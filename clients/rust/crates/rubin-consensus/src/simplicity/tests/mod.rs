@@ -467,53 +467,152 @@ fn mldsa87_verify_jet_propagates_verifier_error_code_with_flat_cost() {
 }
 
 #[test]
-#[rustfmt::skip]
 fn data_jets_match_go_reference() {
+    use core::cmp::Ordering::{Equal, Greater, Less};
+
+    let u128_cmp = evaluate_u128_cmp_jet;
+    let bytes_cmp = evaluate_bytes_cmp_jet;
+
     for (name, got, want, accepted) in [
         ("add", evaluate_u64_checked_add_jet(2, 3), 5, true),
-        ("add-overflow", evaluate_u64_checked_add_jet(u64::MAX, 1), 0, false),
+        (
+            "add-overflow",
+            evaluate_u64_checked_add_jet(u64::MAX, 1),
+            0,
+            false,
+        ),
         ("sub", evaluate_u64_checked_sub_jet(5, 3), 2, true),
-        ("sub-underflow", evaluate_u64_checked_sub_jet(3, 5), 0, false),
+        (
+            "sub-underflow",
+            evaluate_u64_checked_sub_jet(3, 5),
+            0,
+            false,
+        ),
         ("mul", evaluate_u64_checked_mul_jet(7, 6), 42, true),
-        ("mul-overflow", evaluate_u64_checked_mul_jet(1 << 63, 2), 0, false),
+        (
+            "mul-overflow",
+            evaluate_u64_checked_mul_jet(1 << 63, 2),
+            0,
+            false,
+        ),
     ] {
-        assert_eq!(got, U64JetResult { value: want, accepted, cost: 1 }, "{name}");
+        assert_eq!(got, u64_jet(want, accepted), "{name}");
     }
 
-    assert_eq!(evaluate_u64_cmp_jet(1, 2), OrderingJetResult { ordering: core::cmp::Ordering::Less, cost: 1 });
-    assert_eq!(evaluate_u64_cmp_jet(2, 2), OrderingJetResult { ordering: core::cmp::Ordering::Equal, cost: 1 });
-    assert_eq!(evaluate_u64_cmp_jet(3, 2), OrderingJetResult { ordering: core::cmp::Ordering::Greater, cost: 1 });
+    assert_eq!(evaluate_u64_cmp_jet(1, 2), ordering_jet(Less, 1));
+    assert_eq!(evaluate_u64_cmp_jet(2, 2), ordering_jet(Equal, 1));
+    assert_eq!(evaluate_u64_cmp_jet(3, 2), ordering_jet(Greater, 1));
 
     for (name, got, want, accepted) in [
-        ("add-carry", evaluate_u128_checked_add_jet(Uint128 { lo: u64::MAX, hi: 0 }, Uint128 { lo: 1, hi: 0 }), Uint128 { lo: 0, hi: 1 }, true),
-        ("add-overflow", evaluate_u128_checked_add_jet(Uint128 { lo: u64::MAX, hi: u64::MAX }, Uint128 { lo: 1, hi: 0 }), Uint128 { lo: 0, hi: 0 }, false),
-        ("sub-borrow", evaluate_u128_checked_sub_jet(Uint128 { lo: 0, hi: 1 }, Uint128 { lo: 1, hi: 0 }), Uint128 { lo: u64::MAX, hi: 0 }, true),
-        ("sub-underflow", evaluate_u128_checked_sub_jet(Uint128 { lo: 0, hi: 0 }, Uint128 { lo: 1, hi: 0 }), Uint128 { lo: 0, hi: 0 }, false),
+        (
+            "add-carry",
+            evaluate_u128_checked_add_jet(uint128(0, u64::MAX), uint128(0, 1)),
+            uint128(1, 0),
+            true,
+        ),
+        (
+            "add-overflow",
+            evaluate_u128_checked_add_jet(uint128(u64::MAX, u64::MAX), uint128(0, 1)),
+            uint128(0, 0),
+            false,
+        ),
+        (
+            "sub-borrow",
+            evaluate_u128_checked_sub_jet(uint128(1, 0), uint128(0, 1)),
+            uint128(0, u64::MAX),
+            true,
+        ),
+        (
+            "sub-underflow",
+            evaluate_u128_checked_sub_jet(uint128(0, 0), uint128(0, 1)),
+            uint128(0, 0),
+            false,
+        ),
     ] {
-        assert_eq!(got, U128JetResult { value: want, accepted, cost: 1 }, "{name}");
+        assert_eq!(got, u128_jet(want, accepted), "{name}");
     }
 
-    assert_eq!(evaluate_u128_cmp_jet(Uint128 { lo: 0, hi: 1 }, Uint128 { lo: 0, hi: 2 }), OrderingJetResult { ordering: core::cmp::Ordering::Less, cost: 1 });
-    assert_eq!(evaluate_u128_cmp_jet(Uint128 { lo: 3, hi: 2 }, Uint128 { lo: 3, hi: 2 }), OrderingJetResult { ordering: core::cmp::Ordering::Equal, cost: 1 });
-    assert_eq!(evaluate_u128_cmp_jet(Uint128 { lo: 4, hi: 2 }, Uint128 { lo: 3, hi: 2 }), OrderingJetResult { ordering: core::cmp::Ordering::Greater, cost: 1 });
+    assert_eq!(
+        u128_cmp(uint128(1, 0), uint128(2, 0)),
+        ordering_jet(Less, 1)
+    );
+    assert_eq!(
+        u128_cmp(uint128(2, 3), uint128(2, 3)),
+        ordering_jet(Equal, 1)
+    );
+    assert_eq!(
+        u128_cmp(uint128(2, 4), uint128(2, 3)),
+        ordering_jet(Greater, 1)
+    );
 
-    assert_eq!(evaluate_bytes_eq_jet(&[], &[]), BoolJetResult { value: true, cost: 1 });
-    assert_eq!(evaluate_bytes_eq_jet(&[0x11; 33], &[0x11; 32]), BoolJetResult { value: false, cost: 3 });
-    assert_eq!(evaluate_bytes_cmp_jet(&[0xff], &[0x01]), OrderingJetResult { ordering: core::cmp::Ordering::Greater, cost: 2 });
-    assert_eq!(evaluate_bytes_cmp_jet(b"ab", b"abc"), OrderingJetResult { ordering: core::cmp::Ordering::Less, cost: 2 });
-    assert_eq!(evaluate_bytes_cmp_jet(b"abc", b"ab"), OrderingJetResult { ordering: core::cmp::Ordering::Greater, cost: 2 });
-    assert_eq!(evaluate_bytes_cmp_jet(b"abc", b"abc"), OrderingJetResult { ordering: core::cmp::Ordering::Equal, cost: 2 });
+    assert_eq!(evaluate_bytes_eq_jet(&[], &[]), bool_jet(true, 1));
+    assert_eq!(
+        evaluate_bytes_eq_jet(&[0x11; 33], &[0x11; 32]),
+        bool_jet(false, 3)
+    );
+    assert_eq!(bytes_cmp(&[0xff], &[0x01]), ordering_jet(Greater, 2));
+    assert_eq!(bytes_cmp(b"ab", b"abc"), ordering_jet(Less, 2));
+    assert_eq!(bytes_cmp(b"abc", b"ab"), ordering_jet(Greater, 2));
+    assert_eq!(bytes_cmp(b"abc", b"abc"), ordering_jet(Equal, 2));
 
     let mut src = b"abcdef".to_vec();
     let got = evaluate_bytes_slice_jet(&src, 2, 3);
-    assert_eq!(got, BytesJetResult { bytes: b"cde".to_vec(), accepted: true, cost: 2 });
+    assert_eq!(got, bytes_jet(b"cde", true, 2));
     src[2] = b'X';
     assert_eq!(got.bytes, b"cde");
-    assert_eq!(evaluate_bytes_slice_jet(&src, src.len() as u64, 0), BytesJetResult { bytes: Vec::new(), accepted: true, cost: 1 });
-    assert_eq!(evaluate_bytes_slice_jet(&src, 5, 2), BytesJetResult { bytes: Vec::new(), accepted: false, cost: 2 });
-    assert_eq!(evaluate_bytes_slice_jet(&src, u64::MAX, 1), BytesJetResult { bytes: Vec::new(), accepted: false, cost: 2 });
+    assert_eq!(
+        evaluate_bytes_slice_jet(&src, src.len() as u64, 0),
+        bytes_jet(&[], true, 1)
+    );
+    assert_eq!(
+        evaluate_bytes_slice_jet(&src, 5, 2),
+        bytes_jet(&[], false, 2)
+    );
+    assert_eq!(
+        evaluate_bytes_slice_jet(&src, u64::MAX, 1),
+        bytes_jet(&[], false, 2)
+    );
     let max_len = evaluate_bytes_slice_jet(&[], 0, u64::MAX);
-    assert_eq!((max_len.accepted, max_len.cost), (false, 1 + u64::MAX.div_ceil(32)));
+    assert_eq!(
+        (max_len.accepted, max_len.cost),
+        (false, 1 + u64::MAX.div_ceil(32))
+    );
+}
+
+fn uint128(hi: u64, lo: u64) -> Uint128 {
+    Uint128 { lo, hi }
+}
+
+fn u64_jet(value: u64, accepted: bool) -> U64JetResult {
+    U64JetResult {
+        value,
+        accepted,
+        cost: 1,
+    }
+}
+
+fn u128_jet(value: Uint128, accepted: bool) -> U128JetResult {
+    U128JetResult {
+        value,
+        accepted,
+        cost: 1,
+    }
+}
+
+fn ordering_jet(ordering: core::cmp::Ordering, cost: u64) -> OrderingJetResult {
+    OrderingJetResult { ordering, cost }
+}
+
+fn bool_jet(value: bool, cost: u64) -> BoolJetResult {
+    BoolJetResult { value, cost }
+}
+
+fn bytes_jet(bytes: &[u8], accepted: bool, cost: u64) -> BytesJetResult {
+    BytesJetResult {
+        bytes: bytes.to_vec(),
+        accepted,
+        cost,
+    }
 }
 
 #[test]
