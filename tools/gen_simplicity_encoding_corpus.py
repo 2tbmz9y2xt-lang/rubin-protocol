@@ -8,7 +8,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "conformance/fixtures/protocol/simplicity_program_encoding_corpus_v1.json"
+ENCODING_OUT = ROOT / "conformance/fixtures/protocol/simplicity_program_encoding_corpus_v1.json"
+EXEC_OUT = ROOT / "conformance/fixtures/protocol/simplicity_exec_corpus_v1.json"
 
 
 def vector(
@@ -60,37 +61,64 @@ CASES = [
 ]
 
 
-def corpus_bytes() -> bytes:
+MAX_EXEC_COST = 400_000
+MAX_FRAME_BITS = 65_536 * 8
+
+
+EXEC_CASES = [
+    {"id": "VEC-SE-001", "program_hex": "24", "expected_accepted": True, "expected_final_counter": 1},
+    {"id": "VEC-SE-002", "program_hex": "8900", "expected_accepted": True, "expected_final_counter": 2},
+    {"id": "VEC-SE-003", "program_hex": "c1220f0100", "expected_accepted": True, "expected_final_counter": 4},
+    {"id": "VEC-SE-004", "program_hex": "c1d21014", "witness_hex": "00", "expected_accepted": True, "expected_final_counter": 4},
+    {"id": "VEC-SE-005", "program_hex": "c1d21014", "witness_hex": "80", "expected_accepted": True, "expected_final_counter": 4},
+    {"id": "VEC-SE-010", "program_hex": "60", "jet_accepted": True, "jet_cost": MAX_EXEC_COST, "expected_accepted": True, "expected_final_counter": MAX_EXEC_COST},
+    {"id": "VEC-SE-011", "program_hex": "60", "jet_accepted": True, "jet_cost": MAX_EXEC_COST + 1, "expected_accepted": True, "expected_error": "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED", "expected_final_counter": MAX_EXEC_COST},
+    {"id": "VEC-SE-012", "program_hex": "60", "jet_cost": 3, "expected_error": "TX_ERR_SIMPLICITY_REJECTED", "expected_final_counter": 3},
+    {"id": "VEC-SE-020", "eval_steps": 1, "frame_bit_widths": [MAX_FRAME_BITS], "expected_accepted": True, "expected_final_counter": 1},
+    {"id": "VEC-SE-021", "eval_steps": 1, "frame_bit_widths": [MAX_FRAME_BITS + 1], "expected_error": "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED"},
+    {"id": "VEC-SE-022", "eval_steps": 1, "frame_bit_widths": ([MAX_FRAME_BITS] * 16) + [8], "expected_error": "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED"},
+    {"id": "VEC-SE-030A", "program_hex": "24", "expected_accepted": True, "expected_final_counter": 1},
+    {"id": "VEC-SE-030B", "program_hex": "24", "expected_accepted": True, "expected_final_counter": 1},
+]
+
+
+def corpus_bytes(fixture_kind: str, description: str, cases: list[dict[str, object]]) -> bytes:
     payload = {
         "contract_version": 1,
-        "fixture_kind": "simplicity_program_encoding_cmr_v1",
-        "description": "Generator-owned shared corpus for RUB-484 Go/Rust Simplicity encoding and CMR parity tests.",
-        "cases": CASES,
+        "fixture_kind": fixture_kind,
+        "description": description,
+        "cases": cases,
     }
     return (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+ARTIFACTS = (
+    (ENCODING_OUT, "simplicity_program_encoding_cmr_v1", "Generator-owned shared corpus for RUB-484 Go/Rust Simplicity encoding and CMR parity tests.", CASES),
+    (EXEC_OUT, "simplicity_exec_corpus_v1", "Generator-owned shared corpus for RUB-488 Go/Rust Simplicity execution parity tests.", EXEC_CASES),
+)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--check", action="store_true", help="fail if the committed corpus bytes differ")
+    parser.add_argument("--check", action="store_true", help="fail if committed corpus bytes differ")
     args = parser.parse_args()
-    data = corpus_bytes()
     if args.check:
-        if not OUT.exists():
-            print(
-                f"ERROR: missing {OUT.relative_to(ROOT)}; run tools/gen_simplicity_encoding_corpus.py to (re)generate",
-                file=sys.stderr,
-            )
-            return 1
-        got = OUT.read_bytes()
-        if got != data:
-            print(f"ERROR: {OUT.relative_to(ROOT)} is stale; rerun this generator", file=sys.stderr)
-            return 1
-        print("OK: Simplicity encoding corpus matches generator")
+        for out, fixture_kind, description, cases in ARTIFACTS:
+            if not out.exists():
+                print(
+                    f"ERROR: missing {out.relative_to(ROOT)}; run tools/gen_simplicity_encoding_corpus.py to (re)generate",
+                    file=sys.stderr,
+                )
+                return 1
+            if out.read_bytes() != corpus_bytes(fixture_kind, description, cases):
+                print(f"ERROR: {out.relative_to(ROOT)} is stale; rerun this generator", file=sys.stderr)
+                return 1
+        print("OK: Simplicity corpora match generator")
         return 0
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_bytes(data)
-    print(f"wrote {OUT.relative_to(ROOT)}")
+    for out, fixture_kind, description, cases in ARTIFACTS:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(corpus_bytes(fixture_kind, description, cases))
+        print(f"wrote {out.relative_to(ROOT)}")
     return 0
 
 

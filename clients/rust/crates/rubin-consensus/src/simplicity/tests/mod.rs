@@ -128,6 +128,69 @@ fn shared_encoding_corpus_matches_go_reference() {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedExecCorpus {
+    contract_version: u32,
+    fixture_kind: String,
+    description: String,
+    cases: Vec<SharedExecCase>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedExecCase {
+    id: String,
+    #[serde(default)]
+    program_hex: String,
+    #[serde(default)]
+    witness_hex: String,
+    #[serde(default)]
+    eval_steps: u64,
+    #[serde(default)]
+    frame_bit_widths: Vec<u64>,
+    #[serde(default)]
+    jet_accepted: bool,
+    #[serde(default)]
+    jet_cost: u64,
+    #[serde(default)]
+    expected_accepted: bool,
+    #[serde(default)]
+    expected_error: String,
+    #[serde(default)]
+    expected_final_counter: u64,
+}
+
+#[test]
+fn shared_exec_corpus_matches_go_reference() {
+    let raw = fs::read_to_string(exec_corpus_path()).expect("read shared exec corpus");
+    let corpus: SharedExecCorpus = serde_json::from_str(&raw).expect("parse shared exec corpus");
+    assert_eq!(corpus.contract_version, 1);
+    assert_eq!(corpus.fixture_kind, "simplicity_exec_corpus_v1");
+    assert!(!corpus.description.is_empty());
+    assert!(!corpus.cases.is_empty());
+    for case in corpus.cases {
+        match evaluate_shared_exec_case(&case) {
+            Ok(got) => {
+                assert!(case.expected_error.is_empty(), "{}", case.id);
+                assert_eq!(got.accepted, case.expected_accepted, "{}", case.id);
+                assert_eq!(got.cost, case.expected_final_counter, "{}", case.id);
+            }
+            Err(err) => {
+                let want = error_code(&case.expected_error).unwrap_or_else(|| {
+                    panic!(
+                        "{}: unknown expected error {}",
+                        case.id, case.expected_error
+                    )
+                });
+                assert_eq!(err.code, want, "{}", case.id);
+                assert_eq!(err.result.accepted, case.expected_accepted, "{}", case.id);
+                assert_eq!(err.result.cost, case.expected_final_counter, "{}", case.id);
+            }
+        }
+    }
+}
+
 #[test]
 fn program_size_boundary_matches_go_reference() {
     let mut at_cap = vec![0; MAX_PROGRAM_BYTES];
@@ -415,6 +478,36 @@ fn corpus_path() -> PathBuf {
         "../../../../conformance/fixtures/protocol/simplicity_program_encoding_corpus_v1.json",
     );
     path
+}
+
+fn exec_corpus_path() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("../../../../conformance/fixtures/protocol/simplicity_exec_corpus_v1.json");
+    path
+}
+
+fn evaluate_shared_exec_case(case: &SharedExecCase) -> Result<EvalResult, EvalError> {
+    let program = if !case.program_hex.is_empty() {
+        decode(
+            &hx(&case.program_hex),
+            &hx(&case.witness_hex),
+            opts(SEMANTICS_VERSION, ""),
+        )
+        .map_err(|err| EvalError::new(err.code))?
+    } else {
+        internal_program(case.eval_steps, false, None, case.frame_bit_widths.clone())
+    };
+    if program.has_jet {
+        let hook = |_: Jet| {
+            Ok(EvalResult {
+                accepted: case.jet_accepted,
+                cost: case.jet_cost,
+            })
+        };
+        program.evaluate(with_jet_hook(&hook))
+    } else {
+        program.evaluate(EvalOptions::default())
+    }
 }
 
 fn error_code(s: &str) -> Option<ErrorCode> {

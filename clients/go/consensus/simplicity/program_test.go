@@ -124,6 +124,61 @@ func TestSharedEncodingCorpus(t *testing.T) {
 	}
 }
 
+type sharedExecCorpus struct {
+	ContractVersion int              `json:"contract_version"`
+	FixtureKind     string           `json:"fixture_kind"`
+	Description     string           `json:"description"`
+	Cases           []sharedExecCase `json:"cases"`
+}
+
+type sharedExecCase struct {
+	ID                   string   `json:"id"`
+	ProgramHex           string   `json:"program_hex"`
+	WitnessHex           string   `json:"witness_hex"`
+	EvalSteps            uint64   `json:"eval_steps"`
+	FrameBitWidths       []uint64 `json:"frame_bit_widths"`
+	JetAccepted          bool     `json:"jet_accepted"`
+	JetCost              uint64   `json:"jet_cost"`
+	ExpectedAccepted     bool     `json:"expected_accepted"`
+	ExpectedError        string   `json:"expected_error"`
+	ExpectedFinalCounter uint64   `json:"expected_final_counter"`
+}
+
+func TestSharedExecCorpus(t *testing.T) {
+	var corpus sharedExecCorpus
+	raw, err := os.ReadFile(repoPath(t, "conformance", "fixtures", "protocol", "simplicity_exec_corpus_v1.json"))
+	if err != nil {
+		t.Fatalf("read shared exec corpus: %v", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&corpus); err != nil {
+		t.Fatalf("parse shared exec corpus: %v", err)
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err == nil {
+		t.Fatal("parse shared exec corpus: trailing data")
+	} else if !errors.Is(err, io.EOF) {
+		t.Fatalf("parse shared exec corpus: trailing data: %v", err)
+	}
+	if corpus.ContractVersion != 1 || corpus.FixtureKind != "simplicity_exec_corpus_v1" || len(corpus.Cases) == 0 {
+		t.Fatalf("bad shared exec corpus header: version=%d kind=%q cases=%d", corpus.ContractVersion, corpus.FixtureKind, len(corpus.Cases))
+	}
+	for _, tc := range corpus.Cases {
+		t.Run(tc.ID, func(t *testing.T) {
+			got, err := evaluateSharedExecCase(t, tc)
+			if tc.ExpectedError != "" {
+				assertErrorCode(t, err, ErrorCode(tc.ExpectedError))
+			} else if err != nil {
+				t.Fatalf("Evaluate: %v", err)
+			}
+			if got.Accepted != tc.ExpectedAccepted || got.Cost != tc.ExpectedFinalCounter {
+				t.Fatalf("evaluation=%+v want accepted=%v final_counter=%d", got, tc.ExpectedAccepted, tc.ExpectedFinalCounter)
+			}
+		})
+	}
+}
+
 func TestProgramSizeBoundary(t *testing.T) {
 	atCap := make([]byte, MaxProgramBytes)
 	atCap[0] = 0x24
@@ -436,6 +491,31 @@ func TestRubinJetCMRHelperExamples(t *testing.T) {
 	if got != hex32("2e4a23492db398e98317272348128f39da97983f5cbab825d5389c2c8b908e11") {
 		t.Fatalf("ones helper cmr=%x", got)
 	}
+}
+
+func evaluateSharedExecCase(t *testing.T, tc sharedExecCase) (EvalResult, error) {
+	t.Helper()
+	var program Program
+	if tc.ProgramHex != "" {
+		got, err := Decode(hx(tc.ProgramHex), hx(tc.WitnessHex), DecodeOptions{SemanticsVersion: SemanticsVersion})
+		if err != nil {
+			return EvalResult{}, err
+		}
+		program = got
+	} else {
+		program = Program{
+			decoded:        true,
+			evalSteps:      tc.EvalSteps,
+			frameBitWidths: append([]uint64(nil), tc.FrameBitWidths...),
+		}
+	}
+	opts := EvalOptions{}
+	if program.hasJet {
+		opts.JetEvaluator = func(Jet) (EvalResult, error) {
+			return EvalResult{Accepted: tc.JetAccepted, Cost: tc.JetCost}, nil
+		}
+	}
+	return program.Evaluate(opts)
 }
 
 func hx(s string) []byte {
