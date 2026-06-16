@@ -130,7 +130,7 @@ func (p Program) Evaluate(opts EvalOptions) (EvalResult, error) {
 		return EvalResult{}, &Error{Code: ErrDecode}
 	}
 	if p.hasJet {
-		if _, ok := LookupJet(p.jetKey.id, p.jetKey.subOp); !ok {
+		if _, ok := jetRows[p.jetKey]; !ok {
 			return EvalResult{}, &Error{Code: ErrDecode}
 		}
 		if err := checkMemoryBounds(p.frameBitWidths); err != nil {
