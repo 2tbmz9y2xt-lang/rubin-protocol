@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus/simplicity"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
@@ -283,6 +284,9 @@ func TestRubinConsensusCLI_RunFromStdin_CoversKeyOps(t *testing.T) {
 	t.Run("sighash_and_weight", func(t *testing.T) {
 		testRuntimeKeyOpSighashAndWeight(t, fixture)
 	})
+	t.Run("simplicity_exec_vector", func(t *testing.T) {
+		testRuntimeKeyOpSimplicityExecVector(t)
+	})
 	t.Run("block_hash_and_pow_check", func(t *testing.T) {
 		testRuntimeKeyOpBlockHashAndPowCheck(t, fixture)
 	})
@@ -366,6 +370,37 @@ func testRuntimeKeyOpSighashAndWeight(t *testing.T, fixture runtimeKeyOpsFixture
 		t.Fatalf("unexpected resp: %+v", r1)
 	}
 	_ = mustRunOk(t, Request{Op: "tx_weight_and_stats", TxHex: fixture.txHex})
+}
+
+func testRuntimeKeyOpSimplicityExecVector(t *testing.T) {
+	t.Helper()
+	accepted := mustRunOk(t, Request{Op: "simplicity_exec_vector", ProgramHex: "24"})
+	if accepted.Accepted == nil || !*accepted.Accepted || accepted.FinalCounter == nil || *accepted.FinalCounter != 1 {
+		t.Fatalf("unexpected accepted response: %+v", accepted)
+	}
+
+	rejected := runRequest(t, Request{
+		Op:         "simplicity_exec_vector",
+		ProgramHex: "60",
+		JetCost:    ptrUint64(3),
+	})
+	if rejected.Ok || rejected.Err != "TX_ERR_SIMPLICITY_REJECTED" ||
+		rejected.Accepted == nil || *rejected.Accepted ||
+		rejected.FinalCounter == nil || *rejected.FinalCounter != 3 {
+		t.Fatalf("unexpected rejected response: %+v", rejected)
+	}
+
+	budget := runRequest(t, Request{
+		Op:          "simplicity_exec_vector",
+		ProgramHex:  "60",
+		JetAccepted: ptrBool(true),
+		JetCost:     ptrUint64(400_001),
+	})
+	if budget.Ok || budget.Err != "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED" ||
+		budget.Accepted == nil || !*budget.Accepted ||
+		budget.FinalCounter == nil || *budget.FinalCounter != 400_000 {
+		t.Fatalf("unexpected budget response: %+v", budget)
+	}
 }
 
 func testRuntimeKeyOpBlockHashAndPowCheck(t *testing.T, fixture runtimeKeyOpsFixture) {
@@ -502,6 +537,8 @@ func testRuntimeKeyOpHTLCAndVaultPolicyOps(t *testing.T) {
 
 func ptrBool(v bool) *bool { return &v }
 
+func ptrUint64(v uint64) *uint64 { return &v }
+
 func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 	blockBytes, _ := mineGenesisBlockBytes(t)
 	txHex := mustHexBytes(buildAnchorOnlyCoinbaseLikeTxBytes(t, 0, [32]byte{}))
@@ -518,6 +555,14 @@ func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 		{name: "merkle_root_bad_txid", req: Request{Op: "merkle_root", Txids: []string{"00"}}, wantErr: "bad txid"},
 		{name: "witness_merkle_root_bad_wtxid", req: Request{Op: "witness_merkle_root", Wtxids: []string{"00"}}, wantErr: "bad wtxid"},
 		{name: "sighash_bad_chain_id", req: Request{Op: "sighash_v1", TxHex: txHex, ChainIDHex: "00"}, wantErr: "bad chain_id"},
+		{name: "simplicity_exec_vector_missing_program", req: Request{Op: "simplicity_exec_vector"}, wantErr: "bad program_hex"},
+		{name: "simplicity_exec_vector_empty_prefixed_program", req: Request{Op: "simplicity_exec_vector", ProgramHex: "0x"}, wantErr: "bad program_hex"},
+		{name: "simplicity_exec_vector_bad_witness", req: Request{Op: "simplicity_exec_vector", ProgramHex: "24", WitnessHex: "zz"}, wantErr: "bad witness_hex"},
+		{name: "simplicity_exec_vector_oversized_program", req: Request{Op: "simplicity_exec_vector", ProgramHex: strings.Repeat("00", simplicity.MaxProgramBytes+1)}, wantErr: "bad program_hex"},
+		{name: "simplicity_exec_vector_oversized_witness", req: Request{Op: "simplicity_exec_vector", ProgramHex: "24", WitnessHex: strings.Repeat("00", simplicity.MaxProgramBytes+1)}, wantErr: "bad witness_hex"},
+		{name: "simplicity_exec_vector_bad_covenant_cmr", req: Request{Op: "simplicity_exec_vector", ProgramHex: "24", CovenantCMRHex: "00"}, wantErr: "bad covenant_cmr_hex"},
+		{name: "simplicity_exec_vector_missing_jet_result", req: Request{Op: "simplicity_exec_vector", ProgramHex: "60"}, wantErr: "bad jet_result"},
+		{name: "simplicity_exec_vector_decode_error", req: Request{Op: "simplicity_exec_vector", ProgramHex: "25"}, wantErr: "TX_ERR_SIMPLICITY_DECODE"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mustRunErr(t, tc.req, tc.wantErr)

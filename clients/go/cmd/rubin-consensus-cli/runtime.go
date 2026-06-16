@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus/simplicity"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
@@ -60,6 +61,9 @@ type Request struct {
 	TargetHex             string                         `json:"target_hex,omitempty"`
 	ExpectedPrev          string                         `json:"expected_prev_hash,omitempty"`
 	HeaderHex             string                         `json:"header_hex,omitempty"`
+	ProgramHex            string                         `json:"program_hex,omitempty"`
+	WitnessHex            string                         `json:"witness_hex,omitempty"`
+	CovenantCMRHex        string                         `json:"covenant_cmr_hex,omitempty"`
 	CovenantDataHex       string                         `json:"covenant_data_hex,omitempty"`
 	WtxidHex              string                         `json:"wtxid,omitempty"`
 	Path                  string                         `json:"path,omitempty"`
@@ -160,6 +164,9 @@ type Request struct {
 	ExpectedArtifactHash  string                         `json:"expected_artifact_hash_hex,omitempty"`
 	DependencyChecklists  []TxctxDependencyChecklistJSON `json:"dependency_checklists,omitempty"`
 	MempoolTxctxConfirmed *bool                          `json:"mempool_txctx_confirmed,omitempty"`
+	SemanticsVersion      *uint32                        `json:"semantics_version,omitempty"`
+	JetAccepted           *bool                          `json:"jet_accepted,omitempty"`
+	JetCost               *uint64                        `json:"jet_cost,omitempty"`
 }
 
 type requestEnvelope struct {
@@ -365,9 +372,11 @@ func (item SuiteParamsJSON) MarshalJSON() ([]byte, error) {
 	})
 }
 
-const maxExplicitSuiteRegistryItems = 16
-const maxCoreExtHexFieldBytes = 4096
-const canonicalSuiteRegistryAlgName = "ML-DSA-87"
+const (
+	maxExplicitSuiteRegistryItems = 16
+	maxCoreExtHexFieldBytes       = 4096
+	canonicalSuiteRegistryAlgName = "ML-DSA-87"
+)
 
 func validateSuiteRegistryParamLen(value int) (int, error) {
 	// Negative lengths fail closed during JSON decode because the wire surface
@@ -664,6 +673,8 @@ type Response struct {
 	Prioritize         bool           `json:"prioritize,omitempty"`
 	ExtID              uint16         `json:"ext_id,omitempty"`
 	SuiteIDs           []uint8        `json:"suite_ids,omitempty"`
+	Accepted           *bool          `json:"accepted,omitempty"`
+	FinalCounter       *uint64        `json:"final_counter,omitempty"`
 }
 
 func writeResp(w io.Writer, resp Response) {
@@ -740,6 +751,82 @@ func parseOptionalChainIDHex(chainIDHex string) ([32]byte, error) {
 	return parsed, nil
 }
 
+func parseSimplicityHex(name, value string, required bool, maxBytes int) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X")
+	if value == "" {
+		if required {
+			return nil, fmt.Errorf("bad %s", name)
+		}
+		return nil, nil
+	}
+	if maxBytes >= 0 && len(value) > maxBytes*2 {
+		return nil, fmt.Errorf("bad %s", name)
+	}
+	raw, err := hex.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("bad %s", name)
+	}
+	return raw, nil
+}
+
+func simplicityErrString(err error) string {
+	var se *simplicity.Error
+	if errors.As(err, &se) {
+		return string(se.Code)
+	}
+	return err.Error()
+}
+
+func runSimplicityExecVector(req Request) Response {
+	programBytes, err := parseSimplicityHex("program_hex", req.ProgramHex, true, simplicity.MaxProgramBytes)
+	if err != nil {
+		return Response{Ok: false, Err: err.Error()}
+	}
+	witnessBytes, err := parseSimplicityHex("witness_hex", req.WitnessHex, false, simplicity.MaxProgramBytes)
+	if err != nil {
+		return Response{Ok: false, Err: err.Error()}
+	}
+	covenantCMR, err := parseOptionalHex32(req.CovenantCMRHex, "bad covenant_cmr_hex")
+	if err != nil {
+		return Response{Ok: false, Err: err.Error()}
+	}
+
+	semanticsVersion := simplicity.SemanticsVersion
+	if req.SemanticsVersion != nil {
+		semanticsVersion = *req.SemanticsVersion
+	}
+	program, err := simplicity.Decode(programBytes, witnessBytes, simplicity.DecodeOptions{
+		SemanticsVersion:   semanticsVersion,
+		CovenantProgramCMR: covenantCMR,
+	})
+	if err != nil {
+		return Response{Ok: false, Err: simplicityErrString(err)}
+	}
+
+	opts := simplicity.EvalOptions{}
+	if program.Jet != nil {
+		if req.JetCost == nil {
+			return Response{Ok: false, Err: "bad jet_result"}
+		}
+		jetAccepted := false
+		if req.JetAccepted != nil {
+			jetAccepted = *req.JetAccepted
+		}
+		opts.JetEvaluator = func(simplicity.Jet) (simplicity.EvalResult, error) {
+			return simplicity.EvalResult{Accepted: jetAccepted, Cost: *req.JetCost}, nil
+		}
+	}
+
+	result, err := program.Evaluate(opts)
+	accepted := result.Accepted
+	finalCounter := result.Cost
+	if err != nil {
+		return Response{Ok: false, Err: simplicityErrString(err), Accepted: &accepted, FinalCounter: &finalCounter}
+	}
+	return Response{Ok: true, Accepted: &accepted, FinalCounter: &finalCounter}
+}
+
 func parseHex32List(items []string, badErr string) ([][32]byte, error) {
 	parsed := make([][32]byte, 0, len(items))
 	for _, item := range items {
@@ -793,8 +880,10 @@ func buildUtxoMap(items []UtxoJSON) (map[consensus.Outpoint]consensus.UtxoEntry,
 }
 
 // Conformance replay mirrors the current standard mempool default without importing node runtime.
-const conformanceDefaultMempoolMinFeeRate uint64 = 1
-const conformanceDefaultMinDAFeeRate uint64 = 1
+const (
+	conformanceDefaultMempoolMinFeeRate uint64 = 1
+	conformanceDefaultMinDAFeeRate      uint64 = 1
+)
 
 func addU64Policy(a, b uint64) (uint64, bool) {
 	if a > ^uint64(0)-b {
@@ -1432,6 +1521,10 @@ func runFromStdin() {
 	case "txctx_governance_vector":
 		resp := runTxctxGovernanceVector(req, coreExtProfilesReq)
 		writeResp(os.Stdout, resp)
+		return
+
+	case "simplicity_exec_vector":
+		writeResp(os.Stdout, runSimplicityExecVector(req))
 		return
 
 	case "parse_tx":
