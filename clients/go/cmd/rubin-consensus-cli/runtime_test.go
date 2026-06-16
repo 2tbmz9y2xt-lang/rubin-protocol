@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -237,6 +238,45 @@ func mustRunErrAny(t *testing.T, req Request) Response {
 	return resp
 }
 
+type runtimeSharedExecCorpus struct {
+	ContractVersion int                     `json:"contract_version"`
+	FixtureKind     string                  `json:"fixture_kind"`
+	Description     string                  `json:"description"`
+	Cases           []runtimeSharedExecCase `json:"cases"`
+}
+
+type runtimeSharedExecCase struct {
+	ID                   string   `json:"id"`
+	ProgramHex           string   `json:"program_hex"`
+	WitnessHex           string   `json:"witness_hex"`
+	EvalSteps            *uint64  `json:"eval_steps"`
+	FrameBitWidths       []uint64 `json:"frame_bit_widths"`
+	JetAccepted          *bool    `json:"jet_accepted"`
+	JetCost              *uint64  `json:"jet_cost"`
+	ExpectedAccepted     bool     `json:"expected_accepted"`
+	ExpectedError        string   `json:"expected_error"`
+	ExpectedFinalCounter uint64   `json:"expected_final_counter"`
+}
+
+func repoFixturePath(t *testing.T, elems ...string) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		candidate := filepath.Join(append([]string{dir}, elems...)...)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("fixture not found from %s: %s", dir, filepath.Join(elems...))
+		}
+		dir = parent
+	}
+}
+
 type runtimeKeyOpsFixture struct {
 	blockBytes  []byte
 	headerBytes []byte
@@ -401,6 +441,67 @@ func testRuntimeKeyOpSimplicityExecVector(t *testing.T) {
 		budget.FinalCounter == nil || *budget.FinalCounter != 400_000 {
 		t.Fatalf("unexpected budget response: %+v", budget)
 	}
+
+	syntheticAccepted := mustRunOk(t, Request{
+		Op:             "simplicity_exec_vector",
+		EvalSteps:      ptrUint64(1),
+		FrameBitWidths: []uint64{simplicity.MaxFrameBytes * 8},
+	})
+	if syntheticAccepted.Accepted == nil || !*syntheticAccepted.Accepted ||
+		syntheticAccepted.FinalCounter == nil || *syntheticAccepted.FinalCounter != 1 {
+		t.Fatalf("unexpected synthetic accepted response: %+v", syntheticAccepted)
+	}
+
+	syntheticBudget := runRequest(t, Request{
+		Op:             "simplicity_exec_vector",
+		EvalSteps:      ptrUint64(1),
+		FrameBitWidths: []uint64{simplicity.MaxFrameBytes*8 + 1},
+	})
+	if syntheticBudget.Ok || syntheticBudget.Err != "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED" ||
+		syntheticBudget.Accepted == nil || *syntheticBudget.Accepted ||
+		syntheticBudget.FinalCounter == nil || *syntheticBudget.FinalCounter != 0 {
+		t.Fatalf("unexpected synthetic budget response: %+v", syntheticBudget)
+	}
+}
+
+func TestRubinConsensusCLI_SimplicityExecVectorSharedCorpus(t *testing.T) {
+	raw, err := os.ReadFile(repoFixturePath(t, "conformance", "fixtures", "protocol", "simplicity_exec_corpus_v1.json"))
+	if err != nil {
+		t.Fatalf("read shared exec corpus: %v", err)
+	}
+	var corpus runtimeSharedExecCorpus
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&corpus); err != nil {
+		t.Fatalf("parse shared exec corpus: %v", err)
+	}
+	if corpus.ContractVersion != 1 || corpus.FixtureKind != "simplicity_exec_corpus_v1" || len(corpus.Cases) == 0 {
+		t.Fatalf("bad shared exec corpus header: version=%d kind=%q cases=%d", corpus.ContractVersion, corpus.FixtureKind, len(corpus.Cases))
+	}
+	for _, tc := range corpus.Cases {
+		t.Run(tc.ID, func(t *testing.T) {
+			resp := runRequest(t, Request{
+				Op:             "simplicity_exec_vector",
+				ProgramHex:     tc.ProgramHex,
+				WitnessHex:     tc.WitnessHex,
+				EvalSteps:      tc.EvalSteps,
+				FrameBitWidths: tc.FrameBitWidths,
+				JetAccepted:    tc.JetAccepted,
+				JetCost:        tc.JetCost,
+			})
+			if tc.ExpectedError != "" {
+				if resp.Ok || resp.Err != tc.ExpectedError {
+					t.Fatalf("expected err=%q, got: %+v", tc.ExpectedError, resp)
+				}
+			} else if !resp.Ok {
+				t.Fatalf("expected ok, got: %+v", resp)
+			}
+			if resp.Accepted == nil || *resp.Accepted != tc.ExpectedAccepted ||
+				resp.FinalCounter == nil || *resp.FinalCounter != tc.ExpectedFinalCounter {
+				t.Fatalf("outcome=%+v want accepted=%v final_counter=%d", resp, tc.ExpectedAccepted, tc.ExpectedFinalCounter)
+			}
+		})
+	}
 }
 
 func testRuntimeKeyOpBlockHashAndPowCheck(t *testing.T, fixture runtimeKeyOpsFixture) {
@@ -558,7 +659,7 @@ func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 		{name: "simplicity_exec_vector_missing_program", req: Request{Op: "simplicity_exec_vector"}, wantErr: "bad program_hex"},
 		{name: "simplicity_exec_vector_empty_prefixed_program", req: Request{Op: "simplicity_exec_vector", ProgramHex: "0x"}, wantErr: "bad program_hex"},
 		{name: "simplicity_exec_vector_bad_witness", req: Request{Op: "simplicity_exec_vector", ProgramHex: "24", WitnessHex: "zz"}, wantErr: "bad witness_hex"},
-		{name: "simplicity_exec_vector_oversized_program", req: Request{Op: "simplicity_exec_vector", ProgramHex: strings.Repeat("00", simplicity.MaxProgramBytes+1)}, wantErr: "bad program_hex"},
+		{name: "simplicity_exec_vector_oversized_program", req: Request{Op: "simplicity_exec_vector", ProgramHex: strings.Repeat("00", simplicity.MaxProgramBytes+1)}, wantErr: "TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE"},
 		{name: "simplicity_exec_vector_oversized_witness", req: Request{Op: "simplicity_exec_vector", ProgramHex: "24", WitnessHex: strings.Repeat("00", simplicity.MaxProgramBytes+1)}, wantErr: "bad witness_hex"},
 		{name: "simplicity_exec_vector_bad_covenant_cmr", req: Request{Op: "simplicity_exec_vector", ProgramHex: "24", CovenantCMRHex: "00"}, wantErr: "bad covenant_cmr_hex"},
 		{name: "simplicity_exec_vector_missing_jet_cost", req: Request{Op: "simplicity_exec_vector", ProgramHex: "60"}, wantErr: "bad jet_cost"},

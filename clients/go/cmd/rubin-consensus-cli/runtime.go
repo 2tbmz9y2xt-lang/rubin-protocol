@@ -165,6 +165,8 @@ type Request struct {
 	DependencyChecklists  []TxctxDependencyChecklistJSON `json:"dependency_checklists,omitempty"`
 	MempoolTxctxConfirmed *bool                          `json:"mempool_txctx_confirmed,omitempty"`
 	SemanticsVersion      *uint32                        `json:"semantics_version,omitempty"`
+	EvalSteps             *uint64                        `json:"eval_steps,omitempty"`
+	FrameBitWidths        []uint64                       `json:"frame_bit_widths,omitempty"`
 	JetAccepted           *bool                          `json:"jet_accepted,omitempty"`
 	JetCost               *uint64                        `json:"jet_cost,omitempty"`
 }
@@ -770,6 +772,22 @@ func parseSimplicityHex(name, value string, required bool, maxBytes int) ([]byte
 	return raw, nil
 }
 
+func parseSimplicityProgramHex(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X")
+	if value == "" {
+		return nil, fmt.Errorf("bad program_hex")
+	}
+	if len(value) > simplicity.MaxProgramBytes*2 {
+		return nil, &simplicity.Error{Code: simplicity.ErrProgramTooLarge}
+	}
+	raw, err := hex.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("bad program_hex")
+	}
+	return raw, nil
+}
+
 func simplicityErrString(err error) string {
 	var se *simplicity.Error
 	if errors.As(err, &se) {
@@ -778,10 +796,58 @@ func simplicityErrString(err error) string {
 	return err.Error()
 }
 
-func runSimplicityExecVector(req Request) Response {
-	programBytes, err := parseSimplicityHex("program_hex", req.ProgramHex, true, simplicity.MaxProgramBytes)
+func runSimplicitySyntheticExecVector(req Request) Response {
+	if req.EvalSteps == nil {
+		return Response{Ok: false, Err: "bad program_hex"}
+	}
+	result, err := evaluateSimplicitySynthetic(*req.EvalSteps, req.FrameBitWidths)
+	accepted := result.Accepted
+	finalCounter := result.Cost
 	if err != nil {
-		return Response{Ok: false, Err: err.Error()}
+		return Response{Ok: false, Err: simplicityErrString(err), Accepted: &accepted, FinalCounter: &finalCounter}
+	}
+	return Response{Ok: true, Accepted: &accepted, FinalCounter: &finalCounter}
+}
+
+func evaluateSimplicitySynthetic(evalSteps uint64, frameBitWidths []uint64) (simplicity.EvalResult, error) {
+	if evalSteps == 0 {
+		return simplicity.EvalResult{}, &simplicity.Error{Code: simplicity.ErrDecode}
+	}
+	if err := checkSimplicitySyntheticMemory(frameBitWidths); err != nil {
+		return simplicity.EvalResult{}, err
+	}
+	if simplicity.StepCost == 0 {
+		return simplicity.EvalResult{}, &simplicity.Error{Code: simplicity.ErrBudgetExceeded}
+	}
+	maxSteps := simplicity.MaxExecCost / simplicity.StepCost
+	if evalSteps > maxSteps {
+		return simplicity.EvalResult{Accepted: true, Cost: simplicity.MaxExecCost}, &simplicity.Error{Code: simplicity.ErrBudgetExceeded}
+	}
+	return simplicity.EvalResult{Accepted: true, Cost: evalSteps * simplicity.StepCost}, nil
+}
+
+func checkSimplicitySyntheticMemory(frameBitWidths []uint64) error {
+	var live uint64
+	for _, frameBits := range frameBitWidths {
+		if frameBits > ^uint64(0)-7 {
+			return &simplicity.Error{Code: simplicity.ErrBudgetExceeded}
+		}
+		frameBytes := (frameBits + 7) / 8
+		if frameBytes > simplicity.MaxFrameBytes || live > simplicity.MaxLiveMemoryBytes-frameBytes {
+			return &simplicity.Error{Code: simplicity.ErrBudgetExceeded}
+		}
+		live += frameBytes
+	}
+	return nil
+}
+
+func runSimplicityExecVector(req Request) Response {
+	if strings.TrimSpace(req.ProgramHex) == "" {
+		return runSimplicitySyntheticExecVector(req)
+	}
+	programBytes, err := parseSimplicityProgramHex(req.ProgramHex)
+	if err != nil {
+		return Response{Ok: false, Err: simplicityErrString(err)}
 	}
 	witnessBytes, err := parseSimplicityHex("witness_hex", req.WitnessHex, false, simplicity.MaxProgramBytes)
 	if err != nil {
