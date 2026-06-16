@@ -816,9 +816,6 @@ func evaluateSimplicitySynthetic(evalSteps uint64, frameBitWidths []uint64) (sim
 	if err := checkSimplicitySyntheticMemory(frameBitWidths); err != nil {
 		return simplicity.EvalResult{}, err
 	}
-	if simplicity.StepCost == 0 {
-		return simplicity.EvalResult{}, &simplicity.Error{Code: simplicity.ErrBudgetExceeded}
-	}
 	maxSteps := simplicity.MaxExecCost / simplicity.StepCost
 	if evalSteps > maxSteps {
 		return simplicity.EvalResult{Accepted: true, Cost: simplicity.MaxExecCost}, &simplicity.Error{Code: simplicity.ErrBudgetExceeded}
