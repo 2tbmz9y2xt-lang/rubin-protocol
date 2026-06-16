@@ -283,6 +283,11 @@ func TestJetRows(t *testing.T) {
 	if !bytes.Equal(again.SelectorPadded, hx("00")) {
 		t.Fatal("LookupJet returned mutable internal selector storage")
 	}
+	if _, err := requireJet(0x0011, 0x02); err == nil {
+		t.Fatal("requireJet accepted unassigned u128_checked_mul")
+	} else {
+		assertErrorCode(t, err, ErrJetDisallowed)
+	}
 }
 
 func TestDecodeJetMetadataIsImmutable(t *testing.T) {
@@ -352,6 +357,84 @@ func TestCostModelHashMatchesSpecArtifact(t *testing.T) {
 	}
 	if got := CostModelHash(); got != hex32("accb55570168bd7b1fedadff2135c99e32508680ff7a315cf4f33f97744aabc9") {
 		t.Fatalf("cost_model_hash=%x", got)
+	}
+}
+
+func TestJetsRegistryHashMatchesSpecArtifact(t *testing.T) {
+	preimage := jetsRegistryBytes(jetRegistryRows)
+	wantPreimage := "" +
+		"525542494e2d53494d504c49434954592d4a4554532d7631020000000c010000" +
+		"08736861335f323536106279746573202d3e20627974657333320200000e6d6c" +
+		"64736138375f76657269667933287075626b65793a62797465732c207369673a" +
+		"62797465732c2064696765737433323a6279746573333229202d3e20626f6f6c" +
+		"1000000f7536345f636865636b65645f6164641f287536342c2075363429202d" +
+		"3e204569746865723c756e69742c207536343e1000010f7536345f636865636b" +
+		"65645f7375621f287536342c2075363429202d3e204569746865723c756e6974" +
+		"2c207536343e1000020f7536345f636865636b65645f6d756c1f287536342c20" +
+		"75363429202d3e204569746865723c756e69742c207536343e10000307753634" +
+		"5f636d7016287536342c2075363429202d3e206f72646572696e671100001075" +
+		"3132385f636865636b65645f6164642228753132382c207531323829202d3e20" +
+		"4569746865723c756e69742c20753132383e11000110753132385f636865636b" +
+		"65645f7375622228753132382c207531323829202d3e204569746865723c756e" +
+		"69742c20753132383e11000308753132385f636d701828753132382c20753132" +
+		"3829202d3e206f72646572696e672000000862797465735f6571162862797465" +
+		"732c20627974657329202d3e20626f6f6c2000010962797465735f636d701a28" +
+		"62797465732c20627974657329202d3e206f72646572696e672100000b627974" +
+		"65735f736c69636536287372633a62797465732c2073746172743a7536342c20" +
+		"6c656e3a75363429202d3e204569746865723c756e69742c2062797465733e"
+	if got := hex.EncodeToString(preimage); got != wantPreimage {
+		t.Fatalf("jets registry preimage=%s want %s", got, wantPreimage)
+	}
+	if got := JetsRegistryHash(); got != hex32("5aee78aae6b610a3eb3c05bd1487523e318418e0419de48e4fe9555b37f1c059") {
+		t.Fatalf("jets_registry_hash=%x", got)
+	}
+}
+
+func TestJetRegistryRuntimeMetadataMatchesSpecArtifact(t *testing.T) {
+	want := map[jetKey]struct {
+		selectorBitLen int
+		selectorPadded string
+		cmr            string
+	}{
+		{id: 0x0001, subOp: 0x00}: {selectorBitLen: 2, selectorPadded: "00", cmr: "3999889bdf18d07c6c38b7aacb89f6c2bdd3c6a5c3c93ce79d1902a567b1e637"},
+		{id: 0x0002, subOp: 0x00}: {selectorBitLen: 4, selectorPadded: "80", cmr: "f5f90bf76aea628b4f2d75267cb5c13b49cd444b0690c3411fa01856342d4941"},
+		{id: 0x0010, subOp: 0x00}: {selectorBitLen: 12, selectorPadded: "e000", cmr: "4911cf2b5d37ccc5407c0d4e0686f0c6871c0b18c33ebc2dd28ec905cbec90ee"},
+		{id: 0x0010, subOp: 0x01}: {selectorBitLen: 14, selectorPadded: "e010", cmr: "9c2b594d0673d2f416e0bb216f15d35a55a75c2237d030493ec3ae72652f2146"},
+		{id: 0x0010, subOp: 0x02}: {selectorBitLen: 14, selectorPadded: "e014", cmr: "cf668e8e6a8bd1e9bcceebef182e063d1facd1665664170b6ae163456e739fa7"},
+		{id: 0x0010, subOp: 0x03}: {selectorBitLen: 17, selectorPadded: "e01800", cmr: "50a228b34771cac098612f13ccf74949a8a0d8856b29440502fe8b45dd699c07"},
+		{id: 0x0011, subOp: 0x00}: {selectorBitLen: 12, selectorPadded: "e020", cmr: "9d4674805162aca15086e994aa03fb6d2093665316449f9cc97e5288daf14dd9"},
+		{id: 0x0011, subOp: 0x01}: {selectorBitLen: 14, selectorPadded: "e030", cmr: "0d8bc8c7815edb3c220fd212f4c7b6986f50e8a427d6200b74f83a85c1792f75"},
+		{id: 0x0011, subOp: 0x03}: {selectorBitLen: 17, selectorPadded: "e03800", cmr: "c90a66af21fc7ced71a9141082a47dbb0db878c25f432af25f382ccb055f4add"},
+		{id: 0x0020, subOp: 0x00}: {selectorBitLen: 13, selectorPadded: "e200", cmr: "33f82e38417283760f1d9deba367aeaa0feb4c703b69aa37dc8c2aefe7c32d4a"},
+		{id: 0x0020, subOp: 0x01}: {selectorBitLen: 15, selectorPadded: "e208", cmr: "bd237f53ad86be9b3c8bd3dcb2a36642782c07885d5afc44903b5dc6d017960a"},
+		{id: 0x0021, subOp: 0x00}: {selectorBitLen: 13, selectorPadded: "e210", cmr: "9c28e72f9da964de2c90d92c5c772211537ed2e07d20f6790c988284a87c0ce2"},
+	}
+	if len(want) != len(jetRegistryRows) {
+		t.Fatalf("metadata rows=%d want registry rows=%d", len(want), len(jetRegistryRows))
+	}
+	for _, row := range jetRegistryRows {
+		key := jetKey{id: row.jet.ID, subOp: row.jet.SubOp}
+		w, ok := want[key]
+		if !ok {
+			t.Fatalf("unexpected jet row %#04x/%#02x", key.id, key.subOp)
+		}
+		if row.jet.SelectorBitLen != w.selectorBitLen || !bytes.Equal(row.jet.SelectorPadded, hx(w.selectorPadded)) || row.jet.CMR != hex32(w.cmr) {
+			t.Fatalf("metadata %#04x/%#02x got selector=%d/%x cmr=%x", key.id, key.subOp, row.jet.SelectorBitLen, row.jet.SelectorPadded, row.jet.CMR)
+		}
+	}
+}
+
+func TestJetsRegistryRowsRejectDuplicatesAndOrderDrift(t *testing.T) {
+	duplicate := append([]jetRegistryRow(nil), jetRegistryRows...)
+	duplicate[1] = duplicate[0]
+	if err := validateJetLookupRows(duplicate); err == nil {
+		t.Fatal("duplicate jet registry key was accepted")
+	}
+
+	orderDrift := append([]jetRegistryRow(nil), jetRegistryRows...)
+	orderDrift[0], orderDrift[1] = orderDrift[1], orderDrift[0]
+	if err := validateJetLookupRows(orderDrift); err == nil {
+		t.Fatal("out-of-order jet registry rows were accepted")
 	}
 }
 

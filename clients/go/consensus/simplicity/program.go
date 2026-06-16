@@ -11,6 +11,7 @@ import (
 	"crypto/sha3"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"math/bits"
 )
 
@@ -20,13 +21,14 @@ const (
 	MaxExecCost      uint64 = 400_000
 	StepCost         uint64 = 1
 
-	CostModelSemanticsVersion uint32 = 2
-	IntrinsicReadCost         uint64 = 1
-	IntrinsicMissCost         uint64 = 1
-	DescriptorHashBaseCost    uint64 = 64
-	DescriptorHashByteCost    uint64 = 1
-	MaxFrameBytes             uint64 = 65_536
-	MaxLiveMemoryBytes        uint64 = 1_048_576
+	CostModelSemanticsVersion    uint32 = 2
+	JetsRegistrySemanticsVersion uint32 = 2
+	IntrinsicReadCost            uint64 = 1
+	IntrinsicMissCost            uint64 = 1
+	DescriptorHashBaseCost       uint64 = 64
+	DescriptorHashByteCost       uint64 = 1
+	MaxFrameBytes                uint64 = 65_536
+	MaxLiveMemoryBytes           uint64 = 1_048_576
 )
 
 type ErrorCode string
@@ -115,6 +117,14 @@ func LookupJet(id uint16, subOp uint8) (Jet, bool) {
 	return copyJet(row), ok
 }
 
+func requireJet(id uint16, subOp uint8) (Jet, error) {
+	jet, ok := LookupJet(id, subOp)
+	if !ok {
+		return Jet{}, &Error{Code: ErrJetDisallowed}
+	}
+	return jet, nil
+}
+
 func (p Program) Evaluate(opts EvalOptions) (EvalResult, error) {
 	if !p.decoded {
 		return EvalResult{}, &Error{Code: ErrDecode}
@@ -201,6 +211,11 @@ func CostModelHash() [32]byte {
 	return sha3.Sum256(costModelBytes())
 }
 
+// JetsRegistryHash returns the hash of the ordered Go jet registry table.
+func JetsRegistryHash() [32]byte {
+	return jetsRegistryHashValue
+}
+
 func decodeProgram(program []byte) (Program, error) {
 	entry, ok := programs[string(program)]
 	if !ok {
@@ -237,6 +252,11 @@ type jetKey struct {
 	subOp uint8
 }
 
+type jetRegistryRow struct {
+	jet       Jet
+	signature string
+}
+
 type costFormulaID uint8
 
 const (
@@ -256,20 +276,24 @@ type witnessKey struct {
 	bytes   string
 }
 
-var jetRows = map[jetKey]Jet{
-	{0x0001, 0x00}: {ID: 0x0001, SubOp: 0x00, Name: "sha3_256", SelectorBitLen: 2, SelectorPadded: []byte{0x00}, CMR: hex32("3999889bdf18d07c6c38b7aacb89f6c2bdd3c6a5c3c93ce79d1902a567b1e637")},
-	{0x0002, 0x00}: {ID: 0x0002, SubOp: 0x00, Name: "mldsa87_verify", SelectorBitLen: 4, SelectorPadded: []byte{0x80}, CMR: hex32("f5f90bf76aea628b4f2d75267cb5c13b49cd444b0690c3411fa01856342d4941")},
-	{0x0010, 0x00}: {ID: 0x0010, SubOp: 0x00, Name: "u64_checked_add", SelectorBitLen: 12, SelectorPadded: []byte{0xe0, 0x00}, CMR: hex32("4911cf2b5d37ccc5407c0d4e0686f0c6871c0b18c33ebc2dd28ec905cbec90ee")},
-	{0x0010, 0x01}: {ID: 0x0010, SubOp: 0x01, Name: "u64_checked_sub", SelectorBitLen: 14, SelectorPadded: []byte{0xe0, 0x10}, CMR: hex32("9c2b594d0673d2f416e0bb216f15d35a55a75c2237d030493ec3ae72652f2146")},
-	{0x0010, 0x02}: {ID: 0x0010, SubOp: 0x02, Name: "u64_checked_mul", SelectorBitLen: 14, SelectorPadded: []byte{0xe0, 0x14}, CMR: hex32("cf668e8e6a8bd1e9bcceebef182e063d1facd1665664170b6ae163456e739fa7")},
-	{0x0010, 0x03}: {ID: 0x0010, SubOp: 0x03, Name: "u64_cmp", SelectorBitLen: 17, SelectorPadded: []byte{0xe0, 0x18, 0x00}, CMR: hex32("50a228b34771cac098612f13ccf74949a8a0d8856b29440502fe8b45dd699c07")},
-	{0x0011, 0x00}: {ID: 0x0011, SubOp: 0x00, Name: "u128_checked_add", SelectorBitLen: 12, SelectorPadded: []byte{0xe0, 0x20}, CMR: hex32("9d4674805162aca15086e994aa03fb6d2093665316449f9cc97e5288daf14dd9")},
-	{0x0011, 0x01}: {ID: 0x0011, SubOp: 0x01, Name: "u128_checked_sub", SelectorBitLen: 14, SelectorPadded: []byte{0xe0, 0x30}, CMR: hex32("0d8bc8c7815edb3c220fd212f4c7b6986f50e8a427d6200b74f83a85c1792f75")},
-	{0x0011, 0x03}: {ID: 0x0011, SubOp: 0x03, Name: "u128_cmp", SelectorBitLen: 17, SelectorPadded: []byte{0xe0, 0x38, 0x00}, CMR: hex32("c90a66af21fc7ced71a9141082a47dbb0db878c25f432af25f382ccb055f4add")},
-	{0x0020, 0x00}: {ID: 0x0020, SubOp: 0x00, Name: "bytes_eq", SelectorBitLen: 13, SelectorPadded: []byte{0xe2, 0x00}, CMR: hex32("33f82e38417283760f1d9deba367aeaa0feb4c703b69aa37dc8c2aefe7c32d4a")},
-	{0x0020, 0x01}: {ID: 0x0020, SubOp: 0x01, Name: "bytes_cmp", SelectorBitLen: 15, SelectorPadded: []byte{0xe2, 0x08}, CMR: hex32("bd237f53ad86be9b3c8bd3dcb2a36642782c07885d5afc44903b5dc6d017960a")},
-	{0x0021, 0x00}: {ID: 0x0021, SubOp: 0x00, Name: "bytes_slice", SelectorBitLen: 13, SelectorPadded: []byte{0xe2, 0x10}, CMR: hex32("9c28e72f9da964de2c90d92c5c772211537ed2e07d20f6790c988284a87c0ce2")},
+var jetRegistryRows = []jetRegistryRow{
+	{jet: Jet{ID: 0x0001, SubOp: 0x00, Name: "sha3_256", SelectorBitLen: 2, SelectorPadded: []byte{0x00}, CMR: hex32("3999889bdf18d07c6c38b7aacb89f6c2bdd3c6a5c3c93ce79d1902a567b1e637")}, signature: "bytes -> bytes32"},
+	{jet: Jet{ID: 0x0002, SubOp: 0x00, Name: "mldsa87_verify", SelectorBitLen: 4, SelectorPadded: []byte{0x80}, CMR: hex32("f5f90bf76aea628b4f2d75267cb5c13b49cd444b0690c3411fa01856342d4941")}, signature: "(pubkey:bytes, sig:bytes, digest32:bytes32) -> bool"},
+	{jet: Jet{ID: 0x0010, SubOp: 0x00, Name: "u64_checked_add", SelectorBitLen: 12, SelectorPadded: []byte{0xe0, 0x00}, CMR: hex32("4911cf2b5d37ccc5407c0d4e0686f0c6871c0b18c33ebc2dd28ec905cbec90ee")}, signature: "(u64, u64) -> Either<unit, u64>"},
+	{jet: Jet{ID: 0x0010, SubOp: 0x01, Name: "u64_checked_sub", SelectorBitLen: 14, SelectorPadded: []byte{0xe0, 0x10}, CMR: hex32("9c2b594d0673d2f416e0bb216f15d35a55a75c2237d030493ec3ae72652f2146")}, signature: "(u64, u64) -> Either<unit, u64>"},
+	{jet: Jet{ID: 0x0010, SubOp: 0x02, Name: "u64_checked_mul", SelectorBitLen: 14, SelectorPadded: []byte{0xe0, 0x14}, CMR: hex32("cf668e8e6a8bd1e9bcceebef182e063d1facd1665664170b6ae163456e739fa7")}, signature: "(u64, u64) -> Either<unit, u64>"},
+	{jet: Jet{ID: 0x0010, SubOp: 0x03, Name: "u64_cmp", SelectorBitLen: 17, SelectorPadded: []byte{0xe0, 0x18, 0x00}, CMR: hex32("50a228b34771cac098612f13ccf74949a8a0d8856b29440502fe8b45dd699c07")}, signature: "(u64, u64) -> ordering"},
+	{jet: Jet{ID: 0x0011, SubOp: 0x00, Name: "u128_checked_add", SelectorBitLen: 12, SelectorPadded: []byte{0xe0, 0x20}, CMR: hex32("9d4674805162aca15086e994aa03fb6d2093665316449f9cc97e5288daf14dd9")}, signature: "(u128, u128) -> Either<unit, u128>"},
+	{jet: Jet{ID: 0x0011, SubOp: 0x01, Name: "u128_checked_sub", SelectorBitLen: 14, SelectorPadded: []byte{0xe0, 0x30}, CMR: hex32("0d8bc8c7815edb3c220fd212f4c7b6986f50e8a427d6200b74f83a85c1792f75")}, signature: "(u128, u128) -> Either<unit, u128>"},
+	{jet: Jet{ID: 0x0011, SubOp: 0x03, Name: "u128_cmp", SelectorBitLen: 17, SelectorPadded: []byte{0xe0, 0x38, 0x00}, CMR: hex32("c90a66af21fc7ced71a9141082a47dbb0db878c25f432af25f382ccb055f4add")}, signature: "(u128, u128) -> ordering"},
+	{jet: Jet{ID: 0x0020, SubOp: 0x00, Name: "bytes_eq", SelectorBitLen: 13, SelectorPadded: []byte{0xe2, 0x00}, CMR: hex32("33f82e38417283760f1d9deba367aeaa0feb4c703b69aa37dc8c2aefe7c32d4a")}, signature: "(bytes, bytes) -> bool"},
+	{jet: Jet{ID: 0x0020, SubOp: 0x01, Name: "bytes_cmp", SelectorBitLen: 15, SelectorPadded: []byte{0xe2, 0x08}, CMR: hex32("bd237f53ad86be9b3c8bd3dcb2a36642782c07885d5afc44903b5dc6d017960a")}, signature: "(bytes, bytes) -> ordering"},
+	{jet: Jet{ID: 0x0021, SubOp: 0x00, Name: "bytes_slice", SelectorBitLen: 13, SelectorPadded: []byte{0xe2, 0x10}, CMR: hex32("9c28e72f9da964de2c90d92c5c772211537ed2e07d20f6790c988284a87c0ce2")}, signature: "(src:bytes, start:u64, len:u64) -> Either<unit, bytes>"},
 }
+
+var jetRows = jetRowsFromRegistryRows(jetRegistryRows)
+
+var jetsRegistryHashValue = sha3.Sum256(jetsRegistryBytes(jetRegistryRows))
 
 type programEntry struct {
 	program Program
@@ -320,6 +344,54 @@ func costModelBytes() []byte {
 		out = binary.LittleEndian.AppendUint16(out, row.jet.id)
 		out = append(out, row.jet.subOp, byte(row.formula))
 		out = binary.LittleEndian.AppendUint64(out, row.param)
+	}
+	return out
+}
+
+func jetsRegistryBytes(rows []jetRegistryRow) []byte {
+	if err := validateJetLookupRows(rows); err != nil {
+		panic(err)
+	}
+	out := []byte("RUBIN-SIMPLICITY-JETS-v1")
+	out = binary.LittleEndian.AppendUint32(out, JetsRegistrySemanticsVersion)
+	out = appendOneByteCompactSize(out, len(rows))
+	for _, row := range rows {
+		out = binary.LittleEndian.AppendUint16(out, row.jet.ID)
+		out = append(out, row.jet.SubOp)
+		out = appendOneByteCompactSize(out, len(row.jet.Name))
+		out = append(out, row.jet.Name...)
+		out = appendOneByteCompactSize(out, len(row.signature))
+		out = append(out, row.signature...)
+	}
+	return out
+}
+
+func appendOneByteCompactSize(out []byte, n int) []byte {
+	if n >= 253 {
+		panic("jet registry CompactSize value exceeds one-byte encoding")
+	}
+	return append(out, byte(n))
+}
+
+func validateJetLookupRows(rows []jetRegistryRow) error {
+	var prev jetKey
+	for i, row := range rows {
+		key := jetKey{id: row.jet.ID, subOp: row.jet.SubOp}
+		if i > 0 && (prev.id > key.id || (prev.id == key.id && prev.subOp >= key.subOp)) {
+			return fmt.Errorf("jet registry rows not strictly sorted at %d", i)
+		}
+		prev = key
+	}
+	return nil
+}
+
+func jetRowsFromRegistryRows(rows []jetRegistryRow) map[jetKey]Jet {
+	if err := validateJetLookupRows(rows); err != nil {
+		panic(err)
+	}
+	out := make(map[jetKey]Jet, len(rows))
+	for _, row := range rows {
+		out[jetKey{id: row.jet.ID, subOp: row.jet.SubOp}] = copyJet(row.jet)
 	}
 	return out
 }
