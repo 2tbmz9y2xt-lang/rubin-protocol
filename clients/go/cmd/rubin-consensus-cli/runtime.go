@@ -798,6 +798,9 @@ func simplicityErrString(err error) string {
 
 func runSimplicitySyntheticExecVector(req Request) Response {
 	if req.EvalSteps == nil {
+		if len(req.FrameBitWidths) > 0 {
+			return Response{Ok: false, Err: "bad eval_steps"}
+		}
 		return Response{Ok: false, Err: "bad program_hex"}
 	}
 	result, err := evaluateSimplicitySynthetic(*req.EvalSteps, req.FrameBitWidths)
