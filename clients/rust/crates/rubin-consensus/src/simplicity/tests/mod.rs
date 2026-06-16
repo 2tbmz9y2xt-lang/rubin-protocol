@@ -1,5 +1,5 @@
 use super::*;
-use serde::Deserialize;
+use serde::{de::Error as _, Deserialize};
 use std::{fs, path::PathBuf};
 
 const C1: &str = "c40a10263f7436b4160acbef1c36fba4be4d95df181a968afeab5eac247adff7";
@@ -194,6 +194,43 @@ struct SharedCryptoJetCase {
     expected_error: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedDataJetsCorpus {
+    contract_version: u32,
+    fixture_kind: String,
+    description: String,
+    cases: Vec<SharedDataJetCase>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedDataJetCase {
+    id: String,
+    jet: String,
+    a_u64: Option<u64>,
+    b_u64: Option<u64>,
+    a_u128_hi: Option<u64>,
+    a_u128_lo: Option<u64>,
+    b_u128_hi: Option<u64>,
+    b_u128_lo: Option<u64>,
+    bytes_a_hex: Option<String>,
+    bytes_b_hex: Option<String>,
+    source_hex: Option<String>,
+    start: Option<u64>,
+    length: Option<u64>,
+    expected_accepted: Option<bool>,
+    expected_u64: Option<u64>,
+    expected_u128_hi: Option<u64>,
+    expected_u128_lo: Option<u64>,
+    expected_ordering: Option<i8>,
+    expected_bool: Option<bool>,
+    expected_bytes_hex: Option<String>,
+    expected_cost: Option<u64>,
+    #[serde(skip, rename = "__rubin_internal_field_count")]
+    field_count: usize,
+}
+
 #[test]
 fn shared_exec_corpus_requires_outcome_fields() {
     for (name, raw, needle) in [
@@ -312,6 +349,339 @@ fn shared_crypto_jets_corpus_matches_go_reference() {
             _ => panic!("{}: unknown jet {}", case.id, case.jet),
         }
     }
+}
+
+#[test]
+fn shared_data_jets_corpus_matches_go_reference() -> Result<(), String> {
+    let raw = fs::read_to_string(data_jets_corpus_path()).expect("read shared data jets corpus");
+    let corpus: SharedDataJetsCorpus =
+        decode_shared_data_jets_corpus(&raw).expect("parse shared data jets corpus");
+    assert_eq!(corpus.contract_version, 1);
+    assert_eq!(corpus.fixture_kind, "simplicity_data_jets_corpus_v1");
+    assert!(!corpus.description.is_empty() && !corpus.cases.is_empty());
+    for case in corpus.cases {
+        case.validate_outcome_fields()
+            .unwrap_or_else(|err| panic!("{err}"));
+        let expected_cost = case.expected_cost.expect("validated expected_cost");
+        match case.jet.as_str() {
+            "u64_checked_add" | "u64_checked_sub" | "u64_checked_mul" => {
+                let (a, b) = case.u64_inputs();
+                let got = match case.jet.as_str() {
+                    "u64_checked_add" => evaluate_u64_checked_add_jet(a, b),
+                    "u64_checked_sub" => evaluate_u64_checked_sub_jet(a, b),
+                    _ => evaluate_u64_checked_mul_jet(a, b),
+                };
+                assert_eq!(
+                    got,
+                    U64JetResult {
+                        value: case.expected_u64.expect("validated expected_u64"),
+                        accepted: case.expected_accepted.expect("validated expected_accepted"),
+                        cost: expected_cost,
+                    },
+                    "{}",
+                    case.id
+                );
+            }
+            "u64_cmp" => assert_eq!(
+                {
+                    let (a, b) = case.u64_inputs();
+                    evaluate_u64_cmp_jet(a, b)
+                },
+                ordering_jet(case.expected_ordering()?, expected_cost),
+                "{}",
+                case.id
+            ),
+            "u128_checked_add" | "u128_checked_sub" => {
+                let (a128, b128) = case.u128_inputs();
+                let got = match case.jet.as_str() {
+                    "u128_checked_add" => evaluate_u128_checked_add_jet(a128, b128),
+                    _ => evaluate_u128_checked_sub_jet(a128, b128),
+                };
+                assert_eq!(
+                    got,
+                    U128JetResult {
+                        value: uint128(
+                            case.expected_u128_hi.expect("validated expected_u128_hi"),
+                            case.expected_u128_lo.expect("validated expected_u128_lo"),
+                        ),
+                        accepted: case.expected_accepted.expect("validated expected_accepted"),
+                        cost: expected_cost,
+                    },
+                    "{}",
+                    case.id
+                );
+            }
+            "u128_cmp" => assert_eq!(
+                {
+                    let (a128, b128) = case.u128_inputs();
+                    evaluate_u128_cmp_jet(a128, b128)
+                },
+                ordering_jet(case.expected_ordering()?, expected_cost),
+                "{}",
+                case.id
+            ),
+            "bytes_eq" => assert_eq!(
+                {
+                    let (a, b) = case.bytes_pair_inputs();
+                    evaluate_bytes_eq_jet(&hx(a), &hx(b))
+                },
+                bool_jet(
+                    case.expected_bool.expect("validated expected_bool"),
+                    expected_cost
+                ),
+                "{}",
+                case.id
+            ),
+            "bytes_cmp" => assert_eq!(
+                {
+                    let (a, b) = case.bytes_pair_inputs();
+                    evaluate_bytes_cmp_jet(&hx(a), &hx(b))
+                },
+                ordering_jet(case.expected_ordering()?, expected_cost),
+                "{}",
+                case.id
+            ),
+            "bytes_slice" => assert_eq!(
+                {
+                    let (source, start, length) = case.slice_inputs();
+                    evaluate_bytes_slice_jet(&hx(source), start, length)
+                },
+                bytes_jet(
+                    &hx(case
+                        .expected_bytes_hex
+                        .as_deref()
+                        .expect("validated expected_bytes_hex")),
+                    case.expected_accepted.expect("validated expected_accepted"),
+                    expected_cost
+                ),
+                "{}",
+                case.id
+            ),
+            _ => panic!("{}: unknown data jet {}", case.id, case.jet),
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[rustfmt::skip]
+fn shared_data_jets_corpus_requires_outcome_fields() {
+    assert!(matches!(serde_json::from_str::<SharedDataJetsCorpus>(r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-DUP","id":"VEC-SDJ-DUP2","jet":"u64_cmp","a_u64":0,"b_u64":0,"expected_ordering":0,"expected_cost":1}]}"#), Err(err) if err.to_string().contains("duplicate field `id`")));
+    assert!(matches!(decode_shared_data_jets_corpus(r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-INTERNAL-FIELD-COUNT","jet":"bytes_eq","bytes_a_hex":"","bytes_b_hex":"","expected_bool":true,"expected_cost":1,"field_count":6}]}"#), Err(err) if err.to_string().contains("unknown field `field_count`")));
+    for (name, raw, needle) in [
+        ("missing u64 accepted", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-ACCEPTED","jet":"u64_checked_add","a_u64":0,"b_u64":0,"expected_u64":0,"expected_cost":1}]}"#, "missing expected_accepted"),
+        ("missing u64 input", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-A-U64","jet":"u64_checked_add","b_u64":3,"expected_accepted":true,"expected_u64":3,"expected_cost":1}]}"#, "missing a_u64"),
+        ("missing u64 value", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-U64","jet":"u64_checked_add","a_u64":0,"b_u64":0,"expected_accepted":false,"expected_cost":1}]}"#, "missing expected_u64"),
+        ("missing ordering", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-ORDERING","jet":"bytes_cmp","bytes_a_hex":"","bytes_b_hex":"","expected_cost":2}]}"#, "missing expected_ordering"),
+        ("invalid ordering", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-BAD-ORDERING","jet":"u64_cmp","a_u64":0,"b_u64":0,"expected_ordering":2,"expected_cost":1}]}"#, "invalid expected_ordering 2"),
+        ("missing bool", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-BOOL","jet":"bytes_eq","bytes_a_hex":"","bytes_b_hex":"","expected_cost":1}]}"#, "missing expected_bool"),
+        ("missing bytes input", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-BYTES-A","jet":"bytes_eq","bytes_b_hex":"","expected_bool":true,"expected_cost":1}]}"#, "missing bytes_a_hex"),
+        ("missing bytes", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-BYTES","jet":"bytes_slice","source_hex":"","start":0,"length":0,"expected_accepted":false,"expected_cost":2}]}"#, "missing expected_bytes_hex"),
+        ("missing u128 input", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-A-U128-HI","jet":"u128_checked_sub","a_u128_lo":0,"b_u128_hi":0,"b_u128_lo":1,"expected_accepted":false,"expected_u128_hi":0,"expected_u128_lo":0,"expected_cost":1}]}"#, "missing a_u128_hi"),
+        ("missing slice input", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-START","jet":"bytes_slice","source_hex":"616263","length":0,"expected_accepted":true,"expected_bytes_hex":"","expected_cost":1}]}"#, "missing start"),
+        ("missing cost", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-COST","jet":"u64_cmp","a_u64":0,"b_u64":0,"expected_ordering":0}]}"#, "missing expected_cost"),
+        ("extra known field", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-EXTRA","jet":"bytes_eq","bytes_a_hex":"","bytes_b_hex":"","expected_bool":true,"expected_cost":1,"expected_u64":0}]}"#, "unexpected field count"),
+        ("extra beats invalid ordering", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-EXTRA-ORDERING","jet":"bytes_eq","bytes_a_hex":"","bytes_b_hex":"","expected_bool":true,"expected_cost":1,"expected_ordering":2}]}"#, "unexpected field count"),
+        ("invalid bytes eq hex", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-BAD-BYTES-A","jet":"bytes_eq","bytes_a_hex":"zz","bytes_b_hex":"","expected_bool":false,"expected_cost":1}]}"#, "invalid bytes_a_hex"),
+        ("invalid bytes cmp hex", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-BAD-BYTES-B","jet":"bytes_cmp","bytes_a_hex":"","bytes_b_hex":"0","expected_ordering":0,"expected_cost":2}]}"#, "invalid bytes_b_hex"),
+        ("invalid bytes slice hex", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-BAD-SOURCE","jet":"bytes_slice","source_hex":"zz","start":0,"length":0,"expected_accepted":false,"expected_bytes_hex":"","expected_cost":2}]}"#, "invalid source_hex"),
+    ] {
+        let corpus = decode_shared_data_jets_corpus(raw)
+            .unwrap_or_else(|err| panic!("{name}: parse malformed corpus: {err}"));
+        let err = corpus.cases[0]
+            .validate_outcome_fields()
+            .expect_err("malformed corpus parsed successfully");
+        assert!(err.contains(needle), "{name}: error={err} want {needle}");
+    }
+}
+
+#[test]
+fn shared_data_jets_corpus_rejects_reserved_field_count_key() {
+    let raw = serde_json::json!({
+        "contract_version": 1,
+        "fixture_kind": "simplicity_data_jets_corpus_v1",
+        "description": "x",
+        "cases": [{
+            "id": "VEC-SDJ-RESERVED-FIELD-COUNT",
+            "jet": "bytes_eq",
+            "bytes_a_hex": "",
+            "bytes_b_hex": "",
+            "expected_bool": true,
+            "expected_cost": 1,
+            "__rubin_internal_field_count": 6,
+        }],
+    })
+    .to_string();
+    let err = match decode_shared_data_jets_corpus(&raw) {
+        Ok(_) => panic!("reserved bookkeeping key parsed successfully"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("unknown field `__rubin_internal_field_count`"),
+        "error={err}"
+    );
+}
+
+fn decode_shared_data_jets_corpus(raw: &str) -> serde_json::Result<SharedDataJetsCorpus> {
+    #[derive(Deserialize)]
+    struct RawCorpus {
+        cases: Vec<serde_json::Map<String, serde_json::Value>>,
+    }
+    let raw_cases: RawCorpus = serde_json::from_str(raw)?;
+    for fields in &raw_cases.cases {
+        if fields.contains_key("__rubin_internal_field_count") {
+            return Err(serde_json::Error::custom(
+                "unknown field `__rubin_internal_field_count`",
+            ));
+        }
+    }
+    let mut corpus: SharedDataJetsCorpus = serde_json::from_str(raw)?;
+    if raw_cases.cases.len() != corpus.cases.len() {
+        return Err(serde_json::Error::custom(format!(
+            "case count drift: raw={} decoded={}",
+            raw_cases.cases.len(),
+            corpus.cases.len()
+        )));
+    }
+    for (case, fields) in corpus.cases.iter_mut().zip(raw_cases.cases) {
+        case.field_count = fields.len();
+    }
+    Ok(corpus)
+}
+
+impl SharedDataJetCase {
+    fn validate_outcome_fields(&self) -> Result<(), String> {
+        if self.expected_cost.is_none() {
+            return Err(self.missing_field("expected_cost"));
+        }
+        match self.jet.as_str() {
+            "u64_checked_add" | "u64_checked_sub" | "u64_checked_mul" => {
+                self.require_u64_inputs()?;
+                if self.expected_accepted.is_none() {
+                    return Err(self.missing_field("expected_accepted"));
+                }
+                if self.expected_u64.is_none() {
+                    return Err(self.missing_field("expected_u64"));
+                }
+            }
+            "u64_cmp" => {
+                self.require_u64_inputs()?;
+                self.require_present("expected_ordering", self.expected_ordering.is_some())?;
+            }
+            "u128_cmp" => {
+                self.require_u128_inputs()?;
+                self.require_present("expected_ordering", self.expected_ordering.is_some())?;
+            }
+            "bytes_cmp" => {
+                self.require_bytes_pair_inputs()?;
+                self.require_present("expected_ordering", self.expected_ordering.is_some())?;
+            }
+            "u128_checked_add" | "u128_checked_sub" => {
+                self.require_u128_inputs()?;
+                if self.expected_accepted.is_none() {
+                    return Err(self.missing_field("expected_accepted"));
+                }
+                if self.expected_u128_hi.is_none() {
+                    return Err(self.missing_field("expected_u128_hi"));
+                }
+                if self.expected_u128_lo.is_none() {
+                    return Err(self.missing_field("expected_u128_lo"));
+                }
+            }
+            "bytes_eq" => {
+                self.require_bytes_pair_inputs()?;
+                if self.expected_bool.is_none() {
+                    return Err(self.missing_field("expected_bool"));
+                }
+            }
+            "bytes_slice" => {
+                self.require_slice_inputs()?;
+                if self.expected_accepted.is_none() {
+                    return Err(self.missing_field("expected_accepted"));
+                }
+                self.require_present("expected_bytes_hex", self.expected_bytes_hex.is_some())?;
+            }
+            _ => return Err(format!("{}: unknown data jet {}", self.id, self.jet)),
+        }
+        let want = self.expected_field_count();
+        if self.field_count != want {
+            return Err(format!(
+                "{}: unexpected field count {} for {}, want {want}",
+                self.id, self.field_count, self.jet
+            ));
+        }
+        self.validate_formats()?;
+        Ok(())
+    }
+
+    fn require_u64_inputs(&self) -> Result<(), String> {
+        self.require_present("a_u64", self.a_u64.is_some())?;
+        self.require_present("b_u64", self.b_u64.is_some())
+    }
+
+    fn require_u128_inputs(&self) -> Result<(), String> {
+        self.require_present("a_u128_hi", self.a_u128_hi.is_some())?;
+        self.require_present("a_u128_lo", self.a_u128_lo.is_some())?;
+        self.require_present("b_u128_hi", self.b_u128_hi.is_some())?;
+        self.require_present("b_u128_lo", self.b_u128_lo.is_some())
+    }
+
+    fn require_bytes_pair_inputs(&self) -> Result<(), String> {
+        self.require_present("bytes_a_hex", self.bytes_a_hex.is_some())?;
+        self.require_present("bytes_b_hex", self.bytes_b_hex.is_some())
+    }
+
+    fn require_slice_inputs(&self) -> Result<(), String> {
+        self.require_present("source_hex", self.source_hex.is_some())?;
+        self.require_present("start", self.start.is_some())?;
+        self.require_present("length", self.length.is_some())
+    }
+
+    fn require_hex(&self, field: &str, value: Option<&str>) -> Result<(), String> {
+        let value = value.ok_or_else(|| self.missing_field(field))?;
+        hex::decode(value)
+            .map(|_| ())
+            .map_err(|err| format!("{}: invalid {field} for {}: {err}", self.id, self.jet))
+    }
+
+    fn require_present(&self, field: &str, ok: bool) -> Result<(), String> {
+        ok.then_some(()).ok_or_else(|| self.missing_field(field))
+    }
+
+    #[rustfmt::skip]
+    fn validate_formats(&self) -> Result<(), String> { if let Some(value) = self.expected_ordering { self.ordering_from_i8(value)?; } match self.jet.as_str() { "bytes_eq" | "bytes_cmp" => { self.require_hex("bytes_a_hex", self.bytes_a_hex.as_deref())?; self.require_hex("bytes_b_hex", self.bytes_b_hex.as_deref()) }, "bytes_slice" => { self.require_hex("source_hex", self.source_hex.as_deref())?; self.require_hex("expected_bytes_hex", self.expected_bytes_hex.as_deref()) }, _ => Ok(()) } }
+
+    #[rustfmt::skip]
+    fn expected_field_count(&self) -> usize { match self.jet.as_str() { "u64_checked_add" | "u64_checked_sub" | "u64_checked_mul" => 7, "u64_cmp" | "bytes_eq" | "bytes_cmp" => 6, "u128_checked_add" | "u128_checked_sub" => 10, "u128_cmp" | "bytes_slice" => 8, _ => unreachable!() } }
+
+    #[rustfmt::skip]
+    fn u64_inputs(&self) -> (u64, u64) {
+        (self.a_u64.expect("validated a_u64"), self.b_u64.expect("validated b_u64"))
+    }
+
+    #[rustfmt::skip]
+    fn u128_inputs(&self) -> (Uint128, Uint128) { (uint128(self.a_u128_hi.expect("validated a_u128_hi"), self.a_u128_lo.expect("validated a_u128_lo")), uint128(self.b_u128_hi.expect("validated b_u128_hi"), self.b_u128_lo.expect("validated b_u128_lo"))) }
+
+    #[rustfmt::skip]
+    fn bytes_pair_inputs(&self) -> (&str, &str) {
+        (self.bytes_a_hex.as_deref().expect("validated bytes_a_hex"), self.bytes_b_hex.as_deref().expect("validated bytes_b_hex"))
+    }
+
+    #[rustfmt::skip]
+    fn slice_inputs(&self) -> (&str, u64, u64) {
+        (self.source_hex.as_deref().expect("validated source_hex"), self.start.expect("validated start"), self.length.expect("validated length"))
+    }
+
+    fn missing_field(&self, field: &str) -> String {
+        format!("{}: missing {field} for {}", self.id, self.jet)
+    }
+
+    #[rustfmt::skip]
+    fn expected_ordering(&self) -> Result<core::cmp::Ordering, String> { self.ordering_from_i8(self.expected_ordering.ok_or_else(|| self.missing_field("expected_ordering"))?) }
+
+    #[rustfmt::skip]
+    fn ordering_from_i8(&self, value: i8) -> Result<core::cmp::Ordering, String> { match value { -1 => Ok(core::cmp::Ordering::Less), 0 => Ok(core::cmp::Ordering::Equal), 1 => Ok(core::cmp::Ordering::Greater), _ => Err(format!("{}: invalid expected_ordering {value} for {}", self.id, self.jet)) } }
 }
 
 #[test]
@@ -842,6 +1212,12 @@ fn exec_corpus_path() -> PathBuf {
 fn crypto_jets_corpus_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("../../../../conformance/fixtures/protocol/simplicity_crypto_jets_corpus_v1.json");
+    path
+}
+
+fn data_jets_corpus_path() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("../../../../conformance/fixtures/protocol/simplicity_data_jets_corpus_v1.json");
     path
 }
 
