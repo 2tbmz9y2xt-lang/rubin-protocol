@@ -1,5 +1,5 @@
 use super::*;
-use serde::Deserialize;
+use serde::{de::Error as _, Deserialize};
 use std::{fs, path::PathBuf};
 
 const C1: &str = "c40a10263f7436b4160acbef1c36fba4be4d95df181a968afeab5eac247adff7";
@@ -472,6 +472,7 @@ fn shared_data_jets_corpus_requires_outcome_fields() {
         ("missing u64 input", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-A-U64","jet":"u64_checked_add","b_u64":3,"expected_accepted":true,"expected_u64":3,"expected_cost":1}]}"#, "missing a_u64"),
         ("missing u64 value", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-U64","jet":"u64_checked_add","a_u64":0,"b_u64":0,"expected_accepted":false,"expected_cost":1}]}"#, "missing expected_u64"),
         ("missing ordering", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-ORDERING","jet":"bytes_cmp","bytes_a_hex":"","bytes_b_hex":"","expected_cost":2}]}"#, "missing expected_ordering"),
+        ("invalid ordering", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-BAD-ORDERING","jet":"u64_cmp","a_u64":0,"b_u64":0,"expected_ordering":2,"expected_cost":1}]}"#, "invalid expected_ordering 2"),
         ("missing bool", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-BOOL","jet":"bytes_eq","bytes_a_hex":"","bytes_b_hex":"","expected_cost":1}]}"#, "missing expected_bool"),
         ("missing bytes input", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-BYTES-A","jet":"bytes_eq","bytes_b_hex":"","expected_bool":true,"expected_cost":1}]}"#, "missing bytes_a_hex"),
         ("missing bytes", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-BYTES","jet":"bytes_slice","source_hex":"","start":0,"length":0,"expected_accepted":false,"expected_cost":2}]}"#, "missing expected_bytes_hex"),
@@ -496,8 +497,12 @@ fn shared_data_jets_corpus_requires_outcome_fields() {
 #[rustfmt::skip]
 fn decode_shared_data_jets_corpus(raw: &str) -> serde_json::Result<SharedDataJetsCorpus> {
     #[derive(Deserialize)] struct RawCorpus { cases: Vec<serde_json::Map<String, serde_json::Value>> }
+    let raw_cases: RawCorpus = serde_json::from_str(raw)?;
     let mut corpus: SharedDataJetsCorpus = serde_json::from_str(raw)?;
-    for (case, fields) in corpus.cases.iter_mut().zip(serde_json::from_str::<RawCorpus>(raw)?.cases) { case.field_count = fields.len(); }
+    if raw_cases.cases.len() != corpus.cases.len() {
+        return Err(serde_json::Error::custom(format!("case count drift: raw={} decoded={}", raw_cases.cases.len(), corpus.cases.len())));
+    }
+    for (case, fields) in corpus.cases.iter_mut().zip(raw_cases.cases) { case.field_count = fields.len(); }
     Ok(corpus)
 }
 
