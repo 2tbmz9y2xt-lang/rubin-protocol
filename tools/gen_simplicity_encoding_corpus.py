@@ -13,6 +13,7 @@ ENCODING_OUT = ROOT / "conformance/fixtures/protocol/simplicity_program_encoding
 EXEC_OUT = ROOT / "conformance/fixtures/protocol/simplicity_exec_corpus_v1.json"
 CRYPTO_JETS_OUT = ROOT / "conformance/fixtures/protocol/simplicity_crypto_jets_corpus_v1.json"
 DATA_JETS_OUT = ROOT / "conformance/fixtures/protocol/simplicity_data_jets_corpus_v1.json"
+JETS_REGISTRY_OUT = ROOT / "conformance/fixtures/protocol/simplicity_jets_registry_corpus_v1.json"
 
 
 def vector(
@@ -195,6 +196,25 @@ DATA_JET_CASES = [
 ]
 
 
+JETS_REGISTRY_HASH_HEX = "5aee78aae6b610a3eb3c05bd1487523e318418e0419de48e4fe9555b37f1c059"
+
+JETS_REGISTRY_CASES = [
+    {"id": "VEC-SJR-001", "jet_id": 0x0001, "sub_op": 0x00, "name": "sha3_256", "signature": "bytes -> bytes32", "expected_present": True},
+    {"id": "VEC-SJR-002", "jet_id": 0x0002, "sub_op": 0x00, "name": "mldsa87_verify", "signature": "(pubkey:bytes, sig:bytes, digest32:bytes32) -> bool", "expected_present": True},
+    {"id": "VEC-SJR-003", "jet_id": 0x0010, "sub_op": 0x00, "name": "u64_checked_add", "signature": "(u64, u64) -> Either<unit, u64>", "expected_present": True},
+    {"id": "VEC-SJR-004", "jet_id": 0x0010, "sub_op": 0x01, "name": "u64_checked_sub", "signature": "(u64, u64) -> Either<unit, u64>", "expected_present": True},
+    {"id": "VEC-SJR-005", "jet_id": 0x0010, "sub_op": 0x02, "name": "u64_checked_mul", "signature": "(u64, u64) -> Either<unit, u64>", "expected_present": True},
+    {"id": "VEC-SJR-006", "jet_id": 0x0010, "sub_op": 0x03, "name": "u64_cmp", "signature": "(u64, u64) -> ordering", "expected_present": True},
+    {"id": "VEC-SJR-007", "jet_id": 0x0011, "sub_op": 0x00, "name": "u128_checked_add", "signature": "(u128, u128) -> Either<unit, u128>", "expected_present": True},
+    {"id": "VEC-SJR-008", "jet_id": 0x0011, "sub_op": 0x01, "name": "u128_checked_sub", "signature": "(u128, u128) -> Either<unit, u128>", "expected_present": True},
+    {"id": "VEC-SJR-009", "jet_id": 0x0011, "sub_op": 0x03, "name": "u128_cmp", "signature": "(u128, u128) -> ordering", "expected_present": True},
+    {"id": "VEC-SJR-010", "jet_id": 0x0020, "sub_op": 0x00, "name": "bytes_eq", "signature": "(bytes, bytes) -> bool", "expected_present": True},
+    {"id": "VEC-SJR-011", "jet_id": 0x0020, "sub_op": 0x01, "name": "bytes_cmp", "signature": "(bytes, bytes) -> ordering", "expected_present": True},
+    {"id": "VEC-SJR-012", "jet_id": 0x0021, "sub_op": 0x00, "name": "bytes_slice", "signature": "(src:bytes, start:u64, len:u64) -> Either<unit, bytes>", "expected_present": True},
+    {"id": "VEC-SJR-900", "jet_id": 0x0011, "sub_op": 0x02, "program_hex": "7c0680", "expected_present": False, "expected_error": "TX_ERR_SIMPLICITY_JET_DISALLOWED"},
+]
+
+
 def corpus_bytes(fixture_kind: str, description: str, cases: list[dict[str, object]]) -> bytes:
     payload = {
         "contract_version": 1,
@@ -205,12 +225,25 @@ def corpus_bytes(fixture_kind: str, description: str, cases: list[dict[str, obje
     return (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+def jets_registry_corpus_bytes() -> bytes:
+    payload = {
+        "contract_version": 1,
+        "fixture_kind": "simplicity_jets_registry_corpus_v1",
+        "description": "Generator-owned shared corpus for RUB-558 Go/Rust Simplicity jets registry hash and disallowed-id rejection parity tests.",
+        "expected_registry_hash_hex": JETS_REGISTRY_HASH_HEX,
+        "cases": JETS_REGISTRY_CASES,
+    }
+    return (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+
+
 ARTIFACTS = (
     (ENCODING_OUT, "simplicity_program_encoding_cmr_v1", "Generator-owned shared corpus for RUB-484 Go/Rust Simplicity encoding and CMR parity tests.", CASES),
     (EXEC_OUT, "simplicity_exec_corpus_v1", "Generator-owned shared corpus for RUB-488 Go/Rust Simplicity execution parity tests.", EXEC_CASES),
     (CRYPTO_JETS_OUT, "simplicity_crypto_jets_corpus_v1", "Generator-owned shared corpus for RUB-552 Go/Rust Simplicity crypto jet output, error, verifier-call, and cost parity tests.", CRYPTO_JET_CASES),
     (DATA_JETS_OUT, "simplicity_data_jets_corpus_v1", "Generator-owned shared corpus for RUB-555 Go Simplicity arithmetic and bytes data jet result, error, and cost tests.", DATA_JET_CASES),
 )
+
+EXTRA_ARTIFACTS = ((JETS_REGISTRY_OUT, jets_registry_corpus_bytes),)
 
 
 def main() -> int:
@@ -228,11 +261,25 @@ def main() -> int:
             if out.read_bytes() != corpus_bytes(fixture_kind, description, cases):
                 print(f"ERROR: {out.relative_to(ROOT)} is stale; rerun this generator", file=sys.stderr)
                 return 1
+        for out, build in EXTRA_ARTIFACTS:
+            if not out.exists():
+                print(
+                    f"ERROR: missing {out.relative_to(ROOT)}; run tools/gen_simplicity_encoding_corpus.py to (re)generate",
+                    file=sys.stderr,
+                )
+                return 1
+            if out.read_bytes() != build():
+                print(f"ERROR: {out.relative_to(ROOT)} is stale; rerun this generator", file=sys.stderr)
+                return 1
         print("OK: Simplicity corpora match generator")
         return 0
     for out, fixture_kind, description, cases in ARTIFACTS:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(corpus_bytes(fixture_kind, description, cases))
+        print(f"wrote {out.relative_to(ROOT)}")
+    for out, build in EXTRA_ARTIFACTS:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(build())
         print(f"wrote {out.relative_to(ROOT)}")
     return 0
 
