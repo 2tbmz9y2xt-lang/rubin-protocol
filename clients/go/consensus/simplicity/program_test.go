@@ -145,6 +145,25 @@ type sharedExecCase struct {
 	ExpectedFinalCounter uint64   `json:"expected_final_counter"`
 }
 
+type sharedJetsRegistryCorpus struct {
+	ContractVersion         int                      `json:"contract_version"`
+	FixtureKind             string                   `json:"fixture_kind"`
+	Description             string                   `json:"description"`
+	ExpectedRegistryHashHex string                   `json:"expected_registry_hash_hex"`
+	Cases                   []sharedJetsRegistryCase `json:"cases"`
+}
+
+type sharedJetsRegistryCase struct {
+	ID              string `json:"id"`
+	JetID           uint16 `json:"jet_id"`
+	SubOp           uint8  `json:"sub_op"`
+	Name            string `json:"name"`
+	Signature       string `json:"signature"`
+	ProgramHex      string `json:"program_hex"`
+	ExpectedPresent bool   `json:"expected_present"`
+	ExpectedError   string `json:"expected_error"`
+}
+
 func TestSharedExecCorpus(t *testing.T) {
 	var corpus sharedExecCorpus
 	raw, err := os.ReadFile(repoPath(t, "conformance", "fixtures", "protocol", "simplicity_exec_corpus_v1.json"))
@@ -178,6 +197,49 @@ func TestSharedExecCorpus(t *testing.T) {
 			}
 			if got.Accepted != tc.ExpectedAccepted || got.Cost != tc.ExpectedFinalCounter {
 				t.Fatalf("evaluation=%+v want accepted=%v final_counter=%d", got, tc.ExpectedAccepted, tc.ExpectedFinalCounter)
+			}
+		})
+	}
+}
+
+func TestSharedJetsRegistryCorpus(t *testing.T) {
+	var corpus sharedJetsRegistryCorpus
+	raw, err := os.ReadFile(repoPath(t, "conformance", "fixtures", "protocol", "simplicity_jets_registry_corpus_v1.json"))
+	if err != nil {
+		t.Fatalf("read shared jets registry corpus: %v", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&corpus); err != nil {
+		t.Fatalf("parse shared jets registry corpus: %v", err)
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err == nil {
+		t.Fatal("parse shared jets registry corpus: trailing data")
+	} else if !errors.Is(err, io.EOF) {
+		t.Fatalf("parse shared jets registry corpus: trailing data: %v", err)
+	}
+	if corpus.ContractVersion != 1 || corpus.FixtureKind != "simplicity_jets_registry_corpus_v1" || len(corpus.Cases) == 0 {
+		t.Fatalf("bad shared jets registry corpus header: version=%d kind=%q cases=%d", corpus.ContractVersion, corpus.FixtureKind, len(corpus.Cases))
+	}
+	if got := JetsRegistryHash(); got != hex32(corpus.ExpectedRegistryHashHex) {
+		t.Fatalf("jets_registry_hash=%x want %s", got, corpus.ExpectedRegistryHashHex)
+	}
+	for _, tc := range corpus.Cases {
+		t.Run(tc.ID, func(t *testing.T) {
+			got, ok := registryRow(tc.JetID, tc.SubOp)
+			if ok != tc.ExpectedPresent {
+				t.Fatalf("present=%v want %v", ok, tc.ExpectedPresent)
+			}
+			if tc.ExpectedPresent {
+				if got.jet.Name != tc.Name || got.signature != tc.Signature {
+					t.Fatalf("row=%#04x/%#02x name=%q signature=%q", tc.JetID, tc.SubOp, got.jet.Name, got.signature)
+				}
+				return
+			}
+			if tc.ProgramHex != "" {
+				_, err := Decode(hx(tc.ProgramHex), nil, DecodeOptions{SemanticsVersion: SemanticsVersion})
+				assertErrorCode(t, err, ErrorCode(tc.ExpectedError))
 			}
 		})
 	}
@@ -658,6 +720,15 @@ func evaluateSharedExecCase(t *testing.T, tc sharedExecCase) (EvalResult, error)
 		}
 	}
 	return program.Evaluate(opts)
+}
+
+func registryRow(id uint16, subOp uint8) (jetRegistryRow, bool) {
+	for _, row := range jetRegistryRows {
+		if row.jet.ID == id && row.jet.SubOp == subOp {
+			return row, true
+		}
+	}
+	return jetRegistryRow{}, false
 }
 
 func hx(s string) []byte {

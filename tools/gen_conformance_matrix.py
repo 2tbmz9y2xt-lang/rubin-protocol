@@ -23,6 +23,7 @@ EXPECTED_PROTOCOL_ARTIFACTS = frozenset(
         "simplicity_crypto_jets_corpus_v1.json",
         "simplicity_data_jets_corpus_v1.json",
         "simplicity_exec_corpus_v1.json",
+        "simplicity_jets_registry_corpus_v1.json",
         "simplicity_program_encoding_corpus_v1.json",
     }
 )
@@ -130,6 +131,10 @@ PROTOCOL_ARTIFACT_META: dict[str, tuple[str, str]] = {
     "simplicity_data_jets_corpus_v1.json": (
         "Canonical Simplicity data jets Go corpus",
         "Go Simplicity arithmetic and bytes jet result, error, and cost tests",
+    ),
+    "simplicity_jets_registry_corpus_v1.json": (
+        "Canonical Simplicity jets registry parity corpus",
+        "Go/Rust Simplicity jets_registry_hash and disallowed-id rejection tests",
     ),
 }
 

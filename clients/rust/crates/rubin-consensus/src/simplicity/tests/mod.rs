@@ -205,6 +205,33 @@ struct SharedDataJetsCorpus {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SharedJetsRegistryCorpus {
+    contract_version: u32,
+    fixture_kind: String,
+    description: String,
+    expected_registry_hash_hex: String,
+    cases: Vec<SharedJetsRegistryCase>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedJetsRegistryCase {
+    id: String,
+    jet_id: u16,
+    sub_op: u8,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    signature: String,
+    #[serde(default)]
+    program_hex: String,
+    expected_present: bool,
+    #[serde(default)]
+    expected_error: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SharedDataJetCase {
     id: String,
     jet: String,
@@ -461,6 +488,38 @@ fn shared_data_jets_corpus_matches_go_reference() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[test]
+fn shared_jets_registry_corpus_matches_go_reference() {
+    let raw =
+        fs::read_to_string(jets_registry_corpus_path()).expect("read shared jets registry corpus");
+    let corpus: SharedJetsRegistryCorpus =
+        serde_json::from_str(&raw).expect("parse shared jets registry corpus");
+    assert_eq!(corpus.contract_version, 1);
+    assert_eq!(corpus.fixture_kind, "simplicity_jets_registry_corpus_v1");
+    assert!(!corpus.description.is_empty() && !corpus.cases.is_empty());
+    assert_eq!(
+        jets_registry_hash(),
+        hex32(&corpus.expected_registry_hash_hex).expect("valid registry hash")
+    );
+    for case in corpus.cases {
+        let row = JET_ROWS
+            .iter()
+            .find(|row| (row.id, row.sub_op) == (case.jet_id, case.sub_op));
+        assert_eq!(row.is_some(), case.expected_present, "{}", case.id);
+        if let Some(row) = row {
+            assert_eq!(
+                (row.name, row.signature),
+                (case.name.as_str(), case.signature.as_str()),
+                "{}",
+                case.id
+            );
+        } else if !case.program_hex.is_empty() {
+            let want = error_code(&case.expected_error).unwrap();
+            assert_eq!(decode_err(&hx(&case.program_hex), &[]), want, "{}", case.id);
+        }
+    }
 }
 
 #[test]
@@ -1265,6 +1324,12 @@ fn crypto_jets_corpus_path() -> PathBuf {
 fn data_jets_corpus_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("../../../../conformance/fixtures/protocol/simplicity_data_jets_corpus_v1.json");
+    path
+}
+
+fn jets_registry_corpus_path() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("../../../../conformance/fixtures/protocol/simplicity_jets_registry_corpus_v1.json");
     path
 }
 

@@ -11,6 +11,9 @@ Policy:
 
 ---
 
+## 2026-06-16 — Simplicity jets registry parity corpus (RUB-558)
+Причина/инструменты/fixtures/non-goals: добавить generator-owned shared artifact для Go/Rust Simplicity `jets_registry_hash` и disallowed-id rejection parity; регенерация `python3 tools/gen_simplicity_encoding_corpus.py` и `python3 tools/gen_conformance_matrix.py`; изменён `protocol/simplicity_jets_registry_corpus_v1.json`; production jet registry semantics, consensus dispatch wiring, `CV-*.json` и consensus validation rules не затронуты.
+
 ## 2026-06-15 — Simplicity data jets Go corpus (RUB-555)
 Причина/инструменты/fixtures/non-goals: добавить generator-owned artifact для Go Simplicity arithmetic and bytes data jet result, error и cost tests; регенерация `python3 tools/gen_simplicity_encoding_corpus.py` и `python3 tools/gen_conformance_matrix.py`; изменён `protocol/simplicity_data_jets_corpus_v1.json`; production jet semantics, Rust parity, `CV-*.json` и consensus validation rules не затронуты.
 
