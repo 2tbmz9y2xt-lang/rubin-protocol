@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ENCODING_OUT = ROOT / "conformance/fixtures/protocol/simplicity_program_encoding_corpus_v1.json"
 EXEC_OUT = ROOT / "conformance/fixtures/protocol/simplicity_exec_corpus_v1.json"
 CRYPTO_JETS_OUT = ROOT / "conformance/fixtures/protocol/simplicity_crypto_jets_corpus_v1.json"
+DATA_JETS_OUT = ROOT / "conformance/fixtures/protocol/simplicity_data_jets_corpus_v1.json"
 
 
 def vector(
@@ -135,6 +136,65 @@ CRYPTO_JET_CASES = [
 ]
 
 
+U64_MAX = (1 << 64) - 1
+DATA_JET_BYTES_CHUNK_SIZE = 32
+DATA_JET_MAX_SLICE_COST = 1 + (
+    (U64_MAX + DATA_JET_BYTES_CHUNK_SIZE - 1) // DATA_JET_BYTES_CHUNK_SIZE
+)
+
+
+DATA_JET_INPUT_DEFAULTS = {
+    "u64_checked_add": {"a_u64": 0, "b_u64": 0},
+    "u64_checked_sub": {"a_u64": 0, "b_u64": 0},
+    "u64_checked_mul": {"a_u64": 0, "b_u64": 0},
+    "u64_cmp": {"a_u64": 0, "b_u64": 0},
+    "u128_checked_add": {"a_u128_hi": 0, "a_u128_lo": 0, "b_u128_hi": 0, "b_u128_lo": 0},
+    "u128_checked_sub": {"a_u128_hi": 0, "a_u128_lo": 0, "b_u128_hi": 0, "b_u128_lo": 0},
+    "u128_cmp": {"a_u128_hi": 0, "a_u128_lo": 0, "b_u128_hi": 0, "b_u128_lo": 0},
+    "bytes_eq": {"bytes_a_hex": "", "bytes_b_hex": ""},
+    "bytes_cmp": {"bytes_a_hex": "", "bytes_b_hex": ""},
+    "bytes_slice": {"source_hex": "", "start": 0, "length": 0},
+}
+
+
+def data_jet_case(vector_id: str, jet: str, **fields: object) -> dict[str, object]:
+    item: dict[str, object] = {"id": vector_id, "jet": jet}
+    item.update(DATA_JET_INPUT_DEFAULTS[jet])
+    item.update(fields)
+    return item
+
+
+DATA_JET_CASES = [
+    data_jet_case("VEC-SDJ-001", "u64_checked_add", a_u64=2, b_u64=3, expected_accepted=True, expected_u64=5, expected_cost=1),
+    data_jet_case("VEC-SDJ-002", "u64_checked_add", a_u64=U64_MAX, b_u64=1, expected_accepted=False, expected_u64=0, expected_cost=1),
+    data_jet_case("VEC-SDJ-003", "u64_checked_sub", a_u64=5, b_u64=3, expected_accepted=True, expected_u64=2, expected_cost=1),
+    data_jet_case("VEC-SDJ-004", "u64_checked_sub", a_u64=3, b_u64=5, expected_accepted=False, expected_u64=0, expected_cost=1),
+    data_jet_case("VEC-SDJ-005", "u64_checked_mul", a_u64=7, b_u64=6, expected_accepted=True, expected_u64=42, expected_cost=1),
+    data_jet_case("VEC-SDJ-006", "u64_checked_mul", a_u64=1 << 63, b_u64=2, expected_accepted=False, expected_u64=0, expected_cost=1),
+    data_jet_case("VEC-SDJ-010", "u64_cmp", a_u64=1, b_u64=2, expected_ordering=-1, expected_cost=1),
+    data_jet_case("VEC-SDJ-011", "u64_cmp", a_u64=2, b_u64=2, expected_ordering=0, expected_cost=1),
+    data_jet_case("VEC-SDJ-012", "u64_cmp", a_u64=3, b_u64=2, expected_ordering=1, expected_cost=1),
+    data_jet_case("VEC-SDJ-020", "u128_checked_add", a_u128_lo=U64_MAX, b_u128_lo=1, expected_accepted=True, expected_u128_hi=1, expected_u128_lo=0, expected_cost=1),
+    data_jet_case("VEC-SDJ-021", "u128_checked_add", a_u128_hi=U64_MAX, a_u128_lo=U64_MAX, b_u128_lo=1, expected_accepted=False, expected_u128_hi=0, expected_u128_lo=0, expected_cost=1),
+    data_jet_case("VEC-SDJ-022", "u128_checked_sub", a_u128_hi=1, b_u128_lo=1, expected_accepted=True, expected_u128_hi=0, expected_u128_lo=U64_MAX, expected_cost=1),
+    data_jet_case("VEC-SDJ-023", "u128_checked_sub", b_u128_lo=1, expected_accepted=False, expected_u128_hi=0, expected_u128_lo=0, expected_cost=1),
+    data_jet_case("VEC-SDJ-030", "u128_cmp", a_u128_hi=1, b_u128_hi=2, expected_ordering=-1, expected_cost=1),
+    data_jet_case("VEC-SDJ-031", "u128_cmp", a_u128_hi=2, a_u128_lo=3, b_u128_hi=2, b_u128_lo=3, expected_ordering=0, expected_cost=1),
+    data_jet_case("VEC-SDJ-032", "u128_cmp", a_u128_hi=2, a_u128_lo=4, b_u128_hi=2, b_u128_lo=3, expected_ordering=1, expected_cost=1),
+    data_jet_case("VEC-SDJ-040", "bytes_eq", bytes_a_hex="", bytes_b_hex="", expected_bool=True, expected_cost=1),
+    data_jet_case("VEC-SDJ-041", "bytes_eq", bytes_a_hex="11" * 33, bytes_b_hex="11" * 32, expected_bool=False, expected_cost=3),
+    data_jet_case("VEC-SDJ-050", "bytes_cmp", bytes_a_hex="ff", bytes_b_hex="01", expected_ordering=1, expected_cost=2),
+    data_jet_case("VEC-SDJ-051", "bytes_cmp", bytes_a_hex="6162", bytes_b_hex="616263", expected_ordering=-1, expected_cost=2),
+    data_jet_case("VEC-SDJ-052", "bytes_cmp", bytes_a_hex="616263", bytes_b_hex="6162", expected_ordering=1, expected_cost=2),
+    data_jet_case("VEC-SDJ-053", "bytes_cmp", bytes_a_hex="616263", bytes_b_hex="616263", expected_ordering=0, expected_cost=2),
+    data_jet_case("VEC-SDJ-060", "bytes_slice", source_hex="616263646566", start=2, length=3, expected_accepted=True, expected_bytes_hex="636465", expected_cost=2),
+    data_jet_case("VEC-SDJ-061", "bytes_slice", source_hex="616263646566", start=6, length=0, expected_accepted=True, expected_bytes_hex="", expected_cost=1),
+    data_jet_case("VEC-SDJ-062", "bytes_slice", source_hex="616263646566", start=5, length=2, expected_accepted=False, expected_bytes_hex="", expected_cost=2),
+    data_jet_case("VEC-SDJ-063", "bytes_slice", source_hex="616263646566", start=U64_MAX, length=1, expected_accepted=False, expected_bytes_hex="", expected_cost=2),
+    data_jet_case("VEC-SDJ-064", "bytes_slice", source_hex="", start=0, length=U64_MAX, expected_accepted=False, expected_bytes_hex="", expected_cost=DATA_JET_MAX_SLICE_COST),
+]
+
+
 def corpus_bytes(fixture_kind: str, description: str, cases: list[dict[str, object]]) -> bytes:
     payload = {
         "contract_version": 1,
@@ -149,6 +209,7 @@ ARTIFACTS = (
     (ENCODING_OUT, "simplicity_program_encoding_cmr_v1", "Generator-owned shared corpus for RUB-484 Go/Rust Simplicity encoding and CMR parity tests.", CASES),
     (EXEC_OUT, "simplicity_exec_corpus_v1", "Generator-owned shared corpus for RUB-488 Go/Rust Simplicity execution parity tests.", EXEC_CASES),
     (CRYPTO_JETS_OUT, "simplicity_crypto_jets_corpus_v1", "Generator-owned shared corpus for RUB-552 Go/Rust Simplicity crypto jet output, error, verifier-call, and cost parity tests.", CRYPTO_JET_CASES),
+    (DATA_JETS_OUT, "simplicity_data_jets_corpus_v1", "Generator-owned shared corpus for RUB-555 Go Simplicity arithmetic and bytes data jet result, error, and cost tests.", DATA_JET_CASES),
 )
 
 
