@@ -495,15 +495,58 @@ fn shared_data_jets_corpus_requires_outcome_fields() {
     }
 }
 
-#[rustfmt::skip]
+#[test]
+fn shared_data_jets_corpus_rejects_reserved_field_count_key() {
+    let raw = serde_json::json!({
+        "contract_version": 1,
+        "fixture_kind": "simplicity_data_jets_corpus_v1",
+        "description": "x",
+        "cases": [{
+            "id": "VEC-SDJ-RESERVED-FIELD-COUNT",
+            "jet": "bytes_eq",
+            "bytes_a_hex": "",
+            "bytes_b_hex": "",
+            "expected_bool": true,
+            "expected_cost": 1,
+            "__rubin_internal_field_count": 6,
+        }],
+    })
+    .to_string();
+    let err = match decode_shared_data_jets_corpus(&raw) {
+        Ok(_) => panic!("reserved bookkeeping key parsed successfully"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("unknown field `__rubin_internal_field_count`"),
+        "error={err}"
+    );
+}
+
 fn decode_shared_data_jets_corpus(raw: &str) -> serde_json::Result<SharedDataJetsCorpus> {
-    #[derive(Deserialize)] struct RawCorpus { cases: Vec<serde_json::Map<String, serde_json::Value>> }
+    #[derive(Deserialize)]
+    struct RawCorpus {
+        cases: Vec<serde_json::Map<String, serde_json::Value>>,
+    }
     let raw_cases: RawCorpus = serde_json::from_str(raw)?;
+    for fields in &raw_cases.cases {
+        if fields.contains_key("__rubin_internal_field_count") {
+            return Err(serde_json::Error::custom(
+                "unknown field `__rubin_internal_field_count`",
+            ));
+        }
+    }
     let mut corpus: SharedDataJetsCorpus = serde_json::from_str(raw)?;
     if raw_cases.cases.len() != corpus.cases.len() {
-        return Err(serde_json::Error::custom(format!("case count drift: raw={} decoded={}", raw_cases.cases.len(), corpus.cases.len())));
+        return Err(serde_json::Error::custom(format!(
+            "case count drift: raw={} decoded={}",
+            raw_cases.cases.len(),
+            corpus.cases.len()
+        )));
     }
-    for (case, fields) in corpus.cases.iter_mut().zip(raw_cases.cases) { case.field_count = fields.len(); }
+    for (case, fields) in corpus.cases.iter_mut().zip(raw_cases.cases) {
+        case.field_count = fields.len();
+    }
     Ok(corpus)
 }
 
