@@ -213,7 +213,7 @@ func CostModelHash() [32]byte {
 
 // JetsRegistryHash returns the hash of the ordered Go jet registry table.
 func JetsRegistryHash() [32]byte {
-	return sha3.Sum256(jetsRegistryBytes(jetRegistryRows))
+	return jetsRegistryHashValue
 }
 
 func decodeProgram(program []byte) (Program, error) {
@@ -292,6 +292,8 @@ var jetRegistryRows = []jetRegistryRow{
 }
 
 var jetRows = jetRowsFromRegistryRows(jetRegistryRows)
+
+var jetsRegistryHashValue = sha3.Sum256(jetsRegistryBytes(jetRegistryRows))
 
 type programEntry struct {
 	program Program
