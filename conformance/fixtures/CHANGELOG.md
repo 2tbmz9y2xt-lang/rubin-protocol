@@ -11,6 +11,12 @@ Policy:
 
 ---
 
+## 2026-06-15 — Simplicity data jets parity corpus (RUB-555)
+Причина/инструменты/fixtures/non-goals: добавить generator-owned artifact для Go/Rust Simplicity arithmetic and bytes data jet result, error и cost parity; регенерация `python3 tools/gen_simplicity_encoding_corpus.py` и `python3 tools/gen_conformance_matrix.py`; изменён `protocol/simplicity_data_jets_corpus_v1.json`; production jet semantics, `CV-*.json` и consensus validation rules не затронуты.
+
+Follow-up correction:
+- `protocol/simplicity_data_jets_corpus_v1.json` now emits zero-valued input fields explicitly for data-jet rows; vector semantics unchanged. Go/Rust shared-corpus consumers reject missing required inputs instead of treating omitted fields as implicit zero/empty defaults.
+
 ## 2026-06-15 — Simplicity crypto jets parity corpus (RUB-552)
 Причина/инструменты/fixtures/non-goals: добавить generator-owned artifact для Go/Rust Simplicity crypto jet output, error-class, verifier-call и cost parity; регенерация `python3 tools/gen_simplicity_encoding_corpus.py` и `python3 tools/gen_conformance_matrix.py`; изменён `protocol/simplicity_crypto_jets_corpus_v1.json`; production jet semantics, native backend implementation, `CV-*.json` и consensus validation rules не затронуты.
 
