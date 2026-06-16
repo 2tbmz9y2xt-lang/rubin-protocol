@@ -227,7 +227,7 @@ struct SharedDataJetCase {
     expected_bool: Option<bool>,
     expected_bytes_hex: Option<String>,
     expected_cost: Option<u64>,
-    #[serde(skip)]
+    #[serde(skip, rename = "__rubin_internal_field_count")]
     field_count: usize,
 }
 
@@ -467,6 +467,7 @@ fn shared_data_jets_corpus_matches_go_reference() -> Result<(), String> {
 #[rustfmt::skip]
 fn shared_data_jets_corpus_requires_outcome_fields() {
     assert!(matches!(serde_json::from_str::<SharedDataJetsCorpus>(r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-DUP","id":"VEC-SDJ-DUP2","jet":"u64_cmp","a_u64":0,"b_u64":0,"expected_ordering":0,"expected_cost":1}]}"#), Err(err) if err.to_string().contains("duplicate field `id`")));
+    assert!(matches!(decode_shared_data_jets_corpus(r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-INTERNAL-FIELD-COUNT","jet":"bytes_eq","bytes_a_hex":"","bytes_b_hex":"","expected_bool":true,"expected_cost":1,"field_count":6}]}"#), Err(err) if err.to_string().contains("unknown field `field_count`")));
     for (name, raw, needle) in [
         ("missing u64 accepted", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-ACCEPTED","jet":"u64_checked_add","a_u64":0,"b_u64":0,"expected_u64":0,"expected_cost":1}]}"#, "missing expected_accepted"),
         ("missing u64 input", r#"{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-A-U64","jet":"u64_checked_add","b_u64":3,"expected_accepted":true,"expected_u64":3,"expected_cost":1}]}"#, "missing a_u64"),
