@@ -10,6 +10,7 @@ pub const MAX_PROGRAM_BYTES: usize = 16_384;
 pub const MAX_EXEC_COST: u64 = 400_000;
 pub const STEP_COST: u64 = 1;
 pub const COST_MODEL_SEMANTICS_VERSION: u32 = 2;
+pub const JETS_REGISTRY_SEMANTICS_VERSION: u32 = 2;
 pub const INTRINSIC_READ_COST: u64 = 1;
 pub const INTRINSIC_MISS_COST: u64 = 1;
 pub const DESCRIPTOR_HASH_BASE_COST: u64 = 64;
@@ -117,7 +118,8 @@ pub struct BytesJetResult { pub bytes: Vec<u8>, pub accepted: bool, pub cost: u6
 pub type Mldsa87Digest32Verifier<'a> = dyn Fn(&[u8], &[u8], [u8; 32]) -> Result<bool, EvalError> + 'a;
 
 #[rustfmt::skip]
-struct JetRow { id: u16, sub_op: u8, name: &'static str, selector_bit_len: usize, selector_padded: &'static [u8], cmr: &'static str }
+#[derive(Clone, Copy)]
+struct JetRow { id: u16, sub_op: u8, name: &'static str, selector_bit_len: usize, selector_padded: &'static [u8], cmr: &'static str, signature: &'static str }
 
 #[derive(Clone, Copy)]
 #[rustfmt::skip]
@@ -147,7 +149,7 @@ pub fn decode(program: &[u8], witness: &[u8], opts: DecodeOptions) -> Result<Pro
 #[rustfmt::skip]
 pub fn lookup_jet(id: u16, sub_op: u8) -> Option<Jet> {
     static JETS: OnceLock<Vec<Jet>> = OnceLock::new();
-    JETS.get_or_init(|| JET_ROWS.iter().map(|row| { let cmr = hex32(row.cmr).expect("valid checked-in Rubin jet CMR hex"); Jet { id: row.id, sub_op: row.sub_op, name: row.name, selector_bit_len: row.selector_bit_len, selector_padded: row.selector_padded, cmr } }).collect()).iter().copied().find(|jet| (jet.id, jet.sub_op) == (id, sub_op))
+    JETS.get_or_init(|| { validate_jet_registry_rows(JET_ROWS).expect("valid checked-in Rubin jet registry rows"); JET_ROWS.iter().map(|row| { let cmr = hex32(row.cmr).expect("valid checked-in Rubin jet CMR hex"); Jet { id: row.id, sub_op: row.sub_op, name: row.name, selector_bit_len: row.selector_bit_len, selector_padded: row.selector_padded, cmr } }).collect() }).iter().copied().find(|jet| (jet.id, jet.sub_op) == (id, sub_op))
 }
 
 #[rustfmt::skip]
@@ -294,6 +296,12 @@ pub fn cost_model_hash() -> [u8; 32] {
 }
 
 #[rustfmt::skip]
+pub fn jets_registry_hash() -> [u8; 32] {
+    static HASH: OnceLock<[u8; 32]> = OnceLock::new();
+    *HASH.get_or_init(|| Sha3_256::digest(jets_registry_bytes(JET_ROWS)).into())
+}
+
+#[rustfmt::skip]
 pub fn rubin_jet_cmr(identity_hash: [u8; 32], jet_weight: u64) -> [u8; 32] {
     let mut state = [0x9532ee28, 0xcdca69de, 0xc8a0a218, 0xb79be362, 0xf740ceaf, 0x647f15b3, 0x8aed9168, 0x163f921b];
     let mut block = [0u8; 64];
@@ -362,6 +370,42 @@ fn cost_model_bytes() -> Vec<u8> {
 }
 
 #[rustfmt::skip]
+fn jets_registry_bytes(rows: &[JetRow]) -> Vec<u8> {
+    validate_jet_registry_rows(rows).expect("valid checked-in Rubin jet registry rows");
+    let mut out = b"RUBIN-SIMPLICITY-JETS-v1".to_vec();
+    out.extend_from_slice(&JETS_REGISTRY_SEMANTICS_VERSION.to_le_bytes());
+    append_one_byte_compact_size(&mut out, rows.len());
+    for row in rows {
+        out.extend_from_slice(&row.id.to_le_bytes());
+        out.push(row.sub_op);
+        append_one_byte_compact_size(&mut out, row.name.len());
+        out.extend_from_slice(row.name.as_bytes());
+        append_one_byte_compact_size(&mut out, row.signature.len());
+        out.extend_from_slice(row.signature.as_bytes());
+    }
+    out
+}
+
+#[rustfmt::skip]
+fn append_one_byte_compact_size(out: &mut Vec<u8>, value: usize) {
+    assert!(value < 253, "jet registry CompactSize value exceeds one-byte encoding");
+    out.push(value as u8);
+}
+
+#[rustfmt::skip]
+fn validate_jet_registry_rows(rows: &[JetRow]) -> Result<(), &'static str> {
+    let mut prev = None;
+    for row in rows {
+        let key = (row.id, row.sub_op);
+        if prev.is_some_and(|prev| prev >= key) {
+            return Err("jet registry rows not strictly sorted");
+        }
+        prev = Some(key);
+    }
+    Ok(())
+}
+
+#[rustfmt::skip]
 fn cost_model_row_count_byte(rows: usize) -> u8 {
     assert!(rows < 253, "cost model row count exceeds one-byte CompactSize encoding");
     rows as u8
@@ -374,18 +418,18 @@ fn witness_allowed(kind: WitnessKind, version: u32, witness: &[u8]) -> bool {
 
 #[rustfmt::skip]
 const JET_ROWS: &[JetRow] = &[
-    JetRow { id: 0x0001, sub_op: 0x00, name: "sha3_256",         selector_bit_len: 2,  selector_padded: &[0x00],             cmr: "3999889bdf18d07c6c38b7aacb89f6c2bdd3c6a5c3c93ce79d1902a567b1e637" },
-    JetRow { id: 0x0002, sub_op: 0x00, name: "mldsa87_verify",   selector_bit_len: 4,  selector_padded: &[0x80],             cmr: "f5f90bf76aea628b4f2d75267cb5c13b49cd444b0690c3411fa01856342d4941" },
-    JetRow { id: 0x0010, sub_op: 0x00, name: "u64_checked_add",  selector_bit_len: 12, selector_padded: &[0xe0, 0x00],       cmr: "4911cf2b5d37ccc5407c0d4e0686f0c6871c0b18c33ebc2dd28ec905cbec90ee" },
-    JetRow { id: 0x0010, sub_op: 0x01, name: "u64_checked_sub",  selector_bit_len: 14, selector_padded: &[0xe0, 0x10],       cmr: "9c2b594d0673d2f416e0bb216f15d35a55a75c2237d030493ec3ae72652f2146" },
-    JetRow { id: 0x0010, sub_op: 0x02, name: "u64_checked_mul",  selector_bit_len: 14, selector_padded: &[0xe0, 0x14],       cmr: "cf668e8e6a8bd1e9bcceebef182e063d1facd1665664170b6ae163456e739fa7" },
-    JetRow { id: 0x0010, sub_op: 0x03, name: "u64_cmp",          selector_bit_len: 17, selector_padded: &[0xe0, 0x18, 0x00], cmr: "50a228b34771cac098612f13ccf74949a8a0d8856b29440502fe8b45dd699c07" },
-    JetRow { id: 0x0011, sub_op: 0x00, name: "u128_checked_add", selector_bit_len: 12, selector_padded: &[0xe0, 0x20],       cmr: "9d4674805162aca15086e994aa03fb6d2093665316449f9cc97e5288daf14dd9" },
-    JetRow { id: 0x0011, sub_op: 0x01, name: "u128_checked_sub", selector_bit_len: 14, selector_padded: &[0xe0, 0x30],       cmr: "0d8bc8c7815edb3c220fd212f4c7b6986f50e8a427d6200b74f83a85c1792f75" },
-    JetRow { id: 0x0011, sub_op: 0x03, name: "u128_cmp",         selector_bit_len: 17, selector_padded: &[0xe0, 0x38, 0x00], cmr: "c90a66af21fc7ced71a9141082a47dbb0db878c25f432af25f382ccb055f4add" },
-    JetRow { id: 0x0020, sub_op: 0x00, name: "bytes_eq",         selector_bit_len: 13, selector_padded: &[0xe2, 0x00],       cmr: "33f82e38417283760f1d9deba367aeaa0feb4c703b69aa37dc8c2aefe7c32d4a" },
-    JetRow { id: 0x0020, sub_op: 0x01, name: "bytes_cmp",        selector_bit_len: 15, selector_padded: &[0xe2, 0x08],       cmr: "bd237f53ad86be9b3c8bd3dcb2a36642782c07885d5afc44903b5dc6d017960a" },
-    JetRow { id: 0x0021, sub_op: 0x00, name: "bytes_slice",      selector_bit_len: 13, selector_padded: &[0xe2, 0x10],       cmr: "9c28e72f9da964de2c90d92c5c772211537ed2e07d20f6790c988284a87c0ce2" },
+    JetRow { id: 0x0001, sub_op: 0x00, name: "sha3_256",         selector_bit_len: 2,  selector_padded: &[0x00],             cmr: "3999889bdf18d07c6c38b7aacb89f6c2bdd3c6a5c3c93ce79d1902a567b1e637", signature: "bytes -> bytes32" },
+    JetRow { id: 0x0002, sub_op: 0x00, name: "mldsa87_verify",   selector_bit_len: 4,  selector_padded: &[0x80],             cmr: "f5f90bf76aea628b4f2d75267cb5c13b49cd444b0690c3411fa01856342d4941", signature: "(pubkey:bytes, sig:bytes, digest32:bytes32) -> bool" },
+    JetRow { id: 0x0010, sub_op: 0x00, name: "u64_checked_add",  selector_bit_len: 12, selector_padded: &[0xe0, 0x00],       cmr: "4911cf2b5d37ccc5407c0d4e0686f0c6871c0b18c33ebc2dd28ec905cbec90ee", signature: "(u64, u64) -> Either<unit, u64>" },
+    JetRow { id: 0x0010, sub_op: 0x01, name: "u64_checked_sub",  selector_bit_len: 14, selector_padded: &[0xe0, 0x10],       cmr: "9c2b594d0673d2f416e0bb216f15d35a55a75c2237d030493ec3ae72652f2146", signature: "(u64, u64) -> Either<unit, u64>" },
+    JetRow { id: 0x0010, sub_op: 0x02, name: "u64_checked_mul",  selector_bit_len: 14, selector_padded: &[0xe0, 0x14],       cmr: "cf668e8e6a8bd1e9bcceebef182e063d1facd1665664170b6ae163456e739fa7", signature: "(u64, u64) -> Either<unit, u64>" },
+    JetRow { id: 0x0010, sub_op: 0x03, name: "u64_cmp",          selector_bit_len: 17, selector_padded: &[0xe0, 0x18, 0x00], cmr: "50a228b34771cac098612f13ccf74949a8a0d8856b29440502fe8b45dd699c07", signature: "(u64, u64) -> ordering" },
+    JetRow { id: 0x0011, sub_op: 0x00, name: "u128_checked_add", selector_bit_len: 12, selector_padded: &[0xe0, 0x20],       cmr: "9d4674805162aca15086e994aa03fb6d2093665316449f9cc97e5288daf14dd9", signature: "(u128, u128) -> Either<unit, u128>" },
+    JetRow { id: 0x0011, sub_op: 0x01, name: "u128_checked_sub", selector_bit_len: 14, selector_padded: &[0xe0, 0x30],       cmr: "0d8bc8c7815edb3c220fd212f4c7b6986f50e8a427d6200b74f83a85c1792f75", signature: "(u128, u128) -> Either<unit, u128>" },
+    JetRow { id: 0x0011, sub_op: 0x03, name: "u128_cmp",         selector_bit_len: 17, selector_padded: &[0xe0, 0x38, 0x00], cmr: "c90a66af21fc7ced71a9141082a47dbb0db878c25f432af25f382ccb055f4add", signature: "(u128, u128) -> ordering" },
+    JetRow { id: 0x0020, sub_op: 0x00, name: "bytes_eq",         selector_bit_len: 13, selector_padded: &[0xe2, 0x00],       cmr: "33f82e38417283760f1d9deba367aeaa0feb4c703b69aa37dc8c2aefe7c32d4a", signature: "(bytes, bytes) -> bool" },
+    JetRow { id: 0x0020, sub_op: 0x01, name: "bytes_cmp",        selector_bit_len: 15, selector_padded: &[0xe2, 0x08],       cmr: "bd237f53ad86be9b3c8bd3dcb2a36642782c07885d5afc44903b5dc6d017960a", signature: "(bytes, bytes) -> ordering" },
+    JetRow { id: 0x0021, sub_op: 0x00, name: "bytes_slice",      selector_bit_len: 13, selector_padded: &[0xe2, 0x10],       cmr: "9c28e72f9da964de2c90d92c5c772211537ed2e07d20f6790c988284a87c0ce2", signature: "(src:bytes, start:u64, len:u64) -> Either<unit, bytes>" },
 ];
 
 const UNIT_FRAMES: &[u64] = &[0, 0];
