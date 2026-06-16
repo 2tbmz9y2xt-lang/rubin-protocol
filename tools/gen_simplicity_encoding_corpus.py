@@ -137,11 +137,29 @@ CRYPTO_JET_CASES = [
 
 
 U64_MAX = (1 << 64) - 1
-DATA_JET_MAX_SLICE_COST = 1 + ((U64_MAX + 31) // 32)
+DATA_JET_BYTES_CHUNK_SIZE = 32
+DATA_JET_MAX_SLICE_COST = 1 + (
+    (U64_MAX + DATA_JET_BYTES_CHUNK_SIZE - 1) // DATA_JET_BYTES_CHUNK_SIZE
+)
+
+
+DATA_JET_INPUT_DEFAULTS = {
+    "u64_checked_add": {"a_u64": 0, "b_u64": 0},
+    "u64_checked_sub": {"a_u64": 0, "b_u64": 0},
+    "u64_checked_mul": {"a_u64": 0, "b_u64": 0},
+    "u64_cmp": {"a_u64": 0, "b_u64": 0},
+    "u128_checked_add": {"a_u128_hi": 0, "a_u128_lo": 0, "b_u128_hi": 0, "b_u128_lo": 0},
+    "u128_checked_sub": {"a_u128_hi": 0, "a_u128_lo": 0, "b_u128_hi": 0, "b_u128_lo": 0},
+    "u128_cmp": {"a_u128_hi": 0, "a_u128_lo": 0, "b_u128_hi": 0, "b_u128_lo": 0},
+    "bytes_eq": {"bytes_a_hex": "", "bytes_b_hex": ""},
+    "bytes_cmp": {"bytes_a_hex": "", "bytes_b_hex": ""},
+    "bytes_slice": {"source_hex": "", "start": 0, "length": 0},
+}
 
 
 def data_jet_case(vector_id: str, jet: str, **fields: object) -> dict[str, object]:
     item: dict[str, object] = {"id": vector_id, "jet": jet}
+    item.update(DATA_JET_INPUT_DEFAULTS[jet])
     item.update(fields)
     return item
 

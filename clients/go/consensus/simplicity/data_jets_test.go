@@ -108,17 +108,17 @@ type sharedDataJetCorpus struct {
 type sharedDataJetCase struct {
 	ID               string  `json:"id"`
 	Jet              string  `json:"jet"`
-	AU64             uint64  `json:"a_u64"`
-	BU64             uint64  `json:"b_u64"`
-	AU128Hi          uint64  `json:"a_u128_hi"`
-	AU128Lo          uint64  `json:"a_u128_lo"`
-	BU128Hi          uint64  `json:"b_u128_hi"`
-	BU128Lo          uint64  `json:"b_u128_lo"`
-	BytesAHex        string  `json:"bytes_a_hex"`
-	BytesBHex        string  `json:"bytes_b_hex"`
-	SourceHex        string  `json:"source_hex"`
-	Start            uint64  `json:"start"`
-	Length           uint64  `json:"length"`
+	AU64             *uint64 `json:"a_u64"`
+	BU64             *uint64 `json:"b_u64"`
+	AU128Hi          *uint64 `json:"a_u128_hi"`
+	AU128Lo          *uint64 `json:"a_u128_lo"`
+	BU128Hi          *uint64 `json:"b_u128_hi"`
+	BU128Lo          *uint64 `json:"b_u128_lo"`
+	BytesAHex        *string `json:"bytes_a_hex"`
+	BytesBHex        *string `json:"bytes_b_hex"`
+	SourceHex        *string `json:"source_hex"`
+	Start            *uint64 `json:"start"`
+	Length           *uint64 `json:"length"`
 	ExpectedAccepted *bool   `json:"expected_accepted"`
 	ExpectedU64      *uint64 `json:"expected_u64"`
 	ExpectedU128Hi   *uint64 `json:"expected_u128_hi"`
@@ -151,32 +151,36 @@ func TestSharedDataJetsCorpus(t *testing.T) {
 			if err := tc.validateOutcomeFields(); err != nil {
 				t.Fatal(err)
 			}
-			a128 := Uint128{Hi: tc.AU128Hi, Lo: tc.AU128Lo}
-			b128 := Uint128{Hi: tc.BU128Hi, Lo: tc.BU128Lo}
 			switch tc.Jet {
 			case "u64_checked_add":
-				assertU64Jet(t, tc.ID, EvaluateU64CheckedAddJet(tc.AU64, tc.BU64), tc)
+				assertU64Jet(t, tc.ID, EvaluateU64CheckedAddJet(*tc.AU64, *tc.BU64), tc)
 			case "u64_checked_sub":
-				assertU64Jet(t, tc.ID, EvaluateU64CheckedSubJet(tc.AU64, tc.BU64), tc)
+				assertU64Jet(t, tc.ID, EvaluateU64CheckedSubJet(*tc.AU64, *tc.BU64), tc)
 			case "u64_checked_mul":
-				assertU64Jet(t, tc.ID, EvaluateU64CheckedMulJet(tc.AU64, tc.BU64), tc)
+				assertU64Jet(t, tc.ID, EvaluateU64CheckedMulJet(*tc.AU64, *tc.BU64), tc)
 			case "u64_cmp":
-				assertOrdering(t, tc.ID, EvaluateU64CmpJet(tc.AU64, tc.BU64), Ordering(*tc.ExpectedOrdering), *tc.ExpectedCost)
+				assertOrdering(t, tc.ID, EvaluateU64CmpJet(*tc.AU64, *tc.BU64), Ordering(*tc.ExpectedOrdering), *tc.ExpectedCost)
 			case "u128_checked_add":
+				a128 := Uint128{Hi: *tc.AU128Hi, Lo: *tc.AU128Lo}
+				b128 := Uint128{Hi: *tc.BU128Hi, Lo: *tc.BU128Lo}
 				assertU128Jet(t, tc.ID, EvaluateU128CheckedAddJet(a128, b128), tc)
 			case "u128_checked_sub":
+				a128 := Uint128{Hi: *tc.AU128Hi, Lo: *tc.AU128Lo}
+				b128 := Uint128{Hi: *tc.BU128Hi, Lo: *tc.BU128Lo}
 				assertU128Jet(t, tc.ID, EvaluateU128CheckedSubJet(a128, b128), tc)
 			case "u128_cmp":
+				a128 := Uint128{Hi: *tc.AU128Hi, Lo: *tc.AU128Lo}
+				b128 := Uint128{Hi: *tc.BU128Hi, Lo: *tc.BU128Lo}
 				assertOrdering(t, tc.ID, EvaluateU128CmpJet(a128, b128), Ordering(*tc.ExpectedOrdering), *tc.ExpectedCost)
 			case "bytes_eq":
-				got := EvaluateBytesEqJet(hx(tc.BytesAHex), hx(tc.BytesBHex))
+				got := EvaluateBytesEqJet(hx(*tc.BytesAHex), hx(*tc.BytesBHex))
 				if got.Value != *tc.ExpectedBool || got.Cost != *tc.ExpectedCost {
 					t.Fatalf("%s = %+v, want value=%v cost=%d", tc.ID, got, *tc.ExpectedBool, *tc.ExpectedCost)
 				}
 			case "bytes_cmp":
-				assertOrdering(t, tc.ID, EvaluateBytesCmpJet(hx(tc.BytesAHex), hx(tc.BytesBHex)), Ordering(*tc.ExpectedOrdering), *tc.ExpectedCost)
+				assertOrdering(t, tc.ID, EvaluateBytesCmpJet(hx(*tc.BytesAHex), hx(*tc.BytesBHex)), Ordering(*tc.ExpectedOrdering), *tc.ExpectedCost)
 			case "bytes_slice":
-				got := EvaluateBytesSliceJet(hx(tc.SourceHex), tc.Start, tc.Length)
+				got := EvaluateBytesSliceJet(hx(*tc.SourceHex), *tc.Start, *tc.Length)
 				if got.Accepted != *tc.ExpectedAccepted || !bytes.Equal(got.Bytes, hx(*tc.ExpectedBytesHex)) || got.Cost != *tc.ExpectedCost {
 					t.Fatalf("%s = %+v, want accepted=%v bytes=%s cost=%d", tc.ID, got, *tc.ExpectedAccepted, *tc.ExpectedBytesHex, *tc.ExpectedCost)
 				}
@@ -195,32 +199,52 @@ func TestSharedDataJetsCorpusRequiresOutcomeFields(t *testing.T) {
 	}{
 		{
 			name: "missing u64 accepted",
-			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-ACCEPTED","jet":"u64_checked_add","expected_u64":0,"expected_cost":1}]}`,
+			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-ACCEPTED","jet":"u64_checked_add","a_u64":0,"b_u64":0,"expected_u64":0,"expected_cost":1}]}`,
 			want: "missing expected_accepted",
 		},
 		{
+			name: "missing u64 input",
+			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-A-U64","jet":"u64_checked_add","b_u64":3,"expected_accepted":true,"expected_u64":3,"expected_cost":1}]}`,
+			want: "missing a_u64",
+		},
+		{
 			name: "missing u64 value",
-			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-U64","jet":"u64_checked_add","expected_accepted":false,"expected_cost":1}]}`,
+			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-U64","jet":"u64_checked_add","a_u64":0,"b_u64":0,"expected_accepted":false,"expected_cost":1}]}`,
 			want: "missing expected_u64",
 		},
 		{
 			name: "missing ordering",
-			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-ORDERING","jet":"bytes_cmp","expected_cost":2}]}`,
+			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-ORDERING","jet":"bytes_cmp","bytes_a_hex":"","bytes_b_hex":"","expected_cost":2}]}`,
 			want: "missing expected_ordering",
 		},
 		{
 			name: "missing bool",
-			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-BOOL","jet":"bytes_eq","expected_cost":1}]}`,
+			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-BOOL","jet":"bytes_eq","bytes_a_hex":"","bytes_b_hex":"","expected_cost":1}]}`,
 			want: "missing expected_bool",
 		},
 		{
+			name: "missing bytes input",
+			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-BYTES-A","jet":"bytes_eq","bytes_b_hex":"","expected_bool":true,"expected_cost":1}]}`,
+			want: "missing bytes_a_hex",
+		},
+		{
 			name: "missing bytes",
-			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-BYTES","jet":"bytes_slice","expected_accepted":false,"expected_cost":2}]}`,
+			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-BYTES","jet":"bytes_slice","source_hex":"","start":0,"length":0,"expected_accepted":false,"expected_cost":2}]}`,
 			want: "missing expected_bytes_hex",
 		},
 		{
+			name: "missing u128 input",
+			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-A-U128-HI","jet":"u128_checked_sub","a_u128_lo":0,"b_u128_hi":0,"b_u128_lo":1,"expected_accepted":false,"expected_u128_hi":0,"expected_u128_lo":0,"expected_cost":1}]}`,
+			want: "missing a_u128_hi",
+		},
+		{
+			name: "missing slice input",
+			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-START","jet":"bytes_slice","source_hex":"616263","length":0,"expected_accepted":true,"expected_bytes_hex":"","expected_cost":1}]}`,
+			want: "missing start",
+		},
+		{
 			name: "missing cost",
-			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-COST","jet":"u64_cmp","expected_ordering":0}]}`,
+			raw:  `{"contract_version":1,"fixture_kind":"simplicity_data_jets_corpus_v1","description":"x","cases":[{"id":"VEC-SDJ-MISSING-COST","jet":"u64_cmp","a_u64":0,"b_u64":0,"expected_ordering":0}]}`,
 			want: "missing expected_cost",
 		},
 	} {
@@ -248,17 +272,40 @@ func (tc sharedDataJetCase) validateOutcomeFields() error {
 	}
 	switch tc.Jet {
 	case "u64_checked_add", "u64_checked_sub", "u64_checked_mul":
+		if err := tc.requireU64Inputs(); err != nil {
+			return err
+		}
 		if tc.ExpectedAccepted == nil {
 			return tc.missingField("expected_accepted")
 		}
 		if tc.ExpectedU64 == nil {
 			return tc.missingField("expected_u64")
 		}
-	case "u64_cmp", "u128_cmp", "bytes_cmp":
+	case "u64_cmp":
+		if err := tc.requireU64Inputs(); err != nil {
+			return err
+		}
+		if tc.ExpectedOrdering == nil {
+			return tc.missingField("expected_ordering")
+		}
+	case "u128_cmp":
+		if err := tc.requireU128Inputs(); err != nil {
+			return err
+		}
+		if tc.ExpectedOrdering == nil {
+			return tc.missingField("expected_ordering")
+		}
+	case "bytes_cmp":
+		if err := tc.requireBytesPairInputs(); err != nil {
+			return err
+		}
 		if tc.ExpectedOrdering == nil {
 			return tc.missingField("expected_ordering")
 		}
 	case "u128_checked_add", "u128_checked_sub":
+		if err := tc.requireU128Inputs(); err != nil {
+			return err
+		}
 		if tc.ExpectedAccepted == nil {
 			return tc.missingField("expected_accepted")
 		}
@@ -269,10 +316,16 @@ func (tc sharedDataJetCase) validateOutcomeFields() error {
 			return tc.missingField("expected_u128_lo")
 		}
 	case "bytes_eq":
+		if err := tc.requireBytesPairInputs(); err != nil {
+			return err
+		}
 		if tc.ExpectedBool == nil {
 			return tc.missingField("expected_bool")
 		}
 	case "bytes_slice":
+		if err := tc.requireSliceInputs(); err != nil {
+			return err
+		}
 		if tc.ExpectedAccepted == nil {
 			return tc.missingField("expected_accepted")
 		}
@@ -281,6 +334,55 @@ func (tc sharedDataJetCase) validateOutcomeFields() error {
 		}
 	default:
 		return fmt.Errorf("%s: unknown data jet %q", tc.ID, tc.Jet)
+	}
+	return nil
+}
+
+func (tc sharedDataJetCase) requireU64Inputs() error {
+	if tc.AU64 == nil {
+		return tc.missingField("a_u64")
+	}
+	if tc.BU64 == nil {
+		return tc.missingField("b_u64")
+	}
+	return nil
+}
+
+func (tc sharedDataJetCase) requireU128Inputs() error {
+	if tc.AU128Hi == nil {
+		return tc.missingField("a_u128_hi")
+	}
+	if tc.AU128Lo == nil {
+		return tc.missingField("a_u128_lo")
+	}
+	if tc.BU128Hi == nil {
+		return tc.missingField("b_u128_hi")
+	}
+	if tc.BU128Lo == nil {
+		return tc.missingField("b_u128_lo")
+	}
+	return nil
+}
+
+func (tc sharedDataJetCase) requireBytesPairInputs() error {
+	if tc.BytesAHex == nil {
+		return tc.missingField("bytes_a_hex")
+	}
+	if tc.BytesBHex == nil {
+		return tc.missingField("bytes_b_hex")
+	}
+	return nil
+}
+
+func (tc sharedDataJetCase) requireSliceInputs() error {
+	if tc.SourceHex == nil {
+		return tc.missingField("source_hex")
+	}
+	if tc.Start == nil {
+		return tc.missingField("start")
+	}
+	if tc.Length == nil {
+		return tc.missingField("length")
 	}
 	return nil
 }
