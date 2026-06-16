@@ -128,8 +128,8 @@ PROTOCOL_ARTIFACT_META: dict[str, tuple[str, str]] = {
         "Go/Rust Simplicity crypto jet output, error-class, verifier-call, and cost parity tests",
     ),
     "simplicity_data_jets_corpus_v1.json": (
-        "Canonical Simplicity data jets parity corpus",
-        "Go/Rust Simplicity arithmetic and bytes jet result, error, and cost parity tests",
+        "Canonical Simplicity data jets Go corpus",
+        "Go Simplicity arithmetic and bytes jet result, error, and cost tests",
     ),
 }
 

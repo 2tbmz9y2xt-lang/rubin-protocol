@@ -209,7 +209,7 @@ ARTIFACTS = (
     (ENCODING_OUT, "simplicity_program_encoding_cmr_v1", "Generator-owned shared corpus for RUB-484 Go/Rust Simplicity encoding and CMR parity tests.", CASES),
     (EXEC_OUT, "simplicity_exec_corpus_v1", "Generator-owned shared corpus for RUB-488 Go/Rust Simplicity execution parity tests.", EXEC_CASES),
     (CRYPTO_JETS_OUT, "simplicity_crypto_jets_corpus_v1", "Generator-owned shared corpus for RUB-552 Go/Rust Simplicity crypto jet output, error, verifier-call, and cost parity tests.", CRYPTO_JET_CASES),
-    (DATA_JETS_OUT, "simplicity_data_jets_corpus_v1", "Generator-owned shared corpus for RUB-555 Go/Rust Simplicity arithmetic and bytes data jet result, error, and cost parity tests.", DATA_JET_CASES),
+    (DATA_JETS_OUT, "simplicity_data_jets_corpus_v1", "Generator-owned shared corpus for RUB-555 Go Simplicity arithmetic and bytes data jet result, error, and cost tests.", DATA_JET_CASES),
 )
 
 
