@@ -561,7 +561,7 @@ func TestRubinConsensusCLI_RunFromStdin_CoversErrorPaths(t *testing.T) {
 		{name: "simplicity_exec_vector_oversized_program", req: Request{Op: "simplicity_exec_vector", ProgramHex: strings.Repeat("00", simplicity.MaxProgramBytes+1)}, wantErr: "bad program_hex"},
 		{name: "simplicity_exec_vector_oversized_witness", req: Request{Op: "simplicity_exec_vector", ProgramHex: "24", WitnessHex: strings.Repeat("00", simplicity.MaxProgramBytes+1)}, wantErr: "bad witness_hex"},
 		{name: "simplicity_exec_vector_bad_covenant_cmr", req: Request{Op: "simplicity_exec_vector", ProgramHex: "24", CovenantCMRHex: "00"}, wantErr: "bad covenant_cmr_hex"},
-		{name: "simplicity_exec_vector_missing_jet_result", req: Request{Op: "simplicity_exec_vector", ProgramHex: "60"}, wantErr: "bad jet_result"},
+		{name: "simplicity_exec_vector_missing_jet_cost", req: Request{Op: "simplicity_exec_vector", ProgramHex: "60"}, wantErr: "bad jet_cost"},
 		{name: "simplicity_exec_vector_decode_error", req: Request{Op: "simplicity_exec_vector", ProgramHex: "25"}, wantErr: "TX_ERR_SIMPLICITY_DECODE"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

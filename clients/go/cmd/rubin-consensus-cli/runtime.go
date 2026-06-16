@@ -807,7 +807,7 @@ func runSimplicityExecVector(req Request) Response {
 	opts := simplicity.EvalOptions{}
 	if program.Jet != nil {
 		if req.JetCost == nil {
-			return Response{Ok: false, Err: "bad jet_result"}
+			return Response{Ok: false, Err: "bad jet_cost"}
 		}
 		jetAccepted := false
 		if req.JetAccepted != nil {
