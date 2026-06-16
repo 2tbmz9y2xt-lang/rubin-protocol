@@ -211,10 +211,6 @@ func CostModelHash() [32]byte {
 	return sha3.Sum256(costModelBytes())
 }
 
-func jetsRegistryHash() [32]byte {
-	return sha3.Sum256(jetsRegistryBytes(jetRegistryRows))
-}
-
 func decodeProgram(program []byte) (Program, error) {
 	entry, ok := programs[string(program)]
 	if !ok {
@@ -345,25 +341,7 @@ func costModelBytes() []byte {
 	return out
 }
 
-func jetsRegistryBytes(rows []jetRegistryRow) []byte {
-	if err := validateJetRegistryRows(rows); err != nil {
-		panic(err)
-	}
-	out := []byte("RUBIN-SIMPLICITY-JETS-v1")
-	out = binary.LittleEndian.AppendUint32(out, JetsRegistrySemanticsVersion)
-	out = appendOneByteCompactSize(out, len(rows))
-	for _, row := range rows {
-		out = binary.LittleEndian.AppendUint16(out, row.jet.ID)
-		out = append(out, row.jet.SubOp)
-		out = appendOneByteCompactSize(out, len(row.jet.Name))
-		out = append(out, row.jet.Name...)
-		out = appendOneByteCompactSize(out, len(row.signature))
-		out = append(out, row.signature...)
-	}
-	return out
-}
-
-func validateJetRegistryRows(rows []jetRegistryRow) error {
+func validateJetLookupRows(rows []jetRegistryRow) error {
 	var prev jetKey
 	for i, row := range rows {
 		key := jetKey{id: row.jet.ID, subOp: row.jet.SubOp}
@@ -375,15 +353,8 @@ func validateJetRegistryRows(rows []jetRegistryRow) error {
 	return nil
 }
 
-func appendOneByteCompactSize(out []byte, n int) []byte {
-	if n >= 253 {
-		panic("jet registry CompactSize value exceeds one-byte encoding")
-	}
-	return append(out, byte(n))
-}
-
 func jetRowsFromRegistryRows(rows []jetRegistryRow) map[jetKey]Jet {
-	if err := validateJetRegistryRows(rows); err != nil {
+	if err := validateJetLookupRows(rows); err != nil {
 		panic(err)
 	}
 	out := make(map[jetKey]Jet, len(rows))

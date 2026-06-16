@@ -2,6 +2,8 @@ package simplicity
 
 import (
 	"bytes"
+	"crypto/sha3"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -360,8 +362,37 @@ func TestCostModelHashMatchesSpecArtifact(t *testing.T) {
 	}
 }
 
+func testJetsRegistryHash() [32]byte {
+	return sha3.Sum256(testJetsRegistryBytes(jetRegistryRows))
+}
+
+func testJetsRegistryBytes(rows []jetRegistryRow) []byte {
+	if err := validateJetLookupRows(rows); err != nil {
+		panic(err)
+	}
+	out := []byte("RUBIN-SIMPLICITY-JETS-v1")
+	out = binary.LittleEndian.AppendUint32(out, JetsRegistrySemanticsVersion)
+	out = appendTestOneByteCompactSize(out, len(rows))
+	for _, row := range rows {
+		out = binary.LittleEndian.AppendUint16(out, row.jet.ID)
+		out = append(out, row.jet.SubOp)
+		out = appendTestOneByteCompactSize(out, len(row.jet.Name))
+		out = append(out, row.jet.Name...)
+		out = appendTestOneByteCompactSize(out, len(row.signature))
+		out = append(out, row.signature...)
+	}
+	return out
+}
+
+func appendTestOneByteCompactSize(out []byte, n int) []byte {
+	if n >= 253 {
+		panic("jet registry CompactSize value exceeds one-byte encoding")
+	}
+	return append(out, byte(n))
+}
+
 func TestJetsRegistryHashMatchesSpecArtifact(t *testing.T) {
-	preimage := jetsRegistryBytes(jetRegistryRows)
+	preimage := testJetsRegistryBytes(jetRegistryRows)
 	wantPreimage := "" +
 		"525542494e2d53494d504c49434954592d4a4554532d7631020000000c010000" +
 		"08736861335f323536106279746573202d3e20627974657333320200000e6d6c" +
@@ -385,7 +416,7 @@ func TestJetsRegistryHashMatchesSpecArtifact(t *testing.T) {
 	if got := hex.EncodeToString(preimage); got != wantPreimage {
 		t.Fatalf("jets registry preimage=%s want %s", got, wantPreimage)
 	}
-	if got := jetsRegistryHash(); got != hex32("5aee78aae6b610a3eb3c05bd1487523e318418e0419de48e4fe9555b37f1c059") {
+	if got := testJetsRegistryHash(); got != hex32("5aee78aae6b610a3eb3c05bd1487523e318418e0419de48e4fe9555b37f1c059") {
 		t.Fatalf("jets_registry_hash=%x", got)
 	}
 }
@@ -427,13 +458,13 @@ func TestJetRegistryRuntimeMetadataMatchesSpecArtifact(t *testing.T) {
 func TestJetsRegistryRowsRejectDuplicatesAndOrderDrift(t *testing.T) {
 	duplicate := append([]jetRegistryRow(nil), jetRegistryRows...)
 	duplicate[1] = duplicate[0]
-	if err := validateJetRegistryRows(duplicate); err == nil {
+	if err := validateJetLookupRows(duplicate); err == nil {
 		t.Fatal("duplicate jet registry key was accepted")
 	}
 
 	orderDrift := append([]jetRegistryRow(nil), jetRegistryRows...)
 	orderDrift[0], orderDrift[1] = orderDrift[1], orderDrift[0]
-	if err := validateJetRegistryRows(orderDrift); err == nil {
+	if err := validateJetLookupRows(orderDrift); err == nil {
 		t.Fatal("out-of-order jet registry rows were accepted")
 	}
 }
