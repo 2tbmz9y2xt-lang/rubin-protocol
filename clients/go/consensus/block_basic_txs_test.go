@@ -106,7 +106,7 @@ func TestValidateBlockTxSemantics_NonceReplay(t *testing.T) {
 	}
 
 	pb := &ParsedBlock{Txs: []*Tx{coinbase, nonCB(42), nonCB(42)}}
-	err := validateBlockTxSemantics(pb, 1)
+	err := validateBlockTxSemantics(pb, 1, nil)
 	if err == nil {
 		t.Fatalf("expected TX_ERR_NONCE_REPLAY")
 	}
@@ -141,11 +141,20 @@ func TestValidateBlockTxSemantics_CovenantError(t *testing.T) {
 	}
 
 	pb := &ParsedBlock{Txs: []*Tx{coinbase, badCov}}
-	err := validateBlockTxSemantics(pb, 1)
+	err := validateBlockTxSemantics(pb, 1, nil)
 	if err == nil {
 		t.Fatalf("expected TX_ERR_COVENANT_TYPE_INVALID")
 	}
 	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+
+	var cmr [32]byte
+	cmr[0] = 0x44
+	simp := &Tx{TxKind: 0x00, TxNonce: 100, Inputs: []TxInput{{PrevTxid: [32]byte{0x03}, Sequence: 0xffffffff}}, Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_CORE_SIMPLICITY, CovenantData: encodeSimplicityCovenantData(cmr, nil)}}}
+	err = validateBlockTxSemantics(&ParsedBlock{Txs: []*Tx{coinbase, simp}}, 1, nil)
+	assertTxErrCode(t, err, TX_ERR_COVENANT_TYPE_INVALID)
+	if err := validateBlockTxSemantics(&ParsedBlock{Txs: []*Tx{coinbase, simp}}, 1, testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87}); err != nil {
+		t.Fatalf("active CORE_SIMPLICITY block tx semantics: %v", err)
 	}
 }

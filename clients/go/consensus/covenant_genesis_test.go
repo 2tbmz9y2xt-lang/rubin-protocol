@@ -39,6 +39,14 @@ func encodeMultisigCovenantData(threshold uint8, keys [][32]byte) []byte {
 	return b
 }
 
+func encodeSimplicityCovenantData(programCMR [32]byte, state []byte) []byte {
+	b := make([]byte, 0, 32+len(EncodeCompactSize(uint64(len(state))))+len(state))
+	b = append(b, programCMR[:]...)
+	b = AppendCompactSize(b, uint64(len(state)))
+	b = append(b, state...)
+	return b
+}
+
 func validVaultCovenantDataForP2PKOutput() []byte {
 	// Destination (whitelisted) output descriptor.
 	destData := make([]byte, MAX_P2PK_COVENANT_DATA)
@@ -170,6 +178,48 @@ func TestValidateTxCovenantsGenesis_Table(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateTxCovenantsGenesis_CoreSimplicityActive(t *testing.T) {
+	provider := testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87, simplicityActiveHeight: 10}
+	var cmr [32]byte
+	cmr[0] = 0xa5
+	valid := encodeSimplicityCovenantData(cmr, []byte{0x01, 0x02})
+	trailing := append(append([]byte(nil), valid...), 0xff)
+	nonMinimal := append(append([]byte(nil), cmr[:]...), 0xfd, 0xfc, 0x00)
+	nonMinimal = append(nonMinimal, make([]byte, 0xfc)...)
+	out := func(value uint64, data []byte) TxOutput {
+		return TxOutput{Value: value, CovenantType: COV_TYPE_CORE_SIMPLICITY, CovenantData: data}
+	}
+
+	check := func(height uint64, rotation RotationProvider, output TxOutput, want ErrorCode) {
+		t.Helper()
+		err := ValidateTxCovenantsGenesis(&Tx{Outputs: []TxOutput{output}}, height, rotation)
+		if want == "" {
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			return
+		}
+		assertTxErrCode(t, err, want)
+	}
+
+	check(10, provider, out(1, encodeSimplicityCovenantData(cmr, nil)), "")
+	check(10, provider, out(1, encodeSimplicityCovenantData(cmr, make([]byte, MAX_SIMPLICITY_STATE_BYTES))), "")
+	check(9, provider, out(1, valid), TX_ERR_COVENANT_TYPE_INVALID)
+	check(10, nil, out(1, valid), TX_ERR_COVENANT_TYPE_INVALID)
+	check(10, DescriptorRotationProvider{Descriptor: CryptoRotationDescriptor{
+		Name:         "crypto-only",
+		OldSuiteID:   SUITE_ID_ML_DSA_87,
+		NewSuiteID:   0x02,
+		CreateHeight: 10,
+		SpendHeight:  20,
+	}}, out(1, valid), TX_ERR_COVENANT_TYPE_INVALID)
+	check(10, provider, out(0, valid), TX_ERR_COVENANT_TYPE_INVALID)
+	check(10, provider, out(1, encodeSimplicityCovenantData(cmr, make([]byte, MAX_SIMPLICITY_STATE_BYTES+1))), TX_ERR_COVENANT_TYPE_INVALID)
+	check(10, provider, out(1, trailing), TX_ERR_COVENANT_TYPE_INVALID)
+	check(10, provider, out(1, valid[:len(valid)-1]), TX_ERR_COVENANT_TYPE_INVALID)
+	check(10, provider, out(1, nonMinimal), TX_ERR_COVENANT_TYPE_INVALID)
 }
 
 func TestValidateTxCovenantsGenesis_NilTx(t *testing.T) {
@@ -320,14 +370,20 @@ func TestValidateTxCovenantsGenesis_DACommitRules(t *testing.T) {
 // suite ID for creation. Used to test that ValidateTxCovenantsGenesis
 // respects the rotation provider rather than hardcoding ML-DSA-87.
 type testRotationProvider struct {
-	createSuiteID uint8
+	createSuiteID          uint8
+	simplicityActiveHeight uint64
 }
 
 func (p testRotationProvider) NativeCreateSuites(height uint64) *NativeSuiteSet {
 	return mustNewNativeSuiteSet(p.createSuiteID)
 }
+
 func (p testRotationProvider) NativeSpendSuites(height uint64) *NativeSuiteSet {
 	return mustNewNativeSuiteSet(p.createSuiteID)
+}
+
+func (p testRotationProvider) SimplicityActiveAtHeight(height uint64) (bool, error) {
+	return height >= p.simplicityActiveHeight, nil
 }
 
 func TestValidateTxCovenantsGenesis_RotationAware(t *testing.T) {

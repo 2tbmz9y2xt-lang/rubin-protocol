@@ -13,7 +13,7 @@ func TestCoverageResidual_BlockBasicHelpers(t *testing.T) {
 	if isCoinbaseTx(&Tx{TxKind: 0x00, TxNonce: 0, Inputs: []TxInput{{PrevVout: ^uint32(0)}}}) {
 		t.Fatalf("missing prev txid zero check should fail")
 	}
-	if _, err := validateParsedBlockBasicWithContextAtHeight(nil, nil, nil, 0, nil); err == nil {
+	if _, err := validateParsedBlockBasicWithContextAtHeight(nil, nil, nil, 0, nil, nil); err == nil {
 		t.Fatalf("expected nil parsed block rejection")
 	}
 	if err := validateCoinbaseValueBound(nil, 1, big.NewInt(0), 0); err == nil {

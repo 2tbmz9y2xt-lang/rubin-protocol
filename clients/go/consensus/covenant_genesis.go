@@ -11,9 +11,10 @@ func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64, rotation RotationPro
 	if rotation == nil {
 		rotation = DefaultRotationProvider{}
 	}
+	simplicityDeployment := simplicityDeploymentFromRotation(rotation)
 
 	for _, out := range tx.Outputs {
-		if err := validateTxOutputCovenantGenesis(tx.TxKind, out, blockHeight, rotation); err != nil {
+		if err := validateTxOutputCovenantGenesis(tx.TxKind, out, blockHeight, rotation, simplicityDeployment); err != nil {
 			return err
 		}
 	}
@@ -21,7 +22,7 @@ func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64, rotation RotationPro
 	return nil
 }
 
-func validateTxOutputCovenantGenesis(txKind byte, out TxOutput, blockHeight uint64, rotation RotationProvider) error {
+func validateTxOutputCovenantGenesis(txKind byte, out TxOutput, blockHeight uint64, rotation RotationProvider, simplicityDeployment SimplicityDeploymentProvider) error {
 	switch out.CovenantType {
 	case COV_TYPE_P2PK:
 		return validateP2PKGenesisOutput(out, blockHeight, rotation)
@@ -31,6 +32,11 @@ func validateTxOutputCovenantGenesis(txKind byte, out TxOutput, blockHeight uint
 		return validateDACommitGenesisOutput(txKind, out)
 	case COV_TYPE_VAULT, COV_TYPE_MULTISIG, COV_TYPE_HTLC, COV_TYPE_CORE_EXT, COV_TYPE_CORE_STEALTH:
 		return validateParsedValueGenesisOutput(out)
+	case COV_TYPE_CORE_SIMPLICITY:
+		if err := validateCoreSimplicityDeploymentActive(blockHeight, simplicityDeployment); err != nil {
+			return err
+		}
+		return validateCoreSimplicityCovenantData(out.Value, out.CovenantData)
 	case COV_TYPE_RESERVED_FUTURE:
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "reserved covenant_type")
 	default:

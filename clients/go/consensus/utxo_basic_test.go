@@ -157,6 +157,22 @@ func TestApplyNonCoinbaseTxBasicUpdate_RejectsImmatureCoinbaseSpend(t *testing.T
 	}
 }
 
+func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicitySpendRejected(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0x61
+	txBytes := txWithOneInputOneOutputWithWitness(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData(), dummyWitnesses(SIMPLICITY_WITNESS_SLOTS))
+	tx, txid := mustParseTxForUtxo(t, txBytes)
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_SIMPLICITY,
+		},
+	}
+
+	_, _, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 1, 0, [32]byte{})
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in basic apply")
+}
+
 func TestApplyNonCoinbaseTxBasicUpdate_RejectsImmatureCoinbaseSpend_OverflowSafe(t *testing.T) {
 	// Regression: creation_height near MaxUint64 must not wrap around and
 	// falsely pass the maturity check. The overflow-safe form uses
@@ -765,6 +781,7 @@ func TestWitnessSlotsKnownTypes(t *testing.T) {
 	}{
 		{"P2PK", COV_TYPE_P2PK, nil, 1},
 		{"HTLC", COV_TYPE_HTLC, nil, 2},
+		{"CORE_SIMPLICITY", COV_TYPE_CORE_SIMPLICITY, nil, SIMPLICITY_WITNESS_SLOTS},
 		{"MULTISIG_default", COV_TYPE_MULTISIG, []byte{0x01}, 1},
 		{"MULTISIG_3", COV_TYPE_MULTISIG, []byte{0x01, 0x03}, 3},
 		{"VAULT_default", COV_TYPE_VAULT, make([]byte, 32), 1},

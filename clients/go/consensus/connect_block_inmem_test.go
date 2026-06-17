@@ -193,7 +193,7 @@ func TestParseAndValidateBlockBasicWithContextAtHeight_ReturnsParsedBlock(t *tes
 	}
 	block := buildBlockBytes(t, prev, root, target, 5, [][]byte{coinbase})
 
-	pb, summary, err := parseAndValidateBlockBasicWithContextAtHeight(block, &prev, &target, height, nil)
+	pb, summary, err := parseAndValidateBlockBasicWithContextAtHeight(block, &prev, &target, height, nil, nil)
 	if err != nil {
 		t.Fatalf("parseAndValidateBlockBasicWithContextAtHeight: %v", err)
 	}

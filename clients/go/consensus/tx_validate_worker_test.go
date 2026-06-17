@@ -200,6 +200,41 @@ func TestValidateTxLocal_WitnessCountMismatch(t *testing.T) {
 	}
 }
 
+func TestValidateTxLocal_CoreSimplicitySpendRejected(t *testing.T) {
+	var prevTxid [32]byte
+	prevTxid[0] = 0x66
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0}},
+		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Witness: dummyWitnesses(SIMPLICITY_WITNESS_SLOTS),
+	}
+	sighashCache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("NewSighashV1PrehashCache: %v", err)
+	}
+	tvc := TxValidationContext{
+		TxIndex: 1,
+		Tx:      tx,
+		ResolvedInputs: []UtxoEntry{{
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_SIMPLICITY,
+		}},
+		WitnessStart: 0,
+		WitnessEnd:   SIMPLICITY_WITNESS_SLOTS,
+		SighashCache: sighashCache,
+		Fee:          10,
+	}
+
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
+	if result.Valid {
+		t.Fatalf("expected invalid CORE_SIMPLICITY spend")
+	}
+	assertTxErrCode(t, result.Err, TX_ERR_COVENANT_TYPE_INVALID)
+}
+
 func TestValidateTxLocal_WithSigCache(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())

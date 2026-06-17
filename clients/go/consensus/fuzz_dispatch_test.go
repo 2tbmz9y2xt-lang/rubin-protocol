@@ -295,8 +295,8 @@ func FuzzBlockTxSemanticsNonce(f *testing.F) {
 			Txs: []*Tx{coinbase, tx, tx},
 		}
 
-		result1 := validateBlockTxSemantics(pb, blockHeight)
-		result2 := validateBlockTxSemantics(pb, blockHeight)
+		result1 := validateBlockTxSemantics(pb, blockHeight, nil)
+		result2 := validateBlockTxSemantics(pb, blockHeight, nil)
 
 		// Determinism.
 		if (result1 == nil) != (result2 == nil) {

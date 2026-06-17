@@ -140,12 +140,24 @@ func ValidateBlockBasicWithContextAtHeight(
 	blockHeight uint64,
 	prevTimestamps []uint64,
 ) (*BlockBasicSummary, error) {
+	return ValidateBlockBasicWithContextAtHeightAndRotation(blockBytes, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps, nil)
+}
+
+func ValidateBlockBasicWithContextAtHeightAndRotation(
+	blockBytes []byte,
+	expectedPrevHash *[32]byte,
+	expectedTarget *[32]byte,
+	blockHeight uint64,
+	prevTimestamps []uint64,
+	rotation RotationProvider,
+) (*BlockBasicSummary, error) {
 	_, summary, err := parseAndValidateBlockBasicWithContextAtHeight(
 		blockBytes,
 		expectedPrevHash,
 		expectedTarget,
 		blockHeight,
 		prevTimestamps,
+		rotation,
 	)
 	return summary, err
 }
@@ -156,12 +168,13 @@ func parseAndValidateBlockBasicWithContextAtHeight(
 	expectedTarget *[32]byte,
 	blockHeight uint64,
 	prevTimestamps []uint64,
+	rotation RotationProvider,
 ) (*ParsedBlock, *BlockBasicSummary, error) {
 	pb, err := ParseBlockBytes(blockBytes)
 	if err != nil {
 		return nil, nil, err
 	}
-	summary, err := validateParsedBlockBasicWithContextAtHeight(pb, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps)
+	summary, err := validateParsedBlockBasicWithContextAtHeight(pb, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps, rotation)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -174,8 +187,9 @@ func validateParsedBlockBasicWithContextAtHeight(
 	expectedTarget *[32]byte,
 	blockHeight uint64,
 	prevTimestamps []uint64,
+	rotation RotationProvider,
 ) (*BlockBasicSummary, error) {
-	blockHash, stats, err := validateParsedBlockChecks(pb, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps)
+	blockHash, stats, err := validateParsedBlockChecks(pb, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps, rotation)
 	if err != nil {
 		return nil, err
 	}
@@ -196,6 +210,7 @@ func validateParsedBlockChecks(
 	expectedTarget *[32]byte,
 	blockHeight uint64,
 	prevTimestamps []uint64,
+	rotation RotationProvider,
 ) ([32]byte, *blockTxStats, error) {
 	if pb == nil {
 		return [32]byte{}, nil, txerr(BLOCK_ERR_PARSE, "nil parsed block")
@@ -203,7 +218,7 @@ func validateParsedBlockChecks(
 	if err := validateBlockHeaderChecks(pb, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps); err != nil {
 		return [32]byte{}, nil, err
 	}
-	stats, err := validateBlockBodyChecks(pb, blockHeight)
+	stats, err := validateBlockBodyChecks(pb, blockHeight, rotation)
 	if err != nil {
 		return [32]byte{}, nil, err
 	}
@@ -224,7 +239,7 @@ func validateBlockHeaderChecks(pb *ParsedBlock, expectedPrevHash *[32]byte, expe
 	return validateTimestampRules(pb.Header.Timestamp, blockHeight, prevTimestamps)
 }
 
-func validateBlockBodyChecks(pb *ParsedBlock, blockHeight uint64) (*blockTxStats, error) {
+func validateBlockBodyChecks(pb *ParsedBlock, blockHeight uint64, rotation RotationProvider) (*blockTxStats, error) {
 	stats, err := accumulateBlockResourceStats(pb)
 	if err != nil {
 		return nil, err
@@ -235,7 +250,7 @@ func validateBlockBodyChecks(pb *ParsedBlock, blockHeight uint64) (*blockTxStats
 	if err := validateDASetIntegrity(pb.Txs); err != nil {
 		return nil, err
 	}
-	if err := validateBlockTxSemantics(pb, blockHeight); err != nil {
+	if err := validateBlockTxSemantics(pb, blockHeight, rotation); err != nil {
 		return nil, err
 	}
 	return stats, nil
@@ -257,12 +272,17 @@ func ValidateBlockBasicWithContextAndFeesAtHeight(
 	alreadyGenerated uint64,
 	sumFees uint64,
 ) (*BlockBasicSummary, error) {
+	return ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(blockBytes, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps, alreadyGenerated, sumFees, nil)
+}
+
+func ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(blockBytes []byte, expectedPrevHash *[32]byte, expectedTarget *[32]byte, blockHeight uint64, prevTimestamps []uint64, alreadyGenerated uint64, sumFees uint64, rotation RotationProvider) (*BlockBasicSummary, error) {
 	pb, s, err := parseAndValidateBlockBasicWithContextAtHeight(
 		blockBytes,
 		expectedPrevHash,
 		expectedTarget,
 		blockHeight,
 		prevTimestamps,
+		rotation,
 	)
 	if err != nil {
 		return nil, err

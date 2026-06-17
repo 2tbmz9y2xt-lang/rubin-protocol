@@ -100,13 +100,17 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
 	if state.AlreadyGenerated.Sign() < 0 {
 		return nil, txerr(BLOCK_ERR_PARSE, "already_generated must be unsigned")
 	}
+	rot, reg := normalizeCoreExtSuiteContext(rotation, registry)
 
 	// Stateless checks first (wire, merkle root, PoW/target, covenant creation, etc).
-	if _, err := ValidateBlockBasicWithContextAtHeight(blockBytes, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps); err != nil {
-		return nil, err
-	}
-
-	pb, err := ParseBlockBytes(blockBytes)
+	pb, _, err := parseAndValidateBlockBasicWithContextAtHeight(
+		blockBytes,
+		expectedPrevHash,
+		expectedTarget,
+		blockHeight,
+		prevTimestamps,
+		rot,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +135,6 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
 	}
 
 	// Create a single sig check queue for the entire block (rotation-aware so Flush uses verifySigWithRegistry).
-	rot, reg := normalizeCoreExtSuiteContext(rotation, registry)
 	sigQueue := NewSigCheckQueue(workers).WithRegistry(reg)
 
 	// Apply all non-coinbase transactions with deferred sig verification.
@@ -290,7 +293,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 		return nil, 0, txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
 	}
 
-	if err := ValidateTxCovenantsGenesis(tx, height, nil); err != nil {
+	if err := ValidateTxCovenantsGenesis(tx, height, rotation); err != nil {
 		return nil, 0, err
 	}
 	sighashCache, err := NewSighashV1PrehashCache(tx)
