@@ -272,13 +272,17 @@ func ValidateBlockBasicWithContextAndFeesAtHeight(
 	alreadyGenerated uint64,
 	sumFees uint64,
 ) (*BlockBasicSummary, error) {
+	return ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(blockBytes, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps, alreadyGenerated, sumFees, nil)
+}
+
+func ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(blockBytes []byte, expectedPrevHash *[32]byte, expectedTarget *[32]byte, blockHeight uint64, prevTimestamps []uint64, alreadyGenerated uint64, sumFees uint64, rotation RotationProvider) (*BlockBasicSummary, error) {
 	pb, s, err := parseAndValidateBlockBasicWithContextAtHeight(
 		blockBytes,
 		expectedPrevHash,
 		expectedTarget,
 		blockHeight,
 		prevTimestamps,
-		nil,
+		rotation,
 	)
 	if err != nil {
 		return nil, err

@@ -267,6 +267,24 @@ func TestValidateBlockBasic_SubsidyWithFeesOK(t *testing.T) {
 	}
 }
 
+func TestValidateBlockBasicWithFees_CoreSimplicityUsesRotation(t *testing.T) {
+	height, cmr := uint64(10), [32]byte{}
+	cmr[0] = 0x44
+	simp := txWithOneInputOneOutput(hashWithPrefix(0x66), 0, 1, COV_TYPE_CORE_SIMPLICITY, encodeSimplicityCovenantData(cmr, nil))
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, BlockSubsidy(height, 0), simp)
+	root, err := MerkleRootTxids([][32]byte{testTxID(t, coinbase), testTxID(t, simp)})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+	prev, target := hashWithPrefix(0x9c), filledHash(0xff)
+	block := buildBlockBytes(t, prev, root, target, 58, [][]byte{coinbase, simp})
+	_, err = ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, 0, 0)
+	assertTxErrCode(t, err, TX_ERR_COVENANT_TYPE_INVALID)
+	if _, err := ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(block, &prev, &target, height, nil, 0, 0, testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87, simplicityActiveHeight: height}); err != nil {
+		t.Fatalf("ValidateBlockBasicWithContextAndFeesAtHeightAndRotation: %v", err)
+	}
+}
+
 func TestValidateBlockBasic_SubsidyExceeded_CoinbaseSumUsesU128(t *testing.T) {
 	height := uint64(1)
 	alreadyGenerated := uint64(0)
