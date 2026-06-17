@@ -719,6 +719,13 @@ func TestValidateConfig_RejectsBadSuiteRegistry(t *testing.T) {
 			AlgName:    stringPtr("ML-DSA-87"),
 		},
 		{
+			SuiteID:    consensus.SUITE_ID_SIMPLICITY_ENVELOPE,
+			PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+			SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+			VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+			AlgName:    stringPtr("ML-DSA-87"),
+		},
+		{
 			SuiteID:    0x42,
 			PubkeyLen:  64,
 			SigLen:     96,

@@ -203,7 +203,8 @@ func TestSanitizeRotationValidationErr_UsesSharedStems(t *testing.T) {
 
 func TestRubinConsensusCLI_RotationDescriptorCheck_AcceptsLegacyOpenSSLAlgAlias(t *testing.T) {
 	var req Request
-	payload := fmt.Sprintf(`{
+	payload := fmt.Sprintf(
+		`{
 		"op":"rotation_descriptor_check",
 		"network":"devnet",
 		"suite_registry":[
@@ -230,7 +231,8 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_AcceptsLegacyOpenSSLAlgAlias(
 
 func TestRubinConsensusCLI_RotationDescriptorCheck_AcceptsDualAlgNameAndOpenSSLAlgKeys(t *testing.T) {
 	var req Request
-	payload := fmt.Sprintf(`{
+	payload := fmt.Sprintf(
+		`{
 		"op":"rotation_descriptor_check",
 		"network":"devnet",
 		"suite_registry":[
@@ -257,7 +259,8 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_AcceptsDualAlgNameAndOpenSSLA
 
 func TestRubinConsensusCLI_RotationDescriptorCheck_AcceptsCaseInsensitiveAlgName(t *testing.T) {
 	var req Request
-	payload := fmt.Sprintf(`{
+	payload := fmt.Sprintf(
+		`{
 		"op":"rotation_descriptor_check",
 		"network":"devnet",
 		"suite_registry":[
@@ -281,7 +284,8 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_AcceptsCaseInsensitiveAlgName
 
 func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsEmptyAlgNameEvenWithLegacyAlias(t *testing.T) {
 	var req Request
-	payload := fmt.Sprintf(`{
+	payload := fmt.Sprintf(
+		`{
 		"op":"rotation_descriptor_check",
 		"network":"devnet",
 		"suite_registry":[
@@ -305,7 +309,8 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsEmptyAlgNameEvenWithLe
 
 func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsMissingSuiteRegistryAlgName(t *testing.T) {
 	var req Request
-	payload := fmt.Sprintf(`{
+	payload := fmt.Sprintf(
+		`{
 		"op":"rotation_descriptor_check",
 		"network":"devnet",
 		"suite_registry":[
@@ -329,7 +334,8 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsMissingSuiteRegistryAl
 
 func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsMissingSuiteRegistryPubkeyLen(t *testing.T) {
 	var req Request
-	payload := fmt.Sprintf(`{
+	payload := fmt.Sprintf(
+		`{
 		"op":"rotation_descriptor_check",
 		"network":"devnet",
 		"suite_registry":[
@@ -351,7 +357,8 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsMissingSuiteRegistryPu
 
 func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsMissingSuiteRegistrySigLen(t *testing.T) {
 	var req Request
-	payload := fmt.Sprintf(`{
+	payload := fmt.Sprintf(
+		`{
 		"op":"rotation_descriptor_check",
 		"network":"devnet",
 		"suite_registry":[
@@ -373,7 +380,8 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsMissingSuiteRegistrySi
 
 func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsNegativeSuiteRegistryPubkeyLen(t *testing.T) {
 	var req Request
-	payload := fmt.Sprintf(`{
+	payload := fmt.Sprintf(
+		`{
 		"op":"rotation_descriptor_check",
 		"network":"devnet",
 		"suite_registry":[
@@ -395,7 +403,8 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsNegativeSuiteRegistryP
 
 func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsNegativeSuiteRegistrySigLen(t *testing.T) {
 	var req Request
-	payload := fmt.Sprintf(`{
+	payload := fmt.Sprintf(
+		`{
 		"op":"rotation_descriptor_check",
 		"network":"devnet",
 		"suite_registry":[
@@ -505,6 +514,25 @@ func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsZeroSuiteRegistryVerif
 		SuiteRegistry: []SuiteParamsJSON{
 			{SuiteID: 1, PubkeyLen: consensus.ML_DSA_87_PUBKEY_BYTES, SigLen: consensus.ML_DSA_87_SIG_BYTES, VerifyCost: 0, AlgName: "ML-DSA-87"},
 			{SuiteID: 2, PubkeyLen: consensus.ML_DSA_87_PUBKEY_BYTES, SigLen: consensus.ML_DSA_87_SIG_BYTES, VerifyCost: consensus.VERIFY_COST_ML_DSA_87, AlgName: "ML-DSA-87"},
+		},
+		RotationDescriptor: &RotationDescriptorJSON{
+			Name:         "r1",
+			OldSuiteID:   1,
+			NewSuiteID:   2,
+			CreateHeight: 10,
+			SpendHeight:  20,
+			SunsetHeight: 100,
+		},
+	}, "bad suite_registry")
+}
+
+func TestRubinConsensusCLI_RotationDescriptorCheck_RejectsStructuralCarrierSuiteRegistry(t *testing.T) {
+	mustRunErr(t, Request{
+		Op:      "rotation_descriptor_check",
+		Network: "devnet",
+		SuiteRegistry: []SuiteParamsJSON{
+			{SuiteID: 1, PubkeyLen: consensus.ML_DSA_87_PUBKEY_BYTES, SigLen: consensus.ML_DSA_87_SIG_BYTES, VerifyCost: consensus.VERIFY_COST_ML_DSA_87, AlgName: "ML-DSA-87"},
+			{SuiteID: consensus.SUITE_ID_SIMPLICITY_ENVELOPE, PubkeyLen: consensus.ML_DSA_87_PUBKEY_BYTES, SigLen: consensus.ML_DSA_87_SIG_BYTES, VerifyCost: consensus.VERIFY_COST_ML_DSA_87, AlgName: "ML-DSA-87"},
 		},
 		RotationDescriptor: &RotationDescriptorJSON{
 			Name:         "r1",

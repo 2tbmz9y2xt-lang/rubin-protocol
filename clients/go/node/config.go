@@ -88,10 +88,12 @@ func (item SuiteParamsJSON) MarshalJSON() ([]byte, error) {
 	})
 }
 
-const maxSuiteRegistryParamLen = consensus.MAX_WITNESS_BYTES_PER_TX
-const maxExplicitSuiteRegistryEntries = 16
-const productionLocalRotationDescriptorErr = "rotation_descriptor: production networks forbid local rotation_descriptor"
-const supportedNetworkNamesCSV = "devnet, testnet, mainnet"
+const (
+	maxSuiteRegistryParamLen             = consensus.MAX_WITNESS_BYTES_PER_TX
+	maxExplicitSuiteRegistryEntries      = 16
+	productionLocalRotationDescriptorErr = "rotation_descriptor: production networks forbid local rotation_descriptor"
+	supportedNetworkNamesCSV             = "devnet, testnet, mainnet"
+)
 
 // CanonicalNetworkName returns the canonical network token for normalized
 // devnet/testnet/mainnet inputs. Callers that care about distinguishing an
@@ -148,7 +150,9 @@ func defaultSuiteRegistryParams() consensus.SuiteParams {
 }
 
 func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, error) {
-	if item.SuiteID == consensus.SUITE_ID_SENTINEL || item.VerifyCost == 0 {
+	if item.SuiteID == consensus.SUITE_ID_SENTINEL ||
+		consensus.IsStructuralWitnessCarrierSuiteID(item.SuiteID) ||
+		item.VerifyCost == 0 {
 		return consensus.SuiteParams{}, errors.New("bad suite_registry")
 	}
 	pubkeyLen, err := validateSuiteRegistryParamLen(item.PubkeyLen)

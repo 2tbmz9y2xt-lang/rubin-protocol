@@ -185,6 +185,127 @@ func TestParseTx_WitnessItem_Canonicalization(t *testing.T) {
 	}
 }
 
+func TestParseTx_SimplicityEnvelopeWitnessCanonicalization(t *testing.T) {
+	program := []byte{0xa0, 0xa1, 0xa2}
+	witness := []byte{0xb0, 0xb1}
+	validSig := simplicityEnvelopeSignature(program, witness, SIGHASH_ALL)
+
+	t.Run("valid_envelope", func(t *testing.T) {
+		tx, _, _, _, err := ParseTx(txWithWitnessSection(witnessSection(SUITE_ID_SIMPLICITY_ENVELOPE, nil, validSig)))
+		if err != nil {
+			t.Fatalf("ParseTx: %v", err)
+		}
+		if len(tx.Witness) != 1 {
+			t.Fatalf("witness len=%d, want 1", len(tx.Witness))
+		}
+		item := tx.Witness[0]
+		if item.SuiteID != SUITE_ID_SIMPLICITY_ENVELOPE {
+			t.Fatalf("suite_id=0x%02x, want 0xf0", item.SuiteID)
+		}
+		if len(item.Pubkey) != 0 {
+			t.Fatalf("pubkey len=%d, want 0", len(item.Pubkey))
+		}
+		if !bytes.Equal(item.Signature, validSig) {
+			t.Fatalf("signature=%x, want %x", item.Signature, validSig)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		pub  []byte
+		sig  []byte
+	}{
+		{
+			name: "nonzero_pubkey",
+			pub:  []byte{0x01},
+			sig:  validSig,
+		},
+		{
+			name: "missing_envelope",
+			sig:  []byte{SIGHASH_ALL},
+		},
+		{
+			name: "wrong_version",
+			sig:  simplicityEnvelopeSignatureWithVersion(0x02, program, witness, SIGHASH_ALL),
+		},
+		{
+			name: "nonminimal_program_len",
+			sig: []byte{
+				0x01,
+				0xfd, byte(len(program)), 0x00,
+				program[0], program[1], program[2],
+				byte(len(witness)),
+				witness[0], witness[1],
+				SIGHASH_ALL,
+			},
+		},
+		{
+			name: "trailing_envelope_byte",
+			sig:  append(append([]byte(nil), validSig[:len(validSig)-1]...), 0xcc, SIGHASH_ALL),
+		},
+		{
+			name: "truncated_witness",
+			sig: []byte{
+				0x01,
+				byte(len(program)),
+				program[0], program[1], program[2],
+				0x03,
+				witness[0], witness[1],
+				SIGHASH_ALL,
+			},
+		},
+		{
+			name: "program_too_large",
+			sig:  simplicityEnvelopeSignature(make([]byte, MAX_SIMPLICITY_PROGRAM_BYTES+1), nil, SIGHASH_ALL),
+		},
+		{
+			name: "envelope_too_large",
+			sig:  simplicityEnvelopeSignature(make([]byte, MAX_SIMPLICITY_PROGRAM_BYTES), make([]byte, MAX_SIMPLICITY_ENVELOPE_BYTES), SIGHASH_ALL),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			expectParseErrCode(t, txWithWitnessSection(witnessSection(SUITE_ID_SIMPLICITY_ENVELOPE, tc.pub, tc.sig)), TX_ERR_PARSE)
+		})
+	}
+
+	t.Run("structural_unassigned_range_keeps_unknown_suite_tolerance", func(t *testing.T) {
+		for _, suiteID := range []byte{0xf1, 0xfe} {
+			tx, _, _, _, err := ParseTx(txWithWitnessSection(witnessSection(suiteID, []byte{0x01}, []byte{0x02, SIGHASH_ALL})))
+			if err != nil {
+				t.Fatalf("ParseTx suite_id=0x%02x: %v", suiteID, err)
+			}
+			if len(tx.Witness) != 1 || tx.Witness[0].SuiteID != suiteID {
+				t.Fatalf("witness=%v, want suite_id=0x%02x", tx.Witness, suiteID)
+			}
+		}
+	})
+}
+
+func simplicityEnvelopeSignature(program []byte, witness []byte, sighash byte) []byte {
+	return simplicityEnvelopeSignatureWithVersion(0x01, program, witness, sighash)
+}
+
+func simplicityEnvelopeSignatureWithVersion(version byte, program []byte, witness []byte, sighash byte) []byte {
+	sig := []byte{version}
+	sig = AppendCompactSize(sig, uint64(len(program)))
+	sig = append(sig, program...)
+	sig = AppendCompactSize(sig, uint64(len(witness)))
+	sig = append(sig, witness...)
+	return append(sig, sighash)
+}
+
+func witnessSection(suiteID byte, pubkey []byte, signature []byte) []byte {
+	var w bytes.Buffer
+	w.WriteByte(0x01) // witness_count
+	w.WriteByte(suiteID)
+	w.Write(AppendCompactSize(nil, uint64(len(pubkey))))
+	w.Write(pubkey)
+	w.Write(AppendCompactSize(nil, uint64(len(signature))))
+	w.Write(signature)
+	w.WriteByte(0x00) // da_payload_len
+	return w.Bytes()
+}
+
 func TestParseTx_WitnessBytesOverflow(t *testing.T) {
 	var w bytes.Buffer
 	w.WriteByte(0x03) // witness_count = 3

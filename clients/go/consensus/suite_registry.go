@@ -29,9 +29,18 @@ type SuiteRegistry struct {
 func NewSuiteRegistryFromParams(params []SuiteParams) *SuiteRegistry {
 	suites := make(map[uint8]SuiteParams, len(params))
 	for _, p := range params {
+		if IsStructuralWitnessCarrierSuiteID(p.SuiteID) {
+			panic(fmt.Sprintf("structural witness carrier suite 0x%02x cannot be registered as native crypto suite", p.SuiteID))
+		}
 		suites[p.SuiteID] = p
 	}
 	return &SuiteRegistry{suites: suites}
+}
+
+// IsStructuralWitnessCarrierSuiteID reports whether suiteID is reserved for a
+// structural witness carrier rather than native cryptographic verification.
+func IsStructuralWitnessCarrierSuiteID(suiteID uint8) bool {
+	return suiteID >= SUITE_ID_SIMPLICITY_ENVELOPE && suiteID <= 0xfe
 }
 
 // DefaultSuiteRegistry returns the registry containing all currently defined
