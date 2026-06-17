@@ -21,27 +21,36 @@ func validateCoreSimplicityCovenantData(value uint64, covenantData []byte) error
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY value must be > 0")
 	}
 
+	_, _, err := parseCoreSimplicityCovenantData(covenantData)
+	return err
+}
+
+func parseCoreSimplicityCovenantData(covenantData []byte) ([32]byte, []byte, error) {
+	var programCMR [32]byte
 	off := 0
-	if _, err := readBytes(covenantData, &off, 32); err != nil {
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY program_cmr parse failure")
+	cmrBytes, err := readBytes(covenantData, &off, 32)
+	if err != nil {
+		return programCMR, nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY program_cmr parse failure")
 	}
+	copy(programCMR[:], cmrBytes)
 
 	stateLenU64, stateLenVarintBytes, err := readCompactSize(covenantData, &off)
 	if err != nil {
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY state_len parse failure")
+		return programCMR, nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY state_len parse failure")
 	}
 	if stateLenU64 > MAX_SIMPLICITY_STATE_BYTES {
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY state_len too large")
+		return programCMR, nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY state_len too large")
 	}
 	stateLen := int(stateLenU64)
 
-	if _, err := readBytes(covenantData, &off, stateLen); err != nil {
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY state parse failure")
+	state, err := readBytes(covenantData, &off, stateLen)
+	if err != nil {
+		return programCMR, nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY state parse failure")
 	}
 	if len(covenantData) != 32+stateLenVarintBytes+stateLen {
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY covenant_data length mismatch")
+		return programCMR, nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY covenant_data length mismatch")
 	}
-	return nil
+	return programCMR, state, nil
 }
 
 func validateCoreSimplicityDeploymentActive(height uint64, provider SimplicityDeploymentProvider) error {
