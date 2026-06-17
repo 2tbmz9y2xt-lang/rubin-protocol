@@ -70,6 +70,10 @@ func ValidateTxLocal(
 		result.Err = txerr(TX_ERR_PARSE, "nil tx in TxValidationContext")
 		return result
 	}
+	if _, err := BuildSimplicityTxContext(tx, tvc.ResolvedInputs, blockHeight, chainID); err != nil {
+		result.Err = err
+		return result
+	}
 	env := newTxValidationWorkerEnv(tvc, chainID, blockHeight, blockMTP, coreExtProfiles, sigCache)
 
 	txContext, err := buildWorkerTxContext(tx, tvc.ResolvedInputs, env)

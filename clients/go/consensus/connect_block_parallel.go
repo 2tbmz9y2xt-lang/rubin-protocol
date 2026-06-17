@@ -301,15 +301,6 @@ func applyNonCoinbaseTxBasicWorkQ(
 		return nil, 0, err
 	}
 
-	// Clone UTXO set so per-tx mutations (spend/create) don't alias the caller's map.
-	// This matches the sequential path (applyNonCoinbaseTxBasicWork). A future
-	// optimization may use an overlay/undo journal instead, but correctness requires
-	// matching the canonical sequential behavior exactly.
-	work := make(map[Outpoint]UtxoEntry, len(utxoSet))
-	for k, v := range utxoSet {
-		work[k] = v
-	}
-
 	var sumIn u128
 	var sumInVault u128
 	var vaultWhitelist [][32]byte
@@ -344,7 +335,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 			return nil, 0, txerr(TX_ERR_PARSE, "duplicate input outpoint")
 		}
 		seenInputs[op] = struct{}{}
-		entry, ok := work[op]
+		entry, ok := utxoSet[op]
 		if !ok {
 			return nil, 0, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
 		}
@@ -365,8 +356,10 @@ func applyNonCoinbaseTxBasicWorkQ(
 			}
 		}
 
-		if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
-			return nil, 0, err
+		if entry.CovenantType != COV_TYPE_CORE_SIMPLICITY {
+			if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
+				return nil, 0, err
+			}
 		}
 
 		slots, err := WitnessSlots(entry.CovenantType, entry.CovenantData)
@@ -389,6 +382,13 @@ func applyNonCoinbaseTxBasicWorkQ(
 		return nil, 0, txerr(TX_ERR_PARSE, "witness_count mismatch")
 	}
 
+	if _, err := BuildSimplicityTxContext(tx, resolvedInputs, height, chainID); err != nil {
+		return nil, 0, err
+	}
+	if err := rejectCoreSimplicitySpendIfPresent(resolvedInputs); err != nil {
+		return nil, 0, err
+	}
+
 	txContextExtIDs, err := collectTxContextExtIDs(resolvedInputs, height, coreExtProfiles)
 	if err != nil {
 		return nil, 0, err
@@ -403,6 +403,12 @@ func applyNonCoinbaseTxBasicWorkQ(
 		if err != nil {
 			return nil, 0, err
 		}
+	}
+
+	// Clone UTXO set so per-tx mutations (spend/create) don't alias the caller's map.
+	work := make(map[Outpoint]UtxoEntry, len(utxoSet))
+	for k, v := range utxoSet {
+		work[k] = v
 	}
 
 	for inputIndex, entry := range resolvedInputs {

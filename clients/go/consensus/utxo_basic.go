@@ -190,6 +190,9 @@ func (ctx *nonCoinbaseApplyContext) validateResolvedInputEntry(entry UtxoEntry) 
 	if err := ctx.captureVaultResolvedInput(entry); err != nil {
 		return err
 	}
+	if entry.CovenantType == COV_TYPE_CORE_SIMPLICITY {
+		return nil
+	}
 	return checkSpendCovenant(entry.CovenantType, entry.CovenantData)
 }
 
@@ -221,6 +224,12 @@ func (ctx *nonCoinbaseApplyContext) captureVaultResolvedInput(entry UtxoEntry) e
 
 func (ctx *nonCoinbaseApplyContext) buildTxContext() error {
 	resolvedEntries := ctx.resolvedEntries()
+	if _, err := BuildSimplicityTxContext(ctx.tx, resolvedEntries, ctx.height, ctx.chainID); err != nil {
+		return err
+	}
+	if err := rejectCoreSimplicitySpendIfPresent(resolvedEntries); err != nil {
+		return err
+	}
 	txContextExtIDs, err := collectTxContextExtIDs(resolvedEntries, ctx.height, ctx.coreExtProfiles)
 	if err != nil {
 		return err
@@ -233,7 +242,10 @@ func (ctx *nonCoinbaseApplyContext) buildTxContext() error {
 		return err
 	}
 	ctx.txContext, err = BuildTxContext(ctx.tx, resolvedEntries, outputExtIDCache, ctx.height, ctx.coreExtProfiles)
-	return err
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (ctx *nonCoinbaseApplyContext) resolvedEntries() []UtxoEntry {
