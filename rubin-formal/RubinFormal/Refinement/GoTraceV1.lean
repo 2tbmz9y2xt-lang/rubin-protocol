@@ -60,7 +60,14 @@ structure DaIntegrityOut where
   ok : Bool
   err : String
 
-def goTraceFixturesDigestSHA3_256 : String := "6c3aba2597c63dc8765bf9fb40b826fe32f16aa410122f16d5c28c98a533f4f2"
+structure SimplicityExecOut where
+  id : String
+  ok : Bool
+  err : String
+  accepted : Option Bool
+  finalCounter : Option Nat
+
+def goTraceFixturesDigestSHA3_256 : String := "770bfdfcc5eb25185637cf3a149529e73dcc1311bce5e46f758aa18f6ae1086c"
 
 def parseOuts : List ParseOut := [
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },
@@ -117,6 +124,36 @@ def validationOrderOuts : List ValidationOrderOut := [
 
 def daIntegrityOuts : List DaIntegrityOut := [
   { id := "CV-DA-01", ok := true, err := "" }
+]
+
+def simplicityExecOuts : List SimplicityExecOut := [
+  { id := "CV-SE-EXEC-001", ok := true, err := "", accepted := some true, finalCounter := some 400000 },
+  { id := "CV-SE-EXEC-002", ok := false, err := "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED", accepted := some true, finalCounter := some 400000 },
+  { id := "CV-SE-EXEC-003", ok := false, err := "TX_ERR_SIMPLICITY_REJECTED", accepted := some false, finalCounter := some 3 },
+  { id := "CV-SE-MEM-001", ok := true, err := "", accepted := some true, finalCounter := some 1 },
+  { id := "CV-SE-MEM-002", ok := false, err := "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED", accepted := some false, finalCounter := some 0 },
+  { id := "CV-SE-MEM-003", ok := false, err := "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED", accepted := some false, finalCounter := some 0 },
+  { id := "CV-SE-PE-001", ok := true, err := "", accepted := some true, finalCounter := some 1 },
+  { id := "CV-SE-PE-002", ok := true, err := "", accepted := some true, finalCounter := some 4 },
+  { id := "CV-SE-PE-003", ok := true, err := "", accepted := some true, finalCounter := some 2 },
+  { id := "CV-SE-PE-004A", ok := true, err := "", accepted := some true, finalCounter := some 4 },
+  { id := "CV-SE-PE-004B", ok := true, err := "", accepted := some true, finalCounter := some 4 },
+  { id := "CV-SE-PE-005", ok := true, err := "", accepted := some true, finalCounter := some 64 },
+  { id := "CV-SE-PE-006", ok := true, err := "", accepted := some true, finalCounter := some 50000 },
+  { id := "CV-SE-PE-007", ok := false, err := "TX_ERR_SIMPLICITY_DECODE", accepted := none, finalCounter := none },
+  { id := "CV-SE-PE-008", ok := false, err := "TX_ERR_SIMPLICITY_DECODE", accepted := none, finalCounter := none },
+  { id := "CV-SE-PE-009", ok := false, err := "TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE", accepted := none, finalCounter := none },
+  { id := "CV-SE-PE-010", ok := false, err := "TX_ERR_SIMPLICITY_CMR_MISMATCH", accepted := none, finalCounter := none },
+  { id := "CV-SE-PE-011", ok := false, err := "TX_ERR_SIMPLICITY_DECODE", accepted := none, finalCounter := none },
+  { id := "CV-SE-PE-012", ok := false, err := "TX_ERR_SIMPLICITY_DECODE", accepted := none, finalCounter := none },
+  { id := "CV-SE-PE-013", ok := false, err := "TX_ERR_SIMPLICITY_JET_DISALLOWED", accepted := none, finalCounter := none },
+  { id := "CV-SE-PE-014", ok := false, err := "TX_ERR_SIMPLICITY_DECODE", accepted := none, finalCounter := none },
+  { id := "CV-SE-PE-015", ok := false, err := "TX_ERR_SIMPLICITY_DECODE", accepted := none, finalCounter := none },
+  { id := "CV-SE-PE-016", ok := false, err := "TX_ERR_SIMPLICITY_DECODE", accepted := none, finalCounter := none },
+  { id := "CV-SE-PE-017", ok := false, err := "TX_ERR_SIMPLICITY_DECODE", accepted := none, finalCounter := none },
+  { id := "CV-SE-PE-018", ok := false, err := "TX_ERR_SIMPLICITY_DECODE", accepted := none, finalCounter := none },
+  { id := "CV-SE-REPEAT-001", ok := true, err := "", accepted := some true, finalCounter := some 1 },
+  { id := "CV-SE-REPEAT-002", ok := true, err := "", accepted := some true, finalCounter := some 1 }
 ]
 
 end RubinFormal.Refinement

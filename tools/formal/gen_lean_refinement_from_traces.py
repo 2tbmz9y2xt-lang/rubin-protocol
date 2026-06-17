@@ -75,6 +75,14 @@ def _lean_opt_nat(x: Any) -> str:
     _fail(f"expected nat, got: {type(x)}")
 
 
+def _lean_opt_bool(x: Any) -> str:
+    if x is None:
+        return "none"
+    if not isinstance(x, bool):
+        _fail(f"expected bool, got: {type(x)}")
+    return "some true" if x else "some false"
+
+
 def _lean_opt_hex(x: Any) -> str:
     if x is None:
         return "none"
@@ -108,7 +116,55 @@ def _require_keys(obj: dict[str, Any], keys: list[str], ctx: str) -> None:
             _fail(f"missing key {k} in {ctx}")
 
 
-def _emit_go_trace_v1(header: Header, entries: list[dict[str, Any]]) -> str:
+def _load_fixture_vector_ids(path: Path, gate: str) -> list[str]:
+    if not path.exists():
+        _fail(f"fixture file not found: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("gate") != gate:
+        _fail(f"fixture {path} has unexpected gate: {data.get('gate')}")
+    vectors = data.get("vectors")
+    if not isinstance(vectors, list):
+        _fail(f"fixture {path} missing vectors array")
+    ids: list[str] = []
+    for idx, vector in enumerate(vectors):
+        if not isinstance(vector, dict):
+            _fail(f"fixture {path} vector {idx} must be object")
+        vector_id = vector.get("id")
+        if not isinstance(vector_id, str) or not vector_id:
+            _fail(f"fixture {path} vector {idx} missing id")
+        ids.append(vector_id)
+    return ids
+
+
+def _require_exact_trace_ids(
+    rows: list[tuple[str, str]],
+    expected_ids: list[str],
+    gate: str,
+) -> None:
+    seen: dict[str, int] = {}
+    for vector_id, _row in rows:
+        seen[vector_id] = seen.get(vector_id, 0) + 1
+    duplicate = sorted(vector_id for vector_id, count in seen.items() if count != 1)
+    expected = set(expected_ids)
+    actual = set(seen)
+    missing = sorted(expected - actual)
+    extra = sorted(actual - expected)
+    problems = []
+    if missing:
+        problems.append("missing " + ", ".join(missing))
+    if duplicate:
+        problems.append("duplicate " + ", ".join(duplicate))
+    if extra:
+        problems.append("extra " + ", ".join(extra))
+    if problems:
+        _fail(f"{gate} trace ID coverage mismatch: {'; '.join(problems)}")
+
+
+def _emit_go_trace_v1(
+    header: Header,
+    entries: list[dict[str, Any]],
+    expected_simplicity_exec_ids: list[str] | None = None,
+) -> str:
     parse_rows: list[tuple[str, str]] = []
     sighash_rows: list[tuple[str, str]] = []
     pow_rows: list[tuple[str, str]] = []
@@ -117,13 +173,14 @@ def _emit_go_trace_v1(header: Header, entries: list[dict[str, Any]]) -> str:
     weight_rows: list[tuple[str, str]] = []
     validation_order_rows: list[tuple[str, str]] = []
     da_integrity_rows: list[tuple[str, str]] = []
+    simplicity_exec_rows: list[tuple[str, str]] = []
 
     for e in entries:
         gate = str(e.get("gate", ""))
         vector_id = str(e.get("vector_id", ""))
         op = str(e.get("op", ""))
         ok = bool(e.get("ok", False))
-        if not ok:
+        if gate != "CV-SIMPLICITY-EXEC" and not ok:
             continue  # skip negative vectors — Lean refinement only covers accept path
         err = str(e.get("err", ""))
         outputs = e.get("outputs")
@@ -257,9 +314,31 @@ def _emit_go_trace_v1(header: Header, entries: list[dict[str, Any]]) -> str:
                 + _lean_str(err)
                 + " }"
             ))
+        elif gate == "CV-SIMPLICITY-EXEC":
+            simplicity_exec_rows.append((
+                vector_id,
+                "{ id := "
+                + _lean_str(vector_id)
+                + ", ok := "
+                + ("true" if ok else "false")
+                + ", err := "
+                + _lean_str(err)
+                + ", accepted := "
+                + _lean_opt_bool(outputs.get("accepted"))
+                + ", finalCounter := "
+                + _lean_opt_nat(outputs.get("final_counter"))
+                + " }"
+            ))
         else:
             # non-critical gate for refinement: ignore
             continue
+
+    if expected_simplicity_exec_ids is not None:
+        _require_exact_trace_ids(
+            simplicity_exec_rows,
+            expected_simplicity_exec_ids,
+            "CV-SIMPLICITY-EXEC",
+        )
 
     def _sorted_rows(rows: list[tuple[str, str]]) -> list[str]:
         # Deterministic output (CI-friendly): sort by vector id.
@@ -332,6 +411,13 @@ def _emit_go_trace_v1(header: Header, entries: list[dict[str, Any]]) -> str:
     out.append("  ok : Bool")
     out.append("  err : String")
     out.append("")
+    out.append("structure SimplicityExecOut where")
+    out.append("  id : String")
+    out.append("  ok : Bool")
+    out.append("  err : String")
+    out.append("  accepted : Option Bool")
+    out.append("  finalCounter : Option Nat")
+    out.append("")
     # Do not embed current repo commit into generated Lean module.
     # Otherwise `git diff --exit-code` in CI would fail on every commit
     # even when trace semantics are unchanged.
@@ -345,6 +431,7 @@ def _emit_go_trace_v1(header: Header, entries: list[dict[str, Any]]) -> str:
     out.append(list_block("weightOuts", "WeightOut", weight_rows))
     out.append(list_block("validationOrderOuts", "ValidationOrderOut", validation_order_rows))
     out.append(list_block("daIntegrityOuts", "DaIntegrityOut", da_integrity_rows))
+    out.append(list_block("simplicityExecOuts", "SimplicityExecOut", simplicity_exec_rows))
     out.append("end RubinFormal.Refinement")
     out.append("")
     return "\n".join(out)
@@ -370,7 +457,14 @@ def main() -> int:
 
     header, entries = _load_jsonl(trace_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(_emit_go_trace_v1(header, entries), encoding="utf-8")
+    expected_simplicity_exec_ids = _load_fixture_vector_ids(
+        repo_root / "conformance/fixtures/CV-SIMPLICITY-EXEC.json",
+        "CV-SIMPLICITY-EXEC",
+    )
+    out_path.write_text(
+        _emit_go_trace_v1(header, entries, expected_simplicity_exec_ids),
+        encoding="utf-8",
+    )
     print(f"OK: wrote {out_path.relative_to(repo_root)} ({len(entries)} entries)")
     return 0
 

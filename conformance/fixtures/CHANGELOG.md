@@ -11,6 +11,9 @@ Policy:
 
 ---
 
+## 2026-06-17 — Simplicity executable conformance gate (RUB-493)
+Причина/инструменты/fixtures/non-goals: добавить generator-owned executable gate `CV-SIMPLICITY-EXEC.json`, который гонит Go/Rust `simplicity_exec_vector` через encoding, CMR, decode, jet-disallowed, budget, memory и repeated-exec families; регенерация `python3 tools/gen_simplicity_encoding_corpus.py`, `python3 tools/gen_conformance_matrix.py` и `python3 tools/formal/gen_lean_conformance_vectors.py`; изменены `CV-SIMPLICITY-EXEC.json`, `MATRIX.md` и Lean conformance companion; harness op shape, client library semantics, covenant/context/CORE_EXT vectors и consensus validation rules не затронуты.
+
 ## 2026-06-16 — Simplicity jets registry parity corpus (RUB-558)
 Причина/инструменты/fixtures/non-goals: добавить generator-owned shared artifact для Go/Rust Simplicity `jets_registry_hash` и disallowed-id rejection parity; регенерация `python3 tools/gen_simplicity_encoding_corpus.py` и `python3 tools/gen_conformance_matrix.py`; изменён `protocol/simplicity_jets_registry_corpus_v1.json`; production jet registry semantics, consensus dispatch wiring, `CV-*.json` и consensus validation rules не затронуты.
 
