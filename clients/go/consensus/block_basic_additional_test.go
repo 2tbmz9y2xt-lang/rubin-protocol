@@ -738,7 +738,7 @@ func TestMulU64_Zero(t *testing.T) {
 }
 
 func TestValidateParsedBlockBasicNil(t *testing.T) {
-	if _, err := validateParsedBlockBasicWithContextAtHeight(nil, nil, nil, 0, nil); err == nil {
+	if _, err := validateParsedBlockBasicWithContextAtHeight(nil, nil, nil, 0, nil, nil); err == nil {
 		t.Fatal("nil pb should error")
 	}
 }

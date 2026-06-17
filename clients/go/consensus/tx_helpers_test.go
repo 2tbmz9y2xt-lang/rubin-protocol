@@ -171,6 +171,58 @@ func TestCheckTransaction_ValidTx(t *testing.T) {
 	}
 }
 
+func TestCheckTransaction_CoreSimplicityCreationUsesDeploymentProvider(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	prevCovData := P2PKCovenantDataForPubkey(kp.PubkeyBytes())
+	var cmr [32]byte
+	cmr[0] = 0x41
+	simplicityData := encodeSimplicityCovenantData(cmr, []byte{0x01})
+
+	var prevTxid [32]byte
+	prevTxid[0] = 0x4a
+	op := Outpoint{Txid: prevTxid, Vout: 0}
+	utxoSet := map[Outpoint]UtxoEntry{
+		op: {
+			Value:        100,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: prevCovData,
+		},
+	}
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0}},
+		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_CORE_SIMPLICITY, CovenantData: simplicityData}},
+	}
+	var chainID [32]byte
+	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, chainID, kp)}
+	txBytes, err := MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx: %v", err)
+	}
+
+	_, err = CheckTransaction(txBytes, utxoSet, 10, 0, chainID)
+	assertTxErrCode(t, err, TX_ERR_COVENANT_TYPE_INVALID)
+
+	checked, err := CheckTransactionWithCoreExtProfilesAndSuiteContext(
+		txBytes,
+		utxoSet,
+		10,
+		0,
+		chainID,
+		nil,
+		testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CheckTransactionWithCoreExtProfilesAndSuiteContext: %v", err)
+	}
+	if checked.Fee != 10 {
+		t.Fatalf("fee=%d, want 10", checked.Fee)
+	}
+}
+
 func TestCheckTransactionWithCoreExtProfilesAndSuiteContext_DoesNotMutateCallerUtxoSet(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	covData := P2PKCovenantDataForPubkey(kp.PubkeyBytes())

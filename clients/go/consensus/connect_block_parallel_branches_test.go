@@ -1633,6 +1633,29 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CheckSpendCovenantError(t *testing.T) {
 	}
 }
 
+func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicitySpendRejected(t *testing.T) {
+	prevTxid := hashWithPrefix(0xEF)
+	utxoSet := map[Outpoint]UtxoEntry{
+		{Txid: prevTxid, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_SIMPLICITY,
+		},
+	}
+	txBytes := txWithOneInputOneOutputWithWitness(
+		prevTxid,
+		0,
+		90,
+		COV_TYPE_P2PK,
+		validP2PKCovenantData(),
+		dummyWitnesses(SIMPLICITY_WITNESS_SLOTS),
+	)
+	tx, txid := mustParseTxForUtxo(t, txBytes)
+	q := NewSigCheckQueue(1)
+
+	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxoSet, 1, 0, [32]byte{}, nil, q, nil, nil)
+	assertTxErrCode(t, err, TX_ERR_COVENANT_TYPE_INVALID)
+}
+
 // TestApplyNonCoinbaseTxBasicWorkQ_P2PKSpendQError exercises line 326:
 // P2PK input with an invalid suite ID triggers validateP2PKSpendQ error.
 func TestApplyNonCoinbaseTxBasicWorkQ_P2PKSpendQError(t *testing.T) {

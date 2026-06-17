@@ -103,6 +103,7 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
 	)
 }
 
+// #lizard forgive
 func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 	blockBytes []byte,
 	expectedPrevHash *[32]byte,
@@ -206,6 +207,7 @@ func parseInMemoryConnectBlock(input connectBlockBasicInMemorySuiteContext) (*Pa
 		input.ExpectedTarget,
 		input.BlockHeight,
 		input.PrevTimestamps,
+		input.Rotation,
 	)
 	if err != nil {
 		return nil, err

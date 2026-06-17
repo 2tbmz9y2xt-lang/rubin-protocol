@@ -193,6 +193,8 @@ func validateInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) err
 		return validateCoreExtInputSpendQ(check, env)
 	case COV_TYPE_CORE_STEALTH:
 		return validateCoreStealthInputSpendQ(check, env)
+	case COV_TYPE_CORE_SIMPLICITY:
+		return rejectCoreSimplicitySpend()
 	default:
 		// Other covenant types have no spend-time checks in the genesis set.
 		return nil

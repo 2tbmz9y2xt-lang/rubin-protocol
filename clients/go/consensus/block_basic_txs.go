@@ -31,7 +31,7 @@ func addBlockResourceStat(a uint64, b uint64, msg string) (uint64, error) {
 	return sum, nil
 }
 
-func validateBlockTxSemantics(pb *ParsedBlock, blockHeight uint64) error {
+func validateBlockTxSemantics(pb *ParsedBlock, blockHeight uint64, rotation RotationProvider) error {
 	if err := validateCoinbaseStructure(pb, blockHeight); err != nil {
 		return err
 	}
@@ -42,7 +42,7 @@ func validateBlockTxSemantics(pb *ParsedBlock, blockHeight uint64) error {
 				return err
 			}
 		}
-		if err := ValidateTxCovenantsGenesis(tx, blockHeight, nil); err != nil {
+		if err := ValidateTxCovenantsGenesis(tx, blockHeight, rotation); err != nil {
 			return err
 		}
 	}
