@@ -150,8 +150,8 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
                         validate_vector(
                             "CV-NATIVE-ROTATION-DESCRIPTOR",
                             vector,
-                            Path("/tmp/go-cli"),
-                            Path("/tmp/rust-cli"),
+                            Path("go-cli"),
+                            Path("rust-cli"),
                             {},
                         )
                     )
@@ -161,6 +161,159 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
                 for req in seen:
                     self.assertEqual(req["op"], expected_op)
                     self.assertEqual(req["network"], vector["network"])
+
+    def test_simplicity_exec_vector_forwards_fields(self):
+        vector = {
+            "id": "CV-SE-UNIT",
+            "op": "simplicity_exec_vector",
+            "program_hex": "60",
+            "witness_hex": "00",
+            "covenant_cmr_hex": "11" * 32,
+            "semantics_version": 1,
+            "jet_accepted": True,
+            "jet_cost": 7,
+            "expect_ok": True,
+            "expect_accepted": True,
+            "expect_final_counter": 7,
+        }
+        seen = []
+
+        def fake_call_tool(_tool_path, req):
+            seen.append(req.copy())
+            return {"ok": True, "accepted": True, "final_counter": 7}
+
+        with mock.patch(f"{validate_vector.__module__}.call_tool", side_effect=fake_call_tool):
+            problems, skipped = normalize_validation_result(
+                validate_vector(
+                    "CV-SIMPLICITY-EXEC",
+                    vector,
+                    Path("go-cli"),
+                    Path("rust-cli"),
+                    {},
+                )
+            )
+        self.assertEqual(problems, [])
+        self.assertFalse(skipped)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(
+            seen[0],
+            {
+                "op": "simplicity_exec_vector",
+                "program_hex": "60",
+                "witness_hex": "00",
+                "covenant_cmr_hex": "11" * 32,
+                "semantics_version": 1,
+                "jet_accepted": True,
+                "jet_cost": 7,
+            },
+        )
+
+    def test_simplicity_exec_vector_reports_final_counter_mismatch(self):
+        vector = {
+            "id": "CV-SE-COUNTER",
+            "op": "simplicity_exec_vector",
+            "program_hex": "60",
+            "jet_accepted": True,
+            "jet_cost": 400001,
+            "expect_ok": False,
+            "expect_err": "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED",
+            "expect_accepted": True,
+            "expect_final_counter": 400000,
+        }
+
+        def fake_call_tool(_tool_path, _req):
+            return {
+                "ok": False,
+                "err": "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED",
+                "accepted": True,
+                "final_counter": 2,
+            }
+
+        with mock.patch(f"{validate_vector.__module__}.call_tool", side_effect=fake_call_tool):
+            problems, skipped = normalize_validation_result(
+                validate_vector(
+                    "CV-SIMPLICITY-EXEC",
+                    vector,
+                    Path("go-cli"),
+                    Path("rust-cli"),
+                    {},
+                )
+            )
+        self.assertEqual(problems, ["CV-SIMPLICITY-EXEC/CV-SE-COUNTER: expect_final_counter mismatch"])
+        self.assertFalse(skipped)
+
+    def test_simplicity_exec_vector_requires_trace_outputs(self):
+        vector = {
+            "id": "CV-SE-MISSING",
+            "op": "simplicity_exec_vector",
+            "program_hex": "60",
+            "expect_ok": True,
+            "expect_accepted": True,
+            "expect_final_counter": 1,
+        }
+
+        def fake_call_tool(_tool_path, _req):
+            return {"ok": True}
+
+        with mock.patch(f"{validate_vector.__module__}.call_tool", side_effect=fake_call_tool):
+            problems, skipped = normalize_validation_result(
+                validate_vector(
+                    "CV-SIMPLICITY-EXEC",
+                    vector,
+                    Path("go-cli"),
+                    Path("rust-cli"),
+                    {},
+                )
+            )
+        self.assertEqual(
+            problems,
+            [
+                "CV-SIMPLICITY-EXEC/CV-SE-MISSING: missing accepted output go_has=False rust_has=False",
+                "CV-SIMPLICITY-EXEC/CV-SE-MISSING: missing final_counter output go_has=False rust_has=False",
+            ],
+        )
+        self.assertFalse(skipped)
+
+    def test_simplicity_exec_vector_rejects_unexpected_trace_outputs(self):
+        vector = {
+            "id": "CV-SE-UNEXPECTED",
+            "op": "simplicity_exec_vector",
+            "program_hex": "25",
+            "expect_ok": False,
+            "expect_err": "TX_ERR_SIMPLICITY_DECODE",
+        }
+
+        responses = [
+            {"ok": False, "err": "TX_ERR_SIMPLICITY_DECODE", "accepted": False},
+            {
+                "ok": False,
+                "err": "TX_ERR_SIMPLICITY_DECODE",
+                "accepted": False,
+                "final_counter": 0,
+            },
+        ]
+
+        def fake_call_tool(_tool_path, _req):
+            return responses.pop(0)
+
+        with mock.patch(f"{validate_vector.__module__}.call_tool", side_effect=fake_call_tool):
+            problems, skipped = normalize_validation_result(
+                validate_vector(
+                    "CV-SIMPLICITY-EXEC",
+                    vector,
+                    Path("go-cli"),
+                    Path("rust-cli"),
+                    {},
+                )
+            )
+        self.assertEqual(
+            problems,
+            [
+                "CV-SIMPLICITY-EXEC/CV-SE-UNEXPECTED: unexpected accepted output go_has=True rust_has=True",
+                "CV-SIMPLICITY-EXEC/CV-SE-UNEXPECTED: unexpected final_counter output go_has=False rust_has=True",
+            ],
+        )
+        self.assertFalse(skipped)
 
 
 if __name__ == "__main__":

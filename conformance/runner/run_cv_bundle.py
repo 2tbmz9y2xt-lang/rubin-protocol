@@ -1873,6 +1873,20 @@ def validate_vector(
         req["whitelist"] = [str(x) for x in v.get("whitelist", [])]
         if "validation_order" in v and isinstance(v["validation_order"], list):
             req["validation_order"] = [str(x) for x in v["validation_order"]]
+    elif op == "simplicity_exec_vector":
+        req["program_hex"] = str(v.get("program_hex", ""))
+        req["witness_hex"] = str(v.get("witness_hex", ""))
+        req["covenant_cmr_hex"] = str(v.get("covenant_cmr_hex", ""))
+        if "semantics_version" in v:
+            req["semantics_version"] = int(v["semantics_version"])
+        if "eval_steps" in v:
+            req["eval_steps"] = int(v["eval_steps"])
+        if isinstance(v.get("frame_bit_widths"), list):
+            req["frame_bit_widths"] = [int(x) for x in v["frame_bit_widths"]]
+        if "jet_accepted" in v:
+            req["jet_accepted"] = bool(v["jet_accepted"])
+        if "jet_cost" in v:
+            req["jet_cost"] = int(v["jet_cost"])
     elif op == "txctx_spend_vector":
         fixture = {
             "profiles": vectors_by_id.get("__fixture_profiles__", {}),
@@ -1940,6 +1954,43 @@ def validate_vector(
     if bool(go_resp.get("ok")) != bool(rust_resp.get("ok")):
         problems.append(f"{gate}/{vid}: go ok={go_resp.get('ok')} rust ok={rust_resp.get('ok')}")
         return problems
+
+    if op == "simplicity_exec_vector":
+        present_keys = set()
+        for key, expect_key in (
+            ("accepted", "expect_accepted"),
+            ("final_counter", "expect_final_counter"),
+        ):
+            go_has_key = key in go_resp
+            rust_has_key = key in rust_resp
+            if expect_key not in v:
+                if go_has_key or rust_has_key:
+                    problems.append(
+                        f"{gate}/{vid}: unexpected {key} output go_has={go_has_key} rust_has={rust_has_key}"
+                    )
+                continue
+            if not go_has_key or not rust_has_key:
+                problems.append(
+                    f"{gate}/{vid}: missing {key} output go_has={go_has_key} rust_has={rust_has_key}"
+                )
+                continue
+            present_keys.add(key)
+            if go_resp[key] != rust_resp[key]:
+                problems.append(
+                    f"{gate}/{vid}: {key} mismatch go={go_resp[key]} rust={rust_resp[key]}"
+                )
+        if (
+            "expect_accepted" in v
+            and "accepted" in present_keys
+            and go_resp["accepted"] != bool(v["expect_accepted"])
+        ):
+            problems.append(f"{gate}/{vid}: expect_accepted mismatch")
+        if (
+            "expect_final_counter" in v
+            and "final_counter" in present_keys
+            and go_resp["final_counter"] != int(v["expect_final_counter"])
+        ):
+            problems.append(f"{gate}/{vid}: expect_final_counter mismatch")
 
     expected_ok = bool(v.get("expect_ok", True))
     if expected_ok != bool(go_resp.get("ok")):

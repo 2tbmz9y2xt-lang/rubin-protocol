@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus/simplicity"
 )
 
 const maxTraceCoreExtHexFieldBytes = 4096
@@ -257,9 +258,33 @@ type daIntegrityVector struct {
 	ExpectOk       bool     `json:"expect_ok"`
 }
 
-var writeJSONFn = writeJSON
-var gitCommitMetaFn = mustGitCommitMeta
-var goVersionFn = mustGoVersion
+type simplicityExecFixture struct {
+	Gate    string                 `json:"gate"`
+	Vectors []simplicityExecVector `json:"vectors"`
+}
+
+type simplicityExecVector struct {
+	ProgramHex         string   `json:"program_hex,omitempty"`
+	WitnessHex         string   `json:"witness_hex,omitempty"`
+	CovenantCMRHex     string   `json:"covenant_cmr_hex,omitempty"`
+	ID                 string   `json:"id"`
+	Op                 string   `json:"op"`
+	ExpectErr          string   `json:"expect_err,omitempty"`
+	SemanticsVersion   *uint32  `json:"semantics_version,omitempty"`
+	EvalSteps          *uint64  `json:"eval_steps,omitempty"`
+	FrameBitWidths     []uint64 `json:"frame_bit_widths,omitempty"`
+	JetAccepted        *bool    `json:"jet_accepted,omitempty"`
+	JetCost            *uint64  `json:"jet_cost,omitempty"`
+	ExpectAccepted     *bool    `json:"expect_accepted,omitempty"`
+	ExpectFinalCounter *uint64  `json:"expect_final_counter,omitempty"`
+	ExpectOk           bool     `json:"expect_ok"`
+}
+
+var (
+	writeJSONFn     = writeJSON
+	gitCommitMetaFn = mustGitCommitMeta
+	goVersionFn     = mustGoVersion
+)
 
 const unknownGeneratedAtUTC = "1970-01-01T00:00:00Z"
 
@@ -360,6 +385,150 @@ func txErrString(err error) string {
 		return string(te.Code)
 	}
 	return err.Error()
+}
+
+func parseTraceSimplicityHex(name, value string, required bool, maxBytes int) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X")
+	if value == "" {
+		if required {
+			return nil, fmt.Errorf("bad %s", name)
+		}
+		return nil, nil
+	}
+	if maxBytes >= 0 && len(value) > maxBytes*2 {
+		return nil, fmt.Errorf("bad %s", name)
+	}
+	raw, err := hex.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("bad %s", name)
+	}
+	return raw, nil
+}
+
+func parseTraceSimplicityProgramHex(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X")
+	if value == "" {
+		return nil, fmt.Errorf("bad program_hex")
+	}
+	if len(value) > simplicity.MaxProgramBytes*2 {
+		return nil, &simplicity.Error{Code: simplicity.ErrProgramTooLarge}
+	}
+	raw, err := hex.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("bad program_hex")
+	}
+	return raw, nil
+}
+
+func parseOptionalTraceSimplicityHex32(value string, badErr string) (*[32]byte, error) {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X")
+	if value == "" {
+		return nil, nil
+	}
+	raw, err := hex.DecodeString(value)
+	if err != nil || len(raw) != 32 {
+		return nil, fmt.Errorf("%s", badErr)
+	}
+	var out [32]byte
+	copy(out[:], raw)
+	return &out, nil
+}
+
+func evaluateTraceSimplicitySynthetic(evalSteps uint64, frameBitWidths []uint64) (simplicity.EvalResult, error) {
+	if evalSteps == 0 {
+		return simplicity.EvalResult{}, &simplicity.Error{Code: simplicity.ErrDecode}
+	}
+	if err := checkTraceSimplicitySyntheticMemory(frameBitWidths); err != nil {
+		return simplicity.EvalResult{}, err
+	}
+	if simplicity.StepCost == 0 {
+		return simplicity.EvalResult{Accepted: true}, nil
+	}
+	maxSteps := simplicity.MaxExecCost / simplicity.StepCost
+	if evalSteps > maxSteps {
+		return simplicity.EvalResult{Accepted: true, Cost: simplicity.MaxExecCost}, &simplicity.Error{Code: simplicity.ErrBudgetExceeded}
+	}
+	return simplicity.EvalResult{Accepted: true, Cost: evalSteps * simplicity.StepCost}, nil
+}
+
+func checkTraceSimplicitySyntheticMemory(frameBitWidths []uint64) error {
+	var live uint64
+	for _, frameBits := range frameBitWidths {
+		if frameBits > ^uint64(0)-7 {
+			return &simplicity.Error{Code: simplicity.ErrBudgetExceeded}
+		}
+		frameBytes := (frameBits + 7) / 8
+		if frameBytes > simplicity.MaxFrameBytes || live > simplicity.MaxLiveMemoryBytes-frameBytes {
+			return &simplicity.Error{Code: simplicity.ErrBudgetExceeded}
+		}
+		live += frameBytes
+	}
+	return nil
+}
+
+func traceSimplicityOutputs(result simplicity.EvalResult) map[string]any {
+	return map[string]any{
+		"accepted":      result.Accepted,
+		"final_counter": result.Cost,
+	}
+}
+
+func evalTraceSimplicityExecVector(v simplicityExecVector) (map[string]any, error) {
+	if strings.TrimSpace(v.ProgramHex) == "" {
+		if v.EvalSteps == nil {
+			if len(v.FrameBitWidths) > 0 {
+				return map[string]any{}, fmt.Errorf("bad eval_steps")
+			}
+			return map[string]any{}, fmt.Errorf("bad program_hex")
+		}
+		result, err := evaluateTraceSimplicitySynthetic(*v.EvalSteps, v.FrameBitWidths)
+		return traceSimplicityOutputs(result), err
+	}
+
+	programBytes, err := parseTraceSimplicityProgramHex(v.ProgramHex)
+	if err != nil {
+		return map[string]any{}, err
+	}
+	witnessBytes, err := parseTraceSimplicityHex("witness_hex", v.WitnessHex, false, simplicity.MaxProgramBytes)
+	if err != nil {
+		return map[string]any{}, err
+	}
+	covenantCMR, err := parseOptionalTraceSimplicityHex32(v.CovenantCMRHex, "bad covenant_cmr_hex")
+	if err != nil {
+		return map[string]any{}, err
+	}
+
+	semanticsVersion := simplicity.SemanticsVersion
+	if v.SemanticsVersion != nil {
+		semanticsVersion = *v.SemanticsVersion
+	}
+	program, err := simplicity.Decode(programBytes, witnessBytes, simplicity.DecodeOptions{
+		SemanticsVersion:   semanticsVersion,
+		CovenantProgramCMR: covenantCMR,
+	})
+	if err != nil {
+		return map[string]any{}, err
+	}
+
+	opts := simplicity.EvalOptions{}
+	if program.Jet != nil {
+		if v.JetCost == nil {
+			return map[string]any{}, fmt.Errorf("bad jet_cost")
+		}
+		jetAccepted := false
+		if v.JetAccepted != nil {
+			jetAccepted = *v.JetAccepted
+		}
+		opts.JetEvaluator = func(simplicity.Jet) (simplicity.EvalResult, error) {
+			return simplicity.EvalResult{Accepted: jetAccepted, Cost: *v.JetCost}, nil
+		}
+	}
+
+	result, err := program.Evaluate(opts)
+	return traceSimplicityOutputs(result), err
 }
 
 func parseHex32(s string) ([32]byte, error) {
@@ -877,6 +1046,37 @@ func run(fixturesDir, outPath string) error {
 						"prev_timestamps":           v.PrevTimestamps,
 					},
 					map[string]any{},
+				); err != nil {
+					return err
+				}
+			}
+
+		case "CV-SIMPLICITY-EXEC":
+			var fx simplicityExecFixture
+			if err := json.Unmarshal(b, &fx); err != nil {
+				return fmt.Errorf("unmarshal %s: %w", filepath.Join(fixturesDir, name), err)
+			}
+			for _, v := range fx.Vectors {
+				outputs, runErr := evalTraceSimplicityExecVector(v)
+				programHex := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(v.ProgramHex), "0x"), "0X")
+				inputs := map[string]any{
+					"program_hex_len":      len(programHex) / 2,
+					"has_program_hex":      programHex != "",
+					"has_witness_hex":      strings.TrimSpace(v.WitnessHex) != "",
+					"has_covenant_cmr":     strings.TrimSpace(v.CovenantCMRHex) != "",
+					"has_eval_steps":       v.EvalSteps != nil,
+					"frame_bit_widths_len": len(v.FrameBitWidths),
+					"has_jet_cost":         v.JetCost != nil,
+					"has_jet_accepted":     v.JetAccepted != nil,
+				}
+				if err := writeTraceEntry(
+					&traceBuf,
+					fx.Gate,
+					v.ID,
+					v.Op,
+					runErr,
+					inputs,
+					outputs,
 				); err != nil {
 					return err
 				}

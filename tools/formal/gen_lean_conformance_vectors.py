@@ -40,6 +40,11 @@ def _lean_opt_str(value: str | None) -> str:
     v = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'some "{v}"'
 
+
+def _lean_str(value: str) -> str:
+    v = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{v}"'
+
 def _normalize_hex_str(hex_str: str) -> str:
     s = str(hex_str or "").strip()
     if s.startswith("0x") or s.startswith("0X"):
@@ -1478,6 +1483,182 @@ def _lean_opt_nat_list(values: list[int] | None) -> str:
     if values is None:
         return "none"
     return "some [" + ", ".join(str(v) for v in values) + "]"
+
+
+@dataclass(frozen=True)
+class SimplicityExecVector:
+    vid: str
+    op: str
+    program_hex: str | None
+    witness_hex: str | None
+    covenant_cmr_hex: str | None
+    semantics_version: int | None
+    eval_steps: int | None
+    frame_bit_widths: list[int]
+    jet_accepted: bool | None
+    jet_cost: int | None
+    expect_ok: bool
+    expect_err: str | None
+    expect_accepted: bool | None
+    expect_final_counter: int | None
+
+
+def _optional_nat(raw: dict[str, Any], key: str) -> int | None:
+    if key not in raw:
+        return None
+    value = raw[key]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{key} must be a non-negative integer when present")
+    return value
+
+
+def _optional_bool(raw: dict[str, Any], key: str) -> bool | None:
+    if key not in raw:
+        return None
+    value = raw[key]
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be a bool when present")
+    return value
+
+
+def _optional_hex(raw: dict[str, Any], key: str) -> str | None:
+    if key not in raw:
+        return None
+    value = raw[key]
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a hex string when present")
+    stripped = value.strip()
+    if stripped.startswith("0x") or stripped.startswith("0X"):
+        stripped = stripped[2:]
+    if stripped == "":
+        raise ValueError(f"{key} must be a non-empty hex string when present")
+    _hex_to_bytes(value)
+    return value
+
+
+def load_cv_simplicity_exec(path: Path) -> list[SimplicityExecVector]:
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    if doc.get("gate") != "CV-SIMPLICITY-EXEC":
+        raise ValueError(f"expected gate=CV-SIMPLICITY-EXEC, got {doc.get('gate')!r}")
+    vectors = doc.get("vectors")
+    if not isinstance(vectors, list):
+        raise ValueError("vectors must be a list")
+    allowed_keys = {
+        "covenant_cmr_hex",
+        "eval_steps",
+        "expect_accepted",
+        "expect_err",
+        "expect_final_counter",
+        "expect_ok",
+        "frame_bit_widths",
+        "id",
+        "jet_accepted",
+        "jet_cost",
+        "op",
+        "program_hex",
+        "semantics_version",
+        "witness_hex",
+    }
+
+    out: list[SimplicityExecVector] = []
+    for raw in vectors:
+        if not isinstance(raw, dict):
+            raise ValueError("vector entries must be objects")
+        unknown = sorted(set(raw) - allowed_keys)
+        if unknown:
+            raise ValueError(f"unknown CV-SIMPLICITY-EXEC field(s): {', '.join(unknown)}")
+        op = str(raw.get("op") or "")
+        if op != "simplicity_exec_vector":
+            raise ValueError(f"unexpected op in CV-SIMPLICITY-EXEC: {op!r}")
+        vid = str(raw.get("id") or "")
+        if not vid:
+            raise ValueError("vector id must be non-empty")
+        program_hex = _optional_hex(raw, "program_hex")
+        frame_bit_widths_raw = raw.get("frame_bit_widths", [])
+        if frame_bit_widths_raw is None:
+            frame_bit_widths_raw = []
+        if not isinstance(frame_bit_widths_raw, list):
+            raise ValueError(f"{vid}: frame_bit_widths must be a list when present")
+        frame_bit_widths: list[int] = []
+        for width in frame_bit_widths_raw:
+            if isinstance(width, bool) or not isinstance(width, int) or width < 0:
+                raise ValueError(f"{vid}: frame_bit_widths entries must be non-negative integers")
+            frame_bit_widths.append(width)
+
+        if not isinstance(raw.get("expect_ok"), bool):
+            raise ValueError(f"{vid}: expect_ok must be a bool")
+        expect_ok = raw["expect_ok"]
+        if "expect_err" in raw and not isinstance(raw["expect_err"], str):
+            raise ValueError(f"{vid}: expect_err must be a string when present")
+        out.append(
+            SimplicityExecVector(
+                vid=vid,
+                op=op,
+                program_hex=program_hex,
+                witness_hex=_optional_hex(raw, "witness_hex"),
+                covenant_cmr_hex=_optional_hex(raw, "covenant_cmr_hex"),
+                semantics_version=_optional_nat(raw, "semantics_version"),
+                eval_steps=_optional_nat(raw, "eval_steps"),
+                frame_bit_widths=frame_bit_widths,
+                jet_accepted=_optional_bool(raw, "jet_accepted"),
+                jet_cost=_optional_nat(raw, "jet_cost"),
+                expect_ok=expect_ok,
+                expect_err=(str(raw["expect_err"]) if "expect_err" in raw else None),
+                expect_accepted=_optional_bool(raw, "expect_accepted"),
+                expect_final_counter=_optional_nat(raw, "expect_final_counter"),
+            )
+        )
+    if not out:
+        raise ValueError("no simplicity exec vectors found")
+    return out
+
+
+def render_cv_simplicity_exec_lean(vectors: list[SimplicityExecVector]) -> str:
+    rows: list[str] = []
+    for v in vectors:
+        frame_bit_widths = "[" + ", ".join(str(width) for width in v.frame_bit_widths) + "]"
+        rows.append(
+            "  { "
+            + f"id := {_lean_str(v.vid)}, "
+            + f"op := {_lean_str(v.op)}, "
+            + f"programHex := {_lean_opt_hex_str(v.program_hex)}, "
+            + f"witnessHex := {_lean_opt_hex_str(v.witness_hex)}, "
+            + f"covenantCmrHex := {_lean_opt_hex_str(v.covenant_cmr_hex)}, "
+            + f"semanticsVersion := {_lean_opt_nat(v.semantics_version)}, "
+            + f"evalSteps := {_lean_opt_nat(v.eval_steps)}, "
+            + f"frameBitWidths := {frame_bit_widths}, "
+            + f"jetAccepted := {_lean_opt_bool(v.jet_accepted)}, "
+            + f"jetCost := {_lean_opt_nat(v.jet_cost)}, "
+            + f"expectOk := {'true' if v.expect_ok else 'false'}, "
+            + f"expectErr := {_lean_opt_str(v.expect_err)}, "
+            + f"expectAccepted := {_lean_opt_bool(v.expect_accepted)}, "
+            + f"expectFinalCounter := {_lean_opt_nat(v.expect_final_counter)}"
+            + " }"
+        )
+    body = ",\n".join(rows)
+    return _render_lean_namespace(
+        "CV-SIMPLICITY-EXEC",
+        "structure CVSimplicityExecVector where\n"
+        "  id : String\n"
+        "  op : String\n"
+        "  programHex : Option String := none\n"
+        "  witnessHex : Option String := none\n"
+        "  covenantCmrHex : Option String := none\n"
+        "  semanticsVersion : Option Nat := none\n"
+        "  evalSteps : Option Nat := none\n"
+        "  frameBitWidths : List Nat := []\n"
+        "  jetAccepted : Option Bool := none\n"
+        "  jetCost : Option Nat := none\n"
+        "  expectOk : Bool\n"
+        "  expectErr : Option String := none\n"
+        "  expectAccepted : Option Bool := none\n"
+        "  expectFinalCounter : Option Nat := none\n"
+        "deriving Repr\n"
+        "\n"
+        "def cvSimplicityExecVectors : List CVSimplicityExecVector := [\n"
+        + body
+        + "\n]\n",
+    )
 
 
 def render_cv_da_stress_lean(vectors: list[DaStressVector]) -> str:
@@ -3101,6 +3282,17 @@ def main() -> int:
     sigv = load_cv_sig(in_sig)
     out_sig.write_text(_inject_perf_options(render_cv_sig_lean(sigv)), encoding="utf-8")
     print(f"WROTE: {out_sig}")
+
+    in_simplicity_exec = repo_root / "conformance" / "fixtures" / "CV-SIMPLICITY-EXEC.json"
+    out_simplicity_exec = (
+        repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVSimplicityExecVectors.lean"
+    )
+    sev = load_cv_simplicity_exec(in_simplicity_exec)
+    out_simplicity_exec.write_text(
+        _inject_perf_options(render_cv_simplicity_exec_lean(sev)),
+        encoding="utf-8",
+    )
+    print(f"WROTE: {out_simplicity_exec}")
 
     in_devnet_genesis = repo_root / "conformance" / "fixtures" / "CV-DEVNET-GENESIS.json"
     out_devnet_genesis = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVDevnetGenesisVectors.lean"

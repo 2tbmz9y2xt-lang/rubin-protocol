@@ -235,6 +235,71 @@ func TestRunWritesTraceFileMultipleGates(t *testing.T) {
 	}
 }
 
+func TestRunWritesSimplicityExecTraceOutputs(t *testing.T) {
+	fixturesDir := t.TempDir()
+	outPath := filepath.Join(t.TempDir(), "trace.jsonl")
+	content := `{"gate":"CV-SIMPLICITY-EXEC","vectors":[` +
+		`{"id":"SE-OK","op":"simplicity_exec_vector","program_hex":"24","expect_ok":true,"expect_accepted":true,"expect_final_counter":1},` +
+		`{"id":"SE-REJECT","op":"simplicity_exec_vector","program_hex":"60","jet_accepted":false,"jet_cost":3,"expect_ok":false,"expect_err":"TX_ERR_SIMPLICITY_REJECTED","expect_accepted":false,"expect_final_counter":3}` +
+		`]}`
+	if err := os.WriteFile(filepath.Join(fixturesDir, "CV-SIMPLICITY-EXEC.json"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	if err := run(fixturesDir, outPath); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	f, err := os.Open(outPath)
+	if err != nil {
+		t.Fatalf("open trace: %v", err)
+	}
+	defer f.Close()
+
+	entries := make(map[string]traceEntry)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var entry traceEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			t.Fatalf("unmarshal trace line: %v", err)
+		}
+		if entry.Type == "entry" {
+			entries[entry.VectorID] = entry
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan trace: %v", err)
+	}
+
+	okEntry, ok := entries["SE-OK"]
+	if !ok {
+		t.Fatalf("missing SE-OK trace entry")
+	}
+	if !okEntry.Ok || okEntry.Err != "" {
+		t.Fatalf("SE-OK result ok=%v err=%q", okEntry.Ok, okEntry.Err)
+	}
+	if got := okEntry.Outputs["accepted"]; got != true {
+		t.Fatalf("SE-OK accepted=%v, want true", got)
+	}
+	if got := okEntry.Outputs["final_counter"]; got != float64(1) {
+		t.Fatalf("SE-OK final_counter=%v, want 1", got)
+	}
+
+	rejectEntry, ok := entries["SE-REJECT"]
+	if !ok {
+		t.Fatalf("missing SE-REJECT trace entry")
+	}
+	if rejectEntry.Ok || rejectEntry.Err != "TX_ERR_SIMPLICITY_REJECTED" {
+		t.Fatalf("SE-REJECT result ok=%v err=%q", rejectEntry.Ok, rejectEntry.Err)
+	}
+	if got := rejectEntry.Outputs["accepted"]; got != false {
+		t.Fatalf("SE-REJECT accepted=%v, want false", got)
+	}
+	if got := rejectEntry.Outputs["final_counter"]; got != float64(3) {
+		t.Fatalf("SE-REJECT final_counter=%v, want 3", got)
+	}
+}
+
 func TestRun_ConnectBlockBasicTraceUsesApplyPath(t *testing.T) {
 	fixturesDir := t.TempDir()
 	outPath := filepath.Join(t.TempDir(), "trace.jsonl")

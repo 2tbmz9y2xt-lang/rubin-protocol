@@ -18,6 +18,8 @@ import RubinFormal.Conformance.CVBlockBasicVectors
 import RubinFormal.Conformance.CVWeightVectors
 import RubinFormal.Conformance.CVValidationOrderVectors
 import RubinFormal.Conformance.CVDaIntegrityVectors
+import RubinFormal.Conformance.CVSimplicityExecVectors
+import RubinFormal.Conformance.CVSimplicityExecReplay
 
 set_option maxHeartbeats 10000000
 set_option maxRecDepth 50000
@@ -322,6 +324,30 @@ private def checkDaIntegrity (o : DaIntegrityOut) : Bool :=
           | .ok _ => o.ok
           | .error e => (!o.ok) && (o.err == e)
 
+private def checkSimplicityExec (o : SimplicityExecOut) : Bool :=
+  match findById? o.id RubinFormal.Conformance.cvSimplicityExecVectors (fun v => v.id) with
+  | none => false
+  | some v =>
+      let got := RubinFormal.Conformance.evalSimplicityExecVector v
+      got.ok == o.ok &&
+      got.err == o.err &&
+      got.accepted == o.accepted &&
+      got.finalCounter == o.finalCounter
+
+private def allDistinctIds (ids : List String) : Bool :=
+  ids.length == ids.eraseDups.length
+
+private def sameSimplicityExecTraceIds : Bool :=
+  let fixtureIds := RubinFormal.Conformance.cvSimplicityExecVectors.map (·.id)
+  let traceIds := simplicityExecOuts.map (·.id)
+  simplicityExecOuts.length == RubinFormal.Conformance.cvSimplicityExecVectors.length &&
+  allDistinctIds fixtureIds &&
+  allDistinctIds traceIds &&
+  RubinFormal.Conformance.cvSimplicityExecVectors.all
+    (fun v => (simplicityExecOuts.find? (fun o => o.id == v.id)).isSome) &&
+  simplicityExecOuts.all
+    (fun o => (RubinFormal.Conformance.cvSimplicityExecVectors.find? (fun v => v.id == o.id)).isSome)
+
 def allGoTraceV1Ok : Bool :=
   parseOuts.all checkParse &&
   sighashOuts.all checkSighash &&
@@ -330,7 +356,9 @@ def allGoTraceV1Ok : Bool :=
   blockBasicOuts.all checkBlockBasic &&
   weightOuts.all checkWeight &&
   validationOrderOuts.all checkValidationOrder &&
-  daIntegrityOuts.all checkDaIntegrity
+  daIntegrityOuts.all checkDaIntegrity &&
+  sameSimplicityExecTraceIds &&
+  simplicityExecOuts.all checkSimplicityExec
 
 def firstGoTraceV1Mismatch : Option String :=
   let mk (gate : String) (id : String) : Option String := some (gate ++ ":" ++ id)
@@ -357,6 +385,12 @@ def firstGoTraceV1Mismatch : Option String :=
                           | none =>
                               match daIntegrityOuts.find? (fun o => !checkDaIntegrity o) with
                               | some o => mk "CV-DA-INTEGRITY" o.id
-                              | none => none
+                              | none =>
+                                  if !sameSimplicityExecTraceIds then
+                                    some "CV-SIMPLICITY-EXEC:trace-id-coverage"
+                                  else
+                                    match simplicityExecOuts.find? (fun o => !checkSimplicityExec o) with
+                                    | some o => mk "CV-SIMPLICITY-EXEC" o.id
+                                    | none => none
 
 end RubinFormal.Refinement

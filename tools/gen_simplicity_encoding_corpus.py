@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ENCODING_OUT = ROOT / "conformance/fixtures/protocol/simplicity_program_encoding_corpus_v1.json"
 EXEC_OUT = ROOT / "conformance/fixtures/protocol/simplicity_exec_corpus_v1.json"
+CV_EXEC_OUT = ROOT / "conformance/fixtures/CV-SIMPLICITY-EXEC.json"
 CRYPTO_JETS_OUT = ROOT / "conformance/fixtures/protocol/simplicity_crypto_jets_corpus_v1.json"
 DATA_JETS_OUT = ROOT / "conformance/fixtures/protocol/simplicity_data_jets_corpus_v1.json"
 JETS_REGISTRY_OUT = ROOT / "conformance/fixtures/protocol/simplicity_jets_registry_corpus_v1.json"
@@ -69,6 +70,7 @@ MAX_EXEC_COST = 400_000
 MAX_FRAME_BITS = 65_536 * 8
 MLDSA87_PUBKEY_BYTES = 2_592
 MLDSA87_SIG_BYTES = 4_627
+MLDSA87_VERIFY_JET_COST = 50_000
 
 
 EXEC_CASES = [
@@ -85,6 +87,37 @@ EXEC_CASES = [
     {"id": "VEC-SE-022", "eval_steps": 1, "frame_bit_widths": ([MAX_FRAME_BITS] * 16) + [8], "expected_accepted": False, "expected_error": "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED", "expected_final_counter": 0},
     {"id": "VEC-SE-030A", "program_hex": "24", "expected_accepted": True, "expected_final_counter": 1},
     {"id": "VEC-SE-030B", "program_hex": "24", "expected_accepted": True, "expected_final_counter": 1},
+]
+
+
+CV_EXEC_CASES = [
+    {"id": "CV-SE-PE-001", "program_hex": "24", "expect_ok": True, "expect_accepted": True, "expect_final_counter": 1},
+    {"id": "CV-SE-PE-002", "program_hex": "c1220f0100", "expect_ok": True, "expect_accepted": True, "expect_final_counter": 4},
+    {"id": "CV-SE-PE-003", "program_hex": "8900", "expect_ok": True, "expect_accepted": True, "expect_final_counter": 2},
+    {"id": "CV-SE-PE-004A", "program_hex": "c1d21014", "witness_hex": "00", "covenant_cmr_hex": "d3ae07ae97378595ef49c6677fd92a1761f8fe7fd8dde86197efb49a49448b83", "expect_ok": True, "expect_accepted": True, "expect_final_counter": 4},
+    {"id": "CV-SE-PE-004B", "program_hex": "c1d21014", "witness_hex": "80", "expect_ok": True, "expect_accepted": True, "expect_final_counter": 4},
+    {"id": "CV-SE-PE-005", "program_hex": "60", "jet_accepted": True, "jet_cost": 64, "expect_ok": True, "expect_accepted": True, "expect_final_counter": 64},
+    {"id": "CV-SE-PE-006", "program_hex": "70", "jet_accepted": True, "jet_cost": MLDSA87_VERIFY_JET_COST, "expect_ok": True, "expect_accepted": True, "expect_final_counter": MLDSA87_VERIFY_JET_COST},
+    {"id": "CV-SE-PE-007", "program_hex": "24", "semantics_version": 2, "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_DECODE"},
+    {"id": "CV-SE-PE-008", "program_hex": "25", "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_DECODE"},
+    {"id": "CV-SE-PE-009", "program_hex": "24" + ("00" * 16_384), "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE"},
+    {"id": "CV-SE-PE-010", "program_hex": "24", "covenant_cmr_hex": "00" * 32, "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_CMR_MISMATCH"},
+    {"id": "CV-SE-PE-011", "program_hex": "28" + ("00" * 64), "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_DECODE"},
+    {"id": "CV-SE-PE-012", "program_hex": "8958", "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_DECODE"},
+    {"id": "CV-SE-PE-013", "program_hex": "7c0680", "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_JET_DISALLOWED"},
+    {"id": "CV-SE-PE-014", "program_hex": "c1d21014", "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_DECODE"},
+    {"id": "CV-SE-PE-015", "program_hex": "c1d21014", "witness_hex": "01", "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_DECODE"},
+    {"id": "CV-SE-PE-016", "program_hex": "c1d21014", "witness_hex": "0000", "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_DECODE"},
+    {"id": "CV-SE-PE-017", "program_hex": "2400", "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_DECODE"},
+    {"id": "CV-SE-PE-018", "program_hex": "24" + ("00" * 16_383), "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_DECODE"},
+    {"id": "CV-SE-EXEC-001", "program_hex": "60", "jet_accepted": True, "jet_cost": MAX_EXEC_COST, "expect_ok": True, "expect_accepted": True, "expect_final_counter": MAX_EXEC_COST},
+    {"id": "CV-SE-EXEC-002", "program_hex": "60", "jet_accepted": True, "jet_cost": MAX_EXEC_COST + 1, "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED", "expect_accepted": True, "expect_final_counter": MAX_EXEC_COST},
+    {"id": "CV-SE-EXEC-003", "program_hex": "60", "jet_accepted": False, "jet_cost": 3, "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_REJECTED", "expect_accepted": False, "expect_final_counter": 3},
+    {"id": "CV-SE-MEM-001", "eval_steps": 1, "frame_bit_widths": [MAX_FRAME_BITS], "expect_ok": True, "expect_accepted": True, "expect_final_counter": 1},
+    {"id": "CV-SE-MEM-002", "eval_steps": 1, "frame_bit_widths": [MAX_FRAME_BITS + 1], "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED", "expect_accepted": False, "expect_final_counter": 0},
+    {"id": "CV-SE-MEM-003", "eval_steps": 1, "frame_bit_widths": ([MAX_FRAME_BITS] * 16) + [8], "expect_ok": False, "expect_err": "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED", "expect_accepted": False, "expect_final_counter": 0},
+    {"id": "CV-SE-REPEAT-001", "program_hex": "24", "expect_ok": True, "expect_accepted": True, "expect_final_counter": 1},
+    {"id": "CV-SE-REPEAT-002", "program_hex": "24", "expect_ok": True, "expect_accepted": True, "expect_final_counter": 1},
 ]
 
 
@@ -117,7 +150,7 @@ def mldsa87_case(
         "signature_len": signature_len,
         "verifier_result": verifier_result,
         "expected_verified": expected_verified,
-        "expected_cost": 50_000,
+        "expected_cost": MLDSA87_VERIFY_JET_COST,
         "expect_verifier_called": expect_verifier_called,
     }
     if expected_error:
@@ -236,6 +269,18 @@ def jets_registry_corpus_bytes() -> bytes:
     return (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+def cv_exec_fixture_bytes() -> bytes:
+    payload = {
+        "gate": "CV-SIMPLICITY-EXEC",
+        "description": "Generator-owned executable conformance gate for Go/Rust simplicity_exec_vector parity.",
+        "vectors": [
+            {"op": "simplicity_exec_vector", **case}
+            for case in CV_EXEC_CASES
+        ],
+    }
+    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
 ARTIFACTS = (
     (ENCODING_OUT, "simplicity_program_encoding_cmr_v1", "Generator-owned shared corpus for RUB-484 Go/Rust Simplicity encoding and CMR parity tests.", CASES),
     (EXEC_OUT, "simplicity_exec_corpus_v1", "Generator-owned shared corpus for RUB-488 Go/Rust Simplicity execution parity tests.", EXEC_CASES),
@@ -243,7 +288,10 @@ ARTIFACTS = (
     (DATA_JETS_OUT, "simplicity_data_jets_corpus_v1", "Generator-owned shared corpus for RUB-555 Go Simplicity arithmetic and bytes data jet result, error, and cost tests.", DATA_JET_CASES),
 )
 
-EXTRA_ARTIFACTS = ((JETS_REGISTRY_OUT, jets_registry_corpus_bytes),)
+EXTRA_ARTIFACTS = (
+    (CV_EXEC_OUT, cv_exec_fixture_bytes),
+    (JETS_REGISTRY_OUT, jets_registry_corpus_bytes),
+)
 
 
 def main() -> int:
