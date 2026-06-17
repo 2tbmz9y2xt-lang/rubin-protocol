@@ -160,14 +160,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_RejectsImmatureCoinbaseSpend(t *testing.T
 func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicitySpendRejected(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0x61
-	txBytes := txWithOneInputOneOutputWithWitness(
-		prev,
-		0,
-		90,
-		COV_TYPE_P2PK,
-		validP2PKCovenantData(),
-		dummyWitnesses(SIMPLICITY_WITNESS_SLOTS),
-	)
+	txBytes := txWithOneInputOneOutputWithWitness(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData(), dummyWitnesses(SIMPLICITY_WITNESS_SLOTS))
 	tx, txid := mustParseTxForUtxo(t, txBytes)
 	utxos := map[Outpoint]UtxoEntry{
 		{Txid: prev, Vout: 0}: {
@@ -177,7 +170,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicitySpendRejected(t *testing.T)
 	}
 
 	_, _, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 1, 0, [32]byte{})
-	assertTxErrCode(t, err, TX_ERR_COVENANT_TYPE_INVALID)
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in basic apply")
 }
 
 func TestApplyNonCoinbaseTxBasicUpdate_RejectsImmatureCoinbaseSpend_OverflowSafe(t *testing.T) {

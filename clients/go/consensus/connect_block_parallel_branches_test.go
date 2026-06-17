@@ -1641,19 +1641,12 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicitySpendRejected(t *testing.T) 
 			CovenantType: COV_TYPE_CORE_SIMPLICITY,
 		},
 	}
-	txBytes := txWithOneInputOneOutputWithWitness(
-		prevTxid,
-		0,
-		90,
-		COV_TYPE_P2PK,
-		validP2PKCovenantData(),
-		dummyWitnesses(SIMPLICITY_WITNESS_SLOTS),
-	)
+	txBytes := txWithOneInputOneOutputWithWitness(prevTxid, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData(), dummyWitnesses(SIMPLICITY_WITNESS_SLOTS))
 	tx, txid := mustParseTxForUtxo(t, txBytes)
 	q := NewSigCheckQueue(1)
 
 	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxoSet, 1, 0, [32]byte{}, nil, q, nil, nil)
-	assertTxErrCode(t, err, TX_ERR_COVENANT_TYPE_INVALID)
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in basic apply")
 }
 
 // TestApplyNonCoinbaseTxBasicWorkQ_P2PKSpendQError exercises line 326:

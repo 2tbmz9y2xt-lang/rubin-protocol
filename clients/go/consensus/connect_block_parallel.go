@@ -497,8 +497,6 @@ func applyNonCoinbaseTxBasicWorkQ(
 			if err := validateCoreStealthSpendQ(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache, sigQueue, rotation, registry); err != nil {
 				return nil, 0, err
 			}
-		case COV_TYPE_CORE_SIMPLICITY:
-			return nil, 0, rejectCoreSimplicitySpend()
 		default:
 			// Other covenants have no additional spend-time checks in the genesis set.
 		}

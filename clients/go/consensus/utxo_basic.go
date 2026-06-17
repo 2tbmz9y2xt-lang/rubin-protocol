@@ -284,8 +284,6 @@ func (ctx *nonCoinbaseApplyContext) validateInputSpend(inputIndex int, input non
 		return ctx.validateCoreExtInput(inputIndex, entry, assigned)
 	case COV_TYPE_CORE_STEALTH:
 		return ctx.validateCoreStealthInput(inputIndex, entry, assigned)
-	case COV_TYPE_CORE_SIMPLICITY:
-		return rejectCoreSimplicitySpend()
 	default:
 		return nil
 	}
