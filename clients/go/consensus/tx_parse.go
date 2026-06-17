@@ -95,10 +95,12 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 		return nil, zero, zero, 0, err
 	}
 
-	tx := &Tx{Version: version, TxKind: txKind, TxNonce: txNonce,
+	tx := &Tx{
+		Version: version, TxKind: txKind, TxNonce: txNonce,
 		Inputs: inputs, Outputs: outputs, Locktime: locktime,
 		DaCommitCore: daCommitCore, DaChunkCore: daChunkCore,
-		Witness: witness, DaPayload: daPayload}
+		Witness: witness, DaPayload: daPayload,
+	}
 
 	txid := sha3_256(b[:coreEnd])
 	wtxid := sha3_256(b[:off])
@@ -275,9 +277,11 @@ func parseTxDaCommitCore(b []byte, off *int) (*DaCommitCore, error) {
 		return nil, err
 	}
 
-	return &DaCommitCore{DaID: daID, ChunkCount: chunkCount, RetlDomainID: retlDomainID,
+	return &DaCommitCore{
+		DaID: daID, ChunkCount: chunkCount, RetlDomainID: retlDomainID,
 		BatchNumber: batchNumber, TxDataRoot: txDataRoot, StateRoot: stateRoot,
-		WithdrawalsRoot: withdrawalsRoot, BatchSigSuite: batchSigSuite, BatchSig: batchSig}, nil
+		WithdrawalsRoot: withdrawalsRoot, BatchSigSuite: batchSigSuite, BatchSig: batchSig,
+	}, nil
 }
 
 func invalidDaCommitChunkCount(chunkCount uint16) bool {
@@ -409,9 +413,62 @@ func validateWitnessItemLengths(item WitnessItem, pubLen int, sigLen int) error 
 		if pubLen != ML_DSA_87_PUBKEY_BYTES || sigLen != ML_DSA_87_SIG_BYTES+1 {
 			return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
 		}
+	case SUITE_ID_SIMPLICITY_ENVELOPE:
+		if pubLen != 0 {
+			return txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")
+		}
+		if err := validateSimplicityEnvelopeSignature(item.Signature); err != nil {
+			return err
+		}
 	default:
 		// Unknown suites are accepted at parse stage (CANONICAL §12.2 / CV-SIG-05).
 		// Semantic suite authorization is enforced at the spend path.
+	}
+	return nil
+}
+
+func validateSimplicityEnvelopeSignature(sig []byte) error {
+	if len(sig) < 2 {
+		return txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")
+	}
+	envelope := sig[:len(sig)-1]
+	if len(envelope) > MAX_SIMPLICITY_ENVELOPE_BYTES {
+		return txerr(TX_ERR_PARSE, "Simplicity envelope too large")
+	}
+	off := 0
+
+	version, err := readU8(envelope, &off)
+	if err != nil {
+		return err
+	}
+	if version != 0x01 {
+		return txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")
+	}
+	programLenU64, _, err := readCompactSize(envelope, &off)
+	if err != nil {
+		return err
+	}
+	if programLenU64 > MAX_SIMPLICITY_PROGRAM_BYTES {
+		return txerr(TX_ERR_PARSE, "Simplicity program too large")
+	}
+	if programLenU64 > uint64(math.MaxInt) {
+		return txerr(TX_ERR_PARSE, "Simplicity program_len overflows int")
+	}
+	if _, err := readBytes(envelope, &off, int(programLenU64)); err != nil {
+		return err
+	}
+	witnessLenU64, _, err := readCompactSize(envelope, &off)
+	if err != nil {
+		return err
+	}
+	if witnessLenU64 > uint64(math.MaxInt) {
+		return txerr(TX_ERR_PARSE, "Simplicity witness_len overflows int")
+	}
+	if _, err := readBytes(envelope, &off, int(witnessLenU64)); err != nil {
+		return err
+	}
+	if off != len(envelope) {
+		return txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")
 	}
 	return nil
 }

@@ -99,6 +99,25 @@ func TestNewSuiteRegistryFromParams_BuildsIndependentRegistry(t *testing.T) {
 	}
 }
 
+func TestNewSuiteRegistryFromParams_RejectsStructuralCarrierSuites(t *testing.T) {
+	for suiteID := uint8(0xf0); suiteID <= 0xfe; suiteID++ {
+		t.Run(fmt.Sprintf("suite_%02x", suiteID), func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Fatalf("expected panic for structural carrier suite 0x%02x", suiteID)
+				}
+			}()
+			NewSuiteRegistryFromParams([]SuiteParams{{
+				SuiteID:    suiteID,
+				PubkeyLen:  1,
+				SigLen:     1,
+				VerifyCost: 1,
+				AlgName:    "ML-DSA-87",
+			}})
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // NativeSuiteSet tests
 // ---------------------------------------------------------------------------

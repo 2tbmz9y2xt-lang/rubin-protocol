@@ -399,7 +399,9 @@ func normalizeSuiteRegistryAlgName(value string) (string, error) {
 }
 
 func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, error) {
-	if item.SuiteID == consensus.SUITE_ID_SENTINEL || item.VerifyCost == 0 {
+	if item.SuiteID == consensus.SUITE_ID_SENTINEL ||
+		consensus.IsStructuralWitnessCarrierSuiteID(item.SuiteID) ||
+		item.VerifyCost == 0 {
 		return consensus.SuiteParams{}, fmt.Errorf("bad suite_registry")
 	}
 	pubkeyLen, err := validateSuiteRegistryParamLen(item.PubkeyLen)
