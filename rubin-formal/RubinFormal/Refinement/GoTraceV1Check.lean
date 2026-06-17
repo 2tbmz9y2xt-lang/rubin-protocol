@@ -334,8 +334,15 @@ private def checkSimplicityExec (o : SimplicityExecOut) : Bool :=
       got.accepted == o.accepted &&
       got.finalCounter == o.finalCounter
 
+private def allDistinctIds (ids : List String) : Bool :=
+  ids.length == ids.eraseDups.length
+
 private def sameSimplicityExecTraceIds : Bool :=
+  let fixtureIds := RubinFormal.Conformance.cvSimplicityExecVectors.map (·.id)
+  let traceIds := simplicityExecOuts.map (·.id)
   simplicityExecOuts.length == RubinFormal.Conformance.cvSimplicityExecVectors.length &&
+  allDistinctIds fixtureIds &&
+  allDistinctIds traceIds &&
   RubinFormal.Conformance.cvSimplicityExecVectors.all
     (fun v => (simplicityExecOuts.find? (fun o => o.id == v.id)).isSome) &&
   simplicityExecOuts.all

@@ -126,12 +126,16 @@ def _load_fixture_vector_ids(path: Path, gate: str) -> list[str]:
     if not isinstance(vectors, list):
         _fail(f"fixture {path} missing vectors array")
     ids: list[str] = []
+    seen: dict[str, int] = {}
     for idx, vector in enumerate(vectors):
         if not isinstance(vector, dict):
             _fail(f"fixture {path} vector {idx} must be object")
         vector_id = vector.get("id")
         if not isinstance(vector_id, str) or not vector_id:
             _fail(f"fixture {path} vector {idx} missing id")
+        if vector_id in seen:
+            _fail(f"fixture {path} duplicate vector id {vector_id}: indexes {seen[vector_id]} and {idx}")
+        seen[vector_id] = idx
         ids.append(vector_id)
     return ids
 
