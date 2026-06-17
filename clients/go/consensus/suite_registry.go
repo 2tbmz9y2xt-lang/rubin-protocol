@@ -30,6 +30,8 @@ func NewSuiteRegistryFromParams(params []SuiteParams) *SuiteRegistry {
 	suites := make(map[uint8]SuiteParams, len(params))
 	for _, p := range params {
 		if IsStructuralWitnessCarrierSuiteID(p.SuiteID) {
+			// Config/CLI callers must reject these IDs before construction; they
+			// are structural witness carriers, not native cryptographic suites.
 			panic(fmt.Sprintf("structural witness carrier suite 0x%02x cannot be registered as native crypto suite", p.SuiteID))
 		}
 		suites[p.SuiteID] = p
