@@ -1527,6 +1527,11 @@ def _optional_hex(raw: dict[str, Any], key: str) -> str | None:
     value = raw[key]
     if not isinstance(value, str):
         raise ValueError(f"{key} must be a hex string when present")
+    stripped = value.strip()
+    if stripped.startswith("0x") or stripped.startswith("0X"):
+        stripped = stripped[2:]
+    if stripped == "":
+        raise ValueError(f"{key} must be a non-empty hex string when present")
     _hex_to_bytes(value)
     return value
 
