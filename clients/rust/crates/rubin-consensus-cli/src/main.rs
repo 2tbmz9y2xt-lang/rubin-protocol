@@ -14,7 +14,7 @@ use rubin_consensus::{
     connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context,
     core_ext_profile_set_anchor_v1, featurebit_state_at_height_from_window_counts,
     flagday_active_at_height, merkle_root_txids, parse_core_ext_covenant_data, parse_tx, pow_check,
-    retarget_v1, retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_at_height,
+    retarget_v1, retarget_v1_clamped, sighash_v1_digest, simplicity, tx_weight_and_stats_at_height,
     tx_weight_and_stats_public, validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_htlc_spend,
     validate_rotation_descriptor_for_network, validate_rotation_set_for_network,
@@ -511,6 +511,30 @@ struct Request {
     expected_artifact_hash_hex: String,
 
     #[serde(default)]
+    program_hex: String,
+
+    #[serde(default)]
+    witness_hex: String,
+
+    #[serde(default)]
+    semantics_version: Option<u32>,
+
+    #[serde(default)]
+    covenant_cmr_hex: String,
+
+    #[serde(default)]
+    jet_accepted: Option<bool>,
+
+    #[serde(default)]
+    jet_cost: Option<u64>,
+
+    #[serde(default)]
+    eval_steps: Option<u64>,
+
+    #[serde(default)]
+    frame_bit_widths: Vec<u64>,
+
+    #[serde(default)]
     dependency_checklists: Vec<TxctxDependencyChecklistJson>,
 
     #[serde(default)]
@@ -706,6 +730,12 @@ struct Response {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     err: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accepted: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    final_counter: Option<u64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     txid: Option<String>,
@@ -1237,6 +1267,210 @@ fn parse_optional_chain_id_hex(chain_id: &str) -> Result<[u8; 32], String> {
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(out)
+}
+
+fn decode_optional_simplicity_hex(
+    name: &str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let trimmed = value.trim();
+    let stripped = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    if stripped.is_empty() {
+        return Ok(Vec::new());
+    }
+    if stripped.len() > max_bytes.saturating_mul(2) {
+        return Err(format!("bad {name}"));
+    }
+    hex::decode(stripped).map_err(|_| format!("bad {name}"))
+}
+
+fn decode_simplicity_program_hex(value: &str) -> Result<Vec<u8>, String> {
+    let trimmed = value.trim();
+    let stripped = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    if stripped.is_empty() {
+        return Err("bad program_hex".to_string());
+    }
+    if stripped.len() > simplicity::MAX_PROGRAM_BYTES.saturating_mul(2) {
+        return Err(simplicity::ErrorCode::ProgramTooLarge.as_str().to_string());
+    }
+    hex::decode(stripped).map_err(|_| "bad program_hex".to_string())
+}
+
+fn parse_optional_hex32_named(value: &str, bad_err: &str) -> Result<Option<[u8; 32]>, String> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    parse_exact_hex32(value)
+        .map(Some)
+        .map_err(|_| bad_err.to_string())
+}
+
+fn cli_error(err: impl Into<String>) -> Response {
+    Response {
+        ok: false,
+        err: Some(err.into()),
+        ..Default::default()
+    }
+}
+
+fn simplicity_eval_error_response(err: simplicity::EvalError) -> Response {
+    Response {
+        ok: false,
+        err: Some(err.code.as_str().to_string()),
+        accepted: Some(err.result.accepted),
+        final_counter: Some(err.result.cost),
+        ..Default::default()
+    }
+}
+
+fn run_simplicity_synthetic_exec_vector(req: &Request) -> Response {
+    let Some(eval_steps) = req.eval_steps else {
+        return cli_error(if req.frame_bit_widths.is_empty() {
+            "bad program_hex"
+        } else {
+            "bad eval_steps"
+        });
+    };
+    match evaluate_simplicity_synthetic(eval_steps, &req.frame_bit_widths) {
+        Ok(result) => Response {
+            ok: true,
+            accepted: Some(result.accepted),
+            final_counter: Some(result.cost),
+            ..Default::default()
+        },
+        Err(err) => simplicity_eval_error_response(err),
+    }
+}
+
+fn evaluate_simplicity_synthetic(
+    eval_steps: u64,
+    frame_bit_widths: &[u64],
+) -> Result<simplicity::EvalResult, simplicity::EvalError> {
+    if eval_steps == 0 {
+        return Err(simplicity::EvalError {
+            code: simplicity::ErrorCode::Decode,
+            result: simplicity::EvalResult::default(),
+        });
+    }
+    check_simplicity_synthetic_memory(frame_bit_widths)?;
+    let max_steps = simplicity::MAX_EXEC_COST
+        .checked_div(simplicity::STEP_COST)
+        .unwrap_or(u64::MAX);
+    if eval_steps > max_steps {
+        return Err(simplicity::EvalError {
+            code: simplicity::ErrorCode::BudgetExceeded,
+            result: simplicity::EvalResult {
+                accepted: true,
+                cost: simplicity::MAX_EXEC_COST,
+            },
+        });
+    }
+    Ok(simplicity::EvalResult {
+        accepted: true,
+        cost: eval_steps * simplicity::STEP_COST,
+    })
+}
+
+fn check_simplicity_synthetic_memory(
+    frame_bit_widths: &[u64],
+) -> Result<(), simplicity::EvalError> {
+    let mut live = 0u64;
+    for frame_bits in frame_bit_widths {
+        let Some(rounded) = frame_bits.checked_add(7) else {
+            return Err(simplicity_budget_exceeded());
+        };
+        let frame_bytes = rounded / 8;
+        if frame_bytes > simplicity::MAX_FRAME_BYTES {
+            return Err(simplicity_budget_exceeded());
+        }
+        live = live
+            .checked_add(frame_bytes)
+            .ok_or_else(simplicity_budget_exceeded)?;
+        if live > simplicity::MAX_LIVE_MEMORY_BYTES {
+            return Err(simplicity_budget_exceeded());
+        }
+    }
+    Ok(())
+}
+
+fn simplicity_budget_exceeded() -> simplicity::EvalError {
+    simplicity::EvalError {
+        code: simplicity::ErrorCode::BudgetExceeded,
+        result: simplicity::EvalResult::default(),
+    }
+}
+
+fn run_simplicity_exec_vector(req: &Request) -> Response {
+    if req.program_hex.trim().is_empty() {
+        return run_simplicity_synthetic_exec_vector(req);
+    }
+    let program_bytes = match decode_simplicity_program_hex(&req.program_hex) {
+        Ok(bytes) => bytes,
+        Err(err) => return cli_error(err),
+    };
+    let witness_bytes = match decode_optional_simplicity_hex(
+        "witness_hex",
+        &req.witness_hex,
+        simplicity::MAX_PROGRAM_BYTES,
+    ) {
+        Ok(bytes) => bytes,
+        Err(err) => return cli_error(err),
+    };
+    let covenant_program_cmr =
+        match parse_optional_hex32_named(&req.covenant_cmr_hex, "bad covenant_cmr_hex") {
+            Ok(cmr) => cmr,
+            Err(err) => return cli_error(err),
+        };
+
+    let program = match simplicity::decode(
+        &program_bytes,
+        &witness_bytes,
+        simplicity::DecodeOptions {
+            semantics_version: req
+                .semantics_version
+                .unwrap_or(simplicity::SEMANTICS_VERSION),
+            covenant_program_cmr,
+        },
+    ) {
+        Ok(program) => program,
+        Err(err) => return cli_error(err.code.as_str()),
+    };
+
+    let jet_hook;
+    let opts = if program.jet.is_some() {
+        let Some(jet_cost) = req.jet_cost else {
+            return cli_error("bad jet_cost");
+        };
+        let jet_accepted = req.jet_accepted.unwrap_or(false);
+        jet_hook = move |_: simplicity::Jet| {
+            Ok(simplicity::EvalResult {
+                accepted: jet_accepted,
+                cost: jet_cost,
+            })
+        };
+        simplicity::EvalOptions {
+            jet_evaluator: Some(&jet_hook),
+        }
+    } else {
+        simplicity::EvalOptions::default()
+    };
+
+    match program.evaluate(opts) {
+        Ok(result) => Response {
+            ok: true,
+            accepted: Some(result.accepted),
+            final_counter: Some(result.cost),
+            ..Default::default()
+        },
+        Err(err) => simplicity_eval_error_response(err),
+    }
 }
 
 // Conformance replay mirrors the current standard mempool default without importing node runtime.
@@ -1911,6 +2145,10 @@ fn main() {
         }
         "txctx_governance_vector" => {
             let resp = run_txctx_governance_vector(&req);
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+        }
+        "simplicity_exec_vector" => {
+            let resp = run_simplicity_exec_vector(&req);
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "parse_tx" => {
@@ -5309,6 +5547,7 @@ fn encode_compact_size(n: u64) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn cli_test_rotation_suites() -> Vec<SuiteParamsJson> {
         vec![
@@ -5334,6 +5573,115 @@ mod tests {
                 alg_name: "ML-DSA-87".to_string(),
             },
         ]
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CliSharedExecCorpus {
+        contract_version: u64,
+        fixture_kind: String,
+        description: String,
+        cases: Vec<CliSharedExecCase>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CliSharedExecCase {
+        id: String,
+        #[serde(default)]
+        program_hex: String,
+        #[serde(default)]
+        witness_hex: String,
+        #[serde(default)]
+        eval_steps: Option<u64>,
+        #[serde(default)]
+        frame_bit_widths: Vec<u64>,
+        #[serde(default)]
+        jet_accepted: Option<bool>,
+        #[serde(default)]
+        jet_cost: Option<u64>,
+        expected_accepted: bool,
+        #[serde(default)]
+        expected_error: String,
+        expected_final_counter: u64,
+    }
+
+    fn simplicity_exec_request(case: &CliSharedExecCase) -> Request {
+        Request {
+            program_hex: case.program_hex.clone(),
+            witness_hex: case.witness_hex.clone(),
+            eval_steps: case.eval_steps,
+            frame_bit_widths: case.frame_bit_widths.clone(),
+            jet_accepted: case.jet_accepted,
+            jet_cost: case.jet_cost,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn simplicity_exec_vector_covers_error_surface() {
+        let missing_program = run_simplicity_exec_vector(&Request {
+            ..Default::default()
+        });
+        assert_eq!(missing_program.err.as_deref(), Some("bad program_hex"));
+
+        let missing_eval_steps = run_simplicity_exec_vector(&Request {
+            frame_bit_widths: vec![1],
+            ..Default::default()
+        });
+        assert!(!missing_eval_steps.ok);
+        assert_eq!(missing_eval_steps.err.as_deref(), Some("bad eval_steps"));
+
+        let missing_jet_cost = run_simplicity_exec_vector(&Request {
+            program_hex: "60".to_string(),
+            ..Default::default()
+        });
+        assert!(!missing_jet_cost.ok);
+        assert_eq!(missing_jet_cost.err.as_deref(), Some("bad jet_cost"));
+
+        let oversized = run_simplicity_exec_vector(&Request {
+            program_hex: "00".repeat(simplicity::MAX_PROGRAM_BYTES + 1),
+            ..Default::default()
+        });
+        assert!(!oversized.ok);
+        assert_eq!(
+            oversized.err.as_deref(),
+            Some(simplicity::ErrorCode::ProgramTooLarge.as_str())
+        );
+    }
+
+    #[test]
+    fn simplicity_exec_vector_replays_shared_exec_corpus() {
+        let corpus_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../conformance/fixtures/protocol/simplicity_exec_corpus_v1.json");
+        let raw = fs::read_to_string(corpus_path).expect("read shared exec corpus");
+        let corpus: CliSharedExecCorpus =
+            serde_json::from_str(&raw).expect("parse shared exec corpus");
+        assert_eq!(corpus.contract_version, 1);
+        assert_eq!(corpus.fixture_kind, "simplicity_exec_corpus_v1");
+        assert!(!corpus.description.is_empty());
+
+        for case in &corpus.cases {
+            let id = case.id.as_str();
+            let resp = run_simplicity_exec_vector(&simplicity_exec_request(case));
+            if case.expected_error.is_empty() {
+                assert!(resp.ok, "{id}: err={:?}", resp.err);
+                assert_eq!(resp.err, None, "{id}");
+            } else {
+                assert!(!resp.ok, "{id}");
+                assert_eq!(
+                    resp.err.as_deref(),
+                    Some(case.expected_error.as_str()),
+                    "{id}"
+                );
+            }
+            assert_eq!(resp.accepted, Some(case.expected_accepted), "{id}");
+            assert_eq!(
+                resp.final_counter,
+                Some(case.expected_final_counter),
+                "{id}"
+            );
+        }
     }
 
     #[test]
