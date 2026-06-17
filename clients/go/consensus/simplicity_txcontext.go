@@ -1,5 +1,7 @@
 package consensus
 
+import "slices"
+
 type SimplicityTxContextBase struct {
 	ChainID     [32]byte
 	TotalIn     Uint128
@@ -56,6 +58,11 @@ func BuildSimplicityTxContext(tx *Tx, resolvedInputs []UtxoEntry, blockHeight ui
 			return nil, txerr(TX_ERR_PARSE, check.message)
 		}
 	}
+	if !slices.ContainsFunc(resolvedInputs, func(entry UtxoEntry) bool {
+		return entry.CovenantType == COV_TYPE_CORE_SIMPLICITY
+	}) {
+		return nil, nil
+	}
 
 	totalIn, err := sumTxContextInputValues(resolvedInputs, u128{})
 	if err != nil {
@@ -83,18 +90,13 @@ func BuildSimplicityTxContext(tx *Tx, resolvedInputs []UtxoEntry, blockHeight ui
 		selfSources: make([]simplicityTxContextSelfSource, len(resolvedInputs)),
 	}
 
-	hasSimplicityInput, err := populateSimplicityTxContextViews(ctx, tx, resolvedInputs)
-	if err != nil {
+	if err := populateSimplicityTxContextViews(ctx, tx, resolvedInputs); err != nil {
 		return nil, err
-	}
-	if !hasSimplicityInput {
-		return nil, nil
 	}
 	return ctx, nil
 }
 
-func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolvedInputs []UtxoEntry) (bool, error) {
-	hasSimplicityInput := false
+func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolvedInputs []UtxoEntry) error {
 	for i, entry := range resolvedInputs {
 		ctx.inputViews[i] = SimplicityTxContextIOView{
 			Value:        entry.Value,
@@ -105,15 +107,14 @@ func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolved
 		}
 		programCMR, state, err := parseCoreSimplicityCovenantData(entry.CovenantData)
 		if err != nil {
-			return false, err
+			return err
 		}
 		ctx.selfSources[i] = simplicityTxContextSelfSource{
 			programCMR:       programCMR,
-			state:            state,
+			state:            append([]byte{}, state...),
 			value:            entry.Value,
 			isCoreSimplicity: true,
 		}
-		hasSimplicityInput = true
 	}
 
 	for i, out := range tx.Outputs {
@@ -122,7 +123,7 @@ func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolved
 			CovenantType: out.CovenantType,
 		}
 	}
-	return hasSimplicityInput, nil
+	return nil
 }
 
 func (c *SimplicityTxContext) InputViews() []SimplicityTxContextIOView {

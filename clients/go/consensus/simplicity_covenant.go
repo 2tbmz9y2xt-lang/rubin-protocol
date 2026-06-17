@@ -50,7 +50,7 @@ func parseCoreSimplicityCovenantData(covenantData []byte) ([32]byte, []byte, err
 	if len(covenantData) != 32+stateLenVarintBytes+stateLen {
 		return programCMR, nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY covenant_data length mismatch")
 	}
-	return programCMR, append([]byte{}, state...), nil
+	return programCMR, state, nil
 }
 
 func validateCoreSimplicityDeploymentActive(height uint64, provider SimplicityDeploymentProvider) error {

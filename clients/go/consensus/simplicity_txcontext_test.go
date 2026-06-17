@@ -67,6 +67,7 @@ func TestBuildSimplicityTxContext_BaseInputsOutputsAndSelf(t *testing.T) {
 	if ctx == nil {
 		t.Fatalf("expected context")
 	}
+	simplicityCovenant[len(simplicityCovenant)-1] = 0xff
 	if got := ctx.Base.ChainID; got != chainID {
 		t.Fatalf("chain_id=%x want %x", got, chainID)
 	}
