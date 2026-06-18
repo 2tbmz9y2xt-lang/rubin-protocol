@@ -15,6 +15,31 @@ import (
 
 var errSink error
 
+func TestDescriptorHashAccessCostBoundaries(t *testing.T) {
+	got, err := DescriptorHashAccessCost(3)
+	if err != nil || got != DescriptorHashBaseCost+3*DescriptorHashByteCost {
+		t.Fatalf("DescriptorHashAccessCost(3)=%d err=%v", got, err)
+	}
+
+	maxLen := (MaxExecCost - DescriptorHashBaseCost) / DescriptorHashByteCost
+	got, err = DescriptorHashAccessCost(maxLen)
+	if err != nil || got != MaxExecCost {
+		t.Fatalf("DescriptorHashAccessCost(maxLen)=%d err=%v want %d", got, err, MaxExecCost)
+	}
+
+	got, err = DescriptorHashAccessCost(maxLen + 1)
+	assertErrorCode(t, err, ErrBudgetExceeded)
+	if got != MaxExecCost {
+		t.Fatalf("over-budget cost=%d want %d", got, MaxExecCost)
+	}
+
+	got, err = DescriptorHashAccessCost(^uint64(0))
+	assertErrorCode(t, err, ErrBudgetExceeded)
+	if got != MaxExecCost {
+		t.Fatalf("overflow cost=%d want %d", got, MaxExecCost)
+	}
+}
+
 func TestDecodeVectors(t *testing.T) {
 	tests := []struct {
 		id        string

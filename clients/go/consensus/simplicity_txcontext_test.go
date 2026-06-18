@@ -3,6 +3,8 @@ package consensus
 import (
 	"reflect"
 	"testing"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus/simplicity"
 )
 
 func makeCoreSimplicityCovenantData(programCMR [32]byte, state []byte) []byte {
@@ -204,12 +206,133 @@ func TestBuildSimplicityTxContext_InvalidCoreSimplicityOutputFailsClosed(t *test
 	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY value must be > 0")
 }
 
+func TestSimplicityTxContextDescriptorHashAccessors(t *testing.T) {
+	cmr := [32]byte{0: 0xda}
+	inputData := []byte{0x01, 0xaa, 0xbb}
+	outputData := []byte{0x01, 0xcc, 0xdd}
+	tx := &Tx{
+		Version: TX_WIRE_VERSION,
+		Inputs:  []TxInput{{PrevVout: 0}, {PrevVout: 1}},
+		Outputs: []TxOutput{
+			{Value: 3, CovenantType: COV_TYPE_P2PK, CovenantData: outputData},
+		},
+	}
+	resolved := []UtxoEntry{
+		{Value: 1, CovenantType: COV_TYPE_CORE_SIMPLICITY, CovenantData: makeCoreSimplicityCovenantData(cmr, nil)},
+		{Value: 2, CovenantType: COV_TYPE_P2PK, CovenantData: inputData},
+	}
+	ctx, err := BuildSimplicityTxContext(tx, resolved, 1, [32]byte{})
+	if err != nil {
+		t.Fatalf("BuildSimplicityTxContext: %v", err)
+	}
+	inputData[0], outputData[0] = 0xff, 0xff
+
+	inputDesc := OutputDescriptorBytes(COV_TYPE_P2PK, []byte{0x01, 0xaa, 0xbb})
+	inputCost := simplicity.DescriptorHashBaseCost + uint64(len(inputDesc))*simplicity.DescriptorHashByteCost
+	wantInputHash := sha3_256(inputDesc)
+	var meter SimplicityTxContextMeter
+	for i := 1; i <= 2; i++ {
+		got, err := ctx.InputDescriptorHash(1, &meter)
+		if err != nil {
+			t.Fatalf("InputDescriptorHash access %d: %v", i, err)
+		}
+		if !got.Present || got.Hash != wantInputHash {
+			t.Fatalf("input descriptor hash access %d = %+v want %x", i, got, wantInputHash)
+		}
+		if want := uint64(i) * inputCost; meter.Cost() != want {
+			t.Fatalf("cost after input access %d = %d want %d", i, meter.Cost(), want)
+		}
+	}
+
+	outputDesc := OutputDescriptorBytes(COV_TYPE_P2PK, []byte{0x01, 0xcc, 0xdd})
+	outputCost := simplicity.DescriptorHashBaseCost + uint64(len(outputDesc))*simplicity.DescriptorHashByteCost
+	got, err := ctx.OutputDescriptorHash(0, &meter)
+	if err != nil {
+		t.Fatalf("OutputDescriptorHash: %v", err)
+	}
+	if !got.Present || got.Hash != sha3_256(outputDesc) {
+		t.Fatalf("output descriptor hash = %+v", got)
+	}
+	if want := 2*inputCost + outputCost; meter.Cost() != want {
+		t.Fatalf("cost after output access = %d want %d", meter.Cost(), want)
+	}
+}
+
+func TestSimplicityTxContextDescriptorHashMissAndBudgetCross(t *testing.T) {
+	cmr := [32]byte{0: 0xdb}
+	tx := &Tx{Version: TX_WIRE_VERSION, Inputs: []TxInput{{PrevVout: 0}}}
+	resolved := []UtxoEntry{{Value: 1, CovenantType: COV_TYPE_CORE_SIMPLICITY, CovenantData: makeCoreSimplicityCovenantData(cmr, nil)}}
+	ctx, err := BuildSimplicityTxContext(tx, resolved, 1, [32]byte{})
+	if err != nil {
+		t.Fatalf("BuildSimplicityTxContext: %v", err)
+	}
+
+	var missMeter SimplicityTxContextMeter
+	miss, err := ctx.InputDescriptorHash(1, &missMeter)
+	if err != nil {
+		t.Fatalf("InputDescriptorHash miss: %v", err)
+	}
+	if miss.Present || miss.Hash != ([32]byte{}) || missMeter.Cost() != simplicity.IntrinsicMissCost {
+		t.Fatalf("miss result=%+v cost=%d", miss, missMeter.Cost())
+	}
+
+	desc := OutputDescriptorBytes(COV_TYPE_CORE_SIMPLICITY, makeCoreSimplicityCovenantData(cmr, nil))
+	cost := simplicity.DescriptorHashBaseCost + uint64(len(desc))*simplicity.DescriptorHashByteCost
+	over := SimplicityTxContextMeter{cost: simplicity.MaxExecCost - cost + 1}
+	got, err := ctx.InputDescriptorHash(0, &over)
+	assertSimplicityErrCode(t, err, simplicity.ErrBudgetExceeded)
+	if got.Present || got.Hash != ([32]byte{}) || over.Cost() != simplicity.MaxExecCost {
+		t.Fatalf("budget-cross result=%+v cost=%d", got, over.Cost())
+	}
+}
+
+func TestSimplicityTxContextDescriptorHashErrorBranches(t *testing.T) {
+	cmr := [32]byte{0: 0xdc}
+	tx := &Tx{Version: TX_WIRE_VERSION, Inputs: []TxInput{{PrevVout: 0}}}
+	resolved := []UtxoEntry{{Value: 1, CovenantType: COV_TYPE_CORE_SIMPLICITY, CovenantData: makeCoreSimplicityCovenantData(cmr, nil)}}
+	ctx, err := BuildSimplicityTxContext(tx, resolved, 1, [32]byte{})
+	if err != nil {
+		t.Fatalf("BuildSimplicityTxContext: %v", err)
+	}
+
+	got, err := ctx.InputDescriptorHash(0, nil)
+	if err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE || got != (SimplicityTxContextDescriptorHashResult{}) {
+		t.Fatalf("nil meter result=%+v err=%v", got, err)
+	}
+
+	missOver := SimplicityTxContextMeter{cost: simplicity.MaxExecCost}
+	got, err = ctx.InputDescriptorHash(1, &missOver)
+	assertSimplicityErrCode(t, err, simplicity.ErrBudgetExceeded)
+	if got != (SimplicityTxContextDescriptorHashResult{}) || missOver.Cost() != simplicity.MaxExecCost {
+		t.Fatalf("miss over-budget result=%+v cost=%d", got, missOver.Cost())
+	}
+
+	oversize := &SimplicityTxContext{inputDescriptors: []simplicityTxContextDescriptorSource{{
+		covenantType: COV_TYPE_P2PK,
+		covenantData: make([]byte, int(simplicity.MaxExecCost)),
+	}}}
+	var meter SimplicityTxContextMeter
+	got, err = oversize.InputDescriptorHash(0, &meter)
+	assertSimplicityErrCode(t, err, simplicity.ErrBudgetExceeded)
+	if got != (SimplicityTxContextDescriptorHashResult{}) || meter.Cost() != simplicity.MaxExecCost {
+		t.Fatalf("oversize descriptor result=%+v cost=%d", got, meter.Cost())
+	}
+}
+
 func isZeroSimplicitySelfView(view SimplicityTxContextSelfView) bool {
 	return reflect.DeepEqual(view, SimplicityTxContextSelfView{})
 }
 
 func isZeroSimplicitySameCMRView(view SimplicityTxContextSameCMRView) bool {
 	return reflect.DeepEqual(view, SimplicityTxContextSameCMRView{})
+}
+
+func assertSimplicityErrCode(t *testing.T, err error, want simplicity.ErrorCode) {
+	t.Helper()
+	got, ok := err.(*simplicity.Error)
+	if !ok || got.Code != want {
+		t.Fatalf("simplicity err=%v want %s", err, want)
+	}
 }
 
 func TestBuildSimplicityTxContext_SameCMRInputCap(t *testing.T) {

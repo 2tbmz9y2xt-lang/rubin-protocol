@@ -304,13 +304,26 @@ type meter struct {
 	cost uint64
 }
 
-func (m *meter) charge(cost uint64) error {
-	if m.cost > MaxExecCost || cost > MaxExecCost-m.cost {
-		m.cost = MaxExecCost
-		return &Error{Code: ErrBudgetExceeded}
+// ChargeCost applies the shared Simplicity execution budget cap.
+func ChargeCost(current, cost uint64) (uint64, error) {
+	if current > MaxExecCost || cost > MaxExecCost-current {
+		return MaxExecCost, &Error{Code: ErrBudgetExceeded}
 	}
-	m.cost += cost
-	return nil
+	return current + cost, nil
+}
+
+// DescriptorHashAccessCost returns the in-range descriptor_hash access cost.
+func DescriptorHashAccessCost(descriptorLen uint64) (uint64, error) {
+	if DescriptorHashByteCost != 0 && descriptorLen > (^uint64(0)-DescriptorHashBaseCost)/DescriptorHashByteCost {
+		return MaxExecCost, &Error{Code: ErrBudgetExceeded}
+	}
+	return ChargeCost(0, DescriptorHashBaseCost+DescriptorHashByteCost*descriptorLen)
+}
+
+func (m *meter) charge(cost uint64) error {
+	next, err := ChargeCost(m.cost, cost)
+	m.cost = next
+	return err
 }
 
 func checkMemoryBounds(frameBitWidths []uint64) error {

@@ -1,6 +1,10 @@
 package consensus
 
-import "slices"
+import (
+	"slices"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus/simplicity"
+)
 
 type SimplicityTxContextBase struct {
 	ChainID     [32]byte
@@ -17,6 +21,19 @@ type SimplicityTxContextBase struct {
 type SimplicityTxContextIOView struct {
 	Value        uint64
 	CovenantType uint16
+}
+
+type SimplicityTxContextDescriptorHashResult struct {
+	Hash    [32]byte
+	Present bool
+}
+
+type SimplicityTxContextMeter struct {
+	cost uint64
+}
+
+func (m *SimplicityTxContextMeter) Cost() uint64 {
+	return m.cost
 }
 
 type SimplicityTxContextSelfView struct {
@@ -76,14 +93,21 @@ type simplicityTxContextSelfSource struct {
 	isCoreSimplicity bool
 }
 
+type simplicityTxContextDescriptorSource struct {
+	covenantData []byte
+	covenantType uint16
+}
+
 type SimplicityTxContext struct {
-	Base         SimplicityTxContextBase
-	inputViews   []SimplicityTxContextIOView
-	outputViews  []SimplicityTxContextIOView
-	selfSources  []simplicityTxContextSelfSource
-	groupInputs  map[[32]byte][]SimplicityTxContextGroupEntry
-	groupOutputs map[[32]byte][]SimplicityTxContextGroupEntry
-	daView       SimplicityTxContextDAView
+	Base              SimplicityTxContextBase
+	inputViews        []SimplicityTxContextIOView
+	outputViews       []SimplicityTxContextIOView
+	inputDescriptors  []simplicityTxContextDescriptorSource
+	outputDescriptors []simplicityTxContextDescriptorSource
+	selfSources       []simplicityTxContextSelfSource
+	groupInputs       map[[32]byte][]SimplicityTxContextGroupEntry
+	groupOutputs      map[[32]byte][]SimplicityTxContextGroupEntry
+	daView            SimplicityTxContextDAView
 }
 
 func BuildSimplicityTxContext(tx *Tx, resolvedInputs []UtxoEntry, blockHeight uint64, chainID [32]byte) (*SimplicityTxContext, error) {
@@ -129,9 +153,11 @@ func BuildSimplicityTxContext(tx *Tx, resolvedInputs []UtxoEntry, blockHeight ui
 			TotalIn:     uint128FromInternal(totalIn),
 			TotalOut:    uint128FromInternal(totalOut),
 		},
-		inputViews:  make([]SimplicityTxContextIOView, len(resolvedInputs)),
-		outputViews: make([]SimplicityTxContextIOView, len(tx.Outputs)),
-		selfSources: make([]simplicityTxContextSelfSource, len(resolvedInputs)),
+		inputViews:        make([]SimplicityTxContextIOView, len(resolvedInputs)),
+		outputViews:       make([]SimplicityTxContextIOView, len(tx.Outputs)),
+		inputDescriptors:  make([]simplicityTxContextDescriptorSource, len(resolvedInputs)),
+		outputDescriptors: make([]simplicityTxContextDescriptorSource, len(tx.Outputs)),
+		selfSources:       make([]simplicityTxContextSelfSource, len(resolvedInputs)),
 	}
 
 	if err := populateSimplicityTxContextViews(ctx, tx, resolvedInputs); err != nil {
@@ -143,10 +169,26 @@ func BuildSimplicityTxContext(tx *Tx, resolvedInputs []UtxoEntry, blockHeight ui
 func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolvedInputs []UtxoEntry) error {
 	ctx.groupInputs, ctx.groupOutputs = make(map[[32]byte][]SimplicityTxContextGroupEntry), make(map[[32]byte][]SimplicityTxContextGroupEntry)
 
+	if err := populateSimplicityTxContextInputViews(ctx, resolvedInputs); err != nil {
+		return err
+	}
+	if err := populateSimplicityTxContextOutputViews(ctx, tx.Outputs); err != nil {
+		return err
+	}
+	var err error
+	ctx.daView, err = buildSimplicityTxContextDAView(tx)
+	return err
+}
+
+func populateSimplicityTxContextInputViews(ctx *SimplicityTxContext, resolvedInputs []UtxoEntry) error {
 	for i, entry := range resolvedInputs {
 		ctx.inputViews[i] = SimplicityTxContextIOView{
 			Value:        entry.Value,
 			CovenantType: entry.CovenantType,
+		}
+		ctx.inputDescriptors[i] = simplicityTxContextDescriptorSource{
+			covenantType: entry.CovenantType,
+			covenantData: append([]byte{}, entry.CovenantData...),
 		}
 		if entry.CovenantType != COV_TYPE_CORE_SIMPLICITY {
 			continue
@@ -170,11 +212,18 @@ func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolved
 			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY same-cmr input group exceeds limit")
 		}
 	}
+	return nil
+}
 
-	for i, out := range tx.Outputs {
+func populateSimplicityTxContextOutputViews(ctx *SimplicityTxContext, outputs []TxOutput) error {
+	for i, out := range outputs {
 		ctx.outputViews[i] = SimplicityTxContextIOView{
 			Value:        out.Value,
 			CovenantType: out.CovenantType,
+		}
+		ctx.outputDescriptors[i] = simplicityTxContextDescriptorSource{
+			covenantType: out.CovenantType,
+			covenantData: append([]byte{}, out.CovenantData...),
 		}
 		if out.CovenantType != COV_TYPE_CORE_SIMPLICITY {
 			continue
@@ -188,9 +237,7 @@ func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolved
 			State: append([]byte{}, state...),
 		})
 	}
-	var err error
-	ctx.daView, err = buildSimplicityTxContextDAView(tx)
-	return err
+	return nil
 }
 
 func buildSimplicityTxContextDAView(tx *Tx) (SimplicityTxContextDAView, error) {
@@ -247,6 +294,51 @@ func (c *SimplicityTxContext) InputViews() []SimplicityTxContextIOView {
 
 func (c *SimplicityTxContext) OutputViews() []SimplicityTxContextIOView {
 	return append([]SimplicityTxContextIOView{}, c.outputViews...)
+}
+
+func (c *SimplicityTxContext) InputDescriptorHash(inputIndex uint16, meter *SimplicityTxContextMeter) (SimplicityTxContextDescriptorHashResult, error) {
+	return c.descriptorHash(c.inputDescriptors, inputIndex, meter)
+}
+
+func (c *SimplicityTxContext) OutputDescriptorHash(outputIndex uint16, meter *SimplicityTxContextMeter) (SimplicityTxContextDescriptorHashResult, error) {
+	return c.descriptorHash(c.outputDescriptors, outputIndex, meter)
+}
+
+func (c *SimplicityTxContext) descriptorHash(sources []simplicityTxContextDescriptorSource, index uint16, meter *SimplicityTxContextMeter) (SimplicityTxContextDescriptorHashResult, error) {
+	if meter == nil {
+		return SimplicityTxContextDescriptorHashResult{}, txerr(TX_ERR_PARSE, "nil simplicity txcontext meter")
+	}
+	if int(index) >= len(sources) {
+		if err := meter.charge(simplicity.IntrinsicMissCost); err != nil {
+			return SimplicityTxContextDescriptorHashResult{}, err
+		}
+		return SimplicityTxContextDescriptorHashResult{}, nil
+	}
+	source := sources[index]
+	cost, err := simplicity.DescriptorHashAccessCost(descriptorSourceLen(source))
+	if err != nil {
+		meter.cost = simplicity.MaxExecCost
+		return SimplicityTxContextDescriptorHashResult{}, err
+	}
+	if err := meter.charge(cost); err != nil {
+		return SimplicityTxContextDescriptorHashResult{}, err
+	}
+	desc := OutputDescriptorBytes(source.covenantType, source.covenantData)
+	return SimplicityTxContextDescriptorHashResult{Hash: sha3_256(desc), Present: true}, nil
+}
+
+func descriptorSourceLen(source simplicityTxContextDescriptorSource) uint64 {
+	dataLen := uint64(len(source.covenantData))
+	return 2 + compactSizeLen(dataLen) + dataLen
+}
+
+func (m *SimplicityTxContextMeter) charge(cost uint64) error {
+	if m == nil {
+		return txerr(TX_ERR_PARSE, "nil simplicity txcontext meter")
+	}
+	next, err := simplicity.ChargeCost(m.cost, cost)
+	m.cost = next
+	return err
 }
 
 func (c *SimplicityTxContext) SameCMRView(inputIndex uint16) (SimplicityTxContextSameCMRView, error) {
