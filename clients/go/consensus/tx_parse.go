@@ -441,12 +441,8 @@ func parseSimplicityEnvelopeSignature(sig []byte) (parsedSimplicityEnvelope, err
 	if len(envelope) > MAX_SIMPLICITY_ENVELOPE_BYTES {
 		return parsed, txerr(TX_ERR_PARSE, "Simplicity envelope too large")
 	}
-	off := 0
-
-	version, err := readU8(envelope, &off)
-	if err != nil {
-		return parsed, err
-	}
+	version := envelope[0]
+	off := 1
 	if version != 0x01 {
 		return parsed, txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")
 	}
@@ -456,9 +452,6 @@ func parseSimplicityEnvelopeSignature(sig []byte) (parsedSimplicityEnvelope, err
 	}
 	if programLenU64 > MAX_SIMPLICITY_PROGRAM_BYTES {
 		return parsed, txerr(TX_ERR_PARSE, "Simplicity program too large")
-	}
-	if programLenU64 > uint64(math.MaxInt) {
-		return parsed, txerr(TX_ERR_PARSE, "Simplicity program_len overflows int")
 	}
 	program, err := readBytes(envelope, &off, int(programLenU64))
 	if err != nil {

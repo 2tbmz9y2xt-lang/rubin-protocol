@@ -157,7 +157,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_RejectsImmatureCoinbaseSpend(t *testing.T
 	}
 }
 
-func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityRejectsWrongSuite(t *testing.T) {
+func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicitySpendRejected(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0x61
 	txBytes := txWithOneInputOneOutputWithWitness(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData(), dummyWitnesses(SIMPLICITY_WITNESS_SLOTS))
@@ -171,10 +171,10 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityRejectsWrongSuite(t *testin
 	}
 
 	_, _, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 1, 0, [32]byte{})
-	assertTxErrCodeMsg(t, err, TX_ERR_SIG_ALG_INVALID, "CORE_SIMPLICITY witness suite must be 0xF0")
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
 }
 
-func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityRequiresWitness(t *testing.T) {
+func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityRejectsBeforeWitnessChecks(t *testing.T) {
 	prev := hashWithPrefix(0x65)
 	tx := &Tx{
 		Version: TX_WIRE_VERSION,
@@ -195,10 +195,10 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityRequiresWitness(t *testing.
 	if work != nil || summary != nil {
 		t.Fatalf("expected no mutation on reject, got work=%v summary=%v", work, summary)
 	}
-	assertTxErrCodeMsg(t, err, TX_ERR_PARSE, "witness underflow")
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
 }
 
-func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityErrorPrecedesLaterCoreExtLookup(t *testing.T) {
+func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityRejectsBeforeTxContextLookup(t *testing.T) {
 	prevSimplicity := hashWithPrefix(0x62)
 	prevCoreExt := hashWithPrefix(0x63)
 	tx := &Tx{
@@ -240,7 +240,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityErrorPrecedesLaterCoreExtLo
 	if work != nil || summary != nil {
 		t.Fatalf("expected no mutation on reject, got work=%v summary=%v", work, summary)
 	}
-	assertTxErrCodeMsg(t, err, TX_ERR_SIG_ALG_INVALID, "CORE_SIMPLICITY witness suite must be 0xF0")
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
 }
 
 func TestApplyNonCoinbaseTxBasicUpdate_RejectsImmatureCoinbaseSpend_OverflowSafe(t *testing.T) {

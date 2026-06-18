@@ -18,13 +18,17 @@ func simplicityDeploymentFromRotation(rotation RotationProvider) SimplicityDeplo
 	return provider
 }
 
-func hasCoreSimplicityInput(inputs []UtxoEntry) bool {
+func rejectCoreSimplicitySpend() error {
+	return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+}
+
+func rejectCoreSimplicitySpendIfPresent(inputs []UtxoEntry) error {
 	for _, input := range inputs {
 		if input.CovenantType == COV_TYPE_CORE_SIMPLICITY {
-			return true
+			return rejectCoreSimplicitySpend()
 		}
 	}
-	return false
+	return nil
 }
 
 func parseCoreSimplicityCovenantData(value uint64, covenantData []byte) ([32]byte, []byte, error) {
@@ -107,12 +111,9 @@ func validateCoreSimplicitySpend(entry UtxoEntry, witness WitnessItem, txContext
 	if err != nil {
 		return simplicityEvalError(err)
 	}
-	result, err := program.Evaluate(simplicity.EvalOptions{})
+	_, err = program.Evaluate(simplicity.EvalOptions{})
 	if err != nil {
 		return simplicityEvalError(err)
-	}
-	if !result.Accepted {
-		return txerr(TX_ERR_SIMPLICITY_REJECTED, "CORE_SIMPLICITY program rejected")
 	}
 	return nil
 }
@@ -134,7 +135,7 @@ func requireSimplicityTxContext(txContext simplicityTxContextProvider) error {
 func simplicityEvalError(err error) error {
 	var simErr *simplicity.Error
 	if errors.As(err, &simErr) {
-		return txerr(ErrorCode(simErr.Code), string(simErr.Code))
+		return txerr(ErrorCode(simErr.Code), "")
 	}
 	return err
 }

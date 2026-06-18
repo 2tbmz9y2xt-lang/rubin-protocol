@@ -1,6 +1,9 @@
 package consensus
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 var coreSimplicityAcceptCMR = [32]byte{0xc4, 0x0a, 0x10, 0x26, 0x3f, 0x74, 0x36, 0xb4, 0x16, 0x0a, 0xcb, 0xef, 0x1c, 0x36, 0xfb, 0xa4, 0xbe, 0x4d, 0x95, 0xdf, 0x18, 0x1a, 0x96, 0x8a, 0xfe, 0xab, 0x5e, 0xac, 0x24, 0x7a, 0xdf, 0xf7}
 
@@ -12,39 +15,10 @@ func coreSimplicityAcceptWitness() WitnessItem {
 	return WitnessItem{SuiteID: SUITE_ID_SIMPLICITY_ENVELOPE, Signature: simplicityEnvelopeSignature([]byte{0x24}, nil, SIGHASH_ALL)}
 }
 
-func TestCoreSimplicitySpendDispatchSequentialQueueAndWorker(t *testing.T) {
-	prev := hashWithPrefix(0x61)
-	tx, txid := mustParseTxForUtxo(t, txWithOneInputOneOutputWithWitness(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData(), []WitnessItem{coreSimplicityAcceptWitness()}))
-	utxos := map[Outpoint]UtxoEntry{{Txid: prev, Vout: 0}: coreSimplicityAcceptEntry(100)}
-
-	_, summary, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 1, 0, [32]byte{})
-	if err != nil || summary == nil || summary.Fee != 10 {
-		t.Fatalf("sequential spend err=%v summary=%#v", err, summary)
-	}
-
-	q := NewSigCheckQueue(1)
-	_, feeQ, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
-	if err != nil || feeQ != 10 || q.Len() != 0 {
-		t.Fatalf("queued spend err=%v fee/sigs=%d/%d", err, feeQ, q.Len())
-	}
-
-	result := ValidateTxLocal(TxValidationContext{
-		TxIndex:        1,
-		Tx:             tx,
-		ResolvedInputs: []UtxoEntry{coreSimplicityAcceptEntry(100)},
-		WitnessStart:   0,
-		WitnessEnd:     1,
-		Fee:            10,
-	}, [32]byte{}, 1, 0, nil, nil)
-	if !result.Valid || result.Err != nil || result.SigCount != 0 {
-		t.Fatalf("worker result = %#v", result)
-	}
-}
-
-func TestCoreSimplicitySpendDispatchErrors(t *testing.T) {
-	tx := &Tx{Version: TX_WIRE_VERSION, Inputs: []TxInput{{}}, Witness: []WitnessItem{coreSimplicityAcceptWitness()}}
+func TestValidateCoreSimplicitySpendErrors(t *testing.T) {
 	baseEntry := coreSimplicityAcceptEntry(1)
 	baseWitness := coreSimplicityAcceptWitness()
+	validTxContext := func() (*SimplicityTxContext, error) { return &SimplicityTxContext{}, nil }
 	for _, tc := range []struct {
 		name string
 		edit func(*UtxoEntry, *WitnessItem)
@@ -74,11 +48,42 @@ func TestCoreSimplicitySpendDispatchErrors(t *testing.T) {
 				Signature: append([]byte(nil), baseWitness.Signature...),
 			}
 			tc.edit(&entry, &witness)
-			txContext := func() (*SimplicityTxContext, error) {
-				return BuildSimplicityTxContext(tx, []UtxoEntry{entry}, 1, [32]byte{})
-			}
-			assertTxErrCode(t, validateCoreSimplicitySpend(entry, witness, txContext), tc.code)
+			assertTxErrCode(t, validateCoreSimplicitySpend(entry, witness, validTxContext), tc.code)
 		})
+	}
+}
+
+func TestValidateCoreSimplicitySpendRequiresTxContext(t *testing.T) {
+	entry := coreSimplicityAcceptEntry(1)
+	witness := coreSimplicityAcceptWitness()
+
+	assertTxErrCode(t, validateCoreSimplicitySpend(entry, witness, nil), TX_ERR_PARSE)
+	assertTxErrCode(t, validateCoreSimplicitySpend(entry, witness, func() (*SimplicityTxContext, error) {
+		return nil, nil
+	}), TX_ERR_PARSE)
+	assertTxErrCode(t, validateCoreSimplicitySpend(entry, witness, func() (*SimplicityTxContext, error) {
+		return nil, txerr(TX_ERR_PARSE, "txcontext fixture error")
+	}), TX_ERR_PARSE)
+}
+
+func TestSimplicityEvalErrorPreservesGenericErrors(t *testing.T) {
+	errSentinel := errors.New("sentinel")
+	if err := simplicityEvalError(errSentinel); !errors.Is(err, errSentinel) {
+		t.Fatalf("simplicityEvalError() = %v, want sentinel", err)
+	}
+}
+
+func TestSimplicityEvalErrorUsesCodeOnlyMessage(t *testing.T) {
+	entry := coreSimplicityAcceptEntry(1)
+	witness := coreSimplicityAcceptWitness()
+	witness.Signature = simplicityEnvelopeSignature([]byte{0x25}, nil, SIGHASH_ALL)
+
+	err := validateCoreSimplicitySpend(entry, witness, func() (*SimplicityTxContext, error) {
+		return &SimplicityTxContext{}, nil
+	})
+	assertTxErrCodeMsg(t, err, TX_ERR_SIMPLICITY_DECODE, "")
+	if err.Error() != string(TX_ERR_SIMPLICITY_DECODE) {
+		t.Fatalf("Error()=%q, want %q", err.Error(), TX_ERR_SIMPLICITY_DECODE)
 	}
 }
 

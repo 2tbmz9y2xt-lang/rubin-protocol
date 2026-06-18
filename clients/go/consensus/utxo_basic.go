@@ -190,6 +190,9 @@ func (ctx *nonCoinbaseApplyContext) validateResolvedInputEntry(entry UtxoEntry) 
 	if err := ctx.captureVaultResolvedInput(entry); err != nil {
 		return err
 	}
+	if entry.CovenantType == COV_TYPE_CORE_SIMPLICITY {
+		return rejectCoreSimplicitySpend()
+	}
 	return checkSpendCovenant(entry.CovenantType, entry.CovenantData)
 }
 
@@ -221,23 +224,14 @@ func (ctx *nonCoinbaseApplyContext) captureVaultResolvedInput(entry UtxoEntry) e
 
 func (ctx *nonCoinbaseApplyContext) buildTxContext() error {
 	resolvedEntries := ctx.resolvedEntries()
-	if hasCoreSimplicityInput(resolvedEntries) {
-		return nil
+	if err := rejectCoreSimplicitySpendIfPresent(resolvedEntries); err != nil {
+		return err
 	}
-	return ctx.ensureCoreExtTxContext()
-}
-
-func (ctx *nonCoinbaseApplyContext) ensureCoreExtTxContext() error {
-	if ctx.txContextChecked {
-		return nil
-	}
-	resolvedEntries := ctx.resolvedEntries()
 	txContextExtIDs, err := collectTxContextExtIDs(resolvedEntries, ctx.height, ctx.coreExtProfiles)
 	if err != nil {
 		return err
 	}
 	if len(txContextExtIDs) == 0 {
-		ctx.txContextChecked = true
 		return nil
 	}
 	outputExtIDCache, err := BuildTxContextOutputExtIDCache(ctx.tx)
@@ -248,20 +242,7 @@ func (ctx *nonCoinbaseApplyContext) ensureCoreExtTxContext() error {
 	if err != nil {
 		return err
 	}
-	ctx.txContextChecked = true
 	return nil
-}
-
-func (ctx *nonCoinbaseApplyContext) ensureSimplicityTxContext() (*SimplicityTxContext, error) {
-	if ctx.simplicityCtx != nil {
-		return ctx.simplicityCtx, nil
-	}
-	txContext, err := BuildSimplicityTxContext(ctx.tx, ctx.resolvedEntries(), ctx.height, ctx.chainID)
-	if err != nil {
-		return nil, err
-	}
-	ctx.simplicityCtx = txContext
-	return txContext, nil
 }
 
 func (ctx *nonCoinbaseApplyContext) resolvedEntries() []UtxoEntry {
@@ -312,8 +293,6 @@ func (ctx *nonCoinbaseApplyContext) validateInputSpend(inputIndex int, input non
 		return ctx.validateCoreExtInput(inputIndex, entry, assigned)
 	case COV_TYPE_CORE_STEALTH:
 		return ctx.validateCoreStealthInput(inputIndex, entry, assigned)
-	case COV_TYPE_CORE_SIMPLICITY:
-		return ctx.validateCoreSimplicityInput(entry, assigned)
 	default:
 		return nil
 	}
@@ -389,9 +368,6 @@ func (ctx *nonCoinbaseApplyContext) validateCoreExtInput(inputIndex int, entry U
 	if len(assigned) != CORE_EXT_WITNESS_SLOTS {
 		return txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
 	}
-	if err := ctx.ensureCoreExtTxContext(); err != nil {
-		return err
-	}
 	return validateCoreExtSpendWithCache(coreExtSpendValidation{
 		entry:           entry,
 		w:               assigned[0],
@@ -424,13 +400,6 @@ func (ctx *nonCoinbaseApplyContext) validateCoreStealthInput(inputIndex int, ent
 		rotation:    ctx.rotation,
 		registry:    ctx.registry,
 	})
-}
-
-func (ctx *nonCoinbaseApplyContext) validateCoreSimplicityInput(entry UtxoEntry, assigned []WitnessItem) error {
-	if len(assigned) != SIMPLICITY_WITNESS_SLOTS {
-		return txerr(TX_ERR_PARSE, "CORE_SIMPLICITY witness_slots must be 1")
-	}
-	return validateCoreSimplicitySpend(entry, assigned[0], ctx.ensureSimplicityTxContext)
 }
 
 func (ctx *nonCoinbaseApplyContext) addSpendableOutputs() error {
