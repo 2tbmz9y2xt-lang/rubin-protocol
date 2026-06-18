@@ -18,6 +18,14 @@ type UtxoApplySummary struct {
 	UtxoCount uint64
 }
 
+// ApplyNonCoinbaseTxSuiteContext bundles optional CORE_EXT and suite providers
+// for deterministic non-coinbase apply helpers.
+type ApplyNonCoinbaseTxSuiteContext struct {
+	CoreExtProfiles CoreExtProfileProvider
+	Rotation        RotationProvider
+	Registry        *SuiteRegistry
+}
+
 func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEntry, height uint64, blockTimestamp uint64, chainID [32]byte) (*UtxoApplySummary, error) {
 	return ApplyNonCoinbaseTxBasicWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockTimestamp, chainID)
 }
@@ -97,12 +105,9 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
 		txid,
 		utxoSet,
 		height,
-		0,
 		blockMTP,
 		chainID,
-		coreExtProfiles,
-		nil,
-		nil,
+		ApplyNonCoinbaseTxSuiteContext{CoreExtProfiles: coreExtProfiles},
 	)
 }
 
@@ -114,15 +119,12 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
 	txid [32]byte,
 	utxoSet map[Outpoint]UtxoEntry,
 	height uint64,
-	_ uint64,
 	blockMTP uint64,
 	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
-	rotation RotationProvider,
-	registry *SuiteRegistry,
+	suiteContext ApplyNonCoinbaseTxSuiteContext,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	if coreExtProfiles == nil {
-		coreExtProfiles = EmptyCoreExtProfileProvider()
+	if suiteContext.CoreExtProfiles == nil {
+		suiteContext.CoreExtProfiles = EmptyCoreExtProfileProvider()
 	}
 	work := cloneUtxoSet(utxoSet)
 	work, fee, err := applyNonCoinbaseTxBasicWork(nonCoinbaseApplyWorkInput{
@@ -132,9 +134,9 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
 		height:          height,
 		blockMTP:        blockMTP,
 		chainID:         chainID,
-		coreExtProfiles: coreExtProfiles,
-		rotation:        rotation,
-		registry:        registry,
+		coreExtProfiles: suiteContext.CoreExtProfiles,
+		rotation:        suiteContext.Rotation,
+		registry:        suiteContext.Registry,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -177,6 +179,8 @@ func checkSpendCovenant(
 	case COV_TYPE_CORE_STEALTH:
 		_, err := ParseStealthCovenantData(covData)
 		return err
+	case COV_TYPE_CORE_SIMPLICITY:
+		return nil
 	default:
 		// Reserved/unknown are unsupported in basic apply path.
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in basic apply")

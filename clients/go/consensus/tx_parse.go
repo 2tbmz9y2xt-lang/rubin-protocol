@@ -427,50 +427,68 @@ func validateWitnessItemLengths(item WitnessItem, pubLen int, sigLen int) error 
 	return nil
 }
 
-func validateSimplicityEnvelopeSignature(sig []byte) error {
+type parsedSimplicityEnvelope struct {
+	program []byte
+	witness []byte
+}
+
+func parseSimplicityEnvelopeSignature(sig []byte) (parsedSimplicityEnvelope, error) {
+	var parsed parsedSimplicityEnvelope
 	if len(sig) < 2 {
-		return txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")
+		return parsed, txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")
 	}
-	envelope := sig[:len(sig)-1]
+	envelope, _, err := extractCryptoSigAndSighash(WitnessItem{Signature: sig})
+	if err != nil {
+		return parsed, err
+	}
 	if len(envelope) > MAX_SIMPLICITY_ENVELOPE_BYTES {
-		return txerr(TX_ERR_PARSE, "Simplicity envelope too large")
+		return parsed, txerr(TX_ERR_PARSE, "Simplicity envelope too large")
 	}
 	off := 0
 
 	version, err := readU8(envelope, &off)
 	if err != nil {
-		return err
+		return parsed, err
 	}
 	if version != 0x01 {
-		return txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")
+		return parsed, txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")
 	}
 	programLenU64, _, err := readCompactSize(envelope, &off)
 	if err != nil {
-		return err
+		return parsed, err
 	}
 	if programLenU64 > MAX_SIMPLICITY_PROGRAM_BYTES {
-		return txerr(TX_ERR_PARSE, "Simplicity program too large")
+		return parsed, txerr(TX_ERR_PARSE, "Simplicity program too large")
 	}
 	if programLenU64 > uint64(math.MaxInt) {
-		return txerr(TX_ERR_PARSE, "Simplicity program_len overflows int")
+		return parsed, txerr(TX_ERR_PARSE, "Simplicity program_len overflows int")
 	}
-	if _, err := readBytes(envelope, &off, int(programLenU64)); err != nil {
-		return err
+	program, err := readBytes(envelope, &off, int(programLenU64))
+	if err != nil {
+		return parsed, err
 	}
 	witnessLenU64, _, err := readCompactSize(envelope, &off)
 	if err != nil {
-		return err
+		return parsed, err
 	}
 	if witnessLenU64 > uint64(math.MaxInt) {
-		return txerr(TX_ERR_PARSE, "Simplicity witness_len overflows int")
+		return parsed, txerr(TX_ERR_PARSE, "Simplicity witness_len overflows int")
 	}
-	if _, err := readBytes(envelope, &off, int(witnessLenU64)); err != nil {
-		return err
+	witness, err := readBytes(envelope, &off, int(witnessLenU64))
+	if err != nil {
+		return parsed, err
 	}
 	if off != len(envelope) {
-		return txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")
+		return parsed, txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")
 	}
-	return nil
+	parsed.program = program
+	parsed.witness = witness
+	return parsed, nil
+}
+
+func validateSimplicityEnvelopeSignature(sig []byte) error {
+	_, err := parseSimplicityEnvelopeSignature(sig)
+	return err
 }
 
 func isCanonicalSentinelWitnessItem(pubLen int, sig []byte) bool {

@@ -356,9 +356,6 @@ func applyNonCoinbaseTxBasicWorkQ(
 			}
 		}
 
-		if entry.CovenantType == COV_TYPE_CORE_SIMPLICITY {
-			return nil, 0, rejectCoreSimplicitySpend()
-		}
 		if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
 			return nil, 0, err
 		}
@@ -383,22 +380,30 @@ func applyNonCoinbaseTxBasicWorkQ(
 		return nil, 0, txerr(TX_ERR_PARSE, "witness_count mismatch")
 	}
 
-	if err := rejectCoreSimplicitySpendIfPresent(resolvedInputs); err != nil {
-		return nil, 0, err
-	}
-
-	txContextExtIDs, err := collectTxContextExtIDs(resolvedInputs, height, coreExtProfiles)
-	if err != nil {
-		return nil, 0, err
-	}
 	var txContext *TxContextBundle
-	if len(txContextExtIDs) != 0 {
+	ensureTxContext := func() error {
+		if txContext != nil {
+			return nil
+		}
+		txContextExtIDs, err := collectTxContextExtIDs(resolvedInputs, height, coreExtProfiles)
+		if err != nil {
+			return err
+		}
+		if len(txContextExtIDs) == 0 {
+			return nil
+		}
 		outputExtIDCache, err := BuildTxContextOutputExtIDCache(tx)
 		if err != nil {
-			return nil, 0, err
+			return err
 		}
 		txContext, err = BuildTxContext(tx, resolvedInputs, outputExtIDCache, height, coreExtProfiles)
 		if err != nil {
+			return err
+		}
+		return nil
+	}
+	if !hasCoreSimplicityInput(resolvedInputs) {
+		if err := ensureTxContext(); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -477,6 +482,9 @@ func applyNonCoinbaseTxBasicWorkQ(
 			if len(assigned) != CORE_EXT_WITNESS_SLOTS {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
 			}
+			if err := ensureTxContext(); err != nil {
+				return nil, 0, err
+			}
 			if err := validateCoreExtSpendQ(
 				entry,
 				assigned[0],
@@ -499,6 +507,13 @@ func applyNonCoinbaseTxBasicWorkQ(
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
 			}
 			if err := validateCoreStealthSpendQ(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache, sigQueue, rotation, registry); err != nil {
+				return nil, 0, err
+			}
+		case COV_TYPE_CORE_SIMPLICITY:
+			if len(assigned) != SIMPLICITY_WITNESS_SLOTS {
+				return nil, 0, txerr(TX_ERR_PARSE, "CORE_SIMPLICITY witness_slots must be 1")
+			}
+			if err := validateCoreSimplicitySpend(entry, assigned[0], tx, height, chainID, resolvedInputs); err != nil {
 				return nil, 0, err
 			}
 		default:

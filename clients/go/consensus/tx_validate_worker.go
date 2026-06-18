@@ -26,6 +26,8 @@ type TxValidationResult struct {
 }
 
 type txValidationWorkerEnv struct {
+	tx              *Tx
+	resolvedInputs  []UtxoEntry
 	chainID         [32]byte
 	blockHeight     uint64
 	blockMTP        uint64
@@ -74,18 +76,16 @@ func ValidateTxLocal(
 		result.Err = txerr(TX_ERR_PARSE, "txcontext resolved input count mismatch")
 		return result
 	}
-	if err := rejectCoreSimplicitySpendIfPresent(tvc.ResolvedInputs); err != nil {
-		result.Err = err
-		return result
-	}
 	env := newTxValidationWorkerEnv(tvc, chainID, blockHeight, blockMTP, coreExtProfiles, sigCache)
 
-	txContext, err := buildWorkerTxContext(tx, tvc.ResolvedInputs, env)
-	if err != nil {
-		result.Err = err
-		return result
+	if !hasCoreSimplicityInput(tvc.ResolvedInputs) {
+		txContext, err := buildWorkerTxContext(tx, tvc.ResolvedInputs, env)
+		if err != nil {
+			result.Err = err
+			return result
+		}
+		env.txContext = txContext
 	}
-	env.txContext = txContext
 
 	if err := validateTxLocalInputs(tvc, tx, env); err != nil {
 		result.Err = err
@@ -112,6 +112,8 @@ func newTxValidationWorkerEnv(
 		sigQueue.WithCache(sigCache)
 	}
 	return txValidationWorkerEnv{
+		tx:              tvc.Tx,
+		resolvedInputs:  tvc.ResolvedInputs,
 		chainID:         chainID,
 		blockHeight:     blockHeight,
 		blockMTP:        blockMTP,
@@ -202,7 +204,7 @@ func validateInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) err
 	case COV_TYPE_CORE_STEALTH:
 		return validateCoreStealthInputSpendQ(check, env)
 	case COV_TYPE_CORE_SIMPLICITY:
-		return rejectCoreSimplicitySpend()
+		return validateCoreSimplicityInputSpendQ(check, env)
 	default:
 		// Other covenant types have no spend-time checks in the genesis set.
 		return nil
@@ -273,6 +275,13 @@ func validateCoreStealthInputSpendQ(check txInputSpendCheck, env txValidationWor
 	)
 }
 
+func validateCoreSimplicityInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+	if len(check.assigned) != SIMPLICITY_WITNESS_SLOTS {
+		return txerr(TX_ERR_PARSE, "CORE_SIMPLICITY witness_slots must be 1")
+	}
+	return validateCoreSimplicitySpend(check.entry, check.assigned[0], check.tx, env.blockHeight, env.chainID, env.resolvedInputs)
+}
+
 // validateCoreExtSpendQ is the queue-aware CORE_EXT spend validator, extracted
 // from the inline logic in applyNonCoinbaseTxBasicWorkQ. ML-DSA-87 signatures
 // are deferred to sigQueue; external verifiers (non-ML-DSA suites) are called
@@ -341,6 +350,13 @@ func validateCoreExtSpendQWithEnv(check txInputSpendCheck, w WitnessItem, env tx
 	case !ok || !profile.Active:
 		return nil
 	default:
+		if env.txContext == nil {
+			txContext, err := buildWorkerTxContext(env.tx, env.resolvedInputs, env)
+			if err != nil {
+				return err
+			}
+			env.txContext = txContext
+		}
 		return validateCoreExtWitnessAtHeight(coreExtWitnessValidation{
 			cd:           cd,
 			profile:      profile,

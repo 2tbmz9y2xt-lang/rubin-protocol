@@ -2193,12 +2193,13 @@ func runFromStdin() {
 			txid,
 			utxos,
 			req.Height,
-			req.BlockTimestamp,
 			blockMTP,
 			chainID,
-			coreExtProfiles,
-			rotation,
-			registry,
+			consensus.ApplyNonCoinbaseTxSuiteContext{
+				CoreExtProfiles: coreExtProfiles,
+				Rotation:        rotation,
+				Registry:        registry,
+			},
 		)
 		if err != nil {
 			writeConsensusErr(os.Stdout, err)

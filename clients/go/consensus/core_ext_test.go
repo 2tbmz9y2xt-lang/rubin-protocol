@@ -774,11 +774,11 @@ func TestApplyNonCoinbaseTxBasicUpdate_CORE_EXT_TxContextStep3cAndDispatch(t *te
 		utxos,
 		1,
 		0,
-		0,
 		chainID,
-		profiles,
-		nativeRotationProvider{},
-		nil,
+		ApplyNonCoinbaseTxSuiteContext{
+			CoreExtProfiles: profiles,
+			Rotation:        nativeRotationProvider{},
+		},
 	); err != nil {
 		t.Fatalf("ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext: %v", err)
 	}
@@ -830,11 +830,11 @@ func TestApplyNonCoinbaseTxBasicUpdate_CORE_EXT_TxContextMalformedOutputFailsBef
 		utxos,
 		1,
 		0,
-		0,
 		chainID,
-		profiles,
-		nativeRotationProvider{},
-		nil,
+		ApplyNonCoinbaseTxSuiteContext{
+			CoreExtProfiles: profiles,
+			Rotation:        nativeRotationProvider{},
+		},
 	)
 	if err == nil {
 		t.Fatalf("expected error")
@@ -901,11 +901,11 @@ func TestApplyNonCoinbaseTxBasicUpdate_CORE_EXT_TxContextTooManyContinuingOutput
 		utxos,
 		1,
 		0,
-		0,
 		chainID,
-		profiles,
-		nativeRotationProvider{},
-		nil,
+		ApplyNonCoinbaseTxSuiteContext{
+			CoreExtProfiles: profiles,
+			Rotation:        nativeRotationProvider{},
+		},
 	)
 	if err == nil {
 		t.Fatalf("expected error")
@@ -1067,11 +1067,12 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_RotatedNativeSuiteUsesRegistryPath(t *
 		utxos,
 		0,
 		0,
-		0,
 		chainID,
-		profiles,
-		&mockRotationProvider{h2: 0},
-		registry,
+		ApplyNonCoinbaseTxSuiteContext{
+			CoreExtProfiles: profiles,
+			Rotation:        &mockRotationProvider{h2: 0},
+			Registry:        registry,
+		},
 	)
 	if err == nil {
 		t.Fatalf("expected invalid signature error")

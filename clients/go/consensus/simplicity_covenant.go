@@ -1,20 +1,13 @@
 package consensus
 
+import (
+	"errors"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus/simplicity"
+)
+
 type SimplicityDeploymentProvider interface {
 	SimplicityActiveAtHeight(height uint64) (bool, error)
-}
-
-func rejectCoreSimplicitySpend() error {
-	return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-}
-
-func rejectCoreSimplicitySpendIfPresent(inputs []UtxoEntry) error {
-	for _, input := range inputs {
-		if input.CovenantType == COV_TYPE_CORE_SIMPLICITY {
-			return rejectCoreSimplicitySpend()
-		}
-	}
-	return nil
 }
 
 func simplicityDeploymentFromRotation(rotation RotationProvider) SimplicityDeploymentProvider {
@@ -23,6 +16,15 @@ func simplicityDeploymentFromRotation(rotation RotationProvider) SimplicityDeplo
 		return nil
 	}
 	return provider
+}
+
+func hasCoreSimplicityInput(inputs []UtxoEntry) bool {
+	for _, input := range inputs {
+		if input.CovenantType == COV_TYPE_CORE_SIMPLICITY {
+			return true
+		}
+	}
+	return false
 }
 
 func parseCoreSimplicityCovenantData(value uint64, covenantData []byte) ([32]byte, []byte, error) {
@@ -69,4 +71,44 @@ func validateCoreSimplicityDeploymentActive(height uint64, provider SimplicityDe
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
 	}
 	return nil
+}
+
+func validateCoreSimplicitySpend(entry UtxoEntry, witness WitnessItem, tx *Tx, blockHeight uint64, chainID [32]byte, resolvedInputs []UtxoEntry) error {
+	if witness.SuiteID != SUITE_ID_SIMPLICITY_ENVELOPE {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_SIMPLICITY witness suite must be 0xF0")
+	}
+	envelope, err := parseSimplicityEnvelopeSignature(witness.Signature)
+	if err != nil {
+		return err
+	}
+	if _, err := BuildSimplicityTxContext(tx, resolvedInputs, blockHeight, chainID); err != nil {
+		return err
+	}
+	programCMR, _, err := parseCoreSimplicityCovenantData(entry.Value, entry.CovenantData)
+	if err != nil {
+		return err
+	}
+	program, err := simplicity.Decode(envelope.program, envelope.witness, simplicity.DecodeOptions{
+		SemanticsVersion:   simplicity.SemanticsVersion,
+		CovenantProgramCMR: &programCMR,
+	})
+	if err != nil {
+		return simplicityEvalError(err)
+	}
+	result, err := program.Evaluate(simplicity.EvalOptions{})
+	if err != nil {
+		return simplicityEvalError(err)
+	}
+	if !result.Accepted {
+		return txerr(TX_ERR_SIMPLICITY_REJECTED, "CORE_SIMPLICITY program rejected")
+	}
+	return nil
+}
+
+func simplicityEvalError(err error) error {
+	var simErr *simplicity.Error
+	if errors.As(err, &simErr) {
+		return txerr(ErrorCode(simErr.Code), string(simErr.Code))
+	}
+	return err
 }

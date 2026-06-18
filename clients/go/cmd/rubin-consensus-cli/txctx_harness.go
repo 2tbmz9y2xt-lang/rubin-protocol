@@ -775,11 +775,8 @@ func runTxctxSpendVector(req Request) Response {
 		utxos,
 		tc.Height,
 		0,
-		0,
 		chainID,
-		provider,
-		nil,
-		nil,
+		consensus.ApplyNonCoinbaseTxSuiteContext{CoreExtProfiles: provider},
 	)
 	if err != nil {
 		return Response{Ok: false, Err: txctxErrCode(err), Diagnostics: diag.responseMap()}

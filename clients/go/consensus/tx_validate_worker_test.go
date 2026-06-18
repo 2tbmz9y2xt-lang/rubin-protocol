@@ -212,7 +212,7 @@ func TestValidateTxLocal_WitnessCountMismatch(t *testing.T) {
 	}
 }
 
-func TestValidateTxLocal_CoreSimplicitySpendRejected(t *testing.T) {
+func TestValidateTxLocal_CoreSimplicityRejectsWrongSuite(t *testing.T) {
 	var prevTxid [32]byte
 	prevTxid[0] = 0x66
 	tx := &Tx{
@@ -237,10 +237,10 @@ func TestValidateTxLocal_CoreSimplicitySpendRejected(t *testing.T) {
 	}
 
 	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
-	assertTxErrCodeMsg(t, result.Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+	assertTxErrCodeMsg(t, result.Err, TX_ERR_SIG_ALG_INVALID, "CORE_SIMPLICITY witness suite must be 0xF0")
 }
 
-func TestValidateTxLocal_CoreSimplicityRejectsBeforeTxContextLookup(t *testing.T) {
+func TestValidateTxLocal_CoreSimplicityErrorPrecedesLaterCoreExtLookup(t *testing.T) {
 	prevSimplicity := hashWithPrefix(0x67)
 	prevCoreExt := hashWithPrefix(0x68)
 	tx := &Tx{
@@ -275,25 +275,23 @@ func TestValidateTxLocal_CoreSimplicityRejectsBeforeTxContextLookup(t *testing.T
 	}
 
 	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, errCoreExtProfileProvider{}, nil)
-	assertTxErrCodeMsg(t, result.Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+	assertTxErrCodeMsg(t, result.Err, TX_ERR_SIG_ALG_INVALID, "CORE_SIMPLICITY witness suite must be 0xF0")
 }
 
-func TestValidateTxLocal_CoreSimplicityInputGroupCapDeferredBehindDisabledSpend(t *testing.T) {
-	cmr := [32]byte{0x67}
-	run := func(inputCount int, splitLast bool) TxValidationResult {
+func TestValidateTxLocal_CoreSimplicityInputGroupCapAfterDispatch(t *testing.T) {
+	run := func(inputCount int, splitLast bool, witness WitnessItem) TxValidationResult {
 		t.Helper()
-		outputs := []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}}
 		tx := &Tx{
 			Version: 1,
 			TxKind:  0x00,
 			TxNonce: 1,
 			Inputs:  make([]TxInput, inputCount),
-			Outputs: outputs,
+			Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
 			Witness: dummyWitnesses(inputCount * SIMPLICITY_WITNESS_SLOTS),
 		}
 		resolved := make([]UtxoEntry, inputCount)
 		for i := range tx.Inputs {
-			inputCMR := cmr
+			inputCMR := coreSimplicityAcceptCMR
 			if splitLast && i == len(tx.Inputs)-1 {
 				inputCMR = [32]byte{0x68}
 			}
@@ -303,6 +301,10 @@ func TestValidateTxLocal_CoreSimplicityInputGroupCapDeferredBehindDisabledSpend(
 				CovenantType: COV_TYPE_CORE_SIMPLICITY,
 				CovenantData: encodeSimplicityCovenantData(inputCMR, []byte{byte(i)}),
 			}
+		}
+		tx.Witness = make([]WitnessItem, inputCount)
+		for i := range tx.Witness {
+			tx.Witness[i] = witness
 		}
 		sighashCache, err := NewSighashV1PrehashCache(tx)
 		if err != nil {
@@ -320,9 +322,12 @@ func TestValidateTxLocal_CoreSimplicityInputGroupCapDeferredBehindDisabledSpend(
 		}, [32]byte{}, 1, 0, nil, nil)
 	}
 
-	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS, false).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS+1, true).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS+1, false).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+	if result := run(SIMPLICITY_MAX_GROUP_INPUTS, false, coreSimplicityAcceptWitness()); !result.Valid || result.Err != nil {
+		t.Fatalf("exact group cap result = %#v", result)
+	}
+	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS+1, true, coreSimplicityAcceptWitness()).Err, TX_ERR_SIMPLICITY_CMR_MISMATCH, "TX_ERR_SIMPLICITY_CMR_MISMATCH")
+	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS+1, false, coreSimplicityAcceptWitness()).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY same-cmr input group exceeds limit")
+	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS+1, false, WitnessItem{SuiteID: SUITE_ID_SIMPLICITY_ENVELOPE, Signature: simplicityEnvelopeSignature([]byte{0x25}, nil, SIGHASH_ALL)}).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY same-cmr input group exceeds limit")
 }
 
 func TestValidateTxLocal_WithSigCache(t *testing.T) {

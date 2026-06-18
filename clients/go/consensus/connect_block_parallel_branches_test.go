@@ -1633,7 +1633,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CheckSpendCovenantError(t *testing.T) {
 	}
 }
 
-func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicitySpendRejected(t *testing.T) {
+func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicityRejectsWrongSuite(t *testing.T) {
 	prevTxid := hashWithPrefix(0xEF)
 	utxoSet := map[Outpoint]UtxoEntry{
 		{Txid: prevTxid, Vout: 0}: {
@@ -1647,10 +1647,10 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicitySpendRejected(t *testing.T) 
 	q := NewSigCheckQueue(1)
 
 	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxoSet, 1, 0, [32]byte{}, nil, q, nil, nil)
-	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+	assertTxErrCodeMsg(t, err, TX_ERR_SIG_ALG_INVALID, "CORE_SIMPLICITY witness suite must be 0xF0")
 }
 
-func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicityRejectsBeforeWitnessChecks(t *testing.T) {
+func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicityRequiresWitness(t *testing.T) {
 	prevTxid := hashWithPrefix(0xEE)
 	utxoSet := map[Outpoint]UtxoEntry{
 		{Txid: prevTxid, Vout: 0}: {
@@ -1672,7 +1672,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicityRejectsBeforeWitnessChecks(t
 	if work != nil || fee != 0 || q.Len() != 0 {
 		t.Fatalf("expected no queued mutation/sigs on reject, got work=%v fee=%d sigs=%d", work, fee, q.Len())
 	}
-	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+	assertTxErrCodeMsg(t, err, TX_ERR_PARSE, "witness underflow")
 }
 
 func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityOutputGroupingShadowOnly(t *testing.T) {
@@ -1694,7 +1694,15 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityOutputGroupingShadowOnly(t 
 	rotation := testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87, simplicityActiveHeight: 1}
 	outputCount := 9
 
-	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(makeTx(outputCount), hashWithPrefix(0xF1), utxoSet, 1, 0, 0, [32]byte{}, nil, rotation, nil)
+	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
+		makeTx(outputCount),
+		hashWithPrefix(0xF1),
+		utxoSet,
+		1,
+		0,
+		[32]byte{},
+		ApplyNonCoinbaseTxSuiteContext{Rotation: rotation},
+	)
 	if err != nil {
 		t.Fatalf("sequential same-CMR output grouping is shadow-only in this slice: %v", err)
 	}
@@ -1711,9 +1719,9 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityOutputGroupingShadowOnly(t 
 	}
 }
 
-func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityInputGroupCapDeferredBehindDisabledSpend(t *testing.T) {
-	makeCase := func(inputCount int, splitLast bool) (*Tx, [32]byte, map[Outpoint]UtxoEntry) {
-		tx := &Tx{Version: 1, TxKind: 0x00, TxNonce: 1, Inputs: make([]TxInput, inputCount), Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}}, Witness: dummyWitnesses(inputCount * SIMPLICITY_WITNESS_SLOTS)}
+func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityWrongSuitePrecedesInputGroupCap(t *testing.T) {
+	makeCase := func(inputCount int, splitLast bool, witness WitnessItem) (*Tx, [32]byte, map[Outpoint]UtxoEntry) {
+		tx := &Tx{Version: 1, TxKind: 0x00, TxNonce: 1, Inputs: make([]TxInput, inputCount), Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}}, Witness: make([]WitnessItem, inputCount)}
 		utxos := make(map[Outpoint]UtxoEntry, inputCount)
 		for i := range tx.Inputs {
 			cmr := [32]byte{0xf6}
@@ -1722,20 +1730,21 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityInputGroupCapDeferredBehind
 			}
 			prev := hashWithPrefix(byte(0x80 + i))
 			tx.Inputs[i] = TxInput{PrevTxid: prev, PrevVout: 0}
+			tx.Witness[i] = witness
 			utxos[Outpoint{Txid: prev, Vout: 0}] = UtxoEntry{Value: 1, CovenantType: COV_TYPE_CORE_SIMPLICITY, CovenantData: encodeSimplicityCovenantData(cmr, nil)}
 		}
 		return tx, hashWithPrefix(0xf8), utxos
 	}
-	runSeq := func(inputCount int, splitLast bool) error {
-		tx, txid, utxos := makeCase(inputCount, splitLast)
-		work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(tx, txid, utxos, 1, 0, 0, [32]byte{}, nil, nil, nil)
+	runSeq := func(inputCount int, splitLast bool, witness WitnessItem) error {
+		tx, txid, utxos := makeCase(inputCount, splitLast, witness)
+		work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(tx, txid, utxos, 1, 0, [32]byte{}, ApplyNonCoinbaseTxSuiteContext{})
 		if work != nil || summary != nil {
 			t.Fatalf("expected no sequential mutation on reject, got work=%v summary=%v", work, summary)
 		}
 		return err
 	}
-	runQ := func(inputCount int, splitLast bool) error {
-		tx, txid, utxos := makeCase(inputCount, splitLast)
+	runQ := func(inputCount int, splitLast bool, witness WitnessItem) error {
+		tx, txid, utxos := makeCase(inputCount, splitLast, witness)
 		q := NewSigCheckQueue(1)
 		work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
 		if work != nil || fee != 0 || q.Len() != 0 {
@@ -1743,12 +1752,11 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityInputGroupCapDeferredBehind
 		}
 		return err
 	}
-	assertTxErrCodeMsg(t, runSeq(SIMPLICITY_MAX_GROUP_INPUTS, false), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	assertTxErrCodeMsg(t, runSeq(SIMPLICITY_MAX_GROUP_INPUTS+1, true), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	assertTxErrCodeMsg(t, runSeq(SIMPLICITY_MAX_GROUP_INPUTS+1, false), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	assertTxErrCodeMsg(t, runQ(SIMPLICITY_MAX_GROUP_INPUTS, false), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	assertTxErrCodeMsg(t, runQ(SIMPLICITY_MAX_GROUP_INPUTS+1, true), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	assertTxErrCodeMsg(t, runQ(SIMPLICITY_MAX_GROUP_INPUTS+1, false), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+	badProgram := WitnessItem{SuiteID: SUITE_ID_SIMPLICITY_ENVELOPE, Signature: simplicityEnvelopeSignature([]byte{0x25}, nil, SIGHASH_ALL)}
+	for _, run := range []func(int, bool, WitnessItem) error{runSeq, runQ} {
+		assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS+1, false, WitnessItem{SuiteID: SUITE_ID_SENTINEL}), TX_ERR_SIG_ALG_INVALID, "CORE_SIMPLICITY witness suite must be 0xF0")
+		assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS+1, false, badProgram), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY same-cmr input group exceeds limit")
+	}
 }
 
 // TestApplyNonCoinbaseTxBasicWorkQ_P2PKSpendQError exercises line 326:
