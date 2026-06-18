@@ -70,7 +70,7 @@ func ValidateTxLocal(
 		result.Err = txerr(TX_ERR_PARSE, "nil tx in TxValidationContext")
 		return result
 	}
-	if !txValidationInputCountMatches(tx, tvc.ResolvedInputs) {
+	if len(tx.Inputs) != len(tvc.ResolvedInputs) {
 		result.Err = txerr(TX_ERR_PARSE, "txcontext resolved input count mismatch")
 		return result
 	}
@@ -93,16 +93,6 @@ func ValidateTxLocal(
 	}
 	finishTxValidationResult(&result, env.sigQueue)
 	return result
-}
-
-func txValidationInputCountMatches(tx *Tx, resolvedInputs []UtxoEntry) bool {
-	if len(tx.Inputs) == len(resolvedInputs) {
-		return true
-	}
-	if len(resolvedInputs) == 0 || len(resolvedInputs) >= len(tx.Inputs) {
-		return false
-	}
-	return resolvedInputs[len(resolvedInputs)-1].CovenantType == COV_TYPE_CORE_SIMPLICITY
 }
 
 func newTxValidationWorkerEnv(

@@ -399,23 +399,31 @@ func TestPrecomputeTxContexts_CoreSimplicityStopsWitnessPrecompute(t *testing.T)
 			}
 			pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx})
 
-			results, err := PrecomputeTxContexts(pb, utxos, 100)
-			if err != nil {
-				t.Fatalf("unexpected precompute error: %v", err)
-			}
-			if len(results) != 1 {
-				t.Fatalf("expected 1 context, got %d", len(results))
-			}
-			ctx := results[0]
-			if ctx.WitnessStart != 0 || ctx.WitnessEnd != 1 {
-				t.Fatalf("witness bounds: got [%d,%d), want [0,1)", ctx.WitnessStart, ctx.WitnessEnd)
-			}
-			if len(ctx.ResolvedInputs) != 2 {
-				t.Fatalf("resolved inputs: got %d, want 2", len(ctx.ResolvedInputs))
-			}
-			assertTxErrCodeMsg(t, ValidateTxLocal(ctx, [32]byte{}, 100, 0, nil, nil).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+			_, err := PrecomputeTxContexts(pb, utxos, 100)
+			assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
 		})
 	}
+
+	t.Run("does_not_overlay_invalid_simplicity_outputs", func(t *testing.T) {
+		utxos := map[Outpoint]UtxoEntry{
+			{Txid: simpPrev, Vout: 0}: coreSimplicityAcceptEntry(100),
+		}
+		tx1 := &Tx{
+			Version: 1, TxKind: 0x00, TxNonce: 1,
+			Inputs:  []TxInput{{PrevTxid: simpPrev, PrevVout: 0, Sequence: 0}},
+			Outputs: []TxOutput{{Value: 50, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		}
+		tx1Txid := sha3_256([]byte{byte(1)})
+		tx2 := &Tx{
+			Version: 1, TxKind: 0x00, TxNonce: 2,
+			Inputs:  []TxInput{{PrevTxid: tx1Txid, PrevVout: 0, Sequence: 0}},
+			Outputs: []TxOutput{{Value: 40, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		}
+		pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx1, tx2})
+
+		_, err := PrecomputeTxContexts(pb, utxos, 100)
+		assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+	})
 }
 
 func TestPrecomputeTxContexts_WitnessCountMismatch(t *testing.T) {

@@ -136,13 +136,14 @@ func precomputeTxContext(
 	if err != nil {
 		return TxValidationContext{}, err
 	}
+	if inputs.StoppedAtCoreSimplicity {
+		return TxValidationContext{}, rejectCoreSimplicitySpend()
+	}
 
 	var fee uint64
-	if !inputs.StoppedAtCoreSimplicity {
-		fee, err = computePrecomputeFee(inputs.SumIn, tx.Outputs)
-		if err != nil {
-			return TxValidationContext{}, err
-		}
+	fee, err = computePrecomputeFee(inputs.SumIn, tx.Outputs)
+	if err != nil {
+		return TxValidationContext{}, err
 	}
 
 	sighashCache, err := NewSighashV1PrehashCache(tx)
