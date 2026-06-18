@@ -2,9 +2,8 @@
 // library and RUB-485 evaluation/metering library for the closed RUB-561
 // artifact subset.
 //
-// This package is deliberately not wired into consensus dispatch. Do not call it
-// from validation paths until the matching Rust parity and shared conformance
-// slices land.
+// Consensus dispatch remains reject-only until the staged Go dispatch, Rust
+// parity, and shared conformance slices land.
 package simplicity
 
 import (
