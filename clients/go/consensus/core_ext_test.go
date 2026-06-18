@@ -16,6 +16,16 @@ func (m staticCoreExtProfiles) LookupCoreExtProfile(extID uint16, _ uint64) (Cor
 	return p, ok, nil
 }
 
+type countingCoreExtProfiles struct {
+	profile CoreExtProfile
+	calls   int
+}
+
+func (p *countingCoreExtProfiles) LookupCoreExtProfile(uint16, uint64) (CoreExtProfile, bool, error) {
+	p.calls++
+	return p.profile, true, nil
+}
+
 type nativeRotationProvider struct{}
 
 func (nativeRotationProvider) NativeCreateSuites(uint64) *NativeSuiteSet {
@@ -774,11 +784,11 @@ func TestApplyNonCoinbaseTxBasicUpdate_CORE_EXT_TxContextStep3cAndDispatch(t *te
 		utxos,
 		1,
 		0,
+		0,
 		chainID,
-		ApplyNonCoinbaseTxSuiteContext{
-			CoreExtProfiles: profiles,
-			Rotation:        nativeRotationProvider{},
-		},
+		profiles,
+		nativeRotationProvider{},
+		nil,
 	); err != nil {
 		t.Fatalf("ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext: %v", err)
 	}
@@ -830,11 +840,11 @@ func TestApplyNonCoinbaseTxBasicUpdate_CORE_EXT_TxContextMalformedOutputFailsBef
 		utxos,
 		1,
 		0,
+		0,
 		chainID,
-		ApplyNonCoinbaseTxSuiteContext{
-			CoreExtProfiles: profiles,
-			Rotation:        nativeRotationProvider{},
-		},
+		profiles,
+		nativeRotationProvider{},
+		nil,
 	)
 	if err == nil {
 		t.Fatalf("expected error")
@@ -901,11 +911,11 @@ func TestApplyNonCoinbaseTxBasicUpdate_CORE_EXT_TxContextTooManyContinuingOutput
 		utxos,
 		1,
 		0,
+		0,
 		chainID,
-		ApplyNonCoinbaseTxSuiteContext{
-			CoreExtProfiles: profiles,
-			Rotation:        nativeRotationProvider{},
-		},
+		profiles,
+		nativeRotationProvider{},
+		nil,
 	)
 	if err == nil {
 		t.Fatalf("expected error")
@@ -1067,12 +1077,11 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_RotatedNativeSuiteUsesRegistryPath(t *
 		utxos,
 		0,
 		0,
+		0,
 		chainID,
-		ApplyNonCoinbaseTxSuiteContext{
-			CoreExtProfiles: profiles,
-			Rotation:        &mockRotationProvider{h2: 0},
-			Registry:        registry,
-		},
+		profiles,
+		&mockRotationProvider{h2: 0},
+		registry,
 	)
 	if err == nil {
 		t.Fatalf("expected invalid signature error")
@@ -1137,6 +1146,72 @@ func TestApplyNonCoinbaseTxBasic_CORE_EXT_ActiveSuiteRulesAndVerifySig(t *testin
 	}
 	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_INVALID {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_INVALID)
+	}
+}
+
+func TestCoreExtNoTxContextNeededMemoizedAcrossSpendPaths(t *testing.T) {
+	const inputCount = 3
+	profile := CoreExtProfile{
+		Active:        true,
+		AllowedSuites: map[uint8]struct{}{0x09: {}},
+		VerifySigExtFn: func(uint16, uint8, []byte, []byte, [32]byte, []byte) (bool, error) {
+			return true, nil
+		},
+	}
+	makeCase := func() (*Tx, [32]byte, map[Outpoint]UtxoEntry, []UtxoEntry) {
+		tx := &Tx{
+			Version: TX_WIRE_VERSION,
+			TxNonce: 1,
+			Inputs:  make([]TxInput, inputCount),
+			Outputs: []TxOutput{{Value: 20, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+			Witness: make([]WitnessItem, inputCount),
+		}
+		utxos := make(map[Outpoint]UtxoEntry, inputCount)
+		resolved := make([]UtxoEntry, inputCount)
+		for i := range tx.Inputs {
+			prev := hashWithPrefix(byte(0xb0 + i))
+			tx.Inputs[i] = TxInput{PrevTxid: prev, PrevVout: 0}
+			tx.Witness[i] = WitnessItem{SuiteID: 0x09, Signature: []byte{SIGHASH_ALL}}
+			resolved[i] = UtxoEntry{Value: 10, CovenantType: COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantData(7, nil)}
+			utxos[Outpoint{Txid: prev, Vout: 0}] = resolved[i]
+		}
+		return tx, hashWithPrefix(0xbf), utxos, resolved
+	}
+	runs := []struct {
+		name string
+		run  func(*countingCoreExtProfiles) error
+	}{
+		{"sequential", func(profiles *countingCoreExtProfiles) error {
+			tx, txid, utxos, _ := makeCase()
+			_, _, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(tx, txid, utxos, 1, 0, 0, [32]byte{}, profiles, nil, nil)
+			return err
+		}},
+		{"queued", func(profiles *countingCoreExtProfiles) error {
+			tx, txid, utxos, _ := makeCase()
+			q := NewSigCheckQueue(1)
+			_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxos, 1, 0, [32]byte{}, profiles, q, nil, nil)
+			return err
+		}},
+		{"worker", func(profiles *countingCoreExtProfiles) error {
+			tx, _, _, resolved := makeCase()
+			result := ValidateTxLocal(TxValidationContext{
+				TxIndex:        1,
+				Tx:             tx,
+				ResolvedInputs: resolved,
+				WitnessEnd:     inputCount,
+				Fee:            10,
+			}, [32]byte{}, 1, 0, profiles, nil)
+			return result.Err
+		}},
+	}
+	for _, tc := range runs {
+		profiles := &countingCoreExtProfiles{profile: profile}
+		if err := tc.run(profiles); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if want := inputCount * 2; profiles.calls != want {
+			t.Fatalf("%s profile lookups=%d, want %d", tc.name, profiles.calls, want)
+		}
 	}
 }
 

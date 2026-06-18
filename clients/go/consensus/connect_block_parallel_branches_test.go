@@ -1700,8 +1700,11 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityOutputGroupingShadowOnly(t 
 		utxoSet,
 		1,
 		0,
+		0,
 		[32]byte{},
-		ApplyNonCoinbaseTxSuiteContext{Rotation: rotation},
+		nil,
+		rotation,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("sequential same-CMR output grouping is shadow-only in this slice: %v", err)
@@ -1737,7 +1740,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityWrongSuitePrecedesInputGrou
 	}
 	runSeq := func(inputCount int, splitLast bool, witness WitnessItem) error {
 		tx, txid, utxos := makeCase(inputCount, splitLast, witness)
-		work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(tx, txid, utxos, 1, 0, [32]byte{}, ApplyNonCoinbaseTxSuiteContext{})
+		work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(tx, txid, utxos, 1, 0, 0, [32]byte{}, nil, nil, nil)
 		if work != nil || summary != nil {
 			t.Fatalf("expected no sequential mutation on reject, got work=%v summary=%v", work, summary)
 		}

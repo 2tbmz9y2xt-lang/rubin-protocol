@@ -228,7 +228,7 @@ func (ctx *nonCoinbaseApplyContext) buildTxContext() error {
 }
 
 func (ctx *nonCoinbaseApplyContext) ensureCoreExtTxContext() error {
-	if ctx.txContext != nil {
+	if ctx.txContextChecked {
 		return nil
 	}
 	resolvedEntries := ctx.resolvedEntries()
@@ -237,6 +237,7 @@ func (ctx *nonCoinbaseApplyContext) ensureCoreExtTxContext() error {
 		return err
 	}
 	if len(txContextExtIDs) == 0 {
+		ctx.txContextChecked = true
 		return nil
 	}
 	outputExtIDCache, err := BuildTxContextOutputExtIDCache(ctx.tx)
@@ -247,6 +248,7 @@ func (ctx *nonCoinbaseApplyContext) ensureCoreExtTxContext() error {
 	if err != nil {
 		return err
 	}
+	ctx.txContextChecked = true
 	return nil
 }
 

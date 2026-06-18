@@ -26,18 +26,19 @@ type TxValidationResult struct {
 }
 
 type txValidationWorkerEnv struct {
-	tx              *Tx
-	resolvedInputs  []UtxoEntry
-	chainID         [32]byte
-	blockHeight     uint64
-	blockMTP        uint64
-	sighashCache    *SighashV1PrehashCache
-	coreExtProfiles CoreExtProfileProvider
-	sigQueue        *SigCheckQueue
-	rotation        RotationProvider
-	registry        *SuiteRegistry
-	txContext       *TxContextBundle
-	simplicityCtx   *SimplicityTxContext
+	tx               *Tx
+	resolvedInputs   []UtxoEntry
+	chainID          [32]byte
+	blockHeight      uint64
+	blockMTP         uint64
+	sighashCache     *SighashV1PrehashCache
+	coreExtProfiles  CoreExtProfileProvider
+	sigQueue         *SigCheckQueue
+	rotation         RotationProvider
+	registry         *SuiteRegistry
+	txContext        *TxContextBundle
+	txContextChecked bool
+	simplicityCtx    *SimplicityTxContext
 }
 
 type txInputSpendCheck struct {
@@ -80,12 +81,10 @@ func ValidateTxLocal(
 	env := newTxValidationWorkerEnv(tvc, chainID, blockHeight, blockMTP, coreExtProfiles, sigCache)
 
 	if !hasCoreSimplicityInput(tvc.ResolvedInputs) {
-		txContext, err := buildWorkerTxContext(tx, tvc.ResolvedInputs, env)
-		if err != nil {
+		if err := env.ensureCoreExtTxContext(); err != nil {
 			result.Err = err
 			return result
 		}
-		env.txContext = txContext
 	}
 
 	if err := validateTxLocalInputs(tvc, tx, &env); err != nil {
@@ -142,7 +141,7 @@ func buildWorkerTxContext(tx *Tx, resolvedInputs []UtxoEntry, env txValidationWo
 }
 
 func (env *txValidationWorkerEnv) ensureCoreExtTxContext() error {
-	if env.txContext != nil {
+	if env.txContextChecked {
 		return nil
 	}
 	txContext, err := buildWorkerTxContext(env.tx, env.resolvedInputs, *env)
@@ -150,6 +149,7 @@ func (env *txValidationWorkerEnv) ensureCoreExtTxContext() error {
 		return err
 	}
 	env.txContext = txContext
+	env.txContextChecked = true
 	return nil
 }
 

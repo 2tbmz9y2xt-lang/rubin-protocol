@@ -231,8 +231,11 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityErrorPrecedesLaterCoreExtLo
 		utxos,
 		1,
 		0,
+		0,
 		[32]byte{},
-		ApplyNonCoinbaseTxSuiteContext{CoreExtProfiles: errCoreExtProfileProvider{}},
+		errCoreExtProfileProvider{},
+		nil,
+		nil,
 	)
 	if work != nil || summary != nil {
 		t.Fatalf("expected no mutation on reject, got work=%v summary=%v", work, summary)

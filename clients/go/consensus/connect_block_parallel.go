@@ -381,8 +381,9 @@ func applyNonCoinbaseTxBasicWorkQ(
 	}
 
 	var txContext *TxContextBundle
+	txContextChecked := false
 	ensureTxContext := func() error {
-		if txContext != nil {
+		if txContextChecked {
 			return nil
 		}
 		txContextExtIDs, err := collectTxContextExtIDs(resolvedInputs, height, coreExtProfiles)
@@ -390,6 +391,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 			return err
 		}
 		if len(txContextExtIDs) == 0 {
+			txContextChecked = true
 			return nil
 		}
 		outputExtIDCache, err := BuildTxContextOutputExtIDCache(tx)
@@ -400,6 +402,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 		if err != nil {
 			return err
 		}
+		txContextChecked = true
 		return nil
 	}
 	var simplicityCtx *SimplicityTxContext
