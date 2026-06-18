@@ -115,6 +115,18 @@ func TestValidateTxLocal_NilTx(t *testing.T) {
 	}
 }
 
+func TestValidateTxLocal_ResolvedInputCountMismatchUsesTxContextError(t *testing.T) {
+	tx := &Tx{
+		Version: TX_WIRE_VERSION,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevVout: 0}},
+	}
+
+	result := ValidateTxLocal(TxValidationContext{TxIndex: 1, Tx: tx}, [32]byte{}, 1, 0, nil, nil)
+	assertTxErrCodeMsg(t, result.Err, TX_ERR_PARSE, "txcontext resolved input count mismatch")
+}
+
 func TestValidateTxLocal_WitnessUnderflow(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
@@ -211,10 +223,6 @@ func TestValidateTxLocal_CoreSimplicitySpendRejected(t *testing.T) {
 		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
 		Witness: dummyWitnesses(SIMPLICITY_WITNESS_SLOTS),
 	}
-	sighashCache, err := NewSighashV1PrehashCache(tx)
-	if err != nil {
-		t.Fatalf("NewSighashV1PrehashCache: %v", err)
-	}
 	tvc := TxValidationContext{
 		TxIndex: 1,
 		Tx:      tx,
@@ -225,18 +233,52 @@ func TestValidateTxLocal_CoreSimplicitySpendRejected(t *testing.T) {
 		}},
 		WitnessStart: 0,
 		WitnessEnd:   SIMPLICITY_WITNESS_SLOTS,
-		SighashCache: sighashCache,
 		Fee:          10,
 	}
 
 	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
-	if result.Valid {
-		t.Fatalf("expected invalid CORE_SIMPLICITY spend")
-	}
 	assertTxErrCodeMsg(t, result.Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
 }
 
-func TestValidateTxLocal_CoreSimplicityInputGroupCap(t *testing.T) {
+func TestValidateTxLocal_CoreSimplicityRejectsBeforeTxContextLookup(t *testing.T) {
+	prevSimplicity := hashWithPrefix(0x67)
+	prevCoreExt := hashWithPrefix(0x68)
+	tx := &Tx{
+		Version: TX_WIRE_VERSION,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []TxInput{
+			{PrevTxid: prevSimplicity, PrevVout: 0},
+			{PrevTxid: prevCoreExt, PrevVout: 0},
+		},
+		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Witness: dummyWitnesses(SIMPLICITY_WITNESS_SLOTS + CORE_EXT_WITNESS_SLOTS),
+	}
+	tvc := TxValidationContext{
+		TxIndex: 1,
+		Tx:      tx,
+		ResolvedInputs: []UtxoEntry{
+			{
+				Value:        50,
+				CovenantType: COV_TYPE_CORE_SIMPLICITY,
+				CovenantData: encodeSimplicityCovenantData([32]byte{0x67}, nil),
+			},
+			{
+				Value:        50,
+				CovenantType: COV_TYPE_CORE_EXT,
+				CovenantData: coreExtCovenantData(7, nil),
+			},
+		},
+		WitnessStart: 0,
+		WitnessEnd:   len(tx.Witness),
+		Fee:          10,
+	}
+
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, errCoreExtProfileProvider{}, nil)
+	assertTxErrCodeMsg(t, result.Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+}
+
+func TestValidateTxLocal_CoreSimplicityInputGroupCapDeferredBehindDisabledSpend(t *testing.T) {
 	cmr := [32]byte{0x67}
 	run := func(inputCount int, splitLast bool) TxValidationResult {
 		t.Helper()
@@ -280,7 +322,7 @@ func TestValidateTxLocal_CoreSimplicityInputGroupCap(t *testing.T) {
 
 	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS, false).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
 	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS+1, true).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS+1, false).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY same-cmr input group exceeds limit")
+	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS+1, false).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
 }
 
 func TestValidateTxLocal_WithSigCache(t *testing.T) {

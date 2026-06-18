@@ -356,10 +356,11 @@ func applyNonCoinbaseTxBasicWorkQ(
 			}
 		}
 
-		if entry.CovenantType != COV_TYPE_CORE_SIMPLICITY {
-			if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
-				return nil, 0, err
-			}
+		if entry.CovenantType == COV_TYPE_CORE_SIMPLICITY {
+			return nil, 0, rejectCoreSimplicitySpend()
+		}
+		if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
+			return nil, 0, err
 		}
 
 		slots, err := WitnessSlots(entry.CovenantType, entry.CovenantData)
@@ -382,9 +383,6 @@ func applyNonCoinbaseTxBasicWorkQ(
 		return nil, 0, txerr(TX_ERR_PARSE, "witness_count mismatch")
 	}
 
-	if _, err := BuildSimplicityTxContext(tx, resolvedInputs, height, chainID); err != nil {
-		return nil, 0, err
-	}
 	if err := rejectCoreSimplicitySpendIfPresent(resolvedInputs); err != nil {
 		return nil, 0, err
 	}

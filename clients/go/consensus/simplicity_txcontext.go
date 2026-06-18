@@ -137,13 +137,11 @@ func BuildSimplicityTxContext(tx *Tx, resolvedInputs []UtxoEntry, blockHeight ui
 	if err := populateSimplicityTxContextViews(ctx, tx, resolvedInputs); err != nil {
 		return nil, err
 	}
-	ctx.daView, err = buildSimplicityTxContextDAView(tx)
-	return ctx, err
+	return ctx, nil
 }
 
 func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolvedInputs []UtxoEntry) error {
-	ctx.groupInputs = make(map[[32]byte][]SimplicityTxContextGroupEntry)
-	ctx.groupOutputs = make(map[[32]byte][]SimplicityTxContextGroupEntry)
+	ctx.groupInputs, ctx.groupOutputs = make(map[[32]byte][]SimplicityTxContextGroupEntry), make(map[[32]byte][]SimplicityTxContextGroupEntry)
 
 	for i, entry := range resolvedInputs {
 		ctx.inputViews[i] = SimplicityTxContextIOView{
@@ -153,19 +151,20 @@ func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolved
 		if entry.CovenantType != COV_TYPE_CORE_SIMPLICITY {
 			continue
 		}
-		programCMR, state, err := parseCoreSimplicityCovenantData(entry.CovenantData)
+		programCMR, state, err := parseCoreSimplicityCovenantData(entry.Value, entry.CovenantData)
 		if err != nil {
 			return err
 		}
+		state = append([]byte{}, state...)
 		ctx.selfSources[i] = simplicityTxContextSelfSource{
 			programCMR:       programCMR,
-			state:            append([]byte{}, state...),
+			state:            state,
 			value:            entry.Value,
 			isCoreSimplicity: true,
 		}
 		ctx.groupInputs[programCMR] = append(ctx.groupInputs[programCMR], SimplicityTxContextGroupEntry{
 			Value: entry.Value,
-			State: append([]byte{}, state...),
+			State: state,
 		})
 		if len(ctx.groupInputs[programCMR]) > SIMPLICITY_MAX_GROUP_INPUTS {
 			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY same-cmr input group exceeds limit")
@@ -180,7 +179,7 @@ func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolved
 		if out.CovenantType != COV_TYPE_CORE_SIMPLICITY {
 			continue
 		}
-		programCMR, state, err := parseValidatedCoreSimplicityCovenantData(out.Value, out.CovenantData)
+		programCMR, state, err := parseCoreSimplicityCovenantData(out.Value, out.CovenantData)
 		if err != nil {
 			return err
 		}
@@ -189,7 +188,9 @@ func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolved
 			State: append([]byte{}, state...),
 		})
 	}
-	return nil
+	var err error
+	ctx.daView, err = buildSimplicityTxContextDAView(tx)
+	return err
 }
 
 func buildSimplicityTxContextDAView(tx *Tx) (SimplicityTxContextDAView, error) {
@@ -199,11 +200,8 @@ func buildSimplicityTxContextDAView(tx *Tx) (SimplicityTxContextDAView, error) {
 		view.Kind = SimplicityTxContextDAViewAbsent
 	case 0x01:
 		core := tx.DaCommitCore
-		if core == nil {
-			return SimplicityTxContextDAView{}, txerr(TX_ERR_PARSE, "missing da_commit_core for tx_kind=0x01")
-		}
-		if invalidDaCommitChunkCount(core.ChunkCount) {
-			return SimplicityTxContextDAView{}, txerr(TX_ERR_PARSE, "chunk_count out of range for tx_kind=0x01")
+		if err := validateSimplicityTxContextDACommitCore(core); err != nil {
+			return SimplicityTxContextDAView{}, err
 		}
 		view.Kind = SimplicityTxContextDAViewCommit
 		view.Commit = SimplicityTxContextDACommitView{
@@ -235,6 +233,14 @@ func buildSimplicityTxContextDAView(tx *Tx) (SimplicityTxContextDAView, error) {
 	return view, nil
 }
 
+func validateSimplicityTxContextDACommitCore(core *DaCommitCore) error {
+	switch {
+	case core == nil, invalidDaCommitChunkCount(core.ChunkCount), len(core.BatchSig) > MAX_DA_MANIFEST_BYTES_PER_TX:
+		return txerr(TX_ERR_PARSE, "invalid da_commit_core for tx_kind=0x01")
+	}
+	return nil
+}
+
 func (c *SimplicityTxContext) InputViews() []SimplicityTxContextIOView {
 	return append([]SimplicityTxContextIOView{}, c.inputViews...)
 }
@@ -244,21 +250,27 @@ func (c *SimplicityTxContext) OutputViews() []SimplicityTxContextIOView {
 }
 
 func (c *SimplicityTxContext) SameCMRView(inputIndex uint16) (SimplicityTxContextSameCMRView, error) {
-	source, err := c.selfSource(inputIndex)
-	if err != nil {
-		return SimplicityTxContextSameCMRView{}, err
+	if int(inputIndex) >= len(c.selfSources) {
+		return SimplicityTxContextSameCMRView{}, txerr(TX_ERR_PARSE, "simplicity txcontext self input index out of range")
+	}
+	source := c.selfSources[inputIndex]
+	if !source.isCoreSimplicity {
+		return SimplicityTxContextSameCMRView{}, txerr(TX_ERR_COVENANT_TYPE_INVALID, "simplicity txcontext self input is not CORE_SIMPLICITY")
 	}
 	return SimplicityTxContextSameCMRView{
 		ProgramCMR: source.programCMR,
 		Inputs:     cloneSimplicityGroupEntries(c.groupInputs[source.programCMR]),
 		Outputs:    cloneSimplicityGroupEntries(c.groupOutputs[source.programCMR]),
-	}, err
+	}, nil
 }
 
 func (c *SimplicityTxContext) SelfView(inputIndex uint16, sighashType uint8, digest32 [32]byte) (SimplicityTxContextSelfView, error) {
-	source, err := c.selfSource(inputIndex)
-	if err != nil {
-		return SimplicityTxContextSelfView{}, err
+	if int(inputIndex) >= len(c.selfSources) {
+		return SimplicityTxContextSelfView{}, txerr(TX_ERR_PARSE, "simplicity txcontext self input index out of range")
+	}
+	source := c.selfSources[inputIndex]
+	if !source.isCoreSimplicity {
+		return SimplicityTxContextSelfView{}, txerr(TX_ERR_COVENANT_TYPE_INVALID, "simplicity txcontext self input is not CORE_SIMPLICITY")
 	}
 	return SimplicityTxContextSelfView{
 		InputIndex:     inputIndex,
@@ -267,18 +279,7 @@ func (c *SimplicityTxContext) SelfView(inputIndex uint16, sighashType uint8, dig
 		SelfProgramCMR: source.programCMR,
 		SighashType:    sighashType,
 		Digest32:       digest32,
-	}, err
-}
-
-func (c *SimplicityTxContext) selfSource(inputIndex uint16) (simplicityTxContextSelfSource, error) {
-	if int(inputIndex) >= len(c.selfSources) {
-		return simplicityTxContextSelfSource{}, txerr(TX_ERR_PARSE, "simplicity txcontext self input index out of range")
-	}
-	source := c.selfSources[inputIndex]
-	if !source.isCoreSimplicity {
-		return simplicityTxContextSelfSource{}, txerr(TX_ERR_COVENANT_TYPE_INVALID, "simplicity txcontext self input is not CORE_SIMPLICITY")
-	}
-	return source, nil
+	}, nil
 }
 
 func cloneSimplicityGroupEntries(src []SimplicityTxContextGroupEntry) []SimplicityTxContextGroupEntry {

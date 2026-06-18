@@ -25,15 +25,12 @@ func simplicityDeploymentFromRotation(rotation RotationProvider) SimplicityDeplo
 	return provider
 }
 
-func parseValidatedCoreSimplicityCovenantData(value uint64, covenantData []byte) ([32]byte, []byte, error) {
-	if value == 0 {
-		return [32]byte{}, nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY value must be > 0")
-	}
-	return parseCoreSimplicityCovenantData(covenantData)
-}
-
-func parseCoreSimplicityCovenantData(covenantData []byte) ([32]byte, []byte, error) {
+func parseCoreSimplicityCovenantData(value uint64, covenantData []byte) ([32]byte, []byte, error) {
 	var programCMR [32]byte
+	if value == 0 {
+		return programCMR, nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY value must be > 0")
+	}
+
 	off := 0
 	cmrBytes, err := readBytes(covenantData, &off, 32)
 	if err != nil {

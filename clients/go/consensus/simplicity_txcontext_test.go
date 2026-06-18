@@ -1,6 +1,9 @@
 package consensus
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func makeCoreSimplicityCovenantData(programCMR [32]byte, state []byte) []byte {
 	out := make([]byte, 0, 32+1+len(state))
@@ -192,24 +195,21 @@ func TestBuildSimplicityTxContext_InvalidCoreSimplicityOutputFailsClosed(t *test
 	}
 	resolved := []UtxoEntry{{Value: 1, CovenantType: COV_TYPE_CORE_SIMPLICITY, CovenantData: makeCoreSimplicityCovenantData(cmr, nil)}}
 
-	if _, err := BuildSimplicityTxContext(tx, resolved, 1, [32]byte{}); err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("expected invalid CORE_SIMPLICITY output error, got %v", err)
-	}
+	_, err := BuildSimplicityTxContext(tx, resolved, 1, [32]byte{})
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY value must be > 0")
+
+	tx.Outputs[0].Value = 1
+	resolved[0].Value = 0
+	_, err = BuildSimplicityTxContext(tx, resolved, 1, [32]byte{})
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY value must be > 0")
 }
 
 func isZeroSimplicitySelfView(view SimplicityTxContextSelfView) bool {
-	return view.InputIndex == 0 &&
-		view.SelfValue == 0 &&
-		view.SighashType == 0 &&
-		view.SelfProgramCMR == [32]byte{} &&
-		view.Digest32 == [32]byte{} &&
-		len(view.SelfState) == 0
+	return reflect.DeepEqual(view, SimplicityTxContextSelfView{})
 }
 
 func isZeroSimplicitySameCMRView(view SimplicityTxContextSameCMRView) bool {
-	return view.ProgramCMR == [32]byte{} &&
-		len(view.Inputs) == 0 &&
-		len(view.Outputs) == 0
+	return reflect.DeepEqual(view, SimplicityTxContextSameCMRView{})
 }
 
 func TestBuildSimplicityTxContext_SameCMRInputCap(t *testing.T) {
@@ -294,11 +294,11 @@ func TestBuildSimplicityTxContext_DAView(t *testing.T) {
 		{"unsupported tx kind", &Tx{TxKind: 0x03}},
 		{"zero commit chunk count", &Tx{TxKind: 0x01, DaCommitCore: &DaCommitCore{ChunkCount: 0}}},
 		{"too many commit chunks", &Tx{TxKind: 0x01, DaCommitCore: &DaCommitCore{ChunkCount: uint16(MAX_DA_CHUNK_COUNT + 1)}}},
+		{"oversized batch sig", &Tx{TxKind: 0x01, DaCommitCore: &DaCommitCore{ChunkCount: 1, BatchSig: make([]byte, MAX_DA_MANIFEST_BYTES_PER_TX+1)}}},
 		{"chunk index out of range", &Tx{TxKind: 0x02, DaChunkCore: &DaChunkCore{ChunkIndex: uint16(MAX_DA_CHUNK_COUNT)}}},
 	} {
-		if _, err := build(tc.name, tc.tx); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
-			t.Fatalf("%s: expected DA core parse error, got %v", tc.name, err)
-		}
+		_, err := build(tc.name, tc.tx)
+		assertTxErrCode(t, err, TX_ERR_PARSE)
 	}
 }
 
