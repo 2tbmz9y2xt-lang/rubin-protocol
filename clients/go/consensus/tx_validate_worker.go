@@ -37,6 +37,7 @@ type txValidationWorkerEnv struct {
 	rotation        RotationProvider
 	registry        *SuiteRegistry
 	txContext       *TxContextBundle
+	simplicityCtx   *SimplicityTxContext
 }
 
 type txInputSpendCheck struct {
@@ -87,7 +88,7 @@ func ValidateTxLocal(
 		env.txContext = txContext
 	}
 
-	if err := validateTxLocalInputs(tvc, tx, env); err != nil {
+	if err := validateTxLocalInputs(tvc, tx, &env); err != nil {
 		result.Err = err
 		return result
 	}
@@ -140,7 +141,31 @@ func buildWorkerTxContext(tx *Tx, resolvedInputs []UtxoEntry, env txValidationWo
 	return BuildTxContext(tx, resolvedInputs, outputExtIDCache, env.blockHeight, env.coreExtProfiles)
 }
 
-func validateTxLocalInputs(tvc TxValidationContext, tx *Tx, env txValidationWorkerEnv) error {
+func (env *txValidationWorkerEnv) ensureCoreExtTxContext() error {
+	if env.txContext != nil {
+		return nil
+	}
+	txContext, err := buildWorkerTxContext(env.tx, env.resolvedInputs, *env)
+	if err != nil {
+		return err
+	}
+	env.txContext = txContext
+	return nil
+}
+
+func (env *txValidationWorkerEnv) ensureSimplicityTxContext() (*SimplicityTxContext, error) {
+	if env.simplicityCtx != nil {
+		return env.simplicityCtx, nil
+	}
+	txContext, err := BuildSimplicityTxContext(env.tx, env.resolvedInputs, env.blockHeight, env.chainID)
+	if err != nil {
+		return nil, err
+	}
+	env.simplicityCtx = txContext
+	return txContext, nil
+}
+
+func validateTxLocalInputs(tvc TxValidationContext, tx *Tx, env *txValidationWorkerEnv) error {
 	witnessCursor := tvc.WitnessStart
 	for inputIndex, entry := range tvc.ResolvedInputs {
 		assigned, slots, err := assignedWorkerWitness(tx, tvc, entry, witnessCursor)
@@ -189,7 +214,7 @@ func finishTxValidationResult(result *TxValidationResult, sigQueue *SigCheckQueu
 // validateInputSpendQ dispatches a single input to the appropriate Q-variant
 // spend validator based on covenant type. This mirrors the switch in
 // applyNonCoinbaseTxBasicWorkQ but without UTXO mutations.
-func validateInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+func validateInputSpendQ(check txInputSpendCheck, env *txValidationWorkerEnv) error {
 	switch check.entry.CovenantType {
 	case COV_TYPE_P2PK:
 		return validateP2PKInputSpendQ(check, env)
@@ -211,7 +236,7 @@ func validateInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) err
 	}
 }
 
-func validateP2PKInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+func validateP2PKInputSpendQ(check txInputSpendCheck, env *txValidationWorkerEnv) error {
 	if len(check.assigned) != 1 {
 		return txerr(TX_ERR_PARSE, "CORE_P2PK witness_slots must be 1")
 	}
@@ -221,7 +246,7 @@ func validateP2PKInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv)
 	)
 }
 
-func validateMultisigInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+func validateMultisigInputSpendQ(check txInputSpendCheck, env *txValidationWorkerEnv) error {
 	m, err := ParseMultisigCovenantData(check.entry.CovenantData)
 	if err != nil {
 		return err
@@ -233,7 +258,7 @@ func validateMultisigInputSpendQ(check txInputSpendCheck, env txValidationWorker
 	)
 }
 
-func validateVaultInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+func validateVaultInputSpendQ(check txInputSpendCheck, env *txValidationWorkerEnv) error {
 	// Vault: only verify threshold signature in the worker. Full vault policy
 	// (whitelist, owner lock, output checks) is enforced in the commit stage.
 	v, err := ParseVaultCovenantDataForSpend(check.entry.CovenantData)
@@ -247,7 +272,7 @@ func validateVaultInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv
 	)
 }
 
-func validateHTLCInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+func validateHTLCInputSpendQ(check txInputSpendCheck, env *txValidationWorkerEnv) error {
 	if len(check.assigned) != 2 {
 		return txerr(TX_ERR_PARSE, "CORE_HTLC witness_slots must be 2")
 	}
@@ -258,14 +283,14 @@ func validateHTLCInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv)
 	)
 }
 
-func validateCoreExtInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+func validateCoreExtInputSpendQ(check txInputSpendCheck, env *txValidationWorkerEnv) error {
 	if len(check.assigned) != CORE_EXT_WITNESS_SLOTS {
 		return txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
 	}
 	return validateCoreExtSpendQWithEnv(check, check.assigned[0], env)
 }
 
-func validateCoreStealthInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+func validateCoreStealthInputSpendQ(check txInputSpendCheck, env *txValidationWorkerEnv) error {
 	if len(check.assigned) != CORE_STEALTH_WITNESS_SLOTS {
 		return txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
 	}
@@ -275,11 +300,11 @@ func validateCoreStealthInputSpendQ(check txInputSpendCheck, env txValidationWor
 	)
 }
 
-func validateCoreSimplicityInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+func validateCoreSimplicityInputSpendQ(check txInputSpendCheck, env *txValidationWorkerEnv) error {
 	if len(check.assigned) != SIMPLICITY_WITNESS_SLOTS {
 		return txerr(TX_ERR_PARSE, "CORE_SIMPLICITY witness_slots must be 1")
 	}
-	return validateCoreSimplicitySpend(check.entry, check.assigned[0], check.tx, env.blockHeight, env.chainID, env.resolvedInputs)
+	return validateCoreSimplicitySpend(check.entry, check.assigned[0], env.ensureSimplicityTxContext)
 }
 
 // validateCoreExtSpendQ is the queue-aware CORE_EXT spend validator, extracted
@@ -324,7 +349,7 @@ func validateCoreExtSpendQ(
 		inputIndex: inputIndex,
 		inputValue: inputValue,
 	}
-	return validateCoreExtSpendQWithEnv(check, w, env)
+	return validateCoreExtSpendQWithEnv(check, w, &env)
 }
 
 func typedArgOrZero[T any](v any) T {
@@ -335,7 +360,7 @@ func typedArgOrZero[T any](v any) T {
 	return v.(T)
 }
 
-func validateCoreExtSpendQWithEnv(check txInputSpendCheck, w WitnessItem, env txValidationWorkerEnv) error {
+func validateCoreExtSpendQWithEnv(check txInputSpendCheck, w WitnessItem, env *txValidationWorkerEnv) error {
 	cd, err := ParseCoreExtCovenantData(check.entry.CovenantData)
 	if err != nil {
 		return err
@@ -350,12 +375,8 @@ func validateCoreExtSpendQWithEnv(check txInputSpendCheck, w WitnessItem, env tx
 	case !ok || !profile.Active:
 		return nil
 	default:
-		if env.txContext == nil {
-			txContext, err := buildWorkerTxContext(env.tx, env.resolvedInputs, env)
-			if err != nil {
-				return err
-			}
-			env.txContext = txContext
+		if err := env.ensureCoreExtTxContext(); err != nil {
+			return err
 		}
 		return validateCoreExtWitnessAtHeight(coreExtWitnessValidation{
 			cd:           cd,

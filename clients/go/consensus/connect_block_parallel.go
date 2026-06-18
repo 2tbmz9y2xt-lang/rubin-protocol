@@ -402,6 +402,18 @@ func applyNonCoinbaseTxBasicWorkQ(
 		}
 		return nil
 	}
+	var simplicityCtx *SimplicityTxContext
+	ensureSimplicityTxContext := func() (*SimplicityTxContext, error) {
+		if simplicityCtx != nil {
+			return simplicityCtx, nil
+		}
+		var err error
+		simplicityCtx, err = BuildSimplicityTxContext(tx, resolvedInputs, height, chainID)
+		if err != nil {
+			return nil, err
+		}
+		return simplicityCtx, nil
+	}
 	if !hasCoreSimplicityInput(resolvedInputs) {
 		if err := ensureTxContext(); err != nil {
 			return nil, 0, err
@@ -513,7 +525,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 			if len(assigned) != SIMPLICITY_WITNESS_SLOTS {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_SIMPLICITY witness_slots must be 1")
 			}
-			if err := validateCoreSimplicitySpend(entry, assigned[0], tx, height, chainID, resolvedInputs); err != nil {
+			if err := validateCoreSimplicitySpend(entry, assigned[0], ensureSimplicityTxContext); err != nil {
 				return nil, 0, err
 			}
 		default:

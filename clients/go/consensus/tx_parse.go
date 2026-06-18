@@ -437,10 +437,7 @@ func parseSimplicityEnvelopeSignature(sig []byte) (parsedSimplicityEnvelope, err
 	if len(sig) < 2 {
 		return parsed, txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")
 	}
-	envelope, _, err := extractCryptoSigAndSighash(WitnessItem{Signature: sig})
-	if err != nil {
-		return parsed, err
-	}
+	envelope := sig[:len(sig)-1]
 	if len(envelope) > MAX_SIMPLICITY_ENVELOPE_BYTES {
 		return parsed, txerr(TX_ERR_PARSE, "Simplicity envelope too large")
 	}

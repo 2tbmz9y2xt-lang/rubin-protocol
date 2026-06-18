@@ -652,7 +652,8 @@ func validateTestInputSpendQ(entry UtxoEntry, assigned []WitnessItem, tx *Tx) er
 		inputIndex: 0,
 		inputValue: 100,
 	}
-	return validateInputSpendQ(check, txValidationWorkerEnv{blockHeight: 1})
+	env := txValidationWorkerEnv{blockHeight: 1}
+	return validateInputSpendQ(check, &env)
 }
 
 func validateTestCoreExtSpendQ(
@@ -675,7 +676,7 @@ func validateTestCoreExtSpendQ(
 		sighashCache:    sighashCache,
 		coreExtProfiles: profiles,
 	}
-	return validateCoreExtSpendQWithEnv(check, w, env)
+	return validateCoreExtSpendQWithEnv(check, w, &env)
 }
 
 func TestValidateInputSpendQ_DefaultCovType(t *testing.T) {

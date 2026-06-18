@@ -73,15 +73,27 @@ func validateCoreSimplicityDeploymentActive(height uint64, provider SimplicityDe
 	return nil
 }
 
-func validateCoreSimplicitySpend(entry UtxoEntry, witness WitnessItem, tx *Tx, blockHeight uint64, chainID [32]byte, resolvedInputs []UtxoEntry) error {
+type simplicityTxContextProvider func() (*SimplicityTxContext, error)
+
+func parseCoreSimplicityWitnessEnvelope(witness WitnessItem) (parsedSimplicityEnvelope, error) {
 	if witness.SuiteID != SUITE_ID_SIMPLICITY_ENVELOPE {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_SIMPLICITY witness suite must be 0xF0")
+		return parsedSimplicityEnvelope{}, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_SIMPLICITY witness suite must be 0xF0")
 	}
-	envelope, err := parseSimplicityEnvelopeSignature(witness.Signature)
+	if len(witness.Pubkey) != 0 {
+		return parsedSimplicityEnvelope{}, txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")
+	}
+	return parseSimplicityEnvelopeSignature(witness.Signature)
+}
+
+func validateCoreSimplicitySpend(entry UtxoEntry, witness WitnessItem, txContext simplicityTxContextProvider) error {
+	envelope, err := parseCoreSimplicityWitnessEnvelope(witness)
 	if err != nil {
 		return err
 	}
-	if _, err := BuildSimplicityTxContext(tx, resolvedInputs, blockHeight, chainID); err != nil {
+	if _, _, err := extractCryptoSigAndSighash(witness); err != nil {
+		return err
+	}
+	if err := requireSimplicityTxContext(txContext); err != nil {
 		return err
 	}
 	programCMR, _, err := parseCoreSimplicityCovenantData(entry.Value, entry.CovenantData)
@@ -101,6 +113,20 @@ func validateCoreSimplicitySpend(entry UtxoEntry, witness WitnessItem, tx *Tx, b
 	}
 	if !result.Accepted {
 		return txerr(TX_ERR_SIMPLICITY_REJECTED, "CORE_SIMPLICITY program rejected")
+	}
+	return nil
+}
+
+func requireSimplicityTxContext(txContext simplicityTxContextProvider) error {
+	if txContext == nil {
+		return txerr(TX_ERR_PARSE, "CORE_SIMPLICITY txcontext missing")
+	}
+	ctx, err := txContext()
+	if err != nil {
+		return err
+	}
+	if ctx == nil {
+		return txerr(TX_ERR_PARSE, "CORE_SIMPLICITY txcontext missing")
 	}
 	return nil
 }

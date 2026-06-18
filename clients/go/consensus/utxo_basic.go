@@ -250,6 +250,18 @@ func (ctx *nonCoinbaseApplyContext) ensureCoreExtTxContext() error {
 	return nil
 }
 
+func (ctx *nonCoinbaseApplyContext) ensureSimplicityTxContext() (*SimplicityTxContext, error) {
+	if ctx.simplicityCtx != nil {
+		return ctx.simplicityCtx, nil
+	}
+	txContext, err := BuildSimplicityTxContext(ctx.tx, ctx.resolvedEntries(), ctx.height, ctx.chainID)
+	if err != nil {
+		return nil, err
+	}
+	ctx.simplicityCtx = txContext
+	return txContext, nil
+}
+
 func (ctx *nonCoinbaseApplyContext) resolvedEntries() []UtxoEntry {
 	entries := make([]UtxoEntry, 0, len(ctx.resolved))
 	for _, input := range ctx.resolved {
@@ -416,7 +428,7 @@ func (ctx *nonCoinbaseApplyContext) validateCoreSimplicityInput(entry UtxoEntry,
 	if len(assigned) != SIMPLICITY_WITNESS_SLOTS {
 		return txerr(TX_ERR_PARSE, "CORE_SIMPLICITY witness_slots must be 1")
 	}
-	return validateCoreSimplicitySpend(entry, assigned[0], ctx.tx, ctx.height, ctx.chainID, ctx.resolvedEntries())
+	return validateCoreSimplicitySpend(entry, assigned[0], ctx.ensureSimplicityTxContext)
 }
 
 func (ctx *nonCoinbaseApplyContext) addSpendableOutputs() error {

@@ -210,6 +210,18 @@ func TestParseTx_SimplicityEnvelopeWitnessCanonicalization(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid_sighash_type_is_semantic", func(t *testing.T) {
+		invalidSig := append([]byte(nil), validSig...)
+		invalidSig[len(invalidSig)-1] = 0x7f
+		tx, _, _, _, err := ParseTx(txWithWitnessSection(witnessSection(SUITE_ID_SIMPLICITY_ENVELOPE, nil, invalidSig)))
+		if err != nil {
+			t.Fatalf("ParseTx: %v", err)
+		}
+		if !bytes.Equal(tx.Witness[0].Signature, invalidSig) {
+			t.Fatalf("signature=%x, want %x", tx.Witness[0].Signature, invalidSig)
+		}
+	})
+
 	for _, tc := range []struct {
 		name string
 		pub  []byte

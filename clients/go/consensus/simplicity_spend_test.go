@@ -51,7 +51,9 @@ func TestCoreSimplicitySpendDispatchErrors(t *testing.T) {
 		code ErrorCode
 	}{
 		{"wrong_suite", func(_ *UtxoEntry, w *WitnessItem) { *w = WitnessItem{SuiteID: SUITE_ID_SENTINEL} }, TX_ERR_SIG_ALG_INVALID},
+		{"nonzero_pubkey", func(_ *UtxoEntry, w *WitnessItem) { w.Pubkey = []byte{0x01} }, TX_ERR_PARSE},
 		{"envelope_parse", func(_ *UtxoEntry, w *WitnessItem) { w.Signature = []byte{SIGHASH_ALL} }, TX_ERR_PARSE},
+		{"invalid_sighash", func(_ *UtxoEntry, w *WitnessItem) { w.Signature[len(w.Signature)-1] = 0x7f }, TX_ERR_SIGHASH_TYPE_INVALID},
 		{"covenant_parse", func(e *UtxoEntry, _ *WitnessItem) { e.CovenantData = nil }, TX_ERR_COVENANT_TYPE_INVALID},
 		{"cmr_mismatch", func(e *UtxoEntry, _ *WitnessItem) {
 			e.CovenantData = encodeSimplicityCovenantData([32]byte{0x99}, nil)
@@ -65,9 +67,17 @@ func TestCoreSimplicitySpendDispatchErrors(t *testing.T) {
 		}, TX_ERR_SIMPLICITY_JET_DISALLOWED},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			entry, witness := baseEntry, baseWitness
+			entry := baseEntry
+			witness := WitnessItem{
+				SuiteID:   baseWitness.SuiteID,
+				Pubkey:    append([]byte(nil), baseWitness.Pubkey...),
+				Signature: append([]byte(nil), baseWitness.Signature...),
+			}
 			tc.edit(&entry, &witness)
-			assertTxErrCode(t, validateCoreSimplicitySpend(entry, witness, tx, 1, [32]byte{}, []UtxoEntry{entry}), tc.code)
+			txContext := func() (*SimplicityTxContext, error) {
+				return BuildSimplicityTxContext(tx, []UtxoEntry{entry}, 1, [32]byte{})
+			}
+			assertTxErrCode(t, validateCoreSimplicitySpend(entry, witness, txContext), tc.code)
 		})
 	}
 }

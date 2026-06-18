@@ -235,6 +235,7 @@ type nonCoinbaseApplyContext struct {
 	registry        *SuiteRegistry
 	sighashCache    *SighashV1PrehashCache
 	txContext       *TxContextBundle
+	simplicityCtx   *SimplicityTxContext
 	resolved        []nonCoinbaseResolvedInput
 	spend           nonCoinbaseSpendState
 	sumOut          u128
