@@ -352,6 +352,72 @@ func TestPrecomputeTxContexts_WitnessUnderflow(t *testing.T) {
 	}
 }
 
+func TestPrecomputeTxContexts_CoreSimplicityStopsWitnessPrecompute(t *testing.T) {
+	p2pkPrev := sha3_256([]byte("precompute-p2pk-before-simplicity"))
+	simpPrev := sha3_256([]byte("precompute-simplicity"))
+	missingPrev := sha3_256([]byte("precompute-after-simplicity-missing"))
+	dummyWitness := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    make([]byte, ML_DSA_87_PUBKEY_BYTES),
+		Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+	}
+	baseUTXOs := map[Outpoint]UtxoEntry{
+		{Txid: p2pkPrev, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+		{Txid: simpPrev, Vout: 0}: coreSimplicityAcceptEntry(100),
+	}
+
+	for _, tc := range []struct {
+		name   string
+		inputs []TxInput
+	}{
+		{
+			name: "missing_simplicity_witness",
+			inputs: []TxInput{
+				{PrevTxid: p2pkPrev, PrevVout: 0, Sequence: 0},
+				{PrevTxid: simpPrev, PrevVout: 0, Sequence: 0},
+			},
+		},
+		{
+			name: "later_missing_utxo",
+			inputs: []TxInput{
+				{PrevTxid: p2pkPrev, PrevVout: 0, Sequence: 0},
+				{PrevTxid: simpPrev, PrevVout: 0, Sequence: 0},
+				{PrevTxid: missingPrev, PrevVout: 0, Sequence: 0},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			utxos := map[Outpoint]UtxoEntry{}
+			for op, entry := range baseUTXOs {
+				utxos[op] = entry
+			}
+			tx := &Tx{
+				Version: 1, TxKind: 0x00, TxNonce: 1,
+				Inputs:  tc.inputs,
+				Outputs: []TxOutput{{Value: 150, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+				Witness: []WitnessItem{dummyWitness},
+			}
+			pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx})
+
+			results, err := PrecomputeTxContexts(pb, utxos, 100)
+			if err != nil {
+				t.Fatalf("unexpected precompute error: %v", err)
+			}
+			if len(results) != 1 {
+				t.Fatalf("expected 1 context, got %d", len(results))
+			}
+			ctx := results[0]
+			if ctx.WitnessStart != 0 || ctx.WitnessEnd != 1 {
+				t.Fatalf("witness bounds: got [%d,%d), want [0,1)", ctx.WitnessStart, ctx.WitnessEnd)
+			}
+			if len(ctx.ResolvedInputs) != 2 {
+				t.Fatalf("resolved inputs: got %d, want 2", len(ctx.ResolvedInputs))
+			}
+			assertTxErrCodeMsg(t, ValidateTxLocal(ctx, [32]byte{}, 100, 0, nil, nil).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+		})
+	}
+}
+
 func TestPrecomputeTxContexts_WitnessCountMismatch(t *testing.T) {
 	covData := validP2PKCovenantData()
 	prevTxid := sha3_256([]byte("witness-overflow"))
