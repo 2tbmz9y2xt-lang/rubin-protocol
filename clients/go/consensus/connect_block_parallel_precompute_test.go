@@ -522,6 +522,51 @@ func TestPrecomputeTxContexts_CoinbasePrevoutForbidden(t *testing.T) {
 	}
 }
 
+func TestPrecomputeTxContexts_NonCoinbaseInputEncoding(t *testing.T) {
+	prevTxid := sha3_256([]byte("precompute-input-encoding"))
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prevTxid, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+	}
+	dummyWitness := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    make([]byte, ML_DSA_87_PUBKEY_BYTES),
+		Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+	}
+
+	for _, tc := range []struct {
+		name    string
+		input   TxInput
+		code    ErrorCode
+		message string
+	}{
+		{
+			name:    "script_sig",
+			input:   TxInput{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0, ScriptSig: []byte{0x01}},
+			code:    TX_ERR_PARSE,
+			message: "script_sig must be empty under genesis covenant set",
+		},
+		{
+			name:    "sequence_high_bit",
+			input:   TxInput{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0x8000_0000},
+			code:    TX_ERR_SEQUENCE_INVALID,
+			message: "sequence exceeds 0x7fffffff",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &Tx{
+				Version: 1, TxKind: 0x00, TxNonce: 1,
+				Inputs:  []TxInput{tc.input},
+				Outputs: []TxOutput{{Value: 50, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+				Witness: []WitnessItem{dummyWitness},
+			}
+			pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx})
+
+			_, err := PrecomputeTxContexts(pb, utxos, 100)
+			assertTxErrCodeMsg(t, err, tc.code, tc.message)
+		})
+	}
+}
+
 func TestPrecomputeTxContexts_NilTx(t *testing.T) {
 	pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{nil})
 	_, err := PrecomputeTxContexts(pb, map[Outpoint]UtxoEntry{}, 100)

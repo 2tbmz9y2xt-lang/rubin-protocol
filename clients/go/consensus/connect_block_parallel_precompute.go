@@ -204,8 +204,8 @@ func resolvePrecomputeInput(
 	blockHeight uint64,
 ) (UtxoEntry, Outpoint, int, bool, error) {
 	var zeroTxid [32]byte
-	if in.PrevVout == 0xffff_ffff && in.PrevTxid == zeroTxid {
-		return UtxoEntry{}, Outpoint{}, 0, false, txerr(TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
+	if err := validateNonCoinbaseInputEncoding(in, zeroTxid); err != nil {
+		return UtxoEntry{}, Outpoint{}, 0, false, err
 	}
 
 	op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
