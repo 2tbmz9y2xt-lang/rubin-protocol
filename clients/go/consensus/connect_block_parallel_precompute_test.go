@@ -352,6 +352,80 @@ func TestPrecomputeTxContexts_WitnessUnderflow(t *testing.T) {
 	}
 }
 
+func TestPrecomputeTxContexts_CoreSimplicityStopsWitnessPrecompute(t *testing.T) {
+	p2pkPrev := sha3_256([]byte("precompute-p2pk-before-simplicity"))
+	simpPrev := sha3_256([]byte("precompute-simplicity"))
+	missingPrev := sha3_256([]byte("precompute-after-simplicity-missing"))
+	dummyWitness := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    make([]byte, ML_DSA_87_PUBKEY_BYTES),
+		Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+	}
+	baseUTXOs := map[Outpoint]UtxoEntry{
+		{Txid: p2pkPrev, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+		{Txid: simpPrev, Vout: 0}: coreSimplicityAcceptEntry(100),
+	}
+
+	for _, tc := range []struct {
+		name   string
+		inputs []TxInput
+	}{
+		{
+			name: "missing_simplicity_witness",
+			inputs: []TxInput{
+				{PrevTxid: p2pkPrev, PrevVout: 0, Sequence: 0},
+				{PrevTxid: simpPrev, PrevVout: 0, Sequence: 0},
+			},
+		},
+		{
+			name: "later_missing_utxo",
+			inputs: []TxInput{
+				{PrevTxid: p2pkPrev, PrevVout: 0, Sequence: 0},
+				{PrevTxid: simpPrev, PrevVout: 0, Sequence: 0},
+				{PrevTxid: missingPrev, PrevVout: 0, Sequence: 0},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			utxos := map[Outpoint]UtxoEntry{}
+			for op, entry := range baseUTXOs {
+				utxos[op] = entry
+			}
+			tx := &Tx{
+				Version: 1, TxKind: 0x00, TxNonce: 1,
+				Inputs:  tc.inputs,
+				Outputs: []TxOutput{{Value: 150, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+				Witness: []WitnessItem{dummyWitness},
+			}
+			pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx})
+
+			_, err := PrecomputeTxContexts(pb, utxos, 100)
+			assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+		})
+	}
+
+	t.Run("does_not_overlay_invalid_simplicity_outputs", func(t *testing.T) {
+		utxos := map[Outpoint]UtxoEntry{
+			{Txid: simpPrev, Vout: 0}: coreSimplicityAcceptEntry(100),
+		}
+		tx1 := &Tx{
+			Version: 1, TxKind: 0x00, TxNonce: 1,
+			Inputs:  []TxInput{{PrevTxid: simpPrev, PrevVout: 0, Sequence: 0}},
+			Outputs: []TxOutput{{Value: 50, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		}
+		tx1Txid := sha3_256([]byte{byte(1)})
+		tx2 := &Tx{
+			Version: 1, TxKind: 0x00, TxNonce: 2,
+			Inputs:  []TxInput{{PrevTxid: tx1Txid, PrevVout: 0, Sequence: 0}},
+			Outputs: []TxOutput{{Value: 40, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		}
+		pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx1, tx2})
+
+		_, err := PrecomputeTxContexts(pb, utxos, 100)
+		assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+	})
+}
+
 func TestPrecomputeTxContexts_WitnessCountMismatch(t *testing.T) {
 	covData := validP2PKCovenantData()
 	prevTxid := sha3_256([]byte("witness-overflow"))
@@ -445,6 +519,51 @@ func TestPrecomputeTxContexts_CoinbasePrevoutForbidden(t *testing.T) {
 	}
 	if !isTxErrCode(err, TX_ERR_PARSE) {
 		t.Fatalf("expected TX_ERR_PARSE, got: %v", err)
+	}
+}
+
+func TestPrecomputeTxContexts_NonCoinbaseInputEncoding(t *testing.T) {
+	prevTxid := sha3_256([]byte("precompute-input-encoding"))
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prevTxid, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+	}
+	dummyWitness := WitnessItem{
+		SuiteID:   SUITE_ID_ML_DSA_87,
+		Pubkey:    make([]byte, ML_DSA_87_PUBKEY_BYTES),
+		Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+	}
+
+	for _, tc := range []struct {
+		name    string
+		input   TxInput
+		code    ErrorCode
+		message string
+	}{
+		{
+			name:    "script_sig",
+			input:   TxInput{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0, ScriptSig: []byte{0x01}},
+			code:    TX_ERR_PARSE,
+			message: "script_sig must be empty under genesis covenant set",
+		},
+		{
+			name:    "sequence_high_bit",
+			input:   TxInput{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0x8000_0000},
+			code:    TX_ERR_SEQUENCE_INVALID,
+			message: "sequence exceeds 0x7fffffff",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &Tx{
+				Version: 1, TxKind: 0x00, TxNonce: 1,
+				Inputs:  []TxInput{tc.input},
+				Outputs: []TxOutput{{Value: 50, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+				Witness: []WitnessItem{dummyWitness},
+			}
+			pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx})
+
+			_, err := PrecomputeTxContexts(pb, utxos, 100)
+			assertTxErrCodeMsg(t, err, tc.code, tc.message)
+		})
 	}
 }
 

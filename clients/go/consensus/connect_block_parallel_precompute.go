@@ -58,10 +58,11 @@ type TxValidationContext struct {
 }
 
 type precomputeTxInputs struct {
-	ResolvedInputs    []UtxoEntry
-	InputOutpoints    []Outpoint
-	TotalWitnessSlots int
-	SumIn             u128
+	ResolvedInputs          []UtxoEntry
+	InputOutpoints          []Outpoint
+	TotalWitnessSlots       int
+	SumIn                   u128
+	StoppedAtCoreSimplicity bool
 }
 
 // PrecomputeTxContexts builds an immutable TxValidationContext slice for all
@@ -131,12 +132,16 @@ func precomputeTxContext(
 		return TxValidationContext{}, err
 	}
 
-	witnessStart, witnessEnd, err := precomputeWitnessBounds(tx, inputs.TotalWitnessSlots)
+	witnessStart, witnessEnd, err := precomputeWitnessBounds(tx, inputs.TotalWitnessSlots, inputs.StoppedAtCoreSimplicity)
 	if err != nil {
 		return TxValidationContext{}, err
 	}
+	if inputs.StoppedAtCoreSimplicity {
+		return TxValidationContext{}, rejectCoreSimplicitySpend()
+	}
 
-	fee, err := computePrecomputeFee(inputs.SumIn, tx.Outputs)
+	var fee uint64
+	fee, err = computePrecomputeFee(inputs.SumIn, tx.Outputs)
 	if err != nil {
 		return TxValidationContext{}, err
 	}
@@ -165,22 +170,26 @@ func collectPrecomputeTxInputs(
 	blockHeight uint64,
 ) (precomputeTxInputs, error) {
 	out := precomputeTxInputs{
-		ResolvedInputs: make([]UtxoEntry, len(tx.Inputs)),
-		InputOutpoints: make([]Outpoint, len(tx.Inputs)),
+		ResolvedInputs: make([]UtxoEntry, 0, len(tx.Inputs)),
+		InputOutpoints: make([]Outpoint, 0, len(tx.Inputs)),
 	}
 	seenInputs := make(map[Outpoint]struct{}, len(tx.Inputs))
 
-	for j, in := range tx.Inputs {
-		entry, op, slots, err := resolvePrecomputeInput(in, seenInputs, overlay, blockHeight)
+	for _, in := range tx.Inputs {
+		entry, op, slots, stoppedAtCoreSimplicity, err := resolvePrecomputeInput(in, seenInputs, overlay, blockHeight)
 		if err != nil {
 			return precomputeTxInputs{}, err
 		}
-		if out.TotalWitnessSlots, err = addWitnessSlots(out.TotalWitnessSlots, slots); err != nil {
+		out.ResolvedInputs = append(out.ResolvedInputs, entry)
+		out.InputOutpoints = append(out.InputOutpoints, op)
+		if out.SumIn, err = addU64ToU128(out.SumIn, entry.Value); err != nil {
 			return precomputeTxInputs{}, err
 		}
-		out.ResolvedInputs[j] = entry
-		out.InputOutpoints[j] = op
-		if out.SumIn, err = addU64ToU128(out.SumIn, entry.Value); err != nil {
+		if stoppedAtCoreSimplicity {
+			out.StoppedAtCoreSimplicity = true
+			return out, nil
+		}
+		if out.TotalWitnessSlots, err = addWitnessSlots(out.TotalWitnessSlots, slots); err != nil {
 			return precomputeTxInputs{}, err
 		}
 	}
@@ -193,30 +202,33 @@ func resolvePrecomputeInput(
 	seenInputs map[Outpoint]struct{},
 	overlay map[Outpoint]UtxoEntry,
 	blockHeight uint64,
-) (UtxoEntry, Outpoint, int, error) {
+) (UtxoEntry, Outpoint, int, bool, error) {
 	var zeroTxid [32]byte
-	if in.PrevVout == 0xffff_ffff && in.PrevTxid == zeroTxid {
-		return UtxoEntry{}, Outpoint{}, 0, txerr(TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
+	if err := validateNonCoinbaseInputEncoding(in, zeroTxid); err != nil {
+		return UtxoEntry{}, Outpoint{}, 0, false, err
 	}
 
 	op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
 	if err := rememberPrecomputeInput(op, seenInputs); err != nil {
-		return UtxoEntry{}, Outpoint{}, 0, err
+		return UtxoEntry{}, Outpoint{}, 0, false, err
 	}
 
 	entry, ok := overlay[op]
 	if !ok {
-		return UtxoEntry{}, Outpoint{}, 0, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
+		return UtxoEntry{}, Outpoint{}, 0, false, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
 	}
 	if err := validatePrecomputeEntry(entry, blockHeight); err != nil {
-		return UtxoEntry{}, Outpoint{}, 0, err
+		return UtxoEntry{}, Outpoint{}, 0, false, err
+	}
+	if entry.CovenantType == COV_TYPE_CORE_SIMPLICITY {
+		return entry, op, 0, true, nil
 	}
 
 	slots, err := precomputeWitnessSlots(entry)
 	if err != nil {
-		return UtxoEntry{}, Outpoint{}, 0, err
+		return UtxoEntry{}, Outpoint{}, 0, false, err
 	}
-	return entry, op, slots, nil
+	return entry, op, slots, false, nil
 }
 
 func rememberPrecomputeInput(op Outpoint, seenInputs map[Outpoint]struct{}) error {
@@ -248,7 +260,7 @@ func precomputeWitnessSlots(entry UtxoEntry) (int, error) {
 	return slots, nil
 }
 
-func precomputeWitnessBounds(tx *Tx, totalWitnessSlots int) (int, int, error) {
+func precomputeWitnessBounds(tx *Tx, totalWitnessSlots int, stoppedAtCoreSimplicity bool) (int, int, error) {
 	// Witness cursor is per-transaction (reset to 0 for each tx), matching
 	// the sequential path in applyNonCoinbaseTxBasicWorkQ.
 	witnessCursor := 0
@@ -258,7 +270,7 @@ func precomputeWitnessBounds(tx *Tx, totalWitnessSlots int) (int, int, error) {
 		return 0, 0, txerr(TX_ERR_PARSE, "witness underflow")
 	}
 	witnessCursor = witnessEnd
-	if witnessCursor != len(tx.Witness) {
+	if !stoppedAtCoreSimplicity && witnessCursor != len(tx.Witness) {
 		return 0, 0, txerr(TX_ERR_PARSE, "witness_count mismatch")
 	}
 	return witnessStart, witnessEnd, nil

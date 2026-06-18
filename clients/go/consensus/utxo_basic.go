@@ -50,6 +50,9 @@ func (ctx *nonCoinbaseApplyContext) applyPreOutputPhases() error {
 	if err := ctx.resolveInputs(); err != nil {
 		return err
 	}
+	if ctx.hasCoreSimplicityResolvedInput() {
+		return ctx.validateInputSpends()
+	}
 	if err := ctx.buildTxContext(); err != nil {
 		return err
 	}
@@ -107,13 +110,26 @@ func (ctx *nonCoinbaseApplyContext) prepare() error {
 }
 
 func (ctx *nonCoinbaseApplyContext) resolveInputs() error {
-	witnessCursor := 0
 	seenInputs := make(map[Outpoint]struct{}, len(ctx.tx.Inputs))
 	var zeroTxid [32]byte
+	witnessCursor := 0
 	ctx.resolved = make([]nonCoinbaseResolvedInput, 0, len(ctx.tx.Inputs))
 	for _, in := range ctx.tx.Inputs {
 		entry, op, err := ctx.resolveInput(in, seenInputs, zeroTxid)
 		if err != nil {
+			return err
+		}
+		if entry.CovenantType == COV_TYPE_CORE_SIMPLICITY {
+			if err := ctx.validateCoinbaseInputMaturity(entry); err != nil {
+				return err
+			}
+			ctx.resolved = append(ctx.resolved, nonCoinbaseResolvedInput{
+				entry:    entry,
+				outpoint: op,
+			})
+			return nil
+		}
+		if err := ctx.validateResolvedInputEntry(entry); err != nil {
 			return err
 		}
 		slots, err := WitnessSlots(entry.CovenantType, entry.CovenantData)
@@ -146,9 +162,6 @@ func (ctx *nonCoinbaseApplyContext) resolveInput(in TxInput, seenInputs map[Outp
 	}
 	entry, op, err := ctx.lookupInputEntry(in, seenInputs)
 	if err != nil {
-		return UtxoEntry{}, Outpoint{}, err
-	}
-	if err := ctx.validateResolvedInputEntry(entry); err != nil {
 		return UtxoEntry{}, Outpoint{}, err
 	}
 	return entry, op, nil
@@ -253,7 +266,21 @@ func (ctx *nonCoinbaseApplyContext) resolvedEntries() []UtxoEntry {
 	return entries
 }
 
+func (ctx *nonCoinbaseApplyContext) hasCoreSimplicityResolvedInput() bool {
+	for _, input := range ctx.resolved {
+		if input.entry.CovenantType == COV_TYPE_CORE_SIMPLICITY {
+			return true
+		}
+	}
+	return false
+}
+
 func (ctx *nonCoinbaseApplyContext) validateInputSpends() error {
+	for inputIndex, input := range ctx.resolved {
+		if input.entry.CovenantType == COV_TYPE_CORE_SIMPLICITY {
+			return ctx.validateInputSpend(inputIndex, input)
+		}
+	}
 	for inputIndex, input := range ctx.resolved {
 		if err := ctx.validateInputSpend(inputIndex, input); err != nil {
 			return err
@@ -293,6 +320,8 @@ func (ctx *nonCoinbaseApplyContext) validateInputSpend(inputIndex int, input non
 		return ctx.validateCoreExtInput(inputIndex, entry, assigned)
 	case COV_TYPE_CORE_STEALTH:
 		return ctx.validateCoreStealthInput(inputIndex, entry, assigned)
+	case COV_TYPE_CORE_SIMPLICITY:
+		return ctx.validateCoreSimplicityInput(entry, assigned)
 	default:
 		return nil
 	}
@@ -400,6 +429,10 @@ func (ctx *nonCoinbaseApplyContext) validateCoreStealthInput(inputIndex int, ent
 		rotation:    ctx.rotation,
 		registry:    ctx.registry,
 	})
+}
+
+func (ctx *nonCoinbaseApplyContext) validateCoreSimplicityInput(_ UtxoEntry, _ []WitnessItem) error {
+	return rejectCoreSimplicitySpend()
 }
 
 func (ctx *nonCoinbaseApplyContext) addSpendableOutputs() error {
