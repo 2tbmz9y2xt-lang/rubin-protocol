@@ -70,6 +70,14 @@ func ValidateTxLocal(
 		result.Err = txerr(TX_ERR_PARSE, "nil tx in TxValidationContext")
 		return result
 	}
+	if len(tx.Inputs) != len(tvc.ResolvedInputs) {
+		result.Err = txerr(TX_ERR_PARSE, "txcontext resolved input count mismatch")
+		return result
+	}
+	if err := rejectCoreSimplicitySpendIfPresent(tvc.ResolvedInputs); err != nil {
+		result.Err = err
+		return result
+	}
 	env := newTxValidationWorkerEnv(tvc, chainID, blockHeight, blockMTP, coreExtProfiles, sigCache)
 
 	txContext, err := buildWorkerTxContext(tx, tvc.ResolvedInputs, env)

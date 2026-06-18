@@ -28,6 +28,47 @@ type SimplicityTxContextSelfView struct {
 	SighashType    uint8
 }
 
+type SimplicityTxContextGroupEntry struct {
+	State []byte
+	Value uint64
+}
+
+type SimplicityTxContextSameCMRView struct {
+	ProgramCMR [32]byte
+	Inputs     []SimplicityTxContextGroupEntry
+	Outputs    []SimplicityTxContextGroupEntry
+}
+
+type SimplicityTxContextDAViewKind uint8
+
+const (
+	SimplicityTxContextDAViewAbsent SimplicityTxContextDAViewKind = iota
+	SimplicityTxContextDAViewCommit
+	SimplicityTxContextDAViewChunk
+)
+
+type SimplicityTxContextDACommitView struct {
+	DaID            [32]byte
+	RetlDomainID    [32]byte
+	TxDataRoot      [32]byte
+	StateRoot       [32]byte
+	WithdrawalsRoot [32]byte
+	BatchNumber     uint64
+	ChunkCount      uint16
+}
+
+type SimplicityTxContextDAChunkView struct {
+	DaID       [32]byte
+	ChunkHash  [32]byte
+	ChunkIndex uint16
+}
+
+type SimplicityTxContextDAView struct {
+	Commit SimplicityTxContextDACommitView
+	Chunk  SimplicityTxContextDAChunkView
+	Kind   SimplicityTxContextDAViewKind
+}
+
 type simplicityTxContextSelfSource struct {
 	programCMR       [32]byte
 	state            []byte
@@ -36,10 +77,13 @@ type simplicityTxContextSelfSource struct {
 }
 
 type SimplicityTxContext struct {
-	Base        SimplicityTxContextBase
-	inputViews  []SimplicityTxContextIOView
-	outputViews []SimplicityTxContextIOView
-	selfSources []simplicityTxContextSelfSource
+	Base         SimplicityTxContextBase
+	inputViews   []SimplicityTxContextIOView
+	outputViews  []SimplicityTxContextIOView
+	selfSources  []simplicityTxContextSelfSource
+	groupInputs  map[[32]byte][]SimplicityTxContextGroupEntry
+	groupOutputs map[[32]byte][]SimplicityTxContextGroupEntry
+	daView       SimplicityTxContextDAView
 }
 
 func BuildSimplicityTxContext(tx *Tx, resolvedInputs []UtxoEntry, blockHeight uint64, chainID [32]byte) (*SimplicityTxContext, error) {
@@ -97,6 +141,8 @@ func BuildSimplicityTxContext(tx *Tx, resolvedInputs []UtxoEntry, blockHeight ui
 }
 
 func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolvedInputs []UtxoEntry) error {
+	ctx.groupInputs, ctx.groupOutputs = make(map[[32]byte][]SimplicityTxContextGroupEntry), make(map[[32]byte][]SimplicityTxContextGroupEntry)
+
 	for i, entry := range resolvedInputs {
 		ctx.inputViews[i] = SimplicityTxContextIOView{
 			Value:        entry.Value,
@@ -105,15 +151,23 @@ func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolved
 		if entry.CovenantType != COV_TYPE_CORE_SIMPLICITY {
 			continue
 		}
-		programCMR, state, err := parseCoreSimplicityCovenantData(entry.CovenantData)
+		programCMR, state, err := parseCoreSimplicityCovenantData(entry.Value, entry.CovenantData)
 		if err != nil {
 			return err
 		}
+		state = append([]byte{}, state...)
 		ctx.selfSources[i] = simplicityTxContextSelfSource{
 			programCMR:       programCMR,
-			state:            append([]byte{}, state...),
+			state:            state,
 			value:            entry.Value,
 			isCoreSimplicity: true,
+		}
+		ctx.groupInputs[programCMR] = append(ctx.groupInputs[programCMR], SimplicityTxContextGroupEntry{
+			Value: entry.Value,
+			State: state,
+		})
+		if len(ctx.groupInputs[programCMR]) > SIMPLICITY_MAX_GROUP_INPUTS {
+			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY same-cmr input group exceeds limit")
 		}
 	}
 
@@ -122,6 +176,67 @@ func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolved
 			Value:        out.Value,
 			CovenantType: out.CovenantType,
 		}
+		if out.CovenantType != COV_TYPE_CORE_SIMPLICITY {
+			continue
+		}
+		programCMR, state, err := parseCoreSimplicityCovenantData(out.Value, out.CovenantData)
+		if err != nil {
+			return err
+		}
+		ctx.groupOutputs[programCMR] = append(ctx.groupOutputs[programCMR], SimplicityTxContextGroupEntry{
+			Value: out.Value,
+			State: append([]byte{}, state...),
+		})
+	}
+	var err error
+	ctx.daView, err = buildSimplicityTxContextDAView(tx)
+	return err
+}
+
+func buildSimplicityTxContextDAView(tx *Tx) (SimplicityTxContextDAView, error) {
+	var view SimplicityTxContextDAView
+	switch tx.TxKind {
+	case 0x00:
+		view.Kind = SimplicityTxContextDAViewAbsent
+	case 0x01:
+		core := tx.DaCommitCore
+		if err := validateSimplicityTxContextDACommitCore(core); err != nil {
+			return SimplicityTxContextDAView{}, err
+		}
+		view.Kind = SimplicityTxContextDAViewCommit
+		view.Commit = SimplicityTxContextDACommitView{
+			DaID:            core.DaID,
+			ChunkCount:      core.ChunkCount,
+			RetlDomainID:    core.RetlDomainID,
+			BatchNumber:     core.BatchNumber,
+			TxDataRoot:      core.TxDataRoot,
+			StateRoot:       core.StateRoot,
+			WithdrawalsRoot: core.WithdrawalsRoot,
+		}
+	case 0x02:
+		core := tx.DaChunkCore
+		if core == nil {
+			return SimplicityTxContextDAView{}, txerr(TX_ERR_PARSE, "missing da_chunk_core for tx_kind=0x02")
+		}
+		if uint64(core.ChunkIndex) >= MAX_DA_CHUNK_COUNT {
+			return SimplicityTxContextDAView{}, txerr(TX_ERR_PARSE, "chunk_index out of range for tx_kind=0x02")
+		}
+		view.Kind = SimplicityTxContextDAViewChunk
+		view.Chunk = SimplicityTxContextDAChunkView{
+			DaID:       core.DaID,
+			ChunkIndex: core.ChunkIndex,
+			ChunkHash:  core.ChunkHash,
+		}
+	default:
+		return SimplicityTxContextDAView{}, txerr(TX_ERR_PARSE, "unsupported tx_kind")
+	}
+	return view, nil
+}
+
+func validateSimplicityTxContextDACommitCore(core *DaCommitCore) error {
+	switch {
+	case core == nil, invalidDaCommitChunkCount(core.ChunkCount), len(core.BatchSig) > MAX_DA_MANIFEST_BYTES_PER_TX:
+		return txerr(TX_ERR_PARSE, "invalid da_commit_core for tx_kind=0x01")
 	}
 	return nil
 }
@@ -132,6 +247,21 @@ func (c *SimplicityTxContext) InputViews() []SimplicityTxContextIOView {
 
 func (c *SimplicityTxContext) OutputViews() []SimplicityTxContextIOView {
 	return append([]SimplicityTxContextIOView{}, c.outputViews...)
+}
+
+func (c *SimplicityTxContext) SameCMRView(inputIndex uint16) (SimplicityTxContextSameCMRView, error) {
+	if int(inputIndex) >= len(c.selfSources) {
+		return SimplicityTxContextSameCMRView{}, txerr(TX_ERR_PARSE, "simplicity txcontext self input index out of range")
+	}
+	source := c.selfSources[inputIndex]
+	if !source.isCoreSimplicity {
+		return SimplicityTxContextSameCMRView{}, txerr(TX_ERR_COVENANT_TYPE_INVALID, "simplicity txcontext self input is not CORE_SIMPLICITY")
+	}
+	return SimplicityTxContextSameCMRView{
+		ProgramCMR: source.programCMR,
+		Inputs:     cloneSimplicityGroupEntries(c.groupInputs[source.programCMR]),
+		Outputs:    cloneSimplicityGroupEntries(c.groupOutputs[source.programCMR]),
+	}, nil
 }
 
 func (c *SimplicityTxContext) SelfView(inputIndex uint16, sighashType uint8, digest32 [32]byte) (SimplicityTxContextSelfView, error) {
@@ -150,4 +280,15 @@ func (c *SimplicityTxContext) SelfView(inputIndex uint16, sighashType uint8, dig
 		SighashType:    sighashType,
 		Digest32:       digest32,
 	}, nil
+}
+
+func cloneSimplicityGroupEntries(src []SimplicityTxContextGroupEntry) []SimplicityTxContextGroupEntry {
+	out := make([]SimplicityTxContextGroupEntry, len(src))
+	for i, entry := range src {
+		out[i] = SimplicityTxContextGroupEntry{
+			Value: entry.Value,
+			State: append([]byte{}, entry.State...),
+		}
+	}
+	return out
 }

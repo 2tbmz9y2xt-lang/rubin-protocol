@@ -166,11 +166,81 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicitySpendRejected(t *testing.T)
 		{Txid: prev, Vout: 0}: {
 			Value:        100,
 			CovenantType: COV_TYPE_CORE_SIMPLICITY,
+			CovenantData: encodeSimplicityCovenantData([32]byte{0x61}, nil),
 		},
 	}
 
 	_, _, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 1, 0, [32]byte{})
-	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in basic apply")
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+}
+
+func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityRejectsBeforeWitnessChecks(t *testing.T) {
+	prev := hashWithPrefix(0x65)
+	tx := &Tx{
+		Version: TX_WIRE_VERSION,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prev, PrevVout: 0}},
+		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+	}
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_SIMPLICITY,
+			CovenantData: encodeSimplicityCovenantData([32]byte{0x65}, nil),
+		},
+	}
+
+	work, summary, err := ApplyNonCoinbaseTxBasicUpdate(tx, hashWithPrefix(0x66), utxos, 1, 0, [32]byte{})
+	if work != nil || summary != nil {
+		t.Fatalf("expected no mutation on reject, got work=%v summary=%v", work, summary)
+	}
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+}
+
+func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityRejectsBeforeTxContextLookup(t *testing.T) {
+	prevSimplicity := hashWithPrefix(0x62)
+	prevCoreExt := hashWithPrefix(0x63)
+	tx := &Tx{
+		Version: TX_WIRE_VERSION,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []TxInput{
+			{PrevTxid: prevSimplicity, PrevVout: 0},
+			{PrevTxid: prevCoreExt, PrevVout: 0},
+		},
+		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Witness: dummyWitnesses(SIMPLICITY_WITNESS_SLOTS + CORE_EXT_WITNESS_SLOTS),
+	}
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prevSimplicity, Vout: 0}: {
+			Value:        50,
+			CovenantType: COV_TYPE_CORE_SIMPLICITY,
+			CovenantData: encodeSimplicityCovenantData([32]byte{0x62}, nil),
+		},
+		{Txid: prevCoreExt, Vout: 0}: {
+			Value:        50,
+			CovenantType: COV_TYPE_CORE_EXT,
+			CovenantData: coreExtCovenantData(7, nil),
+		},
+	}
+
+	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
+		tx,
+		hashWithPrefix(0x64),
+		utxos,
+		1,
+		0,
+		0,
+		[32]byte{},
+		errCoreExtProfileProvider{},
+		nil,
+		nil,
+	)
+	if work != nil || summary != nil {
+		t.Fatalf("expected no mutation on reject, got work=%v summary=%v", work, summary)
+	}
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
 }
 
 func TestApplyNonCoinbaseTxBasicUpdate_RejectsImmatureCoinbaseSpend_OverflowSafe(t *testing.T) {

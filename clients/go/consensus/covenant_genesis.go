@@ -18,7 +18,6 @@ func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64, rotation RotationPro
 			return err
 		}
 	}
-
 	return nil
 }
 
@@ -36,7 +35,8 @@ func validateTxOutputCovenantGenesis(txKind byte, out TxOutput, blockHeight uint
 		if err := validateCoreSimplicityDeploymentActive(blockHeight, simplicityDeployment); err != nil {
 			return err
 		}
-		return validateCoreSimplicityCovenantData(out.Value, out.CovenantData)
+		_, _, err := parseCoreSimplicityCovenantData(out.Value, out.CovenantData)
+		return err
 	case COV_TYPE_RESERVED_FUTURE:
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "reserved covenant_type")
 	default:

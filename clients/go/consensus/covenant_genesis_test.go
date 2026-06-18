@@ -220,6 +220,14 @@ func TestValidateTxCovenantsGenesis_CoreSimplicityActive(t *testing.T) {
 	check(10, provider, out(1, trailing), TX_ERR_COVENANT_TYPE_INVALID)
 	check(10, provider, out(1, valid[:len(valid)-1]), TX_ERR_COVENANT_TYPE_INVALID)
 	check(10, provider, out(1, nonMinimal), TX_ERR_COVENANT_TYPE_INVALID)
+
+	outputs := make([]TxOutput, 9)
+	for i := range outputs {
+		outputs[i] = out(1, valid)
+	}
+	if err := ValidateTxCovenantsGenesis(&Tx{Outputs: outputs}, 10, provider); err != nil {
+		t.Fatalf("same-CMR output grouping is shadow-only in this slice: %v", err)
+	}
 }
 
 func TestValidateTxCovenantsGenesis_NilTx(t *testing.T) {
