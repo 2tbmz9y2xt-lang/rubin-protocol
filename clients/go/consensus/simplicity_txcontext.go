@@ -314,8 +314,8 @@ func (c *SimplicityTxContext) descriptorHash(sources []simplicityTxContextDescri
 		}
 		return SimplicityTxContextDescriptorHashResult{}, nil
 	}
-	desc := OutputDescriptorBytes(sources[index].covenantType, sources[index].covenantData)
-	cost, err := simplicity.DescriptorHashAccessCost(uint64(len(desc)))
+	source := sources[index]
+	cost, err := simplicity.DescriptorHashAccessCost(descriptorSourceLen(source))
 	if err != nil {
 		meter.cost = simplicity.MaxExecCost
 		return SimplicityTxContextDescriptorHashResult{}, err
@@ -323,7 +323,13 @@ func (c *SimplicityTxContext) descriptorHash(sources []simplicityTxContextDescri
 	if err := meter.charge(cost); err != nil {
 		return SimplicityTxContextDescriptorHashResult{}, err
 	}
+	desc := OutputDescriptorBytes(source.covenantType, source.covenantData)
 	return SimplicityTxContextDescriptorHashResult{Hash: sha3_256(desc), Present: true}, nil
+}
+
+func descriptorSourceLen(source simplicityTxContextDescriptorSource) uint64 {
+	dataLen := uint64(len(source.covenantData))
+	return 2 + compactSizeLen(dataLen) + dataLen
 }
 
 func (m *SimplicityTxContextMeter) charge(cost uint64) error {
