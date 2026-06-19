@@ -75,8 +75,9 @@ const (
 	ML_KEM_1024_CT_BYTES      = 1568
 	MAX_STEALTH_COVENANT_DATA = 1600
 
-	VERIFY_COST_ML_DSA_87     = 8
-	VERIFY_COST_UNKNOWN_SUITE = 64 // conservative floor for non-native suites (CANONICAL §9)
+	VERIFY_COST_ML_DSA_87       = 8
+	VERIFY_COST_UNKNOWN_SUITE   = 64 // conservative floor for non-native suites (CANONICAL §9)
+	SIMPLICITY_BASE_VERIFY_COST = 64
 
 	// EXT_BASE_COST is a policy/activation prerequisite constant for CORE_EXT tracks.
 	// It is defined as a stable numeric baseline derived from devnet-style measurement
