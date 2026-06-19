@@ -66,6 +66,47 @@ func TestTxWeightAtHeight_UnknownSuite_UsesFloor(t *testing.T) {
 	}
 }
 
+func TestTxWeight_SigCostSpecialCases(t *testing.T) {
+	cases := []struct {
+		name    string
+		suiteID uint8
+		want    uint64
+	}{
+		{"simplicity_envelope", SUITE_ID_SIMPLICITY_ENVELOPE, SIMPLICITY_BASE_VERIFY_COST},
+		{"unknown_suite", 0xff, VERIFY_COST_UNKNOWN_SUITE},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sentinel := txWithWitness([]WitnessItem{{SuiteID: SUITE_ID_SENTINEL}})
+			item := txWithWitness([]WitnessItem{{SuiteID: tc.suiteID}})
+
+			legacySentinel, _, _, err := TxWeightAndStats(sentinel)
+			if err != nil {
+				t.Fatalf("legacy sentinel weight: %v", err)
+			}
+			legacyItem, _, _, err := TxWeightAndStats(item)
+			if err != nil {
+				t.Fatalf("legacy item weight: %v", err)
+			}
+			if got := legacyItem - legacySentinel; got != tc.want {
+				t.Fatalf("legacy sig_cost delta=%d, want %d", got, tc.want)
+			}
+
+			registrySentinel, _, _, err := TxWeightAndStatsAtHeight(sentinel, 100, DefaultRotationProvider{}, DefaultSuiteRegistry())
+			if err != nil {
+				t.Fatalf("registry sentinel weight: %v", err)
+			}
+			registryItem, _, _, err := TxWeightAndStatsAtHeight(item, 100, DefaultRotationProvider{}, DefaultSuiteRegistry())
+			if err != nil {
+				t.Fatalf("registry item weight: %v", err)
+			}
+			if got := registryItem - registrySentinel; got != tc.want {
+				t.Fatalf("registry sig_cost delta=%d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTxWeightAtHeight_NativeNotInSpendSet_UsesFloor(t *testing.T) {
 	// Simulate suite 0x02 that IS registered but NOT in spend suites at this height.
 	reg := &SuiteRegistry{

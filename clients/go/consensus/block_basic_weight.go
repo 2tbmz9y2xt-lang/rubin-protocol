@@ -209,6 +209,8 @@ func computeTxDASize(tx *Tx) (uint64, uint64) {
 func txWeightAndStats(tx *Tx) (uint64, uint64, uint64, error) {
 	return txWeightComponents(tx, func(w WitnessItem) (uint64, error) {
 		switch w.SuiteID {
+		case SUITE_ID_SIMPLICITY_ENVELOPE:
+			return SIMPLICITY_BASE_VERIFY_COST, nil
 		case SUITE_ID_ML_DSA_87:
 			if len(w.Pubkey) == ML_DSA_87_PUBKEY_BYTES && len(w.Signature) == ML_DSA_87_SIG_BYTES+1 {
 				return VERIFY_COST_ML_DSA_87, nil
@@ -280,6 +282,9 @@ func txWeightAndStatsWithRegistry(tx *Tx, height uint64, rotation RotationProvid
 	nativeSpend := rotation.NativeSpendSuites(height)
 
 	return txWeightComponents(tx, func(w WitnessItem) (uint64, error) {
+		if w.SuiteID == SUITE_ID_SIMPLICITY_ENVELOPE {
+			return SIMPLICITY_BASE_VERIFY_COST, nil
+		}
 		if nativeSpend.Contains(w.SuiteID) {
 			if params, ok := registry.Lookup(w.SuiteID); ok {
 				// Native registered suite: use registry cost if lengths match,
