@@ -121,15 +121,6 @@ func canonicalLegacyExposureHookVectors() []legacyExposureHookVectorJSON {
 	}
 }
 
-func mustCoreExtOpenSSLDigest32DescriptorHex(t *testing.T) string {
-	t.Helper()
-	descriptor, err := consensus.CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", consensus.ML_DSA_87_PUBKEY_BYTES, consensus.ML_DSA_87_SIG_BYTES)
-	if err != nil {
-		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
-	}
-	return hex.EncodeToString(descriptor)
-}
-
 func TestMustTipReturnsExitCode2OnError(t *testing.T) {
 	var errOut bytes.Buffer
 	_, _, _, code := mustTip(0, [32]byte{}, false, errors.New("boom"), &errOut)
@@ -1206,48 +1197,6 @@ func TestParseGenesisConfigRejectsMissingGenesisHash(t *testing.T) {
 	}
 }
 
-func TestParseGenesisConfigFullBuildsCoreExtProfiles(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "genesis.json")
-	descriptorHex := mustCoreExtOpenSSLDigest32DescriptorHex(t)
-	if err := os.WriteFile(path, []byte(`{
-		"chain_id_hex":"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
-		"genesis_hash_hex":"0x8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[1,3],"binding":"`+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`","binding_descriptor_hex":"`+descriptorHex+`","ext_payload_schema_hex":"b2"}]
-	}`), 0o600); err != nil {
-		t.Fatalf("write genesis file: %v", err)
-	}
-
-	cfg, err := parseGenesisConfigFull(path)
-	if err != nil {
-		t.Fatalf("parseGenesisConfigFull: %v", err)
-	}
-	if cfg.CoreExtProfiles == nil {
-		t.Fatalf("expected core_ext provider")
-	}
-	if _, ok, err := cfg.CoreExtProfiles.LookupCoreExtProfile(7, 11); err != nil {
-		t.Fatalf("lookup pre-activation: %v", err)
-	} else if ok {
-		t.Fatalf("profile must be inactive before activation height")
-	}
-	profile, ok, err := cfg.CoreExtProfiles.LookupCoreExtProfile(7, 12)
-	if err != nil {
-		t.Fatalf("lookup active: %v", err)
-	}
-	if !ok || !profile.Active {
-		t.Fatalf("expected active profile at activation height")
-	}
-	if profile.VerifySigExtFn == nil {
-		t.Fatalf("expected verify_sig_ext binding")
-	}
-	if _, has := profile.AllowedSuites[1]; !has {
-		t.Fatalf("missing allowed suite 1")
-	}
-	if _, has := profile.AllowedSuites[3]; !has {
-		t.Fatalf("missing allowed suite 3")
-	}
-}
-
 func TestParseGenesisConfigFullReadFileError(t *testing.T) {
 	_, err := parseGenesisConfigFull(filepath.Join(t.TempDir(), "missing.json"))
 	if err == nil {
@@ -1281,309 +1230,32 @@ func TestParseGenesisConfigFullRejectsInvalidChainID(t *testing.T) {
 	}
 }
 
-func TestParseGenesisConfigFullRejectsEmptyCoreExtAllowedSuites(t *testing.T) {
+func TestParseGenesisConfigFullRejectsRemovedCoreExtFields(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "genesis.json")
-	descriptorHex := mustCoreExtOpenSSLDigest32DescriptorHex(t)
-	if err := os.WriteFile(path, []byte(`{
-		"chain_id_hex":"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
-		"genesis_hash_hex":"0x8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[],"binding":"`+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`","binding_descriptor_hex":"`+descriptorHex+`","ext_payload_schema_hex":"b2"}]
-	}`), 0o600); err != nil {
-		t.Fatalf("write genesis file: %v", err)
-	}
-
-	if _, err := parseGenesisConfigFull(path); err == nil {
-		t.Fatalf("expected empty allowed suites error")
-	}
-}
-
-func TestParseGenesisConfigFullRejectsInvalidCoreExtBinding(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "genesis.json")
-	chainIDBytes := node.DevnetGenesisChainID()
-	genesisHashBytes := node.DevnetGenesisBlockHash()
-	chainID := hex.EncodeToString(chainIDBytes[:])
-	genesisHash := hex.EncodeToString(genesisHashBytes[:])
-	if err := os.WriteFile(path, []byte(`{
-		"chain_id_hex":"0x`+chainID+`",
-		"genesis_hash_hex":"0x`+genesisHash+`",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"binding":"unsupported"}]
-	}`), 0o600); err != nil {
-		t.Fatalf("write genesis file: %v", err)
-	}
-
-	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "unsupported core_ext binding") {
-		t.Fatalf("expected unsupported binding error, got %v", err)
-	}
-}
-
-func TestParseGenesisConfigFullRejectsInvalidCoreExtBindingBeforeHexDecode(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "genesis.json")
-	chainIDBytes := node.DevnetGenesisChainID()
-	genesisHashBytes := node.DevnetGenesisBlockHash()
-	chainID := hex.EncodeToString(chainIDBytes[:])
-	genesisHash := hex.EncodeToString(genesisHashBytes[:])
-	if err := os.WriteFile(path, []byte(`{
-		"chain_id_hex":"0x`+chainID+`",
-		"genesis_hash_hex":"0x`+genesisHash+`",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[3],"binding":"unsupported","binding_descriptor_hex":"zz","ext_payload_schema_hex":"zz"}]
-	}`), 0o600); err != nil {
-		t.Fatalf("write genesis file: %v", err)
-	}
-
-	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "unsupported core_ext binding") {
-		t.Fatalf("expected unsupported binding error before hex decode, got %v", err)
-	}
-}
-
-func TestParseGenesisConfigFullAcceptsWhitespaceWrappedCoreExtBinding(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "genesis.json")
-	chainIDBytes := node.DevnetGenesisChainID()
-	genesisHashBytes := node.DevnetGenesisBlockHash()
-	chainID := hex.EncodeToString(chainIDBytes[:])
-	genesisHash := hex.EncodeToString(genesisHashBytes[:])
-	descriptorHex := mustCoreExtOpenSSLDigest32DescriptorHex(t)
-	if err := os.WriteFile(path, []byte(`{
-		"chain_id_hex":"0x`+chainID+`",
-		"genesis_hash_hex":"0x`+genesisHash+`",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[3],"binding":"  `+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`\n","binding_descriptor_hex":"`+descriptorHex+`","ext_payload_schema_hex":"b2"}]
-	}`), 0o600); err != nil {
-		t.Fatalf("write genesis file: %v", err)
-	}
-
-	cfg, err := parseGenesisConfigFull(path)
-	if err != nil {
-		t.Fatalf("parseGenesisConfigFull: %v", err)
-	}
-	profile, ok, err := cfg.CoreExtProfiles.LookupCoreExtProfile(7, 12)
-	if err != nil {
-		t.Fatalf("LookupCoreExtProfile: %v", err)
-	}
-	if !ok || !profile.Active {
-		t.Fatalf("expected active profile at activation height")
-	}
-	if profile.VerifySigExtFn == nil {
-		t.Fatalf("expected verify_sig_ext binding")
-	}
-}
-
-func TestParseGenesisConfigFullRejectsCoreExtProfileSetAnchorMismatch(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "genesis.json")
-	chainIDBytes := node.DevnetGenesisChainID()
-	genesisHashBytes := node.DevnetGenesisBlockHash()
-	descriptorHex := mustCoreExtOpenSSLDigest32DescriptorHex(t)
-	descriptor, err := hex.DecodeString(descriptorHex)
-	if err != nil {
-		t.Fatalf("DecodeString(descriptorHex): %v", err)
-	}
-	deployments := []consensus.CoreExtDeploymentProfile{{
-		ExtID:             7,
-		ActivationHeight:  12,
-		AllowedSuites:     map[uint8]struct{}{3: {}},
-		VerifySigExtFn:    func(_ uint16, _ uint8, _ []byte, _ []byte, _ [32]byte, _ []byte) (bool, error) { return true, nil },
-		BindingDescriptor: descriptor,
-		ExtPayloadSchema:  []byte{0xb2},
-	}}
-	anchor, err := consensus.CoreExtProfileSetAnchorV1(chainIDBytes, deployments)
-	if err != nil {
-		t.Fatalf("CoreExtProfileSetAnchorV1: %v", err)
-	}
-	anchor[0] ^= 0xff
-	chainID := hex.EncodeToString(chainIDBytes[:])
-	genesisHash := hex.EncodeToString(genesisHashBytes[:])
-	if err := os.WriteFile(path, []byte(`{
-		"chain_id_hex":"0x`+chainID+`",
-		"genesis_hash_hex":"0x`+genesisHash+`",
-		"core_ext_profile_set_anchor_hex":"0x`+hex.EncodeToString(anchor[:])+`",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[3],"binding":"`+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`","binding_descriptor_hex":"`+descriptorHex+`","ext_payload_schema_hex":"b2"}]
-	}`), 0o600); err != nil {
-		t.Fatalf("write genesis file: %v", err)
-	}
-	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "core_ext profile set anchor mismatch") {
-		t.Fatalf("expected set anchor mismatch error, got %v", err)
-	}
-}
-
-func TestParseGenesisConfigFullRejectsOversizedCoreExtHexFields(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "genesis.json")
-	chainIDBytes := node.DevnetGenesisChainID()
-	genesisHashBytes := node.DevnetGenesisBlockHash()
-	chainID := hex.EncodeToString(chainIDBytes[:])
-	genesisHash := hex.EncodeToString(genesisHashBytes[:])
-	if err := os.WriteFile(path, []byte(`{
-		"chain_id_hex":"0x`+chainID+`",
-		"genesis_hash_hex":"0x`+genesisHash+`",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[3],"binding":"`+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`","binding_descriptor_hex":"`+strings.Repeat("aa", maxCoreExtHexFieldBytes+1)+`","ext_payload_schema_hex":"b2"}]
-	}`), 0o600); err != nil {
-		t.Fatalf("write genesis file: %v", err)
-	}
-	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "bad binding_descriptor_hex") {
-		t.Fatalf("expected oversized descriptor rejection, got %v", err)
-	}
-}
-
-func TestParseGenesisConfigFullRejectsInvalidCoreExtHexFields(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "genesis.json")
 	chainIDBytes := node.DevnetGenesisChainID()
 	genesisHashBytes := node.DevnetGenesisBlockHash()
 	chainID := hex.EncodeToString(chainIDBytes[:])
 	genesisHash := hex.EncodeToString(genesisHashBytes[:])
 
-	if err := os.WriteFile(path, []byte(`{
-		"chain_id_hex":"0x`+chainID+`",
-		"genesis_hash_hex":"0x`+genesisHash+`",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[3],"binding":"`+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`","binding_descriptor_hex":"zz","ext_payload_schema_hex":"b2"}]
-	}`), 0o600); err != nil {
-		t.Fatalf("write genesis file: %v", err)
-	}
-	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "bad binding_descriptor_hex") {
-		t.Fatalf("expected invalid descriptor rejection, got %v", err)
-	}
+	for _, tc := range []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "profiles", field: "core_ext_profiles", value: `[]`},
+		{name: "profile_set_anchor", field: "core_ext_profile_set_anchor_hex", value: `"00"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, tc.name+".json")
+			payload := `{"chain_id_hex":"0x` + chainID + `","genesis_hash_hex":"0x` + genesisHash + `","` + tc.field + `":` + tc.value + `}`
+			if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+				t.Fatalf("write genesis file: %v", err)
+			}
 
-	if err := os.WriteFile(path, []byte(`{
-		"chain_id_hex":"0x`+chainID+`",
-		"genesis_hash_hex":"0x`+genesisHash+`",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[3],"binding":"`+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`","binding_descriptor_hex":"`+mustCoreExtOpenSSLDigest32DescriptorHex(t)+`","ext_payload_schema_hex":"zz"}]
-	}`), 0o600); err != nil {
-		t.Fatalf("write genesis file: %v", err)
-	}
-	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "bad ext_payload_schema_hex") {
-		t.Fatalf("expected invalid payload schema rejection, got %v", err)
-	}
-}
-
-func TestParseGenesisConfigFullRejectsInvalidCoreExtProfileSetAnchorHex(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "genesis.json")
-	chainIDBytes := node.DevnetGenesisChainID()
-	genesisHashBytes := node.DevnetGenesisBlockHash()
-	chainID := hex.EncodeToString(chainIDBytes[:])
-	genesisHash := hex.EncodeToString(genesisHashBytes[:])
-	if err := os.WriteFile(path, []byte(`{
-		"chain_id_hex":"0x`+chainID+`",
-		"genesis_hash_hex":"0x`+genesisHash+`",
-		"core_ext_profile_set_anchor_hex":"zz",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[3],"binding":"`+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`","binding_descriptor_hex":"`+mustCoreExtOpenSSLDigest32DescriptorHex(t)+`","ext_payload_schema_hex":"b2"}]
-	}`), 0o600); err != nil {
-		t.Fatalf("write genesis file: %v", err)
-	}
-	if _, err := parseGenesisConfigFull(path); err == nil {
-		t.Fatalf("expected invalid set anchor rejection")
-	}
-}
-
-func TestBuildGenesisCoreExtProfilesEmptySetAnchorEnforced(t *testing.T) {
-	chainID := [32]byte{0: 0x42}
-	anchor, err := consensus.CoreExtProfileSetAnchorV1(chainID, nil)
-	if err != nil {
-		t.Fatalf("CoreExtProfileSetAnchorV1(empty): %v", err)
-	}
-	provider, err := buildGenesisCoreExtProfiles(nil, chainID, hex.EncodeToString(anchor[:]))
-	if err != nil {
-		t.Fatalf("buildGenesisCoreExtProfiles(empty anchor): %v", err)
-	}
-	if provider == nil {
-		t.Fatalf("expected explicit empty provider for empty anchored profile set")
-	}
-	if _, ok, err := provider.LookupCoreExtProfile(7, 0); err != nil {
-		t.Fatalf("LookupCoreExtProfile: %v", err)
-	} else if ok {
-		t.Fatalf("expected no active profile from empty anchored provider")
-	}
-	anchor[0] ^= 0xff
-	if _, err := buildGenesisCoreExtProfiles(nil, chainID, hex.EncodeToString(anchor[:])); err == nil {
-		t.Fatalf("expected empty profile set anchor mismatch")
-	}
-}
-
-func TestBuildGenesisCoreExtProfilesRejectsMissingPayloadSchema(t *testing.T) {
-	chainID := node.DevnetGenesisChainID()
-	items := []genesisCoreExtProfile{{
-		ExtID:                7,
-		ActivationHeight:     12,
-		AllowedSuiteIDs:      []uint8{3},
-		Binding:              consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
-		BindingDescriptorHex: mustCoreExtOpenSSLDigest32DescriptorHex(t),
-	}}
-	if _, err := buildGenesisCoreExtProfiles(items, chainID, ""); err == nil || !strings.Contains(err.Error(), "requires ext_payload_schema_hex") {
-		t.Fatalf("expected missing payload schema error, got %v", err)
-	}
-}
-
-func TestParseGenesisConfigFullRejectsInvalidCoreExtAnchorProfiles(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "genesis.json")
-	chainIDBytes := node.DevnetGenesisChainID()
-	genesisHashBytes := node.DevnetGenesisBlockHash()
-	chainID := hex.EncodeToString(chainIDBytes[:])
-	genesisHash := hex.EncodeToString(genesisHashBytes[:])
-	descriptorHex := mustCoreExtOpenSSLDigest32DescriptorHex(t)
-	if err := os.WriteFile(path, []byte(`{
-		"chain_id_hex":"0x`+chainID+`",
-		"genesis_hash_hex":"0x`+genesisHash+`",
-		"core_ext_profile_set_anchor_hex":"0x`+strings.Repeat("00", 32)+`",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[],"binding":"`+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`","binding_descriptor_hex":"`+descriptorHex+`","ext_payload_schema_hex":"b2"}]
-	}`), 0o600); err != nil {
-		t.Fatalf("write genesis file: %v", err)
-	}
-	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "must have non-empty allowed suites") {
-		t.Fatalf("expected invalid profile rejection during anchor check, got %v", err)
-	}
-}
-
-func TestParseGenesisConfigFullRejectsTxContextEnabledCoreExtProfileWithoutRuntimeVerifier(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "genesis.json")
-	chainIDBytes := node.DevnetGenesisChainID()
-	genesisHashBytes := node.DevnetGenesisBlockHash()
-	chainID := hex.EncodeToString(chainIDBytes[:])
-	genesisHash := hex.EncodeToString(genesisHashBytes[:])
-	descriptorHex := mustCoreExtOpenSSLDigest32DescriptorHex(t)
-	if err := os.WriteFile(path, []byte(`{
-		"chain_id_hex":"0x`+chainID+`",
-		"genesis_hash_hex":"0x`+genesisHash+`",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"tx_context_enabled":true,"allowed_suite_ids":[3],"binding":"`+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`","binding_descriptor_hex":"`+descriptorHex+`","ext_payload_schema_hex":"b2"}]
-	}`), 0o600); err != nil {
-		t.Fatalf("write genesis file: %v", err)
-	}
-
-	if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), "tx_context_enabled core_ext profile for ext_id=7 requires runtime txcontext verifier wiring") {
-		t.Fatalf("expected tx_context_enabled runtime verifier rejection, got %v", err)
-	}
-}
-
-func TestParseGenesisConfigFullRejectsNonBooleanTxContextEnabled(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "genesis.json")
-	chainIDBytes := node.DevnetGenesisChainID()
-	genesisHashBytes := node.DevnetGenesisBlockHash()
-	chainID := hex.EncodeToString(chainIDBytes[:])
-	genesisHash := hex.EncodeToString(genesisHashBytes[:])
-	descriptorHex := mustCoreExtOpenSSLDigest32DescriptorHex(t)
-	if err := os.WriteFile(path, []byte(`{
-		"chain_id_hex":"0x`+chainID+`",
-		"genesis_hash_hex":"0x`+genesisHash+`",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"tx_context_enabled":1,"allowed_suite_ids":[3],"binding":"`+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`","binding_descriptor_hex":"`+descriptorHex+`","ext_payload_schema_hex":"b2"}]
-	}`), 0o600); err != nil {
-		t.Fatalf("write genesis file: %v", err)
-	}
-
-	_, err := parseGenesisConfigFull(path)
-	if err == nil {
-		t.Fatalf("expected invalid tx_context_enabled parse failure")
-	}
-	var typeErr *json.UnmarshalTypeError
-	if !errors.As(err, &typeErr) {
-		t.Fatalf("expected UnmarshalTypeError, got %T (%v)", err, err)
-	}
-	if !strings.Contains(typeErr.Field, "tx_context_enabled") {
-		t.Fatalf("expected tx_context_enabled field in type error, got %q", typeErr.Field)
+			if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), `unsupported genesis field "`+tc.field+`"`) {
+				t.Fatalf("expected removed field rejection for %s, got %v", tc.field, err)
+			}
+		})
 	}
 }
 
@@ -1593,73 +1265,6 @@ func TestParseGenesisHashRejectsInvalidHeaderBytes(t *testing.T) {
 	}
 	if _, err := parseGenesisHash(genesisPack{GenesisHeaderBytesHex: "00"}); err == nil {
 		t.Fatalf("expected invalid header length error")
-	}
-}
-
-func TestParseCoreExtBindingVariants(t *testing.T) {
-	opensslDescriptor, err := consensus.CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", consensus.ML_DSA_87_PUBKEY_BYTES, consensus.ML_DSA_87_SIG_BYTES)
-	if err != nil {
-		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
-	}
-	tests := []struct {
-		name              string
-		binding           string
-		bindingDescriptor []byte
-		extPayloadSchema  []byte
-		wantErr           string
-		skipCall          bool
-	}{
-		{name: "empty", binding: "", wantErr: "unsupported core_ext binding"},
-		{name: "native", binding: "native_verify_sig", wantErr: "unsupported core_ext binding"},
-		{
-			name:              "openssl-digest32",
-			binding:           consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
-			bindingDescriptor: opensslDescriptor,
-			extPayloadSchema:  []byte{0xb2},
-			skipCall:          true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fn, err := parseCoreExtBinding(tt.binding, tt.bindingDescriptor, tt.extPayloadSchema)
-			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("parseCoreExtBinding(%q) err=%v, want %q", tt.binding, err, tt.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseCoreExtBinding(%q): %v", tt.binding, err)
-			}
-			if fn == nil {
-				t.Fatalf("expected verifier for %q", tt.binding)
-			}
-			if tt.skipCall {
-				return
-			}
-			if ok, callErr := fn(7, 1, nil, nil, [32]byte{}, nil); ok || callErr != nil {
-				t.Fatalf("unexpected verifier result for %q: ok=%v err=%v", tt.binding, ok, callErr)
-			}
-		})
-	}
-}
-
-func TestParseCoreExtBindingRejectsLegacyHarnessBindings(t *testing.T) {
-	for _, binding := range []string{"verify_sig_ext_accept", "verify_sig_ext_reject", "verify_sig_ext_error"} {
-		if _, err := parseCoreExtBinding(binding, nil, nil); err == nil || !strings.Contains(err.Error(), "unsupported core_ext binding") {
-			t.Fatalf("expected legacy binding rejection for %q, got %v", binding, err)
-		}
-	}
-}
-
-func TestParseCoreExtBindingRejectsOpenSSLBindingWithoutPayloadSchema(t *testing.T) {
-	descriptor, err := consensus.CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", consensus.ML_DSA_87_PUBKEY_BYTES, consensus.ML_DSA_87_SIG_BYTES)
-	if err != nil {
-		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
-	}
-	if _, err := parseCoreExtBinding(consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1, descriptor, nil); err == nil {
-		t.Fatalf("expected missing ext_payload_schema rejection")
 	}
 }
 
@@ -1685,47 +1290,6 @@ func TestRunDryRunUsesDevnetGenesisChainIDByDefault(t *testing.T) {
 	}
 	if !bytes.Contains(out.Bytes(), []byte(hex.EncodeToString(want[:]))) {
 		t.Fatalf("expected effective config to print devnet chain_id, got %q", out.String())
-	}
-}
-
-func TestRunPassesGenesisCoreExtProfilesToMempool(t *testing.T) {
-	prev := newMempoolFn
-	var captured node.MempoolConfig
-	newMempoolFn = func(st *node.ChainState, store *node.BlockStore, chainID [32]byte, cfg node.MempoolConfig) (*node.Mempool, error) {
-		captured = cfg
-		return node.NewMempoolWithConfig(st, store, chainID, cfg)
-	}
-	t.Cleanup(func() { newMempoolFn = prev })
-
-	dir := t.TempDir()
-	genesisPath := filepath.Join(dir, "genesis.json")
-	descriptorHex := mustCoreExtOpenSSLDigest32DescriptorHex(t)
-	if err := os.WriteFile(genesisPath, []byte(`{
-		"chain_id_hex":"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
-		"genesis_hash_hex":"0x8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
-		"core_ext_profiles":[{"ext_id":7,"activation_height":12,"allowed_suite_ids":[1],"binding":"`+consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1+`","binding_descriptor_hex":"`+descriptorHex+`","ext_payload_schema_hex":"b2"}]
-	}`), 0o600); err != nil {
-		t.Fatalf("write genesis file: %v", err)
-	}
-
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	code := run([]string{"--dry-run", "--datadir", dir, "--genesis-file", genesisPath}, &out, &errOut)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, errOut.String())
-	}
-	if !captured.PolicyRejectCoreExtPreActivation {
-		t.Fatalf("expected CORE_EXT mempool policy enabled by default")
-	}
-	if captured.CoreExtProfiles == nil {
-		t.Fatalf("expected mempool core_ext profiles")
-	}
-	profile, ok, err := captured.CoreExtProfiles.LookupCoreExtProfile(7, 12)
-	if err != nil {
-		t.Fatalf("LookupCoreExtProfile: %v", err)
-	}
-	if !ok || !profile.Active {
-		t.Fatalf("expected active core_ext profile at activation height")
 	}
 }
 

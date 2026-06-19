@@ -256,12 +256,11 @@ func (s *SyncEngine) preparePreferredBranch(
 		return nil, 0, err
 	}
 	for _, item := range branch {
-		if _, err := previewState.ConnectBlockWithCoreExtProfilesAndSuiteContext(
+		if _, err := previewState.ConnectBlockWithSuiteContext(
 			item.blockBytes,
 			s.cfg.ExpectedTarget,
 			slidingTs,
 			s.cfg.ChainID,
-			s.cfg.CoreExtProfiles,
 			s.cfg.RotationProvider,
 			s.cfg.SuiteRegistry,
 		); err != nil {

@@ -1,17 +1,10 @@
 package node
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
-
-type errCoreExtProfiles struct{}
-
-func (errCoreExtProfiles) LookupCoreExtProfile(uint16, uint64) (consensus.CoreExtProfile, bool, error) {
-	return consensus.CoreExtProfile{}, false, errors.New("boom")
-}
 
 func TestCoverageResidual_MempoolBranches(t *testing.T) {
 	if _, err := NewMempool(nil, nil, [32]byte{}); err == nil {
@@ -137,21 +130,6 @@ func TestCoverageResidual_MempoolLimitBranches(t *testing.T) {
 		t.Fatalf("delete underflow guard left usedBytes=%d", mpBytes.usedBytes)
 	}
 	mpBytes.mu.Unlock()
-}
-
-func TestCoverageResidual_CoreExtPolicyBranches(t *testing.T) {
-	if reject, reason, err := rejectCoreExtCovenantDataPreActivation([]byte{0x01}, 0, nil, "output"); !reject || err == nil || reason == "" {
-		t.Fatalf("expected parse failure path, got reject=%v reason=%q err=%v", reject, reason, err)
-	}
-	if active, err := coreExtProfileActive(1, 0, nil); err != nil || active {
-		t.Fatalf("nil profiles should be inactive: active=%v err=%v", active, err)
-	}
-	if reject, reason, err := rejectCoreExtCovenantDataPreActivation([]byte{0x01, 0x00, 0x00}, 0, errCoreExtProfiles{}, "spend"); !reject || err == nil || reason == "" {
-		t.Fatalf("expected lookup error path, got reject=%v reason=%q err=%v", reject, reason, err)
-	}
-	if reject, reason, err := RejectCoreExtTxPreActivation(&consensus.Tx{TxNonce: 1}, nil, 0, nil); err != nil || reject || reason != "" {
-		t.Fatalf("tx without core-ext should pass: reject=%v reason=%q err=%v", reject, reason, err)
-	}
 }
 
 func TestCoverageResidual_SyncBranches(t *testing.T) {

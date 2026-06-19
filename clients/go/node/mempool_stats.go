@@ -51,9 +51,7 @@ type MempoolConfig struct {
 	// still pass 0 to isolate surcharge-only helper semantics.
 	MinDaFeeRate                         uint64
 	PolicyRejectNonCoinbaseAnchorOutputs bool
-	PolicyRejectCoreExtPreActivation     bool
-	PolicyMaxExtPayloadBytes             int
-	CoreExtProfiles                      consensus.CoreExtProfileProvider
+	PolicyRejectSimplicityPreActivation  bool
 	RotationProvider                     consensus.RotationProvider
 	SuiteRegistry                        *consensus.SuiteRegistry
 }
@@ -106,7 +104,7 @@ func DefaultMempoolConfig() MempoolConfig {
 		PolicyDaSurchargePerByte:             minerDefaults.PolicyDaSurchargePerByte,
 		MinDaFeeRate:                         DefaultMinDaFeeRate,
 		PolicyRejectNonCoinbaseAnchorOutputs: minerDefaults.PolicyRejectNonCoinbaseAnchorOutputs,
-		PolicyRejectCoreExtPreActivation:     minerDefaults.PolicyRejectCoreExtPreActivation,
+		PolicyRejectSimplicityPreActivation:  minerDefaults.PolicyRejectSimplicityPreActivation,
 	}
 }
 

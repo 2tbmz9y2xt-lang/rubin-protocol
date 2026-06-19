@@ -70,18 +70,11 @@ type MinerConfig struct {
 	// CurrentMempoolMinFeeRate above.
 	CurrentMempoolMinFeeRateFn func() uint64
 
-	// PolicyRejectCoreExtPreActivation controls non-consensus pre-activation guardrails
-	// for CORE_EXT and CORE_SIMPLICITY. When enabled, the miner will exclude
-	// transactions that create or spend CORE_EXT outputs whose profile(ext_id, height)
-	// is not ACTIVE, and CORE_SIMPLICITY transactions until the miner rotation provider
-	// reports Simplicity active at the candidate height.
-	//
-	// If CoreExtProfiles is nil, all CORE_EXT profiles are treated as not ACTIVE.
-	PolicyRejectCoreExtPreActivation bool
-
-	// CoreExtProfiles is the chain-config profile mapping used by policy checks.
-	// Consensus uses a canonical source for profile(ext_id, height); this is policy-only.
-	CoreExtProfiles consensus.CoreExtProfileProvider
+	// PolicyRejectSimplicityPreActivation controls non-consensus
+	// pre-activation guardrails for CORE_SIMPLICITY. When enabled, the
+	// miner excludes CORE_SIMPLICITY transactions until the miner rotation
+	// provider reports Simplicity active at the candidate height.
+	PolicyRejectSimplicityPreActivation bool
 
 	CompleteDASetProvider CompleteDASetProvider
 }
@@ -119,11 +112,10 @@ type miningBuildContext struct {
 }
 
 type miningConsensusContext struct {
-	blockMTP        uint64
-	chainID         [32]byte
-	coreExtProfiles consensus.CoreExtProfileProvider
-	rotation        consensus.RotationProvider
-	registry        *consensus.SuiteRegistry
+	blockMTP uint64
+	chainID  [32]byte
+	rotation consensus.RotationProvider
+	registry *consensus.SuiteRegistry
 }
 
 type miningChainStateSnapshot struct {
@@ -148,7 +140,7 @@ func DefaultMinerConfig() MinerConfig {
 		PolicyDaSurchargePerByte:             0,                                    // controller-tunable; disabled by default
 		MinDaFeeRate:                         DefaultMinDaFeeRate,                  // Stage C spec-side per-byte DA floor
 		CurrentMempoolMinFeeRate:             DefaultMempoolMinFeeRate,             // baseline for the rolling floor when no live mempool is bound
-		PolicyRejectCoreExtPreActivation:     true,
+		PolicyRejectSimplicityPreActivation:  true,
 	}
 }
 
@@ -314,7 +306,7 @@ func (m *Miner) policyNeedsReadonlyUtxoSnapshot() bool {
 	if m == nil {
 		return false
 	}
-	if m.cfg.PolicyRejectCoreExtPreActivation {
+	if m.cfg.PolicyRejectSimplicityPreActivation {
 		return true
 	}
 	if m.cfg.CompleteDASetProvider != nil {
@@ -522,7 +514,6 @@ func (m *Miner) providerConsensusContext(nextHeight uint64) (miningConsensusCont
 	}
 	if m.sync != nil {
 		ctx.chainID = m.sync.cfg.ChainID
-		ctx.coreExtProfiles = m.sync.cfg.CoreExtProfiles
 		ctx.rotation = m.sync.cfg.RotationProvider
 		ctx.registry = m.sync.cfg.SuiteRegistry
 	}
@@ -661,7 +652,7 @@ func validateCompleteDASetGroupConsensus(group []miningCandidate, utxos map[cons
 			nextHeight,
 			validationCtx.blockMTP,
 			validationCtx.chainID,
-			validationCtx.coreExtProfiles,
+			nil,
 			validationCtx.rotation,
 			validationCtx.registry,
 		); err != nil {
@@ -743,8 +734,8 @@ func (m *Miner) rejectCandidate(tx *consensus.Tx, utxos map[consensus.Outpoint]c
 		}
 	}
 
-	// Apply CoreExt policy
-	reject, err = m.rejectCandidateCoreExtPolicy(tx, utxos, nextHeight)
+	// Apply Simplicity policy
+	reject, err = m.rejectCandidateSimplicityPolicy(tx, utxos, nextHeight)
 	if err != nil {
 		return false, policyDaIncluded, err
 	}

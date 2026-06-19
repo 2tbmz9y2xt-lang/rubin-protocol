@@ -290,7 +290,7 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 	if err != nil {
 		return nil, nil, err
 	}
-	if policy.PolicyRejectCoreExtPreActivation {
+	if policy.PolicyRejectSimplicityPreActivation {
 		reject, reason, err := rejectCoreSimplicityPreActivation(tx, policyUtxos, nextHeight, policy.RotationProvider)
 		if err != nil {
 			return nil, nil, txAdmitRejected(err.Error())
@@ -330,13 +330,8 @@ func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction,
 		return err
 	}
 
-	// Apply CoreExt policy
-	if err := applyPolicyAgainstStateCoreExt(checked, utxos, nextHeight, policy); err != nil {
-		return err
-	}
-
-	// Apply payload size policy
-	if err := applyPolicyAgainstStatePayload(checked, policy); err != nil {
+	// Apply Simplicity policy
+	if err := applyPolicyAgainstStateSimplicity(checked, utxos, nextHeight, policy); err != nil {
 		return err
 	}
 

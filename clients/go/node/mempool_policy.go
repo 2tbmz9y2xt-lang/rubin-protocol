@@ -122,21 +122,21 @@ func (m *Mempool) policySnapshot() MempoolConfig {
 // already-parsed transaction will read input UTXOs. The decision is
 // tx-aware so admissions of non-DA transactions under the default
 // config (`MinDaFeeRate=DefaultMinDaFeeRate=1`,
-// `PolicyDaSurchargePerByte=0`, `PolicyRejectCoreExtPreActivation=false`)
+// `PolicyDaSurchargePerByte=0`, `PolicyRejectSimplicityPreActivation=false`)
 // skip the per-tx map copy entirely.
 //
 // Trigger conditions:
 //
-//  1. `PolicyRejectCoreExtPreActivation` is on — the pre-activation classifier
-//     reads input state for CORE_EXT and CORE_SIMPLICITY candidates, so the snapshot is required
-//     regardless of tx shape.
+//  1. `PolicyRejectSimplicityPreActivation` is on — the pre-activation
+//     classifier reads input state for CORE_SIMPLICITY candidates, so the
+//     snapshot is required regardless of tx shape.
 //  2. The DA path is exercisable AND the tx is DA-bearing
 //     (`daBytes > 0`). `applyPolicyAgainstState` repeats the DA-bearing
 //     check from the post-validation metadata before invoking
 //     `RejectDaAnchorTxPolicy`, so non-DA tx never consume the snapshot or
 //     enter the DA helper.
 //
-// A raw all-zero DA policy snapshot + non-CORE_EXT routing relies on
+// A raw all-zero DA policy snapshot + non-DA routing relies on
 // `validateFeeFloorLocked` to enforce the rolling relay-fee floor; that
 // path does not need a UTXO snapshot. Public NewMempoolWithConfig callers
 // get DefaultMinDaFeeRate when MinDaFeeRate is left at zero.
@@ -149,7 +149,7 @@ func (m *Mempool) policySnapshot() MempoolConfig {
 // a full weight/stat walk; malformed tx kinds are still rejected by the
 // later consensus validation path.
 func policyNeedsInputSnapshotForTx(tx *consensus.Tx, policy MempoolConfig) (bool, error) {
-	if policy.PolicyRejectCoreExtPreActivation {
+	if policy.PolicyRejectSimplicityPreActivation {
 		return true, nil
 	}
 	if policy.MinDaFeeRate == 0 && policy.PolicyDaSurchargePerByte == 0 {

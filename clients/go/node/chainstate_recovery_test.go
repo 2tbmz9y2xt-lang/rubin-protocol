@@ -516,9 +516,9 @@ func TestReconcileChainStateWithBlockStore_PropagatesCorruptBlockBytesSwap(t *te
 	}
 
 	state := NewChainState()
-	if _, err := state.ConnectBlockWithCoreExtProfilesAndSuiteContext(
+	if _, err := state.ConnectBlockWithSuiteContext(
 		devnetGenesisBlockBytes, &target, nil, devnetGenesisChainID,
-		cfg.CoreExtProfiles, cfg.RotationProvider, cfg.SuiteRegistry,
+		cfg.RotationProvider, cfg.SuiteRegistry,
 	); err != nil {
 		t.Fatalf("seed genesis state: %v", err)
 	}

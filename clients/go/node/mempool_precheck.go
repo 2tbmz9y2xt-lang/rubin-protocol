@@ -7,9 +7,9 @@ import (
 // buildPolicyInputSnapshotIfNeeded returns the immutable pre-validation
 // snapshot of only the transaction inputs that policy lanes inspect.
 // The snapshot is needed only by policy lanes that read tx inputs from
-// utxos (CORE_EXT pre-activation gate, or a DA-bearing tx under any
-// non-zero DA-side fee term); non-DA tx with no CORE_EXT gate skip the
-// map-copy entirely (returns nil, nil). Built before
+// utxos (CORE_SIMPLICITY pre-activation gate, or a DA-bearing tx under
+// any non-zero DA-side fee term); non-DA tx with no Simplicity policy gate
+// skip the map-copy entirely (returns nil, nil). Built before
 // CheckTransaction*WithOwnedUtxoSet because that helper takes
 // ownership of the supplied utxo map and removes spent inputs as part
 // of validation. Extracted from checkTransactionWithSnapshot to keep
@@ -77,7 +77,7 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 		return nil, nil, err
 	}
 	// Only plain P2PK candidates use the cheap floor reject. Transactions
-	// that may hit DA, CORE_ANCHOR, CORE_EXT, or missing-UTXO policy lanes
+	// that may hit DA, CORE_ANCHOR, CORE_SIMPLICITY, or missing-UTXO policy lanes
 	// keep the existing validation and policy-error precedence below.
 	// Wave-4 (PR #1422): pass nextHeight + policy.RotationProvider so the
 	// precheck can defer on consensus-invalid P2PK output shapes
@@ -93,7 +93,7 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	if err != nil {
 		return nil, nil, err
 	}
-	if policy.PolicyRejectCoreExtPreActivation {
+	if policy.PolicyRejectSimplicityPreActivation {
 		reject, reason, err := rejectCoreSimplicityPreActivation(parsedTx, policyUtxos, nextHeight, policy.RotationProvider)
 		if err != nil {
 			return nil, nil, txAdmitRejected(err.Error())
@@ -108,7 +108,7 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 		nextHeight,
 		blockMTP,
 		m.chainID,
-		policy.CoreExtProfiles,
+		nil,
 		policy.RotationProvider,
 		policy.SuiteRegistry,
 	)

@@ -275,35 +275,6 @@ func TestMempoolAddTxDaCommitPreservesBaseChainState(t *testing.T) {
 	assertChainStateUnchanged(t, before, snapshotChainState(t, state))
 }
 
-func TestMempoolAddTxCoreExtPreservesBaseChainState(t *testing.T) {
-	fromKey := mustBenchmarkNodeMLDSA87Keypair(t)
-	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
-	state, outpoints := benchmarkSpendableChainState(fromAddress, []uint64{1_000_000})
-	before := snapshotChainState(t, state)
-	mp, err := NewMempoolWithConfig(state, nil, devnetGenesisChainID, MempoolConfig{
-		PolicyRejectCoreExtPreActivation: true,
-		CoreExtProfiles:                  testCoreExtProfiles{activeByExtID: map[uint16]bool{7: true}},
-	})
-	if err != nil {
-		t.Fatalf("NewMempoolWithConfig: %v", err)
-	}
-	txBytes := mustBuildSignedCoreExtOutputTx(
-		t,
-		state.Utxos,
-		outpoints[0],
-		100_000,
-		100_000,
-		1,
-		fromKey,
-		fromAddress,
-		7,
-	)
-	if err := mp.AddTx(txBytes); err != nil {
-		t.Fatalf("AddTx(core_ext): %v", err)
-	}
-	assertChainStateUnchanged(t, before, snapshotChainState(t, state))
-}
-
 func BenchmarkMempoolAddTx(b *testing.B) {
 	fromKey := mustBenchmarkNodeMLDSA87Keypair(b)
 	toKey := mustBenchmarkNodeMLDSA87Keypair(b)
@@ -445,6 +416,14 @@ func BenchmarkCopyUtxoSet(b *testing.B) {
 }
 
 func BenchmarkConnectBlockWithCoreExtProfilesAndSuiteContext(b *testing.B) {
+	benchmarkConnectBlockWithSuiteContext(b)
+}
+
+func BenchmarkConnectBlockWithSuiteContext(b *testing.B) {
+	benchmarkConnectBlockWithSuiteContext(b)
+}
+
+func benchmarkConnectBlockWithSuiteContext(b *testing.B) {
 	baseState, blockBytes, prevTimestamps := benchmarkConnectBlockFixture(b)
 	b.ReportAllocs()
 	b.SetBytes(int64(len(blockBytes)))
@@ -453,16 +432,15 @@ func BenchmarkConnectBlockWithCoreExtProfilesAndSuiteContext(b *testing.B) {
 		b.StopTimer()
 		state := cloneChainState(baseState)
 		b.StartTimer()
-		if _, err := state.ConnectBlockWithCoreExtProfilesAndSuiteContext(
+		if _, err := state.ConnectBlockWithSuiteContext(
 			blockBytes,
 			nil,
 			prevTimestamps,
 			devnetGenesisChainID,
-			consensus.EmptyCoreExtProfileProvider(),
 			nil,
 			nil,
 		); err != nil {
-			b.Fatalf("ConnectBlockWithCoreExtProfilesAndSuiteContext: %v", err)
+			b.Fatalf("ConnectBlockWithSuiteContext: %v", err)
 		}
 	}
 }
@@ -481,7 +459,6 @@ func BenchmarkConnectBlockParallelSigsWithSuiteContext(b *testing.B) {
 			nil,
 			prevTimestamps,
 			devnetGenesisChainID,
-			consensus.EmptyCoreExtProfileProvider(),
 			nil,
 			nil,
 			2,

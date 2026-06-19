@@ -120,10 +120,10 @@ func TestMinerDaAnchorMasterSwitchOnAllowsAnchorWhenSubflagOff(t *testing.T) {
 	requireMinerCandidateReject(t, cfg, daTx, daUtxos, true, 0)
 }
 
-func TestMinerCoreExtPolicyStillRunsWhenDaAnchorMasterOff(t *testing.T) {
+func TestMinerSimplicityPolicyStillRunsWhenDaAnchorMasterOff(t *testing.T) {
 	var prev [32]byte
 	prev[0] = 0x75
-	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_CORE_EXT, coreExtCovenantData(7, nil), nil)
+	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_CORE_SIMPLICITY, simplicityCovenantDataForNodeTest([32]byte{0x75}, nil), nil)
 	tx := mustParseTx(t, raw)
 	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
 		{Txid: prev, Vout: 0}: {
@@ -134,8 +134,7 @@ func TestMinerCoreExtPolicyStillRunsWhenDaAnchorMasterOff(t *testing.T) {
 	}
 	cfg := DefaultMinerConfig()
 	cfg.PolicyDaAnchorAntiAbuse = false
-	cfg.PolicyRejectCoreExtPreActivation = true
-	cfg.CoreExtProfiles = nil
+	cfg.PolicyRejectSimplicityPreActivation = true
 
 	requireMinerCandidateReject(t, cfg, tx, utxos, true, 0)
 }

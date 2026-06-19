@@ -24,7 +24,6 @@ type SyncConfig struct {
 	IBDLagSeconds    uint64
 	ChainID          [32]byte
 	Network          string
-	CoreExtProfiles  consensus.CoreExtProfileProvider
 	RotationProvider consensus.RotationProvider
 	SuiteRegistry    *consensus.SuiteRegistry
 
@@ -327,9 +326,6 @@ func (s *SyncEngine) SetMempool(mempool *Mempool) {
 	defer s.mu.Unlock()
 	if mempool != nil {
 		mempool.mu.Lock()
-		if mempool.policy.CoreExtProfiles == nil {
-			mempool.policy.CoreExtProfiles = s.cfg.CoreExtProfiles
-		}
 		if mempool.policy.RotationProvider == nil {
 			mempool.policy.RotationProvider = s.cfg.RotationProvider
 		}
@@ -571,12 +567,11 @@ func (s *SyncEngine) connectCanonicalBlock(
 	blockBytes []byte,
 	prevTimestamps []uint64,
 ) (*ChainStateConnectSummary, error) {
-	return s.chainState.ConnectBlockWithCoreExtProfilesAndSuiteContext(
+	return s.chainState.ConnectBlockWithSuiteContext(
 		blockBytes,
 		s.cfg.ExpectedTarget,
 		prevTimestamps,
 		s.cfg.ChainID,
-		s.cfg.CoreExtProfiles,
 		s.cfg.RotationProvider,
 		s.cfg.SuiteRegistry,
 	)
