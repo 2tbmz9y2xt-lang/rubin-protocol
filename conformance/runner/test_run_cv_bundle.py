@@ -4,14 +4,16 @@ from unittest import mock
 
 if __package__:
     from .run_cv_bundle import (
-        TXCTX_GOVERNANCE_VECTOR_IDS,
+        RETIRED_GATES,
+        is_retired_gate,
         normalize_validation_result,
         normalized_vector_op,
         validate_vector,
     )
 else:
     from run_cv_bundle import (
-        TXCTX_GOVERNANCE_VECTOR_IDS,
+        RETIRED_GATES,
+        is_retired_gate,
         normalize_validation_result,
         normalized_vector_op,
         validate_vector,
@@ -19,28 +21,25 @@ else:
 
 
 class RunCvBundleOpNormalizationTests(unittest.TestCase):
-    def test_txctx_whitespace_op_defaults_to_spend_vector(self):
-        op = normalized_vector_op("CV-TXCTX", {"id": "CV-TXCTX-01", "op": "   "})
-        self.assertEqual(op, "txctx_spend_vector")
+    def test_core_ext_gates_are_retired(self):
+        self.assertEqual(RETIRED_GATES, frozenset({"CV-EXT", "CV-TXCTX"}))
+        self.assertTrue(is_retired_gate("CV-EXT"))
+        self.assertTrue(is_retired_gate("CV-TXCTX"))
+        self.assertFalse(is_retired_gate("CV-UTXO-BASIC"))
 
-    def test_txctx_governance_vectors_route_to_governance_harness(self):
-        vector_id = next(iter(TXCTX_GOVERNANCE_VECTOR_IDS))
-        op = normalized_vector_op("CV-TXCTX", {"id": vector_id, "op": "   "})
-        self.assertEqual(op, "txctx_governance_vector")
-
-    def test_non_txctx_whitespace_op_is_missing(self):
+    def test_whitespace_only_op_is_preserved_for_validation_error(self):
         op = normalized_vector_op("CV-OTHER", {"id": "X", "op": "   "})
         self.assertEqual(op, "   ")
 
     def test_noncanonical_whitespace_is_not_silently_normalized(self):
-        op = normalized_vector_op("CV-TXCTX", {"id": "CV-TXCTX-01", "op": " txctx_spend_vector "})
-        self.assertEqual(op, " txctx_spend_vector ")
+        op = normalized_vector_op("CV-UTXO-BASIC", {"id": "CV-U-01", "op": " parse_tx "})
+        self.assertEqual(op, " parse_tx ")
 
-    def test_txctx_invalid_nonstring_op_returns_validation_error_instead_of_crashing(self):
+    def test_invalid_nonstring_op_returns_validation_error_instead_of_crashing(self):
         problems, skipped = normalize_validation_result(
-            validate_vector("CV-TXCTX", {"id": "CV-TXCTX-01", "op": 0}, None, None, {})
+            validate_vector("CV-OTHER", {"id": "X", "op": 0}, None, None, {})
         )
-        self.assertEqual(problems, ["CV-TXCTX/CV-TXCTX-01: missing op"])
+        self.assertEqual(problems, ["CV-OTHER/X: missing op"])
         self.assertFalse(skipped)
 
     def test_rotation_ops_forward_network_into_cli_request(self):
