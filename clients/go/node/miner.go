@@ -70,10 +70,11 @@ type MinerConfig struct {
 	// CurrentMempoolMinFeeRate above.
 	CurrentMempoolMinFeeRateFn func() uint64
 
-	// PolicyRejectCoreExtPreActivation controls non-consensus guardrails for CORE_EXT (COV_TYPE_CORE_EXT).
-	// When enabled, the miner will exclude transactions that create or spend CORE_EXT outputs
-	// whose profile(ext_id, height) is not ACTIVE. This is a safety policy to avoid pre-activation
-	// anyone-can-spend risk; consensus validity is unaffected.
+	// PolicyRejectCoreExtPreActivation controls non-consensus pre-activation guardrails
+	// for CORE_EXT and CORE_SIMPLICITY. When enabled, the miner will exclude
+	// transactions that create or spend CORE_EXT outputs whose profile(ext_id, height)
+	// is not ACTIVE, and CORE_SIMPLICITY transactions until the miner rotation provider
+	// reports Simplicity active at the candidate height.
 	//
 	// If CoreExtProfiles is nil, all CORE_EXT profiles are treated as not ACTIVE.
 	PolicyRejectCoreExtPreActivation bool

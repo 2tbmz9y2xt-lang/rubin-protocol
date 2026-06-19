@@ -93,6 +93,15 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	if err != nil {
 		return nil, nil, err
 	}
+	if policy.PolicyRejectCoreExtPreActivation {
+		reject, reason, err := rejectCoreSimplicityPreActivation(parsedTx, policyUtxos, nextHeight, policy.RotationProvider)
+		if err != nil {
+			return nil, nil, txAdmitRejected(err.Error())
+		}
+		if reject {
+			return nil, nil, txAdmitRejected(reason)
+		}
+	}
 	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 		txBytes,
 		snapshot.utxos,

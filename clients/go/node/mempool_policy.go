@@ -127,8 +127,8 @@ func (m *Mempool) policySnapshot() MempoolConfig {
 //
 // Trigger conditions:
 //
-//  1. `PolicyRejectCoreExtPreActivation` is on — the CORE_EXT classifier
-//     reads input state for any candidate, so the snapshot is required
+//  1. `PolicyRejectCoreExtPreActivation` is on — the pre-activation classifier
+//     reads input state for CORE_EXT and CORE_SIMPLICITY candidates, so the snapshot is required
 //     regardless of tx shape.
 //  2. The DA path is exercisable AND the tx is DA-bearing
 //     (`daBytes > 0`). `applyPolicyAgainstState` repeats the DA-bearing
