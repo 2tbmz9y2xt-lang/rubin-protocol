@@ -2449,6 +2449,113 @@ func TestMempoolPolicyRejectsCoreExtSpendPreActivation(t *testing.T) {
 	}
 }
 
+func TestMempoolPolicyRejectsCoreSimplicityPreActivationBeforeConsensus(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		PolicyRejectCoreExtPreActivation: true,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	createTx := txWithOneInputOneOutput(outpoints[0].Txid, outpoints[0].Vout, 1, consensus.COV_TYPE_CORE_SIMPLICITY, simplicityCovenantDataForNodeTest([32]byte{0x53}, nil), nil)
+	if err := mp.AddTx(createTx); err == nil || !strings.Contains(err.Error(), "CORE_SIMPLICITY output pre-ACTIVE") {
+		t.Fatalf("expected CORE_SIMPLICITY output policy rejection, got %v", err)
+	}
+	if _, err := mp.RelayMetadata(createTx); err == nil || !strings.Contains(err.Error(), "CORE_SIMPLICITY output pre-ACTIVE") {
+		t.Fatalf("expected relay CORE_SIMPLICITY output policy rejection, got %v", err)
+	}
+
+	var prev [32]byte
+	prev[0] = 0x54
+	st.Utxos[consensus.Outpoint{Txid: prev, Vout: 0}] = consensus.UtxoEntry{
+		Value:        100,
+		CovenantType: consensus.COV_TYPE_CORE_SIMPLICITY,
+		CovenantData: simplicityCovenantDataForNodeTest([32]byte{0x55}, nil),
+	}
+	spendTx := txWithOneInputOneOutput(prev, 0, 99, consensus.COV_TYPE_P2PK, append([]byte(nil), fromAddress...), nil)
+	if err := mp.AddTx(spendTx); err == nil || !strings.Contains(err.Error(), "CORE_SIMPLICITY spend pre-ACTIVE") {
+		t.Fatalf("expected CORE_SIMPLICITY spend policy rejection, got %v", err)
+	}
+	if _, err := mp.RelayMetadata(spendTx); err == nil || !strings.Contains(err.Error(), "CORE_SIMPLICITY spend pre-ACTIVE") {
+		t.Fatalf("expected relay CORE_SIMPLICITY spend policy rejection, got %v", err)
+	}
+}
+
+func TestMempoolPolicyAllowsCoreSimplicityCreateWhenActive(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+	entry := st.Utxos[outpoints[0]]
+
+	tx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []consensus.TxInput{{PrevTxid: outpoints[0].Txid, PrevVout: outpoints[0].Vout}},
+		Outputs: []consensus.TxOutput{
+			{Value: 100_000, CovenantType: consensus.COV_TYPE_CORE_SIMPLICITY, CovenantData: simplicityCovenantDataForNodeTest([32]byte{0x58}, nil)},
+			{Value: entry.Value - 200_000, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), fromAddress...)},
+		},
+	}
+	if err := consensus.SignTransaction(tx, st.Utxos, devnetGenesisChainID, fromKey); err != nil {
+		t.Fatalf("SignTransaction: %v", err)
+	}
+	txBytes, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx: %v", err)
+	}
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		PolicyRejectCoreExtPreActivation: true,
+		RotationProvider:                 testSimplicityRotation{activeAt: 0},
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	if err := mp.AddTx(txBytes); err != nil {
+		t.Fatalf("expected active CORE_SIMPLICITY policy allow, got %v", err)
+	}
+}
+
+func TestMempoolPolicyDoesNotMaskMalformedNonSimplicityOutput(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	txBytes := mustMarshalTxForNodeTest(t, &consensus.Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []consensus.TxInput{{PrevTxid: outpoints[0].Txid, PrevVout: outpoints[0].Vout}},
+		Outputs: []consensus.TxOutput{
+			{Value: 1, CovenantType: consensus.COV_TYPE_CORE_SIMPLICITY, CovenantData: simplicityCovenantDataForNodeTest([32]byte{0x59}, nil)},
+			{Value: 1, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: nil},
+		},
+	})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		PolicyRejectCoreExtPreActivation: true,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	for _, admit := range []struct {
+		name string
+		run  func() error
+	}{
+		{"AddTx", func() error { return mp.AddTx(txBytes) }},
+		{"RelayMetadata", func() error { _, err := mp.RelayMetadata(txBytes); return err }},
+	} {
+		err := admit.run()
+		if err == nil || !strings.Contains(err.Error(), "invalid CORE_P2PK covenant_data length") || strings.Contains(err.Error(), "CORE_SIMPLICITY output pre-ACTIVE") {
+			t.Fatalf("%s err=%v, want malformed P2PK without CORE_SIMPLICITY policy masking", admit.name, err)
+		}
+	}
+}
+
 func TestMempoolPolicyAllowsCoreExtWhenProfileActive(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())

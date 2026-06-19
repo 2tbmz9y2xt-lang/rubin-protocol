@@ -21,10 +21,39 @@ func (p testCoreExtProfiles) LookupCoreExtProfile(extID uint16, _ uint64) (conse
 	return consensus.CoreExtProfile{Active: active}, true, nil
 }
 
+type testSimplicityRotation struct {
+	activeAt uint64
+}
+
+func (r testSimplicityRotation) NativeCreateSuites(uint64) *consensus.NativeSuiteSet {
+	return consensus.NewNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87)
+}
+
+func (r testSimplicityRotation) NativeSpendSuites(uint64) *consensus.NativeSuiteSet {
+	return consensus.NewNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87)
+}
+
+func (r testSimplicityRotation) SimplicityActiveAtHeight(height uint64) (bool, error) {
+	return height >= r.activeAt, nil
+}
+
 func coreExtCovenantData(extID uint16, payload []byte) []byte {
 	out := consensus.AppendU16le(nil, extID)
 	out = consensus.AppendCompactSize(out, uint64(len(payload)))
 	out = append(out, payload...)
+	return out
+}
+
+func simplicityCovenantDataForNodeTest(programCMR [32]byte, state []byte) []byte {
+	out := append([]byte(nil), programCMR[:]...)
+	out = consensus.AppendCompactSize(out, uint64(len(state)))
+	out = append(out, state...)
+	return out
+}
+
+func p2pkCovenantDataForNodePolicyTest() []byte {
+	out := make([]byte, consensus.MAX_P2PK_COVENANT_DATA)
+	out[0] = consensus.SUITE_ID_ML_DSA_87
 	return out
 }
 
@@ -120,6 +149,67 @@ func TestRejectCoreExtTxPreActivation_RejectsSpendWhenProfileMissing(t *testing.
 	}
 	if !reject {
 		t.Fatalf("expected reject")
+	}
+}
+
+func TestRejectCoreExtTxPreActivation_RejectsSimplicityPreActivation(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0x14
+	spendUtxos := map[consensus.Outpoint]consensus.UtxoEntry{{Txid: prev, Vout: 0}: {
+		Value:        10,
+		CovenantType: consensus.COV_TYPE_CORE_SIMPLICITY,
+		CovenantData: simplicityCovenantDataForNodeTest([32]byte{0x52}, nil),
+	}}
+	tests := []struct {
+		name    string
+		raw     []byte
+		utxos   map[consensus.Outpoint]consensus.UtxoEntry
+		wantMsg string
+	}{
+		{"output", txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_CORE_SIMPLICITY, simplicityCovenantDataForNodeTest([32]byte{0x51}, nil), nil), nil, "CORE_SIMPLICITY output pre-ACTIVE"},
+		{"spend", txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_P2PK, p2pkCovenantDataForNodePolicyTest(), nil), spendUtxos, "CORE_SIMPLICITY spend pre-ACTIVE"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reject, reason, err := RejectCoreExtTxPreActivation(mustParseTx(t, tc.raw), tc.utxos, 0, nil)
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if !reject || reason != tc.wantMsg {
+				t.Fatalf("reject=%v reason=%q, want %q", reject, reason, tc.wantMsg)
+			}
+		})
+	}
+}
+
+func TestRejectCoreExtTxPreActivation_AllowsSimplicityWhenActive(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0x16
+	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_CORE_SIMPLICITY, simplicityCovenantDataForNodeTest([32]byte{0x53}, nil), nil)
+	tx := mustParseTx(t, raw)
+
+	reject, reason, err := RejectCoreExtTxPreActivationWithRotation(tx, nil, 10, nil, testSimplicityRotation{activeAt: 10})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if reject || reason != "" {
+		t.Fatalf("reject=%v reason=%q, want allow", reject, reason)
+	}
+}
+
+func TestRejectCoreExtTxPreActivation_IgnoresSimplicityWitnessWithoutSimplicityCovenant(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0x17
+	witness := []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_SIMPLICITY_ENVELOPE, Signature: []byte{0x01, 0x00, 0x00, consensus.SIGHASH_ALL}}}
+	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_P2PK, make([]byte, consensus.MAX_P2PK_COVENANT_DATA), witness)
+	tx := mustParseTx(t, raw)
+
+	reject, reason, err := RejectCoreExtTxPreActivation(tx, nil, 0, nil)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if reject || reason != "" {
+		t.Fatalf("reject=%v reason=%q, want allow", reject, reason)
 	}
 }
 

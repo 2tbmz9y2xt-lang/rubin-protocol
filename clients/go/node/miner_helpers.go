@@ -62,7 +62,11 @@ func (m *Miner) rejectCandidateCoreExtPolicy(tx *consensus.Tx, utxos map[consens
 		return false, nil
 	}
 
-	reject, _, err := RejectCoreExtTxPreActivation(tx, utxos, nextHeight, m.cfg.CoreExtProfiles)
+	var rotation consensus.RotationProvider
+	if m.sync != nil {
+		rotation = m.sync.cfg.RotationProvider
+	}
+	reject, _, err := RejectCoreExtTxPreActivationWithRotation(tx, utxos, nextHeight, m.cfg.CoreExtProfiles, rotation)
 	if err != nil {
 		return false, err
 	}

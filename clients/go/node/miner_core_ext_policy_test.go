@@ -154,6 +154,20 @@ func TestMinerPolicyFiltersCoreExtSpend(t *testing.T) {
 	}
 }
 
+func TestMinerPolicyFiltersCoreSimplicityPreActivation(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0x24
+	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_CORE_SIMPLICITY, simplicityCovenantDataForNodeTest([32]byte{0x56}, nil), nil)
+	miner := &Miner{cfg: MinerConfig{PolicyRejectCoreExtPreActivation: true}}
+	_, _, ok, err := miner.trySelectFlatCandidate(raw, nil, 1, 0, ^uint64(0), 0)
+	if err != nil {
+		t.Fatalf("trySelectFlatCandidate: %v", err)
+	}
+	if ok {
+		t.Fatalf("CORE_SIMPLICITY output tx must be filtered")
+	}
+}
+
 func TestMinerPolicySkipsMalformedCoreExtOutput(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)

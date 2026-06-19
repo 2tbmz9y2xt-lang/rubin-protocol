@@ -104,7 +104,7 @@ func applyPolicyAgainstStateDA(checked *consensus.CheckedTransaction, policy Mem
 // applyPolicyAgainstStateCoreExt handles CoreExt policy application
 func applyPolicyAgainstStateCoreExt(checked *consensus.CheckedTransaction, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, policy MempoolConfig) error {
 	if policy.PolicyRejectCoreExtPreActivation {
-		reject, reason, err := RejectCoreExtTxPreActivation(checked.Tx, utxos, nextHeight, policy.CoreExtProfiles)
+		reject, reason, err := RejectCoreExtTxPreActivationWithRotation(checked.Tx, utxos, nextHeight, policy.CoreExtProfiles, policy.RotationProvider)
 		if err != nil {
 			return err
 		}
