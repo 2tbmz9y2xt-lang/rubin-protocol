@@ -290,6 +290,15 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 	if err != nil {
 		return nil, nil, err
 	}
+	if policy.PolicyRejectCoreExtPreActivation {
+		reject, reason, err := rejectCoreSimplicityPreActivation(tx, policyUtxos, nextHeight, policy.RotationProvider)
+		if err != nil {
+			return nil, nil, txAdmitRejected(err.Error())
+		}
+		if reject {
+			return nil, nil, txAdmitRejected(reason)
+		}
+	}
 
 	// Perform consensus validation
 	checked, err := m.validateTransactionWithConsensus(txBytes, tx, txid, wtxid, snapshot, nextHeight, blockMTP, policy)
