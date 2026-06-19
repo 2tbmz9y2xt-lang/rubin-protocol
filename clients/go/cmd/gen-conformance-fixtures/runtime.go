@@ -170,14 +170,6 @@ func runGeneratorCLIWithArgs(args []string) {
 		mustWriteFixture(remapWritePath(path), f)
 	}
 
-	// CV-EXT metadata update for strict real binding ingestion.
-	{
-		path := filepath.Join(repoRoot, "conformance/fixtures/CV-EXT.json")
-		f := mustLoadFixture(path)
-		updateCoreExtEnforcementVector(f, "CV-EXT-ENF-04")
-		mustWriteFixture(remapWritePath(path), f)
-	}
-
 	// CV-VAULT updates.
 	{
 		path := filepath.Join(repoRoot, "conformance/fixtures/CV-VAULT.json")

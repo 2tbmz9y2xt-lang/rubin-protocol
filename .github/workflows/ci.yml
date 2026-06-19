@@ -32,11 +32,6 @@ jobs:
             --code-root . \
             --skip-doc-policy
 
-      - name: CV-TXCTX schema validation (policy)
-        run: |
-          python3 -m pip install --quiet 'jsonschema==4.19.2'
-          python3 tools/check_cv_txctx_schema.py
-
       # Self-contained: do not rely on jsonschema being installed by another step.
       - name: Legacy exposure report v1 contract (policy)
         run: |

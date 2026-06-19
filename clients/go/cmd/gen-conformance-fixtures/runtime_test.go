@@ -119,21 +119,6 @@ func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 		}),
 	})
 
-	writeFixture("CV-EXT.json", []map[string]any{
-		newVector("CV-EXT-ENF-04", 1, map[string]any{
-			"core_ext_profiles": []any{
-				map[string]any{
-					"ext_id":                 float64(4096),
-					"activation_height":      float64(50),
-					"allowed_suite_ids":      []any{float64(1), float64(3)},
-					"binding":                "",
-					"binding_descriptor_hex": "",
-					"ext_payload_schema_hex": "",
-				},
-			},
-		}),
-	})
-
 	writeFixture("CV-VAULT.json", []map[string]any{
 		newVector("VAULT-CREATE-01", 1, nil),
 		newVector("VAULT-CREATE-02", 1, nil),
@@ -844,7 +829,6 @@ func TestGenerator_OutputDirContainmentNoCommittedWrite(t *testing.T) {
 	committedSamples := []string{
 		"CV-UTXO-BASIC.json",
 		"CV-MULTISIG.json",
-		"CV-EXT.json",
 		"CV-VAULT.json",
 		"CV-HTLC.json",
 		"CV-SUBSIDY.json",

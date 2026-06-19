@@ -91,6 +91,7 @@ class GateRow:
     ops: tuple[str, ...]
     local_ops: tuple[str, ...]
     executable_ops: tuple[str, ...]
+    retired: bool
 
 
 @dataclass(frozen=True)
@@ -160,6 +161,18 @@ def load_local_ops() -> set[str]:
     return set(local_ops)
 
 
+def load_retired_gates() -> set[str]:
+    spec = importlib.util.spec_from_file_location("rubin_run_cv_bundle", str(RUNNER_PATH))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load runner module: {RUNNER_PATH}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    retired_gates = getattr(mod, "RETIRED_GATES", None)
+    if not isinstance(retired_gates, frozenset) or not all(isinstance(x, str) for x in retired_gates):
+        raise RuntimeError("runner RETIRED_GATES missing/invalid")
+    return set(retired_gates)
+
+
 def iter_fixtures() -> Iterable[Path]:
     if not FIXTURES_DIR.exists():
         raise RuntimeError(f"missing fixtures dir: {FIXTURES_DIR}")
@@ -204,7 +217,7 @@ def load_json_fail_closed(path: Path) -> Any:
         raise RuntimeError(f"invalid JSON artifact {path}: {err}") from err
 
 
-def validate_fixture_schema(data: Any, path: Path) -> tuple[str, list[dict[str, Any]]]:
+def validate_fixture_schema(data: Any, path: Path, retired_gates: set[str]) -> tuple[str, list[dict[str, Any]]]:
     if not isinstance(data, dict):
         raise RuntimeError(f"fixture root must be object: {path}")
 
@@ -223,9 +236,9 @@ def validate_fixture_schema(data: Any, path: Path) -> tuple[str, list[dict[str, 
     for idx, vector in enumerate(vectors):
         if not isinstance(vector, dict):
             raise RuntimeError(f"fixture vector[{idx}] must be object: {path}")
-        op = vector.get("op")
-        if gate == "CV-TXCTX" and (op is None or (isinstance(op, str) and not op.strip())):
+        if gate in retired_gates:
             continue
+        op = vector.get("op")
         if not isinstance(op, str) or not op.strip():
             vid = vector.get("id", f"#{idx}")
             raise RuntimeError(f"fixture vector missing required op: {path} ({vid})")
@@ -237,21 +250,20 @@ def normalized_vector_op(gate: str, vector: dict[str, Any]) -> str:
     op = vector.get("op")
     if isinstance(op, str) and op.strip():
         return op.strip()
-    if gate == "CV-TXCTX":
-        return "txctx_spend_vector"
     raise RuntimeError(f"fixture vector missing required op: {gate} ({vector.get('id', '?')})")
 
 
-def load_gate_rows(local_ops: set[str]) -> list[GateRow]:
+def load_gate_rows(local_ops: set[str], retired_gates: set[str]) -> list[GateRow]:
     rows: list[GateRow] = []
     seen_gates: set[str] = set()
     for p in iter_fixtures():
         data = json.loads(p.read_text(encoding="utf-8", errors="strict"))
-        gate, vectors = validate_fixture_schema(data, p)
+        gate, vectors = validate_fixture_schema(data, p, retired_gates)
         if gate in seen_gates:
             raise RuntimeError(f"duplicate fixture gate: {gate}: {p}")
         seen_gates.add(gate)
-        ops = tuple(sorted({normalized_vector_op(gate, v) for v in vectors}))
+        retired = gate in retired_gates
+        ops = () if retired else tuple(sorted({normalized_vector_op(gate, v) for v in vectors}))
 
         local = tuple(sorted([o for o in ops if o in local_ops]))
         executable = tuple(sorted([o for o in ops if o not in local_ops]))
@@ -262,6 +274,7 @@ def load_gate_rows(local_ops: set[str]) -> list[GateRow]:
                 ops=ops,
                 local_ops=local,
                 executable_ops=executable,
+                retired=retired,
             )
         )
     rows.sort(key=lambda r: r.gate)
@@ -330,8 +343,9 @@ def validate_expected_gates(rows: list[GateRow]) -> None:
 def render(rows: list[GateRow], local_ops: set[str], protocol_rows: list[ProtocolArtifactRow]) -> str:
     total_vectors = sum(r.vectors for r in rows)
     total_gates = len(rows)
-    all_ops = sorted({o for r in rows for o in r.ops})
-    all_exec_ops = sorted({o for r in rows for o in r.executable_ops})
+    retired_rows = [r for r in rows if r.retired]
+    all_ops = sorted({o for r in rows if not r.retired for o in r.ops})
+    all_exec_ops = sorted({o for r in rows if not r.retired for o in r.executable_ops})
     all_local_ops = sorted({o for r in rows for o in r.local_ops})
 
     def fmt_ops(items: Iterable[str]) -> str:
@@ -349,6 +363,9 @@ def render(rows: list[GateRow], local_ops: set[str], protocol_rows: list[Protoco
     lines.append(f"- Unique ops: **{len(all_ops)}**")
     lines.append(f"- Executable ops (Go↔Rust parity): **{len(all_exec_ops)}**")
     lines.append(f"- Local-only ops (runner-defined): **{len(all_local_ops)}**")
+    if retired_rows:
+        retired = ", ".join(f"`{r.gate}`" for r in retired_rows)
+        lines.append(f"- Retired gates (not executed by runner): {retired}")
     lines.append(f"- Shared protocol artifacts: **{len(protocol_rows)}**")
     lines.append("")
     lines.append("## Gates")
@@ -356,8 +373,10 @@ def render(rows: list[GateRow], local_ops: set[str], protocol_rows: list[Protoco
     lines.append("| Gate | Vectors | Ops | Executable ops | Local-only ops |")
     lines.append("| --- | ---: | --- | --- | --- |")
     for r in rows:
+        ops = "retired" if r.retired else fmt_ops(r.ops)
+        executable_ops = "retired" if r.retired else fmt_ops(r.executable_ops)
         lines.append(
-            f"| `{r.gate}` | {r.vectors} | {fmt_ops(r.ops)} | {fmt_ops(r.executable_ops)} | {fmt_ops(r.local_ops)} |"
+            f"| `{r.gate}` | {r.vectors} | {ops} | {executable_ops} | {fmt_ops(r.local_ops)} |"
         )
     lines.append("")
     lines.append("## Local-only ops (runner)")
@@ -381,7 +400,8 @@ def main() -> int:
     args = ap.parse_args()
 
     local_ops = load_local_ops()
-    rows = load_gate_rows(local_ops)
+    retired_gates = load_retired_gates()
+    rows = load_gate_rows(local_ops, retired_gates)
     protocol_rows = load_protocol_artifact_rows()
     validate_expected_gates(rows)
     content = render(rows, local_ops, protocol_rows)

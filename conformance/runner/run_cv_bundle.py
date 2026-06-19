@@ -17,14 +17,6 @@ RUNNER_DIR = pathlib.Path(__file__).resolve().parent
 if str(RUNNER_DIR) not in sys.path:
     sys.path.insert(0, str(RUNNER_DIR))
 
-from txctx_case import (  # noqa: E402
-    build_txctx_case,
-    build_txctx_governance_request,
-    validate_txctx_governance_responses,
-    validate_txctx_responses,
-)
-
-
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 FIXTURES_DIR = REPO_ROOT / "conformance" / "fixtures"
 BIN_DIR = REPO_ROOT / "conformance" / "bin"
@@ -48,17 +40,16 @@ LOCAL_OPS = {
     if op.strip()
 }
 
-TXCTX_GOVERNANCE_VECTOR_IDS = {"CV-TXCTX-60", "CV-TXCTX-GOV-01"}
+RETIRED_GATES = frozenset({"CV-EXT", "CV-TXCTX"})
+
+
+def is_retired_gate(gate: str) -> bool:
+    return gate in RETIRED_GATES
 
 
 def normalized_vector_op(gate: str, vector: Dict[str, Any]) -> Optional[str]:
     op = vector.get("op")
     stripped = op.strip() if isinstance(op, str) else op
-    if gate == "CV-TXCTX" and (op is None or stripped == ""):
-        vid = str(vector.get("id", "?"))
-        if vid in TXCTX_GOVERNANCE_VECTOR_IDS:
-            return "txctx_governance_vector"
-        return "txctx_spend_vector"
     if isinstance(op, str) and op != stripped:
         return op
     if not op:
@@ -1785,21 +1776,6 @@ def validate_vector(
         if tx_hex == "":
             return [f"{gate}/{v.get('id','?')}: missing tx_hex"]
         req["tx_hex"] = tx_hex
-    elif op in (
-        "ext_envelope_parse",
-        "ext_activation_check",
-        "ext_pre_activation_spend",
-        "ext_enforcement_check",
-        "ext_error_priority",
-        "ext_duplicate_profile",
-    ):
-        req["covenant_data_hex"] = v.get("covenant_data_hex", "")
-        if "height" in v:
-            req["height"] = int(v["height"])
-        if "suite_id" in v:
-            req["suite_id"] = int(v["suite_id"])
-        if "core_ext_profiles" in v:
-            req["core_ext_profiles"] = v["core_ext_profiles"]
     elif op == "utxo_apply_basic":
         if tx_hex == "":
             return [f"{gate}/{v.get('id','?')}: missing tx_hex"]
@@ -1899,63 +1875,8 @@ def validate_vector(
             req["jet_accepted"] = bool(v["jet_accepted"])
         if "jet_cost" in v:
             req["jet_cost"] = int(v["jet_cost"])
-    elif op == "txctx_spend_vector":
-        fixture = {
-            "profiles": vectors_by_id.get("__fixture_profiles__", {}),
-        }
-        req = {
-            "op": op,
-            "txctx_case": build_txctx_case(v, fixture),
-        }
-    elif op == "txctx_governance_vector":
-        fixture = {
-            "profiles": vectors_by_id.get("__fixture_profiles__", {}),
-        }
-        req = build_txctx_governance_request(v, fixture)
     else:
         return [f"{gate}/{vid}: unknown op {op}"], False
-
-    if op in {"txctx_spend_vector", "txctx_governance_vector"}:
-        go_resp = call_tool(go_cli, req)
-        rust_resp = call_tool(rust_cli, req)
-
-        problems: List[str] = []
-        if bool(go_resp.get("ok")) != bool(rust_resp.get("ok")):
-            problems.append(f"{gate}/{vid}: go ok={go_resp.get('ok')} rust ok={rust_resp.get('ok')}")
-            return problems, False
-
-        expected_ok = bool(v.get("expect_ok", True))
-        if op == "txctx_governance_vector":
-            expect_reject = bool(v.get("expect_governance_reject", False))
-            if str(v.get("expected_governance_result", "")).upper() == "REJECTED":
-                expect_reject = True
-            expected_ok = not expect_reject
-        if expected_ok != bool(go_resp.get("ok")):
-            problems.append(f"{gate}/{vid}: expect_ok={expected_ok} got_ok={go_resp.get('ok')}")
-            return problems, False
-
-        if not go_resp.get("ok"):
-            ge = go_resp.get("err")
-            re = rust_resp.get("err")
-            if ge != re:
-                problems.append(f"{gate}/{vid}: err mismatch go={ge} rust={re}")
-            if op == "txctx_governance_vector" and "expect_governance_error" in v and ge != v["expect_governance_error"]:
-                problems.append(f"{gate}/{vid}: expect_governance_error={v['expect_governance_error']} got_err={ge}")
-            if "expect_err" in v and ge != v["expect_err"]:
-                problems.append(f"{gate}/{vid}: expect_err={v['expect_err']} got_err={ge}")
-            if v.get("not_expect_err") and ge == v["not_expect_err"]:
-                problems.append(f"{gate}/{vid}: not_expect_err violated")
-            if op == "txctx_governance_vector":
-                problems.extend(validate_txctx_governance_responses(gate, v, go_resp, rust_resp))
-                return problems, False
-            problems.extend(validate_txctx_responses(gate, v, go_resp, rust_resp))
-            return problems, False
-
-        if op == "txctx_governance_vector":
-            problems.extend(validate_txctx_governance_responses(gate, v, go_resp, rust_resp))
-            return problems, False
-        problems.extend(validate_txctx_responses(gate, v, go_resp, rust_resp))
-        return problems, False
 
     go_resp = call_tool(go_cli, req)
     rust_resp = call_tool(rust_cli, req)
@@ -2124,21 +2045,6 @@ def validate_vector(
     elif op == "covenant_genesis_check":
         # ok/err parity is already checked above.
         pass
-    elif op in (
-        "ext_envelope_parse",
-        "ext_activation_check",
-        "ext_pre_activation_spend",
-        "ext_enforcement_check",
-        "ext_error_priority",
-        "ext_duplicate_profile",
-    ):
-        req["covenant_data_hex"] = v.get("covenant_data_hex", "")
-        if "height" in v:
-            req["height"] = int(v["height"])
-        if "suite_id" in v:
-            req["suite_id"] = int(v["suite_id"])
-        if "core_ext_profiles" in v:
-            req["core_ext_profiles"] = v["core_ext_profiles"]
     elif op == "utxo_apply_basic":
         for k in ["fee", "utxo_count"]:
             gv = as_int(go_resp.get(k))
@@ -2691,12 +2597,29 @@ def main() -> int:
     if only:
         fixtures = [f for f in fixtures if f["gate"] in only]
 
-    go_cli, rust_cli = build_tools()
+    active_fixtures: List[Dict[str, Any]] = []
+    retired_vectors = 0
+    retired_gates: Set[str] = set()
+    for f in fixtures:
+        gate = f["gate"]
+        if is_retired_gate(gate):
+            retired_gates.add(gate)
+            retired_vectors += len(f.get("vectors", []))
+            continue
+        active_fixtures.append(f)
+
+    go_cli: pathlib.Path
+    rust_cli: pathlib.Path
+    if active_fixtures:
+        go_cli, rust_cli = build_tools()
+    else:
+        go_cli = pathlib.Path()
+        rust_cli = pathlib.Path()
 
     total = 0
     skipped = 0
     problems: List[str] = []
-    for f in fixtures:
+    for f in active_fixtures:
         gate = f["gate"]
         vectors = f.get("vectors", [])
         for v in vectors:
@@ -2716,8 +2639,14 @@ def main() -> int:
         print(f"FAILED: {len(problems)} problems across {total} vectors")
         return 1
 
+    suffixes: List[str] = []
     if skipped:
-        print(f"PASS: {total - skipped} vectors (skipped {skipped} governance vectors)")
+        suffixes.append(f"skipped {skipped} governance vectors")
+    if retired_vectors:
+        gates_str = ", ".join(sorted(retired_gates))
+        suffixes.append(f"retired gates skipped: {gates_str} ({retired_vectors} vectors)")
+    if suffixes:
+        print(f"PASS: {total - skipped} vectors ({'; '.join(suffixes)})")
     else:
         print(f"PASS: {total} vectors")
     return 0

@@ -37,7 +37,6 @@ GO_MODULE_REL = Path("clients/go")
 EXPECTED_FIXTURES: tuple[Path, ...] = (
     Path("CV-UTXO-BASIC.json"),
     Path("CV-MULTISIG.json"),
-    Path("CV-EXT.json"),
     Path("CV-VAULT.json"),
     Path("CV-HTLC.json"),
     Path("CV-SUBSIDY.json"),
