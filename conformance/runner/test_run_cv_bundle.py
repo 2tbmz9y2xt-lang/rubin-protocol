@@ -27,7 +27,7 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
         self.assertTrue(is_retired_gate("CV-TXCTX"))
         self.assertFalse(is_retired_gate("CV-UTXO-BASIC"))
 
-    def test_non_txctx_whitespace_op_is_missing(self):
+    def test_whitespace_only_op_is_preserved_for_validation_error(self):
         op = normalized_vector_op("CV-OTHER", {"id": "X", "op": "   "})
         self.assertEqual(op, "   ")
 

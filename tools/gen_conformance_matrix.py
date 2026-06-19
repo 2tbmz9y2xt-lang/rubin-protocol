@@ -14,6 +14,7 @@ FIXTURES_DIR = REPO_ROOT / "conformance" / "fixtures"
 PROTOCOL_FIXTURES_DIR = FIXTURES_DIR / "protocol"
 RUNNER_PATH = REPO_ROOT / "conformance" / "runner" / "run_cv_bundle.py"
 OUT_PATH = REPO_ROOT / "conformance" / "MATRIX.md"
+_RUNNER_MODULE: Any | None = None
 EXPECTED_PROTOCOL_ARTIFACTS = frozenset(
     {
         "legacy_exposure_hook_vectors.json",
@@ -149,12 +150,21 @@ def reject_nonstandard_json_constant(token: str) -> Any:
     raise ValueError(f"invalid JSON constant {token!r}")
 
 
-def load_local_ops() -> set[str]:
+def load_runner_module() -> Any:
+    global _RUNNER_MODULE
+    if _RUNNER_MODULE is not None:
+        return _RUNNER_MODULE
     spec = importlib.util.spec_from_file_location("rubin_run_cv_bundle", str(RUNNER_PATH))
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load runner module: {RUNNER_PATH}")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    _RUNNER_MODULE = mod
+    return mod
+
+
+def load_local_ops() -> set[str]:
+    mod = load_runner_module()
     local_ops = getattr(mod, "LOCAL_OPS", None)
     if not isinstance(local_ops, set) or not all(isinstance(x, str) for x in local_ops):
         raise RuntimeError("runner LOCAL_OPS missing/invalid")
@@ -162,11 +172,7 @@ def load_local_ops() -> set[str]:
 
 
 def load_retired_gates() -> set[str]:
-    spec = importlib.util.spec_from_file_location("rubin_run_cv_bundle", str(RUNNER_PATH))
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load runner module: {RUNNER_PATH}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    mod = load_runner_module()
     retired_gates = getattr(mod, "RETIRED_GATES", None)
     if not isinstance(retired_gates, frozenset) or not all(isinstance(x, str) for x in retired_gates):
         raise RuntimeError("runner RETIRED_GATES missing/invalid")

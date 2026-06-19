@@ -2641,7 +2641,7 @@ def main() -> int:
 
     suffixes: List[str] = []
     if skipped:
-        suffixes.append(f"skipped {skipped} governance vectors")
+        suffixes.append(f"skipped {skipped} vectors")
     if retired_vectors:
         gates_str = ", ".join(sorted(retired_gates))
         suffixes.append(f"retired gates skipped: {gates_str} ({retired_vectors} vectors)")
