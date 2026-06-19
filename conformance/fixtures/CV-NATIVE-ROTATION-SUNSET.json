@@ -65,6 +65,7 @@
       ],
       "covenant_type": 0,
       "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "note": "Spend with old suite at H4: MUST reject (old removed from spend set at H4 per spec \u00a76 Phase 4)"
     },
     {
@@ -97,6 +98,7 @@
         }
       ],
       "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "note": "Create with old suite at H4-1: MUST reject (old already removed from create set at H2 per spec \u00a76 Phase 2)"
     },
     {
@@ -162,6 +164,7 @@
         }
       ],
       "expect_ok": false,
+      "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "note": "Create with old suite far after H4: MUST reject (old removed from create set at H2)"
     }
   ]

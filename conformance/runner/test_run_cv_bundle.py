@@ -162,6 +162,47 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
                     self.assertEqual(req["op"], expected_op)
                     self.assertEqual(req["network"], vector["network"])
 
+    def test_rotation_native_create_suites_normalizes_go_base64_response(self):
+        vector = {
+            "id": "ROT-NATIVE-CREATE-SETS",
+            "op": "rotation_native_create_suites",
+            "height": 15,
+            "rotation_descriptor": {
+                "name": "r1",
+                "old_suite_id": 1,
+                "new_suite_id": 2,
+                "create_height": 10,
+                "spend_height": 20,
+                "sunset_height": 100,
+            },
+            "suite_registry": [],
+            "expect_ok": True,
+            "expect_suite_ids": [1, 2],
+        }
+        responses = iter(
+            [
+                {"ok": True, "suite_ids": "AQI="},
+                {"ok": True, "suite_ids": [1, 2]},
+            ]
+        )
+
+        with mock.patch(
+            f"{validate_vector.__module__}.call_tool",
+            side_effect=lambda _tool_path, _req: next(responses),
+        ):
+            problems, skipped = normalize_validation_result(
+                validate_vector(
+                    "CV-NATIVE-ROTATION-CREATE",
+                    vector,
+                    Path("go-cli"),
+                    Path("rust-cli"),
+                    {},
+                )
+            )
+
+        self.assertEqual(problems, [])
+        self.assertFalse(skipped)
+
     def test_simplicity_exec_vector_forwards_fields(self):
         vector = {
             "id": "CV-SE-UNIT",
