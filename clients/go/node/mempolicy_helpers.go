@@ -101,6 +101,13 @@ func applyPolicyAgainstStateDA(checked *consensus.CheckedTransaction, policy Mem
 	return nil
 }
 
+func applyPolicyAgainstStateCoreExtUnsupported(checked *consensus.CheckedTransaction, utxos map[consensus.Outpoint]consensus.UtxoEntry) error {
+	if reject, reason := rejectUnsupportedCoreExtNodeRuntime(checked.Tx, utxos); reject {
+		return errors.New(reason)
+	}
+	return nil
+}
+
 func applyPolicyAgainstStateSimplicity(checked *consensus.CheckedTransaction, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, policy MempoolConfig) error {
 	if policy.PolicyRejectSimplicityPreActivation {
 		reject, reason, err := rejectCoreSimplicityPreActivation(checked.Tx, utxos, nextHeight, policy.RotationProvider)

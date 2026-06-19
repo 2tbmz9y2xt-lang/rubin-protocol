@@ -33,7 +33,7 @@ func (s *SyncEngine) runPVShadowOnError(blockBytes []byte, prevTimestamps []uint
 	_, parErr := shadowState.ConnectBlockParallelSigsWithSuiteContext(
 		blockBytes,
 		s.cfg.ExpectedTarget, prevTimestamps, s.cfg.ChainID,
-		s.cfg.RotationProvider, s.cfg.SuiteRegistry, 0,
+		nil, s.cfg.RotationProvider, s.cfg.SuiteRegistry, 0,
 	)
 	s.pvTelemetry.RecordValidateLatency(time.Since(validateStart))
 	seqCode, parCode := txErrCode(seqErr), txErrCode(parErr)
@@ -56,7 +56,7 @@ func (s *SyncEngine) runPVShadowOnSuccess(blockBytes []byte, prevTimestamps []ui
 	parSummary, parErr := shadowState.ConnectBlockParallelSigsWithSuiteContext(
 		blockBytes,
 		s.cfg.ExpectedTarget, prevTimestamps, s.cfg.ChainID,
-		s.cfg.RotationProvider, s.cfg.SuiteRegistry, 0,
+		nil, s.cfg.RotationProvider, s.cfg.SuiteRegistry, 0,
 	)
 	s.pvTelemetry.RecordValidateLatency(time.Since(validateStart))
 	if parSummary != nil {

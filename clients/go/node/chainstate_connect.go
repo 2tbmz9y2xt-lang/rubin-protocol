@@ -13,21 +13,33 @@ func (s *ChainState) ConnectBlock(
 	prevTimestamps []uint64,
 	chainID [32]byte,
 ) (*ChainStateConnectSummary, error) {
-	return s.ConnectBlockWithSuiteContext(
+	return s.ConnectBlockWithCoreExtProfiles(blockBytes, expectedTarget, prevTimestamps, chainID, nil)
+}
+
+func (s *ChainState) ConnectBlockWithCoreExtProfiles(
+	blockBytes []byte,
+	expectedTarget *[32]byte,
+	prevTimestamps []uint64,
+	chainID [32]byte,
+	coreExtProfiles consensus.CoreExtProfileProvider,
+) (*ChainStateConnectSummary, error) {
+	return s.ConnectBlockWithCoreExtProfilesAndSuiteContext(
 		blockBytes,
 		expectedTarget,
 		prevTimestamps,
 		chainID,
+		coreExtProfiles,
 		s.rotationOrNil(),
 		s.registryOrNil(),
 	)
 }
 
-func (s *ChainState) ConnectBlockWithSuiteContext(
+func (s *ChainState) ConnectBlockWithCoreExtProfilesAndSuiteContext(
 	blockBytes []byte,
 	expectedTarget *[32]byte,
 	prevTimestamps []uint64,
 	chainID [32]byte,
+	coreExtProfiles consensus.CoreExtProfileProvider,
 	rotation consensus.RotationProvider,
 	registry *consensus.SuiteRegistry,
 ) (*ChainStateConnectSummary, error) {
@@ -51,7 +63,7 @@ func (s *ChainState) ConnectBlockWithSuiteContext(
 		prevTimestamps,
 		&workState,
 		chainID,
-		nil,
+		coreExtProfiles,
 		rotation,
 		registry,
 	)
@@ -80,6 +92,7 @@ func (s *ChainState) ConnectBlockParallelSigs(
 	expectedTarget *[32]byte,
 	prevTimestamps []uint64,
 	chainID [32]byte,
+	coreExtProfiles consensus.CoreExtProfileProvider,
 	workers int,
 ) (*ChainStateConnectSummary, error) {
 	return s.ConnectBlockParallelSigsWithSuiteContext(
@@ -87,6 +100,7 @@ func (s *ChainState) ConnectBlockParallelSigs(
 		expectedTarget,
 		prevTimestamps,
 		chainID,
+		coreExtProfiles,
 		s.rotationOrNil(),
 		s.registryOrNil(),
 		workers,
@@ -98,6 +112,7 @@ func (s *ChainState) ConnectBlockParallelSigsWithSuiteContext(
 	expectedTarget *[32]byte,
 	prevTimestamps []uint64,
 	chainID [32]byte,
+	coreExtProfiles consensus.CoreExtProfileProvider,
 	rotation consensus.RotationProvider,
 	registry *consensus.SuiteRegistry,
 	workers int,
@@ -122,7 +137,7 @@ func (s *ChainState) ConnectBlockParallelSigsWithSuiteContext(
 		prevTimestamps,
 		&workState,
 		chainID,
-		nil,
+		coreExtProfiles,
 		rotation,
 		registry,
 		workers,

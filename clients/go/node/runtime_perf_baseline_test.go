@@ -419,10 +419,6 @@ func BenchmarkConnectBlockWithCoreExtProfilesAndSuiteContext(b *testing.B) {
 	benchmarkConnectBlockWithSuiteContext(b)
 }
 
-func BenchmarkConnectBlockWithSuiteContext(b *testing.B) {
-	benchmarkConnectBlockWithSuiteContext(b)
-}
-
 func benchmarkConnectBlockWithSuiteContext(b *testing.B) {
 	baseState, blockBytes, prevTimestamps := benchmarkConnectBlockFixture(b)
 	b.ReportAllocs()
@@ -432,15 +428,16 @@ func benchmarkConnectBlockWithSuiteContext(b *testing.B) {
 		b.StopTimer()
 		state := cloneChainState(baseState)
 		b.StartTimer()
-		if _, err := state.ConnectBlockWithSuiteContext(
+		if _, err := state.ConnectBlockWithCoreExtProfilesAndSuiteContext(
 			blockBytes,
 			nil,
 			prevTimestamps,
 			devnetGenesisChainID,
 			nil,
 			nil,
+			nil,
 		); err != nil {
-			b.Fatalf("ConnectBlockWithSuiteContext: %v", err)
+			b.Fatalf("ConnectBlockWithCoreExtProfilesAndSuiteContext: %v", err)
 		}
 	}
 }
@@ -459,6 +456,7 @@ func BenchmarkConnectBlockParallelSigsWithSuiteContext(b *testing.B) {
 			nil,
 			prevTimestamps,
 			devnetGenesisChainID,
+			nil,
 			nil,
 			nil,
 			2,

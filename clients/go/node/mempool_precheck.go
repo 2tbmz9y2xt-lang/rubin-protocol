@@ -6,13 +6,7 @@ import (
 
 // buildPolicyInputSnapshotIfNeeded returns the immutable pre-validation
 // snapshot of only the transaction inputs that policy lanes inspect.
-// The snapshot is needed only by policy lanes that read tx inputs from
-// utxos (CORE_SIMPLICITY pre-activation gate, or a DA-bearing tx under
-// any non-zero DA-side fee term); non-DA tx with no Simplicity policy gate
-// skip the map-copy entirely (returns nil, nil). Built before
-// CheckTransaction*WithOwnedUtxoSet because that helper takes
-// ownership of the supplied utxo map and removes spent inputs as part
-// of validation. Extracted from checkTransactionWithSnapshot to keep
+// Built before CheckTransaction*WithOwnedUtxoSet; that helper owns supplied utxos and removes spent inputs during validation. Extracted from checkTransactionWithSnapshot to keep
 // cyclomatic complexity within the repository's lint budget.
 func buildPolicyInputSnapshotIfNeeded(parsedTx *consensus.Tx, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig) (map[consensus.Outpoint]consensus.UtxoEntry, error) {
 	needs, err := policyNeedsInputSnapshotForTx(parsedTx, policy)
@@ -77,7 +71,7 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 		return nil, nil, err
 	}
 	// Only plain P2PK candidates use the cheap floor reject. Transactions
-	// that may hit DA, CORE_ANCHOR, CORE_SIMPLICITY, or missing-UTXO policy lanes
+	// that may hit DA, CORE_ANCHOR, CORE_EXT, CORE_SIMPLICITY, or missing-UTXO policy lanes
 	// keep the existing validation and policy-error precedence below.
 	// Wave-4 (PR #1422): pass nextHeight + policy.RotationProvider so the
 	// precheck can defer on consensus-invalid P2PK output shapes
@@ -92,6 +86,9 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	policyUtxos, err := buildPolicyInputSnapshotIfNeeded(parsedTx, snapshot, policy)
 	if err != nil {
 		return nil, nil, err
+	}
+	if reject, reason := rejectUnsupportedCoreExtNodeRuntime(parsedTx, policyUtxos); reject {
+		return nil, nil, txAdmitRejected(reason)
 	}
 	if policy.PolicyRejectSimplicityPreActivation {
 		reject, reason, err := rejectCoreSimplicityPreActivation(parsedTx, policyUtxos, nextHeight, policy.RotationProvider)

@@ -567,11 +567,12 @@ func (s *SyncEngine) connectCanonicalBlock(
 	blockBytes []byte,
 	prevTimestamps []uint64,
 ) (*ChainStateConnectSummary, error) {
-	return s.chainState.ConnectBlockWithSuiteContext(
+	return s.chainState.ConnectBlockWithCoreExtProfilesAndSuiteContext(
 		blockBytes,
 		s.cfg.ExpectedTarget,
 		prevTimestamps,
 		s.cfg.ChainID,
+		nil,
 		s.cfg.RotationProvider,
 		s.cfg.SuiteRegistry,
 	)

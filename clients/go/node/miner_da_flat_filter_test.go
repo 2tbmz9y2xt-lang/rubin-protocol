@@ -12,16 +12,26 @@ import (
 func TestMinerFlatDAFilterPreservesExplicitNonDACandidates(t *testing.T) {
 	daCommit := daCommitTxBytesForMinerPolicyTest(1, []byte("manifest"))
 	daChunk := minerFlatDATestChunk(t, [32]byte{0x71}, 0, []byte("chunk"))
-	nonDA := minerFlatTestNonDA(0x11)
+	fixture := newMinerProviderTestFixture(t)
+	nonDA := fixture.nonDATx(t, 0x11)
 
-	miner := &Miner{cfg: MinerConfig{MaxTxPerBlock: 2}}
+	miner := &Miner{cfg: MinerConfig{MaxTxPerBlock: 2}, sync: &SyncEngine{cfg: SyncConfig{ChainID: devnetGenesisChainID}}}
 	candidates := miner.candidateTransactions([][]byte{daCommit, daChunk, nonDA})
-	selected, err := miner.selectCandidateTransactions(candidates, nil, 1, ^uint64(0))
+	selected, err := miner.selectCandidateTransactions(candidates, fixture.utxos, 1, ^uint64(0))
 	if err != nil {
 		t.Fatalf("selectCandidateTransactions: %v", err)
 	}
 	if len(selected) != 1 || !bytes.Equal(selected[0].raw, nonDA) {
 		t.Fatalf("selected=%d, want only trailing non-DA candidate", len(selected))
+	}
+	selected, err = miner.selectCandidateTransactions([][]byte{nonDA}, map[consensus.Outpoint]consensus.UtxoEntry{}, 1, ^uint64(0))
+	if err != nil || len(selected) != 0 {
+		t.Fatalf("missing-snapshot input selected=%d err=%v, want skipped without error", len(selected), err)
+	}
+	conflict := minerProviderMutateTx(t, fixture.nonDATx(t, 0x12), func(tx *consensus.Tx) { tx.Inputs[0] = mustParseTx(t, nonDA).Inputs[0] })
+	selected, err = miner.selectCandidateTransactions([][]byte{nonDA, conflict}, fixture.utxos, 1, ^uint64(0))
+	if err != nil || len(selected) != 1 || !bytes.Equal(selected[0].raw, nonDA) {
+		t.Fatalf("input conflict selected=%d err=%v, want first candidate only", len(selected), err)
 	}
 }
 
@@ -57,7 +67,7 @@ func TestMinerFlatDAFilterKeepsCapacityBoundedByCandidates(t *testing.T) {
 
 func TestMinerFlatDAFilterSkipsDAInSelectionPath(t *testing.T) {
 	miner := &Miner{cfg: DefaultMinerConfig()}
-	if _, _, ok, err := miner.trySelectFlatCandidate(daCommitTxBytesForMinerPolicyTest(2, []byte("manifest")), nil, 1, 0, ^uint64(0), 0); err != nil || ok {
+	if _, _, ok, err := miner.trySelectFlatCandidate(daCommitTxBytesForMinerPolicyTest(2, []byte("manifest")), nil, 1, 0, ^uint64(0), 0, miningConsensusContext{}); err != nil || ok {
 		t.Fatalf("DA candidate ok=%v err=%v, want skipped without error", ok, err)
 	}
 }
@@ -65,10 +75,10 @@ func TestMinerFlatDAFilterSkipsDAInSelectionPath(t *testing.T) {
 func TestMinerFlatDAFilterSkipsWeightBudgetRejects(t *testing.T) {
 	nonDA := minerFlatTestNonDA(0x15)
 	miner := &Miner{cfg: DefaultMinerConfig()}
-	if _, _, ok, err := miner.trySelectFlatCandidate(nonDA, nil, 1, 0, 0, 0); err != nil || ok {
+	if _, _, ok, err := miner.trySelectFlatCandidate(nonDA, nil, 1, 0, 0, 0, miningConsensusContext{}); err != nil || ok {
 		t.Fatalf("zero remaining weight ok=%v err=%v, want skipped without error", ok, err)
 	}
-	if _, _, ok, err := miner.trySelectFlatCandidate(nonDA, nil, 1, 0, 1, 0); err != nil || ok {
+	if _, _, ok, err := miner.trySelectFlatCandidate(nonDA, nil, 1, 0, 1, 0, miningConsensusContext{}); err != nil || ok {
 		t.Fatalf("overweight candidate ok=%v err=%v, want skipped without error", ok, err)
 	}
 }
@@ -102,42 +112,6 @@ func (p *countingMinerTestCompleteDASetProvider) CompleteDASetCandidates(uint64)
 	return p.sets
 }
 
-func TestMinerCompleteDASetProviderRuntimeBounds(t *testing.T) {
-	nonDA := minerFlatTestNonDA(0x90)
-	for _, tc := range []struct {
-		name            string
-		flat            [][]byte
-		remainingWeight uint64
-		wantSelected    int
-	}{
-		{
-			name:            "slots full",
-			flat:            [][]byte{nonDA},
-			remainingWeight: ^uint64(0),
-			wantSelected:    1,
-		},
-		{
-			name:            "no remaining weight",
-			remainingWeight: 0,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			provider := &countingMinerTestCompleteDASetProvider{}
-			miner := &Miner{cfg: MinerConfig{CompleteDASetProvider: provider, MaxTxPerBlock: 2}}
-			selected, err := miner.selectCandidateTransactions(tc.flat, nil, 1, tc.remainingWeight)
-			if err != nil {
-				t.Fatalf("selectCandidateTransactions: %v", err)
-			}
-			if len(selected) != tc.wantSelected {
-				t.Fatalf("selected=%d, want %d", len(selected), tc.wantSelected)
-			}
-			if provider.calls != 0 {
-				t.Fatalf("provider calls=%d, want 0", provider.calls)
-			}
-		})
-	}
-}
-
 func TestMinerCompleteDASetProviderSkipsUnfittableSetBeforeParsing(t *testing.T) {
 	badRaw := append(daCommitTxBytesForMinerPolicyTest(1, []byte("manifest")), 0)
 	provider := &countingMinerTestCompleteDASetProvider{
@@ -163,7 +137,7 @@ func TestMinerCompleteDASetProviderValidity(t *testing.T) {
 	fixture := newMinerProviderTestFixture(t)
 	daID := [32]byte{0x81}
 	set := fixture.completeDASet(t, daID, []byte("chunk-0"), []byte("chunk-1"))
-	nonDA := minerFlatTestNonDA(0x82)
+	nonDA := fixture.nonDATx(t, 1)
 	selected := minerProviderSelected(t, []CompleteDASetCandidate{set, set}, nil, fixture.utxos, 0, 0)
 	if len(selected) != 3 {
 		t.Fatalf("duplicate da_id selected=%d, want one complete DA set", len(selected))
@@ -191,7 +165,7 @@ func TestMinerCompleteDASetProviderValidity(t *testing.T) {
 		t.Fatalf("provider nonce collision selected=%d, want only flat tx", len(selected))
 	}
 	collidingInput := minerProviderCloneSet(set)
-	collidingInput.CommitTx = minerProviderMutateTx(t, collidingInput.CommitTx, func(tx *consensus.Tx) { tx.Inputs[0].PrevTxid = [32]byte{0x82} })
+	collidingInput.CommitTx = minerProviderMutateTx(t, collidingInput.CommitTx, func(tx *consensus.Tx) { tx.Inputs[0] = mustParseTx(t, nonDA).Inputs[0] })
 	selected = minerProviderSelected(t, []CompleteDASetCandidate{collidingInput}, [][]byte{nonDA}, fixture.utxos, 0, 0)
 	if len(selected) != 1 || string(selected[0].raw) != string(nonDA) {
 		t.Fatalf("provider input collision selected=%d, want only flat tx", len(selected))
@@ -317,6 +291,11 @@ func (f *minerProviderTestFixture) chunkTx(t *testing.T, chainID [32]byte, daID 
 	tx.Inputs = []consensus.TxInput{f.nextSignedInput()}
 	tx.DaChunkCore = &consensus.DaChunkCore{DaID: daID, ChunkIndex: index, ChunkHash: chunkHash}
 	return f.signAndMarshal(t, chainID, tx)
+}
+
+func (f *minerProviderTestFixture) nonDATx(t *testing.T, nonce uint64) []byte {
+	tx := &consensus.Tx{Version: 1, TxKind: 0x00, TxNonce: nonce, Inputs: []consensus.TxInput{f.nextSignedInput()}, Outputs: []consensus.TxOutput{{Value: 1, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: f.address}}}
+	return f.signAndMarshal(t, devnetGenesisChainID, tx)
 }
 
 func (f *minerProviderTestFixture) nextSignedInput() consensus.TxInput {

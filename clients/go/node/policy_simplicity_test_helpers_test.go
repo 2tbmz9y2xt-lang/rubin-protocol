@@ -6,18 +6,14 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-type testSimplicityRotation struct {
-	activeAt uint64
-}
+type testSimplicityRotation struct{ activeAt uint64 }
 
 func (r testSimplicityRotation) NativeCreateSuites(uint64) *consensus.NativeSuiteSet {
 	return consensus.NewNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87)
 }
-
 func (r testSimplicityRotation) NativeSpendSuites(uint64) *consensus.NativeSuiteSet {
 	return consensus.NewNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87)
 }
-
 func (r testSimplicityRotation) SimplicityActiveAtHeight(height uint64) (bool, error) {
 	return height >= r.activeAt, nil
 }
@@ -39,13 +35,11 @@ func txWithOneInputOneOutput(prevTxid [32]byte, prevVout uint32, outValue uint64
 	b = consensus.AppendU32le(b, prevVout)
 	b = consensus.AppendCompactSize(b, 0)
 	b = consensus.AppendU32le(b, 0)
-
 	b = consensus.AppendCompactSize(b, 1)
 	b = consensus.AppendU64le(b, outValue)
 	b = consensus.AppendU16le(b, outCovType)
 	b = consensus.AppendCompactSize(b, uint64(len(outCovData)))
 	b = append(b, outCovData...)
-
 	b = consensus.AppendU32le(b, 0)
 	b = consensus.AppendCompactSize(b, uint64(len(witnesses)))
 	for _, w := range witnesses {

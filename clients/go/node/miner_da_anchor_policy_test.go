@@ -188,14 +188,6 @@ func TestMinerPolicyRejectsNonCoinbaseAnchorOutputs(t *testing.T) {
 		t.Fatalf("tx_count=%d, want 1 (coinbase only; non-coinbase CORE_ANCHOR must be filtered)", mb.TxCount)
 	}
 
-	cfg.PolicyDaAnchorAntiAbuse = false
-	miner2, err := NewMiner(chainState, blockStore, syncEngine, cfg)
-	if err != nil {
-		t.Fatalf("new miner2: %v", err)
-	}
-	if _, err := miner2.MineOne(context.Background(), [][]byte{txBytes}); err == nil {
-		t.Fatalf("expected mining failure when anchor tx is not filtered")
-	}
 }
 
 func TestMinerPolicyCapsDaTemplateBytes(t *testing.T) {

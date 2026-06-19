@@ -290,6 +290,9 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 	if err != nil {
 		return nil, nil, err
 	}
+	if reject, reason := rejectUnsupportedCoreExtNodeRuntime(tx, policyUtxos); reject {
+		return nil, nil, txAdmitRejected(reason)
+	}
 	if policy.PolicyRejectSimplicityPreActivation {
 		reject, reason, err := rejectCoreSimplicityPreActivation(tx, policyUtxos, nextHeight, policy.RotationProvider)
 		if err != nil {
@@ -327,6 +330,10 @@ func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction,
 
 	// Apply DA fee policy
 	if err := applyPolicyAgainstStateDA(checked, policy, utxos); err != nil {
+		return err
+	}
+
+	if err := applyPolicyAgainstStateCoreExtUnsupported(checked, utxos); err != nil {
 		return err
 	}
 

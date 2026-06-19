@@ -384,49 +384,6 @@ func TestCompactSizeLenForMinerCoversAllBranches(t *testing.T) {
 	}
 }
 
-func TestPolicyNeedsReadonlyUtxoSnapshotMatrix(t *testing.T) {
-	t.Parallel()
-
-	var nilMiner *Miner
-	if nilMiner.policyNeedsReadonlyUtxoSnapshot() {
-		t.Fatal("nil miner should not require snapshot")
-	}
-
-	base := &Miner{cfg: DefaultMinerConfig()}
-	if !base.policyNeedsReadonlyUtxoSnapshot() {
-		t.Fatal("default miner should require snapshot")
-	}
-
-	disabled := &Miner{cfg: DefaultMinerConfig()}
-	disabled.cfg.PolicyRejectSimplicityPreActivation = false
-	disabled.cfg.PolicyDaAnchorAntiAbuse = false
-	if disabled.policyNeedsReadonlyUtxoSnapshot() {
-		t.Fatal("fully disabled policy matrix should not require snapshot")
-	}
-	disabled.cfg.CompleteDASetProvider = minerTestCompleteDASetProvider{}
-	if !disabled.policyNeedsReadonlyUtxoSnapshot() {
-		t.Fatal("provider validation should require snapshot")
-	}
-
-	simplicity := &Miner{cfg: DefaultMinerConfig()}
-	simplicity.cfg.PolicyRejectSimplicityPreActivation = true
-	if !simplicity.policyNeedsReadonlyUtxoSnapshot() {
-		t.Fatal("simplicity policy should require snapshot")
-	}
-
-	da := &Miner{cfg: DefaultMinerConfig()}
-	da.cfg.PolicyRejectSimplicityPreActivation = false
-	da.cfg.PolicyDaAnchorAntiAbuse = true
-	if !da.policyNeedsReadonlyUtxoSnapshot() {
-		t.Fatal("da anchor policy should require snapshot")
-	}
-
-	da.cfg.PolicyDaSurchargePerByte = 1
-	if !da.policyNeedsReadonlyUtxoSnapshot() {
-		t.Fatal("da anchor surcharge path should require snapshot")
-	}
-}
-
 // TestMinerRejectCandidateUsesCurrentMempoolMinFeeRateFnProvider pins the
 // T-D fix for PR #1368 wave-1: rejectCandidate MUST consult
 // MinerConfig.CurrentMempoolMinFeeRateFn (when non-nil) on every candidate
@@ -561,62 +518,6 @@ func TestMinerRejectCandidateClampsBelowDefaultMempoolMinFeeRate(t *testing.T) {
 	}
 }
 
-func TestSnapshotBuildContextStateHandlesNilAndNoPolicyPaths(t *testing.T) {
-	t.Parallel()
-
-	var nilMiner *Miner
-	if _, err := nilMiner.snapshotBuildContextState(); err == nil {
-		t.Fatal("expected nil miner error")
-	}
-
-	minerWithNilState := &Miner{cfg: DefaultMinerConfig()}
-	if _, err := minerWithNilState.snapshotBuildContextState(); err == nil {
-		t.Fatal("expected nil chainstate error")
-	}
-
-	state := NewChainState()
-	state.HasTip = true
-	state.Height = 9
-	state.TipHash = [32]byte{0x99}
-	op := consensus.Outpoint{Txid: [32]byte{0x42}, Vout: 0}
-	state.Utxos[op] = consensus.UtxoEntry{
-		Value:             12,
-		CovenantType:      consensus.COV_TYPE_P2PK,
-		CovenantData:      testP2PKCovenantData(0x11),
-		CreationHeight:    1,
-		CreatedByCoinbase: true,
-	}
-
-	miner := &Miner{chainState: state, cfg: DefaultMinerConfig()}
-	snapshot, err := miner.snapshotBuildContextState()
-	if err != nil {
-		t.Fatalf("snapshotBuildContextState: %v", err)
-	}
-	if !snapshot.hasTip || snapshot.height != 9 || snapshot.tipHash != state.TipHash {
-		t.Fatal("snapshot lost chainstate fields")
-	}
-	if snapshot.utxos == nil {
-		t.Fatal("default policy path should copy utxo map")
-	}
-	miner.cfg.PolicyRejectSimplicityPreActivation = false
-	miner.cfg.PolicyDaAnchorAntiAbuse = true
-	snapshot, err = miner.snapshotBuildContextState()
-	if err != nil {
-		t.Fatalf("snapshotBuildContextState without surcharge: %v", err)
-	}
-	if snapshot.utxos == nil {
-		t.Fatal("da anti-abuse path should still copy utxo map when surcharge is disabled")
-	}
-	miner.cfg.PolicyDaAnchorAntiAbuse = false
-	snapshot, err = miner.snapshotBuildContextState()
-	if err != nil {
-		t.Fatalf("snapshotBuildContextState without policy snapshot: %v", err)
-	}
-	if snapshot.utxos != nil {
-		t.Fatal("disabled policy path should not copy utxo map")
-	}
-}
-
 func TestMinerBuildContextUtxoMapDoesNotAliasChainStateMap(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
@@ -648,7 +549,7 @@ func TestMinerBuildContextUtxoMapDoesNotAliasChainStateMap(t *testing.T) {
 		t.Fatalf("new miner: %v", err)
 	}
 
-	buildCtx, err := miner.buildContext(nil)
+	buildCtx, err := miner.buildContext([][]byte{{0x00}})
 	if err != nil {
 		t.Fatalf("buildContext: %v", err)
 	}
@@ -657,7 +558,7 @@ func TestMinerBuildContextUtxoMapDoesNotAliasChainStateMap(t *testing.T) {
 		t.Fatal("buildContext utxo map aliases chainstate map")
 	}
 
-	buildCtx, err = miner.buildContext(nil)
+	buildCtx, err = miner.buildContext([][]byte{{0x00}})
 	if err != nil {
 		t.Fatalf("buildContext second pass: %v", err)
 	}

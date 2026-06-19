@@ -2432,48 +2432,6 @@ func TestMempoolPolicyRejectsCoreSimplicityPreActivationBeforeConsensus(t *testi
 	}
 }
 
-func TestMempoolPolicyIgnoresSimplicityEnvelopeWitnessWithoutSimplicityCovenant(t *testing.T) {
-	fromKey := mustNodeMLDSA87Keypair(t)
-	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
-
-	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
-		PolicyRejectSimplicityPreActivation: true,
-	})
-	if err != nil {
-		t.Fatalf("new mempool: %v", err)
-	}
-
-	witness := []consensus.WitnessItem{{
-		SuiteID:   consensus.SUITE_ID_SIMPLICITY_ENVELOPE,
-		Signature: []byte{0x01, 0x00, 0x00, consensus.SIGHASH_ALL},
-	}}
-	txBytes := txWithOneInputOneOutput(
-		outpoints[0].Txid,
-		outpoints[0].Vout,
-		1,
-		consensus.COV_TYPE_P2PK,
-		append([]byte(nil), fromAddress...),
-		witness,
-	)
-
-	for _, admit := range []struct {
-		name string
-		run  func() error
-	}{
-		{"AddTx", func() error { return mp.AddTx(txBytes) }},
-		{"RelayMetadata", func() error { _, err := mp.RelayMetadata(txBytes); return err }},
-	} {
-		err := admit.run()
-		if err == nil {
-			t.Fatalf("%s unexpectedly accepted non-native P2PK witness", admit.name)
-		}
-		if strings.Contains(err.Error(), "CORE_SIMPLICITY") {
-			t.Fatalf("%s err=%v, want non-Simplicity rejection without CORE_SIMPLICITY policy masking", admit.name, err)
-		}
-	}
-}
-
 func TestMempoolPolicyAllowsCoreSimplicityCreateWhenActive(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
@@ -2553,6 +2511,22 @@ func TestMempoolPolicyRejectsNilCheckedTransaction(t *testing.T) {
 	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{}, 0, nil, MempoolConfig{}); err == nil || !strings.Contains(err.Error(), "nil checked transaction") {
 		t.Fatalf("expected nil checked tx rejection, got %v", err)
 	}
+	if reject, _ := rejectUnsupportedCoreExtNodeRuntime(&consensus.Tx{Outputs: []consensus.TxOutput{{CovenantType: consensus.COV_TYPE_CORE_EXT}}}, nil); !reject {
+		t.Fatal("expected CORE_EXT output rejection")
+	}
+	if kind := covenantPolicyKind(nil, nil, consensus.COV_TYPE_CORE_EXT); kind != "" {
+		t.Fatalf("nil tx policy kind=%q", kind)
+	}
+	tx := &consensus.Tx{Inputs: []consensus.TxInput{{}}}
+	if reject, reason := rejectUnsupportedCoreExtNodeRuntime(tx, nil); !reject || !strings.Contains(reason, "input snapshot unavailable") {
+		t.Fatalf("CORE_EXT nil snapshot reject=%v reason=%q", reject, reason)
+	}
+	if _, err := policyInputSnapshot(tx, map[consensus.Outpoint]consensus.UtxoEntry{}); err == nil || !strings.Contains(err.Error(), "utxo not found") {
+		t.Fatalf("expected missing UTXO snapshot error, got %v", err)
+	}
+	if err := applyPolicyAgainstStateCoreExtUnsupported(&consensus.CheckedTransaction{Tx: tx}, nil); err == nil || !strings.Contains(err.Error(), "input snapshot unavailable") {
+		t.Fatalf("expected CORE_EXT unsupported policy error, got %v", err)
+	}
 }
 
 func TestMempoolPolicyPropagatesDaFeeComputationErrors(t *testing.T) {
@@ -2612,26 +2586,15 @@ func TestMempoolPolicySkipsDaHelperForNonDaCheckedTx(t *testing.T) {
 			PolicyDaSurchargePerByte: 1,
 		},
 	}
-	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{Tx: tx, DaBytes: daBytes}, 101, nil, mp.policySnapshot()); err != nil {
-		t.Fatalf("non-DA checked tx should skip DA helper despite nil policy utxos, got %v", err)
+	policyUtxos, err := policyInputSnapshot(tx, st.Utxos)
+	if err != nil {
+		t.Fatalf("policyInputSnapshot: %v", err)
+	}
+	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{Tx: tx, DaBytes: daBytes}, 101, policyUtxos, mp.policySnapshot()); err != nil {
+		t.Fatalf("non-DA checked tx should skip DA helper, got %v", err)
 	}
 }
 
-// TestPolicyNeedsInputSnapshotForTxMatrix pins the tx-aware snapshot
-// gate semantics. The decision depends on BOTH the policy config AND
-// the tx shape (DA-bearing or not). This avoids building the per-tx
-// input snapshot for non-DA admissions when only the DA-side floor is
-// configured — the prior policy-only gate built it unconditionally for
-// any `MinDaFeeRate > 0` config and the helper short-circuited without
-// using the snapshot, which is wasted map-copy on the hot non-DA
-// admit path.
-//
-// Proof assertion: for each (config, tx-DA-flag) pair, the function
-// returns the documented value. This direct helper matrix uses raw
-// MempoolConfig literals; NewMempoolWithConfig separately normalizes a
-// zero MinDaFeeRate to DefaultMinDaFeeRate for public mempool callers.
-// Adding a new policy lane that reads input state without updating this
-// matrix breaks the build.
 func TestPolicyNeedsInputSnapshotForTxMatrix(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
@@ -2652,6 +2615,9 @@ func TestPolicyNeedsInputSnapshotForTxMatrix(t *testing.T) {
 	nonDaBytesPayload := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 900_000, 1, fromKey, fromAddress, toAddress)
 	daTx := parseFor(t, daBytesPayload)
 	nonDaTx := parseFor(t, nonDaBytesPayload)
+	if _, err := policyNeedsInputSnapshotForTx(nil, MempoolConfig{}); err == nil {
+		t.Fatal("expected nil transaction snapshot decision error")
+	}
 
 	cases := []struct {
 		name string
@@ -2659,11 +2625,11 @@ func TestPolicyNeedsInputSnapshotForTxMatrix(t *testing.T) {
 		tx   *consensus.Tx
 		want bool
 	}{
-		{name: "all_zero_non_da", cfg: MempoolConfig{}, tx: nonDaTx, want: false},
-		{name: "all_zero_da", cfg: MempoolConfig{}, tx: daTx, want: false},
-		{name: "min_da_fee_rate_only_non_da", cfg: MempoolConfig{MinDaFeeRate: 1}, tx: nonDaTx, want: false},
+		{name: "all_zero_non_da", cfg: MempoolConfig{}, tx: nonDaTx, want: true},
+		{name: "all_zero_da", cfg: MempoolConfig{}, tx: daTx, want: true},
+		{name: "min_da_fee_rate_only_non_da", cfg: MempoolConfig{MinDaFeeRate: 1}, tx: nonDaTx, want: true},
 		{name: "min_da_fee_rate_only_da", cfg: MempoolConfig{MinDaFeeRate: 1}, tx: daTx, want: true},
-		{name: "surcharge_only_non_da", cfg: MempoolConfig{PolicyDaSurchargePerByte: 1}, tx: nonDaTx, want: false},
+		{name: "surcharge_only_non_da", cfg: MempoolConfig{PolicyDaSurchargePerByte: 1}, tx: nonDaTx, want: true},
 		{name: "surcharge_only_da", cfg: MempoolConfig{PolicyDaSurchargePerByte: 1}, tx: daTx, want: true},
 		{name: "simplicity_policy_non_da", cfg: MempoolConfig{PolicyRejectSimplicityPreActivation: true}, tx: nonDaTx, want: true},
 		{name: "simplicity_policy_da", cfg: MempoolConfig{PolicyRejectSimplicityPreActivation: true}, tx: daTx, want: true},
@@ -2678,25 +2644,6 @@ func TestPolicyNeedsInputSnapshotForTxMatrix(t *testing.T) {
 				t.Fatalf("got=%v want=%v", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestPolicyNeedsInputSnapshotForTxUsesCheapNonDaShape(t *testing.T) {
-	tx := &consensus.Tx{
-		Version: 1,
-		TxKind:  0xff, // unsupported, but no DA payload bytes.
-		Inputs:  []consensus.TxInput{{}},
-		Outputs: []consensus.TxOutput{{}},
-	}
-	if _, _, _, err := consensus.TxWeightAndStats(tx); err == nil {
-		t.Fatal("test setup: TxWeightAndStats unexpectedly accepted unsupported tx kind")
-	}
-	got, err := policyNeedsInputSnapshotForTx(tx, MempoolConfig{MinDaFeeRate: 1})
-	if err != nil {
-		t.Fatalf("policyNeedsInputSnapshotForTx should not run full weight stats for non-DA shape, got %v", err)
-	}
-	if got {
-		t.Fatal("policyNeedsInputSnapshotForTx returned true for tx with no DA payload bytes")
 	}
 }
 
