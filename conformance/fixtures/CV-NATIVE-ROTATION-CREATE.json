@@ -83,6 +83,126 @@
       "expect_ok": false,
       "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "note": "suite_id=0x43 is NOT in create set at H2"
+    },
+    {
+      "id": "NATIVE-ROT-CREATE-SET-01",
+      "op": "rotation_native_create_suites",
+      "height": 99,
+      "rotation_descriptor": {
+        "name": "test-rot-with-sunset",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 400
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true,
+      "expect_suite_ids": [1],
+      "note": "Exact create set at H1-1: old only."
+    },
+    {
+      "id": "NATIVE-ROT-CREATE-SET-02",
+      "op": "rotation_native_create_suites",
+      "height": 100,
+      "rotation_descriptor": {
+        "name": "test-rot-with-sunset",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 400
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true,
+      "expect_suite_ids": [1, 2],
+      "note": "Exact create set at H1: old and new."
+    },
+    {
+      "id": "NATIVE-ROT-CREATE-SET-03",
+      "op": "rotation_native_create_suites",
+      "height": 199,
+      "rotation_descriptor": {
+        "name": "test-rot-with-sunset",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 400
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true,
+      "expect_suite_ids": [1, 2],
+      "note": "Exact create set at H2-1: old and new."
+    },
+    {
+      "id": "NATIVE-ROT-CREATE-SET-04",
+      "op": "rotation_native_create_suites",
+      "height": 200,
+      "rotation_descriptor": {
+        "name": "test-rot-with-sunset",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 400
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true,
+      "expect_suite_ids": [2],
+      "note": "Exact create set at H2: new only."
+    },
+    {
+      "id": "NATIVE-ROT-CREATE-SET-05",
+      "op": "rotation_native_create_suites",
+      "height": 399,
+      "rotation_descriptor": {
+        "name": "test-rot-with-sunset",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 400
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true,
+      "expect_suite_ids": [2],
+      "note": "Exact create set at H4-1: new only."
+    },
+    {
+      "id": "NATIVE-ROT-CREATE-SET-06",
+      "op": "rotation_native_create_suites",
+      "height": 400,
+      "rotation_descriptor": {
+        "name": "test-rot-with-sunset",
+        "old_suite_id": 1,
+        "new_suite_id": 2,
+        "create_height": 100,
+        "spend_height": 200,
+        "sunset_height": 400
+      },
+      "suite_registry": [
+        { "suite_id": 1, "pubkey_len": 2592, "sig_len": 4627, "verify_cost": 8, "openssl_alg": "ML-DSA-87" },
+        { "suite_id": 2, "pubkey_len": 1024, "sig_len": 512, "verify_cost": 9, "openssl_alg": "ML-DSA-87" }
+      ],
+      "expect_ok": true,
+      "expect_suite_ids": [2],
+      "note": "Exact create set at H4: new only."
     }
   ]
 }

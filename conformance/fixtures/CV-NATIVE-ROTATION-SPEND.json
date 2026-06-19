@@ -65,7 +65,6 @@
         }
       ],
       "expect_ok": true,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "note": "Spend with new suite at H2-1: allowed (new suite enters spend set at H1, not H2, per spec \u00a76 Phase 1)"
     },
     {
@@ -163,7 +162,6 @@
         }
       ],
       "expect_ok": true,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "note": "Spend with new suite at H2-1: allowed (new suite enters spend set at H1, not H2, per spec \u00a76 Phase 1)"
     },
     {
@@ -261,7 +259,6 @@
         }
       ],
       "expect_ok": true,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "note": "Spend with new suite at H2-1: allowed (new suite enters spend set at H1, not H2, per spec \u00a76 Phase 1)"
     },
     {
@@ -359,7 +356,6 @@
         }
       ],
       "expect_ok": true,
-      "expect_err": "TX_ERR_SIG_ALG_INVALID",
       "note": "Spend with new suite at H2-1: allowed (new suite enters spend set at H1, not H2, per spec \u00a76 Phase 1)"
     },
     {

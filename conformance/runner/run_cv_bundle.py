@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import argparse
+import base64
+import binascii
 from fractions import Fraction
 import hashlib
 import json
@@ -116,6 +118,16 @@ def call_tool(tool_path: pathlib.Path, req: Dict[str, Any]) -> Dict[str, Any]:
         return json.loads(out)
     except json.JSONDecodeError as e:
         raise RuntimeError(f"tool returned non-json: {tool_path}\n{out}\n{e}")
+
+
+def normalize_suite_ids_field(resp: Dict[str, Any]) -> Any:
+    suite_ids = resp.get("suite_ids")
+    if isinstance(suite_ids, str):
+        try:
+            return list(base64.b64decode(suite_ids, validate=True))
+        except (binascii.Error, ValueError):
+            return suite_ids
+    return suite_ids
 
 
 def load_fixtures() -> List[Dict[str, Any]]:
@@ -2047,13 +2059,15 @@ def validate_vector(
         if "expect_digest" in v and go_resp.get("digest") != v["expect_digest"]:
             problems.append(f"{gate}/{vid}: expect_digest mismatch")
     elif op == "rotation_native_create_suites":
-        if go_resp.get("suite_ids") != rust_resp.get("suite_ids"):
+        go_suite_ids = normalize_suite_ids_field(go_resp)
+        rust_suite_ids = normalize_suite_ids_field(rust_resp)
+        if go_suite_ids != rust_suite_ids:
             problems.append(
-                f"{gate}/{vid}: suite_ids mismatch go={go_resp.get('suite_ids')} rust={rust_resp.get('suite_ids')}"
+                f"{gate}/{vid}: suite_ids mismatch go={go_suite_ids} rust={rust_suite_ids}"
             )
-        if "expect_suite_ids" in v and go_resp.get("suite_ids") != v["expect_suite_ids"]:
+        if "expect_suite_ids" in v and go_suite_ids != v["expect_suite_ids"]:
             problems.append(
-                f"{gate}/{vid}: expect_suite_ids={v['expect_suite_ids']} got_suite_ids={go_resp.get('suite_ids')}"
+                f"{gate}/{vid}: expect_suite_ids={v['expect_suite_ids']} got_suite_ids={go_suite_ids}"
             )
     elif op == "block_hash":
         if go_resp.get("block_hash") != rust_resp.get("block_hash"):
