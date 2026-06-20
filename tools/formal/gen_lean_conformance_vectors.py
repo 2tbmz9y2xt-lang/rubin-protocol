@@ -3155,9 +3155,16 @@ def main() -> int:
 
     in_txctx = repo_root / "conformance" / "fixtures" / "CV-TXCTX.json"
     out_txctx = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVTxctxVectors.lean"
-    tv = load_cv_txctx(in_txctx)
-    out_txctx.write_text(_inject_perf_options(render_cv_txctx_lean(tv)), encoding="utf-8")
-    print(f"WROTE: {out_txctx}")
+    if in_txctx.exists():
+        tv = load_cv_txctx(in_txctx)
+        out_txctx.write_text(_inject_perf_options(render_cv_txctx_lean(tv)), encoding="utf-8")
+        print(f"WROTE: {out_txctx}")
+    elif out_txctx.exists():
+        raise FileNotFoundError(
+            f"{out_txctx} exists without retired source fixture {in_txctx}"
+        )
+    else:
+        print(f"SKIP: {out_txctx} (source fixture retired)")
 
     in_utxo_basic = repo_root / "conformance" / "fixtures" / "CV-UTXO-BASIC.json"
     out_utxo_basic = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVUtxoBasicVectors.lean"

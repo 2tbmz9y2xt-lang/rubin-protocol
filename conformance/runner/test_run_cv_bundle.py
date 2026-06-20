@@ -1,3 +1,5 @@
+import io
+import sys
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -6,16 +8,22 @@ if __package__:
     from .run_cv_bundle import (
         RETIRED_GATES,
         is_retired_gate,
+        known_gate_names,
+        main,
         normalize_validation_result,
         normalized_vector_op,
+        select_requested_fixtures,
         validate_vector,
     )
 else:
     from run_cv_bundle import (
         RETIRED_GATES,
         is_retired_gate,
+        known_gate_names,
+        main,
         normalize_validation_result,
         normalized_vector_op,
+        select_requested_fixtures,
         validate_vector,
     )
 
@@ -26,6 +34,44 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
         self.assertTrue(is_retired_gate("CV-EXT"))
         self.assertTrue(is_retired_gate("CV-TXCTX"))
         self.assertFalse(is_retired_gate("CV-UTXO-BASIC"))
+
+    def test_deleted_retired_gates_are_known_for_requested_runs(self):
+        fixtures = [{"gate": "CV-UTXO-BASIC", "vectors": []}]
+
+        self.assertEqual(
+            known_gate_names(fixtures),
+            {"CV-UTXO-BASIC", "CV-EXT", "CV-TXCTX"},
+        )
+        selected, retired, unknown = select_requested_fixtures(fixtures, ["CV-TXCTX"])
+        self.assertEqual(selected, [])
+        self.assertEqual(retired, {"CV-TXCTX"})
+        self.assertEqual(unknown, [])
+
+    def test_unknown_requested_gate_is_reported(self):
+        fixtures = [{"gate": "CV-UTXO-BASIC", "vectors": []}]
+
+        selected, retired, unknown = select_requested_fixtures(
+            fixtures,
+            ["CV-NOT-A-GATE", "CV-EXT"],
+        )
+        self.assertEqual(selected, [])
+        self.assertEqual(retired, {"CV-EXT"})
+        self.assertEqual(unknown, ["CV-NOT-A-GATE"])
+
+    def test_only_deleted_retired_gate_prints_retired_summary(self):
+        fixtures = [{"gate": "CV-UTXO-BASIC", "vectors": []}]
+        argv = ["run_cv_bundle.py", "--only-gates", "CV-TXCTX"]
+
+        with mock.patch.object(sys, "argv", argv):
+            with mock.patch(f"{main.__module__}.load_fixtures", return_value=fixtures):
+                with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                    rc = main()
+
+        self.assertEqual(rc, 0)
+        self.assertIn(
+            "retired gates skipped: CV-TXCTX (0 vectors)",
+            stdout.getvalue(),
+        )
 
     def test_active_utxo_apply_basic_rejects_core_ext_profiles(self):
         vector = {"id": "CV-U-EXT-ACTIVE", "op": "utxo_apply_basic", "tx_hex": "00", "utxos": [],

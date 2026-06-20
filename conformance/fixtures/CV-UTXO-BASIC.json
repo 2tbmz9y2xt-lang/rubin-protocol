@@ -344,14 +344,15 @@
     },
     {
       "block_timestamp": 2000,
-      "expect_ok": true,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "expect_ok": false,
       "height": 500000,
       "id": "CV-U-EXT-01",
       "op": "utxo_apply_basic",
       "tx_hex": "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a00000000000000000021011111111111111111111111111111111111111111111111111111111111111111000000000100000000",
       "utxos": [
         {
-          "covenant_data": "010000",
+          "covenant_data": "",
           "covenant_type": 258,
           "created_by_coinbase": false,
           "creation_height": 0,
@@ -363,14 +364,15 @@
     },
     {
       "block_timestamp": 2000,
-      "expect_ok": true,
+      "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
+      "expect_ok": false,
       "height": 500000,
       "id": "CV-U-EXT-02",
       "op": "utxo_apply_basic",
-      "tx_hex": "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a0000000000000000002101111111111111111111111111111111111111111111111111111111111111111100000000010300010100",
+      "tx_hex": "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a00000000000000000021011111111111111111111111111111111111111111111111111111111111111111000000000100000000",
       "utxos": [
         {
-          "covenant_data": "010000",
+          "covenant_data": "01",
           "covenant_type": 258,
           "created_by_coinbase": false,
           "creation_height": 0,

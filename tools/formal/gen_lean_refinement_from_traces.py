@@ -184,8 +184,11 @@ def _emit_go_trace_v1(
         vector_id = str(e.get("vector_id", ""))
         op = str(e.get("op", ""))
         ok = bool(e.get("ok", False))
-        if gate != "CV-SIMPLICITY-EXEC" and not ok:
-            continue  # skip negative vectors — Lean refinement only covers accept path
+        keep_negative = gate == "CV-SIMPLICITY-EXEC" or (
+            gate == "CV-UTXO-BASIC" and vector_id.startswith("CV-U-EXT-")
+        )
+        if not ok and not keep_negative:
+            continue  # skip negatives except rows required by active refinement coverage
         err = str(e.get("err", ""))
         outputs = e.get("outputs")
         if not isinstance(outputs, dict):
