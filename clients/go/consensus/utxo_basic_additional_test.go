@@ -63,9 +63,9 @@ func TestCheckSpendCovenant_Errors(t *testing.T) {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
 	}
 
-	err = checkSpendCovenant(0x0102, []byte{0x01})
+	err = checkSpendCovenant(COV_TYPE_CORE_EXT, []byte{0x01})
 	if err == nil {
-		t.Fatalf("expected error for retired 0x0102 covenant type")
+		t.Fatalf("expected error for malformed CORE_EXT covenant_data")
 	}
 	if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
