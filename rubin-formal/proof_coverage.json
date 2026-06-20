@@ -5,6 +5,22 @@
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
   "spec_section_hashes_sha3_256": "f7862a144ae9a62bbe0cf6ca721a3768c65c4a3ee34f6530e4919d063b14a70f",
+  "coverage_summary": {
+    "section_rows": 18,
+    "proved_rows": 11,
+    "stated_rows": 7,
+    "deferred_rows": 0,
+    "theorem_references": 29,
+    "unique_theorem_names": 23,
+    "reused_theorem_names": [
+      "RubinFormal.Conformance.cv_parse_vectors_pass",
+      "RubinFormal.Conformance.cv_subsidy_vectors_pass",
+      "RubinFormal.Conformance.cv_utxo_basic_vectors_pass",
+      "RubinFormal.Conformance.cv_validation_order_vectors_pass",
+      "RubinFormal.Conformance.cv_weight_vectors_pass"
+    ],
+    "counting_rule": "section_rows and theorem_references are registry coverage references; unique_theorem_names is the deduplicated theorem-name count and must not be inflated by cross-section reuse."
+  },
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "coverage": [
@@ -191,7 +207,6 @@
         "RubinFormal.Refinement.ParallelEquivalence.commit_equivalence_accept",
         "RubinFormal.Refinement.ParallelEquivalence.commit_equivalence_reject",
         "RubinFormal.Refinement.ParallelEquivalence.worker_purity",
-        "RubinFormal.Refinement.ParallelEquivalence.worker_deterministic",
         "RubinFormal.Refinement.ParallelEquivalence.reducer_permutation_invariant",
         "RubinFormal.Refinement.ParallelEquivalence.precompute_enables_reorder"
       ],
@@ -201,8 +216,9 @@
   "proof_level": "refinement",
   "claims": {
     "allowed": [
-      "Lean executable semantics replay all conformance fixtures (CV-*.json) with byte-level input coverage; this is not a universal proof of CANONICAL semantics",
-      "Go(reference) \u2192 Lean refinement is checked for critical ops over the full conformance fixture set (trace schema v1)",
+      "Lean executable semantics replay the non-CV-PV conformance fixtures imported by RubinFormal.Conformance.Index; this is not a universal proof of CANONICAL semantics",
+      "Go(reference) \u2192 Lean refinement is checked for listed critical ops over replay-covered fixture traces (trace schema v1), excluding runtime/parallel-only CV-PV gates",
+      "proved/stated coverage rows are interpreted at proof_level=refinement; repeated theorem names across multiple sections are coverage references, not additional unique proofs",
       "formal claims are bounded by explicit forbidden claims below"
     ],
     "forbidden": [

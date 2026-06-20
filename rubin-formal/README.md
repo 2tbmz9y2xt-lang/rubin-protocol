@@ -28,15 +28,16 @@ Machine-readable summary contract:
 
 ## Граница claims (критично)
 
-Этот proof-pack — executable replay/refinement coverage для conformance-фикстур (CV-*.json) и baseline-слой
-для дальнейшей формализации. Он нужен для воспроизводимого "якоря", но **не** является универсальной
-формальной верификацией CANONICAL.
+Этот proof-pack — executable replay/refinement coverage для replay-covered conformance-фикстур
+и baseline-слой для дальнейшей формализации. Runtime/parallel-only `CV-PV-*` gates не входят
+в текущий Lean replay scope. Он нужен для воспроизводимого "якоря", но **не** является
+универсальной формальной верификацией CANONICAL.
 Текущий machine-readable статус: `proof_level=refinement`, `claim_level=refined`.
 
 Разрешённые формулировки (OK):
 
-- "Lean executable semantics replay all conformance fixtures (CV-*.json)"
-- "Go(reference) → Lean refinement is checked for critical ops over conformance fixture set"
+- "Lean executable semantics replay the non-CV-PV conformance fixtures imported by RubinFormal.Conformance.Index"
+- "Go(reference) → Lean refinement is checked for listed critical ops over replay-covered fixture traces"
 
 Запрещённые формулировки (NOT OK):
 
