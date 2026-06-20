@@ -119,44 +119,16 @@ func (m *Mempool) policySnapshot() MempoolConfig {
 }
 
 // policyNeedsInputSnapshotForTx returns true if applying policy to the
-// already-parsed transaction will read input UTXOs. The decision is
-// tx-aware so admissions of non-DA transactions under the default
-// config (`MinDaFeeRate=DefaultMinDaFeeRate=1`,
-// `PolicyDaSurchargePerByte=0`, `PolicyRejectCoreExtPreActivation=false`)
-// skip the per-tx map copy entirely.
-//
-// Trigger conditions:
-//
-//  1. `PolicyRejectCoreExtPreActivation` is on — the pre-activation classifier
-//     reads input state for CORE_EXT and CORE_SIMPLICITY candidates, so the snapshot is required
-//     regardless of tx shape.
-//  2. The DA path is exercisable AND the tx is DA-bearing
-//     (`daBytes > 0`). `applyPolicyAgainstState` repeats the DA-bearing
-//     check from the post-validation metadata before invoking
-//     `RejectDaAnchorTxPolicy`, so non-DA tx never consume the snapshot or
-//     enter the DA helper.
-//
-// A raw all-zero DA policy snapshot + non-CORE_EXT routing relies on
-// `validateFeeFloorLocked` to enforce the rolling relay-fee floor; that
-// path does not need a UTXO snapshot. Public NewMempoolWithConfig callers
-// get DefaultMinDaFeeRate when MinDaFeeRate is left at zero.
-//
-// The function takes the parsed `*consensus.Tx` (not the post-validation
-// `*CheckedTransaction`) on purpose: the caller must build the snapshot
-// BEFORE invoking `CheckTransaction*WithOwnedUtxoSet`, which takes
-// ownership of the supplied utxo map and removes spent inputs as it
-// validates. The DA-bearing decision is a cheap structural predicate, not
-// a full weight/stat walk; malformed tx kinds are still rejected by the
-// later consensus validation path.
+// already-parsed transaction will read input UTXOs.
 func policyNeedsInputSnapshotForTx(tx *consensus.Tx, policy MempoolConfig) (bool, error) {
-	if policy.PolicyRejectCoreExtPreActivation {
+	if tx == nil {
+		return false, errors.New("nil transaction")
+	}
+	if len(tx.Inputs) > 0 || policy.PolicyRejectSimplicityPreActivation {
 		return true, nil
 	}
 	if policy.MinDaFeeRate == 0 && policy.PolicyDaSurchargePerByte == 0 {
 		return false, nil
-	}
-	if tx == nil {
-		return false, errors.New("nil transaction")
 	}
 	return tx.TxKind != 0x00 && len(tx.DaPayload) > 0, nil
 }

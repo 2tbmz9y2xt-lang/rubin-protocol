@@ -249,7 +249,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&cfg.BindAddr, "bind", defaults.BindAddr, "bind address host:port")
 	fs.StringVar(&cfg.RPCBindAddr, "rpc-bind", defaults.RPCBindAddr, "devnet HTTP RPC bind address host:port (disabled when empty)")
 	fs.StringVar(&cfg.LogLevel, "log-level", defaults.LogLevel, "log level: debug|info|warn|error")
-	genesisFile := fs.String("genesis-file", "", "path to genesis pack JSON with chain_id_hex, genesis hash, and optional core_ext_profiles")
+	genesisFile := fs.String("genesis-file", "", "path to genesis pack JSON with chain_id_hex and genesis hash")
 	fs.IntVar(&cfg.MaxPeers, "max-peers", defaults.MaxPeers, "max connected peers")
 	fs.IntVar(&cfg.MempoolMaxTxs, "mempool-max-txs", defaults.MempoolMaxTxs, "maximum canonical mempool transactions")
 	fs.IntVar(&cfg.MempoolMaxBytes, "mempool-max-bytes", defaults.MempoolMaxBytes, "maximum canonical mempool serialized transaction bytes")
@@ -359,7 +359,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	syncCfg := node.DefaultSyncConfig(nil, chainIDFromGenesis, chainStatePath)
 	syncCfg.Network = cfg.Network
-	syncCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
 	applySuiteContextToSyncConfig(&syncCfg, rotation, registry)
 	syncCfg.ParallelValidationMode = *pvMode
 	syncCfg.PVShadowMaxSamples = *pvShadowMax
@@ -401,7 +400,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	mempoolCfg := node.DefaultMempoolConfig()
 	mempoolCfg.MaxTransactions = cfg.MempoolMaxTxs
 	mempoolCfg.MaxBytes = cfg.MempoolMaxBytes
-	mempoolCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
 	mempool, err := newMempoolFn(chainState, blockStore, chainIDFromGenesis, mempoolCfg)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "mempool init failed: %v\n", err)
@@ -454,7 +452,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 			minerCfg.MineAddress = addrBytes
 		}
-		minerCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
 		minerCfg.CurrentMempoolMinFeeRateFn = mempool.CurrentMinFeeRateSnapshot
 		miner, err := newMinerFn(chainState, blockStore, syncEngine, minerCfg)
 		if err != nil {
@@ -512,7 +509,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 		}
 		if mineAddrErr == nil {
-			minerCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
 			minerCfg.CurrentMempoolMinFeeRateFn = mempool.CurrentMinFeeRateSnapshot
 			minerCfg.CompleteDASetProvider = p2pService
 			var err error
@@ -716,28 +712,15 @@ func nowUnixU64() uint64 {
 }
 
 type genesisPack struct {
-	ChainIDHex                 string                  `json:"chain_id_hex"`
-	GenesisHashHex             string                  `json:"genesis_hash_hex"`
-	GenesisBlockHashHex        string                  `json:"genesis_block_hash_hex"`
-	GenesisHeaderBytesHex      string                  `json:"genesis_header_bytes_hex"`
-	CoreExtProfiles            []genesisCoreExtProfile `json:"core_ext_profiles,omitempty"`
-	CoreExtProfileSetAnchorHex string                  `json:"core_ext_profile_set_anchor_hex,omitempty"`
-}
-
-type genesisCoreExtProfile struct {
-	ExtID                uint16  `json:"ext_id"`
-	ActivationHeight     uint64  `json:"activation_height"`
-	TxContextEnabled     bool    `json:"tx_context_enabled,omitempty"`
-	AllowedSuiteIDs      []uint8 `json:"allowed_suite_ids,omitempty"`
-	Binding              string  `json:"binding,omitempty"`
-	BindingDescriptorHex string  `json:"binding_descriptor_hex,omitempty"`
-	ExtPayloadSchemaHex  string  `json:"ext_payload_schema_hex,omitempty"`
+	ChainIDHex            string `json:"chain_id_hex"`
+	GenesisHashHex        string `json:"genesis_hash_hex"`
+	GenesisBlockHashHex   string `json:"genesis_block_hash_hex"`
+	GenesisHeaderBytesHex string `json:"genesis_header_bytes_hex"`
 }
 
 type parsedGenesisConfig struct {
-	ChainID         [32]byte
-	GenesisHash     [32]byte
-	CoreExtProfiles consensus.CoreExtProfileProvider
+	ChainID     [32]byte
+	GenesisHash [32]byte
 }
 
 // maybeFlipReadyOnStartup attempts the boot-time readiness gate
@@ -790,6 +773,9 @@ func parseGenesisConfigFull(path string) (parsedGenesisConfig, error) {
 	if err != nil {
 		return cfg, err
 	}
+	if err := rejectRemovedGenesisCoreExtKeys(raw); err != nil {
+		return cfg, err
+	}
 	var payload genesisPack
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return cfg, err
@@ -802,11 +788,20 @@ func parseGenesisConfigFull(path string) (parsedGenesisConfig, error) {
 	if err != nil {
 		return cfg, err
 	}
-	cfg.CoreExtProfiles, err = buildGenesisCoreExtProfiles(payload.CoreExtProfiles, cfg.ChainID, payload.CoreExtProfileSetAnchorHex)
-	if err != nil {
-		return cfg, err
-	}
 	return cfg, nil
+}
+
+func rejectRemovedGenesisCoreExtKeys(raw []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	for _, key := range []string{"core_ext_profiles", "core_ext_profile_set_anchor_hex"} {
+		if _, ok := fields[key]; ok {
+			return fmt.Errorf("unsupported genesis field %q: Go node CORE_EXT profile wiring was removed", key)
+		}
+	}
+	return nil
 }
 
 func parseGenesisChainID(path string) ([32]byte, error) {
@@ -837,94 +832,6 @@ func parseGenesisHash(payload genesisPack) ([32]byte, error) {
 		return zero, fmt.Errorf("genesis_header_bytes must be %d bytes, got %d", consensus.BLOCK_HEADER_BYTES, len(headerBytes))
 	}
 	return consensus.BlockHash(headerBytes)
-}
-
-const maxCoreExtHexFieldBytes = 4096
-
-func decodeOptionalHexBytesField(name, value string) ([]byte, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil, nil
-	}
-	trimmed := trimHexPrefix(value)
-	if (name == "binding_descriptor_hex" || name == "ext_payload_schema_hex") && len(trimmed) > maxCoreExtHexFieldBytes*2 {
-		return nil, fmt.Errorf("bad %s", name)
-	}
-	raw, err := hex.DecodeString(trimmed)
-	if err != nil {
-		return nil, fmt.Errorf("bad %s", name)
-	}
-	return raw, nil
-}
-
-func buildGenesisCoreExtProfiles(items []genesisCoreExtProfile, chainID [32]byte, expectedSetAnchorHex string) (consensus.CoreExtProfileProvider, error) {
-	deployments := make([]consensus.CoreExtDeploymentProfile, 0, len(items))
-	for _, item := range items {
-		binding, err := consensus.NormalizeLiveCoreExtBindingName(strings.TrimSpace(item.Binding))
-		if err != nil {
-			return nil, err
-		}
-		if item.TxContextEnabled {
-			return nil, fmt.Errorf(
-				"tx_context_enabled core_ext profile for ext_id=%d requires runtime txcontext verifier wiring",
-				item.ExtID,
-			)
-		}
-		bindingDescriptor, err := decodeOptionalHexBytesField("binding_descriptor_hex", item.BindingDescriptorHex)
-		if err != nil {
-			return nil, err
-		}
-		extPayloadSchema, err := decodeOptionalHexBytesField("ext_payload_schema_hex", item.ExtPayloadSchemaHex)
-		if err != nil {
-			return nil, err
-		}
-		verifySigExtFn, err := parseNormalizedCoreExtBinding(binding, bindingDescriptor, extPayloadSchema)
-		if err != nil {
-			return nil, err
-		}
-		allowed := make(map[uint8]struct{}, len(item.AllowedSuiteIDs))
-		for _, suiteID := range item.AllowedSuiteIDs {
-			allowed[suiteID] = struct{}{}
-		}
-		deployments = append(deployments, consensus.CoreExtDeploymentProfile{
-			ExtID:             item.ExtID,
-			ActivationHeight:  item.ActivationHeight,
-			TxContextEnabled:  item.TxContextEnabled,
-			AllowedSuites:     allowed,
-			VerifySigExtFn:    verifySigExtFn,
-			BindingDescriptor: bindingDescriptor,
-			ExtPayloadSchema:  extPayloadSchema,
-		})
-	}
-	if strings.TrimSpace(expectedSetAnchorHex) != "" {
-		expectedAnchor, err := parseHex32Field("core_ext_profile_set_anchor", expectedSetAnchorHex)
-		if err != nil {
-			return nil, err
-		}
-		actualAnchor, err := consensus.CoreExtProfileSetAnchorV1(chainID, deployments)
-		if err != nil {
-			return nil, err
-		}
-		if actualAnchor != expectedAnchor {
-			return nil, fmt.Errorf("core_ext profile set anchor mismatch")
-		}
-	}
-	if len(items) == 0 {
-		return consensus.NewStaticCoreExtProfileProvider(nil)
-	}
-	return consensus.NewStaticCoreExtProfileProvider(deployments)
-}
-
-func parseCoreExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (consensus.CoreExtVerifySigExtFunc, error) {
-	binding, err := consensus.NormalizeLiveCoreExtBindingName(binding)
-	if err != nil {
-		return nil, err
-	}
-	return parseNormalizedCoreExtBinding(binding, bindingDescriptor, extPayloadSchema)
-}
-
-func parseNormalizedCoreExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (consensus.CoreExtVerifySigExtFunc, error) {
-	return consensus.ParseNormalizedLiveCoreExtVerifySigExtBinding(binding, bindingDescriptor, extPayloadSchema)
 }
 
 func parseHex32Field(name, value string) ([32]byte, error) {

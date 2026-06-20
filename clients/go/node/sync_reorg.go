@@ -261,7 +261,7 @@ func (s *SyncEngine) preparePreferredBranch(
 			s.cfg.ExpectedTarget,
 			slidingTs,
 			s.cfg.ChainID,
-			s.cfg.CoreExtProfiles,
+			nil,
 			s.cfg.RotationProvider,
 			s.cfg.SuiteRegistry,
 		); err != nil {

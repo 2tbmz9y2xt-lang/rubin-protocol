@@ -138,69 +138,6 @@ func TestMinerMineOneRejectsNonCanonicalTxBytesInInput(t *testing.T) {
 	}
 }
 
-func TestMinerPolicyDropsCoreExtCreatePreActivation(t *testing.T) {
-	dir := t.TempDir()
-	chainStatePath := ChainStatePath(dir)
-
-	chainState := NewChainState()
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
-	if err != nil {
-		t.Fatalf("open blockstore: %v", err)
-	}
-	syncEngine, err := NewSyncEngine(chainState, blockStore, DefaultSyncConfig(nil, [32]byte{}, chainStatePath))
-	if err != nil {
-		t.Fatalf("new sync engine: %v", err)
-	}
-	cfg := DefaultMinerConfig()
-	cfg.TimestampSource = func() uint64 { return 1_777_000_000 }
-	miner, err := NewMiner(chainState, blockStore, syncEngine, cfg)
-	if err != nil {
-		t.Fatalf("new miner: %v", err)
-	}
-
-	var prev [32]byte
-	prev[0] = 0x21
-	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_CORE_EXT, coreExtCovenantData(1, nil), nil)
-
-	mb, err := miner.MineOne(context.Background(), [][]byte{raw})
-	if err != nil {
-		t.Fatalf("mine one: %v", err)
-	}
-	if mb.TxCount != 1 {
-		t.Fatalf("tx_count=%d, want 1 (policy should drop pre-activation CORE_EXT)", mb.TxCount)
-	}
-}
-
-func TestMinerPolicyDisabledAllowsCoreExtTxAndBlockConnectFails(t *testing.T) {
-	dir := t.TempDir()
-	chainStatePath := ChainStatePath(dir)
-
-	chainState := NewChainState()
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
-	if err != nil {
-		t.Fatalf("open blockstore: %v", err)
-	}
-	syncEngine, err := NewSyncEngine(chainState, blockStore, DefaultSyncConfig(nil, [32]byte{}, chainStatePath))
-	if err != nil {
-		t.Fatalf("new sync engine: %v", err)
-	}
-	cfg := DefaultMinerConfig()
-	cfg.PolicyRejectCoreExtPreActivation = false
-	cfg.TimestampSource = func() uint64 { return 1_777_000_000 }
-	miner, err := NewMiner(chainState, blockStore, syncEngine, cfg)
-	if err != nil {
-		t.Fatalf("new miner: %v", err)
-	}
-
-	var prev [32]byte
-	prev[0] = 0x22
-	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_CORE_EXT, coreExtCovenantData(1, nil), nil)
-
-	if _, err := miner.MineOne(context.Background(), [][]byte{raw}); err == nil {
-		t.Fatalf("expected error (block should fail to connect without policy filter)")
-	}
-}
-
 func TestChooseValidTimestampGenesisNowZeroReturnsOne(t *testing.T) {
 	if got := chooseValidTimestamp(0, nil, 0); got != 1 {
 		t.Fatalf("timestamp=%d, want 1", got)
@@ -447,49 +384,6 @@ func TestCompactSizeLenForMinerCoversAllBranches(t *testing.T) {
 	}
 }
 
-func TestPolicyNeedsReadonlyUtxoSnapshotMatrix(t *testing.T) {
-	t.Parallel()
-
-	var nilMiner *Miner
-	if nilMiner.policyNeedsReadonlyUtxoSnapshot() {
-		t.Fatal("nil miner should not require snapshot")
-	}
-
-	base := &Miner{cfg: DefaultMinerConfig()}
-	if !base.policyNeedsReadonlyUtxoSnapshot() {
-		t.Fatal("default miner should require snapshot")
-	}
-
-	disabled := &Miner{cfg: DefaultMinerConfig()}
-	disabled.cfg.PolicyRejectCoreExtPreActivation = false
-	disabled.cfg.PolicyDaAnchorAntiAbuse = false
-	if disabled.policyNeedsReadonlyUtxoSnapshot() {
-		t.Fatal("fully disabled policy matrix should not require snapshot")
-	}
-	disabled.cfg.CompleteDASetProvider = minerTestCompleteDASetProvider{}
-	if !disabled.policyNeedsReadonlyUtxoSnapshot() {
-		t.Fatal("provider validation should require snapshot")
-	}
-
-	coreExt := &Miner{cfg: DefaultMinerConfig()}
-	coreExt.cfg.PolicyRejectCoreExtPreActivation = true
-	if !coreExt.policyNeedsReadonlyUtxoSnapshot() {
-		t.Fatal("core-ext policy should require snapshot")
-	}
-
-	da := &Miner{cfg: DefaultMinerConfig()}
-	da.cfg.PolicyRejectCoreExtPreActivation = false
-	da.cfg.PolicyDaAnchorAntiAbuse = true
-	if !da.policyNeedsReadonlyUtxoSnapshot() {
-		t.Fatal("da anchor policy should require snapshot")
-	}
-
-	da.cfg.PolicyDaSurchargePerByte = 1
-	if !da.policyNeedsReadonlyUtxoSnapshot() {
-		t.Fatal("da anchor surcharge path should require snapshot")
-	}
-}
-
 // TestMinerRejectCandidateUsesCurrentMempoolMinFeeRateFnProvider pins the
 // T-D fix for PR #1368 wave-1: rejectCandidate MUST consult
 // MinerConfig.CurrentMempoolMinFeeRateFn (when non-nil) on every candidate
@@ -510,7 +404,7 @@ func TestMinerRejectCandidateUsesCurrentMempoolMinFeeRateFnProvider(t *testing.T
 	const providerFloor = uint64(100)
 	cfg := DefaultMinerConfig()
 	cfg.PolicyDaAnchorAntiAbuse = true
-	cfg.PolicyRejectCoreExtPreActivation = false
+	cfg.PolicyRejectSimplicityPreActivation = false
 	cfg.MinDaFeeRate = 1
 	cfg.PolicyDaSurchargePerByte = 0
 	cfg.CurrentMempoolMinFeeRate = 1
@@ -555,7 +449,7 @@ func TestMinerRejectCandidateFallbackUsesStaticCurrentMempoolMinFeeRate(t *testi
 	const staticFloor = uint64(100)
 	cfg := DefaultMinerConfig()
 	cfg.PolicyDaAnchorAntiAbuse = true
-	cfg.PolicyRejectCoreExtPreActivation = false
+	cfg.PolicyRejectSimplicityPreActivation = false
 	cfg.MinDaFeeRate = 1
 	cfg.PolicyDaSurchargePerByte = 0
 	cfg.CurrentMempoolMinFeeRate = staticFloor
@@ -600,7 +494,7 @@ func TestMinerRejectCandidateFallbackUsesStaticCurrentMempoolMinFeeRate(t *testi
 func TestMinerRejectCandidateClampsBelowDefaultMempoolMinFeeRate(t *testing.T) {
 	cfg := DefaultMinerConfig()
 	cfg.PolicyDaAnchorAntiAbuse = true
-	cfg.PolicyRejectCoreExtPreActivation = false
+	cfg.PolicyRejectSimplicityPreActivation = false
 	cfg.MinDaFeeRate = 0
 	cfg.PolicyDaSurchargePerByte = 0
 	cfg.CurrentMempoolMinFeeRate = 1
@@ -621,62 +515,6 @@ func TestMinerRejectCandidateClampsBelowDefaultMempoolMinFeeRate(t *testing.T) {
 	}
 	if !reject {
 		t.Fatalf("expected reject after clamp to DefaultMempoolMinFeeRate=1: weight=%d * 1 > fee=0; reject=false", weight)
-	}
-}
-
-func TestSnapshotBuildContextStateHandlesNilAndNoPolicyPaths(t *testing.T) {
-	t.Parallel()
-
-	var nilMiner *Miner
-	if _, err := nilMiner.snapshotBuildContextState(); err == nil {
-		t.Fatal("expected nil miner error")
-	}
-
-	minerWithNilState := &Miner{cfg: DefaultMinerConfig()}
-	if _, err := minerWithNilState.snapshotBuildContextState(); err == nil {
-		t.Fatal("expected nil chainstate error")
-	}
-
-	state := NewChainState()
-	state.HasTip = true
-	state.Height = 9
-	state.TipHash = [32]byte{0x99}
-	op := consensus.Outpoint{Txid: [32]byte{0x42}, Vout: 0}
-	state.Utxos[op] = consensus.UtxoEntry{
-		Value:             12,
-		CovenantType:      consensus.COV_TYPE_P2PK,
-		CovenantData:      testP2PKCovenantData(0x11),
-		CreationHeight:    1,
-		CreatedByCoinbase: true,
-	}
-
-	miner := &Miner{chainState: state, cfg: DefaultMinerConfig()}
-	snapshot, err := miner.snapshotBuildContextState()
-	if err != nil {
-		t.Fatalf("snapshotBuildContextState: %v", err)
-	}
-	if !snapshot.hasTip || snapshot.height != 9 || snapshot.tipHash != state.TipHash {
-		t.Fatal("snapshot lost chainstate fields")
-	}
-	if snapshot.utxos == nil {
-		t.Fatal("default policy path should copy utxo map")
-	}
-	miner.cfg.PolicyRejectCoreExtPreActivation = false
-	miner.cfg.PolicyDaAnchorAntiAbuse = true
-	snapshot, err = miner.snapshotBuildContextState()
-	if err != nil {
-		t.Fatalf("snapshotBuildContextState without surcharge: %v", err)
-	}
-	if snapshot.utxos == nil {
-		t.Fatal("da anti-abuse path should still copy utxo map when surcharge is disabled")
-	}
-	miner.cfg.PolicyDaAnchorAntiAbuse = false
-	snapshot, err = miner.snapshotBuildContextState()
-	if err != nil {
-		t.Fatalf("snapshotBuildContextState without policy snapshot: %v", err)
-	}
-	if snapshot.utxos != nil {
-		t.Fatal("disabled policy path should not copy utxo map")
 	}
 }
 
@@ -711,7 +549,7 @@ func TestMinerBuildContextUtxoMapDoesNotAliasChainStateMap(t *testing.T) {
 		t.Fatalf("new miner: %v", err)
 	}
 
-	buildCtx, err := miner.buildContext(nil)
+	buildCtx, err := miner.buildContext([][]byte{{0x00}})
 	if err != nil {
 		t.Fatalf("buildContext: %v", err)
 	}
@@ -720,7 +558,7 @@ func TestMinerBuildContextUtxoMapDoesNotAliasChainStateMap(t *testing.T) {
 		t.Fatal("buildContext utxo map aliases chainstate map")
 	}
 
-	buildCtx, err = miner.buildContext(nil)
+	buildCtx, err = miner.buildContext([][]byte{{0x00}})
 	if err != nil {
 		t.Fatalf("buildContext second pass: %v", err)
 	}

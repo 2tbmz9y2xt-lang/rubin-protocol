@@ -41,7 +41,7 @@ func (m *Mempool) validateTransactionWithConsensus(
 		nextHeight,
 		blockMTP,
 		m.chainID,
-		policy.CoreExtProfiles,
+		nil,
 		policy.RotationProvider,
 		policy.SuiteRegistry,
 	)
@@ -101,24 +101,16 @@ func applyPolicyAgainstStateDA(checked *consensus.CheckedTransaction, policy Mem
 	return nil
 }
 
-// applyPolicyAgainstStateCoreExt handles CoreExt policy application
-func applyPolicyAgainstStateCoreExt(checked *consensus.CheckedTransaction, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, policy MempoolConfig) error {
-	if policy.PolicyRejectCoreExtPreActivation {
-		reject, reason, err := RejectCoreExtTxPreActivationWithRotation(checked.Tx, utxos, nextHeight, policy.CoreExtProfiles, policy.RotationProvider)
-		if err != nil {
-			return err
-		}
-		if reject {
-			return errors.New(reason)
-		}
+func applyPolicyAgainstStateCoreExtUnsupported(checked *consensus.CheckedTransaction, utxos map[consensus.Outpoint]consensus.UtxoEntry) error {
+	if reject, reason := rejectUnsupportedCoreExtNodeRuntime(checked.Tx, utxos); reject {
+		return errors.New(reason)
 	}
 	return nil
 }
 
-// applyPolicyAgainstStatePayload handles payload size policy application
-func applyPolicyAgainstStatePayload(checked *consensus.CheckedTransaction, policy MempoolConfig) error {
-	if policy.PolicyMaxExtPayloadBytes > 0 {
-		reject, reason, err := RejectCoreExtTxOversizedPayload(checked.Tx, policy.PolicyMaxExtPayloadBytes)
+func applyPolicyAgainstStateSimplicity(checked *consensus.CheckedTransaction, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, policy MempoolConfig) error {
+	if policy.PolicyRejectSimplicityPreActivation {
+		reject, reason, err := rejectCoreSimplicityPreActivation(checked.Tx, utxos, nextHeight, policy.RotationProvider)
 		if err != nil {
 			return err
 		}

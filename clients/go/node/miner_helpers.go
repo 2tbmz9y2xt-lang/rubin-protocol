@@ -56,9 +56,9 @@ func (m *Miner) rejectCandidateAnchorPolicy(tx *consensus.Tx) (bool, error) {
 	return reject, nil
 }
 
-// rejectCandidateCoreExtPolicy handles CoreExt policy for candidate tx
-func (m *Miner) rejectCandidateCoreExtPolicy(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64) (bool, error) {
-	if !m.cfg.PolicyRejectCoreExtPreActivation {
+// rejectCandidateSimplicityPolicy handles Simplicity activation policy for candidate tx.
+func (m *Miner) rejectCandidateSimplicityPolicy(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64) (bool, error) {
+	if !m.cfg.PolicyRejectSimplicityPreActivation {
 		return false, nil
 	}
 
@@ -66,7 +66,7 @@ func (m *Miner) rejectCandidateCoreExtPolicy(tx *consensus.Tx, utxos map[consens
 	if m.sync != nil {
 		rotation = m.sync.cfg.RotationProvider
 	}
-	reject, _, err := RejectCoreExtTxPreActivationWithRotation(tx, utxos, nextHeight, m.cfg.CoreExtProfiles, rotation)
+	reject, _, err := rejectCoreSimplicityPreActivation(tx, utxos, nextHeight, rotation)
 	if err != nil {
 		return false, err
 	}

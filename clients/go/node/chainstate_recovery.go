@@ -210,7 +210,7 @@ func replayCanonicalBlocks(state *ChainState, store *BlockStore, cfg SyncConfig,
 			cfg.ExpectedTarget,
 			prevTimestamps,
 			cfg.ChainID,
-			cfg.CoreExtProfiles,
+			nil,
 			cfg.RotationProvider,
 			cfg.SuiteRegistry,
 		); err != nil {

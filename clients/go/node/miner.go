@@ -70,18 +70,11 @@ type MinerConfig struct {
 	// CurrentMempoolMinFeeRate above.
 	CurrentMempoolMinFeeRateFn func() uint64
 
-	// PolicyRejectCoreExtPreActivation controls non-consensus pre-activation guardrails
-	// for CORE_EXT and CORE_SIMPLICITY. When enabled, the miner will exclude
-	// transactions that create or spend CORE_EXT outputs whose profile(ext_id, height)
-	// is not ACTIVE, and CORE_SIMPLICITY transactions until the miner rotation provider
-	// reports Simplicity active at the candidate height.
-	//
-	// If CoreExtProfiles is nil, all CORE_EXT profiles are treated as not ACTIVE.
-	PolicyRejectCoreExtPreActivation bool
-
-	// CoreExtProfiles is the chain-config profile mapping used by policy checks.
-	// Consensus uses a canonical source for profile(ext_id, height); this is policy-only.
-	CoreExtProfiles consensus.CoreExtProfileProvider
+	// PolicyRejectSimplicityPreActivation controls non-consensus
+	// pre-activation guardrails for CORE_SIMPLICITY. When enabled, the
+	// miner excludes CORE_SIMPLICITY transactions until the miner rotation
+	// provider reports Simplicity active at the candidate height.
+	PolicyRejectSimplicityPreActivation bool
 
 	CompleteDASetProvider CompleteDASetProvider
 }
@@ -119,11 +112,10 @@ type miningBuildContext struct {
 }
 
 type miningConsensusContext struct {
-	blockMTP        uint64
-	chainID         [32]byte
-	coreExtProfiles consensus.CoreExtProfileProvider
-	rotation        consensus.RotationProvider
-	registry        *consensus.SuiteRegistry
+	blockMTP uint64
+	chainID  [32]byte
+	rotation consensus.RotationProvider
+	registry *consensus.SuiteRegistry
 }
 
 type miningChainStateSnapshot struct {
@@ -148,7 +140,7 @@ func DefaultMinerConfig() MinerConfig {
 		PolicyDaSurchargePerByte:             0,                                    // controller-tunable; disabled by default
 		MinDaFeeRate:                         DefaultMinDaFeeRate,                  // Stage C spec-side per-byte DA floor
 		CurrentMempoolMinFeeRate:             DefaultMempoolMinFeeRate,             // baseline for the rolling floor when no live mempool is bound
-		PolicyRejectCoreExtPreActivation:     true,
+		PolicyRejectSimplicityPreActivation:  true,
 	}
 }
 
@@ -242,10 +234,13 @@ func (m *Miner) buildBlock(ctx context.Context, txs [][]byte) ([]byte, []uint64,
 }
 
 func (m *Miner) buildContext(txs [][]byte) (miningBuildContext, error) {
-	state, err := m.snapshotBuildContextState()
+	copyPolicyUtxos := len(txs) != 0 || m.cfg.CompleteDASetProvider != nil ||
+		(m.maxSelectedTransactions() > 0 && m.sync != nil && m.sync.mempool != nil && m.sync.mempool.Len() > 0)
+	state, err := m.snapshotBuildContextState(copyPolicyUtxos)
 	if err != nil {
 		return miningBuildContext{}, err
 	}
+	candidateTxs := m.candidateTransactions(txs)
 	nextHeight, expectedPrev, err := nextBlockContextFromFields(state.hasTip, state.height, state.tipHash)
 	if err != nil {
 		return miningBuildContext{}, err
@@ -264,11 +259,11 @@ func (m *Miner) buildContext(txs [][]byte) (miningBuildContext, error) {
 		remainingWeight:  remainingWeight,
 		alreadyGenerated: state.alreadyGenerated,
 		utxos:            state.utxos,
-		candidateTxs:     m.candidateTransactions(txs),
+		candidateTxs:     candidateTxs,
 	}, nil
 }
 
-func (m *Miner) snapshotBuildContextState() (miningChainStateSnapshot, error) {
+func (m *Miner) snapshotBuildContextState(copyPolicyUtxos bool) (miningChainStateSnapshot, error) {
 	if m == nil || m.chainState == nil {
 		return miningChainStateSnapshot{}, errors.New("nil chainstate")
 	}
@@ -282,7 +277,7 @@ func (m *Miner) snapshotBuildContextState() (miningChainStateSnapshot, error) {
 		tipHash:          state.TipHash,
 		alreadyGenerated: state.AlreadyGenerated,
 	}
-	if m.policyNeedsReadonlyUtxoSnapshot() {
+	if copyPolicyUtxos {
 		snapshot.utxos = copyUtxoSet(state.Utxos)
 	}
 	return snapshot, nil
@@ -308,23 +303,6 @@ func (m *Miner) maxSelectedTransactions() int {
 		return 0
 	}
 	return maxSelected
-}
-
-func (m *Miner) policyNeedsReadonlyUtxoSnapshot() bool {
-	if m == nil {
-		return false
-	}
-	if m.cfg.PolicyRejectCoreExtPreActivation {
-		return true
-	}
-	if m.cfg.CompleteDASetProvider != nil {
-		return true
-	}
-	// DA anti-abuse policy always runs RejectDaAnchorTxPolicy to account for
-	// per-template DA bytes, even when the surcharge floor is disabled. Keep
-	// a readonly snapshot available for that path so custom configs cannot
-	// accidentally call into policy with a nil UTXO map.
-	return m.cfg.PolicyDaAnchorAntiAbuse
 }
 
 func (m *Miner) remainingWeightBudget(nextHeight uint64, alreadyGenerated uint64) (uint64, error) {
@@ -422,16 +400,21 @@ func compactSizeLenForMiner(n uint64) uint64 {
 
 func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, remainingWeight uint64) ([]minedCandidate, error) {
 	maxSelected := m.maxSelectedTransactions()
+	validationCtx, err := m.providerConsensusContext(nextHeight)
+	if err != nil {
+		return nil, err
+	}
 	parsed := make([]minedCandidate, 0, min(len(candidateTxs), maxSelected))
 	var selectedWeight uint64
 	var policyDaIncluded uint64
 	selectedNonces := make(map[uint64]struct{}, maxSelected)
 	selectedInputs := make(map[consensus.Outpoint]struct{}, maxSelected)
+flatCandidates:
 	for _, raw := range candidateTxs {
 		if len(parsed) >= maxSelected {
 			break
 		}
-		candidate, nextDaIncluded, ok, err := m.trySelectFlatCandidate(raw, utxos, nextHeight, selectedWeight, remainingWeight, policyDaIncluded)
+		candidate, nextDaIncluded, ok, err := m.trySelectFlatCandidate(raw, utxos, nextHeight, selectedWeight, remainingWeight, policyDaIncluded, validationCtx)
 		if err != nil {
 			return nil, err
 		}
@@ -441,6 +424,11 @@ func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[con
 			}
 			if _, exists := selectedNonces[candidate.minedCandidate.nonce]; exists {
 				continue
+			}
+			for _, input := range candidate.tx.Inputs {
+				if _, exists := selectedInputs[consensus.Outpoint{Txid: input.PrevTxid, Vout: input.PrevVout}]; exists {
+					continue flatCandidates
+				}
 			}
 			selectedWeight += candidate.minedCandidate.weight
 			policyDaIncluded = nextDaIncluded
@@ -454,10 +442,6 @@ func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[con
 	if m.cfg.CompleteDASetProvider == nil || maxSelected == 0 ||
 		len(parsed) >= maxSelected || selectedWeight >= remainingWeight {
 		return parsed, nil
-	}
-	validationCtx, err := m.providerConsensusContext(nextHeight)
-	if err != nil {
-		return nil, err
 	}
 	providerDaIncluded := uint64(0)
 	selectedDAIDs := make(map[[32]byte]struct{})
@@ -522,7 +506,6 @@ func (m *Miner) providerConsensusContext(nextHeight uint64) (miningConsensusCont
 	}
 	if m.sync != nil {
 		ctx.chainID = m.sync.cfg.ChainID
-		ctx.coreExtProfiles = m.sync.cfg.CoreExtProfiles
 		ctx.rotation = m.sync.cfg.RotationProvider
 		ctx.registry = m.sync.cfg.SuiteRegistry
 	}
@@ -661,7 +644,7 @@ func validateCompleteDASetGroupConsensus(group []miningCandidate, utxos map[cons
 			nextHeight,
 			validationCtx.blockMTP,
 			validationCtx.chainID,
-			validationCtx.coreExtProfiles,
+			nil,
 			validationCtx.rotation,
 			validationCtx.registry,
 		); err != nil {
@@ -671,7 +654,7 @@ func validateCompleteDASetGroupConsensus(group []miningCandidate, utxos map[cons
 	return true
 }
 
-func (m *Miner) trySelectFlatCandidate(raw []byte, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, selectedWeight uint64, remainingWeight uint64, policyDaIncluded uint64) (miningCandidate, uint64, bool, error) {
+func (m *Miner) trySelectFlatCandidate(raw []byte, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, selectedWeight uint64, remainingWeight uint64, policyDaIncluded uint64, validationCtx miningConsensusContext) (miningCandidate, uint64, bool, error) {
 	candidate, err := m.parseMiningCandidate(raw)
 	if err != nil {
 		return miningCandidate{}, policyDaIncluded, false, err
@@ -688,6 +671,13 @@ func (m *Miner) trySelectFlatCandidate(raw []byte, utxos map[consensus.Outpoint]
 	}
 	availableWeight := remainingWeight - selectedWeight
 	if candidate.minedCandidate.weight > availableWeight {
+		return miningCandidate{}, policyDaIncluded, false, nil
+	}
+	workUtxos, err := policyInputSnapshot(candidate.tx, utxos)
+	if err != nil {
+		return miningCandidate{}, policyDaIncluded, false, nil
+	}
+	if _, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(candidate.minedCandidate.raw, candidate.tx, candidate.minedCandidate.txid, candidate.minedCandidate.wtxid, workUtxos, nextHeight, validationCtx.blockMTP, validationCtx.chainID, nil, validationCtx.rotation, validationCtx.registry); err != nil {
 		return miningCandidate{}, policyDaIncluded, false, nil
 	}
 	return candidate, nextDaIncluded, true, nil
@@ -743,8 +733,12 @@ func (m *Miner) rejectCandidate(tx *consensus.Tx, utxos map[consensus.Outpoint]c
 		}
 	}
 
-	// Apply CoreExt policy
-	reject, err = m.rejectCandidateCoreExtPolicy(tx, utxos, nextHeight)
+	if reject, _ := rejectUnsupportedCoreExtNodeRuntime(tx, utxos); reject {
+		return true, policyDaIncluded, nil
+	}
+
+	// Apply Simplicity policy
+	reject, err = m.rejectCandidateSimplicityPolicy(tx, utxos, nextHeight)
 	if err != nil {
 		return false, policyDaIncluded, err
 	}
