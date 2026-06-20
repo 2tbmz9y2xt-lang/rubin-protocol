@@ -3,7 +3,7 @@
 
   Q-FORMAL-CORE-EXT-01: Proves properties about CORE_EXT activation
   transitions, deterministic error-priority mapping, and duplicate
-  ACTIVE profile rejection. Maps back to CV-EXT-* fixture families.
+  ACTIVE profile rejection.
 -/
 import RubinFormal.CriticalInvariants
 

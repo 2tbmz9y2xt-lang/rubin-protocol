@@ -47,6 +47,25 @@ def is_retired_gate(gate: str) -> bool:
     return gate in RETIRED_GATES
 
 
+def known_gate_names(fixtures: List[Dict[str, Any]]) -> Set[str]:
+    gates = {str(f.get("gate")) for f in fixtures if f.get("gate")}
+    return gates | set(RETIRED_GATES)
+
+
+def select_requested_fixtures(
+    fixtures: List[Dict[str, Any]],
+    requested: Optional[List[str]],
+) -> Tuple[List[Dict[str, Any]], Set[str], List[str]]:
+    requested_gates = set(requested or [])
+    if not requested_gates:
+        return fixtures, set(), []
+
+    unknown_gates = sorted(requested_gates - known_gate_names(fixtures))
+    selected = [f for f in fixtures if f.get("gate") in requested_gates]
+    requested_retired_gates = requested_gates & set(RETIRED_GATES)
+    return selected, requested_retired_gates, unknown_gates
+
+
 def normalized_vector_op(gate: str, vector: Dict[str, Any]) -> Optional[str]:
     op = vector.get("op")
     stripped = op.strip() if isinstance(op, str) else op
@@ -2593,15 +2612,21 @@ def main() -> int:
     if args.list_gates:
         for g in gates:
             print(g)
+        for g in sorted(set(RETIRED_GATES) - set(gates)):
+            print(g)
         return 0
 
-    only = set(args.only_gates or [])
-    if only:
-        fixtures = [f for f in fixtures if f["gate"] in only]
+    fixtures, requested_retired_gates, unknown_gates = select_requested_fixtures(
+        fixtures,
+        args.only_gates,
+    )
+    if unknown_gates:
+        print(f"FAIL unknown gate(s): {', '.join(unknown_gates)}")
+        return 1
 
     active_fixtures: List[Dict[str, Any]] = []
     retired_vectors = 0
-    retired_gates: Set[str] = set()
+    retired_gates: Set[str] = set(requested_retired_gates)
     for f in fixtures:
         gate = f["gate"]
         if is_retired_gate(gate):
@@ -2644,7 +2669,7 @@ def main() -> int:
     suffixes: List[str] = []
     if skipped:
         suffixes.append(f"skipped {skipped} vectors")
-    if retired_vectors:
+    if retired_gates:
         gates_str = ", ".join(sorted(retired_gates))
         suffixes.append(f"retired gates skipped: {gates_str} ({retired_vectors} vectors)")
     if suffixes:

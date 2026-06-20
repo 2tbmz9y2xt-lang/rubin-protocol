@@ -11,6 +11,9 @@ Policy:
 
 ---
 
+## 2026-06-20 — Retire CORE_EXT retired fixture files (RUB-515)
+Reason/tools/fixtures/non-goals: delete retired `CV-EXT.json` and `CV-TXCTX.json` after the active runner lanes stopped executing them; replace the remaining positive `CV-U-EXT-01..02` active-gate rows with negative 0x0102 malformed-shape rejects so `CV-UTXO-BASIC.json` no longer asserts ACTIVE CORE_EXT/TXCTX semantics. Changed fixtures: `CV-UTXO-BASIC.json`, deleted `CV-EXT.json`, deleted `CV-TXCTX.json`; `conformance/MATRIX.md` regenerated with `python3 tools/gen_conformance_matrix.py`; generated Lean UTXO companion and Go trace/refinement artifacts regenerated; stale `CV-EXT`/`CV-TXCTX` Lean companions/imports removed; `run_cv_bundle.py --only-gates` now reports deleted retired gates explicitly. No client code, CI lane/check-script, Rust parity, spec prose, or SECTION_HASHES changes.
+
 ## 2026-06-20 — Retire CORE_EXT active-profile UTXO vectors (RUB-511)
 Reason/tools/fixtures/non-goals: remove only `CV-U-EXT-04..05` from active `CV-UTXO-BASIC` replay coverage because the Go CORE_EXT profile/provider runtime is retired in this slice; dormant CORE_EXT shape vectors `CV-U-EXT-01..03` and genesis vectors `CV-COV-16..17` stay active for Go/Rust pre-ACTIVE parity. Changed fixture: `CV-UTXO-BASIC.json`; manual fixture edit, `EDGE_PACK_BASELINE.json`, `conformance/MATRIX.md` via `python3 tools/gen_conformance_matrix.py`, generated Lean conformance vectors via `tools/formal/gen_lean_conformance_vectors.py`, and Go trace/refinement via `clients/go/cmd/formal-trace` plus `tools/formal/gen_lean_refinement_from_traces.py`. Rust client code, `CV-EXT`/`CV-TXCTX` retired gates, canonical spec, and new CORE_EXT semantics are not changed.
 

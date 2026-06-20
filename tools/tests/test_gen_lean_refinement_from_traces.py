@@ -5,7 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.formal.gen_lean_refinement_from_traces import _load_fixture_vector_ids, _require_exact_trace_ids
+from tools.formal.gen_lean_refinement_from_traces import (
+    Header,
+    _emit_go_trace_v1,
+    _load_fixture_vector_ids,
+    _require_exact_trace_ids,
+)
 
 
 class GoTraceV1GeneratorTests(unittest.TestCase):
@@ -54,6 +59,47 @@ class GoTraceV1GeneratorTests(unittest.TestCase):
                 _load_fixture_vector_ids(fixture, "CV-SIMPLICITY-EXEC")
 
         self.assertIn("duplicate vector id CV-SE-001", str(ctx.exception))
+
+    def test_core_ext_utxo_negative_trace_rows_are_emitted(self) -> None:
+        text = _emit_go_trace_v1(
+            Header(
+                repo_commit="test",
+                fixtures_digest_sha3_256="00",
+            ),
+            [
+                {
+                    "type": "entry",
+                    "gate": "CV-UTXO-BASIC",
+                    "vector_id": "CV-U-EXT-NEG",
+                    "op": "utxo_apply_basic",
+                    "ok": False,
+                    "err": "TX_ERR_COVENANT_TYPE_INVALID",
+                    "outputs": {},
+                },
+                {
+                    "type": "entry",
+                    "gate": "CV-UTXO-BASIC",
+                    "vector_id": "CV-U-NEG",
+                    "op": "utxo_apply_basic",
+                    "ok": False,
+                    "err": "TX_ERR_PARSE",
+                    "outputs": {},
+                },
+                {
+                    "type": "entry",
+                    "gate": "CV-PARSE",
+                    "vector_id": "CV-PARSE-NEG",
+                    "op": "parse_tx",
+                    "ok": False,
+                    "err": "TX_ERR_PARSE",
+                    "outputs": {},
+                },
+            ],
+        )
+
+        self.assertIn('{ id := "CV-U-EXT-NEG", ok := false', text)
+        self.assertNotIn("CV-U-NEG", text)
+        self.assertNotIn("CV-PARSE-NEG", text)
 
 
 if __name__ == "__main__":
