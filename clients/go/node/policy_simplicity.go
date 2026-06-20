@@ -6,8 +6,6 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-const removedCoreExtCovenantType uint16 = 0x0102
-
 func rejectCoreSimplicityPreActivation(
 	tx *consensus.Tx,
 	utxos map[consensus.Outpoint]consensus.UtxoEntry,
@@ -42,7 +40,7 @@ func rejectUnsupportedCoreExtNodeRuntime(
 	tx *consensus.Tx,
 	utxos map[consensus.Outpoint]consensus.UtxoEntry,
 ) (reject bool, reason string) {
-	if kind := covenantPolicyKind(tx, utxos, removedCoreExtCovenantType); kind != "" {
+	if kind := covenantPolicyKind(tx, utxos, consensus.COV_TYPE_CORE_EXT); kind != "" {
 		return true, fmt.Sprintf("CORE_EXT %s unsupported by Go node runtime", kind)
 	}
 	if tx != nil && utxos == nil && len(tx.Inputs) > 0 {
