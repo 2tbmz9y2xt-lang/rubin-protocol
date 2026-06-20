@@ -140,48 +140,6 @@ func FuzzFlagDayHelpers(f *testing.F) {
 	})
 }
 
-func FuzzGovernanceReplayToken(f *testing.F) {
-	f.Add(uint16(7), uint64(1), uint64(100), uint64(50), uint16(7), uint64(100), uint64(1), []byte{})
-	f.Add(uint16(7), uint64(1), uint64(100), uint64(1), uint16(7), uint64(101), uint64(1), make([]byte, 10))
-	f.Add(uint16(7), uint64(0), uint64(100), uint64(25), uint16(7), uint64(110), uint64(0), bytes.Repeat([]byte{0xAA}, governanceReplayTokenBytes))
-
-	f.Fuzz(func(t *testing.T, extID uint16, nonce uint64, issuedAtHeight uint64, validityWindow uint64, expectedExtID uint16, currentHeight uint64, expectedNonce uint64, raw []byte) {
-		if len(raw) > 256 {
-			return
-		}
-
-		token := IssueGovernanceReplayToken(extID, nonce, issuedAtHeight, validityWindow)
-		encoded := token.ToBytes()
-		if len(encoded) != governanceReplayTokenBytes {
-			t.Fatalf("encoded len=%d", len(encoded))
-		}
-		decoded, err := GovernanceReplayTokenFromBytes(encoded)
-		if err != nil {
-			t.Fatalf("roundtrip decode: %v", err)
-		}
-		if decoded != token {
-			t.Fatalf("roundtrip mismatch: got=%+v want=%+v", decoded, token)
-		}
-
-		err1 := token.Validate(expectedExtID, currentHeight, expectedNonce)
-		err2 := decoded.Validate(expectedExtID, currentHeight, expectedNonce)
-		if (err1 == nil) != (err2 == nil) {
-			t.Fatalf("validation mismatch: %v vs %v", err1, err2)
-		}
-		if err1 != nil && err1.Error() != err2.Error() {
-			t.Fatalf("validation text mismatch: %q vs %q", err1, err2)
-		}
-
-		decodedRaw, rawErr := GovernanceReplayTokenFromBytes(raw)
-		if rawErr == nil {
-			reencoded := decodedRaw.ToBytes()
-			if !bytes.Equal(reencoded, raw) {
-				t.Fatalf("non-canonical roundtrip for raw token")
-			}
-		}
-	})
-}
-
 func stringsJoin(items []string) string {
 	if len(items) == 0 {
 		return ""

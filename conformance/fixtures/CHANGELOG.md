@@ -11,6 +11,9 @@ Policy:
 
 ---
 
+## 2026-06-20 — Retire CORE_EXT active-profile UTXO vectors (RUB-511)
+Reason/tools/fixtures/non-goals: remove only `CV-U-EXT-04..05` from active `CV-UTXO-BASIC` replay coverage because the Go CORE_EXT profile/provider runtime is retired in this slice; dormant CORE_EXT shape vectors `CV-U-EXT-01..03` and genesis vectors `CV-COV-16..17` stay active for Go/Rust pre-ACTIVE parity. Changed fixture: `CV-UTXO-BASIC.json`; manual fixture edit, `EDGE_PACK_BASELINE.json`, `conformance/MATRIX.md` via `python3 tools/gen_conformance_matrix.py`, generated Lean conformance vectors via `tools/formal/gen_lean_conformance_vectors.py`, and Go trace/refinement via `clients/go/cmd/formal-trace` plus `tools/formal/gen_lean_refinement_from_traces.py`. Rust client code, `CV-EXT`/`CV-TXCTX` retired gates, canonical spec, and new CORE_EXT semantics are not changed.
+
 ## 2026-06-19 — Native rotation Go/docs coverage follow-up (RUB-508)
 Причина/инструменты/fixtures/non-goals: закрыть Go/docs-achievable хвосты RUB-507 native-rotation audit без изменения consensus semantics; ручное добавление exact create-set output rows через уже существующий `rotation_native_create_suites` op, исправление stale accepted-row `expect_err` metadata и допин reject error metadata; runner normalization для уже существующего `suite_ids` response shape; `python3 tools/gen_conformance_matrix.py` для matrix readback; generated Go trace/refinement digest sync через `clients/go/cmd/formal-trace` и `tools/formal/gen_lean_refinement_from_traces.py`; изменены `CV-NATIVE-ROTATION-CREATE.json`, `CV-NATIVE-ROTATION-CUTOFF.json`, `CV-NATIVE-ROTATION-SPEND.json`, `CV-NATIVE-ROTATION-SUNSET.json`, `MATRIX.md`, `rubin-formal/traces/go_trace_v1.jsonl` и `rubin-formal/RubinFormal/Refinement/GoTraceV1.lean`; Go/Rust client code, new runner ops, production activation schedule, governance artifacts, Rust parity work, formal proof logic/coverage claims и end-to-end spend harness не затронуты.
 

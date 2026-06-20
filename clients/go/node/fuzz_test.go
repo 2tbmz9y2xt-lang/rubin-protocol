@@ -288,15 +288,12 @@ func fuzzCheckedDaPolicyTx(
 	checked, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 		txBytes,
 		tx,
-		txid,
-		wtxid,
+		consensus.ParsedTxIDs{TxID: txid, WTxID: wtxid},
 		fuzzCloneUtxos(utxos),
 		101,
 		0,
 		devnetGenesisChainID,
-		nil,
-		nil,
-		nil,
+		consensus.SuiteValidationContext{},
 	)
 	if err != nil {
 		t.Fatalf("CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(signed fuzz tx): %v", err)

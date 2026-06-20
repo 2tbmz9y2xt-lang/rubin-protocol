@@ -6,60 +6,7 @@ import (
 	"testing"
 )
 
-func TestCoverage_ParseCoreExtCovenantData(t *testing.T) {
-	t.Run("too short", func(t *testing.T) {
-		if _, err := ParseCoreExtCovenantData([]byte{0x01}); err == nil {
-			t.Fatalf("expected error")
-		}
-	})
-
-	t.Run("payload overflow int", func(t *testing.T) {
-		tooBig := []byte{0x01, 0x00, 0xff}
-		for i := 0; i < 7; i++ {
-			tooBig = append(tooBig, 0xff)
-		}
-		if _, err := ParseCoreExtCovenantData(tooBig); err == nil {
-			t.Fatalf("expected overflow error")
-		}
-	})
-
-	t.Run("payload parse failure", func(t *testing.T) {
-		if _, err := ParseCoreExtCovenantData([]byte{0x34, 0x12, 0x04, 0xaa}); err == nil {
-			t.Fatalf("expected payload parse failure")
-		}
-	})
-
-	t.Run("length mismatch", func(t *testing.T) {
-		if _, err := ParseCoreExtCovenantData([]byte{0x34, 0x12, 0x01, 0xaa, 0xbb}); err == nil {
-			t.Fatalf("expected length mismatch")
-		}
-	})
-
-	t.Run("success", func(t *testing.T) {
-		got, err := ParseCoreExtCovenantData([]byte{0x34, 0x12, 0x02, 0xaa, 0xbb})
-		if err != nil {
-			t.Fatalf("ParseCoreExtCovenantData: %v", err)
-		}
-		if got.ExtID != 0x1234 {
-			t.Fatalf("ext_id=%x", got.ExtID)
-		}
-		if len(got.ExtPayload) != 2 || got.ExtPayload[0] != 0xaa || got.ExtPayload[1] != 0xbb {
-			t.Fatalf("unexpected payload=%x", got.ExtPayload)
-		}
-	})
-}
-
 func TestCoverage_HasSuiteAndBigIntToUint64(t *testing.T) {
-	if hasSuite(nil, SUITE_ID_ML_DSA_87) {
-		t.Fatalf("nil allowed set must reject")
-	}
-	if hasSuite(map[uint8]struct{}{}, SUITE_ID_ML_DSA_87) {
-		t.Fatalf("empty allowed set must reject")
-	}
-	if !hasSuite(map[uint8]struct{}{SUITE_ID_ML_DSA_87: {}}, SUITE_ID_ML_DSA_87) {
-		t.Fatalf("expected suite present")
-	}
-
 	if got, err := bigIntToUint64(nil); err != nil || got != 0 {
 		t.Fatalf("bigIntToUint64(nil)=%d,%v want 0,nil", got, err)
 	}
@@ -256,6 +203,36 @@ func TestCoverage_NilCovenantDataUsesGenericMalformedContext(t *testing.T) {
 		t.Run(tc.name+"/empty", func(t *testing.T) {
 			assertTxErrCodeMsg(t, tc.parse([]byte{}), tc.code, tc.message)
 		})
+	}
+}
+
+func TestCoverage_CoreExtRetirementAndValueContextBranches(t *testing.T) {
+	entry := wcCoreExtEntry(1, 1)
+	good := nonCoinbaseResolvedInput{entry: entry, witness: []WitnessItem{{}}}
+	if err := (&nonCoinbaseApplyContext{}).validateInputSpend(0, good); err != nil {
+		t.Fatalf("validateInputSpend(CORE_EXT): %v", err)
+	}
+	bad := good
+	bad.witness = nil
+	assertTxErrCodeMsg(t, (&nonCoinbaseApplyContext{}).validateInputSpend(0, bad), TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
+	check := txInputSpendCheck{entry: entry, assigned: []WitnessItem{{}}}
+	if err := validateInputSpendQ(check, txValidationWorkerEnv{}); err != nil {
+		t.Fatalf("validateInputSpendQ(CORE_EXT): %v", err)
+	}
+	check.assigned = nil
+	assertTxErrCodeMsg(t, validateInputSpendQ(check, txValidationWorkerEnv{}), TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
+	check.assigned = []WitnessItem{{}}
+	check.entry.CovenantData = []byte{0x01}
+	assertTxErrCodeMsg(t, validateInputSpendQ(check, txValidationWorkerEnv{}), TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT covenant_data too short")
+	if got := CheckValueConservationTxWide(nil, false, Uint128{}); got == nil || got.Code != TX_ERR_PARSE {
+		t.Fatalf("nil txcontext base code=%v, want %s", got, TX_ERR_PARSE)
+	}
+	max := u128{lo: ^uint64(0), hi: ^uint64(0)}
+	if _, err := sumTxContextInputValues([]UtxoEntry{{Value: 1}}, max); err == nil {
+		t.Fatalf("expected input total overflow")
+	}
+	if _, err := sumTxContextOutputValues([]TxOutput{{Value: 1}}, max); err == nil {
+		t.Fatalf("expected output total overflow")
 	}
 }
 

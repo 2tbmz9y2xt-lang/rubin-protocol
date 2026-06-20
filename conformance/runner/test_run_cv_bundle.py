@@ -27,6 +27,19 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
         self.assertTrue(is_retired_gate("CV-TXCTX"))
         self.assertFalse(is_retired_gate("CV-UTXO-BASIC"))
 
+    def test_active_utxo_apply_basic_rejects_core_ext_profiles(self):
+        vector = {"id": "CV-U-EXT-ACTIVE", "op": "utxo_apply_basic", "tx_hex": "00", "utxos": [],
+                  "height": 1, "block_timestamp": 1, "core_ext_profiles": [{"ext_id": 1}]}
+        with mock.patch(f"{validate_vector.__module__}.call_tool") as call_tool:
+            problems, skipped = normalize_validation_result(
+                validate_vector("CV-UTXO-BASIC", vector, Path("go-cli"), Path("rust-cli"), {})
+            )
+
+        self.assertEqual((problems, skipped), ([
+            "CV-UTXO-BASIC/CV-U-EXT-ACTIVE: core_ext_profiles retired from active utxo_apply_basic gates"
+        ], False))
+        call_tool.assert_not_called()
+
     def test_whitespace_only_op_is_preserved_for_validation_error(self):
         op = normalized_vector_op("CV-OTHER", {"id": "X", "op": "   "})
         self.assertEqual(op, "   ")

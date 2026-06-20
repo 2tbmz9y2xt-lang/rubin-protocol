@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 )
 
@@ -612,4 +613,21 @@ func TestLoadLiveBindingPolicyRejectsUnsupportedRuntimeBinding(t *testing.T) {
 	if got, want := err.Error(), `live_binding_policy: entries[0]: unsupported runtime_binding "unsupported_runtime_v1"`; got != want {
 		t.Fatalf("err=%q, want %q", got, want)
 	}
+}
+
+func forceLiveBindingPolicyStateForTest(
+	t *testing.T,
+	manifest *liveBindingPolicyManifest,
+	err error,
+) {
+	t.Helper()
+	defaultLiveBindingPolicyCached = manifest
+	defaultLiveBindingPolicyErr = err
+	defaultLiveBindingPolicyOnce = sync.Once{}
+	defaultLiveBindingPolicyOnce.Do(func() {})
+	t.Cleanup(func() {
+		defaultLiveBindingPolicyCached = nil
+		defaultLiveBindingPolicyErr = nil
+		defaultLiveBindingPolicyOnce = sync.Once{}
+	})
 }

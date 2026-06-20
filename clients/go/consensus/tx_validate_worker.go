@@ -26,15 +26,13 @@ type TxValidationResult struct {
 }
 
 type txValidationWorkerEnv struct {
-	chainID         [32]byte
-	blockHeight     uint64
-	blockMTP        uint64
-	sighashCache    *SighashV1PrehashCache
-	coreExtProfiles CoreExtProfileProvider
-	sigQueue        *SigCheckQueue
-	rotation        RotationProvider
-	registry        *SuiteRegistry
-	txContext       *TxContextBundle
+	chainID      [32]byte
+	blockHeight  uint64
+	blockMTP     uint64
+	sighashCache *SighashV1PrehashCache
+	sigQueue     *SigCheckQueue
+	rotation     RotationProvider
+	registry     *SuiteRegistry
 }
 
 type txInputSpendCheck struct {
@@ -61,7 +59,7 @@ func ValidateTxLocal(
 	chainID [32]byte,
 	blockHeight uint64,
 	blockMTP uint64,
-	coreExtProfiles CoreExtProfileProvider,
+	_ any,
 	sigCache *SigCache,
 ) TxValidationResult {
 	result := TxValidationResult{TxIndex: tvc.TxIndex, Fee: tvc.Fee}
@@ -78,14 +76,7 @@ func ValidateTxLocal(
 		result.Err = err
 		return result
 	}
-	env := newTxValidationWorkerEnv(tvc, chainID, blockHeight, blockMTP, coreExtProfiles, sigCache)
-
-	txContext, err := buildWorkerTxContext(tx, tvc.ResolvedInputs, env)
-	if err != nil {
-		result.Err = err
-		return result
-	}
-	env.txContext = txContext
+	env := newTxValidationWorkerEnv(tvc, chainID, blockHeight, blockMTP, sigCache)
 
 	if err := validateTxLocalInputs(tvc, tx, env); err != nil {
 		result.Err = err
@@ -100,42 +91,22 @@ func newTxValidationWorkerEnv(
 	chainID [32]byte,
 	blockHeight uint64,
 	blockMTP uint64,
-	coreExtProfiles CoreExtProfileProvider,
 	sigCache *SigCache,
 ) txValidationWorkerEnv {
-	if coreExtProfiles == nil {
-		coreExtProfiles = EmptyCoreExtProfileProvider()
-	}
 	registry := DefaultSuiteRegistry()
 	sigQueue := NewSigCheckQueue(1).WithRegistry(registry)
 	if sigCache != nil {
 		sigQueue.WithCache(sigCache)
 	}
 	return txValidationWorkerEnv{
-		chainID:         chainID,
-		blockHeight:     blockHeight,
-		blockMTP:        blockMTP,
-		sighashCache:    tvc.SighashCache,
-		coreExtProfiles: coreExtProfiles,
-		sigQueue:        sigQueue,
-		rotation:        DefaultRotationProvider{},
-		registry:        registry,
+		chainID:      chainID,
+		blockHeight:  blockHeight,
+		blockMTP:     blockMTP,
+		sighashCache: tvc.SighashCache,
+		sigQueue:     sigQueue,
+		rotation:     DefaultRotationProvider{},
+		registry:     registry,
 	}
-}
-
-func buildWorkerTxContext(tx *Tx, resolvedInputs []UtxoEntry, env txValidationWorkerEnv) (*TxContextBundle, error) {
-	txContextExtIDs, err := collectTxContextExtIDs(resolvedInputs, env.blockHeight, env.coreExtProfiles)
-	if err != nil {
-		return nil, err
-	}
-	if len(txContextExtIDs) == 0 {
-		return nil, nil
-	}
-	outputExtIDCache, err := BuildTxContextOutputExtIDCache(tx)
-	if err != nil {
-		return nil, err
-	}
-	return BuildTxContext(tx, resolvedInputs, outputExtIDCache, env.blockHeight, env.coreExtProfiles)
 }
 
 func validateTxLocalInputs(tvc TxValidationContext, tx *Tx, env txValidationWorkerEnv) error {
@@ -198,7 +169,11 @@ func validateInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) err
 	case COV_TYPE_HTLC:
 		return validateHTLCInputSpendQ(check, env)
 	case COV_TYPE_CORE_EXT:
-		return validateCoreExtInputSpendQ(check, env)
+		if len(check.assigned) != CORE_EXT_WITNESS_SLOTS {
+			return txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
+		}
+		_, err := ParseCoreExtCovenantData(check.entry.CovenantData)
+		return err
 	case COV_TYPE_CORE_STEALTH:
 		return validateCoreStealthInputSpendQ(check, env)
 	case COV_TYPE_CORE_SIMPLICITY:
@@ -256,13 +231,6 @@ func validateHTLCInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv)
 	)
 }
 
-func validateCoreExtInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
-	if len(check.assigned) != CORE_EXT_WITNESS_SLOTS {
-		return txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
-	}
-	return validateCoreExtSpendQWithEnv(check, check.assigned[0], env)
-}
-
 func validateCoreStealthInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
 	if len(check.assigned) != CORE_STEALTH_WITNESS_SLOTS {
 		return txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
@@ -271,92 +239,6 @@ func validateCoreStealthInputSpendQ(check txInputSpendCheck, env txValidationWor
 		check.entry, check.assigned[0], check.tx, check.inputIndex, check.inputValue,
 		env.chainID, env.blockHeight, env.sighashCache, env.sigQueue, env.rotation, env.registry,
 	)
-}
-
-// validateCoreExtSpendQ is the queue-aware CORE_EXT spend validator, extracted
-// from the inline logic in applyNonCoinbaseTxBasicWorkQ. ML-DSA-87 signatures
-// are deferred to sigQueue; external verifiers (non-ML-DSA suites) are called
-// inline because they may not be thread-safe.
-func validateCoreExtSpendQ(
-	entry UtxoEntry,
-	w WitnessItem,
-	tx *Tx,
-	inputIndex uint32,
-	inputValue uint64,
-	args ...any,
-) error {
-	if len(args) != 8 {
-		return txerr(TX_ERR_PARSE, "CORE_EXT validator argument count mismatch")
-	}
-	env, err := func() (env txValidationWorkerEnv, err error) {
-		defer func() {
-			if recover() != nil {
-				err = txerr(TX_ERR_PARSE, "CORE_EXT validator argument type mismatch")
-			}
-		}()
-		return txValidationWorkerEnv{
-			chainID:         args[0].([32]byte),
-			blockHeight:     args[1].(uint64),
-			sighashCache:    typedArgOrZero[*SighashV1PrehashCache](args[2]),
-			coreExtProfiles: typedArgOrZero[CoreExtProfileProvider](args[3]),
-			sigQueue:        typedArgOrZero[*SigCheckQueue](args[4]),
-			rotation:        typedArgOrZero[RotationProvider](args[5]),
-			registry:        typedArgOrZero[*SuiteRegistry](args[6]),
-			txContext:       typedArgOrZero[*TxContextBundle](args[7]),
-		}, nil
-	}()
-	if err != nil {
-		return err
-	}
-	check := txInputSpendCheck{
-		entry:      entry,
-		assigned:   []WitnessItem{w},
-		tx:         tx,
-		inputIndex: inputIndex,
-		inputValue: inputValue,
-	}
-	return validateCoreExtSpendQWithEnv(check, w, env)
-}
-
-func typedArgOrZero[T any](v any) T {
-	if v == nil {
-		var zero T
-		return zero
-	}
-	return v.(T)
-}
-
-func validateCoreExtSpendQWithEnv(check txInputSpendCheck, w WitnessItem, env txValidationWorkerEnv) error {
-	cd, err := ParseCoreExtCovenantData(check.entry.CovenantData)
-	if err != nil {
-		return err
-	}
-	if env.coreExtProfiles == nil {
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile provider missing")
-	}
-	profile, ok, err := env.coreExtProfiles.LookupCoreExtProfile(cd.ExtID, env.blockHeight)
-	switch {
-	case err != nil:
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
-	case !ok || !profile.Active:
-		return nil
-	default:
-		return validateCoreExtWitnessAtHeight(coreExtWitnessValidation{
-			cd:           cd,
-			profile:      profile,
-			w:            w,
-			tx:           check.tx,
-			inputIndex:   check.inputIndex,
-			inputValue:   check.inputValue,
-			chainID:      env.chainID,
-			blockHeight:  env.blockHeight,
-			sighashCache: env.sighashCache,
-			rotation:     env.rotation,
-			registry:     env.registry,
-			txContext:    env.txContext,
-			sigQueue:     env.sigQueue,
-		})
-	}
 }
 
 // RunTxValidationWorkers validates multiple transactions in parallel using
@@ -370,11 +252,11 @@ func RunTxValidationWorkers(
 	chainID [32]byte,
 	blockHeight uint64,
 	blockMTP uint64,
-	coreExtProfiles CoreExtProfileProvider,
+	_ any,
 	sigCache *SigCache,
 ) ([]WorkerResult[TxValidationResult], error) {
 	return RunFunc(ctx, maxWorkers, len(txcs), txcs, func(ctx context.Context, tvc TxValidationContext) (TxValidationResult, error) {
-		r := ValidateTxLocal(tvc, chainID, blockHeight, blockMTP, coreExtProfiles, sigCache)
+		r := ValidateTxLocal(tvc, chainID, blockHeight, blockMTP, nil, sigCache)
 		if r.Err != nil {
 			return r, r.Err
 		}

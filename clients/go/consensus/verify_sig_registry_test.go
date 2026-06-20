@@ -245,31 +245,23 @@ func TestVerifySigWithRegistry_NilRegistry_VerifyCostDriftFailsClosed(t *testing
 	assertDefaultRuntimeRegistryDriftError(t, err)
 }
 
-func TestResolveSuiteVerifierBinding_MatchesCanonicalOpenSSLDescriptor(t *testing.T) {
+func TestResolveSuiteVerifierBinding_MatchesCanonicalRuntimeParams(t *testing.T) {
 	params := canonicalDefaultRuntimeSuiteParams()
 	binding, err := resolveSuiteVerifierBinding(params.AlgName, params.PubkeyLen, params.SigLen)
 	if err != nil {
 		t.Fatalf("resolveSuiteVerifierBinding: %v", err)
 	}
-	raw, err := CoreExtOpenSSLDigest32BindingDescriptorBytes(params.AlgName, params.PubkeyLen, params.SigLen)
-	if err != nil {
-		t.Fatalf("CoreExtOpenSSLDigest32BindingDescriptorBytes: %v", err)
-	}
-	desc, err := ParseCoreExtOpenSSLDigest32BindingDescriptor(raw)
-	if err != nil {
-		t.Fatalf("ParseCoreExtOpenSSLDigest32BindingDescriptor: %v", err)
-	}
 	if binding.kind != suiteVerifierBindingOpenSSLDigest32V1 {
 		t.Fatalf("binding.kind=%v, want %v", binding.kind, suiteVerifierBindingOpenSSLDigest32V1)
 	}
-	if binding.opensslAlg != desc.OpenSSLAlg {
-		t.Fatalf("binding.opensslAlg=%q, want %q", binding.opensslAlg, desc.OpenSSLAlg)
+	if binding.opensslAlg != "ML-DSA-87" {
+		t.Fatalf("binding.opensslAlg=%q, want %q", binding.opensslAlg, "ML-DSA-87")
 	}
-	if binding.pubkeyLen != desc.PubkeyLen {
-		t.Fatalf("binding.pubkeyLen=%d, want %d", binding.pubkeyLen, desc.PubkeyLen)
+	if binding.pubkeyLen != params.PubkeyLen {
+		t.Fatalf("binding.pubkeyLen=%d, want %d", binding.pubkeyLen, params.PubkeyLen)
 	}
-	if binding.sigLen != desc.SigLen {
-		t.Fatalf("binding.sigLen=%d, want %d", binding.sigLen, desc.SigLen)
+	if binding.sigLen != params.SigLen {
+		t.Fatalf("binding.sigLen=%d, want %d", binding.sigLen, params.SigLen)
 	}
 }
 

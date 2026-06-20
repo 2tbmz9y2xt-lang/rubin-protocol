@@ -193,22 +193,3 @@ func FuzzParseStealthCovenantData(f *testing.F) {
 		}
 	})
 }
-
-func FuzzParseCoreExtCovenantData(f *testing.F) {
-	f.Add([]byte{0x01})
-	f.Add([]byte{0x34, 0x12, 0x00})
-	f.Add(coreExtCovenantData(0x1234, []byte{0xAA, 0xBB, 0xCC}))
-	f.Add([]byte{0x34, 0x12, 0x02, 0xAA})
-
-	f.Fuzz(func(t *testing.T, covenantData []byte) {
-		got, err := ParseCoreExtCovenantData(covenantData)
-		if err != nil {
-			return
-		}
-
-		canonical := coreExtCovenantData(got.ExtID, got.ExtPayload)
-		if !bytes.Equal(canonical, covenantData) {
-			t.Fatalf("non-canonical or non-roundtripping CORE_EXT covenant data")
-		}
-	})
-}

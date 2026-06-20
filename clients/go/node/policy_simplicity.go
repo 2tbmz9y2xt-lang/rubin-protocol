@@ -43,7 +43,7 @@ func rejectUnsupportedCoreExtNodeRuntime(
 	if kind := covenantPolicyKind(tx, utxos, consensus.COV_TYPE_CORE_EXT); kind != "" {
 		return true, fmt.Sprintf("CORE_EXT %s unsupported by Go node runtime", kind)
 	}
-	if utxos == nil && len(tx.Inputs) > 0 {
+	if tx != nil && utxos == nil && len(tx.Inputs) > 0 {
 		return true, "input snapshot unavailable for CORE_EXT unsupported policy"
 	}
 	return false, ""

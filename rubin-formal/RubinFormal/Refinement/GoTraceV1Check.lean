@@ -71,10 +71,6 @@ private def isKnownUtxoOkDrift (id gotErr : String) : Bool :=
       id == "CV-U-19"
     )
 
-private def isKnownUtxoAcceptDrift (id expectedErr : String) : Bool :=
-  id == "CV-U-EXT-04" &&
-  expectedErr == "TX_ERR_SIG_ALG_INVALID"
-
 private def checkParse (o : ParseOut) : Bool :=
   match findById? o.id RubinFormal.Conformance.cvParseVectors (fun v => v.id) with
   | none => false
@@ -192,7 +188,7 @@ private def checkUtxoBasic (o : UtxoBasicOut) : Bool :=
               if o.ok then
                 (o.fee == some fee) && (o.utxoCount == some utxoCount)
               else
-                isKnownUtxoAcceptDrift o.id o.err
+                false
           | .error e =>
               if o.ok then
                 isKnownUtxoOkDrift o.id e

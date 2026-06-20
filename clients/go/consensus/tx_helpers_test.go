@@ -293,15 +293,12 @@ func TestCheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext
 	_, err := CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 		nil,
 		nil,
-		[32]byte{},
-		[32]byte{},
+		ParsedTxIDs{},
 		map[Outpoint]UtxoEntry{},
 		1,
 		0,
 		[32]byte{},
-		nil,
-		nil,
-		nil,
+		SuiteValidationContext{},
 	)
 	if err == nil {
 		t.Fatal("expected nil tx error")
@@ -361,15 +358,12 @@ func TestCheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext
 	checked, err := CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 		txBytes,
 		parsed,
-		txid,
-		wtxid,
+		ParsedTxIDs{TxID: txid, WTxID: wtxid},
 		copyTestUtxoSet(utxoSet),
 		200,
 		0,
 		chainID,
-		nil,
-		nil,
-		nil,
+		SuiteValidationContext{},
 	)
 	if err != nil {
 		t.Fatalf("CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext: %v", err)

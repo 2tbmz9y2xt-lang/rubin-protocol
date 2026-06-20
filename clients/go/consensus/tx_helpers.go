@@ -22,6 +22,16 @@ type CheckedTransaction struct {
 	SerializedSize int
 }
 
+type ParsedTxIDs struct {
+	TxID  [32]byte
+	WTxID [32]byte
+}
+
+type SuiteValidationContext struct {
+	Rotation RotationProvider
+	Registry *SuiteRegistry
+}
+
 func P2PKCovenantDataForPubkey(pub []byte) []byte {
 	keyID := sha3_256(pub)
 	out := make([]byte, MAX_P2PK_COVENANT_DATA)
@@ -55,7 +65,7 @@ func CheckTransactionWithCoreExtProfilesAndSuiteContext(
 	height uint64,
 	blockMTP uint64,
 	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
+	_ any,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (*CheckedTransaction, error) {
@@ -66,7 +76,7 @@ func CheckTransactionWithCoreExtProfilesAndSuiteContext(
 		height,
 		blockMTP,
 		chainID,
-		coreExtProfiles,
+		nil,
 		rotation,
 		registry,
 	)
@@ -83,7 +93,7 @@ func CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 	height uint64,
 	blockMTP uint64,
 	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
+	_ any,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (*CheckedTransaction, error) {
@@ -98,15 +108,12 @@ func CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 	return CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 		txBytes,
 		tx,
-		txid,
-		wtxid,
+		ParsedTxIDs{TxID: txid, WTxID: wtxid},
 		workUtxos,
 		height,
 		blockMTP,
 		chainID,
-		coreExtProfiles,
-		rotation,
-		registry,
+		SuiteValidationContext{Rotation: rotation, Registry: registry},
 	)
 }
 
@@ -115,15 +122,12 @@ func CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 func CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 	txBytes []byte,
 	tx *Tx,
-	txid [32]byte,
-	wtxid [32]byte,
+	ids ParsedTxIDs,
 	workUtxos map[Outpoint]UtxoEntry,
 	height uint64,
 	blockMTP uint64,
 	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
-	rotation RotationProvider,
-	registry *SuiteRegistry,
+	suite SuiteValidationContext,
 ) (*CheckedTransaction, error) {
 	if tx == nil {
 		return nil, txerr(TX_ERR_PARSE, "nil tx")
@@ -134,15 +138,14 @@ func CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 		return nil, err
 	}
 	_, fee, err := applyNonCoinbaseTxBasicWork(nonCoinbaseApplyWorkInput{
-		tx:              tx,
-		txid:            txid,
-		utxoSet:         workUtxos,
-		height:          height,
-		blockMTP:        blockMTP,
-		chainID:         chainID,
-		coreExtProfiles: coreExtProfiles,
-		rotation:        rotation,
-		registry:        registry,
+		tx:       tx,
+		txid:     ids.TxID,
+		utxoSet:  workUtxos,
+		height:   height,
+		blockMTP: blockMTP,
+		chainID:  chainID,
+		rotation: suite.Rotation,
+		registry: suite.Registry,
 	})
 	if err != nil {
 		return nil, err
@@ -151,8 +154,8 @@ func CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 	return &CheckedTransaction{
 		Tx:             tx,
 		Bytes:          append([]byte(nil), txBytes...),
-		TxID:           txid,
-		WTxID:          wtxid,
+		TxID:           ids.TxID,
+		WTxID:          ids.WTxID,
 		Fee:            fee,
 		Weight:         weight,
 		DaBytes:        daBytes,

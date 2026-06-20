@@ -39,13 +39,14 @@ func ConnectBlockParallelSigVerify(
 		prevTimestamps,
 		state,
 		chainID,
-		EmptyCoreExtProfileProvider(),
+		nil,
 		workers,
 	)
 }
 
-// ConnectBlockParallelSigVerifyWithCoreExtProfiles is the full variant with
-// CORE_EXT profile support. See ConnectBlockParallelSigVerify for details.
+// ConnectBlockParallelSigVerifyWithCoreExtProfiles preserves the legacy helper
+// name for callers. The profile argument is ignored because Go CORE_EXT runtime
+// wiring has been removed; see ConnectBlockParallelSigVerify for behavior.
 func ConnectBlockParallelSigVerifyWithCoreExtProfiles(
 	blockBytes []byte,
 	expectedPrevHash *[32]byte,
@@ -54,7 +55,7 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfiles(
 	prevTimestamps []uint64,
 	state *InMemoryChainState,
 	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
+	_ any,
 	workers int,
 ) (*ConnectBlockBasicSummary, error) {
 	return ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
@@ -65,7 +66,7 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfiles(
 		prevTimestamps,
 		state,
 		chainID,
-		coreExtProfiles,
+		nil,
 		nil,
 		nil,
 		workers,
@@ -80,14 +81,11 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
 	prevTimestamps []uint64,
 	state *InMemoryChainState,
 	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
+	_ any,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 	workers int,
 ) (*ConnectBlockBasicSummary, error) {
-	if coreExtProfiles == nil {
-		coreExtProfiles = EmptyCoreExtProfileProvider()
-	}
 	if state == nil {
 		return nil, txerr(BLOCK_ERR_PARSE, "nil chainstate")
 	}
@@ -100,7 +98,14 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
 	if state.AlreadyGenerated.Sign() < 0 {
 		return nil, txerr(BLOCK_ERR_PARSE, "already_generated must be unsigned")
 	}
-	rot, reg := normalizeCoreExtSuiteContext(rotation, registry)
+	rot := rotation
+	if rot == nil {
+		rot = DefaultRotationProvider{}
+	}
+	reg := registry
+	if reg == nil {
+		reg = DefaultSuiteRegistry()
+	}
 
 	// Stateless checks first (wire, merkle root, PoW/target, covenant creation, etc).
 	pb, _, err := parseAndValidateBlockBasicWithContextAtHeight(
@@ -151,7 +156,7 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
 			pb.Header.Timestamp,
 			blockMTP,
 			chainID,
-			coreExtProfiles,
+			nil,
 			sigQueue,
 			rot,
 			reg,
@@ -234,9 +239,8 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
 }
 
 // applyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesQ is the queue-aware
-// wrapper around applyNonCoinbaseTxBasicWorkQ. It mirrors
-// ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles but accepts a
-// SigCheckQueue for deferred signature verification.
+// wrapper around applyNonCoinbaseTxBasicWorkQ. The legacy profile argument is
+// ignored; the SigCheckQueue is used for deferred signature verification.
 func applyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesQ(
 	tx *Tx,
 	txid [32]byte,
@@ -245,13 +249,13 @@ func applyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesQ(
 	blockTimestamp uint64,
 	blockMTP uint64,
 	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
+	_ any,
 	sigQueue *SigCheckQueue,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
 	_ = blockTimestamp
-	work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxoSet, height, blockMTP, chainID, coreExtProfiles, sigQueue, rotation, registry)
+	work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxoSet, height, blockMTP, chainID, nil, sigQueue, rotation, registry)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -275,14 +279,11 @@ func applyNonCoinbaseTxBasicWorkQ(
 	height uint64,
 	blockMTP uint64,
 	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
+	_ any,
 	sigQueue *SigCheckQueue,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (map[Outpoint]UtxoEntry, uint64, error) {
-	if coreExtProfiles == nil {
-		coreExtProfiles = EmptyCoreExtProfileProvider()
-	}
 	if tx == nil {
 		return nil, 0, txerr(TX_ERR_PARSE, "nil tx")
 	}
@@ -387,22 +388,6 @@ func applyNonCoinbaseTxBasicWorkQ(
 		return nil, 0, err
 	}
 
-	txContextExtIDs, err := collectTxContextExtIDs(resolvedInputs, height, coreExtProfiles)
-	if err != nil {
-		return nil, 0, err
-	}
-	var txContext *TxContextBundle
-	if len(txContextExtIDs) != 0 {
-		outputExtIDCache, err := BuildTxContextOutputExtIDCache(tx)
-		if err != nil {
-			return nil, 0, err
-		}
-		txContext, err = BuildTxContext(tx, resolvedInputs, outputExtIDCache, height, coreExtProfiles)
-		if err != nil {
-			return nil, 0, err
-		}
-	}
-
 	// Clone UTXO set so per-tx mutations (spend/create) don't alias the caller's map.
 	work := make(map[Outpoint]UtxoEntry, len(utxoSet))
 	for k, v := range utxoSet {
@@ -476,23 +461,6 @@ func applyNonCoinbaseTxBasicWorkQ(
 		case COV_TYPE_CORE_EXT:
 			if len(assigned) != CORE_EXT_WITNESS_SLOTS {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
-			}
-			if err := validateCoreExtSpendQ(
-				entry,
-				assigned[0],
-				tx,
-				uint32(inputIndex),
-				entry.Value,
-				chainID,
-				height,
-				sighashCache,
-				coreExtProfiles,
-				sigQueue,
-				rotation,
-				registry,
-				txContext,
-			); err != nil {
-				return nil, 0, err
 			}
 		case COV_TYPE_CORE_STEALTH:
 			if len(assigned) != CORE_STEALTH_WITNESS_SLOTS {
@@ -644,11 +612,6 @@ func applyNonCoinbaseTxBasicWorkQ(
 		TotalIn:  uint128FromInternal(sumIn),
 		TotalOut: uint128FromInternal(sumOut),
 		Height:   height,
-	}
-	if txContext != nil {
-		if errTx := requireTxContextBaseMatchesTotals(txContext.Base, valueBase.TotalIn, valueBase.TotalOut, height); errTx != nil {
-			return nil, 0, errTx
-		}
 	}
 	if errTx := CheckValueConservationTxWide(valueBase, vaultInputCount == 1, uint128FromInternal(sumInVault)); errTx != nil {
 		return nil, 0, errTx
