@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 
-import subprocess
-import sys
+import argparse
+import shutil
+import subprocess  # nosec B404
 from pathlib import Path
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
 
 DISALLOWED_SUBSTRINGS = [
     "/" + "Users" + "/",
@@ -13,14 +13,34 @@ DISALLOWED_SUBSTRINGS = [
 ]
 
 
-def iter_tracked_files() -> list[Path]:
-    out = subprocess.check_output(["git", "ls-files"], cwd=str(REPO_ROOT), text=True)
+def git_executable() -> str:
+    git = shutil.which("git")
+    if git is None:
+        raise RuntimeError("git executable not found")
+    return git
+
+
+def resolve_repo_root(start: Path) -> Path:
+    out = subprocess.check_output(  # nosec B603
+        [git_executable(), "rev-parse", "--show-toplevel"],
+        cwd=str(start),
+        text=True,
+    )
+    return Path(out.strip()).resolve()
+
+
+def iter_tracked_files(repo_root: Path) -> list[Path]:
+    out = subprocess.check_output(  # nosec B603
+        [git_executable(), "ls-files"],
+        cwd=str(repo_root),
+        text=True,
+    )
     paths: list[Path] = []
     for line in out.splitlines():
         line = line.strip()
         if not line:
             continue
-        paths.append(REPO_ROOT / line)
+        paths.append(repo_root / line)
     return paths
 
 
@@ -37,10 +57,22 @@ def should_scan(p: Path) -> bool:
     return True
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Reject tracked files containing local absolute home paths."
+    )
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path.cwd(),
+        help="Repository root to scan. Defaults to the current working directory.",
+    )
+    args = parser.parse_args(argv)
+    repo_root = resolve_repo_root(args.repo_root.resolve())
+
     bad: list[str] = []
-    for p in iter_tracked_files():
-        rel = str(p.relative_to(REPO_ROOT))
+    for p in iter_tracked_files(repo_root):
+        rel = str(p.relative_to(repo_root))
         if not should_scan(p):
             continue
         try:

@@ -73,7 +73,7 @@ Local command evidence:
   — PASS.
 - `python3 -m py_compile conformance/runner/run_cv_bundle.py conformance/runner/test_run_cv_bundle.py`
   — PASS.
-- `/Users/gpt/.local/bin/ruff check conformance/runner/run_cv_bundle.py conformance/runner/test_run_cv_bundle.py`
+- `$HOME/.local/bin/ruff check conformance/runner/run_cv_bundle.py conformance/runner/test_run_cv_bundle.py`
   — PASS.
 - `scripts/dev-env.sh -- bash -lc 'cd clients/go && go run ./cmd/formal-trace --fixtures-dir ../../conformance/fixtures --out ../../rubin-formal/traces/go_trace_v1.jsonl'`
   — PASS.
