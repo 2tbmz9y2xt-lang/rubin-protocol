@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha3"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -12,62 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
-
-func TestBuildCoreExtProfiles_TrimsBindingAndBoundsHex(t *testing.T) {
-	descriptor, err := consensus.CoreExtOpenSSLDigest32BindingDescriptorBytes(
-		"ML-DSA-87",
-		consensus.ML_DSA_87_PUBKEY_BYTES,
-		consensus.ML_DSA_87_SIG_BYTES,
-	)
-	if err != nil {
-		t.Fatalf("descriptor: %v", err)
-	}
-	items := []coreExtProfileJSON{{
-		ExtID:                1,
-		ActivationHeight:     10,
-		AllowedSuiteIDs:      []uint8{consensus.SUITE_ID_ML_DSA_87},
-		Binding:              " " + consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 + " ",
-		BindingDescriptorHex: hex.EncodeToString(descriptor),
-		ExtPayloadSchemaHex:  "b2",
-	}}
-	if _, err := buildCoreExtProfiles(items); err != nil {
-		t.Fatalf("buildCoreExtProfiles(trimmed binding): %v", err)
-	}
-
-	items[0].BindingDescriptorHex = strings.Repeat("aa", maxTraceCoreExtHexFieldBytes+1)
-	if _, err := buildCoreExtProfiles(items); err == nil {
-		t.Fatalf("expected oversized binding_descriptor_hex rejection")
-	}
-}
-
-func TestBuildCoreExtProfiles_AcceptsNativeBindingOnHarnessPath(t *testing.T) {
-	items := []coreExtProfileJSON{{
-		ExtID:               1,
-		ActivationHeight:    10,
-		AllowedSuiteIDs:     []uint8{consensus.SUITE_ID_ML_DSA_87},
-		Binding:             " native_verify_sig ",
-		ExtPayloadSchemaHex: "b2",
-	}}
-	profiles, err := buildCoreExtProfiles(items)
-	if err != nil {
-		t.Fatalf("buildCoreExtProfiles(native): %v", err)
-	}
-	profile, ok, err := profiles.LookupCoreExtProfile(1, 10)
-	if err != nil {
-		t.Fatalf("LookupCoreExtProfile: %v", err)
-	}
-	if !ok {
-		t.Fatalf("expected native profile to activate")
-	}
-	if profile.VerifySigExtFn != nil {
-		t.Fatalf("expected native binding to keep nil VerifySigExtFn")
-	}
-}
 
 func TestListFixtureNamesSortedAndFiltered(t *testing.T) {
 	dir := t.TempDir()

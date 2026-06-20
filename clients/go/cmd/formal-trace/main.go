@@ -22,8 +22,6 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus/simplicity"
 )
 
-const maxTraceCoreExtHexFieldBytes = 4096
-
 type traceHeader struct {
 	Type                  string `json:"type"`
 	GeneratedAtUTC        string `json:"generated_at_utc"`
@@ -131,60 +129,11 @@ type coreExtProfileJSON struct {
 	ExtPayloadSchemaHex  string  `json:"ext_payload_schema_hex,omitempty"`
 }
 
-func buildCoreExtProfiles(items []coreExtProfileJSON) (consensus.CoreExtProfileProvider, error) {
+func buildCoreExtProfiles(items []coreExtProfileJSON) (any, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
-	deployments := make([]consensus.CoreExtDeploymentProfile, 0, len(items))
-	for _, item := range items {
-		binding, err := consensus.NormalizeCoreExtBindingName(strings.TrimSpace(item.Binding))
-		if err != nil {
-			return nil, err
-		}
-		bindingDescriptor, err := decodeOptionalTraceHexBytes("binding_descriptor_hex", item.BindingDescriptorHex)
-		if err != nil {
-			return nil, err
-		}
-		extPayloadSchema, err := decodeOptionalTraceHexBytes("ext_payload_schema_hex", item.ExtPayloadSchemaHex)
-		if err != nil {
-			return nil, err
-		}
-		// formal-trace replays helper/conformance fixtures and must preserve
-		// non-live bindings so negative vectors reach consensus validation.
-		verifySigExtFn, err := consensus.ParseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor, extPayloadSchema)
-		if err != nil {
-			return nil, err
-		}
-		allowed := make(map[uint8]struct{}, len(item.AllowedSuiteIDs))
-		for _, suiteID := range item.AllowedSuiteIDs {
-			allowed[suiteID] = struct{}{}
-		}
-		deployments = append(deployments, consensus.CoreExtDeploymentProfile{
-			ExtID:             item.ExtID,
-			ActivationHeight:  item.ActivationHeight,
-			AllowedSuites:     allowed,
-			VerifySigExtFn:    verifySigExtFn,
-			BindingDescriptor: bindingDescriptor,
-			ExtPayloadSchema:  extPayloadSchema,
-		})
-	}
-	return consensus.NewStaticCoreExtProfileProvider(deployments)
-}
-
-func decodeOptionalTraceHexBytes(name, value string) ([]byte, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil, nil
-	}
-	trimmed := strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X")
-	if (name == "binding_descriptor_hex" || name == "ext_payload_schema_hex") && len(trimmed) > maxTraceCoreExtHexFieldBytes*2 {
-		return nil, fmt.Errorf("bad %s", name)
-	}
-	raw, err := hex.DecodeString(trimmed)
-	if err != nil {
-		return nil, fmt.Errorf("bad %s", name)
-	}
-	return raw, nil
+	return nil, fmt.Errorf("core_ext_profiles unsupported by Go runtime")
 }
 
 type blockBasicFixture struct {

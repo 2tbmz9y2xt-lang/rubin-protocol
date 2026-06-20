@@ -2511,10 +2511,10 @@ func TestMempoolPolicyRejectsNilCheckedTransaction(t *testing.T) {
 	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{}, 0, nil, MempoolConfig{}); err == nil || !strings.Contains(err.Error(), "nil checked transaction") {
 		t.Fatalf("expected nil checked tx rejection, got %v", err)
 	}
-	if reject, _ := rejectUnsupportedCoreExtNodeRuntime(&consensus.Tx{Outputs: []consensus.TxOutput{{CovenantType: consensus.COV_TYPE_CORE_EXT}}}, nil); !reject {
+	if reject, _ := rejectUnsupportedCoreExtNodeRuntime(&consensus.Tx{Outputs: []consensus.TxOutput{{CovenantType: removedCoreExtCovenantType}}}, nil); !reject {
 		t.Fatal("expected CORE_EXT output rejection")
 	}
-	if kind := covenantPolicyKind(nil, nil, consensus.COV_TYPE_CORE_EXT); kind != "" {
+	if kind := covenantPolicyKind(nil, nil, removedCoreExtCovenantType); kind != "" {
 		t.Fatalf("nil tx policy kind=%q", kind)
 	}
 	tx := &consensus.Tx{Inputs: []consensus.TxInput{{}}}

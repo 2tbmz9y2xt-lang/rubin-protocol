@@ -62,9 +62,9 @@
           "CV-HTLC-14"
         ],
         "CV-UTXO-BASIC": [
+          "CV-U-05",
           "CV-U-EXT-02",
-          "CV-U-EXT-04",
-          "CV-U-EXT-05"
+          "CV-U-EXT-03"
         ],
         "CV-VAULT-POLICY": [
           "CV-V-01",

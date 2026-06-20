@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	liveBindingPolicyVersion                = 1
-	liveBindingPolicyErrStem                = "live_binding_policy"
-	liveBindingPolicyRuntimeOpenSSLDigest32 = "openssl_digest32_v1"
+	liveBindingPolicyVersion                        = 1
+	liveBindingPolicyErrStem                        = "live_binding_policy"
+	liveBindingPolicyRuntimeOpenSSLDigest32         = "openssl_digest32_v1"
+	CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 = "verify_sig_ext_openssl_digest32_v1"
 )
 
 // Derived runtime copy of conformance/fixtures/protocol/live_binding_policy_v1.json.

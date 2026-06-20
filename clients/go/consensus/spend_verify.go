@@ -12,8 +12,7 @@ func extractCryptoSigAndSighash(w WitnessItem) ([]byte, uint8, error) {
 }
 
 // extractSigAndDigest extracts the cryptographic signature bytes and computes
-// the sighash digest from a witness item. This is the common preamble shared
-// by all signature verification paths (ML-DSA-87 core and CORE_EXT profiles).
+// the sighash digest from a witness item.
 func extractSigAndDigest(w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte) ([]byte, [32]byte, error) {
 	return extractSigAndDigestWithCache(w, tx, inputIndex, inputValue, chainID, nil)
 }

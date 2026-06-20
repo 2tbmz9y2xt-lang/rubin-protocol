@@ -74,11 +74,9 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTP(
 	)
 }
 
-// ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles is a helper for deterministic tooling
-// (conformance/CLI) that need to inject CORE_EXT deployment profiles (CANONICAL §23.2.2).
-//
-// Consensus validity depends on the resolved profile(ext_id, height). Nodes MUST ensure they use
-// the canonical chain-config source for this mapping.
+// ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles preserves the legacy
+// helper name for deterministic tooling. The profile argument is ignored
+// because Go CORE_EXT runtime wiring has been removed.
 func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
 	tx *Tx,
 	txid [32]byte,
@@ -87,54 +85,43 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
 	_ uint64,
 	blockMTP uint64,
 	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
+	_ any,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	if coreExtProfiles == nil {
-		coreExtProfiles = EmptyCoreExtProfileProvider()
-	}
 	return ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
 		tx,
 		txid,
 		utxoSet,
 		height,
-		0,
 		blockMTP,
 		chainID,
-		coreExtProfiles,
 		nil,
 		nil,
 	)
 }
 
 // ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext is the
-// suite-aware variant for deterministic tooling that needs CORE_EXT profiles plus
-// explicit native-suite rotation/registry context for ACTIVE-profile spend checks.
+// suite-aware variant for deterministic tooling that needs explicit native-suite
+// rotation/registry context.
 func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
 	tx *Tx,
 	txid [32]byte,
 	utxoSet map[Outpoint]UtxoEntry,
 	height uint64,
-	_ uint64,
 	blockMTP uint64,
 	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	if coreExtProfiles == nil {
-		coreExtProfiles = EmptyCoreExtProfileProvider()
-	}
 	work := cloneUtxoSet(utxoSet)
 	work, fee, err := applyNonCoinbaseTxBasicWork(nonCoinbaseApplyWorkInput{
-		tx:              tx,
-		txid:            txid,
-		utxoSet:         work,
-		height:          height,
-		blockMTP:        blockMTP,
-		chainID:         chainID,
-		coreExtProfiles: coreExtProfiles,
-		rotation:        rotation,
-		registry:        registry,
+		tx:       tx,
+		txid:     txid,
+		utxoSet:  work,
+		height:   height,
+		blockMTP: blockMTP,
+		chainID:  chainID,
+		rotation: rotation,
+		registry: registry,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -222,19 +209,17 @@ func u128ToU64(x u128) (uint64, error) {
 }
 
 type nonCoinbaseApplyContext struct {
-	tx              *Tx
-	txid            [32]byte
-	work            map[Outpoint]UtxoEntry
-	chainID         [32]byte
-	coreExtProfiles CoreExtProfileProvider
-	rotation        RotationProvider
-	registry        *SuiteRegistry
-	sighashCache    *SighashV1PrehashCache
-	txContext       *TxContextBundle
-	resolved        []nonCoinbaseResolvedInput
-	spend           nonCoinbaseSpendState
-	sumOut          u128
-	height          uint64
-	blockMTP        uint64
-	createsVault    bool
+	tx           *Tx
+	txid         [32]byte
+	work         map[Outpoint]UtxoEntry
+	chainID      [32]byte
+	rotation     RotationProvider
+	registry     *SuiteRegistry
+	sighashCache *SighashV1PrehashCache
+	resolved     []nonCoinbaseResolvedInput
+	spend        nonCoinbaseSpendState
+	sumOut       u128
+	height       uint64
+	blockMTP     uint64
+	createsVault bool
 }

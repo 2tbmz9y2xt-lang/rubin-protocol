@@ -1,28 +1,26 @@
 package consensus
 
 type nonCoinbaseApplyWorkInput struct {
-	tx              *Tx
-	txid            [32]byte
-	utxoSet         map[Outpoint]UtxoEntry
-	height          uint64
-	blockMTP        uint64
-	chainID         [32]byte
-	coreExtProfiles CoreExtProfileProvider
-	rotation        RotationProvider
-	registry        *SuiteRegistry
+	tx       *Tx
+	txid     [32]byte
+	utxoSet  map[Outpoint]UtxoEntry
+	height   uint64
+	blockMTP uint64
+	chainID  [32]byte
+	rotation RotationProvider
+	registry *SuiteRegistry
 }
 
 func applyNonCoinbaseTxBasicWork(input nonCoinbaseApplyWorkInput) (map[Outpoint]UtxoEntry, uint64, error) {
 	return (&nonCoinbaseApplyContext{
-		tx:              input.tx,
-		txid:            input.txid,
-		work:            input.utxoSet,
-		height:          input.height,
-		blockMTP:        input.blockMTP,
-		chainID:         input.chainID,
-		coreExtProfiles: nonCoinbaseCoreExtProfilesOrEmpty(input.coreExtProfiles),
-		rotation:        input.rotation,
-		registry:        input.registry,
+		tx:       input.tx,
+		txid:     input.txid,
+		work:     input.utxoSet,
+		height:   input.height,
+		blockMTP: input.blockMTP,
+		chainID:  input.chainID,
+		rotation: input.rotation,
+		registry: input.registry,
 	}).apply()
 }
 
@@ -50,12 +48,6 @@ func (ctx *nonCoinbaseApplyContext) applyPreOutputPhases() error {
 	if err := ctx.resolveInputs(); err != nil {
 		return err
 	}
-	if ctx.hasCoreSimplicityResolvedInput() {
-		return ctx.validateInputSpends()
-	}
-	if err := ctx.buildTxContext(); err != nil {
-		return err
-	}
 	return ctx.validateInputSpends()
 }
 
@@ -71,13 +63,6 @@ func (ctx *nonCoinbaseApplyContext) applyPostOutputRules() error {
 		}
 	}
 	return nil
-}
-
-func nonCoinbaseCoreExtProfilesOrEmpty(coreExtProfiles CoreExtProfileProvider) CoreExtProfileProvider {
-	if coreExtProfiles == nil {
-		return EmptyCoreExtProfileProvider()
-	}
-	return coreExtProfiles
 }
 
 func cloneUtxoSet(src map[Outpoint]UtxoEntry) map[Outpoint]UtxoEntry {
@@ -235,29 +220,6 @@ func (ctx *nonCoinbaseApplyContext) captureVaultResolvedInput(entry UtxoEntry) e
 	return nil
 }
 
-func (ctx *nonCoinbaseApplyContext) buildTxContext() error {
-	resolvedEntries := ctx.resolvedEntries()
-	if err := rejectCoreSimplicitySpendIfPresent(resolvedEntries); err != nil {
-		return err
-	}
-	txContextExtIDs, err := collectTxContextExtIDs(resolvedEntries, ctx.height, ctx.coreExtProfiles)
-	if err != nil {
-		return err
-	}
-	if len(txContextExtIDs) == 0 {
-		return nil
-	}
-	outputExtIDCache, err := BuildTxContextOutputExtIDCache(ctx.tx)
-	if err != nil {
-		return err
-	}
-	ctx.txContext, err = BuildTxContext(ctx.tx, resolvedEntries, outputExtIDCache, ctx.height, ctx.coreExtProfiles)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
 func (ctx *nonCoinbaseApplyContext) resolvedEntries() []UtxoEntry {
 	entries := make([]UtxoEntry, 0, len(ctx.resolved))
 	for _, input := range ctx.resolved {
@@ -317,7 +279,10 @@ func (ctx *nonCoinbaseApplyContext) validateInputSpend(inputIndex int, input non
 	case COV_TYPE_HTLC:
 		return ctx.validateHTLCInput(inputIndex, entry, assigned)
 	case COV_TYPE_CORE_EXT:
-		return ctx.validateCoreExtInput(inputIndex, entry, assigned)
+		if len(assigned) != CORE_EXT_WITNESS_SLOTS {
+			return txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
+		}
+		return nil
 	case COV_TYPE_CORE_STEALTH:
 		return ctx.validateCoreStealthInput(inputIndex, entry, assigned)
 	case COV_TYPE_CORE_SIMPLICITY:
@@ -393,26 +358,6 @@ func (ctx *nonCoinbaseApplyContext) validateHTLCInput(inputIndex int, entry Utxo
 	return ValidateHTLCSpendAtHeight(entry, assigned[0], assigned[1], ctx.tx, uint32(inputIndex), entry.Value, ctx.chainID, ctx.height, ctx.blockMTP, ctx.sighashCache, ctx.rotation, ctx.registry)
 }
 
-func (ctx *nonCoinbaseApplyContext) validateCoreExtInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
-	if len(assigned) != CORE_EXT_WITNESS_SLOTS {
-		return txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
-	}
-	return validateCoreExtSpendWithCache(coreExtSpendValidation{
-		entry:           entry,
-		w:               assigned[0],
-		tx:              ctx.tx,
-		inputIndex:      uint32(inputIndex),
-		inputValue:      entry.Value,
-		chainID:         ctx.chainID,
-		blockHeight:     ctx.height,
-		sighashCache:    ctx.sighashCache,
-		coreExtProfiles: ctx.coreExtProfiles,
-		rotation:        ctx.rotation,
-		registry:        ctx.registry,
-		txContext:       ctx.txContext,
-	})
-}
-
 func (ctx *nonCoinbaseApplyContext) validateCoreStealthInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
 	if len(assigned) != CORE_STEALTH_WITNESS_SLOTS {
 		return txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
@@ -465,11 +410,6 @@ func (ctx *nonCoinbaseApplyContext) finalizeValueAndFee() (uint64, error) {
 		TotalIn:  uint128FromInternal(ctx.spend.sumIn),
 		TotalOut: uint128FromInternal(ctx.sumOut),
 		Height:   ctx.height,
-	}
-	if ctx.txContext != nil {
-		if errTx := requireTxContextBaseMatchesTotals(ctx.txContext.Base, valueBase.TotalIn, valueBase.TotalOut, ctx.height); errTx != nil {
-			return 0, errTx
-		}
 	}
 	if errTx := CheckValueConservationTxWide(valueBase, ctx.spend.vaultInputCount == 1, uint128FromInternal(ctx.spend.sumInVault)); errTx != nil {
 		return 0, errTx

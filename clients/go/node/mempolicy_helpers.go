@@ -35,15 +35,12 @@ func (m *Mempool) validateTransactionWithConsensus(
 	checked, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 		txBytes,
 		tx,
-		txid,
-		wtxid,
+		consensus.ParsedTxIDs{TxID: txid, WTxID: wtxid},
 		snapshot.utxos,
 		nextHeight,
 		blockMTP,
 		m.chainID,
-		nil,
-		policy.RotationProvider,
-		policy.SuiteRegistry,
+		consensus.SuiteValidationContext{Rotation: policy.RotationProvider, Registry: policy.SuiteRegistry},
 	)
 	if err != nil {
 		return nil, txAdmitRejected(err.Error())

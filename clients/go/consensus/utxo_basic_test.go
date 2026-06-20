@@ -226,51 +226,6 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityRejectsBeforeWitnessChecks(
 	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
 }
 
-func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityRejectsBeforeTxContextLookup(t *testing.T) {
-	prevSimplicity := hashWithPrefix(0x62)
-	prevCoreExt := hashWithPrefix(0x63)
-	tx := &Tx{
-		Version: TX_WIRE_VERSION,
-		TxKind:  0x00,
-		TxNonce: 1,
-		Inputs: []TxInput{
-			{PrevTxid: prevSimplicity, PrevVout: 0},
-			{PrevTxid: prevCoreExt, PrevVout: 0},
-		},
-		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
-		Witness: dummyWitnesses(SIMPLICITY_WITNESS_SLOTS + CORE_EXT_WITNESS_SLOTS),
-	}
-	utxos := map[Outpoint]UtxoEntry{
-		{Txid: prevSimplicity, Vout: 0}: {
-			Value:        50,
-			CovenantType: COV_TYPE_CORE_SIMPLICITY,
-			CovenantData: encodeSimplicityCovenantData([32]byte{0x62}, nil),
-		},
-		{Txid: prevCoreExt, Vout: 0}: {
-			Value:        50,
-			CovenantType: COV_TYPE_CORE_EXT,
-			CovenantData: coreExtCovenantData(7, nil),
-		},
-	}
-
-	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
-		tx,
-		hashWithPrefix(0x64),
-		utxos,
-		1,
-		0,
-		0,
-		[32]byte{},
-		errCoreExtProfileProvider{},
-		nil,
-		nil,
-	)
-	if work != nil || summary != nil {
-		t.Fatalf("expected no mutation on reject, got work=%v summary=%v", work, summary)
-	}
-	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-}
-
 func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityPreservesInputOrderPriority(t *testing.T) {
 	makeOutpoint := func(prev [32]byte) Outpoint {
 		return Outpoint{Txid: prev, Vout: 0}
@@ -300,9 +255,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityPreservesInputOrderPriority
 			utxos,
 			1,
 			0,
-			0,
 			[32]byte{},
-			nil,
 			nil,
 			nil,
 		)
@@ -334,9 +287,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityPreservesInputOrderPriority
 			utxos,
 			1,
 			0,
-			0,
 			[32]byte{},
-			nil,
 			nil,
 			nil,
 		)
@@ -371,9 +322,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_NonSimplicityWitnessUnderflowPrecedesLate
 		utxos,
 		1,
 		0,
-		0,
 		[32]byte{},
-		nil,
 		nil,
 		nil,
 	)
@@ -812,9 +761,8 @@ func TestApplyNonCoinbaseTxBasic_VaultRejectsDisallowedDestinationCovenantTypeEv
 	ownerCovData := p2pkCovenantDataForPubkey(ownerKP.PubkeyBytes())
 	ownerLockID := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, ownerCovData))
 
-	// Minimal valid CORE_EXT covenant_data: ext_id:u16le(1) || ext_payload_len:CompactSize(0).
-	coreExtOutData := []byte{0x01, 0x00, 0x00}
-	whitelistH := sha3_256(OutputDescriptorBytes(COV_TYPE_CORE_EXT, coreExtOutData))
+	stealthOutData := stealthCovenantDataForKeyID([32]byte{0x01})
+	whitelistH := sha3_256(OutputDescriptorBytes(COV_TYPE_CORE_STEALTH, stealthOutData))
 
 	vaultKeyID := sha3_256(vaultKP.PubkeyBytes())
 	vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistH})
@@ -828,7 +776,7 @@ func TestApplyNonCoinbaseTxBasic_VaultRejectsDisallowedDestinationCovenantTypeEv
 			{PrevTxid: prevFee, PrevVout: 0},
 		},
 		Outputs: []TxOutput{
-			{Value: 100, CovenantType: COV_TYPE_CORE_EXT, CovenantData: coreExtOutData},
+			{Value: 100, CovenantType: COV_TYPE_CORE_STEALTH, CovenantData: stealthOutData},
 		},
 	}
 	tx.Witness = []WitnessItem{

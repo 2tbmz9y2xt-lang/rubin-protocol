@@ -35,16 +35,14 @@ type connectBlockBasicInMemorySuiteContext struct {
 	PrevTimestamps   []uint64
 	State            *InMemoryChainState
 	ChainID          [32]byte
-	CoreExtProfiles  CoreExtProfileProvider
 	Rotation         RotationProvider
 	Registry         *SuiteRegistry
 }
 
 type connectBlockInMemoryValidationContext struct {
-	chainID         [32]byte
-	coreExtProfiles CoreExtProfileProvider
-	rotation        RotationProvider
-	registry        *SuiteRegistry
+	chainID  [32]byte
+	rotation RotationProvider
+	registry *SuiteRegistry
 }
 
 // ConnectBlockBasicInMemoryAtHeight connects a block against an in-memory UTXO snapshot and an
@@ -72,7 +70,7 @@ func ConnectBlockBasicInMemoryAtHeight(
 		prevTimestamps,
 		state,
 		chainID,
-		EmptyCoreExtProfileProvider(),
+		nil,
 	)
 }
 
@@ -84,11 +82,8 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
 	prevTimestamps []uint64,
 	state *InMemoryChainState,
 	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
+	_ any,
 ) (*ConnectBlockBasicSummary, error) {
-	if coreExtProfiles == nil {
-		coreExtProfiles = EmptyCoreExtProfileProvider()
-	}
 	return ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 		blockBytes,
 		expectedPrevHash,
@@ -97,7 +92,7 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
 		prevTimestamps,
 		state,
 		chainID,
-		coreExtProfiles,
+		nil,
 		nil,
 		nil,
 	)
@@ -112,7 +107,7 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 	prevTimestamps []uint64,
 	state *InMemoryChainState,
 	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
+	_ any,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (*ConnectBlockBasicSummary, error) {
@@ -124,7 +119,6 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 		PrevTimestamps:   prevTimestamps,
 		State:            state,
 		ChainID:          chainID,
-		CoreExtProfiles:  normalizedCoreExtProfiles(coreExtProfiles),
 		Rotation:         rotation,
 		Registry:         registry,
 	})
@@ -149,10 +143,9 @@ func connectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 	}
 
 	validation := connectBlockInMemoryValidationContext{
-		chainID:         input.ChainID,
-		coreExtProfiles: input.CoreExtProfiles,
-		rotation:        input.Rotation,
-		registry:        input.Registry,
+		chainID:  input.ChainID,
+		rotation: input.Rotation,
+		registry: input.Registry,
 	}
 	workUtxos, sumFees, err := applyInMemoryNonCoinbaseTxs(
 		pb,
@@ -175,13 +168,6 @@ func connectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 	applyInMemoryCoinbaseOutputs(pb, workUtxos, input.BlockHeight)
 	alreadyGeneratedN1 := advanceAlreadyGenerated(input.BlockHeight, alreadyGenerated)
 	return commitInMemoryConnectSummary(input.State, workUtxos, input.BlockHeight, alreadyGenerated, alreadyGeneratedN1, sumFees)
-}
-
-func normalizedCoreExtProfiles(coreExtProfiles CoreExtProfileProvider) CoreExtProfileProvider {
-	if coreExtProfiles == nil {
-		return EmptyCoreExtProfileProvider()
-	}
-	return coreExtProfiles
 }
 
 func prepareInMemoryChainState(state *InMemoryChainState) error {
@@ -239,15 +225,14 @@ func applyInMemoryNonCoinbaseTxs(
 	var sumFees uint64
 	for i := 1; i < len(pb.Txs); i++ {
 		nextUtxos, fee, err := applyNonCoinbaseTxBasicWork(nonCoinbaseApplyWorkInput{
-			tx:              pb.Txs[i],
-			txid:            pb.Txids[i],
-			utxoSet:         workUtxos,
-			height:          blockHeight,
-			blockMTP:        blockMTP,
-			chainID:         validation.chainID,
-			coreExtProfiles: validation.coreExtProfiles,
-			rotation:        validation.rotation,
-			registry:        validation.registry,
+			tx:       pb.Txs[i],
+			txid:     pb.Txids[i],
+			utxoSet:  workUtxos,
+			height:   blockHeight,
+			blockMTP: blockMTP,
+			chainID:  validation.chainID,
+			rotation: validation.rotation,
+			registry: validation.registry,
 		})
 		if err != nil {
 			return nil, 0, err

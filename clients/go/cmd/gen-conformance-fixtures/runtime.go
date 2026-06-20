@@ -165,8 +165,6 @@ func runGeneratorCLIWithArgs(args []string) {
 		)
 
 		updateP2PKBurnToFeeVector(f, "CV-U-19", zeroChainID, ownerKP, 100) // burn-to-fee, output_count=0
-		updateCoreExtRealBindingVector(f, "CV-U-EXT-05", zeroChainID, ownerKP, 100, 90)
-
 		mustWriteFixture(remapWritePath(path), f)
 	}
 
@@ -551,29 +549,6 @@ func p2pkCovenantData(pub []byte) []byte {
 	return p2pkCovenantDataWithSuite(consensus.SUITE_ID_ML_DSA_87, pub)
 }
 
-func mustCoreExtOpenSSLDigest32BindingDescriptorHex() string {
-	raw, err := consensus.CoreExtOpenSSLDigest32BindingDescriptorBytes(
-		"ML-DSA-87",
-		consensus.ML_DSA_87_PUBKEY_BYTES,
-		consensus.ML_DSA_87_SIG_BYTES,
-	)
-	if err != nil {
-		fatalf("core_ext binding descriptor: %v", err)
-	}
-	return hex.EncodeToString(raw)
-}
-
-func setCoreExtOpenSSLDigest32Binding(v map[string]any) {
-	profiles := anyToSliceMap(v["core_ext_profiles"])
-	if len(profiles) != 1 {
-		fatalf("%s: want 1 core_ext profile", v["id"])
-	}
-	profiles[0]["binding"] = consensus.CoreExtBindingNameVerifySigExtOpenSSLDigest32V1
-	profiles[0]["binding_descriptor_hex"] = mustCoreExtOpenSSLDigest32BindingDescriptorHex()
-	profiles[0]["ext_payload_schema_hex"] = "b2"
-	v["core_ext_profiles"] = profiles
-}
-
 func parseJSONUint32(name string, value any) (uint32, error) {
 	n, ok := value.(float64)
 	if !ok || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || n > math.MaxUint32 || math.Trunc(n) != n {
@@ -714,138 +689,6 @@ func updateP2PKBurnToFeeVector(f *fixtureFile, id string, chainID [32]byte, sign
 	b := mustTxBytes(tx)
 	v["tx_hex"] = hex.EncodeToString(b)
 	v["utxos"] = utxos
-}
-
-func updateCoreExtRealBindingVector(
-	f *fixtureFile,
-	id string,
-	chainID [32]byte,
-	signer digestSigner,
-	inValue uint64,
-	outValue uint64,
-) {
-	v := findVector(f, id)
-	setCoreExtOpenSSLDigest32Binding(v)
-
-	utxos := anyToSliceMap(v["utxos"])
-	if len(utxos) != 1 {
-		fatalf("%s: want 1 utxo, got %d", id, len(utxos))
-	}
-
-	prevTxid := mustHex32(utxos[0]["txid"].(string))
-	prevVout := mustJSONUint32(id+".utxos[0].vout", utxos[0]["vout"])
-	pub := signer.PubkeyBytes()
-	outCov := p2pkCovenantData(pub)
-
-	// CORE_EXT real-binding witnesses must carry the suite_id that
-	// the vector's core_ext_profiles binding actually allows, NOT a
-	// generic ML-DSA default. The vector pins exactly one allowed
-	// suite for the bound profile (see CV-U-EXT-05.allowed_suite_ids
-	// = [3]); emitting consensus.SUITE_ID_ML_DSA_87 (= 0x01) silently
-	// produced a witness that fails replay with TX_ERR_SIG_ALG_INVALID
-	// once deterministic regen brought the bytes back to current
-	// generator output. Read the suite from the vector contract
-	// directly and assert it is the single allowed suite.
-	witnessSuiteID := mustCoreExtAllowedSuiteID(id, v)
-
-	tx := &consensus.Tx{
-		Version:  1,
-		TxKind:   0x00,
-		TxNonce:  1,
-		Inputs:   []consensus.TxInput{{PrevTxid: prevTxid, PrevVout: prevVout, ScriptSig: nil, Sequence: 0}},
-		Outputs:  []consensus.TxOutput{{Value: outValue, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: outCov}},
-		Locktime: 0,
-	}
-
-	sig := mustSignInputDigest(id, "input0", signer, tx, 0, inValue, chainID)
-	tx.Witness = []consensus.WitnessItem{{
-		SuiteID:   witnessSuiteID,
-		Pubkey:    pub,
-		Signature: sig,
-	}}
-
-	v["tx_hex"] = hex.EncodeToString(mustTxBytes(tx))
-	v["utxos"] = utxos
-}
-
-// coreExtAllowedSuiteID is the error-returning core of the witness
-// suite-id derivation: given a CORE_EXT real-binding vector, extract
-// the single allowed suite from `core_ext_profiles[0].allowed_suite_ids`
-// after asserting the contract shape (one bound profile, one allowed
-// suite, fits in a byte, not SENTINEL). Splitting the error path off
-// from the fatalf wrapper mirrors the existing parseJSONUint32 vs
-// mustJSONUint32 pattern and lets unit tests exercise every guard
-// branch without subprocess-wrapping a CLI fatalf.
-func coreExtAllowedSuiteID(id string, v map[string]any) (byte, error) {
-	rawProfiles, hasProfiles := v["core_ext_profiles"]
-	if !hasProfiles || rawProfiles == nil {
-		return 0, fmt.Errorf("%s: core_ext_profiles is missing or null; expected a JSON array with exactly one bound profile", id)
-	}
-	// Accept both shapes the generator produces in-process:
-	//   - []any (json.Unmarshal default for generic JSON arrays — what the
-	//     test reads back from disk after mustWriteFixture round-trips
-	//     the vector through encoding/json), and
-	//   - []map[string]any (what setCoreExtOpenSSLDigest32Binding writes
-	//     back via anyToSliceMap before the marshal step).
-	// Anything else is a contract violation and surfaces a typed error.
-	var profile map[string]any
-	switch profiles := rawProfiles.(type) {
-	case []any:
-		if len(profiles) != 1 {
-			return 0, fmt.Errorf("%s: core_ext_profiles must have exactly one bound profile, got %d", id, len(profiles))
-		}
-		got, ok := profiles[0].(map[string]any)
-		if !ok {
-			return 0, fmt.Errorf("%s: core_ext_profiles[0] must be a JSON object, got %T", id, profiles[0])
-		}
-		profile = got
-	case []map[string]any:
-		if len(profiles) != 1 {
-			return 0, fmt.Errorf("%s: core_ext_profiles must have exactly one bound profile, got %d", id, len(profiles))
-		}
-		profile = profiles[0]
-	default:
-		return 0, fmt.Errorf("%s: core_ext_profiles must be a JSON array, got %T", id, rawProfiles)
-	}
-	allowedAny, ok := profile["allowed_suite_ids"].([]any)
-	if !ok || len(allowedAny) == 0 {
-		return 0, fmt.Errorf("%s: core_ext_profiles[0].allowed_suite_ids must be a non-empty JSON array", id)
-	}
-	if len(allowedAny) != 1 {
-		return 0, fmt.Errorf("%s: core_ext_profiles[0].allowed_suite_ids must pin exactly one suite for the real-binding witness, got %d entries", id, len(allowedAny))
-	}
-	suite32, err := parseJSONUint32(id+".core_ext_profiles[0].allowed_suite_ids[0]", allowedAny[0])
-	if err != nil {
-		return 0, err
-	}
-	if suite32 > 0xff {
-		return 0, fmt.Errorf("%s: core_ext_profiles[0].allowed_suite_ids[0]=%d does not fit in a single suite_id byte", id, suite32)
-	}
-	if suite32 == uint32(consensus.SUITE_ID_SENTINEL) {
-		return 0, fmt.Errorf("%s: core_ext_profiles[0].allowed_suite_ids[0]=0x00 (SENTINEL) is not a valid witness suite", id)
-	}
-	return byte(suite32), nil
-}
-
-// mustCoreExtAllowedSuiteID is the CLI-boundary fatalf wrapper around
-// coreExtAllowedSuiteID. The contract for the vectors this helper
-// supports is exactly one bound profile with exactly one allowed
-// suite — that suite is what the witness must carry, otherwise the
-// runtime verifier rejects with TX_ERR_SIG_ALG_INVALID before any
-// signature work happens. This stays purely vector-driven; no new
-// magic constant lives in the generator.
-func mustCoreExtAllowedSuiteID(id string, v map[string]any) byte {
-	suite, err := coreExtAllowedSuiteID(id, v)
-	if err != nil {
-		fatalf("%v", err)
-	}
-	return suite
-}
-
-func updateCoreExtEnforcementVector(f *fixtureFile, id string) {
-	v := findVector(f, id)
-	v["description"] = "verify_sig_ext_openssl_digest32_v1 binding: allowed suite, real ML-DSA-87 verifier"
-	setCoreExtOpenSSLDigest32Binding(v)
 }
 
 func updateVaultSpendVectorsUTXO(

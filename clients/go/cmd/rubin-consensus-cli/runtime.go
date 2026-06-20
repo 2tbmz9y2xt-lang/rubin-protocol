@@ -356,7 +356,6 @@ func (item SuiteParamsJSON) MarshalJSON() ([]byte, error) {
 
 const (
 	maxExplicitSuiteRegistryItems = 16
-	maxCoreExtHexFieldBytes       = 4096
 	canonicalSuiteRegistryAlgName = "ML-DSA-87"
 )
 
@@ -408,97 +407,14 @@ func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, err
 	}, nil
 }
 
-func parseOptionalHexBytes(name, value string) ([]byte, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil, nil
-	}
-	trimmed := strings.TrimPrefix(strings.TrimPrefix(value, "0x"), "0X")
-	if (name == "binding_descriptor_hex" || name == "ext_payload_schema_hex") && len(trimmed) > maxCoreExtHexFieldBytes*2 {
-		return nil, fmt.Errorf("bad %s", name)
-	}
-	raw, err := hex.DecodeString(trimmed)
-	if err != nil {
-		return nil, fmt.Errorf("bad %s", name)
-	}
-	return raw, nil
-}
-
-func buildCoreExtDeployments(items []CoreExtProfileJSON) ([]consensus.CoreExtDeploymentProfile, error) {
-	if len(items) == 0 {
-		return nil, nil
-	}
-	deployments := make([]consensus.CoreExtDeploymentProfile, 0, len(items))
-	for _, item := range items {
-		binding, err := consensus.NormalizeCoreExtBindingName(strings.TrimSpace(item.Binding))
-		if err != nil {
-			return nil, err
-		}
-		if item.TxContextEnabled != 0 {
-			return nil, fmt.Errorf(
-				"tx_context_enabled core_ext profile for ext_id=%d requires runtime txcontext verifier wiring",
-				item.ExtID,
-			)
-		}
-		bindingDescriptor, err := parseOptionalHexBytes("binding_descriptor_hex", item.BindingDescriptorHex)
-		if err != nil {
-			return nil, err
-		}
-		extPayloadSchema, err := parseOptionalHexBytes("ext_payload_schema_hex", item.ExtPayloadSchemaHex)
-		if err != nil {
-			return nil, err
-		}
-		verifySigExtFn, err := parseRuntimeCoreExtBinding(binding, bindingDescriptor, extPayloadSchema)
-		if err != nil {
-			return nil, err
-		}
-		allowed := make(map[uint8]struct{}, len(item.AllowedSuiteIDs))
-		for _, suiteID := range item.AllowedSuiteIDs {
-			allowed[suiteID] = struct{}{}
-		}
-		deployments = append(deployments, consensus.CoreExtDeploymentProfile{
-			ExtID:             item.ExtID,
-			ActivationHeight:  item.ActivationHeight,
-			TxContextEnabled:  item.TxContextEnabled != 0,
-			AllowedSuites:     allowed,
-			VerifySigExtFn:    verifySigExtFn,
-			BindingDescriptor: bindingDescriptor,
-			ExtPayloadSchema:  extPayloadSchema,
-		})
-	}
-	return deployments, nil
-}
-
-func parseRuntimeCoreExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (consensus.CoreExtVerifySigExtFunc, error) {
-	return consensus.ParseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor, extPayloadSchema)
-}
-
-func buildCoreExtProfiles(items []CoreExtProfileJSON, chainIDHex string, expectedSetAnchorHex string) (consensus.CoreExtProfileProvider, error) {
-	deployments, err := buildCoreExtDeployments(items)
-	if err != nil {
-		return nil, err
-	}
+func buildCoreExtProfiles(items []CoreExtProfileJSON, _ string, expectedSetAnchorHex string) (any, error) {
 	if strings.TrimSpace(expectedSetAnchorHex) != "" {
-		chainID, err := parseOptionalChainIDHex(chainIDHex)
-		if err != nil {
-			return nil, err
-		}
-		expectedAnchor, err := parseExactHex32(expectedSetAnchorHex)
-		if err != nil {
-			return nil, fmt.Errorf("bad core_ext_profile_set_anchor_hex")
-		}
-		actualAnchor, err := consensus.CoreExtProfileSetAnchorV1(chainID, deployments)
-		if err != nil {
-			return nil, err
-		}
-		if actualAnchor != expectedAnchor {
-			return nil, fmt.Errorf("core_ext profile set anchor mismatch")
-		}
+		return nil, fmt.Errorf("core_ext_profile_set_anchor_hex unsupported by Go runtime")
 	}
-	if len(deployments) == 0 {
-		return consensus.NewStaticCoreExtProfileProvider(nil)
+	if len(items) != 0 {
+		return nil, fmt.Errorf("core_ext_profiles unsupported by Go runtime")
 	}
-	return consensus.NewStaticCoreExtProfileProvider(deployments)
+	return nil, nil
 }
 
 type ForkChoiceChain struct {
@@ -2147,8 +2063,7 @@ func runFromStdin() {
 			return
 		}
 
-		coreExtProfiles, err := buildCoreExtProfiles(coreExtProfilesReq, req.ChainIDHex, envelope.CoreExtProfileSetAnchorHex)
-		if err != nil {
+		if _, err := buildCoreExtProfiles(coreExtProfilesReq, req.ChainIDHex, envelope.CoreExtProfileSetAnchorHex); err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
 			return
 		}
@@ -2163,10 +2078,8 @@ func runFromStdin() {
 			txid,
 			utxos,
 			req.Height,
-			req.BlockTimestamp,
 			blockMTP,
 			chainID,
-			coreExtProfiles,
 			rotation,
 			registry,
 		)
