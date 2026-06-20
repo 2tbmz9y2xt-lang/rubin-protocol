@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Validate CV-TXCTX.json against its JSON Schema.
+"""Validate CV-TXCTX.json against its JSON Schema when the fixture exists.
 
 Usage:
     python3 tools/check_cv_txctx_schema.py [--fixtures PATH] [--schema PATH]
 
-Exits 0 on success, 1 on validation failure.
+Exits 0 on success or retired default fixture, 1 on validation failure.
 """
+from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -14,17 +16,16 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_FIXTURES = REPO_ROOT / "conformance" / "fixtures" / "CV-TXCTX.json"
 DEFAULT_SCHEMA = REPO_ROOT / "conformance" / "schemas" / "cv-txctx-v1.json"
+ROOT_OBJECT_ERROR = "<root>: expected object"
 
 
 def validate(fixture_path: Path, schema_path: Path) -> list[str]:
     """Return list of error messages. Empty = valid."""
-    # Always run structural invariants (duplicate IDs, vector_count consistency)
-    structural_errors = validate_structural_invariants(fixture_path)
-
     try:
         import jsonschema  # type: ignore[import-untyped]
     except ImportError:
         # Fallback: structural checks without jsonschema library
+        structural_errors = validate_structural_invariants(fixture_path)
         return structural_errors + validate_structural(fixture_path, schema_path)
 
     with open(schema_path) as f:
@@ -32,9 +33,25 @@ def validate(fixture_path: Path, schema_path: Path) -> list[str]:
     with open(fixture_path) as f:
         data = json.load(f)
 
-    validator = jsonschema.Draft202012Validator(schema)
-    schema_errors = sorted(validator.iter_errors(data), key=lambda e: list(e.path))
-    return [f"{'.'.join(str(p) for p in e.absolute_path)}: {e.message}" for e in schema_errors] + structural_errors
+    try:
+        jsonschema.Draft202012Validator.check_schema(schema)
+        validator = jsonschema.Draft202012Validator(schema)
+        schema_errors = sorted(validator.iter_errors(data), key=lambda e: list(e.path))
+    except jsonschema.exceptions.SchemaError as e:
+        return [f"schema: {e.message}"]
+    except jsonschema.exceptions.ValidationError as e:
+        return [f"schema: {e.message}"]
+
+    schema_messages = [
+        f"{'.'.join(str(p) for p in e.absolute_path)}: {e.message}"
+        for e in schema_errors
+    ]
+    structural_errors = validate_structural_invariants(fixture_path)
+    if schema_messages:
+        structural_errors = [
+            error for error in structural_errors if error != ROOT_OBJECT_ERROR
+        ]
+    return schema_messages + structural_errors
 
 
 def validate_structural_invariants(fixture_path: Path) -> list[str]:
@@ -44,7 +61,7 @@ def validate_structural_invariants(fixture_path: Path) -> list[str]:
         data = json.load(f)
 
     if not isinstance(data, dict):
-        return ["top-level JSON must be an object"]
+        return [ROOT_OBJECT_ERROR]
 
     vectors = data.get("vectors")
     if not isinstance(vectors, list):
@@ -77,6 +94,9 @@ def validate_structural(fixture_path: Path, schema_path: Path) -> list[str]:
 
     with open(fixture_path) as f:
         data = json.load(f)
+
+    if not isinstance(data, dict):
+        return errors
 
     # Top-level required fields
     for key in ("gate", "spec", "version", "profiles", "vectors", "vector_count"):
@@ -124,13 +144,20 @@ def validate_structural(fixture_path: Path, schema_path: Path) -> list[str]:
     return errors
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    raw_argv = sys.argv[1:] if argv is None else argv
+    fixture_arg_provided = any(
+        arg == "--fixtures" or arg.startswith("--fixtures=") for arg in raw_argv
+    )
     parser = argparse.ArgumentParser(description="Validate CV-TXCTX.json schema")
     parser.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
     parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA)
-    args = parser.parse_args()
+    args = parser.parse_args(raw_argv)
 
     if not args.fixtures.exists():
+        if args.fixtures == DEFAULT_FIXTURES and not fixture_arg_provided:
+            print(f"SKIP: default CV-TXCTX fixture retired: {args.fixtures}")
+            return 0
         print(f"FAIL: fixture file not found: {args.fixtures}", file=sys.stderr)
         return 1
     if not args.schema.exists():

@@ -72,7 +72,14 @@ const invariants = [
   { id: "REG_VAULT", re: /0x0101` `CORE_VAULT/, desc: "registry: CORE_VAULT = 0x0101" },
   { id: "REG_DA_COMMIT", re: /0x0103` `CORE_DA_COMMIT/, desc: "registry: CORE_DA_COMMIT = 0x0103" },
   { id: "REG_MULTISIG", re: /0x0104` `CORE_MULTISIG/, desc: "registry: CORE_MULTISIG = 0x0104" },
-  { id: "REG_0102_CORE_EXT", re: /0x0102` `CORE_EXT/, desc: "registry: CORE_EXT = 0x0102" },
+  {
+    id: "REG_0102_DISPOSITION",
+    any: [
+      /0x0102`\s+`CORE_EXT/,
+      /0x0102`\s+\*\(unassigned[^)]*TX_ERR_COVENANT_TYPE_INVALID[^)]*\)\*/i,
+    ],
+    desc: "registry: 0x0102 is recognized during the CORE_EXT removal window",
+  },
   { id: "RULE_CLAMP_POW_LIMIT", re: /min\(target_old \* 4,\s*POW_LIMIT\)/, desc: "retarget clamp uses POW_LIMIT" },
   { id: "RULE_TARGET_RANGE", re: /1 <= target <= POW_LIMIT/, desc: "target range bound present" },
   { id: "RULE_320_BIT", re: /320-bit/, desc: "320-bit arithmetic requirement present" },
@@ -86,7 +93,8 @@ const invariants = [
 
 let failed = 0;
 for (const inv of invariants) {
-  if (!inv.re.test(spec)) {
+  const patterns = inv.any || [inv.re];
+  if (!patterns.some((pattern) => pattern.test(spec))) {
     console.error(`FAIL [${inv.id}] ${inv.desc}`);
     failed += 1;
   }
