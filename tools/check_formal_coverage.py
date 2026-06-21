@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -35,11 +36,72 @@ REQUIRED_SECTION_KEYS = {
     "block_validation_order",
     "parallel_validation_equivalence",
 }
+THEOREM_DECL_RE = re.compile(r"^\s*theorem\s+([A-Za-z_][A-Za-z0-9_']*)\b", re.MULTILINE)
+NAMESPACE_RE = re.compile(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*)\b")
+END_RE = re.compile(r"^\s*end(?:\s+([A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*))?\s*$")
 
 
 def fail(msg: str) -> int:
     print(f"ERROR: {msg}", file=sys.stderr)
     return 1
+
+
+def declared_lean_theorems(lean_root: Path) -> set[str]:
+    names: set[str] = set()
+    for path in lean_root.rglob("*.lean"):
+        namespace_stack: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if match := NAMESPACE_RE.match(line):
+                namespace_stack.append(match.group(1))
+                continue
+            if END_RE.match(line):
+                if namespace_stack:
+                    namespace_stack.pop()
+                continue
+            if match := THEOREM_DECL_RE.match(line):
+                theorem_name = match.group(1)
+                namespace = ".".join(namespace_stack)
+                names.add(f"{namespace}.{theorem_name}" if namespace else theorem_name)
+    return names
+
+
+def validate_coverage_summary(coverage: dict, rows: list[dict]) -> list[str]:
+    summary = coverage.get("coverage_summary")
+    if not isinstance(summary, dict):
+        return ["missing coverage_summary{} in rubin-formal/proof_coverage.json"]
+
+    status_counts = {status: 0 for status in ALLOWED_STATUS}
+    theorem_refs: list[str] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            return [f"coverage_summary cannot inspect non-object coverage[{index}]"]
+        status = row.get("status")
+        if status in status_counts:
+            status_counts[status] += 1
+        theorems = row.get("theorems", [])
+        if isinstance(theorems, list):
+            theorem_refs.extend(t for t in theorems if isinstance(t, str))
+
+    unique_theorems = sorted(set(theorem_refs))
+    reused_theorems = sorted(t for t in unique_theorems if theorem_refs.count(t) > 1)
+    expected = {
+        "section_rows": len(rows),
+        "proved_rows": status_counts["proved"],
+        "stated_rows": status_counts["stated"],
+        "deferred_rows": status_counts["deferred"],
+        "theorem_references": len(theorem_refs),
+        "unique_theorem_names": len(unique_theorems),
+        "reused_theorem_names": reused_theorems,
+    }
+
+    errors: list[str] = []
+    for key, value in expected.items():
+        if summary.get(key) != value:
+            errors.append(f"coverage_summary.{key} drift: expected {value!r}, got {summary.get(key)!r}")
+    rule = summary.get("counting_rule")
+    if not isinstance(rule, str) or "unique_theorem_names" not in rule:
+        errors.append("coverage_summary.counting_rule must explain theorem reference vs unique theorem-name counting")
+    return errors
 
 
 def main() -> int:
@@ -98,6 +160,13 @@ def main() -> int:
     rows = coverage.get("coverage")
     if not isinstance(rows, list):
         return fail("coverage[]. list is missing in proof_coverage.json")
+    declared_theorems = declared_lean_theorems(repo_root / "rubin-formal" / "RubinFormal")
+
+    summary_errors = validate_coverage_summary(coverage, rows)
+    if summary_errors:
+        for err in summary_errors:
+            print(f"ERROR: {err}", file=sys.stderr)
+        return 1
 
     seen_keys: set[str] = set()
     bad = False
@@ -132,6 +201,15 @@ def main() -> int:
             if not isinstance(theorems, list) or len(theorems) == 0:
                 print(f"ERROR: {key} has status={status} but empty theorems[]", file=sys.stderr)
                 bad = True
+        if isinstance(theorems, list):
+            for theorem_ref in theorems:
+                if not isinstance(theorem_ref, str) or not theorem_ref:
+                    print(f"ERROR: {key} has invalid theorem reference: {theorem_ref}", file=sys.stderr)
+                    bad = True
+                    continue
+                if theorem_ref not in declared_theorems:
+                    print(f"ERROR: {key} references missing Lean theorem declaration: {theorem_ref}", file=sys.stderr)
+                    bad = True
 
         if not isinstance(file_path, str) or not file_path:
             print(f"ERROR: {key} has missing file path", file=sys.stderr)
@@ -153,8 +231,8 @@ def main() -> int:
         return 1
 
     # Conformance fixture → Lean replay coverage check.
-    # Policy: every CV-*.json fixture MUST have a matching Lean vectors+replay module
-    # imported by Conformance/Index.lean, and a gate theorem named:
+    # Policy: every replay-covered CV-*.json fixture MUST have a matching Lean
+    # vectors+replay module imported by Conformance/Index.lean, and a gate theorem named:
     #   cv_<gate_snake>_vectors_pass
     #
     # This prevents silently adding fixtures without formal replay coverage.
@@ -180,6 +258,8 @@ def main() -> int:
         return fail("no CV-*.json fixtures found in conformance/fixtures")
 
     conf_bad = False
+    replay_fixture_files: list[Path] = []
+    skipped_fixture_files: list[Path] = []
     for p in fixture_files:
         fixture = json.loads(p.read_text(encoding="utf-8"))
         gate = fixture.get("gate")
@@ -188,7 +268,9 @@ def main() -> int:
             conf_bad = True
             continue
         if any(gate.startswith(prefix) for prefix in FORMAL_SKIP_GATE_PREFIXES):
+            skipped_fixture_files.append(p)
             continue
+        replay_fixture_files.append(p)
 
         camel = gate_to_camel(gate)
         snake = gate_to_snake(gate)
@@ -231,8 +313,9 @@ def main() -> int:
 
     print(
         f"OK: formal coverage baseline is consistent "
-        f"({len(seen_keys)} pinned section keys), "
-        f"{len(fixture_files)} conformance fixtures covered by Lean replay, "
+        f"({len(seen_keys)} section rows), "
+        f"{len(replay_fixture_files)} replay-covered conformance fixtures "
+        f"({len(skipped_fixture_files)} runtime/parallel-only fixtures skipped), "
         f"proof_level={proof_level}, claim_level={claim_level}."
     )
     return 0
