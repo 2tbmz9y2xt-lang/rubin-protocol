@@ -4,7 +4,7 @@
   "claim_level": "refined",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
-  "spec_section_hashes_sha3_256": "f7862a144ae9a62bbe0cf6ca721a3768c65c4a3ee34f6530e4919d063b14a70f",
+  "spec_section_hashes_sha3_256": "b87095c482a8c404c77069325191efec80966f22a1f829a0eed4c10f133dc8ab",
   "coverage_summary": {
     "section_rows": 18,
     "proved_rows": 11,
