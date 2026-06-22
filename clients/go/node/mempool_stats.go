@@ -40,8 +40,14 @@ type MempoolAdmissionCounts struct {
 }
 
 type MempoolConfig struct {
-	MaxTransactions          int
-	MaxBytes                 int
+	MaxTransactions int
+	MaxBytes        int
+	// PolicyMaxDaBytesPerBlock caps the declared DA bytes of a DA_COMMIT
+	// transaction admitted to mempool/relay policy. The value is derived from
+	// DaCommitCore.ChunkCount * CHUNK_BYTES, not caller-supplied payload bytes.
+	// A zero value is treated as omitted and normalized to the miner policy
+	// default so partial configs do not accidentally disable the budget.
+	PolicyMaxDaBytesPerBlock uint64
 	PolicyDaSurchargePerByte uint64
 	// MinDaFeeRate is the spec-side per-byte DA fee floor
 	// (POLICY_MEMPOOL_ADMISSION_GENESIS.md Stage C `min_da_fee_rate`,
@@ -101,6 +107,7 @@ func DefaultMempoolConfig() MempoolConfig {
 	return MempoolConfig{
 		MaxTransactions:                      DefaultMempoolMaxTransactions,
 		MaxBytes:                             DefaultMempoolMaxBytes,
+		PolicyMaxDaBytesPerBlock:             minerDefaults.PolicyMaxDaBytesPerBlock,
 		PolicyDaSurchargePerByte:             minerDefaults.PolicyDaSurchargePerByte,
 		MinDaFeeRate:                         DefaultMinDaFeeRate,
 		PolicyRejectNonCoinbaseAnchorOutputs: minerDefaults.PolicyRejectNonCoinbaseAnchorOutputs,
@@ -134,6 +141,9 @@ func normalizeMempoolConfig(cfg MempoolConfig) MempoolConfig {
 	}
 	if cfg.MaxBytes <= 0 {
 		cfg.MaxBytes = DefaultMempoolMaxBytes
+	}
+	if cfg.PolicyMaxDaBytesPerBlock == 0 {
+		cfg.PolicyMaxDaBytesPerBlock = DefaultMinerConfig().PolicyMaxDaBytesPerBlock
 	}
 	if cfg.MinDaFeeRate == 0 {
 		cfg.MinDaFeeRate = DefaultMinDaFeeRate

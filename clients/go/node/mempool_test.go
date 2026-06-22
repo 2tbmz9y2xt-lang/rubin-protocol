@@ -1207,6 +1207,125 @@ func TestMempoolPolicyAllowsSufficientFeeDaCommit(t *testing.T) {
 	}
 }
 
+func TestMempoolPolicyRejectsDaCommitDeclaredChunkBudget(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		PolicyMaxDaBytesPerBlock: consensus.CHUNK_BYTES - 1,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	txBytes := mustBuildSignedDaCommitTxWithChunkCount(t, st.Utxos, outpoints[0], 50_000, 950_000, 1, fromKey, toAddress, 1, []byte("0123456789"))
+	err = mp.AddTx(txBytes)
+	if err == nil || !strings.Contains(err.Error(), "DA declared chunk budget exceeded") {
+		t.Fatalf("expected DA declared chunk budget rejection, got %v", err)
+	}
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) || txErr.Kind != TxAdmitRejected {
+		t.Fatalf("over-budget DA err=%v, want TxAdmitRejected", err)
+	}
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("mempool len=%d after rejected AddTx, want 0", got)
+	}
+	if got := mp.BytesUsed(); got != 0 {
+		t.Fatalf("mempool bytes=%d after rejected AddTx, want 0", got)
+	}
+	if mp.lastAdmissionSeq != 0 {
+		t.Fatalf("rejected AddTx consumed admission_seq=%d, want 0", mp.lastAdmissionSeq)
+	}
+	counts := mp.AdmissionCounts()
+	if counts.Rejected != 1 || counts.Accepted != 0 || counts.Conflict != 0 || counts.Unavailable != 0 {
+		t.Fatalf("admission counts=%+v, want one rejected AddTx", counts)
+	}
+
+	_, err = mp.RelayMetadata(txBytes)
+	if !errors.As(err, &txErr) || txErr.Kind != TxAdmitRejected {
+		t.Fatalf("RelayMetadata over-budget err=%T %v, want TxAdmitRejected", err, err)
+	}
+	if !strings.Contains(txErr.Message, "DA declared chunk budget exceeded") {
+		t.Fatalf("RelayMetadata reason=%q, want declared chunk budget rejection", txErr.Message)
+	}
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("RelayMetadata mutated mempool len=%d, want 0", got)
+	}
+	if got := mp.BytesUsed(); got != 0 {
+		t.Fatalf("RelayMetadata mutated mempool bytes=%d, want 0", got)
+	}
+	if mp.lastAdmissionSeq != 0 {
+		t.Fatalf("RelayMetadata consumed admission_seq=%d, want 0", mp.lastAdmissionSeq)
+	}
+}
+
+func TestMempoolPolicyAllowsDaCommitAtDeclaredChunkBudget(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		PolicyMaxDaBytesPerBlock: consensus.CHUNK_BYTES,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	txBytes := mustBuildSignedDaCommitTxWithChunkCount(t, st.Utxos, outpoints[0], 50_000, 950_000, 1, fromKey, toAddress, 1, []byte("0123456789"))
+	if _, err := mp.RelayMetadata(txBytes); err != nil {
+		t.Fatalf("RelayMetadata at budget: %v", err)
+	}
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("RelayMetadata inserted tx; mempool len=%d, want 0", got)
+	}
+	if err := mp.AddTx(txBytes); err != nil {
+		t.Fatalf("AddTx at budget: %v", err)
+	}
+	if got := mp.Len(); got != 1 {
+		t.Fatalf("mempool len=%d, want 1", got)
+	}
+}
+
+func TestMempoolAdmissionSourceWrappersRejectDaCommitDeclaredBudget(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	cases := []struct {
+		name  string
+		admit func(*Mempool, []byte) error
+	}{
+		{name: "local", admit: func(mp *Mempool, tx []byte) error { return mp.AddTx(tx) }},
+		{name: "remote", admit: func(mp *Mempool, tx []byte) error { return mp.AddRemoteTx(tx) }},
+		{name: "reorg", admit: func(mp *Mempool, tx []byte) error { return mp.AddReorgTx(tx) }},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+			mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+				PolicyMaxDaBytesPerBlock: consensus.CHUNK_BYTES - 1,
+			})
+			if err != nil {
+				t.Fatalf("new mempool: %v", err)
+			}
+			txBytes := mustBuildSignedDaCommitTxWithChunkCount(t, st.Utxos, outpoints[0], 50_000, 950_000, uint64(i+1), fromKey, toAddress, 1, []byte("0123456789"))
+			err = tc.admit(mp, txBytes)
+			if err == nil || !strings.Contains(err.Error(), "DA declared chunk budget exceeded") {
+				t.Fatalf("expected DA declared chunk budget rejection, got %v", err)
+			}
+			if got := mp.Len(); got != 0 {
+				t.Fatalf("mempool len=%d, want 0", got)
+			}
+		})
+	}
+}
+
 // TestMempoolPartialConfigBackfillsMinDaFeeRateAndAdmitsSufficientDaTx
 // pins the default-config path for PR #1368: a partial MempoolConfig
 // literal is interpreted as defaults plus overrides, so an omitted
@@ -1288,6 +1407,9 @@ func TestMempoolConfigZeroMinDaFeeRateMeansDefault(t *testing.T) {
 	}
 	if got := mp.policy.MinDaFeeRate; got != DefaultMinDaFeeRate {
 		t.Fatalf("MinDaFeeRate=%d, want DefaultMinDaFeeRate=%d", got, DefaultMinDaFeeRate)
+	}
+	if got, want := mp.policy.PolicyMaxDaBytesPerBlock, DefaultMinerConfig().PolicyMaxDaBytesPerBlock; got != want {
+		t.Fatalf("PolicyMaxDaBytesPerBlock=%d, want default %d", got, want)
 	}
 	if got := mp.policy.PolicyDaSurchargePerByte; got != 2 {
 		t.Fatalf("PolicyDaSurchargePerByte=%d, want 2", got)
@@ -4222,6 +4344,22 @@ func mustBuildSignedDaCommitTx(
 	manifest []byte,
 ) []byte {
 	t.Helper()
+	return mustBuildSignedDaCommitTxWithChunkCount(t, utxos, input, amount, fee, nonce, signer, toAddress, 1, manifest)
+}
+
+func mustBuildSignedDaCommitTxWithChunkCount(
+	t *testing.T,
+	utxos map[consensus.Outpoint]consensus.UtxoEntry,
+	input consensus.Outpoint,
+	amount uint64,
+	fee uint64,
+	nonce uint64,
+	signer *consensus.MLDSA87Keypair,
+	toAddress []byte,
+	chunkCount uint16,
+	manifest []byte,
+) []byte {
+	t.Helper()
 	tx := &consensus.Tx{
 		Version: 1,
 		TxKind:  0x01,
@@ -4239,7 +4377,7 @@ func mustBuildSignedDaCommitTx(
 		Locktime:  0,
 		DaPayload: append([]byte(nil), manifest...),
 		DaCommitCore: &consensus.DaCommitCore{
-			ChunkCount:  1,
+			ChunkCount:  chunkCount,
 			BatchNumber: 1,
 		},
 	}

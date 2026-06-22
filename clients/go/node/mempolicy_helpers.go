@@ -59,6 +59,9 @@ func extractTxInputs(checked *consensus.CheckedTransaction) []consensus.Outpoint
 
 // applyPolicyAgainstStateDA handles DA fee policy application
 func applyPolicyAgainstStateDA(checked *consensus.CheckedTransaction, policy MempoolConfig, utxos map[consensus.Outpoint]consensus.UtxoEntry) error {
+	if err := rejectDaCommitDeclaredBudget(checked.Tx, policy.PolicyMaxDaBytesPerBlock); err != nil {
+		return err
+	}
 	// Stage C DA fee policy: only enter the helper for DA-bearing tx when
 	// the DA-side floor is configured (MinDaFeeRate > 0) or a per-byte
 	// surcharge applies. Non-DA tx skip the helper entirely on the hot
@@ -94,6 +97,20 @@ func applyPolicyAgainstStateDA(checked *consensus.CheckedTransaction, policy Mem
 		if reject {
 			return txAdmitRejected(reason)
 		}
+	}
+	return nil
+}
+
+func rejectDaCommitDeclaredBudget(tx *consensus.Tx, maxDaBytesPerBlock uint64) error {
+	if tx == nil || tx.TxKind != 0x01 || tx.DaCommitCore == nil {
+		return nil
+	}
+	declaredDaBytes, err := mulU64NoOverflow(uint64(tx.DaCommitCore.ChunkCount), consensus.CHUNK_BYTES)
+	if err != nil {
+		return fmt.Errorf("DA declared chunk budget overflow (chunk_count=%d chunk_bytes=%d): %w", tx.DaCommitCore.ChunkCount, consensus.CHUNK_BYTES, err)
+	}
+	if maxDaBytesPerBlock > 0 && declaredDaBytes > maxDaBytesPerBlock {
+		return fmt.Errorf("DA declared chunk budget exceeded (declared_da_bytes=%d max_da_bytes=%d chunk_count=%d chunk_bytes=%d)", declaredDaBytes, maxDaBytesPerBlock, tx.DaCommitCore.ChunkCount, consensus.CHUNK_BYTES)
 	}
 	return nil
 }
