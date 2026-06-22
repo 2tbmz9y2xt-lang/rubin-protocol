@@ -1,6 +1,3 @@
-mod txctx_governance;
-mod txctx_harness;
-
 use num_bigint::BigUint;
 use num_traits::Zero;
 use rubin_consensus::constants::{
@@ -12,17 +9,17 @@ use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
     block_hash, compact_shortid,
     connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context,
-    core_ext_profile_set_anchor_v1, featurebit_state_at_height_from_window_counts,
-    flagday_active_at_height, merkle_root_txids, parse_core_ext_covenant_data, parse_tx, pow_check,
-    retarget_v1, retarget_v1_clamped, sighash_v1_digest, simplicity, tx_weight_and_stats_at_height,
-    tx_weight_and_stats_public, validate_block_basic_with_context_and_fees_at_height,
+    featurebit_state_at_height_from_window_counts, flagday_active_at_height, merkle_root_txids,
+    parse_tx, pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest, simplicity,
+    tx_weight_and_stats_at_height, tx_weight_and_stats_public,
+    validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_htlc_spend,
     validate_rotation_descriptor_for_network, validate_rotation_set_for_network,
-    validate_tx_covenants_genesis, work_from_target, CoreExtDeploymentProfile,
-    CoreExtDeploymentProfiles, CryptoRotationDescriptor, DescriptorRotationProvider, ErrorCode,
-    FeatureBitDeployment, FeatureBitState, FlagDayDeployment, HtlcSpendContext, InMemoryChainState,
-    Outpoint, RotationProvider, SuiteParams, SuiteRegistry, Tx, TxInput, TxOutput, UtxoEntry,
-    WitnessItem, ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
+    validate_tx_covenants_genesis, work_from_target, CoreExtDeploymentProfiles, CoreExtProfiles,
+    CryptoRotationDescriptor, DescriptorRotationProvider, ErrorCode, FeatureBitDeployment,
+    FeatureBitState, FlagDayDeployment, HtlcSpendContext, InMemoryChainState, Outpoint,
+    RotationProvider, SuiteParams, SuiteRegistry, Tx, TxInput, TxOutput, UtxoEntry, WitnessItem,
+    ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
     ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM,
 };
 use rubin_node::{devnet_genesis_chain_id, ChainState, TxPool, TxPoolAdmitErrorKind, TxPoolConfig};
@@ -30,9 +27,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha3::{Digest, Sha3_256};
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
-use txctx_governance::run_txctx_governance_vector;
-use txctx_harness::{run_txctx_spend_vector, TxctxCase};
+use std::collections::HashMap;
 
 const ROTATION_DESCRIPTOR_NOT_ACTIVATED_ERR: &str = "descriptor-not-activated";
 const ROTATION_TOO_MANY_DESCRIPTORS_ERR: &str = "rotation-too-many-descriptors";
@@ -109,9 +104,6 @@ struct Request {
     network: String,
 
     #[serde(default)]
-    txctx_case: Option<TxctxCase>,
-
-    #[serde(default)]
     tx_hex: String,
 
     #[serde(default)]
@@ -178,7 +170,7 @@ struct Request {
     utxos: Vec<UtxoJson>,
 
     #[serde(default)]
-    core_ext_profiles: Vec<CoreExtProfileJson>,
+    core_ext_profiles: Vec<Value>,
 
     #[serde(default)]
     core_ext_profile_set_anchor_hex: String,
@@ -200,9 +192,6 @@ struct Request {
 
     #[serde(default)]
     activation_height: Option<u64>,
-
-    #[serde(default)]
-    transition_height: Option<u64>,
 
     #[serde(default)]
     window_signal_counts: Vec<u32>,
@@ -505,12 +494,6 @@ struct Request {
     orphan_pool_fill_pct: f64,
 
     #[serde(default)]
-    artifact_hex: String,
-
-    #[serde(default)]
-    expected_artifact_hash_hex: String,
-
-    #[serde(default)]
     program_hex: String,
 
     #[serde(default)]
@@ -533,12 +516,6 @@ struct Request {
 
     #[serde(default)]
     frame_bit_widths: Vec<u64>,
-
-    #[serde(default)]
-    dependency_checklists: Vec<TxctxDependencyChecklistJson>,
-
-    #[serde(default)]
-    mempool_txctx_confirmed: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -550,84 +527,6 @@ struct UtxoJson {
     covenant_data: String,
     creation_height: u64,
     created_by_coinbase: bool,
-}
-
-#[derive(Deserialize, Default)]
-struct CoreExtProfileJson {
-    #[serde(default)]
-    ext_id: u16,
-    #[serde(default)]
-    activation_height: u64,
-    #[serde(default, deserialize_with = "deserialize_boolish")]
-    tx_context_enabled: bool,
-    #[serde(default)]
-    allowed_suite_ids: Vec<u8>,
-    #[serde(default)]
-    // Governance vectors deserialize the full profile shape even though this bitset
-    // is consumed by the spend-time harness lane, not by governance checks.
-    #[allow(dead_code)]
-    allowed_sighash_set: u8,
-    #[serde(default)]
-    max_ext_payload_bytes: i64,
-    #[serde(default)]
-    binding: String,
-    #[serde(default)]
-    binding_descriptor_hex: String,
-    #[serde(default)]
-    ext_payload_schema_hex: String,
-    #[serde(default)]
-    governance_nonce: u64,
-}
-
-fn deserialize_boolish<'de, D>(deserializer: D) -> Result<bool, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Boolish {
-        Bool(bool),
-        Int(u8),
-    }
-
-    match Boolish::deserialize(deserializer)? {
-        Boolish::Bool(value) => Ok(value),
-        Boolish::Int(0) => Ok(false),
-        Boolish::Int(1) => Ok(true),
-        Boolish::Int(_) => Err(serde::de::Error::custom(
-            "tx_context_enabled must be bool or 0/1",
-        )),
-    }
-}
-
-#[derive(Clone, Deserialize, Default)]
-struct TxctxDependencyInputsJson {
-    #[serde(default)]
-    self_input_value: bool,
-    #[serde(default)]
-    ctx_base_height: bool,
-    #[serde(default)]
-    ctx_base_total_in: bool,
-    #[serde(default)]
-    ctx_continuing_outputs: bool,
-}
-
-#[derive(Clone, Deserialize, Default)]
-struct TxctxDependencyChecklistJson {
-    #[serde(default)]
-    profile_ext_id: String,
-    #[serde(default)]
-    spec_document: String,
-    #[serde(default)]
-    txcontext_inputs_used: TxctxDependencyInputsJson,
-    #[serde(default)]
-    sighash_types_required: Vec<String>,
-    #[serde(default)]
-    max_ext_payload_bytes: i64,
-    #[serde(default)]
-    verifier_side_effects: String,
-    #[serde(default)]
-    reviewer: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -1173,22 +1072,6 @@ fn value_as_string(v: &Value, def: &str) -> String {
         .unwrap_or_else(|| def.to_string())
 }
 
-fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String> {
-    const MAX_CORE_EXT_HEX_FIELD_BYTES: usize = 4096;
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Ok(Vec::new());
-    }
-    let trimmed = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-        .unwrap_or(trimmed);
-    if trimmed.len() > MAX_CORE_EXT_HEX_FIELD_BYTES * 2 {
-        return Err(format!("bad {name}"));
-    }
-    hex::decode(trimmed).map_err(|_| format!("bad {name}"))
-}
-
 fn normalize_suite_alg_name(value: &str) -> Result<&'static str, String> {
     const CANONICAL_SUITE_ALG_NAME: &str = "ML-DSA-87";
     let trimmed = value.trim();
@@ -1246,27 +1129,6 @@ fn build_suite_registry_from_json(
     }
 
     Ok(Some(SuiteRegistry::with_suites(suites)))
-}
-
-fn parse_optional_chain_id_hex(chain_id: &str) -> Result<[u8; 32], String> {
-    let trimmed = chain_id.trim();
-    if trimmed.is_empty() {
-        return Ok([0u8; 32]);
-    }
-    let trimmed = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-        .unwrap_or(trimmed);
-    if trimmed.len() != 64 {
-        return Err("bad chain_id".to_string());
-    }
-    let bytes = hex::decode(trimmed).map_err(|_| "bad chain_id".to_string())?;
-    if bytes.len() != 32 {
-        return Err("bad chain_id".to_string());
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
 }
 
 fn decode_optional_simplicity_hex(
@@ -1916,60 +1778,17 @@ fn relay_metadata_parse_reject(message: &str) -> bool {
         || message.contains("trailing bytes after canonical tx")
 }
 
-fn core_ext_profiles_from_json(
-    items: &[CoreExtProfileJson],
-    chain_id: [u8; 32],
+fn reject_core_ext_profiles_from_json(
+    items: &[Value],
     expected_set_anchor_hex: &str,
-) -> Result<CoreExtDeploymentProfiles, String> {
-    let mut deployments = Vec::with_capacity(items.len());
-    let mut ext_ids = HashSet::new();
-    for item in items {
-        let binding_name = rubin_consensus::normalize_core_ext_binding_name(item.binding.trim())?;
-        if !ext_ids.insert(item.ext_id) {
-            return Err(format!(
-                "duplicate core_ext deployment for ext_id={}",
-                item.ext_id
-            ));
-        }
-        if item.tx_context_enabled {
-            return Err(format!(
-                "tx_context_enabled core_ext profile for ext_id={} requires runtime txcontext verifier wiring",
-                item.ext_id
-            ));
-        }
-        let binding_descriptor =
-            decode_optional_hex_bytes("binding_descriptor_hex", &item.binding_descriptor_hex)?;
-        let ext_payload_schema =
-            decode_optional_hex_bytes("ext_payload_schema_hex", &item.ext_payload_schema_hex)?;
-        let binding =
-            rubin_consensus::core_ext_verification_binding_from_normalized_name_and_descriptor(
-                binding_name,
-                &binding_descriptor,
-                &ext_payload_schema,
-            )?;
-        deployments.push(CoreExtDeploymentProfile {
-            ext_id: item.ext_id,
-            activation_height: item.activation_height,
-            tx_context_enabled: item.tx_context_enabled,
-            allowed_suite_ids: item.allowed_suite_ids.clone(),
-            verification_binding: binding,
-            verify_sig_ext_tx_context_fn: None,
-            binding_descriptor,
-            ext_payload_schema,
-            governance_nonce: item.governance_nonce,
-        });
-    }
-    let profiles = CoreExtDeploymentProfiles { deployments };
-    profiles.validate()?;
+) -> Result<(), String> {
     if !expected_set_anchor_hex.trim().is_empty() {
-        let expected = parse_optional_chain_id_hex(expected_set_anchor_hex)
-            .map_err(|_| "bad core_ext_profile_set_anchor_hex".to_string())?;
-        let actual = core_ext_profile_set_anchor_v1(chain_id, &profiles.deployments)?;
-        if actual != expected {
-            return Err("core_ext profile set anchor mismatch".to_string());
-        }
+        return Err("core_ext_profile_set_anchor_hex unsupported by Rust runtime".to_string());
     }
-    Ok(profiles)
+    if !items.is_empty() {
+        return Err("core_ext_profiles unsupported by Rust runtime".to_string());
+    }
+    Ok(())
 }
 
 fn build_core_ext_suite_context(
@@ -2139,14 +1958,6 @@ fn main() {
     };
 
     match req.op.as_str() {
-        "txctx_spend_vector" => {
-            let resp = run_txctx_spend_vector(req.txctx_case);
-            let _ = serde_json::to_writer(std::io::stdout(), &resp);
-        }
-        "txctx_governance_vector" => {
-            let resp = run_txctx_governance_vector(&req);
-            let _ = serde_json::to_writer(std::io::stdout(), &resp);
-        }
         "simplicity_exec_vector" => {
             let resp = run_simplicity_exec_vector(&req);
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
@@ -3608,22 +3419,19 @@ fn main() {
                 chain_id.copy_from_slice(&b);
             }
 
-            let core_ext_deployments = match core_ext_profiles_from_json(
+            if let Err(e) = reject_core_ext_profiles_from_json(
                 &req.core_ext_profiles,
-                chain_id,
                 &req.core_ext_profile_set_anchor_hex,
             ) {
-                Ok(v) => v,
-                Err(e) => {
-                    let resp = Response {
-                        ok: false,
-                        err: Some(e),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                    return;
-                }
-            };
+                let resp = Response {
+                    ok: false,
+                    err: Some(e),
+                    ..Default::default()
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
+            let core_ext_deployments = CoreExtDeploymentProfiles::empty();
 
             let (rotation, registry) = match build_core_ext_suite_context(&req) {
                 Ok(v) => v,
@@ -3931,22 +3739,18 @@ fn main() {
                 }
                 chain_id.copy_from_slice(&b);
             }
-            let core_ext_deployments = match core_ext_profiles_from_json(
+            if let Err(e) = reject_core_ext_profiles_from_json(
                 &req.core_ext_profiles,
-                chain_id,
                 &req.core_ext_profile_set_anchor_hex,
             ) {
-                Ok(v) => v,
-                Err(e) => {
-                    let resp = Response {
-                        ok: false,
-                        err: Some(e),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                    return;
-                }
-            };
+                let resp = Response {
+                    ok: false,
+                    err: Some(e),
+                    ..Default::default()
+                };
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
+            }
             let (rotation, registry) = match build_core_ext_suite_context(&req) {
                 Ok(v) => v,
                 Err(e) => {
@@ -3959,19 +3763,7 @@ fn main() {
                     return;
                 }
             };
-            let core_ext_profiles = match core_ext_deployments.active_profiles_at_height(req.height)
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    let resp = Response {
-                        ok: false,
-                        err: Some(err_code(e.code)),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                    return;
-                }
-            };
+            let core_ext_profiles = CoreExtProfiles::empty();
 
             let apply_result =
                 apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
@@ -5360,144 +5152,6 @@ fn main() {
             };
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
-        "ext_envelope_parse" => {
-            let cov_bytes = match hex::decode(&req.covenant_data_hex) {
-                Ok(v) => v,
-                Err(_) => {
-                    let resp = Response {
-                        ok: false,
-                        err: Some("bad covenant_data hex".to_string()),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                    return;
-                }
-            };
-            match parse_core_ext_covenant_data(&cov_bytes) {
-                Ok(parsed) => {
-                    let resp = Response {
-                        ok: true,
-                        ext_id: Some(parsed.ext_id),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                }
-                Err(e) => {
-                    let resp = Response {
-                        ok: false,
-                        err: Some(err_code(e.code)),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                }
-            }
-        }
-        "ext_activation_check"
-        | "ext_pre_activation_spend"
-        | "ext_enforcement_check"
-        | "ext_error_priority" => {
-            let cov_bytes = match hex::decode(&req.covenant_data_hex) {
-                Ok(v) => v,
-                Err(_) => {
-                    let resp = Response {
-                        ok: false,
-                        err: Some("bad covenant_data hex".to_string()),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                    return;
-                }
-            };
-            let parsed = match parse_core_ext_covenant_data(&cov_bytes) {
-                Ok(p) => p,
-                Err(e) => {
-                    let resp = Response {
-                        ok: false,
-                        err: Some(err_code(e.code)),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                    return;
-                }
-            };
-            let chain_id = match parse_optional_chain_id_hex(&req.chain_id) {
-                Ok(v) => v,
-                Err(e) => {
-                    let resp = Response {
-                        ok: false,
-                        err: Some(e),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                    return;
-                }
-            };
-            let profiles = match core_ext_profiles_from_json(
-                &req.core_ext_profiles,
-                chain_id,
-                &req.core_ext_profile_set_anchor_hex,
-            ) {
-                Ok(p) => p,
-                Err(e) => {
-                    let resp = Response {
-                        ok: false,
-                        err: Some(e),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                    return;
-                }
-            };
-            let snap = match profiles.active_profiles_at_height(req.height) {
-                Ok(s) => s,
-                Err(e) => {
-                    let resp = Response {
-                        ok: false,
-                        err: Some(err_code(e.code)),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                    return;
-                }
-            };
-            if let Some(profile) = snap.active.iter().find(|p| p.ext_id == parsed.ext_id) {
-                let suite_id = req.suite_id.unwrap_or(0);
-                if suite_id != 0 && !profile.allowed_suite_ids.contains(&suite_id) {
-                    let resp = Response {
-                        ok: false,
-                        err: Some("TX_ERR_SIG_ALG_INVALID".to_string()),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                    return;
-                }
-            }
-            let resp = Response {
-                ok: true,
-                ext_id: Some(parsed.ext_id),
-                ..Default::default()
-            };
-            let _ = serde_json::to_writer(std::io::stdout(), &resp);
-        }
-        "ext_duplicate_profile" => {
-            let mut seen = std::collections::HashSet::new();
-            for p in &req.core_ext_profiles {
-                if !seen.insert(p.ext_id) {
-                    let resp = Response {
-                        ok: false,
-                        err: Some("TX_ERR_COVENANT_TYPE_INVALID".to_string()),
-                        ..Default::default()
-                    };
-                    let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                    return;
-                }
-            }
-            let resp = Response {
-                ok: true,
-                ..Default::default()
-            };
-            let _ = serde_json::to_writer(std::io::stdout(), &resp);
-        }
         _ => {
             let resp = Response {
                 ok: false,
@@ -5858,248 +5512,34 @@ mod tests {
     }
 
     #[test]
-    fn core_ext_profiles_duplicate_rejected() {
-        let binding_descriptor =
-            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-                "ML-DSA-87",
-                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-            )
-            .expect("descriptor");
-        let err = core_ext_profiles_from_json(
-            &[
-                CoreExtProfileJson {
-                    ext_id: 7,
-                    activation_height: 0,
-                    tx_context_enabled: false,
-                    allowed_suite_ids: vec![3],
-                    allowed_sighash_set: 0,
-                    max_ext_payload_bytes: 0,
-                    binding:
-                        rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-                            .to_string(),
-                    binding_descriptor_hex: hex::encode(&binding_descriptor),
-                    ext_payload_schema_hex: "b2".to_string(),
-                    governance_nonce: 0,
-                },
-                CoreExtProfileJson {
-                    ext_id: 7,
-                    activation_height: 10,
-                    tx_context_enabled: false,
-                    allowed_suite_ids: vec![3],
-                    allowed_sighash_set: 0,
-                    max_ext_payload_bytes: 0,
-                    binding:
-                        rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-                            .to_string(),
-                    binding_descriptor_hex: hex::encode(binding_descriptor),
-                    ext_payload_schema_hex: "b2".to_string(),
-                    governance_nonce: 0,
-                },
-            ],
-            [0u8; 32],
-            "",
-        )
-        .unwrap_err();
-        assert!(err.contains("duplicate core_ext deployment"));
+    fn core_ext_profiles_empty_input_is_retired_noop() {
+        reject_core_ext_profiles_from_json(&[], "").expect("empty retired profile input");
     }
 
     #[test]
-    fn core_ext_profiles_height_gate() {
-        let binding_descriptor =
-            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-                "ML-DSA-87",
-                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-            )
-            .expect("descriptor");
-        let profiles = core_ext_profiles_from_json(
-            &[CoreExtProfileJson {
-                ext_id: 9,
-                activation_height: 42,
-                tx_context_enabled: false,
-                allowed_suite_ids: vec![3],
-                allowed_sighash_set: 0,
-                max_ext_payload_bytes: 0,
-                binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-                    .to_string(),
-                binding_descriptor_hex: hex::encode(binding_descriptor),
-                ext_payload_schema_hex: "b2".to_string(),
-                governance_nonce: 0,
-            }],
-            [0u8; 32],
-            "",
+    fn core_ext_profiles_non_empty_input_is_unsupported() {
+        let err = reject_core_ext_profiles_from_json(&[serde_json::json!({"ext_id": 9})], "")
+            .unwrap_err();
+        assert_eq!(err, "core_ext_profiles unsupported by Rust runtime");
+    }
+
+    #[test]
+    fn core_ext_profiles_legacy_json_deserializes_to_unsupported_error() {
+        let req: Request = serde_json::from_str(
+            r#"{"op":"utxo_apply_basic","core_ext_profiles":[{"ext_id":9,"tx_context_enabled":2}]}"#,
         )
-        .unwrap();
-        assert!(profiles
-            .active_profiles_at_height(41)
-            .unwrap()
-            .active
-            .is_empty());
+        .expect("legacy profile envelope should deserialize before fail-closed rejection");
+        let err = reject_core_ext_profiles_from_json(&req.core_ext_profiles, "").unwrap_err();
+        assert_eq!(err, "core_ext_profiles unsupported by Rust runtime");
+    }
+
+    #[test]
+    fn core_ext_profile_set_anchor_input_is_unsupported() {
+        let err = reject_core_ext_profiles_from_json(&[], "00").unwrap_err();
         assert_eq!(
-            profiles.active_profiles_at_height(42).unwrap().active.len(),
-            1
+            err,
+            "core_ext_profile_set_anchor_hex unsupported by Rust runtime"
         );
-    }
-
-    #[test]
-    fn core_ext_profiles_empty_allowed_suites_rejected() {
-        let binding_descriptor =
-            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-                "ML-DSA-87",
-                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-            )
-            .expect("descriptor");
-        let err = core_ext_profiles_from_json(
-            &[CoreExtProfileJson {
-                ext_id: 9,
-                activation_height: 42,
-                allowed_suite_ids: vec![],
-                binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-                    .to_string(),
-                binding_descriptor_hex: hex::encode(binding_descriptor),
-                ext_payload_schema_hex: "b2".to_string(),
-                ..Default::default()
-            }],
-            [0u8; 32],
-            "",
-        )
-        .unwrap_err();
-        assert!(err.contains("non-empty allowed_suite_ids"));
-    }
-
-    #[test]
-    fn core_ext_profiles_accept_openssl_digest32_binding() {
-        let binding_descriptor =
-            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-                "ML-DSA-87",
-                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-            )
-            .expect("descriptor");
-        let profiles = core_ext_profiles_from_json(
-            &[CoreExtProfileJson {
-                ext_id: 9,
-                activation_height: 42,
-                tx_context_enabled: false,
-                allowed_suite_ids: vec![3],
-                allowed_sighash_set: 0,
-                max_ext_payload_bytes: 0,
-                binding: format!(
-                    "  {}\n",
-                    rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-                ),
-                binding_descriptor_hex: hex::encode(binding_descriptor),
-                ext_payload_schema_hex: "b2".to_string(),
-                governance_nonce: 0,
-            }],
-            [0u8; 32],
-            "",
-        )
-        .expect("profiles");
-        assert_eq!(profiles.deployments.len(), 1);
-    }
-
-    #[test]
-    fn core_ext_profiles_reject_openssl_digest32_binding_without_payload_schema() {
-        let binding_descriptor =
-            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-                "ML-DSA-87",
-                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-            )
-            .expect("descriptor");
-        let err = core_ext_profiles_from_json(
-            &[CoreExtProfileJson {
-                ext_id: 9,
-                activation_height: 42,
-                allowed_suite_ids: vec![3],
-                allowed_sighash_set: 0,
-                max_ext_payload_bytes: 0,
-                binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-                    .to_string(),
-                binding_descriptor_hex: hex::encode(binding_descriptor),
-                ..Default::default()
-            }],
-            [0u8; 32],
-            "",
-        )
-        .unwrap_err();
-        assert!(err.contains("requires ext_payload_schema_hex"));
-    }
-
-    #[test]
-    fn core_ext_profiles_anchor_mismatch_rejected() {
-        let chain_id = [0x42; 32];
-        let binding_descriptor =
-            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-                "ML-DSA-87",
-                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-            )
-            .expect("descriptor");
-        let descriptor = rubin_consensus::parse_core_ext_openssl_digest32_binding_descriptor(
-            &binding_descriptor,
-        )
-        .expect("parse");
-        let mut expected = core_ext_profile_set_anchor_v1(
-            chain_id,
-            &[CoreExtDeploymentProfile {
-                ext_id: 9,
-                activation_height: 42,
-                tx_context_enabled: false,
-                allowed_suite_ids: vec![3],
-                verification_binding:
-                    rubin_consensus::CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
-                        descriptor,
-                    ),
-                verify_sig_ext_tx_context_fn: None,
-                binding_descriptor: binding_descriptor.clone(),
-                ext_payload_schema: vec![0xb2],
-                governance_nonce: 0,
-            }],
-        )
-        .expect("anchor");
-        expected[0] ^= 0xff;
-        let err = core_ext_profiles_from_json(
-            &[CoreExtProfileJson {
-                ext_id: 9,
-                activation_height: 42,
-                tx_context_enabled: false,
-                allowed_suite_ids: vec![3],
-                allowed_sighash_set: 0,
-                max_ext_payload_bytes: 0,
-                binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-                    .to_string(),
-                binding_descriptor_hex: hex::encode(binding_descriptor),
-                ext_payload_schema_hex: "b2".to_string(),
-                governance_nonce: 0,
-            }],
-            chain_id,
-            &hex::encode(expected),
-        )
-        .unwrap_err();
-        assert!(err.contains("anchor mismatch"));
-    }
-
-    #[test]
-    fn core_ext_profiles_empty_set_anchor_enforced() {
-        let chain_id = [0x42; 32];
-        let mut expected = core_ext_profile_set_anchor_v1(chain_id, &[]).expect("anchor");
-        let profiles =
-            core_ext_profiles_from_json(&[], chain_id, &hex::encode(expected)).expect("profiles");
-        assert!(profiles.deployments.is_empty());
-
-        expected[0] ^= 0xff;
-        let err = core_ext_profiles_from_json(&[], chain_id, &hex::encode(expected)).unwrap_err();
-        assert!(err.contains("anchor mismatch"));
-    }
-
-    #[test]
-    fn core_ext_profiles_reject_invalid_set_anchor_length() {
-        let err = core_ext_profiles_from_json(&[], [0u8; 32], "aa").unwrap_err();
-        assert_eq!(err, "bad core_ext_profile_set_anchor_hex");
     }
 
     #[test]
@@ -6348,114 +5788,5 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("bad suite_registry"));
-    }
-
-    #[test]
-    fn core_ext_profiles_reject_oversized_hex_fields() {
-        let err = core_ext_profiles_from_json(
-            &[CoreExtProfileJson {
-                ext_id: 9,
-                activation_height: 42,
-                tx_context_enabled: false,
-                allowed_suite_ids: vec![3],
-                allowed_sighash_set: 0,
-                max_ext_payload_bytes: 0,
-                binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-                    .to_string(),
-                binding_descriptor_hex: "aa".repeat(4097),
-                ext_payload_schema_hex: "b2".to_string(),
-                governance_nonce: 0,
-            }],
-            [0u8; 32],
-            "",
-        )
-        .unwrap_err();
-        assert_eq!(err, "bad binding_descriptor_hex");
-    }
-
-    #[test]
-    fn core_ext_profiles_reject_unsupported_binding_before_hex_decode() {
-        let err = core_ext_profiles_from_json(
-            &[CoreExtProfileJson {
-                ext_id: 9,
-                activation_height: 42,
-                tx_context_enabled: false,
-                allowed_suite_ids: vec![3],
-                allowed_sighash_set: 0,
-                max_ext_payload_bytes: 0,
-                binding: "unknown-binding".to_string(),
-                binding_descriptor_hex: "zz".to_string(),
-                ext_payload_schema_hex: "zz".to_string(),
-                governance_nonce: 0,
-            }],
-            [0u8; 32],
-            "",
-        )
-        .unwrap_err();
-        assert!(err.contains("unsupported core_ext binding"));
-    }
-
-    #[test]
-    fn core_ext_profiles_reject_tx_context_enabled_profile_without_runtime_verifier() {
-        let binding_descriptor =
-            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-                "ML-DSA-87",
-                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-            )
-            .expect("descriptor");
-        let err = core_ext_profiles_from_json(
-            &[CoreExtProfileJson {
-                ext_id: 9,
-                activation_height: 42,
-                tx_context_enabled: true,
-                allowed_suite_ids: vec![3],
-                binding: rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-                    .to_string(),
-                binding_descriptor_hex: hex::encode(binding_descriptor),
-                ext_payload_schema_hex: "b2".to_string(),
-                ..Default::default()
-            }],
-            [0u8; 32],
-            "",
-        )
-        .unwrap_err();
-        assert!(err.contains(
-            "tx_context_enabled core_ext profile for ext_id=9 requires runtime txcontext verifier wiring"
-        ));
-    }
-
-    #[test]
-    fn core_ext_profile_json_rejects_non_boolean_tx_context_enabled() {
-        let err = match serde_json::from_str::<CoreExtProfileJson>(
-            r#"{"ext_id":9,"activation_height":42,"tx_context_enabled":2,"allowed_suite_ids":[3]}"#,
-        ) {
-            Ok(_) => panic!("expected tx_context_enabled=2 to be rejected"),
-            Err(err) => err.to_string(),
-        };
-        assert!(err.contains("tx_context_enabled must be bool or 0/1"));
-    }
-
-    #[test]
-    fn core_ext_profiles_accept_native_binding_on_harness_path() {
-        let profiles = core_ext_profiles_from_json(
-            &[CoreExtProfileJson {
-                ext_id: 9,
-                activation_height: 42,
-                allowed_suite_ids: vec![3],
-                binding: " native_verify_sig ".to_string(),
-                ext_payload_schema_hex: "b2".to_string(),
-                ..Default::default()
-            }],
-            [0u8; 32],
-            "",
-        )
-        .expect("profiles");
-        let active = profiles.active_profiles_at_height(42).expect("active");
-        assert_eq!(active.active.len(), 1);
-        assert!(matches!(
-            active.active[0].verification_binding,
-            rubin_consensus::CoreExtVerificationBinding::NativeVerifySig
-        ));
     }
 }
