@@ -23,6 +23,7 @@ use rubin_consensus::{
     ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM,
 };
 use rubin_node::{devnet_genesis_chain_id, ChainState, TxPool, TxPoolAdmitErrorKind, TxPoolConfig};
+use serde::de::{IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha3::{Digest, Sha3_256};
@@ -44,6 +45,41 @@ const ROTATION_NEW_SUITE_NOT_REGISTERED_MSG: &str = "rotation: new suite ";
 const ROTATION_EQUAL_SUITE_IDS_MSG: &str = "must differ from new suite";
 const ROTATION_CREATE_HEIGHT_ORDER_MSG: &str = "rotation: create_height (";
 const ROTATION_SUNSET_HEIGHT_ORDER_MSG: &str = "rotation: sunset_height (";
+
+#[derive(Default)]
+struct RetiredCoreExtProfiles {
+    has_items: bool,
+}
+
+fn deserialize_retired_core_ext_profiles<'de, D>(
+    deserializer: D,
+) -> Result<RetiredCoreExtProfiles, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct RetiredCoreExtProfilesVisitor;
+
+    impl<'de> Visitor<'de> for RetiredCoreExtProfilesVisitor {
+        type Value = RetiredCoreExtProfiles;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an array")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut has_items = false;
+            while seq.next_element::<IgnoredAny>()?.is_some() {
+                has_items = true;
+            }
+            Ok(RetiredCoreExtProfiles { has_items })
+        }
+    }
+
+    deserializer.deserialize_seq(RetiredCoreExtProfilesVisitor)
+}
 
 fn matches_wrapped_prefix_validation_err(err: &str, expected: &str) -> bool {
     err.starts_with(expected) || err.contains(&format!(": {expected}"))
@@ -169,8 +205,8 @@ struct Request {
     #[serde(default)]
     utxos: Vec<UtxoJson>,
 
-    #[serde(default)]
-    core_ext_profiles: Vec<Value>,
+    #[serde(default, deserialize_with = "deserialize_retired_core_ext_profiles")]
+    core_ext_profiles: RetiredCoreExtProfiles,
 
     #[serde(default)]
     core_ext_profile_set_anchor_hex: String,
@@ -1779,13 +1815,13 @@ fn relay_metadata_parse_reject(message: &str) -> bool {
 }
 
 fn reject_core_ext_profiles_from_json(
-    items: &[Value],
+    profiles: &RetiredCoreExtProfiles,
     expected_set_anchor_hex: &str,
 ) -> Result<(), String> {
     if !expected_set_anchor_hex.trim().is_empty() {
         return Err("core_ext_profile_set_anchor_hex unsupported by Rust runtime".to_string());
     }
-    if !items.is_empty() {
+    if profiles.has_items {
         return Err("core_ext_profiles unsupported by Rust runtime".to_string());
     }
     Ok(())
@@ -5513,13 +5549,15 @@ mod tests {
 
     #[test]
     fn core_ext_profiles_empty_input_is_retired_noop() {
-        reject_core_ext_profiles_from_json(&[], "").expect("empty retired profile input");
+        reject_core_ext_profiles_from_json(&RetiredCoreExtProfiles::default(), "")
+            .expect("empty retired profile input");
     }
 
     #[test]
     fn core_ext_profiles_non_empty_input_is_unsupported() {
-        let err = reject_core_ext_profiles_from_json(&[serde_json::json!({"ext_id": 9})], "")
-            .unwrap_err();
+        let err =
+            reject_core_ext_profiles_from_json(&RetiredCoreExtProfiles { has_items: true }, "")
+                .unwrap_err();
         assert_eq!(err, "core_ext_profiles unsupported by Rust runtime");
     }
 
@@ -5535,7 +5573,8 @@ mod tests {
 
     #[test]
     fn core_ext_profile_set_anchor_input_is_unsupported() {
-        let err = reject_core_ext_profiles_from_json(&[], "00").unwrap_err();
+        let err = reject_core_ext_profiles_from_json(&RetiredCoreExtProfiles::default(), "00")
+            .unwrap_err();
         assert_eq!(
             err,
             "core_ext_profile_set_anchor_hex unsupported by Rust runtime"

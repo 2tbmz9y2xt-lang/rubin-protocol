@@ -576,7 +576,6 @@ dependencies = [
  "rubin-node",
  "serde",
  "serde_json",
- "sha2",
  "sha3",
 ]
 
