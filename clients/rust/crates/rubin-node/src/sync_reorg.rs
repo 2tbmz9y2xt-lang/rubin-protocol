@@ -524,12 +524,11 @@ impl SyncEngine {
         let mut sliding_ts = self.prev_timestamps_for_height(common_ancestor_height + 1)?;
         let (rotation, registry) = self.suite_context();
         for item in branch {
-            preview_state.connect_block_with_core_ext_deployments_and_suite_context(
+            preview_state.connect_block_with_suite_context(
                 &item.block_bytes,
                 self.cfg.expected_target,
                 sliding_ts.as_deref(),
                 self.cfg.chain_id,
-                &self.cfg.core_ext_deployments,
                 rotation,
                 registry,
             )?;

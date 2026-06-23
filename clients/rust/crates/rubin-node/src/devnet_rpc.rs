@@ -577,17 +577,11 @@ pub fn attach_shutdown_signal_to_devnet_rpc_state(
 }
 
 pub fn new_shared_runtime_tx_pool(sync_engine: &Arc<Mutex<SyncEngine>>) -> Arc<Mutex<TxPool>> {
-    let (core_ext_deployments, suite_context) = sync_engine
+    let suite_context = sync_engine
         .lock()
-        .map(|engine| {
-            (
-                engine.core_ext_deployments(),
-                engine.cfg.suite_context.clone(),
-            )
-        })
-        .unwrap_or_else(|_| (Default::default(), None));
+        .map(|engine| engine.cfg.suite_context.clone())
+        .unwrap_or(None);
     Arc::new(Mutex::new(TxPool::new_with_config(TxPoolConfig {
-        core_ext_deployments,
         suite_context,
         ..TxPoolConfig::default()
     })))
@@ -2932,7 +2926,6 @@ mod tests {
         let sync_engine = Arc::new(Mutex::new(engine));
         let tx_pool = new_shared_runtime_tx_pool(&sync_engine);
         let live_cfg = MinerConfig {
-            core_ext_deployments: sync_engine.lock().expect("lock").core_ext_deployments(),
             ..MinerConfig::default()
         };
         let state = new_devnet_rpc_state_with_tx_pool(

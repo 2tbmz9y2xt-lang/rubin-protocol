@@ -217,7 +217,6 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
 
     let mut sync_cfg = default_sync_config(None, chain_id, Some(chain_state_file.clone()));
     sync_cfg.network = cfg.network.clone();
-    sync_cfg.core_ext_deployments = genesis_cfg.core_ext_deployments.clone();
     sync_cfg.suite_context = genesis_cfg.suite_context.clone();
     sync_cfg.parallel_validation_mode = cfg.pv_mode.clone();
     sync_cfg.pv_shadow_max_samples = cfg.pv_shadow_max;
@@ -351,10 +350,7 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         return 0;
     }
     if cfg.mine_blocks > 0 {
-        let mut miner_cfg = MinerConfig {
-            core_ext_deployments: genesis_cfg.core_ext_deployments.clone(),
-            ..MinerConfig::default()
-        };
+        let mut miner_cfg = MinerConfig::default();
         if let Some(ref value) = cfg.mine_address {
             let parsed = match parse_mine_address_arg(value) {
                 Ok(Some(addr)) => addr,
@@ -397,10 +393,7 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     }
 
     let live_mining_cfg = if live_devnet_loopback_mining_allowed(&cfg) {
-        let mut miner_cfg = MinerConfig {
-            core_ext_deployments: genesis_cfg.core_ext_deployments.clone(),
-            ..MinerConfig::default()
-        };
+        let mut miner_cfg = MinerConfig::default();
         let mut addr_invalid = false;
         if let Some(ref value) = cfg.mine_address {
             match parse_mine_address_arg(value) {
