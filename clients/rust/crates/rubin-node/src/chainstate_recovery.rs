@@ -38,10 +38,9 @@
 //!      * canonical(H) ≠ snapshot.tip OR snapshot.height > tip → reset
 //!        snapshot and replay from genesis.
 //!
-//! Replay reuses `ChainState::connect_block_with_core_ext_deployments_
-//! and_suite_context`, the same entry point the live sync engine uses,
-//! so consensus rules during reconcile match consensus rules during
-//! steady-state sync.
+//! Replay reuses `ChainState::connect_block_with_suite_context`, the same
+//! entry point the live sync engine uses, so consensus rules during reconcile
+//! match consensus rules during steady-state sync.
 //!
 //! # Out of scope
 //!
@@ -203,7 +202,7 @@ pub(crate) fn truncate_incomplete_canonical_suffix(store: &mut BlockStore) -> Re
 ///    from height 0.
 ///
 /// Replay reuses
-/// `ChainState::connect_block_with_core_ext_deployments_and_suite_context`
+/// `ChainState::connect_block_with_suite_context`
 /// so consensus checks during recovery match steady-state sync.
 ///
 /// # Threat model
@@ -303,7 +302,7 @@ pub fn reconcile_chain_state_with_block_store(
     // The trait-erasure re-borrow has to stay even at the hoist
     // point: `SuiteContext.rotation` is stored as
     // `Arc<dyn RotationProvider + Send + Sync>` while
-    // `connect_block_with_core_ext_deployments_and_suite_context`
+    // `connect_block_with_suite_context`
     // takes the bare `Option<&dyn RotationProvider>` (no `+ Send +
     // Sync` bound). Without the explicit `let r: &(dyn ... + Send +
     // Sync) = ctx.rotation.as_ref();` step the compiler refuses to
@@ -358,12 +357,11 @@ pub fn reconcile_chain_state_with_block_store(
             ));
         }
         let prev_timestamps = prev_timestamps_from_store(store, height)?;
-        state.connect_block_with_core_ext_deployments_and_suite_context(
+        state.connect_block_with_suite_context(
             &block_bytes,
             cfg.expected_target,
             prev_timestamps.as_deref(),
             cfg.chain_id,
-            &cfg.core_ext_deployments,
             rotation,
             registry,
         )?;
@@ -613,23 +611,21 @@ mod tests {
         // only block 2.
         let mut state = ChainState::new();
         state
-            .connect_block_with_core_ext_deployments_and_suite_context(
+            .connect_block_with_suite_context(
                 &devnet_genesis_block_bytes(),
                 cfg.expected_target,
                 None,
                 cfg.chain_id,
-                &cfg.core_ext_deployments,
                 None,
                 None,
             )
             .expect("seed genesis");
         state
-            .connect_block_with_core_ext_deployments_and_suite_context(
+            .connect_block_with_suite_context(
                 &block1,
                 cfg.expected_target,
                 Some(&[g_ts]),
                 cfg.chain_id,
-                &cfg.core_ext_deployments,
                 None,
                 None,
             )
@@ -692,12 +688,11 @@ mod tests {
         let mut store = engine.block_store_snapshot().expect("blockstore");
         let mut state = ChainState::new();
         state
-            .connect_block_with_core_ext_deployments_and_suite_context(
+            .connect_block_with_suite_context(
                 &devnet_genesis_block_bytes(),
                 cfg.expected_target,
                 None,
                 cfg.chain_id,
-                &cfg.core_ext_deployments,
                 None,
                 None,
             )

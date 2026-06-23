@@ -8,12 +8,11 @@ use rubin_consensus::constants::{
 };
 use rubin_consensus::encode_compact_size;
 use rubin_consensus::{
-    block_hash, canonical_rotation_network_name_normalized, core_ext_profile_set_anchor_v1,
+    block_hash, canonical_rotation_network_name_normalized,
     is_v1_production_rotation_network_normalized,
-    validate_rotation_descriptor_for_normalized_network, CoreExtDeploymentProfile,
-    CoreExtDeploymentProfiles, CryptoRotationDescriptor, DefaultRotationProvider,
-    DescriptorRotationProvider, SuiteParams, SuiteRegistry, BLOCK_HEADER_BYTES,
-    SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
+    validate_rotation_descriptor_for_normalized_network, CryptoRotationDescriptor,
+    DefaultRotationProvider, DescriptorRotationProvider, SuiteParams, SuiteRegistry,
+    BLOCK_HEADER_BYTES, SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,10 +32,6 @@ struct GenesisPack {
     chain_id_hex: String,
     #[serde(default)]
     genesis_hash_hex: String,
-    #[serde(default)]
-    core_ext_profile_set_anchor_hex: String,
-    #[serde(default)]
-    core_ext_profiles: Vec<GenesisCoreExtProfile>,
     #[serde(default)]
     rotation_descriptor: Option<GenesisRotationDescriptor>,
     #[serde(default)]
@@ -100,29 +95,10 @@ impl<'de> Deserialize<'de> for GenesisSuiteParams {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-struct GenesisCoreExtProfile {
-    ext_id: u16,
-    activation_height: u64,
-    #[serde(default)]
-    tx_context_enabled: bool,
-    #[serde(default)]
-    allowed_suite_ids: Vec<u8>,
-    #[serde(default)]
-    binding: String,
-    #[serde(default)]
-    binding_descriptor_hex: String,
-    #[serde(default)]
-    ext_payload_schema_hex: String,
-    #[serde(default)]
-    governance_nonce: u64,
-}
-
 #[derive(Clone, Debug)]
 pub struct LoadedGenesisConfig {
     pub chain_id: [u8; 32],
     pub genesis_hash: Option<[u8; 32]>,
-    pub core_ext_deployments: CoreExtDeploymentProfiles,
     /// Optional SuiteContext built from non-production config or the compiled
     /// production activation schedule. Non-production callers without an
     /// explicit overlay keep this as None; production empty slots use an
@@ -157,13 +133,15 @@ pub fn load_genesis_config(
         return Ok(LoadedGenesisConfig {
             chain_id: devnet_genesis_chain_id(),
             genesis_hash: Some(devnet_genesis_hash()),
-            core_ext_deployments: CoreExtDeploymentProfiles::empty(),
             suite_context: None,
         });
     };
     let raw = fs::read_to_string(path)
         .map_err(|e| format!("read genesis file {}: {e}", path.display()))?;
-    let payload: GenesisPack = serde_json::from_str(&raw)
+    let raw_json: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse genesis file {}: {e}", path.display()))?;
+    reject_removed_genesis_core_ext_keys(&raw_json)?;
+    let payload: GenesisPack = serde_json::from_value(raw_json)
         .map_err(|e| format!("parse genesis file {}: {e}", path.display()))?;
     let mut trimmed = payload.chain_id_hex.trim();
     if trimmed.is_empty() {
@@ -190,17 +168,26 @@ pub fn load_genesis_config(
     Ok(LoadedGenesisConfig {
         chain_id,
         genesis_hash,
-        core_ext_deployments: core_ext_deployments_from_json(
-            chain_id,
-            &payload.core_ext_profile_set_anchor_hex,
-            &payload.core_ext_profiles,
-        )?,
         suite_context: build_suite_context_from_descriptor(
             &payload.rotation_descriptor,
             &payload.suite_registry,
             network,
         )?,
     })
+}
+
+fn reject_removed_genesis_core_ext_keys(raw_json: &serde_json::Value) -> Result<(), String> {
+    let Some(fields) = raw_json.as_object() else {
+        return Ok(());
+    };
+    for key in ["core_ext_profiles", "core_ext_profile_set_anchor_hex"] {
+        if fields.contains_key(key) {
+            return Err(format!(
+                "unsupported genesis field {key:?}: Rust node CORE_EXT profile wiring was removed"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn normalize_suite_alg_name(value: &str) -> Result<&'static str, String> {
@@ -434,94 +421,18 @@ fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
-fn decode_optional_hex_bytes(name: &str, value: &str) -> Result<Vec<u8>, String> {
-    const MAX_CORE_EXT_HEX_FIELD_BYTES: usize = 4096;
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Ok(Vec::new());
-    }
-    let trimmed = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-        .unwrap_or(trimmed);
-    if trimmed.len() > MAX_CORE_EXT_HEX_FIELD_BYTES * 2 {
-        return Err(format!("bad {name}"));
-    }
-    hex::decode(trimmed).map_err(|e| format!("{name}: {e}"))
-}
-
-fn core_ext_deployments_from_json(
-    chain_id: [u8; 32],
-    expected_set_anchor_hex: &str,
-    items: &[GenesisCoreExtProfile],
-) -> Result<CoreExtDeploymentProfiles, String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut deployments = Vec::with_capacity(items.len());
-    for item in items {
-        let binding_name =
-            rubin_consensus::normalize_live_core_ext_binding_name(item.binding.trim())?;
-        if !seen.insert(item.ext_id) {
-            return Err(format!(
-                "duplicate core_ext deployment for ext_id={}",
-                item.ext_id
-            ));
-        }
-        if item.tx_context_enabled {
-            return Err(format!(
-                "tx_context_enabled core_ext profile for ext_id={} requires runtime txcontext verifier wiring",
-                item.ext_id
-            ));
-        }
-        let binding_descriptor =
-            decode_optional_hex_bytes("binding_descriptor_hex", &item.binding_descriptor_hex)?;
-        let ext_payload_schema =
-            decode_optional_hex_bytes("ext_payload_schema_hex", &item.ext_payload_schema_hex)?;
-        let verification_binding =
-            rubin_consensus::live_core_ext_verification_binding_from_normalized_name_and_descriptor(
-                binding_name,
-                &binding_descriptor,
-                &ext_payload_schema,
-            )?;
-        deployments.push(CoreExtDeploymentProfile {
-            ext_id: item.ext_id,
-            activation_height: item.activation_height,
-            tx_context_enabled: item.tx_context_enabled,
-            allowed_suite_ids: item.allowed_suite_ids.clone(),
-            verification_binding,
-            verify_sig_ext_tx_context_fn: None,
-            binding_descriptor,
-            ext_payload_schema,
-            governance_nonce: item.governance_nonce,
-        });
-    }
-    let profiles = CoreExtDeploymentProfiles { deployments };
-    profiles.validate()?;
-    if !expected_set_anchor_hex.trim().is_empty() {
-        let expected = parse_hex32("core_ext_profile_set_anchor_hex", expected_set_anchor_hex)?;
-        let actual = core_ext_profile_set_anchor_v1(chain_id, &profiles.deployments)?;
-        if actual != expected {
-            return Err("core_ext profile set anchor mismatch".to_string());
-        }
-    }
-    Ok(profiles)
-}
-
 #[cfg(test)]
 mod tests {
     use rubin_consensus::constants::{
         ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
     };
-    use rubin_consensus::{
-        core_ext_profile_set_anchor_v1, CoreExtDeploymentProfile, CoreExtVerificationBinding,
-        SuiteRegistry,
-    };
+    use rubin_consensus::SuiteRegistry;
 
     use super::{
         build_suite_context_from_descriptor_with_production_lookup, derive_devnet_genesis_chain_id,
-        devnet_genesis_block_bytes, devnet_genesis_chain_id, devnet_genesis_hash,
-        load_chain_id_from_genesis_file, load_genesis_config, validate_incoming_chain_id,
-        CryptoRotationDescriptor, GenesisRotationDescriptor, GenesisSuiteParams,
-        PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR,
+        devnet_genesis_block_bytes, devnet_genesis_chain_id, load_chain_id_from_genesis_file,
+        load_genesis_config, validate_incoming_chain_id, CryptoRotationDescriptor,
+        GenesisRotationDescriptor, GenesisSuiteParams, PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR,
     };
     use std::collections::BTreeMap;
 
@@ -618,43 +529,37 @@ mod tests {
     }
 
     #[test]
-    fn load_genesis_config_reads_core_ext_profiles() {
+    fn load_genesis_config_rejects_removed_core_ext_fields() {
         let dir = std::env::temp_dir().join(format!(
-            "rubin-node-genesis-core-ext-{}",
+            "rubin-node-genesis-removed-core-ext-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time")
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("genesis.json");
-        let binding_descriptor =
-            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-                "ML-DSA-87",
-                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-            )
-            .expect("descriptor");
-        std::fs::write(
-            &path,
-            format!(
-                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"{}\",\"binding_descriptor_hex\":\"{}\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
-                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
-                hex::encode(binding_descriptor),
+        for (name, field, value) in [
+            ("profiles", "core_ext_profiles", "[]"),
+            (
+                "profile_set_anchor",
+                "core_ext_profile_set_anchor_hex",
+                "\"00\"",
             ),
-        )
-        .expect("write");
-
-        let cfg = load_genesis_config(Some(&path), "devnet").expect("load");
-        assert_eq!(cfg.chain_id, devnet_genesis_chain_id());
-        assert_eq!(cfg.genesis_hash, Some(devnet_genesis_hash()));
-        assert_eq!(cfg.core_ext_deployments.deployments.len(), 1);
-        assert_eq!(cfg.core_ext_deployments.deployments[0].ext_id, 7);
-        assert_eq!(
-            cfg.core_ext_deployments.deployments[0].activation_height,
-            12
-        );
-        assert!(!cfg.core_ext_deployments.deployments[0].tx_context_enabled);
+        ] {
+            let path = dir.join(format!("{name}.json"));
+            std::fs::write(
+                &path,
+                format!(
+                    "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"{field}\":{value}}}"
+                ),
+            )
+            .expect("write");
+            let err = load_genesis_config(Some(&path), "devnet").expect_err("removed field");
+            assert!(
+                err.contains(&format!("unsupported genesis field \"{field}\"")),
+                "unexpected error for {field}: {err}"
+            );
+        }
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -1579,348 +1484,6 @@ mod tests {
 
         let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
         assert!(err.contains("bad suite_registry"));
-
-        std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    #[test]
-    fn load_genesis_config_rejects_empty_core_ext_allowed_suite_ids() {
-        let dir = std::env::temp_dir().join(format!(
-            "rubin-node-genesis-core-ext-empty-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("genesis.json");
-        let binding_descriptor =
-            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-                "ML-DSA-87",
-                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-            )
-            .expect("descriptor");
-        std::fs::write(
-            &path,
-            format!(
-                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[],\"binding\":\"{}\",\"binding_descriptor_hex\":\"{}\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
-                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
-                hex::encode(binding_descriptor),
-            ),
-        )
-        .expect("write");
-
-        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
-        assert!(err.contains("non-empty allowed_suite_ids"));
-
-        std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    #[test]
-    fn load_genesis_config_reads_openssl_digest32_core_ext_profile() {
-        let dir = std::env::temp_dir().join(format!(
-            "rubin-node-genesis-core-ext-openssl-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("genesis.json");
-        let binding_descriptor =
-            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-                "ML-DSA-87",
-                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-            )
-            .expect("descriptor");
-        std::fs::write(
-            &path,
-            format!(
-                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"{}\",\"binding_descriptor_hex\":\"{}\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
-                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
-                hex::encode(binding_descriptor)
-            ),
-        )
-        .expect("write");
-
-        let cfg = load_genesis_config(Some(&path), "devnet").expect("load");
-        assert_eq!(cfg.genesis_hash, Some(devnet_genesis_hash()));
-        assert_eq!(cfg.core_ext_deployments.deployments.len(), 1);
-
-        std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    #[test]
-    fn load_genesis_config_rejects_tx_context_enabled_profile_without_runtime_verifier() {
-        let dir = std::env::temp_dir().join(format!(
-            "rubin-node-genesis-core-ext-txcontext-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("genesis.json");
-        let binding_descriptor =
-            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-                "ML-DSA-87",
-                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-            )
-            .expect("descriptor");
-        std::fs::write(
-            &path,
-            format!(
-                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"tx_context_enabled\":true,\"allowed_suite_ids\":[3],\"binding\":\"{}\",\"binding_descriptor_hex\":\"{}\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
-                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
-                hex::encode(binding_descriptor),
-            ),
-        )
-        .expect("write");
-
-        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
-        assert!(err.contains(
-            "tx_context_enabled core_ext profile for ext_id=7 requires runtime txcontext verifier wiring"
-        ));
-
-        std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    #[test]
-    fn load_genesis_config_rejects_non_boolean_tx_context_enabled() {
-        let dir = std::env::temp_dir().join(format!(
-            "rubin-node-genesis-core-ext-invalid-txcontext-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("genesis.json");
-        let binding_descriptor =
-            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-                "ML-DSA-87",
-                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-            )
-            .expect("descriptor");
-        std::fs::write(
-            &path,
-            format!(
-                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"tx_context_enabled\":1,\"allowed_suite_ids\":[3],\"binding\":\"{}\",\"binding_descriptor_hex\":\"{}\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
-                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
-                hex::encode(binding_descriptor),
-            ),
-        )
-        .expect("write");
-
-        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
-        assert!(err.contains("expected a boolean"));
-
-        std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    #[test]
-    fn load_genesis_config_rejects_openssl_digest32_binding_without_payload_schema() {
-        let dir = std::env::temp_dir().join(format!(
-            "rubin-node-genesis-core-ext-openssl-missing-schema-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("genesis.json");
-        let binding_descriptor =
-            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-                "ML-DSA-87",
-                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-            )
-            .expect("descriptor");
-        std::fs::write(
-            &path,
-            format!(
-                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"{}\",\"binding_descriptor_hex\":\"{}\"}}]}}",
-                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
-                hex::encode(binding_descriptor)
-            ),
-        )
-        .expect("write");
-
-        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
-        assert!(err.contains("requires ext_payload_schema_hex"));
-
-        std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    #[test]
-    fn load_genesis_config_rejects_core_ext_profile_set_anchor_mismatch() {
-        let dir = std::env::temp_dir().join(format!(
-            "rubin-node-genesis-core-ext-anchor-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("genesis.json");
-        let binding_descriptor =
-            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-                "ML-DSA-87",
-                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-            )
-            .expect("descriptor");
-        let descriptor = rubin_consensus::parse_core_ext_openssl_digest32_binding_descriptor(
-            &binding_descriptor,
-        )
-        .expect("parse");
-        let mut anchor = core_ext_profile_set_anchor_v1(
-            devnet_genesis_chain_id(),
-            &[CoreExtDeploymentProfile {
-                ext_id: 7,
-                activation_height: 12,
-                tx_context_enabled: false,
-                allowed_suite_ids: vec![3],
-                verification_binding: CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
-                    descriptor,
-                ),
-                verify_sig_ext_tx_context_fn: None,
-                binding_descriptor: binding_descriptor.clone(),
-                ext_payload_schema: vec![0xb2],
-                governance_nonce: 0,
-            }],
-        )
-        .expect("anchor");
-        anchor[0] ^= 0xff;
-        std::fs::write(
-            &path,
-            format!(
-                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profile_set_anchor_hex\":\"0x{}\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"{}\",\"binding_descriptor_hex\":\"{}\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
-                hex::encode(anchor),
-                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
-                hex::encode(binding_descriptor),
-            ),
-        )
-        .expect("write");
-
-        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
-        assert!(err.contains("anchor mismatch"));
-
-        std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    #[test]
-    fn load_genesis_config_rejects_oversized_core_ext_hex_fields() {
-        let dir = std::env::temp_dir().join(format!(
-            "rubin-node-genesis-core-ext-oversized-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("genesis.json");
-        std::fs::write(
-            &path,
-            format!(
-                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"{}\",\"binding_descriptor_hex\":\"{}\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
-                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
-                "aa".repeat(4097)
-            ),
-        )
-        .expect("write");
-
-        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
-        assert!(err.contains("bad binding_descriptor_hex"));
-
-        std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    #[test]
-    fn load_genesis_config_rejects_unsupported_binding_before_hex_decode() {
-        let dir = std::env::temp_dir().join(format!(
-            "rubin-node-genesis-core-ext-unsupported-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("genesis.json");
-        std::fs::write(
-            &path,
-            "{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"unknown-binding\",\"binding_descriptor_hex\":\"zz\",\"ext_payload_schema_hex\":\"zz\"}]}",
-        )
-        .expect("write");
-
-        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
-        assert!(err.contains("unsupported core_ext binding"));
-
-        std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    #[test]
-    fn load_genesis_config_accepts_whitespace_wrapped_binding() {
-        let dir = std::env::temp_dir().join(format!(
-            "rubin-node-genesis-core-ext-whitespace-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("genesis.json");
-        let binding_descriptor =
-            rubin_consensus::core_ext_openssl_digest32_binding_descriptor_bytes(
-                "ML-DSA-87",
-                rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
-                rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
-            )
-            .expect("descriptor");
-        std::fs::write(
-            &path,
-            format!(
-                "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"  {}\\n\",\"binding_descriptor_hex\":\"{}\",\"ext_payload_schema_hex\":\"b2\"}}]}}",
-                rubin_consensus::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
-                hex::encode(binding_descriptor),
-            ),
-        )
-        .expect("write");
-
-        let cfg = load_genesis_config(Some(&path), "devnet").expect("load genesis");
-        assert_eq!(cfg.genesis_hash, Some(devnet_genesis_hash()));
-        let profiles = cfg
-            .core_ext_deployments
-            .active_profiles_at_height(12)
-            .expect("active profiles");
-        assert_eq!(profiles.active.len(), 1);
-
-        std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    #[test]
-    fn load_genesis_config_rejects_native_binding_on_live_path() {
-        let dir = std::env::temp_dir().join(format!(
-            "rubin-node-genesis-core-ext-native-live-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("genesis.json");
-        std::fs::write(
-            &path,
-            "{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"core_ext_profiles\":[{\"ext_id\":7,\"activation_height\":12,\"allowed_suite_ids\":[3],\"binding\":\"native_verify_sig\",\"ext_payload_schema_hex\":\"b2\"}]}",
-        )
-        .expect("write");
-
-        let err = load_genesis_config(Some(&path), "devnet").unwrap_err();
-        assert!(err.contains("unsupported core_ext binding"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

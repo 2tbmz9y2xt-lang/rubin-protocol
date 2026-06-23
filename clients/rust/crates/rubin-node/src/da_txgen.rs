@@ -353,12 +353,10 @@ pub fn mine_and_generate(data_dir: &Path, mine_blocks: u64) -> Result<SignedDaSe
     let block_store = BlockStore::open(block_store_path(data_dir))?;
 
     let mut sync_cfg = default_sync_config(None, chain_id, Some(chain_state_file.clone()));
-    sync_cfg.core_ext_deployments = genesis.core_ext_deployments.clone();
     sync_cfg.suite_context = genesis.suite_context.clone();
     let mut sync_engine = SyncEngine::new(chain_state, Some(block_store), sync_cfg)?;
 
     let miner_cfg = MinerConfig {
-        core_ext_deployments: genesis.core_ext_deployments.clone(),
         mine_address: mine_covenant_data,
         ..MinerConfig::default()
     };

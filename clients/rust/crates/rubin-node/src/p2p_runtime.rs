@@ -6949,12 +6949,11 @@ mod tests {
             // `Relayed` and the canonical seam fires).
             let (chain_state, tx_bytes, _unused) =
                 signed_conflicting_p2pk_state_and_txs(20_000, 10, 9);
-            let mut sync_cfg = crate::sync::default_sync_config(
+            let sync_cfg = crate::sync::default_sync_config(
                 None,
                 crate::genesis::devnet_genesis_chain_id(),
                 None,
             );
-            sync_cfg.core_ext_deployments = rubin_consensus::CoreExtDeploymentProfiles::empty();
             let mut engine =
                 crate::sync::SyncEngine::new(chain_state, None, sync_cfg).expect("sync engine");
 
@@ -7070,8 +7069,7 @@ mod tests {
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept"); let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8)).expect("session");
             let (chain_state, admitted_tx, conflicting_tx, bad_tx, da_id, conflict_da_id, bad_da_id) = signed_conflicting_da_chunk_state_and_txs();
-            let mut sync_cfg = crate::sync::default_sync_config(None, crate::genesis::devnet_genesis_chain_id(), None);
-            sync_cfg.core_ext_deployments = rubin_consensus::CoreExtDeploymentProfiles::empty();
+            let sync_cfg = crate::sync::default_sync_config(None, crate::genesis::devnet_genesis_chain_id(), None);
             let mut engine = crate::sync::SyncEngine::new(chain_state, None, sync_cfg).expect("sync engine"); let relay_state = crate::tx_relay::TxRelayState::new(); let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 64)); let peer_outboxes: Mutex<HashMap<String, crate::tx_relay::PeerOutbox>> = Mutex::new(HashMap::new()); let canonical_tx_pool = Mutex::new(TxPool::new()); let da_relay = Mutex::new(crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default()).expect("valid DA relay caps"));
             let prefetch = Mutex::new(crate::da_prefetch::DaRelayPrefetchState::default());
             let relay_ctx = PeerRelayContext { relay_state: &relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "sender:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool, da_relay: &da_relay, prefetch: &prefetch };
@@ -7122,12 +7120,11 @@ mod tests {
 
             let (chain_state, tx_bytes, _unused) =
                 signed_conflicting_p2pk_state_and_txs(20_000, 10, 9);
-            let mut sync_cfg = crate::sync::default_sync_config(
+            let sync_cfg = crate::sync::default_sync_config(
                 None,
                 crate::genesis::devnet_genesis_chain_id(),
                 None,
             );
-            sync_cfg.core_ext_deployments = rubin_consensus::CoreExtDeploymentProfiles::empty();
             let mut engine =
                 crate::sync::SyncEngine::new(chain_state, None, sync_cfg).expect("sync engine");
 
@@ -7176,12 +7173,11 @@ mod tests {
 
             let (chain_state, tx_bytes, _unused) =
                 signed_conflicting_p2pk_state_and_txs(20_000, 10, 9);
-            let mut sync_cfg = crate::sync::default_sync_config(
+            let sync_cfg = crate::sync::default_sync_config(
                 None,
                 crate::genesis::devnet_genesis_chain_id(),
                 None,
             );
-            sync_cfg.core_ext_deployments = rubin_consensus::CoreExtDeploymentProfiles::empty();
             let mut engine =
                 crate::sync::SyncEngine::new(chain_state, None, sync_cfg).expect("sync engine");
 
