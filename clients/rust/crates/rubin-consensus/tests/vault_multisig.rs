@@ -395,8 +395,11 @@ fn witness_slots_p2pk() {
 }
 
 #[test]
-fn witness_slots_ext() {
-    assert_eq!(witness_slots(0x0102, &[]).unwrap(), 1); // COV_TYPE_CORE_EXT
+fn witness_slots_ext_rejected() {
+    // COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED per CANONICAL §14: witness_slots
+    // rejects it as TxErrCovenantTypeInvalid (RUB-514 / RUB-585).
+    let err = witness_slots(0x0102, &[]).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
 #[test]

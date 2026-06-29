@@ -1,9 +1,8 @@
 use crate::constants::{
-    COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_CORE_STEALTH, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC,
-    COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_RESERVED_FUTURE, COV_TYPE_VAULT,
-    MAX_ANCHOR_PAYLOAD_SIZE, MAX_COVENANT_DATA_PER_OUTPUT, MAX_P2PK_COVENANT_DATA,
+    COV_TYPE_ANCHOR, COV_TYPE_CORE_STEALTH, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC, COV_TYPE_MULTISIG,
+    COV_TYPE_P2PK, COV_TYPE_RESERVED_FUTURE, COV_TYPE_VAULT, MAX_ANCHOR_PAYLOAD_SIZE,
+    MAX_COVENANT_DATA_PER_OUTPUT, MAX_P2PK_COVENANT_DATA,
 };
-use crate::core_ext::parse_core_ext_covenant_data;
 use crate::error::{ErrorCode, TxError};
 use crate::htlc::parse_htlc_covenant_data;
 use crate::stealth::parse_stealth_covenant_data;
@@ -87,21 +86,6 @@ pub fn validate_tx_covenants_genesis(
                     ));
                 }
                 parse_htlc_covenant_data(&out.covenant_data)?;
-            }
-            COV_TYPE_CORE_EXT => {
-                if out.value == 0 {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrCovenantTypeInvalid,
-                        "CORE_EXT value must be > 0",
-                    ));
-                }
-                if out.covenant_data.len() as u64 > MAX_COVENANT_DATA_PER_OUTPUT {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrCovenantTypeInvalid,
-                        "CORE_EXT covenant_data length exceeds MAX_COVENANT_DATA_PER_OUTPUT",
-                    ));
-                }
-                let _ = parse_core_ext_covenant_data(&out.covenant_data)?;
             }
             COV_TYPE_CORE_STEALTH => {
                 if out.value == 0 {

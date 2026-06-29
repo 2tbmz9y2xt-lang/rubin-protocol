@@ -1,9 +1,9 @@
 use crate::block_basic::ParsedBlock;
 use crate::constants::{
-    CORE_EXT_WITNESS_SLOTS, CORE_STEALTH_WITNESS_SLOTS, COV_TYPE_CORE_EXT, COV_TYPE_CORE_STEALTH,
-    COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_VAULT,
+    CORE_STEALTH_WITNESS_SLOTS, COV_TYPE_CORE_STEALTH, COV_TYPE_HTLC, COV_TYPE_MULTISIG,
+    COV_TYPE_P2PK, COV_TYPE_VAULT,
 };
-use crate::core_ext::{validate_core_ext_spend_with_cache_and_suite_context_q, CoreExtProfiles};
+use crate::core_ext::CoreExtProfiles;
 use crate::error::{ErrorCode, TxError};
 use crate::htlc::{validate_htlc_spend_q, HtlcSpendContext};
 use crate::precompute::PrecomputedTxContext;
@@ -14,10 +14,6 @@ use crate::spend_verify::{validate_p2pk_spend_q, validate_threshold_sig_spend_q}
 use crate::stealth::validate_stealth_spend_q;
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider, SuiteRegistry};
 use crate::tx::{Tx, WitnessItem};
-use crate::txcontext::{
-    build_tx_context, build_tx_context_output_ext_id_cache, collect_txcontext_ext_ids,
-    TxContextBundle,
-};
 use crate::utxo_basic::UtxoEntry;
 use crate::vault::{
     parse_multisig_covenant_data, parse_vault_covenant_data_for_spend, witness_slots,
@@ -49,10 +45,8 @@ struct TxLocalSpendContext<'a> {
     chain_id: [u8; 32],
     block_height: u64,
     block_mtp: u64,
-    core_ext_profiles: &'a CoreExtProfiles,
     rotation: &'a dyn RotationProvider,
     registry: &'a SuiteRegistry,
-    tx_context: Option<&'a TxContextBundle>,
 }
 
 fn pending_tx_validation_result(ptc: &PrecomputedTxContext) -> TxValidationResult {
@@ -119,10 +113,8 @@ fn validate_worker_inputs(
             ctx.block_height,
             ctx.block_mtp,
             sighash_cache,
-            ctx.core_ext_profiles,
             ctx.rotation,
             ctx.registry,
-            ctx.tx_context,
             Some(&mut *sig_queue),
         )?;
 
@@ -131,16 +123,8 @@ fn validate_worker_inputs(
     Ok(witness_cursor)
 }
 
-fn build_tx_local_preflight<'a>(
-    tx: &'a Tx,
-    resolved_inputs: &[UtxoEntry],
-    block_height: u64,
-    core_ext_profiles: &CoreExtProfiles,
-) -> Result<(SighashV1PrehashCache<'a>, Option<TxContextBundle>), TxError> {
-    let sighash_cache = SighashV1PrehashCache::new(tx)?;
-    let tx_context =
-        build_tx_context_if_needed(tx, resolved_inputs, block_height, core_ext_profiles)?;
-    Ok((sighash_cache, tx_context))
+fn build_tx_local_preflight(tx: &Tx) -> Result<SighashV1PrehashCache<'_>, TxError> {
+    SighashV1PrehashCache::new(tx)
 }
 
 /// Validate a single non-coinbase transaction using read-only precomputed
@@ -163,13 +147,17 @@ pub fn validate_tx_local(
     core_ext_profiles: &CoreExtProfiles,
     sig_cache: Option<&SigCache>,
 ) -> TxValidationResult {
+    // COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED and rejected by `witness_slots`
+    // (TxErrCovenantTypeInvalid) before any spend dispatch, so no CORE_EXT
+    // profile gating runs here. `core_ext_profiles` is retained in the public
+    // signature for node/connect_block callers but carries no behavior.
+    let _ = core_ext_profiles;
     let tx = &pb.txs[ptc.tx_block_idx];
 
-    let (mut sighash_cache, tx_context) =
-        match build_tx_local_preflight(tx, &ptc.resolved_inputs, block_height, core_ext_profiles) {
-            Ok(preflight) => preflight,
-            Err(e) => return tx_validation_error_result(ptc, e),
-        };
+    let mut sighash_cache = match build_tx_local_preflight(tx) {
+        Ok(preflight) => preflight,
+        Err(e) => return tx_validation_error_result(ptc, e),
+    };
 
     let rotation = DefaultRotationProvider;
     let registry = SuiteRegistry::default_registry();
@@ -178,10 +166,8 @@ pub fn validate_tx_local(
         chain_id,
         block_height,
         block_mtp,
-        core_ext_profiles,
         rotation: &rotation,
         registry: &registry,
-        tx_context: tx_context.as_ref(),
     };
 
     let witness_cursor =
@@ -222,10 +208,8 @@ fn validate_input_spend(
     block_height: u64,
     block_mtp: u64,
     sighash_cache: &mut SighashV1PrehashCache<'_>,
-    core_ext_profiles: &CoreExtProfiles,
     rotation: &dyn RotationProvider,
     registry: &SuiteRegistry,
-    tx_context: Option<&TxContextBundle>,
     sig_queue: Option<&mut SigCheckQueue>,
 ) -> Result<(), TxError> {
     match entry.covenant_type {
@@ -314,29 +298,6 @@ fn validate_input_spend(
             )
         }
 
-        COV_TYPE_CORE_EXT => {
-            if assigned.len() != CORE_EXT_WITNESS_SLOTS as usize {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "CORE_EXT witness_slots must be 1",
-                ));
-            }
-            validate_core_ext_spend_with_cache_and_suite_context_q(
-                entry,
-                &assigned[0],
-                input_index,
-                input_value,
-                chain_id,
-                block_height,
-                core_ext_profiles,
-                Some(rotation),
-                Some(registry),
-                tx_context,
-                sig_queue,
-                sighash_cache,
-            )
-        }
-
         COV_TYPE_CORE_STEALTH => {
             if assigned.len() != CORE_STEALTH_WITNESS_SLOTS as usize {
                 return Err(TxError::new(
@@ -363,28 +324,6 @@ fn validate_input_spend(
             Ok(())
         }
     }
-}
-
-/// Build [`TxContextBundle`] only when at least one resolved input requires
-/// CORE_EXT context.
-fn build_tx_context_if_needed(
-    tx: &Tx,
-    resolved_inputs: &[UtxoEntry],
-    block_height: u64,
-    core_ext_profiles: &CoreExtProfiles,
-) -> Result<Option<TxContextBundle>, TxError> {
-    let ext_ids = collect_txcontext_ext_ids(resolved_inputs, core_ext_profiles)?;
-    if ext_ids.is_empty() {
-        return Ok(None);
-    }
-    let output_ext_id_cache = build_tx_context_output_ext_id_cache(tx)?;
-    build_tx_context(
-        tx,
-        resolved_inputs,
-        Some(&output_ext_id_cache),
-        block_height,
-        core_ext_profiles,
-    )
 }
 
 /// Validate multiple transactions in parallel using the deterministic

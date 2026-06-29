@@ -262,9 +262,15 @@ rules.
 
 ### Stage F — CORE_EXT Pre-Activation Gate
 
+> **Updated by RUB-585 (2026-06-29):** covenant_type `0x0102` (CORE_EXT) is unassigned per
+> `RUBIN_L1_CANONICAL.md` §14 and is rejected by consensus as `TX_ERR_COVENANT_TYPE_INVALID`
+> at both creation and spend; there is no `ACTIVE` path. This relay gate is now redundant
+> with consensus rejection and is retained as defense in depth.
+
 Reject as non-standard if the transaction creates or spends a
-`CORE_EXT` output whose profile is not `ACTIVE` at the candidate
-admission height.
+`CORE_EXT` output (covenant_type `0x0102`). (Historically this gate was conditioned on the
+profile not being `ACTIVE`; post-RUB-585 there is no `ACTIVE` path, so the rejection is
+unconditional.)
 
 Strict mode is ON by default for production nodes.
 

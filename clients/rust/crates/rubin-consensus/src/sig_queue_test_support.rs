@@ -1,10 +1,8 @@
-use crate::compactsize::encode_compact_size;
 use crate::constants::{
     COV_TYPE_CORE_STEALTH, COV_TYPE_HTLC, COV_TYPE_P2PK, LOCK_MODE_HEIGHT, MAX_HTLC_COVENANT_DATA,
     MAX_STEALTH_COVENANT_DATA, ML_KEM_1024_CT_BYTES, SIGHASH_ALL, SUITE_ID_ML_DSA_87,
     SUITE_ID_SENTINEL,
 };
-use crate::core_ext::{CoreExtActiveProfile, CoreExtProfiles, CoreExtVerificationBinding};
 use crate::hash::sha3_256;
 use crate::htlc::HtlcSpendContext;
 use crate::suite_registry::SuiteRegistry;
@@ -99,28 +97,6 @@ pub(super) fn make_stealth_entry(one_time_key_id: [u8; 32]) -> UtxoEntry {
         covenant_data: out,
         creation_height: 0,
         created_by_coinbase: false,
-    }
-}
-
-pub(super) fn core_ext_covdata(ext_id: u16, payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&ext_id.to_le_bytes());
-    encode_compact_size(payload.len() as u64, &mut out);
-    out.extend_from_slice(payload);
-    out
-}
-
-pub(super) fn core_ext_profiles(ext_id: u16) -> CoreExtProfiles {
-    CoreExtProfiles {
-        active: vec![CoreExtActiveProfile {
-            ext_id,
-            tx_context_enabled: false,
-            allowed_suite_ids: vec![SUITE_ID_ML_DSA_87],
-            verification_binding: CoreExtVerificationBinding::NativeVerifySig,
-            verify_sig_ext_tx_context_fn: None,
-            binding_descriptor: Vec::new(),
-            ext_payload_schema: Vec::new(),
-        }],
     }
 }
 

@@ -1,14 +1,7 @@
-use crate::constants::COV_TYPE_CORE_EXT;
-use crate::core_ext::{parse_core_ext_covenant_data, CoreExtProfiles};
 use crate::error::{ErrorCode, TxError};
-use crate::tx::{Tx, TxOutput};
-use crate::utxo_basic::UtxoEntry;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 pub const TXCONTEXT_MAX_CONTINUING_OUTPUTS: usize = 2;
-const TXCONTEXT_TOO_MANY_CONTINUING_OUTPUTS: &str =
-    "too many continuing outputs for txcontext ext_id";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Uint128 {
@@ -100,14 +93,6 @@ pub struct TxOutputView {
     pub ext_payload: Arc<[u8]>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExtIdCacheEntry {
-    pub ext_id: u16,
-    pub vout_index: u32,
-    pub ext_payload: Arc<[u8]>,
-    pub value: u64,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TxContextContinuing {
     pub continuing_output_count: u8,
@@ -133,159 +118,4 @@ impl TxContextContinuing {
             )
         })
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct TxContextBundle {
-    pub base: Arc<TxContextBase>,
-    continuing: HashMap<u16, Arc<TxContextContinuing>>,
-}
-
-impl TxContextBundle {
-    pub fn get_continuing(&self, ext_id: u16) -> Option<Arc<TxContextContinuing>> {
-        self.continuing.get(&ext_id).cloned()
-    }
-
-    pub fn sorted_ext_ids(&self) -> Vec<u16> {
-        let mut ids: Vec<u16> = self.continuing.keys().copied().collect();
-        ids.sort_unstable();
-        ids
-    }
-}
-
-fn sum_input_values(resolved_inputs: &[UtxoEntry]) -> Result<u128, TxError> {
-    resolved_inputs.iter().try_fold(0u128, |acc, entry| {
-        acc.checked_add(entry.value as u128)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))
-    })
-}
-
-fn sum_output_values(outputs: &[TxOutput]) -> Result<u128, TxError> {
-    outputs.iter().try_fold(0u128, |acc, output| {
-        acc.checked_add(output.value as u128)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))
-    })
-}
-
-pub fn build_tx_context_output_ext_id_cache(
-    tx: &Tx,
-) -> Result<BTreeMap<u16, Vec<ExtIdCacheEntry>>, TxError> {
-    let mut cache = BTreeMap::new();
-    for (vout_index, output) in tx.outputs.iter().enumerate() {
-        if output.covenant_type != COV_TYPE_CORE_EXT {
-            continue;
-        }
-        let covenant = parse_core_ext_covenant_data(&output.covenant_data)?;
-        cache
-            .entry(covenant.ext_id)
-            .or_insert_with(Vec::new)
-            .push(ExtIdCacheEntry {
-                ext_id: covenant.ext_id,
-                vout_index: vout_index as u32,
-                ext_payload: Arc::from(covenant.ext_payload),
-                value: output.value,
-            });
-    }
-    Ok(cache)
-}
-
-pub(crate) fn collect_txcontext_ext_ids(
-    resolved_inputs: &[UtxoEntry],
-    profiles_at_height: &CoreExtProfiles,
-) -> Result<Vec<u16>, TxError> {
-    let mut ext_ids = BTreeSet::new();
-    for entry in resolved_inputs {
-        if entry.covenant_type != COV_TYPE_CORE_EXT {
-            continue;
-        }
-        let covenant = parse_core_ext_covenant_data(&entry.covenant_data)?;
-        let Some(profile) = profiles_at_height.lookup_active_profile(covenant.ext_id)? else {
-            continue;
-        };
-        if !profile.tx_context_enabled {
-            continue;
-        }
-        ext_ids.insert(covenant.ext_id);
-    }
-    Ok(ext_ids.into_iter().collect())
-}
-
-fn build_tx_context_base(
-    tx: &Tx,
-    resolved_inputs: &[UtxoEntry],
-    height: u64,
-) -> Result<Arc<TxContextBase>, TxError> {
-    Ok(Arc::new(TxContextBase {
-        total_in: Uint128::from_native(sum_input_values(resolved_inputs)?),
-        total_out: Uint128::from_native(sum_output_values(&tx.outputs)?),
-        height,
-    }))
-}
-
-fn build_tx_context_continuing_for_ext_id(
-    entries: Option<&[ExtIdCacheEntry]>,
-) -> Result<TxContextContinuing, TxError> {
-    let mut bundle = TxContextContinuing::default();
-    if let Some(entries) = entries {
-        for entry in entries {
-            if bundle.continuing_output_count as usize >= TXCONTEXT_MAX_CONTINUING_OUTPUTS {
-                return Err(TxError::new(
-                    ErrorCode::TxErrCovenantTypeInvalid,
-                    TXCONTEXT_TOO_MANY_CONTINUING_OUTPUTS,
-                ));
-            }
-            let index = bundle.continuing_output_count as usize;
-            bundle.continuing_outputs[index] = Some(TxOutputView {
-                value: entry.value,
-                ext_payload: Arc::clone(&entry.ext_payload),
-            });
-            bundle.continuing_output_count += 1;
-        }
-    }
-    Ok(bundle)
-}
-
-fn build_tx_context_continuing(
-    ext_ids: Vec<u16>,
-    output_ext_id_cache: &BTreeMap<u16, Vec<ExtIdCacheEntry>>,
-) -> Result<HashMap<u16, Arc<TxContextContinuing>>, TxError> {
-    let mut continuing = HashMap::with_capacity(ext_ids.len());
-    for ext_id in ext_ids {
-        let entries = output_ext_id_cache.get(&ext_id).map(Vec::as_slice);
-        let bundle = build_tx_context_continuing_for_ext_id(entries)?;
-        continuing.insert(ext_id, Arc::new(bundle));
-    }
-    Ok(continuing)
-}
-
-pub fn build_tx_context(
-    tx: &Tx,
-    resolved_inputs: &[UtxoEntry],
-    output_ext_id_cache: Option<&BTreeMap<u16, Vec<ExtIdCacheEntry>>>,
-    height: u64,
-    profiles_at_height: &CoreExtProfiles,
-) -> Result<Option<TxContextBundle>, TxError> {
-    if tx.inputs.len() != resolved_inputs.len() {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "txcontext resolved input count mismatch",
-        ));
-    }
-
-    let ext_ids = collect_txcontext_ext_ids(resolved_inputs, profiles_at_height)?;
-    if ext_ids.is_empty() {
-        return Ok(None);
-    }
-
-    let output_ext_id_cache = output_ext_id_cache.ok_or_else(|| {
-        TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
-            "txcontext output cache missing",
-        )
-    })?;
-
-    let base = build_tx_context_base(tx, resolved_inputs, height)?;
-    let continuing = build_tx_context_continuing(ext_ids, output_ext_id_cache)?;
-
-    Ok(Some(TxContextBundle { base, continuing }))
 }

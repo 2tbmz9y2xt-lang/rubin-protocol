@@ -458,10 +458,6 @@ func applyNonCoinbaseTxBasicWorkQ(
 			); err != nil {
 				return nil, 0, err
 			}
-		case COV_TYPE_CORE_EXT:
-			if len(assigned) != CORE_EXT_WITNESS_SLOTS {
-				return nil, 0, txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
-			}
 		case COV_TYPE_CORE_STEALTH:
 			if len(assigned) != CORE_STEALTH_WITNESS_SLOTS {
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")

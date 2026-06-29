@@ -77,10 +77,11 @@ The runner requires Go and Rust to return identical `ok/err` behavior and identi
 
 ## Policy Guardrails (Non-consensus)
 
-`CORE_EXT` (`covenant_type=0x0102`) can be consensus-valid pre-activation with anyone-can-spend semantics.
-To mitigate user-funds exposure, the Go miner defaults to excluding transactions that create or spend
-`CORE_EXT` outputs whose `profile(ext_id, height)` is not `ACTIVE`.
+`CORE_EXT` (`covenant_type=0x0102`) is **unassigned** per CANONICAL §14: consensus rejects it as
+`TX_ERR_COVENANT_TYPE_INVALID` at both creation and spend (RUB-585; spec RUB-517). The earlier
+pre-activation anyone-can-spend framework has been retired. The Go node retains a defensive
+mempool/miner guardrail that independently excludes transactions creating or spending `CORE_EXT`
+outputs — now redundant with consensus rejection, kept as defense in depth:
 
-- Default: `node.DefaultMinerConfig().PolicyRejectCoreExtPreActivation = true`
-- Helper for admission surfaces: `node.RejectCoreExtTxPreActivation(...)`
-- Disabling this policy is unsafe and should be used only for controlled testing.
+- Implemented by `rejectUnsupportedCoreExtNodeRuntime(...)` (`clients/go/node`), invoked on the miner-template and mempool-admission paths to exclude any transaction that creates or spends a `CORE_EXT` output.
+- This guardrail is now redundant with consensus rejection (consensus rejects 0x0102 unconditionally) and is retained as defense in depth.

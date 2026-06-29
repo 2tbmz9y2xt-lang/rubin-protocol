@@ -367,17 +367,9 @@ def applyNonCoinbaseTxBasicState
       if suite != SUITE_ID_ML_DSA_87 then
         throw "TX_ERR_SIG_ALG_INVALID"
     else if e.covenantType == COV_TYPE_EXT then
-      if e.covenantData.size < 3 then
-        throw "TX_ERR_COVENANT_TYPE_INVALID"
-      let c0 : Wire.Cursor := { bs := e.covenantData, off := 2 }
-      let (payloadLen, c1, minimal) ←
-        match c0.getCompactSize? with
-        | none => throw "TX_ERR_COVENANT_TYPE_INVALID"
-        | some x => pure x
-      if !minimal then
-        throw "TX_ERR_COVENANT_TYPE_INVALID"
-      if c1.off + payloadLen != e.covenantData.size then
-        throw "TX_ERR_COVENANT_TYPE_INVALID"
+      -- 0x0102 (CORE_EXT) is unassigned per CANONICAL §14 — every spend is rejected
+      -- unconditionally (RUB-585), independent of covenant_data.
+      throw "TX_ERR_COVENANT_TYPE_INVALID"
 
     let lockId := outputDescriptorLockId e
     inputLockIds := inputLockIds.concat lockId
@@ -451,9 +443,9 @@ def applyNonCoinbaseTxBasicState
       if e.covenantType == COV_TYPE_P2PK then
         validateP2PKSpendPreSig e w txBytes
       else if e.covenantType == COV_TYPE_EXT then
-        -- CORE_EXT pre-ACTIVE semantics: anyone-can-spend.
-        -- No witness semantic checks are performed here (wire parsing rules already applied by TxV2.parseTx).
-        pure ()
+        -- 0x0102 (CORE_EXT) is unassigned and already rejected during input resolution
+        -- above (RUB-585); this branch is unreachable but kept for total coverage.
+        throw "TX_ERR_COVENANT_TYPE_INVALID"
       witnessCursor := witnessCursor + 1
   if witnessCursor != tx.witness.length then
     throw "TX_ERR_PARSE"
