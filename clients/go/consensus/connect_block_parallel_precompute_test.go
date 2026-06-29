@@ -158,6 +158,38 @@ func TestPrecomputeTxContexts_SingleP2PK(t *testing.T) {
 	}
 }
 
+// TestPrecomputeTxContexts_CoreExt0x0102OutputRejected pins the precompute
+// path to the sequential path for output covenant genesis: a transaction that
+// spends an otherwise-valid P2PK input but creates an unassigned 0x0102
+// (CORE_EXT) output must be rejected during precompute, not reported valid.
+// Workers only validate inputs, so without the genesis check in precompute this
+// tx would precompute successfully while sequential apply rejects it.
+func TestPrecomputeTxContexts_CoreExt0x0102OutputRejected(t *testing.T) {
+	covData := validP2PKCovenantData()
+	prevTxid := sha3_256([]byte("core-ext-output-precompute"))
+	op := Outpoint{Txid: prevTxid, Vout: 0}
+	utxos := map[Outpoint]UtxoEntry{
+		op: {Value: 1000, CovenantType: COV_TYPE_P2PK, CovenantData: covData},
+	}
+
+	tx := &Tx{
+		Version: 1, TxKind: 0x00, TxNonce: 1,
+		Inputs: []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0}},
+		// Unassigned 0x0102 CORE_EXT output: invalid at creation time.
+		Outputs: []TxOutput{{Value: 900, CovenantType: COV_TYPE_CORE_EXT, CovenantData: []byte{0x07, 0x00, 0x00}}},
+		Witness: []WitnessItem{{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: make([]byte, ML_DSA_87_PUBKEY_BYTES), Signature: make([]byte, ML_DSA_87_SIG_BYTES+1)}},
+	}
+
+	pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx})
+	_, err := PrecomputeTxContexts(pb, utxos, 100)
+	if err == nil {
+		t.Fatal("expected rejection of unassigned 0x0102 CORE_EXT output in precompute")
+	}
+	if !isTxErrCode(err, TX_ERR_COVENANT_TYPE_INVALID) {
+		t.Fatalf("expected TX_ERR_COVENANT_TYPE_INVALID, got: %v", err)
+	}
+}
+
 func TestPrecomputeTxContexts_WitnessCursorParity(t *testing.T) {
 	// Two transactions, each P2PK (1 witness slot each).
 	// Sequential cursor model: tx0 gets [0,1), tx1 gets [1,2).

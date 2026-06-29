@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::block_basic::ParsedBlock;
 use crate::constants::{COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
+use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
 use crate::utxo_basic::{Outpoint, UtxoEntry};
 use crate::vault::witness_slots;
@@ -98,6 +99,14 @@ pub fn precompute_tx_contexts(
                 "non-coinbase must have at least one input",
             ));
         }
+
+        // Output covenant genesis must be validated here so the precompute/worker
+        // path matches the sequential path exactly. Workers (`validate_tx_local`)
+        // only validate inputs, so without this an output whose covenant is
+        // invalid at creation time (e.g. an unassigned 0x0102 CORE_EXT output)
+        // would be precomputed and reported valid even though sequential apply
+        // rejects it. Default rotation (`None`) mirrors the worker env.
+        validate_tx_covenants_genesis(tx, block_height, None)?;
 
         // Resolve inputs and compute witness boundaries.
         let mut resolved_inputs = Vec::with_capacity(tx.inputs.len());

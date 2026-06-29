@@ -15,7 +15,12 @@ use crate::utxo_basic::{Outpoint, UtxoEntry};
 use crate::worker_pool::{WorkerCancellationToken, WorkerPoolError, WorkerResult};
 
 fn valid_p2pk_covenant_data() -> Vec<u8> {
-    vec![0u8; 32]
+    // Genesis-valid CORE_P2PK covenant_data: suite_id byte + key-id placeholder.
+    // `precompute_tx_contexts` now validates output covenant genesis, so P2PK
+    // outputs must use a real native-create suite_id and the exact length.
+    let mut b = vec![0u8; MAX_P2PK_COVENANT_DATA as usize];
+    b[0] = SUITE_ID_ML_DSA_87;
+    b
 }
 
 fn dummy_witness() -> WitnessItem {
