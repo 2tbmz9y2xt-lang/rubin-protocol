@@ -1650,12 +1650,13 @@ mod tests {
 
         let err = engine.apply_block(&block, None).unwrap_err();
         assert!(
-            err.contains("TX_ERR_SIG_ALG_INVALID"),
+            err.contains("TX_ERR_COVENANT_TYPE_INVALID"),
             "unexpected error: {err}"
         );
     }
 
     #[test]
+    #[ignore = "RUB-585: the 0x0102 native-binding spend vehicle is now consensus-rejected before signature/suite-context validation; shadow suite-context-reuse coverage must be re-pinned on a non-0x0102 spend (follow-up)"]
     fn sync_engine_shadow_mode_reuses_shared_suite_context_sequentially() {
         let dir = unique_temp_path("rubin-node-sync-pv-shared-suite-context");
         let chain_state_file = chain_state_path(&dir);
@@ -1733,7 +1734,7 @@ mod tests {
 
         let err = engine.apply_block(&block, None).unwrap_err();
         assert!(
-            err.contains("TX_ERR_SIG_ALG_INVALID"),
+            err.contains("TX_ERR_COVENANT_TYPE_INVALID"),
             "unexpected error: {err}"
         );
         assert!(

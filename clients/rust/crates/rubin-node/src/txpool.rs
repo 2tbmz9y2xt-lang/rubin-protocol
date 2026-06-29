@@ -2730,7 +2730,7 @@ mod tests {
             relay_metadata(&raw, &state, None, [0u8; 32], &TxPoolConfig::default()).unwrap_err();
 
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
-        assert!(err.message.contains("CORE_EXT output pre-ACTIVE"));
+        assert!(err.message.contains("TX_ERR_COVENANT_TYPE_INVALID"));
     }
 
     #[test]
@@ -3843,7 +3843,7 @@ mod tests {
         //     CORE_EXT pre-activation policy) precedes the rolling-floor
         //     check in admit_with_metadata.
         //   - Proof assertion: `assert_eq!(err.kind, Rejected)` plus
-        //     `err.message.contains("CORE_EXT output pre-ACTIVE")`
+        //     `err.message.contains("TX_ERR_COVENANT_TYPE_INVALID")`
         //     below pin the class winner against the alternative
         //     `Unavailable("mempool fee below rolling minimum")`
         //     outcome.
@@ -3869,11 +3869,14 @@ mod tests {
             .admit(&raw, &state, None, [0u8; 32])
             .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
-        assert!(err.message.contains("CORE_EXT output pre-ACTIVE"));
+        assert!(err.message.contains("TX_ERR_COVENANT_TYPE_INVALID"));
     }
 
     #[test]
-    fn admit_allows_core_ext_output_when_profile_is_active() {
+    // RUB-585: 0x0102 is unassigned (CANONICAL §14) and consensus-rejected at creation
+    // regardless of any registered profile — there is no ACTIVE path. The profile setup
+    // below is kept only to prove it grants no consensus bypass.
+    fn admit_rejects_core_ext_output_even_with_registered_profile() {
         // RUB-162 Phase A migration rationale (per controller Q2 record):
         //   - old assumption: input=10/output=9 → fee=1 with weight≈7533
         //     admits once core_ext profile is registered (pre-RUB-162 had no
@@ -3912,8 +3915,9 @@ mod tests {
                 governance_nonce: 0,
             }],
         };
-        let txid = pool.admit(&raw, &state, None, [0u8; 32]).expect("admit");
-        assert!(pool.txs.contains_key(&txid));
+        let err = pool.admit(&raw, &state, None, [0u8; 32]).unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(err.message.contains("TX_ERR_COVENANT_TYPE_INVALID"));
     }
 
     #[test]
@@ -3928,7 +3932,7 @@ mod tests {
         //     rolling-floor check in admit_with_metadata. Headroom is
         //     defensive.
         //   - Proof assertion: `assert_eq!(err.kind, Rejected)` plus
-        //     `err.message.contains("CORE_EXT spend pre-ACTIVE")`
+        //     `err.message.contains("TX_ERR_COVENANT_TYPE_INVALID")`
         //     below pin the class winner against the alternative
         //     `Unavailable("mempool fee below rolling minimum")`
         //     outcome.
@@ -3946,7 +3950,7 @@ mod tests {
             .admit(&raw, &state, None, [0u8; 32])
             .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
-        assert!(err.message.contains("CORE_EXT spend pre-ACTIVE"));
+        assert!(err.message.contains("TX_ERR_COVENANT_TYPE_INVALID"));
     }
 
     #[test]
@@ -5205,7 +5209,7 @@ mod tests {
     ///
     /// Proof assertion: build a sub-floor P2PK→CORE_EXT tx with no
     /// matching active profile; `assert_eq!(err.kind, Rejected)` plus
-    /// `err.message.contains("CORE_EXT output pre-ACTIVE")` below pin
+    /// `err.message.contains("TX_ERR_COVENANT_TYPE_INVALID")` below pin
     /// the class winner against the alternative
     /// `Unavailable("mempool fee below rolling minimum")` outcome.
     #[test]
@@ -5236,8 +5240,8 @@ mod tests {
             err.message
         );
         assert!(
-            err.message.contains("CORE_EXT output pre-ACTIVE"),
-            "error must come from CORE_EXT pre-activation guard, not the rolling floor check; got: {}",
+            err.message.contains("TX_ERR_COVENANT_TYPE_INVALID"),
+            "error must come from the consensus 0x0102 unassigned-reject (RUB-585), not the rolling floor check; got: {}",
             err.message
         );
         // Atomicity: no partial insert on cross-pollination reject.
