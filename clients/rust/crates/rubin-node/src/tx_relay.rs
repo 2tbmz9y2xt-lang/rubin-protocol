@@ -646,7 +646,6 @@ pub fn handle_received_tx(
     }
 
     let relay_cfg = crate::txpool::TxPoolConfig {
-        core_ext_deployments: sync_engine.cfg.core_ext_deployments.clone(),
         suite_context: sync_engine.cfg.suite_context.clone(),
         ..crate::txpool::TxPoolConfig::default()
     };
@@ -1406,8 +1405,7 @@ mod tests {
         // other) is preserved.
         let (chain_state, tx_bytes, _second_tx_unused) =
             crate::test_helpers::signed_conflicting_p2pk_state_and_txs(20_000, 10, 9);
-        let mut cfg = default_sync_config(None, crate::genesis::devnet_genesis_chain_id(), None);
-        cfg.core_ext_deployments = rubin_consensus::CoreExtDeploymentProfiles::empty();
+        let cfg = default_sync_config(None, crate::genesis::devnet_genesis_chain_id(), None);
         let sync_engine = SyncEngine::new(chain_state, None, cfg).expect("sync engine");
         let relay = TxRelayState::new();
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(

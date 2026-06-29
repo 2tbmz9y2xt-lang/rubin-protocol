@@ -5,9 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rubin_consensus::constants::POW_LIMIT;
-use rubin_consensus::{
-    block_hash, parse_block_bytes, parse_block_header_bytes, CoreExtDeploymentProfiles,
-};
+use rubin_consensus::{block_hash, parse_block_bytes, parse_block_header_bytes};
 use rubin_consensus::{RotationProvider, SuiteRegistry};
 
 use crate::blockstore::BlockStore;
@@ -28,7 +26,6 @@ pub struct SyncConfig {
     pub chain_id: [u8; 32],
     pub chain_state_path: Option<PathBuf>,
     pub network: String,
-    pub core_ext_deployments: CoreExtDeploymentProfiles,
     pub suite_context: Option<SuiteContext>,
     pub parallel_validation_mode: String,
     pub pv_shadow_max_samples: u64,
@@ -521,7 +518,6 @@ pub fn default_sync_config(
         chain_id,
         chain_state_path,
         network: "devnet".to_string(),
-        core_ext_deployments: CoreExtDeploymentProfiles::empty(),
         suite_context: None,
         parallel_validation_mode: "off".to_string(),
         pv_shadow_max_samples: DEFAULT_PV_SHADOW_MAX_SAMPLES,
@@ -636,10 +632,6 @@ impl SyncEngine {
 
     pub fn block_store_snapshot(&self) -> Option<BlockStore> {
         self.block_store.clone()
-    }
-
-    pub fn core_ext_deployments(&self) -> CoreExtDeploymentProfiles {
-        self.cfg.core_ext_deployments.clone()
     }
 
     pub fn tip(&self) -> Result<Option<(u64, [u8; 32])>, String> {
@@ -759,17 +751,14 @@ impl SyncEngine {
                 Some(ctx) => (Some(ctx.rotation.as_ref()), Some(ctx.registry.as_ref())),
                 None => (None, None),
             };
-        let summary = match self
-            .chain_state
-            .connect_block_with_core_ext_deployments_and_suite_context(
-                block_bytes,
-                self.cfg.expected_target,
-                prev_timestamps,
-                self.cfg.chain_id,
-                &self.cfg.core_ext_deployments,
-                rotation,
-                registry,
-            ) {
+        let summary = match self.chain_state.connect_block_with_suite_context(
+            block_bytes,
+            self.cfg.expected_target,
+            prev_timestamps,
+            self.cfg.chain_id,
+            rotation,
+            registry,
+        ) {
             Ok(summary) => summary,
             Err(err) => {
                 if pv_active {
@@ -1174,12 +1163,11 @@ fn run_pv_shadow_validation(
             Some(ctx) => (Some(ctx.rotation.as_ref()), Some(ctx.registry.as_ref())),
             None => (None, None),
         };
-    shadow_state.connect_block_with_core_ext_deployments_and_suite_context(
+    shadow_state.connect_block_with_suite_context(
         block_bytes,
         cfg.expected_target,
         prev_timestamps,
         cfg.chain_id,
-        &cfg.core_ext_deployments,
         rotation,
         registry,
     )?;
@@ -1195,24 +1183,16 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use rubin_consensus::constants::{
-        COV_TYPE_CORE_EXT, COV_TYPE_P2PK, POW_LIMIT, SUITE_ID_ML_DSA_87,
-    };
-    use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
+    use rubin_consensus::constants::{COV_TYPE_P2PK, POW_LIMIT, SUITE_ID_ML_DSA_87};
     use rubin_consensus::{
-        block_hash, encode_compact_size, merkle_root_txids, parse_block_bytes, parse_tx,
-        CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CoreExtVerificationBinding,
-        NativeSuiteSet, Outpoint, RotationProvider, UtxoEntry, BLOCK_HEADER_BYTES,
+        block_hash, encode_compact_size, Outpoint, UtxoEntry, BLOCK_HEADER_BYTES,
     };
     use rubin_consensus::{DefaultRotationProvider, SuiteRegistry};
 
     use crate::blockstore::{block_store_path, BlockStore};
     use crate::chainstate::{chain_state_path, load_chain_state, ChainState};
-    use crate::coinbase::{build_coinbase_tx, default_mine_address};
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::io_utils::unique_temp_path;
     use crate::sync::{
@@ -1221,24 +1201,6 @@ mod tests {
     };
 
     const VALID_BLOCK_HEX: &str = "01000000111111111111111111111111111111111111111111111111111111111111111102e66000bf8ce870908df4a8689554852ccef681ee0b5df32246162a53e36e290100000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff07000000000000000101000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff010000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000";
-    const CORE_EXT_NATIVE_BINDING_SPEND_TX_HEX: &str = "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a0000000000000000002101111111111111111111111111111111111111111111111111111111111111111100000000010300010100";
-
-    struct CountingRotationProvider {
-        spend_calls: AtomicUsize,
-    }
-
-    impl RotationProvider for CountingRotationProvider {
-        fn native_create_suites(&self, _height: u64) -> NativeSuiteSet {
-            NativeSuiteSet::try_new(&[SUITE_ID_ML_DSA_87])
-                .expect("counting rotation provider suite set must stay <= 2")
-        }
-
-        fn native_spend_suites(&self, _height: u64) -> NativeSuiteSet {
-            self.spend_calls.fetch_add(1, Ordering::SeqCst);
-            NativeSuiteSet::try_new(&[SUITE_ID_ML_DSA_87])
-                .expect("counting rotation provider suite set must stay <= 2")
-        }
-    }
 
     fn hex_to_bytes(hex: &str) -> Vec<u8> {
         let mut out = Vec::with_capacity(hex.len() / 2);
@@ -1580,169 +1542,6 @@ mod tests {
             .expect("default rotation must accept genesis");
         assert!(engine.chain_state.has_tip);
         assert_eq!(engine.chain_state.height, 0);
-    }
-
-    #[test]
-    fn sync_engine_rejects_post_activation_core_ext_spend_without_pre_active_bypass() {
-        let dir = unique_temp_path("rubin-node-sync-core-ext");
-        let chain_state_file = chain_state_path(&dir);
-        let block_store_root = block_store_path(&dir);
-        let store = BlockStore::open(block_store_root).expect("open blockstore");
-
-        let mut cfg = default_sync_config(
-            Some(POW_LIMIT),
-            devnet_genesis_chain_id(),
-            Some(chain_state_file),
-        );
-        cfg.core_ext_deployments = CoreExtDeploymentProfiles {
-            deployments: vec![CoreExtDeploymentProfile {
-                ext_id: 1,
-                activation_height: 1,
-                tx_context_enabled: false,
-                allowed_suite_ids: vec![3],
-                verification_binding: CoreExtVerificationBinding::NativeVerifySig,
-                verify_sig_ext_tx_context_fn: None,
-                binding_descriptor: Vec::new(),
-                ext_payload_schema: Vec::new(),
-                governance_nonce: 0,
-            }],
-        };
-        let mut engine = SyncEngine::new(ChainState::new(), Some(store), cfg).expect("new sync");
-        engine
-            .apply_block(&devnet_genesis_block_bytes(), None)
-            .expect("apply genesis");
-
-        engine.chain_state.utxos.insert(
-            Outpoint {
-                txid: [0xee; 32],
-                vout: 0,
-            },
-            UtxoEntry {
-                value: 100,
-                covenant_type: COV_TYPE_CORE_EXT,
-                covenant_data: vec![0x01, 0x00, 0x00],
-                creation_height: 0,
-                created_by_coinbase: false,
-            },
-        );
-
-        let spend_tx = hex_to_bytes(CORE_EXT_NATIVE_BINDING_SPEND_TX_HEX);
-        let (_, spend_txid, spend_wtxid, consumed) = parse_tx(&spend_tx).expect("parse spend");
-        assert_eq!(consumed, spend_tx.len());
-        let witness_root =
-            witness_merkle_root_wtxids(&[[0u8; 32], spend_wtxid]).expect("witness root");
-        let witness_commitment = witness_commitment_hash(witness_root);
-        let coinbase =
-            build_coinbase_tx(1, 0, &default_mine_address(), witness_commitment).expect("coinbase");
-        let (_, coinbase_txid, _, coinbase_consumed) = parse_tx(&coinbase).expect("parse coinbase");
-        assert_eq!(coinbase_consumed, coinbase.len());
-        let merkle_root = merkle_root_txids(&[coinbase_txid, spend_txid]).expect("merkle root");
-        let genesis = devnet_genesis_block_bytes();
-        let genesis_hash = block_hash(&genesis[..BLOCK_HEADER_BYTES]).expect("genesis hash");
-        let parsed_genesis = parse_block_bytes(&genesis).expect("parse genesis");
-        let block = build_block_bytes(
-            genesis_hash,
-            merkle_root,
-            POW_LIMIT,
-            parsed_genesis.header.timestamp.saturating_add(1),
-            &[coinbase, spend_tx],
-        );
-
-        let err = engine.apply_block(&block, None).unwrap_err();
-        assert!(
-            err.contains("TX_ERR_COVENANT_TYPE_INVALID"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    #[ignore = "RUB-585: the 0x0102 native-binding spend vehicle is now consensus-rejected before signature/suite-context validation; shadow suite-context-reuse coverage must be re-pinned on a non-0x0102 spend (follow-up)"]
-    fn sync_engine_shadow_mode_reuses_shared_suite_context_sequentially() {
-        let dir = unique_temp_path("rubin-node-sync-pv-shared-suite-context");
-        let chain_state_file = chain_state_path(&dir);
-        let block_store_root = block_store_path(&dir);
-        let store = BlockStore::open(block_store_root).expect("open blockstore");
-
-        let rotation = Arc::new(CountingRotationProvider {
-            spend_calls: AtomicUsize::new(0),
-        });
-
-        let mut cfg = default_sync_config(
-            Some(POW_LIMIT),
-            devnet_genesis_chain_id(),
-            Some(chain_state_file),
-        );
-        cfg.parallel_validation_mode = "shadow".to_string();
-        cfg.suite_context = Some(SuiteContext {
-            rotation: rotation.clone(),
-            registry: Arc::new(SuiteRegistry::default_registry().clone()),
-        });
-        cfg.core_ext_deployments = CoreExtDeploymentProfiles {
-            deployments: vec![CoreExtDeploymentProfile {
-                ext_id: 1,
-                activation_height: 1,
-                tx_context_enabled: false,
-                allowed_suite_ids: vec![3],
-                verification_binding: CoreExtVerificationBinding::NativeVerifySig,
-                verify_sig_ext_tx_context_fn: None,
-                binding_descriptor: Vec::new(),
-                ext_payload_schema: Vec::new(),
-                governance_nonce: 0,
-            }],
-        };
-
-        let mut engine = SyncEngine::new(ChainState::new(), Some(store), cfg).expect("new sync");
-        engine
-            .apply_block(&devnet_genesis_block_bytes(), None)
-            .expect("apply genesis");
-
-        engine.chain_state.utxos.insert(
-            Outpoint {
-                txid: [0xee; 32],
-                vout: 0,
-            },
-            UtxoEntry {
-                value: 100,
-                covenant_type: COV_TYPE_CORE_EXT,
-                covenant_data: vec![0x01, 0x00, 0x00],
-                creation_height: 0,
-                created_by_coinbase: false,
-            },
-        );
-
-        let spend_tx = hex_to_bytes(CORE_EXT_NATIVE_BINDING_SPEND_TX_HEX);
-        let (_, spend_txid, spend_wtxid, consumed) = parse_tx(&spend_tx).expect("parse spend");
-        assert_eq!(consumed, spend_tx.len());
-        let witness_root =
-            witness_merkle_root_wtxids(&[[0u8; 32], spend_wtxid]).expect("witness root");
-        let witness_commitment = witness_commitment_hash(witness_root);
-        let coinbase =
-            build_coinbase_tx(1, 0, &default_mine_address(), witness_commitment).expect("coinbase");
-        let (_, coinbase_txid, _, coinbase_consumed) = parse_tx(&coinbase).expect("parse coinbase");
-        assert_eq!(coinbase_consumed, coinbase.len());
-        let merkle_root = merkle_root_txids(&[coinbase_txid, spend_txid]).expect("merkle root");
-        let genesis = devnet_genesis_block_bytes();
-        let genesis_hash = block_hash(&genesis[..BLOCK_HEADER_BYTES]).expect("genesis hash");
-        let parsed_genesis = parse_block_bytes(&genesis).expect("parse genesis");
-        let block = build_block_bytes(
-            genesis_hash,
-            merkle_root,
-            POW_LIMIT,
-            parsed_genesis.header.timestamp.saturating_add(1),
-            &[coinbase, spend_tx],
-        );
-
-        let err = engine.apply_block(&block, None).unwrap_err();
-        assert!(
-            err.contains("TX_ERR_COVENANT_TYPE_INVALID"),
-            "unexpected error: {err}"
-        );
-        assert!(
-            rotation.spend_calls.load(Ordering::SeqCst) >= 2,
-            "shared suite context should be exercised by both primary and shadow validation paths"
-        );
-
-        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     /// RUB-12 / GitHub #1156: pin the exact 33-line Prometheus

@@ -4,9 +4,9 @@ use std::sync::OnceLock;
 
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
-    constants::MAX_RELAY_MSG_BYTES, parse_block_header_bytes, parse_core_ext_covenant_data,
-    parse_tx, tx_weight_and_stats_public, CoreExtDeploymentProfiles, DefaultRotationProvider,
-    NativeSuiteSet, Outpoint, RotationProvider, SuiteRegistry,
+    constants::{COV_TYPE_CORE_EXT, MAX_RELAY_MSG_BYTES},
+    parse_block_header_bytes, parse_tx, tx_weight_and_stats_public, CoreExtProfiles,
+    DefaultRotationProvider, NativeSuiteSet, Outpoint, RotationProvider, SuiteRegistry,
 };
 
 use crate::sync::SuiteContext;
@@ -94,9 +94,6 @@ pub const DEFAULT_MIN_DA_FEE_RATE: u64 = 1;
 pub struct TxPoolConfig {
     pub policy_da_surcharge_per_byte: u64,
     pub policy_reject_non_coinbase_anchor_outputs: bool,
-    pub policy_reject_core_ext_pre_activation: bool,
-    pub policy_max_ext_payload_bytes: usize,
-    pub core_ext_deployments: CoreExtDeploymentProfiles,
     pub suite_context: Option<SuiteContext>,
     /// Rolling local mempool floor used by the Stage C relay-fee term.
     /// Defaults to `DEFAULT_MEMPOOL_MIN_FEE_RATE`; a live rolling floor
@@ -607,11 +604,6 @@ impl TxPool {
 
         let next_height = next_block_height(chain_state)?;
         let block_mtp = next_block_mtp(block_store, next_height)?;
-        let active_profiles = self
-            .cfg
-            .core_ext_deployments
-            .active_profiles_at_height(next_height)
-            .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
         let (rotation, registry): (Option<&dyn RotationProvider>, Option<&SuiteRegistry>) =
             match self.cfg.suite_context.as_ref() {
                 Some(ctx) => (Some(ctx.rotation.as_ref()), Some(ctx.registry.as_ref())),
@@ -666,7 +658,7 @@ impl TxPool {
                 block_mtp,
                 block_mtp,
                 chain_id,
-                &active_profiles,
+                &CoreExtProfiles::empty(),
                 rotation,
                 registry,
             )
@@ -688,7 +680,7 @@ impl TxPool {
         let utxos = &chain_state.utxos;
         let cfg = &self.cfg;
         #[rustfmt::skip]
-        let policy_result = apply_post_consensus_policy_without_floor(&tx, utxos, next_height, weight, da_bytes, cfg);
+        let policy_result = apply_post_consensus_policy_without_floor(&tx, utxos, weight, da_bytes, cfg);
         policy_result?;
 
         if self.txs.contains_key(&txid) {
@@ -1106,10 +1098,6 @@ pub(crate) fn relay_metadata(
 
     let next_height = next_block_height(chain_state)?;
     let block_mtp = next_block_mtp(block_store, next_height)?;
-    let active_profiles = cfg
-        .core_ext_deployments
-        .active_profiles_at_height(next_height)
-        .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
     let (rotation, registry): (Option<&dyn RotationProvider>, Option<&SuiteRegistry>) =
         match cfg.suite_context.as_ref() {
             Some(ctx) => (Some(ctx.rotation.as_ref()), Some(ctx.registry.as_ref())),
@@ -1124,7 +1112,7 @@ pub(crate) fn relay_metadata(
             block_mtp,
             block_mtp,
             chain_id,
-            &active_profiles,
+            &CoreExtProfiles::empty(),
             rotation,
             registry,
         )
@@ -1144,7 +1132,7 @@ pub(crate) fn relay_metadata(
     // Codacy diff-coverage attribution (mirror of admit_with_metadata).
     let utxos = &chain_state.utxos;
     #[rustfmt::skip]
-    let policy_result = apply_post_consensus_policy_with_floor(&tx, utxos, next_height, summary.fee, weight, da_bytes, cfg);
+    let policy_result = apply_post_consensus_policy_with_floor(&tx, utxos, summary.fee, weight, da_bytes, cfg);
     policy_result?;
 
     Ok(RelayTxMetadata {
@@ -1199,27 +1187,25 @@ pub(crate) fn relay_metadata(
 fn apply_post_consensus_policy_with_floor(
     tx: &rubin_consensus::Tx,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
-    next_height: u64,
     fee: u64,
     weight: u64,
     da_bytes: u64,
     cfg: &TxPoolConfig,
 ) -> Result<(), TxPoolAdmitError> {
-    apply_post_consensus_policy_without_floor(tx, utxos, next_height, weight, da_bytes, cfg)?;
+    apply_post_consensus_policy_without_floor(tx, utxos, weight, da_bytes, cfg)?;
     validate_fee_floor(fee, weight, cfg.policy_current_mempool_min_fee_rate)
 }
 
 fn apply_post_consensus_policy_without_floor(
     tx: &rubin_consensus::Tx,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
-    next_height: u64,
     weight: u64,
     da_bytes: u64,
     cfg: &TxPoolConfig,
 ) -> Result<(), TxPoolAdmitError> {
     let mut policy_cfg = cfg.clone();
     policy_cfg.policy_current_mempool_min_fee_rate = 0;
-    apply_policy(tx, weight, da_bytes, utxos, next_height, &policy_cfg).map_err(rejected)
+    apply_policy(tx, weight, da_bytes, utxos, &policy_cfg).map_err(rejected)
 }
 
 impl Default for TxPool {
@@ -1233,9 +1219,6 @@ impl Default for TxPoolConfig {
         Self {
             policy_da_surcharge_per_byte: 0,
             policy_reject_non_coinbase_anchor_outputs: true,
-            policy_reject_core_ext_pre_activation: true,
-            policy_max_ext_payload_bytes: 0,
-            core_ext_deployments: CoreExtDeploymentProfiles::empty(),
             suite_context: None,
             policy_current_mempool_min_fee_rate: DEFAULT_MEMPOOL_MIN_FEE_RATE,
             policy_min_da_fee_rate: DEFAULT_MIN_DA_FEE_RATE,
@@ -1660,7 +1643,6 @@ pub(crate) fn apply_policy(
     weight: u64,
     da_bytes: u64,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
-    next_height: u64,
     cfg: &TxPoolConfig,
 ) -> Result<(), String> {
     if cfg.policy_reject_non_coinbase_anchor_outputs {
@@ -1675,42 +1657,45 @@ pub(crate) fn apply_policy(
         cfg.policy_min_da_fee_rate,
         cfg.policy_da_surcharge_per_byte,
     )?;
-    if cfg.policy_reject_core_ext_pre_activation {
-        reject_core_ext_tx_pre_activation(tx, utxos, next_height, &cfg.core_ext_deployments)?;
-    }
-    if cfg.policy_max_ext_payload_bytes > 0 {
-        reject_core_ext_tx_oversized_payload(tx, cfg.policy_max_ext_payload_bytes)?;
+    if let Some(reason) = reject_unsupported_core_ext_node_runtime(tx, utxos) {
+        return Err(reason);
     }
     Ok(())
 }
 
-/// SHOULD-level mempool policy: reject transactions with CORE_EXT outputs whose
-/// ext_payload exceeds the configured maximum. This is relay policy, not consensus.
-pub(crate) fn reject_core_ext_tx_oversized_payload(
+fn reject_unsupported_core_ext_node_runtime(
     tx: &rubin_consensus::Tx,
-    max_bytes: usize,
-) -> Result<(), String> {
-    if max_bytes == 0 {
-        return Ok(());
+    utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
+) -> Option<String> {
+    covenant_policy_kind(tx, utxos, COV_TYPE_CORE_EXT)
+        .map(|kind| format!("CORE_EXT {kind} unsupported by Rust node runtime"))
+}
+
+fn covenant_policy_kind(
+    tx: &rubin_consensus::Tx,
+    utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
+    covenant_type: u16,
+) -> Option<&'static str> {
+    if tx
+        .outputs
+        .iter()
+        .any(|output| output.covenant_type == covenant_type)
+    {
+        return Some("output");
     }
-    for (i, output) in tx.outputs.iter().enumerate() {
-        if output.covenant_type != rubin_consensus::constants::COV_TYPE_CORE_EXT {
-            continue;
-        }
-        let cov = match parse_core_ext_covenant_data(&output.covenant_data) {
-            Ok(c) => c,
-            Err(_) => continue, // Parse failure handled by consensus validation
+    for input in &tx.inputs {
+        let outpoint = Outpoint {
+            txid: input.prev_txid,
+            vout: input.prev_vout,
         };
-        if cov.ext_payload.len() > max_bytes {
-            return Err(format!(
-                "CORE_EXT output {} ext_payload {} bytes exceeds policy limit {}",
-                i,
-                cov.ext_payload.len(),
-                max_bytes,
-            ));
+        if utxos
+            .get(&outpoint)
+            .is_some_and(|entry| entry.covenant_type == covenant_type)
+        {
+            return Some("spend");
         }
     }
-    Ok(())
+    None
 }
 
 pub(crate) fn reject_non_coinbase_anchor_outputs(tx: &rubin_consensus::Tx) -> Result<(), String> {
@@ -1866,53 +1851,6 @@ pub(crate) fn compute_fee_no_verify(
         return Err("overspend".to_string());
     }
     Ok(sum_in - sum_out)
-}
-
-pub(crate) fn reject_core_ext_tx_pre_activation(
-    tx: &rubin_consensus::Tx,
-    utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
-    height: u64,
-    deployments: &CoreExtDeploymentProfiles,
-) -> Result<(), String> {
-    let active = deployments
-        .active_profiles_at_height(height)
-        .map_err(|err| err.to_string())?;
-    for output in &tx.outputs {
-        if output.covenant_type != rubin_consensus::constants::COV_TYPE_CORE_EXT {
-            continue;
-        }
-        let cov =
-            parse_core_ext_covenant_data(&output.covenant_data).map_err(|err| err.to_string())?;
-        if !active
-            .active
-            .iter()
-            .any(|profile| profile.ext_id == cov.ext_id)
-        {
-            return Err(format!("CORE_EXT output pre-ACTIVE ext_id={}", cov.ext_id));
-        }
-    }
-    for input in &tx.inputs {
-        let outpoint = Outpoint {
-            txid: input.prev_txid,
-            vout: input.prev_vout,
-        };
-        let Some(entry) = utxos.get(&outpoint) else {
-            continue;
-        };
-        if entry.covenant_type != rubin_consensus::constants::COV_TYPE_CORE_EXT {
-            continue;
-        }
-        let cov =
-            parse_core_ext_covenant_data(&entry.covenant_data).map_err(|err| err.to_string())?;
-        if !active
-            .active
-            .iter()
-            .any(|profile| profile.ext_id == cov.ext_id)
-        {
-            return Err(format!("CORE_EXT spend pre-ACTIVE ext_id={}", cov.ext_id));
-        }
-    }
-    Ok(())
 }
 
 fn compare_entries_for_mining(
@@ -2079,8 +2017,7 @@ mod tests {
     };
     use rubin_consensus::{
         marshal_tx, p2pk_covenant_data_for_pubkey, parse_tx, sign_transaction,
-        tx_weight_and_stats_public, CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
-        CoreExtVerificationBinding, DaChunkCore, Mldsa87Keypair, Outpoint, Tx, TxInput, TxOutput,
+        tx_weight_and_stats_public, DaChunkCore, Mldsa87Keypair, Outpoint, Tx, TxInput, TxOutput,
         UtxoEntry, WitnessItem,
     };
 
@@ -2088,10 +2025,9 @@ mod tests {
         cheap_fee_floor_precheck, compare_admit_priority, compare_entries_for_mining,
         compare_fee_rate, conflict, default_tx_pool_low_water_bytes, fee_precheck_p2pk_input_value,
         fee_precheck_p2pk_output_value, mtp_median, next_block_height, next_block_mtp,
-        reject_core_ext_tx_oversized_payload, reject_da_anchor_tx_policy, rejected, relay_metadata,
-        tx_pool_byte_pressure_target, unavailable, TxPool, TxPoolAdmitErrorKind, TxPoolConfig,
-        TxPoolEntry, TxPoolSnapshot, TxPoolSnapshotEntry, TxSource, DEFAULT_MEMPOOL_MIN_FEE_RATE,
-        MAX_TX_POOL_TRANSACTIONS,
+        reject_da_anchor_tx_policy, rejected, relay_metadata, tx_pool_byte_pressure_target,
+        unavailable, TxPool, TxPoolAdmitErrorKind, TxPoolConfig, TxPoolEntry, TxPoolSnapshot,
+        TxPoolSnapshotEntry, TxSource, DEFAULT_MEMPOOL_MIN_FEE_RATE, MAX_TX_POOL_TRANSACTIONS,
     };
     use crate::{
         block_store_path, default_sync_config, devnet_genesis_block_bytes, devnet_genesis_chain_id,
@@ -2533,14 +2469,12 @@ mod tests {
 
         let lenient_snapshot = TxPool::new_with_config(TxPoolConfig {
             policy_current_mempool_min_fee_rate: 0,
-            policy_reject_core_ext_pre_activation: false,
             ..TxPoolConfig::default()
         })
         .snapshot()
         .expect("lenient snapshot");
         pool.restore_snapshot(&lenient_snapshot)
             .expect("empty snapshot restores");
-        assert!(pool.cfg.policy_reject_core_ext_pre_activation);
         assert!(pool.cfg.policy_current_mempool_min_fee_rate == DEFAULT_MEMPOOL_MIN_FEE_RATE);
     }
 
@@ -2713,7 +2647,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_metadata_rejects_pre_activation_core_ext_outputs() {
+    fn relay_metadata_rejects_core_ext_outputs_as_unsupported_runtime() {
         let (state, raw) = signed_p2pk_state_and_tx(
             10,
             vec![TxOutput {
@@ -2730,7 +2664,7 @@ mod tests {
             relay_metadata(&raw, &state, None, [0u8; 32], &TxPoolConfig::default()).unwrap_err();
 
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
-        assert!(err.message.contains("TX_ERR_COVENANT_TYPE_INVALID"));
+        assert!(err.message.contains("CORE_EXT output unsupported"));
     }
 
     #[test]
@@ -3834,26 +3768,9 @@ mod tests {
     }
 
     #[test]
-    fn admit_rejects_core_ext_output_pre_activation_by_policy() {
-        // RUB-162 Phase A migration rationale (per controller Path A
-        // approval 2026-05-03 + RESP P1 #2 reorder fix 2026-05-03):
-        //   - old assumption: input=10/output=9 fee=1 reached the
-        //     CORE_EXT pre-activation policy guard returning Rejected.
-        //   - new invariant: apply_policy (which evaluates the
-        //     CORE_EXT pre-activation policy) precedes the rolling-floor
-        //     check in admit_with_metadata.
-        //   - Proof assertion: `assert_eq!(err.kind, Rejected)` plus
-        //     `err.message.contains("TX_ERR_COVENANT_TYPE_INVALID")`
-        //     below pin the class winner against the alternative
-        //     `Unavailable("mempool fee below rolling minimum")`
-        //     outcome.
-        //   - replacement coverage: input bumped to 7700 so fee=7691
-        //     ≥ weight ⇒ candidate also passes the floor (defensive,
-        //     since apply_policy rejects regardless) and reaches the
-        //     CORE_EXT pre-activation policy guard. The fixture is
-        //     mirrored in
-        //     rub162_admit_sub_floor_core_ext_classifies_as_core_ext_rejected
-        //     to PIN the cross-pollination class winner.
+    fn admit_rejects_core_ext_output_as_unsupported_runtime_before_floor() {
+        // The candidate is floor-compliant; the test pins CORE_EXT
+        // unsupported-runtime classification independent of fee floor.
         let (state, raw) = signed_p2pk_state_and_tx(
             7700,
             vec![TxOutput {
@@ -3869,79 +3786,13 @@ mod tests {
             .admit(&raw, &state, None, [0u8; 32])
             .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
-        assert!(err.message.contains("TX_ERR_COVENANT_TYPE_INVALID"));
+        assert!(err.message.contains("CORE_EXT output unsupported"));
     }
 
     #[test]
-    // RUB-585: 0x0102 is unassigned (CANONICAL §14) and consensus-rejected at creation
-    // regardless of any registered profile — there is no ACTIVE path. The profile setup
-    // below is kept only to prove it grants no consensus bypass.
-    fn admit_rejects_core_ext_output_even_with_registered_profile() {
-        // RUB-162 Phase A migration rationale (per controller Q2 record):
-        //   - old assumption: input=10/output=9 → fee=1 with weight≈7533
-        //     admits once core_ext profile is registered (pre-RUB-162 had no
-        //     fee-floor check).
-        //   - new invariant: admit_with_metadata enforces the rolling fee
-        //     floor (DEFAULT_MEMPOOL_MIN_FEE_RATE=1).
-        //   - why it reaches policy path: tx is well-formed; floor check is
-        //     after apply_policy and after the CORE_EXT pre-activation check
-        //     succeeds for the registered profile.
-        //   - replacement coverage: input bumped to 7542 so fee = 7542 - 9
-        //     = 7533 ≥ weight (≈7533) ⇒ fee/weight ≥ 1 ⇒ passes the
-        //     default floor; the test's CORE_EXT-profile-activation
-        //     invariant remains under test.
-        let (state, raw) = signed_p2pk_state_and_tx(
-            7_542,
-            vec![TxOutput {
-                value: 9,
-                covenant_type: COV_TYPE_CORE_EXT,
-                covenant_data: empty_core_ext_covenant_data(7),
-            }],
-            0x00,
-            None,
-            Vec::new(),
-        );
-        let mut pool = TxPool::new_with_config(TxPoolConfig::default());
-        pool.cfg.core_ext_deployments = CoreExtDeploymentProfiles {
-            deployments: vec![CoreExtDeploymentProfile {
-                ext_id: 7,
-                activation_height: 0,
-                tx_context_enabled: false,
-                allowed_suite_ids: vec![3],
-                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
-                verify_sig_ext_tx_context_fn: None,
-                binding_descriptor: b"accept".to_vec(),
-                ext_payload_schema: b"schema".to_vec(),
-                governance_nonce: 0,
-            }],
-        };
-        let err = pool.admit(&raw, &state, None, [0u8; 32]).unwrap_err();
-        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
-        assert!(err.message.contains("TX_ERR_COVENANT_TYPE_INVALID"));
-    }
-
-    #[test]
-    fn admit_rejects_core_ext_spend_pre_activation_by_policy() {
-        // RUB-162 Phase A migration rationale (per controller Path A
-        // approval 2026-05-03 + RESP P1 #2 reorder fix 2026-05-03):
-        //   - old assumption: core_ext_spend_state_and_tx helper sets
-        //     UTXO value=10/output value=9 → fee=1 reaches the
-        //     CORE_EXT-spend pre-activation policy guard.
-        //   - new invariant: apply_policy (which evaluates the
-        //     CORE_EXT spend pre-activation policy) precedes the
-        //     rolling-floor check in admit_with_metadata. Headroom is
-        //     defensive.
-        //   - Proof assertion: `assert_eq!(err.kind, Rejected)` plus
-        //     `err.message.contains("TX_ERR_COVENANT_TYPE_INVALID")`
-        //     below pin the class winner against the alternative
-        //     `Unavailable("mempool fee below rolling minimum")`
-        //     outcome.
-        //   - replacement coverage: bump UTXO value in-place to 7700
-        //     (helper's UTXO value patched after construction; helper
-        //     signature preserved for any future caller). fee = 7700 -
-        //     9 = 7691 ≥ weight ⇒ candidate also passes the floor; the
-        //     CORE_EXT-spend pre-activation guard remains the test
-        //     goal.
+    fn admit_rejects_core_ext_spend_as_unsupported_runtime_before_floor() {
+        // Spend-side twin of the output test. The candidate is made
+        // floor-compliant so the unsupported-runtime policy is the winner.
         let (mut state, raw) = core_ext_spend_state_and_tx(9);
         for entry in state.utxos.values_mut() {
             entry.value = 7700;
@@ -3950,7 +3801,7 @@ mod tests {
             .admit(&raw, &state, None, [0u8; 32])
             .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
-        assert!(err.message.contains("TX_ERR_COVENANT_TYPE_INVALID"));
+        assert!(err.message.contains("CORE_EXT spend unsupported"));
     }
 
     #[test]
@@ -3966,134 +3817,6 @@ mod tests {
         let unavailable_err = unavailable("unavailable");
         assert_eq!(unavailable_err.kind, TxPoolAdmitErrorKind::Unavailable);
         assert_eq!(unavailable_err.to_string(), "unavailable");
-    }
-
-    #[test]
-    fn reject_oversized_payload_allows_under_limit() {
-        let tx = Tx {
-            version: TX_WIRE_VERSION,
-            tx_kind: 0,
-            tx_nonce: 1,
-            inputs: vec![],
-            outputs: vec![TxOutput {
-                value: 1,
-                covenant_type: COV_TYPE_CORE_EXT,
-                covenant_data: core_ext_covenant_data_with_payload(5, &[0u8; 32]),
-            }],
-            locktime: 0,
-            da_commit_core: None,
-            da_chunk_core: None,
-            witness: vec![],
-            da_payload: vec![],
-        };
-        assert!(reject_core_ext_tx_oversized_payload(&tx, 48).is_ok());
-    }
-
-    #[test]
-    fn reject_oversized_payload_allows_at_limit() {
-        let tx = Tx {
-            version: TX_WIRE_VERSION,
-            tx_kind: 0,
-            tx_nonce: 1,
-            inputs: vec![],
-            outputs: vec![TxOutput {
-                value: 1,
-                covenant_type: COV_TYPE_CORE_EXT,
-                covenant_data: core_ext_covenant_data_with_payload(5, &[0u8; 48]),
-            }],
-            locktime: 0,
-            da_commit_core: None,
-            da_chunk_core: None,
-            witness: vec![],
-            da_payload: vec![],
-        };
-        assert!(reject_core_ext_tx_oversized_payload(&tx, 48).is_ok());
-    }
-
-    #[test]
-    fn reject_oversized_payload_rejects_over_limit() {
-        let tx = Tx {
-            version: TX_WIRE_VERSION,
-            tx_kind: 0,
-            tx_nonce: 1,
-            inputs: vec![],
-            outputs: vec![TxOutput {
-                value: 1,
-                covenant_type: COV_TYPE_CORE_EXT,
-                covenant_data: core_ext_covenant_data_with_payload(5, &[0u8; 49]),
-            }],
-            locktime: 0,
-            da_commit_core: None,
-            da_chunk_core: None,
-            witness: vec![],
-            da_payload: vec![],
-        };
-        let err = reject_core_ext_tx_oversized_payload(&tx, 48);
-        assert!(err.is_err());
-        assert!(err.unwrap_err().contains("exceeds policy limit"));
-    }
-
-    #[test]
-    fn reject_oversized_payload_ignores_non_core_ext() {
-        let tx = Tx {
-            version: TX_WIRE_VERSION,
-            tx_kind: 0,
-            tx_nonce: 1,
-            inputs: vec![],
-            outputs: vec![TxOutput {
-                value: 1,
-                covenant_type: COV_TYPE_P2PK,
-                covenant_data: vec![0u8; 100],
-            }],
-            locktime: 0,
-            da_commit_core: None,
-            da_chunk_core: None,
-            witness: vec![],
-            da_payload: vec![],
-        };
-        assert!(reject_core_ext_tx_oversized_payload(&tx, 1).is_ok());
-    }
-
-    #[test]
-    fn reject_oversized_payload_zero_limit_disables() {
-        let tx = Tx {
-            version: TX_WIRE_VERSION,
-            tx_kind: 0,
-            tx_nonce: 1,
-            inputs: vec![],
-            outputs: vec![TxOutput {
-                value: 1,
-                covenant_type: COV_TYPE_CORE_EXT,
-                covenant_data: core_ext_covenant_data_with_payload(5, &[0u8; 100]),
-            }],
-            locktime: 0,
-            da_commit_core: None,
-            da_chunk_core: None,
-            witness: vec![],
-            da_payload: vec![],
-        };
-        assert!(reject_core_ext_tx_oversized_payload(&tx, 0).is_ok());
-    }
-
-    #[test]
-    fn reject_oversized_payload_empty_payload_allowed() {
-        let tx = Tx {
-            version: TX_WIRE_VERSION,
-            tx_kind: 0,
-            tx_nonce: 1,
-            inputs: vec![],
-            outputs: vec![TxOutput {
-                value: 1,
-                covenant_type: COV_TYPE_CORE_EXT,
-                covenant_data: core_ext_covenant_data_with_payload(5, &[]),
-            }],
-            locktime: 0,
-            da_commit_core: None,
-            da_chunk_core: None,
-            witness: vec![],
-            da_payload: vec![],
-        };
-        assert!(reject_core_ext_tx_oversized_payload(&tx, 1).is_ok());
     }
 
     // ----- Stage C DA fee policy parity tests (Linear RUB-122) -----
@@ -5202,21 +4925,18 @@ mod tests {
     }
 
     /// RUB-162 cross-pollination ordering PIN — sub-floor tx with a
-    /// CORE_EXT output before its profile is active. Same ordering
-    /// invariant as the DA-anchor cross-pollination test above; ext-id
-    /// 7 is unregistered so the pre-activation guard inside
-    /// apply_policy is the relevant gate.
+    /// CORE_EXT output while the node runtime does not support CORE_EXT.
+    /// Same ordering invariant as the DA-anchor cross-pollination test above.
     ///
-    /// Proof assertion: build a sub-floor P2PK→CORE_EXT tx with no
-    /// matching active profile; `assert_eq!(err.kind, Rejected)` plus
-    /// `err.message.contains("TX_ERR_COVENANT_TYPE_INVALID")` below pin
+    /// Proof assertion: build a sub-floor P2PK->CORE_EXT tx;
+    /// `assert_eq!(err.kind, Rejected)` plus
+    /// `err.message.contains("CORE_EXT output unsupported")` below pin
     /// the class winner against the alternative
     /// `Unavailable("mempool fee below rolling minimum")` outcome.
     #[test]
     fn rub162_admit_sub_floor_core_ext_classifies_as_core_ext_rejected_not_floor_unavailable() {
         // input=10 / output=9 → fee=1 with weight≈7533 ⇒ sub-floor.
-        // CORE_EXT output with ext_id=7 and no profile registered ⇒
-        // pre-activation guard rejects.
+        // CORE_EXT output with ext_id=7 => unsupported-runtime guard rejects.
         let (state, raw) = signed_p2pk_state_and_tx(
             10,
             vec![TxOutput {
@@ -5231,17 +4951,17 @@ mod tests {
         let mut pool = TxPool::new();
         let err = pool
             .admit(&raw, &state, None, [0u8; 32])
-            .expect_err("admit must reject when both sub-floor and pre-activation CORE_EXT");
+            .expect_err("admit must reject when both sub-floor and unsupported CORE_EXT");
         assert_eq!(
             err.kind,
             TxPoolAdmitErrorKind::Rejected,
-            "CORE_EXT pre-activation class must win when apply_policy runs before validate_fee_floor; got kind={:?} message={}",
+            "CORE_EXT unsupported class must win when apply_policy runs before validate_fee_floor; got kind={:?} message={}",
             err.kind,
             err.message
         );
         assert!(
-            err.message.contains("TX_ERR_COVENANT_TYPE_INVALID"),
-            "error must come from the consensus 0x0102 unassigned-reject (RUB-585), not the rolling floor check; got: {}",
+            err.message.contains("CORE_EXT output unsupported"),
+            "error must come from CORE_EXT unsupported guard, not the rolling floor check; got: {}",
             err.message
         );
         // Atomicity: no partial insert on cross-pollination reject.

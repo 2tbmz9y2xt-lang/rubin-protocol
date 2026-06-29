@@ -9,7 +9,7 @@ use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxid
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context as apply_basic_non_coinbase_update,
     encode_compact_size, merkle_root_txids, parse_tx, pow_check, tx_weight_and_stats_public,
-    CoreExtDeploymentProfiles, Outpoint, Tx, UtxoEntry,
+    CoreExtProfiles, Outpoint, Tx, UtxoEntry,
 };
 use sha3::{Digest, Sha3_256};
 
@@ -56,8 +56,6 @@ pub struct MinerConfig {
     /// `DEFAULT_MEMPOOL_MIN_FEE_RATE` so a future change to the relay
     /// floor cannot silently change the DA floor.
     pub policy_min_da_fee_rate: u64,
-    pub policy_reject_core_ext_pre_activation: bool,
-    pub core_ext_deployments: CoreExtDeploymentProfiles,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,8 +113,6 @@ impl Default for MinerConfig {
             policy_da_surcharge_per_byte: 0,
             policy_current_mempool_min_fee_rate: DEFAULT_MEMPOOL_MIN_FEE_RATE,
             policy_min_da_fee_rate: DEFAULT_MIN_DA_FEE_RATE,
-            policy_reject_core_ext_pre_activation: true,
-            core_ext_deployments: CoreExtDeploymentProfiles::empty(),
         }
     }
 }
@@ -379,7 +375,7 @@ impl<'a> Miner<'a> {
         &self,
         tx: &Tx,
         utxos: &HashMap<Outpoint, UtxoEntry>,
-        next_height: u64,
+        _next_height: u64,
         policy_da_included: u64,
     ) -> Result<(bool, u64), String> {
         let policy_cfg = TxPoolConfig {
@@ -392,9 +388,6 @@ impl<'a> Miner<'a> {
             // by policy contract; this does not change consensus validity.
             policy_reject_non_coinbase_anchor_outputs: self.cfg.policy_da_anchor_anti_abuse
                 && self.cfg.policy_reject_non_coinbase_anchor_outputs,
-            policy_reject_core_ext_pre_activation: self.cfg.policy_reject_core_ext_pre_activation,
-            policy_max_ext_payload_bytes: 0,
-            core_ext_deployments: self.cfg.core_ext_deployments.clone(),
             suite_context: self.sync.cfg.suite_context.clone(),
             policy_current_mempool_min_fee_rate: if self.cfg.policy_da_anchor_anti_abuse {
                 self.cfg.policy_current_mempool_min_fee_rate
@@ -414,7 +407,7 @@ impl<'a> Miner<'a> {
         // `apply_policy` recomputed weight/da_bytes internally and the
         // miner then walked again to read `da_bytes`.
         let (weight, da_bytes, _) = tx_weight_and_stats_public(tx).map_err(|e| e.to_string())?;
-        let policy_result = apply_policy(tx, weight, da_bytes, utxos, next_height, &policy_cfg);
+        let policy_result = apply_policy(tx, weight, da_bytes, utxos, &policy_cfg);
         if policy_result.is_err() {
             return Ok((true, policy_da_included));
         }
@@ -493,10 +486,6 @@ impl<'a> Miner<'a> {
             &HashMap<Outpoint, UtxoEntry>,
         ) -> Result<bool, String>,
     ) -> Result<bool, String> {
-        let deployments = &self.sync.cfg.core_ext_deployments;
-        let active_profiles = deployments
-            .active_profiles_at_height(next_height)
-            .map_err(|err| err.to_string())?;
         let (rotation, registry) = self.sync.suite_context();
         let mut work_utxos = copy_selected_utxo_set(&self.sync.chain_state.utxos, group_inputs);
         for candidate in group {
@@ -511,7 +500,7 @@ impl<'a> Miner<'a> {
                 block_mtp,
                 block_mtp,
                 self.sync.cfg.chain_id,
-                &active_profiles,
+                &CoreExtProfiles::empty(),
                 rotation,
                 registry,
             );
@@ -813,8 +802,8 @@ mod tests {
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
     use rubin_consensus::{
         encode_compact_size, marshal_tx, p2pk_covenant_data_for_pubkey, parse_tx, sign_transaction,
-        tx_weight_and_stats_public, CoreExtDeploymentProfiles, DaChunkCore, DaCommitCore,
-        Mldsa87Keypair, Outpoint, Tx, TxInput, TxOutput, UtxoEntry,
+        tx_weight_and_stats_public, DaChunkCore, DaCommitCore, Mldsa87Keypair, Outpoint, Tx,
+        TxInput, TxOutput, UtxoEntry,
     };
     use sha3::{Digest, Sha3_256};
 
@@ -1366,14 +1355,12 @@ mod tests {
     }
 
     #[test]
-    fn miner_core_ext_policy_still_runs_when_da_anchor_master_off() {
+    fn miner_rejects_core_ext_when_da_anchor_master_off() {
         let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-core-ext-master-off");
         let (tx, utxos) = core_ext_policy_tx(0x75);
         sync.chain_state.utxos = utxos;
         let cfg = MinerConfig {
             policy_da_anchor_anti_abuse: false,
-            policy_reject_core_ext_pre_activation: true,
-            core_ext_deployments: CoreExtDeploymentProfiles::empty(),
             ..MinerConfig::default()
         };
         let miner = Miner::new(&mut sync, None, cfg).expect("miner");
@@ -1383,7 +1370,7 @@ mod tests {
             .expect("CORE_EXT candidate");
         assert!(
             reject,
-            "CORE_EXT pre-activation policy must still run when DA/anchor master is off"
+            "CORE_EXT unsupported-runtime policy must still run when DA/anchor master is off"
         );
         assert_eq!(next_da, 0);
         let _ = fs::remove_dir_all(&dir);
