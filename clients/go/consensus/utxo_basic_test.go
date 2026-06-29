@@ -249,7 +249,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityPreservesInputOrderPriority
 			makeOutpoint(simpPrev): coreSimplicityAcceptEntry(100),
 		}
 
-		work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
+		work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(
 			tx,
 			hashWithPrefix(0xE3),
 			utxos,
@@ -281,7 +281,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityPreservesInputOrderPriority
 			makeOutpoint(simpPrev): coreSimplicityAcceptEntry(100),
 		}
 
-		work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
+		work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(
 			tx,
 			hashWithPrefix(0xE4),
 			utxos,
@@ -316,7 +316,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_NonSimplicityWitnessUnderflowPrecedesLate
 		{Txid: laterPrev, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_HTLC, CovenantData: []byte{0x01}},
 	}
 
-	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
+	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(
 		tx,
 		hashWithPrefix(0xE9),
 		utxos,

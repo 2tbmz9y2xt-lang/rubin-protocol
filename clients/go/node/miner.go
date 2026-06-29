@@ -635,7 +635,7 @@ func collectCompleteDASetGroupInputs(group []miningCandidate, selectedNonces map
 func validateCompleteDASetGroupConsensus(group []miningCandidate, utxos map[consensus.Outpoint]consensus.UtxoEntry, groupInputOutpoints []consensus.Outpoint, nextHeight uint64, validationCtx miningConsensusContext) bool {
 	workUtxos := copySelectedUtxoSet(utxos, groupInputOutpoints)
 	for _, candidate := range group {
-		if _, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+		if _, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext(
 			candidate.minedCandidate.raw,
 			candidate.tx,
 			consensus.ParsedTxIDs{TxID: candidate.minedCandidate.txid, WTxID: candidate.minedCandidate.wtxid},
@@ -674,7 +674,7 @@ func (m *Miner) trySelectFlatCandidate(raw []byte, utxos map[consensus.Outpoint]
 	if err != nil {
 		return miningCandidate{}, policyDaIncluded, false, nil
 	}
-	if _, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(candidate.minedCandidate.raw, candidate.tx, consensus.ParsedTxIDs{TxID: candidate.minedCandidate.txid, WTxID: candidate.minedCandidate.wtxid}, workUtxos, nextHeight, validationCtx.blockMTP, validationCtx.chainID, consensus.SuiteValidationContext{Rotation: validationCtx.rotation, Registry: validationCtx.registry}); err != nil {
+	if _, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext(candidate.minedCandidate.raw, candidate.tx, consensus.ParsedTxIDs{TxID: candidate.minedCandidate.txid, WTxID: candidate.minedCandidate.wtxid}, workUtxos, nextHeight, validationCtx.blockMTP, validationCtx.chainID, consensus.SuiteValidationContext{Rotation: validationCtx.rotation, Registry: validationCtx.registry}); err != nil {
 		return miningCandidate{}, policyDaIncluded, false, nil
 	}
 	return candidate, nextDaIncluded, true, nil

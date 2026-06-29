@@ -2488,18 +2488,17 @@ func TestMempoolPolicySnapshot_DoesNotMutateForDaPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("nextBlockMTP: %v", err)
 	}
-	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndSuiteContext(
 		txBytes,
 		copyUtxoSet(st.Utxos),
 		nextHeight,
 		blockMTP,
 		devnetGenesisChainID,
-		nil,
 		mp.policy.RotationProvider,
 		mp.policy.SuiteRegistry,
 	)
 	if err != nil {
-		t.Fatalf("CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext: %v", err)
+		t.Fatalf("CheckTransactionWithOwnedUtxoSetAndSuiteContext: %v", err)
 	}
 	policyUtxos, err := policyInputSnapshot(checked.Tx, st.Utxos)
 	if err != nil {

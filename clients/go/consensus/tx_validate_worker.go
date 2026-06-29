@@ -59,7 +59,6 @@ func ValidateTxLocal(
 	chainID [32]byte,
 	blockHeight uint64,
 	blockMTP uint64,
-	_ any,
 	sigCache *SigCache,
 ) TxValidationResult {
 	result := TxValidationResult{TxIndex: tvc.TxIndex, Fee: tvc.Fee}
@@ -246,11 +245,10 @@ func RunTxValidationWorkers(
 	chainID [32]byte,
 	blockHeight uint64,
 	blockMTP uint64,
-	_ any,
 	sigCache *SigCache,
 ) ([]WorkerResult[TxValidationResult], error) {
 	return RunFunc(ctx, maxWorkers, len(txcs), txcs, func(ctx context.Context, tvc TxValidationContext) (TxValidationResult, error) {
-		r := ValidateTxLocal(tvc, chainID, blockHeight, blockMTP, nil, sigCache)
+		r := ValidateTxLocal(tvc, chainID, blockHeight, blockMTP, sigCache)
 		if r.Err != nil {
 			return r, r.Err
 		}

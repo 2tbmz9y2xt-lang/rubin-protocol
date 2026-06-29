@@ -62,7 +62,7 @@ func ConnectBlockBasicInMemoryAtHeight(
 	state *InMemoryChainState,
 	chainID [32]byte,
 ) (*ConnectBlockBasicSummary, error) {
-	return ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
+	return ConnectBlockBasicInMemoryAtHeightAndSuiteContext(
 		blockBytes,
 		expectedPrevHash,
 		expectedTarget,
@@ -70,36 +70,13 @@ func ConnectBlockBasicInMemoryAtHeight(
 		prevTimestamps,
 		state,
 		chainID,
-		nil,
-	)
-}
-
-func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfiles(
-	blockBytes []byte,
-	expectedPrevHash *[32]byte,
-	expectedTarget *[32]byte,
-	blockHeight uint64,
-	prevTimestamps []uint64,
-	state *InMemoryChainState,
-	chainID [32]byte,
-	_ any,
-) (*ConnectBlockBasicSummary, error) {
-	return ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
-		blockBytes,
-		expectedPrevHash,
-		expectedTarget,
-		blockHeight,
-		prevTimestamps,
-		state,
-		chainID,
-		nil,
-		nil,
-		nil,
+		nil, /*rotation*/
+		nil, /*registry*/
 	)
 }
 
 // #lizard forgive
-func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
+func ConnectBlockBasicInMemoryAtHeightAndSuiteContext(
 	blockBytes []byte,
 	expectedPrevHash *[32]byte,
 	expectedTarget *[32]byte,
@@ -107,11 +84,10 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 	prevTimestamps []uint64,
 	state *InMemoryChainState,
 	chainID [32]byte,
-	_ any,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (*ConnectBlockBasicSummary, error) {
-	return connectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(connectBlockBasicInMemorySuiteContext{
+	return connectBlockBasicInMemoryAtHeightAndSuiteContext(connectBlockBasicInMemorySuiteContext{
 		BlockBytes:       blockBytes,
 		ExpectedPrevHash: expectedPrevHash,
 		ExpectedTarget:   expectedTarget,
@@ -124,7 +100,7 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 	})
 }
 
-func connectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
+func connectBlockBasicInMemoryAtHeightAndSuiteContext(
 	input connectBlockBasicInMemorySuiteContext,
 ) (*ConnectBlockBasicSummary, error) {
 	if err := prepareInMemoryChainState(input.State); err != nil {
