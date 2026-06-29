@@ -36,8 +36,10 @@ pub const MAX_VAULT_KEYS: u8 = 12;
 pub const MAX_VAULT_WHITELIST_ENTRIES: u16 = 1024;
 pub const MAX_MULTISIG_KEYS: u8 = 12;
 pub const COV_TYPE_MULTISIG: u16 = 0x0104;
+// COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED per CANONICAL §14: consensus rejects it as
+// TxErrCovenantTypeInvalid at creation and spend (RUB-514/RUB-585). Retained only so the node
+// pre-activation mempool policy can name it; it carries NO consensus covenant semantics.
 pub const COV_TYPE_CORE_EXT: u16 = 0x0102;
-pub const CORE_EXT_WITNESS_SLOTS: u64 = 1;
 pub const COV_TYPE_CORE_STEALTH: u16 = 0x0105;
 pub const CORE_STEALTH_WITNESS_SLOTS: u64 = 1;
 

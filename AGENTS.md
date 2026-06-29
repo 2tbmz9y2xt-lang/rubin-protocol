@@ -183,7 +183,7 @@ Flag P1 if a consensus-impacting PR skips any required stage or lacks controller
 
 - CompactSize minimality must be enforced everywhere.
 - Parsers must reject premature EOF and trailing bytes.
-- Unknown witness suites may be parse-canonical but must fail at semantic authorization unless an ACTIVE `CORE_EXT` profile authorizes them.
+- Unknown witness suites may be parse-canonical but must fail at semantic authorization. There is no `CORE_EXT` activation path: covenant_type `0x0102` is unassigned (CANONICAL §14) and rejected as `TX_ERR_COVENANT_TYPE_INVALID` (RUB-585).
 - Implementations must not compute/cache TXID or WTXID for non-canonically parsed transactions.
 - Validation-before-mutation must hold: no UTXO or chain state mutation before all prior required checks pass.
 
@@ -192,14 +192,14 @@ Flag P1 if a consensus-impacting PR skips any required stage or lacks controller
 - `verify_sig` receives exactly `digest32` as the protocol message. No extra hashing, truncation, domain prefix, context string, or wrapper is allowed.
 - `crypto_sig` excludes the trailing `sighash_type` byte.
 - Native consensus suite is ML-DSA-87 (`suite_id=0x01`) only.
-- Non-native suites are allowed only through an ACTIVE `CORE_EXT` deployment profile with deterministic `verify_sig_ext` binding.
+- Non-native signature suites have no consensus activation path: the `CORE_EXT` covenant (`0x0102`) is unassigned and rejected (RUB-585), so only the native ML-DSA-87 suite is consensus-valid.
 - OpenSSL/FIPS paths must not overclaim regulatory compliance. Runtime preflight success is not production FIPS certification.
 - Consensus verification must not depend on ambient `OPENSSL_CONF`, `OPENSSL_MODULES`, or mutable process-global OpenSSL provider state unless an explicit isolation test proves identical behavior.
 
 ### Covenants and `CORE_EXT`
 
-- `CORE_EXT` pre-activation consensus semantics are anyone-can-spend with respect to witness semantics. Policy layers must fail closed for user safety: wallet/RPC/mempool/miner must not create, relay, or template unactivated `CORE_EXT` funds unless explicitly controlled for testing.
-- Do not convert policy-only guardrails into consensus validity rules without the consensus release train and controller approval.
+- `CORE_EXT` (`covenant_type=0x0102`) is unassigned per CANONICAL §14 and is rejected by consensus as `TX_ERR_COVENANT_TYPE_INVALID` at both creation and spend (RUB-585; spec RUB-517). There is no `CORE_EXT` activation path and 0x0102 is not spendable; the legacy pre-activation anyone-can-spend semantics have been retired.
+- The Go node retains a non-consensus mempool/miner guardrail that excludes 0x0102 (now redundant with consensus rejection, kept as defense in depth). Do not reintroduce `CORE_EXT` covenant semantics or treat 0x0102 as spendable; covenant-type validity follows CANONICAL §14 + `RUBIN_CONSENSUS_STATE_MACHINE`.
 - For `CORE_HTLC`, structural selector checks must run before cryptographic verification. Enforce `MIN_HTLC_PREIMAGE_BYTES`, selector coupling, locktime, suite gating, and error priority.
 - For `CORE_VAULT`, enforce one-vault-input, owner authorization, no non-owner fee sponsorship, whitelist rules, and `sum_out >= sum_in_vault` in the canonical order.
 

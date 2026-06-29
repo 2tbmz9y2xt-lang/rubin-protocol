@@ -230,8 +230,10 @@ fn validate_tx_covenants_genesis_htlc_zero_value_rejected() {
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
+// COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED per CANONICAL §14: a well-formed
+// 0x0102 creation output MUST reject as TxErrCovenantTypeInvalid (RUB-514).
 #[test]
-fn validate_tx_covenants_genesis_ext_ok() {
+fn validate_tx_covenants_genesis_ext_unassigned_rejected() {
     let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
     let mut cov = Vec::new();
     cov.extend_from_slice(&7u16.to_le_bytes());
@@ -242,7 +244,8 @@ fn validate_tx_covenants_genesis_ext_ok() {
         covenant_type: COV_TYPE_CORE_EXT,
         covenant_data: cov,
     }];
-    validate_tx_covenants_genesis(&tx, 0, None).expect("ok");
+    let err = validate_tx_covenants_genesis(&tx, 0, None).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
 #[test]

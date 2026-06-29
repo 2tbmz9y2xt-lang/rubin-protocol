@@ -207,23 +207,26 @@ func TestCoverage_NilCovenantDataUsesGenericMalformedContext(t *testing.T) {
 }
 
 func TestCoverage_CoreExtRetirementAndValueContextBranches(t *testing.T) {
-	entry := wcCoreExtEntry(1, 1)
-	good := nonCoinbaseResolvedInput{entry: entry, witness: []WitnessItem{{}}}
-	if err := (&nonCoinbaseApplyContext{}).validateInputSpend(0, good); err != nil {
-		t.Fatalf("validateInputSpend(CORE_EXT): %v", err)
+	// CORE_EXT (0x0102) is unassigned per CANONICAL §14 — consensus rejects it as
+	// TX_ERR_COVENANT_TYPE_INVALID at creation, witness assignment, and spend covenant
+	// validation, for any covenant_data (well-formed or malformed) (RUB-585).
+	wellFormed := wcCoreExtEntry(1, 1).CovenantData // ext_id + compactSize(0): well-formed under the retired parser
+	for _, cd := range [][]byte{wellFormed, {0x01}, {}} {
+		out := TxOutput{Value: 1, CovenantType: COV_TYPE_CORE_EXT, CovenantData: cd}
+		err := ValidateTxCovenantsGenesis(&Tx{Outputs: []TxOutput{out}}, 0, nil)
+		if err == nil {
+			t.Fatalf("genesis create CORE_EXT covenant_data=%x: expected reject", cd)
+		}
+		if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
+			t.Fatalf("genesis create CORE_EXT covenant_data=%x: code=%s, want %s", cd, got, TX_ERR_COVENANT_TYPE_INVALID)
+		}
 	}
-	bad := good
-	bad.witness = nil
-	assertTxErrCodeMsg(t, (&nonCoinbaseApplyContext{}).validateInputSpend(0, bad), TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
-	check := txInputSpendCheck{entry: entry, assigned: []WitnessItem{{}}}
-	if err := validateInputSpendQ(check, txValidationWorkerEnv{}); err != nil {
-		t.Fatalf("validateInputSpendQ(CORE_EXT): %v", err)
+	if _, err := WitnessSlots(COV_TYPE_CORE_EXT, wellFormed); err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("WitnessSlots(CORE_EXT) must reject with TX_ERR_COVENANT_TYPE_INVALID, got %v", err)
 	}
-	check.assigned = nil
-	assertTxErrCodeMsg(t, validateInputSpendQ(check, txValidationWorkerEnv{}), TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
-	check.assigned = []WitnessItem{{}}
-	check.entry.CovenantData = []byte{0x01}
-	assertTxErrCodeMsg(t, validateInputSpendQ(check, txValidationWorkerEnv{}), TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT covenant_data too short")
+	if err := checkSpendCovenant(COV_TYPE_CORE_EXT, wellFormed); err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("checkSpendCovenant(CORE_EXT) must reject with TX_ERR_COVENANT_TYPE_INVALID, got %v", err)
+	}
 	if got := CheckValueConservationTxWide(nil, false, Uint128{}); got == nil || got.Code != TX_ERR_PARSE {
 		t.Fatalf("nil txcontext base code=%v, want %s", got, TX_ERR_PARSE)
 	}

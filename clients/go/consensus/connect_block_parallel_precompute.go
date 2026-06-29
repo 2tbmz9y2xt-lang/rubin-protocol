@@ -127,6 +127,16 @@ func precomputeTxContext(
 		return TxValidationContext{}, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
 	}
 
+	// Output covenant genesis must be validated here so the precompute/worker
+	// path matches the sequential path exactly. Workers (ValidateTxLocal) only
+	// validate inputs, so without this an output whose covenant is invalid at
+	// creation time (e.g. an unassigned 0x0102 CORE_EXT output) would be
+	// precomputed and reported valid even though sequential apply rejects it.
+	// Default rotation (nil) mirrors the worker env (DefaultRotationProvider).
+	if err := ValidateTxCovenantsGenesis(tx, blockHeight, nil); err != nil {
+		return TxValidationContext{}, err
+	}
+
 	inputs, err := collectPrecomputeTxInputs(tx, overlay, blockHeight)
 	if err != nil {
 		return TxValidationContext{}, err

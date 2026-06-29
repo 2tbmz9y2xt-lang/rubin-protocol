@@ -168,12 +168,6 @@ func validateInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) err
 		return validateVaultInputSpendQ(check, env)
 	case COV_TYPE_HTLC:
 		return validateHTLCInputSpendQ(check, env)
-	case COV_TYPE_CORE_EXT:
-		if len(check.assigned) != CORE_EXT_WITNESS_SLOTS {
-			return txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
-		}
-		_, err := ParseCoreExtCovenantData(check.entry.CovenantData)
-		return err
 	case COV_TYPE_CORE_STEALTH:
 		return validateCoreStealthInputSpendQ(check, env)
 	case COV_TYPE_CORE_SIMPLICITY:

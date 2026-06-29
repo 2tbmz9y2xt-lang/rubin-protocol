@@ -158,9 +158,6 @@ func checkSpendCovenant(
 	case COV_TYPE_HTLC:
 		_, err := ParseHTLCCovenantData(covData)
 		return err
-	case COV_TYPE_CORE_EXT:
-		_, err := ParseCoreExtCovenantData(covData)
-		return err
 	case COV_TYPE_CORE_STEALTH:
 		_, err := ParseStealthCovenantData(covData)
 		return err

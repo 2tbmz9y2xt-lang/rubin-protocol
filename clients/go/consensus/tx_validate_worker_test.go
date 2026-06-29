@@ -240,6 +240,40 @@ func TestValidateTxLocal_CoreSimplicitySpendRejected(t *testing.T) {
 	assertTxErrCodeMsg(t, result.Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
 }
 
+// 0x0102 (CORE_EXT) is unassigned per CANONICAL §14 — the worker/queued spend path
+// (ValidateTxLocal -> validateTxLocalInputs -> assignedWorkerWitness/WitnessSlots) must
+// reject it as TX_ERR_COVENANT_TYPE_INVALID (RUB-585), even with well-formed covenant_data
+// (ext_id=7 || compactSize(0) = 070000) that the retired parser would have accepted.
+func TestValidateTxLocal_CoreExt0x0102Rejected(t *testing.T) {
+	var prevTxid [32]byte
+	prevTxid[0] = 0x67
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0}},
+		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Witness: dummyWitnesses(1),
+	}
+	tvc := TxValidationContext{
+		TxIndex: 1,
+		Tx:      tx,
+		ResolvedInputs: []UtxoEntry{{
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_EXT,
+			CovenantData: []byte{0x07, 0x00, 0x00}, // well-formed CORE_EXT covenant_data
+		}},
+		WitnessStart: 0,
+		WitnessEnd:   1,
+		Fee:          10,
+	}
+
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
+	if got := mustTxErrCode(t, result.Err); got != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("worker path: code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
+}
+
 func TestValidateTxLocal_CoreSimplicityInputGroupCapDeferredBehindDisabledSpend(t *testing.T) {
 	cmr := [32]byte{0x67}
 	run := func(inputCount int, splitLast bool) TxValidationResult {
