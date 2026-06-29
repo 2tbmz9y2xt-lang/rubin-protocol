@@ -73,7 +73,8 @@
         "CV-U-19",
         "CV-U-EXT-01",
         "CV-U-EXT-02",
-        "CV-U-EXT-03"
+        "CV-U-EXT-03",
+        "CV-U-EXT-06"
       ],
       "scope": "Go trace replay for the listed CV-UTXO-BASIC trace IDs plus bounded value-conservation statements.",
       "limitations": [
