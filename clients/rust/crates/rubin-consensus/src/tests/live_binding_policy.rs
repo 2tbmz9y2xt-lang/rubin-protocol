@@ -1,8 +1,9 @@
 use super::{
-    cached_live_binding_policy, default_live_binding_policy, live_binding_policy_core_ext_entry,
-    live_binding_policy_core_ext_entry_not_found_error, live_binding_policy_runtime_entry,
-    live_binding_policy_runtime_entry_not_found_error, load_live_binding_policy_from_json,
-    LiveBindingPolicyLookupError, LIVE_BINDING_POLICY_V1_JSON, LIVE_BINDING_POLICY_VERSION,
+    cached_live_binding_policy, default_live_binding_policy,
+    live_binding_policy_binding_name_entry, live_binding_policy_binding_name_entry_not_found_error,
+    live_binding_policy_runtime_entry, live_binding_policy_runtime_entry_not_found_error,
+    load_live_binding_policy_from_json, LiveBindingPolicyLookupError, LIVE_BINDING_POLICY_V1_JSON,
+    LIVE_BINDING_POLICY_VERSION,
 };
 use std::cell::Cell;
 use std::fs;
@@ -53,7 +54,7 @@ fn live_binding_policy_rejects_unsupported_version() {
                 "sig_len": 4627,
                 "runtime_binding": "openssl_digest32_v1",
                 "openssl_alg": "ML-DSA-87",
-                "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
             }]
         }"#,
     )
@@ -72,7 +73,7 @@ fn live_binding_policy_rejects_unknown_runtime_binding() {
                 "sig_len": 4627,
                 "runtime_binding": "unknown",
                 "openssl_alg": "ML-DSA-87",
-                "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
             }]
         }"#,
     )
@@ -84,7 +85,7 @@ fn live_binding_policy_rejects_unknown_runtime_binding() {
 }
 
 #[test]
-fn live_binding_policy_rejects_duplicate_core_ext_binding_name() {
+fn live_binding_policy_rejects_duplicate_live_binding_name() {
     let err = load_live_binding_policy_from_json(
         r#"{
             "version": 1,
@@ -95,7 +96,7 @@ fn live_binding_policy_rejects_duplicate_core_ext_binding_name() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 },
                 {
                     "alg_name": "ML-DSA-87",
@@ -103,7 +104,7 @@ fn live_binding_policy_rejects_duplicate_core_ext_binding_name() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }
             ]
         }"#,
@@ -111,7 +112,7 @@ fn live_binding_policy_rejects_duplicate_core_ext_binding_name() {
     .expect_err("must reject");
     assert_eq!(
         err,
-        r#"live_binding_policy: entries[1]: duplicate core_ext_live_binding_name "verify_sig_ext_openssl_digest32_v1""#
+        r#"live_binding_policy: entries[1]: duplicate live_binding_name "verify_sig_ext_openssl_digest32_v1""#
     );
 }
 
@@ -127,7 +128,7 @@ fn live_binding_policy_rejects_duplicate_runtime_tuple() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 },
                 {
                     "alg_name": "ML-DSA-87",
@@ -135,7 +136,7 @@ fn live_binding_policy_rejects_duplicate_runtime_tuple() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1_alt"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1_alt"
                 }
             ]
         }"#,
@@ -172,7 +173,7 @@ fn live_binding_policy_rejects_field_and_canonical_mismatches() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }]
             }"#,
             "live_binding_policy: entries[0]: alg_name missing",
@@ -187,7 +188,7 @@ fn live_binding_policy_rejects_field_and_canonical_mismatches() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }]
             }"#,
             "live_binding_policy: entries[0]: pubkey_len must be > 0",
@@ -202,7 +203,7 @@ fn live_binding_policy_rejects_field_and_canonical_mismatches() {
                     "sig_len": 0,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }]
             }"#,
             "live_binding_policy: entries[0]: sig_len must be > 0",
@@ -217,7 +218,7 @@ fn live_binding_policy_rejects_field_and_canonical_mismatches() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }]
             }"#,
             "live_binding_policy: entries[0]: openssl_alg missing",
@@ -232,13 +233,13 @@ fn live_binding_policy_rejects_field_and_canonical_mismatches() {
                     "sig_len": 4627,
                     "runtime_binding": "",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }]
             }"#,
             "live_binding_policy: entries[0]: runtime_binding missing",
         ),
         (
-            "core_ext_binding_missing",
+            "live_binding_name_missing",
             r#"{
                 "version": 1,
                 "entries": [{
@@ -247,10 +248,10 @@ fn live_binding_policy_rejects_field_and_canonical_mismatches() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": ""
+                    "live_binding_name": ""
                 }]
             }"#,
-            "live_binding_policy: entries[0]: core_ext_live_binding_name missing",
+            "live_binding_policy: entries[0]: live_binding_name missing",
         ),
         (
             "alg_name_mismatch",
@@ -262,7 +263,7 @@ fn live_binding_policy_rejects_field_and_canonical_mismatches() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }]
             }"#,
             r#"live_binding_policy: entries[0]: runtime_binding "openssl_digest32_v1" requires alg_name "ML-DSA-87""#,
@@ -277,7 +278,7 @@ fn live_binding_policy_rejects_field_and_canonical_mismatches() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-65",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }]
             }"#,
             r#"live_binding_policy: entries[0]: runtime_binding "openssl_digest32_v1" requires openssl_alg "ML-DSA-87""#,
@@ -292,7 +293,7 @@ fn live_binding_policy_rejects_field_and_canonical_mismatches() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }]
             }"#,
             r#"live_binding_policy: entries[0]: runtime_binding "openssl_digest32_v1" requires pubkey_len 2592"#,
@@ -307,13 +308,13 @@ fn live_binding_policy_rejects_field_and_canonical_mismatches() {
                     "sig_len": 4626,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }]
             }"#,
             r#"live_binding_policy: entries[0]: runtime_binding "openssl_digest32_v1" requires sig_len 4627"#,
         ),
         (
-            "core_ext_binding_mismatch",
+            "live_binding_name_mismatch",
             r#"{
                 "version": 1,
                 "entries": [{
@@ -322,10 +323,10 @@ fn live_binding_policy_rejects_field_and_canonical_mismatches() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1_alt"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1_alt"
                 }]
             }"#,
-            r#"live_binding_policy: entries[0]: runtime_binding "openssl_digest32_v1" requires core_ext_live_binding_name "verify_sig_ext_openssl_digest32_v1""#,
+            r#"live_binding_policy: entries[0]: runtime_binding "openssl_digest32_v1" requires live_binding_name "verify_sig_ext_openssl_digest32_v1""#,
         ),
     ];
 
@@ -347,7 +348,7 @@ fn live_binding_policy_rejects_missing_and_unknown_fields() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }]
             }"#,
             "missing field `version`",
@@ -362,7 +363,7 @@ fn live_binding_policy_rejects_missing_and_unknown_fields() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }],
                 "unexpected": true
             }"#,
@@ -377,7 +378,7 @@ fn live_binding_policy_rejects_missing_and_unknown_fields() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }]
             }"#,
             "missing field `alg_name`",
@@ -391,7 +392,7 @@ fn live_binding_policy_rejects_missing_and_unknown_fields() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }]
             }"#,
             "missing field `pubkey_len`",
@@ -405,7 +406,7 @@ fn live_binding_policy_rejects_missing_and_unknown_fields() {
                     "pubkey_len": 2592,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }]
             }"#,
             "missing field `sig_len`",
@@ -419,7 +420,7 @@ fn live_binding_policy_rejects_missing_and_unknown_fields() {
                     "pubkey_len": 2592,
                     "sig_len": 4627,
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }]
             }"#,
             "missing field `runtime_binding`",
@@ -433,13 +434,13 @@ fn live_binding_policy_rejects_missing_and_unknown_fields() {
                     "pubkey_len": 2592,
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
                 }]
             }"#,
             "missing field `openssl_alg`",
         ),
         (
-            "entry_missing_core_ext_live_binding_name",
+            "entry_missing_live_binding_name",
             r#"{
                 "version": 1,
                 "entries": [{
@@ -450,7 +451,7 @@ fn live_binding_policy_rejects_missing_and_unknown_fields() {
                     "openssl_alg": "ML-DSA-87"
                 }]
             }"#,
-            "missing field `core_ext_live_binding_name`",
+            "missing field `live_binding_name`",
         ),
         (
             "entry_unknown_field",
@@ -462,7 +463,7 @@ fn live_binding_policy_rejects_missing_and_unknown_fields() {
                     "sig_len": 4627,
                     "runtime_binding": "openssl_digest32_v1",
                     "openssl_alg": "ML-DSA-87",
-                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1",
+                    "live_binding_name": "verify_sig_ext_openssl_digest32_v1",
                     "unexpected": true
                 }]
             }"#,
@@ -491,7 +492,7 @@ fn live_binding_policy_rejects_duplicate_json_keys() {
                 "sig_len": 4627,
                 "runtime_binding": "openssl_digest32_v1",
                 "openssl_alg": "ML-DSA-87",
-                "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                "live_binding_name": "verify_sig_ext_openssl_digest32_v1"
             }]
         }"#,
     )
@@ -554,18 +555,19 @@ fn live_binding_policy_lookup_helpers_match_embedded_manifest() {
         )
     );
 
-    let core_ext_entry = live_binding_policy_core_ext_entry("verify_sig_ext_openssl_digest32_v1")
-        .expect("lookup core_ext entry");
-    assert_eq!(core_ext_entry.runtime_binding, "openssl_digest32_v1");
+    let live_binding_entry =
+        live_binding_policy_binding_name_entry("verify_sig_ext_openssl_digest32_v1")
+            .expect("lookup live_binding entry");
+    assert_eq!(live_binding_entry.runtime_binding, "openssl_digest32_v1");
 
-    let core_ext_miss = live_binding_policy_core_ext_entry("verify_sig_ext_unknown")
-        .expect_err("lookup core_ext miss");
+    let live_binding_miss = live_binding_policy_binding_name_entry("verify_sig_ext_unknown")
+        .expect_err("lookup live_binding miss");
     assert!(matches!(
-        core_ext_miss,
+        live_binding_miss,
         LiveBindingPolicyLookupError::NotFound(_)
     ));
     assert_eq!(
-        core_ext_miss.to_string(),
-        live_binding_policy_core_ext_entry_not_found_error("verify_sig_ext_unknown")
+        live_binding_miss.to_string(),
+        live_binding_policy_binding_name_entry_not_found_error("verify_sig_ext_unknown")
     );
 }

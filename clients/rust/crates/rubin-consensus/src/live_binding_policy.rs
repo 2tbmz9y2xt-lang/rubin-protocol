@@ -25,7 +25,7 @@ pub(crate) struct LiveBindingPolicyEntry {
     pub(crate) sig_len: u64,
     pub(crate) runtime_binding: String,
     pub(crate) openssl_alg: String,
-    pub(crate) core_ext_live_binding_name: String,
+    pub(crate) live_binding_name: String,
 }
 
 fn live_binding_policy_error(message: impl Into<String>) -> String {
@@ -42,10 +42,8 @@ pub(crate) fn live_binding_policy_runtime_entry_not_found_error(
     ))
 }
 
-pub(crate) fn live_binding_policy_core_ext_entry_not_found_error(binding_name: &str) -> String {
-    live_binding_policy_error(format!(
-        "core_ext_live_binding_name not found {binding_name:?}"
-    ))
+pub(crate) fn live_binding_policy_binding_name_entry_not_found_error(binding_name: &str) -> String {
+    live_binding_policy_error(format!("live_binding_name not found {binding_name:?}"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,9 +174,9 @@ pub(crate) fn load_live_binding_policy_from_json(
         return Err(live_binding_policy_error("entries missing"));
     }
     let mut seen_runtime_tuples = BTreeSet::new();
-    let mut seen_core_ext_bindings = BTreeSet::new();
+    let mut seen_live_bindings = BTreeSet::new();
     for (index, entry) in manifest.entries.iter().enumerate() {
-        entry.validate(index, &mut seen_runtime_tuples, &mut seen_core_ext_bindings)?;
+        entry.validate(index, &mut seen_runtime_tuples, &mut seen_live_bindings)?;
     }
     Ok(manifest)
 }
@@ -188,7 +186,7 @@ impl LiveBindingPolicyEntry {
         &self,
         index: usize,
         seen_runtime_tuples: &mut BTreeSet<String>,
-        seen_core_ext_bindings: &mut BTreeSet<String>,
+        seen_live_bindings: &mut BTreeSet<String>,
     ) -> Result<(), String> {
         if self.alg_name.is_empty() {
             return Err(live_binding_policy_error(format!(
@@ -215,15 +213,15 @@ impl LiveBindingPolicyEntry {
                 "entries[{index}]: openssl_alg missing"
             )));
         }
-        if self.core_ext_live_binding_name.is_empty() {
+        if self.live_binding_name.is_empty() {
             return Err(live_binding_policy_error(format!(
-                "entries[{index}]: core_ext_live_binding_name missing"
+                "entries[{index}]: live_binding_name missing"
             )));
         }
-        if !seen_core_ext_bindings.insert(self.core_ext_live_binding_name.clone()) {
+        if !seen_live_bindings.insert(self.live_binding_name.clone()) {
             return Err(live_binding_policy_error(format!(
-                "entries[{index}]: duplicate core_ext_live_binding_name {:?}",
-                self.core_ext_live_binding_name
+                "entries[{index}]: duplicate live_binding_name {:?}",
+                self.live_binding_name
             )));
         }
         let runtime_tuple_key =
@@ -262,11 +260,11 @@ impl LiveBindingPolicyEntry {
                         crate::constants::ML_DSA_87_SIG_BYTES
                     )));
                 }
-                if self.core_ext_live_binding_name
+                if self.live_binding_name
                     != crate::core_ext::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
                 {
                     return Err(live_binding_policy_error(format!(
-                        "entries[{index}]: runtime_binding {:?} requires core_ext_live_binding_name {:?}",
+                        "entries[{index}]: runtime_binding {:?} requires live_binding_name {:?}",
                         self.runtime_binding,
                         crate::core_ext::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
                     )));
@@ -322,17 +320,17 @@ pub(crate) fn live_binding_policy_runtime_entry(
         })
 }
 
-pub(crate) fn live_binding_policy_core_ext_entry(
+pub(crate) fn live_binding_policy_binding_name_entry(
     binding_name: &str,
 ) -> Result<&'static LiveBindingPolicyEntry, LiveBindingPolicyLookupError> {
     let manifest = default_live_binding_policy().map_err(LiveBindingPolicyLookupError::Invalid)?;
     manifest
         .entries
         .iter()
-        .find(|entry| entry.core_ext_live_binding_name == binding_name)
+        .find(|entry| entry.live_binding_name == binding_name)
         .ok_or_else(|| {
             LiveBindingPolicyLookupError::NotFound(
-                live_binding_policy_core_ext_entry_not_found_error(binding_name),
+                live_binding_policy_binding_name_entry_not_found_error(binding_name),
             )
         })
 }
