@@ -98,15 +98,16 @@ type utxoBasicFixture struct {
 	Vectors []utxoBasicVector `json:"vectors"`
 }
 type utxoBasicVector struct {
-	BlockMTP       *uint64    `json:"block_mtp"`
-	ID             string     `json:"id"`
-	Op             string     `json:"op"`
-	TxHex          string     `json:"tx_hex"`
-	ExpectErr      string     `json:"expect_err"`
-	Utxos          []utxoJSON `json:"utxos"`
-	Height         uint64     `json:"height"`
-	BlockTimestamp uint64     `json:"block_timestamp"`
-	ExpectOk       bool       `json:"expect_ok"`
+	BlockMTP        *uint64           `json:"block_mtp"`
+	CoreExtProfiles []json.RawMessage `json:"core_ext_profiles,omitempty"`
+	ID              string            `json:"id"`
+	Op              string            `json:"op"`
+	TxHex           string            `json:"tx_hex"`
+	ExpectErr       string            `json:"expect_err"`
+	Utxos           []utxoJSON        `json:"utxos"`
+	Height          uint64            `json:"height"`
+	BlockTimestamp  uint64            `json:"block_timestamp"`
+	ExpectOk        bool              `json:"expect_ok"`
 }
 
 type utxoJSON struct {
@@ -740,6 +741,12 @@ func run(fixturesDir, outPath string) error {
 					utxos, e := buildUtxoMapFromJSON(v.Utxos)
 					if e != nil {
 						runErr = e
+					} else if len(v.CoreExtProfiles) != 0 {
+						// 0x0102 (CORE_EXT) is unassigned: a fixture still carrying
+						// core_ext_profiles is rejected (fail-closed), matching the
+						// consensus CLI / runner, so the Go->Lean trace does not cover a
+						// request shape the active paths reject.
+						runErr = fmt.Errorf("core_ext_profiles unsupported by Go runtime")
 					} else {
 						mtp := v.BlockTimestamp
 						if v.BlockMTP != nil {
