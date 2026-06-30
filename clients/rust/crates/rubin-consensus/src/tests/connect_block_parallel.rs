@@ -1,5 +1,4 @@
 use super::*;
-use crate::CoreExtProfiles;
 
 fn clone_state(
     utxos: &HashMap<Outpoint, UtxoEntry>,
@@ -603,7 +602,6 @@ fn apply_non_coinbase_tx_basic_update_deferred_sigchecks_matches_sequential() {
             0,
             0,
             ZERO_CHAIN_ID,
-            &CoreExtProfiles::empty(),
             None,
             None,
         )
@@ -618,7 +616,6 @@ fn apply_non_coinbase_tx_basic_update_deferred_sigchecks_matches_sequential() {
             0,
             0,
             ZERO_CHAIN_ID,
-            &CoreExtProfiles::empty(),
             None,
             None,
         )
@@ -663,7 +660,6 @@ fn apply_non_coinbase_tx_basic_update_deferred_sigchecks_missing_utxo_fails_befo
             0,
             0,
             ZERO_CHAIN_ID,
-            &CoreExtProfiles::empty(),
             None,
             None,
         )

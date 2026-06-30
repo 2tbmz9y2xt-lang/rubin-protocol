@@ -3,7 +3,6 @@ use crate::constants::{
     CORE_STEALTH_WITNESS_SLOTS, COV_TYPE_CORE_STEALTH, COV_TYPE_HTLC, COV_TYPE_MULTISIG,
     COV_TYPE_P2PK, COV_TYPE_VAULT,
 };
-use crate::core_ext::CoreExtProfiles;
 use crate::error::{ErrorCode, TxError};
 use crate::htlc::{validate_htlc_spend_q, HtlcSpendContext};
 use crate::precompute::PrecomputedTxContext;
@@ -137,21 +136,17 @@ fn build_tx_local_preflight(tx: &Tx) -> Result<SighashV1PrehashCache<'_>, TxErro
 /// Vault inputs: only the threshold signature is verified here. Full vault
 /// policy (whitelist, owner lock, output rules) is enforced in the sequential
 /// commit stage, which has access to block-level context.
-#[allow(clippy::too_many_arguments)]
 pub fn validate_tx_local(
     ptc: &PrecomputedTxContext,
     pb: &ParsedBlock,
     chain_id: [u8; 32],
     block_height: u64,
     block_mtp: u64,
-    core_ext_profiles: &CoreExtProfiles,
     sig_cache: Option<&SigCache>,
 ) -> TxValidationResult {
     // COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED and rejected by `witness_slots`
     // (TxErrCovenantTypeInvalid) before any spend dispatch, so no CORE_EXT
-    // profile gating runs here. `core_ext_profiles` is retained in the public
-    // signature for node/connect_block callers but carries no behavior.
-    let _ = core_ext_profiles;
+    // profile gating runs here.
     let tx = &pb.txs[ptc.tx_block_idx];
 
     let mut sighash_cache = match build_tx_local_preflight(tx) {
@@ -340,7 +335,6 @@ pub fn run_tx_validation_workers(
     chain_id: [u8; 32],
     block_height: u64,
     block_mtp: u64,
-    core_ext_profiles: &CoreExtProfiles,
     sig_cache: Option<SigCache>,
 ) -> Result<Vec<WorkerResult<TxValidationResult, TxError>>, WorkerPoolRunError> {
     let max_tasks = ptcs.len();
@@ -354,7 +348,6 @@ pub fn run_tx_validation_workers(
             chain_id,
             block_height,
             block_mtp,
-            core_ext_profiles,
             sig_cache.as_ref(),
         );
         if let Some(ref e) = r.err {

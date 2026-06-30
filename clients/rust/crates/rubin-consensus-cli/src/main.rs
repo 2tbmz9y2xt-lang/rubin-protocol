@@ -15,10 +15,10 @@ use rubin_consensus::{
     validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_htlc_spend,
     validate_rotation_descriptor_for_network, validate_rotation_set_for_network,
-    validate_tx_covenants_genesis, work_from_target, CoreExtDeploymentProfiles, CoreExtProfiles,
-    CryptoRotationDescriptor, DescriptorRotationProvider, ErrorCode, FeatureBitDeployment,
-    FeatureBitState, FlagDayDeployment, HtlcSpendContext, InMemoryChainState, Outpoint,
-    RotationProvider, SuiteParams, SuiteRegistry, Tx, TxInput, TxOutput, UtxoEntry, WitnessItem,
+    validate_tx_covenants_genesis, work_from_target, CryptoRotationDescriptor,
+    DescriptorRotationProvider, ErrorCode, FeatureBitDeployment, FeatureBitState,
+    FlagDayDeployment, HtlcSpendContext, InMemoryChainState, Outpoint, RotationProvider,
+    SuiteParams, SuiteRegistry, Tx, TxInput, TxOutput, UtxoEntry, WitnessItem,
     ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
     ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM,
 };
@@ -3467,8 +3467,6 @@ fn main() {
                 let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 return;
             }
-            let core_ext_deployments = CoreExtDeploymentProfiles::empty();
-
             let (rotation, registry) = match build_core_ext_suite_context(&req) {
                 Ok(v) => v,
                 Err(e) => {
@@ -3490,7 +3488,6 @@ fn main() {
                 prev_timestamps,
                 &mut state,
                 chain_id,
-                &core_ext_deployments,
                 rotation.as_ref().map(|rp| rp as &dyn RotationProvider),
                 registry.as_ref(),
             ) {
@@ -3799,8 +3796,6 @@ fn main() {
                     return;
                 }
             };
-            let core_ext_profiles = CoreExtProfiles::empty();
-
             let apply_result =
                 apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
                     &tx,
@@ -3810,7 +3805,6 @@ fn main() {
                     req.block_timestamp,
                     block_mtp,
                     chain_id,
-                    &core_ext_profiles,
                     rotation.as_ref().map(|rp| rp as &dyn RotationProvider),
                     registry.as_ref(),
                 );

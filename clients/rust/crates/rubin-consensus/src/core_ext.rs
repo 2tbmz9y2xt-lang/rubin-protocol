@@ -56,23 +56,6 @@ pub struct CoreExtOpenSslDigest32BindingDescriptor {
 
 #[allow(unpredictable_function_pointer_comparisons)]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CoreExtActiveProfile {
-    pub ext_id: u16,
-    pub tx_context_enabled: bool,
-    pub allowed_suite_ids: Vec<u8>,
-    pub verification_binding: CoreExtVerificationBinding,
-    pub verify_sig_ext_tx_context_fn: Option<CoreExtVerifySigExtTxContextFn>,
-    pub binding_descriptor: Vec<u8>,
-    pub ext_payload_schema: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CoreExtProfiles {
-    pub active: Vec<CoreExtActiveProfile>,
-}
-
-#[allow(unpredictable_function_pointer_comparisons)]
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreExtDeploymentProfile {
     pub ext_id: u16,
     pub activation_height: u64,
@@ -227,71 +210,6 @@ fn read_replay_token_u64(data: &[u8], offset: usize) -> Result<u64, String> {
     let mut raw = [0u8; 8];
     raw.copy_from_slice(bytes);
     Ok(u64::from_le_bytes(raw))
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CoreExtDeploymentProfiles {
-    pub deployments: Vec<CoreExtDeploymentProfile>,
-}
-
-impl CoreExtProfiles {
-    pub fn empty() -> Self {
-        Self { active: Vec::new() }
-    }
-}
-
-impl CoreExtDeploymentProfiles {
-    pub fn empty() -> Self {
-        Self {
-            deployments: Vec::new(),
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        for deployment in &self.deployments {
-            if deployment.allowed_suite_ids.is_empty() {
-                return Err(format!(
-                    "core_ext deployment for ext_id={} must have non-empty allowed_suite_ids",
-                    deployment.ext_id
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    pub fn active_profiles_at_height(&self, height: u64) -> Result<CoreExtProfiles, TxError> {
-        self.validate().map_err(|_| {
-            TxError::new(
-                ErrorCode::TxErrCovenantTypeInvalid,
-                "CORE_EXT active profile must have non-empty allowed_suite_ids",
-            )
-        })?;
-        let mut active = Vec::new();
-        for deployment in &self.deployments {
-            if height < deployment.activation_height {
-                continue;
-            }
-            if active
-                .iter()
-                .any(|profile: &CoreExtActiveProfile| profile.ext_id == deployment.ext_id)
-            {
-                return Err(TxError::new(
-                    ErrorCode::TxErrCovenantTypeInvalid,
-                    "CORE_EXT multiple ACTIVE profiles for ext_id",
-                ));
-            }
-            active.push(CoreExtActiveProfile {
-                ext_id: deployment.ext_id,
-                tx_context_enabled: deployment.tx_context_enabled,
-                allowed_suite_ids: deployment.allowed_suite_ids.clone(),
-                verification_binding: deployment.verification_binding.clone(),
-                verify_sig_ext_tx_context_fn: deployment.verify_sig_ext_tx_context_fn,
-                binding_descriptor: deployment.binding_descriptor.clone(),
-                ext_payload_schema: deployment.ext_payload_schema.clone(),
-            });
-        }
-        Ok(CoreExtProfiles { active })
-    }
 }
 
 fn normalized_allowed_suite_ids(ids: &[u8]) -> Vec<u8> {
@@ -732,84 +650,6 @@ mod tests {
         assert_eq!(desc.openssl_alg, "ML-DSA-87");
         assert_eq!(desc.pubkey_len, ML_DSA_87_PUBKEY_BYTES);
         assert_eq!(desc.sig_len, ML_DSA_87_SIG_BYTES);
-    }
-
-    #[test]
-    fn core_ext_deployments_activate_at_height() {
-        let deployments = CoreExtDeploymentProfiles {
-            deployments: vec![CoreExtDeploymentProfile {
-                ext_id: 7,
-                activation_height: 10,
-                tx_context_enabled: true,
-                allowed_suite_ids: vec![0x03],
-                verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
-                verify_sig_ext_tx_context_fn: None,
-                binding_descriptor: b"accept".to_vec(),
-                ext_payload_schema: b"schema".to_vec(),
-                governance_nonce: 0,
-            }],
-        };
-
-        let before = deployments.active_profiles_at_height(9).unwrap();
-        assert!(before.active.is_empty());
-
-        let active = deployments.active_profiles_at_height(10).unwrap();
-        assert_eq!(active.active.len(), 1);
-        assert_eq!(active.active[0].ext_id, 7);
-        assert!(active.active[0].tx_context_enabled);
-    }
-
-    #[test]
-    fn core_ext_deployments_empty_allowed_suite_ids_rejected_at_activation_lookup() {
-        let deployments = CoreExtDeploymentProfiles {
-            deployments: vec![CoreExtDeploymentProfile {
-                ext_id: 7,
-                activation_height: 10,
-                tx_context_enabled: false,
-                allowed_suite_ids: Vec::new(),
-                verification_binding: CoreExtVerificationBinding::NativeVerifySig,
-                verify_sig_ext_tx_context_fn: None,
-                binding_descriptor: Vec::new(),
-                ext_payload_schema: b"schema".to_vec(),
-                governance_nonce: 0,
-            }],
-        };
-
-        let err = deployments.active_profiles_at_height(10).unwrap_err();
-        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
-    }
-
-    #[test]
-    fn core_ext_deployments_duplicate_active_rejected() {
-        let deployments = CoreExtDeploymentProfiles {
-            deployments: vec![
-                CoreExtDeploymentProfile {
-                    ext_id: 7,
-                    activation_height: 0,
-                    tx_context_enabled: false,
-                    allowed_suite_ids: vec![0x03],
-                    verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
-                    verify_sig_ext_tx_context_fn: None,
-                    binding_descriptor: b"accept".to_vec(),
-                    ext_payload_schema: b"schema-a".to_vec(),
-                    governance_nonce: 0,
-                },
-                CoreExtDeploymentProfile {
-                    ext_id: 7,
-                    activation_height: 0,
-                    tx_context_enabled: false,
-                    allowed_suite_ids: vec![0x04],
-                    verification_binding: CoreExtVerificationBinding::VerifySigExtReject,
-                    verify_sig_ext_tx_context_fn: None,
-                    binding_descriptor: b"reject".to_vec(),
-                    ext_payload_schema: b"schema-b".to_vec(),
-                    governance_nonce: 0,
-                },
-            ],
-        };
-
-        let err = deployments.active_profiles_at_height(0).unwrap_err();
-        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
     }
 
     #[test]

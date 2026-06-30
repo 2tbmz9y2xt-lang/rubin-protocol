@@ -9,7 +9,7 @@ use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxid
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context as apply_basic_non_coinbase_update,
     encode_compact_size, merkle_root_txids, parse_tx, pow_check, tx_weight_and_stats_public,
-    CoreExtProfiles, Outpoint, Tx, UtxoEntry,
+    Outpoint, Tx, UtxoEntry,
 };
 use sha3::{Digest, Sha3_256};
 
@@ -500,7 +500,6 @@ impl<'a> Miner<'a> {
                 block_mtp,
                 block_mtp,
                 self.sync.cfg.chain_id,
-                &CoreExtProfiles::empty(),
                 rotation,
                 registry,
             );

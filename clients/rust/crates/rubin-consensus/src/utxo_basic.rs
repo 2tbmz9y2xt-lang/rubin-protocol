@@ -5,7 +5,6 @@ use crate::constants::{
     COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_CORE_STEALTH, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC,
     COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_VAULT,
 };
-use crate::core_ext::CoreExtProfiles;
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
@@ -50,7 +49,6 @@ struct UtxoApplyImplContext<'a> {
     block_timestamp: u64,
     block_mtp: u64,
     chain_id: [u8; 32],
-    core_ext_profiles_at_height: &'a CoreExtProfiles,
     rotation: Option<&'a dyn RotationProvider>,
     registry: Option<&'a SuiteRegistry>,
 }
@@ -83,29 +81,6 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
     block_mtp: u64,
     chain_id: [u8; 32],
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
-        tx,
-        txid,
-        utxo_set,
-        height,
-        block_timestamp,
-        block_mtp,
-        chain_id,
-        &CoreExtProfiles::empty(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
-    tx: &Tx,
-    txid: [u8; 32],
-    utxo_set: &HashMap<Outpoint, UtxoEntry>,
-    height: u64,
-    block_timestamp: u64,
-    block_mtp: u64,
-    chain_id: [u8; 32],
-    core_ext_profiles_at_height: &CoreExtProfiles,
-) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
         tx,
         txid,
@@ -114,7 +89,6 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles(
         block_timestamp,
         block_mtp,
         chain_id,
-        core_ext_profiles_at_height,
         None,
         None,
     )
@@ -129,7 +103,6 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
     block_timestamp: u64,
     block_mtp: u64,
     chain_id: [u8; 32],
-    core_ext_profiles_at_height: &CoreExtProfiles,
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
@@ -142,7 +115,6 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
             block_timestamp,
             block_mtp,
             chain_id,
-            core_ext_profiles_at_height,
             rotation,
             registry,
         },
@@ -159,7 +131,6 @@ pub(crate) fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_
     block_timestamp: u64,
     block_mtp: u64,
     chain_id: [u8; 32],
-    core_ext_profiles_at_height: &CoreExtProfiles,
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
     sig_queue: &mut SigCheckQueue,
@@ -173,7 +144,6 @@ pub(crate) fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_
             block_timestamp,
             block_mtp,
             chain_id,
-            core_ext_profiles_at_height,
             rotation,
             registry,
         },
@@ -190,26 +160,23 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
     block_timestamp: u64,
     block_mtp: u64,
     chain_id: [u8; 32],
-    core_ext_profiles_at_height: &CoreExtProfiles,
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
     let mut sig_queue = SigCheckQueue::new(1);
     let queue_mark = sig_queue.mark();
-    let result =
-        apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
-            tx,
-            txid,
-            utxo_set,
-            height,
-            block_timestamp,
-            block_mtp,
-            chain_id,
-            core_ext_profiles_at_height,
-            rotation,
-            registry,
-            &mut sig_queue,
-        );
+    let result = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+        tx,
+        txid,
+        utxo_set,
+        height,
+        block_timestamp,
+        block_mtp,
+        chain_id,
+        rotation,
+        registry,
+        &mut sig_queue,
+    );
     let (work, summary) = match result {
         Ok(ok) => ok,
         Err(err) => {
@@ -233,7 +200,6 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
         block_timestamp,
         block_mtp,
         chain_id,
-        core_ext_profiles_at_height,
         rotation,
         registry,
     } = ctx;
@@ -361,9 +327,6 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
     // COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED and already rejected by
     // `check_spend_covenant`/`witness_slots` (TxErrCovenantTypeInvalid) during
     // input resolution above, so no CORE_EXT profile gating runs here.
-    // `core_ext_profiles_at_height` is retained in the public signatures for
-    // node/connect_block callers but carries no behavior.
-    let _ = core_ext_profiles_at_height;
 
     for (input_index, ((entry, assigned_range), op)) in resolved_inputs
         .iter()
@@ -771,16 +734,7 @@ mod tests {
         );
         let create_err =
             apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                &create_tx,
-                txid,
-                &funding,
-                1,
-                0,
-                0,
-                chain_id,
-                &CoreExtProfiles::empty(),
-                None,
-                None,
+                &create_tx, txid, &funding, 1, 0, 0, chain_id, None, None,
             )
             .expect_err("0x0102 creation must reject");
         assert_eq!(create_err.code, ErrorCode::TxErrCovenantTypeInvalid);
@@ -817,7 +771,6 @@ mod tests {
                 0,
                 0,
                 spend_chain,
-                &CoreExtProfiles::empty(),
                 None,
                 None,
             )
@@ -1280,16 +1233,7 @@ mod tests {
         let original = utxo_set.clone();
         let (_work, summary) =
             apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                tx,
-                txid,
-                utxo_set,
-                200,
-                1_000,
-                1_000,
-                chain_id,
-                &CoreExtProfiles::empty(),
-                None,
-                None,
+                tx, txid, utxo_set, 200, 1_000, 1_000, chain_id, None, None,
             )
             .expect("apply");
         assert!(summary.fee > 0);
@@ -1302,32 +1246,15 @@ mod tests {
 
         let sequential =
             apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                &tx,
-                txid,
-                &utxo_set,
-                1,
-                0,
-                0,
-                chain_id,
-                &CoreExtProfiles::empty(),
-                None,
-                None,
+                &tx, txid, &utxo_set, 1, 0, 0, chain_id, None, None,
             )
             .expect("sequential apply");
 
-        let deferred = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
-            &tx,
-            txid,
-            &utxo_set,
-            1,
-            0,
-            0,
-            chain_id,
-            &CoreExtProfiles::empty(),
-            None,
-            None,
-        )
-        .expect("deferred apply");
+        let deferred =
+            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
+                &tx, txid, &utxo_set, 1, 0, 0, chain_id, None, None,
+            )
+            .expect("deferred apply");
 
         assert_eq!(deferred, sequential);
     }
@@ -1380,16 +1307,7 @@ mod tests {
         tx.witness[0].signature[0] ^= 0x01;
 
         let err = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
-            &tx,
-            txid,
-            &utxo_set,
-            1,
-            0,
-            0,
-            chain_id,
-            &CoreExtProfiles::empty(),
-            None,
-            None,
+            &tx, txid, &utxo_set, 1, 0, 0, chain_id, None, None,
         )
         .expect_err("bad signature must fail");
 
@@ -1402,16 +1320,7 @@ mod tests {
         tx.outputs[0].value = 101;
 
         let err = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
-            &tx,
-            txid,
-            &utxo_set,
-            1,
-            0,
-            0,
-            chain_id,
-            &CoreExtProfiles::empty(),
-            None,
-            None,
+            &tx, txid, &utxo_set, 1, 0, 0, chain_id, None, None,
         )
         .expect_err("late value-conservation failure must return error, not leave queued tasks");
 
