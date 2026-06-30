@@ -32,6 +32,7 @@ pub const MAX_P2PK_COVENANT_DATA: u64 = 33;
 pub const MAX_HTLC_COVENANT_DATA: u64 = 105;
 pub const MIN_HTLC_PREIMAGE_BYTES: u64 = 16; // consensus security floor (Q-A287-03)
 pub const MAX_HTLC_PREIMAGE_BYTES: u64 = 256;
+pub const MAX_SIMPLICITY_STATE_BYTES: u64 = 512;
 pub const MAX_VAULT_KEYS: u8 = 12;
 pub const MAX_VAULT_WHITELIST_ENTRIES: u16 = 1024;
 pub const MAX_MULTISIG_KEYS: u8 = 12;
@@ -42,6 +43,7 @@ pub const COV_TYPE_MULTISIG: u16 = 0x0104;
 pub const COV_TYPE_CORE_EXT: u16 = 0x0102;
 pub const COV_TYPE_CORE_STEALTH: u16 = 0x0105;
 pub const CORE_STEALTH_WITNESS_SLOTS: u64 = 1;
+pub const COV_TYPE_CORE_SIMPLICITY: u16 = 0x0106;
 
 #[deprecated(note = "use COV_TYPE_CORE_EXT")]
 pub const COV_TYPE_EXT: u16 = COV_TYPE_CORE_EXT;
@@ -107,8 +109,13 @@ mod tests {
         assert_eq!(COV_TYPE_CORE_EXT, 0x0102);
         assert_eq!(COV_TYPE_DA_COMMIT, 0x0103);
         assert_eq!(COV_TYPE_CORE_STEALTH, 0x0105);
+        assert_eq!(COV_TYPE_CORE_SIMPLICITY, 0x0106);
         assert_eq!(COV_TYPE_CORE_EXT.to_le_bytes(), 0x0102u16.to_le_bytes());
         assert_eq!(COV_TYPE_CORE_STEALTH.to_le_bytes(), 0x0105u16.to_le_bytes());
+        assert_eq!(
+            COV_TYPE_CORE_SIMPLICITY.to_le_bytes(),
+            0x0106u16.to_le_bytes()
+        );
     }
 
     #[allow(deprecated)]
