@@ -1183,22 +1183,56 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use rubin_consensus::constants::{COV_TYPE_P2PK, POW_LIMIT, SUITE_ID_ML_DSA_87};
+    use rubin_consensus::constants::{
+        COV_TYPE_P2PK, POW_LIMIT, SUITE_ID_ML_DSA_87, TX_WIRE_VERSION,
+    };
+    use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
     use rubin_consensus::{
-        block_hash, encode_compact_size, Outpoint, UtxoEntry, BLOCK_HEADER_BYTES,
+        block_hash, encode_compact_size, marshal_tx, merkle_root_txids,
+        p2pk_covenant_data_for_pubkey, parse_block_bytes, parse_tx, sign_transaction,
+        Mldsa87Keypair, NativeSuiteSet, Outpoint, RotationProvider, Tx, TxInput, TxOutput,
+        UtxoEntry, BLOCK_HEADER_BYTES,
     };
     use rubin_consensus::{DefaultRotationProvider, SuiteRegistry};
 
     use crate::blockstore::{block_store_path, BlockStore};
     use crate::chainstate::{chain_state_path, load_chain_state, ChainState};
+    use crate::coinbase::{build_coinbase_tx, default_mine_address};
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::io_utils::unique_temp_path;
     use crate::sync::{
         default_sync_config, run_pv_shadow_validation_guarded, SuiteContext, SyncEngine,
         MAX_PV_SHADOW_MAX_SAMPLES,
     };
+
+    /// Test-only rotation provider that counts how many times the
+    /// spend-suite set is consulted (the lookup native covenant spend
+    /// validation performs at the top of `validate_p2pk_spend_q`,
+    /// before any key/signature check). Used by
+    /// `sync_engine_shadow_mode_reuses_shared_suite_context_sequentially`
+    /// to prove a single shared `SuiteContext` Arc is exercised by BOTH
+    /// the primary and the shadow validation lanes. Behaves like
+    /// `DefaultRotationProvider` ({ML-DSA-87} for create and spend).
+    struct CountingRotationProvider {
+        spend_calls: AtomicUsize,
+    }
+
+    impl RotationProvider for CountingRotationProvider {
+        fn native_create_suites(&self, _height: u64) -> NativeSuiteSet {
+            NativeSuiteSet::try_new(&[SUITE_ID_ML_DSA_87])
+                .expect("counting rotation provider suite set must stay <= 2")
+        }
+
+        fn native_spend_suites(&self, _height: u64) -> NativeSuiteSet {
+            self.spend_calls.fetch_add(1, Ordering::SeqCst);
+            NativeSuiteSet::try_new(&[SUITE_ID_ML_DSA_87])
+                .expect("counting rotation provider suite set must stay <= 2")
+        }
+    }
 
     const VALID_BLOCK_HEX: &str = "01000000111111111111111111111111111111111111111111111111111111111111111102e66000bf8ce870908df4a8689554852ccef681ee0b5df32246162a53e36e290100000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff07000000000000000101000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff010000000000000000020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8000000000000";
 
@@ -1371,6 +1405,151 @@ mod tests {
         let (mismatches, samples) = engine.pv_shadow_stats();
         assert_eq!(mismatches, 0);
         assert!(samples.is_empty());
+    }
+
+    /// RUB-587: re-pin shadow shared-suite-context parity coverage on a
+    /// non-0x0102 vehicle (CORE_P2PK). Installs a single shared
+    /// `SuiteContext { rotation, registry }` (one `Arc<CountingRotationProvider>`)
+    /// and runs `apply_block` in `parallel_validation_mode = "shadow"` against
+    /// a block that spends a CORE_P2PK output. The spend carries a canonical
+    /// ML-DSA-87 witness whose signature is bound to a different key, so the
+    /// spend FAILS — but both the primary lane
+    /// (`connect_block_with_suite_context`) and the shadow lane
+    /// (`run_pv_shadow_validation`, fed the SAME `cfg.suite_context` Arc)
+    /// consult `rotation.native_spend_suites(..)` at the top of
+    /// `validate_p2pk_spend_q` BEFORE the key/signature check. Asserting
+    /// `spend_calls >= 2` proves the one shared suite-context object is
+    /// exercised by both validation paths. (Replaces the deleted CORE_EXT
+    /// vehicle from #2168; no `TX_ERR_SIG_ALG_INVALID` / CORE_EXT coupling.)
+    #[test]
+    fn sync_engine_shadow_mode_reuses_shared_suite_context_sequentially() {
+        let dir = unique_temp_path("rubin-node-sync-pv-shared-suite-context");
+        let chain_state_file = chain_state_path(&dir);
+        let block_store_root = block_store_path(&dir);
+        let store = BlockStore::open(block_store_root).expect("open blockstore");
+
+        let rotation = Arc::new(CountingRotationProvider {
+            spend_calls: AtomicUsize::new(0),
+        });
+
+        let mut cfg = default_sync_config(
+            Some(POW_LIMIT),
+            devnet_genesis_chain_id(),
+            Some(chain_state_file),
+        );
+        cfg.parallel_validation_mode = "shadow".to_string();
+        cfg.suite_context = Some(SuiteContext {
+            rotation: rotation.clone(),
+            registry: Arc::new(SuiteRegistry::default_registry().clone()),
+        });
+
+        let mut engine = SyncEngine::new(ChainState::new(), Some(store), cfg).expect("new sync");
+        engine
+            .apply_block(&devnet_genesis_block_bytes(), None)
+            .expect("apply genesis");
+
+        // Genesis applied at height 0 with a far-behind timestamp keeps the
+        // engine in IBD, so the shadow lane is active for the next block.
+        assert!(
+            engine.pv_shadow_active(),
+            "shadow lane must be active for the spend block"
+        );
+
+        // CORE_P2PK output bound to `owner_pubkey`. We sign correctly with the
+        // owner key (so the witness has canonical lengths and the registered
+        // ML-DSA-87 suite), then corrupt one signature byte so the spend FAILS
+        // at signature verification. Both lanes still consult the spend-suite
+        // set first (it is looked up before any signature check).
+        let owner = Mldsa87Keypair::generate().expect("OpenSSL signer unavailable");
+        let owner_pubkey = owner.pubkey_bytes();
+
+        let outpoint = Outpoint {
+            txid: [0xee; 32],
+            vout: 0,
+        };
+        engine.chain_state.utxos.insert(
+            outpoint.clone(),
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&owner_pubkey),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+
+        let mut spend = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x00,
+            tx_nonce: 1,
+            inputs: vec![TxInput {
+                prev_txid: outpoint.txid,
+                prev_vout: outpoint.vout,
+                script_sig: Vec::new(),
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 90,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&owner_pubkey),
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        };
+        sign_transaction(
+            &mut spend,
+            &engine.chain_state.utxos,
+            devnet_genesis_chain_id(),
+            &owner,
+        )
+        .expect("sign spend");
+        // Corrupt one byte of the signature body (not the trailing sighash-type
+        // byte) so witness lengths stay canonical but signature verification
+        // fails. The spend-suite lookup runs before this check on both lanes.
+        {
+            let wi = spend.witness.first_mut().expect("witness item present");
+            assert!(wi.signature.len() >= 2, "signature must carry a body byte");
+            wi.signature[0] ^= 0xff;
+        }
+        let spend_tx = marshal_tx(&spend).expect("marshal spend");
+
+        let (_, spend_txid, spend_wtxid, consumed) = parse_tx(&spend_tx).expect("parse spend");
+        assert_eq!(consumed, spend_tx.len());
+        let witness_root =
+            witness_merkle_root_wtxids(&[[0u8; 32], spend_wtxid]).expect("witness root");
+        let witness_commitment = witness_commitment_hash(witness_root);
+        let coinbase =
+            build_coinbase_tx(1, 0, &default_mine_address(), witness_commitment).expect("coinbase");
+        let (_, coinbase_txid, _, coinbase_consumed) = parse_tx(&coinbase).expect("parse coinbase");
+        assert_eq!(coinbase_consumed, coinbase.len());
+        let merkle_root = merkle_root_txids(&[coinbase_txid, spend_txid]).expect("merkle root");
+
+        let genesis = devnet_genesis_block_bytes();
+        let genesis_hash = block_hash(&genesis[..BLOCK_HEADER_BYTES]).expect("genesis hash");
+        let parsed_genesis = parse_block_bytes(&genesis).expect("parse genesis");
+        let block = build_block_bytes(
+            genesis_hash,
+            merkle_root,
+            POW_LIMIT,
+            parsed_genesis.header.timestamp.saturating_add(1),
+            &[coinbase, spend_tx],
+        );
+
+        let err = engine.apply_block(&block, None).unwrap_err();
+        assert!(!err.is_empty(), "P2PK spend with mismatched key must fail");
+
+        let spend_calls = rotation.spend_calls.load(Ordering::SeqCst);
+        eprintln!("RUB-587 shared-suite-context spend_calls = {spend_calls}");
+        assert!(
+            spend_calls >= 2,
+            "shared suite context should be exercised by both primary and shadow \
+             validation paths (spend_calls = {spend_calls})"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]
