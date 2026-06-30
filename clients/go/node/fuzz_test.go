@@ -285,7 +285,7 @@ func fuzzCheckedDaPolicyTx(
 	if consumed != len(txBytes) {
 		t.Fatalf("ParseTx consumed=%d, want %d", consumed, len(txBytes))
 	}
-	checked, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+	checked, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext(
 		txBytes,
 		tx,
 		consensus.ParsedTxIDs{TxID: txid, WTxID: wtxid},
@@ -296,7 +296,7 @@ func fuzzCheckedDaPolicyTx(
 		consensus.SuiteValidationContext{},
 	)
 	if err != nil {
-		t.Fatalf("CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(signed fuzz tx): %v", err)
+		t.Fatalf("CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext(signed fuzz tx): %v", err)
 	}
 	if checked.Fee != policyFee {
 		t.Fatalf("checked fee=%d, want %d", checked.Fee, policyFee)

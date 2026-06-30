@@ -28,7 +28,7 @@ Go:
 - `BenchmarkMinerBuildContext`
 - `BenchmarkCloneChainState`
 - `BenchmarkCopyUtxoSet`
-- `BenchmarkConnectBlockWithCoreExtProfilesAndSuiteContext`
+- `BenchmarkConnectBlockWithSuiteContext`
 - `BenchmarkConnectBlockParallelSigsWithSuiteContext`
 
 Rust:

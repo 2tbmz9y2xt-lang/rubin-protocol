@@ -13,33 +13,21 @@ func (s *ChainState) ConnectBlock(
 	prevTimestamps []uint64,
 	chainID [32]byte,
 ) (*ChainStateConnectSummary, error) {
-	return s.ConnectBlockWithCoreExtProfiles(blockBytes, expectedTarget, prevTimestamps, chainID, nil)
-}
-
-func (s *ChainState) ConnectBlockWithCoreExtProfiles(
-	blockBytes []byte,
-	expectedTarget *[32]byte,
-	prevTimestamps []uint64,
-	chainID [32]byte,
-	coreExtProfiles any,
-) (*ChainStateConnectSummary, error) {
-	return s.ConnectBlockWithCoreExtProfilesAndSuiteContext(
+	return s.ConnectBlockWithSuiteContext(
 		blockBytes,
 		expectedTarget,
 		prevTimestamps,
 		chainID,
-		coreExtProfiles,
 		s.rotationOrNil(),
 		s.registryOrNil(),
 	)
 }
 
-func (s *ChainState) ConnectBlockWithCoreExtProfilesAndSuiteContext(
+func (s *ChainState) ConnectBlockWithSuiteContext(
 	blockBytes []byte,
 	expectedTarget *[32]byte,
 	prevTimestamps []uint64,
 	chainID [32]byte,
-	coreExtProfiles any,
 	rotation consensus.RotationProvider,
 	registry *consensus.SuiteRegistry,
 ) (*ChainStateConnectSummary, error) {
@@ -55,7 +43,7 @@ func (s *ChainState) ConnectBlockWithCoreExtProfilesAndSuiteContext(
 	if err != nil {
 		return nil, err
 	}
-	summary, err := consensus.ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
+	summary, err := consensus.ConnectBlockBasicInMemoryAtHeightAndSuiteContext(
 		blockBytes,
 		expectedPrevHash,
 		expectedTarget,
@@ -63,7 +51,6 @@ func (s *ChainState) ConnectBlockWithCoreExtProfilesAndSuiteContext(
 		prevTimestamps,
 		&workState,
 		chainID,
-		coreExtProfiles,
 		rotation,
 		registry,
 	)
@@ -92,7 +79,6 @@ func (s *ChainState) ConnectBlockParallelSigs(
 	expectedTarget *[32]byte,
 	prevTimestamps []uint64,
 	chainID [32]byte,
-	coreExtProfiles any,
 	workers int,
 ) (*ChainStateConnectSummary, error) {
 	return s.ConnectBlockParallelSigsWithSuiteContext(
@@ -100,7 +86,6 @@ func (s *ChainState) ConnectBlockParallelSigs(
 		expectedTarget,
 		prevTimestamps,
 		chainID,
-		coreExtProfiles,
 		s.rotationOrNil(),
 		s.registryOrNil(),
 		workers,
@@ -112,7 +97,6 @@ func (s *ChainState) ConnectBlockParallelSigsWithSuiteContext(
 	expectedTarget *[32]byte,
 	prevTimestamps []uint64,
 	chainID [32]byte,
-	coreExtProfiles any,
 	rotation consensus.RotationProvider,
 	registry *consensus.SuiteRegistry,
 	workers int,
@@ -129,7 +113,7 @@ func (s *ChainState) ConnectBlockParallelSigsWithSuiteContext(
 	if err != nil {
 		return nil, err
 	}
-	summary, err := consensus.ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
+	summary, err := consensus.ConnectBlockParallelSigVerifyWithSuiteContext(
 		blockBytes,
 		expectedPrevHash,
 		expectedTarget,
@@ -137,7 +121,6 @@ func (s *ChainState) ConnectBlockParallelSigsWithSuiteContext(
 		prevTimestamps,
 		&workState,
 		chainID,
-		coreExtProfiles,
 		rotation,
 		registry,
 		workers,

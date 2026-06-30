@@ -93,7 +93,7 @@ func TestPV14_RunTxValidationWorkers_ValidP2PK(t *testing.T) {
 	results, err := RunTxValidationWorkers(
 		context.Background(), 2,
 		[]TxValidationContext{tvc},
-		[32]byte{}, 1, 0, nil, nil,
+		[32]byte{}, 1, 0, nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTxValidationWorkers: %v", err)
@@ -146,7 +146,7 @@ func TestPV14_RunTxValidationWorkers_WithSigCache(t *testing.T) {
 	cache := NewSigCache(100)
 
 	// First run: no cache hits.
-	results1, err := RunTxValidationWorkers(context.Background(), 1, []TxValidationContext{tvc}, [32]byte{}, 1, 0, nil, cache)
+	results1, err := RunTxValidationWorkers(context.Background(), 1, []TxValidationContext{tvc}, [32]byte{}, 1, 0, cache)
 	if err != nil {
 		t.Fatalf("first run: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestPV14_RunTxValidationWorkers_WithSigCache(t *testing.T) {
 	}
 
 	// Second run: should get cache hit.
-	results2, err := RunTxValidationWorkers(context.Background(), 1, []TxValidationContext{tvc}, [32]byte{}, 1, 0, nil, cache)
+	results2, err := RunTxValidationWorkers(context.Background(), 1, []TxValidationContext{tvc}, [32]byte{}, 1, 0, cache)
 	if err != nil {
 		t.Fatalf("second run: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestPV14_RunTxValidationWorkers_CancelledContext(t *testing.T) {
 		WitnessStart:   0, WitnessEnd: 1, SighashCache: sighashCache, Fee: 10,
 	}
 
-	results, err := RunTxValidationWorkers(ctx, 1, []TxValidationContext{tvc}, [32]byte{}, 1, 0, nil, nil)
+	results, err := RunTxValidationWorkers(ctx, 1, []TxValidationContext{tvc}, [32]byte{}, 1, 0, nil)
 	if err != nil {
 		t.Fatalf("RunTxValidationWorkers: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestPV14_ValidateTxLocal_WitnessUnderflow(t *testing.T) {
 		ResolvedInputs: []UtxoEntry{{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
 		WitnessStart:   0, WitnessEnd: 0, SighashCache: sighashCache, Fee: 10,
 	}
-	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
 	if result.Err == nil {
 		t.Fatal("expected witness underflow error")
 	}

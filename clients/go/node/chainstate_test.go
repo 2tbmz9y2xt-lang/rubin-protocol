@@ -573,7 +573,7 @@ func TestChainStateConnectBlockParallelSigs(t *testing.T) {
 
 	// Parallel path: connect genesis + same block.
 	parSt := NewChainState()
-	parGenesis, err := parSt.ConnectBlockParallelSigs(devnetGenesisBlockBytes, &target, nil, devnetGenesisChainID, nil, 4)
+	parGenesis, err := parSt.ConnectBlockParallelSigs(devnetGenesisBlockBytes, &target, nil, devnetGenesisChainID, 4)
 	if err != nil {
 		t.Fatalf("par connect genesis: %v", err)
 	}
@@ -581,7 +581,7 @@ func TestChainStateConnectBlockParallelSigs(t *testing.T) {
 		t.Fatalf("genesis height mismatch: seq=%d par=%d", seqGenesis.BlockHeight, parGenesis.BlockHeight)
 	}
 
-	parBlock1, err := parSt.ConnectBlockParallelSigs(block1, &target, nil, devnetGenesisChainID, nil, 4)
+	parBlock1, err := parSt.ConnectBlockParallelSigs(block1, &target, nil, devnetGenesisChainID, 4)
 	if err != nil {
 		t.Fatalf("par connect block 1: %v", err)
 	}
@@ -615,7 +615,7 @@ func TestChainStateConnectBlockParallelSigs(t *testing.T) {
 // TestChainStateConnectBlockParallelSigs_NilState checks that nil receiver is rejected.
 func TestChainStateConnectBlockParallelSigs_NilState(t *testing.T) {
 	var st *ChainState
-	_, err := st.ConnectBlockParallelSigs(nil, nil, nil, [32]byte{}, nil, 0)
+	_, err := st.ConnectBlockParallelSigs(nil, nil, nil, [32]byte{}, 0)
 	if err == nil {
 		t.Fatal("expected error for nil chainstate")
 	}
@@ -625,7 +625,7 @@ func TestChainStateConnectBlockParallelSigs_NilState(t *testing.T) {
 func TestChainStateConnectBlockParallelSigs_InvalidBlock(t *testing.T) {
 	target := consensus.POW_LIMIT
 	st := NewChainState()
-	_, err := st.ConnectBlockParallelSigs([]byte{0x00}, &target, nil, [32]byte{}, nil, 1)
+	_, err := st.ConnectBlockParallelSigs([]byte{0x00}, &target, nil, [32]byte{}, 1)
 	if err == nil {
 		t.Fatal("expected error for invalid block")
 	}

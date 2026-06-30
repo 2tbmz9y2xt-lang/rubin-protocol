@@ -170,8 +170,27 @@ type Request struct {
 
 type requestEnvelope struct {
 	Request
-	CoreExtProfiles            []CoreExtProfileJSON `json:"core_ext_profiles,omitempty"`
-	CoreExtProfileSetAnchorHex string               `json:"core_ext_profile_set_anchor_hex,omitempty"`
+	// core_ext_profiles is typed as a sequence so a non-array (string/object)
+	// payload fails envelope decoding as a schema/bad-request error — matching
+	// the pre-removal []CoreExtProfileJSON behavior and the Rust CLI, which
+	// deserializes the same retired field as a sequence.
+	CoreExtProfiles            []json.RawMessage `json:"core_ext_profiles,omitempty"`
+	CoreExtProfileSetAnchorHex string            `json:"core_ext_profile_set_anchor_hex,omitempty"`
+}
+
+// rejectRetiredCoreExtProfiles preserves the Go runtime's explicit rejection of
+// the retired CORE_EXT request fields, matching the Rust consensus CLI. 0x0102
+// (CORE_EXT) is unassigned, so a request still carrying a non-empty
+// core_ext_profiles array / core_ext_profile_set_anchor_hex is rejected — not
+// silently ignored. (A non-array core_ext_profiles already fails at decode.)
+func rejectRetiredCoreExtProfiles(profiles []json.RawMessage, anchorHex string) error {
+	if strings.TrimSpace(anchorHex) != "" {
+		return fmt.Errorf("core_ext_profile_set_anchor_hex unsupported by Go runtime")
+	}
+	if len(profiles) != 0 {
+		return fmt.Errorf("core_ext_profiles unsupported by Go runtime")
+	}
+	return nil
 }
 
 const rotationDescriptorNotActivatedErr = "descriptor-not-activated"
@@ -240,52 +259,6 @@ type UtxoJSON struct {
 	Vout              uint32 `json:"vout"`
 	CovenantType      uint16 `json:"covenant_type"`
 	CreatedByCoinbase bool   `json:"created_by_coinbase"`
-}
-
-type CoreExtProfileJSON struct {
-	ExtID                uint16      `json:"ext_id"`
-	ActivationHeight     uint64      `json:"activation_height"`
-	TxContextEnabled     BoolishFlag `json:"tx_context_enabled"`
-	AllowedSuiteIDs      []uint8     `json:"allowed_suite_ids,omitempty"`
-	AllowedSighashSet    uint8       `json:"allowed_sighash_set,omitempty"`
-	MaxExtPayloadBytes   int         `json:"max_ext_payload_bytes,omitempty"`
-	Binding              string      `json:"binding,omitempty"`
-	BindingDescriptorHex string      `json:"binding_descriptor_hex,omitempty"`
-	ExtPayloadSchemaHex  string      `json:"ext_payload_schema_hex,omitempty"`
-}
-
-type BoolishFlag int
-
-func (flag *BoolishFlag) UnmarshalJSON(data []byte) error {
-	trimmed := bytes.TrimSpace(data)
-	switch string(trimmed) {
-	case "true":
-		*flag = 1
-		return nil
-	case "false":
-		*flag = 0
-		return nil
-	}
-	var value int
-	if err := json.Unmarshal(trimmed, &value); err != nil {
-		return fmt.Errorf("bad tx_context_enabled")
-	}
-	if value != 0 && value != 1 {
-		return fmt.Errorf("bad tx_context_enabled")
-	}
-	*flag = BoolishFlag(value)
-	return nil
-}
-
-func (flag BoolishFlag) MarshalJSON() ([]byte, error) {
-	switch flag {
-	case 0:
-		return []byte("false"), nil
-	case 1:
-		return []byte("true"), nil
-	default:
-		return nil, fmt.Errorf("bad tx_context_enabled")
-	}
 }
 
 type RotationDescriptorJSON struct {
@@ -405,16 +378,6 @@ func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, err
 		VerifyCost: item.VerifyCost,
 		AlgName:    algName,
 	}, nil
-}
-
-func buildCoreExtProfiles(items []CoreExtProfileJSON, _ string, expectedSetAnchorHex string) (any, error) {
-	if strings.TrimSpace(expectedSetAnchorHex) != "" {
-		return nil, fmt.Errorf("core_ext_profile_set_anchor_hex unsupported by Go runtime")
-	}
-	if len(items) != 0 {
-		return nil, fmt.Errorf("core_ext_profiles unsupported by Go runtime")
-	}
-	return nil, nil
 }
 
 type ForkChoiceChain struct {
@@ -1477,7 +1440,6 @@ func runFromStdin() {
 		return
 	}
 	req := envelope.Request
-	coreExtProfilesReq := envelope.CoreExtProfiles
 
 	switch req.Op {
 	case "simplicity_exec_vector":
@@ -1979,8 +1941,7 @@ func runFromStdin() {
 			return
 		}
 
-		coreExtProfiles, err := buildCoreExtProfiles(coreExtProfilesReq, req.ChainIDHex, envelope.CoreExtProfileSetAnchorHex)
-		if err != nil {
+		if err := rejectRetiredCoreExtProfiles(envelope.CoreExtProfiles, envelope.CoreExtProfileSetAnchorHex); err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
 			return
 		}
@@ -1990,7 +1951,7 @@ func runFromStdin() {
 			return
 		}
 
-		s, err := consensus.ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
+		s, err := consensus.ConnectBlockBasicInMemoryAtHeightAndSuiteContext(
 			blockBytes,
 			expectedPrev,
 			expectedTarget,
@@ -1998,7 +1959,6 @@ func runFromStdin() {
 			req.PrevTimestamps,
 			&st,
 			chainID,
-			coreExtProfiles,
 			rotation,
 			registry,
 		)
@@ -2063,7 +2023,7 @@ func runFromStdin() {
 			return
 		}
 
-		if _, err := buildCoreExtProfiles(coreExtProfilesReq, req.ChainIDHex, envelope.CoreExtProfileSetAnchorHex); err != nil {
+		if err := rejectRetiredCoreExtProfiles(envelope.CoreExtProfiles, envelope.CoreExtProfileSetAnchorHex); err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
 			return
 		}
@@ -2073,7 +2033,7 @@ func runFromStdin() {
 			return
 		}
 
-		_, s, err := consensus.ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
+		_, s, err := consensus.ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(
 			tx,
 			txid,
 			utxos,

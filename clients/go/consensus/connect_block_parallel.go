@@ -31,7 +31,7 @@ func ConnectBlockParallelSigVerify(
 	chainID [32]byte,
 	workers int,
 ) (*ConnectBlockBasicSummary, error) {
-	return ConnectBlockParallelSigVerifyWithCoreExtProfiles(
+	return ConnectBlockParallelSigVerifyWithSuiteContext(
 		blockBytes,
 		expectedPrevHash,
 		expectedTarget,
@@ -39,15 +39,13 @@ func ConnectBlockParallelSigVerify(
 		prevTimestamps,
 		state,
 		chainID,
-		nil,
+		nil, /*rotation*/
+		nil, /*registry*/
 		workers,
 	)
 }
 
-// ConnectBlockParallelSigVerifyWithCoreExtProfiles preserves the legacy helper
-// name for callers. The profile argument is ignored because Go CORE_EXT runtime
-// wiring has been removed; see ConnectBlockParallelSigVerify for behavior.
-func ConnectBlockParallelSigVerifyWithCoreExtProfiles(
+func ConnectBlockParallelSigVerifyWithSuiteContext(
 	blockBytes []byte,
 	expectedPrevHash *[32]byte,
 	expectedTarget *[32]byte,
@@ -55,33 +53,6 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfiles(
 	prevTimestamps []uint64,
 	state *InMemoryChainState,
 	chainID [32]byte,
-	_ any,
-	workers int,
-) (*ConnectBlockBasicSummary, error) {
-	return ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
-		blockBytes,
-		expectedPrevHash,
-		expectedTarget,
-		blockHeight,
-		prevTimestamps,
-		state,
-		chainID,
-		nil,
-		nil,
-		nil,
-		workers,
-	)
-}
-
-func ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
-	blockBytes []byte,
-	expectedPrevHash *[32]byte,
-	expectedTarget *[32]byte,
-	blockHeight uint64,
-	prevTimestamps []uint64,
-	state *InMemoryChainState,
-	chainID [32]byte,
-	_ any,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 	workers int,
@@ -148,7 +119,7 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
 		tx := pb.Txs[i]
 		txid := pb.Txids[i]
 
-		nextUtxos, s, err := applyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesQ(
+		nextUtxos, s, err := applyNonCoinbaseTxBasicUpdateWithMTPQ(
 			tx,
 			txid,
 			workUtxos,
@@ -156,7 +127,6 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
 			pb.Header.Timestamp,
 			blockMTP,
 			chainID,
-			nil,
 			sigQueue,
 			rot,
 			reg,
@@ -238,24 +208,22 @@ func ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
 	}, nil
 }
 
-// applyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesQ is the queue-aware
-// wrapper around applyNonCoinbaseTxBasicWorkQ. The legacy profile argument is
-// ignored; the SigCheckQueue is used for deferred signature verification.
-func applyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesQ(
+// applyNonCoinbaseTxBasicUpdateWithMTPQ is the queue-aware
+// wrapper around applyNonCoinbaseTxBasicWorkQ. The SigCheckQueue is used for
+// deferred signature verification.
+func applyNonCoinbaseTxBasicUpdateWithMTPQ(
 	tx *Tx,
 	txid [32]byte,
 	utxoSet map[Outpoint]UtxoEntry,
 	height uint64,
-	blockTimestamp uint64,
+	_ uint64,
 	blockMTP uint64,
 	chainID [32]byte,
-	_ any,
 	sigQueue *SigCheckQueue,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	_ = blockTimestamp
-	work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxoSet, height, blockMTP, chainID, nil, sigQueue, rotation, registry)
+	work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxoSet, height, blockMTP, chainID, sigQueue, rotation, registry)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -279,7 +247,6 @@ func applyNonCoinbaseTxBasicWorkQ(
 	height uint64,
 	blockMTP uint64,
 	chainID [32]byte,
-	_ any,
 	sigQueue *SigCheckQueue,
 	rotation RotationProvider,
 	registry *SuiteRegistry,

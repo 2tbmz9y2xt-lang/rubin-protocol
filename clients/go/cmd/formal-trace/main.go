@@ -98,16 +98,16 @@ type utxoBasicFixture struct {
 	Vectors []utxoBasicVector `json:"vectors"`
 }
 type utxoBasicVector struct {
-	BlockMTP        *uint64              `json:"block_mtp"`
-	CoreExtProfiles []coreExtProfileJSON `json:"core_ext_profiles,omitempty"`
-	ID              string               `json:"id"`
-	Op              string               `json:"op"`
-	TxHex           string               `json:"tx_hex"`
-	ExpectErr       string               `json:"expect_err"`
-	Utxos           []utxoJSON           `json:"utxos"`
-	Height          uint64               `json:"height"`
-	BlockTimestamp  uint64               `json:"block_timestamp"`
-	ExpectOk        bool                 `json:"expect_ok"`
+	BlockMTP        *uint64           `json:"block_mtp"`
+	CoreExtProfiles []json.RawMessage `json:"core_ext_profiles,omitempty"`
+	ID              string            `json:"id"`
+	Op              string            `json:"op"`
+	TxHex           string            `json:"tx_hex"`
+	ExpectErr       string            `json:"expect_err"`
+	Utxos           []utxoJSON        `json:"utxos"`
+	Height          uint64            `json:"height"`
+	BlockTimestamp  uint64            `json:"block_timestamp"`
+	ExpectOk        bool              `json:"expect_ok"`
 }
 
 type utxoJSON struct {
@@ -118,22 +118,6 @@ type utxoJSON struct {
 	Vout              uint32 `json:"vout"`
 	CovenantType      uint16 `json:"covenant_type"`
 	CreatedByCoinbase bool   `json:"created_by_coinbase"`
-}
-
-type coreExtProfileJSON struct {
-	ExtID                uint16  `json:"ext_id"`
-	ActivationHeight     uint64  `json:"activation_height"`
-	AllowedSuiteIDs      []uint8 `json:"allowed_suite_ids,omitempty"`
-	Binding              string  `json:"binding,omitempty"`
-	BindingDescriptorHex string  `json:"binding_descriptor_hex,omitempty"`
-	ExtPayloadSchemaHex  string  `json:"ext_payload_schema_hex,omitempty"`
-}
-
-func buildCoreExtProfiles(items []coreExtProfileJSON) (any, error) {
-	if len(items) == 0 {
-		return nil, nil
-	}
-	return nil, fmt.Errorf("core_ext_profiles unsupported by Go runtime")
 }
 
 type blockBasicFixture struct {
@@ -757,27 +741,27 @@ func run(fixturesDir, outPath string) error {
 					utxos, e := buildUtxoMapFromJSON(v.Utxos)
 					if e != nil {
 						runErr = e
+					} else if len(v.CoreExtProfiles) != 0 {
+						// 0x0102 (CORE_EXT) is unassigned: a fixture still carrying
+						// core_ext_profiles is rejected (fail-closed), matching the
+						// consensus CLI / runner, so the Go->Lean trace does not cover a
+						// request shape the active paths reject.
+						runErr = fmt.Errorf("core_ext_profiles unsupported by Go runtime")
 					} else {
 						mtp := v.BlockTimestamp
 						if v.BlockMTP != nil {
 							mtp = *v.BlockMTP
 						}
 						var chainID [32]byte
-						coreExtProfiles, e := buildCoreExtProfiles(v.CoreExtProfiles)
-						if e != nil {
-							runErr = e
-						} else {
-							_, sum, runErr = consensus.ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
-								tx,
-								txid,
-								utxos,
-								v.Height,
-								v.BlockTimestamp,
-								mtp,
-								chainID,
-								coreExtProfiles,
-							)
-						}
+						_, sum, runErr = consensus.ApplyNonCoinbaseTxBasicUpdateWithMTP(
+							tx,
+							txid,
+							utxos,
+							v.Height,
+							v.BlockTimestamp,
+							mtp,
+							chainID,
+						)
 					}
 				}
 				outputs := map[string]any{}
