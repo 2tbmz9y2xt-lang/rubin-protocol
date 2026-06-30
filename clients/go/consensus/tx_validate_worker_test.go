@@ -44,7 +44,7 @@ func TestValidateTxLocal_P2PK_Valid(t *testing.T) {
 		Fee:          10,
 	}
 
-	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
 	if !result.Valid {
 		t.Fatalf("expected valid, got err: %v", result.Err)
 	}
@@ -95,7 +95,7 @@ func TestValidateTxLocal_P2PK_InvalidSig(t *testing.T) {
 		Fee:          10,
 	}
 
-	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
 	if result.Valid {
 		t.Fatalf("expected invalid, got valid")
 	}
@@ -106,7 +106,7 @@ func TestValidateTxLocal_P2PK_InvalidSig(t *testing.T) {
 
 func TestValidateTxLocal_NilTx(t *testing.T) {
 	tvc := TxValidationContext{TxIndex: 1, Tx: nil}
-	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
 	if result.Valid {
 		t.Fatalf("expected invalid for nil tx")
 	}
@@ -123,7 +123,7 @@ func TestValidateTxLocal_ResolvedInputCountMismatchUsesTxContextError(t *testing
 		Inputs:  []TxInput{{PrevVout: 0}},
 	}
 
-	result := ValidateTxLocal(TxValidationContext{TxIndex: 1, Tx: tx}, [32]byte{}, 1, 0, nil, nil)
+	result := ValidateTxLocal(TxValidationContext{TxIndex: 1, Tx: tx}, [32]byte{}, 1, 0, nil)
 	assertTxErrCodeMsg(t, result.Err, TX_ERR_PARSE, "txcontext resolved input count mismatch")
 }
 
@@ -159,7 +159,7 @@ func TestValidateTxLocal_WitnessUnderflow(t *testing.T) {
 		Fee:          10,
 	}
 
-	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
 	if result.Valid {
 		t.Fatalf("expected invalid for witness underflow")
 	}
@@ -200,7 +200,7 @@ func TestValidateTxLocal_WitnessCountMismatch(t *testing.T) {
 		SighashCache: sighashCache,
 	}
 
-	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
 	if result.Valid {
 		t.Fatalf("expected invalid for witness count mismatch")
 	}
@@ -236,8 +236,42 @@ func TestValidateTxLocal_CoreSimplicitySpendRejected(t *testing.T) {
 		Fee:          10,
 	}
 
-	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
 	assertTxErrCodeMsg(t, result.Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+}
+
+// 0x0102 (CORE_EXT) is unassigned per CANONICAL §14 — the worker/queued spend path
+// (ValidateTxLocal -> validateTxLocalInputs -> assignedWorkerWitness/WitnessSlots) must
+// reject it as TX_ERR_COVENANT_TYPE_INVALID (RUB-585), even with well-formed covenant_data
+// (ext_id=7 || compactSize(0) = 070000) that the retired parser would have accepted.
+func TestValidateTxLocal_CoreExt0x0102Rejected(t *testing.T) {
+	var prevTxid [32]byte
+	prevTxid[0] = 0x67
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0}},
+		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Witness: dummyWitnesses(1),
+	}
+	tvc := TxValidationContext{
+		TxIndex: 1,
+		Tx:      tx,
+		ResolvedInputs: []UtxoEntry{{
+			Value:        100,
+			CovenantType: COV_TYPE_CORE_EXT,
+			CovenantData: []byte{0x07, 0x00, 0x00}, // well-formed CORE_EXT covenant_data
+		}},
+		WitnessStart: 0,
+		WitnessEnd:   1,
+		Fee:          10,
+	}
+
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
+	if got := mustTxErrCode(t, result.Err); got != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("worker path: code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
+	}
 }
 
 func TestValidateTxLocal_CoreSimplicityInputGroupCapDeferredBehindDisabledSpend(t *testing.T) {
@@ -279,7 +313,7 @@ func TestValidateTxLocal_CoreSimplicityInputGroupCapDeferredBehindDisabledSpend(
 			WitnessEnd:     len(tx.Witness),
 			SighashCache:   sighashCache,
 			Fee:            uint64(inputCount - 1),
-		}, [32]byte{}, 1, 0, nil, nil)
+		}, [32]byte{}, 1, 0, nil)
 	}
 
 	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS, false).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
@@ -325,7 +359,7 @@ func TestValidateTxLocal_WithSigCache(t *testing.T) {
 	}
 
 	// First call populates sig cache.
-	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, sigCache)
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, sigCache)
 	if !result.Valid {
 		t.Fatalf("first call: %v", result.Err)
 	}
@@ -334,7 +368,7 @@ func TestValidateTxLocal_WithSigCache(t *testing.T) {
 	}
 
 	// Second call should hit cache.
-	result2 := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, sigCache)
+	result2 := ValidateTxLocal(tvc, [32]byte{}, 1, 0, sigCache)
 	if !result2.Valid {
 		t.Fatalf("second call (cached): %v", result2.Err)
 	}
@@ -349,7 +383,7 @@ func TestValidateTxLocal_WithSigCache(t *testing.T) {
 
 func TestRunTxValidationWorkers_Empty(t *testing.T) {
 	results, err := RunTxValidationWorkers(
-		context.Background(), 4, nil, [32]byte{}, 1, 0, nil, nil,
+		context.Background(), 4, nil, [32]byte{}, 1, 0, nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTxValidationWorkers: %v", err)
@@ -394,7 +428,7 @@ func TestRunTxValidationWorkers_SingleValid(t *testing.T) {
 	}}
 
 	results, err := RunTxValidationWorkers(
-		context.Background(), 2, txcs, [32]byte{}, 1, 0, nil, nil,
+		context.Background(), 2, txcs, [32]byte{}, 1, 0, nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTxValidationWorkers: %v", err)
@@ -458,7 +492,7 @@ func TestRunTxValidationWorkers_MultipleWithOneInvalid(t *testing.T) {
 	}
 
 	results, err := RunTxValidationWorkers(
-		context.Background(), 2, txcs, [32]byte{}, 1, 0, nil, nil,
+		context.Background(), 2, txcs, [32]byte{}, 1, 0, nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTxValidationWorkers: %v", err)
@@ -526,7 +560,7 @@ func TestRunTxValidationWorkers_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already canceled
 
-	results, err := RunTxValidationWorkers(ctx, 2, txcs, [32]byte{}, 1, 0, nil, nil)
+	results, err := RunTxValidationWorkers(ctx, 2, txcs, [32]byte{}, 1, 0, nil)
 	if err != nil {
 		t.Fatalf("RunTxValidationWorkers: %v", err)
 	}
@@ -663,7 +697,7 @@ func TestValidateTxLocal_Multisig_Valid(t *testing.T) {
 		Fee:          10,
 	}
 
-	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
 	if !result.Valid {
 		t.Fatalf("multisig valid: %v", result.Err)
 	}
@@ -720,7 +754,7 @@ func TestValidateTxLocal_HTLC_ClaimValid(t *testing.T) {
 		Fee:          10,
 	}
 
-	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
 	if !result.Valid {
 		t.Fatalf("HTLC claim valid: %v", result.Err)
 	}
@@ -766,7 +800,7 @@ func TestValidateTxLocal_Vault_SigValid(t *testing.T) {
 		Fee:          10,
 	}
 
-	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
 	if !result.Valid {
 		t.Fatalf("vault sig valid: %v", result.Err)
 	}
@@ -807,7 +841,7 @@ func TestValidateTxLocal_Stealth_Valid(t *testing.T) {
 		Fee:          10,
 	}
 
-	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil, nil)
+	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
 	if !result.Valid {
 		t.Fatalf("stealth valid: %v", result.Err)
 	}

@@ -308,6 +308,53 @@ func newRuntimeKeyOpsFixture(t *testing.T) runtimeKeyOpsFixture {
 	}
 }
 
+// TestRejectRetiredCoreExtProfiles mirrors the Rust consensus CLI's
+// reject_core_ext_profiles_from_json tests: the retired 0x0102 CORE_EXT request
+// fields are rejected (not silently ignored), keeping Go/Rust CLI parity.
+func TestRejectRetiredCoreExtProfiles(t *testing.T) {
+	mk := func(items ...string) []json.RawMessage {
+		out := make([]json.RawMessage, 0, len(items))
+		for _, it := range items {
+			out = append(out, json.RawMessage(it))
+		}
+		return out
+	}
+	cases := []struct {
+		name     string
+		profiles []json.RawMessage
+		anchor   string
+		wantErr  string
+	}{
+		{"absent", nil, "", ""},
+		{"empty array", []json.RawMessage{}, "", ""},
+		{"non-empty profiles", mk(`{"ext_id":1}`), "", "core_ext_profiles unsupported by Go runtime"},
+		{"anchor set", nil, "deadbeef", "core_ext_profile_set_anchor_hex unsupported by Go runtime"},
+		{"anchor takes precedence", mk(`{"ext_id":1}`), "deadbeef", "core_ext_profile_set_anchor_hex unsupported by Go runtime"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := rejectRetiredCoreExtProfiles(tc.profiles, tc.anchor)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected no error, got: %v", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("expected error %q, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+	// A non-array core_ext_profiles is a schema/decode error (Rust parity:
+	// "bad request"), not the op-level "unsupported" error.
+	t.Run("malformed non-array is a decode error", func(t *testing.T) {
+		var env requestEnvelope
+		if err := json.Unmarshal([]byte(`{"core_ext_profiles":"oops"}`), &env); err == nil {
+			t.Fatal("expected decode error for non-array core_ext_profiles")
+		}
+	})
+}
+
 func TestRubinConsensusCLI_RunFromStdin_CoversKeyOps(t *testing.T) {
 	fixture := newRuntimeKeyOpsFixture(t)
 

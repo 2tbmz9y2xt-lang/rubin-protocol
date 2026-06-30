@@ -58,51 +58,26 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTP(
 	txid [32]byte,
 	utxoSet map[Outpoint]UtxoEntry,
 	height uint64,
-	blockTimestamp uint64,
-	blockMTP uint64,
-	chainID [32]byte,
-) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	return ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
-		tx,
-		txid,
-		utxoSet,
-		height,
-		blockTimestamp,
-		blockMTP,
-		chainID,
-		nil,
-	)
-}
-
-// ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles preserves the legacy
-// helper name for deterministic tooling. The profile argument is ignored
-// because Go CORE_EXT runtime wiring has been removed.
-func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
-	tx *Tx,
-	txid [32]byte,
-	utxoSet map[Outpoint]UtxoEntry,
-	height uint64,
 	_ uint64,
 	blockMTP uint64,
 	chainID [32]byte,
-	_ any,
 ) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	return ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
+	return ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(
 		tx,
 		txid,
 		utxoSet,
 		height,
 		blockMTP,
 		chainID,
-		nil,
-		nil,
+		nil, /*rotation*/
+		nil, /*registry*/
 	)
 }
 
-// ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext is the
+// ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext is the
 // suite-aware variant for deterministic tooling that needs explicit native-suite
 // rotation/registry context.
-func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
+func ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(
 	tx *Tx,
 	txid [32]byte,
 	utxoSet map[Outpoint]UtxoEntry,
@@ -157,9 +132,6 @@ func checkSpendCovenant(
 		return err
 	case COV_TYPE_HTLC:
 		_, err := ParseHTLCCovenantData(covData)
-		return err
-	case COV_TYPE_CORE_EXT:
-		_, err := ParseCoreExtCovenantData(covData)
 		return err
 	case COV_TYPE_CORE_STEALTH:
 		_, err := ParseStealthCovenantData(covData)

@@ -239,12 +239,19 @@ fn prepare_connect_block(
         ));
     }
 
+    // 0x0102 (CORE_EXT) is unassigned with no activation path, so the retired
+    // deployment set must not influence consensus/admission for ordinary
+    // (e.g. P2PK) traffic. Do NOT call `active_profiles_at_height` here: it
+    // validates the deployment set and would reject otherwise-valid blocks if a
+    // node were started with a stale/invalid `core_ext_deployments` entry. Pass
+    // empty active profiles instead, mirroring Go, which ignores the parameter.
+    // The parameter is retained on the public signatures for node/CLI API
+    // compatibility; full removal is tracked under CORE_EXT retirement.
+    let _ = ctx.core_ext_deployments;
     Ok(PreparedConnectBlock {
         block_mtp: median_time_past(ctx.block_height, ctx.prev_timestamps)?
             .unwrap_or(pb.header.timestamp),
-        core_ext_profiles: ctx
-            .core_ext_deployments
-            .active_profiles_at_height(ctx.block_height)?,
+        core_ext_profiles: CoreExtProfiles::default(),
         pb,
         block_height: ctx.block_height,
         already_generated,

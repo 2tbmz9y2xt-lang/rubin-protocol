@@ -1,5 +1,7 @@
 # Policy: CORE_EXT pre-activation guardrails
 
+> **SUPERSEDED FOR CONSENSUS BY RUB-585 (2026-06-29).** Covenant type `0x0102` (CORE_EXT) is now **unassigned** per `RUBIN_L1_CANONICAL.md` §14 and is **rejected by consensus** as `TX_ERR_COVENANT_TYPE_INVALID` at both creation and spend. There is no CORE_EXT activation/ACTIVE path. The pre-activation "anyone-can-spend" statements below are historical and no longer describe consensus behavior; the guardrails described here are now redundant-with-consensus defense-in-depth only.
+
 **Status:** NON-CONSENSUS / policy-only safety guardrail
 **Date:** 2026-04-28
 **Revision:** post-review rc3
@@ -53,9 +55,9 @@ CORE_EXT profiles authorize non-native extension behavior only when ACTIVE.
 
 ## 1. Risk Statement
 
-Before an intended `CORE_EXT` profile is `ACTIVE`, consensus treats spends of that `CORE_EXT(ext_id)` as anyone-can-spend with respect to witness semantics.
+**Historical (pre-RUB-585):** before this change consensus treated spends of a pre-`ACTIVE` `CORE_EXT(ext_id)` as anyone-can-spend with respect to witness semantics.
 
-Therefore, policy must prevent accidental creation and relay of pre-activation `CORE_EXT` funds.
+**Current (RUB-585):** consensus rejects every `0x0102` create and spend as `TX_ERR_COVENANT_TYPE_INVALID` (CANONICAL §14); there is no `ACTIVE` path. The policy below remains as redundant defense-in-depth and to prevent accidental relay.
 
 ## 2. Decision
 

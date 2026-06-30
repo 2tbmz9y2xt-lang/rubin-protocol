@@ -59,7 +59,6 @@ func ValidateTxLocal(
 	chainID [32]byte,
 	blockHeight uint64,
 	blockMTP uint64,
-	_ any,
 	sigCache *SigCache,
 ) TxValidationResult {
 	result := TxValidationResult{TxIndex: tvc.TxIndex, Fee: tvc.Fee}
@@ -168,12 +167,6 @@ func validateInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) err
 		return validateVaultInputSpendQ(check, env)
 	case COV_TYPE_HTLC:
 		return validateHTLCInputSpendQ(check, env)
-	case COV_TYPE_CORE_EXT:
-		if len(check.assigned) != CORE_EXT_WITNESS_SLOTS {
-			return txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
-		}
-		_, err := ParseCoreExtCovenantData(check.entry.CovenantData)
-		return err
 	case COV_TYPE_CORE_STEALTH:
 		return validateCoreStealthInputSpendQ(check, env)
 	case COV_TYPE_CORE_SIMPLICITY:
@@ -252,11 +245,10 @@ func RunTxValidationWorkers(
 	chainID [32]byte,
 	blockHeight uint64,
 	blockMTP uint64,
-	_ any,
 	sigCache *SigCache,
 ) ([]WorkerResult[TxValidationResult], error) {
 	return RunFunc(ctx, maxWorkers, len(txcs), txcs, func(ctx context.Context, tvc TxValidationContext) (TxValidationResult, error) {
-		r := ValidateTxLocal(tvc, chainID, blockHeight, blockMTP, nil, sigCache)
+		r := ValidateTxLocal(tvc, chainID, blockHeight, blockMTP, sigCache)
 		if r.Err != nil {
 			return r, r.Err
 		}

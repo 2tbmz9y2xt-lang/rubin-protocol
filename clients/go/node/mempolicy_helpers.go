@@ -32,7 +32,7 @@ func (m *Mempool) validateTransactionWithConsensus(
 	blockMTP uint64,
 	policy MempoolConfig,
 ) (*consensus.CheckedTransaction, error) {
-	checked, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+	checked, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext(
 		txBytes,
 		tx,
 		consensus.ParsedTxIDs{TxID: txid, WTxID: wtxid},

@@ -26,7 +26,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicityPrevalidationRejectLeavesSig
 	}
 	q := NewSigCheckQueue(1)
 
-	work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xD2), utxoSet, 1, 0, [32]byte{}, nil, q, nil, nil)
+	work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xD2), utxoSet, 1, 0, [32]byte{}, q, nil, nil)
 	if work != nil || fee != 0 || q.Len() != 0 {
 		t.Fatalf("expected no queued mutation/sigs on reject, got work=%v fee=%d sigs=%d", work, fee, q.Len())
 	}
@@ -85,7 +85,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicityPreservesEarlierPrevalidatio
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q := NewSigCheckQueue(1)
-			work, fee, err := applyNonCoinbaseTxBasicWorkQ(tc.tx, hashWithPrefix(0xD7), tc.utxos, 1, 0, [32]byte{}, nil, q, nil, nil)
+			work, fee, err := applyNonCoinbaseTxBasicWorkQ(tc.tx, hashWithPrefix(0xD7), tc.utxos, 1, 0, [32]byte{}, q, nil, nil)
 			if work != nil || fee != 0 || q.Len() != 0 {
 				t.Fatalf("expected no queued mutation/sigs on reject, got work=%v fee=%d sigs=%d", work, fee, q.Len())
 			}

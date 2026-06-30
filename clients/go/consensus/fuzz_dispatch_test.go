@@ -141,7 +141,7 @@ func FuzzValidateTxLocalDispatch(f *testing.F) {
 			Fee:            42,
 		}
 
-		r1 := ValidateTxLocal(tvc, chainID, blockHeight, blockMTP, nil, nil)
+		r1 := ValidateTxLocal(tvc, chainID, blockHeight, blockMTP, nil)
 
 		// Invariant: Valid ↔ Err consistency.
 		if r1.Valid && r1.Err != nil {
@@ -167,7 +167,7 @@ func FuzzValidateTxLocalDispatch(f *testing.F) {
 		}
 
 		// Invariant: Determinism.
-		r2 := ValidateTxLocal(tvc, chainID, blockHeight, blockMTP, nil, nil)
+		r2 := ValidateTxLocal(tvc, chainID, blockHeight, blockMTP, nil)
 		if r1.Valid != r2.Valid {
 			t.Fatalf("non-deterministic Valid: %v vs %v", r1.Valid, r2.Valid)
 		}

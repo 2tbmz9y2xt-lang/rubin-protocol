@@ -99,13 +99,12 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 			return nil, nil, txAdmitRejected(reason)
 		}
 	}
-	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndSuiteContext(
 		txBytes,
 		snapshot.utxos,
 		nextHeight,
 		blockMTP,
 		m.chainID,
-		nil,
 		policy.RotationProvider,
 		policy.SuiteRegistry,
 	)

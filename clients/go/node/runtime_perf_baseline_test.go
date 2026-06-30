@@ -415,7 +415,7 @@ func BenchmarkCopyUtxoSet(b *testing.B) {
 	}
 }
 
-func BenchmarkConnectBlockWithCoreExtProfilesAndSuiteContext(b *testing.B) {
+func BenchmarkConnectBlockWithSuiteContext(b *testing.B) {
 	benchmarkConnectBlockWithSuiteContext(b)
 }
 
@@ -428,16 +428,15 @@ func benchmarkConnectBlockWithSuiteContext(b *testing.B) {
 		b.StopTimer()
 		state := cloneChainState(baseState)
 		b.StartTimer()
-		if _, err := state.ConnectBlockWithCoreExtProfilesAndSuiteContext(
+		if _, err := state.ConnectBlockWithSuiteContext(
 			blockBytes,
 			nil,
 			prevTimestamps,
 			devnetGenesisChainID,
 			nil,
 			nil,
-			nil,
 		); err != nil {
-			b.Fatalf("ConnectBlockWithCoreExtProfilesAndSuiteContext: %v", err)
+			b.Fatalf("ConnectBlockWithSuiteContext: %v", err)
 		}
 	}
 }
@@ -456,7 +455,6 @@ func BenchmarkConnectBlockParallelSigsWithSuiteContext(b *testing.B) {
 			nil,
 			prevTimestamps,
 			devnetGenesisChainID,
-			nil,
 			nil,
 			nil,
 			2,

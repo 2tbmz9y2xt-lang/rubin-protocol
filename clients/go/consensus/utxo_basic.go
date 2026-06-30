@@ -278,11 +278,6 @@ func (ctx *nonCoinbaseApplyContext) validateInputSpend(inputIndex int, input non
 		return ctx.captureVaultInput(inputIndex, entry, assigned)
 	case COV_TYPE_HTLC:
 		return ctx.validateHTLCInput(inputIndex, entry, assigned)
-	case COV_TYPE_CORE_EXT:
-		if len(assigned) != CORE_EXT_WITNESS_SLOTS {
-			return txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
-		}
-		return nil
 	case COV_TYPE_CORE_STEALTH:
 		return ctx.validateCoreStealthInput(inputIndex, entry, assigned)
 	case COV_TYPE_CORE_SIMPLICITY:

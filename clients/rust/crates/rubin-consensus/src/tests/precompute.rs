@@ -11,7 +11,12 @@ use crate::utxo_basic::{Outpoint, UtxoEntry};
 use crate::ErrorCode;
 
 fn valid_p2pk_covenant_data() -> Vec<u8> {
-    vec![0u8; 32] // key-id placeholder
+    // Genesis-valid CORE_P2PK covenant_data: suite_id byte + key-id placeholder.
+    // Precompute now runs `validate_tx_covenants_genesis` on outputs, so P2PK
+    // outputs must use a real native-create suite_id and the exact length.
+    let mut b = vec![0u8; MAX_P2PK_COVENANT_DATA as usize];
+    b[0] = SUITE_ID_ML_DSA_87;
+    b
 }
 
 fn dummy_witness() -> WitnessItem {
@@ -157,6 +162,59 @@ fn precompute_single_p2pk() {
     assert_eq!(ctx.witness_end, 1);
     assert_eq!(ctx.fee, 100);
     assert_eq!(ctx.input_outpoints, vec![op]);
+}
+
+// Pins the precompute path to the sequential path for output covenant genesis:
+// a transaction that spends an otherwise-valid P2PK input but creates an
+// unassigned 0x0102 (CORE_EXT) output must be rejected during precompute, not
+// reported valid. Workers only validate inputs, so without the genesis check in
+// precompute this tx would precompute successfully while sequential apply
+// rejects it.
+#[test]
+fn precompute_core_ext_0x0102_output_rejected() {
+    let cov_data = valid_p2pk_covenant_data();
+    let prev_txid = sha3_256(b"core-ext-output-precompute");
+    let op = Outpoint {
+        txid: prev_txid,
+        vout: 0,
+    };
+    let utxos = HashMap::from([(
+        op,
+        UtxoEntry {
+            value: 1000,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    )]);
+
+    let tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        // Unassigned 0x0102 CORE_EXT output: invalid at creation time.
+        outputs: vec![TxOutput {
+            value: 900,
+            covenant_type: COV_TYPE_CORE_EXT,
+            covenant_data: vec![0x07, 0x00, 0x00],
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![dummy_witness()],
+        da_payload: Vec::new(),
+    };
+
+    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+    let err = precompute_tx_contexts(&pb, &utxos, 100).unwrap_err();
+    assert_eq!(err.code.as_str(), "TX_ERR_COVENANT_TYPE_INVALID");
 }
 
 #[test]

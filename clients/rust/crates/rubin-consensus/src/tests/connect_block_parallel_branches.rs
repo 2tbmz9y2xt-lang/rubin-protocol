@@ -1,33 +1,6 @@
 use super::*;
 use crate::output_descriptor_bytes;
-use crate::{
-    CoreExtActiveProfile, CoreExtProfiles, CoreExtVerificationBinding, TxContextBase,
-    TxContextContinuing,
-};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Mutex,
-};
-
-static CORE_EXT_TXCTX_CALLED: AtomicBool = AtomicBool::new(false);
-static CORE_EXT_TXCTX_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-// Mirrors the production core-ext verifier callback signature.
-#[allow(clippy::too_many_arguments)]
-fn record_txctx_verifier(
-    _ext_id: u16,
-    _suite_id: u8,
-    _pubkey: &[u8],
-    _signature: &[u8],
-    _digest32: &[u8; 32],
-    _ext_payload: &[u8],
-    _ctx_base: &TxContextBase,
-    _ctx_continuing: &TxContextContinuing,
-    _self_input_value: u64,
-) -> Result<bool, crate::error::TxError> {
-    CORE_EXT_TXCTX_CALLED.store(true, Ordering::SeqCst);
-    Ok(true)
-}
+use crate::CoreExtProfiles;
 
 fn deferred_apply(
     tx: &crate::tx::Tx,
@@ -943,6 +916,9 @@ fn apply_non_coinbase_tx_basic_workq_vault_error_paths() {
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrVaultOwnerAuthRequired);
 
+    // A CORE_EXT (0x0102) destination output is UNASSIGNED and rejected by the
+    // genesis covenant check (TxErrCovenantTypeInvalid) BEFORE the vault output
+    // whitelist check runs.
     let mut disallowed_destination_tx = tx_base(crate::tx::TxOutput {
         value: 50,
         covenant_type: COV_TYPE_CORE_EXT,
@@ -960,19 +936,20 @@ fn apply_non_coinbase_tx_basic_workq_vault_error_paths() {
         &profiles,
     )
     .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrVaultOutputNotWhitelisted);
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
 #[test]
-fn apply_non_coinbase_tx_basic_workq_core_ext_branches() {
-    let _guard = CORE_EXT_TXCTX_TEST_LOCK.lock().expect("core ext test lock");
-    CORE_EXT_TXCTX_CALLED.store(false, Ordering::SeqCst);
+fn apply_non_coinbase_tx_basic_workq_core_ext_0x0102_rejects() {
+    // COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED: spending an input of this
+    // covenant type is rejected as TxErrCovenantTypeInvalid. The CORE_EXT
+    // covenant-spend runtime has been removed.
     let out_kp = kp_or_skip!();
     let out_cov = p2pk_covenant_data_for_pubkey(&out_kp.pubkey);
     let prev_txid = [0xa0; 32];
     let txid = [0xa1; 32];
 
-    let pre_active_tx = crate::tx::Tx {
+    let tx = crate::tx::Tx {
         version: 1,
         tx_kind: 0x00,
         tx_nonce: 1,
@@ -985,7 +962,7 @@ fn apply_non_coinbase_tx_basic_workq_core_ext_branches() {
         outputs: vec![crate::tx::TxOutput {
             value: 90,
             covenant_type: COV_TYPE_P2PK,
-            covenant_data: out_cov.clone(),
+            covenant_data: out_cov,
         }],
         locktime: 0,
         witness: vec![crate::tx::WitnessItem {
@@ -1005,155 +982,15 @@ fn apply_non_coinbase_tx_basic_workq_core_ext_branches() {
         UtxoEntry {
             value: 100,
             covenant_type: COV_TYPE_CORE_EXT,
-            covenant_data: core_ext_covdata(42, &[]),
+            // ext_id:u16le(1) || ext_payload_len:CompactSize(0)
+            covenant_data: vec![0x01, 0x00, 0x00],
             creation_height: 0,
             created_by_coinbase: false,
         },
     )]);
-    let inactive_profiles = CoreExtProfiles::empty();
-    let (_next_utxos, summary) =
-        deferred_apply(&pre_active_tx, txid, &ext_utxos, 1, &inactive_profiles)
-            .expect("pre-active core ext");
-    assert_eq!(summary.fee, 10);
 
-    let active_disallowed_profiles = CoreExtProfiles {
-        active: vec![CoreExtActiveProfile {
-            ext_id: 42,
-            tx_context_enabled: false,
-            allowed_suite_ids: vec![0x99],
-            verification_binding: CoreExtVerificationBinding::NativeVerifySig,
-            verify_sig_ext_tx_context_fn: None,
-            binding_descriptor: Vec::new(),
-            ext_payload_schema: Vec::new(),
-        }],
-    };
-    let disallowed_tx = crate::tx::Tx {
-        version: 1,
-        tx_kind: 0x00,
-        tx_nonce: 1,
-        inputs: vec![crate::tx::TxInput {
-            prev_txid,
-            prev_vout: 0,
-            script_sig: vec![],
-            sequence: 0,
-        }],
-        outputs: vec![crate::tx::TxOutput {
-            value: 90,
-            covenant_type: COV_TYPE_P2PK,
-            covenant_data: out_cov.clone(),
-        }],
-        locktime: 0,
-        witness: vec![crate::tx::WitnessItem {
-            suite_id: SUITE_ID_ML_DSA_87,
-            pubkey: vec![0u8; ML_DSA_87_PUBKEY_BYTES as usize],
-            signature: vec![0u8; (ML_DSA_87_SIG_BYTES + 1) as usize],
-        }],
-        da_payload: vec![],
-        da_commit_core: None,
-        da_chunk_core: None,
-    };
-    let err = deferred_apply(
-        &disallowed_tx,
-        txid,
-        &ext_utxos,
-        1,
-        &active_disallowed_profiles,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
-
-    CORE_EXT_TXCTX_CALLED.store(false, Ordering::SeqCst);
-    let txctx_profiles = CoreExtProfiles {
-        active: vec![CoreExtActiveProfile {
-            ext_id: 7,
-            tx_context_enabled: true,
-            allowed_suite_ids: vec![0x42],
-            verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
-            verify_sig_ext_tx_context_fn: Some(record_txctx_verifier),
-            binding_descriptor: b"accept".to_vec(),
-            ext_payload_schema: b"schema".to_vec(),
-        }],
-    };
-    let txctx_tx = crate::tx::Tx {
-        version: 1,
-        tx_kind: 0x00,
-        tx_nonce: 1,
-        inputs: vec![crate::tx::TxInput {
-            prev_txid: [0xb2; 32],
-            prev_vout: 0,
-            script_sig: vec![],
-            sequence: 0,
-        }],
-        outputs: vec![crate::tx::TxOutput {
-            value: 90,
-            covenant_type: COV_TYPE_P2PK,
-            covenant_data: out_cov.clone(),
-        }],
-        locktime: 0,
-        witness: vec![crate::tx::WitnessItem {
-            suite_id: 0x42,
-            pubkey: vec![0x01, 0x02, 0x03],
-            signature: vec![0x04, 0x01],
-        }],
-        da_payload: vec![],
-        da_commit_core: None,
-        da_chunk_core: None,
-    };
-    let txctx_utxos = HashMap::from([(
-        Outpoint {
-            txid: [0xb2; 32],
-            vout: 0,
-        },
-        UtxoEntry {
-            value: 100,
-            covenant_type: COV_TYPE_CORE_EXT,
-            covenant_data: core_ext_covdata(7, &[0x99]),
-            creation_height: 0,
-            created_by_coinbase: false,
-        },
-    )]);
-    let (_next_utxos, summary) =
-        deferred_apply(&txctx_tx, [0xb5; 32], &txctx_utxos, 1, &txctx_profiles)
-            .expect("txcontext core ext");
-    assert_eq!(summary.fee, 10);
-    assert!(CORE_EXT_TXCTX_CALLED.load(Ordering::SeqCst));
-
-    CORE_EXT_TXCTX_CALLED.store(false, Ordering::SeqCst);
-    let malformed_output_tx = crate::tx::Tx {
-        version: 1,
-        tx_kind: 0x00,
-        tx_nonce: 1,
-        inputs: vec![crate::tx::TxInput {
-            prev_txid: [0xb2; 32],
-            prev_vout: 0,
-            script_sig: vec![],
-            sequence: 0,
-        }],
-        outputs: vec![crate::tx::TxOutput {
-            value: 90,
-            covenant_type: COV_TYPE_CORE_EXT,
-            covenant_data: vec![0x01],
-        }],
-        locktime: 0,
-        witness: vec![crate::tx::WitnessItem {
-            suite_id: 0x42,
-            pubkey: vec![0x01, 0x02, 0x03],
-            signature: vec![0x04, 0x01],
-        }],
-        da_payload: vec![],
-        da_commit_core: None,
-        da_chunk_core: None,
-    };
-    let err = deferred_apply(
-        &malformed_output_tx,
-        [0xb6; 32],
-        &txctx_utxos,
-        1,
-        &txctx_profiles,
-    )
-    .unwrap_err();
+    let err = deferred_apply(&tx, txid, &ext_utxos, 1, &CoreExtProfiles::empty()).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
-    assert!(!CORE_EXT_TXCTX_CALLED.load(Ordering::SeqCst));
 }
 
 #[test]

@@ -205,12 +205,11 @@ func replayCanonicalBlocks(state *ChainState, store *BlockStore, cfg SyncConfig,
 		if err != nil {
 			return false, err
 		}
-		if _, err := state.ConnectBlockWithCoreExtProfilesAndSuiteContext(
+		if _, err := state.ConnectBlockWithSuiteContext(
 			blockBytes,
 			cfg.ExpectedTarget,
 			prevTimestamps,
 			cfg.ChainID,
-			nil,
 			cfg.RotationProvider,
 			cfg.SuiteRegistry,
 		); err != nil {

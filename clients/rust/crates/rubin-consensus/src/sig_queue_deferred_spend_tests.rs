@@ -1,14 +1,10 @@
 use super::test_support::{
-    core_ext_covdata, core_ext_profiles, encode_htlc_claim_payload, htlc_spend_context,
-    make_stealth_entry, sign_witness, test_tx_context,
+    encode_htlc_claim_payload, htlc_spend_context, make_stealth_entry, sign_witness,
+    test_tx_context,
 };
 use super::*;
 use crate::constants::{
-    COV_TYPE_CORE_EXT, COV_TYPE_HTLC, COV_TYPE_P2PK, LOCK_MODE_HEIGHT, MAX_HTLC_COVENANT_DATA,
-    SUITE_ID_SENTINEL,
-};
-use crate::core_ext::{
-    parse_core_ext_covenant_data, validate_core_ext_spend_with_cache_and_suite_context_q,
+    COV_TYPE_HTLC, COV_TYPE_P2PK, LOCK_MODE_HEIGHT, MAX_HTLC_COVENANT_DATA, SUITE_ID_SENTINEL,
 };
 use crate::hash::sha3_256;
 use crate::htlc::{parse_htlc_covenant_data, validate_htlc_spend_q};
@@ -212,42 +208,4 @@ fn validate_stealth_spend_q_defers_and_flushes() {
     assert_eq!(queue.len(), 1);
     queue.flush().expect("flush");
     assert!(parse_stealth_covenant_data(&entry.covenant_data).is_ok());
-}
-
-#[test]
-fn validate_core_ext_native_q_defers_and_flushes() {
-    let ext_id = 7u16;
-    let keypair = Mldsa87Keypair::generate().expect("keypair");
-    let entry = UtxoEntry {
-        value: 1,
-        covenant_type: COV_TYPE_CORE_EXT,
-        covenant_data: core_ext_covdata(ext_id, b""),
-        creation_height: 0,
-        created_by_coinbase: false,
-    };
-    let profiles = core_ext_profiles(ext_id);
-    let (tx, input_index, input_value, chain_id) = test_tx_context();
-    let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
-    let witness = sign_witness(&keypair, &tx, input_index, input_value, chain_id);
-    let registry = SuiteRegistry::default_registry();
-    let mut queue = SigCheckQueue::new(1).with_registry(&registry);
-
-    validate_core_ext_spend_with_cache_and_suite_context_q(
-        &entry,
-        &witness,
-        input_index,
-        input_value,
-        chain_id,
-        0,
-        &profiles,
-        None,
-        Some(&registry),
-        None,
-        Some(&mut queue),
-        &mut cache,
-    )
-    .expect("queued core_ext");
-    assert_eq!(queue.len(), 1);
-    queue.flush().expect("flush");
-    assert!(parse_core_ext_covenant_data(&entry.covenant_data).is_ok());
 }

@@ -205,25 +205,24 @@ func TestCheckTransaction_CoreSimplicityCreationUsesDeploymentProvider(t *testin
 	_, err = CheckTransaction(txBytes, utxoSet, 10, 0, chainID)
 	assertTxErrCode(t, err, TX_ERR_COVENANT_TYPE_INVALID)
 
-	checked, err := CheckTransactionWithCoreExtProfilesAndSuiteContext(
+	checked, err := CheckTransactionWithSuiteContext(
 		txBytes,
 		utxoSet,
 		10,
 		0,
 		chainID,
-		nil,
 		testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87},
 		nil,
 	)
 	if err != nil {
-		t.Fatalf("CheckTransactionWithCoreExtProfilesAndSuiteContext: %v", err)
+		t.Fatalf("CheckTransactionWithSuiteContext: %v", err)
 	}
 	if checked.Fee != 10 {
 		t.Fatalf("fee=%d, want 10", checked.Fee)
 	}
 }
 
-func TestCheckTransactionWithCoreExtProfilesAndSuiteContext_DoesNotMutateCallerUtxoSet(t *testing.T) {
+func TestCheckTransactionWithSuiteContext_DoesNotMutateCallerUtxoSet(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	covData := P2PKCovenantDataForPubkey(kp.PubkeyBytes())
 
@@ -268,7 +267,7 @@ func TestCheckTransactionWithCoreExtProfilesAndSuiteContext_DoesNotMutateCallerU
 	}
 
 	original := copyTestUtxoSet(utxoSet)
-	checked, err := CheckTransactionWithCoreExtProfilesAndSuiteContext(
+	checked, err := CheckTransactionWithSuiteContext(
 		txBytes,
 		utxoSet,
 		200,
@@ -276,21 +275,20 @@ func TestCheckTransactionWithCoreExtProfilesAndSuiteContext_DoesNotMutateCallerU
 		chainID,
 		nil,
 		nil,
-		nil,
 	)
 	if err != nil {
-		t.Fatalf("CheckTransactionWithCoreExtProfilesAndSuiteContext: %v", err)
+		t.Fatalf("CheckTransactionWithSuiteContext: %v", err)
 	}
 	if checked.Fee != 10_000_000 {
 		t.Fatalf("expected fee 10_000_000, got %d", checked.Fee)
 	}
 	if !reflect.DeepEqual(utxoSet, original) {
-		t.Fatalf("CheckTransactionWithCoreExtProfilesAndSuiteContext mutated caller utxo set")
+		t.Fatalf("CheckTransactionWithSuiteContext mutated caller utxo set")
 	}
 }
 
-func TestCheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext_NilTx(t *testing.T) {
-	_, err := CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+func TestCheckParsedTransactionWithOwnedUtxoSetAndSuiteContext_NilTx(t *testing.T) {
+	_, err := CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext(
 		nil,
 		nil,
 		ParsedTxIDs{},
@@ -305,7 +303,7 @@ func TestCheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext
 	}
 }
 
-func TestCheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext_ValidTx(t *testing.T) {
+func TestCheckParsedTransactionWithOwnedUtxoSetAndSuiteContext_ValidTx(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	covData := P2PKCovenantDataForPubkey(kp.PubkeyBytes())
 
@@ -355,7 +353,7 @@ func TestCheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext
 		t.Fatalf("consumed=%d len=%d", consumed, len(txBytes))
 	}
 
-	checked, err := CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+	checked, err := CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext(
 		txBytes,
 		parsed,
 		ParsedTxIDs{TxID: txid, WTxID: wtxid},
@@ -366,7 +364,7 @@ func TestCheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext
 		SuiteValidationContext{},
 	)
 	if err != nil {
-		t.Fatalf("CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext: %v", err)
+		t.Fatalf("CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext: %v", err)
 	}
 	if checked.Fee != 10_000_000 {
 		t.Fatalf("expected fee 10_000_000, got %d", checked.Fee)

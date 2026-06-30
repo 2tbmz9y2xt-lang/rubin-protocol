@@ -1135,8 +1135,7 @@ fn apply_non_coinbase_tx_basic_vault_whitelist_rejects_output() {
 }
 
 #[test]
-fn apply_non_coinbase_tx_basic_vault_rejects_disallowed_destination_covenant_type_even_if_whitelisted(
-) {
+fn apply_non_coinbase_tx_basic_vault_rejects_unassigned_core_ext_destination() {
     let mut prev_vault = [0u8; 32];
     prev_vault[0] = 0xe4;
     let mut prev_fee = [0u8; 32];
@@ -1153,7 +1152,10 @@ fn apply_non_coinbase_tx_basic_vault_rejects_disallowed_destination_covenant_typ
         &owner_cov,
     ));
 
-    // Minimal valid CORE_EXT covenant_data: ext_id:u16le(1) || ext_payload_len:CompactSize(0).
+    // CORE_EXT (0x0102) is UNASSIGNED: even when whitelisted, a CORE_EXT
+    // destination output is rejected by the genesis covenant check
+    // (TxErrCovenantTypeInvalid) BEFORE the vault output whitelist check runs.
+    // ext_id:u16le(1) || ext_payload_len:CompactSize(0).
     let core_ext_cov = vec![0x01, 0x00, 0x00];
     let whitelist_h = sha3_256(&crate::vault::output_descriptor_bytes(
         COV_TYPE_CORE_EXT,
@@ -1226,7 +1228,7 @@ fn apply_non_coinbase_tx_basic_vault_rejects_disallowed_destination_covenant_typ
     );
 
     let err = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000, ZERO_CHAIN_ID).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrVaultOutputNotWhitelisted);
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
 #[test]

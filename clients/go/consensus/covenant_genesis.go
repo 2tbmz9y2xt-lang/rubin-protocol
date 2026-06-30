@@ -29,7 +29,7 @@ func validateTxOutputCovenantGenesis(txKind byte, out TxOutput, blockHeight uint
 		return validateAnchorGenesisOutput(out)
 	case COV_TYPE_DA_COMMIT:
 		return validateDACommitGenesisOutput(txKind, out)
-	case COV_TYPE_VAULT, COV_TYPE_MULTISIG, COV_TYPE_HTLC, COV_TYPE_CORE_EXT, COV_TYPE_CORE_STEALTH:
+	case COV_TYPE_VAULT, COV_TYPE_MULTISIG, COV_TYPE_HTLC, COV_TYPE_CORE_STEALTH:
 		return validateParsedValueGenesisOutput(out)
 	case COV_TYPE_CORE_SIMPLICITY:
 		if err := validateCoreSimplicityDeploymentActive(blockHeight, simplicityDeployment); err != nil {
@@ -77,8 +77,6 @@ func validateParsedValueGenesisOutput(out TxOutput) error {
 		return validateMultisigGenesisOutput(out)
 	case COV_TYPE_HTLC:
 		return validateHTLCGenesisOutput(out)
-	case COV_TYPE_CORE_EXT:
-		return validateCoreExtGenesisOutput(out)
 	case COV_TYPE_CORE_STEALTH:
 		return validateCoreStealthGenesisOutput(out)
 	default:
@@ -107,14 +105,6 @@ func validateHTLCGenesisOutput(out TxOutput) error {
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_HTLC value must be > 0")
 	}
 	_, err := ParseHTLCCovenantData(out.CovenantData)
-	return err
-}
-
-func validateCoreExtGenesisOutput(out TxOutput) error {
-	if out.Value == 0 {
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT value must be > 0")
-	}
-	_, err := ParseCoreExtCovenantData(out.CovenantData)
 	return err
 }
 

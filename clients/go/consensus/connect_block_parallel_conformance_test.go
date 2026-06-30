@@ -241,11 +241,11 @@ func copyUtxoMap(src map[Outpoint]UtxoEntry) map[Outpoint]UtxoEntry {
 }
 
 // TestConnectBlockParallelSigVerify_GuardPaths exercises early-return guard
-// paths in ConnectBlockParallelSigVerifyWithCoreExtProfiles.
+// paths in ConnectBlockParallelSigVerify.
 func TestConnectBlockParallelSigVerify_GuardPaths(t *testing.T) {
 	t.Run("nil_state", func(t *testing.T) {
-		_, err := ConnectBlockParallelSigVerifyWithCoreExtProfiles(
-			[]byte{}, nil, nil, 0, nil, nil, [32]byte{}, nil, 0,
+		_, err := ConnectBlockParallelSigVerify(
+			[]byte{}, nil, nil, 0, nil, nil, [32]byte{}, 0,
 		)
 		if err == nil {
 			t.Fatal("expected error for nil state")
@@ -258,8 +258,8 @@ func TestConnectBlockParallelSigVerify_GuardPaths(t *testing.T) {
 			AlreadyGenerated: nil,
 		}
 		// Should normalize nil to zero, then fail at block validation.
-		_, err := ConnectBlockParallelSigVerifyWithCoreExtProfiles(
-			[]byte{0x00}, nil, nil, 0, nil, state, [32]byte{}, nil, 0,
+		_, err := ConnectBlockParallelSigVerify(
+			[]byte{0x00}, nil, nil, 0, nil, state, [32]byte{}, 0,
 		)
 		if err == nil {
 			t.Fatal("expected error for invalid block bytes")
@@ -271,8 +271,8 @@ func TestConnectBlockParallelSigVerify_GuardPaths(t *testing.T) {
 			Utxos:            make(map[Outpoint]UtxoEntry),
 			AlreadyGenerated: big.NewInt(-1),
 		}
-		_, err := ConnectBlockParallelSigVerifyWithCoreExtProfiles(
-			[]byte{0x00}, nil, nil, 0, nil, state, [32]byte{}, nil, 0,
+		_, err := ConnectBlockParallelSigVerify(
+			[]byte{0x00}, nil, nil, 0, nil, state, [32]byte{}, 0,
 		)
 		if err == nil {
 			t.Fatal("expected error for negative AlreadyGenerated")
@@ -284,8 +284,8 @@ func TestConnectBlockParallelSigVerify_GuardPaths(t *testing.T) {
 			Utxos:            nil, // should be normalized to empty map
 			AlreadyGenerated: new(big.Int),
 		}
-		_, err := ConnectBlockParallelSigVerifyWithCoreExtProfiles(
-			[]byte{0x00}, nil, nil, 0, nil, state, [32]byte{}, nil, 0,
+		_, err := ConnectBlockParallelSigVerify(
+			[]byte{0x00}, nil, nil, 0, nil, state, [32]byte{}, 0,
 		)
 		// Will fail at block validation but nil Utxos normalization is covered.
 		if err == nil {
@@ -301,8 +301,8 @@ func TestConnectBlockParallelSigVerify_GuardPaths(t *testing.T) {
 			Utxos:            nil,
 			AlreadyGenerated: nil,
 		}
-		_, err := ConnectBlockParallelSigVerifyWithCoreExtProfiles(
-			[]byte{0x00}, nil, nil, 0, nil, state, [32]byte{}, nil, 0,
+		_, err := ConnectBlockParallelSigVerify(
+			[]byte{0x00}, nil, nil, 0, nil, state, [32]byte{}, 0,
 		)
 		if err == nil {
 			t.Fatal("expected error for invalid block bytes")
@@ -380,8 +380,8 @@ func TestConnectBlockParallelSigVerify_TxValidationError_MissingUTXO(t *testing.
 		Utxos:            make(map[Outpoint]UtxoEntry),
 		AlreadyGenerated: new(big.Int),
 	}
-	_, err := ConnectBlockParallelSigVerifyWithCoreExtProfiles(
-		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, nil, 4,
+	_, err := ConnectBlockParallelSigVerify(
+		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, 4,
 	)
 	if err == nil {
 		t.Fatal("expected error for missing UTXO")
@@ -403,8 +403,8 @@ func TestConnectBlockParallelSigVerify_CoinbaseValueBound(t *testing.T) {
 		Utxos:            utxos,
 		AlreadyGenerated: new(big.Int).SetUint64(MINEABLE_CAP),
 	}
-	_, err := ConnectBlockParallelSigVerifyWithCoreExtProfiles(
-		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, nil, 4,
+	_, err := ConnectBlockParallelSigVerify(
+		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, 4,
 	)
 	if err == nil {
 		t.Fatal("expected coinbase value bound error")
@@ -428,8 +428,8 @@ func TestConnectBlockParallelSigVerify_AlreadyGeneratedOverflow(t *testing.T) {
 		Utxos:            utxos,
 		AlreadyGenerated: hugeAG,
 	}
-	_, err := ConnectBlockParallelSigVerifyWithCoreExtProfiles(
-		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, nil, 4,
+	_, err := ConnectBlockParallelSigVerify(
+		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, 4,
 	)
 	if err == nil {
 		t.Fatal("expected already_generated overflow error")
@@ -454,8 +454,8 @@ func TestConnectBlockParallelSigVerify_AlreadyGeneratedN1Overflow(t *testing.T) 
 		Utxos:            utxos,
 		AlreadyGenerated: ag,
 	}
-	_, err := ConnectBlockParallelSigVerifyWithCoreExtProfiles(
-		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, nil, 4,
+	_, err := ConnectBlockParallelSigVerify(
+		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, 4,
 	)
 	if err == nil {
 		t.Fatal("expected already_generated_n1 overflow error")
@@ -507,8 +507,8 @@ func TestConnectBlockParallelSigVerify_CoinbaseVaultForbidden(t *testing.T) {
 		Utxos:            make(map[Outpoint]UtxoEntry),
 		AlreadyGenerated: new(big.Int),
 	}
-	_, err = ConnectBlockParallelSigVerifyWithCoreExtProfiles(
-		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, nil, 4,
+	_, err = ConnectBlockParallelSigVerify(
+		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, 4,
 	)
 	if err == nil {
 		t.Fatal("expected coinbase vault forbidden error")

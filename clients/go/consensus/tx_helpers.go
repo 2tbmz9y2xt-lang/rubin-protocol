@@ -47,53 +47,49 @@ func CheckTransaction(
 	blockMTP uint64,
 	chainID [32]byte,
 ) (*CheckedTransaction, error) {
-	return CheckTransactionWithCoreExtProfilesAndSuiteContext(
+	return CheckTransactionWithSuiteContext(
 		txBytes,
 		utxoSet,
 		height,
 		blockMTP,
 		chainID,
-		nil,
-		nil,
-		nil,
+		nil, /*rotation*/
+		nil, /*registry*/
 	)
 }
 
-func CheckTransactionWithCoreExtProfilesAndSuiteContext(
+func CheckTransactionWithSuiteContext(
 	txBytes []byte,
 	utxoSet map[Outpoint]UtxoEntry,
 	height uint64,
 	blockMTP uint64,
 	chainID [32]byte,
-	_ any,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (*CheckedTransaction, error) {
 	workUtxos := cloneUtxoSet(utxoSet)
-	return CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+	return CheckTransactionWithOwnedUtxoSetAndSuiteContext(
 		txBytes,
 		workUtxos,
 		height,
 		blockMTP,
 		chainID,
-		nil,
 		rotation,
 		registry,
 	)
 }
 
-// CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext validates
+// CheckTransactionWithOwnedUtxoSetAndSuiteContext validates
 // a transaction against a caller-owned mutable UTXO work set. The caller must
 // not pass a live shared chainstate map; this helper may mutate the supplied
 // work set while preserving the same CheckedTransaction result contract as the
 // cloned wrapper above.
-func CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+func CheckTransactionWithOwnedUtxoSetAndSuiteContext(
 	txBytes []byte,
 	workUtxos map[Outpoint]UtxoEntry,
 	height uint64,
 	blockMTP uint64,
 	chainID [32]byte,
-	_ any,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (*CheckedTransaction, error) {
@@ -105,7 +101,7 @@ func CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 		return nil, txerr(TX_ERR_PARSE, "trailing bytes after canonical tx")
 	}
 
-	return CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+	return CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext(
 		txBytes,
 		tx,
 		ParsedTxIDs{TxID: txid, WTxID: wtxid},
@@ -117,9 +113,9 @@ func CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 	)
 }
 
-// CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext validates an already
+// CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext validates an already
 // parsed canonical transaction against a caller-owned mutable UTXO work set.
-func CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+func CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext(
 	txBytes []byte,
 	tx *Tx,
 	ids ParsedTxIDs,

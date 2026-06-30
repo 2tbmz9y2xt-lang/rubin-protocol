@@ -54,3 +54,7 @@ spec/RUBIN_IMPLEMENTATION_ROADMAP.md
 # Local orchestration files (must stay local-only)
 scripts/orchestration/
 operational/orchestration/
+
+# Compiled CLI binaries (go build/run output)
+/clients/go/rubin-consensus-cli
+/clients/go/rubin-node

@@ -64,10 +64,9 @@ pub use core_ext::{
     live_core_ext_verification_binding_from_normalized_name_and_descriptor,
     normalize_core_ext_binding_name, normalize_live_core_ext_binding_name,
     parse_core_ext_covenant_data, parse_core_ext_openssl_digest32_binding_descriptor,
-    validate_core_ext_spend, CoreExtActiveProfile, CoreExtDeploymentProfile,
-    CoreExtDeploymentProfiles, CoreExtOpenSslDigest32BindingDescriptor, CoreExtProfiles,
-    CoreExtVerificationBinding, GovernanceReplayToken,
-    CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
+    CoreExtActiveProfile, CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
+    CoreExtOpenSslDigest32BindingDescriptor, CoreExtProfiles, CoreExtVerificationBinding,
+    GovernanceReplayToken, CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
 };
 pub use covenant_genesis::validate_tx_covenants_genesis;
 pub use da_verify_parallel::{
@@ -115,8 +114,7 @@ pub use tx_validate_worker::{
     first_tx_error, run_tx_validation_workers, validate_tx_local, TxValidationResult,
 };
 pub use txcontext::{
-    build_tx_context, build_tx_context_output_ext_id_cache, ExtIdCacheEntry, TxContextBase,
-    TxContextBundle, TxContextContinuing, TxOutputView, Uint128, TXCONTEXT_MAX_CONTINUING_OUTPUTS,
+    TxContextBase, TxContextContinuing, TxOutputView, Uint128, TXCONTEXT_MAX_CONTINUING_OUTPUTS,
 };
 pub use utxo_basic::{
     apply_non_coinbase_tx_basic, apply_non_coinbase_tx_basic_update,
