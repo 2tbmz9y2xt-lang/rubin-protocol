@@ -170,6 +170,25 @@ type Request struct {
 
 type requestEnvelope struct {
 	Request
+	CoreExtProfiles            json.RawMessage `json:"core_ext_profiles,omitempty"`
+	CoreExtProfileSetAnchorHex string          `json:"core_ext_profile_set_anchor_hex,omitempty"`
+}
+
+// rejectRetiredCoreExtProfiles preserves the Go runtime's explicit rejection of
+// the retired CORE_EXT request fields, matching the Rust consensus CLI. 0x0102
+// (CORE_EXT) is unassigned, so a request still carrying core_ext_profiles /
+// core_ext_profile_set_anchor_hex is rejected — not silently ignored.
+func rejectRetiredCoreExtProfiles(profiles json.RawMessage, anchorHex string) error {
+	if strings.TrimSpace(anchorHex) != "" {
+		return fmt.Errorf("core_ext_profile_set_anchor_hex unsupported by Go runtime")
+	}
+	if len(profiles) > 0 {
+		var items []json.RawMessage
+		if err := json.Unmarshal(profiles, &items); err != nil || len(items) != 0 {
+			return fmt.Errorf("core_ext_profiles unsupported by Go runtime")
+		}
+	}
+	return nil
 }
 
 const rotationDescriptorNotActivatedErr = "descriptor-not-activated"
@@ -1920,6 +1939,10 @@ func runFromStdin() {
 			return
 		}
 
+		if err := rejectRetiredCoreExtProfiles(envelope.CoreExtProfiles, envelope.CoreExtProfileSetAnchorHex); err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
 		rotation, registry, err := buildCoreExtSuiteContext(req)
 		if err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
@@ -1998,6 +2021,10 @@ func runFromStdin() {
 			return
 		}
 
+		if err := rejectRetiredCoreExtProfiles(envelope.CoreExtProfiles, envelope.CoreExtProfileSetAnchorHex); err != nil {
+			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
+			return
+		}
 		rotation, registry, err := buildCoreExtSuiteContext(req)
 		if err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
