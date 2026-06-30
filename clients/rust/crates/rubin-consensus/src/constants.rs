@@ -44,6 +44,7 @@ pub const COV_TYPE_CORE_EXT: u16 = 0x0102;
 pub const COV_TYPE_CORE_STEALTH: u16 = 0x0105;
 pub const CORE_STEALTH_WITNESS_SLOTS: u64 = 1;
 pub const COV_TYPE_CORE_SIMPLICITY: u16 = 0x0106;
+pub const SIMPLICITY_WITNESS_SLOTS: u64 = 1;
 
 #[deprecated(note = "use COV_TYPE_CORE_EXT")]
 pub const COV_TYPE_EXT: u16 = COV_TYPE_CORE_EXT;
@@ -116,6 +117,7 @@ mod tests {
             COV_TYPE_CORE_SIMPLICITY.to_le_bytes(),
             0x0106u16.to_le_bytes()
         );
+        assert_eq!(SIMPLICITY_WITNESS_SLOTS, 1);
     }
 
     #[allow(deprecated)]

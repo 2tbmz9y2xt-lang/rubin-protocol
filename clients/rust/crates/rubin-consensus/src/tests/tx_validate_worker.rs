@@ -290,6 +290,41 @@ fn validate_tx_local_multisig_dispatch_enters_branch() {
     assert_eq!(r.fee, 10);
 }
 
+// RUB-591: the worker upfront guard rejects a 0x0106 spend with the dedicated
+// message before any input dispatch (defensive — precompute already rejects it).
+#[test]
+fn validate_tx_local_rejects_core_simplicity_spend() {
+    let mut tx = simple_p2pk_tx(0x55);
+    tx.witness = vec![dummy_witness()];
+    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+    let ptc = PrecomputedTxContext {
+        tx_index: 1,
+        tx_block_idx: 1,
+        txid: [0u8; 32],
+        resolved_inputs: vec![UtxoEntry {
+            value: 100,
+            covenant_type: COV_TYPE_CORE_SIMPLICITY,
+            covenant_data: vec![],
+            creation_height: 1,
+            created_by_coinbase: false,
+        }],
+        witness_start: 0,
+        witness_end: 1,
+        input_outpoints: vec![Outpoint {
+            txid: [0u8; 32],
+            vout: 0,
+        }],
+        fee: 10,
+    };
+    let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, None);
+    assert!(!r.valid);
+    let err = r.err.expect("0x0106 worker input must reject");
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert!(err
+        .msg
+        .contains("CORE_SIMPLICITY spend evaluation not enabled"));
+}
+
 /// Covers validate_input_spend → COV_TYPE_VAULT branch. Uses synthetic PTC
 /// with a vault resolved input.
 #[test]

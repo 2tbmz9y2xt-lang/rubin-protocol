@@ -1,17 +1,20 @@
-//! CORE_SIMPLICITY (0x0106) creation-side covenant rules.
+//! CORE_SIMPLICITY (0x0106) covenant rules.
 //!
-//! Rust mirror of the merged Go reference (`clients/go/consensus/simplicity_covenant.go`,
-//! RUB-494): the creation-side `covenant_data` structure validation plus the
-//! deployment-active gate. Creation is accepted only when the rotation provider
-//! reports the Simplicity deployment active at the block height; otherwise it is
-//! rejected ("deployment not active"), which is the default (fail-closed) for any
-//! provider that does not wire a deployment. Spend-side handling (witness_slots,
-//! spend reject, apply/precompute error-priority) lands in RUB-591.
+//! Rust mirror of the merged Go reference (`clients/go/consensus/simplicity_covenant.go`):
+//! the creation-side `covenant_data` structure validation plus the
+//! deployment-active gate (RUB-494/590), and the spend-side fail-closed reject
+//! (RUB-591). Creation is accepted only when the rotation provider reports the
+//! Simplicity deployment active at the block height; otherwise it is rejected
+//! ("deployment not active"), the default (fail-closed) for any provider that
+//! does not wire a deployment. Spending a 0x0106 output is rejected with the
+//! dedicated "spend evaluation not enabled" message ahead of generic
+//! covenant/witness errors; actual spend evaluation is a later slice (RUB-505).
 
 use crate::compactsize::read_compact_size;
-use crate::constants::MAX_SIMPLICITY_STATE_BYTES;
+use crate::constants::{COV_TYPE_CORE_SIMPLICITY, MAX_SIMPLICITY_STATE_BYTES};
 use crate::error::{ErrorCode, TxError};
 use crate::suite_registry::RotationProvider;
+use crate::utxo_basic::UtxoEntry;
 use crate::wire_read::Reader;
 
 /// Rejects CORE_SIMPLICITY creation unless the rotation provider reports the
@@ -30,6 +33,29 @@ pub(crate) fn validate_core_simplicity_deployment_active(
             "CORE_SIMPLICITY deployment not active",
         ))
     }
+}
+
+/// The dedicated fail-closed reject for spending a CORE_SIMPLICITY (0x0106)
+/// output. Mirrors Go `rejectCoreSimplicitySpend`: spend evaluation is not yet
+/// enabled, so any 0x0106 spend is rejected with this exact code+message, ahead
+/// of generic covenant/witness errors.
+pub(crate) fn reject_core_simplicity_spend() -> TxError {
+    TxError::new(
+        ErrorCode::TxErrCovenantTypeInvalid,
+        "CORE_SIMPLICITY spend evaluation not enabled",
+    )
+}
+
+/// Rejects if any resolved input spends a CORE_SIMPLICITY (0x0106) output.
+/// Mirrors Go `rejectCoreSimplicitySpendIfPresent`.
+pub(crate) fn reject_core_simplicity_spend_if_present(inputs: &[UtxoEntry]) -> Result<(), TxError> {
+    if inputs
+        .iter()
+        .any(|input| input.covenant_type == COV_TYPE_CORE_SIMPLICITY)
+    {
+        return Err(reject_core_simplicity_spend());
+    }
+    Ok(())
 }
 
 /// Validates a CORE_SIMPLICITY creation output's `covenant_data`:

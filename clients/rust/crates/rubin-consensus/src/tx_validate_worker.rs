@@ -9,6 +9,7 @@ use crate::precompute::PrecomputedTxContext;
 use crate::sig_cache::SigCache;
 use crate::sig_queue::SigCheckQueue;
 use crate::sighash::SighashV1PrehashCache;
+use crate::simplicity_covenant::reject_core_simplicity_spend_if_present;
 use crate::spend_verify::{validate_p2pk_spend_q, validate_threshold_sig_spend_q};
 use crate::stealth::validate_stealth_spend_q;
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider, SuiteRegistry};
@@ -148,6 +149,13 @@ pub fn validate_tx_local(
     // (TxErrCovenantTypeInvalid) before any spend dispatch, so no CORE_EXT
     // profile gating runs here.
     let tx = &pb.txs[ptc.tx_block_idx];
+
+    // Fail-closed upfront guard (mirror Go ValidateTxLocal): a 0x0106 spend is
+    // rejected with the dedicated message before any input dispatch. Defensive —
+    // precompute already rejects 0x0106 inputs before a worker context exists.
+    if let Err(e) = reject_core_simplicity_spend_if_present(&ptc.resolved_inputs) {
+        return tx_validation_error_result(ptc, e);
+    }
 
     let mut sighash_cache = match build_tx_local_preflight(tx) {
         Ok(preflight) => preflight,
@@ -316,6 +324,9 @@ fn validate_input_spend(
 
         _ => {
             // Other covenant types have no spend-time checks in the genesis set.
+            // A 0x0106 input never reaches here — `validate_tx_local`'s upfront
+            // reject_core_simplicity_spend_if_present guard rejects it first
+            // (mirror Go ValidateTxLocal).
             Ok(())
         }
     }

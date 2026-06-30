@@ -1,9 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::block_basic::ParsedBlock;
-use crate::constants::{COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
+use crate::constants::{
+    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_DA_COMMIT,
+};
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
+use crate::simplicity_covenant::reject_core_simplicity_spend;
 use crate::utxo_basic::{Outpoint, UtxoEntry};
 use crate::vault::witness_slots;
 
@@ -114,6 +117,10 @@ pub fn precompute_tx_contexts(
         let mut seen_inputs: HashSet<Outpoint> = HashSet::with_capacity(tx.inputs.len());
         let mut total_witness_slots: usize = 0;
         let mut sum_in: u128 = 0;
+        // Mirror Go's StoppedAtCoreSimplicity: a 0x0106 input contributes 0
+        // witness slots, relaxes the witness-count mismatch check, and triggers
+        // the dedicated spend reject after bound validation.
+        let mut stopped_at_core_simplicity = false;
 
         for input in &tx.inputs {
             // Coinbase prevout encoding forbidden in non-coinbase.
@@ -160,6 +167,20 @@ pub fn precompute_tx_contexts(
                 ));
             }
 
+            if entry.covenant_type == COV_TYPE_CORE_SIMPLICITY {
+                // Mirror Go's early return (collectPrecomputeTxInputs): STOP
+                // resolving inputs at the first 0x0106 so no trailing input can
+                // surface a competing error ahead of the dedicated reject. The
+                // 0x0106 input contributes 0 witness slots; the reject is
+                // deferred until after the (mismatch-relaxed) bound check.
+                // `sum_in` is left unaccumulated — the reject precedes the fee /
+                // value-conservation checks, so its value is never read.
+                stopped_at_core_simplicity = true;
+                resolved_inputs.push(entry);
+                input_outpoints.push(op);
+                break;
+            }
+
             let slots = witness_slots(entry.covenant_type, &entry.covenant_data)?;
             if slots == 0 {
                 return Err(TxError::new(ErrorCode::TxErrParse, "invalid witness slots"));
@@ -181,11 +202,16 @@ pub fn precompute_tx_contexts(
         if witness_end > tx.witness.len() {
             return Err(TxError::new(ErrorCode::TxErrParse, "witness underflow"));
         }
-        if witness_end != tx.witness.len() {
+        if !stopped_at_core_simplicity && witness_end != tx.witness.len() {
             return Err(TxError::new(
                 ErrorCode::TxErrParse,
                 "witness_count mismatch",
             ));
+        }
+        // Fail-closed: surface the dedicated 0x0106 spend reject ahead of the
+        // fee/value-conservation checks, with Go-identical code+message.
+        if stopped_at_core_simplicity {
+            return Err(reject_core_simplicity_spend());
         }
 
         // Fee = sum_in − sum_out, matching sequential value conservation.

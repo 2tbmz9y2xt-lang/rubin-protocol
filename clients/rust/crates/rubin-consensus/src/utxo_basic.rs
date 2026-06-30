@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::constants::{
-    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_CORE_STEALTH, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC,
-    COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_VAULT,
+    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_CORE_STEALTH,
+    COV_TYPE_DA_COMMIT, COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_VAULT,
 };
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
@@ -11,6 +11,7 @@ use crate::hash::sha3_256;
 use crate::htlc::{parse_htlc_covenant_data, validate_htlc_spend_q, HtlcSpendContext};
 use crate::sig_queue::SigCheckQueue;
 use crate::sighash::SighashV1PrehashCache;
+use crate::simplicity_covenant::reject_core_simplicity_spend;
 use crate::spend_verify::{validate_p2pk_spend_q, validate_threshold_sig_spend_q};
 use crate::stealth::{parse_stealth_covenant_data, validate_stealth_spend_q};
 use crate::suite_registry::{RotationProvider, SuiteRegistry};
@@ -302,6 +303,12 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
                     "multiple CORE_VAULT inputs forbidden",
                 ));
             }
+        }
+        // Fail-closed: a CORE_SIMPLICITY (0x0106) spend is rejected with the
+        // dedicated message ahead of the generic check_spend_covenant/witness
+        // errors, matching Go's input-resolution order.
+        if entry.covenant_type == COV_TYPE_CORE_SIMPLICITY {
+            return Err(reject_core_simplicity_spend());
         }
         check_spend_covenant(entry.covenant_type, &entry.covenant_data)?;
         let slots = witness_slots(entry.covenant_type, &entry.covenant_data)?;
@@ -776,6 +783,54 @@ mod tests {
             )
             .expect_err("0x0102 spend must reject");
             assert_eq!(spend_err.code, ErrorCode::TxErrCovenantTypeInvalid);
+        }
+    }
+
+    // RUB-591: a tx consuming a 0x0106 UTXO is rejected during input resolution
+    // with the DEDICATED "spend evaluation not enabled" message — ahead of the
+    // generic check_spend_covenant/witness errors — for any covenant_data.
+    #[test]
+    fn core_simplicity_0x0106_spend_rejects_with_dedicated_message() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let pubkey = keypair.pubkey_bytes();
+        let spend_prev = [0x91; 32];
+        let spend_txid = [0x92; 32];
+        let spend_chain = [0x93; 32];
+        for cov_data in [vec![], vec![0xffu8; 8]] {
+            let spend_set =
+                HashMap::from([utxo(spend_prev, 100, COV_TYPE_CORE_SIMPLICITY, cov_data)]);
+            let mut spend_tx = unsigned_tx(
+                0x00,
+                2,
+                vec![tx_input(spend_prev)],
+                vec![tx_output(
+                    90,
+                    COV_TYPE_P2PK,
+                    p2pk_covenant_data_for_pubkey(&pubkey),
+                )],
+            );
+            spend_tx.witness = vec![WitnessItem {
+                suite_id: SUITE_ID_ML_DSA_87,
+                pubkey: pubkey.to_vec(),
+                signature: vec![0u8; 1],
+            }];
+            let err = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                &spend_tx,
+                spend_txid,
+                &spend_set,
+                1,
+                0,
+                0,
+                spend_chain,
+                None,
+                None,
+            )
+            .expect_err("0x0106 spend must reject");
+            assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+            assert!(
+                format!("{err}").contains("CORE_SIMPLICITY spend evaluation not enabled"),
+                "got: {err}"
+            );
         }
     }
 
