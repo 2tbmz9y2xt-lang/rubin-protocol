@@ -1,8 +1,28 @@
 use super::*;
 use crate::compactsize::encode_compact_size;
-use crate::constants::{COV_TYPE_CORE_SIMPLICITY, MAX_SIMPLICITY_STATE_BYTES};
+use crate::constants::{COV_TYPE_CORE_SIMPLICITY, MAX_SIMPLICITY_STATE_BYTES, SUITE_ID_ML_DSA_87};
 use crate::error::ErrorCode;
+use crate::suite_registry::{DefaultRotationProvider, NativeSuiteSet, RotationProvider};
 use crate::tx::{Tx, TxOutput};
+
+// Rotation provider that reports the Simplicity deployment active at/above a
+// threshold height, mirroring Go's testRotationProvider{simplicityActiveHeight}.
+// Suite sets fall back to the default ({ML-DSA-87}) so unrelated P2PK creation
+// rules are intact.
+struct ActiveSimplicity {
+    active_from: u64,
+}
+impl RotationProvider for ActiveSimplicity {
+    fn native_create_suites(&self, h: u64) -> NativeSuiteSet {
+        DefaultRotationProvider.native_create_suites(h)
+    }
+    fn native_spend_suites(&self, h: u64) -> NativeSuiteSet {
+        DefaultRotationProvider.native_spend_suites(h)
+    }
+    fn simplicity_active_at_height(&self, h: u64) -> bool {
+        h >= self.active_from
+    }
+}
 
 fn encode_simplicity_covenant_data(program_cmr: [u8; 32], state: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(32 + 1 + state.len());
@@ -80,20 +100,60 @@ fn covenant_data_validation_cases() {
     }
 }
 
-// End-to-end through the genesis dispatch: creation is fail-closed in this slice
-// ("creation not enabled"); malformed covenant_data surfaces the structural
-// error first. The deployment-active gate that turns this into conditional
-// acceptance lands in RUB-590.
+// End-to-end through the genesis dispatch. Mirrors Go
+// TestValidateTxCovenantsGenesis_CoreSimplicityActive: the deployment-active
+// gate runs before any structural parse (so an inactive provider rejects even
+// malformed data with "deployment not active"), and an active provider accepts
+// well-formed data while still surfacing structural errors.
 #[test]
-fn genesis_arm_fail_closed() {
-    let data = encode_simplicity_covenant_data([0x44; 32], &[0x01, 0x02]);
-    let tx = tx_with_outputs(vec![simplicity_output(1, data)]);
+fn genesis_deployment_gate() {
+    let active = ActiveSimplicity { active_from: 10 };
+    let valid = encode_simplicity_covenant_data([0x44; 32], &[0x01, 0x02]);
+
+    // The active provider only flips the Simplicity deployment flag; its native
+    // create/spend suites stay the default ({ML-DSA-87}), so P2PK rotation is
+    // unaffected by the gate.
+    assert!(active.native_create_suites(10).contains(SUITE_ID_ML_DSA_87));
+    assert!(active.native_spend_suites(10).contains(SUITE_ID_ML_DSA_87));
+
+    // Inactive (default): rejected at the gate, before any covenant_data parse.
+    let tx = tx_with_outputs(vec![simplicity_output(1, valid.clone())]);
     let e = crate::validate_tx_covenants_genesis(&tx, 10, None).unwrap_err();
     assert_eq!(e.code, ErrorCode::TxErrCovenantTypeInvalid);
-    assert!(err_msg(&e).contains("creation not enabled"));
+    assert!(err_msg(&e).contains("deployment not active"));
 
+    // Inactive + malformed: still the gate message, not the structural one.
+    let bad_inactive = tx_with_outputs(vec![simplicity_output(1, vec![0u8; 10])]);
+    let e = crate::validate_tx_covenants_genesis(&bad_inactive, 10, None).unwrap_err();
+    assert!(err_msg(&e).contains("deployment not active"));
+
+    // Active provider, but BELOW its activation height: still "not active".
+    let e = crate::validate_tx_covenants_genesis(&tx, 9, Some(&active)).unwrap_err();
+    assert!(err_msg(&e).contains("deployment not active"));
+
+    // Production DescriptorRotationProvider does not wire a deployment, so it
+    // inherits the default-false seam: fail-closed even at a high height.
+    let descriptor = crate::suite_registry::DescriptorRotationProvider {
+        descriptor: crate::suite_registry::CryptoRotationDescriptor {
+            name: "t".into(),
+            old_suite_id: crate::constants::SUITE_ID_ML_DSA_87,
+            new_suite_id: 0x02,
+            create_height: 1,
+            spend_height: 2,
+            sunset_height: 0,
+        },
+    };
+    let e = crate::validate_tx_covenants_genesis(&tx, 100, Some(&descriptor)).unwrap_err();
+    assert!(err_msg(&e).contains("deployment not active"));
+
+    // Active at/above the activation height: a well-formed output is accepted.
+    assert!(crate::validate_tx_covenants_genesis(&tx, 10, Some(&active)).is_ok());
+
+    // Active + value 0 / malformed: structural errors surface after the gate.
+    let zero = tx_with_outputs(vec![simplicity_output(0, valid)]);
+    let e = crate::validate_tx_covenants_genesis(&zero, 10, Some(&active)).unwrap_err();
+    assert!(err_msg(&e).contains("value must be > 0"));
     let bad = tx_with_outputs(vec![simplicity_output(1, vec![0u8; 10])]);
-    let e = crate::validate_tx_covenants_genesis(&bad, 10, None).unwrap_err();
-    assert_eq!(e.code, ErrorCode::TxErrCovenantTypeInvalid);
+    let e = crate::validate_tx_covenants_genesis(&bad, 10, Some(&active)).unwrap_err();
     assert!(err_msg(&e).contains("program_cmr parse failure"));
 }

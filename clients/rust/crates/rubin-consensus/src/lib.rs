@@ -43,7 +43,9 @@ pub use block_basic::{
     parse_block_bytes, tx_weight_and_stats_at_height, tx_weight_and_stats_public,
     validate_block_basic, validate_block_basic_at_height,
     validate_block_basic_with_context_and_fees_at_height,
-    validate_block_basic_with_context_at_height, BlockBasicSummary, ParsedBlock,
+    validate_block_basic_with_context_and_fees_at_height_and_rotation,
+    validate_block_basic_with_context_at_height,
+    validate_block_basic_with_context_at_height_and_rotation, BlockBasicSummary, ParsedBlock,
 };
 pub use compact_relay::compact_shortid;
 pub use compactsize::encode_compact_size;

@@ -1,16 +1,36 @@
 //! CORE_SIMPLICITY (0x0106) creation-side covenant rules.
 //!
 //! Rust mirror of the merged Go reference (`clients/go/consensus/simplicity_covenant.go`,
-//! RUB-494), scoped to the creation-side `covenant_data` structure validation.
-//! Creation is fail-closed in this slice (see `covenant_genesis`). The
-//! deployment-active gate + rotation threading land together in RUB-590;
-//! spend-side handling (witness_slots, spend reject, apply/precompute
-//! error-priority) lands in RUB-591.
+//! RUB-494): the creation-side `covenant_data` structure validation plus the
+//! deployment-active gate. Creation is accepted only when the rotation provider
+//! reports the Simplicity deployment active at the block height; otherwise it is
+//! rejected ("deployment not active"), which is the default (fail-closed) for any
+//! provider that does not wire a deployment. Spend-side handling (witness_slots,
+//! spend reject, apply/precompute error-priority) lands in RUB-591.
 
 use crate::compactsize::read_compact_size;
 use crate::constants::MAX_SIMPLICITY_STATE_BYTES;
 use crate::error::{ErrorCode, TxError};
+use crate::suite_registry::RotationProvider;
 use crate::wire_read::Reader;
+
+/// Rejects CORE_SIMPLICITY creation unless the rotation provider reports the
+/// Simplicity deployment active at `height`. Mirrors Go
+/// `validateCoreSimplicityDeploymentActive`: a provider that does not wire a
+/// deployment (the default) yields "deployment not active".
+pub(crate) fn validate_core_simplicity_deployment_active(
+    height: u64,
+    rotation: &dyn RotationProvider,
+) -> Result<(), TxError> {
+    if rotation.simplicity_active_at_height(height) {
+        Ok(())
+    } else {
+        Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_SIMPLICITY deployment not active",
+        ))
+    }
+}
 
 /// Validates a CORE_SIMPLICITY creation output's `covenant_data`:
 /// `program_cmr:bytes32 || state_len:CompactSize || state`, with

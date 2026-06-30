@@ -139,6 +139,86 @@ fn validate_block_basic_subsidy_with_fees_ok() {
     assert_eq!(s.tx_count, 1);
 }
 
+// Mirrors Go TestValidateBlockBasicWithFees_CoreSimplicityUsesRotation: a block
+// creating an active CORE_SIMPLICITY (0x0106) output is rejected by the
+// rotation-unaware block-basic path ("deployment not active") and accepted once
+// the active rotation provider is threaded through to genesis validation.
+#[test]
+fn validate_block_basic_with_fees_core_simplicity_uses_rotation() {
+    use crate::suite_registry::{DefaultRotationProvider, NativeSuiteSet, RotationProvider};
+
+    struct SimplicityActive;
+    impl RotationProvider for SimplicityActive {
+        fn native_create_suites(&self, h: u64) -> NativeSuiteSet {
+            DefaultRotationProvider.native_create_suites(h)
+        }
+        fn native_spend_suites(&self, h: u64) -> NativeSuiteSet {
+            DefaultRotationProvider.native_spend_suites(h)
+        }
+        fn simplicity_active_at_height(&self, _h: u64) -> bool {
+            true
+        }
+    }
+
+    let height = 10u64;
+    let mut cmr = [0u8; 32];
+    cmr[0] = 0x44;
+    let mut cov = cmr.to_vec(); // program_cmr || state_len=0 (empty state)
+    crate::compactsize::encode_compact_size(0, &mut cov);
+    let mut prev_txid = [0u8; 32];
+    prev_txid[0] = 0x66;
+    let simp = tx_with_one_input_one_output(prev_txid, 0, 1, COV_TYPE_CORE_SIMPLICITY, &cov);
+
+    let subsidy = crate::subsidy::block_subsidy(height, 0);
+    let coinbase = coinbase_with_witness_commitment_and_p2pk_value(
+        height as u32,
+        subsidy,
+        std::slice::from_ref(&simp),
+    );
+    let (_c, coinbase_txid, _wc, _nc) = parse_tx(&coinbase).expect("coinbase");
+    let (_s, simp_txid, _ws, _ns) = parse_tx(&simp).expect("simp");
+    let root = merkle_root_txids(&[coinbase_txid, simp_txid]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0x9c;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, root, target, 58, &[coinbase, simp]);
+
+    // Rotation-unaware path: the inactive deployment rejects the 0x0106 create.
+    let e = validate_block_basic_with_context_and_fees_at_height(
+        &block,
+        Some(prev),
+        Some(target),
+        height,
+        None,
+        0,
+        0,
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ErrorCode::TxErrCovenantTypeInvalid);
+
+    // Active provider threaded through: the same block validates.
+    crate::validate_block_basic_with_context_and_fees_at_height_and_rotation(
+        &block,
+        Some(prev),
+        Some(target),
+        height,
+        None,
+        0,
+        0,
+        Some(&SimplicityActive),
+    )
+    .expect("active CORE_SIMPLICITY block must validate");
+
+    // The active provider keeps native create/spend suites at the default; only
+    // the Simplicity deployment flag flips.
+    assert!(SimplicityActive
+        .native_create_suites(height)
+        .contains(SUITE_ID_ML_DSA_87));
+    assert!(SimplicityActive
+        .native_spend_suites(height)
+        .contains(SUITE_ID_ML_DSA_87));
+}
+
 #[test]
 fn validate_block_basic_linkage_mismatch() {
     let tx = minimal_tx_bytes();

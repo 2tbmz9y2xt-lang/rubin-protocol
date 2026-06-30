@@ -1,6 +1,7 @@
 use rubin_consensus::{
     block_hash, parse_block_bytes, parse_tx, read_compact_size_bytes,
-    validate_block_basic_with_context_at_height, Outpoint, ParsedBlock, BLOCK_HEADER_BYTES,
+    validate_block_basic_with_context_at_height_and_rotation, Outpoint, ParsedBlock,
+    BLOCK_HEADER_BYTES,
 };
 use std::ops::Deref;
 
@@ -320,12 +321,16 @@ impl SyncEngine {
             // issue #1168).
             let candidate = branch.last().ok_or("empty side branch")?;
             let ts = self.side_branch_prev_timestamps(&branch, common_ancestor_height)?;
-            validate_block_basic_with_context_at_height(
+            // Thread the engine's rotation provider so an active CORE_SIMPLICITY
+            // (0x0106) side-branch block is accepted, mirroring Go sync_reorg.go.
+            let (rotation, _registry) = self.suite_context();
+            validate_block_basic_with_context_at_height_and_rotation(
                 &candidate.block_bytes,
                 Some(candidate.prev_hash),
                 self.cfg.expected_target,
                 candidate_height,
                 ts.as_deref(),
+                rotation,
             )
             .map_err(|e| e.to_string())?;
 

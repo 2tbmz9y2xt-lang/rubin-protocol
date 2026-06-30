@@ -152,6 +152,25 @@ pub trait RotationProvider {
 
     /// Returns suites valid for spending native covenant outputs at height.
     fn native_spend_suites(&self, height: u64) -> NativeSuiteSet;
+
+    /// Whether the CORE_SIMPLICITY (0x0106) deployment is active at `height`.
+    ///
+    /// Default is inactive (fail-closed): a rotation provider that does not
+    /// wire a Simplicity deployment keeps 0x0106 creation rejected. This
+    /// mirrors Go's optional `SimplicityDeploymentProvider` seam, where a
+    /// `RotationProvider` that does not also implement it is treated as
+    /// "deployment not active".
+    ///
+    /// The seam is intentionally infallible (`bool`). Go's interface returns
+    /// `(bool, error)` and maps the error case to a distinct
+    /// "CORE_SIMPLICITY deployment lookup failure" reject. No current provider
+    /// performs a fallible lookup, so that third state is unrepresentable and
+    /// unreachable here. When a real (fallible) deployment provider is wired
+    /// (activation slice), this must widen to a `Result` to re-establish the
+    /// lookup-failure error-string parity with Go.
+    fn simplicity_active_at_height(&self, _height: u64) -> bool {
+        false
+    }
 }
 
 /// Pre-rotation provider: always returns {ML_DSA_87} for both create and spend.

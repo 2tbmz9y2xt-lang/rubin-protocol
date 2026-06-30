@@ -1,5 +1,6 @@
 use super::*;
 use crate::covenant_genesis::validate_tx_covenants_genesis;
+use crate::suite_registry::RotationProvider;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug)]
@@ -34,6 +35,7 @@ fn add_block_resource_stat(current: u64, delta: u64, msg: &'static str) -> Resul
 pub(super) fn validate_block_tx_semantics(
     pb: &ParsedBlock,
     block_height: u64,
+    rotation: Option<&dyn RotationProvider>,
 ) -> Result<(), TxError> {
     coinbase::validate_coinbase_structure(pb, block_height)?;
     let mut seen_nonces: HashMap<u64, ()> = HashMap::with_capacity(pb.txs.len());
@@ -58,7 +60,7 @@ pub(super) fn validate_block_tx_semantics(
                 ));
             }
         }
-        validate_tx_covenants_genesis(tx, block_height, None)?;
+        validate_tx_covenants_genesis(tx, block_height, rotation)?;
     }
     Ok(())
 }
@@ -199,7 +201,7 @@ mod tests {
     #[test]
     fn validate_block_tx_semantics_rejects_nonce_replay() {
         let pb = parsed_block(vec![coinbase(1), spend(42, 1), spend(42, 1)]);
-        let err = validate_block_tx_semantics(&pb, 1).unwrap_err();
+        let err = validate_block_tx_semantics(&pb, 1, None).unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrNonceReplay);
     }
 
@@ -208,7 +210,7 @@ mod tests {
         let mut bad = spend(99, 0);
         bad.outputs[0].value = 0;
         let pb = parsed_block(vec![coinbase(1), bad]);
-        let err = validate_block_tx_semantics(&pb, 1).unwrap_err();
+        let err = validate_block_tx_semantics(&pb, 1, None).unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
     }
 }
