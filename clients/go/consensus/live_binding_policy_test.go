@@ -52,8 +52,8 @@ func TestLoadLiveBindingPolicyAcceptsEmbeddedManifest(t *testing.T) {
 	if entry.AlgName != "ML-DSA-87" {
 		t.Fatalf("alg_name=%q, want %q", entry.AlgName, "ML-DSA-87")
 	}
-	if entry.CoreExtLiveBindingName != CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 {
-		t.Fatalf("core_ext_live_binding_name=%q, want %q", entry.CoreExtLiveBindingName, CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
+	if entry.LiveBindingName != CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 {
+		t.Fatalf("live_binding_name=%q, want %q", entry.LiveBindingName, CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
 	}
 }
 
@@ -66,7 +66,7 @@ func TestLoadLiveBindingPolicyRejectsUnsupportedVersion(t *testing.T) {
 			"sig_len": 4627,
 			"runtime_binding": "openssl_digest32_v1",
 			"openssl_alg": "ML-DSA-87",
-			"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+			"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 		}]
 	}`))
 	if err == nil {
@@ -77,7 +77,7 @@ func TestLoadLiveBindingPolicyRejectsUnsupportedVersion(t *testing.T) {
 	}
 }
 
-func TestLoadLiveBindingPolicyRejectsDuplicateCoreExtBindingName(t *testing.T) {
+func TestLoadLiveBindingPolicyRejectsDuplicateLiveBindingName(t *testing.T) {
 	_, err := loadLiveBindingPolicyFromJSON([]byte(`{
 		"version": 1,
 		"entries": [
@@ -87,7 +87,7 @@ func TestLoadLiveBindingPolicyRejectsDuplicateCoreExtBindingName(t *testing.T) {
 				"sig_len": 4627,
 				"runtime_binding": "openssl_digest32_v1",
 				"openssl_alg": "ML-DSA-87",
-				"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+				"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 			},
 			{
 				"alg_name": "ML-DSA-87",
@@ -95,14 +95,14 @@ func TestLoadLiveBindingPolicyRejectsDuplicateCoreExtBindingName(t *testing.T) {
 				"sig_len": 4627,
 				"runtime_binding": "openssl_digest32_v1",
 				"openssl_alg": "ML-DSA-87",
-				"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+				"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 			}
 		]
 	}`))
 	if err == nil {
-		t.Fatal("expected duplicate core_ext binding rejection")
+		t.Fatal("expected duplicate live_binding_name rejection")
 	}
-	if got, want := err.Error(), `live_binding_policy: entries[1]: duplicate core_ext_live_binding_name "verify_sig_ext_openssl_digest32_v1"`; got != want {
+	if got, want := err.Error(), `live_binding_policy: entries[1]: duplicate live_binding_name "verify_sig_ext_openssl_digest32_v1"`; got != want {
 		t.Fatalf("err=%q, want %q", got, want)
 	}
 }
@@ -117,7 +117,7 @@ func TestLoadLiveBindingPolicyRejectsDuplicateRuntimeTuple(t *testing.T) {
 				"sig_len": 4627,
 				"runtime_binding": "openssl_digest32_v1",
 				"openssl_alg": "ML-DSA-87",
-				"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+				"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 			},
 			{
 				"alg_name": "ML-DSA-87",
@@ -125,7 +125,7 @@ func TestLoadLiveBindingPolicyRejectsDuplicateRuntimeTuple(t *testing.T) {
 				"sig_len": 4627,
 				"runtime_binding": "openssl_digest32_v1",
 				"openssl_alg": "ML-DSA-87",
-				"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1_alt"
+				"live_binding_name": "verify_sig_ext_openssl_digest32_v1_alt"
 			}
 		]
 	}`))
@@ -165,7 +165,7 @@ func TestLoadLiveBindingPolicyRejectsMissingRequiredFields(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			}`,
 			want: "live_binding_policy: version missing",
@@ -179,7 +179,7 @@ func TestLoadLiveBindingPolicyRejectsMissingRequiredFields(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			}`,
 			want: "live_binding_policy: entries[0]: pubkey_len missing",
@@ -193,7 +193,7 @@ func TestLoadLiveBindingPolicyRejectsMissingRequiredFields(t *testing.T) {
 					"pubkey_len": 2592,
 					"sig_len": 4627,
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			}`,
 			want: "live_binding_policy: entries[0]: runtime_binding missing",
@@ -208,7 +208,7 @@ func TestLoadLiveBindingPolicyRejectsMissingRequiredFields(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			}`,
 			want: "live_binding_policy: entries[0]: runtime_binding missing",
@@ -230,12 +230,12 @@ func TestLoadLiveBindingPolicyRejectsMissingRequiredFields(t *testing.T) {
 
 func TestLiveBindingPolicyValidateRejectsEmptyRuntimeBinding(t *testing.T) {
 	entry := liveBindingPolicyEntry{
-		AlgName:                "ML-DSA-87",
-		PubkeyLen:              ML_DSA_87_PUBKEY_BYTES,
-		SigLen:                 ML_DSA_87_SIG_BYTES,
-		RuntimeBinding:         "",
-		OpenSSLAlg:             "ML-DSA-87",
-		CoreExtLiveBindingName: CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+		AlgName:         "ML-DSA-87",
+		PubkeyLen:       ML_DSA_87_PUBKEY_BYTES,
+		SigLen:          ML_DSA_87_SIG_BYTES,
+		RuntimeBinding:  "",
+		OpenSSLAlg:      "ML-DSA-87",
+		LiveBindingName: CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
 	}
 	err := entry.validate(0, map[string]struct{}{}, map[string]struct{}{})
 	if err == nil {
@@ -263,7 +263,7 @@ func TestLoadLiveBindingPolicyRejectsDuplicateJSONKeys(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			}`,
 			want: `live_binding_policy: parse embedded artifact: duplicate JSON key "version"`,
@@ -279,7 +279,7 @@ func TestLoadLiveBindingPolicyRejectsDuplicateJSONKeys(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			}`,
 			want: `live_binding_policy: parse embedded artifact: duplicate JSON key "alg_name"`,
@@ -315,7 +315,7 @@ func TestLoadLiveBindingPolicyRejectsFieldAndCanonicalMismatches(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			}`,
 			want: "live_binding_policy: entries[0]: alg_name missing",
@@ -330,7 +330,7 @@ func TestLoadLiveBindingPolicyRejectsFieldAndCanonicalMismatches(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			}`,
 			want: "live_binding_policy: entries[0]: pubkey_len must be > 0",
@@ -345,7 +345,7 @@ func TestLoadLiveBindingPolicyRejectsFieldAndCanonicalMismatches(t *testing.T) {
 					"sig_len": 0,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			}`,
 			want: "live_binding_policy: entries[0]: sig_len must be > 0",
@@ -360,13 +360,13 @@ func TestLoadLiveBindingPolicyRejectsFieldAndCanonicalMismatches(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			}`,
 			want: "live_binding_policy: entries[0]: openssl_alg missing",
 		},
 		{
-			name: "core_ext_binding_missing",
+			name: "live_binding_name_missing",
 			raw: `{
 				"version": 1,
 				"entries": [{
@@ -375,10 +375,10 @@ func TestLoadLiveBindingPolicyRejectsFieldAndCanonicalMismatches(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": ""
+					"live_binding_name": ""
 				}]
 			}`,
-			want: "live_binding_policy: entries[0]: core_ext_live_binding_name missing",
+			want: "live_binding_policy: entries[0]: live_binding_name missing",
 		},
 		{
 			name: "alg_name_mismatch",
@@ -390,7 +390,7 @@ func TestLoadLiveBindingPolicyRejectsFieldAndCanonicalMismatches(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			}`,
 			want: `live_binding_policy: entries[0]: runtime_binding "openssl_digest32_v1" requires alg_name "ML-DSA-87"`,
@@ -405,7 +405,7 @@ func TestLoadLiveBindingPolicyRejectsFieldAndCanonicalMismatches(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-65",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			}`,
 			want: `live_binding_policy: entries[0]: runtime_binding "openssl_digest32_v1" requires openssl_alg "ML-DSA-87"`,
@@ -420,7 +420,7 @@ func TestLoadLiveBindingPolicyRejectsFieldAndCanonicalMismatches(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			}`,
 			want: `live_binding_policy: entries[0]: runtime_binding "openssl_digest32_v1" requires pubkey_len 2592`,
@@ -435,13 +435,13 @@ func TestLoadLiveBindingPolicyRejectsFieldAndCanonicalMismatches(t *testing.T) {
 					"sig_len": 4626,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			}`,
 			want: `live_binding_policy: entries[0]: runtime_binding "openssl_digest32_v1" requires sig_len 4627`,
 		},
 		{
-			name: "core_ext_binding_mismatch",
+			name: "live_binding_name_mismatch",
 			raw: `{
 				"version": 1,
 				"entries": [{
@@ -450,10 +450,10 @@ func TestLoadLiveBindingPolicyRejectsFieldAndCanonicalMismatches(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1_alt"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1_alt"
 				}]
 			}`,
-			want: `live_binding_policy: entries[0]: runtime_binding "openssl_digest32_v1" requires core_ext_live_binding_name "verify_sig_ext_openssl_digest32_v1"`,
+			want: `live_binding_policy: entries[0]: runtime_binding "openssl_digest32_v1" requires live_binding_name "verify_sig_ext_openssl_digest32_v1"`,
 		},
 	}
 
@@ -494,27 +494,27 @@ func TestLiveBindingPolicyLookupHelpers(t *testing.T) {
 		t.Fatalf("runtime miss err=%q, want %q (entry=%+v)", got, want, runtimeMiss)
 	}
 
-	coreExtEntry, err := liveBindingPolicyCoreExtEntry(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
+	liveBindingEntry, err := liveBindingPolicyBindingNameEntry(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
 	if err != nil {
-		t.Fatalf("liveBindingPolicyCoreExtEntry(valid): %v", err)
+		t.Fatalf("liveBindingPolicyBindingNameEntry(valid): %v", err)
 	}
-	if coreExtEntry.RuntimeBinding != liveBindingPolicyRuntimeOpenSSLDigest32 {
-		t.Fatalf("runtime_binding=%q, want %q", coreExtEntry.RuntimeBinding, liveBindingPolicyRuntimeOpenSSLDigest32)
+	if liveBindingEntry.RuntimeBinding != liveBindingPolicyRuntimeOpenSSLDigest32 {
+		t.Fatalf("runtime_binding=%q, want %q", liveBindingEntry.RuntimeBinding, liveBindingPolicyRuntimeOpenSSLDigest32)
 	}
-	coreExtEntry.RuntimeBinding = "MUTATED"
-	coreExtEntryAgain, err := liveBindingPolicyCoreExtEntry(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
+	liveBindingEntry.RuntimeBinding = "MUTATED"
+	liveBindingEntryAgain, err := liveBindingPolicyBindingNameEntry(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
 	if err != nil {
-		t.Fatalf("liveBindingPolicyCoreExtEntry(reload): %v", err)
+		t.Fatalf("liveBindingPolicyBindingNameEntry(reload): %v", err)
 	}
-	if coreExtEntryAgain.RuntimeBinding != liveBindingPolicyRuntimeOpenSSLDigest32 {
-		t.Fatalf("lookup must return copy, got runtime_binding=%q", coreExtEntryAgain.RuntimeBinding)
+	if liveBindingEntryAgain.RuntimeBinding != liveBindingPolicyRuntimeOpenSSLDigest32 {
+		t.Fatalf("lookup must return copy, got runtime_binding=%q", liveBindingEntryAgain.RuntimeBinding)
 	}
-	coreExtMiss, err := liveBindingPolicyCoreExtEntry("verify_sig_ext_unknown")
+	liveBindingMiss, err := liveBindingPolicyBindingNameEntry("verify_sig_ext_unknown")
 	if err == nil {
-		t.Fatal("expected core_ext miss rejection")
+		t.Fatal("expected live_binding_name miss rejection")
 	}
-	if got, want := err.Error(), `live_binding_policy: core_ext_live_binding_name not found "verify_sig_ext_unknown"`; got != want {
-		t.Fatalf("core_ext miss err=%q, want %q (entry=%+v)", got, want, coreExtMiss)
+	if got, want := err.Error(), `live_binding_policy: live_binding_name not found "verify_sig_ext_unknown"`; got != want {
+		t.Fatalf("live_binding_name miss err=%q, want %q (entry=%+v)", got, want, liveBindingMiss)
 	}
 }
 
@@ -544,7 +544,7 @@ func TestLoadLiveBindingPolicyRejectsMalformedAndTrailingJSON(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}],
 				"bogus": 7
 			}`,
@@ -560,7 +560,7 @@ func TestLoadLiveBindingPolicyRejectsMalformedAndTrailingJSON(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			}`,
 			want: `live_binding_policy: parse embedded artifact: json: cannot unmarshal string into Go struct field liveBindingPolicyEntryJSON.entries.pubkey_len of type int`,
@@ -575,7 +575,7 @@ func TestLoadLiveBindingPolicyRejectsMalformedAndTrailingJSON(t *testing.T) {
 					"sig_len": 4627,
 					"runtime_binding": "openssl_digest32_v1",
 					"openssl_alg": "ML-DSA-87",
-					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+					"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 				}]
 			} 42`,
 			want: `live_binding_policy: parse embedded artifact: trailing JSON tokens`,
@@ -604,7 +604,7 @@ func TestLoadLiveBindingPolicyRejectsUnsupportedRuntimeBinding(t *testing.T) {
 			"sig_len": 4627,
 			"runtime_binding": "unsupported_runtime_v1",
 			"openssl_alg": "ML-DSA-87",
-			"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+			"live_binding_name": "verify_sig_ext_openssl_digest32_v1"
 		}]
 	}`))
 	if err == nil {

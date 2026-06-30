@@ -3,7 +3,7 @@ use crate::constants::{MAX_COVENANT_DATA_PER_OUTPUT, ML_DSA_87_PUBKEY_BYTES, ML_
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
 use crate::live_binding_policy::{
-    live_binding_policy_core_ext_entry, LiveBindingPolicyEntry, LiveBindingPolicyLookupError,
+    live_binding_policy_binding_name_entry, LiveBindingPolicyEntry, LiveBindingPolicyLookupError,
     LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1,
 };
 use crate::txcontext::{TxContextBase, TxContextContinuing};
@@ -325,7 +325,7 @@ fn unsupported_core_ext_binding_error(binding_name: &str) -> String {
 fn supported_live_core_ext_policy_entry(
     binding_name: &str,
 ) -> Result<&'static LiveBindingPolicyEntry, String> {
-    let entry = match live_binding_policy_core_ext_entry(binding_name) {
+    let entry = match live_binding_policy_binding_name_entry(binding_name) {
         Ok(entry) => entry,
         Err(LiveBindingPolicyLookupError::NotFound(_)) => {
             return Err(unsupported_core_ext_binding_error(binding_name));
@@ -338,7 +338,7 @@ fn supported_live_core_ext_policy_entry(
     }
 }
 
-pub fn normalize_core_ext_binding_name(binding_name: &str) -> Result<&'static str, String> {
+pub fn normalize_binding_name(binding_name: &str) -> Result<&'static str, String> {
     let binding_name = binding_name.trim();
     match binding_name {
         "" => Ok(""),
@@ -355,7 +355,7 @@ pub fn core_ext_verification_binding_from_name_and_descriptor(
     binding_descriptor: &[u8],
     ext_payload_schema: &[u8],
 ) -> Result<CoreExtVerificationBinding, String> {
-    let binding_name = normalize_core_ext_binding_name(binding_name)?;
+    let binding_name = normalize_binding_name(binding_name)?;
     core_ext_verification_binding_from_normalized_name_and_descriptor(
         binding_name,
         binding_descriptor,
@@ -386,7 +386,7 @@ pub fn core_ext_verification_binding_from_normalized_name_and_descriptor(
 }
 
 /// Live/runtime helper for callers that already normalized the binding through
-/// `normalize_live_core_ext_binding_name` and still need fail-closed
+/// `normalize_live_binding_name` and still need fail-closed
 /// ext_payload_schema enforcement on the active chain path.
 pub fn live_core_ext_verification_binding_from_normalized_name_and_descriptor(
     binding_name: &str,
@@ -397,7 +397,7 @@ pub fn live_core_ext_verification_binding_from_normalized_name_and_descriptor(
     match entry.runtime_binding.as_str() {
         LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1 => {
             core_ext_verification_binding_from_normalized_name_and_descriptor(
-                entry.core_ext_live_binding_name.as_str(),
+                entry.live_binding_name.as_str(),
                 binding_descriptor,
                 ext_payload_schema,
             )
@@ -406,10 +406,10 @@ pub fn live_core_ext_verification_binding_from_normalized_name_and_descriptor(
     }
 }
 
-pub fn normalize_live_core_ext_binding_name(binding_name: &str) -> Result<&'static str, String> {
+pub fn normalize_live_binding_name(binding_name: &str) -> Result<&'static str, String> {
     let binding_name = binding_name.trim();
     let entry = supported_live_core_ext_policy_entry(binding_name)?;
-    Ok(entry.core_ext_live_binding_name.as_str())
+    Ok(entry.live_binding_name.as_str())
 }
 
 pub fn live_core_ext_verification_binding_from_name_and_descriptor(
@@ -417,7 +417,7 @@ pub fn live_core_ext_verification_binding_from_name_and_descriptor(
     binding_descriptor: &[u8],
     ext_payload_schema: &[u8],
 ) -> Result<CoreExtVerificationBinding, String> {
-    let binding_name = normalize_live_core_ext_binding_name(binding_name)?;
+    let binding_name = normalize_live_binding_name(binding_name)?;
     live_core_ext_verification_binding_from_normalized_name_and_descriptor(
         binding_name,
         binding_descriptor,
@@ -806,7 +806,7 @@ mod tests {
     #[test]
     fn live_core_ext_binding_helper_rejects_non_manifest_bindings() {
         let padded = format!("  {CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1}\n");
-        let normalized = normalize_live_core_ext_binding_name(&padded).expect("valid live binding");
+        let normalized = normalize_live_binding_name(&padded).expect("valid live binding");
         assert_eq!(
             normalized,
             CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
@@ -814,8 +814,7 @@ mod tests {
 
         macro_rules! assert_normalize_rejects {
             ($name:expr) => {{
-                let err =
-                    normalize_live_core_ext_binding_name($name).expect_err("non-live must fail");
+                let err = normalize_live_binding_name($name).expect_err("non-live must fail");
                 assert!(err.contains("unsupported core_ext binding"), "{err}");
             }};
         }
