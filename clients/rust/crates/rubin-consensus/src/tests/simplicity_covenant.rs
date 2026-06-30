@@ -1,9 +1,14 @@
 use super::*;
 use crate::compactsize::encode_compact_size;
-use crate::constants::{COV_TYPE_CORE_SIMPLICITY, MAX_SIMPLICITY_STATE_BYTES, SUITE_ID_ML_DSA_87};
+use crate::constants::{
+    COV_TYPE_CORE_SIMPLICITY, COV_TYPE_P2PK, MAX_SIMPLICITY_STATE_BYTES, SIMPLICITY_WITNESS_SLOTS,
+    SUITE_ID_ML_DSA_87,
+};
 use crate::error::ErrorCode;
 use crate::suite_registry::{DefaultRotationProvider, NativeSuiteSet, RotationProvider};
 use crate::tx::{Tx, TxOutput};
+use crate::utxo_basic::UtxoEntry;
+use crate::vault::witness_slots;
 
 // Rotation provider that reports the Simplicity deployment active at/above a
 // threshold height, mirroring Go's testRotationProvider{simplicityActiveHeight}.
@@ -156,4 +161,40 @@ fn genesis_deployment_gate() {
     let bad = tx_with_outputs(vec![simplicity_output(1, vec![0u8; 10])]);
     let e = crate::validate_tx_covenants_genesis(&bad, 10, Some(&active)).unwrap_err();
     assert!(err_msg(&e).contains("program_cmr parse failure"));
+}
+
+fn utxo_entry(covenant_type: u16) -> UtxoEntry {
+    UtxoEntry {
+        value: 1,
+        covenant_type,
+        covenant_data: vec![],
+        creation_height: 0,
+        created_by_coinbase: false,
+    }
+}
+
+// Spend-side fail-closed building blocks (RUB-591). Mirrors Go
+// rejectCoreSimplicitySpend / rejectCoreSimplicitySpendIfPresent / WitnessSlots.
+#[test]
+fn spend_fail_closed_helpers() {
+    // witness_slots routes 0x0106 to SIMPLICITY_WITNESS_SLOTS (= 1).
+    assert_eq!(
+        witness_slots(COV_TYPE_CORE_SIMPLICITY, &[]).unwrap(),
+        SIMPLICITY_WITNESS_SLOTS as usize
+    );
+
+    // The dedicated reject carries the exact code + message.
+    let e = reject_core_simplicity_spend();
+    assert_eq!(e.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert!(err_msg(&e).contains("CORE_SIMPLICITY spend evaluation not enabled"));
+
+    // _if_present fires iff an input spends a 0x0106 output.
+    assert!(reject_core_simplicity_spend_if_present(&[]).is_ok());
+    assert!(reject_core_simplicity_spend_if_present(&[utxo_entry(COV_TYPE_P2PK)]).is_ok());
+    let e = reject_core_simplicity_spend_if_present(&[
+        utxo_entry(COV_TYPE_P2PK),
+        utxo_entry(COV_TYPE_CORE_SIMPLICITY),
+    ])
+    .unwrap_err();
+    assert!(err_msg(&e).contains("CORE_SIMPLICITY spend evaluation not enabled"));
 }

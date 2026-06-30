@@ -1017,3 +1017,119 @@ fn add_witness_slots_overflow() {
         err.msg
     );
 }
+
+// RUB-591: a 0x0106 spend input is rejected by precompute with the dedicated
+// "spend evaluation not enabled" message and TX_ERR_COVENANT_TYPE_INVALID — even
+// with a mismatched witness count that would otherwise surface TX_ERR_PARSE
+// ("witness_count mismatch"). Mirrors Go StoppedAtCoreSimplicity priority.
+#[test]
+fn precompute_core_simplicity_0x0106_spend_rejects_ahead_of_witness_errors() {
+    let prev_txid = sha3_256(b"simplicity-spend");
+    let utxos = HashMap::from([(
+        Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 500,
+            covenant_type: COV_TYPE_CORE_SIMPLICITY,
+            covenant_data: vec![0xab; 33],
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    )]);
+    let tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 400,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        // Extra witnesses: would be "witness_count mismatch" (TX_ERR_PARSE) for a
+        // normal covenant, but must NOT mask the dedicated 0x0106 spend reject.
+        witness: vec![dummy_witness(), dummy_witness()],
+        da_payload: Vec::new(),
+    };
+    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+    let err = precompute_tx_contexts(&pb, &utxos, 100).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert!(
+        err.msg
+            .contains("CORE_SIMPLICITY spend evaluation not enabled"),
+        "unexpected: {}",
+        err.msg
+    );
+}
+
+// RUB-591: precompute must STOP at the first 0x0106 input (mirror Go's early
+// return), so a trailing input that is independently invalid (here: a missing
+// UTXO) cannot surface its own error ahead of the dedicated 0x0106 reject. With
+// a `continue` (instead of `break`) this would return TX_ERR_MISSING_UTXO.
+#[test]
+fn precompute_core_simplicity_0x0106_spend_wins_over_trailing_input_error() {
+    let simp_prev = sha3_256(b"simplicity-first-input");
+    let missing_prev = sha3_256(b"missing-second-input");
+    let utxos = HashMap::from([(
+        Outpoint {
+            txid: simp_prev,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 500,
+            covenant_type: COV_TYPE_CORE_SIMPLICITY,
+            covenant_data: vec![0xab; 33],
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    )]);
+    // missing_prev is intentionally absent from `utxos`.
+    let tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![
+            TxInput {
+                prev_txid: simp_prev,
+                prev_vout: 0,
+                script_sig: Vec::new(),
+                sequence: 0,
+            },
+            TxInput {
+                prev_txid: missing_prev,
+                prev_vout: 0,
+                script_sig: Vec::new(),
+                sequence: 0,
+            },
+        ],
+        outputs: vec![TxOutput {
+            value: 400,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![dummy_witness()],
+        da_payload: Vec::new(),
+    };
+    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+    let err = precompute_tx_contexts(&pb, &utxos, 100).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert!(
+        err.msg
+            .contains("CORE_SIMPLICITY spend evaluation not enabled"),
+        "trailing missing-utxo must not mask the 0x0106 reject; got: {}",
+        err.msg
+    );
+}
