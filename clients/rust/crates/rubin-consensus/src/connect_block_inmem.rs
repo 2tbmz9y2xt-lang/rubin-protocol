@@ -174,6 +174,7 @@ fn prepare_connect_block(
         ctx.expected_target,
         ctx.block_height,
         ctx.prev_timestamps,
+        ctx.rotation,
     )?;
     if pb.txs.is_empty() || pb.txids.len() != pb.txs.len() {
         return Err(TxError::new(

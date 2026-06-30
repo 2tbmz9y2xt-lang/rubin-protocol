@@ -5,7 +5,9 @@ use crate::constants::{
 };
 use crate::error::{ErrorCode, TxError};
 use crate::htlc::parse_htlc_covenant_data;
-use crate::simplicity_covenant::validate_core_simplicity_covenant_data;
+use crate::simplicity_covenant::{
+    validate_core_simplicity_covenant_data, validate_core_simplicity_deployment_active,
+};
 use crate::stealth::parse_stealth_covenant_data;
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider};
 use crate::tx::Tx;
@@ -124,14 +126,12 @@ pub fn validate_tx_covenants_genesis(
                 }
             }
             COV_TYPE_CORE_SIMPLICITY => {
-                // Creation is fail-closed in this slice: the deployment-active gate and
-                // its rotation threading are inseparable and land together in RUB-590.
-                // Validate covenant_data structure, then reject (creation not enabled).
+                // Mirrors Go: gate on the deployment being active first, then
+                // validate covenant_data structure. The default provider reports
+                // inactive, so creation stays fail-closed ("deployment not
+                // active") until a deployment is wired and threaded.
+                validate_core_simplicity_deployment_active(block_height, rp)?;
                 validate_core_simplicity_covenant_data(out.value, &out.covenant_data)?;
-                return Err(TxError::new(
-                    ErrorCode::TxErrCovenantTypeInvalid,
-                    "CORE_SIMPLICITY creation not enabled",
-                ));
             }
             COV_TYPE_RESERVED_FUTURE => {
                 return Err(TxError::new(

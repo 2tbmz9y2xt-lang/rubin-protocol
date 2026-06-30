@@ -1,6 +1,7 @@
 use crate::block::{BlockHeader, BLOCK_HEADER_BYTES};
 use crate::constants::{MAX_ANCHOR_BYTES_PER_BLOCK, MAX_BLOCK_WEIGHT, MAX_DA_BYTES_PER_BLOCK};
 use crate::error::{ErrorCode, TxError};
+use crate::suite_registry::RotationProvider;
 use crate::tx::Tx;
 
 mod coinbase;
@@ -86,6 +87,28 @@ pub fn validate_block_basic_with_context_at_height(
     block_height: u64,
     prev_timestamps: Option<&[u64]>,
 ) -> Result<BlockBasicSummary, TxError> {
+    validate_block_basic_with_context_at_height_and_rotation(
+        block_bytes,
+        expected_prev_hash,
+        expected_target,
+        block_height,
+        prev_timestamps,
+        None,
+    )
+}
+
+/// Rotation-aware variant of `validate_block_basic_with_context_at_height`.
+/// Threads the rotation/deployment provider to genesis covenant validation so
+/// an active CORE_SIMPLICITY (0x0106) deployment is accepted. Mirrors Go
+/// `ValidateBlockBasicWithContextAtHeightAndRotation`.
+pub fn validate_block_basic_with_context_at_height_and_rotation(
+    block_bytes: &[u8],
+    expected_prev_hash: Option<[u8; 32]>,
+    expected_target: Option<[u8; 32]>,
+    block_height: u64,
+    prev_timestamps: Option<&[u64]>,
+    rotation: Option<&dyn RotationProvider>,
+) -> Result<BlockBasicSummary, TxError> {
     let pb = parse_block_bytes(block_bytes)?;
     validate_parsed_block_basic_with_context_at_height(
         &pb,
@@ -93,6 +116,7 @@ pub fn validate_block_basic_with_context_at_height(
         expected_target,
         block_height,
         prev_timestamps,
+        rotation,
     )
 }
 
@@ -105,6 +129,31 @@ pub fn validate_block_basic_with_context_and_fees_at_height(
     already_generated: u128,
     sum_fees: u64,
 ) -> Result<BlockBasicSummary, TxError> {
+    validate_block_basic_with_context_and_fees_at_height_and_rotation(
+        block_bytes,
+        expected_prev_hash,
+        expected_target,
+        block_height,
+        prev_timestamps,
+        already_generated,
+        sum_fees,
+        None,
+    )
+}
+
+/// Rotation-aware variant of `validate_block_basic_with_context_and_fees_at_height`.
+/// Mirrors Go `ValidateBlockBasicWithContextAndFeesAtHeightAndRotation`.
+#[allow(clippy::too_many_arguments)]
+pub fn validate_block_basic_with_context_and_fees_at_height_and_rotation(
+    block_bytes: &[u8],
+    expected_prev_hash: Option<[u8; 32]>,
+    expected_target: Option<[u8; 32]>,
+    block_height: u64,
+    prev_timestamps: Option<&[u64]>,
+    already_generated: u128,
+    sum_fees: u64,
+    rotation: Option<&dyn RotationProvider>,
+) -> Result<BlockBasicSummary, TxError> {
     // G.9: parse once, share `pb` between basic validation and the
     // coinbase-value-bound check, instead of parsing twice.
     let pb = parse_block_bytes(block_bytes)?;
@@ -114,6 +163,7 @@ pub fn validate_block_basic_with_context_and_fees_at_height(
         expected_target,
         block_height,
         prev_timestamps,
+        rotation,
     )?;
     validate_coinbase_value_bound(&pb, block_height, already_generated, sum_fees)?;
     Ok(s)

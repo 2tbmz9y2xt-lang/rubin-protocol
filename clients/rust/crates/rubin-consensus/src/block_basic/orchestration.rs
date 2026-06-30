@@ -6,6 +6,7 @@ use super::{
 };
 use crate::block::block_hash;
 use crate::error::{ErrorCode, TxError};
+use crate::suite_registry::RotationProvider;
 
 /// G.9 / Go parity (`clients/go/consensus/block_basic.go`,
 /// `validateParsedBlockBasicWithContextAtHeight`): validation logic against an
@@ -18,6 +19,7 @@ pub(crate) fn validate_parsed_block_basic_with_context_at_height(
     expected_target: Option<[u8; 32]>,
     block_height: u64,
     prev_timestamps: Option<&[u64]>,
+    rotation: Option<&dyn RotationProvider>,
 ) -> Result<BlockBasicSummary, TxError> {
     let stats = validate_parsed_block_basic_checks(
         pb,
@@ -25,6 +27,7 @@ pub(crate) fn validate_parsed_block_basic_with_context_at_height(
         expected_target,
         block_height,
         prev_timestamps,
+        rotation,
     )?;
     let h = block_hash(&pb.header_bytes)
         .map_err(|_| TxError::new(ErrorCode::BlockErrParse, "failed to hash block header"))?;
@@ -43,6 +46,7 @@ fn validate_parsed_block_basic_checks(
     expected_target: Option<[u8; 32]>,
     block_height: u64,
     prev_timestamps: Option<&[u64]>,
+    rotation: Option<&dyn RotationProvider>,
 ) -> Result<BlockTxStats, TxError> {
     validate_header_commitments(pb, expected_prev_hash, expected_target)
         .and_then(|_| validate_coinbase_witness_commitment(pb))
@@ -54,7 +58,7 @@ fn validate_parsed_block_basic_checks(
     validate_block_resource_limits(stats)?;
 
     validate_da_set_integrity(&pb.txs)
-        .and_then(|_| validate_block_tx_semantics(pb, block_height))?;
+        .and_then(|_| validate_block_tx_semantics(pb, block_height, rotation))?;
 
     Ok(stats)
 }
