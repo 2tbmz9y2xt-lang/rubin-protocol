@@ -8,7 +8,6 @@ use crate::block_basic::{
 };
 use crate::compactsize::encode_compact_size;
 use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
-use crate::core_ext::{CoreExtDeploymentProfiles, CoreExtProfiles};
 use crate::error::{ErrorCode, TxError};
 use crate::sig_queue::SigCheckQueue;
 use crate::subsidy::block_subsidy;
@@ -48,7 +47,6 @@ struct ConnectBlockContext<'a> {
     block_height: u64,
     prev_timestamps: Option<&'a [u64]>,
     chain_id: [u8; 32],
-    core_ext_deployments: &'a CoreExtDeploymentProfiles,
     rotation: Option<&'a dyn RotationProvider>,
     registry: Option<&'a SuiteRegistry>,
 }
@@ -58,7 +56,6 @@ struct PreparedConnectBlock {
     block_height: u64,
     already_generated: u128,
     block_mtp: u64,
-    core_ext_profiles: CoreExtProfiles,
 }
 
 /// ConnectBlockBasicInMemoryAtHeight connects a block against an in-memory chainstate and enforces
@@ -74,29 +71,6 @@ pub fn connect_block_basic_in_memory_at_height(
     state: &mut InMemoryChainState,
     chain_id: [u8; 32],
 ) -> Result<ConnectBlockBasicSummary, TxError> {
-    connect_block_basic_in_memory_at_height_and_core_ext_deployments(
-        block_bytes,
-        expected_prev_hash,
-        expected_target,
-        block_height,
-        prev_timestamps,
-        state,
-        chain_id,
-        &CoreExtDeploymentProfiles::empty(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn connect_block_basic_in_memory_at_height_and_core_ext_deployments(
-    block_bytes: &[u8],
-    expected_prev_hash: Option<[u8; 32]>,
-    expected_target: Option<[u8; 32]>,
-    block_height: u64,
-    prev_timestamps: Option<&[u64]>,
-    state: &mut InMemoryChainState,
-    chain_id: [u8; 32],
-    core_ext_deployments: &CoreExtDeploymentProfiles,
-) -> Result<ConnectBlockBasicSummary, TxError> {
     connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context(
         block_bytes,
         expected_prev_hash,
@@ -105,7 +79,6 @@ pub fn connect_block_basic_in_memory_at_height_and_core_ext_deployments(
         prev_timestamps,
         state,
         chain_id,
-        core_ext_deployments,
         None,
         None,
     )
@@ -120,7 +93,6 @@ pub fn connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_sui
     prev_timestamps: Option<&[u64]>,
     state: &mut InMemoryChainState,
     chain_id: [u8; 32],
-    core_ext_deployments: &CoreExtDeploymentProfiles,
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
 ) -> Result<ConnectBlockBasicSummary, TxError> {
@@ -130,7 +102,6 @@ pub fn connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_sui
         block_height,
         prev_timestamps,
         chain_id,
-        core_ext_deployments,
         rotation,
         registry,
     };
@@ -151,31 +122,6 @@ pub fn connect_block_parallel_sig_verify(
     chain_id: [u8; 32],
     workers: usize,
 ) -> Result<ConnectBlockBasicSummary, TxError> {
-    connect_block_parallel_sig_verify_and_core_ext_deployments(
-        block_bytes,
-        expected_prev_hash,
-        expected_target,
-        block_height,
-        prev_timestamps,
-        state,
-        chain_id,
-        &CoreExtDeploymentProfiles::empty(),
-        workers,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn connect_block_parallel_sig_verify_and_core_ext_deployments(
-    block_bytes: &[u8],
-    expected_prev_hash: Option<[u8; 32]>,
-    expected_target: Option<[u8; 32]>,
-    block_height: u64,
-    prev_timestamps: Option<&[u64]>,
-    state: &mut InMemoryChainState,
-    chain_id: [u8; 32],
-    core_ext_deployments: &CoreExtDeploymentProfiles,
-    workers: usize,
-) -> Result<ConnectBlockBasicSummary, TxError> {
     connect_block_parallel_sig_verify_and_core_ext_deployments_with_suite_context(
         block_bytes,
         expected_prev_hash,
@@ -184,7 +130,6 @@ pub fn connect_block_parallel_sig_verify_and_core_ext_deployments(
         prev_timestamps,
         state,
         chain_id,
-        core_ext_deployments,
         None,
         None,
         workers,
@@ -200,7 +145,6 @@ pub fn connect_block_parallel_sig_verify_and_core_ext_deployments_with_suite_con
     prev_timestamps: Option<&[u64]>,
     state: &mut InMemoryChainState,
     chain_id: [u8; 32],
-    core_ext_deployments: &CoreExtDeploymentProfiles,
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
     workers: usize,
@@ -211,7 +155,6 @@ pub fn connect_block_parallel_sig_verify_and_core_ext_deployments_with_suite_con
         block_height,
         prev_timestamps,
         chain_id,
-        core_ext_deployments,
         rotation,
         registry,
     };
@@ -239,19 +182,14 @@ fn prepare_connect_block(
         ));
     }
 
-    // 0x0102 (CORE_EXT) is unassigned with no activation path, so the retired
-    // deployment set must not influence consensus/admission for ordinary
-    // (e.g. P2PK) traffic. Do NOT call `active_profiles_at_height` here: it
-    // validates the deployment set and would reject otherwise-valid blocks if a
-    // node were started with a stale/invalid `core_ext_deployments` entry. Pass
-    // empty active profiles instead, mirroring Go, which ignores the parameter.
-    // The parameter is retained on the public signatures for node/CLI API
-    // compatibility; full removal is tracked under CORE_EXT retirement.
-    let _ = ctx.core_ext_deployments;
+    // 0x0102 (CORE_EXT) is unassigned with no activation path, so there is no
+    // CORE_EXT profile machinery on the connect-block path: 0x0102 is rejected
+    // by `check_spend_covenant`/`witness_slots` during input resolution for
+    // ordinary (e.g. P2PK) traffic. Matches Go, which carries no profile set on
+    // the connect-block path.
     Ok(PreparedConnectBlock {
         block_mtp: median_time_past(ctx.block_height, ctx.prev_timestamps)?
             .unwrap_or(pb.header.timestamp),
-        core_ext_profiles: CoreExtProfiles::default(),
         pb,
         block_height: ctx.block_height,
         already_generated,
@@ -286,7 +224,6 @@ fn apply_non_coinbase_txs_sequential(
                 prepared.pb.header.timestamp,
                 prepared.block_mtp,
                 ctx.chain_id,
-                &prepared.core_ext_profiles,
                 ctx.rotation,
                 ctx.registry,
             )?;
@@ -332,7 +269,6 @@ fn apply_non_coinbase_txs_parallel(
                 prepared.pb.header.timestamp,
                 prepared.block_mtp,
                 ctx.chain_id,
-                &prepared.core_ext_profiles,
                 ctx.rotation,
                 ctx.registry,
                 &mut sig_queue,

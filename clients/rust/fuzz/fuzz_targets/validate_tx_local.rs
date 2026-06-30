@@ -237,8 +237,6 @@ fuzz_target!(|data: &[u8]| {
         wtxids: vec![[0u8; 32]],
     };
 
-    let profiles = rubin_consensus::CoreExtProfiles { active: vec![] };
-
     // --- First call ---
     let r1 = rubin_consensus::validate_tx_local(
         &ptc,
@@ -246,7 +244,6 @@ fuzz_target!(|data: &[u8]| {
         chain_id,
         block_height,
         block_mtp,
-        &profiles,
         None,
     );
 
@@ -273,7 +270,6 @@ fuzz_target!(|data: &[u8]| {
         chain_id,
         block_height,
         block_mtp,
-        &profiles,
         None,
     );
     if r1 != r2 {

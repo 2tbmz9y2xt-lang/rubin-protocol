@@ -49,9 +49,8 @@ pub use compactsize::encode_compact_size;
 pub use compactsize::read_compact_size_bytes;
 pub use connect_block_inmem::{
     connect_block_basic_in_memory_at_height,
-    connect_block_basic_in_memory_at_height_and_core_ext_deployments,
     connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context,
-    connect_block_parallel_sig_verify, connect_block_parallel_sig_verify_and_core_ext_deployments,
+    connect_block_parallel_sig_verify,
     connect_block_parallel_sig_verify_and_core_ext_deployments_with_suite_context,
     ConnectBlockBasicSummary, InMemoryChainState,
 };
@@ -64,8 +63,7 @@ pub use core_ext::{
     live_core_ext_verification_binding_from_normalized_name_and_descriptor,
     normalize_core_ext_binding_name, normalize_live_core_ext_binding_name,
     parse_core_ext_covenant_data, parse_core_ext_openssl_digest32_binding_descriptor,
-    CoreExtActiveProfile, CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
-    CoreExtOpenSslDigest32BindingDescriptor, CoreExtProfiles, CoreExtVerificationBinding,
+    CoreExtDeploymentProfile, CoreExtOpenSslDigest32BindingDescriptor, CoreExtVerificationBinding,
     GovernanceReplayToken, CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
 };
 pub use covenant_genesis::validate_tx_covenants_genesis;
@@ -119,7 +117,6 @@ pub use txcontext::{
 pub use utxo_basic::{
     apply_non_coinbase_tx_basic, apply_non_coinbase_tx_basic_update,
     apply_non_coinbase_tx_basic_update_with_mtp,
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles,
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks,
     apply_non_coinbase_tx_basic_with_mtp, Outpoint, UtxoApplySummary, UtxoEntry,

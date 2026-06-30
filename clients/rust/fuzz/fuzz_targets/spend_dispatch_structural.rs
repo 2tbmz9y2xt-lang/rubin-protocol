@@ -193,12 +193,8 @@ fuzz_target!(|data: &[u8]| {
         wtxids: vec![[0u8; 32]],
     };
 
-    let profiles = rubin_consensus::CoreExtProfiles { active: vec![] };
-
     // --- First call ---
-    let r1 = rubin_consensus::validate_tx_local(
-        &ptc, &pb, chain_id, block_height, 0, &profiles, None,
-    );
+    let r1 = rubin_consensus::validate_tx_local(&ptc, &pb, chain_id, block_height, 0, None);
 
     // --- Invariant: Valid ↔ Err consistency ---
     if r1.valid && r1.err.is_some() {
@@ -217,9 +213,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // --- Invariant: Determinism ---
-    let r2 = rubin_consensus::validate_tx_local(
-        &ptc, &pb, chain_id, block_height, 0, &profiles, None,
-    );
+    let r2 = rubin_consensus::validate_tx_local(&ptc, &pb, chain_id, block_height, 0, None);
     if r1 != r2 {
         panic!("validate_tx_local non-deterministic");
     }
