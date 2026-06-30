@@ -5,8 +5,8 @@ use std::sync::OnceLock;
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
     constants::{COV_TYPE_CORE_EXT, MAX_RELAY_MSG_BYTES},
-    parse_block_header_bytes, parse_tx, tx_weight_and_stats_public, CoreExtProfiles,
-    DefaultRotationProvider, NativeSuiteSet, Outpoint, RotationProvider, SuiteRegistry,
+    parse_block_header_bytes, parse_tx, tx_weight_and_stats_public, DefaultRotationProvider,
+    NativeSuiteSet, Outpoint, RotationProvider, SuiteRegistry,
 };
 
 use crate::sync::SuiteContext;
@@ -614,32 +614,24 @@ impl TxPool {
         // spam BEFORE expensive ML-DSA signature verification in
         // `apply_non_coinbase_tx_basic_update_*` below, but AFTER all
         // chain-context resolution (`next_block_height`,
-        // `next_block_mtp`, `active_profiles_at_height`,
-        // `suite_context` lookup). Chain-context failures (height
-        // overflow, missing tip MTP, invalid CORE_EXT deployment
-        // config) keep their existing error precedence so
-        // `admit_with_metadata` does NOT diverge from `relay_metadata`
-        // on the (chain-context-error vs fee-floor-fail) precedence.
+        // `next_block_mtp`, `suite_context` lookup). Chain-context
+        // failures (height overflow, missing tip MTP) keep their
+        // existing error precedence so `admit_with_metadata` does NOT
+        // diverge from `relay_metadata` on the (chain-context-error vs
+        // fee-floor-fail) precedence.
         // Mirrors Go's `cheapFeeFloorPrecheck` call site inside
         // `checkTransactionWithSnapshot` at
         // `clients/go/node/mempool_precheck.go` `checkTransactionWithSnapshot` (RUB-165 PR #1415):
         // Go runs the precheck after `nextBlockContext`/`nextBlockMTP`
-        // and immediately before the expensive
-        // `CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext`
-        // call. Note: Go's `policy.CoreExtProfiles` /
-        // `policy.SuiteRegistry` are resolved at policy-snapshot time
-        // outside admission, so they cannot error mid-admission in Go.
-        // Rust's per-admission `active_profiles_at_height` lookup adds
-        // a chain-context error path Go does not have; running precheck
-        // after it preserves the admit/relay endpoint precedence
-        // consistency. The helper bails (`Ok(())`) for any tx shape it
-        // cannot soundly classify (DA / multi-input / non-P2PK
-        // covenant / overspend) and the existing expensive path keeps
-        // its error precedence. Reuses the RUB-167 pre-computed
-        // `weight`. Same `Unavailable` error class + same message
-        // format as `validate_fee_floor`, so the rolling-floor
-        // classification stays uniform across the fast-reject path and
-        // the post-consensus path.
+        // and immediately before the expensive consensus apply call.
+        // The helper bails (`Ok(())`) for any tx shape it cannot
+        // soundly classify (DA / multi-input / non-P2PK covenant /
+        // overspend) and the existing expensive path keeps its error
+        // precedence. Reuses the RUB-167 pre-computed `weight`. Same
+        // `Unavailable` error class + same message format as
+        // `validate_fee_floor`, so the rolling-floor classification
+        // stays uniform across the fast-reject path and the
+        // post-consensus path.
         cheap_fee_floor_precheck(
             &tx,
             &chain_state.utxos,
@@ -658,7 +650,6 @@ impl TxPool {
                 block_mtp,
                 block_mtp,
                 chain_id,
-                &CoreExtProfiles::empty(),
                 rotation,
                 registry,
             )
@@ -1112,7 +1103,6 @@ pub(crate) fn relay_metadata(
             block_mtp,
             block_mtp,
             chain_id,
-            &CoreExtProfiles::empty(),
             rotation,
             registry,
         )

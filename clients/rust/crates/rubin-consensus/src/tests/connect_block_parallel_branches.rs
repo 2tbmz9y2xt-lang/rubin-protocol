@@ -1,13 +1,11 @@
 use super::*;
 use crate::output_descriptor_bytes;
-use crate::CoreExtProfiles;
 
 fn deferred_apply(
     tx: &crate::tx::Tx,
     txid: [u8; 32],
     utxos: &HashMap<Outpoint, UtxoEntry>,
     height: u64,
-    profiles: &CoreExtProfiles,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, crate::UtxoApplySummary), crate::error::TxError> {
     crate::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
         tx,
@@ -17,7 +15,6 @@ fn deferred_apply(
         0,
         0,
         ZERO_CHAIN_ID,
-        profiles,
         None,
         None,
     )
@@ -116,9 +113,7 @@ fn apply_non_coinbase_tx_basic_workq_multisig_branch() {
         },
     )]);
 
-    let profiles = CoreExtProfiles::empty();
-    let (next_utxos, summary) =
-        deferred_apply(&tx, txid, &utxos, 1, &profiles).expect("multisig branch");
+    let (next_utxos, summary) = deferred_apply(&tx, txid, &utxos, 1).expect("multisig branch");
     assert_eq!(summary.fee, 100);
     assert_eq!(next_utxos.len(), 1);
 }
@@ -213,9 +208,7 @@ fn apply_non_coinbase_tx_basic_workq_htlc_claim_branch() {
         entry.clone(),
     )]);
 
-    let profiles = CoreExtProfiles::empty();
-    let (_next_utxos, summary) =
-        deferred_apply(&tx, txid, &utxos, 1, &profiles).expect("htlc claim branch");
+    let (_next_utxos, summary) = deferred_apply(&tx, txid, &utxos, 1).expect("htlc claim branch");
     assert_eq!(summary.fee, entry.value - 90);
 }
 
@@ -286,17 +279,13 @@ fn apply_non_coinbase_tx_basic_workq_stealth_branch() {
         },
     )]);
 
-    let profiles = CoreExtProfiles::empty();
-    let (next_utxos, summary) =
-        deferred_apply(&tx, txid, &utxos, 1, &profiles).expect("stealth branch");
+    let (next_utxos, summary) = deferred_apply(&tx, txid, &utxos, 1).expect("stealth branch");
     assert_eq!(summary.fee, 100);
     assert_eq!(next_utxos.len(), 1);
 }
 
 #[test]
 fn apply_non_coinbase_tx_basic_workq_error_paths() {
-    let profiles = CoreExtProfiles::empty();
-
     let err = deferred_apply(
         &crate::tx::Tx {
             version: 1,
@@ -313,7 +302,6 @@ fn apply_non_coinbase_tx_basic_workq_error_paths() {
         [0u8; 32],
         &HashMap::new(),
         0,
-        &profiles,
     )
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrParse);
@@ -339,7 +327,6 @@ fn apply_non_coinbase_tx_basic_workq_error_paths() {
         [0u8; 32],
         &HashMap::new(),
         0,
-        &profiles,
     )
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrTxNonceInvalid);
@@ -374,8 +361,7 @@ fn apply_non_coinbase_tx_basic_workq_error_paths() {
         ZERO_CHAIN_ID,
         &kp,
     )];
-    let err =
-        deferred_apply(&missing_utxo_tx, [0u8; 32], &HashMap::new(), 1, &profiles).unwrap_err();
+    let err = deferred_apply(&missing_utxo_tx, [0u8; 32], &HashMap::new(), 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrMissingUtxo);
 
     let prev_txid = [0x24; 32];
@@ -425,7 +411,7 @@ fn apply_non_coinbase_tx_basic_workq_error_paths() {
             created_by_coinbase: false,
         },
     )]);
-    let err = deferred_apply(&duplicate_input_tx, [0u8; 32], &utxos, 1, &profiles).unwrap_err();
+    let err = deferred_apply(&duplicate_input_tx, [0u8; 32], &utxos, 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrParse);
 
     let immature_utxos = HashMap::from([(
@@ -469,8 +455,7 @@ fn apply_non_coinbase_tx_basic_workq_error_paths() {
         ZERO_CHAIN_ID,
         &kp,
     )];
-    let err =
-        deferred_apply(&mature_check_tx, [0u8; 32], &immature_utxos, 50, &profiles).unwrap_err();
+    let err = deferred_apply(&mature_check_tx, [0u8; 32], &immature_utxos, 50).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCoinbaseImmature);
 }
 
@@ -617,9 +602,7 @@ fn apply_non_coinbase_tx_basic_workq_vault_spend_ok() {
         ),
     ]);
 
-    let profiles = CoreExtProfiles::empty();
-    let (next_utxos, summary) =
-        deferred_apply(&tx, txid, &utxos, 200, &profiles).expect("vault spend");
+    let (next_utxos, summary) = deferred_apply(&tx, txid, &utxos, 200).expect("vault spend");
     assert_eq!(summary.fee, 10);
     assert_eq!(next_utxos.len(), 1);
 }
@@ -671,9 +654,7 @@ fn apply_non_coinbase_tx_basic_workq_vault_creation_ok() {
         },
     )]);
 
-    let profiles = CoreExtProfiles::empty();
-    let (next_utxos, summary) =
-        deferred_apply(&tx, txid, &utxos, 200, &profiles).expect("vault creation");
+    let (next_utxos, summary) = deferred_apply(&tx, txid, &utxos, 200).expect("vault creation");
     assert_eq!(summary.fee, 10);
     assert_eq!(next_utxos.len(), 1);
 }
@@ -753,9 +734,7 @@ fn apply_non_coinbase_tx_basic_workq_vault_error_paths() {
             },
         ),
     ]);
-    let profiles = CoreExtProfiles::empty();
-    let err =
-        deferred_apply(&forbidden_output_tx, [0u8; 32], &base_utxos, 200, &profiles).unwrap_err();
+    let err = deferred_apply(&forbidden_output_tx, [0u8; 32], &base_utxos, 200).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrVaultOutputNotWhitelisted);
 
     let sponsor_kp = kp_or_skip!();
@@ -841,8 +820,7 @@ fn apply_non_coinbase_tx_basic_workq_vault_error_paths() {
             },
         ),
     ]);
-    let err =
-        deferred_apply(&fee_sponsor_tx, [0u8; 32], &sponsor_utxos, 200, &profiles).unwrap_err();
+    let err = deferred_apply(&fee_sponsor_tx, [0u8; 32], &sponsor_utxos, 200).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrVaultFeeSponsorForbidden);
 
     let outsider_kp = kp_or_skip!();
@@ -856,8 +834,7 @@ fn apply_non_coinbase_tx_basic_workq_vault_error_paths() {
         sign_input_witness(&not_whitelisted_tx, 0, 100, ZERO_CHAIN_ID, &vault_kp),
         sign_input_witness(&not_whitelisted_tx, 1, 10, ZERO_CHAIN_ID, &owner_kp),
     ];
-    let err =
-        deferred_apply(&not_whitelisted_tx, [0u8; 32], &base_utxos, 200, &profiles).unwrap_err();
+    let err = deferred_apply(&not_whitelisted_tx, [0u8; 32], &base_utxos, 200).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrVaultOutputNotWhitelisted);
 
     let input_kp = kp_or_skip!();
@@ -906,14 +883,8 @@ fn apply_non_coinbase_tx_basic_workq_vault_error_paths() {
             created_by_coinbase: false,
         },
     )]);
-    let err = deferred_apply(
-        &creation_missing_owner_tx,
-        [0u8; 32],
-        &creation_utxos,
-        200,
-        &profiles,
-    )
-    .unwrap_err();
+    let err =
+        deferred_apply(&creation_missing_owner_tx, [0u8; 32], &creation_utxos, 200).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrVaultOwnerAuthRequired);
 
     // A CORE_EXT (0x0102) destination output is UNASSIGNED and rejected by the
@@ -928,14 +899,7 @@ fn apply_non_coinbase_tx_basic_workq_vault_error_paths() {
         sign_input_witness(&disallowed_destination_tx, 0, 100, ZERO_CHAIN_ID, &vault_kp),
         sign_input_witness(&disallowed_destination_tx, 1, 10, ZERO_CHAIN_ID, &owner_kp),
     ];
-    let err = deferred_apply(
-        &disallowed_destination_tx,
-        [0u8; 32],
-        &base_utxos,
-        200,
-        &profiles,
-    )
-    .unwrap_err();
+    let err = deferred_apply(&disallowed_destination_tx, [0u8; 32], &base_utxos, 200).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
@@ -989,7 +953,7 @@ fn apply_non_coinbase_tx_basic_workq_core_ext_0x0102_rejects() {
         },
     )]);
 
-    let err = deferred_apply(&tx, txid, &ext_utxos, 1, &CoreExtProfiles::empty()).unwrap_err();
+    let err = deferred_apply(&tx, txid, &ext_utxos, 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
@@ -1042,9 +1006,7 @@ fn apply_non_coinbase_tx_basic_workq_anchor_output_skip() {
         },
     )]);
 
-    let profiles = CoreExtProfiles::empty();
-    let (next_utxos, summary) =
-        deferred_apply(&tx, txid, &utxos, 1, &profiles).expect("anchor output skip");
+    let (next_utxos, summary) = deferred_apply(&tx, txid, &utxos, 1).expect("anchor output skip");
     assert_eq!(summary.fee, 10);
     assert_eq!(next_utxos.len(), 1);
     assert!(!next_utxos.contains_key(&Outpoint { txid, vout: 1 }));
@@ -1093,9 +1055,7 @@ fn apply_wrapper() {
         )]);
         (tx, utxos, [0x71; 32])
     };
-    let profiles = CoreExtProfiles::empty();
-    let (next_utxos, summary) =
-        deferred_apply(&tx, txid, &utxo_set, 1, &profiles).expect("wrapper success");
+    let (next_utxos, summary) = deferred_apply(&tx, txid, &utxo_set, 1).expect("wrapper success");
     assert_eq!(summary.fee, 10);
     assert_eq!(next_utxos.len(), 1);
 
@@ -1115,7 +1075,6 @@ fn apply_wrapper() {
         [0u8; 32],
         &HashMap::new(),
         0,
-        &profiles,
     )
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrParse);
@@ -1162,8 +1121,7 @@ fn apply_non_coinbase_tx_basic_workq_covenant_genesis_error() {
         },
     )]);
 
-    let profiles = CoreExtProfiles::empty();
-    let err = deferred_apply(&tx, [0u8; 32], &utxos, 1, &profiles).unwrap_err();
+    let err = deferred_apply(&tx, [0u8; 32], &utxos, 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
@@ -1209,8 +1167,7 @@ fn apply_non_coinbase_tx_basic_workq_sighash_prehash_error() {
         },
     )]);
 
-    let profiles = CoreExtProfiles::empty();
-    let err = deferred_apply(&tx, [0u8; 32], &utxos, 1, &profiles).unwrap_err();
+    let err = deferred_apply(&tx, [0u8; 32], &utxos, 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrParse);
 }
 
@@ -1255,8 +1212,7 @@ fn apply_non_coinbase_tx_basic_workq_check_spend_covenant_error() {
         },
     )]);
 
-    let profiles = CoreExtProfiles::empty();
-    let err = deferred_apply(&tx, [0u8; 32], &utxos, 1, &profiles).unwrap_err();
+    let err = deferred_apply(&tx, [0u8; 32], &utxos, 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrVaultMalformed);
 }
 
@@ -1304,7 +1260,6 @@ fn apply_non_coinbase_tx_basic_workq_p2pk_spend_q_error() {
         },
     )]);
 
-    let profiles = CoreExtProfiles::empty();
-    let err = deferred_apply(&tx, [0u8; 32], &utxos, 1, &profiles).unwrap_err();
+    let err = deferred_apply(&tx, [0u8; 32], &utxos, 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
 }

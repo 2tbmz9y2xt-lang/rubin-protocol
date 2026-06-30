@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 use rubin_consensus::{
     block_hash,
-    connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context as connect_block_basic_in_memory_at_height_with_suite_context,
-    encode_compact_size, parse_block_bytes, ConnectBlockBasicSummary, CoreExtDeploymentProfiles,
-    InMemoryChainState, Outpoint, RotationProvider, SuiteRegistry, UtxoEntry,
+    connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context,
+    encode_compact_size, parse_block_bytes, ConnectBlockBasicSummary, InMemoryChainState, Outpoint,
+    RotationProvider, SuiteRegistry, UtxoEntry,
 };
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
@@ -144,7 +144,7 @@ impl ChainState {
         };
 
         let connect_summary: ConnectBlockBasicSummary =
-            connect_block_basic_in_memory_at_height_with_suite_context(
+            connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context(
                 block_bytes,
                 expected_prev_hash,
                 expected_target,
@@ -152,7 +152,6 @@ impl ChainState {
                 prev_timestamps,
                 &mut work_state,
                 chain_id,
-                &CoreExtDeploymentProfiles::empty(),
                 rotation,
                 registry,
             )
