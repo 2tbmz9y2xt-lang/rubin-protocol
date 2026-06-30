@@ -21,6 +21,7 @@ mod sig_cache;
 mod sig_queue;
 pub mod sighash;
 pub mod simplicity;
+mod simplicity_covenant;
 mod spend_verify;
 mod stealth;
 pub mod subsidy;

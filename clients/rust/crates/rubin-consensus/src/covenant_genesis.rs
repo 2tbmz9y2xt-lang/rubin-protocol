@@ -1,10 +1,11 @@
 use crate::constants::{
-    COV_TYPE_ANCHOR, COV_TYPE_CORE_STEALTH, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC, COV_TYPE_MULTISIG,
-    COV_TYPE_P2PK, COV_TYPE_RESERVED_FUTURE, COV_TYPE_VAULT, MAX_ANCHOR_PAYLOAD_SIZE,
-    MAX_COVENANT_DATA_PER_OUTPUT, MAX_P2PK_COVENANT_DATA,
+    COV_TYPE_ANCHOR, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_CORE_STEALTH, COV_TYPE_DA_COMMIT,
+    COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_RESERVED_FUTURE, COV_TYPE_VAULT,
+    MAX_ANCHOR_PAYLOAD_SIZE, MAX_COVENANT_DATA_PER_OUTPUT, MAX_P2PK_COVENANT_DATA,
 };
 use crate::error::{ErrorCode, TxError};
 use crate::htlc::parse_htlc_covenant_data;
+use crate::simplicity_covenant::validate_core_simplicity_covenant_data;
 use crate::stealth::parse_stealth_covenant_data;
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider};
 use crate::tx::Tx;
@@ -121,6 +122,16 @@ pub fn validate_tx_covenants_genesis(
                         "invalid CORE_DA_COMMIT covenant_data length",
                     ));
                 }
+            }
+            COV_TYPE_CORE_SIMPLICITY => {
+                // Creation is fail-closed in this slice: the deployment-active gate and
+                // its rotation threading are inseparable and land together in RUB-590.
+                // Validate covenant_data structure, then reject (creation not enabled).
+                validate_core_simplicity_covenant_data(out.value, &out.covenant_data)?;
+                return Err(TxError::new(
+                    ErrorCode::TxErrCovenantTypeInvalid,
+                    "CORE_SIMPLICITY creation not enabled",
+                ));
             }
             COV_TYPE_RESERVED_FUTURE => {
                 return Err(TxError::new(
