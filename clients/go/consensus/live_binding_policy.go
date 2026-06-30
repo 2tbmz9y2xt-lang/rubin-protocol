@@ -34,21 +34,21 @@ type liveBindingPolicyManifestJSON struct {
 }
 
 type liveBindingPolicyEntry struct {
-	AlgName                string `json:"alg_name"`
-	PubkeyLen              int    `json:"pubkey_len"`
-	SigLen                 int    `json:"sig_len"`
-	RuntimeBinding         string `json:"runtime_binding"`
-	OpenSSLAlg             string `json:"openssl_alg"`
-	CoreExtLiveBindingName string `json:"core_ext_live_binding_name"`
+	AlgName         string `json:"alg_name"`
+	PubkeyLen       int    `json:"pubkey_len"`
+	SigLen          int    `json:"sig_len"`
+	RuntimeBinding  string `json:"runtime_binding"`
+	OpenSSLAlg      string `json:"openssl_alg"`
+	LiveBindingName string `json:"live_binding_name"`
 }
 
 type liveBindingPolicyEntryJSON struct {
-	AlgName                *string `json:"alg_name"`
-	PubkeyLen              *int    `json:"pubkey_len"`
-	SigLen                 *int    `json:"sig_len"`
-	RuntimeBinding         *string `json:"runtime_binding"`
-	OpenSSLAlg             *string `json:"openssl_alg"`
-	CoreExtLiveBindingName *string `json:"core_ext_live_binding_name"`
+	AlgName         *string `json:"alg_name"`
+	PubkeyLen       *int    `json:"pubkey_len"`
+	SigLen          *int    `json:"sig_len"`
+	RuntimeBinding  *string `json:"runtime_binding"`
+	OpenSSLAlg      *string `json:"openssl_alg"`
+	LiveBindingName *string `json:"live_binding_name"`
 }
 
 var (
@@ -77,13 +77,13 @@ func (e liveBindingPolicyRuntimeEntryNotFoundError) Error() string {
 	)
 }
 
-type liveBindingPolicyCoreExtEntryNotFoundError struct {
+type liveBindingPolicyBindingNameEntryNotFoundError struct {
 	binding string
 }
 
-func (e liveBindingPolicyCoreExtEntryNotFoundError) Error() string {
+func (e liveBindingPolicyBindingNameEntryNotFoundError) Error() string {
 	return fmt.Sprintf(
-		"%s: core_ext_live_binding_name not found %q",
+		"%s: live_binding_name not found %q",
 		liveBindingPolicyErrStem,
 		e.binding,
 	)
@@ -248,7 +248,7 @@ func (entry liveBindingPolicyEntryJSON) materialize(index int) (liveBindingPolic
 	if out.OpenSSLAlg, err = requiredLiveBindingPolicyEntryString(index, "openssl_alg", entry.OpenSSLAlg); err != nil {
 		return liveBindingPolicyEntry{}, err
 	}
-	if out.CoreExtLiveBindingName, err = requiredLiveBindingPolicyEntryString(index, "core_ext_live_binding_name", entry.CoreExtLiveBindingName); err != nil {
+	if out.LiveBindingName, err = requiredLiveBindingPolicyEntryString(index, "live_binding_name", entry.LiveBindingName); err != nil {
 		return liveBindingPolicyEntry{}, err
 	}
 	return out, nil
@@ -288,9 +288,9 @@ func loadLiveBindingPolicyFromJSON(raw []byte) (*liveBindingPolicyManifest, erro
 		return nil, liveBindingPolicyError("entries missing")
 	}
 	seenRuntimeTuples := make(map[string]struct{}, len(manifest.Entries))
-	seenCoreExtBindings := make(map[string]struct{}, len(manifest.Entries))
+	seenLiveBindings := make(map[string]struct{}, len(manifest.Entries))
 	for i, entry := range manifest.Entries {
-		if err := entry.validate(i, seenRuntimeTuples, seenCoreExtBindings); err != nil {
+		if err := entry.validate(i, seenRuntimeTuples, seenLiveBindings); err != nil {
 			return nil, err
 		}
 	}
@@ -300,7 +300,7 @@ func loadLiveBindingPolicyFromJSON(raw []byte) (*liveBindingPolicyManifest, erro
 func (entry liveBindingPolicyEntry) validate(
 	index int,
 	seenRuntimeTuples map[string]struct{},
-	seenCoreExtBindings map[string]struct{},
+	seenLiveBindings map[string]struct{},
 ) error {
 	if entry.AlgName == "" {
 		return liveBindingPolicyError("entries[%d]: alg_name missing", index)
@@ -317,14 +317,14 @@ func (entry liveBindingPolicyEntry) validate(
 	if entry.OpenSSLAlg == "" {
 		return liveBindingPolicyError("entries[%d]: openssl_alg missing", index)
 	}
-	if entry.CoreExtLiveBindingName == "" {
-		return liveBindingPolicyError("entries[%d]: core_ext_live_binding_name missing", index)
+	if entry.LiveBindingName == "" {
+		return liveBindingPolicyError("entries[%d]: live_binding_name missing", index)
 	}
-	if _, ok := seenCoreExtBindings[entry.CoreExtLiveBindingName]; ok {
+	if _, ok := seenLiveBindings[entry.LiveBindingName]; ok {
 		return liveBindingPolicyError(
-			"entries[%d]: duplicate core_ext_live_binding_name %q",
+			"entries[%d]: duplicate live_binding_name %q",
 			index,
-			entry.CoreExtLiveBindingName,
+			entry.LiveBindingName,
 		)
 	}
 	runtimeTupleKey := liveBindingPolicyRuntimeTupleKey(entry.AlgName, entry.PubkeyLen, entry.SigLen)
@@ -371,9 +371,9 @@ func (entry liveBindingPolicyEntry) validate(
 				ML_DSA_87_SIG_BYTES,
 			)
 		}
-		if entry.CoreExtLiveBindingName != CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 {
+		if entry.LiveBindingName != CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 {
 			return liveBindingPolicyError(
-				"entries[%d]: runtime_binding %q requires core_ext_live_binding_name %q",
+				"entries[%d]: runtime_binding %q requires live_binding_name %q",
 				index,
 				entry.RuntimeBinding,
 				CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
@@ -387,7 +387,7 @@ func (entry liveBindingPolicyEntry) validate(
 		)
 	}
 	seenRuntimeTuples[runtimeTupleKey] = struct{}{}
-	seenCoreExtBindings[entry.CoreExtLiveBindingName] = struct{}{}
+	seenLiveBindings[entry.LiveBindingName] = struct{}{}
 	return nil
 }
 
@@ -422,18 +422,18 @@ func liveBindingPolicyRuntimeEntry(
 	}
 }
 
-func liveBindingPolicyCoreExtEntry(binding string) (liveBindingPolicyEntry, error) {
+func liveBindingPolicyBindingNameEntry(binding string) (liveBindingPolicyEntry, error) {
 	manifest, err := defaultLiveBindingPolicy()
 	if err != nil {
 		return liveBindingPolicyEntry{}, err
 	}
 	for i := range manifest.Entries {
 		entry := &manifest.Entries[i]
-		if entry.CoreExtLiveBindingName == binding {
+		if entry.LiveBindingName == binding {
 			return *entry, nil
 		}
 	}
-	return liveBindingPolicyEntry{}, liveBindingPolicyCoreExtEntryNotFoundError{
+	return liveBindingPolicyEntry{}, liveBindingPolicyBindingNameEntryNotFoundError{
 		binding: binding,
 	}
 }
