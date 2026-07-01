@@ -90,9 +90,6 @@ pub fn build_simplicity_tx_context(
 
     let total_in = sum_values(resolved_inputs.iter().map(|entry| entry.value))?;
     let total_out = sum_values(tx.outputs.iter().map(|out| out.value))?;
-
-    // Counts are bounded by MAX_TX_INPUTS/MAX_TX_OUTPUTS (1024) above, so these
-    // u16 casts cannot truncate.
     #[allow(clippy::cast_possible_truncation)] // guarded len <= 1024 < u16::MAX
     let input_count = tx.inputs.len() as u16;
     #[allow(clippy::cast_possible_truncation)] // guarded len <= 1024 < u16::MAX
@@ -108,16 +105,30 @@ pub fn build_simplicity_tx_context(
         output_count,
         tx_kind: tx.tx_kind,
     };
+    let mut ctx = SimplicityTxContext {
+        base,
+        input_views: Vec::with_capacity(resolved_inputs.len()),
+        output_views: Vec::with_capacity(tx.outputs.len()),
+        self_sources: Vec::with_capacity(resolved_inputs.len()),
+    };
+    populate_simplicity_tx_context_views(&mut ctx, tx, resolved_inputs)?;
+    Ok(Some(ctx))
+}
 
-    let mut input_views = Vec::with_capacity(resolved_inputs.len());
-    let mut self_sources = Vec::with_capacity(resolved_inputs.len());
+/// Fills the input/output views and per-input self sources. Mirrors Go
+/// `populateSimplicityTxContextViews`, the decomposition `Build` delegates to.
+fn populate_simplicity_tx_context_views(
+    ctx: &mut SimplicityTxContext,
+    tx: &Tx,
+    resolved_inputs: &[UtxoEntry],
+) -> Result<(), TxError> {
     for entry in resolved_inputs {
-        input_views.push(SimplicityTxContextIoView {
+        ctx.input_views.push(SimplicityTxContextIoView {
             value: entry.value,
             covenant_type: entry.covenant_type,
         });
         if entry.covenant_type != COV_TYPE_CORE_SIMPLICITY {
-            self_sources.push(SimplicityTxContextSelfSource {
+            ctx.self_sources.push(SimplicityTxContextSelfSource {
                 program_cmr: [0u8; 32],
                 state: Vec::new(),
                 value: 0,
@@ -127,34 +138,23 @@ pub fn build_simplicity_tx_context(
         }
         let (program_cmr, state) =
             parse_core_simplicity_covenant_data(entry.value, &entry.covenant_data)?;
-        self_sources.push(SimplicityTxContextSelfSource {
+        ctx.self_sources.push(SimplicityTxContextSelfSource {
             program_cmr,
             state,
             value: entry.value,
             is_core_simplicity: true,
         });
     }
-
-    let output_views = tx
-        .outputs
-        .iter()
-        .map(|out| SimplicityTxContextIoView {
+    for out in &tx.outputs {
+        ctx.output_views.push(SimplicityTxContextIoView {
             value: out.value,
             covenant_type: out.covenant_type,
-        })
-        .collect();
-
-    Ok(Some(SimplicityTxContext {
-        base,
-        input_views,
-        output_views,
-        self_sources,
-    }))
+        });
+    }
+    Ok(())
 }
 
-// Widening each u64 to u128 before the add avoids truncation; the checked add
-// keeps the Go reference's fail-closed overflow corner (unreachable for the
-// wire-bounded counts).
+// u128-widened checked add: no truncation, and keeps Go's fail-closed overflow corner.
 fn sum_values(values: impl Iterator<Item = u64>) -> Result<Uint128, TxError> {
     let mut total: u128 = 0;
     for value in values {
