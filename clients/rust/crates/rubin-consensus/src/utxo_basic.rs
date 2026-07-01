@@ -834,6 +834,186 @@ mod tests {
         }
     }
 
+    // A well-formed CORE_SIMPLICITY covenant blob: program_cmr[32] || state_len(0).
+    fn simplicity_cov(cmr_byte: u8) -> Vec<u8> {
+        let mut cov = vec![cmr_byte; 32];
+        cov.push(0x00);
+        cov
+    }
+
+    // RUB-505 (mirror of Go RUB-504): the §5.3 CORE_SIMPLICITY spend reject is
+    // ordered at the input's wire position — an earlier-index resolution error
+    // (coinbase maturity, witness underflow) wins over a later disabled-spend
+    // reject, and a CORE_SIMPLICITY input wins over a later input's error.
+
+    #[test]
+    fn core_simplicity_immature_coinbase_precedes_disabled_spend() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let pubkey = keypair.pubkey_bytes();
+        let prev = [0x67u8; 32];
+        let (op, mut entry) = utxo(prev, 100, COV_TYPE_CORE_SIMPLICITY, simplicity_cov(0x67));
+        entry.created_by_coinbase = true; // creation_height 0
+        let set = HashMap::from([(op, entry)]);
+        let tx = unsigned_tx(
+            0x00,
+            1,
+            vec![tx_input(prev)],
+            vec![tx_output(
+                90,
+                COV_TYPE_P2PK,
+                p2pk_covenant_data_for_pubkey(&pubkey),
+            )],
+        );
+        let err =
+            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                &tx,
+                [0x68u8; 32],
+                &set,
+                COINBASE_MATURITY - 1,
+                0,
+                0,
+                [0u8; 32],
+                None,
+                None,
+            )
+            .expect_err("immature coinbase precedes disabled spend");
+        assert_eq!(err.code, ErrorCode::TxErrCoinbaseImmature);
+    }
+
+    #[test]
+    fn core_simplicity_precedes_later_missing_utxo() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let pubkey = keypair.pubkey_bytes();
+        let simp_prev = [0xE1u8; 32];
+        let later_missing = [0xE2u8; 32];
+        // Only the CORE_SIMPLICITY input is resolvable; the later input is missing.
+        let set = HashMap::from([utxo(
+            simp_prev,
+            100,
+            COV_TYPE_CORE_SIMPLICITY,
+            simplicity_cov(0xE1),
+        )]);
+        let tx = unsigned_tx(
+            0x00,
+            1,
+            vec![tx_input(simp_prev), tx_input(later_missing)],
+            vec![tx_output(
+                90,
+                COV_TYPE_P2PK,
+                p2pk_covenant_data_for_pubkey(&pubkey),
+            )],
+        );
+        let err =
+            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                &tx,
+                [0xE3u8; 32],
+                &set,
+                1,
+                0,
+                0,
+                [0u8; 32],
+                None,
+                None,
+            )
+            .expect_err("simplicity precedes later missing utxo");
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+        assert!(
+            format!("{err}").contains("CORE_SIMPLICITY spend evaluation not enabled"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn p2pk_witness_underflow_precedes_later_simplicity() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let pubkey = keypair.pubkey_bytes();
+        let p2pk_prev = [0xE0u8; 32];
+        let simp_prev = [0xE1u8; 32];
+        let set = HashMap::from([
+            utxo(
+                p2pk_prev,
+                100,
+                COV_TYPE_P2PK,
+                p2pk_covenant_data_for_pubkey(&pubkey),
+            ),
+            utxo(
+                simp_prev,
+                100,
+                COV_TYPE_CORE_SIMPLICITY,
+                simplicity_cov(0xE1),
+            ),
+        ]);
+        // Empty witness => the index-0 P2PK input underflows before the later
+        // CORE_SIMPLICITY input is reached.
+        let tx = unsigned_tx(
+            0x00,
+            1,
+            vec![tx_input(p2pk_prev), tx_input(simp_prev)],
+            vec![tx_output(
+                190,
+                COV_TYPE_P2PK,
+                p2pk_covenant_data_for_pubkey(&pubkey),
+            )],
+        );
+        let err =
+            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                &tx,
+                [0xE4u8; 32],
+                &set,
+                1,
+                0,
+                0,
+                [0u8; 32],
+                None,
+                None,
+            )
+            .expect_err("earlier p2pk underflow precedes later simplicity");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+        assert!(format!("{err}").contains("witness underflow"), "got: {err}");
+    }
+
+    #[test]
+    fn non_simplicity_witness_underflow_precedes_later_validation() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let pubkey = keypair.pubkey_bytes();
+        let first_prev = [0xE7u8; 32];
+        let later_prev = [0xE8u8; 32];
+        let set = HashMap::from([
+            utxo(
+                first_prev,
+                100,
+                COV_TYPE_P2PK,
+                p2pk_covenant_data_for_pubkey(&pubkey),
+            ),
+            utxo(later_prev, 100, COV_TYPE_HTLC, vec![0x01]),
+        ]);
+        let tx = unsigned_tx(
+            0x00,
+            1,
+            vec![tx_input(first_prev), tx_input(later_prev)],
+            vec![tx_output(
+                190,
+                COV_TYPE_P2PK,
+                p2pk_covenant_data_for_pubkey(&pubkey),
+            )],
+        );
+        let err =
+            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                &tx,
+                [0xE9u8; 32],
+                &set,
+                1,
+                0,
+                0,
+                [0u8; 32],
+                None,
+                None,
+            )
+            .expect_err("earlier witness underflow precedes later validation");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+        assert!(format!("{err}").contains("witness underflow"), "got: {err}");
+    }
+
     fn tx_input(prev_txid: [u8; 32]) -> TxInput {
         TxInput {
             prev_txid,
