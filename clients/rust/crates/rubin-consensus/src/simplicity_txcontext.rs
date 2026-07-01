@@ -91,8 +91,12 @@ pub fn build_simplicity_tx_context(
     let total_in = sum_values(resolved_inputs.iter().map(|entry| entry.value))?;
     let total_out = sum_values(tx.outputs.iter().map(|out| out.value))?;
 
-    // Counts are bounded by MAX_TX_INPUTS/MAX_TX_OUTPUTS above, so the u16
-    // narrowing below cannot truncate.
+    // Counts are bounded by MAX_TX_INPUTS/MAX_TX_OUTPUTS (1024) above, so these
+    // u16 casts cannot truncate.
+    #[allow(clippy::cast_possible_truncation)] // guarded len <= 1024 < u16::MAX
+    let input_count = tx.inputs.len() as u16;
+    #[allow(clippy::cast_possible_truncation)] // guarded len <= 1024 < u16::MAX
+    let output_count = tx.outputs.len() as u16;
     let base = SimplicityTxContextBase {
         chain_id,
         total_in,
@@ -100,8 +104,8 @@ pub fn build_simplicity_tx_context(
         height: block_height,
         tx_nonce: tx.tx_nonce,
         locktime: tx.locktime,
-        input_count: tx.inputs.len() as u16,
-        output_count: tx.outputs.len() as u16,
+        input_count,
+        output_count,
         tx_kind: tx.tx_kind,
     };
 
