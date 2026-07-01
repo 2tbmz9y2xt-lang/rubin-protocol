@@ -578,3 +578,229 @@ fn pow_check_rejects_invalid_header_length_before_target() {
         assert_eq!(err.msg, "pow: invalid header length", "{name}");
     }
 }
+
+// --- RUB-497 §5.4 Simplicity envelope (0xF0) parse case (mirror of Go) ---
+
+fn compact_size(n: usize) -> Vec<u8> {
+    if n < 0xfd {
+        vec![n as u8]
+    } else {
+        // Test envelopes never exceed u16 lengths (the envelope cap is 32_768 bytes),
+        // so only the single-byte and 3-byte (0xfd) compactSize forms are needed.
+        let mut v = vec![0xfd];
+        v.extend_from_slice(&(n as u16).to_le_bytes());
+        v
+    }
+}
+
+fn simplicity_env_sig_ver(version: u8, program: &[u8], witness: &[u8], sighash: u8) -> Vec<u8> {
+    let mut sig = vec![version];
+    sig.extend(compact_size(program.len()));
+    sig.extend_from_slice(program);
+    sig.extend(compact_size(witness.len()));
+    sig.extend_from_slice(witness);
+    sig.push(sighash);
+    sig
+}
+
+fn simplicity_env_sig(program: &[u8], witness: &[u8], sighash: u8) -> Vec<u8> {
+    simplicity_env_sig_ver(0x01, program, witness, sighash)
+}
+
+fn envelope_witness_tx(suite: u8, pubkey: &[u8], sig: &[u8]) -> Vec<u8> {
+    let mut tx = minimal_tx_bytes();
+    tx.truncate(core_end());
+    tx.push(0x01); // witness_count = 1
+    tx.push(suite);
+    tx.extend(compact_size(pubkey.len()));
+    tx.extend_from_slice(pubkey);
+    tx.extend(compact_size(sig.len()));
+    tx.extend_from_slice(sig);
+    tx.push(0x00); // da_payload_len
+    tx
+}
+
+#[test]
+fn parse_tx_simplicity_envelope_witness_len_overflow_rejected() {
+    // witness_len = u64::MAX (0xFF compactSize) exceeds isize::MAX → TX_ERR_PARSE (mirror of Go).
+    let mut sig = vec![0x01u8]; // version
+    sig.push(0x00); // program_len = 0 (minimal)
+    sig.push(0xff); // witness_len: 64-bit compactSize form
+    sig.extend_from_slice(&u64::MAX.to_le_bytes());
+    sig.push(SIGHASH_ALL); // trailing sighash byte (stripped before parse)
+    let err = parse_tx(&envelope_witness_tx(
+        SUITE_ID_SIMPLICITY_ENVELOPE,
+        &[],
+        &sig,
+    ))
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "Simplicity witness_len overflows int");
+}
+
+#[test]
+fn parse_tx_simplicity_envelope_witness_canonicalization() {
+    let program = [0xa0u8, 0xa1, 0xa2];
+    let witness = [0xb0u8, 0xb1];
+    let valid_sig = simplicity_env_sig(&program, &witness, SIGHASH_ALL);
+
+    // valid_envelope: parses; suite=0xf0, pubkey empty, signature preserved.
+    let (parsed, _, _, _) = parse_tx(&envelope_witness_tx(
+        SUITE_ID_SIMPLICITY_ENVELOPE,
+        &[],
+        &valid_sig,
+    ))
+    .expect("valid envelope parses");
+    assert_eq!(parsed.witness.len(), 1);
+    assert_eq!(parsed.witness[0].suite_id, SUITE_ID_SIMPLICITY_ENVELOPE);
+    assert!(parsed.witness[0].pubkey.is_empty());
+    assert_eq!(parsed.witness[0].signature, valid_sig);
+
+    // invalid sighash type is a SEMANTIC concern, not a parse error.
+    let mut bad_sighash = valid_sig.clone();
+    *bad_sighash.last_mut().unwrap() = 0x7f;
+    let (parsed, _, _, _) = parse_tx(&envelope_witness_tx(
+        SUITE_ID_SIMPLICITY_ENVELOPE,
+        &[],
+        &bad_sighash,
+    ))
+    .expect("non-canonical sighash still parses");
+    assert_eq!(parsed.witness[0].signature, bad_sighash);
+
+    // TX_ERR_PARSE corners (byte-for-byte with the Go reference table).
+    let nonminimal: Vec<u8> = vec![
+        0x01,
+        0xfd,
+        program.len() as u8,
+        0x00,
+        program[0],
+        program[1],
+        program[2],
+        witness.len() as u8,
+        witness[0],
+        witness[1],
+        SIGHASH_ALL,
+    ];
+    let trailing: Vec<u8> = {
+        let mut s = valid_sig[..valid_sig.len() - 1].to_vec();
+        s.extend_from_slice(&[0xcc, SIGHASH_ALL]);
+        s
+    };
+    let truncated: Vec<u8> = vec![
+        0x01,
+        program.len() as u8,
+        program[0],
+        program[1],
+        program[2],
+        0x03,
+        witness[0],
+        witness[1],
+        SIGHASH_ALL,
+    ];
+    let cases: Vec<(&str, u8, Vec<u8>, Vec<u8>)> = vec![
+        (
+            "nonzero_pubkey",
+            SUITE_ID_SIMPLICITY_ENVELOPE,
+            vec![0x01],
+            valid_sig.clone(),
+        ),
+        (
+            "missing_envelope",
+            SUITE_ID_SIMPLICITY_ENVELOPE,
+            vec![],
+            vec![SIGHASH_ALL],
+        ),
+        (
+            "wrong_version",
+            SUITE_ID_SIMPLICITY_ENVELOPE,
+            vec![],
+            simplicity_env_sig_ver(0x02, &program, &witness, SIGHASH_ALL),
+        ),
+        (
+            "nonminimal_program_len",
+            SUITE_ID_SIMPLICITY_ENVELOPE,
+            vec![],
+            nonminimal,
+        ),
+        (
+            "trailing_envelope_byte",
+            SUITE_ID_SIMPLICITY_ENVELOPE,
+            vec![],
+            trailing,
+        ),
+        (
+            "truncated_witness",
+            SUITE_ID_SIMPLICITY_ENVELOPE,
+            vec![],
+            truncated,
+        ),
+        (
+            "program_too_large",
+            SUITE_ID_SIMPLICITY_ENVELOPE,
+            vec![],
+            simplicity_env_sig(
+                &vec![0u8; MAX_SIMPLICITY_PROGRAM_BYTES as usize + 1],
+                &[],
+                SIGHASH_ALL,
+            ),
+        ),
+        (
+            "envelope_too_large",
+            SUITE_ID_SIMPLICITY_ENVELOPE,
+            vec![],
+            simplicity_env_sig(
+                &vec![0u8; MAX_SIMPLICITY_PROGRAM_BYTES as usize],
+                &vec![0u8; MAX_SIMPLICITY_ENVELOPE_BYTES],
+                SIGHASH_ALL,
+            ),
+        ),
+    ];
+    for (name, suite, pubkey, sig) in cases {
+        let err = parse_tx(&envelope_witness_tx(suite, &pubkey, &sig)).unwrap_err();
+        assert_eq!(
+            err.code,
+            ErrorCode::TxErrParse,
+            "case {name}: expected TX_ERR_PARSE"
+        );
+    }
+
+    // Unknown suites in the structural range (0xF1..=0xFE) keep unknown-suite
+    // tolerance — only 0xF0 has the §5.4 structural parse rule.
+    for suite in [0xf1u8, 0xfe] {
+        let (parsed, _, _, _) =
+            parse_tx(&envelope_witness_tx(suite, &[0x01], &[0x02, SIGHASH_ALL]))
+                .unwrap_or_else(|e| panic!("unknown suite 0x{suite:02x} should parse: {e:?}"));
+        assert_eq!(parsed.witness.len(), 1);
+        assert_eq!(parsed.witness[0].suite_id, suite);
+    }
+}
+
+#[test]
+fn suite_registry_rejects_structural_carrier_registration() {
+    use crate::suite_registry::{
+        is_structural_witness_carrier_suite_id, SuiteParams, SuiteRegistry,
+    };
+    use std::collections::BTreeMap;
+    assert!(is_structural_witness_carrier_suite_id(
+        SUITE_ID_SIMPLICITY_ENVELOPE
+    ));
+    assert!(is_structural_witness_carrier_suite_id(0xfe));
+    assert!(!is_structural_witness_carrier_suite_id(0xff));
+    assert!(!is_structural_witness_carrier_suite_id(SUITE_ID_ML_DSA_87));
+    let mut m: BTreeMap<u8, SuiteParams> = BTreeMap::new();
+    m.insert(
+        SUITE_ID_SIMPLICITY_ENVELOPE,
+        SuiteParams {
+            suite_id: SUITE_ID_SIMPLICITY_ENVELOPE,
+            pubkey_len: 0,
+            sig_len: 0,
+            verify_cost: 0,
+            alg_name: "bogus",
+        },
+    );
+    let res = std::panic::catch_unwind(|| SuiteRegistry::with_suites(m));
+    assert!(
+        res.is_err(),
+        "registering a structural carrier as a crypto suite must panic"
+    );
+}

@@ -14,7 +14,11 @@ fn build_registry(data: &[u8]) -> SuiteRegistry {
     }
 
     let mut suites = BTreeMap::new();
-    let custom_id = data.get(1).copied().unwrap_or(0x09);
+    // Fold structural ids (0xF0..=0xFE) into the native range so `with_suites` isn't a false crash.
+    let mut custom_id = data.get(1).copied().unwrap_or(0x09);
+    if rubin_consensus::suite_registry::is_structural_witness_carrier_suite_id(custom_id) {
+        custom_id &= 0x0f;
+    }
     let pubkey_len = u64::from(data.get(2).copied().unwrap_or(0)) + 1;
     let sig_len = u64::from(data.get(3).copied().unwrap_or(0)) + 1;
     let verify_cost = u64::from(data.get(4).copied().unwrap_or(0)) + 1;

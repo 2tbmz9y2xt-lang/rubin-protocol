@@ -362,8 +362,64 @@ fn validate_witness_item_shape(
                 "non-canonical ML-DSA witness item lengths",
             ))
         }
+        SUITE_ID_SIMPLICITY_ENVELOPE if pub_len_u64 != 0 => Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "non-canonical Simplicity envelope witness item",
+        )),
+        SUITE_ID_SIMPLICITY_ENVELOPE => validate_simplicity_envelope_signature(signature),
         _ => Ok(()),
     }
+}
+
+/// Structurally validates a §5.4 Simplicity envelope witness signature, byte-for-byte
+/// with the merged Go `parseSimplicityEnvelopeSignature`: the trailing sighash byte is
+/// dropped, then version(0x01) + compactSize program + compactSize witness must consume
+/// the envelope exactly, within the canonical size bounds.
+fn validate_simplicity_envelope_signature(signature: &[u8]) -> Result<(), TxError> {
+    if signature.len() < 2 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "non-canonical Simplicity envelope witness item",
+        ));
+    }
+    let envelope = &signature[..signature.len() - 1];
+    if envelope.len() > MAX_SIMPLICITY_ENVELOPE_BYTES {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "Simplicity envelope too large",
+        ));
+    }
+    let mut r = Reader::new(envelope);
+    if r.read_u8()? != 0x01 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "non-canonical Simplicity envelope witness item",
+        ));
+    }
+    let (program_len_u64, _) = read_compact_size(&mut r)?;
+    if program_len_u64 > MAX_SIMPLICITY_PROGRAM_BYTES {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "Simplicity program too large",
+        ));
+    }
+    r.read_bytes(program_len_u64 as usize)?;
+    let (witness_len_u64, _) = read_compact_size(&mut r)?;
+    // `isize::MAX` == Go's `math.MaxInt` on every target: byte-identical, and blocks a 32-bit `as usize` truncation.
+    if witness_len_u64 > isize::MAX as u64 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "Simplicity witness_len overflows int",
+        ));
+    }
+    r.read_bytes(witness_len_u64 as usize)?;
+    if r.offset() != envelope.len() {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "non-canonical Simplicity envelope witness item",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_sentinel_witness(pub_len: usize, signature: &[u8]) -> Result<(), TxError> {

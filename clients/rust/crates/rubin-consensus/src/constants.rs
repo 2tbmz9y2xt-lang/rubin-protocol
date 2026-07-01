@@ -60,6 +60,12 @@ pub const TX_WIRE_VERSION: u32 = 1;
 
 pub const SUITE_ID_SENTINEL: u8 = 0x00;
 pub const SUITE_ID_ML_DSA_87: u8 = 0x01;
+/// Structural witness carrier for CORE_SIMPLICITY (§5.4). Not a native crypto suite.
+pub const SUITE_ID_SIMPLICITY_ENVELOPE: u8 = 0xf0;
+
+/// Canonical bounds for the §5.4 Simplicity envelope witness item (mirror of Go).
+pub const MAX_SIMPLICITY_PROGRAM_BYTES: u64 = 16_384;
+pub const MAX_SIMPLICITY_ENVELOPE_BYTES: usize = 32_768;
 
 pub const COV_TYPE_P2PK: u16 = 0x0000;
 pub const COV_TYPE_ANCHOR: u16 = 0x0002;

@@ -1138,7 +1138,11 @@ fn build_suite_registry_from_json(
 
     let mut suites = std::collections::BTreeMap::new();
     for s in items {
-        if s.suite_id == rubin_consensus::constants::SUITE_ID_SENTINEL || s.verify_cost == 0 {
+        // Reject structural ids (0xF0..=0xFE) (mirror of Go) so untrusted config can't panic `with_suites`.
+        if s.suite_id == rubin_consensus::constants::SUITE_ID_SENTINEL
+            || rubin_consensus::suite_registry::is_structural_witness_carrier_suite_id(s.suite_id)
+            || s.verify_cost == 0
+        {
             return Err("bad suite_registry".to_string());
         }
         let pubkey_len = validate_suite_registry_param_len(s.pubkey_len)?;
@@ -5583,6 +5587,19 @@ mod tests {
             sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
             verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
             alg_name: "SLH-DSA".to_string(),
+        }])
+        .unwrap_err();
+        assert_eq!(err, "bad suite_registry");
+    }
+
+    #[test]
+    fn suite_registry_rejects_structural_carrier_suite_id() {
+        let err = build_suite_registry_from_json(&[SuiteParamsJson {
+            suite_id: rubin_consensus::constants::SUITE_ID_SIMPLICITY_ENVELOPE,
+            pubkey_len: rubin_consensus::constants::ML_DSA_87_PUBKEY_BYTES,
+            sig_len: rubin_consensus::constants::ML_DSA_87_SIG_BYTES,
+            verify_cost: rubin_consensus::constants::VERIFY_COST_ML_DSA_87,
+            alg_name: "ML-DSA-87".to_string(),
         }])
         .unwrap_err();
         assert_eq!(err, "bad suite_registry");
