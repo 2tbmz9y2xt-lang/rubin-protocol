@@ -121,7 +121,8 @@ pub fn build_simplicity_tx_context(
             });
             continue;
         }
-        let (program_cmr, state) = parse_core_simplicity_covenant_data(&entry.covenant_data)?;
+        let (program_cmr, state) =
+            parse_core_simplicity_covenant_data(entry.value, &entry.covenant_data)?;
         self_sources.push(SimplicityTxContextSelfSource {
             program_cmr,
             state,

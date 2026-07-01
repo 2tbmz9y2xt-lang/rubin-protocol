@@ -58,12 +58,20 @@ pub(crate) fn reject_core_simplicity_spend_if_present(inputs: &[UtxoEntry]) -> R
     Ok(())
 }
 
-/// Parses `program_cmr:bytes32 || state_len:CompactSize || state` (no trailing
-/// bytes, `state_len <= MAX_SIMPLICITY_STATE_BYTES`) into the CMR and a fresh
+/// Parses a CORE_SIMPLICITY covenant blob: rejects `value == 0`, then
+/// `program_cmr:bytes32 || state_len:CompactSize || state` (no trailing bytes,
+/// `state_len <= MAX_SIMPLICITY_STATE_BYTES`), returning the CMR and a fresh
 /// copy of the state. Mirrors Go `parseCoreSimplicityCovenantData`.
 pub(crate) fn parse_core_simplicity_covenant_data(
+    value: u64,
     covenant_data: &[u8],
 ) -> Result<([u8; 32], Vec<u8>), TxError> {
+    if value == 0 {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_SIMPLICITY value must be > 0",
+        ));
+    }
     let mut r = Reader::new(covenant_data);
     let cmr_bytes = r.read_bytes(32).map_err(|_| {
         TxError::new(
@@ -110,13 +118,7 @@ pub(crate) fn validate_core_simplicity_covenant_data(
     value: u64,
     covenant_data: &[u8],
 ) -> Result<(), TxError> {
-    if value == 0 {
-        return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
-            "CORE_SIMPLICITY value must be > 0",
-        ));
-    }
-    parse_core_simplicity_covenant_data(covenant_data)?;
+    parse_core_simplicity_covenant_data(value, covenant_data)?;
     Ok(())
 }
 

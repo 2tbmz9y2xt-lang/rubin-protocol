@@ -187,3 +187,18 @@ fn build_fails_closed_on_malformed_self_covenant() {
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
     assert_eq!(err.msg, "CORE_SIMPLICITY program_cmr parse failure");
 }
+
+#[test]
+fn build_rejects_zero_value_core_simplicity_input() {
+    // Mirrors Go: parse checks value > 0 before structure, so a structurally
+    // valid but zero-value CORE_SIMPLICITY input is rejected at build time.
+    let tx = tx_with(vec![input()], vec![]);
+    let resolved = vec![utxo(
+        0,
+        COV_TYPE_CORE_SIMPLICITY,
+        covenant([0x77u8; 32], &[]),
+    )];
+    let err = build_simplicity_tx_context(&tx, &resolved, 1, [0u8; 32]).expect_err("zero value");
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert_eq!(err.msg, "CORE_SIMPLICITY value must be > 0");
+}
