@@ -60,12 +60,13 @@ pub(crate) fn reject_core_simplicity_spend_if_present(inputs: &[UtxoEntry]) -> R
 
 /// Parses a CORE_SIMPLICITY covenant blob: rejects `value == 0`, then
 /// `program_cmr:bytes32 || state_len:CompactSize || state` (no trailing bytes,
-/// `state_len <= MAX_SIMPLICITY_STATE_BYTES`), returning the CMR and a fresh
-/// copy of the state. Mirrors Go `parseCoreSimplicityCovenantData`.
+/// `state_len <= MAX_SIMPLICITY_STATE_BYTES`), returning the CMR and a borrowed
+/// `state` slice (callers copy only when they need ownership). Mirrors Go
+/// `parseCoreSimplicityCovenantData` (returns a slice; `Build` copies).
 pub(crate) fn parse_core_simplicity_covenant_data(
     value: u64,
     covenant_data: &[u8],
-) -> Result<([u8; 32], Vec<u8>), TxError> {
+) -> Result<([u8; 32], &[u8]), TxError> {
     if value == 0 {
         return Err(TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
@@ -108,7 +109,7 @@ pub(crate) fn parse_core_simplicity_covenant_data(
             "CORE_SIMPLICITY covenant_data length mismatch",
         ));
     }
-    Ok((program_cmr, state.to_vec()))
+    Ok((program_cmr, state))
 }
 
 /// Validates a CORE_SIMPLICITY creation output's `covenant_data`: `value > 0`

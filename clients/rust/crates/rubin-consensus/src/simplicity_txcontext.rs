@@ -105,6 +105,7 @@ pub fn build_simplicity_tx_context(
         output_count,
         tx_kind: tx.tx_kind,
     };
+
     let mut ctx = SimplicityTxContext {
         base,
         input_views: Vec::with_capacity(resolved_inputs.len()),
@@ -140,7 +141,7 @@ fn populate_simplicity_tx_context_views(
             parse_core_simplicity_covenant_data(entry.value, &entry.covenant_data)?;
         ctx.self_sources.push(SimplicityTxContextSelfSource {
             program_cmr,
-            state,
+            state: state.to_vec(),
             value: entry.value,
             is_core_simplicity: true,
         });
