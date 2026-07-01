@@ -4,7 +4,7 @@ use crate::constants::{
     COV_TYPE_CORE_SIMPLICITY, COV_TYPE_P2PK, MAX_TX_INPUTS, MAX_TX_OUTPUTS, SIGHASH_ALL,
 };
 use crate::error::ErrorCode;
-use crate::tx::{Tx, TxInput, TxOutput};
+use crate::tx::{DaChunkCore, Tx, TxInput, TxOutput};
 use crate::txcontext::Uint128;
 use crate::utxo_basic::UtxoEntry;
 
@@ -99,7 +99,14 @@ fn build_populates_base_views_self_and_fresh_copies() {
     let mut src = covenant(cmr, &state);
 
     let mut tx = tx_with(vec![input(), input()], vec![p2pk(u64::MAX), p2pk(1)]);
+    // tx_kind=0x02 with a valid da_chunk_core so the tx is well-formed in both
+    // clients (RUB-500 core ignores DA; the DA view + validation is RUB-501).
     tx.tx_kind = 2;
+    tx.da_chunk_core = Some(DaChunkCore {
+        da_id: [0u8; 32],
+        chunk_index: 0,
+        chunk_hash: [0u8; 32],
+    });
     tx.tx_nonce = 99;
     tx.locktime = 12345;
     let resolved = vec![
