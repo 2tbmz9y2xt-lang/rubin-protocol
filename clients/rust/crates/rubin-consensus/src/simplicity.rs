@@ -48,6 +48,33 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Applies the shared Simplicity execution budget cap. Mirrors Go
+/// `simplicity.ChargeCost` (budget failure caps the meter at `MAX_EXEC_COST`).
+pub fn charge_cost(current: u64, cost: u64) -> Result<u64, Error> {
+    if current > MAX_EXEC_COST || cost > MAX_EXEC_COST - current {
+        return Err(Error {
+            code: ErrorCode::BudgetExceeded,
+        });
+    }
+    Ok(current + cost)
+}
+
+/// Returns the in-range descriptor_hash access cost. Mirrors Go
+/// `simplicity.DescriptorHashAccessCost`.
+pub fn descriptor_hash_access_cost(descriptor_len: u64) -> Result<u64, Error> {
+    if DESCRIPTOR_HASH_BYTE_COST != 0
+        && descriptor_len > (u64::MAX - DESCRIPTOR_HASH_BASE_COST) / DESCRIPTOR_HASH_BYTE_COST
+    {
+        return Err(Error {
+            code: ErrorCode::BudgetExceeded,
+        });
+    }
+    charge_cost(
+        0,
+        DESCRIPTOR_HASH_BASE_COST + DESCRIPTOR_HASH_BYTE_COST * descriptor_len,
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
 pub struct DecodeOptions { pub semantics_version: u32, pub covenant_program_cmr: Option<[u8; 32]> }

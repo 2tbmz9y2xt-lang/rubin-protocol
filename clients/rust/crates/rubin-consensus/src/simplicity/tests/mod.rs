@@ -1369,3 +1369,31 @@ fn error_code(s: &str) -> Option<ErrorCode> {
     .into_iter()
     .find(|code| code.as_str() == s)
 }
+
+#[test]
+fn descriptor_hash_access_cost_boundaries() {
+    // Mirrors Go TestDescriptorHashAccessCostBoundaries: pin the in-range cost, the
+    // exact MAX_EXEC_COST boundary (no error), the one-past budget reject, and the
+    // pre-charge overflow guard that the txcontext oversize test never reaches.
+    assert_eq!(
+        descriptor_hash_access_cost(3).expect("in range"),
+        DESCRIPTOR_HASH_BASE_COST + 3 * DESCRIPTOR_HASH_BYTE_COST
+    );
+    let max_len = (MAX_EXEC_COST - DESCRIPTOR_HASH_BASE_COST) / DESCRIPTOR_HASH_BYTE_COST;
+    assert_eq!(
+        descriptor_hash_access_cost(max_len).expect("max boundary"),
+        MAX_EXEC_COST
+    );
+    assert_eq!(
+        descriptor_hash_access_cost(max_len + 1)
+            .expect_err("over budget")
+            .code,
+        ErrorCode::BudgetExceeded
+    );
+    assert_eq!(
+        descriptor_hash_access_cost(u64::MAX)
+            .expect_err("overflow guard")
+            .code,
+        ErrorCode::BudgetExceeded
+    );
+}

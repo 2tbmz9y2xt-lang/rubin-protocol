@@ -11,10 +11,13 @@ use crate::constants::{
     MAX_TX_OUTPUTS, SIMPLICITY_MAX_GROUP_INPUTS,
 };
 use crate::error::{ErrorCode, TxError};
+use crate::hash::sha3_256;
+use crate::simplicity;
 use crate::simplicity_covenant::parse_core_simplicity_covenant_data;
 use crate::tx::{DaCommitCore, Tx, TxOutput};
 use crate::txcontext::Uint128;
 use crate::utxo_basic::UtxoEntry;
+use crate::vault::output_descriptor_bytes;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SimplicityTxContextBase {
@@ -101,6 +104,46 @@ struct SimplicityTxContextSelfSource {
     is_core_simplicity: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SimplicityTxContextDescriptorHashResult {
+    pub hash: [u8; 32],
+    pub present: bool,
+}
+
+/// Shared per-access execution meter for the descriptor_hash intrinsics. Mirrors
+/// Go `SimplicityTxContextMeter`; a budget failure caps `cost` at `MAX_EXEC_COST`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SimplicityTxContextMeter {
+    cost: u64,
+}
+
+impl SimplicityTxContextMeter {
+    pub fn cost(&self) -> u64 {
+        self.cost
+    }
+
+    fn charge(&mut self, cost: u64) -> Result<(), simplicity::Error> {
+        match simplicity::charge_cost(self.cost, cost) {
+            Ok(next) => {
+                self.cost = next;
+                Ok(())
+            }
+            Err(err) => {
+                self.cost = simplicity::MAX_EXEC_COST;
+                Err(err)
+            }
+        }
+    }
+}
+
+// Index-aligned with the resolved inputs / tx outputs; the descriptor bytes are
+// copied at build time so accessor hashes never alias the source covenant_data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SimplicityTxContextDescriptorSource {
+    covenant_type: u16,
+    covenant_data: Vec<u8>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SimplicityTxContext {
     pub base: SimplicityTxContextBase,
@@ -112,6 +155,9 @@ pub struct SimplicityTxContext {
     group_inputs: BTreeMap<[u8; 32], Vec<SimplicityTxContextGroupEntry>>,
     group_outputs: BTreeMap<[u8; 32], Vec<SimplicityTxContextGroupEntry>>,
     da_view: SimplicityTxContextDaView,
+    // Index-aligned descriptor sources feeding the descriptor_hash intrinsics.
+    input_descriptors: Vec<SimplicityTxContextDescriptorSource>,
+    output_descriptors: Vec<SimplicityTxContextDescriptorSource>,
 }
 
 fn parse_err(msg: &'static str) -> TxError {
@@ -166,6 +212,8 @@ pub fn build_simplicity_tx_context(
         group_inputs: BTreeMap::new(),
         group_outputs: BTreeMap::new(),
         da_view: SimplicityTxContextDaView::default(),
+        input_descriptors: Vec::with_capacity(resolved_inputs.len()),
+        output_descriptors: Vec::with_capacity(tx.outputs.len()),
     };
     populate_simplicity_tx_context_views(&mut ctx, tx, resolved_inputs)?;
     Ok(Some(ctx))
@@ -197,6 +245,11 @@ fn populate_simplicity_tx_context_input_views(
             value: entry.value,
             covenant_type: entry.covenant_type,
         });
+        ctx.input_descriptors
+            .push(SimplicityTxContextDescriptorSource {
+                covenant_type: entry.covenant_type,
+                covenant_data: entry.covenant_data.clone(),
+            });
         if entry.covenant_type != COV_TYPE_CORE_SIMPLICITY {
             ctx.self_sources.push(SimplicityTxContextSelfSource {
                 program_cmr: [0u8; 32],
@@ -241,6 +294,11 @@ fn populate_simplicity_tx_context_output_views(
             value: out.value,
             covenant_type: out.covenant_type,
         });
+        ctx.output_descriptors
+            .push(SimplicityTxContextDescriptorSource {
+                covenant_type: out.covenant_type,
+                covenant_data: out.covenant_data.clone(),
+            });
         if out.covenant_type != COV_TYPE_CORE_SIMPLICITY {
             continue;
         }
@@ -393,6 +451,57 @@ impl SimplicityTxContext {
                 .unwrap_or_default(),
         })
     }
+
+    /// The descriptor_hash intrinsic for input `input_index`: charges the shared
+    /// meter and returns sha3-256 of the input's output-descriptor bytes (== its
+    /// lock_id), or a not-present miss for an out-of-range index. Mirrors Go
+    /// `InputDescriptorHash`.
+    pub fn input_descriptor_hash(
+        &self,
+        input_index: u16,
+        meter: &mut SimplicityTxContextMeter,
+    ) -> Result<SimplicityTxContextDescriptorHashResult, simplicity::Error> {
+        descriptor_hash(&self.input_descriptors, input_index, meter)
+    }
+
+    /// The descriptor_hash intrinsic for output `output_index`. Mirrors Go
+    /// `OutputDescriptorHash`.
+    pub fn output_descriptor_hash(
+        &self,
+        output_index: u16,
+        meter: &mut SimplicityTxContextMeter,
+    ) -> Result<SimplicityTxContextDescriptorHashResult, simplicity::Error> {
+        descriptor_hash(&self.output_descriptors, output_index, meter)
+    }
+}
+
+/// Shared descriptor_hash logic: an out-of-range index charges `INTRINSIC_MISS_COST`
+/// and returns a not-present result; otherwise it charges the per-access descriptor
+/// cost and returns sha3-256 of the descriptor bytes. A budget failure saturates the
+/// meter at `MAX_EXEC_COST`. Mirrors Go `SimplicityTxContext.descriptorHash` — the
+/// Rust `&mut` meter makes Go's nil-meter branch statically unreachable.
+fn descriptor_hash(
+    sources: &[SimplicityTxContextDescriptorSource],
+    index: u16,
+    meter: &mut SimplicityTxContextMeter,
+) -> Result<SimplicityTxContextDescriptorHashResult, simplicity::Error> {
+    let Some(source) = sources.get(index as usize) else {
+        meter.charge(simplicity::INTRINSIC_MISS_COST)?;
+        return Ok(SimplicityTxContextDescriptorHashResult::default());
+    };
+    let desc = output_descriptor_bytes(source.covenant_type, &source.covenant_data);
+    let cost = match simplicity::descriptor_hash_access_cost(desc.len() as u64) {
+        Ok(cost) => cost,
+        Err(err) => {
+            meter.cost = simplicity::MAX_EXEC_COST;
+            return Err(err);
+        }
+    };
+    meter.charge(cost)?;
+    Ok(SimplicityTxContextDescriptorHashResult {
+        hash: sha3_256(&desc),
+        present: true,
+    })
 }
 
 #[cfg(test)]
