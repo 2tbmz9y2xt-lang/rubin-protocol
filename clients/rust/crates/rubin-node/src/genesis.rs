@@ -219,7 +219,11 @@ fn validate_suite_registry_param_len(value: u64) -> Result<u64, String> {
 }
 
 fn validate_suite_registry_item(item: &GenesisSuiteParams) -> Result<SuiteParams, String> {
-    if item.suite_id == SUITE_ID_SENTINEL || item.verify_cost == 0 {
+    // Reject structural ids (0xF0..=0xFE) here (mirror of Go) so untrusted genesis can't panic `with_suites`.
+    if item.suite_id == SUITE_ID_SENTINEL
+        || rubin_consensus::suite_registry::is_structural_witness_carrier_suite_id(item.suite_id)
+        || item.verify_cost == 0
+    {
         return Err("bad suite_registry".to_string());
     }
     let pubkey_len = validate_suite_registry_param_len(item.pubkey_len)?;
@@ -1121,6 +1125,21 @@ mod tests {
         assert_eq!(err, "bad suite_registry");
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn validate_suite_registry_item_rejects_structural_carrier() {
+        let item = GenesisSuiteParams {
+            suite_id: rubin_consensus::constants::SUITE_ID_SIMPLICITY_ENVELOPE,
+            pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+            sig_len: ML_DSA_87_SIG_BYTES,
+            verify_cost: VERIFY_COST_ML_DSA_87,
+            alg_name: "ML-DSA-87".to_string(),
+        };
+        assert_eq!(
+            super::validate_suite_registry_item(&item).unwrap_err(),
+            "bad suite_registry"
+        );
     }
 
     #[test]

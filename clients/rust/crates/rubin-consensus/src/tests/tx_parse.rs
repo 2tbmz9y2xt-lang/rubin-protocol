@@ -584,17 +584,11 @@ fn pow_check_rejects_invalid_header_length_before_target() {
 fn compact_size(n: usize) -> Vec<u8> {
     if n < 0xfd {
         vec![n as u8]
-    } else if n <= 0xffff {
+    } else {
+        // Test envelopes never exceed u16 lengths (the envelope cap is 32_768 bytes),
+        // so only the single-byte and 3-byte (0xfd) compactSize forms are needed.
         let mut v = vec![0xfd];
         v.extend_from_slice(&(n as u16).to_le_bytes());
-        v
-    } else if n <= 0xffff_ffff {
-        let mut v = vec![0xfe];
-        v.extend_from_slice(&(n as u32).to_le_bytes());
-        v
-    } else {
-        let mut v = vec![0xff];
-        v.extend_from_slice(&(n as u64).to_le_bytes());
         v
     }
 }
@@ -624,6 +618,24 @@ fn envelope_witness_tx(suite: u8, pubkey: &[u8], sig: &[u8]) -> Vec<u8> {
     tx.extend_from_slice(sig);
     tx.push(0x00); // da_payload_len
     tx
+}
+
+#[test]
+fn parse_tx_simplicity_envelope_witness_len_overflow_rejected() {
+    // witness_len = u64::MAX (0xFF compactSize) exceeds isize::MAX → TX_ERR_PARSE (mirror of Go).
+    let mut sig = vec![0x01u8]; // version
+    sig.push(0x00); // program_len = 0 (minimal)
+    sig.push(0xff); // witness_len: 64-bit compactSize form
+    sig.extend_from_slice(&u64::MAX.to_le_bytes());
+    sig.push(SIGHASH_ALL); // trailing sighash byte (stripped before parse)
+    let err = parse_tx(&envelope_witness_tx(
+        SUITE_ID_SIMPLICITY_ENVELOPE,
+        &[],
+        &sig,
+    ))
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "Simplicity witness_len overflows int");
 }
 
 #[test]

@@ -22,8 +22,6 @@ pub struct SuiteParams {
     pub alg_name: &'static str,
 }
 
-/// Maps suite IDs to their consensus parameters. Single source of truth for
-/// per-suite constants, replacing scattered hardcoded ML_DSA_87_* constants.
 /// Reports whether `suite_id` is reserved for a structural witness carrier (e.g.
 /// the §5.4 Simplicity envelope, 0xF0) rather than native cryptographic
 /// verification. Mirror of Go `IsStructuralWitnessCarrierSuiteID`.
@@ -31,6 +29,8 @@ pub fn is_structural_witness_carrier_suite_id(suite_id: u8) -> bool {
     (SUITE_ID_SIMPLICITY_ENVELOPE..=0xfe).contains(&suite_id)
 }
 
+/// Maps suite IDs to their consensus parameters. Single source of truth for
+/// per-suite constants, replacing scattered hardcoded ML_DSA_87_* constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuiteRegistry {
     suites: BTreeMap<u8, SuiteParams>,

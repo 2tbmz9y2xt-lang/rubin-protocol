@@ -405,8 +405,8 @@ fn validate_simplicity_envelope_signature(signature: &[u8]) -> Result<(), TxErro
     }
     r.read_bytes(program_len_u64 as usize)?;
     let (witness_len_u64, _) = read_compact_size(&mut r)?;
-    // Go rejects witness_len > math.MaxInt (== i64::MAX on the 64-bit consensus target).
-    if witness_len_u64 > i64::MAX as u64 {
+    // `isize::MAX` == Go's `math.MaxInt` on every target: byte-identical, and blocks a 32-bit `as usize` truncation.
+    if witness_len_u64 > isize::MAX as u64 {
         return Err(TxError::new(
             ErrorCode::TxErrParse,
             "Simplicity witness_len overflows int",
