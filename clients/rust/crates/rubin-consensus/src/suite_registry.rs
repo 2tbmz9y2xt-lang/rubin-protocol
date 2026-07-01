@@ -1,5 +1,6 @@
 use crate::constants::{
-    ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
+    ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SIMPLICITY_ENVELOPE,
+    VERIFY_COST_ML_DSA_87,
 };
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,6 +24,13 @@ pub struct SuiteParams {
 
 /// Maps suite IDs to their consensus parameters. Single source of truth for
 /// per-suite constants, replacing scattered hardcoded ML_DSA_87_* constants.
+/// Reports whether `suite_id` is reserved for a structural witness carrier (e.g.
+/// the §5.4 Simplicity envelope, 0xF0) rather than native cryptographic
+/// verification. Mirror of Go `IsStructuralWitnessCarrierSuiteID`.
+pub fn is_structural_witness_carrier_suite_id(suite_id: u8) -> bool {
+    (SUITE_ID_SIMPLICITY_ENVELOPE..=0xfe).contains(&suite_id)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuiteRegistry {
     suites: BTreeMap<u8, SuiteParams>,
@@ -66,6 +74,15 @@ impl SuiteRegistry {
     /// custom rotation deployments or tests that need additional suites beyond
     /// the default (e.g. `CryptoRotationDescriptor::validate` with old→new transition).
     pub fn with_suites(suites: BTreeMap<u8, SuiteParams>) -> Self {
+        // Structural-range guard (§5.4): suite IDs 0xF0..=0xFE are structural
+        // witness carriers, not native cryptographic suites, and must never be
+        // registered as one. Mirror of the Go suite-registry panic.
+        for &suite_id in suites.keys() {
+            assert!(
+                !is_structural_witness_carrier_suite_id(suite_id),
+                "structural witness carrier suite 0x{suite_id:02x} cannot be registered as native crypto suite",
+            );
+        }
         Self { suites }
     }
 
