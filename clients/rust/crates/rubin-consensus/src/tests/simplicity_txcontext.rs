@@ -1,10 +1,11 @@
 use super::*;
 use crate::compactsize::encode_compact_size;
 use crate::constants::{
-    COV_TYPE_CORE_SIMPLICITY, COV_TYPE_P2PK, MAX_TX_INPUTS, MAX_TX_OUTPUTS, SIGHASH_ALL,
+    COV_TYPE_CORE_SIMPLICITY, COV_TYPE_P2PK, MAX_DA_CHUNK_COUNT, MAX_DA_MANIFEST_BYTES_PER_TX,
+    MAX_TX_INPUTS, MAX_TX_OUTPUTS, SIGHASH_ALL, SIMPLICITY_MAX_GROUP_INPUTS,
 };
 use crate::error::ErrorCode;
-use crate::tx::{DaChunkCore, Tx, TxInput, TxOutput};
+use crate::tx::{DaChunkCore, DaCommitCore, Tx, TxInput, TxOutput};
 use crate::txcontext::Uint128;
 use crate::utxo_basic::UtxoEntry;
 
@@ -55,6 +56,43 @@ fn p2pk(value: u64) -> TxOutput {
         value,
         covenant_type: COV_TYPE_P2PK,
         covenant_data: vec![],
+    }
+}
+
+fn core_out(value: u64, program_cmr: [u8; 32], state: &[u8]) -> TxOutput {
+    TxOutput {
+        value,
+        covenant_type: COV_TYPE_CORE_SIMPLICITY,
+        covenant_data: covenant(program_cmr, state),
+    }
+}
+
+fn da_commit(chunk_count: u16, batch_sig: Vec<u8>) -> DaCommitCore {
+    DaCommitCore {
+        da_id: [0u8; 32],
+        chunk_count,
+        retl_domain_id: [0u8; 32],
+        batch_number: 0,
+        tx_data_root: [0u8; 32],
+        state_root: [0u8; 32],
+        withdrawals_root: [0u8; 32],
+        batch_sig_suite: 0,
+        batch_sig,
+    }
+}
+
+fn chunk_core(da_id: [u8; 32], chunk_index: u16, chunk_hash: [u8; 32]) -> DaChunkCore {
+    DaChunkCore {
+        da_id,
+        chunk_index,
+        chunk_hash,
+    }
+}
+
+fn ge(state: &[u8], value: u64) -> SimplicityTxContextGroupEntry {
+    SimplicityTxContextGroupEntry {
+        state: state.to_vec(),
+        value,
     }
 }
 
@@ -167,6 +205,10 @@ fn build_populates_base_views_self_and_fresh_copies() {
         .self_view(2, SIGHASH_ALL, digest)
         .expect_err("out of range");
     assert_eq!(e2.code, ErrorCode::TxErrParse);
+
+    // Same-CMR view fail-closed on a non-CORE_SIMPLICITY input (input 1 is P2PK).
+    let e3 = ctx.same_cmr_view(1).expect_err("non-core same-cmr");
+    assert_eq!(e3.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
 #[test]
@@ -208,4 +250,182 @@ fn build_rejects_zero_value_core_simplicity_input() {
     let err = build_simplicity_tx_context(&tx, &resolved, 1, [0u8; 32]).expect_err("zero value");
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
     assert_eq!(err.msg, "CORE_SIMPLICITY value must be > 0");
+}
+
+#[test]
+fn rejects_zero_value_core_simplicity_output() {
+    // Mirrors Go: the output covenant is parsed too — a zero-value output fails closed.
+    let cmr = [0xbau8; 32];
+    let tx = tx_with(vec![input()], vec![core_out(0, cmr, &[])]);
+    let resolved = vec![utxo(1, COV_TYPE_CORE_SIMPLICITY, covenant(cmr, &[]))];
+    let err = build_simplicity_tx_context(&tx, &resolved, 1, [0u8; 32]).expect_err("zero output");
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert_eq!(err.msg, "CORE_SIMPLICITY value must be > 0");
+}
+
+#[test]
+fn same_cmr_view_projection() {
+    // Group both inputs AND outputs by program_cmr (symmetric B-1), ascending
+    // order, foreign CMRs excluded, returned entries are fresh copies.
+    let cmr_a = [0xa0u8; 32];
+    let cmr_b = [0xb0u8; 32];
+    let tx = tx_with(
+        vec![input(), input(), input()],
+        vec![core_out(44, cmr_a, &[0x04]), core_out(55, cmr_b, &[0x05])],
+    );
+    let resolved = vec![
+        utxo(11, COV_TYPE_CORE_SIMPLICITY, covenant(cmr_a, &[0x01])),
+        utxo(22, COV_TYPE_CORE_SIMPLICITY, covenant(cmr_b, &[0x02])),
+        utxo(33, COV_TYPE_CORE_SIMPLICITY, covenant(cmr_a, &[0x03])),
+    ];
+    let ctx = build_simplicity_tx_context(&tx, &resolved, 7, [0u8; 32])
+        .expect("build")
+        .expect("context");
+
+    let mut view_a = ctx.same_cmr_view(0).expect("view a");
+    assert_eq!(view_a.program_cmr, cmr_a);
+    assert_eq!(view_a.inputs, vec![ge(&[0x01], 11), ge(&[0x03], 33)]);
+    assert_eq!(view_a.outputs, vec![ge(&[0x04], 44)]);
+
+    // Projection isolation: mutating the returned view cannot alias the ctx.
+    view_a.inputs[0].state[0] = 0xff;
+    assert_eq!(
+        ctx.same_cmr_view(0).expect("view a again").inputs[0].state,
+        vec![0x01]
+    );
+
+    let view_b = ctx.same_cmr_view(1).expect("view b");
+    assert_eq!(view_b.program_cmr, cmr_b);
+    assert_eq!(view_b.inputs, vec![ge(&[0x02], 22)]);
+    assert_eq!(view_b.outputs, vec![ge(&[0x05], 55)]);
+
+    let err = ctx.same_cmr_view(3).expect_err("out of range");
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+}
+
+#[test]
+fn same_cmr_input_cap() {
+    let cmr = [0xc0u8; 32];
+    let n = SIMPLICITY_MAX_GROUP_INPUTS + 1; // 9
+    let mut resolved: Vec<UtxoEntry> = (0..n)
+        .map(|_| utxo(1, COV_TYPE_CORE_SIMPLICITY, covenant(cmr, &[])))
+        .collect();
+    let tx = tx_with(vec![input(); n], vec![]);
+
+    // Exactly SIMPLICITY_MAX_GROUP_INPUTS (8) same-CMR inputs sit at the cap -> pass.
+    let tx_exact = tx_with(vec![input(); SIMPLICITY_MAX_GROUP_INPUTS], vec![]);
+    build_simplicity_tx_context(
+        &tx_exact,
+        &resolved[..SIMPLICITY_MAX_GROUP_INPUTS],
+        1,
+        [0u8; 32],
+    )
+    .expect("8 same-cmr inputs pass the cap");
+
+    // 9 inputs but the 9th splits into its own CMR group -> pass.
+    resolved[SIMPLICITY_MAX_GROUP_INPUTS].covenant_data = covenant([0xc1u8; 32], &[]);
+    build_simplicity_tx_context(&tx, &resolved, 1, [0u8; 32]).expect("9 split-cmr inputs pass");
+
+    // 9 inputs all in one CMR group -> fail closed.
+    resolved[SIMPLICITY_MAX_GROUP_INPUTS].covenant_data = covenant(cmr, &[]);
+    let err = build_simplicity_tx_context(&tx, &resolved, 1, [0u8; 32]).expect_err("9 same-cmr");
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert_eq!(
+        err.msg,
+        "CORE_SIMPLICITY same-cmr input group exceeds limit"
+    );
+}
+
+#[test]
+fn da_view_kinds_and_rejects() {
+    let da_id = [0x01u8; 32];
+    let resolved = vec![utxo(
+        1,
+        COV_TYPE_CORE_SIMPLICITY,
+        covenant([0xd0u8; 32], &[]),
+    )];
+    let da_view_of = |tx_kind: u8,
+                      commit: Option<DaCommitCore>,
+                      chunk: Option<DaChunkCore>|
+     -> Result<SimplicityTxContextDaView, TxError> {
+        let mut tx = tx_with(vec![input()], vec![]);
+        tx.tx_kind = tx_kind;
+        tx.da_commit_core = commit;
+        tx.da_chunk_core = chunk;
+        Ok(build_simplicity_tx_context(&tx, &resolved, 1, [0u8; 32])?
+            .expect("context")
+            .da_view)
+    };
+
+    // commit (0x01): copies commit fields, excludes batch_sig, ignores stale chunk.
+    let mut commit_core = da_commit(2, vec![0xaa, 0xbb]);
+    commit_core.da_id = da_id;
+    commit_core.batch_number = 9;
+    let commit = da_view_of(
+        0x01,
+        Some(commit_core),
+        Some(chunk_core(da_id, 7, [0u8; 32])),
+    )
+    .expect("commit");
+    assert_eq!(
+        commit,
+        SimplicityTxContextDaView {
+            kind: SimplicityTxContextDaViewKind::Commit,
+            commit: SimplicityTxContextDaCommitView {
+                da_id,
+                chunk_count: 2,
+                batch_number: 9,
+                ..Default::default()
+            },
+            chunk: SimplicityTxContextDaChunkView::default(),
+        }
+    );
+
+    // absent (0x00) ignores stale cores; chunk (0x02) ignores stale commit.
+    let absent = da_view_of(
+        0x00,
+        Some(da_commit(0, vec![])),
+        Some(chunk_core(da_id, 1, [0u8; 32])),
+    )
+    .expect("absent");
+    assert_eq!(absent, SimplicityTxContextDaView::default());
+
+    let chunk_hash = [0x03u8; 32];
+    let chunk = da_view_of(
+        0x02,
+        Some(da_commit(0, vec![])),
+        Some(chunk_core(da_id, 4, chunk_hash)),
+    )
+    .expect("chunk");
+    assert_eq!(
+        chunk,
+        SimplicityTxContextDaView {
+            kind: SimplicityTxContextDaViewKind::Chunk,
+            commit: SimplicityTxContextDaCommitView::default(),
+            chunk: SimplicityTxContextDaChunkView {
+                da_id,
+                chunk_index: 4,
+                chunk_hash
+            },
+        }
+    );
+
+    // Every malformed / unsupported DA shape fails closed with TX_ERR_PARSE.
+    let big_sig = vec![0u8; usize::try_from(MAX_DA_MANIFEST_BYTES_PER_TX + 1).expect("fits usize")];
+    let over_chunks = u16::try_from(MAX_DA_CHUNK_COUNT + 1).expect("fits u16");
+    let over_index = u16::try_from(MAX_DA_CHUNK_COUNT).expect("fits u16");
+    #[rustfmt::skip]
+    let rejects: [(&str, u8, Option<DaCommitCore>, Option<DaChunkCore>); 7] = [
+        ("missing commit core", 0x01, None, None),
+        ("missing chunk core", 0x02, None, None),
+        ("unsupported tx kind", 0x03, None, None),
+        ("zero commit chunk count", 0x01, Some(da_commit(0, vec![])), None),
+        ("too many commit chunks", 0x01, Some(da_commit(over_chunks, vec![])), None),
+        ("oversized batch sig", 0x01, Some(da_commit(1, big_sig)), None),
+        ("chunk index out of range", 0x02, None, Some(chunk_core(da_id, over_index, [0u8; 32]))),
+    ];
+    for (name, kind, commit, chunk) in rejects {
+        let code = da_view_of(kind, commit, chunk).expect_err(name).code;
+        assert_eq!(code, ErrorCode::TxErrParse, "{name}");
+    }
 }
