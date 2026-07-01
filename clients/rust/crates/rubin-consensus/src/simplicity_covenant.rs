@@ -58,29 +58,30 @@ pub(crate) fn reject_core_simplicity_spend_if_present(inputs: &[UtxoEntry]) -> R
     Ok(())
 }
 
-/// Validates a CORE_SIMPLICITY creation output's `covenant_data`:
-/// `program_cmr:bytes32 || state_len:CompactSize || state`, with
-/// `value > 0`, `state_len <= MAX_SIMPLICITY_STATE_BYTES`, and the total
-/// length matching exactly (no trailing bytes). Mirrors Go
-/// `validateCoreSimplicityCovenantData`.
-pub(crate) fn validate_core_simplicity_covenant_data(
+/// Parses a CORE_SIMPLICITY covenant blob: rejects `value == 0`, then
+/// `program_cmr:bytes32 || state_len:CompactSize || state` (no trailing bytes,
+/// `state_len <= MAX_SIMPLICITY_STATE_BYTES`), returning the CMR and a borrowed
+/// `state` slice (callers copy only when they need ownership). Mirrors Go
+/// `parseCoreSimplicityCovenantData` (returns a slice; `Build` copies).
+pub(crate) fn parse_core_simplicity_covenant_data(
     value: u64,
     covenant_data: &[u8],
-) -> Result<(), TxError> {
+) -> Result<([u8; 32], &[u8]), TxError> {
     if value == 0 {
         return Err(TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
             "CORE_SIMPLICITY value must be > 0",
         ));
     }
-
     let mut r = Reader::new(covenant_data);
-    if r.read_bytes(32).is_err() {
-        return Err(TxError::new(
+    let cmr_bytes = r.read_bytes(32).map_err(|_| {
+        TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
             "CORE_SIMPLICITY program_cmr parse failure",
-        ));
-    }
+        )
+    })?;
+    let mut program_cmr = [0u8; 32];
+    program_cmr.copy_from_slice(cmr_bytes);
 
     let (state_len_u64, state_len_varint_bytes) = read_compact_size(&mut r).map_err(|_| {
         TxError::new(
@@ -96,18 +97,29 @@ pub(crate) fn validate_core_simplicity_covenant_data(
     }
     let state_len = state_len_u64 as usize;
 
-    if r.read_bytes(state_len).is_err() {
-        return Err(TxError::new(
+    let state = r.read_bytes(state_len).map_err(|_| {
+        TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
             "CORE_SIMPLICITY state parse failure",
-        ));
-    }
+        )
+    })?;
     if covenant_data.len() != 32 + state_len_varint_bytes + state_len {
         return Err(TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
             "CORE_SIMPLICITY covenant_data length mismatch",
         ));
     }
+    Ok((program_cmr, state))
+}
+
+/// Validates a CORE_SIMPLICITY creation output's `covenant_data`: `value > 0`
+/// and the structure parses exactly. Mirrors Go
+/// `validateCoreSimplicityCovenantData`.
+pub(crate) fn validate_core_simplicity_covenant_data(
+    value: u64,
+    covenant_data: &[u8],
+) -> Result<(), TxError> {
+    parse_core_simplicity_covenant_data(value, covenant_data)?;
     Ok(())
 }
 
