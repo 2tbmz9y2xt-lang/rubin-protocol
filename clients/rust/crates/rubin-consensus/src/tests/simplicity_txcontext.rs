@@ -429,3 +429,147 @@ fn da_view_kinds_and_rejects() {
         assert_eq!(code, ErrorCode::TxErrParse, "{name}");
     }
 }
+
+fn p2pk_out(value: u64, covenant_data: Vec<u8>) -> TxOutput {
+    TxOutput {
+        value,
+        covenant_type: COV_TYPE_P2PK,
+        covenant_data,
+    }
+}
+
+fn access_cost(descriptor: &[u8]) -> u64 {
+    simplicity::DESCRIPTOR_HASH_BASE_COST
+        + descriptor.len() as u64 * simplicity::DESCRIPTOR_HASH_BYTE_COST
+}
+
+fn descriptor_source(
+    covenant_type: u16,
+    covenant_data: Vec<u8>,
+) -> SimplicityTxContextDescriptorSource {
+    SimplicityTxContextDescriptorSource {
+        covenant_type,
+        covenant_data,
+    }
+}
+
+#[test]
+fn descriptor_hash_accessors_accumulate_cost() {
+    let cmr = [0xdau8; 32];
+    let mut input_data = vec![0x01, 0xaa, 0xbb];
+    let mut output_data = vec![0x01, 0xcc, 0xdd];
+    let tx = tx_with(
+        vec![input(), input()],
+        vec![p2pk_out(3, output_data.clone())],
+    );
+    let resolved = vec![
+        utxo(1, COV_TYPE_CORE_SIMPLICITY, covenant(cmr, &[])),
+        utxo(2, COV_TYPE_P2PK, input_data.clone()),
+    ];
+    let ctx = build_simplicity_tx_context(&tx, &resolved, 1, [0u8; 32])
+        .expect("build")
+        .expect("context");
+    // Mutating the sources after build must not affect the copied descriptors.
+    input_data[0] = 0xff;
+    output_data[0] = 0xff;
+
+    let input_desc = output_descriptor_bytes(COV_TYPE_P2PK, &[0x01, 0xaa, 0xbb]);
+    let input_cost = access_cost(&input_desc);
+    let mut meter = SimplicityTxContextMeter::default();
+    for i in 1..=2u64 {
+        let got = ctx
+            .input_descriptor_hash(1, &mut meter)
+            .expect("input hash");
+        assert!(got.present);
+        assert_eq!(got.hash, sha3_256(&input_desc));
+        assert_eq!(meter.cost(), i * input_cost);
+    }
+
+    let output_desc = output_descriptor_bytes(COV_TYPE_P2PK, &[0x01, 0xcc, 0xdd]);
+    let got = ctx
+        .output_descriptor_hash(0, &mut meter)
+        .expect("output hash");
+    assert!(got.present);
+    assert_eq!(got.hash, sha3_256(&output_desc));
+    assert_eq!(meter.cost(), 2 * input_cost + access_cost(&output_desc));
+}
+
+#[test]
+fn descriptor_hash_miss_and_budget_cross() {
+    let cmr = [0xdbu8; 32];
+    let tx = tx_with(vec![input()], vec![]);
+    let resolved = vec![utxo(1, COV_TYPE_CORE_SIMPLICITY, covenant(cmr, &[]))];
+    let ctx = build_simplicity_tx_context(&tx, &resolved, 1, [0u8; 32])
+        .expect("build")
+        .expect("context");
+
+    // Out-of-range index charges only the miss cost and reports not-present.
+    let mut miss = SimplicityTxContextMeter::default();
+    let got = ctx.input_descriptor_hash(1, &mut miss).expect("miss");
+    assert!(!got.present);
+    assert_eq!(got.hash, [0u8; 32]);
+    assert_eq!(miss.cost(), simplicity::INTRINSIC_MISS_COST);
+
+    // A meter primed one unit below the access cost saturates to MAX on charge.
+    let cost = access_cost(&output_descriptor_bytes(
+        COV_TYPE_CORE_SIMPLICITY,
+        &covenant(cmr, &[]),
+    ));
+    let mut over = SimplicityTxContextMeter {
+        cost: simplicity::MAX_EXEC_COST - cost + 1,
+    };
+    let err = ctx.input_descriptor_hash(0, &mut over).expect_err("budget");
+    assert_eq!(err.code, simplicity::ErrorCode::BudgetExceeded);
+    assert_eq!(over.cost(), simplicity::MAX_EXEC_COST);
+}
+
+#[test]
+fn descriptor_hash_error_branches() {
+    let cmr = [0xdcu8; 32];
+    let tx = tx_with(vec![input()], vec![]);
+    let resolved = vec![utxo(1, COV_TYPE_CORE_SIMPLICITY, covenant(cmr, &[]))];
+    let ctx = build_simplicity_tx_context(&tx, &resolved, 1, [0u8; 32])
+        .expect("build")
+        .expect("context");
+
+    // A miss on an already-saturated meter still fails closed.
+    let mut miss_over = SimplicityTxContextMeter {
+        cost: simplicity::MAX_EXEC_COST,
+    };
+    let err = ctx
+        .input_descriptor_hash(1, &mut miss_over)
+        .expect_err("miss over budget");
+    assert_eq!(err.code, simplicity::ErrorCode::BudgetExceeded);
+    assert_eq!(miss_over.cost(), simplicity::MAX_EXEC_COST);
+
+    // A single descriptor whose access cost alone exceeds the budget fails closed.
+    let oversize = [descriptor_source(
+        COV_TYPE_P2PK,
+        vec![0u8; usize::try_from(simplicity::MAX_EXEC_COST).expect("fits usize")],
+    )];
+    let mut meter = SimplicityTxContextMeter::default();
+    let err = descriptor_hash(&oversize, 0, &mut meter).expect_err("oversize");
+    assert_eq!(err.code, simplicity::ErrorCode::BudgetExceeded);
+    assert_eq!(meter.cost(), simplicity::MAX_EXEC_COST);
+}
+
+#[test]
+fn descriptor_hash_equals_lock_id() {
+    // The descriptor_hash intrinsic returns the covenant lock_id: sha3-256 of the
+    // output-descriptor bytes — the same value utxo_basic derives for owner auth.
+    let cmr = [0xd0u8; 32];
+    let owner = vec![0x01u8; 33];
+    let tx = tx_with(vec![input()], vec![p2pk_out(5, owner.clone())]);
+    let resolved = vec![utxo(1, COV_TYPE_CORE_SIMPLICITY, covenant(cmr, &[]))];
+    let ctx = build_simplicity_tx_context(&tx, &resolved, 1, [0u8; 32])
+        .expect("build")
+        .expect("context");
+
+    let mut meter = SimplicityTxContextMeter::default();
+    let got = ctx.output_descriptor_hash(0, &mut meter).expect("hash");
+    assert!(got.present);
+    assert_eq!(
+        got.hash,
+        sha3_256(&output_descriptor_bytes(COV_TYPE_P2PK, &owner))
+    );
+}
