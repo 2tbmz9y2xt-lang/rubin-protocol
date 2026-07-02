@@ -779,8 +779,15 @@ func TestEvaluateHostMeteringPaths(t *testing.T) {
 	host.cost = MaxExecCost
 	got, err = Program{decoded: true, intrinsics: []ContextIntrinsic{ctx}}.Evaluate(EvalOptions{Host: host})
 	assertErrorCode(t, err, ErrBudgetExceeded)
-	if !got.Accepted || got.Cost != MaxExecCost {
-		t.Fatalf("over-cap intrinsic evaluation=%+v want accepted cost=%d", got, MaxExecCost)
+	if !got.Accepted || got.Cost != MaxExecCost || host.reads != 0 {
+		t.Fatalf("over-cap intrinsic evaluation=%+v host=%+v want accepted cost=%d before read", got, host, MaxExecCost)
+	}
+	host = newTestEvalHost()
+	host.cost = MaxExecCost - IntrinsicReadCost
+	got, err = Program{decoded: true, intrinsics: []ContextIntrinsic{ctx, ctx}}.Evaluate(EvalOptions{Host: host})
+	assertErrorCode(t, err, ErrBudgetExceeded)
+	if !got.Accepted || got.Cost != MaxExecCost || host.reads != 1 {
+		t.Fatalf("at-cap second intrinsic evaluation=%+v host=%+v want one read then budget", got, host)
 	}
 
 	overSteps := MaxExecCost/StepCost + 1

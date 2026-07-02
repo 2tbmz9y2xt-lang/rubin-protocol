@@ -71,6 +71,9 @@ func (p Program) evaluateIntrinsics(opts EvalOptions) (EvalResult, error) {
 		}
 	}
 	for _, intrinsic := range p.intrinsics {
+		if opts.Host.Cost() >= MaxExecCost {
+			return EvalResult{Accepted: true, Cost: MaxExecCost}, &Error{Code: ErrBudgetExceeded}
+		}
 		result, err := opts.Host.ReadIntrinsic(intrinsic)
 		if err != nil {
 			return EvalResult{Accepted: result.Accepted, Cost: opts.Host.Cost()}, err
