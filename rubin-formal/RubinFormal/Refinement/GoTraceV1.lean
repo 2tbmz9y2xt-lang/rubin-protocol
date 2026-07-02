@@ -67,7 +67,7 @@ structure SimplicityExecOut where
   accepted : Option Bool
   finalCounter : Option Nat
 
-def goTraceFixturesDigestSHA3_256 : String := "02a969f064d8709b9cfc088341cd9eb078af08c0fd7b31f1ff9f5ee4d6d56db8"
+def goTraceFixturesDigestSHA3_256 : String := "04e1ddb443219bb2b2fc371e405cd54c1fd3f60a8d135a33382ed451a8a3c43a"
 
 def parseOuts : List ParseOut := [
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },
@@ -116,7 +116,11 @@ def weightOuts : List WeightOut := [
   { id := "WEIGHT-01", ok := true, err := "", weight := some 242, daBytes := some 0, anchorBytes := some 0 },
   { id := "WEIGHT-03", ok := true, err := "", weight := some 374, daBytes := some 0, anchorBytes := some 0 },
   { id := "WEIGHT-04", ok := true, err := "", weight := some 1107, daBytes := some 1, anchorBytes := some 32 },
-  { id := "WEIGHT-05", ok := true, err := "", weight := some 507, daBytes := some 1, anchorBytes := some 0 }
+  { id := "WEIGHT-05", ok := true, err := "", weight := some 507, daBytes := some 1, anchorBytes := some 0 },
+  { id := "WEIGHT-08", ok := true, err := "", weight := some 313, daBytes := some 0, anchorBytes := some 0 },
+  { id := "WEIGHT-09", ok := true, err := "", weight := some 319, daBytes := some 0, anchorBytes := some 0 },
+  { id := "WEIGHT-10", ok := true, err := "", weight := some 316, daBytes := some 0, anchorBytes := some 0 },
+  { id := "WEIGHT-11", ok := true, err := "", weight := some 310, daBytes := some 0, anchorBytes := some 0 }
 ]
 
 def validationOrderOuts : List ValidationOrderOut := [
