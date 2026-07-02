@@ -90,6 +90,12 @@ pub const SIGHASH_ANYONECANPAY: u8 = 0x80;
 
 pub const VERIFY_COST_ML_DSA_87: u64 = 8;
 pub const VERIFY_COST_UNKNOWN_SUITE: u64 = 64;
+/// CANONICAL §9: base verify cost priced to a `0xF0` Simplicity envelope
+/// (§5.4) witness item. Kept as its own named constant (not shared with
+/// `VERIFY_COST_UNKNOWN_SUITE`, though both are 64 today) so a future
+/// change to the unknown-suite floor does not silently re-price the
+/// Simplicity envelope. Mirror of Go `SIMPLICITY_BASE_VERIFY_COST`.
+pub const SIMPLICITY_BASE_VERIFY_COST: u64 = 64;
 
 /// EXT_BASE_COST is a policy/activation prerequisite constant for CORE_EXT tracks.
 /// It is defined as a stable numeric baseline derived from devnet-style measurement

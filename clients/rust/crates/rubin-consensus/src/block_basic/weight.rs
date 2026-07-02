@@ -1,6 +1,7 @@
 use crate::constants::{
     COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES,
-    SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL, VERIFY_COST_ML_DSA_87, VERIFY_COST_UNKNOWN_SUITE,
+    SIMPLICITY_BASE_VERIFY_COST, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
+    SUITE_ID_SIMPLICITY_ENVELOPE, VERIFY_COST_ML_DSA_87, VERIFY_COST_UNKNOWN_SUITE,
     WITNESS_DISCOUNT_DIVISOR,
 };
 use crate::error::{ErrorCode, TxError};
@@ -111,6 +112,10 @@ pub(super) fn tx_weight_and_stats(tx: &Tx) -> Result<(u64, u64, u64), TxError> {
 fn legacy_sig_cost(witness: &WitnessItem) -> Result<u64, TxError> {
     Ok(match witness.suite_id {
         SUITE_ID_SENTINEL => 0,
+        // CANONICAL §9 / mirror of Go `txWeightAndStats`: a 0xF0 Simplicity
+        // envelope witness is priced at its own base cost, not the
+        // unknown-suite floor (numerically equal today; see the constant).
+        SUITE_ID_SIMPLICITY_ENVELOPE => SIMPLICITY_BASE_VERIFY_COST,
         SUITE_ID_ML_DSA_87 if has_expected_mldsa87_shape(witness) => VERIFY_COST_ML_DSA_87,
         SUITE_ID_ML_DSA_87 => 0,
         _ => VERIFY_COST_UNKNOWN_SUITE,
@@ -148,6 +153,12 @@ fn registry_sig_cost(
 ) -> Result<u64, TxError> {
     if witness.suite_id == SUITE_ID_SENTINEL {
         return Ok(0);
+    }
+    // CANONICAL §9 / mirror of Go `txWeightAndStatsWithRegistry`: the 0xF0
+    // Simplicity envelope is priced BEFORE the native-spend/registry lookup
+    // (it is a structural carrier, never a native crypto suite).
+    if witness.suite_id == SUITE_ID_SIMPLICITY_ENVELOPE {
+        return Ok(SIMPLICITY_BASE_VERIFY_COST);
     }
     if !native_spend.contains(witness.suite_id) {
         return Ok(VERIFY_COST_UNKNOWN_SUITE);
