@@ -215,6 +215,44 @@ func JetsRegistryHash() [32]byte {
 	return jetsRegistryHashValue
 }
 
+// ProgramEncodingHash returns the CORE_SIMPLICITY deployment-descriptor
+// program_encoding_hash commitment (CANONICAL §23.2.4, defined as SHA3-256 over
+// ProgramEncodingRulesBytes_v1). The value is a pinned literal transcribed from
+// the published rubin-spec artifact SPEC-SIMPLICITY-01-PROGRAM-ENCODING
+// (final-rules JSON), which lives in the private spec repo and is absent from
+// this public checkout (see SPEC_LOCATION.md); this package carries no
+// encoding-rules preimage, so the value is committed here, not recomputed.
+// Rust simplicity::PROGRAM_ENCODING_HASH separately pins this byte-identical
+// value; that is a corroborating second copy of the same §23.2.4 bytes reviewed
+// against the artifact, not an automated in-repo cross-client comparator.
+func ProgramEncodingHash() [32]byte {
+	return [32]byte{
+		0x27, 0xe5, 0xad, 0x52, 0x1e, 0xfd, 0xf9, 0xd1, 0x85, 0xc1, 0xc9, 0x2a, 0x3a, 0x1a, 0x4a, 0xac,
+		0xc9, 0x27, 0x6c, 0x2a, 0x5b, 0x1b, 0x85, 0x18, 0xce, 0x25, 0xc8, 0xc9, 0x73, 0xa3, 0x8a, 0xdc,
+	}
+}
+
+// ContextSchemaHash returns the CORE_SIMPLICITY deployment-descriptor
+// context_schema_hash commitment (CANONICAL §23.2.4, defined as SHA3-256 over the
+// published context-ABI artifact: the RUBIN_CONSENSUS_STATE_MACHINE §3 schema and
+// intrinsic table). The value is a pinned literal transcribed from the published
+// rubin-spec artifact SPEC-SIMPLICITY-01-CONTEXT-ABI (integrated into canon by
+// RUB-597), which lives in the private spec repo and is absent from this public
+// checkout (see SPEC_LOCATION.md); this package carries no context-ABI preimage,
+// so the value is committed here, not recomputed. Unlike program_encoding_hash
+// there is no in-repo cross-client or preimage anchor for these bytes yet: the
+// Rust context_schema_hash mirror is deferred behind the Rust freeze and the
+// shared hash-parity corpus is owned by RUB-606, both outside this single-client
+// slice. Cross-client parity for this value is therefore a deferred divergence
+// owned by those siblings under the controller-sanctioned Rust freeze, not an
+// in-scope gap for this slice; the bytes are transcribed from §23.2.4 canon.
+func ContextSchemaHash() [32]byte {
+	return [32]byte{
+		0xe8, 0x32, 0xdb, 0x30, 0x08, 0xc3, 0x55, 0x26, 0x24, 0x20, 0xc6, 0x31, 0x68, 0xc1, 0xc9, 0x78,
+		0x7a, 0x69, 0xaa, 0xc3, 0x1d, 0x15, 0xa5, 0x0a, 0x64, 0x0f, 0x03, 0x01, 0xd8, 0x41, 0x01, 0x50,
+	}
+}
+
 func decodeProgram(program []byte) (Program, error) {
 	entry, ok := programs[string(program)]
 	if !ok {
