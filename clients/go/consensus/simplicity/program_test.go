@@ -373,18 +373,10 @@ func TestSharedExecCorpusRequiresOutcomeFields(t *testing.T) {
 		cases []sharedExecCase
 		want  string
 	}{
-		{
-			name:  "missing accepted",
-			raw:   `{"cases":[{"expected_final_counter":0}]}`,
-			cases: []sharedExecCase{{ID: "VEC-SE-MISSING-ACCEPTED"}},
-			want:  "shared exec corpus case VEC-SE-MISSING-ACCEPTED missing expected_accepted",
-		},
-		{
-			name:  "missing final counter",
-			raw:   `{"cases":[{"expected_accepted":false}]}`,
-			cases: []sharedExecCase{{ID: "VEC-SE-MISSING-COUNTER"}},
-			want:  "shared exec corpus case VEC-SE-MISSING-COUNTER missing expected_final_counter",
-		},
+		{name: "missing accepted", raw: `{"cases":[{"expected_final_counter":0}]}`, cases: []sharedExecCase{{ID: "VEC-SE-MISSING-ACCEPTED"}}, want: "shared exec corpus case VEC-SE-MISSING-ACCEPTED missing expected_accepted"},
+		{name: "missing final counter", raw: `{"cases":[{"expected_accepted":false}]}`, cases: []sharedExecCase{{ID: "VEC-SE-MISSING-COUNTER"}}, want: "shared exec corpus case VEC-SE-MISSING-COUNTER missing expected_final_counter"},
+		{name: "null accepted", raw: `{"cases":[{"expected_accepted":null,"expected_final_counter":0}]}`, cases: []sharedExecCase{{ID: "VEC-SE-NULL-ACCEPTED"}}, want: "shared exec corpus case VEC-SE-NULL-ACCEPTED missing expected_accepted"},
+		{name: "null final counter", raw: `{"cases":[{"expected_accepted":false,"expected_final_counter":null}]}`, cases: []sharedExecCase{{ID: "VEC-SE-NULL-COUNTER"}}, want: "shared exec corpus case VEC-SE-NULL-COUNTER missing expected_final_counter"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -408,13 +400,10 @@ func requireSharedExecOutcomeFields(cases []sharedExecCase, raw []byte) error {
 	}
 	for i, fields := range rawCorpus.Cases {
 		id := cases[i].ID
-		if id == "" {
-			id = fmt.Sprintf("index %d", i)
-		}
-		if _, ok := fields["expected_accepted"]; !ok {
+		if raw, ok := fields["expected_accepted"]; !ok || bytes.Equal(raw, []byte("null")) {
 			return fmt.Errorf("shared exec corpus case %s missing expected_accepted", id)
 		}
-		if _, ok := fields["expected_final_counter"]; !ok {
+		if raw, ok := fields["expected_final_counter"]; !ok || bytes.Equal(raw, []byte("null")) {
 			return fmt.Errorf("shared exec corpus case %s missing expected_final_counter", id)
 		}
 	}

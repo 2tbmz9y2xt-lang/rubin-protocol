@@ -7,9 +7,8 @@ type EvalHost interface {
 }
 
 type ContextIntrinsic struct {
-	ID              uint16
+	ID, Index       uint16
 	Name, Signature string
-	Index           uint16
 }
 
 type IntrinsicResult struct{ Accepted bool }
@@ -100,11 +99,9 @@ func chargeSteps(host EvalHost, steps uint64) error {
 	return host.Charge(steps * StepCost)
 }
 
-var (
-	contextSchemaHashValue = hex32("e832db3008c355262420c63168c1c9787a69aac31d15a50a640f0301d8410150")
-	contextIntrinsicByID   = contextIntrinsicRowsByID(contextIntrinsicRows)
-	contextChainIDRow      = contextIntrinsicByID[0x0100]
-)
+var contextSchemaHashValue = hex32("e832db3008c355262420c63168c1c9787a69aac31d15a50a640f0301d8410150")
+var contextIntrinsicByID = contextIntrinsicRowsByID(contextIntrinsicRows)
+var contextChainIDRow = contextIntrinsicByID[0x0100]
 
 var contextIntrinsicRows = []ContextIntrinsic{
 	{ID: 0x0100, Name: "ctx_chain_id", Signature: "unit -> bytes32"},
