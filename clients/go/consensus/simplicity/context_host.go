@@ -62,7 +62,7 @@ func (p Program) evaluateStepProgram(opts EvalOptions) (EvalResult, error) {
 
 func (p Program) evaluateIntrinsics(opts EvalOptions) (EvalResult, error) {
 	if opts.Host == nil {
-		return EvalResult{}, &Error{Code: ErrJetDisallowed}
+		return EvalResult{}, &Error{Code: ErrDecode}
 	}
 	if p.evalSteps > 0 {
 		if err := chargeSteps(opts.Host, p.evalSteps); err != nil {

@@ -757,7 +757,7 @@ func TestEvaluateHostMeteringPaths(t *testing.T) {
 		t.Fatalf("miss evaluation=%+v host=%+v err=%v want accepted miss cost", got, host, err)
 	}
 	_, err = Program{decoded: true, intrinsics: []ContextIntrinsic{ctx}}.Evaluate(EvalOptions{})
-	assertErrorCode(t, err, ErrJetDisallowed)
+	assertErrorCode(t, err, ErrDecode)
 	host = newTestEvalHost()
 	host.cost = MaxExecCost
 	got, err = Program{decoded: true, intrinsics: []ContextIntrinsic{ctx}}.Evaluate(EvalOptions{Host: host})
