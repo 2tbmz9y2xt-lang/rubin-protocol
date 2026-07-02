@@ -13,23 +13,27 @@ func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64, rotation RotationPro
 	}
 	simplicityDeployment := simplicityDeploymentFromRotation(rotation)
 
-	// Same-program_cmr CORE_SIMPLICITY outputs are capped at
-	// SIMPLICITY_MAX_GROUP_OUTPUTS on this live creation/apply path, mirroring the
-	// same-cmr input group cap. The count is over tx.Outputs in wire order (no map
-	// iteration feeds the decision), and the cap does not depend on spending a
-	// CORE_SIMPLICITY input or on BuildSimplicityTxContext being constructed.
-	var simplicityOutputGroups map[[32]byte]int
+	// Pass 1: full per-output covenant validation in index order. A per-output
+	// creation error wins over the same-cmr output group-cap error (RUB-594
+	// binding error-precedence amendment), so the transaction-level cap is only
+	// evaluated after every output has passed its own creation check.
+	var simplicityOutputCMRs [][32]byte
 	for _, out := range tx.Outputs {
 		programCMR, isCoreSimplicity, err := validateTxOutputCovenantGenesis(tx.TxKind, out, blockHeight, rotation, simplicityDeployment)
 		if err != nil {
 			return err
 		}
-		if !isCoreSimplicity {
-			continue
+		if isCoreSimplicity {
+			simplicityOutputCMRs = append(simplicityOutputCMRs, programCMR)
 		}
-		if simplicityOutputGroups == nil {
-			simplicityOutputGroups = make(map[[32]byte]int)
-		}
+	}
+
+	// Pass 2: transaction-level same-program_cmr CORE_SIMPLICITY output group
+	// cap, counted over the collected outputs in wire order (the map is only a
+	// counter; no map iteration feeds the accept/reject decision). The cap does
+	// not depend on spending a CORE_SIMPLICITY input or on BuildSimplicityTxContext.
+	simplicityOutputGroups := make(map[[32]byte]int, len(simplicityOutputCMRs))
+	for _, programCMR := range simplicityOutputCMRs {
 		simplicityOutputGroups[programCMR]++
 		if simplicityOutputGroups[programCMR] > SIMPLICITY_MAX_GROUP_OUTPUTS {
 			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY same-cmr output group exceeds limit")

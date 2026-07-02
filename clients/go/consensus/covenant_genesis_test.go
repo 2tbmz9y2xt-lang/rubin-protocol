@@ -242,6 +242,12 @@ func TestValidateTxCovenantsGenesis_CoreSimplicityActive(t *testing.T) {
 	if err := ValidateTxCovenantsGenesis(&Tx{Outputs: mixed}, 10, provider); err != nil {
 		t.Fatalf("distinct program_cmr groups must not aggregate: %v", err)
 	}
+
+	// Error precedence (RUB-594 binding amendment): a per-output creation error at
+	// a later output index wins over the same-cmr output group-cap error — the cap
+	// is only evaluated after the complete per-output validation pass.
+	overCapThenBad := append(sameCMR(SIMPLICITY_MAX_GROUP_OUTPUTS+1, cmr), TxOutput{Value: 0, CovenantType: COV_TYPE_VAULT})
+	assertTxErrCode(t, ValidateTxCovenantsGenesis(&Tx{Outputs: overCapThenBad}, 10, provider), TX_ERR_VAULT_PARAMS_INVALID)
 }
 
 func TestValidateTxCovenantsGenesis_NilTx(t *testing.T) {
