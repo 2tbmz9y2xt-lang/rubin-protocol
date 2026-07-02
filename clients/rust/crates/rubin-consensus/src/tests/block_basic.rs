@@ -925,6 +925,80 @@ fn tx_weight_at_height_unknown_suite_uses_floor() {
 }
 
 #[test]
+fn tx_weight_sig_cost_special_cases_mirror_go() {
+    // Mirror of Go `TestTxWeight_SigCostSpecialCases` (RUB-545): the sig_cost
+    // DELTA between a single-witness tx and an otherwise-identical
+    // sentinel-witness tx must equal `want`, on BOTH the legacy and the
+    // registry weight paths. Pins the 0xF0 Simplicity-envelope price to its
+    // own base cost (not the unknown-suite floor, though numerically equal).
+    use crate::constants::{SIMPLICITY_BASE_VERIFY_COST, VERIFY_COST_UNKNOWN_SUITE};
+    use crate::suite_registry::{DefaultRotationProvider, SuiteRegistry};
+
+    // Build the Tx struct directly (mirror of Go `txWithWitness`, which does
+    // not round-trip through parse): the weight functions take `&Tx`, and an
+    // empty-pubkey/empty-sig witness keeps the witness byte-size identical
+    // across suites, so the weight delta isolates the sig_cost.
+    fn one_witness_tx(suite_id: u8) -> Tx {
+        Tx {
+            version: 1,
+            tx_kind: 0x00,
+            tx_nonce: 0,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: vec![WitnessItem {
+                suite_id,
+                pubkey: Vec::new(),
+                signature: Vec::new(),
+            }],
+            da_payload: Vec::new(),
+        }
+    }
+
+    let rp = DefaultRotationProvider;
+    let reg = SuiteRegistry::default_registry();
+    let sentinel = one_witness_tx(SUITE_ID_SENTINEL);
+    for (name, suite_id, want) in [
+        (
+            "simplicity_envelope",
+            crate::constants::SUITE_ID_SIMPLICITY_ENVELOPE,
+            SIMPLICITY_BASE_VERIFY_COST,
+        ),
+        ("unknown_suite", 0xFFu8, VERIFY_COST_UNKNOWN_SUITE),
+    ] {
+        let item = one_witness_tx(suite_id);
+
+        let (legacy_sentinel, _, _) =
+            crate::block_basic::tx_weight_and_stats_public(&sentinel).expect("legacy sentinel");
+        let (legacy_item, _, _) =
+            crate::block_basic::tx_weight_and_stats_public(&item).expect("legacy item");
+        assert_eq!(
+            legacy_item - legacy_sentinel,
+            want,
+            "{name}: legacy sig_cost delta"
+        );
+
+        let (reg_sentinel, _, _) = crate::block_basic::tx_weight_and_stats_at_height(
+            &sentinel,
+            100,
+            Some(&rp),
+            Some(&reg),
+        )
+        .expect("registry sentinel");
+        let (reg_item, _, _) =
+            crate::block_basic::tx_weight_and_stats_at_height(&item, 100, Some(&rp), Some(&reg))
+                .expect("registry item");
+        assert_eq!(
+            reg_item - reg_sentinel,
+            want,
+            "{name}: registry sig_cost delta"
+        );
+    }
+}
+
+#[test]
 fn tx_weight_at_height_native_suite_uses_registry_cost() {
     use crate::suite_registry::{DefaultRotationProvider, SuiteRegistry};
 

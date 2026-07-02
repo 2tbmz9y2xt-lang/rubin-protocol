@@ -89,6 +89,46 @@
         "da_id_fill": 83
       },
       "note": "Synthetic block builder uses valid tx_kind=0x01 DA manifests to reach sum_da_bytes exactly MAX_DA_BYTES_PER_BLOCK+1 without tripping tx_kind=0x02 chunk-size parse guards."
+    },
+    {
+      "id": "WEIGHT-08",
+      "op": "tx_weight_and_stats",
+      "tx_hex": "01000000000000000000000000011111111111111111111111111111111111111111111111111111111111111111000000000000000000000000000001f000040100000100",
+      "expect_ok": true,
+      "expect_weight": 313,
+      "expect_da_bytes": 0,
+      "expect_anchor_bytes": 0,
+      "note": "base=60 witness=8 da_size=1 sig_cost=64 (single 0xF0 Simplicity-envelope witness, minimal envelope 01|00|00; CANONICAL §9 SIMPLICITY_BASE_VERIFY_COST). Priced identically by Go and Rust."
+    },
+    {
+      "id": "WEIGHT-09",
+      "op": "tx_weight_and_stats",
+      "tx_hex": "01000000000000000000000000011111111111111111111111111111111111111111111111111111111111111111000000000000000000000000000001f0000a0104aabbccdd02eeff0100",
+      "expect_ok": true,
+      "expect_weight": 319,
+      "expect_da_bytes": 0,
+      "expect_anchor_bytes": 0,
+      "note": "base=60 witness=14 da_size=1 sig_cost=64 (0xF0 envelope with 4-byte program + 2-byte witness). Envelope-size-independent base cost stays 64; Go and Rust agree."
+    },
+    {
+      "id": "WEIGHT-10",
+      "op": "tx_weight_and_stats",
+      "tx_hex": "01000000000000000000000000011111111111111111111111111111111111111111111111111111111111111111000000000000000000000000000002000000f000040100000100",
+      "expect_ok": true,
+      "expect_weight": 316,
+      "expect_da_bytes": 0,
+      "expect_anchor_bytes": 0,
+      "note": "base=60 witness=11 da_size=1 sig_cost=64 (sentinel witness cost 0 + 0xF0 envelope cost 64). Per-item sig_cost accumulation across mixed witness forms; Go and Rust agree."
+    },
+    {
+      "id": "WEIGHT-11",
+      "op": "tx_weight_and_stats",
+      "tx_hex": "01000000000000000000000000011111111111111111111111111111111111111111111111111111111111111111000000000000000000000000000001f100010100",
+      "expect_ok": true,
+      "expect_weight": 310,
+      "expect_da_bytes": 0,
+      "expect_anchor_bytes": 0,
+      "note": "base=60 witness=5 da_size=1 sig_cost=64 (0xF1 non-envelope suite hits VERIFY_COST_UNKNOWN_SUITE floor). Adjacency guard: the §9 0xF0 special-case does not leak to the neighboring structural-carrier id; unchanged unknown-suite pricing, Go and Rust agree."
     }
   ]
 }
