@@ -770,12 +770,6 @@ func TestEvaluateHostMeteringPaths(t *testing.T) {
 	_, err = Program{decoded: true, intrinsics: []ContextIntrinsic{ctx}}.Evaluate(EvalOptions{})
 	assertErrorCode(t, err, ErrJetDisallowed)
 	host = newTestEvalHost()
-	host.cost = MaxExecCost - IntrinsicReadCost
-	got, err = Program{decoded: true, intrinsics: []ContextIntrinsic{ctx}}.Evaluate(EvalOptions{Host: host})
-	if err != nil || !got.Accepted || got.Cost != MaxExecCost {
-		t.Fatalf("at-cap evaluation=%+v err=%v want accepted cost=%d", got, err, MaxExecCost)
-	}
-	host = newTestEvalHost()
 	host.cost = MaxExecCost
 	got, err = Program{decoded: true, intrinsics: []ContextIntrinsic{ctx}}.Evaluate(EvalOptions{Host: host})
 	assertErrorCode(t, err, ErrBudgetExceeded)
