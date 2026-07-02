@@ -23,23 +23,10 @@ func ContextSchemaHash() [32]byte { return contextSchemaHashValue }
 
 func contextIntrinsicRowsByID(rows []ContextIntrinsic) map[uint16]ContextIntrinsic {
 	out := make(map[uint16]ContextIntrinsic, len(rows))
-	var prev uint16
-	for i, row := range rows {
-		if i > 0 && prev >= row.ID {
-			panic("context intrinsic rows not strictly sorted")
-		}
+	for _, row := range rows {
 		out[row.ID] = row
-		prev = row.ID
 	}
 	return out
-}
-
-func mustContextIntrinsic(id uint16) ContextIntrinsic {
-	row, ok := LookupContextIntrinsic(id)
-	if !ok {
-		panic("missing context intrinsic row")
-	}
-	return row
 }
 
 func evaluateJetWithHost(result EvalResult, host EvalHost) (EvalResult, error) {
@@ -113,7 +100,7 @@ func chargeSteps(host EvalHost, steps uint64) error {
 var (
 	contextSchemaHashValue = hex32("e832db3008c355262420c63168c1c9787a69aac31d15a50a640f0301d8410150")
 	contextIntrinsicByID   = contextIntrinsicRowsByID(contextIntrinsicRows)
-	contextChainIDRow      = mustContextIntrinsic(0x0100)
+	contextChainIDRow      = ContextIntrinsic{ID: 0x0100, Name: "ctx_chain_id", Signature: "unit -> bytes32"}
 )
 
 var contextIntrinsicRows = []ContextIntrinsic{

@@ -307,6 +307,13 @@ func TestContextIntrinsicRowsMatchRUB597Snapshot(t *testing.T) {
 	if len(contextIntrinsicRows) != 35 {
 		t.Fatalf("context intrinsic rows=%d want 35", len(contextIntrinsicRows))
 	}
+	var prev uint16
+	for i, row := range contextIntrinsicRows {
+		if i > 0 && prev >= row.ID {
+			t.Fatalf("context intrinsic row %d id=%#04x after %#04x", i, row.ID, prev)
+		}
+		prev = row.ID
+	}
 	first, ok := LookupContextIntrinsic(0x0100)
 	if !ok || first.Name != "ctx_chain_id" || first.Signature != "unit -> bytes32" {
 		t.Fatalf("ctx_chain_id row=%+v ok=%v", first, ok)
