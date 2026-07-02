@@ -13,35 +13,70 @@ func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64, rotation RotationPro
 	}
 	simplicityDeployment := simplicityDeploymentFromRotation(rotation)
 
+	// Pass 1: full per-output covenant validation in index order. A per-output
+	// creation error wins over the same-cmr output group-cap error (RUB-594
+	// binding error-precedence amendment), so the transaction-level cap is only
+	// evaluated after every output has passed its own creation check.
+	var simplicityOutputCMRs [][32]byte
 	for _, out := range tx.Outputs {
-		if err := validateTxOutputCovenantGenesis(tx.TxKind, out, blockHeight, rotation, simplicityDeployment); err != nil {
+		programCMR, isCoreSimplicity, err := validateTxOutputCovenantGenesis(tx.TxKind, out, blockHeight, rotation, simplicityDeployment)
+		if err != nil {
 			return err
+		}
+		if isCoreSimplicity {
+			simplicityOutputCMRs = append(simplicityOutputCMRs, programCMR)
+		}
+	}
+
+	// Pass 2: transaction-level same-program_cmr CORE_SIMPLICITY output group
+	// cap, counted over the collected outputs in wire order (the map is only a
+	// counter; no map iteration feeds the accept/reject decision). The cap does
+	// not depend on spending a CORE_SIMPLICITY input or on BuildSimplicityTxContext.
+	simplicityOutputGroups := make(map[[32]byte]int, len(simplicityOutputCMRs))
+	for _, programCMR := range simplicityOutputCMRs {
+		simplicityOutputGroups[programCMR]++
+		if simplicityOutputGroups[programCMR] > SIMPLICITY_MAX_GROUP_OUTPUTS {
+			return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY same-cmr output group exceeds limit")
 		}
 	}
 	return nil
 }
 
-func validateTxOutputCovenantGenesis(txKind byte, out TxOutput, blockHeight uint64, rotation RotationProvider, simplicityDeployment SimplicityDeploymentProvider) error {
+// validateTxOutputCovenantGenesis validates one output's covenant at creation.
+// For a well-formed CORE_SIMPLICITY output it returns the parsed program_cmr and
+// true so the caller can enforce the same-cmr output group cap on the live path;
+// every other covenant type returns the zero cmr and false.
+func validateTxOutputCovenantGenesis(txKind byte, out TxOutput, blockHeight uint64, rotation RotationProvider, simplicityDeployment SimplicityDeploymentProvider) ([32]byte, bool, error) {
 	switch out.CovenantType {
 	case COV_TYPE_P2PK:
-		return validateP2PKGenesisOutput(out, blockHeight, rotation)
+		return [32]byte{}, false, validateP2PKGenesisOutput(out, blockHeight, rotation)
 	case COV_TYPE_ANCHOR:
-		return validateAnchorGenesisOutput(out)
+		return [32]byte{}, false, validateAnchorGenesisOutput(out)
 	case COV_TYPE_DA_COMMIT:
-		return validateDACommitGenesisOutput(txKind, out)
+		return [32]byte{}, false, validateDACommitGenesisOutput(txKind, out)
 	case COV_TYPE_VAULT, COV_TYPE_MULTISIG, COV_TYPE_HTLC, COV_TYPE_CORE_STEALTH:
-		return validateParsedValueGenesisOutput(out)
+		return [32]byte{}, false, validateParsedValueGenesisOutput(out)
 	case COV_TYPE_CORE_SIMPLICITY:
-		if err := validateCoreSimplicityDeploymentActive(blockHeight, simplicityDeployment); err != nil {
-			return err
-		}
-		_, _, err := parseCoreSimplicityCovenantData(out.Value, out.CovenantData)
-		return err
+		return validateCoreSimplicityGenesisOutput(out, blockHeight, simplicityDeployment)
 	case COV_TYPE_RESERVED_FUTURE:
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "reserved covenant_type")
+		return [32]byte{}, false, txerr(TX_ERR_COVENANT_TYPE_INVALID, "reserved covenant_type")
 	default:
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "unknown covenant_type")
+		return [32]byte{}, false, txerr(TX_ERR_COVENANT_TYPE_INVALID, "unknown covenant_type")
 	}
+}
+
+// validateCoreSimplicityGenesisOutput validates a CORE_SIMPLICITY creation output
+// and, on success, returns its program_cmr and true so the caller can enforce the
+// same-cmr output group cap.
+func validateCoreSimplicityGenesisOutput(out TxOutput, blockHeight uint64, simplicityDeployment SimplicityDeploymentProvider) ([32]byte, bool, error) {
+	if err := validateCoreSimplicityDeploymentActive(blockHeight, simplicityDeployment); err != nil {
+		return [32]byte{}, false, err
+	}
+	programCMR, _, err := parseCoreSimplicityCovenantData(out.Value, out.CovenantData)
+	if err != nil {
+		return [32]byte{}, false, err
+	}
+	return programCMR, true, nil
 }
 
 func validateP2PKGenesisOutput(out TxOutput, blockHeight uint64, rotation RotationProvider) error {

@@ -1116,7 +1116,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicityRejectsBeforeWitnessChecks(t
 	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
 }
 
-func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityOutputGroupingShadowOnly(t *testing.T) {
+func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityOutputGroupCapLiveEnforced(t *testing.T) {
 	prevTxid := hashWithPrefix(0xF0)
 	kp := mustMLDSA87Keypair(t)
 	prevCovData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
@@ -1133,23 +1133,30 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityOutputGroupingShadowOnly(t 
 		return tx
 	}
 	rotation := testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87, simplicityActiveHeight: 1}
-	outputCount := 9
 
-	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(makeTx(outputCount), hashWithPrefix(0xF1), utxoSet, 1, 0, [32]byte{}, rotation, nil)
+	// Exactly SIMPLICITY_MAX_GROUP_OUTPUTS same-cmr outputs still apply.
+	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(makeTx(SIMPLICITY_MAX_GROUP_OUTPUTS), hashWithPrefix(0xF1), utxoSet, 1, 0, [32]byte{}, rotation, nil)
 	if err != nil {
-		t.Fatalf("sequential same-CMR output grouping is shadow-only in this slice: %v", err)
+		t.Fatalf("exactly SIMPLICITY_MAX_GROUP_OUTPUTS same-cmr outputs must apply (sequential): %v", err)
 	}
 	if work == nil || summary == nil {
 		t.Fatalf("expected work and summary, got work=%v summary=%v", work, summary)
 	}
 
-	work, fee, err := applyNonCoinbaseTxBasicWorkQ(makeTx(outputCount), hashWithPrefix(0xF2), utxoSet, 1, 0, [32]byte{}, NewSigCheckQueue(1), rotation, nil)
-	if err != nil {
-		t.Fatalf("queued same-CMR output grouping is shadow-only in this slice: %v", err)
+	// One over the cap is rejected atomically on the sequential apply path.
+	work, summary, err = ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(makeTx(SIMPLICITY_MAX_GROUP_OUTPUTS+1), hashWithPrefix(0xF2), utxoSet, 1, 0, [32]byte{}, rotation, nil)
+	if work != nil || summary != nil {
+		t.Fatalf("expected no sequential mutation on reject, got work=%v summary=%v", work, summary)
 	}
-	if work == nil || fee == 0 {
-		t.Fatalf("expected work and fee, got work=%v fee=%d", work, fee)
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY same-cmr output group exceeds limit")
+
+	// ...and atomically on the queued apply path.
+	q := NewSigCheckQueue(1)
+	workQ, fee, err := applyNonCoinbaseTxBasicWorkQ(makeTx(SIMPLICITY_MAX_GROUP_OUTPUTS+1), hashWithPrefix(0xF3), utxoSet, 1, 0, [32]byte{}, q, rotation, nil)
+	if workQ != nil || fee != 0 || q.Len() != 0 {
+		t.Fatalf("expected no queued mutation on reject, got work=%v fee=%d sigs=%d", workQ, fee, q.Len())
 	}
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY same-cmr output group exceeds limit")
 }
 
 func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityInputGroupCapDeferredBehindDisabledSpend(t *testing.T) {

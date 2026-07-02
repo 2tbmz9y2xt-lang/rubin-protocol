@@ -221,13 +221,33 @@ func TestValidateTxCovenantsGenesis_CoreSimplicityActive(t *testing.T) {
 	check(10, provider, out(1, valid[:len(valid)-1]), TX_ERR_COVENANT_TYPE_INVALID)
 	check(10, provider, out(1, nonMinimal), TX_ERR_COVENANT_TYPE_INVALID)
 
-	outputs := make([]TxOutput, 9)
-	for i := range outputs {
-		outputs[i] = out(1, valid)
+	// Same-program_cmr CORE_SIMPLICITY outputs are capped at
+	// SIMPLICITY_MAX_GROUP_OUTPUTS on the live creation/apply path (RUB-594):
+	// exactly the cap passes, one more is rejected atomically, and distinct
+	// program_cmr groups are counted independently.
+	var cmr2 [32]byte
+	cmr2[0] = 0x5a
+	sameCMR := func(n int, c [32]byte) []TxOutput {
+		outs := make([]TxOutput, n)
+		for i := range outs {
+			outs[i] = out(1, encodeSimplicityCovenantData(c, nil))
+		}
+		return outs
 	}
-	if err := ValidateTxCovenantsGenesis(&Tx{Outputs: outputs}, 10, provider); err != nil {
-		t.Fatalf("same-CMR output grouping is shadow-only in this slice: %v", err)
+	if err := ValidateTxCovenantsGenesis(&Tx{Outputs: sameCMR(SIMPLICITY_MAX_GROUP_OUTPUTS, cmr)}, 10, provider); err != nil {
+		t.Fatalf("exactly SIMPLICITY_MAX_GROUP_OUTPUTS same-cmr outputs must pass: %v", err)
 	}
+	assertTxErrCode(t, ValidateTxCovenantsGenesis(&Tx{Outputs: sameCMR(SIMPLICITY_MAX_GROUP_OUTPUTS+1, cmr)}, 10, provider), TX_ERR_COVENANT_TYPE_INVALID)
+	mixed := append(sameCMR(SIMPLICITY_MAX_GROUP_OUTPUTS, cmr), sameCMR(SIMPLICITY_MAX_GROUP_OUTPUTS, cmr2)...)
+	if err := ValidateTxCovenantsGenesis(&Tx{Outputs: mixed}, 10, provider); err != nil {
+		t.Fatalf("distinct program_cmr groups must not aggregate: %v", err)
+	}
+
+	// Error precedence (RUB-594 binding amendment): a per-output creation error at
+	// a later output index wins over the same-cmr output group-cap error — the cap
+	// is only evaluated after the complete per-output validation pass.
+	overCapThenBad := append(sameCMR(SIMPLICITY_MAX_GROUP_OUTPUTS+1, cmr), TxOutput{Value: 0, CovenantType: COV_TYPE_VAULT})
+	assertTxErrCode(t, ValidateTxCovenantsGenesis(&Tx{Outputs: overCapThenBad}, 10, provider), TX_ERR_VAULT_PARAMS_INVALID)
 }
 
 func TestValidateTxCovenantsGenesis_NilTx(t *testing.T) {
