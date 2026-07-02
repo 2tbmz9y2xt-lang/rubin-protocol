@@ -30,8 +30,39 @@ def cvMempoolToDaFeeFloorVector (v : CVMempoolVector) : CVDaFeeFloorVector := {
   expectRequiredFee := v.expectRequiredFee
 }
 
+-- CORE_SIMPLICITY pre-activation policy rows (Go RUB-527 / Rust RUB-528):
+-- the pinned reject is a node-policy outcome, not floor arithmetic. The
+-- replay proves (a) the row pins exactly the policy reject shape
+-- (ok, admit=false, admit_class "rejected", no floor reject_reason) and
+-- (b) the shared floor arithmetic over the pinned numbers is ACCEPTING —
+-- i.e. the pre-activation guardrail, not a fee floor, rejects the
+-- transaction. The reject reason strings themselves are proven
+-- byte-identical Go↔Rust by the executable conformance runner.
+def simplicityPreActivePolicyErr (err : Option String) : Bool :=
+  err == some "CORE_SIMPLICITY output pre-ACTIVE"
+    || err == some "CORE_SIMPLICITY spend pre-ACTIVE"
+
+def mempoolSimplicityPolicyVectorPass (v : CVMempoolVector) : Bool :=
+  let d := cvMempoolToDaFeeFloorVector v
+  let got := evalDaFeeFloor d
+  v.expectOk
+    && !v.expectAdmit
+    && v.expectAdmitClass == "rejected"
+    && v.expectRejectReason == none
+    && got.admit
+    && got.rejectReason == none
+    && got.dominantFloor == v.expectDominantFloor
+    && v.expectRelayFeeFloor == got.relayFeeFloor
+    && v.expectDaFeeFloor == got.daFeeFloor
+    && v.expectDaSurcharge == got.daSurcharge
+    && v.expectDaRequiredFee == got.daRequiredFee
+    && v.expectRequiredFee == got.requiredFee
+
 def mempoolVectorPass (v : CVMempoolVector) : Bool :=
-  daFeeFloorVectorPass (cvMempoolToDaFeeFloorVector v)
+  if simplicityPreActivePolicyErr v.expectErr then
+    mempoolSimplicityPolicyVectorPass v
+  else
+    daFeeFloorVectorPass (cvMempoolToDaFeeFloorVector v)
 
 def cvMempoolVectorsPass : Bool :=
   cvMempoolVectors.all mempoolVectorPass

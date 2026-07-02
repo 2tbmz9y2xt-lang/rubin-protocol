@@ -56,6 +56,14 @@ pub struct MinerConfig {
     /// `DEFAULT_MEMPOOL_MIN_FEE_RATE` so a future change to the relay
     /// floor cannot silently change the DA floor.
     pub policy_min_da_fee_rate: u64,
+    /// Mirror of Go `MinerConfig.PolicyRejectSimplicityPreActivation`:
+    /// when true, the miner excludes CORE_SIMPLICITY (0x0106)
+    /// create/spend candidates until the rotation provider reports the
+    /// Simplicity deployment active at the candidate height. NOT nested
+    /// under `policy_da_anchor_anti_abuse` (Go pins this with
+    /// `TestMinerSimplicityPolicyStillRunsWhenDaAnchorMasterOff`).
+    /// Policy-only; consensus validity is unaffected.
+    pub policy_reject_simplicity_pre_activation: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +121,7 @@ impl Default for MinerConfig {
             policy_da_surcharge_per_byte: 0,
             policy_current_mempool_min_fee_rate: DEFAULT_MEMPOOL_MIN_FEE_RATE,
             policy_min_da_fee_rate: DEFAULT_MIN_DA_FEE_RATE,
+            policy_reject_simplicity_pre_activation: true,
         }
     }
 }
@@ -375,7 +384,7 @@ impl<'a> Miner<'a> {
         &self,
         tx: &Tx,
         utxos: &HashMap<Outpoint, UtxoEntry>,
-        _next_height: u64,
+        next_height: u64,
         policy_da_included: u64,
     ) -> Result<(bool, u64), String> {
         let policy_cfg = TxPoolConfig {
@@ -388,6 +397,13 @@ impl<'a> Miner<'a> {
             // by policy contract; this does not change consensus validity.
             policy_reject_non_coinbase_anchor_outputs: self.cfg.policy_da_anchor_anti_abuse
                 && self.cfg.policy_reject_non_coinbase_anchor_outputs,
+            // NOT nested under the DA/anchor master switch: mirrors Go,
+            // where the Simplicity pre-activation guardrail is its own
+            // top-level miner policy flag (rotation comes from the sync
+            // engine's suite context, like Go's `m.sync.cfg.RotationProvider`).
+            policy_reject_simplicity_pre_activation: self
+                .cfg
+                .policy_reject_simplicity_pre_activation,
             suite_context: self.sync.cfg.suite_context.clone(),
             policy_current_mempool_min_fee_rate: if self.cfg.policy_da_anchor_anti_abuse {
                 self.cfg.policy_current_mempool_min_fee_rate
@@ -407,7 +423,7 @@ impl<'a> Miner<'a> {
         // `apply_policy` recomputed weight/da_bytes internally and the
         // miner then walked again to read `da_bytes`.
         let (weight, da_bytes, _) = tx_weight_and_stats_public(tx).map_err(|e| e.to_string())?;
-        let policy_result = apply_policy(tx, weight, da_bytes, utxos, &policy_cfg);
+        let policy_result = apply_policy(tx, weight, da_bytes, utxos, next_height, &policy_cfg);
         if policy_result.is_err() {
             return Ok((true, policy_da_included));
         }
@@ -795,8 +811,8 @@ mod tests {
     use std::path::PathBuf;
 
     use rubin_consensus::constants::{
-        COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_DA_COMMIT, COV_TYPE_P2PK, MAX_BLOCK_WEIGHT,
-        MAX_DA_BATCHES_PER_BLOCK as MDB, TX_WIRE_VERSION,
+        COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_DA_COMMIT,
+        COV_TYPE_P2PK, MAX_BLOCK_WEIGHT, MAX_DA_BATCHES_PER_BLOCK as MDB, TX_WIRE_VERSION,
     };
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
     use rubin_consensus::{
@@ -939,6 +955,14 @@ mod tests {
         let mut cov = 7u16.to_le_bytes().to_vec();
         encode_compact_size(0, &mut cov);
         one_input_policy_tx(marker, 1, COV_TYPE_CORE_EXT, cov)
+    }
+
+    fn core_simplicity_policy_tx(marker: u8) -> (Tx, HashMap<Outpoint, UtxoEntry>) {
+        // Mirror of Go `simplicityCovenantDataForNodeTest`: 32-byte CMR +
+        // compactSize(0) empty state.
+        let mut cov = vec![marker; 32];
+        encode_compact_size(0, &mut cov);
+        one_input_policy_tx(marker, 1, COV_TYPE_CORE_SIMPLICITY, cov)
     }
 
     fn da_budget_policy_tx(marker: u8) -> (Tx, HashMap<Outpoint, UtxoEntry>) {
@@ -1370,6 +1394,32 @@ mod tests {
         assert!(
             reject,
             "CORE_EXT unsupported-runtime policy must still run when DA/anchor master is off"
+        );
+        assert_eq!(next_da, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn miner_simplicity_policy_still_runs_when_da_anchor_master_off() {
+        // Mirror of Go `TestMinerSimplicityPolicyStillRunsWhenDaAnchorMasterOff`:
+        // the CORE_SIMPLICITY pre-activation guardrail is NOT nested
+        // under the DA/anchor master switch.
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-simplicity-master-off");
+        let (tx, utxos) = core_simplicity_policy_tx(0x76);
+        sync.chain_state.utxos = utxos;
+        let cfg = MinerConfig {
+            policy_da_anchor_anti_abuse: false,
+            policy_reject_simplicity_pre_activation: true,
+            ..MinerConfig::default()
+        };
+        let miner = Miner::new(&mut sync, None, cfg).expect("miner");
+
+        let (reject, next_da) = miner
+            .reject_candidate(&tx, 0, 0)
+            .expect("CORE_SIMPLICITY candidate");
+        assert!(
+            reject,
+            "CORE_SIMPLICITY pre-activation policy must still run when DA/anchor master is off"
         );
         assert_eq!(next_da, 0);
         let _ = fs::remove_dir_all(&dir);
