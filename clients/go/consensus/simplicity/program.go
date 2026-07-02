@@ -141,7 +141,7 @@ func (p Program) Evaluate(opts EvalOptions) (EvalResult, error) {
 	case len(p.intrinsics) > 0:
 		return p.evaluateIntrinsics(opts)
 	default:
-		return p.evaluateSteps(opts)
+		return p.evaluateStepProgram(opts)
 	}
 }
 

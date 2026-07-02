@@ -54,7 +54,7 @@ func evaluateJetWithLocalMeter(result EvalResult) (EvalResult, error) {
 	return result, nil
 }
 
-func (p Program) evaluateSteps(opts EvalOptions) (EvalResult, error) {
+func (p Program) evaluateStepProgram(opts EvalOptions) (EvalResult, error) {
 	if opts.Host != nil {
 		return evaluateStepsWithHost(p.evalSteps, opts.Host)
 	}
