@@ -655,10 +655,16 @@ impl TxPool {
         // the policy reason — not the consensus reject — is the
         // observable admission outcome (Go pins this with
         // `TestMempoolPolicyRejectsCoreSimplicityPreActivationBeforeConsensus`).
-        // A missing input rejects with the consensus TX_ERR_MISSING_UTXO
-        // shape FIRST (Go `policyInputSnapshot` precedence) so the policy
-        // reason never masks it.
-        if self.cfg.policy_reject_simplicity_pre_activation {
+        // Scoped to CORE_SIMPLICITY-involved txs (the exact set the gate
+        // acts on): for those, a missing input rejects with the consensus
+        // TX_ERR_MISSING_UTXO shape FIRST (Go `policyInputSnapshot`
+        // precedence) so the policy reason never masks it. Non-Simplicity
+        // txs (coinbase, plain spends) keep their pre-existing consensus
+        // reject path untouched — full policyInputSnapshot parity for
+        // every tx is a separate general-policy surface, not this gate.
+        if self.cfg.policy_reject_simplicity_pre_activation
+            && covenant_policy_kind(&tx, &chain_state.utxos, COV_TYPE_CORE_SIMPLICITY).is_some()
+        {
             reject_missing_policy_inputs(&tx, &chain_state.utxos)?;
             if let Some(reason) = reject_core_simplicity_pre_activation(
                 &tx,
@@ -1127,11 +1133,14 @@ pub(crate) fn relay_metadata(
     // Mirror of Go `checkParsedTransactionWithSnapshot`
     // (`clients/go/node/mempool.go`): the CORE_SIMPLICITY pre-activation
     // policy gate runs BEFORE consensus validation on the relay path too,
-    // so relay and admission report the same policy reason. As on the
-    // admission path, a missing input rejects with the consensus
-    // TX_ERR_MISSING_UTXO shape FIRST (Go `policyInputSnapshot`
-    // precedence) so the policy reason never masks it.
-    if cfg.policy_reject_simplicity_pre_activation {
+    // so relay and admission report the same policy reason. Scoped to
+    // CORE_SIMPLICITY-involved txs, as on the admission path: a missing
+    // input rejects with the consensus TX_ERR_MISSING_UTXO shape FIRST
+    // (Go `policyInputSnapshot` precedence) so the policy reason never
+    // masks it; non-Simplicity txs keep their pre-existing reject path.
+    if cfg.policy_reject_simplicity_pre_activation
+        && covenant_policy_kind(&tx, &chain_state.utxos, COV_TYPE_CORE_SIMPLICITY).is_some()
+    {
         reject_missing_policy_inputs(&tx, &chain_state.utxos)?;
         if let Some(reason) =
             reject_core_simplicity_pre_activation(&tx, &chain_state.utxos, next_height, rotation)
@@ -1731,22 +1740,26 @@ fn reject_unsupported_core_ext_node_runtime(
         .map(|kind| format!("CORE_EXT {kind} unsupported by Rust node runtime"))
 }
 
-/// Mirror of Go `policyInputSnapshot`
-/// (`clients/go/node/mempool_policy.go:150`): with the Simplicity
-/// pre-activation policy enabled, Go resolves every input outpoint into
-/// the policy snapshot BEFORE `rejectCoreSimplicityPreActivation` and
-/// rejects a missing input with `TX_ERR_MISSING_UTXO: utxo not found`
-/// first, so the policy reason never masks the consensus structural
-/// error. Rust must reject actively here (not merely skip the gate):
-/// its consensus pipeline checks output covenants (incl. the
-/// CORE_SIMPLICITY deployment gate) before input resolution, so a
-/// fall-through would surface `TX_ERR_COVENANT_TYPE_INVALID` instead of
-/// Go's missing-UTXO-first precedence. The message reuses the exact
-/// consensus `TxError` shape (`utxo_basic.rs` "utxo not found") wrapped
-/// like every consensus reject on this path. The miner path
-/// intentionally has NO such guard: Go's miner helper calls the gate
-/// directly on the chain UTXO view (no snapshot), and the classifier
-/// skips unresolvable inputs there.
+/// Missing-input precedence for the CORE_SIMPLICITY gate, mirroring Go
+/// `policyInputSnapshot` (`clients/go/node/mempool_policy.go:150`): Go
+/// resolves input outpoints into the policy snapshot BEFORE
+/// `rejectCoreSimplicityPreActivation` and rejects a missing input with
+/// `TX_ERR_MISSING_UTXO: utxo not found` first, so the policy reason
+/// never masks the consensus structural error. Called ONLY for
+/// CORE_SIMPLICITY-involved txs (the call sites gate on
+/// `covenant_policy_kind(.., COV_TYPE_CORE_SIMPLICITY)`): Rust must
+/// reject actively rather than fall through, because its consensus
+/// pipeline checks output covenants (incl. the CORE_SIMPLICITY
+/// deployment gate) before input resolution, so a fall-through would
+/// surface `TX_ERR_COVENANT_TYPE_INVALID` instead of Go's
+/// missing-UTXO-first precedence. The message is the BARE consensus
+/// `TxError` text (`utxo_basic.rs` "utxo not found"), byte-identical to
+/// Go's `txAdmitRejected(err.Error())`. Non-Simplicity txs (coinbase,
+/// plain spends) are deliberately NOT routed here — they keep their
+/// pre-existing consensus reject path; extending Go's unconditional
+/// policyInputSnapshot to every tx is a separate general-policy surface.
+/// The miner path also has NO such guard: Go's miner helper calls the
+/// gate directly on the chain UTXO view (no snapshot).
 fn reject_missing_policy_inputs(
     tx: &rubin_consensus::Tx,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
@@ -1757,11 +1770,20 @@ fn reject_missing_policy_inputs(
             vout: input.prev_vout,
         };
         if !utxos.contains_key(&outpoint) {
+            // BARE `TxError` text (no "transaction rejected: " wrapper): Go's
+            // policyInputSnapshot rejects via `txAdmitRejected(err.Error())`
+            // (`clients/go/node/mempool_precheck.go`), whose harness `err` is
+            // the plain `TX_ERR_MISSING_UTXO: utxo not found`. Verified equal
+            // on both CLIs for plain-P2PK AND CORE_SIMPLICITY missing-input
+            // txs. The surrounding parse/consensus rejects keep their
+            // pre-existing `transaction rejected:` wrapper — that Rust-wide
+            // convention vs Go's bare text is a separate, pre-existing
+            // divergence outside this contract.
             let err = rubin_consensus::TxError::new(
                 rubin_consensus::ErrorCode::TxErrMissingUtxo,
                 "utxo not found",
             );
-            return Err(rejected(format!("transaction rejected: {err}")));
+            return Err(rejected(format!("{err}")));
         }
     }
     Ok(())
@@ -1805,7 +1827,11 @@ fn reject_core_simplicity_pre_activation(
     }
     let forced = ActiveSimplicityGenesisRotation { inner: rotation };
     if let Err(err) = validate_tx_covenants_genesis(tx, height, Some(&forced)) {
-        return Err(format!("transaction rejected: {err}"));
+        // BARE text to match Go: `rejectCoreSimplicityPreActivation` returns
+        // the raw `ValidateTxCovenantsGenesis` error and the caller emits
+        // `txAdmitRejected(err.Error())` (no wrapper), so a masked-consensus
+        // reject reads identically Go vs Rust.
+        return Err(format!("{err}"));
     }
     Ok(Some(format!("CORE_SIMPLICITY {kind} pre-ACTIVE")))
 }
@@ -3023,10 +3049,13 @@ mod tests {
             ),
         ] {
             assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected, "{name}");
-            assert!(
-                err.message.contains("TX_ERR_MISSING_UTXO") && !err.message.contains("pre-ACTIVE"),
-                "{name}: missing input must keep the consensus missing-UTXO reject: {}",
-                err.message
+            // Exact BARE string — byte-identical to Go's
+            // `txAdmitRejected(err.Error())` (verified equal on both CLIs).
+            // Pins the missing-UTXO precedence AND the no-wrapper parity
+            // without a shared vector; the policy reason must not mask it.
+            assert_eq!(
+                err.message, "TX_ERR_MISSING_UTXO: utxo not found",
+                "{name}: missing input must keep the bare consensus missing-UTXO reject"
             );
         }
     }
