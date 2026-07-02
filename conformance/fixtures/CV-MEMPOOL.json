@@ -351,6 +351,106 @@
       "expect_ok": false,
       "expect_err": "TX_ERR_PARSE",
       "policy_branch": "relay_metadata_parse_rejected_before_policy_floor"
+    },
+    {
+      "id": "CV-MEMPOOL-RELAY-METADATA-05-SIMPLICITY-CREATE-PREACTIVE-REJECTED",
+      "op": "mempool_relay_metadata_policy",
+      "height": 200,
+      "chain_id": "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
+      "expect_policy_entrypoint": "mempool_relay_metadata",
+      "expect_no_mutation": true,
+      "expect_mutation_checked": true,
+      "expect_mutated": false,
+      "expect_pool_len_before": 0,
+      "expect_pool_len_after": 0,
+      "expect_duplicate_conflict_capacity_checked": false,
+      "early_guards_passed": [
+        "explicit_unsigned_tx_hex_committed",
+        "explicit_utxo_context_committed",
+        "relay_metadata_called",
+        "simplicity_policy_fires_before_consensus_and_signature_checks",
+        "no_add_tx_or_capacity_path"
+      ],
+      "expect_fee": 900000,
+      "expect_weight": 418,
+      "expect_wire_bytes": 106,
+      "expect_da_bytes": 0,
+      "current_mempool_min_fee_rate": 1,
+      "min_da_fee_rate": 200,
+      "da_surcharge_per_byte": 200,
+      "expect_ok": true,
+      "expect_admit": false,
+      "expect_admit_class": "rejected",
+      "expect_err": "CORE_SIMPLICITY output pre-ACTIVE",
+      "expect_dominant_floor": "relay",
+      "expect_relay_fee_floor": 418,
+      "expect_da_fee_floor": 0,
+      "expect_da_surcharge": 0,
+      "expect_da_required_fee": 0,
+      "expect_required_fee": 418,
+      "policy_branch": "relay_metadata_readonly_simplicity_create_preactive_rejected",
+      "tx_hex": "01000000000b0000000000000001111111111111111111111111111111111111111111111111111111111111111100000000000000000001a086010000000000060121535353535353535353535353535353535353535353535353535353535353535300000000000000",
+      "utxos": [
+        {
+          "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+          "vout": 0,
+          "value": 1000000,
+          "covenant_type": 0,
+          "covenant_data": "014444444444444444444444444444444444444444444444444444444444444444",
+          "creation_height": 1,
+          "created_by_coinbase": false
+        }
+      ]
+    },
+    {
+      "id": "CV-MEMPOOL-RELAY-METADATA-06-SIMPLICITY-SPEND-PREACTIVE-REJECTED",
+      "op": "mempool_relay_metadata_policy",
+      "height": 200,
+      "chain_id": "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
+      "expect_policy_entrypoint": "mempool_relay_metadata",
+      "expect_no_mutation": true,
+      "expect_mutation_checked": true,
+      "expect_mutated": false,
+      "expect_pool_len_before": 0,
+      "expect_pool_len_after": 0,
+      "expect_duplicate_conflict_capacity_checked": false,
+      "early_guards_passed": [
+        "explicit_unsigned_tx_hex_committed",
+        "explicit_utxo_context_committed",
+        "relay_metadata_called",
+        "simplicity_policy_fires_before_consensus_and_signature_checks",
+        "no_add_tx_or_capacity_path"
+      ],
+      "expect_fee": 900000,
+      "expect_weight": 418,
+      "expect_wire_bytes": 106,
+      "expect_da_bytes": 0,
+      "current_mempool_min_fee_rate": 1,
+      "min_da_fee_rate": 200,
+      "da_surcharge_per_byte": 200,
+      "expect_ok": true,
+      "expect_admit": false,
+      "expect_admit_class": "rejected",
+      "expect_err": "CORE_SIMPLICITY spend pre-ACTIVE",
+      "expect_dominant_floor": "relay",
+      "expect_relay_fee_floor": 418,
+      "expect_da_fee_floor": 0,
+      "expect_da_surcharge": 0,
+      "expect_da_required_fee": 0,
+      "expect_required_fee": 418,
+      "policy_branch": "relay_metadata_readonly_simplicity_spend_preactive_rejected",
+      "tx_hex": "01000000000b0000000000000001545454545454545454545454545454545454545454545454545454545454545400000000000000000001a086010000000000000021014444444444444444444444444444444444444444444444444444444444444444000000000000",
+      "utxos": [
+        {
+          "txid": "5454545454545454545454545454545454545454545454545454545454545454",
+          "vout": 0,
+          "value": 1000000,
+          "covenant_type": 262,
+          "covenant_data": "555555555555555555555555555555555555555555555555555555555555555500",
+          "creation_height": 1,
+          "created_by_coinbase": false
+        }
+      ]
     }
   ]
 }

@@ -4,9 +4,9 @@ use std::sync::OnceLock;
 
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
-    constants::{COV_TYPE_CORE_EXT, MAX_RELAY_MSG_BYTES},
-    parse_block_header_bytes, parse_tx, tx_weight_and_stats_public, DefaultRotationProvider,
-    NativeSuiteSet, Outpoint, RotationProvider, SuiteRegistry,
+    constants::{COV_TYPE_CORE_EXT, COV_TYPE_CORE_SIMPLICITY, MAX_RELAY_MSG_BYTES},
+    parse_block_header_bytes, parse_tx, tx_weight_and_stats_public, validate_tx_covenants_genesis,
+    DefaultRotationProvider, NativeSuiteSet, Outpoint, RotationProvider, SuiteRegistry,
 };
 
 use crate::sync::SuiteContext;
@@ -94,6 +94,14 @@ pub const DEFAULT_MIN_DA_FEE_RATE: u64 = 1;
 pub struct TxPoolConfig {
     pub policy_da_surcharge_per_byte: u64,
     pub policy_reject_non_coinbase_anchor_outputs: bool,
+    /// Mirror of Go `MempoolConfig.PolicyRejectSimplicityPreActivation`:
+    /// non-consensus pre-activation guardrail for CORE_SIMPLICITY
+    /// (0x0106). When true, transactions that create or spend a
+    /// CORE_SIMPLICITY output are rejected by admission/relay policy
+    /// until the rotation provider reports the Simplicity deployment
+    /// active at the next block height. Policy-only; consensus validity
+    /// is unaffected.
+    pub policy_reject_simplicity_pre_activation: bool,
     pub suite_context: Option<SuiteContext>,
     /// Rolling local mempool floor used by the Stage C relay-fee term.
     /// Defaults to `DEFAULT_MEMPOOL_MIN_FEE_RATE`; a live rolling floor
@@ -641,6 +649,34 @@ impl TxPool {
             rotation,
             registry,
         )?;
+        // Mirror of Go `checkTransactionWithSnapshot`
+        // (`clients/go/node/mempool_precheck.go`): the CORE_SIMPLICITY
+        // pre-activation policy gate runs BEFORE consensus validation so
+        // the policy reason — not the consensus reject — is the
+        // observable admission outcome (Go pins this with
+        // `TestMempoolPolicyRejectsCoreSimplicityPreActivationBeforeConsensus`).
+        // Scoped to CORE_SIMPLICITY-involved txs (the exact set the gate
+        // acts on): for those, a missing input rejects with the consensus
+        // TX_ERR_MISSING_UTXO shape FIRST (Go `policyInputSnapshot`
+        // precedence) so the policy reason never masks it. Non-Simplicity
+        // txs (coinbase, plain spends) keep their pre-existing consensus
+        // reject path untouched — full policyInputSnapshot parity for
+        // every tx is a separate general-policy surface, not this gate.
+        if self.cfg.policy_reject_simplicity_pre_activation
+            && covenant_policy_kind(&tx, &chain_state.utxos, COV_TYPE_CORE_SIMPLICITY).is_some()
+        {
+            reject_missing_policy_inputs(&tx, &chain_state.utxos)?;
+            if let Some(reason) = reject_core_simplicity_pre_activation(
+                &tx,
+                &chain_state.utxos,
+                next_height,
+                rotation,
+            )
+            .map_err(rejected)?
+            {
+                return Err(rejected(reason));
+            }
+        }
         let (_, summary) =
             apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
                 &tx,
@@ -671,7 +707,7 @@ impl TxPool {
         let utxos = &chain_state.utxos;
         let cfg = &self.cfg;
         #[rustfmt::skip]
-        let policy_result = apply_post_consensus_policy_without_floor(&tx, utxos, weight, da_bytes, cfg);
+        let policy_result = apply_post_consensus_policy_without_floor(&tx, utxos, weight, da_bytes, next_height, cfg);
         policy_result?;
 
         if self.txs.contains_key(&txid) {
@@ -1094,6 +1130,25 @@ pub(crate) fn relay_metadata(
             Some(ctx) => (Some(ctx.rotation.as_ref()), Some(ctx.registry.as_ref())),
             None => (None, None),
         };
+    // Mirror of Go `checkParsedTransactionWithSnapshot`
+    // (`clients/go/node/mempool.go`): the CORE_SIMPLICITY pre-activation
+    // policy gate runs BEFORE consensus validation on the relay path too,
+    // so relay and admission report the same policy reason. Scoped to
+    // CORE_SIMPLICITY-involved txs, as on the admission path: a missing
+    // input rejects with the consensus TX_ERR_MISSING_UTXO shape FIRST
+    // (Go `policyInputSnapshot` precedence) so the policy reason never
+    // masks it; non-Simplicity txs keep their pre-existing reject path.
+    if cfg.policy_reject_simplicity_pre_activation
+        && covenant_policy_kind(&tx, &chain_state.utxos, COV_TYPE_CORE_SIMPLICITY).is_some()
+    {
+        reject_missing_policy_inputs(&tx, &chain_state.utxos)?;
+        if let Some(reason) =
+            reject_core_simplicity_pre_activation(&tx, &chain_state.utxos, next_height, rotation)
+                .map_err(rejected)?
+        {
+            return Err(rejected(reason));
+        }
+    }
     let (_, summary) =
         apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
             &tx,
@@ -1122,7 +1177,7 @@ pub(crate) fn relay_metadata(
     // Codacy diff-coverage attribution (mirror of admit_with_metadata).
     let utxos = &chain_state.utxos;
     #[rustfmt::skip]
-    let policy_result = apply_post_consensus_policy_with_floor(&tx, utxos, summary.fee, weight, da_bytes, cfg);
+    let policy_result = apply_post_consensus_policy_with_floor(&tx, utxos, summary.fee, weight, da_bytes, next_height, cfg);
     policy_result?;
 
     Ok(RelayTxMetadata {
@@ -1180,9 +1235,10 @@ fn apply_post_consensus_policy_with_floor(
     fee: u64,
     weight: u64,
     da_bytes: u64,
+    next_height: u64,
     cfg: &TxPoolConfig,
 ) -> Result<(), TxPoolAdmitError> {
-    apply_post_consensus_policy_without_floor(tx, utxos, weight, da_bytes, cfg)?;
+    apply_post_consensus_policy_without_floor(tx, utxos, weight, da_bytes, next_height, cfg)?;
     validate_fee_floor(fee, weight, cfg.policy_current_mempool_min_fee_rate)
 }
 
@@ -1191,11 +1247,12 @@ fn apply_post_consensus_policy_without_floor(
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
     weight: u64,
     da_bytes: u64,
+    next_height: u64,
     cfg: &TxPoolConfig,
 ) -> Result<(), TxPoolAdmitError> {
     let mut policy_cfg = cfg.clone();
     policy_cfg.policy_current_mempool_min_fee_rate = 0;
-    apply_policy(tx, weight, da_bytes, utxos, &policy_cfg).map_err(rejected)
+    apply_policy(tx, weight, da_bytes, utxos, next_height, &policy_cfg).map_err(rejected)
 }
 
 impl Default for TxPool {
@@ -1209,6 +1266,9 @@ impl Default for TxPoolConfig {
         Self {
             policy_da_surcharge_per_byte: 0,
             policy_reject_non_coinbase_anchor_outputs: true,
+            // Mirror of Go `DefaultMinerConfig` -> `DefaultMempoolConfig`:
+            // the CORE_SIMPLICITY pre-activation guardrail defaults ON.
+            policy_reject_simplicity_pre_activation: true,
             suite_context: None,
             policy_current_mempool_min_fee_rate: DEFAULT_MEMPOOL_MIN_FEE_RATE,
             policy_min_da_fee_rate: DEFAULT_MIN_DA_FEE_RATE,
@@ -1633,6 +1693,7 @@ pub(crate) fn apply_policy(
     weight: u64,
     da_bytes: u64,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
+    next_height: u64,
     cfg: &TxPoolConfig,
 ) -> Result<(), String> {
     if cfg.policy_reject_non_coinbase_anchor_outputs {
@@ -1650,6 +1711,24 @@ pub(crate) fn apply_policy(
     if let Some(reason) = reject_unsupported_core_ext_node_runtime(tx, utxos) {
         return Err(reason);
     }
+    // Mirror of Go `applyPolicyAgainstStateSimplicity`
+    // (`clients/go/node/mempolicy_helpers.go`). On the admission/relay
+    // paths this arm is unreachable in practice — the pre-consensus gate
+    // in `add_tx_with_source`/`relay_metadata` fires first — but it is
+    // the arm that covers the miner candidate path (`apply_policy` is
+    // the Rust miner's policy vehicle, like Go's
+    // `rejectCandidateSimplicityPolicy`).
+    if cfg.policy_reject_simplicity_pre_activation {
+        let rotation = cfg
+            .suite_context
+            .as_ref()
+            .map(|ctx| ctx.rotation.as_ref() as &dyn RotationProvider);
+        if let Some(reason) =
+            reject_core_simplicity_pre_activation(tx, utxos, next_height, rotation)?
+        {
+            return Err(reason);
+        }
+    }
     Ok(())
 }
 
@@ -1659,6 +1738,133 @@ fn reject_unsupported_core_ext_node_runtime(
 ) -> Option<String> {
     covenant_policy_kind(tx, utxos, COV_TYPE_CORE_EXT)
         .map(|kind| format!("CORE_EXT {kind} unsupported by Rust node runtime"))
+}
+
+/// Missing-input precedence for the CORE_SIMPLICITY gate, mirroring Go
+/// `policyInputSnapshot` (`clients/go/node/mempool_policy.go:150`): Go
+/// resolves input outpoints into the policy snapshot BEFORE
+/// `rejectCoreSimplicityPreActivation` and rejects a missing input with
+/// `TX_ERR_MISSING_UTXO: utxo not found` first, so the policy reason
+/// never masks the consensus structural error. Called ONLY for
+/// CORE_SIMPLICITY-involved txs (the call sites gate on
+/// `covenant_policy_kind(.., COV_TYPE_CORE_SIMPLICITY)`): Rust must
+/// reject actively rather than fall through, because its consensus
+/// pipeline checks output covenants (incl. the CORE_SIMPLICITY
+/// deployment gate) before input resolution, so a fall-through would
+/// surface `TX_ERR_COVENANT_TYPE_INVALID` instead of Go's
+/// missing-UTXO-first precedence. The message is the BARE consensus
+/// `TxError` text (`utxo_basic.rs` "utxo not found"), byte-identical to
+/// Go's `txAdmitRejected(err.Error())`. Non-Simplicity txs (coinbase,
+/// plain spends) are deliberately NOT routed here — they keep their
+/// pre-existing consensus reject path; extending Go's unconditional
+/// policyInputSnapshot to every tx is a separate general-policy surface.
+/// The miner path also has NO such guard: Go's miner helper calls the
+/// gate directly on the chain UTXO view (no snapshot).
+fn reject_missing_policy_inputs(
+    tx: &rubin_consensus::Tx,
+    utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
+) -> Result<(), TxPoolAdmitError> {
+    for input in &tx.inputs {
+        let outpoint = Outpoint {
+            txid: input.prev_txid,
+            vout: input.prev_vout,
+        };
+        if !utxos.contains_key(&outpoint) {
+            // BARE `TxError` text (no "transaction rejected: " wrapper): Go's
+            // policyInputSnapshot rejects via `txAdmitRejected(err.Error())`
+            // (`clients/go/node/mempool_precheck.go`), whose harness `err` is
+            // the plain `TX_ERR_MISSING_UTXO: utxo not found`. Verified equal
+            // on both CLIs for plain-P2PK AND CORE_SIMPLICITY missing-input
+            // txs. The surrounding parse/consensus rejects keep their
+            // pre-existing `transaction rejected:` wrapper — that Rust-wide
+            // convention vs Go's bare text is a separate, pre-existing
+            // divergence outside this contract.
+            let err = rubin_consensus::TxError::new(
+                rubin_consensus::ErrorCode::TxErrMissingUtxo,
+                "utxo not found",
+            );
+            return Err(rejected(format!("{err}")));
+        }
+    }
+    Ok(())
+}
+
+/// Mirror of Go `rejectCoreSimplicityPreActivation`
+/// (`clients/go/node/policy_simplicity.go`): pre-activation fail-closed
+/// CORE_SIMPLICITY (0x0106) mempool/relay/miner policy.
+///
+/// Returns `Ok(None)` when the transaction neither creates nor spends a
+/// CORE_SIMPLICITY output, or when the rotation provider reports the
+/// Simplicity deployment active at `height`. Returns `Ok(Some(reason))`
+/// with the policy reject reason (`CORE_SIMPLICITY {output|spend}
+/// pre-ACTIVE` — byte-identical to Go, no client name) for a
+/// structurally valid pre-activation create/spend. Returns
+/// `Err(message)` when the forced-active genesis revalidation surfaces a
+/// consensus structural error: a malformed non-Simplicity covenant must
+/// keep its consensus error instead of being masked by the policy
+/// reason (Go `TestMempoolPolicyDoesNotMaskMalformedNonSimplicityOutput`);
+/// the message is the BARE `TxError` text (no `transaction rejected: `
+/// wrapper), byte-identical to Go's `txAdmitRejected(err.Error())`, which
+/// the caller forwards through `rejected(...)` unchanged.
+///
+/// Go's `SimplicityDeploymentProvider.SimplicityActiveAtHeight` can fail
+/// ("CORE_SIMPLICITY deployment lookup failure" reject branch); the Rust
+/// `RotationProvider::simplicity_active_at_height` is infallible, so
+/// that branch is statically unreachable here.
+fn reject_core_simplicity_pre_activation(
+    tx: &rubin_consensus::Tx,
+    utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
+    height: u64,
+    rotation: Option<&dyn RotationProvider>,
+) -> Result<Option<String>, String> {
+    let Some(kind) = covenant_policy_kind(tx, utxos, COV_TYPE_CORE_SIMPLICITY) else {
+        return Ok(None);
+    };
+    let active = rotation
+        .map(|provider| provider.simplicity_active_at_height(height))
+        .unwrap_or(false);
+    if active {
+        return Ok(None);
+    }
+    let forced = ActiveSimplicityGenesisRotation { inner: rotation };
+    if let Err(err) = validate_tx_covenants_genesis(tx, height, Some(&forced)) {
+        // BARE text to match Go: `rejectCoreSimplicityPreActivation` returns
+        // the raw `ValidateTxCovenantsGenesis` error and the caller emits
+        // `txAdmitRejected(err.Error())` (no wrapper), so a masked-consensus
+        // reject reads identically Go vs Rust.
+        return Err(format!("{err}"));
+    }
+    Ok(Some(format!("CORE_SIMPLICITY {kind} pre-ACTIVE")))
+}
+
+/// Mirror of Go `activeSimplicityGenesisRotation`: delegates suite
+/// rotation to the wrapped provider (or `DefaultRotationProvider` when
+/// none is configured, mirroring the Go nil fallback) while forcing the
+/// Simplicity deployment active, so the pre-activation policy can re-run
+/// genesis covenant checks without the deployment gate masking
+/// structural errors.
+struct ActiveSimplicityGenesisRotation<'a> {
+    inner: Option<&'a dyn RotationProvider>,
+}
+
+impl RotationProvider for ActiveSimplicityGenesisRotation<'_> {
+    fn native_create_suites(&self, height: u64) -> NativeSuiteSet {
+        match self.inner {
+            Some(inner) => inner.native_create_suites(height),
+            None => DefaultRotationProvider.native_create_suites(height),
+        }
+    }
+
+    fn native_spend_suites(&self, height: u64) -> NativeSuiteSet {
+        match self.inner {
+            Some(inner) => inner.native_spend_suites(height),
+            None => DefaultRotationProvider.native_spend_suites(height),
+        }
+    }
+
+    fn simplicity_active_at_height(&self, _height: u64) -> bool {
+        true
+    }
 }
 
 fn covenant_policy_kind(
@@ -2003,7 +2209,8 @@ mod tests {
 
     use rubin_consensus::block::BLOCK_HEADER_BYTES;
     use rubin_consensus::constants::{
-        COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_P2PK, SUITE_ID_SENTINEL, TX_WIRE_VERSION,
+        COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_P2PK,
+        SUITE_ID_SENTINEL, TX_WIRE_VERSION,
     };
     use rubin_consensus::{
         marshal_tx, p2pk_covenant_data_for_pubkey, parse_tx, sign_transaction,
@@ -2655,6 +2862,297 @@ mod tests {
 
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
         assert!(err.message.contains("TX_ERR_COVENANT_TYPE_INVALID"));
+    }
+
+    /// Mirror of Go `simplicityCovenantDataForNodeTest`: 32-byte program
+    /// CMR followed by compactSize(state_len) with an empty state.
+    fn simplicity_covenant_data(cmr_byte: u8) -> Vec<u8> {
+        let mut out = vec![cmr_byte; 32];
+        rubin_consensus::encode_compact_size(0, &mut out);
+        out
+    }
+
+    /// Mirror of Go `testSimplicityRotation`: default native suites plus
+    /// a Simplicity deployment that is active at every height.
+    struct SimplicityActiveRotation;
+
+    impl rubin_consensus::RotationProvider for SimplicityActiveRotation {
+        fn native_create_suites(&self, height: u64) -> rubin_consensus::NativeSuiteSet {
+            rubin_consensus::DefaultRotationProvider.native_create_suites(height)
+        }
+
+        fn native_spend_suites(&self, height: u64) -> rubin_consensus::NativeSuiteSet {
+            rubin_consensus::DefaultRotationProvider.native_spend_suites(height)
+        }
+
+        fn simplicity_active_at_height(&self, _height: u64) -> bool {
+            true
+        }
+    }
+
+    /// Mirror of the Go test `MempoolConfig` literal (zero floors, only
+    /// the Simplicity pre-activation guardrail enabled).
+    fn simplicity_policy_only_config() -> TxPoolConfig {
+        TxPoolConfig {
+            policy_da_surcharge_per_byte: 0,
+            policy_reject_non_coinbase_anchor_outputs: false,
+            policy_reject_simplicity_pre_activation: true,
+            suite_context: None,
+            policy_current_mempool_min_fee_rate: 0,
+            policy_min_da_fee_rate: 0,
+        }
+    }
+
+    /// Mirror of Go `txWithOneInputOneOutput`: a deliberately UNSIGNED
+    /// single-input transaction (the pre-activation policy gate must
+    /// fire before signature verification).
+    fn unsigned_one_input_tx(prev: &Outpoint, outputs: Vec<TxOutput>) -> Vec<u8> {
+        let tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x00,
+            tx_nonce: 11,
+            inputs: vec![TxInput {
+                prev_txid: prev.txid,
+                prev_vout: prev.vout,
+                script_sig: Vec::new(),
+                sequence: 0,
+            }],
+            outputs,
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        };
+        marshal_tx(&tx).expect("marshal unsigned policy tx")
+    }
+
+    #[test]
+    fn mempool_policy_rejects_core_simplicity_pre_activation_before_consensus() {
+        // Mirror of Go
+        // `TestMempoolPolicyRejectsCoreSimplicityPreActivationBeforeConsensus`:
+        // the policy reason — not a consensus reject — is the observable
+        // outcome for BOTH admission and relay, on the create side and
+        // the spend side, with unsigned transactions.
+        let funding = Outpoint {
+            txid: [0x11; 32],
+            vout: 0,
+        };
+        let mut state = ChainState::new();
+        state.utxos.insert(
+            funding.clone(),
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&[0x44; 2592]),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+        let cfg = simplicity_policy_only_config();
+        let chain_id = [0u8; 32];
+
+        let create_raw = unsigned_one_input_tx(
+            &funding,
+            vec![TxOutput {
+                value: 1,
+                covenant_type: COV_TYPE_CORE_SIMPLICITY,
+                covenant_data: simplicity_covenant_data(0x53),
+            }],
+        );
+        let err = TxPool::new_with_config(cfg.clone())
+            .admit(&create_raw, &state, None, chain_id)
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(
+            err.message.contains("CORE_SIMPLICITY output pre-ACTIVE"),
+            "admit create: {}",
+            err.message
+        );
+        let err = relay_metadata(&create_raw, &state, None, chain_id, &cfg).unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(
+            err.message.contains("CORE_SIMPLICITY output pre-ACTIVE"),
+            "relay create: {}",
+            err.message
+        );
+
+        let prev = Outpoint {
+            txid: [0x54; 32],
+            vout: 0,
+        };
+        state.utxos.insert(
+            prev.clone(),
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_CORE_SIMPLICITY,
+                covenant_data: simplicity_covenant_data(0x55),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+        let spend_raw = unsigned_one_input_tx(
+            &prev,
+            vec![TxOutput {
+                value: 99,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&[0x44; 2592]),
+            }],
+        );
+        let err = TxPool::new_with_config(cfg.clone())
+            .admit(&spend_raw, &state, None, chain_id)
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(
+            err.message.contains("CORE_SIMPLICITY spend pre-ACTIVE"),
+            "admit spend: {}",
+            err.message
+        );
+        let err = relay_metadata(&spend_raw, &state, None, chain_id, &cfg).unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(
+            err.message.contains("CORE_SIMPLICITY spend pre-ACTIVE"),
+            "relay spend: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn mempool_policy_missing_input_precedes_simplicity_policy_reason() {
+        // Mirror of Go `policyInputSnapshot` precedence (semantic-review
+        // finding, RUB-528): a missing input outpoint keeps the
+        // consensus TX_ERR_MISSING_UTXO reject — the CORE_SIMPLICITY
+        // policy reason must NOT mask it, on both admission and relay.
+        let missing = Outpoint {
+            txid: [0x66; 32],
+            vout: 0,
+        };
+        let state = ChainState::new();
+        let raw = unsigned_one_input_tx(
+            &missing,
+            vec![TxOutput {
+                value: 1,
+                covenant_type: COV_TYPE_CORE_SIMPLICITY,
+                covenant_data: simplicity_covenant_data(0x66),
+            }],
+        );
+        let cfg = simplicity_policy_only_config();
+        for (name, err) in [
+            (
+                "admit",
+                TxPool::new_with_config(cfg.clone())
+                    .admit(&raw, &state, None, [0u8; 32])
+                    .unwrap_err(),
+            ),
+            (
+                "relay",
+                relay_metadata(&raw, &state, None, [0u8; 32], &cfg).unwrap_err(),
+            ),
+        ] {
+            assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected, "{name}");
+            // Exact BARE string — byte-identical to Go's
+            // `txAdmitRejected(err.Error())` (verified equal on both CLIs).
+            // Pins the missing-UTXO precedence AND the no-wrapper parity
+            // without a shared vector; the policy reason must not mask it.
+            assert_eq!(
+                err.message, "TX_ERR_MISSING_UTXO: utxo not found",
+                "{name}: missing input must keep the bare consensus missing-UTXO reject"
+            );
+        }
+    }
+
+    #[test]
+    fn mempool_policy_allows_core_simplicity_create_when_active() {
+        // Mirror of Go `TestMempoolPolicyAllowsCoreSimplicityCreateWhenActive`:
+        // with a rotation provider reporting the Simplicity deployment
+        // active, the policy gate steps aside and a signed create admits.
+        let (state, raw) = signed_p2pk_state_and_tx(
+            1_000_000,
+            vec![
+                TxOutput {
+                    value: 100_000,
+                    covenant_type: COV_TYPE_CORE_SIMPLICITY,
+                    covenant_data: simplicity_covenant_data(0x58),
+                },
+                TxOutput {
+                    value: 800_000,
+                    covenant_type: COV_TYPE_P2PK,
+                    covenant_data: p2pk_covenant_data_for_pubkey(&[0x44; 2592]),
+                },
+            ],
+            0x00,
+            None,
+            Vec::new(),
+        );
+        let mut cfg = simplicity_policy_only_config();
+        cfg.suite_context = Some(crate::sync::SuiteContext {
+            rotation: std::sync::Arc::new(SimplicityActiveRotation),
+            registry: std::sync::Arc::new(
+                rubin_consensus::SuiteRegistry::default_registry().clone(),
+            ),
+        });
+        TxPool::new_with_config(cfg)
+            .admit(&raw, &state, None, [0u8; 32])
+            .expect("active CORE_SIMPLICITY create must pass policy and admit");
+    }
+
+    #[test]
+    fn mempool_policy_does_not_mask_malformed_non_simplicity_output() {
+        // Mirror of Go `TestMempoolPolicyDoesNotMaskMalformedNonSimplicityOutput`:
+        // the forced-active genesis revalidation must surface the
+        // malformed P2PK consensus error instead of the policy reason.
+        let funding = Outpoint {
+            txid: [0x11; 32],
+            vout: 0,
+        };
+        let mut state = ChainState::new();
+        state.utxos.insert(
+            funding.clone(),
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&[0x44; 2592]),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+        let raw = unsigned_one_input_tx(
+            &funding,
+            vec![
+                TxOutput {
+                    value: 1,
+                    covenant_type: COV_TYPE_CORE_SIMPLICITY,
+                    covenant_data: simplicity_covenant_data(0x59),
+                },
+                TxOutput {
+                    value: 1,
+                    covenant_type: COV_TYPE_P2PK,
+                    covenant_data: Vec::new(),
+                },
+            ],
+        );
+        let cfg = simplicity_policy_only_config();
+        for (name, err) in [
+            (
+                "admit",
+                TxPool::new_with_config(cfg.clone())
+                    .admit(&raw, &state, None, [0u8; 32])
+                    .unwrap_err(),
+            ),
+            (
+                "relay",
+                relay_metadata(&raw, &state, None, [0u8; 32], &cfg).unwrap_err(),
+            ),
+        ] {
+            assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected, "{name}");
+            assert!(
+                err.message
+                    .contains("invalid CORE_P2PK covenant_data length")
+                    && !err.message.contains("CORE_SIMPLICITY output pre-ACTIVE"),
+                "{name}: malformed P2PK must not be masked by the Simplicity policy: {}",
+                err.message
+            );
+        }
     }
 
     #[test]
