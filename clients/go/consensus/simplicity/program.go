@@ -58,9 +58,11 @@ type Program struct {
 	NeedsWitness   bool
 	maxWitnessLen  int
 	witnesses      map[witnessKey]struct{}
+	intrinsics     []ContextIntrinsic
 	evalSteps      uint64
 	decoded        bool
 	hasJet         bool
+	disallowedJet  bool
 	jetKey         jetKey
 	frameBitWidths []uint64
 }
@@ -76,11 +78,29 @@ type Jet struct {
 
 type EvalOptions struct {
 	JetEvaluator func(Jet) (EvalResult, error)
+	Host         EvalHost
 }
 
 type EvalResult struct {
 	Accepted bool
 	Cost     uint64
+}
+
+type EvalHost interface {
+	Charge(cost uint64) error
+	Cost() uint64
+	ReadIntrinsic(ContextIntrinsic) (IntrinsicResult, error)
+}
+
+type ContextIntrinsic struct {
+	ID        uint16
+	Name      string
+	Signature string
+	Index     uint16
+}
+
+type IntrinsicResult struct {
+	Accepted bool
 }
 
 func Decode(program, witness []byte, opts DecodeOptions) (Program, error) {
@@ -116,6 +136,11 @@ func LookupJet(id uint16, subOp uint8) (Jet, bool) {
 	return copyJet(row), ok
 }
 
+func LookupContextIntrinsic(id uint16) (ContextIntrinsic, bool) {
+	row, ok := contextIntrinsicByID[id]
+	return row, ok
+}
+
 func requireJet(id uint16, subOp uint8) (Jet, error) {
 	jet, ok := LookupJet(id, subOp)
 	if !ok {
@@ -128,22 +153,34 @@ func (p Program) Evaluate(opts EvalOptions) (EvalResult, error) {
 	if !p.decoded {
 		return EvalResult{}, &Error{Code: ErrDecode}
 	}
-	if p.hasJet {
-		if _, ok := jetRows[p.jetKey]; !ok {
-			return EvalResult{}, &Error{Code: ErrDecode}
-		}
-		if err := checkMemoryBounds(p.frameBitWidths); err != nil {
-			return EvalResult{}, err
-		}
-		return p.evaluateJet(opts)
-	}
-	if p.evalSteps == 0 {
-		return EvalResult{}, &Error{Code: ErrDecode}
-	}
-	if err := checkMemoryBounds(p.frameBitWidths); err != nil {
+	if err := p.checkRunnable(); err != nil {
 		return EvalResult{}, err
 	}
-	return evaluateSteps(p.evalSteps)
+
+	switch {
+	case p.hasJet:
+		return p.evaluateJet(opts)
+	case len(p.intrinsics) > 0:
+		return p.evaluateIntrinsics(opts)
+	default:
+		return p.evaluateSteps(opts)
+	}
+}
+
+func (p Program) checkRunnable() error {
+	if p.disallowedJet {
+		return &Error{Code: ErrJetDisallowed}
+	}
+	if p.hasJet {
+		if _, ok := jetRows[p.jetKey]; !ok {
+			return &Error{Code: ErrDecode}
+		}
+		return checkMemoryBounds(p.frameBitWidths)
+	}
+	if len(p.intrinsics) == 0 && p.evalSteps == 0 {
+		return &Error{Code: ErrDecode}
+	}
+	return checkMemoryBounds(p.frameBitWidths)
 }
 
 func (p Program) evaluateJet(opts EvalOptions) (EvalResult, error) {
@@ -154,10 +191,31 @@ func (p Program) evaluateJet(opts EvalOptions) (EvalResult, error) {
 	if !ok {
 		return EvalResult{}, &Error{Code: ErrDecode}
 	}
+	if opts.Host != nil && opts.Host.Cost() >= MaxExecCost {
+		return EvalResult{Accepted: true, Cost: MaxExecCost}, &Error{Code: ErrBudgetExceeded}
+	}
 	result, err := opts.JetEvaluator(jet)
 	if err != nil {
 		return EvalResult{}, err
 	}
+	if opts.Host != nil {
+		return evaluateJetWithHost(result, opts.Host)
+	}
+	return evaluateJetWithLocalMeter(result)
+}
+
+func evaluateJetWithHost(result EvalResult, host EvalHost) (EvalResult, error) {
+	if err := host.Charge(result.Cost); err != nil {
+		return EvalResult{Accepted: result.Accepted, Cost: host.Cost()}, err
+	}
+	result.Cost = host.Cost()
+	if !result.Accepted {
+		return result, &Error{Code: ErrRejected}
+	}
+	return result, nil
+}
+
+func evaluateJetWithLocalMeter(result EvalResult) (EvalResult, error) {
 	var meter meter
 	if err := meter.charge(result.Cost); err != nil {
 		return EvalResult{Accepted: result.Accepted, Cost: meter.cost}, err
@@ -169,6 +227,38 @@ func (p Program) evaluateJet(opts EvalOptions) (EvalResult, error) {
 	return result, nil
 }
 
+func (p Program) evaluateSteps(opts EvalOptions) (EvalResult, error) {
+	if opts.Host != nil {
+		return evaluateStepsWithHost(p.evalSteps, opts.Host)
+	}
+	return evaluateSteps(p.evalSteps)
+}
+
+func (p Program) evaluateIntrinsics(opts EvalOptions) (EvalResult, error) {
+	if opts.Host == nil {
+		return EvalResult{}, &Error{Code: ErrJetDisallowed}
+	}
+	if p.evalSteps > 0 {
+		if err := chargeSteps(opts.Host, p.evalSteps); err != nil {
+			return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, err
+		}
+	}
+	for _, intrinsic := range p.intrinsics {
+		result, err := opts.Host.ReadIntrinsic(intrinsic)
+		if err != nil {
+			return EvalResult{Accepted: result.Accepted, Cost: opts.Host.Cost()}, err
+		}
+	}
+	return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, nil
+}
+
+func evaluateStepsWithHost(steps uint64, host EvalHost) (EvalResult, error) {
+	if err := chargeSteps(host, steps); err != nil {
+		return EvalResult{Accepted: true, Cost: host.Cost()}, err
+	}
+	return EvalResult{Accepted: true, Cost: host.Cost()}, nil
+}
+
 func evaluateSteps(steps uint64) (EvalResult, error) {
 	if StepCost == 0 {
 		return EvalResult{Accepted: true}, nil
@@ -178,6 +268,19 @@ func evaluateSteps(steps uint64) (EvalResult, error) {
 		return EvalResult{Accepted: true, Cost: MaxExecCost}, &Error{Code: ErrBudgetExceeded}
 	}
 	return EvalResult{Accepted: true, Cost: steps * StepCost}, nil
+}
+
+func chargeSteps(host EvalHost, steps uint64) error {
+	if StepCost == 0 || steps == 0 {
+		return nil
+	}
+	if steps > MaxExecCost/StepCost {
+		if err := host.Charge(MaxExecCost); err != nil {
+			return err
+		}
+		return &Error{Code: ErrBudgetExceeded}
+	}
+	return host.Charge(steps * StepCost)
 }
 
 func RubinJetCMR(identityHash [32]byte, jetWeight uint64) [32]byte {
@@ -213,6 +316,10 @@ func CostModelHash() [32]byte {
 // JetsRegistryHash returns the hash of the ordered Go jet registry table.
 func JetsRegistryHash() [32]byte {
 	return jetsRegistryHashValue
+}
+
+func ContextSchemaHash() [32]byte {
+	return contextSchemaHashValue
 }
 
 func decodeProgram(program []byte) (Program, error) {
@@ -270,9 +377,68 @@ type costModelRow struct {
 	param   uint64
 }
 
+func contextIntrinsicRowsByID(rows []ContextIntrinsic) map[uint16]ContextIntrinsic {
+	out := make(map[uint16]ContextIntrinsic, len(rows))
+	var prev uint16
+	for i, row := range rows {
+		if i > 0 && prev >= row.ID {
+			panic("context intrinsic rows not strictly sorted")
+		}
+		out[row.ID] = row
+		prev = row.ID
+	}
+	return out
+}
+
+func mustContextIntrinsic(id uint16) ContextIntrinsic {
+	row, ok := LookupContextIntrinsic(id)
+	if !ok {
+		panic("missing context intrinsic row")
+	}
+	return row
+}
+
 type witnessKey struct {
 	version uint32
 	bytes   string
+}
+
+var contextIntrinsicRows = []ContextIntrinsic{
+	{ID: 0x0100, Name: "ctx_chain_id", Signature: "unit -> bytes32"},
+	{ID: 0x0101, Name: "ctx_height", Signature: "unit -> u64"},
+	{ID: 0x0102, Name: "ctx_tx_kind", Signature: "unit -> u8"},
+	{ID: 0x0103, Name: "ctx_tx_nonce", Signature: "unit -> u64"},
+	{ID: 0x0104, Name: "ctx_locktime", Signature: "unit -> u32"},
+	{ID: 0x0105, Name: "ctx_input_count", Signature: "unit -> u16"},
+	{ID: 0x0106, Name: "ctx_output_count", Signature: "unit -> u16"},
+	{ID: 0x0107, Name: "ctx_total_in", Signature: "unit -> u128"},
+	{ID: 0x0108, Name: "ctx_total_out", Signature: "unit -> u128"},
+	{ID: 0x0110, Name: "ctx_self_input_index", Signature: "unit -> u16"},
+	{ID: 0x0111, Name: "ctx_self_value", Signature: "unit -> u64"},
+	{ID: 0x0112, Name: "ctx_self_state", Signature: "unit -> bytes"},
+	{ID: 0x0113, Name: "ctx_self_program_cmr", Signature: "unit -> bytes32"},
+	{ID: 0x0114, Name: "ctx_self_sighash_type", Signature: "unit -> u8"},
+	{ID: 0x0115, Name: "ctx_self_digest32", Signature: "unit -> bytes32"},
+	{ID: 0x0120, Name: "ctx_inputs_value", Signature: "u16 -> Either<unit, u64>"},
+	{ID: 0x0121, Name: "ctx_inputs_covenant_type", Signature: "u16 -> Either<unit, u16>"},
+	{ID: 0x0122, Name: "ctx_inputs_descriptor_hash", Signature: "u16 -> Either<unit, bytes32>"},
+	{ID: 0x0128, Name: "ctx_outputs_value", Signature: "u16 -> Either<unit, u64>"},
+	{ID: 0x0129, Name: "ctx_outputs_covenant_type", Signature: "u16 -> Either<unit, u16>"},
+	{ID: 0x012a, Name: "ctx_outputs_descriptor_hash", Signature: "u16 -> Either<unit, bytes32>"},
+	{ID: 0x0130, Name: "ctx_group_inputs_value", Signature: "u16 -> Either<unit, u64>"},
+	{ID: 0x0131, Name: "ctx_group_inputs_state_bytes", Signature: "u16 -> Either<unit, bytes>"},
+	{ID: 0x0138, Name: "ctx_group_outputs_value", Signature: "u16 -> Either<unit, u64>"},
+	{ID: 0x0139, Name: "ctx_group_outputs_state_bytes", Signature: "u16 -> Either<unit, bytes>"},
+	{ID: 0x0140, Name: "ctx_da_commit_da_id", Signature: "unit -> Either<unit, bytes32>"},
+	{ID: 0x0141, Name: "ctx_da_commit_chunk_count", Signature: "unit -> Either<unit, u16>"},
+	{ID: 0x0142, Name: "ctx_da_commit_retl_domain_id", Signature: "unit -> Either<unit, bytes32>"},
+	{ID: 0x0143, Name: "ctx_da_commit_batch_number", Signature: "unit -> Either<unit, u64>"},
+	{ID: 0x0144, Name: "ctx_da_commit_tx_data_root", Signature: "unit -> Either<unit, bytes32>"},
+	{ID: 0x0145, Name: "ctx_da_commit_state_root", Signature: "unit -> Either<unit, bytes32>"},
+	{ID: 0x0146, Name: "ctx_da_commit_withdrawals_root", Signature: "unit -> Either<unit, bytes32>"},
+	{ID: 0x0150, Name: "ctx_da_chunk_da_id", Signature: "unit -> Either<unit, bytes32>"},
+	{ID: 0x0151, Name: "ctx_da_chunk_chunk_index", Signature: "unit -> Either<unit, u16>"},
+	{ID: 0x0152, Name: "ctx_da_chunk_chunk_hash", Signature: "unit -> Either<unit, bytes32>"},
 }
 
 var jetRegistryRows = []jetRegistryRow{
@@ -416,15 +582,19 @@ func costModelRowCountByte(rows []costModelRow) byte {
 }
 
 var (
-	noWitness     = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: ""}: {}}
-	boolWitness   = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: string([]byte{0x00})}: {}, {version: SemanticsVersion, bytes: string([]byte{0x80})}: {}}
-	sha3JetRow    = jetRows[jetKey{id: 0x0001, subOp: 0x00}]
-	mldsa87JetRow = jetRows[jetKey{id: 0x0002, subOp: 0x00}]
-	unitFrames    = []uint64{0, 0}
-	boolFrames    = []uint64{1, 1}
-	sha3Frames    = []uint64{512, 256}
-	mldsa87Frames = []uint64{(2_592 + 4_627 + 32) * 8, 1}
-	costModelRows = []costModelRow{
+	noWitness              = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: ""}: {}}
+	boolWitness            = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: string([]byte{0x00})}: {}, {version: SemanticsVersion, bytes: string([]byte{0x80})}: {}}
+	contextSchemaHashValue = hex32("e832db3008c355262420c63168c1c9787a69aac31d15a50a640f0301d8410150")
+	contextIntrinsicByID   = contextIntrinsicRowsByID(contextIntrinsicRows)
+	contextChainIDRow      = mustContextIntrinsic(0x0100)
+	sha3JetRow             = jetRows[jetKey{id: 0x0001, subOp: 0x00}]
+	mldsa87JetRow          = jetRows[jetKey{id: 0x0002, subOp: 0x00}]
+	unitFrames             = []uint64{0, 0}
+	boolFrames             = []uint64{1, 1}
+	contextChainIDFrames   = []uint64{0, 256}
+	sha3Frames             = []uint64{512, 256}
+	mldsa87Frames          = []uint64{(2_592 + 4_627 + 32) * 8, 1}
+	costModelRows          = []costModelRow{
 		{jet: jetKey{id: 0x0001, subOp: 0x00}, formula: costBasePlusLen, param: sha3256JetBaseCost},
 		{jet: jetKey{id: 0x0002, subOp: 0x00}, formula: costConstant, param: mldsa87VerifyJetCost},
 		{jet: jetKey{id: 0x0010, subOp: 0x00}, formula: costConstant, param: 1},
@@ -443,8 +613,13 @@ var (
 		string([]byte{0xc1, 0x22, 0x0f, 0x01, 0x00}): {program: Program{CMR: hex32("afeae8c18903b9e0aae2c125f31f7b8e09de916e461f221936b633d587c1b434"), witnesses: noWitness, evalSteps: 4, frameBitWidths: unitFrames}},
 		string([]byte{0x89, 0x00}):                   {program: Program{CMR: hex32("d296a48e538af38908242ab30244036fdb66e9056d5f812a5b328fae2b6a2726"), witnesses: noWitness, evalSteps: 2, frameBitWidths: unitFrames}},
 		string([]byte{0xc1, 0xd2, 0x10, 0x14}):       {program: Program{CMR: hex32("d3ae07ae97378595ef49c6677fd92a1761f8fe7fd8dde86197efb49a49448b83"), NeedsWitness: true, maxWitnessLen: 1, witnesses: boolWitness, evalSteps: 4, frameBitWidths: boolFrames}},
+		string([]byte{0xe8, 0x00, 0x00}):             {program: Program{CMR: hex32("39f9eaabbe10dc4e46b4b099604762181b70921da4d17ccb76fd585e1370a66a"), witnesses: noWitness, intrinsics: []ContextIntrinsic{contextChainIDRow}, frameBitWidths: contextChainIDFrames}},
 		string([]byte{0x60}):                         {program: Program{CMR: sha3JetRow.CMR, Jet: &sha3JetRow, witnesses: noWitness, frameBitWidths: sha3Frames}},
 		string([]byte{0x70}):                         {program: Program{CMR: mldsa87JetRow.CMR, Jet: &mldsa87JetRow, witnesses: noWitness, frameBitWidths: mldsa87Frames}},
+		string([]byte{0xe8, 0x60, 0x00}):             {err: ErrDecode},
+		string([]byte{0xf0, 0x00, 0x10, 0x00}):       {err: ErrDecode},
+		string([]byte{0xe8, 0x00, 0x80}):             {err: ErrDecode},
+		string([]byte{0xe3, 0x00}):                   {err: ErrJetDisallowed},
 		string([]byte{0x7c, 0x06, 0x80}):             {err: ErrJetDisallowed},
 	}
 )
