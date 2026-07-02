@@ -158,3 +158,35 @@ func TestValidateBlockTxSemantics_CovenantError(t *testing.T) {
 		t.Fatalf("active CORE_SIMPLICITY block tx semantics: %v", err)
 	}
 }
+
+// The same-cmr CORE_SIMPLICITY output group cap applies to EVERY transaction,
+// coinbase included (RUB-594): a coinbase creating >SIMPLICITY_MAX_GROUP_OUTPUTS
+// same-program_cmr CORE_SIMPLICITY outputs at an active deployment height is
+// rejected on the block-apply path (validateBlockTxSemantics runs the covenant
+// genesis cap for tx index 0).
+func TestValidateBlockTxSemantics_CoinbaseCoreSimplicityOutputGroupCap(t *testing.T) {
+	var cmr [32]byte
+	cmr[0] = 0x77
+	rotation := testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87, simplicityActiveHeight: 1}
+	coinbaseWith := func(n int) *Tx {
+		outputs := make([]TxOutput, n)
+		for i := range outputs {
+			outputs[i] = TxOutput{Value: 1, CovenantType: COV_TYPE_CORE_SIMPLICITY, CovenantData: encodeSimplicityCovenantData(cmr, nil)}
+		}
+		return &Tx{
+			TxKind:   0x00,
+			TxNonce:  0,
+			Inputs:   []TxInput{{PrevTxid: [32]byte{}, PrevVout: ^uint32(0), Sequence: ^uint32(0)}},
+			Outputs:  outputs,
+			Locktime: 1,
+		}
+	}
+
+	// Exactly the cap of same-cmr CORE_SIMPLICITY outputs in a coinbase is accepted.
+	if err := validateBlockTxSemantics(&ParsedBlock{Txs: []*Tx{coinbaseWith(SIMPLICITY_MAX_GROUP_OUTPUTS)}}, 1, rotation); err != nil {
+		t.Fatalf("coinbase with SIMPLICITY_MAX_GROUP_OUTPUTS same-cmr outputs must pass: %v", err)
+	}
+	// One over the cap is rejected on the block-apply path, coinbase included.
+	err := validateBlockTxSemantics(&ParsedBlock{Txs: []*Tx{coinbaseWith(SIMPLICITY_MAX_GROUP_OUTPUTS + 1)}}, 1, rotation)
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY same-cmr output group exceeds limit")
+}
