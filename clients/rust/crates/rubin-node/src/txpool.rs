@@ -1803,8 +1803,9 @@ fn reject_missing_policy_inputs(
 /// consensus structural error: a malformed non-Simplicity covenant must
 /// keep its consensus error instead of being masked by the policy
 /// reason (Go `TestMempoolPolicyDoesNotMaskMalformedNonSimplicityOutput`);
-/// the message uses the same `transaction rejected: {err}` shape as the
-/// admission consensus map.
+/// the message is the BARE `TxError` text (no `transaction rejected: `
+/// wrapper), byte-identical to Go's `txAdmitRejected(err.Error())`, which
+/// the caller forwards through `rejected(...)` unchanged.
 ///
 /// Go's `SimplicityDeploymentProvider.SimplicityActiveAtHeight` can fail
 /// ("CORE_SIMPLICITY deployment lookup failure" reject branch); the Rust
