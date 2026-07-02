@@ -335,7 +335,6 @@ func TestDecodeContextABIVectors(t *testing.T) {
 	if len(program.intrinsics) != 1 || program.intrinsics[0].ID != 0x0100 {
 		t.Fatalf("decoded intrinsics=%+v want ctx_chain_id", program.intrinsics)
 	}
-
 	for _, tt := range []struct {
 		name     string
 		program  string
@@ -761,10 +760,8 @@ func TestEvaluateHostMeteringPaths(t *testing.T) {
 	if err != nil || !got.Accepted || got.Cost != IntrinsicMissCost || host.last.ID != 0x0140 {
 		t.Fatalf("miss evaluation=%+v host=%+v err=%v want accepted miss cost", got, host, err)
 	}
-
 	_, err = Program{decoded: true, intrinsics: []ContextIntrinsic{ctx}}.Evaluate(EvalOptions{})
 	assertErrorCode(t, err, ErrJetDisallowed)
-
 	host = newTestEvalHost()
 	host.cost = MaxExecCost - IntrinsicReadCost
 	got, err = Program{decoded: true, intrinsics: []ContextIntrinsic{ctx}}.Evaluate(EvalOptions{Host: host})
@@ -788,7 +785,6 @@ func TestEvaluateHostMeteringPaths(t *testing.T) {
 	}
 	_, err = Program{decoded: true, evalSteps: overSteps, disallowedJet: true}.Evaluate(EvalOptions{Host: newTestEvalHost()})
 	assertErrorCode(t, err, ErrJetDisallowed)
-
 	host = newTestEvalHost()
 	got, err = Program{decoded: true, evalSteps: 3}.Evaluate(EvalOptions{Host: host})
 	if err != nil || !got.Accepted || got.Cost != 3*StepCost || host.cost != got.Cost {
@@ -800,7 +796,6 @@ func TestEvaluateHostMeteringPaths(t *testing.T) {
 	if !got.Accepted || got.Cost != MaxExecCost {
 		t.Fatalf("over-step evaluation=%+v want accepted cost=%d", got, MaxExecCost)
 	}
-
 	host.cost = 1
 	err = chargeSteps(host, overSteps)
 	assertErrorCode(t, err, ErrBudgetExceeded)
