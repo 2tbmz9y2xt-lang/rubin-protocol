@@ -219,9 +219,12 @@ func JetsRegistryHash() [32]byte {
 // program_encoding_hash commitment (CANONICAL §23.2.4, defined as SHA3-256 over
 // ProgramEncodingRulesBytes_v1). The value is a pinned literal transcribed from
 // the published rubin-spec artifact SPEC-SIMPLICITY-01-PROGRAM-ENCODING
-// (final-rules JSON), which lives in the private spec repo and is absent from
-// this public checkout (see SPEC_LOCATION.md); this package carries no
-// encoding-rules preimage, so the value is committed here, not recomputed.
+// (final-rules JSON), verified against GitHub 2tbmz9y2xt-lang/rubin-spec@main
+// de22d2ec34d26bc91d3425811c1adb733e5832c3 at
+// spec/extensions/SPEC-SIMPLICITY-01-PROGRAM-ENCODING.final-rules.generated.json.
+// The artifact lives in the private spec repo and is absent from this public
+// checkout (see SPEC_LOCATION.md); this package carries no encoding-rules
+// preimage, so the value is committed here, not recomputed.
 // Rust simplicity::PROGRAM_ENCODING_HASH separately pins this byte-identical
 // value; that is a corroborating second copy of the same §23.2.4 bytes reviewed
 // against the artifact, not an automated in-repo cross-client comparator.
@@ -237,15 +240,18 @@ func ProgramEncodingHash() [32]byte {
 // published context-ABI artifact: the RUBIN_CONSENSUS_STATE_MACHINE §3 schema and
 // intrinsic table). The value is a pinned literal transcribed from the published
 // rubin-spec artifact SPEC-SIMPLICITY-01-CONTEXT-ABI (integrated into canon by
-// RUB-597), which lives in the private spec repo and is absent from this public
-// checkout (see SPEC_LOCATION.md); this package carries no context-ABI preimage,
-// so the value is committed here, not recomputed. Unlike program_encoding_hash
-// there is no in-repo cross-client or preimage anchor for these bytes yet: the
-// Rust context_schema_hash mirror is deferred behind the Rust freeze and the
-// shared hash-parity corpus is owned by RUB-606, both outside this single-client
-// slice. Cross-client parity for this value is therefore a deferred divergence
-// owned by those siblings under the controller-sanctioned Rust freeze, not an
-// in-scope gap for this slice; the bytes are transcribed from §23.2.4 canon.
+// RUB-597), verified against GitHub 2tbmz9y2xt-lang/rubin-spec@main
+// de22d2ec34d26bc91d3425811c1adb733e5832c3 at
+// spec/extensions/SPEC-SIMPLICITY-01-CONTEXT-ABI.generated.json. The artifact
+// lives in the private spec repo and is absent from this public checkout (see
+// SPEC_LOCATION.md); this package carries no context-ABI preimage, so the value
+// is committed here, not recomputed. Unlike program_encoding_hash there is no
+// in-repo cross-client or preimage anchor for these bytes yet: the Rust
+// context_schema_hash mirror is deferred behind the Rust freeze and the shared
+// hash-parity corpus is owned by RUB-606, both outside this single-client slice.
+// Cross-client parity for this value is therefore a deferred divergence owned by
+// those siblings under the controller-sanctioned Rust freeze, not an in-scope gap
+// for this slice; the bytes are transcribed from §23.2.4 canon.
 func ContextSchemaHash() [32]byte {
 	return [32]byte{
 		0xe8, 0x32, 0xdb, 0x30, 0x08, 0xc3, 0x55, 0x26, 0x24, 0x20, 0xc6, 0x31, 0x68, 0xc1, 0xc9, 0x78,
