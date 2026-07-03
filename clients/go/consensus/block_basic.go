@@ -13,6 +13,12 @@ type ParsedBlock struct {
 	Wtxids      [][32]byte
 	Header      BlockHeader
 	TxCount     uint64
+	// ChainID is the validating chain's id, set by the context-bearing
+	// parse+validate entry so block-body covenant-genesis validation checks a
+	// CORE_SIMPLICITY deployment descriptor's committed chain_id against the real
+	// chain (matching the apply path), not a zero placeholder. Zero on the
+	// pure-parse path, which carries no rotation and does no deployment check.
+	ChainID [32]byte
 }
 
 type BlockBasicSummary struct {
@@ -140,7 +146,7 @@ func ValidateBlockBasicWithContextAtHeight(
 	blockHeight uint64,
 	prevTimestamps []uint64,
 ) (*BlockBasicSummary, error) {
-	return ValidateBlockBasicWithContextAtHeightAndRotation(blockBytes, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps, nil)
+	return ValidateBlockBasicWithContextAtHeightAndRotation(blockBytes, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps, [32]byte{}, nil)
 }
 
 func ValidateBlockBasicWithContextAtHeightAndRotation(
@@ -149,6 +155,7 @@ func ValidateBlockBasicWithContextAtHeightAndRotation(
 	expectedTarget *[32]byte,
 	blockHeight uint64,
 	prevTimestamps []uint64,
+	chainID [32]byte,
 	rotation RotationProvider,
 ) (*BlockBasicSummary, error) {
 	_, summary, err := parseAndValidateBlockBasicWithContextAtHeight(
@@ -157,6 +164,7 @@ func ValidateBlockBasicWithContextAtHeightAndRotation(
 		expectedTarget,
 		blockHeight,
 		prevTimestamps,
+		chainID,
 		rotation,
 	)
 	return summary, err
@@ -168,12 +176,14 @@ func parseAndValidateBlockBasicWithContextAtHeight(
 	expectedTarget *[32]byte,
 	blockHeight uint64,
 	prevTimestamps []uint64,
+	chainID [32]byte,
 	rotation RotationProvider,
 ) (*ParsedBlock, *BlockBasicSummary, error) {
 	pb, err := ParseBlockBytes(blockBytes)
 	if err != nil {
 		return nil, nil, err
 	}
+	pb.ChainID = chainID
 	summary, err := validateParsedBlockBasicWithContextAtHeight(pb, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps, rotation)
 	if err != nil {
 		return nil, nil, err
@@ -272,16 +282,17 @@ func ValidateBlockBasicWithContextAndFeesAtHeight(
 	alreadyGenerated uint64,
 	sumFees uint64,
 ) (*BlockBasicSummary, error) {
-	return ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(blockBytes, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps, alreadyGenerated, sumFees, nil)
+	return ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(blockBytes, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps, alreadyGenerated, sumFees, [32]byte{}, nil)
 }
 
-func ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(blockBytes []byte, expectedPrevHash *[32]byte, expectedTarget *[32]byte, blockHeight uint64, prevTimestamps []uint64, alreadyGenerated uint64, sumFees uint64, rotation RotationProvider) (*BlockBasicSummary, error) {
+func ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(blockBytes []byte, expectedPrevHash *[32]byte, expectedTarget *[32]byte, blockHeight uint64, prevTimestamps []uint64, alreadyGenerated uint64, sumFees uint64, chainID [32]byte, rotation RotationProvider) (*BlockBasicSummary, error) {
 	pb, s, err := parseAndValidateBlockBasicWithContextAtHeight(
 		blockBytes,
 		expectedPrevHash,
 		expectedTarget,
 		blockHeight,
 		prevTimestamps,
+		chainID,
 		rotation,
 	)
 	if err != nil {

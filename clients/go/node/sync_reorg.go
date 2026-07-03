@@ -79,7 +79,7 @@ func (s *SyncEngine) storeSideBlockAndSummary(branch []reorgBranchBlock, commonA
 	if err != nil {
 		return nil, err
 	}
-	if _, err := consensus.ValidateBlockBasicWithContextAtHeightAndRotation(candidate.blockBytes, &candidate.header.PrevBlockHash, s.cfg.ExpectedTarget, candidateHeight, prevTimestamps, s.cfg.RotationProvider); err != nil {
+	if _, err := consensus.ValidateBlockBasicWithContextAtHeightAndRotation(candidate.blockBytes, &candidate.header.PrevBlockHash, s.cfg.ExpectedTarget, candidateHeight, prevTimestamps, s.cfg.ChainID, s.cfg.RotationProvider); err != nil {
 		return nil, err
 	}
 	if err := s.blockStore.StoreBlock(candidate.hash, candidate.parsed.HeaderBytes, candidate.blockBytes); err != nil {

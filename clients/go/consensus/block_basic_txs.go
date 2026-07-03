@@ -42,10 +42,11 @@ func validateBlockTxSemantics(pb *ParsedBlock, blockHeight uint64, rotation Rota
 				return err
 			}
 		}
-		// Block-body validation carries no SimplicityDeploymentProvider, so no
-		// CORE_SIMPLICITY deployment activates and chain_id is unused here (the live
-		// apply path passes the real one).
-		if err := ValidateTxCovenantsGenesis(tx, [32]byte{}, blockHeight, rotation); err != nil {
+		// pb.ChainID is the validating chain's id (set by the context-bearing
+		// parse+validate entry), so block-body covenant-genesis validation checks a
+		// CORE_SIMPLICITY deployment descriptor against the real chain, matching the
+		// apply path. Zero only on the pure-parse path, which carries no rotation.
+		if err := ValidateTxCovenantsGenesis(tx, pb.ChainID, blockHeight, rotation); err != nil {
 			return err
 		}
 	}

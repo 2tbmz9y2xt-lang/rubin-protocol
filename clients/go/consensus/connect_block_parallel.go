@@ -85,6 +85,7 @@ func ConnectBlockParallelSigVerifyWithSuiteContext(
 		expectedTarget,
 		blockHeight,
 		prevTimestamps,
+		chainID,
 		rot,
 	)
 	if err != nil {

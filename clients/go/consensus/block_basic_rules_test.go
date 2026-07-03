@@ -280,8 +280,16 @@ func TestValidateBlockBasicWithFees_CoreSimplicityUsesRotation(t *testing.T) {
 	block := buildBlockBytes(t, prev, root, target, 58, [][]byte{coinbase, simp})
 	_, err = ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, 0, 0)
 	assertTxErrCode(t, err, TX_ERR_COVENANT_TYPE_INVALID)
-	if _, err := ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(block, &prev, &target, height, nil, 0, 0, testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87, simplicityActiveHeight: height}); err != nil {
+	if _, err := ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(block, &prev, &target, height, nil, 0, 0, [32]byte{}, testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87, simplicityActiveHeight: height}); err != nil {
 		t.Fatalf("ValidateBlockBasicWithContextAndFeesAtHeightAndRotation: %v", err)
+	}
+	// Block-body threads the REAL chain_id: a descriptor committed for chainX
+	// activates only when block-body is given chainX (a zero-chain_id bug would
+	// reject it as chain_id mismatch — the Copilot/Codex P1).
+	chainX := bytes32(0x7a)
+	rotX := testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87, simplicityActiveHeight: height, chainID: chainX}
+	if _, err := ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(block, &prev, &target, height, nil, 0, 0, chainX, rotX); err != nil {
+		t.Fatalf("block-body must thread the real chain_id (descriptor for chainX active): %v", err)
 	}
 }
 
