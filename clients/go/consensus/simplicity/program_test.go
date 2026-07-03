@@ -69,7 +69,7 @@ func TestDecodeVectors(t *testing.T) {
 		{id: "VEC-PE-015", program: hx("c1d21014"), witness: hx("01"), version: 1, wantError: ErrDecode},
 		{id: "VEC-PE-016", program: hx("c1d21014"), witness: hx("0000"), version: 1, wantError: ErrDecode},
 		{id: "VEC-PE-017", program: hx("2400"), version: 1, wantError: ErrDecode},
-			{id: "RUB598-PE-UNKNOWN-CONTEXT-INTRINSIC", program: hx("e86000"), version: 1, wantError: ErrDecode},
+		{id: "RUB598-PE-UNKNOWN-CONTEXT-INTRINSIC", program: hx("e86000"), version: 1, wantError: ErrDecode},
 	}
 
 	for _, tt := range tests {
@@ -272,6 +272,10 @@ func TestSharedJetsRegistryCorpus(t *testing.T) {
 	}
 }
 
+// Self-consistency guard only: the expected hash below is derived from contextIntrinsicRows itself
+// (same pattern as TestCostModelHashMatchesSpecArtifact/TestJetsRegistryHashMatchesSpecArtifact
+// already on main), so it catches an ACCIDENTAL EDIT after this file was written, not an incorrect
+// initial transcription from the RUB-597 artifact — see context_abi_generated.go's header.
 func TestContextIntrinsicRowsMatchRUB597Snapshot(t *testing.T) {
 	if len(contextIntrinsicRows) != 35 {
 		t.Fatalf("context ABI row count=%d want 35", len(contextIntrinsicRows))
@@ -322,6 +326,13 @@ func (h *evalTestHost) ReadIntrinsic(ContextIntrinsic) (IntrinsicResult, error) 
 func TestAdversarialHostDoesNotMutateOnBudgetError(t *testing.T) {
 	if (IntrinsicResult{Value: ContextValue{Kind: ContextValueU8, Uint: 0x100}}).validFor(ContextIntrinsic{Kind: ContextValueU8}) {
 		t.Fatal("u8 intrinsic accepted out-of-range host value")
+	}
+	bytesIntrinsic := ContextIntrinsic{Kind: ContextValueBytes}
+	if !(IntrinsicResult{Value: ContextValue{Kind: ContextValueBytes, Bytes: make([]byte, maxContextStateBytes)}}).validFor(bytesIntrinsic) {
+		t.Fatal("bytes intrinsic rejected at-cap host value")
+	}
+	if (IntrinsicResult{Value: ContextValue{Kind: ContextValueBytes, Bytes: make([]byte, maxContextStateBytes+1)}}).validFor(bytesIntrinsic) {
+		t.Fatal("bytes intrinsic accepted over-cap host value")
 	}
 	desc, err := Decode(hx("e82200"), nil, DecodeOptions{SemanticsVersion: SemanticsVersion})
 	if err != nil {
@@ -541,12 +552,15 @@ func TestJetsRegistryHashMatchesSpecArtifact(t *testing.T) {
 	}
 }
 
+// Regression guard, NOT an artifact recompute — see ProgramEncodingHash's doc comment for why.
 func TestProgramEncodingHashPinsPublishedSpecValue(t *testing.T) {
 	if got := ProgramEncodingHash(); got != hex32("27e5ad521efdf9d185c1c92a3a1a4aacc9276c2a5b1b8518ce25c8c973a38adc") {
 		t.Fatalf("program_encoding_hash=%x", got)
 	}
 }
 
+// Regression guard, NOT an artifact recompute — see ContextSchemaHash's doc comment for why (no
+// in-repo Rust/preimage anchor yet; deferred to RUB-606 under the Rust freeze).
 func TestContextSchemaHashPinsPublishedSpecValue(t *testing.T) {
 	if got := ContextSchemaHash(); got != hex32("e832db3008c355262420c63168c1c9787a69aac31d15a50a640f0301d8410150") {
 		t.Fatalf("context_schema_hash=%x", got)

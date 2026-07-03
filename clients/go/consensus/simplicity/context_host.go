@@ -154,6 +154,13 @@ func chargeCost(host EvalHost, cost uint64) error {
 	return host.Charge(cost)
 }
 
+// maxContextStateBytes mirrors consensus.MAX_SIMPLICITY_STATE_BYTES (clients/go/consensus/constants.go);
+// package simplicity cannot import package consensus (see EvalHost doc), so this is a hand-kept
+// duplicate, not a derived value. Keep it in sync by hand if the consensus constant changes: staying
+// too NARROW only over-rejects (fail-closed, safe); staying too WIDE would under-reject, so never
+// widen this without also widening the consensus constant in the same change.
+const maxContextStateBytes = 512
+
 func (r IntrinsicResult) validFor(intrinsic ContextIntrinsic) bool {
 	if r.Failure {
 		return intrinsic.Either
@@ -163,7 +170,7 @@ func (r IntrinsicResult) validFor(intrinsic ContextIntrinsic) bool {
 	}
 	switch r.Value.Kind {
 	case ContextValueBytes:
-		return len(r.Value.Bytes) <= 512
+		return len(r.Value.Bytes) <= maxContextStateBytes
 	case ContextValueU8:
 		return r.Value.Uint <= 0xff
 	case ContextValueU16:

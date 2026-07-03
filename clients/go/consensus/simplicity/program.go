@@ -53,15 +53,20 @@ type DecodeOptions struct {
 }
 
 type Program struct {
-	CMR            [32]byte
-	Jet            *Jet
-	NeedsWitness   bool
-	maxWitnessLen  int
-	witnesses      map[witnessKey]struct{}
-	intrinsics     []ContextIntrinsic
-	evalSteps      uint64
-	decoded        bool
-	hasJet         bool
+	CMR           [32]byte
+	Jet           *Jet
+	NeedsWitness  bool
+	maxWitnessLen int
+	witnesses     map[witnessKey]struct{}
+	intrinsics    []ContextIntrinsic
+	evalSteps     uint64
+	decoded       bool
+	hasJet        bool
+	// disallowedJet is reserved for a decoded program containing a jet outside the ACTIVE registry on
+	// a never-taken branch (E11(ii)); no decode path in this Go-only slice sets it yet because the
+	// current flat hasJet/jetKey representation has no branch/CFG concept to place a jet on an
+	// untaken path — that test case is deferred to RUB-610/RUB-611 (real branch composition), not
+	// implementable here without the STOP_AND_SPLIT this issue's own contract anticipated.
 	disallowedJet  bool
 	jetKey         jetKey
 	frameBitWidths []uint64
