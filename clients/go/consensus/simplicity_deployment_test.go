@@ -159,11 +159,13 @@ func TestSelectGoverningSurface_UnverifiableSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Clause (b): a previously-ACTIVE surface at height 10, then UNKNOWN (set-anchor
-	// mismatch) must yield NO surface — the stateless gate never replaces or
-	// deactivates a caller-held governing surface.
+	// STATELESS UNKNOWN disposition: the same set selects a governing surface under
+	// its real anchor, but under a wrong anchor selectGoverningSurface returns
+	// (nil, error) — it never fabricates or activates a surface on partial knowledge.
+	// (No caller-held state here; not deactivating an already-active surface on a
+	// later UNKNOWN is a stateful live-spend property owned by RUB-601, not this gate.)
 	if s, _ := selectGoverningSurface(set, anchor, chain, 10, liveArtifactHashes()); s == nil {
-		t.Fatal("precondition: expected a previously-ACTIVE surface")
+		t.Fatal("precondition: expected a governing surface under the real anchor")
 	}
 	if s, err := selectGoverningSurface(set, bytes32(0xFF), chain, 10, liveArtifactHashes()); err == nil || s != nil {
 		t.Fatalf("UNKNOWN must yield no surface, got s=%v err=%v", s, err)

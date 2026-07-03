@@ -70,11 +70,13 @@ func parseCoreSimplicityCovenantData(value uint64, covenantData []byte) ([32]byt
 }
 
 // SimplicityActiveAtHeight reports whether a verified CORE_SIMPLICITY surface
-// governs at height on the validating chain. A provider I/O error is returned as
-// an error (distinct "lookup failure" disposition); an unobtainable/unverifiable
-// set (ok=false or set-anchor mismatch/duplicate) and "no governing descriptor"
-// both yield (false, nil) — deployment state UNKNOWN never activates or replaces
-// a surface on partial knowledge.
+// governs at height on the validating chain. STATELESS and fail-closed: a provider
+// I/O error is the ONE distinct disposition (returned as an error → "deployment
+// lookup failure"); every other non-affirmative state — ok=false, set-anchor
+// mismatch/duplicate, or no governing descriptor — collapses to (false, nil). The
+// output does NOT distinguish "UNKNOWN" from "not active" (both are inactive here).
+// Not deactivating an ALREADY-active surface on a later UNKNOWN lookup is a
+// STATEFUL live-spend property owned by the RUB-601 call-site, not enforced here.
 func SimplicityActiveAtHeight(chainID [32]byte, height uint64, provider SimplicityDeploymentProvider) (bool, error) {
 	if provider == nil {
 		return false, nil
