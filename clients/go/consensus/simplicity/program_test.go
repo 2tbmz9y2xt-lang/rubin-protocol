@@ -318,6 +318,7 @@ func (h *evalTestHost) Cost() uint64 { return h.cost }
 func (h *evalTestHost) IntrinsicCost(ContextIntrinsic) (uint64, error) {
 	return 1, nil
 }
+
 func (h *evalTestHost) ReadIntrinsic(ContextIntrinsic) (IntrinsicResult, error) {
 	h.reads++
 	return IntrinsicResult{}, nil

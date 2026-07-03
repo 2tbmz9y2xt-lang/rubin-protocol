@@ -300,6 +300,7 @@ func (h testSimplicityEvalHost) IntrinsicCost(in simplicity.ContextIntrinsic) (u
 	}
 	return simplicity.DescriptorHashAccessCost(descriptorSourceLen(sources[in.Index]))
 }
+
 func (h testSimplicityEvalHost) ReadIntrinsic(in simplicity.ContextIntrinsic) (simplicity.IntrinsicResult, error) {
 	var got SimplicityTxContextDescriptorHashResult
 	var scratch SimplicityTxContextMeter
