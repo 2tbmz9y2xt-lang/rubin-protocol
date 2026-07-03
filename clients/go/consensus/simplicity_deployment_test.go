@@ -126,6 +126,7 @@ func TestSelectGoverningSurface_ValidityAndSelection(t *testing.T) {
 		{"chain_id mismatch", 10, []SimplicityDeploymentDescriptor{crossChain}, false, 0},
 		{"informative fields arbitrary still active", 10, []SimplicityDeploymentDescriptor{informative}, true, 10},
 		{"two valid same height => both ignored", 10, []SimplicityDeploymentDescriptor{tieA, tieB}, false, 0},
+		{"tie at query height ignored, prior lower valid governs", 10, []SimplicityDeploymentDescriptor{liveValidDescriptor(chain, 5), tieA, tieB}, true, 5},
 		{"valid + invalid same height => valid governs", 10, []SimplicityDeploymentDescriptor{liveValidDescriptor(chain, 10), crossChain}, true, 10},
 		{"later descriptor replaces earlier (query high)", 20, []SimplicityDeploymentDescriptor{liveValidDescriptor(chain, 10), liveValidDescriptor(chain, 20)}, true, 20},
 		{"earlier governs before replacement (query low)", 15, []SimplicityDeploymentDescriptor{liveValidDescriptor(chain, 10), liveValidDescriptor(chain, 20)}, true, 10},
