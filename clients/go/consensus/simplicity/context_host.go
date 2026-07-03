@@ -1,39 +1,88 @@
 package simplicity
 
+import "encoding/hex"
+
+// EvalHost supplies context-ABI values through one shared execution meter.
+// Charge MUST either advance Cost or return ErrBudgetExceeded without extra
+// work. IntrinsicCost MUST be computable without materializing the value, and
+// ReadIntrinsic MUST NOT charge; Evaluate charges the returned cost first.
 type EvalHost interface {
 	Charge(cost uint64) error
 	Cost() uint64
+	IntrinsicCost(ContextIntrinsic) (uint64, error)
 	ReadIntrinsic(ContextIntrinsic) (IntrinsicResult, error)
 }
 
 type ContextIntrinsic struct {
 	ID, Index       uint16
 	Name, Signature string
+	SelectorHex     string
+	CMR             [32]byte
+	OutputBitWidth  uint64
+	Kind            ContextValueKind
+	Either          bool
 }
 
-type IntrinsicResult struct{ Accepted bool }
+type ContextValueKind uint8
 
-func LookupContextIntrinsic(id uint16) (ContextIntrinsic, bool) {
-	row, ok := contextIntrinsicByID[id]
-	return row, ok
+const (
+	ContextValueInvalid ContextValueKind = iota
+	ContextValueBytes32
+	ContextValueBytes
+	ContextValueU8
+	ContextValueU16
+	ContextValueU32
+	ContextValueU64
+	ContextValueU128
+)
+
+type ContextValue struct {
+	Kind    ContextValueKind
+	Bytes32 [32]byte
+	Bytes   []byte
+	Uint    uint64
+	Uint128 [2]uint64
 }
 
-func ContextSchemaHash() [32]byte { return contextSchemaHashValue }
+type IntrinsicResult struct {
+	Value   ContextValue
+	Failure bool
+}
 
-func contextIntrinsicRowsByID(rows []ContextIntrinsic) map[uint16]ContextIntrinsic {
-	out := make(map[uint16]ContextIntrinsic, len(rows))
+func contextIntrinsicProgramEntries(rows []ContextIntrinsic, witnesses map[witnessKey]struct{}) map[string]programEntry {
+	out := make(map[string]programEntry, len(rows))
 	for _, row := range rows {
-		out[row.ID] = row
+		out[string(mustHexBytes(row.SelectorHex))] = programEntry{program: Program{
+			CMR:            row.CMR,
+			witnesses:      witnesses,
+			intrinsics:     []ContextIntrinsic{row},
+			frameBitWidths: []uint64{0, row.OutputBitWidth},
+		}}
 	}
 	return out
 }
 
-func evaluateJetWithHost(result EvalResult, host EvalHost) (EvalResult, error) {
-	err := host.Charge(result.Cost)
-	result.Cost = host.Cost()
-	if err != nil {
-		return result, err
+func mergeProgramEntries(base, extra map[string]programEntry) map[string]programEntry {
+	out := make(map[string]programEntry, len(base)+len(extra))
+	for key, entry := range base {
+		out[key] = entry
 	}
+	for key, entry := range extra {
+		out[key] = entry
+	}
+	return out
+}
+
+func mustHexBytes(s string) []byte {
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		panic("invalid embedded hex: " + err.Error())
+	}
+	return raw
+}
+
+func evaluateJetWithHost(result EvalResult, host EvalHost) (EvalResult, error) {
+	result.Cost = host.Cost()
 	if !result.Accepted {
 		return result, &Error{Code: ErrRejected}
 	}
@@ -70,12 +119,22 @@ func (p Program) evaluateIntrinsics(opts EvalOptions) (EvalResult, error) {
 		}
 	}
 	for _, intrinsic := range p.intrinsics {
-		if opts.Host.Cost() >= MaxExecCost {
-			return EvalResult{Accepted: true, Cost: MaxExecCost}, &Error{Code: ErrBudgetExceeded}
+		cost, err := opts.Host.IntrinsicCost(intrinsic)
+		if err != nil {
+			return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, err
+		}
+		if err := chargeCost(opts.Host, cost); err != nil {
+			return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, err
 		}
 		result, err := opts.Host.ReadIntrinsic(intrinsic)
 		if err != nil {
-			return EvalResult{Accepted: result.Accepted, Cost: opts.Host.Cost()}, err
+			return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, err
+		}
+		if !result.validFor(intrinsic) {
+			return EvalResult{Cost: opts.Host.Cost()}, &Error{Code: ErrRejected}
+		}
+		if opts.ContextEvaluator != nil && !opts.ContextEvaluator(intrinsic, result) {
+			return EvalResult{Cost: opts.Host.Cost()}, &Error{Code: ErrRejected}
 		}
 	}
 	return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, nil
@@ -91,52 +150,27 @@ func chargeSteps(host EvalHost, steps uint64) error {
 		return nil
 	}
 	if steps > MaxExecCost/StepCost {
-		if err := host.Charge(MaxExecCost); err != nil {
-			return err
+		return chargeCost(host, MaxExecCost+1)
+	}
+	return chargeCost(host, steps*StepCost)
+}
+
+func chargeCost(host EvalHost, cost uint64) error {
+	current := host.Cost()
+	if current >= MaxExecCost || cost > MaxExecCost-current {
+		if current < MaxExecCost {
+			if err := host.Charge(MaxExecCost - current); err != nil {
+				return err
+			}
 		}
 		return &Error{Code: ErrBudgetExceeded}
 	}
-	return host.Charge(steps * StepCost)
+	return host.Charge(cost)
 }
 
-var contextSchemaHashValue = hex32("e832db3008c355262420c63168c1c9787a69aac31d15a50a640f0301d8410150")
-var contextIntrinsicByID = contextIntrinsicRowsByID(contextIntrinsicRows)
-var contextChainIDRow = contextIntrinsicByID[0x0100]
-
-var contextIntrinsicRows = []ContextIntrinsic{
-	{ID: 0x0100, Name: "ctx_chain_id", Signature: "unit -> bytes32"},
-	{ID: 0x0101, Name: "ctx_height", Signature: "unit -> u64"},
-	{ID: 0x0102, Name: "ctx_tx_kind", Signature: "unit -> u8"},
-	{ID: 0x0103, Name: "ctx_tx_nonce", Signature: "unit -> u64"},
-	{ID: 0x0104, Name: "ctx_locktime", Signature: "unit -> u32"},
-	{ID: 0x0105, Name: "ctx_input_count", Signature: "unit -> u16"},
-	{ID: 0x0106, Name: "ctx_output_count", Signature: "unit -> u16"},
-	{ID: 0x0107, Name: "ctx_total_in", Signature: "unit -> u128"},
-	{ID: 0x0108, Name: "ctx_total_out", Signature: "unit -> u128"},
-	{ID: 0x0110, Name: "ctx_self_input_index", Signature: "unit -> u16"},
-	{ID: 0x0111, Name: "ctx_self_value", Signature: "unit -> u64"},
-	{ID: 0x0112, Name: "ctx_self_state", Signature: "unit -> bytes"},
-	{ID: 0x0113, Name: "ctx_self_program_cmr", Signature: "unit -> bytes32"},
-	{ID: 0x0114, Name: "ctx_self_sighash_type", Signature: "unit -> u8"},
-	{ID: 0x0115, Name: "ctx_self_digest32", Signature: "unit -> bytes32"},
-	{ID: 0x0120, Name: "ctx_inputs_value", Signature: "u16 -> Either<unit, u64>"},
-	{ID: 0x0121, Name: "ctx_inputs_covenant_type", Signature: "u16 -> Either<unit, u16>"},
-	{ID: 0x0122, Name: "ctx_inputs_descriptor_hash", Signature: "u16 -> Either<unit, bytes32>"},
-	{ID: 0x0128, Name: "ctx_outputs_value", Signature: "u16 -> Either<unit, u64>"},
-	{ID: 0x0129, Name: "ctx_outputs_covenant_type", Signature: "u16 -> Either<unit, u16>"},
-	{ID: 0x012a, Name: "ctx_outputs_descriptor_hash", Signature: "u16 -> Either<unit, bytes32>"},
-	{ID: 0x0130, Name: "ctx_group_inputs_value", Signature: "u16 -> Either<unit, u64>"},
-	{ID: 0x0131, Name: "ctx_group_inputs_state_bytes", Signature: "u16 -> Either<unit, bytes>"},
-	{ID: 0x0138, Name: "ctx_group_outputs_value", Signature: "u16 -> Either<unit, u64>"},
-	{ID: 0x0139, Name: "ctx_group_outputs_state_bytes", Signature: "u16 -> Either<unit, bytes>"},
-	{ID: 0x0140, Name: "ctx_da_commit_da_id", Signature: "unit -> Either<unit, bytes32>"},
-	{ID: 0x0141, Name: "ctx_da_commit_chunk_count", Signature: "unit -> Either<unit, u16>"},
-	{ID: 0x0142, Name: "ctx_da_commit_retl_domain_id", Signature: "unit -> Either<unit, bytes32>"},
-	{ID: 0x0143, Name: "ctx_da_commit_batch_number", Signature: "unit -> Either<unit, u64>"},
-	{ID: 0x0144, Name: "ctx_da_commit_tx_data_root", Signature: "unit -> Either<unit, bytes32>"},
-	{ID: 0x0145, Name: "ctx_da_commit_state_root", Signature: "unit -> Either<unit, bytes32>"},
-	{ID: 0x0146, Name: "ctx_da_commit_withdrawals_root", Signature: "unit -> Either<unit, bytes32>"},
-	{ID: 0x0150, Name: "ctx_da_chunk_da_id", Signature: "unit -> Either<unit, bytes32>"},
-	{ID: 0x0151, Name: "ctx_da_chunk_chunk_index", Signature: "unit -> Either<unit, u16>"},
-	{ID: 0x0152, Name: "ctx_da_chunk_chunk_hash", Signature: "unit -> Either<unit, bytes32>"},
+func (r IntrinsicResult) validFor(intrinsic ContextIntrinsic) bool {
+	if r.Failure {
+		return intrinsic.Either
+	}
+	return intrinsic.Kind != ContextValueInvalid && r.Value.Kind == intrinsic.Kind
 }

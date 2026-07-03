@@ -77,8 +77,10 @@ type Jet struct {
 }
 
 type EvalOptions struct {
-	JetEvaluator func(Jet) (EvalResult, error)
-	Host         EvalHost
+	JetEvaluator     func(Jet) (EvalResult, error)
+	JetRegistry      func(Jet) bool
+	Host             EvalHost
+	ContextEvaluator func(ContextIntrinsic, IntrinsicResult) bool
 }
 
 type EvalResult struct {
@@ -150,7 +152,8 @@ func (p Program) checkRunnable() error {
 		return &Error{Code: ErrJetDisallowed}
 	}
 	if p.hasJet {
-		if _, ok := jetRows[p.jetKey]; !ok {
+		_, ok := LookupJet(p.jetKey.id, p.jetKey.subOp)
+		if !ok {
 			return &Error{Code: ErrDecode}
 		}
 		return checkMemoryBounds(p.frameBitWidths)
@@ -169,8 +172,13 @@ func (p Program) evaluateJet(opts EvalOptions) (EvalResult, error) {
 	if !ok {
 		return EvalResult{}, &Error{Code: ErrDecode}
 	}
-	if opts.Host != nil && opts.Host.Cost() >= MaxExecCost {
-		return EvalResult{Accepted: true, Cost: MaxExecCost}, &Error{Code: ErrBudgetExceeded}
+	if opts.JetRegistry != nil && !opts.JetRegistry(jet) {
+		return EvalResult{}, &Error{Code: ErrJetDisallowed}
+	}
+	if opts.Host != nil {
+		if err := chargeCost(opts.Host, p.jetCost()); err != nil {
+			return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, err
+		}
 	}
 	result, err := opts.JetEvaluator(jet)
 	if err != nil {
@@ -180,6 +188,17 @@ func (p Program) evaluateJet(opts EvalOptions) (EvalResult, error) {
 		return evaluateJetWithHost(result, opts.Host)
 	}
 	return evaluateJetWithLocalMeter(result)
+}
+
+func (p Program) jetCost() uint64 {
+	switch p.jetKey {
+	case jetKey{id: 0x0001, subOp: 0x00}:
+		return sha3256JetBaseCost + frameBytes(p.frameBitWidths[0])
+	case jetKey{id: 0x0002, subOp: 0x00}:
+		return mldsa87VerifyJetCost
+	default:
+		return 1
+	}
 }
 
 func evaluateSteps(steps uint64) (EvalResult, error) {
@@ -429,16 +448,15 @@ func costModelRowCountByte(rows []costModelRow) byte {
 }
 
 var (
-	noWitness            = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: ""}: {}}
-	boolWitness          = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: string([]byte{0x00})}: {}, {version: SemanticsVersion, bytes: string([]byte{0x80})}: {}}
-	sha3JetRow           = jetRows[jetKey{id: 0x0001, subOp: 0x00}]
-	mldsa87JetRow        = jetRows[jetKey{id: 0x0002, subOp: 0x00}]
-	unitFrames           = []uint64{0, 0}
-	boolFrames           = []uint64{1, 1}
-	contextChainIDFrames = []uint64{0, 256}
-	sha3Frames           = []uint64{512, 256}
-	mldsa87Frames        = []uint64{(2_592 + 4_627 + 32) * 8, 1}
-	costModelRows        = []costModelRow{
+	noWitness     = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: ""}: {}}
+	boolWitness   = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: string([]byte{0x00})}: {}, {version: SemanticsVersion, bytes: string([]byte{0x80})}: {}}
+	sha3JetRow    = jetRows[jetKey{id: 0x0001, subOp: 0x00}]
+	mldsa87JetRow = jetRows[jetKey{id: 0x0002, subOp: 0x00}]
+	unitFrames    = []uint64{0, 0}
+	boolFrames    = []uint64{1, 1}
+	sha3Frames    = []uint64{512, 256}
+	mldsa87Frames = []uint64{(2_592 + 4_627 + 32) * 8, 1}
+	costModelRows = []costModelRow{
 		{jet: jetKey{id: 0x0001, subOp: 0x00}, formula: costBasePlusLen, param: sha3256JetBaseCost},
 		{jet: jetKey{id: 0x0002, subOp: 0x00}, formula: costConstant, param: mldsa87VerifyJetCost},
 		{jet: jetKey{id: 0x0010, subOp: 0x00}, formula: costConstant, param: 1},
@@ -452,12 +470,11 @@ var (
 		{jet: jetKey{id: 0x0020, subOp: 0x01}, formula: costOnePlusCeilLen32},
 		{jet: jetKey{id: 0x0021, subOp: 0x00}, formula: costOnePlusCeilLen32},
 	}
-	programs = map[string]programEntry{
+	basePrograms = map[string]programEntry{
 		string([]byte{0x24}):                         {program: Program{CMR: hex32("c40a10263f7436b4160acbef1c36fba4be4d95df181a968afeab5eac247adff7"), witnesses: noWitness, evalSteps: 1, frameBitWidths: unitFrames}},
 		string([]byte{0xc1, 0x22, 0x0f, 0x01, 0x00}): {program: Program{CMR: hex32("afeae8c18903b9e0aae2c125f31f7b8e09de916e461f221936b633d587c1b434"), witnesses: noWitness, evalSteps: 4, frameBitWidths: unitFrames}},
 		string([]byte{0x89, 0x00}):                   {program: Program{CMR: hex32("d296a48e538af38908242ab30244036fdb66e9056d5f812a5b328fae2b6a2726"), witnesses: noWitness, evalSteps: 2, frameBitWidths: unitFrames}},
 		string([]byte{0xc1, 0xd2, 0x10, 0x14}):       {program: Program{CMR: hex32("d3ae07ae97378595ef49c6677fd92a1761f8fe7fd8dde86197efb49a49448b83"), NeedsWitness: true, maxWitnessLen: 1, witnesses: boolWitness, evalSteps: 4, frameBitWidths: boolFrames}},
-		string([]byte{0xe8, 0x00, 0x00}):             {program: Program{CMR: hex32("39f9eaabbe10dc4e46b4b099604762181b70921da4d17ccb76fd585e1370a66a"), witnesses: noWitness, intrinsics: []ContextIntrinsic{contextChainIDRow}, frameBitWidths: contextChainIDFrames}},
 		string([]byte{0x60}):                         {program: Program{CMR: sha3JetRow.CMR, Jet: &sha3JetRow, witnesses: noWitness, frameBitWidths: sha3Frames}},
 		string([]byte{0x70}):                         {program: Program{CMR: mldsa87JetRow.CMR, Jet: &mldsa87JetRow, witnesses: noWitness, frameBitWidths: mldsa87Frames}},
 		string([]byte{0xe8, 0x60, 0x00}):             {err: ErrDecode},
@@ -466,6 +483,7 @@ var (
 		string([]byte{0xe3, 0x00}):                   {err: ErrJetDisallowed},
 		string([]byte{0x7c, 0x06, 0x80}):             {err: ErrJetDisallowed},
 	}
+	programs = mergeProgramEntries(basePrograms, contextIntrinsicProgramEntries(contextIntrinsicRows, noWitness))
 )
 
 func sha256Compress(state *[8]uint32, block [64]uint32) {
