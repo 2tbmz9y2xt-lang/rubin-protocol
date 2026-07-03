@@ -53,7 +53,7 @@ func selectGoverningSurface(
 // validDescriptorSubset returns the valid descriptors, derived AFTER set-anchor
 // verification (validity-agnostic ordering).
 func validDescriptorSubset(descriptors []SimplicityDeploymentDescriptor, chainID [32]byte, artifacts simplicityArtifactHashes) []SimplicityDeploymentDescriptor {
-	valid := descriptors[:0:0]
+	valid := make([]SimplicityDeploymentDescriptor, 0, len(descriptors))
 	for i := range descriptors {
 		if descriptorFieldsValid(descriptors[i], chainID, artifacts) {
 			valid = append(valid, descriptors[i])
