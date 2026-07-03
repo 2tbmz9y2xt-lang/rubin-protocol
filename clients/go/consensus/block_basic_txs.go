@@ -42,7 +42,10 @@ func validateBlockTxSemantics(pb *ParsedBlock, blockHeight uint64, rotation Rota
 				return err
 			}
 		}
-		if err := ValidateTxCovenantsGenesis(tx, blockHeight, rotation); err != nil {
+		// Block-body validation carries no SimplicityDeploymentProvider, so no
+		// CORE_SIMPLICITY deployment activates and chain_id is unused here (the live
+		// apply path passes the real one).
+		if err := ValidateTxCovenantsGenesis(tx, [32]byte{}, blockHeight, rotation); err != nil {
 			return err
 		}
 	}

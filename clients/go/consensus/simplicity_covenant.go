@@ -6,8 +6,14 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus/simplicity"
 )
 
+// SimplicityDeploymentProvider supplies the raw published CORE_SIMPLICITY
+// deployment set and its published set anchor (§23.2.4). It does pure I/O: it
+// MUST return the COMPLETE published set INCLUDING invalid descriptors and MUST
+// NOT pre-filter — the consensus layer verifies the set anchor and derives the
+// valid subset (validity-agnostic ordering). ok=false signals the set is
+// unobtainable / only partially known (deployment state UNKNOWN).
 type SimplicityDeploymentProvider interface {
-	SimplicityActiveAtHeight(height uint64) (bool, error)
+	PublishedSimplicityDeployments() (descriptors []SimplicityDeploymentDescriptor, setAnchor [32]byte, ok bool, err error)
 }
 
 func simplicityDeploymentFromRotation(rotation RotationProvider) SimplicityDeploymentProvider {
@@ -63,11 +69,32 @@ func parseCoreSimplicityCovenantData(value uint64, covenantData []byte) ([32]byt
 	return programCMR, state, nil
 }
 
-func validateCoreSimplicityDeploymentActive(height uint64, provider SimplicityDeploymentProvider) error {
+// SimplicityActiveAtHeight reports whether a verified CORE_SIMPLICITY surface
+// governs at height on the validating chain. A provider I/O error is returned as
+// an error (distinct "lookup failure" disposition); an unobtainable/unverifiable
+// set (ok=false or set-anchor mismatch/duplicate) and "no governing descriptor"
+// both yield (false, nil) — deployment state UNKNOWN never activates or replaces
+// a surface on partial knowledge.
+func SimplicityActiveAtHeight(chainID [32]byte, height uint64, provider SimplicityDeploymentProvider) (bool, error) {
 	if provider == nil {
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
+		return false, nil
 	}
-	active, err := provider.SimplicityActiveAtHeight(height)
+	descriptors, setAnchor, ok, err := provider.PublishedSimplicityDeployments()
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	surface, err := selectGoverningSurface(descriptors, setAnchor, chainID, height, liveArtifactHashes())
+	if err != nil {
+		return false, nil
+	}
+	return surface != nil, nil
+}
+
+func validateCoreSimplicityDeploymentActive(chainID [32]byte, height uint64, provider SimplicityDeploymentProvider) error {
+	active, err := SimplicityActiveAtHeight(chainID, height, provider)
 	if err != nil {
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment lookup failure")
 	}

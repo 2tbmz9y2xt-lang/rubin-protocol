@@ -1987,7 +1987,8 @@ func runFromStdin() {
 			writeConsensusErr(os.Stdout, err)
 			return
 		}
-		if err := consensus.ValidateTxCovenantsGenesis(tx, req.Height, nil); err != nil {
+		// nil rotation carries no SimplicityDeploymentProvider, so chain_id is unused.
+		if err := consensus.ValidateTxCovenantsGenesis(tx, [32]byte{}, req.Height, nil); err != nil {
 			writeConsensusErr(os.Stdout, err)
 			return
 		}

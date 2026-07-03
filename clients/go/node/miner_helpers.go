@@ -63,10 +63,12 @@ func (m *Miner) rejectCandidateSimplicityPolicy(tx *consensus.Tx, utxos map[cons
 	}
 
 	var rotation consensus.RotationProvider
+	var chainID [32]byte
 	if m.sync != nil {
 		rotation = m.sync.cfg.RotationProvider
+		chainID = m.sync.cfg.ChainID
 	}
-	reject, _, err := rejectCoreSimplicityPreActivation(tx, utxos, nextHeight, rotation)
+	reject, _, err := rejectCoreSimplicityPreActivation(tx, utxos, chainID, nextHeight, rotation)
 	if err != nil {
 		return false, err
 	}

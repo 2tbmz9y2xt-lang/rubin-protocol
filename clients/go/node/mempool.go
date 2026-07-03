@@ -294,7 +294,7 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 		return nil, nil, txAdmitRejected(reason)
 	}
 	if policy.PolicyRejectSimplicityPreActivation {
-		reject, reason, err := rejectCoreSimplicityPreActivation(tx, policyUtxos, nextHeight, policy.RotationProvider)
+		reject, reason, err := rejectCoreSimplicityPreActivation(tx, policyUtxos, m.chainID, nextHeight, policy.RotationProvider)
 		if err != nil {
 			return nil, nil, txAdmitRejected(err.Error())
 		}
@@ -338,7 +338,7 @@ func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction,
 	}
 
 	// Apply Simplicity policy
-	if err := applyPolicyAgainstStateSimplicity(checked, utxos, nextHeight, policy); err != nil {
+	if err := applyPolicyAgainstStateSimplicity(checked, utxos, m.chainID, nextHeight, policy); err != nil {
 		return err
 	}
 

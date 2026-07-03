@@ -83,7 +83,7 @@ func (ctx *nonCoinbaseApplyContext) prepare() error {
 	if ctx.tx.TxNonce == 0 {
 		return txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
 	}
-	if err := ValidateTxCovenantsGenesis(ctx.tx, ctx.height, ctx.rotation); err != nil {
+	if err := ValidateTxCovenantsGenesis(ctx.tx, ctx.chainID, ctx.height, ctx.rotation); err != nil {
 		return err
 	}
 	sighashCache, err := NewSighashV1PrehashCache(ctx.tx)

@@ -2579,7 +2579,7 @@ func TestMempoolPolicyAllowsCoreSimplicityCreateWhenActive(t *testing.T) {
 
 	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
 		PolicyRejectSimplicityPreActivation: true,
-		RotationProvider:                    testSimplicityRotation{activeAt: 0},
+		RotationProvider:                    testSimplicityRotation{activeAt: 0, chainID: devnetGenesisChainID},
 	})
 	if err != nil {
 		t.Fatalf("new mempool: %v", err)
@@ -3389,7 +3389,7 @@ func TestMempoolConnectedBlockDecaySeesConfirmedAndConflictingRemovals(t *testin
 	}
 
 	block := &consensus.ParsedBlock{
-		Txids: [][32]byte{[32]byte{0x01}, confirmedID},
+		Txids: [][32]byte{{0x01}, confirmedID},
 		Txs: []*consensus.Tx{
 			{},
 			{Inputs: []consensus.TxInput{{PrevTxid: spentByBlock.Txid, PrevVout: spentByBlock.Vout}}},

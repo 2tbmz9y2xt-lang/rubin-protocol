@@ -122,9 +122,9 @@ func applyPolicyAgainstStateCoreExtUnsupported(checked *consensus.CheckedTransac
 	return nil
 }
 
-func applyPolicyAgainstStateSimplicity(checked *consensus.CheckedTransaction, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, policy MempoolConfig) error {
+func applyPolicyAgainstStateSimplicity(checked *consensus.CheckedTransaction, utxos map[consensus.Outpoint]consensus.UtxoEntry, chainID [32]byte, nextHeight uint64, policy MempoolConfig) error {
 	if policy.PolicyRejectSimplicityPreActivation {
-		reject, reason, err := rejectCoreSimplicityPreActivation(checked.Tx, utxos, nextHeight, policy.RotationProvider)
+		reject, reason, err := rejectCoreSimplicityPreActivation(checked.Tx, utxos, chainID, nextHeight, policy.RotationProvider)
 		if err != nil {
 			return err
 		}
