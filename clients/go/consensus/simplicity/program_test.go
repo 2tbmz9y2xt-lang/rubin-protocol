@@ -2,6 +2,7 @@ package simplicity
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -68,6 +69,10 @@ func TestDecodeVectors(t *testing.T) {
 		{id: "VEC-PE-015", program: hx("c1d21014"), witness: hx("01"), version: 1, wantError: ErrDecode},
 		{id: "VEC-PE-016", program: hx("c1d21014"), witness: hx("0000"), version: 1, wantError: ErrDecode},
 		{id: "VEC-PE-017", program: hx("2400"), version: 1, wantError: ErrDecode},
+		{id: "RUB598-PE-UNKNOWN-CONTEXT-INTRINSIC", program: hx("e86000"), version: 1, wantError: ErrDecode},
+		{id: "RUB598-PE-NON-ALIASING-NATURAL", program: hx("f0001000"), version: 1, wantError: ErrDecode},
+		{id: "RUB598-PE-BAD-SECOND-NATURAL", program: hx("e80080"), version: 1, wantError: ErrDecode},
+		{id: "RUB598-PE-JET-NAMESPACE-DISALLOWED", program: hx("e300"), version: 1, wantError: ErrJetDisallowed},
 	}
 
 	for _, tt := range tests {
@@ -270,6 +275,122 @@ func TestSharedJetsRegistryCorpus(t *testing.T) {
 	}
 }
 
+// Self-consistency guard only: the expected hash below is derived from contextIntrinsicRows itself
+// (same pattern as TestCostModelHashMatchesSpecArtifact/TestJetsRegistryHashMatchesSpecArtifact
+// already on main), so it catches an ACCIDENTAL EDIT after this file was written, not an incorrect
+// initial transcription from the RUB-597 artifact — see context_abi_generated.go's header.
+func TestContextIntrinsicRowsMatchRUB597Snapshot(t *testing.T) {
+	if len(contextIntrinsicRows) != 35 {
+		t.Fatalf("context ABI row count=%d want 35", len(contextIntrinsicRows))
+	}
+	hash := sha256.New()
+	for _, row := range contextIntrinsicRows {
+		program, err := Decode(hx(row.SelectorHex), nil, DecodeOptions{SemanticsVersion: SemanticsVersion})
+		if err != nil {
+			t.Fatalf("Decode context ABI row %#04x: %v", row.ID, err)
+		}
+		if program.CMR != row.CMR {
+			t.Fatalf("row %#04x cmr=%x want %x", row.ID, program.CMR, row.CMR)
+		}
+		if len(program.intrinsics) != 1 || program.intrinsics[0].ID != row.ID {
+			t.Fatalf("row %#04x decoded intrinsics=%+v", row.ID, program.intrinsics)
+		}
+		fmt.Fprintf(hash, "%04x|%s|%s|%s|%x|%d|%d|%t|%t\n", row.ID, row.Name, row.Signature, row.SelectorHex, row.CMR, row.Kind, row.OutputBitWidth, row.Either, row.Indexed)
+	}
+	if got := hex.EncodeToString(hash.Sum(nil)); got != "8a7543f57ac73443a793a66f281e78072eedcf1bf12ed27710aefb0624865638" {
+		t.Fatalf("context ABI RUB-597 snapshot hash=%s", got)
+	}
+}
+
+type evalTestHost struct {
+	meter
+	charges, reads   int
+	lastCharge       uint64
+	failCharge       bool
+	intrinsicCostErr error
+	intrinsicCostFn  func(ContextIntrinsic) (uint64, error)
+	intrinsicResult  IntrinsicResult
+	readErr          error
+	lastIndex        uint16
+}
+
+func (h *evalTestHost) Charge(cost uint64) error {
+	h.charges++
+	h.lastCharge = cost
+	if h.failCharge {
+		return &Error{Code: ErrBudgetExceeded}
+	}
+	return h.charge(cost)
+}
+func (h *evalTestHost) Cost() uint64 { return h.cost }
+func (h *evalTestHost) IntrinsicCost(intrinsic ContextIntrinsic) (uint64, error) {
+	if h.intrinsicCostFn != nil {
+		return h.intrinsicCostFn(intrinsic)
+	}
+	return 1, h.intrinsicCostErr
+}
+
+func (h *evalTestHost) ReadIntrinsic(intrinsic ContextIntrinsic) (IntrinsicResult, error) {
+	h.reads++
+	h.lastIndex = intrinsic.Index
+	return h.intrinsicResult, h.readErr
+}
+
+func TestAdversarialHostDoesNotMutateOnBudgetError(t *testing.T) {
+	if (IntrinsicResult{Value: ContextValue{Kind: ContextValueU8, Uint: 0x100}}).validFor(ContextIntrinsic{Kind: ContextValueU8}) {
+		t.Fatal("u8 intrinsic accepted out-of-range host value")
+	}
+	bytesIntrinsic := ContextIntrinsic{Kind: ContextValueBytes}
+	if !(IntrinsicResult{Value: ContextValue{Kind: ContextValueBytes, Bytes: make([]byte, maxContextStateBytes)}}).validFor(bytesIntrinsic) {
+		t.Fatal("bytes intrinsic rejected at-cap host value")
+	}
+	if (IntrinsicResult{Value: ContextValue{Kind: ContextValueBytes, Bytes: make([]byte, maxContextStateBytes+1)}}).validFor(bytesIntrinsic) {
+		t.Fatal("bytes intrinsic accepted over-cap host value")
+	}
+	desc, err := Decode(hx("e82200"), nil, DecodeOptions{SemanticsVersion: SemanticsVersion})
+	if err != nil {
+		t.Fatalf("Decode descriptor intrinsic: %v", err)
+	}
+	host := &evalTestHost{meter: meter{cost: MaxExecCost - 1}, failCharge: true}
+	got, err := Program{decoded: true, evalSteps: 1}.Evaluate(EvalOptions{Host: host})
+	if !hasErrorCode(err, ErrBudgetExceeded) || got.Cost != MaxExecCost-1 || host.Cost() != MaxExecCost-1 || host.charges != 1 || host.lastCharge != 1 || host.reads != 0 {
+		t.Fatalf("adversarial host step charge result=%+v host=%+v err=%v", got, host, err)
+	}
+	host = &evalTestHost{meter: meter{cost: 7}}
+	got, err = Program{decoded: true, evalSteps: MaxExecCost/StepCost + 1}.Evaluate(EvalOptions{Host: host})
+	if !hasErrorCode(err, ErrBudgetExceeded) || got.Cost != MaxExecCost || host.Cost() != MaxExecCost || host.charges != 1 || host.lastCharge != MaxExecCost-7 || host.reads != 0 {
+		t.Fatalf("over-cap host precharge result=%+v host=%+v err=%v", got, host, err)
+	}
+	host = &evalTestHost{meter: meter{cost: MaxExecCost}, failCharge: true}
+	got, err = desc.Evaluate(EvalOptions{Host: host})
+	if !hasErrorCode(err, ErrBudgetExceeded) || got.Cost != MaxExecCost || host.charges != 0 || host.reads != 0 {
+		t.Fatalf("exhausted intrinsic result=%+v host=%+v err=%v", got, host, err)
+	}
+}
+
+// TestEvaluateIntrinsicZeroCostAtCapAccepted mirrors TestEvaluateJetCostHookCapBoundary's
+// zero-cost-at-cap case for the intrinsic path: a host already exactly at MaxExecCost must still
+// accept a zero-cost intrinsic (evaluateOneIntrinsic must not pre-reject on Host.Cost()==MaxExecCost
+// before learning the actual cost — see chargeCost's own ChargeCost(MaxExecCost, 0) boundary).
+func TestEvaluateIntrinsicZeroCostAtCapAccepted(t *testing.T) {
+	desc, err := Decode(hx("e82200"), nil, DecodeOptions{SemanticsVersion: SemanticsVersion})
+	if err != nil {
+		t.Fatalf("Decode descriptor intrinsic: %v", err)
+	}
+	if next, legacyErr := ChargeCost(MaxExecCost, 0); legacyErr != nil || next != MaxExecCost {
+		t.Fatalf("legacy ChargeCost(MaxExecCost, 0)=%d err=%v want accept", next, legacyErr)
+	}
+	host := &evalTestHost{
+		meter:           meter{cost: MaxExecCost},
+		intrinsicCostFn: func(ContextIntrinsic) (uint64, error) { return 0, nil },
+		intrinsicResult: IntrinsicResult{Value: ContextValue{Kind: ContextValueBytes32}},
+	}
+	got, err := desc.Evaluate(EvalOptions{Host: host})
+	if err != nil || !got.Accepted || got.Cost != MaxExecCost || host.reads != 1 {
+		t.Fatalf("zero-cost intrinsic at cap via Host=%+v err=%v reads=%d want accepted cost=%d reads=1 (matching legacy ChargeCost)", got, err, host.reads, MaxExecCost)
+	}
+}
+
 func TestSharedExecCorpusRequiresOutcomeFields(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -277,18 +398,8 @@ func TestSharedExecCorpusRequiresOutcomeFields(t *testing.T) {
 		cases []sharedExecCase
 		want  string
 	}{
-		{
-			name:  "missing accepted",
-			raw:   `{"cases":[{"expected_final_counter":0}]}`,
-			cases: []sharedExecCase{{ID: "VEC-SE-MISSING-ACCEPTED"}},
-			want:  "shared exec corpus case VEC-SE-MISSING-ACCEPTED missing expected_accepted",
-		},
-		{
-			name:  "missing final counter",
-			raw:   `{"cases":[{"expected_accepted":false}]}`,
-			cases: []sharedExecCase{{ID: "VEC-SE-MISSING-COUNTER"}},
-			want:  "shared exec corpus case VEC-SE-MISSING-COUNTER missing expected_final_counter",
-		},
+		{name: "missing accepted", raw: `{"cases":[{"expected_final_counter":0}]}`, cases: []sharedExecCase{{ID: "VEC-SE-MISSING-ACCEPTED"}}, want: "shared exec corpus case VEC-SE-MISSING-ACCEPTED missing expected_accepted"},
+		{name: "missing final counter", raw: `{"cases":[{"expected_accepted":false}]}`, cases: []sharedExecCase{{ID: "VEC-SE-MISSING-COUNTER"}}, want: "shared exec corpus case VEC-SE-MISSING-COUNTER missing expected_final_counter"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -477,30 +588,16 @@ func TestJetsRegistryHashMatchesSpecArtifact(t *testing.T) {
 	}
 }
 
+// Regression guard, NOT an artifact recompute — see ProgramEncodingHash's doc comment for why.
 func TestProgramEncodingHashPinsPublishedSpecValue(t *testing.T) {
-	// Regression guard, NOT an artifact recompute: ProgramEncodingHash() must keep
-	// returning the §23.2.4 program_encoding_hash committed by
-	// SPEC-SIMPLICITY-01-PROGRAM-ENCODING. This package holds no encoding-rules
-	// preimage (recompute would be spec-authoring, out of scope), so the test pins
-	// the transcribed literal to catch an accidental edit. Rust
-	// simplicity::PROGRAM_ENCODING_HASH separately pins the byte-identical value (a
-	// corroborating second copy of the same bytes; there is no automated
-	// cross-client comparator in-repo).
 	if got := ProgramEncodingHash(); got != hex32("27e5ad521efdf9d185c1c92a3a1a4aacc9276c2a5b1b8518ce25c8c973a38adc") {
 		t.Fatalf("program_encoding_hash=%x", got)
 	}
 }
 
+// Regression guard, NOT an artifact recompute — see ContextSchemaHash's doc comment for why (no
+// in-repo Rust/preimage anchor yet; deferred to RUB-606 under the Rust freeze).
 func TestContextSchemaHashPinsPublishedSpecValue(t *testing.T) {
-	// Regression guard, NOT an artifact recompute: ContextSchemaHash() must keep
-	// returning the §23.2.4 context_schema_hash committed by
-	// SPEC-SIMPLICITY-01-CONTEXT-ABI (RUB-597). As with program_encoding_hash this
-	// pins the transcribed literal rather than recomputing it (no context-ABI
-	// preimage here — out of scope). This Go-only slice has no in-repo
-	// cross-client/preimage anchor for these bytes: the Rust mirror is deferred
-	// behind the Rust freeze and the shared hash-parity corpus is owned by RUB-606.
-	// That missing anchor is a deferred cross-client divergence sanctioned by the
-	// Rust freeze, not an in-scope gap for this Go-only slice.
 	if got := ContextSchemaHash(); got != hex32("e832db3008c355262420c63168c1c9787a69aac31d15a50a640f0301d8410150") {
 		t.Fatalf("context_schema_hash=%x", got)
 	}
@@ -628,12 +725,205 @@ func TestEvaluateJetCostHookCapBoundary(t *testing.T) {
 			}
 		})
 	}
+	calls := 0
+	_, err := program.Evaluate(EvalOptions{Host: &evalTestHost{meter: meter{cost: MaxExecCost}}, JetRegistry: func(Jet) bool { return true }, JetCost: func(Jet) (uint64, error) { return 1, nil }, JetEvaluator: func(Jet) (EvalResult, error) {
+		calls++
+		return EvalResult{Accepted: true}, nil
+	}})
+	assertErrorCode(t, err, ErrBudgetExceeded)
+	if calls != 0 {
+		t.Fatalf("JetEvaluator calls=%d want 0 after budget reject", calls)
+	}
+	_, err = program.Evaluate(EvalOptions{Host: &evalTestHost{meter: meter{cost: MaxExecCost}}, JetRegistry: func(Jet) bool { return false }, JetEvaluator: func(Jet) (EvalResult, error) {
+		t.Fatal("JetEvaluator called after registry reject")
+		return EvalResult{}, nil
+	}})
+	assertErrorCode(t, err, ErrJetDisallowed)
 
 	got, err := evaluateSHA3JetWithResult(t, program, EvalResult{Accepted: true, Cost: MaxExecCost + 1})
 	assertErrorCode(t, err, ErrBudgetExceeded)
 	if !got.Accepted || got.Cost != MaxExecCost {
 		t.Fatalf("evaluation=%+v want accepted saturated cost=%d", got, MaxExecCost)
 	}
+
+	// A zero-cost jet exactly at the cap must succeed identically on the Host path (chargeCost) and
+	// the legacy local-meter path (ChargeCost) -- the "single shared meter" invariant, not two
+	// different accept/reject boundaries for the same (current, cost) pair.
+	atCapHost := &evalTestHost{meter: meter{cost: MaxExecCost}}
+	got, err = program.Evaluate(EvalOptions{
+		Host:         atCapHost,
+		JetRegistry:  func(Jet) bool { return true },
+		JetCost:      func(Jet) (uint64, error) { return 0, nil },
+		JetEvaluator: func(Jet) (EvalResult, error) { return EvalResult{Accepted: true}, nil },
+	})
+	if next, legacyErr := ChargeCost(MaxExecCost, 0); legacyErr != nil || next != MaxExecCost {
+		t.Fatalf("legacy ChargeCost(MaxExecCost, 0)=%d err=%v want accept", next, legacyErr)
+	}
+	if err != nil || !got.Accepted || got.Cost != MaxExecCost {
+		t.Fatalf("zero-cost jet at cap via Host=%+v err=%v want accepted cost=%d (matching legacy ChargeCost)", got, err, MaxExecCost)
+	}
+}
+
+func TestEvaluateJetWithHostFullPath(t *testing.T) {
+	program := decodeSHA3Jet(t)
+	host := &evalTestHost{}
+	got, err := program.Evaluate(EvalOptions{
+		Host:        host,
+		JetRegistry: func(Jet) bool { return true },
+		JetCost:     func(Jet) (uint64, error) { return 5, nil },
+		JetEvaluator: func(j Jet) (EvalResult, error) {
+			return EvalResult{Accepted: true, Cost: 3}, nil
+		},
+	})
+	if err != nil || !got.Accepted || got.Cost != 5 || host.Cost() != 5 {
+		t.Fatalf("full host jet path result=%+v host.cost=%d err=%v", got, host.Cost(), err)
+	}
+
+	_, err = program.Evaluate(EvalOptions{
+		Host:         &evalTestHost{},
+		JetEvaluator: func(Jet) (EvalResult, error) { t.Fatal("evaluator called with no registry"); return EvalResult{}, nil },
+	})
+	assertErrorCode(t, err, ErrJetDisallowed)
+
+	_, err = program.Evaluate(EvalOptions{
+		Host:         &evalTestHost{},
+		JetRegistry:  func(Jet) bool { return true },
+		JetEvaluator: func(Jet) (EvalResult, error) { t.Fatal("evaluator called with no JetCost"); return EvalResult{}, nil },
+	})
+	assertErrorCode(t, err, ErrJetDisallowed)
+
+	_, err = program.Evaluate(EvalOptions{
+		Host:        &evalTestHost{},
+		JetRegistry: func(Jet) bool { return true },
+		JetCost:     func(Jet) (uint64, error) { return 0, &Error{Code: ErrBudgetExceeded} },
+		JetEvaluator: func(Jet) (EvalResult, error) {
+			t.Fatal("evaluator called after JetCost error")
+			return EvalResult{}, nil
+		},
+	})
+	assertErrorCode(t, err, ErrBudgetExceeded)
+
+	got, err = program.Evaluate(EvalOptions{
+		Host:        &evalTestHost{},
+		JetRegistry: func(Jet) bool { return true },
+		JetCost:     func(Jet) (uint64, error) { return 1, nil },
+		JetEvaluator: func(Jet) (EvalResult, error) {
+			return EvalResult{Accepted: false}, nil
+		},
+	})
+	assertErrorCode(t, err, ErrRejected)
+	if got.Accepted {
+		t.Fatalf("host jet rejection result=%+v want Accepted=false", got)
+	}
+}
+
+func TestCheckRunnableDisallowedJetPriority(t *testing.T) {
+	_, err := Program{decoded: true, disallowedJet: true, evalSteps: 1}.Evaluate(EvalOptions{})
+	assertErrorCode(t, err, ErrJetDisallowed)
+}
+
+func TestEvaluateIntrinsicsRequiresHost(t *testing.T) {
+	ctx := ContextIntrinsic{ID: 0x0100, Kind: ContextValueBytes32}
+	_, err := Program{decoded: true, intrinsics: []ContextIntrinsic{ctx}}.Evaluate(EvalOptions{})
+	assertErrorCode(t, err, ErrDecode)
+}
+
+func TestEvaluateIntrinsicsWithLeadingSteps(t *testing.T) {
+	ctx := ContextIntrinsic{ID: 0x0100, Kind: ContextValueBytes32}
+	failHost := &evalTestHost{meter: meter{cost: MaxExecCost - 1}, failCharge: true}
+	_, err := Program{decoded: true, evalSteps: 1, intrinsics: []ContextIntrinsic{ctx}}.Evaluate(EvalOptions{Host: failHost})
+	assertErrorCode(t, err, ErrBudgetExceeded)
+	if failHost.reads != 0 {
+		t.Fatalf("read count=%d want 0 before failed step charge", failHost.reads)
+	}
+}
+
+func TestEvaluateOneIntrinsicBranches(t *testing.T) {
+	valid := ContextIntrinsic{ID: 0x0122, Kind: ContextValueBytes32, Indexed: true}
+
+	host := &evalTestHost{intrinsicResult: IntrinsicResult{Value: ContextValue{Kind: ContextValueBytes32}}}
+	got, err := Program{decoded: true, intrinsics: []ContextIntrinsic{valid}}.Evaluate(EvalOptions{Host: host, ContextIndex: 9})
+	if err != nil || !got.Accepted || host.lastIndex != 9 {
+		t.Fatalf("indexed success result=%+v host=%+v err=%v", got, host, err)
+	}
+
+	costErrHost := &evalTestHost{intrinsicCostErr: &Error{Code: ErrBudgetExceeded}}
+	_, err = Program{decoded: true, intrinsics: []ContextIntrinsic{valid}}.Evaluate(EvalOptions{Host: costErrHost})
+	assertErrorCode(t, err, ErrBudgetExceeded)
+
+	chargeErrHost := &evalTestHost{failCharge: true}
+	_, err = Program{decoded: true, intrinsics: []ContextIntrinsic{valid}}.Evaluate(EvalOptions{Host: chargeErrHost})
+	assertErrorCode(t, err, ErrBudgetExceeded)
+	if chargeErrHost.reads != 0 {
+		t.Fatalf("read count=%d want 0 before failed intrinsic charge", chargeErrHost.reads)
+	}
+
+	readErrHost := &evalTestHost{readErr: &Error{Code: ErrDecode}}
+	_, err = Program{decoded: true, intrinsics: []ContextIntrinsic{valid}}.Evaluate(EvalOptions{Host: readErrHost})
+	assertErrorCode(t, err, ErrDecode)
+
+	rejectHost := &evalTestHost{} // zero-value IntrinsicResult has Kind ContextValueInvalid
+	got, err = Program{decoded: true, intrinsics: []ContextIntrinsic{valid}}.Evaluate(EvalOptions{Host: rejectHost})
+	assertErrorCode(t, err, ErrRejected)
+	if got.Accepted {
+		t.Fatalf("kind-mismatch rejection result=%+v want Accepted=false", got)
+	}
+
+	evaluatorHost := &evalTestHost{intrinsicResult: IntrinsicResult{Value: ContextValue{Kind: ContextValueBytes32}}}
+	called := false
+	_, err = Program{decoded: true, intrinsics: []ContextIntrinsic{valid}}.Evaluate(EvalOptions{
+		Host:             evaluatorHost,
+		ContextEvaluator: func(ContextIntrinsic, IntrinsicResult) bool { called = true; return false },
+	})
+	assertErrorCode(t, err, ErrRejected)
+	if !called {
+		t.Fatal("ContextEvaluator never called for a validFor-passing result")
+	}
+}
+
+// E7 TOTALITY (engine-level, package simplicity): an Either-typed intrinsic's failure branch
+// (out-of-range index) is TOTAL -- it is accepted as data (Failure:true), never a hard reject or
+// abort, so the program can still branch on it via ContextEvaluator.
+func TestEngineTotalityAcceptsEitherFailureBranch(t *testing.T) {
+	either := ContextIntrinsic{ID: 0x0122, Kind: ContextValueBytes32, Either: true, Indexed: true}
+	host := &evalTestHost{intrinsicResult: IntrinsicResult{Failure: true}}
+	sawFailure := false
+	got, err := Program{decoded: true, intrinsics: []ContextIntrinsic{either}}.Evaluate(EvalOptions{
+		Host: host,
+		ContextEvaluator: func(_ ContextIntrinsic, r IntrinsicResult) bool {
+			sawFailure = r.Failure
+			return true
+		},
+	})
+	if err != nil || !got.Accepted || !sawFailure {
+		t.Fatalf("Either failure-branch result=%+v err=%v sawFailure=%v want accepted, total (not rejected/aborted)", got, err, sawFailure)
+	}
+
+	nonEither := ContextIntrinsic{ID: 0x0100, Kind: ContextValueBytes32, Either: false}
+	_, err = Program{decoded: true, intrinsics: []ContextIntrinsic{nonEither}}.Evaluate(EvalOptions{
+		Host: &evalTestHost{intrinsicResult: IntrinsicResult{Failure: true}},
+	})
+	assertErrorCode(t, err, ErrRejected)
+}
+
+// E15 (engine-level, package simplicity): the same intrinsic reached twice in one program charges
+// twice -- evaluateIntrinsics does not memoize/discount a repeated read by identity.
+func TestEngineChargesRepeatedIntrinsicTwice(t *testing.T) {
+	same := ContextIntrinsic{ID: 0x0122, Kind: ContextValueBytes32, Either: true, Indexed: true}
+	host := &evalTestHost{intrinsicResult: IntrinsicResult{Value: ContextValue{Kind: ContextValueBytes32}}}
+	got, err := Program{decoded: true, intrinsics: []ContextIntrinsic{same, same}}.Evaluate(EvalOptions{Host: host})
+	if err != nil || !got.Accepted || host.reads != 2 || host.charges != 2 {
+		t.Fatalf("repeated-intrinsic evaluation=%+v host=%+v err=%v want reads=2 charges=2 (no memoization discount)", got, host, err)
+	}
+}
+
+func TestMustHexBytesPanicsOnInvalidHex(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("mustHexBytes did not panic on invalid hex")
+		}
+	}()
+	mustHexBytes("not-hex")
 }
 
 func TestEvaluateMemoryBounds(t *testing.T) {

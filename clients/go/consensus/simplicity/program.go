@@ -53,14 +53,21 @@ type DecodeOptions struct {
 }
 
 type Program struct {
-	CMR            [32]byte
-	Jet            *Jet
-	NeedsWitness   bool
-	maxWitnessLen  int
-	witnesses      map[witnessKey]struct{}
-	evalSteps      uint64
-	decoded        bool
-	hasJet         bool
+	CMR           [32]byte
+	Jet           *Jet
+	NeedsWitness  bool
+	maxWitnessLen int
+	witnesses     map[witnessKey]struct{}
+	intrinsics    []ContextIntrinsic
+	evalSteps     uint64
+	decoded       bool
+	hasJet        bool
+	// disallowedJet is reserved for a decoded program containing a jet outside the ACTIVE registry on
+	// a never-taken branch (E11(ii)); no decode path in this Go-only slice sets it yet because the
+	// current flat hasJet/jetKey representation has no branch/CFG concept to place a jet on an
+	// untaken path — that test case is deferred to RUB-610/RUB-611 (real branch composition), not
+	// implementable here without the STOP_AND_SPLIT this issue's own contract anticipated.
+	disallowedJet  bool
 	jetKey         jetKey
 	frameBitWidths []uint64
 }
@@ -75,7 +82,21 @@ type Jet struct {
 }
 
 type EvalOptions struct {
+	// JetEvaluator computes a jet's EvalResult. Under the no-Host (legacy) path its returned
+	// EvalResult.Cost is the charged amount. Under the Host path (Host != nil), JetCost —
+	// already charged in jetPreflight before JetEvaluator runs — is the SOLE authoritative
+	// cost; JetEvaluator.Cost is discarded, not summed or cross-checked (see evaluateJet). A
+	// JetCost implementation MUST reproduce the exact cost JetEvaluator itself would compute
+	// for the same jet+inputs — they are not independent knobs, and a mismatch silently
+	// over/under-charges with nothing in this package able to catch it.
 	JetEvaluator func(Jet) (EvalResult, error)
+	// JetCost is the Host-path jet cost hook; see JetEvaluator's doc for the lockstep
+	// requirement with JetEvaluator's own cost.
+	JetCost          func(Jet) (uint64, error)
+	JetRegistry      func(Jet) bool
+	Host             EvalHost
+	ContextIndex     uint16
+	ContextEvaluator func(ContextIntrinsic, IntrinsicResult) bool
 }
 
 type EvalResult struct {
@@ -102,6 +123,7 @@ func Decode(program, witness []byte, opts DecodeOptions) (Program, error) {
 	}
 	decoded.decoded = true
 	decoded.frameBitWidths = append([]uint64(nil), decoded.frameBitWidths...)
+	decoded.intrinsics = append([]ContextIntrinsic(nil), decoded.intrinsics...)
 	if decoded.Jet != nil {
 		jet := copyJet(*decoded.Jet)
 		decoded.Jet = &jet
@@ -128,22 +150,39 @@ func (p Program) Evaluate(opts EvalOptions) (EvalResult, error) {
 	if !p.decoded {
 		return EvalResult{}, &Error{Code: ErrDecode}
 	}
-	if p.hasJet {
-		if _, ok := jetRows[p.jetKey]; !ok {
-			return EvalResult{}, &Error{Code: ErrDecode}
-		}
-		if err := checkMemoryBounds(p.frameBitWidths); err != nil {
-			return EvalResult{}, err
-		}
-		return p.evaluateJet(opts)
-	}
-	if p.evalSteps == 0 {
-		return EvalResult{}, &Error{Code: ErrDecode}
-	}
-	if err := checkMemoryBounds(p.frameBitWidths); err != nil {
+	if err := p.checkRunnable(); err != nil {
 		return EvalResult{}, err
 	}
-	return evaluateSteps(p.evalSteps)
+
+	switch {
+	case p.hasJet:
+		return p.evaluateJet(opts)
+	case len(p.intrinsics) > 0:
+		return p.evaluateIntrinsics(opts)
+	default:
+		if opts.Host != nil {
+			err := chargeSteps(opts.Host, p.evalSteps)
+			return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, err
+		}
+		return evaluateSteps(p.evalSteps)
+	}
+}
+
+func (p Program) checkRunnable() error {
+	if p.disallowedJet {
+		return &Error{Code: ErrJetDisallowed}
+	}
+	if p.hasJet {
+		_, ok := LookupJet(p.jetKey.id, p.jetKey.subOp)
+		if !ok {
+			return &Error{Code: ErrDecode}
+		}
+		return checkMemoryBounds(p.frameBitWidths)
+	}
+	if len(p.intrinsics) == 0 && p.evalSteps == 0 {
+		return &Error{Code: ErrDecode}
+	}
+	return checkMemoryBounds(p.frameBitWidths)
 }
 
 func (p Program) evaluateJet(opts EvalOptions) (EvalResult, error) {
@@ -154,19 +193,58 @@ func (p Program) evaluateJet(opts EvalOptions) (EvalResult, error) {
 	if !ok {
 		return EvalResult{}, &Error{Code: ErrDecode}
 	}
+	if pre, err := jetPreflight(opts, jet); err != nil {
+		return pre, err
+	}
 	result, err := opts.JetEvaluator(jet)
 	if err != nil {
 		return EvalResult{}, err
 	}
-	var meter meter
-	if err := meter.charge(result.Cost); err != nil {
-		return EvalResult{Accepted: result.Accepted, Cost: meter.cost}, err
+	if opts.Host != nil {
+		// Metering contract: under the Host path, JetCost (already charged in jetPreflight) is the
+		// SOLE authoritative cost — result.Cost as reported by JetEvaluator is intentionally
+		// discarded here, not summed or cross-checked. A future JetCost implementation MUST reproduce
+		// the exact cost JetEvaluator itself computes for the same jet+inputs (they are not
+		// independent knobs); a mismatch would silently over/under-charge with no test able to catch
+		// it from this package alone.
+		result.Cost = opts.Host.Cost()
+		if !result.Accepted {
+			return result, &Error{Code: ErrRejected}
+		}
+		return result, nil
 	}
-	result.Cost = meter.cost
-	if !result.Accepted {
-		return result, &Error{Code: ErrRejected}
+	return evaluateJetWithLocalMeter(result)
+}
+
+// jetPreflight enforces the registry check and charges the jet's cost before JetEvaluator runs.
+func jetPreflight(opts EvalOptions, jet Jet) (EvalResult, error) {
+	if !jetRegistryAllows(opts, jet) {
+		return EvalResult{}, &Error{Code: ErrJetDisallowed}
 	}
-	return result, nil
+	if opts.Host == nil {
+		return EvalResult{}, nil
+	}
+	if opts.JetCost == nil {
+		return EvalResult{}, &Error{Code: ErrJetDisallowed}
+	}
+	cost, err := opts.JetCost(jet)
+	if err != nil {
+		return EvalResult{}, err
+	}
+	if err := chargeCost(opts.Host, cost); err != nil {
+		return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, err
+	}
+	return EvalResult{}, nil
+}
+
+// jetRegistryAllows mirrors the original inline ordering exactly: the JetRegistry check applies
+// whenever JetRegistry is set, independent of whether Host is set; a Host with no JetRegistry is a
+// fail-closed misconfiguration (reject), not an implicit allow-all.
+func jetRegistryAllows(opts EvalOptions, jet Jet) bool {
+	if opts.Host != nil && opts.JetRegistry == nil {
+		return false
+	}
+	return opts.JetRegistry == nil || opts.JetRegistry(jet)
 }
 
 func evaluateSteps(steps uint64) (EvalResult, error) {
@@ -482,15 +560,21 @@ var (
 		{jet: jetKey{id: 0x0020, subOp: 0x01}, formula: costOnePlusCeilLen32},
 		{jet: jetKey{id: 0x0021, subOp: 0x00}, formula: costOnePlusCeilLen32},
 	}
-	programs = map[string]programEntry{
+	basePrograms = map[string]programEntry{
 		string([]byte{0x24}):                         {program: Program{CMR: hex32("c40a10263f7436b4160acbef1c36fba4be4d95df181a968afeab5eac247adff7"), witnesses: noWitness, evalSteps: 1, frameBitWidths: unitFrames}},
 		string([]byte{0xc1, 0x22, 0x0f, 0x01, 0x00}): {program: Program{CMR: hex32("afeae8c18903b9e0aae2c125f31f7b8e09de916e461f221936b633d587c1b434"), witnesses: noWitness, evalSteps: 4, frameBitWidths: unitFrames}},
 		string([]byte{0x89, 0x00}):                   {program: Program{CMR: hex32("d296a48e538af38908242ab30244036fdb66e9056d5f812a5b328fae2b6a2726"), witnesses: noWitness, evalSteps: 2, frameBitWidths: unitFrames}},
 		string([]byte{0xc1, 0xd2, 0x10, 0x14}):       {program: Program{CMR: hex32("d3ae07ae97378595ef49c6677fd92a1761f8fe7fd8dde86197efb49a49448b83"), NeedsWitness: true, maxWitnessLen: 1, witnesses: boolWitness, evalSteps: 4, frameBitWidths: boolFrames}},
 		string([]byte{0x60}):                         {program: Program{CMR: sha3JetRow.CMR, Jet: &sha3JetRow, witnesses: noWitness, frameBitWidths: sha3Frames}},
 		string([]byte{0x70}):                         {program: Program{CMR: mldsa87JetRow.CMR, Jet: &mldsa87JetRow, witnesses: noWitness, frameBitWidths: mldsa87Frames}},
+		string([]byte{0xe8, 0x60, 0x00}):             {err: ErrDecode},
+		string([]byte{0xf0, 0x00, 0x10, 0x00}):       {err: ErrDecode},
+		string([]byte{0xe8, 0x00, 0x80}):             {err: ErrDecode},
+		string([]byte{0xe3, 0x00}):                   {err: ErrJetDisallowed},
 		string([]byte{0x7c, 0x06, 0x80}):             {err: ErrJetDisallowed},
 	}
+	// RUB-598 binds/meters typed context ABI selectors only; value-branch execution is RUB-610/RUB-611 and Rust/shared selector parity is RUB-603/RUB-606.
+	programs = mergeProgramEntries(basePrograms, contextIntrinsicProgramEntries(contextIntrinsicRows, noWitness))
 )
 
 func sha256Compress(state *[8]uint32, block [64]uint32) {
