@@ -301,9 +301,13 @@ func TestContextIntrinsicRowsMatchRUB597Snapshot(t *testing.T) {
 
 type evalTestHost struct {
 	meter
-	charges, reads int
-	lastCharge     uint64
-	failCharge     bool
+	charges, reads   int
+	lastCharge       uint64
+	failCharge       bool
+	intrinsicCostErr error
+	intrinsicResult  IntrinsicResult
+	readErr          error
+	lastIndex        uint16
 }
 
 func (h *evalTestHost) Charge(cost uint64) error {
@@ -316,12 +320,13 @@ func (h *evalTestHost) Charge(cost uint64) error {
 }
 func (h *evalTestHost) Cost() uint64 { return h.cost }
 func (h *evalTestHost) IntrinsicCost(ContextIntrinsic) (uint64, error) {
-	return 1, nil
+	return 1, h.intrinsicCostErr
 }
 
-func (h *evalTestHost) ReadIntrinsic(ContextIntrinsic) (IntrinsicResult, error) {
+func (h *evalTestHost) ReadIntrinsic(intrinsic ContextIntrinsic) (IntrinsicResult, error) {
 	h.reads++
-	return IntrinsicResult{}, nil
+	h.lastIndex = intrinsic.Index
+	return h.intrinsicResult, h.readErr
 }
 
 func TestAdversarialHostDoesNotMutateOnBudgetError(t *testing.T) {
@@ -783,6 +788,49 @@ func TestEvaluateIntrinsicsWithLeadingSteps(t *testing.T) {
 	assertErrorCode(t, err, ErrBudgetExceeded)
 	if failHost.reads != 0 {
 		t.Fatalf("read count=%d want 0 before failed step charge", failHost.reads)
+	}
+}
+
+func TestEvaluateOneIntrinsicBranches(t *testing.T) {
+	valid := ContextIntrinsic{ID: 0x0122, Kind: ContextValueBytes32, Indexed: true}
+
+	host := &evalTestHost{intrinsicResult: IntrinsicResult{Value: ContextValue{Kind: ContextValueBytes32}}}
+	got, err := Program{decoded: true, intrinsics: []ContextIntrinsic{valid}}.Evaluate(EvalOptions{Host: host, ContextIndex: 9})
+	if err != nil || !got.Accepted || host.lastIndex != 9 {
+		t.Fatalf("indexed success result=%+v host=%+v err=%v", got, host, err)
+	}
+
+	costErrHost := &evalTestHost{intrinsicCostErr: &Error{Code: ErrBudgetExceeded}}
+	_, err = Program{decoded: true, intrinsics: []ContextIntrinsic{valid}}.Evaluate(EvalOptions{Host: costErrHost})
+	assertErrorCode(t, err, ErrBudgetExceeded)
+
+	chargeErrHost := &evalTestHost{failCharge: true}
+	_, err = Program{decoded: true, intrinsics: []ContextIntrinsic{valid}}.Evaluate(EvalOptions{Host: chargeErrHost})
+	assertErrorCode(t, err, ErrBudgetExceeded)
+	if chargeErrHost.reads != 0 {
+		t.Fatalf("read count=%d want 0 before failed intrinsic charge", chargeErrHost.reads)
+	}
+
+	readErrHost := &evalTestHost{readErr: &Error{Code: ErrDecode}}
+	_, err = Program{decoded: true, intrinsics: []ContextIntrinsic{valid}}.Evaluate(EvalOptions{Host: readErrHost})
+	assertErrorCode(t, err, ErrDecode)
+
+	rejectHost := &evalTestHost{} // zero-value IntrinsicResult has Kind ContextValueInvalid
+	got, err = Program{decoded: true, intrinsics: []ContextIntrinsic{valid}}.Evaluate(EvalOptions{Host: rejectHost})
+	assertErrorCode(t, err, ErrRejected)
+	if got.Accepted {
+		t.Fatalf("kind-mismatch rejection result=%+v want Accepted=false", got)
+	}
+
+	evaluatorHost := &evalTestHost{intrinsicResult: IntrinsicResult{Value: ContextValue{Kind: ContextValueBytes32}}}
+	called := false
+	_, err = Program{decoded: true, intrinsics: []ContextIntrinsic{valid}}.Evaluate(EvalOptions{
+		Host:             evaluatorHost,
+		ContextEvaluator: func(ContextIntrinsic, IntrinsicResult) bool { called = true; return false },
+	})
+	assertErrorCode(t, err, ErrRejected)
+	if !called {
+		t.Fatal("ContextEvaluator never called for a validFor-passing result")
 	}
 }
 
