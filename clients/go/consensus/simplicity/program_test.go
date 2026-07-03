@@ -477,6 +477,35 @@ func TestJetsRegistryHashMatchesSpecArtifact(t *testing.T) {
 	}
 }
 
+func TestProgramEncodingHashPinsPublishedSpecValue(t *testing.T) {
+	// Regression guard, NOT an artifact recompute: ProgramEncodingHash() must keep
+	// returning the §23.2.4 program_encoding_hash committed by
+	// SPEC-SIMPLICITY-01-PROGRAM-ENCODING. This package holds no encoding-rules
+	// preimage (recompute would be spec-authoring, out of scope), so the test pins
+	// the transcribed literal to catch an accidental edit. Rust
+	// simplicity::PROGRAM_ENCODING_HASH separately pins the byte-identical value (a
+	// corroborating second copy of the same bytes; there is no automated
+	// cross-client comparator in-repo).
+	if got := ProgramEncodingHash(); got != hex32("27e5ad521efdf9d185c1c92a3a1a4aacc9276c2a5b1b8518ce25c8c973a38adc") {
+		t.Fatalf("program_encoding_hash=%x", got)
+	}
+}
+
+func TestContextSchemaHashPinsPublishedSpecValue(t *testing.T) {
+	// Regression guard, NOT an artifact recompute: ContextSchemaHash() must keep
+	// returning the §23.2.4 context_schema_hash committed by
+	// SPEC-SIMPLICITY-01-CONTEXT-ABI (RUB-597). As with program_encoding_hash this
+	// pins the transcribed literal rather than recomputing it (no context-ABI
+	// preimage here — out of scope). This Go-only slice has no in-repo
+	// cross-client/preimage anchor for these bytes: the Rust mirror is deferred
+	// behind the Rust freeze and the shared hash-parity corpus is owned by RUB-606.
+	// That missing anchor is a deferred cross-client divergence sanctioned by the
+	// Rust freeze, not an in-scope gap for this Go-only slice.
+	if got := ContextSchemaHash(); got != hex32("e832db3008c355262420c63168c1c9787a69aac31d15a50a640f0301d8410150") {
+		t.Fatalf("context_schema_hash=%x", got)
+	}
+}
+
 func TestJetRegistryRuntimeMetadataMatchesSpecArtifact(t *testing.T) {
 	want := map[jetKey]struct {
 		selectorBitLen int
