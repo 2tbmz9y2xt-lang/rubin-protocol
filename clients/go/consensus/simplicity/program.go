@@ -184,23 +184,8 @@ func (p Program) evaluateJet(opts EvalOptions) (EvalResult, error) {
 	if !ok {
 		return EvalResult{}, &Error{Code: ErrDecode}
 	}
-	if opts.Host != nil && opts.JetRegistry == nil {
-		return EvalResult{}, &Error{Code: ErrJetDisallowed}
-	}
-	if opts.JetRegistry != nil && !opts.JetRegistry(jet) {
-		return EvalResult{}, &Error{Code: ErrJetDisallowed}
-	}
-	if opts.Host != nil {
-		if opts.JetCost == nil {
-			return EvalResult{}, &Error{Code: ErrJetDisallowed}
-		}
-		cost, err := opts.JetCost(jet)
-		if err != nil {
-			return EvalResult{}, err
-		}
-		if err := chargeCost(opts.Host, cost); err != nil {
-			return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, err
-		}
+	if pre, err := jetPreflight(opts, jet); err != nil {
+		return pre, err
 	}
 	result, err := opts.JetEvaluator(jet)
 	if err != nil {
@@ -214,6 +199,37 @@ func (p Program) evaluateJet(opts EvalOptions) (EvalResult, error) {
 		return result, nil
 	}
 	return evaluateJetWithLocalMeter(result)
+}
+
+// jetPreflight enforces the registry check and charges the jet's cost before JetEvaluator runs.
+func jetPreflight(opts EvalOptions, jet Jet) (EvalResult, error) {
+	if !jetRegistryAllows(opts, jet) {
+		return EvalResult{}, &Error{Code: ErrJetDisallowed}
+	}
+	if opts.Host == nil {
+		return EvalResult{}, nil
+	}
+	if opts.JetCost == nil {
+		return EvalResult{}, &Error{Code: ErrJetDisallowed}
+	}
+	cost, err := opts.JetCost(jet)
+	if err != nil {
+		return EvalResult{}, err
+	}
+	if err := chargeCost(opts.Host, cost); err != nil {
+		return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, err
+	}
+	return EvalResult{}, nil
+}
+
+// jetRegistryAllows mirrors the original inline ordering exactly: the JetRegistry check applies
+// whenever JetRegistry is set, independent of whether Host is set; a Host with no JetRegistry is a
+// fail-closed misconfiguration (reject), not an implicit allow-all.
+func jetRegistryAllows(opts EvalOptions, jet Jet) bool {
+	if opts.Host != nil && opts.JetRegistry == nil {
+		return false
+	}
+	return opts.JetRegistry == nil || opts.JetRegistry(jet)
 }
 
 func evaluateSteps(steps uint64) (EvalResult, error) {

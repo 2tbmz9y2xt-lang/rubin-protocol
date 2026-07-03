@@ -104,31 +104,51 @@ func (p Program) evaluateIntrinsics(opts EvalOptions) (EvalResult, error) {
 		}
 	}
 	for _, intrinsic := range p.intrinsics {
-		if opts.Host.Cost() >= MaxExecCost {
-			return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, &Error{Code: ErrBudgetExceeded}
+		rejected, err := evaluateOneIntrinsic(opts, intrinsic)
+		if rejected {
+			return EvalResult{Cost: opts.Host.Cost()}, err
 		}
-		if intrinsic.Indexed {
-			intrinsic.Index = opts.ContextIndex
-		}
-		cost, err := opts.Host.IntrinsicCost(intrinsic)
 		if err != nil {
 			return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, err
-		}
-		if err := chargeCost(opts.Host, cost); err != nil {
-			return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, err
-		}
-		result, err := opts.Host.ReadIntrinsic(intrinsic)
-		if err != nil {
-			return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, err
-		}
-		if !result.validFor(intrinsic) {
-			return EvalResult{Cost: opts.Host.Cost()}, &Error{Code: ErrRejected}
-		}
-		if opts.ContextEvaluator != nil && !opts.ContextEvaluator(intrinsic, result) {
-			return EvalResult{Cost: opts.Host.Cost()}, &Error{Code: ErrRejected}
 		}
 	}
 	return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, nil
+}
+
+// evaluateOneIntrinsic reads and validates a single context intrinsic, charging its cost first.
+// rejected=true means the value failed validation (a logical ErrRejected — the caller keeps
+// Accepted=false); rejected=false with a non-nil err means a resource/host error (the caller sets
+// Accepted=true, mirroring chargeSteps/chargeCost's own convention elsewhere in this file).
+func evaluateOneIntrinsic(opts EvalOptions, intrinsic ContextIntrinsic) (rejected bool, err error) {
+	if opts.Host.Cost() >= MaxExecCost {
+		return false, &Error{Code: ErrBudgetExceeded}
+	}
+	if intrinsic.Indexed {
+		intrinsic.Index = opts.ContextIndex
+	}
+	cost, err := opts.Host.IntrinsicCost(intrinsic)
+	if err != nil {
+		return false, err
+	}
+	if err := chargeCost(opts.Host, cost); err != nil {
+		return false, err
+	}
+	result, err := opts.Host.ReadIntrinsic(intrinsic)
+	if err != nil {
+		return false, err
+	}
+	if !intrinsicAccepted(opts, intrinsic, result) {
+		return true, &Error{Code: ErrRejected}
+	}
+	return false, nil
+}
+
+// intrinsicAccepted combines the type/bounds check with the caller-supplied value predicate.
+func intrinsicAccepted(opts EvalOptions, intrinsic ContextIntrinsic, result IntrinsicResult) bool {
+	if !result.validFor(intrinsic) {
+		return false
+	}
+	return opts.ContextEvaluator == nil || opts.ContextEvaluator(intrinsic, result)
 }
 
 func chargeSteps(host EvalHost, steps uint64) error {
