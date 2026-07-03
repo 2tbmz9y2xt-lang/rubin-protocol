@@ -18,7 +18,6 @@ func coreSimplicityAcceptWitness() WitnessItem {
 func TestValidateCoreSimplicitySpendErrors(t *testing.T) {
 	baseEntry := coreSimplicityAcceptEntry(1)
 	baseWitness := coreSimplicityAcceptWitness()
-	validTxContext := func() (*SimplicityTxContext, error) { return &SimplicityTxContext{}, nil }
 	for _, tc := range []struct {
 		name string
 		edit func(*UtxoEntry, *WitnessItem)
@@ -48,8 +47,35 @@ func TestValidateCoreSimplicitySpendErrors(t *testing.T) {
 				Signature: append([]byte(nil), baseWitness.Signature...),
 			}
 			tc.edit(&entry, &witness)
-			assertTxErrCode(t, validateCoreSimplicitySpend(entry, witness, validTxContext), tc.code)
+			assertTxErrCode(t, validateCoreSimplicitySpend(entry, witness, 0, [32]byte{}, txContextFor(entry)), tc.code)
 		})
+	}
+}
+
+// txContextFor builds a valid provider for a single-input tx whose only input is
+// the CORE_SIMPLICITY entry under test, so a spend that reaches Evaluate (jet_disallowed,
+// accept) has a real SimplicityTxContext with input[0] == entry.
+func txContextFor(entry UtxoEntry) simplicityTxContextProvider {
+	return func() (*SimplicityTxContext, error) {
+		tx := &Tx{Version: TX_WIRE_VERSION, Inputs: []TxInput{{PrevVout: 0}}}
+		ctx, err := BuildSimplicityTxContext(tx, []UtxoEntry{entry}, 1, [32]byte{})
+		if err != nil {
+			return nil, err
+		}
+		return ctx, nil
+	}
+}
+
+func TestValidateCoreSimplicitySpendAccepts(t *testing.T) {
+	entry := coreSimplicityAcceptEntry(7)
+	witness := coreSimplicityAcceptWitness()
+	tx := &Tx{Version: TX_WIRE_VERSION, Inputs: []TxInput{{PrevVout: 0}}}
+	digest32, err := SighashV1DigestWithType(tx, 0, entry.Value, [32]byte{}, SIGHASH_ALL)
+	if err != nil {
+		t.Fatalf("SighashV1DigestWithType: %v", err)
+	}
+	if err := validateCoreSimplicitySpend(entry, witness, 0, digest32, txContextFor(entry)); err != nil {
+		t.Fatalf("valid CORE_SIMPLICITY accept spend rejected: %v", err)
 	}
 }
 
@@ -57,11 +83,11 @@ func TestValidateCoreSimplicitySpendRequiresTxContext(t *testing.T) {
 	entry := coreSimplicityAcceptEntry(1)
 	witness := coreSimplicityAcceptWitness()
 
-	assertTxErrCode(t, validateCoreSimplicitySpend(entry, witness, nil), TX_ERR_PARSE)
-	assertTxErrCode(t, validateCoreSimplicitySpend(entry, witness, func() (*SimplicityTxContext, error) {
+	assertTxErrCode(t, validateCoreSimplicitySpend(entry, witness, 0, [32]byte{}, nil), TX_ERR_PARSE)
+	assertTxErrCode(t, validateCoreSimplicitySpend(entry, witness, 0, [32]byte{}, func() (*SimplicityTxContext, error) {
 		return nil, nil
 	}), TX_ERR_PARSE)
-	assertTxErrCode(t, validateCoreSimplicitySpend(entry, witness, func() (*SimplicityTxContext, error) {
+	assertTxErrCode(t, validateCoreSimplicitySpend(entry, witness, 0, [32]byte{}, func() (*SimplicityTxContext, error) {
 		return nil, txerr(TX_ERR_PARSE, "txcontext fixture error")
 	}), TX_ERR_PARSE)
 }
@@ -78,7 +104,7 @@ func TestSimplicityEvalErrorUsesCodeOnlyMessage(t *testing.T) {
 	witness := coreSimplicityAcceptWitness()
 	witness.Signature = simplicityEnvelopeSignature([]byte{0x25}, nil, SIGHASH_ALL)
 
-	err := validateCoreSimplicitySpend(entry, witness, func() (*SimplicityTxContext, error) {
+	err := validateCoreSimplicitySpend(entry, witness, 0, [32]byte{}, func() (*SimplicityTxContext, error) {
 		return &SimplicityTxContext{}, nil
 	})
 	assertTxErrCodeMsg(t, err, TX_ERR_SIMPLICITY_DECODE, "")
