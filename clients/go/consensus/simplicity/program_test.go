@@ -712,6 +712,89 @@ func TestEvaluateJetCostHookCapBoundary(t *testing.T) {
 	}
 }
 
+func TestEvaluateJetWithHostFullPath(t *testing.T) {
+	program := decodeSHA3Jet(t)
+	host := &evalTestHost{}
+	got, err := program.Evaluate(EvalOptions{
+		Host:        host,
+		JetRegistry: func(Jet) bool { return true },
+		JetCost:     func(Jet) (uint64, error) { return 5, nil },
+		JetEvaluator: func(j Jet) (EvalResult, error) {
+			return EvalResult{Accepted: true, Cost: 3}, nil
+		},
+	})
+	if err != nil || !got.Accepted || got.Cost != 5 || host.Cost() != 5 {
+		t.Fatalf("full host jet path result=%+v host.cost=%d err=%v", got, host.Cost(), err)
+	}
+
+	_, err = program.Evaluate(EvalOptions{
+		Host:         &evalTestHost{},
+		JetEvaluator: func(Jet) (EvalResult, error) { t.Fatal("evaluator called with no registry"); return EvalResult{}, nil },
+	})
+	assertErrorCode(t, err, ErrJetDisallowed)
+
+	_, err = program.Evaluate(EvalOptions{
+		Host:         &evalTestHost{},
+		JetRegistry:  func(Jet) bool { return true },
+		JetEvaluator: func(Jet) (EvalResult, error) { t.Fatal("evaluator called with no JetCost"); return EvalResult{}, nil },
+	})
+	assertErrorCode(t, err, ErrJetDisallowed)
+
+	_, err = program.Evaluate(EvalOptions{
+		Host:        &evalTestHost{},
+		JetRegistry: func(Jet) bool { return true },
+		JetCost:     func(Jet) (uint64, error) { return 0, &Error{Code: ErrBudgetExceeded} },
+		JetEvaluator: func(Jet) (EvalResult, error) {
+			t.Fatal("evaluator called after JetCost error")
+			return EvalResult{}, nil
+		},
+	})
+	assertErrorCode(t, err, ErrBudgetExceeded)
+
+	got, err = program.Evaluate(EvalOptions{
+		Host:        &evalTestHost{},
+		JetRegistry: func(Jet) bool { return true },
+		JetCost:     func(Jet) (uint64, error) { return 1, nil },
+		JetEvaluator: func(Jet) (EvalResult, error) {
+			return EvalResult{Accepted: false}, nil
+		},
+	})
+	assertErrorCode(t, err, ErrRejected)
+	if got.Accepted {
+		t.Fatalf("host jet rejection result=%+v want Accepted=false", got)
+	}
+}
+
+func TestCheckRunnableDisallowedJetPriority(t *testing.T) {
+	_, err := Program{decoded: true, disallowedJet: true, evalSteps: 1}.Evaluate(EvalOptions{})
+	assertErrorCode(t, err, ErrJetDisallowed)
+}
+
+func TestEvaluateIntrinsicsRequiresHost(t *testing.T) {
+	ctx := ContextIntrinsic{ID: 0x0100, Kind: ContextValueBytes32}
+	_, err := Program{decoded: true, intrinsics: []ContextIntrinsic{ctx}}.Evaluate(EvalOptions{})
+	assertErrorCode(t, err, ErrDecode)
+}
+
+func TestEvaluateIntrinsicsWithLeadingSteps(t *testing.T) {
+	ctx := ContextIntrinsic{ID: 0x0100, Kind: ContextValueBytes32}
+	failHost := &evalTestHost{meter: meter{cost: MaxExecCost - 1}, failCharge: true}
+	_, err := Program{decoded: true, evalSteps: 1, intrinsics: []ContextIntrinsic{ctx}}.Evaluate(EvalOptions{Host: failHost})
+	assertErrorCode(t, err, ErrBudgetExceeded)
+	if failHost.reads != 0 {
+		t.Fatalf("read count=%d want 0 before failed step charge", failHost.reads)
+	}
+}
+
+func TestMustHexBytesPanicsOnInvalidHex(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("mustHexBytes did not panic on invalid hex")
+		}
+	}()
+	mustHexBytes("not-hex")
+}
+
 func TestEvaluateMemoryBounds(t *testing.T) {
 	for _, frames := range [][]uint64{{MaxFrameBytes * 8}, repeated(MaxFrameBytes*8, int(MaxLiveMemoryBytes/MaxFrameBytes))} {
 		got, err := Program{decoded: true, evalSteps: 1, frameBitWidths: frames}.Evaluate(EvalOptions{})
