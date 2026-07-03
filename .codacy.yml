@@ -126,6 +126,13 @@ engines:
       - "clients/go/consensus/tx_parse.go"
       - "clients/go/consensus/tx_validate_worker.go"
       - "clients/go/consensus/utxo_basic.go"
+      # RUB-598: decomposing evaluateJet/evaluateIntrinsics into small per-method-CCN<=8 helpers
+      # (jetPreflight/jetRegistryAllows, evaluateOneIntrinsic/intrinsicAccepted) raised the aggregate
+      # per-file complexity sum, since each extracted function adds its own baseline CCN — the local
+      # lizard per-method gate is green, this is the aggregate-only metric penalizing decomposition
+      # itself, matching the accepted-risk rationale above.
+      - "clients/go/consensus/simplicity/program.go"
+      - "clients/go/consensus/simplicity/context_host.go"
       - "clients/rust/crates/rubin-consensus/src/block_basic/da_set.rs"
       - "clients/rust/crates/rubin-consensus/src/block_basic/weight.rs"
       - "clients/rust/crates/rubin-consensus/src/core_ext.rs"
