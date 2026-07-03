@@ -70,7 +70,7 @@ func TestValidateTxCovenantsGenesis_P2PK_BadSuite(t *testing.T) {
 			{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: data},
 		},
 	}
-	err := ValidateTxCovenantsGenesis(tx, 0, nil)
+	err := ValidateTxCovenantsGenesis(tx, [32]byte{}, 0, nil)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -163,7 +163,7 @@ func TestValidateTxCovenantsGenesis_Table(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &Tx{Outputs: []TxOutput{tc.output}}
-			err := ValidateTxCovenantsGenesis(tx, 0, nil)
+			err := ValidateTxCovenantsGenesis(tx, [32]byte{}, 0, nil)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
@@ -194,7 +194,7 @@ func TestValidateTxCovenantsGenesis_CoreSimplicityActive(t *testing.T) {
 
 	check := func(height uint64, rotation RotationProvider, output TxOutput, want ErrorCode) {
 		t.Helper()
-		err := ValidateTxCovenantsGenesis(&Tx{Outputs: []TxOutput{output}}, height, rotation)
+		err := ValidateTxCovenantsGenesis(&Tx{Outputs: []TxOutput{output}}, [32]byte{}, height, rotation)
 		if want == "" {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -234,12 +234,12 @@ func TestValidateTxCovenantsGenesis_CoreSimplicityActive(t *testing.T) {
 		}
 		return outs
 	}
-	if err := ValidateTxCovenantsGenesis(&Tx{Outputs: sameCMR(SIMPLICITY_MAX_GROUP_OUTPUTS, cmr)}, 10, provider); err != nil {
+	if err := ValidateTxCovenantsGenesis(&Tx{Outputs: sameCMR(SIMPLICITY_MAX_GROUP_OUTPUTS, cmr)}, [32]byte{}, 10, provider); err != nil {
 		t.Fatalf("exactly SIMPLICITY_MAX_GROUP_OUTPUTS same-cmr outputs must pass: %v", err)
 	}
-	assertTxErrCode(t, ValidateTxCovenantsGenesis(&Tx{Outputs: sameCMR(SIMPLICITY_MAX_GROUP_OUTPUTS+1, cmr)}, 10, provider), TX_ERR_COVENANT_TYPE_INVALID)
+	assertTxErrCode(t, ValidateTxCovenantsGenesis(&Tx{Outputs: sameCMR(SIMPLICITY_MAX_GROUP_OUTPUTS+1, cmr)}, [32]byte{}, 10, provider), TX_ERR_COVENANT_TYPE_INVALID)
 	mixed := append(sameCMR(SIMPLICITY_MAX_GROUP_OUTPUTS, cmr), sameCMR(SIMPLICITY_MAX_GROUP_OUTPUTS, cmr2)...)
-	if err := ValidateTxCovenantsGenesis(&Tx{Outputs: mixed}, 10, provider); err != nil {
+	if err := ValidateTxCovenantsGenesis(&Tx{Outputs: mixed}, [32]byte{}, 10, provider); err != nil {
 		t.Fatalf("distinct program_cmr groups must not aggregate: %v", err)
 	}
 
@@ -247,11 +247,11 @@ func TestValidateTxCovenantsGenesis_CoreSimplicityActive(t *testing.T) {
 	// a later output index wins over the same-cmr output group-cap error — the cap
 	// is only evaluated after the complete per-output validation pass.
 	overCapThenBad := append(sameCMR(SIMPLICITY_MAX_GROUP_OUTPUTS+1, cmr), TxOutput{Value: 0, CovenantType: COV_TYPE_VAULT})
-	assertTxErrCode(t, ValidateTxCovenantsGenesis(&Tx{Outputs: overCapThenBad}, 10, provider), TX_ERR_VAULT_PARAMS_INVALID)
+	assertTxErrCode(t, ValidateTxCovenantsGenesis(&Tx{Outputs: overCapThenBad}, [32]byte{}, 10, provider), TX_ERR_VAULT_PARAMS_INVALID)
 }
 
 func TestValidateTxCovenantsGenesis_NilTx(t *testing.T) {
-	err := ValidateTxCovenantsGenesis(nil, 0, nil)
+	err := ValidateTxCovenantsGenesis(nil, [32]byte{}, 0, nil)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -330,7 +330,7 @@ func TestValidateTxCovenantsGenesis_MoreBranches(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateTxCovenantsGenesis(tc.tx, 0, nil)
+			err := ValidateTxCovenantsGenesis(tc.tx, [32]byte{}, 0, nil)
 			if err == nil {
 				t.Fatalf("expected error")
 			}
@@ -348,7 +348,7 @@ func TestValidateTxCovenantsGenesis_DACommitRules(t *testing.T) {
 	// tx_kind must be 0x01
 	{
 		tx := &Tx{TxKind: 0x00, Outputs: []TxOutput{valid}}
-		err := ValidateTxCovenantsGenesis(tx, 0, nil)
+		err := ValidateTxCovenantsGenesis(tx, [32]byte{}, 0, nil)
 		if err == nil {
 			t.Fatalf("expected error")
 		}
@@ -362,7 +362,7 @@ func TestValidateTxCovenantsGenesis_DACommitRules(t *testing.T) {
 		out := valid
 		out.Value = 1
 		tx := &Tx{TxKind: 0x01, Outputs: []TxOutput{out}}
-		err := ValidateTxCovenantsGenesis(tx, 0, nil)
+		err := ValidateTxCovenantsGenesis(tx, [32]byte{}, 0, nil)
 		if err == nil {
 			t.Fatalf("expected error")
 		}
@@ -376,7 +376,7 @@ func TestValidateTxCovenantsGenesis_DACommitRules(t *testing.T) {
 		out := valid
 		out.CovenantData = make([]byte, 31)
 		tx := &Tx{TxKind: 0x01, Outputs: []TxOutput{out}}
-		err := ValidateTxCovenantsGenesis(tx, 0, nil)
+		err := ValidateTxCovenantsGenesis(tx, [32]byte{}, 0, nil)
 		if err == nil {
 			t.Fatalf("expected error")
 		}
@@ -388,7 +388,7 @@ func TestValidateTxCovenantsGenesis_DACommitRules(t *testing.T) {
 	// ok
 	{
 		tx := &Tx{TxKind: 0x01, Outputs: []TxOutput{valid}}
-		if err := ValidateTxCovenantsGenesis(tx, 0, nil); err != nil {
+		if err := ValidateTxCovenantsGenesis(tx, [32]byte{}, 0, nil); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	}
@@ -400,6 +400,7 @@ func TestValidateTxCovenantsGenesis_DACommitRules(t *testing.T) {
 type testRotationProvider struct {
 	createSuiteID          uint8
 	simplicityActiveHeight uint64
+	chainID                [32]byte
 }
 
 func (p testRotationProvider) NativeCreateSuites(height uint64) *NativeSuiteSet {
@@ -410,8 +411,22 @@ func (p testRotationProvider) NativeSpendSuites(height uint64) *NativeSuiteSet {
 	return mustNewNativeSuiteSet(p.createSuiteID)
 }
 
-func (p testRotationProvider) SimplicityActiveAtHeight(height uint64) (bool, error) {
-	return height >= p.simplicityActiveHeight, nil
+func (p testRotationProvider) PublishedSimplicityDeployments() ([]SimplicityDeploymentDescriptor, [32]byte, bool, error) {
+	a := liveArtifactHashes()
+	set := []SimplicityDeploymentDescriptor{{
+		ChainID:             p.chainID,
+		ActivationHeight:    p.simplicityActiveHeight,
+		WitnessABIVersion:   1,
+		JetsRegistryHash:    a.jetsRegistry,
+		CostModelHash:       a.costModel,
+		ProgramEncodingHash: a.programEncoding,
+		ContextSchemaHash:   a.contextSchema,
+	}}
+	anchor, err := SimplicityDeploymentSetAnchor(p.chainID, set)
+	if err != nil {
+		return nil, [32]byte{}, false, err
+	}
+	return set, anchor, true, nil
 }
 
 func TestValidateTxCovenantsGenesis_RotationAware(t *testing.T) {
@@ -422,7 +437,7 @@ func TestValidateTxCovenantsGenesis_RotationAware(t *testing.T) {
 	mlDSA := make([]byte, MAX_P2PK_COVENANT_DATA)
 	mlDSA[0] = SUITE_ID_ML_DSA_87
 	tx := &Tx{Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: mlDSA}}}
-	err := ValidateTxCovenantsGenesis(tx, 0, rot)
+	err := ValidateTxCovenantsGenesis(tx, [32]byte{}, 0, rot)
 	if err == nil {
 		t.Fatalf("expected ML-DSA-87 to be rejected by custom rotation")
 	}
@@ -434,7 +449,7 @@ func TestValidateTxCovenantsGenesis_RotationAware(t *testing.T) {
 	custom := make([]byte, MAX_P2PK_COVENANT_DATA)
 	custom[0] = 0x42
 	tx2 := &Tx{Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: custom}}}
-	if err := ValidateTxCovenantsGenesis(tx2, 0, rot); err != nil {
+	if err := ValidateTxCovenantsGenesis(tx2, [32]byte{}, 0, rot); err != nil {
 		t.Fatalf("expected suite 0x42 to be accepted: %v", err)
 	}
 }

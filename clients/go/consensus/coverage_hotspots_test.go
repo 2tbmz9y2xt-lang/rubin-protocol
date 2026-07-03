@@ -19,7 +19,7 @@ func TestCoverage_HasSuiteAndBigIntToUint64(t *testing.T) {
 }
 
 func TestCoverage_ConnectBlockBasicInMemoryAtHeightGuards(t *testing.T) {
-	var target = POW_LIMIT
+	target := POW_LIMIT
 	if _, err := ConnectBlockBasicInMemoryAtHeight(nil, nil, &target, 0, nil, nil, [32]byte{}); err == nil {
 		t.Fatalf("expected nil state rejection")
 	}
@@ -213,7 +213,7 @@ func TestCoverage_CoreExtRetirementAndValueContextBranches(t *testing.T) {
 	wellFormed := wcCoreExtEntry(1, 1).CovenantData // ext_id + compactSize(0): well-formed under the retired parser
 	for _, cd := range [][]byte{wellFormed, {0x01}, {}} {
 		out := TxOutput{Value: 1, CovenantType: COV_TYPE_CORE_EXT, CovenantData: cd}
-		err := ValidateTxCovenantsGenesis(&Tx{Outputs: []TxOutput{out}}, 0, nil)
+		err := ValidateTxCovenantsGenesis(&Tx{Outputs: []TxOutput{out}}, [32]byte{}, 0, nil)
 		if err == nil {
 			t.Fatalf("genesis create CORE_EXT covenant_data=%x: expected reject", cd)
 		}

@@ -20,7 +20,7 @@ func FuzzValidateTxCovenantsGenesis(f *testing.F) {
 		if err != nil {
 			return
 		}
-		_ = ValidateTxCovenantsGenesis(tx, blockHeight, nil)
+		_ = ValidateTxCovenantsGenesis(tx, [32]byte{}, blockHeight, nil)
 	})
 }
 

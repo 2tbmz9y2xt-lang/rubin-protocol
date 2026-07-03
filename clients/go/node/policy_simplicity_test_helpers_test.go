@@ -6,16 +6,28 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-type testSimplicityRotation struct{ activeAt uint64 }
+type testSimplicityRotation struct {
+	activeAt uint64
+	chainID  [32]byte
+}
 
 func (r testSimplicityRotation) NativeCreateSuites(uint64) *consensus.NativeSuiteSet {
 	return consensus.NewNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87)
 }
+
 func (r testSimplicityRotation) NativeSpendSuites(uint64) *consensus.NativeSuiteSet {
 	return consensus.NewNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87)
 }
-func (r testSimplicityRotation) SimplicityActiveAtHeight(height uint64) (bool, error) {
-	return height >= r.activeAt, nil
+
+func (r testSimplicityRotation) PublishedSimplicityDeployments() ([]consensus.SimplicityDeploymentDescriptor, [32]byte, bool, error) {
+	d := consensus.LiveSimplicityDeploymentDescriptor(r.chainID)
+	d.ActivationHeight = r.activeAt
+	set := []consensus.SimplicityDeploymentDescriptor{d}
+	anchor, err := consensus.SimplicityDeploymentSetAnchor(r.chainID, set)
+	if err != nil {
+		return nil, [32]byte{}, false, err
+	}
+	return set, anchor, true, nil
 }
 
 func simplicityCovenantDataForNodeTest(programCMR [32]byte, state []byte) []byte {

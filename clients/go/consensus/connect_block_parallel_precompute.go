@@ -113,6 +113,19 @@ func PrecomputeTxContexts(
 	return results, nil
 }
 
+// precomputeTxPreChecks runs the structural + covenant-genesis pre-validation the
+// precompute/worker path must share with the sequential apply path. nil rotation
+// carries no SimplicityDeploymentProvider, so the zero chain_id is unused here.
+func precomputeTxPreChecks(tx *Tx, blockHeight uint64) error {
+	if tx == nil {
+		return txerr(TX_ERR_PARSE, "nil tx")
+	}
+	if len(tx.Inputs) == 0 {
+		return txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
+	}
+	return ValidateTxCovenantsGenesis(tx, [32]byte{}, blockHeight, nil)
+}
+
 func precomputeTxContext(
 	txIndex int,
 	tx *Tx,
@@ -120,20 +133,7 @@ func precomputeTxContext(
 	overlay map[Outpoint]UtxoEntry,
 	blockHeight uint64,
 ) (TxValidationContext, error) {
-	if tx == nil {
-		return TxValidationContext{}, txerr(TX_ERR_PARSE, "nil tx")
-	}
-	if len(tx.Inputs) == 0 {
-		return TxValidationContext{}, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
-	}
-
-	// Output covenant genesis must be validated here so the precompute/worker
-	// path matches the sequential path exactly. Workers (ValidateTxLocal) only
-	// validate inputs, so without this an output whose covenant is invalid at
-	// creation time (e.g. an unassigned 0x0102 CORE_EXT output) would be
-	// precomputed and reported valid even though sequential apply rejects it.
-	// Default rotation (nil) mirrors the worker env (DefaultRotationProvider).
-	if err := ValidateTxCovenantsGenesis(tx, blockHeight, nil); err != nil {
+	if err := precomputeTxPreChecks(tx, blockHeight); err != nil {
 		return TxValidationContext{}, err
 	}
 

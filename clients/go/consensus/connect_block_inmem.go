@@ -169,6 +169,7 @@ func parseInMemoryConnectBlock(input connectBlockBasicInMemorySuiteContext) (*Pa
 		input.ExpectedTarget,
 		input.BlockHeight,
 		input.PrevTimestamps,
+		input.ChainID,
 		input.Rotation,
 	)
 	if err != nil {

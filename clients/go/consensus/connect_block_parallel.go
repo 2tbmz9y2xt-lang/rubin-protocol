@@ -85,6 +85,7 @@ func ConnectBlockParallelSigVerifyWithSuiteContext(
 		expectedTarget,
 		blockHeight,
 		prevTimestamps,
+		chainID,
 		rot,
 	)
 	if err != nil {
@@ -261,7 +262,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 		return nil, 0, txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
 	}
 
-	if err := ValidateTxCovenantsGenesis(tx, height, rotation); err != nil {
+	if err := ValidateTxCovenantsGenesis(tx, chainID, height, rotation); err != nil {
 		return nil, 0, err
 	}
 	sighashCache, err := NewSighashV1PrehashCache(tx)

@@ -9,6 +9,7 @@ import (
 func rejectCoreSimplicityPreActivation(
 	tx *consensus.Tx,
 	utxos map[consensus.Outpoint]consensus.UtxoEntry,
+	chainID [32]byte,
 	height uint64,
 	rotation consensus.RotationProvider,
 ) (reject bool, reason string, err error) {
@@ -18,7 +19,7 @@ func rejectCoreSimplicityPreActivation(
 	}
 	active := false
 	if provider, ok := rotation.(consensus.SimplicityDeploymentProvider); ok {
-		active, err = provider.SimplicityActiveAtHeight(height)
+		active, err = consensus.SimplicityActiveAtHeight(chainID, height, provider)
 		if err != nil {
 			return true, "CORE_SIMPLICITY deployment lookup failure",
 				fmt.Errorf("CORE_SIMPLICITY deployment lookup failure: %w", err)
@@ -30,7 +31,7 @@ func rejectCoreSimplicityPreActivation(
 	if rotation == nil {
 		rotation = consensus.DefaultRotationProvider{}
 	}
-	if err := consensus.ValidateTxCovenantsGenesis(tx, height, activeSimplicityGenesisRotation{RotationProvider: rotation}); err != nil {
+	if err := consensus.ValidateTxCovenantsGenesis(tx, chainID, height, activeSimplicityGenesisRotation{chainID: chainID, RotationProvider: rotation}); err != nil {
 		return false, "", err
 	}
 	return true, fmt.Sprintf("CORE_SIMPLICITY %s pre-ACTIVE", kind), nil
@@ -71,9 +72,19 @@ func covenantPolicyKind(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus
 }
 
 type activeSimplicityGenesisRotation struct {
+	chainID [32]byte
 	consensus.RotationProvider
 }
 
-func (activeSimplicityGenesisRotation) SimplicityActiveAtHeight(uint64) (bool, error) {
-	return true, nil
+// PublishedSimplicityDeployments forces CORE_SIMPLICITY active by publishing the
+// live valid single-descriptor set for the node's chain, so the pre-activation
+// well-formedness check passes the deployment-active gate. This is a policy shim,
+// not a real descriptor source (the live descriptor set is wired later).
+func (r activeSimplicityGenesisRotation) PublishedSimplicityDeployments() ([]consensus.SimplicityDeploymentDescriptor, [32]byte, bool, error) {
+	set := []consensus.SimplicityDeploymentDescriptor{consensus.LiveSimplicityDeploymentDescriptor(r.chainID)}
+	anchor, err := consensus.SimplicityDeploymentSetAnchor(r.chainID, set)
+	if err != nil {
+		return nil, [32]byte{}, false, err
+	}
+	return set, anchor, true, nil
 }

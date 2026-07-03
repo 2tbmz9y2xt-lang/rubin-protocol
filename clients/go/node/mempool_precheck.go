@@ -91,7 +91,7 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 		return nil, nil, txAdmitRejected(reason)
 	}
 	if policy.PolicyRejectSimplicityPreActivation {
-		reject, reason, err := rejectCoreSimplicityPreActivation(parsedTx, policyUtxos, nextHeight, policy.RotationProvider)
+		reject, reason, err := rejectCoreSimplicityPreActivation(parsedTx, policyUtxos, m.chainID, nextHeight, policy.RotationProvider)
 		if err != nil {
 			return nil, nil, txAdmitRejected(err.Error())
 		}
