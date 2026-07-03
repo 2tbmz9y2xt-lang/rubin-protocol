@@ -63,8 +63,10 @@ func validDescriptorSubset(descriptors []SimplicityDeploymentDescriptor, chainID
 }
 
 // governingDescriptor returns the highest-activation_height valid descriptor at
-// or below height, skipping activation_height ties (both ignored). It iterates
-// the ordered slice, never a map, for determinism.
+// or below height, skipping activation_height ties (both ignored). Selection
+// iterates the ordered slice, so the chosen descriptor is deterministic; the map
+// is used only for order-independent tie counting (how many valid descriptors
+// share each activation_height) and never drives selection order.
 func governingDescriptor(valid []SimplicityDeploymentDescriptor, height uint64) *SimplicityDeploymentDescriptor {
 	heightCounts := make(map[uint64]int, len(valid))
 	for i := range valid {
