@@ -82,7 +82,16 @@ type Jet struct {
 }
 
 type EvalOptions struct {
-	JetEvaluator     func(Jet) (EvalResult, error)
+	// JetEvaluator computes a jet's EvalResult. Under the no-Host (legacy) path its returned
+	// EvalResult.Cost is the charged amount. Under the Host path (Host != nil), JetCost —
+	// already charged in jetPreflight before JetEvaluator runs — is the SOLE authoritative
+	// cost; JetEvaluator.Cost is discarded, not summed or cross-checked (see evaluateJet). A
+	// JetCost implementation MUST reproduce the exact cost JetEvaluator itself would compute
+	// for the same jet+inputs — they are not independent knobs, and a mismatch silently
+	// over/under-charges with nothing in this package able to catch it.
+	JetEvaluator func(Jet) (EvalResult, error)
+	// JetCost is the Host-path jet cost hook; see JetEvaluator's doc for the lockstep
+	// requirement with JetEvaluator's own cost.
 	JetCost          func(Jet) (uint64, error)
 	JetRegistry      func(Jet) bool
 	Host             EvalHost

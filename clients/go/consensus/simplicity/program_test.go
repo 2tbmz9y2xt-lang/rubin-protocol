@@ -308,6 +308,7 @@ type evalTestHost struct {
 	lastCharge       uint64
 	failCharge       bool
 	intrinsicCostErr error
+	intrinsicCostFn  func(ContextIntrinsic) (uint64, error)
 	intrinsicResult  IntrinsicResult
 	readErr          error
 	lastIndex        uint16
@@ -322,7 +323,10 @@ func (h *evalTestHost) Charge(cost uint64) error {
 	return h.charge(cost)
 }
 func (h *evalTestHost) Cost() uint64 { return h.cost }
-func (h *evalTestHost) IntrinsicCost(ContextIntrinsic) (uint64, error) {
+func (h *evalTestHost) IntrinsicCost(intrinsic ContextIntrinsic) (uint64, error) {
+	if h.intrinsicCostFn != nil {
+		return h.intrinsicCostFn(intrinsic)
+	}
 	return 1, h.intrinsicCostErr
 }
 
@@ -361,6 +365,29 @@ func TestAdversarialHostDoesNotMutateOnBudgetError(t *testing.T) {
 	got, err = desc.Evaluate(EvalOptions{Host: host})
 	if !hasErrorCode(err, ErrBudgetExceeded) || got.Cost != MaxExecCost || host.charges != 0 || host.reads != 0 {
 		t.Fatalf("exhausted intrinsic result=%+v host=%+v err=%v", got, host, err)
+	}
+}
+
+// TestEvaluateIntrinsicZeroCostAtCapAccepted mirrors TestEvaluateJetCostHookCapBoundary's
+// zero-cost-at-cap case for the intrinsic path: a host already exactly at MaxExecCost must still
+// accept a zero-cost intrinsic (evaluateOneIntrinsic must not pre-reject on Host.Cost()==MaxExecCost
+// before learning the actual cost — see chargeCost's own ChargeCost(MaxExecCost, 0) boundary).
+func TestEvaluateIntrinsicZeroCostAtCapAccepted(t *testing.T) {
+	desc, err := Decode(hx("e82200"), nil, DecodeOptions{SemanticsVersion: SemanticsVersion})
+	if err != nil {
+		t.Fatalf("Decode descriptor intrinsic: %v", err)
+	}
+	if next, legacyErr := ChargeCost(MaxExecCost, 0); legacyErr != nil || next != MaxExecCost {
+		t.Fatalf("legacy ChargeCost(MaxExecCost, 0)=%d err=%v want accept", next, legacyErr)
+	}
+	host := &evalTestHost{
+		meter:           meter{cost: MaxExecCost},
+		intrinsicCostFn: func(ContextIntrinsic) (uint64, error) { return 0, nil },
+		intrinsicResult: IntrinsicResult{Value: ContextValue{Kind: ContextValueBytes32}},
+	}
+	got, err := desc.Evaluate(EvalOptions{Host: host})
+	if err != nil || !got.Accepted || got.Cost != MaxExecCost || host.reads != 1 {
+		t.Fatalf("zero-cost intrinsic at cap via Host=%+v err=%v reads=%d want accepted cost=%d reads=1 (matching legacy ChargeCost)", got, err, host.reads, MaxExecCost)
 	}
 }
 

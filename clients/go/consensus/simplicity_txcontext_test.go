@@ -542,3 +542,13 @@ func TestBuildSimplicityTxContext_MalformedSelfCovenantFailsClosed(t *testing.T)
 		t.Fatalf("expected malformed CORE_SIMPLICITY covenant error, got %v", err)
 	}
 }
+
+// package simplicity cannot import package consensus (dependency-inversion boundary — see
+// EvalHost's doc in context_host.go), so simplicity.maxContextStateBytes is a hand-kept duplicate
+// of MAX_SIMPLICITY_STATE_BYTES, not a derived value. package consensus CAN import package
+// simplicity, so this external test is the guard that catches the two drifting apart.
+func TestSimplicityMaxContextStateBytesMatchesConsensusConstant(t *testing.T) {
+	if got, want := simplicity.MaxContextStateBytes(), uint64(MAX_SIMPLICITY_STATE_BYTES); got != want {
+		t.Fatalf("simplicity.MaxContextStateBytes()=%d want %d (must mirror consensus.MAX_SIMPLICITY_STATE_BYTES)", got, want)
+	}
+}

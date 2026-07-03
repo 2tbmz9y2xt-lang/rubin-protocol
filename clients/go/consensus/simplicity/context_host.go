@@ -2,7 +2,20 @@ package simplicity
 
 import "encoding/hex"
 
-// EvalHost supplies context-ABI values through one shared execution meter. Charge MUST either add exactly cost or return an error without changing Cost; IntrinsicCost MUST not materialize values, and ReadIntrinsic MUST not charge.
+// EvalHost supplies context-ABI values through one shared execution meter.
+//
+// Postconditions implementations MUST uphold:
+//   - Charge MUST either add exactly cost to Cost and return nil, or return an error and leave
+//     Cost unchanged. Saturating a partially-spent budget up to MaxExecCost is the caller's job
+//     (see chargeCost/chargeSteps), never Charge's own responsibility.
+//   - IntrinsicCost MUST not materialize the intrinsic's value (it computes a cost only) and MUST
+//     have no side effects that depend on whether the caller goes on to charge/read.
+//   - ReadIntrinsic MUST not charge the meter.
+//   - E7 totality: for an Either-typed (intrinsic.Either) intrinsic, an out-of-range/invalid read
+//     (e.g. an index outside the referenced group) MUST be reported via
+//     IntrinsicResult{Failure: true}, never a non-nil error. Only IntrinsicResult.Failure is a
+//     total, in-protocol sum-type outcome (see validFor); a non-nil error from ReadIntrinsic is
+//     always treated as a resource/host fault, not a valid "no value at this index" result.
 type EvalHost interface {
 	Charge(uint64) error
 	Cost() uint64
@@ -119,10 +132,14 @@ func (p Program) evaluateIntrinsics(opts EvalOptions) (EvalResult, error) {
 // rejected=true means the value failed validation (a logical ErrRejected — the caller keeps
 // Accepted=false); rejected=false with a non-nil err means a resource/host error (the caller sets
 // Accepted=true, mirroring chargeSteps/chargeCost's own convention elsewhere in this file).
+//
+// Deliberately no "Host.Cost() >= MaxExecCost" pre-check here: that would reject a zero-cost
+// intrinsic exactly at the cap, which is wrong (chargeCost accepts a zero-size charge at the cap —
+// see ChargeCost's own boundary). chargeCost below is the sole authority for the accept/reject
+// boundary; it already guarantees the expensive ReadIntrinsic call is skipped whenever the actual
+// charge would exceed the remaining budget, so no separate pre-check is needed to keep
+// ReadIntrinsic from running once the meter is truly exhausted.
 func evaluateOneIntrinsic(opts EvalOptions, intrinsic ContextIntrinsic) (rejected bool, err error) {
-	if opts.Host.Cost() >= MaxExecCost {
-		return false, &Error{Code: ErrBudgetExceeded}
-	}
 	if intrinsic.Indexed {
 		intrinsic.Index = opts.ContextIndex
 	}
@@ -184,6 +201,11 @@ func chargeCost(host EvalHost, cost uint64) error {
 // too NARROW only over-rejects (fail-closed, safe); staying too WIDE would under-reject, so never
 // widen this without also widening the consensus constant in the same change.
 const maxContextStateBytes = 512
+
+// MaxContextStateBytes exposes maxContextStateBytes read-only so package consensus (which CAN
+// import package simplicity, unlike the reverse) can assert by test that the two hand-kept
+// duplicates never drift — see TestSimplicityMaxContextStateBytesMatchesConsensusConstant.
+func MaxContextStateBytes() uint64 { return maxContextStateBytes }
 
 func (r IntrinsicResult) validFor(intrinsic ContextIntrinsic) bool {
 	if r.Failure {
