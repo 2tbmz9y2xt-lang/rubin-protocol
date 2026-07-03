@@ -244,7 +244,10 @@ func TestSimplicityTxContextDescriptorHashAccessors(t *testing.T) {
 		}
 	}
 	evalIntrinsic := func(sel []byte, idx uint16, wantCost uint64, accept func(simplicity.ContextIntrinsic, simplicity.IntrinsicResult) bool) {
-		program, _ := simplicity.Decode(sel, nil, simplicity.DecodeOptions{SemanticsVersion: simplicity.SemanticsVersion})
+		program, err := simplicity.Decode(sel, nil, simplicity.DecodeOptions{SemanticsVersion: simplicity.SemanticsVersion})
+		if err != nil {
+			t.Fatalf("Decode context ABI selector %x: %v", sel, err)
+		}
 		var meter SimplicityTxContextMeter
 		got, err := program.Evaluate(simplicity.EvalOptions{Host: testSimplicityEvalHost{ctx: ctx, meter: &meter}, ContextIndex: idx, ContextEvaluator: accept})
 		if err != nil || !got.Accepted || got.Cost != wantCost {

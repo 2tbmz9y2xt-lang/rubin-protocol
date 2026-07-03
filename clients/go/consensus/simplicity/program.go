@@ -192,6 +192,12 @@ func (p Program) evaluateJet(opts EvalOptions) (EvalResult, error) {
 		return EvalResult{}, err
 	}
 	if opts.Host != nil {
+		// Metering contract: under the Host path, JetCost (already charged in jetPreflight) is the
+		// SOLE authoritative cost — result.Cost as reported by JetEvaluator is intentionally
+		// discarded here, not summed or cross-checked. A future JetCost implementation MUST reproduce
+		// the exact cost JetEvaluator itself computes for the same jet+inputs (they are not
+		// independent knobs); a mismatch would silently over/under-charge with no test able to catch
+		// it from this package alone.
 		result.Cost = opts.Host.Cost()
 		if !result.Accepted {
 			return result, &Error{Code: ErrRejected}
