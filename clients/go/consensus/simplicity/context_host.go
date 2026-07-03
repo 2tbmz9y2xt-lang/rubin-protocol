@@ -2,25 +2,21 @@ package simplicity
 
 import "encoding/hex"
 
-// EvalHost supplies context-ABI values through one shared execution meter.
-// Charge MUST either advance Cost or return ErrBudgetExceeded without extra
-// work. IntrinsicCost MUST be computable without materializing the value, and
-// ReadIntrinsic MUST NOT charge; Evaluate charges the returned cost first.
+// EvalHost supplies context-ABI values through one shared execution meter. Charge MUST either add exactly cost or return an error without changing Cost; IntrinsicCost MUST not materialize values, and ReadIntrinsic MUST not charge.
 type EvalHost interface {
-	Charge(cost uint64) error
+	Charge(uint64) error
 	Cost() uint64
 	IntrinsicCost(ContextIntrinsic) (uint64, error)
 	ReadIntrinsic(ContextIntrinsic) (IntrinsicResult, error)
 }
 
 type ContextIntrinsic struct {
-	ID, Index       uint16
-	Name, Signature string
-	SelectorHex     string
-	CMR             [32]byte
-	OutputBitWidth  uint64
-	Kind            ContextValueKind
-	Either          bool
+	ID, Index                    uint16
+	Name, Signature, SelectorHex string
+	CMR                          [32]byte
+	OutputBitWidth               uint64
+	Kind                         ContextValueKind
+	Either, Indexed              bool
 }
 
 type ContextValueKind uint8
@@ -41,7 +37,7 @@ type ContextValue struct {
 	Bytes32 [32]byte
 	Bytes   []byte
 	Uint    uint64
-	Uint128 [2]uint64
+	Uint128 Uint128
 }
 
 type IntrinsicResult struct {
@@ -52,11 +48,15 @@ type IntrinsicResult struct {
 func contextIntrinsicProgramEntries(rows []ContextIntrinsic, witnesses map[witnessKey]struct{}) map[string]programEntry {
 	out := make(map[string]programEntry, len(rows))
 	for _, row := range rows {
+		inputWidth := uint64(0)
+		if row.Indexed {
+			inputWidth = 16
+		}
 		out[string(mustHexBytes(row.SelectorHex))] = programEntry{program: Program{
 			CMR:            row.CMR,
 			witnesses:      witnesses,
 			intrinsics:     []ContextIntrinsic{row},
-			frameBitWidths: []uint64{0, row.OutputBitWidth},
+			frameBitWidths: []uint64{inputWidth, row.OutputBitWidth},
 		}}
 	}
 	return out
@@ -81,14 +81,6 @@ func mustHexBytes(s string) []byte {
 	return raw
 }
 
-func evaluateJetWithHost(result EvalResult, host EvalHost) (EvalResult, error) {
-	result.Cost = host.Cost()
-	if !result.Accepted {
-		return result, &Error{Code: ErrRejected}
-	}
-	return result, nil
-}
-
 func evaluateJetWithLocalMeter(result EvalResult) (EvalResult, error) {
 	var meter meter
 	err := meter.charge(result.Cost)
@@ -102,13 +94,6 @@ func evaluateJetWithLocalMeter(result EvalResult) (EvalResult, error) {
 	return result, nil
 }
 
-func (p Program) evaluateStepProgram(opts EvalOptions) (EvalResult, error) {
-	if opts.Host != nil {
-		return evaluateStepsWithHost(p.evalSteps, opts.Host)
-	}
-	return evaluateSteps(p.evalSteps)
-}
-
 func (p Program) evaluateIntrinsics(opts EvalOptions) (EvalResult, error) {
 	if opts.Host == nil {
 		return EvalResult{}, &Error{Code: ErrDecode}
@@ -119,6 +104,12 @@ func (p Program) evaluateIntrinsics(opts EvalOptions) (EvalResult, error) {
 		}
 	}
 	for _, intrinsic := range p.intrinsics {
+		if opts.Host.Cost() >= MaxExecCost {
+			return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, &Error{Code: ErrBudgetExceeded}
+		}
+		if intrinsic.Indexed {
+			intrinsic.Index = opts.ContextIndex
+		}
 		cost, err := opts.Host.IntrinsicCost(intrinsic)
 		if err != nil {
 			return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, err
@@ -138,11 +129,6 @@ func (p Program) evaluateIntrinsics(opts EvalOptions) (EvalResult, error) {
 		}
 	}
 	return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, nil
-}
-
-func evaluateStepsWithHost(steps uint64, host EvalHost) (EvalResult, error) {
-	err := chargeSteps(host, steps)
-	return EvalResult{Accepted: true, Cost: host.Cost()}, err
 }
 
 func chargeSteps(host EvalHost, steps uint64) error {
@@ -172,5 +158,19 @@ func (r IntrinsicResult) validFor(intrinsic ContextIntrinsic) bool {
 	if r.Failure {
 		return intrinsic.Either
 	}
-	return intrinsic.Kind != ContextValueInvalid && r.Value.Kind == intrinsic.Kind
+	if intrinsic.Kind == ContextValueInvalid || r.Value.Kind != intrinsic.Kind {
+		return false
+	}
+	switch r.Value.Kind {
+	case ContextValueBytes:
+		return len(r.Value.Bytes) <= 512
+	case ContextValueU8:
+		return r.Value.Uint <= 0xff
+	case ContextValueU16:
+		return r.Value.Uint <= 0xffff
+	case ContextValueU32:
+		return r.Value.Uint <= 0xffffffff
+	default:
+		return true
+	}
 }

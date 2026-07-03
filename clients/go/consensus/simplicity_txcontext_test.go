@@ -243,7 +243,21 @@ func TestSimplicityTxContextDescriptorHashAccessors(t *testing.T) {
 			t.Fatalf("cost after input access %d = %d want %d", i, meter.Cost(), want)
 		}
 	}
-
+	evalIntrinsic := func(sel []byte, idx uint16, wantCost uint64, accept func(simplicity.ContextIntrinsic, simplicity.IntrinsicResult) bool) {
+		program, _ := simplicity.Decode(sel, nil, simplicity.DecodeOptions{SemanticsVersion: simplicity.SemanticsVersion})
+		var meter SimplicityTxContextMeter
+		got, err := program.Evaluate(simplicity.EvalOptions{Host: testSimplicityEvalHost{ctx: ctx, meter: &meter}, ContextIndex: idx, ContextEvaluator: accept})
+		if err != nil || !got.Accepted || got.Cost != wantCost {
+			t.Fatalf("context intrinsic %x result=%+v cost=%d err=%v", sel, got, meter.Cost(), err)
+		}
+	}
+	evalIntrinsic([]byte{0xe8, 0x22, 0x00}, 1, inputCost, func(in simplicity.ContextIntrinsic, result simplicity.IntrinsicResult) bool {
+		return in.ID == 0x0122 && in.Index == 1 && result.Value.Bytes32 == wantInputHash
+	})
+	evalIntrinsic([]byte{0xe8, 0x22, 0x00}, 7, simplicity.IntrinsicMissCost, func(_ simplicity.ContextIntrinsic, result simplicity.IntrinsicResult) bool { return result.Failure })
+	evalIntrinsic([]byte{0xe8, 0x40, 0x00}, 0, simplicity.IntrinsicMissCost, func(in simplicity.ContextIntrinsic, result simplicity.IntrinsicResult) bool {
+		return in.ID == 0x0140 && result.Failure
+	})
 	outputDesc := OutputDescriptorBytes(COV_TYPE_P2PK, []byte{0x01, 0xcc, 0xdd})
 	outputCost := simplicity.DescriptorHashBaseCost + uint64(len(outputDesc))*simplicity.DescriptorHashByteCost
 	got, err := ctx.OutputDescriptorHash(0, &meter)
@@ -256,6 +270,51 @@ func TestSimplicityTxContextDescriptorHashAccessors(t *testing.T) {
 	if want := 2*inputCost + outputCost; meter.Cost() != want {
 		t.Fatalf("cost after output access = %d want %d", meter.Cost(), want)
 	}
+	evalIntrinsic([]byte{0xe8, 0x2a, 0x00}, 0, outputCost, func(in simplicity.ContextIntrinsic, result simplicity.IntrinsicResult) bool {
+		return in.ID == 0x012a && result.Value.Bytes32 == sha3_256(outputDesc)
+	})
+}
+
+type testSimplicityEvalHost struct {
+	ctx   *SimplicityTxContext
+	meter *SimplicityTxContextMeter
+}
+
+func (h testSimplicityEvalHost) Charge(cost uint64) error { return h.meter.charge(cost) }
+func (h testSimplicityEvalHost) Cost() uint64             { return h.meter.Cost() }
+func (h testSimplicityEvalHost) IntrinsicCost(in simplicity.ContextIntrinsic) (uint64, error) {
+	var sources []simplicityTxContextDescriptorSource
+	switch in.ID {
+	case 0x0122:
+		sources = h.ctx.inputDescriptors
+	case 0x012a:
+		sources = h.ctx.outputDescriptors
+	default:
+		if in.ID >= 0x0140 || in.Either {
+			return simplicity.IntrinsicMissCost, nil
+		}
+		return simplicity.IntrinsicReadCost, nil
+	}
+	if int(in.Index) >= len(sources) {
+		return simplicity.IntrinsicMissCost, nil
+	}
+	return simplicity.DescriptorHashAccessCost(descriptorSourceLen(sources[in.Index]))
+}
+func (h testSimplicityEvalHost) ReadIntrinsic(in simplicity.ContextIntrinsic) (simplicity.IntrinsicResult, error) {
+	var got SimplicityTxContextDescriptorHashResult
+	var scratch SimplicityTxContextMeter
+	switch in.ID {
+	case 0x0122:
+		got, _ = h.ctx.InputDescriptorHash(in.Index, &scratch)
+	case 0x012a:
+		got, _ = h.ctx.OutputDescriptorHash(in.Index, &scratch)
+	default:
+		return simplicity.IntrinsicResult{Failure: true}, nil
+	}
+	if !got.Present {
+		return simplicity.IntrinsicResult{Failure: true}, nil
+	}
+	return simplicity.IntrinsicResult{Value: simplicity.ContextValue{Kind: simplicity.ContextValueBytes32, Bytes32: got.Hash}}, nil
 }
 
 func TestSimplicityTxContextDescriptorHashMissAndBudgetCross(t *testing.T) {

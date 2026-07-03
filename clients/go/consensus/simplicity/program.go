@@ -78,8 +78,10 @@ type Jet struct {
 
 type EvalOptions struct {
 	JetEvaluator     func(Jet) (EvalResult, error)
+	JetCost          func(Jet) (uint64, error)
 	JetRegistry      func(Jet) bool
 	Host             EvalHost
+	ContextIndex     uint16
 	ContextEvaluator func(ContextIntrinsic, IntrinsicResult) bool
 }
 
@@ -107,6 +109,7 @@ func Decode(program, witness []byte, opts DecodeOptions) (Program, error) {
 	}
 	decoded.decoded = true
 	decoded.frameBitWidths = append([]uint64(nil), decoded.frameBitWidths...)
+	decoded.intrinsics = append([]ContextIntrinsic(nil), decoded.intrinsics...)
 	if decoded.Jet != nil {
 		jet := copyJet(*decoded.Jet)
 		decoded.Jet = &jet
@@ -143,7 +146,11 @@ func (p Program) Evaluate(opts EvalOptions) (EvalResult, error) {
 	case len(p.intrinsics) > 0:
 		return p.evaluateIntrinsics(opts)
 	default:
-		return p.evaluateStepProgram(opts)
+		if opts.Host != nil {
+			err := chargeSteps(opts.Host, p.evalSteps)
+			return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, err
+		}
+		return evaluateSteps(p.evalSteps)
 	}
 }
 
@@ -172,11 +179,21 @@ func (p Program) evaluateJet(opts EvalOptions) (EvalResult, error) {
 	if !ok {
 		return EvalResult{}, &Error{Code: ErrDecode}
 	}
+	if opts.Host != nil && opts.JetRegistry == nil {
+		return EvalResult{}, &Error{Code: ErrJetDisallowed}
+	}
 	if opts.JetRegistry != nil && !opts.JetRegistry(jet) {
 		return EvalResult{}, &Error{Code: ErrJetDisallowed}
 	}
 	if opts.Host != nil {
-		if err := chargeCost(opts.Host, p.jetCost()); err != nil {
+		if opts.JetCost == nil {
+			return EvalResult{}, &Error{Code: ErrJetDisallowed}
+		}
+		cost, err := opts.JetCost(jet)
+		if err != nil {
+			return EvalResult{}, err
+		}
+		if err := chargeCost(opts.Host, cost); err != nil {
 			return EvalResult{Accepted: true, Cost: opts.Host.Cost()}, err
 		}
 	}
@@ -185,20 +202,13 @@ func (p Program) evaluateJet(opts EvalOptions) (EvalResult, error) {
 		return EvalResult{}, err
 	}
 	if opts.Host != nil {
-		return evaluateJetWithHost(result, opts.Host)
+		result.Cost = opts.Host.Cost()
+		if !result.Accepted {
+			return result, &Error{Code: ErrRejected}
+		}
+		return result, nil
 	}
 	return evaluateJetWithLocalMeter(result)
-}
-
-func (p Program) jetCost() uint64 {
-	switch p.jetKey {
-	case jetKey{id: 0x0001, subOp: 0x00}:
-		return sha3256JetBaseCost + frameBytes(p.frameBitWidths[0])
-	case jetKey{id: 0x0002, subOp: 0x00}:
-		return mldsa87VerifyJetCost
-	default:
-		return 1
-	}
 }
 
 func evaluateSteps(steps uint64) (EvalResult, error) {
@@ -245,6 +255,50 @@ func CostModelHash() [32]byte {
 // JetsRegistryHash returns the hash of the ordered Go jet registry table.
 func JetsRegistryHash() [32]byte {
 	return jetsRegistryHashValue
+}
+
+// ProgramEncodingHash returns the CORE_SIMPLICITY deployment-descriptor
+// program_encoding_hash commitment (CANONICAL §23.2.4, defined as SHA3-256 over
+// ProgramEncodingRulesBytes_v1). The value is a pinned literal transcribed from
+// the published rubin-spec artifact SPEC-SIMPLICITY-01-PROGRAM-ENCODING
+// (final-rules JSON), verified against GitHub 2tbmz9y2xt-lang/rubin-spec@main
+// de22d2ec34d26bc91d3425811c1adb733e5832c3 at
+// spec/extensions/SPEC-SIMPLICITY-01-PROGRAM-ENCODING.final-rules.generated.json.
+// The artifact lives in the private spec repo and is absent from this public
+// checkout (see SPEC_LOCATION.md); this package carries no encoding-rules
+// preimage, so the value is committed here, not recomputed.
+// Rust simplicity::PROGRAM_ENCODING_HASH separately pins this byte-identical
+// value; that is a corroborating second copy of the same §23.2.4 bytes reviewed
+// against the artifact, not an automated in-repo cross-client comparator.
+func ProgramEncodingHash() [32]byte {
+	return [32]byte{
+		0x27, 0xe5, 0xad, 0x52, 0x1e, 0xfd, 0xf9, 0xd1, 0x85, 0xc1, 0xc9, 0x2a, 0x3a, 0x1a, 0x4a, 0xac,
+		0xc9, 0x27, 0x6c, 0x2a, 0x5b, 0x1b, 0x85, 0x18, 0xce, 0x25, 0xc8, 0xc9, 0x73, 0xa3, 0x8a, 0xdc,
+	}
+}
+
+// ContextSchemaHash returns the CORE_SIMPLICITY deployment-descriptor
+// context_schema_hash commitment (CANONICAL §23.2.4, defined as SHA3-256 over the
+// published context-ABI artifact: the RUBIN_CONSENSUS_STATE_MACHINE §3 schema and
+// intrinsic table). The value is a pinned literal transcribed from the published
+// rubin-spec artifact SPEC-SIMPLICITY-01-CONTEXT-ABI (integrated into canon by
+// RUB-597), verified against GitHub 2tbmz9y2xt-lang/rubin-spec@main
+// de22d2ec34d26bc91d3425811c1adb733e5832c3 at
+// spec/extensions/SPEC-SIMPLICITY-01-CONTEXT-ABI.generated.json. The artifact
+// lives in the private spec repo and is absent from this public checkout (see
+// SPEC_LOCATION.md); this package carries no context-ABI preimage, so the value
+// is committed here, not recomputed. Unlike program_encoding_hash there is no
+// in-repo cross-client or preimage anchor for these bytes yet: the Rust
+// context_schema_hash mirror is deferred behind the Rust freeze and the shared
+// hash-parity corpus is owned by RUB-606, both outside this single-client slice.
+// Cross-client parity for this value is therefore a deferred divergence owned by
+// those siblings under the controller-sanctioned Rust freeze, not an in-scope gap
+// for this slice; the bytes are transcribed from §23.2.4 canon.
+func ContextSchemaHash() [32]byte {
+	return [32]byte{
+		0xe8, 0x32, 0xdb, 0x30, 0x08, 0xc3, 0x55, 0x26, 0x24, 0x20, 0xc6, 0x31, 0x68, 0xc1, 0xc9, 0x78,
+		0x7a, 0x69, 0xaa, 0xc3, 0x1d, 0x15, 0xa5, 0x0a, 0x64, 0x0f, 0x03, 0x01, 0xd8, 0x41, 0x01, 0x50,
+	}
 }
 
 func decodeProgram(program []byte) (Program, error) {
@@ -483,6 +537,7 @@ var (
 		string([]byte{0xe3, 0x00}):                   {err: ErrJetDisallowed},
 		string([]byte{0x7c, 0x06, 0x80}):             {err: ErrJetDisallowed},
 	}
+	// RUB-598 binds/meters typed context ABI selectors only; value-branch execution is RUB-610/RUB-611 and Rust/shared selector parity is RUB-603/RUB-606.
 	programs = mergeProgramEntries(basePrograms, contextIntrinsicProgramEntries(contextIntrinsicRows, noWitness))
 )
 

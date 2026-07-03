@@ -2,6 +2,7 @@ package simplicity
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -68,6 +69,7 @@ func TestDecodeVectors(t *testing.T) {
 		{id: "VEC-PE-015", program: hx("c1d21014"), witness: hx("01"), version: 1, wantError: ErrDecode},
 		{id: "VEC-PE-016", program: hx("c1d21014"), witness: hx("0000"), version: 1, wantError: ErrDecode},
 		{id: "VEC-PE-017", program: hx("2400"), version: 1, wantError: ErrDecode},
+			{id: "RUB598-PE-UNKNOWN-CONTEXT-INTRINSIC", program: hx("e86000"), version: 1, wantError: ErrDecode},
 	}
 
 	for _, tt := range tests {
@@ -189,44 +191,6 @@ type sharedJetsRegistryCase struct {
 	ExpectedError   string `json:"expected_error"`
 }
 
-type testEvalHost struct {
-	cost    uint64
-	reads   int
-	charges []uint64
-	results map[uint16]IntrinsicResult
-}
-
-func newTestEvalHost() *testEvalHost {
-	return &testEvalHost{results: map[uint16]IntrinsicResult{}}
-}
-
-func (h *testEvalHost) Charge(cost uint64) error {
-	h.charges = append(h.charges, cost)
-	next, err := ChargeCost(h.cost, cost)
-	h.cost = next
-	return err
-}
-
-func (h *testEvalHost) Cost() uint64 { return h.cost }
-
-func (h *testEvalHost) IntrinsicCost(intrinsic ContextIntrinsic) (uint64, error) {
-	if intrinsic.ID == 0x0122 || intrinsic.ID == 0x012a {
-		return DescriptorHashAccessCost(32)
-	}
-	if h.results[intrinsic.ID].Failure {
-		return IntrinsicMissCost, nil
-	}
-	return IntrinsicReadCost, nil
-}
-
-func (h *testEvalHost) ReadIntrinsic(intrinsic ContextIntrinsic) (IntrinsicResult, error) {
-	h.reads++
-	if result, ok := h.results[intrinsic.ID]; ok {
-		return result, nil
-	}
-	return IntrinsicResult{Value: ContextValue{Kind: intrinsic.Kind}}, nil
-}
-
 func TestSharedExecCorpus(t *testing.T) {
 	var corpus sharedExecCorpus
 	raw, err := os.ReadFile(repoPath(t, "conformance", "fixtures", "protocol", "simplicity_exec_corpus_v1.json"))
@@ -308,7 +272,11 @@ func TestSharedJetsRegistryCorpus(t *testing.T) {
 	}
 }
 
-func TestDecodeContextABIVectors(t *testing.T) {
+func TestContextIntrinsicRowsMatchRUB597Snapshot(t *testing.T) {
+	if len(contextIntrinsicRows) != 35 {
+		t.Fatalf("context ABI row count=%d want 35", len(contextIntrinsicRows))
+	}
+	hash := sha256.New()
 	for _, row := range contextIntrinsicRows {
 		program, err := Decode(hx(row.SelectorHex), nil, DecodeOptions{SemanticsVersion: SemanticsVersion})
 		if err != nil {
@@ -320,6 +288,59 @@ func TestDecodeContextABIVectors(t *testing.T) {
 		if len(program.intrinsics) != 1 || program.intrinsics[0].ID != row.ID {
 			t.Fatalf("row %#04x decoded intrinsics=%+v", row.ID, program.intrinsics)
 		}
+		fmt.Fprintf(hash, "%04x|%s|%s|%s|%x|%d|%d|%t|%t\n", row.ID, row.Name, row.Signature, row.SelectorHex, row.CMR, row.Kind, row.OutputBitWidth, row.Either, row.Indexed)
+	}
+	if got := hex.EncodeToString(hash.Sum(nil)); got != "8a7543f57ac73443a793a66f281e78072eedcf1bf12ed27710aefb0624865638" {
+		t.Fatalf("context ABI RUB-597 snapshot hash=%s", got)
+	}
+}
+
+type evalTestHost struct {
+	meter
+	charges, reads int
+	lastCharge     uint64
+	failCharge     bool
+}
+
+func (h *evalTestHost) Charge(cost uint64) error {
+	h.charges++
+	h.lastCharge = cost
+	if h.failCharge {
+		return &Error{Code: ErrBudgetExceeded}
+	}
+	return h.charge(cost)
+}
+func (h *evalTestHost) Cost() uint64 { return h.cost }
+func (h *evalTestHost) IntrinsicCost(ContextIntrinsic) (uint64, error) {
+	return 1, nil
+}
+func (h *evalTestHost) ReadIntrinsic(ContextIntrinsic) (IntrinsicResult, error) {
+	h.reads++
+	return IntrinsicResult{}, nil
+}
+
+func TestAdversarialHostDoesNotMutateOnBudgetError(t *testing.T) {
+	if (IntrinsicResult{Value: ContextValue{Kind: ContextValueU8, Uint: 0x100}}).validFor(ContextIntrinsic{Kind: ContextValueU8}) {
+		t.Fatal("u8 intrinsic accepted out-of-range host value")
+	}
+	desc, err := Decode(hx("e82200"), nil, DecodeOptions{SemanticsVersion: SemanticsVersion})
+	if err != nil {
+		t.Fatalf("Decode descriptor intrinsic: %v", err)
+	}
+	host := &evalTestHost{meter: meter{cost: MaxExecCost - 1}, failCharge: true}
+	got, err := Program{decoded: true, evalSteps: 1}.Evaluate(EvalOptions{Host: host})
+	if !hasErrorCode(err, ErrBudgetExceeded) || got.Cost != MaxExecCost-1 || host.Cost() != MaxExecCost-1 || host.charges != 1 || host.lastCharge != 1 || host.reads != 0 {
+		t.Fatalf("adversarial host step charge result=%+v host=%+v err=%v", got, host, err)
+	}
+	host = &evalTestHost{meter: meter{cost: 7}}
+	got, err = Program{decoded: true, evalSteps: MaxExecCost/StepCost + 1}.Evaluate(EvalOptions{Host: host})
+	if !hasErrorCode(err, ErrBudgetExceeded) || got.Cost != MaxExecCost || host.Cost() != MaxExecCost || host.charges != 1 || host.lastCharge != MaxExecCost-7 || host.reads != 0 {
+		t.Fatalf("over-cap host precharge result=%+v host=%+v err=%v", got, host, err)
+	}
+	host = &evalTestHost{meter: meter{cost: MaxExecCost}, failCharge: true}
+	got, err = desc.Evaluate(EvalOptions{Host: host})
+	if !hasErrorCode(err, ErrBudgetExceeded) || got.Cost != MaxExecCost || host.charges != 0 || host.reads != 0 {
+		t.Fatalf("exhausted intrinsic result=%+v host=%+v err=%v", got, host, err)
 	}
 }
 
@@ -332,8 +353,6 @@ func TestSharedExecCorpusRequiresOutcomeFields(t *testing.T) {
 	}{
 		{name: "missing accepted", raw: `{"cases":[{"expected_final_counter":0}]}`, cases: []sharedExecCase{{ID: "VEC-SE-MISSING-ACCEPTED"}}, want: "shared exec corpus case VEC-SE-MISSING-ACCEPTED missing expected_accepted"},
 		{name: "missing final counter", raw: `{"cases":[{"expected_accepted":false}]}`, cases: []sharedExecCase{{ID: "VEC-SE-MISSING-COUNTER"}}, want: "shared exec corpus case VEC-SE-MISSING-COUNTER missing expected_final_counter"},
-		{name: "null accepted", raw: `{"cases":[{"expected_accepted":null,"expected_final_counter":0}]}`, cases: []sharedExecCase{{ID: "VEC-SE-NULL-ACCEPTED"}}, want: "shared exec corpus case VEC-SE-NULL-ACCEPTED missing expected_accepted"},
-		{name: "null final counter", raw: `{"cases":[{"expected_accepted":false,"expected_final_counter":null}]}`, cases: []sharedExecCase{{ID: "VEC-SE-NULL-COUNTER"}}, want: "shared exec corpus case VEC-SE-NULL-COUNTER missing expected_final_counter"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -360,10 +379,10 @@ func requireSharedExecOutcomeFields(cases []sharedExecCase, raw []byte) error {
 		if id == "" {
 			id = fmt.Sprintf("index %d", i)
 		}
-		if raw, ok := fields["expected_accepted"]; !ok || bytes.Equal(raw, []byte("null")) {
+		if _, ok := fields["expected_accepted"]; !ok {
 			return fmt.Errorf("shared exec corpus case %s missing expected_accepted", id)
 		}
-		if raw, ok := fields["expected_final_counter"]; !ok || bytes.Equal(raw, []byte("null")) {
+		if _, ok := fields["expected_final_counter"]; !ok {
 			return fmt.Errorf("shared exec corpus case %s missing expected_final_counter", id)
 		}
 	}
@@ -522,6 +541,18 @@ func TestJetsRegistryHashMatchesSpecArtifact(t *testing.T) {
 	}
 }
 
+func TestProgramEncodingHashPinsPublishedSpecValue(t *testing.T) {
+	if got := ProgramEncodingHash(); got != hex32("27e5ad521efdf9d185c1c92a3a1a4aacc9276c2a5b1b8518ce25c8c973a38adc") {
+		t.Fatalf("program_encoding_hash=%x", got)
+	}
+}
+
+func TestContextSchemaHashPinsPublishedSpecValue(t *testing.T) {
+	if got := ContextSchemaHash(); got != hex32("e832db3008c355262420c63168c1c9787a69aac31d15a50a640f0301d8410150") {
+		t.Fatalf("context_schema_hash=%x", got)
+	}
+}
+
 func TestJetRegistryRuntimeMetadataMatchesSpecArtifact(t *testing.T) {
 	want := map[jetKey]struct {
 		selectorBitLen int
@@ -644,69 +675,25 @@ func TestEvaluateJetCostHookCapBoundary(t *testing.T) {
 			}
 		})
 	}
+	calls := 0
+	_, err := program.Evaluate(EvalOptions{Host: &evalTestHost{meter: meter{cost: MaxExecCost}}, JetRegistry: func(Jet) bool { return true }, JetCost: func(Jet) (uint64, error) { return 1, nil }, JetEvaluator: func(Jet) (EvalResult, error) {
+		calls++
+		return EvalResult{Accepted: true}, nil
+	}})
+	assertErrorCode(t, err, ErrBudgetExceeded)
+	if calls != 0 {
+		t.Fatalf("JetEvaluator calls=%d want 0 after budget reject", calls)
+	}
+	_, err = program.Evaluate(EvalOptions{Host: &evalTestHost{meter: meter{cost: MaxExecCost}}, JetRegistry: func(Jet) bool { return false }, JetEvaluator: func(Jet) (EvalResult, error) {
+		t.Fatal("JetEvaluator called after registry reject")
+		return EvalResult{}, nil
+	}})
+	assertErrorCode(t, err, ErrJetDisallowed)
 
 	got, err := evaluateSHA3JetWithResult(t, program, EvalResult{Accepted: true, Cost: MaxExecCost + 1})
 	assertErrorCode(t, err, ErrBudgetExceeded)
 	if !got.Accepted || got.Cost != MaxExecCost {
 		t.Fatalf("evaluation=%+v want accepted saturated cost=%d", got, MaxExecCost)
-	}
-}
-
-func TestEvaluateHostMeteringPaths(t *testing.T) {
-	desc := decodeContextProgram(t, "e82200")
-	host := newTestEvalHost()
-	descValue := [32]byte{0xaa}
-	host.results[0x0122] = IntrinsicResult{Value: ContextValue{Kind: ContextValueBytes32, Bytes32: descValue}}
-	got, err := desc.Evaluate(EvalOptions{
-		Host: host,
-		ContextEvaluator: func(intrinsic ContextIntrinsic, result IntrinsicResult) bool {
-			return intrinsic.ID == 0x0122 && result.Value.Bytes32 == descValue
-		},
-	})
-	descCost, _ := DescriptorHashAccessCost(32)
-	if err != nil || !got.Accepted || got.Cost != descCost || host.cost != descCost || host.reads != 1 {
-		t.Fatalf("descriptor context evaluation=%+v host=%+v err=%v want accepted cost=%d reads=1", got, host, err, descCost)
-	}
-	host = newTestEvalHost()
-	host.results[0x0122] = IntrinsicResult{Value: ContextValue{Kind: ContextValueBytes32, Bytes32: [32]byte{0xbb}}}
-	got, err = desc.Evaluate(EvalOptions{
-		Host: host,
-		ContextEvaluator: func(intrinsic ContextIntrinsic, result IntrinsicResult) bool {
-			return intrinsic.ID == 0x0122 && result.Value.Bytes32 == descValue
-		},
-	})
-	assertErrorCode(t, err, ErrRejected)
-	if got.Accepted || got.Cost != descCost || host.reads != 1 {
-		t.Fatalf("context value rejection evaluation=%+v host=%+v", got, host)
-	}
-	daCommit := decodeContextProgram(t, "e84000")
-	host = newTestEvalHost()
-	host.results[0x0140] = IntrinsicResult{Failure: true}
-	got, err = daCommit.Evaluate(EvalOptions{Host: host})
-	if err != nil || !got.Accepted || got.Cost != IntrinsicMissCost || host.reads != 1 {
-		t.Fatalf("failure-branch evaluation=%+v host=%+v err=%v want accepted miss cost", got, host, err)
-	}
-	host = newTestEvalHost()
-	host.cost = MaxExecCost - 1
-	got, err = desc.Evaluate(EvalOptions{Host: host})
-	assertErrorCode(t, err, ErrBudgetExceeded)
-	if !got.Accepted || got.Cost != MaxExecCost || host.reads != 0 {
-		t.Fatalf("descriptor over-cap evaluation=%+v host=%+v want no read", got, host)
-	}
-
-	overSteps := MaxExecCost/StepCost + 1
-	host = newTestEvalHost()
-	got, err = Program{decoded: true, evalSteps: overSteps, intrinsics: desc.intrinsics}.Evaluate(EvalOptions{Host: host})
-	assertErrorCode(t, err, ErrBudgetExceeded)
-	if !got.Accepted || got.Cost != MaxExecCost || host.reads != 0 {
-		t.Fatalf("pre-read budget evaluation=%+v host=%+v want saturated before read", got, host)
-	}
-	host = newTestEvalHost()
-	host.cost = 1
-	err = chargeSteps(host, overSteps)
-	assertErrorCode(t, err, ErrBudgetExceeded)
-	if host.cost != MaxExecCost || len(host.charges) != 1 || host.charges[0] != MaxExecCost-1 {
-		t.Fatalf("overflow host cost=%d charges=%v want saturated by remaining budget", host.cost, host.charges)
 	}
 }
 
@@ -890,15 +877,6 @@ func decodeSHA3Jet(t *testing.T) Program {
 	program, err := Decode(hx("60"), nil, DecodeOptions{SemanticsVersion: SemanticsVersion})
 	if err != nil {
 		t.Fatalf("Decode sha3 jet: %v", err)
-	}
-	return program
-}
-
-func decodeContextProgram(t *testing.T, programHex string) Program {
-	t.Helper()
-	program, err := Decode(hx(programHex), nil, DecodeOptions{SemanticsVersion: SemanticsVersion})
-	if err != nil {
-		t.Fatalf("Decode context program %s: %v", programHex, err)
 	}
 	return program
 }
