@@ -161,15 +161,19 @@ func chargeSteps(host EvalHost, steps uint64) error {
 	return chargeCost(host, steps*StepCost)
 }
 
+// chargeCost routes through ChargeCost (the SAME cap-boundary function the legacy no-Host meter
+// path uses) so a zero-cost charge exactly at MaxExecCost behaves identically on both paths — this
+// issue's own one_invariant claims "a SINGLE shared meter"; two different accept/reject boundaries
+// for the same state would contradict that.
 func chargeCost(host EvalHost, cost uint64) error {
 	current := host.Cost()
-	if current >= MaxExecCost || cost > MaxExecCost-current {
+	if _, err := ChargeCost(current, cost); err != nil {
 		if current < MaxExecCost {
-			if err := host.Charge(MaxExecCost - current); err != nil {
-				return err
+			if chargeErr := host.Charge(MaxExecCost - current); chargeErr != nil {
+				return chargeErr
 			}
 		}
-		return &Error{Code: ErrBudgetExceeded}
+		return err
 	}
 	return host.Charge(cost)
 }

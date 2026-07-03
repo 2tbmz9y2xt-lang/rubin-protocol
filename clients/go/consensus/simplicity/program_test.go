@@ -70,6 +70,9 @@ func TestDecodeVectors(t *testing.T) {
 		{id: "VEC-PE-016", program: hx("c1d21014"), witness: hx("0000"), version: 1, wantError: ErrDecode},
 		{id: "VEC-PE-017", program: hx("2400"), version: 1, wantError: ErrDecode},
 		{id: "RUB598-PE-UNKNOWN-CONTEXT-INTRINSIC", program: hx("e86000"), version: 1, wantError: ErrDecode},
+		{id: "RUB598-PE-NON-ALIASING-NATURAL", program: hx("f0001000"), version: 1, wantError: ErrDecode},
+		{id: "RUB598-PE-BAD-SECOND-NATURAL", program: hx("e80080"), version: 1, wantError: ErrDecode},
+		{id: "RUB598-PE-JET-NAMESPACE-DISALLOWED", program: hx("e300"), version: 1, wantError: ErrJetDisallowed},
 	}
 
 	for _, tt := range tests {
@@ -715,6 +718,23 @@ func TestEvaluateJetCostHookCapBoundary(t *testing.T) {
 	if !got.Accepted || got.Cost != MaxExecCost {
 		t.Fatalf("evaluation=%+v want accepted saturated cost=%d", got, MaxExecCost)
 	}
+
+	// A zero-cost jet exactly at the cap must succeed identically on the Host path (chargeCost) and
+	// the legacy local-meter path (ChargeCost) -- the "single shared meter" invariant, not two
+	// different accept/reject boundaries for the same (current, cost) pair.
+	atCapHost := &evalTestHost{meter: meter{cost: MaxExecCost}}
+	got, err = program.Evaluate(EvalOptions{
+		Host:         atCapHost,
+		JetRegistry:  func(Jet) bool { return true },
+		JetCost:      func(Jet) (uint64, error) { return 0, nil },
+		JetEvaluator: func(Jet) (EvalResult, error) { return EvalResult{Accepted: true}, nil },
+	})
+	if next, legacyErr := ChargeCost(MaxExecCost, 0); legacyErr != nil || next != MaxExecCost {
+		t.Fatalf("legacy ChargeCost(MaxExecCost, 0)=%d err=%v want accept", next, legacyErr)
+	}
+	if err != nil || !got.Accepted || got.Cost != MaxExecCost {
+		t.Fatalf("zero-cost jet at cap via Host=%+v err=%v want accepted cost=%d (matching legacy ChargeCost)", got, err, MaxExecCost)
+	}
 }
 
 func TestEvaluateJetWithHostFullPath(t *testing.T) {
@@ -831,6 +851,42 @@ func TestEvaluateOneIntrinsicBranches(t *testing.T) {
 	assertErrorCode(t, err, ErrRejected)
 	if !called {
 		t.Fatal("ContextEvaluator never called for a validFor-passing result")
+	}
+}
+
+// E7 TOTALITY (engine-level, package simplicity): an Either-typed intrinsic's failure branch
+// (out-of-range index) is TOTAL -- it is accepted as data (Failure:true), never a hard reject or
+// abort, so the program can still branch on it via ContextEvaluator.
+func TestEngineTotalityAcceptsEitherFailureBranch(t *testing.T) {
+	either := ContextIntrinsic{ID: 0x0122, Kind: ContextValueBytes32, Either: true, Indexed: true}
+	host := &evalTestHost{intrinsicResult: IntrinsicResult{Failure: true}}
+	sawFailure := false
+	got, err := Program{decoded: true, intrinsics: []ContextIntrinsic{either}}.Evaluate(EvalOptions{
+		Host: host,
+		ContextEvaluator: func(_ ContextIntrinsic, r IntrinsicResult) bool {
+			sawFailure = r.Failure
+			return true
+		},
+	})
+	if err != nil || !got.Accepted || !sawFailure {
+		t.Fatalf("Either failure-branch result=%+v err=%v sawFailure=%v want accepted, total (not rejected/aborted)", got, err, sawFailure)
+	}
+
+	nonEither := ContextIntrinsic{ID: 0x0100, Kind: ContextValueBytes32, Either: false}
+	_, err = Program{decoded: true, intrinsics: []ContextIntrinsic{nonEither}}.Evaluate(EvalOptions{
+		Host: &evalTestHost{intrinsicResult: IntrinsicResult{Failure: true}},
+	})
+	assertErrorCode(t, err, ErrRejected)
+}
+
+// E15 (engine-level, package simplicity): the same intrinsic reached twice in one program charges
+// twice -- evaluateIntrinsics does not memoize/discount a repeated read by identity.
+func TestEngineChargesRepeatedIntrinsicTwice(t *testing.T) {
+	same := ContextIntrinsic{ID: 0x0122, Kind: ContextValueBytes32, Either: true, Indexed: true}
+	host := &evalTestHost{intrinsicResult: IntrinsicResult{Value: ContextValue{Kind: ContextValueBytes32}}}
+	got, err := Program{decoded: true, intrinsics: []ContextIntrinsic{same, same}}.Evaluate(EvalOptions{Host: host})
+	if err != nil || !got.Accepted || host.reads != 2 || host.charges != 2 {
+		t.Fatalf("repeated-intrinsic evaluation=%+v host=%+v err=%v want reads=2 charges=2 (no memoization discount)", got, host, err)
 	}
 }
 
