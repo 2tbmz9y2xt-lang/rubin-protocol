@@ -6,8 +6,12 @@ import "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus/simplicit
 // eager digest32 / sighash_type) to the RUB-598 step-6 context ABI
 // (simplicity.EvalHost): one FRESH host per CORE_SIMPLICITY input carries the single
 // shared exec meter and answers each context intrinsic read from the immutable tx
-// context. NON-LIVE — building/using it changes no spend accept/reject decision until
-// the RUB-615 gate wires it into the dispatch.
+// context. RUB-615 wired this adapter into the CORE_SIMPLICITY spend-validation
+// dispatch, but it stays NON-LIVE in production: CORE_SIMPLICITY spends remain
+// reject-only because no §23.2.4 deployment activates without a real H_simplicity
+// activation pin (activation is test-local only). A future activation-pin issue makes
+// it live; until then building or using the host changes no production spend
+// accept/reject decision.
 type simplicityEvalHost struct {
 	ctx      *SimplicityTxContext
 	self     SimplicityTxContextSelfView
