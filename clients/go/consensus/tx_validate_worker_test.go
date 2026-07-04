@@ -237,7 +237,7 @@ func TestValidateTxLocal_CoreSimplicitySpendRejected(t *testing.T) {
 	}
 
 	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
-	assertTxErrCodeMsg(t, result.Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+	assertTxErrCodeMsg(t, result.Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
 }
 
 // 0x0102 (CORE_EXT) is unassigned per CANONICAL §14 — the worker/queued spend path
@@ -316,9 +316,26 @@ func TestValidateTxLocal_CoreSimplicityInputGroupCapDeferredBehindDisabledSpend(
 		}, [32]byte{}, 1, 0, nil)
 	}
 
-	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS, false).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS+1, true).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS+1, false).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS, false).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
+	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS+1, true).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
+	assertTxErrCodeMsg(t, run(SIMPLICITY_MAX_GROUP_INPUTS+1, false).Err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
+}
+
+// TestValidateTxLocal_CoreSimplicityActiveSpendWorker: the queued worker path evaluates an ACTIVE CORE_SIMPLICITY accept (eager step 3d -> validateCoreSimplicityInputSpendQ).
+func TestValidateTxLocal_CoreSimplicityActiveSpendWorker(t *testing.T) {
+	var chainID [32]byte
+	const H = 1
+	tx, _, utxos := simplicityLiveTx(1, simplicityEnvelopeSignature([]byte{0x24}, nil, SIGHASH_ALL))
+	resolved := []UtxoEntry{utxos[Outpoint{Txid: tx.Inputs[0].PrevTxid, Vout: 0}]}
+	cache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatalf("prehash cache: %v", err)
+	}
+	env := txValidationWorkerEnv{chainID: chainID, blockHeight: H, sighashCache: cache, rotation: activeSimplicityRotation(chainID, H)}
+	tvc := TxValidationContext{Tx: tx, ResolvedInputs: resolved, WitnessStart: 0, WitnessEnd: len(tx.Witness), SighashCache: cache}
+	if err := validateTxLocalInputs(tvc, tx, env); err != nil {
+		t.Fatalf("worker active CORE_SIMPLICITY accept rejected: %v", err)
+	}
 }
 
 func TestValidateTxLocal_WithSigCache(t *testing.T) {

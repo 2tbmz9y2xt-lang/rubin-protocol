@@ -33,6 +33,9 @@ type txValidationWorkerEnv struct {
 	sigQueue     *SigCheckQueue
 	rotation     RotationProvider
 	registry     *SuiteRegistry
+	// simplicityCtx is the §2.4 step-3d per-tx SimplicityTxContext, built EAGERLY in
+	// validateTxLocalInputs before the per-input loop so the group cap precedes every spend error.
+	simplicityCtx *SimplicityTxContext
 }
 
 type txInputSpendCheck struct {
@@ -71,10 +74,6 @@ func ValidateTxLocal(
 		result.Err = txerr(TX_ERR_PARSE, "txcontext resolved input count mismatch")
 		return result
 	}
-	if err := rejectCoreSimplicitySpendIfPresent(tvc.ResolvedInputs); err != nil {
-		result.Err = err
-		return result
-	}
 	env := newTxValidationWorkerEnv(tvc, chainID, blockHeight, blockMTP, sigCache)
 
 	if err := validateTxLocalInputs(tvc, tx, env); err != nil {
@@ -97,6 +96,12 @@ func newTxValidationWorkerEnv(
 	if sigCache != nil {
 		sigQueue.WithCache(sigCache)
 	}
+	// rotation is DefaultRotationProvider here: ValidateTxLocal / RunTxValidationWorkers have NO
+	// production caller yet (grep-proven), so this read-only worker path is NON-LIVE. The
+	// §14.3 gate is wired (validateCoreSimplicityInputSpendQ), and the authoritative sequential
+	// (applyNonCoinbaseTxBasicWork) and parallel (applyNonCoinbaseTxBasicWorkQ) block-validation
+	// paths thread a real rotation. Plumbing an active rotation into this worker pool is deferred to
+	// whenever it is wired live (a no-deployment default keeps it consistently reject-only until then).
 	return txValidationWorkerEnv{
 		chainID:      chainID,
 		blockHeight:  blockHeight,
@@ -109,6 +114,13 @@ func newTxValidationWorkerEnv(
 }
 
 func validateTxLocalInputs(tvc TxValidationContext, tx *Tx, env txValidationWorkerEnv) error {
+	// §2.4 step 3d (see buildSimplicityStep3dContext): eager group cap after input resolution, before
+	// the per-input spend loop.
+	simplicityCtx, err := buildSimplicityStep3dContext(tx, tvc.ResolvedInputs, env.blockHeight, env.chainID, env.rotation)
+	if err != nil {
+		return err
+	}
+	env.simplicityCtx = simplicityCtx
 	witnessCursor := tvc.WitnessStart
 	for inputIndex, entry := range tvc.ResolvedInputs {
 		assigned, slots, err := assignedWorkerWitness(tx, tvc, entry, witnessCursor)
@@ -170,7 +182,7 @@ func validateInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) err
 	case COV_TYPE_CORE_STEALTH:
 		return validateCoreStealthInputSpendQ(check, env)
 	case COV_TYPE_CORE_SIMPLICITY:
-		return rejectCoreSimplicitySpend()
+		return validateCoreSimplicityInputSpendQ(check, env)
 	default:
 		// Other covenant types have no spend-time checks in the genesis set.
 		return nil
@@ -232,6 +244,23 @@ func validateCoreStealthInputSpendQ(check txInputSpendCheck, env txValidationWor
 		check.entry, check.assigned[0], check.tx, check.inputIndex, check.inputValue,
 		env.chainID, env.blockHeight, env.sighashCache, env.sigQueue, env.rotation, env.registry,
 	)
+}
+
+func validateCoreSimplicityInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+	if len(check.assigned) != SIMPLICITY_WITNESS_SLOTS {
+		return txerr(TX_ERR_PARSE, "CORE_SIMPLICITY witness_slots must be 1")
+	}
+	return validateCoreSimplicitySpendAtHeight(coreSimplicitySpendValidation{
+		entry:       check.entry,
+		witness:     check.assigned[0],
+		tx:          check.tx,
+		inputIndex:  check.inputIndex,
+		inputValue:  check.inputValue,
+		chainID:     env.chainID,
+		blockHeight: env.blockHeight,
+		cache:       env.sighashCache,
+		txContext:   env.simplicityCtx,
+	})
 }
 
 // RunTxValidationWorkers validates multiple transactions in parallel using

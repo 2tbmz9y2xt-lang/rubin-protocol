@@ -58,11 +58,10 @@ type TxValidationContext struct {
 }
 
 type precomputeTxInputs struct {
-	ResolvedInputs          []UtxoEntry
-	InputOutpoints          []Outpoint
-	TotalWitnessSlots       int
-	SumIn                   u128
-	StoppedAtCoreSimplicity bool
+	ResolvedInputs    []UtxoEntry
+	InputOutpoints    []Outpoint
+	TotalWitnessSlots int
+	SumIn             u128
 }
 
 // PrecomputeTxContexts builds an immutable TxValidationContext slice for all
@@ -142,12 +141,9 @@ func precomputeTxContext(
 		return TxValidationContext{}, err
 	}
 
-	witnessStart, witnessEnd, err := precomputeWitnessBounds(tx, inputs.TotalWitnessSlots, inputs.StoppedAtCoreSimplicity)
+	witnessStart, witnessEnd, err := precomputeWitnessBounds(tx, inputs.TotalWitnessSlots)
 	if err != nil {
 		return TxValidationContext{}, err
-	}
-	if inputs.StoppedAtCoreSimplicity {
-		return TxValidationContext{}, rejectCoreSimplicitySpend()
 	}
 
 	var fee uint64
@@ -186,7 +182,7 @@ func collectPrecomputeTxInputs(
 	seenInputs := make(map[Outpoint]struct{}, len(tx.Inputs))
 
 	for _, in := range tx.Inputs {
-		entry, op, slots, stoppedAtCoreSimplicity, err := resolvePrecomputeInput(in, seenInputs, overlay, blockHeight)
+		entry, op, slots, err := resolvePrecomputeInput(in, seenInputs, overlay, blockHeight)
 		if err != nil {
 			return precomputeTxInputs{}, err
 		}
@@ -194,10 +190,6 @@ func collectPrecomputeTxInputs(
 		out.InputOutpoints = append(out.InputOutpoints, op)
 		if out.SumIn, err = addU64ToU128(out.SumIn, entry.Value); err != nil {
 			return precomputeTxInputs{}, err
-		}
-		if stoppedAtCoreSimplicity {
-			out.StoppedAtCoreSimplicity = true
-			return out, nil
 		}
 		if out.TotalWitnessSlots, err = addWitnessSlots(out.TotalWitnessSlots, slots); err != nil {
 			return precomputeTxInputs{}, err
@@ -212,33 +204,33 @@ func resolvePrecomputeInput(
 	seenInputs map[Outpoint]struct{},
 	overlay map[Outpoint]UtxoEntry,
 	blockHeight uint64,
-) (UtxoEntry, Outpoint, int, bool, error) {
+) (UtxoEntry, Outpoint, int, error) {
 	var zeroTxid [32]byte
 	if err := validateNonCoinbaseInputEncoding(in, zeroTxid); err != nil {
-		return UtxoEntry{}, Outpoint{}, 0, false, err
+		return UtxoEntry{}, Outpoint{}, 0, err
 	}
 
 	op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
 	if err := rememberPrecomputeInput(op, seenInputs); err != nil {
-		return UtxoEntry{}, Outpoint{}, 0, false, err
+		return UtxoEntry{}, Outpoint{}, 0, err
 	}
 
 	entry, ok := overlay[op]
 	if !ok {
-		return UtxoEntry{}, Outpoint{}, 0, false, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
+		return UtxoEntry{}, Outpoint{}, 0, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
 	}
 	if err := validatePrecomputeEntry(entry, blockHeight); err != nil {
-		return UtxoEntry{}, Outpoint{}, 0, false, err
-	}
-	if entry.CovenantType == COV_TYPE_CORE_SIMPLICITY {
-		return entry, op, 0, true, nil
+		return UtxoEntry{}, Outpoint{}, 0, err
 	}
 
+	// CORE_SIMPLICITY is now a normal input (SIMPLICITY_WITNESS_SLOTS=1): witness slots are
+	// accumulated like any other covenant so witness bounds cover the whole tx (RUB-615). The
+	// former early stop was a reject-only artifact that truncated witness accounting.
 	slots, err := precomputeWitnessSlots(entry)
 	if err != nil {
-		return UtxoEntry{}, Outpoint{}, 0, false, err
+		return UtxoEntry{}, Outpoint{}, 0, err
 	}
-	return entry, op, slots, false, nil
+	return entry, op, slots, nil
 }
 
 func rememberPrecomputeInput(op Outpoint, seenInputs map[Outpoint]struct{}) error {
@@ -270,7 +262,7 @@ func precomputeWitnessSlots(entry UtxoEntry) (int, error) {
 	return slots, nil
 }
 
-func precomputeWitnessBounds(tx *Tx, totalWitnessSlots int, stoppedAtCoreSimplicity bool) (int, int, error) {
+func precomputeWitnessBounds(tx *Tx, totalWitnessSlots int) (int, int, error) {
 	// Witness cursor is per-transaction (reset to 0 for each tx), matching
 	// the sequential path in applyNonCoinbaseTxBasicWorkQ.
 	witnessCursor := 0
@@ -280,7 +272,7 @@ func precomputeWitnessBounds(tx *Tx, totalWitnessSlots int, stoppedAtCoreSimplic
 		return 0, 0, txerr(TX_ERR_PARSE, "witness underflow")
 	}
 	witnessCursor = witnessEnd
-	if !stoppedAtCoreSimplicity && witnessCursor != len(tx.Witness) {
+	if witnessCursor != len(tx.Witness) {
 		return 0, 0, txerr(TX_ERR_PARSE, "witness_count mismatch")
 	}
 	return witnessStart, witnessEnd, nil

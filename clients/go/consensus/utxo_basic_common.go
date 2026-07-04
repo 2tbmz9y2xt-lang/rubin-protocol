@@ -136,6 +136,10 @@ func checkSpendCovenant(
 	case COV_TYPE_CORE_STEALTH:
 		_, err := ParseStealthCovenantData(covData)
 		return err
+	case COV_TYPE_CORE_SIMPLICITY:
+		// Resolve-phase accept (like P2PK): the full §14.3 covenant-data + spend validation runs at
+		// spend time (validateCoreSimplicitySpend -> parseCoreSimplicityCovenantData with value).
+		return nil
 	default:
 		// Reserved/unknown are unsupported in basic apply path.
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in basic apply")
@@ -181,17 +185,18 @@ func u128ToU64(x u128) (uint64, error) {
 }
 
 type nonCoinbaseApplyContext struct {
-	tx           *Tx
-	txid         [32]byte
-	work         map[Outpoint]UtxoEntry
-	chainID      [32]byte
-	rotation     RotationProvider
-	registry     *SuiteRegistry
-	sighashCache *SighashV1PrehashCache
-	resolved     []nonCoinbaseResolvedInput
-	spend        nonCoinbaseSpendState
-	sumOut       u128
-	height       uint64
-	blockMTP     uint64
-	createsVault bool
+	tx            *Tx
+	txid          [32]byte
+	work          map[Outpoint]UtxoEntry
+	chainID       [32]byte
+	rotation      RotationProvider
+	registry      *SuiteRegistry
+	sighashCache  *SighashV1PrehashCache
+	resolved      []nonCoinbaseResolvedInput
+	simplicityCtx *SimplicityTxContext
+	spend         nonCoinbaseSpendState
+	sumOut        u128
+	height        uint64
+	blockMTP      uint64
+	createsVault  bool
 }

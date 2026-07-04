@@ -325,9 +325,6 @@ func applyNonCoinbaseTxBasicWorkQ(
 			}
 		}
 
-		if entry.CovenantType == COV_TYPE_CORE_SIMPLICITY {
-			return nil, 0, rejectCoreSimplicitySpend()
-		}
 		if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
 			return nil, 0, err
 		}
@@ -352,14 +349,17 @@ func applyNonCoinbaseTxBasicWorkQ(
 		return nil, 0, txerr(TX_ERR_PARSE, "witness_count mismatch")
 	}
 
-	if err := rejectCoreSimplicitySpendIfPresent(resolvedInputs); err != nil {
-		return nil, 0, err
-	}
-
 	// Clone UTXO set so per-tx mutations (spend/create) don't alias the caller's map.
 	work := make(map[Outpoint]UtxoEntry, len(utxoSet))
 	for k, v := range utxoSet {
 		work[k] = v
+	}
+
+	// §2.4 step 3d (see buildSimplicityStep3dContext): eager group cap after input resolution, before
+	// the spend loop.
+	simplicityCtx, err := buildSimplicityStep3dContext(tx, resolvedInputs, height, chainID, rotation)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	for inputIndex, entry := range resolvedInputs {
@@ -431,6 +431,23 @@ func applyNonCoinbaseTxBasicWorkQ(
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
 			}
 			if err := validateCoreStealthSpendQ(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache, sigQueue, rotation, registry); err != nil {
+				return nil, 0, err
+			}
+		case COV_TYPE_CORE_SIMPLICITY:
+			if len(assigned) != SIMPLICITY_WITNESS_SLOTS {
+				return nil, 0, txerr(TX_ERR_PARSE, "CORE_SIMPLICITY witness_slots must be 1")
+			}
+			if err := validateCoreSimplicitySpendAtHeight(coreSimplicitySpendValidation{
+				entry:       entry,
+				witness:     assigned[0],
+				tx:          tx,
+				inputIndex:  uint32(inputIndex),
+				inputValue:  entry.Value,
+				chainID:     chainID,
+				blockHeight: height,
+				cache:       sighashCache,
+				txContext:   simplicityCtx,
+			}); err != nil {
 				return nil, 0, err
 			}
 		default:

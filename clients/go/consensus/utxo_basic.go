@@ -48,6 +48,13 @@ func (ctx *nonCoinbaseApplyContext) applyPreOutputPhases() error {
 	if err := ctx.resolveInputs(); err != nil {
 		return err
 	}
+	// §2.4 step 3d (see buildSimplicityStep3dContext): eager group cap after input resolution, before
+	// the spend loop.
+	simplicityCtx, err := buildSimplicityStep3dContext(ctx.tx, ctx.resolvedEntries(), ctx.height, ctx.chainID, ctx.rotation)
+	if err != nil {
+		return err
+	}
+	ctx.simplicityCtx = simplicityCtx
 	return ctx.validateInputSpends()
 }
 
@@ -103,16 +110,6 @@ func (ctx *nonCoinbaseApplyContext) resolveInputs() error {
 		entry, op, err := ctx.resolveInput(in, seenInputs, zeroTxid)
 		if err != nil {
 			return err
-		}
-		if entry.CovenantType == COV_TYPE_CORE_SIMPLICITY {
-			if err := ctx.validateCoinbaseInputMaturity(entry); err != nil {
-				return err
-			}
-			ctx.resolved = append(ctx.resolved, nonCoinbaseResolvedInput{
-				entry:    entry,
-				outpoint: op,
-			})
-			return nil
 		}
 		if err := ctx.validateResolvedInputEntry(entry); err != nil {
 			return err
@@ -188,9 +185,6 @@ func (ctx *nonCoinbaseApplyContext) validateResolvedInputEntry(entry UtxoEntry) 
 	if err := ctx.captureVaultResolvedInput(entry); err != nil {
 		return err
 	}
-	if entry.CovenantType == COV_TYPE_CORE_SIMPLICITY {
-		return rejectCoreSimplicitySpend()
-	}
 	return checkSpendCovenant(entry.CovenantType, entry.CovenantData)
 }
 
@@ -228,21 +222,11 @@ func (ctx *nonCoinbaseApplyContext) resolvedEntries() []UtxoEntry {
 	return entries
 }
 
-func (ctx *nonCoinbaseApplyContext) hasCoreSimplicityResolvedInput() bool {
-	for _, input := range ctx.resolved {
-		if input.entry.CovenantType == COV_TYPE_CORE_SIMPLICITY {
-			return true
-		}
-	}
-	return false
-}
-
 func (ctx *nonCoinbaseApplyContext) validateInputSpends() error {
-	for inputIndex, input := range ctx.resolved {
-		if input.entry.CovenantType == COV_TYPE_CORE_SIMPLICITY {
-			return ctx.validateInputSpend(inputIndex, input)
-		}
-	}
+	// §14.3 lowest-wire-index first-error: every input (including CORE_SIMPLICITY) is validated in
+	// wire order by the loop below. The former CORE_SIMPLICITY short-circuit here was a reject-only
+	// artifact — it validated ONLY the first simplicity input and returned, which under live spend
+	// would skip all other inputs AND preempt a lower-wire-index error (RUB-615 removed it).
 	for inputIndex, input := range ctx.resolved {
 		if err := ctx.validateInputSpend(inputIndex, input); err != nil {
 			return err
@@ -281,7 +265,7 @@ func (ctx *nonCoinbaseApplyContext) validateInputSpend(inputIndex int, input non
 	case COV_TYPE_CORE_STEALTH:
 		return ctx.validateCoreStealthInput(inputIndex, entry, assigned)
 	case COV_TYPE_CORE_SIMPLICITY:
-		return ctx.validateCoreSimplicityInput(entry, assigned)
+		return ctx.validateCoreSimplicityInput(inputIndex, entry, assigned)
 	default:
 		return nil
 	}
@@ -371,8 +355,21 @@ func (ctx *nonCoinbaseApplyContext) validateCoreStealthInput(inputIndex int, ent
 	})
 }
 
-func (ctx *nonCoinbaseApplyContext) validateCoreSimplicityInput(_ UtxoEntry, _ []WitnessItem) error {
-	return rejectCoreSimplicitySpend()
+func (ctx *nonCoinbaseApplyContext) validateCoreSimplicityInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
+	if len(assigned) != SIMPLICITY_WITNESS_SLOTS {
+		return txerr(TX_ERR_PARSE, "CORE_SIMPLICITY witness_slots must be 1")
+	}
+	return validateCoreSimplicitySpendAtHeight(coreSimplicitySpendValidation{
+		entry:       entry,
+		witness:     assigned[0],
+		tx:          ctx.tx,
+		inputIndex:  uint32(inputIndex),
+		inputValue:  entry.Value,
+		chainID:     ctx.chainID,
+		blockHeight: ctx.height,
+		cache:       ctx.sighashCache,
+		txContext:   ctx.simplicityCtx,
+	})
 }
 
 func (ctx *nonCoinbaseApplyContext) addSpendableOutputs() error {

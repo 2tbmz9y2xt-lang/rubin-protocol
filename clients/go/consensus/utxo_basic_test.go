@@ -171,7 +171,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicitySpendRejected(t *testing.T)
 	}
 
 	_, _, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 1, 0, [32]byte{})
-	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
 }
 
 func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityImmatureCoinbasePrecedesDisabledSpend(t *testing.T) {
@@ -202,68 +202,17 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityImmatureCoinbasePrecedesDis
 	}
 }
 
-func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityRejectsBeforeWitnessChecks(t *testing.T) {
-	prev := hashWithPrefix(0x65)
-	tx := &Tx{
-		Version: TX_WIRE_VERSION,
-		TxKind:  0x00,
-		TxNonce: 1,
-		Inputs:  []TxInput{{PrevTxid: prev, PrevVout: 0}},
-		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
-	}
-	utxos := map[Outpoint]UtxoEntry{
-		{Txid: prev, Vout: 0}: {
-			Value:        100,
-			CovenantType: COV_TYPE_CORE_SIMPLICITY,
-			CovenantData: encodeSimplicityCovenantData([32]byte{0x65}, nil),
-		},
-	}
-
-	work, summary, err := ApplyNonCoinbaseTxBasicUpdate(tx, hashWithPrefix(0x66), utxos, 1, 0, [32]byte{})
-	if work != nil || summary != nil {
-		t.Fatalf("expected no mutation on reject, got work=%v summary=%v", work, summary)
-	}
-	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-}
-
 func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityPreservesInputOrderPriority(t *testing.T) {
 	makeOutpoint := func(prev [32]byte) Outpoint {
 		return Outpoint{Txid: prev, Vout: 0}
 	}
 	p2pkPrev := hashWithPrefix(0xE0)
 	simpPrev := hashWithPrefix(0xE1)
-	laterMissingPrev := hashWithPrefix(0xE2)
-
-	t.Run("current_simplicity_precedes_later_missing_utxo", func(t *testing.T) {
-		tx := &Tx{
-			Version: TX_WIRE_VERSION,
-			TxKind:  0x00,
-			TxNonce: 1,
-			Inputs: []TxInput{
-				{PrevTxid: simpPrev, PrevVout: 0},
-				{PrevTxid: laterMissingPrev, PrevVout: 0},
-			},
-			Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
-		}
-		utxos := map[Outpoint]UtxoEntry{
-			makeOutpoint(simpPrev): coreSimplicityAcceptEntry(100),
-		}
-
-		work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(
-			tx,
-			hashWithPrefix(0xE3),
-			utxos,
-			1,
-			0,
-			[32]byte{},
-			nil,
-			nil,
-		)
-		if work != nil || summary != nil {
-			t.Fatalf("expected no mutation on reject, got work=%v summary=%v", work, summary)
-		}
-		assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	})
+	// current_simplicity_precedes_later_missing_utxo was a reject-only artifact: it relied on the
+	// removed resolveInputs early-return. Under live spend, input resolution processes all inputs in
+	// wire order (a missing UTXO at a later input surfaces during resolution), and the CORE_SIMPLICITY
+	// activation/spend check runs afterward in validateInputSpends — so that ordering no longer holds.
+	// Live first-error ordering is covered by TestSimplicityLiveGate_OrderedErrorSet.
 
 	t.Run("earlier_p2pk_witness_underflow_precedes_later_simplicity", func(t *testing.T) {
 		tx := &Tx{
