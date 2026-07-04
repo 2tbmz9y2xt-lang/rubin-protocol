@@ -118,15 +118,18 @@ func parseCoreSimplicityWitnessEnvelope(witness WitnessItem) (parsedSimplicityEn
 	return parseSimplicityEnvelopeSignature(witness.Signature)
 }
 
-func validateCoreSimplicitySpend(entry UtxoEntry, witness WitnessItem, txContext simplicityTxContextProvider) error {
+// validateCoreSimplicitySpend runs §14.3 steps 4-7 for one CORE_SIMPLICITY input:
+// decode against the covenant program_cmr, then evaluate under the RUB-614 EvalHost
+// bound to the built tx context and this input's eager digest32/sighash_type.
+// inputIdx/digest32 are supplied by the caller (digest32 via SighashV1DigestWithType).
+// NON-LIVE: no production dispatch calls this yet — the RUB-615 gate wires it.
+func validateCoreSimplicitySpend(entry UtxoEntry, witness WitnessItem, inputIdx uint16, digest32 [32]byte, txContext simplicityTxContextProvider) error {
 	envelope, err := parseCoreSimplicityWitnessEnvelope(witness)
 	if err != nil {
 		return err
 	}
-	if _, _, err := extractCryptoSigAndSighash(witness); err != nil {
-		return err
-	}
-	if err := requireSimplicityTxContext(txContext); err != nil {
+	_, sighashType, err := extractCryptoSigAndSighash(witness)
+	if err != nil {
 		return err
 	}
 	programCMR, _, err := parseCoreSimplicityCovenantData(entry.Value, entry.CovenantData)
@@ -140,25 +143,34 @@ func validateCoreSimplicitySpend(entry UtxoEntry, witness WitnessItem, txContext
 	if err != nil {
 		return simplicityEvalError(err)
 	}
-	_, err = program.Evaluate(simplicity.EvalOptions{})
+	// The tx context + host are only needed to EVALUATE (§14.3 steps 5-7), so resolve
+	// them after decode: a decode/cmr failure surfaces without a context.
+	ctx, err := resolveSimplicityTxContext(txContext)
 	if err != nil {
+		return err
+	}
+	host, err := newSimplicityEvalHost(ctx, inputIdx, sighashType, digest32)
+	if err != nil {
+		return err
+	}
+	if _, err := program.Evaluate(simplicity.EvalOptions{Host: host}); err != nil {
 		return simplicityEvalError(err)
 	}
 	return nil
 }
 
-func requireSimplicityTxContext(txContext simplicityTxContextProvider) error {
+func resolveSimplicityTxContext(txContext simplicityTxContextProvider) (*SimplicityTxContext, error) {
 	if txContext == nil {
-		return txerr(TX_ERR_PARSE, "CORE_SIMPLICITY txcontext missing")
+		return nil, txerr(TX_ERR_PARSE, "CORE_SIMPLICITY txcontext missing")
 	}
 	ctx, err := txContext()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if ctx == nil {
-		return txerr(TX_ERR_PARSE, "CORE_SIMPLICITY txcontext missing")
+		return nil, txerr(TX_ERR_PARSE, "CORE_SIMPLICITY txcontext missing")
 	}
-	return nil
+	return ctx, nil
 }
 
 func simplicityEvalError(err error) error {

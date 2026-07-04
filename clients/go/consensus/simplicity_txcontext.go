@@ -304,6 +304,27 @@ func (c *SimplicityTxContext) OutputDescriptorHash(outputIndex uint16, meter *Si
 	return c.descriptorHash(c.outputDescriptors, outputIndex, meter)
 }
 
+// InputDescriptorHashCost returns the metered access cost of the input descriptor
+// hash at inputIndex WITHOUT materializing the hash — the cost-only path for
+// EvalHost.IntrinsicCost (the descriptor_hash cost depends only on the descriptor
+// length, never on the hash value). An out-of-range index is the Either-miss cost.
+// It charges no meter and never runs sha3_256.
+func (c *SimplicityTxContext) InputDescriptorHashCost(inputIndex uint16) (uint64, error) {
+	return descriptorHashCost(c.inputDescriptors, inputIndex)
+}
+
+// OutputDescriptorHashCost is the output-side cost-only accessor (see InputDescriptorHashCost).
+func (c *SimplicityTxContext) OutputDescriptorHashCost(outputIndex uint16) (uint64, error) {
+	return descriptorHashCost(c.outputDescriptors, outputIndex)
+}
+
+func descriptorHashCost(sources []simplicityTxContextDescriptorSource, index uint16) (uint64, error) {
+	if int(index) >= len(sources) {
+		return simplicity.IntrinsicMissCost, nil
+	}
+	return simplicity.DescriptorHashAccessCost(descriptorSourceLen(sources[index]))
+}
+
 func (c *SimplicityTxContext) descriptorHash(sources []simplicityTxContextDescriptorSource, index uint16, meter *SimplicityTxContextMeter) (SimplicityTxContextDescriptorHashResult, error) {
 	if meter == nil {
 		return SimplicityTxContextDescriptorHashResult{}, txerr(TX_ERR_PARSE, "nil simplicity txcontext meter")
