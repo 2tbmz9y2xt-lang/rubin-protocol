@@ -156,13 +156,21 @@ func TestSimplicityLiveGate_Step3SizeBounds(t *testing.T) {
 	assertTxErrCode(t, runSimplicitySeqNoMutate(t, tx, txid, utxos, H, chainID, rot), TX_ERR_SIGHASH_TYPE_INVALID)
 
 	// End-to-end through FULL TX PARSE (no direct-call stub): the relocation means §5.4 parse now
-	// ACCEPTS the oversized envelope, and the production connect path rejects it at §14.3 step 3.
+	// ACCEPTS the oversized PROGRAM, and the production connect path rejects it at §14.3 step 3.
 	prev := hashWithPrefix(0xB0)
 	txBytes := txWithOneInputOneOutputWithWitness(prev, 0, 1, COV_TYPE_P2PK, validP2PKCovenantData(),
 		[]WitnessItem{simplicityAcceptWitnessSig(simplicityEnvelopeSignature(bigProgram, nil, SIGHASH_ALL))})
-	parsedTx, parsedTxid := mustParseTxForUtxo(t, txBytes) // parse must accept the oversized envelope
+	parsedTx, parsedTxid := mustParseTxForUtxo(t, txBytes) // parse must accept the oversized program
 	parseUtxos := map[Outpoint]UtxoEntry{{Txid: prev, Vout: 0}: coreSimplicityAcceptEntry(100)}
 	assertTxErrCode(t, runSimplicitySeqNoMutate(t, parsedTx, parsedTxid, parseUtxos, H, chainID, rot), TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE)
+
+	// Symmetric full-parse case for the ENVELOPE bound: program within bound, an oversized witness
+	// pushes the envelope over MAX_SIMPLICITY_ENVELOPE_BYTES. §5.4 parse must still ACCEPT, and the
+	// production connect path rejects at §14.3 step 3 with ENVELOPE_TOO_LARGE.
+	envBytes := txWithOneInputOneOutputWithWitness(prev, 0, 1, COV_TYPE_P2PK, validP2PKCovenantData(),
+		[]WitnessItem{simplicityAcceptWitnessSig(simplicityEnvelopeSignature(okProgram, bigWitness, SIGHASH_ALL))})
+	parsedEnvTx, parsedEnvTxid := mustParseTxForUtxo(t, envBytes) // parse must accept the oversized envelope
+	assertTxErrCode(t, runSimplicitySeqNoMutate(t, parsedEnvTx, parsedEnvTxid, parseUtxos, H, chainID, rot), TX_ERR_SIMPLICITY_ENVELOPE_TOO_LARGE)
 }
 
 // TestSimplicityLiveGate_EngineErrorMapping (E4 steps 6-7): the engine's ErrBudgetExceeded / ErrRejected
@@ -254,20 +262,24 @@ func TestSimplicityLiveGate_InputGroupCap(t *testing.T) {
 	assertTxErrCode(t, runSimplicityPar(txOverP, txidOverP, utxosOverP, H, chainID, rot), TX_ERR_COVENANT_TYPE_INVALID)
 }
 
-// TestSimplicityLiveGate_FreshMeterPerInput: two CORE_SIMPLICITY inputs both accept — proving the
-// per-input meter is fresh (budgets are not shared; a shared meter would let the second input inherit
-// the first's spent cost). The two inputs share the accept CMR (a 2-member group, well under the cap).
-func TestSimplicityLiveGate_FreshMeterPerInput(t *testing.T) {
+// TestSimplicityLiveGate_PerInputFreshHost: two CORE_SIMPLICITY inputs sharing the accept CMR (a
+// 2-member group under the cap) each evaluate under their OWN freshly built EvalHost — the dispatch
+// constructs a per-input host rather than reusing one. This exercises the per-input host wiring; it
+// does NOT exercise budget-sharing: the only dispatch-decodable programs (accept 0x24 and the sha3
+// jet 0x60) both cost far below MaxExecCost, so a shared vs fresh meter is indistinguishable at this
+// layer. Fresh-meter budget isolation itself is proven at the engine level in
+// simplicity/program_test.go (RUB-598); here we only pin that both inputs are independently accepted.
+func TestSimplicityLiveGate_PerInputFreshHost(t *testing.T) {
 	var chainID [32]byte
 	const H = 1
 	rot := activeSimplicityRotation(chainID, H)
 	sig := simplicityEnvelopeSignature([]byte{0x24}, nil, SIGHASH_ALL)
 
-	// Two inputs, same accept CMR (a 2-member group, under the cap): both must evaluate to accept
-	// under their own fresh meter.
+	// Two inputs, same accept CMR (a 2-member group, under the cap): each must evaluate to accept
+	// under its own freshly built per-input host.
 	tx, txid, utxos := simplicityLiveTx(2, sig)
 	if err := runSimplicitySeq(tx, txid, utxos, H, chainID, rot); err != nil {
-		t.Fatalf("two-input fresh-meter accept rejected: %v", err)
+		t.Fatalf("two-input per-input-host accept rejected: %v", err)
 	}
 }
 
