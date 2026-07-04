@@ -43,10 +43,10 @@ func validateCoreSimplicitySpendAtHeight(v coreSimplicitySpendValidation) error 
 }
 
 // buildSimplicityStep3dContext performs §2.4 step 3d EAGERLY (every dispatch path runs it after input
-// resolution, before the spend loop): no-op when no CORE_SIMPLICITY input; else the §23.2.4 deployment
-// MUST be ACTIVE first (inactive → 0x0106 is an unknown covenant, rejected at the step-3 covenant check
-// before step 3d), then the single per-tx context is built with the same-CMR input group cap. Running it
-// before the loop makes a group-cap rejection precede every §14.3 and lower-wire-index spend error (the spec forbids lazy per-program construction — "NOT a conforming implementation of the error order").
+// resolution, before the spend loop): no-op when no CORE_SIMPLICITY input; else the §23.2.4 activation
+// gate is enforced HERE at step-3d entry (checkSpendCovenant accepts CORE_SIMPLICITY at step 3), before
+// the group cap — so an inactive deployment rejects ahead of the cap and every §14.3/lower-wire-index
+// spend error. Lazy per-program construction is forbidden ("NOT a conforming implementation of the error order").
 func buildSimplicityStep3dContext(tx *Tx, resolvedInputs []UtxoEntry, height uint64, chainID [32]byte, rotation RotationProvider) (*SimplicityTxContext, error) {
 	hasSimplicity := false
 	for _, e := range resolvedInputs {
