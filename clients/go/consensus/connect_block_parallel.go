@@ -355,6 +355,13 @@ func applyNonCoinbaseTxBasicWorkQ(
 		work[k] = v
 	}
 
+	// §2.4 step 3d (see buildSimplicityStep3dContext): eager group cap after input resolution, before
+	// the spend loop.
+	simplicityCtx, err := buildSimplicityStep3dContext(tx, resolvedInputs, height, chainID, rotation)
+	if err != nil {
+		return nil, 0, err
+	}
+
 	for inputIndex, entry := range resolvedInputs {
 		assigned := resolvedWitness[inputIndex]
 		switch entry.CovenantType {
@@ -431,16 +438,15 @@ func applyNonCoinbaseTxBasicWorkQ(
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_SIMPLICITY witness_slots must be 1")
 			}
 			if err := validateCoreSimplicitySpendAtHeight(coreSimplicitySpendValidation{
-				entry:          entry,
-				witness:        assigned[0],
-				tx:             tx,
-				inputIndex:     uint32(inputIndex),
-				inputValue:     entry.Value,
-				chainID:        chainID,
-				blockHeight:    height,
-				cache:          sighashCache,
-				rotation:       rotation,
-				resolvedInputs: resolvedInputs,
+				entry:       entry,
+				witness:     assigned[0],
+				tx:          tx,
+				inputIndex:  uint32(inputIndex),
+				inputValue:  entry.Value,
+				chainID:     chainID,
+				blockHeight: height,
+				cache:       sighashCache,
+				txContext:   simplicityCtx,
 			}); err != nil {
 				return nil, 0, err
 			}

@@ -2,51 +2,30 @@ package consensus
 
 import "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus/simplicity"
 
-// This file holds the RUB-615 CORE_SIMPLICITY live-spend evaluation: the shared per-input helper
-// wired into all four production dispatch paths, and the §14.3 steps 1-7 validator it calls. The
-// §23.2.4 deployment surface + covenant-data parsing live in simplicity_covenant.go.
+// This file holds the RUB-615 CORE_SIMPLICITY live-spend evaluation: the §2.4 step-3d context build,
+// the per-input dispatch helper, and the §14.3 steps 1-7 validator (deployment/parse in simplicity_covenant.go).
 
-// coreSimplicitySpendValidation carries everything a §14.3 CORE_SIMPLICITY live spend needs at any
-// dispatch path (sequential / queued / parallel worker / precompute), mirroring
-// coreStealthSpendValidation. resolvedInputs is the WHOLE tx's resolved input set: SimplicityTxContext
-// needs the full input and output views (same-CMR group, indexed IO, descriptor-hash), not just this
-// input's entry.
+// coreSimplicitySpendValidation carries what a §14.3 CORE_SIMPLICITY spend needs at any dispatch path.
+// txContext is the ONE immutable per-tx SimplicityTxContext built EAGERLY at §2.4 step 3d by the caller
+// (group cap already enforced); per-input validation only threads it into the §14.3 walk.
 type coreSimplicitySpendValidation struct {
-	entry          UtxoEntry
-	witness        WitnessItem
-	tx             *Tx
-	inputIndex     uint32
-	inputValue     uint64
-	chainID        [32]byte
-	blockHeight    uint64
-	cache          *SighashV1PrehashCache
-	rotation       RotationProvider
-	resolvedInputs []UtxoEntry
+	entry       UtxoEntry
+	witness     WitnessItem
+	tx          *Tx
+	inputIndex  uint32
+	inputValue  uint64
+	chainID     [32]byte
+	blockHeight uint64
+	cache       *SighashV1PrehashCache
+	txContext   *SimplicityTxContext
 }
 
-// validateCoreSimplicitySpendAtHeight runs the §23.2.4 activation gate then §14.3 steps 1-7 for one
-// CORE_SIMPLICITY input. Fail-closed: unless the verified deployment surface is active at height the
-// spend is REJECTED, never evaluated. On active it computes digest32 EAGERLY (reusing the existing
-// SighashV1DigestWithType path — NOT a new digest) and threads it + a per-tx SimplicityTxContext into
-// the RUB-614 host adapter (which builds a FRESH per-input meter).
-//
-// Ordering note: step 1 (suite_id != 0xF0 → TX_ERR_SIG_ALG_INVALID) is applied via
-// parseCoreSimplicityWitnessEnvelope BEFORE step 2 (trailing sighash byte → TX_ERR_SIGHASH_TYPE_INVALID)
-// via extractCryptoSigAndSighash, so a witness violating both surfaces step 1 first. validateCoreSimplicitySpend
-// re-walks steps 1-7 with the eager digest; the pre-parse here only orders the digest's step-2 dependency.
+// validateCoreSimplicitySpendAtHeight runs §14.3 steps 1-7 for one CORE_SIMPLICITY input. The §23.2.4
+// activation gate and the §2.4 step-3d group cap were already enforced EAGERLY by the caller
+// (buildSimplicityStep3dContext), so this runs only for an active deployment. It computes digest32
+// eagerly (reusing SighashV1DigestWithType — NOT a new digest) and threads it + the pre-built per-tx
+// SimplicityTxContext into the RUB-614 host adapter (FRESH per-input meter); step 1 (suite_id) before step 2 (sighash byte).
 func validateCoreSimplicitySpendAtHeight(v coreSimplicitySpendValidation) error {
-	if err := validateCoreSimplicityDeploymentActive(v.chainID, v.blockHeight, simplicityDeploymentFromRotation(v.rotation)); err != nil {
-		return err
-	}
-	// EAGER §2.4 step-3d context construction (STATE_MACHINE §3.4, BINDING): the input-side same-CMR
-	// group cap fires HERE — before any per-input §14.3 error (steps 1-7) — so a group-cap rejection
-	// deterministically precedes a lower-wire-index input's sighash/decode error, matching the spec
-	// order. Building the context before parse also makes it the single §14.3 pre-step (the trivial
-	// provider below just hands the already-built context to the shared step-1..7 validator).
-	ctx, err := BuildSimplicityTxContext(v.tx, v.resolvedInputs, v.blockHeight, v.chainID)
-	if err != nil {
-		return err
-	}
 	if _, err := parseCoreSimplicityWitnessEnvelope(v.witness); err != nil {
 		return err
 	}
@@ -59,8 +38,30 @@ func validateCoreSimplicitySpendAtHeight(v coreSimplicitySpendValidation) error 
 		return err
 	}
 	return validateCoreSimplicitySpend(v.entry, v.witness, uint16(v.inputIndex), digest32, func() (*SimplicityTxContext, error) {
-		return ctx, nil
+		return v.txContext, nil
 	})
+}
+
+// buildSimplicityStep3dContext performs §2.4 step 3d EAGERLY (every dispatch path runs it after input
+// resolution, before the spend loop): no-op when no CORE_SIMPLICITY input; else the §23.2.4 deployment
+// MUST be ACTIVE first (inactive → 0x0106 is an unknown covenant, rejected at the step-3 covenant check
+// before step 3d), then the single per-tx context is built with the same-CMR input group cap. Running it
+// before the loop makes a group-cap rejection precede every §14.3 and lower-wire-index spend error (the spec forbids lazy per-program construction — "NOT a conforming implementation of the error order").
+func buildSimplicityStep3dContext(tx *Tx, resolvedInputs []UtxoEntry, height uint64, chainID [32]byte, rotation RotationProvider) (*SimplicityTxContext, error) {
+	hasSimplicity := false
+	for _, e := range resolvedInputs {
+		if e.CovenantType == COV_TYPE_CORE_SIMPLICITY {
+			hasSimplicity = true
+			break
+		}
+	}
+	if !hasSimplicity {
+		return nil, nil
+	}
+	if err := validateCoreSimplicityDeploymentActive(chainID, height, simplicityDeploymentFromRotation(rotation)); err != nil {
+		return nil, err
+	}
+	return BuildSimplicityTxContext(tx, resolvedInputs, height, chainID)
 }
 
 // simplicitySpendDigest computes the eager §12.2 sighash digest for a CORE_SIMPLICITY input, using the
@@ -72,12 +73,9 @@ func simplicitySpendDigest(cache *SighashV1PrehashCache, tx *Tx, inputIndex uint
 	return SighashV1DigestWithType(tx, inputIndex, inputValue, chainID, sighashType)
 }
 
-// validateCoreSimplicitySpend runs §14.3 steps 1-7 for one CORE_SIMPLICITY input: envelope/suite
-// (step 1), sighash byte (step 2), the relocated size bounds (step 3), decode against the covenant
-// program_cmr (step 4), then evaluate under the RUB-614 EvalHost bound to the built tx context and
-// this input's eager digest32/sighash_type (steps 5-7). inputIdx/digest32 are supplied by the caller
-// (digest32 via SighashV1DigestWithType). LIVE behind the activation gate: validateCoreSimplicitySpendAtHeight
-// calls this only after validateCoreSimplicityDeploymentActive reports the §23.2.4 surface active.
+// validateCoreSimplicitySpend runs §14.3 steps 1-7 for one CORE_SIMPLICITY input: envelope/suite (1),
+// sighash byte (2), relocated size bounds (3), decode vs the covenant program_cmr (4), then evaluate
+// under the RUB-614 EvalHost with the eager digest32/sighash_type (5-7). Runs only behind the gate.
 func validateCoreSimplicitySpend(entry UtxoEntry, witness WitnessItem, inputIdx uint16, digest32 [32]byte, txContext simplicityTxContextProvider) error {
 	envelope, err := parseCoreSimplicityWitnessEnvelope(witness)
 	if err != nil {
@@ -87,10 +85,8 @@ func validateCoreSimplicitySpend(entry UtxoEntry, witness WitnessItem, inputIdx 
 	if err != nil {
 		return err
 	}
-	// §14.3 step 3: policy size bounds, RELOCATED here from §5.4 parse (RUB-615). Program bound is
-	// applied first, then envelope, per the spec's listed order — so a dual-violation surfaces
-	// PROGRAM_TOO_LARGE. envelope bytes == crypto_sig == signature[:len-1] (the §12 sighash byte
-	// is excluded); parse already guaranteed len(signature) >= 2, so len-1 >= 1.
+	// §14.3 step 3: policy size bounds RELOCATED from §5.4 parse (RUB-615), program-first then envelope
+	// (dual-violation -> PROGRAM_TOO_LARGE). envelope bytes = signature[:len-1] (sighash byte excluded).
 	if len(envelope.program) > MAX_SIMPLICITY_PROGRAM_BYTES {
 		return txerr(TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE, "CORE_SIMPLICITY program too large")
 	}
@@ -111,9 +107,7 @@ func validateCoreSimplicitySpend(entry UtxoEntry, witness WitnessItem, inputIdx 
 	return evaluateCoreSimplicityProgram(program, inputIdx, digest32, sighashType, txContext)
 }
 
-// evaluateCoreSimplicityProgram runs §14.3 steps 5-7 for a decoded program: resolve the tx context,
-// build the FRESH per-input host, and evaluate. The context is resolved only after decode so a
-// decode/cmr failure surfaces without one.
+// evaluateCoreSimplicityProgram runs §14.3 steps 5-7: resolve the step-3d context, build the FRESH per-input host, evaluate.
 func evaluateCoreSimplicityProgram(program simplicity.Program, inputIdx uint16, digest32 [32]byte, sighashType uint8, txContext simplicityTxContextProvider) error {
 	ctx, err := resolveSimplicityTxContext(txContext)
 	if err != nil {

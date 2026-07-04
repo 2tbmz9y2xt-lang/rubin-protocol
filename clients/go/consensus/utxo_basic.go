@@ -48,6 +48,13 @@ func (ctx *nonCoinbaseApplyContext) applyPreOutputPhases() error {
 	if err := ctx.resolveInputs(); err != nil {
 		return err
 	}
+	// §2.4 step 3d (see buildSimplicityStep3dContext): eager group cap after input resolution, before
+	// the spend loop.
+	simplicityCtx, err := buildSimplicityStep3dContext(ctx.tx, ctx.resolvedEntries(), ctx.height, ctx.chainID, ctx.rotation)
+	if err != nil {
+		return err
+	}
+	ctx.simplicityCtx = simplicityCtx
 	return ctx.validateInputSpends()
 }
 
@@ -353,16 +360,15 @@ func (ctx *nonCoinbaseApplyContext) validateCoreSimplicityInput(inputIndex int, 
 		return txerr(TX_ERR_PARSE, "CORE_SIMPLICITY witness_slots must be 1")
 	}
 	return validateCoreSimplicitySpendAtHeight(coreSimplicitySpendValidation{
-		entry:          entry,
-		witness:        assigned[0],
-		tx:             ctx.tx,
-		inputIndex:     uint32(inputIndex),
-		inputValue:     entry.Value,
-		chainID:        ctx.chainID,
-		blockHeight:    ctx.height,
-		cache:          ctx.sighashCache,
-		rotation:       ctx.rotation,
-		resolvedInputs: ctx.resolvedEntries(),
+		entry:       entry,
+		witness:     assigned[0],
+		tx:          ctx.tx,
+		inputIndex:  uint32(inputIndex),
+		inputValue:  entry.Value,
+		chainID:     ctx.chainID,
+		blockHeight: ctx.height,
+		cache:       ctx.sighashCache,
+		txContext:   ctx.simplicityCtx,
 	})
 }
 

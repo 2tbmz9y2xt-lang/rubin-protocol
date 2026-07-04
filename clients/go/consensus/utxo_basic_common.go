@@ -185,17 +185,18 @@ func u128ToU64(x u128) (uint64, error) {
 }
 
 type nonCoinbaseApplyContext struct {
-	tx           *Tx
-	txid         [32]byte
-	work         map[Outpoint]UtxoEntry
-	chainID      [32]byte
-	rotation     RotationProvider
-	registry     *SuiteRegistry
-	sighashCache *SighashV1PrehashCache
-	resolved     []nonCoinbaseResolvedInput
-	spend        nonCoinbaseSpendState
-	sumOut       u128
-	height       uint64
-	blockMTP     uint64
-	createsVault bool
+	tx            *Tx
+	txid          [32]byte
+	work          map[Outpoint]UtxoEntry
+	chainID       [32]byte
+	rotation      RotationProvider
+	registry      *SuiteRegistry
+	sighashCache  *SighashV1PrehashCache
+	resolved      []nonCoinbaseResolvedInput
+	simplicityCtx *SimplicityTxContext
+	spend         nonCoinbaseSpendState
+	sumOut        u128
+	height        uint64
+	blockMTP      uint64
+	createsVault  bool
 }

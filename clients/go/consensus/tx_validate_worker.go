@@ -26,14 +26,16 @@ type TxValidationResult struct {
 }
 
 type txValidationWorkerEnv struct {
-	chainID        [32]byte
-	blockHeight    uint64
-	blockMTP       uint64
-	sighashCache   *SighashV1PrehashCache
-	sigQueue       *SigCheckQueue
-	rotation       RotationProvider
-	registry       *SuiteRegistry
-	resolvedInputs []UtxoEntry
+	chainID      [32]byte
+	blockHeight  uint64
+	blockMTP     uint64
+	sighashCache *SighashV1PrehashCache
+	sigQueue     *SigCheckQueue
+	rotation     RotationProvider
+	registry     *SuiteRegistry
+	// simplicityCtx is the §2.4 step-3d per-tx SimplicityTxContext, built EAGERLY in
+	// validateTxLocalInputs before the per-input loop so the group cap precedes every spend error.
+	simplicityCtx *SimplicityTxContext
 }
 
 type txInputSpendCheck struct {
@@ -101,18 +103,24 @@ func newTxValidationWorkerEnv(
 	// paths thread a real rotation. Plumbing an active rotation into this worker pool is deferred to
 	// whenever it is wired live (a no-deployment default keeps it consistently reject-only until then).
 	return txValidationWorkerEnv{
-		chainID:        chainID,
-		blockHeight:    blockHeight,
-		blockMTP:       blockMTP,
-		sighashCache:   tvc.SighashCache,
-		sigQueue:       sigQueue,
-		rotation:       DefaultRotationProvider{},
-		registry:       registry,
-		resolvedInputs: tvc.ResolvedInputs,
+		chainID:      chainID,
+		blockHeight:  blockHeight,
+		blockMTP:     blockMTP,
+		sighashCache: tvc.SighashCache,
+		sigQueue:     sigQueue,
+		rotation:     DefaultRotationProvider{},
+		registry:     registry,
 	}
 }
 
 func validateTxLocalInputs(tvc TxValidationContext, tx *Tx, env txValidationWorkerEnv) error {
+	// §2.4 step 3d (see buildSimplicityStep3dContext): eager group cap after input resolution, before
+	// the per-input spend loop.
+	simplicityCtx, err := buildSimplicityStep3dContext(tx, tvc.ResolvedInputs, env.blockHeight, env.chainID, env.rotation)
+	if err != nil {
+		return err
+	}
+	env.simplicityCtx = simplicityCtx
 	witnessCursor := tvc.WitnessStart
 	for inputIndex, entry := range tvc.ResolvedInputs {
 		assigned, slots, err := assignedWorkerWitness(tx, tvc, entry, witnessCursor)
@@ -243,16 +251,15 @@ func validateCoreSimplicityInputSpendQ(check txInputSpendCheck, env txValidation
 		return txerr(TX_ERR_PARSE, "CORE_SIMPLICITY witness_slots must be 1")
 	}
 	return validateCoreSimplicitySpendAtHeight(coreSimplicitySpendValidation{
-		entry:          check.entry,
-		witness:        check.assigned[0],
-		tx:             check.tx,
-		inputIndex:     check.inputIndex,
-		inputValue:     check.inputValue,
-		chainID:        env.chainID,
-		blockHeight:    env.blockHeight,
-		cache:          env.sighashCache,
-		rotation:       env.rotation,
-		resolvedInputs: env.resolvedInputs,
+		entry:       check.entry,
+		witness:     check.assigned[0],
+		tx:          check.tx,
+		inputIndex:  check.inputIndex,
+		inputValue:  check.inputValue,
+		chainID:     env.chainID,
+		blockHeight: env.blockHeight,
+		cache:       env.sighashCache,
+		txContext:   env.simplicityCtx,
 	})
 }
 
