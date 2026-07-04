@@ -193,7 +193,7 @@ func populateSimplicityTxContextInputViews(ctx *SimplicityTxContext, resolvedInp
 		if entry.CovenantType != COV_TYPE_CORE_SIMPLICITY {
 			continue
 		}
-		programCMR, state, err := parseCoreSimplicityCovenantData(entry.Value, entry.CovenantData)
+		programCMR, state, err := splitCoreSimplicityCovenantData(entry.CovenantData)
 		if err != nil {
 			return err
 		}
@@ -228,7 +228,7 @@ func populateSimplicityTxContextOutputViews(ctx *SimplicityTxContext, outputs []
 		if out.CovenantType != COV_TYPE_CORE_SIMPLICITY {
 			continue
 		}
-		programCMR, state, err := parseCoreSimplicityCovenantData(out.Value, out.CovenantData)
+		programCMR, state, err := splitCoreSimplicityCovenantData(out.CovenantData)
 		if err != nil {
 			return err
 		}
@@ -238,6 +238,49 @@ func populateSimplicityTxContextOutputViews(ctx *SimplicityTxContext, outputs []
 		})
 	}
 	return nil
+}
+
+// splitCoreSimplicityCovenantData performs the §2.4 step-3d byte-copy split of a
+// CORE_SIMPLICITY covenant_data snapshot into (program_cmr, state): program_cmr =
+// the first 32 bytes; state = the bytes after the CompactSize length prefix, with
+// the prefix STRIPPED (matching the Section 3.4 state_bytes definition). The
+// snapshot is trusted — for resolved inputs by their creation-time §14 validation,
+// for outputs by the step-2 §14 structural validation that precedes step 3d — so the
+// split is byte-copies only and MUST NOT re-impose the value>0 / state_len-bound /
+// total-length checks (those are creation-time §14 concerns, not step 3d; see
+// RUBIN_CONSENSUS_STATE_MACHINE.md §2.4 step 3d "It MUST NOT re-parse covenant_data").
+// The spec's "the split cannot fail" holds for those well-formed snapshots; the length
+// guards here are a defensive no-panic boundary (validity-path code must return a typed
+// error, never panic) for the structurally impossible malformed case, not a re-validation
+// of the §14 checks. They do not re-parse.
+func splitCoreSimplicityCovenantData(covenantData []byte) ([32]byte, []byte, error) {
+	var programCMR [32]byte
+	if len(covenantData) < 33 {
+		return programCMR, nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY covenant_data too short for step-3d split")
+	}
+	copy(programCMR[:], covenantData[:32])
+	stateStart := 32 + compactSizePrefixLen(covenantData[32])
+	if len(covenantData) < stateStart {
+		return programCMR, nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY covenant_data too short for step-3d split")
+	}
+	return programCMR, covenantData[stateStart:], nil
+}
+
+// compactSizePrefixLen returns the encoded byte width of a CompactSize length prefix
+// from its tag byte (§ CompactSize encoding): 1 for tag < 0xfd, else 3/5/9 for the
+// 0xfd/0xfe/0xff wide forms. It reads only the tag to strip the prefix; it does not
+// decode or validate the encoded value (that would be a re-parse).
+func compactSizePrefixLen(tag byte) int {
+	switch tag {
+	case 0xff:
+		return 9
+	case 0xfe:
+		return 5
+	case 0xfd:
+		return 3
+	default:
+		return 1
+	}
 }
 
 func buildSimplicityTxContextDAView(tx *Tx) (SimplicityTxContextDAView, error) {

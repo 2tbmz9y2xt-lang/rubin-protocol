@@ -188,22 +188,38 @@ func TestBuildSimplicityTxContext_SameCMRViewProjection(t *testing.T) {
 	}
 }
 
-func TestBuildSimplicityTxContext_InvalidCoreSimplicityOutputFailsClosed(t *testing.T) {
+// TestBuildSimplicityTxContext_Step3dTrustsSnapshotNoReparse pins that §2.4 step-3d
+// context construction (BuildSimplicityTxContext) treats the resolved-input snapshot
+// and the step-2-validated output cache as TRUSTED: it byte-copy splits
+// (program_cmr, state) and does NOT re-impose the value>0 / state_len-bound /
+// total-length §14 checks, so a value=0 CORE_SIMPLICITY output (and a value=0 resolved
+// input) are NOT re-rejected during construction. The value>0 rejection lives at
+// creation-time §14 validation instead — the check step 3d delegates to rather than
+// duplicating, exercised here via ValidateTxCovenantsGenesis under an active deployment
+// (and in TestValidateTxCovenantsGenesis_CoreSimplicityActive).
+func TestBuildSimplicityTxContext_Step3dTrustsSnapshotNoReparse(t *testing.T) {
 	cmr := [32]byte{0: 0xba}
-	tx := &Tx{
-		Version: TX_WIRE_VERSION,
-		Inputs:  []TxInput{{PrevVout: 0}},
-		Outputs: []TxOutput{{Value: 0, CovenantType: COV_TYPE_CORE_SIMPLICITY, CovenantData: makeCoreSimplicityCovenantData(cmr, nil)}},
-	}
+	badOut := TxOutput{Value: 0, CovenantType: COV_TYPE_CORE_SIMPLICITY, CovenantData: makeCoreSimplicityCovenantData(cmr, nil)}
+
+	// Creation-time §14 (active deployment) is where a value=0 CORE_SIMPLICITY output
+	// fails closed — the check step 3d delegates to.
+	active := testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87, simplicityActiveHeight: 10}
+	assertTxErrCodeMsg(t, ValidateTxCovenantsGenesis(&Tx{Outputs: []TxOutput{badOut}}, [32]byte{}, 10, active),
+		TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY value must be > 0")
+
+	// Step 3d trusts the snapshot: with a well-formed CORE_SIMPLICITY input present,
+	// the value=0 output is NOT re-rejected during construction.
+	tx := &Tx{Version: TX_WIRE_VERSION, Inputs: []TxInput{{PrevVout: 0}}, Outputs: []TxOutput{badOut}}
 	resolved := []UtxoEntry{{Value: 1, CovenantType: COV_TYPE_CORE_SIMPLICITY, CovenantData: makeCoreSimplicityCovenantData(cmr, nil)}}
+	if _, err := BuildSimplicityTxContext(tx, resolved, 1, [32]byte{}); err != nil {
+		t.Fatalf("step 3d must trust the value=0 output snapshot (no re-validation), got %v", err)
+	}
 
-	_, err := BuildSimplicityTxContext(tx, resolved, 1, [32]byte{})
-	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY value must be > 0")
-
-	tx.Outputs[0].Value = 1
+	// A value=0 resolved input is likewise trusted at step 3d.
 	resolved[0].Value = 0
-	_, err = BuildSimplicityTxContext(tx, resolved, 1, [32]byte{})
-	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY value must be > 0")
+	if _, err := BuildSimplicityTxContext(tx, resolved, 1, [32]byte{}); err != nil {
+		t.Fatalf("step 3d must trust the value=0 resolved-input snapshot (no re-validation), got %v", err)
+	}
 }
 
 func TestSimplicityTxContextDescriptorHashAccessors(t *testing.T) {
@@ -540,6 +556,49 @@ func TestBuildSimplicityTxContext_MalformedSelfCovenantFailsClosed(t *testing.T)
 	_, err := BuildSimplicityTxContext(tx, resolved, 1, [32]byte{})
 	if err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
 		t.Fatalf("expected malformed CORE_SIMPLICITY covenant error, got %v", err)
+	}
+}
+
+// TestSplitCoreSimplicityCovenantData pins the §2.4 step-3d byte-copy split: program_cmr
+// is the first 32 bytes and state is whatever follows the CompactSize length prefix, with
+// the prefix stripped by its tag-encoded width and WITHOUT decoding/validating the encoded
+// length (byte-copies only, no re-parse). The length guards fail closed on a structurally
+// malformed snapshot without re-imposing the creation-time §14 checks.
+func TestSplitCoreSimplicityCovenantData(t *testing.T) {
+	cmr := [32]byte{0: 0xab, 31: 0xcd}
+
+	// 1-byte CompactSize prefix: prefix stripped, state returned verbatim.
+	oneByte := append(append(append([]byte{}, cmr[:]...), 0x02), 0xaa, 0xbb)
+	if gotCMR, state, err := splitCoreSimplicityCovenantData(oneByte); err != nil || gotCMR != cmr || string(state) != "\xaa\xbb" {
+		t.Fatalf("1-byte prefix split: cmr=%x state=%x err=%v", gotCMR, state, err)
+	}
+
+	// 3-byte (0xfd) prefix: the full prefix is stripped by width without decoding the
+	// encoded length (0x1234 here does not match the 2 trailing bytes, yet the split
+	// still returns them — proving no re-parse).
+	wide := append(append(append([]byte{}, cmr[:]...), 0xfd, 0x34, 0x12), 0xcc, 0xdd)
+	if gotCMR, state, err := splitCoreSimplicityCovenantData(wide); err != nil || gotCMR != cmr || string(state) != "\xcc\xdd" {
+		t.Fatalf("0xfd prefix split: cmr=%x state=%x err=%v", gotCMR, state, err)
+	}
+
+	// Slice-panic guards fail closed without re-validating: too short for cmr+tag, and a
+	// wide tag claiming more prefix bytes than the snapshot carries.
+	if _, _, err := splitCoreSimplicityCovenantData(make([]byte, 10)); err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("too-short snapshot: got %v", err)
+	}
+	shortWide := append(append([]byte{}, cmr[:]...), 0xff)
+	if _, _, err := splitCoreSimplicityCovenantData(shortWide); err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("wide-tag-underflow snapshot: got %v", err)
+	}
+
+	// compactSizePrefixLen strips exactly the encoded CompactSize width for every tag.
+	for _, tc := range []struct {
+		tag  byte
+		want int
+	}{{0x00, 1}, {0xfc, 1}, {0xfd, 3}, {0xfe, 5}, {0xff, 9}} {
+		if got := compactSizePrefixLen(tc.tag); got != tc.want {
+			t.Fatalf("compactSizePrefixLen(%#x)=%d want %d", tc.tag, got, tc.want)
+		}
 	}
 }
 
