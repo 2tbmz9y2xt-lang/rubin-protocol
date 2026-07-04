@@ -438,9 +438,10 @@ func parseSimplicityEnvelopeSignature(sig []byte) (parsedSimplicityEnvelope, err
 		return parsed, txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")
 	}
 	envelope := sig[:len(sig)-1]
-	if len(envelope) > MAX_SIMPLICITY_ENVELOPE_BYTES {
-		return parsed, txerr(TX_ERR_PARSE, "Simplicity envelope too large")
-	}
+	// §5.4 parse keeps ONLY structural rules; the MAX_SIMPLICITY_ENVELOPE_BYTES /
+	// MAX_SIMPLICITY_PROGRAM_BYTES policy bounds are enforced at the §14.3 step-3 spend re-walk
+	// (RUB-615), NOT here. The arch-independence guard below is retained because it is structural:
+	// int(programLenU64) must not truncate on a 32-bit build (a fork if it accepted what 64-bit rejects).
 	version := envelope[0]
 	off := 1
 	if version != 0x01 {
@@ -450,8 +451,8 @@ func parseSimplicityEnvelopeSignature(sig []byte) (parsedSimplicityEnvelope, err
 	if err != nil {
 		return parsed, err
 	}
-	if programLenU64 > MAX_SIMPLICITY_PROGRAM_BYTES {
-		return parsed, txerr(TX_ERR_PARSE, "Simplicity program too large")
+	if programLenU64 > uint64(math.MaxInt) {
+		return parsed, txerr(TX_ERR_PARSE, "Simplicity program_len overflows int")
 	}
 	program, err := readBytes(envelope, &off, int(programLenU64))
 	if err != nil {

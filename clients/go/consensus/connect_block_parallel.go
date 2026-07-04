@@ -325,9 +325,6 @@ func applyNonCoinbaseTxBasicWorkQ(
 			}
 		}
 
-		if entry.CovenantType == COV_TYPE_CORE_SIMPLICITY {
-			return nil, 0, rejectCoreSimplicitySpend()
-		}
 		if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
 			return nil, 0, err
 		}
@@ -350,10 +347,6 @@ func applyNonCoinbaseTxBasicWorkQ(
 	}
 	if witnessCursor != len(tx.Witness) {
 		return nil, 0, txerr(TX_ERR_PARSE, "witness_count mismatch")
-	}
-
-	if err := rejectCoreSimplicitySpendIfPresent(resolvedInputs); err != nil {
-		return nil, 0, err
 	}
 
 	// Clone UTXO set so per-tx mutations (spend/create) don't alias the caller's map.
@@ -431,6 +424,24 @@ func applyNonCoinbaseTxBasicWorkQ(
 				return nil, 0, txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
 			}
 			if err := validateCoreStealthSpendQ(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache, sigQueue, rotation, registry); err != nil {
+				return nil, 0, err
+			}
+		case COV_TYPE_CORE_SIMPLICITY:
+			if len(assigned) != SIMPLICITY_WITNESS_SLOTS {
+				return nil, 0, txerr(TX_ERR_PARSE, "CORE_SIMPLICITY witness_slots must be 1")
+			}
+			if err := validateCoreSimplicitySpendAtHeight(coreSimplicitySpendValidation{
+				entry:          entry,
+				witness:        assigned[0],
+				tx:             tx,
+				inputIndex:     uint32(inputIndex),
+				inputValue:     entry.Value,
+				chainID:        chainID,
+				blockHeight:    height,
+				cache:          sighashCache,
+				rotation:       rotation,
+				resolvedInputs: resolvedInputs,
+			}); err != nil {
 				return nil, 0, err
 			}
 		default:

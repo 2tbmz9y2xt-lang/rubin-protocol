@@ -1088,32 +1088,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicitySpendRejected(t *testing.T) 
 	q := NewSigCheckQueue(1)
 
 	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxoSet, 1, 0, [32]byte{}, q, nil, nil)
-	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-}
-
-func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicityRejectsBeforeWitnessChecks(t *testing.T) {
-	prevTxid := hashWithPrefix(0xEE)
-	utxoSet := map[Outpoint]UtxoEntry{
-		{Txid: prevTxid, Vout: 0}: {
-			Value:        100,
-			CovenantType: COV_TYPE_CORE_SIMPLICITY,
-			CovenantData: encodeSimplicityCovenantData([32]byte{0xee}, nil),
-		},
-	}
-	tx := &Tx{
-		Version: TX_WIRE_VERSION,
-		TxKind:  0x00,
-		TxNonce: 1,
-		Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0}},
-		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
-	}
-	q := NewSigCheckQueue(1)
-
-	work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xed), utxoSet, 1, 0, [32]byte{}, q, nil, nil)
-	if work != nil || fee != 0 || q.Len() != 0 {
-		t.Fatalf("expected no queued mutation/sigs on reject, got work=%v fee=%d sigs=%d", work, fee, q.Len())
-	}
-	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
 }
 
 func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityOutputGroupCapLiveEnforced(t *testing.T) {
@@ -1191,12 +1166,12 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityInputGroupCapDeferredBehind
 		}
 		return err
 	}
-	assertTxErrCodeMsg(t, runSeq(SIMPLICITY_MAX_GROUP_INPUTS, false), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	assertTxErrCodeMsg(t, runSeq(SIMPLICITY_MAX_GROUP_INPUTS+1, true), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	assertTxErrCodeMsg(t, runSeq(SIMPLICITY_MAX_GROUP_INPUTS+1, false), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	assertTxErrCodeMsg(t, runQ(SIMPLICITY_MAX_GROUP_INPUTS, false), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	assertTxErrCodeMsg(t, runQ(SIMPLICITY_MAX_GROUP_INPUTS+1, true), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-	assertTxErrCodeMsg(t, runQ(SIMPLICITY_MAX_GROUP_INPUTS+1, false), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
+	assertTxErrCodeMsg(t, runSeq(SIMPLICITY_MAX_GROUP_INPUTS, false), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
+	assertTxErrCodeMsg(t, runSeq(SIMPLICITY_MAX_GROUP_INPUTS+1, true), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
+	assertTxErrCodeMsg(t, runSeq(SIMPLICITY_MAX_GROUP_INPUTS+1, false), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
+	assertTxErrCodeMsg(t, runQ(SIMPLICITY_MAX_GROUP_INPUTS, false), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
+	assertTxErrCodeMsg(t, runQ(SIMPLICITY_MAX_GROUP_INPUTS+1, true), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
+	assertTxErrCodeMsg(t, runQ(SIMPLICITY_MAX_GROUP_INPUTS+1, false), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
 }
 
 // TestApplyNonCoinbaseTxBasicWorkQ_P2PKSpendQError exercises line 326:

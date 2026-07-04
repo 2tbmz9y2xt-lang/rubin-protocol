@@ -24,19 +24,6 @@ func simplicityDeploymentFromRotation(rotation RotationProvider) SimplicityDeplo
 	return provider
 }
 
-func rejectCoreSimplicitySpend() error {
-	return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY spend evaluation not enabled")
-}
-
-func rejectCoreSimplicitySpendIfPresent(inputs []UtxoEntry) error {
-	for _, input := range inputs {
-		if input.CovenantType == COV_TYPE_CORE_SIMPLICITY {
-			return rejectCoreSimplicitySpend()
-		}
-	}
-	return nil
-}
-
 func parseCoreSimplicityCovenantData(value uint64, covenantData []byte) ([32]byte, []byte, error) {
 	var programCMR [32]byte
 	if value == 0 {
@@ -116,61 +103,6 @@ func parseCoreSimplicityWitnessEnvelope(witness WitnessItem) (parsedSimplicityEn
 		return parsedSimplicityEnvelope{}, txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")
 	}
 	return parseSimplicityEnvelopeSignature(witness.Signature)
-}
-
-// validateCoreSimplicitySpend runs §14.3 steps 4-7 for one CORE_SIMPLICITY input:
-// decode against the covenant program_cmr, then evaluate under the RUB-614 EvalHost
-// bound to the built tx context and this input's eager digest32/sighash_type.
-// inputIdx/digest32 are supplied by the caller (digest32 via SighashV1DigestWithType).
-// NON-LIVE: no production dispatch calls this yet — the RUB-615 gate wires it.
-func validateCoreSimplicitySpend(entry UtxoEntry, witness WitnessItem, inputIdx uint16, digest32 [32]byte, txContext simplicityTxContextProvider) error {
-	envelope, err := parseCoreSimplicityWitnessEnvelope(witness)
-	if err != nil {
-		return err
-	}
-	_, sighashType, err := extractCryptoSigAndSighash(witness)
-	if err != nil {
-		return err
-	}
-	programCMR, _, err := parseCoreSimplicityCovenantData(entry.Value, entry.CovenantData)
-	if err != nil {
-		return err
-	}
-	program, err := simplicity.Decode(envelope.program, envelope.witness, simplicity.DecodeOptions{
-		SemanticsVersion:   simplicity.SemanticsVersion,
-		CovenantProgramCMR: &programCMR,
-	})
-	if err != nil {
-		return simplicityEvalError(err)
-	}
-	// The tx context + host are only needed to EVALUATE (§14.3 steps 5-7), so resolve
-	// them after decode: a decode/cmr failure surfaces without a context.
-	ctx, err := resolveSimplicityTxContext(txContext)
-	if err != nil {
-		return err
-	}
-	host, err := newSimplicityEvalHost(ctx, inputIdx, sighashType, digest32)
-	if err != nil {
-		return err
-	}
-	if _, err := program.Evaluate(simplicity.EvalOptions{Host: host}); err != nil {
-		return simplicityEvalError(err)
-	}
-	return nil
-}
-
-func resolveSimplicityTxContext(txContext simplicityTxContextProvider) (*SimplicityTxContext, error) {
-	if txContext == nil {
-		return nil, txerr(TX_ERR_PARSE, "CORE_SIMPLICITY txcontext missing")
-	}
-	ctx, err := txContext()
-	if err != nil {
-		return nil, err
-	}
-	if ctx == nil {
-		return nil, txerr(TX_ERR_PARSE, "CORE_SIMPLICITY txcontext missing")
-	}
-	return ctx, nil
 }
 
 func simplicityEvalError(err error) error {

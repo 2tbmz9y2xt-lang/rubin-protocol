@@ -266,14 +266,10 @@ func TestParseTx_SimplicityEnvelopeWitnessCanonicalization(t *testing.T) {
 				SIGHASH_ALL,
 			},
 		},
-		{
-			name: "program_too_large",
-			sig:  simplicityEnvelopeSignature(make([]byte, MAX_SIMPLICITY_PROGRAM_BYTES+1), nil, SIGHASH_ALL),
-		},
-		{
-			name: "envelope_too_large",
-			sig:  simplicityEnvelopeSignature(make([]byte, MAX_SIMPLICITY_PROGRAM_BYTES), make([]byte, MAX_SIMPLICITY_ENVELOPE_BYTES), SIGHASH_ALL),
-		},
+		// program_too_large / envelope_too_large were RELOCATED (RUB-615) out of §5.4 parse into the
+		// §14.3 step-3 spend re-walk: a well-formed but oversized envelope now PASSES parse and is
+		// rejected at spend (TestSimplicityLiveGate_Step3SizeBounds). Only structural violations remain
+		// parse-stage TX_ERR_PARSE here.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			expectParseErrCode(t, txWithWitnessSection(witnessSection(SUITE_ID_SIMPLICITY_ENVELOPE, tc.pub, tc.sig)), TX_ERR_PARSE)
