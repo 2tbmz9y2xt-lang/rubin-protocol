@@ -18,6 +18,9 @@ concurrency:
   group: fuzz-nightly-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   fuzz-stage2:
     runs-on: ubuntu-latest

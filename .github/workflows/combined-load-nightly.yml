@@ -9,6 +9,9 @@ concurrency:
   group: combined-load-nightly-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   combined-load:
     runs-on: ubuntu-latest

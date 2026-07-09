@@ -19,6 +19,9 @@ on:
     # Weekly: Wednesday 04:00 UTC — catches regressions from Kani updates.
     - cron: '0 4 * * 3'
 
+permissions:
+  contents: read
+
 jobs:
   kani:
     name: Kani Proof Check
