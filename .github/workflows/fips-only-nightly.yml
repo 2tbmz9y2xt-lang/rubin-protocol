@@ -9,6 +9,9 @@ concurrency:
   group: fips-only-nightly-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   fips-only-smoke:
     runs-on: ubuntu-latest
