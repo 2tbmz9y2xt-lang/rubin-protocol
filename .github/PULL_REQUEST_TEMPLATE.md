@@ -1,4 +1,4 @@
-<!-- Generated projection of rubin-control-plane-private/config/pr-body-profiles.json. -->
+<!-- Control-plane projection with the protocol-required Summary compatibility section. -->
 ## Issue
 - Linear: {{ISSUE}}
 - GitHub Issue mirror (non-authoritative): {{GITHUB_ISSUE}}
