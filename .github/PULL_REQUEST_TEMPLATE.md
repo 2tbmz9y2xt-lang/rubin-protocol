@@ -1,38 +1,25 @@
-## Summary
+<!-- Generated projection of rubin-control-plane-private/config/pr-body-profiles.json. -->
+## Issue
+- Linear: {{ISSUE}}
+- GitHub Issue mirror (non-authoritative): {{GITHUB_ISSUE}}
 
-<!-- What does this PR do? -->
+Refs: {{Q_TOKEN}}
+
+## Invariant
+{{INVARIANT}}
 
 ## Scope
+- Changed files: {{CHANGED_FILES}}
+- Surfaces: {{SURFACES}}
+- Non-scope: {{NON_SCOPE}}
+- Consensus rules unchanged: {{CONSENSUS_UNCHANGED}}
+- SECTION_HASHES.json unchanged: {{SECTION_HASHES_UNCHANGED}}
+- Wire format unchanged: {{WIRE_FORMAT_UNCHANGED}}
 
-- [ ] Documentation-only
-- [ ] Implementation-only change (no consensus change)
-- [ ] Consensus-affecting change (requires explicit process)
+## Validation
+- `cl push`: {{VERDICT}} for HEAD {{HEAD}}
+- Focused checks: {{FOCUSED_CHECKS}}
+- Not run / skipped: {{SKIPPED}}
 
-**Consensus boundary (required):**
-
-- Consensus rules unchanged: YES/NO
-- `SECTION_HASHES.json` unchanged: YES/NO
-- Wire format unchanged: YES/NO
-
-## Evidence / Gates
-
-<!-- Required for PV/CORE_EXT/consensus-sensitive areas -->
-
-- CI links:
-  - test:
-  - coverage:
-  - policy/validator:
-- Conformance:
-  - `run_cv_bundle.py`:
-- Replay / determinism:
-  - seq vs par equality (verdict/error/digests):
-
-## Rollout / Flags (if applicable)
-
-```text
-pv-mode=off|shadow|on
-pv-shadow-max=N
-```
-
-Refs: Q-XXX-YY-ZZ
-
+## Follow-ups / Waivers
+- {{FOLLOW_UPS}}
