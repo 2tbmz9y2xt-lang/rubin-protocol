@@ -63,6 +63,39 @@ func TestNewSyncEngine_ParallelValidationModeParse(t *testing.T) {
 	}
 }
 
+// TestValidateParallelValidationMode pins the validation-only wrapper to
+// the canonical parser's accept set: wrapper and NewSyncEngine must
+// agree on every value, so a nil wrapper result can never precede an
+// engine-side mode-parse rejection (RUB-665 validate-before-mutate).
+func TestValidateParallelValidationMode(t *testing.T) {
+	for _, mode := range []string{"", "off", "shadow", "on", "OFF", "Shadow", " on ", "\toff\n"} {
+		if err := ValidateParallelValidationMode(mode); err != nil {
+			t.Errorf("ValidateParallelValidationMode(%q) = %v, want nil", mode, err)
+			continue
+		}
+		cfg := DefaultSyncConfig(nil, [32]byte{}, "")
+		cfg.ParallelValidationMode = mode
+		if _, err := NewSyncEngine(NewChainState(), nil, cfg); err != nil {
+			t.Errorf("NewSyncEngine rejected %q accepted by wrapper: %v", mode, err)
+		}
+	}
+	for _, mode := range []string{"nope", "of", "offf", "off shadow", "off,on", "0", "-", "øff"} {
+		err := ValidateParallelValidationMode(mode)
+		if err == nil {
+			t.Errorf("ValidateParallelValidationMode(%q) = nil, want error", mode)
+			continue
+		}
+		if !strings.Contains(err.Error(), "invalid parallel_validation_mode") {
+			t.Errorf("ValidateParallelValidationMode(%q) error = %q, want canonical parser text", mode, err)
+		}
+		cfg := DefaultSyncConfig(nil, [32]byte{}, "")
+		cfg.ParallelValidationMode = mode
+		if _, err := NewSyncEngine(NewChainState(), nil, cfg); err == nil {
+			t.Errorf("NewSyncEngine accepted %q rejected by wrapper", mode)
+		}
+	}
+}
+
 func TestPVShadowMismatch_SequentialTruthPreserved(t *testing.T) {
 	target := consensus.POW_LIMIT
 	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, "")
