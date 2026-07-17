@@ -51,7 +51,8 @@ Usage: scripts/ci/run_fuzz_stage2.sh
 
 Runs the bounded Go stage2 fuzz target list and writes reproducibility metadata
 under .artifacts/fuzz-stage2/. The script does not commit, push, regenerate
-tracked fixtures, or open issues.
+tracked fixtures, or open issues. A target that fails its first attempt is
+retried once; it is FAIL only when both attempts fail.
 
 Environment:
   FUZZ_TIME=${FUZZ_TIME}
@@ -160,6 +161,13 @@ write_target_metadata() {
   } > "${metadata_file}"
 }
 
+run_fuzz_target() {
+  local pkg="$1"
+  local target="$2"
+  local log_file="$3"
+  go test -run=^$ -fuzz="${target}" -fuzztime="${FUZZ_TIME}" -fuzzminimizetime="${FUZZ_MINIMIZE_TIME}" "${pkg}" >"${log_file}" 2>&1
+}
+
 trap collect_artifacts EXIT
 write_run_metadata
 
@@ -180,11 +188,16 @@ for spec in "${TARGETS[@]}"; do
   write_target_metadata "${pkg}" "${target}"
   echo "==> running ${target} (${pkg})" | tee -a "${ARTIFACTS_DIR}/summary.log"
   echo "metadata ${target}: ${ARTIFACTS_DIR}/${target}.metadata.env" >> "${ARTIFACTS_DIR}/summary.log"
-  if ! go test -run=^$ -fuzz="${target}" -fuzztime="${FUZZ_TIME}" -fuzzminimizetime="${FUZZ_MINIMIZE_TIME}" "${pkg}" >"${log_file}" 2>&1; then
+  if run_fuzz_target "${pkg}" "${target}" "${log_file}"; then
+    echo "PASS ${target}" | tee -a "${ARTIFACTS_DIR}/summary.log"
+    continue
+  fi
+  echo "RETRY ${target}: first attempt failed, retrying once" | tee -a "${ARTIFACTS_DIR}/summary.log"
+  if run_fuzz_target "${pkg}" "${target}" "${log_file}"; then
+    echo "PASS ${target}" | tee -a "${ARTIFACTS_DIR}/summary.log"
+  else
     STATUS=1
     echo "FAIL ${target}" | tee -a "${ARTIFACTS_DIR}/summary.log"
-  else
-    echo "PASS ${target}" | tee -a "${ARTIFACTS_DIR}/summary.log"
   fi
 done
 

@@ -15,7 +15,7 @@ on:
         default: "60"
 
 concurrency:
-  group: fuzz-nightly-${{ github.ref }}
+  group: fuzz-nightly
   cancel-in-progress: false
 
 permissions:
@@ -25,6 +25,9 @@ jobs:
   fuzz-stage2:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -35,6 +38,7 @@ jobs:
           cache-dependency-path: clients/go/go.mod
 
       - name: Run stage2 fuzz targets (timeboxed)
+        id: fuzz
         env:
           FUZZ_TIME: ${{ github.event.inputs.fuzz_time || '45s' }}
           FUZZ_MINIMIZE_TIME: "5s"
@@ -52,6 +56,36 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Signal red run via pinned issue
+        if: ${{ failure() && steps.fuzz.conclusion == 'failure' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          # Idempotent label create; tolerate "already exists". The
+          # label-filtered lookup then returns only the single pinned issue,
+          # so it can never be truncated out of a newest-N window.
+          gh label create fuzz-nightly-signal --repo "$GITHUB_REPOSITORY" --color BFD4F2 \
+            --description "Pinned fuzz-nightly signal issue" 2>/dev/null || true
+          issue_line="$(gh issue list --repo "$GITHUB_REPOSITORY" --state all --label fuzz-nightly-signal \
+            --json number,title,state \
+            --jq '[.[] | select(.title == "fuzz-nightly red")] | sort_by(.number) | first // empty | "\(.number) \(.state)"')"
+          if [ -z "$issue_line" ]; then
+            issue_number="$(gh issue create --repo "$GITHUB_REPOSITORY" --title "fuzz-nightly red" \
+              --label fuzz-nightly-signal \
+              --body "Pinned signal for red fuzz-nightly runs (a target failed twice). Synced to Linear Triage. Open the run to see which target and why; close after triage." \
+              | sed 's|.*/||')"
+          else
+            issue_number="${issue_line%% *}"
+            if [ "${issue_line##* }" = "CLOSED" ]; then
+              gh issue reopen "$issue_number" --repo "$GITHUB_REPOSITORY"
+            fi
+          fi
+          gh issue comment "$issue_number" --repo "$GITHUB_REPOSITORY" \
+            --body "Red fuzz-nightly run $(date -u +%Y-%m-%dT%H:%M:%SZ). Run: ${run_url}"
 
   fuzz-rust:
     runs-on: ubuntu-latest
