@@ -63,6 +63,23 @@ func parseParallelValidationMode(s string) (parallelValidationMode, error) {
 	}
 }
 
+// ValidateParallelValidationMode reports whether s names a valid
+// parallel-validation mode. It accepts exactly the values the canonical
+// parser used by NewSyncEngine accepts: "off", "shadow", "on"
+// (case-insensitive, surrounding whitespace ignored) plus "" (the
+// documented default, resolving to "off"). Validation-only: it performs
+// no filesystem, chainstate, blockstore, or service side effect, and a
+// nil return guarantees NewSyncEngine cannot later reject the same value
+// on mode parsing. rubin-node startup calls it so an invalid operator
+// mode exits before datadir creation, chainstate load/save, blockstore
+// open, reconcile, the legacy-exposure-scan chainstate read, or any
+// service start (RUB-665). NewSyncEngine keeps its own internal parse as
+// defense in depth for embedded callers.
+func ValidateParallelValidationMode(s string) error {
+	_, err := parseParallelValidationMode(s)
+	return err
+}
+
 type HeaderRequest struct {
 	FromHash [32]byte
 	HasFrom  bool

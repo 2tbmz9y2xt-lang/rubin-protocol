@@ -277,6 +277,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if canonicalNetwork, ok := node.CanonicalNetworkName(cfg.Network); ok {
 		cfg.Network = canonicalNetwork
 	}
+	// pv-mode is untrusted operator input: reject an invalid mode BEFORE
+	// the legacy-exposure-scan branch (its chainstate read below) and
+	// BEFORE the first filesystem mutation (os.MkdirAll below), so the
+	// process exits on an untouched filesystem with no service started.
+	// Everything above this guard is pure parse/normalize over argv.
+	// NewSyncEngine re-parses the same value internally (defense in
+	// depth for embedded callers), so on the normal startup path this
+	// guard only moves that existing rejection earlier. On the
+	// --legacy-exposure-scan path it instead ADDS a new rejection:
+	// exit 2 where the pre-diff code returned 0 with an invalid mode
+	// silently ignored (a contracted operator-visible change).
+	if err := node.ValidateParallelValidationMode(*pvMode); err != nil {
+		_, _ = fmt.Fprintf(stderr, "invalid pv-mode: %v\n", err)
+		return 2
+	}
 	if *legacyExposureScan {
 		var err error
 		watchedSuiteIDs, err = normalizeLegacySuiteIDs([]string(legacySuiteIDs))

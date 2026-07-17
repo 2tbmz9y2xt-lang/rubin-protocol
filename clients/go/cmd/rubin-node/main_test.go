@@ -1038,6 +1038,210 @@ func TestRunRejectsMainnetMisconfigBeforeDataDirCreate(t *testing.T) {
 	}
 }
 
+// TestRunRejectsInvalidPVModeBeforeStorage proves the RUB-665 pv-mode
+// guard fires BEFORE any filesystem or service side effect: datadir
+// creation, chainstate load/save, blockstore open, reconcile, service
+// construction, and the legacy-exposure-scan chainstate read. Invalid
+// legs use otherwise-valid config, so the only guards ahead of the
+// pv-mode guard are pure parse/normalize steps (flag parse,
+// ValidateConfig, NormalizeDataDir, CanonicalNetworkName) — the test
+// cannot pass through an unrelated early rejection. The asymmetric
+// assertions (guard stderr present, storage stderr absent, filesystem
+// untouched, service sentinels silent) prove ordering, not just
+// rejection: on the old ordering pv-mode was parsed only inside
+// NewSyncEngine after MkdirAll+LoadChainState+reconcile+Save (normal
+// path) and silently ignored on the scan path (exit 0), so the clean
+// datadir, snapshot, and scan legs all turn red without the guard.
+func TestRunRejectsInvalidPVModeBeforeStorage(t *testing.T) {
+	const invalidMode = "nope"
+	const wantGuardStderr = `invalid pv-mode: invalid parallel_validation_mode: "nope" (want off|shadow|on)`
+	storageStderr := []string{
+		"datadir create failed",
+		"chainstate load failed",
+		"chainstate reconcile failed",
+		"chainstate save failed",
+		"blockstore open failed",
+	}
+
+	forbidServiceStart := func(t *testing.T) {
+		t.Helper()
+		prevSync, prevMempool, prevP2P, prevMiner := newSyncEngineFn, newMempoolFn, newP2PServiceFn, newMinerFn
+		newSyncEngineFn = func(st *node.ChainState, store *node.BlockStore, cfg node.SyncConfig) (*node.SyncEngine, error) {
+			t.Error("newSyncEngineFn called despite invalid pv-mode")
+			return prevSync(st, store, cfg)
+		}
+		newMempoolFn = func(st *node.ChainState, store *node.BlockStore, chainID [32]byte, cfg node.MempoolConfig) (*node.Mempool, error) {
+			t.Error("newMempoolFn called despite invalid pv-mode")
+			return prevMempool(st, store, chainID, cfg)
+		}
+		newP2PServiceFn = func(cfg p2p.ServiceConfig) (*p2p.Service, error) {
+			t.Error("newP2PServiceFn called despite invalid pv-mode")
+			return prevP2P(cfg)
+		}
+		newMinerFn = func(st *node.ChainState, store *node.BlockStore, engine *node.SyncEngine, cfg node.MinerConfig) (*node.Miner, error) {
+			t.Error("newMinerFn called despite invalid pv-mode")
+			return prevMiner(st, store, engine, cfg)
+		}
+		t.Cleanup(func() {
+			newSyncEngineFn, newMempoolFn, newP2PServiceFn, newMinerFn = prevSync, prevMempool, prevP2P, prevMiner
+		})
+	}
+
+	snapshotDir := func(t *testing.T, root string) map[string]string {
+		t.Helper()
+		snap := make(map[string]string)
+		if err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				snap[path] = "<dir>"
+				return nil
+			}
+			raw, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			snap[path] = string(raw)
+			return nil
+		}); err != nil {
+			t.Fatalf("snapshot %s: %v", root, err)
+		}
+		return snap
+	}
+
+	runInvalid := func(t *testing.T, args []string) (stdout, stderr string) {
+		t.Helper()
+		forbidServiceStart(t)
+		var out, errOut bytes.Buffer
+		code := run(args, &out, &errOut)
+		if code != 2 {
+			t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
+		}
+		if !strings.Contains(errOut.String(), wantGuardStderr) {
+			t.Fatalf("stderr missing pv-mode guard error: %q", errOut.String())
+		}
+		for _, marker := range storageStderr {
+			if strings.Contains(errOut.String(), marker) {
+				t.Fatalf("storage path reached despite invalid pv-mode (%q): %q", marker, errOut.String())
+			}
+		}
+		return out.String(), errOut.String()
+	}
+
+	for _, leg := range []struct {
+		name      string
+		extraArgs []string
+	}{
+		{name: "normal_clean_datadir"},
+		{name: "dry_run_clean_datadir", extraArgs: []string{"--dry-run"}},
+	} {
+		t.Run(leg.name, func(t *testing.T) {
+			datadir := filepath.Join(t.TempDir(), "data")
+			args := append([]string{"--datadir", datadir, "--pv-mode", invalidMode}, leg.extraArgs...)
+			stdout, _ := runInvalid(t, args)
+			if stdout != "" {
+				t.Fatalf("expected empty stdout, got %q", stdout)
+			}
+			if _, err := os.Stat(datadir); !os.IsNotExist(err) {
+				t.Fatalf("datadir must not be created on invalid pv-mode: stat err=%v", err)
+			}
+		})
+	}
+
+	t.Run("preexisting_datadir_byte_identical", func(t *testing.T) {
+		datadir := filepath.Join(t.TempDir(), "data")
+		var out, errOut bytes.Buffer
+		if code := run([]string{"--dry-run", "--datadir", datadir}, &out, &errOut); code != 0 {
+			t.Fatalf("seed dry-run exit code %d (stderr=%q)", code, errOut.String())
+		}
+		before := snapshotDir(t, datadir)
+		stdout, _ := runInvalid(t, []string{"--datadir", datadir, "--pv-mode", invalidMode})
+		if stdout != "" {
+			t.Fatalf("expected empty stdout, got %q", stdout)
+		}
+		if after := snapshotDir(t, datadir); !reflect.DeepEqual(before, after) {
+			t.Fatalf("pre-existing datadir mutated on invalid pv-mode:\nbefore=%v\nafter=%v", before, after)
+		}
+	})
+
+	t.Run("legacy_exposure_scan_tipped_chainstate", func(t *testing.T) {
+		datadir := t.TempDir()
+		if err := testLegacyExposureTippedChainState().Save(node.ChainStatePath(datadir)); err != nil {
+			t.Fatalf("Save(chainstate): %v", err)
+		}
+		before := snapshotDir(t, datadir)
+		stdout, stderr := runInvalid(t, []string{
+			"--datadir", datadir,
+			"--legacy-exposure-scan",
+			"--legacy-suite-id", "1",
+			"--pv-mode", invalidMode,
+		})
+		if stdout != "" {
+			t.Fatalf("scan must not emit a report on invalid pv-mode, stdout=%q", stdout)
+		}
+		if strings.Contains(stderr, "legacy exposure") {
+			t.Fatalf("scan path reached despite invalid pv-mode: %q", stderr)
+		}
+		if after := snapshotDir(t, datadir); !reflect.DeepEqual(before, after) {
+			t.Fatalf("datadir mutated on invalid pv-mode scan leg")
+		}
+	})
+
+	t.Run("legacy_exposure_scan_missing_chainstate", func(t *testing.T) {
+		datadir := filepath.Join(t.TempDir(), "missing")
+		stdout, stderr := runInvalid(t, []string{
+			"--datadir", datadir,
+			"--legacy-exposure-scan",
+			"--legacy-suite-id", "1",
+			"--pv-mode", invalidMode,
+		})
+		if stdout != "" {
+			t.Fatalf("expected empty stdout, got %q", stdout)
+		}
+		if strings.Contains(stderr, "legacy exposure") {
+			t.Fatalf("scan chainstate precondition ran before pv-mode guard: %q", stderr)
+		}
+		if _, err := os.Stat(datadir); !os.IsNotExist(err) {
+			t.Fatalf("datadir must not be created: stat err=%v", err)
+		}
+	})
+
+	// This leg pins the branch-entry ordering: the pv-mode guard must reject before the legacy-exposure-scan branch runs its own config normalization.
+	t.Run("invalid_pv_mode_with_malformed_suite_id_scan", func(t *testing.T) {
+		datadir := filepath.Join(t.TempDir(), "missing")
+		stdout, stderr := runInvalid(t, []string{
+			"--datadir", datadir,
+			"--legacy-exposure-scan",
+			"--legacy-suite-id", "999",
+			"--pv-mode", invalidMode,
+		})
+		if stdout != "" {
+			t.Fatalf("expected empty stdout, got %q", stdout)
+		}
+		if strings.Contains(stderr, "legacy exposure scan config failed") {
+			t.Fatalf("scan branch config normalization ran before pv-mode guard: %q", stderr)
+		}
+		if _, err := os.Stat(datadir); !os.IsNotExist(err) {
+			t.Fatalf("datadir must not be created: stat err=%v", err)
+		}
+	})
+
+	t.Run("valid_modes_preserved", func(t *testing.T) {
+		for _, mode := range []string{"off", "shadow", "on", "", "OFF", " on "} {
+			datadir := filepath.Join(t.TempDir(), "data")
+			var out, errOut bytes.Buffer
+			code := run([]string{"--dry-run", "--datadir", datadir, "--pv-mode", mode}, &out, &errOut)
+			if code != 0 {
+				t.Fatalf("valid pv-mode %q exit code %d (stderr=%q)", mode, code, errOut.String())
+			}
+			if _, err := os.Stat(node.ChainStatePath(datadir)); err != nil {
+				t.Fatalf("valid pv-mode %q: expected chainstate file: %v", mode, err)
+			}
+		}
+	})
+}
+
 func TestRunLegacyExposureScanPropagatesEncodeFailure(t *testing.T) {
 	dir := t.TempDir()
 	if err := testLegacyExposureTippedChainState().Save(node.ChainStatePath(dir)); err != nil {
