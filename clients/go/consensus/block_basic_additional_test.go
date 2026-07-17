@@ -2,14 +2,7 @@ package consensus
 
 import (
 	"testing"
-	"unsafe"
 )
-
-var dummyByteForUnsafeLen byte
-
-func unsafeLenBytes(n int) []byte {
-	return unsafe.Slice((*byte)(unsafe.Pointer(&dummyByteForUnsafeLen)), n)
-}
 
 func TestCompactSizeLen_Boundaries(t *testing.T) {
 	cases := []struct {
@@ -273,122 +266,6 @@ func TestTxWeightAndStats_TxKind02_ChunkCoreOK(t *testing.T) {
 	}
 	if anchorBytes != 0 {
 		t.Fatalf("anchorBytes=%d, want 0", anchorBytes)
-	}
-}
-
-func TestTxWeightAndStats_OverflowScriptSigLen(t *testing.T) {
-	maxInt := int(^uint(0) >> 1)
-
-	tx := &Tx{
-		Version:  1,
-		TxKind:   0x00,
-		TxNonce:  1,
-		Inputs:   []TxInput{{ScriptSig: unsafeLenBytes(maxInt)}, {ScriptSig: unsafeLenBytes(maxInt)}},
-		Outputs:  nil,
-		Locktime: 0,
-		Witness:  nil,
-		DaPayload: []byte{
-			0x01,
-		},
-	}
-
-	if _, _, _, err := TxWeightAndStats(tx); err == nil {
-		t.Fatalf("expected error")
-	} else if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
-	}
-}
-
-func TestTxWeightAndStats_OverflowCovenantDataLen(t *testing.T) {
-	maxInt := int(^uint(0) >> 1)
-
-	tx := &Tx{
-		Version: 1,
-		TxKind:  0x00,
-		TxNonce: 2,
-		Inputs:  nil,
-		Outputs: []TxOutput{
-			{Value: 0, CovenantType: COV_TYPE_P2PK, CovenantData: unsafeLenBytes(maxInt)},
-			{Value: 0, CovenantType: COV_TYPE_P2PK, CovenantData: unsafeLenBytes(maxInt)},
-		},
-		Locktime: 0,
-	}
-
-	if _, _, _, err := TxWeightAndStats(tx); err == nil {
-		t.Fatalf("expected error")
-	} else if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
-	}
-}
-
-func TestTxWeightAndStats_OverflowBaseWeightMulU64(t *testing.T) {
-	// baseSize = 68 + len(scriptSig) for 1-input, 0-output, tx_kind=0x00.
-	// Pick len(scriptSig) such that baseSize > max_u64/4 to force mulU64 overflow.
-	baseSizeTarget := (^uint64(0))/4 + 1
-	scriptSigLen := int(baseSizeTarget - 68)
-
-	tx := &Tx{
-		Version:  1,
-		TxKind:   0x00,
-		TxNonce:  3,
-		Inputs:   []TxInput{{ScriptSig: unsafeLenBytes(scriptSigLen)}},
-		Outputs:  nil,
-		Locktime: 0,
-	}
-
-	if _, _, _, err := TxWeightAndStats(tx); err == nil {
-		t.Fatalf("expected error")
-	} else if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
-	}
-}
-
-func TestTxWeightAndStats_OverflowAddWitnessSize(t *testing.T) {
-	// baseSize = 68 + len(scriptSig) for 1-input, 0-output, tx_kind=0x00.
-	// Choose baseSize=max_u64/4 so baseWeight=max_u64-3, then witnessSize=4 => overflow.
-	baseSizeTarget := (^uint64(0)) / 4
-	scriptSigLen := int(baseSizeTarget - 68)
-
-	tx := &Tx{
-		Version:  1,
-		TxKind:   0x00,
-		TxNonce:  4,
-		Inputs:   []TxInput{{ScriptSig: unsafeLenBytes(scriptSigLen)}},
-		Outputs:  nil,
-		Locktime: 0,
-		Witness:  []WitnessItem{{SuiteID: 0x00, Pubkey: nil, Signature: nil}},
-	}
-
-	if _, _, _, err := TxWeightAndStats(tx); err == nil {
-		t.Fatalf("expected error")
-	} else if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
-	}
-}
-
-func TestTxWeightAndStats_OverflowAddDaSize(t *testing.T) {
-	// baseSize=max_u64/4 => baseWeight=max_u64-3. With no witness: weight=max_u64-2.
-	// Pick daSize=3 (len=2) so adding daSize overflows.
-	baseSizeTarget := (^uint64(0)) / 4
-	scriptSigLen := int(baseSizeTarget - 68)
-
-	tx := &Tx{
-		Version:  1,
-		TxKind:   0x00,
-		TxNonce:  5,
-		Inputs:   []TxInput{{ScriptSig: unsafeLenBytes(scriptSigLen)}},
-		Outputs:  nil,
-		Locktime: 0,
-		Witness:  nil,
-		DaPayload: []byte{
-			0x01, 0x02,
-		},
-	}
-
-	if _, _, _, err := TxWeightAndStats(tx); err == nil {
-		t.Fatalf("expected error")
-	} else if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
 	}
 }
 

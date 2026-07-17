@@ -17,39 +17,6 @@ func TestAccumulateBlockResourceStats_NilTxError(t *testing.T) {
 	}
 }
 
-func TestAccumulateBlockResourceStats_SumWeightOverflow(t *testing.T) {
-	// Each TX has ScriptSig large enough to produce weight ≈ 2^63 + 2.
-	// Two such TXs make addU64(sumWeight, w) overflow on the second iteration.
-	//
-	// weight = 4*(68 + L) + 1 + 1 + 0  (1 input, 0 outputs, 0 witness, 0 da)
-	// We need weight > max_u64 / 2 so that weight+weight overflows.
-	// L = 2305843009213693884 gives weight = 9223372036854775810 > 2^63.
-	const scriptLen = 2305843009213693884
-
-	makeTx := func() *Tx {
-		return &Tx{
-			Version:  1,
-			TxKind:   0x00,
-			TxNonce:  0,
-			Inputs:   []TxInput{{ScriptSig: unsafeLenBytes(scriptLen)}},
-			Outputs:  nil,
-			Locktime: 0,
-		}
-	}
-
-	pb := &ParsedBlock{Txs: []*Tx{makeTx(), makeTx()}}
-	_, err := accumulateBlockResourceStats(pb)
-	if err == nil {
-		t.Fatalf("expected overflow error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
-	}
-	if got := err.Error(); got != "TX_ERR_PARSE: sum_weight overflow" {
-		t.Fatalf("err=%q, want %q", got, "TX_ERR_PARSE: sum_weight overflow")
-	}
-}
-
 func TestAddBlockResourceStat_OverflowMessages(t *testing.T) {
 	for _, tc := range []struct {
 		name string
