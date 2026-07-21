@@ -10,8 +10,5 @@
     "formal:coverage": "python3 tools/check_formal_coverage.py",
     "formal:bridge": "python3 tools/check_formal_refinement_bridge.py",
     "formal:claims-lint": "python3 tools/check_formal_claims_lint.py"
-  },
-  "dependencies": {
-    "marked": "^17.0.3"
   }
 }
