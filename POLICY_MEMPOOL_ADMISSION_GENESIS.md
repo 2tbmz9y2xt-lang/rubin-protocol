@@ -39,8 +39,8 @@ least:
 - any first-reason ordering that affects cross-client behavior.
 
 This document adds genesis policy defaults and protocol-side enforcement
-surfaces: fee floor, dust floor, locktime gate, `CORE_EXT` pre-activation
-gate, DA / anchor anti-abuse gate, and telemetry names.
+surfaces: fee floor, dust floor, locktime gate, DA / anchor anti-abuse gate,
+and telemetry names.
 
 If this file and `spec/RUBIN_MEMPOOL_POLICY.md` conflict on
 ordering, eviction, rolling floor, duplicate checks, or reorg requeue
@@ -232,7 +232,6 @@ CORE_HTLC
 CORE_VAULT
 CORE_MULTISIG
 CORE_STEALTH
-CORE_EXT
 ```
 
 Exempt non-spendable covenant types (dust gate does not apply):
@@ -260,38 +259,7 @@ This is relay-only. Consensus does not assign general transaction-level
 locktime semantics outside the coinbase height commitment and HTLC
 rules.
 
-### Stage F — CORE_EXT Pre-Activation Gate
-
-> **Updated by RUB-585 (2026-06-29):** covenant_type `0x0102` (CORE_EXT) is unassigned per
-> `RUBIN_L1_CANONICAL.md` §14 and is rejected by consensus as `TX_ERR_COVENANT_TYPE_INVALID`
-> at both creation and spend; there is no `ACTIVE` path. This relay gate is now redundant
-> with consensus rejection and is retained as defense in depth.
-
-Reject as non-standard if the transaction creates or spends a
-`CORE_EXT` output (covenant_type `0x0102`). (Historically this gate was conditioned on the
-profile not being `ACTIVE`; post-RUB-585 there is no `ACTIVE` path, so the rejection is
-unconditional.)
-
-Strict mode is ON by default for production nodes.
-
-A node MAY expose an unsafe test-only override, but it MUST:
-
-1. Be disabled by default.
-2. Emit a structured warning event at startup.
-3. Be forbidden in release-profile configuration.
-4. Be excluded from miner templates unless explicitly enabled for
-   controlled tests.
-
-This overlay is consistent with the existing
-`POLICY_CORE_EXT_PREACTIVATION.md` (this repository, root) guardrail
-and is restated here for cross-doc continuity. This overlay does NOT
-authorize or name the runtime implementation owner for the Stage F
-guardrail; per §9 the overlay is policy text only and any concrete
-runtime/implementation work for Stage F remains under whatever
-separate, independently-approved implementation tracks the project may
-already have or may open in the future.
-
-### Stage G — Anchor and DA Anti-Abuse Gate
+### Stage F — Anchor and DA Anti-Abuse Gate
 
 Reject as non-standard if a non-coinbase transaction creates a
 `CORE_ANCHOR` output.
@@ -314,7 +282,6 @@ A policy-compliant miner template MUST exclude:
 - under-fee transactions;
 - dust outputs;
 - non-coinbase `CORE_ANCHOR` outputs;
-- pre-activation `CORE_EXT` creates/spends;
 - DA-carrying transactions that would cause the cumulative DA bytes
   selected into the candidate template to exceed
   `PolicyMaxDaBytesPerBlock`; once that budget is reached, additional
@@ -351,7 +318,6 @@ This rule applies to:
 - HTLC spends;
 - multisig spends;
 - stealth spends;
-- `CORE_EXT` spends.
 
 DA duplicate commits remain governed by the stricter relay rule in
 `spec/RUBIN_COMPACT_BLOCKS.md`: the first-seen commit for a `da_id` is
@@ -400,7 +366,6 @@ rubin_node_mempool_reject_total
 rubin_node_mempool_reject_fee_total
 rubin_node_mempool_reject_dust_total
 rubin_node_mempool_reject_conflict_total
-rubin_node_mempool_reject_core_ext_preactivation_total
 rubin_node_mempool_reject_anchor_nonstandard_total
 rubin_node_mempool_reject_locktime_future_total
 rubin_node_mempool_reject_da_underfee_total
@@ -484,16 +449,15 @@ implementation by itself:
 
 This overlay does NOT itself open a separate "miner template
 enforcement" or "operator config / safety-rail" tracking issue, and it
-does NOT claim a specific implementation owner for Stage F's
-`CORE_EXT` pre-activation guardrail or Stage G's anchor / DA
-anti-abuse guardrail. Those guardrails are recorded in pre-existing
-protocol-side policy documents — `POLICY_CORE_EXT_PREACTIVATION.md`
-and `POLICY_DA_ANCHOR_ANTI_ABUSE.md` (this repository, root) — and
-this overlay restates them only for cross-doc continuity. Any concrete
-runtime/implementation work for Stage F or Stage G remains owned by
-whatever separate, independently-approved implementation tracks the
-project may already have or may open in the future; this overlay does
-not authorize, name, or relax review requirements for that work.
+does NOT claim a specific implementation owner for Stage F's anchor /
+DA anti-abuse guardrail. That guardrail is recorded in the pre-existing
+protocol-side policy document — `POLICY_DA_ANCHOR_ANTI_ABUSE.md` (this
+repository, root) — and this overlay restates it only for cross-doc
+continuity. Any concrete runtime/implementation work for Stage F
+remains owned by whatever separate, independently-approved
+implementation tracks the project may already have or may open in the
+future; this overlay does not authorize, name, or relax review
+requirements for that work.
 
 Each of the issues above remains the canonical owner of its execution
 work and lands in a separate PR. Citing this overlay does not relax
@@ -514,8 +478,6 @@ the review or evidence requirements on those PRs.
 - `POLICY_DA_ANCHOR_ANTI_ABUSE.md` (this repository, root) —
   `PolicyDaSurchargePerByte`, `PolicyMaxDaBytesPerBlock`, non-coinbase
   `CORE_ANCHOR` rule.
-- `POLICY_CORE_EXT_PREACTIVATION.md` (this repository, root) —
-  `CORE_EXT` pre-activation guardrail (consistent with Stage F).
 - `POLICY_STRUCTURED_LOGGING_MINIMUM.md` — minimum structured logging policy
   and mempool event-family taxonomy.
 - `rubin-protocol#1341` — this overlay's tracking issue.
