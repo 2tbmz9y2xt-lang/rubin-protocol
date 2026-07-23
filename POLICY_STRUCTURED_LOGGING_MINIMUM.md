@@ -272,9 +272,9 @@ It must also preserve the standard mempool metric families documented by
 `spec/RUBIN_MEMPOOL_POLICY.md`. Those metrics retain their own bounded-label
 rules; the mempool structured log event names in §5.3 do not redefine them.
 
-## 8. Example Rejection Event
+## 8. Rejection Event Shape
 
-The example below illustrates shape only. It is not evidence that runtime logging
+This section illustrates shape only. It is not evidence that runtime logging
 exists today.
 
 ```json
@@ -283,18 +283,14 @@ exists today.
   "level": "INFO",
   "class": "mempool",
   "event": "mempool.tx_rejected",
-  "message": "transaction rejected by relay policy",
+  "message": "bounded human-readable summary",
   "chain_id": "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
   "best_height": 120,
   "block_hash": null,
   "txid": null,
   "wtxid": null,
   "peer_id": null,
-  "policy_version": 1,
-  "details": {
-    "reason": "CORE_EXT_PREACTIVATION",
-    "consensus_validity_changed": false
-  }
+  "policy_version": 1
 }
 ```
 
