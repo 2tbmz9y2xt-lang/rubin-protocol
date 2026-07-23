@@ -277,6 +277,23 @@ rules; the mempool structured log event names in §5.3 do not redefine them.
 This section illustrates shape only. It is not evidence that runtime logging
 exists today.
 
+```json
+{
+  "timestamp": "2026-04-29T00:00:00Z",
+  "level": "INFO",
+  "class": "mempool",
+  "event": "mempool.tx_rejected",
+  "message": "bounded human-readable summary",
+  "chain_id": "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103",
+  "best_height": 120,
+  "block_hash": null,
+  "txid": null,
+  "wtxid": null,
+  "peer_id": null,
+  "policy_version": 1
+}
+```
+
 ## 9. Review Triggers
 
 Review this policy when:
