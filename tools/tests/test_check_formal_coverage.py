@@ -43,43 +43,22 @@ class ConformanceIndexImportTests(unittest.TestCase):
 
     def test_reachability_ignores_quoted_and_raw_string_imports(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            formal = root / "rubin-formal"
+            root, formal = Path(td), Path(td) / "rubin-formal"
             lean_root = formal / "RubinFormal"
             lean_root.mkdir(parents=True)
-            hidden_modules = (
-                "HiddenOrdinary",
-                "HiddenRaw",
-                "HiddenHashed",
-            )
-            for module in (*hidden_modules, "Live"):
-                (lean_root / f"{module}.lean").write_text("", encoding="utf-8")
+            (lean_root / "Live.lean").touch()
             (formal / "RubinFormal.lean").write_text(
-                'def ordinary := "import RubinFormal.HiddenOrdinary"\n'
-                'def raw := r"import RubinFormal.HiddenRaw"\n'
-                'def hashed := r###"\n'
-                'import RubinFormal.HiddenHashed\n'
-                '"###\n'
+                'def o := "import RubinFormal.HiddenOrdinary"\n'
+                'def r := r"import RubinFormal.HiddenRaw"\n'
+                'def h := r###"\nimport RubinFormal.HiddenHashed\n"###\n'
                 'import RubinFormal.Live\n',
                 encoding="utf-8",
             )
-            doc = {
-                "source_rebind": {
-                    "drop_retired_source_paths": [
-                        *(f"RubinFormal/{module}.lean" for module in hidden_modules),
-                        "RubinFormal/Live.lean",
-                    ]
-                }
-            }
-
+            hidden = [f"RubinFormal/{name}.lean" for name in ("HiddenOrdinary", "HiddenRaw", "HiddenHashed")]
+            doc = {"source_rebind": {"drop_retired_source_paths": [*hidden, "RubinFormal/Live.lean"]}}
             errors = m.validate_retired_source_paths(root, doc)
 
-        self.assertIn("retired source path remains reachable from RubinFormal.lean: RubinFormal/Live.lean", errors)
-        for module in hidden_modules:
-            self.assertNotIn(
-                f"retired source path remains reachable from RubinFormal.lean: RubinFormal/{module}.lean",
-                errors,
-            )
+        self.assertEqual([e for e in errors if "reachable from" in e], ["retired source path remains reachable from RubinFormal.lean: RubinFormal/Live.lean"])
 
 
 class FormalRiskMaturityTests(unittest.TestCase):

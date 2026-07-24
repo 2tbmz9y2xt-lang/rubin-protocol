@@ -154,7 +154,7 @@
       "RubinFormal/WitnessCommitmentPregate.lean": {"disposition":"BYTE_EXACT","source_sha256":"5d523572039be8a7ed6f17c68f2050b480a1792b2bcc523ad416f47afd2ee535","candidate_sha256":"5d523572039be8a7ed6f17c68f2050b480a1792b2bcc523ad416f47afd2ee535"},
       "RubinFormal/WitnessCommitmentV1.lean": {"disposition":"BYTE_EXACT","source_sha256":"b8853ab1eb8f1fe35089b7a9ed0104498e2431766bf24e3823e88c3f6547c866","candidate_sha256":"b8853ab1eb8f1fe35089b7a9ed0104498e2431766bf24e3823e88c3f6547c866"},
       "scripts/check.sh": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"7ee36e514edb40d2182160165b9d43c82acd4aafe3b37a09a2da98fa1edf08a0","candidate_sha256":"b3795268916f36020cd52a31b9321592d83aaa1f2f6deb0bf8e04433f1e82c59"},
-      "tests/test_check_formal_registry_truth.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"6e6550c095f77c9281d64db9d94817777eaed9465a3af3b7d8a6a3c332d824a0","candidate_sha256":"4493c09bb81db184aec005e45a72ba2348179a47904ac0f2048913c51545fa8f"},
+      "tests/test_check_formal_registry_truth.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"6e6550c095f77c9281d64db9d94817777eaed9465a3af3b7d8a6a3c332d824a0","candidate_sha256":"f879322ac28c316f02e62225131a61f70e5ea1224db91233564a68508682fe96"},
       "tests/test_covenant_registry_disposition.py": {"disposition":"BYTE_EXACT","source_sha256":"7fd85a8ed5415d948046c54bb44ec0c5a91b7d90bb3e02aa6f4e9bbe9b37a630","candidate_sha256":"7fd85a8ed5415d948046c54bb44ec0c5a91b7d90bb3e02aa6f4e9bbe9b37a630"},
       "tests/test_integration.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"90cef0cf7dfc542cbe3cd4e5f745d64971352a6a93ec9cf08cd76f076614e01d","candidate_sha256":"dc33402b488e6c15a1fe7f8c3568a63ed17e10fdd7e82853fb5ceb3ba5189818"},
       "tests/test_path_resolution.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"ad32d9edad27a0a0dfff71c9a75ee13b76b4f92c4ff42f691d5e1c8abed33050","candidate_sha256":"96aaf0a25b2dfe01bc60f68cd3e48760ad8f486d13d24fbc8c82a6a3dedb708f"},
@@ -163,7 +163,7 @@
       "tests/test_strip_lean_comments.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"5ec65a9f9dec186017230df464355492ad930143955d3ed9afffd71e0fdc6017","candidate_sha256":"f7076c904203aa4417322cd961c0ce8402ea631b09732aed15230b15dc9b3ab3"},
       "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8ce69c12f3b713f960bed3c04f2f5e400c08b7e6f1896d5e68a1c2ebf8d8b93f"},
       "tools/LOCAL_CODEX_EXEC_REVIEW.md": {"disposition":"BYTE_EXACT","source_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5","candidate_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5"},
-      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"5d80719cd1914adfdca95510b437d94ec13e006791a5e79e787993968e86e300"}
+      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"19262b75f8b6f4c3114a7b599182cd02f7429a3316aa93a370a805a247a7bc1d"}
     }
   },
   "coverage": [

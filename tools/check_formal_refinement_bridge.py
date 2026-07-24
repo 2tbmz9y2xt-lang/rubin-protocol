@@ -53,101 +53,35 @@ def states_bounded_scope(value: object) -> bool:
     return "bounded" in words and "unbounded" not in words
 
 
-def _trace_list_block(live_text: str, list_name: str) -> tuple[int, int] | None:
-    definition_re = re.compile(
-        rf"^\s*def\s+{re.escape(list_name)}\s*:\s*List\b", re.MULTILINE
-    )
-    definitions = list(definition_re.finditer(live_text))
-    if len(definitions) != 1:
-        return None
-    assignment = live_text.find(":=", definitions[0].end())
-    if assignment == -1:
-        return None
-    opening = live_text.find("[", assignment + 2)
-    if opening == -1:
-        return None
-    depth = 0
-    for index in range(opening, len(live_text)):
-        if live_text[index] == "[":
-            depth += 1
-        elif live_text[index] == "]":
-            depth -= 1
-            if depth == 0:
-                return opening, index + 1
-            if depth < 0:
-                return None
-    return None
-
-
-def _trace_record_ranges(live_text: str, block_start: int, block_end: int) -> list[tuple[int, int]] | None:
-    records: list[tuple[int, int]] = []
-    depth = 0
-    record_start: int | None = None
-    for index in range(block_start + 1, block_end - 1):
-        if live_text[index] == "{":
-            if depth == 0:
-                record_start = index
-            depth += 1
-        elif live_text[index] == "}":
-            depth -= 1
-            if depth < 0:
-                return None
-            if depth == 0 and record_start is not None:
-                records.append((record_start, index + 1))
-                record_start = None
-    return records if depth == 0 else None
-
-
-def _ordinary_string_value(source: str, start: int, end: int) -> str | None:
-    if start >= end or source[start] != '"':
-        return None
-    value: list[str] = []
-    index = start + 1
-    while index < end:
-        ch = source[index]
-        if ch == "\\" and index + 1 < end:
-            value.append(source[index + 1])
-            index += 2
-            continue
-        if ch == '"':
-            return "".join(value)
-        value.append(ch)
-        index += 1
-    return None
-
-
-def _live_string_field(source: str, live_text: str, start: int, end: int, field: str) -> str | None:
-    match = re.search(rf"\b{re.escape(field)}\s*:=", live_text[start:end])
-    if match is None:
-        return None
-    value_start = start + match.end()
-    while value_start < end and source[value_start].isspace():
-        value_start += 1
-    return _ordinary_string_value(source, value_start, end)
+def _field(source: str, live: str, start: int, end: int, name: str) -> str | None:
+    match = re.search(r"\b" + re.escape(name) + r"\s*:=", live[start:end])
+    if match is None: return None
+    start += match.end()
+    while start < end and source[start].isspace(): start += 1
+    close = source.find('"', start + 1)
+    return source[start + 1:close] if source[start:start + 1] == '"' and start < close < end else None
 
 
 def trace_ids_for_op(trace_text: str, op: str) -> set[str] | None:
-    list_name = TRACE_LIST_NAME_BY_OP.get(op)
-    if list_name is None:
-        return set()
-    live_text = blank_lean_comments_and_strings(trace_text)
-    block = _trace_list_block(live_text, list_name)
-    if block is None:
-        return None
-    records = _trace_record_ranges(live_text, *block)
-    if records is None:
-        return None
+    name = TRACE_LIST_NAME_BY_OP.get(op)
+    if name is None: return set()
+    live = blank_lean_comments_and_strings(trace_text)
+    definitions = list(re.finditer(r"(?m)^\s*def\s+" + re.escape(name) + r"\s*:\s*List\b", live))
+    if len(definitions) != 1: return None
+    start = live.find("[", definitions[0].end())
+    end = live.find("\n]", start)
+    if start < 0 or end < start: return None
+    block = live[start:end]
+    records = list(re.finditer(r"\{[^{}]*\}", block, re.DOTALL))
+    if "{" in re.sub(r"\{[^{}]*\}", "", block) or "}" in re.sub(r"\{[^{}]*\}", "", block): return None
     ids: set[str] = set()
-    for record_start, record_end in records:
-        identifier = _live_string_field(trace_text, live_text, record_start, record_end, "id")
-        if identifier is None:
-            return None
+    for record in records:
+        left, right = start + record.start(), start + record.end()
+        identifier = _field(trace_text, live, left, right, "id")
+        if identifier is None: return None
         if op == "retarget_v1":
-            record_op = _live_string_field(trace_text, live_text, record_start, record_end, "op")
-            if record_op is None:
-                return None
-            if record_op != "retarget_v1":
-                continue
+            if _field(trace_text, live, left, right, "op") not in {"retarget_v1", None}: continue
+            if _field(trace_text, live, left, right, "op") is None: return None
         ids.add(identifier)
     return ids
 

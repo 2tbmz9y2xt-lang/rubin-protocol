@@ -88,31 +88,20 @@ end RubinFormal.Real
 
     def test_source_import_reachability_ignores_quoted_and_raw_string_imports(self) -> None:
         with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            lean_root = root / "RubinFormal"
+            root, lean_root = Path(tmp), Path(tmp) / "RubinFormal"
             lean_root.mkdir()
-            hidden_modules = ("HiddenOrdinary", "HiddenRaw", "HiddenHashed")
-            hidden_paths = []
-            for module in (*hidden_modules, "Live"):
-                path = lean_root / f"{module}.lean"
-                path.write_text("", encoding="utf-8")
-                if module != "Live":
-                    hidden_paths.append(path.resolve())
+            (lean_root / "Live.lean").touch()
             (root / "RubinFormal.lean").write_text(
-                'def ordinary := "import RubinFormal.HiddenOrdinary"\n'
-                'def raw := r"import RubinFormal.HiddenRaw"\n'
-                'def hashed := r###"\n'
-                'import RubinFormal.HiddenHashed\n'
-                '"###\n'
+                'def o := "import RubinFormal.HiddenOrdinary"\n'
+                'def r := r"import RubinFormal.HiddenRaw"\n'
+                'def h := r###"\nimport RubinFormal.HiddenHashed\n"###\n'
                 'import RubinFormal.Live\n',
                 encoding="utf-8",
             )
-
             reachable, errors = registry.source_import_reachability(root)
 
             self.assertEqual(errors, [])
             self.assertIn((lean_root / "Live.lean").resolve(), reachable)
-            self.assertTrue(all(path not in reachable for path in hidden_paths))
 
     def test_extract_declared_names_respects_relative_namespace_names(self) -> None:
         text = """

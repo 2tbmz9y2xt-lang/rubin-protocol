@@ -84,119 +84,54 @@ def fail(msg: str) -> int:
     return 1
 
 
-def _blank_span(text: str, start: int, end: int, out: list[str]) -> None:
-    out.extend("\n" if ch == "\n" else " " for ch in text[start:end])
-
-
-def _consume_string(text: str, start: int, out: list[str], *, blank: bool) -> int:
-    i = start + 1
-    while i < len(text):
-        ch = text[i]
-        if ch == "\\" and i + 1 < len(text):
-            i += 2
-            continue
-        i += 1
-        if ch == "\"":
-            break
-    if blank:
-        _blank_span(text, start, i, out)
-    else:
-        out.extend(text[start:i])
-    return i
-
-
-def _consume_raw_string(text: str, start: int, out: list[str], *, blank: bool) -> Optional[int]:
-    quote = start + 1
-    while quote < len(text) and text[quote] == "#":
-        quote += 1
-    if quote >= len(text) or text[quote] != '"':
-        return None
-    delimiter = "#" * (quote - start - 1)
-    i = quote + 1
-    while i < len(text):
-        if text[i] == '"' and text.startswith(delimiter, i + 1):
-            i += 1 + len(delimiter)
-            break
-        i += 1
-    if blank:
-        _blank_span(text, start, i, out)
-    else:
-        out.extend(text[start:i])
-    return i
-
-
-def _consume_line_comment(text: str, i: int, out: list[str]) -> int:
-    while i < len(text) and text[i] != "\n":
-        out.append(" ")
-        i += 1
-    if i < len(text):
-        out.append("\n")
-        i += 1
-    return i
-
-
-def _comment_pair_delta(text: str, i: int) -> int:
-    nxt = text[i + 1] if i + 1 < len(text) else ""
-    if text[i] == "/" and nxt == "-":
-        return 1
-    if text[i] == "-" and nxt == "/":
-        return -1
-    return 0
-
-
-def _consume_block_comment(text: str, i: int, out: list[str]) -> int:
-    depth = 1
-    while i < len(text) and depth > 0:
-        delta = _comment_pair_delta(text, i)
-        if delta:
-            out.extend((" ", " "))
-            depth += delta
-            i += 2
-            continue
-        out.append("\n" if text[i] == "\n" else " ")
-        i += 1
-    return i
-
-
-def _strip_lean(text: str, *, blank_strings: bool) -> str:
+def _scan_lean(text: str, *, blank_strings: bool) -> str:
     out: list[str] = []
     i = 0
-
     while i < len(text):
-        ch = text[i]
-        nxt = text[i + 1] if i + 1 < len(text) else ""
-
-        if ch == "r":
-            raw_end = _consume_raw_string(text, i, out, blank=blank_strings)
-            if raw_end is not None:
-                i = raw_end
-                continue
-        if ch == "\"":
-            i = _consume_string(text, i, out, blank=blank_strings)
-            continue
-        if ch == "-" and nxt == "-":
-            out.extend((" ", " "))
-            i = _consume_line_comment(text, i + 2, out)
-            continue
-        if ch == "/" and nxt == "-":
-            out.extend((" ", " "))
-            i = _consume_block_comment(text, i + 2, out)
-            continue
-
-        out.append(ch)
-        i += 1
-
+        start, keep = i, None
+        if text[i] == "r":
+            quote = i + 1
+            while quote < len(text) and text[quote] == "#": quote += 1
+            if quote < len(text) and text[quote] == '"':
+                end = text.find('"' + "#" * (quote - i - 1), quote + 1)
+                i = len(text) if end < 0 else end + quote - i
+                keep = not blank_strings
+        if keep is None and text[i] == '"':
+            i += 1
+            while i < len(text) and text[i] != '"': i += 2 if text[i] == "\\" else 1
+            i += i < len(text)
+            keep = not blank_strings
+        if keep is None and text.startswith("--", i):
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end
+            keep = False
+        if keep is None and text.startswith("/-", i):
+            depth = 1
+            i += 2
+            while i < len(text) and depth:
+                if text.startswith("/-", i):
+                    depth, i = depth + 1, i + 2
+                elif text.startswith("-/", i):
+                    depth, i = depth - 1, i + 2
+                else: i += 1
+            keep = False
+        if keep is None:
+            out.append(text[i]); i += 1
+        elif keep:
+            out.extend(text[start:i])
+        else:
+            out.extend("\n" if ch == "\n" else " " for ch in text[start:i])
     return "".join(out)
 
 
 def strip_lean_comments(text: str) -> str:
     """Blank Lean comments while preserving quoted strings and line positions."""
-    return _strip_lean(text, blank_strings=False)
+    return _scan_lean(text, blank_strings=False)
 
 
 def blank_lean_comments_and_strings(text: str) -> str:
     """Blank Lean comments and quoted/raw strings while preserving line positions."""
-    return _strip_lean(text, blank_strings=True)
+    return _scan_lean(text, blank_strings=True)
 
 
 def source_import_reachability(repo_root: Path) -> tuple[set[Path], list[str]]:

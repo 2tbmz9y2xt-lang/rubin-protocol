@@ -44,34 +44,16 @@ def powOuts : List PowOut := [
         self.assertEqual(m.trace_ids_for_op(trace_text, "retarget_v1"), {"POW-01"})
 
     def test_trace_ids_ignore_commented_and_string_shadow_definitions(self) -> None:
-        trace_text = '''
-/-
-def parseOuts : List ParseOut := [
-  { id := "COMMENT-SHADOW", ok := true }
-]
--/
-def ordinary := "def parseOuts : List ParseOut := []"
-def raw := r###"
-def parseOuts : List ParseOut := [
-  { id := "RAW-SHADOW", ok := true }
-]
-"###
-def parseOuts : List ParseOut := [
-  { id := "PARSE-LIVE", ok := true }
-]
-'''
+        trace_text = ('/- def parseOuts : List ParseOut := [] -/\n'
+                      'def s := "def parseOuts : List ParseOut := []"\n'
+                      'def r := r###"def parseOuts : List ParseOut := []"###\n'
+                      'def parseOuts : List ParseOut := [{ id := "PARSE-LIVE", ok := true }\n]\n')
 
         self.assertEqual(m.trace_ids_for_op(trace_text, "parse_tx"), {"PARSE-LIVE"})
 
     def test_duplicate_live_trace_definitions_fail_closed(self) -> None:
-        trace_text = '''
-def parseOuts : List ParseOut := [
-  { id := "PARSE-01", ok := true }
-]
-def parseOuts : List ParseOut := [
-  { id := "PARSE-02", ok := true }
-]
-'''
+        trace_text = ('def parseOuts : List ParseOut := [{ id := "PARSE-01", ok := true }\n]\n'
+                      'def parseOuts : List ParseOut := [{ id := "PARSE-02", ok := true }\n]\n')
 
         self.assertIsNone(m.trace_ids_for_op(trace_text, "parse_tx"))
         errors = m.trace_binding_errors(

@@ -184,94 +184,55 @@ def fail(msg: str) -> int:
     return 1
 
 
-def _blank_lean_span(source: str, start: int, end: int, out: list[str]) -> None:
-    out.extend("\n" if ch == "\n" else " " for ch in source[start:end])
-
-
-def _consume_lean_string(source: str, start: int, out: list[str], *, blank: bool) -> int:
-    i = start + 1
-    while i < len(source):
-        if source[i] == "\\" and i + 1 < len(source):
-            i += 2
-            continue
-        if source[i] == '"':
-            i += 1
-            break
-        i += 1
-    if blank:
-        _blank_lean_span(source, start, i, out)
-    else:
-        out.extend(source[start:i])
-    return i
-
-
-def _consume_lean_raw_string(source: str, start: int, out: list[str], *, blank: bool) -> int | None:
-    quote = start + 1
-    while quote < len(source) and source[quote] == "#":
-        quote += 1
-    if quote >= len(source) or source[quote] != '"':
-        return None
-    delimiter = "#" * (quote - start - 1)
-    i = quote + 1
-    while i < len(source):
-        if source[i] == '"' and source.startswith(delimiter, i + 1):
-            i += 1 + len(delimiter)
-            break
-        i += 1
-    if blank:
-        _blank_lean_span(source, start, i, out)
-    else:
-        out.extend(source[start:i])
-    return i
-
-
-def _strip_lean(source: str, *, blank_strings: bool) -> str:
+def _scan_lean(source: str, *, blank_strings: bool) -> str:
     out: list[str] = []
     i = 0
     while i < len(source):
+        start, keep = i, None
         if source[i] == "r":
-            raw_end = _consume_lean_raw_string(source, i, out, blank=blank_strings)
-            if raw_end is not None:
-                i = raw_end
-                continue
-        if source[i] == '"':
-            i = _consume_lean_string(source, i, out, blank=blank_strings)
-            continue
-        if source.startswith("--", i):
-            while i < len(source) and source[i] != "\n":
-                out.append(" ")
-                i += 1
-            continue
-        if source.startswith("/-", i):
+            quote = i + 1
+            while quote < len(source) and source[quote] == "#": quote += 1
+            if quote < len(source) and source[quote] == '"':
+                end = source.find('"' + "#" * (quote - i - 1), quote + 1)
+                i = len(source) if end < 0 else end + quote - i
+                keep = not blank_strings
+        if keep is None and source[i] == '"':
+            i += 1
+            while i < len(source) and source[i] != '"': i += 2 if source[i] == "\\" else 1
+            i += i < len(source)
+            keep = not blank_strings
+        if keep is None and source.startswith("--", i):
+            end = source.find("\n", i)
+            i = len(source) if end < 0 else end
+            keep = False
+        if keep is None and source.startswith("/-", i):
             depth = 1
-            out.extend((" ", " "))
             i += 2
             while i < len(source) and depth:
                 if source.startswith("/-", i):
-                    depth += 1
-                    out.extend((" ", " "))
-                    i += 2
+                    depth, i = depth + 1, i + 2
                 elif source.startswith("-/", i):
-                    depth -= 1
-                    out.extend((" ", " "))
-                    i += 2
+                    depth, i = depth - 1, i + 2
                 else:
-                    out.append("\n" if source[i] == "\n" else " ")
                     i += 1
-            continue
-        out.append(source[i])
-        i += 1
+            keep = False
+        if keep is None:
+            out.append(source[i]); i += 1
+        elif keep:
+            out.extend(source[start:i])
+        else:
+            out.extend("\n" if ch == "\n" else " " for ch in source[start:i])
     return "".join(out)
 
 
 def strip_lean_comments(source: str) -> str:
     """Blank Lean comments while preserving quoted strings and line positions."""
-    return _strip_lean(source, blank_strings=False)
+    return _scan_lean(source, blank_strings=False)
 
 
 def blank_lean_comments_and_strings(source: str) -> str:
     """Blank Lean comments and quoted/raw strings while preserving line positions."""
-    return _strip_lean(source, blank_strings=True)
+    return _scan_lean(source, blank_strings=True)
 
 
 def has_canonical_import(source: str, expected_line: str) -> bool:
