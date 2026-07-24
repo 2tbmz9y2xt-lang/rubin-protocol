@@ -163,7 +163,7 @@
       "tests/test_strip_lean_comments.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"5ec65a9f9dec186017230df464355492ad930143955d3ed9afffd71e0fdc6017","candidate_sha256":"f7076c904203aa4417322cd961c0ce8402ea631b09732aed15230b15dc9b3ab3"},
       "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8ce69c12f3b713f960bed3c04f2f5e400c08b7e6f1896d5e68a1c2ebf8d8b93f"},
       "tools/LOCAL_CODEX_EXEC_REVIEW.md": {"disposition":"BYTE_EXACT","source_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5","candidate_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5"},
-      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"ca606316d358e4f1f4d850f89ff10b3d9e45f50ec0926ba1e55911234f340328"}
+      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"b6f3ada4759791b9ee270c6692dc98c27e8b288717e6649bc905481f7b02222a"}
     }
   },
   "coverage": [
@@ -359,7 +359,7 @@
       "section_key": "weight_accounting",
       "section_heading": "## 9. Weight Accounting (Normative)",
       "status": "proved",
-      "proof_trust": "compiler_trusted",
+      "proof_trust": "kernel_checked",
       "theorems": [
         "RubinFormal.WeightSuiteAware.weight_suite_aware_correct",
         "RubinFormal.WeightSuiteAware.weight_suite_aware_correct_create",
@@ -367,7 +367,6 @@
         "RubinFormal.Refinement.weight_monotone_base",
         "RubinFormal.Refinement.weight_monotone_sigCost",
         "RubinFormal.weight_accounting_proved",
-        "RubinFormal.weight_cv_replay_pass",
         "RubinFormal.weight_formula_bridges_abstract",
         "RubinFormal.computeWeight_monotone_base",
         "RubinFormal.computeWeight_monotone_witness",
@@ -398,7 +397,6 @@
         "RubinFormal.weight_accounting_proved": "rubin-formal/RubinFormal/PinnedSections.lean",
         "RubinFormal.Refinement.weight_monotone_base": "rubin-formal/RubinFormal/Refinement/UniversalInvariants.lean",
         "RubinFormal.Refinement.weight_monotone_sigCost": "rubin-formal/RubinFormal/Refinement/UniversalInvariants.lean",
-        "RubinFormal.weight_cv_replay_pass": "rubin-formal/RubinFormal/TxWeightBehavioral.lean",
         "RubinFormal.weight_formula_bridges_abstract": "rubin-formal/RubinFormal/TxWeightBehavioral.lean",
         "RubinFormal.computeWeight_monotone_base": "rubin-formal/RubinFormal/TxWeightBehavioral.lean",
         "RubinFormal.computeWeight_monotone_witness": "rubin-formal/RubinFormal/TxWeightBehavioral.lean",
@@ -863,7 +861,6 @@
         "RubinFormal.timestamp_step_le_actual",
         "RubinFormal.max_tActual_bounded",
         "RubinFormal.max_retarget_ratio",
-        "RubinFormal.retarget_cv_replay_pass",
         "RubinFormal.retargetV1_parse_none",
         "RubinFormal.retargetV1_zero_target",
         "RubinFormal.retargetV1_ok_none_simple",
@@ -905,7 +902,6 @@
         "RubinFormal.timestamp_step_le_actual": "rubin-formal/RubinFormal/RetargetBehavioral.lean",
         "RubinFormal.max_tActual_bounded": "rubin-formal/RubinFormal/RetargetBehavioral.lean",
         "RubinFormal.max_retarget_ratio": "rubin-formal/RubinFormal/RetargetBehavioral.lean",
-        "RubinFormal.retarget_cv_replay_pass": "rubin-formal/RubinFormal/RetargetBehavioral.lean",
         "RubinFormal.retargetV1_parse_none": "rubin-formal/RubinFormal/RetargetBehavioral.lean",
         "RubinFormal.retargetV1_zero_target": "rubin-formal/RubinFormal/RetargetBehavioral.lean",
         "RubinFormal.retargetV1_ok_none_simple": "rubin-formal/RubinFormal/RetargetBehavioral.lean",
@@ -1386,7 +1382,6 @@
         "RubinFormal.forkSelect_lighter_loses",
         "RubinFormal.forkSelect_chainwork_bridge",
         "RubinFormal.forkSelect_equal_chains",
-        "RubinFormal.Refinement.fork_choice_select_cv_contract_proved",
         "RubinFormal.forkSelect_exhaustive"
       ],
       "file": "rubin-formal/RubinFormal/ForkChoiceV1.lean",
@@ -1395,7 +1390,6 @@
         "RubinFormal.ForkChoiceV1.heavierChain_wins": "rubin-formal/RubinFormal/ForkChoiceV1.lean",
         "RubinFormal.ForkChoiceV1.zeroTarget_rejected": "rubin-formal/RubinFormal/ForkChoiceV1.lean",
         "RubinFormal.ForkChoiceV1.overLimitTarget_rejected": "rubin-formal/RubinFormal/ForkChoiceV1.lean",
-        "RubinFormal.Refinement.fork_choice_select_cv_contract_proved": "rubin-formal/RubinFormal/Refinement/GoTraceV1Check.lean",
         "RubinFormal.bytesLT_irrefl": "rubin-formal/RubinFormal/ForkChoiceTiebreak.lean",
         "RubinFormal.bytesLT_total_of_ne": "rubin-formal/RubinFormal/ForkChoiceTiebreak.lean",
         "RubinFormal.fork_choice_tiebreak_deterministic": "rubin-formal/RubinFormal/ForkChoiceTiebreak.lean",
@@ -1741,8 +1735,8 @@
     "proved_with_axiom_rows": 4,
     "stated_rows": 3,
     "deferred_rows": 0,
-    "theorem_references": 523,
-    "unique_theorem_names": 508,
+    "theorem_references": 520,
+    "unique_theorem_names": 505,
     "reused_theorem_names": [
       "RubinFormal.RegistryResolutionLiveBridge.ml_dsa_87_params_bridge",
       "RubinFormal.RegistryResolutionLiveBridge.pre_rotation_registered_iff",

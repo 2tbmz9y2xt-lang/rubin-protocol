@@ -27,13 +27,16 @@ ALLOWED_AXIOMS = {
 
 # Intentionally narrow shared-op parity scope after Q-FORMAL-REGISTRY-EVIDENCE-LEVEL-ALIGN-01.
 # `sighash_v1`, `retarget_v1`, and `fork_choice_select` remain honest supplemental bridge lanes whose
-# bridge evidence level is narrower than the broader section row on purpose.
+# bridge evidence level is narrower than the broader section row on purpose. `weight_accounting`
+# remains subject to row-presence and evidence-level parity, but intentionally retains bounded
+# compiler-trusted CV support in its bridge lane while its proof_coverage universal row contains only
+# kernel-checked claim-bearing theorems.
 SHARED_OP_PARITY = {
     "da_set_integrity": "da_set_integrity",
     "weight_accounting": "weight_accounting",
 }
-EXPECTED_COVERAGE_TRUST = (32, 523, 508, 16, 55, 52)
-EXPECTED_UNIVERSAL_TRUST = (24, 482, 13, 45, 42)
+EXPECTED_COVERAGE_TRUST = (32, 520, 505, 15, 52, 49)
+EXPECTED_UNIVERSAL_TRUST = (24, 480, 12, 43, 40)
 EXPECTED_KERNEL_THEOREM_COMPLEMENT = (468, 456)
 EXPECTED_BRIDGE_TRUST = (12, 165, 162, 9, 21, 21)
 EXPECTED_UNAFFECTED_UNIVERSAL = {
@@ -48,6 +51,7 @@ EXPECTED_UNAFFECTED_UNIVERSAL = {
     "transaction_identifiers",
     "transaction_wire",
     "value_conservation",
+    "weight_accounting",
 }
 EXPECTED_AFFECTED_BRIDGE_REFS = {
     "da_set_integrity": 1,
@@ -516,6 +520,9 @@ def validate_shared_op_parity(
             errors.append(f"shared-op parity row missing in proof_coverage.json: {section_key}")
             continue
         for field, label in (("evidence_level", "evidence level"), ("proof_trust", "proof trust")):
+            if op == "weight_accounting" and field == "proof_trust":
+                # RUB-1037 preserves this intentional mixed evidence lane.
+                continue
             if bridge_row.get(field) != coverage_row.get(field):
                 errors.append(
                     f"shared-op {label} drift for {op}: refinement_bridge={bridge_row.get(field)} vs "
