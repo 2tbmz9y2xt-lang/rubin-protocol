@@ -10,7 +10,7 @@ Lean replay/refinement слой покрывает non-`CV-PV-*` conformance fix
 представленные модулями, импортированными `RubinFormal.Conformance.Index`.
 Runtime/parallel-only `CV-PV-*` gates в этот Lean replay scope не входят.
 
-## Source rebind: 116 original → 102 active (14 standalone `DROP_STALE_SOURCE` retirements; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
+## Source rebind: 116 original → 102 active (4 `DROP_RETIRED_GENERATED_SOURCE` + 3 `DROP_RETIRED_SOURCE` + 7 `DROP_STALE_SOURCE`; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
 
 ## Термины (важно)
 

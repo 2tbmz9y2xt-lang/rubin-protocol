@@ -13,7 +13,7 @@ and which theorems back each claim.
 This policy defines what MUST be registered, what is explicitly excluded,
 and how to evaluate a candidate theorem.
 
-### Imported-source rebind: 116 original → 102 active (14 standalone `DROP_STALE_SOURCE` retirements; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
+### Imported-source rebind: 116 original → 102 active (4 `DROP_RETIRED_GENERATED_SOURCE` + 3 `DROP_RETIRED_SOURCE` + 7 `DROP_STALE_SOURCE`; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
 
 ## 2. Registration Tiers
 

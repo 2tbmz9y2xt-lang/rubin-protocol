@@ -56,12 +56,12 @@ class SourceRebindTests(unittest.TestCase):
 
     def test_rejects_path_set_and_count_drift(self) -> None:
         doc = source_rebind_doc()
-        doc["source_rebind"]["reconcile_current_protocol_paths"].pop()
+        doc["source_rebind"]["drop_retired_generated_source_paths"].pop()
 
         errors = m.validate_source_rebind(doc)
 
-        self.assertTrue(any("reconcile_current_protocol_paths set drift" in error for error in errors))
-        self.assertTrue(any("reconcile_current_protocol_path_count does not match" in error for error in errors))
+        self.assertTrue(any("drop_retired_generated_source_paths set drift" in error for error in errors))
+        self.assertTrue(any("drop_retired_generated_source_path_count does not match" in error for error in errors))
 
     def test_rejects_partition_arithmetic_drift(self) -> None:
         doc = source_rebind_doc()
@@ -101,7 +101,7 @@ class SourceRebindTests(unittest.TestCase):
         keys = (
             "import_adapt_single_owner_path_count",
             "transplant_check_logic_path_count",
-            "original_imported_source_paths",
+            "drop_retired_source_path_count",
             "byte_exact_path_count",
         )
         entrypoints = (

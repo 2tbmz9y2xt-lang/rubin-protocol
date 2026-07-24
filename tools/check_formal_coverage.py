@@ -65,20 +65,21 @@ EXPECTED_SOURCE_REBIND_SCALARS = {
     "inventory_sha256": "77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6",
     "original_imported_source_paths": 116,
     "active_imported_source_paths": 102,
-    "disposition": "DROP_STALE_SOURCE",
     "byte_exact_path_count": 76,
     "reconcile_current_protocol_path_count": 16,
+    "drop_retired_generated_source_path_count": 4, "drop_retired_source_path_count": 3, "drop_stale_source_path_count": 7,
     "import_adapt_single_owner_path_count": 1,
     "transplant_check_logic_path_count": 2,
     "import_package_check_or_test_path_count": 7,
     "active_partition_equation": "76 + 16 + 1 + 2 + 7 = 102",
-    "original_inventory_equation": "102 + 14 = 116",
+    "original_inventory_equation": "102 + 4 + 3 + 7 = 116",
 }
 SOURCE_REBIND_COUNT_KEYS = {
     "original_imported_source_paths",
     "active_imported_source_paths",
     "byte_exact_path_count",
     "reconcile_current_protocol_path_count",
+    "drop_retired_generated_source_path_count", "drop_retired_source_path_count", "drop_stale_source_path_count",
     "import_adapt_single_owner_path_count",
     "transplant_check_logic_path_count",
     "import_package_check_or_test_path_count",
@@ -113,22 +114,9 @@ EXPECTED_SOURCE_REBIND_PATHS = {
         "tests/test_strip_lean_comments.py",
         "tests/test_validation.py",
     },
-    "excluded_stale_source_paths": {
-        "RubinFormal/ConsensusConstantsBehavioral.lean",
-        "RubinFormal/Conformance/CVExtReplay.lean",
-        "RubinFormal/Conformance/CVExtVectors.lean",
-        "RubinFormal/Conformance/CVTxctxReplay.lean",
-        "RubinFormal/Conformance/CVTxctxVectors.lean",
-        "RubinFormal/FormalGap03.lean",
-        "RubinFormal/GovernanceReplayToken.lean",
-        "RubinFormal/CoreExtInvariants.lean",
-        "RubinFormal/NativeExtIndependence.lean",
-        "RubinFormal/TxWireTxPayloadContract.lean",
-        "RubinFormal/TxWireTxWithWitnessContract.lean",
-        "RubinFormal/TxWireTxAfterDaCoreContract.lean",
-        "RubinFormal/TxWireTxBodyContract.lean",
-        "RubinFormal/TxWireTxContract.lean",
-    },
+    "drop_retired_generated_source_paths": {"RubinFormal/Conformance/CVExtVectors.lean", "RubinFormal/Conformance/CVExtReplay.lean", "RubinFormal/Conformance/CVTxctxVectors.lean", "RubinFormal/Conformance/CVTxctxReplay.lean"},
+    "drop_retired_source_paths": {"RubinFormal/CoreExtInvariants.lean", "RubinFormal/NativeExtIndependence.lean", "RubinFormal/GovernanceReplayToken.lean"},
+    "drop_stale_source_paths": {"RubinFormal/ConsensusConstantsBehavioral.lean", "RubinFormal/FormalGap03.lean", "RubinFormal/TxWireTxPayloadContract.lean", "RubinFormal/TxWireTxWithWitnessContract.lean", "RubinFormal/TxWireTxAfterDaCoreContract.lean", "RubinFormal/TxWireTxBodyContract.lean", "RubinFormal/TxWireTxContract.lean"},
     "semantic_theorem_reconciliation_retired_paths": {"RubinFormal/CoreExtRefinement.lean"},
 }
 SOURCE_REBIND_LIST_COUNTS = {
@@ -136,6 +124,7 @@ SOURCE_REBIND_LIST_COUNTS = {
     "import_adapt_single_owner_paths": "import_adapt_single_owner_path_count",
     "transplant_check_logic_paths": "transplant_check_logic_path_count",
     "import_package_check_or_test_paths": "import_package_check_or_test_path_count",
+    "drop_retired_generated_source_paths": "drop_retired_generated_source_path_count", "drop_retired_source_paths": "drop_retired_source_path_count", "drop_stale_source_paths": "drop_stale_source_path_count",
 }
 THEOREM_DECL_RE = re.compile(
     r"^\s*theorem\s+([A-Za-z_][A-Za-z0-9_'?!]*(?:\.[A-Za-z_][A-Za-z0-9_'?!]*)*)(?=\s|$|[:({\[])",
@@ -286,16 +275,16 @@ def validate_source_rebind(doc: dict) -> list[str]:
                 f"active_imported_source_paths={source_rebind.get('active_imported_source_paths')!r}"
             )
 
-    excluded_paths = source_rebind.get("excluded_stale_source_paths")
-    if isinstance(excluded_paths, list):
+    retired_counts = [source_rebind.get(key) for key in ("drop_retired_generated_source_path_count", "drop_retired_source_path_count", "drop_stale_source_path_count")]
+    if all(type(count) is int for count in retired_counts):
         active_total = source_rebind.get("active_imported_source_paths")
         original_total = source_rebind.get("original_imported_source_paths")
         if type(active_total) is int and type(original_total) is int:
-            rebound_total = active_total + len(excluded_paths)
+            rebound_total = active_total + sum(retired_counts)
             if rebound_total != original_total:
                 errors.append(
                     "source_rebind original inventory drift: "
-                    f"{active_total} + {len(excluded_paths)} = {rebound_total}, "
+                    f"{active_total} + {' + '.join(str(count) for count in retired_counts)} = {rebound_total}, "
                     f"original_imported_source_paths={original_total!r}"
                 )
     return errors
@@ -304,7 +293,7 @@ def validate_source_rebind(doc: dict) -> list[str]:
 def validate_retired_source_paths(repo_root: Path, doc: dict) -> list[str]:
     source_rebind = doc.get("source_rebind")
     if not isinstance(source_rebind, dict): return []
-    retired = [path for key in ("excluded_stale_source_paths", "semantic_theorem_reconciliation_retired_paths") for path in source_rebind.get(key, []) if isinstance(path, str)]
+    retired = [path for key in ("drop_retired_generated_source_paths", "drop_retired_source_paths", "drop_stale_source_paths", "semantic_theorem_reconciliation_retired_paths") for path in source_rebind.get(key, []) if isinstance(path, str)]
     formal_root, entrypoint = repo_root / "rubin-formal", repo_root / "rubin-formal" / "RubinFormal.lean"
     if not entrypoint.exists(): return ["RubinFormal.lean missing while checking retired source paths"]
 

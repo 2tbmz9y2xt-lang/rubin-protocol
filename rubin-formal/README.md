@@ -8,7 +8,7 @@ Machine-checked formal proof surface for the RUBIN L1 blockchain protocol.
 - `proof_coverage.json` — machine-readable coverage registry with 32 section entries
 - Each registry entry carries explicit `evidence_level`, `proof_trust`, `notes`, and `limitations` so that public claims never outrun the actual proof boundary
 
-## Source rebind: 116 original → 102 active (14 standalone `DROP_STALE_SOURCE` retirements; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
+## Source rebind: 116 original → 102 active (4 `DROP_RETIRED_GENERATED_SOURCE` + 3 `DROP_RETIRED_SOURCE` + 7 `DROP_STALE_SOURCE`; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
 
 ## Claim boundary (critical)
 

@@ -12,7 +12,7 @@
   - `coverage[]`: pinned‑секции из `spec/SECTION_HASHES.json` и их статусы
   - `claims.allowed` / `claims.forbidden`: рамка допустимых публичных формулировок (обязательно)
 
-## Source rebind: 116 original → 102 active (14 standalone `DROP_STALE_SOURCE` retirements; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
+## Source rebind: 116 original → 102 active (4 `DROP_RETIRED_GENERATED_SOURCE` + 3 `DROP_RETIRED_SOURCE` + 7 `DROP_STALE_SOURCE`; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
 
 ## Термины
 

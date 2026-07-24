@@ -7,7 +7,6 @@
     "inventory_sha256": "77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6",
     "original_imported_source_paths": 116,
     "active_imported_source_paths": 102,
-    "disposition": "DROP_STALE_SOURCE",
     "byte_exact_path_count": 76,
     "reconcile_current_protocol_path_count": 16,
     "reconcile_current_protocol_paths": [
@@ -37,22 +36,9 @@
       "scripts/check.sh",
       "tools/check_formal_registry_truth.py"
     ],
-    "excluded_stale_source_paths": [
-      "RubinFormal/ConsensusConstantsBehavioral.lean",
-      "RubinFormal/Conformance/CVExtReplay.lean",
-      "RubinFormal/Conformance/CVExtVectors.lean",
-      "RubinFormal/Conformance/CVTxctxReplay.lean",
-      "RubinFormal/Conformance/CVTxctxVectors.lean",
-      "RubinFormal/FormalGap03.lean",
-      "RubinFormal/GovernanceReplayToken.lean",
-      "RubinFormal/CoreExtInvariants.lean",
-      "RubinFormal/NativeExtIndependence.lean",
-      "RubinFormal/TxWireTxPayloadContract.lean",
-      "RubinFormal/TxWireTxWithWitnessContract.lean",
-      "RubinFormal/TxWireTxAfterDaCoreContract.lean",
-      "RubinFormal/TxWireTxBodyContract.lean",
-      "RubinFormal/TxWireTxContract.lean"
-    ],
+    "drop_retired_generated_source_path_count": 4, "drop_retired_generated_source_paths": ["RubinFormal/Conformance/CVExtVectors.lean", "RubinFormal/Conformance/CVExtReplay.lean", "RubinFormal/Conformance/CVTxctxVectors.lean", "RubinFormal/Conformance/CVTxctxReplay.lean"],
+    "drop_retired_source_path_count": 3, "drop_retired_source_paths": ["RubinFormal/CoreExtInvariants.lean", "RubinFormal/NativeExtIndependence.lean", "RubinFormal/GovernanceReplayToken.lean"],
+    "drop_stale_source_path_count": 7, "drop_stale_source_paths": ["RubinFormal/ConsensusConstantsBehavioral.lean", "RubinFormal/FormalGap03.lean", "RubinFormal/TxWireTxPayloadContract.lean", "RubinFormal/TxWireTxWithWitnessContract.lean", "RubinFormal/TxWireTxAfterDaCoreContract.lean", "RubinFormal/TxWireTxBodyContract.lean", "RubinFormal/TxWireTxContract.lean"],
     "semantic_theorem_reconciliation_retired_paths": ["RubinFormal/CoreExtRefinement.lean"],
     "import_package_check_or_test_path_count": 7,
     "import_package_check_or_test_paths": [
@@ -65,7 +51,7 @@
       "tests/test_validation.py"
     ],
     "active_partition_equation": "76 + 16 + 1 + 2 + 7 = 102",
-    "original_inventory_equation": "102 + 14 = 116"
+    "original_inventory_equation": "102 + 4 + 3 + 7 = 116"
   },
   "critical_ops": [
     {
