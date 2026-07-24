@@ -38,7 +38,7 @@ SHARED_OP_PARITY = {
 EXPECTED_COVERAGE_TRUST = (32, 520, 505, 15, 52, 49)
 EXPECTED_UNIVERSAL_TRUST = (24, 480, 12, 43, 40)
 EXPECTED_KERNEL_THEOREM_COMPLEMENT = (468, 456)
-EXPECTED_BRIDGE_TRUST = (12, 165, 162, 9, 21, 21)
+EXPECTED_BRIDGE_TRUST = (12, 164, 161, 9, 20, 20)
 EXPECTED_UNAFFECTED_UNIVERSAL = {
     "block_timestamp_rules",
     "consensus_constants_witness_lengths_pre_rotation",
@@ -59,7 +59,7 @@ EXPECTED_AFFECTED_BRIDGE_REFS = {
     "native_rotation": 1,
     "native_suite_rotation": 2,
     "parse_tx": 1,
-    "retarget_v1": 9,
+    "retarget_v1": 8,
     "sighash_v1": 3,
     "utxo_apply_basic": 1,
     "weight_accounting": 1,

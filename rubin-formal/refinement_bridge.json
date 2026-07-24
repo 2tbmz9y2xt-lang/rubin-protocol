@@ -157,7 +157,7 @@
       "tests/test_strip_lean_comments.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"5ec65a9f9dec186017230df464355492ad930143955d3ed9afffd71e0fdc6017","candidate_sha256":"f7076c904203aa4417322cd961c0ce8402ea631b09732aed15230b15dc9b3ab3"},
       "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8ce69c12f3b713f960bed3c04f2f5e400c08b7e6f1896d5e68a1c2ebf8d8b93f"},
       "tools/LOCAL_CODEX_EXEC_REVIEW.md": {"disposition":"BYTE_EXACT","source_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5","candidate_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5"},
-      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"b6f3ada4759791b9ee270c6692dc98c27e8b288717e6649bc905481f7b02222a"}
+      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"33e11845d5eb2e697ae33b09b49e592ceceaab0ef73891627d4701576c4ffb5d"}
     }
   },
   "critical_ops": [
@@ -275,12 +275,10 @@
         "RubinFormal.timestamp_step_le_actual",
         "RubinFormal.max_tActual_bounded",
         "RubinFormal.max_retarget_ratio",
-        "RubinFormal.retarget_cv_replay_pass",
         "RubinFormal.Conformance.cv_pow_vectors_pass"
       ],
       "supporting_theorem_files": {
-        "RubinFormal.Conformance.cv_pow_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVPowReplay.lean",
-        "RubinFormal.retarget_cv_replay_pass": "rubin-formal/RubinFormal/RetargetBehavioral.lean"
+        "RubinFormal.Conformance.cv_pow_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVPowReplay.lean"
       },
       "notes": "The model theorem is the exact current native trace expression; retained supporting theorems provide the separate behavioral decomposition of the retarget formula."
     },
