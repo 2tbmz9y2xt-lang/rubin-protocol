@@ -32,16 +32,22 @@ SHARED_OP_PARITY = {
     "da_set_integrity": "da_set_integrity",
     "weight_accounting": "weight_accounting",
 }
-EXPECTED_COVERAGE_TRUST = (32, 541, 522, 22, 73, 66)
-EXPECTED_UNIVERSAL_TRUST = (24, 498, 19, 61, 54)
+EXPECTED_COVERAGE_TRUST = (32, 523, 508, 16, 55, 52)
+EXPECTED_UNIVERSAL_TRUST = (24, 482, 13, 45, 42)
 EXPECTED_KERNEL_THEOREM_COMPLEMENT = (468, 456)
 EXPECTED_BRIDGE_TRUST = (12, 165, 162, 9, 21, 21)
 EXPECTED_UNAFFECTED_UNIVERSAL = {
+    "block_timestamp_rules",
     "consensus_constants_witness_lengths_pre_rotation",
+    "consensus_error_codes",
     "parallel_validation_equivalence",
+    "replay_domain_checks",
     "spend_gate_bridge",
     "create_side_live_gate",
     "feature_activation_fsm",
+    "transaction_identifiers",
+    "transaction_wire",
+    "value_conservation",
 }
 EXPECTED_AFFECTED_BRIDGE_REFS = {
     "da_set_integrity": 1,
@@ -553,7 +559,12 @@ def classify_registered_theorems(repo_root: Path, refs: list[TheoremRef]) -> tup
     theorems = sorted({theorem for theorem, _ in refs})
     if not theorems:
         return {}, []
-    source = "\n".join(["import RubinFormal", *(f"#print axioms {theorem}" for theorem in theorems), ""])
+    source = "\n".join([
+        "import RubinFormal",
+        "import RubinFormal.ErrorPriority",
+        *(f"#print axioms {theorem}" for theorem in theorems),
+        "",
+    ])
     try:
         result = subprocess.run(
             ["lake", "env", "lean", "--stdin", "--root=."],

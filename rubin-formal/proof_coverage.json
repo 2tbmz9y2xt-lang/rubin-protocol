@@ -62,7 +62,7 @@
     "active_partition_equation": "73 + 19 + 1 + 2 + 7 = 102",
     "original_inventory_equation": "102 + 4 + 3 + 7 = 116",
     "active_path_manifest": {
-      "REGISTRY_COMPLETENESS_POLICY.md": {"disposition":"IMPORT_ADAPT_SINGLE_OWNER","source_sha256":"9af957d4fefad13471a00ca18f1ee1c146c8b34e551cf3f9b179c517e5be8c3c","candidate_sha256":"7508fb16b34f011f2983582c0d42a4253c526f3edea03a3d09677ebb26a7ddc7"},
+      "REGISTRY_COMPLETENESS_POLICY.md": {"disposition":"IMPORT_ADAPT_SINGLE_OWNER","source_sha256":"9af957d4fefad13471a00ca18f1ee1c146c8b34e551cf3f9b179c517e5be8c3c","candidate_sha256":"b8808d222b5ebbc120993b5c4082551c35b24d0b6c4afee44060d6c2b74c8846"},
       "RubinFormal/BlockHeaderRoundtrip.lean": {"disposition":"BYTE_EXACT","source_sha256":"3239aac537d9d53f4d8af01716b8a959fa4fe3b057b8e9d6b9d75d85b6f860ec","candidate_sha256":"3239aac537d9d53f4d8af01716b8a959fa4fe3b057b8e9d6b9d75d85b6f860ec"},
       "RubinFormal/BlockTimestampBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"c21d4899dc9fe505b48e8037c04eb66599b558bb1f184b1676d84da12c0e35d5","candidate_sha256":"c21d4899dc9fe505b48e8037c04eb66599b558bb1f184b1676d84da12c0e35d5"},
       "RubinFormal/BlockValidationOrder.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"a63d141bd53dac280a0012a3a1e742ecf059c9d2736774ae97e8dc3d3957549f","candidate_sha256":"0716940a9a99bfb5f7dfcf0c20cb1710f9866fc3d19090ee39c1a9b38a9aff35"},
@@ -81,7 +81,7 @@
       "RubinFormal/CreateSideLiveGateBridge.lean": {"disposition":"BYTE_EXACT","source_sha256":"bd3702ab78260d7b3ba5e7c9aa3ba93c484cb21c54aabc4410d1194fabeda73c","candidate_sha256":"bd3702ab78260d7b3ba5e7c9aa3ba93c484cb21c54aabc4410d1194fabeda73c"},
       "RubinFormal/DaIntegrityBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"e5b5f91fe1140d56cfaad36b88465332e1ee72547471a1bdccd189cb5e028cf7","candidate_sha256":"e5b5f91fe1140d56cfaad36b88465332e1ee72547471a1bdccd189cb5e028cf7"},
       "RubinFormal/DeterminismRequirements.lean": {"disposition":"BYTE_EXACT","source_sha256":"d2db16f90fb246d739e72cd23b717f87025145a836a018743d625faffb6cb0a8","candidate_sha256":"d2db16f90fb246d739e72cd23b717f87025145a836a018743d625faffb6cb0a8"},
-      "RubinFormal/ErrorPriority.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"9a2361617709189211a99cc080e3278a04065048e79fd17c117a37470d0cd7a5","candidate_sha256":"6d9870a5aa64bc70ee035ead5b62e1fc8a9aeb4dd88cee375ad8bc7a35541ac3"},
+      "RubinFormal/ErrorPriority.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"9a2361617709189211a99cc080e3278a04065048e79fd17c117a37470d0cd7a5","candidate_sha256":"e6d6f4ddf0dfd426a9da95b38ef21751c0a50b492d835850891e230a3d0e1585"},
       "RubinFormal/FeatureActivationFSM.lean": {"disposition":"BYTE_EXACT","source_sha256":"346b65852e93222b9b574b976c3ab17a26b42960005498245da6308ec9faf565","candidate_sha256":"346b65852e93222b9b574b976c3ab17a26b42960005498245da6308ec9faf565"},
       "RubinFormal/FeatureActivationLiveBridge.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"6959f52b6e206e2890a897ca3acdb55c0ee3566e2398858eebd3f8d5f5498dab","candidate_sha256":"657fc4583de15945852c4e1a62af5c79fa63c8fe0da8171486a91df2450be802"},
       "RubinFormal/ForkChoiceSelect.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"4a1a9fdb6a4e883efcb869ec30542d165c25e55946635dfae867a1a70a4c6364","candidate_sha256":"031182b226d8f00a2bae6c89439d12e42e0d5a5b710bddf38c316d6f0820794c"},
@@ -163,7 +163,7 @@
       "tests/test_strip_lean_comments.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"5ec65a9f9dec186017230df464355492ad930143955d3ed9afffd71e0fdc6017","candidate_sha256":"f7076c904203aa4417322cd961c0ce8402ea631b09732aed15230b15dc9b3ab3"},
       "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8ce69c12f3b713f960bed3c04f2f5e400c08b7e6f1896d5e68a1c2ebf8d8b93f"},
       "tools/LOCAL_CODEX_EXEC_REVIEW.md": {"disposition":"BYTE_EXACT","source_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5","candidate_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5"},
-      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"19262b75f8b6f4c3114a7b599182cd02f7429a3316aa93a370a805a247a7bc1d"}
+      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"ca606316d358e4f1f4d850f89ff10b3d9e45f50ec0926ba1e55911234f340328"}
     }
   },
   "coverage": [
@@ -227,7 +227,6 @@
       "status": "proved",
       "proof_trust": "compiler_trusted",
       "theorems": [
-        "RubinFormal.NativeRegistryResolution.fi_rot_03_pre_rotation_ml_dsa_resolves",
         "RubinFormal.RegistryResolutionLiveBridge.pre_rotation_registered_iff",
         "RubinFormal.RegistryResolutionLiveBridge.ml_dsa_87_params_bridge",
         "RubinFormal.RegistryResolutionLiveBridge.ml_dsa_87_manifest_tuple_bridge",
@@ -236,7 +235,6 @@
       ],
       "file": "rubin-formal/RubinFormal/RegistryResolutionLiveBridge.lean",
       "theorem_files": {
-        "RubinFormal.NativeRegistryResolution.fi_rot_03_pre_rotation_ml_dsa_resolves": "rubin-formal/RubinFormal/NativeRegistryResolution.lean",
         "RubinFormal.RegistryResolutionLiveBridge.pre_rotation_registered_iff": "rubin-formal/RubinFormal/RegistryResolutionLiveBridge.lean",
         "RubinFormal.RegistryResolutionLiveBridge.ml_dsa_87_params_bridge": "rubin-formal/RubinFormal/RegistryResolutionLiveBridge.lean",
         "RubinFormal.RegistryResolutionLiveBridge.ml_dsa_87_manifest_tuple_bridge": "rubin-formal/RubinFormal/RegistryResolutionLiveBridge.lean",
@@ -255,10 +253,8 @@
       "section_key": "transaction_wire",
       "section_heading": "## 5. Transaction Wire",
       "status": "proved",
-      "proof_trust": "compiler_trusted",
+      "proof_trust": "kernel_checked",
       "theorems": [
-        "RubinFormal.Conformance.cv_parse_vectors_pass",
-        "RubinFormal.Conformance.cv_compact_vectors_pass",
         "RubinFormal.Wire.compactSize_roundtrip",
         "RubinFormal.Wire.compactSize_overflow_safety",
         "RubinFormal.Wire.compactSize_encode_roundtrip",
@@ -286,8 +282,6 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
-        "RubinFormal.Conformance.cv_parse_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVParseReplay.lean",
-        "RubinFormal.Conformance.cv_compact_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVCompactReplay.lean",
         "RubinFormal.Wire.compactSize_roundtrip": "rubin-formal/RubinFormal/ByteWireV2.lean",
         "RubinFormal.Wire.compactSize_overflow_safety": "rubin-formal/RubinFormal/ByteWireV2.lean",
         "RubinFormal.Wire.compactSize_encode_roundtrip": "rubin-formal/RubinFormal/ByteWireV2.lean",
@@ -323,18 +317,14 @@
       "section_key": "transaction_identifiers",
       "section_heading": "## 8. Transaction Identifiers (TXID / WTXID)",
       "status": "proved",
-      "proof_trust": "compiler_trusted",
+      "proof_trust": "kernel_checked",
       "theorems": [
-        "RubinFormal.Conformance.cv_parse_vectors_pass",
-        "RubinFormal.Conformance.cv_sig_vectors_pass",
         "RubinFormal.transaction_identifiers_proved",
         "RubinFormal.txid_wtxid_witness_empty_serialization_shape",
         "RubinFormal.txid_wtxid_identifier_domain_contract"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
-        "RubinFormal.Conformance.cv_parse_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVParseReplay.lean",
-        "RubinFormal.Conformance.cv_sig_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVSigReplay.lean",
         "RubinFormal.transaction_identifiers_proved": "rubin-formal/RubinFormal/PinnedSections.lean",
         "RubinFormal.txid_wtxid_witness_empty_serialization_shape": "rubin-formal/RubinFormal/TxIdBehavioral.lean",
         "RubinFormal.txid_wtxid_identifier_domain_contract": "rubin-formal/RubinFormal/TxIdBehavioral.lean"
@@ -371,7 +361,6 @@
       "status": "proved",
       "proof_trust": "compiler_trusted",
       "theorems": [
-        "RubinFormal.Conformance.cv_weight_vectors_pass",
         "RubinFormal.WeightSuiteAware.weight_suite_aware_correct",
         "RubinFormal.WeightSuiteAware.weight_suite_aware_correct_create",
         "RubinFormal.weight_monotone_witness",
@@ -403,7 +392,6 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
-        "RubinFormal.Conformance.cv_weight_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVWeightReplay.lean",
         "RubinFormal.WeightSuiteAware.weight_suite_aware_correct": "rubin-formal/RubinFormal/WeightSuiteAware.lean",
         "RubinFormal.WeightSuiteAware.weight_suite_aware_correct_create": "rubin-formal/RubinFormal/WeightSuiteAware.lean",
         "RubinFormal.weight_monotone_witness": "rubin-formal/RubinFormal/CriticalInvariants.lean",
@@ -488,7 +476,6 @@
       "status": "proved",
       "proof_trust": "compiler_trusted",
       "theorems": [
-        "RubinFormal.Conformance.cv_sighash_vectors_pass",
         "RubinFormal.sighash_v1_proved",
         "RubinFormal.SighashV1.buildPreimageFrameParts_injective",
         "RubinFormal.SighashV1.selectHashPrevouts_all_commits_all_inputs",
@@ -506,7 +493,6 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
-        "RubinFormal.Conformance.cv_sighash_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVSighashReplay.lean",
         "RubinFormal.sighash_v1_proved": "rubin-formal/RubinFormal/PinnedSections.lean",
         "RubinFormal.SighashV1.buildPreimageFrameParts_injective": "rubin-formal/RubinFormal/SighashV1.lean",
         "RubinFormal.SighashV1.selectHashPrevouts_all_commits_all_inputs": "rubin-formal/RubinFormal/SighashV1.lean",
@@ -554,9 +540,8 @@
       "section_key": "consensus_error_codes",
       "section_heading": "## 13. Consensus Error Codes (Normative)",
       "status": "proved",
-      "proof_trust": "compiler_trusted",
+      "proof_trust": "kernel_checked",
       "theorems": [
-        "RubinFormal.Conformance.cv_validation_order_vectors_pass",
         "RubinFormal.error_priority_parse",
         "RubinFormal.error_priority_pow",
         "RubinFormal.error_priority_target",
@@ -678,7 +663,6 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
-        "RubinFormal.Conformance.cv_validation_order_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVValidationOrderReplay.lean",
         "RubinFormal.error_priority_parse": "rubin-formal/RubinFormal/ErrorPriority.lean",
         "RubinFormal.error_priority_pow": "rubin-formal/RubinFormal/ErrorPriority.lean",
         "RubinFormal.error_priority_target": "rubin-formal/RubinFormal/ErrorPriority.lean",
@@ -808,7 +792,6 @@
       "status": "proved",
       "proof_trust": "compiler_trusted",
       "theorems": [
-        "RubinFormal.Conformance.cv_covenant_genesis_vectors_pass",
         "RubinFormal.covenantDispositionComplete",
         "RubinFormal.covenant_types_pairwise_distinct",
         "RubinFormal.cov_type_p2pk_value",
@@ -827,7 +810,6 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
-        "RubinFormal.Conformance.cv_covenant_genesis_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVCovenantGenesisReplay.lean",
         "RubinFormal.covenantDispositionComplete": "rubin-formal/RubinFormal/CovenantRegistryExhaustive.lean",
         "RubinFormal.covenant_types_pairwise_distinct": "rubin-formal/RubinFormal/CovenantRegistryExhaustive.lean",
         "RubinFormal.cov_type_p2pk_value": "rubin-formal/RubinFormal/CovenantRegistryExhaustive.lean",
@@ -857,7 +839,6 @@
       "status": "proved",
       "proof_trust": "compiler_trusted",
       "theorems": [
-        "RubinFormal.Conformance.cv_pow_vectors_pass",
         "RubinFormal.PowV1.retargetV1_clamp_bounded",
         "RubinFormal.PowV1.retargetV1_clamp_positive",
         "RubinFormal.retarget_window_size_value",
@@ -902,7 +883,6 @@
       "theorem_files": {
         "RubinFormal.PowV1.retargetV1_clamp_bounded": "rubin-formal/RubinFormal/PowV1.lean",
         "RubinFormal.PowV1.retargetV1_clamp_positive": "rubin-formal/RubinFormal/PowV1.lean",
-        "RubinFormal.Conformance.cv_pow_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVPowReplay.lean",
         "RubinFormal.retarget_window_size_value": "rubin-formal/RubinFormal/RetargetBehavioral.lean",
         "RubinFormal.retarget_block_interval_value": "rubin-formal/RubinFormal/RetargetBehavioral.lean",
         "RubinFormal.retarget_tExpected_value": "rubin-formal/RubinFormal/RetargetBehavioral.lean",
@@ -951,7 +931,6 @@
       "status": "proved",
       "proof_trust": "compiler_trusted",
       "theorems": [
-        "RubinFormal.Conformance.cv_validation_order_vectors_pass",
         "RubinFormal.unknown_suite_0x05_rejected",
         "RubinFormal.sentinel_nonempty_pubkey_rejected",
         "RubinFormal.sentinel_empty_accepted",
@@ -974,7 +953,6 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
-        "RubinFormal.Conformance.cv_validation_order_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVValidationOrderReplay.lean",
         "RubinFormal.unknown_suite_0x05_rejected": "rubin-formal/RubinFormal/StructuralRulesBehavioral.lean",
         "RubinFormal.sentinel_nonempty_pubkey_rejected": "rubin-formal/RubinFormal/StructuralRulesBehavioral.lean",
         "RubinFormal.sentinel_empty_accepted": "rubin-formal/RubinFormal/StructuralRulesBehavioral.lean",
@@ -1006,9 +984,8 @@
       "section_key": "replay_domain_checks",
       "section_heading": "## 1. Replay-Domain Checks (Normative)",
       "status": "proved",
-      "proof_trust": "compiler_trusted",
+      "proof_trust": "kernel_checked",
       "theorems": [
-        "RubinFormal.Conformance.cv_replay_vectors_pass",
         "RubinFormal.replay_domain_checks_proved",
         "RubinFormal.parsed_nonce_duplicate_not_replay_free",
         "RubinFormal.replay_domain_nonce_contract",
@@ -1019,7 +996,6 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
-        "RubinFormal.Conformance.cv_replay_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVReplayReplay.lean",
         "RubinFormal.replay_domain_checks_proved": "rubin-formal/RubinFormal/PinnedSections.lean",
         "RubinFormal.parsed_nonce_duplicate_not_replay_free": "rubin-formal/RubinFormal/ReplayDomainBehavioral.lean",
         "RubinFormal.replay_domain_nonce_contract": "rubin-formal/RubinFormal/ReplayDomainBehavioral.lean",
@@ -1161,7 +1137,6 @@
       "status": "proved",
       "proof_trust": "compiler_trusted",
       "theorems": [
-        "RubinFormal.Conformance.cv_subsidy_vectors_pass",
         "RubinFormal.subsidy_u128_safety_proved",
         "RubinFormal.SubsidyV1.connectBlock_end_to_end_proved",
         "RubinFormal.blockSubsidy_bounded",
@@ -1170,7 +1145,6 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
-        "RubinFormal.Conformance.cv_subsidy_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVSubsidyReplay.lean",
         "RubinFormal.subsidy_u128_safety_proved": "rubin-formal/RubinFormal/PinnedSections.lean",
         "RubinFormal.SubsidyV1.connectBlock_end_to_end_proved": "rubin-formal/RubinFormal/SubsidyV1.lean",
         "RubinFormal.blockSubsidy_bounded": "rubin-formal/RubinFormal/ArithmeticSafety.lean",
@@ -1184,9 +1158,8 @@
       "section_key": "value_conservation",
       "section_heading": "## 20. Value Conservation (Normative)",
       "status": "proved",
-      "proof_trust": "compiler_trusted",
+      "proof_trust": "kernel_checked",
       "theorems": [
-        "RubinFormal.Conformance.cv_subsidy_vectors_pass",
         "RubinFormal.utxo_conservation_theorem",
         "RubinFormal.value_conservation_single_tx",
         "RubinFormal.value_conservation_block_txs",
@@ -1194,7 +1167,6 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
-        "RubinFormal.Conformance.cv_subsidy_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVSubsidyReplay.lean",
         "RubinFormal.utxo_conservation_theorem": "rubin-formal/RubinFormal/ConnectBlockStrong.lean",
         "RubinFormal.value_conservation_single_tx": "rubin-formal/RubinFormal/ValueConservationBehavioral.lean",
         "RubinFormal.value_conservation_block_txs": "rubin-formal/RubinFormal/ValueConservationBehavioral.lean",
@@ -1209,7 +1181,6 @@
       "status": "proved",
       "proof_trust": "compiler_trusted",
       "theorems": [
-        "RubinFormal.Conformance.cv_da_integrity_vectors_pass",
         "RubinFormal.da_empty_txs_accepted",
         "RubinFormal.da_batch_exceeded",
         "RubinFormal.da_batch_ok",
@@ -1284,7 +1255,6 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
-        "RubinFormal.Conformance.cv_da_integrity_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVDaIntegrityReplay.lean",
         "RubinFormal.da_empty_txs_accepted": "rubin-formal/RubinFormal/DaIntegrityBehavioral.lean",
         "RubinFormal.da_batch_exceeded": "rubin-formal/RubinFormal/DaIntegrityBehavioral.lean",
         "RubinFormal.da_batch_ok": "rubin-formal/RubinFormal/DaIntegrityBehavioral.lean",
@@ -1365,9 +1335,8 @@
       "section_key": "block_timestamp_rules",
       "section_heading": "## 22. Block Timestamp Rules (Normative)",
       "status": "proved",
-      "proof_trust": "compiler_trusted",
+      "proof_trust": "kernel_checked",
       "theorems": [
-        "RubinFormal.Conformance.cv_timestamp_vectors_pass",
         "RubinFormal.medianTimePast_value",
         "RubinFormal.medianTimePast_index_valid",
         "RubinFormal.BlockBasicCheckV1.timestampBounds_ok_iff",
@@ -1380,7 +1349,6 @@
       ],
       "file": "rubin-formal/RubinFormal/BlockTimestampBehavioral.lean",
       "theorem_files": {
-        "RubinFormal.Conformance.cv_timestamp_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVTimestampReplay.lean",
         "RubinFormal.medianTimePast_value": "rubin-formal/RubinFormal/BlockTimestampBehavioral.lean",
         "RubinFormal.medianTimePast_index_valid": "rubin-formal/RubinFormal/BlockTimestampBehavioral.lean",
         "RubinFormal.BlockBasicCheckV1.timestampBounds_ok_iff": "rubin-formal/RubinFormal/BlockBasicCheckV1.lean",
@@ -1404,7 +1372,6 @@
       "status": "stated",
       "proof_trust": "compiler_trusted",
       "theorems": [
-        "RubinFormal.Conformance.cv_fork_choice_vectors_pass",
         "RubinFormal.ForkChoiceV1.emptyChain_loses",
         "RubinFormal.ForkChoiceV1.heavierChain_wins",
         "RubinFormal.ForkChoiceV1.zeroTarget_rejected",
@@ -1424,7 +1391,6 @@
       ],
       "file": "rubin-formal/RubinFormal/ForkChoiceV1.lean",
       "theorem_files": {
-        "RubinFormal.Conformance.cv_fork_choice_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVForkChoiceReplay.lean",
         "RubinFormal.ForkChoiceV1.emptyChain_loses": "rubin-formal/RubinFormal/ForkChoiceV1.lean",
         "RubinFormal.ForkChoiceV1.heavierChain_wins": "rubin-formal/RubinFormal/ForkChoiceV1.lean",
         "RubinFormal.ForkChoiceV1.zeroTarget_rejected": "rubin-formal/RubinFormal/ForkChoiceV1.lean",
@@ -1561,7 +1527,6 @@
         "RubinFormal.NativeRegistryResolution.fi_rot_03_registry_lookup_deterministic",
         "RubinFormal.NativeRegistryResolution.fi_rot_03_unique_entry",
         "RubinFormal.NativeRegistryResolution.fi_rot_03_active_suite_resolves",
-        "RubinFormal.NativeRegistryResolution.fi_rot_03_pre_rotation_ml_dsa_resolves",
         "RubinFormal.NativeRegistryResolution.fi_rot_03_pre_rotation_no_duplicates",
         "RubinFormal.RegistryResolutionLiveBridge.pre_rotation_registered_iff",
         "RubinFormal.RegistryResolutionLiveBridge.ml_dsa_87_params_bridge",
@@ -1579,7 +1544,6 @@
         "RubinFormal.NativeRegistryResolution.fi_rot_03_registry_lookup_deterministic": "rubin-formal/RubinFormal/NativeRegistryResolution.lean",
         "RubinFormal.NativeRegistryResolution.fi_rot_03_unique_entry": "rubin-formal/RubinFormal/NativeRegistryResolution.lean",
         "RubinFormal.NativeRegistryResolution.fi_rot_03_active_suite_resolves": "rubin-formal/RubinFormal/NativeRegistryResolution.lean",
-        "RubinFormal.NativeRegistryResolution.fi_rot_03_pre_rotation_ml_dsa_resolves": "rubin-formal/RubinFormal/NativeRegistryResolution.lean",
         "RubinFormal.NativeRegistryResolution.fi_rot_03_pre_rotation_no_duplicates": "rubin-formal/RubinFormal/NativeRegistryResolution.lean",
         "RubinFormal.RegistryResolutionLiveBridge.pre_rotation_registered_iff": "rubin-formal/RubinFormal/RegistryResolutionLiveBridge.lean",
         "RubinFormal.RegistryResolutionLiveBridge.ml_dsa_87_params_bridge": "rubin-formal/RubinFormal/RegistryResolutionLiveBridge.lean",
@@ -1777,13 +1741,9 @@
     "proved_with_axiom_rows": 4,
     "stated_rows": 3,
     "deferred_rows": 0,
-    "theorem_references": 541,
-    "unique_theorem_names": 522,
+    "theorem_references": 523,
+    "unique_theorem_names": 508,
     "reused_theorem_names": [
-      "RubinFormal.Conformance.cv_parse_vectors_pass",
-      "RubinFormal.Conformance.cv_subsidy_vectors_pass",
-      "RubinFormal.Conformance.cv_validation_order_vectors_pass",
-      "RubinFormal.NativeRegistryResolution.fi_rot_03_pre_rotation_ml_dsa_resolves",
       "RubinFormal.RegistryResolutionLiveBridge.ml_dsa_87_params_bridge",
       "RubinFormal.RegistryResolutionLiveBridge.pre_rotation_registered_iff",
       "RubinFormal.UtxoApplyGenesisV1.validateWitnessItemLengths_eq_registry_pre_rotation",
