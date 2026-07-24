@@ -23,6 +23,14 @@ def source_rebind_doc() -> dict:
     return {"source_rebind": source_rebind}
 
 
+class ConformanceIndexImportTests(unittest.TestCase):
+    def test_requires_canonical_import_line(self) -> None:
+        expected = "import RubinFormal.Conformance.CVParseReplay"
+
+        self.assertTrue(m.has_canonical_import(f"{expected}\n", expected))
+        self.assertFalse(m.has_canonical_import(f"-- {expected}\n", expected))
+
+
 class SourceRebindTests(unittest.TestCase):
     def test_accepts_exact_manifest(self) -> None:
         self.assertEqual(m.validate_source_rebind(source_rebind_doc()), [])

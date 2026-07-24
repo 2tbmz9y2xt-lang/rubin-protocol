@@ -139,6 +139,10 @@ def fail(msg: str) -> int:
     return 1
 
 
+def has_canonical_import(source: str, expected_line: str) -> bool:
+    return any(line.strip() == expected_line for line in source.splitlines())
+
+
 def declared_lean_theorems(lean_root: Path) -> set[str]:
     names: set[str] = set()
     for path in lean_root.rglob("*.lean"):
@@ -507,13 +511,13 @@ def main() -> int:
 
         imp_vectors = f"import RubinFormal.Conformance.CV{camel}Vectors"
         imp_replay = f"import RubinFormal.Conformance.CV{camel}Replay"
-        if imp_vectors not in index_txt:
+        if not has_canonical_import(index_txt, imp_vectors):
             print(
                 f"ERROR: Conformance/Index.lean does not import vectors for {gate}: expected line '{imp_vectors}'",
                 file=sys.stderr,
             )
             conf_bad = True
-        if imp_replay not in index_txt:
+        if not has_canonical_import(index_txt, imp_replay):
             print(
                 f"ERROR: Conformance/Index.lean does not import replay for {gate}: expected line '{imp_replay}'",
                 file=sys.stderr,
