@@ -43,6 +43,23 @@ def powOuts : List PowOut := [
         self.assertEqual(m.trace_ids_for_op(trace_text, "parse_tx"), {"PARSE-01", "PARSE-16"})
         self.assertEqual(m.trace_ids_for_op(trace_text, "retarget_v1"), {"POW-01"})
 
+    def test_required_trace_bindings_fail_closed(self) -> None:
+        trace_text = '''
+def parseOuts : List ParseOut := [
+  { id := "PARSE-01", ok := true },
+  { id := "PARSE-16", ok := true }
+]
+'''
+        self.assertEqual(
+            m.trace_binding_errors("parse_tx", "machine_checked_contract", m.TRACE_SOURCE_FILE, ["PARSE-01", "PARSE-16"], trace_text),
+            [],
+        )
+        self.assertEqual(
+            m.trace_binding_errors("parse_tx", "machine_checked_contract", None, None, trace_text),
+            ["required trace evidence missing for op `parse_tx`"],
+        )
+        self.assertTrue(any("drift" in error for error in m.trace_binding_errors("parse_tx", "machine_checked_contract", m.TRACE_SOURCE_FILE, ["PARSE-01"], trace_text)))
+
     def test_fully_qualified_theorem_must_match_file(self) -> None:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "Bridge.lean"

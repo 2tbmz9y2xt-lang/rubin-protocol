@@ -189,12 +189,10 @@ class ValidateTheoremRefsTests(unittest.TestCase):
 class ValidateSharedOpParityTests(unittest.TestCase):
     def test_matching_evidence_levels(self) -> None:
         coverage_rows = {
-            "sighash_v1": {"evidence_level": "machine_checked_universal", "proof_trust": "kernel_checked"},
             "da_set_integrity": {"evidence_level": "machine_checked_universal"},
             "weight_accounting": {"evidence_level": "machine_checked_universal"},
         }
         bridge_rows = {
-            "sighash_v1": {"evidence_level": "machine_checked_universal", "proof_trust": "kernel_checked"},
             "da_set_integrity": {"evidence_level": "machine_checked_universal"},
             "weight_accounting": {"evidence_level": "machine_checked_universal"},
         }
@@ -203,28 +201,24 @@ class ValidateSharedOpParityTests(unittest.TestCase):
 
     def test_drift_detected(self) -> None:
         coverage_rows = {
-            "sighash_v1": {"evidence_level": "machine_checked_universal", "proof_trust": "kernel_checked"},
-            "da_set_integrity": {"evidence_level": "machine_checked_universal"},
+            "da_set_integrity": {"evidence_level": "machine_checked_universal", "proof_trust": "kernel_checked"},
             "weight_accounting": {"evidence_level": "machine_checked_universal"},
         }
         bridge_rows = {
-            "sighash_v1": {"evidence_level": "machine_checked_universal", "proof_trust": "compiler_trusted"},
-            "da_set_integrity": {"evidence_level": "machine_checked_universal"},
+            "da_set_integrity": {"evidence_level": "machine_checked_universal", "proof_trust": "compiler_trusted"},
             "weight_accounting": {"evidence_level": "machine_checked_universal"},
         }
         errors = validate_shared_op_parity(coverage_rows, bridge_rows)
         self.assertEqual(len(errors), 1)
         self.assertIn("drift", errors[0])
-        self.assertIn("sighash_v1", errors[0])
+        self.assertIn("da_set_integrity", errors[0])
 
     def test_missing_bridge_row(self) -> None:
         coverage_rows = {
-            "sighash_v1": {"evidence_level": "a"},
             "da_set_integrity": {"evidence_level": "a"},
             "weight_accounting": {"evidence_level": "a"},
         }
         bridge_rows = {
-            "da_set_integrity": {"evidence_level": "a"},
             "weight_accounting": {"evidence_level": "a"},
         }
         errors = validate_shared_op_parity(coverage_rows, bridge_rows)
@@ -233,11 +227,9 @@ class ValidateSharedOpParityTests(unittest.TestCase):
 
     def test_missing_coverage_row(self) -> None:
         coverage_rows = {
-            "da_set_integrity": {"evidence_level": "a"},
             "weight_accounting": {"evidence_level": "a"},
         }
         bridge_rows = {
-            "sighash_v1": {"evidence_level": "a"},
             "da_set_integrity": {"evidence_level": "a"},
             "weight_accounting": {"evidence_level": "a"},
         }
@@ -247,8 +239,8 @@ class ValidateSharedOpParityTests(unittest.TestCase):
 
     def test_both_missing(self) -> None:
         errors = validate_shared_op_parity({}, {})
-        # All 3 SHARED_OP_PARITY items should be flagged
-        self.assertEqual(len(errors), 3)
+        # Both SHARED_OP_PARITY items should be flagged.
+        self.assertEqual(len(errors), 2)
 
 
 class ValidateRegisteredPathsTests(unittest.TestCase):

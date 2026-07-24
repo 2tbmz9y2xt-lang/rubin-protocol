@@ -33,14 +33,13 @@ structure TxContextInputData where
   activeExtIds : List Nat
   continuingData : List (Nat × TxContextContinuing)
 
-/-- Derive the raw continuing-output counts from the same bundle data that
-    will later be packed into the computed TxContext. This avoids validating
-    detached metadata. -/
+/-- Derive raw continuing-output counts from the caller-supplied model bundle.
+    This validates local count metadata only; it does not derive the bundle
+    from block transactions or UTXOs. -/
 def continuingCountsFromData (continuingData : List (Nat × TxContextContinuing)) : List Nat :=
   continuingData.map fun pair => pair.2.outputs.length
 
-/-- Validate all raw continuing-output counts before packing the TxContext bundle.
-    This wires the K-overflow reject helper into the live computed TxContext path. -/
+/-- Validate all raw continuing-output counts before packing the model bundle. -/
 def validateTxContextContinuingCounts : List Nat → Except String Unit
   | [] => .ok ()
   | count :: rest =>
@@ -50,8 +49,8 @@ def validateTxContextContinuingCounts : List Nat → Except String Unit
 
 /-- Full block connection pipeline.
     TxContext parameters are threaded through for backward compatibility
-    with existing proofs. See connectBlockFullComputed for the version
-    that computes TxContext from tx data. -/
+    with existing proofs. `connectBlockFullComputed` remains an experimental
+    caller-supplied TxContext model, not a transaction/UTXO derivation. -/
 def connectBlockFull
     (nonCoinbaseTxs : List Bytes)
     (coinbaseOutputs : List CovenantGenesisV1.TxOut)
@@ -74,11 +73,9 @@ def connectBlockFull
             , sumFees := sumFees
             , txContext := buildTxContext activeExtIds totalIn totalOut height continuingData }
 
-/-- Full block connection with COMPUTED TxContext from tx data.
-    This is the CORRECT version: TxContext is computed from resolved
-    input/output values, not passed as free parameters.
-    Uses buildTxContextLive which folds actual value lists and derives
-    the continuing-count guard from the same TxContext input bundle. -/
+/-- Experimental block-connection model with caller-supplied TxContext data.
+    It folds the supplied lists and checks their continuing counts, but does
+    not establish that those lists are derived from the transactions or UTXOs. -/
 def connectBlockFullComputed
     (nonCoinbaseTxs : List Bytes)
     (coinbaseOutputs : List CovenantGenesisV1.TxOut)
@@ -109,9 +106,9 @@ def connectBlockFullComputed
                     , sumFees := sumFees
                     , txContext := buildTxContextLive d.activeExtIds d.inputValues d.outputValues height d.continuingData }
 
-/-- Equivalence under the computed-path continuing-count guard:
-    if continuing-count validation succeeds on the computed TxContext input
-    bundle, then `connectBlockFullComputed` reduces to the
+/-- Experimental wrapper equivalence under the caller-supplied count guard:
+    if continuing-count validation succeeds on the supplied model bundle, then
+    `connectBlockFullComputed` reduces to the
     aggregate compatibility wrapper `connectBlockFull` with computed sums.
     This bridges the two signatures; it is not an unconditional theorem that
     the wrapper itself enforces the extra guard. -/
@@ -136,7 +133,7 @@ theorem connectBlockFullComputed_none_eq
     connectBlockFull nctxs couts ctxid utxos h bt cid sub [] 0 0 [] := by
   simp [connectBlockFullComputed, connectBlockFull, buildTxContextLive, buildTxContext]
 
-/-- Computed TxContext has correct base values from tx data. -/
+/-- Experimental model result preserves base values from caller-supplied data. -/
 theorem connectBlockFullComputed_txcontext_correct
     (nctxs : List Bytes) (couts : List CovenantGenesisV1.TxOut)
     (ctxid : Bytes) (utxos : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
@@ -171,8 +168,7 @@ theorem connectBlockFullComputed_txcontext_correct
           · rename_i heq; omega
           · exact ⟨_, rfl, rfl, rfl, rfl⟩
 
-/-- Computed TxContext preserves the live continuing bundle data from the same
-    validated txcontext input surface. -/
+/-- Experimental model result preserves caller-supplied continuing bundle data. -/
 theorem connectBlockFullComputed_txcontext_continuing_data
     (nctxs : List Bytes) (couts : List CovenantGenesisV1.TxOut)
     (ctxid : Bytes) (utxos : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
@@ -209,9 +205,9 @@ theorem connectBlockFullComputed_txcontext_continuing_data
           exact buildTxContext_continuing_data
             d.activeExtIds hIds _ _ _ d.continuingData bundle hBuild
 
-/-- Success on the computed block-connection path implies that the live
-    TxContext input bundle passed the continuing-count guard. This exposes the
-    exact surface on which
+/-- Success on the experimental block-connection model implies that its
+    caller-supplied TxContext bundle passed the continuing-count guard. This exposes the
+    exact model surface on which
     `connectBlockFullComputed_eq_connectBlockFull` is an equality theorem,
     rather than leaving that assumption as free-floating registry prose. -/
 theorem connectBlockFullComputed_ok_implies_txctx_continuing_counts
@@ -395,7 +391,8 @@ theorem coinbase_processed_after_noncoinbase
 /-! ## Error taxonomy (replaces former axiom) -/
 
 /-- Structural correspondence: connectBlockFull returns ONLY canonical
-    error codes. Machine-checked exhaustive proof, zero axioms. -/
+    error codes. Machine-checked exhaustive proof; this does not assert that
+    ordinary Lean foundations are absent from its closure. -/
 theorem connectBlockFull_error_taxonomy
     (nctxs : List Bytes) (couts : List CovenantGenesisV1.TxOut)
     (ctxid : Bytes) (utxos : Std.RBMap Outpoint UtxoEntry cmpOutpoint)

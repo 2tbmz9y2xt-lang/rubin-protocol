@@ -72,14 +72,14 @@
       "RubinFormal/CoinbaseBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"6df50d672213bcc08a21a4c2a0775f1a700c675d143e0a939eeb1e6607cca495","candidate_sha256":"6df50d672213bcc08a21a4c2a0775f1a700c675d143e0a939eeb1e6607cca495"},
       "RubinFormal/CoinbaseSubsidyBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"97dcfb4144c55a756b4020d8b970f5f8257189176da039114dbb25395400fa2c","candidate_sha256":"97dcfb4144c55a756b4020d8b970f5f8257189176da039114dbb25395400fa2c"},
       "RubinFormal/Conformance/CVVaultLifecycleReplay.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"e3848f52dd3cfe22e94208cc2b512e95d265c24dc93b66ec653f0c84185286f6","candidate_sha256":"4c5565dfba1541412d6b5b49381560392439952ada3f5f1e8887b1412ab2b895"},
-      "RubinFormal/ConnectBlockFull.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"3e01c90632d91091e1882535f3ecdb099e4c72b38d9ee52c7923a144ed4d698b","candidate_sha256":"9f491608147a67e52ee5c350d52f1c8927071a687ea0f321952277a89dc5a219"},
+      "RubinFormal/ConnectBlockFull.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"3e01c90632d91091e1882535f3ecdb099e4c72b38d9ee52c7923a144ed4d698b","candidate_sha256":"8f3abdf6f86ec565e682719f35a20dd933508a0cb725669598a852630a8d31b5"},
       "RubinFormal/ConnectBlockStrong.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"9b8aed27abe1b618aa6cede957c1e9a0b28d04dc3e81cff2f4c86234a83a0258","candidate_sha256":"601b49906968020a63fdd813f4291019a81897699d660fd258ab2fce446c5691"},
       "RubinFormal/CovenantParserGaps.lean": {"disposition":"BYTE_EXACT","source_sha256":"37e6ed125e90489f5ff03f18e693c51e3ae4bceab5255da91eadcac52409d2b0","candidate_sha256":"37e6ed125e90489f5ff03f18e693c51e3ae4bceab5255da91eadcac52409d2b0"},
       "RubinFormal/CovenantRegistryExhaustive.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"7ce2cf0832a63e234c7616fad9791b4a382ea1f10bb57b5d074111b54038ed29","candidate_sha256":"e45a870a1a03ff1bd06d5ee111f695ea07400f8252476e655fe12dc3db966d30"},
       "RubinFormal/CreateSideLiveGateBridge.lean": {"disposition":"BYTE_EXACT","source_sha256":"bd3702ab78260d7b3ba5e7c9aa3ba93c484cb21c54aabc4410d1194fabeda73c","candidate_sha256":"bd3702ab78260d7b3ba5e7c9aa3ba93c484cb21c54aabc4410d1194fabeda73c"},
       "RubinFormal/DaIntegrityBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"e5b5f91fe1140d56cfaad36b88465332e1ee72547471a1bdccd189cb5e028cf7","candidate_sha256":"e5b5f91fe1140d56cfaad36b88465332e1ee72547471a1bdccd189cb5e028cf7"},
       "RubinFormal/DeterminismRequirements.lean": {"disposition":"BYTE_EXACT","source_sha256":"d2db16f90fb246d739e72cd23b717f87025145a836a018743d625faffb6cb0a8","candidate_sha256":"d2db16f90fb246d739e72cd23b717f87025145a836a018743d625faffb6cb0a8"},
-      "RubinFormal/ErrorPriority.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"9a2361617709189211a99cc080e3278a04065048e79fd17c117a37470d0cd7a5","candidate_sha256":"0c532148bb77936096661c410b7bdf74bb85517631aa082b0456467daefb5bf3"},
+      "RubinFormal/ErrorPriority.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"9a2361617709189211a99cc080e3278a04065048e79fd17c117a37470d0cd7a5","candidate_sha256":"52774cc72210c46873e894b41f3e3fbfec589f49c6a1bcab6beda0fb9da307b6"},
       "RubinFormal/FeatureActivationFSM.lean": {"disposition":"BYTE_EXACT","source_sha256":"346b65852e93222b9b574b976c3ab17a26b42960005498245da6308ec9faf565","candidate_sha256":"346b65852e93222b9b574b976c3ab17a26b42960005498245da6308ec9faf565"},
       "RubinFormal/FeatureActivationLiveBridge.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"6959f52b6e206e2890a897ca3acdb55c0ee3566e2398858eebd3f8d5f5498dab","candidate_sha256":"657fc4583de15945852c4e1a62af5c79fa63c8fe0da8171486a91df2450be802"},
       "RubinFormal/ForkChoiceSelect.lean": {"disposition":"BYTE_EXACT","source_sha256":"4a1a9fdb6a4e883efcb869ec30542d165c25e55946635dfae867a1a70a4c6364","candidate_sha256":"4a1a9fdb6a4e883efcb869ec30542d165c25e55946635dfae867a1a70a4c6364"},
@@ -152,16 +152,16 @@
       "RubinFormal/WitnessCommitmentPregate.lean": {"disposition":"BYTE_EXACT","source_sha256":"5d523572039be8a7ed6f17c68f2050b480a1792b2bcc523ad416f47afd2ee535","candidate_sha256":"5d523572039be8a7ed6f17c68f2050b480a1792b2bcc523ad416f47afd2ee535"},
       "RubinFormal/WitnessCommitmentV1.lean": {"disposition":"BYTE_EXACT","source_sha256":"b8853ab1eb8f1fe35089b7a9ed0104498e2431766bf24e3823e88c3f6547c866","candidate_sha256":"b8853ab1eb8f1fe35089b7a9ed0104498e2431766bf24e3823e88c3f6547c866"},
       "scripts/check.sh": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"7ee36e514edb40d2182160165b9d43c82acd4aafe3b37a09a2da98fa1edf08a0","candidate_sha256":"b3795268916f36020cd52a31b9321592d83aaa1f2f6deb0bf8e04433f1e82c59"},
-      "tests/test_check_formal_registry_truth.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"6e6550c095f77c9281d64db9d94817777eaed9465a3af3b7d8a6a3c332d824a0","candidate_sha256":"acedfe6237c04dcd471c8496bcf3e9880e4315801220dda68b789c46fb0a8225"},
+      "tests/test_check_formal_registry_truth.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"6e6550c095f77c9281d64db9d94817777eaed9465a3af3b7d8a6a3c332d824a0","candidate_sha256":"e076ae84daf8af791140ee3328b4fed7d9fb96f411abc93cceafbc8228ff2638"},
       "tests/test_covenant_registry_disposition.py": {"disposition":"BYTE_EXACT","source_sha256":"7fd85a8ed5415d948046c54bb44ec0c5a91b7d90bb3e02aa6f4e9bbe9b37a630","candidate_sha256":"7fd85a8ed5415d948046c54bb44ec0c5a91b7d90bb3e02aa6f4e9bbe9b37a630"},
       "tests/test_integration.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"90cef0cf7dfc542cbe3cd4e5f745d64971352a6a93ec9cf08cd76f076614e01d","candidate_sha256":"dc33402b488e6c15a1fe7f8c3568a63ed17e10fdd7e82853fb5ceb3ba5189818"},
       "tests/test_path_resolution.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"ad32d9edad27a0a0dfff71c9a75ee13b76b4f92c4ff42f691d5e1c8abed33050","candidate_sha256":"96aaf0a25b2dfe01bc60f68cd3e48760ad8f486d13d24fbc8c82a6a3dedb708f"},
       "tests/test_registry_extraction.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"1b95552b124485d1374dbb3aab3cc7fb793f2924eaac6a380016a81323e07654","candidate_sha256":"ae327b4b419d4f0cca3b53cd97341188e26f0b66e6e13cb0323445b53805db94"},
       "tests/test_scope_and_names.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"11ae31c8f8d0c0e45f8fd72bb57d439b0c123e809533db6461eb153d2b807f51","candidate_sha256":"dd03d34c268b7e2d0736bb4a7006c525090bd035c2921b8bd7309cbfb6a4c7b4"},
       "tests/test_strip_lean_comments.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"5ec65a9f9dec186017230df464355492ad930143955d3ed9afffd71e0fdc6017","candidate_sha256":"f7076c904203aa4417322cd961c0ce8402ea631b09732aed15230b15dc9b3ab3"},
-      "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8de9d123d334b7f35ada433c30b7bc1894976dbd7c33001f8bfdc769d8045548"},
+      "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8ce69c12f3b713f960bed3c04f2f5e400c08b7e6f1896d5e68a1c2ebf8d8b93f"},
       "tools/LOCAL_CODEX_EXEC_REVIEW.md": {"disposition":"BYTE_EXACT","source_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5","candidate_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5"},
-      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"48142a13fceed011a61a58b74b09d38f787a07e4d886f3dfde97dae94863685d"}
+      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"1e765bf49657f9407549cda6e646e0e39f7f1a280a7d2927164c8349a41db967"}
     }
   },
   "coverage": [
@@ -647,7 +647,6 @@
         "RubinFormal.bridge_semantic_scriptsig",
         "RubinFormal.bridge_semantic_witness_cursor",
         "RubinFormal.consensus_error_ordering_contract",
-        "RubinFormal.tx_parse_pipeline_deterministic",
         "RubinFormal.tx_semantic_pipeline_deterministic",
         "RubinFormal.ptfc_header_version_fail",
         "RubinFormal.ptfc_header_txkind_fail",
@@ -769,7 +768,6 @@
         "RubinFormal.bridge_semantic_output_covenant": "rubin-formal/RubinFormal/ErrorPriority.lean",
         "RubinFormal.bridge_semantic_scriptsig": "rubin-formal/RubinFormal/ErrorPriority.lean",
         "RubinFormal.bridge_semantic_witness_cursor": "rubin-formal/RubinFormal/ErrorPriority.lean",
-        "RubinFormal.tx_parse_pipeline_deterministic": "rubin-formal/RubinFormal/ErrorPriority.lean",
         "RubinFormal.tx_semantic_pipeline_deterministic": "rubin-formal/RubinFormal/ErrorPriority.lean",
         "RubinFormal.consensus_error_ordering_contract": "rubin-formal/RubinFormal/ErrorPriority.lean",
         "RubinFormal.ptfc_header_version_fail": "rubin-formal/RubinFormal/ErrorPriority.lean",
@@ -780,7 +778,7 @@
         "RubinFormal.ptpi_outputs_fail": "rubin-formal/RubinFormal/ErrorPriority.lean",
         "RubinFormal.ptpi_locktime_fail": "rubin-formal/RubinFormal/ErrorPriority.lean"
       },
-      "notes": "Universal theorem lane: block-level 6-stage live error propagation on `validateBlockBasic`, the direct live tx-parse and tx-semantic stage bridges, and the strict ordering/injectivity contracts (`consensus_error_ordering_contract`, `tx_parse_pipeline_deterministic`, `tx_semantic_pipeline_deterministic`). TARGET ambiguity is formally resolved via `target_error_disambiguated`, and `dispatchCovenantValidation` is claimed on the direct live per-input path rather than through a parallel-model helper caveat. Separate fixture lane: CV-VALIDATION-ORDER replay on pinned ordering vectors. That executable lane is complementary regression evidence only and does not replace the live stage-order theorem surface.",
+      "notes": "Universal theorem lane: block-level 6-stage live error propagation on `validateBlockBasic`, direct live tx-parse and tx-semantic stage bridges, and the retained semantic ordering/injectivity contract. The experimental `tx_parse_pipeline_deterministic` model omits DA-core and payload-read failures and is intentionally unregistered as complete live parse evidence. TARGET ambiguity is formally resolved via `target_error_disambiguated`, and `dispatchCovenantValidation` is claimed on the direct live per-input path rather than through a parallel-model helper caveat. Separate fixture lane: CV-VALIDATION-ORDER replay on pinned ordering vectors. That executable lane is complementary regression evidence only and does not replace the live stage-order theorem surface.",
       "limitations": [],
       "evidence_level": "machine_checked_universal"
     },
@@ -1428,7 +1426,7 @@
         "RubinFormal.forkSelect_equal_chains": "rubin-formal/RubinFormal/ForkChoiceSelect.lean",
         "RubinFormal.forkSelect_exhaustive": "rubin-formal/RubinFormal/ForkChoiceSelect.lean"
       },
-      "notes": "Universal theorem lane: fork-choice exhaustive determinism proof. `forkSelect_exhaustive` is the master theorem: for ALL 32-byte hash inputs, `forkSelect` yields consistent cross-node agreement with zero axioms and zero semantic premises. `forkSelect_equal_chains` covers the identical-chain trivial case, `forkSelect_total_det` covers all distinguishable pairs, and `bytesLT_antisym` plus `bytesLT_total_of_ne` provide the tie-break properties. Separate generated fixture lane: `fork_choice_select_cv_contract_proved` machine-checks exactly the six current positive protocol-generated CV-FORK-CHOICE fork_choice_select vectors in their pinned order. Negative expect_ok=false vectors remain runtime conformance-only because the protocol generator excludes them; standalone-only extra vectors are not claimed. This contract lane is complementary concrete evidence only and does not replace the universal theorem lane. The old `block_hash_collision_resistance` axiom has been removed; the determinism proofs are fully axiom-free.",
+      "notes": "Universal theorem lane: fork-choice exhaustive determinism proof. `forkSelect_exhaustive` is the master theorem: for ALL 32-byte hash inputs, `forkSelect` yields consistent cross-node agreement with no extra semantic premises. `forkSelect_equal_chains` covers the identical-chain trivial case, `forkSelect_total_det` covers all distinguishable pairs, and `bytesLT_antisym` plus `bytesLT_total_of_ne` provide the tie-break properties. Separate generated fixture lane: `fork_choice_select_cv_contract_proved` machine-checks exactly the six current positive protocol-generated CV-FORK-CHOICE fork_choice_select vectors in their pinned order. Negative expect_ok=false vectors remain runtime conformance-only because the protocol generator excludes them; standalone-only extra vectors are not claimed. This contract lane is complementary concrete evidence only and does not replace the universal theorem lane. `kernel_checked` here means no `Lean.ofReduceBool` compiler/evaluator dependency; it does not assert absence of ordinary Lean foundations.",
       "limitations": [
         "forkSelect models the runtime fork_choice_select. Go/Rust code follows identical if/else chain. Structural equivalence evident from inspection but not proved via rfl (Go/Rust not importable to Lean).",
         "The 32-byte hash length premise (hL/hR) is a protocol type invariant (SHA3-256 output), not a semantic precondition. Runtime block hashes are always 32 bytes by construction.",
@@ -1477,7 +1475,7 @@
       },
       "notes": "The counted theorem is `accept_reject_equivalence_live`: for one identical precheck result and signature-task list, sequential reduction and the live SigCheckQueue.Flush accept/reject helper contract return the same verdict. Helper/model reducer lemmas remain in ParallelEquivalence.lean as supporting mathematics rather than separate coverage.",
       "limitations": [
-        "No theorem composes `accept_reject_equivalence_live` with `connectBlockFullComputed*` into end-to-end sequential-versus-parallel block equality. The ConnectBlockFull computed/wrapper equalities are independent TxContext facts registered under `txcontext_formal`.",
+        "No theorem composes `accept_reject_equivalence_live` with `connectBlockFullComputed*` into end-to-end sequential-versus-parallel block equality. The retained caller-supplied ConnectBlockFull wrapper lemmas are experimental and unregistered.",
         "Auxiliary tagged-result lowest-index theorems remain in ParallelEquivalence.lean for helper reasoning only; they are not counted here because the live queue may early-abort and surface a deterministic submission-order error instead of the absolute lowest failing index."
       ],
       "evidence_level": "machine_checked_universal"
@@ -1509,10 +1507,7 @@
         "RubinFormal.buildTxContext_all_continuings_bounded",
         "RubinFormal.buildTxContextFromValues_value_conservation",
         "RubinFormal.buildTxContextLive_eq_fromValues",
-        "RubinFormal.buildTxContextLive_eq_buildTxContext",
-        "RubinFormal.connectBlockFullComputed_eq_connectBlockFull",
-        "RubinFormal.connectBlockFullComputed_none_eq",
-        "RubinFormal.connectBlockFullComputed_ok_implies_txctx_continuing_counts"
+        "RubinFormal.buildTxContextLive_eq_buildTxContext"
       ],
       "file": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
       "theorem_files": {
@@ -1537,13 +1532,12 @@
         "RubinFormal.buildTxContext_all_continuings_bounded": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
         "RubinFormal.buildTxContextFromValues_value_conservation": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
         "RubinFormal.buildTxContextLive_eq_fromValues": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContextLive_eq_buildTxContext": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.connectBlockFullComputed_eq_connectBlockFull": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
-        "RubinFormal.connectBlockFullComputed_none_eq": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
-        "RubinFormal.connectBlockFullComputed_ok_implies_txctx_continuing_counts": "rubin-formal/RubinFormal/ConnectBlockFull.lean"
+        "RubinFormal.buildTxContextLive_eq_buildTxContext": "rubin-formal/RubinFormal/TxContextBehavioral.lean"
       },
-      "notes": "§14 closure over current live TxContext construction, value conservation, continuing-output bounds, and independent computed/wrapper facts. The 25 counted theorems cover sortExtIds, buildTxContext, buildTxContextFromValues, buildTxContextLive, compareUint128, validateContinuingOutputCount, value conservation, and the precise ConnectBlockFull computed/wrapper equality surface under its continuing-count guard. The retired CORE_EXT/CV-TXCTX sighash allowlist policy is not an active premise or claim. Zero fixture dependencies; source syntax is reviewed separately and does not override compiler_trusted/Lean.ofReduceBool closure.",
-      "limitations": [],
+      "notes": "§14 closure over TxContext helper construction, value conservation, and continuing-output bounds. The 22 counted theorems cover sortExtIds, buildTxContext, buildTxContextFromValues, buildTxContextLive, compareUint128, validateContinuingOutputCount, and value conservation. The retained caller-supplied ConnectBlockFull computed-wrapper lemmas are experimental and unregistered; they do not establish a transaction/UTXO-derived live TxContext. The retired CORE_EXT/CV-TXCTX sighash allowlist policy is not an active premise or claim. Zero fixture dependencies; source syntax is reviewed separately and does not override compiler_trusted/Lean.ofReduceBool closure.",
+      "limitations": [
+        "No registered theorem derives TxContextData from the connected transactions or UTXOs; the retained ConnectBlockFull computed wrapper surface is model-only."
+      ],
       "evidence_level": "machine_checked_universal"
     },
     {
@@ -1774,8 +1768,8 @@
     "proved_with_axiom_rows": 3,
     "stated_rows": 0,
     "deferred_rows": 0,
-    "theorem_references": 553,
-    "unique_theorem_names": 530,
+    "theorem_references": 549,
+    "unique_theorem_names": 526,
     "reused_theorem_names": [
       "RubinFormal.Conformance.cv_parse_vectors_pass",
       "RubinFormal.Conformance.cv_subsidy_vectors_pass",
@@ -1821,7 +1815,7 @@
     ]
   },
   "status_taxonomy": {
-    "machine_checked_universal": "Universal proof scope over all quantified inputs, independent of fixtures. Row-level proof_trust states whether the trusted base is the Lean kernel only or also Lean.ofReduceBool compiler/evaluator behavior.",
+    "machine_checked_universal": "Universal proof scope over all quantified inputs, independent of fixtures. Row-level proof_trust records whether compiled closures include Lean.ofReduceBool compiler/evaluator behavior: kernel_checked excludes that dependency only, not ordinary Lean foundations such as propext, Quot.sound, or Classical.choice.",
     "machine_checked_behavioral": "Behavioral decomposition of a Lean transcription of a live Go/Rust formula into pure functions with full constant pins, monotonicity, and CV replay. Not monadic end-to-end. Lean-to-Go/Rust parity is human-verified by code review, not machine-checked.",
     "machine_checked_contract": "Fixture-backed contract: conformance vectors or Go-trace vectors replayed via native_decide. Sound for covered inputs only; not a universal proof.",
     "machine_checked_model": "Property of a Lean model or helper definition with no live bridge to Go/Rust implementation. Honest about coverage gap; should be upgraded to behavioral or universal when a bridge is added.",

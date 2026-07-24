@@ -66,14 +66,14 @@
       "RubinFormal/CoinbaseBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"6df50d672213bcc08a21a4c2a0775f1a700c675d143e0a939eeb1e6607cca495","candidate_sha256":"6df50d672213bcc08a21a4c2a0775f1a700c675d143e0a939eeb1e6607cca495"},
       "RubinFormal/CoinbaseSubsidyBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"97dcfb4144c55a756b4020d8b970f5f8257189176da039114dbb25395400fa2c","candidate_sha256":"97dcfb4144c55a756b4020d8b970f5f8257189176da039114dbb25395400fa2c"},
       "RubinFormal/Conformance/CVVaultLifecycleReplay.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"e3848f52dd3cfe22e94208cc2b512e95d265c24dc93b66ec653f0c84185286f6","candidate_sha256":"4c5565dfba1541412d6b5b49381560392439952ada3f5f1e8887b1412ab2b895"},
-      "RubinFormal/ConnectBlockFull.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"3e01c90632d91091e1882535f3ecdb099e4c72b38d9ee52c7923a144ed4d698b","candidate_sha256":"9f491608147a67e52ee5c350d52f1c8927071a687ea0f321952277a89dc5a219"},
+      "RubinFormal/ConnectBlockFull.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"3e01c90632d91091e1882535f3ecdb099e4c72b38d9ee52c7923a144ed4d698b","candidate_sha256":"8f3abdf6f86ec565e682719f35a20dd933508a0cb725669598a852630a8d31b5"},
       "RubinFormal/ConnectBlockStrong.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"9b8aed27abe1b618aa6cede957c1e9a0b28d04dc3e81cff2f4c86234a83a0258","candidate_sha256":"601b49906968020a63fdd813f4291019a81897699d660fd258ab2fce446c5691"},
       "RubinFormal/CovenantParserGaps.lean": {"disposition":"BYTE_EXACT","source_sha256":"37e6ed125e90489f5ff03f18e693c51e3ae4bceab5255da91eadcac52409d2b0","candidate_sha256":"37e6ed125e90489f5ff03f18e693c51e3ae4bceab5255da91eadcac52409d2b0"},
       "RubinFormal/CovenantRegistryExhaustive.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"7ce2cf0832a63e234c7616fad9791b4a382ea1f10bb57b5d074111b54038ed29","candidate_sha256":"e45a870a1a03ff1bd06d5ee111f695ea07400f8252476e655fe12dc3db966d30"},
       "RubinFormal/CreateSideLiveGateBridge.lean": {"disposition":"BYTE_EXACT","source_sha256":"bd3702ab78260d7b3ba5e7c9aa3ba93c484cb21c54aabc4410d1194fabeda73c","candidate_sha256":"bd3702ab78260d7b3ba5e7c9aa3ba93c484cb21c54aabc4410d1194fabeda73c"},
       "RubinFormal/DaIntegrityBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"e5b5f91fe1140d56cfaad36b88465332e1ee72547471a1bdccd189cb5e028cf7","candidate_sha256":"e5b5f91fe1140d56cfaad36b88465332e1ee72547471a1bdccd189cb5e028cf7"},
       "RubinFormal/DeterminismRequirements.lean": {"disposition":"BYTE_EXACT","source_sha256":"d2db16f90fb246d739e72cd23b717f87025145a836a018743d625faffb6cb0a8","candidate_sha256":"d2db16f90fb246d739e72cd23b717f87025145a836a018743d625faffb6cb0a8"},
-      "RubinFormal/ErrorPriority.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"9a2361617709189211a99cc080e3278a04065048e79fd17c117a37470d0cd7a5","candidate_sha256":"0c532148bb77936096661c410b7bdf74bb85517631aa082b0456467daefb5bf3"},
+      "RubinFormal/ErrorPriority.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"9a2361617709189211a99cc080e3278a04065048e79fd17c117a37470d0cd7a5","candidate_sha256":"52774cc72210c46873e894b41f3e3fbfec589f49c6a1bcab6beda0fb9da307b6"},
       "RubinFormal/FeatureActivationFSM.lean": {"disposition":"BYTE_EXACT","source_sha256":"346b65852e93222b9b574b976c3ab17a26b42960005498245da6308ec9faf565","candidate_sha256":"346b65852e93222b9b574b976c3ab17a26b42960005498245da6308ec9faf565"},
       "RubinFormal/FeatureActivationLiveBridge.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"6959f52b6e206e2890a897ca3acdb55c0ee3566e2398858eebd3f8d5f5498dab","candidate_sha256":"657fc4583de15945852c4e1a62af5c79fa63c8fe0da8171486a91df2450be802"},
       "RubinFormal/ForkChoiceSelect.lean": {"disposition":"BYTE_EXACT","source_sha256":"4a1a9fdb6a4e883efcb869ec30542d165c25e55946635dfae867a1a70a4c6364","candidate_sha256":"4a1a9fdb6a4e883efcb869ec30542d165c25e55946635dfae867a1a70a4c6364"},
@@ -146,31 +146,58 @@
       "RubinFormal/WitnessCommitmentPregate.lean": {"disposition":"BYTE_EXACT","source_sha256":"5d523572039be8a7ed6f17c68f2050b480a1792b2bcc523ad416f47afd2ee535","candidate_sha256":"5d523572039be8a7ed6f17c68f2050b480a1792b2bcc523ad416f47afd2ee535"},
       "RubinFormal/WitnessCommitmentV1.lean": {"disposition":"BYTE_EXACT","source_sha256":"b8853ab1eb8f1fe35089b7a9ed0104498e2431766bf24e3823e88c3f6547c866","candidate_sha256":"b8853ab1eb8f1fe35089b7a9ed0104498e2431766bf24e3823e88c3f6547c866"},
       "scripts/check.sh": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"7ee36e514edb40d2182160165b9d43c82acd4aafe3b37a09a2da98fa1edf08a0","candidate_sha256":"b3795268916f36020cd52a31b9321592d83aaa1f2f6deb0bf8e04433f1e82c59"},
-      "tests/test_check_formal_registry_truth.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"6e6550c095f77c9281d64db9d94817777eaed9465a3af3b7d8a6a3c332d824a0","candidate_sha256":"acedfe6237c04dcd471c8496bcf3e9880e4315801220dda68b789c46fb0a8225"},
+      "tests/test_check_formal_registry_truth.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"6e6550c095f77c9281d64db9d94817777eaed9465a3af3b7d8a6a3c332d824a0","candidate_sha256":"e076ae84daf8af791140ee3328b4fed7d9fb96f411abc93cceafbc8228ff2638"},
       "tests/test_covenant_registry_disposition.py": {"disposition":"BYTE_EXACT","source_sha256":"7fd85a8ed5415d948046c54bb44ec0c5a91b7d90bb3e02aa6f4e9bbe9b37a630","candidate_sha256":"7fd85a8ed5415d948046c54bb44ec0c5a91b7d90bb3e02aa6f4e9bbe9b37a630"},
       "tests/test_integration.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"90cef0cf7dfc542cbe3cd4e5f745d64971352a6a93ec9cf08cd76f076614e01d","candidate_sha256":"dc33402b488e6c15a1fe7f8c3568a63ed17e10fdd7e82853fb5ceb3ba5189818"},
       "tests/test_path_resolution.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"ad32d9edad27a0a0dfff71c9a75ee13b76b4f92c4ff42f691d5e1c8abed33050","candidate_sha256":"96aaf0a25b2dfe01bc60f68cd3e48760ad8f486d13d24fbc8c82a6a3dedb708f"},
       "tests/test_registry_extraction.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"1b95552b124485d1374dbb3aab3cc7fb793f2924eaac6a380016a81323e07654","candidate_sha256":"ae327b4b419d4f0cca3b53cd97341188e26f0b66e6e13cb0323445b53805db94"},
       "tests/test_scope_and_names.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"11ae31c8f8d0c0e45f8fd72bb57d439b0c123e809533db6461eb153d2b807f51","candidate_sha256":"dd03d34c268b7e2d0736bb4a7006c525090bd035c2921b8bd7309cbfb6a4c7b4"},
       "tests/test_strip_lean_comments.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"5ec65a9f9dec186017230df464355492ad930143955d3ed9afffd71e0fdc6017","candidate_sha256":"f7076c904203aa4417322cd961c0ce8402ea631b09732aed15230b15dc9b3ab3"},
-      "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8de9d123d334b7f35ada433c30b7bc1894976dbd7c33001f8bfdc769d8045548"},
+      "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8ce69c12f3b713f960bed3c04f2f5e400c08b7e6f1896d5e68a1c2ebf8d8b93f"},
       "tools/LOCAL_CODEX_EXEC_REVIEW.md": {"disposition":"BYTE_EXACT","source_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5","candidate_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5"},
-      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"48142a13fceed011a61a58b74b09d38f787a07e4d886f3dfde97dae94863685d"}
+      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"1e765bf49657f9407549cda6e646e0e39f7f1a280a7d2927164c8349a41db967"}
     }
   },
   "critical_ops": [
+    {
+      "op": "parse_tx",
+      "gate": "CV-PARSE",
+      "model_theorem": "RubinFormal.Refinement.parse_tx_go_trace_contract_proved",
+      "lean_file": "rubin-formal/RubinFormal/Refinement/GoTraceV1Check.lean",
+      "evidence_level": "machine_checked_contract",
+      "proof_trust": "compiler_trusted",
+      "contract_scope": "Bounded Go-trace replay over exactly the listed generated parse_tx vectors.",
+      "limitations": [
+        "The trace covers only PARSE-01 and PARSE-16 from the current generated source.",
+        "It does not establish complete parse-stage coverage or cross-language refinement for arbitrary bytes."
+      ],
+      "trace_source_file": "rubin-formal/RubinFormal/Refinement/GoTraceV1.lean",
+      "traced_vector_ids": [
+        "PARSE-01",
+        "PARSE-16"
+      ],
+      "supporting_theorems": []
+    },
     {
       "op": "sighash_v1",
       "gate": "CV-SIGHASH",
       "model_theorem": "RubinFormal.sighash_v1_proved",
       "lean_file": "rubin-formal/RubinFormal/PinnedSections.lean",
-      "evidence_level": "machine_checked_universal",
+      "evidence_level": "machine_checked_contract",
       "proof_trust": "compiler_trusted",
       "spec_section": "§12",
-      "contract_scope": "Universal Lean model surface for current sighash structural selection and base-type classification, with CV-SIGHASH replay as complementary evidence.",
+      "contract_scope": "Bounded Go-trace replay for exactly the listed current sighash_v1 vectors, with structural selector/base-type model support.",
       "limitations": [
         "The executable replay covers the current CV-SIGHASH fixture set, not arbitrary raw transaction / witness-carried sighash_type combinations.",
         "DA kinds lack an active Lean live bridge; this row does not claim live Go/Rust DigestV1 correspondence or a full-protocol residual."
+      ],
+      "trace_source_file": "rubin-formal/RubinFormal/Refinement/GoTraceV1.lean",
+      "traced_vector_ids": [
+        "SIGHASH-01",
+        "SIGHASH-02",
+        "SIGHASH-03",
+        "SIGHASH-04",
+        "SIGHASH-05"
       ],
       "supporting_theorems": [
         "RubinFormal.sighash_v1_proved",
@@ -189,7 +216,7 @@
         "RubinFormal.selectHashOutputs_invalid_returns_none",
         "RubinFormal.hasValidBaseType_exhaustive"
       ],
-      "notes": "Universal Lean model/fixture claim for the structural selector/base-type surface; it is not a live implementation bridge."
+      "notes": "Bounded Go-trace contract for the structural selector/base-type surface; it is not a live implementation bridge."
     },
     {
       "op": "retarget_v1",
@@ -201,10 +228,22 @@
       "contract_scope": "Bounded CV-POW replay contract for retargetV1, supported by a behavioral decomposition of the three-way clamp with constant pins, candidate monotonicity, 4x stability boundary, lo≤hi under valid preconditions, strengthened clamped range, and timestamp clamping.",
       "limitations": [
         "The model theorem is bounded CV replay plus behavioral support; it does not claim a universal end-to-end refinement theorem for every retargetV1 input tuple.",
-        "No Go-trace theorem or trace-ID set is claimed by this row."
+        "The trace binding is limited to the exact generated retarget_v1 IDs listed below."
       ],
       "spec_section": "§15",
       "go_function": "retargetV1",
+      "trace_source_file": "rubin-formal/RubinFormal/Refinement/GoTraceV1.lean",
+      "traced_vector_ids": [
+        "POW-01",
+        "POW-02",
+        "POW-03",
+        "POW-03A",
+        "POW-03C",
+        "POW-03D",
+        "POW-08",
+        "POW-09",
+        "POW-10"
+      ],
       "supporting_theorems": [
         "RubinFormal.retarget_window_size_value",
         "RubinFormal.retarget_block_interval_value",
@@ -261,11 +300,24 @@
       "gate": "CV-UTXO-BASIC",
       "model_theorem": "RubinFormal.utxo_apply_basic_universal_refinement",
       "lean_file": "rubin-formal/RubinFormal/RefinementBridgeV1.lean",
-      "evidence_level": "machine_checked_universal",
+      "evidence_level": "machine_checked_contract",
       "proof_trust": "kernel_checked",
-      "contract_scope": "Universal inductive proof: for ANY transaction list and ANY UTXO state, if `connectBlockTxs` succeeds then UTXO conservation AND anti-double-spend hold simultaneously. Chain-level composition via `utxo_apply_basic_chain_refinement`. No axioms, no fixture dependence.",
+      "contract_scope": "Bounded Go-trace replay for exactly the listed utxo_apply_basic vectors, supported by separately registered UTXO conservation and anti-double-spend theorems.",
       "limitations": [
-        "The universal theorems cover `connectBlockTxs` (non-coinbase transaction processing). Header linkage, PoW, and coinbase checks are proved elsewhere."
+        "The trace contract covers only the listed vectors. Separate universal theorems cover `connectBlockTxs` (non-coinbase transaction processing); header linkage, PoW, and coinbase checks are proved elsewhere.",
+        "kernel_checked records no Lean.ofReduceBool compiler/evaluator dependency and does not assert absence of ordinary Lean foundations."
+      ],
+      "trace_source_file": "rubin-formal/RubinFormal/Refinement/GoTraceV1.lean",
+      "traced_vector_ids": [
+        "CV-U-06",
+        "CV-U-09",
+        "CV-U-11",
+        "CV-U-13",
+        "CV-U-19",
+        "CV-U-EXT-01",
+        "CV-U-EXT-02",
+        "CV-U-EXT-03",
+        "CV-U-EXT-06"
       ],
       "supporting_theorems": [
         "RubinFormal.utxo_conservation_theorem",
@@ -353,11 +405,11 @@
       "go_function": "connect_block_parallel.go::SigCheckQueue.Flush",
       "contract_scope": "Universal helper-level accept/reject equivalence: given one identical precheck result and signature-task list, sequential reduction and the live SigCheckQueue.Flush accept/reject contract return the same verdict.",
       "limitations": [
-        "No theorem composes this helper result with `connectBlockFullComputed*` into end-to-end sequential-versus-parallel block equality. Those ConnectBlockFull equalities are independent TxContext wrapper facts.",
+        "No theorem composes this helper result with `connectBlockFullComputed*` into end-to-end sequential-versus-parallel block equality. The caller-supplied ConnectBlockFull wrapper lemmas are experimental and unregistered.",
         "Auxiliary tagged-result lowest-index helper theorems are excluded from this bridge because the live queue promises deterministic submission-order surfacing under early abort, not a universal absolute-lowest-failing-index contract."
       ],
       "supporting_theorems": [],
-      "notes": "The row is intentionally limited to the existing live queue helper theorem. ConnectBlockFull computed/wrapper equalities remain valid independent facts but are not parallel-composition evidence."
+      "notes": "The row is intentionally limited to the existing live queue helper theorem. Retained ConnectBlockFull computed/wrapper lemmas are experimental model facts, not parallel-composition evidence."
     },
     {
       "op": "weight_accounting",
@@ -403,6 +455,10 @@
         "RubinFormal.Conformance.cv_native_rotation_cutoff_vectors_pass",
         "RubinFormal.Conformance.cv_native_rotation_sunset_vectors_pass"
       ],
+      "supporting_theorem_files": {
+        "RubinFormal.Conformance.cv_native_rotation_cutoff_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVNativeRotationCutoffReplay.lean",
+        "RubinFormal.Conformance.cv_native_rotation_sunset_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVNativeRotationSunsetReplay.lean"
+      },
       "evidence_level": "machine_checked_behavioral",
       "proof_trust": "compiler_trusted",
       "contract_scope": "Behavioral state-machine model of §23.2.1 descriptor activation lifecycle proving at-most-one uniqueness (inductive), five-phase exhaustive height partition with mutual exclusion. Conformance: 11 vectors (6 cutoff + 5 sunset) structurally replayed.",
@@ -440,7 +496,10 @@
         "RubinFormal.FeatureActivationLiveBridge.min_three_steps_to_active",
         "RubinFormal.FeatureActivationLiveBridge.featurebit_state_at_height_from_window_counts_state_eq_fold",
         "RubinFormal.FeatureActivationLiveBridge.featurebit_state_at_height_from_window_counts_state_monotone"
-      ]
+      ],
+      "supporting_theorem_files": {
+        "RubinFormal.multi_step_monotone": "rubin-formal/RubinFormal/FeatureActivationFSM.lean"
+      }
     },
     {
       "op": "spend_gate_bridge",
@@ -463,7 +522,12 @@
         "RubinFormal.NativeSpendCreateGate.fi_rot_04_spend_gate_iff",
         "RubinFormal.LegacySunset.fi_rot_06_old_suite_rejected_after_h4",
         "RubinFormal.LegacySunset.fi_rot_06_new_suite_always_spendable_after_h4"
-      ]
+      ],
+      "supporting_theorem_files": {
+        "RubinFormal.NativeSpendCreateGate.fi_rot_04_spend_gate_iff": "rubin-formal/RubinFormal/NativeSpendCreateGate.lean",
+        "RubinFormal.LegacySunset.fi_rot_06_old_suite_rejected_after_h4": "rubin-formal/RubinFormal/LegacySunset.lean",
+        "RubinFormal.LegacySunset.fi_rot_06_new_suite_always_spendable_after_h4": "rubin-formal/RubinFormal/LegacySunset.lean"
+      }
     },
     {
       "op": "native_rotation",
@@ -484,7 +548,10 @@
         "RubinFormal.NativeRegistryResolution.fi_rot_03_active_suite_resolves",
         "RubinFormal.NativeRegistryResolution.fi_rot_03_active_create_suite_resolves",
         "RubinFormal.RegistryResolutionLiveBridge.pre_rotation_registered_iff"
-      ]
+      ],
+      "supporting_theorem_files": {
+        "RubinFormal.NativeRegistryResolution.fi_rot_03_active_create_suite_resolves": "rubin-formal/RubinFormal/NativeRegistryResolution.lean"
+      }
     }
   ]
 }

@@ -35,10 +35,32 @@ class RegistryTruthCheckerTests(unittest.TestCase):
             self.assertEqual(stderr.getvalue(), "ERROR: proof_coverage.json: invalid UTF-8\n")
 
     def test_axiom_output_classifies_and_fails_closed(self) -> None:
-        trust, errors = parse_axiom_output("'A.ok' depends on axioms: [propext, Lean.ofReduceBool]\n'B.ok' does not depend on any axioms\n", ["A.ok", "B.ok"])
+        trust, errors = parse_axiom_output("'A.ok' depends on axioms: [propext, Lean.ofReduceBool]\n'B.ok' depends on axioms: [propext, Quot.sound, Classical.choice]\n", ["A.ok", "B.ok"])
         self.assertEqual(errors, [])
         self.assertEqual(trust, {"A.ok": "compiler_trusted", "B.ok": "kernel_checked"})
         self.assertTrue(parse_axiom_output("unexpected", ["A.ok"])[1])
+
+    def test_supporting_theorems_require_exact_file_bindings(self) -> None:
+        theorem = "RubinFormal.Model.ok"
+        coverage = {"coverage": [{"theorems": [theorem], "theorem_files": {theorem: "rubin-formal/RubinFormal/Model.lean"}}]}
+        paths = registry.coverage_theorem_file_paths(coverage)
+        bindings, errors = registry.bridge_supporting_theorem_bindings({"op": "demo", "supporting_theorems": [theorem]}, paths)
+        self.assertEqual((bindings, errors), ({theorem: "rubin-formal/RubinFormal/Model.lean"}, []))
+        _, errors = registry.bridge_supporting_theorem_bindings(
+            {
+                "op": "demo",
+                "supporting_theorems": [theorem],
+                "supporting_theorem_files": {theorem: "rubin-formal/RubinFormal/Model.lean"},
+            },
+            paths,
+        )
+        self.assertEqual(
+            errors,
+            [
+                f"refinement_bridge `demo` supporting theorem `{theorem}` has direct binding but "
+                "proof_coverage already binds it to `rubin-formal/RubinFormal/Model.lean`"
+            ],
+        )
 
     def test_extract_declared_names_ignores_comments(self) -> None:
         text = """

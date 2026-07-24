@@ -15,20 +15,21 @@ REPO_PREFIX = "rubin-formal/"
 PROOF_TRUST_KERNEL = "kernel_checked"
 PROOF_TRUST_COMPILER = "compiler_trusted"
 ALLOWED_PROOF_TRUST = {PROOF_TRUST_KERNEL, PROOF_TRUST_COMPILER}
+# proof_trust distinguishes only compiler/evaluator closure: ordinary Lean
+# foundations such as propext, Quot.sound, and Classical.choice remain possible.
 COMPILER_TRUST_AXIOM = "Lean.ofReduceBool"
 
 # Intentionally narrow shared-op parity scope after Q-FORMAL-REGISTRY-EVIDENCE-LEVEL-ALIGN-01.
-# `retarget_v1` and `fork_choice_select` remain honest supplemental bridge lanes whose
+# `sighash_v1`, `retarget_v1`, and `fork_choice_select` remain honest supplemental bridge lanes whose
 # bridge evidence level is narrower than the broader section row on purpose.
 SHARED_OP_PARITY = {
-    "sighash_v1": "sighash_v1",
     "da_set_integrity": "da_set_integrity",
     "weight_accounting": "weight_accounting",
 }
-EXPECTED_COVERAGE_TRUST = (31, 553, 530, 22, 73, 66)
-EXPECTED_UNIVERSAL_TRUST = (27, 533, 21, 65, 58)
-EXPECTED_KERNEL_THEOREM_COMPLEMENT = (480, 464)
-EXPECTED_BRIDGE_TRUST = (11, 161, 156, 7, 18, 17)
+EXPECTED_COVERAGE_TRUST = (31, 549, 526, 22, 73, 66)
+EXPECTED_UNIVERSAL_TRUST = (27, 529, 21, 65, 58)
+EXPECTED_KERNEL_THEOREM_COMPLEMENT = (476, 460)
+EXPECTED_BRIDGE_TRUST = (12, 162, 157, 8, 19, 18)
 EXPECTED_UNAFFECTED_UNIVERSAL = {
     "consensus_constants_witness_lengths_pre_rotation",
     "block_validation_order",
@@ -42,6 +43,7 @@ EXPECTED_AFFECTED_BRIDGE_REFS = {
     "fork_choice_select": 2,
     "native_rotation": 1,
     "native_suite_rotation": 2,
+    "parse_tx": 1,
     "retarget_v1": 9,
     "sighash_v1": 2,
     "weight_accounting": 1,
@@ -299,6 +301,11 @@ def bridge_paths(row: dict) -> set[str]:
         path = row.get(key)
         if isinstance(path, str):
             refs.add(path)
+    theorem_files = row.get("supporting_theorem_files", {})
+    if isinstance(theorem_files, dict):
+        for path in theorem_files.values():
+            if isinstance(path, str):
+                refs.add(path)
     return refs
 
 
@@ -323,7 +330,61 @@ def coverage_theorems(row: dict) -> list[TheoremRef]:
     return refs
 
 
-def bridge_theorems(row: dict) -> list[TheoremRef]:
+def coverage_theorem_file_paths(coverage: dict) -> dict[str, set[str]]:
+    paths: dict[str, set[str]] = {}
+    for row in coverage.get("coverage", []):
+        if not isinstance(row, dict):
+            continue
+        theorem_files = row.get("theorem_files", {})
+        if not isinstance(theorem_files, dict):
+            continue
+        for theorem in row.get("theorems", []):
+            path = theorem_files.get(theorem) if isinstance(theorem, str) else None
+            if isinstance(path, str):
+                paths.setdefault(theorem, set()).add(path)
+    return paths
+
+
+def bridge_supporting_theorem_bindings(
+    row: dict, coverage_paths: dict[str, set[str]]
+) -> tuple[dict[str, str], list[str]]:
+    op = row.get("op", "<unknown>")
+    supporting = {theorem for theorem in row.get("supporting_theorems", []) if isinstance(theorem, str)}
+    direct = row.get("supporting_theorem_files", {})
+    if not isinstance(direct, dict):
+        return {}, [f"refinement_bridge `{op}` supporting_theorem_files must be an object"]
+    errors: list[str] = []
+    for theorem in direct:
+        if not isinstance(theorem, str) or theorem not in supporting:
+            errors.append(f"refinement_bridge `{op}` has unexpected supporting theorem binding `{theorem}`")
+    bindings: dict[str, str] = {}
+    for theorem in supporting:
+        covered = coverage_paths.get(theorem, set())
+        explicit = direct.get(theorem)
+        if len(covered) > 1:
+            errors.append(
+                f"refinement_bridge `{op}` supporting theorem `{theorem}` has conflicting proof_coverage bindings: {sorted(covered)}"
+            )
+            continue
+        if covered:
+            path = next(iter(covered))
+            if explicit is not None:
+                errors.append(
+                    f"refinement_bridge `{op}` supporting theorem `{theorem}` has direct binding but "
+                    f"proof_coverage already binds it to `{path}`"
+                )
+                continue
+            bindings[theorem] = path
+        elif explicit is not None and not isinstance(explicit, str):
+            errors.append(f"refinement_bridge `{op}` supporting theorem `{theorem}` has non-string file binding")
+        elif isinstance(explicit, str):
+            bindings[theorem] = explicit
+        else:
+            errors.append(f"refinement_bridge `{op}` supporting theorem `{theorem}` has no exact Lean-file binding")
+    return bindings, errors
+
+
+def bridge_theorems(row: dict, supporting_bindings: Optional[dict[str, str]] = None) -> list[TheoremRef]:
     refs: list[TheoremRef] = []
     lean_file = row.get("lean_file") if isinstance(row.get("lean_file"), str) else None
     model_theorem = row.get("model_theorem")
@@ -331,21 +392,33 @@ def bridge_theorems(row: dict) -> list[TheoremRef]:
         refs.append((model_theorem, lean_file))
     for theorem in row.get("supporting_theorems", []):
         if isinstance(theorem, str):
-            refs.append((theorem, None))
+            refs.append((theorem, supporting_bindings.get(theorem) if supporting_bindings else None))
     return refs
 
 
-def iter_registered_theorems(
+def iter_registered_theorems_with_binding_errors(
     coverage: dict, bridge: dict
-) -> tuple[list[TheoremRef], list[TheoremRef]]:
+) -> tuple[list[TheoremRef], list[TheoremRef], list[str]]:
     coverage_refs: list[TheoremRef] = []
     bridge_refs: list[TheoremRef] = []
     for row in coverage.get("coverage", []):
         if isinstance(row, dict):
             coverage_refs.extend(coverage_theorems(row))
+    binding_errors: list[str] = []
+    coverage_paths = coverage_theorem_file_paths(coverage)
     for row in bridge.get("critical_ops", []):
         if isinstance(row, dict):
-            bridge_refs.extend(bridge_theorems(row))
+            bindings, errors = bridge_supporting_theorem_bindings(row, coverage_paths)
+            bridge_refs.extend(bridge_theorems(row, bindings))
+            binding_errors.extend(errors)
+    return coverage_refs, bridge_refs, binding_errors
+
+
+def iter_registered_theorems(
+    coverage: dict, bridge: dict
+) -> tuple[list[TheoremRef], list[TheoremRef]]:
+    """Return registered theorem references using the historical public shape."""
+    coverage_refs, bridge_refs, _ = iter_registered_theorems_with_binding_errors(coverage, bridge)
     return coverage_refs, bridge_refs
 
 
@@ -636,12 +709,15 @@ def collect_registry_errors(
     theorem_exists_in_file,
 ) -> tuple[set[str], list[TheoremRef], list[TheoremRef], list[str]]:
     registered_paths = iter_registry_paths(coverage, bridge)
-    coverage_theorem_refs, bridge_theorem_refs = iter_registered_theorems(coverage, bridge)
+    coverage_theorem_refs, bridge_theorem_refs, binding_errors = iter_registered_theorems_with_binding_errors(
+        coverage, bridge
+    )
     coverage_rows = indexed_rows(coverage.get("coverage", []), "section_key")
     bridge_rows = indexed_rows(bridge.get("critical_ops", []), "op")
     errors = []
     if coverage.get("source_rebind") != bridge.get("source_rebind"):
         errors.append("source_rebind manifest drift between proof_coverage.json and refinement_bridge.json")
+    errors.extend(binding_errors)
     errors.extend(validate_registered_paths(repo_root, registered_paths))
     errors.extend(
         validate_theorem_refs(

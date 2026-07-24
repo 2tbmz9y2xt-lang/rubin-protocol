@@ -24,6 +24,7 @@ ALLOWED_EVIDENCE_LEVEL = {
 FORMAL_SKIP_GATE_PREFIXES = ("CV-PV-",)
 FORBIDDEN_SCOPE_MARKERS = ("universal", "for all", "all inputs", "all byte strings", "not bounded", "not-bounded")
 TRACE_SOURCE_FILE = "rubin-formal/RubinFormal/Refinement/GoTraceV1.lean"
+REQUIRED_TRACE_OPS = frozenset({"parse_tx", "sighash_v1", "retarget_v1", "utxo_apply_basic"})
 
 
 def valid_non_empty_string_list(value: object) -> bool:
@@ -76,6 +77,32 @@ def trace_ids_for_op(trace_text: str, op: str) -> set[str]:
         if id_end != -1:
             ids.add(item[id_start:id_end])
     return ids
+
+
+def trace_binding_errors(
+    op: str, evidence_level: object, trace_source_file: object, traced_vector_ids: object, trace_text: str
+) -> list[str]:
+    required = op in REQUIRED_TRACE_OPS
+    declared = trace_source_file is not None or traced_vector_ids is not None
+    if not required and not declared:
+        return []
+    errors: list[str] = []
+    if required and not declared:
+        return [f"required trace evidence missing for op `{op}`"]
+    if evidence_level != "machine_checked_contract":
+        errors.append(f"trace-backed op `{op}` must use machine_checked_contract evidence")
+    if trace_source_file != TRACE_SOURCE_FILE:
+        errors.append(f"trace_source_file for op `{op}` must be `{TRACE_SOURCE_FILE}`, got {trace_source_file}")
+    if not valid_non_empty_string_list(traced_vector_ids):
+        errors.append(f"traced_vector_ids[] for op `{op}` must be a non-empty string list")
+    else:
+        expected = trace_ids_for_op(trace_text, op)
+        actual = set(traced_vector_ids)
+        if not expected:
+            errors.append(f"no imported trace rows found for trace-backed op `{op}`")
+        elif actual != expected:
+            errors.append(f"traced_vector_ids[] for op `{op}` drift: expected {sorted(expected)}, got {sorted(actual)}")
+    return errors
 
 
 def gate_to_camel(gate: str) -> str:
@@ -182,6 +209,7 @@ def main() -> int:
     trace_text = trace_path.read_text(encoding="utf-8")
 
     bad = False
+    seen_ops: set[str] = set()
     for idx, row in enumerate(rows):
         if not isinstance(row, dict):
             print(f"ERROR: critical_ops[{idx}] must be object", file=sys.stderr)
@@ -202,6 +230,7 @@ def main() -> int:
             print(f"ERROR: critical_ops[{idx}] missing op", file=sys.stderr)
             bad = True
             continue
+        seen_ops.add(op)
         if not isinstance(theorem, str) or not theorem:
             print(f"ERROR: missing model_theorem for op `{op}`", file=sys.stderr)
             bad = True
@@ -278,36 +307,13 @@ def main() -> int:
                 print(f"ERROR: behavioral limitations[] for op `{op}` must be non-empty", file=sys.stderr)
                 bad = True
 
-        claims_trace_evidence = trace_source_file is not None or traced_vector_ids is not None
-        if claims_trace_evidence:
-            if evidence_level != "machine_checked_contract":
-                print(f"ERROR: trace-backed op `{op}` must use machine_checked_contract evidence", file=sys.stderr)
-                bad = True
-            if trace_source_file != TRACE_SOURCE_FILE:
-                print(
-                    f"ERROR: trace_source_file for op `{op}` must be `{TRACE_SOURCE_FILE}`, got {trace_source_file}",
-                    file=sys.stderr,
-                )
-                bad = True
-            if not valid_non_empty_string_list(traced_vector_ids):
-                print(f"ERROR: traced_vector_ids[] for op `{op}` must be a non-empty string list", file=sys.stderr)
-                bad = True
-            else:
-                expected_trace_ids = trace_ids_for_op(trace_text, op)
-                actual_trace_ids = set(traced_vector_ids)
-                if not expected_trace_ids:
-                    print(f"ERROR: no imported trace rows found for trace-backed op `{op}`", file=sys.stderr)
-                    bad = True
-                elif actual_trace_ids != expected_trace_ids:
-                    print(
-                        f"ERROR: traced_vector_ids[] for op `{op}` drift: expected {sorted(expected_trace_ids)}, "
-                        f"got {sorted(actual_trace_ids)}",
-                        file=sys.stderr,
-                    )
-                    bad = True
-        elif "traced_vector_ids" in row or "trace_source_file" in row:
-            print(f"ERROR: incomplete trace evidence fields for op `{op}`", file=sys.stderr)
+        for error in trace_binding_errors(op, evidence_level, trace_source_file, traced_vector_ids, trace_text):
+            print(f"ERROR: {error}", file=sys.stderr)
             bad = True
+
+    for op in sorted(REQUIRED_TRACE_OPS - seen_ops):
+        print(f"ERROR: required trace op missing from refinement_bridge.json: `{op}`", file=sys.stderr)
+        bad = True
 
     if bad:
         return 1
