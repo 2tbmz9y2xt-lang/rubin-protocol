@@ -13,8 +13,8 @@
     "inventory_sha256": "77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6",
     "original_imported_source_paths": 116,
     "active_imported_source_paths": 102,
-    "byte_exact_path_count": 76,
-    "reconcile_current_protocol_path_count": 16,
+    "byte_exact_path_count": 75,
+    "reconcile_current_protocol_path_count": 17,
     "reconcile_current_protocol_paths": [
       "RubinFormal/Conformance/CVVaultLifecycleReplay.lean",
       "RubinFormal/ConnectBlockFull.lean",
@@ -29,6 +29,7 @@
       "RubinFormal/SighashAssumptionBridge.lean",
       "RubinFormal/SpendGateLiveBridge.lean",
       "RubinFormal/StructuralRulesBehavioral.lean",
+      "RubinFormal/ThresholdSpendSuiteGateBridge.lean",
       "RubinFormal/TxWireTxAfterDaCoreStep.lean",
       "RubinFormal/TxWireTxFinalizeContract.lean",
       "RubinFormal/VaultStateMachine.lean"
@@ -56,7 +57,7 @@
       "tests/test_strip_lean_comments.py",
       "tests/test_validation.py"
     ],
-    "active_partition_equation": "76 + 16 + 1 + 2 + 7 = 102",
+    "active_partition_equation": "75 + 17 + 1 + 2 + 7 = 102",
     "original_inventory_equation": "102 + 4 + 3 + 7 = 116"
   },
   "coverage": [
