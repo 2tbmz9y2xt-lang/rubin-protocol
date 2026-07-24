@@ -13,15 +13,17 @@
     "inventory_sha256": "77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6",
     "original_imported_source_paths": 116,
     "active_imported_source_paths": 102,
-    "byte_exact_path_count": 75,
-    "reconcile_current_protocol_path_count": 17,
+    "byte_exact_path_count": 73,
+    "reconcile_current_protocol_path_count": 19,
     "reconcile_current_protocol_paths": [
+      "RubinFormal/BlockValidationOrder.lean",
       "RubinFormal/Conformance/CVVaultLifecycleReplay.lean",
       "RubinFormal/ConnectBlockFull.lean",
       "RubinFormal/ConnectBlockStrong.lean",
       "RubinFormal/CovenantRegistryExhaustive.lean",
       "RubinFormal/ErrorPriority.lean",
       "RubinFormal/FeatureActivationLiveBridge.lean",
+      "RubinFormal/ForkChoiceSelect.lean",
       "RubinFormal/HtlcSpendStructuralLiveBridge.lean",
       "RubinFormal/PerTxStateMachine.lean",
       "RubinFormal/RefinementBridgeV1.lean",
@@ -57,13 +59,13 @@
       "tests/test_strip_lean_comments.py",
       "tests/test_validation.py"
     ],
-    "active_partition_equation": "75 + 17 + 1 + 2 + 7 = 102",
+    "active_partition_equation": "73 + 19 + 1 + 2 + 7 = 102",
     "original_inventory_equation": "102 + 4 + 3 + 7 = 116",
     "active_path_manifest": {
       "REGISTRY_COMPLETENESS_POLICY.md": {"disposition":"IMPORT_ADAPT_SINGLE_OWNER","source_sha256":"9af957d4fefad13471a00ca18f1ee1c146c8b34e551cf3f9b179c517e5be8c3c","candidate_sha256":"7508fb16b34f011f2983582c0d42a4253c526f3edea03a3d09677ebb26a7ddc7"},
       "RubinFormal/BlockHeaderRoundtrip.lean": {"disposition":"BYTE_EXACT","source_sha256":"3239aac537d9d53f4d8af01716b8a959fa4fe3b057b8e9d6b9d75d85b6f860ec","candidate_sha256":"3239aac537d9d53f4d8af01716b8a959fa4fe3b057b8e9d6b9d75d85b6f860ec"},
       "RubinFormal/BlockTimestampBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"c21d4899dc9fe505b48e8037c04eb66599b558bb1f184b1676d84da12c0e35d5","candidate_sha256":"c21d4899dc9fe505b48e8037c04eb66599b558bb1f184b1676d84da12c0e35d5"},
-      "RubinFormal/BlockValidationOrder.lean": {"disposition":"BYTE_EXACT","source_sha256":"a63d141bd53dac280a0012a3a1e742ecf059c9d2736774ae97e8dc3d3957549f","candidate_sha256":"a63d141bd53dac280a0012a3a1e742ecf059c9d2736774ae97e8dc3d3957549f"},
+      "RubinFormal/BlockValidationOrder.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"a63d141bd53dac280a0012a3a1e742ecf059c9d2736774ae97e8dc3d3957549f","candidate_sha256":"0716940a9a99bfb5f7dfcf0c20cb1710f9866fc3d19090ee39c1a9b38a9aff35"},
       "RubinFormal/BlockValidationOrderBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"ff3babb8806a22a1826db0c8f7e5538224b7959a71463b7f4022a9ac1c8578f6","candidate_sha256":"ff3babb8806a22a1826db0c8f7e5538224b7959a71463b7f4022a9ac1c8578f6"},
       "RubinFormal/ByteWireLegacy.lean": {"disposition":"BYTE_EXACT","source_sha256":"75d9e9bf54b5d633737f436d1a2cea2eb25563778a289fa617ec1fe9d2bf7ebb","candidate_sha256":"75d9e9bf54b5d633737f436d1a2cea2eb25563778a289fa617ec1fe9d2bf7ebb"},
       "RubinFormal/BytesEqLemmas.lean": {"disposition":"BYTE_EXACT","source_sha256":"79b54bdbd91230d50864d1ba1c969b02d298f88b8d986892cfb8aef94dd845bf","candidate_sha256":"79b54bdbd91230d50864d1ba1c969b02d298f88b8d986892cfb8aef94dd845bf"},
@@ -79,10 +81,10 @@
       "RubinFormal/CreateSideLiveGateBridge.lean": {"disposition":"BYTE_EXACT","source_sha256":"bd3702ab78260d7b3ba5e7c9aa3ba93c484cb21c54aabc4410d1194fabeda73c","candidate_sha256":"bd3702ab78260d7b3ba5e7c9aa3ba93c484cb21c54aabc4410d1194fabeda73c"},
       "RubinFormal/DaIntegrityBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"e5b5f91fe1140d56cfaad36b88465332e1ee72547471a1bdccd189cb5e028cf7","candidate_sha256":"e5b5f91fe1140d56cfaad36b88465332e1ee72547471a1bdccd189cb5e028cf7"},
       "RubinFormal/DeterminismRequirements.lean": {"disposition":"BYTE_EXACT","source_sha256":"d2db16f90fb246d739e72cd23b717f87025145a836a018743d625faffb6cb0a8","candidate_sha256":"d2db16f90fb246d739e72cd23b717f87025145a836a018743d625faffb6cb0a8"},
-      "RubinFormal/ErrorPriority.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"9a2361617709189211a99cc080e3278a04065048e79fd17c117a37470d0cd7a5","candidate_sha256":"52774cc72210c46873e894b41f3e3fbfec589f49c6a1bcab6beda0fb9da307b6"},
+      "RubinFormal/ErrorPriority.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"9a2361617709189211a99cc080e3278a04065048e79fd17c117a37470d0cd7a5","candidate_sha256":"6d9870a5aa64bc70ee035ead5b62e1fc8a9aeb4dd88cee375ad8bc7a35541ac3"},
       "RubinFormal/FeatureActivationFSM.lean": {"disposition":"BYTE_EXACT","source_sha256":"346b65852e93222b9b574b976c3ab17a26b42960005498245da6308ec9faf565","candidate_sha256":"346b65852e93222b9b574b976c3ab17a26b42960005498245da6308ec9faf565"},
       "RubinFormal/FeatureActivationLiveBridge.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"6959f52b6e206e2890a897ca3acdb55c0ee3566e2398858eebd3f8d5f5498dab","candidate_sha256":"657fc4583de15945852c4e1a62af5c79fa63c8fe0da8171486a91df2450be802"},
-      "RubinFormal/ForkChoiceSelect.lean": {"disposition":"BYTE_EXACT","source_sha256":"4a1a9fdb6a4e883efcb869ec30542d165c25e55946635dfae867a1a70a4c6364","candidate_sha256":"4a1a9fdb6a4e883efcb869ec30542d165c25e55946635dfae867a1a70a4c6364"},
+      "RubinFormal/ForkChoiceSelect.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"4a1a9fdb6a4e883efcb869ec30542d165c25e55946635dfae867a1a70a4c6364","candidate_sha256":"dcfcb2c22ae1d97ed517109a32a23a67c4ed36039e65292004b34a2e4a5e0b9a"},
       "RubinFormal/ForkChoiceTiebreak.lean": {"disposition":"BYTE_EXACT","source_sha256":"deab351e30491dbb72c6a89ece802c0967bacc91e9305cf030723608e829eec4","candidate_sha256":"deab351e30491dbb72c6a89ece802c0967bacc91e9305cf030723608e829eec4"},
       "RubinFormal/ForkChoiceV1.lean": {"disposition":"BYTE_EXACT","source_sha256":"bb16d304ac725b9aa1518f38bcf2531d74232ca445e181fd87c0bfb58eeb94a1","candidate_sha256":"bb16d304ac725b9aa1518f38bcf2531d74232ca445e181fd87c0bfb58eeb94a1"},
       "RubinFormal/GenesisRuleBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"31c372ff911c83b2557fb44a4028bbb63b4b8151aeb2cd7f51aac485015b321c","candidate_sha256":"31c372ff911c83b2557fb44a4028bbb63b4b8151aeb2cd7f51aac485015b321c"},
@@ -152,7 +154,7 @@
       "RubinFormal/WitnessCommitmentPregate.lean": {"disposition":"BYTE_EXACT","source_sha256":"5d523572039be8a7ed6f17c68f2050b480a1792b2bcc523ad416f47afd2ee535","candidate_sha256":"5d523572039be8a7ed6f17c68f2050b480a1792b2bcc523ad416f47afd2ee535"},
       "RubinFormal/WitnessCommitmentV1.lean": {"disposition":"BYTE_EXACT","source_sha256":"b8853ab1eb8f1fe35089b7a9ed0104498e2431766bf24e3823e88c3f6547c866","candidate_sha256":"b8853ab1eb8f1fe35089b7a9ed0104498e2431766bf24e3823e88c3f6547c866"},
       "scripts/check.sh": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"7ee36e514edb40d2182160165b9d43c82acd4aafe3b37a09a2da98fa1edf08a0","candidate_sha256":"b3795268916f36020cd52a31b9321592d83aaa1f2f6deb0bf8e04433f1e82c59"},
-      "tests/test_check_formal_registry_truth.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"6e6550c095f77c9281d64db9d94817777eaed9465a3af3b7d8a6a3c332d824a0","candidate_sha256":"e076ae84daf8af791140ee3328b4fed7d9fb96f411abc93cceafbc8228ff2638"},
+      "tests/test_check_formal_registry_truth.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"6e6550c095f77c9281d64db9d94817777eaed9465a3af3b7d8a6a3c332d824a0","candidate_sha256":"2a758c2a940515abfcab88f8860f32eec35a2861a41ad5e693ae28432e227850"},
       "tests/test_covenant_registry_disposition.py": {"disposition":"BYTE_EXACT","source_sha256":"7fd85a8ed5415d948046c54bb44ec0c5a91b7d90bb3e02aa6f4e9bbe9b37a630","candidate_sha256":"7fd85a8ed5415d948046c54bb44ec0c5a91b7d90bb3e02aa6f4e9bbe9b37a630"},
       "tests/test_integration.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"90cef0cf7dfc542cbe3cd4e5f745d64971352a6a93ec9cf08cd76f076614e01d","candidate_sha256":"dc33402b488e6c15a1fe7f8c3568a63ed17e10fdd7e82853fb5ceb3ba5189818"},
       "tests/test_path_resolution.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"ad32d9edad27a0a0dfff71c9a75ee13b76b4f92c4ff42f691d5e1c8abed33050","candidate_sha256":"96aaf0a25b2dfe01bc60f68cd3e48760ad8f486d13d24fbc8c82a6a3dedb708f"},
@@ -161,7 +163,7 @@
       "tests/test_strip_lean_comments.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"5ec65a9f9dec186017230df464355492ad930143955d3ed9afffd71e0fdc6017","candidate_sha256":"f7076c904203aa4417322cd961c0ce8402ea631b09732aed15230b15dc9b3ab3"},
       "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8ce69c12f3b713f960bed3c04f2f5e400c08b7e6f1896d5e68a1c2ebf8d8b93f"},
       "tools/LOCAL_CODEX_EXEC_REVIEW.md": {"disposition":"BYTE_EXACT","source_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5","candidate_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5"},
-      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"1e765bf49657f9407549cda6e646e0e39f7f1a280a7d2927164c8349a41db967"}
+      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"f8908a65c976e7cf8b7365a08e6f1a14beb0930b872bfeb8f451f25fc52f9ab7"}
     }
   },
   "coverage": [
@@ -174,7 +176,7 @@
         "RubinFormal.subsidy_u128_safety_proved",
         "RubinFormal.htlc_timelock_proved"
       ],
-      "file": "rubin-formal/RubinFormal/PinnedSections.lean",
+      "file": "rubin-formal/RubinFormal/BlockBasicV1.lean",
       "theorem_files": {
         "RubinFormal.subsidy_u128_safety_proved": "rubin-formal/RubinFormal/PinnedSections.lean",
         "RubinFormal.htlc_timelock_proved": "rubin-formal/RubinFormal/PinnedSections.lean"
@@ -441,21 +443,17 @@
       "status": "proved",
       "proof_trust": "compiler_trusted",
       "theorems": [
-        "RubinFormal.witness_commitment_proved",
         "RubinFormal.WitnessCommitmentV1.witnessMerkleRootWtxids_rewrites_coinbase_slot",
-        "RubinFormal.WitnessCommitmentV1.checkWitnessCommitment_ok_iff",
         "RubinFormal.WitnessCommitmentV1.validateBlockBasic_witness_stage",
         "RubinFormal.Conformance.cv_block_basic_vectors_pass"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
-        "RubinFormal.witness_commitment_proved": "rubin-formal/RubinFormal/PinnedSections.lean",
         "RubinFormal.WitnessCommitmentV1.witnessMerkleRootWtxids_rewrites_coinbase_slot": "rubin-formal/RubinFormal/WitnessCommitmentV1.lean",
-        "RubinFormal.WitnessCommitmentV1.checkWitnessCommitment_ok_iff": "rubin-formal/RubinFormal/WitnessCommitmentV1.lean",
         "RubinFormal.WitnessCommitmentV1.validateBlockBasic_witness_stage": "rubin-formal/RubinFormal/WitnessCommitmentV1.lean",
         "RubinFormal.Conformance.cv_block_basic_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVBlockBasicReplay.lean"
       },
-      "notes": "Universal theorem lane: `witness_commitment_proved` lifts the section statement onto the live witness-commitment surface, combining the zeroed-coinbase-slot rewrite, the exact `checkWitnessCommitment` success criterion, and the `validateBlockBasic` reduction onto that witness stage after parse/pow/target/linkage/merkle gates pass. Separate fixture lane: CV-BLOCK-BASIC replay for the shipped witness-commitment vectors. That executable lane is complementary evidence only and does not replace the universal theorem lane. The merkle-tag anti-alias SHA3 ceiling is tracked separately in `witness_commitment_crypto_residual` rather than depressing this live commitment row.",
+      "notes": "Active evidence is limited to the canonical executable `checkWitnessCommitment` stage reduction after parse/pow/target/linkage/merkle gates, the coinbase-slot rewrite, and CV-BLOCK-BASIC replay. Legacy single-anchor source theorems remain unregistered experimental material: they do not establish the exact-one matching-anchor criterion. The merkle-tag anti-alias SHA3 ceiling is tracked separately in `witness_commitment_crypto_residual`.",
       "limitations": [
         "Executable replay remains complementary evidence for concrete fixture coverage and regression checking.",
         "Cross-domain txid/wtxid tagged-root anti-aliasing is not claimed in this row and is tracked separately in `witness_commitment_crypto_residual`."
@@ -1426,7 +1424,7 @@
         "RubinFormal.forkSelect_equal_chains": "rubin-formal/RubinFormal/ForkChoiceSelect.lean",
         "RubinFormal.forkSelect_exhaustive": "rubin-formal/RubinFormal/ForkChoiceSelect.lean"
       },
-      "notes": "Universal theorem lane: fork-choice exhaustive determinism proof. `forkSelect_exhaustive` is the master theorem: for ALL 32-byte hash inputs, `forkSelect` yields consistent cross-node agreement with no extra semantic premises. `forkSelect_equal_chains` covers the identical-chain trivial case, `forkSelect_total_det` covers all distinguishable pairs, and `bytesLT_antisym` plus `bytesLT_total_of_ne` provide the tie-break properties. Separate generated fixture lane: `fork_choice_select_cv_contract_proved` machine-checks exactly the six current positive protocol-generated CV-FORK-CHOICE fork_choice_select vectors in their pinned order. Negative expect_ok=false vectors remain runtime conformance-only because the protocol generator excludes them; standalone-only extra vectors are not claimed. This contract lane is complementary concrete evidence only and does not replace the universal theorem lane. `kernel_checked` here means no `Lean.ofReduceBool` compiler/evaluator dependency; it does not assert absence of ordinary Lean foundations.",
+      "notes": "Universal theorem lane: fork-choice exhaustive determinism proof. `forkSelect_exhaustive` is the master theorem: for ALL 32-byte hash inputs, `forkSelect` yields consistent cross-node agreement with no extra semantic premises. `forkSelect_equal_chains` covers the identical-chain trivial case, `forkSelect_total_det` covers all distinguishable pairs, and `bytesLT_antisym` plus `bytesLT_total_of_ne` provide the tie-break properties. Separate generated fixture lane: `fork_choice_select_cv_contract_proved` machine-checks exactly the six current positive protocol-generated CV-FORK-CHOICE fork_choice_select vectors in their pinned order. Negative expect_ok=false vectors remain runtime conformance-only because the protocol generator excludes them; standalone-only extra vectors are not claimed. This contract lane is complementary concrete evidence only and does not replace the universal theorem lane. `compiler_trusted` here records a `Lean.ofReduceBool` compiler/evaluator dependency in the registered fixture contract; it does not assert absence of ordinary Lean foundations.",
       "limitations": [
         "forkSelect models the runtime fork_choice_select. Go/Rust code follows identical if/else chain. Structural equivalence evident from inspection but not proved via rfl (Go/Rust not importable to Lean).",
         "The 32-byte hash length premise (hL/hR) is a protocol type invariant (SHA3-256 output), not a semantic precondition. Runtime block hashes are always 32 bytes by construction.",
@@ -1768,8 +1766,8 @@
     "proved_with_axiom_rows": 3,
     "stated_rows": 0,
     "deferred_rows": 0,
-    "theorem_references": 549,
-    "unique_theorem_names": 526,
+    "theorem_references": 547,
+    "unique_theorem_names": 524,
     "reused_theorem_names": [
       "RubinFormal.Conformance.cv_parse_vectors_pass",
       "RubinFormal.Conformance.cv_subsidy_vectors_pass",

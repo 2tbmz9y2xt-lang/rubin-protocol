@@ -18,6 +18,12 @@ ALLOWED_PROOF_TRUST = {PROOF_TRUST_KERNEL, PROOF_TRUST_COMPILER}
 # proof_trust distinguishes only compiler/evaluator closure: ordinary Lean
 # foundations such as propext, Quot.sound, and Classical.choice remain possible.
 COMPILER_TRUST_AXIOM = "Lean.ofReduceBool"
+ALLOWED_AXIOMS = {
+    "propext",
+    "Quot.sound",
+    "Classical.choice",
+    COMPILER_TRUST_AXIOM,
+}
 
 # Intentionally narrow shared-op parity scope after Q-FORMAL-REGISTRY-EVIDENCE-LEVEL-ALIGN-01.
 # `sighash_v1`, `retarget_v1`, and `fork_choice_select` remain honest supplemental bridge lanes whose
@@ -26,10 +32,10 @@ SHARED_OP_PARITY = {
     "da_set_integrity": "da_set_integrity",
     "weight_accounting": "weight_accounting",
 }
-EXPECTED_COVERAGE_TRUST = (31, 549, 526, 22, 73, 66)
-EXPECTED_UNIVERSAL_TRUST = (27, 529, 21, 65, 58)
-EXPECTED_KERNEL_THEOREM_COMPLEMENT = (476, 460)
-EXPECTED_BRIDGE_TRUST = (12, 162, 157, 8, 19, 18)
+EXPECTED_COVERAGE_TRUST = (31, 547, 524, 22, 73, 66)
+EXPECTED_UNIVERSAL_TRUST = (27, 527, 21, 65, 58)
+EXPECTED_KERNEL_THEOREM_COMPLEMENT = (474, 458)
+EXPECTED_BRIDGE_TRUST = (12, 163, 160, 9, 21, 21)
 EXPECTED_UNAFFECTED_UNIVERSAL = {
     "consensus_constants_witness_lengths_pre_rotation",
     "block_validation_order",
@@ -45,7 +51,8 @@ EXPECTED_AFFECTED_BRIDGE_REFS = {
     "native_suite_rotation": 2,
     "parse_tx": 1,
     "retarget_v1": 9,
-    "sighash_v1": 2,
+    "sighash_v1": 3,
+    "utxo_apply_basic": 1,
     "weight_accounting": 1,
 }
 
@@ -556,6 +563,11 @@ def parse_axiom_output(output: str, expected: list[str]) -> tuple[dict[str, str]
         if end == -1:
             return {}, [f"unterminated #print axioms output for `{theorem}`"]
         axioms = [name.strip() for name in output[start:end].split(",") if name.strip()]
+        unknown_axioms = sorted(set(axioms) - ALLOWED_AXIOMS)
+        if unknown_axioms:
+            return {}, [
+                f"unexpected axiom(s) for `{theorem}`: {', '.join(unknown_axioms)}"
+            ]
         trust[theorem] = PROOF_TRUST_COMPILER if COMPILER_TRUST_AXIOM in axioms else PROOF_TRUST_KERNEL
         cursor = end + 1
     if output[cursor:].strip():

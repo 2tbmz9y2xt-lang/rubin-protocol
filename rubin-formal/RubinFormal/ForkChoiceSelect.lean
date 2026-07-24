@@ -66,7 +66,8 @@ deriving DecidableEq, Repr
 def forkSelect (lhsWork rhsWork : Nat) (lhsHash rhsHash : List UInt8) : ForkResult :=
   if lhsWork > rhsWork then .Left
   else if rhsWork > lhsWork then .Right
-  else if bytesLT lhsHash rhsHash then .Right
+  else if bytesLT lhsHash rhsHash then .Left
+  else if bytesLT rhsHash lhsHash then .Right
   else .Left
 
 /-! ## Determinism proofs -/
@@ -185,16 +186,16 @@ theorem forkSelect_exhaustive (lw rw : Nat) (lh rh : List UInt8)
 -- Smoke tests: all fork-choice cases
 #eval forkSelect 100 50 [1] [2]    -- .Left  (heavier lhs)
 #eval forkSelect 50 100 [1] [2]    -- .Right (heavier rhs)
-#eval forkSelect 100 100 [0] [1]   -- .Right (tie-break: [0] < [1])
-#eval forkSelect 100 100 [1] [0]   -- .Left  (tie-break: [1] > [0])
+#eval forkSelect 100 100 [0] [1]   -- .Left  (lower hash wins)
+#eval forkSelect 100 100 [1] [0]   -- .Right (higher hash loses)
 -- Edge cases
-#eval forkSelect 0 0 [0] [1]       -- .Right (zero work, tie-break)
-#eval forkSelect 0 0 [1] [0]       -- .Left  (zero work, reverse)
+#eval forkSelect 0 0 [0] [1]       -- .Left  (zero work, lower hash wins)
+#eval forkSelect 0 0 [1] [0]       -- .Right (zero work, higher hash loses)
 #eval forkSelect 1 0 [0] [255]     -- .Left  (work wins over hash)
 -- Symmetric agreement check: A sees (lh,rh), B sees (rh,lh)
 -- Both must agree on same winner
 #eval (forkSelect 50 50 [0,1] [1,0], forkSelect 50 50 [1,0] [0,1])
--- Expected: (.Right, .Left) — both pick [1,0] as winner
+-- Expected: (.Left, .Right) — both pick [0,1] as winner
 
 /-! ## Go/Rust code reference
 
@@ -202,7 +203,7 @@ Go (chainstate.go):
 ```
 if lhsWork > rhsWork { return lhs }
 if rhsWork > lhsWork { return rhs }
-if bytes.Compare(lhsHash[:], rhsHash[:]) < 0 { return rhs }
+if bytes.Compare(lhsHash[:], rhsHash[:]) > 0 { return rhs }
 return lhs
 ```
 
@@ -211,7 +212,7 @@ Rust (sync.rs):
 match lhs_work.cmp(&rhs_work) {
     Ordering::Greater => lhs,
     Ordering::Less => rhs,
-    Ordering::Equal => if lhs_hash < rhs_hash { rhs } else { lhs },
+    Ordering::Equal => if lhs_hash > rhs_hash { rhs } else { lhs },
 }
 ```
 

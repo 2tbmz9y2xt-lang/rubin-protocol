@@ -99,6 +99,24 @@ class SourceRebindTests(unittest.TestCase):
         self.assertTrue(any("byte_exact_path_count drift" in error for error in errors))
         self.assertTrue(any("active partition drift" in error for error in errors))
 
+    def test_claim_boundary_evidence_requires_non_empty_limitations(self) -> None:
+        for limitations in (None, [], "not-a-list", [""], [1]):
+            self.assertIsNotNone(
+                m.claim_boundary_limitations_error(
+                    "covenant_registry", "machine_checked_model", limitations
+                )
+            )
+        self.assertIsNone(
+            m.claim_boundary_limitations_error(
+                "covenant_registry", "machine_checked_model", ["bounded model only"]
+            )
+        )
+        self.assertIsNone(
+            m.claim_boundary_limitations_error(
+                "fork_choice", "machine_checked_universal", None
+            )
+        )
+
     def test_retired_paths_must_be_absent_and_unreachable(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root, formal = Path(td), Path(td) / "rubin-formal"

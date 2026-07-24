@@ -126,19 +126,13 @@ def merkleWitnessTailExplicit (pb : ParsedBlock) : Except String Unit :=
     if (mr != pb.header.merkleRoot) = true then
       Except.error "BLOCK_ERR_MERKLE_INVALID"
     else
-      (witnessMerkleRootWtxids pb.wtxids).bind fun wmr =>
-        let expectCommit := witnessCommitmentHash wmr
-        (findCoinbaseAnchorCommitment pb.coinbaseTx).bind fun gotCommit =>
-          if (gotCommit != expectCommit) = true then
-            Except.error "BLOCK_ERR_WITNESS_COMMITMENT"
-          else
-            Except.ok ()
+      checkWitnessCommitment pb
 
 /-- Definitional equivalence: the do version = explicit bind version. -/
 theorem merkleWitnessTail_eq_explicit (pb : ParsedBlock) :
     validateBlockBasicMerkleWitnessTail pb = merkleWitnessTailExplicit pb := by
   simp only [validateBlockBasicMerkleWitnessTail, merkleWitnessTailExplicit,
-    checkWitnessCommitment, Except.bind]; rfl
+    Except.bind]; rfl
 
 /-- Stage 5a: merkle mismatch → returns BLOCK_ERR_MERKLE_INVALID.
     Proved at the `validateBlockBasicAfterPow` level for none/none. -/
@@ -942,16 +936,14 @@ theorem consensus_error_ordering_contract
       validateBlockBasic blockBytes ph pt = .error err) ∧
     -- (4) Success → all 6 stages passed
     (validateBlockBasic blockBytes ph pt = .ok () →
-      ∃ pb mr wmr gotCommit,
+      ∃ pb mr,
         parseBlock blockBytes = .ok pb ∧
         powCheck pb.header = .ok () ∧
         (match pt with | none => True | some exp => pb.header.target = exp) ∧
         (match ph with | none => True | some exp => pb.header.prevHash = exp) ∧
         merkleRootTxids pb.txids = .ok mr ∧
         mr = pb.header.merkleRoot ∧
-        witnessMerkleRootWtxids pb.wtxids = .ok wmr ∧
-        findCoinbaseAnchorCommitment pb.coinbaseTx = .ok gotCommit ∧
-        gotCommit = witnessCommitmentHash wmr) := by
+        checkWitnessCommitment pb = .ok ()) := by
   refine ⟨?_, ?_, ?_, ?_⟩
   · exact validateBlockBasic_accept_or_reject blockBytes ph pt
   · intro err hFail; exact error_priority_parse blockBytes ph pt err hFail

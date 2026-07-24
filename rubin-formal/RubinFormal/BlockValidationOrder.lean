@@ -12,12 +12,7 @@ def validateBlockBasicMerkleWitnessTail
   let mr ← merkleRootTxids pb.txids
   if mr != pb.header.merkleRoot then
     throw "BLOCK_ERR_MERKLE_INVALID"
-  let wmr ← witnessMerkleRootWtxids pb.wtxids
-  let expectCommit := witnessCommitmentHash wmr
-  let gotCommit ← findCoinbaseAnchorCommitment pb.coinbaseTx
-  if gotCommit != expectCommit then
-    throw "BLOCK_ERR_WITNESS_COMMITMENT"
-  pure ()
+  checkWitnessCommitment pb
 
 /-- Proof-only decomposition of the post-PoW tail. -/
 def validateBlockBasicAfterPow
@@ -98,65 +93,29 @@ theorem validateBlockBasic_pow_passes
 theorem merkle_witness_of_tail
     (pb : ParsedBlock)
     (hTail : validateBlockBasicMerkleWitnessTail pb = .ok ()) :
-    ∃ mr wmr gotCommit,
+    ∃ mr,
       merkleRootTxids pb.txids = .ok mr ∧
       mr = pb.header.merkleRoot ∧
-      witnessMerkleRootWtxids pb.wtxids = .ok wmr ∧
-      findCoinbaseAnchorCommitment pb.coinbaseTx = .ok gotCommit ∧
-      gotCommit = witnessCommitmentHash wmr := by
+      checkWitnessCommitment pb = .ok () := by
   unfold validateBlockBasicMerkleWitnessTail at hTail
   rcases except_bind_eq_ok hTail with ⟨mr, hMr, hAfterMr⟩
   have hMrGate :
       (if mr != pb.header.merkleRoot then
         Except.error "BLOCK_ERR_MERKLE_INVALID"
       else
-        do
-          let wmr ← witnessMerkleRootWtxids pb.wtxids
-          let expectCommit := witnessCommitmentHash wmr
-          let gotCommit ← findCoinbaseAnchorCommitment pb.coinbaseTx
-          if gotCommit != expectCommit then
-            throw "BLOCK_ERR_WITNESS_COMMITMENT"
-          pure ()) = .ok () := by
+        checkWitnessCommitment pb) = .ok () := by
     simpa using hAfterMr
   have hMrFalse : (mr != pb.header.merkleRoot) = false := bool_gate_pass hMrGate
   have hMrEq : mr = pb.header.merkleRoot := bne_false_eq mr pb.header.merkleRoot hMrFalse
-  have hAfterMerkle :
-      (do
-        let wmr ← witnessMerkleRootWtxids pb.wtxids
-        let expectCommit := witnessCommitmentHash wmr
-        let gotCommit ← findCoinbaseAnchorCommitment pb.coinbaseTx
-        if gotCommit != expectCommit then
-          throw "BLOCK_ERR_WITNESS_COMMITMENT"
-        pure ()) = .ok () := by
+  have hCommit : checkWitnessCommitment pb = .ok () := by
     simpa [hMrFalse] using hAfterMr
-  change
-      (witnessMerkleRootWtxids pb.wtxids >>= fun wmr =>
-        do
-          let expectCommit := witnessCommitmentHash wmr
-          let gotCommit ← findCoinbaseAnchorCommitment pb.coinbaseTx
-          if gotCommit != expectCommit then
-            throw "BLOCK_ERR_WITNESS_COMMITMENT"
-          pure ()) = .ok () at hAfterMerkle
-  rcases except_bind_eq_ok hAfterMerkle with ⟨wmr, hWmr, hAfterWmr⟩
-  have hAfterWmr' :
-      (findCoinbaseAnchorCommitment pb.coinbaseTx >>= fun gotCommit =>
-        if gotCommit != witnessCommitmentHash wmr then
-          Except.error "BLOCK_ERR_WITNESS_COMMITMENT"
-        else
-          .ok ()) = .ok () := by
-    simpa using hAfterWmr
-  rcases except_bind_eq_ok hAfterWmr' with ⟨gotCommit, hGotCommit, hAfterGotCommit⟩
-  have hCommitFalse : (gotCommit != witnessCommitmentHash wmr) = false :=
-    bool_gate_pass hAfterGotCommit
-  have hCommitEq : gotCommit = witnessCommitmentHash wmr :=
-    bne_false_eq gotCommit (witnessCommitmentHash wmr) hCommitFalse
-  exact ⟨mr, wmr, gotCommit, hMr, hMrEq, hWmr, hGotCommit, hCommitEq⟩
+  exact ⟨mr, hMr, hMrEq, hCommit⟩
 
 theorem section25_order_complete
     (blockBytes : Bytes)
     (expectedPrevHash expectedTarget : Option Bytes)
     (hOk : validateBlockBasic blockBytes expectedPrevHash expectedTarget = .ok ()) :
-    ∃ pb mr wmr gotCommit,
+    ∃ pb mr,
       parseBlock blockBytes = .ok pb ∧
       powCheck pb.header = .ok () ∧
       (match expectedTarget with
@@ -167,9 +126,7 @@ theorem section25_order_complete
       | some exp => pb.header.prevHash = exp) ∧
       merkleRootTxids pb.txids = .ok mr ∧
       mr = pb.header.merkleRoot ∧
-      witnessMerkleRootWtxids pb.wtxids = .ok wmr ∧
-      findCoinbaseAnchorCommitment pb.coinbaseTx = .ok gotCommit ∧
-      gotCommit = witnessCommitmentHash wmr := by
+      checkWitnessCommitment pb = .ok () := by
   rcases validateBlockBasic_pow_passes blockBytes expectedPrevHash expectedTarget hOk with
     ⟨pb, hParse, hPow, hAfterPow⟩
   cases hTgt : expectedTarget with
@@ -188,12 +145,12 @@ theorem section25_order_complete
           have hMerkleTail : validateBlockBasicMerkleWitnessTail pb = .ok () := by
             simpa [hPrev] using hAfterTarget
           rcases merkle_witness_of_tail pb hMerkleTail with
-            ⟨mr, wmr, gotCommit, hMr, hMrEq, hWmr, hGotCommit, hCommitEq⟩
-          exact ⟨pb, mr, wmr, gotCommit,
+            ⟨mr, hMr, hMrEq, hCommit⟩
+          exact ⟨pb, mr,
             hParse, hPow,
             by simp [hTgt],
             by simp [hPrev],
-            hMr, hMrEq, hWmr, hGotCommit, hCommitEq⟩
+            hMr, hMrEq, hCommit⟩
       | some prev =>
           have hPrevGate :
               (if pb.header.prevHash != prev then
@@ -206,12 +163,12 @@ theorem section25_order_complete
           have hMerkleTail : validateBlockBasicMerkleWitnessTail pb = .ok () := by
             simpa [hPrev, hPrevFalse] using hAfterTarget
           rcases merkle_witness_of_tail pb hMerkleTail with
-            ⟨mr, wmr, gotCommit, hMr, hMrEq, hWmr, hGotCommit, hCommitEq⟩
-          exact ⟨pb, mr, wmr, gotCommit,
+            ⟨mr, hMr, hMrEq, hCommit⟩
+          exact ⟨pb, mr,
             hParse, hPow,
             by simp [hTgt],
             by simp [hPrev, hPrevEq],
-            hMr, hMrEq, hWmr, hGotCommit, hCommitEq⟩
+            hMr, hMrEq, hCommit⟩
   | some target =>
       have hTargetGate :
           (if pb.header.target != target then
@@ -242,12 +199,12 @@ theorem section25_order_complete
           have hMerkleTail : validateBlockBasicMerkleWitnessTail pb = .ok () := by
             simpa [hPrev] using hAfterTarget
           rcases merkle_witness_of_tail pb hMerkleTail with
-            ⟨mr, wmr, gotCommit, hMr, hMrEq, hWmr, hGotCommit, hCommitEq⟩
-          exact ⟨pb, mr, wmr, gotCommit,
+            ⟨mr, hMr, hMrEq, hCommit⟩
+          exact ⟨pb, mr,
             hParse, hPow,
             by simp [hTgt, hTargetEq],
             by simp [hPrev],
-            hMr, hMrEq, hWmr, hGotCommit, hCommitEq⟩
+            hMr, hMrEq, hCommit⟩
       | some prev =>
           have hPrevGate :
               (if pb.header.prevHash != prev then
@@ -260,17 +217,17 @@ theorem section25_order_complete
           have hMerkleTail : validateBlockBasicMerkleWitnessTail pb = .ok () := by
             simpa [hPrev, hPrevFalse] using hAfterTarget
           rcases merkle_witness_of_tail pb hMerkleTail with
-            ⟨mr, wmr, gotCommit, hMr, hMrEq, hWmr, hGotCommit, hCommitEq⟩
-          exact ⟨pb, mr, wmr, gotCommit,
+            ⟨mr, hMr, hMrEq, hCommit⟩
+          exact ⟨pb, mr,
             hParse, hPow,
             by simp [hTgt, hTargetEq],
             by simp [hPrev, hPrevEq],
-            hMr, hMrEq, hWmr, hGotCommit, hCommitEq⟩
+            hMr, hMrEq, hCommit⟩
 
 def section25AcceptWitness
     (blockBytes : Bytes)
     (expectedPrevHash expectedTarget : Option Bytes) : Prop :=
-  ∃ pb mr wmr gotCommit,
+  ∃ pb mr,
     parseBlock blockBytes = .ok pb ∧
     powCheck pb.header = .ok () ∧
     (match expectedTarget with
@@ -281,9 +238,7 @@ def section25AcceptWitness
     | some exp => pb.header.prevHash = exp) ∧
     merkleRootTxids pb.txids = .ok mr ∧
     mr = pb.header.merkleRoot ∧
-    witnessMerkleRootWtxids pb.wtxids = .ok wmr ∧
-    findCoinbaseAnchorCommitment pb.coinbaseTx = .ok gotCommit ∧
-    gotCommit = witnessCommitmentHash wmr
+    checkWitnessCommitment pb = .ok ()
 
 def section25ValidationTotalStatement : Prop :=
   ∀ (blockBytes : Bytes) (expectedPrevHash expectedTarget : Option Bytes),

@@ -39,6 +39,11 @@ class RegistryTruthCheckerTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(trust, {"A.ok": "compiler_trusted", "B.ok": "kernel_checked"})
         self.assertTrue(parse_axiom_output("unexpected", ["A.ok"])[1])
+        self.assertTrue(
+            parse_axiom_output(
+                "'A.ok' depends on axioms: [ExternalAssumption]\n", ["A.ok"]
+            )[1]
+        )
 
     def test_supporting_theorems_require_exact_file_bindings(self) -> None:
         theorem = "RubinFormal.Model.ok"

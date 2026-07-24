@@ -352,6 +352,15 @@ def parseGoTraceV1Pass : Bool :=
 theorem parse_tx_go_trace_contract_proved : parseGoTraceV1Pass = true := by
   native_decide
 
+theorem sighash_v1_go_trace_contract_proved : sighashOuts.all checkSighash = true := by
+  native_decide
+
+theorem retarget_v1_go_trace_contract_proved : powOuts.all checkPow = true := by
+  native_decide
+
+theorem utxo_apply_basic_go_trace_contract_proved : utxoBasicOuts.all checkUtxoBasic = true := by
+  native_decide
+
 private def forkChoiceSelectVectors : List Conformance.CVForkChoiceVector :=
   Conformance.cvForkChoiceVectors.filter (fun v => v.op == "fork_choice_select")
 

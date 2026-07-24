@@ -17,6 +17,10 @@ ALLOWED_EVIDENCE_LEVEL = {
     "machine_checked_model",
 }
 ALLOWED_PROOF_TRUST = {"kernel_checked", "compiler_trusted"}
+CLAIM_BOUNDARY_EVIDENCE_LEVELS = {
+    "machine_checked_assumption_backed",
+    "machine_checked_model",
+}
 PENDING_PACKAGE_MATURITY = "experimental_pending_reverification"
 ALLOWED_PROOF_LEVEL = {"toy-model", "spec-model", "byte-model", "refinement"}
 ALLOWED_CLAIM_LEVEL = {"toy", "byte", "refined"}
@@ -65,13 +69,13 @@ EXPECTED_SOURCE_REBIND_SCALARS = {
     "inventory_sha256": "77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6",
     "original_imported_source_paths": 116,
     "active_imported_source_paths": 102,
-    "byte_exact_path_count": 75,
-    "reconcile_current_protocol_path_count": 17,
+    "byte_exact_path_count": 73,
+    "reconcile_current_protocol_path_count": 19,
     "drop_retired_generated_source_path_count": 4, "drop_retired_source_path_count": 3, "drop_stale_source_path_count": 7,
     "import_adapt_single_owner_path_count": 1,
     "transplant_check_logic_path_count": 2,
     "import_package_check_or_test_path_count": 7,
-    "active_partition_equation": "75 + 17 + 1 + 2 + 7 = 102",
+    "active_partition_equation": "73 + 19 + 1 + 2 + 7 = 102",
     "original_inventory_equation": "102 + 4 + 3 + 7 = 116",
 }
 SOURCE_REBIND_COUNT_KEYS = {
@@ -86,12 +90,14 @@ SOURCE_REBIND_COUNT_KEYS = {
 }
 EXPECTED_SOURCE_REBIND_PATHS = {
     "reconcile_current_protocol_paths": {
+        "RubinFormal/BlockValidationOrder.lean",
         "RubinFormal/Conformance/CVVaultLifecycleReplay.lean",
         "RubinFormal/ConnectBlockFull.lean",
         "RubinFormal/ConnectBlockStrong.lean",
         "RubinFormal/CovenantRegistryExhaustive.lean",
         "RubinFormal/ErrorPriority.lean",
         "RubinFormal/FeatureActivationLiveBridge.lean",
+        "RubinFormal/ForkChoiceSelect.lean",
         "RubinFormal/HtlcSpendStructuralLiveBridge.lean",
         "RubinFormal/PerTxStateMachine.lean",
         "RubinFormal/RefinementBridgeV1.lean",
@@ -120,6 +126,23 @@ EXPECTED_SOURCE_REBIND_PATHS = {
     "drop_stale_source_paths": {"RubinFormal/ConsensusConstantsBehavioral.lean", "RubinFormal/FormalGap03.lean", "RubinFormal/TxWireTxPayloadContract.lean", "RubinFormal/TxWireTxWithWitnessContract.lean", "RubinFormal/TxWireTxAfterDaCoreContract.lean", "RubinFormal/TxWireTxBodyContract.lean", "RubinFormal/TxWireTxContract.lean"},
     "semantic_theorem_reconciliation_retired_paths": {"RubinFormal/CoreExtRefinement.lean"},
 }
+
+
+def claim_boundary_limitations_error(
+    key: object, evidence_level: object, limitations: object
+) -> str | None:
+    if evidence_level not in CLAIM_BOUNDARY_EVIDENCE_LEVELS:
+        return None
+    if (
+        not isinstance(limitations, list)
+        or not limitations
+        or not all(isinstance(item, str) and item.strip() for item in limitations)
+    ):
+        return (
+            f"{key} has evidence_level={evidence_level} but limitations[] must be "
+            "a non-empty list of non-empty strings"
+        )
+    return None
 EXPECTED_ACTIVE_SOURCE_PATHS = frozenset("""
 REGISTRY_COMPLETENESS_POLICY.md RubinFormal/BlockHeaderRoundtrip.lean RubinFormal/BlockTimestampBehavioral.lean RubinFormal/BlockValidationOrder.lean RubinFormal/BlockValidationOrderBehavioral.lean RubinFormal/ByteWireLegacy.lean RubinFormal/BytesEqLemmas.lean RubinFormal/ChainIdBehavioral.lean RubinFormal/ChainWorkV1.lean RubinFormal/CoinbaseBehavioral.lean RubinFormal/CoinbaseSubsidyBehavioral.lean
 RubinFormal/Conformance/CVVaultLifecycleReplay.lean RubinFormal/ConnectBlockFull.lean RubinFormal/ConnectBlockStrong.lean RubinFormal/CovenantParserGaps.lean RubinFormal/CovenantRegistryExhaustive.lean RubinFormal/CreateSideLiveGateBridge.lean RubinFormal/DaIntegrityBehavioral.lean RubinFormal/DeterminismRequirements.lean RubinFormal/ErrorPriority.lean RubinFormal/FeatureActivationFSM.lean RubinFormal/FeatureActivationLiveBridge.lean
@@ -554,6 +577,11 @@ def main() -> int:
                 f"ERROR: {key} has assumption-backed evidence but status={status}; expected proved_with_axiom",
                 file=sys.stderr,
             )
+            bad = True
+        if error := claim_boundary_limitations_error(
+            key, evidence_level, row.get("limitations")
+        ):
+            print(f"ERROR: {error}", file=sys.stderr)
             bad = True
 
         if status in {"proved", "proved_with_axiom", "stated"}:
