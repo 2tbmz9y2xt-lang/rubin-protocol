@@ -162,6 +162,7 @@ class CollectRegistryErrorsTests(unittest.TestCase):
                 "namespace RubinFormal.Foo\ntheorem bar : True := by trivial\nend RubinFormal.Foo",
                 encoding="utf-8",
             )
+            (root / "RubinFormal.lean").write_text("import RubinFormal.Foo", encoding="utf-8")
             lake_dir = root / ".lake" / "build" / "lib" / "RubinFormal"
             lake_dir.mkdir(parents=True)
             (lake_dir / "Foo.olean").write_text("")
@@ -298,8 +299,7 @@ class CollectRegistryErrorsTests(unittest.TestCase):
             registered_paths, _, _, _ = collect_registry_errors(root, coverage, bridge, ea, eif)
             self.assertIn(path, registered_paths)
 
-    def test_bridge_theorem_with_global_fallback(self) -> None:
-        """Bridge theorems allow global fallback, so a theorem found in any file passes."""
+    def test_bridge_model_theorem_does_not_fallback_globally(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             lean_dir = root / "RubinFormal"
@@ -328,9 +328,8 @@ class CollectRegistryErrorsTests(unittest.TestCase):
             }
             ea, eif = theorem_lookups(root, [file_a, file_b])
             _, _, _, errors = collect_registry_errors(root, coverage, bridge, ea, eif)
-            # bridge uses global fallback, so theorem found in A.lean should pass
             theorem_errors = [e for e in errors if "bridge_thm" in e]
-            self.assertEqual(theorem_errors, [])
+            self.assertTrue(theorem_errors)
 
 
 class MainFunctionTests(unittest.TestCase):
@@ -350,6 +349,7 @@ class MainFunctionTests(unittest.TestCase):
             "end RubinFormal.Ops\n",
             encoding="utf-8",
         )
+        (root / "RubinFormal.lean").write_text("import RubinFormal.Ops", encoding="utf-8")
 
         lake_dir = root / ".lake" / "build" / "lib" / "RubinFormal"
         lake_dir.mkdir(parents=True)
@@ -420,7 +420,7 @@ class MainFunctionTests(unittest.TestCase):
             self._write_minimal_valid_registry(root)
             stdout = io.StringIO()
             stderr = io.StringIO()
-            with self._patched_main_file(root), mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+            with self._patched_main_file(root), mock.patch.object(registry_truth, "classify_registered_theorems", return_value=({}, [])), mock.patch.object(registry_truth, "validate_compiled_proof_trust", return_value=[]), mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
                 result = registry_truth.main()
             self.assertEqual(result, 0)
             self.assertEqual(stderr.getvalue(), "")

@@ -189,12 +189,12 @@ class ValidateTheoremRefsTests(unittest.TestCase):
 class ValidateSharedOpParityTests(unittest.TestCase):
     def test_matching_evidence_levels(self) -> None:
         coverage_rows = {
-            "sighash_v1": {"evidence_level": "machine_checked_universal"},
+            "sighash_v1": {"evidence_level": "machine_checked_universal", "proof_trust": "kernel_checked"},
             "da_set_integrity": {"evidence_level": "machine_checked_universal"},
             "weight_accounting": {"evidence_level": "machine_checked_universal"},
         }
         bridge_rows = {
-            "sighash_v1": {"evidence_level": "machine_checked_universal"},
+            "sighash_v1": {"evidence_level": "machine_checked_universal", "proof_trust": "kernel_checked"},
             "da_set_integrity": {"evidence_level": "machine_checked_universal"},
             "weight_accounting": {"evidence_level": "machine_checked_universal"},
         }
@@ -203,12 +203,12 @@ class ValidateSharedOpParityTests(unittest.TestCase):
 
     def test_drift_detected(self) -> None:
         coverage_rows = {
-            "sighash_v1": {"evidence_level": "machine_checked_universal"},
+            "sighash_v1": {"evidence_level": "machine_checked_universal", "proof_trust": "kernel_checked"},
             "da_set_integrity": {"evidence_level": "machine_checked_universal"},
             "weight_accounting": {"evidence_level": "machine_checked_universal"},
         }
         bridge_rows = {
-            "sighash_v1": {"evidence_level": "different_level"},
+            "sighash_v1": {"evidence_level": "machine_checked_universal", "proof_trust": "compiler_trusted"},
             "da_set_integrity": {"evidence_level": "machine_checked_universal"},
             "weight_accounting": {"evidence_level": "machine_checked_universal"},
         }
@@ -257,6 +257,7 @@ class ValidateRegisteredPathsTests(unittest.TestCase):
             root = Path(tmp)
             lean_dir = root / "RubinFormal"
             lean_dir.mkdir()
+            (root / "RubinFormal.lean").write_text("import RubinFormal.Foo")
             (lean_dir / "Foo.lean").write_text("theorem a : True := by trivial")
             lake_dir = root / ".lake" / "build" / "lib" / "RubinFormal"
             lake_dir.mkdir(parents=True)
@@ -275,16 +276,21 @@ class ValidateRegisteredPathsTests(unittest.TestCase):
             self.assertEqual(len(errors), 1)
             self.assertIn("does not exist", errors[0])
 
-    def test_olean_missing(self) -> None:
+    def test_stale_olean_is_not_reachable(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             lean_dir = root / "RubinFormal"
             lean_dir.mkdir()
             (lean_dir / "Foo.lean").write_text("code")
+            (lean_dir / "Other.lean").write_text("code")
+            (root / "RubinFormal.lean").write_text("import RubinFormal.Other")
+            lake_dir = root / ".lake" / "build" / "lib" / "RubinFormal"
+            lake_dir.mkdir(parents=True)
+            (lake_dir / "Foo.olean").write_text("")
             paths = {"rubin-formal/RubinFormal/Foo.lean"}
             errors = validate_registered_paths(root, paths)
             self.assertEqual(len(errors), 1)
-            self.assertIn("outside the default build graph or failed to build", errors[0])
+            self.assertIn("not reachable from RubinFormal.lean source imports", errors[0])
 
     def test_non_canonical_path(self) -> None:
         with TemporaryDirectory() as tmp:

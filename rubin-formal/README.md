@@ -6,7 +6,7 @@ Machine-checked formal proof surface for the RUBIN L1 blockchain protocol.
 
 - Lean 4 package `RubinFormal`
 - `proof_coverage.json` — machine-readable coverage registry with 32 section entries
-- Each registry entry carries explicit `evidence_level`, `notes`, and `limitations` so that public claims never outrun the actual proof boundary
+- Each registry entry carries explicit `evidence_level`, `proof_trust`, `notes`, and `limitations` so that public claims never outrun the actual proof boundary
 
 ## Source rebind: 109 → 102
 
@@ -72,8 +72,7 @@ Within the same 102 active paths, seven adaptations are classified
 
 They make the imported package tests resolve their own `tools` package from
 both repository-root and package-root discovery, without changing proof
-claims. The RUB-959 section-hash digest remains
-`c21c234f6380f9421a10481958993ba23ec31277217fcdd6d5d4d4d613df74a3`.
+claims. The canonical digest is `proof_coverage.json.spec_section_hashes_sha3_256`.
 
 ## Claim boundary (critical)
 
@@ -83,7 +82,7 @@ conformance fixtures whose replay modules are imported by
 sections. It provides reproducible machine-checked evidence but **is not** a
 universal formal verification of the entire CANONICAL spec.
 
-Current machine-readable status: `proof_level=refinement`, `claim_level=refined`.
+Current machine-readable status: `proof_level=refinement`, `claim_level=refined`, `package_maturity=experimental_pending_reverification`.
 
 Permitted claim formulations (OK):
 
@@ -100,7 +99,7 @@ Prohibited claim formulations (NOT OK):
 - "bit-exact wire/serialization proven"
 - "universal mechanized equivalence between spec text and Go/Rust implementations"
 
-Source of truth for claim boundary: `proof_coverage.json` (`proof_level`, `claims`).
+Source of truth for claim boundary: `proof_coverage.json` (`proof_level`, `package_maturity`, `claims`, and row-level `proof_trust`).
 `claim_level` (`toy|byte|refined`) is CI-validated for consistency against `proof_level`.
 
 Wire model notes:

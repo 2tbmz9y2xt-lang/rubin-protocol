@@ -74,8 +74,7 @@ inventory also classifies seven paths within the same 102-path active count as
 - `tests/test_validation.py`
 
 These are repository-valid package-test import adaptations, not theorem
-evidence and not additional active paths. The RUB-959 section-hash digest remains
-`c21c234f6380f9421a10481958993ba23ec31277217fcdd6d5d4d4d613df74a3`.
+evidence and not additional active paths. The canonical digest is `proof_coverage.json.spec_section_hashes_sha3_256`.
 
 ## 2. Registration Tiers
 

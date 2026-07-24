@@ -70,19 +70,17 @@ class BridgePathsTests(unittest.TestCase):
         row = {"lean_file": "rubin-formal/RubinFormal/Foo.lean"}
         self.assertEqual(bridge_paths(row), {"rubin-formal/RubinFormal/Foo.lean"})
 
-    def test_theorem_file_only(self) -> None:
+    def test_supporting_theorem_file_is_not_a_registry_path(self) -> None:
         row = {"theorem_file": "rubin-formal/RubinFormal/Bar.lean"}
-        self.assertEqual(bridge_paths(row), {"rubin-formal/RubinFormal/Bar.lean"})
+        self.assertEqual(bridge_paths(row), set())
 
     def test_both_files(self) -> None:
         row = {
             "lean_file": "rubin-formal/RubinFormal/A.lean",
-            "theorem_file": "rubin-formal/RubinFormal/B.lean",
         }
         result = bridge_paths(row)
-        self.assertEqual(len(result), 2)
+        self.assertEqual(len(result), 1)
         self.assertIn("rubin-formal/RubinFormal/A.lean", result)
-        self.assertIn("rubin-formal/RubinFormal/B.lean", result)
 
     def test_empty_row(self) -> None:
         self.assertEqual(bridge_paths({}), set())
@@ -167,19 +165,17 @@ class BridgeTheoremsTests(unittest.TestCase):
     def test_supporting_theorems(self) -> None:
         row = {
             "supporting_theorems": ["S.a", "S.b"],
-            "theorem_file": "rubin-formal/RubinFormal/Support.lean",
         }
         refs = bridge_theorems(row)
         self.assertEqual(len(refs), 2)
-        self.assertEqual(refs[0], ("S.a", "rubin-formal/RubinFormal/Support.lean"))
-        self.assertEqual(refs[1], ("S.b", "rubin-formal/RubinFormal/Support.lean"))
+        self.assertEqual(refs[0], ("S.a", None))
+        self.assertEqual(refs[1], ("S.b", None))
 
     def test_model_and_supporting(self) -> None:
         row = {
             "model_theorem": "Model.thm",
             "lean_file": "rubin-formal/RubinFormal/Model.lean",
             "supporting_theorems": ["S.a"],
-            "theorem_file": "rubin-formal/RubinFormal/Support.lean",
         }
         refs = bridge_theorems(row)
         self.assertEqual(len(refs), 2)

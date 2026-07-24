@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import json
-import re
 import sys
 from pathlib import Path
 
-from check_formal_coverage import declared_lean_theorems, validate_source_rebind
+from check_formal_coverage import (
+    ALLOWED_PROOF_TRUST,
+    declared_lean_theorems,
+    declared_lean_theorems_in_text,
+    has_canonical_import,
+    validate_source_rebind,
+)
 
 
 ALLOWED_EVIDENCE_LEVEL = {
@@ -92,8 +97,8 @@ def has_lean_replay_evidence(repo_root: Path, gate: str) -> bool:
     return (
         vectors_file.exists()
         and replay_file.exists()
-        and f"import RubinFormal.Conformance.CV{camel}Vectors" in index_text
-        and f"import RubinFormal.Conformance.CV{camel}Replay" in index_text
+        and has_canonical_import(index_text, f"import RubinFormal.Conformance.CV{camel}Vectors")
+        and has_canonical_import(index_text, f"import RubinFormal.Conformance.CV{camel}Replay")
     )
 
 
@@ -103,9 +108,7 @@ def fail(msg: str) -> int:
 
 
 def theorem_declared_in_file(path: Path, theorem: str) -> bool:
-    short_name = theorem.rsplit(".", 1)[-1]
-    pattern = re.compile(rf"^\s*theorem\s+{re.escape(short_name)}\b", re.MULTILINE)
-    return bool(pattern.search(path.read_text(encoding="utf-8")))
+    return theorem in declared_lean_theorems_in_text(path.read_text(encoding="utf-8"))
 
 
 def parse_executable_ops(matrix_text: str) -> set[str]:
@@ -155,6 +158,8 @@ def main() -> int:
         return fail("conformance/fixtures directory not found")
 
     bridge = json.loads(bridge_path.read_text(encoding="utf-8"))
+    if "package_maturity" in bridge:
+        return fail("package_maturity belongs only in rubin-formal/proof_coverage.json")
     source_rebind_errors = validate_source_rebind(bridge)
     if source_rebind_errors:
         for err in source_rebind_errors:
@@ -185,6 +190,7 @@ def main() -> int:
         theorem = row.get("model_theorem")
         lean_file = row.get("lean_file")
         evidence_level = row.get("evidence_level")
+        proof_trust = row.get("proof_trust")
         traced_vector_ids = row.get("traced_vector_ids")
         trace_source_file = row.get("trace_source_file")
         scope = row.get("contract_scope")
@@ -217,6 +223,12 @@ def main() -> int:
             )
             bad = True
             continue
+        if proof_trust not in ALLOWED_PROOF_TRUST:
+            print(
+                f"ERROR: invalid proof_trust for op `{op}`: {proof_trust}; expected one of {sorted(ALLOWED_PROOF_TRUST)}",
+                file=sys.stderr,
+            )
+            bad = True
 
         if not isinstance(scope, str) or not scope:
             print(f"ERROR: contract_scope for op `{op}` must be a non-empty string", file=sys.stderr)

@@ -15,6 +15,8 @@ ALLOWED_EVIDENCE_LEVEL = {
     "machine_checked_contract",
     "machine_checked_model",
 }
+ALLOWED_PROOF_TRUST = {"kernel_checked", "compiler_trusted"}
+PENDING_PACKAGE_MATURITY = "experimental_pending_reverification"
 ALLOWED_PROOF_LEVEL = {"toy-model", "spec-model", "byte-model", "refinement"}
 ALLOWED_CLAIM_LEVEL = {"toy", "byte", "refined"}
 EXPECTED_CLAIM_BY_PROOF = {
@@ -126,7 +128,7 @@ SOURCE_REBIND_LIST_COUNTS = {
     "import_package_check_or_test_paths": "import_package_check_or_test_path_count",
 }
 THEOREM_DECL_RE = re.compile(
-    r"^\s*theorem\s+([A-Za-z_][A-Za-z0-9_'?!]*)(?=\s|$|[:({\[])",
+    r"^\s*theorem\s+([A-Za-z_][A-Za-z0-9_'?!]*(?:\.[A-Za-z_][A-Za-z0-9_'?!]*)*)(?=\s|$|[:({\[])",
     re.MULTILINE,
 )
 NAMESPACE_RE = re.compile(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*)\s*$")
@@ -139,40 +141,86 @@ def fail(msg: str) -> int:
     return 1
 
 
+def strip_lean_comments(source: str) -> str:
+    out: list[str] = []
+    i = 0
+    while i < len(source):
+        if source[i] == '"':
+            out.append(source[i])
+            i += 1
+            while i < len(source):
+                ch = source[i]
+                out.append(ch)
+                if ch == "\\" and i + 1 < len(source):
+                    out.append(source[i + 1])
+                    i += 2
+                    continue
+                i += 1
+                if ch == '"':
+                    break
+            continue
+        if source.startswith("--", i):
+            while i < len(source) and source[i] != "\n":
+                out.append(" ")
+                i += 1
+            continue
+        if source.startswith("/-", i):
+            depth = 1
+            out.extend((" ", " "))
+            i += 2
+            while i < len(source) and depth:
+                if source.startswith("/-", i):
+                    depth += 1
+                    out.extend((" ", " "))
+                    i += 2
+                elif source.startswith("-/", i):
+                    depth -= 1
+                    out.extend((" ", " "))
+                    i += 2
+                else:
+                    out.append("\n" if source[i] == "\n" else " ")
+                    i += 1
+            continue
+        out.append(source[i])
+        i += 1
+    return "".join(out)
+
+
 def has_canonical_import(source: str, expected_line: str) -> bool:
-    return any(line.strip() == expected_line for line in source.splitlines())
+    return any(line.strip() == expected_line for line in strip_lean_comments(source).splitlines())
+
+
+def declared_lean_theorems_in_text(source: str) -> set[str]:
+    names: set[str] = set()
+    scope_stack: list[tuple[str, str | None]] = []
+    for line in strip_lean_comments(source).splitlines():
+        if match := NAMESPACE_RE.match(line):
+            scope_stack.append(("namespace", match.group(1)))
+            continue
+        if match := SECTION_RE.match(line):
+            scope_stack.append(("section", match.group(1)))
+            continue
+        if match := END_RE.match(line):
+            label = match.group(1)
+            if label is None:
+                if scope_stack:
+                    scope_stack.pop()
+            else:
+                for index in range(len(scope_stack) - 1, -1, -1):
+                    if scope_stack[index][1] == label:
+                        del scope_stack[index:]
+                        break
+            continue
+        if match := THEOREM_DECL_RE.match(line):
+            namespace = ".".join(label for kind, label in scope_stack if kind == "namespace" and label is not None)
+            names.add(f"{namespace}.{match.group(1)}" if namespace else match.group(1))
+    return names
 
 
 def declared_lean_theorems(lean_root: Path) -> set[str]:
     names: set[str] = set()
     for path in lean_root.rglob("*.lean"):
-        scope_stack: list[tuple[str, str | None]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if match := NAMESPACE_RE.match(line):
-                scope_stack.append(("namespace", match.group(1)))
-                continue
-            if match := SECTION_RE.match(line):
-                scope_stack.append(("section", match.group(1)))
-                continue
-            if match := END_RE.match(line):
-                label = match.group(1)
-                if label is None:
-                    if scope_stack:
-                        scope_stack.pop()
-                else:
-                    for index in range(len(scope_stack) - 1, -1, -1):
-                        if scope_stack[index][1] == label:
-                            del scope_stack[index:]
-                            break
-                continue
-            if match := THEOREM_DECL_RE.match(line):
-                theorem_name = match.group(1)
-                namespace = ".".join(
-                    label
-                    for kind, label in scope_stack
-                    if kind == "namespace" and label is not None
-                )
-                names.add(f"{namespace}.{theorem_name}" if namespace else theorem_name)
+        names.update(declared_lean_theorems_in_text(path.read_text(encoding="utf-8")))
     return names
 
 
@@ -326,6 +374,10 @@ def main() -> int:
         return fail(
             f"proof_level/claim_level mismatch: proof_level={proof_level} requires claim_level={expected_claim}, got {claim_level}"
         )
+    if coverage.get("package_maturity") != PENDING_PACKAGE_MATURITY:
+        return fail(
+            "package_maturity must be experimental_pending_reverification in rubin-formal/proof_coverage.json"
+        )
 
     claims = coverage.get("claims")
     if not isinstance(claims, dict):
@@ -374,6 +426,7 @@ def main() -> int:
         key = row.get("section_key")
         status = row.get("status")
         evidence_level = row.get("evidence_level")
+        proof_trust = row.get("proof_trust")
         theorems = row.get("theorems", [])
         file_path = row.get("file")
 
@@ -397,6 +450,12 @@ def main() -> int:
         if evidence_level != expected_evidence_level:
             print(
                 f"ERROR: evidence_level drift for {key}: expected {expected_evidence_level}, got {evidence_level}",
+                file=sys.stderr,
+            )
+            bad = True
+        if proof_trust not in ALLOWED_PROOF_TRUST:
+            print(
+                f"ERROR: invalid proof_trust for {key}: {proof_trust}; expected one of {sorted(ALLOWED_PROOF_TRUST)}",
                 file=sys.stderr,
             )
             bad = True

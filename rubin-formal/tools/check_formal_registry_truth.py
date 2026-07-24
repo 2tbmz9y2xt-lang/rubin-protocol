@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from functools import lru_cache
@@ -11,6 +12,10 @@ from typing import Optional, Tuple
 
 
 REPO_PREFIX = "rubin-formal/"
+PROOF_TRUST_KERNEL = "kernel_checked"
+PROOF_TRUST_COMPILER = "compiler_trusted"
+ALLOWED_PROOF_TRUST = {PROOF_TRUST_KERNEL, PROOF_TRUST_COMPILER}
+COMPILER_TRUST_AXIOM = "Lean.ofReduceBool"
 
 # Intentionally narrow shared-op parity scope after Q-FORMAL-REGISTRY-EVIDENCE-LEVEL-ALIGN-01.
 # `retarget_v1` and `fork_choice_select` remain honest supplemental bridge lanes whose
@@ -20,6 +25,28 @@ SHARED_OP_PARITY = {
     "da_set_integrity": "da_set_integrity",
     "weight_accounting": "weight_accounting",
 }
+EXPECTED_COVERAGE_TRUST = (32, 566, 543, 22, 74, 67)
+EXPECTED_UNIVERSAL_TRUST = (27, 545, 21, 66, 59)
+EXPECTED_KERNEL_THEOREM_COMPLEMENT = (492, 476)
+EXPECTED_BRIDGE_TRUST = (13, 164, 158, 8, 19, 18)
+EXPECTED_UNAFFECTED_UNIVERSAL = {
+    "consensus_constants_witness_lengths_pre_rotation",
+    "block_validation_order",
+    "parallel_validation_equivalence",
+    "spend_gate_bridge",
+    "create_side_live_gate",
+    "feature_activation_fsm",
+}
+EXPECTED_AFFECTED_BRIDGE_REFS = {
+    "da_set_integrity": 1,
+    "fork_choice_select": 2,
+    "native_rotation": 1,
+    "native_suite_rotation": 2,
+    "parse_tx": 1,
+    "retarget_v1": 9,
+    "sighash_v1": 2,
+    "weight_accounting": 1,
+}
 
 DECL_KINDS = ("theorem", "lemma", "def", "abbrev")
 TheoremRef = Tuple[str, Optional[str]]
@@ -27,6 +54,7 @@ TheoremRef = Tuple[str, Optional[str]]
 NAMESPACE_RE = re.compile(r"^\s*namespace\s+([A-Za-z0-9_'.]+)\s*$")
 SECTION_RE = re.compile(r"^\s*section(?:\s+([A-Za-z0-9_'.]+))?\s*$")
 END_RE = re.compile(r"^\s*end(?:\s+([A-Za-z0-9_'.]+))?\s*$")
+IMPORT_RE = re.compile(r"^\s*import\s+([A-Za-z][A-Za-z0-9_']*(?:\.[A-Za-z][A-Za-z0-9_']*)*)\s*$", re.MULTILINE)
 DECLARATION_RE = re.compile(
     r"^\s*(?:@\[[^\]]+\]\s*)*"
     r"(?P<modifiers>(?:(?:private|protected|noncomputable|unsafe|partial)\s+)*)"
@@ -122,6 +150,34 @@ def strip_lean_comments(text: str) -> str:
         i += 1
 
     return "".join(out)
+
+
+def source_import_reachability(repo_root: Path) -> tuple[set[Path], list[str]]:
+    root = repo_root / "RubinFormal.lean"
+    if not root.exists():
+        return set(), ["formal root source missing: RubinFormal.lean"]
+
+    reachable: set[Path] = set()
+    errors: list[str] = []
+    pending = [root]
+    while pending:
+        path = pending.pop()
+        resolved = path.resolve()
+        if resolved in reachable:
+            continue
+        reachable.add(resolved)
+        for module in IMPORT_RE.findall(strip_lean_comments(path.read_text(encoding="utf-8"))):
+            if module == "RubinFormal":
+                imported = root
+            elif module.startswith("RubinFormal."):
+                imported = repo_root / f"{module.replace('.', '/')}.lean"
+            else:
+                continue
+            if not imported.exists():
+                errors.append(f"root import missing source: {module} ({rel_repo_path(repo_root, imported)})")
+            else:
+                pending.append(imported)
+    return reachable, sorted(set(errors))
 
 
 def _current_namespace_parts(stack: list[ScopeFrame]) -> list[str]:
@@ -240,7 +296,7 @@ def coverage_paths(row: dict) -> set[str]:
 
 def bridge_paths(row: dict) -> set[str]:
     refs: set[str] = set()
-    for key in ("lean_file", "theorem_file"):
+    for key in ("lean_file",):
         path = row.get(key)
         if isinstance(path, str):
             refs.add(path)
@@ -271,13 +327,12 @@ def coverage_theorems(row: dict) -> list[TheoremRef]:
 def bridge_theorems(row: dict) -> list[TheoremRef]:
     refs: list[TheoremRef] = []
     lean_file = row.get("lean_file") if isinstance(row.get("lean_file"), str) else None
-    theorem_file = row.get("theorem_file") if isinstance(row.get("theorem_file"), str) else None
     model_theorem = row.get("model_theorem")
     if isinstance(model_theorem, str):
         refs.append((model_theorem, lean_file))
     for theorem in row.get("supporting_theorems", []):
         if isinstance(theorem, str):
-            refs.append((theorem, theorem_file))
+            refs.append((theorem, None))
     return refs
 
 
@@ -297,6 +352,7 @@ def iter_registered_theorems(
 
 def validate_registered_paths(repo_root: Path, registered_paths: set[str]) -> list[str]:
     errors: list[str] = []
+    existing_paths: list[tuple[str, Path]] = []
     for declared_path in sorted(registered_paths):
         abs_path = try_lean_repo_path(repo_root, declared_path)
         if abs_path is None:
@@ -304,6 +360,17 @@ def validate_registered_paths(repo_root: Path, registered_paths: set[str]) -> li
             continue
         if not abs_path.exists():
             errors.append(f"referenced Lean file does not exist: {declared_path}")
+            continue
+        existing_paths.append((declared_path, abs_path))
+
+    reachable, reachability_errors = source_import_reachability(repo_root) if existing_paths else (set(), [])
+    errors.extend(reachability_errors)
+    for declared_path, abs_path in existing_paths:
+        if abs_path.resolve() not in reachable:
+            errors.append(
+                "registered Lean file is not reachable from RubinFormal.lean source imports: "
+                f"{declared_path}"
+            )
             continue
         try:
             built = olean_path(repo_root, declared_path)
@@ -387,12 +454,128 @@ def validate_shared_op_parity(
         if coverage_row is None:
             errors.append(f"shared-op parity row missing in proof_coverage.json: {section_key}")
             continue
-        if bridge_row.get("evidence_level") != coverage_row.get("evidence_level"):
-            errors.append(
-                f"shared-op evidence level drift for {op}: "
-                f"refinement_bridge={bridge_row.get('evidence_level')} vs "
-                f"proof_coverage[{section_key}]={coverage_row.get('evidence_level')}"
-            )
+        for field, label in (("evidence_level", "evidence level"), ("proof_trust", "proof trust")):
+            if bridge_row.get(field) != coverage_row.get(field):
+                errors.append(
+                    f"shared-op {label} drift for {op}: refinement_bridge={bridge_row.get(field)} vs "
+                    f"proof_coverage[{section_key}]={coverage_row.get(field)}"
+                )
+    return errors
+
+
+def parse_axiom_output(output: str, expected: list[str]) -> tuple[dict[str, str], list[str]]:
+    trust: dict[str, str] = {}
+    cursor = 0
+    for theorem in expected:
+        while cursor < len(output) and output[cursor].isspace():
+            cursor += 1
+        no_axioms = f"'{theorem}' does not depend on any axioms"
+        if output.startswith(no_axioms, cursor):
+            trust[theorem] = PROOF_TRUST_KERNEL
+            cursor += len(no_axioms)
+            continue
+        header = f"'{theorem}' depends on axioms: ["
+        if not output.startswith(header, cursor):
+            return {}, [f"unparseable #print axioms output for `{theorem}`"]
+        start = cursor + len(header)
+        end = output.find("]", start)
+        if end == -1:
+            return {}, [f"unterminated #print axioms output for `{theorem}`"]
+        axioms = [name.strip() for name in output[start:end].split(",") if name.strip()]
+        trust[theorem] = PROOF_TRUST_COMPILER if COMPILER_TRUST_AXIOM in axioms else PROOF_TRUST_KERNEL
+        cursor = end + 1
+    if output[cursor:].strip():
+        return {}, ["unexpected trailing output from #print axioms"]
+    return trust, []
+
+
+def classify_registered_theorems(repo_root: Path, refs: list[TheoremRef]) -> tuple[dict[str, str], list[str]]:
+    theorems = sorted({theorem for theorem, _ in refs})
+    if not theorems:
+        return {}, []
+    source = "\n".join(["import RubinFormal", *(f"#print axioms {theorem}" for theorem in theorems), ""])
+    try:
+        result = subprocess.run(
+            ["lake", "env", "lean", "--stdin", "--root=."],
+            cwd=repo_root,
+            input=source,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        return {}, [f"cannot run lake env lean for proof trust: {exc}"]
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        return {}, [f"lake env lean #print axioms failed ({result.returncode}): {detail}"]
+    return parse_axiom_output(result.stdout, theorems)
+
+
+def _row_theorems(row: dict, extractor) -> list[str]:
+    return [theorem for theorem, _ in extractor(row)]
+
+
+def _trust_facts(rows: list[dict], extractor, theorem_trust: dict[str, str]) -> tuple[int, int, int, int, int, int]:
+    row_refs = [_row_theorems(row, extractor) for row in rows]
+    refs = [theorem for names in row_refs for theorem in names]
+    compiler_refs = [theorem for theorem in refs if theorem_trust[theorem] == PROOF_TRUST_COMPILER]
+    compiler_rows = sum(any(theorem_trust[theorem] == PROOF_TRUST_COMPILER for theorem in names) for names in row_refs)
+    return len(rows), len(refs), len(set(refs)), compiler_rows, len(compiler_refs), len(set(compiler_refs))
+
+
+def validate_compiled_proof_trust(coverage: dict, bridge: dict, theorem_trust: dict[str, str]) -> list[str]:
+    errors: list[str] = []
+    coverage_rows = [row for row in coverage.get("coverage", []) if isinstance(row, dict)]
+    bridge_rows = [row for row in bridge.get("critical_ops", []) if isinstance(row, dict)]
+    for label, rows, extractor, id_field in (
+        ("proof_coverage", coverage_rows, coverage_theorems, "section_key"),
+        ("refinement_bridge", bridge_rows, bridge_theorems, "op"),
+    ):
+        for row in rows:
+            names = _row_theorems(row, extractor)
+            missing = [name for name in names if name not in theorem_trust]
+            identity = row.get(id_field)
+            if missing:
+                errors.append(f"{label} `{identity}` has unclassified theorem refs: {sorted(set(missing))}")
+                continue
+            expected = PROOF_TRUST_COMPILER if any(theorem_trust[name] == PROOF_TRUST_COMPILER for name in names) else PROOF_TRUST_KERNEL
+            actual = row.get("proof_trust")
+            if actual not in ALLOWED_PROOF_TRUST:
+                errors.append(f"{label} `{identity}` has invalid proof_trust: {actual}")
+            elif actual != expected:
+                errors.append(f"{label} `{identity}` proof_trust drift: expected {expected}, got {actual}")
+    if errors:
+        return errors
+
+    coverage_facts = _trust_facts(coverage_rows, coverage_theorems, theorem_trust)
+    if coverage_facts != EXPECTED_COVERAGE_TRUST:
+        errors.append(f"coverage compiled-trust facts drift: expected {EXPECTED_COVERAGE_TRUST}, got {coverage_facts}")
+    universal_rows = [row for row in coverage_rows if row.get("evidence_level") == "machine_checked_universal"]
+    universal_facts = _trust_facts(universal_rows, coverage_theorems, theorem_trust)
+    universal_expected = (universal_facts[0], universal_facts[1], universal_facts[3], universal_facts[4], universal_facts[5])
+    if universal_expected != EXPECTED_UNIVERSAL_TRUST:
+        errors.append(f"universal compiled-trust facts drift: expected {EXPECTED_UNIVERSAL_TRUST}, got {universal_expected}")
+    unaffected = {
+        row.get("section_key") for row in universal_rows
+        if all(theorem_trust[name] == PROOF_TRUST_KERNEL for name in _row_theorems(row, coverage_theorems))
+    }
+    if unaffected != EXPECTED_UNAFFECTED_UNIVERSAL:
+        errors.append(f"unaffected universal rows drift: expected {sorted(EXPECTED_UNAFFECTED_UNIVERSAL)}, got {sorted(unaffected)}")
+    coverage_refs = [theorem for row in coverage_rows for theorem in _row_theorems(row, coverage_theorems)]
+    kernel_refs = [theorem for theorem in coverage_refs if theorem_trust[theorem] == PROOF_TRUST_KERNEL]
+    kernel_facts = (len(kernel_refs), len(set(kernel_refs)))
+    if kernel_facts != EXPECTED_KERNEL_THEOREM_COMPLEMENT:
+        errors.append(f"kernel theorem-level complement drift: expected {EXPECTED_KERNEL_THEOREM_COMPLEMENT}, got {kernel_facts}")
+    bridge_facts = _trust_facts(bridge_rows, bridge_theorems, theorem_trust)
+    if bridge_facts != EXPECTED_BRIDGE_TRUST:
+        errors.append(f"bridge compiled-trust facts drift: expected {EXPECTED_BRIDGE_TRUST}, got {bridge_facts}")
+    affected_bridge_refs = {
+        row.get("op"): sum(theorem_trust[name] == PROOF_TRUST_COMPILER for name in _row_theorems(row, bridge_theorems))
+        for row in bridge_rows
+    }
+    affected_bridge_refs = {op: count for op, count in affected_bridge_refs.items() if count}
+    if affected_bridge_refs != EXPECTED_AFFECTED_BRIDGE_REFS:
+        errors.append(f"affected bridge theorem refs drift: expected {EXPECTED_AFFECTED_BRIDGE_REFS}, got {affected_bridge_refs}")
     return errors
 
 
@@ -464,7 +647,7 @@ def collect_registry_errors(
             theorem_exists_in_file,
             theorem_exists_anywhere,
             label="refinement_bridge",
-            allow_global_fallback=True,
+            allow_global_fallback=False,
         )
     )
     errors.extend(validate_shared_op_parity(coverage_rows, bridge_rows))
@@ -482,6 +665,15 @@ def main() -> int:
     registered_paths, coverage_theorem_refs, bridge_theorem_refs, errors = collect_registry_errors(
         repo_root, coverage, bridge, theorem_exists_anywhere, theorem_exists_in_file
     )
+    if errors:
+        for msg in errors:
+            print(f"ERROR: {msg}", file=sys.stderr)
+        return 1
+
+    theorem_trust, trust_errors = classify_registered_theorems(
+        repo_root, coverage_theorem_refs + bridge_theorem_refs
+    )
+    errors = trust_errors or validate_compiled_proof_trust(coverage, bridge, theorem_trust)
     if errors:
         for msg in errors:
             print(f"ERROR: {msg}", file=sys.stderr)

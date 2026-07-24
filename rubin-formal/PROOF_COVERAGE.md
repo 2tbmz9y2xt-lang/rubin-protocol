@@ -4,7 +4,7 @@
 Машинный реестр: `rubin-formal/proof_coverage.json`
 
 Текущее состояние: machine-readable source-of-truth (`proof_coverage.json`) фиксирует
-`proof_level=refinement`, `claim_level=refined`, полный registry по 32 current coverage entries и явные
+`proof_level=refinement`, `claim_level=refined`, `package_maturity=experimental_pending_reverification`, полный registry по 32 current coverage entries и явные
 `notes` / `limitations` для non-universal claims. Conformance-фикстуры
 Lean replay/refinement слой покрывает non-`CV-PV-*` conformance fixtures,
 представленные модулями, импортированными `RubinFormal.Conformance.Index`.
@@ -73,8 +73,7 @@ lifecycle/provenance evidence с pinned external source. Локальные chec
 - `tests/test_validation.py`
 
 Они фиксируют repository-valid Python import path для package tests и не
-усиливают theorem claims. RUB-959 section-hash digest остаётся
-`c21c234f6380f9421a10481958993ba23ec31277217fcdd6d5d4d4d613df74a3`.
+усиливают theorem claims. Канонический digest: `proof_coverage.json.spec_section_hashes_sha3_256`.
 
 ## Термины (важно)
 
@@ -89,7 +88,9 @@ lifecycle/provenance evidence с pinned external source. Локальные chec
   - `refined` (refinement to executable path).
 - `status=proved/proved_with_axiom` относится к конкретной registry entry **в рамках указанного `proof_level`**.
 - `status=proved_with_axiom` означает: proof закрывает секцию, но опирается на явно названные криптографические или модельные допущения, поэтому честный ceiling такой записи — `machine_checked_assumption_backed`, а не unconditional `universal`.
-- `evidence_level` — главный public-facing taxonomy field. Именно он различает universal / behavioral / assumption-backed / contract-level ceiling.
+- `evidence_level` remains the public claim taxonomy.
+- `proof_trust=kernel_checked`: compiled registered theorem closures do not report `Lean.ofReduceBool`; this does not claim absence of ordinary Lean foundations such as `propext`, `Quot.sound`, or `Classical.choice`.
+- `proof_trust=compiler_trusted`: at least one registered theorem closure reports `Lean.ofReduceBool`, so the trusted base includes Lean compiler/evaluator behavior.
 
 Внешний аудит / freeze-ready коммуникации **НЕ ДОЛЖНЫ** трактовать текущий `proof_level=refinement`
 как “formal verification of CANONICAL for all inputs/sections”.

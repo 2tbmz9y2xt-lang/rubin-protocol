@@ -14,6 +14,8 @@ if str(TOOLS_DIR) not in sys.path:
 
 import check_formal_coverage as m  # noqa: E402
 import check_formal_refinement_bridge as bridge_checker  # noqa: E402
+from check_formal_risk_gate import check_profile  # noqa: E402
+from formal_risk_score import RiskSummary  # noqa: E402
 
 
 def source_rebind_doc() -> dict:
@@ -29,6 +31,23 @@ class ConformanceIndexImportTests(unittest.TestCase):
 
         self.assertTrue(m.has_canonical_import(f"{expected}\n", expected))
         self.assertFalse(m.has_canonical_import(f"-- {expected}\n", expected))
+        self.assertFalse(m.has_canonical_import(f"/- {expected} -/\n", expected))
+
+    def test_string_comment_markers_preserve_following_import_and_theorem(self) -> None:
+        expected = "import RubinFormal.Conformance.CVParseReplay"
+        source = 'def marker := "-- /- not a comment -/"\n' + expected + "\nnamespace RubinFormal\ntheorem retained : True := by trivial\n"
+
+        self.assertTrue(m.has_canonical_import(source, expected))
+        self.assertEqual(m.declared_lean_theorems_in_text(source), {"RubinFormal.retained"})
+
+
+class FormalRiskMaturityTests(unittest.TestCase):
+    def test_only_phase0_and_devnet_pass_pending_maturity(self) -> None:
+        summary = RiskSummary("refinement", "refined", "experimental_pending_reverification", 32, 28, 4, 0, 0, 0, "LOW", [], [], [])
+        self.assertTrue(check_profile("phase0", summary)[0])
+        self.assertTrue(check_profile("devnet", summary)[0])
+        self.assertFalse(check_profile("audit", summary)[0])
+        self.assertFalse(check_profile("freeze", summary)[0])
 
 
 class SourceRebindTests(unittest.TestCase):

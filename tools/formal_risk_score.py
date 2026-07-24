@@ -17,12 +17,14 @@ EXPECTED_CLAIM_BY_PROOF = {
     "byte-model": "byte",
     "refinement": "refined",
 }
+PENDING_PACKAGE_MATURITY = "experimental_pending_reverification"
 
 
 @dataclass(frozen=True)
 class RiskSummary:
     proof_level: str
     claim_level: str
+    package_maturity: str
     total_sections: int
     proved: int
     proved_with_axiom: int
@@ -79,6 +81,9 @@ def summarize(coverage_doc: dict) -> RiskSummary:
         raise ValueError(
             f"proof_level/claim_level mismatch: proof_level={proof_level} requires claim_level={expected_claim}, got {claim_level}"
         )
+    package_maturity = coverage_doc.get("package_maturity")
+    if not isinstance(package_maturity, str) or not package_maturity:
+        raise ValueError("missing/invalid package_maturity")
 
     rows = coverage_doc.get("coverage")
     if not isinstance(rows, list) or not rows:
@@ -115,6 +120,7 @@ def summarize(coverage_doc: dict) -> RiskSummary:
     return RiskSummary(
         proof_level=proof_level,
         claim_level=claim_level,
+        package_maturity=package_maturity,
         total_sections=len(rows),
         proved=proved,
         proved_with_axiom=proved_with_axiom,
@@ -148,6 +154,7 @@ def main() -> int:
                 {
                     "proof_level": summary.proof_level,
                     "claim_level": summary.claim_level,
+                    "package_maturity": summary.package_maturity,
                     "total_sections": summary.total_sections,
                     "proved": summary.proved,
                     "proved_with_axiom": summary.proved_with_axiom,
@@ -168,6 +175,7 @@ def main() -> int:
     print("FORMAL_RISK_SCORE")
     print(f"- proof_level: {summary.proof_level}")
     print(f"- claim_level: {summary.claim_level}")
+    print(f"- package_maturity: {summary.package_maturity}")
     print(
         f"- coverage: total={summary.total_sections} proved={summary.proved} "
         f"proved_with_axiom={summary.proved_with_axiom} stated={summary.stated} deferred={summary.deferred}"

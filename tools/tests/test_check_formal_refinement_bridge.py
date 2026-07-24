@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(TOOLS_DIR) not in sys.path:
@@ -41,6 +42,20 @@ def powOuts : List PowOut := [
 
         self.assertEqual(m.trace_ids_for_op(trace_text, "parse_tx"), {"PARSE-01", "PARSE-16"})
         self.assertEqual(m.trace_ids_for_op(trace_text, "retarget_v1"), {"POW-01"})
+
+    def test_fully_qualified_theorem_must_match_file(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Bridge.lean"
+            path.write_text("namespace RubinFormal.Other\ntheorem bridge_ok : True := by trivial\nend RubinFormal.Other")
+            self.assertFalse(m.theorem_declared_in_file(path, "RubinFormal.Real.bridge_ok"))
+
+    def test_block_commented_replay_imports_do_not_count(self) -> None:
+        with TemporaryDirectory() as tmp:
+            conformance = Path(tmp) / "rubin-formal" / "RubinFormal" / "Conformance"
+            conformance.mkdir(parents=True)
+            (conformance / "CVParseVectors.lean").touch(); (conformance / "CVParseReplay.lean").touch()
+            (conformance / "Index.lean").write_text("/- import RubinFormal.Conformance.CVParseVectors\nimport RubinFormal.Conformance.CVParseReplay -/")
+            self.assertFalse(m.has_lean_replay_evidence(Path(tmp), "CV-PARSE"))
 
 
 if __name__ == "__main__":

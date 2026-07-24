@@ -5,10 +5,16 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.check_formal_registry_truth import extract_declared_names, theorem_lookups
+from tools.check_formal_registry_truth import extract_declared_names, parse_axiom_output, theorem_lookups
 
 
 class RegistryTruthCheckerTests(unittest.TestCase):
+    def test_axiom_output_classifies_and_fails_closed(self) -> None:
+        trust, errors = parse_axiom_output("'A.ok' depends on axioms: [propext, Lean.ofReduceBool]\n'B.ok' does not depend on any axioms\n", ["A.ok", "B.ok"])
+        self.assertEqual(errors, [])
+        self.assertEqual(trust, {"A.ok": "compiler_trusted", "B.ok": "kernel_checked"})
+        self.assertTrue(parse_axiom_output("unexpected", ["A.ok"])[1])
+
     def test_extract_declared_names_ignores_comments(self) -> None:
         text = """
 namespace RubinFormal.Real

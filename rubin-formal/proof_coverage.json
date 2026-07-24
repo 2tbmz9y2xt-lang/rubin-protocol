@@ -2,6 +2,7 @@
   "schema_version": 1,
   "status": "active",
   "claim_level": "refined",
+  "package_maturity": "experimental_pending_reverification",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
   "spec_section_hashes_sha3_256": "c21c234f6380f9421a10481958993ba23ec31277217fcdd6d5d4d4d613df74a3",
@@ -66,6 +67,7 @@
       "section_key": "consensus_constants",
       "section_heading": "## 4. Consensus Constants (Wire-Level)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.subsidy_u128_safety_proved",
         "RubinFormal.htlc_timelock_proved"
@@ -87,6 +89,7 @@
       "section_key": "consensus_constants_witness_lengths_pre_rotation",
       "section_heading": "## 4. Consensus Constants (Witness-Length Pre-Rotation Registry Fragment)",
       "status": "proved",
+      "proof_trust": "kernel_checked",
       "theorems": [
         "RubinFormal.UtxoApplyGenesisV1.validateWitnessItemLengths_eq_registry_pre_rotation",
         "RubinFormal.unknown_suite_rejected_registry_pre_rotation",
@@ -118,6 +121,7 @@
       "section_key": "consensus_constants_native_binding_manifest_pre_rotation",
       "section_heading": "## 4. Consensus Constants (Native Binding Manifest Pre-Rotation Residual)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.NativeRegistryResolution.fi_rot_03_pre_rotation_ml_dsa_resolves",
         "RubinFormal.RegistryResolutionLiveBridge.pre_rotation_registered_iff",
@@ -147,6 +151,7 @@
       "section_key": "transaction_wire",
       "section_heading": "## 5. Transaction Wire",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.Conformance.cv_parse_vectors_pass",
         "RubinFormal.Conformance.cv_compact_vectors_pass",
@@ -215,6 +220,7 @@
       "section_key": "transaction_identifiers",
       "section_heading": "## 8. Transaction Identifiers (TXID / WTXID)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.Conformance.cv_parse_vectors_pass",
         "RubinFormal.Conformance.cv_sig_vectors_pass",
@@ -241,6 +247,7 @@
       "section_key": "transaction_identifiers_crypto_residual",
       "section_heading": "## TXID / WTXID Crypto Residual",
       "status": "proved_with_axiom",
+      "proof_trust": "kernel_checked",
       "theorems": [
         "RubinFormal.txid_wtxid_digest_collision_reduces_to_sha3_collision"
       ],
@@ -259,6 +266,7 @@
       "section_key": "weight_accounting",
       "section_heading": "## 9. Weight Accounting (Normative)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.Conformance.cv_weight_vectors_pass",
         "RubinFormal.WeightSuiteAware.weight_suite_aware_correct",
@@ -329,6 +337,7 @@
       "section_key": "witness_commitment",
       "section_heading": "### 10.4.1 Witness Commitment (Coinbase Anchor)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.witness_commitment_proved",
         "RubinFormal.WitnessCommitmentV1.witnessMerkleRootWtxids_rewrites_coinbase_slot",
@@ -355,6 +364,7 @@
       "section_key": "witness_commitment_crypto_residual",
       "section_heading": "## Witness Commitment Crypto Residual",
       "status": "proved_with_axiom",
+      "proof_trust": "kernel_checked",
       "theorems": [
         "RubinFormal.Merkle.merkle_tag_equivalence_leaf_collision_reduces_to_sha3_collision",
         "RubinFormal.Merkle.merkle_tag_equivalence_node_collision_reduces_to_sha3_collision"
@@ -375,6 +385,7 @@
       "section_key": "sighash_v1",
       "section_heading": "## 12. Sighash v1 (Normative)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.Conformance.cv_sighash_vectors_pass",
         "RubinFormal.sighash_v1_proved",
@@ -421,6 +432,7 @@
       "section_key": "sighash_v1_digest_collision_residual",
       "section_heading": "## Sighash v1 Digest Collision Residual",
       "status": "proved_with_axiom",
+      "proof_trust": "kernel_checked",
       "theorems": [
         "RubinFormal.digestV1_output_collision_reduces_to_sha3_collision"
       ],
@@ -439,6 +451,7 @@
       "section_key": "consensus_error_codes",
       "section_heading": "## 13. Consensus Error Codes (Normative)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.Conformance.cv_validation_order_vectors_pass",
         "RubinFormal.error_priority_parse",
@@ -692,6 +705,7 @@
       "section_key": "covenant_registry",
       "section_heading": "## 14. Covenant Type Registry (Normative)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.Conformance.cv_covenant_genesis_vectors_pass",
         "RubinFormal.covenantDispositionComplete",
@@ -739,6 +753,7 @@
       "section_key": "difficulty_update",
       "section_heading": "## 15. Difficulty Update (Normative)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.Conformance.cv_pow_vectors_pass",
         "RubinFormal.PowV1.retargetV1_clamp_bounded",
@@ -832,6 +847,7 @@
       "section_key": "transaction_structural_rules",
       "section_heading": "## 16. Transaction Structural Rules (Normative)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.Conformance.cv_validation_order_vectors_pass",
         "RubinFormal.unknown_suite_0x05_rejected",
@@ -887,6 +903,7 @@
       "section_key": "replay_domain_checks",
       "section_heading": "## 1. Replay-Domain Checks (Normative)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.Conformance.cv_replay_vectors_pass",
         "RubinFormal.replay_domain_checks_proved",
@@ -915,6 +932,7 @@
       "section_key": "utxo_state_model",
       "section_heading": "## 2. UTXO State Model (Normative)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.Conformance.cv_utxo_basic_vectors_pass",
         "RubinFormal.UtxoBasicV1.validateCoinbaseMaturity_reject_iff",
@@ -1047,6 +1065,7 @@
       "section_key": "coinbase_and_subsidy",
       "section_heading": "## 19. Coinbase and Subsidy (Normative)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.Conformance.cv_subsidy_vectors_pass",
         "RubinFormal.subsidy_u128_safety_proved",
@@ -1069,6 +1088,7 @@
       "section_key": "value_conservation",
       "section_heading": "## 20. Value Conservation (Normative)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.Conformance.cv_utxo_basic_vectors_pass",
         "RubinFormal.Conformance.cv_subsidy_vectors_pass",
@@ -1091,6 +1111,7 @@
       "section_key": "da_set_integrity",
       "section_heading": "## 21. DA Set Integrity (Normative)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.Conformance.cv_da_integrity_vectors_pass",
         "RubinFormal.da_empty_txs_accepted",
@@ -1248,6 +1269,7 @@
       "section_key": "block_timestamp_rules",
       "section_heading": "## 22. Block Timestamp Rules (Normative)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.Conformance.cv_timestamp_vectors_pass",
         "RubinFormal.medianTimePast_value",
@@ -1284,6 +1306,7 @@
       "section_key": "fork_choice",
       "section_heading": "## 23. Fork-Choice Rule (Non-Validation Procedure)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.Conformance.cv_fork_choice_vectors_pass",
         "RubinFormal.ForkChoiceV1.emptyChain_loses",
@@ -1331,6 +1354,7 @@
       "section_key": "block_validation_order",
       "section_heading": "## 25. Block Validation Order (Normative)",
       "status": "proved",
+      "proof_trust": "kernel_checked",
       "theorems": [
         "RubinFormal.section25_validation_total_proved",
         "RubinFormal.SubsidyV1.connectBlock_end_to_end_proved",
@@ -1356,6 +1380,7 @@
       "section_key": "parallel_validation_equivalence",
       "section_heading": "## Parallel Validation — Sequential Equivalence (Q-PV-19)",
       "status": "proved",
+      "proof_trust": "kernel_checked",
       "theorems": [
         "RubinFormal.Refinement.ParallelEquivalence.accept_reject_equivalence_live"
       ],
@@ -1374,6 +1399,7 @@
       "section_key": "txcontext_formal",
       "section_heading": "## SPEC-TXCTX-01 §14. TxContext Construction and Bounds",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.sortExtIds_order_independent",
         "RubinFormal.buildTxContext_ext_ids",
@@ -1437,6 +1463,7 @@
       "section_key": "native_rotation",
       "section_heading": "Native Crypto Suite Rotation (§4.1.2, §4.1.3, §23.2.1)",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.NativeSuiteRotation.fi_rot_01_descriptor_unique",
         "RubinFormal.NativeSuiteRotation.fi_rot_02_phase_partition",
@@ -1482,6 +1509,7 @@
       "section_key": "spend_gate_bridge",
       "section_heading": "## Spend Gate — Suite Acceptance Bridge",
       "status": "proved",
+      "proof_trust": "kernel_checked",
       "theorems": [
         "RubinFormal.SpendGateLiveBridge.validateP2PKSpendPreSig_ok_constrained",
         "RubinFormal.SpendGateLiveBridge.validateP2PKSpendPreSig_rejects_inactive_suite",
@@ -1505,6 +1533,7 @@
       "section_key": "threshold_stealth_spend_suite_gate",
       "section_heading": "## Threshold/Stealth Spend Suite Gate Bridge",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.ThresholdSpendSuiteGateBridge.pre_rotation_threshold_gate_eq_hardcoded",
         "RubinFormal.ThresholdSpendSuiteGateBridge.pre_rotation_hardcoded_accept_implies_gate",
@@ -1547,6 +1576,7 @@
       "section_key": "htlc_spend_side_structural",
       "section_heading": "## HTLC Spend-Side Structural Live Bridge",
       "status": "proved",
+      "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.HtlcSpendStructuralLiveBridge.htlc_witness_slots_fixed",
         "RubinFormal.HtlcSpendStructuralLiveBridge.dispatch_htlc_ok_constrained",
@@ -1580,6 +1610,7 @@
       "section_key": "create_side_live_gate",
       "section_heading": "## Create-Side Live Gate (Top-Level Runtime P2PK Path)",
       "status": "proved",
+      "proof_trust": "kernel_checked",
       "theorems": [
         "RubinFormal.CreateSideLiveGateBridge.validateOutGenesisWithRotation_some_p2pk_ok_iff",
         "RubinFormal.CreateSideLiveGateBridge.validateOutGenesisWithRotation_some_p2pk_rejects_inactive_suite",
@@ -1606,6 +1637,7 @@
       "section_key": "htlc_spend_side_crypto_assumption",
       "section_heading": "## HTLC Spend-Side Crypto Assumption Bridge",
       "status": "proved_with_axiom",
+      "proof_trust": "kernel_checked",
       "theorems": [
         "RubinFormal.HtlcSpendCryptoAssumptionBridge.claim_hash_collision_reduces_to_sha3_collision"
       ],
@@ -1624,6 +1656,7 @@
       "section_key": "feature_activation_fsm",
       "section_heading": "## Feature Activation FSM (BIP9-like)",
       "status": "proved",
+      "proof_trust": "kernel_checked",
       "theorems": [
         "RubinFormal.active_terminal",
         "RubinFormal.failed_terminal",
@@ -1717,7 +1750,7 @@
     ]
   },
   "status_taxonomy": {
-    "machine_checked_universal": "Universal inductive proof over all inputs. No axioms, no fixture dependence. A counterexample would require a Lean kernel bug.",
+    "machine_checked_universal": "Universal proof scope over all quantified inputs, independent of fixtures. Row-level proof_trust states whether the trusted base is the Lean kernel only or also Lean.ofReduceBool compiler/evaluator behavior.",
     "machine_checked_behavioral": "Behavioral decomposition of a Lean transcription of a live Go/Rust formula into pure functions with full constant pins, monotonicity, and CV replay. Not monadic end-to-end. Lean-to-Go/Rust parity is human-verified by code review, not machine-checked.",
     "machine_checked_contract": "Fixture-backed contract: conformance vectors or Go-trace vectors replayed via native_decide. Sound for covered inputs only; not a universal proof.",
     "machine_checked_model": "Property of a Lean model or helper definition with no live bridge to Go/Rust implementation. Honest about coverage gap; should be upgraded to behavioral or universal when a bridge is added.",
