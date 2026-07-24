@@ -52,7 +52,7 @@ REQUIRED_SECTION_EVIDENCE_LEVELS = {
     "value_conservation": "machine_checked_universal",
     "da_set_integrity": "machine_checked_universal",
     "block_timestamp_rules": "machine_checked_universal",
-    "fork_choice": "machine_checked_universal",
+    "fork_choice": "machine_checked_model",
     "block_validation_order": "machine_checked_model",
     "parallel_validation_equivalence": "machine_checked_universal",
     "txcontext_formal": "machine_checked_universal",
@@ -184,23 +184,58 @@ def fail(msg: str) -> int:
     return 1
 
 
-def strip_lean_comments(source: str) -> str:
+def _blank_lean_span(source: str, start: int, end: int, out: list[str]) -> None:
+    out.extend("\n" if ch == "\n" else " " for ch in source[start:end])
+
+
+def _consume_lean_string(source: str, start: int, out: list[str], *, blank: bool) -> int:
+    i = start + 1
+    while i < len(source):
+        if source[i] == "\\" and i + 1 < len(source):
+            i += 2
+            continue
+        if source[i] == '"':
+            i += 1
+            break
+        i += 1
+    if blank:
+        _blank_lean_span(source, start, i, out)
+    else:
+        out.extend(source[start:i])
+    return i
+
+
+def _consume_lean_raw_string(source: str, start: int, out: list[str], *, blank: bool) -> int | None:
+    quote = start + 1
+    while quote < len(source) and source[quote] == "#":
+        quote += 1
+    if quote >= len(source) or source[quote] != '"':
+        return None
+    delimiter = "#" * (quote - start - 1)
+    i = quote + 1
+    while i < len(source):
+        if source[i] == '"' and source.startswith(delimiter, i + 1):
+            i += 1 + len(delimiter)
+            break
+        i += 1
+    if blank:
+        _blank_lean_span(source, start, i, out)
+    else:
+        out.extend(source[start:i])
+    return i
+
+
+def _strip_lean(source: str, *, blank_strings: bool) -> str:
     out: list[str] = []
     i = 0
     while i < len(source):
+        if source[i] == "r":
+            raw_end = _consume_lean_raw_string(source, i, out, blank=blank_strings)
+            if raw_end is not None:
+                i = raw_end
+                continue
         if source[i] == '"':
-            out.append(source[i])
-            i += 1
-            while i < len(source):
-                ch = source[i]
-                out.append(ch)
-                if ch == "\\" and i + 1 < len(source):
-                    out.append(source[i + 1])
-                    i += 2
-                    continue
-                i += 1
-                if ch == '"':
-                    break
+            i = _consume_lean_string(source, i, out, blank=blank_strings)
             continue
         if source.startswith("--", i):
             while i < len(source) and source[i] != "\n":
@@ -229,8 +264,18 @@ def strip_lean_comments(source: str) -> str:
     return "".join(out)
 
 
+def strip_lean_comments(source: str) -> str:
+    """Blank Lean comments while preserving quoted strings and line positions."""
+    return _strip_lean(source, blank_strings=False)
+
+
+def blank_lean_comments_and_strings(source: str) -> str:
+    """Blank Lean comments and quoted/raw strings while preserving line positions."""
+    return _strip_lean(source, blank_strings=True)
+
+
 def has_canonical_import(source: str, expected_line: str) -> bool:
-    return any(line.strip() == expected_line for line in strip_lean_comments(source).splitlines())
+    return any(line.strip() == expected_line for line in blank_lean_comments_and_strings(source).splitlines())
 
 
 def declared_lean_theorems_in_text(source: str) -> set[str]:
@@ -401,7 +446,7 @@ def validate_retired_source_paths(repo_root: Path, doc: dict) -> list[str]:
     pending, visited = [entrypoint], {entrypoint.resolve()}
     while pending:
         path = pending.pop()
-        for module in LEAN_IMPORT_RE.findall(strip_lean_comments(path.read_text(encoding="utf-8"))):
+        for module in LEAN_IMPORT_RE.findall(blank_lean_comments_and_strings(path.read_text(encoding="utf-8"))):
             rel_path = f"{module.replace('.', '/')}.lean"
             reachable.add(rel_path)
             imported = formal_root / rel_path

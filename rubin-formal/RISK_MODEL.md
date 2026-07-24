@@ -19,9 +19,9 @@
 - **Pinned section**: секция из `spec/SECTION_HASHES.json`, которая hash‑pin’ится и должна быть синхронна со спекой.
 - `status=proved`: утверждения для pinned‑секции доказаны в рамках текущего `proof_level`.
 - `status=proved_with_axiom`: утверждения доказаны, но proof опирается на один или более явно названных допущений. Для hash/commitment-секций это обычно означает reduction к collision resistance, а не аксиомо-свободную невозможность коллизии.
-- `status=stated`: резервный статус для будущих registry rows без machine-checked доказательства. В текущем registry таких строк нет.
+- `status=stated`: row сохраняет полезное machine-checked model/contract evidence, но не заявляет более широкий proof closure. В текущем registry таких строк `3`.
 - `status=deferred`: резервный статус для сознательно не покрытой секции. В текущем registry таких строк нет.
-- `evidence_level`: главный truth-correction field для честного public claim ceiling. Он отделяет universal, behavioral, assumption-backed и contract-level entries даже когда registry status уже `proved`.
+- `evidence_level`: главный truth-correction field для честного public claim ceiling. Он отделяет universal, behavioral, assumption-backed, contract-level и model-level entries даже когда registry status уже `proved`.
 
 ## Уровни доказательств (`proof_level`)
 
@@ -71,12 +71,13 @@ re-verification/maturity.
 
 На текущем refinement-срезе registry содержит:
 
-- `28` rows со статусом `proved`;
-- `3` rows со статусом `proved_with_axiom`;
-- `27` universal entries;
-- `3` assumption-backed entries;
-- `1` model-level entry;
-- `0` stated rows;
+- `25` rows со статусом `proved`;
+- `4` rows со статусом `proved_with_axiom`;
+- `24` universal entries;
+- `4` assumption-backed entries;
+- `3` model-level entries;
+- `1` contract-level entry;
+- `3` stated rows;
 - `0` deferred rows.
 
 Это сильнее старого bootstrap narrative, но всё ещё не даёт права заявлять universal proof of full CANONICAL semantics.

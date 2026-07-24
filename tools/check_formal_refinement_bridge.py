@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
 from check_formal_coverage import (
     ALLOWED_PROOF_TRUST,
+    blank_lean_comments_and_strings,
     declared_lean_theorems,
     declared_lean_theorems_in_text,
     has_canonical_import,
@@ -25,6 +27,12 @@ FORMAL_SKIP_GATE_PREFIXES = ("CV-PV-",)
 FORBIDDEN_SCOPE_MARKERS = ("universal", "for all", "all inputs", "all byte strings", "not bounded", "not-bounded")
 TRACE_SOURCE_FILE = "rubin-formal/RubinFormal/Refinement/GoTraceV1.lean"
 REQUIRED_TRACE_OPS = frozenset({"parse_tx", "sighash_v1", "retarget_v1", "utxo_apply_basic"})
+TRACE_LIST_NAME_BY_OP = {
+    "parse_tx": "parseOuts",
+    "sighash_v1": "sighashOuts",
+    "retarget_v1": "powOuts",
+    "utxo_apply_basic": "utxoBasicOuts",
+}
 
 
 def valid_non_empty_string_list(value: object) -> bool:
@@ -45,37 +53,102 @@ def states_bounded_scope(value: object) -> bool:
     return "bounded" in words and "unbounded" not in words
 
 
-def trace_ids_for_op(trace_text: str, op: str) -> set[str]:
-    list_name_by_op = {
-        "parse_tx": "parseOuts",
-        "sighash_v1": "sighashOuts",
-        "retarget_v1": "powOuts",
-        "utxo_apply_basic": "utxoBasicOuts",
-    }
-    list_name = list_name_by_op.get(op)
+def _trace_list_block(live_text: str, list_name: str) -> tuple[int, int] | None:
+    definition_re = re.compile(
+        rf"^\s*def\s+{re.escape(list_name)}\s*:\s*List\b", re.MULTILINE
+    )
+    definitions = list(definition_re.finditer(live_text))
+    if len(definitions) != 1:
+        return None
+    assignment = live_text.find(":=", definitions[0].end())
+    if assignment == -1:
+        return None
+    opening = live_text.find("[", assignment + 2)
+    if opening == -1:
+        return None
+    depth = 0
+    for index in range(opening, len(live_text)):
+        if live_text[index] == "[":
+            depth += 1
+        elif live_text[index] == "]":
+            depth -= 1
+            if depth == 0:
+                return opening, index + 1
+            if depth < 0:
+                return None
+    return None
+
+
+def _trace_record_ranges(live_text: str, block_start: int, block_end: int) -> list[tuple[int, int]] | None:
+    records: list[tuple[int, int]] = []
+    depth = 0
+    record_start: int | None = None
+    for index in range(block_start + 1, block_end - 1):
+        if live_text[index] == "{":
+            if depth == 0:
+                record_start = index
+            depth += 1
+        elif live_text[index] == "}":
+            depth -= 1
+            if depth < 0:
+                return None
+            if depth == 0 and record_start is not None:
+                records.append((record_start, index + 1))
+                record_start = None
+    return records if depth == 0 else None
+
+
+def _ordinary_string_value(source: str, start: int, end: int) -> str | None:
+    if start >= end or source[start] != '"':
+        return None
+    value: list[str] = []
+    index = start + 1
+    while index < end:
+        ch = source[index]
+        if ch == "\\" and index + 1 < end:
+            value.append(source[index + 1])
+            index += 2
+            continue
+        if ch == '"':
+            return "".join(value)
+        value.append(ch)
+        index += 1
+    return None
+
+
+def _live_string_field(source: str, live_text: str, start: int, end: int, field: str) -> str | None:
+    match = re.search(rf"\b{re.escape(field)}\s*:=", live_text[start:end])
+    if match is None:
+        return None
+    value_start = start + match.end()
+    while value_start < end and source[value_start].isspace():
+        value_start += 1
+    return _ordinary_string_value(source, value_start, end)
+
+
+def trace_ids_for_op(trace_text: str, op: str) -> set[str] | None:
+    list_name = TRACE_LIST_NAME_BY_OP.get(op)
     if list_name is None:
         return set()
-    marker = f"def {list_name} : List "
-    start = trace_text.find(marker)
-    if start == -1:
-        return set()
-    block_start = trace_text.find("[", start)
-    block_end = trace_text.find("\n]", block_start)
-    if block_start == -1 or block_end == -1:
-        return set()
-    block = trace_text[block_start:block_end]
+    live_text = blank_lean_comments_and_strings(trace_text)
+    block = _trace_list_block(live_text, list_name)
+    if block is None:
+        return None
+    records = _trace_record_ranges(live_text, *block)
+    if records is None:
+        return None
     ids: set[str] = set()
-    for item in block.split("},"):
-        if op == "retarget_v1" and 'op := "retarget_v1"' not in item:
-            continue
-        marker = 'id := "'
-        id_start = item.find(marker)
-        if id_start == -1:
-            continue
-        id_start += len(marker)
-        id_end = item.find('"', id_start)
-        if id_end != -1:
-            ids.add(item[id_start:id_end])
+    for record_start, record_end in records:
+        identifier = _live_string_field(trace_text, live_text, record_start, record_end, "id")
+        if identifier is None:
+            return None
+        if op == "retarget_v1":
+            record_op = _live_string_field(trace_text, live_text, record_start, record_end, "op")
+            if record_op is None:
+                return None
+            if record_op != "retarget_v1":
+                continue
+        ids.add(identifier)
     return ids
 
 
@@ -96,14 +169,19 @@ def trace_binding_errors(
     if not valid_non_empty_string_list(traced_vector_ids):
         errors.append(f"traced_vector_ids[] for op `{op}` must be a non-empty string list")
     else:
-        expected = trace_ids_for_op(trace_text, op)
         actual = set(traced_vector_ids)
-        if not expected:
+        list_name = TRACE_LIST_NAME_BY_OP.get(op)
+        if list_name is None:
+            errors.append(f"no trace list mapping registered for trace-backed op `{op}`")
+            return errors
+        expected = trace_ids_for_op(trace_text, op)
+        if expected is None:
+            errors.append(f"trace list `{list_name}` must have exactly one live definition with extractable rows")
+        elif not expected:
             errors.append(f"no imported trace rows found for trace-backed op `{op}`")
         elif actual != expected:
             errors.append(f"traced_vector_ids[] for op `{op}` drift: expected {sorted(expected)}, got {sorted(actual)}")
     return errors
-
 
 def gate_to_camel(gate: str) -> str:
     if not gate.startswith("CV-"):

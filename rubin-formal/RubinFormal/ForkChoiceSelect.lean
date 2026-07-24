@@ -1,23 +1,23 @@
 import RubinFormal.ForkChoiceTiebreak
 
 /-!
-# Fork-Choice Selector (§23) — Universal Determinism
+# Fork-Choice Selector (§23) — Model Determinism
 
 Models the full `fork_choice_select` operation: chainwork comparison first,
 tie-break by block hash when chainwork is equal.
 
-Proves universal exhaustive agreement for ALL 32-byte hash inputs:
-- `forkSelect_exhaustive`: master theorem — no axioms, no semantic premises
+Proves deterministic selector properties for represented 32-byte hash values:
+- `forkSelect_exhaustive`: master theorem — no additional, custom, or cryptographic axioms
 - `forkSelect_heavier`: unequal chainwork → heavier wins
 - `forkSelect_tiebreak_det`: equal chainwork + different hashes → deterministic
 - `forkSelect_equal_chains`: identical chains → Left (trivial, no fork)
-- `forkSelect_total_det`: all distinguishable pairs → symmetric agreement
+- `forkSelect_total_det`: model-distinguishable pairs → symmetric selection
 - `bytesLT_antisym`: strict ordering (no symmetric pair)
 
-Evidence level: `machine_checked_universal` — zero axioms, zero sorry,
-zero assumptions. The only premise is `hL/hR : length = 32` which is a
-protocol type invariant (block hashes are SHA3-256 outputs = 32 bytes),
-not a semantic precondition.
+Evidence level: `machine_checked_model`. These theorem closures introduce no
+additional, custom, or cryptographic axioms. The `hL/hR : length = 32`
+hypotheses describe the represented hash shape; distinct candidates with equal
+work and equal hashes are not represented as different values here.
 -/
 
 namespace RubinFormal
@@ -60,7 +60,7 @@ inductive ForkResult where
 deriving DecidableEq, Repr
 
 /-- Full fork-choice selector: chainwork first, tie-break by block hash.
-    Models the runtime fork_choice_select operation from §23.
+    Models the chainwork/hash selection structure from §23.
     Block hashes are 32 bytes (SHA3-256 output). The 32-byte requirement
     is a protocol type invariant, not a semantic precondition. -/
 def forkSelect (lhsWork rhsWork : Nat) (lhsHash rhsHash : List UInt8) : ForkResult :=
@@ -83,10 +83,8 @@ theorem forkSelect_heavier (lw rw : Nat) (lh rh : List UInt8) (h : lw > rw) :
     forkSelect lw rw lh rh = .Left := by
   simp [forkSelect, h]
 
-/-- Equal-chainwork symmetric agreement: if node A sees (lh, rh) and node B
-    sees (rh, lh), they agree on which chain wins. This is the key fork-choice
-    property — two nodes seeing the same chains in different order will converge
-    to the same tip. -/
+/-- Equal-chainwork model symmetry: reversing distinct represented hashes
+    reverses the selected side. This is not a candidate-identity claim. -/
 theorem forkSelect_tiebreak_det (w : Nat) (lh rh : List UInt8)
     (hL : lh.length = 32) (hR : rh.length = 32) (hNeq : lh ≠ rh) :
     (forkSelect w w lh rh = .Left ∧ forkSelect w w rh lh = .Right) ∨
@@ -108,7 +106,7 @@ theorem forkSelect_chainwork_bridge (lhs rhs : List Nat)
     ChainWorkV1.heavierChain lhs rhs = true :=
   ⟨forkSelect_heavier _ _ _ _ h, heavierChain_wins lhs rhs h⟩
 
-/-- All distinguishable pairs → symmetric agreement. -/
+/-- All model-distinguishable pairs → symmetric selection. -/
 theorem forkSelect_total_det (lw rw : Nat) (lh rh : List UInt8)
     (hL : lh.length = 32) (hR : rh.length = 32)
     (hDiff : lw ≠ rw ∨ lh ≠ rh) :
@@ -137,26 +135,27 @@ theorem forkSelect_lighter_loses (lw rw : Nat) (lh rh : List UInt8) (h : lw > rw
     forkSelect rw lw rh lh = .Right := by
   unfold forkSelect; simp [show ¬ (rw > lw) from by omega, h]
 
-/-! ## Universal exhaustive agreement (master theorem)
+/-! ## Model exhaustiveness (master theorem)
 
-For ALL possible inputs with 32-byte hashes, forkSelect produces a
-consistent outcome across asymmetric views. This eliminates the need for
-any axiom or semantic premise beyond the protocol type invariant.
+For represented inputs with 32-byte hashes, forkSelect covers the equal-work
+and unequal-work cases. It does not distinguish distinct candidates that share
+both work and hash values.
 
 Case partition:
 - Identical inputs (lw = rw ∧ lh = rh): both sides return .Left
-- Distinguishable inputs (lw ≠ rw ∨ lh ≠ rh): symmetric agreement
+- Distinguishable inputs (lw ≠ rw ∨ lh ≠ rh): symmetric model selection
 
-Together: exhaustive ∀ coverage, zero axioms. -/
+Together: model-level case coverage with no additional, custom, or
+cryptographic axioms. -/
 
-/-- **Master theorem.** For ALL 32-byte hash inputs, forkSelect yields
-    consistent cross-node agreement. Either both calls return .Left
-    (identical chains, no fork), or they produce opposite results
-    (symmetric agreement on the winner).
+/-- **Master theorem.** For represented 32-byte hash inputs, forkSelect yields
+    a total model result. Either both calls return .Left for equal represented
+    values, or they produce opposite results for model-distinguishable values.
 
-    This is the universal closure of §23 fork-choice determinism.
-    Zero axioms. Zero semantic premises. Only the protocol type invariant
-    (block hashes = 32 bytes) appears as a hypothesis. -/
+    This is a model theorem, not a cross-node candidate-identity claim: distinct
+    candidates with equal work and equal hashes are not distinguished. It adds
+    no additional, custom, or cryptographic axioms; the 32-byte hash shape
+    remains an explicit hypothesis. -/
 theorem forkSelect_exhaustive (lw rw : Nat) (lh rh : List UInt8)
     (hL : lh.length = 32) (hR : rh.length = 32) :
     (forkSelect lw rw lh rh = .Left ∧ forkSelect rw lw rh lh = .Left) ∨
@@ -192,10 +191,9 @@ theorem forkSelect_exhaustive (lw rw : Nat) (lh rh : List UInt8)
 #eval forkSelect 0 0 [0] [1]       -- .Left  (zero work, lower hash wins)
 #eval forkSelect 0 0 [1] [0]       -- .Right (zero work, higher hash loses)
 #eval forkSelect 1 0 [0] [255]     -- .Left  (work wins over hash)
--- Symmetric agreement check: A sees (lh,rh), B sees (rh,lh)
--- Both must agree on same winner
+-- Model symmetry check: reverse the represented hash order
 #eval (forkSelect 50 50 [0,1] [1,0], forkSelect 50 50 [1,0] [0,1])
--- Expected: (.Left, .Right) — both pick [0,1] as winner
+-- Expected model selections: (.Left, .Right)
 
 /-! ## Go/Rust code reference
 
@@ -216,7 +214,7 @@ match lhs_work.cmp(&rhs_work) {
 }
 ```
 
-forkSelect exactly models this: chainwork first, bytesLT tie-break.
+forkSelect is a Lean model of this chainwork-first, bytesLT tie-break shape.
 -/
 
 end RubinFormal

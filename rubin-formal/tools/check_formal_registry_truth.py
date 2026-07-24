@@ -33,7 +33,7 @@ SHARED_OP_PARITY = {
     "weight_accounting": "weight_accounting",
 }
 EXPECTED_COVERAGE_TRUST = (32, 541, 522, 22, 73, 66)
-EXPECTED_UNIVERSAL_TRUST = (25, 515, 20, 64, 57)
+EXPECTED_UNIVERSAL_TRUST = (24, 498, 19, 61, 54)
 EXPECTED_KERNEL_THEOREM_COMPLEMENT = (468, 456)
 EXPECTED_BRIDGE_TRUST = (12, 165, 162, 9, 21, 21)
 EXPECTED_UNAFFECTED_UNIVERSAL = {
@@ -84,19 +84,44 @@ def fail(msg: str) -> int:
     return 1
 
 
-def _consume_string(text: str, i: int, out: list[str]) -> int:
-    out.append(text[i])
-    i += 1
+def _blank_span(text: str, start: int, end: int, out: list[str]) -> None:
+    out.extend("\n" if ch == "\n" else " " for ch in text[start:end])
+
+
+def _consume_string(text: str, start: int, out: list[str], *, blank: bool) -> int:
+    i = start + 1
     while i < len(text):
         ch = text[i]
-        out.append(ch)
         if ch == "\\" and i + 1 < len(text):
-            out.append(text[i + 1])
             i += 2
             continue
         i += 1
         if ch == "\"":
             break
+    if blank:
+        _blank_span(text, start, i, out)
+    else:
+        out.extend(text[start:i])
+    return i
+
+
+def _consume_raw_string(text: str, start: int, out: list[str], *, blank: bool) -> Optional[int]:
+    quote = start + 1
+    while quote < len(text) and text[quote] == "#":
+        quote += 1
+    if quote >= len(text) or text[quote] != '"':
+        return None
+    delimiter = "#" * (quote - start - 1)
+    i = quote + 1
+    while i < len(text):
+        if text[i] == '"' and text.startswith(delimiter, i + 1):
+            i += 1 + len(delimiter)
+            break
+        i += 1
+    if blank:
+        _blank_span(text, start, i, out)
+    else:
+        out.extend(text[start:i])
     return i
 
 
@@ -133,7 +158,7 @@ def _consume_block_comment(text: str, i: int, out: list[str]) -> int:
     return i
 
 
-def strip_lean_comments(text: str) -> str:
+def _strip_lean(text: str, *, blank_strings: bool) -> str:
     out: list[str] = []
     i = 0
 
@@ -141,8 +166,13 @@ def strip_lean_comments(text: str) -> str:
         ch = text[i]
         nxt = text[i + 1] if i + 1 < len(text) else ""
 
+        if ch == "r":
+            raw_end = _consume_raw_string(text, i, out, blank=blank_strings)
+            if raw_end is not None:
+                i = raw_end
+                continue
         if ch == "\"":
-            i = _consume_string(text, i, out)
+            i = _consume_string(text, i, out, blank=blank_strings)
             continue
         if ch == "-" and nxt == "-":
             out.extend((" ", " "))
@@ -159,6 +189,16 @@ def strip_lean_comments(text: str) -> str:
     return "".join(out)
 
 
+def strip_lean_comments(text: str) -> str:
+    """Blank Lean comments while preserving quoted strings and line positions."""
+    return _strip_lean(text, blank_strings=False)
+
+
+def blank_lean_comments_and_strings(text: str) -> str:
+    """Blank Lean comments and quoted/raw strings while preserving line positions."""
+    return _strip_lean(text, blank_strings=True)
+
+
 def source_import_reachability(repo_root: Path) -> tuple[set[Path], list[str]]:
     root = repo_root / "RubinFormal.lean"
     if not root.exists():
@@ -173,7 +213,7 @@ def source_import_reachability(repo_root: Path) -> tuple[set[Path], list[str]]:
         if resolved in reachable:
             continue
         reachable.add(resolved)
-        for module in IMPORT_RE.findall(strip_lean_comments(path.read_text(encoding="utf-8"))):
+        for module in IMPORT_RE.findall(blank_lean_comments_and_strings(path.read_text(encoding="utf-8"))):
             if module == "RubinFormal":
                 imported = root
             elif module.startswith("RubinFormal."):
