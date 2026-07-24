@@ -1,14 +1,39 @@
+import contextlib
+import io
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from tools import check_formal_registry_truth as registry
 from tools.check_formal_registry_truth import extract_declared_names, parse_axiom_output, theorem_lookups
 
 
 class RegistryTruthCheckerTests(unittest.TestCase):
+    def test_malformed_registry_json_fails_closed(self) -> None:
+        for name in ("proof_coverage.json", "refinement_bridge.json"):
+            with self.subTest(name=name), TemporaryDirectory() as tmp:
+                root = Path(tmp); (root / "tools").mkdir()
+                for path in ("proof_coverage.json", "refinement_bridge.json"):
+                    (root / path).write_text("{" if path == name else "{}", encoding="utf-8")
+                stderr = io.StringIO()
+                with mock.patch.object(registry, "__file__", str(root / "tools" / "check_formal_registry_truth.py")), contextlib.redirect_stderr(stderr):
+                    self.assertEqual(registry.main(), 1)
+                self.assertEqual(stderr.getvalue(), f"ERROR: {name}: invalid JSON\n")
+
+    def test_non_utf8_registry_json_fails_closed(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / "tools").mkdir()
+            (root / "proof_coverage.json").write_bytes(b"\xff")
+            (root / "refinement_bridge.json").write_text("{}", encoding="utf-8")
+            stderr = io.StringIO()
+            with mock.patch.object(registry, "__file__", str(root / "tools" / "check_formal_registry_truth.py")), contextlib.redirect_stderr(stderr):
+                self.assertEqual(registry.main(), 1)
+            self.assertEqual(stderr.getvalue(), "ERROR: proof_coverage.json: invalid UTF-8\n")
+
     def test_axiom_output_classifies_and_fails_closed(self) -> None:
         trust, errors = parse_axiom_output("'A.ok' depends on axioms: [propext, Lean.ofReduceBool]\n'B.ok' does not depend on any axioms\n", ["A.ok", "B.ok"])
         self.assertEqual(errors, [])

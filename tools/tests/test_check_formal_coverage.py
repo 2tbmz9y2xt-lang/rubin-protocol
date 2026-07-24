@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import sys
@@ -43,7 +44,7 @@ class ConformanceIndexImportTests(unittest.TestCase):
 
 class FormalRiskMaturityTests(unittest.TestCase):
     def test_only_phase0_and_devnet_pass_pending_maturity(self) -> None:
-        summary = RiskSummary("refinement", "refined", "experimental_pending_reverification", 32, 28, 4, 0, 0, 0, "LOW", [], [], [])
+        summary = RiskSummary("refinement", "refined", "experimental_pending_reverification", 31, 28, 3, 0, 0, 0, "LOW", [], [], [])
         self.assertTrue(check_profile("phase0", summary)[0])
         self.assertTrue(check_profile("devnet", summary)[0])
         self.assertFalse(check_profile("audit", summary)[0])
@@ -51,6 +52,16 @@ class FormalRiskMaturityTests(unittest.TestCase):
 
 
 class SourceRebindTests(unittest.TestCase):
+    @staticmethod
+    def active_manifest_doc(root: Path) -> dict:
+        manifest = {}
+        for path, disposition in m.expected_active_source_dispositions().items():
+            candidate = root / "rubin-formal" / path
+            candidate.parent.mkdir(parents=True, exist_ok=True); candidate.write_text(path, encoding="utf-8")
+            candidate_hash = hashlib.sha256(candidate.read_bytes()).hexdigest()
+            manifest[path] = {"disposition": disposition, "source_sha256": candidate_hash if disposition == "BYTE_EXACT" else "0" * 64, "candidate_sha256": candidate_hash}
+        return {"source_rebind": {"active_path_manifest": manifest}}
+
     def test_accepts_exact_manifest(self) -> None:
         self.assertEqual(m.validate_source_rebind(source_rebind_doc()), [])
 
@@ -64,6 +75,20 @@ class SourceRebindTests(unittest.TestCase):
 
         self.assertTrue(any("reconcile_current_protocol_paths set drift" in error for error in errors))
         self.assertTrue(any("reconcile_current_protocol_path_count does not match" in error for error in errors))
+
+    def test_active_manifest_rejects_candidate_and_metadata_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); doc = self.active_manifest_doc(root)
+            self.assertEqual(m.validate_active_path_manifest(root, doc), [])
+            path = "RubinFormal/BlockHeaderRoundtrip.lean"
+            (root / "rubin-formal" / path).write_text("one-byte-drift", encoding="utf-8")
+            self.assertTrue(any("candidate hash drift" in error for error in m.validate_active_path_manifest(root, doc)))
+            doc = self.active_manifest_doc(root)
+            doc["source_rebind"]["active_path_manifest"][path]["disposition"] = "RECONCILE_CURRENT_PROTOCOL"
+            self.assertTrue(any("disposition drift" in error for error in m.validate_active_path_manifest(root, doc)))
+            doc = self.active_manifest_doc(root)
+            doc["source_rebind"]["active_path_manifest"][path]["candidate_sha256"] = "0" * 64
+            self.assertTrue(any("candidate hash drift" in error for error in m.validate_active_path_manifest(root, doc)))
 
     def test_rejects_partition_arithmetic_drift(self) -> None:
         doc = source_rebind_doc()

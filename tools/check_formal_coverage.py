@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -36,7 +37,6 @@ REQUIRED_SECTION_EVIDENCE_LEVELS = {
     "witness_commitment": "machine_checked_universal",
     "witness_commitment_crypto_residual": "machine_checked_assumption_backed",
     "sighash_v1": "machine_checked_universal",
-    "sighash_v1_digest_collision_residual": "machine_checked_assumption_backed",
     "consensus_error_codes": "machine_checked_universal",
     "covenant_registry": "machine_checked_model",
     "difficulty_update": "machine_checked_universal",
@@ -120,6 +120,23 @@ EXPECTED_SOURCE_REBIND_PATHS = {
     "drop_stale_source_paths": {"RubinFormal/ConsensusConstantsBehavioral.lean", "RubinFormal/FormalGap03.lean", "RubinFormal/TxWireTxPayloadContract.lean", "RubinFormal/TxWireTxWithWitnessContract.lean", "RubinFormal/TxWireTxAfterDaCoreContract.lean", "RubinFormal/TxWireTxBodyContract.lean", "RubinFormal/TxWireTxContract.lean"},
     "semantic_theorem_reconciliation_retired_paths": {"RubinFormal/CoreExtRefinement.lean"},
 }
+EXPECTED_ACTIVE_SOURCE_PATHS = frozenset("""
+REGISTRY_COMPLETENESS_POLICY.md RubinFormal/BlockHeaderRoundtrip.lean RubinFormal/BlockTimestampBehavioral.lean RubinFormal/BlockValidationOrder.lean RubinFormal/BlockValidationOrderBehavioral.lean RubinFormal/ByteWireLegacy.lean RubinFormal/BytesEqLemmas.lean RubinFormal/ChainIdBehavioral.lean RubinFormal/ChainWorkV1.lean RubinFormal/CoinbaseBehavioral.lean RubinFormal/CoinbaseSubsidyBehavioral.lean
+RubinFormal/Conformance/CVVaultLifecycleReplay.lean RubinFormal/ConnectBlockFull.lean RubinFormal/ConnectBlockStrong.lean RubinFormal/CovenantParserGaps.lean RubinFormal/CovenantRegistryExhaustive.lean RubinFormal/CreateSideLiveGateBridge.lean RubinFormal/DaIntegrityBehavioral.lean RubinFormal/DeterminismRequirements.lean RubinFormal/ErrorPriority.lean RubinFormal/FeatureActivationFSM.lean RubinFormal/FeatureActivationLiveBridge.lean
+RubinFormal/ForkChoiceSelect.lean RubinFormal/ForkChoiceTiebreak.lean RubinFormal/ForkChoiceV1.lean RubinFormal/GenesisRuleBehavioral.lean RubinFormal/HtlcSpendCryptoAssumptionBridge.lean RubinFormal/HtlcSpendStructuralLiveBridge.lean RubinFormal/LegacySunset.lean RubinFormal/MerkleStructure.lean RubinFormal/NativeRegistryResolution.lean RubinFormal/NativeSpendCreateGate.lean RubinFormal/NativeSuiteRotation.lean RubinFormal/PerTxStateMachine.lean RubinFormal/PrimitiveEncodingRoundtrip.lean
+RubinFormal/Refinement/AbortSoundness.lean RubinFormal/RefinementBridgeV1.lean RubinFormal/RegistryResolutionLiveBridge.lean RubinFormal/ReplayDomainBehavioral.lean RubinFormal/ReplayDomainUniversal.lean RubinFormal/RetargetBehavioral.lean RubinFormal/RotationPrelude.lean RubinFormal/SighashAssumptionBridge.lean RubinFormal/SighashRefinementUpgrade.lean RubinFormal/SpendGateLiveBridge.lean RubinFormal/SpendTxEndToEnd.lean RubinFormal/StructuralRulesBehavioral.lean RubinFormal/ThresholdSpendSuiteGateBridge.lean
+RubinFormal/TransactionWireBehavioral.lean RubinFormal/TxContextBehavioral.lean RubinFormal/TxContextFormal.lean RubinFormal/TxIdBehavioral.lean RubinFormal/TxWeightBehavioral.lean RubinFormal/TxWireCompactSizeLemmas.lean RubinFormal/TxWireCompactSizeNineByteLemmas.lean RubinFormal/TxWireCompactSizeNineLemmas.lean RubinFormal/TxWireCompactSizeNineMidLemmas.lean RubinFormal/TxWireCompactSizeThreeLemmas.lean RubinFormal/TxWireDaCoreBase.lean
+RubinFormal/TxWireDaCoreContract.lean RubinFormal/TxWireDaCoreKind1Contract.lean RubinFormal/TxWireDaCoreKind2Contract.lean RubinFormal/TxWireDaCoreKind2Info.lean RubinFormal/TxWireExtractExact.lean RubinFormal/TxWireFullContract.lean RubinFormal/TxWireInputBetweenContract.lean RubinFormal/TxWireInputPostContract.lean RubinFormal/TxWireListContract.lean RubinFormal/TxWireOutputBetweenContract.lean RubinFormal/TxWireOutputPostContract.lean RubinFormal/TxWirePrefixLemmas.lean
+RubinFormal/TxWireRoundtrip.lean RubinFormal/TxWireShiftLemmas.lean RubinFormal/TxWireTxAfterDaCoreStep.lean RubinFormal/TxWireTxAfterLockDaCoreExtract.lean RubinFormal/TxWireTxAfterLockDaCoreRead.lean RubinFormal/TxWireTxAfterLockStep.lean RubinFormal/TxWireTxFinalizeContract.lean RubinFormal/TxWireTxWitnessReadContract.lean RubinFormal/TxWireWitnessBetweenContract.lean RubinFormal/TxWireWitnessContract.lean RubinFormal/TxWireWitnessPostContract.lean RubinFormal/UtxoMapProperties.lean
+RubinFormal/UtxoSpendTxBehavioral.lean RubinFormal/ValueConservationBehavioral.lean RubinFormal/VaultStateMachine.lean RubinFormal/VaultThresholdBound.lean RubinFormal/WeightBehavioral.lean RubinFormal/WeightSuiteAware.lean RubinFormal/WitnessCommitmentPregate.lean RubinFormal/WitnessCommitmentV1.lean scripts/check.sh tests/test_check_formal_registry_truth.py tests/test_covenant_registry_disposition.py tests/test_integration.py tests/test_path_resolution.py tests/test_registry_extraction.py tests/test_scope_and_names.py tests/test_strip_lean_comments.py tests/test_validation.py tools/LOCAL_CODEX_EXEC_REVIEW.md tools/check_formal_registry_truth.py
+""".split())
+ACTIVE_SOURCE_DISPOSITIONS = {
+    "reconcile_current_protocol_paths": "RECONCILE_CURRENT_PROTOCOL",
+    "import_adapt_single_owner_paths": "IMPORT_ADAPT_SINGLE_OWNER",
+    "transplant_check_logic_paths": "TRANSPLANT_CHECK_LOGIC",
+    "import_package_check_or_test_paths": "IMPORT_PACKAGE_CHECK_OR_TEST",
+}
+SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 SOURCE_REBIND_LIST_COUNTS = {
     "reconcile_current_protocol_paths": "reconcile_current_protocol_path_count",
     "import_adapt_single_owner_paths": "import_adapt_single_owner_path_count",
@@ -291,6 +308,45 @@ def validate_source_rebind(doc: dict) -> list[str]:
     return errors
 
 
+def expected_active_source_dispositions() -> dict[str, str]:
+    expected = {path: "BYTE_EXACT" for path in EXPECTED_ACTIVE_SOURCE_PATHS}
+    for category, disposition in ACTIVE_SOURCE_DISPOSITIONS.items():
+        for path in EXPECTED_SOURCE_REBIND_PATHS[category]:
+            expected[path] = disposition
+    return expected
+
+
+def validate_active_path_manifest(repo_root: Path, doc: dict) -> list[str]:
+    source_rebind = doc.get("source_rebind")
+    if not isinstance(source_rebind, dict): return []
+    manifest = source_rebind.get("active_path_manifest")
+    if not isinstance(manifest, dict): return ["source_rebind.active_path_manifest must be an object"]
+    expected = expected_active_source_dispositions()
+    errors: list[str] = []
+    if len(manifest) != 102: errors.append(f"source_rebind.active_path_manifest count drift: expected 102, got {len(manifest)}")
+    if set(manifest) != set(expected): errors.append("source_rebind.active_path_manifest key set drift")
+    for path, disposition in expected.items():
+        record = manifest.get(path)
+        if not isinstance(record, dict):
+            errors.append(f"source_rebind.active_path_manifest[{path}] must be an object"); continue
+        if record.get("disposition") != disposition:
+            errors.append(f"source_rebind.active_path_manifest[{path}].disposition drift: expected {disposition!r}, got {record.get('disposition')!r}")
+        source_hash, candidate_hash = record.get("source_sha256"), record.get("candidate_sha256")
+        for key, value in (("source_sha256", source_hash), ("candidate_sha256", candidate_hash)):
+            if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
+                errors.append(f"source_rebind.active_path_manifest[{path}].{key} must be lowercase SHA-256")
+        candidate = repo_root / "rubin-formal" / path
+        if not candidate.is_file():
+            errors.append(f"source_rebind.active_path_manifest candidate missing: {path}")
+        elif isinstance(candidate_hash, str) and SHA256_RE.fullmatch(candidate_hash) and hashlib.sha256(candidate.read_bytes()).hexdigest() != candidate_hash:
+            errors.append(f"source_rebind.active_path_manifest candidate hash drift: {path}")
+        if isinstance(source_hash, str) and isinstance(candidate_hash, str) and SHA256_RE.fullmatch(source_hash) and SHA256_RE.fullmatch(candidate_hash):
+            equal = source_hash == candidate_hash
+            if equal != (disposition == "BYTE_EXACT"):
+                errors.append(f"source_rebind.active_path_manifest source/candidate disposition drift: {path}")
+    return errors
+
+
 def validate_retired_source_paths(repo_root: Path, doc: dict) -> list[str]:
     source_rebind = doc.get("source_rebind")
     if not isinstance(source_rebind, dict): return []
@@ -378,6 +434,7 @@ def main() -> int:
     coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
 
     source_rebind_errors = validate_source_rebind(coverage)
+    source_rebind_errors.extend(validate_active_path_manifest(repo_root, coverage))
     source_rebind_errors.extend(validate_retired_source_paths(repo_root, coverage))
     if source_rebind_errors:
         for err in source_rebind_errors:

@@ -10,6 +10,7 @@ from check_formal_coverage import (
     declared_lean_theorems,
     declared_lean_theorems_in_text,
     has_canonical_import,
+    validate_active_path_manifest,
     validate_source_rebind,
 )
 
@@ -161,6 +162,7 @@ def main() -> int:
     if "package_maturity" in bridge:
         return fail("package_maturity belongs only in rubin-formal/proof_coverage.json")
     source_rebind_errors = validate_source_rebind(bridge)
+    source_rebind_errors.extend(validate_active_path_manifest(repo_root, bridge))
     if source_rebind_errors:
         for err in source_rebind_errors:
             print(f"ERROR: {err}", file=sys.stderr)

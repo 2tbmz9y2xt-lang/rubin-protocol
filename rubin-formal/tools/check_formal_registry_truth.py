@@ -25,10 +25,10 @@ SHARED_OP_PARITY = {
     "da_set_integrity": "da_set_integrity",
     "weight_accounting": "weight_accounting",
 }
-EXPECTED_COVERAGE_TRUST = (32, 558, 535, 22, 73, 66)
-EXPECTED_UNIVERSAL_TRUST = (27, 537, 21, 65, 58)
-EXPECTED_KERNEL_THEOREM_COMPLEMENT = (485, 469)
-EXPECTED_BRIDGE_TRUST = (12, 163, 157, 7, 18, 17)
+EXPECTED_COVERAGE_TRUST = (31, 553, 530, 22, 73, 66)
+EXPECTED_UNIVERSAL_TRUST = (27, 533, 21, 65, 58)
+EXPECTED_KERNEL_THEOREM_COMPLEMENT = (480, 464)
+EXPECTED_BRIDGE_TRUST = (11, 161, 156, 7, 18, 17)
 EXPECTED_UNAFFECTED_UNIVERSAL = {
     "consensus_constants_witness_lengths_pre_rotation",
     "block_validation_order",
@@ -587,8 +587,16 @@ def load_registry_inputs(repo_root: Path) -> tuple[dict, dict, list[Path]]:
         raise FileNotFoundError("proof_coverage.json not found")
     if not bridge_path.exists():
         raise FileNotFoundError("refinement_bridge.json not found")
-    coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
-    bridge = json.loads(bridge_path.read_text(encoding="utf-8"))
+    def load_json(path: Path) -> dict:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            raise ValueError(f"{path.name}: invalid JSON") from None
+        except UnicodeDecodeError:
+            raise ValueError(f"{path.name}: invalid UTF-8") from None
+
+    coverage = load_json(coverage_path)
+    bridge = load_json(bridge_path)
     lean_files = sorted((repo_root / "RubinFormal").rglob("*.lean"))
     if not lean_files:
         raise FileNotFoundError("no Lean files found under RubinFormal/")
@@ -632,6 +640,8 @@ def collect_registry_errors(
     coverage_rows = indexed_rows(coverage.get("coverage", []), "section_key")
     bridge_rows = indexed_rows(bridge.get("critical_ops", []), "op")
     errors = []
+    if coverage.get("source_rebind") != bridge.get("source_rebind"):
+        errors.append("source_rebind manifest drift between proof_coverage.json and refinement_bridge.json")
     errors.extend(validate_registered_paths(repo_root, registered_paths))
     errors.extend(
         validate_theorem_refs(
@@ -659,7 +669,7 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     try:
         coverage, bridge, lean_files = load_registry_inputs(repo_root)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         return fail(str(exc))
 
     theorem_exists_anywhere, theorem_exists_in_file = theorem_lookups(repo_root, lean_files)
