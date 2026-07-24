@@ -11,16 +11,18 @@
   "source_rebind": {
     "source_oid": "2d9f1024f1d0b1bfb3fe6a8b727762e7a979b3a0",
     "inventory_sha256": "77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6",
-    "original_imported_source_paths": 109,
+    "original_imported_source_paths": 116,
     "active_imported_source_paths": 102,
     "disposition": "DROP_STALE_SOURCE",
-    "byte_exact_path_count": 79,
-    "reconcile_current_protocol_path_count": 14,
+    "byte_exact_path_count": 76,
+    "reconcile_current_protocol_path_count": 16,
     "reconcile_current_protocol_paths": [
       "RubinFormal/Conformance/CVVaultLifecycleReplay.lean",
+      "RubinFormal/ConnectBlockFull.lean",
       "RubinFormal/ConnectBlockStrong.lean",
       "RubinFormal/CovenantRegistryExhaustive.lean",
       "RubinFormal/ErrorPriority.lean",
+      "RubinFormal/FeatureActivationLiveBridge.lean",
       "RubinFormal/HtlcSpendStructuralLiveBridge.lean",
       "RubinFormal/PerTxStateMachine.lean",
       "RubinFormal/RefinementBridgeV1.lean",
@@ -36,19 +38,28 @@
     "import_adapt_single_owner_paths": [
       "REGISTRY_COMPLETENESS_POLICY.md"
     ],
-    "transplant_check_logic_path_count": 1,
+    "transplant_check_logic_path_count": 2,
     "transplant_check_logic_paths": [
-      "scripts/check.sh"
+      "scripts/check.sh",
+      "tools/check_formal_registry_truth.py"
     ],
     "excluded_stale_source_paths": [
       "RubinFormal/ConsensusConstantsBehavioral.lean",
+      "RubinFormal/Conformance/CVExtReplay.lean",
+      "RubinFormal/Conformance/CVExtVectors.lean",
+      "RubinFormal/Conformance/CVTxctxReplay.lean",
+      "RubinFormal/Conformance/CVTxctxVectors.lean",
       "RubinFormal/FormalGap03.lean",
+      "RubinFormal/GovernanceReplayToken.lean",
+      "RubinFormal/CoreExtInvariants.lean",
+      "RubinFormal/NativeExtIndependence.lean",
       "RubinFormal/TxWireTxPayloadContract.lean",
       "RubinFormal/TxWireTxWithWitnessContract.lean",
       "RubinFormal/TxWireTxAfterDaCoreContract.lean",
       "RubinFormal/TxWireTxBodyContract.lean",
       "RubinFormal/TxWireTxContract.lean"
     ],
+    "semantic_theorem_reconciliation_retired_paths": ["RubinFormal/CoreExtRefinement.lean"],
     "import_package_check_or_test_path_count": 7,
     "import_package_check_or_test_paths": [
       "tests/test_check_formal_registry_truth.py",
@@ -59,8 +70,8 @@
       "tests/test_strip_lean_comments.py",
       "tests/test_validation.py"
     ],
-    "active_partition_equation": "79 + 14 + 1 + 1 + 7 = 102",
-    "original_inventory_equation": "102 + 7 = 109"
+    "active_partition_equation": "76 + 16 + 1 + 2 + 7 = 102",
+    "original_inventory_equation": "102 + 14 = 116"
   },
   "coverage": [
     {
@@ -170,7 +181,6 @@
         "RubinFormal.u64le_roundtrip_1M",
         "RubinFormal.u16le_roundtrip_258",
         "RubinFormal.u32le_roundtrip_16909060",
-        "RubinFormal.Refinement.parse_tx_go_trace_contract_proved",
         "RubinFormal.parseTx_result_integrity",
         "RubinFormal.UtxoBasicV1.parseInput_serializeInput_between",
         "RubinFormal.UtxoBasicV1.parseInputs_serializeInputs_between",
@@ -183,6 +193,8 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
+        "RubinFormal.Conformance.cv_parse_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVParseReplay.lean",
+        "RubinFormal.Conformance.cv_compact_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVCompactReplay.lean",
         "RubinFormal.Wire.compactSize_roundtrip": "rubin-formal/RubinFormal/ByteWireV2.lean",
         "RubinFormal.Wire.compactSize_overflow_safety": "rubin-formal/RubinFormal/ByteWireV2.lean",
         "RubinFormal.Wire.compactSize_encode_roundtrip": "rubin-formal/RubinFormal/ByteWireV2.lean",
@@ -198,7 +210,6 @@
         "RubinFormal.u64le_roundtrip_1M": "rubin-formal/RubinFormal/PrimitiveEncodingRoundtrip.lean",
         "RubinFormal.u16le_roundtrip_258": "rubin-formal/RubinFormal/PrimitiveEncodingRoundtrip.lean",
         "RubinFormal.u32le_roundtrip_16909060": "rubin-formal/RubinFormal/PrimitiveEncodingRoundtrip.lean",
-        "RubinFormal.Refinement.parse_tx_go_trace_contract_proved": "rubin-formal/RubinFormal/Refinement/GoTraceV1Check.lean",
         "RubinFormal.parseTx_result_integrity": "rubin-formal/RubinFormal/TxWireRoundtrip.lean",
         "RubinFormal.UtxoBasicV1.parseInput_serializeInput_between": "rubin-formal/RubinFormal/TxWireInputBetweenContract.lean",
         "RubinFormal.UtxoBasicV1.parseInputs_serializeInputs_between": "rubin-formal/RubinFormal/TxWireListContract.lean",
@@ -210,10 +221,9 @@
         "RubinFormal.UtxoBasicV1.parseDaCoreFieldsWithBytes_between": "rubin-formal/RubinFormal/TxWireDaCoreContract.lean"
       },
       "limitations": [
-        "PARSE-16 error-priority drift documented (Go: WITNESS_OVERFLOW, Lean: SIG_ALG_INVALID). Drift exception payload-pinned via triple-segment content hash (~192-bit collision resistance).",
-        "Cross-language Lean→Go/Rust byte-level equivalence is machine-checked only for the replayed fixture/trace corpus. Outside those exercised bytes, emitted-wire parity still relies on human-reviewed Go/Rust alignment rather than a universal binary bridge."
+        "CV-PARSE/CV-COMPACT replay is fixture-bound Lean evidence; any correspondence between Lean serialization and Go/Rust remains human-reviewed."
       ],
-      "notes": "Universal Lean serializer-contract lane: CompactSize canonicality/overflow/cursor-advance theorems, fixed-width primitive encoder size/roundtrip theorems, explicit between-contracts for input/output/witness-item/witness-list/DA-core lanes, and `parseTx_result_integrity`. The removed upper full-transaction serializer modules are not claimed. Separate fixture/contract lane: CV-PARSE, CV-COMPACT, and the machine-checked Go-trace contract for parse_tx over the two imported trace rows, including the payload-pinned PARSE-16 drift exception. Those replay/trace artifacts are complementary executable evidence only and do not establish universal Go/Rust binary equivalence.",
+      "notes": "Universal Lean serializer-contract lane: CompactSize canonicality/overflow/cursor-advance theorems, fixed-width primitive encoder size/roundtrip theorems, explicit between-contracts for input/output/witness-item/witness-list/DA-core lanes, and `parseTx_result_integrity`. The removed upper full-transaction serializer modules are not claimed. CV-PARSE and CV-COMPACT are complementary fixture-bound Lean replay, not machine-checked Lean-to-Go/Rust equivalence.",
       "evidence_level": "machine_checked_universal"
     },
     {
@@ -300,6 +310,7 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
+        "RubinFormal.Conformance.cv_weight_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVWeightReplay.lean",
         "RubinFormal.WeightSuiteAware.weight_suite_aware_correct": "rubin-formal/RubinFormal/WeightSuiteAware.lean",
         "RubinFormal.WeightSuiteAware.weight_suite_aware_correct_create": "rubin-formal/RubinFormal/WeightSuiteAware.lean",
         "RubinFormal.weight_monotone_witness": "rubin-formal/RubinFormal/CriticalInvariants.lean",
@@ -726,6 +737,7 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
+        "RubinFormal.Conformance.cv_covenant_genesis_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVCovenantGenesisReplay.lean",
         "RubinFormal.covenantDispositionComplete": "rubin-formal/RubinFormal/CovenantRegistryExhaustive.lean",
         "RubinFormal.covenant_types_pairwise_distinct": "rubin-formal/RubinFormal/CovenantRegistryExhaustive.lean",
         "RubinFormal.cov_type_p2pk_value": "rubin-formal/RubinFormal/CovenantRegistryExhaustive.lean",
@@ -872,6 +884,7 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
+        "RubinFormal.Conformance.cv_validation_order_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVValidationOrderReplay.lean",
         "RubinFormal.unknown_suite_0x05_rejected": "rubin-formal/RubinFormal/StructuralRulesBehavioral.lean",
         "RubinFormal.sentinel_nonempty_pubkey_rejected": "rubin-formal/RubinFormal/StructuralRulesBehavioral.lean",
         "RubinFormal.sentinel_empty_accepted": "rubin-formal/RubinFormal/StructuralRulesBehavioral.lean",
@@ -916,6 +929,7 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
+        "RubinFormal.Conformance.cv_replay_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVReplayReplay.lean",
         "RubinFormal.replay_domain_checks_proved": "rubin-formal/RubinFormal/PinnedSections.lean",
         "RubinFormal.parsed_nonce_duplicate_not_replay_free": "rubin-formal/RubinFormal/ReplayDomainBehavioral.lean",
         "RubinFormal.replay_domain_nonce_contract": "rubin-formal/RubinFormal/ReplayDomainBehavioral.lean",
@@ -1076,6 +1090,8 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
+        "RubinFormal.Conformance.cv_subsidy_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVSubsidyReplay.lean",
+        "RubinFormal.subsidy_u128_safety_proved": "rubin-formal/RubinFormal/PinnedSections.lean",
         "RubinFormal.SubsidyV1.connectBlock_end_to_end_proved": "rubin-formal/RubinFormal/SubsidyV1.lean",
         "RubinFormal.blockSubsidy_bounded": "rubin-formal/RubinFormal/ArithmeticSafety.lean",
         "RubinFormal.blockSubsidy_in_u64": "rubin-formal/RubinFormal/ArithmeticSafety.lean",
@@ -1099,6 +1115,8 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
+        "RubinFormal.Conformance.cv_utxo_basic_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVUtxoBasicReplay.lean",
+        "RubinFormal.Conformance.cv_subsidy_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVSubsidyReplay.lean",
         "RubinFormal.utxo_conservation_theorem": "rubin-formal/RubinFormal/ConnectBlockStrong.lean",
         "RubinFormal.value_conservation_single_tx": "rubin-formal/RubinFormal/ValueConservationBehavioral.lean",
         "RubinFormal.value_conservation_block_txs": "rubin-formal/RubinFormal/ValueConservationBehavioral.lean",
@@ -1329,6 +1347,10 @@
       "file": "rubin-formal/RubinFormal/ForkChoiceV1.lean",
       "theorem_files": {
         "RubinFormal.Conformance.cv_fork_choice_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVForkChoiceReplay.lean",
+        "RubinFormal.ForkChoiceV1.emptyChain_loses": "rubin-formal/RubinFormal/ForkChoiceV1.lean",
+        "RubinFormal.ForkChoiceV1.heavierChain_wins": "rubin-formal/RubinFormal/ForkChoiceV1.lean",
+        "RubinFormal.ForkChoiceV1.zeroTarget_rejected": "rubin-formal/RubinFormal/ForkChoiceV1.lean",
+        "RubinFormal.ForkChoiceV1.overLimitTarget_rejected": "rubin-formal/RubinFormal/ForkChoiceV1.lean",
         "RubinFormal.Refinement.fork_choice_select_cv_contract_proved": "rubin-formal/RubinFormal/Refinement/GoTraceV1Check.lean",
         "RubinFormal.bytesLT_irrefl": "rubin-formal/RubinFormal/ForkChoiceTiebreak.lean",
         "RubinFormal.bytesLT_total_of_ne": "rubin-formal/RubinFormal/ForkChoiceTiebreak.lean",
@@ -1367,6 +1389,7 @@
       "file": "rubin-formal/RubinFormal/SubsidyV1.lean",
       "theorem_files": {
         "RubinFormal.section25_validation_total_proved": "rubin-formal/RubinFormal/BlockValidationOrder.lean",
+        "RubinFormal.SubsidyV1.connectBlock_end_to_end_proved": "rubin-formal/RubinFormal/SubsidyV1.lean",
         "RubinFormal.utxo_conservation_theorem": "rubin-formal/RubinFormal/ConnectBlockStrong.lean",
         "RubinFormal.no_double_spend_theorem": "rubin-formal/RubinFormal/ConnectBlockStrong.lean",
         "RubinFormal.prepareNonCoinbaseTxBasic_utxo_conserved": "rubin-formal/RubinFormal/ConnectBlockStrong.lean",
@@ -1501,7 +1524,7 @@
       },
       "notes": "Universal for §4.1.2/§4.1.3/§23.2.1 native crypto suite rotation. native_rotation_ok_constrained proves that for any well-formed descriptor in any well-formed registry, at every height: the phase partition holds and all active create/spend suites resolve to unique entries. Covers all 5 rotation phases including post-rotation dispatch. No claim about byte-level wire encoding trace (G7 residual).",
       "limitations": [
-        "Structural model ↔ Go/Rust parity proved; byte-level wire encoding trace not formalized (G7-class cross-language bridge residual)."
+        "The model is machine-checked in Lean; correspondence to Go/Rust is human-reviewed, and byte-level wire encoding trace remains unformalized (G7 residual)."
       ],
       "evidence_level": "machine_checked_universal"
     },
@@ -1531,20 +1554,13 @@
     },
     {
       "section_key": "threshold_stealth_spend_suite_gate",
-      "section_heading": "## Threshold/Stealth Spend Suite Gate Bridge",
+      "section_heading": "## Threshold Spend Pre-Rotation Suite Gate Bridge",
       "status": "proved",
       "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.ThresholdSpendSuiteGateBridge.pre_rotation_threshold_gate_eq_hardcoded",
         "RubinFormal.ThresholdSpendSuiteGateBridge.pre_rotation_hardcoded_accept_implies_gate",
         "RubinFormal.ThresholdSpendSuiteGateBridge.pre_rotation_hardcoded_reject_implies_gate",
-        "RubinFormal.ThresholdSpendSuiteGateBridge.post_rotation_gate_iff_model",
-        "RubinFormal.ThresholdSpendSuiteGateBridge.post_rotation_gate_accept_soundness",
-        "RubinFormal.ThresholdSpendSuiteGateBridge.post_rotation_gate_accept_completeness",
-        "RubinFormal.ThresholdSpendSuiteGateBridge.post_rotation_gate_reject_soundness",
-        "RubinFormal.ThresholdSpendSuiteGateBridge.sentinel_not_in_spend_suites",
-        "RubinFormal.ThresholdSpendSuiteGateBridge.threshold_suite_gate_iff_spend_suites",
-        "RubinFormal.ThresholdSpendSuiteGateBridge.threshold_suite_gate_reject_iff",
         "RubinFormal.ThresholdSpendSuiteGateBridge.live_threshold_suite_check_passes_on_gate_accept",
         "RubinFormal.ThresholdSpendSuiteGateBridge.live_threshold_suite_check_rejects_on_gate_reject"
       ],
@@ -1553,22 +1569,13 @@
         "RubinFormal.ThresholdSpendSuiteGateBridge.pre_rotation_threshold_gate_eq_hardcoded": "rubin-formal/RubinFormal/ThresholdSpendSuiteGateBridge.lean",
         "RubinFormal.ThresholdSpendSuiteGateBridge.pre_rotation_hardcoded_accept_implies_gate": "rubin-formal/RubinFormal/ThresholdSpendSuiteGateBridge.lean",
         "RubinFormal.ThresholdSpendSuiteGateBridge.pre_rotation_hardcoded_reject_implies_gate": "rubin-formal/RubinFormal/ThresholdSpendSuiteGateBridge.lean",
-        "RubinFormal.ThresholdSpendSuiteGateBridge.post_rotation_gate_iff_model": "rubin-formal/RubinFormal/ThresholdSpendSuiteGateBridge.lean",
-        "RubinFormal.ThresholdSpendSuiteGateBridge.post_rotation_gate_accept_soundness": "rubin-formal/RubinFormal/ThresholdSpendSuiteGateBridge.lean",
-        "RubinFormal.ThresholdSpendSuiteGateBridge.post_rotation_gate_accept_completeness": "rubin-formal/RubinFormal/ThresholdSpendSuiteGateBridge.lean",
-        "RubinFormal.ThresholdSpendSuiteGateBridge.post_rotation_gate_reject_soundness": "rubin-formal/RubinFormal/ThresholdSpendSuiteGateBridge.lean",
-        "RubinFormal.ThresholdSpendSuiteGateBridge.sentinel_not_in_spend_suites": "rubin-formal/RubinFormal/ThresholdSpendSuiteGateBridge.lean",
-        "RubinFormal.ThresholdSpendSuiteGateBridge.threshold_suite_gate_iff_spend_suites": "rubin-formal/RubinFormal/ThresholdSpendSuiteGateBridge.lean",
-        "RubinFormal.ThresholdSpendSuiteGateBridge.threshold_suite_gate_reject_iff": "rubin-formal/RubinFormal/ThresholdSpendSuiteGateBridge.lean",
         "RubinFormal.ThresholdSpendSuiteGateBridge.live_threshold_suite_check_passes_on_gate_accept": "rubin-formal/RubinFormal/ThresholdSpendSuiteGateBridge.lean",
         "RubinFormal.ThresholdSpendSuiteGateBridge.live_threshold_suite_check_rejects_on_gate_reject": "rubin-formal/RubinFormal/ThresholdSpendSuiteGateBridge.lean"
       },
-      "notes": "Universal for the descriptor-aware suite gate in threshold-sig and stealth spend paths. LIVE bridge theorems prove that thresholdItemSuiteAllowed result determines the outcome of the actual per-item suite check (w.suiteId == SUITE_ID_ML_DSA_87) in validateThresholdSigSpendNoCrypto line 98 — same live-subexpression bridge pattern as spend_gate_bridge. Post-rotation BRIDGE theorems prove soundness/completeness against NativeSpendSuites for any RotationDeploymentDescriptor at any height. Covers MULTISIG (§14.2), VAULT (§24.1), and STEALTH suite gate abstraction. Closes rubin-formal#419.",
+      "notes": "Pre-rotation-only bridge for the threshold-sig per-item comparison in validateThresholdSigSpendNoCrypto. The registered theorems bind only the no-descriptor singleton ML-DSA-87 case; descriptor-present and post-rotation behavior is excluded and fails closed.",
       "limitations": [
-        "Per-item suite gate only; threshold counting semantics remain in transaction_structural_rules row.",
-        "Decision-level bridge: LIVE theorems prove the per-item suite comparison result (w.suiteId == SUITE_ID_ML_DSA_87), not end-to-end validateThresholdSigSpendNoCrypto behavior. Narrower scope than spend_gate_bridge which has function-level theorems.",
-        "Stealth spend-side has no dedicated Lean model; this row covers the suite gate abstraction that stealth would share.",
-        "G7 wire encoding residual: byte-level cross-language bridge not formalized."
+        "Per-item pre-rotation comparison only; threshold counting and all descriptor-present/post-rotation behavior remain outside this row.",
+        "No independent stealth live model or Go/Rust parity claim is registered."
       ],
       "evidence_level": "machine_checked_universal"
     },
@@ -1703,8 +1710,8 @@
     "proved_with_axiom_rows": 4,
     "stated_rows": 0,
     "deferred_rows": 0,
-    "theorem_references": 566,
-    "unique_theorem_names": 543,
+    "theorem_references": 558,
+    "unique_theorem_names": 535,
     "reused_theorem_names": [
       "RubinFormal.Conformance.cv_parse_vectors_pass",
       "RubinFormal.Conformance.cv_subsidy_vectors_pass",
@@ -1735,7 +1742,7 @@
   "claims": {
     "allowed": [
       "Lean executable semantics replay the non-CV-PV conformance fixtures represented by modules imported by RubinFormal.Conformance.Index; runtime/parallel-only CV-PV gates remain outside Lean replay scope",
-      "Executable Lean↔Go/Rust bridge evidence is op-scoped and mixed: depending on the critical op, the honest ceiling recorded in rubin-formal/refinement_bridge.json is universal, assumption-backed, behavioral, or contract-level rather than one uniform Go-trace refinement claim over the full conformance set",
+      "Lean evidence is op-scoped and mixed; any correspondence to Go/Rust is human-reviewed rather than machine-checked implementation equivalence",
       "The registry currently covers 32 machine-checked coverage entries. Each entry carries an explicit evidence_level distinguishing universal proofs, model proofs, and assumption-backed proofs.",
       "formal claims are bounded by explicit forbidden claims below",
       "Bridge theorems (LIVE/BRIDGE class) prove properties of Lean transcriptions of Go/Rust functions. Lean-to-Go/Rust parity is verified by human code review, not machine-checked. The behavioral claim applies to the Lean transcription; transfer to Go/Rust binary relies on the reviewed parity."

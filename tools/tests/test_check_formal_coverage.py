@@ -72,6 +72,18 @@ class SourceRebindTests(unittest.TestCase):
         self.assertTrue(any("byte_exact_path_count drift" in error for error in errors))
         self.assertTrue(any("active partition drift" in error for error in errors))
 
+    def test_retired_paths_must_be_absent_and_unreachable(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root, formal = Path(td), Path(td) / "rubin-formal"
+            (formal / "RubinFormal").mkdir(parents=True)
+            (formal / "RubinFormal.lean").write_text("import RubinFormal.Active\n", encoding="utf-8")
+            (formal / "RubinFormal" / "Active.lean").write_text("", encoding="utf-8")
+            doc = source_rebind_doc(); self.assertEqual(m.validate_retired_source_paths(root, doc), [])
+            retired = "RubinFormal/CoreExtRefinement.lean"; (formal / retired).write_text("", encoding="utf-8")
+            (formal / "RubinFormal.lean").write_text("import RubinFormal.CoreExtRefinement\n", encoding="utf-8")
+            errors = m.validate_retired_source_paths(root, doc)
+        self.assertTrue(all(any(token in error for error in errors) for token in ("candidate tree", "reachable")))
+
     def test_rejects_boolean_for_every_numeric_count(self) -> None:
         for key in sorted(m.SOURCE_REBIND_COUNT_KEYS):
             with self.subTest(key=key):

@@ -63,16 +63,16 @@ REQUIRED_SECTION_KEYS = set(REQUIRED_SECTION_EVIDENCE_LEVELS)
 EXPECTED_SOURCE_REBIND_SCALARS = {
     "source_oid": "2d9f1024f1d0b1bfb3fe6a8b727762e7a979b3a0",
     "inventory_sha256": "77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6",
-    "original_imported_source_paths": 109,
+    "original_imported_source_paths": 116,
     "active_imported_source_paths": 102,
     "disposition": "DROP_STALE_SOURCE",
-    "byte_exact_path_count": 79,
-    "reconcile_current_protocol_path_count": 14,
+    "byte_exact_path_count": 76,
+    "reconcile_current_protocol_path_count": 16,
     "import_adapt_single_owner_path_count": 1,
-    "transplant_check_logic_path_count": 1,
+    "transplant_check_logic_path_count": 2,
     "import_package_check_or_test_path_count": 7,
-    "active_partition_equation": "79 + 14 + 1 + 1 + 7 = 102",
-    "original_inventory_equation": "102 + 7 = 109",
+    "active_partition_equation": "76 + 16 + 1 + 2 + 7 = 102",
+    "original_inventory_equation": "102 + 14 = 116",
 }
 SOURCE_REBIND_COUNT_KEYS = {
     "original_imported_source_paths",
@@ -86,9 +86,11 @@ SOURCE_REBIND_COUNT_KEYS = {
 EXPECTED_SOURCE_REBIND_PATHS = {
     "reconcile_current_protocol_paths": {
         "RubinFormal/Conformance/CVVaultLifecycleReplay.lean",
+        "RubinFormal/ConnectBlockFull.lean",
         "RubinFormal/ConnectBlockStrong.lean",
         "RubinFormal/CovenantRegistryExhaustive.lean",
         "RubinFormal/ErrorPriority.lean",
+        "RubinFormal/FeatureActivationLiveBridge.lean",
         "RubinFormal/HtlcSpendStructuralLiveBridge.lean",
         "RubinFormal/PerTxStateMachine.lean",
         "RubinFormal/RefinementBridgeV1.lean",
@@ -101,7 +103,7 @@ EXPECTED_SOURCE_REBIND_PATHS = {
         "RubinFormal/VaultStateMachine.lean",
     },
     "import_adapt_single_owner_paths": {"REGISTRY_COMPLETENESS_POLICY.md"},
-    "transplant_check_logic_paths": {"scripts/check.sh"},
+    "transplant_check_logic_paths": {"scripts/check.sh", "tools/check_formal_registry_truth.py"},
     "import_package_check_or_test_paths": {
         "tests/test_check_formal_registry_truth.py",
         "tests/test_integration.py",
@@ -113,13 +115,21 @@ EXPECTED_SOURCE_REBIND_PATHS = {
     },
     "excluded_stale_source_paths": {
         "RubinFormal/ConsensusConstantsBehavioral.lean",
+        "RubinFormal/Conformance/CVExtReplay.lean",
+        "RubinFormal/Conformance/CVExtVectors.lean",
+        "RubinFormal/Conformance/CVTxctxReplay.lean",
+        "RubinFormal/Conformance/CVTxctxVectors.lean",
         "RubinFormal/FormalGap03.lean",
+        "RubinFormal/GovernanceReplayToken.lean",
+        "RubinFormal/CoreExtInvariants.lean",
+        "RubinFormal/NativeExtIndependence.lean",
         "RubinFormal/TxWireTxPayloadContract.lean",
         "RubinFormal/TxWireTxWithWitnessContract.lean",
         "RubinFormal/TxWireTxAfterDaCoreContract.lean",
         "RubinFormal/TxWireTxBodyContract.lean",
         "RubinFormal/TxWireTxContract.lean",
     },
+    "semantic_theorem_reconciliation_retired_paths": {"RubinFormal/CoreExtRefinement.lean"},
 }
 SOURCE_REBIND_LIST_COUNTS = {
     "reconcile_current_protocol_paths": "reconcile_current_protocol_path_count",
@@ -134,6 +144,7 @@ THEOREM_DECL_RE = re.compile(
 NAMESPACE_RE = re.compile(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*)\s*$")
 SECTION_RE = re.compile(r"^\s*section(?:\s+([A-Za-z_][A-Za-z0-9_']*))?\s*$")
 END_RE = re.compile(r"^\s*end(?:\s+([A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*))?\s*$")
+LEAN_IMPORT_RE = re.compile(r"^\s*import\s+(RubinFormal(?:\.[A-Za-z][A-Za-z0-9_']*)+)\s*$", re.MULTILINE)
 
 
 def fail(msg: str) -> int:
@@ -290,6 +301,31 @@ def validate_source_rebind(doc: dict) -> list[str]:
     return errors
 
 
+def validate_retired_source_paths(repo_root: Path, doc: dict) -> list[str]:
+    source_rebind = doc.get("source_rebind")
+    if not isinstance(source_rebind, dict): return []
+    retired = [path for key in ("excluded_stale_source_paths", "semantic_theorem_reconciliation_retired_paths") for path in source_rebind.get(key, []) if isinstance(path, str)]
+    formal_root, entrypoint = repo_root / "rubin-formal", repo_root / "rubin-formal" / "RubinFormal.lean"
+    if not entrypoint.exists(): return ["RubinFormal.lean missing while checking retired source paths"]
+
+    reachable: set[str] = set()
+    pending, visited = [entrypoint], {entrypoint.resolve()}
+    while pending:
+        path = pending.pop()
+        for module in LEAN_IMPORT_RE.findall(strip_lean_comments(path.read_text(encoding="utf-8"))):
+            rel_path = f"{module.replace('.', '/')}.lean"
+            reachable.add(rel_path)
+            imported = formal_root / rel_path
+            if imported.exists() and imported.resolve() not in visited:
+                visited.add(imported.resolve()); pending.append(imported)
+
+    errors = []
+    for rel_path in retired:
+        if (formal_root / rel_path).exists(): errors.append(f"retired source path remains in candidate tree: {rel_path}")
+        if rel_path in reachable: errors.append(f"retired source path remains reachable from RubinFormal.lean: {rel_path}")
+    return errors
+
+
 def validate_coverage_summary(coverage: dict, rows: list[dict]) -> list[str]:
     summary = coverage.get("coverage_summary")
     if not isinstance(summary, dict):
@@ -352,6 +388,7 @@ def main() -> int:
     coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
 
     source_rebind_errors = validate_source_rebind(coverage)
+    source_rebind_errors.extend(validate_retired_source_paths(repo_root, coverage))
     if source_rebind_errors:
         for err in source_rebind_errors:
             print(f"ERROR: {err}", file=sys.stderr)

@@ -13,68 +13,7 @@ and which theorems back each claim.
 This policy defines what MUST be registered, what is explicitly excluded,
 and how to evaluate a candidate theorem.
 
-### Imported-source rebind
-
-The current imported-source obligation is 102 paths: the original 109-path
-inventory minus exactly seven `DROP_STALE_SOURCE` paths:
-
-- `RubinFormal/ConsensusConstantsBehavioral.lean`
-- `RubinFormal/FormalGap03.lean`
-- `RubinFormal/TxWireTxPayloadContract.lean`
-- `RubinFormal/TxWireTxWithWitnessContract.lean`
-- `RubinFormal/TxWireTxAfterDaCoreContract.lean`
-- `RubinFormal/TxWireTxBodyContract.lean`
-- `RubinFormal/TxWireTxContract.lean`
-
-Pinned provenance:
-
-- `source_oid`: `2d9f1024f1d0b1bfb3fe6a8b727762e7a979b3a0`
-- `inventory_sha256`: `77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6`
-- `byte_exact_path_count`: 79 (`BYTE_EXACT`)
-- `reconcile_current_protocol_path_count`: 14 (`RECONCILE_CURRENT_PROTOCOL`):
-  - `RubinFormal/Conformance/CVVaultLifecycleReplay.lean`
-  - `RubinFormal/ConnectBlockStrong.lean`
-  - `RubinFormal/CovenantRegistryExhaustive.lean`
-  - `RubinFormal/ErrorPriority.lean`
-  - `RubinFormal/HtlcSpendStructuralLiveBridge.lean`
-  - `RubinFormal/PerTxStateMachine.lean`
-  - `RubinFormal/RefinementBridgeV1.lean`
-  - `RubinFormal/RotationPrelude.lean`
-  - `RubinFormal/SighashAssumptionBridge.lean`
-  - `RubinFormal/SpendGateLiveBridge.lean`
-  - `RubinFormal/StructuralRulesBehavioral.lean`
-  - `RubinFormal/TxWireTxAfterDaCoreStep.lean`
-  - `RubinFormal/TxWireTxFinalizeContract.lean`
-  - `RubinFormal/VaultStateMachine.lean`
-- `import_adapt_single_owner_path_count`: 1 (`IMPORT_ADAPT_SINGLE_OWNER`) —
-  `REGISTRY_COMPLETENESS_POLICY.md`
-- `transplant_check_logic_path_count`: 1 (`TRANSPLANT_CHECK_LOGIC`) —
-  `scripts/check.sh`
-- `import_package_check_or_test_path_count`: 7
-  (`IMPORT_PACKAGE_CHECK_OR_TEST`), listed below
-
-The provenance arithmetic is
-`active_partition_equation = "79 + 14 + 1 + 1 + 7 = 102"` and
-`original_inventory_equation = "102 + 7 = 109"`. Byte equality is
-lifecycle/provenance evidence against the pinned external source. Local
-checkers validate this recorded manifest and the reachable registry; they do
-not reconstruct the external OID's bytes.
-
-The excluded paths cannot support current registry claims. Reintroducing or
-replacing any of them is a separately authorized follow-up. The frozen RUB-1024
-inventory also classifies seven paths within the same 102-path active count as
-`IMPORT_PACKAGE_CHECK_OR_TEST`:
-
-- `tests/test_check_formal_registry_truth.py`
-- `tests/test_integration.py`
-- `tests/test_path_resolution.py`
-- `tests/test_registry_extraction.py`
-- `tests/test_scope_and_names.py`
-- `tests/test_strip_lean_comments.py`
-- `tests/test_validation.py`
-
-These are repository-valid package-test import adaptations, not theorem
-evidence and not additional active paths. The canonical digest is `proof_coverage.json.spec_section_hashes_sha3_256`.
+### Imported-source rebind: 116 original → 102 active (14 standalone `DROP_STALE_SOURCE` retirements; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
 
 ## 2. Registration Tiers
 
@@ -148,17 +87,3 @@ The registry is auditable via:
   and evidence level parity between registries.
 - The gap between total theorems (code) and registered theorems (registry) is
   intentional and governed by this policy. Not every theorem needs registration.
-
-## 6. Current Metrics
-
-As of 2026-07-24, recomputed from the current registries and Lean tree:
-
-- Lean source tree: 1,063 public theorem declarations, 1,063 unique theorem names
-- `proof_coverage.json`: 566 references, 543 unique theorem names
-- `refinement_bridge.json`: 164 references, 158 unique theorem names
-- Registry union: 550 unique theorem names
-- Unregistered: 513 unique theorem names (mostly helpers, wrappers, internals per policy §2)
-
-Reference counts count every row occurrence. Unique counts deduplicate fully
-qualified public theorem names; private declarations are excluded per §2 and
-the unregistered count is `1,063 - 550`.

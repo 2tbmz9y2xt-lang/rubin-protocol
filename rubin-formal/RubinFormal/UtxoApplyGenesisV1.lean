@@ -239,9 +239,7 @@ def validateThresholdSigSpendNoCrypto
     Structurally mirrors the legacy `for ... let mut` loop so bridge-level
     equivalence can be proven by per-element body congruence.
 
-    **Status:** LIVE-ready for post-rotation wiring. Integration with call
-    sites (MULTISIG/VAULT spend gates) is handled in Wave A3 (#427) — this
-    PR only adds the helper + bridge. -/
+    **Scope:** pre-rotation only; descriptor-present or other-registry calls fail closed. -/
 def validateThresholdSigSpendRegistry
     (reg : Rotation.SuiteRegistry)
     (keys : List Bytes)
@@ -251,6 +249,8 @@ def validateThresholdSigSpendRegistry
     (_context : String)
     (rotDesc? : Option NativeSuiteRotation.RotationDeploymentDescriptor := none) :
     Except String Unit := do
+  if !(decide ((show List Rotation.SuiteEntry from reg) = [Rotation.ML_DSA_87_ENTRY])) || rotDesc?.isSome then
+    throw "TX_ERR_SIG_ALG_INVALID"
   if ws.length != keys.length then
     throw "TX_ERR_PARSE"
   let mut valid : Nat := 0
@@ -372,11 +372,11 @@ theorem validateThresholdSigSpend_eq_registry_pre_rotation
   -- in canonical form, then collapse `(x && x) = x` by Bool idempotence.
   -- Additionally unfold the local `SUITE_ID_ML_DSA_87` alias so the legacy
   -- branch uses the same canonical `RubinFormal.SUITE_ID_ML_DSA_87`.
-  simp only [liveSpendGateAllows_none_eq_beq_ml_dsa_87,
+  simp [liveSpendGateAllows_none_eq_beq_ml_dsa_87,
              registryLookup_pre_rotation_isSome_eq_beq_ml_dsa_87,
              Bool.and_self, SUITE_ID_ML_DSA_87,
              CovenantGenesisV1.SUITE_ID_ML_DSA_87,
-             RubinFormal.SUITE_ID_ML_DSA_87]
+             RubinFormal.SUITE_ID_ML_DSA_87, Rotation.PRE_ROTATION_REGISTRY, Rotation.ML_DSA_87_ENTRY]
 
 def validateHTLCSpendNoCrypto
     (c : CovenantGenesisV1.HtlcCovenant)

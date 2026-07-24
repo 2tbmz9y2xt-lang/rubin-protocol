@@ -25,10 +25,10 @@ SHARED_OP_PARITY = {
     "da_set_integrity": "da_set_integrity",
     "weight_accounting": "weight_accounting",
 }
-EXPECTED_COVERAGE_TRUST = (32, 566, 543, 22, 74, 67)
-EXPECTED_UNIVERSAL_TRUST = (27, 545, 21, 66, 59)
-EXPECTED_KERNEL_THEOREM_COMPLEMENT = (492, 476)
-EXPECTED_BRIDGE_TRUST = (13, 164, 158, 8, 19, 18)
+EXPECTED_COVERAGE_TRUST = (32, 558, 535, 22, 73, 66)
+EXPECTED_UNIVERSAL_TRUST = (27, 537, 21, 65, 58)
+EXPECTED_KERNEL_THEOREM_COMPLEMENT = (485, 469)
+EXPECTED_BRIDGE_TRUST = (12, 163, 157, 7, 18, 17)
 EXPECTED_UNAFFECTED_UNIVERSAL = {
     "consensus_constants_witness_lengths_pre_rotation",
     "block_validation_order",
@@ -42,7 +42,6 @@ EXPECTED_AFFECTED_BRIDGE_REFS = {
     "fork_choice_select": 2,
     "native_rotation": 1,
     "native_suite_rotation": 2,
-    "parse_tx": 1,
     "retarget_v1": 9,
     "sighash_v1": 2,
     "weight_accounting": 1,
@@ -401,6 +400,8 @@ def validate_single_theorem_ref(
     label: str,
     allow_global_fallback: bool,
 ) -> Optional[str]:
+    if label == "proof_coverage" and not declared_path:
+        return f"proof_coverage theorem `{theorem}` has no exact theorem_files mapping"
     if declared_path:
         declared_result = theorem_exists_in_file(theorem, declared_path)
         if declared_result is None or declared_result:

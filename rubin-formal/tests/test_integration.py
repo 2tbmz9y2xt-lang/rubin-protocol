@@ -196,7 +196,7 @@ class CollectRegistryErrorsTests(unittest.TestCase):
             lean_dir = root / "RubinFormal"
             lean_dir.mkdir()
             sample = lean_dir / "Foo.lean"
-            sample.write_text("-- no theorems here", encoding="utf-8")
+            sample.write_text("namespace RubinFormal.Foo\ntheorem present : True := by trivial\nend RubinFormal.Foo", encoding="utf-8")
             lake_dir = root / ".lake" / "build" / "lib" / "RubinFormal"
             lake_dir.mkdir(parents=True)
             (lake_dir / "Foo.olean").write_text("")
@@ -206,10 +206,7 @@ class CollectRegistryErrorsTests(unittest.TestCase):
                     {
                         "section_key": "test_section",
                         "file": "rubin-formal/RubinFormal/Foo.lean",
-                        "theorems": ["RubinFormal.Foo.nonexistent"],
-                        "theorem_files": {
-                            "RubinFormal.Foo.nonexistent": "rubin-formal/RubinFormal/Foo.lean"
-                        },
+                        "theorems": ["RubinFormal.Foo.present"],
                     }
                 ]
             }
@@ -218,7 +215,7 @@ class CollectRegistryErrorsTests(unittest.TestCase):
             _, _, _, errors = collect_registry_errors(root, coverage, bridge, ea, eif)
             theorem_errors = [e for e in errors if "theorem" in e.lower() and "shared-op" not in e]
             self.assertGreater(len(theorem_errors), 0)
-            self.assertIn("nonexistent", theorem_errors[0])
+            self.assertIn("no exact theorem_files mapping", theorem_errors[0])
 
     def test_private_theorem_cannot_satisfy_registry_reference(self) -> None:
         with TemporaryDirectory() as tmp:

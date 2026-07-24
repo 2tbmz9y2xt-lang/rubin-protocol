@@ -8,71 +8,7 @@ Machine-checked formal proof surface for the RUBIN L1 blockchain protocol.
 - `proof_coverage.json` — machine-readable coverage registry with 32 section entries
 - Each registry entry carries explicit `evidence_level`, `proof_trust`, `notes`, and `limitations` so that public claims never outrun the actual proof boundary
 
-## Source rebind: 109 → 102
-
-The active imported-source obligation is 102 paths: the original 109-path
-inventory minus exactly these seven `DROP_STALE_SOURCE` paths:
-
-- `RubinFormal/ConsensusConstantsBehavioral.lean`
-- `RubinFormal/FormalGap03.lean`
-- `RubinFormal/TxWireTxPayloadContract.lean`
-- `RubinFormal/TxWireTxWithWitnessContract.lean`
-- `RubinFormal/TxWireTxAfterDaCoreContract.lean`
-- `RubinFormal/TxWireTxBodyContract.lean`
-- `RubinFormal/TxWireTxContract.lean`
-
-Pinned provenance:
-
-- `source_oid`: `2d9f1024f1d0b1bfb3fe6a8b727762e7a979b3a0`
-- `inventory_sha256`: `77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6`
-- `byte_exact_path_count`: 79 (`BYTE_EXACT`)
-- `reconcile_current_protocol_path_count`: 14 (`RECONCILE_CURRENT_PROTOCOL`):
-  - `RubinFormal/Conformance/CVVaultLifecycleReplay.lean`
-  - `RubinFormal/ConnectBlockStrong.lean`
-  - `RubinFormal/CovenantRegistryExhaustive.lean`
-  - `RubinFormal/ErrorPriority.lean`
-  - `RubinFormal/HtlcSpendStructuralLiveBridge.lean`
-  - `RubinFormal/PerTxStateMachine.lean`
-  - `RubinFormal/RefinementBridgeV1.lean`
-  - `RubinFormal/RotationPrelude.lean`
-  - `RubinFormal/SighashAssumptionBridge.lean`
-  - `RubinFormal/SpendGateLiveBridge.lean`
-  - `RubinFormal/StructuralRulesBehavioral.lean`
-  - `RubinFormal/TxWireTxAfterDaCoreStep.lean`
-  - `RubinFormal/TxWireTxFinalizeContract.lean`
-  - `RubinFormal/VaultStateMachine.lean`
-- `import_adapt_single_owner_path_count`: 1 (`IMPORT_ADAPT_SINGLE_OWNER`) —
-  `REGISTRY_COMPLETENESS_POLICY.md`
-- `transplant_check_logic_path_count`: 1 (`TRANSPLANT_CHECK_LOGIC`) —
-  `scripts/check.sh`
-- `import_package_check_or_test_path_count`: 7
-  (`IMPORT_PACKAGE_CHECK_OR_TEST`), listed below
-
-The recorded arithmetic is
-`active_partition_equation = "79 + 14 + 1 + 1 + 7 = 102"` and
-`original_inventory_equation = "102 + 7 = 109"`. Byte equality is
-lifecycle/provenance evidence against the pinned external source. Local
-checkers validate this recorded manifest and the reachable registry; they do
-not reconstruct the external OID's bytes.
-
-Those paths are excluded from current source and claim coverage. Reintroducing
-or replacing them requires a separately authorized follow-up and does not form
-part of the present registry claims.
-
-Within the same 102 active paths, seven adaptations are classified
-`IMPORT_PACKAGE_CHECK_OR_TEST` (they do not add to the path count):
-
-- `tests/test_check_formal_registry_truth.py`
-- `tests/test_integration.py`
-- `tests/test_path_resolution.py`
-- `tests/test_registry_extraction.py`
-- `tests/test_scope_and_names.py`
-- `tests/test_strip_lean_comments.py`
-- `tests/test_validation.py`
-
-They make the imported package tests resolve their own `tools` package from
-both repository-root and package-root discovery, without changing proof
-claims. The canonical digest is `proof_coverage.json.spec_section_hashes_sha3_256`.
+## Source rebind: 116 original → 102 active (14 standalone `DROP_STALE_SOURCE` retirements; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
 
 ## Claim boundary (critical)
 
@@ -88,9 +24,7 @@ Permitted claim formulations (OK):
 
 - "Lean executable semantics replay the non-`CV-PV-*` conformance fixtures
   represented by modules imported by `RubinFormal.Conformance.Index`"
-- "Bridge evidence is op-scoped and mixed; the bounded imported Go-trace ID
-  contract is claimed only for `parse_tx`, while other rows use their named
-  universal, assumption-backed, behavioral, or CV-contract theorem surfaces"
+- "Bridge evidence is op-scoped Lean evidence; Go/Rust correspondence remains human-reviewed"
 - "Pinned-section coverage is machine-readable with explicit evidence levels: universal, behavioral, assumption-backed, and contract-level"
 
 Prohibited claim formulations (NOT OK):
@@ -120,7 +54,6 @@ Wire model notes:
 - The formal coverage registry currently contains 32 machine-checked section entries
 - Registry status counts: 28 `proved`, 4 `proved_with_axiom`, 0 `stated`, 0 `deferred`
 - Claim strength breakdown: 27 universal, 4 assumption-backed, 1 model-level
-- Registry theorem counts: 566 references and 543 unique theorem names
 - Machine-checked status does not imply uniform claim strength — the honest boundary is set by `status`, `evidence_level`, and `limitations`
 - Extra formal-only theorems are not counted as pinned-section claims unless registered in the machine-readable registry
 

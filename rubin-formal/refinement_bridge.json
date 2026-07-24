@@ -1,20 +1,22 @@
 {
   "schema_version": 1,
   "status": "active",
-  "notes": "Bridge map for model theorem -> executable conformance op evidence. Each critical_op carries one evidence_level from the exact mixed taxonomy: machine_checked_universal, machine_checked_assumption_backed, machine_checked_behavioral, or machine_checked_contract. This map is op-scoped and records mixed Lean↔Go/Rust ceilings rather than one uniform implementation-equivalence claim. Trace IDs are required only on rows that explicitly claim imported Go-trace evidence.",
+  "notes": "Bridge map for model theorem -> Lean conformance evidence. Each critical_op carries one evidence_level from the exact mixed taxonomy; Go/Rust correspondence remains human-reviewed rather than a machine-checked implementation-equivalence claim.",
   "source_rebind": {
     "source_oid": "2d9f1024f1d0b1bfb3fe6a8b727762e7a979b3a0",
     "inventory_sha256": "77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6",
-    "original_imported_source_paths": 109,
+    "original_imported_source_paths": 116,
     "active_imported_source_paths": 102,
     "disposition": "DROP_STALE_SOURCE",
-    "byte_exact_path_count": 79,
-    "reconcile_current_protocol_path_count": 14,
+    "byte_exact_path_count": 76,
+    "reconcile_current_protocol_path_count": 16,
     "reconcile_current_protocol_paths": [
       "RubinFormal/Conformance/CVVaultLifecycleReplay.lean",
+      "RubinFormal/ConnectBlockFull.lean",
       "RubinFormal/ConnectBlockStrong.lean",
       "RubinFormal/CovenantRegistryExhaustive.lean",
       "RubinFormal/ErrorPriority.lean",
+      "RubinFormal/FeatureActivationLiveBridge.lean",
       "RubinFormal/HtlcSpendStructuralLiveBridge.lean",
       "RubinFormal/PerTxStateMachine.lean",
       "RubinFormal/RefinementBridgeV1.lean",
@@ -30,19 +32,28 @@
     "import_adapt_single_owner_paths": [
       "REGISTRY_COMPLETENESS_POLICY.md"
     ],
-    "transplant_check_logic_path_count": 1,
+    "transplant_check_logic_path_count": 2,
     "transplant_check_logic_paths": [
-      "scripts/check.sh"
+      "scripts/check.sh",
+      "tools/check_formal_registry_truth.py"
     ],
     "excluded_stale_source_paths": [
       "RubinFormal/ConsensusConstantsBehavioral.lean",
+      "RubinFormal/Conformance/CVExtReplay.lean",
+      "RubinFormal/Conformance/CVExtVectors.lean",
+      "RubinFormal/Conformance/CVTxctxReplay.lean",
+      "RubinFormal/Conformance/CVTxctxVectors.lean",
       "RubinFormal/FormalGap03.lean",
+      "RubinFormal/GovernanceReplayToken.lean",
+      "RubinFormal/CoreExtInvariants.lean",
+      "RubinFormal/NativeExtIndependence.lean",
       "RubinFormal/TxWireTxPayloadContract.lean",
       "RubinFormal/TxWireTxWithWitnessContract.lean",
       "RubinFormal/TxWireTxAfterDaCoreContract.lean",
       "RubinFormal/TxWireTxBodyContract.lean",
       "RubinFormal/TxWireTxContract.lean"
     ],
+    "semantic_theorem_reconciliation_retired_paths": ["RubinFormal/CoreExtRefinement.lean"],
     "import_package_check_or_test_path_count": 7,
     "import_package_check_or_test_paths": [
       "tests/test_check_formal_registry_truth.py",
@@ -53,29 +64,10 @@
       "tests/test_strip_lean_comments.py",
       "tests/test_validation.py"
     ],
-    "active_partition_equation": "79 + 14 + 1 + 1 + 7 = 102",
-    "original_inventory_equation": "102 + 7 = 109"
+    "active_partition_equation": "76 + 16 + 1 + 2 + 7 = 102",
+    "original_inventory_equation": "102 + 14 = 116"
   },
   "critical_ops": [
-    {
-      "op": "parse_tx",
-      "gate": "CV-PARSE",
-      "model_theorem": "RubinFormal.Refinement.parse_tx_go_trace_contract_proved",
-      "lean_file": "rubin-formal/RubinFormal/Refinement/GoTraceV1Check.lean",
-      "evidence_level": "machine_checked_contract",
-      "proof_trust": "compiler_trusted",
-      "trace_source_file": "rubin-formal/RubinFormal/Refinement/GoTraceV1.lean",
-      "traced_vector_ids": [
-        "PARSE-01",
-        "PARSE-16"
-      ],
-      "contract_scope": "Bounded Go-trace contract over the two imported parse_tx rows, PARSE-01 and PARSE-16, replayed against Lean parseTx. PARSE-16's accepted error-priority drift is payload-pinned via a triple-segment content hash.",
-      "limitations": [
-        "Narrow trace-backed contract over two imported parse_tx rows, not all 16 CV-PARSE fixture vectors and not a universal proof for all possible transaction byte sequences.",
-        "PARSE-16 has documented error-priority drift (Go: WITNESS_OVERFLOW, Lean: SIG_ALG_INVALID). Drift exception is pinned to concrete fixture payload via triple-segment hash (full + first-half + second-half, ~192-bit collision resistance) — any byte change breaks the proof.",
-        "Serialize direction (Lean→bytes→Go roundtrip) is not covered by this contract."
-      ]
-    },
     {
       "op": "sighash_v1",
       "gate": "CV-SIGHASH",
@@ -414,7 +406,7 @@
       "contract_scope": "Universal for native crypto suite rotation. Constrained theorem: ∀ well-formed descriptor+registry, ∀ height → phase partition holds ∧ all active create/spend suites resolve uniquely.",
       "notes": "Universal for the native suite rotation model surface. Composes fi_rot_02_phase_partition + fi_rot_03_active_{create,suite}_resolves. No claim about byte-level wire encoding trace (G7 residual).",
       "limitations": [
-        "Structural model ↔ Go/Rust parity proved; byte-level wire encoding trace not formalized (G7-class cross-language bridge residual)."
+        "The model is machine-checked in Lean; correspondence to Go/Rust is human-reviewed, and byte-level wire encoding trace remains unformalized (G7 residual)."
       ],
       "supporting_theorems": [
         "RubinFormal.NativeSuiteRotation.fi_rot_02_phase_partition",

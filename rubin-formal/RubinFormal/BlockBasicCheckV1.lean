@@ -13,7 +13,7 @@ namespace BlockBasicCheckV1
 def MAX_FUTURE_DRIFT : Nat := 7200
 
 def enforceSigSuiteActivation (_txs : List Bytes) (_blockHeight : Nat) : Except String Unit :=
-  -- No native signature-suite activation remains; non-native algorithms are only available via CORE_EXT profiles.
+  -- Legacy structural no-op: retired profiles, including CORE_EXT, are not active or supported.
   pure ()
 
 def insertNat (x : Nat) : List Nat → List Nat
