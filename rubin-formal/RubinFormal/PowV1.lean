@@ -146,6 +146,41 @@ def retargetV1 (targetOld : Bytes) (timestampFirst timestampLast : Nat) (pattern
   let targetNew := Nat.max lo (Nat.min candidate hi)
   pure (natToBytesBE32 targetNew)
 
+-- F-AUDIT-07: retarget clamp is bounded by powLimit.
+-- The three-way clamp `max(lo, min(candidate, hi))` where hi ≤ powLimit
+-- guarantees the result never exceeds the 256-bit PoW limit.
+
+/-- The retarget clamp cannot exceed the 256-bit PoW limit. -/
+theorem retargetV1_clamp_bounded (targetOldNat tActual : Nat)
+    (hTargetOld : targetOldNat ≤ powLimit) :
+    let candidate := (targetOldNat * tActual) / tExpected
+    let lo := Nat.max 1 (targetOldNat / 4)
+    let hi := Nat.min (targetOldNat * 4) powLimit
+    let targetNew := Nat.max lo (Nat.min candidate hi)
+    targetNew ≤ powLimit := by
+  dsimp
+  -- max(lo, min(candidate, hi)) ≤ powLimit
+  -- Both branches of the max are ≤ powLimit:
+  --   lo = max(1, old/4) ≤ old ≤ powLimit
+  --   min(candidate, hi) ≤ hi = min(old*4, powLimit) ≤ powLimit
+  apply Nat.max_le.mpr
+  constructor
+  · -- lo ≤ powLimit
+    apply Nat.max_le.mpr
+    exact ⟨by native_decide, Nat.le_trans (Nat.div_le_self _ _) hTargetOld⟩
+  · -- min(candidate, hi) ≤ powLimit
+    exact Nat.le_trans (Nat.min_le_right _ _) (Nat.min_le_right _ _)
+
+/-- retargetV1 result is always ≥ 1 (never zero target). -/
+theorem retargetV1_clamp_positive (targetOldNat tActual : Nat) :
+    let candidate := (targetOldNat * tActual) / tExpected
+    let lo := Nat.max 1 (targetOldNat / 4)
+    let targetNew := Nat.max lo (Nat.min candidate (Nat.min (targetOldNat * 4) powLimit))
+    targetNew ≥ 1 := by
+  dsimp
+  -- max(max(1, q/4), min(...)) ≥ max(1, q/4) ≥ 1
+  exact Nat.le_trans (Nat.le_max_left 1 _) (Nat.le_max_left _ _)
+
 def blockHash (headerBytes : Bytes) : Bytes :=
   SHA3.sha3_256 headerBytes
 

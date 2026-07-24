@@ -63,4 +63,30 @@ def cvVaultPolicyVectorsPass : Bool :=
 theorem cv_vault_policy_vectors_pass : cvVaultPolicyVectorsPass = true := by
   native_decide
 
+def vaultPolicyDefaultOrderSafeStatement : Prop :=
+  ∀ v : CVVaultPolicyVector,
+    v.validationOrder = none →
+    v.vaultInputCount <= 1 →
+    v.hasOwnerAuth = true →
+    (v.nonVaultLockIds.all (fun x => x == v.ownerLockId)) = true →
+    (v.slots == v.keyCount) = true →
+    (v.sentinelSuiteId == 0 &&
+      v.sentinelPubkeyLen == 0 &&
+      v.sentinelSigLen == 0 &&
+      (!v.sentinelVerifyCalled)) = true →
+    v.sigThresholdOk = true →
+    strictlySortedUnique v.whitelist = true →
+    (!v.whitelist.elem v.ownerLockId) = true →
+    v.sumOut >= v.sumInVault →
+    vaultPolicyEval v = (true, none)
+
+theorem vault_policy_default_order_safe_proved :
+    vaultPolicyDefaultOrderSafeStatement := by
+  intro v hOrder hMulti hOwner hSponsor hSlots hSentinel hSig hWhitelist
+    hOwnerDestination hValue
+  simp [vaultPolicyDefaultOrderSafeStatement, vaultPolicyEval, hOrder, hMulti,
+    hOwner, hSponsor, hSlots, hSentinel, hSig, hWhitelist,
+    hOwnerDestination, hValue]
+  native_decide
+
 end RubinFormal.Conformance

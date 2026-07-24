@@ -20,6 +20,8 @@ import RubinFormal.Conformance.CVValidationOrderVectors
 import RubinFormal.Conformance.CVDaIntegrityVectors
 import RubinFormal.Conformance.CVSimplicityExecVectors
 import RubinFormal.Conformance.CVSimplicityExecReplay
+import RubinFormal.Conformance.CVForkChoiceVectors
+import RubinFormal.Conformance.CVForkChoiceReplay
 
 set_option maxHeartbeats 10000000
 set_option maxRecDepth 50000
@@ -344,6 +346,46 @@ private def sameSimplicityExecTraceIds : Bool :=
   simplicityExecOuts.all
     (fun o => (RubinFormal.Conformance.cvSimplicityExecVectors.find? (fun v => v.id == o.id)).isSome)
 
+def parseGoTraceV1Pass : Bool :=
+  !parseOuts.isEmpty && parseOuts.all checkParse
+
+theorem parse_tx_go_trace_contract_proved : parseGoTraceV1Pass = true := by
+  native_decide
+
+theorem sighash_v1_go_trace_contract_proved : sighashOuts.all checkSighash = true := by
+  native_decide
+
+theorem retarget_v1_go_trace_contract_proved : powOuts.all checkPow = true := by
+  native_decide
+
+theorem utxo_apply_basic_go_trace_contract_proved : utxoBasicOuts.all checkUtxoBasic = true := by
+  native_decide
+
+private def forkChoiceSelectVectors : List Conformance.CVForkChoiceVector :=
+  Conformance.cvForkChoiceVectors.filter (fun v => v.op == "fork_choice_select")
+
+private def forkChoiceSelectExpectedIds : List String :=
+  ["CV-FC-03", "CV-FC-EQUAL-WORK-TIE-BREAK",
+   "CV-FC-EQUAL-WORK-TIE-BREAK-REVERSED",
+   "CV-FC-HEAVIER-WINS-DISTINCT-TIPS",
+   "CV-FC-THREE-CHAIN-HEAVIEST",
+   "CV-FC-SHORT-HEAVY-BEATS-LONG-LIGHT"]
+
+private def forkChoiceSelectVectorIds : List String :=
+  forkChoiceSelectVectors.map (fun v => v.id)
+
+private def forkChoiceSelectSupportedIdsOk : Bool :=
+  forkChoiceSelectVectorIds == forkChoiceSelectExpectedIds
+
+def forkChoiceSelectCVPass : Bool :=
+  forkChoiceSelectSupportedIdsOk &&
+  !forkChoiceSelectVectors.isEmpty &&
+  forkChoiceSelectVectors.all Conformance.checkForkChoiceVector
+
+theorem fork_choice_select_cv_contract_proved :
+    forkChoiceSelectCVPass = true := by
+  native_decide
+
 def allGoTraceV1Ok : Bool :=
   parseOuts.all checkParse &&
   sighashOuts.all checkSighash &&
@@ -354,7 +396,8 @@ def allGoTraceV1Ok : Bool :=
   validationOrderOuts.all checkValidationOrder &&
   daIntegrityOuts.all checkDaIntegrity &&
   sameSimplicityExecTraceIds &&
-  simplicityExecOuts.all checkSimplicityExec
+  simplicityExecOuts.all checkSimplicityExec &&
+  forkChoiceSelectCVPass
 
 def firstGoTraceV1Mismatch : Option String :=
   let mk (gate : String) (id : String) : Option String := some (gate ++ ":" ++ id)

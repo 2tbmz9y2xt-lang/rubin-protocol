@@ -1,81 +1,78 @@
-# RUBIN Formal (Lean4) — mirror/bootstrap (in-repo)
+# RUBIN Formal (Lean 4)
 
-Этот каталог содержит in-repo formal proof-pack baseline для RUBIN.
-**Источник истины (authoritative formal baseline)** — standalone репозиторий `rubin-formal`:
-`https://github.com/2tbmz9y2xt-lang/rubin-formal`.
+Machine-checked formal proof surface for the RUBIN L1 blockchain protocol.
 
-Этот in-repo каталог используется как:
+## Contents
 
-- зеркальный bootstrap для CI в `rubin-protocol`,
-- воспроизводимый “пин” для replay/refinement поверх conformance fixtures,
-- удобная точка входа для разработчиков, но **не** как canonical formal SOT.
+- Lean 4 package `RubinFormal`
+- `proof_coverage.json` — machine-readable coverage registry with 32 section entries
+- Each registry entry carries explicit `evidence_level`, `proof_trust`, `notes`, and `limitations` so that public claims never outrun the actual proof boundary
 
-Machine-readable summary contract:
+## Source rebind: 116 original → 102 active (4 `DROP_RETIRED_GENERATED_SOURCE` + 3 `DROP_RETIRED_SOURCE` + 7 `DROP_STALE_SOURCE`; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
 
-- `rubin-formal/proof_coverage.json` в standalone repo — authoritative source of truth;
-- `rubin-protocol/rubin-formal/proof_coverage.json` — documented in-repo summary subset для CI и
-  tooling в `rubin-protocol`;
-- summary MUST carry the same `proof_level`, `claim_level`, and `spec_section_hashes_sha3_256` as
-  authoritative standalone file, but MAY omit entries that the in-repo tooling does not model.
+## Claim boundary (critical)
 
-## Что есть сейчас
+This proof pack is an executable replay/refinement surface for the non-`CV-PV-*`
+conformance fixtures whose replay modules are imported by
+`RubinFormal.Conformance.Index`, plus live Lean theorems over select canonical
+sections. It provides reproducible machine-checked evidence but **is not** a
+universal formal verification of the entire CANONICAL spec.
 
-- Lean4-пакет `RubinFormal`
-- `proof_coverage.json` с machine-readable summary registry для pinned section keys, которые
-  текущее protocol tooling реально моделирует
-- summary entries со статусами `proved` / `stated` и явными `notes` / `limitations`, если
-  authoritative standalone registry уже ограничивает claim scope
+Current machine-readable status: `proof_level=refinement`, `claim_level=refined`, `package_maturity=experimental_pending_reverification`.
 
-## Граница claims (критично)
+Permitted claim formulations (OK):
 
-Этот proof-pack — executable replay/refinement coverage для replay-covered conformance-фикстур
-и baseline-слой для дальнейшей формализации. Runtime/parallel-only `CV-PV-*` gates не входят
-в текущий Lean replay scope. Он нужен для воспроизводимого "якоря", но **не** является
-универсальной формальной верификацией CANONICAL.
-Текущий machine-readable статус: `proof_level=refinement`, `claim_level=refined`.
+- "Lean executable semantics replay the non-`CV-PV-*` conformance fixtures
+  represented by modules imported by `RubinFormal.Conformance.Index`"
+- "Bridge evidence is op-scoped Lean evidence; Go/Rust correspondence remains human-reviewed"
+- "Pinned-section coverage is machine-readable with explicit evidence levels: universal, behavioral, assumption-backed, contract-level, and model-level"
 
-Разрешённые формулировки (OK):
-
-- "Lean executable semantics replay the non-CV-PV conformance fixtures imported by RubinFormal.Conformance.Index"
-- "Go(reference) → Lean refinement is checked for listed critical ops over replay-covered fixture traces"
-
-Запрещённые формулировки (NOT OK):
+Prohibited claim formulations (NOT OK):
 
 - "formal verification of RUBIN consensus / CANONICAL"
 - "bit-exact wire/serialization proven"
 - "universal mechanized equivalence between spec text and Go/Rust implementations"
 
-Источник истины по границе claims — standalone `rubin-formal/proof_coverage.json`.
-Summary в этом каталоге не является отдельным formal SOT и не должен overclaim-ить по отношению к standalone файлу.
-Дополнительно используется `claim_level` (`toy|byte|refined`) с CI-валидацией консистентности относительно `proof_level`.
+Source of truth for claim boundary: `proof_coverage.json` (`proof_level`, `package_maturity`, `claims`, and row-level `proof_trust`).
+`claim_level` (`toy|byte|refined`) is CI-validated for consistency against `proof_level`.
+
+Wire model notes:
+
+- `RubinFormal.ByteWireV2` — real CompactSize / byte-accurate proof surface for current wire claims
+- `RubinFormal.ByteWireLegacy` — toy bootstrap model for single-byte CompactSize only (`n < 253`) and `TxMini`
 
 ## Risk model / CI gate
 
-- Док: `rubin-formal/RISK_MODEL.md`
-- Скрипты:
-  - `tools/formal_risk_score.py`
-  - `tools/check_formal_risk_gate.py --profile phase0`
-  - `tools/check_formal_refinement_bridge.py`
-  - `tools/check_formal_claims_lint.py`
+- Documentation: `RISK_MODEL.md`
+- Lean validation (in-tree package): `lake build`
+- Registry/claims linting: protocol-root tooling from `tools/`
 
-## Что это значит
+## What this means
 
-- Это **не** полный freeze-ready пакет уровня "универсальная байтовая модель wire + state transition для всех секций".
-- Консенсусные правила не меняются.
-- In-repo summary registry покрывает тот поднабор pinned section keys, который текущее tooling
-  `rubin-protocol` реально валидирует.
-- Если standalone `rubin-formal` усиливает или ослабляет claim boundary, summary обязан обновиться
-  так, чтобы не противоречить authoritative файлу.
+- This is **not** a freeze-ready package at the level of "universal byte-accurate wire + state transition model for all sections"
+- Consensus rules are not changed by this formal package
+- The formal coverage registry currently contains 32 machine-checked section entries
+- Registry status counts: 25 `proved`, 4 `proved_with_axiom`, 3 `stated`, 0 `deferred`
+- Claim strength breakdown: 24 universal, 4 assumption-backed, 3 model-level, 1 contract-level
+- Machine-checked status does not imply uniform claim strength — the honest boundary is set by `status`, `evidence_level`, and `limitations`
+- Extra formal-only theorems are not counted as pinned-section claims unless registered in the machine-readable registry
 
-## Локальный запуск
+## Local build
 
 ```bash
-scripts/dev-env.sh -- bash -lc 'cd rubin-formal && lake env lean --version'
-scripts/dev-env.sh -- bash -lc 'cd rubin-formal && lake build'
+export PATH="$HOME/.elan/bin:$PATH"
+lake env lean --version
+lake build
 ```
 
-## Дальше
+Integrated workspace wrapper:
 
-1. Держать summary `proof_coverage.json` в синхроне с authoritative standalone файлом по `proof_level`, `claim_level`, `spec_section_hashes_sha3_256` и смысловой границе claims.
-2. Расширить protocol tooling так, чтобы summary можно было сужать всё меньше, а не держать вечный split-brain.
-3. Углубить универсальные теоремы beyond-fixtures поверх текущего refinement слоя.
+```bash
+cd .. && scripts/dev-env.sh -- bash -lc 'cd rubin-formal && lake build'
+```
+
+## Roadmap
+
+1. Keep `proof_coverage.json`, public narrative, and closeout evidence in sync
+2. Do not elevate formal-only extra theorems to public pinned-section claims without an explicit registry update
+3. Theorem-level traceability (`theorem_refs`) is tracked as a separate hygiene/improvement effort, not mixed with truth-correction

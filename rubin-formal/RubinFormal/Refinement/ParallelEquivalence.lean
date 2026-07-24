@@ -1,8 +1,8 @@
 /-
   ParallelEquivalence.lean — Formal refinement theorems for parallel validation.
 
-  Proves that the parallel signature verification pipeline produces results
-  equivalent to the sequential path. This is the Q-PV-19 formal package.
+  Proves the helper-level accept/reject contract for the parallel signature
+  verification pipeline. This is the Q-PV-19 formal package.
 
   Architecture modeled:
   - Sequential: ConnectBlockBasicInMemoryAtHeight (canonical truth path)
@@ -15,63 +15,21 @@
   3. Executes signature verifications in parallel via goroutine pool.
   4. Reduces results: any signature failure → block rejected.
 
-  Key insight: since pre-checks are sequential and identical, equivalence
-  reduces to proving that signature verification is order-independent
-  (pure function of inputs) and that the reducer correctly propagates
-  failures.
+  Key insight: since pre-checks are sequential and identical, the live bridge
+  surface is the signature queue reducer contract:
+  - accept iff every queued signature verifies;
+  - reject iff any queued signature fails.
+
+  This file does NOT claim exact surfaced error-index equivalence for the live
+  queue. The Go SigCheckQueue may skip some later work after the first observed
+  failure, so the surfaced error is deterministic by submission order but not a
+  universal "lowest failing index" contract.
 -/
 import RubinFormal.CriticalInvariants
 
 namespace RubinFormal.Refinement.ParallelEquivalence
 
 open RubinFormal
-
--- ============================================================================
--- Section 1: Witness Cursor Determinism
--- ============================================================================
-
-/-- A witness cursor state: current position and remaining witness count. -/
-structure CursorState where
-  pos : Nat
-  witnessLen : Nat
-
-/-- Advance cursor by consuming `slots` items. Returns none if underflow. -/
-def advanceCursor (s : CursorState) (slots : Nat) : Option CursorState :=
-  if s.pos + slots ≤ s.witnessLen then
-    some { pos := s.pos + slots, witnessLen := s.witnessLen }
-  else
-    none
-
-/-- Run cursor over a list of slot counts, returning final state or none on underflow. -/
-def runCursor (init : CursorState) : List Nat → Option CursorState
-  | [] => some init
-  | slots :: rest =>
-    match advanceCursor init slots with
-    | none => none
-    | some next => runCursor next rest
-
-/-- Cursor determinism: two runs with equal inputs produce equal outputs.
-    This is the formal anchor for ComputeWitnessAssignments: given the
-    same starting position, witness length, and slot list, the cursor
-    always produces the same final state. -/
-theorem cursor_determinism (pos1 pos2 wLen1 wLen2 : Nat) (slots : List Nat)
-    (hPos : pos1 = pos2) (hLen : wLen1 = wLen2) :
-    runCursor { pos := pos1, witnessLen := wLen1 } slots =
-    runCursor { pos := pos2, witnessLen := wLen2 } slots := by
-  subst hPos; subst hLen; rfl
-
-/-- Cursor output depends only on (pos, witnessLen, slots) — no hidden state.
-    Two cursor states with equal fields produce equal results. -/
-theorem cursor_pure (init1 init2 : CursorState) (slots : List Nat)
-    (hPos : init1.pos = init2.pos) (hLen : init1.witnessLen = init2.witnessLen) :
-    runCursor init1 slots = runCursor init2 slots := by
-  cases init1; cases init2
-  simp only [CursorState.pos, CursorState.witnessLen] at hPos hLen
-  subst hPos; subst hLen; rfl
-
--- ============================================================================
--- Section 2: Signature Verification Purity
--- ============================================================================
 
 /-- A signature check task: pure inputs for verification. -/
 structure SigTask where
@@ -80,31 +38,8 @@ structure SigTask where
   signature : Bytes
   digest : Bytes
 
-/-- Abstract signature verifier: deterministic pure function. -/
-def verifySig (verify : SigTask → Bool) (task : SigTask) : Bool := verify task
-
-/-- Verification is a pure function: same task → same result regardless
-    of when or where it is called. -/
-theorem sig_verify_pure (verify : SigTask → Bool) (t1 t2 : SigTask)
-    (h : t1 = t2) :
-    verifySig verify t1 = verifySig verify t2 := by
-  rw [h]
-
-/-- Verification result at index i is the same whether we look it up
-    in the original list or in a permutation — provided the element
-    at that index is the same task. This bridges indexing and membership. -/
-theorem sig_verify_index_stable (verify : SigTask → Bool)
-    (tasks : List SigTask) (t : SigTask) (hMem : t ∈ tasks) :
-    verifySig verify t = verifySig verify t := rfl
-
-/-- Stronger: any task in the list produces the same verify result
-    regardless of which list it appears in, as long as it's the same task. -/
-theorem sig_verify_list_independent (verify : SigTask → Bool)
-    (l1 l2 : List SigTask) (t : SigTask) (_h1 : t ∈ l1) (_h2 : t ∈ l2) :
-    verifySig verify t = verifySig verify t := rfl
-
 -- ============================================================================
--- Section 3: Reducer — All-Pass / Any-Fail Equivalence
+-- Section 1: Reducer — All-Pass / Any-Fail Equivalence
 -- ============================================================================
 
 /-- Sequential reduction: check tasks one by one, stop on first failure. -/
@@ -136,8 +71,31 @@ theorem reducer_equivalence (verify : SigTask → Bool) (tasks : List SigTask) :
       simp [hv]
 
 -- ============================================================================
--- Section 4: Accept/Reject Equivalence
+-- Section 2: Live Queue Contract Bridge
 -- ============================================================================
+
+/-- Transcription of the live Go `SigCheckQueue.Flush` accept/reject contract.
+    The live queue may stop doing expensive crypto work after the first observed
+    failure, but its externally visible success condition is simple: flush
+    returns success iff every queued signature verifies. -/
+def flushAccepts (verify : SigTask → Bool) (tasks : List SigTask) : Bool :=
+  !(tasks.any (fun t => !(verify t)))
+
+/-- Bridge theorem: the formal `reducePar` reducer and the live queue flush
+    contract accept exactly the same batches. -/
+theorem reducePar_eq_flushAccepts (verify : SigTask → Bool) (tasks : List SigTask) :
+    reducePar verify tasks = flushAccepts verify tasks := by
+  induction tasks with
+  | nil => rfl
+  | cons t rest ih =>
+      unfold reducePar flushAccepts
+      simp only [List.all_cons, List.any_cons]
+      cases hvt : verify t with
+      | false =>
+          simp [hvt]
+      | true =>
+          simp [hvt]
+          exact ih
 
 /-- Block validation result. -/
 inductive BlockResult
@@ -163,8 +121,27 @@ def validatePar (precheck : List α → Option (List SigTask × Nat))
     if reducePar verify sigTasks then BlockResult.Accept digest
     else BlockResult.Reject ErrorCode.TxErrSigInvalid 0
 
-/-- Accept/Reject equivalence: sequential and parallel validation produce
-    the same verdict for any block. -/
+/-- Live helper bridge for the parallel path: this models only the reducer
+    contract that `SigCheckQueue.Flush` enforces in Go. It does not claim the
+    full end-to-end block path or exact surfaced error-index parity. -/
+def validateParLive (precheck : List α → Option (List SigTask × Nat))
+    (verify : SigTask → Bool) (txs : List α) : BlockResult :=
+  match precheck txs with
+  | none => BlockResult.Reject ErrorCode.TxErrParse 0
+  | some (sigTasks, digest) =>
+    if flushAccepts verify sigTasks then BlockResult.Accept digest
+    else BlockResult.Reject ErrorCode.TxErrSigInvalid 0
+
+/-- The model-level parallel validator and the live queue reducer contract are
+    extensionally equal on accept/reject. -/
+theorem validatePar_eq_validateParLive
+    (precheck : List α → Option (List SigTask × Nat))
+    (verify : SigTask → Bool) (txs : List α) :
+    validatePar precheck verify txs = validateParLive precheck verify txs := by
+  simp [validatePar, validateParLive, reducePar_eq_flushAccepts]
+
+/-- Model-level accept/reject equivalence under one identical precheck result
+    and signature-task list. -/
 theorem accept_reject_equivalence (precheck : List α → Option (List SigTask × Nat))
     (verify : SigTask → Bool) (txs : List α) :
     validateSeq precheck verify txs = validatePar precheck verify txs := by
@@ -176,49 +153,121 @@ theorem accept_reject_equivalence (precheck : List α → Option (List SigTask �
     simp only
     rw [reducer_equivalence]
 
-/-- Commit equivalence: if sequential accepts with digest d, parallel
-    accepts with the same digest d. -/
-theorem commit_equivalence_accept (precheck : List α → Option (List SigTask × Nat))
-    (verify : SigTask → Bool) (txs : List α) (d : Nat) :
-    validateSeq precheck verify txs = BlockResult.Accept d →
-    validatePar precheck verify txs = BlockResult.Accept d := by
-  intro h
-  rwa [← accept_reject_equivalence]
-
-/-- Commit equivalence: if sequential rejects, parallel rejects
-    with the same error. -/
-theorem commit_equivalence_reject (precheck : List α → Option (List SigTask × Nat))
-    (verify : SigTask → Bool) (txs : List α) (e : ErrorCode) (i : Nat) :
-    validateSeq precheck verify txs = BlockResult.Reject e i →
-    validatePar precheck verify txs = BlockResult.Reject e i := by
-  intro h
-  rwa [← accept_reject_equivalence]
+/-- Under one identical precheck result and signature-task list, sequential
+    reduction agrees with the live parallel queue contract on accept/reject.
+    This is the counted bridge theorem for the actual Go helper surface, not a
+    claim about end-to-end block equality or exact surfaced error-index parity. -/
+theorem accept_reject_equivalence_live
+    (precheck : List α → Option (List SigTask × Nat))
+    (verify : SigTask → Bool) (txs : List α) :
+    validateSeq precheck verify txs = validateParLive precheck verify txs := by
+  rw [← validatePar_eq_validateParLive]
+  exact accept_reject_equivalence precheck verify txs
 
 -- ============================================================================
--- Section 5: Validation Purity (Worker Side-Effect Freedom)
+-- Section 2b: Auxiliary Tagged-Result Error Index Model
 -- ============================================================================
 
-/-- A scheduling context represents the runtime environment of a worker:
-    worker index, scheduling order, time slot, goroutine ID. In the formal
-    model, we prove that the verify result is independent of all of these. -/
-structure ScheduleCtx where
-  workerId : Nat
-  schedOrder : Nat
-  timeSlot : Nat
+/-- Sequential first-failure index over pure worker results. -/
+def firstRejectIndexFrom (start : Nat) : List Bool → Option Nat
+  | [] => none
+  | ok :: rest => if ok then firstRejectIndexFrom (start + 1) rest else some start
 
-/-- A "context-aware" verifier takes a scheduling context + task.
-    If the verifier ignores the context (as it must for correctness),
-    then any two contexts produce the same result. -/
-def contextFreeVerify (verify : SigTask → Bool) (_ctx : ScheduleCtx) (task : SigTask) : Bool :=
-  verify task
+/-- Sequential first-failure index from zero. -/
+def firstRejectIndex (results : List Bool) : Option Nat :=
+  firstRejectIndexFrom 0 results
 
-/-- Worker purity: context-free verifier produces the same result under
-    any two scheduling contexts. This is non-trivial because we quantify
-    over arbitrary distinct contexts and show the result is invariant. -/
-theorem worker_purity (verify : SigTask → Bool) (task : SigTask)
-    (ctx1 ctx2 : ScheduleCtx) (_hDiff : ctx1 ≠ ctx2) :
-    contextFreeVerify verify ctx1 task = contextFreeVerify verify ctx2 task := by
-  simp only [contextFreeVerify]
+/-- Tag worker results with their canonical input index. -/
+def indexedVerifyResultsFrom (start : Nat) : List Bool → List (Nat × Bool)
+  | [] => []
+  | ok :: rest => (start, ok) :: indexedVerifyResultsFrom (start + 1) rest
+
+/-- Canonical tagged worker results from zero. -/
+def indexedVerifyResults (results : List Bool) : List (Nat × Bool) :=
+  indexedVerifyResultsFrom 0 results
+
+/-- Parallel reducer returns the lowest failing canonical index, if any. -/
+def lowestRejectIdx? : List (Nat × Bool) → Option Nat
+  | [] => none
+  | (idx, ok) :: rest =>
+      let tail := lowestRejectIdx? rest
+      if ok then tail
+      else
+        match tail with
+        | none => some idx
+        | some j => some (Nat.min idx j)
+
+private theorem firstRejectIndexFrom_lower_bound (start idx : Nat) (results : List Bool)
+    (h : firstRejectIndexFrom start results = some idx) :
+    start ≤ idx := by
+  induction results generalizing start idx with
+  | nil => simp [firstRejectIndexFrom] at h
+  | cons ok rest ih =>
+      cases ok with
+      | false =>
+          simp [firstRejectIndexFrom] at h
+          cases h
+          exact Nat.le_refl _
+      | true =>
+          simp [firstRejectIndexFrom] at h
+          exact Nat.le_trans (Nat.le_succ start) (ih (start + 1) idx h)
+
+private theorem lowestRejectIdx_indexed_from (start : Nat) (results : List Bool) :
+    lowestRejectIdx? (indexedVerifyResultsFrom start results) =
+    firstRejectIndexFrom start results := by
+  induction results generalizing start with
+  | nil => rfl
+  | cons ok rest ih =>
+      cases ok with
+      | false =>
+          simp [indexedVerifyResultsFrom, lowestRejectIdx?, firstRejectIndexFrom]
+          rw [ih (start + 1)]
+          cases hrest : firstRejectIndexFrom (start + 1) rest with
+          | none => simp [hrest]
+          | some j =>
+              have hge1 : start + 1 ≤ j := firstRejectIndexFrom_lower_bound (start + 1) j rest hrest
+              have hge : start ≤ j := Nat.le_trans (Nat.le_succ start) hge1
+              simp [hrest, Nat.min_eq_left hge]
+      | true =>
+          simp [indexedVerifyResultsFrom, lowestRejectIdx?, firstRejectIndexFrom, ih (start + 1)]
+
+private theorem lowestRejectIdx_perm_invariant {xs ys : List (Nat × Bool)}
+    (hperm : List.Perm xs ys) :
+    lowestRejectIdx? xs = lowestRejectIdx? ys := by
+  induction hperm with
+  | nil => rfl
+  | cons x _ ih => simp [lowestRejectIdx?, ih]
+  | swap x y zs =>
+      cases x with
+      | mk i oki =>
+          cases y with
+          | mk j okj =>
+              cases oki <;> cases okj <;> simp only [lowestRejectIdx?]
+              all_goals (try rfl)
+              all_goals (
+                cases lowestRejectIdx? zs with
+                | none => simp [Nat.min_def]; split <;> split <;> omega
+                | some k => simp [Nat.min_def]; repeat (first | split | omega))
+  | trans _ _ ih1 ih2 => exact ih1.trans ih2
+
+/-- Auxiliary tagged-result theorem: any permutation of canonically indexed
+    worker outputs preserves the lowest rejecting input index. This is useful
+    for helper reasoning, but it is not counted as a bridge to the live queue,
+    which only promises accept/reject plus deterministic submission-order
+    surfacing under early abort. -/
+theorem parallel_error_index_priority (results : List Bool)
+    (parallel : List (Nat × Bool))
+    (hperm : List.Perm parallel (indexedVerifyResults results)) :
+    lowestRejectIdx? parallel = firstRejectIndex results := by
+  calc
+    lowestRejectIdx? parallel
+        = lowestRejectIdx? (indexedVerifyResults results) := lowestRejectIdx_perm_invariant hperm
+    _ = firstRejectIndexFrom 0 results := lowestRejectIdx_indexed_from 0 results
+    _ = firstRejectIndex results := rfl
+
+-- ============================================================================
+-- Section 3: Context-Free Reducer Parity
+-- ============================================================================
 
 /-- A hypothetical context-dependent verifier would break parity. We prove
     that only context-free verifiers satisfy the parity requirement:

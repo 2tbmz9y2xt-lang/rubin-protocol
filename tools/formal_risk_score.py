@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-ALLOWED_STATUS = {"proved", "stated", "deferred"}
+ALLOWED_STATUS = {"proved", "proved_with_axiom", "stated", "deferred"}
 ALLOWED_PROOF_LEVEL = {"toy-model", "spec-model", "byte-model", "refinement"}
 ALLOWED_CLAIM_LEVEL = {"toy", "byte", "refined"}
 EXPECTED_CLAIM_BY_PROOF = {
@@ -17,19 +17,23 @@ EXPECTED_CLAIM_BY_PROOF = {
     "byte-model": "byte",
     "refinement": "refined",
 }
+PENDING_PACKAGE_MATURITY = "experimental_pending_reverification"
 
 
 @dataclass(frozen=True)
 class RiskSummary:
     proof_level: str
     claim_level: str
+    package_maturity: str
     total_sections: int
     proved: int
+    proved_with_axiom: int
     stated: int
     deferred: int
     risk_score: int
     risk_tier: str
     deferred_keys: list[str]
+    proved_with_axiom_keys: list[str]
     stated_keys: list[str]
 
 
@@ -77,13 +81,17 @@ def summarize(coverage_doc: dict) -> RiskSummary:
         raise ValueError(
             f"proof_level/claim_level mismatch: proof_level={proof_level} requires claim_level={expected_claim}, got {claim_level}"
         )
+    package_maturity = coverage_doc.get("package_maturity")
+    if not isinstance(package_maturity, str) or not package_maturity:
+        raise ValueError("missing/invalid package_maturity")
 
     rows = coverage_doc.get("coverage")
     if not isinstance(rows, list) or not rows:
         raise ValueError("coverage[] missing or empty")
 
-    proved = stated = deferred = 0
+    proved = proved_with_axiom = stated = deferred = 0
     deferred_keys: list[str] = []
+    proved_with_axiom_keys: list[str] = []
     stated_keys: list[str] = []
 
     for i, row in enumerate(rows):
@@ -98,6 +106,9 @@ def summarize(coverage_doc: dict) -> RiskSummary:
 
         if status == "proved":
             proved += 1
+        elif status == "proved_with_axiom":
+            proved_with_axiom += 1
+            proved_with_axiom_keys.append(key)
         elif status == "stated":
             stated += 1
             stated_keys.append(key)
@@ -109,13 +120,16 @@ def summarize(coverage_doc: dict) -> RiskSummary:
     return RiskSummary(
         proof_level=proof_level,
         claim_level=claim_level,
+        package_maturity=package_maturity,
         total_sections=len(rows),
         proved=proved,
+        proved_with_axiom=proved_with_axiom,
         stated=stated,
         deferred=deferred,
         risk_score=score,
         risk_tier=tier,
         deferred_keys=sorted(deferred_keys),
+        proved_with_axiom_keys=sorted(proved_with_axiom_keys),
         stated_keys=sorted(stated_keys),
     )
 
@@ -140,12 +154,15 @@ def main() -> int:
                 {
                     "proof_level": summary.proof_level,
                     "claim_level": summary.claim_level,
+                    "package_maturity": summary.package_maturity,
                     "total_sections": summary.total_sections,
                     "proved": summary.proved,
+                    "proved_with_axiom": summary.proved_with_axiom,
                     "stated": summary.stated,
                     "deferred": summary.deferred,
                     "risk_score": summary.risk_score,
                     "risk_tier": summary.risk_tier,
+                    "proved_with_axiom_keys": summary.proved_with_axiom_keys,
                     "stated_keys": summary.stated_keys,
                     "deferred_keys": summary.deferred_keys,
                 },
@@ -158,12 +175,20 @@ def main() -> int:
     print("FORMAL_RISK_SCORE")
     print(f"- proof_level: {summary.proof_level}")
     print(f"- claim_level: {summary.claim_level}")
-    print(f"- coverage: total={summary.total_sections} proved={summary.proved} stated={summary.stated} deferred={summary.deferred}")
+    print(f"- package_maturity: {summary.package_maturity}")
+    print(
+        f"- coverage: total={summary.total_sections} proved={summary.proved} "
+        f"proved_with_axiom={summary.proved_with_axiom} stated={summary.stated} deferred={summary.deferred}"
+    )
     print(f"- risk_score: {summary.risk_score}")
     print(f"- risk_tier: {summary.risk_tier}")
     if summary.stated_keys:
         print("- stated sections:")
         for k in summary.stated_keys:
+            print(f"  - {k}")
+    if summary.proved_with_axiom_keys:
+        print("- proved_with_axiom sections:")
+        for k in summary.proved_with_axiom_keys:
             print(f"  - {k}")
     if summary.deferred_keys:
         print("- deferred sections:")

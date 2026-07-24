@@ -33,6 +33,9 @@ def roundConstants : Array UInt64 :=
     let r := UInt64.ofNat (64 - k)
     (x <<< ku) ||| (x >>> r)
 
+-- FIPS 202 §3.2.1: State array A[x,y] is stored in linear array as A[5*y + x].
+-- This matches the NIST convention where x is the column index (0..4)
+-- and y is the row index (0..4), with row-major linearization.
 @[inline] def idx (x y : Nat) : Nat := 5*y + x
 
 def keccakF (st : Array UInt64) : Array UInt64 :=
