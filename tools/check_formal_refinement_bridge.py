@@ -66,9 +66,11 @@ def trace_ids_for_op(trace_text: str, op: str) -> set[str] | None:
     name = TRACE_LIST_NAME_BY_OP.get(op)
     if name is None: return set()
     live = blank_lean_comments_and_strings(trace_text)
-    definitions = list(re.finditer(r"(?m)^\s*def\s+" + re.escape(name) + r"\s*:\s*List\b", live))
+    definitions = list(re.finditer(r"(?m)^\s*def\s+" + re.escape(name) + r"\b", live))
     if len(definitions) != 1: return None
-    start = live.find("[", definitions[0].end())
+    header = re.match(r"\s*:\s*List\s+[^:=\[\n]+?\s*:=\s*\[", live[definitions[0].end():])
+    if header is None: return None
+    start = definitions[0].end() + header.end() - 1
     end = live.find("\n]", start)
     if start < 0 or end < start: return None
     block = live[start:end]

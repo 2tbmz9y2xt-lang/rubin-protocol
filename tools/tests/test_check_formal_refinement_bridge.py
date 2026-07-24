@@ -65,6 +65,12 @@ def powOuts : List PowOut := [
         )
         self.assertTrue(any("exactly one live definition" in error for error in errors))
 
+    def test_non_list_target_rhs_does_not_capture_later_list(self) -> None:
+        trace_text = ('def parseOuts : List ParseOut := by exact []\n'
+                      'def unrelated := [{ id := "BAD", ok := true }\n]\n')
+
+        self.assertIsNone(m.trace_ids_for_op(trace_text, "parse_tx"))
+
     def test_required_trace_bindings_fail_closed(self) -> None:
         trace_text = '''
 def parseOuts : List ParseOut := [
