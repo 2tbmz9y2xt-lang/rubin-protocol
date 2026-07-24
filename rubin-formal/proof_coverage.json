@@ -163,7 +163,7 @@
       "tests/test_strip_lean_comments.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"5ec65a9f9dec186017230df464355492ad930143955d3ed9afffd71e0fdc6017","candidate_sha256":"f7076c904203aa4417322cd961c0ce8402ea631b09732aed15230b15dc9b3ab3"},
       "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8ce69c12f3b713f960bed3c04f2f5e400c08b7e6f1896d5e68a1c2ebf8d8b93f"},
       "tools/LOCAL_CODEX_EXEC_REVIEW.md": {"disposition":"BYTE_EXACT","source_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5","candidate_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5"},
-      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"f8908a65c976e7cf8b7365a08e6f1a14beb0930b872bfeb8f451f25fc52f9ab7"}
+      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"1a1c7633ce3e86e98b70a0bd461d9d64b796ebbbf6f8de027c54fd8cd2a2653e"}
     }
   },
   "coverage": [
@@ -440,7 +440,7 @@
     {
       "section_key": "witness_commitment",
       "section_heading": "### 10.4.1 Witness Commitment (Coinbase Anchor)",
-      "status": "proved",
+      "status": "stated",
       "proof_trust": "compiler_trusted",
       "theorems": [
         "RubinFormal.WitnessCommitmentV1.witnessMerkleRootWtxids_rewrites_coinbase_slot",
@@ -453,12 +453,13 @@
         "RubinFormal.WitnessCommitmentV1.validateBlockBasic_witness_stage": "rubin-formal/RubinFormal/WitnessCommitmentV1.lean",
         "RubinFormal.Conformance.cv_block_basic_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVBlockBasicReplay.lean"
       },
-      "notes": "Active evidence is limited to the canonical executable `checkWitnessCommitment` stage reduction after parse/pow/target/linkage/merkle gates, the coinbase-slot rewrite, and CV-BLOCK-BASIC replay. Legacy single-anchor source theorems remain unregistered experimental material: they do not establish the exact-one matching-anchor criterion. The merkle-tag anti-alias SHA3 ceiling is tracked separately in `witness_commitment_crypto_residual`.",
+      "notes": "Active evidence is limited to the canonical executable `checkWitnessCommitment` stage reduction after parse/pow/target/linkage/merkle gates, the coinbase-slot rewrite, and CV-BLOCK-BASIC replay. No registered theorem establishes the exact-one matching-anchor fallback criterion. The merkle-tag anti-alias SHA3 ceiling is tracked separately in `witness_commitment_crypto_residual`.",
       "limitations": [
-        "Executable replay remains complementary evidence for concrete fixture coverage and regression checking.",
+        "Executable stage and fixture evidence do not prove the exact-one matching-anchor fallback criterion.",
+        "A formal re-proof of that criterion is deferred under RUB-1033.",
         "Cross-domain txid/wtxid tagged-root anti-aliasing is not claimed in this row and is tracked separately in `witness_commitment_crypto_residual`."
       ],
-      "evidence_level": "machine_checked_universal"
+      "evidence_level": "machine_checked_contract"
     },
     {
       "section_key": "witness_commitment_crypto_residual",
@@ -474,7 +475,7 @@
         "RubinFormal.Merkle.merkle_tag_equivalence_leaf_collision_reduces_to_sha3_collision": "rubin-formal/RubinFormal/MerkleStructure.lean",
         "RubinFormal.Merkle.merkle_tag_equivalence_node_collision_reduces_to_sha3_collision": "rubin-formal/RubinFormal/MerkleStructure.lean"
       },
-      "notes": "Dedicated assumption-backed residual for the witness-commitment anti-alias boundary. The counted merkle-tag reduction theorems show that any cross-domain root equality between txid tags (0x00/0x01) and witness-merkle tags (0x02/0x03) would require a SHA3-256 collision on distinct tagged preimages. This row intentionally carries only that crypto ceiling and does not re-count the live witness-commitment semantics already owned by the universal `witness_commitment` row.",
+      "notes": "Dedicated assumption-backed residual for the witness-commitment anti-alias boundary. The counted merkle-tag reduction theorems show that any cross-domain root equality between txid tags (0x00/0x01) and witness-merkle tags (0x02/0x03) would require a SHA3-256 collision on distinct tagged preimages. This row intentionally carries only that crypto ceiling and does not re-count the separately scoped `witness_commitment` row.",
       "limitations": [
         "Ruling out txid/wtxid tagged-root aliasing remains assumption-backed: the row reduces any such equality to a SHA3-256 collision obligation on distinct tagged preimages.",
         "The merkle-tag theorems are reduction theorems (equality implies a SHA3 collision on distinct tagged preimages), not an axiom-free cryptographic impossibility proof."
@@ -527,6 +528,27 @@
         "DA kinds lack an active Lean live bridge; no live Go/Rust DigestV1 or full-protocol residual claim is registered."
       ],
       "evidence_level": "machine_checked_universal"
+    },
+    {
+      "section_key": "sighash_v1_crypto_residual",
+      "section_heading": "## Sighash v1 Crypto Residual",
+      "status": "proved_with_axiom",
+      "proof_trust": "kernel_checked",
+      "theorems": [
+        "RubinFormal.digestV1_ok_eq_sha3_preimage",
+        "RubinFormal.digestV1_output_collision_reduces_to_sha3_collision"
+      ],
+      "file": "rubin-formal/RubinFormal/SighashAssumptionBridge.lean",
+      "theorem_files": {
+        "RubinFormal.digestV1_ok_eq_sha3_preimage": "rubin-formal/RubinFormal/SighashAssumptionBridge.lean",
+        "RubinFormal.digestV1_output_collision_reduces_to_sha3_collision": "rubin-formal/RubinFormal/SighashAssumptionBridge.lean"
+      },
+      "notes": "Assumption-backed digest ceiling: the registered theorems reduce successful `digestV1` output equality and an output collision to SHA3-256 preimage/collision obligations. They do not establish cryptographic collision impossibility.",
+      "limitations": [
+        "These are reduction theorems under the SHA3-256 cryptographic ceiling, not an axiom-free proof that collisions cannot occur.",
+        "This residual does not expand the bounded SIGHASH trace contract into a live Go/Rust implementation-equivalence claim."
+      ],
+      "evidence_level": "machine_checked_assumption_backed"
     },
     {
       "section_key": "consensus_error_codes",
@@ -1016,7 +1038,6 @@
       "status": "proved",
       "proof_trust": "compiler_trusted",
       "theorems": [
-        "RubinFormal.Conformance.cv_utxo_basic_vectors_pass",
         "RubinFormal.UtxoBasicV1.validateCoinbaseMaturity_reject_iff",
         "RubinFormal.Conformance.vault_policy_default_order_safe_proved",
         "RubinFormal.UtxoApplyGenesisV1.creation_owner_auth_p2pk_or_multisig",
@@ -1114,7 +1135,6 @@
         "RubinFormal.addCoinbaseOutputsList_single_spendable_found": "rubin-formal/RubinFormal/CoinbaseBehavioral.lean",
         "RubinFormal.listFind?_inserts_all_other": "rubin-formal/RubinFormal/CoinbaseBehavioral.lean",
         "RubinFormal.listFind?_foldl_finds_head": "rubin-formal/RubinFormal/CoinbaseBehavioral.lean",
-        "RubinFormal.Conformance.cv_utxo_basic_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVUtxoBasicReplay.lean",
         "RubinFormal.coinbase_outpoint_beq_derived": "rubin-formal/RubinFormal/CoinbaseBehavioral.lean",
         "RubinFormal.cmpOutpoint_le_trans": "rubin-formal/RubinFormal/UtxoMapProperties.lean",
         "RubinFormal.rbmap_find_insert_self": "rubin-formal/RubinFormal/UtxoMapProperties.lean",
@@ -1166,7 +1186,6 @@
       "status": "proved",
       "proof_trust": "compiler_trusted",
       "theorems": [
-        "RubinFormal.Conformance.cv_utxo_basic_vectors_pass",
         "RubinFormal.Conformance.cv_subsidy_vectors_pass",
         "RubinFormal.utxo_conservation_theorem",
         "RubinFormal.value_conservation_single_tx",
@@ -1175,14 +1194,13 @@
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
-        "RubinFormal.Conformance.cv_utxo_basic_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVUtxoBasicReplay.lean",
         "RubinFormal.Conformance.cv_subsidy_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVSubsidyReplay.lean",
         "RubinFormal.utxo_conservation_theorem": "rubin-formal/RubinFormal/ConnectBlockStrong.lean",
         "RubinFormal.value_conservation_single_tx": "rubin-formal/RubinFormal/ValueConservationBehavioral.lean",
         "RubinFormal.value_conservation_block_txs": "rubin-formal/RubinFormal/ValueConservationBehavioral.lean",
         "RubinFormal.utxo_apply_basic_universal_refinement": "rubin-formal/RubinFormal/RefinementBridgeV1.lean"
       },
-      "notes": "Universal theorem lane: value conservation at single-tx level (`sum_in = sum_out + fee` via `scanInputs` / `sumOutputs`) and block level (`connectBlockTxs` preserves conservation across all txs), backed by the current `utxo_apply_basic_universal_refinement` bridge on the real UTXO-map model rather than an abstract ledger. Separate fixture lane: CV-UTXO-BASIC and CV-SUBSIDY replay on the shipped vectors. Those executable lanes are complementary regression evidence only and do not replace the universal theorem lane.",
+      "notes": "Universal theorem lane: value conservation at single-tx level (`sum_in = sum_out + fee` via `scanInputs` / `sumOutputs`) and block level (`connectBlockTxs` preserves conservation across all txs), backed by the current `utxo_apply_basic_universal_refinement` bridge on the real UTXO-map model rather than an abstract ledger. Separate fixture lane: CV-SUBSIDY replay on the shipped vectors. That executable lane is complementary regression evidence only and does not replace the universal theorem lane.",
       "evidence_level": "machine_checked_universal"
     },
     {
@@ -1435,29 +1453,21 @@
     {
       "section_key": "block_validation_order",
       "section_heading": "## 25. Block Validation Order (Normative)",
-      "status": "proved",
+      "status": "stated",
       "proof_trust": "kernel_checked",
       "theorems": [
-        "RubinFormal.section25_validation_total_proved",
-        "RubinFormal.SubsidyV1.connectBlock_end_to_end_proved",
-        "RubinFormal.utxo_conservation_theorem",
-        "RubinFormal.no_double_spend_theorem",
-        "RubinFormal.prepareNonCoinbaseTxBasic_utxo_conserved",
-        "RubinFormal.prepareNonCoinbaseTxBasic_inputs_available",
-        "RubinFormal.scanInputs_no_intra_tx_double_spend"
+        "RubinFormal.section25_validation_total_proved"
       ],
-      "file": "rubin-formal/RubinFormal/SubsidyV1.lean",
+      "file": "rubin-formal/RubinFormal/BlockValidationOrder.lean",
       "theorem_files": {
-        "RubinFormal.section25_validation_total_proved": "rubin-formal/RubinFormal/BlockValidationOrder.lean",
-        "RubinFormal.SubsidyV1.connectBlock_end_to_end_proved": "rubin-formal/RubinFormal/SubsidyV1.lean",
-        "RubinFormal.utxo_conservation_theorem": "rubin-formal/RubinFormal/ConnectBlockStrong.lean",
-        "RubinFormal.no_double_spend_theorem": "rubin-formal/RubinFormal/ConnectBlockStrong.lean",
-        "RubinFormal.prepareNonCoinbaseTxBasic_utxo_conserved": "rubin-formal/RubinFormal/ConnectBlockStrong.lean",
-        "RubinFormal.prepareNonCoinbaseTxBasic_inputs_available": "rubin-formal/RubinFormal/ConnectBlockStrong.lean",
-        "RubinFormal.scanInputs_no_intra_tx_double_spend": "rubin-formal/RubinFormal/ConnectBlockStrong.lean"
+        "RubinFormal.section25_validation_total_proved": "rubin-formal/RubinFormal/BlockValidationOrder.lean"
       },
-      "notes": "Section 25 coverage now includes a standalone totality theorem for the BlockValidationOrder model: every input either produces the ordered acceptance witness from section25_order_complete or rejects with an explicit error returned by validateBlockBasic.",
-      "evidence_level": "machine_checked_universal"
+      "notes": "The retained theorem establishes totality for the BlockValidationOrder model: every input produces the model acceptance witness or an error returned by `validateBlockBasic`.",
+      "limitations": [
+        "This model totality theorem does not prove the normative gate order or error-precedence requirements.",
+        "A full order/error-precedence re-proof is deferred under RUB-1033."
+      ],
+      "evidence_level": "machine_checked_model"
     },
     {
       "section_key": "parallel_validation_equivalence",
@@ -1761,22 +1771,20 @@
     }
   ],
   "coverage_summary": {
-    "section_rows": 31,
-    "proved_rows": 28,
-    "proved_with_axiom_rows": 3,
-    "stated_rows": 0,
+    "section_rows": 32,
+    "proved_rows": 26,
+    "proved_with_axiom_rows": 4,
+    "stated_rows": 2,
     "deferred_rows": 0,
-    "theorem_references": 547,
-    "unique_theorem_names": 524,
+    "theorem_references": 541,
+    "unique_theorem_names": 522,
     "reused_theorem_names": [
       "RubinFormal.Conformance.cv_parse_vectors_pass",
       "RubinFormal.Conformance.cv_subsidy_vectors_pass",
-      "RubinFormal.Conformance.cv_utxo_basic_vectors_pass",
       "RubinFormal.Conformance.cv_validation_order_vectors_pass",
       "RubinFormal.NativeRegistryResolution.fi_rot_03_pre_rotation_ml_dsa_resolves",
       "RubinFormal.RegistryResolutionLiveBridge.ml_dsa_87_params_bridge",
       "RubinFormal.RegistryResolutionLiveBridge.pre_rotation_registered_iff",
-      "RubinFormal.SubsidyV1.connectBlock_end_to_end_proved",
       "RubinFormal.UtxoApplyGenesisV1.validateWitnessItemLengths_eq_registry_pre_rotation",
       "RubinFormal.buildTxContext_some",
       "RubinFormal.cov_type_da_commit_value",
@@ -1784,7 +1792,6 @@
       "RubinFormal.mldsa87_empty_sig_rejected_registry_pre_rotation",
       "RubinFormal.mldsa87_sig_too_large_rejected_registry_pre_rotation",
       "RubinFormal.mldsa87_wrong_pubkey_rejected_registry_pre_rotation",
-      "RubinFormal.no_double_spend_theorem",
       "RubinFormal.sentinel_empty_accepted_registry_pre_rotation",
       "RubinFormal.sentinel_nonempty_rejected_registry_pre_rotation",
       "RubinFormal.subsidy_u128_safety_proved",

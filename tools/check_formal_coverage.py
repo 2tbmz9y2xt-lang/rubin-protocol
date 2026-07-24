@@ -38,9 +38,10 @@ REQUIRED_SECTION_EVIDENCE_LEVELS = {
     "transaction_identifiers": "machine_checked_universal",
     "transaction_identifiers_crypto_residual": "machine_checked_assumption_backed",
     "weight_accounting": "machine_checked_universal",
-    "witness_commitment": "machine_checked_universal",
+    "witness_commitment": "machine_checked_contract",
     "witness_commitment_crypto_residual": "machine_checked_assumption_backed",
     "sighash_v1": "machine_checked_universal",
+    "sighash_v1_crypto_residual": "machine_checked_assumption_backed",
     "consensus_error_codes": "machine_checked_universal",
     "covenant_registry": "machine_checked_model",
     "difficulty_update": "machine_checked_universal",
@@ -52,7 +53,7 @@ REQUIRED_SECTION_EVIDENCE_LEVELS = {
     "da_set_integrity": "machine_checked_universal",
     "block_timestamp_rules": "machine_checked_universal",
     "fork_choice": "machine_checked_universal",
-    "block_validation_order": "machine_checked_universal",
+    "block_validation_order": "machine_checked_model",
     "parallel_validation_equivalence": "machine_checked_universal",
     "txcontext_formal": "machine_checked_universal",
     "native_rotation": "machine_checked_universal",
@@ -78,6 +79,7 @@ EXPECTED_SOURCE_REBIND_SCALARS = {
     "active_partition_equation": "73 + 19 + 1 + 2 + 7 = 102",
     "original_inventory_equation": "102 + 4 + 3 + 7 = 116",
 }
+EXPECTED_SOURCE_MANIFEST_PIN_SHA256 = "62f58d1c3151e98f4252d5bfb570d141c03f64ab4feb070c1328912b6bbf39c1"
 SOURCE_REBIND_COUNT_KEYS = {
     "original_imported_source_paths",
     "active_imported_source_paths",
@@ -339,6 +341,22 @@ def expected_active_source_dispositions() -> dict[str, str]:
     return expected
 
 
+def pinned_source_manifest_digest(source_oid: object, manifest: object) -> str | None:
+    if not isinstance(source_oid, str) or not isinstance(manifest, dict):
+        return None
+    entries: list[str] = []
+    for path in sorted(manifest):
+        record = manifest[path]
+        if not isinstance(path, str) or not isinstance(record, dict):
+            return None
+        source_hash = record.get("source_sha256")
+        if not isinstance(source_hash, str):
+            return None
+        entries.append(f"{path}\0{source_hash}")
+    payload = "\n".join([source_oid, *entries]).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def validate_active_path_manifest(repo_root: Path, doc: dict) -> list[str]:
     source_rebind = doc.get("source_rebind")
     if not isinstance(source_rebind, dict): return []
@@ -346,6 +364,8 @@ def validate_active_path_manifest(repo_root: Path, doc: dict) -> list[str]:
     if not isinstance(manifest, dict): return ["source_rebind.active_path_manifest must be an object"]
     expected = expected_active_source_dispositions()
     errors: list[str] = []
+    if pinned_source_manifest_digest(source_rebind.get("source_oid"), manifest) != EXPECTED_SOURCE_MANIFEST_PIN_SHA256:
+        errors.append("source_rebind.active_path_manifest source digest drift")
     if len(manifest) != 102: errors.append(f"source_rebind.active_path_manifest count drift: expected 102, got {len(manifest)}")
     if set(manifest) != set(expected): errors.append("source_rebind.active_path_manifest key set drift")
     for path, disposition in expected.items():

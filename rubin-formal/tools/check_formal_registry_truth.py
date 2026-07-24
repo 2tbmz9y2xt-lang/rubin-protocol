@@ -32,13 +32,12 @@ SHARED_OP_PARITY = {
     "da_set_integrity": "da_set_integrity",
     "weight_accounting": "weight_accounting",
 }
-EXPECTED_COVERAGE_TRUST = (31, 547, 524, 22, 73, 66)
-EXPECTED_UNIVERSAL_TRUST = (27, 527, 21, 65, 58)
-EXPECTED_KERNEL_THEOREM_COMPLEMENT = (474, 458)
-EXPECTED_BRIDGE_TRUST = (12, 163, 160, 9, 21, 21)
+EXPECTED_COVERAGE_TRUST = (32, 541, 522, 22, 73, 66)
+EXPECTED_UNIVERSAL_TRUST = (25, 515, 20, 64, 57)
+EXPECTED_KERNEL_THEOREM_COMPLEMENT = (468, 456)
+EXPECTED_BRIDGE_TRUST = (12, 165, 162, 9, 21, 21)
 EXPECTED_UNAFFECTED_UNIVERSAL = {
     "consensus_constants_witness_lengths_pre_rotation",
-    "block_validation_order",
     "parallel_validation_equivalence",
     "spend_gate_bridge",
     "create_side_live_gate",

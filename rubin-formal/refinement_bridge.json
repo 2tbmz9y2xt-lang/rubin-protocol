@@ -157,7 +157,7 @@
       "tests/test_strip_lean_comments.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"5ec65a9f9dec186017230df464355492ad930143955d3ed9afffd71e0fdc6017","candidate_sha256":"f7076c904203aa4417322cd961c0ce8402ea631b09732aed15230b15dc9b3ab3"},
       "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8ce69c12f3b713f960bed3c04f2f5e400c08b7e6f1896d5e68a1c2ebf8d8b93f"},
       "tools/LOCAL_CODEX_EXEC_REVIEW.md": {"disposition":"BYTE_EXACT","source_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5","candidate_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5"},
-      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"f8908a65c976e7cf8b7365a08e6f1a14beb0930b872bfeb8f451f25fc52f9ab7"}
+      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"1a1c7633ce3e86e98b70a0bd461d9d64b796ebbbf6f8de027c54fd8cd2a2653e"}
     }
   },
   "critical_ops": [
@@ -191,7 +191,8 @@
       "contract_scope": "Exact bounded native GoTrace check of `sighashOuts.all checkSighash = true` for the listed current sighash_v1 vectors.",
       "limitations": [
         "This exact trace check does not establish a universal theorem for arbitrary raw transaction or witness-carried sighash_type combinations.",
-        "It does not claim live Go/Rust DigestV1 implementation equivalence or a full-protocol residual."
+        "It does not claim live Go/Rust DigestV1 implementation equivalence or a full-protocol residual.",
+        "The DigestV1 preimage/collision ceiling is separately assumption-backed reduction evidence; this bounded trace contract does not prove collision impossibility."
       ],
       "trace_source_file": "rubin-formal/RubinFormal/Refinement/GoTraceV1.lean",
       "traced_vector_ids": [
@@ -202,6 +203,8 @@
         "SIGHASH-05"
       ],
       "supporting_theorems": [
+        "RubinFormal.digestV1_ok_eq_sha3_preimage",
+        "RubinFormal.digestV1_output_collision_reduces_to_sha3_collision",
         "RubinFormal.sighash_v1_proved",
         "RubinFormal.Conformance.cv_sighash_vectors_pass",
         "RubinFormal.SighashV1.buildPreimageFrameParts_injective",
@@ -218,7 +221,7 @@
         "RubinFormal.selectHashOutputs_invalid_returns_none",
         "RubinFormal.hasValidBaseType_exhaustive"
       ],
-      "notes": "The model theorem is the exact current native trace expression; retained supporting theorems provide separate structural selector/base-type evidence."
+      "notes": "The model theorem is the exact current native trace expression; retained supporting theorems provide separate structural selector/base-type evidence and the separately scoped DigestV1 assumption-backed reduction ceiling."
     },
     {
       "op": "retarget_v1",

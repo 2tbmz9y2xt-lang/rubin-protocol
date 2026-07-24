@@ -53,14 +53,13 @@ class FormalRiskMaturityTests(unittest.TestCase):
 
 class SourceRebindTests(unittest.TestCase):
     @staticmethod
-    def active_manifest_doc(root: Path) -> dict:
-        manifest = {}
-        for path, disposition in m.expected_active_source_dispositions().items():
-            candidate = root / "rubin-formal" / path
-            candidate.parent.mkdir(parents=True, exist_ok=True); candidate.write_text(path, encoding="utf-8")
-            candidate_hash = hashlib.sha256(candidate.read_bytes()).hexdigest()
-            manifest[path] = {"disposition": disposition, "source_sha256": candidate_hash if disposition == "BYTE_EXACT" else "0" * 64, "candidate_sha256": candidate_hash}
-        return {"source_rebind": {"active_path_manifest": manifest}}
+    def active_manifest_doc() -> dict:
+        coverage = json.loads(
+            (TOOLS_DIR.parent / "rubin-formal" / "proof_coverage.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        return {"source_rebind": coverage["source_rebind"]}
 
     def test_accepts_exact_manifest(self) -> None:
         self.assertEqual(m.validate_source_rebind(source_rebind_doc()), [])
@@ -77,18 +76,27 @@ class SourceRebindTests(unittest.TestCase):
         self.assertTrue(any("reconcile_current_protocol_path_count does not match" in error for error in errors))
 
     def test_active_manifest_rejects_candidate_and_metadata_drift(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td); doc = self.active_manifest_doc(root)
-            self.assertEqual(m.validate_active_path_manifest(root, doc), [])
-            path = "RubinFormal/BlockHeaderRoundtrip.lean"
-            (root / "rubin-formal" / path).write_text("one-byte-drift", encoding="utf-8")
-            self.assertTrue(any("candidate hash drift" in error for error in m.validate_active_path_manifest(root, doc)))
-            doc = self.active_manifest_doc(root)
-            doc["source_rebind"]["active_path_manifest"][path]["disposition"] = "RECONCILE_CURRENT_PROTOCOL"
-            self.assertTrue(any("disposition drift" in error for error in m.validate_active_path_manifest(root, doc)))
-            doc = self.active_manifest_doc(root)
-            doc["source_rebind"]["active_path_manifest"][path]["candidate_sha256"] = "0" * 64
-            self.assertTrue(any("candidate hash drift" in error for error in m.validate_active_path_manifest(root, doc)))
+        root = TOOLS_DIR.parent
+        doc = self.active_manifest_doc()
+        self.assertEqual(m.validate_active_path_manifest(root, doc), [])
+        path = "RubinFormal/BlockHeaderRoundtrip.lean"
+        doc = self.active_manifest_doc()
+        doc["source_rebind"]["active_path_manifest"][path]["disposition"] = "RECONCILE_CURRENT_PROTOCOL"
+        self.assertTrue(any("disposition drift" in error for error in m.validate_active_path_manifest(root, doc)))
+        doc = self.active_manifest_doc()
+        doc["source_rebind"]["active_path_manifest"][path]["candidate_sha256"] = "0" * 64
+        self.assertTrue(any("candidate hash drift" in error for error in m.validate_active_path_manifest(root, doc)))
+
+    def test_active_manifest_rejects_simultaneous_source_and_candidate_hash_tampering(self) -> None:
+        doc = self.active_manifest_doc()
+        record = doc["source_rebind"]["active_path_manifest"]["RubinFormal/BlockHeaderRoundtrip.lean"]
+        tampered_hash = hashlib.sha256(b"tampered-source-record").hexdigest()
+        record["source_sha256"] = tampered_hash
+        record["candidate_sha256"] = tampered_hash
+
+        errors = m.validate_active_path_manifest(TOOLS_DIR.parent, doc)
+
+        self.assertTrue(any("source digest drift" in error for error in errors))
 
     def test_rejects_partition_arithmetic_drift(self) -> None:
         doc = source_rebind_doc()
