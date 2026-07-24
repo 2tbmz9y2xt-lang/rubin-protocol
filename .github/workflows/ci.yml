@@ -202,7 +202,7 @@ jobs:
           lake env lean --version
           lake build
           python3 -m unittest discover -s tests -p 'test_*.py'
-          python3 tools/check_formal_registry_truth.py
+          python3 -m tools.check_formal_registry_truth
 
       - name: Formal coverage baseline check
         run: python3 tools/check_formal_coverage.py
