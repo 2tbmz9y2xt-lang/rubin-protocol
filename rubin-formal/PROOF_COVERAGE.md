@@ -98,7 +98,7 @@ lifecycle/provenance evidence с pinned external source. Локальные chec
 
 - `proof_coverage.json` сейчас содержит 32 machine-checked registry entries.
 - Status counts: `28` `proved`, `4` `proved_with_axiom`, `0` `stated`, `0` `deferred`.
-- Registry counts: `575` theorem references и `552` unique theorem names.
+- Registry counts: `566` theorem references и `543` unique theorem names.
 - Не все 32 entries равны по силе claims: честная граница определяется `evidence_level` и `limitations`.
 - Extra formal-only theorems не считаются pinned-section coverage,
   если они не внесены отдельной registry entry.

@@ -72,6 +72,15 @@ EXPECTED_SOURCE_REBIND_SCALARS = {
     "active_partition_equation": "79 + 14 + 1 + 1 + 7 = 102",
     "original_inventory_equation": "102 + 7 = 109",
 }
+SOURCE_REBIND_COUNT_KEYS = {
+    "original_imported_source_paths",
+    "active_imported_source_paths",
+    "byte_exact_path_count",
+    "reconcile_current_protocol_path_count",
+    "import_adapt_single_owner_path_count",
+    "transplant_check_logic_path_count",
+    "import_package_check_or_test_path_count",
+}
 EXPECTED_SOURCE_REBIND_PATHS = {
     "reconcile_current_protocol_paths": {
         "RubinFormal/Conformance/CVVaultLifecycleReplay.lean",
@@ -170,8 +179,14 @@ def validate_source_rebind(doc: dict) -> list[str]:
 
     errors: list[str] = []
     for key, expected in EXPECTED_SOURCE_REBIND_SCALARS.items():
-        if source_rebind.get(key) != expected:
-            errors.append(f"source_rebind.{key} drift: expected {expected!r}, got {source_rebind.get(key)!r}")
+        value = source_rebind.get(key)
+        if key in SOURCE_REBIND_COUNT_KEYS and type(value) is not int:
+            errors.append(
+                f"source_rebind.{key} must be an exact integer, got {value!r}"
+            )
+            continue
+        if value != expected:
+            errors.append(f"source_rebind.{key} drift: expected {expected!r}, got {value!r}")
 
     for key, expected_paths in EXPECTED_SOURCE_REBIND_PATHS.items():
         value = source_rebind.get(key)
@@ -185,10 +200,11 @@ def validate_source_rebind(doc: dict) -> list[str]:
                 f"source_rebind.{key} set drift: expected {sorted(expected_paths)!r}, got {sorted(set(value))!r}"
             )
         count_key = SOURCE_REBIND_LIST_COUNTS.get(key)
-        if count_key is not None and source_rebind.get(count_key) != len(value):
+        count_value = source_rebind.get(count_key) if count_key is not None else None
+        if count_key is not None and type(count_value) is int and count_value != len(value):
             errors.append(
                 f"source_rebind.{count_key} does not match {key} length: "
-                f"{source_rebind.get(count_key)!r} != {len(value)}"
+                f"{count_value!r} != {len(value)}"
             )
 
     active_parts = (
@@ -198,7 +214,7 @@ def validate_source_rebind(doc: dict) -> list[str]:
         source_rebind.get("transplant_check_logic_path_count"),
         source_rebind.get("import_package_check_or_test_path_count"),
     )
-    if all(isinstance(value, int) and not isinstance(value, bool) for value in active_parts):
+    if all(type(value) is int for value in active_parts):
         active_total = sum(active_parts)
         if active_total != source_rebind.get("active_imported_source_paths"):
             errors.append(
@@ -209,14 +225,15 @@ def validate_source_rebind(doc: dict) -> list[str]:
 
     excluded_paths = source_rebind.get("excluded_stale_source_paths")
     if isinstance(excluded_paths, list):
-        original_total = source_rebind.get("active_imported_source_paths")
-        if isinstance(original_total, int) and not isinstance(original_total, bool):
-            rebound_total = original_total + len(excluded_paths)
-            if rebound_total != source_rebind.get("original_imported_source_paths"):
+        active_total = source_rebind.get("active_imported_source_paths")
+        original_total = source_rebind.get("original_imported_source_paths")
+        if type(active_total) is int and type(original_total) is int:
+            rebound_total = active_total + len(excluded_paths)
+            if rebound_total != original_total:
                 errors.append(
                     "source_rebind original inventory drift: "
-                    f"{original_total} + {len(excluded_paths)} = {rebound_total}, "
-                    f"original_imported_source_paths={source_rebind.get('original_imported_source_paths')!r}"
+                    f"{active_total} + {len(excluded_paths)} = {rebound_total}, "
+                    f"original_imported_source_paths={original_total!r}"
                 )
     return errors
 

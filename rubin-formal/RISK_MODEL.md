@@ -141,7 +141,7 @@ routing и не является новым formal evidence. RUB-959 section-has
 - `1` model-level entry;
 - `0` stated rows;
 - `0` deferred rows.
-- `575` theorem references и `552` unique theorem names.
+- `566` theorem references и `543` unique theorem names.
 
 Это сильнее старого bootstrap narrative, но всё ещё не даёт права заявлять universal proof of full CANONICAL semantics.
 

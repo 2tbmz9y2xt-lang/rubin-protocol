@@ -219,6 +219,67 @@ class CollectRegistryErrorsTests(unittest.TestCase):
             self.assertGreater(len(theorem_errors), 0)
             self.assertIn("nonexistent", theorem_errors[0])
 
+    def test_private_theorem_cannot_satisfy_registry_reference(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lean_dir = root / "RubinFormal"
+            lean_dir.mkdir()
+            sample = lean_dir / "Foo.lean"
+            sample.write_text(
+                "namespace RubinFormal.Foo\n"
+                "private theorem hidden : True := by trivial\n"
+                "end RubinFormal.Foo",
+                encoding="utf-8",
+            )
+            lake_dir = root / ".lake" / "build" / "lib" / "RubinFormal"
+            lake_dir.mkdir(parents=True)
+            (lake_dir / "Foo.olean").write_text("")
+
+            path = "rubin-formal/RubinFormal/Foo.lean"
+            coverage = {
+                "coverage": [
+                    {
+                        "section_key": "test_section",
+                        "file": path,
+                        "theorems": ["RubinFormal.Foo.hidden"],
+                        "theorem_files": {"RubinFormal.Foo.hidden": path},
+                    }
+                ]
+            }
+            bridge = {"critical_ops": []}
+            ea, eif = theorem_lookups(root, [sample])
+
+            _, _, _, errors = collect_registry_errors(root, coverage, bridge, ea, eif)
+
+            self.assertTrue(
+                any("RubinFormal.Foo.hidden" in error for error in errors),
+                errors,
+            )
+
+    def test_registry_path_traversal_is_rejected(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lean_dir = root / "RubinFormal"
+            lean_dir.mkdir()
+            sample = lean_dir / "Safe.lean"
+            sample.write_text(
+                "namespace RubinFormal.Safe\n"
+                "theorem kept : True := by trivial\n"
+                "end RubinFormal.Safe",
+                encoding="utf-8",
+            )
+            traversal = "rubin-formal/RubinFormal/../../outside.lean"
+            coverage = {"coverage": [{"file": traversal}]}
+            bridge = {"critical_ops": []}
+            ea, eif = theorem_lookups(root, [sample])
+
+            _, _, _, errors = collect_registry_errors(root, coverage, bridge, ea, eif)
+
+            self.assertIn(
+                f"unsupported non-repo path in registry: {traversal}",
+                errors,
+            )
+
     def test_returns_registered_paths(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

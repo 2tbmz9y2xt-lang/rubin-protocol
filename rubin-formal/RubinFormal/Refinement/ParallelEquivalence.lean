@@ -140,8 +140,8 @@ theorem validatePar_eq_validateParLive
     validatePar precheck verify txs = validateParLive precheck verify txs := by
   simp [validatePar, validateParLive, reducePar_eq_flushAccepts]
 
-/-- Accept/Reject equivalence: sequential and parallel validation produce
-    the same verdict for any block. -/
+/-- Model-level accept/reject equivalence under one identical precheck result
+    and signature-task list. -/
 theorem accept_reject_equivalence (precheck : List α → Option (List SigTask × Nat))
     (verify : SigTask → Bool) (txs : List α) :
     validateSeq precheck verify txs = validatePar precheck verify txs := by
@@ -153,9 +153,10 @@ theorem accept_reject_equivalence (precheck : List α → Option (List SigTask �
     simp only
     rw [reducer_equivalence]
 
-/-- Sequential validation agrees with the live parallel queue contract on
-    accept/reject. This is the counted bridge theorem for the actual Go helper
-    surface, not a claim about exact surfaced error-index parity. -/
+/-- Under one identical precheck result and signature-task list, sequential
+    reduction agrees with the live parallel queue contract on accept/reject.
+    This is the counted bridge theorem for the actual Go helper surface, not a
+    claim about end-to-end block equality or exact surfaced error-index parity. -/
 theorem accept_reject_equivalence_live
     (precheck : List α → Option (List SigTask × Nat))
     (verify : SigTask → Bool) (txs : List α) :

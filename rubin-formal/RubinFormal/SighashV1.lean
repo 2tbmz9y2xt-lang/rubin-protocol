@@ -153,54 +153,11 @@ def SIGHASH_ALL_ANYONECANPAY : UInt8 := 0x81
 def SIGHASH_NONE_ANYONECANPAY : UInt8 := 0x82
 def SIGHASH_SINGLE_ANYONECANPAY : UInt8 := 0x83
 
-/-- TxContext pre-activation gate: valid base types are ALL/NONE/SINGLE only. -/
+/-- Current sighash structural classifier: valid base types are
+    ALL/NONE/SINGLE only. -/
 def hasValidBaseType (sighashType : UInt8) : Bool :=
   let baseType := sighashType.toNat &&& 0x7F
   baseType == 1 || baseType == 2 || baseType == 3
-
-private def bitSetNat (mask bit : Nat) : Bool :=
-  (mask &&& bit) == bit
-
-/-- Live CORE_EXT txcontext sighash policy gate.
-    Mirrors the Go/Rust base-type + ACP allowlist logic. -/
-def checkSighashPolicy (allowedSet sighashType : UInt8) : Bool :=
-  let st := sighashType.toNat
-  let baseType := st &&& 0x7F
-  let hasAcp := (st &&& 0x80) != 0
-  let allowed := allowedSet.toNat
-  let baseAllowed :=
-    (baseType == 1 && bitSetNat allowed 0x01) ||
-    (baseType == 2 && bitSetNat allowed 0x02) ||
-    (baseType == 3 && bitSetNat allowed 0x04)
-  hasValidBaseType sighashType && baseAllowed && (!hasAcp || bitSetNat allowed 0x80)
-
-private def sighashAllowlistOracle (allowedSet : UInt8) : List Nat :=
-  let allowed := allowedSet.toNat
-  let a1 := if bitSetNat allowed 0x01 then [0x01] else []
-  let a2 := if bitSetNat allowed 0x02 then [0x02] else []
-  let a3 := if bitSetNat allowed 0x04 then [0x03] else []
-  let acp1 := if bitSetNat allowed 0x81 then [0x81] else []
-  let acp2 := if bitSetNat allowed 0x82 then [0x82] else []
-  let acp3 := if bitSetNat allowed 0x84 then [0x83] else []
-  a1 ++ a2 ++ a3 ++ acp1 ++ acp2 ++ acp3
-
-private def checkSighashPolicySpec (allowedSet sighashType : UInt8) : Bool :=
-  decide (sighashType.toNat ∈ sighashAllowlistOracle allowedSet)
-
-/-- Exhaustive 256×256 closure for the live txcontext sighash gate. -/
-theorem checkSighashPolicy_exhaustive_256x256 :
-    ∀ (allowedSet sighashType : Fin 256),
-      checkSighashPolicy (UInt8.ofNat allowedSet.val) (UInt8.ofNat sighashType.val) =
-      checkSighashPolicySpec (UInt8.ofNat allowedSet.val) (UInt8.ofNat sighashType.val) := by
-  native_decide
-
-/-- Invalid base types are rejected on the live txcontext sighash gate. -/
-theorem checkSighashPolicy_invalid_base_rejected :
-    ∀ (allowedSet : Fin 256),
-      checkSighashPolicy (UInt8.ofNat allowedSet.val) 0x00 = false ∧
-      checkSighashPolicy (UInt8.ofNat allowedSet.val) 0x04 = false ∧
-      checkSighashPolicy (UInt8.ofNat allowedSet.val) 0x80 = false := by
-  native_decide
 
 def selectHashPrevouts (sighashType : UInt8) (allInputs currentInput : Bytes) : Option Bytes :=
   if _ : sighashType = SIGHASH_ALL_ANYONECANPAY then

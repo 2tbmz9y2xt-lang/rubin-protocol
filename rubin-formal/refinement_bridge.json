@@ -84,7 +84,7 @@
       "evidence_level": "machine_checked_universal",
       "spec_section": "§12",
       "go_function": "DigestV1",
-      "contract_scope": "Universal theorem surface for live sighash selection and the TXCTX allowed_sighash_set gates, with CV-SIGHASH replay as complementary evidence. This row covers the structural selector/TXCTX gate surface only; the digest collision ceiling is tracked separately.",
+      "contract_scope": "Universal theorem surface for current sighash structural selection and base-type classification, with CV-SIGHASH replay as complementary evidence. The retired CORE_EXT/CV-TXCTX allowlist policy is excluded; the digest collision ceiling is tracked separately.",
       "limitations": [
         "The executable replay covers the current CV-SIGHASH fixture set and remains complementary evidence, not a universal proof for arbitrary raw transaction / witness-carried sighash_type combinations outside the named theorem surface.",
         "This row does not claim the SHA3 collision-resistance ceiling for equal live digestV1 outputs on distinct executable preimages; that residual is tracked separately in `sighash_v1_digest_collision_residual`."
@@ -104,16 +104,9 @@
         "RubinFormal.selectHashPrevouts_invalid_returns_none",
         "RubinFormal.selectHashSequences_invalid_returns_none",
         "RubinFormal.selectHashOutputs_invalid_returns_none",
-        "RubinFormal.hasValidBaseType_exhaustive",
-        "RubinFormal.validateTxContextSighashGate_ok_iff",
-        "RubinFormal.validateTxContextSighashGate_invalid_base_rejects",
-        "RubinFormal.validateTxContextSighashGate_disallowed_rejects",
-        "RubinFormal.validateTxContextSighashWitness_ok_iff",
-        "RubinFormal.validateTxContextSighashWitness_empty_signature_rejects",
-        "RubinFormal.validateTxContextSighashWitness_invalid_base_rejects",
-        "RubinFormal.validateTxContextSighashWitness_disallowed_rejects"
+        "RubinFormal.hasValidBaseType_exhaustive"
       ],
-      "notes": "Universal bridge for the live selector/TXCTX gate surface after splitting the assumption-backed digest-collision theorem into its own residual row. This row remains honest about residual raw-tx/preimage distinctness gaps and does not overclaim universal tx-level digest equivalence."
+      "notes": "Universal bridge for the current structural selector/base-type surface after splitting the assumption-backed digest-collision theorem into its own residual row. This row remains honest about residual raw-tx/preimage distinctness gaps and does not overclaim universal tx-level digest equivalence."
     },
     {
       "op": "sighash_v1_digest_collision_residual",
@@ -126,13 +119,13 @@
       "go_function": "DigestV1",
       "contract_scope": "Explicit reduction theorem for the remaining live digestV1 crypto ceiling: equal live digestV1 outputs on distinct executable preimages would require a SHA3-256 collision.",
       "limitations": [
-        "This row is intentionally residual only. It does not re-count the structural selector/TXCTX allowlist gate surface already carried by `sighash_v1`.",
+        "This row is intentionally residual only. It does not re-count the structural selector/base-type surface already carried by `sighash_v1`.",
         "The theorem is a reduction theorem, not an axiom-free impossibility proof: ruling out equal digests on distinct executable preimages still depends on SHA3-256 collision resistance."
       ],
       "supporting_theorems": [
         "RubinFormal.digestV1_output_collision_reduces_to_sha3_collision"
       ],
-      "notes": "Dedicated assumption-backed residual for the live digestV1 crypto boundary after the universal split of the selector/TXCTX gate lane."
+      "notes": "Dedicated assumption-backed residual for the live digestV1 crypto boundary after the universal split of the structural selector/base-type lane."
     },
     {
       "op": "retarget_v1",
@@ -286,26 +279,19 @@
     },
     {
       "op": "parallel_validation_equivalence",
-      "model_theorem": "RubinFormal.connectBlockFullComputed_eq_connectBlockFull",
-      "lean_file": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
-      "theorem_file": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
+      "model_theorem": "RubinFormal.Refinement.ParallelEquivalence.accept_reject_equivalence_live",
+      "lean_file": "rubin-formal/RubinFormal/Refinement/ParallelEquivalence.lean",
+      "theorem_file": "rubin-formal/RubinFormal/Refinement/ParallelEquivalence.lean",
       "evidence_level": "machine_checked_universal",
-      "spec_section": "§18/§14/§19",
-      "go_function": "connect_block_parallel.go::BuildTxContext / ConnectBlockParallelSigVerify",
-      "contract_scope": "Universal closure of the shared validated sequential-versus-parallel block-connection surface. The row counts both the live queue accept/reject bridge in ParallelEquivalence.lean and the exact full block-pipeline equality between connectBlockFullComputed (computed TxContext path) and connectBlockFull (aggregate compatibility wrapper). The some-path equality is exact once the live TxContext continuing-count and sighash-witness gates accept; the none-path equality is unconditional.",
+      "spec_section": "Q-PV-19",
+      "go_function": "connect_block_parallel.go::SigCheckQueue.Flush",
+      "contract_scope": "Universal helper-level accept/reject equivalence: given one identical precheck result and signature-task list, sequential reduction and the live SigCheckQueue.Flush accept/reject contract return the same verdict.",
       "limitations": [
-        "Malformed TxContext-input bundles that fail validateTxContextContinuingCounts or validateTxContextSighashWitness are intentionally tracked by the live §14 TxContext gate closure, not duplicated here as extra sequential↔parallel equivalence claims.",
+        "No theorem composes this helper result with `connectBlockFullComputed*` into end-to-end sequential-versus-parallel block equality. Those ConnectBlockFull equalities are independent TxContext wrapper facts.",
         "Auxiliary tagged-result lowest-index helper theorems are excluded from this bridge because the live queue promises deterministic submission-order surfacing under early abort, not a universal absolute-lowest-failing-index contract."
       ],
-      "supporting_theorems": [
-        "RubinFormal.Refinement.ParallelEquivalence.accept_reject_equivalence_live",
-        "RubinFormal.connectBlockFullComputed_eq_connectBlockFull",
-        "RubinFormal.connectBlockFullComputed_none_eq",
-        "RubinFormal.connectBlockFullComputed_ok_implies_txctx_gates",
-        "RubinFormal.buildTxContextLive_eq_fromValues",
-        "RubinFormal.buildTxContextLive_eq_buildTxContext"
-      ],
-      "notes": "The previous behavioral ceiling came from counting only the queue reducer contract. The bridge now rests on the live queue accept/reject theorem plus the exact ConnectBlockFull computed-path equalities in ConnectBlockFull.lean; lower-level reducer algebra remains internal helper math rather than counted bridge surface. This upgrades the row honestly to universal without claiming malformed-TxContext equivalence or lowest-index error surfacing."
+      "supporting_theorems": [],
+      "notes": "The row is intentionally limited to the existing live queue helper theorem. ConnectBlockFull computed/wrapper equalities remain valid independent facts but are not parallel-composition evidence."
     },
     {
       "op": "weight_accounting",
@@ -366,9 +352,11 @@
       "evidence_level": "machine_checked_universal",
       "spec_section": "§23",
       "go_function": "FeatureBitStateAtHeightFromWindowCounts",
-      "contract_scope": "Universal closure of §23 feature activation FSM / prechecked state-only state-at-height fold surface. featurebit_state_at_height_from_window_counts_state_eq_fold bridges the live multi-boundary state helper to the fold-based FSM model once the same sufficient window_signal_counts prefix guard enforced by Go/Rust has passed, and featurebit_state_at_height_from_window_counts_state_monotone lifts multi_step_monotone onto that reachable live height path.",
-      "notes": "Universal closure of the §23 feature activation FSM state surface on the reachable prechecked state-at-height fold path. The Go/Rust helper's out-of-range error branch remains outside this row's scoped state-only bridge; existing single-step transition and flagday theorems remain complementary support.",
-      "limitations": [],
+      "contract_scope": "Universal closure of §23 feature activation FSM / prechecked state-only state-at-height fold surface. featurebit_state_at_height_from_window_counts_state_eq_fold bridges the live multi-boundary state helper to the fold-based FSM model after deployment validation (`startHeight ≤ timeoutHeight`) and the sufficient window_signal_counts prefix guard, and featurebit_state_at_height_from_window_counts_state_monotone lifts multi_step_monotone onto that reachable live height path.",
+      "notes": "Universal closure of the §23 feature activation FSM state surface on the reachable prechecked state-at-height fold path. Existing single-step transition and flagday theorems remain complementary support.",
+      "limitations": [
+        "The state-only bridge applies only after live deployment validation (`startHeight ≤ timeoutHeight`) and sufficient window_signal_counts. Invalid deployments and the helper's count-prefix error branch reject before the modeled fold."
+      ],
       "supporting_theorems": [
         "RubinFormal.active_terminal",
         "RubinFormal.failed_terminal",

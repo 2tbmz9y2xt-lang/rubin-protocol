@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import io
+import json
 import sys
 import tempfile
 import unittest
+import unittest.mock as mock
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -10,6 +13,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 import check_formal_coverage as m  # noqa: E402
+import check_formal_refinement_bridge as bridge_checker  # noqa: E402
 
 
 def source_rebind_doc() -> dict:
@@ -40,6 +44,74 @@ class SourceRebindTests(unittest.TestCase):
 
         self.assertTrue(any("byte_exact_path_count drift" in error for error in errors))
         self.assertTrue(any("active partition drift" in error for error in errors))
+
+    def test_rejects_boolean_for_every_numeric_count(self) -> None:
+        for key in sorted(m.SOURCE_REBIND_COUNT_KEYS):
+            with self.subTest(key=key):
+                doc = source_rebind_doc()
+                doc["source_rebind"][key] = True
+
+                errors = m.validate_source_rebind(doc)
+
+                self.assertIn(
+                    f"source_rebind.{key} must be an exact integer, got True",
+                    errors,
+                )
+
+    def test_both_entrypoints_reject_boolean_count_positions(self) -> None:
+        keys = (
+            "import_adapt_single_owner_path_count",
+            "transplant_check_logic_path_count",
+            "original_imported_source_paths",
+            "byte_exact_path_count",
+        )
+        entrypoints = (
+            (m, "check_formal_coverage.py"),
+            (bridge_checker, "check_formal_refinement_bridge.py"),
+        )
+        for module, filename in entrypoints:
+            for key in keys:
+                with self.subTest(entrypoint=filename, key=key):
+                    with tempfile.TemporaryDirectory() as td:
+                        root = Path(td)
+                        (root / "tools").mkdir()
+                        (root / "conformance" / "fixtures").mkdir(parents=True)
+                        (root / "conformance" / "MATRIX.md").write_text(
+                            "# matrix\n",
+                            encoding="utf-8",
+                        )
+                        conformance = (
+                            root / "rubin-formal" / "RubinFormal" / "Conformance"
+                        )
+                        conformance.mkdir(parents=True)
+                        (conformance / "Index.lean").write_text(
+                            "-- fixture\n",
+                            encoding="utf-8",
+                        )
+                        doc = source_rebind_doc()
+                        doc["source_rebind"][key] = True
+                        payload = json.dumps(doc)
+                        (root / "rubin-formal" / "proof_coverage.json").write_text(
+                            payload,
+                            encoding="utf-8",
+                        )
+                        (root / "rubin-formal" / "refinement_bridge.json").write_text(
+                            payload,
+                            encoding="utf-8",
+                        )
+                        stderr = io.StringIO()
+                        fake_file = root / "tools" / filename
+                        with (
+                            mock.patch.object(module, "__file__", str(fake_file)),
+                            mock.patch("sys.stderr", stderr),
+                        ):
+                            result = module.main()
+
+                    self.assertEqual(result, 1)
+                    self.assertIn(
+                        f"source_rebind.{key} must be an exact integer",
+                        stderr.getvalue(),
+                    )
 
 
 class FormalCoverageSummaryTests(unittest.TestCase):

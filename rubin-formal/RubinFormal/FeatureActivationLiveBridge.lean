@@ -38,6 +38,11 @@ def featureBitHasSufficientWindowSignalCounts
     (height : Nat) (windowSignalCounts : List Nat) : Prop :=
   featureBitTargetBoundaryIndex height ≤ windowSignalCounts.length
 
+/-- The representable descriptor-ordering guard enforced by the live Go helper
+    before it admits a deployment to the state-at-height fold. -/
+def featureBitDeploymentValid (d : FeatureBitDeployment) : Prop :=
+  d.startHeight ≤ d.timeoutHeight
+
 /-! ## §0 Multi-boundary live fold bridge
 
 Go `FeatureBitStateAtHeightFromWindowCounts` and Rust
@@ -95,13 +100,15 @@ private theorem featureBitStateAtBoundaryIndexLoop_eq_fold
       simp [featureBitStateAtBoundaryIndexLoop, featureBitBoundaryWindows, ih,
         List.foldl_append]
 
-/-- BRIDGE: once the Go/Rust helper's sufficient-prefix guard has passed, the
-    live multi-boundary state loop is extensionally equal to the fold-based FSM
-    model used by `multi_step_monotone`. This closes the remaining
+/-- BRIDGE: once deployment validation and the Go/Rust helper's
+    sufficient-prefix guard have passed, the live multi-boundary state loop is
+    extensionally equal to the fold-based FSM model used by
+    `multi_step_monotone`. This closes the remaining
     `FeatureBitStateAtHeightFromWindowCounts` fold gap for the reachable
     state-only §23 path. -/
 theorem featurebit_state_at_height_from_window_counts_state_eq_fold
     (d : FeatureBitDeployment) (height : Nat) (windowSignalCounts : List Nat)
+    (_hDeployment : featureBitDeploymentValid d)
     (_hCounts : featureBitHasSufficientWindowSignalCounts height windowSignalCounts) :
     featureBitStateAtHeightFromWindowCountsState d height windowSignalCounts =
       (featureBitBoundaryWindows
@@ -323,18 +330,20 @@ theorem min_three_steps_to_active
   · exact (defined_to_started_iff bh1 cnt1 d).mp hStep1
   · exact (started_to_lockedin_iff bh2 cnt2 d).mp hStep2
 
-/-- LIVE: after the Go/Rust helper has admitted a sufficient signal-count
-    prefix, the state produced by the height-based multi-boundary fold is
-    monotone in the canonical FSM order. This is the live counterpart of
-    `multi_step_monotone` on the reachable state-only helper path. -/
+/-- LIVE: after the Go/Rust helper has validated the deployment and admitted a
+    sufficient signal-count prefix, the state produced by the height-based
+    multi-boundary fold is monotone in the canonical FSM order. This is the
+    live counterpart of `multi_step_monotone` on the reachable state-only
+    helper path. -/
 theorem featurebit_state_at_height_from_window_counts_state_monotone
     (d : FeatureBitDeployment) (height : Nat) (windowSignalCounts : List Nat)
+    (hDeployment : featureBitDeploymentValid d)
     (hCounts : featureBitHasSufficientWindowSignalCounts height windowSignalCounts) :
     featureBitStateOrd .defined ≤
       featureBitStateOrd
         (featureBitStateAtHeightFromWindowCountsState d height windowSignalCounts) := by
   rw [featurebit_state_at_height_from_window_counts_state_eq_fold
-    d height windowSignalCounts hCounts]
+    d height windowSignalCounts hDeployment hCounts]
   exact multi_step_monotone d .defined
     (featureBitBoundaryWindows
       (featureBitTargetBoundaryIndex height)

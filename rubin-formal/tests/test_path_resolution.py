@@ -43,6 +43,32 @@ class LeanRepoPathTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 lean_repo_path(root, "RubinFormal/Foo.lean")
 
+    def test_parent_traversal_escapes_source_root(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(ValueError) as ctx:
+                lean_repo_path(
+                    root,
+                    "rubin-formal/RubinFormal/../../outside.lean",
+                )
+            self.assertIn("escapes RubinFormal source root", str(ctx.exception))
+
+    def test_symlink_escape_raises(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_root = root / "RubinFormal"
+            source_root.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            (source_root / "Linked").symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaises(ValueError) as ctx:
+                lean_repo_path(
+                    root,
+                    "rubin-formal/RubinFormal/Linked/Foo.lean",
+                )
+            self.assertIn("escapes RubinFormal source root", str(ctx.exception))
+
 
 class TryLeanRepoPathTests(unittest.TestCase):
     def test_valid_path_returns_path(self) -> None:
@@ -94,6 +120,16 @@ class OleanPathTests(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 olean_path(root, "rubin-formal/RubinFormal/Foo.py")
             self.assertIn("outside RubinFormal build graph", str(ctx.exception))
+
+    def test_parent_traversal_cannot_derive_olean(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(ValueError) as ctx:
+                olean_path(
+                    root,
+                    "rubin-formal/RubinFormal/../../outside.lean",
+                )
+            self.assertIn("escapes RubinFormal source root", str(ctx.exception))
 
 
 class RelRepoPathTests(unittest.TestCase):

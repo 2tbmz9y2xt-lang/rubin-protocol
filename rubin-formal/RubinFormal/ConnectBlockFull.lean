@@ -1,7 +1,6 @@
 import RubinFormal.ConnectBlockStrong
 import RubinFormal.CoinbaseBehavioral
 import RubinFormal.TxContextBehavioral
-import RubinFormal.SighashV1
 
 /-!
 # Full Block Connection with Coinbase + TxContext (§18/§19/§14)
@@ -33,22 +32,12 @@ structure TxContextInputData where
   outputValues : List Nat
   activeExtIds : List Nat
   continuingData : List (Nat × TxContextContinuing)
-  allowedSighashSet : UInt8
-  sighashWitness : WitnessItem
 
 /-- Derive the raw continuing-output counts from the same bundle data that
     will later be packed into the computed TxContext. This avoids validating
     detached metadata. -/
 def continuingCountsFromData (continuingData : List (Nat × TxContextContinuing)) : List Nat :=
   continuingData.map fun pair => pair.2.outputs.length
-
-/-- Extract the actual sighash byte from a witness item.
-    Empty signatures fail before the policy gate runs. -/
-def extractTxContextSighashType (w : WitnessItem) : Except String UInt8 :=
-  if w.signature.size = 0 then
-    .error "TX_ERR_SIG_INVALID"
-  else
-    .ok (w.signature.get! (w.signature.size - 1))
 
 /-- Validate all raw continuing-output counts before packing the TxContext bundle.
     This wires the K-overflow reject helper into the live computed TxContext path. -/
@@ -58,25 +47,6 @@ def validateTxContextContinuingCounts : List Nat → Except String Unit
       match validateContinuingOutputCount count with
       | .error err => .error err
       | .ok () => validateTxContextContinuingCounts rest
-
-/-- Validate the txcontext sighash gate before building the bundle.
-    Invalid base types map to `TX_ERR_SIGHASH_TYPE_INVALID`; disallowed but
-    well-formed types map to `TX_ERR_SIG_ALG_INVALID`. -/
-def validateTxContextSighashGate (allowedSet sighashType : UInt8) : Except String Unit :=
-  if !SighashV1.hasValidBaseType sighashType then
-    .error "TX_ERR_SIGHASH_TYPE_INVALID"
-  else if SighashV1.checkSighashPolicy allowedSet sighashType then
-    .ok ()
-  else
-    .error "TX_ERR_SIG_ALG_INVALID"
-
-/-- Validate the txcontext sighash gate from the live witness bytes rather
-    than a detached metadata byte. -/
-def validateTxContextSighashWitness
-    (allowedSet : UInt8) (w : WitnessItem) : Except String Unit :=
-  match extractTxContextSighashType w with
-  | .error err => .error err
-  | .ok sighashType => validateTxContextSighashGate allowedSet sighashType
 
 /-- Full block connection pipeline.
     TxContext parameters are threaded through for backward compatibility
@@ -108,7 +78,7 @@ def connectBlockFull
     This is the CORRECT version: TxContext is computed from resolved
     input/output values, not passed as free parameters.
     Uses buildTxContextLive which folds actual value lists and derives
-    all pre-activation gate inputs from the same TxContext input bundle. -/
+    the continuing-count guard from the same TxContext input bundle. -/
 def connectBlockFullComputed
     (nonCoinbaseTxs : List Bytes)
     (coinbaseOutputs : List CovenantGenesisV1.TxOut)
@@ -135,30 +105,27 @@ def connectBlockFullComputed
             match validateTxContextContinuingCounts (continuingCountsFromData d.continuingData) with
             | .error e => .error e
             | .ok () =>
-                match validateTxContextSighashWitness d.allowedSighashSet d.sighashWitness with
-                | .error e => .error e
-                | .ok () =>
-                    .ok { utxoMap := addCoinbaseOutputs coinbaseOutputs coinbaseTxid height postTxUtxos
-                        , sumFees := sumFees
-                        , txContext := buildTxContextLive d.activeExtIds d.inputValues d.outputValues height d.continuingData }
+                .ok { utxoMap := addCoinbaseOutputs coinbaseOutputs coinbaseTxid height postTxUtxos
+                    , sumFees := sumFees
+                    , txContext := buildTxContextLive d.activeExtIds d.inputValues d.outputValues height d.continuingData }
 
-/-- Equivalence under the computed-path gate assumptions:
-    if the continuing-count and sighash validations succeed on the computed
-    TxContext input bundle, then `connectBlockFullComputed` reduces to the
+/-- Equivalence under the computed-path continuing-count guard:
+    if continuing-count validation succeeds on the computed TxContext input
+    bundle, then `connectBlockFullComputed` reduces to the
     aggregate compatibility wrapper `connectBlockFull` with computed sums.
     This bridges the two signatures; it is not an unconditional theorem that
-    the wrapper itself enforces the extra gates. -/
+    the wrapper itself enforces the extra guard. -/
 theorem connectBlockFullComputed_eq_connectBlockFull
     (nctxs : List Bytes) (couts : List CovenantGenesisV1.TxOut)
     (ctxid : Bytes) (utxos : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
     (h bt : Nat) (cid : Bytes) (sub : Nat) (d : TxContextInputData) :
     validateTxContextContinuingCounts (continuingCountsFromData d.continuingData) = .ok () →
-    validateTxContextSighashWitness d.allowedSighashSet d.sighashWitness = .ok () →
     connectBlockFullComputed nctxs couts ctxid utxos h bt cid sub (some d) =
     connectBlockFull nctxs couts ctxid utxos h bt cid sub
       d.activeExtIds (sumInputValues d.inputValues) (sumOutputValues d.outputValues) d.continuingData := by
-  intro hCounts hSighash
-  simp [connectBlockFullComputed, connectBlockFull, buildTxContextLive, buildTxContext, sumInputValues, sumOutputValues, hCounts, hSighash]
+  intro hCounts
+  simp [connectBlockFullComputed, connectBlockFull, buildTxContextLive, buildTxContext,
+    sumInputValues, sumOutputValues, hCounts]
 
 /-- connectBlockFullComputed with None = connectBlockFull with empty ext_ids. -/
 theorem connectBlockFullComputed_none_eq
@@ -198,15 +165,11 @@ theorem connectBlockFullComputed_txcontext_correct
         | .error _ => simp [hCounts] at hOk
         | .ok () =>
           simp [hCounts] at hOk
-          match hSighash : validateTxContextSighashWitness d.allowedSighashSet d.sighashWitness with
-          | .error _ => simp [hSighash] at hOk
-          | .ok () =>
-            simp [hSighash] at hOk
-            cases hOk
-            simp [buildTxContextLive, buildTxContext, sumInputValues, sumOutputValues]
-            split
-            · rename_i heq; omega
-            · exact ⟨_, rfl, rfl, rfl, rfl⟩
+          cases hOk
+          simp [buildTxContextLive, buildTxContext, sumInputValues, sumOutputValues]
+          split
+          · rename_i heq; omega
+          · exact ⟨_, rfl, rfl, rfl, rfl⟩
 
 /-- Computed TxContext preserves the live continuing bundle data from the same
     validated txcontext input surface. -/
@@ -236,33 +199,28 @@ theorem connectBlockFullComputed_txcontext_continuing_data
         | .error _ => simp [hCounts] at hOk
         | .ok () =>
           simp [hCounts] at hOk
-          match hSighash : validateTxContextSighashWitness d.allowedSighashSet d.sighashWitness with
-          | .error _ => simp [hSighash] at hOk
-          | .ok () =>
-            simp [hSighash] at hOk
-            cases hOk
-            have hBuild :
-                buildTxContext d.activeExtIds
-                  (sumInputValues d.inputValues)
-                  (sumOutputValues d.outputValues)
-                  h d.continuingData = some bundle := by
-              simpa [buildTxContextLive, buildTxContext, sumInputValues, sumOutputValues] using hBundle
-            exact buildTxContext_continuing_data
-              d.activeExtIds hIds _ _ _ d.continuingData bundle hBuild
+          cases hOk
+          have hBuild :
+              buildTxContext d.activeExtIds
+                (sumInputValues d.inputValues)
+                (sumOutputValues d.outputValues)
+                h d.continuingData = some bundle := by
+            simpa [buildTxContextLive, buildTxContext, sumInputValues, sumOutputValues] using hBundle
+          exact buildTxContext_continuing_data
+            d.activeExtIds hIds _ _ _ d.continuingData bundle hBuild
 
-/-- Success on the computed parallel block-connection path implies that the
-    live TxContext input bundle passed both computed-path gates. This exposes
-    the exact shared validated surface on which
+/-- Success on the computed block-connection path implies that the live
+    TxContext input bundle passed the continuing-count guard. This exposes the
+    exact surface on which
     `connectBlockFullComputed_eq_connectBlockFull` is an equality theorem,
-    rather than leaving those assumptions as free-floating registry prose. -/
-theorem connectBlockFullComputed_ok_implies_txctx_gates
+    rather than leaving that assumption as free-floating registry prose. -/
+theorem connectBlockFullComputed_ok_implies_txctx_continuing_counts
     (nctxs : List Bytes) (couts : List CovenantGenesisV1.TxOut)
     (ctxid : Bytes) (utxos : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
     (h bt : Nat) (cid : Bytes) (sub : Nat) (d : TxContextInputData)
     (result : ConnectBlockResult)
     (hOk : connectBlockFullComputed nctxs couts ctxid utxos h bt cid sub (some d) = .ok result) :
-    validateTxContextContinuingCounts (continuingCountsFromData d.continuingData) = .ok () ∧
-    validateTxContextSighashWitness d.allowedSighashSet d.sighashWitness = .ok () := by
+    validateTxContextContinuingCounts (continuingCountsFromData d.continuingData) = .ok () := by
   simp only [connectBlockFullComputed] at hOk
   match hT : connectBlockTxs nctxs utxos h bt cid with
   | .error _ => simp [hT] at hOk
@@ -280,11 +238,7 @@ theorem connectBlockFullComputed_ok_implies_txctx_gates
         | .error _ => simp [hCounts] at hOk
         | .ok () =>
           simp [hCounts] at hOk
-          match hSighash : validateTxContextSighashWitness d.allowedSighashSet d.sighashWitness with
-          | .error _ => simp [hSighash] at hOk
-          | .ok () =>
-            simp [hSighash] at hOk
-            constructor <;> rfl
+          rfl
 
 /-! ## Helper: extract connectBlockTxs success -/
 

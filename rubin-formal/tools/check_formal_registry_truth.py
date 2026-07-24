@@ -29,9 +29,9 @@ SECTION_RE = re.compile(r"^\s*section(?:\s+([A-Za-z0-9_'.]+))?\s*$")
 END_RE = re.compile(r"^\s*end(?:\s+([A-Za-z0-9_'.]+))?\s*$")
 DECLARATION_RE = re.compile(
     r"^\s*(?:@\[[^\]]+\]\s*)*"
-    r"(?:(?:private|protected|noncomputable|unsafe|partial)\s+)*"
+    r"(?P<modifiers>(?:(?:private|protected|noncomputable|unsafe|partial)\s+)*)"
     r"(?:theorem|lemma|def|abbrev)\s+"
-    r"([A-Za-z0-9_'?!]+(?:\.[A-Za-z0-9_'?!]+)*)"
+    r"(?P<name>[A-Za-z0-9_'?!]+(?:\.[A-Za-z0-9_'?!]+)*)"
     r"(?:\.\{[^}]+\})?"
     r"(?=\s|$|[:({\[])"
 )
@@ -171,7 +171,9 @@ def extract_declared_names(text: str) -> set[str]:
             _pop_scope(stack, match.group(1))
             continue
         if match := DECLARATION_RE.match(line):
-            names.add(_qualify_decl_name(match.group(1), _current_namespace_parts(stack)))
+            if "private" in match.group("modifiers").split():
+                continue
+            names.add(_qualify_decl_name(match.group("name"), _current_namespace_parts(stack)))
 
     return names
 
@@ -181,12 +183,18 @@ def rel_repo_path(repo_root: Path, path: Path) -> str:
 
 
 def lean_repo_path(repo_root: Path, rel_path: str) -> Path:
-    if rel_path.startswith(REPO_PREFIX):
-        return repo_root / rel_path[len(REPO_PREFIX) :]
-    raise ValueError(
-        f"non-canonical path in registry: {rel_path!r} "
-        f"(must start with {REPO_PREFIX!r})"
-    )
+    if not rel_path.startswith(REPO_PREFIX):
+        raise ValueError(
+            f"non-canonical path in registry: {rel_path!r} "
+            f"(must start with {REPO_PREFIX!r})"
+        )
+    source_root = (repo_root / "RubinFormal").resolve()
+    candidate = repo_root / rel_path[len(REPO_PREFIX) :]
+    if not candidate.resolve().is_relative_to(source_root):
+        raise ValueError(
+            f"registered file escapes RubinFormal source root: {rel_path}"
+        )
+    return candidate
 
 
 def try_lean_repo_path(repo_root: Path, rel_path: str) -> Optional[Path]:
@@ -205,8 +213,16 @@ def olean_path(repo_root: Path, rel_path: str) -> Path:
     normalized = rel_path[len(REPO_PREFIX) :]
     if not normalized.startswith("RubinFormal/") or not normalized.endswith(".lean"):
         raise ValueError(f"registered file is outside RubinFormal build graph surface: {rel_path}")
-    suffix = normalized[: -len(".lean")]
-    return repo_root / ".lake" / "build" / "lib" / f"{suffix}.olean"
+    source_path = lean_repo_path(repo_root, rel_path)
+    source_root = (repo_root / "RubinFormal").resolve()
+    source_suffix = source_path.resolve().relative_to(source_root).with_suffix(".olean")
+    build_root = repo_root / ".lake" / "build" / "lib" / "RubinFormal"
+    candidate = build_root / source_suffix
+    if not candidate.resolve().is_relative_to(build_root.resolve()):
+        raise ValueError(
+            f"derived olean path escapes RubinFormal build root: {rel_path}"
+        )
+    return candidate
 
 
 def coverage_paths(row: dict) -> set[str]:

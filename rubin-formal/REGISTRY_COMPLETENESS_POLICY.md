@@ -154,11 +154,12 @@ The registry is auditable via:
 
 As of 2026-07-24, recomputed from the current registries and Lean tree:
 
-- Lean source tree: 1,219 theorem declarations, 1,198 unique theorem names
-- `proof_coverage.json`: 575 references, 552 unique theorem names
-- `refinement_bridge.json`: 177 references, 170 unique theorem names
-- Registry union: 559 unique theorem names
-- Unregistered: 639 unique theorem names (mostly helpers, wrappers, internals per policy §2)
+- Lean source tree: 1,063 public theorem declarations, 1,063 unique theorem names
+- `proof_coverage.json`: 566 references, 543 unique theorem names
+- `refinement_bridge.json`: 164 references, 158 unique theorem names
+- Registry union: 550 unique theorem names
+- Unregistered: 513 unique theorem names (mostly helpers, wrappers, internals per policy §2)
 
 Reference counts count every row occurrence. Unique counts deduplicate fully
-qualified theorem names; the unregistered count is `1,198 - 559`.
+qualified public theorem names; private declarations are excluded per §2 and
+the unregistered count is `1,063 - 550`.

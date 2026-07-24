@@ -121,7 +121,7 @@ Wire model notes:
 - The formal coverage registry currently contains 32 machine-checked section entries
 - Registry status counts: 28 `proved`, 4 `proved_with_axiom`, 0 `stated`, 0 `deferred`
 - Claim strength breakdown: 27 universal, 4 assumption-backed, 1 model-level
-- Registry theorem counts: 575 references and 552 unique theorem names
+- Registry theorem counts: 566 references and 543 unique theorem names
 - Machine-checked status does not imply uniform claim strength — the honest boundary is set by `status`, `evidence_level`, and `limitations`
 - Extra formal-only theorems are not counted as pinned-section claims unless registered in the machine-readable registry
 

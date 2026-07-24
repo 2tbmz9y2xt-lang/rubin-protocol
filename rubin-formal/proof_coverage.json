@@ -390,14 +390,7 @@
         "RubinFormal.selectHashPrevouts_invalid_returns_none",
         "RubinFormal.selectHashSequences_invalid_returns_none",
         "RubinFormal.selectHashOutputs_invalid_returns_none",
-        "RubinFormal.hasValidBaseType_exhaustive",
-        "RubinFormal.validateTxContextSighashGate_ok_iff",
-        "RubinFormal.validateTxContextSighashGate_invalid_base_rejects",
-        "RubinFormal.validateTxContextSighashGate_disallowed_rejects",
-        "RubinFormal.validateTxContextSighashWitness_ok_iff",
-        "RubinFormal.validateTxContextSighashWitness_empty_signature_rejects",
-        "RubinFormal.validateTxContextSighashWitness_invalid_base_rejects",
-        "RubinFormal.validateTxContextSighashWitness_disallowed_rejects"
+        "RubinFormal.hasValidBaseType_exhaustive"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
@@ -415,16 +408,9 @@
         "RubinFormal.selectHashPrevouts_invalid_returns_none": "rubin-formal/RubinFormal/SighashRefinementUpgrade.lean",
         "RubinFormal.selectHashSequences_invalid_returns_none": "rubin-formal/RubinFormal/SighashRefinementUpgrade.lean",
         "RubinFormal.selectHashOutputs_invalid_returns_none": "rubin-formal/RubinFormal/SighashRefinementUpgrade.lean",
-        "RubinFormal.hasValidBaseType_exhaustive": "rubin-formal/RubinFormal/SighashRefinementUpgrade.lean",
-        "RubinFormal.validateTxContextSighashGate_ok_iff": "rubin-formal/RubinFormal/SighashAssumptionBridge.lean",
-        "RubinFormal.validateTxContextSighashGate_invalid_base_rejects": "rubin-formal/RubinFormal/SighashAssumptionBridge.lean",
-        "RubinFormal.validateTxContextSighashGate_disallowed_rejects": "rubin-formal/RubinFormal/SighashAssumptionBridge.lean",
-        "RubinFormal.validateTxContextSighashWitness_ok_iff": "rubin-formal/RubinFormal/SighashAssumptionBridge.lean",
-        "RubinFormal.validateTxContextSighashWitness_empty_signature_rejects": "rubin-formal/RubinFormal/SighashAssumptionBridge.lean",
-        "RubinFormal.validateTxContextSighashWitness_invalid_base_rejects": "rubin-formal/RubinFormal/SighashAssumptionBridge.lean",
-        "RubinFormal.validateTxContextSighashWitness_disallowed_rejects": "rubin-formal/RubinFormal/SighashAssumptionBridge.lean"
+        "RubinFormal.hasValidBaseType_exhaustive": "rubin-formal/RubinFormal/SighashRefinementUpgrade.lean"
       },
-      "notes": "Universal theorem lane: `sighash_v1_proved` keeps the structural selection/preimage-frame surface explicit, while the live TXCTX `allowed_sighash_set` gate/witness theorems register the runtime accept/reject boundary for valid, invalid-base, empty-signature, and disallowed-type paths. Separate fixture lane: CV-SIGHASH replay for the shipped digest vectors. That executable lane is complementary evidence only and does not replace the universal theorem lane. The SHA3 digest-collision ceiling is tracked separately in `sighash_v1_digest_collision_residual` rather than depressing this live selection/TXCTX row.",
+      "notes": "Universal theorem lane: `sighash_v1_proved` keeps the current structural selection/preimage-frame surface explicit, including exhaustive current base-type classification. Separate fixture lane: CV-SIGHASH replay for the shipped digest vectors. That executable lane is complementary evidence only and does not replace the universal theorem lane. The retired CORE_EXT/CV-TXCTX allowlist policy is not part of this active claim. The SHA3 digest-collision ceiling is tracked separately in `sighash_v1_digest_collision_residual`.",
       "limitations": [
         "The executable digestV1 replay path still covers the current fixture subset and is not a universal tx-level equivalence proof for arbitrary raw transaction pairs.",
         "The collision-resistance ceiling for equal live `digestV1` outputs on distinct executable preimages is not claimed in this row and is tracked separately in `sighash_v1_digest_collision_residual`."
@@ -442,7 +428,7 @@
       "theorem_files": {
         "RubinFormal.digestV1_output_collision_reduces_to_sha3_collision": "rubin-formal/RubinFormal/SighashAssumptionBridge.lean"
       },
-      "notes": "Dedicated assumption-backed residual for the live `digestV1` crypto ceiling. The counted reduction theorem shows that when two live `digestV1` executions succeed with equal outputs and their executable preimages are distinct, SHA3-256 would have to collide on those distinct preimages. This row intentionally carries only that residual and does not re-count the structural selector/TXCTX gate surface already owned by the universal `sighash_v1` row.",
+      "notes": "Dedicated assumption-backed residual for the live `digestV1` crypto ceiling. The counted reduction theorem shows that when two live `digestV1` executions succeed with equal outputs and their executable preimages are distinct, SHA3-256 would have to collide on those distinct preimages. This row intentionally carries only that residual and does not re-count the structural selector surface already owned by the universal `sighash_v1` row.",
       "limitations": [
         "This is a reduction theorem, not an axiom-free impossibility proof: ruling out equal digests on distinct executable preimages still depends on SHA3-256 collision resistance.",
         "The row does not claim arbitrary raw-tx preimage distinctness or a universal proof for every possible witness-carried transaction variation outside the executable digest surface named in the theorem."
@@ -1371,28 +1357,22 @@
       "section_heading": "## Parallel Validation — Sequential Equivalence (Q-PV-19)",
       "status": "proved",
       "theorems": [
-        "RubinFormal.Refinement.ParallelEquivalence.accept_reject_equivalence_live",
-        "RubinFormal.connectBlockFullComputed_eq_connectBlockFull",
-        "RubinFormal.connectBlockFullComputed_none_eq",
-        "RubinFormal.connectBlockFullComputed_ok_implies_txctx_gates"
+        "RubinFormal.Refinement.ParallelEquivalence.accept_reject_equivalence_live"
       ],
-      "file": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
+      "file": "rubin-formal/RubinFormal/Refinement/ParallelEquivalence.lean",
       "theorem_files": {
-        "RubinFormal.Refinement.ParallelEquivalence.accept_reject_equivalence_live": "rubin-formal/RubinFormal/Refinement/ParallelEquivalence.lean",
-        "RubinFormal.connectBlockFullComputed_eq_connectBlockFull": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
-        "RubinFormal.connectBlockFullComputed_none_eq": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
-        "RubinFormal.connectBlockFullComputed_ok_implies_txctx_gates": "rubin-formal/RubinFormal/ConnectBlockFull.lean"
+        "RubinFormal.Refinement.ParallelEquivalence.accept_reject_equivalence_live": "rubin-formal/RubinFormal/Refinement/ParallelEquivalence.lean"
       },
-      "notes": "Counted core is now the LIVE/BRIDGE quartet only: (1) accept_reject_equivalence_live for the Go SigCheckQueue.Flush contract, (2) connectBlockFullComputed_eq_connectBlockFull for exact some-path equality on the shared validated TxContext-input surface, (3) connectBlockFullComputed_none_eq for the unconditional none-path, and (4) connectBlockFullComputed_ok_implies_txctx_gates to derive the some-path gate assumptions from an actual live .ok result. Helper/model reducer lemmas remain in ParallelEquivalence.lean as supporting mathematics but are no longer counted here as separate coverage.",
+      "notes": "The counted theorem is `accept_reject_equivalence_live`: for one identical precheck result and signature-task list, sequential reduction and the live SigCheckQueue.Flush accept/reject helper contract return the same verdict. Helper/model reducer lemmas remain in ParallelEquivalence.lean as supporting mathematics rather than separate coverage.",
       "limitations": [
-        "The full block-pipeline equality is scoped to the shared validated TxContext-input surface: on the some-path, connectBlockFullComputed_eq_connectBlockFull applies once validateTxContextContinuingCounts and validateTxContextSighashWitness accept; malformed TxContext-input rejections remain covered by the live §14 TxContext gate row rather than duplicated here.",
+        "No theorem composes `accept_reject_equivalence_live` with `connectBlockFullComputed*` into end-to-end sequential-versus-parallel block equality. The ConnectBlockFull computed/wrapper equalities are independent TxContext facts registered under `txcontext_formal`.",
         "Auxiliary tagged-result lowest-index theorems remain in ParallelEquivalence.lean for helper reasoning only; they are not counted here because the live queue may early-abort and surface a deterministic submission-order error instead of the absolute lowest failing index."
       ],
       "evidence_level": "machine_checked_universal"
     },
     {
       "section_key": "txcontext_formal",
-      "section_heading": "## SPEC-TXCTX-01 §14. TxContext Pre-Activation Gates",
+      "section_heading": "## SPEC-TXCTX-01 §14. TxContext Construction and Bounds",
       "status": "proved",
       "theorems": [
         "RubinFormal.sortExtIds_order_independent",
@@ -1403,8 +1383,6 @@
         "RubinFormal.buildTxContext_all_continuings_outputs_bounded",
         "RubinFormal.vault_bridge_no_vault",
         "RubinFormal.vault_bridge_with_vault",
-        "RubinFormal.SighashV1.checkSighashPolicy_exhaustive_256x256",
-        "RubinFormal.SighashV1.checkSighashPolicy_invalid_base_rejected",
         "RubinFormal.sortExtIds_eq_model",
         "RubinFormal.compareUint128_eq_true_iff_model",
         "RubinFormal.continuing_output_count_accepts_in_range",
@@ -1418,7 +1396,10 @@
         "RubinFormal.buildTxContext_all_continuings_bounded",
         "RubinFormal.buildTxContextFromValues_value_conservation",
         "RubinFormal.buildTxContextLive_eq_fromValues",
-        "RubinFormal.buildTxContextLive_eq_buildTxContext"
+        "RubinFormal.buildTxContextLive_eq_buildTxContext",
+        "RubinFormal.connectBlockFullComputed_eq_connectBlockFull",
+        "RubinFormal.connectBlockFullComputed_none_eq",
+        "RubinFormal.connectBlockFullComputed_ok_implies_txctx_continuing_counts"
       ],
       "file": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
       "theorem_files": {
@@ -1430,8 +1411,6 @@
         "RubinFormal.buildTxContext_all_continuings_outputs_bounded": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
         "RubinFormal.vault_bridge_no_vault": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
         "RubinFormal.vault_bridge_with_vault": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.SighashV1.checkSighashPolicy_exhaustive_256x256": "rubin-formal/RubinFormal/SighashV1.lean",
-        "RubinFormal.SighashV1.checkSighashPolicy_invalid_base_rejected": "rubin-formal/RubinFormal/SighashV1.lean",
         "RubinFormal.sortExtIds_eq_model": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
         "RubinFormal.compareUint128_eq_true_iff_model": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
         "RubinFormal.continuing_output_count_accepts_in_range": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
@@ -1445,9 +1424,12 @@
         "RubinFormal.buildTxContext_all_continuings_bounded": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
         "RubinFormal.buildTxContextFromValues_value_conservation": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
         "RubinFormal.buildTxContextLive_eq_fromValues": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContextLive_eq_buildTxContext": "rubin-formal/RubinFormal/TxContextBehavioral.lean"
+        "RubinFormal.buildTxContextLive_eq_buildTxContext": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
+        "RubinFormal.connectBlockFullComputed_eq_connectBlockFull": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
+        "RubinFormal.connectBlockFullComputed_none_eq": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
+        "RubinFormal.connectBlockFullComputed_ok_implies_txctx_continuing_counts": "rubin-formal/RubinFormal/ConnectBlockFull.lean"
       },
-      "notes": "§14 pre-activation gate closure on the LIVE Lean TxContext surface. All 24 substantive theorems are ∀-quantified over live functions (sortExtIds, buildTxContext, buildTxContextFromValues, buildTxContextLive, compareUint128, validateContinuingOutputCount, checkSighashPolicy, checkValueConservation↔validateValueConservation). 18 LIVE theorems prove properties directly on live functions. 6 BRIDGE theorems wire live↔model equivalences (sortExtIds↔sortAscending, compareUint128↔uint128GTE, buildTxContextLive↔fromValues↔buildTxContext, vault conservation paths). 2 WRAPPER theorems excluded from registry: max_continuing_is_two (rfl constant), continuing_bound_is_invariant (type field projection). Zero limitations. Zero fixture dependencies. Zero sorry/admit/axiom. Sighash policy exhaustive 256×256 native_decide in SighashV1.lean.",
+      "notes": "§14 closure over current live TxContext construction, value conservation, continuing-output bounds, and independent computed/wrapper facts. The 25 counted theorems cover sortExtIds, buildTxContext, buildTxContextFromValues, buildTxContextLive, compareUint128, validateContinuingOutputCount, value conservation, and the precise ConnectBlockFull computed/wrapper equality surface under its continuing-count guard. The retired CORE_EXT/CV-TXCTX sighash allowlist policy is not an active premise or claim. Zero fixture dependencies and zero sorry/admit/axiom.",
       "limitations": [],
       "evidence_level": "machine_checked_universal"
     },
@@ -1675,8 +1657,10 @@
         "RubinFormal.FeatureActivationLiveBridge.featurebit_state_at_height_from_window_counts_state_eq_fold": "rubin-formal/RubinFormal/FeatureActivationLiveBridge.lean",
         "RubinFormal.FeatureActivationLiveBridge.featurebit_state_at_height_from_window_counts_state_monotone": "rubin-formal/RubinFormal/FeatureActivationLiveBridge.lean"
       },
-      "notes": "Universal closure of §23 feature activation FSM / flag-day surface. FeatureActivationLiveBridge now bridges the prechecked state-only live multi-boundary state-at-height fold used by Go featurebits.go and Rust featurebits.rs to the existing fold-based FSM model, then lifts multi_step_monotone onto that reachable helper path under the same sufficient window_signal_counts prefix guard enforced by live code before the fold begins. Single-step priority/no-skip/iff theorems plus flagday_complete_behavior remain complementary executable evidence. 14 theorems total.",
-      "limitations": [],
+      "notes": "Universal closure of §23 feature activation FSM / flag-day surface. FeatureActivationLiveBridge bridges the prechecked state-only live multi-boundary state-at-height fold to the existing fold-based FSM model, then lifts multi_step_monotone onto that reachable helper path after deployment validation (`startHeight ≤ timeoutHeight`) and the sufficient window_signal_counts prefix guard. Single-step priority/no-skip/iff theorems plus flagday_complete_behavior remain complementary executable evidence. 14 theorems total.",
+      "limitations": [
+        "The state-at-height bridge applies only after live deployment validation (`startHeight ≤ timeoutHeight`) and sufficient window_signal_counts. Invalid deployments reject before the fold and are outside the state-only theorem surface."
+      ],
       "evidence_level": "machine_checked_universal"
     }
   ],
@@ -1686,8 +1670,8 @@
     "proved_with_axiom_rows": 4,
     "stated_rows": 0,
     "deferred_rows": 0,
-    "theorem_references": 575,
-    "unique_theorem_names": 552,
+    "theorem_references": 566,
+    "unique_theorem_names": 543,
     "reused_theorem_names": [
       "RubinFormal.Conformance.cv_parse_vectors_pass",
       "RubinFormal.Conformance.cv_subsidy_vectors_pass",

@@ -171,7 +171,7 @@ def main() -> int:
         return 1
 
     # Governance merge gate (AM-02): if pinned section hashes change, formal disposition must be updated.
-    # Spec CI checks out rubin-protocol tooling; use its in-repo rubin-formal mirror coverage registry.
+    # Spec CI checks out rubin-protocol tooling; use its in-repo canonical formal coverage registry.
     formal_cov = repo_root / "rubin-protocol" / "rubin-formal" / "proof_coverage.json"
     if formal_cov.exists():
         try:

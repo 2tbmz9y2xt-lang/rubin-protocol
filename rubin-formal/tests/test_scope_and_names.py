@@ -137,7 +137,7 @@ private theorem secret : True := by trivial
 end Foo
 """
         names = extract_declared_names(text)
-        self.assertIn("Foo.secret", names)
+        self.assertNotIn("Foo.secret", names)
 
     def test_protected_theorem(self) -> None:
         text = """
