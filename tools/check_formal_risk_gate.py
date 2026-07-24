@@ -33,14 +33,20 @@ def check_profile(profile: str, summary: RiskSummary) -> tuple[bool, str]:
     if profile in {"phase0", "devnet"}:
         if summary.deferred != 0:
             return False, f"{profile}: deferred sections are not allowed (deferred={summary.deferred})"
-        return True, f"{profile}: OK (baseline present; proof_level={summary.proof_level}; tier={summary.risk_tier})"
+        return True, (
+            f"{profile}: OK (baseline present; proof_level={summary.proof_level}; "
+            f"proved_with_axiom={summary.proved_with_axiom}; tier={summary.risk_tier})"
+        )
 
     if profile == "audit":
         if summary.deferred != 0:
             return False, f"audit: deferred sections are not allowed (deferred={summary.deferred})"
         if summary.proof_level == "toy-model":
             return False, "audit: proof_level=toy-model is not acceptable for external audit claims"
-        return True, f"audit: OK (proof_level={summary.proof_level}; tier={summary.risk_tier})"
+        return True, (
+            f"audit: OK (proof_level={summary.proof_level}; "
+            f"proved_with_axiom={summary.proved_with_axiom}; tier={summary.risk_tier})"
+        )
 
     if profile == "freeze":
         if summary.deferred != 0 or summary.stated != 0:
@@ -49,7 +55,10 @@ def check_profile(profile: str, summary: RiskSummary) -> tuple[bool, str]:
             return False, f"freeze: proof_level must be byte-model/refinement (got {summary.proof_level})"
         if summary.claim_level != "refined":
             return False, f"freeze: claim_level must be refined (got {summary.claim_level})"
-        return True, f"freeze: OK (proof_level={summary.proof_level}; tier={summary.risk_tier})"
+        return True, (
+            f"freeze: OK (proof_level={summary.proof_level}; "
+            f"proved_with_axiom={summary.proved_with_axiom}; tier={summary.risk_tier})"
+        )
 
     return False, f"unknown profile: {profile}"
 
@@ -88,8 +97,10 @@ def main() -> int:
                     "risk_score": summary.risk_score,
                     "total_sections": summary.total_sections,
                     "proved": summary.proved,
+                    "proved_with_axiom": summary.proved_with_axiom,
                     "stated": summary.stated,
                     "deferred": summary.deferred,
+                    "proved_with_axiom_keys": summary.proved_with_axiom_keys,
                     "stated_keys": summary.stated_keys,
                     "deferred_keys": summary.deferred_keys,
                 },

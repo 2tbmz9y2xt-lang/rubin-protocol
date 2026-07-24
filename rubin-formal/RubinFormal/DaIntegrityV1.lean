@@ -98,169 +98,301 @@ def parseDaChunkCore (c : Cursor) : Option (Bytes × Nat × Bytes × Cursor) := 
   let (h, c3) ← c2.getBytes? 32
   pure (daId, idx, h, c3)
 
-def mapWitnessErr (wErr : Wire.TxErr) : Option String :=
-  if wErr == .witnessOverflow then some "TX_ERR_WITNESS_OVERFLOW"
-  else if wErr == .sigAlgInvalid then some "TX_ERR_SIG_ALG_INVALID"
-  else if wErr == .sigNoncanonical then some "TX_ERR_SIG_NONCANONICAL"
-  else none
+/-- Witness section error checks from parseDATx (lines 169-172).
+    LIVE sub-function: called directly from parseDATx.
+    Written without do-notation for formal proof access.
+    Returns one of: TX_ERR_WITNESS_OVERFLOW, TX_ERR_SIG_ALG_INVALID,
+    TX_ERR_SIG_NONCANONICAL, or .ok (). -/
+def validateWitnessErrors (ws : TxWeightV2.WitnessSectionResult) : Except String Unit :=
+  if ws.endOff - ws.startOff > TxWeightV2.MAX_WITNESS_BYTES_PER_TX then
+    .error "TX_ERR_WITNESS_OVERFLOW"
+  else if ws.isOverflow then
+    .error "TX_ERR_WITNESS_OVERFLOW"
+  else if ws.anySigAlgInvalid then
+    .error "TX_ERR_SIG_ALG_INVALID"
+  else if ws.anySigNoncanonical then
+    .error "TX_ERR_SIG_NONCANONICAL"
+  else .ok ()
 
-def parseDATx (tx : Bytes) : Except String ParsedDATx := do
+/-- Phase 1: structure parsing + DA core fields. Only TX_ERR_PARSE.
+    Explicit match (no do) for formal taxonomy proof. -/
+structure DATxPhase1Result where
+  tk : Nat
+  outs : List TxOut
+  commitDaId : Option Bytes
+  commitChunkCount : Option Nat
+  chunkDaId : Option Bytes
+  chunkIndex : Option Nat
+  chunkHash : Option Bytes
+  witnessCursor : Cursor
+
+def parseDATxPhase1 (tx : Bytes) : Except String DATxPhase1Result :=
   let c0 : Cursor := { bs := tx, off := 0 }
-  let (_, c1) ←
-    match c0.getU32le? with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  let (tkB, c2) ←
+  match c0.getU32le? with
+  | none => .error "TX_ERR_PARSE"
+  | some (_, c1) =>
     match c1.getU8? with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  let tk := tkB.toNat
-  if !(tk == 0x00 || tk == 0x01 || tk == 0x02) then throw "TX_ERR_PARSE"
-  let (_, c3) ←
-    match c2.getU64le? with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  let (inCount, c4, minIn) ←
-    match c3.getCompactSize? with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  if !minIn then throw "TX_ERR_PARSE"
-  let c5 ←
-    match RubinFormal.TxWeightV2.parseInputsSkip c4 inCount with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  let (outCount, c6, minOut) ←
-    match c5.getCompactSize? with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  if !minOut then throw "TX_ERR_PARSE"
-  let (outs, c7) ←
-    match parseOutputsLite c6 outCount with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  let (_, c8) ←
-    match c7.getU32le? with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
+    | none => .error "TX_ERR_PARSE"
+    | some (tkB, c2) =>
+      let tk := tkB.toNat
+      if !(tk == 0x00 || tk == 0x01 || tk == 0x02) then .error "TX_ERR_PARSE"
+      else match c2.getU64le? with
+        | none => .error "TX_ERR_PARSE"
+        | some (_, c3) =>
+          match c3.getCompactSize? with
+          | none => .error "TX_ERR_PARSE"
+          | some (inCount, c4, minIn) =>
+            if !minIn then .error "TX_ERR_PARSE"
+            else match TxWeightV2.parseInputsSkip c4 inCount with
+              | none => .error "TX_ERR_PARSE"
+              | some c5 =>
+                match c5.getCompactSize? with
+                | none => .error "TX_ERR_PARSE"
+                | some (outCount, c6, minOut) =>
+                  if !minOut then .error "TX_ERR_PARSE"
+                  else match parseOutputsLite c6 outCount with
+                    | none => .error "TX_ERR_PARSE"
+                    | some (outs, c7) =>
+                      match c7.getU32le? with
+                      | none => .error "TX_ERR_PARSE"
+                      | some (_, c8) =>
+                        if tk == 0x00 then
+                          .ok { tk, outs, commitDaId := none, commitChunkCount := none,
+                                chunkDaId := none, chunkIndex := none, chunkHash := none,
+                                witnessCursor := c8 }
+                        else if tk == 0x01 then
+                          match parseDaCommitCore c8 with
+                          | none => .error "TX_ERR_PARSE"
+                          | some (daId, cc, c') =>
+                            .ok { tk, outs, commitDaId := some daId, commitChunkCount := some cc,
+                                  chunkDaId := none, chunkIndex := none, chunkHash := none,
+                                  witnessCursor := c' }
+                        else
+                          match parseDaChunkCore c8 with
+                          | none => .error "TX_ERR_PARSE"
+                          | some (daId, idx, h, c') =>
+                            .ok { tk, outs, commitDaId := none, commitChunkCount := none,
+                                  chunkDaId := some daId, chunkIndex := some idx,
+                                  chunkHash := some h, witnessCursor := c' }
 
-  let mut commitDaId : Option Bytes := none
-  let mut commitChunkCount : Option Nat := none
-  let mut chunkDaId : Option Bytes := none
-  let mut chunkIndex : Option Nat := none
-  let mut chunkHash : Option Bytes := none
-  let c9 ←
-    if tk == 0x00 then
-      pure c8
-    else if tk == 0x01 then
-      match parseDaCommitCore c8 with
-      | none => throw "TX_ERR_PARSE"
-      | some (daId, cc, c') =>
-          commitDaId := some daId
-          commitChunkCount := some cc
-          pure c'
-    else
-      match parseDaChunkCore c8 with
-      | none => throw "TX_ERR_PARSE"
-      | some (daId, idx, h, c') =>
-          chunkDaId := some daId
-          chunkIndex := some idx
-          chunkHash := some h
-          pure c'
+/-- Phase 3: DA payload parsing. Only TX_ERR_PARSE.
+    Explicit match (no do) for formal taxonomy proof. -/
+def parseDATxPhase3 (tk daLen : Nat) (c10 : Cursor) (minDa : Bool) (txSize : Nat)
+    : Except String (Bytes × Cursor) :=
+  if !minDa then .error "TX_ERR_PARSE"
+  else if tk == 0x00 && daLen != 0 then .error "TX_ERR_PARSE"
+  else if tk == 0x01 && daLen > MAX_DA_MANIFEST_BYTES_PER_TX then .error "TX_ERR_PARSE"
+  else if tk != 0x00 && tk != 0x01 && (daLen < 1 || daLen > CHUNK_BYTES) then .error "TX_ERR_PARSE"
+  else match c10.getBytes? daLen with
+    | none => .error "TX_ERR_PARSE"
+    | some (payload, c11) =>
+      if c11.off != txSize then .error "TX_ERR_PARSE"
+      else .ok (payload, c11)
 
-  let (cW, wErr, wStart, wEnd, _ml, _unk) ←
-    match RubinFormal.TxWeightV2.parseWitnessSectionForWeight c9 with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  let witBytes := wEnd - wStart
-  if witBytes > RubinFormal.TxWeightV2.MAX_WITNESS_BYTES_PER_TX then throw "TX_ERR_WITNESS_OVERFLOW"
-  match mapWitnessErr wErr with
-  | some e => throw e
-  | none => pure ()
+/-- Compose phases into parseDATx.
+    Phase 1 (structure) → Phase 2 (witness) → Phase 3 (payload). -/
+def parseDATx (tx : Bytes) : Except String ParsedDATx :=
+  match parseDATxPhase1 tx with
+  | .error e => .error e
+  | .ok p1 =>
+    match TxWeightV2.parseWitnessSectionForWeight p1.witnessCursor with
+    | none => .error "TX_ERR_PARSE"
+    | some ws =>
+      match validateWitnessErrors ws with
+      | .error e => .error e
+      | .ok () =>
+        match ws.cursor.getCompactSize? with
+        | none => .error "TX_ERR_PARSE"
+        | some (daLen, c10, minDa) =>
+          match parseDATxPhase3 p1.tk daLen c10 minDa tx.size with
+          | .error e => .error e
+          | .ok (payload, _) =>
+            .ok { txKind := p1.tk
+                , commitDaId := p1.commitDaId
+                , commitChunkCount := p1.commitChunkCount
+                , chunkDaId := p1.chunkDaId
+                , chunkIndex := p1.chunkIndex
+                , chunkHash := p1.chunkHash
+                , outputs := p1.outs
+                , payload := payload }
 
-  let (daLen, c10, minDa) ←
-    match cW.getCompactSize? with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  if !minDa then throw "TX_ERR_PARSE"
-  if tk == 0x00 then
-    if daLen != 0 then throw "TX_ERR_PARSE"
-  else if tk == 0x01 then
-    if daLen > MAX_DA_MANIFEST_BYTES_PER_TX then throw "TX_ERR_PARSE"
-  else
-    if daLen < 1 || daLen > CHUNK_BYTES then throw "TX_ERR_PARSE"
-  let (payload, c11) ←
-    match c10.getBytes? daLen with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  if c11.off != tx.size then
-    throw "TX_ERR_PARSE"
+/-- Batch count limit check. LIVE sub-function (line 226-227). -/
+def validateDaBatchCount (commitCount : Nat) : Except String Unit :=
+  if commitCount > MAX_DA_BATCHES_PER_BLOCK then
+    Except.error "BLOCK_ERR_DA_BATCH_EXCEEDED"
+  else Except.ok ()
 
-  pure {
-    txKind := tk
-    commitDaId := commitDaId
-    commitChunkCount := commitChunkCount
-    chunkDaId := chunkDaId
-    chunkIndex := chunkIndex
-    chunkHash := chunkHash
-    outputs := outs
-    payload := payload
-  }
+/-- Orphan chunk check: every chunk daId must have a commit. LIVE sub-function (line 229-231).
+    Recursive version for formal proof access. -/
+def validateNoOrphanChunks
+    (chunkList : List (Bytes × Std.RBMap Nat DaChunkInfo compare))
+    (commits : Std.RBMap Bytes DaCommitInfo cmpBytes) : Except String Unit :=
+  match chunkList with
+  | [] => .ok ()
+  | (daId, _) :: rest =>
+    if !(commits.contains daId) then .error "BLOCK_ERR_DA_SET_INVALID"
+    else validateNoOrphanChunks rest commits
 
-def validateDASetIntegrity (txs : List Bytes) : Except String Unit := do
-  let mut commits : Std.RBMap Bytes DaCommitInfo cmpBytes := Std.RBMap.empty
-  let mut chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes := Std.RBMap.empty
+/-- Chunk hash verification: sha3(payload) must match embedded hash. LIVE sub-function (line 219-220). -/
+def validateChunkHash (payload hash : Bytes) : Except String Unit :=
+  if SHA3.sha3_256 payload != hash then
+    Except.error "BLOCK_ERR_DA_CHUNK_HASH_INVALID"
+  else Except.ok ()
 
-  for txBytes in txs do
-    let t ← parseDATx txBytes
-    if t.txKind == 0x01 then
-      let daId ← match t.commitDaId with | some x => pure x | none => throw "TX_ERR_PARSE"
-      let cc ← match t.commitChunkCount with | some x => pure x | none => throw "TX_ERR_PARSE"
-      if commits.contains daId then
-        throw "BLOCK_ERR_DA_SET_INVALID"
-      commits := commits.insert daId { chunkCount := cc, outputs := t.outputs }
-    else if t.txKind == 0x02 then
-      let daId ← match t.chunkDaId with | some x => pure x | none => throw "TX_ERR_PARSE"
-      let idx ← match t.chunkIndex with | some x => pure x | none => throw "TX_ERR_PARSE"
-      let h ← match t.chunkHash with | some x => pure x | none => throw "TX_ERR_PARSE"
-      if SHA3.sha3_256 t.payload != h then
-        throw "BLOCK_ERR_DA_CHUNK_HASH_INVALID"
-      let set := match chunks.find? daId with | none => Std.RBMap.empty | some m => m
-      if set.contains idx then
-        throw "BLOCK_ERR_DA_SET_INVALID"
-      chunks := chunks.insert daId (set.insert idx { chunkIndex := idx, chunkHash := h, payload := t.payload })
+/-- Duplicate commit check: daId already in commits map → BLOCK_ERR_DA_SET_INVALID.
+    LIVE sub-function (line 233). Written without do for formal proof access. -/
+def validateNoDuplicateCommit
+    (commits : Std.RBMap Bytes DaCommitInfo cmpBytes) (daId : Bytes) : Except String Unit :=
+  if commits.contains daId then Except.error "BLOCK_ERR_DA_SET_INVALID"
+  else Except.ok ()
 
-  if commits.size > MAX_DA_BATCHES_PER_BLOCK then
-    throw "BLOCK_ERR_DA_BATCH_EXCEEDED"
+/-- Duplicate chunk index check: idx already in set → BLOCK_ERR_DA_SET_INVALID.
+    LIVE sub-function (line 242). Written without do for formal proof access. -/
+def validateNoDuplicateChunk
+    (set : Std.RBMap Nat DaChunkInfo compare) (idx : Nat) : Except String Unit :=
+  if set.contains idx then Except.error "BLOCK_ERR_DA_SET_INVALID"
+  else Except.ok ()
 
-  for (daId, _) in chunks.toList do
-    if !(commits.contains daId) then
-      throw "BLOCK_ERR_DA_SET_INVALID"
+/-- Count DA_COMMIT outputs and extract the single commit hash.
+    Returns (count, hash_or_empty). Pure function for proof access. -/
+def countDaCommitOutputs (outputs : List TxOut) : Nat × Bytes :=
+  outputs.foldl (fun (acc : Nat × Bytes) o =>
+    if o.covenantType == COV_TYPE_DA_COMMIT then
+      let count := acc.1 + 1
+      let got := if o.covenantData.size == 32 then o.covenantData else acc.2
+      (count, got)
+    else acc
+  ) (0, ByteArray.empty)
 
-  for (daId, cinfo) in commits.toList do
-    let set? := chunks.find? daId
-    let set ← match set? with | none => throw "BLOCK_ERR_DA_INCOMPLETE" | some m => pure m
-    if set.size != cinfo.chunkCount then
-      throw "BLOCK_ERR_DA_INCOMPLETE"
-    let mut concat : Bytes := ByteArray.empty
-    for i in [0:cinfo.chunkCount] do
-      let ch? := set.find? i
-      let ch ← match ch? with | none => throw "BLOCK_ERR_DA_INCOMPLETE" | some x => pure x
-      concat := concat ++ ch.payload
-    let payloadCommit := SHA3.sha3_256 concat
+/-- Validate commit output: exactly 1 DA_COMMIT output with matching hash.
+    LIVE sub-function (lines 293-303). Written without do for formal proof access. -/
+def validateCommitOutput (outputs : List TxOut) (payloadCommit : Bytes)
+    : Except String Unit :=
+  let (count, got) := countDaCommitOutputs outputs
+  if count != 1 then Except.error "BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID"
+  else if got != payloadCommit then Except.error "BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID"
+  else Except.ok ()
 
-    let mut daCommitOutputs : Nat := 0
-    let mut got : Bytes := ByteArray.empty
-    for o in cinfo.outputs do
-      if o.covenantType == COV_TYPE_DA_COMMIT then
-        daCommitOutputs := daCommitOutputs + 1
-        if o.covenantData.size == 32 then
-          got := o.covenantData
-    if daCommitOutputs != 1 then
-      throw "BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID"
-    if got != payloadCommit then
-      throw "BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID"
+/-- Validate chunk count matches commit declaration.
+    LIVE sub-function (lines 284-285). Written without do for formal proof access. -/
+def validateChunkCountMatch (setSize chunkCount : Nat) : Except String Unit :=
+  if setSize != chunkCount then Except.error "BLOCK_ERR_DA_INCOMPLETE"
+  else Except.ok ()
 
-  pure ()
+/-- Collect and concatenate chunk payloads in index order [start..start+count).
+    Returns error if any index missing. LIVE sub-function (lines 287-295).
+    Recursive version (no foldlM/List.range) for full formal proof access. -/
+def collectChunkPayloads
+    (set : Std.RBMap Nat DaChunkInfo compare) (count : Nat)
+    (acc : Bytes := ByteArray.empty) (start : Nat := 0)
+    : Except String Bytes :=
+  match count with
+  | 0 => .ok acc
+  | n + 1 =>
+    match set.find? start with
+    | none => .error "BLOCK_ERR_DA_INCOMPLETE"
+    | some ch => collectChunkPayloads set n (acc ++ ch.payload) (start + 1)
+
+/-- Process one commit tx: extract daId, chunkCount, check duplicate.
+    LIVE sub-function of accumulateDATxs commit branch. -/
+def processCommitTx
+    (t : ParsedDATx)
+    (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
+    : Except String (Std.RBMap Bytes DaCommitInfo cmpBytes) :=
+  match t.commitDaId with
+  | none => .error "TX_ERR_PARSE"
+  | some daId =>
+    match t.commitChunkCount with
+    | none => .error "TX_ERR_PARSE"
+    | some cc =>
+      match validateNoDuplicateCommit commits daId with
+      | .error e => .error e
+      | .ok () => .ok (commits.insert daId { chunkCount := cc, outputs := t.outputs })
+
+/-- Process one chunk tx: extract daId, index, hash, verify, check duplicate.
+    LIVE sub-function of accumulateDATxs chunk branch. -/
+def processChunkTx
+    (t : ParsedDATx)
+    (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
+    : Except String (Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes) :=
+  match t.chunkDaId with
+  | none => .error "TX_ERR_PARSE"
+  | some daId =>
+    match t.chunkIndex with
+    | none => .error "TX_ERR_PARSE"
+    | some idx =>
+      match t.chunkHash with
+      | none => .error "TX_ERR_PARSE"
+      | some h =>
+        match validateChunkHash t.payload h with
+        | .error e => .error e
+        | .ok () =>
+          let set := match chunks.find? daId with | none => Std.RBMap.empty | some m => m
+          match validateNoDuplicateChunk set idx with
+          | .error e => .error e
+          | .ok () => .ok (chunks.insert daId (set.insert idx { chunkIndex := idx, chunkHash := h, payload := t.payload }))
+
+/-- Accumulate DA txs using decomposed processCommitTx / processChunkTx.
+    Each branch delegates to the corresponding sub-function, enabling
+    formal error propagation proofs at the sub-function level. -/
+def accumulateDATxs
+    (txs : List Bytes)
+    (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
+    (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
+    : Except String (Std.RBMap Bytes DaCommitInfo cmpBytes ×
+                      Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes) :=
+  match txs with
+  | [] => .ok (commits, chunks)
+  | txBytes :: rest =>
+    match parseDATx txBytes with
+    | .error e => .error e
+    | .ok t =>
+      if t.txKind == 0x01 then
+        match processCommitTx t commits with
+        | .error e => .error e
+        | .ok newCommits => accumulateDATxs rest newCommits chunks
+      else if t.txKind == 0x02 then
+        match processChunkTx t chunks with
+        | .error e => .error e
+        | .ok newChunks => accumulateDATxs rest commits newChunks
+      else
+        accumulateDATxs rest commits chunks
+
+/-- Verify loop: check per-commit integrity for each commit.
+    Recursive version for formal proof access. -/
+def verifyCommitIntegrity
+    (commitList : List (Bytes × DaCommitInfo))
+    (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
+    : Except String Unit :=
+  match commitList with
+  | [] => .ok ()
+  | (daId, cinfo) :: rest =>
+    match chunks.find? daId with
+    | none => .error "BLOCK_ERR_DA_INCOMPLETE"
+    | some set =>
+      match validateChunkCountMatch set.size cinfo.chunkCount with
+      | .error e => .error e
+      | .ok () =>
+        match collectChunkPayloads set cinfo.chunkCount with
+        | .error e => .error e
+        | .ok concat =>
+          let payloadCommit := SHA3.sha3_256 concat
+          match validateCommitOutput cinfo.outputs payloadCommit with
+          | .error e => .error e
+          | .ok () => verifyCommitIntegrity rest chunks
+
+/-- Full DA set integrity validation. Composed from recursive sub-functions.
+    No do-notation for full formal proof access. -/
+def validateDASetIntegrity (txs : List Bytes) : Except String Unit :=
+  match accumulateDATxs txs Std.RBMap.empty Std.RBMap.empty with
+  | .error e => .error e
+  | .ok (commits, chunks) =>
+    match validateDaBatchCount commits.size with
+    | .error e => .error e
+    | .ok () =>
+      match validateNoOrphanChunks chunks.toList commits with
+      | .error e => .error e
+      | .ok () => verifyCommitIntegrity commits.toList chunks
 
 def validateDaIntegrityGate
     (blockBytes : Bytes)

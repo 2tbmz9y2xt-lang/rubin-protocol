@@ -1,22 +1,78 @@
 {
   "schema_version": 1,
-  "status": "pv-refined",
-  "notes": "Bridge map for executable trace ops. PV structural proofs are in proof_coverage.json (not trace-replay based).",
+  "status": "active",
+  "notes": "Bridge map for model theorem -> executable conformance op evidence. Each critical_op carries one evidence_level from the exact mixed taxonomy: machine_checked_universal, machine_checked_assumption_backed, machine_checked_behavioral, or machine_checked_contract. This map is op-scoped and records mixed Lean↔Go/Rust ceilings rather than one uniform implementation-equivalence claim. Trace IDs are required only on rows that explicitly claim imported Go-trace evidence.",
+  "source_rebind": {
+    "source_oid": "2d9f1024f1d0b1bfb3fe6a8b727762e7a979b3a0",
+    "inventory_sha256": "77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6",
+    "original_imported_source_paths": 109,
+    "active_imported_source_paths": 102,
+    "disposition": "DROP_STALE_SOURCE",
+    "byte_exact_path_count": 79,
+    "reconcile_current_protocol_path_count": 14,
+    "reconcile_current_protocol_paths": [
+      "RubinFormal/Conformance/CVVaultLifecycleReplay.lean",
+      "RubinFormal/ConnectBlockStrong.lean",
+      "RubinFormal/CovenantRegistryExhaustive.lean",
+      "RubinFormal/ErrorPriority.lean",
+      "RubinFormal/HtlcSpendStructuralLiveBridge.lean",
+      "RubinFormal/PerTxStateMachine.lean",
+      "RubinFormal/RefinementBridgeV1.lean",
+      "RubinFormal/RotationPrelude.lean",
+      "RubinFormal/SighashAssumptionBridge.lean",
+      "RubinFormal/SpendGateLiveBridge.lean",
+      "RubinFormal/StructuralRulesBehavioral.lean",
+      "RubinFormal/TxWireTxAfterDaCoreStep.lean",
+      "RubinFormal/TxWireTxFinalizeContract.lean",
+      "RubinFormal/VaultStateMachine.lean"
+    ],
+    "import_adapt_single_owner_path_count": 1,
+    "import_adapt_single_owner_paths": [
+      "REGISTRY_COMPLETENESS_POLICY.md"
+    ],
+    "transplant_check_logic_path_count": 1,
+    "transplant_check_logic_paths": [
+      "scripts/check.sh"
+    ],
+    "excluded_stale_source_paths": [
+      "RubinFormal/ConsensusConstantsBehavioral.lean",
+      "RubinFormal/FormalGap03.lean",
+      "RubinFormal/TxWireTxPayloadContract.lean",
+      "RubinFormal/TxWireTxWithWitnessContract.lean",
+      "RubinFormal/TxWireTxAfterDaCoreContract.lean",
+      "RubinFormal/TxWireTxBodyContract.lean",
+      "RubinFormal/TxWireTxContract.lean"
+    ],
+    "import_package_check_or_test_path_count": 7,
+    "import_package_check_or_test_paths": [
+      "tests/test_check_formal_registry_truth.py",
+      "tests/test_integration.py",
+      "tests/test_path_resolution.py",
+      "tests/test_registry_extraction.py",
+      "tests/test_scope_and_names.py",
+      "tests/test_strip_lean_comments.py",
+      "tests/test_validation.py"
+    ],
+    "active_partition_equation": "79 + 14 + 1 + 1 + 7 = 102",
+    "original_inventory_equation": "102 + 7 = 109"
+  },
   "critical_ops": [
     {
       "op": "parse_tx",
       "gate": "CV-PARSE",
-      "model_theorem": "RubinFormal.transaction_wire_proved",
-      "lean_file": "rubin-formal/RubinFormal/PinnedSections.lean",
-      "evidence_level": "fixture_trace_refinement",
+      "model_theorem": "RubinFormal.Refinement.parse_tx_go_trace_contract_proved",
+      "lean_file": "rubin-formal/RubinFormal/Refinement/GoTraceV1Check.lean",
+      "evidence_level": "machine_checked_contract",
+      "trace_source_file": "rubin-formal/RubinFormal/Refinement/GoTraceV1.lean",
       "traced_vector_ids": [
         "PARSE-01",
         "PARSE-16"
       ],
-      "scope": "Go trace replay for the listed CV-PARSE trace IDs plus the bounded transactionWireStatement theorem.",
+      "contract_scope": "Bounded Go-trace contract over the two imported parse_tx rows, PARSE-01 and PARSE-16, replayed against Lean parseTx. PARSE-16's accepted error-priority drift is payload-pinned via a triple-segment content hash.",
       "limitations": [
-        "PARSE-16 is replayed as a concrete generated trace vector.",
-        "This row does not claim all byte strings are universally refined against Go."
+        "Narrow trace-backed contract over two imported parse_tx rows, not all 16 CV-PARSE fixture vectors and not a universal proof for all possible transaction byte sequences.",
+        "PARSE-16 has documented error-priority drift (Go: WITNESS_OVERFLOW, Lean: SIG_ALG_INVALID). Drift exception is pinned to concrete fixture payload via triple-segment hash (full + first-half + second-half, ~192-bit collision resistance) — any byte change breaks the proof.",
+        "Serialize direction (Lean→bytes→Go roundtrip) is not covered by this contract."
       ]
     },
     {
@@ -24,61 +80,355 @@
       "gate": "CV-SIGHASH",
       "model_theorem": "RubinFormal.sighash_v1_proved",
       "lean_file": "rubin-formal/RubinFormal/PinnedSections.lean",
-      "evidence_level": "fixture_trace_refinement",
-      "traced_vector_ids": [
-        "SIGHASH-01",
-        "SIGHASH-02",
-        "SIGHASH-03",
-        "SIGHASH-04",
-        "SIGHASH-05"
-      ],
-      "scope": "Go trace replay for the listed CV-SIGHASH trace IDs plus the bounded sighashV1Statement theorem.",
+      "theorem_file": "rubin-formal/RubinFormal/SighashRefinementUpgrade.lean",
+      "evidence_level": "machine_checked_universal",
+      "spec_section": "§12",
+      "go_function": "DigestV1",
+      "contract_scope": "Universal theorem surface for live sighash selection and the TXCTX allowed_sighash_set gates, with CV-SIGHASH replay as complementary evidence. This row covers the structural selector/TXCTX gate surface only; the digest collision ceiling is tracked separately.",
       "limitations": [
-        "This row does not claim a cryptographic security proof or universal equivalence for all transaction inputs."
-      ]
+        "The executable replay covers the current CV-SIGHASH fixture set and remains complementary evidence, not a universal proof for arbitrary raw transaction / witness-carried sighash_type combinations outside the named theorem surface.",
+        "This row does not claim the SHA3 collision-resistance ceiling for equal live digestV1 outputs on distinct executable preimages; that residual is tracked separately in `sighash_v1_digest_collision_residual`."
+      ],
+      "supporting_theorems": [
+        "RubinFormal.sighash_v1_proved",
+        "RubinFormal.Conformance.cv_sighash_vectors_pass",
+        "RubinFormal.SighashV1.buildPreimageFrameParts_injective",
+        "RubinFormal.SighashV1.selectHashPrevouts_all_commits_all_inputs",
+        "RubinFormal.SighashV1.selectHashPrevouts_anyonecanpay_commits_current_input",
+        "RubinFormal.SighashV1.selectHashSequences_all_commits_all_inputs",
+        "RubinFormal.SighashV1.selectHashSequences_anyonecanpay_commits_current_input",
+        "RubinFormal.SighashV1.selectHashOutputs_all_commits_all_outputs",
+        "RubinFormal.SighashV1.selectHashOutputs_none_commits_no_outputs",
+        "RubinFormal.SighashV1.selectHashOutputs_single_commits_selected_output",
+        "RubinFormal.SighashV1.selectHashOutputs_single_oob_commits_empty",
+        "RubinFormal.selectHashPrevouts_invalid_returns_none",
+        "RubinFormal.selectHashSequences_invalid_returns_none",
+        "RubinFormal.selectHashOutputs_invalid_returns_none",
+        "RubinFormal.hasValidBaseType_exhaustive",
+        "RubinFormal.validateTxContextSighashGate_ok_iff",
+        "RubinFormal.validateTxContextSighashGate_invalid_base_rejects",
+        "RubinFormal.validateTxContextSighashGate_disallowed_rejects",
+        "RubinFormal.validateTxContextSighashWitness_ok_iff",
+        "RubinFormal.validateTxContextSighashWitness_empty_signature_rejects",
+        "RubinFormal.validateTxContextSighashWitness_invalid_base_rejects",
+        "RubinFormal.validateTxContextSighashWitness_disallowed_rejects"
+      ],
+      "notes": "Universal bridge for the live selector/TXCTX gate surface after splitting the assumption-backed digest-collision theorem into its own residual row. This row remains honest about residual raw-tx/preimage distinctness gaps and does not overclaim universal tx-level digest equivalence."
+    },
+    {
+      "op": "sighash_v1_digest_collision_residual",
+      "gate": "CV-SIGHASH",
+      "model_theorem": "RubinFormal.digestV1_output_collision_reduces_to_sha3_collision",
+      "lean_file": "rubin-formal/RubinFormal/SighashAssumptionBridge.lean",
+      "theorem_file": "rubin-formal/RubinFormal/SighashAssumptionBridge.lean",
+      "evidence_level": "machine_checked_assumption_backed",
+      "spec_section": "§12",
+      "go_function": "DigestV1",
+      "contract_scope": "Explicit reduction theorem for the remaining live digestV1 crypto ceiling: equal live digestV1 outputs on distinct executable preimages would require a SHA3-256 collision.",
+      "limitations": [
+        "This row is intentionally residual only. It does not re-count the structural selector/TXCTX allowlist gate surface already carried by `sighash_v1`.",
+        "The theorem is a reduction theorem, not an axiom-free impossibility proof: ruling out equal digests on distinct executable preimages still depends on SHA3-256 collision resistance."
+      ],
+      "supporting_theorems": [
+        "RubinFormal.digestV1_output_collision_reduces_to_sha3_collision"
+      ],
+      "notes": "Dedicated assumption-backed residual for the live digestV1 crypto boundary after the universal split of the selector/TXCTX gate lane."
     },
     {
       "op": "retarget_v1",
       "gate": "CV-POW",
-      "model_theorem": "RubinFormal.difficulty_update_proved",
-      "lean_file": "rubin-formal/RubinFormal/PinnedSections.lean",
-      "evidence_level": "fixture_trace_refinement",
-      "traced_vector_ids": [
-        "POW-01",
-        "POW-02",
-        "POW-03",
-        "POW-03A",
-        "POW-03C",
-        "POW-03D",
-        "POW-08",
-        "POW-09",
-        "POW-10"
-      ],
-      "scope": "Go trace replay for the listed CV-POW retarget trace IDs plus bounded arithmetic/clamp invariants in difficultyUpdateStatement.",
+      "model_theorem": "RubinFormal.retarget_cv_replay_pass",
+      "lean_file": "rubin-formal/RubinFormal/RetargetBehavioral.lean",
+      "evidence_level": "machine_checked_contract",
+      "contract_scope": "Bounded CV-POW replay contract for retargetV1, supported by a behavioral decomposition of the three-way clamp with constant pins, candidate monotonicity, 4x stability boundary, lo≤hi under valid preconditions, strengthened clamped range, and timestamp clamping.",
       "limitations": [
-        "This row does not claim universal refinement for every retargetV1 input tuple."
+        "The model theorem is bounded CV replay plus behavioral support; it does not claim a universal end-to-end refinement theorem for every retargetV1 input tuple.",
+        "No Go-trace theorem or trace-ID set is claimed by this row."
+      ],
+      "theorem_file": "rubin-formal/RubinFormal/RetargetBehavioral.lean",
+      "spec_section": "§15",
+      "go_function": "retargetV1",
+      "supporting_theorems": [
+        "RubinFormal.retarget_window_size_value",
+        "RubinFormal.retarget_block_interval_value",
+        "RubinFormal.retarget_tExpected_value",
+        "RubinFormal.retarget_max_timestamp_step_value",
+        "RubinFormal.retarget_pow_limit_value",
+        "RubinFormal.retarget_tExpected_decomposition",
+        "RubinFormal.retarget_identity",
+        "RubinFormal.retarget_zero_tActual",
+        "RubinFormal.retarget_lo_positive",
+        "RubinFormal.retarget_hi_bounded",
+        "RubinFormal.retarget_lo_le_hi",
+        "RubinFormal.retarget_clamped_in_range",
+        "RubinFormal.retarget_clamped_in_range_strong",
+        "RubinFormal.retarget_result_in_valid_range",
+        "RubinFormal.retarget_candidate_monotone",
+        "RubinFormal.retarget_candidate_monotone_target",
+        "RubinFormal.retarget_4x_lower",
+        "RubinFormal.retarget_4x_upper",
+        "RubinFormal.timestamp_step_bounded",
+        "RubinFormal.timestamp_step_le_actual",
+        "RubinFormal.max_tActual_bounded",
+        "RubinFormal.max_retarget_ratio",
+        "RubinFormal.retarget_cv_replay_pass",
+        "RubinFormal.Conformance.cv_pow_vectors_pass"
+      ],
+      "notes": "Behavioral closure of §15 retarget formula. The live retargetV1 function is validated against CV-POW vectors (native_decide), and the three-way clamp formula is decomposed into pure functions with full constant pins, candidate monotonicity (both tActual and targetOldNat), lo≤hi proof, strengthened clamped range [lo,hi], and 4x stability boundary. Helper lemma nat_div_le_div_right proved from Nat.div_add_mod since Lean 4.6.0 Init lacks Nat.div_le_div_right."
+    },
+    {
+      "op": "fork_choice_select",
+      "gate": "CV-FORK-CHOICE",
+      "model_theorem": "RubinFormal.Refinement.fork_choice_select_cv_contract_proved",
+      "lean_file": "rubin-formal/RubinFormal/Refinement/GoTraceV1Check.lean",
+      "evidence_level": "machine_checked_contract",
+      "contract_scope": "Bounded contract over exactly six positive protocol-generated CV-FORK-CHOICE vectors with op=fork_choice_select, replayed against selectWinner. Their order is pinned by forkChoiceSelectExpectedIds; the generator excludes expect_ok=false rows.",
+      "limitations": [
+        "Generated contract over exactly six current positive CV-FORK-CHOICE fork_choice_select vectors, not a universal proof for all possible chain configurations.",
+        "Negative expect_ok=false vectors are runtime conformance-only because the protocol generator excludes them; standalone-only extra vectors are not claimed by this row.",
+        "Data source is the protocol-generated CV-FORK-CHOICE Lean vectors, not Go trace (go_trace_v1.jsonl does not contain fork_choice_select operations).",
+        "Equivalence with Go/Rust implementation is structural (same if/else chain), not proved via rfl."
+      ],
+      "supporting_theorems": [
+        "RubinFormal.Conformance.cv_fork_choice_vectors_pass",
+        "RubinFormal.forkSelect_exhaustive",
+        "RubinFormal.forkSelect_tiebreak_det",
+        "RubinFormal.forkSelect_total_det",
+        "RubinFormal.forkSelect_heavier",
+        "RubinFormal.bytesLT_antisym"
       ]
     },
     {
       "op": "utxo_apply_basic",
       "gate": "CV-UTXO-BASIC",
-      "model_theorem": "RubinFormal.value_conservation_proved",
-      "lean_file": "rubin-formal/RubinFormal/PinnedSections.lean",
-      "evidence_level": "fixture_trace_refinement",
-      "traced_vector_ids": [
-        "CV-U-06",
-        "CV-U-09",
-        "CV-U-11",
-        "CV-U-13",
-        "CV-U-19",
-        "CV-U-EXT-01",
-        "CV-U-EXT-02",
-        "CV-U-EXT-03",
-        "CV-U-EXT-06"
-      ],
-      "scope": "Go trace replay for the listed CV-UTXO-BASIC trace IDs plus bounded value-conservation statements.",
+      "model_theorem": "RubinFormal.utxo_apply_basic_universal_refinement",
+      "lean_file": "rubin-formal/RubinFormal/RefinementBridgeV1.lean",
+      "evidence_level": "machine_checked_universal",
+      "contract_scope": "Universal inductive proof: for ANY transaction list and ANY UTXO state, if `connectBlockTxs` succeeds then UTXO conservation AND anti-double-spend hold simultaneously. Chain-level composition via `utxo_apply_basic_chain_refinement`. No axioms, no fixture dependence.",
       "limitations": [
-        "Known drift allowances in GoTraceV1Check remain explicit and this row does not claim universal SpendTx refinement."
+        "The universal theorems cover `connectBlockTxs` (non-coinbase transaction processing). Header linkage, PoW, and coinbase checks are proved elsewhere."
+      ],
+      "supporting_theorems": [
+        "RubinFormal.utxo_conservation_theorem",
+        "RubinFormal.no_double_spend_theorem",
+        "RubinFormal.utxo_apply_basic_chain_refinement",
+        "RubinFormal.chainConsistency_inductive"
+      ]
+    },
+    {
+      "op": "da_set_integrity",
+      "gate": "CV-DA-INTEGRITY",
+      "model_theorem": "RubinFormal.validateDASetIntegrity_ok_constrained",
+      "lean_file": "rubin-formal/RubinFormal/DaIntegrityBehavioral.lean",
+      "theorem_file": "rubin-formal/RubinFormal/DaIntegrityBehavioral.lean",
+      "evidence_level": "machine_checked_universal",
+      "spec_section": "§21",
+      "go_function": "validateDASetIntegrity",
+      "limitations": [],
+      "supporting_theorems": [
+        "RubinFormal.da_batch_exceeded",
+        "RubinFormal.da_batch_ok",
+        "RubinFormal.da_batch_at_limit",
+        "RubinFormal.da_batch_over_limit",
+        "RubinFormal.da_chunk_hash_mismatch",
+        "RubinFormal.da_chunk_hash_ok",
+        "RubinFormal.da_duplicate_commit_rejects",
+        "RubinFormal.da_duplicate_commit_ok",
+        "RubinFormal.da_duplicate_chunk_rejects",
+        "RubinFormal.da_duplicate_chunk_ok",
+        "RubinFormal.da_chunk_count_mismatch",
+        "RubinFormal.da_chunk_count_ok",
+        "RubinFormal.da_commit_output_wrong_count",
+        "RubinFormal.da_commit_output_hash_mismatch",
+        "RubinFormal.da_commit_output_ok",
+        "RubinFormal.da_gate_block_error",
+        "RubinFormal.da_gate_parse_error",
+        "RubinFormal.da_gate_integrity_error",
+        "RubinFormal.da_gate_all_ok",
+        "RubinFormal.da_gate_ok_implies_block_ok",
+        "RubinFormal.da_gate_ok_implies_das_ok",
+        "RubinFormal.da_empty_txs_accepted",
+        "RubinFormal.Conformance.cv_da_integrity_vectors_pass",
+        "RubinFormal.da_collect_empty",
+        "RubinFormal.da_orphan_chunk_rejects",
+        "RubinFormal.da_orphan_chunk_empty",
+        "RubinFormal.da_collect_missing",
+        "RubinFormal.da_collect_step",
+        "RubinFormal.da_orphan_chunk_step",
+        "RubinFormal.da_verify_missing_set",
+        "RubinFormal.da_verify_step_ok",
+        "RubinFormal.da_verify_empty",
+        "RubinFormal.da_accumulate_empty",
+        "RubinFormal.da_accumulate_parse_fail",
+        "RubinFormal.da_accumulate_commit_error",
+        "RubinFormal.da_accumulate_commit_ok",
+        "RubinFormal.da_accumulate_chunk_error",
+        "RubinFormal.da_accumulate_chunk_ok",
+        "RubinFormal.da_accumulate_skip",
+        "RubinFormal.da_integrity_accumulate_error",
+        "RubinFormal.da_integrity_batch_error",
+        "RubinFormal.da_integrity_orphan_error",
+        "RubinFormal.da_integrity_verify_result",
+        "RubinFormal.validateWitnessErrors_taxonomy",
+        "RubinFormal.parseDATxPhase1_taxonomy",
+        "RubinFormal.parseDATxPhase3_taxonomy",
+        "RubinFormal.parseDATx_error_taxonomy",
+        "RubinFormal.da_gate_ok_conjunction",
+        "RubinFormal.witness_overflow_size_rejects",
+        "RubinFormal.witness_overflow_flag_rejects",
+        "RubinFormal.witness_sig_alg_rejects",
+        "RubinFormal.witness_sig_noncanonical_rejects",
+        "RubinFormal.witness_all_ok",
+        "RubinFormal.validateDASetIntegrity_ok_constrained"
+      ],
+      "notes": "Universal closure of the live DA validator surface. validateDASetIntegrity_ok_constrained decomposes .ok into accumulateDATxs + batch count bound + orphan check + verifyCommitIntegrity with parse-derived witnesses. validateWitnessErrors is extracted as a LIVE sub-function; the full DA pipeline is decomposed into recursive helpers plus gate-level error propagation, with CV-DA-INTEGRITY replay backing the same surface.",
+      "contract_scope": "Universal closure of S21 DA set integrity. Constrained theorem decomposes .ok into all 4 stages with parse-derived witnesses."
+    },
+    {
+      "op": "parallel_validation_equivalence",
+      "model_theorem": "RubinFormal.connectBlockFullComputed_eq_connectBlockFull",
+      "lean_file": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
+      "theorem_file": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
+      "evidence_level": "machine_checked_universal",
+      "spec_section": "§18/§14/§19",
+      "go_function": "connect_block_parallel.go::BuildTxContext / ConnectBlockParallelSigVerify",
+      "contract_scope": "Universal closure of the shared validated sequential-versus-parallel block-connection surface. The row counts both the live queue accept/reject bridge in ParallelEquivalence.lean and the exact full block-pipeline equality between connectBlockFullComputed (computed TxContext path) and connectBlockFull (aggregate compatibility wrapper). The some-path equality is exact once the live TxContext continuing-count and sighash-witness gates accept; the none-path equality is unconditional.",
+      "limitations": [
+        "Malformed TxContext-input bundles that fail validateTxContextContinuingCounts or validateTxContextSighashWitness are intentionally tracked by the live §14 TxContext gate closure, not duplicated here as extra sequential↔parallel equivalence claims.",
+        "Auxiliary tagged-result lowest-index helper theorems are excluded from this bridge because the live queue promises deterministic submission-order surfacing under early abort, not a universal absolute-lowest-failing-index contract."
+      ],
+      "supporting_theorems": [
+        "RubinFormal.Refinement.ParallelEquivalence.accept_reject_equivalence_live",
+        "RubinFormal.connectBlockFullComputed_eq_connectBlockFull",
+        "RubinFormal.connectBlockFullComputed_none_eq",
+        "RubinFormal.connectBlockFullComputed_ok_implies_txctx_gates",
+        "RubinFormal.buildTxContextLive_eq_fromValues",
+        "RubinFormal.buildTxContextLive_eq_buildTxContext"
+      ],
+      "notes": "The previous behavioral ceiling came from counting only the queue reducer contract. The bridge now rests on the live queue accept/reject theorem plus the exact ConnectBlockFull computed-path equalities in ConnectBlockFull.lean; lower-level reducer algebra remains internal helper math rather than counted bridge surface. This upgrades the row honestly to universal without claiming malformed-TxContext equivalence or lowest-index error surfacing."
+    },
+    {
+      "op": "weight_accounting",
+      "gate": "CV-WEIGHT",
+      "model_theorem": "RubinFormal.txWeightAndStats_ok_weight_eq_constrained",
+      "lean_file": "rubin-formal/RubinFormal/TxWeightBehavioral.lean",
+      "theorem_file": "rubin-formal/RubinFormal/TxWeightBehavioral.lean",
+      "evidence_level": "machine_checked_universal",
+      "spec_section": "§9",
+      "go_function": "CalcTxWeight",
+      "contract_scope": "Universal closure of S9 weight formula. Full Except-chain proof: txWeightAndStats_ok_weight_eq_constrained records the successful parseTxHeader + parseTxBody + finalizeTxWeight chain and proves .ok implies the returned weight matches computeWeight on parse-derived witnesses.",
+      "limitations": [],
+      "supporting_theorems": [
+        "RubinFormal.Conformance.cv_weight_vectors_pass",
+        "RubinFormal.txWeightAndStats_ok_weight_eq",
+        "RubinFormal.txWeightAndStats_weight_pos",
+        "RubinFormal.weight_formula_bridges_abstract",
+        "RubinFormal.weight_discount_divisor_value",
+        "RubinFormal.weight_verify_cost_ml_dsa_value",
+        "RubinFormal.weight_verify_cost_unknown_suite_value",
+        "RubinFormal.computeWeight_monotone_base",
+        "RubinFormal.computeWeight_monotone_witness",
+        "RubinFormal.computeWeight_monotone_da",
+        "RubinFormal.computeWeight_monotone_sigCost",
+        "RubinFormal.sigCost_monotone_ml",
+        "RubinFormal.sigCost_monotone_unknown",
+        "RubinFormal.daSize_kind0",
+        "RubinFormal.compactSizeLen_small",
+        "RubinFormal.WeightSuiteAware.weight_suite_aware_correct",
+        "RubinFormal.WeightSuiteAware.weight_suite_aware_correct_create",
+        "RubinFormal.weight_accounting_proved"
+      ],
+      "notes": "Universal closure of §9 weight formula. The live txWeightAndStats path now has a parse-constrained full-chain theorem plus a non-vacuous positivity guard; CV-WEIGHT remains the executable evidence lane, and WeightSuiteAware.lean supporting theorems close the suite-aware post-rotation cost model within the same section-level universal row."
+    },
+    {
+      "op": "native_suite_rotation",
+      "gate": "FI-ROT-01 + FI-ROT-02",
+      "model_theorem": "RubinFormal.NativeSuiteRotation.fi_rot_01_descriptor_unique",
+      "lean_file": "rubin-formal/RubinFormal/NativeSuiteRotation.lean",
+      "supporting_theorems": [
+        "RubinFormal.NativeSuiteRotation.fi_rot_02_phase_partition",
+        "RubinFormal.NativeSuiteRotation.fi_rot_02_phases_exclusive",
+        "RubinFormal.Conformance.cv_native_rotation_cutoff_vectors_pass",
+        "RubinFormal.Conformance.cv_native_rotation_sunset_vectors_pass"
+      ],
+      "evidence_level": "machine_checked_behavioral",
+      "contract_scope": "Behavioral state-machine model of §23.2.1 descriptor activation lifecycle proving at-most-one uniqueness (inductive), five-phase exhaustive height partition with mutual exclusion. Conformance: 11 vectors (6 cutoff + 5 sunset) structurally replayed.",
+      "limitations": [
+        "Behavioral model only. No Go/Rust implementation bridge is claimed; the phase functions are Lean definitions rather than extracted production code."
+      ]
+    },
+    {
+      "op": "feature_activation_fsm",
+      "gate": "featurebits state-at-height fold",
+      "model_theorem": "RubinFormal.FeatureActivationLiveBridge.featurebit_state_at_height_from_window_counts_state_monotone",
+      "lean_file": "rubin-formal/RubinFormal/FeatureActivationLiveBridge.lean",
+      "theorem_file": "rubin-formal/RubinFormal/FeatureActivationLiveBridge.lean",
+      "evidence_level": "machine_checked_universal",
+      "spec_section": "§23",
+      "go_function": "FeatureBitStateAtHeightFromWindowCounts",
+      "contract_scope": "Universal closure of §23 feature activation FSM / prechecked state-only state-at-height fold surface. featurebit_state_at_height_from_window_counts_state_eq_fold bridges the live multi-boundary state helper to the fold-based FSM model once the same sufficient window_signal_counts prefix guard enforced by Go/Rust has passed, and featurebit_state_at_height_from_window_counts_state_monotone lifts multi_step_monotone onto that reachable live height path.",
+      "notes": "Universal closure of the §23 feature activation FSM state surface on the reachable prechecked state-at-height fold path. The Go/Rust helper's out-of-range error branch remains outside this row's scoped state-only bridge; existing single-step transition and flagday theorems remain complementary support.",
+      "limitations": [],
+      "supporting_theorems": [
+        "RubinFormal.active_terminal",
+        "RubinFormal.failed_terminal",
+        "RubinFormal.locked_in_always_activates",
+        "RubinFormal.multi_step_monotone",
+        "RubinFormal.flagday_exact_activation",
+        "RubinFormal.FeatureActivationLiveBridge.lockin_priority_over_timeout",
+        "RubinFormal.FeatureActivationLiveBridge.no_defined_to_active",
+        "RubinFormal.FeatureActivationLiveBridge.no_started_to_active",
+        "RubinFormal.FeatureActivationLiveBridge.defined_to_started_iff",
+        "RubinFormal.FeatureActivationLiveBridge.started_to_lockedin_iff",
+        "RubinFormal.FeatureActivationLiveBridge.started_to_failed_iff",
+        "RubinFormal.FeatureActivationLiveBridge.flagday_complete_behavior",
+        "RubinFormal.FeatureActivationLiveBridge.min_three_steps_to_active",
+        "RubinFormal.FeatureActivationLiveBridge.featurebit_state_at_height_from_window_counts_state_eq_fold",
+        "RubinFormal.FeatureActivationLiveBridge.featurebit_state_at_height_from_window_counts_state_monotone"
+      ]
+    },
+    {
+      "op": "spend_gate_bridge",
+      "gate": "descriptor-aware P2PK spend gate",
+      "model_theorem": "RubinFormal.SpendGateLiveBridge.validateP2PKSpendPreSig_ok_constrained",
+      "lean_file": "rubin-formal/RubinFormal/SpendGateLiveBridge.lean",
+      "theorem_file": "rubin-formal/RubinFormal/SpendGateLiveBridge.lean",
+      "evidence_level": "machine_checked_universal",
+      "spec_section": "§5.4 / §4.1.2",
+      "go_function": "validateP2PKSpendPreSig / scanSingleInputStep",
+      "contract_scope": "Universal closure of the descriptor-aware P2PK spend-side live gate bridge. Under the same preceding live structural guards, validateP2PKSpendPreSig and the P2PK branch of scanSingleInputStep succeed iff the committed suite is in NativeSpendSuites(h,d); inactive suites reject with the exact live error codes.",
+      "notes": "Universal closure of the live post-rotation spend gate bridge on the descriptor-aware P2PK spend path. The counted closure is the direct spend helper plus the input-scan gate; FI-ROT-04/FI-ROT-06 model theorems remain supporting evidence rather than the counted closure itself.",
+      "limitations": [
+        "Scope: descriptor-aware P2PK spend-side live gate bridge only; create-side gate and other spend validators are tracked separately."
+      ],
+      "supporting_theorems": [
+        "RubinFormal.SpendGateLiveBridge.validateP2PKSpendPreSig_rejects_inactive_suite",
+        "RubinFormal.SpendGateLiveBridge.scanSingleInputStep_ok_constrained",
+        "RubinFormal.SpendGateLiveBridge.scanSingleInputStep_rejects_inactive_p2pk_suite",
+        "RubinFormal.NativeSpendCreateGate.fi_rot_04_spend_gate_iff",
+        "RubinFormal.LegacySunset.fi_rot_06_old_suite_rejected_after_h4",
+        "RubinFormal.LegacySunset.fi_rot_06_new_suite_always_spendable_after_h4"
+      ]
+    },
+    {
+      "op": "native_rotation",
+      "gate": "FI-ROT",
+      "model_theorem": "RubinFormal.NativeRegistryResolution.native_rotation_ok_constrained",
+      "lean_file": "rubin-formal/RubinFormal/NativeRegistryResolution.lean",
+      "theorem_file": "rubin-formal/RubinFormal/NativeRegistryResolution.lean",
+      "evidence_level": "machine_checked_universal",
+      "spec_section": "§4.1.2/§4.1.3/§23.2.1",
+      "go_function": "DescriptorRotationProvider",
+      "contract_scope": "Universal for native crypto suite rotation. Constrained theorem: ∀ well-formed descriptor+registry, ∀ height → phase partition holds ∧ all active create/spend suites resolve uniquely.",
+      "notes": "Universal for the native suite rotation model surface. Composes fi_rot_02_phase_partition + fi_rot_03_active_{create,suite}_resolves. No claim about byte-level wire encoding trace (G7 residual).",
+      "limitations": [
+        "Structural model ↔ Go/Rust parity proved; byte-level wire encoding trace not formalized (G7-class cross-language bridge residual)."
+      ],
+      "supporting_theorems": [
+        "RubinFormal.NativeSuiteRotation.fi_rot_02_phase_partition",
+        "RubinFormal.NativeRegistryResolution.fi_rot_03_active_suite_resolves",
+        "RubinFormal.NativeRegistryResolution.fi_rot_03_active_create_suite_resolves",
+        "RubinFormal.RegistryResolutionLiveBridge.pre_rotation_registered_iff"
       ]
     }
   ]

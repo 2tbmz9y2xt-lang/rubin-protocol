@@ -12,6 +12,36 @@ if str(TOOLS_DIR) not in sys.path:
 import check_formal_coverage as m  # noqa: E402
 
 
+def source_rebind_doc() -> dict:
+    source_rebind = dict(m.EXPECTED_SOURCE_REBIND_SCALARS)
+    for key, paths in m.EXPECTED_SOURCE_REBIND_PATHS.items():
+        source_rebind[key] = sorted(paths)
+    return {"source_rebind": source_rebind}
+
+
+class SourceRebindTests(unittest.TestCase):
+    def test_accepts_exact_manifest(self) -> None:
+        self.assertEqual(m.validate_source_rebind(source_rebind_doc()), [])
+
+    def test_rejects_path_set_and_count_drift(self) -> None:
+        doc = source_rebind_doc()
+        doc["source_rebind"]["reconcile_current_protocol_paths"].pop()
+
+        errors = m.validate_source_rebind(doc)
+
+        self.assertTrue(any("reconcile_current_protocol_paths set drift" in error for error in errors))
+        self.assertTrue(any("reconcile_current_protocol_path_count does not match" in error for error in errors))
+
+    def test_rejects_partition_arithmetic_drift(self) -> None:
+        doc = source_rebind_doc()
+        doc["source_rebind"]["byte_exact_path_count"] = 78
+
+        errors = m.validate_source_rebind(doc)
+
+        self.assertTrue(any("byte_exact_path_count drift" in error for error in errors))
+        self.assertTrue(any("active partition drift" in error for error in errors))
+
+
 class FormalCoverageSummaryTests(unittest.TestCase):
     def test_summary_accepts_exact_counts(self) -> None:
         rows = [

@@ -19,6 +19,9 @@ def witnessPrefix : Bytes :=
     0x52,0x55,0x42,0x49,0x4e,0x2d,0x57,0x49,0x54,0x4e,0x45,0x53,0x53,0x2f
   ]
 
+def coinbaseWitnessReservedValue : Bytes :=
+  RubinFormal.bytes ((List.replicate 32 (UInt8.ofNat 0)).toArray)
+
 structure BlockHeader where
   version : Nat
   prevHash : Bytes
@@ -91,68 +94,100 @@ def powCheck (h : BlockHeader) : Except String Unit := do
   let _ ← RubinFormal.PowV1.powCheck (headerBytes h) h.target
   pure ()
 
-  def parseTxFromCursor (c : Cursor) : Except String (Nat × Bytes × Bytes × Bytes × Cursor) := do
-  let start := c.off
-  let (ver, c1) ←
-    match c.getU32le? with
-    | none => throw "BLOCK_ERR_PARSE"
-    | some x => pure x
-  let (tkB, c2) ←
-    match c1.getU8? with
-    | none => throw "BLOCK_ERR_PARSE"
-    | some x => pure x
-  let tk := tkB.toNat
-  if !(tk == 0x00 || tk == 0x01 || tk == 0x02) then throw "TX_ERR_PARSE"
-  let (_, c3) ←
-    match c2.getU64le? with
-    | none => throw "BLOCK_ERR_PARSE"
-    | some x => pure x
-  let (inCount, c4, minIn) ←
-    match c3.getCompactSize? with
-    | none => throw "BLOCK_ERR_PARSE"
-    | some x => pure x
-  if !minIn then throw "TX_ERR_PARSE"
-  match RubinFormal.TxWeightV2.parseInputsSkip c4 inCount with
-  | none => throw "BLOCK_ERR_PARSE"
-  | some c5 =>
-    let (outCount, c6, minOut) ←
-      match c5.getCompactSize? with
-      | none => throw "BLOCK_ERR_PARSE"
-      | some x => pure x
+  /-- Tx-kind validation from parseTxFromCursor (line 130).
+      LIVE sub-function: parseTxFromCursor calls it directly. -/
+  def validateTxKind (tk : Nat) : Except String Unit := do
+    if !(tk == 0x00 || tk == 0x01 || tk == 0x02) then throw "TX_ERR_PARSE"
+    pure ()
+
+  /-- Input count minimality from parseTxFromCursor (line 139).
+      LIVE sub-function: parseTxFromCursor calls it directly. -/
+  def validateInputCountMin (minIn : Bool) : Except String Unit := do
+    if !minIn then throw "TX_ERR_PARSE"
+    pure ()
+
+  /-- Output count minimality from parseTxFromCursor (line 147).
+      LIVE sub-function: parseTxFromCursor calls it directly. -/
+  def validateOutputCountMin (minOut : Bool) : Except String Unit := do
     if !minOut then throw "TX_ERR_PARSE"
-    let (c7, _anchorBytes) ←
-      match RubinFormal.TxWeightV2.parseOutputsForAnchor c6 outCount with
-      | none => throw "BLOCK_ERR_PARSE"
-      | some x => pure x
-    let (_, c8) ←
-      match c7.getU32le? with
-      | none => throw "BLOCK_ERR_PARSE"
-      | some x => pure x
+    pure ()
+
+  /-- Witness-section error checks extracted from parseTxFromCursor (lines 143-147).
+      This is a LIVE sub-function: parseTxFromCursor calls it directly. -/
+  def applyWitnessChecks (ws : TxWeightV2.WitnessSectionResult) : Except String Unit := do
+    let witBytes := ws.endOff - ws.startOff
+    if witBytes > TxWeightV2.MAX_WITNESS_BYTES_PER_TX then throw "TX_ERR_WITNESS_OVERFLOW"
+    if ws.isOverflow then throw "TX_ERR_WITNESS_OVERFLOW"
+    -- Unknown non-sentinel suite IDs are structurally parseable. Native-suite
+    -- admissibility is enforced later by the spend path.
+    if ws.anySigNoncanonical then throw "TX_ERR_SIG_NONCANONICAL"
+    pure ()
+
+  /-- DA-payload length checks from parseTxFromCursor (lines 158-164).
+      LIVE sub-function: parseTxFromCursor calls it directly. -/
+  def applyDaLenChecks (tk : Nat) (daLen : Nat) (minDa : Bool) : Except String Unit := do
+    if !minDa then throw "TX_ERR_PARSE"
+    if tk == 0x00 then
+      if daLen != 0 then throw "TX_ERR_PARSE"
+    else if tk == 0x01 then
+      if daLen > DaCoreV1.MAX_DA_MANIFEST_BYTES_PER_TX then throw "TX_ERR_PARSE"
+    else
+      if daLen < 1 || daLen > DaCoreV1.CHUNK_BYTES then throw "TX_ERR_PARSE"
+    pure ()
+
+  /-- Parse all transaction inputs.
+      Extracted from parseTxFromCursor for bridge proofs. -/
+  @[irreducible] def readInputs (c4 : Cursor) (inCount : Nat) : Except String Cursor :=
+    match RubinFormal.TxWeightV2.parseInputsSkip c4 inCount with
+    | none => .error "BLOCK_ERR_PARSE"
+    | some c5 => .ok c5
+
+  /-- Read output count + validate minimality.
+      Extracted from parseTxFromCursor for bridge proofs. -/
+  @[irreducible] def readOutputCount (c5 : Cursor) : Except String (Nat × Cursor × Bool) :=
+    match c5.getCompactSize? with
+    | none => .error "BLOCK_ERR_PARSE"
+    | some (outCount, c6, minOut) => .ok (outCount, c6, minOut)
+
+  /-- Parse outputs (anchor extraction).
+      Extracted from parseTxFromCursor for bridge proofs. -/
+  @[irreducible] def readOutputs (c6 : Cursor) (outCount : Nat) : Except String (Cursor × Nat) :=
+    match RubinFormal.TxWeightV2.parseOutputsForAnchor c6 outCount with
+    | none => .error "BLOCK_ERR_PARSE"
+    | some x => .ok x
+
+  /-- Read locktime (U32LE).
+      Extracted from parseTxFromCursor for bridge proofs. -/
+  @[irreducible] def readLocktime (c7 : Cursor) : Except String (Nat × Cursor) :=
+    match c7.getU32le? with
+    | none => .error "BLOCK_ERR_PARSE"
+    | some x => .ok x
+
+  /-- Post-input parsing: outputs, locktime, DA core, witness, DA len.
+      Uses extracted sub-functions for outputs/locktime so that bridge
+      proofs can target them directly. -/
+  @[irreducible] def parseTxPostInputs (c : Cursor) (start : Nat) (tk : Nat)
+      (inCount : Nat) (c5 : Cursor) :
+      Except String (Nat × Bytes × Bytes × Bytes × Cursor) := do
+    let (outCount, c6, minOut) ← readOutputCount c5
+    validateOutputCountMin minOut
+    let (c7, _anchorBytes) ← readOutputs c6 outCount
+    let (_, c8) ← readLocktime c7
     let (c9, _daCoreLen) ←
       match RubinFormal.DaCoreV1.parseDaCoreFieldsWithBytes tk c8 with
       | none => throw "TX_ERR_PARSE"
       | some x => pure x
     let coreEnd := c9.off
-    let (cW, wErr, wStart, wEnd, _ml, _unk) ←
+    let ws ←
       match RubinFormal.TxWeightV2.parseWitnessSectionForWeight c9 with
       | none => throw "TX_ERR_PARSE"
       | some x => pure x
-    let witBytes := wEnd - wStart
-    if witBytes > RubinFormal.TxWeightV2.MAX_WITNESS_BYTES_PER_TX then throw "TX_ERR_WITNESS_OVERFLOW"
-    if wErr == .witnessOverflow then throw "TX_ERR_WITNESS_OVERFLOW"
-    if wErr == .sigAlgInvalid then throw "TX_ERR_SIG_ALG_INVALID"
-    if wErr == .sigNoncanonical then throw "TX_ERR_SIG_NONCANONICAL"
+    applyWitnessChecks ws
     let (daLen, c10, minDa) ←
-      match cW.getCompactSize? with
+      match ws.cursor.getCompactSize? with
       | none => throw "BLOCK_ERR_PARSE"
       | some x => pure x
-    if !minDa then throw "TX_ERR_PARSE"
-    if tk == 0x00 then
-      if daLen != 0 then throw "TX_ERR_PARSE"
-    else if tk == 0x01 then
-      if daLen > RubinFormal.DaCoreV1.MAX_DA_MANIFEST_BYTES_PER_TX then throw "TX_ERR_PARSE"
-    else
-      if daLen < 1 || daLen > RubinFormal.DaCoreV1.CHUNK_BYTES then throw "TX_ERR_PARSE"
+    applyDaLenChecks tk daLen minDa
     let (_, c11) ←
       match c10.getBytes? daLen with
       | none => throw "BLOCK_ERR_PARSE"
@@ -163,6 +198,28 @@ def powCheck (h : BlockHeader) : Except String Unit := do
     let txid := SHA3.sha3_256 core
     let wtxid := SHA3.sha3_256 full
     pure (inCount, txid, wtxid, full, { c with off := endOff })
+
+  /-- Parse a transaction from a cursor position.
+      Structured as explicit Except.bind chain (not do-notation) to
+      enable direct error-propagation proofs via simp + rw. -/
+  def parseTxFromCursor (c : Cursor) : Except String (Nat × Bytes × Bytes × Bytes × Cursor) :=
+    let start := c.off
+    match c.getU32le? with
+    | none => .error "BLOCK_ERR_PARSE"
+    | some (ver, c1) =>
+      match c1.getU8? with
+      | none => .error "BLOCK_ERR_PARSE"
+      | some (tkB, c2) =>
+        (validateTxKind tkB.toNat).bind fun () =>
+        match c2.getU64le? with
+        | none => .error "BLOCK_ERR_PARSE"
+        | some (_, c3) =>
+          match c3.getCompactSize? with
+          | none => .error "BLOCK_ERR_PARSE"
+          | some (inCount, c4, minIn) =>
+            (validateInputCountMin minIn).bind fun () =>
+            (readInputs c4 inCount).bind fun c5 =>
+            parseTxPostInputs c start tkB.toNat inCount c5
 
 def parseBlock (blockBytes : Bytes) : Except String ParsedBlock := do
   let c0 : Cursor := { bs := blockBytes, off := 0 }
@@ -203,8 +260,8 @@ def merkleRootTxids (txids : List Bytes) : Except String Bytes := do
 
 def merkleRootTagged (ids : List Bytes) (leafTag nodeTag : UInt8) : Except String Bytes := do
   if ids.isEmpty then throw "BLOCK_ERR_PARSE"
-  let leaf := fun (x : Bytes) => SHA3.sha3_256 ((ByteArray.empty.push leafTag) ++ x)
-  let node := fun (l r : Bytes) => SHA3.sha3_256 ((ByteArray.empty.push nodeTag) ++ l ++ r)
+  let leaf := fun (x : Bytes) => RubinFormal.Merkle.taggedLeafHash leafTag x
+  let node := fun (l r : Bytes) => RubinFormal.Merkle.taggedNodeHash nodeTag l r
   let mut level : List Bytes := ids.map leaf
   while level.length > 1 do
     let mut nxt : List Bytes := []
@@ -223,8 +280,7 @@ def witnessMerkleRootWtxids (wtxids : List Bytes) : Except String Bytes := do
   if wtxids.isEmpty then throw "BLOCK_ERR_PARSE"
   let mut ids := wtxids
   -- coinbase slot commits as zero bytes (CANONICAL §10.4.1)
-  let zero32 : Bytes := RubinFormal.bytes ((List.replicate 32 (UInt8.ofNat 0)).toArray)
-  ids := zero32 :: (ids.drop 1)
+  ids := coinbaseWitnessReservedValue :: (ids.drop 1)
   merkleRootTagged ids 0x02 0x03
 
 def witnessCommitmentHash (witnessRoot : Bytes) : Bytes :=
@@ -261,11 +317,27 @@ def findCoinbaseAnchorCommitment (coinbaseTx : Bytes) : Except String Bytes := d
       throw "BLOCK_ERR_WITNESS_COMMITMENT"
     pure anchorData
 
+def checkWitnessCommitment (pb : ParsedBlock) : Except String Unit := do
+  let witnessRoot ← witnessMerkleRootWtxids pb.wtxids
+  let expectedCommit := witnessCommitmentHash witnessRoot
+  let gotCommit ← findCoinbaseAnchorCommitment pb.coinbaseTx
+  if gotCommit != expectedCommit then
+    throw "BLOCK_ERR_WITNESS_COMMITMENT"
+  pure ()
+
 def validateBlockBasic
     (blockHex : Bytes)
     (expectedPrevHash : Option Bytes)
     (expectedTarget : Option Bytes) : Except String Unit := do
   let pb ← parseBlock blockHex
+  -- §25 step order (post-PR#418): pow → target → linkage → merkle → witness_commitment
+  -- pow check (range + strict-less)
+  powCheck pb.header
+  -- target check
+  match expectedTarget with
+  | none => pure ()
+  | some exp =>
+      if pb.header.target != exp then throw "BLOCK_ERR_TARGET_INVALID"
   -- linkage
   match expectedPrevHash with
   | none => pure ()
@@ -275,20 +347,31 @@ def validateBlockBasic
   let mr ← merkleRootTxids pb.txids
   if mr != pb.header.merkleRoot then
     throw "BLOCK_ERR_MERKLE_INVALID"
-  -- pow check (range + strict-less)
-  powCheck pb.header
-  -- target check
-  match expectedTarget with
-  | none => pure ()
-  | some exp =>
-      if pb.header.target != exp then throw "BLOCK_ERR_TARGET_INVALID"
   -- witness commitment check
-  let wmr ← witnessMerkleRootWtxids pb.wtxids
-  let expectCommit := witnessCommitmentHash wmr
-  let gotCommit ← findCoinbaseAnchorCommitment pb.coinbaseTx
-  if gotCommit != expectCommit then
-    throw "BLOCK_ERR_WITNESS_COMMITMENT"
-  pure ()
+  checkWitnessCommitment pb
+
+-- F-AUDIT-04: Duplicate txid uniqueness.
+-- Go enforces nonce uniqueness in validateBlockTxSemantics (block_basic_txs.go:35-39)
+-- via TX_ERR_NONCE_REPLAY. Txid = SHA3(core bytes) which includes the nonce, so
+-- under collision resistance, unique nonces ⟹ unique txids.
+-- The basic block validator here does not repeat that check (it runs in a separate
+-- pass in Go); this section documents the invariant for auditors.
+
+/-- Check that a list of byte-arrays has no duplicates (quadratic, OK for proof). -/
+def noDuplicateByteArrays : List Bytes → Bool
+  | [] => true
+  | x :: rest => !rest.contains x && noDuplicateByteArrays rest
+
+/-- noDuplicateByteArrays on empty list is trivially true. -/
+theorem noDuplicateByteArrays_nil : noDuplicateByteArrays [] = true := rfl
+
+/-- noDuplicateByteArrays implies the head is not in the tail. -/
+theorem noDuplicateByteArrays_head_not_in_tail
+    (x : Bytes) (rest : List Bytes)
+    (h : noDuplicateByteArrays (x :: rest) = true) :
+    rest.contains x = false := by
+  simp [noDuplicateByteArrays] at h
+  exact h.1
 
 end BlockBasicV1
 

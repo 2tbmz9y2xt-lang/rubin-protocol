@@ -196,11 +196,13 @@ jobs:
           restore-keys: |
             lake-formal-${{ runner.os }}-
 
-      - name: Lean build (rubin-formal)
+      - name: Lean package checks (rubin-formal)
         run: |
           cd rubin-formal
           lake env lean --version
           lake build
+          python3 -m unittest discover -s tests -p 'test_*.py'
+          python3 tools/check_formal_registry_truth.py
 
       - name: Formal coverage baseline check
         run: python3 tools/check_formal_coverage.py

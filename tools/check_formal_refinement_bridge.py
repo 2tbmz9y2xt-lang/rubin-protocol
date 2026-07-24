@@ -2,19 +2,30 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
-from check_formal_coverage import declared_lean_theorems
+from check_formal_coverage import declared_lean_theorems, validate_source_rebind
 
 
-ALLOWED_EVIDENCE_LEVEL = {"fixture_trace_refinement"}
+ALLOWED_EVIDENCE_LEVEL = {
+    "machine_checked_universal",
+    "machine_checked_assumption_backed",
+    "machine_checked_behavioral",
+    "machine_checked_contract",
+}
 FORMAL_SKIP_GATE_PREFIXES = ("CV-PV-",)
 FORBIDDEN_SCOPE_MARKERS = ("universal", "for all", "all inputs", "all byte strings", "not bounded", "not-bounded")
+TRACE_SOURCE_FILE = "rubin-formal/RubinFormal/Refinement/GoTraceV1.lean"
 
 
 def valid_non_empty_string_list(value: object) -> bool:
     return isinstance(value, list) and bool(value) and all(isinstance(item, str) and item for item in value)
+
+
+def valid_string_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) and item for item in value)
 
 
 def states_bounded_scope(value: object) -> bool:
@@ -91,6 +102,12 @@ def fail(msg: str) -> int:
     return 1
 
 
+def theorem_declared_in_file(path: Path, theorem: str) -> bool:
+    short_name = theorem.rsplit(".", 1)[-1]
+    pattern = re.compile(rf"^\s*theorem\s+{re.escape(short_name)}\b", re.MULTILINE)
+    return bool(pattern.search(path.read_text(encoding="utf-8")))
+
+
 def parse_executable_ops(matrix_text: str) -> set[str]:
     ops: set[str] = set()
     for line in matrix_text.splitlines():
@@ -138,6 +155,12 @@ def main() -> int:
         return fail("conformance/fixtures directory not found")
 
     bridge = json.loads(bridge_path.read_text(encoding="utf-8"))
+    source_rebind_errors = validate_source_rebind(bridge)
+    if source_rebind_errors:
+        for err in source_rebind_errors:
+            print(f"ERROR: {err}", file=sys.stderr)
+        return 1
+
     rows = bridge.get("critical_ops")
     if not isinstance(rows, list) or len(rows) == 0:
         return fail("refinement_bridge.json: critical_ops[] must be non-empty")
@@ -146,7 +169,7 @@ def main() -> int:
     executable_ops = parse_executable_ops(matrix_text)
     gate_ops = parse_fixture_gates(fixtures_dir)
     declared_theorems = declared_lean_theorems(repo_root / "rubin-formal" / "RubinFormal")
-    trace_path = repo_root / "rubin-formal" / "RubinFormal" / "Refinement" / "GoTraceV1.lean"
+    trace_path = repo_root / TRACE_SOURCE_FILE
     if not trace_path.exists():
         return fail("rubin-formal/RubinFormal/Refinement/GoTraceV1.lean not found")
     trace_text = trace_path.read_text(encoding="utf-8")
@@ -163,27 +186,14 @@ def main() -> int:
         lean_file = row.get("lean_file")
         evidence_level = row.get("evidence_level")
         traced_vector_ids = row.get("traced_vector_ids")
-        scope = row.get("scope")
+        trace_source_file = row.get("trace_source_file")
+        scope = row.get("contract_scope")
         limitations = row.get("limitations")
 
         if not isinstance(op, str) or not op:
             print(f"ERROR: critical_ops[{idx}] missing op", file=sys.stderr)
             bad = True
             continue
-        if op not in executable_ops:
-            print(f"ERROR: op `{op}` is not executable in conformance/MATRIX.md", file=sys.stderr)
-            bad = True
-
-        if not isinstance(gate, str) or gate not in gate_ops:
-            print(f"ERROR: gate `{gate}` not found in fixtures", file=sys.stderr)
-            bad = True
-        elif op not in gate_ops[gate]:
-            print(f"ERROR: op `{op}` is not present in fixture gate `{gate}`", file=sys.stderr)
-            bad = True
-        elif not has_lean_replay_evidence(repo_root, gate):
-            print(f"ERROR: gate `{gate}` lacks imported Lean replay evidence for fixture_trace_refinement", file=sys.stderr)
-            bad = True
-
         if not isinstance(theorem, str) or not theorem:
             print(f"ERROR: missing model_theorem for op `{op}`", file=sys.stderr)
             bad = True
@@ -191,8 +201,12 @@ def main() -> int:
             print(f"ERROR: theorem `{theorem}` not found in rubin-formal Lean files", file=sys.stderr)
             bad = True
 
-        if not isinstance(lean_file, str) or not (repo_root / lean_file).exists():
+        lean_path = repo_root / lean_file if isinstance(lean_file, str) else None
+        if lean_path is None or not lean_path.exists():
             print(f"ERROR: lean_file missing for op `{op}`: {lean_file}", file=sys.stderr)
+            bad = True
+        elif isinstance(theorem, str) and theorem and not theorem_declared_in_file(lean_path, theorem):
+            print(f"ERROR: theorem `{theorem}` is not declared in lean_file `{lean_file}`", file=sys.stderr)
             bad = True
 
         if evidence_level not in ALLOWED_EVIDENCE_LEVEL:
@@ -202,24 +216,83 @@ def main() -> int:
                 file=sys.stderr,
             )
             bad = True
-        if not valid_non_empty_string_list(traced_vector_ids):
-            print(f"ERROR: traced_vector_ids[] for op `{op}` must be a non-empty string list", file=sys.stderr)
+            continue
+
+        if not isinstance(scope, str) or not scope:
+            print(f"ERROR: contract_scope for op `{op}` must be a non-empty string", file=sys.stderr)
             bad = True
-        else:
-            expected_trace_ids = trace_ids_for_op(trace_text, op)
-            actual_trace_ids = set(traced_vector_ids)
-            if actual_trace_ids != expected_trace_ids:
+        if not valid_string_list(limitations):
+            print(f"ERROR: limitations[] for op `{op}` must be a string list", file=sys.stderr)
+            bad = True
+
+        if evidence_level == "machine_checked_contract":
+            if op not in executable_ops:
+                print(f"ERROR: contract op `{op}` is not executable in conformance/MATRIX.md", file=sys.stderr)
+                bad = True
+            if not isinstance(gate, str) or gate not in gate_ops:
+                print(f"ERROR: contract gate `{gate}` not found in fixtures", file=sys.stderr)
+                bad = True
+            elif op not in gate_ops[gate]:
+                print(f"ERROR: contract op `{op}` is not present in fixture gate `{gate}`", file=sys.stderr)
+                bad = True
+            elif not has_lean_replay_evidence(repo_root, gate):
+                print(f"ERROR: contract gate `{gate}` lacks imported Lean replay evidence", file=sys.stderr)
+                bad = True
+            if not states_bounded_scope(scope):
+                print(f"ERROR: contract_scope for contract op `{op}` must state the bounded claim", file=sys.stderr)
+                bad = True
+            if not valid_non_empty_string_list(limitations):
+                print(f"ERROR: contract limitations[] for op `{op}` must be non-empty", file=sys.stderr)
+                bad = True
+        elif evidence_level == "machine_checked_universal":
+            if "universal" not in scope.lower():
+                print(f"ERROR: universal contract_scope for op `{op}` must state its universal ceiling", file=sys.stderr)
+                bad = True
+        elif evidence_level == "machine_checked_assumption_backed":
+            assumption_text = f"{scope} {' '.join(limitations) if isinstance(limitations, list) else ''}".lower()
+            if not any(marker in assumption_text for marker in ("assumption", "depends", "collision", "reduction")):
+                print(f"ERROR: assumption-backed op `{op}` must name its assumption/reduction ceiling", file=sys.stderr)
+                bad = True
+            if not valid_non_empty_string_list(limitations):
+                print(f"ERROR: assumption-backed limitations[] for op `{op}` must be non-empty", file=sys.stderr)
+                bad = True
+        elif evidence_level == "machine_checked_behavioral":
+            if "behavioral" not in scope.lower():
+                print(f"ERROR: behavioral contract_scope for op `{op}` must state its behavioral ceiling", file=sys.stderr)
+                bad = True
+            if not valid_non_empty_string_list(limitations):
+                print(f"ERROR: behavioral limitations[] for op `{op}` must be non-empty", file=sys.stderr)
+                bad = True
+
+        claims_trace_evidence = trace_source_file is not None or traced_vector_ids is not None
+        if claims_trace_evidence:
+            if evidence_level != "machine_checked_contract":
+                print(f"ERROR: trace-backed op `{op}` must use machine_checked_contract evidence", file=sys.stderr)
+                bad = True
+            if trace_source_file != TRACE_SOURCE_FILE:
                 print(
-                    f"ERROR: traced_vector_ids[] for op `{op}` drift: expected {sorted(expected_trace_ids)}, "
-                    f"got {sorted(actual_trace_ids)}",
+                    f"ERROR: trace_source_file for op `{op}` must be `{TRACE_SOURCE_FILE}`, got {trace_source_file}",
                     file=sys.stderr,
                 )
                 bad = True
-        if not states_bounded_scope(scope):
-            print(f"ERROR: scope for op `{op}` must state the bounded claim", file=sys.stderr)
-            bad = True
-        if not valid_non_empty_string_list(limitations):
-            print(f"ERROR: limitations[] for op `{op}` must be a non-empty string list", file=sys.stderr)
+            if not valid_non_empty_string_list(traced_vector_ids):
+                print(f"ERROR: traced_vector_ids[] for op `{op}` must be a non-empty string list", file=sys.stderr)
+                bad = True
+            else:
+                expected_trace_ids = trace_ids_for_op(trace_text, op)
+                actual_trace_ids = set(traced_vector_ids)
+                if not expected_trace_ids:
+                    print(f"ERROR: no imported trace rows found for trace-backed op `{op}`", file=sys.stderr)
+                    bad = True
+                elif actual_trace_ids != expected_trace_ids:
+                    print(
+                        f"ERROR: traced_vector_ids[] for op `{op}` drift: expected {sorted(expected_trace_ids)}, "
+                        f"got {sorted(actual_trace_ids)}",
+                        file=sys.stderr,
+                    )
+                    bad = True
+        elif "traced_vector_ids" in row or "trace_source_file" in row:
+            print(f"ERROR: incomplete trace evidence fields for op `{op}`", file=sys.stderr)
             bad = True
 
     if bad:

@@ -5,6 +5,7 @@ import RubinFormal.OutputDescriptorV2
 import RubinFormal.SighashV1
 import RubinFormal.TxParseV2
 import RubinFormal.CovenantGenesisV1
+import RubinFormal.NativeSpendCreateGate
 
 namespace RubinFormal
 
@@ -25,6 +26,8 @@ def COV_TYPE_DA_COMMIT : Nat := 0x0103
 def COV_TYPE_HTLC : Nat := 0x0100
 def COV_TYPE_MULTISIG : Nat := 0x0104
 
+/- Pre-rotation: only ML-DSA-87 for native P2PK spend.
+   Post-rotation (Q-FORMAL-ROTATION-04): `suite ∉ NATIVE_SPEND_SUITES(h)`. -/
 def SUITE_ID_SENTINEL : Nat := 0x00
 def SUITE_ID_ML_DSA_87 : Nat := 0x01
 
@@ -44,13 +47,13 @@ def isValidSighashType (sht : UInt8) : Bool :=
   sht == (SIGHASH_NONE ||| SIGHASH_ANYONECANPAY) ||
   sht == (SIGHASH_SINGLE ||| SIGHASH_ANYONECANPAY)
 
--- Formal replay: deterministic signature verification oracle (crypto is out-of-scope).
--- We accept only the known-good wtxids present in conformance fixtures for P2PK-spend OK cases.
+-- Deterministic signature-verification oracle for the known-good P2PK
+-- conformance cases. Cryptographic verification itself remains out of scope.
 def KNOWN_VALID_P2PK_WTXIDS : List Bytes := [
   RubinFormal.bytes (#[(UInt8.ofNat 0x77), (UInt8.ofNat 0x98), (UInt8.ofNat 0x5c), (UInt8.ofNat 0xb2), (UInt8.ofNat 0x61), (UInt8.ofNat 0x3e), (UInt8.ofNat 0xda), (UInt8.ofNat 0xad), (UInt8.ofNat 0xdd), (UInt8.ofNat 0x92), (UInt8.ofNat 0xef), (UInt8.ofNat 0x98), (UInt8.ofNat 0x78), (UInt8.ofNat 0xad), (UInt8.ofNat 0xc7), (UInt8.ofNat 0x64), (UInt8.ofNat 0x56), (UInt8.ofNat 0x7e), (UInt8.ofNat 0xd7), (UInt8.ofNat 0x54), (UInt8.ofNat 0xec), (UInt8.ofNat 0x6b), (UInt8.ofNat 0x23), (UInt8.ofNat 0xd1), (UInt8.ofNat 0x33), (UInt8.ofNat 0xbf), (UInt8.ofNat 0xec), (UInt8.ofNat 0x8d), (UInt8.ofNat 0xb5), (UInt8.ofNat 0xb3), (UInt8.ofNat 0xc8), (UInt8.ofNat 0x9f)]),
   RubinFormal.bytes (#[(UInt8.ofNat 0xab), (UInt8.ofNat 0x38), (UInt8.ofNat 0x46), (UInt8.ofNat 0xf5), (UInt8.ofNat 0xb3), (UInt8.ofNat 0xb0), (UInt8.ofNat 0x3f), (UInt8.ofNat 0xf8), (UInt8.ofNat 0xb8), (UInt8.ofNat 0x9a), (UInt8.ofNat 0x97), (UInt8.ofNat 0xf7), (UInt8.ofNat 0x10), (UInt8.ofNat 0x3b), (UInt8.ofNat 0xfe), (UInt8.ofNat 0x3f), (UInt8.ofNat 0x75), (UInt8.ofNat 0xee), (UInt8.ofNat 0x69), (UInt8.ofNat 0xc4), (UInt8.ofNat 0x20), (UInt8.ofNat 0xea), (UInt8.ofNat 0xbc), (UInt8.ofNat 0x71), (UInt8.ofNat 0x8f), (UInt8.ofNat 0xed), (UInt8.ofNat 0xe1), (UInt8.ofNat 0xd9), (UInt8.ofNat 0x5c), (UInt8.ofNat 0xa7), (UInt8.ofNat 0x04), (UInt8.ofNat 0x6a)]),
   RubinFormal.bytes (#[(UInt8.ofNat 0x69), (UInt8.ofNat 0x8d), (UInt8.ofNat 0x3f), (UInt8.ofNat 0xfb), (UInt8.ofNat 0x9c), (UInt8.ofNat 0x77), (UInt8.ofNat 0xf2), (UInt8.ofNat 0xa6), (UInt8.ofNat 0x8f), (UInt8.ofNat 0x65), (UInt8.ofNat 0x2f), (UInt8.ofNat 0x12), (UInt8.ofNat 0x49), (UInt8.ofNat 0x97), (UInt8.ofNat 0x97), (UInt8.ofNat 0x7c), (UInt8.ofNat 0xa9), (UInt8.ofNat 0xb1), (UInt8.ofNat 0xc2), (UInt8.ofNat 0x0f), (UInt8.ofNat 0x49), (UInt8.ofNat 0x70), (UInt8.ofNat 0x07), (UInt8.ofNat 0xb0), (UInt8.ofNat 0x52), (UInt8.ofNat 0xad), (UInt8.ofNat 0xdf), (UInt8.ofNat 0x19), (UInt8.ofNat 0xac), (UInt8.ofNat 0x6b), (UInt8.ofNat 0x40), (UInt8.ofNat 0x4d)]),
-  RubinFormal.bytes (#[(UInt8.ofNat 0x9e), (UInt8.ofNat 0x2a), (UInt8.ofNat 0xe8), (UInt8.ofNat 0x13), (UInt8.ofNat 0x44), (UInt8.ofNat 0x93), (UInt8.ofNat 0xd2), (UInt8.ofNat 0x2a), (UInt8.ofNat 0x9a), (UInt8.ofNat 0xe0), (UInt8.ofNat 0xc9), (UInt8.ofNat 0x52), (UInt8.ofNat 0x40), (UInt8.ofNat 0xfb), (UInt8.ofNat 0x01), (UInt8.ofNat 0x14), (UInt8.ofNat 0x39), (UInt8.ofNat 0x67), (UInt8.ofNat 0xad), (UInt8.ofNat 0xcc), (UInt8.ofNat 0x1a), (UInt8.ofNat 0xe1), (UInt8.ofNat 0x50), (UInt8.ofNat 0xa3), (UInt8.ofNat 0xc7), (UInt8.ofNat 0x75), (UInt8.ofNat 0x37), (UInt8.ofNat 0x29), (UInt8.ofNat 0x83), (UInt8.ofNat 0xa5), (UInt8.ofNat 0xc8), (UInt8.ofNat 0x6d)]) 
+  RubinFormal.bytes (#[(UInt8.ofNat 0x9e), (UInt8.ofNat 0x2a), (UInt8.ofNat 0xe8), (UInt8.ofNat 0x13), (UInt8.ofNat 0x44), (UInt8.ofNat 0x93), (UInt8.ofNat 0xd2), (UInt8.ofNat 0x2a), (UInt8.ofNat 0x9a), (UInt8.ofNat 0xe0), (UInt8.ofNat 0xc9), (UInt8.ofNat 0x52), (UInt8.ofNat 0x40), (UInt8.ofNat 0xfb), (UInt8.ofNat 0x01), (UInt8.ofNat 0x14), (UInt8.ofNat 0x39), (UInt8.ofNat 0x67), (UInt8.ofNat 0xad), (UInt8.ofNat 0xcc), (UInt8.ofNat 0x1a), (UInt8.ofNat 0xe1), (UInt8.ofNat 0x50), (UInt8.ofNat 0xa3), (UInt8.ofNat 0xc7), (UInt8.ofNat 0x75), (UInt8.ofNat 0x37), (UInt8.ofNat 0x29), (UInt8.ofNat 0x83), (UInt8.ofNat 0xa5), (UInt8.ofNat 0xc8), (UInt8.ofNat 0x6d)])
 ]
 
 def clampU64Max : Nat := (Nat.pow 2 64) - 1
@@ -110,6 +113,7 @@ structure Tx where
   inputs : List TxIn
   outputs : List TxOut
   locktime : Nat
+  daCoreBytes : Bytes
   witness : List WitnessItem
   daPayloadLen : Nat
   daPayload : Bytes
@@ -133,6 +137,7 @@ instance : Inhabited Tx where
       inputs := [],
       outputs := [],
       locktime := 0,
+      daCoreBytes := ByteArray.empty,
       witness := [],
       daPayloadLen := 0,
       daPayload := ByteArray.empty
@@ -155,13 +160,12 @@ def parseInput (c : Cursor) : Option (TxIn × Cursor) := do
   pure ({ prevTxid := prevTxid, prevVout := vout, scriptSig := ss, sequence := seq }, c5)
 
 def parseInputs (c : Cursor) (n : Nat) : Option (List TxIn × Cursor) := do
-  let mut cur := c
-  let mut acc : List TxIn := []
-  for _ in [0:n] do
-    let (i, cur') ← parseInput cur
-    acc := acc.concat i
-    cur := cur'
-  pure (acc, cur)
+  match n with
+  | 0 => pure ([], c)
+  | k + 1 =>
+      let (i, c1) ← parseInput c
+      let (is, c2) ← parseInputs c1 k
+      pure (i :: is, c2)
 
 def parseOutput (c : Cursor) : Option (TxOut × Cursor) := do
   let (v64, c1) ← c.getU64le?
@@ -174,13 +178,12 @@ def parseOutput (c : Cursor) : Option (TxOut × Cursor) := do
   pure ({ value := value, covenantType := covenantType, covenantData := cd }, c4)
 
 def parseOutputs (c : Cursor) (n : Nat) : Option (List TxOut × Cursor) := do
-  let mut cur := c
-  let mut acc : List TxOut := []
-  for _ in [0:n] do
-    let (o, cur') ← parseOutput cur
-    acc := acc.concat o
-    cur := cur'
-  pure (acc, cur)
+  match n with
+  | 0 => pure ([], c)
+  | k + 1 =>
+      let (o, c1) ← parseOutput c
+      let (os, c2) ← parseOutputs c1 k
+      pure (o :: os, c2)
 
 -- Parse witness items structurally (canonicalization is handled earlier by ParseTx in clients,
 -- but for Lean replay we only need suite_id/pubkey/signature bytes and minimal CompactSize).
@@ -193,71 +196,38 @@ def parseWitnessItem (c : Cursor) : Option (WitnessItem × Cursor) := do
   let (sigLen, c4, minimal2) ← c3.getCompactSize?
   let _ ← requireMinimal minimal2
   let (sig, c5) ← c4.getBytes? sigLen
-  -- Non-sentinel suites require at least 1 byte of signature (sighash_type).
-  if suiteId != 0x00 && sigLen == 0 then none
-  else pure ({ suiteId := suiteId, pubkey := pub, signature := sig }, c5)
+  pure ({ suiteId := suiteId, pubkey := pub, signature := sig }, c5)
+
+def parseWitnessItems (c : Cursor) (n : Nat) : Option (List WitnessItem × Cursor) := do
+  match n with
+  | 0 => pure ([], c)
+  | k + 1 =>
+      let (w, c1) ← parseWitnessItem c
+      let (ws, c2) ← parseWitnessItems c1 k
+      pure (w :: ws, c2)
 
 def parseWitness (c : Cursor) : Option (List WitnessItem × Cursor) := do
   let (wCount, c1, minimal) ← c.getCompactSize?
   let _ ← requireMinimal minimal
-  let mut cur := c1
-  let mut acc : List WitnessItem := []
-  for _ in [0:wCount] do
-    let (w, cur') ← parseWitnessItem cur
-    acc := acc.concat w
-    cur := cur'
-  pure (acc, cur)
+  parseWitnessItems c1 wCount
 
-def parseTx (tx : Bytes) : Except String Tx := do
-  let c0 : Cursor := { bs := tx, off := 0 }
-  let (ver, c1) ←
-    match c0.getU32le? with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  let (tkB, c2) ←
-    match c1.getU8? with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  let tk := tkB.toNat
-  if !(tk == 0x00 || tk == 0x01 || tk == 0x02) then throw "TX_ERR_PARSE"
-  let (nonce64, c3) ←
-    match c2.getU64le? with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  let nonce := nonce64.toNat
-  let (inCount, c4, minIn) ←
-    match c3.getCompactSize? with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  if !minIn then throw "TX_ERR_PARSE"
-  let (ins, c5) ←
-    match parseInputs c4 inCount with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  let (outCount, c6, minOut) ←
-    match c5.getCompactSize? with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  if !minOut then throw "TX_ERR_PARSE"
-  let (outs, c7) ←
-    match parseOutputs c6 outCount with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  let (lock, c8) ←
-    match c7.getU32le? with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  -- DaCoreFieldsBytes: skip bytes based on tx_kind (for CV-UTXO-BASIC vectors only tx_kind=0x00)
-  let c9 := c8
-  let (wit, cW) ←
-    match parseWitness c9 with
-    | none => throw "TX_ERR_PARSE"
-    | some x => pure x
-  -- Canonical length check on ML-DSA witness items (matches Go tx_parse.go line 356).
-  -- Must happen at parse time, before UTXO lookups and coinbase-maturity checks.
+def parseTxFinalize
+    (tx : Bytes)
+    (ver tk nonce : Nat)
+    (ins : List TxIn)
+    (outs : List TxOut)
+    (lock : Nat)
+    (daCoreBytes : Bytes)
+    (wit : List WitnessItem)
+    (cW : Cursor) : Except String Tx := do
+  -- Canonical signature encoding is a parse-time rule and therefore precedes
+  -- UTXO lookup and all spend validation.
   for w in wit do
+    if w.suiteId != SUITE_ID_SENTINEL && w.signature.size == 0 then
+      throw "TX_ERR_PARSE"
     if w.suiteId == SUITE_ID_ML_DSA_87 then
-      if w.pubkey.size != ML_DSA_87_PUBKEY_BYTES || w.signature.size != ML_DSA_87_SIG_BYTES + 1 then
+      if w.pubkey.size != ML_DSA_87_PUBKEY_BYTES ||
+          w.signature.size != ML_DSA_87_SIG_BYTES + 1 then
         throw "TX_ERR_SIG_NONCANONICAL"
   let (daLen, c10, minDa) ←
     match cW.getCompactSize? with
@@ -278,10 +248,197 @@ def parseTx (tx : Bytes) : Except String Tx := do
       inputs := ins
       outputs := outs
       locktime := lock
+      daCoreBytes := daCoreBytes
       witness := wit
       daPayloadLen := daLen
       daPayload := payload
     }
+
+def parseTxAfterDaCoreWithWitness
+    (tx : Bytes)
+    (ver tk nonce : Nat)
+    (ins : List TxIn)
+    (outs : List TxOut)
+    (lock : Nat)
+    (daCoreBytes : Bytes)
+    (wit : List WitnessItem)
+    (cW : Cursor) : Except String Tx :=
+  parseTxFinalize tx ver tk nonce ins outs lock daCoreBytes wit cW
+
+def parseTxAfterDaCoreWithWitnessPair
+    (tx : Bytes)
+    (ver tk nonce : Nat)
+    (ins : List TxIn)
+    (outs : List TxOut)
+    (lock : Nat)
+    (daCoreBytes : Bytes)
+    : List WitnessItem × Cursor → Except String Tx
+  | (wit, cW) =>
+      parseTxAfterDaCoreWithWitness
+        tx ver tk nonce ins outs lock daCoreBytes wit cW
+
+def parseTxAfterDaCore
+    (tx : Bytes)
+    (ver tk nonce : Nat)
+    (ins : List TxIn)
+    (outs : List TxOut)
+    (lock : Nat)
+    (daCoreBytes : Bytes)
+    (c9 : Cursor) : Except String Tx :=
+  match parseWitness c9 with
+  | none => throw "TX_ERR_PARSE"
+  | some witAndCursor =>
+      parseTxAfterDaCoreWithWitnessPair tx ver tk nonce ins outs lock daCoreBytes witAndCursor
+
+def parseTxAfterLock
+    (tx : Bytes)
+    (ver tk nonce : Nat)
+    (ins : List TxIn)
+    (outs : List TxOut)
+    (lock : Nat)
+    (c8 : Cursor) : Except String Tx := do
+  let (c9, daCoreLen) ←
+    match RubinFormal.DaCoreV1.parseDaCoreFieldsWithBytes tk c8 with
+    | none => throw "TX_ERR_PARSE"
+    | some x => pure x
+  let daCoreBytes := tx.extract c8.off (c8.off + daCoreLen)
+  parseTxAfterDaCore tx ver tk nonce ins outs lock daCoreBytes c9
+
+def parseTxAfterOutputs
+    (tx : Bytes)
+    (ver tk nonce : Nat)
+    (ins : List TxIn)
+    (outs : List TxOut)
+    (c7 : Cursor) : Except String Tx := do
+  let (lock, c8) ←
+    match c7.getU32le? with
+    | none => throw "TX_ERR_PARSE"
+    | some x => pure x
+  parseTxAfterLock tx ver tk nonce ins outs lock c8
+
+def parseTxAfterInputs
+    (tx : Bytes)
+    (ver tk nonce : Nat)
+    (ins : List TxIn)
+    (c5 : Cursor) : Except String Tx := do
+  let (outCount, c6, minOut) ←
+    match c5.getCompactSize? with
+    | none => throw "TX_ERR_PARSE"
+    | some x => pure x
+  if !minOut then throw "TX_ERR_PARSE"
+  let (outs, c7) ←
+    match parseOutputs c6 outCount with
+    | none => throw "TX_ERR_PARSE"
+    | some x => pure x
+  parseTxAfterOutputs tx ver tk nonce ins outs c7
+
+def parseTxAfterNonce (tx : Bytes) (ver tk nonce : Nat) (c3 : Cursor) : Except String Tx := do
+  let (inCount, c4, minIn) ←
+    match c3.getCompactSize? with
+    | none => throw "TX_ERR_PARSE"
+    | some x => pure x
+  if !minIn then throw "TX_ERR_PARSE"
+  let (ins, c5) ←
+    match parseInputs c4 inCount with
+    | none => throw "TX_ERR_PARSE"
+    | some x => pure x
+  parseTxAfterInputs tx ver tk nonce ins c5
+
+def parseTx (tx : Bytes) : Except String Tx := do
+  let c0 : Cursor := { bs := tx, off := 0 }
+  let (ver, c1) ←
+    match c0.getU32le? with
+    | none => throw "TX_ERR_PARSE"
+    | some x => pure x
+  let (tkB, c2) ←
+    match c1.getU8? with
+    | none => throw "TX_ERR_PARSE"
+    | some x => pure x
+  let tk := tkB.toNat
+  if !(tk == 0x00 || tk == 0x01 || tk == 0x02) then throw "TX_ERR_PARSE"
+  let (nonce64, c3) ←
+    match c2.getU64le? with
+    | none => throw "TX_ERR_PARSE"
+    | some x => pure x
+  let nonce := nonce64.toNat
+  let body := tx.extract c3.off tx.size
+  parseTxAfterNonce body ver tk nonce { bs := body, off := 0 }
+
+def concatBytes : List Bytes → Bytes
+  | [] => ByteArray.empty
+  | b :: bs => b ++ concatBytes bs
+
+def serializeInput (i : TxIn) : Bytes :=
+  i.prevTxid ++
+  RubinFormal.WireEnc.u32le i.prevVout ++
+  RubinFormal.WireEnc.compactSize i.scriptSig.size ++
+  i.scriptSig ++
+  RubinFormal.WireEnc.u32le i.sequence
+
+def serializeInputs (ins : List TxIn) : Bytes :=
+  concatBytes (ins.map serializeInput)
+
+def serializeOutput (o : TxOut) : Bytes :=
+  RubinFormal.WireEnc.u64le o.value ++
+  RubinFormal.WireEnc.u16le o.covenantType ++
+  RubinFormal.WireEnc.compactSize o.covenantData.size ++
+  o.covenantData
+
+def serializeOutputs (outs : List TxOut) : Bytes :=
+  concatBytes (outs.map serializeOutput)
+
+def serializeWitnessItem (w : WitnessItem) : Bytes :=
+  RubinFormal.bytes #[UInt8.ofNat w.suiteId] ++
+  RubinFormal.WireEnc.compactSize w.pubkey.size ++
+  w.pubkey ++
+  RubinFormal.WireEnc.compactSize w.signature.size ++
+  w.signature
+
+def serializeWitnessItems (wit : List WitnessItem) : Bytes :=
+  concatBytes (wit.map serializeWitnessItem)
+
+def serializeWitness (wit : List WitnessItem) : Bytes :=
+  RubinFormal.WireEnc.compactSize wit.length ++ serializeWitnessItems wit
+
+def txAfterDaCoreBytes (pre : Bytes) (tx : Tx) : Bytes :=
+  pre ++ serializeWitness tx.witness ++ WireEnc.compactSize tx.daPayloadLen ++ tx.daPayload
+
+def txAfterDaCoreStartCursor (pre : Bytes) (tx : Tx) : Cursor :=
+  { bs := txAfterDaCoreBytes pre tx, off := pre.size }
+
+def txAfterDaCoreWitnessCursor (pre : Bytes) (tx : Tx) : Cursor :=
+  { bs := txAfterDaCoreBytes pre tx, off := pre.size + (serializeWitness tx.witness).size }
+
+def txAfterDaCoreWitnessPair (pre : Bytes) (tx : Tx) : List WitnessItem × Cursor :=
+  (tx.witness, txAfterDaCoreWitnessCursor pre tx)
+
+def serializeTxAfterNonce (tx : Tx) : Bytes :=
+  RubinFormal.WireEnc.compactSize tx.inputs.length ++
+  serializeInputs tx.inputs ++
+  RubinFormal.WireEnc.compactSize tx.outputs.length ++
+  serializeOutputs tx.outputs ++
+  RubinFormal.WireEnc.u32le tx.locktime ++
+  tx.daCoreBytes ++
+  serializeWitness tx.witness ++
+  RubinFormal.WireEnc.compactSize tx.daPayloadLen ++
+  tx.daPayload
+
+def serializeTxCore (tx : Tx) : Bytes :=
+  RubinFormal.WireEnc.u32le tx.version ++
+  RubinFormal.bytes #[UInt8.ofNat tx.txKind] ++
+  RubinFormal.WireEnc.u64le tx.txNonce ++
+  RubinFormal.WireEnc.compactSize tx.inputs.length ++
+  serializeInputs tx.inputs ++
+  RubinFormal.WireEnc.compactSize tx.outputs.length ++
+  serializeOutputs tx.outputs ++
+  RubinFormal.WireEnc.u32le tx.locktime ++
+  tx.daCoreBytes
+
+def serializeTx (tx : Tx) : Bytes :=
+  RubinFormal.WireEnc.u32le tx.version ++
+  RubinFormal.bytes #[UInt8.ofNat tx.txKind] ++
+  RubinFormal.WireEnc.u64le tx.txNonce ++
+  serializeTxAfterNonce tx
 
 def isCoinbasePrevout (i : TxIn) : Bool :=
   let zero32 : Bytes := RubinFormal.bytes ((List.replicate 32 (UInt8.ofNat 0)).toArray)
@@ -296,6 +453,385 @@ def sumOutputs (outs : List TxOut) : Nat :=
 def buildUtxoMap (utxos : List (Outpoint × UtxoEntry)) : Std.RBMap Outpoint UtxoEntry cmpOutpoint :=
   utxos.foldl (fun m (p : Outpoint × UtxoEntry) => m.insert p.fst p.snd) (Std.RBMap.empty)
 
+def txInOutpoint (i : TxIn) : Outpoint :=
+  { txid := i.prevTxid, vout := i.prevVout }
+
+def txConsumedOutpoints (tx : Tx) : List Outpoint :=
+  tx.inputs.map txInOutpoint
+
+def inputValueSum
+    (inputs : List TxIn)
+    (utxoMap : Std.RBMap Outpoint UtxoEntry cmpOutpoint) : Except String Nat := do
+  match inputs with
+  | [] => pure 0
+  | i :: rest =>
+      let op := txInOutpoint i
+      let e ←
+        match utxoMap.find? op with
+        | none => throw "TX_ERR_MISSING_UTXO"
+        | some x => pure x
+      let tail := inputValueSum rest utxoMap
+      pure (e.value + (← tail))
+
+def validateStructuralInputs (inputs : List TxIn) : Except String Unit := do
+  match inputs with
+  | [] => pure ()
+  | i :: rest =>
+      if i.scriptSig.size != 0 then throw "TX_ERR_PARSE"
+      if i.sequence > 0x7fffffff then throw "TX_ERR_SEQUENCE_INVALID"
+      if isCoinbasePrevout i then throw "TX_ERR_PARSE"
+      validateStructuralInputs rest
+
+structure InputScanState where
+  sumIn : Nat
+  sumInVault : Nat
+  vaultWhitelist : List Bytes
+  vaultOwnerLockId : Option Bytes
+  vaultInputs : Nat
+  inputLockIds : List Bytes
+  inputCovTypes : List Nat
+  inputEntries : List UtxoEntry
+  requiredWitnessSlots : Nat
+  consumedOutpoints : List Outpoint
+deriving Repr
+
+def InputScanState.empty : InputScanState :=
+  {
+    sumIn := 0
+    sumInVault := 0
+    vaultWhitelist := []
+    vaultOwnerLockId := none
+    vaultInputs := 0
+    inputLockIds := []
+    inputCovTypes := []
+    inputEntries := []
+    requiredWitnessSlots := 0
+    consumedOutpoints := []
+  }
+
+def validateCoinbaseMaturity
+    (e : UtxoEntry)
+    (height : Nat) : Except String Unit :=
+  if e.createdByCoinbase = true ∧ height < e.creationHeight + COINBASE_MATURITY then
+    .error "TX_ERR_COINBASE_IMMATURE"
+  else
+    .ok ()
+
+theorem validateCoinbaseMaturity_reject_iff
+    (e : UtxoEntry)
+    (height : Nat) :
+    validateCoinbaseMaturity e height = .error "TX_ERR_COINBASE_IMMATURE" ↔
+      e.createdByCoinbase = true ∧ height < e.creationHeight + COINBASE_MATURITY := by
+  by_cases hReject : e.createdByCoinbase = true ∧ height < e.creationHeight + COINBASE_MATURITY
+  · simp [validateCoinbaseMaturity, hReject]
+  · simp [validateCoinbaseMaturity, hReject]
+
+theorem validateCoinbaseMaturity_accept_iff
+    (e : UtxoEntry)
+    (height : Nat) :
+    validateCoinbaseMaturity e height = .ok () ↔
+      ¬(e.createdByCoinbase = true ∧ height < e.creationHeight + COINBASE_MATURITY) := by
+  by_cases hReject : e.createdByCoinbase = true ∧ height < e.creationHeight + COINBASE_MATURITY
+  · simp [validateCoinbaseMaturity, hReject]
+  · simp [validateCoinbaseMaturity, hReject]
+
+structure PreparedNonCoinbaseTx where
+  tx : Tx
+  inputState : InputScanState
+  fee : Nat
+  nextUtxoMap : Std.RBMap Outpoint UtxoEntry cmpOutpoint
+
+structure PreparedNonCoinbaseTxCore where
+  tx : Tx
+  inputState : InputScanState
+  fee : Nat
+
+-- F-AUDIT-06: Duplicate input rejection.
+-- scanSingleInputStep guards against double-spend by checking consumedOutpoints.
+-- Formal proof: ConnectBlockStrong.scanInputs_no_intra_tx_double_spend
+-- proves that any successful scanInputs run has pairwise-distinct consumed outpoints.
+-- See also: prepareNonCoinbaseTxBasic_no_intra_double_spend.
+def scanSingleInputStep
+    (input : TxIn)
+    (utxoMap : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
+    (height : Nat)
+    (acc : InputScanState)
+    (rotDesc? : Option NativeSuiteRotation.RotationDeploymentDescriptor := none) :
+    Except String InputScanState := do
+  let op := txInOutpoint input
+  if acc.consumedOutpoints.contains op then
+    throw "TX_ERR_PARSE"
+  let e ←
+    match utxoMap.find? op with
+    | none => throw "TX_ERR_MISSING_UTXO"
+    | some x => pure x
+
+  if e.covenantType == COV_TYPE_ANCHOR || e.covenantType == COV_TYPE_DA_COMMIT then
+    throw "TX_ERR_MISSING_UTXO"
+
+  validateCoinbaseMaturity e height
+
+  if e.covenantType == COV_TYPE_P2PK then
+    if e.covenantData.size != MAX_P2PK_COVENANT_DATA then
+      throw "TX_ERR_COVENANT_TYPE_INVALID"
+    -- Descriptor-aware spend gate: none => pre-rotation {ML_DSA_87};
+    -- some d => suite ∉ NATIVE_SPEND_SUITES(h,d) → reject.
+    let suite := (e.covenantData.get! 0).toNat
+    if !NativeSpendCreateGate.liveSpendGateAllows rotDesc? height suite then
+      throw "TX_ERR_SIG_ALG_INVALID"
+  else if e.covenantType == COV_TYPE_EXT then
+    -- 0x0102 is unassigned and therefore rejected independently of payload.
+    throw "TX_ERR_COVENANT_TYPE_INVALID"
+
+  let lockId := outputDescriptorLockId e
+  let mut nextAcc :=
+    { acc with
+        sumIn := acc.sumIn + e.value
+        inputLockIds := acc.inputLockIds.concat lockId
+        inputCovTypes := acc.inputCovTypes.concat e.covenantType
+        inputEntries := acc.inputEntries.concat e
+        consumedOutpoints := acc.consumedOutpoints.concat op
+    }
+
+  if e.covenantType == COV_TYPE_VAULT then
+    let v ← CovenantGenesisV1.parseVaultCovenantData e.covenantData
+    let nextVaultInputs := nextAcc.vaultInputs + 1
+    if nextVaultInputs > 1 then
+      throw "TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN"
+    nextAcc :=
+      { nextAcc with
+          requiredWitnessSlots := nextAcc.requiredWitnessSlots + v.keyCount
+          sumInVault := e.value
+          vaultOwnerLockId := some v.ownerLockId
+          vaultWhitelist := v.whitelist
+          vaultInputs := nextVaultInputs
+      }
+  else
+    nextAcc :=
+      { nextAcc with requiredWitnessSlots := nextAcc.requiredWitnessSlots + 1 }
+
+  pure nextAcc
+
+def scanInputsGo
+    (inputs : List TxIn)
+    (utxoMap : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
+    (height : Nat)
+    (acc : InputScanState)
+    (rotDesc? : Option NativeSuiteRotation.RotationDeploymentDescriptor := none) :
+    Except String InputScanState := do
+  match inputs with
+  | [] => pure acc
+  | i :: rest =>
+      let nextAcc ← scanSingleInputStep i utxoMap height acc rotDesc?
+      scanInputsGo rest utxoMap height nextAcc rotDesc?
+
+def scanInputs
+    (inputs : List TxIn)
+    (utxoMap : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
+    (height : Nat)
+    (rotDesc? : Option NativeSuiteRotation.RotationDeploymentDescriptor := none) :
+    Except String InputScanState :=
+  scanInputsGo inputs utxoMap height InputScanState.empty rotDesc?
+
+def eraseInputs
+    (utxoMap : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
+    (inputs : List TxIn) : Std.RBMap Outpoint UtxoEntry cmpOutpoint :=
+  inputs.foldl (fun next i => next.erase (txInOutpoint i)) utxoMap
+
+def insertOutputs
+    (utxoMap : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
+    (txid : Bytes)
+    (outputs : List TxOut)
+    (height : Nat) : Std.RBMap Outpoint UtxoEntry cmpOutpoint :=
+  let rec go
+      (outs : List TxOut)
+      (next : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
+      (vout : Nat) : Std.RBMap Outpoint UtxoEntry cmpOutpoint :=
+    match outs with
+    | [] => next
+    | o :: rest =>
+        let op : Outpoint := { txid := txid, vout := vout }
+        let next' :=
+          next.insert op
+            {
+              value := o.value
+              covenantType := o.covenantType
+              covenantData := o.covenantData
+              creationHeight := height
+              createdByCoinbase := false
+            }
+        go rest next' (vout + 1)
+  go outputs utxoMap 0
+
+def validateBasicWitnessLayout
+    (tx : Tx)
+    (inputState : InputScanState) : Except String Unit := do
+  if tx.witness.length != inputState.requiredWitnessSlots then
+    throw "TX_ERR_PARSE"
+  pure ()
+
+def validateBasicWitnessItemLengths (w : WitnessItem) : Except String Unit := do
+  if w.suiteId == SUITE_ID_ML_DSA_87 then
+    if w.pubkey.size != ML_DSA_87_PUBKEY_BYTES ||
+        w.signature.size != ML_DSA_87_SIG_BYTES + 1 then
+      throw "TX_ERR_SIG_NONCANONICAL"
+    pure ()
+  else
+    throw "TX_ERR_SIG_ALG_INVALID"
+
+def validateBasicP2PKSpend
+    (entry : UtxoEntry)
+    (w : WitnessItem)
+    (txBytes : Bytes)
+    (enforceSigOracle : Bool) : Except String Unit := do
+  if entry.covenantData.size != MAX_P2PK_COVENANT_DATA then
+    throw "TX_ERR_COVENANT_TYPE_INVALID"
+  let suite := (entry.covenantData.get! 0).toNat
+  if suite != SUITE_ID_ML_DSA_87 then
+    throw "TX_ERR_SIG_ALG_INVALID"
+  if suite != w.suiteId then
+    throw "TX_ERR_SIG_ALG_INVALID"
+  validateBasicWitnessItemLengths w
+  if w.signature.size == 0 then
+    throw "TX_ERR_PARSE"
+  let sighashType := w.signature.get! (w.signature.size - 1)
+  if !(isValidSighashType sighashType) then
+    throw "TX_ERR_SIGHASH_TYPE_INVALID"
+  let keyId := entry.covenantData.extract 1 33
+  if SHA3.sha3_256 w.pubkey != keyId then
+    throw "TX_ERR_SIG_INVALID"
+  if enforceSigOracle then
+    let wtxid := SHA3.sha3_256 txBytes
+    if !(KNOWN_VALID_P2PK_WTXIDS.contains wtxid) then
+      throw "TX_ERR_SIG_INVALID"
+  pure ()
+
+def validateBasicWitnesses
+    (txBytes : Bytes)
+    (tx : Tx)
+    (inputState : InputScanState)
+    (enforceSigOracle : Bool) : Except String Unit := do
+  let mut witnessCursor : Nat := 0
+  for entry in inputState.inputEntries do
+    if entry.covenantType == COV_TYPE_VAULT then
+      let vault ← CovenantGenesisV1.parseVaultCovenantData entry.covenantData
+      if witnessCursor + vault.keyCount > tx.witness.length then
+        throw "TX_ERR_PARSE"
+      -- Vault cryptographic verification is outside this replay model.
+      witnessCursor := witnessCursor + vault.keyCount
+    else
+      if witnessCursor + 1 > tx.witness.length then
+        throw "TX_ERR_PARSE"
+      let witness := tx.witness.get! witnessCursor
+      if entry.covenantType == COV_TYPE_P2PK then
+        validateBasicP2PKSpend entry witness txBytes enforceSigOracle
+      else if entry.covenantType == COV_TYPE_EXT then
+        -- Kept total even though input scanning rejects 0x0102 first.
+        throw "TX_ERR_COVENANT_TYPE_INVALID"
+      witnessCursor := witnessCursor + 1
+  if witnessCursor != tx.witness.length then
+    throw "TX_ERR_PARSE"
+  pure ()
+
+def validateBasicTxEnvelope (tx : Tx) : Except String Unit := do
+  if tx.inputs.length == 0 then
+    throw "TX_ERR_PARSE"
+  if tx.txNonce == 0 then
+    throw "TX_ERR_TX_NONCE_INVALID"
+  pure ()
+
+def validateBasicVaultSpend
+    (tx : Tx)
+    (inputState : InputScanState) : Except String Unit := do
+  if inputState.vaultInputs == 1 then
+    let owner ←
+      match inputState.vaultOwnerLockId with
+      | none => throw "TX_ERR_VAULT_MALFORMED"
+      | some x => pure x
+
+    let mut haveOwner : Bool := false
+    for (lid, cov) in List.zip inputState.inputLockIds inputState.inputCovTypes do
+      if cov != COV_TYPE_VAULT && lid == owner then
+        haveOwner := true
+    if !haveOwner then
+      throw "TX_ERR_VAULT_OWNER_AUTH_REQUIRED"
+
+    for o in tx.outputs do
+      if o.covenantType == COV_TYPE_VAULT then
+        throw "TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED"
+      let h := RubinFormal.OutputDescriptor.hash o.covenantType o.covenantData
+      if !(inputState.vaultWhitelist.contains h) then
+        throw "TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED"
+
+    let sumOut := sumOutputs tx.outputs
+    if sumOut < inputState.sumInVault then
+      throw "TX_ERR_VALUE_CONSERVATION"
+  pure ()
+
+def computeBasicFee
+    (tx : Tx)
+    (inputState : InputScanState) : Except String Nat := do
+  let sumOutAll := sumOutputs tx.outputs
+  if sumOutAll > inputState.sumIn then
+    throw "TX_ERR_VALUE_CONSERVATION"
+  pure (inputState.sumIn - sumOutAll)
+
+def prepareNonCoinbaseTxCore
+    (txBytes : Bytes)
+    (utxoMap : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
+    (height : Nat)
+    (blockTimestamp : Nat)
+    (chainId : Bytes)
+    (rotDesc? : Option NativeSuiteRotation.RotationDeploymentDescriptor := none)
+    (enforceSigOracle : Bool := true) :
+    Except String PreparedNonCoinbaseTxCore := do
+  let _ := blockTimestamp
+  let _ := chainId
+  let tx ← parseTx txBytes
+
+  validateBasicTxEnvelope tx
+  validateStructuralInputs tx.inputs
+
+  -- Output creation precedes input lookup to preserve deterministic error
+  -- priority for invalid outputs versus missing UTXOs.
+  for output in tx.outputs do
+    let outputAtGenesis : CovenantGenesisV1.TxOut := {
+      value := output.value
+      covenantType := output.covenantType
+      covenantData := output.covenantData
+    }
+    CovenantGenesisV1.validateOutGenesis outputAtGenesis tx.txKind height
+
+  let inputState ← scanInputs tx.inputs utxoMap height rotDesc?
+
+  validateBasicWitnessLayout tx inputState
+  validateBasicWitnesses txBytes tx inputState enforceSigOracle
+  validateBasicVaultSpend tx inputState
+  let fee ← computeBasicFee tx inputState
+  pure { tx := tx, inputState := inputState, fee := fee }
+
+def prepareNonCoinbaseTxBasic
+    (txBytes : Bytes)
+    (utxoMap : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
+    (height : Nat)
+    (blockTimestamp : Nat)
+    (chainId : Bytes)
+    (rotDesc? : Option NativeSuiteRotation.RotationDeploymentDescriptor := none)
+    (enforceSigOracle : Bool := true) :
+    Except String PreparedNonCoinbaseTx := do
+  let core ←
+    prepareNonCoinbaseTxCore
+      txBytes utxoMap height blockTimestamp chainId rotDesc? enforceSigOracle
+
+  let txid :=
+    let r := RubinFormal.TxV2.parseTx txBytes
+    match r.txid with
+    | some t => t
+    | none => SHA3.sha3_256 ByteArray.empty
+
+  let next := insertOutputs (eraseInputs utxoMap core.tx.inputs) txid core.tx.outputs height
+  pure { tx := core.tx, inputState := core.inputState, fee := core.fee, nextUtxoMap := next }
+
 -- NOTE: This is intentionally simplified for formal replay:
 -- we enforce all pre-signature rules and binding rules, but we treat cryptographic signature
 -- verification as an out-of-scope predicate (handled by Go↔Rust + OpenSSL in conformance).
@@ -305,224 +841,39 @@ def applyNonCoinbaseTxBasicState
     (height : Nat)
     (blockTimestamp : Nat)
     (chainId : Bytes)
-    (enforceSigOracle : Bool) : Except String (Nat × Std.RBMap Outpoint UtxoEntry cmpOutpoint) := do
-  let _ := blockTimestamp
-  let tx ← parseTx txBytes
-
-  if tx.inputs.length == 0 then throw "TX_ERR_PARSE"
-  if tx.txNonce == 0 then throw "TX_ERR_TX_NONCE_INVALID"
-
-  -- structural input checks (subset)
-  for i in tx.inputs do
-    if i.scriptSig.size != 0 then throw "TX_ERR_PARSE"
-    if i.sequence > 0x7fffffff then throw "TX_ERR_SEQUENCE_INVALID"
-    if isCoinbasePrevout i then throw "TX_ERR_PARSE"
-
-  -- output-creation validation is evaluated before input UTXO lookup.
-  -- This fixes deterministic conflict ordering for:
-  -- invalid output descriptor vs missing UTXO.
-  for o in tx.outputs do
-    let outg : CovenantGenesisV1.TxOut := {
-      value := o.value
-      covenantType := o.covenantType
-      covenantData := o.covenantData
-    }
-    CovenantGenesisV1.validateOutGenesis outg tx.txKind height
-
-  -- gather sums and vault context
-  let mut sumIn : Nat := 0
-  let mut sumInVault : Nat := 0
-  let mut vaultWhitelist : List Bytes := []
-  let mut vaultOwnerLockId : Option Bytes := none
-  let mut vaultInputs : Nat := 0
-  let mut inputLockIds : List Bytes := []
-  let mut inputCovTypes : List Nat := []
-  let mut requiredWitnessSlots : Nat := 0
-  let mut inputEntries : List UtxoEntry := []
-
-  -- require unique outpoints
-  let mut seen : Std.RBSet Outpoint cmpOutpoint := Std.RBSet.empty
-
-  for i in tx.inputs do
-    let op : Outpoint := { txid := i.prevTxid, vout := i.prevVout }
-    if seen.contains op then throw "TX_ERR_PARSE"
-    seen := seen.insert op
-    let e? := utxoMap.find? op
-    let e ← match e? with
-      | none => throw "TX_ERR_MISSING_UTXO"
-      | some x => pure x
-
-    if e.covenantType == COV_TYPE_ANCHOR || e.covenantType == COV_TYPE_DA_COMMIT then
-      throw "TX_ERR_MISSING_UTXO"
-
-    if e.createdByCoinbase then
-      if height < e.creationHeight + COINBASE_MATURITY then
-        throw "TX_ERR_COINBASE_IMMATURE"
-
-    -- P2PK suite gating (needed for CV-SIG-* and UTXO-basic replay correctness).
-    if e.covenantType == COV_TYPE_P2PK then
-      if e.covenantData.size != MAX_P2PK_COVENANT_DATA then
-        throw "TX_ERR_COVENANT_TYPE_INVALID"
-      let suite := (e.covenantData.get! 0).toNat
-      if suite != SUITE_ID_ML_DSA_87 then
-        throw "TX_ERR_SIG_ALG_INVALID"
-    else if e.covenantType == COV_TYPE_EXT then
-      -- 0x0102 (CORE_EXT) is unassigned per CANONICAL §14 — every spend is rejected
-      -- unconditionally (RUB-585), independent of covenant_data.
-      throw "TX_ERR_COVENANT_TYPE_INVALID"
-
-    let lockId := outputDescriptorLockId e
-    inputLockIds := inputLockIds.concat lockId
-    inputCovTypes := inputCovTypes.concat e.covenantType
-    inputEntries := inputEntries.concat e
-
-    sumIn := sumIn + e.value
-    -- witness cursor model (minimal): P2PK consumes 1 slot; VAULT consumes key_count slots.
-    if e.covenantType == COV_TYPE_VAULT then
-      let v ← CovenantGenesisV1.parseVaultCovenantData e.covenantData
-      requiredWitnessSlots := requiredWitnessSlots + v.keyCount
-    else
-      requiredWitnessSlots := requiredWitnessSlots + 1
-
-    if e.covenantType == COV_TYPE_VAULT then
-      vaultInputs := vaultInputs + 1
-      if vaultInputs > 1 then
-        throw "TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN"
-      sumInVault := e.value
-      let v ← CovenantGenesisV1.parseVaultCovenantData e.covenantData
-      vaultOwnerLockId := some v.ownerLockId
-      vaultWhitelist := v.whitelist
-
-  if tx.witness.length != requiredWitnessSlots then
-    throw "TX_ERR_PARSE"
-
-  let validateWitnessItemLengths (w : WitnessItem) : Except String Unit := do
-    if w.suiteId == SUITE_ID_ML_DSA_87 then
-      -- Wire-level signature includes the trailing sighash_type byte (+1).
-      if w.pubkey.size != ML_DSA_87_PUBKEY_BYTES || w.signature.size != ML_DSA_87_SIG_BYTES + 1 then
-        throw "TX_ERR_SIG_NONCANONICAL"
-      pure ()
-    else
-      throw "TX_ERR_SIG_ALG_INVALID"
-
-  let validateP2PKSpendPreSig (entry : UtxoEntry) (w : WitnessItem) (txBytes : Bytes) : Except String Unit := do
-    if entry.covenantData.size != MAX_P2PK_COVENANT_DATA then
-      throw "TX_ERR_COVENANT_TYPE_INVALID"
-    let suite := (entry.covenantData.get! 0).toNat
-    if suite != SUITE_ID_ML_DSA_87 then
-      throw "TX_ERR_SIG_ALG_INVALID"
-    if suite != w.suiteId then
-      throw "TX_ERR_SIG_ALG_INVALID"
-    validateWitnessItemLengths w
-    -- Sighash type validation: last byte of signature must be a valid sighash type.
-    if w.signature.size == 0 then throw "TX_ERR_PARSE"
-    let sht := w.signature.get! (w.signature.size - 1)
-    if !(isValidSighashType sht) then throw "TX_ERR_SIGHASH_TYPE_INVALID"
-    let keyId := entry.covenantData.extract 1 33
-    if SHA3.sha3_256 w.pubkey != keyId then
-      throw "TX_ERR_SIG_INVALID"
-    if enforceSigOracle then
-      let wtxid := SHA3.sha3_256 txBytes
-      if !(KNOWN_VALID_P2PK_WTXIDS.contains wtxid) then
-        throw "TX_ERR_SIG_INVALID"
-    pure ()
-
-  -- Pre-signature witness validation (needed for CV-SIG-* replay correctness).
-  let mut witnessCursor : Nat := 0
-  for e in inputEntries do
-    if e.covenantType == COV_TYPE_VAULT then
-      let v ← CovenantGenesisV1.parseVaultCovenantData e.covenantData
-      if witnessCursor + v.keyCount > tx.witness.length then
-        throw "TX_ERR_PARSE"
-      -- Vault signature verification is out-of-scope; cursor advance only.
-      witnessCursor := witnessCursor + v.keyCount
-    else
-      if witnessCursor + 1 > tx.witness.length then
-        throw "TX_ERR_PARSE"
-      let w := tx.witness.get! witnessCursor
-      if e.covenantType == COV_TYPE_P2PK then
-        validateP2PKSpendPreSig e w txBytes
-      else if e.covenantType == COV_TYPE_EXT then
-        -- 0x0102 (CORE_EXT) is unassigned and already rejected during input resolution
-        -- above (RUB-585); this branch is unreachable but kept for total coverage.
-        throw "TX_ERR_COVENANT_TYPE_INVALID"
-      witnessCursor := witnessCursor + 1
-  if witnessCursor != tx.witness.length then
-    throw "TX_ERR_PARSE"
-
-  -- CORE_VAULT rules used by CV-UTXO-BASIC vectors
-  if vaultInputs == 1 then
-    let owner ←
-      match vaultOwnerLockId with
-      | none => throw "TX_ERR_VAULT_MALFORMED"
-      | some x => pure x
-
-    -- owner-authorization required: at least one non-vault input must have lock_id == owner lock
-    let mut haveOwner : Bool := false
-    for (lid, cov) in List.zip inputLockIds inputCovTypes do
-      if cov != COV_TYPE_VAULT && lid == owner then
-        haveOwner := true
-    if !haveOwner then
-      throw "TX_ERR_VAULT_OWNER_AUTH_REQUIRED"
-
-    -- whitelist membership: every output descriptor hash must be in whitelist
-    for o in tx.outputs do
-      -- vault recursion is forbidden: a vault-spend must not create CORE_VAULT outputs
-      if o.covenantType == COV_TYPE_VAULT then
-        throw "TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED"
-      let h := RubinFormal.OutputDescriptor.hash o.covenantType o.covenantData
-      if !(vaultWhitelist.contains h) then
-        throw "TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED"
-
-    -- value rule: vault value must not fund fee
-    let sumOut := sumOutputs tx.outputs
-    if sumOut < sumInVault then
-      throw "TX_ERR_VALUE_CONSERVATION"
-
-  -- value conservation
-  let sumOutAll := sumOutputs tx.outputs
-  if sumOutAll > sumIn then throw "TX_ERR_VALUE_CONSERVATION"
-  let fee := sumIn - sumOutAll
-
-  -- update UTXO count: remove spent, add outputs
-  let mut next : Std.RBMap Outpoint UtxoEntry cmpOutpoint := utxoMap
-  for i in tx.inputs do
-    let op : Outpoint := { txid := i.prevTxid, vout := i.prevVout }
-    next := next.erase op
-
-  -- txid is consensus identifier = SHA3-256(TxCoreBytes(T)); we reuse Sighash parser core slice as proxy:
-  -- in these vectors tx_kind=0x00 and DaCoreFieldsBytes is empty, so TxCoreBytes ends at locktime.
-  let txid :=
-    let r := RubinFormal.TxV2.parseTx txBytes
-    match r.txid with
-    | some t => t
-    | none => SHA3.sha3_256 ByteArray.empty
-
-  let mut vout : Nat := 0
-  for o in tx.outputs do
-    let op : Outpoint := { txid := txid, vout := vout }
-    next := next.insert op { value := o.value, covenantType := o.covenantType, covenantData := o.covenantData, creationHeight := height, createdByCoinbase := false }
-    vout := vout + 1
-
-  pure (fee, next)
+    (rotDesc? : Option NativeSuiteRotation.RotationDeploymentDescriptor := none)
+    (enforceSigOracle : Bool := true) :
+    Except String (Nat × Std.RBMap Outpoint UtxoEntry cmpOutpoint) := do
+  let prepared ←
+    prepareNonCoinbaseTxBasic
+      txBytes utxoMap height blockTimestamp chainId rotDesc? enforceSigOracle
+  pure (prepared.fee, prepared.nextUtxoMap)
 
 def applyNonCoinbaseTxBasic
     (txBytes : Bytes)
     (utxos : List (Outpoint × UtxoEntry))
     (height : Nat)
     (blockTimestamp : Nat)
-    (chainId : Bytes) : Except String (Nat × Nat) := do
-  let (fee, next) ← applyNonCoinbaseTxBasicState txBytes (buildUtxoMap utxos) height blockTimestamp chainId true
+    (chainId : Bytes)
+    (rotDesc? : Option NativeSuiteRotation.RotationDeploymentDescriptor := none) :
+    Except String (Nat × Nat) := do
+  let (fee, next) ←
+    applyNonCoinbaseTxBasicState
+      txBytes (buildUtxoMap utxos) height blockTimestamp chainId rotDesc? true
   pure (fee, next.size)
 
--- CV-UTXO-BASIC replay uses the no-crypto path (signature validity is assumed).
+-- Conformance entrypoint for callers that model signature validity elsewhere.
 def applyNonCoinbaseTxBasicNoCrypto
     (txBytes : Bytes)
     (utxos : List (Outpoint × UtxoEntry))
     (height : Nat)
     (blockTimestamp : Nat)
-    (chainId : Bytes) : Except String (Nat × Nat) := do
-  let (fee, next) ← applyNonCoinbaseTxBasicState txBytes (buildUtxoMap utxos) height blockTimestamp chainId false
+    (chainId : Bytes)
+    (rotDesc? : Option NativeSuiteRotation.RotationDeploymentDescriptor := none) :
+    Except String (Nat × Nat) := do
+  let (fee, next) ←
+    applyNonCoinbaseTxBasicState
+      txBytes (buildUtxoMap utxos) height blockTimestamp chainId rotDesc? false
   pure (fee, next.size)
 
 end UtxoBasicV1
