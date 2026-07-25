@@ -10,6 +10,11 @@ Lean replay/refinement слой покрывает non-`CV-PV-*` conformance fix
 представленные модулями, импортированными `RubinFormal.Conformance.Index`.
 Runtime/parallel-only `CV-PV-*` gates в этот Lean replay scope не входят.
 
+Конечный CV replay — это compiled conformance evidence. Теорема
+`cv_*_vectors_pass` section-registered только там, где она является
+claim-bearing `machine_checked_contract` evidence; она не является
+universal/model section proof evidence.
+
 ## Source rebind: 116 original → 102 active (4 `DROP_RETIRED_GENERATED_SOURCE` + 3 `DROP_RETIRED_SOURCE` + 7 `DROP_STALE_SOURCE`; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
 
 ## Термины (важно)

@@ -58,18 +58,7 @@ def vectorPass (v : CVUtxoBasicVector) : Bool :=
 def cvUtxoBasicVectorsPass : Bool :=
   cvUtxoBasicVectors.all vectorPass
 
--- NOTE: `native_decide` proof generation is currently failing for this gate on Lean 4.6.0
--- (application type mismatch in `Lean.ofReduceBool`).
--- We keep an elaboration-time check instead: compilation fails if vectors do not pass.
-#eval
-  if cvUtxoBasicVectorsPass then
-    ()
-  else
-    panic! "[FAIL] CV-UTXO-BASIC replay: cvUtxoBasicVectorsPass=false"
-
-theorem cv_utxo_basic_vectors_pass : True := by
-  -- NOTE: this theorem is required by tools/check_formal_coverage.py as a stable gate name.
-  -- The actual enforcement is performed by the `#eval` check above (compilation fails on false).
-  trivial
+theorem cv_utxo_basic_vectors_pass : cvUtxoBasicVectorsPass = true := by
+  native_decide
 
 end RubinFormal.Conformance
