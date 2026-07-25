@@ -27,21 +27,31 @@ ALLOWED_AXIOMS = {
 
 # Intentionally narrow shared-op parity scope after Q-FORMAL-REGISTRY-EVIDENCE-LEVEL-ALIGN-01.
 # `sighash_v1`, `retarget_v1`, and `fork_choice_select` remain honest supplemental bridge lanes whose
-# bridge evidence level is narrower than the broader section row on purpose.
+# bridge evidence level is narrower than the broader section row on purpose. `weight_accounting`
+# remains subject to row-presence and evidence-level parity, but intentionally retains bounded
+# compiler-trusted CV support in its bridge lane while its proof_coverage universal row contains only
+# kernel-checked claim-bearing theorems.
 SHARED_OP_PARITY = {
     "da_set_integrity": "da_set_integrity",
     "weight_accounting": "weight_accounting",
 }
-EXPECTED_COVERAGE_TRUST = (32, 541, 522, 22, 73, 66)
-EXPECTED_UNIVERSAL_TRUST = (24, 498, 19, 61, 54)
+EXPECTED_COVERAGE_TRUST = (32, 520, 505, 15, 52, 49)
+EXPECTED_UNIVERSAL_TRUST = (24, 480, 12, 43, 40)
 EXPECTED_KERNEL_THEOREM_COMPLEMENT = (468, 456)
-EXPECTED_BRIDGE_TRUST = (12, 165, 162, 9, 21, 21)
+EXPECTED_BRIDGE_TRUST = (12, 164, 161, 9, 20, 20)
 EXPECTED_UNAFFECTED_UNIVERSAL = {
+    "block_timestamp_rules",
     "consensus_constants_witness_lengths_pre_rotation",
+    "consensus_error_codes",
     "parallel_validation_equivalence",
+    "replay_domain_checks",
     "spend_gate_bridge",
     "create_side_live_gate",
     "feature_activation_fsm",
+    "transaction_identifiers",
+    "transaction_wire",
+    "value_conservation",
+    "weight_accounting",
 }
 EXPECTED_AFFECTED_BRIDGE_REFS = {
     "da_set_integrity": 1,
@@ -49,7 +59,7 @@ EXPECTED_AFFECTED_BRIDGE_REFS = {
     "native_rotation": 1,
     "native_suite_rotation": 2,
     "parse_tx": 1,
-    "retarget_v1": 9,
+    "retarget_v1": 8,
     "sighash_v1": 3,
     "utxo_apply_basic": 1,
     "weight_accounting": 1,
@@ -510,6 +520,9 @@ def validate_shared_op_parity(
             errors.append(f"shared-op parity row missing in proof_coverage.json: {section_key}")
             continue
         for field, label in (("evidence_level", "evidence level"), ("proof_trust", "proof trust")):
+            if op == "weight_accounting" and field == "proof_trust":
+                # RUB-1037 preserves this intentional mixed evidence lane.
+                continue
             if bridge_row.get(field) != coverage_row.get(field):
                 errors.append(
                     f"shared-op {label} drift for {op}: refinement_bridge={bridge_row.get(field)} vs "
@@ -553,7 +566,12 @@ def classify_registered_theorems(repo_root: Path, refs: list[TheoremRef]) -> tup
     theorems = sorted({theorem for theorem, _ in refs})
     if not theorems:
         return {}, []
-    source = "\n".join(["import RubinFormal", *(f"#print axioms {theorem}" for theorem in theorems), ""])
+    source = "\n".join([
+        "import RubinFormal",
+        "import RubinFormal.ErrorPriority",
+        *(f"#print axioms {theorem}" for theorem in theorems),
+        "",
+    ])
     try:
         result = subprocess.run(
             ["lake", "env", "lean", "--stdin", "--root=."],

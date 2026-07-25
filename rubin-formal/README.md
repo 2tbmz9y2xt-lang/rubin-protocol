@@ -20,6 +20,10 @@ universal formal verification of the entire CANONICAL spec.
 
 Current machine-readable status: `proof_level=refinement`, `claim_level=refined`, `package_maturity=experimental_pending_reverification`.
 
+Finite CV replay is compiled conformance evidence. A `cv_*_vectors_pass` theorem
+is section-registered only where it is claim-bearing `machine_checked_contract`
+evidence; it is not universal/model section proof evidence.
+
 Permitted claim formulations (OK):
 
 - "Lean executable semantics replay the non-`CV-PV-*` conformance fixtures

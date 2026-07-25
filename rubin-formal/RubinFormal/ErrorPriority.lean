@@ -10,7 +10,8 @@ linkage → merkle (via explicit-bind equivalence) → witness (existing).
 
 ## Tx-level — live sub-function decomposition
 - `applyWitnessChecks` (LIVE, called from `parseTxFromCursor`):
-  OVERFLOW → SIG_ALG_INVALID → SIG_NONCANONICAL ordering via rfl equivalence.
+  OVERFLOW → SIG_NONCANONICAL ordering via rfl equivalence; SIG_ALG_INVALID
+  belongs to later spend-path validation.
 - `applyDaLenChecks` (LIVE, called from `parseTxFromCursor`):
   4 DA-length checks, all TX_ERR_PARSE.
 - `applyTxPreInputChecks` (LIVE, called from `applyNonCoinbaseTxBasicNoCrypto`):
@@ -253,7 +254,9 @@ theorem err_ne_tx_covenant_missing :
 
 `applyWitnessChecks` is a LIVE sub-function extracted from parseTxFromCursor.
 It is called directly by parseTxFromCursor (BlockBasicV1.lean) — not a proof-only
-decomposition. Error ordering is proved via explicit-bind equivalence.
+decomposition. This helper checks OVERFLOW before SIG_NONCANONICAL;
+SIG_ALG_INVALID belongs to later spend-path validation. Error ordering is proved
+via explicit-bind equivalence.
 -/
 
 open RubinFormal.TxWeightV2 in

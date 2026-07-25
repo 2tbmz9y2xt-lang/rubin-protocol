@@ -34,8 +34,10 @@ satisfies ALL of:
 - MODEL theorems that are the sole formal evidence for a spec section and no
   LIVE/BRIDGE theorem exists yet. These should be registered with
   `evidence_level: "machine_checked_model"` to honestly represent coverage.
-- Conformance vector replay theorems (`cv_*_vectors_pass`) — always registered
-  as `machine_checked_contract`.
+- Finite conformance vector replay theorems (`cv_*_vectors_pass`) are compiled
+  conformance evidence. Register one as `machine_checked_contract` only where
+  it is claim-bearing contract evidence for that section; do not count it as
+  universal/model section proof evidence.
 
 ### MUST NOT register (excluded)
 
