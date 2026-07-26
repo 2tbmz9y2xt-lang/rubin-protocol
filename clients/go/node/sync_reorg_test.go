@@ -188,6 +188,241 @@ func requireConsensusTxErrCode(t *testing.T, err error, want consensus.ErrorCode
 	}
 }
 
+func directTipMTPTestBlock(t *testing.T, engine *SyncEngine, target [32]byte, timestamp uint64) []byte {
+	t.Helper()
+	view := engine.chainState.view()
+	height := view.height + 1
+	subsidy := consensus.BlockSubsidy(height, view.alreadyGenerated)
+	return buildSingleTxBlock(t, view.tipHash, target, timestamp, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, subsidy))
+}
+
+func applyDirectTipMTPTestBlock(t *testing.T, engine *SyncEngine, target [32]byte, timestamp uint64, callerContext []uint64) ([]byte, *ChainStateConnectSummary, error) {
+	t.Helper()
+	block := directTipMTPTestBlock(t, engine, target, timestamp)
+	summary, err := engine.ApplyBlockWithReorg(block, callerContext)
+	return block, summary, err
+}
+
+func extendDirectTipMTPTestChain(t *testing.T, engine *SyncEngine, target [32]byte, throughHeight uint64) {
+	t.Helper()
+	for engine.chainState.view().height < throughHeight {
+		height := engine.chainState.view().height + 1
+		if _, _, err := applyDirectTipMTPTestBlock(t, engine, target, reorgTestTimestamp(height), nil); err != nil {
+			t.Fatalf("ApplyBlockWithReorg(height=%d): %v", height, err)
+		}
+	}
+}
+
+type directTipStateSnapshot struct {
+	view      chainStateView
+	memory    chainStateDisk
+	persisted chainStateDisk
+	canonical []string
+	mempool   MempoolStats
+}
+
+func captureDirectTipState(t *testing.T, engine *SyncEngine, store *BlockStore) directTipStateSnapshot {
+	t.Helper()
+	memory, err := stateToDisk(engine.chainState)
+	if err != nil {
+		t.Fatalf("stateToDisk(memory): %v", err)
+	}
+	persistedState, err := LoadChainState(engine.cfg.ChainStatePath)
+	if err != nil {
+		t.Fatalf("LoadChainState: %v", err)
+	}
+	persisted, err := stateToDisk(persistedState)
+	if err != nil {
+		t.Fatalf("stateToDisk(persisted): %v", err)
+	}
+	canonical, err := store.CanonicalIndexSnapshot()
+	if err != nil {
+		t.Fatalf("CanonicalIndexSnapshot: %v", err)
+	}
+	var mempool MempoolStats
+	if engine.mempool != nil {
+		mempool = engine.mempool.Stats()
+	}
+	return directTipStateSnapshot{engine.chainState.view(), memory, persisted, canonical, mempool}
+}
+
+func requireDirectTipStateUnchanged(t *testing.T, engine *SyncEngine, store *BlockStore, before directTipStateSnapshot) {
+	t.Helper()
+	if after := captureDirectTipState(t, engine, store); !reflect.DeepEqual(after, before) {
+		t.Fatalf("candidate changed state:\nbefore=%+v\nafter=%+v", before, after)
+	}
+}
+
+func TestApplyBlockWithReorgDerivesDirectTipMTPWhenCallerContextNil(t *testing.T) {
+	dir := t.TempDir()
+	store := mustOpenBlockStore(t, BlockStorePath(dir))
+	target := consensus.POW_LIMIT
+	engine, err := NewSyncEngine(NewChainState(), store, DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(dir)))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if summary, err := engine.ApplyBlockWithReorg(devnetGenesisBlockBytes, nil); err != nil || summary.BlockHeight != 0 {
+		t.Fatalf("ApplyBlockWithReorg(genesis)=(%v,%v), want height zero success", summary, err)
+	}
+	_, _, err = applyDirectTipMTPTestBlock(t, engine, target, reorgTestTimestamp(0), nil)
+	requireConsensusTxErrCode(t, err, consensus.BLOCK_ERR_TIMESTAMP_OLD)
+}
+
+func TestApplyBlockWithReorgRejectsDirectTipTimestampAtOrBelowDerivedMTP(t *testing.T) {
+	tests := []struct {
+		name      string
+		timestamp uint64
+	}{{"at_mtp", reorgTestTimestamp(0)}, {"below_mtp", reorgTestTimestamp(0) - 1}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			engine, _, target := newReorgTestEngine(t)
+			_, _, err := applyDirectTipMTPTestBlock(t, engine, target, tc.timestamp, nil)
+			requireConsensusTxErrCode(t, err, consensus.BLOCK_ERR_TIMESTAMP_OLD)
+		})
+	}
+}
+
+func TestApplyBlockWithReorgRejectsDirectTipTimestampAboveDerivedFutureBound(t *testing.T) {
+	engine, _, target := newReorgTestEngine(t)
+	_, _, err := applyDirectTipMTPTestBlock(t, engine, target, reorgTestTimestamp(0)+consensus.MAX_FUTURE_DRIFT+1, nil)
+	requireConsensusTxErrCode(t, err, consensus.BLOCK_ERR_TIMESTAMP_FUTURE)
+}
+
+func TestApplyBlockWithReorgIgnoresForgedCallerTimestampContext(t *testing.T) {
+	t.Run("false_low_cannot_bypass", func(t *testing.T) {
+		engine, _, target := newReorgTestEngine(t)
+		_, _, err := applyDirectTipMTPTestBlock(t, engine, target, reorgTestTimestamp(0), []uint64{reorgTestTimestamp(0) - 1})
+		requireConsensusTxErrCode(t, err, consensus.BLOCK_ERR_TIMESTAMP_OLD)
+	})
+	t.Run("false_high_cannot_reject", func(t *testing.T) {
+		engine, _, target := newReorgTestEngine(t)
+		if _, summary, err := applyDirectTipMTPTestBlock(t, engine, target, reorgTestTimestamp(1), []uint64{reorgTestTimestamp(1)}); err != nil || summary.BlockHeight != 1 {
+			t.Fatalf("ApplyBlockWithReorg(valid direct child)=(%v,%v), want height one success", summary, err)
+		}
+	})
+}
+
+func TestApplyBlockWithReorgTimestampFailureDoesNotMutateState(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+	mempool, err := NewMempool(engine.chainState, store, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	engine.SetMempool(mempool)
+	block := directTipMTPTestBlock(t, engine, target, reorgTestTimestamp(0))
+	blockHash, err := consensus.BlockHash(blockHeaderBytes(t, block))
+	if err != nil {
+		t.Fatalf("BlockHash: %v", err)
+	}
+	beforeState := captureDirectTipState(t, engine, store)
+	beforeCounts := engine.BlockApplyCounts()
+	_, err = engine.ApplyBlockWithReorg(block, nil)
+	requireConsensusTxErrCode(t, err, consensus.BLOCK_ERR_TIMESTAMP_OLD)
+	requireDirectTipStateUnchanged(t, engine, store, beforeState)
+	if got := engine.BlockApplyCounts(); got.Accepted != beforeCounts.Accepted || got.Rejected != beforeCounts.Rejected+1 {
+		t.Fatalf("BlockApplyCounts=%+v, want accepted=%d rejected=%d", got, beforeCounts.Accepted, beforeCounts.Rejected+1)
+	}
+	if canonical, ok, err := store.CanonicalHash(0); err != nil || !ok || canonical != devnetGenesisBlockHash {
+		t.Fatalf("CanonicalHash(0)=(%x,%v,%v), want genesis", canonical, ok, err)
+	}
+	if _, err := store.GetBlockByHash(blockHash); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("GetBlockByHash(rejected) err=%v, want not-exist", err)
+	}
+}
+
+func TestApplyBlockWithReorgRejectsMissingDirectTipTimestampHistory(t *testing.T) {
+	tests := []struct {
+		name         string
+		setup        func(*testing.T, *SyncEngine, *BlockStore)
+		wantExact    string
+		wantCode     consensus.ErrorCode
+		wantNotExist bool
+	}{
+		{"nil_blockstore", func(_ *testing.T, e *SyncEngine, _ *BlockStore) { e.blockStore = nil }, "missing blockstore for direct-tip timestamp context", "", false},
+		{"missing_hash", func(t *testing.T, _ *SyncEngine, s *BlockStore) {
+			if err := s.TruncateCanonical(0); err != nil {
+				t.Fatalf("TruncateCanonical: %v", err)
+			}
+		}, "missing canonical hash at height 0 for timestamp context (next_height=1)", "", false},
+		{"missing_header", func(t *testing.T, _ *SyncEngine, s *BlockStore) {
+			if err := os.Remove(filepath.Join(s.headersDir, hex.EncodeToString(devnetGenesisBlockHash[:])+".bin")); err != nil {
+				t.Fatalf("Remove(header): %v", err)
+			}
+		}, "", "", true},
+		{"malformed_header", func(t *testing.T, _ *SyncEngine, s *BlockStore) {
+			if err := os.WriteFile(filepath.Join(s.headersDir, hex.EncodeToString(devnetGenesisBlockHash[:])+".bin"), []byte{0}, 0o600); err != nil {
+				t.Fatalf("WriteFile(header): %v", err)
+			}
+		}, "", consensus.TX_ERR_PARSE, false},
+		{"height_overflow", func(_ *testing.T, e *SyncEngine, _ *BlockStore) {
+			e.chainState.mu.Lock()
+			e.chainState.Height = ^uint64(0)
+			e.chainState.mu.Unlock()
+		}, "height overflow", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			engine, store, target := newReorgTestEngine(t)
+			block := directTipMTPTestBlock(t, engine, target, reorgTestTimestamp(1))
+			blockHash, err := consensus.BlockHash(blockHeaderBytes(t, block))
+			if err != nil {
+				t.Fatalf("BlockHash: %v", err)
+			}
+			tc.setup(t, engine, store)
+			beforeState := captureDirectTipState(t, engine, store)
+			beforeCounts := engine.BlockApplyCounts()
+			_, err = engine.ApplyBlockWithReorg(block, []uint64{reorgTestTimestamp(0)})
+			switch {
+			case tc.wantExact != "" && (err == nil || err.Error() != tc.wantExact):
+				t.Fatalf("err=%v, want %q", err, tc.wantExact)
+			case tc.wantNotExist && !errors.Is(err, os.ErrNotExist):
+				t.Fatalf("err=%v, want os.ErrNotExist", err)
+			case tc.wantCode != "":
+				requireConsensusTxErrCode(t, err, tc.wantCode)
+			}
+			requireDirectTipStateUnchanged(t, engine, store, beforeState)
+			if got := engine.BlockApplyCounts(); got != beforeCounts {
+				t.Fatalf("BlockApplyCounts changed from %+v to %+v", beforeCounts, got)
+			}
+			if _, err := store.GetBlockByHash(blockHash); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("GetBlockByHash(rejected) err=%v, want not-exist", err)
+			}
+		})
+	}
+}
+
+func TestApplyBlockWithReorgDirectTipMTPWindowBoundaries(t *testing.T) {
+	tests := []struct {
+		name       string
+		nextHeight uint64
+		mtpOffset  uint64
+	}{{"height_10_window_10", 10, 4}, {"height_11_window_11", 11, 5}, {"height_12_slides_past_genesis", 12, 6}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			engine, _, target := newReorgTestEngine(t)
+			extendDirectTipMTPTestChain(t, engine, target, tc.nextHeight-1)
+			_, _, err := applyDirectTipMTPTestBlock(t, engine, target, reorgTestTimestamp(tc.mtpOffset), nil)
+			requireConsensusTxErrCode(t, err, consensus.BLOCK_ERR_TIMESTAMP_OLD)
+		})
+	}
+}
+
+func TestApplyBlockWithReorgRejectThenValidPreservesState(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+	beforeState := captureDirectTipState(t, engine, store)
+	beforeCounts := engine.BlockApplyCounts()
+	_, _, err := applyDirectTipMTPTestBlock(t, engine, target, reorgTestTimestamp(0), nil)
+	requireConsensusTxErrCode(t, err, consensus.BLOCK_ERR_TIMESTAMP_OLD)
+	requireDirectTipStateUnchanged(t, engine, store, beforeState)
+	_, summary, err := applyDirectTipMTPTestBlock(t, engine, target, reorgTestTimestamp(1), nil)
+	if err != nil || summary.BlockHeight != 1 || engine.chainState.view().tipHash != summary.BlockHash {
+		t.Fatalf("ApplyBlockWithReorg(valid recovery)=(%v,%v), want canonical height one", summary, err)
+	}
+	if got := engine.BlockApplyCounts(); got.Accepted != beforeCounts.Accepted+1 || got.Rejected != beforeCounts.Rejected+1 {
+		t.Fatalf("BlockApplyCounts=%+v, want accepted=%d rejected=%d", got, beforeCounts.Accepted+1, beforeCounts.Rejected+1)
+	}
+}
+
 func TestApplyBlockWithReorgRejectsMissingParent(t *testing.T) {
 	engine, _, target := newReorgTestEngine(t)
 	before := engine.BlockApplyCounts()
