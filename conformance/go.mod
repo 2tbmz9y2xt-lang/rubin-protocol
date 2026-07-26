@@ -1,6 +1,6 @@
 module github.com/2tbmz9y2xt-lang/rubin-protocol/conformance
 
-go 1.24.13
+go 1.26.5
 
 require github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go v0.0.0
 
