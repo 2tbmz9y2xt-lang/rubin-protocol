@@ -17,6 +17,7 @@ pub mod relay_pool;
 pub mod sync;
 pub mod sync_disconnect;
 pub mod sync_reorg;
+mod target_schedule;
 pub mod tx_relay;
 pub mod tx_seen;
 pub mod txpool;
