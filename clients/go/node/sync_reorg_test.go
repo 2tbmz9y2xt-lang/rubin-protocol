@@ -332,33 +332,36 @@ func TestApplyBlockWithReorgTimestampFailureDoesNotMutateState(t *testing.T) {
 
 func TestApplyBlockWithReorgRejectsMissingDirectTipTimestampHistory(t *testing.T) {
 	tests := []struct {
-		name         string
-		setup        func(*testing.T, *SyncEngine, *BlockStore)
-		wantExact    string
-		wantCode     consensus.ErrorCode
-		wantNotExist bool
+		name      string
+		setup     func(*testing.T, *SyncEngine, *BlockStore)
+		wantExact string
+		wantCode  consensus.ErrorCode
 	}{
-		{"nil_blockstore", func(_ *testing.T, e *SyncEngine, _ *BlockStore) { e.blockStore = nil }, "missing blockstore for direct-tip timestamp context", "", false},
+		{"nil_blockstore", func(_ *testing.T, e *SyncEngine, _ *BlockStore) { e.blockStore = nil }, "missing blockstore for direct-tip timestamp context", ""},
 		{"missing_hash", func(t *testing.T, _ *SyncEngine, s *BlockStore) {
 			if err := s.TruncateCanonical(0); err != nil {
 				t.Fatalf("TruncateCanonical: %v", err)
 			}
-		}, "missing canonical hash at height 0 for timestamp context (next_height=1)", "", false},
+		}, "missing canonical hash at height 0 for timestamp context (next_height=1)", ""},
+		// RUB-655 ordering: target context precedes the MTP window, so a
+		// missing selected-parent header is now the primitive's documented
+		// ErrParentNotFound instead of the MTP read's raw os.ErrNotExist.
+		// Rejected either way, and nothing is stored.
 		{"missing_header", func(t *testing.T, _ *SyncEngine, s *BlockStore) {
 			if err := os.Remove(filepath.Join(s.headersDir, hex.EncodeToString(devnetGenesisBlockHash[:])+".bin")); err != nil {
 				t.Fatalf("Remove(header): %v", err)
 			}
-		}, "", "", true},
+		}, ErrParentNotFound.Error(), ""},
 		{"malformed_header", func(t *testing.T, _ *SyncEngine, s *BlockStore) {
 			if err := os.WriteFile(filepath.Join(s.headersDir, hex.EncodeToString(devnetGenesisBlockHash[:])+".bin"), []byte{0}, 0o600); err != nil {
 				t.Fatalf("WriteFile(header): %v", err)
 			}
-		}, "", consensus.TX_ERR_PARSE, false},
+		}, "", consensus.TX_ERR_PARSE},
 		{"height_overflow", func(_ *testing.T, e *SyncEngine, _ *BlockStore) {
 			e.chainState.mu.Lock()
 			e.chainState.Height = ^uint64(0)
 			e.chainState.mu.Unlock()
-		}, "height overflow", "", false},
+		}, "height overflow", ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -375,8 +378,6 @@ func TestApplyBlockWithReorgRejectsMissingDirectTipTimestampHistory(t *testing.T
 			switch {
 			case tc.wantExact != "" && (err == nil || err.Error() != tc.wantExact):
 				t.Fatalf("err=%v, want %q", err, tc.wantExact)
-			case tc.wantNotExist && !errors.Is(err, os.ErrNotExist):
-				t.Fatalf("err=%v, want os.ErrNotExist", err)
 			case tc.wantCode != "":
 				requireConsensusTxErrCode(t, err, tc.wantCode)
 			}
@@ -735,7 +736,7 @@ func TestCollectBranchToCanonicalPropagatesNonNotExistErrors(t *testing.T) {
 
 func TestApplyCanonicalParsedBlockHelperErrors(t *testing.T) {
 	var nilEngine *SyncEngine
-	if _, err := nilEngine.applyCanonicalParsedBlock(nil, nil, nil); err == nil {
+	if _, err := nilEngine.applyCanonicalParsedBlock(nil, nil, nil, nil); err == nil {
 		t.Fatalf("expected nil sync engine error")
 	}
 
@@ -755,7 +756,7 @@ func TestApplyCanonicalParsedBlockHelperErrors(t *testing.T) {
 	}
 
 	engine := newEmptyEngine(t, devnetGenesisChainID)
-	if _, err := engine.applyCanonicalParsedBlock(nil, nil, nil); err == nil {
+	if _, err := engine.applyCanonicalParsedBlock(nil, nil, nil, nil); err == nil {
 		t.Fatalf("expected nil parsed block error")
 	}
 

@@ -11,6 +11,9 @@ use rubin_consensus::{RotationProvider, SuiteRegistry};
 use crate::blockstore::BlockStore;
 use crate::chainstate::{ChainState, ChainStateConnectSummary};
 use crate::chainstate_recovery::should_persist_chainstate_snapshot;
+use crate::genesis::devnet_genesis_chain_id;
+use crate::sync_reorg::PARENT_BLOCK_NOT_FOUND_ERR;
+use crate::target_schedule::{expected_target_for_candidate, TargetScheduleError};
 use crate::undo::build_block_undo;
 
 pub const DEFAULT_IBD_LAG_SECONDS: u64 = 24 * 60 * 60;
@@ -524,7 +527,150 @@ pub fn default_sync_config(
     }
 }
 
+/// Mirror of Go `normalizedNetworkName`: trim, lowercase, blank => `"devnet"`.
+fn normalized_network_name(network: &str) -> String {
+    let network = network.trim().to_ascii_lowercase();
+    #[rustfmt::skip]
+    return if network.is_empty() { "devnet".to_string() } else { network };
+}
+
+/// The exact stock Phase-0 devnet predicate — whether a candidate's expected
+/// target MUST come from the derived schedule instead of the static
+/// `SyncConfig.expected_target`. Exactly TWO immutable startup terms, identical
+/// in every layer of both clients, mirroring Go `stockDevnetTargetSchedule`:
+/// the network normalizes to `"devnet"` AND the chain id is the published
+/// devnet genesis chain id.
+///
+/// There is deliberately no genesis-HASH term. The devnet chain id is the
+/// SHA3-256 commitment over the published genesis bytes; in THIS client both
+/// sides are compiled-in constants whose equality `genesis.rs` pins with a test
+/// (`derive_devnet_genesis_chain_id`) rather than an init-time re-derivation,
+/// so chain-id equality already identifies the published genesis. A canonical[0]
+/// term added no guarantee while making rule selection depend on chain state
+/// (an empty or recovering store flipped it), forcing a canonical-index read
+/// per untrusted peer message, and having no single realizable form across
+/// layers — which is what produced a cross-client divergence. Genesis identity
+/// on the wire stays with the p2p handshake's genesis-hash comparison and is
+/// not duplicated here. Being config-only, the predicate cannot fail.
+pub(crate) fn stock_devnet_target_schedule(network: &str, chain_id: [u8; 32]) -> bool {
+    normalized_network_name(network) == "devnet" && chain_id == devnet_genesis_chain_id()
+}
+
+/// An already-resolved expected target, from a caller that owns the (selected
+/// parent, candidate height) pair. `expected` is `None` ONLY when the predicate
+/// fails AND `SyncConfig.expected_target` is itself `None`: a derivation
+/// failure is always an `Err`, never a missing target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CanonicalApplyTarget {
+    pub(crate) expected: Option<[u8; 32]>,
+}
+
+/// Resolve the expected target for ONE candidate. The CALLER owns both inputs:
+/// `parent_hash` MUST be the authoritative selected parent, `candidate_height`
+/// the caller's own height. Height 0 is the published-genesis path.
+///
+/// Once the predicate holds the derived target is the ONLY binding rule, so a
+/// caller with no block store is refused rather than silently falling back to
+/// the static value — fail-closed, never an unbound target.
+pub(crate) fn target_context_for_candidate(
+    block_store: Option<&BlockStore>,
+    cfg: &SyncConfig,
+    parent_hash: [u8; 32],
+    candidate_height: u64,
+) -> Result<CanonicalApplyTarget, String> {
+    #[cfg(test)]
+    TARGET_CONTEXT_CALLS.with(|calls| calls.set(calls.get() + 1));
+    #[rustfmt::skip]
+    let static_target = CanonicalApplyTarget { expected: cfg.expected_target };
+    if candidate_height == 0 || !stock_devnet_target_schedule(&cfg.network, cfg.chain_id) {
+        return Ok(static_target);
+    }
+    let store = block_store.ok_or(UNBOUND_DEVNET_TARGET_ERR)?;
+    let target = expected_target_for_candidate(store, parent_hash, candidate_height)
+        .map_err(target_schedule_error_message)?;
+    #[rustfmt::skip]
+    return Ok(CanonicalApplyTarget { expected: Some(target) });
+}
+
+const UNBOUND_DEVNET_TARGET_ERR: &str =
+    "target schedule context: stock devnet predicate holds but there is no block store";
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only seam counting `target_context_for_candidate` entries on THIS
+    /// thread, so a row can pin HOW MANY times a caller derives: one per
+    /// applied block, one per branch row per phase (preview and commit are
+    /// distinct, mirroring Go), never quadratic. Thread-local because the test
+    /// harness runs rows in parallel and derivation never leaves the calling
+    /// thread — the PV shadow lane runs under `catch_unwind`, not a worker.
+    static TARGET_CONTEXT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_target_context_calls() {
+    TARGET_CONTEXT_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn target_context_calls() -> u64 {
+    TARGET_CONTEXT_CALLS.with(std::cell::Cell::get)
+}
+
+/// Render a `TargetScheduleError` as the node-layer error string. ONLY
+/// `ParentUnknown` maps onto `PARENT_BLOCK_NOT_FOUND_ERR` — the class
+/// `p2p_runtime::is_parent_not_found_err` matches byte-for-byte (Go's
+/// `targetScheduleReadError`); every other variant keeps its own distinct
+/// category and cause (Go's `errTarget*` set).
+pub(crate) fn target_schedule_error_message(err: TargetScheduleError) -> String {
+    match err {
+        TargetScheduleError::ParentUnknown => PARENT_BLOCK_NOT_FOUND_ERR.to_string(),
+        TargetScheduleError::HistoryMissing => "target schedule history unavailable".to_string(),
+        TargetScheduleError::HistoryCorrupt => "target schedule history corrupt".to_string(),
+        TargetScheduleError::HeightInvalid => "target schedule height invalid".to_string(),
+        TargetScheduleError::Retarget(cause) => format!("target schedule retarget failed: {cause}"),
+        TargetScheduleError::LocalIo(cause) => format!("target schedule local I/O: {cause}"),
+    }
+}
+
 impl SyncEngine {
+    /// The stock predicate on this engine's own config.
+    pub(crate) fn stock_devnet_target_schedule(&self) -> bool {
+        stock_devnet_target_schedule(&self.cfg.network, self.cfg.chain_id)
+    }
+
+    pub(crate) fn target_context_for_candidate(
+        &self,
+        parent: [u8; 32],
+        height: u64,
+    ) -> Result<CanonicalApplyTarget, String> {
+        let store = self.block_store.as_ref();
+        target_context_for_candidate(store, &self.cfg, parent, height)
+    }
+
+    /// THE canonical choke point for target-schedule context: every canonical
+    /// apply passes through it, so no live canonical path can reach
+    /// `connect_block_with_suite_context` with an unbound target. A supplied
+    /// context is used verbatim (caller acquired it ahead of its own MTP window,
+    /// or owns a branch-relative height the chainstate does not reflect yet),
+    /// keeping a boundary candidate to one `WINDOW_SIZE` walk instead of two;
+    /// otherwise the parent is the canonical tip and the height the chainstate's
+    /// next; at height 0 nothing is derived. Read-only, running before
+    /// `build_block_undo` — before any state-shaping work.
+    fn resolve_canonical_apply_target(
+        &self,
+        target: Option<CanonicalApplyTarget>,
+        next_height: u64,
+    ) -> Result<Option<[u8; 32]>, String> {
+        if let Some(target) = target {
+            return Ok(target.expected);
+        }
+        let has_tip = self.chain_state.has_tip;
+        let tip = self.chain_state.tip_hash;
+        let parent = if has_tip { tip } else { [0u8; 32] };
+        let resolved = self.target_context_for_candidate(parent, next_height)?;
+        Ok(resolved.expected)
+    }
+
     pub(crate) fn suite_context(&self) -> (Option<&dyn RotationProvider>, Option<&SuiteRegistry>) {
         match self.cfg.suite_context.as_ref() {
             Some(ctx) => (Some(ctx.rotation.as_ref()), Some(ctx.registry.as_ref())),
@@ -723,8 +869,29 @@ impl SyncEngine {
         block_bytes: &[u8],
         prev_timestamps: Option<&[u64]>,
     ) -> Result<ChainStateConnectSummary, String> {
+        self.apply_block_with_target(block_bytes, prev_timestamps, None)
+    }
+
+    /// `apply_block` with an OPTIONAL caller-resolved target context; `None`
+    /// resolves at the choke point (`resolve_canonical_apply_target`).
+    pub(crate) fn apply_block_with_target(
+        &mut self,
+        block_bytes: &[u8],
+        prev_timestamps: Option<&[u64]>,
+        target: Option<CanonicalApplyTarget>,
+    ) -> Result<ChainStateConnectSummary, String> {
         let parsed = parse_block_bytes(block_bytes).map_err(|e| e.to_string())?;
         let block_hash_bytes = block_hash(&parsed.header_bytes).map_err(|e| e.to_string())?;
+        // Height and target context are acquired BEFORE the MTP window and
+        // before `build_block_undo` — ahead of the first state-shaping work.
+        // `checked_add` mirrors the `u64::MAX` guard in
+        // `prev_timestamps_for_next_block` / `ChainState::next_block_context`.
+        let mut next_height = 0u64;
+        if self.chain_state.has_tip {
+            let height = self.chain_state.height;
+            next_height = height.checked_add(1).ok_or("height overflow")?;
+        }
+        let expected_target = self.resolve_canonical_apply_target(target, next_height)?;
         let derived_prev_timestamps = if prev_timestamps.is_none() {
             self.prev_timestamps_for_next_block()?
         } else {
@@ -738,11 +905,6 @@ impl SyncEngine {
         let old_best_known_height = self.best_known_height;
 
         // Build undo record from the pre-mutation state.
-        let next_height = if self.chain_state.has_tip {
-            self.chain_state.height + 1
-        } else {
-            0
-        };
         let undo = build_block_undo(&self.chain_state, block_bytes, next_height)?;
 
         let suite_context = self.cfg.suite_context.clone();
@@ -753,7 +915,7 @@ impl SyncEngine {
             };
         let summary = match self.chain_state.connect_block_with_suite_context(
             block_bytes,
-            self.cfg.expected_target,
+            expected_target,
             prev_timestamps,
             self.cfg.chain_id,
             rotation,
@@ -765,7 +927,13 @@ impl SyncEngine {
                     self.pv_telemetry.record_block_validated();
                     let validate_start = Instant::now();
                     match run_pv_shadow_validation_guarded(|| {
-                        run_pv_shadow_validation(&snapshot, block_bytes, prev_timestamps, &self.cfg)
+                        run_pv_shadow_validation(
+                            &snapshot,
+                            block_bytes,
+                            prev_timestamps,
+                            expected_target,
+                            &self.cfg,
+                        )
                     }) {
                         Ok(Ok(_)) => {
                             self.record_pv_shadow_mismatch(format!(
@@ -810,7 +978,13 @@ impl SyncEngine {
             self.pv_telemetry.record_block_validated();
             let validate_start = Instant::now();
             match run_pv_shadow_validation_guarded(|| {
-                run_pv_shadow_validation(&snapshot, block_bytes, prev_timestamps, &self.cfg)
+                run_pv_shadow_validation(
+                    &snapshot,
+                    block_bytes,
+                    prev_timestamps,
+                    expected_target,
+                    &self.cfg,
+                )
             }) {
                 Ok(Ok(shadow_digest)) => {
                     let current_digest = self.chain_state.utxo_set_hash();
@@ -1151,10 +1325,18 @@ fn load_persisted_tip_timestamp(
     Ok(header.timestamp)
 }
 
+/// Shadow (parallel-validation) re-run of the sequential connect.
+///
+/// The shadow run MUST observe the same expected target as the sequential
+/// connect it shadows — the caller's already-resolved `expected_target`, never
+/// the static `SyncConfig.expected_target`. Feeding it a different target
+/// would make PV report a fabricated seq/par divergence at every retarget
+/// boundary.
 fn run_pv_shadow_validation(
     snapshot: &ChainState,
     block_bytes: &[u8],
     prev_timestamps: Option<&[u64]>,
+    expected_target: Option<[u8; 32]>,
     cfg: &SyncConfig,
 ) -> Result<[u8; 32], String> {
     let mut shadow_state = snapshot.clone();
@@ -1165,7 +1347,7 @@ fn run_pv_shadow_validation(
         };
     shadow_state.connect_block_with_suite_context(
         block_bytes,
-        cfg.expected_target,
+        expected_target,
         prev_timestamps,
         cfg.chain_id,
         rotation,
@@ -1179,6 +1361,116 @@ where
     F: FnOnce() -> Result<[u8; 32], String>,
 {
     catch_unwind(AssertUnwindSafe(run)).map_err(|_| "pv_shadow panic".to_string())
+}
+
+/// Test-only stock Phase-0 devnet fixture shared by every RUB-655 runtime row:
+/// a devnet-chain-id engine (so the predicate holds) whose store really does
+/// hold the PUBLISHED devnet genesis at canonical height 0, so MTP context,
+/// undo records and chain work behave as on a live chain.
+#[cfg(test)]
+pub(crate) fn stock_devnet_engine_for_test(
+    prefix: &str,
+    mutate: impl FnOnce(&mut SyncConfig),
+) -> (SyncEngine, std::path::PathBuf) {
+    let dir = crate::io_utils::unique_temp_path(prefix);
+    let store = BlockStore::open(crate::blockstore::block_store_path(&dir)).expect("open store");
+    let mut cfg = default_sync_config(None, devnet_genesis_chain_id(), None);
+    mutate(&mut cfg);
+    let mut engine = SyncEngine::new(ChainState::new(), Some(store), cfg).expect("engine");
+    let genesis = crate::genesis::devnet_genesis_block_bytes();
+    engine.apply_block(&genesis, None).expect("apply genesis");
+    (engine, dir)
+}
+
+/// Test-only: rewrite a block's target and search a nonce that genuinely
+/// satisfies PoW against it (shared builders pin nonce 0, which only works at
+/// POW_LIMIT-scale targets).
+#[cfg(test)]
+pub(crate) fn retarget_block_for_test(mut block: Vec<u8>, target: [u8; 32]) -> Vec<u8> {
+    // Header layout: .. | target @76..108 | nonce @108..116 |.
+    block[76..108].copy_from_slice(&target);
+    let mut nonce: u64 = 0;
+    loop {
+        block[108..116].copy_from_slice(&nonce.to_le_bytes());
+        if rubin_consensus::pow_check(&block[..116], target).is_ok() {
+            return block;
+        }
+        nonce += 1;
+    }
+}
+
+/// Test-only: the engine's next canonical candidate, mined against `target`.
+#[cfg(test)]
+pub(crate) fn next_candidate_block_for_test(
+    engine: &SyncEngine,
+    target: [u8; 32],
+    timestamp: u64,
+) -> Vec<u8> {
+    let block = crate::test_helpers::coinbase_only_block_with_gen(
+        engine.chain_state.height + 1,
+        engine.chain_state.already_generated,
+        engine.chain_state.tip_hash,
+        timestamp,
+    );
+    retarget_block_for_test(block, target)
+}
+
+/// Test-only: a stock devnet chain whose tip sits at `WINDOW_SIZE - 1`, so the
+/// next candidate lands exactly on a retarget boundary. Height 0 is the REAL
+/// published genesis applied through the normal path; heights `1..=WINDOW_SIZE-2`
+/// are synthetic HEADERS written straight into the header directory with a
+/// directly-written canonical index, mirroring the Go fixture — 10,078 real
+/// blocks would cost ~20k fsync'd atomic writes plus an O(n^2) index rewrite
+/// (~23 ms per `store_block`, measured), while the primitive reads only headers
+/// BY HASH and the MTP window only the last 11 canonical headers.
+///
+/// The TIP at `WINDOW_SIZE - 1` is then applied for real through the engine, so
+/// it owns block bytes and an undo record and a reorg forking below it can
+/// actually disconnect it — synthetic header-only entries cannot be
+/// disconnected. Timestamps are spaced at half the target interval so the
+/// retarget lands near `POW_LIMIT / 2` (inside the `/4` clamp) and the boundary
+/// candidate is bound to a target its parent does NOT carry — discriminating,
+/// not tautological. Returns the `0..WINDOW_SIZE-1` timestamps ascending.
+#[cfg(test)]
+pub(crate) fn boundary_chain_for_test(prefix: &str) -> (SyncEngine, std::path::PathBuf, Vec<u64>) {
+    use rubin_consensus::constants::{TARGET_BLOCK_INTERVAL, WINDOW_SIZE};
+    const SPACING: u64 = TARGET_BLOCK_INTERVAL / 2;
+
+    let (engine, dir) = stock_devnet_engine_for_test(prefix, |_| {});
+    let genesis_timestamp = engine.tip_timestamp;
+    let mut chain_state = engine.chain_state.clone();
+    let root = crate::blockstore::block_store_path(&dir);
+    drop(engine);
+
+    let headers = root.join("headers");
+    let mut times = vec![genesis_timestamp];
+    let mut canonical = vec![hex::encode(chain_state.tip_hash)];
+    let mut prev = chain_state.tip_hash;
+    for height in 1..WINDOW_SIZE - 1 {
+        let ts = genesis_timestamp + height * SPACING;
+        let mut raw = crate::test_helpers::build_block_bytes(prev, [0u8; 32], POW_LIMIT, ts, &[]);
+        raw.truncate(rubin_consensus::BLOCK_HEADER_BYTES);
+        let hash = block_hash(&raw).expect("synthetic header hash");
+        std::fs::write(headers.join(format!("{}.bin", hex::encode(hash))), &raw).expect("write");
+        times.push(ts);
+        canonical.push(hex::encode(hash));
+        prev = hash;
+    }
+    let index = serde_json::json!({ "version": 1, "canonical": canonical }).to_string();
+    std::fs::write(root.join("index.json"), index).expect("write canonical index");
+
+    chain_state.height = WINDOW_SIZE - 2;
+    chain_state.tip_hash = prev;
+    let store = BlockStore::open(&root).expect("reopen store");
+    let cfg = default_sync_config(None, devnet_genesis_chain_id(), None);
+    let mut engine = SyncEngine::new(chain_state, Some(store), cfg).expect("boundary engine");
+    let tip_timestamp = genesis_timestamp + (WINDOW_SIZE - 1) * SPACING;
+    let tip = next_candidate_block_for_test(&engine, POW_LIMIT, tip_timestamp);
+    engine
+        .apply_block_with_reorg(&tip, None)
+        .expect("apply the real boundary-chain tip");
+    times.push(tip_timestamp);
+    (engine, dir, times)
 }
 
 #[cfg(test)]
@@ -1205,8 +1497,10 @@ mod tests {
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::io_utils::unique_temp_path;
     use crate::sync::{
-        default_sync_config, run_pv_shadow_validation_guarded, SuiteContext, SyncEngine,
-        MAX_PV_SHADOW_MAX_SAMPLES,
+        boundary_chain_for_test, default_sync_config, next_candidate_block_for_test,
+        retarget_block_for_test, run_pv_shadow_validation_guarded, stock_devnet_engine_for_test,
+        target_context_for_candidate, CanonicalApplyTarget, SuiteContext, SyncEngine,
+        MAX_PV_SHADOW_MAX_SAMPLES, PARENT_BLOCK_NOT_FOUND_ERR, UNBOUND_DEVNET_TARGET_ERR,
     };
 
     /// Test-only rotation provider that counts how many times the
@@ -2010,5 +2304,245 @@ mod tests {
             body.contains(r#"rubin_pv_mode{mode="shadow\"} 1\n# HELP fake malicious\n# TYPE fake gauge\nfake 1"} 1"#),
             "rendered rubin_pv_mode line must carry the injected payload as an escaped label value, not as separate lines; body=\n{body}"
         );
+    }
+
+    // ---- RUB-655 target-schedule runtime rows ----
+
+    const TARGET_MISMATCH: &str = "BLOCK_ERR_TARGET_INVALID: target mismatch";
+
+    /// A target the schedule never yields here (the derived value is POW_LIMIT).
+    fn off_schedule_target() -> [u8; 32] {
+        let mut t = POW_LIMIT;
+        t[1] = 0x7f;
+        t
+    }
+
+    fn ctx(expected: Option<[u8; 32]>) -> Result<CanonicalApplyTarget, String> {
+        Ok(CanonicalApplyTarget { expected })
+    }
+
+    /// The published-genesis path derives NOTHING: no static `expected_target`
+    /// and an empty store, so a height-0 derivation would have failed on the
+    /// zero parent — bootstrap succeeding is the proof.
+    #[test]
+    fn target_schedule_runtime_published_genesis_unchanged() {
+        let (engine, dir) = stock_devnet_engine_for_test("rubin-ts-genesis", |_| {});
+        let store = engine.block_store_snapshot().expect("store");
+        assert_eq!(engine.cfg.expected_target, None);
+        assert_eq!(store.tip(), Ok(Some((0, engine.chain_state.tip_hash))));
+        assert!(engine.stock_devnet_target_schedule());
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Reject-then-valid at the SAME height: the mis-targeted candidate is
+    /// rejected by the DERIVED target and leaves storage and the canonical tip
+    /// untouched; the correctly targeted candidate is then accepted.
+    #[test]
+    fn target_schedule_runtime_direct_reject_then_valid_at_same_height() {
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-ts-direct", |_| {});
+        let timestamp = engine.tip_timestamp + 1;
+        let stale = next_candidate_block_for_test(&engine, off_schedule_target(), timestamp);
+        let stale_hash = block_hash(&stale[..BLOCK_HEADER_BYTES]).expect("stale hash");
+        let err = engine.apply_block_with_reorg(&stale, None).unwrap_err();
+        assert_eq!(err, TARGET_MISMATCH);
+        assert_eq!(engine.has_block(stale_hash), Ok(false));
+        assert_eq!(engine.chain_state.height, 0);
+
+        let good = next_candidate_block_for_test(&engine, POW_LIMIT, timestamp);
+        let ok = engine.apply_block_with_reorg(&good, None).expect("derived");
+        assert_eq!(ok.summary.block_height, 1);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Public error PRIORITY on candidates violating several rules at once: PoW
+    /// range and PoW work both decide BEFORE target equality, and the DERIVED
+    /// target equality wins over prev-hash linkage (derivation resolves the
+    /// parent from the canonical tip, so a mis-linked candidate still gets a
+    /// target). Rows 0/1 keep the pinned nonce 0, so PoW fails.
+    #[test]
+    fn target_schedule_runtime_pow_precedes_target_precedes_linkage() {
+        const RANGE: &str = "BLOCK_ERR_TARGET_INVALID: target out of range";
+        const POW: &str = "BLOCK_ERR_POW_INVALID: pow invalid";
+        let mut tiny = [0u8; 32];
+        tiny[31] = 0x01;
+        #[rustfmt::skip]
+        let rows = [
+            (None::<[u8; 32]>, [0; 32], false, RANGE),
+            (None, tiny, false, POW),
+            (Some([0xab; 32]), off_schedule_target(), true, TARGET_MISMATCH),
+        ];
+        for (parent, target, search_nonce, want) in rows {
+            let (mut engine, dir) = stock_devnet_engine_for_test("rubin-ts-prio", |_| {});
+            let prev = parent.unwrap_or(engine.chain_state.tip_hash);
+            let mut block =
+                crate::test_helpers::height_one_coinbase_only_block(prev, engine.tip_timestamp + 1);
+            block[76..108].copy_from_slice(&target);
+            if search_nonce {
+                block = retarget_block_for_test(block, target);
+            }
+            assert_eq!(engine.apply_block(&block, None).unwrap_err(), want);
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
+    }
+
+    /// The predicate GATES derivation: under the stock configuration the derived
+    /// target binds and rejects a candidate carrying the configured static
+    /// value; with a term broken the static value binds and that candidate is
+    /// accepted exactly as before.
+    #[test]
+    fn target_schedule_runtime_predicate_gates_derivation() {
+        let static_target = off_schedule_target();
+        for (network, derived) in [("devnet", true), ("regtest", false)] {
+            let (mut engine, dir) =
+                stock_devnet_engine_for_test("rubin-ts-gate", |cfg| cfg.network = network.into());
+            // Installed AFTER genesis: at height 0 the static value still binds,
+            // so a deliberately wrong one would reject genesis itself.
+            engine.cfg.expected_target = Some(static_target);
+            let block =
+                next_candidate_block_for_test(&engine, static_target, engine.tip_timestamp + 1);
+            let err = engine.apply_block_with_reorg(&block, None).err();
+            assert_eq!(
+                err.as_deref(),
+                derived.then_some(TARGET_MISMATCH),
+                "{network}"
+            );
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
+
+        // The predicate is CONFIG-ONLY: emptying the canonical index cannot
+        // flip it, so rule selection never depends on chain state.
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-ts-term3", |_| {});
+        let store = engine.block_store.as_mut().expect("store");
+        store.truncate_canonical(0).expect("truncate canonical");
+        assert!(engine.stock_devnet_target_schedule());
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Once the predicate holds the derived target is the ONLY binding rule, so
+    /// a storeless caller is refused — with or without a configured static
+    /// target — instead of silently falling back to it.
+    #[test]
+    fn target_schedule_runtime_storeless_devnet_refuses_unbound_target() {
+        let devnet = default_sync_config(None, devnet_genesis_chain_id(), None);
+        let mut with_static = devnet.clone();
+        with_static.expected_target = Some(POW_LIMIT);
+        let mut regtest = devnet.clone();
+        regtest.network = "regtest".to_string();
+        for cfg in [&devnet, &with_static] {
+            let got = target_context_for_candidate(None, cfg, [0x01; 32], 1);
+            assert_eq!(got, Err(UNBOUND_DEVNET_TARGET_ERR.to_string()));
+        }
+        // Height 0 is the published-genesis path and is never refused; a
+        // non-devnet chain keeps its fail-open behaviour verbatim.
+        #[rustfmt::skip]
+        let rows = [(&devnet, 0, ctx(None)), (&with_static, 0, ctx(Some(POW_LIMIT))), (&regtest, 1, ctx(None))];
+        for (cfg, height, want) in rows {
+            let got = target_context_for_candidate(None, cfg, [0x01; 32], height);
+            assert_eq!(got, want);
+        }
+    }
+
+    /// The PV shadow lane must observe the SAME derived target as the sequential
+    /// connect. The static value is deliberately wrong: had the shadow run still
+    /// read `SyncConfig.expected_target` it would reject the block the
+    /// sequential run accepts and record a fabricated divergence.
+    #[test]
+    fn target_schedule_runtime_parallel_validation_sees_derived_target() {
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-ts-pv", |cfg| {
+            cfg.parallel_validation_mode = "shadow".to_string();
+        });
+        engine.cfg.expected_target = Some(off_schedule_target());
+        assert!(engine.pv_shadow_active(), "fixture is not in IBD");
+        let before = engine.pv_telemetry_snapshot().blocks_validated;
+        let block = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
+        engine.apply_block_with_reorg(&block, None).expect("shadow");
+        assert_eq!(engine.pv_shadow_stats(), (0, Vec::new()));
+        let after = engine.pv_telemetry_snapshot().blocks_validated;
+        assert_eq!(after, before + 1, "pv shadow did not run at all");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// The PV shadow-on-ERROR lane must bind the SAME derived target as the
+    /// failing sequential connect. The candidate carries the deliberately wrong
+    /// STATIC target, so the sequential run rejects it against the derived one;
+    /// had the shadow kept reading `SyncConfig.expected_target` it would have
+    /// ACCEPTED the block and recorded a fabricated seq_err/shadow_ok
+    /// divergence. Zero mismatches with the shadow proven to have run is the
+    /// evidence.
+    #[test]
+    fn target_schedule_runtime_parallel_validation_error_lane_sees_derived_target() {
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-ts-pverr", |cfg| {
+            cfg.parallel_validation_mode = "shadow".to_string();
+        });
+        let wrong = off_schedule_target();
+        engine.cfg.expected_target = Some(wrong);
+        assert!(engine.pv_shadow_active(), "fixture is not in IBD");
+        let before = engine.pv_telemetry_snapshot().blocks_validated;
+        let block = next_candidate_block_for_test(&engine, wrong, engine.tip_timestamp + 1);
+        let err = engine.apply_block_with_reorg(&block, None).unwrap_err();
+        assert_eq!(err, TARGET_MISMATCH);
+        assert_eq!(engine.pv_shadow_stats(), (0, Vec::new()));
+        let after = engine.pv_telemetry_snapshot().blocks_validated;
+        assert_eq!(after, before + 1, "pv shadow error lane did not run at all");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Acquisition order is target-then-MTP. At height 1 the selected-parent
+    /// header and the whole MTP window are the SAME missing genesis header, so
+    /// the error class says which was acquired first — target wins, with the
+    /// orphan-routing class. At height 2 with that header still missing the
+    /// non-boundary derivation reads only the height-1 header and SUCCEEDS, so
+    /// the failure comes from the MTP window: the ordering is real, not an
+    /// artifact of one shared file.
+    #[test]
+    fn target_schedule_runtime_target_context_precedes_mtp() {
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-ts-mtp", |_| {});
+        let genesis_header = crate::blockstore::block_store_path(&dir)
+            .join("headers")
+            .join(format!("{}.bin", hex::encode(engine.chain_state.tip_hash)));
+        let saved = std::fs::read(&genesis_header).expect("read genesis header");
+        let block = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
+        std::fs::remove_file(&genesis_header).expect("remove genesis header");
+        let err = engine.apply_block_with_reorg(&block, None).unwrap_err();
+        assert_eq!(err, PARENT_BLOCK_NOT_FOUND_ERR);
+
+        std::fs::write(&genesis_header, &saved).expect("restore genesis header");
+        assert!(engine.apply_block_with_reorg(&block, None).is_ok());
+        let next = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
+        std::fs::remove_file(&genesis_header).expect("remove genesis header again");
+        let err = engine.apply_block_with_reorg(&next, None).unwrap_err();
+        assert!(
+            err.contains("read header"),
+            "want the MTP read error, got: {err}"
+        );
+        assert_ne!(err, PARENT_BLOCK_NOT_FOUND_ERR);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// The retarget BOUNDARY: the resolver returns the parent's own target one
+    /// height below it and the retargeted value ON it, and that derived value
+    /// binds the candidate (reject-then-valid at the boundary height).
+    #[test]
+    fn target_schedule_runtime_boundary_binds_retargeted_value() {
+        use rubin_consensus::constants::WINDOW_SIZE;
+        let (mut engine, dir, times) = boundary_chain_for_test("rubin-ts-boundary");
+        let parent = engine.chain_state.tip_hash;
+        let want = rubin_consensus::retarget_v1_clamped(POW_LIMIT, &times).expect("reference");
+        assert_ne!(want, POW_LIMIT, "boundary fixture is tautological");
+        for (height, expected) in [(WINDOW_SIZE - 1, POW_LIMIT), (WINDOW_SIZE, want)] {
+            let got = engine.target_context_for_candidate(parent, height);
+            assert_eq!(got, ctx(Some(expected)), "height {height}");
+        }
+
+        let timestamp = times.last().expect("window") + 1;
+        let stale = next_candidate_block_for_test(&engine, POW_LIMIT, timestamp);
+        let err = engine.apply_block_with_reorg(&stale, None).unwrap_err();
+        assert_eq!(err, TARGET_MISMATCH);
+        let good = next_candidate_block_for_test(&engine, want, timestamp);
+        let ok = engine
+            .apply_block_with_reorg(&good, None)
+            .expect("boundary");
+        assert_eq!(ok.summary.block_height, WINDOW_SIZE);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

@@ -99,6 +99,11 @@ func TestValidateParallelValidationMode(t *testing.T) {
 func TestPVShadowMismatch_SequentialTruthPreserved(t *testing.T) {
 	target := consensus.POW_LIMIT
 	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, "")
+	// Storeless engine: a stock devnet identity now fails closed rather than
+	// falling back to the static target (RUB-655), so this PV fixture declares
+	// a non-devnet network. The chain id must stay devnet — it is the sighash
+	// domain these signed transactions were built against.
+	cfg.Network = "regtest"
 	cfg.ParallelValidationMode = "shadow"
 	cfg.PVShadowMaxSamples = 2
 
@@ -226,6 +231,11 @@ func TestPVShadowMismatch_IsBounded(t *testing.T) {
 func TestPVShadow_NoMismatchOnValidBlock(t *testing.T) {
 	target := consensus.POW_LIMIT
 	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, "")
+	// Storeless engine: a stock devnet identity now fails closed rather than
+	// falling back to the static target (RUB-655), so this PV fixture declares
+	// a non-devnet network. The chain id must stay devnet — it is the sighash
+	// domain these signed transactions were built against.
+	cfg.Network = "regtest"
 	cfg.ParallelValidationMode = "shadow"
 	cfg.PVShadowMaxSamples = 3
 

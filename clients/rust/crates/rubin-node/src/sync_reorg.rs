@@ -12,6 +12,17 @@ use crate::txpool::{TxPool, TxPoolAdmitError, TxPoolAdmitErrorKind, TxSource};
 
 pub(crate) const PARENT_BLOCK_NOT_FOUND_ERR: &str = "parent block not found";
 
+/// Caller-owned candidate height of branch row `index` above the common
+/// ancestor — Go's `commonAncestorHeight + 1 + i`, with the additions checked so
+/// a corrupt ancestor height cannot wrap into a LOWER candidate height (which
+/// would pick the wrong retarget boundary).
+fn branch_row_height(common_ancestor_height: u64, index: usize) -> Result<u64, String> {
+    let offset = u64::try_from(index).map_err(|_| "branch index overflow".to_string())?;
+    let base = common_ancestor_height.checked_add(1);
+    base.and_then(|first| first.checked_add(offset))
+        .ok_or_else(|| "height overflow".to_string())
+}
+
 /// Slide the MTP window forward by one block: prepend `new_ts` and keep at
 /// most 11 entries.  Mirrors Go `advancePrevTimestamps`.
 fn advance_prev_timestamps(prev: Option<&[u64]>, new_ts: u64) -> Vec<u64> {
@@ -320,6 +331,16 @@ impl SyncEngine {
             // invalid side-chain blocks never reach the blockstore (B.2 fix,
             // issue #1168).
             let candidate = branch.last().ok_or("empty side branch")?;
+            // RUB-655: target context BEFORE the MTP window, so its failure
+            // short-circuits without reading MTP state. Selected parent is the
+            // candidate's own prev_hash (already resolved against stored
+            // ancestry by `collect_branch_to_canonical`); the height is the
+            // caller-owned `candidate_height`, which the chainstate does not
+            // reflect for a non-canonical branch. Full validation still precedes
+            // `store_block`, so an invalid side-branch target reaches neither
+            // stored state nor fork choice.
+            let target_ctx =
+                self.target_context_for_candidate(candidate.prev_hash, candidate_height)?;
             let ts = self.side_branch_prev_timestamps(&branch, common_ancestor_height)?;
             // Thread the engine's rotation provider so an active CORE_SIMPLICITY
             // (0x0106) side-branch block is accepted, mirroring Go sync_reorg.go.
@@ -327,7 +348,7 @@ impl SyncEngine {
             validate_block_basic_with_context_at_height_and_rotation(
                 &candidate.block_bytes,
                 Some(candidate.prev_hash),
-                self.cfg.expected_target,
+                target_ctx.expected,
                 candidate_height,
                 ts.as_deref(),
                 rotation,
@@ -393,7 +414,18 @@ impl SyncEngine {
         }
 
         if parsed.header.prev_block_hash == self.chain_state.tip_hash {
-            let summary = self.apply_block(block_bytes, prev_timestamps)?;
+            // RUB-655 acquisition order is target-then-MTP: `apply_block`
+            // derives the canonical MTP window when the caller passes `None`, so
+            // the target context is acquired here, ahead of it. Selected parent
+            // is the canonical tip, height the caller-owned next height under
+            // the same `u64::MAX` guard `prev_timestamps_for_next_block` uses.
+            // The height-0 genesis branch above never reaches this arm.
+            let height = self.chain_state.height;
+            let next_height = height.checked_add(1).ok_or("height overflow")?;
+            let target =
+                self.target_context_for_candidate(self.chain_state.tip_hash, next_height)?;
+            let summary =
+                self.apply_block_with_target(block_bytes, prev_timestamps, Some(target))?;
             return Ok(Some(summary));
         }
 
@@ -462,10 +494,27 @@ impl SyncEngine {
         // Connect the preferred branch.  Pass None so apply_block derives
         // fresh timestamps from the (updated) canonical index for each block,
         // instead of reusing the stale caller value (B.9 fix, issue #1166).
+        //
+        // RUB-655: both context windows are re-derived per iteration — the
+        // canonical index moved when the previous row committed, and a branch can
+        // cross a retarget boundary (the target half of the same B.9 argument).
+        // Target context comes first, so its failure short-circuits before
+        // `apply_block_with_target` reads the MTP window.
         let mut last_summary = None;
         let mut canonical_applied_blocks: Vec<CanonicalAppliedBlock> = Vec::new();
-        for item in &branch {
-            match self.apply_block(&item.block_bytes, None) {
+        for (index, item) in branch.iter().enumerate() {
+            let target = match branch_row_height(common_ancestor_height, index)
+                .and_then(|height| self.target_context_for_candidate(item.prev_hash, height))
+            {
+                Ok(target) => target,
+                Err(err) => {
+                    return Err(Self::err_with_rollback(
+                        err,
+                        self.rollback_apply_block(rollback),
+                    ));
+                }
+            };
+            match self.apply_block_with_target(&item.block_bytes, None, Some(target)) {
                 Ok(mut summary) => {
                     // branch is in ascending canonical (height) order, so this
                     // accumulates every newly-canonical block in canonical order.
@@ -528,10 +577,23 @@ impl SyncEngine {
         // re-deriving from the store each iteration (B.9 fix, issue #1166).
         let mut sliding_ts = self.prev_timestamps_for_height(common_ancestor_height + 1)?;
         let (rotation, registry) = self.suite_context();
-        for item in branch {
+        for (index, item) in branch.iter().enumerate() {
+            // RUB-655 per-row derivation: a branch can cross a retarget
+            // boundary. Unlike the MTP window this needs no sliding workaround —
+            // the derivation reads headers BY HASH, never the canonical index,
+            // so it is safe during preview, and every ancestor it needs is
+            // already stored (`collect_branch_to_canonical` fetched
+            // branch[0..n-2]; the common ancestor is canonical). This preview is
+            // the only pre-mutation slot — it runs before
+            // `disconnect_canonical_to_ancestor`, so every branch row is
+            // target-validated before any disconnect.
+            let target_ctx = self.target_context_for_candidate(
+                item.prev_hash,
+                branch_row_height(common_ancestor_height, index)?,
+            )?;
             preview_state.connect_block_with_suite_context(
                 &item.block_bytes,
-                self.cfg.expected_target,
+                target_ctx.expected,
                 sliding_ts.as_deref(),
                 self.cfg.chain_id,
                 rotation,
@@ -718,7 +780,10 @@ mod tests {
     use crate::chainstate::{chain_state_path, ChainState};
     use crate::devnet_genesis_chain_id;
     use crate::io_utils::unique_temp_path;
-    use crate::sync::{default_sync_config, SuiteContext, SyncEngine};
+    use crate::sync::{
+        boundary_chain_for_test, default_sync_config, next_candidate_block_for_test,
+        retarget_block_for_test, stock_devnet_engine_for_test, SuiteContext, SyncEngine,
+    };
     use crate::test_helpers::{
         block_with_txs, coinbase_only_block, coinbase_only_block_with_gen, genesis_info,
         height_one_coinbase_only_block, signed_conflicting_p2pk_state_and_txs,
@@ -2069,5 +2134,273 @@ mod tests {
             "duplicate failed requeue must not replace the existing Local entry as Reorg"
         );
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    // ---- RUB-655 target-schedule runtime rows ----
+
+    const TARGET_MISMATCH: &str = "BLOCK_ERR_TARGET_INVALID: target mismatch";
+
+    /// A competing height-1 branch declaring a quarter of `POW_LIMIT` carries
+    /// MORE chain work than the two canonical blocks, so fork choice SELECTS it
+    /// and the reorg PREVIEW must reject it — before any disconnect, store write
+    /// or contribution to chain work.
+    #[test]
+    fn target_schedule_runtime_side_branch_rejected_before_storage_and_fork_choice() {
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-ts-side", |_| {});
+        let genesis_hash = engine.chain_state.tip_hash;
+        let generated = engine.chain_state.already_generated;
+        for _ in 0..2 {
+            let block = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
+            assert!(engine.apply_block_with_reorg(&block, None).is_ok());
+        }
+        let before_tip = engine.chain_state.tip_hash;
+        let before_height = engine.chain_state.height;
+        let store = engine.block_store_snapshot().expect("store");
+        let before_len = store.canonical_len();
+
+        let mut heavier = POW_LIMIT;
+        heavier[0] = 0x3f;
+        let ts = engine.tip_timestamp + 9;
+        let base = coinbase_only_block_with_gen(1, generated, genesis_hash, ts);
+        let side = retarget_block_for_test(base, heavier);
+        let side_hash = block_hash(&side[..BLOCK_HEADER_BYTES]).expect("side hash");
+
+        // Evidence, not argument, that the REORG PREVIEW is the rejecting site:
+        // fork choice really does select this branch, and the preview — the only
+        // pre-mutation slot, running before `disconnect_canonical_to_ancestor` —
+        // rejects it, isolated from the commit loop.
+        let (branch, ancestor, _) = engine
+            .collect_branch_to_canonical(side_hash, &side)
+            .expect("collect branch");
+        let switch = engine.should_switch_to_branch(&branch, ancestor);
+        assert_eq!(switch, Ok((true, 1)));
+        let preview = engine.prepare_preferred_branch(&branch, 0).unwrap_err();
+        assert_eq!(preview, TARGET_MISMATCH);
+
+        let err = engine.apply_block_with_reorg(&side, None).unwrap_err();
+        assert_eq!(err, TARGET_MISMATCH);
+        assert_eq!(engine.has_block(side_hash), Ok(false));
+        assert_eq!(engine.chain_state.tip_hash, before_tip);
+        assert_eq!(engine.chain_state.height, before_height);
+        let store = engine.block_store_snapshot().expect("store");
+        assert_eq!(store.canonical_len(), before_len);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// The reorg PREVIEW and the reorg COMMIT loop both derive per row: an
+    /// equal-work competing height-1 branch with the smaller tip wins fork
+    /// choice, so the preview validates it and `apply_preferred_branch`
+    /// disconnects and re-applies it through `apply_block_with_target` with a
+    /// freshly derived context. The wrong static `expected_target` installed
+    /// after genesis makes the row discriminating: if ANY of those sites read
+    /// the config value instead, both applies would be rejected.
+    #[test]
+    fn target_schedule_runtime_reorg_commit_derives_per_row() {
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-ts-commit", |_| {});
+        let mut wrong = POW_LIMIT;
+        wrong[1] = 0x7f;
+        engine.cfg.expected_target = Some(wrong);
+        let (higher, higher_hash, lower, lower_hash) = timestamp_ordered_equal_work_height_one_pair(
+            engine.chain_state.tip_hash,
+            engine.tip_timestamp,
+            std::cmp::Ordering::Less,
+        );
+        assert!(engine.apply_block_with_reorg(&higher, None).is_ok());
+        assert_eq!(engine.chain_state.tip_hash, higher_hash);
+        let summary = engine.apply_block_with_reorg(&lower, None).expect("reorg");
+        assert_eq!(summary.summary.block_height, 1);
+        assert_eq!(engine.chain_state.tip_hash, lower_hash);
+        assert_eq!(engine.reorg_count(), 1);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Two missing-parent shapes, both ending in the class
+    /// `p2p_runtime::is_parent_not_found_err` routes to orphan retention —
+    /// byte-exact equality here IS the routing claim, since that predicate is a
+    /// string comparison against this constant. Row 0 is pre-existing; row 1 is
+    /// the RUB-655 reclassification: target derivation now precedes the MTP
+    /// window on the direct-tip path, so a missing selected-parent header
+    /// surfaces as the unknown-IMMEDIATE-parent class instead of the raw storage
+    /// read error the later MTP read produced — the Go outcome (orphan, not an
+    /// apply-error record). Nothing is stored and the tip does not move.
+    #[test]
+    fn target_schedule_runtime_missing_parent_stays_parent_not_found() {
+        for remove_tip_header in [false, true] {
+            let (mut engine, dir) = stock_devnet_engine_for_test("rubin-ts-orphan", |_| {});
+            let ts = engine.tip_timestamp + 1;
+            let block = if remove_tip_header {
+                let tip = hex::encode(engine.chain_state.tip_hash);
+                let headers = block_store_path(&dir).join("headers");
+                let candidate = next_candidate_block_for_test(&engine, POW_LIMIT, ts);
+                std::fs::remove_file(headers.join(format!("{tip}.bin"))).expect("rm header");
+                candidate
+            } else {
+                coinbase_only_block(1, [0xab; 32], ts)
+            };
+            let hash = block_hash(&block[..BLOCK_HEADER_BYTES]).expect("candidate hash");
+            let err = engine.apply_block_with_reorg(&block, None).unwrap_err();
+            assert_eq!(err, PARENT_BLOCK_NOT_FOUND_ERR, "{remove_tip_header}");
+            assert_eq!(engine.has_block(hash), Ok(false));
+            assert_eq!(engine.chain_state.height, 0);
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
+    }
+
+    /// The store-but-NOT-switch path: fork choice DECLINES this lighter
+    /// side branch, so `store_side_block_and_summary` is the rejecting site. A
+    /// wrong declared target must be rejected BEFORE `store_block`, leaving no
+    /// artifact, no canonical-index change and no chain-work contribution.
+    #[test]
+    fn target_schedule_runtime_side_branch_rejected_before_store_without_switch() {
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-ts-noswitch", |_| {});
+        let genesis_hash = engine.chain_state.tip_hash;
+        let generated = engine.chain_state.already_generated;
+        for _ in 0..2 {
+            let block = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
+            assert!(engine.apply_block_with_reorg(&block, None).is_ok());
+        }
+        let before_len = engine
+            .block_store_snapshot()
+            .expect("store")
+            .canonical_len();
+
+        let mut wrong = POW_LIMIT;
+        wrong[1] = 0x7f;
+        let base =
+            coinbase_only_block_with_gen(1, generated, genesis_hash, engine.tip_timestamp + 9);
+        let side = retarget_block_for_test(base, wrong);
+        let side_hash = block_hash(&side[..BLOCK_HEADER_BYTES]).expect("side hash");
+
+        // One block cannot outweigh the two canonical ones, so fork choice
+        // declines and the store path — not the reorg preview — must reject.
+        let (branch, ancestor, _) = engine
+            .collect_branch_to_canonical(side_hash, &side)
+            .expect("collect branch");
+        let switch = engine.should_switch_to_branch(&branch, ancestor);
+        assert_eq!(switch, Ok((false, 1)));
+
+        let err = engine.apply_block_with_reorg(&side, None).unwrap_err();
+        assert_eq!(err, TARGET_MISMATCH);
+        let store = engine.block_store_snapshot().expect("store");
+        assert!(
+            !store.has_block(side_hash),
+            "rejected side block was stored"
+        );
+        assert_eq!(store.canonical_len(), before_len);
+        assert!(
+            store.chain_work(side_hash).is_err(),
+            "contributed chain work"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// A reorg branch CROSSING a retarget boundary — the only path where the
+    /// boundary walk starts inside BRANCH ancestry instead of the canonical
+    /// index. The branch forks at `WINDOW_SIZE - 2`, so its second row sits on
+    /// the boundary and its `WINDOW_SIZE`-header walk begins at the first
+    /// branch row. The canonical-ancestry retarget value is therefore the WRONG
+    /// answer here, and the row pins that: mis-targeting with it is rejected,
+    /// and only the branch-derived value is accepted.
+    #[test]
+    fn target_schedule_runtime_reorg_across_retarget_boundary_uses_branch_ancestry() {
+        use rubin_consensus::constants::WINDOW_SIZE;
+        let (mut engine, dir, times) = boundary_chain_for_test("rubin-ts-xboundary");
+        let window = usize::try_from(WINDOW_SIZE).expect("window fits usize");
+        let canonical_tip = engine.chain_state.tip_hash;
+        let canonical_want =
+            rubin_consensus::retarget_v1_clamped(POW_LIMIT, &times).expect("canonical retarget");
+        let store = engine.block_store_snapshot().expect("store");
+        let fork_parent = store
+            .canonical_hash(WINDOW_SIZE - 2)
+            .expect("read")
+            .expect("fork parent");
+        let generated = engine.chain_state.already_generated;
+
+        // Row 0 competes with the real canonical tip at equal work, so its
+        // timestamp is chosen to keep its hash ABOVE that tip's — otherwise it
+        // would win fork choice alone and never form a two-row branch.
+        let (row0, row0_ts) = (1u64..1024)
+            .find_map(|delta| {
+                let ts = times[window - 2] + delta;
+                let raw = coinbase_only_block_with_gen(WINDOW_SIZE - 1, generated, fork_parent, ts);
+                let hash = block_hash(&raw[..BLOCK_HEADER_BYTES]).expect("row0 hash");
+                (hash > canonical_tip).then_some((raw, ts))
+            })
+            .expect("no row0 timestamp keeps the branch from winning alone");
+        let row0_hash = block_hash(&row0[..BLOCK_HEADER_BYTES]).expect("row0 hash");
+        assert!(engine.apply_block_with_reorg(&row0, None).is_ok());
+        assert_eq!(engine.chain_state.tip_hash, canonical_tip, "row0 switched");
+
+        // The boundary target row 1 must carry: same window, but ending at
+        // row0's timestamp instead of the canonical tip's.
+        let mut branch_times = times[..window - 1].to_vec();
+        branch_times.push(row0_ts);
+        let branch_want = rubin_consensus::retarget_v1_clamped(POW_LIMIT, &branch_times)
+            .expect("branch retarget");
+        assert_ne!(
+            branch_want, canonical_want,
+            "fixture cannot tell the two apart"
+        );
+
+        let row1 = |target| {
+            let raw = coinbase_only_block_with_gen(WINDOW_SIZE, generated, row0_hash, row0_ts + 1);
+            retarget_block_for_test(raw, target)
+        };
+        let err = engine
+            .apply_block_with_reorg(&row1(canonical_want), None)
+            .unwrap_err();
+        assert_eq!(
+            err, TARGET_MISMATCH,
+            "canonical ancestry must not bind here"
+        );
+        let good = row1(branch_want);
+        let summary = engine
+            .apply_block_with_reorg(&good, None)
+            .expect("branch-derived boundary target");
+        assert_eq!(summary.summary.block_height, WINDOW_SIZE);
+        assert_eq!(engine.reorg_count(), 1);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// HOW MANY times a caller derives: exactly one per applied block, and one
+    /// per branch row per phase — the reorg preview and the commit loop are
+    /// distinct phases (Go derives in both), so an N-row branch costs 2N, never
+    /// 3N and never N². The commit loop passing its resolved context into
+    /// `apply_block_with_target` is what keeps the second derivation from
+    /// happening inside the apply. Read counts INSIDE the primitive are its own
+    /// merged tests' business and are not re-pinned here.
+    #[test]
+    fn target_schedule_runtime_derivation_is_invoked_once_per_row() {
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-ts-count", |_| {});
+        let block = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
+        crate::sync::reset_target_context_calls();
+        assert!(engine.apply_block_with_reorg(&block, None).is_ok());
+        assert_eq!(crate::sync::target_context_calls(), 1, "direct apply");
+
+        // Equal-work single-row reorg: 1 preview + 1 commit.
+        let (mut engine, reorg_dir) = stock_devnet_engine_for_test("rubin-ts-count2", |_| {});
+        let (higher, _, lower, _) = timestamp_ordered_equal_work_height_one_pair(
+            engine.chain_state.tip_hash,
+            engine.tip_timestamp,
+            std::cmp::Ordering::Less,
+        );
+        assert!(engine.apply_block_with_reorg(&higher, None).is_ok());
+        crate::sync::reset_target_context_calls();
+        assert!(engine.apply_block_with_reorg(&lower, None).is_ok());
+        assert_eq!(
+            crate::sync::target_context_calls(),
+            2,
+            "1 preview + 1 commit"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        std::fs::remove_dir_all(&reorg_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn target_schedule_runtime_branch_row_height_is_checked() {
+        let overflow = Err("height overflow".to_string());
+        assert_eq!(branch_row_height(7, 3), Ok(11));
+        assert_eq!(branch_row_height(u64::MAX, 0), overflow);
+        assert_eq!(branch_row_height(u64::MAX - 1, 1), overflow);
     }
 }

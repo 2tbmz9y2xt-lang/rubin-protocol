@@ -679,7 +679,7 @@ func TestCompactBlockTransactionsByIndexRejectsRangeBeforeScanningTx(t *testing.
 }
 
 func TestCompactBlockTransactionsByIndexStopsAfterHighestRequested(t *testing.T) {
-	txs := [][]byte{minimalBlockTxnTestTxBytes(501), []byte{0xff}}
+	txs := [][]byte{minimalBlockTxnTestTxBytes(501), {0xff}}
 	block := compactTestBlockBytesWithRawTxTail(t, txs, nil)
 
 	got, err := compactBlockTransactionsByIndex(block, []uint64{0})
@@ -771,6 +771,10 @@ func TestHandleCmpctBlockValidationAndFallbackEdges(t *testing.T) {
 
 	wrongExpected := compactFilledTarget(0xee)
 	p = newCompactScriptedPeer(t)
+	// RUB-655: the static equality is now skipped under the stock devnet
+	// predicate, so this row pins the unchanged non-stock behavior. The
+	// predicate follows the ENGINE, so the engine is what must move off devnet.
+	retargetPeerEngine(t, p, "regtest", node.DevnetGenesisChainID())
 	p.service.cfg.SyncConfig.ExpectedTarget = &wrongExpected
 	err = p.handleCmpctBlock(full)
 	if err == nil || !strings.Contains(err.Error(), "target mismatch") || p.snapshotState().BanScore == 0 {
@@ -1548,4 +1552,157 @@ func compactFilledTarget(fill byte) [32]byte {
 		out[i] = fill
 	}
 	return out
+}
+
+// TestTargetScheduleRuntimeCompactStaticTargetGate pins both sides of the
+// RUB-655 compact-relay gate: under the exact stock Phase-0 devnet predicate
+// the optional static expected-target equality is skipped so the reconstructed
+// block reaches the authoritative SyncEngine apply, and under any other
+// configuration the pre-existing static comparison and peer disposition are
+// unchanged. Parse, PoW range and PoW work are enforced either way.
+func TestTargetScheduleRuntimeCompactStaticTargetGate(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	// The published genesis carries POW_LIMIT, so this configured value is
+	// deliberately not the header's target.
+	wrongExpected := compactFilledTarget(0xee)
+	powInvalid := [32]byte{}
+	powInvalid[31] = 0x01
+
+	for _, tc := range []struct {
+		name      string
+		breakTerm func(*testing.T, *peer) // nil keeps the stock devnet configuration
+		target    *[32]byte               // nil keeps the published genesis header target
+		wantStock bool
+		wantErr   string // "" means the block must reach the apply path
+	}{
+		{name: "stock_devnet_defers_to_apply_path", wantStock: true},
+		{name: "stock_devnet_still_enforces_pow", target: &powInvalid, wantStock: true, wantErr: "pow invalid"},
+		// The predicate moves with the ENGINE's identity, not this service's
+		// SyncConfig copy, and NewSyncEngine normalizes what it is given.
+		{name: "engine_padded_mixed_case_network_is_devnet", breakTerm: func(t *testing.T, p *peer) {
+			retargetPeerEngine(t, p, " DevNet\t", node.DevnetGenesisChainID())
+		}, wantStock: true},
+		{name: "engine_non_devnet_network", breakTerm: func(t *testing.T, p *peer) {
+			retargetPeerEngine(t, p, "regtest", node.DevnetGenesisChainID())
+		}, wantErr: "target mismatch"},
+		{name: "engine_foreign_chain_id", breakTerm: func(t *testing.T, p *peer) {
+			retargetPeerEngine(t, p, "devnet", [32]byte{0x01})
+		}, wantErr: "target mismatch"},
+		// validateServiceConfig never requires ServiceConfig.SyncConfig to
+		// agree with the engine, so the gate must follow the engine it hands
+		// the block to. Reading the copy here would reject a header the engine
+		// would have accepted — a same-process accept/reject divergence.
+		{name: "service_config_disagrees_gate_follows_engine", breakTerm: func(_ *testing.T, p *peer) {
+			p.service.cfg.SyncConfig.Network = "regtest"
+			p.service.cfg.SyncConfig.ChainID = [32]byte{0x01}
+		}, wantStock: true},
+		// The configured genesis hash is deliberately NOT a predicate term:
+		// the chain id already commits to the published genesis bytes, and a
+		// hash term had no single realizable form across layers. Changing it
+		// must not flip rule selection.
+		{name: "foreign_genesis_hash_is_not_a_term", breakTerm: func(_ *testing.T, p *peer) { p.service.cfg.GenesisHash = [32]byte{0x01} }, wantStock: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newCompactScriptedPeer(t)
+			p.service.cfg.SyncConfig.ExpectedTarget = &wrongExpected
+			if tc.breakTerm != nil {
+				tc.breakTerm(t, p)
+			}
+			if got := peerStockDevnetTargetSchedule(p); got != tc.wantStock {
+				t.Fatalf("predicate=%v, want %v", got, tc.wantStock)
+			}
+			relayed := header
+			if tc.target != nil {
+				relayed = compactHeaderWithTarget(header, *tc.target)
+			}
+			err := p.handleCmpctBlock(mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{
+				Header:    relayed,
+				Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}},
+			}))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || p.snapshotState().BanScore == 0 {
+					t.Fatalf("err=%v state=%+v, want %q with a ban", err, p.snapshotState(), tc.wantErr)
+				}
+				return
+			}
+			requireNoCompactErr(t, err, tc.name)
+			have, haveErr := p.service.hasBlock(blockHash)
+			if p.snapshotState().BanScore != 0 || haveErr != nil || !have {
+				t.Fatalf("ban=%d have=%v err=%v, want the block accepted by the apply path", p.snapshotState().BanScore, have, haveErr)
+			}
+		})
+	}
+}
+
+// peerStockDevnetTargetSchedule reads the predicate exactly as
+// validateCompactBlockHeader does: from the ENGINE the service defers to.
+func peerStockDevnetTargetSchedule(p *peer) bool {
+	return p.service.cfg.SyncEngine.StockDevnetTargetSchedule()
+}
+
+// retargetPeerEngine rebuilds the service's sync engine with a different
+// startup identity. The gate reads the ENGINE's normalized config, so this —
+// not ServiceConfig.SyncConfig — is what moves the predicate.
+func retargetPeerEngine(t *testing.T, p *peer, network string, chainID [32]byte) {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	cfg := node.DefaultSyncConfig(nil, chainID, node.ChainStatePath(dir))
+	cfg.Network = network
+	engine, err := node.NewSyncEngine(node.NewChainState(), store, cfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	// Keep the service's store with its engine, as production wires them.
+	p.service.cfg.SyncEngine = engine
+	p.service.cfg.BlockStore = store
+}
+
+func compactHeaderWithPrev(header [consensus.BLOCK_HEADER_BYTES]byte, prev [32]byte) [consensus.BLOCK_HEADER_BYTES]byte {
+	const prevOffset = 4
+	copy(header[prevOffset:prevOffset+32], prev[:])
+	return header
+}
+
+// TestTargetScheduleRuntimeCompactOrphanRetainedNotBanned pins the disposition
+// of a relayed block whose parent is not in the store: target-schedule context
+// cannot be derived for an unresolved parent, so the block must be RETAINED as
+// an orphan — never turned into a connection-level error and never ban-scored.
+// Go reaches this through compactApplyErrorFallback -> retainRelayedOrphanIfValid;
+// the row exists so the two clients are provably aligned on it.
+func TestTargetScheduleRuntimeCompactOrphanRetainedNotBanned(t *testing.T) {
+	header, _, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	// A non-zero, unknown parent. The published genesis carries POW_LIMIT so
+	// the header still satisfies PoW and the orphan guard admits it.
+	orphanHeader := compactHeaderWithPrev(header, [32]byte{0xab})
+	orphanHash, err := consensus.BlockHash(orphanHeader[:])
+	if err != nil {
+		t.Fatalf("BlockHash: %v", err)
+	}
+
+	p := newCompactScriptedPeer(t)
+	if !peerStockDevnetTargetSchedule(p) {
+		t.Fatal("scripted peer is not the stock devnet configuration")
+	}
+	// Prefilled-only: no short ids, so the apply path does not fall back to a
+	// full-block request and the orphan disposition is what gets exercised.
+	err = p.handleCmpctBlock(mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{
+		Header:    orphanHeader,
+		Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}},
+	}))
+	if err != nil {
+		t.Fatalf("unresolved-parent compact block returned a connection-level error: %v", err)
+	}
+	if score := p.snapshotState().BanScore; score != 0 {
+		t.Fatalf("BanScore=%d, want 0 for an orphan", score)
+	}
+	if p.service.orphans.Len() != 1 {
+		t.Fatalf("orphan pool len=%d, want the block retained", p.service.orphans.Len())
+	}
+	if have, herr := p.service.hasBlock(orphanHash); herr != nil || have {
+		t.Fatalf("hasBlock=%v err=%v, want the orphan NOT applied", have, herr)
+	}
 }

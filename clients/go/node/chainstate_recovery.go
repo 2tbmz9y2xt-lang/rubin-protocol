@@ -201,13 +201,17 @@ func replayCanonicalBlocks(state *ChainState, store *BlockStore, cfg SyncConfig,
 			// height instead of having to reconstruct the loop state.
 			return false, fmt.Errorf("missing canonical block hash during chainstate replay at height %d (tip_height=%d)", height, tipHeight)
 		}
+		expectedTarget, err := replayExpectedTarget(store, cfg, height, tipHeight)
+		if err != nil {
+			return false, err
+		}
 		blockBytes, prevTimestamps, err := replayBlockInputs(store, blockHash, height)
 		if err != nil {
 			return false, err
 		}
 		if _, err := state.ConnectBlockWithSuiteContext(
 			blockBytes,
-			cfg.ExpectedTarget,
+			expectedTarget,
 			prevTimestamps,
 			cfg.ChainID,
 			cfg.RotationProvider,
@@ -218,6 +222,41 @@ func replayCanonicalBlocks(state *ChainState, store *BlockStore, cfg SyncConfig,
 		changed = true
 	}
 	return changed, nil
+}
+
+// replayExpectedTarget resolves the expected target per replayed block: the
+// selected parent is the canonical index entry at height-1. Only the
+// free-function form of the primitive is callable here — this runs before the
+// sync engine exists.
+//
+// Failure contract (RUB-655 done_when): the error returns unchanged through
+// replayCanonicalBlocks and ReconcileChainStateWithBlockStore to
+// cmd/rubin-node/main.go, which exits 2 BEFORE chainState.Save, before
+// newSyncEngineFn, and before the mempool, peer manager and every service
+// start. This helper writes nothing, so the only durable write already made is
+// the pre-existing incomplete-suffix truncation from
+// truncateIncompleteCanonicalSuffix; it stays intact and nothing is added to
+// it. The in-memory reset reconcileReplayStart may have done is not durable —
+// chainState.Save is never reached.
+func replayExpectedTarget(store *BlockStore, cfg SyncConfig, height uint64, tipHeight uint64) (*[32]byte, error) {
+	if height == 0 {
+		return cfg.ExpectedTarget, nil
+	}
+	if !StockDevnetTargetSchedule(cfg.Network, cfg.ChainID) {
+		return cfg.ExpectedTarget, nil
+	}
+	parentHash, ok, err := store.CanonicalHash(height - 1)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("missing canonical parent hash for target context during chainstate replay at height %d (tip_height=%d)", height, tipHeight)
+	}
+	target, err := deriveExpectedTargetFn(store, parentHash, height)
+	if err != nil {
+		return nil, err
+	}
+	return &target, nil
 }
 
 func replayBlockInputs(store *BlockStore, blockHash [32]byte, height uint64) ([]byte, []uint64, error) {

@@ -75,11 +75,21 @@ func (s *SyncEngine) storeSideBlockAndSummary(branch []reorgBranchBlock, commonA
 		return nil, errors.New("empty side branch")
 	}
 	candidate := branch[len(branch)-1]
+	// Target context BEFORE the MTP window, so a target-context failure
+	// short-circuits without reading MTP state. Selected parent = the
+	// candidate's PrevBlockHash, already resolved against stored ancestry by
+	// collectBranchToCanonical; height = the caller-owned candidateHeight.
+	targetCtx, err := s.targetContextForCandidate(candidate.header.PrevBlockHash, candidateHeight)
+	if err != nil {
+		return nil, err
+	}
 	prevTimestamps, err := sideBranchPrevTimestamps(s.blockStore, branch, commonAncestorHeight)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := consensus.ValidateBlockBasicWithContextAtHeightAndRotation(candidate.blockBytes, &candidate.header.PrevBlockHash, s.cfg.ExpectedTarget, candidateHeight, prevTimestamps, s.cfg.ChainID, s.cfg.RotationProvider); err != nil {
+	// Full validation still precedes StoreBlock, so an invalid side-branch
+	// target contributes nothing to stored state or to fork choice.
+	if _, err := consensus.ValidateBlockBasicWithContextAtHeightAndRotation(candidate.blockBytes, &candidate.header.PrevBlockHash, targetCtx.expected, candidateHeight, prevTimestamps, s.cfg.ChainID, s.cfg.RotationProvider); err != nil {
 		return nil, err
 	}
 	if err := s.blockStore.StoreBlock(candidate.hash, candidate.parsed.HeaderBytes, candidate.blockBytes); err != nil {
@@ -117,25 +127,37 @@ func (s *SyncEngine) applyDirectBlockIfPossible(
 		if pb.Header.PrevBlockHash != zero {
 			return nil, true, ErrParentNotFound
 		}
-		summary, err := s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps)
+		summary, err := s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps, nil)
 		return summary, true, err
 	case pb.Header.PrevBlockHash == view.tipHash:
-		nextHeight, _, err := nextBlockContextFromFields(view.hasTip, view.height, view.tipHash)
-		if err != nil {
-			return nil, true, err
-		}
-		if s.blockStore == nil {
-			return nil, true, errors.New("missing blockstore for direct-tip timestamp context")
-		}
-		canonicalPrevTimestamps, err := prevTimestampsFromStore(s.blockStore, nextHeight)
-		if err != nil {
-			return nil, true, err
-		}
-		summary, err := s.applyCanonicalParsedBlock(pb, blockBytes, canonicalPrevTimestamps)
+		summary, err := s.applyDirectTipBlock(pb, blockBytes, view)
 		return summary, true, err
 	default:
 		return nil, false, nil
 	}
+}
+
+// applyDirectTipBlock applies a candidate whose parent is the canonical tip.
+// Acquisition order is target-then-MTP: the target context must precede the
+// RUB-647 canonical MTP window so a target-context failure short-circuits
+// before any MTP state is read. The height-0 genesis branch never reaches here.
+func (s *SyncEngine) applyDirectTipBlock(pb *consensus.ParsedBlock, blockBytes []byte, view chainStateView) (*ChainStateConnectSummary, error) {
+	nextHeight, _, err := nextBlockContextFromFields(view.hasTip, view.height, view.tipHash)
+	if err != nil {
+		return nil, err
+	}
+	if s.blockStore == nil {
+		return nil, errors.New("missing blockstore for direct-tip timestamp context")
+	}
+	targetCtx, err := s.targetContextForCandidate(view.tipHash, nextHeight)
+	if err != nil {
+		return nil, err
+	}
+	canonicalPrevTimestamps, err := prevTimestampsFromStore(s.blockStore, nextHeight)
+	if err != nil {
+		return nil, err
+	}
+	return s.applyCanonicalParsedBlock(pb, blockBytes, canonicalPrevTimestamps, targetCtx)
 }
 
 func (s *SyncEngine) shouldSwitchToBranch(
@@ -202,17 +224,8 @@ func (s *SyncEngine) applyPreferredBranch(
 	var pendingAccepted uint64
 	var canonicalBlocks []CanonicalAppliedBlock
 	for i, item := range branch {
-		// Derive fresh timestamps from the (updated) canonical index for
-		// each block in the branch.  The stale caller prevTimestamps was
-		// computed for height commonAncestorHeight+1 and is wrong for
-		// blocks 2+ (finding B.9, issue #1166).
-		nextHeight := commonAncestorHeight + 1 + uint64(i)
-		freshTs, tsErr := prevTimestampsFromStore(s.blockStore, nextHeight)
-		if tsErr != nil {
-			return nil, s.rollbackApplyBlock(tsErr, rollbackState)
-		}
 		var outcome blockApplyMetricOutcome
-		summary, outcome, err = s.applyCanonicalParsedBlockTracked(item.parsed, item.blockBytes, freshTs)
+		summary, outcome, err = s.applyBranchBlock(item, commonAncestorHeight+1+uint64(i))
 		if err != nil {
 			return nil, s.rollbackBranchBlockApply(err, rollbackState, outcome)
 		}
@@ -230,6 +243,24 @@ func (s *SyncEngine) applyPreferredBranch(
 		summary.CanonicalAppliedBlocks = canonicalBlocks
 	}
 	return summary, nil
+}
+
+// applyBranchBlock commits one row of the preferred branch at its caller-owned
+// height. Both context windows are re-derived per iteration: the canonical
+// index moved when the previous row committed, and a branch can cross a
+// retarget boundary (the target half of the B.9 / issue #1166 argument). Target
+// context first, so a target-context failure short-circuits before the MTP
+// window is read.
+func (s *SyncEngine) applyBranchBlock(item reorgBranchBlock, nextHeight uint64) (*ChainStateConnectSummary, blockApplyMetricOutcome, error) {
+	targetCtx, err := s.targetContextForCandidate(item.header.PrevBlockHash, nextHeight)
+	if err != nil {
+		return nil, blockApplyMetricNone, err
+	}
+	freshTs, err := prevTimestampsFromStore(s.blockStore, nextHeight)
+	if err != nil {
+		return nil, blockApplyMetricNone, err
+	}
+	return s.applyCanonicalParsedBlockTracked(item.parsed, item.blockBytes, freshTs, targetCtx)
 }
 
 func (s *SyncEngine) rollbackBranchBlockApply(
@@ -266,10 +297,19 @@ func (s *SyncEngine) preparePreferredBranch(
 	if err != nil {
 		return nil, 0, err
 	}
-	for _, item := range branch {
+	for i, item := range branch {
+		// Per-row derivation: a branch can cross a retarget boundary. Unlike
+		// the MTP window this needs no sliding workaround — it reads headers
+		// by hash and never consults the canonical index, and every ancestor
+		// it needs is already stored (collectBranchToCanonical fetched
+		// branch[0..len-2] from the store; the common ancestor is canonical).
+		targetCtx, targetErr := s.targetContextForCandidate(item.header.PrevBlockHash, commonAncestorHeight+1+uint64(i))
+		if targetErr != nil {
+			return nil, 0, targetErr
+		}
 		if _, err := previewState.ConnectBlockWithSuiteContext(
 			item.blockBytes,
-			s.cfg.ExpectedTarget,
+			targetCtx.expected,
 			slidingTs,
 			s.cfg.ChainID,
 			s.cfg.RotationProvider,
