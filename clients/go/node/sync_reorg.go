@@ -120,7 +120,18 @@ func (s *SyncEngine) applyDirectBlockIfPossible(
 		summary, err := s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps)
 		return summary, true, err
 	case pb.Header.PrevBlockHash == view.tipHash:
-		summary, err := s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps)
+		nextHeight, _, err := nextBlockContextFromFields(view.hasTip, view.height, view.tipHash)
+		if err != nil {
+			return nil, true, err
+		}
+		if s.blockStore == nil {
+			return nil, true, errors.New("missing blockstore for direct-tip timestamp context")
+		}
+		canonicalPrevTimestamps, err := prevTimestampsFromStore(s.blockStore, nextHeight)
+		if err != nil {
+			return nil, true, err
+		}
+		summary, err := s.applyCanonicalParsedBlock(pb, blockBytes, canonicalPrevTimestamps)
 		return summary, true, err
 	default:
 		return nil, false, nil
