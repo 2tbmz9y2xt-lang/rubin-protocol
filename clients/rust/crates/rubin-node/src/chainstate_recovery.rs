@@ -53,7 +53,8 @@
 
 use crate::blockstore::BlockStore;
 use crate::chainstate::{ChainState, ChainStateConnectSummary};
-use crate::sync::SyncConfig;
+use crate::sync::{stock_devnet_target_schedule, target_schedule_error_message, SyncConfig};
+use crate::target_schedule::expected_target_for_candidate;
 use rubin_consensus::parse_block_header_bytes;
 
 /// Snapshot cadence: persist `ChainState` to disk on every block until
@@ -327,6 +328,7 @@ pub fn reconcile_chain_state_with_block_store(
                 "missing canonical block hash during chainstate replay at height {height} (tip_height={tip_height})"
             )
         })?;
+        let expected_target = replay_expected_target(store, cfg, height, tip_height)?;
         let block_bytes = store.get_block_by_hash(block_hash)?;
         // Defence-in-depth: re-hash the loaded block's header and
         // confirm it matches the canonical-index entry BEFORE
@@ -359,7 +361,7 @@ pub fn reconcile_chain_state_with_block_store(
         let prev_timestamps = prev_timestamps_from_store(store, height)?;
         state.connect_block_with_suite_context(
             &block_bytes,
-            cfg.expected_target,
+            expected_target,
             prev_timestamps.as_deref(),
             cfg.chain_id,
             rotation,
@@ -368,6 +370,41 @@ pub fn reconcile_chain_state_with_block_store(
         changed = true;
     }
     Ok(changed)
+}
+
+/// Expected target for the canonical block at `height`, resolved PER replayed
+/// block: the selected parent is the canonical index entry at `height - 1`, the
+/// candidate height is the loop variable. Only the free-function form of the
+/// primitive is callable here — reconcile runs before the sync engine exists.
+/// Mirror of Go `chainstate_recovery.go::replayExpectedTarget`.
+///
+/// Failure contract (RUB-655 `done_when`): the error returns unchanged through
+/// `reconcile_chain_state_with_block_store` to `main.rs`, which exits 2 BEFORE
+/// `chain_state.save`, before `SyncEngine::new`, and before the tx pool, p2p
+/// service, RPC server and miner start. This helper writes nothing, so the only
+/// durable write already made is the pre-existing incomplete-suffix truncation
+/// from `truncate_incomplete_canonical_suffix`; it stays intact and nothing is
+/// added. The in-memory `*state` reset is not durable — save is never reached.
+fn replay_expected_target(
+    store: &BlockStore,
+    cfg: &SyncConfig,
+    height: u64,
+    tip_height: u64,
+) -> Result<Option<[u8; 32]>, String> {
+    if height == 0 {
+        return Ok(cfg.expected_target);
+    }
+    if !stock_devnet_target_schedule(&cfg.network, cfg.chain_id) {
+        return Ok(cfg.expected_target);
+    }
+    let parent_hash = store.canonical_hash(height - 1)?.ok_or_else(|| {
+        format!(
+            "missing canonical parent hash for target context during chainstate replay at height {height} (tip_height={tip_height})"
+        )
+    })?;
+    expected_target_for_candidate(store, parent_hash, height)
+        .map(Some)
+        .map_err(target_schedule_error_message)
 }
 
 /// Build the prev-timestamps window used by `connect_block` consensus
@@ -1095,5 +1132,86 @@ mod tests {
             "explicit save outside the apply-block gate must always land"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---- RUB-655 target-schedule runtime rows ----
+
+    /// Replay derives the expected target PER BLOCK, and a target-context
+    /// failure adds NO durable write of its own: canonical index,
+    /// block/header/undo artifacts and the absence of a chainstate snapshot are
+    /// all unchanged across the failing reconcile. Corrupting the height-1
+    /// HEADER artifact ONLY is what makes it per-block evidence — replay of
+    /// height 1 derives from the intact genesis header and its own block
+    /// artifact still re-hashes, so the failure lands on height 2's lookup.
+    #[test]
+    fn target_schedule_runtime_recovery_derives_per_block_without_durable_write() {
+        use crate::sync::{next_candidate_block_for_test, stock_devnet_engine_for_test};
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-ts-recover", |_| {});
+        let at_genesis = engine.chain_state_snapshot();
+        for _ in 0..2 {
+            let block = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
+            assert!(engine.apply_block_with_reorg(&block, None).is_ok());
+        }
+        // The deliberately wrong static target makes the row discriminating:
+        // replaying heights 1..=2 only succeeds if the DERIVED value binds.
+        // Replay resumes from the height-0 snapshot, so the published-genesis
+        // path (which keeps the static value by design) is not re-run.
+        let mut cfg = default_sync_config(None, devnet_genesis_chain_id(), None);
+        cfg.expected_target = Some([0x7f; 32]);
+        let mut store = engine.block_store_snapshot().expect("blockstore");
+        drop(engine);
+
+        let mut replayed = at_genesis.clone();
+        let changed = reconcile_chain_state_with_block_store(&mut replayed, &mut store, &cfg);
+        assert_eq!((changed, replayed.height), (Ok(true), 2));
+
+        let root = block_store_path(&dir);
+        // The selected parent is the canonical entry at height-1, NEVER the
+        // block's own: making canonical[2]'s header unreadable must not disturb
+        // the derivation FOR height 2, which reads canonical[1].
+        let tip = hex::encode(store.canonical_hash(2).expect("read").expect("height 2"));
+        let tip_header = root.join("headers").join(format!("{tip}.bin"));
+        let saved = fs::read(&tip_header).expect("read tip header");
+        fs::write(&tip_header, [0x00]).expect("corrupt tip header");
+        let derived = replay_expected_target(&store, &cfg, 2, 2);
+        assert!(
+            derived.is_ok(),
+            "derivation read the block's own header: {derived:?}"
+        );
+        fs::write(&tip_header, &saved).expect("restore tip header");
+        // A non-devnet replay keeps the configured static target verbatim.
+        let mut regtest = cfg.clone();
+        regtest.network = "regtest".to_string();
+        assert_eq!(
+            replay_expected_target(&store, &regtest, 1, 2),
+            Ok(cfg.expected_target)
+        );
+
+        let h1 = hex::encode(store.canonical_hash(1).expect("read").expect("height 1"));
+        fs::write(root.join("headers").join(format!("{h1}.bin")), [0x00]).expect("corrupt header");
+        let before = durable_state(&root);
+
+        let mut fresh = open_store_in(&dir);
+        let mut state = at_genesis;
+        let err = reconcile_chain_state_with_block_store(&mut state, &mut fresh, &cfg).unwrap_err();
+        assert_eq!(err, "target schedule history corrupt");
+        assert_eq!(
+            durable_state(&root),
+            before,
+            "reconcile added a durable write"
+        );
+        // `main.rs` reaches `chain_state.save` only AFTER reconcile returns Ok,
+        // so the fixture dir must hold no chainstate snapshot at all.
+        assert!(!crate::chainstate::chain_state_path(&dir).exists());
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// The canonical index plus the block/header/undo artifact counts, so a
+    /// failing path can be shown to add no durable write of its own.
+    fn durable_state(root: &std::path::Path) -> (Vec<u8>, [usize; 3]) {
+        let index = fs::read(root.join("index.json")).expect("index");
+        let counts = ["blocks", "headers", "undo"]
+            .map(|name| fs::read_dir(root.join(name)).expect("artifact dir").count());
+        (index, counts)
     }
 }

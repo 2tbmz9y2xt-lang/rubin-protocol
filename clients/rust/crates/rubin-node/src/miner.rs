@@ -17,7 +17,7 @@ use crate::coinbase::{
     build_coinbase_tx, default_mine_address, normalize_mine_address, parse_mine_address,
 };
 use crate::da_relay::{CompleteDaSetCandidate, CompleteDaSetProvider};
-use crate::sync::SyncEngine;
+use crate::sync::{target_schedule_error_message, SyncEngine};
 use crate::txpool::{
     apply_policy, TxPool, TxPoolConfig, DEFAULT_MEMPOOL_MIN_FEE_RATE, DEFAULT_MIN_DA_FEE_RATE,
 };
@@ -169,6 +169,9 @@ impl<'a> Miner<'a> {
         } else {
             [0u8; 32]
         };
+        // RUB-655: resolved BEFORE the MTP window, and used for BOTH header
+        // construction and the nonce search below.
+        let target = self.template_target(prev_hash, next_height)?;
         let remaining_weight = self.remaining_weight_budget(next_height)?;
         let candidates = self.candidate_transactions(txs);
         let prev_timestamps = self.sync.prev_timestamps_for_next_block()?;
@@ -201,9 +204,8 @@ impl<'a> Miner<'a> {
             txids.push(candidate.txid);
         }
         let merkle_root = merkle_root_txids(&txids).map_err(|e| e.to_string())?;
-        let block_without_nonce =
-            make_header_prefix(prev_hash, merkle_root, timestamp, self.cfg.target);
-        let (header_bytes, nonce) = mine_header_nonce(&block_without_nonce, self.cfg.target)?;
+        let block_without_nonce = make_header_prefix(prev_hash, merkle_root, timestamp, target);
+        let (header_bytes, nonce) = mine_header_nonce(&block_without_nonce, target)?;
         let block_bytes = assemble_block_bytes(&header_bytes, &coinbase, &parsed);
         let summary = self
             .sync
@@ -216,6 +218,25 @@ impl<'a> Miner<'a> {
             nonce,
             tx_count: 1 + parsed.len(),
         })
+    }
+
+    /// The target this post-genesis template commits to, for BOTH header
+    /// construction and the nonce search — the miner must never mine against a
+    /// target the apply path will then reject. `prev_hash` is the canonical tip
+    /// `mine_one` snapshotted (this template's authoritative selected parent)
+    /// and `next_height` the miner's own candidate height. On a stock Phase-0
+    /// devnet chain the derived target REPLACES the static `MinerConfig.target`,
+    /// so that field carries no authority there; everywhere else it is returned
+    /// unchanged, including `next_height == 0` (empty chain, no schedule target).
+    /// Mirror of Go `templateTarget`, whose nil-`m.sync` arm has no counterpart
+    /// here (the Rust `Miner` holds `&mut SyncEngine`).
+    fn template_target(&self, prev_hash: [u8; 32], next_height: u64) -> Result<[u8; 32], String> {
+        if next_height == 0 || !self.sync.stock_devnet_target_schedule() {
+            return Ok(self.cfg.target);
+        }
+        self.sync
+            .expected_target_for_candidate(prev_hash, next_height)
+            .map_err(target_schedule_error_message)
     }
 
     /// Flat candidate selection, mirroring Go `candidateTransactions`: individual DA
@@ -833,10 +854,10 @@ mod tests {
 
     use super::{
         assemble_block_bytes, build_witness_commitment, canonical_tx_weight,
-        choose_valid_timestamp, default_mine_address, make_header_prefix, mtp_median,
-        parse_complete_da_set_candidate, parse_mine_address_arg, parse_mining_candidate,
-        pick_flat_candidate_raw, updated_policy_da_bytes, validate_complete_da_set_candidate_shape,
-        Miner, MinerConfig,
+        choose_valid_timestamp, default_mine_address, make_header_prefix, mine_header_nonce,
+        mtp_median, parse_complete_da_set_candidate, parse_mine_address_arg,
+        parse_mining_candidate, pick_flat_candidate_raw, updated_policy_da_bytes,
+        validate_complete_da_set_candidate_shape, Miner, MinerConfig,
     };
 
     use std::path::Path;
@@ -1894,5 +1915,76 @@ mod tests {
         assert_eq!(conflict_skipped.len(), 1);
         assert_eq!(conflict_skipped[0].raw, raw);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---- RUB-655 target-schedule runtime rows ----
+
+    /// On a stock devnet chain the template IGNORES a deliberately wrong static
+    /// `MinerConfig.target` for BOTH header construction and the nonce search —
+    /// otherwise `mine_one`'s own `apply_block` would reject the block the miner
+    /// just mined. At a retarget BOUNDARY it commits to the retargeted value; on
+    /// a non-stock configuration the static target is verbatim.
+    #[test]
+    fn target_schedule_runtime_miner_uses_derived_target() {
+        use crate::sync::{boundary_chain_for_test, stock_devnet_engine_for_test};
+        use rubin_consensus::constants::{POW_LIMIT, WINDOW_SIZE};
+
+        // Two leading zero bytes: far HARDER than the derived POW_LIMIT, so a
+        // nonce searched against it lands nowhere near the first nonce that
+        // satisfies the derived target.
+        let mut wrong = POW_LIMIT;
+        wrong[0] = 0x00;
+        wrong[1] = 0x00;
+        #[rustfmt::skip]
+        let cfg = MinerConfig { target: wrong, ..Default::default() };
+
+        // End to end: `mine_one` mines AND applies, so a template that kept the
+        // wrong static target could not have produced an accepted block.
+        let (mut sync, dir) = stock_devnet_engine_for_test("rubin-ts-miner", |_| {});
+        let mined = {
+            let mut miner = Miner::new(&mut sync, None, cfg.clone()).expect("miner");
+            miner.mine_one(&[]).expect("mine one")
+        };
+        let store = sync.block_store_snapshot().expect("store");
+        let header = store.get_header_by_hash(mined.hash).expect("mined header");
+        let parsed = rubin_consensus::parse_block_header_bytes(&header).expect("parse header");
+        assert_eq!(parsed.target, POW_LIMIT, "template kept the static target");
+        // The NONCE SEARCH must take the derived target too, not just the
+        // header field: the mined nonce has to be the FIRST that satisfies the
+        // derived value, which a search against the static one would skip.
+        let (_, first) = mine_header_nonce(&header[..108], POW_LIMIT).expect("first nonce");
+        assert_eq!(
+            mined.nonce, first,
+            "nonce searched against the static target"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup");
+
+        // One height below the boundary the parent's own target binds, so the
+        // boundary row is not a tautology; height 0 is the empty-chain path and
+        // keeps the configured value; a non-stock chain keeps it too.
+        let (mut boundary, boundary_dir, times) = boundary_chain_for_test("rubin-ts-mnbound");
+        let want = rubin_consensus::retarget_v1_clamped(POW_LIMIT, &times).expect("reference");
+        let parent = boundary.chain_state.tip_hash;
+        {
+            let miner = Miner::new(&mut boundary, None, cfg.clone()).expect("boundary miner");
+            #[rustfmt::skip]
+            let rows = [(WINDOW_SIZE, want), (WINDOW_SIZE - 1, POW_LIMIT), (0, wrong)];
+            for (height, expected) in rows {
+                let got = miner.template_target(parent, height);
+                assert_eq!(got, Ok(expected), "{height}");
+            }
+        }
+        drop(boundary);
+        fs::remove_dir_all(&boundary_dir).expect("cleanup");
+
+        let (mut regtest, regtest_dir) =
+            stock_devnet_engine_for_test("rubin-ts-mnregtest", |c| c.network = "regtest".into());
+        let regtest_parent = regtest.chain_state.tip_hash;
+        {
+            let miner = Miner::new(&mut regtest, None, cfg).expect("regtest miner");
+            assert_eq!(miner.template_target(regtest_parent, 1), Ok(wrong));
+        }
+        drop(regtest);
+        fs::remove_dir_all(&regtest_dir).expect("cleanup");
     }
 }

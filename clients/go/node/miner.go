@@ -335,7 +335,8 @@ func canonicalCoinbaseWeight(height uint64, alreadyGenerated uint64, mineAddress
 		addrLen := uint64(len(mineAddress))
 		parts = append(parts, 8+2+compactSizeLenForMiner(addrLen)+addrLen)
 	}
-	parts = append(parts,
+	parts = append(
+		parts,
 		compactSizeLenForMiner(outputCount),
 		8+2+compactSizeLenForMiner(32)+32,
 		4,
@@ -791,18 +792,40 @@ func (m *Miner) buildCoinbaseAndMerkleRoot(nextHeight uint64, alreadyGenerated u
 }
 
 func (m *Miner) mineHeader(ctx context.Context, nextHeight uint64, prevHash [32]byte, merkleRoot [32]byte) ([]uint64, uint64, []byte, uint64, error) {
+	target, err := m.templateTarget(prevHash, nextHeight)
+	if err != nil {
+		return nil, 0, nil, 0, err
+	}
 	prevTimestamps, err := m.prevTimestamps(nextHeight)
 	if err != nil {
 		return nil, 0, nil, 0, err
 	}
 	now := m.cfg.TimestampSource()
 	timestamp := chooseValidTimestamp(nextHeight, prevTimestamps, now)
-	blockWithoutNonce := makeHeaderPrefix(prevHash, merkleRoot, timestamp, m.cfg.Target)
-	headerBytes, nonce, err := mineHeaderNonce(ctx, blockWithoutNonce, m.cfg.Target)
+	blockWithoutNonce := makeHeaderPrefix(prevHash, merkleRoot, timestamp, target)
+	headerBytes, nonce, err := mineHeaderNonce(ctx, blockWithoutNonce, target)
 	if err != nil {
 		return nil, 0, nil, 0, err
 	}
 	return prevTimestamps, timestamp, headerBytes, nonce, nil
+}
+
+// templateTarget returns the target the post-genesis template commits to, for
+// BOTH header construction and the nonce search — the miner must never mine
+// against a target the apply path will then reject.
+//
+// prevHash is the canonical tip snapshotted by buildContext under the chainstate
+// read lock, i.e. this template's authoritative selected parent. On a stock
+// devnet chain the derived target replaces MinerConfig.Target, so that field
+// carries no static authority there; everywhere else the configured target is
+// returned unchanged, including nextHeight == 0 (the empty-chain path, already
+// redirected to the published genesis by BootstrapCanonicalGenesisIfEmpty).
+func (m *Miner) templateTarget(prevHash [32]byte, nextHeight uint64) ([32]byte, error) {
+	if nextHeight == 0 || m.sync == nil || m.blockStore == nil ||
+		!StockDevnetTargetSchedule(m.sync.cfg.Network, m.sync.cfg.ChainID) {
+		return m.cfg.Target, nil
+	}
+	return deriveExpectedTargetFn(m.blockStore, prevHash, nextHeight)
 }
 
 func assembleBlockBytes(headerBytes []byte, coinbase []byte, parsed []minedCandidate) []byte {

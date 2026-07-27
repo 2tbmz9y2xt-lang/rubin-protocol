@@ -1071,7 +1071,18 @@ impl PeerSession {
             self.bump_ban(100, &err.to_string());
             return Err(io::Error::new(io::ErrorKind::InvalidData, err.to_string()));
         }
+        // RUB-655: under the exact stock Phase-0 devnet predicate the OPTIONAL
+        // static expected-target equality is SKIPPED, so the reconstructed
+        // block reaches `SyncEngine::apply_block_with_reorg`, the authoritative
+        // path that derives the target from the selected parent and the
+        // candidate height. Parse, PoW range, PoW work and the peer disposition
+        // stay untouched; when the predicate is false this comparison and its
+        // peer outcome are byte-identical to pre-RUB-655.
+        //
+        // The predicate is the same two config-only startup terms every other
+        // layer uses; the startup identity check owns genesis-hash verification.
         if matches!(sync_engine.cfg.expected_target, Some(expected) if parsed_header.target != expected)
+            && !sync_engine.stock_devnet_target_schedule()
         {
             self.bump_ban(100, "target mismatch");
             return Err(invalid_data("target mismatch"));
@@ -1504,9 +1515,9 @@ impl PeerSession {
                 .has_block(parsed.header.prev_block_hash)
                 .map_err(io::Error::other)?
         {
-            return self.retain_or_resolve_orphan(
+            return self.retain_relayed_orphan_if_valid(
+                &parsed,
                 block_hash_bytes,
-                parsed.header.prev_block_hash,
                 block_bytes,
                 sync_engine,
                 relay_ctx,
@@ -1539,11 +1550,55 @@ impl PeerSession {
                     accepted_blocks,
                 })
             }
-            Err(err) if is_parent_not_found_err(&err) => Err(io::Error::other(format!(
-                "unexpected missing-parent after precheck: {err}"
-            ))),
+            // RUB-655: the apply path now DERIVES a target, so it can report
+            // the parent-not-found class even after the precheck passed — the
+            // precheck tests the CANDIDATE's prev hash while derivation asks
+            // for the prepared canonical tip, i.e. different hashes and
+            // different files, and `has_block` is a `Path::exists()` probe that
+            // conflates "missing" with a metadata error. A partially truncated
+            // or damaged store therefore disagrees with no concurrency at all.
+            // The precheck is an optimization and must not harden the outcome:
+            // route to the SAME orphan retention Go reaches from this position
+            // (`handlers_block.go` `retainRelayedOrphanIfValid`), instead of
+            // failing the peer message and losing the block.
+            Err(err) if is_parent_not_found_err(&err) => self.retain_relayed_orphan_if_valid(
+                &parsed,
+                block_hash_bytes,
+                block_bytes,
+                sync_engine,
+                relay_ctx,
+            ),
             Err(err) => Err(io::Error::other(err)),
         }
+    }
+
+    /// Mirror of Go `retainRelayedOrphanIfValid` (`handlers_block.go`): an
+    /// orphan candidate is PoW-gated against its OWN declared target BEFORE it
+    /// is admitted to the pool, so unvalidated peer data cannot take memory and
+    /// a bad-PoW block earns the same ban delta in both clients. Both orphan
+    /// entries — the pre-apply `has_block` precheck and the post-apply
+    /// parent-not-found arm — go through here; Go has no precheck, so its only
+    /// entry is the post-apply one and gating just that side would leave the
+    /// precheck path admitting what Go rejects.
+    fn retain_relayed_orphan_if_valid(
+        &mut self,
+        parsed: &rubin_consensus::ParsedBlock,
+        block_hash_bytes: [u8; 32],
+        block_bytes: &[u8],
+        sync_engine: &mut SyncEngine,
+        relay_ctx: Option<&PeerRelayContext<'_>>,
+    ) -> io::Result<RelayedBlockOutcome> {
+        if let Err(err) = rubin_consensus::pow_check(&parsed.header_bytes, parsed.header.target) {
+            self.bump_ban(100, &err.to_string());
+            return Err(io::Error::new(io::ErrorKind::InvalidData, err.to_string()));
+        }
+        self.retain_or_resolve_orphan(
+            block_hash_bytes,
+            parsed.header.prev_block_hash,
+            block_bytes,
+            sync_engine,
+            relay_ctx,
+        )
     }
 
     fn retain_or_resolve_orphan(
@@ -7268,5 +7323,156 @@ mod tests {
 
         let _client = TcpStream::connect(addr).expect("connect");
         server.join().expect("server join");
+    }
+
+    // ---- RUB-655 target-schedule runtime rows ----
+
+    /// Compact payload for one block, prefilled so reconstruction needs no pool.
+    fn compact_payload_for_block(block: &[u8]) -> Vec<u8> {
+        let mut header = [0u8; BLOCK_HEADER_BYTES];
+        header.copy_from_slice(&block[..BLOCK_HEADER_BYTES]);
+        let txs = compact_block_transactions_by_index(block, &[0]).expect("prefilled tx");
+        encode_cmpctblock_payload(CmpctBlockPayload {
+            header,
+            nonce1: 0,
+            nonce2: 0,
+            short_ids: Vec::new(),
+            prefilled: vec![PrefilledTxn {
+                index: 0,
+                tx: txs[0].clone(),
+            }],
+        })
+        .expect("encode cmpctblock")
+    }
+
+    /// RUB-655 item 2: the precheck is an OPTIMIZATION and must not harden the
+    /// outcome. `has_block` probes `headers/<hash>.bin`, while
+    /// `collect_branch_to_canonical` reads `blocks/<hash>.bin` — different
+    /// files, so a partially truncated or damaged store makes the precheck pass
+    /// and the apply report the parent-not-found class with NO concurrency at
+    /// all. Before this fix that arm returned a connection-level error and lost
+    /// the block; it must instead reach the same orphan retention Go reaches
+    /// from this position — retained, no error, no ban.
+    #[test]
+    fn target_schedule_runtime_precheck_apply_disagreement_retains_orphan() {
+        use crate::sync::{retarget_block_for_test, stock_devnet_engine_for_test};
+        let _metrics = orphan_pool_metrics_test_guard();
+        reset_orphan_pool_metrics_for_test();
+
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-ts-precheck", |_| {});
+        let genesis = engine.chain_state.tip_hash;
+        let ts = engine.tip_timestamp + 1;
+
+        // A HEADER-ONLY artifact: the header probe the precheck uses succeeds,
+        // the block-bytes read the apply performs does not.
+        let mut header =
+            crate::test_helpers::build_block_bytes(genesis, [0u8; 32], POW_LIMIT, ts, &[]);
+        header.truncate(BLOCK_HEADER_BYTES);
+        let orphan_parent = block_hash(&header).expect("parent hash");
+        let root = crate::blockstore::block_store_path(&dir);
+        let leaf = format!("{}.bin", hex::encode(orphan_parent));
+        fs::write(root.join("headers").join(&leaf), &header).expect("write header-only artifact");
+        assert!(engine.has_block(orphan_parent).expect("precheck probe"));
+        assert!(!root.join("blocks").join(&leaf).exists());
+
+        let child = retarget_block_for_test(
+            coinbase_only_block_with_gen(2, 0, orphan_parent, ts + 1),
+            POW_LIMIT,
+        );
+        let child_hash = block_hash(&child[..BLOCK_HEADER_BYTES]).expect("child hash");
+        let (mut session, _client) = test_peer_session();
+        session
+            .handle_block(&child, &mut engine)
+            .expect("disagreement must not fail the peer message");
+        assert_eq!(
+            session.orphans.len(),
+            1,
+            "block must be retained as an orphan"
+        );
+        assert!(session.orphans.by_hash.contains_key(&child_hash));
+        assert_eq!(session.state().ban_score, 0, "retention must not ban");
+        assert_eq!(engine.chain_state.height, 0, "nothing became canonical");
+
+        // Go PoW-gates BEFORE retaining (`retainRelayedOrphanIfValid`), so a
+        // bad-PoW orphan must be rejected with the same ban delta and must not
+        // take pool memory — on BOTH orphan entries, the pre-apply precheck
+        // (parent absent) and the post-apply parent-not-found arm.
+        for (row, parent) in [(0u8, orphan_parent), (1, [0xab; 32])] {
+            let mut bad = coinbase_only_block_with_gen(2, 0, parent, ts + 2);
+            bad[76..108].copy_from_slice(&[0u8; 32]);
+            bad[107] = 0x01;
+            let (mut session, _client) = test_peer_session();
+            let err = session
+                .handle_block(&bad, &mut engine)
+                .expect_err("bad PoW must not be retained");
+            assert!(err.to_string().contains("pow invalid"), "row {row}: {err}");
+            assert_eq!(session.state().ban_score, 100, "row {row}");
+            assert_eq!(
+                session.orphans.len(),
+                0,
+                "row {row}: bad PoW took pool memory"
+            );
+        }
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// The compact-relay gate, BOTH ways. Under the stock predicate the OPTIONAL
+    /// static expected-target equality is skipped, so the reconstructed block
+    /// reaches the authoritative apply path and is accepted with no ban; with ANY
+    /// term broken the static rejection and its peer disposition (`target
+    /// mismatch`, ban 100) are unchanged. PoW is enforced either way.
+    #[test]
+    fn target_schedule_runtime_compact_static_target_gate() {
+        use crate::sync::{next_candidate_block_for_test, stock_devnet_engine_for_test};
+        const POW_LIMIT: [u8; 32] = rubin_consensus::constants::POW_LIMIT;
+
+        let mut wrong = POW_LIMIT; // deliberately not the candidate's target
+        wrong[1] = 0x7f;
+        let break_term: [fn(&mut SyncEngine); 2] = [
+            |engine| engine.cfg.network = "regtest".to_string(),
+            |engine| engine.cfg.chain_id = [0x01; 32],
+        ];
+
+        for (row, break_term) in break_term.into_iter().enumerate() {
+            let (mut engine, dir) = stock_devnet_engine_for_test("rubin-ts-cmpct-off", |_| {});
+            let block = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
+            engine.cfg.expected_target = Some(wrong);
+            break_term(&mut engine);
+            assert!(!engine.stock_devnet_target_schedule(), "row {row}");
+
+            let (mut session, _client) = test_peer_session();
+            let err = session
+                .handle_cmpctblock(&compact_payload_for_block(&block), &mut engine, None)
+                .expect_err("static target must still reject");
+            assert_eq!(err.to_string(), "target mismatch", "row {row}");
+            assert_eq!(session.state().ban_score, 100, "row {row}");
+            fs::remove_dir_all(&dir).expect("cleanup");
+        }
+
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-ts-cmpct-on", |_| {});
+        let block = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
+        engine.cfg.expected_target = Some(wrong);
+        assert!(engine.stock_devnet_target_schedule());
+        let hash = block_hash(&block[..BLOCK_HEADER_BYTES]).expect("candidate hash");
+
+        let (mut session, _client) = test_peer_session();
+        let payload = compact_payload_for_block(&block);
+        let ok = session.handle_cmpctblock(&payload, &mut engine, None);
+        assert!(ok.is_ok(), "must defer to the apply path: {ok:?}");
+        assert_eq!(session.state().ban_score, 0);
+        assert_eq!(engine.has_block(hash), Ok(true), "apply path must accept");
+
+        // PoW is still enforced under the stock predicate: only the OPTIONAL
+        // static equality moved, nothing else.
+        let mut tiny = block;
+        tiny[76..108].copy_from_slice(&[0u8; 32]);
+        tiny[107] = 0x01;
+        let (mut session, _client) = test_peer_session();
+        let err = session
+            .handle_cmpctblock(&compact_payload_for_block(&tiny), &mut engine, None)
+            .expect_err("pow must still reject");
+        assert!(err.to_string().contains("pow invalid"), "{err}");
+        assert_eq!(session.state().ban_score, 100);
+        fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

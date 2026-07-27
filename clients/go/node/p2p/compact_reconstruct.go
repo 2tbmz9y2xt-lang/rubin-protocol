@@ -310,7 +310,22 @@ func (p *peer) validateCompactBlockHeader(header [consensus.BLOCK_HEADER_BYTES]b
 		p.bumpBan(100, err.Error())
 		return err
 	}
-	if expected := p.service.cfg.SyncConfig.ExpectedTarget; expected != nil && parsed.Target != *expected {
+	// The stock Phase-0 devnet predicate gates ONLY this optional static
+	// equality. When it holds, a header whose target follows the derived
+	// schedule must not be rejected here against one configured constant; the
+	// reconstructed block goes on to SyncEngine.ApplyBlockWithReorg, which
+	// derives the target from the selected parent and candidate height. Parse,
+	// PoW range, PoW work and the peer disposition are untouched — nothing new
+	// is accepted, the authority simply moves to the apply path. When the
+	// predicate is false this comparison and its peer outcome are byte-identical
+	// to pre-RUB-655.
+	//
+	// Ask the ENGINE, never this service's own SyncConfig copy.
+	// validateServiceConfig does not require the two to agree, so reading the
+	// copy would let this layer reject a header the engine it defers to would
+	// have accepted. Nil-safe on the method.
+	stockDevnet := p.service.cfg.SyncEngine.StockDevnetTargetSchedule()
+	if expected := p.service.cfg.SyncConfig.ExpectedTarget; expected != nil && !stockDevnet && parsed.Target != *expected {
 		err := &consensus.TxError{Code: consensus.BLOCK_ERR_TARGET_INVALID, Msg: "target mismatch"}
 		p.bumpBan(100, err.Error())
 		return err

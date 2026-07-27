@@ -26,13 +26,19 @@ func (s *SyncEngine) validateGenesisIdentity(blockHeight uint64, blockHash [32]b
 }
 
 // runPVShadowOnError runs parallel validation when sequential connect failed.
-func (s *SyncEngine) runPVShadowOnError(blockBytes []byte, prevTimestamps []uint64, prevState *ChainState, blockHeight uint64, seqErr error) {
+//
+// The shadow run MUST observe the same expected target as the sequential
+// connect that produced seqErr — ctx.expectedTarget, never the static
+// SyncConfig.ExpectedTarget, or PV reports a fabricated seq/par divergence at
+// every retarget boundary.
+func (s *SyncEngine) runPVShadowOnError(blockBytes []byte, prevTimestamps []uint64, ctx canonicalBlockApplyContext, seqErr error) {
+	blockHeight := ctx.blockHeight
 	s.pvTelemetry.RecordBlockValidated()
 	validateStart := time.Now()
-	shadowState := cloneChainState(prevState)
+	shadowState := cloneChainState(ctx.prevState)
 	_, parErr := shadowState.ConnectBlockParallelSigsWithSuiteContext(
 		blockBytes,
-		s.cfg.ExpectedTarget, prevTimestamps, s.cfg.ChainID,
+		ctx.expectedTarget, prevTimestamps, s.cfg.ChainID,
 		s.cfg.RotationProvider, s.cfg.SuiteRegistry, 0,
 	)
 	s.pvTelemetry.RecordValidateLatency(time.Since(validateStart))
@@ -49,13 +55,16 @@ func (s *SyncEngine) runPVShadowOnError(blockBytes []byte, prevTimestamps []uint
 }
 
 // runPVShadowOnSuccess runs parallel validation when sequential connect succeeded.
-func (s *SyncEngine) runPVShadowOnSuccess(blockBytes []byte, prevTimestamps []uint64, prevState *ChainState, blockHeight uint64, seqSummary *ChainStateConnectSummary) {
+//
+// Same contract as runPVShadowOnError: binds to ctx.expectedTarget.
+func (s *SyncEngine) runPVShadowOnSuccess(blockBytes []byte, prevTimestamps []uint64, ctx canonicalBlockApplyContext, seqSummary *ChainStateConnectSummary) {
+	blockHeight := ctx.blockHeight
 	s.pvTelemetry.RecordBlockValidated()
 	validateStart := time.Now()
-	shadowState := cloneChainState(prevState)
+	shadowState := cloneChainState(ctx.prevState)
 	parSummary, parErr := shadowState.ConnectBlockParallelSigsWithSuiteContext(
 		blockBytes,
-		s.cfg.ExpectedTarget, prevTimestamps, s.cfg.ChainID,
+		ctx.expectedTarget, prevTimestamps, s.cfg.ChainID,
 		s.cfg.RotationProvider, s.cfg.SuiteRegistry, 0,
 	)
 	s.pvTelemetry.RecordValidateLatency(time.Since(validateStart))
@@ -77,16 +86,16 @@ func (s *SyncEngine) runPVShadowOnSuccess(blockBytes []byte, prevTimestamps []ui
 }
 
 // runPVShadowIfActive runs the appropriate PV shadow validation.
-func (s *SyncEngine) runPVShadowIfActive(blockBytes []byte, prevTimestamps []uint64, prevState *ChainState, blockHeight uint64, seqErr error, seqSummary *ChainStateConnectSummary) {
+func (s *SyncEngine) runPVShadowIfActive(blockBytes []byte, prevTimestamps []uint64, ctx canonicalBlockApplyContext, seqErr error, seqSummary *ChainStateConnectSummary) {
 	pvActive := (s.pvMode == pvModeShadow || s.pvMode == pvModeOn) && s.isInIBDUnchecked()
 	if !pvActive {
 		s.pvTelemetry.RecordBlockSkipped()
 		return
 	}
 	if seqErr != nil {
-		s.runPVShadowOnError(blockBytes, prevTimestamps, prevState, blockHeight, seqErr)
+		s.runPVShadowOnError(blockBytes, prevTimestamps, ctx, seqErr)
 	} else {
-		s.runPVShadowOnSuccess(blockBytes, prevTimestamps, prevState, blockHeight, seqSummary)
+		s.runPVShadowOnSuccess(blockBytes, prevTimestamps, ctx, seqSummary)
 	}
 }
 
