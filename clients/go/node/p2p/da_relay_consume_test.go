@@ -1,6 +1,8 @@
 package p2p
 
 import (
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -262,5 +264,212 @@ func TestConsumeCanonicalAppliedDASetsNilRelayNoOp(t *testing.T) {
 	blocks := []node.CanonicalAppliedBlock{{Hash: daRelayTestID(0x66), CompleteDAIDs: [][32]byte{daRelayTestID(0x68)}}}
 	if err := svc.consumeCanonicalAppliedDASets(blocks); err != nil {
 		t.Fatalf("nil daRelay should no-op, got: %v", err)
+	}
+}
+
+func stageConsumeCompleteDASet(t *testing.T, state *daRelayState, daID [32]byte, peer string, payloads ...[]byte) (daRelaySetRecord, uint64) {
+	t.Helper()
+	mustAddDACommit(t, state, peer+"-commit", daRelayTestCommitForPayloads(daID, uint64(len(payloads)), payloads...))
+	var record daRelaySetRecord
+	for index, payload := range payloads {
+		record = mustAddDAChunk(t, state, peer+"-chunk", daRelayTestChunkPayload(daID, uint16(index), uint64(len(payload)), payload))
+	}
+	return record, mustPinnedPayloadAccounting(t, record)
+}
+
+func TestConsumeCanonicalAppliedDASetsBestEffortPerID(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		badIndex int
+	}{
+		{name: "first", badIndex: 0},
+		{name: "middle", badIndex: 1},
+		{name: "last", badIndex: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := newDARelayStateForTest(t, defaultDARelayCaps())
+			ids := [][32]byte{daRelayTestID(0x91), daRelayTestID(0x92), daRelayTestID(0x93)}
+			pinned := make([]uint64, len(ids))
+			var badRecord daRelaySetRecord
+			for index, daID := range ids {
+				payloads := [][]byte{[]byte(fmt.Sprintf("good-%d", index))}
+				if index == test.badIndex {
+					payloads = [][]byte{[]byte("bad-0"), []byte("bad-1"), []byte("bad-2"), []byte("bad-3"), []byte("bad-4"), []byte("bad-5"), []byte("bad-6"), []byte("bad-7")}
+				}
+				record, recordPinned := stageConsumeCompleteDASet(t, state, daID, fmt.Sprintf("%s-%d", test.name, index), payloads...)
+				pinned[index] = recordPinned
+				if index == test.badIndex {
+					badRecord = record
+				}
+			}
+			state.pinnedPayloadBytes = 0
+			for index, value := range pinned {
+				if index != test.badIndex {
+					state.pinnedPayloadBytes += value
+				}
+			}
+
+			hash := daRelayTestID(byte(0xa1 + test.badIndex))
+			err := (&Service{daRelay: state}).consumeCanonicalAppliedDASets([]node.CanonicalAppliedBlock{{Hash: hash, CompleteDAIDs: ids}})
+			if err == nil {
+				t.Fatal("item-local accounting failure returned nil")
+			}
+			if !errors.Is(err, errDARelayArithmeticOverflow) {
+				t.Fatalf("error %q did not preserve the native accounting cause", err)
+			}
+			for _, want := range []string{hex.EncodeToString(hash[:]), hex.EncodeToString(ids[test.badIndex][:])} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error %q does not attribute the failing item with %s", err, want)
+				}
+			}
+			if got := state.sets[ids[test.badIndex]]; !reflect.DeepEqual(got, badRecord) {
+				t.Fatalf("failing record mutated: got=%+v want=%+v", got, badRecord)
+			}
+			for index, daID := range ids {
+				if index != test.badIndex {
+					if _, ok := state.sets[daID]; ok {
+						t.Fatalf("valid ID %x after a local failure was not consumed", daID)
+					}
+				}
+			}
+			if state.pinnedPayloadBytes != 0 {
+				t.Fatalf("successful partial progress left pinned accounting=%d, want 0", state.pinnedPayloadBytes)
+			}
+		})
+	}
+}
+
+func TestConsumeCanonicalAppliedDASetsRetainsEarliestItemFailureAcrossBlocks(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	goodFirst := daRelayTestID(0xa1)
+	badFirst := daRelayTestID(0xa2)
+	badSecond := daRelayTestID(0xa3)
+	badThird := daRelayTestID(0xa4)
+	goodLast := daRelayTestID(0xa5)
+	_, firstPinned := stageConsumeCompleteDASet(t, state, goodFirst, "first", []byte("first"))
+	badRecords := map[[32]byte]daRelaySetRecord{}
+	for _, daID := range [][32]byte{badFirst, badSecond, badThird} {
+		record, _ := stageConsumeCompleteDASet(t, state, daID, fmt.Sprintf("bad-%x", daID[0]), []byte("bad-0"), []byte("bad-1"))
+		badRecords[daID] = record
+	}
+	_, lastPinned := stageConsumeCompleteDASet(t, state, goodLast, "last", []byte("last"))
+	state.pinnedPayloadBytes = firstPinned + lastPinned
+
+	firstHash := daRelayTestID(0xb1)
+	blocks := []node.CanonicalAppliedBlock{
+		{Hash: firstHash, CompleteDAIDs: [][32]byte{goodFirst, badFirst, badSecond}},
+		{Hash: daRelayTestID(0xb2), CompleteDAIDs: [][32]byte{badThird, goodLast}},
+	}
+	err := (&Service{daRelay: state}).consumeCanonicalAppliedDASets(blocks)
+	if err == nil || !errors.Is(err, errDARelayArithmeticOverflow) {
+		t.Fatalf("earliest item-local accounting failure err=%v, want wrapped native cause", err)
+	}
+	for _, want := range []string{hex.EncodeToString(firstHash[:]), hex.EncodeToString(badFirst[:])} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("earliest failure error %q does not contain %s", err, want)
+		}
+	}
+	for daID, want := range badRecords {
+		if got := state.sets[daID]; !reflect.DeepEqual(got, want) {
+			t.Fatalf("failing ID %x mutated: got=%+v want=%+v", daID, got, want)
+		}
+	}
+	for _, daID := range [][32]byte{goodFirst, goodLast} {
+		if _, ok := state.sets[daID]; ok {
+			t.Fatalf("later valid ID %x was not consumed", daID)
+		}
+	}
+	if state.pinnedPayloadBytes != 0 {
+		t.Fatalf("successful IDs left pinned accounting=%d, want 0", state.pinnedPayloadBytes)
+	}
+}
+
+func TestConsumeCanonicalAppliedDASetsNoOpsForEmptyUnknownIncompleteAndRepeatedIDs(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	completeID := daRelayTestID(0xc1)
+	incompleteID := daRelayTestID(0xc2)
+	unknownID := daRelayTestID(0xc3)
+	_, completePinned := stageConsumeCompleteDASet(t, state, completeID, "complete", []byte("complete"))
+	incomplete := mustAddDACommit(t, state, "incomplete", daRelayTestCommitForPayloads(incompleteID, 1, []byte("incomplete")))
+
+	svc := &Service{daRelay: state}
+	if err := svc.consumeCanonicalAppliedDASets(nil); err != nil {
+		t.Fatalf("empty canonical report: %v", err)
+	}
+	if state.pinnedPayloadBytes != completePinned {
+		t.Fatalf("empty report mutated pinned accounting=%d, want %d", state.pinnedPayloadBytes, completePinned)
+	}
+	err := svc.consumeCanonicalAppliedDASets([]node.CanonicalAppliedBlock{{
+		Hash:          daRelayTestID(0xc4),
+		CompleteDAIDs: [][32]byte{unknownID, incompleteID, completeID, completeID},
+	}})
+	if err != nil {
+		t.Fatalf("unknown, incomplete, and repeated IDs must be no-op-safe: %v", err)
+	}
+	if _, ok := state.sets[completeID]; ok {
+		t.Fatal("first complete-ID attempt did not consume the record")
+	}
+	if got := state.sets[incompleteID]; !reflect.DeepEqual(got, incomplete) {
+		t.Fatalf("incomplete ID mutated: got=%+v want=%+v", got, incomplete)
+	}
+	if state.pinnedPayloadBytes != 0 {
+		t.Fatalf("repeated no-op changed accounting=%d, want 0", state.pinnedPayloadBytes)
+	}
+}
+
+func TestConsumeAcceptedBlockDASetsBestEffortPerID(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	firstID := daRelayTestID(0xd1)
+	badID := daRelayTestID(0xd2)
+	lastID := daRelayTestID(0xd3)
+	_, firstPinned := stageConsumeCompleteDASet(t, state, firstID, "accepted-first", []byte("first"))
+	badRecord, _ := stageConsumeCompleteDASet(t, state, badID, "accepted-bad", []byte("bad-0"), []byte("bad-1"))
+	_, lastPinned := stageConsumeCompleteDASet(t, state, lastID, "accepted-last", []byte("last"))
+	state.pinnedPayloadBytes = firstPinned + lastPinned
+
+	block := compactTestBlockBytesWithTxs(t, [][]byte{
+		minimalValidTxBytes(t),
+		daCommitRelayTxBytes(t, firstID, 1, []byte("first")),
+		daChunkRelayTxBytes(t, firstID, 0, 2, []byte("first")),
+		daCommitRelayTxBytes(t, badID, 3, []byte("bad")),
+		daChunkRelayTxBytes(t, badID, 0, 4, []byte("bad")),
+		daCommitRelayTxBytes(t, lastID, 5, []byte("last")),
+		daChunkRelayTxBytes(t, lastID, 0, 6, []byte("last")),
+	})
+	if got := mustParseCompleteDASetIDs(t, block); !reflect.DeepEqual(got, [][32]byte{firstID, badID, lastID}) {
+		t.Fatalf("accepted bytes extracted IDs=%x, want %x", got, [][32]byte{firstID, badID, lastID})
+	}
+	err := (&Service{daRelay: state}).ConsumeAcceptedBlockDASets(block)
+	if err == nil || !errors.Is(err, errDARelayArithmeticOverflow) {
+		t.Fatalf("accepted block item-local accounting failure err=%v, want wrapped native cause", err)
+	}
+	if !strings.Contains(err.Error(), hex.EncodeToString(badID[:])) {
+		t.Fatalf("accepted error %q does not attribute da_id %x", err, badID)
+	}
+	if got := state.sets[badID]; !reflect.DeepEqual(got, badRecord) {
+		t.Fatalf("accepted failing record mutated: got=%+v want=%+v", got, badRecord)
+	}
+	for _, daID := range [][32]byte{firstID, lastID} {
+		if _, ok := state.sets[daID]; ok {
+			t.Fatalf("accepted valid ID %x after failure was not consumed", daID)
+		}
+	}
+	if state.pinnedPayloadBytes != 0 {
+		t.Fatalf("accepted partial success left pinned accounting=%d, want 0", state.pinnedPayloadBytes)
+	}
+}
+
+func TestConsumeAcceptedBlockDASetsMalformedBytesDoNotMutateRelay(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	daID := daRelayTestID(0xe1)
+	record, pinned := stageConsumeCompleteDASet(t, state, daID, "malformed", []byte("payload"))
+	if err := (&Service{daRelay: state}).ConsumeAcceptedBlockDASets([]byte{0x01, 0x02}); err == nil {
+		t.Fatal("malformed accepted bytes returned nil")
+	}
+	if got := state.sets[daID]; !reflect.DeepEqual(got, record) {
+		t.Fatalf("malformed bytes mutated record: got=%+v want=%+v", got, record)
+	}
+	if state.pinnedPayloadBytes != pinned {
+		t.Fatalf("malformed bytes mutated pinned accounting=%d, want %d", state.pinnedPayloadBytes, pinned)
 	}
 }

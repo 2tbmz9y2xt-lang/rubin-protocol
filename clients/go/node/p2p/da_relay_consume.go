@@ -59,13 +59,16 @@ func (s *Service) ConsumeAcceptedBlockDASets(blockBytes []byte) error {
 	return s.consumeCompleteDASetIDs(daIDs)
 }
 
-// consumeCompleteDASetIDs releases relay accounting for each ID in order and
-// stops at the first failure. Callers guarantee a non-nil relay.
+// consumeCompleteDASetIDs releases relay accounting for each ID in order. An
+// item-local failure leaves that ID unchanged, while later IDs are still
+// attempted; the earliest failure is returned after all attempts. Callers
+// guarantee a non-nil relay.
 func (s *Service) consumeCompleteDASetIDs(daIDs [][32]byte) error {
+	var firstErr error
 	for _, daID := range daIDs {
-		if _, err := s.daRelay.consumeCompleteSet(daID); err != nil {
-			return err
+		if _, err := s.daRelay.consumeCompleteSet(daID); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("consume DA set %x: %w", daID, err)
 		}
 	}
-	return nil
+	return firstErr
 }
