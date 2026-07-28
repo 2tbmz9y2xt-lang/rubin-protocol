@@ -51,6 +51,14 @@ func truncateIncompleteCanonicalSuffix(store *BlockStore) (bool, error) {
 	return scanAndTruncateCanonicalSuffix(store)
 }
 
+// errCanonicalIndexZeroCompletePrefix: the canonical index claims blocks but not
+// even height 0 has a complete header/block/undo set. Truncating to zero would
+// silently discard the operator's whole chain, so this is fatal. Raised AFTER the
+// scan's structural/IO/corruption errors (they keep precedence) and BEFORE
+// TruncateCanonical, any chainstate reset/replay/save, and any service start.
+// Cross-client literal — Rust mirror CANONICAL_INDEX_ZERO_COMPLETE_PREFIX_ERR.
+var errCanonicalIndexZeroCompletePrefix = errors.New("persisted canonical index has zero complete prefix")
+
 func scanAndTruncateCanonicalSuffix(store *BlockStore) (bool, error) {
 	canonical, err := store.CanonicalIndexSnapshot()
 	if err != nil {
@@ -59,6 +67,9 @@ func scanAndTruncateCanonicalSuffix(store *BlockStore) (bool, error) {
 	validCount, err := countCompleteCanonicalPrefix(store, canonical)
 	if err != nil {
 		return false, err
+	}
+	if len(canonical) > 0 && validCount == 0 {
+		return false, errCanonicalIndexZeroCompletePrefix
 	}
 	if validCount == uint64(len(canonical)) {
 		return false, nil

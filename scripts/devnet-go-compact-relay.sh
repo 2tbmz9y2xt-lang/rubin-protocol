@@ -130,10 +130,10 @@ PY
 start_node() {
   local label="$1" log_file="$2" datadir="$3" peers="${4:-}"
   if [[ -z "${peers}" ]]; then
-    rubin_process_start "${log_file}" "${NODE_BIN}" --datadir "${datadir}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 \
+    rubin_process_start "${log_file}" "${NODE_BIN}" --create-store --datadir "${datadir}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 \
       || { printf 'failed to start %s log_file=%s\n' "${label}" "${log_file}" >&2; return 1; }
   else
-    rubin_process_start "${log_file}" "${NODE_BIN}" --datadir "${datadir}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peers "${peers}" \
+    rubin_process_start "${log_file}" "${NODE_BIN}" --create-store --datadir "${datadir}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peers "${peers}" \
       || { printf 'failed to start %s log_file=%s\n' "${label}" "${log_file}" >&2; return 1; }
   fi
   STARTED_PID="${RUBIN_PROCESS_LAST_PID}"

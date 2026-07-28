@@ -35,9 +35,9 @@ func mustRPCStateAtDir(t *testing.T, dir string, withGenesis bool) *devnetRPCSta
 	if err := chainState.Save(chainStatePath); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), chainStatePath)
 	syncEngine, err := node.NewSyncEngine(chainState, blockStore, syncCfg)
@@ -125,9 +125,9 @@ func mustRPCStateWithSpendableUTXOsAndMempoolConfig(
 	if err := chainState.Save(chainStatePath); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), chainStatePath)
 	syncEngine, err := node.NewSyncEngine(chainState, blockStore, syncCfg)
@@ -2085,9 +2085,9 @@ func TestDevnetRPCMineNextMineOneError(t *testing.T) {
 	if err := chainState.Save(chainStatePath); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), chainStatePath)
 	syncEngine, err := node.NewSyncEngine(chainState, blockStore, syncCfg)
@@ -2171,9 +2171,9 @@ func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 	if err := chainState.Save(chainStatePath); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), chainStatePath)
 	syncEngine, err := node.NewSyncEngine(chainState, blockStore, syncCfg)
@@ -2282,9 +2282,9 @@ func mustRPCMineNextState(t *testing.T) *devnetRPCState {
 	if err := chainState.Save(chainStatePath); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), chainStatePath)
 	syncEngine, err := node.NewSyncEngine(chainState, blockStore, syncCfg)
@@ -2345,9 +2345,9 @@ func TestDevnetRPCMineNextLogsAnnounceBlockError(t *testing.T) {
 	if err := chainState.Save(chainStatePath); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), chainStatePath)
 	syncEngine, err := node.NewSyncEngine(chainState, blockStore, syncCfg)

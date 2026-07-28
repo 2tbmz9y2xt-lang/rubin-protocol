@@ -39,9 +39,9 @@ func TestRequeueDisconnectedNoErrorOnCoinbaseOnly(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
 	chainState := NewChainState()
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	syncCfg := DefaultSyncConfig(nil, [32]byte{}, chainStatePath)
 	engine, err := NewSyncEngine(chainState, blockStore, syncCfg)
@@ -89,9 +89,9 @@ func TestRequeueDisconnectedSkipsUnparseableBlocks(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
 	chainState := NewChainState()
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	syncCfg := DefaultSyncConfig(nil, [32]byte{}, chainStatePath)
 	engine, err := NewSyncEngine(chainState, blockStore, syncCfg)
@@ -120,9 +120,9 @@ func TestApplyBlockMempoolEvictStderrPlumbing(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
 	chainState := NewChainState()
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	syncCfg := DefaultSyncConfig(nil, [32]byte{}, chainStatePath)
 	engine, err := NewSyncEngine(chainState, blockStore, syncCfg)
@@ -168,9 +168,9 @@ func TestRequeueDisconnectedLogsAddTxError(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
 	chainState := NewChainState()
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	syncCfg := DefaultSyncConfig(nil, devnetGenesisChainID, chainStatePath)
 	engine, err := NewSyncEngine(chainState, blockStore, syncCfg)

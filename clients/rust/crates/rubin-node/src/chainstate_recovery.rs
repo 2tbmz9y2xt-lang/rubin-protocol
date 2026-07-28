@@ -172,12 +172,24 @@ pub(crate) fn truncate_incomplete_canonical_suffix(store: &mut BlockStore) -> Re
         store.get_undo(block_hash)?;
         valid_count += 1;
     }
+    if canonical_len > 0 && valid_count == 0 {
+        return Err(CANONICAL_INDEX_ZERO_COMPLETE_PREFIX_ERR.to_string());
+    }
     if valid_count == canonical_len {
         return Ok(false);
     }
     store.truncate_canonical(valid_count)?;
     Ok(true)
 }
+
+/// The canonical index claims blocks but not even height 0 has a complete
+/// header/block/undo set. Truncating to zero would silently discard the
+/// operator's whole chain, so this is fatal. Raised AFTER the scan's
+/// structural/IO/corruption errors (they keep precedence) and BEFORE
+/// `truncate_canonical`, any chainstate reset/replay/save, and any service start.
+/// Cross-client literal — Go mirror `errCanonicalIndexZeroCompletePrefix`.
+pub(crate) const CANONICAL_INDEX_ZERO_COMPLETE_PREFIX_ERR: &str =
+    "persisted canonical index has zero complete prefix";
 
 /// Reconcile the persisted chainstate snapshot against the on-disk
 /// canonical chain in `store`. Returns `Ok(true)` if any repair was
@@ -449,14 +461,16 @@ mod tests {
     use rubin_consensus::{block_hash, parse_block_bytes};
     use std::fs;
 
+    use super::CANONICAL_INDEX_ZERO_COMPLETE_PREFIX_ERR;
+
     fn fresh_dir(prefix: &str) -> std::path::PathBuf {
         let dir = unique_temp_path(prefix);
         fs::create_dir_all(&dir).expect("create test dir");
         dir
     }
 
-    fn open_store_in(dir: &std::path::Path) -> BlockStore {
-        BlockStore::open(block_store_path(dir)).expect("open blockstore")
+    fn create_store_in(dir: &std::path::Path) -> BlockStore {
+        BlockStore::create(block_store_path(dir)).expect("create blockstore")
     }
 
     fn devnet_cfg() -> SyncConfig {
@@ -484,7 +498,7 @@ mod tests {
     #[test]
     fn reconcile_empty_store_empty_state_is_noop() {
         let dir = fresh_dir("rubin-recover-empty");
-        let mut store = open_store_in(&dir);
+        let mut store = create_store_in(&dir);
         let mut state = ChainState::new();
         let cfg = devnet_cfg();
         let changed =
@@ -496,7 +510,7 @@ mod tests {
     #[test]
     fn reconcile_empty_store_dirty_state_resets_to_empty() {
         let dir = fresh_dir("rubin-recover-dirty");
-        let mut store = open_store_in(&dir);
+        let mut store = create_store_in(&dir);
         let mut state = ChainState::new();
         state.has_tip = true;
         state.height = 7;
@@ -517,7 +531,7 @@ mod tests {
     #[test]
     fn reconcile_noop_when_state_matches_canonical_tip() {
         let dir = fresh_dir("rubin-recover-noop");
-        let store = open_store_in(&dir);
+        let store = create_store_in(&dir);
         let (_genesis_hash, mut store, mut state) = apply_genesis(store);
         let cfg = devnet_cfg();
         let changed = reconcile_chain_state_with_block_store(&mut state, &mut store, &cfg)
@@ -529,7 +543,7 @@ mod tests {
     #[test]
     fn reconcile_resets_mismatched_snapshot_at_genesis() {
         let dir = fresh_dir("rubin-recover-mismatch");
-        let store = open_store_in(&dir);
+        let store = create_store_in(&dir);
         let (genesis_hash, mut store, mut state) = apply_genesis(store);
         // Corrupt the snapshot's tip hash so canonical(height) != tip.
         state.tip_hash[0] ^= 0xff;
@@ -546,7 +560,7 @@ mod tests {
     #[test]
     fn reconcile_resets_ahead_snapshot() {
         let dir = fresh_dir("rubin-recover-ahead");
-        let store = open_store_in(&dir);
+        let store = create_store_in(&dir);
         let (genesis_hash, mut store, mut state) = apply_genesis(store);
         // Snapshot claims a height the blockstore does not have.
         state.height = 5;
@@ -615,7 +629,7 @@ mod tests {
     fn reconcile_replays_forward_from_matching_lower_height() {
         use crate::test_helpers::{coinbase_only_block_with_gen, height_one_coinbase_only_block};
         let dir = fresh_dir("rubin-recover-fwd-replay");
-        let store = open_store_in(&dir);
+        let store = create_store_in(&dir);
         let cfg = devnet_cfg();
         let mut engine =
             SyncEngine::new(ChainState::new(), Some(store), cfg.clone()).expect("sync engine");
@@ -693,7 +707,7 @@ mod tests {
     fn reconcile_propagates_corrupt_canonical_block_artifact() {
         use crate::test_helpers::{coinbase_only_block_with_gen, height_one_coinbase_only_block};
         let dir = fresh_dir("rubin-recover-corrupt-block");
-        let store = open_store_in(&dir);
+        let store = create_store_in(&dir);
         let cfg = devnet_cfg();
         let mut engine =
             SyncEngine::new(ChainState::new(), Some(store), cfg.clone()).expect("sync engine");
@@ -755,7 +769,7 @@ mod tests {
     fn prev_timestamps_from_store_matches_sync_engine() {
         use crate::test_helpers::{coinbase_only_block_with_gen, height_one_coinbase_only_block};
         let dir = fresh_dir("rubin-recover-prev-ts-parity");
-        let store = open_store_in(&dir);
+        let store = create_store_in(&dir);
         let cfg = devnet_cfg();
         let mut engine =
             SyncEngine::new(ChainState::new(), Some(store), cfg.clone()).expect("sync engine");
@@ -793,7 +807,7 @@ mod tests {
     #[test]
     fn reconcile_truncates_when_block_data_missing() {
         let dir = fresh_dir("rubin-recover-trunc-block");
-        let store = open_store_in(&dir);
+        let store = create_store_in(&dir);
         let (genesis_hash, mut store, mut state) = apply_genesis(store);
         // Header + undo present, block_data missing → truncate at L101.
         let _fake = synth_partial_artifact_at_height_1(&dir, &mut store, "block_data");
@@ -812,7 +826,7 @@ mod tests {
     #[test]
     fn reconcile_truncates_when_undo_missing() {
         let dir = fresh_dir("rubin-recover-trunc-undo");
-        let store = open_store_in(&dir);
+        let store = create_store_in(&dir);
         let (genesis_hash, mut store, mut state) = apply_genesis(store);
         // Header + block_data present, undo missing → truncate at L105.
         let _fake = synth_partial_artifact_at_height_1(&dir, &mut store, "undo");
@@ -831,7 +845,7 @@ mod tests {
     #[test]
     fn reconcile_resets_tipless_dirty_state_with_canonical_chain() {
         let dir = fresh_dir("rubin-recover-tipless");
-        let store = open_store_in(&dir);
+        let store = create_store_in(&dir);
         let (genesis_hash, mut store, _) = apply_genesis(store);
         // Build a fresh dirty-but-tipless state: has_tip=false but
         // utxos non-empty (the "stale dirty snapshot" residue path).
@@ -871,7 +885,7 @@ mod tests {
     fn truncate_propagates_metadata_eacces_instead_of_silent_truncate() {
         use std::os::unix::fs::PermissionsExt;
         let dir = fresh_dir("rubin-recover-eacces");
-        let store = open_store_in(&dir);
+        let store = create_store_in(&dir);
         let (_genesis_hash, mut store, _state) = apply_genesis(store);
         // Promote canonical to a fake height-1 entry whose artifact
         // dir we will chmod 0o000 to force EACCES on metadata().
@@ -916,7 +930,7 @@ mod tests {
     #[test]
     fn reconcile_truncates_incomplete_canonical_suffix() {
         let dir = fresh_dir("rubin-recover-truncate");
-        let store = open_store_in(&dir);
+        let store = create_store_in(&dir);
         let (genesis_hash, mut store, mut state) = apply_genesis(store);
         // Synthesise a canonical entry at height 1 whose artifacts are
         // missing. We use `BlockStore::set_canonical_tip` with a hash
@@ -1098,7 +1112,7 @@ mod tests {
     fn reconcile_then_explicit_save_persists_snapshot_independent_of_gate() {
         let dir = fresh_dir("rubin-recover-explicit-save");
         let chain_state_file = crate::chainstate::chain_state_path(&dir);
-        let store = open_store_in(&dir);
+        let store = create_store_in(&dir);
         let (_genesis_hash, mut store, mut state) = apply_genesis(store);
         // Force the gate to its "skip" branch by faking a large UTxO
         // set + off-interval height; reconcile + explicit save must
@@ -1191,7 +1205,7 @@ mod tests {
         fs::write(root.join("headers").join(format!("{h1}.bin")), [0x00]).expect("corrupt header");
         let before = durable_state(&root);
 
-        let mut fresh = open_store_in(&dir);
+        let mut fresh = BlockStore::open(block_store_path(&dir)).expect("reopen blockstore");
         let mut state = at_genesis;
         let err = reconcile_chain_state_with_block_store(&mut state, &mut fresh, &cfg).unwrap_err();
         assert_eq!(err, "target schedule history corrupt");
@@ -1213,5 +1227,66 @@ mod tests {
         let counts = ["blocks", "headers", "undo"]
             .map(|name| fs::read_dir(root.join(name)).expect("artifact dir").count());
         (index, counts)
+    }
+
+    /// B2 rules 5-6 + parity matrix row 12: a canonical index that claims blocks
+    /// but has NO complete artifact set at height 0 is fatal. The guard must be
+    /// raised before truncate_canonical, before any chainstate reset/save, and
+    /// with the exact cross-client message. Go mirror:
+    /// `TestReconcileZeroCompleteCanonicalPrefixIsFatal`.
+    #[test]
+    fn zero_complete_canonical_prefix_is_fatal_before_any_mutation() {
+        let dir = fresh_dir("rubin-recover-zero-prefix");
+        let store = create_store_in(&dir);
+        let (genesis_hash, mut store, mut state) = apply_genesis(store);
+        let root = block_store_path(&dir);
+        let leaf = format!("{}.bin", hex::encode(genesis_hash));
+        fs::remove_file(root.join("headers").join(&leaf)).expect("drop height-0 header");
+        let index_before = fs::read(root.join("index.json")).expect("index before");
+        let state_before = (state.height, state.tip_hash, state.has_tip);
+
+        let err = reconcile_chain_state_with_block_store(&mut state, &mut store, &devnet_cfg())
+            .expect_err("zero complete prefix must be fatal");
+        assert_eq!(err, CANONICAL_INDEX_ZERO_COMPLETE_PREFIX_ERR);
+        assert_eq!(err, "persisted canonical index has zero complete prefix");
+        assert_eq!(
+            fs::read(root.join("index.json")).expect("index after"),
+            index_before,
+            "guard must fire before TruncateCanonical(0)"
+        );
+        assert_eq!(
+            store.canonical_len(),
+            1,
+            "canonical index kept in memory too"
+        );
+        assert_eq!(
+            (state.height, state.tip_hash, state.has_tip),
+            state_before,
+            "no chainstate reset before the guard"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// B2 rule 3 + parity matrix precedence: a structural/corruption error keeps
+    /// its ORIGINAL error and wins over the zero-prefix guard, even though the
+    /// complete prefix is also zero. Go mirror:
+    /// `TestReconcileZeroCompletePrefixLosesToArtifactError`.
+    #[test]
+    fn zero_complete_canonical_prefix_loses_to_artifact_error() {
+        let dir = fresh_dir("rubin-recover-zero-prefix-precedence");
+        let store = create_store_in(&dir);
+        let (genesis_hash, mut store, mut state) = apply_genesis(store);
+        let root = block_store_path(&dir);
+        let leaf = format!("{}.json", hex::encode(genesis_hash));
+        // Height 0 is present but its undo record does not parse: complete
+        // prefix is still zero, yet the parse error must be what surfaces.
+        fs::write(root.join("undo").join(&leaf), b"not json").expect("corrupt undo");
+        let err = reconcile_chain_state_with_block_store(&mut state, &mut store, &devnet_cfg())
+            .expect_err("corrupt artifact must fail");
+        assert_ne!(
+            err, CANONICAL_INDEX_ZERO_COMPLETE_PREFIX_ERR,
+            "structural error must win over the zero-prefix guard"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

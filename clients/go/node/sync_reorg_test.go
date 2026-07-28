@@ -138,9 +138,9 @@ func TestDeepReorg10(t *testing.T) {
 		t.Fatalf("LastReorgDepth()=%d, want 10", depth)
 	}
 
-	referenceStore, err := OpenBlockStore(BlockStorePath(t.TempDir()))
+	referenceStore, err := CreateBlockStore(BlockStorePath(t.TempDir()))
 	if err != nil {
-		t.Fatalf("OpenBlockStore(reference): %v", err)
+		t.Fatalf("CreateBlockStore(reference): %v", err)
 	}
 	referenceState := NewChainState()
 	referenceEngine, err := NewSyncEngine(referenceState, referenceStore, DefaultSyncConfig(&target, devnetGenesisChainID, ""))
@@ -256,7 +256,7 @@ func requireDirectTipStateUnchanged(t *testing.T, engine *SyncEngine, store *Blo
 
 func TestApplyBlockWithReorgDerivesDirectTipMTPWhenCallerContextNil(t *testing.T) {
 	dir := t.TempDir()
-	store := mustOpenBlockStore(t, BlockStorePath(dir))
+	store := mustCreateBlockStore(t, BlockStorePath(dir))
 	target := consensus.POW_LIMIT
 	engine, err := NewSyncEngine(NewChainState(), store, DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(dir)))
 	if err != nil {
@@ -541,9 +541,9 @@ func TestApplyBlockWithReorgRejectsSideBranchTimestampContextBeforeStore(t *test
 func TestApplyBlockWithReorgRollbackRestoresCanonicalIndexAndChainstateFile(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	target := consensus.POW_LIMIT
 	engine, err := NewSyncEngine(NewChainState(), store, DefaultSyncConfig(&target, devnetGenesisChainID, chainStatePath))
@@ -745,9 +745,9 @@ func TestApplyCanonicalParsedBlockHelperErrors(t *testing.T) {
 	newEmptyEngine := func(t *testing.T, chainID [32]byte) *SyncEngine {
 		t.Helper()
 		dir := t.TempDir()
-		store, err := OpenBlockStore(BlockStorePath(dir))
+		store, err := CreateBlockStore(BlockStorePath(dir))
 		if err != nil {
-			t.Fatalf("OpenBlockStore: %v", err)
+			t.Fatalf("CreateBlockStore: %v", err)
 		}
 		engine, err := NewSyncEngine(NewChainState(), store, DefaultSyncConfig(&target, chainID, ChainStatePath(dir)))
 		if err != nil {
@@ -1504,9 +1504,9 @@ func TestSyncReorgHelperCoveragePaths(t *testing.T) {
 		t.Fatalf("testBlockStoreCanonicalCount(genesis)=(%d,%v), want (1,nil)", got, err)
 	}
 	emptyDir := t.TempDir()
-	emptyStore, err := OpenBlockStore(BlockStorePath(emptyDir))
+	emptyStore, err := CreateBlockStore(BlockStorePath(emptyDir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore(empty): %v", err)
+		t.Fatalf("CreateBlockStore(empty): %v", err)
 	}
 	emptyEngine, err := NewSyncEngine(NewChainState(), emptyStore, DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(emptyDir)))
 	if err != nil {
@@ -1709,7 +1709,7 @@ func TestSyncApplyHelperAdditionalBranches(t *testing.T) {
 		t.Fatalf("testBlockStoreCanonicalIndexSnapshot(nil)=(%v,%v), want (nil,nil)", got, err)
 	}
 
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	store.index.Canonical = []string{"zz"}
 	if _, err := testBlockStoreCanonicalIndexSnapshot(store); err == nil {
 		t.Fatalf("expected invalid canonical snapshot error")
@@ -1821,9 +1821,9 @@ func reorgTestCoinbaseForWtxids(t *testing.T, height uint64, value uint64, addre
 func newReorgTestEngine(t *testing.T) (*SyncEngine, *BlockStore, [32]byte) {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	target := consensus.POW_LIMIT
 	engine, err := NewSyncEngine(NewChainState(), store, DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(dir)))

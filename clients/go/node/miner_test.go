@@ -17,7 +17,7 @@ func TestMinerMineOneFromEmptyState(t *testing.T) {
 	if err := chainState.Save(chainStatePath); err != nil {
 		t.Fatalf("save chainstate: %v", err)
 	}
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestMinerMineNProducesTimestampProgression(t *testing.T) {
 	chainStatePath := ChainStatePath(dir)
 
 	chainState := NewChainState()
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestMinerMineOneRejectsHeightOverflow(t *testing.T) {
 		t.Fatalf("save chainstate: %v", err)
 	}
 
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestNewMinerSetsDefaultTimestampSourceWhenNil(t *testing.T) {
 	chainStatePath := ChainStatePath(dir)
 
 	chainState := NewChainState()
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestUnixNowU64ReturnsZeroWhenUnixTimeNonPositive(t *testing.T) {
 
 func TestNewMinerRejectsNilSyncEngine(t *testing.T) {
 	chainState := NewChainState()
-	blockStore, err := OpenBlockStore(BlockStorePath(t.TempDir()))
+	blockStore, err := CreateBlockStore(BlockStorePath(t.TempDir()))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestMinerMineOneHeightOnePaysConfiguredMineAddressAndTracksCoinbaseMetadata
 	chainStatePath := ChainStatePath(dir)
 
 	chainState := NewChainState()
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}

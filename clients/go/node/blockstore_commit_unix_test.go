@@ -27,7 +27,7 @@ func TestCommitCanonicalBlock_DoesNotAdvanceTipWhenUndoWriteFails(t *testing.T) 
 		t.Skip("running as root: chmod-based permission check does not apply")
 	}
 
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	header := testHeaderBytes(13, 13)
 	hash := mustHeaderHash(t, header)
 	blockBytes := []byte("blk")

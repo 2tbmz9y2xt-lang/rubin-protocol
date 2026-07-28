@@ -296,8 +296,21 @@ func TestLegacyExposureExampleFixtureMatchesFrozenContract(t *testing.T) {
 	}
 }
 
+// seedBlockStore initializes a store the way an operator would with
+// --create-store, for tests whose subject is a later startup step.
+func seedBlockStore(t *testing.T, dataDir string) {
+	t.Helper()
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("mkdir datadir: %v", err)
+	}
+	if _, err := node.CreateBlockStore(node.BlockStorePath(dataDir)); err != nil {
+		t.Fatalf("CreateBlockStore: %v", err)
+	}
+}
+
 func TestRunDryRunOK(t *testing.T) {
 	dir := t.TempDir()
+	seedBlockStore(t, dir)
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 
@@ -341,6 +354,7 @@ func symlinkTraversalDataDir(t *testing.T) (raw string, cleaned string, escaped 
 
 func TestRunNormalizesDataDirBeforeChainStateAndBlockStorePathDerivation(t *testing.T) {
 	raw, cleaned, escaped := symlinkTraversalDataDir(t)
+	seedBlockStore(t, cleaned)
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
@@ -374,7 +388,7 @@ func TestRunCreatesPrivatePersistencePaths(t *testing.T) {
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
-	code := run([]string{"--dry-run", "--datadir", datadir}, &out, &errOut)
+	code := run([]string{"--create-store", "--datadir", datadir, "--mine-blocks", "1", "--mine-exit"}, &out, &errOut)
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, errOut.String())
 	}
@@ -1151,6 +1165,7 @@ func TestRunRejectsInvalidPVModeBeforeStorage(t *testing.T) {
 
 	t.Run("preexisting_datadir_byte_identical", func(t *testing.T) {
 		datadir := filepath.Join(t.TempDir(), "data")
+		seedBlockStore(t, datadir)
 		var out, errOut bytes.Buffer
 		if code := run([]string{"--dry-run", "--datadir", datadir}, &out, &errOut); code != 0 {
 			t.Fatalf("seed dry-run exit code %d (stderr=%q)", code, errOut.String())
@@ -1230,6 +1245,7 @@ func TestRunRejectsInvalidPVModeBeforeStorage(t *testing.T) {
 	t.Run("valid_modes_preserved", func(t *testing.T) {
 		for _, mode := range []string{"off", "shadow", "on", "", "OFF", " on "} {
 			datadir := filepath.Join(t.TempDir(), "data")
+			seedBlockStore(t, datadir)
 			var out, errOut bytes.Buffer
 			code := run([]string{"--dry-run", "--datadir", datadir, "--pv-mode", mode}, &out, &errOut)
 			if code != 0 {
@@ -1278,9 +1294,9 @@ func TestSaturatingAddUint64(t *testing.T) {
 func TestRunDryRunReconcilesChainStateFromBlockStore(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := node.ChainStatePath(dir)
-	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	store, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	target := consensus.POW_LIMIT
 	state := node.NewChainState()
@@ -1482,6 +1498,7 @@ func TestRunDryRunUsesDevnetGenesisChainIDByDefault(t *testing.T) {
 	t.Cleanup(func() { newSyncEngineFn = prev })
 
 	dir := t.TempDir()
+	seedBlockStore(t, dir)
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 	code := run([]string{"--dry-run", "--datadir", dir}, &out, &errOut)
@@ -1507,6 +1524,7 @@ func TestRunPassesMempoolLimitsToMempoolAndPrintsConfig(t *testing.T) {
 	t.Cleanup(func() { newMempoolFn = prev })
 
 	dir := t.TempDir()
+	seedBlockStore(t, dir)
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 	code := run([]string{"--dry-run", "--datadir", dir, "--mempool-max-txs", "7", "--mempool-max-bytes", "4096"}, &out, &errOut)
@@ -1537,6 +1555,7 @@ func TestRunWiresP2PToCanonicalMempool(t *testing.T) {
 	t.Cleanup(func() { newP2PServiceFn = prev })
 
 	dir := t.TempDir()
+	seedBlockStore(t, dir)
 	var errOut bytes.Buffer
 	code := run([]string{"--datadir", dir, "--bind", "127.0.0.1:0", "--rpc-bind", ""}, io.Discard, &errOut)
 	if code != 2 {
@@ -1601,7 +1620,7 @@ func TestApplySuiteContextToSyncConfig_NilConfig(t *testing.T) {
 func TestRunDryRunShowsTipWhenBlockstoreHasTip(t *testing.T) {
 	dir := t.TempDir()
 
-	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -1628,9 +1647,9 @@ func TestRunDryRunShowsTipWhenBlockstoreHasTip(t *testing.T) {
 
 func TestRunDryRunFailsWhenChainstateReconcileFails(t *testing.T) {
 	dir := t.TempDir()
-	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	parsed, err := consensus.ParseBlockBytes(node.DevnetGenesisBlockBytes())
 	if err != nil {
@@ -1656,9 +1675,9 @@ func TestRunDryRunFailsWhenChainstateReconcileFails(t *testing.T) {
 func TestRunDryRunFailsWhenChainstateSaveFails(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := node.ChainStatePath(dir)
-	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	store, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	target := consensus.POW_LIMIT
 	state := node.NewChainState()
@@ -1732,7 +1751,7 @@ func TestRunMineBlocksExitOK(t *testing.T) {
 	var errOut bytes.Buffer
 
 	code := run(
-		[]string{"--datadir", dir, "--mine-blocks", "1", "--mine-exit"},
+		[]string{"--create-store", "--datadir", dir, "--mine-blocks", "1", "--mine-exit"},
 		&out,
 		&errOut,
 	)
@@ -1746,6 +1765,7 @@ func TestRunMineBlocksExitOK(t *testing.T) {
 
 func TestRunMineBlocksResetsDirtyChainStateWhenBlockstoreEmpty(t *testing.T) {
 	dir := t.TempDir()
+	seedBlockStore(t, dir)
 	chainState := node.NewChainState()
 	chainState.HasTip = true
 	chainState.Height = math.MaxUint64
@@ -1823,7 +1843,7 @@ func TestRunMineBlocksPassesMineAddressToMiner(t *testing.T) {
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 	code := run(
-		[]string{"--datadir", dir, "--mine-blocks", "1", "--mine-exit", "--mine-address", strings.Repeat("11", 32)},
+		[]string{"--create-store", "--datadir", dir, "--mine-blocks", "1", "--mine-exit", "--mine-address", strings.Repeat("11", 32)},
 		&out,
 		&errOut,
 	)
@@ -1878,9 +1898,9 @@ func TestRunMainnetFailsWithoutGenesisFileBeforeExplicitTargetCheck(t *testing.T
 func TestRunMainnetFailsBeforeReconcilingChainState(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := node.ChainStatePath(dir)
-	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	store, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	target := consensus.POW_LIMIT
 	state := node.NewChainState()
@@ -1916,6 +1936,7 @@ func TestRunMainnetFailsBeforeReconcilingChainState(t *testing.T) {
 
 func TestRunDryRunEmitsRPCBindAddrWhenPresent(t *testing.T) {
 	dir := t.TempDir()
+	seedBlockStore(t, dir)
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 	code := run([]string{"--dry-run", "--datadir", dir, "--rpc-bind", "127.0.0.1:19112"}, &out, &errOut)
@@ -2023,6 +2044,7 @@ func TestRunFailsWhenBlockStoreOpenFails(t *testing.T) {
 
 func TestRunPrintConfigFailsWhenStdoutFails(t *testing.T) {
 	datadir := t.TempDir()
+	seedBlockStore(t, datadir)
 	var errOut bytes.Buffer
 	code := run([]string{"--dry-run", "--datadir", datadir}, failWriter{}, &errOut)
 	if code != 1 {
@@ -2043,6 +2065,7 @@ func TestNowUnixU64ReturnsZeroWhenUnixTimeNonPositive(t *testing.T) {
 func TestMainExitCodeIs0OnDryRun(t *testing.T) {
 	if os.Getenv("RUBIN_NODE_CHILD") == "1" {
 		datadir := t.TempDir()
+		seedBlockStore(t, datadir)
 		os.Args = []string{"rubin-node", "--dry-run", "--datadir", datadir}
 		main()
 		return
@@ -2068,7 +2091,7 @@ func TestRunNonDryRunExitsOnSignal(t *testing.T) {
 			p, _ := os.FindProcess(os.Getpid())
 			_ = p.Signal(syscall.SIGINT)
 		}()
-		code := run([]string{"--datadir", dir, "--bind", "127.0.0.1:0"}, os.Stdout, os.Stderr)
+		code := run([]string{"--create-store", "--datadir", dir, "--bind", "127.0.0.1:0"}, os.Stdout, os.Stderr)
 		os.Exit(code)
 		return
 	}
@@ -2096,7 +2119,7 @@ func TestRunFailsWhenRPCBindPortUnavailable(t *testing.T) {
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 	code := run(
-		[]string{"--datadir", dir, "--bind", "127.0.0.1:0", "--rpc-bind", listener.Addr().String()},
+		[]string{"--create-store", "--datadir", dir, "--bind", "127.0.0.1:0", "--rpc-bind", listener.Addr().String()},
 		&out,
 		&errOut,
 	)
@@ -2120,7 +2143,7 @@ func TestRunNonDryRunWithRPCBindExitsOnSignal(t *testing.T) {
 			_ = p.Signal(syscall.SIGINT)
 		}()
 		code := run(
-			[]string{"--datadir", dir, "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"},
+			[]string{"--create-store", "--datadir", dir, "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"},
 			os.Stdout,
 			os.Stderr,
 		)
@@ -2170,7 +2193,7 @@ func TestRunRPCBindReadyEndpointReportsLifecycle(t *testing.T) {
 	if os.Getenv("RUBIN_NODE_READY_LIFECYCLE_CHILD") == "1" {
 		dir := t.TempDir()
 		code := run(
-			[]string{"--datadir", dir, "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"},
+			[]string{"--create-store", "--datadir", dir, "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"},
 			os.Stdout,
 			os.Stderr,
 		)
@@ -2338,6 +2361,7 @@ func TestRunDevnetWithRPCBindInvalidMineAddressLogsStderr(t *testing.T) {
 		badSuiteMineAddr := "00" + strings.Repeat("00", 32)
 		code := run(
 			[]string{
+				"--create-store",
 				"--datadir", dir,
 				"--bind", "127.0.0.1:0",
 				"--rpc-bind", "127.0.0.1:0",
@@ -2424,6 +2448,7 @@ func TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn(t *testing.T
 		}()
 		code := run(
 			[]string{
+				"--create-store",
 				"--datadir", dir,
 				"--bind", "127.0.0.1:0",
 				"--rpc-bind", "127.0.0.1:0",
@@ -2475,6 +2500,7 @@ func TestRunDevnetWithRPCBindLiveMinerInitErrorLogsStderr(t *testing.T) {
 		}()
 		code := run(
 			[]string{
+				"--create-store",
 				"--datadir", dir,
 				"--bind", "127.0.0.1:0",
 				"--rpc-bind", "127.0.0.1:0",
@@ -2601,5 +2627,138 @@ func TestMaybeFlipReadyOnStartup_NilServerNoOp(t *testing.T) {
 	maybeFlipReadyOnStartup(nil, &buf)
 	if got := buf.String(); got != "" {
 		t.Fatalf("expected no output for nil server, got %q", got)
+	}
+}
+
+func runCLI(args ...string) (int, string) {
+	var out, errOut bytes.Buffer
+	code := run(args, &out, &errOut)
+	return code, errOut.String()
+}
+
+// create_open_state_machine rule 2 + parity row 4: --create-store is
+// incompatible with the read-only modes and rejects before any filesystem
+// access. Rust mirror: `create_store_rejects_flag_combinations_before_any_storage_access`.
+func TestRunCreateStoreRejectsFlagCombinationsBeforeStorage(t *testing.T) {
+	for _, extra := range [][]string{
+		{"--dry-run"},
+		{"--legacy-exposure-scan", "--legacy-suite-id", "1"},
+	} {
+		dir := filepath.Join(t.TempDir(), "data")
+		code, stderr := runCLI(append([]string{"--datadir", dir, "--create-store"}, extra...)...)
+		if code != 2 {
+			t.Fatalf("%v: exit %d, want 2", extra, code)
+		}
+		if want := "--create-store cannot be combined with --dry-run or --legacy-exposure-scan"; !strings.Contains(stderr, want) {
+			t.Fatalf("%v: stderr = %q, want %q", extra, stderr, want)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("%v: no filesystem entry may be created: %v", extra, err)
+		}
+	}
+}
+
+// Parity rows 1-3 + rejected cases: create commits the tree, refuses an existing
+// root (whose error wins over chainstate), refuses an existing chainstate
+// without touching the root. Rust mirror:
+// `create_store_creates_tree_and_rejects_existing_root_or_chainstate`.
+func TestRunCreateStoreCreatesTreeAndRejectsExisting(t *testing.T) {
+	create := func(dir string) []string {
+		return []string{"--datadir", dir, "--create-store", "--mine-blocks", "1", "--mine-exit"}
+	}
+	dir := filepath.Join(t.TempDir(), "data")
+	if code, stderr := runCLI(create(dir)...); code != 0 {
+		t.Fatalf("create exit %d (stderr=%q)", code, stderr)
+	}
+	root := node.BlockStorePath(dir)
+	for _, sub := range []string{"blocks", "headers", "undo"} {
+		if info, err := os.Stat(filepath.Join(root, sub)); err != nil || !info.IsDir() {
+			t.Fatalf("%s: %v %v", sub, info, err)
+		}
+	}
+	markerBefore, err := os.ReadFile(filepath.Join(root, "index.json")) // #nosec G304 -- test-local path.
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+
+	code, stderr := runCLI(create(dir)...)
+	if code != 2 || !strings.Contains(stderr, "blockstore root already exists") {
+		t.Fatalf("re-create: exit %d stderr %q", code, stderr)
+	}
+	markerAfter, err := os.ReadFile(filepath.Join(root, "index.json")) // #nosec G304 -- test-local path.
+	if err != nil || string(markerAfter) != string(markerBefore) {
+		t.Fatalf("existing store must be untouched: %v %v", markerAfter, err)
+	}
+
+	csDir := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(csDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(node.ChainStatePath(csDir), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("seed chainstate: %v", err)
+	}
+	code, stderr = runCLI(create(csDir)...)
+	if code != 2 || !strings.Contains(stderr, "chainstate already exists") {
+		t.Fatalf("chainstate present: exit %d stderr %q", code, stderr)
+	}
+	if _, err := os.Stat(node.BlockStorePath(csDir)); !os.IsNotExist(err) {
+		t.Fatalf("root must not be created: %v", err)
+	}
+
+	both := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(node.BlockStorePath(both), 0o700); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if err := os.WriteFile(node.ChainStatePath(both), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("seed chainstate: %v", err)
+	}
+	if code, stderr := runCLI(create(both)...); code != 2 || !strings.Contains(stderr, "blockstore root already exists") {
+		t.Fatalf("both present: exit %d stderr %q (root error must win)", code, stderr)
+	}
+
+	// hostile: a DANGLING symlink at either path is present (lstat), not absent.
+	for _, target := range []string{"blockstore root", "chainstate"} {
+		dir := filepath.Join(t.TempDir(), "data")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		link := node.BlockStorePath(dir)
+		if target == "chainstate" {
+			link = node.ChainStatePath(dir)
+		}
+		if err := os.Symlink(filepath.Join(dir, "nowhere"), link); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if code, stderr := runCLI(create(dir)...); code != 2 || !strings.Contains(stderr, target+" already exists") {
+			t.Fatalf("dangling %s symlink: exit %d stderr %q", target, code, stderr)
+		}
+	}
+}
+
+// Parity rows 5-9: ordinary startup strictly opens. Rust mirror:
+// `open_existing_startup_never_synthesizes_a_store`.
+func TestRunOpenExistingStartupDoesNotSynthesizeStore(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	code, stderr := runCLI("--datadir", dir, "--dry-run")
+	if code != 2 || !strings.Contains(stderr, "blockstore open failed") {
+		t.Fatalf("missing store: exit %d stderr %q", code, stderr)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("ordinary startup must not create the datadir: %v", err)
+	}
+
+	code, stderr = runCLI("--datadir", dir, "--legacy-exposure-scan", "--legacy-suite-id", "1")
+	if code != 2 || !strings.Contains(stderr, "legacy exposure scan requires an existing chainstate") {
+		t.Fatalf("legacy scan: exit %d stderr %q", code, stderr)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("legacy scan must not create a store: %v", err)
+	}
+
+	if code, stderr := runCLI("--datadir", dir, "--create-store", "--mine-blocks", "1", "--mine-exit"); code != 0 {
+		t.Fatalf("create exit %d (stderr=%q)", code, stderr)
+	}
+	if code, stderr := runCLI("--datadir", dir, "--dry-run"); code != 0 {
+		t.Fatalf("reopen exit %d (stderr=%q)", code, stderr)
 	}
 }

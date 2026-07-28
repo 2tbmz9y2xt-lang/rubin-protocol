@@ -99,7 +99,7 @@ func mineGenesisBlockBytes(t *testing.T) (blockBytes []byte, headerBytes []byte)
 	chainStatePath := node.ChainStatePath(dir)
 
 	chainState := node.NewChainState()
-	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}

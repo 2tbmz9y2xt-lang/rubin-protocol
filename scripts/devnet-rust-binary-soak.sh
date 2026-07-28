@@ -398,7 +398,7 @@ NODE_PID=""
 # on a single helper failure — the calling `if` block decides next steps.
 attempt_helper_launch() {
   rubin_process_start "${LOG_FILE}" "${NODE_BIN}" \
-    --network devnet --datadir "${DATA_DIR}" \
+    --network devnet --create-store --datadir "${DATA_DIR}" \
     --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 \
     || { LAUNCH_FAILURE_REASON="rubin_process_start did not register a Rust helper/advisory process"; return 1; }
   NODE_PID="${RUBIN_PROCESS_LAST_PID:-}"

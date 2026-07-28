@@ -1477,9 +1477,9 @@ func newPeerRuntimeTestPeer(t *testing.T) *peer {
 	t.Helper()
 	dir := t.TempDir()
 	chainState := node.NewChainState()
-	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	syncEngine, err := node.NewSyncEngine(
 		chainState,

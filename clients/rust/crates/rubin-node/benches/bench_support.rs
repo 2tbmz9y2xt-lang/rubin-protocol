@@ -249,7 +249,7 @@ pub fn signed_transfer_tx(
 pub fn fresh_sync_engine(prefix: &str) -> SyncFixture {
     let dir = unique_temp_dir(prefix);
     let chain_state_file = chain_state_path(&dir);
-    let block_store = BlockStore::open(block_store_path(&dir)).expect("open block store");
+    let block_store = BlockStore::create(block_store_path(&dir)).expect("create block store");
     let chain_state = ChainState::new();
     chain_state
         .save(&chain_state_file)

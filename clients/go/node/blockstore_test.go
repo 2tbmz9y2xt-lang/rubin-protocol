@@ -24,6 +24,15 @@ func mustOpenBlockStore(t *testing.T, path string) *BlockStore {
 	return store
 }
 
+func mustCreateBlockStore(t *testing.T, path string) *BlockStore {
+	t.Helper()
+	store, err := CreateBlockStore(path)
+	if err != nil {
+		t.Fatalf("create blockstore: %v", err)
+	}
+	return store
+}
+
 func assertNodePathMode(t *testing.T, path string, want os.FileMode) {
 	t.Helper()
 	info, err := os.Stat(path)
@@ -54,9 +63,9 @@ func mustPutBlock(t *testing.T, store *BlockStore, height uint64, seed byte, non
 	return hash, header
 }
 
-func TestOpenBlockStoreCreatesPrivateDirsAndFiles(t *testing.T) {
+func TestCreateBlockStoreCreatesPrivateDirsAndFiles(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "blockstore")
-	store := mustOpenBlockStore(t, root)
+	store := mustCreateBlockStore(t, root)
 
 	assertNodePathMode(t, root, 0o700)
 	assertNodePathMode(t, store.blocksDir, 0o700)
@@ -87,7 +96,7 @@ func TestOpenBlockStoreCreatesPrivateDirsAndFiles(t *testing.T) {
 }
 
 func TestBlockStorePutGetAndTip(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	block0 := []byte("block-0")
 	hash0, _ := mustPutBlock(t, store, 0, 1, 11, block0)
 
@@ -129,7 +138,7 @@ func TestBlockStorePutGetAndTip(t *testing.T) {
 }
 
 func TestBlockStoreReorgAndRewindHooks(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	hash0, _ := mustPutBlock(t, store, 0, 10, 1, []byte("b0"))
 	_, _ = mustPutBlock(t, store, 1, 11, 2, []byte("b1a"))
 	hash1b, _ := mustPutBlock(t, store, 1, 12, 3, []byte("b1b"))
@@ -156,7 +165,7 @@ func TestBlockStoreReorgAndRewindHooks(t *testing.T) {
 }
 
 func TestBlockStoreRejectsHeightGap(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	header := testHeaderBytes(3, 33)
 	hash := mustHeaderHash(t, header)
 	if err := store.PutBlock(2, hash, header, []byte("gapped")); err == nil {
@@ -166,7 +175,7 @@ func TestBlockStoreRejectsHeightGap(t *testing.T) {
 
 func TestBlockStorePersistsIndex(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "blockstore")
-	store := mustOpenBlockStore(t, root)
+	store := mustCreateBlockStore(t, root)
 	hash, _ := mustPutBlock(t, store, 0, 7, 77, []byte("persist"))
 
 	var err error
@@ -410,7 +419,7 @@ func TestBlockStoreTipNil(t *testing.T) {
 }
 
 func TestBlockStoreTipEmptyOK(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	_, _, ok, err := store.Tip()
 	if err != nil {
 		t.Fatalf("tip: %v", err)
@@ -442,4 +451,187 @@ func testHeaderBytes(seed byte, nonce uint64) []byte {
 	}
 	binary.LittleEndian.PutUint64(header[108:116], nonce)
 	return header
+}
+
+// fresh datadir whose blockstore root does NOT exist yet.
+func freshDataDir(t *testing.T) string {
+	t.Helper()
+	return t.TempDir()
+}
+
+// Parity matrix row 1: create with root and chainstate absent commits the tree
+// plus the EXACT empty version-1 marker, and the store opens after. Rust mirror:
+// `create_store_commits_exact_empty_marker`.
+func TestCreateBlockStoreCommitsExactEmptyMarker(t *testing.T) {
+	root := BlockStorePath(freshDataDir(t))
+	store := mustCreateBlockStore(t, root)
+	if got, err := store.CanonicalIndexSnapshot(); err != nil || len(got) != 0 {
+		t.Fatalf("canonical snapshot = %v, %v, want empty", got, err)
+	}
+	for _, sub := range []string{"blocks", "headers", "undo"} {
+		if info, err := os.Stat(filepath.Join(root, sub)); err != nil || !info.IsDir() {
+			t.Fatalf("%s: info=%v err=%v, want directory", sub, info, err)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "index.json")) // #nosec G304 -- test-local path.
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if want := "{\n  \"canonical\": [],\n  \"version\": 1\n}\n"; string(raw) != want {
+		t.Fatalf("marker = %q, want %q", raw, want)
+	}
+	mustOpenBlockStore(t, root)
+}
+
+// Parity matrix row 2 + rejected case "create overwrites": an existing root of
+// any kind is refused, and a PARTIAL root (no marker yet, i.e. a crash between
+// mkdir and the commit) is adopted by neither constructor. Rust mirror:
+// `create_store_rejects_existing_and_partial_root`.
+func TestCreateBlockStoreRejectsExistingAndPartialRoot(t *testing.T) {
+	root := BlockStorePath(freshDataDir(t))
+	mustCreateBlockStore(t, root)
+	seeded := filepath.Join(root, "blocks", "marker.bin")
+	if err := os.WriteFile(seeded, []byte("pre-existing"), 0o600); err != nil {
+		t.Fatalf("seed artifact: %v", err)
+	}
+	if _, err := CreateBlockStore(root); err == nil {
+		t.Fatalf("second create must fail")
+	}
+	if _, err := os.Stat(seeded); err != nil {
+		t.Fatalf("existing root must not be overwritten or reset: %v", err)
+	}
+
+	partial := BlockStorePath(freshDataDir(t))
+	if err := os.Mkdir(partial, 0o700); err != nil {
+		t.Fatalf("partial root: %v", err)
+	}
+	if _, err := CreateBlockStore(partial); err == nil {
+		t.Fatalf("no resume of a partial root")
+	}
+	if _, err := OpenBlockStore(partial); err == nil {
+		t.Fatalf("no adoption of a partial root")
+	}
+}
+
+// Parity matrix rows 6-8: strict open never repairs and never creates. Rust
+// mirror: `open_existing_rejects_uninitialized_tree_without_mutating`.
+func TestOpenBlockStoreRejectsUninitializedTree(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		break_ func(t *testing.T, root string)
+	}{
+		{"missing_root", func(t *testing.T, root string) { mustRemoveAll(t, root) }},
+		{"missing_subdir", func(t *testing.T, root string) { mustRemoveAll(t, filepath.Join(root, "undo")) }},
+		{"missing_blocks", func(t *testing.T, root string) { mustRemoveAll(t, filepath.Join(root, "blocks")) }},
+		{"missing_headers", func(t *testing.T, root string) { mustRemoveAll(t, filepath.Join(root, "headers")) }},
+		{"missing_marker", func(t *testing.T, root string) { mustRemoveAll(t, filepath.Join(root, "index.json")) }},
+		{"root_is_file", func(t *testing.T, root string) {
+			mustRemoveAll(t, root)
+			if err := os.WriteFile(root, []byte("x"), 0o600); err != nil {
+				t.Fatalf("root as file: %v", err)
+			}
+		}},
+		{"marker_is_directory", func(t *testing.T, root string) {
+			marker := filepath.Join(root, "index.json")
+			mustRemoveAll(t, marker)
+			if err := os.Mkdir(marker, 0o700); err != nil {
+				t.Fatalf("marker as dir: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := BlockStorePath(freshDataDir(t))
+			mustCreateBlockStore(t, root)
+			tc.break_(t, root)
+			if _, err := OpenBlockStore(root); err == nil {
+				t.Fatalf("strict open must reject")
+			}
+			switch tc.name {
+			case "missing_root":
+				if _, err := os.Stat(root); !os.IsNotExist(err) {
+					t.Fatalf("strict open must not mkdir: %v", err)
+				}
+			case "missing_marker":
+				if _, err := os.Stat(filepath.Join(root, "index.json")); !os.IsNotExist(err) {
+					t.Fatalf("strict open must not synthesize a marker: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func mustRemoveAll(t *testing.T, path string) {
+	t.Helper()
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatalf("remove %s: %v", path, err)
+	}
+}
+
+// index_marker_validity as an executing table. Rust mirror:
+// `open_existing_rejects_malformed_marker_rows` pins the same rows.
+func TestOpenBlockStoreRejectsMalformedMarker(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	rejected := []struct{ name, body string }{
+		{"empty", ""},
+		{"not_an_object", "[]"},
+		{"missing_version", `{"canonical":[]}`},
+		{"missing_canonical", `{"version":1}`},
+		{"canonical_null", `{"version":1,"canonical":null}`},
+		{"unknown_field", `{"version":1,"canonical":[],"chain_id":"x"}`},
+		{"duplicate_version", `{"version":1,"version":1,"canonical":[]}`},
+		{"duplicate_canonical", `{"version":1,"canonical":[],"canonical":[]}`},
+		{"wrong_version", `{"version":2,"canonical":[]}`},
+		{"version_wrong_type", `{"version":"1","canonical":[]}`},
+		{"version_non_integer", `{"version":1.0,"canonical":[]}`},
+		{"canonical_wrong_type", `{"version":1,"canonical":{}}`},
+		{"entry_uppercase", `{"version":1,"canonical":["` + strings.ToUpper(hash) + `"]}`},
+		{"entry_short", `{"version":1,"canonical":["ab"]}`},
+		{"entry_not_hex", `{"version":1,"canonical":["` + strings.Repeat("z", 64) + `"]}`},
+		{"entry_wrong_type", `{"version":1,"canonical":[1]}`},
+		{"trailing_value", `{"version":1,"canonical":[]} {"version":1}`},
+	}
+	root := BlockStorePath(freshDataDir(t))
+	mustCreateBlockStore(t, root)
+	marker := filepath.Join(root, "index.json")
+	for _, tc := range rejected {
+		if err := os.WriteFile(marker, []byte(tc.body), 0o600); err != nil {
+			t.Fatalf("%s: write marker: %v", tc.name, err)
+		}
+		if _, err := OpenBlockStore(root); err == nil {
+			t.Fatalf("marker row %s must be rejected", tc.name)
+		}
+	}
+	// Accepted rows: the empty marker, and a well-formed lowercase entry in the
+	// opposite field order (the Rust writer emits version first).
+	for _, tc := range []struct {
+		body string
+		want int
+	}{
+		{`{"version":1,"canonical":[]}`, 0},
+		{`{"canonical":["` + hash + `"],"version":1}`, 1},
+	} {
+		if err := os.WriteFile(marker, []byte(tc.body), 0o600); err != nil {
+			t.Fatalf("write marker: %v", err)
+		}
+		store, err := OpenBlockStore(root)
+		if err != nil {
+			t.Fatalf("%s must be accepted: %v", tc.body, err)
+		}
+		if got, err := store.CanonicalIndexSnapshot(); err != nil || len(got) != tc.want {
+			t.Fatalf("canonical len = %v (%v), want %d", got, err, tc.want)
+		}
+	}
+}
+
+// Rule 10 at the LOADER layer: a missing marker must error even though the tree
+// check above it already rejects — no implicit empty index anywhere. Rust mirror:
+// `open_existing_marker_loader_never_synthesizes_empty_index`.
+func TestLoadBlockStoreIndexNeverSynthesizesEmptyIndex(t *testing.T) {
+	root := BlockStorePath(t.TempDir())
+	mustCreateBlockStore(t, root)
+	marker := filepath.Join(root, "index.json")
+	mustRemoveAll(t, marker)
+	if _, err := loadBlockStoreIndex(marker); err == nil {
+		t.Fatalf("missing marker must not decode as an empty index")
+	}
 }

@@ -60,7 +60,7 @@ func isGenesisHashMismatchTxError(err error) bool {
 func newGenesisIdentityTestEngine(t *testing.T, chainID [32]byte) *SyncEngine {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestSyncEngineBootstrapCanonicalGenesisIfEmpty_NilChainState(t *testing.T) 
 func newAliasingTestPair(t *testing.T, chainID [32]byte) (*SyncEngine, *ChainState, *BlockStore) {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -339,12 +339,12 @@ func TestNewMiner_RejectsMismatchedChainState(t *testing.T) {
 // timestamp context from the miner's separate blockStore.
 func TestNewMiner_RejectsMismatchedBlockStore(t *testing.T) {
 	dir := t.TempDir()
-	storeA, err := OpenBlockStore(BlockStorePath(dir))
+	storeA, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore A: %v", err)
 	}
 	otherDir := t.TempDir()
-	storeB, err := OpenBlockStore(BlockStorePath(otherDir))
+	storeB, err := CreateBlockStore(BlockStorePath(otherDir))
 	if err != nil {
 		t.Fatalf("open blockstore B: %v", err)
 	}
@@ -372,7 +372,7 @@ func TestNewMiner_RejectsMismatchedBlockStore(t *testing.T) {
 // corruption that the production code must handle.
 func TestMinerMineOne_PropagatesBootstrapError(t *testing.T) {
 	dir := t.TempDir()
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}

@@ -282,7 +282,7 @@ func newDevnetEnv() (*devnetEnv, error) {
 	target := consensus.POW_LIMIT
 	chainID := node.DevnetGenesisChainID()
 	chainState := node.NewChainState()
-	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
 		return nil, err
 	}

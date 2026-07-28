@@ -332,7 +332,7 @@ RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "$
 MINE_ADDRESS_HEX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["mine_address_hex"])' "${KEYGEN_JSON}")"
 mkdir -p "${A_DIR}" "${B_DIR}"
 echo "Mining mature Go chain to height ${BASE_HEIGHT}"
-"${NODE_BIN}" --datadir "${A_DIR}" --mine-address "${MINE_ADDRESS_HEX}" --mine-blocks "${BASE_HEIGHT}" --mine-exit >"${MINE_LOG}" 2>&1
+"${NODE_BIN}" --create-store --datadir "${A_DIR}" --mine-address "${MINE_ADDRESS_HEX}" --mine-blocks "${BASE_HEIGHT}" --mine-exit >"${MINE_LOG}" 2>&1
 write_da_txgen
 RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${DATXGEN_GO}" "${A_DIR}" "${FROM_KEY_FILE}" >"${DA_TX_JSON}"
 cleanup_from_key_file

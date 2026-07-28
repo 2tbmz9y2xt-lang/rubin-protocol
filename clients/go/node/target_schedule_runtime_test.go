@@ -20,7 +20,7 @@ const boundarySpacingSeconds = consensus.TARGET_BLOCK_INTERVAL / 2
 func newStockDevnetEngine(t *testing.T, mutate func(*SyncConfig)) (*SyncEngine, *BlockStore, string) {
 	t.Helper()
 	dir := t.TempDir()
-	store := mustOpenBlockStore(t, BlockStorePath(dir))
+	store := mustCreateBlockStore(t, BlockStorePath(dir))
 	cfg := DefaultSyncConfig(nil, devnetGenesisChainID, ChainStatePath(dir))
 	if mutate != nil {
 		mutate(&cfg)

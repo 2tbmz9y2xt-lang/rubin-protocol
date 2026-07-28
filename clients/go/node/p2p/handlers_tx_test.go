@@ -1310,9 +1310,9 @@ func TestBlockBytesIOError(t *testing.T) {
 	// a non-ErrNotExist error from GetBlockByHash. This exercises the error
 	// propagation path in blockBytes (line: return nil, false, err).
 	dir := t.TempDir()
-	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 
 	// Replace the blocks directory with a regular file.

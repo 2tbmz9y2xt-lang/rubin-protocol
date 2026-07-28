@@ -691,7 +691,7 @@ TO_ADDRESS_HEX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])
 
 mkdir -p "${A_DIR}" "${B_DIR}"
 echo "Mining mature Go chain to height ${BASE_HEIGHT}"
-"${NODE_BIN}" --datadir "${A_DIR}" --mine-address "${MINE_ADDRESS_HEX}" --mine-blocks "${BASE_HEIGHT}" --mine-exit >"${MINE_LOG}" 2>&1
+"${NODE_BIN}" --create-store --datadir "${A_DIR}" --mine-address "${MINE_ADDRESS_HEX}" --mine-blocks "${BASE_HEIGHT}" --mine-exit >"${MINE_LOG}" 2>&1
 cp -R "${A_DIR}/." "${B_DIR}/"
 assert_distinct_datadirs
 

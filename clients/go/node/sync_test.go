@@ -396,7 +396,7 @@ func TestSyncEngineIBDLogic(t *testing.T) {
 func TestSyncEngineApplyBlockPersistsChainstateAndStore(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -445,7 +445,7 @@ func TestSyncEngineApplyBlockPersistsChainstateAndStore(t *testing.T) {
 func TestSyncEngineBlockApplyCountsCanonicalAcceptedRejected(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -605,7 +605,7 @@ func TestChainStateDisconnectBlockRestoresSpentUTXOState(t *testing.T) {
 func TestSyncEngineDisconnectTipPersistsChainstateAndStore(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}

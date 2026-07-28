@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/bits"
 	"os"
 	"os/signal"
@@ -228,6 +230,51 @@ func loadLegacyExposureScanChainState(path string) (*node.ChainState, error) {
 	return chainState, nil
 }
 
+// createOrOpenBlockStore selects the explicit create path or the strict
+// open-existing path. In create mode the CLI owns the preconditions: the
+// blockstore root must be absent (its error wins) and the chainstate must be
+// absent, both checked before the datadir or any store artifact is created.
+func createOrOpenBlockStore(dataDir, chainStatePath string, createStore bool, stderr io.Writer) (*node.BlockStore, int) {
+	rootPath := node.BlockStorePath(dataDir)
+	if !createStore {
+		blockStore, err := node.OpenBlockStore(rootPath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "blockstore open failed: %v\n", err)
+			return nil, 2
+		}
+		return blockStore, 0
+	}
+	if err := requireAbsentPath("blockstore root", rootPath); err != nil {
+		_, _ = fmt.Fprintf(stderr, "blockstore create failed: %v\n", err)
+		return nil, 2
+	}
+	if err := requireAbsentPath("chainstate", chainStatePath); err != nil {
+		_, _ = fmt.Fprintf(stderr, "blockstore create failed: %v\n", err)
+		return nil, 2
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		_, _ = fmt.Fprintf(stderr, "datadir create failed: %v\n", err)
+		return nil, 2
+	}
+	blockStore, err := node.CreateBlockStore(rootPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "blockstore create failed: %v\n", err)
+		return nil, 2
+	}
+	return blockStore, 0
+}
+
+// requireAbsentPath rejects any existing filesystem entry at path. Lstat, not
+// Stat, so a dangling symlink counts as present rather than as "not found".
+func requireAbsentPath(label, path string) error {
+	if _, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("%s already exists: %s", label, path)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("stat %s %s: %w", label, path, err)
+	}
+	return nil
+}
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -263,6 +310,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.Var(&legacySuiteIDs, "legacy-suite-id", "legacy suite_id to watch (decimal or 0xNN); repeatable")
 	legacyExposureIncludeOutpoints := fs.Bool("legacy-exposure-include-outpoints", false, "include deterministic outpoint lists in legacy exposure report")
 	dryRun := fs.Bool("dry-run", false, "print effective config and exit")
+	createStore := fs.Bool("create-store", false, "create a new blockstore (default: strictly open an existing one)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -279,7 +327,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	// pv-mode is untrusted operator input: reject an invalid mode BEFORE
 	// the legacy-exposure-scan branch (its chainstate read below) and
-	// BEFORE the first filesystem mutation (os.MkdirAll below), so the
+	// BEFORE the storage lifecycle (createOrOpenBlockStore below), so the
 	// process exits on an untouched filesystem with no service started.
 	// Everything above this guard is pure parse/normalize over argv.
 	// NewSyncEngine re-parses the same value internally (defense in
@@ -301,6 +349,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	} else if len(legacySuiteIDs) > 0 || *legacyExposureIncludeOutpoints {
 		_, _ = fmt.Fprintln(stderr, "legacy exposure flags require --legacy-exposure-scan")
+		return 2
+	}
+	// --create-store mutates storage; --dry-run and --legacy-exposure-scan are
+	// read-only. Reject the combination after the existing config/legacy-suite
+	// validation and before genesis loading, the scan's chainstate read, and
+	// every filesystem write: exit 2 on an untouched filesystem.
+	if *createStore && (*dryRun || *legacyExposureScan) {
+		_, _ = fmt.Fprintln(stderr, "--create-store cannot be combined with --dry-run or --legacy-exposure-scan")
 		return 2
 	}
 	chainStatePath := node.ChainStatePath(cfg.DataDir)
@@ -326,8 +382,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "invalid genesis file: %v\n", err)
 		return 2
 	}
-	// Genesis-identity guards run BEFORE the first filesystem mutation
-	// (os.MkdirAll(cfg.DataDir) below). A wrong devnet chain_id /
+	// Genesis-identity guards run BEFORE the storage lifecycle
+	// (createOrOpenBlockStore below). A wrong devnet chain_id /
 	// genesis_hash, or a misconfigured mainnet runtime, must reject on a
 	// clean filesystem so operators do not end up with partial datadir /
 	// chainstate / blockstore artifacts that the next startup would have
@@ -344,9 +400,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "mainnet genesis guard failed: %v\n", err)
 		return 2
 	}
-	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
-		_, _ = fmt.Fprintf(stderr, "datadir create failed: %v\n", err)
-		return 2
+	// Storage lifecycle runs BEFORE the chainstate load: an uninitialized or
+	// half-initialized store must reject before anything reads or writes
+	// chainstate. Ordinary startup performs no mkdir at all.
+	blockStore, storeExit := createOrOpenBlockStore(cfg.DataDir, chainStatePath, *createStore, stderr)
+	if storeExit != 0 {
+		return storeExit
 	}
 	chainState, err := node.LoadChainState(chainStatePath)
 	if err != nil {
@@ -367,18 +426,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	chainState.Rotation = rotation
 	chainState.Registry = registry
-	blockStore, err := node.OpenBlockStore(node.BlockStorePath(cfg.DataDir))
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "blockstore open failed: %v\n", err)
-		return 2
-	}
 	syncCfg := node.DefaultSyncConfig(nil, chainIDFromGenesis, chainStatePath)
 	syncCfg.Network = cfg.Network
 	applySuiteContextToSyncConfig(&syncCfg, rotation, registry)
 	syncCfg.ParallelValidationMode = *pvMode
 	syncCfg.PVShadowMaxSamples = *pvShadowMax
 	// Genesis-identity guards (devnet ValidateDevnetGenesisIdentity and
-	// mainnet ValidateMainnetGenesisGuard) ran above before MkdirAll, so
+	// mainnet ValidateMainnetGenesisGuard) ran above the storage lifecycle, so
 	// any malformed pack or misconfigured mainnet runtime has already
 	// rejected on a clean filesystem. NewSyncEngine still re-runs the
 	// mainnet guard internally for embedded / test callers that

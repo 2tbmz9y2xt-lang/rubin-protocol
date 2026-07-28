@@ -365,7 +365,7 @@ mod tests {
             std::process::id(),
             NEXT_DIR.fetch_add(1, Ordering::Relaxed)
         ));
-        let mut store = BlockStore::open(&path).expect("open blockstore");
+        let mut store = BlockStore::create(&path).expect("create blockstore");
         let raw = header([0u8; 32], [0x70; 32], 1, 1);
         let parent = block_hash(&raw).expect("parent hash");
         store
