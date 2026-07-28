@@ -337,6 +337,49 @@ func advancePrevTimestamps(prev []uint64, newTs uint64) []uint64 {
 	return out
 }
 
+// errBranchStoreCorrupt marks a local block-store defect observed while walking
+// a side branch: a stored block whose bytes do not hash to the hash they were
+// looked up by, or an ancestry that revisits a hash already walked.
+//
+// It is deliberately a plain error and NOT a *consensus.TxError, and it is
+// deliberately distinct from ErrParentNotFound. node/p2p classifies an apply
+// failure by errors.As(*consensus.TxError) (handlers_block.go
+// isConsensusApplyBlockError), so a peer that relayed a perfectly well-formed
+// block is never ban-scored for OUR corrupt store; the failure is recorded as a
+// local error instead. Unexported: no caller outside this package should branch
+// on the specific cause, only on "not a consensus fault".
+var errBranchStoreCorrupt = errors.New("block store corruption during side-branch collection")
+
+// collectBranchToCanonical walks a candidate's ancestry back to the first block
+// the canonical index knows, returning the branch in canonical (oldest-first)
+// order together with the common ancestor.
+//
+// Two independent guards bound the walk, and their relationship is NOT
+// redundancy — do not remove either one on that theory:
+//
+//   - Per-ancestor verification (loadVerifiedBranchAncestor) is the live guard.
+//     It is what actually stops a corrupt or hostile store file whose
+//     prev_block_hash points at itself, or at another file that points back:
+//     such a file cannot also hash to the name it was fetched under, so it is
+//     rejected on the first read. Without it this loop runs forever, appending
+//     the same block bytes on every pass, since nothing else in the walk bounds
+//     it.
+//   - The walked set below is defense-in-depth that the verification guard makes
+//     UNREACHABLE today. Reaching it needs an ancestry that returns to an
+//     already-walked hash while every loaded block still hashes to its own
+//     lookup key — i.e. a SHA3-256 cycle. It exists so the walk stays bounded if
+//     the verification guard is ever weakened, reordered, or removed.
+//
+// Because it is unreachable, the walked-set branch cannot be pinned by a test
+// against the shipped code, and a line-coverage tool WILL report it uncovered.
+// That is expected, not a gap: the relationship is demonstrated by mutation —
+// removing the verification guard alone leaves the walked set catching both the
+// self-referencing and the two-file cycle shapes, and removing both hangs the
+// walk (measured, RUB-880).
+//
+// With either guard in place the walk is bounded by the number of distinct
+// blocks actually on disk, so no explicit depth limit is needed: an honest
+// branch still terminates at the canonical index or at ErrParentNotFound.
 func (s *SyncEngine) collectBranchToCanonical(
 	blockHash [32]byte,
 	blockBytes []byte,
@@ -348,6 +391,11 @@ func (s *SyncEngine) collectBranchToCanonical(
 		parsed:     pb,
 		header:     pb.Header,
 	}}
+	// Unreachable while loadVerifiedBranchAncestor stands; see the guard
+	// relationship on this function. The candidate is seeded so that ancestry
+	// looping back to the candidate itself would be caught on the same rule as
+	// any other repeat.
+	walked := map[[32]byte]struct{}{blockHash: {}}
 	parentHash := pb.Header.PrevBlockHash
 	for {
 		height, found, err := s.blockStore.FindCanonicalHeight(parentHash)
@@ -358,14 +406,11 @@ func (s *SyncEngine) collectBranchToCanonical(
 			reverseBranchBlocks(branch)
 			return branch, parentHash, height, nil
 		}
-		parentBlockBytes, err := s.blockStore.GetBlockByHash(parentHash)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return nil, [32]byte{}, 0, ErrParentNotFound
-			}
-			return nil, [32]byte{}, 0, err
+		if _, repeated := walked[parentHash]; repeated {
+			return nil, [32]byte{}, 0, fmt.Errorf("%w: ancestor %x already walked", errBranchStoreCorrupt, parentHash)
 		}
-		parentParsed, err := consensus.ParseBlockBytes(parentBlockBytes)
+		walked[parentHash] = struct{}{}
+		parentParsed, parentBlockBytes, err := s.loadVerifiedBranchAncestor(parentHash)
 		if err != nil {
 			return nil, [32]byte{}, 0, err
 		}
@@ -377,6 +422,48 @@ func (s *SyncEngine) collectBranchToCanonical(
 		})
 		parentHash = parentParsed.Header.PrevBlockHash
 	}
+}
+
+// loadVerifiedBranchAncestor reads one stored ancestor and proves it is the
+// block that was asked for. A plain file read cannot: BlockStore.GetBlockByHash
+// returns whatever bytes sit at the path named by the hash. Mirrors the
+// defense-in-depth re-hash verifyReplayBlockHash performs on the startup replay
+// path. A genuinely absent ancestor keeps the pre-existing ErrParentNotFound
+// outcome, which the caller turns into normal orphan handling.
+//
+// EVERY way the stored bytes can fail to be the requested block — unparseable,
+// unhashable, or hashing to something else — is one local-corruption class and
+// is reported as errBranchStoreCorrupt. Bytes that cannot even yield a header
+// certainly do not hash to their lookup key, so parse failure is not a separate
+// verdict. The cause is rendered with %v and deliberately NOT wrapped with %w:
+// consensus.ParseBlockBytes returns a *consensus.TxError, and errors.As unwraps
+// through %w, so a %w-chained cause would still satisfy node/p2p's
+// isConsensusApplyBlockError and bump a relaying peer's ban score by 100 for OUR
+// corrupt datadir. Measured both renderings against that exact predicate: %w =>
+// matched, %v => did not, with identical message text.
+func (s *SyncEngine) loadVerifiedBranchAncestor(parentHash [32]byte) (*consensus.ParsedBlock, []byte, error) {
+	parentBlockBytes, err := s.blockStore.GetBlockByHash(parentHash)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil, ErrParentNotFound
+		}
+		return nil, nil, err
+	}
+	parentParsed, err := consensus.ParseBlockBytes(parentBlockBytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: stored block for %x does not parse: %v", errBranchStoreCorrupt, parentHash, err) //nolint:errorlint // %v is required, not %w: errors.As unwraps %w, so a wrapped *consensus.TxError cause would satisfy p2p isConsensusApplyBlockError and bump the relaying peer's ban score 100 for OUR corrupt store (measured)
+	}
+	observedHash, err := consensus.BlockHash(parentParsed.HeaderBytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: stored block for %x does not hash: %v", errBranchStoreCorrupt, parentHash, err) //nolint:errorlint // %v is required, not %w: errors.As unwraps %w, so a wrapped *consensus.TxError cause would satisfy p2p isConsensusApplyBlockError and bump the relaying peer's ban score 100 for OUR corrupt store (measured)
+	}
+	if observedHash != parentHash {
+		return nil, nil, fmt.Errorf(
+			"%w: stored block for %x hashes to %x",
+			errBranchStoreCorrupt, parentHash, observedHash,
+		)
+	}
+	return parentParsed, parentBlockBytes, nil
 }
 
 func (s *SyncEngine) syntheticSideChainSummary(height uint64, blockHash [32]byte) *ChainStateConnectSummary {

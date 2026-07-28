@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"crypto/sha3"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -2004,8 +2005,62 @@ func TestCanonicalAppliedBlocksOnDirectApply(t *testing.T) {
 	if blocks[0].Hash != summary.BlockHash {
 		t.Fatalf("CanonicalAppliedBlocks[0].Hash=%x, want BlockHash=%x", blocks[0].Hash, summary.BlockHash)
 	}
-	if !bytes.Equal(blocks[0].BlockBytes, blockBytes) {
-		t.Fatal("CanonicalAppliedBlocks[0].BlockBytes does not match original block bytes")
+	if len(blocks[0].CompleteDAIDs) != 0 {
+		t.Fatalf("CompleteDAIDs=%x for a block with no DA transactions, want none", blocks[0].CompleteDAIDs)
+	}
+}
+
+// TestCanonicalAppliedBlockCarriesNoBlockBytes pins the bound itself: the
+// canonical-applied record is fixed-width by construction, so a reorg summary
+// cannot retain N x MAX_BLOCK_BYTES of block bytes no matter how deep the reorg.
+// A byte-slice field of any name reintroduces that growth, so the shape — not
+// one field name — is what is asserted.
+func TestCanonicalAppliedBlockCarriesNoBlockBytes(t *testing.T) {
+	typ := reflect.TypeOf(CanonicalAppliedBlock{})
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if field.Type.Kind() == reflect.Slice && field.Type.Elem().Kind() == reflect.Uint8 {
+			t.Fatalf("CanonicalAppliedBlock.%s is a raw byte slice; the record must stay bounded", field.Name)
+		}
+	}
+	if typ.NumField() != 2 {
+		t.Fatalf("CanonicalAppliedBlock has %d fields, want exactly Hash and CompleteDAIDs", typ.NumField())
+	}
+}
+
+// TestCanonicalAppliedBlocksOnDirectApplyReportsCompleteDASets is the
+// exact-IDs row: a block that really is applied to the canonical tip reports the
+// da_id of every complete DA set it carries, in ascending order, and nothing
+// else. Both sets here are complete because consensus rejects a block carrying
+// an incomplete one (BLOCK_ERR_DA_INCOMPLETE) — the incomplete-set report
+// corners are pinned against the extraction core in node/p2p.
+func TestCanonicalAppliedBlocksOnDirectApplyReportsCompleteDASets(t *testing.T) {
+	fixture := newCanonicalDATestFixture(t)
+	// Declared out of ascending order on the wire so a map-iteration or
+	// insertion-order report cannot pass by luck.
+	secondID := [32]byte{0xd2}
+	firstID := [32]byte{0xd1}
+
+	blockBytes := fixture.blockWithDASets(
+		t,
+		daSetSpec{daID: secondID, payloads: [][]byte{[]byte("second-0")}},
+		daSetSpec{daID: firstID, payloads: [][]byte{[]byte("first-0"), []byte("first-1")}},
+	)
+
+	summary, err := fixture.engine.ApplyBlock(blockBytes, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(DA block): %v", err)
+	}
+	blocks := summary.CanonicalAppliedBlocks
+	if len(blocks) != 1 {
+		t.Fatalf("CanonicalAppliedBlocks len=%d, want 1", len(blocks))
+	}
+	if blocks[0].Hash != summary.BlockHash {
+		t.Fatalf("CanonicalAppliedBlocks[0].Hash=%x, want BlockHash=%x", blocks[0].Hash, summary.BlockHash)
+	}
+	want := [][32]byte{firstID, secondID}
+	if !reflect.DeepEqual(blocks[0].CompleteDAIDs, want) {
+		t.Fatalf("CompleteDAIDs=%x, want %x in ascending order", blocks[0].CompleteDAIDs, want)
 	}
 }
 
@@ -2082,15 +2137,61 @@ func TestCanonicalAppliedBlocksOnReorg(t *testing.T) {
 	if canonBlocks[0].Hash != b1Hash {
 		t.Fatalf("CanonicalAppliedBlocks[0].Hash=%x, want B1=%x", canonBlocks[0].Hash, b1Hash)
 	}
-	if !bytes.Equal(canonBlocks[0].BlockBytes, blockB1) {
-		t.Fatal("CanonicalAppliedBlocks[0].BlockBytes does not match B1 block bytes")
-	}
 	// B2 is second (height 2)
 	if canonBlocks[1].Hash != summary.BlockHash {
 		t.Fatalf("CanonicalAppliedBlocks[1].Hash=%x, want B2=%x", canonBlocks[1].Hash, summary.BlockHash)
 	}
-	if !bytes.Equal(canonBlocks[1].BlockBytes, blockB2) {
-		t.Fatal("CanonicalAppliedBlocks[1].BlockBytes does not match B2 block bytes")
+	for i, item := range canonBlocks {
+		if len(item.CompleteDAIDs) != 0 {
+			t.Fatalf("CanonicalAppliedBlocks[%d].CompleteDAIDs=%x for a coinbase-only block, want none", i, item.CompleteDAIDs)
+		}
+	}
+}
+
+// TestCanonicalAppliedBlocksOnReorgAttributesDASetsPerBlock is the per-block
+// attribution row: after a reorg each newly-canonical block reports ITS OWN
+// complete DA sets, in canonical order. A single accumulated set, or a
+// last-block-wins report, would leave the other block's relay records pinned
+// forever.
+func TestCanonicalAppliedBlocksOnReorgAttributesDASetsPerBlock(t *testing.T) {
+	fixture := newCanonicalDATestFixture(t)
+	idA1 := [32]byte{0xa1}
+	idB1 := [32]byte{0xb1}
+	idB2 := [32]byte{0xb2}
+
+	// Canonical chain A: one block carrying its own DA set.
+	blockA1 := fixture.blockWithDASets(t, daSetSpec{daID: idA1, payloads: [][]byte{[]byte("a1")}})
+	if _, err := fixture.engine.ApplyBlock(blockA1, nil); err != nil {
+		t.Fatalf("ApplyBlock(A1): %v", err)
+	}
+
+	// Competing branch B1 -> B2, each with a distinct DA set, out-working A.
+	forkFixture := fixture.forkFrom(t)
+	blockB1 := forkFixture.blockWithDASets(t, daSetSpec{daID: idB1, payloads: [][]byte{[]byte("b1")}})
+	b1Parsed, b1Hash := mustParseReorgBlockForTest(t, blockB1)
+	if err := fixture.store.StoreBlock(b1Hash, b1Parsed.HeaderBytes, blockB1); err != nil {
+		t.Fatalf("StoreBlock(B1): %v", err)
+	}
+	// blockWithDASets already advanced the fork to build on B1.
+	blockB2 := forkFixture.blockWithDASets(t, daSetSpec{daID: idB2, payloads: [][]byte{[]byte("b2")}})
+
+	summary, err := fixture.engine.ApplyBlockWithReorg(blockB2, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B2): %v", err)
+	}
+	canonBlocks := summary.CanonicalAppliedBlocks
+	if len(canonBlocks) != 2 {
+		t.Fatalf("CanonicalAppliedBlocks len=%d, want 2 (B1 + B2)", len(canonBlocks))
+	}
+	if canonBlocks[0].Hash != b1Hash || canonBlocks[1].Hash != summary.BlockHash {
+		t.Fatalf("canonical order = %x, %x; want B1=%x then B2=%x",
+			canonBlocks[0].Hash, canonBlocks[1].Hash, b1Hash, summary.BlockHash)
+	}
+	if !reflect.DeepEqual(canonBlocks[0].CompleteDAIDs, [][32]byte{idB1}) {
+		t.Fatalf("B1 CompleteDAIDs=%x, want %x", canonBlocks[0].CompleteDAIDs, [][32]byte{idB1})
+	}
+	if !reflect.DeepEqual(canonBlocks[1].CompleteDAIDs, [][32]byte{idB2}) {
+		t.Fatalf("B2 CompleteDAIDs=%x, want %x", canonBlocks[1].CompleteDAIDs, [][32]byte{idB2})
 	}
 }
 
@@ -2112,5 +2213,837 @@ func TestCanonicalAppliedBlocksOnDirectApplyWithReorg(t *testing.T) {
 	}
 	if blocks[0].Hash != summary.BlockHash {
 		t.Fatalf("CanonicalAppliedBlocks[0].Hash=%x, want BlockHash=%x", blocks[0].Hash, summary.BlockHash)
+	}
+}
+
+// daSetSpec describes one complete DA set for a fixture block: one commit
+// declaring len(payloads) chunks, plus one chunk transaction per payload.
+type daSetSpec struct {
+	daID     [32]byte
+	payloads [][]byte
+}
+
+// canonicalDATestFixture mines a matured canonical chain and then builds blocks
+// that really carry complete DA sets. Nothing cheaper reaches the canonical
+// apply path: DA transactions are non-coinbase, so they need spendable inputs
+// and valid ML-DSA-87 signatures, and coinbase outputs only become spendable
+// after consensus.COINBASE_MATURITY blocks.
+type canonicalDATestFixture struct {
+	engine           *SyncEngine
+	store            *BlockStore
+	keypair          *consensus.MLDSA87Keypair
+	address          []byte
+	spendable        []consensus.Outpoint
+	cursor           *int // shared across forks so two branches never reuse an input
+	target           [32]byte
+	prevHash         [32]byte
+	height           uint64
+	alreadyGenerated uint64
+	timestampSeed    uint64
+	nextNonce        uint64
+}
+
+// daFixtureSpendableOutputs is how many independently spendable P2PK outputs the
+// height-1 coinbase pays to the fixture key. Only outputs created at height 1
+// are mature at the first post-maturity block, so every DA input a test needs
+// has to come from that one coinbase.
+const daFixtureSpendableOutputs = 8
+
+func newCanonicalDATestFixture(t *testing.T) *canonicalDATestFixture {
+	t.Helper()
+	engine, store, target := newReorgTestEngine(t)
+	keypair := mustReorgMLDSA87Keypair(t)
+	cursor := 0
+	fixture := &canonicalDATestFixture{
+		engine:        engine,
+		store:         store,
+		keypair:       keypair,
+		address:       consensus.P2PKCovenantDataForPubkey(keypair.PubkeyBytes()),
+		cursor:        &cursor,
+		target:        target,
+		prevHash:      devnetGenesisBlockHash,
+		timestampSeed: 1,
+		nextNonce:     1,
+	}
+	for height := uint64(1); height <= consensus.COINBASE_MATURITY; height++ {
+		fixture.mineMaturityBlock(t, height)
+	}
+	fixture.height = consensus.COINBASE_MATURITY + 1
+	return fixture
+}
+
+func (f *canonicalDATestFixture) mineMaturityBlock(t *testing.T, height uint64) {
+	t.Helper()
+	subsidy := consensus.BlockSubsidy(height, f.alreadyGenerated)
+	coinbase := f.maturityCoinbase(t, height, subsidy)
+	block := buildSingleTxBlock(t, f.prevHash, f.target, reorgTestTimestamp(height), coinbase)
+	summary, err := f.engine.ApplyBlock(block, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(maturity height=%d): %v", height, err)
+	}
+	if height == 1 {
+		_, txid, _, _, err := consensus.ParseTx(coinbase)
+		if err != nil {
+			t.Fatalf("ParseTx(height-1 coinbase): %v", err)
+		}
+		for vout := 0; vout < daFixtureSpendableOutputs; vout++ {
+			f.spendable = append(f.spendable, consensus.Outpoint{Txid: txid, Vout: uint32(vout)})
+		}
+	}
+	f.prevHash = summary.BlockHash
+	f.alreadyGenerated += subsidy
+	f.timestampSeed = height + 1
+}
+
+// maturityCoinbase pays the full subsidy to the fixture key. At height 1 it
+// splits the subsidy across daFixtureSpendableOutputs outputs so later DA
+// transactions have independent inputs; the total is exactly the subsidy, which
+// keeps the fixture's own already-generated tracking exact.
+func (f *canonicalDATestFixture) maturityCoinbase(t *testing.T, height uint64, subsidy uint64) []byte {
+	t.Helper()
+	if height != 1 {
+		return reorgTestCoinbaseForAddress(t, height, subsidy, f.address)
+	}
+	share := subsidy / daFixtureSpendableOutputs
+	outputs := make([]testOutput, 0, daFixtureSpendableOutputs+1)
+	for i := 0; i < daFixtureSpendableOutputs; i++ {
+		value := share
+		if i == 0 {
+			value = subsidy - share*(daFixtureSpendableOutputs-1)
+		}
+		outputs = append(outputs, testOutput{
+			value:        value,
+			covenantType: consensus.COV_TYPE_P2PK,
+			covenantData: append([]byte(nil), f.address...),
+		})
+	}
+	wroot, err := consensus.WitnessMerkleRootWtxids([][32]byte{{}})
+	if err != nil {
+		t.Fatalf("WitnessMerkleRootWtxids(height 1): %v", err)
+	}
+	commitment := consensus.WitnessCommitmentHash(wroot)
+	outputs = append(outputs, testOutput{
+		value:        0,
+		covenantType: consensus.COV_TYPE_ANCHOR,
+		covenantData: commitment[:],
+	})
+	return coinbaseTxWithOutputs(uint32(height), outputs)
+}
+
+// forkFrom snapshots the fixture so a competing branch can be built from the
+// same parent. The spend cursor is shared, so branch blocks never claim an input
+// another branch already used.
+func (f *canonicalDATestFixture) forkFrom(t *testing.T) *canonicalDATestFixture {
+	t.Helper()
+	fork := *f
+	fork.timestampSeed = f.timestampSeed + 1000
+	return &fork
+}
+
+// blockWithDASets builds (does NOT apply) the next block of this branch carrying
+// every specified DA set, and advances the fixture as if it became the tip.
+func (f *canonicalDATestFixture) blockWithDASets(t *testing.T, specs ...daSetSpec) []byte {
+	t.Helper()
+	daTxs := make([][]byte, 0, len(specs)*2)
+	var sumFees uint64
+	for _, spec := range specs {
+		txs, fees := f.daSetTxs(t, spec)
+		daTxs = append(daTxs, txs...)
+		sumFees += fees
+	}
+	wtxids := make([][32]byte, 0, len(daTxs)+1)
+	wtxids = append(wtxids, [32]byte{})
+	for _, txBytes := range daTxs {
+		_, _, wtxid, _, err := consensus.ParseTx(txBytes)
+		if err != nil {
+			t.Fatalf("ParseTx(DA tx): %v", err)
+		}
+		wtxids = append(wtxids, wtxid)
+	}
+	subsidy := consensus.BlockSubsidy(f.height, f.alreadyGenerated)
+	coinbase := reorgTestCoinbaseForWtxids(t, f.height, subsidy+sumFees, f.address, wtxids)
+	block := buildMultiTxBlock(t, f.prevHash, f.target, reorgTestTimestamp(f.timestampSeed), append([][]byte{coinbase}, daTxs...)...)
+
+	f.prevHash = mustBlockHashForTest(t, block)
+	f.height++
+	f.alreadyGenerated += subsidy
+	f.timestampSeed++
+	return block
+}
+
+func (f *canonicalDATestFixture) daSetTxs(t *testing.T, spec daSetSpec) ([][]byte, uint64) {
+	t.Helper()
+	hasher := sha3.New256()
+	for _, payload := range spec.payloads {
+		if _, err := hasher.Write(payload); err != nil {
+			t.Fatalf("hash DA payload: %v", err)
+		}
+	}
+	var commitment [32]byte
+	copy(commitment[:], hasher.Sum(nil))
+
+	commitInput, commitFee := f.nextSpendableInput(t)
+	commitTx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0x01,
+		TxNonce: f.takeNonce(),
+		Inputs:  []consensus.TxInput{commitInput},
+		Outputs: []consensus.TxOutput{{
+			Value:        0,
+			CovenantType: consensus.COV_TYPE_DA_COMMIT,
+			CovenantData: append([]byte(nil), commitment[:]...),
+		}},
+		DaCommitCore: &consensus.DaCommitCore{
+			DaID:        spec.daID,
+			ChunkCount:  uint16(len(spec.payloads)),
+			BatchNumber: 1,
+		},
+	}
+	txs := [][]byte{f.signAndMarshal(t, commitTx)}
+	fees := commitFee
+	for index, payload := range spec.payloads {
+		chunkInput, chunkFee := f.nextSpendableInput(t)
+		chunkHash := sha3.Sum256(payload)
+		chunkTx := &consensus.Tx{
+			Version: 1,
+			TxKind:  0x02,
+			TxNonce: f.takeNonce(),
+			Inputs:  []consensus.TxInput{chunkInput},
+			DaChunkCore: &consensus.DaChunkCore{
+				DaID:       spec.daID,
+				ChunkIndex: uint16(index),
+				ChunkHash:  chunkHash,
+			},
+			DaPayload: append([]byte(nil), payload...),
+		}
+		txs = append(txs, f.signAndMarshal(t, chunkTx))
+		fees += chunkFee
+	}
+	return txs, fees
+}
+
+// nextSpendableInput claims the next unused matured coinbase output. Its whole
+// value becomes fee, since DA transactions here create no spendable outputs.
+func (f *canonicalDATestFixture) nextSpendableInput(t *testing.T) (consensus.TxInput, uint64) {
+	t.Helper()
+	if *f.cursor >= len(f.spendable) {
+		t.Fatalf("fixture ran out of spendable outputs (have %d)", len(f.spendable))
+	}
+	outpoint := f.spendable[*f.cursor]
+	*f.cursor++
+	entry, ok := f.engine.chainState.Utxos[outpoint]
+	if !ok {
+		t.Fatalf("spendable outpoint %x:%d is not in the UTXO set", outpoint.Txid, outpoint.Vout)
+	}
+	return consensus.TxInput{PrevTxid: outpoint.Txid, PrevVout: outpoint.Vout}, entry.Value
+}
+
+func (f *canonicalDATestFixture) takeNonce() uint64 {
+	f.nextNonce++
+	return f.nextNonce
+}
+
+func (f *canonicalDATestFixture) signAndMarshal(t *testing.T, tx *consensus.Tx) []byte {
+	t.Helper()
+	if err := consensus.SignTransaction(tx, f.engine.chainState.Utxos, devnetGenesisChainID, f.keypair); err != nil {
+		t.Fatalf("SignTransaction(DA tx): %v", err)
+	}
+	raw, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx(DA tx): %v", err)
+	}
+	return raw
+}
+
+func mustBlockHashForTest(t *testing.T, blockBytes []byte) [32]byte {
+	t.Helper()
+	hash, err := consensus.BlockHash(blockHeaderBytes(t, blockBytes))
+	if err != nil {
+		t.Fatalf("BlockHash: %v", err)
+	}
+	return hash
+}
+
+func mustParseReorgBlockForTest(t *testing.T, blockBytes []byte) (*consensus.ParsedBlock, [32]byte) {
+	t.Helper()
+	parsed, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes: %v", err)
+	}
+	hash, err := consensus.BlockHash(parsed.HeaderBytes)
+	if err != nil {
+		t.Fatalf("BlockHash: %v", err)
+	}
+	return parsed, hash
+}
+
+// writeRawStoreBlockFile plants arbitrary bytes at the block-store path a given
+// hash resolves to. BlockStore.GetBlockByHash is a plain file read, so this is
+// exactly what a corrupt datadir — or anything with write access to it — hands
+// the branch walk.
+func writeRawStoreBlockFile(t *testing.T, store *BlockStore, hash [32]byte, blockBytes []byte) {
+	t.Helper()
+	path := filepath.Join(store.blocksDir, hex.EncodeToString(hash[:])+".bin")
+	if err := os.WriteFile(path, blockBytes, 0o600); err != nil {
+		t.Fatalf("plant store block %x: %v", hash, err)
+	}
+}
+
+// assertBranchStoreCorruption pins the failure class of a corrupt-store branch
+// walk: a local-corruption error, distinct from ErrParentNotFound, and NOT a
+// *consensus.TxError. That last property is what keeps a peer from being
+// ban-scored for our own bad datadir — node/p2p classifies apply failures with
+// exactly this predicate (handlers_block.go isConsensusApplyBlockError).
+func assertBranchStoreCorruption(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("corrupt store walk returned nil error")
+	}
+	// Checked FIRST because it is the consequential one: errors.As unwraps, so
+	// any *consensus.TxError anywhere in the chain — including a %w-wrapped
+	// cause — makes node/p2p bumpBan(100) the peer that relayed a well-formed
+	// block, for a defect that is entirely ours.
+	var txErr *consensus.TxError
+	if errors.As(err, &txErr) {
+		t.Fatalf("corruption error %v is a consensus.TxError; the relaying peer would be ban-scored for our corrupt store", err)
+	}
+	if !errors.Is(err, errBranchStoreCorrupt) {
+		t.Fatalf("error %v is not errBranchStoreCorrupt", err)
+	}
+	if errors.Is(err, ErrParentNotFound) {
+		t.Fatalf("corruption error %v must not be ErrParentNotFound", err)
+	}
+}
+
+// TestCollectBranchToCanonicalRejectsCorruptStoreAncestry drives the branch walk
+// against a block store whose files lie. None of these shapes is
+// self-consistent — a stored block that really hashed to a name it also points
+// back to would need a hash preimage — which is exactly what a corrupt or
+// hostile datadir produces and what a plain file read cannot detect.
+//
+// Each case plants store content and returns the parent hash a candidate should
+// name. The prior defect differs by shape, and all three kinds converge on one
+// verdict here:
+//
+//   - self-referencing store file, two-file store cycle: the walk did not
+//     terminate — it appended stored bytes forever.
+//   - ancestor bytes hashing to another value: the walk terminated but TRUSTED
+//     the substituted block as a branch ancestor.
+//   - ancestor file present but unparseable, truncated mid-block: the walk
+//     terminated and trusted nothing — ParseBlockBytes failed and its error was
+//     returned immediately. The defect was the CLASS of that error: a raw
+//     *consensus.TxError, which node/p2p reads as a consensus fault and
+//     ban-scores the relaying peer 100 for our own corrupt datadir.
+//
+// All five must now fail as local corruption: typed, terminating, and never a
+// *consensus.TxError.
+func TestCollectBranchToCanonicalRejectsCorruptStoreAncestry(t *testing.T) {
+	subsidy := consensus.BlockSubsidy(1, 0)
+	cases := []struct {
+		name  string
+		plant func(t *testing.T, store *BlockStore, target [32]byte) [32]byte
+	}{{
+		// One file claiming itself as its own parent: the walk used to append
+		// the same block bytes on every pass, forever.
+		name: "self-referencing store file",
+		plant: func(t *testing.T, store *BlockStore, target [32]byte) [32]byte {
+			selfHash := [32]byte{0x5e, 0x1f}
+			block := buildSingleTxBlock(t, selfHash, target, reorgTestTimestamp(60), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy))
+			writeRawStoreBlockFile(t, store, selfHash, block)
+			return selfHash
+		},
+	}, {
+		// The same class one hop wider: two files pointing at each other.
+		name: "two-file store cycle",
+		plant: func(t *testing.T, store *BlockStore, target [32]byte) [32]byte {
+			hashX := [32]byte{0xc0, 0x01}
+			hashY := [32]byte{0xc0, 0x02}
+			writeRawStoreBlockFile(t, store, hashX,
+				buildSingleTxBlock(t, hashY, target, reorgTestTimestamp(70), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy)))
+			writeRawStoreBlockFile(t, store, hashY,
+				buildSingleTxBlock(t, hashX, target, reorgTestTimestamp(71), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy)))
+			return hashX
+		},
+	}, {
+		// Present but unparseable: bytes that cannot even yield a header
+		// certainly are not the block that was asked for. The raw parse failure
+		// is a *consensus.TxError, so leaking it would have node/p2p ban-score
+		// the relaying peer 100 for our own corrupt datadir.
+		name: "ancestor file present but unparseable",
+		plant: func(t *testing.T, store *BlockStore, target [32]byte) [32]byte {
+			garbageHash := [32]byte{0x9a, 0x11}
+			writeRawStoreBlockFile(t, store, garbageHash, []byte{0x01, 0x02, 0x03})
+			return garbageHash
+		},
+	}, {
+		// Truncated: a real block cut short mid-encoding.
+		name: "ancestor file truncated mid-block",
+		plant: func(t *testing.T, store *BlockStore, target [32]byte) [32]byte {
+			truncatedHash := [32]byte{0x9a, 0x22}
+			full := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(75), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy))
+			writeRawStoreBlockFile(t, store, truncatedHash, full[:len(full)/2])
+			return truncatedHash
+		},
+	}, {
+		// Substitution: a real, well-formed block stored under someone else's
+		// hash. A plain file read cannot tell the difference.
+		name: "ancestor bytes hashing to another value",
+		plant: func(t *testing.T, store *BlockStore, target [32]byte) [32]byte {
+			claimedHash := [32]byte{0xbe, 0xef}
+			writeRawStoreBlockFile(t, store, claimedHash,
+				buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(80), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy)))
+			return claimedHash
+		},
+	}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			engine, store, target := newReorgTestEngine(t)
+			parentHash := tc.plant(t, store, target)
+			candidate := buildSingleTxBlock(t, parentHash, target, reorgTestTimestamp(90), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy))
+			parsed, candidateHash := mustParseReorgBlockForTest(t, candidate)
+
+			_, _, _, err := engine.collectBranchToCanonical(candidateHash, candidate, parsed)
+			assertBranchStoreCorruption(t, err)
+		})
+	}
+}
+
+// TestCollectBranchToCanonicalKeepsParentNotFoundForAbsentAncestor pins that
+// hardening did not reclassify the ordinary case: an ancestor that simply is not
+// stored stays ErrParentNotFound, which is what drives orphan retention.
+func TestCollectBranchToCanonicalKeepsParentNotFoundForAbsentAncestor(t *testing.T) {
+	engine, _, target := newReorgTestEngine(t)
+
+	subsidy := consensus.BlockSubsidy(1, 0)
+	candidate := buildSingleTxBlock(t, [32]byte{0xab, 0x5e, 0x17}, target, reorgTestTimestamp(90), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy))
+	parsed, candidateHash := mustParseReorgBlockForTest(t, candidate)
+
+	_, _, _, err := engine.collectBranchToCanonical(candidateHash, candidate, parsed)
+	if !errors.Is(err, ErrParentNotFound) {
+		t.Fatalf("absent ancestor error=%v, want ErrParentNotFound", err)
+	}
+	if errors.Is(err, errBranchStoreCorrupt) {
+		t.Fatalf("absent ancestor reported as store corruption: %v", err)
+	}
+	if _, err := engine.ApplyBlockWithReorg(candidate, nil); !errors.Is(err, ErrParentNotFound) {
+		t.Fatalf("ApplyBlockWithReorg(orphan) error=%v, want ErrParentNotFound", err)
+	}
+}
+
+// TestCollectBranchToCanonicalAcceptsHonestMultiBlockBranch is the
+// no-false-positive row: verification must pass on honest stored ancestry, and
+// the branch must still collect in canonical order and reorg the chain.
+func TestCollectBranchToCanonicalAcceptsHonestMultiBlockBranch(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+
+	subsidy1 := consensus.BlockSubsidy(1, 0)
+	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	if _, err := engine.ApplyBlock(blockA1, nil); err != nil {
+		t.Fatalf("ApplyBlock(A1): %v", err)
+	}
+
+	blockB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(2), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	b1Parsed, b1Hash := mustParseReorgBlockForTest(t, blockB1)
+	if err := store.StoreBlock(b1Hash, b1Parsed.HeaderBytes, blockB1); err != nil {
+		t.Fatalf("StoreBlock(B1): %v", err)
+	}
+	subsidy2 := consensus.BlockSubsidy(2, subsidy1)
+	blockB2 := buildSingleTxBlock(t, b1Hash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+	b2Parsed, b2Hash := mustParseReorgBlockForTest(t, blockB2)
+
+	branch, ancestorHash, ancestorHeight, err := engine.collectBranchToCanonical(b2Hash, blockB2, b2Parsed)
+	if err != nil {
+		t.Fatalf("collectBranchToCanonical(honest branch): %v", err)
+	}
+	if len(branch) != 2 || branch[0].hash != b1Hash || branch[1].hash != b2Hash {
+		t.Fatalf("branch=%d blocks, want B1=%x then B2=%x", len(branch), b1Hash, b2Hash)
+	}
+	if ancestorHash != devnetGenesisBlockHash || ancestorHeight != 0 {
+		t.Fatalf("common ancestor=%x at height %d, want genesis at 0", ancestorHash, ancestorHeight)
+	}
+
+	summary, err := engine.ApplyBlockWithReorg(blockB2, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlockWithReorg(honest branch): %v", err)
+	}
+	if engine.chainState.TipHash != b2Hash || engine.chainState.Height != 2 {
+		t.Fatalf("tip=%x height=%d after honest reorg, want %x at 2", engine.chainState.TipHash, engine.chainState.Height, b2Hash)
+	}
+	if len(summary.CanonicalAppliedBlocks) != 2 {
+		t.Fatalf("CanonicalAppliedBlocks len=%d after honest reorg, want 2", len(summary.CanonicalAppliedBlocks))
+	}
+}
+
+// TestApplyBlockWithReorgReportsNoCanonicalBlocksWhenBranchApplyFails is the
+// rollback row: a heavier branch whose later block is invalid must leave the
+// canonical chain untouched AND return no summary, so the DA-consume hook that
+// runs on accepted blocks has nothing to consume.
+func TestApplyBlockWithReorgReportsNoCanonicalBlocksWhenBranchApplyFails(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+
+	subsidy1 := consensus.BlockSubsidy(1, 0)
+	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	summaryA1, err := engine.ApplyBlock(blockA1, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(A1): %v", err)
+	}
+
+	blockB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(10), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	b1Parsed, b1Hash := mustParseReorgBlockForTest(t, blockB1)
+	if err := store.StoreBlock(b1Hash, b1Parsed.HeaderBytes, blockB1); err != nil {
+		t.Fatalf("StoreBlock(B1): %v", err)
+	}
+	subsidy2 := consensus.BlockSubsidy(2, subsidy1)
+	validB2 := buildSingleTxBlock(t, b1Hash, target, reorgTestTimestamp(11), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+	// Over-claiming coinbase: the branch out-works the canonical chain, so fork
+	// choice selects it, and the second row then fails to apply.
+	invalidB2 := buildSingleTxBlock(t, b1Hash, target, reorgTestTimestamp(11), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2+1))
+	if bytes.Equal(validB2, invalidB2) {
+		t.Fatal("invalid B2 fixture is identical to the valid one")
+	}
+
+	summary, err := engine.ApplyBlockWithReorg(invalidB2, nil)
+	if err == nil {
+		t.Fatal("invalid heavier branch was applied")
+	}
+	if summary != nil {
+		t.Fatalf("failed reorg returned summary %+v; a canonical-applied report would consume DA sets for a branch that never landed", summary)
+	}
+	if engine.chainState.Height != 1 || engine.chainState.TipHash != summaryA1.BlockHash {
+		t.Fatalf("canonical tip=%x height=%d after failed reorg, want A1=%x at 1", engine.chainState.TipHash, engine.chainState.Height, summaryA1.BlockHash)
+	}
+}
+
+// completeDASetTxsForCount returns the transactions of exactly count complete DA
+// sets (one commit declaring one chunk, plus that chunk).
+func completeDASetTxsForCount(count int) []*consensus.Tx {
+	txs := make([]*consensus.Tx, 0, count*2)
+	for i := 0; i < count; i++ {
+		daID := [32]byte{byte(i), byte(i >> 8)}
+		txs = append(
+			txs,
+			&consensus.Tx{TxKind: 0x01, DaCommitCore: &consensus.DaCommitCore{DaID: daID, ChunkCount: 1}},
+			&consensus.Tx{TxKind: 0x02, DaChunkCore: &consensus.DaChunkCore{DaID: daID, ChunkIndex: 0}},
+		)
+	}
+	return txs
+}
+
+// TestApplyCanonicalParsedBlockRollsBackWhenCanonicalReportFails pins the
+// disposition of a failure in the canonical-applied report, which happens AFTER
+// ConnectBlock has already mutated chain state. Returning the error without
+// rolling back would leave the in-memory tip advanced to a block that was never
+// persisted and never reported — a chain state diverged from the block store,
+// created by a path that returned an error.
+//
+// The failure is injected the only way it is reachable: applyCanonicalParsedBlockTracked
+// takes the parsed block and the raw bytes as independent parameters, so the
+// connect can be fed a real valid block while extraction is fed a tx list
+// carrying more complete DA sets than consensus can ever accept. On the
+// production path both come from one parse and this branch is unreachable, which
+// is exactly why it needs pinning rather than trust.
+func TestApplyCanonicalParsedBlockRollsBackWhenCanonicalReportFails(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+	mempool, err := NewMempool(engine.chainState, store, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	engine.SetMempool(mempool)
+
+	before := engine.chainState.view()
+	beforeMempoolLen := mempool.Len()
+	beforeTipHeight, beforeTipHash, beforeTipOK, err := store.Tip()
+	if err != nil {
+		t.Fatalf("store.Tip(before): %v", err)
+	}
+	beforeIndex, err := store.CanonicalIndexSnapshot()
+	if err != nil {
+		t.Fatalf("CanonicalIndexSnapshot(before): %v", err)
+	}
+
+	subsidy := consensus.BlockSubsidy(1, 0)
+	blockBytes := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy))
+	parsed, _ := mustParseReorgBlockForTest(t, blockBytes)
+	overloaded := &consensus.ParsedBlock{
+		HeaderBytes: parsed.HeaderBytes,
+		Header:      parsed.Header,
+		Txs:         completeDASetTxsForCount(consensus.MAX_DA_BATCHES_PER_BLOCK + 1),
+	}
+
+	summary, outcome, err := engine.applyCanonicalParsedBlockTracked(overloaded, blockBytes, nil, nil)
+	if err == nil {
+		t.Fatal("over-cap canonical-applied report was accepted")
+	}
+	if summary != nil {
+		t.Fatalf("failed report returned summary %+v, want nil", summary)
+	}
+	if outcome != blockApplyMetricNone {
+		t.Fatalf("outcome=%v, want blockApplyMetricNone (the block was neither accepted nor consensus-rejected)", outcome)
+	}
+
+	if after := engine.chainState.view(); after != before {
+		t.Fatalf("chain state not rolled back: after=%+v, before=%+v", after, before)
+	}
+	tipHeight, tipHash, tipOK, err := store.Tip()
+	if err != nil {
+		t.Fatalf("store.Tip(after): %v", err)
+	}
+	if tipOK != beforeTipOK || tipHeight != beforeTipHeight || tipHash != beforeTipHash {
+		t.Fatalf("store tip moved: ok=%v height=%d hash=%x, want ok=%v height=%d hash=%x",
+			tipOK, tipHeight, tipHash, beforeTipOK, beforeTipHeight, beforeTipHash)
+	}
+	afterIndex, err := store.CanonicalIndexSnapshot()
+	if err != nil {
+		t.Fatalf("CanonicalIndexSnapshot(after): %v", err)
+	}
+	if !reflect.DeepEqual(afterIndex, beforeIndex) {
+		t.Fatalf("canonical index changed: after=%v, before=%v", afterIndex, beforeIndex)
+	}
+	if got := mempool.Len(); got != beforeMempoolLen {
+		t.Fatalf("mempool len=%d, want %d", got, beforeMempoolLen)
+	}
+}
+
+// --- complete-DA-set extraction core -----------------------------------------
+//
+// These rows live in package node because the extraction core does. Go
+// attributes statement coverage to the package under test, so exercising
+// CompleteDASetIDsFromParsedBlock from package p2p left the core reading as
+// dead code in node's profile. node/p2p keeps only the rows whose subject is
+// p2p behavior — the bytes entry, the canonical-applied iteration, and the
+// bytes-vs-parsed equivalence row, which is precisely about the two entry
+// points agreeing and therefore has to sit on the p2p side.
+
+func daExtractionTestID(seed byte) (out [32]byte) {
+	out[0] = seed
+	return out
+}
+
+// daExtractionBlockBytes encodes a real block carrying txs, so a row exercises
+// the same parse-then-extract path ConsumeAcceptedBlockDASets takes rather than
+// only the in-memory core.
+func daExtractionBlockBytes(t *testing.T, daTxs ...[]byte) []byte {
+	t.Helper()
+	txs := make([][]byte, 0, len(daTxs)+1)
+	txs = append(txs, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidy(1, 0)))
+	txs = append(txs, daTxs...)
+	return buildMultiTxBlock(t, devnetGenesisBlockHash, consensus.POW_LIMIT, reorgTestTimestamp(1), txs...)
+}
+
+func daExtractionCommitTxBytes(t *testing.T, daID [32]byte, nonce uint64, payloads ...[]byte) []byte {
+	t.Helper()
+	hasher := sha3.New256()
+	for _, payload := range payloads {
+		if _, err := hasher.Write(payload); err != nil {
+			t.Fatalf("hash DA payload: %v", err)
+		}
+	}
+	return mustMarshalTxForNodeTest(t, &consensus.Tx{
+		Version: 1,
+		TxKind:  0x01,
+		TxNonce: nonce,
+		Outputs: []consensus.TxOutput{{
+			Value:        0,
+			CovenantType: consensus.COV_TYPE_DA_COMMIT,
+			CovenantData: hasher.Sum(nil),
+		}},
+		DaCommitCore: &consensus.DaCommitCore{DaID: daID, ChunkCount: uint16(len(payloads))},
+	})
+}
+
+func daExtractionChunkTxBytes(t *testing.T, daID [32]byte, index uint16, nonce uint64, payload []byte) []byte {
+	t.Helper()
+	chunkHash := sha3.Sum256(payload)
+	return mustMarshalTxForNodeTest(t, &consensus.Tx{
+		Version:     1,
+		TxKind:      0x02,
+		TxNonce:     nonce,
+		DaChunkCore: &consensus.DaChunkCore{DaID: daID, ChunkIndex: index, ChunkHash: chunkHash},
+		DaPayload:   append([]byte(nil), payload...),
+	})
+}
+
+// mustParseCompleteDASetIDs runs the extraction core over real block bytes:
+// parse first, exactly as ConsumeAcceptedBlockDASets does, so these rows pin the
+// behavior of the encoded-block entry and not only of the core.
+func mustParseCompleteDASetIDs(t *testing.T, blockBytes []byte) [][32]byte {
+	t.Helper()
+	parsed, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes: %v", err)
+	}
+	ids, err := CompleteDASetIDsFromParsedBlock(parsed)
+	if err != nil {
+		t.Fatalf("CompleteDASetIDsFromParsedBlock: %v", err)
+	}
+	return ids
+}
+
+// daSetTxObjects returns the tx objects of one DA set: a single commit declaring
+// chunkCount, plus one chunk per index in present. Building objects rather than
+// wire bytes keeps the high-cardinality rows (128 sets) cheap; the encoded path
+// is covered by the mustParseCompleteDASetIDs rows.
+func daSetTxObjects(daID [32]byte, chunkCount uint16, present []uint16) []*consensus.Tx {
+	txs := []*consensus.Tx{{
+		TxKind:       0x01,
+		DaCommitCore: &consensus.DaCommitCore{DaID: daID, ChunkCount: chunkCount},
+	}}
+	for _, index := range present {
+		txs = append(txs, &consensus.Tx{
+			TxKind:      0x02,
+			DaChunkCore: &consensus.DaChunkCore{DaID: daID, ChunkIndex: index},
+		})
+	}
+	return txs
+}
+
+func TestCompleteDASetIDsFromParsedBlockNoDA(t *testing.T) {
+	block := daExtractionBlockBytes(t)
+
+	if got := mustParseCompleteDASetIDs(t, block); len(got) != 0 {
+		t.Fatalf("got %d DA ids, want none", len(got))
+	}
+}
+
+func TestCompleteDASetIDsFromParsedBlockSingle(t *testing.T) {
+	daID := daExtractionTestID(0x41)
+	payload := []byte("payload")
+	block := daExtractionBlockBytes(
+		t,
+		daExtractionCommitTxBytes(t, daID, 1, payload),
+		daExtractionChunkTxBytes(t, daID, 0, 2, payload),
+	)
+
+	got := mustParseCompleteDASetIDs(t, block)
+	if !reflect.DeepEqual(got, [][32]byte{daID}) {
+		t.Fatalf("got %x, want %x", got, [][32]byte{daID})
+	}
+}
+
+func TestCompleteDASetIDsFromParsedBlockSorted(t *testing.T) {
+	low := daExtractionTestID(0x01)
+	mid := daExtractionTestID(0x7f)
+	high := daExtractionTestID(0xf0)
+	lowPayload, midPayload, highPayload := []byte("low"), []byte("mid"), []byte("high")
+	block := daExtractionBlockBytes(
+		t,
+		daExtractionCommitTxBytes(t, high, 1, highPayload),
+		daExtractionChunkTxBytes(t, high, 0, 2, highPayload),
+		daExtractionCommitTxBytes(t, low, 3, lowPayload),
+		daExtractionChunkTxBytes(t, low, 0, 4, lowPayload),
+		daExtractionCommitTxBytes(t, mid, 7, midPayload),
+		daExtractionChunkTxBytes(t, mid, 0, 8, midPayload),
+	)
+
+	got := mustParseCompleteDASetIDs(t, block)
+	want := [][32]byte{low, mid, high}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %x, want %x", got, want)
+	}
+}
+
+func TestCompleteDASetIDsFromParsedBlockNilBlock(t *testing.T) {
+	if _, err := CompleteDASetIDsFromParsedBlock(nil); err == nil {
+		t.Fatal("nil parsed block returned nil error")
+	}
+}
+
+// TestCompleteDASetIDsFromParsedBlockAtBatchBoundary pins the exact
+// MAX_DA_BATCHES_PER_BLOCK boundary: a block carrying the maximum number of
+// complete sets reports every one of them, ascending, and does not trip the
+// defensive cap.
+func TestCompleteDASetIDsFromParsedBlockAtBatchBoundary(t *testing.T) {
+	var txs []*consensus.Tx
+	want := make([][32]byte, 0, consensus.MAX_DA_BATCHES_PER_BLOCK)
+	for i := 0; i < consensus.MAX_DA_BATCHES_PER_BLOCK; i++ {
+		daID := daExtractionTestID(byte(i))
+		want = append(want, daID)
+		txs = append(txs, daSetTxObjects(daID, 1, []uint16{0})...)
+	}
+
+	got, err := CompleteDASetIDsFromParsedBlock(&consensus.ParsedBlock{Txs: txs})
+	if err != nil {
+		t.Fatalf("CompleteDASetIDsFromParsedBlock: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %d ids, want the %d ascending boundary ids", len(got), len(want))
+	}
+}
+
+// TestCompleteDASetIDsFromParsedBlockBoundaryWithOneIncomplete pins that
+// completeness is decided per set even at the boundary: 128 commits with one set
+// missing a chunk yields exactly the other 127 and never the incomplete id.
+func TestCompleteDASetIDsFromParsedBlockBoundaryWithOneIncomplete(t *testing.T) {
+	incomplete := daExtractionTestID(byte(consensus.MAX_DA_BATCHES_PER_BLOCK - 1))
+	var txs []*consensus.Tx
+	want := make([][32]byte, 0, consensus.MAX_DA_BATCHES_PER_BLOCK-1)
+	for i := 0; i < consensus.MAX_DA_BATCHES_PER_BLOCK; i++ {
+		daID := daExtractionTestID(byte(i))
+		if daID == incomplete {
+			// Declares two chunks, carries only index 0.
+			txs = append(txs, daSetTxObjects(daID, 2, []uint16{0})...)
+			continue
+		}
+		want = append(want, daID)
+		txs = append(txs, daSetTxObjects(daID, 1, []uint16{0})...)
+	}
+
+	got, err := CompleteDASetIDsFromParsedBlock(&consensus.ParsedBlock{Txs: txs})
+	if err != nil {
+		t.Fatalf("CompleteDASetIDsFromParsedBlock: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %d ids, want %d complete ids without %x", len(got), len(want), incomplete)
+	}
+}
+
+// TestCompleteDASetIDsFromParsedBlockOverBatchCap pins the defensive cap: a
+// block that would report more complete sets than consensus can ever accept is
+// an error, never a silently truncated list. Consensus rejects such a block
+// first (BLOCK_ERR_DA_BATCH_EXCEEDED), so this branch is unreachable from the
+// canonical-apply path and exists only so an unvalidated caller cannot under-report.
+func TestCompleteDASetIDsFromParsedBlockOverBatchCap(t *testing.T) {
+	var txs []*consensus.Tx
+	for i := 0; i <= consensus.MAX_DA_BATCHES_PER_BLOCK; i++ {
+		daID := [32]byte{byte(i), byte(i >> 8)}
+		txs = append(txs, daSetTxObjects(daID, 1, []uint16{0})...)
+	}
+
+	if _, err := CompleteDASetIDsFromParsedBlock(&consensus.ParsedBlock{Txs: txs}); err == nil {
+		t.Fatal("over-cap complete DA set count returned nil error")
+	}
+}
+
+func TestCompleteDASetIDsFromParsedBlockIncompleteShapes(t *testing.T) {
+	daID := daExtractionTestID(0x71)
+	cases := []struct {
+		name string
+		txs  []*consensus.Tx
+	}{
+		{"duplicate commit", append(daSetTxObjects(daID, 1, []uint16{0}), &consensus.Tx{
+			TxKind:       0x01,
+			DaCommitCore: &consensus.DaCommitCore{DaID: daID, ChunkCount: 1},
+		})},
+		{"zero chunk count", daSetTxObjects(daID, 0, nil)},
+		{"chunk count mismatch", daSetTxObjects(daID, 2, []uint16{0})},
+		{"chunk index gap", daSetTxObjects(daID, 2, []uint16{0, 2})},
+		{"chunk count over max", daSetTxObjects(daID, uint16(consensus.MAX_DA_CHUNK_COUNT)+1, []uint16{0})},
+		{"chunks without commit", daSetTxObjects(daID, 1, []uint16{0})[1:]},
+		{"commit without DA core", []*consensus.Tx{{TxKind: 0x01}}},
+		{"chunk without DA core", append(daSetTxObjects(daID, 1, nil), &consensus.Tx{TxKind: 0x02})},
+		{"nil transaction beside an incomplete set", append(daSetTxObjects(daID, 2, []uint16{0}), nil)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := CompleteDASetIDsFromParsedBlock(&consensus.ParsedBlock{Txs: tc.txs})
+			if err != nil {
+				t.Fatalf("CompleteDASetIDsFromParsedBlock: %v", err)
+			}
+			for _, id := range got {
+				if id == daID {
+					t.Fatalf("%s reported %x as a complete DA set", tc.name, daID)
+				}
+			}
+		})
 	}
 }

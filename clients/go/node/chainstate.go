@@ -2,6 +2,8 @@ package node
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"sort"
 	"sync"
 
@@ -59,22 +61,133 @@ type ChainState struct {
 	Registry         *consensus.SuiteRegistry
 }
 
+// CanonicalAppliedBlock identifies one block a canonical apply committed, plus
+// the complete DA-set IDs that block carries. It deliberately holds NO raw block
+// bytes: a reorg summary accumulates one record per newly-canonical block, and a
+// block is up to consensus.MAX_BLOCK_BYTES, so retaining bytes made summary size
+// grow with reorg depth times block size. CompleteDAIDs is bounded by
+// consensus.MAX_DA_BATCHES_PER_BLOCK fixed-width IDs, which is all any consumer
+// needed from the bytes.
 type CanonicalAppliedBlock struct {
-	Hash       [32]byte
-	BlockBytes []byte
+	Hash          [32]byte
+	CompleteDAIDs [][32]byte
 }
 
 type ChainStateConnectSummary struct {
-	BlockHeight            uint64
-	BlockHash              [32]byte
-	SumFees                uint64
-	AlreadyGenerated       uint64
-	AlreadyGeneratedN1     uint64
-	UtxoCount              uint64
+	BlockHeight        uint64
+	BlockHash          [32]byte
+	SumFees            uint64
+	AlreadyGenerated   uint64
+	AlreadyGeneratedN1 uint64
+	UtxoCount          uint64
+	// CanonicalAppliedBlocks is populated ONLY by the SyncEngine canonical-apply
+	// path, in canonical order: a direct apply reports the single connected
+	// block, a reorg reports every newly-canonical branch block, and a
+	// stored-but-not-switched side branch reports none. The ChainState connect
+	// entry points leave it nil — connecting to an in-memory state is not by
+	// itself a canonical-application event (the reorg preview and startup replay
+	// both connect blocks that must never be reported).
 	CanonicalAppliedBlocks []CanonicalAppliedBlock
 	PostStateDigest        [32]byte
 	SigTaskCount           uint64 // parallel path only; 0 for sequential
 	WorkerPanics           uint64 // parallel path only; 0 for sequential
+}
+
+// CompleteDASetIDsFromParsedBlock returns the da_id of every COMPLETE DA set
+// carried by an already-parsed block, in ascending byte order.
+//
+// This is the single implementation of block-level complete-DA-set extraction in
+// the Go tree; node/p2p parses untrusted bytes and delegates here so the
+// bytes-entry and parsed-entry paths cannot diverge.
+//
+// A set counts as complete exactly when the block carries one tx_kind=0x01
+// commit for that da_id (a second commit disqualifies it), the commit's
+// chunk_count is in 1..=consensus.MAX_DA_CHUNK_COUNT, and the block carries a
+// tx_kind=0x02 chunk for every index 0..chunk_count-1. This mirrors the
+// completeness rule consensus.ConnectBlock* already enforces; it is repeated
+// here because the caller may hand over a block that has NOT been validated.
+//
+// Contract:
+//   - Output is sorted by raw ID bytes, never by map iteration order, so it is
+//     deterministic for a given block.
+//   - At most consensus.MAX_DA_BATCHES_PER_BLOCK IDs are returned; a block that
+//     would yield more is reported as an error rather than truncated. A block
+//     that passed consensus validation cannot reach that branch.
+//   - pb is read-only; no field of pb or of its transactions is mutated.
+//   - A nil pb, a nil transaction, or a DA transaction missing its DA core is an
+//     error or is skipped — never a panic, since callers may pass a block that
+//     was assembled rather than parsed.
+func CompleteDASetIDsFromParsedBlock(pb *consensus.ParsedBlock) ([][32]byte, error) {
+	if pb == nil {
+		return nil, errors.New("nil parsed block")
+	}
+	sets := make(map[[32]byte]blockDASetTally)
+	for _, tx := range pb.Txs {
+		recordBlockDATx(sets, tx)
+	}
+	ids := make([][32]byte, 0, len(sets))
+	for daID, set := range sets {
+		if !set.complete() {
+			continue
+		}
+		ids = append(ids, daID)
+	}
+	if len(ids) > consensus.MAX_DA_BATCHES_PER_BLOCK {
+		return nil, fmt.Errorf("complete DA sets in block: %d exceeds MAX_DA_BATCHES_PER_BLOCK=%d", len(ids), consensus.MAX_DA_BATCHES_PER_BLOCK)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return bytes.Compare(ids[i][:], ids[j][:]) < 0
+	})
+	return ids, nil
+}
+
+func recordBlockDATx(sets map[[32]byte]blockDASetTally, tx *consensus.Tx) {
+	if tx == nil {
+		return
+	}
+	switch tx.TxKind {
+	case 0x01:
+		if tx.DaCommitCore == nil {
+			return
+		}
+		daID := tx.DaCommitCore.DaID
+		set := sets[daID]
+		set.commitCount++
+		set.chunkCount = tx.DaCommitCore.ChunkCount
+		sets[daID] = set
+	case 0x02:
+		if tx.DaChunkCore == nil {
+			return
+		}
+		daID := tx.DaChunkCore.DaID
+		set := sets[daID]
+		if set.chunks == nil {
+			set.chunks = make(map[uint16]struct{})
+		}
+		set.chunks[tx.DaChunkCore.ChunkIndex] = struct{}{}
+		sets[daID] = set
+	}
+}
+
+type blockDASetTally struct {
+	commitCount int
+	chunkCount  uint16
+	chunks      map[uint16]struct{}
+}
+
+func (s blockDASetTally) complete() bool {
+	if s.commitCount != 1 || s.chunkCount == 0 || uint64(s.chunkCount) > consensus.MAX_DA_CHUNK_COUNT {
+		return false
+	}
+	if len(s.chunks) != int(s.chunkCount) {
+		return false
+	}
+	for i := uint16(0); i < s.chunkCount; i++ {
+		if _, ok := s.chunks[i]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 type chainStateDisk struct {

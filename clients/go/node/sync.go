@@ -640,6 +640,19 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	if err != nil {
 		return nil, blockApplyMetricRejected, err
 	}
+	// This is the ONLY site that reports a block as canonical-applied, so the
+	// distinction between "connected to some chain state" and "made canonical"
+	// lives in exactly one place. Extraction runs on the already-parsed block —
+	// no re-parse, no retained bytes — and only AFTER the connect succeeded, so
+	// an over-cap or malformed DA layout is rejected by consensus with its own
+	// public error code before this ever runs. Any error here is therefore a
+	// defensive assertion; it rolls the apply back rather than committing a
+	// block whose canonical-applied report could not be built.
+	daIDs, err := CompleteDASetIDsFromParsedBlock(pb)
+	if err != nil {
+		return nil, blockApplyMetricNone, s.rollbackApplyBlock(err, ctx.rollbackState)
+	}
+	summary.CanonicalAppliedBlocks = []CanonicalAppliedBlock{{Hash: ctx.blockHash, CompleteDAIDs: daIDs}}
 	if err := s.finalizeAppliedBlock(summary, ctx.blockHash, pb, blockBytes, ctx.prevState, ctx.rollbackState); err != nil {
 		return nil, blockApplyMetricNone, err
 	}

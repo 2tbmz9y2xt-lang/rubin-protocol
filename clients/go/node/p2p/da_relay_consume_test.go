@@ -6,68 +6,67 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
-func TestExtractAcceptedBlockDAIDsNoDA(t *testing.T) {
-	block := compactTestBlockBytesWithTxs(t, [][]byte{minimalValidTxBytes(t)})
-
-	got, err := extractAcceptedBlockDAIDs(block)
+// mustParseCompleteDASetIDs runs the shared extraction core over real block
+// bytes: parse first, exactly as ConsumeAcceptedBlockDASets does, so these rows
+// pin the behavior of the encoded-block entry and not only of the core.
+func mustParseCompleteDASetIDs(t *testing.T, blockBytes []byte) [][32]byte {
+	t.Helper()
+	parsed, err := consensus.ParseBlockBytes(blockBytes)
 	if err != nil {
-		t.Fatalf("extractAcceptedBlockDAIDs: %v", err)
+		t.Fatalf("ParseBlockBytes: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("got %d DA ids, want none", len(got))
+	ids, err := node.CompleteDASetIDsFromParsedBlock(parsed)
+	if err != nil {
+		t.Fatalf("CompleteDASetIDsFromParsedBlock: %v", err)
 	}
+	return ids
 }
 
-func TestExtractAcceptedBlockDAIDsSingle(t *testing.T) {
-	daID := daRelayTestID(0x41)
-	payload := []byte("payload")
+// TestConsumeAcceptedBlockDASetsMatchesParsedCore is the equivalence row: the
+// bytes entry (RPC hook) and the parsed core (canonical-apply attach point) must
+// select the SAME complete DA sets for the same block, or the two entries would
+// consume different relay records.
+func TestConsumeAcceptedBlockDASetsMatchesParsedCore(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	consumeID := daRelayTestID(0x81)
+	keepID := daRelayTestID(0x82)
+	consumePayload := []byte("equiv-consume")
+	incompletePayload := []byte("equiv-incomplete")
+
+	// Staged for its relay-accounting side effect only; the block this row needs
+	// is the richer one built below, which also carries keepID's commit.
+	_ = stageCompleteDASet(t, state, consumeID, "equiv", consumePayload)
+	// keepID is complete in relay accounting but INCOMPLETE in the block (commit
+	// only), so a divergence between the two entries would show up here.
+	mustAddDACommit(t, state, "equiv-keep-commit", daRelayTestCommitForPayloads(keepID, 1, incompletePayload))
+	mustAddDAChunk(t, state, "equiv-keep-chunk", daRelayTestChunkPayload(keepID, 0, uint64(len(incompletePayload)), incompletePayload))
 	block := compactTestBlockBytesWithTxs(t, [][]byte{
 		minimalValidTxBytes(t),
-		daCommitRelayTxBytes(t, daID, 1, payload),
-		daChunkRelayTxBytes(t, daID, 0, 2, payload),
+		daCommitRelayTxBytes(t, consumeID, 1, consumePayload),
+		daChunkRelayTxBytes(t, consumeID, 0, 2, consumePayload),
+		daCommitRelayTxBytes(t, keepID, 3, incompletePayload),
 	})
 
-	got, err := extractAcceptedBlockDAIDs(block)
-	if err != nil {
-		t.Fatalf("extractAcceptedBlockDAIDs: %v", err)
+	coreIDs := mustParseCompleteDASetIDs(t, block)
+	if !reflect.DeepEqual(coreIDs, [][32]byte{consumeID}) {
+		t.Fatalf("parsed core ids=%x, want %x", coreIDs, [][32]byte{consumeID})
 	}
-	if !reflect.DeepEqual(got, [][32]byte{daID}) {
-		t.Fatalf("got %x, want %x", got, [][32]byte{daID})
+	before := len(state.sets)
+	if err := (&Service{daRelay: state}).ConsumeAcceptedBlockDASets(block); err != nil {
+		t.Fatalf("ConsumeAcceptedBlockDASets: %v", err)
 	}
-}
-
-func TestExtractAcceptedBlockDAIDsSorted(t *testing.T) {
-	low := daRelayTestID(0x01)
-	mid := daRelayTestID(0x7f)
-	high := daRelayTestID(0xf0)
-	lowPayload, midPayload, highPayload := []byte("low"), []byte("mid"), []byte("high")
-	block := compactTestBlockBytesWithTxs(t, [][]byte{
-		minimalValidTxBytes(t),
-		daCommitRelayTxBytes(t, high, 1, highPayload),
-		daChunkRelayTxBytes(t, high, 0, 2, highPayload),
-		daCommitRelayTxBytes(t, low, 3, lowPayload),
-		daChunkRelayTxBytes(t, low, 0, 4, lowPayload),
-		daCommitRelayTxBytes(t, mid, 7, midPayload),
-		daChunkRelayTxBytes(t, mid, 0, 8, midPayload),
-	})
-
-	got, err := extractAcceptedBlockDAIDs(block)
-	if err != nil {
-		t.Fatalf("extractAcceptedBlockDAIDs: %v", err)
+	if _, ok := state.sets[consumeID]; ok {
+		t.Fatal("bytes entry did not consume the id the parsed core selected")
 	}
-	want := [][32]byte{low, mid, high}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %x, want %x", got, want)
+	if got := state.sets[keepID]; got.state != daRelayStateCompleteSet {
+		t.Fatalf("bytes entry consumed %x which the parsed core did not select", keepID)
 	}
-}
-
-func TestExtractAcceptedBlockDAIDsMalformedBlock(t *testing.T) {
-	_, err := extractAcceptedBlockDAIDs([]byte{0x01, 0x02})
-	if err == nil {
-		t.Fatal("malformed block returned nil error")
+	if len(state.sets) != before-len(coreIDs) {
+		t.Fatalf("consumed %d records, want exactly the %d ids the core selected", before-len(state.sets), len(coreIDs))
 	}
 }
 
@@ -136,27 +135,6 @@ func TestConsumeAcceptedBlockDASetsNilDARelay(t *testing.T) {
 	}
 }
 
-func TestAcceptedBlockDASetCompleteRejectsNonSingleCommit(t *testing.T) {
-	s := acceptedBlockDASet{commitCount: 2, chunkCount: 1, chunks: map[uint16]struct{}{0: {}}}
-	if s.complete() {
-		t.Fatal("commitCount=2 accepted as complete")
-	}
-}
-
-func TestAcceptedBlockDASetCompleteRejectsZeroChunks(t *testing.T) {
-	s := acceptedBlockDASet{commitCount: 1, chunkCount: 0}
-	if s.complete() {
-		t.Fatal("chunkCount=0 accepted as complete")
-	}
-}
-
-func TestAcceptedBlockDASetCompleteRejectsChunkCountMismatch(t *testing.T) {
-	s := acceptedBlockDASet{commitCount: 1, chunkCount: 2, chunks: map[uint16]struct{}{0: {}}}
-	if s.complete() {
-		t.Fatal("chunk count mismatch accepted as complete")
-	}
-}
-
 func TestConsumeAcceptedBlockDASetsMalformedBlock(t *testing.T) {
 	svc := &Service{daRelay: newDARelayStateForTest(t, defaultDARelayCaps())}
 	if err := svc.ConsumeAcceptedBlockDASets([]byte{0x01, 0x02}); err == nil {
@@ -183,7 +161,10 @@ func TestConsumeCanonicalAppliedDASetsDirectApplyConsumes(t *testing.T) {
 	block := stageCompleteDASet(t, state, daID, "direct", []byte("direct-payload"))
 
 	svc := &Service{daRelay: state}
-	blocks := []node.CanonicalAppliedBlock{{Hash: daRelayTestID(0xa0), BlockBytes: block}}
+	blocks := []node.CanonicalAppliedBlock{{
+		Hash:          daRelayTestID(0xa0),
+		CompleteDAIDs: mustParseCompleteDASetIDs(t, block),
+	}}
 	if err := svc.consumeCanonicalAppliedDASets(blocks); err != nil {
 		t.Fatalf("consumeCanonicalAppliedDASets: %v", err)
 	}
@@ -216,8 +197,8 @@ func TestConsumeCanonicalAppliedDASetsReorgConsumesAllBlocks(t *testing.T) {
 
 	svc := &Service{daRelay: state}
 	blocks := []node.CanonicalAppliedBlock{
-		{Hash: daRelayTestID(0xa1), BlockBytes: blockA},
-		{Hash: daRelayTestID(0xb1), BlockBytes: blockB},
+		{Hash: daRelayTestID(0xa1), CompleteDAIDs: mustParseCompleteDASetIDs(t, blockA)},
+		{Hash: daRelayTestID(0xb1), CompleteDAIDs: mustParseCompleteDASetIDs(t, blockB)},
 	}
 	if err := svc.consumeCanonicalAppliedDASets(blocks); err != nil {
 		t.Fatalf("consumeCanonicalAppliedDASets: %v", err)
@@ -230,35 +211,55 @@ func TestConsumeCanonicalAppliedDASetsReorgConsumesAllBlocks(t *testing.T) {
 	}
 }
 
+// TestConsumeCanonicalAppliedDASetsSurfacesErrorAndContinues pins the failure
+// contract of the hook that runs AFTER a canonical application has already
+// committed (handlers_block.go noteAcceptedBlock): the first relay-accounting
+// failure is reported and attributed to its block, later canonical blocks are
+// still consumed, and the canonical-applied report itself is left untouched —
+// nothing here can undo or rewrite what the apply committed.
 func TestConsumeCanonicalAppliedDASetsSurfacesErrorAndContinues(t *testing.T) {
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
-	daID := daRelayTestID(0x65)
-	goodBlock := stageCompleteDASet(t, state, daID, "after-bad", []byte("after-bad-payload"))
+	goodID := daRelayTestID(0x65)
+	badID := daRelayTestID(0x67)
+	_ = stageCompleteDASet(t, state, goodID, "after-bad", []byte("after-bad"))
+	pinnedGood := state.pinnedPayloadBytes
+	_ = stageCompleteDASet(t, state, badID, "bad", []byte("a-strictly-longer-payload-than-the-good-one"))
+	// Corrupt relay accounting so releasing badID underflows the pinned-payload
+	// counter while releasing goodID still balances exactly.
+	state.pinnedPayloadBytes = pinnedGood
 
 	badHash := daRelayTestID(0xee)
+	goodHash := daRelayTestID(0xcc)
 	svc := &Service{daRelay: state}
 	blocks := []node.CanonicalAppliedBlock{
-		{Hash: badHash, BlockBytes: []byte{0x01, 0x02}}, // unparseable -> visible error
-		{Hash: daRelayTestID(0xcc), BlockBytes: goodBlock},
+		{Hash: badHash, CompleteDAIDs: [][32]byte{badID}},
+		{Hash: goodHash, CompleteDAIDs: [][32]byte{goodID}},
 	}
 	err := svc.consumeCanonicalAppliedDASets(blocks)
 	if err == nil {
-		t.Fatal("malformed canonical block was consumed silently (want visible error)")
+		t.Fatal("relay accounting failure was swallowed (want visible error)")
 	}
 	if !strings.Contains(err.Error(), fmt.Sprintf("%x", badHash)) {
 		t.Fatalf("error %q does not identify failing block %x", err, badHash)
 	}
-	// Best-effort: the later valid canonical block is still consumed despite the
+	// Best-effort: the later canonical block is still consumed despite the
 	// earlier error.
-	if _, ok := state.sets[daID]; ok {
+	if _, ok := state.sets[goodID]; ok {
 		t.Fatal("best-effort consume skipped a valid canonical block after an earlier error")
+	}
+	want := []node.CanonicalAppliedBlock{
+		{Hash: badHash, CompleteDAIDs: [][32]byte{badID}},
+		{Hash: goodHash, CompleteDAIDs: [][32]byte{goodID}},
+	}
+	if !reflect.DeepEqual(blocks, want) {
+		t.Fatal("consume mutated the canonical-applied report")
 	}
 }
 
 func TestConsumeCanonicalAppliedDASetsNilRelayNoOp(t *testing.T) {
 	// DA relay disabled: the hook must no-op (not error on every accepted block).
 	svc := &Service{daRelay: nil}
-	blocks := []node.CanonicalAppliedBlock{{Hash: daRelayTestID(0x66), BlockBytes: []byte{0x01, 0x02}}}
+	blocks := []node.CanonicalAppliedBlock{{Hash: daRelayTestID(0x66), CompleteDAIDs: [][32]byte{daRelayTestID(0x68)}}}
 	if err := svc.consumeCanonicalAppliedDASets(blocks); err != nil {
 		t.Fatalf("nil daRelay should no-op, got: %v", err)
 	}
