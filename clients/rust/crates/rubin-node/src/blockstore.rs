@@ -365,6 +365,28 @@ impl BlockStore {
         )))
     }
 
+    /// Kind-preserving sibling of [`BlockStore::get_block_by_hash`]: it returns
+    /// the raw [`std::io::Error`], so a caller can tell a genuinely absent block
+    /// ([`std::io::ErrorKind::NotFound`]) apart from every other read failure
+    /// (permissions, a directory planted where a file belongs, EIO).
+    ///
+    /// `get_block_by_hash` formats that error into a `String`, which erases the
+    /// kind; re-deriving the distinction by matching on the rendered text is
+    /// OS-dependent and must not be used. The side-branch walk
+    /// (`sync_reorg::load_verified_branch_ancestor`) needs the distinction
+    /// because only `NotFound` may keep the parent-not-found / orphan-retention
+    /// outcome — every other read failure is local store corruption. Go reaches
+    /// the same split with `errors.Is(err, os.ErrNotExist)` in
+    /// `clients/go/node/sync_reorg.go`.
+    pub fn read_block_file_by_hash(
+        &self,
+        block_hash_bytes: [u8; 32],
+    ) -> Result<Vec<u8>, std::io::Error> {
+        // E.10: see `get_block_by_hash` for the safe-leaf-name rationale.
+        let name = format!("{}.bin", hex::encode(block_hash_bytes));
+        read_file_from_dir(&self.blocks_dir, &name)
+    }
+
     pub fn get_block_by_hash(&self, block_hash_bytes: [u8; 32]) -> Result<Vec<u8>, String> {
         // E.10: route through `read_file_from_dir` so the leaf name is
         // validated against the same traversal / absolute-path / empty-name
@@ -373,7 +395,7 @@ impl BlockStore {
         // guard removes the entire class of "leaf name from on-disk
         // index drift becomes a traversal" without runtime cost.
         let name = format!("{}.bin", hex::encode(block_hash_bytes));
-        read_file_from_dir(&self.blocks_dir, &name)
+        self.read_block_file_by_hash(block_hash_bytes)
             .map_err(|e| format!("read block {}: {e}", self.blocks_dir.join(&name).display()))
     }
 

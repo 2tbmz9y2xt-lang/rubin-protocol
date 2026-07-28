@@ -9,8 +9,9 @@ use rubin_consensus::{block_hash, parse_block_bytes, parse_block_header_bytes};
 use rubin_consensus::{RotationProvider, SuiteRegistry};
 
 use crate::blockstore::BlockStore;
-use crate::chainstate::{ChainState, ChainStateConnectSummary};
+use crate::chainstate::{CanonicalAppliedBlock, ChainState, ChainStateConnectSummary};
 use crate::chainstate_recovery::should_persist_chainstate_snapshot;
+use crate::da_relay::complete_da_set_ids_from_parsed_block;
 use crate::genesis::devnet_genesis_chain_id;
 use crate::sync_reorg::PARENT_BLOCK_NOT_FOUND_ERR;
 use crate::target_schedule::{expected_target_for_candidate, TargetScheduleError};
@@ -913,7 +914,7 @@ impl SyncEngine {
                 Some(ctx) => (Some(ctx.rotation.as_ref()), Some(ctx.registry.as_ref())),
                 None => (None, None),
             };
-        let summary = match self.chain_state.connect_block_with_suite_context(
+        let mut summary = match self.chain_state.connect_block_with_suite_context(
             block_bytes,
             expected_target,
             prev_timestamps,
@@ -1018,6 +1019,38 @@ impl SyncEngine {
         } else {
             self.pv_telemetry.record_block_skipped();
         }
+
+        // This is the ONLY site that reports a block as canonical-applied, so
+        // the distinction between "connected to some chain state" and "made
+        // canonical" lives in exactly one place: the connect layer leaves the
+        // field empty, and the reorg loop above accumulates one record per
+        // newly-canonical block by calling back into here. Extraction runs on
+        // the already-parsed block — no re-parse of the bytes and no retained
+        // bytes — and only AFTER the connect succeeded, so an over-cap or
+        // malformed DA layout is rejected by consensus with its own public error
+        // code before this ever runs.
+        //
+        // Any error here is therefore a defensive assertion. It rolls the apply
+        // back rather than committing a block whose canonical-applied report
+        // could not be built: the connect already mutated the in-memory chain
+        // state, and returning without this restore would leave the in-memory
+        // tip advanced to a block that was never persisted and never reported.
+        // Rollback runs BEFORE `commit_canonical_block`, so no store rewind is
+        // needed — the persisted canonical tip has not moved yet. Go twin:
+        // `sync.go` `applyCanonicalParsedBlockTracked` + `rollbackApplyBlock`.
+        let complete_da_ids = match complete_da_set_ids_from_parsed_block(&parsed) {
+            Ok(ids) => ids,
+            Err(err) => {
+                self.chain_state = snapshot;
+                self.tip_timestamp = old_tip_timestamp;
+                self.best_known_height = old_best_known_height;
+                return Err(err);
+            }
+        };
+        summary.canonical_applied_blocks = vec![CanonicalAppliedBlock {
+            hash: block_hash_bytes,
+            complete_da_ids,
+        }];
 
         let commit_start = Instant::now();
         // `canonical_len_before` is the rewind target for the ONLY remaining

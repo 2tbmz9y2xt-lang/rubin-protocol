@@ -3796,7 +3796,12 @@ impl Drop for OrphanBlockPool {
     }
 }
 
-fn is_parent_not_found_err(err: &str) -> bool {
+/// The exact predicate that routes an apply failure to orphan retention.
+/// `pub(crate)` so the side-branch walk's corruption rows can assert against
+/// THIS function rather than against a copy of its rule: a local-corruption
+/// error that started matching here would silently park an honest peer's block
+/// in the orphan pool.
+pub(crate) fn is_parent_not_found_err(err: &str) -> bool {
     err == PARENT_BLOCK_NOT_FOUND_ERR
 }
 
@@ -7413,6 +7418,67 @@ mod tests {
                 "row {row}: bad PoW took pool memory"
             );
         }
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// A CORRUPT LOCAL STORE must never change a peer's disposition. The peer
+    /// relayed a well-formed block; the defect is entirely ours, so the failure
+    /// is surfaced as a local error — not routed to orphan retention (which
+    /// would silently park an honest block forever) and not scored against the
+    /// peer. The routing predicate itself is asserted, not a copy of its rule.
+    #[test]
+    fn corrupt_branch_store_is_peer_neutral() {
+        use crate::sync::{retarget_block_for_test, stock_devnet_engine_for_test};
+        use crate::sync_reorg::BRANCH_STORE_CORRUPT_ERR;
+        let _metrics = orphan_pool_metrics_test_guard();
+        reset_orphan_pool_metrics_for_test();
+
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-corrupt-neutral", |_| {});
+        let genesis = engine.chain_state.tip_hash;
+        let ts = engine.tip_timestamp + 1;
+
+        // The header probe the pre-apply precheck uses succeeds, so the walk is
+        // reached; the block bytes it then reads are corrupt.
+        let mut header =
+            crate::test_helpers::build_block_bytes(genesis, [0u8; 32], POW_LIMIT, ts, &[]);
+        header.truncate(BLOCK_HEADER_BYTES);
+        let corrupt_parent = block_hash(&header).expect("parent hash");
+        let root = crate::blockstore::block_store_path(&dir);
+        let leaf = format!("{}.bin", hex::encode(corrupt_parent));
+        fs::write(root.join("headers").join(&leaf), &header).expect("write header artifact");
+        fs::write(root.join("blocks").join(&leaf), b"corrupt datadir bytes")
+            .expect("write corrupt block artifact");
+
+        let child = retarget_block_for_test(
+            coinbase_only_block_with_gen(2, 0, corrupt_parent, ts + 1),
+            POW_LIMIT,
+        );
+        let (mut session, _client) = test_peer_session();
+        let err = session
+            .handle_block(&child, &mut engine)
+            .expect_err("local corruption must surface, not be swallowed as an orphan");
+        let rendered = err.to_string();
+
+        assert!(
+            rendered.contains(BRANCH_STORE_CORRUPT_ERR),
+            "local corruption class: {rendered}"
+        );
+        assert!(
+            !is_parent_not_found_err(&rendered),
+            "the orphan router must not match local corruption: {rendered}"
+        );
+        assert_eq!(
+            session.state().ban_score,
+            0,
+            "a corrupt datadir must not raise the ban score of a peer that relayed an honest block"
+        );
+        assert_eq!(
+            session.orphans.len(),
+            0,
+            "no orphan retention on corruption"
+        );
+        assert_eq!(engine.chain_state.height, 0, "nothing became canonical");
+
         fs::remove_dir_all(&dir).expect("cleanup");
     }
 

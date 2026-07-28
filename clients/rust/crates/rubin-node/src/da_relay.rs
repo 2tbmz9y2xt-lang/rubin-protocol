@@ -3,9 +3,9 @@ use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 
-use rubin_consensus::constants::{CHUNK_BYTES, MAX_DA_CHUNK_COUNT};
+use rubin_consensus::constants::{CHUNK_BYTES, MAX_DA_BATCHES_PER_BLOCK, MAX_DA_CHUNK_COUNT};
 use rubin_consensus::constants::{COV_TYPE_DA_COMMIT, TX_WIRE_VERSION};
-use rubin_consensus::{parse_block_bytes, parse_tx, Tx, TxError};
+use rubin_consensus::{parse_block_bytes, parse_tx, ParsedBlock, Tx};
 use sha3::{Digest, Sha3_256};
 
 pub const DA_ORPHAN_POOL_BYTES: u64 = 64 << 20;
@@ -1207,25 +1207,65 @@ fn sha3_256(input: &[u8]) -> [u8; 32] {
     Sha3_256::digest(input).into()
 }
 
-/// Deterministically extract the `da_id` of every COMPLETE DA set carried by an
-/// already-accepted block, in ascending `da_id` order. A set is complete when
-/// the block contains exactly one DA commit for the `da_id` whose `chunk_count`
-/// is in `(0, MAX_DA_CHUNK_COUNT]`, plus a DA chunk tx for every index
-/// `0..chunk_count`. Read-only: it parses block bytes and never mutates relay
-/// state. Mirrors merged Go `extractAcceptedBlockDAIDs` (RUB-429).
-pub(crate) fn extract_accepted_block_da_ids(block_bytes: &[u8]) -> Result<Vec<[u8; 32]>, TxError> {
-    let parsed = parse_block_bytes(block_bytes)?;
+/// Returns the `da_id` of every COMPLETE DA set carried by an ALREADY-PARSED
+/// block, in ascending raw-byte order.
+///
+/// This is the single implementation of block-level complete-DA-set selection in
+/// the Rust tree; the bytes entry [`consume_accepted_block_da_sets`] parses
+/// untrusted bytes and delegates here, so the bytes-entry and the parsed-entry
+/// (canonical-apply) paths cannot select different DA sets for the same block.
+///
+/// A set counts as complete exactly when the block carries one `tx_kind=0x01`
+/// commit for that `da_id` (a second commit disqualifies it), the commit's
+/// `chunk_count` is in `1..=MAX_DA_CHUNK_COUNT`, and the block carries a
+/// `tx_kind=0x02` chunk for every index `0..chunk_count-1`. This mirrors the
+/// completeness rule consensus `connect_block_*` already enforces; it is
+/// repeated here because the caller may hand over a block that has NOT been
+/// validated.
+///
+/// Contract:
+/// - Output is ordered by raw ID bytes, never by hash-map iteration order, so it
+///   is deterministic for a given block.
+/// - At most `MAX_DA_BATCHES_PER_BLOCK` IDs are returned; a block that would
+///   yield more is reported as an ERROR rather than truncated. A block that
+///   passed consensus validation cannot reach that branch.
+/// - `parsed` is read-only; nothing here mutates the block or relay state.
+/// - A DA transaction missing its DA core is skipped, never a panic, since
+///   callers may pass a block that was assembled rather than parsed.
+///
+/// Go twin: `clients/go/node/chainstate.go`
+/// `CompleteDASetIDsFromParsedBlock` (RUB-880).
+pub(crate) fn complete_da_set_ids_from_parsed_block(
+    parsed: &ParsedBlock,
+) -> Result<Vec<[u8; 32]>, String> {
     let mut sets: BTreeMap<[u8; 32], AcceptedBlockDaSet> = BTreeMap::new();
     for tx in &parsed.txs {
         record_accepted_block_da_tx(&mut sets, tx);
     }
-    // BTreeMap iterates by ascending key, so the surviving da_ids are returned
-    // sorted and unique (one entry per da_id) without an explicit sort.
-    Ok(sets
+    // `BTreeMap<[u8; 32], _>` iterates in ascending raw-key order, so the
+    // surviving da_ids come out byte-sorted and unique (one entry per da_id).
+    // Ascending byte order is a PINNED contract of this function — Go sorts an
+    // unordered map with `bytes.Compare` to reach the same result — not an
+    // incidental property of the container: a container swap must preserve it,
+    // and a hash map here would make the output nondeterministic.
+    let ids: Vec<[u8; 32]> = sets
         .into_iter()
         .filter(|(_, set)| set.complete())
         .map(|(da_id, _)| da_id)
-        .collect())
+        .collect();
+    // Counted AFTER completeness filtering, exactly like Go: a block carrying
+    // MAX_DA_BATCHES_PER_BLOCK commits of which one set is incomplete yields one
+    // fewer ID and is accepted. Over the cap is an error, never a truncated
+    // list — a truncated list would silently leave the dropped sets' relay
+    // records pinned forever.
+    if ids.len() > MAX_DA_BATCHES_PER_BLOCK as usize {
+        return Err(format!(
+            "complete DA sets in block: {} exceeds MAX_DA_BATCHES_PER_BLOCK={}",
+            ids.len(),
+            MAX_DA_BATCHES_PER_BLOCK
+        ));
+    }
+    Ok(ids)
 }
 
 fn record_accepted_block_da_tx(sets: &mut BTreeMap<[u8; 32], AcceptedBlockDaSet>, tx: &Tx) {
@@ -1271,22 +1311,35 @@ impl AcceptedBlockDaSet {
     }
 }
 
-/// Consume every COMPLETE DA set included in an already-applied block: extract
-/// the block's complete DA ids (RUB-434) and consume each from the locked relay
-/// (RUB-433), aborting on the first error (fail-closed). Used by the Rust
-/// /mine_next consume wiring (RUB-435) — the mirror of Go
-/// `ConsumeAcceptedBlockDASets`.
+/// Consume every COMPLETE DA set carried by a block supplied as RAW BYTES. This
+/// is the entry point for callers that hold bytes and no canonical-apply summary
+/// — today the `/mine_next` RPC accepted-block hook (RUB-435). It parses, then
+/// delegates to the same [`complete_da_set_ids_from_parsed_block`] core the
+/// canonical-apply path uses, so the two entry points cannot select different DA
+/// sets for the same block. Mirror of Go `ConsumeAcceptedBlockDASets`.
 pub fn consume_accepted_block_da_sets(
     da_relay: &Mutex<DaRelayState>,
     block_bytes: &[u8],
 ) -> Result<(), String> {
-    let da_ids = extract_accepted_block_da_ids(block_bytes).map_err(|err| err.to_string())?;
+    let parsed = parse_block_bytes(block_bytes).map_err(|err| err.to_string())?;
+    let da_ids = complete_da_set_ids_from_parsed_block(&parsed)?;
+    consume_complete_da_set_ids(da_relay, &da_ids)
+}
+
+/// Releases relay accounting for each ID in order and stops at the FIRST
+/// failure (fail-closed). Both consume entry points route through here, so the
+/// per-ID effect is identical whichever entry produced the IDs. Mirror of Go
+/// `consumeCompleteDASetIDs`.
+fn consume_complete_da_set_ids(
+    da_relay: &Mutex<DaRelayState>,
+    da_ids: &[[u8; 32]],
+) -> Result<(), String> {
     let mut relay = da_relay
         .lock()
         .map_err(|_| "DA relay lock poisoned during accepted-block DA consume".to_string())?;
     for da_id in da_ids {
         relay
-            .consume_complete_set(da_id)
+            .consume_complete_set(*da_id)
             .map_err(|err| format!("consume accepted DA set: {err:?}"))?;
     }
     Ok(())
@@ -1301,13 +1354,18 @@ pub fn consume_accepted_block_da_sets(
 /// cleanup for the remaining canonical blocks. Used by the Rust P2P
 /// accepted-block consume hook (RUB-437) — the mirror of Go
 /// `consumeCanonicalAppliedDASets`.
+///
+/// It consumes the IDs the apply path already extracted: the summary carries no
+/// block bytes and nothing here re-parses a block. The report is taken by
+/// immutable borrow, so a consume failure cannot rewrite what the apply already
+/// committed.
 pub fn consume_canonical_applied_da_sets(
     da_relay: &Mutex<DaRelayState>,
     canonical_applied_blocks: &[crate::chainstate::CanonicalAppliedBlock],
 ) -> Result<(), String> {
     let mut first_err: Option<String> = None;
     for block in canonical_applied_blocks {
-        if let Err(err) = consume_accepted_block_da_sets(da_relay, &block.block_bytes) {
+        if let Err(err) = consume_complete_da_set_ids(da_relay, &block.complete_da_ids) {
             first_err.get_or_insert_with(|| {
                 format!(
                     "consume canonical-applied DA sets for block {}: {err}",
@@ -1917,35 +1975,92 @@ mod tests {
         assert!(state.complete_da_set_candidates(0).is_empty());
     }
 
+    const CORE_PAYLOAD: &[u8] = b"da-payload";
+
+    /// In-memory DA commit transaction for `da_id` declaring `chunk_count`
+    /// chunks. Kept unmarshalled because the extraction core takes an
+    /// ALREADY-PARSED block and its contract explicitly admits a block that was
+    /// ASSEMBLED rather than parsed.
+    fn core_commit_tx(da_id: [u8; 32], chunk_count: u16) -> Tx {
+        Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x01,
+            tx_nonce: 7,
+            inputs: Vec::new(),
+            outputs: vec![da_commit_output([2u8; 32])],
+            locktime: 0,
+            da_commit_core: Some(relay_commit_core(da_id, chunk_count)),
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        }
+    }
+
+    /// In-memory DA chunk transaction at `index` for `da_id`.
+    fn core_chunk_tx(da_id: [u8; 32], index: u16) -> Tx {
+        Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x02,
+            tx_nonce: 7,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: Some(relay_chunk_core(da_id, index, CORE_PAYLOAD)),
+            witness: Vec::new(),
+            da_payload: CORE_PAYLOAD.to_vec(),
+        }
+    }
+
+    /// A DA-kind transaction carrying NO DA core. This shape cannot exist on the
+    /// wire — `marshal_tx` refuses to encode `tx_kind=0x01` without a commit
+    /// core — so it is reachable only through an assembled block, which is
+    /// exactly the caller class the core's panic-free skip exists for.
+    fn core_coreless_tx(tx_kind: u8) -> Tx {
+        let mut tx = core_commit_tx([0u8; 32], 1);
+        tx.tx_kind = tx_kind;
+        tx.da_commit_core = None;
+        tx.da_chunk_core = None;
+        tx
+    }
+
+    /// Wrap in-memory transactions in a `ParsedBlock` without encoding them: the
+    /// header comes from a real coinbase-only block so every other field is
+    /// well-formed. Mirrors Go's in-memory `[]*consensus.Tx` extraction rows.
+    fn assembled_block(txs: Vec<Tx>) -> ParsedBlock {
+        let base = crate::test_helpers::block_with_txs(1, 0, [0u8; 32], 1, &[]);
+        let mut parsed = parse_block_bytes(&base).expect("parse coinbase-only base block");
+        parsed.tx_count = txs.len() as u64;
+        parsed.txs = txs;
+        parsed
+    }
+
+    fn core_wire_tx(tx: &Tx) -> Vec<u8> {
+        rubin_consensus::marshal_tx(tx).expect("marshal DA test tx")
+    }
+
+    /// Parse a test block and run the single extraction core over it.
+    fn core_ids(block_bytes: &[u8]) -> Result<Vec<[u8; 32]>, String> {
+        let parsed = parse_block_bytes(block_bytes).map_err(|err| err.to_string())?;
+        complete_da_set_ids_from_parsed_block(&parsed)
+    }
+
+    /// One `da_id` per index, distinct across the whole `u16` range used here.
+    fn core_boundary_da_id(index: u16) -> [u8; 32] {
+        let mut da_id = [0u8; 32];
+        da_id[0] = (index >> 8) as u8;
+        da_id[1] = (index & 0xff) as u8;
+        da_id
+    }
+
     #[test]
-    fn extract_accepted_block_da_ids_matrix() {
+    fn complete_da_set_ids_from_parsed_block_matrix() {
         use crate::test_helpers::block_with_txs;
         let prev = [0u8; 32];
-        let payload = b"da-payload".to_vec();
-        let commit_for = |da_id, chunk_count| {
-            relay_test_tx(
-                0x01,
-                vec![da_commit_output([2u8; 32])],
-                Some(relay_commit_core(da_id, chunk_count)),
-                None,
-                Vec::new(),
-            )
-        };
-        let chunk_for = |da_id, index| {
-            relay_test_tx(
-                0x02,
-                Vec::new(),
-                None,
-                Some(relay_chunk_core(da_id, index, &payload)),
-                payload.clone(),
-            )
-        };
 
         // Coinbase-only block carries no DA txs.
         let empty_block = block_with_txs(1, 0, prev, 1_000, &[]);
-        assert!(extract_accepted_block_da_ids(&empty_block)
-            .unwrap()
-            .is_empty());
+        assert!(core_ids(&empty_block).expect("no-DA block").is_empty());
 
         // One complete DA set for a single da_id.
         let one_id = [5u8; 32];
@@ -1954,15 +2069,18 @@ mod tests {
             0,
             prev,
             1_001,
-            &[commit_for(one_id, 1), chunk_for(one_id, 0)],
+            &[
+                core_wire_tx(&core_commit_tx(one_id, 1)),
+                core_wire_tx(&core_chunk_tx(one_id, 0)),
+            ],
         );
-        assert_eq!(
-            extract_accepted_block_da_ids(&one_block).unwrap(),
-            vec![one_id]
-        );
+        assert_eq!(core_ids(&one_block).expect("single set"), vec![one_id]);
 
-        // Two complete sets; the higher da_id is staged first in the block.
+        // Three complete sets declared high/low/mid ON THE WIRE come back in
+        // ascending raw-byte order. Ordering is a pinned contract of the core,
+        // not an artefact of the order the block happened to carry them in.
         let lo = [3u8; 32];
+        let mid = [6u8; 32];
         let hi = [9u8; 32];
         let multi_block = block_with_txs(
             1,
@@ -1970,26 +2088,234 @@ mod tests {
             prev,
             1_002,
             &[
-                commit_for(hi, 1),
-                chunk_for(hi, 0),
-                commit_for(lo, 1),
-                chunk_for(lo, 0),
+                core_wire_tx(&core_commit_tx(hi, 1)),
+                core_wire_tx(&core_chunk_tx(hi, 0)),
+                core_wire_tx(&core_commit_tx(lo, 1)),
+                core_wire_tx(&core_chunk_tx(lo, 0)),
+                core_wire_tx(&core_commit_tx(mid, 1)),
+                core_wire_tx(&core_chunk_tx(mid, 0)),
             ],
         );
         assert_eq!(
-            extract_accepted_block_da_ids(&multi_block).unwrap(),
-            vec![lo, hi]
+            core_ids(&multi_block).expect("three sets"),
+            vec![lo, mid, hi],
+            "IDs must be byte-sorted ascending, not in wire order"
         );
 
-        // Commit declares 2 chunks but only chunk index 0 is present.
+        // A nil/absent DA layout is not the only empty case: a block whose DA
+        // txs are all incomplete also yields an empty list, never an error.
         let inc = [7u8; 32];
-        let inc_block = block_with_txs(1, 0, prev, 1_003, &[commit_for(inc, 2), chunk_for(inc, 0)]);
-        assert!(extract_accepted_block_da_ids(&inc_block)
-            .unwrap()
-            .is_empty());
+        let inc_block = block_with_txs(
+            1,
+            0,
+            prev,
+            1_003,
+            &[
+                core_wire_tx(&core_commit_tx(inc, 2)),
+                core_wire_tx(&core_chunk_tx(inc, 0)),
+            ],
+        );
+        assert!(core_ids(&inc_block).expect("incomplete set").is_empty());
 
-        // Unparseable block bytes.
-        assert!(extract_accepted_block_da_ids(&[0x01, 0x02]).is_err());
+        // Unparseable bytes never reach the core: the bytes entry parses first.
+        assert!(core_ids(&[0x01, 0x02]).is_err());
+    }
+
+    /// Every branch of the completeness classifier that must EXCLUDE a da_id.
+    /// Mirrors Go `TestCompleteDASetIDsFromParsedBlockIncompleteShapes`. The
+    /// nil-transaction row Go carries is structurally unrepresentable here:
+    /// `ParsedBlock.txs` is a `Vec<Tx>`, not a `Vec<*Tx>`, so there is no null
+    /// element to skip. The missing-DA-core rows below cover the same
+    /// panic-free-skip obligation for Rust's `Option` cores.
+    #[test]
+    fn complete_da_set_ids_from_parsed_block_excludes_incomplete_shapes() {
+        let da_id = [7u8; 32];
+        // One past the largest legal chunk_count, saturating if the constant is
+        // wider than the wire field.
+        let over_cap_chunks =
+            u16::try_from(MAX_DA_CHUNK_COUNT.saturating_add(1)).unwrap_or(u16::MAX);
+
+        let rows: Vec<(&str, Vec<Tx>)> = vec![
+            (
+                "duplicate commit disqualifies",
+                vec![
+                    core_commit_tx(da_id, 1),
+                    core_commit_tx(da_id, 1),
+                    core_chunk_tx(da_id, 0),
+                ],
+            ),
+            ("zero chunk_count", vec![core_commit_tx(da_id, 0)]),
+            (
+                "chunk_count mismatch: declares 2, carries 1",
+                vec![core_commit_tx(da_id, 2), core_chunk_tx(da_id, 0)],
+            ),
+            (
+                "chunk index gap: declares 2, carries 0 and 2",
+                vec![
+                    core_commit_tx(da_id, 2),
+                    core_chunk_tx(da_id, 0),
+                    core_chunk_tx(da_id, 2),
+                ],
+            ),
+            (
+                // EVERY declared chunk is carried, so the length and
+                // index-coverage clauses both PASS and the `chunk_count >
+                // MAX_DA_CHUNK_COUNT` clause is the only one that can reject
+                // this set. Planting a single chunk would be rejected by the
+                // length clause first and would pin nothing about the cap.
+                "chunk_count over MAX_DA_CHUNK_COUNT",
+                std::iter::once(core_commit_tx(da_id, over_cap_chunks))
+                    .chain((0..over_cap_chunks).map(|index| core_chunk_tx(da_id, index)))
+                    .collect(),
+            ),
+            (
+                "chunks without any commit",
+                vec![core_chunk_tx(da_id, 0), core_chunk_tx(da_id, 1)],
+            ),
+            (
+                "commit with no DA core is skipped, not unwrapped",
+                vec![core_coreless_tx(0x01), core_chunk_tx(da_id, 0)],
+            ),
+            (
+                "chunk with no DA core is skipped, not unwrapped",
+                vec![core_commit_tx(da_id, 1), core_coreless_tx(0x02)],
+            ),
+        ];
+
+        for (name, txs) in rows {
+            let block = assembled_block(txs);
+            assert!(
+                complete_da_set_ids_from_parsed_block(&block)
+                    .expect(name)
+                    .is_empty(),
+                "{name}: da_id must not be reported complete"
+            );
+        }
+    }
+
+    /// The per-block cap is an ERROR, never a truncated list: a truncated list
+    /// would silently leave the dropped sets' relay records pinned forever.
+    #[test]
+    fn complete_da_set_ids_from_parsed_block_bounds_at_max_da_batches() {
+        let cap = MAX_DA_BATCHES_PER_BLOCK as usize;
+        let complete_sets = |count: usize, incomplete_last: bool| {
+            let mut txs = Vec::with_capacity(count * 2);
+            for index in 0..count {
+                let da_id = core_boundary_da_id(u16::try_from(index).expect("index fits u16"));
+                txs.push(core_commit_tx(da_id, 1));
+                // An incomplete last set carries its commit but not its chunk.
+                if !(incomplete_last && index + 1 == count) {
+                    txs.push(core_chunk_tx(da_id, 0));
+                }
+            }
+            assembled_block(txs)
+        };
+
+        // Exactly MAX_DA_BATCHES_PER_BLOCK complete sets: all returned, ascending.
+        let ids = complete_da_set_ids_from_parsed_block(&complete_sets(cap, false))
+            .expect("exactly the cap is accepted");
+        assert_eq!(ids.len(), cap);
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "cap-sized output stays byte-sorted");
+
+        // Cap-many commits with the last set incomplete: exactly cap-1 IDs. The
+        // cap is counted AFTER completeness filtering.
+        assert_eq!(
+            complete_da_set_ids_from_parsed_block(&complete_sets(cap, true))
+                .expect("cap commits with one incomplete set is under the cap")
+                .len(),
+            cap - 1
+        );
+
+        // One over the cap is an error, and the error names the bound.
+        let err = complete_da_set_ids_from_parsed_block(&complete_sets(cap + 1, false))
+            .expect_err("over the cap must error, not truncate");
+        assert!(
+            err.contains("MAX_DA_BATCHES_PER_BLOCK"),
+            "cap error names the bound: {err}"
+        );
+    }
+
+    /// The bytes entry and the parsed core cannot select different DA sets for
+    /// the same block: the bytes entry parses and delegates to the same core.
+    /// Mirrors Go `TestConsumeAcceptedBlockDASetsMatchesParsedCore`.
+    #[test]
+    fn consume_accepted_block_da_sets_matches_parsed_core() {
+        use crate::test_helpers::block_with_txs;
+        // `complete_id` is complete in the block; `commit_only_id` is staged in
+        // relay accounting but carries no chunk in the block, so the core must
+        // not select it and consume must leave its record alone.
+        let complete_id = [0x31; 32];
+        let commit_only_id = [0x32; 32];
+        let block = block_with_txs(
+            1,
+            0,
+            [0u8; 32],
+            4_000,
+            &[
+                core_wire_tx(&core_commit_tx(complete_id, 1)),
+                core_wire_tx(&core_chunk_tx(complete_id, 0)),
+                core_wire_tx(&core_commit_tx(commit_only_id, 1)),
+            ],
+        );
+
+        let parsed = parse_block_bytes(&block).expect("parse block");
+        let core_selected = complete_da_set_ids_from_parsed_block(&parsed).expect("core selection");
+        assert_eq!(core_selected, vec![complete_id]);
+
+        let payload: &[u8] = b"equivalence-payload";
+        let payload_wire = payload.len() as u64;
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        for (index, id) in [complete_id, commit_only_id].into_iter().enumerate() {
+            state
+                .stage_incomplete_da_commit(
+                    &format!("commit-{index}:8333"),
+                    DaRelayCommit {
+                        da_id: id,
+                        payload_commitment: payload_commitment(&[payload]),
+                        peer_quota_key: PeerQuotaKey::from_peer_addr("forged:8333"),
+                        chunk_count: 1,
+                        wire_bytes: payload_wire,
+                        tx_bytes: Arc::from(&b"commit-tx"[..]),
+                    },
+                )
+                .unwrap();
+            state
+                .stage_incomplete_da_chunk(
+                    &format!("chunk-{index}:8333"),
+                    DaRelayChunk {
+                        da_id: id,
+                        chunk_hash: sha3_256(payload),
+                        peer_quota_key: PeerQuotaKey::from_peer_addr("forged:8333"),
+                        chunk_index: 0,
+                        payload: Arc::from(payload),
+                        wire_bytes: payload_wire,
+                        tx_bytes: Arc::from(&b"chunk-tx"[..]),
+                    },
+                )
+                .unwrap();
+        }
+        let relay = Mutex::new(state);
+        consume_accepted_block_da_sets(&relay, &block).expect("bytes-entry consume");
+
+        let guard = relay.lock().unwrap();
+        assert!(
+            !guard.sets_by_da_id.contains_key(&complete_id),
+            "the core-selected set is consumed"
+        );
+        assert!(
+            guard.sets_by_da_id.contains_key(&commit_only_id),
+            "a set complete in relay accounting but INCOMPLETE in the block is not consumed"
+        );
+    }
+
+    /// Malformed bytes fail at the bytes entry before any relay accounting is
+    /// touched — the parse is the first thing the entry does.
+    #[test]
+    fn consume_accepted_block_da_sets_rejects_malformed_block_before_consuming() {
+        let relay = Mutex::new(DaRelayState::new(DaRelayCaps::default()).unwrap());
+        assert!(consume_accepted_block_da_sets(&relay, &[0x01, 0x02]).is_err());
     }
 
     #[test]
@@ -2071,7 +2397,6 @@ mod tests {
     #[test]
     fn consume_canonical_applied_da_sets_consumes_all_canonical_blocks() {
         use crate::chainstate::CanonicalAppliedBlock;
-        use crate::test_helpers::block_with_txs;
         let payload: &[u8] = b"p2p-accept-payload";
         let payload_wire = payload.len() as u64;
         let commit_tx = b"canonical-commit-tx";
@@ -2093,29 +2418,12 @@ mod tests {
             wire_bytes,
             tx_bytes: Arc::from(tx_bytes),
         };
-        let block_for = |da_id, ts| {
-            block_with_txs(
-                1,
-                0,
-                [0u8; 32],
-                ts,
-                &[
-                    relay_test_tx(
-                        0x01,
-                        vec![da_commit_output([2u8; 32])],
-                        Some(relay_commit_core(da_id, 1)),
-                        None,
-                        Vec::new(),
-                    ),
-                    relay_test_tx(
-                        0x02,
-                        Vec::new(),
-                        None,
-                        Some(relay_chunk_core(da_id, 0, payload)),
-                        payload.to_vec(),
-                    ),
-                ],
-            )
+        // The report carries IDs, not bytes: a canonical-applied record is the
+        // block hash plus the IDs the apply path already extracted, and nothing
+        // in the consume hook re-parses a block.
+        let record_for = |hash: [u8; 32], da_ids: Vec<[u8; 32]>| CanonicalAppliedBlock {
+            hash,
+            complete_da_ids: da_ids,
         };
 
         let id_a = [81u8; 32];
@@ -2140,34 +2448,37 @@ mod tests {
 
         // Both canonical-applied blocks consume their complete sets, in order.
         let blocks = vec![
-            CanonicalAppliedBlock {
-                hash: [0xa0; 32],
-                block_bytes: block_for(id_a, 1_000),
-            },
-            CanonicalAppliedBlock {
-                hash: [0xb0; 32],
-                block_bytes: block_for(id_b, 1_001),
-            },
+            record_for([0xa0; 32], vec![id_a]),
+            record_for([0xb0; 32], vec![id_b]),
         ];
         consume_canonical_applied_da_sets(&relay, &blocks).expect("consume canonical");
+        assert_eq!(
+            blocks,
+            vec![
+                record_for([0xa0; 32], vec![id_a]),
+                record_for([0xb0; 32], vec![id_b]),
+            ],
+            "the hook must not mutate the report it was handed"
+        );
         let guard = relay.lock().unwrap();
         assert!(!guard.sets_by_da_id.contains_key(&id_a));
         assert!(!guard.sets_by_da_id.contains_key(&id_b));
         assert_eq!(guard.pinned_payload_bytes, 0);
         drop(guard);
 
-        // Fail-closed: a malformed canonical block surfaces an error.
-        let relay2 = Mutex::new(DaRelayState::new(DaRelayCaps::default()).unwrap());
-        let bad = vec![CanonicalAppliedBlock {
-            hash: [0xee; 32],
-            block_bytes: vec![0x01, 0x02],
-        }];
-        assert!(consume_canonical_applied_da_sets(&relay2, &bad).is_err());
-
-        // Best-effort: a malformed block between two valid canonical blocks does
-        // not skip the others; the first error (naming that block) is surfaced.
+        // Best-effort: a block whose relay accounting fails does not skip the
+        // others; the FIRST error, naming that block, is surfaced. The failure
+        // is injected through relay accounting rather than through block bytes,
+        // because a canonical-applied record no longer carries bytes to malform.
+        // A set's pinned accounting grows with its chunk COUNT
+        // (`DA_COMPLETE_SET_CHUNK_FOOTPRINT` per chunk), so the middle set is
+        // given two chunks and the counter is rewound to cover only the two
+        // one-chunk sets: consuming the middle block underflows while the blocks
+        // on either side still succeed.
         let id_c = [83u8; 32];
         let id_d = [84u8; 32];
+        let id_bad = [85u8; 32];
+        let payload_b: &[u8] = b"p2p-accept-payload-second-chunk";
         let mut state3 = DaRelayState::new(DaRelayCaps::default()).unwrap();
         for (id, c, k) in [
             (id_c, "commit-c:8333", "chunk-c:8333"),
@@ -2180,37 +2491,70 @@ mod tests {
                 .stage_incomplete_da_chunk(k, chunk(id, 0, payload, payload_wire, chunk_tx))
                 .unwrap();
         }
+        // Exactly what the two small sets pinned — read from the relay rather
+        // than recomputed, so the row does not depend on the accounting formula.
+        let two_small_sets_pinned = state3.pinned_payload_bytes;
+        state3
+            .stage_incomplete_da_commit(
+                "commit-bad:8333",
+                commit(id_bad, &[payload, payload_b], payload_wire, commit_tx),
+            )
+            .unwrap();
+        state3
+            .stage_incomplete_da_chunk(
+                "chunk-bad-0:8333",
+                chunk(id_bad, 0, payload, payload_wire, chunk_tx),
+            )
+            .unwrap();
+        state3
+            .stage_incomplete_da_chunk(
+                "chunk-bad-1:8333",
+                chunk(id_bad, 1, payload_b, payload_b.len() as u64, chunk_tx),
+            )
+            .unwrap();
+        state3.pinned_payload_bytes = two_small_sets_pinned;
         let relay3 = Mutex::new(state3);
         let mixed = vec![
-            CanonicalAppliedBlock {
-                hash: [0xc0; 32],
-                block_bytes: block_for(id_c, 1_002),
-            },
-            CanonicalAppliedBlock {
-                hash: [0xee; 32],
-                block_bytes: vec![0x01, 0x02],
-            },
-            CanonicalAppliedBlock {
-                hash: [0xd0; 32],
-                block_bytes: block_for(id_d, 1_003),
-            },
+            record_for([0xc0; 32], vec![id_c]),
+            record_for([0xee; 32], vec![id_bad]),
+            record_for([0xd0; 32], vec![id_d]),
         ];
         let err = consume_canonical_applied_da_sets(&relay3, &mixed)
-            .expect_err("malformed middle block surfaces an error");
+            .expect_err("failing relay accounting surfaces an error");
         assert!(
             err.contains(&hex::encode([0xee; 32])),
-            "first error names the malformed block: {err}"
+            "first error names the failing block: {err}"
         );
         let guard3 = relay3.lock().unwrap();
         assert!(
             !guard3.sets_by_da_id.contains_key(&id_c),
-            "block before the malformed one is consumed"
+            "block before the failing one is consumed"
+        );
+        assert!(
+            guard3.sets_by_da_id.contains_key(&id_bad),
+            "the failing block's set is left staged"
         );
         assert!(
             !guard3.sets_by_da_id.contains_key(&id_d),
-            "block after the malformed one is still consumed (best-effort)"
+            "block after the failing one is still consumed (best-effort)"
         );
-        assert_eq!(guard3.pinned_payload_bytes, 0);
+    }
+
+    /// An absent relay is a silent no-op even with IDs present: a relay-disabled
+    /// node must not error on every canonical apply. The P2P hook reaches this
+    /// by skipping the call entirely when no relay context is wired; the row
+    /// below pins the ID-list side — an empty report consumes nothing.
+    #[test]
+    fn consume_canonical_applied_da_sets_no_ops_on_unknown_ids() {
+        use crate::chainstate::CanonicalAppliedBlock;
+        let relay = Mutex::new(DaRelayState::new(DaRelayCaps::default()).unwrap());
+        let blocks = vec![CanonicalAppliedBlock {
+            hash: [0x77; 32],
+            complete_da_ids: vec![[0x99; 32]],
+        }];
+        consume_canonical_applied_da_sets(&relay, &blocks)
+            .expect("IDs with no staged relay record are a no-op, not an error");
+        assert_eq!(relay.lock().unwrap().pinned_payload_bytes, 0);
     }
 
     #[test]
