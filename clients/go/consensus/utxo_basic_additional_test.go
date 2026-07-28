@@ -42,7 +42,6 @@ func TestCheckSpendCovenant_SupportedTypes(t *testing.T) {
 	if err := checkSpendCovenant(COV_TYPE_HTLC, htlcData); err != nil {
 		t.Fatalf("CORE_HTLC: %v", err)
 	}
-
 }
 
 func TestCheckSpendCovenant_Errors(t *testing.T) {

@@ -35,7 +35,6 @@ func VerifyDAChunkHashesParallel(ctx context.Context, tasks []DAChunkHashTask, w
 			return struct{}{}, nil
 		},
 	)
-
 	if err != nil {
 		return err
 	}
@@ -78,7 +77,6 @@ func VerifyDAPayloadCommitsParallel(ctx context.Context, tasks []DAPayloadCommit
 			return struct{}{}, nil
 		},
 	)
-
 	if err != nil {
 		return err
 	}
