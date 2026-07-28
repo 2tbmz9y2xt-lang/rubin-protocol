@@ -58,3 +58,7 @@ operational/orchestration/
 # Compiled CLI binaries (go build/run output)
 /clients/go/rubin-consensus-cli
 /clients/go/rubin-node
+/clients/go/formal-trace
+/clients/go/gen-conformance-fixtures
+/clients/go/rubin-txgen
+/conformance/gen-devnet-fixtures
