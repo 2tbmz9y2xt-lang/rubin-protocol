@@ -1323,26 +1323,96 @@ pub fn consume_accepted_block_da_sets(
 ) -> Result<(), String> {
     let parsed = parse_block_bytes(block_bytes).map_err(|err| err.to_string())?;
     let da_ids = complete_da_set_ids_from_parsed_block(&parsed)?;
-    consume_complete_da_set_ids(da_relay, &da_ids)
+    consume_complete_da_set_ids(da_relay, &da_ids).map_err(CompleteDaSetConsumeError::diagnostic)
 }
 
-/// Releases relay accounting for each ID in order and stops at the FIRST
-/// failure (fail-closed). Both consume entry points route through here, so the
-/// per-ID effect is identical whichever entry produced the IDs. Mirror of Go
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompleteDaSetConsumeAttemptError {
+    ItemLocal(DaRelayError),
+    MutexPoison,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompleteDaSetConsumeError {
+    ItemLocal {
+        da_id: [u8; 32],
+        cause: DaRelayError,
+    },
+    MutexPoison {
+        da_id: [u8; 32],
+    },
+}
+
+impl CompleteDaSetConsumeError {
+    fn diagnostic(self) -> String {
+        match self {
+            Self::ItemLocal { da_id, cause } => {
+                format!("consume DA set {}: {cause:?}", hex::encode(da_id))
+            }
+            Self::MutexPoison { da_id } => format!(
+                "consume DA set {}: DA relay lock poisoned during accepted-block DA consume",
+                hex::encode(da_id)
+            ),
+        }
+    }
+
+    fn is_mutex_poison(self) -> bool {
+        matches!(self, Self::MutexPoison { .. })
+    }
+}
+
+/// Releases relay accounting for each ID in order. Item-local failures are
+/// retained until every supplied ID has been attempted; mutex poison is typed
+/// structural failure and stops at its current ID.
+fn consume_complete_da_set_ids_with<F>(
+    da_ids: &[[u8; 32]],
+    mut attempt: F,
+) -> Result<(), CompleteDaSetConsumeError>
+where
+    F: FnMut([u8; 32]) -> Result<(), CompleteDaSetConsumeAttemptError>,
+{
+    let mut first_item_error = None;
+    for da_id in da_ids {
+        match attempt(*da_id) {
+            Ok(()) => {}
+            Err(CompleteDaSetConsumeAttemptError::ItemLocal(cause)) => {
+                first_item_error.get_or_insert(CompleteDaSetConsumeError::ItemLocal {
+                    da_id: *da_id,
+                    cause,
+                });
+            }
+            Err(CompleteDaSetConsumeAttemptError::MutexPoison) => {
+                return Err(CompleteDaSetConsumeError::MutexPoison { da_id: *da_id });
+            }
+        }
+    }
+    first_item_error.map_or(Ok(()), Err)
+}
+
+fn consume_complete_da_set_attempt(
+    da_relay: &Mutex<DaRelayState>,
+    da_id: [u8; 32],
+) -> Result<(), CompleteDaSetConsumeAttemptError> {
+    let mut relay = da_relay
+        .lock()
+        .map_err(|_| CompleteDaSetConsumeAttemptError::MutexPoison)?;
+    relay
+        .consume_complete_set(da_id)
+        .map(|_| ())
+        .map_err(CompleteDaSetConsumeAttemptError::ItemLocal)
+}
+
+/// Both consume entry points route through here, so the per-ID effect is
+/// identical whichever entry produced the IDs. Empty input does not acquire the
+/// mutex; every non-empty ID attempt owns and releases one guard. Mirror of Go
 /// `consumeCompleteDASetIDs`.
 fn consume_complete_da_set_ids(
     da_relay: &Mutex<DaRelayState>,
     da_ids: &[[u8; 32]],
-) -> Result<(), String> {
-    let mut relay = da_relay
-        .lock()
-        .map_err(|_| "DA relay lock poisoned during accepted-block DA consume".to_string())?;
-    for da_id in da_ids {
-        relay
-            .consume_complete_set(*da_id)
-            .map_err(|err| format!("consume accepted DA set: {err:?}"))?;
-    }
-    Ok(())
+) -> Result<(), CompleteDaSetConsumeError> {
+    consume_complete_da_set_ids_with(da_ids, |da_id| {
+        consume_complete_da_set_attempt(da_relay, da_id)
+    })
 }
 
 /// Consume the complete DA sets included in every block reported
@@ -1365,13 +1435,24 @@ pub fn consume_canonical_applied_da_sets(
 ) -> Result<(), String> {
     let mut first_err: Option<String> = None;
     for block in canonical_applied_blocks {
-        if let Err(err) = consume_complete_da_set_ids(da_relay, &block.complete_da_ids) {
-            first_err.get_or_insert_with(|| {
-                format!(
-                    "consume canonical-applied DA sets for block {}: {err}",
-                    hex::encode(block.hash)
-                )
-            });
+        match consume_complete_da_set_ids(da_relay, &block.complete_da_ids) {
+            Ok(()) => {}
+            Err(err) if err.is_mutex_poison() => {
+                return Err(format!(
+                    "consume canonical-applied DA sets for block {}: {}",
+                    hex::encode(block.hash),
+                    err.diagnostic()
+                ));
+            }
+            Err(err) => {
+                first_err.get_or_insert_with(|| {
+                    format!(
+                        "consume canonical-applied DA sets for block {}: {}",
+                        hex::encode(block.hash),
+                        err.diagnostic()
+                    )
+                });
+            }
         }
     }
     first_err.map_or(Ok(()), Err)
@@ -2648,6 +2729,382 @@ mod tests {
 
         // Absent da_id is a no-op.
         assert_eq!(state.consume_complete_set([99; 32]), Ok(false));
+    }
+
+    fn stage_consume_complete_set(
+        state: &mut DaRelayState,
+        da_id: [u8; 32],
+        peer: &str,
+        payloads: &[&[u8]],
+    ) -> (DaRelaySetRecord, u64) {
+        state
+            .stage_incomplete_da_commit(
+                peer,
+                DaRelayCommit {
+                    da_id,
+                    payload_commitment: payload_commitment(payloads),
+                    peer_quota_key: PeerQuotaKey::from_peer_addr(peer),
+                    chunk_count: payloads.len() as u16,
+                    wire_bytes: payloads.len() as u64,
+                    tx_bytes: Arc::from([]),
+                },
+            )
+            .unwrap();
+        for (index, payload) in payloads.iter().enumerate() {
+            state
+                .stage_incomplete_da_chunk(
+                    peer,
+                    DaRelayChunk {
+                        da_id,
+                        chunk_hash: sha3_256(payload),
+                        peer_quota_key: PeerQuotaKey::from_peer_addr(peer),
+                        chunk_index: index as u16,
+                        payload: Arc::from(*payload),
+                        wire_bytes: payload.len() as u64,
+                        tx_bytes: Arc::from([]),
+                    },
+                )
+                .unwrap();
+        }
+        let record = state.sets_by_da_id[&da_id].clone();
+        let pinned = record.pinned_payload_accounting_bytes().unwrap();
+        (record, pinned)
+    }
+
+    fn accepted_block_with_complete_da_ids(sets: &[([u8; 32], u16)]) -> Vec<u8> {
+        let mut txs = Vec::new();
+        for (da_id, chunk_count) in sets {
+            txs.push(core_wire_tx(&core_commit_tx(*da_id, *chunk_count)));
+            for index in 0..*chunk_count {
+                txs.push(core_wire_tx(&core_chunk_tx(*da_id, index)));
+            }
+        }
+        crate::test_helpers::block_with_txs(1, 0, [0u8; 32], 1_000, &txs)
+    }
+
+    fn poison_relay(relay: &Mutex<DaRelayState>) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = relay.lock().unwrap();
+            panic!("test-only mutex poison");
+        }));
+    }
+
+    #[test]
+    fn da_relay_canonical_consume_keeps_going_after_each_item_error() {
+        use crate::chainstate::CanonicalAppliedBlock;
+
+        for (name, bad_index) in [("first", 0usize), ("middle", 1), ("last", 2)] {
+            let ids = [[0x91; 32], [0x92; 32], [0x93; 32]];
+            let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+            let mut pinned = [0u64; 3];
+            let mut bad_record = None;
+            for (index, da_id) in ids.into_iter().enumerate() {
+                let (record, value) = if index == bad_index {
+                    stage_consume_complete_set(
+                        &mut state,
+                        da_id,
+                        name,
+                        &[
+                            b"bad-0", b"bad-1", b"bad-2", b"bad-3", b"bad-4", b"bad-5", b"bad-6",
+                            b"bad-7",
+                        ],
+                    )
+                } else {
+                    stage_consume_complete_set(&mut state, da_id, name, &[b"good"])
+                };
+                pinned[index] = value;
+                if index == bad_index {
+                    bad_record = Some(record);
+                }
+            }
+            state.pinned_payload_bytes = pinned
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, value)| (index != bad_index).then_some(value))
+                .sum();
+            let hash = [0xa1 + bad_index as u8; 32];
+            let relay = Mutex::new(state);
+            let err = consume_canonical_applied_da_sets(
+                &relay,
+                &[CanonicalAppliedBlock {
+                    hash,
+                    complete_da_ids: ids.to_vec(),
+                }],
+            )
+            .expect_err("item-local accounting failure is returned after all IDs are attempted");
+            let guard = relay.lock().unwrap();
+            assert_eq!(
+                guard.sets_by_da_id.get(&ids[bad_index]),
+                bad_record.as_ref()
+            );
+            for (index, da_id) in ids.into_iter().enumerate() {
+                if index != bad_index {
+                    assert!(
+                        !guard.sets_by_da_id.contains_key(&da_id),
+                        "{name}: valid ID after failure was not consumed"
+                    );
+                }
+            }
+            assert_eq!(
+                guard.pinned_payload_bytes, 0,
+                "{name}: partial successes commit"
+            );
+            drop(guard);
+            assert!(
+                err.contains(&hex::encode(hash)),
+                "{name}: block hash is first context: {err}"
+            );
+            assert!(
+                err.contains(&hex::encode(ids[bad_index])),
+                "{name}: DA ID is retained: {err}"
+            );
+            assert!(
+                err.contains("AccountingUnderflow"),
+                "{name}: native cause is retained: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn da_relay_canonical_consume_retains_earliest_item_error_across_blocks() {
+        use crate::chainstate::CanonicalAppliedBlock;
+
+        let good_first = [0xa1; 32];
+        let bad_first = [0xa2; 32];
+        let bad_second = [0xa3; 32];
+        let bad_third = [0xa4; 32];
+        let good_last = [0xa5; 32];
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        let (_, first_pinned) =
+            stage_consume_complete_set(&mut state, good_first, "first", &[b"first"]);
+        let mut bad_records = BTreeMap::new();
+        for da_id in [bad_first, bad_second, bad_third] {
+            let (record, _) =
+                stage_consume_complete_set(&mut state, da_id, "bad", &[b"bad-0", b"bad-1"]);
+            bad_records.insert(da_id, record);
+        }
+        let (_, last_pinned) =
+            stage_consume_complete_set(&mut state, good_last, "last", &[b"last"]);
+        state.pinned_payload_bytes = first_pinned + last_pinned;
+        let first_hash = [0xb1; 32];
+        let relay = Mutex::new(state);
+        let err = consume_canonical_applied_da_sets(
+            &relay,
+            &[
+                CanonicalAppliedBlock {
+                    hash: first_hash,
+                    complete_da_ids: vec![good_first, bad_first, bad_second],
+                },
+                CanonicalAppliedBlock {
+                    hash: [0xb2; 32],
+                    complete_da_ids: vec![bad_third, good_last],
+                },
+            ],
+        )
+        .expect_err("the earliest item-local failure is returned after every available attempt");
+        let guard = relay.lock().unwrap();
+        for (da_id, record) in &bad_records {
+            assert_eq!(
+                guard.sets_by_da_id.get(da_id),
+                Some(record),
+                "failing ID stays atomic"
+            );
+        }
+        assert!(!guard.sets_by_da_id.contains_key(&good_first));
+        assert!(!guard.sets_by_da_id.contains_key(&good_last));
+        assert_eq!(guard.pinned_payload_bytes, 0);
+        drop(guard);
+        assert!(err.contains(&hex::encode(first_hash)));
+        assert!(err.contains(&hex::encode(bad_first)));
+        assert!(err.contains("AccountingUnderflow"));
+    }
+
+    #[test]
+    fn da_relay_canonical_consume_noops_empty_unknown_incomplete_and_repeated_ids() {
+        use crate::chainstate::CanonicalAppliedBlock;
+
+        let complete_id = [0xc1; 32];
+        let incomplete_id = [0xc2; 32];
+        let unknown_id = [0xc3; 32];
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        let (_, complete_pinned) =
+            stage_consume_complete_set(&mut state, complete_id, "complete", &[b"complete"]);
+        state
+            .test_stage_incomplete_da_commit("incomplete", incomplete_id, 1, 1)
+            .unwrap();
+        let incomplete = state.sets_by_da_id[&incomplete_id].clone();
+        let relay = Mutex::new(state);
+        consume_canonical_applied_da_sets(&relay, &[]).expect("empty report is a no-op");
+        assert_eq!(relay.lock().unwrap().pinned_payload_bytes, complete_pinned);
+        consume_canonical_applied_da_sets(
+            &relay,
+            &[CanonicalAppliedBlock {
+                hash: [0xc4; 32],
+                complete_da_ids: vec![unknown_id, incomplete_id, complete_id, complete_id],
+            }],
+        )
+        .expect("unknown, incomplete, and repeated IDs are safe no-ops");
+        let guard = relay.lock().unwrap();
+        assert!(!guard.sets_by_da_id.contains_key(&complete_id));
+        assert_eq!(guard.sets_by_da_id.get(&incomplete_id), Some(&incomplete));
+        assert_eq!(guard.pinned_payload_bytes, 0);
+    }
+
+    #[test]
+    fn da_relay_accepted_consume_keeps_going_after_item_error() {
+        let first_id = [0xd1; 32];
+        let bad_id = [0xd2; 32];
+        let last_id = [0xd3; 32];
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        let (_, first_pinned) =
+            stage_consume_complete_set(&mut state, first_id, "first", &[b"first"]);
+        let (bad_record, _) =
+            stage_consume_complete_set(&mut state, bad_id, "bad", &[b"bad-0", b"bad-1"]);
+        let (_, last_pinned) = stage_consume_complete_set(&mut state, last_id, "last", &[b"last"]);
+        state.pinned_payload_bytes = first_pinned + last_pinned;
+        let block =
+            accepted_block_with_complete_da_ids(&[(first_id, 1), (bad_id, 1), (last_id, 1)]);
+        assert_eq!(core_ids(&block).unwrap(), vec![first_id, bad_id, last_id]);
+        let relay = Mutex::new(state);
+        let err = consume_accepted_block_da_sets(&relay, &block)
+            .expect_err("accepted bytes keep attempting later IDs after a local failure");
+        let guard = relay.lock().unwrap();
+        assert!(!guard.sets_by_da_id.contains_key(&first_id));
+        assert_eq!(guard.sets_by_da_id.get(&bad_id), Some(&bad_record));
+        assert!(!guard.sets_by_da_id.contains_key(&last_id));
+        assert_eq!(guard.pinned_payload_bytes, 0);
+        drop(guard);
+        assert!(err.contains(&hex::encode(bad_id)));
+        assert!(err.contains("AccountingUnderflow"));
+    }
+
+    #[test]
+    fn da_relay_accepted_malformed_bytes_leave_relay_unchanged() {
+        let da_id = [0xe1; 32];
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        let (record, pinned) =
+            stage_consume_complete_set(&mut state, da_id, "malformed", &[b"payload"]);
+        let relay = Mutex::new(state);
+        assert!(consume_accepted_block_da_sets(&relay, &[0x01, 0x02]).is_err());
+        let guard = relay.lock().unwrap();
+        assert_eq!(guard.sets_by_da_id.get(&da_id), Some(&record));
+        assert_eq!(guard.pinned_payload_bytes, pinned);
+    }
+
+    #[test]
+    fn da_relay_empty_accepted_consume_does_not_observe_mutex_poison() {
+        let relay = Mutex::new(DaRelayState::new(DaRelayCaps::default()).unwrap());
+        poison_relay(&relay);
+        let empty_block = accepted_block_with_complete_da_ids(&[]);
+        assert!(consume_accepted_block_da_sets(&relay, &empty_block).is_ok());
+    }
+
+    #[test]
+    fn da_relay_accepted_mutex_poison_orders_current_id_before_cause() {
+        let da_id = [0xf0; 32];
+        let relay = Mutex::new(DaRelayState::new(DaRelayCaps::default()).unwrap());
+        poison_relay(&relay);
+        let err = consume_accepted_block_da_sets(
+            &relay,
+            &accepted_block_with_complete_da_ids(&[(da_id, 1)]),
+        )
+        .expect_err("non-empty accepted input observes typed mutex poison");
+        let da_id_at = err.find(&hex::encode(da_id)).expect("diagnostic DA ID");
+        let cause_at = err
+            .find("DA relay lock poisoned during accepted-block DA consume")
+            .expect("native poison cause");
+        assert!(da_id_at < cause_at, "accepted diagnostic order: {err}");
+    }
+
+    #[test]
+    fn da_relay_canonical_mutex_poison_is_terminal_at_current_block_and_id() {
+        use crate::chainstate::CanonicalAppliedBlock;
+
+        let current_id = [0xf1; 32];
+        let later_id = [0xf2; 32];
+        let hash = [0xf3; 32];
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        let (current_record, current_pinned) =
+            stage_consume_complete_set(&mut state, current_id, "current", &[b"current"]);
+        let (later_record, _) =
+            stage_consume_complete_set(&mut state, later_id, "later", &[b"later"]);
+        state.pinned_payload_bytes =
+            current_pinned + later_record.pinned_payload_accounting_bytes().unwrap();
+        let relay = Mutex::new(state);
+        poison_relay(&relay);
+        let err = consume_canonical_applied_da_sets(
+            &relay,
+            &[CanonicalAppliedBlock {
+                hash,
+                complete_da_ids: vec![current_id, later_id],
+            }],
+        )
+        .expect_err("non-empty poisoned relay is terminal");
+        let hash_at = err.find(&hex::encode(hash)).expect("canonical block hash");
+        let da_id_at = err
+            .find(&hex::encode(current_id))
+            .expect("canonical current DA ID");
+        let cause_at = err
+            .find("DA relay lock poisoned during accepted-block DA consume")
+            .expect("native poison cause");
+        assert!(
+            hash_at < da_id_at && da_id_at < cause_at,
+            "canonical diagnostic order: {err}"
+        );
+        let guard = match relay.lock() {
+            Ok(_) => panic!("relay must remain poisoned"),
+            Err(poison) => poison.into_inner(),
+        };
+        assert_eq!(guard.sets_by_da_id.get(&current_id), Some(&current_record));
+        assert_eq!(guard.sets_by_da_id.get(&later_id), Some(&later_record));
+        assert_eq!(
+            guard.pinned_payload_bytes,
+            current_pinned + later_record.pinned_payload_accounting_bytes().unwrap()
+        );
+    }
+
+    #[test]
+    fn da_relay_structural_poison_overrides_retained_item_error_with_prior_success() {
+        let good_id = [0xf4; 32];
+        let failing_id = [0xf5; 32];
+        let poisoned_id = [0xf6; 32];
+        let later_id = [0xf7; 32];
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        let (_, good_pinned) = stage_consume_complete_set(&mut state, good_id, "good", &[b"good"]);
+        let (failing_record, _) =
+            stage_consume_complete_set(&mut state, failing_id, "failing", &[b"failing"]);
+        let (poisoned_record, _) =
+            stage_consume_complete_set(&mut state, poisoned_id, "poisoned", &[b"poisoned"]);
+        let (later_record, _) =
+            stage_consume_complete_set(&mut state, later_id, "later", &[b"later"]);
+        state.pinned_payload_bytes = good_pinned;
+        let mut attempted = Vec::new();
+        let result = consume_complete_da_set_ids_with(
+            &[good_id, failing_id, poisoned_id, later_id],
+            |da_id| {
+                attempted.push(da_id);
+                if da_id == poisoned_id {
+                    return Err(CompleteDaSetConsumeAttemptError::MutexPoison);
+                }
+                state
+                    .consume_complete_set(da_id)
+                    .map(|_| ())
+                    .map_err(CompleteDaSetConsumeAttemptError::ItemLocal)
+            },
+        );
+        assert_eq!(attempted, vec![good_id, failing_id, poisoned_id]);
+        assert_eq!(
+            result,
+            Err(CompleteDaSetConsumeError::MutexPoison { da_id: poisoned_id })
+        );
+        assert!(!state.sets_by_da_id.contains_key(&good_id));
+        assert_eq!(state.sets_by_da_id.get(&failing_id), Some(&failing_record));
+        assert_eq!(
+            state.sets_by_da_id.get(&poisoned_id),
+            Some(&poisoned_record)
+        );
+        assert_eq!(state.sets_by_da_id.get(&later_id), Some(&later_record));
+        assert_eq!(state.pinned_payload_bytes, 0);
     }
 
     #[test]
