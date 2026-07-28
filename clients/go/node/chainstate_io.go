@@ -95,12 +95,13 @@ func chainStateFromDisk(disk chainStateDisk) (*ChainState, error) {
 		Utxos:            utxos,
 	}, nil
 }
+
 func ChainStatePath(dataDir string) string {
 	return filepath.Join(dataDir, chainStateFileName)
 }
 
 func LoadChainState(path string) (*ChainState, error) {
-	raw, err := readFileByPath(path)
+	raw, err := readFileByPath(path, chainStateFileMaxBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return NewChainState(), nil
 	}

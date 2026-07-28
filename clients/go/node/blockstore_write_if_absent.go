@@ -101,7 +101,7 @@ import (
 // `_ = ...` discarded the exact failures that MUST reach the
 // caller. Propagate via `return` instead.
 func writeFileIfAbsent(path string, content []byte) error {
-	existing, err := readFileByPathFn(path)
+	existing, err := readFileByPathFn(path, storeVerifyReadMaxBytes)
 	if err == nil {
 		return syncMatchingExistingFile(path, content, existing)
 	}
@@ -129,7 +129,7 @@ func writeFileViaTempLink(path string, content []byte) error {
 }
 
 func handleLinkEEXIST(path string, content []byte) error {
-	existing, err := readFileByPathFn(path)
+	existing, err := readFileByPathFn(path, storeVerifyReadMaxBytes)
 	if err != nil {
 		return fmt.Errorf("read existing after link EEXIST %s: %w", path, err)
 	}

@@ -8,7 +8,9 @@ use rubin_consensus::{
 use serde::{Deserialize, Serialize};
 
 use crate::io_utils::{
-    parse_hex32, read_file_from_dir, write_file_atomic, write_file_exclusive, AtomicWriteError,
+    parse_hex32, read_file_by_path, read_file_from_dir, write_file_atomic, write_file_exclusive,
+    AtomicWriteError, BLOCK_FILE_MAX_BYTES, HEADER_FILE_MAX_BYTES, INDEX_FILE_MAX_BYTES,
+    STORE_VERIFY_READ_MAX_BYTES, UNDO_FILE_MAX_BYTES,
 };
 use crate::undo::{marshal_block_undo, unmarshal_block_undo, BlockUndo};
 use std::ffi::OsStr;
@@ -447,8 +449,12 @@ impl BlockStore {
         block_hash_bytes: [u8; 32],
     ) -> Result<Vec<u8>, std::io::Error> {
         // E.10: see `get_block_by_hash` for the safe-leaf-name rationale.
+        // RUB-1057: an over-bound file is refused with `InvalidData` (never
+        // `NotFound`), so on the branch ancestor walk it routes to
+        // `load_verified_branch_ancestor`'s local-corruption arm
+        // (`branch_store_corrupt`) and never changes a peer's disposition.
         let name = format!("{}.bin", hex::encode(block_hash_bytes));
-        read_file_from_dir(&self.blocks_dir, &name)
+        read_file_from_dir(&self.blocks_dir, &name, BLOCK_FILE_MAX_BYTES)
     }
 
     pub fn get_block_by_hash(&self, block_hash_bytes: [u8; 32]) -> Result<Vec<u8>, String> {
@@ -466,7 +472,7 @@ impl BlockStore {
     pub fn get_header_by_hash(&self, block_hash_bytes: [u8; 32]) -> Result<Vec<u8>, String> {
         // E.10: see `get_block_by_hash` doc.
         let name = format!("{}.bin", hex::encode(block_hash_bytes));
-        read_file_from_dir(&self.headers_dir, &name).map_err(|e| {
+        read_file_from_dir(&self.headers_dir, &name, HEADER_FILE_MAX_BYTES).map_err(|e| {
             format!(
                 "read header {}: {e}",
                 self.headers_dir.join(&name).display()
@@ -681,7 +687,7 @@ impl BlockStore {
     pub fn get_undo(&self, block_hash_bytes: [u8; 32]) -> Result<BlockUndo, String> {
         // E.10: see `get_block_by_hash` doc.
         let name = format!("{}.json", hex::encode(block_hash_bytes));
-        let raw = read_file_from_dir(&self.undo_dir, &name)
+        let raw = read_file_from_dir(&self.undo_dir, &name, UNDO_FILE_MAX_BYTES)
             .map_err(|e| format!("read undo {}: {e}", self.undo_dir.join(&name).display()))?;
         unmarshal_block_undo(&raw)
     }
@@ -882,8 +888,9 @@ fn load_blockstore_index(path: &Path) -> Result<BlockStoreIndexDisk, String> {
             ));
         }
     };
-    // A missing marker is an error, never an implicit empty index.
-    let raw = read_file_from_dir(parent, name)
+    // A missing marker is an error, never an implicit empty index. The read
+    // is bounded by the index class (RUB-1057) before any allocation.
+    let raw = read_file_from_dir(parent, name, INDEX_FILE_MAX_BYTES)
         .map_err(|e| format!("read blockstore index {}: {e}", path.display()))?;
     // `deny_unknown_fields` plus serde's duplicate/missing-field errors,
     // `from_slice`'s trailing-input rejection and the entry check below pin the
@@ -1023,6 +1030,19 @@ struct BlockStoreIndexView<'a> {
 /// through `sync_dir`'s own best-effort wrapper (Copilot P1 wave-7 on
 /// PR #1220).
 fn write_file_if_absent(path: &Path, content: &[u8]) -> Result<(), String> {
+    // Both verify reads share ONE documented seam bound
+    // (STORE_VERIFY_READ_MAX_BYTES = undo, the coarsest class served);
+    // the closure is the test seam mirroring Go's `readFileByPathFn` var.
+    write_file_if_absent_with(path, content, |p| {
+        read_file_by_path(p, STORE_VERIFY_READ_MAX_BYTES)
+    })
+}
+
+fn write_file_if_absent_with(
+    path: &Path,
+    content: &[u8],
+    read_existing: impl Fn(&Path) -> Result<Vec<u8>, std::io::Error>,
+) -> Result<(), String> {
     // Fast path: destination already on disk. Same behaviour as the Go
     // helper's `readFileByPathFn(path)` fast path — short-circuit
     // before any temp write when the file is already present with the
@@ -1045,7 +1065,7 @@ fn write_file_if_absent(path: &Path, content: &[u8]) -> Result<(), String> {
     // double-swallowed errors — `sync_dir` is already best-effort,
     // so the outer `let _` discarded the exact failures that MUST
     // reach the caller. Propagate via `?` instead.
-    match fs::read(path) {
+    match read_existing(path) {
         Ok(existing) => {
             if existing != content {
                 return Err(format!(
@@ -1068,38 +1088,186 @@ fn write_file_if_absent(path: &Path, content: &[u8]) -> Result<(), String> {
 
     match write_file_exclusive(path, content) {
         Ok(()) => Ok(()),
-        Err(AtomicWriteError::AlreadyExists) => {
-            // Race: destination appeared between the fast-path read
-            // and our link. Verify content matches (idempotent retry)
-            // or surface the drift as an error — never silently
-            // overwrite, never return Ok on drift.
-            let existing =
-                fs::read(path).map_err(|e| format!("read existing {}: {e}", path.display()))?;
-            if existing != content {
-                return Err(format!(
-                    "file already exists with different content: {}",
-                    path.display()
-                ));
-            }
-            // Propagate parent dir-sync result on the EEXIST-retry
-            // branch for the same reason as the Ok fast-path above:
-            // `sync_dir` already applies the permission policy, so
-            // `?` surfaces only real durability failures.
-            if let Some(parent) = crate::io_utils::effective_parent(path) {
-                crate::io_utils::sync_dir(parent)?;
-            }
-            Ok(())
-        }
+        Err(AtomicWriteError::AlreadyExists) => handle_link_eexist(path, content, read_existing),
         Err(AtomicWriteError::Other(msg)) => Err(msg),
     }
 }
 
+/// EEXIST verify arm (Go twin: `handleLinkEEXIST`): the destination
+/// appeared between the fast-path read and our link. Re-read it through
+/// the same bounded seam, verify content matches (idempotent retry) or
+/// surface the drift as an error — never silently overwrite, never Ok on
+/// drift.
+fn handle_link_eexist(
+    path: &Path,
+    content: &[u8],
+    read_existing: impl Fn(&Path) -> Result<Vec<u8>, std::io::Error>,
+) -> Result<(), String> {
+    let existing =
+        read_existing(path).map_err(|e| format!("read existing {}: {e}", path.display()))?;
+    if existing != content {
+        return Err(format!(
+            "file already exists with different content: {}",
+            path.display()
+        ));
+    }
+    // Propagate parent dir-sync result on the EEXIST-retry branch for the
+    // same reason as the Ok fast-path above: `sync_dir` already applies
+    // the permission policy, so `?` surfaces only real durability failures.
+    if let Some(parent) = crate::io_utils::effective_parent(path) {
+        crate::io_utils::sync_dir(parent)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::io_utils::unique_temp_path;
+    use crate::io_utils::{create_sparse_file, unique_temp_path, STORE_FILE_TOO_LARGE_PREFIX};
     use std::path::{Path, PathBuf};
 
-    use super::{block_store_path, write_file_if_absent, BlockStore, BLOCK_STORE_DIR_NAME};
+    use super::{
+        block_store_path, load_blockstore_index, read_file_by_path, write_file_if_absent,
+        write_file_if_absent_with, BlockStore, BlockStoreIndexDisk, BLOCK_FILE_MAX_BYTES,
+        BLOCK_STORE_DIR_NAME, HEADER_FILE_MAX_BYTES, INDEX_FILE_MAX_BYTES,
+        STORE_VERIFY_READ_MAX_BYTES, UNDO_FILE_MAX_BYTES,
+    };
+
+    /// RUB-1057: every blockstore read path refuses an over-bound file with
+    /// the typed size-class error — never an allocation, an absent-file
+    /// default, or a parse error (the index row is over-bound AND malformed
+    /// [all zeros] and must report the size class). The block row goes
+    /// through `read_block_file_by_hash` so the ErrorKind pin (InvalidData,
+    /// never NotFound) covers the branch ancestor walk (RUB-881): only
+    /// NotFound may keep `sync_reorg::load_verified_branch_ancestor`'s
+    /// parent-not-found arm. Go twin:
+    /// `TestBlockStoreReadFileClassBoundsRefuseOverBound`.
+    #[test]
+    fn read_class_bounds_refuse_over_bound_files() {
+        let root = unique_temp_path("rubin-bs-bounds");
+        let store = BlockStore::create(&root).expect("create");
+        let hash = [0u8; 32];
+        let name = hex::encode(hash);
+        create_sparse_file(
+            &root.join("blocks").join(format!("{name}.bin")),
+            BLOCK_FILE_MAX_BYTES + 1,
+        );
+        let err = store.read_block_file_by_hash(hash).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_ne!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            err.to_string().starts_with(STORE_FILE_TOO_LARGE_PREFIX),
+            "{err}"
+        );
+        create_sparse_file(
+            &root.join("headers").join(format!("{name}.bin")),
+            HEADER_FILE_MAX_BYTES + 1,
+        );
+        let err = store.get_header_by_hash(hash).unwrap_err();
+        assert!(err.contains(STORE_FILE_TOO_LARGE_PREFIX), "{err}");
+        create_sparse_file(
+            &root.join("undo").join(format!("{name}.json")),
+            UNDO_FILE_MAX_BYTES + 1,
+        );
+        let err = store.get_undo(hash).unwrap_err();
+        assert!(err.contains(STORE_FILE_TOO_LARGE_PREFIX), "{err}");
+        let big_index = root.join("big-index.json");
+        create_sparse_file(&big_index, INDEX_FILE_MAX_BYTES + 1);
+        let err = load_blockstore_index(&big_index).unwrap_err();
+        assert!(err.contains(STORE_FILE_TOO_LARGE_PREFIX), "{err}");
+        let verify_dst = root.join("blocks").join("verify.bin");
+        create_sparse_file(&verify_dst, STORE_VERIFY_READ_MAX_BYTES + 1);
+        let err = write_file_if_absent(&verify_dst, b"x").unwrap_err();
+        assert!(err.contains(STORE_FILE_TOO_LARGE_PREFIX), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Completes the per-class verdict pair (Go twin:
+    /// `TestBlockStoreReadFileClassBoundsAcceptAtBound`): a file sized
+    /// EXACTLY at its class bound is admitted by the read layer — the header
+    /// row returns its bytes, every other row's error is the caller's
+    /// parse/content class, never the size refusal (block's accept row lives
+    /// in `read_file_from_dir_block_class_production_bound`). The
+    /// undo/chainstate/verify rows transiently materialize 1-2GB of zeros
+    /// (sparse on disk; the JSON decoders fail on the first byte).
+    #[test]
+    fn read_class_bounds_accept_at_bound_files() {
+        let root = unique_temp_path("rubin-bs-at-bound");
+        let store = BlockStore::create(&root).expect("create");
+        let hash = [0u8; 32];
+        let name = hex::encode(hash);
+        let not_size = |row: &str, err: String| {
+            assert!(!err.contains(STORE_FILE_TOO_LARGE_PREFIX), "{row}: {err}");
+        };
+        create_sparse_file(
+            &root.join("headers").join(format!("{name}.bin")),
+            HEADER_FILE_MAX_BYTES,
+        );
+        let got = store.get_header_by_hash(hash).expect("header at bound");
+        assert_eq!(got.len() as u64, HEADER_FILE_MAX_BYTES);
+        create_sparse_file(
+            &root.join("undo").join(format!("{name}.json")),
+            UNDO_FILE_MAX_BYTES,
+        );
+        not_size("undo", store.get_undo(hash).unwrap_err());
+        let idx = root.join("at-index.json");
+        create_sparse_file(&idx, INDEX_FILE_MAX_BYTES);
+        not_size("index_marker", load_blockstore_index(&idx).unwrap_err());
+        let cs = root.join("chainstate.json");
+        create_sparse_file(&cs, crate::io_utils::CHAIN_STATE_FILE_MAX_BYTES);
+        not_size(
+            "chainstate",
+            crate::chainstate::load_chain_state(&cs).unwrap_err(),
+        );
+        let verify = root.join("blocks").join("verify.bin");
+        create_sparse_file(&verify, STORE_VERIFY_READ_MAX_BYTES);
+        not_size(
+            "write_if_absent_verify",
+            write_file_if_absent(&verify, b"x").unwrap_err(),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Drives the hard_link-EEXIST verify arm against an over-bound
+    /// existing destination: the seam's first probe reports NotFound so
+    /// `write_file_exclusive` reaches hard_link EEXIST, and the second
+    /// (real, bounded) read must refuse instead of buffering the file.
+    /// Go twin: `TestWriteFileIfAbsentEEXISTVerifyReadFileBound`.
+    #[test]
+    fn write_file_if_absent_eexist_verify_read_enforces_bound() {
+        let dir = unique_temp_path("rubin-wfia-eexist-bound");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let dst = dir.join("dst.bin");
+        create_sparse_file(&dst, STORE_VERIFY_READ_MAX_BYTES + 1);
+        let first = std::cell::Cell::new(true);
+        let err = write_file_if_absent_with(&dst, b"x", |p| {
+            if first.replace(false) {
+                return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+            }
+            read_file_by_path(p, STORE_VERIFY_READ_MAX_BYTES)
+        })
+        .unwrap_err();
+        assert!(err.contains(STORE_FILE_TOO_LARGE_PREFIX), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Index marker per-entry derivation pin: one canonical entry costs
+    /// exactly 72 bytes on the production pretty encoding (Go twin row
+    /// `index_marker_entry` in `TestReadFileBoundDerivationEntrySizes`).
+    #[test]
+    fn index_marker_entry_derivation_size() {
+        let enc = |canonical: Vec<String>| -> i64 {
+            let disk = BlockStoreIndexDisk {
+                version: 1,
+                canonical,
+            };
+            serde_json::to_string_pretty(&disk).expect("json").len() as i64
+        };
+        let hex64 = "ab".repeat(32);
+        assert_eq!(
+            enc(vec![hex64.clone(), hex64.clone()]) - enc(vec![hex64]),
+            72
+        );
+    }
 
     /// Happy path for the E.3-hardened helper: destination absent,
     /// write_file_if_absent creates it via the atomic hard_link path,

@@ -1585,6 +1585,29 @@ mod tests {
         );
     }
 
+    /// RUB-1057 hostile row: an over-bound ancestor block file on the branch
+    /// walk is LOCAL corruption — the bounded reader refuses with
+    /// `InvalidData` (never `NotFound`), so `load_verified_branch_ancestor`'s
+    /// NotFound-only arm cannot report it as an absent parent, and no peer
+    /// disposition changes. Go twin:
+    /// `TestLoadVerifiedBranchAncestorOverBoundBlockIsLocalCorruption`.
+    #[test]
+    fn branch_walk_over_bound_ancestor_is_local_corruption() {
+        let dir = unique_temp_path("rubin-reorg-over-bound");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let store = BlockStore::create(block_store_path(&dir)).expect("create blockstore");
+        let hash = [0x11u8; 32];
+        crate::io_utils::create_sparse_file(
+            &block_store_path(&dir)
+                .join("blocks")
+                .join(format!("{}.bin", hex::encode(hash))),
+            crate::io_utils::BLOCK_FILE_MAX_BYTES + 1,
+        );
+        let err = load_verified_branch_ancestor(&store, hash).unwrap_err();
+        assert_branch_store_corruption(&err);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
     /// Engine holding genesis + one canonical block, ready for a side-branch
     /// candidate at height 2. Returns the engine, its data dir, and the
     /// already-generated subsidy at height 1.

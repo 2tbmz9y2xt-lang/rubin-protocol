@@ -878,3 +878,84 @@ func TestAllocateAndWriteTemp_ExhaustsRetries(t *testing.T) {
 		_ = os.Remove(stale)
 	}
 }
+
+// TestLoadChainStateRefusesOverBoundSnapshot pins the RUB-1057 chainstate
+// class bound at the caller: an over-bound snapshot yields the typed
+// errStoreFileTooLarge, never a fresh-state fallback or an allocation.
+func TestLoadChainStateRefusesOverBoundSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), chainStateFileName)
+	createSparseFile(t, path, chainStateFileMaxBytes+1)
+	if _, err := LoadChainState(path); !errors.Is(err, errStoreFileTooLarge) {
+		t.Fatalf("want errStoreFileTooLarge, got %v", err)
+	}
+}
+
+// TestReadFileBoundDerivationEntrySizes pins the measured per-entry JSON
+// byte costs cited by the RUB-1057 bound derivations in safeio.go, encoding
+// the real disk structs exactly as production does (json.MarshalIndent with
+// two-space indent). Each want is the marginal cost of one additional entry.
+// A red row means a disk-struct change silently shifted the derivation
+// margins: reconcile the safeio.go comments and the Rust mirror bound table
+// before re-pinning.
+func TestReadFileBoundDerivationEntrySizes(t *testing.T) {
+	enc := func(v any) int {
+		raw, err := json.MarshalIndent(v, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return len(raw)
+	}
+	const maxU64 = ^uint64(0)
+	hex64 := strings.Repeat("ab", 32)
+	// CORE_VAULT max covenant_data: 32+1+1+12*32+2+1024*32 = 33_188 raw bytes.
+	worstCov := strings.Repeat("cd", 33188)
+	utxo := func(cov string, covType uint16) utxoDiskEntry {
+		return utxoDiskEntry{
+			Txid: hex64, CovenantData: cov, Value: maxU64,
+			CreationHeight: maxU64, Vout: ^uint32(0), CovenantType: covType,
+		}
+	}
+	worst := utxo(worstCov, 0x0101)
+	p2pk := utxo(strings.Repeat("cd", 33), 0x0000)
+	spent := spentUndoDisk{
+		Txid: hex64, Vout: ^uint32(0), Value: maxU64,
+		CovenantType: 0x0101, CovenantData: worstCov, CreationHeight: maxU64,
+	}
+	rows := []struct {
+		name     string
+		one, two any
+		want     int
+	}{
+		{
+			"index_marker_entry",
+			blockStoreIndexDisk{Canonical: []string{hex64}, Version: 1},
+			blockStoreIndexDisk{Canonical: []string{hex64, hex64}, Version: 1},
+			72,
+		},
+		{
+			"chainstate_worst_vault_entry",
+			chainStateDisk{Utxos: []utxoDiskEntry{worst}},
+			chainStateDisk{Utxos: []utxoDiskEntry{worst, worst}},
+			66671,
+		},
+		{
+			"chainstate_digit_width_conservative_p2pk_entry",
+			chainStateDisk{Utxos: []utxoDiskEntry{p2pk}},
+			chainStateDisk{Utxos: []utxoDiskEntry{p2pk, p2pk}},
+			359,
+		},
+		{
+			"undo_worst_spent_entry",
+			blockUndoDisk{Txs: []txUndoDisk{{Spent: []spentUndoDisk{spent}}}},
+			blockUndoDisk{Txs: []txUndoDisk{{Spent: []spentUndoDisk{spent, spent}}}},
+			66707,
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			if got := enc(row.two) - enc(row.one); got != row.want {
+				t.Fatalf("marginal per-entry bytes = %d, want %d", got, row.want)
+			}
+		})
+	}
+}

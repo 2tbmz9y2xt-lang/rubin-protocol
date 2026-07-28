@@ -309,14 +309,14 @@ func (bs *BlockStore) GetBlockByHash(blockHash [32]byte) ([]byte, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
 	}
-	return readFileFromDir(bs.blocksDir, hex.EncodeToString(blockHash[:])+".bin")
+	return readFileFromDir(bs.blocksDir, hex.EncodeToString(blockHash[:])+".bin", blockFileMaxBytes)
 }
 
 func (bs *BlockStore) GetHeaderByHash(blockHash [32]byte) ([]byte, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
 	}
-	return readFileFromDir(bs.headersDir, hex.EncodeToString(blockHash[:])+".bin")
+	return readFileFromDir(bs.headersDir, hex.EncodeToString(blockHash[:])+".bin", headerFileMaxBytes)
 }
 
 func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
@@ -501,7 +501,7 @@ func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
 	}
-	raw, err := readFileFromDir(bs.undoDir, hex.EncodeToString(blockHash[:])+".json")
+	raw, err := readFileFromDir(bs.undoDir, hex.EncodeToString(blockHash[:])+".json", undoFileMaxBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -511,7 +511,7 @@ func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
 // loadBlockStoreIndex reads the sole initialization marker. A missing marker is
 // an error, never an implicit empty index.
 func loadBlockStoreIndex(path string) (blockStoreIndexDisk, error) {
-	raw, err := readFileByPath(path)
+	raw, err := readFileByPath(path, indexFileMaxBytes)
 	if err != nil {
 		return blockStoreIndexDisk{}, err
 	}
