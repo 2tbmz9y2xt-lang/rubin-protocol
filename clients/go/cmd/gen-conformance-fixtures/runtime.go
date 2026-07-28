@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"math"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"sort"
@@ -46,6 +47,39 @@ var embeddedTestKeysFS embed.FS
 //
 // It intentionally mutates only the vectors that previously used a dummy suite_id=0
 // witness item and now fail with TX_ERR_SIG_ALG_INVALID after Q-R006.
+
+// Devnet operator-evidence value constants.
+//
+// The three conformance/fixtures/devnet/* vectors are the only
+// generator-owned artifacts replayed against a LIVE node: the
+// scripts/devnet-core-{htlc,multisig,vault}-evidence.sh harnesses seed
+// utxos[0] and submit tx_hex through the node's real /submit_tx path.
+// That path enforces the mempool rolling fee floor and rejects any
+// transaction whose fee is below tx_weight * DefaultMempoolMinFeeRate
+// (clients/go/node/mempool.go, clients/go/node/mempool_fee_floor.go).
+// An ML-DSA-87-signed single-input vector weighs ~7.7k weight units,
+// so the 100/90 values these vectors inherited from the offline
+// conformance vectors put their fee two orders of magnitude below the
+// floor.
+//
+// fee = 1_000_000 - 900_000 = 100_000 clears a ~7.7k floor by >10x, so
+// the artifacts absorb both re-signing weight growth and a modest
+// future floor raise. That headroom is not itself enforced:
+// pinDevnetEvidenceFeeMetadata re-derives the real weight from the
+// emitted transaction and fails generation only once the fee drops
+// below the 2x devnetEvidenceMinFeeMarginFactor bound.
+//
+// The zero-chain CV-*.json vectors deliberately keep their historical
+// 100/90 values: they are replayed by the offline conformance harness,
+// which has no mempool and no fee floor.
+const (
+	devnetEvidenceInputValue  = uint64(1_000_000)
+	devnetEvidenceOutputValue = uint64(900_000)
+
+	// devnetEvidenceMinFeeMarginFactor is the multiple of the live
+	// admission floor a generated devnet fee must clear.
+	devnetEvidenceMinFeeMarginFactor = uint64(2)
+)
 
 // runGeneratorCLI parses CLI flags and runs the conformance fixture
 // generator. The --output-dir flag selects between two write surfaces:
@@ -204,7 +238,7 @@ func runGeneratorCLIWithArgs(args []string) {
 	{
 		path := filepath.Join(repoRoot, "conformance/fixtures/CV-HTLC.json")
 		f := mustLoadFixture(path)
-		updateHTLCVector(f, "CV-HTLC-13", zeroChainID, htlcClaimKP, htlcRefundKP, destKP)
+		updateHTLCVector(f, "CV-HTLC-13", zeroChainID, htlcClaimKP, htlcRefundKP, destKP, 100, 90) // fee=10
 		mustWriteFixture(remapWritePath(path), f)
 	}
 
@@ -228,9 +262,11 @@ func runGeneratorCLIWithArgs(args []string) {
 			ownerKP,
 			vaultKP,
 			destKP,
-			100, // input_value
-			90,  // vault_output_value (fee=10)
+			devnetEvidenceInputValue,
+			devnetEvidenceOutputValue,
 		)
+		// Live-admission values: see devnetEvidenceInputValue.
+		pinDevnetEvidenceFeeMetadata(f, "DEVNET-VAULT-CREATE-01", devnetEvidenceInputValue, devnetEvidenceOutputValue)
 		mustWriteFixture(remapWritePath(path), f)
 	}
 
@@ -250,10 +286,12 @@ func runGeneratorCLIWithArgs(args []string) {
 		path := filepath.Join(repoRoot, "conformance", "fixtures", "devnet", "devnet-htlc-claim-01.json")
 		f := mustLoadFixture(path)
 		devnetChainID := node.DevnetGenesisChainID()
-		updateHTLCVector(f, "DEVNET-HTLC-CLAIM-01", devnetChainID, htlcClaimKP, htlcRefundKP, destKP)
+		// Live-admission values: see devnetEvidenceInputValue.
+		updateHTLCVector(f, "DEVNET-HTLC-CLAIM-01", devnetChainID, htlcClaimKP, htlcRefundKP, destKP, devnetEvidenceInputValue, devnetEvidenceOutputValue)
 		// Pin chain_id_hex on the vector so the artifact carries
 		// explicit metadata matching the chainID just used to sign.
 		findVector(f, "DEVNET-HTLC-CLAIM-01")["chain_id_hex"] = hex.EncodeToString(devnetChainID[:])
+		pinDevnetEvidenceFeeMetadata(f, "DEVNET-HTLC-CLAIM-01", devnetEvidenceInputValue, devnetEvidenceOutputValue)
 		mustWriteFixture(remapWritePath(path), f)
 	}
 
@@ -274,10 +312,12 @@ func runGeneratorCLIWithArgs(args []string) {
 		path := filepath.Join(repoRoot, "conformance", "fixtures", "devnet", "devnet-multisig-spend-01.json")
 		f := mustLoadFixture(path)
 		devnetChainID := node.DevnetGenesisChainID()
-		updateMultisigVector1of1(f, "DEVNET-MULTISIG-SPEND-01", devnetChainID, multisigKP, 100, 90)
+		// Live-admission values: see devnetEvidenceInputValue.
+		updateMultisigVector1of1(f, "DEVNET-MULTISIG-SPEND-01", devnetChainID, multisigKP, devnetEvidenceInputValue, devnetEvidenceOutputValue)
 		// Pin chain_id_hex on the vector so the artifact carries
 		// explicit metadata matching the chainID just used to sign.
 		findVector(f, "DEVNET-MULTISIG-SPEND-01")["chain_id_hex"] = hex.EncodeToString(devnetChainID[:])
+		pinDevnetEvidenceFeeMetadata(f, "DEVNET-MULTISIG-SPEND-01", devnetEvidenceInputValue, devnetEvidenceOutputValue)
 		mustWriteFixture(remapWritePath(path), f)
 	}
 
@@ -915,6 +955,80 @@ func updateDevnetVaultCreateVector(
 	v["chain_id_hex"] = hex.EncodeToString(devnetChainID[:])
 }
 
+// pinDevnetEvidenceFeeMetadata writes the input value and the derived
+// expect_fee onto a devnet operator-evidence vector, then fails
+// generation unless the resulting fee clears live mempool admission by
+// devnetEvidenceMinFeeMarginFactor.
+//
+// The value must be pinned by the generator, not left in the JSON: the
+// shared updateSingleInputSignedVector helper writes only tx_hex and
+// covenant_data, the evidence scripts seed the node's UTXO set from
+// utxos[0].value, and a value disagreeing with the one signed over
+// yields a different sighash and an invalid signature.
+//
+// outValue is cross-checked against the transaction the caller's
+// update* helper actually signed, so a call site whose arguments drift
+// from the emitted bytes fails here rather than only at /submit_tx.
+//
+// The floor is re-derived from the emitted transaction rather than
+// assumed. The comparison mirrors feeRateBelowFloor in
+// clients/go/node/mempool_fee_floor.go, including its weight==0
+// fail-closed arm.
+func pinDevnetEvidenceFeeMetadata(f *fixtureFile, id string, inValue uint64, outValue uint64) {
+	if outValue > inValue {
+		fatalf("%s: output value %d exceeds input value %d", id, outValue, inValue)
+	}
+	fee := inValue - outValue
+
+	v := findVector(f, id)
+	utxos := anyToSliceMap(v["utxos"])
+	if len(utxos) != 1 {
+		fatalf("%s: want 1 utxo, got %d", id, len(utxos))
+	}
+	utxos[0]["value"] = float64(inValue)
+	v["utxos"] = utxos
+	v["expect_fee"] = float64(fee)
+
+	txHex, ok := v["tx_hex"].(string)
+	if !ok {
+		fatalf("%s: tx_hex is not a string", id)
+	}
+	txBytes, err := hex.DecodeString(txHex)
+	if err != nil {
+		fatalf("%s: decode tx_hex: %v", id, err)
+	}
+	tx, _, _, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		fatalf("%s: parse emitted tx: %v", id, err)
+	}
+
+	var sumOut uint64
+	for i, out := range tx.Outputs {
+		if sumOut > math.MaxUint64-out.Value {
+			fatalf("%s: emitted tx output value sum overflows at index %d", id, i)
+		}
+		sumOut += out.Value
+	}
+	if sumOut != outValue {
+		fatalf("%s: emitted tx output sum %d does not match outValue %d", id, sumOut, outValue)
+	}
+
+	weight, _, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil {
+		fatalf("%s: tx weight: %v", id, err)
+	}
+	if weight == 0 {
+		fatalf("%s: emitted tx has zero weight", id)
+	}
+	hi, required := bits.Mul64(weight, node.DefaultMempoolMinFeeRate*devnetEvidenceMinFeeMarginFactor)
+	if hi != 0 || fee < required {
+		fatalf(
+			"%s: fee=%d below required=%d (weight=%d min_fee_rate=%d margin=%dx); raise devnetEvidenceInputValue",
+			id, fee, required, weight, node.DefaultMempoolMinFeeRate, devnetEvidenceMinFeeMarginFactor,
+		)
+	}
+}
+
 func updateVaultSpendVectorsVaultFixture(
 	f *fixtureFile,
 	chainID [32]byte,
@@ -1041,6 +1155,8 @@ func updateHTLCVector(
 	claimKP digestSigner,
 	refundKP digestSigner,
 	destKP digestSigner,
+	inValue uint64,
+	outValue uint64,
 ) {
 	v := findVector(f, id)
 	utxos := anyToSliceMap(v["utxos"])
@@ -1073,7 +1189,7 @@ func updateHTLCVector(
 
 	utxos[0]["covenant_data"] = hex.EncodeToString(htlcCov)
 	utxos[0]["covenant_type"] = float64(consensus.COV_TYPE_HTLC)
-	utxos[0]["value"] = float64(100)
+	utxos[0]["value"] = float64(inValue)
 
 	prev := mustHex32(utxos[0]["txid"].(string))
 	vout := mustJSONUint32(id+".utxos[0].vout", utxos[0]["vout"])
@@ -1084,12 +1200,12 @@ func updateHTLCVector(
 		TxKind:  0x00,
 		TxNonce: 1,
 		Inputs:  []consensus.TxInput{{PrevTxid: prev, PrevVout: vout, ScriptSig: nil, Sequence: 0}},
-		Outputs: []consensus.TxOutput{{Value: 90, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: outCov}},
+		Outputs: []consensus.TxOutput{{Value: outValue, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: outCov}},
 		// Keep locktime=0 for non-coinbase.
 		Locktime: 0,
 	}
 
-	sig := mustSignInputDigest(id, "claim_input", claimKP, tx, 0, 100, chainID)
+	sig := mustSignInputDigest(id, "claim_input", claimKP, tx, 0, inValue, chainID)
 
 	// Witness items for HTLC input:
 	//  - path selector (sentinel): pubkey=key_id (32), signature=claim payload
