@@ -49,38 +49,102 @@ pub struct BlockStore {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BlockStoreIndexDisk {
     version: u32,
     canonical: Vec<String>,
 }
 
-impl BlockStore {
-    pub fn open<P: Into<PathBuf>>(root_path: P) -> Result<Self, String> {
-        let root_path = root_path.into();
-        if root_path.as_os_str().is_empty() {
+struct BlockStorePaths {
+    root: PathBuf,
+    index: PathBuf,
+    blocks: PathBuf,
+    headers: PathBuf,
+    undo: PathBuf,
+}
+
+impl BlockStorePaths {
+    fn new(root: PathBuf) -> Result<Self, String> {
+        if root.as_os_str().is_empty() {
             return Err("blockstore root is required".to_string());
         }
+        Ok(Self {
+            index: root.join("index.json"),
+            blocks: root.join("blocks"),
+            headers: root.join("headers"),
+            undo: root.join("undo"),
+            root,
+        })
+    }
 
-        let index_path = root_path.join("index.json");
-        let blocks_dir = root_path.join("blocks");
-        let headers_dir = root_path.join("headers");
-        let undo_dir = root_path.join("undo");
+    /// Check the resolved filesystem kind of every path the store needs.
+    /// `metadata`, not `symlink_metadata`: symlinks resolve normally on open.
+    fn require_initialized(&self) -> Result<(), String> {
+        for dir in [&self.root, &self.blocks, &self.headers, &self.undo] {
+            let meta = fs::metadata(dir)
+                .map_err(|e| format!("blockstore directory {}: {e}", dir.display()))?;
+            if !meta.is_dir() {
+                return Err(format!(
+                    "blockstore path is not a directory: {}",
+                    dir.display()
+                ));
+            }
+        }
+        let meta = fs::metadata(&self.index)
+            .map_err(|e| format!("blockstore index {}: {e}", self.index.display()))?;
+        if !meta.is_file() {
+            return Err(format!(
+                "blockstore index is not a regular file: {}",
+                self.index.display()
+            ));
+        }
+        Ok(())
+    }
+}
 
-        fs::create_dir_all(&blocks_dir)
-            .map_err(|e| format!("create blockstore blocks {}: {e}", blocks_dir.display()))?;
-        fs::create_dir_all(&headers_dir)
-            .map_err(|e| format!("create blockstore headers {}: {e}", headers_dir.display()))?;
-        fs::create_dir_all(&undo_dir)
-            .map_err(|e| format!("create blockstore undo {}: {e}", undo_dir.display()))?;
+impl BlockStore {
+    /// Initialize a fresh blockstore at `root_path`: the only constructor that
+    /// writes. The root is created exclusively (an existing root of any kind
+    /// fails; two racing creates cannot both win) and `index.json` is written
+    /// LAST as the creation commit marker, so a crash before it leaves a partial
+    /// root both constructors reject. Owns only `root_path`, never chainstate.
+    /// Go mirror: `CreateBlockStore` in `clients/go/node/blockstore.go`.
+    pub fn create<P: Into<PathBuf>>(root_path: P) -> Result<Self, String> {
+        let paths = BlockStorePaths::new(root_path.into())?;
+        fs::create_dir(&paths.root)
+            .map_err(|e| format!("create blockstore root {}: {e}", paths.root.display()))?;
+        for dir in [&paths.blocks, &paths.headers, &paths.undo] {
+            fs::create_dir(dir)
+                .map_err(|e| format!("create blockstore directory {}: {e}", dir.display()))?;
+        }
+        let index = BlockStoreIndexDisk {
+            version: BLOCK_STORE_INDEX_VERSION,
+            canonical: vec![],
+        };
+        save_blockstore_index(&paths.index, &index)?;
+        Self::from_parts(paths, index)
+    }
 
-        let index = load_blockstore_index(&index_path)?;
+    /// Open an already-initialized blockstore. Strict: no mkdir, no marker
+    /// synthesis, no fallback. A missing root/subdirectory/marker, a malformed
+    /// marker, or a resolved path of the wrong kind is an error, never a fresh
+    /// empty store. Symlinks resolve normally; no path-identity claim is made.
+    /// Go mirror: `OpenBlockStore` in `clients/go/node/blockstore.go`.
+    pub fn open<P: Into<PathBuf>>(root_path: P) -> Result<Self, String> {
+        let paths = BlockStorePaths::new(root_path.into())?;
+        paths.require_initialized()?;
+        let index = load_blockstore_index(&paths.index)?;
+        Self::from_parts(paths, index)
+    }
+
+    fn from_parts(paths: BlockStorePaths, index: BlockStoreIndexDisk) -> Result<Self, String> {
         let canonical_hash_by_height = build_canonical_hash_cache(&index.canonical)?;
         Ok(Self {
-            root_path,
-            index_path,
-            blocks_dir,
-            headers_dir,
-            undo_dir,
+            root_path: paths.root,
+            index_path: paths.index,
+            blocks_dir: paths.blocks,
+            headers_dir: paths.headers,
+            undo_dir: paths.undo,
             index,
             canonical_hash_by_height,
             #[cfg(test)]
@@ -818,16 +882,13 @@ fn load_blockstore_index(path: &Path) -> Result<BlockStoreIndexDisk, String> {
             ));
         }
     };
-    let raw = match read_file_from_dir(parent, name) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(BlockStoreIndexDisk {
-                version: BLOCK_STORE_INDEX_VERSION,
-                canonical: vec![],
-            });
-        }
-        Err(e) => return Err(format!("read blockstore index {}: {e}", path.display())),
-    };
+    // A missing marker is an error, never an implicit empty index.
+    let raw = read_file_from_dir(parent, name)
+        .map_err(|e| format!("read blockstore index {}: {e}", path.display()))?;
+    // `deny_unknown_fields` plus serde's duplicate/missing-field errors,
+    // `from_slice`'s trailing-input rejection and the entry check below pin the
+    // exact marker schema: exactly one `version` and one `canonical` field, in
+    // either order. Go mirror: `decodeBlockStoreIndex` in the Go blockstore.
     let index: BlockStoreIndexDisk = serde_json::from_slice(&raw)
         .map_err(|e| format!("decode blockstore index {}: {e}", path.display()))?;
     if index.version != BLOCK_STORE_INDEX_VERSION {
@@ -836,15 +897,24 @@ fn load_blockstore_index(path: &Path) -> Result<BlockStoreIndexDisk, String> {
             index.version
         ));
     }
-    // Canonical hash validation is performed in `build_canonical_hash_cache`
-    // when callers (e.g. `BlockStore::open`, `reload_index_from_disk`) build
-    // the height->hash cache from this index. Validating here would re-decode
-    // every canonical entry on cold start (one decode in this loop, another
-    // inside `build_canonical_hash_cache`); the cache build is the
-    // single sanctioned `parse_hex32` site for canonical entries. Any caller
-    // that consumes `index.canonical` strings without going through that
-    // helper is expected to keep its own validation discipline.
+    // Cheap string-shape check (no decode): `parse_hex32` in
+    // `build_canonical_hash_cache` accepts uppercase, the marker does not.
+    for (i, hash_hex) in index.canonical.iter().enumerate() {
+        if !valid_canonical_hash_hex(hash_hex) {
+            return Err(format!(
+                "canonical[{i}]: not 64 lowercase hex characters: {hash_hex:?}"
+            ));
+        }
+    }
     Ok(index)
+}
+
+/// The marker's exact entry shape: 64 lowercase hex characters.
+fn valid_canonical_hash_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
 fn save_blockstore_index(path: &Path, index: &BlockStoreIndexDisk) -> Result<(), String> {
@@ -1027,6 +1097,7 @@ fn write_file_if_absent(path: &Path, content: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use crate::io_utils::unique_temp_path;
+    use std::path::{Path, PathBuf};
 
     use super::{block_store_path, write_file_if_absent, BlockStore, BLOCK_STORE_DIR_NAME};
 
@@ -1154,13 +1225,14 @@ mod tests {
     #[test]
     fn blockstore_open_and_reopen() {
         let dir = unique_temp_path("rubin-blockstore-test");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
         assert_eq!(
             root.file_name().and_then(|s| s.to_str()),
             Some(BLOCK_STORE_DIR_NAME)
         );
 
-        let mut store = BlockStore::open(&root).expect("open");
+        let mut store = BlockStore::create(&root).expect("create");
         assert!(store.tip().expect("tip").is_none());
         store
             .set_canonical_tip(0, [0x11; 32])
@@ -1181,8 +1253,9 @@ mod tests {
         use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
 
         let dir = unique_temp_path("rubin-blockstore-store");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
-        let store = BlockStore::open(&root).expect("open");
+        let store = BlockStore::create(&root).expect("create");
 
         let genesis = devnet_genesis_block_bytes();
         let header = &genesis[..BLOCK_HEADER_BYTES];
@@ -1208,8 +1281,9 @@ mod tests {
         use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
 
         let dir = unique_temp_path("rubin-blockstore-cw");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
-        let mut store = BlockStore::open(&root).expect("open");
+        let mut store = BlockStore::create(&root).expect("create");
 
         let genesis = devnet_genesis_block_bytes();
         let hash = block_hash(&genesis[..BLOCK_HEADER_BYTES]).expect("hash");
@@ -1231,8 +1305,9 @@ mod tests {
         use crate::undo::{BlockUndo, TxUndo};
 
         let dir = unique_temp_path("rubin-blockstore-undo");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
-        let store = BlockStore::open(&root).expect("open");
+        let store = BlockStore::create(&root).expect("create");
 
         let undo = BlockUndo {
             block_height: 7,
@@ -1251,8 +1326,9 @@ mod tests {
     #[test]
     fn blockstore_truncate_and_canonical_len() {
         let dir = unique_temp_path("rubin-blockstore-trunc");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
-        let mut store = BlockStore::open(&root).expect("open");
+        let mut store = BlockStore::create(&root).expect("create");
 
         store.set_canonical_tip(0, [0x11; 32]).expect("set 0");
         store.set_canonical_tip(1, [0x22; 32]).expect("set 1");
@@ -1280,8 +1356,9 @@ mod tests {
         use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
 
         let dir = unique_temp_path("rubin-blockstore-commit-happy");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
-        let mut store = BlockStore::open(&root).expect("open");
+        let mut store = BlockStore::create(&root).expect("create");
 
         let genesis = devnet_genesis_block_bytes();
         let header = &genesis[..BLOCK_HEADER_BYTES];
@@ -1317,8 +1394,9 @@ mod tests {
         use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
 
         let dir = unique_temp_path("rubin-blockstore-commit-undo-fail");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
-        let mut store = BlockStore::open(&root).expect("open");
+        let mut store = BlockStore::create(&root).expect("create");
 
         let genesis = devnet_genesis_block_bytes();
         let header = &genesis[..BLOCK_HEADER_BYTES];
@@ -1383,8 +1461,9 @@ mod tests {
         use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
 
         let dir = unique_temp_path("rubin-blockstore-commit-undo-mismatch");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
-        let mut store = BlockStore::open(&root).expect("open");
+        let mut store = BlockStore::create(&root).expect("create");
 
         let genesis = devnet_genesis_block_bytes();
         let header = &genesis[..BLOCK_HEADER_BYTES];
@@ -1435,8 +1514,9 @@ mod tests {
         use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
 
         let dir = unique_temp_path("rubin-blockstore-replay-backfill");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
-        let mut store = BlockStore::open(&root).expect("open");
+        let mut store = BlockStore::create(&root).expect("create");
 
         let genesis = devnet_genesis_block_bytes();
         let header = &genesis[..BLOCK_HEADER_BYTES];
@@ -1484,8 +1564,9 @@ mod tests {
         use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
 
         let dir = unique_temp_path("rubin-blockstore-commit-gap");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
-        let mut store = BlockStore::open(&root).expect("open");
+        let mut store = BlockStore::create(&root).expect("create");
 
         let genesis = devnet_genesis_block_bytes();
         let header = &genesis[..BLOCK_HEADER_BYTES];
@@ -1541,8 +1622,9 @@ mod tests {
         use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
 
         let dir = unique_temp_path("rubin-blockstore-same-hash-replay");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
-        let mut store = BlockStore::open(&root).expect("open");
+        let mut store = BlockStore::create(&root).expect("create");
 
         let genesis = devnet_genesis_block_bytes();
         let header = &genesis[..BLOCK_HEADER_BYTES];
@@ -1619,8 +1701,9 @@ mod tests {
     #[test]
     fn canonical_hash_cache_coherent_after_append_and_truncate() {
         let dir = unique_temp_path("rubin-blockstore-e7-cache-append-trunc");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
-        let mut store = BlockStore::open(&root).expect("open");
+        let mut store = BlockStore::create(&root).expect("create");
 
         // Append three entries via the production hot path.
         store.set_canonical_tip(0, [0xA0; 32]).expect("set 0");
@@ -1656,8 +1739,9 @@ mod tests {
         // must follow exactly: a stale entry at the replaced height
         // is the rejected case.
         let dir = unique_temp_path("rubin-blockstore-e7-cache-replace");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
-        let mut store = BlockStore::open(&root).expect("open");
+        let mut store = BlockStore::create(&root).expect("create");
 
         store.set_canonical_tip(0, [0x10; 32]).expect("set 0");
         store.set_canonical_tip(1, [0x11; 32]).expect("set 1");
@@ -1677,8 +1761,9 @@ mod tests {
     #[test]
     fn canonical_hash_cache_coherent_after_rewind_to_height() {
         let dir = unique_temp_path("rubin-blockstore-e7-cache-rewind");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
-        let mut store = BlockStore::open(&root).expect("open");
+        let mut store = BlockStore::create(&root).expect("create");
 
         store.set_canonical_tip(0, [0x21; 32]).expect("set 0");
         store.set_canonical_tip(1, [0x22; 32]).expect("set 1");
@@ -1696,8 +1781,9 @@ mod tests {
     #[test]
     fn canonical_hash_cache_coherent_after_rollback_canonical() {
         let dir = unique_temp_path("rubin-blockstore-e7-cache-rollback");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
-        let mut store = BlockStore::open(&root).expect("open");
+        let mut store = BlockStore::create(&root).expect("create");
 
         store.set_canonical_tip(0, [0x30; 32]).expect("set 0");
         store.set_canonical_tip(1, [0x31; 32]).expect("set 1");
@@ -1727,10 +1813,11 @@ mod tests {
         // store, and `canonical_hash` must return the right hash with
         // zero hex parses on the read path.
         let dir = unique_temp_path("rubin-blockstore-e7-cache-cold-open");
+        std::fs::create_dir_all(&dir).expect("create test dir");
         let root = block_store_path(&dir);
         let entries: Vec<[u8; 32]> = (0..16u8).map(|i| [i; 32]).collect();
         {
-            let mut store = BlockStore::open(&root).expect("open");
+            let mut store = BlockStore::create(&root).expect("create");
             for (i, h) in entries.iter().enumerate() {
                 store.set_canonical_tip(i as u64, *h).expect("set");
             }
@@ -1747,5 +1834,221 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Fresh temp datadir whose blockstore root does NOT exist yet.
+    fn fresh_datadir(prefix: &str) -> PathBuf {
+        let dir = unique_temp_path(prefix);
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    /// Parity matrix row 1: create with root and chainstate absent commits the
+    /// tree plus the EXACT empty version-1 marker, and the store opens after.
+    #[test]
+    fn create_store_commits_exact_empty_marker() {
+        let dir = fresh_datadir("rubin-bs-create-marker");
+        let root = block_store_path(&dir);
+        let store = BlockStore::create(&root).expect("create");
+        assert_eq!(store.canonical_len(), 0);
+        for sub in ["blocks", "headers", "undo"] {
+            assert!(root.join(sub).is_dir(), "{sub} must be a directory");
+        }
+        let raw = std::fs::read_to_string(root.join("index.json")).expect("marker");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("marker json");
+        assert_eq!(parsed, serde_json::json!({"version": 1, "canonical": []}));
+        BlockStore::open(&root).expect("strict open of a freshly created store");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Parity matrix row 2 + rejected case "create overwrites": an existing root
+    /// of any kind is refused, and a PARTIAL root (no marker yet, i.e. a crash
+    /// between mkdir and the commit) is adopted by neither constructor.
+    #[test]
+    fn create_store_rejects_existing_and_partial_root() {
+        let dir = fresh_datadir("rubin-bs-create-existing");
+        let root = block_store_path(&dir);
+        BlockStore::create(&root).expect("first create");
+        std::fs::write(root.join("blocks").join("marker.bin"), b"pre-existing")
+            .expect("seed artifact");
+        let err = BlockStore::create(&root).expect_err("second create must fail");
+        assert!(err.contains("create blockstore root"), "{err}");
+        assert!(
+            root.join("blocks").join("marker.bin").exists(),
+            "existing root must not be overwritten or reset"
+        );
+
+        let partial = block_store_path(fresh_datadir("rubin-bs-partial"));
+        std::fs::create_dir(&partial).expect("partial root");
+        assert!(
+            BlockStore::create(&partial).is_err(),
+            "no resume of a partial root"
+        );
+        assert!(
+            BlockStore::open(&partial).is_err(),
+            "no adoption of a partial root"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Parity matrix rows 6-8: strict open never repairs and never creates.
+    #[test]
+    fn open_existing_rejects_uninitialized_tree_without_mutating() {
+        type BreakFn = fn(&Path);
+        let cases: [(&str, BreakFn); 7] = [
+            ("missing_root", |root| {
+                std::fs::remove_dir_all(root).expect("drop root");
+            }),
+            ("missing_subdir", |root| {
+                std::fs::remove_dir_all(root.join("undo")).expect("drop undo");
+            }),
+            ("missing_blocks", |root| {
+                std::fs::remove_dir_all(root.join("blocks")).expect("drop blocks");
+            }),
+            ("missing_headers", |root| {
+                std::fs::remove_dir_all(root.join("headers")).expect("drop headers");
+            }),
+            ("missing_marker", |root| {
+                std::fs::remove_file(root.join("index.json")).expect("drop marker");
+            }),
+            ("root_is_file", |root| {
+                std::fs::remove_dir_all(root).expect("drop root");
+                std::fs::write(root, b"x").expect("root as file");
+            }),
+            ("marker_is_directory", |root| {
+                std::fs::remove_file(root.join("index.json")).expect("drop marker");
+                std::fs::create_dir(root.join("index.json")).expect("marker as dir");
+            }),
+        ];
+        for (name, break_it) in cases {
+            let dir = fresh_datadir("rubin-bs-strict-open");
+            let root = block_store_path(&dir);
+            BlockStore::create(&root).expect("create");
+            break_it(&root);
+            let err = BlockStore::open(&root).expect_err("row {name} must reject");
+            assert!(!err.is_empty(), "row {name}");
+            if name == "missing_root" {
+                assert!(!root.exists(), "row {name}: strict open must not mkdir");
+            } else if name == "missing_marker" {
+                assert!(
+                    !root.join("index.json").exists(),
+                    "row {name}: strict open must not synthesize a marker"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// index_marker_validity as an executing table. Every row must reject; the
+    /// Go mirror `TestOpenBlockStoreRejectsMalformedMarker` pins the same rows.
+    #[test]
+    fn open_existing_rejects_malformed_marker_rows() {
+        let hash = "a".repeat(64);
+        let rows: Vec<(&str, String)> = vec![
+            ("empty", String::new()),
+            ("not_an_object", "[]".to_string()),
+            ("missing_version", r#"{"canonical":[]}"#.to_string()),
+            ("missing_canonical", r#"{"version":1}"#.to_string()),
+            (
+                "canonical_null",
+                r#"{"version":1,"canonical":null}"#.to_string(),
+            ),
+            (
+                "unknown_field",
+                r#"{"version":1,"canonical":[],"chain_id":"x"}"#.to_string(),
+            ),
+            (
+                "duplicate_version",
+                r#"{"version":1,"version":1,"canonical":[]}"#.to_string(),
+            ),
+            (
+                "duplicate_canonical",
+                r#"{"version":1,"canonical":[],"canonical":[]}"#.to_string(),
+            ),
+            (
+                "wrong_version",
+                r#"{"version":2,"canonical":[]}"#.to_string(),
+            ),
+            (
+                "version_wrong_type",
+                r#"{"version":"1","canonical":[]}"#.to_string(),
+            ),
+            (
+                "version_non_integer",
+                r#"{"version":1.0,"canonical":[]}"#.to_string(),
+            ),
+            (
+                "canonical_wrong_type",
+                r#"{"version":1,"canonical":{}}"#.to_string(),
+            ),
+            (
+                "entry_uppercase",
+                format!(r#"{{"version":1,"canonical":["{}"]}}"#, hash.to_uppercase()),
+            ),
+            (
+                "entry_short",
+                r#"{"version":1,"canonical":["ab"]}"#.to_string(),
+            ),
+            (
+                "entry_not_hex",
+                format!(r#"{{"version":1,"canonical":["{}"]}}"#, "z".repeat(64)),
+            ),
+            (
+                "entry_wrong_type",
+                r#"{"version":1,"canonical":[1]}"#.to_string(),
+            ),
+            (
+                "trailing_value",
+                r#"{"version":1,"canonical":[]} {"version":1}"#.to_string(),
+            ),
+        ];
+        let dir = fresh_datadir("rubin-bs-marker-rows");
+        let root = block_store_path(&dir);
+        BlockStore::create(&root).expect("create");
+        for (name, body) in rows {
+            std::fs::write(root.join("index.json"), body.as_bytes()).expect("write marker");
+            assert!(
+                BlockStore::open(&root).is_err(),
+                "marker row {name} must be rejected"
+            );
+        }
+        // The accepted rows: empty marker, and a well-formed lowercase entry.
+        std::fs::write(root.join("index.json"), br#"{"version":1,"canonical":[]}"#)
+            .expect("write marker");
+        assert_eq!(
+            BlockStore::open(&root)
+                .expect("empty marker accepted")
+                .canonical_len(),
+            0
+        );
+        std::fs::write(
+            root.join("index.json"),
+            format!(r#"{{"canonical":["{hash}"],"version":1}}"#).as_bytes(),
+        )
+        .expect("write marker");
+        assert_eq!(
+            BlockStore::open(&root)
+                .expect("field order is free")
+                .canonical_len(),
+            1
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Rule 10 at the LOADER layer: a missing marker must error even though the
+    /// tree check above it already rejects — no implicit empty index anywhere.
+    /// Go mirror: `TestLoadBlockStoreIndexNeverSynthesizesEmptyIndex`.
+    #[test]
+    fn open_existing_marker_loader_never_synthesizes_empty_index() {
+        let dir = fresh_datadir("rubin-bs-loader");
+        let root = block_store_path(&dir);
+        BlockStore::create(&root).expect("create");
+        let marker = root.join("index.json");
+        std::fs::remove_file(&marker).expect("drop marker");
+        assert!(
+            super::load_blockstore_index(&marker).is_err(),
+            "missing marker must not decode as an empty index"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

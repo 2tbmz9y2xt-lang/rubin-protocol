@@ -248,7 +248,7 @@ PY
 mkdir -p "${GO_DATA_DIR}" "${RUST_DATA_DIR}"
 
 echo "Mining mature chainstate with Go node"
-"${GO_NODE_BIN}" --datadir "${GO_DATA_DIR}" --mine-address "${MINE_ADDRESS_HEX}" --mine-blocks 101 --mine-exit >"${MINE_LOG}" 2>&1
+"${GO_NODE_BIN}" --create-store --datadir "${GO_DATA_DIR}" --mine-address "${MINE_ADDRESS_HEX}" --mine-blocks 101 --mine-exit >"${MINE_LOG}" 2>&1
 cp -R "${GO_DATA_DIR}/." "${RUST_DATA_DIR}/"
 
 echo "Starting Go RPC node at ${GO_RPC_ADDR}"

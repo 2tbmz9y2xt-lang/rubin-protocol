@@ -225,7 +225,7 @@ NODE_A_PORT="$((29110 + ($$ % 1000)))"
 NODE_A_ADDR="127.0.0.1:${NODE_A_PORT}"
 
 echo "Starting node A at ${NODE_A_ADDR}"
-start_node "${NODE_A_LOG}" --datadir "${NODE_A_DIR}" --bind "${NODE_A_ADDR}" --rpc-bind "${NODE_A_RPC_ADDR}" --mine-blocks 10
+start_node "${NODE_A_LOG}" --create-store --datadir "${NODE_A_DIR}" --bind "${NODE_A_ADDR}" --rpc-bind "${NODE_A_RPC_ADDR}" --mine-blocks 10
 NODE_A_PID="${LAST_PID}"
 wait_for_log "${NODE_A_LOG}" "rpc: listening=" 30 "${NODE_A_PID}"
 NODE_A_RPC_ADDR="$(extract_rpc_addr "${NODE_A_LOG}")"
@@ -245,10 +245,10 @@ if [[ "${NODE_A_HAS_TIP}" != "true" ]]; then
 fi
 
 echo "Starting node B"
-start_node "${NODE_B_LOG}" --datadir "${NODE_B_DIR}" --bind "127.0.0.1:0" --rpc-bind "${NODE_B_RPC_ADDR}" --peers "${NODE_A_ADDR}"
+start_node "${NODE_B_LOG}" --create-store --datadir "${NODE_B_DIR}" --bind "127.0.0.1:0" --rpc-bind "${NODE_B_RPC_ADDR}" --peers "${NODE_A_ADDR}"
 NODE_B_PID="${LAST_PID}"
 echo "Starting node C"
-start_node "${NODE_C_LOG}" --datadir "${NODE_C_DIR}" --bind "127.0.0.1:0" --rpc-bind "${NODE_C_RPC_ADDR}" --peers "${NODE_A_ADDR}"
+start_node "${NODE_C_LOG}" --create-store --datadir "${NODE_C_DIR}" --bind "127.0.0.1:0" --rpc-bind "${NODE_C_RPC_ADDR}" --peers "${NODE_A_ADDR}"
 NODE_C_PID="${LAST_PID}"
 
 wait_for_log "${NODE_B_LOG}" "rpc: listening=" 30 "${NODE_B_PID}"

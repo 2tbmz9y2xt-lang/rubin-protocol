@@ -73,14 +73,14 @@ func TestLoadBlockStoreIndex_Errors(t *testing.T) {
 }
 
 func TestBlockStorePutBlock_RejectsInvalidHeaderLen(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	if err := store.PutBlock(0, [32]byte{}, []byte{0x01}, []byte("b")); err == nil {
 		t.Fatalf("expected error")
 	}
 }
 
 func TestBlockStorePutBlock_RejectsHeaderHashMismatch(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	header := testHeaderBytes(1, 1)
 	var wrong [32]byte
 	wrong[0] = 0x01
@@ -90,7 +90,7 @@ func TestBlockStorePutBlock_RejectsHeaderHashMismatch(t *testing.T) {
 }
 
 func TestBlockStoreSetCanonicalTip_SameHashIdempotent(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	payload := []byte("block-0")
 	hash0, header0 := mustPutBlock(t, store, 0, 1, 11, payload)
 
@@ -114,7 +114,7 @@ func TestBlockStoreRewindToHeight_Errors(t *testing.T) {
 		t.Fatalf("expected error")
 	}
 
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	if err := store.RewindToHeight(0); err != nil {
 		t.Fatalf("expected ok on empty store: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestBlockStoreRewindToHeight_Errors(t *testing.T) {
 }
 
 func TestBlockStoreCanonicalHash_Errors(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	if _, ok, err := store.CanonicalHash(0); err != nil || ok {
 		t.Fatalf("expected ok=false no error; ok=%v err=%v", ok, err)
 	}
@@ -138,7 +138,7 @@ func TestBlockStoreCanonicalHash_Errors(t *testing.T) {
 }
 
 func TestBlockStoreTip_Errors(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	store.index.Canonical = []string{"zz"}
 	if _, _, _, err := store.Tip(); err == nil {
 		t.Fatalf("expected error")
@@ -188,7 +188,7 @@ func TestWriteFileIfAbsent_ExistingSameContentOk(t *testing.T) {
 func TestBlockStorePutBlock_RejectsComputedHashMismatch(t *testing.T) {
 	// Coverage for consensus.BlockHash error path is hard to hit (header len checked),
 	// but computedHash != blockHash is reachable by passing the wrong hash.
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	header := testHeaderBytes(1, 2)
 	hash := mustHeaderHash(t, header)
 	hash[0] ^= 0xff
@@ -205,7 +205,7 @@ func TestBlockStoreGetHeaderByHash_Nil(t *testing.T) {
 }
 
 func TestBlockStorePutBlock_CallsSetCanonicalTip(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	header := testHeaderBytes(9, 9)
 	hash := mustHeaderHash(t, header)
 	if err := store.PutBlock(0, hash, header, []byte("blk")); err != nil {
@@ -238,14 +238,14 @@ func TestCommitCanonicalBlock_RejectsNilInputs(t *testing.T) {
 		t.Fatalf("expected nil blockstore error")
 	}
 
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	if err := store.CommitCanonicalBlock(0, hash, header, blockBytes, nil); err == nil {
 		t.Fatalf("expected nil undo error")
 	}
 }
 
 func TestCommitCanonicalBlock_PropagatesStoreBlockFailure(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	header := testHeaderBytes(15, 15)
 	hash := mustHeaderHash(t, header)
 	header[0] ^= 0xff
@@ -255,7 +255,7 @@ func TestCommitCanonicalBlock_PropagatesStoreBlockFailure(t *testing.T) {
 }
 
 func TestBlockStoreStoreBlockAndChainWork(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	if work, err := store.ChainWork([32]byte{}); err != nil {
 		t.Fatalf("ChainWork(zero): %v", err)
 	} else if work.Cmp(big.NewInt(0)) != 0 {
@@ -292,7 +292,7 @@ func TestBlockStoreStoreBlockAndChainWork(t *testing.T) {
 }
 
 func TestBlockStoreChainWorkCachesAndHelperCoverage(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 
 	header0 := testHeaderBytes(9, 1)
 	for i := 4; i < 36; i++ {
@@ -353,7 +353,7 @@ func TestBlockStoreCanonicalIndexHelpersAndUndoErrors(t *testing.T) {
 		t.Fatalf("expected nil GetUndo error")
 	}
 
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	store.index.Canonical = []string{"zz"}
 	if _, err := store.CanonicalIndexSnapshot(); err == nil {
 		t.Fatalf("expected invalid canonical snapshot error")
@@ -377,7 +377,7 @@ func TestBlockStoreCanonicalIndexHelpersAndUndoErrors(t *testing.T) {
 }
 
 func TestBlockStoreChainWorkCachesCanonicalOnly(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 
 	header0 := testHeaderBytes(0x31, 1)
 	for i := 4; i < 36; i++ {
@@ -427,7 +427,7 @@ func TestBlockStoreChainWorkCachesCanonicalOnly(t *testing.T) {
 }
 
 func TestBlockStoreChainWorkRejectsInvalidTargetWithCachedAncestor(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 
 	header0 := testHeaderBytes(0x41, 1)
 	for i := 4; i < 36; i++ {
@@ -457,7 +457,7 @@ func TestBlockStoreChainWorkRejectsInvalidTargetWithCachedAncestor(t *testing.T)
 }
 
 func TestBlockStoreChainWorkRejectsInvalidTargetWithoutCachedAncestor(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 
 	header := testHeaderBytes(0x43, 3)
 	for i := 4; i < 36; i++ {
@@ -477,7 +477,7 @@ func TestBlockStoreChainWorkRejectsInvalidTargetWithoutCachedAncestor(t *testing
 }
 
 func TestBlockStoreChainWorkParentCycle(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	header := testHeaderBytes(7, 3)
 	hash := mustHeaderHash(t, header)
 	if err := store.StoreBlock(hash, header, []byte("blk")); err != nil {
@@ -505,7 +505,7 @@ func TestBlockStoreStoreBlockAndChainWorkErrors(t *testing.T) {
 		t.Fatalf("expected nil ChainWork error")
 	}
 
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	if _, err := store.ChainWork(hash); err == nil {
 		t.Fatalf("expected missing header error")
 	}
@@ -518,7 +518,7 @@ func TestBlockStoreStoreBlockAndChainWorkErrors(t *testing.T) {
 		t.Fatalf("expected invalid header parse error")
 	}
 
-	cycleStore := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "cycle"))
+	cycleStore := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "cycle"))
 	cycleHeader := append([]byte(nil), testHeaderBytes(8, 8)...)
 	cycleHash := mustHeaderHash(t, cycleHeader)
 	copy(cycleHeader[4:36], cycleHash[:])
@@ -573,7 +573,7 @@ func TestBlockStoreCanonicalStateHelpers(t *testing.T) {
 		t.Fatalf("nil dropCanonicalStateFromLocked: %v", err)
 	}
 
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	store.index.Canonical = []string{hex.EncodeToString(hash0[:]), hex.EncodeToString(hash1[:])}
 	store.canonicalHeightByHash = map[[32]byte]uint64{hash0: 0, hash1: 1}
 	store.chainWorkByHash = map[[32]byte]*big.Int{hash0: big.NewInt(10), hash1: big.NewInt(20)}
@@ -626,7 +626,7 @@ func TestBlockStoreCanonicalAndTruncateErrorBranches(t *testing.T) {
 		t.Fatalf("expected nil TruncateCanonical error")
 	}
 
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	if err := store.TruncateCanonical(1); err == nil {
 		t.Fatalf("expected truncate out-of-range error")
 	}

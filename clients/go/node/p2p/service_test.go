@@ -3,10 +3,12 @@ package p2p
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 )
 
 type testHarness struct {
+	dataDir     string
 	peerManager *node.PeerManager
 	chainState  *node.ChainState
 	blockStore  *node.BlockStore
@@ -885,9 +888,9 @@ func newTestHarness(t *testing.T, blockCount int, bindAddr string, bootstrapPeer
 	dir := t.TempDir()
 	chainStatePath := node.ChainStatePath(dir)
 	chainState := node.NewChainState()
-	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	target := consensus.POW_LIMIT
 	syncCfg := node.DefaultSyncConfig(&target, node.DevnetGenesisChainID(), chainStatePath)
@@ -897,6 +900,7 @@ func newTestHarness(t *testing.T, blockCount int, bindAddr string, bootstrapPeer
 	}
 
 	h := &testHarness{
+		dataDir:     dir,
 		peerManager: node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8)),
 		chainState:  chainState,
 		blockStore:  blockStore,
@@ -1361,5 +1365,43 @@ func TestIsConsensusApplyBlockError(t *testing.T) {
 	}
 	if !isConsensusApplyBlockError(&consensus.TxError{Code: consensus.TX_ERR_PARSE, Msg: "bad block"}) {
 		t.Fatalf("consensus TxError must be treated as consensus error")
+	}
+}
+
+// B1 parity matrix rows 14-16: the Go behavioral reference for block presence.
+// Absence is only reported when a healthy lookup proves it; a local store fault
+// is an error, never absence. Rust mirror: `has_block_local_store_rows`.
+func TestServiceHasBlockLocalStoreRows(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	tip, _, ok, err := h.blockStore.Tip()
+	if err != nil || !ok {
+		t.Fatalf("tip = %d ok=%v err=%v", tip, ok, err)
+	}
+	_, tipHash, _, err := h.blockStore.Tip()
+	if err != nil {
+		t.Fatalf("tip hash: %v", err)
+	}
+
+	// Row 14: readable header -> present.
+	if have, err := h.service.hasBlock(tipHash); err != nil || !have {
+		t.Fatalf("readable header: have=%v err=%v, want true/nil", have, err)
+	}
+	// Row 15: healthy missing header -> absent, NOT an error.
+	if have, err := h.service.hasBlock([32]byte{0xab}); err != nil || have {
+		t.Fatalf("missing header: have=%v err=%v, want false/nil", have, err)
+	}
+	// Row 16: the header path exists but cannot be read -> error, not absence.
+	var unreadable [32]byte
+	unreadable[0] = 0x5a
+	leaf := filepath.Join(node.BlockStorePath(h.dataDir), "headers", hex.EncodeToString(unreadable[:])+".bin")
+	if err := os.Mkdir(leaf, 0o700); err != nil {
+		t.Fatalf("header leaf as directory: %v", err)
+	}
+	have, err := h.service.hasBlock(unreadable)
+	if err == nil {
+		t.Fatalf("a failed header read must not read as absence (have=%v)", have)
+	}
+	if os.IsNotExist(err) {
+		t.Fatalf("read failure must not be classified as NotFound: %v", err)
 	}
 }

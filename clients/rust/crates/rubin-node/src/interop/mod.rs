@@ -233,8 +233,9 @@ pub fn run_action(session: &mut PeerSession, action: &Action) -> io::Result<()> 
         }
         Action::SyncBlocks => {
             let mut data_dir = unique_interop_temp_dir();
+            fs::create_dir_all(&data_dir)?;
             let block_store =
-                BlockStore::open(block_store_path(&data_dir)).map_err(io::Error::other)?;
+                BlockStore::create(block_store_path(&data_dir)).map_err(io::Error::other)?;
             let chain_state_path = chain_state_path(&data_dir);
             let mut cfg = default_sync_config(
                 Some(POW_LIMIT),
@@ -713,7 +714,8 @@ mod tests {
                 let block = devnet_genesis_block_bytes();
                 let block_hash_bytes =
                     block_hash(&block[..BLOCK_HEADER_BYTES]).map_err(|err| err.to_string())?;
-                let mut store = BlockStore::open(block_store_path(&server_dir))?;
+                std::fs::create_dir_all(&server_dir).map_err(|err| err.to_string())?;
+                let mut store = BlockStore::create(block_store_path(&server_dir))?;
                 store.put_block(0, block_hash_bytes, &block[..BLOCK_HEADER_BYTES], &block)?;
 
                 let mut cfg = default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), None);

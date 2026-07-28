@@ -901,7 +901,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("mkdir");
         let chain_state_file = chain_state_path(&dir);
-        let block_store = BlockStore::open(block_store_path(&dir)).expect("blockstore");
+        let block_store = BlockStore::create(block_store_path(&dir)).expect("blockstore");
         let chain_state = ChainState::new();
         chain_state.save(&chain_state_file).expect("save");
         let sync = SyncEngine::new(

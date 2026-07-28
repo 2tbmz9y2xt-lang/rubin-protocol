@@ -538,7 +538,8 @@ if partition_mode:
     proof_for_argv = data.get("proof")
     req(isinstance(proof_for_argv, dict) and ep(proof_for_argv.get("partition_proxy_endpoint")), "partition proxy endpoint is malformed")
     rust_expected_peer = proof_for_argv["partition_proxy_endpoint"]
-req(report_node_argv_eq(nodes_by_impl["go"], "node-go", []) and report_node_argv_eq(nodes_by_impl["rust"], "node-rust", ["--peer", rust_expected_peer]), "node command_argv does not match exact launched argv")
+create_flag = [] if (tx_mode or restart_mode or partition_mode) else ["--create-store"]
+req(report_node_argv_eq(nodes_by_impl["go"], "node-go", create_flag) and report_node_argv_eq(nodes_by_impl["rust"], "node-rust", ["--peer", rust_expected_peer] + create_flag), "node command_argv does not match exact launched argv")
 req(nodes_by_impl["go"]["pid"] != nodes_by_impl["rust"]["pid"], "go/rust process evidence uses the same pid")
 req(nodes_by_impl["go"]["binary"] != nodes_by_impl["rust"]["binary"] and nodes_by_impl["go"]["command"] != nodes_by_impl["rust"]["command"] and nodes_by_impl["go"].get("command_argv") != nodes_by_impl["rust"].get("command_argv"), "go/rust process evidence is not implementation-distinct")
 req(len({nodes_by_impl[i][f] for i in ("go", "rust") for f in ("rpc_endpoint", "p2p_endpoint")}) == 4, "node rpc/p2p endpoints are not pairwise distinct")
@@ -789,6 +790,10 @@ source "${HELPER}"
 rubin_process_init mixed-client-mesh
 GO_NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"; RUST_NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-rust"
 GO_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-go"; RUST_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-rust"
+# A datadir is initialized once, by whoever constructs it first: the prepare_*
+# mine, or the first node start in plain mode. Every later start/restart, and
+# the Rust datadir once it is a byte-copy of the Go one, is a reopen.
+GO_STORE_READY=0; RUST_STORE_READY=0
 GO_LOG="node-go.log"; RUST_LOG="node-rust.log"; RUST_RESTART_LOG="node-rust-restart.log"; PARTITION_PROXY_LOG="partition-proxy.log"; REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-report.json"; LEGACY_SCHEMA_MARKER_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-legacy-schema-marker.json"
 GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"; RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
 RUST_PRE_RESTART_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-pre-restart-tip.json"; GO_RESTART_MINE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-restart-mine-next.json"; GO_RESTART_TARGET_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-restart-target-tip.json"; RUST_CATCH_UP_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-catch-up-tip.json"
@@ -1275,8 +1280,10 @@ with open(sys.argv[1], "w", encoding="utf-8") as f:
 PY
   rm -f -- "${KEYGEN_GO}" || { cleanup_tx_from_key_file || true; TX_REASON=go_submit_keygen_cleanup_failed; return 1; }
   echo "Mining mature chainstate for mixed-client evidence" >&2
-  bounded_mesh "${GO_NODE_BIN}" --network devnet --datadir "${GO_DIR}" --mine-address "${mine_address}" --mine-blocks 101 --mine-exit >"$(_rubin_process_resolve_log "${MINE_LOG}")" 2>&1 || { status=$?; cleanup_tx_from_key_file || true; [[ ${status} -eq 142 ]] && TX_REASON=go_submit_mine_timeout || TX_REASON=go_submit_mine_failed; return 1; }
+  bounded_mesh "${GO_NODE_BIN}" --network devnet --create-store --datadir "${GO_DIR}" --mine-address "${mine_address}" --mine-blocks 101 --mine-exit >"$(_rubin_process_resolve_log "${MINE_LOG}")" 2>&1 || { status=$?; cleanup_tx_from_key_file || true; [[ ${status} -eq 142 ]] && TX_REASON=go_submit_mine_timeout || TX_REASON=go_submit_mine_failed; return 1; }
+  GO_STORE_READY=1
   cp -R -- "${GO_DIR}/." "${RUST_DIR}/" || { cleanup_tx_from_key_file || true; TX_REASON=go_submit_chainstate_copy_failed; return 1; }
+  RUST_STORE_READY=1
 }
 prepare_restart_chainstate() {
   TX_REASON=""
@@ -2586,6 +2593,7 @@ start_rust_node_with_log() {
   local rust_log="$1"
   local peer_addr="${RUST_BOOTSTRAP_PEER_ADDR:-${GO_P2P_ADDR}}"
   local -a argv=("${RUST_NODE_BIN}" --network devnet --datadir "${RUST_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer "${peer_addr}")
+  (( RUST_STORE_READY )) || { argv+=(--create-store); RUST_STORE_READY=1; }
   START_REASON=""
   RUST_CMD="$(argv_cmd "${argv[@]}")"; RUST_ARGV_JSON="$(argv_json "${argv[@]}")"
   rubin_process_start "${rust_log}" "${argv[@]}" || { START_REASON=rust_launch_failed; return 1; }; RUST_PID="${RUBIN_PROCESS_LAST_PID}"
@@ -2657,6 +2665,7 @@ run_rust_restart_scenario() {
 }
 start_go_node() {
   local -a argv=("${GO_NODE_BIN}" --network devnet --datadir "${GO_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0)
+  (( GO_STORE_READY )) || { argv+=(--create-store); GO_STORE_READY=1; }
   START_REASON=""
   GO_CMD="$(argv_cmd "${argv[@]}")"; GO_ARGV_JSON="$(argv_json "${argv[@]}")"
   rubin_process_start "${GO_LOG}" "${argv[@]}" || { START_REASON=go_launch_failed; return 1; }; GO_PID="${RUBIN_PROCESS_LAST_PID}"

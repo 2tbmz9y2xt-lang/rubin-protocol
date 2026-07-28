@@ -1229,7 +1229,7 @@ func TestProcessCompactTransactionsRejectsAcceptedBlockMissingAfterApply(t *test
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newCompactScriptedPeer(t)
-			otherStore, err := node.OpenBlockStore(node.BlockStorePath(t.TempDir()))
+			otherStore, err := node.CreateBlockStore(node.BlockStorePath(t.TempDir()))
 			requireNoCompactErr(t, err, "open alternate blockstore")
 			p.service.cfg.BlockStore = otherStore
 
@@ -1646,9 +1646,9 @@ func peerStockDevnetTargetSchedule(p *peer) bool {
 func retargetPeerEngine(t *testing.T, p *peer, network string, chainID [32]byte) {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	store, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	cfg := node.DefaultSyncConfig(nil, chainID, node.ChainStatePath(dir))
 	cfg.Network = network

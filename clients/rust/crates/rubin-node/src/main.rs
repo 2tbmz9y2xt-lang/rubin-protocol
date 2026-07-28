@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -43,6 +43,7 @@ struct CliConfig {
     legacy_suite_ids: Vec<u8>,
     legacy_exposure_include_outpoints: bool,
     dry_run: bool,
+    create_store: bool,
 }
 
 #[derive(Serialize)]
@@ -139,6 +140,55 @@ fn load_legacy_exposure_scan_chain_state(
     Ok(chain_state)
 }
 
+/// Select the explicit create path or the strict open-existing path. In create
+/// mode the CLI owns the preconditions: the blockstore root must be absent (its
+/// error wins) and the chainstate must be absent, both checked before the datadir
+/// or any store artifact is created.
+fn create_or_open_block_store(
+    cfg: &CliConfig,
+    chain_state_file: &Path,
+    stderr: &mut dyn Write,
+) -> Result<BlockStore, i32> {
+    let root_path = block_store_path(&cfg.data_dir);
+    if !cfg.create_store {
+        return BlockStore::open(root_path).map_err(|err| {
+            let _ = writeln!(stderr, "blockstore open failed: {err}");
+            2
+        });
+    }
+    for (label, path) in [
+        ("blockstore root", root_path.as_path()),
+        ("chainstate", chain_state_file),
+    ] {
+        if let Err(err) = require_absent_path(label, path) {
+            let _ = writeln!(stderr, "blockstore create failed: {err}");
+            return Err(2);
+        }
+    }
+    if let Err(err) = fs::create_dir_all(&cfg.data_dir) {
+        let _ = writeln!(
+            stderr,
+            "datadir create failed ({}): {err}",
+            cfg.data_dir.display()
+        );
+        return Err(2);
+    }
+    BlockStore::create(root_path).map_err(|err| {
+        let _ = writeln!(stderr, "blockstore create failed: {err}");
+        2
+    })
+}
+
+/// Reject any existing filesystem entry at `path`. `symlink_metadata`, not
+/// `metadata`, so a dangling symlink counts as present rather than as not-found.
+fn require_absent_path(label: &str, path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(format!("{label} already exists: {}", path.display())),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("stat {label} {}: {err}", path.display())),
+    }
+}
+
 fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     if args.iter().any(|arg| arg == "-h" || arg == "--help") {
         usage(stdout);
@@ -157,6 +207,18 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         return 2;
     }
 
+    // --create-store is a storage-mutating mode; --dry-run and
+    // --legacy-exposure-scan are read-only modes. Reject the combination here,
+    // after the existing config/legacy-suite validation and before genesis
+    // loading, the legacy scan's chainstate read, and every filesystem write,
+    // so the process exits 2 on an untouched filesystem.
+    if cfg.create_store && (cfg.dry_run || cfg.legacy_exposure_scan) {
+        let _ = writeln!(
+            stderr,
+            "--create-store cannot be combined with --dry-run or --legacy-exposure-scan"
+        );
+        return 2;
+    }
     let chain_state_file = chain_state_path(&cfg.data_dir);
     if cfg.legacy_exposure_scan {
         let chain_state = match load_legacy_exposure_scan_chain_state(&chain_state_file, stderr) {
@@ -186,14 +248,24 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             return 2;
         }
     };
-    if let Err(err) = fs::create_dir_all(&cfg.data_dir) {
-        let _ = writeln!(
-            stderr,
-            "datadir create failed ({}): {err}",
-            cfg.data_dir.display()
-        );
+    // Identity guards run BEFORE the storage lifecycle so a misconfigured
+    // network rejects on an untouched filesystem, mirroring the Go ordering in
+    // `clients/go/cmd/rubin-node/main.go` (guard, then createOrOpenBlockStore).
+    // The guard reads only `network`. `SyncEngine::new` re-runs it on the final
+    // SyncConfig for embedded callers — that inner call is not a duplicate.
+    let mut guard_cfg = default_sync_config(None, genesis_cfg.chain_id, None);
+    guard_cfg.network = cfg.network.clone();
+    if let Err(err) = validate_mainnet_genesis_guard(&guard_cfg) {
+        let _ = writeln!(stderr, "mainnet genesis guard failed: {err}");
         return 2;
     }
+    // Storage lifecycle runs BEFORE the chainstate load: an uninitialized or
+    // half-initialized store must reject before anything reads or writes
+    // chainstate. Ordinary startup performs no mkdir at all.
+    let mut block_store = match create_or_open_block_store(&cfg, &chain_state_file, stderr) {
+        Ok(block_store) => block_store,
+        Err(code) => return code,
+    };
     let mut chain_state = match load_chain_state(&chain_state_file) {
         Ok(chain_state) => chain_state,
         Err(err) => {
@@ -207,35 +279,11 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     };
     let chain_id = genesis_cfg.chain_id;
 
-    let mut block_store = match BlockStore::open(block_store_path(&cfg.data_dir)) {
-        Ok(block_store) => block_store,
-        Err(err) => {
-            let _ = writeln!(stderr, "blockstore open failed: {err}");
-            return 2;
-        }
-    };
-
     let mut sync_cfg = default_sync_config(None, chain_id, Some(chain_state_file.clone()));
     sync_cfg.network = cfg.network.clone();
     sync_cfg.suite_context = genesis_cfg.suite_context.clone();
     sync_cfg.parallel_validation_mode = cfg.pv_mode.clone();
     sync_cfg.pv_shadow_max_samples = cfg.pv_shadow_max;
-
-    // Mainnet target / genesis guard runs BEFORE reconcile so a
-    // misconfigured `--network mainnet` startup is rejected before
-    // any reconcile-driven state mutation: reconcile may rewrite
-    // chainstate via truncate / replay, and we must not touch persisted
-    // state when the network config itself is invalid. `SyncEngine::new`
-    // runs the same guard internally as defence-in-depth: it re-validates
-    // the final `SyncConfig` actually passed to the engine, catching any
-    // mutation between this early call and engine construction. For
-    // callers that construct `SyncEngine` directly (tests, embedded uses)
-    // it is the ONLY guard. Do not remove the inner call as a perceived
-    // duplicate. Devnet / test networks no-op.
-    if let Err(err) = validate_mainnet_genesis_guard(&sync_cfg) {
-        let _ = writeln!(stderr, "mainnet genesis guard failed: {err}");
-        return 2;
-    }
 
     // Startup reconcile (E.2): repair any chainstate ↔ blockstore
     // mismatch left by a crash (incomplete canonical suffix, stale
@@ -794,6 +842,7 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
         legacy_suite_ids: Vec::new(),
         legacy_exposure_include_outpoints: false,
         dry_run: false,
+        create_store: false,
     };
     let mut peer_tokens = Vec::new();
 
@@ -909,6 +958,9 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
             "--dry-run" => {
                 cfg.dry_run = true;
             }
+            "--create-store" => {
+                cfg.create_store = true;
+            }
             unknown => {
                 return Err(format!("unknown flag: {unknown}"));
             }
@@ -932,7 +984,7 @@ fn default_data_dir() -> PathBuf {
 fn usage(stdout: &mut dyn Write) {
     let _ = writeln!(
         stdout,
-        "usage: rubin-node [--network <name>] [--datadir <path>] [--genesis-file <path>] [--bind <host:port>] [--peer <host:port>]... [--peers <csv>] [--max-peers <n>] [--rpc-bind <host:port>] [--mine-address <hex>] [--mine-blocks <n>] [--mine-exit] [--pv-mode <off|shadow|on>] [--pv-shadow-max <n>] [--legacy-exposure-scan] [--legacy-suite-id <id>]... [--legacy-exposure-include-outpoints] [--dry-run]"
+        "usage: rubin-node [--network <name>] [--datadir <path>] [--genesis-file <path>] [--bind <host:port>] [--peer <host:port>]... [--peers <csv>] [--max-peers <n>] [--rpc-bind <host:port>] [--mine-address <hex>] [--mine-blocks <n>] [--mine-exit] [--pv-mode <off|shadow|on>] [--pv-shadow-max <n>] [--legacy-exposure-scan] [--legacy-suite-id <id>]... [--legacy-exposure-include-outpoints] [--dry-run] [--create-store]"
     );
 }
 
@@ -1984,6 +2036,7 @@ mod tests {
     #[test]
     fn dry_run_defaults_to_devnet_chain_id() {
         let dir = unique_temp_dir("rubin-node-bin-default");
+        seed_block_store(&dir);
         let args = vec![
             "--dry-run".to_string(),
             "--datadir".to_string(),
@@ -2008,6 +2061,7 @@ mod tests {
     fn dry_run_loads_chain_id_from_genesis_file() {
         let dir = unique_temp_dir("rubin-node-bin-genesis");
         fs::create_dir_all(&dir).expect("mkdir");
+        seed_block_store(&dir);
         let genesis_file = dir.join("genesis.json");
         fs::write(
             &genesis_file,
@@ -2383,6 +2437,7 @@ mod tests {
     #[test]
     fn dry_run_emits_rpc_bind_when_present() {
         let dir = unique_temp_dir("rubin-node-bin-rpc-bind");
+        seed_block_store(&dir);
         let args = vec![
             "--dry-run".to_string(),
             "--datadir".to_string(),
@@ -2404,6 +2459,7 @@ mod tests {
     #[test]
     fn dry_run_emits_p2p_runtime_fields() {
         let dir = unique_temp_dir("rubin-node-bin-p2p-runtime");
+        seed_block_store(&dir);
         let args = vec![
             "--dry-run".to_string(),
             "--datadir".to_string(),
@@ -2431,6 +2487,7 @@ mod tests {
     #[test]
     fn dry_run_emits_pv_fields() {
         let dir = unique_temp_dir("rubin-node-bin-pv");
+        seed_block_store(&dir);
         let args = vec![
             "--dry-run".to_string(),
             "--datadir".to_string(),
@@ -2470,6 +2527,7 @@ mod tests {
     #[test]
     fn dry_run_emits_sync_and_peer_slots_banners_after_json_in_order() {
         let dir = unique_temp_dir("rubin-node-bin-banners");
+        seed_block_store(&dir);
         let args = vec![
             "--dry-run".to_string(),
             "--datadir".to_string(),
@@ -3067,6 +3125,7 @@ mod tests {
     fn mine_exit_mines_requested_blocks_and_returns_zero() {
         let dir = unique_temp_dir("rubin-node-bin-mine-exit");
         let args = vec![
+            "--create-store".to_string(),
             "--datadir".to_string(),
             dir.display().to_string(),
             "--mine-blocks".to_string(),
@@ -3151,5 +3210,214 @@ mod tests {
     fn validate_addr_accepts_valid_hostname() {
         assert!(super::validate_addr_inner("test", "node-1.example.com:8333", false).is_ok());
         assert!(super::validate_addr_inner("test", "a.b.c:19111", false).is_ok());
+    }
+
+    use rubin_node::{block_store_path, chain_state_path, BlockStore};
+
+    /// Initialize a store the way an operator would with --create-store, for
+    /// tests whose subject is a later startup step. Go mirror: `seedBlockStore`
+    /// in `clients/go/cmd/rubin-node/main_test.go`.
+    fn seed_block_store(data_dir: &std::path::Path) {
+        fs::create_dir_all(data_dir).expect("mkdir datadir");
+        BlockStore::create(block_store_path(data_dir)).expect("create block store");
+    }
+
+    fn cli(args: &[&str]) -> (i32, String) {
+        let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = run(&owned, &mut out, &mut err);
+        (code, String::from_utf8_lossy(&err).to_string())
+    }
+
+    /// create_open_state_machine rule 2 + parity row 4: --create-store is
+    /// incompatible with the read-only modes and rejects before any filesystem
+    /// access. Go mirror: `TestRunCreateStoreRejectsFlagCombinationsBeforeStorage`.
+    #[test]
+    fn create_store_rejects_flag_combinations_before_any_storage_access() {
+        for extra in [
+            vec!["--dry-run"],
+            vec!["--legacy-exposure-scan", "--legacy-suite-id", "1"],
+        ] {
+            let dir = unique_temp_dir("rubin-node-create-flags");
+            let d = dir.display().to_string();
+            let mut args = vec!["--datadir", d.as_str(), "--create-store"];
+            args.extend(extra.iter().copied());
+            let (code, err) = cli(&args);
+            assert_eq!(code, 2, "{extra:?}");
+            assert!(
+                err.contains(
+                    "--create-store cannot be combined with --dry-run or --legacy-exposure-scan"
+                ),
+                "{extra:?}: {err}"
+            );
+            assert!(
+                !dir.exists(),
+                "{extra:?}: no filesystem entry may be created"
+            );
+        }
+    }
+
+    /// Parity rows 1-3 + rejected cases: create commits the tree, refuses an
+    /// existing root (whose error wins over chainstate), refuses an existing
+    /// chainstate without touching the root. Go mirror:
+    /// `TestRunCreateStoreCreatesTreeAndRejectsExisting`.
+    #[test]
+    fn create_store_creates_tree_and_rejects_existing_root_or_chainstate() {
+        fn mk(d: &str) -> Vec<&str> {
+            vec![
+                "--datadir",
+                d,
+                "--create-store",
+                "--mine-blocks",
+                "1",
+                "--mine-exit",
+            ]
+        }
+
+        let dir = unique_temp_dir("rubin-node-create-tree");
+        let d = dir.display().to_string();
+        let (code, err) = cli(&mk(&d));
+        assert_eq!(code, 0, "{err}");
+        let root = block_store_path(&dir);
+        for sub in ["blocks", "headers", "undo"] {
+            assert!(root.join(sub).is_dir());
+        }
+        assert!(root.join("index.json").is_file());
+
+        // Re-create: root exists -> refused, existing store untouched.
+        let marker_before = fs::read(root.join("index.json")).expect("marker");
+        let (code, err) = cli(&mk(&d));
+        assert_eq!(code, 2);
+        assert!(err.contains("blockstore root already exists"), "{err}");
+        assert_eq!(
+            fs::read(root.join("index.json")).expect("marker"),
+            marker_before
+        );
+
+        // Chainstate present, root absent -> refused BEFORE the root is created.
+        let cs = unique_temp_dir("rubin-node-create-chainstate");
+        fs::create_dir_all(&cs).expect("mkdir");
+        fs::write(chain_state_path(&cs), b"{}").expect("seed chainstate");
+        let (code, err) = cli(&mk(&cs.display().to_string()));
+        assert_eq!(code, 2);
+        assert!(err.contains("chainstate already exists"), "{err}");
+        assert!(!block_store_path(&cs).exists(), "root must not be created");
+
+        // Both present -> the blockstore-root error wins.
+        let both = unique_temp_dir("rubin-node-create-both");
+        fs::create_dir_all(block_store_path(&both)).expect("mkdir root");
+        fs::write(chain_state_path(&both), b"{}").expect("seed chainstate");
+        let (code, err) = cli(&mk(&both.display().to_string()));
+        assert_eq!(code, 2);
+        assert!(err.contains("blockstore root already exists"), "{err}");
+
+        // hostile: a DANGLING symlink at either path is present (lstat), not absent.
+        #[cfg(unix)]
+        for target in ["blockstore root", "chainstate"] {
+            let d = unique_temp_dir("rubin-node-create-dangling");
+            fs::create_dir_all(&d).expect("mkdir");
+            let link = if target == "chainstate" {
+                chain_state_path(&d)
+            } else {
+                block_store_path(&d)
+            };
+            std::os::unix::fs::symlink(d.join("nowhere"), &link).expect("dangling symlink");
+            let (code, err) = cli(&mk(&d.display().to_string()));
+            assert_eq!(code, 2, "dangling {target}: {err}");
+            assert!(err.contains(&format!("{target} already exists")), "{err}");
+            let _ = fs::remove_dir_all(&d);
+        }
+
+        for x in [&dir, &cs, &both] {
+            let _ = fs::remove_dir_all(x);
+        }
+    }
+
+    /// Parity rows 5-9: ordinary startup strictly opens. A missing store errors
+    /// with NO mkdir; the legacy scan without --create-store keeps its
+    /// chainstate-only flow; after an explicit create the same startup succeeds.
+    /// Go mirror: `TestRunOpenExistingStartupDoesNotSynthesizeStore`.
+    #[test]
+    fn open_existing_startup_never_synthesizes_a_store() {
+        let dir = unique_temp_dir("rubin-node-open-existing");
+        let d = dir.display().to_string();
+
+        let (code, err) = cli(&["--datadir", &d, "--dry-run"]);
+        assert_eq!(code, 2);
+        assert!(err.contains("blockstore open failed"), "{err}");
+        assert!(
+            !dir.exists(),
+            "ordinary startup must not create the datadir"
+        );
+
+        let (code, err) = cli(&[
+            "--datadir",
+            &d,
+            "--legacy-exposure-scan",
+            "--legacy-suite-id",
+            "1",
+        ]);
+        assert_eq!(code, 2);
+        assert!(
+            err.contains("legacy exposure scan requires an existing chainstate"),
+            "{err}"
+        );
+        assert!(!dir.exists(), "legacy scan must not create a store");
+
+        let (code, err) = cli(&[
+            "--datadir",
+            &d,
+            "--create-store",
+            "--mine-blocks",
+            "1",
+            "--mine-exit",
+        ]);
+        assert_eq!(code, 0, "{err}");
+        let (code, err) = cli(&["--datadir", &d, "--dry-run"]);
+        assert_eq!(code, 0, "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// FIX-1 / state machine rule 4: identity guards precede the storage
+    /// lifecycle, so a misconfigured network rejects on an untouched
+    /// filesystem in BOTH modes. Go mirror:
+    /// `TestRunMainnetFailsBeforeReconcilingChainState` ordering.
+    #[test]
+    fn create_store_mainnet_guard_rejects_before_storage() {
+        let genesis = unique_temp_dir("rubin-node-mainnet-guard-genesis");
+        fs::create_dir_all(&genesis).expect("mkdir");
+        let genesis_file = genesis.join("genesis.json");
+        fs::write(&genesis_file, "{\"chain_id_hex\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}")
+            .expect("write genesis");
+        let gf = genesis_file.display().to_string();
+
+        for create in [true, false] {
+            let dir = unique_temp_dir("rubin-node-mainnet-guard");
+            let d = dir.display().to_string();
+            let mut args = vec![
+                "--network",
+                "mainnet",
+                "--genesis-file",
+                &gf,
+                "--datadir",
+                &d,
+            ];
+            if create {
+                args.extend(["--create-store", "--mine-blocks", "1", "--mine-exit"]);
+            } else {
+                args.push("--dry-run");
+            }
+            let (code, err) = cli(&args);
+            assert_eq!(code, 2, "create={create}: {err}");
+            assert!(
+                err.contains("mainnet genesis guard failed"),
+                "create={create}: the guard must win over any storage error: {err}"
+            );
+            assert!(
+                !dir.exists(),
+                "create={create}: filesystem must stay untouched"
+            );
+        }
+        let _ = fs::remove_dir_all(&genesis);
     }
 }

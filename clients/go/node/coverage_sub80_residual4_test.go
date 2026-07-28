@@ -56,9 +56,9 @@ func TestCoverageResidual4_SyncRollbackAndPersistHelpers(t *testing.T) {
 
 func TestCoverageResidual4_SyncStoreErrorBranches(t *testing.T) {
 	dir := t.TempDir()
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 
 	if _, err := testParentTipTimestamp(store, 1, [32]byte{0xaa}); err == nil {
@@ -86,9 +86,9 @@ func TestCoverageResidual4_SyncStoreErrorBranches(t *testing.T) {
 
 func TestCoverageResidual4_SyncAdditionalErrorBranches(t *testing.T) {
 	dir := t.TempDir()
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 
 	st := NewChainState()

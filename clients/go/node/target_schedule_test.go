@@ -81,7 +81,7 @@ func TestExpectedTargetForCandidateInputContract(t *testing.T) {
 	}
 	target := [32]byte{0x40}
 	raw, parent := scheduleHeader(t, [32]byte{}, target, 1_000_000, 1)
-	store := mustOpenBlockStore(t, t.TempDir())
+	store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
 	if err := store.PutBlock(0, parent, raw, raw); err != nil {
 		t.Fatalf("PutBlock: %v", err)
 	}

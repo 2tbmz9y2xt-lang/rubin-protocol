@@ -1469,7 +1469,8 @@ mod tests {
 
     fn test_engine(prefix: &str) -> (Arc<Mutex<SyncEngine>>, std::path::PathBuf) {
         let dir = unique_temp_dir(prefix);
-        let store = BlockStore::open(block_store_path(&dir)).expect("blockstore");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let store = BlockStore::create(block_store_path(&dir)).expect("blockstore");
         let cfg = default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), None);
         let engine = SyncEngine::new(ChainState::new(), Some(store), cfg).expect("sync engine");
         (Arc::new(Mutex::new(engine)), dir)

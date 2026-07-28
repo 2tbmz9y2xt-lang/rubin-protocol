@@ -14,7 +14,7 @@ func TestNewMinerSetsDefaultMaxTxPerBlockWhenNonPositive(t *testing.T) {
 	chainStatePath := ChainStatePath(dir)
 
 	chainState := NewChainState()
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestNewMinerRejectsNilChainState(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
 
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestNewMinerRejectsNilBlockStore(t *testing.T) {
 	chainStatePath := ChainStatePath(dir)
 
 	chainState := NewChainState()
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestMinerMineOneReturnsContextError(t *testing.T) {
 	chainStatePath := ChainStatePath(dir)
 
 	chainState := NewChainState()
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestMinerMineOneRejectsNonCanonicalTxBytesInInput(t *testing.T) {
 	chainStatePath := ChainStatePath(dir)
 
 	chainState := NewChainState()
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestMinerBuildContextAndAssembleBlockBytes(t *testing.T) {
 	chainState.HasTip = true
 	chainState.Height = 7
 	chainState.TipHash = [32]byte{0x44}
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -323,7 +323,6 @@ func TestCanonicalCoinbaseWeightMatchesLegacyWeight(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -536,7 +535,7 @@ func TestMinerBuildContextUtxoMapDoesNotAliasChainStateMap(t *testing.T) {
 		CreatedByCoinbase: true,
 	}
 
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}

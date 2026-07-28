@@ -2268,10 +2268,10 @@ mod tests {
         ))
     }
 
-    fn open_block_store(prefix: &str) -> (BlockStore, PathBuf) {
+    fn create_block_store(prefix: &str) -> (BlockStore, PathBuf) {
         let dir = unique_temp_dir(prefix);
         fs::create_dir_all(&dir).expect("mkdir");
-        let store = BlockStore::open(block_store_path(&dir)).expect("blockstore");
+        let store = BlockStore::create(block_store_path(&dir)).expect("blockstore");
         (store, dir)
     }
 
@@ -2794,7 +2794,7 @@ mod tests {
     fn next_block_mtp_handles_missing_store_context() {
         assert_eq!(next_block_mtp(None, 0).expect("mtp"), 0);
 
-        let (store, dir) = open_block_store("rubin-txpool-mtp");
+        let (store, dir) = create_block_store("rubin-txpool-mtp");
         assert_eq!(next_block_mtp(Some(&store), 0).expect("mtp"), 0);
         let err = next_block_mtp(Some(&store), 1).unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
@@ -2804,7 +2804,7 @@ mod tests {
 
     #[test]
     fn next_block_mtp_reads_timestamp_context_from_store() {
-        let (store, dir) = open_block_store("rubin-txpool-mtp-success");
+        let (store, dir) = create_block_store("rubin-txpool-mtp-success");
         let mut engine = SyncEngine::new(
             ChainState::new(),
             Some(store.clone()),
@@ -4065,7 +4065,7 @@ mod tests {
         state.has_tip = true;
         state.height = 0;
 
-        let (store, dir) = open_block_store("rubin-txpool-admit-mtp");
+        let (store, dir) = create_block_store("rubin-txpool-admit-mtp");
         let err = TxPool::new()
             .admit(&raw, &state, Some(&store), devnet_genesis_chain_id())
             .unwrap_err();
@@ -4121,7 +4121,7 @@ mod tests {
         state.has_tip = true;
         state.height = 0;
 
-        let (mut store, dir) = open_block_store("rubin-txpool-admit-header-read");
+        let (mut store, dir) = create_block_store("rubin-txpool-admit-header-read");
         store
             .set_canonical_tip(0, [0x42; 32])
             .expect("set canonical tip");

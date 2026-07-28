@@ -350,7 +350,7 @@ pub fn mine_and_generate(data_dir: &Path, mine_blocks: u64) -> Result<SignedDaSe
         .map_err(|err| format!("datadir create failed ({}): {err}", data_dir.display()))?;
     let chain_state_file = chain_state_path(data_dir);
     let chain_state = load_chain_state(&chain_state_file)?;
-    let block_store = BlockStore::open(block_store_path(data_dir))?;
+    let block_store = BlockStore::create(block_store_path(data_dir))?;
 
     let mut sync_cfg = default_sync_config(None, chain_id, Some(chain_state_file.clone()));
     sync_cfg.suite_context = genesis.suite_context.clone();

@@ -386,7 +386,7 @@ func main() {
 	}
 
 	st := node.NewChainState()
-	store, err := node.OpenBlockStore(node.BlockStorePath(*datadir))
+	store, err := node.CreateBlockStore(node.BlockStorePath(*datadir))
 	if err != nil {
 		die(err)
 	}

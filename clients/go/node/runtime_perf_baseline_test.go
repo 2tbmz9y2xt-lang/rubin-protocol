@@ -347,9 +347,9 @@ func BenchmarkMinerBuildContext(b *testing.B) {
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
 	state, outpoints := benchmarkSpendableChainState(fromAddress, []uint64{100})
-	blockStore, err := OpenBlockStore(BlockStorePath(b.TempDir()))
+	blockStore, err := CreateBlockStore(BlockStorePath(b.TempDir()))
 	if err != nil {
-		b.Fatalf("OpenBlockStore: %v", err)
+		b.Fatalf("CreateBlockStore: %v", err)
 	}
 	syncEngine, err := NewSyncEngine(state, blockStore, DefaultSyncConfig(nil, [32]byte{}, ""))
 	if err != nil {
@@ -483,9 +483,9 @@ func benchmarkRecoveryReplayFixture(tb testing.TB, blocks int) (*BlockStore, Syn
 	tb.Helper()
 	dir := tb.TempDir()
 	chainStatePath := ChainStatePath(dir)
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		tb.Fatalf("OpenBlockStore: %v", err)
+		tb.Fatalf("CreateBlockStore: %v", err)
 	}
 
 	target := consensus.POW_LIMIT

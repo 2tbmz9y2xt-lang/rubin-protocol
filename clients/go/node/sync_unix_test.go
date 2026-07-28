@@ -25,7 +25,7 @@ func TestSyncEngineApplyBlockPutUndoFailureRollsBackCanonicalTip(t *testing.T) {
 
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}

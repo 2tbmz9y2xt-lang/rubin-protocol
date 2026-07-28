@@ -1554,9 +1554,8 @@ impl PeerSession {
             // the parent-not-found class even after the precheck passed — the
             // precheck tests the CANDIDATE's prev hash while derivation asks
             // for the prepared canonical tip, i.e. different hashes and
-            // different files, and `has_block` is a `Path::exists()` probe that
-            // conflates "missing" with a metadata error. A partially truncated
-            // or damaged store therefore disagrees with no concurrency at all.
+            // different files. A partially truncated or damaged store therefore
+            // disagrees with no concurrency at all.
             // The precheck is an optimization and must not harden the outcome:
             // route to the SAME orphan retention Go reaches from this position
             // (`handlers_block.go` `retainRelayedOrphanIfValid`), instead of
@@ -3994,7 +3993,7 @@ mod tests {
         fs::create_dir_all(&root).expect("create temp dir");
         let blockstore_dir = root.join("blockstore");
         let chainstate_path = root.join("chainstate.json");
-        let block_store = BlockStore::open(&blockstore_dir).expect("open blockstore");
+        let block_store = BlockStore::create(&blockstore_dir).expect("create blockstore");
         let mut engine = SyncEngine::new(
             ChainState::new(),
             Some(block_store),
@@ -7540,5 +7539,153 @@ mod tests {
         assert!(err.to_string().contains("pow invalid"), "{err}");
         assert_eq!(session.state().ban_score, 100);
         fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// B1 rules 7-8: ONE local store fault, all six named live P2P consumers.
+    /// Each must propagate the error instead of converting it into absence,
+    /// with ban score and orphan population unchanged — no absence-driven
+    /// request/response, orphan retention, compact fallback, or peer fault.
+    /// Go reference: `p2p.Service.hasBlock` callers in `clients/go/node/p2p`.
+    #[test]
+    fn has_block_local_store_error_propagates_through_p2p_consumers() {
+        use crate::sync::{next_candidate_block_for_test, stock_devnet_engine_for_test};
+
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-b1-consumers", |_| {});
+        let block = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
+        let hash = block_hash(&block[..BLOCK_HEADER_BYTES]).expect("candidate hash");
+        let root = crate::blockstore::block_store_path(&dir);
+        // Header leaf is a directory: the probe succeeds, the read fails. This is
+        // exactly the class `Path::exists` would silently report as "absent".
+        fs::create_dir(
+            root.join("headers")
+                .join(format!("{}.bin", hex::encode(hash))),
+        )
+        .expect("header leaf as directory");
+        assert!(
+            engine.has_block(hash).is_err(),
+            "fixture must fault the store"
+        );
+
+        let inv = encode_inventory_vectors(&[InventoryVector {
+            kind: MSG_BLOCK,
+            hash,
+        }])
+        .expect("encode inv");
+
+        // 1. handle_cmpctblock — no compact fallback on a local fault.
+        let (mut session, _c1) = test_peer_session();
+        session
+            .handle_cmpctblock(&compact_payload_for_block(&block), &mut engine, None)
+            .expect_err("cmpctblock must propagate the local store error");
+        assert_eq!(session.state().ban_score, 0);
+        assert_eq!(session.orphans.len(), 0);
+
+        // 2. handle_getblocktxn — announced, so the probe is reached.
+        let (mut session, _c2) = test_peer_session();
+        session.compact_announced.push(hash);
+        session
+            .handle_getblocktxn(
+                &encode_getblocktxn_payload(GetBlockTxnPayload {
+                    block_hash: hash,
+                    indexes: vec![0],
+                })
+                .expect("encode getblocktxn"),
+                &engine,
+            )
+            .expect_err("getblocktxn must propagate the local store error");
+        assert_eq!(session.state().ban_score, 0);
+
+        // 3. handle_inv — no absence-driven getdata request.
+        let (mut session, _c3) = test_peer_session();
+        session
+            .handle_inv(&inv, &engine, None)
+            .expect_err("inv must propagate the local store error");
+        assert_eq!(session.state().ban_score, 0);
+
+        // 4. collect_getdata_responses — no absence-driven skip/serve.
+        let (mut session, _c4) = test_peer_session();
+        session
+            .collect_getdata_responses(&inv, &engine, None)
+            .expect_err("getdata must propagate the local store error");
+        assert_eq!(session.state().ban_score, 0);
+
+        // 5. handle_block_with_acceptance — fault on the block's OWN probe:
+        //    no apply, no orphan, no ban.
+        let (mut session, _c5) = test_peer_session();
+        session
+            .handle_block_with_acceptance(&block, &mut engine, None)
+            .expect_err("relayed block must propagate the local store error");
+        assert_eq!(session.state().ban_score, 0);
+        assert_eq!(session.orphans.len(), 0);
+        assert_eq!(engine.chain_state.height, 0, "nothing became canonical");
+
+        // 6. retain_or_resolve_orphan — reached only with a healthy own-probe and
+        //    a faulty PARENT probe. It adds to the orphan pool BEFORE its own
+        //    probe, so the pool grows by exactly one and the error still wins:
+        //    no resolve, no apply, no ban.
+        let child = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 2);
+        let child_hash = block_hash(&child[..BLOCK_HEADER_BYTES]).expect("child hash");
+        let (mut session, _c6) = test_peer_session();
+        session
+            .retain_or_resolve_orphan(child_hash, hash, &child, &mut engine, None)
+            .expect_err("orphan resolve must propagate the local store error");
+        assert_eq!(session.state().ban_score, 0);
+        assert_eq!(session.orphans.len(), 1);
+        assert_eq!(engine.chain_state.height, 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The retain_or_resolve_orphan ordering is unreachable with a faulty parent:
+    /// handle_block_with_acceptance probes the SAME parent hash first, so the
+    /// orphan insertion inside retain_or_resolve_orphan is never executed on a
+    /// local store fault. Pins the ordering rather than arguing it.
+    #[test]
+    fn has_block_local_store_parent_fault_never_reaches_orphan_insertion() {
+        use crate::sync::{next_candidate_block_for_test, stock_devnet_engine_for_test};
+
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-b1-orphan-order", |_| {});
+        let parent = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
+        let parent_hash = block_hash(&parent[..BLOCK_HEADER_BYTES]).expect("parent hash");
+        engine
+            .apply_block_with_reorg(&parent, None)
+            .expect("apply parent");
+        let child = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
+        let child_hash = block_hash(&child[..BLOCK_HEADER_BYTES]).expect("child hash");
+        let root = crate::blockstore::block_store_path(&dir);
+
+        // Fault the PARENT header read; the child itself is genuinely absent.
+        let leaf = format!("{}.bin", hex::encode(parent_hash));
+        let saved = fs::read(root.join("headers").join(&leaf)).expect("save parent header");
+        fs::remove_file(root.join("headers").join(&leaf)).expect("drop parent header");
+        fs::create_dir(root.join("headers").join(&leaf)).expect("parent leaf as directory");
+        assert_eq!(
+            engine.has_block(child_hash),
+            Ok(false),
+            "child is healthily absent"
+        );
+        assert!(
+            engine.has_block(parent_hash).is_err(),
+            "parent probe faults"
+        );
+
+        let (mut session, _client) = test_peer_session();
+        session
+            .handle_block_with_acceptance(&child, &mut engine, None)
+            .expect_err("parent fault must propagate");
+        assert_eq!(
+            session.orphans.len(),
+            0,
+            "the parent fault must reject BEFORE any orphan insertion"
+        );
+        assert_eq!(
+            session.state().ban_score,
+            0,
+            "a local fault is not a peer fault"
+        );
+
+        fs::remove_dir(root.join("headers").join(&leaf)).expect("undo fixture");
+        fs::write(root.join("headers").join(&leaf), &saved).expect("restore parent header");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

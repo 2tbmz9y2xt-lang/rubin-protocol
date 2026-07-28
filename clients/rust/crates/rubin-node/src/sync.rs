@@ -819,11 +819,26 @@ impl SyncEngine {
         block_store.get_block_by_hash(block_hash_bytes)
     }
 
+    /// Live P2P block-presence decision. Absence is reported only when a healthy
+    /// lookup proves it: the fallible `try_has_block` probe separates NotFound
+    /// (`Ok(false)`) from every other local failure (`Err`), and a positive probe
+    /// is confirmed by a real `get_header_by_hash` read whose failure is also
+    /// `Err`. `Path::exists` and the boolean `BlockStore::has_block` conflate a
+    /// local fault with absence and must not decide this. No parse or consensus
+    /// check is added — a successful byte read is the criterion, matching Go
+    /// `p2p.Service.hasBlock` (`clients/go/node/p2p/service_sync.go`).
+    ///
+    /// Stable-path only: if the header disappears between probe and read, the
+    /// read error propagates as `Err`, not absence.
     pub fn has_block(&self, block_hash_bytes: [u8; 32]) -> Result<bool, String> {
         let Some(block_store) = self.block_store.as_ref() else {
             return Ok(false);
         };
-        Ok(block_store.has_block(block_hash_bytes))
+        if !block_store.try_has_block(block_hash_bytes)? {
+            return Ok(false);
+        }
+        block_store.get_header_by_hash(block_hash_bytes)?;
+        Ok(true)
     }
 
     pub fn is_in_ibd(&self, now_unix: u64) -> bool {
@@ -1406,7 +1421,9 @@ pub(crate) fn stock_devnet_engine_for_test(
     mutate: impl FnOnce(&mut SyncConfig),
 ) -> (SyncEngine, std::path::PathBuf) {
     let dir = crate::io_utils::unique_temp_path(prefix);
-    let store = BlockStore::open(crate::blockstore::block_store_path(&dir)).expect("open store");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let store =
+        BlockStore::create(crate::blockstore::block_store_path(&dir)).expect("create store");
     let mut cfg = default_sync_config(None, devnet_genesis_chain_id(), None);
     mutate(&mut cfg);
     let mut engine = SyncEngine::new(ChainState::new(), Some(store), cfg).expect("engine");
@@ -1636,7 +1653,8 @@ mod tests {
         let dir = unique_temp_path("rubin-node-sync-persist");
         let chain_state_file = chain_state_path(&dir);
         let block_store_root = block_store_path(&dir);
-        let store = BlockStore::open(block_store_root).expect("open blockstore");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let store = BlockStore::create(block_store_root).expect("create blockstore");
 
         let st = ChainState::new();
         let cfg = default_sync_config(Some(POW_LIMIT), [0u8; 32], Some(chain_state_file.clone()));
@@ -1685,7 +1703,8 @@ mod tests {
     fn sync_engine_apply_block_no_chainstate_path_skips_save_path() {
         let dir = unique_temp_path("rubin-node-sync-no-chainstate-path");
         let block_store_root = block_store_path(&dir);
-        let store = BlockStore::open(block_store_root).expect("open blockstore");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let store = BlockStore::create(block_store_root).expect("create blockstore");
 
         let st = ChainState::new();
         let cfg = default_sync_config(Some(POW_LIMIT), [0u8; 32], None /* chain_state_path */);
@@ -1753,7 +1772,8 @@ mod tests {
         let dir = unique_temp_path("rubin-node-sync-pv-shared-suite-context");
         let chain_state_file = chain_state_path(&dir);
         let block_store_root = block_store_path(&dir);
-        let store = BlockStore::open(block_store_root).expect("open blockstore");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let store = BlockStore::create(block_store_root).expect("create blockstore");
 
         let rotation = Arc::new(CountingRotationProvider {
             spend_calls: AtomicUsize::new(0),
@@ -1915,7 +1935,8 @@ mod tests {
     fn sync_engine_hydrates_tip_timestamp_from_persisted_tip_header() {
         let dir = unique_temp_path("rubin-node-sync-tip-timestamp");
         let block_store_root = block_store_path(&dir);
-        let mut store = BlockStore::open(block_store_root).expect("open blockstore");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let mut store = BlockStore::create(block_store_root).expect("create blockstore");
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2577,5 +2598,60 @@ mod tests {
             .expect("boundary");
         assert_eq!(ok.summary.block_height, WINDOW_SIZE);
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// B1 rules 1-6 + parity matrix rows 14-16/18: the presence decision. Rows
+    /// are the same shapes the Go mirror `TestServiceHasBlockLocalStoreRows`
+    /// asserts against `p2p.Service.hasBlock`, the behavioral reference.
+    #[test]
+    fn has_block_local_store_rows() {
+        // Row 18: no configured blockstore stays Ok(false).
+        let engine_no_store = SyncEngine::new(
+            ChainState::new(),
+            None,
+            default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), None),
+        )
+        .expect("engine");
+        assert_eq!(engine_no_store.has_block([0x11; 32]), Ok(false));
+
+        let (engine, dir) = stock_devnet_engine_for_test("rubin-b1-rows", |_| {});
+        let root = crate::blockstore::block_store_path(&dir);
+
+        // Row 14: readable header -> present.
+        assert_eq!(engine.has_block(engine.chain_state.tip_hash), Ok(true));
+        // Row 15: healthy missing header -> absent (NOT an error).
+        assert_eq!(engine.has_block([0xab; 32]), Ok(false));
+
+        // Row 16a: probe says present, the header read fails -> Err, not absent.
+        let unreadable = [0x5a; 32];
+        std::fs::create_dir(
+            root.join("headers")
+                .join(format!("{}.bin", hex::encode(unreadable))),
+        )
+        .expect("header leaf as directory");
+        let err = engine
+            .has_block(unreadable)
+            .expect_err("a failed header read must not read as absence");
+        assert!(err.contains("read header"), "{err}");
+
+        // Row 16b: the probe itself fails (parent directory unreadable) -> Err.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let headers = root.join("headers");
+            let restore = std::fs::metadata(&headers)
+                .expect("headers meta")
+                .permissions();
+            std::fs::set_permissions(&headers, std::fs::Permissions::from_mode(0o000))
+                .expect("seal headers");
+            let probe = engine.has_block([0xcd; 32]);
+            std::fs::set_permissions(&headers, restore).expect("restore headers");
+            // Running as root defeats the permission bit; only assert when it bit.
+            if probe != Ok(false) {
+                let err = probe.expect_err("probe failure must not read as absence");
+                assert!(err.contains("stat"), "{err}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

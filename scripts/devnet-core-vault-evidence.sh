@@ -122,7 +122,7 @@ func main() {
  if *datadir == "" || !v.ExpectOK || v.ExpectErr != "" || v.TxHex == "" || len(v.Utxos) == 0 { die("CORE_VAULT fixture contract mismatch") }
  if v.ChainIDHex != *chainID { die(fmt.Sprintf("chain_id_hex actual=%s expected=%s", v.ChainIDHex, *chainID)) }
  if _, err := hex.DecodeString(v.TxHex); err != nil { die(fmt.Sprintf("invalid tx_hex: %v", err)) }
- st := node.NewChainState(); store, err := node.OpenBlockStore(node.BlockStorePath(*datadir)); if err != nil { die(err) }
+ st := node.NewChainState(); store, err := node.CreateBlockStore(node.BlockStorePath(*datadir)); if err != nil { die(err) }
  engine, err := node.NewSyncEngine(st, store, node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), node.ChainStatePath(*datadir))); if err != nil { die(err) }
  if _, err := engine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil { die(err) }
  for _, u := range v.Utxos { txidBytes, err := hex.DecodeString(u.Txid); if err != nil || len(txidBytes) != 32 { die("invalid fixture txid") }; cov, err := hex.DecodeString(u.CovenantData); if err != nil { die(fmt.Sprintf("invalid fixture covenant_data: %v", err)) }; var txid [32]byte; copy(txid[:], txidBytes); st.Utxos[consensus.Outpoint{Txid: txid, Vout: u.Vout}] = consensus.UtxoEntry{Value: u.Value, CovenantType: u.CovenantType, CovenantData: cov, CreationHeight: u.CreationHeight, CreatedByCoinbase: u.CreatedByCoinbase} }

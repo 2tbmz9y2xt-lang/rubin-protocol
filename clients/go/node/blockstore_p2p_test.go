@@ -13,9 +13,9 @@ import (
 func setupBlockStoreForP2P(t *testing.T, blockCount int) (*BlockStore, *SyncEngine, *ChainState) {
 	t.Helper()
 	dir := t.TempDir()
-	bs, err := OpenBlockStore(BlockStorePath(dir))
+	bs, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	cs := NewChainState()
 	target := consensus.POW_LIMIT
@@ -90,7 +90,7 @@ func TestFindCanonicalHeight_NilBlockStore(t *testing.T) {
 }
 
 func TestFindCanonicalHeight_ReorgRebuildsCache(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	hash0, _ := mustPutBlock(t, store, 0, 0x10, 1, []byte("b0"))
 	hash1a, _ := mustPutBlock(t, store, 1, 0x11, 2, []byte("b1a"))
 	hash1b, _ := mustPutBlock(t, store, 1, 0x12, 3, []byte("b1b"))
@@ -121,7 +121,7 @@ func TestFindCanonicalHeight_ReorgRebuildsCache(t *testing.T) {
 }
 
 func TestFindCanonicalHeight_UsesCachedHeightAndRepairsStaleIndex(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	_, _ = mustPutBlock(t, store, 0, 0x20, 1, []byte("b0"))
 	hash1, _ := mustPutBlock(t, store, 1, 0x21, 2, []byte("b1"))
 
@@ -153,7 +153,7 @@ func TestFindCanonicalHeight_UsesCachedHeightAndRepairsStaleIndex(t *testing.T) 
 }
 
 func TestFindCanonicalHeight_PreservesCanonicalHashParsingSemantics(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	hash0, _ := mustPutBlock(t, store, 0, 0x30, 1, []byte("b0"))
 
 	store.index.Canonical[0] = strings.ToUpper(hex.EncodeToString(hash0[:]))

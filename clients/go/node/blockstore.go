@@ -1,13 +1,16 @@
 package node
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -50,43 +53,100 @@ func BlockStorePath(dataDir string) string {
 	return filepath.Join(dataDir, blockStoreDirName)
 }
 
+type blockStorePaths struct {
+	root    string
+	index   string
+	blocks  string
+	headers string
+	undo    string
+}
+
+func newBlockStorePaths(rootPath string) blockStorePaths {
+	return blockStorePaths{
+		root:    rootPath,
+		index:   filepath.Join(rootPath, "index.json"),
+		blocks:  filepath.Join(rootPath, "blocks"),
+		headers: filepath.Join(rootPath, "headers"),
+		undo:    filepath.Join(rootPath, "undo"),
+	}
+}
+
+// CreateBlockStore initializes a fresh blockstore at rootPath: the only
+// constructor that writes. The root is created exclusively (an existing root of
+// any kind fails; two racing creates cannot both win) and index.json is written
+// LAST as the creation commit marker, so a crash before it leaves a partial root
+// both constructors reject. Owns only rootPath, never chainstate.
+func CreateBlockStore(rootPath string) (*BlockStore, error) {
+	paths := newBlockStorePaths(rootPath)
+	if err := os.Mkdir(paths.root, 0o700); err != nil {
+		return nil, fmt.Errorf("create blockstore root: %w", err)
+	}
+	for _, dir := range []string{paths.blocks, paths.headers, paths.undo} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("create blockstore directory: %w", err)
+		}
+	}
+	index := blockStoreIndexDisk{Version: blockStoreIndexVersion, Canonical: []string{}}
+	if err := saveBlockStoreIndex(paths.index, index); err != nil {
+		return nil, fmt.Errorf("commit blockstore index: %w", err)
+	}
+	return newBlockStore(paths, index)
+}
+
+// OpenBlockStore opens an already-initialized blockstore. Strict: no mkdir, no
+// marker synthesis, no fallback. A missing root/subdirectory/marker, a malformed
+// marker, or a resolved path of the wrong kind is an error, never a fresh empty
+// store. Symlinks resolve normally; no runtime path-identity claim is made.
 func OpenBlockStore(rootPath string) (*BlockStore, error) {
-	indexPath := filepath.Join(rootPath, "index.json")
-	blocksDir := filepath.Join(rootPath, "blocks")
-	headersDir := filepath.Join(rootPath, "headers")
-	undoDir := filepath.Join(rootPath, "undo")
-
-	if err := os.MkdirAll(blocksDir, 0o700); err != nil {
+	paths := newBlockStorePaths(rootPath)
+	if err := paths.requireInitialized(); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(headersDir, 0o700); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(undoDir, 0o700); err != nil {
-		return nil, err
-	}
-
-	index, err := loadBlockStoreIndex(indexPath)
+	index, err := loadBlockStoreIndex(paths.index)
 	if err != nil {
 		return nil, err
 	}
+	return newBlockStore(paths, index)
+}
+
+// requireInitialized checks the resolved filesystem kind of every path the store
+// needs. Stat, not Lstat: symlinks resolve normally on open.
+func (p blockStorePaths) requireInitialized() error {
+	for _, dir := range []string{p.root, p.blocks, p.headers, p.undo} {
+		info, err := os.Stat(dir)
+		if err != nil {
+			return fmt.Errorf("blockstore directory %s: %w", dir, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("blockstore path is not a directory: %s", dir)
+		}
+	}
+	info, err := os.Stat(p.index)
+	if err != nil {
+		return fmt.Errorf("blockstore index %s: %w", p.index, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("blockstore index is not a regular file: %s", p.index)
+	}
+	return nil
+}
+
+func newBlockStore(paths blockStorePaths, index blockStoreIndexDisk) (*BlockStore, error) {
 	canonicalHeightByHash, err := buildCanonicalHeightIndex(index.Canonical)
 	if err != nil {
 		return nil, err
 	}
-
-	bs := &BlockStore{
-		rootPath:   rootPath,
-		indexPath:  indexPath,
-		blocksDir:  blocksDir,
-		headersDir: headersDir,
-		undoDir:    undoDir,
+	return &BlockStore{
+		rootPath:   paths.root,
+		indexPath:  paths.index,
+		blocksDir:  paths.blocks,
+		headersDir: paths.headers,
+		undoDir:    paths.undo,
 		index:      index,
 
 		canonicalHeightByHash: canonicalHeightByHash,
 		chainWorkByHash:       make(map[[32]byte]*big.Int),
-	}
-	return bs, nil
+	}, nil
 }
 
 func (bs *BlockStore) PutBlock(height uint64, blockHash [32]byte, headerBytes []byte, blockBytes []byte) error {
@@ -448,30 +508,112 @@ func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
 	return unmarshalBlockUndo(raw)
 }
 
+// loadBlockStoreIndex reads the sole initialization marker. A missing marker is
+// an error, never an implicit empty index.
 func loadBlockStoreIndex(path string) (blockStoreIndexDisk, error) {
 	raw, err := readFileByPath(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return blockStoreIndexDisk{
-			Version:   blockStoreIndexVersion,
-			Canonical: []string{},
-		}, nil
-	}
 	if err != nil {
 		return blockStoreIndexDisk{}, err
 	}
-	var index blockStoreIndexDisk
-	if err := json.Unmarshal(raw, &index); err != nil {
+	index, err := decodeBlockStoreIndex(raw)
+	if err != nil {
 		return blockStoreIndexDisk{}, fmt.Errorf("decode blockstore index: %w", err)
 	}
-	if index.Version != blockStoreIndexVersion {
-		return blockStoreIndexDisk{}, fmt.Errorf("unsupported blockstore index version: %d", index.Version)
+	return index, nil
+}
+
+// decodeBlockStoreIndex accepts exactly one JSON object with exactly one
+// "version" and one "canonical" field, in either order. Duplicate/unknown/missing
+// fields, a null or non-array canonical, an entry that is not 64 lowercase hex
+// characters, a version other than 1, and any trailing JSON value are rejected.
+// Rust mirror: load_blockstore_index in crates/rubin-node/src/blockstore.rs.
+func decodeBlockStoreIndex(raw []byte) (blockStoreIndexDisk, error) {
+	if err := requireExactIndexFields(raw); err != nil {
+		return blockStoreIndexDisk{}, err
 	}
-	for i, hashHex := range index.Canonical {
-		if _, err := parseHex32(fmt.Sprintf("canonical[%d]", i), hashHex); err != nil {
-			return blockStoreIndexDisk{}, err
+	var index blockStoreIndexDisk
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if err := dec.Decode(&index); err != nil {
+		return blockStoreIndexDisk{}, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return blockStoreIndexDisk{}, errors.New("unexpected trailing JSON value")
+	}
+	return index, validateBlockStoreIndex(index)
+}
+
+// requireExactIndexFields requires the top-level key multiset to be exactly
+// {canonical, version}: struct decoding alone catches none of duplicate,
+// unknown or missing fields.
+func requireExactIndexFields(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return errors.New("blockstore index must be a JSON object")
+	}
+	keys, err := collectIndexFieldNames(dec)
+	if err != nil {
+		return err
+	}
+	sort.Strings(keys)
+	if len(keys) != 2 || keys[0] != "canonical" || keys[1] != "version" {
+		return fmt.Errorf("blockstore index fields must be exactly canonical and version, got %q", keys)
+	}
+	return nil
+}
+
+// collectIndexFieldNames drains the top-level object, returning its key names in
+// encounter order (duplicates included, so the caller can reject them).
+func collectIndexFieldNames(dec *json.Decoder) ([]string, error) {
+	keys := make([]string, 0, 2)
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		name, _ := key.(string)
+		keys = append(keys, name)
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, err
 		}
 	}
-	return index, nil
+	return keys, nil
+}
+
+func validateBlockStoreIndex(index blockStoreIndexDisk) error {
+	if index.Version != blockStoreIndexVersion {
+		return fmt.Errorf("unsupported blockstore index version: %d", index.Version)
+	}
+	// The "canonical" key is present (requireExactIndexFields), so a nil slice
+	// here can only come from a JSON null.
+	if index.Canonical == nil {
+		return errors.New("canonical must not be null")
+	}
+	for i, hashHex := range index.Canonical {
+		if !validCanonicalHashHex(hashHex) {
+			return fmt.Errorf("canonical[%d]: not 64 lowercase hex characters: %q", i, hashHex)
+		}
+	}
+	return nil
+}
+
+// validCanonicalHashHex: 64 lowercase hex characters (hex decoding alone would
+// accept uppercase).
+func validCanonicalHashHex(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func saveBlockStoreIndex(path string, index blockStoreIndexDisk) error {

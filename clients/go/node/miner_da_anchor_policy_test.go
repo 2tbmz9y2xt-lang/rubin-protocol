@@ -148,7 +148,7 @@ func TestMinerPolicyRejectsNonCoinbaseAnchorOutputs(t *testing.T) {
 	if err := chainState.Save(chainStatePath); err != nil {
 		t.Fatalf("save chainstate: %v", err)
 	}
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}
@@ -187,7 +187,6 @@ func TestMinerPolicyRejectsNonCoinbaseAnchorOutputs(t *testing.T) {
 	if mb.TxCount != 1 {
 		t.Fatalf("tx_count=%d, want 1 (coinbase only; non-coinbase CORE_ANCHOR must be filtered)", mb.TxCount)
 	}
-
 }
 
 func TestMinerPolicyCapsDaTemplateBytes(t *testing.T) {
@@ -197,7 +196,7 @@ func TestMinerPolicyCapsDaTemplateBytes(t *testing.T) {
 	if err := chainState.Save(chainStatePath); err != nil {
 		t.Fatalf("save chainstate: %v", err)
 	}
-	blockStore, err := OpenBlockStore(BlockStorePath(dir))
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("open blockstore: %v", err)
 	}

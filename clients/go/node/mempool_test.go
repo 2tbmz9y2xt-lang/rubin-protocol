@@ -4045,7 +4045,7 @@ func TestMempoolAddTxHeightOverflow(t *testing.T) {
 func TestMempoolAddTxBlockMTPError(t *testing.T) {
 	// Empty blockStore + non-zero height → prevTimestampsFromStore fails.
 	dir := t.TempDir()
-	store := mustOpenBlockStore(t, BlockStorePath(dir))
+	store := mustCreateBlockStore(t, BlockStorePath(dir))
 	st := &ChainState{HasTip: true, Height: 50}
 	mp, err := NewMempool(st, store, devnetGenesisChainID)
 	if err != nil {
@@ -4126,7 +4126,7 @@ func TestMempoolSelectByFee(t *testing.T) {
 
 func TestMinerMineOneSelectsFromMempool(t *testing.T) {
 	dir := t.TempDir()
-	store := mustOpenBlockStore(t, BlockStorePath(dir))
+	store := mustCreateBlockStore(t, BlockStorePath(dir))
 
 	var tipHash [32]byte
 	for height := uint64(0); height <= 100; height++ {

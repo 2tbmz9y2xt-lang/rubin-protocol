@@ -2884,7 +2884,7 @@ mod tests {
     fn build_state(with_genesis: bool) -> (super::DevnetRPCState, PathBuf) {
         let dir = unique_temp_path("rubin-devnet-rpc");
         fs::create_dir_all(&dir).expect("mkdir");
-        let block_store = BlockStore::open(block_store_path(&dir)).expect("blockstore");
+        let block_store = BlockStore::create(block_store_path(&dir)).expect("blockstore");
         let mut engine = SyncEngine::new(
             ChainState::new(),
             Some(block_store.clone()),
@@ -2910,7 +2910,7 @@ mod tests {
     fn build_state_with_live_mining(with_genesis: bool) -> (super::DevnetRPCState, PathBuf) {
         let dir = unique_temp_path("rubin-devnet-rpc-live");
         fs::create_dir_all(&dir).expect("mkdir");
-        let block_store = BlockStore::open(block_store_path(&dir)).expect("blockstore");
+        let block_store = BlockStore::create(block_store_path(&dir)).expect("blockstore");
         let mut engine = SyncEngine::new(
             ChainState::new(),
             Some(block_store.clone()),
@@ -5783,7 +5783,7 @@ mod tests {
     fn concurrent_connections_are_handled() {
         let dir = unique_temp_path("rubin-concurrent-rpc");
         fs::create_dir_all(&dir).expect("mkdir");
-        let block_store = BlockStore::open(block_store_path(&dir)).expect("blockstore");
+        let block_store = BlockStore::create(block_store_path(&dir)).expect("blockstore");
         let mut engine = SyncEngine::new(
             ChainState::new(),
             Some(block_store.clone()),
@@ -5831,7 +5831,7 @@ mod tests {
     fn excess_connections_are_dropped_at_capacity() {
         let dir = unique_temp_path("rubin-capacity-rpc");
         fs::create_dir_all(&dir).expect("mkdir");
-        let block_store = BlockStore::open(block_store_path(&dir)).expect("blockstore");
+        let block_store = BlockStore::create(block_store_path(&dir)).expect("blockstore");
         let mut engine = SyncEngine::new(
             ChainState::new(),
             Some(block_store.clone()),

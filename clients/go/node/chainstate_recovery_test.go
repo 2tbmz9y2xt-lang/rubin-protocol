@@ -84,9 +84,9 @@ func TestCloneChainState_NilAndDeepCopy(t *testing.T) {
 func TestReconcileChainStateWithBlockStoreReplaysMissingCanonicalBlocks(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 
 	target := consensus.POW_LIMIT
@@ -128,9 +128,9 @@ func TestReconcileChainStateWithBlockStoreReplaysMissingCanonicalBlocks(t *testi
 func TestReconcileChainStateWithBlockStoreResetsMismatchedSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 
 	target := consensus.POW_LIMIT
@@ -171,9 +171,9 @@ func TestReconcileChainStateWithBlockStore_InputValidationAndNoopPaths(t *testin
 	}
 
 	dir := t.TempDir()
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 	changed, err := ReconcileChainStateWithBlockStore(state, store, DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(dir)))
 	if err != nil {
@@ -206,7 +206,7 @@ func TestTruncateIncompleteCanonicalSuffix_InputValidation(t *testing.T) {
 		t.Fatalf("expected nil blockstore error")
 	}
 
-	store := mustOpenBlockStore(t, BlockStorePath(t.TempDir()))
+	store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
 	store.index.Canonical = []string{"zz"}
 	if _, err := truncateIncompleteCanonicalSuffix(store); err == nil {
 		t.Fatalf("expected malformed canonical hash error")
@@ -216,9 +216,9 @@ func TestTruncateIncompleteCanonicalSuffix_InputValidation(t *testing.T) {
 func TestReconcileChainStateWithBlockStore_NoopForCanonicalTipAndResetsAheadSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 
 	target := consensus.POW_LIMIT
@@ -258,9 +258,9 @@ func TestReconcileChainStateWithBlockStore_NoopForCanonicalTipAndResetsAheadSnap
 func TestReconcileChainStateWithBlockStore_TruncatesIncompleteCanonicalSuffix(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 
 	target := consensus.POW_LIMIT
@@ -319,9 +319,9 @@ func TestReconcileChainStateWithBlockStore_TruncatesIncompleteCanonicalSuffix(t 
 func TestReconcileChainStateWithBlockStore_PropagatesCorruptCanonicalArtifact(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 
 	target := consensus.POW_LIMIT
@@ -373,7 +373,7 @@ func TestReconcileChainStateWithBlockStore_PropagatesCorruptCanonicalArtifact(t 
 
 func TestTruncateIncompleteCanonicalSuffix_PropagatesIndexWriteFailure(t *testing.T) {
 	dir := t.TempDir()
-	store := mustOpenBlockStore(t, BlockStorePath(dir))
+	store := mustCreateBlockStore(t, BlockStorePath(dir))
 
 	target := consensus.POW_LIMIT
 	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(dir))
@@ -417,9 +417,9 @@ func TestTruncateIncompleteCanonicalSuffix_PropagatesIndexWriteFailure(t *testin
 func TestReconcileChainStateWithBlockStore_ResetsDirtyTiplessSnapshotBeforeReplay(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 
 	target := consensus.POW_LIMIT
@@ -470,9 +470,9 @@ func TestReconcileChainStateWithBlockStore_ResetsDirtyTiplessSnapshotBeforeRepla
 func TestReconcileChainStateWithBlockStore_PropagatesCorruptBlockBytesSwap(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
-	store, err := OpenBlockStore(BlockStorePath(dir))
+	store, err := CreateBlockStore(BlockStorePath(dir))
 	if err != nil {
-		t.Fatalf("OpenBlockStore: %v", err)
+		t.Fatalf("CreateBlockStore: %v", err)
 	}
 
 	target := consensus.POW_LIMIT
@@ -529,5 +529,86 @@ func TestReconcileChainStateWithBlockStore_PropagatesCorruptBlockBytesSwap(t *te
 	want := "canonical artifact corruption during chainstate replay at height 1"
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("expected error containing %q, got %v", want, err)
+	}
+}
+
+// storeAtGenesis returns a fresh store holding the canonical devnet genesis at
+// height 0, plus the live chainstate and the sync config used to build it.
+func storeAtGenesis(t *testing.T, dir string) (*BlockStore, *ChainState, SyncConfig) {
+	t.Helper()
+	store, err := CreateBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("CreateBlockStore: %v", err)
+	}
+	target := consensus.POW_LIMIT
+	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(dir))
+	state := NewChainState()
+	engine, err := NewSyncEngine(state, store, cfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	return store, state, cfg
+}
+
+// B2 rules 5-6 + parity matrix row 12: a canonical index that claims blocks but
+// has NO complete artifact set at height 0 is fatal. The guard fires before
+// TruncateCanonical, before any chainstate reset/save, with the exact
+// cross-client message. Rust mirror:
+// `zero_complete_canonical_prefix_is_fatal_before_any_mutation`.
+func TestReconcileZeroCompleteCanonicalPrefixIsFatal(t *testing.T) {
+	dir := t.TempDir()
+	store, liveState, cfg := storeAtGenesis(t, dir)
+	markerPath := filepath.Join(BlockStorePath(dir), "index.json")
+	if err := os.Remove(filepath.Join(store.headersDir, hex.EncodeToString(devnetGenesisBlockHash[:])+".bin")); err != nil {
+		t.Fatalf("Remove(genesis header): %v", err)
+	}
+	indexBefore, err := os.ReadFile(markerPath) // #nosec G304 -- test-local path.
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	state := cloneChainState(liveState)
+	before := state.view()
+
+	_, err = ReconcileChainStateWithBlockStore(state, store, cfg)
+	if !errors.Is(err, errCanonicalIndexZeroCompletePrefix) {
+		t.Fatalf("reconcile err = %v, want errCanonicalIndexZeroCompletePrefix", err)
+	}
+	if got, want := err.Error(), "persisted canonical index has zero complete prefix"; got != want {
+		t.Fatalf("message = %q, want %q", got, want)
+	}
+	indexAfter, err := os.ReadFile(markerPath) // #nosec G304 -- test-local path.
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if string(indexAfter) != string(indexBefore) {
+		t.Fatalf("guard must fire before TruncateCanonical(0): marker changed")
+	}
+	if got, err := store.CanonicalIndexSnapshot(); err != nil || len(got) != 1 {
+		t.Fatalf("canonical index = %v (%v), want length 1", got, err)
+	}
+	if after := state.view(); after != before {
+		t.Fatalf("chainstate mutated before the guard: %+v -> %+v", before, after)
+	}
+}
+
+// B2 rule 3: a structural/corruption error keeps its ORIGINAL error and wins
+// over the zero-prefix guard even though the complete prefix is also zero. Rust
+// mirror: `zero_complete_canonical_prefix_loses_to_artifact_error`.
+func TestReconcileZeroCompletePrefixLosesToArtifactError(t *testing.T) {
+	dir := t.TempDir()
+	store, liveState, cfg := storeAtGenesis(t, dir)
+	undo := filepath.Join(store.undoDir, hex.EncodeToString(devnetGenesisBlockHash[:])+".json")
+	if err := os.WriteFile(undo, []byte("not json"), 0o600); err != nil {
+		t.Fatalf("corrupt undo: %v", err)
+	}
+	_, err := ReconcileChainStateWithBlockStore(cloneChainState(liveState), store, cfg)
+	if err == nil {
+		t.Fatalf("corrupt artifact must fail")
+	}
+	if errors.Is(err, errCanonicalIndexZeroCompletePrefix) {
+		t.Fatalf("structural error must win over the zero-prefix guard, got %v", err)
 	}
 }
