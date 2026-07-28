@@ -28,10 +28,21 @@ pub struct ChainState {
     pub utxos: HashMap<Outpoint, UtxoEntry>,
 }
 
+/// Identifies one block a canonical apply committed, plus the complete DA-set
+/// IDs that block carries. It deliberately holds NO raw block bytes: a reorg
+/// summary accumulates one record per newly-canonical block, and a block is up
+/// to `MAX_BLOCK_BYTES`, so retaining bytes made summary size grow with reorg
+/// depth times block size. `complete_da_ids` is bounded by
+/// `MAX_DA_BATCHES_PER_BLOCK` fixed-width IDs, which is all any consumer ever
+/// needed from the bytes.
+///
+/// The no-bytes bound is on the SHAPE, not on a field name: no byte-slice field
+/// of any name may be reintroduced here. Go twin:
+/// `clients/go/node/chainstate.go` `CanonicalAppliedBlock`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalAppliedBlock {
     pub hash: [u8; 32],
-    pub block_bytes: Vec<u8>,
+    pub complete_da_ids: Vec<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +53,15 @@ pub struct ChainStateConnectSummary {
     pub already_generated: u64,
     pub already_generated_n1: u64,
     pub utxo_count: u64,
+    /// Populated ONLY by the `SyncEngine` canonical-apply path
+    /// (`SyncEngine::apply_block_with_target`), in canonical order: a direct
+    /// apply reports the single connected block, a reorg reports every
+    /// newly-canonical branch block, and a stored-but-not-switched side branch
+    /// reports none. The `ChainState` connect entry points leave it EMPTY —
+    /// connecting to an in-memory state is not by itself a canonical-application
+    /// event, and both the reorg preview (`prepare_preferred_branch`) and the
+    /// startup replay (`chainstate_recovery`) connect blocks that must never be
+    /// reported. Go twin: `ChainStateConnectSummary.CanonicalAppliedBlocks`.
     pub canonical_applied_blocks: Vec<CanonicalAppliedBlock>,
 }
 
@@ -176,10 +196,12 @@ impl ChainState {
             already_generated_n1: u64::try_from(connect_summary.already_generated_n1)
                 .map_err(|_| "already_generated_n1 overflow".to_string())?,
             utxo_count: connect_summary.utxo_count,
-            canonical_applied_blocks: vec![CanonicalAppliedBlock {
-                hash: tip_hash,
-                block_bytes: block_bytes.to_vec(),
-            }],
+            // Left EMPTY on purpose: connecting to an in-memory chain state is
+            // not a canonical-application event. Only the SyncEngine
+            // canonical-apply site mints these records, so the reorg preview,
+            // the startup replay, and side-branch connects — all of which land
+            // here — structurally cannot report a canonical-applied block.
+            canonical_applied_blocks: Vec::new(),
         })
     }
 
@@ -877,6 +899,14 @@ mod tests {
         let summary = st
             .connect_block(&block1, Some(POW_LIMIT), None, [0u8; 32])
             .expect("connect height 1");
+        // The connect entry point mints NO canonical-applied record: connecting
+        // to an in-memory chain state is not a canonical-application event, and
+        // the reorg preview and startup replay both land here. Only the
+        // SyncEngine canonical-apply site populates this field.
+        assert!(
+            summary.canonical_applied_blocks.is_empty(),
+            "the connect layer must not report canonical-applied blocks"
+        );
         assert_eq!(summary.block_height, 1);
         assert_eq!(summary.already_generated, 0);
         assert_eq!(summary.already_generated_n1, block_subsidy(1, 0));

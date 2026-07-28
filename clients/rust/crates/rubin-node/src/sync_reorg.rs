@@ -3,6 +3,7 @@ use rubin_consensus::{
     validate_block_basic_with_context_at_height_and_rotation, Outpoint, ParsedBlock,
     BLOCK_HEADER_BYTES,
 };
+use std::collections::BTreeSet;
 use std::ops::Deref;
 
 use crate::blockstore::BlockStore;
@@ -11,6 +12,100 @@ use crate::sync::SyncEngine;
 use crate::txpool::{TxPool, TxPoolAdmitError, TxPoolAdmitErrorKind, TxSource};
 
 pub(crate) const PARENT_BLOCK_NOT_FOUND_ERR: &str = "parent block not found";
+
+/// Marks a LOCAL block-store defect observed while walking a side branch: a
+/// stored block that cannot be read, cannot be parsed, or does not hash to the
+/// hash it was looked up by, or an ancestry that revisits a hash already walked.
+///
+/// It is deliberately distinct from [`PARENT_BLOCK_NOT_FOUND_ERR`]: only a
+/// genuinely absent ancestor may keep the parent-not-found outcome, which the
+/// P2P layer turns into normal orphan retention. Classifying our corrupt datadir
+/// as parent-not-found would silently park an honest peer's block in the orphan
+/// pool forever.
+///
+/// The cause is carried as PRE-RENDERED TEXT inside the message and is never
+/// chained: `parse_block_bytes` fails with a `TxError` (the consensus fault
+/// type), and a corruption error that a peer-facing classifier could reach
+/// through a `From` / `#[from]` / `source()` chain would attribute OUR local
+/// defect to the peer that relayed a perfectly well-formed block. Errors on this
+/// path are `String`s, so rendering the cause with `{err}` drops the chain by
+/// construction — that is the property, not an accident of the error type. Go
+/// reaches the same result by rendering the cause with `%v` instead of `%w`,
+/// because `errors.As` unwraps `%w` chains (`sync_reorg.go`
+/// `errBranchStoreCorrupt`).
+pub(crate) const BRANCH_STORE_CORRUPT_ERR: &str =
+    "block store corruption during side-branch collection";
+
+/// Builds a local-corruption error carrying `detail` as pre-rendered text. See
+/// [`BRANCH_STORE_CORRUPT_ERR`] for why the cause is text and never a chained
+/// error value.
+pub(crate) fn branch_store_corrupt(detail: String) -> String {
+    format!("{BRANCH_STORE_CORRUPT_ERR}: {detail}")
+}
+
+/// Reads one stored ancestor and PROVES it is the block that was asked for. A
+/// plain file read cannot: [`BlockStore::get_block_by_hash`] returns whatever
+/// bytes sit at the path named by the hash, so a corrupt — or hostile — datadir
+/// can answer every lookup with a block that points somewhere else entirely.
+///
+/// Every way the stored bytes can fail to be the requested block — unreadable,
+/// unparseable, unhashable, or hashing to something else — is one local
+/// corruption class. Bytes that cannot even yield a header certainly do not hash
+/// to their lookup key, so a parse failure is not a separate verdict. Only an
+/// underlying [`std::io::ErrorKind::NotFound`] means the ancestor is genuinely
+/// absent, which keeps the pre-existing [`PARENT_BLOCK_NOT_FOUND_ERR`] outcome.
+///
+/// Go twin: `clients/go/node/sync_reorg.go` `loadVerifiedBranchAncestor`.
+fn load_verified_branch_ancestor(
+    block_store: &BlockStore,
+    parent_hash: [u8; 32],
+) -> Result<(ParsedBlock, Vec<u8>), String> {
+    let parent_bytes = match block_store.read_block_file_by_hash(parent_hash) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(PARENT_BLOCK_NOT_FOUND_ERR.to_string());
+        }
+        Err(err) => {
+            return Err(branch_store_corrupt(format!(
+                "stored block for {} is unreadable: {err}",
+                hex::encode(parent_hash)
+            )));
+        }
+    };
+    let parent_parsed = parse_block_bytes(&parent_bytes).map_err(|err| {
+        branch_store_corrupt(format!(
+            "stored block for {} does not parse: {err}",
+            hex::encode(parent_hash)
+        ))
+    })?;
+    let observed_hash = block_hash(&parent_parsed.header_bytes).map_err(|err| {
+        branch_store_corrupt(format!(
+            "stored block for {} does not hash: {err}",
+            hex::encode(parent_hash)
+        ))
+    })?;
+    if observed_hash != parent_hash {
+        return Err(branch_store_corrupt(format!(
+            "stored block for {} hashes to {}",
+            hex::encode(parent_hash),
+            hex::encode(observed_hash)
+        )));
+    }
+    Ok((parent_parsed, parent_bytes))
+}
+
+/// One collected branch row built from an already-parsed block.
+fn branch_row(hash: [u8; 32], parsed: &ParsedBlock, block_bytes: Vec<u8>) -> ReorgBranchBlock {
+    ReorgBranchBlock {
+        hash,
+        header_bytes: parsed.header_bytes,
+        block_bytes,
+        prev_hash: parsed.header.prev_block_hash,
+        target: parsed.header.target,
+        timestamp: parsed.header.timestamp,
+        txids: parsed.txids.clone(),
+    }
+}
 
 /// Caller-owned candidate height of branch row `index` above the common
 /// ancestor — Go's `commonAncestorHeight + 1 + i`, with the additions checked so
@@ -611,6 +706,35 @@ impl SyncEngine {
     /// Walk backward from the given block along parent pointers until we find
     /// a block on the canonical chain. Returns the branch blocks in
     /// ancestor-to-tip order, plus the common ancestor hash and height.
+    ///
+    /// Two independent guards bound the walk, and their relationship is NOT
+    /// redundancy — do not remove either one on that theory:
+    ///
+    /// - Per-ancestor verification ([`load_verified_branch_ancestor`]) is the
+    ///   live guard. It is what actually stops a corrupt or hostile store file
+    ///   whose `prev_block_hash` points at itself, or at another file that
+    ///   points back: such a file cannot also hash to the name it was fetched
+    ///   under, so it is rejected on the first read. Without it this loop runs
+    ///   forever, appending the same block bytes on every pass, since nothing
+    ///   else in the walk bounds it.
+    /// - The `walked` set below is defense-in-depth that the verification guard
+    ///   makes UNREACHABLE today. Reaching it needs an ancestry that returns to
+    ///   an already-walked hash while every loaded block still hashes to its own
+    ///   lookup key — i.e. a SHA3-256 cycle. It exists so the walk stays bounded
+    ///   if the verification guard is ever weakened, reordered, or removed.
+    ///
+    /// Because it is unreachable, the `walked` branch cannot be pinned by a test
+    /// against the shipped code, and a line-coverage tool WILL report it
+    /// uncovered. That is expected, not a gap: the relationship is demonstrated
+    /// by mutation — removing the verification guard alone leaves the `walked`
+    /// set catching both the self-referencing and the two-file cycle shapes, and
+    /// removing both hangs the walk.
+    ///
+    /// With either guard in place the walk is bounded by the number of distinct
+    /// blocks actually on disk, so NO explicit depth limit is needed: an honest
+    /// branch still terminates at the canonical index or at
+    /// [`PARENT_BLOCK_NOT_FOUND_ERR`]. Go twin: `sync_reorg.go`
+    /// `collectBranchToCanonical`.
     fn collect_branch_to_canonical(
         &self,
         block_hash_bytes: [u8; 32],
@@ -622,16 +746,14 @@ impl SyncEngine {
             .ok_or("sync engine has no blockstore")?;
 
         let parsed = parse_block_bytes(block_bytes).map_err(|e| e.to_string())?;
-        let mut branch = vec![ReorgBranchBlock {
-            hash: block_hash_bytes,
-            header_bytes: parsed.header_bytes,
-            block_bytes: block_bytes.to_vec(),
-            prev_hash: parsed.header.prev_block_hash,
-            target: parsed.header.target,
-            timestamp: parsed.header.timestamp,
-            txids: parsed.txids.clone(),
-        }];
+        let mut branch = vec![branch_row(block_hash_bytes, &parsed, block_bytes.to_vec())];
 
+        // Seeded with the candidate so an ancestry looping back to the candidate
+        // itself is caught by the same rule as any other repeat. A `BTreeSet` is
+        // used rather than a hash set so nothing on this path depends on hash
+        // iteration behaviour; it is only ever probed, never iterated.
+        let mut walked: BTreeSet<[u8; 32]> = BTreeSet::new();
+        walked.insert(block_hash_bytes);
         let mut parent_hash = parsed.header.prev_block_hash;
 
         loop {
@@ -641,22 +763,21 @@ impl SyncEngine {
                 return Ok((branch, parent_hash, height));
             }
 
-            // Load the parent block from the side-chain store.
-            let parent_bytes = block_store
-                .get_block_by_hash(parent_hash)
-                .map_err(|_| PARENT_BLOCK_NOT_FOUND_ERR.to_string())?;
-            let parent_parsed = parse_block_bytes(&parent_bytes).map_err(|e| e.to_string())?;
+            // Unreachable while `load_verified_branch_ancestor` stands; see the
+            // guard relationship on this function.
+            if !walked.insert(parent_hash) {
+                return Err(branch_store_corrupt(format!(
+                    "ancestor {} already walked",
+                    hex::encode(parent_hash)
+                )));
+            }
 
-            branch.push(ReorgBranchBlock {
-                hash: parent_hash,
-                header_bytes: parent_parsed.header_bytes,
-                block_bytes: parent_bytes,
-                prev_hash: parent_parsed.header.prev_block_hash,
-                target: parent_parsed.header.target,
-                timestamp: parent_parsed.header.timestamp,
-                txids: parent_parsed.txids.clone(),
-            });
+            // Load the parent block from the side-chain store and prove it is
+            // the block that was asked for.
+            let (parent_parsed, parent_bytes) =
+                load_verified_branch_ancestor(block_store, parent_hash)?;
 
+            branch.push(branch_row(parent_hash, &parent_parsed, parent_bytes));
             parent_hash = parent_parsed.header.prev_block_hash;
         }
     }
@@ -1211,9 +1332,487 @@ mod tests {
         assert_eq!(summary.canonical_applied_blocks.len(), 1);
         assert_eq!(summary.canonical_applied_blocks[0].hash, block1_hash);
         assert_eq!(summary.canonical_applied_blocks[0].hash, summary.block_hash);
-        assert_eq!(summary.canonical_applied_blocks[0].block_bytes, block1);
+        // A coinbase-only block carries no DA set, so the ID list is empty —
+        // and the record owns no block payload at all.
+        assert!(summary.canonical_applied_blocks[0]
+            .complete_da_ids
+            .is_empty());
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Funds `count` independently spendable P2PK outputs owned by `keypair`
+    /// directly in the engine's chain state. They are NOT coinbase outputs, so
+    /// no maturity wait is needed — the DA transactions below still go through
+    /// real signing and full consensus validation, which is what these rows are
+    /// about; the funding route is not.
+    fn fund_p2pk_outputs(
+        engine: &mut SyncEngine,
+        keypair: &Mldsa87Keypair,
+        count: u8,
+    ) -> Vec<Outpoint> {
+        let covenant_data = p2pk_covenant_data_for_pubkey(&keypair.pubkey_bytes());
+        (0..count)
+            .map(|index| {
+                let outpoint = Outpoint {
+                    txid: [0xd0 + index; 32],
+                    vout: 0,
+                };
+                engine.chain_state.utxos.insert(
+                    outpoint.clone(),
+                    UtxoEntry {
+                        value: 200_000,
+                        covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
+                        covenant_data: covenant_data.clone(),
+                        creation_height: 0,
+                        created_by_coinbase: false,
+                    },
+                );
+                outpoint
+            })
+            .collect()
+    }
+
+    /// Signed wire bytes for one COMPLETE DA set (a single-chunk commit plus its
+    /// chunk) for `da_id`. Each transaction spends one funded output entirely as
+    /// fee, mirroring the devnet DA tx generator's shape.
+    fn signed_complete_da_set(
+        engine: &SyncEngine,
+        keypair: &Mldsa87Keypair,
+        da_id: [u8; 32],
+        coins: &[Outpoint],
+        nonce_base: u64,
+        payload: &[u8],
+    ) -> Vec<Vec<u8>> {
+        use sha3::{Digest, Sha3_256};
+        let digest = |bytes: &[u8]| -> [u8; 32] { Sha3_256::digest(bytes).into() };
+        let input_for = |coin: &Outpoint| TxInput {
+            prev_txid: coin.txid,
+            prev_vout: coin.vout,
+            script_sig: Vec::new(),
+            sequence: 0,
+        };
+        let base = |tx_kind: u8, tx_nonce: u64, coin: &Outpoint| Tx {
+            version: rubin_consensus::constants::TX_WIRE_VERSION,
+            tx_kind,
+            tx_nonce,
+            inputs: vec![input_for(coin)],
+            outputs: Vec::new(),
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        };
+
+        let mut commit = base(0x01, nonce_base, &coins[0]);
+        commit.outputs = vec![TxOutput {
+            value: 0,
+            covenant_type: rubin_consensus::constants::COV_TYPE_DA_COMMIT,
+            // Single chunk, so the commitment is over that chunk's payload.
+            covenant_data: digest(payload).to_vec(),
+        }];
+        commit.da_commit_core = Some(rubin_consensus::DaCommitCore {
+            da_id,
+            chunk_count: 1,
+            retl_domain_id: [0x10; 32],
+            batch_number: 1,
+            tx_data_root: [0x11; 32],
+            state_root: [0x12; 32],
+            withdrawals_root: [0x13; 32],
+            batch_sig_suite: 0,
+            batch_sig: Vec::new(),
+        });
+        commit.da_payload = vec![0xa1];
+
+        let mut chunk = base(0x02, nonce_base + 1, &coins[1]);
+        chunk.da_chunk_core = Some(rubin_consensus::DaChunkCore {
+            da_id,
+            chunk_index: 0,
+            chunk_hash: digest(payload),
+        });
+        chunk.da_payload = payload.to_vec();
+
+        [commit, chunk]
+            .into_iter()
+            .map(|mut tx| {
+                sign_transaction(
+                    &mut tx,
+                    &engine.chain_state.utxos,
+                    engine.cfg.chain_id,
+                    keypair,
+                )
+                .expect("sign DA tx");
+                marshal_tx(&tx).expect("marshal DA tx")
+            })
+            .collect()
+    }
+
+    /// A direct canonical apply reports the block's OWN complete DA-set IDs,
+    /// byte-sorted, extracted from the block the apply already parsed. The two
+    /// sets are laid out on the wire high-`da_id` first, so wire order cannot be
+    /// mistaken for sorted order.
+    #[test]
+    fn apply_block_with_reorg_reports_complete_da_sets_on_direct_apply() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-canon-da-direct");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+        engine.cfg.chain_id = devnet_genesis_chain_id();
+
+        let keypair = Mldsa87Keypair::generate().expect("OpenSSL signer unavailable");
+        let coins = fund_p2pk_outputs(&mut engine, &keypair, 4);
+        let da_lo = [0x21u8; 32];
+        let da_hi = [0x91u8; 32];
+        let mut txs =
+            signed_complete_da_set(&engine, &keypair, da_hi, &coins[0..2], 100, b"hi-pay");
+        txs.extend(signed_complete_da_set(
+            &engine,
+            &keypair,
+            da_lo,
+            &coins[2..4],
+            200,
+            b"lo-pay",
+        ));
+
+        let block1 = block_with_txs(1, 0, genesis_hash, gen_ts + 1, &txs);
+        let block1_hash = block_header_hash(&block1);
+        let outcome = engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("DA-carrying block applies");
+
+        assert_eq!(outcome.summary.canonical_applied_blocks.len(), 1);
+        let record = &outcome.summary.canonical_applied_blocks[0];
+        assert_eq!(record.hash, block1_hash);
+        assert_eq!(
+            record.complete_da_ids,
+            vec![da_lo, da_hi],
+            "the record carries this block's own complete DA IDs, byte-sorted"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// On a reorg each newly-canonical block reports ITS OWN complete DA sets:
+    /// a single accumulated set, or a last-block-wins report, would leave the
+    /// other blocks' relay records pinned forever.
+    #[test]
+    fn apply_block_with_reorg_attributes_complete_da_sets_per_block() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-canon-da-reorg");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+        engine.cfg.chain_id = devnet_genesis_chain_id();
+
+        let keypair = Mldsa87Keypair::generate().expect("OpenSSL signer unavailable");
+        let coins = fund_p2pk_outputs(&mut engine, &keypair, 4);
+        let da_first = [0x41u8; 32];
+        let da_second = [0x42u8; 32];
+
+        // Canonical single block, so the two-block branch below outweighs it.
+        let block1 = coinbase_only_block(1, genesis_hash, gen_ts + 1);
+        engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("block1 canonical");
+
+        // Branch block 1 carries the first DA set; branch block 2 the second.
+        let alt1_txs =
+            signed_complete_da_set(&engine, &keypair, da_first, &coins[0..2], 300, b"branch-1");
+        let alt1 = block_with_txs(1, 0, genesis_hash, gen_ts + 2, &alt1_txs);
+        let alt1_hash = block_header_hash(&alt1);
+        engine
+            .block_store
+            .as_ref()
+            .expect("blockstore")
+            .store_block(
+                alt1_hash,
+                &alt1[..rubin_consensus::BLOCK_HEADER_BYTES],
+                &alt1,
+            )
+            .expect("store alt1 as side branch");
+
+        let alt2_txs =
+            signed_complete_da_set(&engine, &keypair, da_second, &coins[2..4], 400, b"branch-2");
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let alt2 = block_with_txs(2, subsidy1, alt1_hash, gen_ts + 3, &alt2_txs);
+        let alt2_hash = block_header_hash(&alt2);
+
+        let outcome = engine
+            .apply_block_with_reorg(&alt2, None)
+            .expect("reorg to the heavier DA-carrying branch");
+
+        assert_eq!(engine.chain_state.tip_hash, alt2_hash);
+        let records = &outcome.summary.canonical_applied_blocks;
+        assert_eq!(records.len(), 2, "one record per newly canonical block");
+        assert_eq!(records[0].hash, alt1_hash);
+        assert_eq!(records[0].complete_da_ids, vec![da_first]);
+        assert_eq!(records[1].hash, alt2_hash);
+        assert_eq!(records[1].complete_da_ids, vec![da_second]);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Plants arbitrary bytes at the block-store path a given hash resolves to.
+    /// The store read is a plain file read, so this is exactly what a corrupt
+    /// datadir — or anything with write access to it — hands the branch walk.
+    fn plant_raw_store_block(dir: &std::path::Path, hash: [u8; 32], bytes: &[u8]) {
+        let path = block_store_path(dir)
+            .join("blocks")
+            .join(format!("{}.bin", hex::encode(hash)));
+        std::fs::write(&path, bytes).expect("plant raw store block");
+    }
+
+    /// Pins the failure class of a corrupt-store branch walk: a local-corruption
+    /// error, distinct from the parent-not-found class, that the P2P orphan
+    /// router does NOT match. The router check is the consequential one — it is
+    /// what keeps our own bad datadir from parking an honest peer's block in the
+    /// orphan pool instead of surfacing the local defect.
+    fn assert_branch_store_corruption(err: &str) {
+        assert!(
+            !crate::p2p_runtime::is_parent_not_found_err(err),
+            "the P2P orphan router must not match local corruption: {err}"
+        );
+        assert_ne!(
+            err, PARENT_BLOCK_NOT_FOUND_ERR,
+            "not the absent-ancestor class"
+        );
+        assert!(
+            err.starts_with(BRANCH_STORE_CORRUPT_ERR),
+            "expected the local-corruption class, got: {err}"
+        );
+    }
+
+    /// Engine holding genesis + one canonical block, ready for a side-branch
+    /// candidate at height 2. Returns the engine, its data dir, and the
+    /// already-generated subsidy at height 1.
+    fn engine_with_canonical_tip(suffix: &str) -> (SyncEngine, std::path::PathBuf, u64, u64) {
+        let (mut engine, dir) = engine_with_store(suffix);
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
+        engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("block1 canonical");
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        (engine, dir, subsidy1, gen_ts)
+    }
+
+    /// Drives the branch walk against a block store whose files lie. NONE of
+    /// these shapes is self-consistent — a stored block that really hashed to
+    /// the name it also points at would be a SHA3-256 cycle — so every one of
+    /// them is caught by the per-ancestor verification, terminating instead of
+    /// walking forever.
+    #[test]
+    fn apply_block_with_reorg_rejects_corrupt_store_ancestry() {
+        // A fabricated ancestor hash the candidate will point at.
+        let missing_parent = [0x5c_u8; 32];
+        let second_hop = [0x5d_u8; 32];
+        let honest_elsewhere = coinbase_only_block(1, [0x6a; 32], 10_000);
+
+        // Each row plants files, then the walk is driven through the public
+        // reorg entry with a candidate whose prev hash names the first file.
+        type PlantedStoreFiles = Vec<([u8; 32], Vec<u8>)>;
+        let rows: Vec<(&str, PlantedStoreFiles)> = vec![
+            (
+                // The former NON-TERMINATION reproduction: a stored file whose
+                // prev pointer names itself. Without verification the walk
+                // re-reads it forever.
+                "self-referencing stored ancestor",
+                vec![(
+                    missing_parent,
+                    coinbase_only_block(1, missing_parent, 10_001),
+                )],
+            ),
+            (
+                "two-file store cycle",
+                vec![
+                    (missing_parent, coinbase_only_block(1, second_hop, 10_002)),
+                    (second_hop, coinbase_only_block(1, missing_parent, 10_003)),
+                ],
+            ),
+            (
+                "stored ancestor present but unparseable",
+                vec![(missing_parent, b"not a block at all".to_vec())],
+            ),
+            (
+                "real block truncated mid-encoding",
+                vec![(
+                    missing_parent,
+                    honest_elsewhere[..honest_elsewhere.len() / 2].to_vec(),
+                )],
+            ),
+            (
+                "well-formed block stored under another block's hash",
+                vec![(missing_parent, honest_elsewhere.clone())],
+            ),
+        ];
+
+        for (index, (name, planted)) in rows.into_iter().enumerate() {
+            let (mut engine, dir, subsidy1, gen_ts) =
+                engine_with_canonical_tip(&format!("rubin-reorg-corrupt-{index}"));
+            for (hash, bytes) in &planted {
+                plant_raw_store_block(&dir, *hash, bytes);
+            }
+            let candidate = coinbase_only_block_with_gen(
+                2,
+                subsidy1,
+                missing_parent,
+                gen_ts + 20 + index as u64,
+            );
+            let err = engine
+                .apply_block_with_reorg(&candidate, None)
+                .expect_err(name);
+            assert_branch_store_corruption(&err);
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
+    }
+
+    /// A store read failure that is NOT `NotFound` is local corruption, never
+    /// the absent-ancestor class. A directory planted where the block file
+    /// belongs produces exactly that: the read fails with a non-`NotFound` kind.
+    /// This is the row the kind-preserving store accessor exists for — the
+    /// `String`-formatting accessor erases the kind, and matching on rendered
+    /// io-error text is OS-dependent.
+    #[test]
+    fn apply_block_with_reorg_reports_corruption_for_non_not_found_read_error() {
+        let (mut engine, dir, subsidy1, gen_ts) =
+            engine_with_canonical_tip("rubin-reorg-corrupt-readerr");
+        let blocked_parent = [0x5e_u8; 32];
+        let path = block_store_path(&dir)
+            .join("blocks")
+            .join(format!("{}.bin", hex::encode(blocked_parent)));
+        std::fs::create_dir_all(&path).expect("plant a directory where a block file belongs");
+
+        let candidate = coinbase_only_block_with_gen(2, subsidy1, blocked_parent, gen_ts + 40);
+        let err = engine
+            .apply_block_with_reorg(&candidate, None)
+            .expect_err("a non-NotFound read error must fail the walk");
+        assert_branch_store_corruption(&err);
+        assert!(
+            err.contains("unreadable"),
+            "the read-failure shape is named in the message: {err}"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// A genuinely absent ancestor keeps the parent-not-found outcome — and so
+    /// keeps orphan retention — from both the walk and the public reorg entry.
+    #[test]
+    fn apply_block_with_reorg_keeps_parent_not_found_for_absent_ancestor() {
+        let (mut engine, dir, subsidy1, gen_ts) =
+            engine_with_canonical_tip("rubin-reorg-absent-ancestor");
+        let absent_parent = [0x5f_u8; 32];
+        let candidate = coinbase_only_block_with_gen(2, subsidy1, absent_parent, gen_ts + 50);
+        let candidate_hash = block_header_hash(&candidate);
+
+        // `ReorgBranchBlock` is not `Debug`, so match rather than `expect_err`.
+        let Err(walk_err) = engine.collect_branch_to_canonical(candidate_hash, &candidate) else {
+            panic!("an absent ancestor must fail the walk");
+        };
+        assert_eq!(walk_err, PARENT_BLOCK_NOT_FOUND_ERR);
+        assert!(crate::p2p_runtime::is_parent_not_found_err(&walk_err));
+
+        let apply_err = engine
+            .apply_block_with_reorg(&candidate, None)
+            .expect_err("absent ancestor through the public entry");
+        assert_eq!(apply_err, PARENT_BLOCK_NOT_FOUND_ERR);
+        assert!(
+            !apply_err.starts_with(BRANCH_STORE_CORRUPT_ERR),
+            "a missing ancestor is not local corruption"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Verification adds NO false positives: an honest stored multi-block branch
+    /// still collects in canonical order with the correct common ancestor, and
+    /// the reorg that follows still applies and reports one record per block.
+    #[test]
+    fn collect_branch_to_canonical_accepts_honest_multi_block_branch() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-honest-branch");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
+        engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("block1 canonical");
+
+        // A two-block branch off genesis, the first block honestly stored.
+        let alt1 = coinbase_only_block(1, genesis_hash, gen_ts + 2);
+        let alt1_hash = block_header_hash(&alt1);
+        engine
+            .block_store
+            .as_ref()
+            .expect("blockstore")
+            .store_block(
+                alt1_hash,
+                &alt1[..rubin_consensus::BLOCK_HEADER_BYTES],
+                &alt1,
+            )
+            .expect("store alt1");
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let alt2 = coinbase_only_block_with_gen(2, subsidy1, alt1_hash, gen_ts + 3);
+        let alt2_hash = block_header_hash(&alt2);
+
+        // `ReorgBranchBlock` is not `Debug`, so destructure rather than `expect`.
+        let Ok((branch, ancestor_hash, ancestor_height)) =
+            engine.collect_branch_to_canonical(alt2_hash, &alt2)
+        else {
+            panic!("honest branch must collect, verification adds no false positives");
+        };
+        assert_eq!(ancestor_hash, genesis_hash);
+        assert_eq!(ancestor_height, 0);
+        assert_eq!(
+            branch.iter().map(|row| row.hash).collect::<Vec<_>>(),
+            vec![alt1_hash, alt2_hash],
+            "branch is oldest-first"
+        );
+
+        let outcome = engine
+            .apply_block_with_reorg(&alt2, None)
+            .expect("honest branch applies");
+        assert_eq!(engine.chain_state.tip_hash, alt2_hash);
+        assert_eq!(engine.chain_state.height, 2);
+        assert_eq!(
+            outcome
+                .summary
+                .canonical_applied_blocks
+                .iter()
+                .map(|record| record.hash)
+                .collect::<Vec<_>>(),
+            vec![alt1_hash, alt2_hash]
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// The no-bytes bound is on the SHAPE of the record, not on a field name:
+    /// this destructuring is exhaustive, so ADDING any field — a `Vec<u8>` of
+    /// block bytes under any name included — fails to compile here. That is the
+    /// Rust stand-in for Go's reflective field inventory
+    /// (`TestCanonicalAppliedBlockCarriesNoBlockBytes`), which Rust cannot do at
+    /// runtime. Each retained item is a fixed-width hash or a bounded list of
+    /// fixed-width IDs, so a canonical-applied report grows with block COUNT,
+    /// never with block SIZE.
+    #[test]
+    fn canonical_applied_block_carries_no_block_bytes() {
+        let record = CanonicalAppliedBlock {
+            hash: [0x11; 32],
+            complete_da_ids: vec![[0x22; 32]],
+        };
+        let CanonicalAppliedBlock {
+            hash,
+            complete_da_ids,
+        } = record;
+        assert_eq!(hash, [0x11; 32]);
+        assert_eq!(complete_da_ids, vec![[0x22; 32]]);
     }
 
     #[test]
@@ -1292,9 +1891,12 @@ mod tests {
         // Every block that became canonical, in ascending canonical order.
         assert_eq!(summary.canonical_applied_blocks.len(), 2);
         assert_eq!(summary.canonical_applied_blocks[0].hash, block1_alt_hash);
-        assert_eq!(summary.canonical_applied_blocks[0].block_bytes, block1_alt);
         assert_eq!(summary.canonical_applied_blocks[1].hash, block2_alt_hash);
-        assert_eq!(summary.canonical_applied_blocks[1].block_bytes, block2_alt);
+        // Coinbase-only branch blocks carry no DA sets; the records are the two
+        // hashes and nothing else.
+        for record in &summary.canonical_applied_blocks {
+            assert!(record.complete_da_ids.is_empty());
+        }
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -1762,6 +2364,14 @@ mod tests {
             .apply_block_with_reorg(&block2_alt, None)
             .unwrap_err();
 
+        // No chain-state assertion here on purpose: this shape fails inside
+        // `disconnect_canonical_to_ancestor` BEFORE the in-memory chain state
+        // moves, so "height/tip unchanged" holds trivially and stays green even
+        // with the rollback deleted outright (measured). The untouched-chain
+        // half of the failed-reorg obligation is pinned by
+        // `apply_preferred_branch_connect_fail_undo_readonly`, where the connect
+        // has already advanced the state and the rollback is what restores it.
+
         // Restore permissions for cleanup.
         let mut perms = std::fs::metadata(&dir).expect("dir meta").permissions();
         #[allow(clippy::permissions_set_readonly_false)]
@@ -1825,9 +2435,20 @@ mod tests {
         perms.set_readonly(true);
         std::fs::set_permissions(&undo_dir, perms).expect("set ro");
 
+        // A failed branch apply must leave the canonical chain exactly where it
+        // was — the other half of "a failed reorg reports nothing".
+        let before_height = engine.chain_state.height;
+        let before_tip = engine.chain_state.tip_hash;
+
         let err = engine
             .apply_block_with_reorg(&block2_alt, None)
             .unwrap_err();
+
+        assert_eq!(
+            engine.chain_state.height, before_height,
+            "height rolled back"
+        );
+        assert_eq!(engine.chain_state.tip_hash, before_tip, "tip rolled back");
 
         // Restore permissions for cleanup.
         let mut perms = std::fs::metadata(&undo_dir)
