@@ -275,7 +275,7 @@ PY
 }
 start_node() {
   local label="$1" log="$2" datadir="$3" peers="${4:-}"
-  local cmd=("${NODE_BIN}" --network devnet --datadir "${datadir}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0)
+  local cmd=("${NODE_BIN}" --network devnet --create-store --datadir "${datadir}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0)
   STARTED_PID=""; STARTED_RPC=""; STARTED_P2P=""
   [[ -z "${peers}" ]] || cmd+=(--peers "${peers}")
   rubin_process_start "${log}" "${cmd[@]}" || { echo "failed to start ${label}" >&2; return 1; }

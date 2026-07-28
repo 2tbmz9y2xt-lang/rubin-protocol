@@ -342,7 +342,7 @@ pid_listens_on() {
 start_partition_go_node() {
   local log_file="partition-node-go.log" args
   GO_PARTITION_PID="" GO_PARTITION_RPC="" GO_PARTITION_P2P="" GO_PARTITION_STARTED=""
-  args=(--network devnet --datadir "${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-node-go" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0)
+  args=(--network devnet --create-store --datadir "${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-node-go" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0)
   [[ -z "${PARTITION_GO_MINE_ADDRESS_HEX:-}" ]] || args+=(--mine-address "${PARTITION_GO_MINE_ADDRESS_HEX}")
   rubin_process_start "${log_file}" "${NODE_BIN}" "${args[@]}" || return 1
   GO_PARTITION_PID="${RUBIN_PROCESS_LAST_PID}"
@@ -355,7 +355,7 @@ start_partition_go_node() {
 start_partition_rust_node() {
   local log_file="partition-node-rust.log" peer_addr="$1" args
   RUST_PARTITION_PID="" RUST_PARTITION_RPC="" RUST_PARTITION_P2P="" RUST_PARTITION_STARTED=""
-  args=(--network devnet --datadir "${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-node-rust" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer "${peer_addr}")
+  args=(--network devnet --create-store --datadir "${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-node-rust" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer "${peer_addr}")
   [[ -z "${PARTITION_RUST_MINE_ADDRESS_HEX:-}" ]] || args+=(--mine-address "${PARTITION_RUST_MINE_ADDRESS_HEX}")
   rubin_process_start "${log_file}" "${RUST_NODE_BIN}" "${args[@]}" || return 1
   RUST_PARTITION_PID="${RUBIN_PROCESS_LAST_PID}"
@@ -1254,7 +1254,7 @@ MINE_ADDRESS_HEX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1
 TO_ADDRESS_HEX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["to_address_hex"])' "${KEYGEN_JSON}")"
 mkdir -p "${A_DIR}" "${B_DIR}" "${C_DIR}"
 echo "Mining mature Go chain to height ${BASE_HEIGHT}"
-"${NODE_BIN}" --datadir "${A_DIR}" --mine-address "${MINE_ADDRESS_HEX}" --mine-blocks "${BASE_MINE_BLOCKS}" --mine-exit >"${MINE_LOG}" 2>&1
+"${NODE_BIN}" --create-store --datadir "${A_DIR}" --mine-address "${MINE_ADDRESS_HEX}" --mine-blocks "${BASE_MINE_BLOCKS}" --mine-exit >"${MINE_LOG}" 2>&1
 cp -R "${A_DIR}/." "${B_DIR}/"
 cp -R "${A_DIR}/." "${C_DIR}/"
 echo "Starting three Go rubin-node processes"

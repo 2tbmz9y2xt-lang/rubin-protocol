@@ -22,6 +22,7 @@
 //! wallet/key generation. The key material is devnet-only and ephemeral.
 
 use std::fs;
+use std::io;
 use std::path::Path;
 
 use rubin_consensus::constants::{
@@ -340,12 +341,34 @@ pub fn build_signed_da_set(
 /// signed DA set spending the matured coinbases. The keypair never leaves this
 /// process. Leaves a persisted devnet datadir (chainstate + blockstore) for
 /// downstream relay wiring (RUB-443).
+/// Create-mode rule 5 applied to this generator, BEFORE any datadir mutation.
+/// `mine_and_generate` commits a blockstore and then keeps working, so any later
+/// failure (bad chainstate tip, insufficient coinbase maturity, ...) used to
+/// leave an initialized root behind and every retry died on "root already
+/// exists". Refusing up front keeps a failed run retryable. `symlink_metadata`,
+/// not `metadata`, so a dangling symlink counts as present; the blockstore-root
+/// error wins when both paths exist.
+fn require_absent_for_generate(data_dir: &Path) -> Result<(), String> {
+    for (label, path) in [
+        ("blockstore root", block_store_path(data_dir)),
+        ("chainstate", chain_state_path(data_dir)),
+    ] {
+        match fs::symlink_metadata(&path) {
+            Ok(_) => return Err(format!("{label} already exists: {}", path.display())),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("stat {label} {}: {err}", path.display())),
+        }
+    }
+    Ok(())
+}
+
 pub fn mine_and_generate(data_dir: &Path, mine_blocks: u64) -> Result<SignedDaSet, String> {
     let genesis = load_genesis_config(None, "devnet")?;
     let chain_id = genesis.chain_id;
     let keypair = Mldsa87Keypair::generate().map_err(|err| err.to_string())?;
     let mine_covenant_data = p2pk_covenant_data_for_pubkey(&keypair.pubkey_bytes());
 
+    require_absent_for_generate(data_dir)?;
     fs::create_dir_all(data_dir)
         .map_err(|err| format!("datadir create failed ({}): {err}", data_dir.display()))?;
     let chain_state_file = chain_state_path(data_dir);
@@ -504,5 +527,35 @@ mod tests {
 
     fn genesis_chain_id() -> [u8; 32] {
         crate::genesis::devnet_genesis_chain_id()
+    }
+
+    /// A failed generate must never poison the datadir. With a chainstate present
+    /// and no store (the shape a crashed/rejected run leaves behind), the
+    /// precondition refuses BEFORE any mutation: no blockstore is created, and a
+    /// SECOND call returns the identical refusal rather than "File exists".
+    /// The refusal precedes every read, so the chainstate bytes are irrelevant.
+    #[test]
+    fn mine_and_generate_refuses_existing_state_without_mutating_datadir() {
+        let dir = TempDir::new();
+        fs::create_dir_all(&dir.path).expect("mkdir datadir");
+        fs::write(chain_state_path(&dir.path), b"{}").expect("seed chainstate");
+
+        let first = mine_and_generate(&dir.path, DA_RELAY_BASE_HEIGHT)
+            .expect_err("an existing chainstate must refuse the run");
+        assert!(first.contains("chainstate already exists"), "{first}");
+        assert!(
+            !block_store_path(&dir.path).exists(),
+            "refusal must not create a blockstore root"
+        );
+
+        let second = mine_and_generate(&dir.path, DA_RELAY_BASE_HEIGHT)
+            .expect_err("the refusal must be idempotent");
+        assert_eq!(first, second, "retry must not degrade into a create error");
+
+        // The blockstore-root error wins when both paths exist.
+        fs::create_dir_all(block_store_path(&dir.path)).expect("mkdir root");
+        let both = mine_and_generate(&dir.path, DA_RELAY_BASE_HEIGHT)
+            .expect_err("an existing root must refuse the run");
+        assert!(both.contains("blockstore root already exists"), "{both}");
     }
 }
