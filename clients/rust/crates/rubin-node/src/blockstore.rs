@@ -1006,8 +1006,14 @@ struct BlockStoreIndexView<'a> {
 /// destination inode. That is safe: `write_and_sync_temp` uses
 /// `O_CREATE|O_EXCL` (no `O_TRUNC`), so any later call hitting the same
 /// temp path returns `AlreadyExists` via `allocate_and_write_temp` and
-/// retries with a fresh `seq` (16-retry budget). Startup reconcile
-/// (`E.2`) sweeps orphan `.tmp.*` siblings. A crash before the final
+/// retries with a fresh `seq` (16-retry budget). NOTHING removes that
+/// sibling today: a crash between the temp write and the link or rename
+/// leaks one `<dest>.tmp.<pid>.<seq>` file, and there is no startup
+/// sweep. The leak exists only because the name is unique per write; the
+/// fix is a FIXED temp name per destination (which the next write
+/// truncates) plus a datadir lock, not a startup deletion pass — Bitcoin
+/// Core and Monero take the naming route and sweep nothing at startup.
+/// Tracked as RUB-1078. A crash before the final
 /// `sync_dir` leaves the dirent in page cache; the fast-path on retry
 /// re-runs `sync_dir` and PROPAGATES its error so the durability
 /// failure is surfaced.

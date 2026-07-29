@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 use crate::production_rotation_schedule::production_rotation_descriptor_for_network;
@@ -136,7 +135,7 @@ pub fn load_genesis_config(
             suite_context: None,
         });
     };
-    let raw = fs::read_to_string(path)
+    let raw = crate::io_utils::read_config_file_to_string(path)
         .map_err(|e| format!("read genesis file {}: {e}", path.display()))?;
     let raw_json: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|e| format!("parse genesis file {}: {e}", path.display()))?;
@@ -360,7 +359,7 @@ pub fn load_chain_id_from_genesis_file(path: Option<&Path>) -> Result<[u8; 32], 
     let Some(path) = path else {
         return Ok(devnet_genesis_chain_id());
     };
-    let raw = fs::read_to_string(path)
+    let raw = crate::io_utils::read_config_file_to_string(path)
         .map_err(|e| format!("read genesis file {}: {e}", path.display()))?;
     let payload: GenesisPack = serde_json::from_str(&raw)
         .map_err(|e| format!("parse genesis file {}: {e}", path.display()))?;
@@ -1567,5 +1566,68 @@ mod tests {
         assert_eq!(cfg.genesis_hash, None);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Operator-config bound at BOTH genesis read sites: a pack padded with
+    /// trailing JSON whitespace to exactly `CONFIG_FILE_MAX_BYTES` parses and
+    /// round-trips the chain id, one byte over is refused with the typed size
+    /// error before the contents are allocated. Go twin:
+    /// `TestReadFileConfigBoundGenesisSite`.
+    ///
+    /// The pack carries a chain id the compiled devnet default can never
+    /// produce (Go uses `strings.Repeat("ab", 32)` for the same reason), so a
+    /// loader that stopped honouring the path and returned the default cannot
+    /// satisfy the at-bound assertion. `genesis_hash_hex` is explicit for the
+    /// same reason: it exercises the parse branch instead of the devnet
+    /// special case.
+    #[test]
+    fn config_bound_at_both_genesis_read_sites() {
+        let dir = crate::io_utils::unique_temp_path("rubin-node-genesis-config-bound");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let expected = [0xabu8; 32];
+        let expected_hash = [0xcdu8; 32];
+        assert_ne!(
+            expected,
+            devnet_genesis_chain_id(),
+            "pack must not be the default"
+        );
+        let pack = format!(
+            "{{\"chain_id_hex\":\"{}\",\"genesis_hash_hex\":\"{}\"}}",
+            hex::encode(expected),
+            hex::encode(expected_hash)
+        );
+        let padded = |name: &str, size: usize| -> std::path::PathBuf {
+            let mut content = pack.clone().into_bytes();
+            assert!(content.len() <= size, "payload longer than target size");
+            content.resize(size, b' ');
+            let path = dir.join(name);
+            std::fs::write(&path, &content).expect("write");
+            path
+        };
+        // Literal, not the constant: this row pins the per-site boundary at
+        // the real ceiling, and `config_bound_pins_derived_value` ties the
+        // literal to `CONFIG_FILE_MAX_BYTES`. Same split as Go's
+        // `configBoundTestFile` / `TestReadFileConfigBoundPinsDerivedValue`.
+        let at = padded("at.json", 1 << 24);
+        let over = padded("over.json", (1 << 24) + 1);
+
+        let cfg = load_genesis_config(Some(&at), "devnet").expect("at-bound pack must load");
+        assert_eq!(cfg.chain_id, expected);
+        assert_eq!(cfg.genesis_hash, Some(expected_hash));
+        let chain_id =
+            load_chain_id_from_genesis_file(Some(&at)).expect("at-bound pack must load chain id");
+        assert_eq!(chain_id, expected);
+
+        for err in [
+            load_genesis_config(Some(&over), "devnet").expect_err("over-bound pack must refuse"),
+            load_chain_id_from_genesis_file(Some(&over)).expect_err("over-bound pack must refuse"),
+        ] {
+            assert!(
+                err.contains("exceeds size bound"),
+                "over-bound pack must be refused with the typed size error, got {err}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
