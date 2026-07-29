@@ -59,6 +59,11 @@ class FormalRelevanceTests(unittest.TestCase):
                 self.assertFalse(decision.run_formal)
                 self.assertEqual(decision.path_count, 1)
 
+    def test_pr_template_only_skips(self):
+        self.assertFalse(
+            self.decision(diff(("M", ".github/PULL_REQUEST_TEMPLATE.md"))).run_formal
+        )
+
     def test_protected_precedence_over_broad_allowlists(self):
         for path in (
             "tools/formal/generate.py",
