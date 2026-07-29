@@ -147,7 +147,7 @@ jobs:
 
       - name: Classify formal relevance
         id: formal_gate
-        run: python3 tools/ci_formal_relevance.py
+        run: python3 tools/ci_formal_relevance.py --job formal
 
       - name: Cache Lean toolchain
         if: steps.formal_gate.outputs.run_formal == 'true'
@@ -204,9 +204,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: rubin-formal/.lake
-          key: lake-formal-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain', 'rubin-formal/lakefile.lean', 'rubin-formal/lake-manifest.json') }}
+          key: lake-formal-v2-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain', 'rubin-formal/lakefile.lean', 'rubin-formal/lake-manifest.json') }}-${{ hashFiles('rubin-formal/RubinFormal.lean', 'rubin-formal/RubinFormal/**/*.lean') }}
           restore-keys: |
-            lake-formal-${{ runner.os }}-
+            lake-formal-v2-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain', 'rubin-formal/lakefile.lean', 'rubin-formal/lake-manifest.json') }}-
 
       - name: Lean package checks (rubin-formal)
         if: steps.formal_gate.outputs.run_formal == 'true'
@@ -248,7 +248,7 @@ jobs:
           path: |
             ~/.cache/rubin-openssl/bundle-3.5.5
             ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
-          key: openssl-bundle-${{ runner.os }}-3.5.5-v3
+          key: openssl-bundle-${{ runner.os }}-3.5.5-v3-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}
 
       - name: Build OpenSSL 3.5.5 bundle
         run: |
@@ -489,7 +489,7 @@ jobs:
           path: |
             ~/.cache/rubin-openssl/bundle-3.5.5
             ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
-          key: openssl-bundle-${{ runner.os }}-3.5.5-v3
+          key: openssl-bundle-${{ runner.os }}-3.5.5-v3-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}
 
       - name: Build OpenSSL 3.5.5 bundle
         run: |
@@ -549,7 +549,7 @@ jobs:
 
       - name: Classify formal relevance
         id: formal_gate
-        run: python3 tools/ci_formal_relevance.py
+        run: python3 tools/ci_formal_relevance.py --job formal_refinement
 
       - name: Cache Lean toolchain
         if: steps.formal_gate.outputs.run_formal == 'true'
@@ -608,7 +608,7 @@ jobs:
           path: |
             ~/.cache/rubin-openssl/bundle-3.5.5
             ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
-          key: openssl-bundle-${{ runner.os }}-3.5.5-v3
+          key: openssl-bundle-${{ runner.os }}-3.5.5-v3-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}
 
       - name: Build OpenSSL 3.5.5 bundle
         if: steps.formal_gate.outputs.run_formal == 'true'
@@ -689,9 +689,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: rubin-formal/.lake
-          key: lake-refinement-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain', 'rubin-formal/lakefile.lean', 'rubin-formal/lake-manifest.json') }}
+          key: lake-refinement-v2-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain', 'rubin-formal/lakefile.lean', 'rubin-formal/lake-manifest.json') }}-${{ hashFiles('rubin-formal/RubinFormal.lean', 'rubin-formal/RubinFormal/**/*.lean') }}
           restore-keys: |
-            lake-refinement-${{ runner.os }}-
+            lake-refinement-v2-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain', 'rubin-formal/lakefile.lean', 'rubin-formal/lake-manifest.json') }}-
 
       - name: Lean build (rubin-formal)
         if: steps.formal_gate.outputs.run_formal == 'true'
@@ -718,7 +718,7 @@ jobs:
           path: |
             ~/.cache/rubin-openssl/bundle-3.5.5
             ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
-          key: openssl-bundle-${{ runner.os }}-3.5.5-v3
+          key: openssl-bundle-${{ runner.os }}-3.5.5-v3-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}
       - name: Build OpenSSL 3.5.5 bundle
         run: |
           set -euo pipefail

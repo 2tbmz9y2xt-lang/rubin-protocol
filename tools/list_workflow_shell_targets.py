@@ -5,7 +5,7 @@ import re
 import sys
 from pathlib import Path
 
-WORKFLOW_SCRIPT_RE = re.compile(r"scripts/[A-Za-z0-9_./-]+\.sh")
+WORKFLOW_SCRIPT_RE = re.compile(r"scripts/[A-Za-z0-9_./-]+\.sh(?![A-Za-z0-9_./-])")
 
 
 def iter_workflows(workflow_dir: Path) -> list[Path]:

@@ -98,13 +98,15 @@ jobs:
       # own key because its entries are already verified and rotating them would
       # buy nothing. No restore-keys: a prefix fallback reaches pre-rotation
       # entries and would undo both.
+      # The key also binds hashFiles of the pinned-digest file, so a pin change
+      # rotates it; the prefix stays dedicated because only this lane writes it.
       - name: Cache OpenSSL 3.5 bundle
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: |
             ~/.cache/rubin-openssl/bundle-3.5.5
             ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
-          key: openssl-bundle-mldsa-verified-${{ runner.os }}-3.5.5-v1
+          key: openssl-bundle-mldsa-verified-${{ runner.os }}-3.5.5-v1-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}
 
       - name: Build OpenSSL 3.5.5 bundle
         run: |
