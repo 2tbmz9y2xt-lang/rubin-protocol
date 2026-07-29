@@ -47,11 +47,16 @@ TARGETS=(
 
 usage() {
   cat <<USAGE
-Usage: scripts/ci/run_fuzz_stage2.sh
+Usage: scripts/ci/run_fuzz_stage2.sh [--list-json | --target <pkg:Target>]
 
 Runs the bounded Go stage2 fuzz target list and writes reproducibility metadata
 under .artifacts/fuzz-stage2/. The script does not commit, push, regenerate
 tracked fixtures, or open issues.
+
+Modes:
+  (no args)          run every target in the list (local use)
+  --list-json        print the target list as a compact JSON array and exit
+  --target <spec>    run exactly one listed "pkg:Target" spec (CI matrix use)
 
 Environment:
   FUZZ_TIME=${FUZZ_TIME}
@@ -62,16 +67,77 @@ Artifact metadata includes:
 USAGE
 }
 
-if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  usage
-  exit 0
+# TARGETS entries are trusted in-file literals ("pkg:Target", no quotes or
+# backslashes), so plain string concatenation yields valid JSON.
+list_json() {
+  local out="["
+  local first=1
+  local spec
+  for spec in "${TARGETS[@]}"; do
+    if ((first)); then first=0; else out+=","; fi
+    out+="\"${spec}\""
+  done
+  printf '%s]\n' "${out}"
+}
+
+MODE="all"
+TARGET_SPEC=""
+case "${1:-}" in
+  --help|-h)
+    usage
+    exit 0
+    ;;
+  --list-json)
+    if (($# > 1)); then
+      echo "FAIL: --list-json takes no extra arguments" >&2
+      exit 2
+    fi
+    list_json
+    exit 0
+    ;;
+  --target)
+    if (($# != 2)); then
+      echo "FAIL: --target requires exactly one pkg:Target spec" >&2
+      usage >&2
+      exit 2
+    fi
+    MODE="single"
+    TARGET_SPEC="$2"
+    ;;
+  "")
+    MODE="all"
+    ;;
+  *)
+    echo "FAIL: unexpected arguments: $*" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${MODE}" == "single" ]]; then
+  target_known=0
+  for spec in "${TARGETS[@]}"; do
+    if [[ "${spec}" == "${TARGET_SPEC}" ]]; then
+      target_known=1
+      break
+    fi
+  done
+  if [[ "${target_known}" -ne 1 ]]; then
+    echo "FAIL: unknown target spec: ${TARGET_SPEC}" >&2
+    exit 2
+  fi
 fi
 
-if (($# > 0)); then
-  echo "FAIL: unexpected arguments: $*" >&2
-  usage >&2
+if [[ ! "${FUZZ_TIME}" =~ ^[0-9]+s$ ]]; then
+  echo "FAIL: FUZZ_TIME must match ^[0-9]+s\$ (got: ${FUZZ_TIME})" >&2
   exit 2
 fi
+fuzz_seconds="${FUZZ_TIME%s}"
+# The +600s margin covers baseline-coverage gathering, minimisation
+# (FUZZ_MINIMIZE_TIME), coordinator shutdown, and runner starvation; without an
+# explicit -timeout the default 10m go test timeout would become the binding
+# kill once fuzztime reaches minutes.
+GO_TEST_TIMEOUT="$((fuzz_seconds + 600))s"
 
 COMMIT_SHA="${GITHUB_SHA:-$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || printf '%s' unknown)}"
 
@@ -155,9 +221,36 @@ write_target_metadata() {
     write_env_field "corpus_path" "${corpus_path}"
     write_env_field "artifacts_path" "${artifacts_path}"
     write_env_field "seed_path" "${corpus_path}"
-    write_env_field "command" "cd clients/go && go test -run=^$ -fuzz=\"${target}\" -fuzztime=\"${FUZZ_TIME}\" -fuzzminimizetime=\"${FUZZ_MINIMIZE_TIME}\" \"${pkg}\""
+    write_env_field "go_test_timeout" "${GO_TEST_TIMEOUT}"
+    write_env_field "command" "cd clients/go && go test -run=^$ -fuzz=\"${target}\" -fuzztime=\"${FUZZ_TIME}\" -fuzzminimizetime=\"${FUZZ_MINIMIZE_TIME}\" -timeout=\"${GO_TEST_TIMEOUT}\" \"${pkg}\""
     write_env_field "log_path" ".artifacts/fuzz-stage2/${target}.log"
   } > "${metadata_file}"
+}
+
+run_one_target() {
+  local pkg="$1"
+  local target="$2"
+  local log_file="${ARTIFACTS_DIR}/${target}.log"
+  local corpus_dir="${GO_DIR}/${pkg#./}/testdata/fuzz/${target}"
+  local corpus_before="${ARTIFACTS_DIR}/${target}.corpus-before.txt"
+  # Snapshot the corpus file list before the run: the benign-exit classifier
+  # treats "no new file here" as proof no crasher was written.
+  if [[ -d "${corpus_dir}" ]]; then
+    find "${corpus_dir}" -type f | sort > "${corpus_before}"
+  else
+    : > "${corpus_before}"
+  fi
+  write_target_metadata "${pkg}" "${target}"
+  echo "==> running ${target} (${pkg})" | tee -a "${ARTIFACTS_DIR}/summary.log"
+  echo "metadata ${target}: ${ARTIFACTS_DIR}/${target}.metadata.env" >> "${ARTIFACTS_DIR}/summary.log"
+  if go test -run=^$ -fuzz="${target}" -fuzztime="${FUZZ_TIME}" -fuzzminimizetime="${FUZZ_MINIMIZE_TIME}" -timeout="${GO_TEST_TIMEOUT}" "${pkg}" >"${log_file}" 2>&1; then
+    echo "PASS ${target}" | tee -a "${ARTIFACTS_DIR}/summary.log"
+  elif "${ROOT_DIR}/scripts/ci/classify_go_fuzz_exit.sh" "${target}" "${fuzz_seconds}" "${log_file}" "${corpus_before}" "${corpus_dir}"; then
+    echo "PASS_AFTER_BENIGN_DEADLINE ${target} (upstream fuzztime shutdown race; full budget spent, no defect evidence)" | tee -a "${ARTIFACTS_DIR}/summary.log"
+  else
+    STATUS=1
+    echo "FAIL ${target}" | tee -a "${ARTIFACTS_DIR}/summary.log"
+  fi
 }
 
 trap collect_artifacts EXIT
@@ -168,25 +261,19 @@ write_run_metadata
   echo "commit sha: ${COMMIT_SHA}"
   echo "fuzz time per target: ${FUZZ_TIME}"
   echo "fuzz minimize time: ${FUZZ_MINIMIZE_TIME}"
+  echo "go test timeout: ${GO_TEST_TIMEOUT}"
   echo "metadata: ${ARTIFACTS_DIR}/run-metadata.env"
 } > "${ARTIFACTS_DIR}/summary.log"
 
 cd "${GO_DIR}"
 
-for spec in "${TARGETS[@]}"; do
-  pkg="${spec%%:*}"
-  target="${spec##*:}"
-  log_file="${ARTIFACTS_DIR}/${target}.log"
-  write_target_metadata "${pkg}" "${target}"
-  echo "==> running ${target} (${pkg})" | tee -a "${ARTIFACTS_DIR}/summary.log"
-  echo "metadata ${target}: ${ARTIFACTS_DIR}/${target}.metadata.env" >> "${ARTIFACTS_DIR}/summary.log"
-  if ! go test -run=^$ -fuzz="${target}" -fuzztime="${FUZZ_TIME}" -fuzzminimizetime="${FUZZ_MINIMIZE_TIME}" "${pkg}" >"${log_file}" 2>&1; then
-    STATUS=1
-    echo "FAIL ${target}" | tee -a "${ARTIFACTS_DIR}/summary.log"
-  else
-    echo "PASS ${target}" | tee -a "${ARTIFACTS_DIR}/summary.log"
-  fi
-done
+if [[ "${MODE}" == "single" ]]; then
+  run_one_target "${TARGET_SPEC%%:*}" "${TARGET_SPEC##*:}"
+else
+  for spec in "${TARGETS[@]}"; do
+    run_one_target "${spec%%:*}" "${spec##*:}"
+  done
+fi
 
 echo "fuzz stage2 finished at: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${ARTIFACTS_DIR}/summary.log"
 exit "${STATUS}"
