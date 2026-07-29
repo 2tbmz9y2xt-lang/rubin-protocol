@@ -17,7 +17,7 @@ import (
 )
 
 var (
-	readFileByPathFn  = readFileByPath
+	readFileByPathFn  = readFileByPathCapped
 	writeFileAtomicFn = writeFileAtomic
 )
 
@@ -309,14 +309,14 @@ func (bs *BlockStore) GetBlockByHash(blockHash [32]byte) ([]byte, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
 	}
-	return readFileFromDir(bs.blocksDir, hex.EncodeToString(blockHash[:])+".bin")
+	return readFileFromDir(bs.blocksDir, hex.EncodeToString(blockHash[:])+".bin", blockFileMaxBytes)
 }
 
 func (bs *BlockStore) GetHeaderByHash(blockHash [32]byte) ([]byte, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
 	}
-	return readFileFromDir(bs.headersDir, hex.EncodeToString(blockHash[:])+".bin")
+	return readFileFromDir(bs.headersDir, hex.EncodeToString(blockHash[:])+".bin", headerFileMaxBytes)
 }
 
 func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
@@ -494,14 +494,23 @@ func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {
 	if err != nil {
 		return err
 	}
-	return writeFileIfAbsent(filepath.Join(bs.undoDir, hex.EncodeToString(blockHash[:])+".json"), raw)
+	path := filepath.Join(bs.undoDir, hex.EncodeToString(blockHash[:])+".json")
+	// RUB-1057 write/read symmetry for the undo class: the bound rests on a
+	// wire-cost derivation (>=1 mandatory signature per spent input), so this
+	// guard converts any future derivation drift (a new covenant family,
+	// signature aggregation) into a loud save-time error instead of a
+	// next-restart refusal of the node's own undo file.
+	if err := checkStoreSaveBound(path, len(raw), undoFileMaxBytes); err != nil {
+		return err
+	}
+	return writeFileIfAbsent(path, raw)
 }
 
 func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
 	}
-	raw, err := readFileFromDir(bs.undoDir, hex.EncodeToString(blockHash[:])+".json")
+	raw, err := readFileFromDir(bs.undoDir, hex.EncodeToString(blockHash[:])+".json", undoFileMaxBytes)
 	if err != nil {
 		return nil, err
 	}
