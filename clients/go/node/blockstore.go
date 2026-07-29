@@ -494,7 +494,16 @@ func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {
 	if err != nil {
 		return err
 	}
-	return writeFileIfAbsent(filepath.Join(bs.undoDir, hex.EncodeToString(blockHash[:])+".json"), raw)
+	path := filepath.Join(bs.undoDir, hex.EncodeToString(blockHash[:])+".json")
+	// RUB-1057 write/read symmetry for the undo class: the bound rests on a
+	// wire-cost derivation (>=1 mandatory signature per spent input), so this
+	// guard converts any future derivation drift (a new covenant family,
+	// signature aggregation) into a loud save-time error instead of a
+	// next-restart refusal of the node's own undo file.
+	if err := checkStoreSaveBound(path, len(raw), undoFileMaxBytes); err != nil {
+		return err
+	}
+	return writeFileIfAbsent(path, raw)
 }
 
 func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
@@ -622,6 +631,11 @@ func saveBlockStoreIndex(path string, index blockStoreIndexDisk) error {
 		return err
 	}
 	raw = append(raw, '\n')
+	// RUB-1057 write/read symmetry: never persist a marker the bounded
+	// loader would refuse on the next open.
+	if err := checkStoreSaveBound(path, len(raw), indexFileMaxBytes); err != nil {
+		return err
+	}
 	return writeFileAtomicFn(path, raw, 0o600)
 }
 

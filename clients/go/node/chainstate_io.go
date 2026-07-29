@@ -128,6 +128,11 @@ func (s *ChainState) Save(path string) error {
 		return fmt.Errorf("encode chainstate: %w", err)
 	}
 	raw = append(raw, '\n')
+	// RUB-1057 write/read symmetry: never persist a snapshot the bounded
+	// loader would refuse on the next startup.
+	if err := checkStoreSaveBound(path, len(raw), chainStateFileMaxBytes); err != nil {
+		return err
+	}
 	// nosemgrep: Semgrep_go.lang.correctness.permissions.file_permission.incorrect-default-permission
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil { // nosemgrep
 		return err

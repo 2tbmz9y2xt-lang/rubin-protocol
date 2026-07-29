@@ -6,10 +6,42 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 const testReadBound = 8
+
+// TestSafeIOClassBoundConstantsPinFrozenValues pins the six frozen
+// cross-client bound values; a red row means the cross-client contract
+// number drifted, not a local tuning knob. De-scaled stand-in for the
+// removed at-production-bound rows of the undo/index/chainstate/verify
+// classes (RUB-1057 wave 2): those callers share the bounded readers at
+// these hard-wired constants, and their at/over verdicts run at small
+// injectable bounds in this file.
+func TestSafeIOClassBoundConstantsPinFrozenValues(t *testing.T) {
+	if blockFileMaxBytes != 72_000_000 || headerFileMaxBytes != 116 ||
+		undoFileMaxBytes != 2_000_000_000 || indexFileMaxBytes != 256_000_000 ||
+		chainStateFileMaxBytes != 1_000_000_000 || storeVerifyReadMaxBytes != undoFileMaxBytes {
+		t.Fatalf("class bound constants drifted from the frozen cross-client table")
+	}
+}
+
+// TestSafeIOStoreSaveBoundRefusesOverBound pins the write/read symmetry
+// guard for the guarded classes (undo + both growth classes) with small
+// synthetic numbers: at bound the save proceeds, one byte over refuses with
+// the typed class error and a clearly save-side message.
+func TestSafeIOStoreSaveBoundRefusesOverBound(t *testing.T) {
+	for _, class := range []string{"undo", "chainstate", "index_marker"} {
+		if err := checkStoreSaveBound(class, testReadBound, testReadBound); err != nil {
+			t.Fatalf("%s at bound: %v", class, err)
+		}
+		err := checkStoreSaveBound(class, testReadBound+1, testReadBound)
+		if !errors.Is(err, errStoreFileTooLarge) || !strings.Contains(err.Error(), "refusing to save") {
+			t.Fatalf("%s over bound: want save-side errStoreFileTooLarge, got %v", class, err)
+		}
+	}
+}
 
 func TestReadFileFromDirRejectsTraversal(t *testing.T) {
 	dir := t.TempDir()

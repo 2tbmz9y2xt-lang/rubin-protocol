@@ -52,6 +52,10 @@ const (
 	// json.RawMessage before decoding, so an in-bound marker transiently
 	// costs up to ~3x its on-disk size in memory during open (raw bytes +
 	// RawMessage copy + decoded strings); the on-disk bound is unchanged.
+	// Enforced on BOTH ends (checkStoreSaveBound in saveBlockStoreIndex,
+	// readFileByPath in loadBlockStoreIndex), so ordinary chain growth
+	// surfaces as a loud save-time error instead of a next-open refusal of
+	// the node's own marker.
 	indexFileMaxBytes = 256_000_000
 
 	// Chainstate snapshot: one utxoDiskEntry costs 359B in a digit-width-
@@ -61,7 +65,10 @@ const (
 	// 1_000_000_000 admits >=2.8M P2PK-shaped or ~15K worst-shape UTXOs;
 	// a realistic devnet/testnet population (low hundreds of thousands,
 	// overwhelmingly P2PK/HTLC-shaped) fits with >=10x margin. Growth:
-	// linear in UTXO count.
+	// linear in UTXO count. Enforced on BOTH ends (checkStoreSaveBound in
+	// ChainState.Save, readFileByPath in LoadChainState), so ordinary UTXO
+	// growth surfaces as a loud save-time error instead of a next-startup
+	// refusal of the node's own snapshot.
 	chainStateFileMaxBytes = 1_000_000_000
 
 	// storeVerifyReadMaxBytes bounds the write-if-absent existing-
@@ -171,4 +178,17 @@ func capHint(size, maxBytes int64) int {
 
 func errFileTooLarge(name string, observed, maxBytes int64) error {
 	return fmt.Errorf("%s: %d bytes observed, class bound %d: %w", name, observed, maxBytes, errStoreFileTooLarge)
+}
+
+// checkStoreSaveBound is the write/read symmetry guard for the growth
+// classes (chainstate snapshot, index marker): the node must never persist a
+// file it would refuse to load back. Same typed class as the read-side
+// refusal; the message is clearly save-side. Rust twin:
+// `check_store_save_bound` in io_utils.rs.
+func checkStoreSaveBound(name string, size int, maxBytes int64) error {
+	if int64(size) > maxBytes {
+		return fmt.Errorf("refusing to save %s: %d bytes marshaled, class bound %d: %w",
+			name, size, maxBytes, errStoreFileTooLarge)
+	}
+	return nil
 }

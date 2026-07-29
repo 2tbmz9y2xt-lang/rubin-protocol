@@ -681,6 +681,17 @@ impl BlockStore {
         // undo files are ephemeral and reorg-scoped, and keep the
         // Go-baseline symmetric raw-OS resolution so a freshly
         // written undo is always visible to the corresponding read.
+        //
+        // RUB-1057 write/read symmetry for the undo class: the bound rests
+        // on a wire-cost derivation (>=1 mandatory signature per spent
+        // input), so this guard converts any future derivation drift (a new
+        // covenant family, signature aggregation) into a loud save-time
+        // error instead of a next-restart refusal of the node's own undo.
+        crate::io_utils::check_store_save_bound(
+            &path.display().to_string(),
+            raw.len(),
+            UNDO_FILE_MAX_BYTES,
+        )?;
         write_file_atomic(&path, &raw)
     }
 
@@ -939,6 +950,13 @@ fn save_blockstore_index_serializable<S: serde::Serialize + ?Sized>(
     let mut raw =
         serde_json::to_vec_pretty(index).map_err(|e| format!("encode blockstore index: {e}"))?;
     raw.push(b'\n');
+    // RUB-1057 write/read symmetry: never persist a marker the bounded
+    // loader would refuse on the next open.
+    crate::io_utils::check_store_save_bound(
+        &path.display().to_string(),
+        raw.len(),
+        INDEX_FILE_MAX_BYTES,
+    )?;
     // Keep writer on raw `write_file_atomic` (no `lexical_clean`)
     // so the index file persists to the same physical directory
     // that block / header / undo writers use and that
@@ -1126,20 +1144,22 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        block_store_path, load_blockstore_index, read_file_by_path, write_file_if_absent,
-        write_file_if_absent_with, BlockStore, BlockStoreIndexDisk, BLOCK_FILE_MAX_BYTES,
-        BLOCK_STORE_DIR_NAME, HEADER_FILE_MAX_BYTES, INDEX_FILE_MAX_BYTES,
-        STORE_VERIFY_READ_MAX_BYTES, UNDO_FILE_MAX_BYTES,
+        block_store_path, read_file_by_path, write_file_if_absent, write_file_if_absent_with,
+        BlockStore, BlockStoreIndexDisk, BLOCK_FILE_MAX_BYTES, BLOCK_STORE_DIR_NAME,
+        HEADER_FILE_MAX_BYTES,
     };
 
-    /// RUB-1057: every blockstore read path refuses an over-bound file with
-    /// the typed size-class error — never an allocation, an absent-file
-    /// default, or a parse error (the index row is over-bound AND malformed
-    /// [all zeros] and must report the size class). The block row goes
-    /// through `read_block_file_by_hash` so the ErrorKind pin (InvalidData,
-    /// never NotFound) covers the branch ancestor walk (RUB-881): only
-    /// NotFound may keep `sync_reorg::load_verified_branch_ancestor`'s
-    /// parent-not-found arm. Go twin:
+    /// RUB-1057: bound+1 refusal at the two caller paths whose production
+    /// bounds are cheap to stage — block (72MB sparse, the contract-mandated
+    /// production-scale row) and header (117B). The block row goes through
+    /// `read_block_file_by_hash` so the ErrorKind pin (InvalidData, never
+    /// NotFound) covers the branch ancestor walk (RUB-881): only NotFound may
+    /// keep `sync_reorg::load_verified_branch_ancestor`'s parent-not-found
+    /// arm. The undo/index/chainstate/verify callers share the same bounded
+    /// readers at hard-wired constants pinned by
+    /// `class_bound_constants_pin_frozen_values`; their at/over verdicts run
+    /// at small injectable bounds in io_utils.rs (RUB-1057 wave-2
+    /// de-scaling: no multi-GB or 256MB rows). Go twin:
     /// `TestBlockStoreReadFileClassBoundsRefuseOverBound`.
     #[test]
     fn read_class_bounds_refuse_over_bound_files() {
@@ -1164,89 +1184,64 @@ mod tests {
         );
         let err = store.get_header_by_hash(hash).unwrap_err();
         assert!(err.contains(STORE_FILE_TOO_LARGE_PREFIX), "{err}");
-        create_sparse_file(
-            &root.join("undo").join(format!("{name}.json")),
-            UNDO_FILE_MAX_BYTES + 1,
-        );
-        let err = store.get_undo(hash).unwrap_err();
-        assert!(err.contains(STORE_FILE_TOO_LARGE_PREFIX), "{err}");
-        let big_index = root.join("big-index.json");
-        create_sparse_file(&big_index, INDEX_FILE_MAX_BYTES + 1);
-        let err = load_blockstore_index(&big_index).unwrap_err();
-        assert!(err.contains(STORE_FILE_TOO_LARGE_PREFIX), "{err}");
-        let verify_dst = root.join("blocks").join("verify.bin");
-        create_sparse_file(&verify_dst, STORE_VERIFY_READ_MAX_BYTES + 1);
-        let err = write_file_if_absent(&verify_dst, b"x").unwrap_err();
-        assert!(err.contains(STORE_FILE_TOO_LARGE_PREFIX), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Completes the per-class verdict pair (Go twin:
-    /// `TestBlockStoreReadFileClassBoundsAcceptAtBound`): a file sized
-    /// EXACTLY at its class bound is admitted by the read layer — the header
-    /// row returns its bytes, every other row's error is the caller's
-    /// parse/content class, never the size refusal (block's accept row lives
-    /// in `read_file_from_dir_block_class_production_bound`). The
-    /// undo/chainstate/verify rows transiently materialize 1-2GB of zeros
-    /// (sparse on disk; the JSON decoders fail on the first byte).
+    /// A header sized exactly at its class bound (116B) reads back
+    /// byte-complete — the caller-level at-bound accept row for the one
+    /// production bound that is cheap to stage (block's accept row reads
+    /// 72MB in `read_file_from_dir_block_class_production_bound`; the other
+    /// classes' at/over pairs run at small injectable bounds in io_utils.rs,
+    /// production constants pinned by
+    /// `class_bound_constants_pin_frozen_values`). Go twin:
+    /// `TestBlockStoreReadFileClassBoundsAcceptAtBound`.
     #[test]
     fn read_class_bounds_accept_at_bound_files() {
         let root = unique_temp_path("rubin-bs-at-bound");
         let store = BlockStore::create(&root).expect("create");
         let hash = [0u8; 32];
         let name = hex::encode(hash);
-        let not_size = |row: &str, err: String| {
-            assert!(!err.contains(STORE_FILE_TOO_LARGE_PREFIX), "{row}: {err}");
-        };
         create_sparse_file(
             &root.join("headers").join(format!("{name}.bin")),
             HEADER_FILE_MAX_BYTES,
         );
         let got = store.get_header_by_hash(hash).expect("header at bound");
         assert_eq!(got.len() as u64, HEADER_FILE_MAX_BYTES);
-        create_sparse_file(
-            &root.join("undo").join(format!("{name}.json")),
-            UNDO_FILE_MAX_BYTES,
-        );
-        not_size("undo", store.get_undo(hash).unwrap_err());
-        let idx = root.join("at-index.json");
-        create_sparse_file(&idx, INDEX_FILE_MAX_BYTES);
-        not_size("index_marker", load_blockstore_index(&idx).unwrap_err());
-        let cs = root.join("chainstate.json");
-        create_sparse_file(&cs, crate::io_utils::CHAIN_STATE_FILE_MAX_BYTES);
-        not_size(
-            "chainstate",
-            crate::chainstate::load_chain_state(&cs).unwrap_err(),
-        );
-        let verify = root.join("blocks").join("verify.bin");
-        create_sparse_file(&verify, STORE_VERIFY_READ_MAX_BYTES);
-        not_size(
-            "write_if_absent_verify",
-            write_file_if_absent(&verify, b"x").unwrap_err(),
-        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Drives the hard_link-EEXIST verify arm against an over-bound
-    /// existing destination: the seam's first probe reports NotFound so
-    /// `write_file_exclusive` reaches hard_link EEXIST, and the second
-    /// (real, bounded) read must refuse instead of buffering the file.
-    /// Go twin: `TestWriteFileIfAbsentEEXISTVerifyReadFileBound`.
+    /// Drives BOTH write-if-absent verify read sites against an over-bound
+    /// existing destination at a small injectable bound through the
+    /// `write_file_if_absent_with` seam (the production seam constant
+    /// `STORE_VERIFY_READ_MAX_BYTES` is pinned by
+    /// `class_bound_constants_pin_frozen_values`): the fast-path probe and
+    /// the hard_link-EEXIST re-read must both refuse instead of buffering
+    /// the file. For the EEXIST arm the first probe reports NotFound so
+    /// `write_file_exclusive` reaches hard_link EEXIST and performs the real
+    /// second read. Go twin: `TestWriteFileIfAbsentEEXISTVerifyReadFileBound`.
     #[test]
     fn write_file_if_absent_eexist_verify_read_enforces_bound() {
         let dir = unique_temp_path("rubin-wfia-eexist-bound");
         std::fs::create_dir_all(&dir).expect("mkdir");
         let dst = dir.join("dst.bin");
-        create_sparse_file(&dst, STORE_VERIFY_READ_MAX_BYTES + 1);
+        std::fs::write(&dst, [0xa5u8; 9]).expect("seed"); // small bound 8 + 1
+        let err = write_file_if_absent_with(&dst, b"x", |p| read_file_by_path(p, 8)).unwrap_err();
+        assert!(
+            err.contains(STORE_FILE_TOO_LARGE_PREFIX),
+            "fast path: {err}"
+        );
         let first = std::cell::Cell::new(true);
         let err = write_file_if_absent_with(&dst, b"x", |p| {
             if first.replace(false) {
                 return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
             }
-            read_file_by_path(p, STORE_VERIFY_READ_MAX_BYTES)
+            read_file_by_path(p, 8)
         })
         .unwrap_err();
-        assert!(err.contains(STORE_FILE_TOO_LARGE_PREFIX), "{err}");
+        assert!(
+            err.contains(STORE_FILE_TOO_LARGE_PREFIX),
+            "eexist arm: {err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

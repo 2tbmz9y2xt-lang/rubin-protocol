@@ -636,115 +636,77 @@ func TestLoadBlockStoreIndexNeverSynthesizesEmptyIndex(t *testing.T) {
 	}
 }
 
-// TestBlockStoreReadFileClassBoundsRefuseOverBound pins the per-class RUB-1057 size
-// bounds at every blockstore read path: an over-bound file yields the typed
-// errStoreFileTooLarge (never an allocation, absent-file default, or parse
-// error — the sparse index row is over-bound AND malformed and must report
-// the size class). In-bound behavior is pinned by the existing
-// BlockStoreIndex/OpenBlockStore/CreateBlockStore tests.
+// TestBlockStoreReadFileClassBoundsRefuseOverBound pins the bound+1 refusal
+// at the two caller paths whose production bounds are cheap to stage — block
+// (72MB sparse, the contract-mandated production-scale row) and header
+// (117B): the typed errStoreFileTooLarge, never an absent-file default. The
+// undo/index/chainstate/verify callers share the same bounded readers at
+// hard-wired constants pinned by TestSafeIOClassBoundConstantsPinFrozenValues;
+// their at/over verdicts run at small injectable bounds in safeio_test.go
+// (RUB-1057 wave-2 de-scaling: no multi-GB or 256MB rows).
 func TestBlockStoreReadFileClassBoundsRefuseOverBound(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "blockstore")
 	store := mustCreateBlockStore(t, root)
 	var hash [32]byte
 	name := hex.EncodeToString(hash[:])
-
-	rows := []struct {
-		name string
-		path string
-		size int64
-		read func() error
-	}{
-		{
-			"block", filepath.Join(root, "blocks", name+".bin"), blockFileMaxBytes + 1,
-			func() error { _, err := store.GetBlockByHash(hash); return err },
-		},
-		{
-			"header", filepath.Join(root, "headers", name+".bin"), headerFileMaxBytes + 1,
-			func() error { _, err := store.GetHeaderByHash(hash); return err },
-		},
-		{
-			"undo", filepath.Join(root, "undo", name+".json"), undoFileMaxBytes + 1,
-			func() error { _, err := store.GetUndo(hash); return err },
-		},
-		{
-			"index_marker", filepath.Join(root, "big-index.json"), indexFileMaxBytes + 1,
-			nil,
-		},
-		{
-			"write_if_absent_verify", filepath.Join(root, "blocks", "verify.bin"), storeVerifyReadMaxBytes + 1,
-			nil,
-		},
+	createSparseFile(t, filepath.Join(root, "blocks", name+".bin"), blockFileMaxBytes+1)
+	if _, err := store.GetBlockByHash(hash); !errors.Is(err, errStoreFileTooLarge) {
+		t.Fatalf("block: want errStoreFileTooLarge, got %v", err)
 	}
-	rows[3].read = func() error { _, err := loadBlockStoreIndex(rows[3].path); return err }
-	rows[4].read = func() error { return writeFileIfAbsent(rows[4].path, []byte("x")) }
-	for _, row := range rows {
-		t.Run(row.name, func(t *testing.T) {
-			createSparseFile(t, row.path, row.size)
-			if err := row.read(); !errors.Is(err, errStoreFileTooLarge) {
-				t.Fatalf("want errStoreFileTooLarge, got %v", err)
-			}
-		})
+	createSparseFile(t, filepath.Join(root, "headers", name+".bin"), headerFileMaxBytes+1)
+	if _, err := store.GetHeaderByHash(hash); !errors.Is(err, errStoreFileTooLarge) {
+		t.Fatalf("header: want errStoreFileTooLarge, got %v", err)
 	}
 }
 
-// TestBlockStoreReadFileClassBoundsAcceptAtBound completes the per-class
-// verdict pair: a file sized EXACTLY at its class bound is admitted by the
-// read layer — the header row returns its bytes, and every other row's error
-// is the caller's parse/content class, never errStoreFileTooLarge (block's
-// accept row lives in TestReadFileFromDirBlockClassProductionBound). The
-// undo/chainstate/verify rows transiently materialize 1-2GB of zeros (sparse
-// on disk; the JSON decoders fail on the first byte). Rust twin:
-// `read_class_bounds_accept_at_bound_files`.
+// TestBlockStoreReadFileClassBoundsAcceptAtBound: a header sized exactly at
+// its class bound (116B) reads back byte-complete — the caller-level
+// at-bound accept row for the one production bound that is cheap to stage
+// (block's accept row reads 72MB in TestReadFileFromDirBlockClassProductionBound;
+// the other classes' at/over pairs run at small injectable bounds in
+// safeio_test.go, production constants pinned by
+// TestSafeIOClassBoundConstantsPinFrozenValues).
 func TestBlockStoreReadFileClassBoundsAcceptAtBound(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "blockstore")
 	store := mustCreateBlockStore(t, root)
 	var hash [32]byte
 	name := hex.EncodeToString(hash[:])
-	requireNotSizeErr := func(row string, err error) {
-		t.Helper()
-		if err == nil || errors.Is(err, errStoreFileTooLarge) {
-			t.Fatalf("%s at bound: want parse/content-class error, got %v", row, err)
-		}
-	}
 	createSparseFile(t, filepath.Join(root, "headers", name+".bin"), headerFileMaxBytes)
 	if got, err := store.GetHeaderByHash(hash); err != nil || int64(len(got)) != int64(headerFileMaxBytes) {
 		t.Fatalf("header at bound: len=%d err=%v", len(got), err)
 	}
-	createSparseFile(t, filepath.Join(root, "undo", name+".json"), undoFileMaxBytes)
-	_, err := store.GetUndo(hash)
-	requireNotSizeErr("undo", err)
-	idx := filepath.Join(root, "at-index.json")
-	createSparseFile(t, idx, indexFileMaxBytes)
-	_, err = loadBlockStoreIndex(idx)
-	requireNotSizeErr("index_marker", err)
-	cs := filepath.Join(root, "chainstate.json")
-	createSparseFile(t, cs, chainStateFileMaxBytes)
-	_, err = LoadChainState(cs)
-	requireNotSizeErr("chainstate", err)
-	verify := filepath.Join(root, "blocks", "verify.bin")
-	createSparseFile(t, verify, storeVerifyReadMaxBytes)
-	requireNotSizeErr("write_if_absent_verify", writeFileIfAbsent(verify, []byte("x")))
 }
 
-// TestWriteFileIfAbsentEEXISTVerifyReadFileBound drives the EEXIST-branch
-// verify read (handleLinkEEXIST) against an over-bound existing destination:
-// the initial probe is stubbed to report NotExist so writeFileViaTempLink
-// reaches os.Link EEXIST, and the real second read must refuse with the
-// typed bound error instead of buffering the file.
+// TestWriteFileIfAbsentEEXISTVerifyReadFileBound drives BOTH write-if-absent
+// verify read sites against an over-bound existing destination at a small
+// injectable bound through the readFileByPathFn seam (the production seam
+// constant storeVerifyReadMaxBytes is pinned by
+// TestSafeIOClassBoundConstantsPinFrozenValues): the fast-path probe and the
+// EEXIST-arm re-read must both refuse with the typed bound error instead of
+// buffering the file. For the EEXIST arm the first probe reports NotExist so
+// writeFileViaTempLink reaches os.Link EEXIST and performs the real second
+// read.
 func TestWriteFileIfAbsentEEXISTVerifyReadFileBound(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "dst.bin")
-	createSparseFile(t, dst, storeVerifyReadMaxBytes+1)
+	if err := os.WriteFile(dst, []byte("012345678"), 0o600); err != nil { // testReadBound+1 bytes
+		t.Fatalf("seed: %v", err)
+	}
 	prev := readFileByPathFn
 	t.Cleanup(func() { readFileByPathFn = prev })
+	stubBound := func(path string, _ int64) ([]byte, error) { return readFileByPath(path, testReadBound) }
+	readFileByPathFn = stubBound
+	if err := writeFileIfAbsent(dst, []byte("x")); !errors.Is(err, errStoreFileTooLarge) {
+		t.Fatalf("fast-path verify read: want errStoreFileTooLarge, got %v", err)
+	}
 	first := true
 	readFileByPathFn = func(path string, maxBytes int64) ([]byte, error) {
 		if first {
 			first = false
 			return nil, os.ErrNotExist
 		}
-		return readFileByPath(path, maxBytes)
+		return stubBound(path, maxBytes)
 	}
 	if err := writeFileIfAbsent(dst, []byte("x")); !errors.Is(err, errStoreFileTooLarge) {
-		t.Fatalf("want errStoreFileTooLarge via EEXIST verify read, got %v", err)
+		t.Fatalf("EEXIST verify read: want errStoreFileTooLarge, got %v", err)
 	}
 }

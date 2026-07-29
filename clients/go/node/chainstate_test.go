@@ -879,17 +879,6 @@ func TestAllocateAndWriteTemp_ExhaustsRetries(t *testing.T) {
 	}
 }
 
-// TestLoadChainStateRefusesOverBoundSnapshot pins the RUB-1057 chainstate
-// class bound at the caller: an over-bound snapshot yields the typed
-// errStoreFileTooLarge, never a fresh-state fallback or an allocation.
-func TestLoadChainStateRefusesOverBoundSnapshot(t *testing.T) {
-	path := filepath.Join(t.TempDir(), chainStateFileName)
-	createSparseFile(t, path, chainStateFileMaxBytes+1)
-	if _, err := LoadChainState(path); !errors.Is(err, errStoreFileTooLarge) {
-		t.Fatalf("want errStoreFileTooLarge, got %v", err)
-	}
-}
-
 // TestReadFileBoundDerivationEntrySizes pins the measured per-entry JSON
 // byte costs cited by the RUB-1057 bound derivations in safeio.go, encoding
 // the real disk structs exactly as production does (json.MarshalIndent with

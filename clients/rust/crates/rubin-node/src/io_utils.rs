@@ -33,7 +33,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 //   json.RawMessage before decoding, so an in-bound marker transiently costs
 //   up to ~3x its on-disk size there (raw + RawMessage copy + decoded
 //   strings); Rust decodes the raw buffer in one serde pass (~2x). The
-//   on-disk bound is unchanged and shared.
+//   on-disk bound is unchanged and shared. Enforced on BOTH ends
+//   (check_store_save_bound in save_blockstore_index, the bounded read in
+//   load_blockstore_index), so ordinary chain growth surfaces as a loud
+//   save-time error instead of a next-open refusal of the node's own marker.
 // - Chainstate snapshot: one `UtxoDiskEntry` costs 359B in a digit-width-
 //   conservative P2PK shape (max-width numeric fields; real entries are
 //   smaller, so admitted counts are a floor) and 66_671B in the worst
@@ -41,7 +44,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 //   1_000_000_000 admits >=2.8M P2PK-shaped or ~15K worst-shape UTXOs; a
 //   realistic devnet/testnet population (low hundreds of thousands,
 //   overwhelmingly P2PK/HTLC-shaped) fits with >=10x margin. Growth: linear
-//   in UTXO count.
+//   in UTXO count. Enforced on BOTH ends (check_store_save_bound in
+//   ChainState::save, read_file_by_path in load_chain_state), so ordinary
+//   UTXO growth surfaces as a loud save-time error instead of a
+//   next-startup refusal of the node's own snapshot.
 // - STORE_VERIFY_READ_MAX_BYTES bounds the write-if-absent existing-
 //   destination verify reads (blockstore.rs `write_file_if_absent`), one
 //   seam serving block, header, and undo destinations: the coarsest class
@@ -68,6 +74,20 @@ fn file_too_large_error(name: &str, observed: u64, max_bytes: u64) -> std::io::E
         std::io::ErrorKind::InvalidData,
         format!("{STORE_FILE_TOO_LARGE_PREFIX}: {name}: {observed} bytes observed, class bound {max_bytes}"),
     )
+}
+
+/// Write/read symmetry guard for the growth classes (chainstate snapshot,
+/// index marker): the node must never persist a file it would refuse to load
+/// back. Same class as the read-side refusal (shared prefix, never an
+/// absent-file class); the message is clearly save-side. Go twin:
+/// `checkStoreSaveBound` in `clients/go/node/safeio.go`.
+pub(crate) fn check_store_save_bound(name: &str, len: usize, max_bytes: u64) -> Result<(), String> {
+    if len as u64 > max_bytes {
+        return Err(format!(
+            "refusing to save {name}: {len} bytes marshaled, class bound {max_bytes}: {STORE_FILE_TOO_LARGE_PREFIX}"
+        ));
+    }
+    Ok(())
 }
 
 /// Process-wide monotonic sequence counter appended to every temp-file
@@ -1080,6 +1100,46 @@ mod tests {
             }
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Pins the six frozen cross-client bound values; a red row means the
+    /// cross-client contract number drifted, not a local tuning knob.
+    /// De-scaled stand-in for the removed at-production-bound rows of the
+    /// undo/index/chainstate/verify classes (RUB-1057 wave 2): those callers
+    /// share the bounded readers at these hard-wired constants, and their
+    /// at/over verdicts run at small injectable bounds in this module. Go
+    /// twin: `TestSafeIOClassBoundConstantsPinFrozenValues`.
+    #[test]
+    fn class_bound_constants_pin_frozen_values() {
+        assert_eq!(BLOCK_FILE_MAX_BYTES, 72_000_000);
+        assert_eq!(super::HEADER_FILE_MAX_BYTES, 116);
+        assert_eq!(super::UNDO_FILE_MAX_BYTES, 2_000_000_000);
+        assert_eq!(super::INDEX_FILE_MAX_BYTES, 256_000_000);
+        assert_eq!(super::CHAIN_STATE_FILE_MAX_BYTES, 1_000_000_000);
+        assert_eq!(
+            super::STORE_VERIFY_READ_MAX_BYTES,
+            super::UNDO_FILE_MAX_BYTES
+        );
+    }
+
+    /// Write/read symmetry guard rows for the guarded classes (undo + both
+    /// growth classes) with small synthetic numbers: at bound the save
+    /// proceeds, one byte over refuses with the shared class prefix and a
+    /// clearly save-side message. Go twin:
+    /// `TestSafeIOStoreSaveBoundRefusesOverBound`.
+    #[test]
+    fn check_store_save_bound_refuses_over_bound() {
+        for class in ["undo", "chainstate", "index_marker"] {
+            super::check_store_save_bound(class, TEST_READ_BOUND as usize, TEST_READ_BOUND)
+                .expect("at bound");
+            let err =
+                super::check_store_save_bound(class, TEST_READ_BOUND as usize + 1, TEST_READ_BOUND)
+                    .unwrap_err();
+            assert!(
+                err.starts_with("refusing to save") && err.contains(STORE_FILE_TOO_LARGE_PREFIX),
+                "{class}: {err}"
+            );
+        }
     }
 
     struct CountingReader {

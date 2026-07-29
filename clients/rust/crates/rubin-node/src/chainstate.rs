@@ -13,7 +13,8 @@ use sha3::{Digest, Sha3_256};
 
 use crate::genesis::validate_incoming_chain_id;
 use crate::io_utils::{
-    parse_hex32, read_file_by_path, write_file_atomic, CHAIN_STATE_FILE_MAX_BYTES,
+    check_store_save_bound, parse_hex32, read_file_by_path, write_file_atomic,
+    CHAIN_STATE_FILE_MAX_BYTES,
 };
 
 pub const CHAIN_STATE_FILE_NAME: &str = "chainstate.json";
@@ -104,6 +105,13 @@ impl ChainState {
         let mut raw =
             serde_json::to_vec_pretty(&disk).map_err(|e| format!("encode chainstate: {e}"))?;
         raw.push(b'\n');
+        // RUB-1057 write/read symmetry: never persist a snapshot the bounded
+        // loader would refuse on the next startup.
+        check_store_save_bound(
+            &path.display().to_string(),
+            raw.len(),
+            CHAIN_STATE_FILE_MAX_BYTES,
+        )?;
         // Parent creation is delegated to `write_file_atomic`, which
         // runs `fs::create_dir_all(effective_parent(path))` on the
         // actual write target. `effective_parent` maps a bare-filename
@@ -475,10 +483,7 @@ mod tests {
 
     use crate::coinbase::{build_coinbase_tx, default_mine_address};
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
-    use crate::io_utils::{
-        create_sparse_file, unique_temp_path, CHAIN_STATE_FILE_MAX_BYTES,
-        STORE_FILE_TOO_LARGE_PREFIX,
-    };
+    use crate::io_utils::unique_temp_path;
     use crate::undo::{marshal_block_undo, BlockUndo, SpentUndo, TxUndo};
 
     use super::{
@@ -837,13 +842,14 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
-    /// RUB-1057 chainstate class bound at the caller: an absent snapshot
-    /// still yields a fresh state (NotFound-only arm), while an over-bound
-    /// snapshot yields the typed size error — never the fresh-state
-    /// fallback and never an allocation. Go twin:
-    /// `TestLoadChainStateRefusesOverBoundSnapshot`.
+    /// An absent snapshot yields a fresh state (the NotFound-only arm of
+    /// `load_chain_state`'s bounded read). The over-bound refusal for this
+    /// class runs at small injectable bounds in io_utils.rs with the
+    /// production constant pinned by `class_bound_constants_pin_frozen_values`
+    /// and enforced symmetrically at save time by `check_store_save_bound`
+    /// (RUB-1057 wave-2 de-scaling: the 1GB sparse row is gone).
     #[test]
-    fn load_chain_state_refuses_over_bound_snapshot() {
+    fn load_chain_state_absent_yields_fresh_state() {
         let dir = unique_temp_path("rubin-chainstate-bound");
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = chain_state_path(&dir);
@@ -851,9 +857,6 @@ mod tests {
             load_chain_state(&path).expect("absent -> fresh"),
             ChainState::new()
         );
-        create_sparse_file(&path, CHAIN_STATE_FILE_MAX_BYTES + 1);
-        let err = load_chain_state(&path).unwrap_err();
-        assert!(err.contains(STORE_FILE_TOO_LARGE_PREFIX), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
