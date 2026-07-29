@@ -52,6 +52,7 @@ SKIPPABLE_EXACT = {
         "workflow-hygiene.yml",
     )
 } | {
+    ".github/PULL_REQUEST_TEMPLATE.md",
     ".codacy.yml",
     ".coderabbit.yaml",
     ".jscpd.json",
