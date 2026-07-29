@@ -6,13 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       fuzz_time:
-        description: "Go fuzz time per target (for example 45s, 120s)"
+        description: "Go fuzz time per target (for example 300s, 600s)"
         required: false
-        default: "45s"
+        default: "300s"
       rust_fuzz_time:
-        description: "Rust fuzz time per target in seconds (for example 60, 120)"
+        description: "Rust fuzz time per target in seconds (for example 300, 600)"
         required: false
-        default: "60"
+        default: "300"
 
 concurrency:
   group: fuzz-nightly-${{ github.ref }}
@@ -22,10 +22,55 @@ permissions:
   contents: read
 
 jobs:
-  fuzz-stage2:
+  # Derives both fan-out matrices from their single-source lists so that
+  # adding a target never requires a workflow edit and nightly wall clock
+  # stays flat as the lists grow.
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
+    outputs:
+      go_targets: ${{ steps.lists.outputs.go_targets }}
+      rust_chunks: ${{ steps.lists.outputs.rust_chunks }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Emit fuzz target matrices
+        id: lists
+        run: |
+          set -euo pipefail
+          go_targets="$(scripts/ci/run_fuzz_stage2.sh --list-json)"
+          # Chunk size 5 amortises the per-job nightly-toolchain + cargo-fuzz
+          # install + fuzz-crate build cost while keeping per-job wall clock
+          # constant as the target list grows.
+          rust_chunks="$(grep -Ev '^[[:space:]]*(#|$)' scripts/ci/rust_fuzz_targets.txt \
+            | jq -R . | jq -cs '[range(0; length; 5) as $i | .[$i:$i + 5]]')"
+          echo "go targets: $(jq -r length <<<"${go_targets}")"
+          echo "rust chunks: $(jq -r length <<<"${rust_chunks}")"
+          {
+            echo "go_targets=${go_targets}"
+            echo "rust_chunks=${rust_chunks}"
+          } >> "$GITHUB_OUTPUT"
+
+  fuzz-stage2:
+    needs: prepare
+    runs-on: ubuntu-latest
+    # Must exceed GO_TEST_TIMEOUT at the documented fuzz_time=600s example
+    # (1200s) plus checkout/setup-go/instrumented-build, so a hung target dies
+    # by go test's own -timeout (writing the panic dump), never by the job cap.
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.prepare.outputs.go_targets) }}
+    steps:
+      - name: Derive artifact-safe target name
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
+          # ":" and "/" are invalid in artifact names; the function name after
+          # the "pkg:Target" colon is a clean identifier.
+          echo "FUZZ_TARGET_NAME=${FUZZ_TARGET##*:}" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -34,28 +79,41 @@ jobs:
           cache: true
           cache-dependency-path: clients/go/go.mod
 
-      - name: Run stage2 fuzz targets (timeboxed)
+      - name: Run stage2 fuzz target (timeboxed)
         env:
-          FUZZ_TIME: ${{ github.event.inputs.fuzz_time || '45s' }}
+          FUZZ_TIME: ${{ github.event.inputs.fuzz_time || '300s' }}
           FUZZ_MINIMIZE_TIME: "5s"
+          FUZZ_TARGET: ${{ matrix.target }}
         run: |
-          scripts/dev-env.sh -- bash -lc "cd \"$GITHUB_WORKSPACE\" && scripts/ci/run_fuzz_stage2.sh"
+          scripts/dev-env.sh -- bash -lc "cd \"$GITHUB_WORKSPACE\" && scripts/ci/run_fuzz_stage2.sh --target \"$FUZZ_TARGET\""
 
       - name: Upload fuzz artifacts (crashes/regressions)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: fuzz-stage2-${{ github.run_id }}
+          # -a<attempt>: v4+ artifacts are immutable, so a re-run of a failed
+          # leg would otherwise collide with attempt 1's upload.
+          name: fuzz-stage2-${{ github.run_id }}-${{ env.FUZZ_TARGET_NAME }}-a${{ github.run_attempt }}
           path: |
             .artifacts/fuzz-stage2/**
             clients/go/consensus/testdata/fuzz/**
+            clients/go/node/testdata/fuzz/**
+            clients/go/node/p2p/testdata/fuzz/**
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
 
   fuzz-rust:
+    needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Sized for the documented dispatch example rust_fuzz_time=600: a 5-target
+    # chunk = 50 min fuzzing + uncached nightly-toolchain/cargo-fuzz/fuzz-crate
+    # build overhead.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: ${{ fromJSON(needs.prepare.outputs.rust_chunks) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -78,8 +136,10 @@ jobs:
 
       - name: Run Rust fuzz targets (timeboxed)
         env:
-          RUST_FUZZ_TIME: ${{ github.event.inputs.rust_fuzz_time || '60' }}
+          RUST_FUZZ_TIME: ${{ github.event.inputs.rust_fuzz_time || '300' }}
+          CHUNK_TARGETS: ${{ toJSON(matrix.chunk) }}
         run: |
+          set -euo pipefail
           quote_env_value() {
             local value="$1"
             printf "'"
@@ -96,7 +156,13 @@ jobs:
           RUST_ARTIFACTS_DIR="$GITHUB_WORKSPACE/.artifacts/fuzz-rust"
           mkdir -p "$RUST_ARTIFACTS_DIR"
           cd clients/rust
-          TARGETS=(merkle_determinism retarget_no_panic biguint_roundtrip sighash parse_tx parse_block_bytes compactsize validate_block_basic pow_check compact_shortid parse_htlc parse_vault parse_multisig fork_work block_subsidy covenant_genesis p2p_wire_message p2p_version_payload sig_verify_openssl sig_cache_structural connect_block_inmem da_chunk_hash_verify tx_dep_graph da_payload_commit_verify tx_relay_announce tx_relay_receive)
+          # The chunk arrives from the prepare job matrix as a JSON array of
+          # target names taken from scripts/ci/rust_fuzz_targets.txt.
+          mapfile -t TARGETS < <(jq -r '.[]' <<<"$CHUNK_TARGETS")
+          if [[ "${#TARGETS[@]}" -eq 0 ]]; then
+            echo "FAIL: empty target chunk" >&2
+            exit 2
+          fi
           {
             write_env_field "commit_sha" "${GITHUB_SHA}"
             write_env_field "workflow_run_id" "${GITHUB_RUN_ID}"
@@ -129,10 +195,32 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: fuzz-rust-${{ github.run_id }}
+          name: fuzz-rust-${{ github.run_id }}-c${{ strategy.job-index }}-a${{ github.run_attempt }}
           path: |
             .artifacts/fuzz-rust/**
             clients/rust/fuzz/artifacts/
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
+
+  # Single aggregate verdict so a nightly run stays answerable as one result.
+  verdict:
+    needs: [fuzz-stage2, fuzz-rust]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate nightly fuzz verdict
+        env:
+          GO_RESULT: ${{ needs.fuzz-stage2.result }}
+          RUST_RESULT: ${{ needs.fuzz-rust.result }}
+        run: |
+          echo "verdict: go-matrix=${GO_RESULT} rust-matrix=${RUST_RESULT}"
+          # Fail closed: anything but exact "success" (failure/cancelled/skipped/empty).
+          for result in "$GO_RESULT" "$RUST_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              echo "FAIL: a nightly fuzz matrix ended with result: ${result:-empty}" >&2
+              exit 1
+            fi
+          done
+          echo "PASS: both nightly fuzz matrices succeeded"
