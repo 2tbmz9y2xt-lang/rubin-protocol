@@ -20,8 +20,9 @@ const testReadBound = 8
 // removed at-production-bound row of the undo class: that caller shares the
 // bounded reader at these hard-wired constants, and its at/over verdicts run
 // at small injectable bounds in this file. The chainstate snapshot and index
-// marker are deliberately absent — they grow with accumulated state, admit
-// no fixed ceiling, and are owned by RUB-1062. The write-if-absent verify
+// marker are deliberately absent — they grow with accumulated state and admit
+// no fixed ceiling; readFileByPath's comment is the decision of record. The
+// write-if-absent verify
 // reads have no constant of their own: they are bounded by the length of the
 // content being written (see readVerifyTarget).
 func TestSafeIOClassBoundConstantsPinFrozenValues(t *testing.T) {
@@ -397,5 +398,37 @@ func TestSafeIOReadAllCappedPropagatesRawErrors(t *testing.T) {
 				t.Fatalf("want raw probe error, got %v", err)
 			}
 		})
+	}
+}
+
+// TestReadFileConfigBoundPinsDerivedValue pins the RUB-1062 rider A
+// operator-config ceiling; the derivation lives on configFileMaxBytes in
+// safeio.go. A red row means the derived cross-surface contract number
+// drifted.
+func TestReadFileConfigBoundPinsDerivedValue(t *testing.T) {
+	if configFileMaxBytes != 1<<24 {
+		t.Fatalf("configFileMaxBytes = %d, want %d (16 MiB, see derivation)", configFileMaxBytes, 1<<24)
+	}
+}
+
+// TestReadFileConfigBoundAtAndOverBound pins the typed pre-allocation
+// refusal at the shared helper: at-bound accepted byte-for-byte, one byte
+// over refused with errStoreFileTooLarge.
+func TestReadFileConfigBoundAtAndOverBound(t *testing.T) {
+	dir := t.TempDir()
+	at := filepath.Join(dir, "at.json")
+	if err := os.WriteFile(at, make([]byte, configFileMaxBytes), 0o600); err != nil {
+		t.Fatalf("write at-bound: %v", err)
+	}
+	raw, err := ReadConfigFile(at)
+	if err != nil || len(raw) != configFileMaxBytes {
+		t.Fatalf("at-bound config must be read whole: len=%d err=%v", len(raw), err)
+	}
+	over := filepath.Join(dir, "over.json")
+	if err := os.WriteFile(over, make([]byte, configFileMaxBytes+1), 0o600); err != nil {
+		t.Fatalf("write over-bound: %v", err)
+	}
+	if _, err := ReadConfigFile(over); !errors.Is(err, errStoreFileTooLarge) {
+		t.Fatalf("over-bound config must be refused with errStoreFileTooLarge, got %v", err)
 	}
 }

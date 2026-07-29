@@ -38,8 +38,17 @@ import (
 //	                    O_CREATE|O_EXCL (no O_TRUNC), so a later call
 //	                    hitting the same tmp path gets os.ErrExist from
 //	                    allocateAndWriteTemp and retries with a fresh
-//	                    seq (16-retry budget). Startup reconcile (E.2)
-//	                    sweeps orphan .tmp.* siblings. Crash before
+//	                    seq (16-retry budget). NOTHING removes that
+//	                    sibling today: a crash between the temp write
+//	                    and the link or rename leaks one
+//	                    <dest>.tmp.<pid>.<seq> file, and there is no
+//	                    startup sweep. The leak exists only because the
+//	                    name is unique per write; the fix is a FIXED
+//	                    temp name per destination (which the next write
+//	                    truncates) plus a datadir lock, not a startup
+//	                    deletion pass — Bitcoin Core and Monero take
+//	                    the naming route and sweep nothing at startup.
+//	                    Tracked as its own contract. Crash before
 //	                    syncDir leaves the dirent in page cache; the
 //	                    fast-path on retry re-runs syncDir and
 //	                    propagates its error so durability is surfaced.

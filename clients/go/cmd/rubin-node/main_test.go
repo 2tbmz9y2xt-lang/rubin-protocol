@@ -2762,3 +2762,56 @@ func TestRunOpenExistingStartupDoesNotSynthesizeStore(t *testing.T) {
 		t.Fatalf("reopen exit %d (stderr=%q)", code, stderr)
 	}
 }
+
+// configBoundTestFile writes a config file padded with trailing JSON
+// whitespace to exactly size bytes (1<<24 pins node's configFileMaxBytes via
+// TestReadFileConfigBoundPinsDerivedValue).
+func configBoundTestFile(t *testing.T, dir, name, payload string, size int) string {
+	t.Helper()
+	if len(payload) > size {
+		t.Fatalf("payload longer than target size")
+	}
+	content := append([]byte(payload), bytes.Repeat([]byte{' '}, size-len(payload))...)
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	return path
+}
+
+// TestReadFileConfigBoundDeploymentsSite pins RUB-1062 rider A at the
+// featurebits-deployments call site: an at-bound file loads exactly as
+// before, one byte over is refused with the typed size error.
+func TestReadFileConfigBoundDeploymentsSite(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	at := configBoundTestFile(t, dir, "at.json", "[]", 1<<24)
+	if err := printFeatureBitsTelemetry(&out, nil, 0, at); err != nil {
+		t.Fatalf("at-bound deployments must load: %v", err)
+	}
+	over := configBoundTestFile(t, dir, "over.json", "[]", 1<<24+1)
+	if err := printFeatureBitsTelemetry(&out, nil, 0, over); err == nil || !strings.Contains(err.Error(), "exceeds size bound") {
+		t.Fatalf("over-bound deployments must be refused with the typed size error, got %v", err)
+	}
+}
+
+// TestReadFileConfigBoundGenesisSite pins RUB-1062 rider A at the
+// genesis-pack call site: an at-bound file parses exactly as before, one
+// byte over is refused with the typed size error.
+func TestReadFileConfigBoundGenesisSite(t *testing.T) {
+	dir := t.TempDir()
+	chainID := strings.Repeat("ab", 32)
+	pack := `{"chain_id_hex":"` + chainID + `","genesis_hash_hex":"` + strings.Repeat("cd", 32) + `"}`
+	at := configBoundTestFile(t, dir, "at.json", pack, 1<<24)
+	cfg, err := parseGenesisConfigFull(at)
+	if err != nil {
+		t.Fatalf("at-bound genesis pack must parse: %v", err)
+	}
+	if fmt.Sprintf("%x", cfg.ChainID[:]) != chainID {
+		t.Fatalf("at-bound genesis pack parsed wrong chain id: %x", cfg.ChainID[:])
+	}
+	over := configBoundTestFile(t, dir, "over.json", pack, 1<<24+1)
+	if _, err := parseGenesisConfigFull(over); err == nil || !strings.Contains(err.Error(), "exceeds size bound") {
+		t.Fatalf("over-bound genesis pack must be refused with the typed size error, got %v", err)
+	}
+}
