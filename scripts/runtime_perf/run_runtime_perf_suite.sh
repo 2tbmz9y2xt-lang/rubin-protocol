@@ -70,7 +70,10 @@ done
 set +e
 (
   cd clients/rust
-  cargo clean -p rubin-node -p rubin-consensus -p rubin-consensus-cli
+  if ! cargo clean --workspace; then
+    echo "failed to invalidate Rust workspace artifacts" >&2
+    exit 2
+  fi
   cargo bench -p rubin-node --bench runtime_baseline -- --noplot --sample-size 10 --measurement-time 1
 )
 rust_status=$?

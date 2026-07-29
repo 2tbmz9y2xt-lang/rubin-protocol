@@ -35,9 +35,10 @@ class RuntimePerfCacheTests(unittest.TestCase):
         self.assertIn('CRITERION_ROOT="$CARGO_TARGET_DIR/criterion"', text)
         self.assertIn('--criterion-root "$CRITERION_ROOT"', text)
         self.assertNotIn("clients/rust/target/criterion", text)
-        clean = "cargo clean -p rubin-node -p rubin-consensus -p rubin-consensus-cli"
+        clean = "if ! cargo clean --workspace; then"
         self.assertEqual(text.count(clean), 1)
         self.assertLess(text.index(clean), text.index("cargo bench -p rubin-node"))
+        self.assertIn('echo "failed to invalidate Rust workspace artifacts" >&2', text)
 
 
 if __name__ == "__main__":
