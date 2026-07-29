@@ -40,7 +40,10 @@ If SLA cannot be met, incident owner MUST publish a blocker note with ETA and mi
    - **Consensus-impacting**: can alter accept/reject decisions or signature verification outcomes.
    - **Operational-only**: availability/perf/compliance without consensus drift.
 3. Prepare mitigation:
-   - version bump and bundle rebuild,
+   - version bump and bundle rebuild — the build refuses an unpinned version, so add
+     the new version's sha256 to the `case` block in
+     `scripts/crypto/openssl/build-openssl-bundle.sh` from the upstream
+     `openssl-<version>.tar.gz.sha256` asset named in the refusal message,
    - temporary runtime guard (if needed),
    - tests for regression and deterministic behavior.
 4. Open one PR for code/tooling updates and one PR for spec/ops updates when required.
