@@ -224,10 +224,18 @@ pub(crate) fn read_file_by_path(path: &Path, max_bytes: u64) -> Result<Vec<u8>, 
 
 /// Bounded read core (Go twin: `readAllCapped`/`readCapped`). Refuses
 /// `stat_size > max_bytes` WITHOUT reading, then reads through a
-/// `max_bytes+1` limiter into a buffer presized to min(size, bound)+1, so a
-/// file that grows between stat and read is still refused (stat/read race
-/// pin) and at most `max_bytes+1` bytes are ever transiently read. Raw read
-/// errors propagate unwrapped — never coerced into the size error.
+/// `max_bytes+1` limiter into a buffer this function grows ITSELF, so a file
+/// that grew between stat and read is still read in full when it fits, still
+/// refused by the post-read length check when it does not, and never costs
+/// more than `cap_hint(max_bytes, max_bytes)` of capacity.
+///
+/// The growth is hand-rolled rather than delegated to `read_to_end` because
+/// std's amortized doubling overshoots the class bound: measured, a 2-byte
+/// initial capacity reading `MAX_BLOCK_BYTES + 1` bytes ends at capacity
+/// 134_217_728 == 1.86x the advertised ceiling. Go's `readCapped` never
+/// exceeds `maxBytes+1`, so the overshoot was a cross-client asymmetry in
+/// peak allocation. Raw read errors propagate unwrapped — never coerced into
+/// the size error.
 fn read_capped<R: Read>(
     r: R,
     name: &str,
@@ -237,12 +245,55 @@ fn read_capped<R: Read>(
     if stat_size > max_bytes {
         return Err(file_too_large_error(name, stat_size, max_bytes));
     }
-    let mut buf = Vec::with_capacity(cap_hint(stat_size, max_bytes));
-    r.take(max_bytes.saturating_add(1)).read_to_end(&mut buf)?;
+    // Zero-filled so the spare capacity is safely readable as `&mut [u8]`;
+    // `len == capacity` is maintained on every growth and the tail is
+    // truncated at the end. Mirrors Go, whose `make` also hands back zeroed
+    // memory. Saturate the limiter budget rather than +1 blindly: a wrapped
+    // negative budget would report EOF immediately — a silent truncation
+    // exactly where the bound is supposed to refuse.
+    let mut buf = vec![0u8; cap_hint(stat_size, max_bytes)];
+    let mut limited = r.take(max_bytes.saturating_add(1));
+    let mut filled = 0usize;
+    loop {
+        if filled == buf.len() {
+            let next = grow_capacity(buf.len(), max_bytes);
+            if next <= buf.len() {
+                break; // at the ceiling; the length check below decides
+            }
+            buf.reserve_exact(next - buf.len());
+            buf.resize(next, 0);
+        }
+        let n = limited.read(&mut buf[filled..])?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    buf.truncate(filled);
     if buf.len() as u64 > max_bytes {
         return Err(file_too_large_error(name, buf.len() as u64, max_bytes));
     }
     Ok(buf)
+}
+
+/// Doubles `current`, clamped to `cap_hint(max_bytes, max_bytes)` (the most
+/// the limiter can ever deliver) and floored at 512 bytes, the floor itself
+/// clamped to the limit so a small class never gets an oversized buffer.
+/// Line-by-line twin of Go's `growCapacity` in `clients/go/node/safeio.go`;
+/// the two clients' growth ceilings must stay comparable. The limit is the
+/// DEFAULT and the doubling is taken only when it provably fits
+/// (`current <= limit / 2`), so an overflowed product can never be observed.
+fn grow_capacity(current: usize, max_bytes: u64) -> usize {
+    const GROW_FLOOR: usize = 512;
+    let limit = cap_hint(max_bytes, max_bytes);
+    let mut next = limit;
+    if current <= limit / 2 {
+        next = current * 2;
+    }
+    if next < GROW_FLOOR {
+        next = GROW_FLOOR.min(limit);
+    }
+    next
 }
 
 /// min(stat_size, max_bytes)+1 — the +1 gives the EOF probe room so an
@@ -1168,6 +1219,107 @@ mod tests {
         );
         let got = read_capped(Cursor::new(b"012".to_vec()), "f", 8, 8).expect("shrank");
         assert_eq!(got, b"012");
+    }
+
+    /// Feeds `total` bytes regardless of what it claimed to Stat, recording the
+    /// largest slice it was ever offered — that offered length is
+    /// `capacity - filled`, so it exposes the buffer's growth profile from
+    /// outside.
+    struct GrowthProbeReader {
+        left: usize,
+        max_offer: usize,
+    }
+    impl Read for GrowthProbeReader {
+        fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+            self.max_offer = self.max_offer.max(b.len());
+            if self.left == 0 {
+                return Ok(0);
+            }
+            let n = b.len().min(self.left);
+            b[..n].fill(0xa5);
+            self.left -= n;
+            Ok(n)
+        }
+    }
+
+    /// RUB-1057: the ACCEPTED stat/read race must stay accepted — a file that
+    /// grew between stat and read but still fits the bound is returned IN
+    /// FULL, exactly as Go's `readCapped` does. Turning this into a refusal
+    /// would be a live cross-client divergence. The same row pins the
+    /// allocation ceiling: capacity must never exceed
+    /// `cap_hint(max_bytes, max_bytes)`. Under std's `read_to_end` the
+    /// amortized doubling lands at 8192 for these numbers — above the 5001
+    /// ceiling — so this row is falsifiable.
+    #[test]
+    fn read_capped_grown_file_is_returned_in_full_within_the_ceiling() {
+        const MAX: u64 = 5000;
+        let limit = super::cap_hint(MAX, MAX);
+        let mut r = GrowthProbeReader {
+            left: MAX as usize,
+            max_offer: 0,
+        };
+        // Stat lied low (2); the reader actually yields exactly MAX bytes.
+        let got =
+            read_capped(&mut r, "f", 2, MAX).expect("grown-but-fitting file must be accepted");
+        assert_eq!(got.len(), MAX as usize, "full bytes must be returned");
+        assert!(got.iter().all(|b| *b == 0xa5), "bytes must be intact");
+        assert!(
+            got.capacity() <= limit,
+            "capacity {} exceeds the class ceiling {limit}",
+            got.capacity()
+        );
+    }
+
+    /// The same race one byte over the bound is still refused with the typed
+    /// error, and the buffer still never grows past the ceiling: the largest
+    /// slice offered to the reader (== capacity - filled) stays within it.
+    /// Under `read_to_end` the offered slices follow std's doubling and
+    /// exceed the ceiling, so this row is falsifiable too.
+    #[test]
+    fn read_capped_over_bound_growth_stays_within_the_ceiling() {
+        const MAX: u64 = 4096;
+        let limit = super::cap_hint(MAX, MAX);
+        let mut r = GrowthProbeReader {
+            left: MAX as usize + 1,
+            max_offer: 0,
+        };
+        let err = read_capped(&mut r, "f", 2, MAX).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().starts_with(STORE_FILE_TOO_LARGE_PREFIX),
+            "{err}"
+        );
+        assert!(
+            r.max_offer <= limit,
+            "offered slice {} exceeds the class ceiling {limit}",
+            r.max_offer
+        );
+    }
+
+    /// `grow_capacity` is the line-by-line twin of Go's `growCapacity`: the
+    /// limit is the default, the doubling is taken only when it fits, and the
+    /// 512 floor is itself clamped so a small class (header: limit 117) never
+    /// receives an oversized buffer.
+    #[test]
+    fn grow_capacity_mirrors_the_go_ceiling_rule() {
+        const MAX: u64 = 1 << 20;
+        let limit = super::cap_hint(MAX, MAX);
+        assert_eq!(super::grow_capacity(0, MAX), 512);
+        assert_eq!(super::grow_capacity(4, MAX), 512);
+        assert_eq!(super::grow_capacity(1024, MAX), 2048);
+        assert_eq!(super::grow_capacity(limit / 2 + 1, MAX), limit);
+        assert_eq!(super::grow_capacity(limit, MAX), limit);
+        assert_eq!(super::grow_capacity(usize::MAX, MAX), limit);
+        // Small classes: the floor must never exceed the limit.
+        for small in [super::HEADER_FILE_MAX_BYTES, 71, 0] {
+            let small_limit = super::cap_hint(small, small);
+            for current in [0, 1, small_limit] {
+                assert!(
+                    super::grow_capacity(current, small) <= small_limit,
+                    "grow_capacity({current}, {small}) exceeds limit {small_limit}"
+                );
+            }
+        }
     }
 
     /// A raw mid-read failure surfaces unwrapped — never coerced into the
