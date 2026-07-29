@@ -1,5 +1,6 @@
 import subprocess
 import unittest
+from pathlib import Path
 
 from tools import ci_formal_relevance as subject
 
@@ -86,6 +87,20 @@ class FormalRelevanceTests(unittest.TestCase):
         for path in subject.REFINEMENT_EXACT:
             with self.subTest(job="formal_refinement", path=path):
                 self.assertTrue(subject.is_refinement_input(path))
+
+    def test_lake_cache_keys_bind_compatibility_and_formal_sources(self):
+        workflow = (
+            Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
+        ).read_text()
+        compatibility = "${{ hashFiles('rubin-formal/lean-toolchain', 'rubin-formal/lakefile.lean', 'rubin-formal/lake-manifest.json') }}"
+        sources = "${{ hashFiles('rubin-formal/RubinFormal.lean', 'rubin-formal/RubinFormal/**/*.lean') }}"
+        for namespace in ("lake-formal-v2", "lake-refinement-v2"):
+            key = f"          key: {namespace}-${{{{ runner.os }}}}-{compatibility}-{sources}\n"
+            restore = f"            {namespace}-${{{{ runner.os }}}}-{compatibility}-\n"
+            self.assertEqual(workflow.count(key), 1)
+            self.assertEqual(workflow.count(restore), 1)
+        self.assertNotIn("key: lake-formal-${{", workflow)
+        self.assertNotIn("key: lake-refinement-${{", workflow)
 
     def test_mixed_diff_decides_profiles_independently(self):
         payload = diff(("M", "README.md"), ("M", "clients/go/go.mod"))
