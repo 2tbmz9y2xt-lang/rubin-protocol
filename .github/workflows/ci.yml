@@ -147,7 +147,7 @@ jobs:
 
       - name: Classify formal relevance
         id: formal_gate
-        run: python3 tools/ci_formal_relevance.py
+        run: python3 tools/ci_formal_relevance.py --job formal
 
       - name: Cache Lean toolchain
         if: steps.formal_gate.outputs.run_formal == 'true'
@@ -549,7 +549,7 @@ jobs:
 
       - name: Classify formal relevance
         id: formal_gate
-        run: python3 tools/ci_formal_relevance.py
+        run: python3 tools/ci_formal_relevance.py --job formal_refinement
 
       - name: Cache Lean toolchain
         if: steps.formal_gate.outputs.run_formal == 'true'

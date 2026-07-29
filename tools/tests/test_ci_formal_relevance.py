@@ -23,91 +23,101 @@ def runner(
     return run
 
 class FormalRelevanceTests(unittest.TestCase):
-    def decision(self, payload: bytes) -> subject.Decision:
-        return subject.decide("pull_request", "main", runner(payload))
+    def decision(self, job: str, payload: bytes) -> subject.Decision:
+        return subject.decide(job, "pull_request", "main", runner(payload))
 
-    def test_every_protected_family_runs(self):
-        paths = [
-            ".github/workflows/ci.yml",
-            "rubin-formal/A.lean",
-            "conformance/vector.json",
-            "clients/go/consensus/a.go",
-            "clients/rust/crates/rubin-consensus/src/lib.rs",
-            "tools/formal/generate.py",
-            "scripts/crypto/openssl/build-openssl-bundle.sh",
-            "scripts/crypto/openssl/source-checksums.sha256",
-            "README.md",
-            "SPEC_LOCATION.md",
-            *sorted(path for path in subject.PROTECTED_EXACT if path.startswith("tools/")),
-        ]
-        for path in paths:
-            with self.subTest(path=path):
-                decision = self.decision(diff(("M", path)))
-                self.assertTrue(decision.run_formal)
-                self.assertEqual(decision.reason, f"protected path: {path}")
-
-    def test_every_skippable_family_skips(self):
-        paths = [
-            "tools/ordinary.py",
-            "scripts/ordinary.sh",
-            "clients/rust/crates/wallet/src/lib.rs",
-            *sorted(subject.SKIPPABLE_EXACT),
-        ]
-        for path in paths:
-            with self.subTest(path=path):
-                decision = self.decision(diff(("M", path)))
-                self.assertFalse(decision.run_formal)
-                self.assertEqual(decision.path_count, 1)
-
-    def test_pr_template_only_skips(self):
-        self.assertFalse(
-            self.decision(diff(("M", ".github/PULL_REQUEST_TEMPLATE.md"))).run_formal
+    def assert_jobs(self, path: str, formal: bool, refinement: bool):
+        payload = diff(("M", path))
+        self.assertEqual(self.decision("formal", payload).run_formal, formal, path)
+        self.assertEqual(
+            self.decision("formal_refinement", payload).run_formal, refinement, path
         )
 
-    def test_protected_precedence_over_broad_allowlists(self):
-        for path in (
-            "tools/formal/generate.py",
-            "tools/check_formal_coverage.py",
-            "scripts/crypto/openssl/build-openssl-bundle.sh",
-            "clients/rust/crates/rubin-consensus/src/lib.rs",
-        ):
+    def test_input_families_and_exact_exclusions(self):
+        cases = {
+            ".github/workflows/ci.yml": (True, True),
+            "tools/ci_formal_relevance.py": (True, True),
+            "rubin-formal/RubinFormal/X.lean": (True, True),
+            "conformance/fixtures/CV-X.json": (True, True),
+            "README.md": (True, False),
+            "conformance/MATRIX.md": (True, False),
+            "rubin-formal/tests/test_x.py": (True, False),
+            "tools/check_formal_coverage.py": (True, False),
+            "clients/go/consensus/x.go": (True, True),
+            "clients/go/consensus/sub/x.go": (False, True),
+            "clients/rust/crates/rubin-consensus/src/x.rs": (True, False),
+            "clients/rust/crates/rubin-consensus/src/x_tests.rs": (True, False),
+            "clients/go/go.mod": (False, True),
+            "clients/go/cmd/formal-trace/x.go": (False, True),
+            "tools/formal/gen_lean_conformance_vectors.py": (False, True),
+            "scripts/crypto/openssl/build-openssl-bundle.sh": (False, True),
+            "tools/tests/test_ci_formal_relevance.py": (False, False),
+            ".github/PULL_REQUEST_TEMPLATE.md": (False, False),
+            "rubin-formal/RISK_MODEL.md": (False, False),
+            "rubin-formal/lakefile.toml": (False, False),
+            "rubin-formal/traces/schema_v1.json": (False, False),
+            "conformance/fixtures/devnet/CV-X.json": (False, False),
+            "conformance/fixtures/CHANGELOG.md": (False, False),
+            "clients/go/consensus/x_test.go": (False, False),
+            "clients/rust/crates/rubin-consensus/src/tests/x.rs": (False, False),
+            "clients/rust/crates/rubin-consensus/src/x_test.rs": (False, False),
+            "clients/rust/crates/wallet/src/lib.rs": (False, False),
+            "tools/ordinary.py": (False, False),
+        }
+        for path, expected in cases.items():
             with self.subTest(path=path):
-                self.assertTrue(self.decision(diff(("M", path))).run_formal)
+                self.assert_jobs(path, *expected)
 
-    def test_unknown_mixed_and_nearest_misses_run(self):
-        cases = [
-            diff(("A", "docs/new.md")),
-            diff(("A", ".github/workflows/new.yml")),
-            diff(("M", "tools/ok.py"), ("M", "README.md")),
-            diff(("M", "README.markdown")),
-            diff(("M", "rubin-formality/file")),
-            diff(("M", "client/rust/file")),
-        ]
-        for payload in cases:
-            with self.subTest(payload=payload):
-                self.assertTrue(self.decision(payload).run_formal)
+    def test_tracked_inventory_counts(self):
+        paths = subprocess.run(
+            ["git", "ls-files"], check=True, stdout=subprocess.PIPE, text=True
+        ).stdout.splitlines()
+        formal = {path for path in paths if subject.is_formal_input(path)}
+        refinement = {path for path in paths if subject.is_refinement_input(path)}
+        self.assertEqual(
+            (len(formal), len(refinement), len(formal & refinement), len(formal | refinement)),
+            (416, 336, 323, 429),
+        )
+
+    def test_every_exact_input_uses_its_job_profile(self):
+        for path in subject.FORMAL_EXACT:
+            with self.subTest(job="formal", path=path):
+                self.assertTrue(subject.is_formal_input(path))
+        for path in subject.REFINEMENT_EXACT:
+            with self.subTest(job="formal_refinement", path=path):
+                self.assertTrue(subject.is_refinement_input(path))
+
+    def test_mixed_diff_decides_profiles_independently(self):
+        payload = diff(("M", "README.md"), ("M", "clients/go/go.mod"))
+        for job in subject.JOBS:
+            self.assertTrue(self.decision(job, payload).run_formal)
 
     def test_add_delete_rename_and_copy_parse_all_paths(self):
         cases = [
-            (diff(("A", "tools/a.py"), ("D", "scripts/b.sh")), False),
-            (diff(("R100", "README.md", "tools/readme.txt")), True),
-            (diff(("R090", "tools/readme.txt", "README.md")), True),
-            (diff(("C075", "tools/a.py", "scripts/a.py")), False),
-            (diff(("C100", "tools/a.py", "rubin-formal/A.lean")), True),
+            (diff(("A", "tools/a.py"), ("D", "scripts/b.sh")), False, False),
+            (diff(("R100", "README.md", "tools/readme.txt")), True, False),
+            (diff(("R090", "tools/readme.txt", "clients/go/go.mod")), False, True),
+            (diff(("C075", "tools/a.py", "scripts/a.py")), False, False),
+            (diff(("C100", "README.md", "docs/readme-copy.md")), True, False),
+            (diff(("C100", "tools/a.py", "rubin-formal/RubinFormal/A.lean")), True, True),
         ]
-        for payload, expected in cases:
+        for payload, formal, refinement in cases:
             with self.subTest(payload=payload):
-                self.assertEqual(self.decision(payload).run_formal, expected)
+                self.assertEqual(self.decision("formal", payload).run_formal, formal)
+                self.assertEqual(
+                    self.decision("formal_refinement", payload).run_formal, refinement
+                )
 
-    def test_fips_preflight_skips_but_bundle_build_runs(self):
-        self.assertFalse(
-            self.decision(diff(("M", "scripts/crypto/openssl/fips-preflight.sh"))).run_formal
+    def test_git_diff_enables_copy_detection_for_unchanged_sources(self):
+        commands = []
+        subject.decide(
+            "formal", "pull_request", "main",
+            lambda command, **kwargs: (
+                commands.append(command) or runner()(command, **kwargs)
+            ),
         )
-        self.assertTrue(
-            self.decision(
-                diff(("M", "scripts/crypto/openssl/build-openssl-bundle.sh"))
-            ).run_formal
-        )
+        self.assertIn("--find-copies", commands[1])
+        self.assertIn("--find-copies-harder", commands[1])
 
     def test_malformed_unknown_and_empty_diffs_run(self):
         for payload in (
@@ -121,21 +131,19 @@ class FormalRelevanceTests(unittest.TestCase):
             b"M\0\xff\0",
         ):
             with self.subTest(payload=payload):
-                self.assertTrue(self.decision(payload).run_formal)
+                for job in subject.JOBS:
+                    self.assertTrue(self.decision(job, payload).run_formal)
 
     def test_environment_and_git_failures_run(self):
-        self.assertTrue(subject.decide("push", "", runner()).run_formal)
-        self.assertTrue(subject.decide("pull_request", "", runner()).run_formal)
-        self.assertTrue(
-            subject.decide(
-                "pull_request", "main", runner(verify_code=1)
-            ).run_formal
-        )
-        self.assertTrue(
-            subject.decide(
-                "pull_request", "main", runner(diff_code=1)
-            ).run_formal
-        )
+        for job in subject.JOBS:
+            self.assertTrue(subject.decide(job, "push", "", runner()).run_formal)
+            self.assertTrue(subject.decide(job, "pull_request", "", runner()).run_formal)
+            self.assertTrue(subject.decide(
+                job, "pull_request", "main", runner(verify_code=1)
+            ).run_formal)
+            self.assertTrue(subject.decide(
+                job, "pull_request", "main", runner(diff_code=1)
+            ).run_formal)
 
 
 if __name__ == "__main__":
