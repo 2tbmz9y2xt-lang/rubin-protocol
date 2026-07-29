@@ -374,7 +374,7 @@ func TestValidateThresholdSigSpendQ_RollbackOnLateThresholdErrors(t *testing.T) 
 		},
 		{
 			name:       "key_binding_mismatch",
-			keys:       [][32]byte{keyID1, [32]byte{0xEE}},
+			keys:       [][32]byte{keyID1, {0xEE}},
 			second:     WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp2.PubkeyBytes(), Signature: sig2},
 			wantErr:    TX_ERR_SIG_INVALID,
 			wantErrMsg: "key binding mismatch",

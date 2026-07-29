@@ -95,6 +95,7 @@ func chainStateFromDisk(disk chainStateDisk) (*ChainState, error) {
 		Utxos:            utxos,
 	}, nil
 }
+
 func ChainStatePath(dataDir string) string {
 	return filepath.Join(dataDir, chainStateFileName)
 }
