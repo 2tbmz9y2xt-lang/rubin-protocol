@@ -71,14 +71,17 @@ func TestReadFileFromDirEnforcesBound(t *testing.T) {
 
 // lyingStatFile wraps a real file but reports a fixed Stat size, standing in
 // for a file whose size changes between Stat and read (or a size-lying
-// special file). reads counts content reads; statErr/readErr, when set,
-// inject raw failures for the error-propagation rows.
+// special file). reads counts content reads; maxRead records the largest
+// read window offered (== the buffer's free capacity, exposing the growth
+// pattern); statErr/readErr, when set, inject raw failures for the
+// error-propagation rows.
 type lyingStatFile struct {
 	fs.File
 	statErr error
 	readErr error
 	size    int64
 	reads   int
+	maxRead int
 }
 
 type lyingSizeInfo struct {
@@ -101,10 +104,38 @@ func (l *lyingStatFile) Stat() (fs.FileInfo, error) {
 
 func (l *lyingStatFile) Read(p []byte) (int, error) {
 	l.reads++
+	if len(p) > l.maxRead {
+		l.maxRead = len(p)
+	}
 	if l.readErr != nil {
 		return 0, l.readErr
 	}
 	return l.File.Read(p)
+}
+
+// TestSafeIOReadCappedGrowsGeometricallyOnStatLyingLow pins the Codex P1
+// fix: a stat-lying-low race (stat says 2, the file holds 2000, bound 1500)
+// is still refused at exactly the same boundary, and the buffer grows
+// geometrically — the largest read window stays at one doubling step (1024
+// here), never the old single maxBytes+1-sized jump (which would offer a
+// 1498-byte window from the 3-byte presize).
+func TestSafeIOReadCappedGrowsGeometricallyOnStatLyingLow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f.bin")
+	if err := os.WriteFile(path, bytes.Repeat([]byte{0xa5}, 2000), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+	lf := &lyingStatFile{File: f, size: 2}
+	if _, err := readAllCapped(lf, "f.bin", 1500); !errors.Is(err, errStoreFileTooLarge) {
+		t.Fatalf("want errStoreFileTooLarge, got %v", err)
+	}
+	if lf.maxRead > 1024 {
+		t.Fatalf("read window %d exceeds geometric growth; bound-sized allocation spike", lf.maxRead)
+	}
 }
 
 func TestSafeIOReadAllCappedPinsStatReadRace(t *testing.T) {

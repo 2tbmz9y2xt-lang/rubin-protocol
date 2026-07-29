@@ -114,7 +114,9 @@ func readAllCapped(f fs.File, name string, maxBytes int64) ([]byte, error) {
 }
 
 // readCapped reads at most maxBytes+1 bytes into a buffer presized to
-// capacity, growing at most once (to maxBytes+1) if the stat size lied low.
+// capacity, growing geometrically (doubled per step, 512-byte floor, capped
+// at maxBytes+1) if the stat size lied low — a small stat/read race costs a
+// small reallocation, never a bound-sized allocation spike.
 func readCapped(f fs.File, name string, capacity int, maxBytes int64) ([]byte, error) {
 	buf := make([]byte, 0, capacity)
 	limited := io.LimitReader(f, maxBytes+1)
@@ -123,7 +125,7 @@ func readCapped(f fs.File, name string, capacity int, maxBytes int64) ([]byte, e
 			if int64(len(buf)) > maxBytes {
 				return nil, errFileTooLarge(name, int64(len(buf)), maxBytes)
 			}
-			next := make([]byte, len(buf), capHint(maxBytes, maxBytes))
+			next := make([]byte, len(buf), growCapacity(cap(buf), maxBytes))
 			copy(next, buf)
 			buf = next
 		}
@@ -138,8 +140,27 @@ func readCapped(f fs.File, name string, capacity int, maxBytes int64) ([]byte, e
 	}
 }
 
+// growCapacity doubles the current capacity (512-byte floor so a tiny start
+// still makes progress), capped at capHint(maxBytes, maxBytes) = maxBytes+1
+// — the most the limiter can ever deliver. Progress is guaranteed: the grow
+// branch only runs with len(buf) <= maxBytes < maxBytes+1, so the returned
+// capacity always exceeds the current one. The negative check catches a
+// doubling overflow on 32-bit int builds.
+func growCapacity(current int, maxBytes int64) int {
+	const growFloor = 512
+	next := current * 2
+	if next < growFloor {
+		next = growFloor
+	}
+	if limit := capHint(maxBytes, maxBytes); next > limit || next < 0 {
+		next = limit
+	}
+	return next
+}
+
 // capHint is min(size, maxBytes)+1 — the +1 gives the EOF probe room so an
-// exact-size read never reallocates — clamped to the platform int range.
+// exact-size read never reallocates — clamped to the platform int range. It
+// doubles as the growth ceiling in growCapacity.
 func capHint(size, maxBytes int64) int {
 	hint := min(size, maxBytes) + 1
 	if hint > math.MaxInt {
