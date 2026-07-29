@@ -30,7 +30,6 @@ func TestNextAcceptErrorBackoff(t *testing.T) {
 		{"overshoot clamps to cap", 10 * time.Second, acceptErrorBackoffCap},
 	}
 	for _, tc := range cases {
-
 		t.Run(tc.name, func(t *testing.T) {
 			got := nextAcceptErrorBackoff(tc.current)
 			if got != tc.want {

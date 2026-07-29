@@ -10,8 +10,10 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-const productionRotationScheduleVersion = 1
-const productionRotationScheduleErrStem = "production_rotation_schedule"
+const (
+	productionRotationScheduleVersion = 1
+	productionRotationScheduleErrStem = "production_rotation_schedule"
+)
 
 // Derived runtime copy of conformance/fixtures/protocol/production_rotation_schedule_v1.json.
 // Go embed cannot read a parent-path artifact directly, so tests keep this JSON-equivalent

@@ -179,6 +179,7 @@ func TestMinerCompleteDASetProviderValidity(t *testing.T) {
 		t.Fatalf("selected batches=%d, want capped provider DA batches", len(selected)/3)
 	}
 }
+
 func TestMinerCompleteDASetProviderRejectsInvalidGroups(t *testing.T) {
 	fixture := newMinerProviderTestFixture(t)
 	base := fixture.completeDASet(t, [32]byte{0x83}, []byte("chunk-0"), []byte("chunk-1"))
