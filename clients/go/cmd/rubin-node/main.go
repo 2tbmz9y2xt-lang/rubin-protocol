@@ -683,7 +683,9 @@ type headerStore interface {
 }
 
 func printFeatureBitsTelemetry(w io.Writer, bs headerStore, height uint64, deploymentsPath string) error {
-	raw, err := os.ReadFile(filepath.Clean(deploymentsPath))
+	// Operator config read, bounded pre-allocation (RUB-1062 rider A; see
+	// node.ReadConfigFile for the ceiling derivation).
+	raw, err := node.ReadConfigFile(filepath.Clean(deploymentsPath))
 	if err != nil {
 		return err
 	}
@@ -838,7 +840,9 @@ func parseGenesisConfigFull(path string) (parsedGenesisConfig, error) {
 	if strings.TrimSpace(path) == "" {
 		return cfg, nil
 	}
-	raw, err := os.ReadFile(filepath.Clean(path))
+	// Operator config read, bounded pre-allocation (RUB-1062 rider A; see
+	// node.ReadConfigFile for the ceiling derivation).
+	raw, err := node.ReadConfigFile(filepath.Clean(path))
 	if err != nil {
 		return cfg, err
 	}

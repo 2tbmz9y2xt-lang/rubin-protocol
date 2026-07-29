@@ -23,7 +23,9 @@ var errStoreFileTooLarge = errors.New("store file exceeds size bound")
 // size a consensus rule already caps, so the bound is derived rather than
 // invented. Artifacts that grow with chain length or UTXO-set size (the
 // chainstate snapshot, the canonical index marker) admit no such ceiling and
-// are deliberately NOT bounded here — they are owned by RUB-1062. The numbers
+// are deliberately left UNBOUNDED: no fixed byte number is defensible on
+// them, which is a settled decision rather than missing work — readFileByPath
+// carries the measurements and the alternative that was tried. The numbers
 // are a cross-client contract mirrored byte-for-byte by the Rust client; each
 // derivation and margin is recorded here and must not drift from the Rust
 // copy. The measured per-entry figure below is pinned by
@@ -63,10 +65,22 @@ const (
 //   - LoadChainState (chainstate_io.go) — the chainstate snapshot, which
 //     grows with UTXO-SET SIZE.
 //
-// Both belong to RUB-1062, and each needs its OWN derivation: the two grow
-// along different axes, so a single bound added at this helper would silently
-// cover both with one number that fits neither. Bounded readers are
-// readFileFromDir (per-class) and readFileByPathCapped.
+// Leaving them unbounded is a standing decision, not a gap awaiting an owner.
+// No byte ceiling on either artifact is defensible: RUB-1057 measured a 1 GB
+// chainstate bound as reachable in ~29 blocks of maximum-size CORE_VAULT
+// outputs, and any marker ceiling is only a hard cap on chain length. A
+// single bound at this helper would be worse still — the two grow along
+// different axes, so one number would silently cover both and fit neither.
+// Bounded readers are readFileFromDir (per-class) and readFileByPathCapped.
+//
+// An incremental-decode alternative to reading these whole was implemented
+// and measured, then withdrawn; do not re-derive it. It does not close the
+// finding — an oversized hostile file still kills the node — it is several
+// times WORSE than the whole-buffer path on a document holding one huge
+// value, and its equivalence to the whole-buffer decoders is only ever
+// provable by sampling: a nesting-depth divergence hid in two call sites and
+// was caught by a hand-written probe, not by the 70-plus-row corpus written
+// to catch exactly that. RUB-1057 is the finding of record.
 func readFileByPath(path string) ([]byte, error) {
 	dir := filepath.Dir(path)
 	name := filepath.Base(path)
@@ -228,14 +242,50 @@ func errFileTooLarge(name string, observed, maxBytes int64) error {
 // only production caller is PutUndo. Same typed class as the read-side
 // refusal; the message is clearly save-side. Block and header writes need no
 // guard — the wire format already fixes their size. The chainstate snapshot
-// and index marker have NO guard on either end in this slice: they are
-// unbounded on read too (see readFileByPath) and belong to RUB-1062, which
-// must add both ends together. Rust twin: `check_store_save_bound` in
-// io_utils.rs.
+// and index marker have NO guard on either end, deliberately and for good:
+// they grow with accumulated state, so no ceiling is defensible on the save
+// side either, and they are read whole and unbounded to match (the decision
+// and its measurements live on readFileByPath). Rust twin:
+// `check_store_save_bound` in io_utils.rs.
 func checkStoreSaveBound(name string, size int, maxBytes int64) error {
 	if int64(size) > maxBytes {
 		return fmt.Errorf("refusing to save %s: %d bytes marshaled, class bound %d: %w",
 			name, size, maxBytes, errStoreFileTooLarge)
 	}
 	return nil
+}
+
+// configFileMaxBytes bounds the two operator-supplied config files the Go
+// node reads at startup: the featurebits deployments JSON
+// (cmd/rubin-node --featurebits-deployments) and the genesis pack JSON
+// (--genesis-file). Derivation (RUB-1062 rider A): both schemas are small
+// and fixed —
+//   - deployments: a JSON array of {name, bit, start_height, timeout_height,
+//     activation_height}; bit is a uint8, so even an exhaustive table of all
+//     256 bits with generous 64-char names and 20-digit heights is
+//     ~256*400B ~= 100 KiB, and a realistic handful-of-deployments file is
+//     under 8 KiB;
+//   - genesis pack: four fixed hex fields, the largest the 116-byte header
+//     hex-doubled — a well-formed pack is under 1 KiB.
+//
+// The bound is 16 MiB: >3 orders of magnitude above any legitimate config
+// (~2000x the realistic deployments ceiling, >10^4 x a genesis pack) and
+// still >160x the exhaustive 256-bit table. Reachability (the RUB-1057
+// lesson): both files are operator-authored and do not grow with chain or
+// UTXO state; an input actually filling 16 MiB would need ~40k deployment
+// entries or megabytes of padding, which no legitimate config approaches —
+// the ceiling cannot fire on honest use, while a mistakenly-pointed-at huge
+// file is refused before allocation. Cross-client disposition: the
+// DEPLOYMENTS surface is Go-only (the Rust node has no such flag; the
+// born-bounded obligation for a future port is RUB-1065), while the
+// GENESIS-FILE surface exists in Rust (load_genesis_config and
+// load_chain_id_from_genesis_file in crates/rubin-node/src/genesis.rs) and
+// is still unbounded there — the Rust mirror (RUB-1069) carries this same
+// 16 MiB ceiling and the same typed pre-allocation refusal.
+const configFileMaxBytes = 1 << 24
+
+// ReadConfigFile reads an operator config file under configFileMaxBytes with
+// the typed pre-allocation refusal from RUB-1057 (errStoreFileTooLarge).
+func ReadConfigFile(path string) ([]byte, error) {
+	return readFileByPathCapped(path, configFileMaxBytes)
 }
