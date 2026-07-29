@@ -246,20 +246,21 @@ run_one_target() {
   echo "==> running ${target} (${pkg})" | tee -a "${ARTIFACTS_DIR}/summary.log"
   echo "metadata ${target}: ${ARTIFACTS_DIR}/${target}.metadata.env" >> "${ARTIFACTS_DIR}/summary.log"
   if go test -run=^$ -fuzz="${target}" -fuzztime="${FUZZ_TIME}" -fuzzminimizetime="${FUZZ_MINIMIZE_TIME}" -timeout="${GO_TEST_TIMEOUT}" "${pkg}" >"${log_file}" 2>&1; then
-    # `go test -fuzz=<pattern>` matching no fuzz test exits 0, so a renamed or
-    # deleted target left in TARGETS would otherwise report a silent green
-    # PASS with zero coverage. Warning text pinned empirically on go1.26.5:
-    # "testing: warning: no fuzz tests to fuzz".
+    # A zero exit is a real PASS only with fuzz-execution evidence: `go test
+    # -fuzz=<pattern>` matching nothing exits 0, and a setup f.Skipf() (e.g.
+    # unavailable ML-DSA backend, measured 2026-07-29) leaves a bare PASS log.
     if grep -Eq -- '^fuzz: elapsed:' "${log_file}"; then
       echo "PASS ${target}" | tee -a "${ARTIFACTS_DIR}/summary.log"
-    elif grep -Fq -- "testing: warning: no fuzz tests to fuzz" "${log_file}"; then
+    # Disambiguate via the test binary's own -list output — the truth source
+    # for target existence: the no-fuzz-tests warning is not emitted when the
+    # package has no fuzz tests at all. The -list run reuses the already-built
+    # test binary, so it is cheap. Ambiguity is FAIL (fail closed).
+    elif go test -run='^$' -list "^${target}\$" "${pkg}" >"${ARTIFACTS_DIR}/${target}.list.txt" 2>&1 &&
+      grep -Fxq -- "${target}" "${ARTIFACTS_DIR}/${target}.list.txt"; then
+      echo "SKIP_FUZZ_SETUP ${target} (fuzz target skipped during setup; zero fuzz coverage — ML-DSA backend unavailable? see RUB-1064)" | tee -a "${ARTIFACTS_DIR}/summary.log"
+    else
       STATUS=1
       echo "FAIL ${target} (no fuzzing executed — target missing from package?)" | tee -a "${ARTIFACTS_DIR}/summary.log"
-    else
-      # Measured 2026-07-29: targets whose setup f.Skipf()s on an unavailable
-      # crypto backend exit 0 with a bare PASS log; visible-never-silent, and
-      # red stays reserved for defect evidence.
-      echo "SKIP_FUZZ_SETUP ${target} (fuzz target skipped during setup; zero fuzz coverage — ML-DSA backend unavailable? see RUB-1064)" | tee -a "${ARTIFACTS_DIR}/summary.log"
     fi
   elif "${ROOT_DIR}/scripts/ci/classify_go_fuzz_exit.sh" "${target}" "${fuzz_seconds}" "${log_file}" "${corpus_before}" "${corpus_dir}"; then
     echo "PASS_AFTER_BENIGN_DEADLINE ${target} (upstream fuzztime shutdown race; full budget spent, no defect evidence)" | tee -a "${ARTIFACTS_DIR}/summary.log"
