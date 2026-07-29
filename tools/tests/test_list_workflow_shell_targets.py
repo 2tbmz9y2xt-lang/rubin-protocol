@@ -58,6 +58,29 @@ class WorkflowShellTargetTests(unittest.TestCase):
 
             self.assertEqual(m.collect_targets(repo_root), ["scripts/ci/sample.sh"])
 
+    def test_collect_targets_ignores_longer_suffixes_on_a_sh_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            workflow_dir = repo_root / ".github" / "workflows"
+            script_dir = repo_root / "scripts" / "crypto" / "openssl"
+            workflow_dir.mkdir(parents=True)
+            script_dir.mkdir(parents=True)
+            (script_dir / "build-openssl-bundle.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+            # source-checksums.sha256 is deliberately absent: an unanchored `.sh`
+            # match would read it as a shell target and fail closed on it.
+            (workflow_dir / "cache.yml").write_text(
+                "jobs:\n  build:\n    steps:\n"
+                "      - with:\n"
+                "          key: openssl-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}\n"
+                "      - run: scripts/crypto/openssl/build-openssl-bundle.sh\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                m.collect_targets(repo_root),
+                ["scripts/crypto/openssl/build-openssl-bundle.sh"],
+            )
+
     def test_collect_targets_fail_closed_on_missing_shell_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
