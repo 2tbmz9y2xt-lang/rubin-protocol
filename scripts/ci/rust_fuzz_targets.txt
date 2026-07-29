@@ -28,3 +28,14 @@ tx_dep_graph
 da_payload_commit_verify
 tx_relay_announce
 tx_relay_receive
+block_header_surface
+connect_block_parallel_determinism
+connect_block_parallel_worker_parity
+featurebits_state
+flagday_helpers
+marshal_tx_roundtrip
+parse_tx_determinism
+sig_cache_concurrent
+spend_dispatch_structural
+suite_registry_surface
+validate_tx_local
