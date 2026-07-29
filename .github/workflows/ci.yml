@@ -138,10 +138,19 @@ jobs:
   formal:
     needs: policy
     runs-on: ubuntu-latest
+    outputs:
+      run_formal: ${{ steps.formal_gate.outputs.run_formal }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Classify formal relevance
+        id: formal_gate
+        run: python3 tools/ci_formal_relevance.py
 
       - name: Cache Lean toolchain
+        if: steps.formal_gate.outputs.run_formal == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: |
@@ -156,6 +165,7 @@ jobs:
             lean-toolchain-${{ runner.os }}-
 
       - name: Install elan (Lean toolchain manager)
+        if: steps.formal_gate.outputs.run_formal == 'true'
         run: |
           set -euo pipefail
           if [ ! -x "$HOME/.elan/bin/elan" ]; then
@@ -167,6 +177,7 @@ jobs:
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
       - name: Pin Lean toolchain (deterministic)
+        if: steps.formal_gate.outputs.run_formal == 'true'
         run: |
           set -euo pipefail
           TOOLCHAIN="$(cat rubin-formal/lean-toolchain)"
@@ -189,6 +200,7 @@ jobs:
           done
 
       - name: Cache Lean .lake build artifacts
+        if: steps.formal_gate.outputs.run_formal == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: rubin-formal/.lake
@@ -197,6 +209,7 @@ jobs:
             lake-formal-${{ runner.os }}-
 
       - name: Lean package checks (rubin-formal)
+        if: steps.formal_gate.outputs.run_formal == 'true'
         run: |
           cd rubin-formal
           lake env lean --version
@@ -205,18 +218,23 @@ jobs:
           python3 -m tools.check_formal_registry_truth
 
       - name: Formal coverage baseline check
+        if: steps.formal_gate.outputs.run_formal == 'true'
         run: python3 tools/check_formal_coverage.py
 
       - name: Formal refinement bridge check
+        if: steps.formal_gate.outputs.run_formal == 'true'
         run: python3 tools/check_formal_refinement_bridge.py
 
       - name: Formal claims lint
+        if: steps.formal_gate.outputs.run_formal == 'true'
         run: python3 tools/check_formal_claims_lint.py
 
       - name: Formal risk gate (Phase-0/devnet)
+        if: steps.formal_gate.outputs.run_formal == 'true'
         run: python3 tools/check_formal_risk_gate.py --profile phase0
 
       - name: Map iteration determinism lint (Go/Rust)
+        if: steps.formal_gate.outputs.run_formal == 'true'
         run: python3 tools/check_map_iteration_determinism.py
 
   test:
@@ -522,10 +540,19 @@ jobs:
   formal_refinement:
     needs: policy
     runs-on: ubuntu-latest
+    outputs:
+      run_formal: ${{ steps.formal_gate.outputs.run_formal }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Classify formal relevance
+        id: formal_gate
+        run: python3 tools/ci_formal_relevance.py
 
       - name: Cache Lean toolchain
+        if: steps.formal_gate.outputs.run_formal == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: |
@@ -540,6 +567,7 @@ jobs:
             lean-toolchain-${{ runner.os }}-
 
       - name: Install elan (Lean toolchain manager)
+        if: steps.formal_gate.outputs.run_formal == 'true'
         run: |
           set -euo pipefail
           if [ ! -x "$HOME/.elan/bin/elan" ]; then
@@ -551,6 +579,7 @@ jobs:
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
       - name: Pin Lean toolchain (deterministic)
+        if: steps.formal_gate.outputs.run_formal == 'true'
         run: |
           set -euo pipefail
           TOOLCHAIN="$(cat rubin-formal/lean-toolchain)"
@@ -573,6 +602,7 @@ jobs:
           done
 
       - name: Cache OpenSSL 3.5 bundle
+        if: steps.formal_gate.outputs.run_formal == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: |
@@ -581,6 +611,7 @@ jobs:
           key: openssl-bundle-${{ runner.os }}-3.5.5-v2
 
       - name: Build OpenSSL 3.5.5 bundle
+        if: steps.formal_gate.outputs.run_formal == 'true'
         id: openssl
         run: |
           set -euo pipefail
@@ -612,6 +643,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Verify OpenSSL PQ algorithms
+        if: steps.formal_gate.outputs.run_formal == 'true'
         env:
           OPENSSL_DIR: ${{ steps.openssl.outputs.openssl_dir }}
           OPENSSL_MODULES: ${{ steps.openssl.outputs.openssl_modules }}
@@ -623,12 +655,14 @@ jobs:
           openssl list -signature-algorithms | grep -E 'ML-DSA-87'
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: steps.formal_gate.outputs.run_formal == 'true'
         with:
           go-version: '1.26.5'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
       - name: Generate Go trace v1
+        if: steps.formal_gate.outputs.run_formal == 'true'
         env:
           OPENSSL_DIR: ${{ steps.openssl.outputs.openssl_dir }}
           OPENSSL_MODULES: ${{ steps.openssl.outputs.openssl_modules }}
@@ -640,15 +674,18 @@ jobs:
           go run ./cmd/formal-trace --fixtures-dir ../../conformance/fixtures --out ../../rubin-formal/traces/go_trace_v1.jsonl
 
       - name: Generate Lean expected outputs (GoTraceV1.lean)
+        if: steps.formal_gate.outputs.run_formal == 'true'
         run: |
           python3 tools/formal/gen_lean_refinement_from_traces.py --traces rubin-formal/traces/go_trace_v1.jsonl --out rubin-formal/RubinFormal/Refinement/GoTraceV1.lean
           git diff --exit-code -- rubin-formal/RubinFormal/Refinement/GoTraceV1.lean
 
       - name: Check Lean conformance vector staleness
+        if: steps.formal_gate.outputs.run_formal == 'true'
         run: |
           python3 tools/check_lean_conformance_staleness.py
 
       - name: Cache Lean .lake build artifacts (refinement)
+        if: steps.formal_gate.outputs.run_formal == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: rubin-formal/.lake
@@ -657,12 +694,14 @@ jobs:
             lake-refinement-${{ runner.os }}-
 
       - name: Lean build (rubin-formal)
+        if: steps.formal_gate.outputs.run_formal == 'true'
         run: |
           cd rubin-formal
           lake env lean --version
           lake build
 
       - name: Run Go→Lean refinement check
+        if: steps.formal_gate.outputs.run_formal == 'true'
         run: |
           cd rubin-formal
           lake env lean --run RubinFormal/Refinement/Main.lean
