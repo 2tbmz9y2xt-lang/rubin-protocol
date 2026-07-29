@@ -53,11 +53,20 @@ const (
 	undoFileMaxBytes = 2_000_000_000
 )
 
-// readFileByPath reads path in full with only the leaf-name guard. Its sole
-// caller is the block store index marker loader: that artifact grows with
-// chain length and admits no fixed ceiling a consensus-valid chain cannot
-// reach, so RUB-1057 deliberately leaves it UNBOUNDED — RUB-1062 owns it.
-// Bounded readers are readFileFromDir (per-class) and readFileByPathCapped.
+// readFileByPath reads path in full with only the leaf-name guard. It has TWO
+// callers, both reading artifacts that grow with accumulated state and admit
+// no fixed ceiling a consensus-valid chain cannot reach, so RUB-1057
+// deliberately leaves both UNBOUNDED:
+//
+//   - loadBlockStoreIndex (blockstore.go) — the canonical index marker, which
+//     grows with CHAIN LENGTH;
+//   - LoadChainState (chainstate_io.go) — the chainstate snapshot, which
+//     grows with UTXO-SET SIZE.
+//
+// Both belong to RUB-1062, and each needs its OWN derivation: the two grow
+// along different axes, so a single bound added at this helper would silently
+// cover both with one number that fits neither. Bounded readers are
+// readFileFromDir (per-class) and readFileByPathCapped.
 func readFileByPath(path string) ([]byte, error) {
 	dir := filepath.Dir(path)
 	name := filepath.Base(path)
@@ -104,6 +113,16 @@ func readAllCapped(f fs.File, name string, maxBytes int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Fail closed on hostile/absurd metadata BEFORE any sizing arithmetic: a
+	// negative reported size would make capHint return a negative capacity and
+	// `make` panic ("makeslice: cap out of range"), and a negative bound is a
+	// caller bug that must not silently admit everything. Neither is reachable
+	// through a regular file today, but this function's contract is to answer
+	// hostile on-disk metadata with a typed refusal, never a panic. (The Rust
+	// twin cannot express this: `metadata().len()` is u64.)
+	if info.Size() < 0 || maxBytes < 0 {
+		return nil, errFileTooLarge(name, info.Size(), maxBytes)
+	}
 	if info.Size() > maxBytes {
 		return nil, errFileTooLarge(name, info.Size(), maxBytes)
 	}
@@ -123,7 +142,14 @@ func readAllCapped(f fs.File, name string, maxBytes int64) ([]byte, error) {
 // small reallocation, never a bound-sized allocation spike.
 func readCapped(f fs.File, name string, capacity int, maxBytes int64) ([]byte, error) {
 	buf := make([]byte, 0, capacity)
-	limited := io.LimitReader(f, maxBytes+1)
+	// Saturate: at the int64 ceiling maxBytes+1 wraps negative, and a
+	// negative LimitReader budget reports EOF immediately — a silent
+	// truncation exactly where the bound is supposed to refuse.
+	readBudget := maxBytes
+	if readBudget < math.MaxInt64 {
+		readBudget++
+	}
+	limited := io.LimitReader(f, readBudget)
 	for {
 		if len(buf) == cap(buf) {
 			if int64(len(buf)) > maxBytes {
@@ -146,7 +172,9 @@ func readCapped(f fs.File, name string, capacity int, maxBytes int64) ([]byte, e
 
 // growCapacity doubles the current capacity, clamped to
 // capHint(maxBytes, maxBytes) = maxBytes+1 (the most the limiter can ever
-// deliver), then floored at 512 bytes so a tiny start still makes progress.
+// deliver), then floored at 512 bytes so a tiny start still makes progress —
+// the floor itself is clamped to the limit, so a small class (header: limit
+// 117) never gets a 512-byte buffer.
 //
 // ORDER MATTERS: the doubling overflow is detected and clamped BEFORE the
 // floor is applied. Applying the floor first would rewrite an overflowed
@@ -162,8 +190,8 @@ func growCapacity(current int, maxBytes int64) int {
 	if next < 0 || next > limit || current > limit/2 {
 		next = limit
 	}
-	if next < growFloor && next < limit {
-		next = growFloor
+	if next < growFloor {
+		next = min(growFloor, limit)
 	}
 	return next
 }
@@ -183,11 +211,15 @@ func errFileTooLarge(name string, observed, maxBytes int64) error {
 	return fmt.Errorf("%s: %d bytes observed, class bound %d: %w", name, observed, maxBytes, errStoreFileTooLarge)
 }
 
-// checkStoreSaveBound is the write/read symmetry guard for the growth
-// classes (chainstate snapshot, index marker): the node must never persist a
-// file it would refuse to load back. Same typed class as the read-side
-// refusal; the message is clearly save-side. Rust twin:
-// `check_store_save_bound` in io_utils.rs.
+// checkStoreSaveBound is the write/read symmetry guard for the undo class:
+// the node must never persist an undo file it would refuse to load back. Its
+// only production caller is PutUndo. Same typed class as the read-side
+// refusal; the message is clearly save-side. Block and header writes need no
+// guard — the wire format already fixes their size. The chainstate snapshot
+// and index marker have NO guard on either end in this slice: they are
+// unbounded on read too (see readFileByPath) and belong to RUB-1062, which
+// must add both ends together. Rust twin: `check_store_save_bound` in
+// io_utils.rs.
 func checkStoreSaveBound(name string, size int, maxBytes int64) error {
 	if int64(size) > maxBytes {
 		return fmt.Errorf("refusing to save %s: %d bytes marshaled, class bound %d: %w",

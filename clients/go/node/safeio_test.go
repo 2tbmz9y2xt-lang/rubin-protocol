@@ -57,6 +57,52 @@ func TestSafeIOGrowCapacityClampsOverflowBeforeFloor(t *testing.T) {
 			t.Fatalf("growCapacity(%d) returned negative capacity %d", row.current, got)
 		}
 	}
+	// A class smaller than the floor must never be handed a floor-sized
+	// buffer: the doc promises the capacity is clamped at capHint, and the
+	// header class (bound 116 -> limit 117) is exactly that case.
+	for _, small := range []int64{headerFileMaxBytes, 71, 0} {
+		smallLimit := capHint(small, small)
+		for _, current := range []int{0, 1, smallLimit} {
+			if got := growCapacity(current, small); got > smallLimit {
+				t.Fatalf("growCapacity(%d, %d) = %d, exceeds limit %d",
+					current, small, got, smallLimit)
+			}
+		}
+	}
+}
+
+// TestSafeIOReadAllCappedRefusesHostileStatSize pins the fail-closed answer to
+// hostile on-disk metadata: a negative reported size must yield the typed size
+// error, never a negative capacity handed to make (which panics with
+// "makeslice: cap out of range"). Rust cannot express this row — its
+// metadata().len() is u64.
+func TestSafeIOReadAllCappedRefusesHostileStatSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f.bin")
+	if err := os.WriteFile(path, []byte("0123456789"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("negative stat size panicked instead of refusing: %v", r)
+		}
+	}()
+	lf := &lyingStatFile{File: f, size: -5}
+	if _, err := readAllCapped(lf, "f.bin", headerFileMaxBytes); !errors.Is(err, errStoreFileTooLarge) {
+		t.Fatalf("negative stat size: want errStoreFileTooLarge, got %v", err)
+	}
+	if lf.reads != 0 {
+		t.Fatalf("content was read despite hostile stat size: %d reads", lf.reads)
+	}
+	// A negative bound is a caller bug: refuse rather than admit everything.
+	honest := &lyingStatFile{File: f, size: 4}
+	if _, err := readAllCapped(honest, "f.bin", -1); !errors.Is(err, errStoreFileTooLarge) {
+		t.Fatalf("negative bound: want errStoreFileTooLarge, got %v", err)
+	}
 }
 
 // TestSafeIOStoreSaveBoundRefusesOverBound pins the write/read symmetry
