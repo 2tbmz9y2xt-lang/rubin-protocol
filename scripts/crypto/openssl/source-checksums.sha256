@@ -1,0 +1,8 @@
+# Authoritative sha256 pins for the upstream OpenSSL source tarballs this repository
+# is allowed to build, in sha256sum format so `sha256sum -c` works here by hand.
+# build-openssl-bundle.sh selects a line by OPENSSL_VERSION and refuses to build a
+# version that has none. Each digest is the one published in the official release asset
+# https://github.com/openssl/openssl/releases/download/openssl-<version>/openssl-<version>.tar.gz.sha256
+# Supporting a new version is one line here and nothing else; keep it that way, since
+# CVE_RESPONSE_RUNBOOK.md section 5 makes an operational bump approval-free.
+b28c91532a8b65a1f983b4c28b7488174e4a01008e29ce8e69bd789f28bc2a89  openssl-3.5.5.tar.gz

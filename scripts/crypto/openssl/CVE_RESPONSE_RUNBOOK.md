@@ -41,8 +41,8 @@ If SLA cannot be met, incident owner MUST publish a blocker note with ETA and mi
    - **Operational-only**: availability/perf/compliance without consensus drift.
 3. Prepare mitigation:
    - version bump and bundle rebuild — the build refuses an unpinned version, so add
-     the new version's sha256 to the `case` block in
-     `scripts/crypto/openssl/build-openssl-bundle.sh` from the upstream
+     the new version's `<sha256>  openssl-<version>.tar.gz` line to
+     `scripts/crypto/openssl/source-checksums.sha256` from the upstream
      `openssl-<version>.tar.gz.sha256` asset named in the refusal message,
    - temporary runtime guard (if needed),
    - tests for regression and deterministic behavior.

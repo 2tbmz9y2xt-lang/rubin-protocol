@@ -15,6 +15,9 @@ from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "crypto" / "openssl" / "build-openssl-bundle.sh"
+CHECKSUM_PATH = SCRIPT_PATH.with_name("source-checksums.sha256")
+PAYLOAD = object()  # pin the served bytes; ABSENT writes no checksum file at all
+ABSENT = object()
 VERSION = "3.5.5"
 PUBLISHED_SHA256 = "b28c91532a8b65a1f983b4c28b7488174e4a01008e29ce8e69bd789f28bc2a89"
 MIRROR_URL = "https://mirror.example/openssl.tar.gz"
@@ -47,24 +50,18 @@ def source_tarball() -> bytes:
 
 
 def repin_text(text: str, digest: str, version: str) -> str:
-    """Repoint one version's case arm, leaving every other pinned version intact."""
-    patched, count = re.subn(rf'({re.escape(version)}\)\s+EXPECTED_SHA256=")[0-9a-f]{{64}}',
-                             rf"\g<1>{digest}", text)
+    """Repoint one version's pinned line, leaving every other pinned version intact."""
+    patched, count = re.subn(rf"^[0-9a-f]{{64}}(  openssl-{re.escape(version)}\.tar\.gz)$",
+                             rf"{digest}\g<1>", text, flags=re.MULTILINE)
     assert count == 1, f"expected one pinned digest for {version}, found {count}"
     return patched
 
 
-def repin(root: Path, payload: bytes, version: str) -> Path:
-    """The real script with the selected version's pin repointed at a local payload."""
-    path = root / "build-openssl-bundle.sh"
-    path.write_text(repin_text(SCRIPT_PATH.read_text(encoding="utf-8"),
-                               hashlib.sha256(payload).hexdigest(), version), encoding="utf-8")
-    return path
-
-
 class OpenSSLBundleContractTests(unittest.TestCase):
-    def run_bundle(self, tmp, *, served, repinned=False, precache=False, version=VERSION,
+    def run_bundle(self, tmp, *, served, pin=None, precache=False, version=VERSION,
                    archive_url=None, break_sha_tools=False):
+        """pin=None runs the real script against the repository pin file; anything else copies
+        the script beside PAYLOAD (pin the served bytes), ABSENT (no file), or literal text."""
         root = Path(tmp)
         bin_dir = root / "bin"
         bin_dir.mkdir()
@@ -84,7 +81,16 @@ class OpenSSLBundleContractTests(unittest.TestCase):
                "CURL_RAN": str(root / "curl-ran")}
         if archive_url is not None:
             env["ARCHIVE_URL"] = archive_url
-        proc = subprocess.run(["/bin/bash", str(repin(root, served, version) if repinned else SCRIPT_PATH)],
+        script = SCRIPT_PATH
+        if pin is not None:
+            script = root / "build-openssl-bundle.sh"
+            script.write_text(SCRIPT_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+            if pin is not ABSENT:
+                (root / "source-checksums.sha256").write_text(
+                    repin_text(CHECKSUM_PATH.read_text(encoding="utf-8"),
+                               hashlib.sha256(served).hexdigest(), version)
+                    if pin is PAYLOAD else pin, encoding="utf-8")
+        proc = subprocess.run(["/bin/bash", str(script)],
                               capture_output=True, text=True, env=env, cwd=root)
         return SimpleNamespace(proc=proc, tarball=tarball, curl_ran=root / "curl-ran",
                                extracted=work / f"openssl-{version}" / "EXTRACTED")
@@ -96,7 +102,7 @@ class OpenSSLBundleContractTests(unittest.TestCase):
             ("mirror serving pinned bytes", {"archive_url": MIRROR_URL}, True),
         ):
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
-                run = self.run_bundle(tmp, served=source_tarball(), repinned=True, **kwargs)
+                run = self.run_bundle(tmp, served=source_tarball(), pin=PAYLOAD, **kwargs)
                 self.assertEqual(run.proc.returncode, 0, run.proc.stderr)
                 self.assertEqual(run.curl_ran.exists(), downloaded)
                 self.assertTrue(run.extracted.exists())
@@ -120,8 +126,26 @@ class OpenSSLBundleContractTests(unittest.TestCase):
             self.assertNotEqual(run.proc.returncode, 0)
             self.assertFalse(run.curl_ran.exists())
             self.assertIn("no pinned sha256 for OpenSSL 9.9.9", run.proc.stderr)
-            self.assertIn("scripts/crypto/openssl/build-openssl-bundle.sh", run.proc.stderr)
+            self.assertIn("scripts/crypto/openssl/source-checksums.sha256", run.proc.stderr)
             self.assertIn("openssl-9.9.9.tar.gz.sha256", run.proc.stderr)
+
+    def test_unusable_pin_file_refuses_before_any_download(self):
+        pinned = f"{'d' * 64}  openssl-{VERSION}.tar.gz\n"
+        for name, pin, expected in (
+            ("no pin file at all", ABSENT, "cannot read pinned checksum file"),
+            ("only another version pinned", f"{'d' * 64}  openssl-3.4.0.tar.gz\n", "no pinned sha256"),
+            ("digest too short", f"{'d' * 63}  openssl-{VERSION}.tar.gz\n", "malformed entry"),
+            ("uppercase digest", f"{'D' * 64}  openssl-{VERSION}.tar.gz\n", "malformed entry"),
+            ("single-space separator", f"{'d' * 64} openssl-{VERSION}.tar.gz\n", "malformed entry"),
+            ("malformed line for another version", pinned + "garbage\n", "malformed entry"),
+            ("duplicate entry", pinned + pinned, "duplicate pinned sha256"),
+        ):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                run = self.run_bundle(tmp, served=source_tarball(), pin=pin)
+                self.assertNotEqual(run.proc.returncode, 0)
+                self.assertFalse(run.curl_ran.exists())
+                self.assertFalse(run.extracted.exists())
+                self.assertIn(expected, run.proc.stderr)
 
     def test_hash_tool_failure_is_not_reported_as_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,17 +155,17 @@ class OpenSSLBundleContractTests(unittest.TestCase):
             self.assertNotIn("mismatch", run.proc.stderr)
             self.assertTrue(run.tarball.exists())
 
-    def test_repin_targets_one_arm_when_a_second_version_is_pinned(self):
-        second = f'  3.6.0)\n    EXPECTED_SHA256="{"a" * 64}"\n    ;;\n'
-        text = SCRIPT_PATH.read_text(encoding="utf-8").replace("  3.5.5)\n", second + "  3.5.5)\n", 1)
+    def test_repin_targets_one_line_when_a_second_version_is_pinned(self):
+        text = CHECKSUM_PATH.read_text(encoding="utf-8") + f"{'a' * 64}  openssl-3.6.0.tar.gz\n"
         patched = repin_text(text, "b" * 64, VERSION)
-        self.assertIn(f'EXPECTED_SHA256="{"a" * 64}"', patched)
-        self.assertIn(f'EXPECTED_SHA256="{"b" * 64}"', patched)
+        self.assertIn(f"{'a' * 64}  openssl-3.6.0.tar.gz", patched)
+        self.assertIn(f"{'b' * 64}  openssl-{VERSION}.tar.gz", patched)
         self.assertNotIn(PUBLISHED_SHA256, patched)
 
-    def test_script_is_the_single_definition_of_the_published_pin(self):
-        self.assertIn(f'EXPECTED_SHA256="{PUBLISHED_SHA256}"',
-                      SCRIPT_PATH.read_text(encoding="utf-8"))
+    def test_checksum_file_is_the_single_definition_of_the_published_pin(self):
+        self.assertIn(f"{PUBLISHED_SHA256}  openssl-{VERSION}.tar.gz",
+                      CHECKSUM_PATH.read_text(encoding="utf-8"))
+        self.assertNotIn(PUBLISHED_SHA256, SCRIPT_PATH.read_text(encoding="utf-8"))
         for workflow in sorted((REPO_ROOT / ".github" / "workflows").glob("*.y*ml")):
             self.assertNotIn(PUBLISHED_SHA256, workflow.read_text(encoding="utf-8"),
                              f"pin duplicated in {workflow.name}")
