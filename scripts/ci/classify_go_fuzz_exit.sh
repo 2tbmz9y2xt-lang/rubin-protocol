@@ -3,10 +3,9 @@
 # fuzztime-expiry shutdown race (exit 0) or defect evidence (exit 1).
 #
 # Benign signature (verified in go1.26.5, src/internal/fuzz/fuzz.go:129): the
-# fuzz coordinator can observe the fuzztime deadline via the parent done
-# channel before its own context reports it, so the suppression guard
-# `err == fuzzCtx.Err()` misses and a bare "context deadline exceeded" fails
-# the run even though the full fuzz budget was spent and no defect was found.
+# coordinator can observe the fuzztime deadline before its own context reports
+# it, so the `err == fuzzCtx.Err()` suppression guard misses and a bare
+# "context deadline exceeded" fails a run that spent its full budget cleanly.
 #
 # Usage:
 #   classify_go_fuzz_exit.sh <target> <fuzztime_seconds> <log_file> \
@@ -15,8 +14,7 @@
 # <corpus_before_list> is a file holding the sorted `find <corpus_dir> -type f`
 # output taken before the run (may be empty); <corpus_dir> may not exist.
 #
-# Exit codes: 0 = benign shutdown race (PASS-with-warning),
-#             1 = not benign (FAIL), 2 = usage/malformed-argument error.
+# Exit: 0 = benign race (PASS-with-warning), 1 = not benign (FAIL), 2 = usage.
 set -euo pipefail
 
 fail_usage() {
@@ -46,19 +44,31 @@ not_benign() {
   exit 1
 }
 
-# Conjunct 1: exactly one FAIL block, whose failure text is exactly the bare
-# "context deadline exceeded" line. Any other failure text (panic, assertion,
-# hang diagnostics) or a second FAIL block is defect evidence, not the race.
+# Conjunct 1: exactly one FAIL block, closed on both sides: the '^--- FAIL: '
+# count over ANY target closes the foreign-FAIL-block channel, and requiring
+# the bare deadline line followed immediately by the package-level "FAIL"
+# verdict line closes the trailing-diagnostic channel.
+any_fail_count="$(grep -Ec -- '^--- FAIL: ' "${log_file}" || true)"
+if [[ "${any_fail_count}" -ne 1 ]]; then
+  not_benign "expected exactly one FAIL block in the log, found ${any_fail_count}"
+fi
 fail_regex="^--- FAIL: ${target} \(([0-9]+(\.[0-9]+)?)s\)\$"
 fail_count="$(grep -Ec -- "${fail_regex}" "${log_file}" || true)"
 if [[ "${fail_count}" -ne 1 ]]; then
   not_benign "expected exactly one benign-shaped FAIL line, found ${fail_count}"
 fi
 fail_line_no="$(grep -En -- "${fail_regex}" "${log_file}" | cut -d: -f1)"
+# A NUL byte switches grep -En to "Binary file ... matches" with no line
+# number; classify instead of aborting on the sed call below via set -e.
+[[ "${fail_line_no}" =~ ^[0-9]+$ ]] || not_benign "FAIL line number not derivable (binary or malformed log)"
 fail_line="$(sed -n "${fail_line_no}p" "${log_file}")"
 next_line="$(sed -n "$((fail_line_no + 1))p" "${log_file}")"
 if [[ "${next_line}" != "    context deadline exceeded" ]]; then
   not_benign "failure text after the FAIL line is not the bare deadline"
+fi
+verdict_line="$(sed -n "$((fail_line_no + 2))p" "${log_file}")"
+if [[ "${verdict_line}" != "FAIL" ]]; then
+  not_benign "trailing diagnostic between the deadline and the package FAIL verdict"
 fi
 
 # Conjunct 2: the run must have consumed at least the full fuzztime budget.
@@ -70,15 +80,19 @@ if ! awk -v d="${duration}" -v budget="${fuzz_seconds}" 'BEGIN { exit !(d + 0 >=
   not_benign "deadline hit at ${duration}s, below the ${fuzz_seconds}s budget"
 fi
 
-# Conjunct 3: no crash/instability marker anywhere in the log. Each marker is
-# a distinct defect-evidence channel: a written failing input (reproducible
-# crash), a hung/terminated worker (abnormal termination), a worker
-# communication error, or an internal fuzz-engine failure.
+# Conjunct 3: no crash/instability marker anywhere in the log. Each closes a
+# distinct defect-evidence channel: written failing input (reproducible crash),
+# hung/terminated worker, worker communication error, internal fuzz-engine
+# failure, "panic:" (a cleanup/TestMain panic produces no other marker), and
+# "fatal error:" (runtime aborts like concurrent map writes print fatal
+# error:, not panic:, and can follow the package FAIL verdict).
 for marker in \
   "Failing input written" \
   "fuzzing process hung or terminated" \
   "communicating with fuzzing process" \
-  "internal failure"; do
+  "internal failure" \
+  "panic:" \
+  "fatal error:"; do
   if grep -Fq -- "${marker}" "${log_file}"; then
     not_benign "defect-evidence marker present: ${marker}"
   fi

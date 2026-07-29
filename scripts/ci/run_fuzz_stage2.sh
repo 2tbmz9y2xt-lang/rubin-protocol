@@ -82,37 +82,37 @@ list_json() {
 
 MODE="all"
 TARGET_SPEC=""
-case "${1:-}" in
-  --help|-h)
-    usage
-    exit 0
-    ;;
-  --list-json)
-    if (($# > 1)); then
-      echo "FAIL: --list-json takes no extra arguments" >&2
-      exit 2
-    fi
-    list_json
-    exit 0
-    ;;
-  --target)
-    if (($# != 2)); then
-      echo "FAIL: --target requires exactly one pkg:Target spec" >&2
+# Full-loop mode only on truly empty argv: an empty-string first arg is rejected.
+if (($# > 0)); then
+  case "$1" in
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --list-json)
+      if (($# > 1)); then
+        echo "FAIL: --list-json takes no extra arguments" >&2
+        exit 2
+      fi
+      list_json
+      exit 0
+      ;;
+    --target)
+      if (($# != 2)); then
+        echo "FAIL: --target requires exactly one pkg:Target spec" >&2
+        usage >&2
+        exit 2
+      fi
+      MODE="single"
+      TARGET_SPEC="$2"
+      ;;
+    *)
+      echo "FAIL: unexpected arguments: $*" >&2
       usage >&2
       exit 2
-    fi
-    MODE="single"
-    TARGET_SPEC="$2"
-    ;;
-  "")
-    MODE="all"
-    ;;
-  *)
-    echo "FAIL: unexpected arguments: $*" >&2
-    usage >&2
-    exit 2
-    ;;
-esac
+      ;;
+  esac
+fi
 
 if [[ "${MODE}" == "single" ]]; then
   target_known=0
@@ -128,11 +128,13 @@ if [[ "${MODE}" == "single" ]]; then
   fi
 fi
 
-if [[ ! "${FUZZ_TIME}" =~ ^[0-9]+s$ ]]; then
-  echo "FAIL: FUZZ_TIME must match ^[0-9]+s\$ (got: ${FUZZ_TIME})" >&2
+# {1,6} bounds the value so the +600 arithmetic below can never wrap int64.
+if [[ ! "${FUZZ_TIME}" =~ ^[0-9]{1,6}s$ ]]; then
+  echo "FAIL: FUZZ_TIME must match ^[0-9]{1,6}s\$ (got: ${FUZZ_TIME})" >&2
   exit 2
 fi
-fuzz_seconds="${FUZZ_TIME%s}"
+# 10# forces base-10: zero-padded input (e.g. 08s) is valid per the stated format but would otherwise be parsed as octal.
+fuzz_seconds="$((10#${FUZZ_TIME%s}))"
 # The +600s margin covers baseline-coverage gathering, minimisation
 # (FUZZ_MINIMIZE_TIME), coordinator shutdown, and runner starvation; without an
 # explicit -timeout the default 10m go test timeout would become the binding
@@ -244,7 +246,15 @@ run_one_target() {
   echo "==> running ${target} (${pkg})" | tee -a "${ARTIFACTS_DIR}/summary.log"
   echo "metadata ${target}: ${ARTIFACTS_DIR}/${target}.metadata.env" >> "${ARTIFACTS_DIR}/summary.log"
   if go test -run=^$ -fuzz="${target}" -fuzztime="${FUZZ_TIME}" -fuzzminimizetime="${FUZZ_MINIMIZE_TIME}" -timeout="${GO_TEST_TIMEOUT}" "${pkg}" >"${log_file}" 2>&1; then
-    echo "PASS ${target}" | tee -a "${ARTIFACTS_DIR}/summary.log"
+    # `go test -fuzz=<pattern>` matching no fuzz test exits 0, so a renamed or
+    # deleted target left in TARGETS would otherwise report a silent green
+    # PASS with zero coverage.
+    if grep -Eq -- '^fuzz: elapsed:' "${log_file}"; then
+      echo "PASS ${target}" | tee -a "${ARTIFACTS_DIR}/summary.log"
+    else
+      STATUS=1
+      echo "FAIL ${target} (no fuzzing executed — target missing from package?)" | tee -a "${ARTIFACTS_DIR}/summary.log"
+    fi
   elif "${ROOT_DIR}/scripts/ci/classify_go_fuzz_exit.sh" "${target}" "${fuzz_seconds}" "${log_file}" "${corpus_before}" "${corpus_dir}"; then
     echo "PASS_AFTER_BENIGN_DEADLINE ${target} (upstream fuzztime shutdown race; full budget spent, no defect evidence)" | tee -a "${ARTIFACTS_DIR}/summary.log"
   else

@@ -77,20 +77,22 @@ cat > "${CRASH_LOG}" <<'EOF'
 fuzz: elapsed: 45s, execs: 324315 (13337/sec), new interesting: 15 (total: 17)
 --- FAIL: FuzzX (46.02s)
     context deadline exceeded
-Failing input written to testdata/fuzz/FuzzX/abc
 FAIL
+Failing input written to testdata/fuzz/FuzzX/abc
 exit status 1
 EOF
 run_case crash_with_input 1 \
   FuzzX 45 "${CRASH_LOG}" "${EMPTY_LIST}" "${WORKDIR}/no-such-corpus"
 
-# Case 3: a hung/terminated worker is abnormal termination (conjunct 3).
+# Case 3: a hung/terminated worker is abnormal termination — rejected by its
+# marker (conjunct 3) even when the FAIL block itself is benign-shaped.
 HUNG_LOG="${WORKDIR}/hung.log"
 cat > "${HUNG_LOG}" <<'EOF'
 fuzz: elapsed: 3s, execs: 18013 (6004/sec), new interesting: 3 (total: 5)
 --- FAIL: FuzzX (52.00s)
-    fuzzing process hung or terminated unexpectedly: exit status 2
+    context deadline exceeded
 FAIL
+fuzzing process hung or terminated unexpectedly: exit status 2
 exit status 1
 EOF
 run_case hung_or_terminated 1 \
@@ -124,6 +126,45 @@ run_case duration_below_budget 1 \
 # Case 7: malformed fuzztime argument fails closed with the usage code.
 run_case malformed_fuzztime 2 \
   FuzzDAChunkHashVerify 45s "${BENIGN_LOG}" "${EMPTY_LIST}" "${EMPTY_CORPUS_DIR}"
+
+# Case 8: a diagnostic between the deadline and the package "FAIL" verdict.
+cat > "${WORKDIR}/trailing.log" <<'EOF'
+--- FAIL: FuzzX (46.02s)
+    context deadline exceeded
+    cleanup: assertion failed
+EOF
+run_case trailing_diagnostic_after_deadline 1 \
+  FuzzX 45 "${WORKDIR}/trailing.log" "${EMPTY_LIST}" "${WORKDIR}/no-such-corpus"
+
+# Case 9: a panic after an otherwise benign-shaped block (conjunct 3).
+cat > "${WORKDIR}/panic.log" <<'EOF'
+--- FAIL: FuzzX (46.02s)
+    context deadline exceeded
+FAIL
+panic: runtime error: index out of range
+EOF
+run_case panic_after_benign_block 1 \
+  FuzzX 45 "${WORKDIR}/panic.log" "${EMPTY_LIST}" "${WORKDIR}/no-such-corpus"
+
+# Case 10: a second FAIL block for another target elsewhere in the log.
+cat > "${WORKDIR}/second.log" <<'EOF'
+--- FAIL: FuzzX (46.02s)
+    context deadline exceeded
+FAIL
+--- FAIL: FuzzY (1.00s)
+EOF
+run_case second_fail_block 1 \
+  FuzzX 45 "${WORKDIR}/second.log" "${EMPTY_LIST}" "${WORKDIR}/no-such-corpus"
+
+# Case 11: a Go runtime abort after an otherwise benign-shaped block.
+cat > "${WORKDIR}/fatal.log" <<'EOF'
+--- FAIL: FuzzX (46.02s)
+    context deadline exceeded
+FAIL
+fatal error: concurrent map writes
+EOF
+run_case fatal_error_after_verdict 1 \
+  FuzzX 45 "${WORKDIR}/fatal.log" "${EMPTY_LIST}" "${WORKDIR}/no-such-corpus"
 
 echo "classifier corpus: ${PASS_COUNT}/${TOTAL} PASS"
 if [[ "${FAILED}" -ne 0 ]]; then

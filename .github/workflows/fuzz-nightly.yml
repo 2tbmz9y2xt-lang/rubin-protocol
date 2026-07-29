@@ -54,7 +54,10 @@ jobs:
   fuzz-stage2:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Must exceed GO_TEST_TIMEOUT at the documented fuzz_time=600s example
+    # (1200s) plus checkout/setup-go/instrumented-build, so a hung target dies
+    # by go test's own -timeout (writing the panic dump), never by the job cap.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -88,10 +91,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: fuzz-stage2-${{ github.run_id }}-${{ env.FUZZ_TARGET_NAME }}
+          # -a<attempt>: v4+ artifacts are immutable, so a re-run of a failed
+          # leg would otherwise collide with attempt 1's upload.
+          name: fuzz-stage2-${{ github.run_id }}-${{ env.FUZZ_TARGET_NAME }}-a${{ github.run_attempt }}
           path: |
             .artifacts/fuzz-stage2/**
             clients/go/consensus/testdata/fuzz/**
+            clients/go/node/testdata/fuzz/**
+            clients/go/node/p2p/testdata/fuzz/**
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
@@ -99,7 +106,10 @@ jobs:
   fuzz-rust:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Sized for the documented dispatch example rust_fuzz_time=600: a 5-target
+    # chunk = 50 min fuzzing + uncached nightly-toolchain/cargo-fuzz/fuzz-crate
+    # build overhead.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -185,7 +195,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: fuzz-rust-${{ github.run_id }}-c${{ strategy.job-index }}
+          name: fuzz-rust-${{ github.run_id }}-c${{ strategy.job-index }}-a${{ github.run_attempt }}
           path: |
             .artifacts/fuzz-rust/**
             clients/rust/fuzz/artifacts/
@@ -206,12 +216,11 @@ jobs:
           RUST_RESULT: ${{ needs.fuzz-rust.result }}
         run: |
           echo "verdict: go-matrix=${GO_RESULT} rust-matrix=${RUST_RESULT}"
+          # Fail closed: anything but exact "success" (failure/cancelled/skipped/empty).
           for result in "$GO_RESULT" "$RUST_RESULT"; do
-            case "$result" in
-              failure|cancelled)
-                echo "FAIL: a nightly fuzz matrix ended with result: $result" >&2
-                exit 1
-                ;;
-            esac
+            if [[ "$result" != "success" ]]; then
+              echo "FAIL: a nightly fuzz matrix ended with result: ${result:-empty}" >&2
+              exit 1
+            fi
           done
-          echo "PASS: both nightly fuzz matrices completed without defect evidence"
+          echo "PASS: both nightly fuzz matrices succeeded"
