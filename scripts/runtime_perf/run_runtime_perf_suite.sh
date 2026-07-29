@@ -68,7 +68,11 @@ do
 done
 
 set +e
-(cd clients/rust && cargo bench -p rubin-node --bench runtime_baseline -- --noplot --sample-size 10 --measurement-time 1)
+(
+  cd clients/rust
+  cargo clean -p rubin-node -p rubin-consensus -p rubin-consensus-cli
+  cargo bench -p rubin-node --bench runtime_baseline -- --noplot --sample-size 10 --measurement-time 1
+)
 rust_status=$?
 set -e
 if [[ $rust_status -eq 0 ]]; then
