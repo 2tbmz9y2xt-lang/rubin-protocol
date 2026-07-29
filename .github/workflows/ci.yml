@@ -331,17 +331,33 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Cache Rust cargo registry & build
+      - name: Resolve Rust cache identity
+        id: rust_cache_identity
+        run: |
+          release="$(rustc --version --verbose | sed -n 's/^release: //p')"
+          if [[ ! "$release" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "invalid rustc release: ${release:-<empty>}" >&2
+            exit 1
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
+          key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml', 'clients/rust/crates/**/Cargo.toml') }}
+
+      - name: Cache Rust test target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+        with:
+          path: |
             clients/rust/target
-          key: rust-${{ runner.os }}-${{ hashFiles('clients/rust/Cargo.lock') }}
+          key: rust-test-v2-${{ runner.os }}-${{ steps.rust_cache_identity.outputs.release }}-${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml', 'clients/rust/crates/**/Cargo.toml', 'scripts/crypto/openssl/source-checksums.sha256') }}-${{ hashFiles('clients/rust/**/*.rs') }}
           restore-keys: |
-            rust-${{ runner.os }}-
+            rust-test-v2-${{ runner.os }}-${{ steps.rust_cache_identity.outputs.release }}-${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml', 'clients/rust/crates/**/Cargo.toml', 'scripts/crypto/openssl/source-checksums.sha256') }}-
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:

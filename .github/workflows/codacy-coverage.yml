@@ -68,16 +68,33 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
-      - name: Cache Rust deps (coverage)
+      - name: Resolve Rust cache identity
+        id: rust_cache_identity
+        run: |
+          release="$(rustc --version --verbose | sed -n 's/^release: //p')"
+          if [[ ! "$release" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "invalid rustc release: ${release:-<empty>}" >&2
+            exit 1
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml', 'clients/rust/crates/**/Cargo.toml') }}
+
+      - name: Cache Rust coverage target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+        with:
+          path: |
             clients/rust/target
-          key: rust-coverage-${{ runner.os }}-${{ hashFiles('clients/rust/Cargo.lock') }}
+          key: rust-coverage-v2-${{ runner.os }}-${{ steps.rust_cache_identity.outputs.release }}-${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml', 'clients/rust/crates/**/Cargo.toml', 'scripts/crypto/openssl/source-checksums.sha256') }}-${{ hashFiles('clients/rust/**/*.rs') }}
           restore-keys: |
-            rust-coverage-${{ runner.os }}-
+            rust-coverage-v2-${{ runner.os }}-${{ steps.rust_cache_identity.outputs.release }}-${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml', 'clients/rust/crates/**/Cargo.toml', 'scripts/crypto/openssl/source-checksums.sha256') }}-
 
       - name: Cache cargo-tarpaulin
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
