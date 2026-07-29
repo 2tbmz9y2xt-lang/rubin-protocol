@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -12,34 +13,61 @@ import (
 
 const testReadBound = 8
 
-// TestSafeIOClassBoundConstantsPinFrozenValues pins the six frozen
+// TestSafeIOClassBoundConstantsPinFrozenValues pins the four frozen
 // cross-client bound values; a red row means the cross-client contract
 // number drifted, not a local tuning knob. De-scaled stand-in for the
-// removed at-production-bound rows of the undo/index/chainstate/verify
-// classes (RUB-1057 wave 2): those callers share the bounded readers at
-// these hard-wired constants, and their at/over verdicts run at small
-// injectable bounds in this file.
+// removed at-production-bound rows of the undo and verify classes: those
+// callers share the bounded readers at these hard-wired constants, and their
+// at/over verdicts run at small injectable bounds in this file. The
+// chainstate snapshot and index marker are deliberately absent — they grow
+// with accumulated state, admit no fixed ceiling, and are owned by RUB-1062.
 func TestSafeIOClassBoundConstantsPinFrozenValues(t *testing.T) {
 	if blockFileMaxBytes != 72_000_000 || headerFileMaxBytes != 116 ||
-		undoFileMaxBytes != 2_000_000_000 || indexFileMaxBytes != 256_000_000 ||
-		chainStateFileMaxBytes != 1_000_000_000 || storeVerifyReadMaxBytes != undoFileMaxBytes {
+		undoFileMaxBytes != 2_000_000_000 || storeVerifyReadMaxBytes != undoFileMaxBytes {
 		t.Fatalf("class bound constants drifted from the frozen cross-client table")
 	}
 }
 
 // TestSafeIOStoreSaveBoundRefusesOverBound pins the write/read symmetry
-// guard for the guarded classes (undo + both growth classes) with small
-// synthetic numbers: at bound the save proceeds, one byte over refuses with
-// the typed class error and a clearly save-side message.
+// guard for the undo class (the one guarded write path — block and header
+// sizes are already fixed by the wire format) with small synthetic numbers:
+// at bound the save proceeds, one byte over refuses with the typed class
+// error and a clearly save-side message.
 func TestSafeIOStoreSaveBoundRefusesOverBound(t *testing.T) {
-	for _, class := range []string{"undo", "chainstate", "index_marker"} {
-		if err := checkStoreSaveBound(class, testReadBound, testReadBound); err != nil {
-			t.Fatalf("%s at bound: %v", class, err)
+	if err := checkStoreSaveBound("undo", testReadBound, testReadBound); err != nil {
+		t.Fatalf("undo at bound: %v", err)
+	}
+	err := checkStoreSaveBound("undo", testReadBound+1, testReadBound)
+	if !errors.Is(err, errStoreFileTooLarge) || !strings.Contains(err.Error(), "refusing to save") {
+		t.Fatalf("undo over bound: want save-side errStoreFileTooLarge, got %v", err)
+	}
+}
+
+// TestReadFileBoundDerivationEntrySizes pins the measured per-entry JSON
+// byte cost cited by the undo bound derivation in safeio.go, encoding the
+// real disk structs exactly as production does (json.MarshalIndent with
+// two-space indent). The want is the marginal cost of one additional spent
+// entry in its worst spendable shape. A red row means a disk-struct change
+// silently shifted the derivation margin: reconcile the safeio.go comment
+// and the Rust mirror bound table before re-pinning.
+func TestReadFileBoundDerivationEntrySizes(t *testing.T) {
+	hex64 := strings.Repeat("ab", 32)
+	// CORE_VAULT max covenant_data: 32+1+1+12*32+2+1024*32 = 33_188 raw bytes.
+	spent := spentUndoDisk{
+		Txid: hex64, Vout: ^uint32(0), Value: ^uint64(0),
+		CovenantType: 0x0101, CovenantData: strings.Repeat("cd", 33188),
+		CreationHeight: ^uint64(0),
+	}
+	enc := func(spent []spentUndoDisk) int {
+		raw, err := json.MarshalIndent(
+			blockUndoDisk{Txs: []txUndoDisk{{Spent: spent}}}, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
 		}
-		err := checkStoreSaveBound(class, testReadBound+1, testReadBound)
-		if !errors.Is(err, errStoreFileTooLarge) || !strings.Contains(err.Error(), "refusing to save") {
-			t.Fatalf("%s over bound: want save-side errStoreFileTooLarge, got %v", class, err)
-		}
+		return len(raw)
+	}
+	if got := enc([]spentUndoDisk{spent, spent}) - enc([]spentUndoDisk{spent}); got != 66707 {
+		t.Fatalf("marginal per-entry bytes = %d, want 66707", got)
 	}
 }
 

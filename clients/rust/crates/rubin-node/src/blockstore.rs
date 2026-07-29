@@ -8,9 +8,9 @@ use rubin_consensus::{
 use serde::{Deserialize, Serialize};
 
 use crate::io_utils::{
-    parse_hex32, read_file_by_path, read_file_from_dir, write_file_atomic, write_file_exclusive,
-    AtomicWriteError, BLOCK_FILE_MAX_BYTES, HEADER_FILE_MAX_BYTES, INDEX_FILE_MAX_BYTES,
-    STORE_VERIFY_READ_MAX_BYTES, UNDO_FILE_MAX_BYTES,
+    parse_hex32, read_file_by_path, read_file_from_dir, read_file_from_dir_unbounded,
+    write_file_atomic, write_file_exclusive, AtomicWriteError, BLOCK_FILE_MAX_BYTES,
+    HEADER_FILE_MAX_BYTES, STORE_VERIFY_READ_MAX_BYTES, UNDO_FILE_MAX_BYTES,
 };
 use crate::undo::{marshal_block_undo, unmarshal_block_undo, BlockUndo};
 use std::ffi::OsStr;
@@ -899,9 +899,8 @@ fn load_blockstore_index(path: &Path) -> Result<BlockStoreIndexDisk, String> {
             ));
         }
     };
-    // A missing marker is an error, never an implicit empty index. The read
-    // is bounded by the index class (RUB-1057) before any allocation.
-    let raw = read_file_from_dir(parent, name, INDEX_FILE_MAX_BYTES)
+    // A missing marker is an error, never an implicit empty index.
+    let raw = read_file_from_dir_unbounded(parent, name)
         .map_err(|e| format!("read blockstore index {}: {e}", path.display()))?;
     // `deny_unknown_fields` plus serde's duplicate/missing-field errors,
     // `from_slice`'s trailing-input rejection and the entry check below pin the
@@ -950,13 +949,6 @@ fn save_blockstore_index_serializable<S: serde::Serialize + ?Sized>(
     let mut raw =
         serde_json::to_vec_pretty(index).map_err(|e| format!("encode blockstore index: {e}"))?;
     raw.push(b'\n');
-    // RUB-1057 write/read symmetry: never persist a marker the bounded
-    // loader would refuse on the next open.
-    crate::io_utils::check_store_save_bound(
-        &path.display().to_string(),
-        raw.len(),
-        INDEX_FILE_MAX_BYTES,
-    )?;
     // Keep writer on raw `write_file_atomic` (no `lexical_clean`)
     // so the index file persists to the same physical directory
     // that block / header / undo writers use and that
@@ -1145,8 +1137,7 @@ mod tests {
 
     use super::{
         block_store_path, read_file_by_path, write_file_if_absent, write_file_if_absent_with,
-        BlockStore, BlockStoreIndexDisk, BLOCK_FILE_MAX_BYTES, BLOCK_STORE_DIR_NAME,
-        HEADER_FILE_MAX_BYTES,
+        BlockStore, BLOCK_FILE_MAX_BYTES, BLOCK_STORE_DIR_NAME, HEADER_FILE_MAX_BYTES,
     };
 
     /// RUB-1057: bound+1 refusal at the two caller paths whose production
@@ -1245,22 +1236,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Index marker per-entry derivation pin: one canonical entry costs
-    /// exactly 72 bytes on the production pretty encoding (Go twin row
-    /// `index_marker_entry` in `TestReadFileBoundDerivationEntrySizes`).
+    /// Pins the measured per-entry JSON byte cost cited by the undo bound
+    /// derivation (io_utils.rs), measured through the production encoder
+    /// (`marshal_block_undo`; its trailing newline cancels in the diff). A red
+    /// row means a disk-struct change silently shifted the derivation margin:
+    /// reconcile the io_utils.rs comment and the Go bound table before
+    /// re-pinning. Go twin: `TestReadFileBoundDerivationEntrySizes`.
     #[test]
-    fn index_marker_entry_derivation_size() {
-        let enc = |canonical: Vec<String>| -> i64 {
-            let disk = BlockStoreIndexDisk {
-                version: 1,
-                canonical,
-            };
-            serde_json::to_string_pretty(&disk).expect("json").len() as i64
+    fn undo_entry_derivation_size() {
+        use crate::undo::{marshal_block_undo, BlockUndo, SpentUndo, TxUndo};
+        use rubin_consensus::{Outpoint, UtxoEntry};
+        // CORE_VAULT max covenant_data: 32+1+1+12*32+2+1024*32 = 33_188 bytes.
+        let spent = SpentUndo {
+            outpoint: Outpoint {
+                txid: [0xab; 32],
+                vout: u32::MAX,
+            },
+            entry: UtxoEntry {
+                value: u64::MAX,
+                covenant_type: 0x0101,
+                covenant_data: vec![0xcd; 33_188],
+                creation_height: u64::MAX,
+                created_by_coinbase: false,
+            },
         };
-        let hex64 = "ab".repeat(32);
+        let undo_len = |spent: Vec<SpentUndo>| -> i64 {
+            let undo = BlockUndo {
+                block_height: 0,
+                previous_already_generated: 0,
+                txs: vec![TxUndo { spent }],
+            };
+            marshal_block_undo(&undo).expect("marshal").len() as i64
+        };
         assert_eq!(
-            enc(vec![hex64.clone(), hex64.clone()]) - enc(vec![hex64]),
-            72
+            undo_len(vec![spent.clone(), spent.clone()]) - undo_len(vec![spent]),
+            66_707
         );
     }
 

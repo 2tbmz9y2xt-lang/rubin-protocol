@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use rubin_consensus::{
@@ -12,10 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
 use crate::genesis::validate_incoming_chain_id;
-use crate::io_utils::{
-    check_store_save_bound, parse_hex32, read_file_by_path, write_file_atomic,
-    CHAIN_STATE_FILE_MAX_BYTES,
-};
+use crate::io_utils::{parse_hex32, write_file_atomic};
 
 pub const CHAIN_STATE_FILE_NAME: &str = "chainstate.json";
 const CHAIN_STATE_DISK_VERSION: u32 = 1;
@@ -105,13 +103,6 @@ impl ChainState {
         let mut raw =
             serde_json::to_vec_pretty(&disk).map_err(|e| format!("encode chainstate: {e}"))?;
         raw.push(b'\n');
-        // RUB-1057 write/read symmetry: never persist a snapshot the bounded
-        // loader would refuse on the next startup.
-        check_store_save_bound(
-            &path.display().to_string(),
-            raw.len(),
-            CHAIN_STATE_FILE_MAX_BYTES,
-        )?;
         // Parent creation is delegated to `write_file_atomic`, which
         // runs `fs::create_dir_all(effective_parent(path))` on the
         // actual write target. `effective_parent` maps a bare-filename
@@ -124,7 +115,7 @@ impl ChainState {
         // helper's own `effective_parent` is the correct layer.
         //
         // Raw `write_file_atomic`. Paired with `load_chain_state`'s
-        // bounded read — both use the caller-supplied path
+        // raw `fs::read` — both use the caller-supplied path
         // directly, with no per-helper `lexical_clean` step.
         //
         // For the node binary, `path` originates from
@@ -322,16 +313,9 @@ pub fn chain_state_path<P: AsRef<Path>>(data_dir: P) -> PathBuf {
 
 pub fn load_chain_state<P: AsRef<Path>>(path: P) -> Result<ChainState, String> {
     let path = path.as_ref();
-    // Bounded read (RUB-1057): route the caller-supplied path through
-    // `read_file_by_path`, which enforces the shared chainstate-snapshot
-    // class bound BEFORE allocating the contents and applies the same
-    // leaf-name guard as the blockstore readers (the node's leaf is the
-    // constant `chainstate.json`, so verdicts for every legitimate path
-    // are unchanged). An absent file still yields a fresh state via the
-    // NotFound-only arm below; an over-bound file is the typed local
-    // size error — never a fresh-state fallback. Mirrors the Go
-    // `LoadChainState` -> `readFileByPath` in
-    // `clients/go/node/chainstate_io.go`.
+    // Raw `fs::read` on a caller-supplied path. Mirrors the Go
+    // `LoadChainState` reader in `clients/go/node/chainstate.go`,
+    // which also uses a caller-supplied path directly.
     //
     // For the node binary's own call site, `path` originates from
     // `chain_state_path(cfg.data_dir)` after `cfg.data_dir` was
@@ -342,7 +326,7 @@ pub fn load_chain_state<P: AsRef<Path>>(path: P) -> Result<ChainState, String> {
     // symlink+`..` segments. Other callers of this public function
     // are responsible for their own path hygiene — this helper does
     // NOT canonicalise or sandbox its input.
-    let raw = match read_file_by_path(path, CHAIN_STATE_FILE_MAX_BYTES) {
+    let raw = match fs::read(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ChainState::new()),
         Err(e) => return Err(format!("read chainstate {}: {e}", path.display())),
@@ -484,11 +468,10 @@ mod tests {
     use crate::coinbase::{build_coinbase_tx, default_mine_address};
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::io_utils::unique_temp_path;
-    use crate::undo::{marshal_block_undo, BlockUndo, SpentUndo, TxUndo};
 
     use super::{
         chain_state_path, copy_utxo_entry, copy_utxo_set, load_chain_state, ChainState,
-        ChainStateDisk, UtxoDiskEntry, CHAIN_STATE_FILE_NAME,
+        ChainStateDisk, CHAIN_STATE_FILE_NAME,
     };
     use rubin_consensus::constants::POW_LIMIT;
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
@@ -840,91 +823,6 @@ mod tests {
         assert!(err.contains("unsupported chainstate version"));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    /// An absent snapshot yields a fresh state (the NotFound-only arm of
-    /// `load_chain_state`'s bounded read). The over-bound refusal for this
-    /// class runs at small injectable bounds in io_utils.rs with the
-    /// production constant pinned by `class_bound_constants_pin_frozen_values`
-    /// and enforced symmetrically at save time by `check_store_save_bound`
-    /// (RUB-1057 wave-2 de-scaling: the 1GB sparse row is gone).
-    #[test]
-    fn load_chain_state_absent_yields_fresh_state() {
-        let dir = unique_temp_path("rubin-chainstate-bound");
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let path = chain_state_path(&dir);
-        assert_eq!(
-            load_chain_state(&path).expect("absent -> fresh"),
-            ChainState::new()
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Pins the measured per-entry JSON byte costs cited by the RUB-1057
-    /// bound derivations (io_utils.rs const block), on the real disk
-    /// structs via the production pretty encoding (serde_json 2-space
-    /// indent — same figures as Go `json.MarshalIndent`; Go twin:
-    /// `TestReadFileBoundDerivationEntrySizes`). A red row means a
-    /// disk-struct change silently shifted the derivation margins:
-    /// reconcile the io_utils.rs comments and the Go bound table before
-    /// re-pinning.
-    #[test]
-    fn read_file_bound_derivation_entry_sizes() {
-        fn enc<T: serde::Serialize>(v: &T) -> i64 {
-            serde_json::to_string_pretty(v).expect("json").len() as i64
-        }
-        let hex64 = "ab".repeat(32);
-        // CORE_VAULT max covenant_data: 32+1+1+12*32+2+1024*32 = 33_188 raw bytes.
-        let utxo = |cov_hex_bytes: usize, covenant_type: u16| UtxoDiskEntry {
-            txid: hex64.clone(),
-            vout: u32::MAX,
-            value: u64::MAX,
-            covenant_type,
-            covenant_data: "cd".repeat(cov_hex_bytes),
-            creation_height: u64::MAX,
-            created_by_coinbase: false,
-        };
-        let state = |utxos: Vec<UtxoDiskEntry>| ChainStateDisk {
-            version: 0,
-            has_tip: false,
-            height: 0,
-            tip_hash: String::new(),
-            already_generated: 0,
-            utxos,
-        };
-        let worst = utxo(33_188, 0x0101);
-        let p2pk = utxo(33, 0x0000);
-        let one = enc(&state(vec![worst.clone()]));
-        assert_eq!(enc(&state(vec![worst.clone(), worst])) - one, 66_671);
-        let one = enc(&state(vec![p2pk.clone()]));
-        assert_eq!(enc(&state(vec![p2pk.clone(), p2pk])) - one, 359);
-        // Undo worst spent entry, measured through the production encoder
-        // (`marshal_block_undo`; its trailing newline cancels in the diff).
-        let spent = SpentUndo {
-            outpoint: Outpoint {
-                txid: [0xab; 32],
-                vout: u32::MAX,
-            },
-            entry: UtxoEntry {
-                value: u64::MAX,
-                covenant_type: 0x0101,
-                covenant_data: vec![0xcd; 33_188],
-                creation_height: u64::MAX,
-                created_by_coinbase: false,
-            },
-        };
-        let undo_len = |spent: Vec<SpentUndo>| -> i64 {
-            let undo = BlockUndo {
-                block_height: 0,
-                previous_already_generated: 0,
-                txs: vec![TxUndo { spent }],
-            };
-            marshal_block_undo(&undo).expect("marshal").len() as i64
-        };
-        assert_eq!(
-            undo_len(vec![spent.clone(), spent.clone()]) - undo_len(vec![spent]),
-            66_707
-        );
     }
 
     #[test]

@@ -693,7 +693,9 @@ func TestWriteFileIfAbsentEEXISTVerifyReadFileBound(t *testing.T) {
 	}
 	prev := readFileByPathFn
 	t.Cleanup(func() { readFileByPathFn = prev })
-	stubBound := func(path string, _ int64) ([]byte, error) { return readFileByPath(path, testReadBound) }
+	stubBound := func(path string, _ int64) ([]byte, error) {
+		return readFileByPathCapped(path, testReadBound)
+	}
 	readFileByPathFn = stubBound
 	if err := writeFileIfAbsent(dst, []byte("x")); !errors.Is(err, errStoreFileTooLarge) {
 		t.Fatalf("fast-path verify read: want errStoreFileTooLarge, got %v", err)

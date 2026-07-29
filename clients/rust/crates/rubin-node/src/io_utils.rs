@@ -4,12 +4,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // Per-class local store read bounds (RUB-1057), enforced BEFORE the file's
-// contents are allocated. The numbers are a cross-client contract mirrored
-// byte-for-byte from Go `clients/go/node/safeio.go`; derivations, growth
-// models, and margins must not drift from the Go copy. Measured per-entry
-// figures are pinned by `read_file_bound_derivation_entry_sizes`
-// (chainstate.rs) and `index_marker_entry_derivation_size` (blockstore.rs),
-// twins of Go's `TestReadFileBoundDerivationEntrySizes`.
+// contents are allocated. Every class here holds exactly one wire item whose
+// size a consensus rule already caps, so the bound is derived rather than
+// invented. Artifacts that grow with chain length or UTXO-set size (the
+// chainstate snapshot, the canonical index marker) admit no such ceiling and
+// are deliberately NOT bounded here — they are owned by RUB-1062. The numbers
+// are a cross-client contract mirrored byte-for-byte from Go
+// `clients/go/node/safeio.go`; derivations and margins must not drift from the
+// Go copy. The measured per-entry figure is pinned by
+// `undo_entry_derivation_size` (blockstore.rs), twin of Go's
+// `TestReadFileBoundDerivationEntrySizes`.
 //
 // - Block blobs hold exactly one wire block, capped by the P2P layer at
 //   MAX_BLOCK_BYTES. Growth: none per file (fixed constant).
@@ -23,31 +27,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 //   33_188B, hex-doubled) -> 15_424*66_707 ~= 1.029GB. 2_000_000_000 covers
 //   that with ~1.94x margin (~3x vs the proven pubkey+sig floor of ~661MB)
 //   and stays below 2^31 so the size never narrows unsafely on any build.
-//   Growth: per block, not cumulative.
-// - Index marker (index.json): one canonical entry costs exactly 72B
-//   (measured: `    "<64 hex>",` + newline). TARGET_BLOCK_INTERVAL=120s ->
-//   ~262_800 blocks/year -> ~18.9MB/year. 256_000_000 admits ~13.5 years of
-//   continuous chain, over an order of magnitude beyond a realistic
-//   devnet/testnet deployment. Growth: linear in chain length. Go's RUB-1053
-//   strict-open re-buffers each top-level marker value through
-//   json.RawMessage before decoding, so an in-bound marker transiently costs
-//   up to ~3x its on-disk size there (raw + RawMessage copy + decoded
-//   strings); Rust decodes the raw buffer in one serde pass (~2x). The
-//   on-disk bound is unchanged and shared. Enforced on BOTH ends
-//   (check_store_save_bound in save_blockstore_index, the bounded read in
-//   load_blockstore_index), so ordinary chain growth surfaces as a loud
-//   save-time error instead of a next-open refusal of the node's own marker.
-// - Chainstate snapshot: one `UtxoDiskEntry` costs 359B in a digit-width-
-//   conservative P2PK shape (max-width numeric fields; real entries are
-//   smaller, so admitted counts are a floor) and 66_671B in the worst
-//   spendable shape (CORE_VAULT max covenant_data 33_188B, measured).
-//   1_000_000_000 admits >=2.8M P2PK-shaped or ~15K worst-shape UTXOs; a
-//   realistic devnet/testnet population (low hundreds of thousands,
-//   overwhelmingly P2PK/HTLC-shaped) fits with >=10x margin. Growth: linear
-//   in UTXO count. Enforced on BOTH ends (check_store_save_bound in
-//   ChainState::save, read_file_by_path in load_chain_state), so ordinary
-//   UTXO growth surfaces as a loud save-time error instead of a
-//   next-startup refusal of the node's own snapshot.
+//   Growth: per block, not cumulative. Decoding an undo file costs roughly
+//   twice the admitted on-disk bytes in peak resident memory (raw buffer plus
+//   decoded structs), so this bound governs the FILE, not the decode
+//   footprint. Enforced on both ends (check_store_save_bound in put_undo, the
+//   bounded read in get_undo).
 // - STORE_VERIFY_READ_MAX_BYTES bounds the write-if-absent existing-
 //   destination verify reads (blockstore.rs `write_file_if_absent`), one
 //   seam serving block, header, and undo destinations: the coarsest class
@@ -55,8 +39,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) const BLOCK_FILE_MAX_BYTES: u64 = rubin_consensus::constants::MAX_BLOCK_BYTES;
 pub(crate) const HEADER_FILE_MAX_BYTES: u64 = rubin_consensus::BLOCK_HEADER_BYTES as u64;
 pub(crate) const UNDO_FILE_MAX_BYTES: u64 = 2_000_000_000;
-pub(crate) const INDEX_FILE_MAX_BYTES: u64 = 256_000_000;
-pub(crate) const CHAIN_STATE_FILE_MAX_BYTES: u64 = 1_000_000_000;
 pub(crate) const STORE_VERIFY_READ_MAX_BYTES: u64 = UNDO_FILE_MAX_BYTES;
 
 /// Stable message prefix of the typed over-bound refusal; tests match on
@@ -76,11 +58,12 @@ fn file_too_large_error(name: &str, observed: u64, max_bytes: u64) -> std::io::E
     )
 }
 
-/// Write/read symmetry guard for the growth classes (chainstate snapshot,
-/// index marker): the node must never persist a file it would refuse to load
-/// back. Same class as the read-side refusal (shared prefix, never an
-/// absent-file class); the message is clearly save-side. Go twin:
-/// `checkStoreSaveBound` in `clients/go/node/safeio.go`.
+/// Write/read symmetry guard for the undo class: the node must never persist
+/// an undo file it would refuse to load back. Same class as the read-side
+/// refusal (shared prefix, never an absent-file class); the message is
+/// clearly save-side. Block and header writes need no guard — the wire format
+/// already fixes their size. Go twin: `checkStoreSaveBound` in
+/// `clients/go/node/safeio.go`.
 pub(crate) fn check_store_save_bound(name: &str, len: usize, max_bytes: u64) -> Result<(), String> {
     if len as u64 > max_bytes {
         return Err(format!(
@@ -206,10 +189,25 @@ pub fn read_file_from_dir(
     read_capped(f, name, stat_size, max_bytes)
 }
 
+/// Reads `dir/name` in full with only the leaf-name guard. Its sole caller is
+/// the block store index marker loader: that artifact grows with chain length
+/// and admits no fixed ceiling a consensus-valid chain cannot reach, so
+/// RUB-1057 deliberately leaves it UNBOUNDED — RUB-1062 owns it. Go twin:
+/// `readFileByPath` in `clients/go/node/safeio.go`.
+pub(crate) fn read_file_from_dir_unbounded(
+    dir: &Path,
+    name: &str,
+) -> Result<Vec<u8>, std::io::Error> {
+    if let Err(msg) = check_safe_file_name(name) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg));
+    }
+    fs::read(dir.join(name))
+}
+
 /// Bounded read of `path` routed through `read_file_from_dir` by splitting
 /// it into parent dir + leaf, so the leaf-name guard applies too (the
-/// legitimate leaves on these paths are hex-hash names and the chainstate
-/// file constant, so verdicts are unchanged). Go twin: `readFileByPath`.
+/// legitimate leaves on this path are hex-hash names, so verdicts are
+/// unchanged). Go twin: `readFileByPathCapped`.
 pub(crate) fn read_file_by_path(path: &Path, max_bytes: u64) -> Result<Vec<u8>, std::io::Error> {
     let dir = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
@@ -612,8 +610,7 @@ pub fn normalize_data_dir(path: &Path) -> Result<PathBuf, String> {
 // used to sit here; CLI-level `normalize_data_dir` replaced that per-site
 // cleaning strategy and they were removed. RUB-1057 reintroduced
 // `read_file_by_path` above as a BOUNDED dir+leaf split reader (no
-// `lexical_clean`), used by `chainstate::load_chain_state` and the blockstore
-// write-if-absent verify seam.
+// `lexical_clean`), used by the blockstore write-if-absent verify seam.
 
 pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
     let bytes = hex::decode(value).map_err(|e| format!("{name}: {e}"))?;
@@ -1102,44 +1099,42 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Pins the six frozen cross-client bound values; a red row means the
+    /// Pins the four frozen cross-client bound values; a red row means the
     /// cross-client contract number drifted, not a local tuning knob.
     /// De-scaled stand-in for the removed at-production-bound rows of the
-    /// undo/index/chainstate/verify classes (RUB-1057 wave 2): those callers
-    /// share the bounded readers at these hard-wired constants, and their
-    /// at/over verdicts run at small injectable bounds in this module. Go
-    /// twin: `TestSafeIOClassBoundConstantsPinFrozenValues`.
+    /// undo and verify classes: those callers share the bounded readers at
+    /// these hard-wired constants, and their at/over verdicts run at small
+    /// injectable bounds in this module. The chainstate snapshot and index
+    /// marker are deliberately absent — they grow with accumulated state,
+    /// admit no fixed ceiling, and are owned by RUB-1062. Go twin:
+    /// `TestSafeIOClassBoundConstantsPinFrozenValues`.
     #[test]
     fn class_bound_constants_pin_frozen_values() {
         assert_eq!(BLOCK_FILE_MAX_BYTES, 72_000_000);
         assert_eq!(super::HEADER_FILE_MAX_BYTES, 116);
         assert_eq!(super::UNDO_FILE_MAX_BYTES, 2_000_000_000);
-        assert_eq!(super::INDEX_FILE_MAX_BYTES, 256_000_000);
-        assert_eq!(super::CHAIN_STATE_FILE_MAX_BYTES, 1_000_000_000);
         assert_eq!(
             super::STORE_VERIFY_READ_MAX_BYTES,
             super::UNDO_FILE_MAX_BYTES
         );
     }
 
-    /// Write/read symmetry guard rows for the guarded classes (undo + both
-    /// growth classes) with small synthetic numbers: at bound the save
-    /// proceeds, one byte over refuses with the shared class prefix and a
-    /// clearly save-side message. Go twin:
-    /// `TestSafeIOStoreSaveBoundRefusesOverBound`.
+    /// Write/read symmetry guard row for the undo class (the one guarded
+    /// write path — block and header sizes are already fixed by the wire
+    /// format) with small synthetic numbers: at bound the save proceeds, one
+    /// byte over refuses with the shared class prefix and a clearly save-side
+    /// message. Go twin: `TestSafeIOStoreSaveBoundRefusesOverBound`.
     #[test]
     fn check_store_save_bound_refuses_over_bound() {
-        for class in ["undo", "chainstate", "index_marker"] {
-            super::check_store_save_bound(class, TEST_READ_BOUND as usize, TEST_READ_BOUND)
-                .expect("at bound");
-            let err =
-                super::check_store_save_bound(class, TEST_READ_BOUND as usize + 1, TEST_READ_BOUND)
-                    .unwrap_err();
-            assert!(
-                err.starts_with("refusing to save") && err.contains(STORE_FILE_TOO_LARGE_PREFIX),
-                "{class}: {err}"
-            );
-        }
+        super::check_store_save_bound("undo", TEST_READ_BOUND as usize, TEST_READ_BOUND)
+            .expect("at bound");
+        let err =
+            super::check_store_save_bound("undo", TEST_READ_BOUND as usize + 1, TEST_READ_BOUND)
+                .unwrap_err();
+        assert!(
+            err.starts_with("refusing to save") && err.contains(STORE_FILE_TOO_LARGE_PREFIX),
+            "{err}"
+        );
     }
 
     struct CountingReader {

@@ -17,7 +17,7 @@ import (
 )
 
 var (
-	readFileByPathFn  = readFileByPath
+	readFileByPathFn  = readFileByPathCapped
 	writeFileAtomicFn = writeFileAtomic
 )
 
@@ -520,7 +520,7 @@ func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
 // loadBlockStoreIndex reads the sole initialization marker. A missing marker is
 // an error, never an implicit empty index.
 func loadBlockStoreIndex(path string) (blockStoreIndexDisk, error) {
-	raw, err := readFileByPath(path, indexFileMaxBytes)
+	raw, err := readFileByPath(path)
 	if err != nil {
 		return blockStoreIndexDisk{}, err
 	}
@@ -631,11 +631,6 @@ func saveBlockStoreIndex(path string, index blockStoreIndexDisk) error {
 		return err
 	}
 	raw = append(raw, '\n')
-	// RUB-1057 write/read symmetry: never persist a marker the bounded
-	// loader would refuse on the next open.
-	if err := checkStoreSaveBound(path, len(raw), indexFileMaxBytes); err != nil {
-		return err
-	}
 	return writeFileAtomicFn(path, raw, 0o600)
 }
 

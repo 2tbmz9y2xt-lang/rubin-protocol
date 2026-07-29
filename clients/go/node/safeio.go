@@ -19,10 +19,15 @@ import (
 var errStoreFileTooLarge = errors.New("store file exceeds size bound")
 
 // Per-class local store read bounds (RUB-1057), enforced BEFORE the file's
-// contents are allocated. The numbers are a cross-client contract mirrored
-// byte-for-byte by the Rust client; each derivation, growth model, and margin
-// is recorded here and must not drift from the Rust copy. All measured
-// per-entry figures below are pinned by TestReadFileBoundDerivationEntrySizes.
+// contents are allocated. Every class here holds exactly one wire item whose
+// size a consensus rule already caps, so the bound is derived rather than
+// invented. Artifacts that grow with chain length or UTXO-set size (the
+// chainstate snapshot, the canonical index marker) admit no such ceiling and
+// are deliberately NOT bounded here — they are owned by RUB-1062. The numbers
+// are a cross-client contract mirrored byte-for-byte by the Rust client; each
+// derivation and margin is recorded here and must not drift from the Rust
+// copy. The measured per-entry figure below is pinned by
+// TestReadFileBoundDerivationEntrySizes.
 const (
 	// Block blobs hold exactly one wire block, capped by the P2P layer at
 	// MAX_BLOCK_BYTES. Growth: none per file (fixed consensus constant).
@@ -41,35 +46,11 @@ const (
 	// 2_000_000_000 covers that with ~1.94x margin (~3x vs the proven
 	// pubkey+sig floor of ~661MB) and stays below 2^31 so the size never
 	// narrows unsafely on any build. Growth: per block, not cumulative.
+	// Decoding an undo file costs roughly twice the admitted on-disk bytes
+	// in peak resident memory (raw buffer plus decoded structs), so this
+	// bound governs the FILE, not the decode footprint. Enforced on both
+	// ends (checkStoreSaveBound in PutUndo, readFileFromDir in GetUndo).
 	undoFileMaxBytes = 2_000_000_000
-
-	// Index marker (index.json): one canonical entry costs exactly 72B
-	// (measured: `    "<64 hex>",` + newline). TARGET_BLOCK_INTERVAL=120s
-	// -> ~262_800 blocks/year -> ~18.9MB/year. 256_000_000 admits ~13.5
-	// years of continuous chain, over an order of magnitude beyond a
-	// realistic devnet/testnet deployment. Growth: linear in chain length.
-	// RUB-1053 strict-open re-buffers each top-level marker value through
-	// json.RawMessage before decoding, so an in-bound marker transiently
-	// costs up to ~3x its on-disk size in memory during open (raw bytes +
-	// RawMessage copy + decoded strings); the on-disk bound is unchanged.
-	// Enforced on BOTH ends (checkStoreSaveBound in saveBlockStoreIndex,
-	// readFileByPath in loadBlockStoreIndex), so ordinary chain growth
-	// surfaces as a loud save-time error instead of a next-open refusal of
-	// the node's own marker.
-	indexFileMaxBytes = 256_000_000
-
-	// Chainstate snapshot: one utxoDiskEntry costs 359B in a digit-width-
-	// conservative P2PK shape (max-width numeric fields; real entries are
-	// smaller, so admitted counts are a floor) and 66_671B in the worst
-	// spendable shape (CORE_VAULT max covenant_data 33_188B, measured).
-	// 1_000_000_000 admits >=2.8M P2PK-shaped or ~15K worst-shape UTXOs;
-	// a realistic devnet/testnet population (low hundreds of thousands,
-	// overwhelmingly P2PK/HTLC-shaped) fits with >=10x margin. Growth:
-	// linear in UTXO count. Enforced on BOTH ends (checkStoreSaveBound in
-	// ChainState.Save, readFileByPath in LoadChainState), so ordinary UTXO
-	// growth surfaces as a loud save-time error instead of a next-startup
-	// refusal of the node's own snapshot.
-	chainStateFileMaxBytes = 1_000_000_000
 
 	// storeVerifyReadMaxBytes bounds the write-if-absent existing-
 	// destination verify reads (blockstore_write_if_absent.go), one seam
@@ -79,15 +60,38 @@ const (
 	storeVerifyReadMaxBytes = undoFileMaxBytes
 )
 
-func readFileByPath(path string, maxBytes int64) ([]byte, error) {
+// readFileByPath reads path in full with only the leaf-name guard. Its sole
+// caller is the block store index marker loader: that artifact grows with
+// chain length and admits no fixed ceiling a consensus-valid chain cannot
+// reach, so RUB-1057 deliberately leaves it UNBOUNDED — RUB-1062 owns it.
+// Bounded readers are readFileFromDir (per-class) and readFileByPathCapped.
+func readFileByPath(path string) ([]byte, error) {
+	dir := filepath.Dir(path)
+	name := filepath.Base(path)
+	if err := checkLeafName(name); err != nil {
+		return nil, err
+	}
+	return fs.ReadFile(os.DirFS(dir), name)
+}
+
+// readFileByPathCapped is the bounded path-based reader behind the
+// write-if-absent verify seam.
+func readFileByPathCapped(path string, maxBytes int64) ([]byte, error) {
 	dir := filepath.Dir(path)
 	name := filepath.Base(path)
 	return readFileFromDir(dir, name, maxBytes)
 }
 
-func readFileFromDir(dir, name string, maxBytes int64) ([]byte, error) {
+func checkLeafName(name string) error {
 	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
-		return nil, fmt.Errorf("invalid file name: %q", name)
+		return fmt.Errorf("invalid file name: %q", name)
+	}
+	return nil
+}
+
+func readFileFromDir(dir, name string, maxBytes int64) ([]byte, error) {
+	if err := checkLeafName(name); err != nil {
+		return nil, err
 	}
 	f, err := os.DirFS(dir).Open(name)
 	if err != nil {
