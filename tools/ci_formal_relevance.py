@@ -3,65 +3,44 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 from pathlib import Path
 import subprocess
 from typing import Callable, NamedTuple
 
-PROTECTED_PREFIXES = (
-    "rubin-formal/",
-    "conformance/",
-    "clients/go/",
-    "clients/rust/crates/rubin-consensus/src/",
-    "tools/formal/",
-)
-PROTECTED_EXACT = {
+JOBS = ("formal", "formal_refinement")
+COMMON_EXACT = {
     ".github/workflows/ci.yml",
-    "README.md",
-    "SPEC_LOCATION.md",
-    "scripts/crypto/openssl/build-openssl-bundle.sh",
-    "scripts/crypto/openssl/source-checksums.sha256",
+    "rubin-formal/RubinFormal.lean",
+    "rubin-formal/lake-manifest.json",
+    "rubin-formal/lakefile.lean",
+    "rubin-formal/lean-toolchain",
+    "tools/ci_formal_relevance.py",
+}
+FORMAL_EXACT = COMMON_EXACT | {
+    "README.md", "SPEC_LOCATION.md", "conformance/MATRIX.md",
+    "rubin-formal/PROOF_COVERAGE.md", "rubin-formal/README.md",
+    "rubin-formal/REGISTRY_COMPLETENESS_POLICY.md",
+    "rubin-formal/proof_coverage.json", "rubin-formal/refinement_bridge.json",
+    "rubin-formal/scripts/check.sh",
+    "rubin-formal/tools/LOCAL_CODEX_EXEC_REVIEW.md",
+    "rubin-formal/tools/check_formal_registry_truth.py",
     "tools/check_formal_claims_lint.py",
     "tools/check_formal_coverage.py",
     "tools/check_formal_refinement_bridge.py",
     "tools/check_formal_risk_gate.py",
-    "tools/check_lean_conformance_staleness.py",
     "tools/check_map_iteration_determinism.py",
-    "tools/ci_formal_relevance.py",
     "tools/formal_risk_score.py",
-    "tools/tests/test_ci_formal_relevance.py",
 }
-SKIPPABLE_PREFIXES = ("tools/", "scripts/", "clients/rust/")
-SKIPPABLE_EXACT = {
-    f".github/workflows/{name}"
-    for name in (
-        "auto-approve.yml",
-        "codacy-coverage.yml",
-        "codeql.yml",
-        "combined-load-nightly.yml",
-        "dependency-review.yml",
-        "dependency-submission.yml",
-        "fips-only-nightly.yml",
-        "fuzz-nightly.yml",
-        "kani.yml",
-        "parity-gate.yml",
-        "runtime-perf-guardrails.yml",
-        "sbom.yml",
-        "security-supply-chain-nightly.yml",
-        "spec-checks.yml",
-        "workflow-hygiene.yml",
-    )
-} | {
-    ".github/PULL_REQUEST_TEMPLATE.md",
-    ".codacy.yml",
-    ".coderabbit.yaml",
-    ".jscpd.json",
-    ".node-version",
-    ".nvmrc",
-    "CODACY_CCN_SUMMARY.md",
-    "package-lock.json",
-    "package.json",
-    "tree-api.json",
+REFINEMENT_EXACT = COMMON_EXACT | {
+    "clients/go/go.mod",
+    "clients/go/consensus/live_binding_policy_v1_embedded.json",
+    "scripts/crypto/openssl/build-openssl-bundle.sh",
+    "scripts/crypto/openssl/source-checksums.sha256",
+    "tools/check_lean_conformance_staleness.py",
+    "tools/formal/gen_lean_conformance_vectors.py",
+    "tools/formal/gen_lean_refinement_from_traces.py",
 }
 
 class Decision(NamedTuple):
@@ -102,17 +81,50 @@ def parse_name_status(data: bytes) -> tuple[list[str], str | None]:
         index += path_fields
     return paths, None
 
-def classify_paths(paths: list[str]) -> Decision:
+def is_common(path: str) -> bool:
+    return path in COMMON_EXACT or (
+        path.startswith("rubin-formal/RubinFormal/") and path.endswith(".lean")
+    ) or (
+        path.startswith("conformance/fixtures/CV-")
+        and path.endswith(".json")
+        and path.count("/") == 2
+    )
+
+def is_formal_input(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    return is_common(path) or path in FORMAL_EXACT or (
+        path.startswith("rubin-formal/tests/") and name.startswith("test_")
+        and name.endswith(".py")
+    ) or (
+        path.startswith("clients/go/consensus/") and path.count("/") == 3
+        and path.endswith(".go") and not path.endswith("_test.go")
+    ) or (
+        path.startswith("clients/rust/crates/rubin-consensus/src/")
+        and path.endswith(".rs") and "/tests/" not in path
+        and not name.endswith("_test.rs")
+    )
+
+def is_refinement_input(path: str) -> bool:
+    return is_common(path) or path in REFINEMENT_EXACT or (
+        path.startswith("clients/go/cmd/formal-trace/")
+        and path.count("/") == 4 and path.endswith(".go")
+        and not path.endswith("_test.go")
+    ) or (
+        path.startswith("clients/go/consensus/")
+        and path.endswith(".go") and not path.endswith("_test.go")
+    )
+
+def classify_paths(paths: list[str], job: str) -> Decision:
     if not paths:
         return Decision(True, "empty or malformed diff")
+    predicate = is_formal_input if job == "formal" else is_refinement_input
     for path in paths:
-        if path in PROTECTED_EXACT or path.startswith(PROTECTED_PREFIXES):
-            return Decision(True, f"protected path: {path}", len(paths))
-        if path not in SKIPPABLE_EXACT and not path.startswith(SKIPPABLE_PREFIXES):
-            return Decision(True, f"path not in allowlist: {path}", len(paths))
-    return Decision(False, "all paths are in allowlist", len(paths))
+        if predicate(path):
+            return Decision(True, f"{job} input: {path}", len(paths))
+    return Decision(False, f"no {job} inputs", len(paths))
 
 def decide(
+    job: str,
     event_name: str,
     base_ref: str,
     run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
@@ -131,7 +143,10 @@ def decide(
     if verify.returncode:
         return Decision(True, f"missing pull request base: {base}")
     diff = run(
-        ["git", "diff", "--name-status", "-z", "--find-renames", f"{base}..HEAD"],
+        [
+            "git", "diff", "--name-status", "-z", "--find-renames",
+            "--find-copies", "--find-copies-harder", f"{base}..HEAD",
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -139,10 +154,14 @@ def decide(
     if diff.returncode:
         return Decision(True, f"git diff failed for {base}..HEAD")
     paths, error = parse_name_status(diff.stdout)
-    return Decision(True, error) if error else classify_paths(paths)
+    return Decision(True, error) if error else classify_paths(paths, job)
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--job", choices=JOBS, required=True)
+    args = parser.parse_args()
     decision = decide(
+        args.job,
         os.environ.get("GITHUB_EVENT_NAME", ""),
         os.environ.get("GITHUB_BASE_REF", ""),
     )
@@ -150,8 +169,8 @@ def main() -> int:
         print(f"RUN: {decision.reason}")
     else:
         print(
-            f"SKIP: formal-irrelevant diff "
-            f"({decision.path_count} paths, all in allowlist)"
+            f"SKIP: {args.job}-irrelevant diff "
+            f"({decision.path_count} paths, no profile inputs)"
         )
     output = Path(os.environ["GITHUB_OUTPUT"])
     with output.open("a", encoding="utf-8") as stream:
