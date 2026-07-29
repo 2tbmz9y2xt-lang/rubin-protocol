@@ -3047,3 +3047,31 @@ func TestCompleteDASetIDsFromParsedBlockIncompleteShapes(t *testing.T) {
 		})
 	}
 }
+
+// RUB-1057 hostile row: an over-bound ancestor block file on the branch walk
+// is LOCAL store corruption — never ErrParentNotFound (the orphan path), and
+// never a peer-attributable consensus error. The unreadable arm propagates
+// the typed errStoreFileTooLarge raw (only parse/hash defects are rendered as
+// errBranchStoreCorrupt); the Rust twin renders the same arm through its
+// branch_store_corrupt prefix — same local-corruption verdict class. Rust
+// twin: `branch_walk_over_bound_ancestor_is_local_corruption`.
+func TestLoadVerifiedBranchAncestorOverBoundBlockIsLocalCorruption(t *testing.T) {
+	dir := t.TempDir()
+	store := mustCreateBlockStore(t, BlockStorePath(dir))
+	target := consensus.POW_LIMIT
+	engine, err := NewSyncEngine(NewChainState(), store, DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(dir)))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	hash := [32]byte{0: 0x11}
+	blockPath := filepath.Join(BlockStorePath(dir), "blocks", hex.EncodeToString(hash[:])+".bin")
+	createSparseFile(t, blockPath, blockFileMaxBytes+1)
+	_, _, err = engine.loadVerifiedBranchAncestor(hash)
+	if !errors.Is(err, errStoreFileTooLarge) || errors.Is(err, ErrParentNotFound) {
+		t.Fatalf("want typed local size error (not ErrParentNotFound), got %v", err)
+	}
+	var txErr *consensus.TxError
+	if errors.As(err, &txErr) {
+		t.Fatalf("over-bound ancestor must not be peer-attributable: %v", err)
+	}
+}

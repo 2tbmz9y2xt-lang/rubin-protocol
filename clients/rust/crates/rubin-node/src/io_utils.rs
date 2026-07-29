@@ -1,6 +1,77 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+// Per-class local store read bounds (RUB-1057), enforced BEFORE the file's
+// contents are allocated. Every class here holds exactly one wire item whose
+// size a consensus rule already caps, so the bound is derived rather than
+// invented. Artifacts that grow with chain length or UTXO-set size (the
+// chainstate snapshot, the canonical index marker) admit no such ceiling and
+// are deliberately NOT bounded here — they are owned by RUB-1062. The numbers
+// are a cross-client contract mirrored byte-for-byte from Go
+// `clients/go/node/safeio.go`; derivations and margins must not drift from the
+// Go copy. The measured per-entry figure is pinned by
+// `undo_entry_derivation_size` (blockstore.rs), twin of Go's
+// `TestReadFileBoundDerivationEntrySizes`.
+//
+// - Block blobs hold exactly one wire block, capped by the P2P layer at
+//   MAX_BLOCK_BYTES. Growth: none per file (fixed constant).
+// - Header blobs hold exactly one wire header (BLOCK_HEADER_BYTES).
+// - Undo files hold one block's spent-entry JSON. Worst legitimate case
+//   (measured on this repo's pretty-JSON encoding): inputs_max =
+//   MAX_BLOCK_BYTES / min-wire-per-spend (41B input + 4627B ML-DSA-87 sig,
+//   ignoring the mandatory 2592B pubkey reveal and the weight cap, both of
+//   which only shrink it) = 72_000_000/4_668 = 15_424 spends; worst
+//   per-entry JSON = 66_707B (max spendable covenant_data is CORE_VAULT at
+//   33_188B, hex-doubled) -> 15_424*66_707 ~= 1.029GB. 2_000_000_000 covers
+//   that with ~1.94x margin (~3x vs the proven pubkey+sig floor of ~661MB)
+//   and stays below 2^31 so the size never narrows unsafely on any build.
+//   Growth: per block, not cumulative. Decoding an undo file costs roughly
+//   twice the admitted on-disk bytes in peak resident memory (raw buffer plus
+//   decoded structs), so this bound governs the FILE, not the decode
+//   footprint. Enforced on both ends (check_store_save_bound in put_undo, the
+//   bounded read in get_undo).
+// The write-if-absent existing-destination verify reads have no constant of
+// their own: they exist only to compare against the content being written, so
+// they are bounded by that content's own length (blockstore.rs
+// `write_file_if_absent`) and a larger destination is reported through the
+// existing content-mismatch error rather than as a size refusal.
+pub(crate) const BLOCK_FILE_MAX_BYTES: u64 = rubin_consensus::constants::MAX_BLOCK_BYTES;
+pub(crate) const HEADER_FILE_MAX_BYTES: u64 = rubin_consensus::BLOCK_HEADER_BYTES as u64;
+pub(crate) const UNDO_FILE_MAX_BYTES: u64 = 2_000_000_000;
+
+/// Stable message prefix of the typed over-bound refusal; tests match on
+/// ErrorKind + this prefix.
+pub(crate) const STORE_FILE_TOO_LARGE_PREFIX: &str = "store file exceeds size bound";
+
+/// Typed refusal for an over-bound store file (RUB-1057). The kind is
+/// `InvalidData` — deliberately NEVER `NotFound` — so absent-file fallbacks
+/// (fresh chainstate, empty block store index, write-if-absent probes) and
+/// `sync_reorg::load_verified_branch_ancestor`'s NotFound-only
+/// parent-not-found arm can never treat an over-bound file as absent.
+/// Go twin: `errStoreFileTooLarge` in `clients/go/node/safeio.go`.
+fn file_too_large_error(name: &str, observed: u64, max_bytes: u64) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("{STORE_FILE_TOO_LARGE_PREFIX}: {name}: {observed} bytes observed, class bound {max_bytes}"),
+    )
+}
+
+/// Write/read symmetry guard for the undo class: the node must never persist
+/// an undo file it would refuse to load back. Same class as the read-side
+/// refusal (shared prefix, never an absent-file class); the message is
+/// clearly save-side. Block and header writes need no guard — the wire format
+/// already fixes their size. Go twin: `checkStoreSaveBound` in
+/// `clients/go/node/safeio.go`.
+pub(crate) fn check_store_save_bound(name: &str, len: usize, max_bytes: u64) -> Result<(), String> {
+    if len as u64 > max_bytes {
+        return Err(format!(
+            "refusing to save {name}: {len} bytes marshaled, class bound {max_bytes}: {STORE_FILE_TOO_LARGE_PREFIX}"
+        ));
+    }
+    Ok(())
+}
 
 /// Process-wide monotonic sequence counter appended to every temp-file
 /// name so two threads writing to the same destination within the same
@@ -102,11 +173,136 @@ fn check_safe_file_name(name: &str) -> Result<(), String> {
 /// be attacker-influenced (block index entries, on-disk headers, etc.)
 /// even when the current call sites synthesize the name from a fixed
 /// `hex::encode(hash) + ".bin"` shape.
-pub fn read_file_from_dir(dir: &Path, name: &str) -> Result<Vec<u8>, std::io::Error> {
+/// `max_bytes` is the caller's class bound (RUB-1057), enforced before the
+/// file's contents are materialized: the OPEN handle is fstat'ed (no path
+/// re-stat) and an over-bound size is refused without reading any content.
+pub fn read_file_from_dir(
+    dir: &Path,
+    name: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, std::io::Error> {
+    if let Err(msg) = check_safe_file_name(name) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg));
+    }
+    let f = fs::File::open(dir.join(name))?;
+    let stat_size = f.metadata()?.len();
+    read_capped(f, name, stat_size, max_bytes)
+}
+
+/// Reads `dir/name` in full with only the leaf-name guard. Its sole caller is
+/// the block store index marker loader: that artifact grows with chain length
+/// and admits no fixed ceiling a consensus-valid chain cannot reach, so
+/// RUB-1057 deliberately leaves it UNBOUNDED — RUB-1062 owns it. Go twin:
+/// `readFileByPath` in `clients/go/node/safeio.go`.
+pub(crate) fn read_file_from_dir_unbounded(
+    dir: &Path,
+    name: &str,
+) -> Result<Vec<u8>, std::io::Error> {
     if let Err(msg) = check_safe_file_name(name) {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg));
     }
     fs::read(dir.join(name))
+}
+
+/// Bounded read of `path` routed through `read_file_from_dir` by splitting
+/// it into parent dir + leaf, so the leaf-name guard applies too (the
+/// legitimate leaves on this path are hex-hash names, so verdicts are
+/// unchanged). Go twin: `readFileByPathCapped`.
+pub(crate) fn read_file_by_path(path: &Path, max_bytes: u64) -> Result<Vec<u8>, std::io::Error> {
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    match path.file_name().and_then(std::ffi::OsStr::to_str) {
+        Some(name) => read_file_from_dir(dir, name, max_bytes),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid file name: {}", path.display()),
+        )),
+    }
+}
+
+/// Bounded read core (Go twin: `readAllCapped`/`readCapped`). Refuses
+/// `stat_size > max_bytes` WITHOUT reading, then reads through a
+/// `max_bytes+1` limiter into a buffer this function grows ITSELF, so a file
+/// that grew between stat and read is still read in full when it fits, still
+/// refused by the post-read length check when it does not, and never costs
+/// more than `cap_hint(max_bytes, max_bytes)` of capacity.
+///
+/// The growth is hand-rolled rather than delegated to `read_to_end` because
+/// std's amortized doubling overshoots the class bound: measured, a 2-byte
+/// initial capacity reading `MAX_BLOCK_BYTES + 1` bytes ends at capacity
+/// 134_217_728 == 1.86x the advertised ceiling. Go's `readCapped` never
+/// exceeds `maxBytes+1`, so the overshoot was a cross-client asymmetry in
+/// peak allocation. Raw read errors propagate unwrapped — never coerced into
+/// the size error.
+fn read_capped<R: Read>(
+    r: R,
+    name: &str,
+    stat_size: u64,
+    max_bytes: u64,
+) -> Result<Vec<u8>, std::io::Error> {
+    if stat_size > max_bytes {
+        return Err(file_too_large_error(name, stat_size, max_bytes));
+    }
+    // Zero-filled so the spare capacity is safely readable as `&mut [u8]`;
+    // `len == capacity` is maintained on every growth and the tail is
+    // truncated at the end. Mirrors Go, whose `make` also hands back zeroed
+    // memory. Saturate the limiter budget rather than +1 blindly: a wrapped
+    // negative budget would report EOF immediately — a silent truncation
+    // exactly where the bound is supposed to refuse.
+    let mut buf = vec![0u8; cap_hint(stat_size, max_bytes)];
+    let mut limited = r.take(max_bytes.saturating_add(1));
+    let mut filled = 0usize;
+    loop {
+        if filled == buf.len() {
+            let next = grow_capacity(buf.len(), max_bytes);
+            if next <= buf.len() {
+                break; // at the ceiling; the length check below decides
+            }
+            buf.reserve_exact(next - buf.len());
+            buf.resize(next, 0);
+        }
+        let n = limited.read(&mut buf[filled..])?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    buf.truncate(filled);
+    if buf.len() as u64 > max_bytes {
+        return Err(file_too_large_error(name, buf.len() as u64, max_bytes));
+    }
+    Ok(buf)
+}
+
+/// Doubles `current`, clamped to `cap_hint(max_bytes, max_bytes)` (the most
+/// the limiter can ever deliver) and floored at 512 bytes, the floor itself
+/// clamped to the limit so a small class never gets an oversized buffer.
+/// Line-by-line twin of Go's `growCapacity` in `clients/go/node/safeio.go`;
+/// the two clients' growth ceilings must stay comparable. The limit is the
+/// DEFAULT and the doubling is taken only when it provably fits
+/// (`current <= limit / 2`), so an overflowed product can never be observed.
+fn grow_capacity(current: usize, max_bytes: u64) -> usize {
+    const GROW_FLOOR: usize = 512;
+    let limit = cap_hint(max_bytes, max_bytes);
+    let mut next = limit;
+    if current <= limit / 2 {
+        next = current * 2;
+    }
+    if next < GROW_FLOOR {
+        next = GROW_FLOOR.min(limit);
+    }
+    next
+}
+
+/// min(stat_size, max_bytes)+1 — the +1 gives the EOF probe room so an
+/// exact-size read never reallocates — clamped to `isize::MAX` (== Go
+/// `math.MaxInt` in `capHint`); the clamp is unreachable for the real class
+/// bounds (all < 2^31).
+fn cap_hint(stat_size: u64, max_bytes: u64) -> usize {
+    let hint = stat_size.min(max_bytes).saturating_add(1);
+    usize::try_from(hint.min(isize::MAX as u64)).unwrap_or(isize::MAX as usize)
 }
 
 /// Length of the volume prefix at the start of `s`. Mirrors Go
@@ -460,19 +656,12 @@ pub fn normalize_data_dir(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-// Historical helpers `resolve_io_path_dir_leaf`, `read_file_by_path`,
-// and `write_file_atomic_by_path` used to sit here. They applied
-// `lexical_clean` to the dir portion of a caller-supplied full path
-// so that symlink-divergence on an operator `--data-dir` could be
-// defeated at the per-read / per-write site. After adopting
-// CLI-level normalisation via `normalize_data_dir` in `main.rs`,
-// every subsystem now receives a pre-cleaned data-dir and can stay
-// on raw `fs::read` / `write_file_atomic`; the per-helper cleaning
-// step is no longer needed (and having it at some call sites but
-// not others reintroduced asymmetries between chainstate and
-// blockstore surfaces). The removed helpers and their regression
-// tests lived in git history; the CLI-level approach is the single
-// resolution strategy the whole node now uses.
+// Historical note: `resolve_io_path_dir_leaf` and the ORIGINAL (unbounded,
+// `lexical_clean`-applying) `read_file_by_path` / `write_file_atomic_by_path`
+// used to sit here; CLI-level `normalize_data_dir` replaced that per-site
+// cleaning strategy and they were removed. RUB-1057 reintroduced
+// `read_file_by_path` above as a BOUNDED dir+leaf split reader (no
+// `lexical_clean`), used by the blockstore write-if-absent verify seam.
 
 pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
     let bytes = hex::decode(value).map_err(|e| format!("{name}: {e}"))?;
@@ -820,6 +1009,17 @@ pub fn sync_dir(dir: &Path) -> Result<(), String> {
     }
 }
 
+/// Create a hole-only sparse file of the nominal size (no data blocks
+/// written; passes on APFS/ext4/tmpfs). Panics if the filesystem does not
+/// report the nominal size back (Go's twin skips instead).
+#[cfg(test)]
+pub(crate) fn create_sparse_file(path: &Path, size: u64) {
+    let f = fs::File::create(path).expect("create sparse");
+    f.set_len(size).expect("sparse set_len");
+    drop(f);
+    assert_eq!(fs::metadata(path).expect("stat sparse").len(), size);
+}
+
 #[cfg(test)]
 pub fn unique_temp_path(prefix: &str) -> PathBuf {
     static NEXT_UNIQUE_TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -837,10 +1037,15 @@ pub fn unique_temp_path(prefix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        lexical_clean, read_file_from_dir, sync_dir, unique_temp_path, volume_prefix_len,
-        write_file_atomic,
+        create_sparse_file, lexical_clean, read_capped, read_file_from_dir, sync_dir,
+        unique_temp_path, volume_prefix_len, write_file_atomic, BLOCK_FILE_MAX_BYTES,
+        STORE_FILE_TOO_LARGE_PREFIX,
     };
     use std::fs;
+    use std::io::{Cursor, Read};
+
+    /// Small injectable bound for the RUB-1057 corpus rows.
+    const TEST_READ_BOUND: u64 = 8;
 
     /// E.10 parity: `read_file_from_dir` mirrors Go `readFileFromDir`.
     /// Rejected vectors (must surface `InvalidInput`):
@@ -862,7 +1067,7 @@ mod tests {
             "sub/file",
             "/etc/passwd", // absolute Unix
         ] {
-            match read_file_from_dir(&dir, bad) {
+            match read_file_from_dir(&dir, bad, TEST_READ_BOUND) {
                 Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {}
                 Err(e) => panic!("expected InvalidInput for {bad:?}, got {:?}: {e}", e.kind()),
                 Ok(_) => panic!("expected error for {bad:?}, got Ok"),
@@ -888,7 +1093,7 @@ mod tests {
             "_:foo",
             "0:",
         ] {
-            match read_file_from_dir(&dir, bad) {
+            match read_file_from_dir(&dir, bad, TEST_READ_BOUND) {
                 Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {}
                 Err(e) => panic!("expected InvalidInput for {bad:?}, got {:?}: {e}", e.kind()),
                 Ok(_) => panic!("expected error for {bad:?}, got Ok"),
@@ -906,9 +1111,290 @@ mod tests {
         let leaf = "ok.bin";
         fs::write(dir.join(leaf), b"hi").expect("seed");
 
-        let got = read_file_from_dir(&dir, leaf).expect("read leaf");
+        let got = read_file_from_dir(&dir, leaf, TEST_READ_BOUND).expect("read leaf");
         assert_eq!(got, b"hi");
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// RUB-1057 corpus: empty and at-bound files read back byte-identically;
+    /// bound+1 is the typed refusal — kind `InvalidData` (never `NotFound`,
+    /// so no absent-file fallback can match) + stable prefix.
+    #[test]
+    fn read_file_from_dir_enforces_class_bound() {
+        let dir = unique_temp_path("rubin-io-bound");
+        fs::create_dir_all(&dir).expect("create test dir");
+        let rows: [(&str, u64, bool); 3] = [
+            ("empty", 0, false),
+            ("at", TEST_READ_BOUND, false),
+            ("over", TEST_READ_BOUND + 1, true),
+        ];
+        for (name, len, over) in rows {
+            fs::write(dir.join(name), vec![0xa5u8; len as usize]).expect("seed");
+            match read_file_from_dir(&dir, name, TEST_READ_BOUND) {
+                Ok(got) => {
+                    assert!(!over, "{name}: over-bound accepted");
+                    assert_eq!(got, vec![0xa5u8; len as usize]);
+                }
+                Err(e) => {
+                    assert!(over, "{name}: unexpected error {e}");
+                    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+                    assert_ne!(e.kind(), std::io::ErrorKind::NotFound);
+                    assert!(
+                        e.to_string().starts_with(STORE_FILE_TOO_LARGE_PREFIX),
+                        "{e}"
+                    );
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Pins the three frozen cross-client bound values; a red row means the
+    /// cross-client contract number drifted, not a local tuning knob.
+    /// De-scaled stand-in for the removed at-production-bound row of the undo
+    /// class: that caller shares the bounded reader at these hard-wired
+    /// constants, and its at/over verdicts run at small injectable bounds in
+    /// this module. The chainstate snapshot and index marker are deliberately
+    /// absent — they grow with accumulated state, admit no fixed ceiling, and
+    /// are owned by RUB-1062. The write-if-absent verify reads have no
+    /// constant of their own: they are bounded by the length of the content
+    /// being written. Go twin:
+    /// `TestSafeIOClassBoundConstantsPinFrozenValues`.
+    #[test]
+    fn class_bound_constants_pin_frozen_values() {
+        assert_eq!(BLOCK_FILE_MAX_BYTES, 72_000_000);
+        assert_eq!(super::HEADER_FILE_MAX_BYTES, 116);
+        assert_eq!(super::UNDO_FILE_MAX_BYTES, 2_000_000_000);
+    }
+
+    /// Write/read symmetry guard row for the undo class (the one guarded
+    /// write path — block and header sizes are already fixed by the wire
+    /// format) with small synthetic numbers: at bound the save proceeds, one
+    /// byte over refuses with the shared class prefix and a clearly save-side
+    /// message. Go twin: `TestSafeIOStoreSaveBoundRefusesOverBound`.
+    #[test]
+    fn check_store_save_bound_refuses_over_bound() {
+        super::check_store_save_bound("undo", TEST_READ_BOUND as usize, TEST_READ_BOUND)
+            .expect("at bound");
+        let err =
+            super::check_store_save_bound("undo", TEST_READ_BOUND as usize + 1, TEST_READ_BOUND)
+                .unwrap_err();
+        assert!(
+            err.starts_with("refusing to save") && err.contains(STORE_FILE_TOO_LARGE_PREFIX),
+            "{err}"
+        );
+    }
+
+    struct CountingReader {
+        data: Cursor<Vec<u8>>,
+        reads: usize,
+    }
+    impl Read for CountingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            self.data.read(buf)
+        }
+    }
+
+    /// Stat/read race pin on the testable core (Go twin:
+    /// `TestSafeIOReadAllCappedPinsStatReadRace`): an over-bound stat size
+    /// is refused WITHOUT reading content; a stat that lies LOW (file grew
+    /// after stat) is still refused by the bound+1 limiter instead of being
+    /// truncated; a stat that lies HIGH (file shrank) returns the bytes.
+    #[test]
+    fn read_capped_pins_stat_read_race() {
+        let bytes = b"0123456789".to_vec();
+        let mut r = CountingReader {
+            data: Cursor::new(bytes.clone()),
+            reads: 0,
+        };
+        let err = read_capped(&mut r, "f", 6, 5).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(r.reads, 0, "content was read despite over-bound stat");
+        let err = read_capped(Cursor::new(bytes.clone()), "f", 2, 5).unwrap_err();
+        assert!(
+            err.to_string().starts_with(STORE_FILE_TOO_LARGE_PREFIX),
+            "{err}"
+        );
+        let got = read_capped(Cursor::new(b"012".to_vec()), "f", 8, 8).expect("shrank");
+        assert_eq!(got, b"012");
+    }
+
+    /// Feeds `total` bytes regardless of what it claimed to Stat, recording the
+    /// largest slice it was ever offered — that offered length is
+    /// `capacity - filled`, so it exposes the buffer's growth profile from
+    /// outside.
+    struct GrowthProbeReader {
+        left: usize,
+        max_offer: usize,
+    }
+    impl Read for GrowthProbeReader {
+        fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+            self.max_offer = self.max_offer.max(b.len());
+            if self.left == 0 {
+                return Ok(0);
+            }
+            let n = b.len().min(self.left);
+            b[..n].fill(0xa5);
+            self.left -= n;
+            Ok(n)
+        }
+    }
+
+    /// RUB-1057: the ACCEPTED stat/read race must stay accepted — a file that
+    /// grew between stat and read but still fits the bound is returned IN
+    /// FULL, exactly as Go's `readCapped` does. Turning this into a refusal
+    /// would be a live cross-client divergence. The same row pins the
+    /// allocation ceiling: capacity must never exceed
+    /// `cap_hint(max_bytes, max_bytes)`. Under std's `read_to_end` the
+    /// amortized doubling lands at 8192 for these numbers — above the 5001
+    /// ceiling — so this row is falsifiable.
+    #[test]
+    fn read_capped_grown_file_is_returned_in_full_within_the_ceiling() {
+        const MAX: u64 = 5000;
+        let limit = super::cap_hint(MAX, MAX);
+        let mut r = GrowthProbeReader {
+            left: MAX as usize,
+            max_offer: 0,
+        };
+        // Stat lied low (2); the reader actually yields exactly MAX bytes.
+        let got =
+            read_capped(&mut r, "f", 2, MAX).expect("grown-but-fitting file must be accepted");
+        assert_eq!(got.len(), MAX as usize, "full bytes must be returned");
+        assert!(got.iter().all(|b| *b == 0xa5), "bytes must be intact");
+        assert!(
+            got.capacity() <= limit,
+            "capacity {} exceeds the class ceiling {limit}",
+            got.capacity()
+        );
+    }
+
+    /// The same race one byte over the bound is still refused with the typed
+    /// error, and the buffer still never grows past the ceiling: the largest
+    /// slice offered to the reader (== capacity - filled) stays within it.
+    /// Under `read_to_end` the offered slices follow std's doubling and
+    /// exceed the ceiling, so this row is falsifiable too.
+    #[test]
+    fn read_capped_over_bound_growth_stays_within_the_ceiling() {
+        const MAX: u64 = 4096;
+        let limit = super::cap_hint(MAX, MAX);
+        let mut r = GrowthProbeReader {
+            left: MAX as usize + 1,
+            max_offer: 0,
+        };
+        let err = read_capped(&mut r, "f", 2, MAX).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().starts_with(STORE_FILE_TOO_LARGE_PREFIX),
+            "{err}"
+        );
+        assert!(
+            r.max_offer <= limit,
+            "offered slice {} exceeds the class ceiling {limit}",
+            r.max_offer
+        );
+    }
+
+    /// `grow_capacity` is the line-by-line twin of Go's `growCapacity`: the
+    /// limit is the default, the doubling is taken only when it fits, and the
+    /// 512 floor is itself clamped so a small class (header: limit 117) never
+    /// receives an oversized buffer.
+    #[test]
+    fn grow_capacity_mirrors_the_go_ceiling_rule() {
+        const MAX: u64 = 1 << 20;
+        let limit = super::cap_hint(MAX, MAX);
+        assert_eq!(super::grow_capacity(0, MAX), 512);
+        assert_eq!(super::grow_capacity(4, MAX), 512);
+        assert_eq!(super::grow_capacity(1024, MAX), 2048);
+        assert_eq!(super::grow_capacity(limit / 2 + 1, MAX), limit);
+        assert_eq!(super::grow_capacity(limit, MAX), limit);
+        assert_eq!(super::grow_capacity(usize::MAX, MAX), limit);
+        // Small classes: the floor must never exceed the limit.
+        for small in [super::HEADER_FILE_MAX_BYTES, 71, 0] {
+            let small_limit = super::cap_hint(small, small);
+            for current in [0, 1, small_limit] {
+                assert!(
+                    super::grow_capacity(current, small) <= small_limit,
+                    "grow_capacity({current}, {small}) exceeds limit {small_limit}"
+                );
+            }
+        }
+    }
+
+    /// A raw mid-read failure surfaces unwrapped — never coerced into the
+    /// size error (Go twin: `TestSafeIOReadAllCappedPropagatesRawErrors`;
+    /// the Go stat-error row has no core-level Rust twin because the fstat
+    /// happens on a real `File` in `read_file_from_dir`).
+    #[test]
+    fn read_capped_propagates_raw_read_error() {
+        struct FailingReader;
+        impl Read for FailingReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("probe failure"))
+            }
+        }
+        let err = read_capped(FailingReader, "f", 4, 8).unwrap_err();
+        assert_eq!(err.to_string(), "probe failure");
+        assert_ne!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// One at-production-bound sanity row for the block class, via sparse
+    /// hole-only files (Go twin: `TestReadFileFromDirBlockClassProductionBound`).
+    #[test]
+    fn read_file_from_dir_block_class_production_bound() {
+        let dir = unique_temp_path("rubin-io-prod-bound");
+        fs::create_dir_all(&dir).expect("create test dir");
+        create_sparse_file(&dir.join("at.bin"), BLOCK_FILE_MAX_BYTES);
+        let got = read_file_from_dir(&dir, "at.bin", BLOCK_FILE_MAX_BYTES).expect("at bound");
+        assert_eq!(got.len() as u64, BLOCK_FILE_MAX_BYTES);
+        create_sparse_file(&dir.join("over.bin"), BLOCK_FILE_MAX_BYTES + 1);
+        let err = read_file_from_dir(&dir, "over.bin", BLOCK_FILE_MAX_BYTES).unwrap_err();
+        assert!(
+            err.to_string().starts_with(STORE_FILE_TOO_LARGE_PREFIX),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `read_file_by_path` edge arms: `/` has no parent and no leaf, so the
+    /// empty-parent fallback (`_ => Path::new(".")`) runs and the missing-leaf
+    /// arm refuses with InvalidInput; a non-UTF-8 leaf (unix) refuses the same
+    /// way. The positive bare-filename mapping (`parent() == Some("")` -> `.`)
+    /// is pinned by `effective_parent_maps_empty_parent_to_current_directory`.
+    #[test]
+    fn read_file_by_path_refuses_rootless_and_non_utf8_leaves() {
+        use std::path::Path;
+        let err = super::read_file_by_path(Path::new("/"), 8).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let raw = std::ffi::OsStr::from_bytes(b"/tmp/rubin-\xFF-leaf");
+            let err = super::read_file_by_path(Path::new(raw), 8).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+
+    /// Non-regular targets keep their pre-existing OS error classes — never
+    /// the size refusal: a directory read fails with the raw is-a-directory
+    /// error (its ~64B stat size passes any production bound) and a dangling
+    /// symlink stays NotFound (absent-file class). Go twin:
+    /// `TestReadFileFromDirNonRegularTargetsKeepOSErrorClasses`.
+    #[cfg(unix)]
+    #[test]
+    fn read_file_from_dir_non_regular_targets_keep_os_error_classes() {
+        let dir = unique_temp_path("rubin-io-nonreg");
+        fs::create_dir_all(dir.join("sub")).expect("mkdir");
+        let err = read_file_from_dir(&dir, "sub", BLOCK_FILE_MAX_BYTES).unwrap_err();
+        assert!(
+            !err.to_string().starts_with(STORE_FILE_TOO_LARGE_PREFIX)
+                && err.kind() != std::io::ErrorKind::NotFound,
+            "directory: {err}"
+        );
+        std::os::unix::fs::symlink(dir.join("absent"), dir.join("dangling")).expect("symlink");
+        let err = read_file_from_dir(&dir, "dangling", BLOCK_FILE_MAX_BYTES).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -216,7 +216,7 @@ func TestWriteFileIfAbsentPropagatesReadError(t *testing.T) {
 		readFileByPathFn = prevRead
 	})
 
-	readFileByPathFn = func(string) ([]byte, error) { return nil, errors.New("boom") }
+	readFileByPathFn = func(string, int64) ([]byte, error) { return nil, errors.New("boom") }
 
 	if err := writeFileIfAbsent(filepath.Join(t.TempDir(), "x.bin"), []byte("x")); err == nil {
 		t.Fatalf("expected error")
@@ -633,5 +633,101 @@ func TestLoadBlockStoreIndexNeverSynthesizesEmptyIndex(t *testing.T) {
 	mustRemoveAll(t, marker)
 	if _, err := loadBlockStoreIndex(marker); err == nil {
 		t.Fatalf("missing marker must not decode as an empty index")
+	}
+}
+
+// TestBlockStoreReadFileClassBoundsRefuseOverBound pins the bound+1 refusal
+// at the two caller paths whose production bounds are cheap to stage — block
+// (72MB sparse, the contract-mandated production-scale row) and header
+// (117B): the typed errStoreFileTooLarge, never an absent-file default. The
+// undo/index/chainstate/verify callers share the same bounded readers at
+// hard-wired constants pinned by TestSafeIOClassBoundConstantsPinFrozenValues;
+// their at/over verdicts run at small injectable bounds in safeio_test.go
+// (RUB-1057 wave-2 de-scaling: no multi-GB or 256MB rows).
+func TestBlockStoreReadFileClassBoundsRefuseOverBound(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "blockstore")
+	store := mustCreateBlockStore(t, root)
+	var hash [32]byte
+	name := hex.EncodeToString(hash[:])
+	createSparseFile(t, filepath.Join(root, "blocks", name+".bin"), blockFileMaxBytes+1)
+	if _, err := store.GetBlockByHash(hash); !errors.Is(err, errStoreFileTooLarge) {
+		t.Fatalf("block: want errStoreFileTooLarge, got %v", err)
+	}
+	createSparseFile(t, filepath.Join(root, "headers", name+".bin"), headerFileMaxBytes+1)
+	if _, err := store.GetHeaderByHash(hash); !errors.Is(err, errStoreFileTooLarge) {
+		t.Fatalf("header: want errStoreFileTooLarge, got %v", err)
+	}
+}
+
+// TestBlockStoreReadFileClassBoundsAcceptAtBound: a header sized exactly at
+// its class bound (116B) reads back byte-complete — the caller-level
+// at-bound accept row for the one production bound that is cheap to stage
+// (block's accept row reads 72MB in TestReadFileFromDirBlockClassProductionBound;
+// the other classes' at/over pairs run at small injectable bounds in
+// safeio_test.go, production constants pinned by
+// TestSafeIOClassBoundConstantsPinFrozenValues).
+func TestBlockStoreReadFileClassBoundsAcceptAtBound(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "blockstore")
+	store := mustCreateBlockStore(t, root)
+	var hash [32]byte
+	name := hex.EncodeToString(hash[:])
+	createSparseFile(t, filepath.Join(root, "headers", name+".bin"), headerFileMaxBytes)
+	if got, err := store.GetHeaderByHash(hash); err != nil || int64(len(got)) != int64(headerFileMaxBytes) {
+		t.Fatalf("header at bound: len=%d err=%v", len(got), err)
+	}
+}
+
+// TestWriteFileIfAbsentVerifyReadBoundedByContentLength pins the RUB-1057
+// wave-3 seam semantics on BOTH verify read sites — the fast-path probe and
+// the link-EEXIST re-read: an existing destination LARGER than the content
+// being written is reported as the pre-existing content-mismatch error (the
+// caller-visible taxonomy is identical for every mismatch, whatever the
+// existing file's size), and the read never materializes more than
+// len(content) bytes, so a corrupt multi-gigabyte file at a small
+// destination is never buffered whole. The recorded bound proves the seam
+// passes len(content), not a coarse class constant.
+func TestWriteFileIfAbsentVerifyReadBoundedByContentLength(t *testing.T) {
+	content := []byte("x")
+	wantErr := "file already exists with different content"
+	for _, tc := range []struct {
+		name   string
+		eexist bool
+	}{
+		{"fast_path", false},
+		{"link_eexist", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), "dst.bin")
+			// Far larger than len(content): a whole-file read would allocate it.
+			if err := os.WriteFile(dst, bytes.Repeat([]byte{0xa5}, 4096), 0o600); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			prev := readFileByPathFn
+			t.Cleanup(func() { readFileByPathFn = prev })
+			var bounds []int64
+			skipFirst := tc.eexist
+			readFileByPathFn = func(path string, maxBytes int64) ([]byte, error) {
+				if skipFirst {
+					skipFirst = false
+					return nil, os.ErrNotExist
+				}
+				bounds = append(bounds, maxBytes)
+				got, err := readFileByPathCapped(path, maxBytes)
+				if int64(len(got)) > maxBytes {
+					t.Fatalf("verify read materialized %d bytes, bound %d", len(got), maxBytes)
+				}
+				return got, err
+			}
+			err := writeFileIfAbsent(dst, content)
+			if err == nil || !strings.Contains(err.Error(), wantErr) {
+				t.Fatalf("want content-mismatch error, got %v", err)
+			}
+			if errors.Is(err, errStoreFileTooLarge) {
+				t.Fatalf("size refusal leaked into the caller taxonomy: %v", err)
+			}
+			if len(bounds) != 1 || bounds[0] != int64(len(content)) {
+				t.Fatalf("verify read bounds = %v, want [%d]", bounds, len(content))
+			}
+		})
 	}
 }
