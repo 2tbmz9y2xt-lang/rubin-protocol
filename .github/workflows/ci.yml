@@ -348,14 +348,16 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml', 'clients/rust/crates/**/Cargo.toml') }}
+          key: cargo-registry-v2-${{ runner.os }}-${{ hashFiles('clients/rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-v2-${{ runner.os }}-
 
       - name: Cache Rust test target
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: |
             clients/rust/target
-          key: rust-test-v2-${{ runner.os }}-${{ steps.rust_cache_identity.outputs.release }}-${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml', 'clients/rust/crates/**/Cargo.toml', 'scripts/crypto/openssl/source-checksums.sha256') }}-${{ hashFiles('clients/rust/**/*.rs') }}
+          key: rust-test-v2-${{ runner.os }}-${{ steps.rust_cache_identity.outputs.release }}-${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml', 'clients/rust/crates/**/Cargo.toml', 'scripts/crypto/openssl/source-checksums.sha256') }}-${{ hashFiles('clients/rust/**', 'conformance/fixtures/**') }}
           restore-keys: |
             rust-test-v2-${{ runner.os }}-${{ steps.rust_cache_identity.outputs.release }}-${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml', 'clients/rust/crates/**/Cargo.toml', 'scripts/crypto/openssl/source-checksums.sha256') }}-
 

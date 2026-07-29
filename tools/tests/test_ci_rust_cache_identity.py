@@ -4,9 +4,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPATIBILITY = "${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml', 'clients/rust/crates/**/Cargo.toml', 'scripts/crypto/openssl/source-checksums.sha256') }}"
-REGISTRY = "${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml', 'clients/rust/crates/**/Cargo.toml') }}"
+REGISTRY = "${{ hashFiles('clients/rust/Cargo.lock') }}"
 RELEASE = "${{ steps.rust_cache_identity.outputs.release }}"
-SOURCES = "${{ hashFiles('clients/rust/**/*.rs') }}"
+SOURCES = "${{ hashFiles('clients/rust/**', 'conformance/fixtures/**') }}"
 
 
 class RustCacheIdentityTests(unittest.TestCase):
@@ -32,7 +32,9 @@ class RustCacheIdentityTests(unittest.TestCase):
             text = self.workflow(workflow)
             with self.subTest(workflow=workflow):
                 registry = f"          key: cargo-registry-v2-${{{{ runner.os }}}}-{REGISTRY}\n"
+                restore = "            cargo-registry-v2-${{ runner.os }}-\n"
                 self.assertEqual(text.count(registry), 1)
+                self.assertEqual(text.count(restore), 1)
                 self.assertIn("            ~/.cargo/registry/index\n", text)
                 self.assertIn("            ~/.cargo/registry/cache\n", text)
                 self.assertIn("            ~/.cargo/git/db\n", text)
