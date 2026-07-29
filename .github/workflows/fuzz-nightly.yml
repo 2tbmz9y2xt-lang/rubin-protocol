@@ -57,6 +57,10 @@ jobs:
     # Must exceed GO_TEST_TIMEOUT at the documented fuzz_time=600s example
     # (1200s) plus checkout/setup-go/instrumented-build, so a hung target dies
     # by go test's own -timeout (writing the panic dump), never by the job cap.
+    # The OpenSSL bundle steps fit too: warm path (shared cache hit) is a
+    # restore plus one sha256, seconds; worst case cold path is ~2 min
+    # checkout/setup + <=~8 min source build (4-vCPU runner) + the 1200s
+    # hung-target kill + instrumented build ~= 36 min < 40.
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -79,11 +83,98 @@ jobs:
           cache: true
           cache-dependency-path: clients/go/go.mod
 
+      # ML-DSA backend provisioning (RUB-1064). The runner's system OpenSSL
+      # lacks ML-DSA, so the ML-DSA-gated targets f.Skipf during setup and
+      # produce zero fuzz coverage (surfaced as SKIP_FUZZ_SETUP since
+      # RUB-1061). The four steps below mirror the proven pair in ci.yml
+      # `test` (cache + guarded build + PQ visibility check); the identical
+      # cache key means nightly legs normally restore the bundle regular CI
+      # already built, and only build from source on a cold cache.
+      - name: Cache OpenSSL 3.5 bundle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+        with:
+          path: |
+            ~/.cache/rubin-openssl/bundle-3.5.5
+            ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
+          key: openssl-bundle-${{ runner.os }}-3.5.5-v2
+
+      - name: Verify OpenSSL 3.5.5 source integrity
+        run: |
+          set -euo pipefail
+          # Pinned sha256 of the upstream source tarball, from the official
+          # release asset openssl-3.5.5.tar.gz.sha256 at
+          # https://github.com/openssl/openssl/releases/tag/openssl-3.5.5
+          # (independently re-downloaded and re-hashed on 2026-07-29).
+          EXPECTED_SHA256="b28c91532a8b65a1f983b4c28b7488174e4a01008e29ce8e69bd789f28bc2a89"
+          WORK_ROOT="$HOME/.cache/rubin-openssl/work"
+          TARBALL="$WORK_ROOT/openssl-3.5.5.tar.gz"
+          mkdir -p "$WORK_ROOT"
+          if [ ! -f "$TARBALL" ]; then
+            curl -fL --retry 3 \
+              "https://github.com/openssl/openssl/releases/download/openssl-3.5.5/openssl-3.5.5.tar.gz" \
+              -o "$TARBALL"
+          fi
+          # Runs on the warm path too: the tarball may come from the shared
+          # actions cache, and a poisoned cache entry must fail closed here,
+          # never feed the build. (The built bundle itself cannot be pinned —
+          # the build is not bit-reproducible — so the trust chain is verified
+          # source plus a repo-scoped cache written only by this repo's CI.)
+          if ! echo "$EXPECTED_SHA256  $TARBALL" | sha256sum -c -; then
+            echo "ERROR: openssl-3.5.5.tar.gz sha256 mismatch (tampered download or poisoned cache); refusing to build" >&2
+            rm -f -- "$TARBALL"
+            exit 1
+          fi
+
+      - name: Build OpenSSL 3.5.5 bundle
+        run: |
+          set -euo pipefail
+          PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
+          MODULES_DIR="$PREFIX/lib/ossl-modules"
+          if [ ! -d "$MODULES_DIR" ] && [ -d "$PREFIX/lib64/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib64/ossl-modules"
+          fi
+          if [ ! -x "$PREFIX/bin/openssl" ] || [ ! -f "$PREFIX/ssl/openssl-fips.cnf" ] || [ ! -d "$MODULES_DIR" ]; then
+            OPENSSL_VERSION=3.5.5 PREFIX="$PREFIX" bash scripts/crypto/openssl/build-openssl-bundle.sh
+          fi
+          if [ -d "$PREFIX/lib/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib/ossl-modules"
+          elif [ -d "$PREFIX/lib64/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib64/ossl-modules"
+          else
+            echo "ERROR: OpenSSL modules directory not found under $PREFIX/lib*/ossl-modules" >&2
+            exit 1
+          fi
+          {
+            echo "$PREFIX/bin"
+          } >> "$GITHUB_PATH"
+          # LD_LIBRARY_PATH is exported here deliberately: dev-env.sh
+          # select_openssl() wires PATH/OPENSSL_DIR/PKG_CONFIG_PATH/
+          # OPENSSL_MODULES from RUBIN_OPENSSL_PREFIX but does NOT export
+          # LD_LIBRARY_PATH, and the fuzz test binary links the bundle's
+          # libcrypto dynamically (#cgo pkg-config: openssl), so the runtime
+          # linker needs it exactly as in ci.yml `test`.
+          {
+            echo "OPENSSL_DIR=$PREFIX"
+            echo "PKG_CONFIG_PATH=$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig"
+            echo "LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib"
+            echo "OPENSSL_MODULES=$MODULES_DIR"
+            echo "OPENSSL_CONF=$PREFIX/ssl/openssl-fips.cnf"
+          } >> "$GITHUB_ENV"
+
+      # Fail fast with a precise diagnostic if the provisioned backend does
+      # not expose ML-DSA-87: a red step here means "backend broken", never
+      # "fuzzing found a defect".
+      - name: Verify OpenSSL PQ algorithms
+        run: |
+          openssl version
+          openssl list -signature-algorithms | grep -E 'ML-DSA-87'
+
       - name: Run stage2 fuzz target (timeboxed)
         env:
           FUZZ_TIME: ${{ github.event.inputs.fuzz_time || '300s' }}
           FUZZ_MINIMIZE_TIME: "5s"
           FUZZ_TARGET: ${{ matrix.target }}
+          RUBIN_OPENSSL_PREFIX: ${{ env.OPENSSL_DIR }}
         run: |
           scripts/dev-env.sh -- bash -lc "cd \"$GITHUB_WORKSPACE\" && scripts/ci/run_fuzz_stage2.sh --target \"$FUZZ_TARGET\""
 
