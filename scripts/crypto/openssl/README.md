@@ -7,6 +7,12 @@ cd <REPO_ROOT>
 OPENSSL_VERSION=3.5.5 scripts/dev-env.sh -- bash scripts/crypto/openssl/build-openssl-bundle.sh
 ```
 
+Before extracting, the script verifies the source tarball — freshly downloaded or
+cached — against a sha256 pinned per version in its own `case` block, and refuses
+to build on a mismatch or on a version with no pin entry. A version bump therefore
+adds one `case` entry with the digest from the upstream
+`openssl-<version>.tar.gz.sha256` release asset.
+
 Default install prefix:
 
 `$HOME/.cache/rubin-openssl/bundle-<version>`

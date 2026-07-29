@@ -39,7 +39,7 @@ jobs:
           path: |
             ~/.cache/rubin-openssl/bundle-3.5.5
             ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
-          key: openssl-bundle-${{ runner.os }}-3.5.5-v2
+          key: openssl-bundle-${{ runner.os }}-3.5.5-v3
 
       - name: Build OpenSSL 3.5.5 bundle
         id: openssl

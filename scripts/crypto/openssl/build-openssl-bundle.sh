@@ -12,6 +12,35 @@ TARBALL_PATH="${WORK_ROOT}/${ARCHIVE}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)}"
 FIPS_SECTION_NAME="${FIPS_SECTION_NAME:-fips_sect}"
 
+# Pinned sha256 of the upstream source tarball, one entry per supported version,
+# from the official release asset openssl-<version>.tar.gz.sha256. Selected by
+# OPENSSL_VERSION and never by ARCHIVE_URL, so a mirror serving the pinned bytes
+# passes and anything else fails without any URL-specific logic.
+case "${OPENSSL_VERSION}" in
+  3.5.5)
+    EXPECTED_SHA256="b28c91532a8b65a1f983b4c28b7488174e4a01008e29ce8e69bd789f28bc2a89"
+    ;;
+  *)
+    echo "ERROR: no pinned sha256 for OpenSSL ${OPENSSL_VERSION}; refusing to build" >&2
+    echo "Add a case entry for ${OPENSSL_VERSION} in scripts/crypto/openssl/build-openssl-bundle.sh" >&2
+    echo "using the digest published at https://github.com/openssl/openssl/releases/download/${OPENSSL_TAG}/${ARCHIVE}.sha256" >&2
+    exit 1
+    ;;
+esac
+
+compute_sha256() {
+  local output
+  if command -v sha256sum >/dev/null 2>&1; then
+    output="$(sha256sum "$1")" || { echo "ERROR: sha256sum failed for $1" >&2; return 1; }
+  elif command -v shasum >/dev/null 2>&1; then
+    output="$(shasum -a 256 "$1")" || { echo "ERROR: shasum failed for $1" >&2; return 1; }
+  else
+    echo "ERROR: no sha256 tool available (need sha256sum or shasum -a 256)" >&2
+    return 1
+  fi
+  printf '%s\n' "${output%% *}"
+}
+
 mkdir -p "${WORK_ROOT}"
 
 echo "[openssl-bundle] version=${OPENSSL_VERSION}"
@@ -20,8 +49,22 @@ echo "[openssl-bundle] work=${WORK_ROOT}"
 echo "[openssl-bundle] prefix=${PREFIX}"
 
 if [ ! -f "${TARBALL_PATH}" ]; then
-  curl -fL "${ARCHIVE_URL}" -o "${TARBALL_PATH}"
+  # Retrying is safe because of the check below: a truncated or partial result
+  # fails verification rather than being consumed.
+  curl -fL --retry 5 --retry-delay 2 "${ARCHIVE_URL}" -o "${TARBALL_PATH}"
 fi
+
+# One verification point covers both paths: a freshly downloaded tarball and one
+# restored from a CI or developer cache reach it alike, before extraction.
+if ! ACTUAL_SHA256="$(compute_sha256 "${TARBALL_PATH}")"; then
+  exit 1
+fi
+if [ "${ACTUAL_SHA256}" != "${EXPECTED_SHA256}" ]; then
+  echo "ERROR: ${ARCHIVE} sha256 mismatch (expected ${EXPECTED_SHA256}, got ${ACTUAL_SHA256}); refusing to build" >&2
+  rm -f -- "${TARBALL_PATH}"
+  exit 1
+fi
+echo "[openssl-bundle] source-sha256=${ACTUAL_SHA256}"
 
 rm -rf "${BUILD_DIR}"
 mkdir -p "${BUILD_DIR}"

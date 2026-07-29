@@ -86,21 +86,18 @@ jobs:
       # ML-DSA backend provisioning (RUB-1064). The runner's system OpenSSL
       # lacks ML-DSA, so the ML-DSA-gated targets f.Skipf during setup and
       # produce zero fuzz coverage (surfaced as SKIP_FUZZ_SETUP since
-      # RUB-1061). The four steps below follow the proven ci.yml `test` shape
-      # (cache + guarded build + PQ visibility check) with one deliberate
-      # deviation: a dedicated cache key plus a provenance marker, so the
-      # bundle the fuzz binary links provably descends from the
-      # sha256-verified source tarball.
+      # RUB-1061). The three steps below follow the proven ci.yml `test` shape
+      # (cache + guarded build + PQ visibility check).
       #
-      # Dedicated key, deliberately NOT the shared openssl-bundle-*-v2 key:
-      # that one is also written by ci.yml and four other workflows whose
-      # build paths never verify the tarball, so a warm shared bundle has
-      # unverifiable provenance. This key is written exclusively by this
-      # workflow's verified-build path below — a warm bundle under it is one
-      # this job built from a sha256-verified source. No restore-keys
-      # fallback: a fallback would reintroduce unverified bundles. Cost:
-      # cold on first use (every matrix leg builds once, ~6-8 min, until the
-      # first successful save); warm restores afterwards are seconds.
+      # Dedicated key, deliberately NOT the shared openssl-bundle-*-v3 key: this
+      # one is written only by this workflow, and since RUB-1067 the bundle
+      # script verifies the source tarball against a version-pinned sha256
+      # before extracting, so every bundle stored under this key descends from a
+      # verified tarball. The shared key was rotated v2 -> v3 in the same change
+      # to drop entries built before verification existed; this lane keeps its
+      # own key because its entries are already verified and rotating them would
+      # buy nothing. No restore-keys: a prefix fallback reaches pre-rotation
+      # entries and would undo both.
       - name: Cache OpenSSL 3.5 bundle
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
@@ -109,69 +106,16 @@ jobs:
             ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
           key: openssl-bundle-mldsa-verified-${{ runner.os }}-3.5.5-v1
 
-      - name: Verify OpenSSL 3.5.5 source integrity
-        run: |
-          set -euo pipefail
-          # Pinned sha256 of the upstream source tarball, from the official
-          # release asset openssl-3.5.5.tar.gz.sha256 at
-          # https://github.com/openssl/openssl/releases/tag/openssl-3.5.5
-          # (independently re-downloaded and re-hashed on 2026-07-29).
-          EXPECTED_SHA256="b28c91532a8b65a1f983b4c28b7488174e4a01008e29ce8e69bd789f28bc2a89"
-          WORK_ROOT="$HOME/.cache/rubin-openssl/work"
-          TARBALL="$WORK_ROOT/openssl-3.5.5.tar.gz"
-          mkdir -p "$WORK_ROOT"
-          if [ ! -f "$TARBALL" ]; then
-            curl -fL --retry 3 \
-              "https://github.com/openssl/openssl/releases/download/openssl-3.5.5/openssl-3.5.5.tar.gz" \
-              -o "$TARBALL"
-          fi
-          # Runs on the warm path too: the tarball may come from the shared
-          # actions cache, and a poisoned cache entry must fail closed here,
-          # never feed the build. (The built bundle itself cannot be pinned —
-          # the build is not bit-reproducible — so the trust chain is verified
-          # source plus a repo-scoped cache written only by this repo's CI.)
-          if ! echo "$EXPECTED_SHA256  $TARBALL" | sha256sum -c -; then
-            echo "ERROR: openssl-3.5.5.tar.gz sha256 mismatch (tampered download or poisoned cache); refusing to build" >&2
-            rm -f -- "$TARBALL"
-            exit 1
-          fi
-          # Single definition of the pin: the build step consumes this export
-          # for its provenance marker instead of repeating the literal, so the
-          # two steps cannot drift apart silently. Written only after the
-          # check above passed.
-          echo "RUBIN_OPENSSL_TARBALL_SHA256=$EXPECTED_SHA256" >> "$GITHUB_ENV"
-
       - name: Build OpenSSL 3.5.5 bundle
         run: |
           set -euo pipefail
-          # :? fails closed if the verify step did not run (reordered/removed):
-          # the build must never proceed without a verified pin in hand.
-          PINNED_SHA256="${RUBIN_OPENSSL_TARBALL_SHA256:?verify step must export the pin first}"
           PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
-          # Provenance marker: records the sha256 of the source tarball this
-          # bundle was built from, making "this bundle descends from the
-          # verified source" checkable rather than inferred — and keeping the
-          # guard honest even if a future workflow starts writing this cache
-          # key without verification.
-          MARKER="$PREFIX/.rubin-verified-source-sha256"
           MODULES_DIR="$PREFIX/lib/ossl-modules"
           if [ ! -d "$MODULES_DIR" ] && [ -d "$PREFIX/lib64/ossl-modules" ]; then
             MODULES_DIR="$PREFIX/lib64/ossl-modules"
           fi
-          NEED_BUILD=0
           if [ ! -x "$PREFIX/bin/openssl" ] || [ ! -f "$PREFIX/ssl/openssl-fips.cnf" ] || [ ! -d "$MODULES_DIR" ]; then
-            NEED_BUILD=1
-          elif [ ! -f "$MARKER" ] || [ "$(cat "$MARKER")" != "$PINNED_SHA256" ]; then
-            # A complete-looking bundle without a matching marker did not come
-            # from this workflow's verified-build path: rebuild it.
-            NEED_BUILD=1
-          fi
-          if [ "$NEED_BUILD" -eq 1 ]; then
-            # Wipe first so nothing from an unverified or partial bundle
-            # survives the reinstall (make install overwrites, never prunes).
-            rm -rf -- "$PREFIX"
             OPENSSL_VERSION=3.5.5 PREFIX="$PREFIX" bash scripts/crypto/openssl/build-openssl-bundle.sh
-            printf '%s\n' "$PINNED_SHA256" > "$MARKER"
           fi
           if [ -d "$PREFIX/lib/ossl-modules" ]; then
             MODULES_DIR="$PREFIX/lib/ossl-modules"
