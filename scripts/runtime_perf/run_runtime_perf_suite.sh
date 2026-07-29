@@ -26,6 +26,10 @@ if [[ -z "$REPO_ROOT" || -z "$OUT_DIR" ]]; then
   echo "usage: $0 --repo-root <repo-root> --output-dir <out-dir>" >&2
   exit 2
 fi
+if [[ -z "${CARGO_TARGET_DIR:-}" || "$CARGO_TARGET_DIR" != /* ]]; then
+  echo "CARGO_TARGET_DIR must be an absolute path" >&2
+  exit 2
+fi
 
 mkdir -p "$OUT_DIR"
 
@@ -51,13 +55,14 @@ if [[ $go_status -eq 0 ]]; then
   fi
 fi
 
+CRITERION_ROOT="$CARGO_TARGET_DIR/criterion"
 for path in \
-  clients/rust/target/criterion/rubin_node_txpool \
-  clients/rust/target/criterion/rubin_node_chainstate_clone \
-  clients/rust/target/criterion/rubin_node_sync_chain_state_snapshot \
-  clients/rust/target/criterion/rubin_node_sync \
-  clients/rust/target/criterion/rubin_node_undo \
-  clients/rust/target/criterion/rubin_node_miner_mine_one
+  "$CRITERION_ROOT/rubin_node_txpool" \
+  "$CRITERION_ROOT/rubin_node_chainstate_clone" \
+  "$CRITERION_ROOT/rubin_node_sync_chain_state_snapshot" \
+  "$CRITERION_ROOT/rubin_node_sync" \
+  "$CRITERION_ROOT/rubin_node_undo" \
+  "$CRITERION_ROOT/rubin_node_miner_mine_one"
 do
   rm -rf "$path"
 done
@@ -68,7 +73,7 @@ rust_status=$?
 set -e
 if [[ $rust_status -eq 0 ]]; then
   python3 "$SCRIPT_DIR/parse_rust_runtime_metrics.py" \
-    --criterion-root "$REPO_ROOT/clients/rust/target/criterion" \
+    --criterion-root "$CRITERION_ROOT" \
     --output "$RUST_JSON"
 fi
 
