@@ -89,14 +89,15 @@ jobs:
       # RUB-1061). The three steps below follow the proven ci.yml `test` shape
       # (cache + guarded build + PQ visibility check).
       #
-      # Dedicated key, deliberately NOT the shared openssl-bundle-*-v2 key: this
+      # Dedicated key, deliberately NOT the shared openssl-bundle-*-v3 key: this
       # one is written only by this workflow, and since RUB-1067 the bundle
       # script verifies the source tarball against a version-pinned sha256
       # before extracting, so every bundle stored under this key descends from a
-      # verified tarball. The shared key still holds entries built before that
-      # verification existed, and the build step below skips the script whenever
-      # the restored bundle looks complete, so such an entry would never be
-      # checked. No restore-keys, for the same reason.
+      # verified tarball. The shared key was rotated v2 -> v3 in the same change
+      # to drop entries built before verification existed; this lane keeps its
+      # own key because its entries are already verified and rotating them would
+      # buy nothing. No restore-keys: a prefix fallback reaches pre-rotation
+      # entries and would undo both.
       - name: Cache OpenSSL 3.5 bundle
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
