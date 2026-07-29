@@ -11,22 +11,48 @@ BUILD_DIR="${WORK_ROOT}/openssl-${OPENSSL_VERSION}"
 TARBALL_PATH="${WORK_ROOT}/${ARCHIVE}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)}"
 FIPS_SECTION_NAME="${FIPS_SECTION_NAME:-fips_sect}"
+CHECKSUM_FILE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/source-checksums.sha256"
+CHECKSUM_LINE_RE='^([0-9a-f]{64})  ([^[:space:]]+)$'
 
-# Pinned sha256 of the upstream source tarball, one entry per supported version,
-# from the official release asset openssl-<version>.tar.gz.sha256. Selected by
-# OPENSSL_VERSION and never by ARCHIVE_URL, so a mirror serving the pinned bytes
-# passes and anything else fails without any URL-specific logic.
-case "${OPENSSL_VERSION}" in
-  3.5.5)
-    EXPECTED_SHA256="b28c91532a8b65a1f983b4c28b7488174e4a01008e29ce8e69bd789f28bc2a89"
-    ;;
-  *)
+# The pinned sha256 of every supported upstream source tarball lives in
+# CHECKSUM_FILE, selected by archive name — i.e. by OPENSSL_VERSION — and never by
+# ARCHIVE_URL, so a mirror serving the pinned bytes passes and anything else fails
+# without any URL-specific logic. A pin file that is unreadable, malformed anywhere,
+# or ambiguous about the selected archive fails the build rather than being trusted.
+lookup_pinned_sha256() {
+  local archive="$1" line digest="" lineno=0
+  if [ ! -r "${CHECKSUM_FILE}" ]; then
+    echo "ERROR: cannot read pinned checksum file ${CHECKSUM_FILE}; refusing to build" >&2
+    return 1
+  fi
+  while IFS= read -r line || [ -n "${line}" ]; do
+    lineno=$((lineno + 1))
+    case "${line}" in ''|'#'*) continue ;; esac
+    if [[ ! "${line}" =~ ${CHECKSUM_LINE_RE} ]]; then
+      echo "ERROR: malformed entry at ${CHECKSUM_FILE}:${lineno}" >&2
+      echo "Every entry must be '<64 lowercase hex>  <archive>'; refusing to build" >&2
+      return 1
+    fi
+    if [ "${BASH_REMATCH[2]}" = "${archive}" ]; then
+      if [ -n "${digest}" ]; then
+        echo "ERROR: duplicate pinned sha256 for ${archive} at ${CHECKSUM_FILE}:${lineno}; refusing to build" >&2
+        return 1
+      fi
+      digest="${BASH_REMATCH[1]}"
+    fi
+  done < "${CHECKSUM_FILE}"
+  if [ -z "${digest}" ]; then
     echo "ERROR: no pinned sha256 for OpenSSL ${OPENSSL_VERSION}; refusing to build" >&2
-    echo "Add a case entry for ${OPENSSL_VERSION} in scripts/crypto/openssl/build-openssl-bundle.sh" >&2
+    echo "Add a '<sha256>  ${ARCHIVE}' line to ${CHECKSUM_FILE}" >&2
     echo "using the digest published at https://github.com/openssl/openssl/releases/download/${OPENSSL_TAG}/${ARCHIVE}.sha256" >&2
-    exit 1
-    ;;
-esac
+    return 1
+  fi
+  printf '%s\n' "${digest}"
+}
+
+if ! EXPECTED_SHA256="$(lookup_pinned_sha256 "${ARCHIVE}")"; then
+  exit 1
+fi
 
 compute_sha256() {
   local output

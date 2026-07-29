@@ -20,6 +20,7 @@ PROTECTED_EXACT = {
     "README.md",
     "SPEC_LOCATION.md",
     "scripts/crypto/openssl/build-openssl-bundle.sh",
+    "scripts/crypto/openssl/source-checksums.sha256",
     "tools/check_formal_claims_lint.py",
     "tools/check_formal_coverage.py",
     "tools/check_formal_refinement_bridge.py",

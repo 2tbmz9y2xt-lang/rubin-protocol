@@ -35,6 +35,7 @@ class FormalRelevanceTests(unittest.TestCase):
             "clients/rust/crates/rubin-consensus/src/lib.rs",
             "tools/formal/generate.py",
             "scripts/crypto/openssl/build-openssl-bundle.sh",
+            "scripts/crypto/openssl/source-checksums.sha256",
             "README.md",
             "SPEC_LOCATION.md",
             *sorted(path for path in subject.PROTECTED_EXACT if path.startswith("tools/")),
