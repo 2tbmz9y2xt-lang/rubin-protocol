@@ -113,14 +113,14 @@ func readAllCapped(f fs.File, name string, maxBytes int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Fail closed on hostile/absurd metadata BEFORE any sizing arithmetic: a
-	// negative reported size would make capHint return a negative capacity and
-	// `make` panic ("makeslice: cap out of range"), and a negative bound is a
-	// caller bug that must not silently admit everything. Neither is reachable
-	// through a regular file today, but this function's contract is to answer
-	// hostile on-disk metadata with a typed refusal, never a panic. (The Rust
-	// twin cannot express this: `metadata().len()` is u64.)
-	if info.Size() < 0 || maxBytes < 0 {
+	// Fail closed on hostile metadata BEFORE any sizing arithmetic: a negative
+	// reported size would make capHint return a negative capacity and `make`
+	// panic ("makeslice: cap out of range"). The size is DATA — it comes off
+	// the filesystem — so it gets a typed refusal rather than trust. The bound
+	// is not: callers pass a non-negative bound well below the int64 ceiling
+	// (a class constant or len(content)), so it is not re-validated here. (The
+	// Rust twin cannot express this row: `metadata().len()` is u64.)
+	if info.Size() < 0 {
 		return nil, errFileTooLarge(name, info.Size(), maxBytes)
 	}
 	if info.Size() > maxBytes {
@@ -142,9 +142,11 @@ func readAllCapped(f fs.File, name string, maxBytes int64) ([]byte, error) {
 // small reallocation, never a bound-sized allocation spike.
 func readCapped(f fs.File, name string, capacity int, maxBytes int64) ([]byte, error) {
 	buf := make([]byte, 0, capacity)
-	// Saturate: at the int64 ceiling maxBytes+1 wraps negative, and a
-	// negative LimitReader budget reports EOF immediately — a silent
-	// truncation exactly where the bound is supposed to refuse.
+	// Saturate rather than +1 blindly: a wrapped negative LimitReader budget
+	// reports EOF immediately — a silent truncation exactly where the bound is
+	// supposed to refuse. Production bounds sit far below this edge (see the
+	// caller invariant in readAllCapped); this keeps the arithmetic total
+	// regardless.
 	readBudget := maxBytes
 	if readBudget < math.MaxInt64 {
 		readBudget++
@@ -176,19 +178,21 @@ func readCapped(f fs.File, name string, capacity int, maxBytes int64) ([]byte, e
 // the floor itself is clamped to the limit, so a small class (header: limit
 // 117) never gets a 512-byte buffer.
 //
-// ORDER MATTERS: the doubling overflow is detected and clamped BEFORE the
-// floor is applied. Applying the floor first would rewrite an overflowed
-// negative product (on a 32-bit int build, current*2 wrapping to MinInt32)
-// into 512, and readCapped would then call make with a capacity below the
-// buffer's current length and panic. Progress is still guaranteed: the grow
-// branch only runs with len(buf) <= maxBytes < maxBytes+1 == limit, so the
-// returned capacity always exceeds the current one.
+// ORDER MATTERS: the limit is the DEFAULT and the doubling is taken only when
+// it provably fits (current <= limit/2), so an overflowed product can never be
+// observed — rather than being produced and corrected afterwards. `current` is
+// a slice capacity and therefore never negative, so `current <= limit/2`
+// implies `current*2 <= limit` and no wrap on any int width. The floor is
+// applied LAST and is itself clamped to the limit, so a class smaller than the
+// floor (header: limit 117) never receives a 512-byte buffer. Progress is
+// still guaranteed: the grow branch only runs with len(buf) <= maxBytes <
+// maxBytes+1 == limit, so the returned capacity always exceeds the current one.
 func growCapacity(current int, maxBytes int64) int {
 	const growFloor = 512
 	limit := capHint(maxBytes, maxBytes)
-	next := current * 2
-	if next < 0 || next > limit || current > limit/2 {
-		next = limit
+	next := limit
+	if current <= limit/2 {
+		next = current * 2
 	}
 	if next < growFloor {
 		next = min(growFloor, limit)
@@ -199,12 +203,20 @@ func growCapacity(current int, maxBytes int64) int {
 // capHint is min(size, maxBytes)+1 — the +1 gives the EOF probe room so an
 // exact-size read never reallocates — clamped to the platform int range. It
 // doubles as the growth ceiling in growCapacity.
+//
+// The clamp PRECEDES the increment: adding first would wrap
+// min(size, maxBytes) == MaxInt64 to MinInt64, and the old `> math.MaxInt`
+// test could never see it, so the ceiling returned a NEGATIVE capacity that
+// propagated into growCapacity's limit. Clamping first saturates instead.
+// A negative size still yields a negative hint by design — readAllCapped
+// refuses that case before capHint is ever reached, so there is deliberately
+// no second guard here.
 func capHint(size, maxBytes int64) int {
-	hint := min(size, maxBytes) + 1
-	if hint > math.MaxInt {
+	hint := min(size, maxBytes)
+	if hint >= math.MaxInt {
 		return math.MaxInt
 	}
-	return int(hint)
+	return int(hint) + 1
 }
 
 func errFileTooLarge(name string, observed, maxBytes int64) error {

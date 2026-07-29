@@ -57,6 +57,16 @@ func TestSafeIOGrowCapacityClampsOverflowBeforeFloor(t *testing.T) {
 			t.Fatalf("growCapacity(%d) returned negative capacity %d", row.current, got)
 		}
 	}
+	// capHint saturates at the int64 ceiling instead of wrapping: adding
+	// before clamping turned min(size,maxBytes)==MaxInt64 into MinInt64, and
+	// growCapacity then inherited a NEGATIVE limit. Pin both the helper and
+	// the growth ceiling it feeds.
+	if got := capHint(math.MaxInt64, math.MaxInt64); got != math.MaxInt {
+		t.Fatalf("capHint at the int64 ceiling = %d, want %d (saturated)", got, math.MaxInt)
+	}
+	if got := growCapacity(0, math.MaxInt64); got < 0 {
+		t.Fatalf("growCapacity inherited a negative ceiling: %d", got)
+	}
 	// A class smaller than the floor must never be handed a floor-sized
 	// buffer: the doc promises the capacity is clamped at capHint, and the
 	// header class (bound 116 -> limit 117) is exactly that case.
@@ -74,8 +84,9 @@ func TestSafeIOGrowCapacityClampsOverflowBeforeFloor(t *testing.T) {
 // TestSafeIOReadAllCappedRefusesHostileStatSize pins the fail-closed answer to
 // hostile on-disk metadata: a negative reported size must yield the typed size
 // error, never a negative capacity handed to make (which panics with
-// "makeslice: cap out of range"). Rust cannot express this row — its
-// metadata().len() is u64.
+// "makeslice: cap out of range"). Only the SIZE is validated — it is data off
+// the filesystem; the bound is a caller-supplied class constant and is not
+// re-checked. Rust cannot express this row — its metadata().len() is u64.
 func TestSafeIOReadAllCappedRefusesHostileStatSize(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "f.bin")
 	if err := os.WriteFile(path, []byte("0123456789"), 0o600); err != nil {
@@ -97,11 +108,6 @@ func TestSafeIOReadAllCappedRefusesHostileStatSize(t *testing.T) {
 	}
 	if lf.reads != 0 {
 		t.Fatalf("content was read despite hostile stat size: %d reads", lf.reads)
-	}
-	// A negative bound is a caller bug: refuse rather than admit everything.
-	honest := &lyingStatFile{File: f, size: 4}
-	if _, err := readAllCapped(honest, "f.bin", -1); !errors.Is(err, errStoreFileTooLarge) {
-		t.Fatalf("negative bound: want errStoreFileTooLarge, got %v", err)
 	}
 }
 
