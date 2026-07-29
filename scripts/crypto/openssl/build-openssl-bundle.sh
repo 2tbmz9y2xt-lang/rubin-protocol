@@ -49,7 +49,9 @@ echo "[openssl-bundle] work=${WORK_ROOT}"
 echo "[openssl-bundle] prefix=${PREFIX}"
 
 if [ ! -f "${TARBALL_PATH}" ]; then
-  curl -fL "${ARCHIVE_URL}" -o "${TARBALL_PATH}"
+  # Retrying is safe because of the check below: a truncated or partial result
+  # fails verification rather than being consumed.
+  curl -fL --retry 5 --retry-delay 2 --retry-all-errors "${ARCHIVE_URL}" -o "${TARBALL_PATH}"
 fi
 
 # One verification point covers both paths: a freshly downloaded tarball and one

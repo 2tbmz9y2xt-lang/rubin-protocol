@@ -87,17 +87,23 @@ jobs:
       # lacks ML-DSA, so the ML-DSA-gated targets f.Skipf during setup and
       # produce zero fuzz coverage (surfaced as SKIP_FUZZ_SETUP since
       # RUB-1061). The three steps below follow the proven ci.yml `test` shape
-      # and share its cache key: since RUB-1067 the bundle script verifies the
-      # source tarball against a version-pinned sha256 before extracting, on the
-      # cold and the cache-warm path alike, so every workflow writing this key
-      # builds from verified source.
+      # (cache + guarded build + PQ visibility check).
+      #
+      # Dedicated key, deliberately NOT the shared openssl-bundle-*-v2 key: this
+      # one is written only by this workflow, and since RUB-1067 the bundle
+      # script verifies the source tarball against a version-pinned sha256
+      # before extracting, so every bundle stored under this key descends from a
+      # verified tarball. The shared key still holds entries built before that
+      # verification existed, and the build step below skips the script whenever
+      # the restored bundle looks complete, so such an entry would never be
+      # checked. No restore-keys, for the same reason.
       - name: Cache OpenSSL 3.5 bundle
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: |
             ~/.cache/rubin-openssl/bundle-3.5.5
             ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
-          key: openssl-bundle-${{ runner.os }}-3.5.5-v2
+          key: openssl-bundle-mldsa-verified-${{ runner.os }}-3.5.5-v1
 
       - name: Build OpenSSL 3.5.5 bundle
         run: |

@@ -46,16 +46,19 @@ def source_tarball() -> bytes:
     return buf.getvalue()
 
 
-def repin(root: Path, payload: bytes) -> Path:
-    """The real script with its 3.5.5 pin repointed at a locally built payload."""
-    patched, count = re.subn(
-        r'(?<=EXPECTED_SHA256=")[0-9a-f]{64}(?=")',
-        hashlib.sha256(payload).hexdigest(),
-        SCRIPT_PATH.read_text(encoding="utf-8"),
-    )
-    assert count == 1, f"expected one pinned digest in {SCRIPT_PATH}, found {count}"
+def repin_text(text: str, digest: str, version: str) -> str:
+    """Repoint one version's case arm, leaving every other pinned version intact."""
+    patched, count = re.subn(rf'({re.escape(version)}\)\s+EXPECTED_SHA256=")[0-9a-f]{{64}}',
+                             rf"\g<1>{digest}", text)
+    assert count == 1, f"expected one pinned digest for {version}, found {count}"
+    return patched
+
+
+def repin(root: Path, payload: bytes, version: str) -> Path:
+    """The real script with the selected version's pin repointed at a local payload."""
     path = root / "build-openssl-bundle.sh"
-    path.write_text(patched, encoding="utf-8")
+    path.write_text(repin_text(SCRIPT_PATH.read_text(encoding="utf-8"),
+                               hashlib.sha256(payload).hexdigest(), version), encoding="utf-8")
     return path
 
 
@@ -81,7 +84,7 @@ class OpenSSLBundleContractTests(unittest.TestCase):
                "CURL_RAN": str(root / "curl-ran")}
         if archive_url is not None:
             env["ARCHIVE_URL"] = archive_url
-        proc = subprocess.run(["/bin/bash", str(repin(root, served) if repinned else SCRIPT_PATH)],
+        proc = subprocess.run(["/bin/bash", str(repin(root, served, version) if repinned else SCRIPT_PATH)],
                               capture_output=True, text=True, env=env, cwd=root)
         return SimpleNamespace(proc=proc, tarball=tarball, curl_ran=root / "curl-ran",
                                extracted=work / f"openssl-{version}" / "EXTRACTED")
@@ -127,6 +130,14 @@ class OpenSSLBundleContractTests(unittest.TestCase):
             self.assertRegex(run.proc.stderr, r"(sha256sum|shasum) failed")
             self.assertNotIn("mismatch", run.proc.stderr)
             self.assertTrue(run.tarball.exists())
+
+    def test_repin_targets_one_arm_when_a_second_version_is_pinned(self):
+        second = f'  3.6.0)\n    EXPECTED_SHA256="{"a" * 64}"\n    ;;\n'
+        text = SCRIPT_PATH.read_text(encoding="utf-8").replace("  3.5.5)\n", second + "  3.5.5)\n", 1)
+        patched = repin_text(text, "b" * 64, VERSION)
+        self.assertIn(f'EXPECTED_SHA256="{"a" * 64}"', patched)
+        self.assertIn(f'EXPECTED_SHA256="{"b" * 64}"', patched)
+        self.assertNotIn(PUBLISHED_SHA256, patched)
 
     def test_script_is_the_single_definition_of_the_published_pin(self):
         self.assertIn(f'EXPECTED_SHA256="{PUBLISHED_SHA256}"',
