@@ -101,14 +101,33 @@ import (
 // `_ = ...` discarded the exact failures that MUST reach the
 // caller. Propagate via `return` instead.
 func writeFileIfAbsent(path string, content []byte) error {
-	existing, err := readFileByPathFn(path, storeVerifyReadMaxBytes)
+	existing, err := readVerifyTarget(path, content)
 	if err == nil {
 		return syncMatchingExistingFile(path, content, existing)
+	}
+	if errors.Is(err, errStoreFileTooLarge) {
+		return errExistingContentDiffers(path)
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return writeFileViaTempLink(path, content)
+}
+
+// readVerifyTarget reads the existing destination bounded by len(content).
+// These reads exist ONLY to compare against content, so a destination of any
+// other size cannot match: bounding by the caller's own length means a
+// corrupt multi-gigabyte file at a 116-byte header destination is refused
+// before allocation instead of being buffered whole (RUB-1057). Callers map
+// the size refusal onto the pre-existing content-mismatch error, so the
+// caller-visible taxonomy is identical for every mismatch regardless of the
+// existing file's size.
+func readVerifyTarget(path string, content []byte) ([]byte, error) {
+	return readFileByPathFn(path, int64(len(content)))
+}
+
+func errExistingContentDiffers(path string) error {
+	return fmt.Errorf("file already exists with different content: %s", path)
 }
 
 // writeFileViaTempLink writes content to a temp file and atomically links it to path.
@@ -129,7 +148,10 @@ func writeFileViaTempLink(path string, content []byte) error {
 }
 
 func handleLinkEEXIST(path string, content []byte) error {
-	existing, err := readFileByPathFn(path, storeVerifyReadMaxBytes)
+	existing, err := readVerifyTarget(path, content)
+	if errors.Is(err, errStoreFileTooLarge) {
+		return errExistingContentDiffers(path)
+	}
 	if err != nil {
 		return fmt.Errorf("read existing after link EEXIST %s: %w", path, err)
 	}
@@ -138,7 +160,7 @@ func handleLinkEEXIST(path string, content []byte) error {
 
 func syncMatchingExistingFile(path string, content []byte, existing []byte) error {
 	if !bytes.Equal(existing, content) {
-		return fmt.Errorf("file already exists with different content: %s", path)
+		return errExistingContentDiffers(path)
 	}
 	return syncDir(filepath.Dir(path))
 }

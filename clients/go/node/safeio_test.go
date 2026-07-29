@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,18 +14,48 @@ import (
 
 const testReadBound = 8
 
-// TestSafeIOClassBoundConstantsPinFrozenValues pins the four frozen
+// TestSafeIOClassBoundConstantsPinFrozenValues pins the three frozen
 // cross-client bound values; a red row means the cross-client contract
 // number drifted, not a local tuning knob. De-scaled stand-in for the
-// removed at-production-bound rows of the undo and verify classes: those
-// callers share the bounded readers at these hard-wired constants, and their
-// at/over verdicts run at small injectable bounds in this file. The
-// chainstate snapshot and index marker are deliberately absent — they grow
-// with accumulated state, admit no fixed ceiling, and are owned by RUB-1062.
+// removed at-production-bound row of the undo class: that caller shares the
+// bounded reader at these hard-wired constants, and its at/over verdicts run
+// at small injectable bounds in this file. The chainstate snapshot and index
+// marker are deliberately absent — they grow with accumulated state, admit
+// no fixed ceiling, and are owned by RUB-1062. The write-if-absent verify
+// reads have no constant of their own: they are bounded by the length of the
+// content being written (see readVerifyTarget).
 func TestSafeIOClassBoundConstantsPinFrozenValues(t *testing.T) {
 	if blockFileMaxBytes != 72_000_000 || headerFileMaxBytes != 116 ||
-		undoFileMaxBytes != 2_000_000_000 || storeVerifyReadMaxBytes != undoFileMaxBytes {
+		undoFileMaxBytes != 2_000_000_000 {
 		t.Fatalf("class bound constants drifted from the frozen cross-client table")
+	}
+}
+
+// TestSafeIOGrowCapacityClampsOverflowBeforeFloor pins the guard ORDER: a
+// doubling that overflows (or merely exceeds the limit) is clamped to the
+// limit, never rewritten to the 512 floor — a floor-first order would return
+// a capacity below the buffer's current length and make readCapped panic on
+// a 32-bit build. Exercised on the helper so the row runs on 64-bit CI too.
+func TestSafeIOGrowCapacityClampsOverflowBeforeFloor(t *testing.T) {
+	const maxBytes = int64(1 << 20)
+	limit := capHint(maxBytes, maxBytes)
+	rows := []struct{ current, want int }{
+		{0, 512},                 // tiny start: floor applies
+		{4, 512},                 // still below the floor
+		{1024, 2048},             // ordinary doubling
+		{limit/2 + 1, limit},     // doubling would exceed the limit
+		{limit, limit},           // already at the limit
+		{math.MaxInt, limit},     // doubling overflows to negative
+		{math.MaxInt / 2, limit}, // doubling lands exactly at overflow edge
+		{math.MaxInt - 1, limit}, // near-ceiling overflow
+	}
+	for _, row := range rows {
+		if got := growCapacity(row.current, maxBytes); got != row.want {
+			t.Fatalf("growCapacity(%d) = %d, want %d", row.current, got, row.want)
+		}
+		if got := growCapacity(row.current, maxBytes); got < 0 {
+			t.Fatalf("growCapacity(%d) returned negative capacity %d", row.current, got)
+		}
 	}
 }
 

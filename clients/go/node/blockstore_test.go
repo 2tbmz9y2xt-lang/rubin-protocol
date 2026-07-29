@@ -677,38 +677,57 @@ func TestBlockStoreReadFileClassBoundsAcceptAtBound(t *testing.T) {
 	}
 }
 
-// TestWriteFileIfAbsentEEXISTVerifyReadFileBound drives BOTH write-if-absent
-// verify read sites against an over-bound existing destination at a small
-// injectable bound through the readFileByPathFn seam (the production seam
-// constant storeVerifyReadMaxBytes is pinned by
-// TestSafeIOClassBoundConstantsPinFrozenValues): the fast-path probe and the
-// EEXIST-arm re-read must both refuse with the typed bound error instead of
-// buffering the file. For the EEXIST arm the first probe reports NotExist so
-// writeFileViaTempLink reaches os.Link EEXIST and performs the real second
-// read.
-func TestWriteFileIfAbsentEEXISTVerifyReadFileBound(t *testing.T) {
-	dst := filepath.Join(t.TempDir(), "dst.bin")
-	if err := os.WriteFile(dst, []byte("012345678"), 0o600); err != nil { // testReadBound+1 bytes
-		t.Fatalf("seed: %v", err)
-	}
-	prev := readFileByPathFn
-	t.Cleanup(func() { readFileByPathFn = prev })
-	stubBound := func(path string, _ int64) ([]byte, error) {
-		return readFileByPathCapped(path, testReadBound)
-	}
-	readFileByPathFn = stubBound
-	if err := writeFileIfAbsent(dst, []byte("x")); !errors.Is(err, errStoreFileTooLarge) {
-		t.Fatalf("fast-path verify read: want errStoreFileTooLarge, got %v", err)
-	}
-	first := true
-	readFileByPathFn = func(path string, maxBytes int64) ([]byte, error) {
-		if first {
-			first = false
-			return nil, os.ErrNotExist
-		}
-		return stubBound(path, maxBytes)
-	}
-	if err := writeFileIfAbsent(dst, []byte("x")); !errors.Is(err, errStoreFileTooLarge) {
-		t.Fatalf("EEXIST verify read: want errStoreFileTooLarge, got %v", err)
+// TestWriteFileIfAbsentVerifyReadBoundedByContentLength pins the RUB-1057
+// wave-3 seam semantics on BOTH verify read sites — the fast-path probe and
+// the link-EEXIST re-read: an existing destination LARGER than the content
+// being written is reported as the pre-existing content-mismatch error (the
+// caller-visible taxonomy is identical for every mismatch, whatever the
+// existing file's size), and the read never materializes more than
+// len(content) bytes, so a corrupt multi-gigabyte file at a small
+// destination is never buffered whole. The recorded bound proves the seam
+// passes len(content), not a coarse class constant.
+func TestWriteFileIfAbsentVerifyReadBoundedByContentLength(t *testing.T) {
+	content := []byte("x")
+	wantErr := "file already exists with different content"
+	for _, tc := range []struct {
+		name   string
+		eexist bool
+	}{
+		{"fast_path", false},
+		{"link_eexist", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), "dst.bin")
+			// Far larger than len(content): a whole-file read would allocate it.
+			if err := os.WriteFile(dst, bytes.Repeat([]byte{0xa5}, 4096), 0o600); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			prev := readFileByPathFn
+			t.Cleanup(func() { readFileByPathFn = prev })
+			var bounds []int64
+			skipFirst := tc.eexist
+			readFileByPathFn = func(path string, maxBytes int64) ([]byte, error) {
+				if skipFirst {
+					skipFirst = false
+					return nil, os.ErrNotExist
+				}
+				bounds = append(bounds, maxBytes)
+				got, err := readFileByPathCapped(path, maxBytes)
+				if int64(len(got)) > maxBytes {
+					t.Fatalf("verify read materialized %d bytes, bound %d", len(got), maxBytes)
+				}
+				return got, err
+			}
+			err := writeFileIfAbsent(dst, content)
+			if err == nil || !strings.Contains(err.Error(), wantErr) {
+				t.Fatalf("want content-mismatch error, got %v", err)
+			}
+			if errors.Is(err, errStoreFileTooLarge) {
+				t.Fatalf("size refusal leaked into the caller taxonomy: %v", err)
+			}
+			if len(bounds) != 1 || bounds[0] != int64(len(content)) {
+				t.Fatalf("verify read bounds = %v, want [%d]", bounds, len(content))
+			}
+		})
 	}
 }

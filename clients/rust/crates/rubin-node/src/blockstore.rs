@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::io_utils::{
     parse_hex32, read_file_by_path, read_file_from_dir, read_file_from_dir_unbounded,
     write_file_atomic, write_file_exclusive, AtomicWriteError, BLOCK_FILE_MAX_BYTES,
-    HEADER_FILE_MAX_BYTES, STORE_VERIFY_READ_MAX_BYTES, UNDO_FILE_MAX_BYTES,
+    HEADER_FILE_MAX_BYTES, UNDO_FILE_MAX_BYTES,
 };
 use crate::undo::{marshal_block_undo, unmarshal_block_undo, BlockUndo};
 use std::ffi::OsStr;
@@ -1040,12 +1040,36 @@ struct BlockStoreIndexView<'a> {
 /// through `sync_dir`'s own best-effort wrapper (Copilot P1 wave-7 on
 /// PR #1220).
 fn write_file_if_absent(path: &Path, content: &[u8]) -> Result<(), String> {
-    // Both verify reads share ONE documented seam bound
-    // (STORE_VERIFY_READ_MAX_BYTES = undo, the coarsest class served);
-    // the closure is the test seam mirroring Go's `readFileByPathFn` var.
-    write_file_if_absent_with(path, content, |p| {
-        read_file_by_path(p, STORE_VERIFY_READ_MAX_BYTES)
-    })
+    // Both verify reads are bounded by the length of the content being
+    // written: they exist ONLY to compare against `content`, so a
+    // destination of any other size cannot match, and bounding by the
+    // caller's own length means a corrupt multi-gigabyte file at a
+    // 116-byte header destination is refused before allocation instead of
+    // being buffered whole (RUB-1057). The size refusal is mapped onto the
+    // pre-existing content-mismatch error by `existing_content_differs`, so
+    // the caller-visible taxonomy is identical for every mismatch whatever
+    // the existing file's size. The closure is the test seam mirroring Go's
+    // `readFileByPathFn` var.
+    let bound = content.len() as u64;
+    write_file_if_absent_with(path, content, move |p| read_file_by_path(p, bound))
+}
+
+/// The one caller-visible verdict for a destination whose bytes are not the
+/// bytes being written — including a destination too large to be them.
+fn existing_content_differs(path: &Path) -> String {
+    format!(
+        "file already exists with different content: {}",
+        path.display()
+    )
+}
+
+/// True when `e` is the bounded reader's size refusal, i.e. the existing
+/// destination is larger than the content being written and therefore cannot
+/// equal it. Go twin: `errors.Is(err, errStoreFileTooLarge)` at the same sites.
+fn is_over_bound_refusal(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::InvalidData
+        && e.to_string()
+            .starts_with(crate::io_utils::STORE_FILE_TOO_LARGE_PREFIX)
 }
 
 fn write_file_if_absent_with(
@@ -1078,10 +1102,7 @@ fn write_file_if_absent_with(
     match read_existing(path) {
         Ok(existing) => {
             if existing != content {
-                return Err(format!(
-                    "file already exists with different content: {}",
-                    path.display()
-                ));
+                return Err(existing_content_differs(path));
             }
             if let Some(parent) = crate::io_utils::effective_parent(path) {
                 crate::io_utils::sync_dir(parent)?;
@@ -1090,6 +1111,10 @@ fn write_file_if_absent_with(
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // Fall through to the race-hardened atomic write.
+        }
+        Err(e) if is_over_bound_refusal(&e) => {
+            // Larger than the content being written: cannot be a match.
+            return Err(existing_content_differs(path));
         }
         Err(e) => {
             return Err(format!("read existing {}: {e}", path.display()));
@@ -1113,13 +1138,15 @@ fn handle_link_eexist(
     content: &[u8],
     read_existing: impl Fn(&Path) -> Result<Vec<u8>, std::io::Error>,
 ) -> Result<(), String> {
-    let existing =
-        read_existing(path).map_err(|e| format!("read existing {}: {e}", path.display()))?;
+    let existing = read_existing(path).map_err(|e| {
+        if is_over_bound_refusal(&e) {
+            existing_content_differs(path)
+        } else {
+            format!("read existing {}: {e}", path.display())
+        }
+    })?;
     if existing != content {
-        return Err(format!(
-            "file already exists with different content: {}",
-            path.display()
-        ));
+        return Err(existing_content_differs(path));
     }
     // Propagate parent dir-sync result on the EEXIST-retry branch for the
     // same reason as the Ok fast-path above: `sync_dir` already applies
@@ -1201,39 +1228,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Drives BOTH write-if-absent verify read sites against an over-bound
-    /// existing destination at a small injectable bound through the
-    /// `write_file_if_absent_with` seam (the production seam constant
-    /// `STORE_VERIFY_READ_MAX_BYTES` is pinned by
-    /// `class_bound_constants_pin_frozen_values`): the fast-path probe and
-    /// the hard_link-EEXIST re-read must both refuse instead of buffering
-    /// the file. For the EEXIST arm the first probe reports NotFound so
-    /// `write_file_exclusive` reaches hard_link EEXIST and performs the real
-    /// second read. Go twin: `TestWriteFileIfAbsentEEXISTVerifyReadFileBound`.
+    /// RUB-1057 wave-3 seam semantics on BOTH verify read sites — the
+    /// fast-path probe and the hard_link-EEXIST re-read: an existing
+    /// destination LARGER than the content being written is reported as the
+    /// pre-existing content-mismatch error (identical caller-visible taxonomy
+    /// for every mismatch, whatever the existing file's size), and the read
+    /// never materializes more than `content.len()` bytes, so a corrupt
+    /// multi-gigabyte file at a small destination is never buffered whole.
+    /// The recorded bound proves the seam passes `content.len()`, not a
+    /// coarse class constant. For the EEXIST arm the first probe reports
+    /// NotFound so `write_file_exclusive` reaches hard_link EEXIST and
+    /// performs the real second read. Go twin:
+    /// `TestWriteFileIfAbsentVerifyReadBoundedByContentLength`.
     #[test]
-    fn write_file_if_absent_eexist_verify_read_enforces_bound() {
-        let dir = unique_temp_path("rubin-wfia-eexist-bound");
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let dst = dir.join("dst.bin");
-        std::fs::write(&dst, [0xa5u8; 9]).expect("seed"); // small bound 8 + 1
-        let err = write_file_if_absent_with(&dst, b"x", |p| read_file_by_path(p, 8)).unwrap_err();
-        assert!(
-            err.contains(STORE_FILE_TOO_LARGE_PREFIX),
-            "fast path: {err}"
-        );
-        let first = std::cell::Cell::new(true);
-        let err = write_file_if_absent_with(&dst, b"x", |p| {
-            if first.replace(false) {
-                return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
-            }
-            read_file_by_path(p, 8)
-        })
-        .unwrap_err();
-        assert!(
-            err.contains(STORE_FILE_TOO_LARGE_PREFIX),
-            "eexist arm: {err}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+    fn write_file_if_absent_verify_read_bounded_by_content_length() {
+        for eexist in [false, true] {
+            let dir = unique_temp_path("rubin-wfia-verify-bound");
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            let dst = dir.join("dst.bin");
+            // Far larger than content.len(): a whole-file read would allocate it.
+            std::fs::write(&dst, [0xa5u8; 4096]).expect("seed");
+            let content = b"x";
+            let bounds = std::cell::RefCell::new(Vec::new());
+            let skip_first = std::cell::Cell::new(eexist);
+            let err = write_file_if_absent(&dst, content).unwrap_err();
+            assert!(
+                err.starts_with("file already exists with different content"),
+                "production seam: {err}"
+            );
+            assert!(
+                !err.contains(STORE_FILE_TOO_LARGE_PREFIX),
+                "size refusal leaked into the caller taxonomy: {err}"
+            );
+            // Same through the injectable seam, recording the bound passed.
+            let err = write_file_if_absent_with(&dst, content, |p| {
+                if skip_first.replace(false) {
+                    return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+                }
+                let bound = content.len() as u64;
+                bounds.borrow_mut().push(bound);
+                let got = read_file_by_path(p, bound);
+                if let Ok(bytes) = &got {
+                    assert!(bytes.len() as u64 <= bound, "materialized {}", bytes.len());
+                }
+                got
+            })
+            .unwrap_err();
+            assert!(
+                err.starts_with("file already exists with different content"),
+                "injected seam (eexist={eexist}): {err}"
+            );
+            assert_eq!(*bounds.borrow(), vec![content.len() as u64]);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     /// Pins the measured per-entry JSON byte cost cited by the undo bound

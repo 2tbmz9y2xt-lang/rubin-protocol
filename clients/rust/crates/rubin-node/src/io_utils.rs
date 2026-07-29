@@ -32,14 +32,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 //   decoded structs), so this bound governs the FILE, not the decode
 //   footprint. Enforced on both ends (check_store_save_bound in put_undo, the
 //   bounded read in get_undo).
-// - STORE_VERIFY_READ_MAX_BYTES bounds the write-if-absent existing-
-//   destination verify reads (blockstore.rs `write_file_if_absent`), one
-//   seam serving block, header, and undo destinations: the coarsest class
-//   served (undo). The tighter per-class bounds hold on the live read paths.
+// The write-if-absent existing-destination verify reads have no constant of
+// their own: they exist only to compare against the content being written, so
+// they are bounded by that content's own length (blockstore.rs
+// `write_file_if_absent`) and a larger destination is reported through the
+// existing content-mismatch error rather than as a size refusal.
 pub(crate) const BLOCK_FILE_MAX_BYTES: u64 = rubin_consensus::constants::MAX_BLOCK_BYTES;
 pub(crate) const HEADER_FILE_MAX_BYTES: u64 = rubin_consensus::BLOCK_HEADER_BYTES as u64;
 pub(crate) const UNDO_FILE_MAX_BYTES: u64 = 2_000_000_000;
-pub(crate) const STORE_VERIFY_READ_MAX_BYTES: u64 = UNDO_FILE_MAX_BYTES;
 
 /// Stable message prefix of the typed over-bound refusal; tests match on
 /// ErrorKind + this prefix.
@@ -1099,24 +1099,22 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Pins the four frozen cross-client bound values; a red row means the
+    /// Pins the three frozen cross-client bound values; a red row means the
     /// cross-client contract number drifted, not a local tuning knob.
-    /// De-scaled stand-in for the removed at-production-bound rows of the
-    /// undo and verify classes: those callers share the bounded readers at
-    /// these hard-wired constants, and their at/over verdicts run at small
-    /// injectable bounds in this module. The chainstate snapshot and index
-    /// marker are deliberately absent — they grow with accumulated state,
-    /// admit no fixed ceiling, and are owned by RUB-1062. Go twin:
+    /// De-scaled stand-in for the removed at-production-bound row of the undo
+    /// class: that caller shares the bounded reader at these hard-wired
+    /// constants, and its at/over verdicts run at small injectable bounds in
+    /// this module. The chainstate snapshot and index marker are deliberately
+    /// absent — they grow with accumulated state, admit no fixed ceiling, and
+    /// are owned by RUB-1062. The write-if-absent verify reads have no
+    /// constant of their own: they are bounded by the length of the content
+    /// being written. Go twin:
     /// `TestSafeIOClassBoundConstantsPinFrozenValues`.
     #[test]
     fn class_bound_constants_pin_frozen_values() {
         assert_eq!(BLOCK_FILE_MAX_BYTES, 72_000_000);
         assert_eq!(super::HEADER_FILE_MAX_BYTES, 116);
         assert_eq!(super::UNDO_FILE_MAX_BYTES, 2_000_000_000);
-        assert_eq!(
-            super::STORE_VERIFY_READ_MAX_BYTES,
-            super::UNDO_FILE_MAX_BYTES
-        );
     }
 
     /// Write/read symmetry guard row for the undo class (the one guarded

@@ -51,13 +51,6 @@ const (
 	// bound governs the FILE, not the decode footprint. Enforced on both
 	// ends (checkStoreSaveBound in PutUndo, readFileFromDir in GetUndo).
 	undoFileMaxBytes = 2_000_000_000
-
-	// storeVerifyReadMaxBytes bounds the write-if-absent existing-
-	// destination verify reads (blockstore_write_if_absent.go), one seam
-	// serving block, header, and undo destinations: the coarsest class
-	// served (undo). The tighter per-class bounds hold on the live read
-	// paths (GetBlockByHash/GetHeaderByHash/GetUndo).
-	storeVerifyReadMaxBytes = undoFileMaxBytes
 )
 
 // readFileByPath reads path in full with only the leaf-name guard. Its sole
@@ -151,20 +144,26 @@ func readCapped(f fs.File, name string, capacity int, maxBytes int64) ([]byte, e
 	}
 }
 
-// growCapacity doubles the current capacity (512-byte floor so a tiny start
-// still makes progress), capped at capHint(maxBytes, maxBytes) = maxBytes+1
-// — the most the limiter can ever deliver. Progress is guaranteed: the grow
-// branch only runs with len(buf) <= maxBytes < maxBytes+1, so the returned
-// capacity always exceeds the current one. The negative check catches a
-// doubling overflow on 32-bit int builds.
+// growCapacity doubles the current capacity, clamped to
+// capHint(maxBytes, maxBytes) = maxBytes+1 (the most the limiter can ever
+// deliver), then floored at 512 bytes so a tiny start still makes progress.
+//
+// ORDER MATTERS: the doubling overflow is detected and clamped BEFORE the
+// floor is applied. Applying the floor first would rewrite an overflowed
+// negative product (on a 32-bit int build, current*2 wrapping to MinInt32)
+// into 512, and readCapped would then call make with a capacity below the
+// buffer's current length and panic. Progress is still guaranteed: the grow
+// branch only runs with len(buf) <= maxBytes < maxBytes+1 == limit, so the
+// returned capacity always exceeds the current one.
 func growCapacity(current int, maxBytes int64) int {
 	const growFloor = 512
+	limit := capHint(maxBytes, maxBytes)
 	next := current * 2
-	if next < growFloor {
-		next = growFloor
-	}
-	if limit := capHint(maxBytes, maxBytes); next > limit || next < 0 {
+	if next < 0 || next > limit || current > limit/2 {
 		next = limit
+	}
+	if next < growFloor && next < limit {
+		next = growFloor
 	}
 	return next
 }
