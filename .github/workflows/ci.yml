@@ -204,9 +204,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: rubin-formal/.lake
-          key: lake-formal-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain', 'rubin-formal/lakefile.lean', 'rubin-formal/lake-manifest.json') }}
+          key: lake-formal-v2-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain', 'rubin-formal/lakefile.lean', 'rubin-formal/lake-manifest.json') }}-${{ hashFiles('rubin-formal/RubinFormal.lean', 'rubin-formal/RubinFormal/**/*.lean') }}
           restore-keys: |
-            lake-formal-${{ runner.os }}-
+            lake-formal-v2-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain', 'rubin-formal/lakefile.lean', 'rubin-formal/lake-manifest.json') }}-
 
       - name: Lean package checks (rubin-formal)
         if: steps.formal_gate.outputs.run_formal == 'true'
@@ -689,9 +689,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: rubin-formal/.lake
-          key: lake-refinement-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain', 'rubin-formal/lakefile.lean', 'rubin-formal/lake-manifest.json') }}
+          key: lake-refinement-v2-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain', 'rubin-formal/lakefile.lean', 'rubin-formal/lake-manifest.json') }}-${{ hashFiles('rubin-formal/RubinFormal.lean', 'rubin-formal/RubinFormal/**/*.lean') }}
           restore-keys: |
-            lake-refinement-${{ runner.os }}-
+            lake-refinement-v2-${{ runner.os }}-${{ hashFiles('rubin-formal/lean-toolchain', 'rubin-formal/lakefile.lean', 'rubin-formal/lake-manifest.json') }}-
 
       - name: Lean build (rubin-formal)
         if: steps.formal_gate.outputs.run_formal == 'true'
