@@ -460,12 +460,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// chainstate as loaded from disk — a snapshot that disagrees with the
 	// blockstore is reported, not fixed. Ordinary startup is unaffected:
 	// same two calls, same order, same errors, same exit codes.
-	//
-	// The Rust mirror named above therefore holds for ordinary startup ONLY.
-	// It is deliberately broken for --dry-run until RUB-1083 lands the same
-	// skip: Rust still reconciles and saves before its own dry-run return, so
-	// on a datadir with an incomplete canonical suffix Go reports the tip and
-	// leaves the index alone where Rust truncates it and reports the loss.
 	if !*dryRun {
 		if _, err := node.ReconcileChainStateWithBlockStore(chainState, blockStore, syncCfg); err != nil {
 			_, _ = fmt.Fprintf(stderr, "chainstate reconcile failed: %v\n", err)
