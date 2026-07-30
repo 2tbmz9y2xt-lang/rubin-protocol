@@ -586,6 +586,7 @@ dependencies = [
  "criterion",
  "ctrlc",
  "hex",
+ "libc",
  "num-bigint",
  "rubin-consensus",
  "serde",

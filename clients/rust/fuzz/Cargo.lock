@@ -334,6 +334,7 @@ version = "0.0.0"
 dependencies = [
  "ctrlc",
  "hex",
+ "libc",
  "num-bigint",
  "rubin-consensus",
  "serde",

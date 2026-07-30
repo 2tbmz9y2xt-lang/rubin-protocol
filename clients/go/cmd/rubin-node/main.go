@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node/p2p"
 )
@@ -231,34 +232,85 @@ func loadLegacyExposureScanChainState(path string) (*node.ChainState, error) {
 }
 
 // createOrOpenBlockStore selects the explicit create path or the strict
-// open-existing path. In create mode the CLI owns the preconditions: the
-// blockstore root must be absent (its error wins) and the chainstate must be
-// absent, both checked before the datadir or any store artifact is created.
-func createOrOpenBlockStore(dataDir, chainStatePath string, createStore bool, stderr io.Writer) (*node.BlockStore, int) {
+// open-existing path. Mutating paths return their held datadir lock; dry-run
+// preserves the strict open without acquiring or creating that lock.
+func createOrOpenBlockStore(dataDir, chainStatePath string, createStore, dryRun bool, stderr io.Writer) (*node.BlockStore, *filelock.Handle, int) {
 	rootPath := node.BlockStorePath(dataDir)
 	if !createStore {
-		blockStore, err := node.OpenBlockStore(rootPath)
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "blockstore open failed: %v\n", err)
-			return nil, 2
+		if dryRun {
+			blockStore, exit := openBlockStore(rootPath, stderr)
+			return blockStore, nil, exit
 		}
-		return blockStore, 0
+		if err := missingBlockStoreOpenError(dataDir, rootPath); err != nil {
+			_, _ = fmt.Fprintf(stderr, "blockstore open failed: %v\n", err)
+			return nil, nil, 2
+		}
+		lock, lockExit := acquireDatadirLock(dataDir, stderr)
+		if lockExit != 0 {
+			return nil, nil, lockExit
+		}
+		blockStore, exit := openBlockStore(rootPath, stderr)
+		if exit != 0 {
+			_ = lock.Release()
+			return nil, nil, exit
+		}
+		return blockStore, lock, 0
 	}
 	if err := requireAbsentPath("blockstore root", rootPath); err != nil {
 		_, _ = fmt.Fprintf(stderr, "blockstore create failed: %v\n", err)
-		return nil, 2
+		return nil, nil, 2
 	}
 	if err := requireAbsentPath("chainstate", chainStatePath); err != nil {
 		_, _ = fmt.Fprintf(stderr, "blockstore create failed: %v\n", err)
-		return nil, 2
+		return nil, nil, 2
 	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		_, _ = fmt.Fprintf(stderr, "datadir create failed: %v\n", err)
-		return nil, 2
+		return nil, nil, 2
+	}
+	lock, lockExit := acquireDatadirLock(dataDir, stderr)
+	if lockExit != 0 {
+		return nil, nil, lockExit
+	}
+	if err := requireAbsentPath("blockstore root", rootPath); err != nil {
+		_ = lock.Release()
+		_, _ = fmt.Fprintf(stderr, "blockstore create failed: %v\n", err)
+		return nil, nil, 2
+	}
+	if err := requireAbsentPath("chainstate", chainStatePath); err != nil {
+		_ = lock.Release()
+		_, _ = fmt.Fprintf(stderr, "blockstore create failed: %v\n", err)
+		return nil, nil, 2
 	}
 	blockStore, err := node.CreateBlockStore(rootPath)
 	if err != nil {
+		_ = lock.Release()
 		_, _ = fmt.Fprintf(stderr, "blockstore create failed: %v\n", err)
+		return nil, nil, 2
+	}
+	return blockStore, lock, 0
+}
+
+// missingBlockStoreOpenError preserves the strict-open rejection for an
+// initially absent datadir without entering BlockStore open before a mutating
+// caller owns the datadir lock. The second, root-level probe closes the only
+// relevant race: if a concurrent create has made the root appear, the caller
+// continues to acquire the lock and opens the store under it. If it remains
+// absent, format the same root Stat error that BlockStore open would report.
+func missingBlockStoreOpenError(dataDir, rootPath string) error {
+	if _, err := os.Lstat(dataDir); !errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if _, err := os.Stat(rootPath); errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("blockstore directory %s: %w", rootPath, err)
+	}
+	return nil
+}
+
+func openBlockStore(rootPath string, stderr io.Writer) (*node.BlockStore, int) {
+	blockStore, err := node.OpenBlockStore(rootPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "blockstore open failed: %v\n", err)
 		return nil, 2
 	}
 	return blockStore, 0
@@ -406,9 +458,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// Storage lifecycle runs BEFORE the chainstate load: an uninitialized or
 	// half-initialized store must reject before anything reads or writes
 	// chainstate. Ordinary startup performs no mkdir at all.
-	blockStore, storeExit := createOrOpenBlockStore(cfg.DataDir, chainStatePath, *createStore, stderr)
+	blockStore, datadirLock, storeExit := createOrOpenBlockStore(cfg.DataDir, chainStatePath, *createStore, *dryRun, stderr)
 	if storeExit != 0 {
 		return storeExit
+	}
+	if datadirLock != nil {
+		defer func() { _ = datadirLock.Release() }()
 	}
 	chainState, err := node.LoadChainState(chainStatePath)
 	if err != nil {

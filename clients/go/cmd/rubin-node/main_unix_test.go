@@ -41,6 +41,14 @@ func TestRunStartupFailsWhenChainstateSaveFails(t *testing.T) {
 	if _, err := engine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
 		t.Fatalf("ApplyBlock(genesis): %v", err)
 	}
+	var lockStderr bytes.Buffer
+	lock, lockExit := acquireDatadirLock(dir, &lockStderr)
+	if lockExit != 0 || lock == nil {
+		t.Fatalf("create datadir lock: exit=%d stderr=%q", lockExit, lockStderr.String())
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("release datadir lock: %v", err)
+	}
 
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatalf("Chmod(readonly datadir): %v", err)

@@ -23,6 +23,9 @@ use rubin_node::{
 };
 use serde::{Deserialize, Serialize};
 
+mod datadir_lock;
+mod file_lock;
+
 const PRODUCTION_STOP_SIGNAL_SET: &str = "SIGINT/SIGTERM";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,30 +143,35 @@ fn load_legacy_exposure_scan_chain_state(
     Ok(chain_state)
 }
 
-/// Select the explicit create path or the strict open-existing path. In create
-/// mode the CLI owns the preconditions: the blockstore root must be absent (its
-/// error wins) and the chainstate must be absent, both checked before the datadir
-/// or any store artifact is created.
+/// Select the explicit create path or the strict open-existing path. Mutating
+/// paths return their held datadir lock; dry-run preserves the strict open
+/// without acquiring or creating that lock.
 fn create_or_open_block_store(
     cfg: &CliConfig,
     chain_state_file: &Path,
     stderr: &mut dyn Write,
-) -> Result<BlockStore, i32> {
+) -> Result<(BlockStore, Option<datadir_lock::HeldDatadirLock>), i32> {
     let root_path = block_store_path(&cfg.data_dir);
     if !cfg.create_store {
-        return BlockStore::open(root_path).map_err(|err| {
-            let _ = writeln!(stderr, "blockstore open failed: {err}");
-            2
-        });
-    }
-    for (label, path) in [
-        ("blockstore root", root_path.as_path()),
-        ("chainstate", chain_state_file),
-    ] {
-        if let Err(err) = require_absent_path(label, path) {
-            let _ = writeln!(stderr, "blockstore create failed: {err}");
+        if cfg.dry_run {
+            return open_block_store(&root_path, stderr).map(|store| (store, None));
+        }
+        if let Some(error) = missing_block_store_open_error(&cfg.data_dir, &root_path) {
+            let _ = writeln!(stderr, "blockstore open failed: {error}");
             return Err(2);
         }
+        let lock = datadir_lock::acquire(&cfg.data_dir, stderr)?;
+        return match open_block_store(&root_path, stderr) {
+            Ok(store) => Ok((store, Some(lock))),
+            Err(code) => {
+                lock.release();
+                Err(code)
+            }
+        };
+    }
+    if let Err(err) = require_create_paths(&root_path, chain_state_file) {
+        let _ = writeln!(stderr, "blockstore create failed: {err}");
+        return Err(2);
     }
     if let Err(err) = fs::create_dir_all(&cfg.data_dir) {
         let _ = writeln!(
@@ -173,10 +181,57 @@ fn create_or_open_block_store(
         );
         return Err(2);
     }
-    BlockStore::create(root_path).map_err(|err| {
+    let lock = datadir_lock::acquire(&cfg.data_dir, stderr)?;
+    if let Err(err) = require_create_paths(&root_path, chain_state_file) {
+        lock.release();
         let _ = writeln!(stderr, "blockstore create failed: {err}");
+        return Err(2);
+    }
+    match BlockStore::create(root_path) {
+        Ok(store) => Ok((store, Some(lock))),
+        Err(err) => {
+            lock.release();
+            let _ = writeln!(stderr, "blockstore create failed: {err}");
+            Err(2)
+        }
+    }
+}
+
+fn open_block_store(root_path: &Path, stderr: &mut dyn Write) -> Result<BlockStore, i32> {
+    BlockStore::open(root_path.to_path_buf()).map_err(|err| {
+        let _ = writeln!(stderr, "blockstore open failed: {err}");
         2
     })
+}
+
+fn data_dir_is_missing(path: &Path) -> bool {
+    matches!(
+        fs::symlink_metadata(path),
+        Err(err) if err.kind() == io::ErrorKind::NotFound
+    )
+}
+
+fn missing_block_store_open_error(data_dir: &Path, root_path: &Path) -> Option<String> {
+    if !data_dir_is_missing(data_dir) {
+        return None;
+    }
+    match fs::metadata(root_path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(format!(
+            "blockstore directory {}: {error}",
+            root_path.display()
+        )),
+        _ => None,
+    }
+}
+
+fn require_create_paths(root_path: &Path, chain_state_file: &Path) -> Result<(), String> {
+    for (label, path) in [
+        ("blockstore root", root_path),
+        ("chainstate", chain_state_file),
+    ] {
+        require_absent_path(label, path)?;
+    }
+    Ok(())
 }
 
 /// Reject any existing filesystem entry at `path`. `symlink_metadata`, not
@@ -262,10 +317,11 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     // Storage lifecycle runs BEFORE the chainstate load: an uninitialized or
     // half-initialized store must reject before anything reads or writes
     // chainstate. Ordinary startup performs no mkdir at all.
-    let mut block_store = match create_or_open_block_store(&cfg, &chain_state_file, stderr) {
-        Ok(block_store) => block_store,
-        Err(code) => return code,
-    };
+    let (mut block_store, _datadir_lock) =
+        match create_or_open_block_store(&cfg, &chain_state_file, stderr) {
+            Ok(block_store_and_lock) => block_store_and_lock,
+            Err(code) => return code,
+        };
     let mut chain_state = match load_chain_state(&chain_state_file) {
         Ok(chain_state) => chain_state,
         Err(err) => {
@@ -3867,6 +3923,9 @@ mod tests {
             assert!(root.join(sub).is_dir());
         }
         assert!(root.join("index.json").is_file());
+        let lock = fs::metadata(dir.join(".rubin.lock")).expect("datadir lock");
+        assert!(lock.file_type().is_file());
+        assert_eq!(lock.len(), 0);
 
         // Re-create: root exists -> refused, existing store untouched.
         let marker_before = fs::read(root.join("index.json")).expect("marker");
@@ -3891,6 +3950,7 @@ mod tests {
         let both = unique_temp_dir("rubin-node-create-both");
         fs::create_dir_all(block_store_path(&both)).expect("mkdir root");
         fs::write(chain_state_path(&both), b"{}").expect("seed chainstate");
+        fs::write(both.join(".rubin.lock"), b"not empty").expect("seed invalid lock");
         let (code, err) = cli(&mk(&both.display().to_string()));
         assert_eq!(code, 2);
         assert!(err.contains("blockstore root already exists"), "{err}");
@@ -3925,6 +3985,8 @@ mod tests {
     fn open_existing_startup_never_synthesizes_a_store() {
         let dir = unique_temp_dir("rubin-node-open-existing");
         let d = dir.display().to_string();
+        let root_path = block_store_path(&dir);
+        let missing_root_error = fs::metadata(&root_path).expect_err("missing root metadata");
 
         let (code, err) = cli(&["--datadir", &d, "--dry-run"]);
         assert_eq!(code, 2);
@@ -3932,6 +3994,20 @@ mod tests {
         assert!(
             !dir.exists(),
             "ordinary startup must not create the datadir"
+        );
+
+        let (code, err) = cli(&["--datadir", &d]);
+        assert_eq!(code, 2);
+        assert_eq!(
+            err,
+            format!(
+                "blockstore open failed: blockstore directory {}: {missing_root_error}\n",
+                root_path.display()
+            )
+        );
+        assert!(
+            !dir.exists(),
+            "mutating strict open must not create the datadir or lock"
         );
 
         let (code, err) = cli(&[
@@ -3960,6 +4036,146 @@ mod tests {
         let (code, err) = cli(&["--datadir", &d, "--dry-run"]);
         assert_eq!(code, 0, "{err}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn strict_open_holds_lock_while_dry_run_does_not() {
+        let dir = unique_temp_dir("rubin-node-strict-open-lock");
+        seed_block_store(&dir);
+        let data_dir = dir.display().to_string();
+        let args = vec!["--datadir".to_string(), data_dir];
+        let cfg = parse_args(&args).expect("parse strict-open config");
+        let chain_state_file = chain_state_path(&dir);
+
+        let (store, lock) =
+            super::create_or_open_block_store(&cfg, &chain_state_file, &mut Vec::new())
+                .expect("mutating strict open");
+        assert_eq!(store.root_dir(), block_store_path(&dir).as_path());
+        let lock = lock.expect("mutating strict open must hold a lock");
+        match super::file_lock::acquire(&dir.join(".rubin.lock")) {
+            Err(error) => assert_eq!(error.class(), super::file_lock::LockClass::Contended),
+            Ok(challenger) => {
+                challenger.release();
+                panic!("mutating strict open did not hold the datadir lock");
+            }
+        }
+        lock.release();
+
+        let mut dry_run = cfg;
+        dry_run.dry_run = true;
+        let (store, lock) =
+            super::create_or_open_block_store(&dry_run, &chain_state_file, &mut Vec::new())
+                .expect("dry-run strict open");
+        assert_eq!(store.root_dir(), block_store_path(&dir).as_path());
+        assert!(lock.is_none(), "dry-run must not hold a lock");
+        super::file_lock::acquire(&dir.join(".rubin.lock"))
+            .unwrap_or_else(|error| panic!("dry-run lock probe: {}", error.cause()))
+            .release();
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn held_datadir_lock_rejects_mutating_lifecycle_before_store_access() {
+        let strict = unique_temp_dir("rubin-node-lock-strict");
+        fs::create_dir_all(&strict).expect("mkdir strict datadir");
+        let strict_name = strict.display().to_string();
+        let holder = super::file_lock::acquire(&strict.join(".rubin.lock"))
+            .unwrap_or_else(|err| panic!("acquire strict lock: {}", err.cause()));
+        let (code, err) = cli(&["--datadir", &strict_name]);
+        assert_eq!(code, 2);
+        assert!(
+            err.contains("datadir is already in use by another rubin-node:"),
+            "{err}"
+        );
+        assert!(!block_store_path(&strict).exists());
+        holder.release();
+        let _ = fs::remove_dir_all(&strict);
+
+        let create = unique_temp_dir("rubin-node-lock-create");
+        fs::create_dir_all(&create).expect("mkdir create datadir");
+        let create_name = create.display().to_string();
+        let holder = super::file_lock::acquire(&create.join(".rubin.lock"))
+            .unwrap_or_else(|err| panic!("acquire create lock: {}", err.cause()));
+        let (code, err) = cli(&["--datadir", &create_name, "--create-store"]);
+        assert_eq!(code, 2);
+        assert!(
+            err.contains("datadir is already in use by another rubin-node:"),
+            "{err}"
+        );
+        assert!(!block_store_path(&create).exists());
+        assert!(!chain_state_path(&create).exists());
+        holder.release();
+        let _ = fs::remove_dir_all(&create);
+
+        let invalid = unique_temp_dir("rubin-node-lock-invalid");
+        fs::create_dir_all(&invalid).expect("mkdir invalid datadir");
+        let invalid_lock = invalid.join(".rubin.lock");
+        fs::write(&invalid_lock, b"x").expect("write invalid lock");
+        let invalid_name = invalid.display().to_string();
+        let (code, err) = cli(&["--datadir", &invalid_name, "--create-store"]);
+        assert_eq!(code, 2);
+        assert_eq!(
+            err,
+            format!(
+                "cannot open datadir lock {}: datadir lock must be empty, got size 1\n",
+                invalid_lock.display()
+            )
+        );
+        assert!(!block_store_path(&invalid).exists());
+        assert!(!chain_state_path(&invalid).exists());
+        let _ = fs::remove_dir_all(&invalid);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn read_only_modes_ignore_datadir_lock() {
+        let dir = unique_temp_dir("rubin-node-lock-read-only");
+        let name = dir.display().to_string();
+        let (code, err) = cli(&[
+            "--datadir",
+            &name,
+            "--create-store",
+            "--mine-blocks",
+            "1",
+            "--mine-exit",
+        ]);
+        assert_eq!(code, 0, "{err}");
+        let index = fs::read(block_store_path(&dir).join("index.json")).expect("index");
+        let lock_path = dir.join(".rubin.lock");
+
+        let holder = super::file_lock::acquire(&lock_path)
+            .unwrap_or_else(|err| panic!("acquire held lock: {}", err.cause()));
+        assert_read_only_modes(&name);
+        holder.release();
+
+        fs::remove_file(&lock_path).expect("remove valid lock");
+        fs::write(&lock_path, b"not empty").expect("write invalid lock");
+        assert_read_only_modes(&name);
+        assert_eq!(
+            fs::read(block_store_path(&dir).join("index.json")).expect("index"),
+            index
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn assert_read_only_modes(data_dir: &str) {
+        for args in [
+            vec!["--dry-run", "--datadir", data_dir],
+            vec![
+                "--legacy-exposure-scan",
+                "--legacy-suite-id",
+                "1",
+                "--datadir",
+                data_dir,
+            ],
+        ] {
+            let (code, err) = cli(&args);
+            assert_eq!(code, 0, "{args:?}: {err}");
+        }
     }
 
     /// FIX-1 / state machine rule 4: identity guards precede the storage
