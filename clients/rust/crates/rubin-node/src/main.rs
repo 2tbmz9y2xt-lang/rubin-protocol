@@ -293,20 +293,50 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     // A reconcile error is fatal: continuing would let the engine run
     // with a chainstate tip that no longer points at any canonical
     // block on disk.
-    if let Err(err) =
-        reconcile_chain_state_with_block_store(&mut chain_state, &mut block_store, &sync_cfg)
-    {
-        let _ = writeln!(stderr, "chainstate reconcile failed: {err}");
-        return 2;
+    //
+    // RUB-1083: both steps are skipped under `--dry-run`, which reports the
+    // datadir and must not repair it — reconcile can truncate the canonical
+    // index, and `save` rewrites the snapshot through a temp file + rename (a
+    // fresh inode) on EVERY invocation. The report below therefore describes
+    // the chainstate as loaded from disk. Ordinary startup is unaffected.
+    // Go reference: the `if !*dryRun` guard in `cmd/rubin-node/main.go`.
+    if !cfg.dry_run {
+        if let Err(err) =
+            reconcile_chain_state_with_block_store(&mut chain_state, &mut block_store, &sync_cfg)
+        {
+            let _ = writeln!(stderr, "chainstate reconcile failed: {err}");
+            return 2;
+        }
+        if let Err(err) = chain_state.save(&chain_state_file) {
+            let _ = writeln!(
+                stderr,
+                "chainstate save failed ({}): {err}",
+                chain_state_file.display()
+            );
+            return 2;
+        }
     }
-    if let Err(err) = chain_state.save(&chain_state_file) {
-        let _ = writeln!(
-            stderr,
-            "chainstate save failed ({}): {err}",
-            chain_state_file.display()
-        );
-        return 2;
-    }
+
+    // RUB-1083: the `--dry-run`-only store report, captured here because
+    // `chain_state` is moved into the sync engine below and the values must be
+    // the ones loaded from disk. Go emits the same pair UNCONDITIONALLY
+    // (`clients/go/cmd/rubin-node/main.go:513-519`, outside its dry-run branch)
+    // while this client emits it only under `--dry-run`, and
+    // `dry_run_emits_store_report_between_json_and_sync_banner` pins that as an
+    // invariant — the cross-client difference on ordinary startup is frozen,
+    // not an oversight. Go's `mustTip` treats a tip-read failure as fatal with
+    // this exact message and exit code, so the Rust mirror does too.
+    let dry_run_store_report = if cfg.dry_run {
+        match block_store.tip() {
+            Ok(store_tip) => Some(format_dry_run_store_report(&chain_state, store_tip)),
+            Err(err) => {
+                let _ = writeln!(stderr, "blockstore tip read failed: {err}");
+                return 2;
+            }
+        }
+    } else {
+        None
+    };
 
     // NOTE: `block_store.clone()` here mirrors the pre-existing
     // pattern in `main.rs` (the RPC handoff at `Some(block_store)`
@@ -320,7 +350,19 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     // BLOCKSTORE-SHARING follow-up for the proper Arc<BlockStore>
     // fix that touches both `SyncEngine::new` and
     // `new_devnet_rpc_state_with_tx_pool` signatures.
-    let mut sync_engine = match SyncEngine::new(chain_state, Some(block_store.clone()), sync_cfg) {
+    //
+    // RUB-1083: the `--dry-run` reporting engine is built with NO blockstore, on
+    // every invocation and every store shape. `load_persisted_tip_timestamp` is
+    // the constructor's only store read, and `None` takes its `Ok(0)` arm, so the
+    // dry-run path never opens, reads or parses the canonical tip header at all —
+    // matching Go, whose `NewSyncEngine` never reads it either and therefore
+    // exits 0 whatever shape sits at the header path. The constructor itself is
+    // unchanged: it still validates the config, and `header_sync_request` and
+    // `tip()` both still serve the claimed tip from `chain_state`. The
+    // `blockstore:` line above still comes from the real opened index. Ordinary
+    // startup always gets the real clone and stays strict.
+    let engine_block_store = (!cfg.dry_run).then(|| block_store.clone());
+    let mut sync_engine = match SyncEngine::new(chain_state, engine_block_store, sync_cfg) {
         Ok(engine) => engine,
         Err(err) => {
             let _ = writeln!(stderr, "sync engine init failed: {err}");
@@ -358,6 +400,9 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         return 1;
     }
     let _ = writeln!(stdout);
+    if let Some(report) = dry_run_store_report.as_deref() {
+        let _ = writeln!(stdout, "{report}");
+    }
 
     // RUB-13 / GitHub #1157: operator-facing startup banners that pin
     // the cross-client format. Mixed-client devnet diagnostic scripts
@@ -817,6 +862,34 @@ fn format_peer_slots_banner(max_peers: usize, connected: usize) -> String {
     format!("p2p: peer_slots={max_peers} connected={connected}")
 }
 
+/// RUB-1083: the frozen `--dry-run` store report — the `chainstate:` +
+/// `blockstore:` line pair as one two-line string whose trailing newline the
+/// caller's `writeln!` supplies. Token-for-token mirror of the two
+/// `fmt.Fprintf` sites in `clients/go/cmd/rubin-node/main.go`, including their
+/// gating: both lines follow the BLOCKSTORE tip, never `chain_state.has_tip`,
+/// so an empty canonical index drops `tip=` even for a chainstate that still
+/// claims one. The chainstate fields are always the values loaded from disk.
+fn format_dry_run_store_report(
+    chain_state: &rubin_node::ChainState,
+    store_tip: Option<(u64, [u8; 32])>,
+) -> String {
+    let chainstate_head = format!(
+        "chainstate: has_tip={} height={} utxos={} already_generated={}",
+        chain_state.has_tip,
+        chain_state.height,
+        chain_state.utxos.len(),
+        chain_state.already_generated
+    );
+    match store_tip {
+        Some((tip_height, tip_hash)) => format!(
+            "{chainstate_head} tip={}\nblockstore: tip_height={tip_height} tip_hash={}",
+            hex::encode(chain_state.tip_hash),
+            hex::encode(tip_hash)
+        ),
+        None => format!("{chainstate_head}\nblockstore: empty"),
+    }
+}
+
 fn runtime_genesis_hash(genesis_cfg: &LoadedGenesisConfig) -> Result<[u8; 32], String> {
     genesis_cfg.genesis_hash.ok_or_else(|| {
         "runtime p2p requires genesis_hash_hex in the genesis file when chain_id is not devnet"
@@ -844,6 +917,16 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
         dry_run: false,
         create_store: false,
     };
+    // RUB-1083: one CSV slot plus one repeated-value list, not one argv-ordered
+    // list. Go registers `--peers` with `flag.String`
+    // (`clients/go/cmd/rubin-node/main.go:292`), whose `Set` assigns rather than
+    // appends — a repeated `--peers` is accepted and only the last one survives
+    // — and builds the raw list as `append([]string{*peerCSV}, peers...)`
+    // (`main.go:319`): exactly one CSV element ahead of every repeated `--peer`,
+    // wherever they sit in argv. Go's unset zero value is the empty string,
+    // which normalization drops, so the slot is unconditionally the first raw
+    // token here too.
+    let mut peers_csv = String::new();
     let mut peer_tokens = Vec::new();
 
     let mut idx = 0usize;
@@ -882,7 +965,7 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
                 let value = args
                     .get(idx)
                     .ok_or_else(|| "missing value for --peers".to_string())?;
-                peer_tokens.push(value.clone());
+                peers_csv.clone_from(value);
             }
             "--peer" => {
                 idx += 1;
@@ -967,7 +1050,9 @@ fn parse_args(args: &[String]) -> Result<CliConfig, String> {
         }
         idx += 1;
     }
-    cfg.peers = normalize_peers(&peer_tokens);
+    let mut raw_peers = vec![peers_csv];
+    raw_peers.extend(peer_tokens);
+    cfg.peers = normalize_peers(&raw_peers);
     cfg.legacy_suite_ids.sort_unstable();
     cfg.legacy_suite_ids.dedup();
 
@@ -1369,8 +1454,8 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use super::{
-        advance_da_ttl_for_block, announce_tx_after_local_admission, format_peer_slots_banner,
-        handle_rpc_start_error_after_maybe_stop, legacy_exposure_hooks,
+        advance_da_ttl_for_block, announce_tx_after_local_admission, format_dry_run_store_report,
+        format_peer_slots_banner, handle_rpc_start_error_after_maybe_stop, legacy_exposure_hooks,
         live_devnet_loopback_mining_allowed, maybe_shutdown_if_requested, parse_args, run,
         runtime_genesis_hash, stop_signal_pair, validate_config, wait_for_stop_and_shutdown,
         LegacyExposureReport, PRODUCTION_STOP_SIGNAL_SET, RPC_READINESS_TRANSITION_FAILED,
@@ -1614,10 +1699,14 @@ mod tests {
     }
 
     /// RUB-13 / GitHub #1157: stdout helper for tests that parse the
-    /// effective-config JSON dump. After RUB-13 the dry-run/full
-    /// startup stdout layout is
+    /// effective-config JSON dump. After RUB-13 the ordinary-startup
+    /// stdout layout is
     /// `{<EffectiveConfig>}\n<sync line>\n<peer_slots line>\n`
-    /// rather than the previous `{<EffectiveConfig>}\n` only, so a
+    /// rather than the previous `{<EffectiveConfig>}\n` only, and after
+    /// RUB-1083 a `--dry-run` invocation inserts the store report pair
+    /// between the JSON and the sync line, giving
+    /// `{<EffectiveConfig>}\n<chainstate line>\n<blockstore line>\n<sync line>\n<peer_slots line>\n`.
+    /// Either way a
     /// caller using the strict `serde_json::from_slice(&buf)` reads
     /// the JSON object cleanly but then hits the trailing post-JSON
     /// banner bytes and rejects via the strict trailing-character
@@ -2253,9 +2342,13 @@ mod tests {
         ])
         .expect("parse");
         assert_eq!(cfg.bind_addr, "127.0.0.1:19111");
+        // RUB-1083: the `--peers` CSV entries come first even though `--peer`
+        // appears earlier in argv, so deduplication keeps the CSV occurrence of
+        // the repeated address. Go builds the same raw list as
+        // `append([]string{*peerCSV}, peers...)`.
         assert_eq!(
             cfg.peers,
-            vec!["127.0.0.1:19112".to_string(), "127.0.0.1:19113".to_string(),]
+            vec!["127.0.0.1:19113".to_string(), "127.0.0.1:19112".to_string(),]
         );
         assert_eq!(cfg.max_peers, 32);
     }
@@ -2684,6 +2777,421 @@ mod tests {
         assert!(
             json_pos < json_close_pos,
             "JSON object well-formed; json_pos={json_pos}, json_close_pos={json_close_pos}"
+        );
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// RUB-1083: pin the frozen `--dry-run` store report token-for-token against
+    /// the two `fmt.Fprintf` sites in `clients/go/cmd/rubin-node/main.go`. Row
+    /// three is the one the public path cannot easily reach and an intuitive
+    /// rewrite gets wrong: a chainstate claiming a tip over an EMPTY canonical
+    /// index still drops `tip=` and still prints `blockstore: empty`.
+    #[test]
+    fn dry_run_store_report_matches_go_format() {
+        let mut empty = rubin_node::ChainState::new();
+        empty.tip_hash = [0u8; 32];
+        assert_eq!(
+            format_dry_run_store_report(&empty, None),
+            "chainstate: has_tip=false height=0 utxos=0 already_generated=0\nblockstore: empty"
+        );
+
+        let mut tipped = rubin_node::ChainState::new();
+        tipped.has_tip = true;
+        tipped.height = 7;
+        tipped.already_generated = 42;
+        tipped.tip_hash = [0xab; 32];
+        assert_eq!(
+            format_dry_run_store_report(&tipped, Some((7, [0xab; 32]))),
+            format!(
+                "chainstate: has_tip=true height=7 utxos=0 already_generated=42 tip={hash}\n\
+                 blockstore: tip_height=7 tip_hash={hash}",
+                hash = "ab".repeat(32)
+            )
+        );
+
+        assert_eq!(
+            format_dry_run_store_report(&tipped, None),
+            "chainstate: has_tip=true height=7 utxos=0 already_generated=42\nblockstore: empty"
+        );
+
+        // A no-tip chainstate over a non-empty index still prints `tip=`, with
+        // the all-zero chainstate tip hash — the absent-chainstate parity row.
+        assert_eq!(
+            format_dry_run_store_report(&empty, Some((1, [0x5c; 32]))),
+            format!(
+                "chainstate: has_tip=false height=0 utxos=0 already_generated=0 tip={zero}\n\
+                 blockstore: tip_height=1 tip_hash={tip}",
+                zero = "00".repeat(32),
+                tip = "5c".repeat(32)
+            )
+        );
+    }
+
+    /// RUB-1083: the store report is emitted only under `--dry-run`, and only
+    /// between the effective-config JSON and the sync banner. Ordinary startup
+    /// keeps its RUB-13 two-banner layout.
+    #[test]
+    fn dry_run_emits_store_report_between_json_and_sync_banner() {
+        let dir = unique_temp_dir("rubin-node-bin-store-report");
+        let d = dir.display().to_string();
+        let (code, err) = cli(&[
+            "--datadir",
+            &d,
+            "--create-store",
+            "--mine-blocks",
+            "1",
+            "--mine-exit",
+        ]);
+        assert_eq!(code, 0, "{err}");
+
+        let args = vec!["--datadir".to_string(), d.clone(), "--dry-run".to_string()];
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+        let stdout_str = String::from_utf8(stdout).expect("stdout utf8");
+        let banners: Vec<&str> = stdout_str
+            .lines()
+            .skip_while(|line| !line.starts_with("chainstate: "))
+            .collect();
+        assert_eq!(
+            banners.len(),
+            4,
+            "expected exactly four banner lines after the JSON; stdout=\n{stdout_str}"
+        );
+        // The pure unit test pins the format against Go; this row proves the
+        // public path renders the chainstate ACTUALLY on disk together with the
+        // canonical tip actually in the index.
+        let on_disk = rubin_node::load_chain_state(chain_state_path(&dir))
+            .expect("load the on-disk chainstate");
+        let store_tip = on_disk_store_tip(&dir);
+        assert!(
+            store_tip.is_some() && on_disk.has_tip,
+            "the mined fixture must have both a canonical tip and a tipped chainstate"
+        );
+        assert_eq!(
+            format!("{}\n{}", banners[0], banners[1]),
+            format_dry_run_store_report(&on_disk, store_tip),
+            "the store report must render the on-disk state"
+        );
+        assert!(
+            banners[2].starts_with("sync: header_request_has_from="),
+            "unexpected sync banner: {}",
+            banners[2]
+        );
+        assert!(
+            banners[3].starts_with("p2p: peer_slots="),
+            "unexpected p2p banner: {}",
+            banners[3]
+        );
+        let json_close = stdout_str.rfind('}').expect("json close");
+        let report_pos = stdout_str.find("chainstate: ").expect("store report");
+        assert!(
+            json_close < report_pos,
+            "the store report must follow the effective-config JSON; stdout=\n{stdout_str}"
+        );
+
+        // Ordinary startup must NOT gain the banner pair: the same datadir
+        // mined once more emits only the RUB-13 sync / peer_slots banners.
+        let args = vec![
+            "--datadir".to_string(),
+            d.clone(),
+            "--mine-blocks".to_string(),
+            "1".to_string(),
+            "--mine-exit".to_string(),
+        ];
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+        let stdout_str = String::from_utf8(stdout).expect("stdout utf8");
+        assert!(
+            !stdout_str.contains("chainstate: ") && !stdout_str.contains("blockstore: "),
+            "ordinary startup must not emit the dry-run store report; stdout=\n{stdout_str}"
+        );
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// RUB-1083 zero-write guard: three consecutive `--dry-run` invocations
+    /// move no inode, link count, permission bit, size or nanosecond mtime on
+    /// the two files a save would rewrite, nor on the directories that would
+    /// record a create/rename. A byte-identical rewrite still reddens this,
+    /// which a content comparison alone would miss. The exhaustive recursive
+    /// snapshot over every storage shape lives in
+    /// `scripts/test_node_dry_run_parity.sh`; this is the in-tree guard that
+    /// `cargo test` alone catches.
+    #[cfg(unix)]
+    #[test]
+    fn dry_run_moves_no_inode_or_mtime_in_the_datadir() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = unique_temp_dir("rubin-node-bin-zero-write");
+        let d = dir.display().to_string();
+        let (code, err) = cli(&[
+            "--datadir",
+            &d,
+            "--create-store",
+            "--mine-blocks",
+            "1",
+            "--mine-exit",
+        ]);
+        assert_eq!(code, 0, "{err}");
+
+        let store_root = block_store_path(&dir);
+        let watched = [
+            dir.clone(),
+            chain_state_path(&dir),
+            store_root.clone(),
+            store_root.join("index.json"),
+            store_root.join("blocks"),
+            store_root.join("headers"),
+            store_root.join("undo"),
+        ];
+        let stamp = || -> Vec<String> {
+            watched
+                .iter()
+                .map(|path| {
+                    let meta = fs::symlink_metadata(path)
+                        .unwrap_or_else(|err| panic!("stat {}: {err}", path.display()));
+                    format!(
+                        "{} ino={} nlink={} mode={:o} len={} mtime={}.{:09}",
+                        path.display(),
+                        meta.ino(),
+                        meta.nlink(),
+                        meta.permissions().mode(),
+                        meta.len(),
+                        meta.mtime(),
+                        meta.mtime_nsec()
+                    )
+                })
+                .collect()
+        };
+
+        let before = stamp();
+        for attempt in 1..=3 {
+            let (code, err) = cli(&["--datadir", &d, "--dry-run"]);
+            assert_eq!(code, 0, "attempt {attempt}: {err}");
+            assert_eq!(stamp(), before, "attempt {attempt}: --dry-run wrote");
+        }
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// RUB-1083: the stale shape — a dense canonical index over a chainstate
+    /// reset to the encoded empty/no-tip state. `--dry-run` reports what is on
+    /// disk and repairs nothing, while a non-dry-run invocation still
+    /// reconciles and saves in the existing order.
+    #[test]
+    fn dry_run_reports_stale_chainstate_while_ordinary_startup_still_repairs_it() {
+        let dir = unique_temp_dir("rubin-node-bin-stale-chainstate");
+        let d = dir.display().to_string();
+        let (code, err) = cli(&[
+            "--datadir",
+            &d,
+            "--create-store",
+            "--mine-blocks",
+            "1",
+            "--mine-exit",
+        ]);
+        assert_eq!(code, 0, "{err}");
+
+        let chain_state_file = chain_state_path(&dir);
+        rubin_node::ChainState::new()
+            .save(&chain_state_file)
+            .expect("reset chainstate to the encoded empty state");
+        let stale_bytes = fs::read(&chain_state_file).expect("read stale chainstate");
+        let (store_tip_height, store_tip_hash) =
+            on_disk_store_tip(&dir).expect("the mined fixture must have a canonical tip");
+
+        let args = vec!["--datadir".to_string(), d.clone(), "--dry-run".to_string()];
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+        let stdout_str = String::from_utf8(stdout).expect("stdout utf8");
+        assert!(
+            stdout_str.contains(
+                "chainstate: has_tip=false height=0 utxos=0 already_generated=0 tip=\
+                 0000000000000000000000000000000000000000000000000000000000000000\n"
+            ),
+            "dry-run must report the on-disk chainstate, not a repaired one; stdout=\n{stdout_str}"
+        );
+        assert!(
+            stdout_str.contains(&format!(
+                "blockstore: tip_height={store_tip_height} tip_hash={}\n",
+                hex::encode(store_tip_hash)
+            )),
+            "dry-run must report the still-indexed blockstore tip; stdout=\n{stdout_str}"
+        );
+        assert_eq!(
+            fs::read(&chain_state_file).expect("re-read chainstate"),
+            stale_bytes,
+            "dry-run must not rewrite the stale chainstate"
+        );
+        assert_eq!(
+            on_disk_store_tip(&dir),
+            Some((store_tip_height, store_tip_hash)),
+            "dry-run must not truncate the canonical index"
+        );
+
+        // Ordinary startup keeps the reconcile-then-save behaviour: the same
+        // datadir replays the canonical index back into the chainstate before
+        // mining one more block on top of it.
+        let (code, err) = cli(&["--datadir", &d, "--mine-blocks", "1", "--mine-exit"]);
+        assert_eq!(code, 0, "{err}");
+        let repaired = rubin_node::load_chain_state(&chain_state_file).expect("reload chainstate");
+        assert!(
+            repaired.has_tip && repaired.height == store_tip_height + 1,
+            "ordinary startup must still reconcile and save: has_tip={} height={} expected={}",
+            repaired.has_tip,
+            repaired.height,
+            store_tip_height + 1
+        );
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// RUB-1083 tip-header shapes: chainstate and the canonical index both name
+    /// a tip whose header blob is absent, empty, malformed or replaced by a
+    /// directory. The dry-run reporting engine gets no blockstore, so it never
+    /// reads the header and every shape exits 0 reporting the on-disk
+    /// chainstate and the still-indexed tip — Go's disposition. Zero-write is
+    /// pinned by `dry_run_moves_no_inode_or_mtime_in_the_datadir`; the full
+    /// six-shape cross-client table (these plus the dangling symlink and the
+    /// mode-000 header) lives in `scripts/test_node_dry_run_parity.sh`.
+    #[test]
+    fn dry_run_reports_every_tip_header_shape_without_reading_the_header() {
+        for shape in ["absent", "zero-length", "malformed", "directory"] {
+            let dir = unique_temp_dir("rubin-node-bin-tip-header");
+            let d = dir.display().to_string();
+            let (code, err) = cli(&[
+                "--datadir",
+                &d,
+                "--create-store",
+                "--mine-blocks",
+                "1",
+                "--mine-exit",
+            ]);
+            assert_eq!(code, 0, "{shape}: {err}");
+
+            let chain_state_file = chain_state_path(&dir);
+            let (tip_height, tip_hash) =
+                on_disk_store_tip(&dir).expect("the mined fixture must have a canonical tip");
+            let on_disk = rubin_node::load_chain_state(&chain_state_file).expect("load chainstate");
+            assert!(
+                on_disk.has_tip && on_disk.tip_hash == tip_hash,
+                "{shape}: the row needs chainstate and the canonical index to name the same tip"
+            );
+            let header = block_store_path(&dir)
+                .join("headers")
+                .join(format!("{}.bin", hex::encode(tip_hash)));
+            match shape {
+                "absent" => fs::remove_file(&header).expect("remove the tip header blob"),
+                "zero-length" => fs::write(&header, b"").expect("truncate the tip header blob"),
+                "malformed" => fs::write(&header, b"not a header").expect("corrupt the tip header"),
+                _ => {
+                    fs::remove_file(&header).expect("remove the tip header blob");
+                    fs::create_dir(&header).expect("directory at the header path");
+                }
+            }
+
+            let args = vec!["--datadir".to_string(), d.clone(), "--dry-run".to_string()];
+            let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+            let code = run(&args, &mut stdout, &mut stderr);
+            assert!(
+                code == 0 && stderr.is_empty(),
+                "{shape}: code={code} stderr={}",
+                String::from_utf8_lossy(&stderr)
+            );
+            let stdout_str = String::from_utf8(stdout).expect("stdout utf8");
+            assert!(
+                stdout_str.contains(&format!(
+                    "{}\n",
+                    format_dry_run_store_report(&on_disk, Some((tip_height, tip_hash)))
+                )),
+                "{shape}: the report must keep the on-disk chainstate and the indexed tip; \
+                 stdout=\n{stdout_str}"
+            );
+            assert!(
+                stdout_str.contains(
+                    "sync: header_request_has_from=true header_request_limit=512 ibd=true\n"
+                ),
+                "{shape}: unexpected projected sync line; stdout=\n{stdout_str}"
+            );
+
+            fs::remove_dir_all(&dir).expect("cleanup");
+        }
+    }
+
+    /// RUB-1083 frozen peer-collection precedence: Go builds the raw peer list
+    /// as `append([]string{*peerCSV}, peers...)`, so every `--peers` CSV entry
+    /// precedes every repeated `--peer` entry no matter where they sit in
+    /// argv. Both permutations must therefore yield the same ordered list.
+    #[test]
+    fn peers_csv_entries_precede_repeated_peer_entries_in_either_argv_order() {
+        let argv =
+            |args: &[&str]| -> Vec<String> { args.iter().map(|arg| (*arg).to_string()).collect() };
+        let expected = ["127.0.0.1:29114", "127.0.0.1:29115", "127.0.0.1:29112"];
+        for permutation in [
+            argv(&[
+                "--peers",
+                "127.0.0.1:29114,127.0.0.1:29115",
+                "--peer",
+                "127.0.0.1:29112",
+            ]),
+            argv(&[
+                "--peer",
+                "127.0.0.1:29112",
+                "--peers",
+                "127.0.0.1:29114,127.0.0.1:29115",
+            ]),
+        ] {
+            assert_eq!(
+                parse_args(&permutation).expect("parse").peers,
+                expected,
+                "argv {permutation:?} must yield the frozen Go peer order"
+            );
+        }
+    }
+
+    /// RUB-1083 `F3_PEERS_LAST_WINS`: an earlier `--peers` is overwritten, not
+    /// accumulated (see the `peers_csv` comment in `parse_args` for the Go
+    /// citation), while every `--peer` survives after the winning CSV. The
+    /// contract pins this on both surfaces, so one argv drives ordinary
+    /// `parse_args` and the `--dry-run` reported `peers`.
+    #[test]
+    #[rustfmt::skip]
+    fn last_peers_occurrence_replaces_earlier_ones_in_parsing_and_dry_run() {
+        let expected = ["127.0.0.1:29117", "127.0.0.1:29112", "127.0.0.1:29113"];
+        let dir = unique_temp_dir("rubin-node-bin-peers-last-wins");
+        seed_block_store(&dir);
+        let args: Vec<String> = [
+            "--datadir", &dir.display().to_string(),
+            "--peers", "127.0.0.1:29114,127.0.0.1:29115",
+            "--peer", "127.0.0.1:29112",
+            "--peers", "127.0.0.1:29117",
+            "--peer", "127.0.0.1:29113",
+            "--max-peers", "8",
+            "--dry-run",
+        ]
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect();
+
+        assert_eq!(
+            parse_args(&args).expect("parse").peers,
+            expected,
+            "ordinary parsing must keep only the final --peers CSV"
+        );
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+        let json: Value = parse_effective_config_json(&stdout);
+        assert_eq!(
+            json["peers"],
+            serde_json::json!(expected),
+            "the dry-run report must keep only the final --peers CSV"
         );
 
         fs::remove_dir_all(&dir).expect("cleanup");
@@ -3287,6 +3795,15 @@ mod tests {
     fn seed_block_store(data_dir: &std::path::Path) {
         fs::create_dir_all(data_dir).expect("mkdir datadir");
         BlockStore::create(block_store_path(data_dir)).expect("create block store");
+    }
+
+    /// Canonical tip an already-created store holds on disk, for tests that
+    /// must not hard-code the local mining bootstrap's canonical height.
+    fn on_disk_store_tip(data_dir: &std::path::Path) -> Option<(u64, [u8; 32])> {
+        BlockStore::open(block_store_path(data_dir))
+            .expect("open block store")
+            .tip()
+            .expect("read block store tip")
     }
 
     fn cli(args: &[&str]) -> (i32, String) {
