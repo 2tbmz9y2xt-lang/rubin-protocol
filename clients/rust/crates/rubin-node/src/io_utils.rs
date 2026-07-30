@@ -6,12 +6,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // Per-class local store read bounds (RUB-1057), enforced BEFORE the file's
 // contents are allocated. Every class here holds exactly one wire item whose
 // size a consensus rule already caps, so the bound is derived rather than
-// invented. Artifacts that grow with chain length or UTXO-set size (the
-// chainstate snapshot, the canonical index marker) admit no such ceiling and
-// are deliberately NOT bounded here — they are owned by RUB-1062. The numbers
-// are a cross-client contract mirrored byte-for-byte from Go
-// `clients/go/node/safeio.go`; derivations and margins must not drift from the
-// Go copy. The measured per-entry figure is pinned by
+// invented. Artifacts that grow with chain length or UTXO-set size admit no
+// such ceiling and are deliberately left UNBOUNDED: the canonical index
+// marker, read through `read_file_from_dir_unbounded` below, and the
+// chainstate snapshot, read through `fs::read` in
+// `chainstate.rs::load_chain_state`. No fixed byte number is defensible on
+// either — a settled decision rather than missing work, whose measurements
+// and withdrawn alternative are recorded on `read_file_from_dir_unbounded`
+// and cover both artifacts. The numbers are a cross-client contract mirrored
+// byte-for-byte from Go `clients/go/node/safeio.go`; derivations and margins
+// must not drift from the Go copy. The measured per-entry figure is pinned by
 // `undo_entry_derivation_size` (blockstore.rs), twin of Go's
 // `TestReadFileBoundDerivationEntrySizes`.
 //
@@ -192,8 +196,25 @@ pub fn read_file_from_dir(
 /// Reads `dir/name` in full with only the leaf-name guard. Its sole caller is
 /// the block store index marker loader: that artifact grows with chain length
 /// and admits no fixed ceiling a consensus-valid chain cannot reach, so
-/// RUB-1057 deliberately leaves it UNBOUNDED — RUB-1062 owns it. Go twin:
-/// `readFileByPath` in `clients/go/node/safeio.go`.
+/// RUB-1057 deliberately leaves it UNBOUNDED.
+///
+/// Leaving it unbounded is a standing decision, not a gap awaiting an owner.
+/// No byte ceiling is defensible on either unbounded artifact, and they grow
+/// along DIFFERENT axes — this helper's marker with CHAIN LENGTH, the
+/// chainstate snapshot (read via `fs::read` in `chainstate.rs`) with
+/// UTXO-SET SIZE — so each would need its own number even if either were
+/// defensible. (Go states this as one helper serving both artifacts; here they
+/// are read by different functions, so there is no shared number at stake —
+/// only the same two-axis fact.) RUB-1057 measured a 1 GB chainstate bound as
+/// reachable in ~29 blocks of maximum-size CORE_VAULT outputs, and any marker
+/// ceiling is only a hard cap on chain length. An incremental-decode
+/// alternative to reading these whole was implemented and measured, then
+/// withdrawn; do not re-derive it. It does not close the finding — an
+/// oversized hostile file still kills the node — it is several times WORSE
+/// than the whole-buffer path on a document holding one huge value, and its
+/// equivalence to the whole-buffer decoders is only ever provable by
+/// sampling. RUB-1057 is the finding of record. Go twin: `readFileByPath` in
+/// `clients/go/node/safeio.go`.
 pub(crate) fn read_file_from_dir_unbounded(
     dir: &Path,
     name: &str,
@@ -204,10 +225,13 @@ pub(crate) fn read_file_from_dir_unbounded(
     fs::read(dir.join(name))
 }
 
-/// Bounded read of `path` routed through `read_file_from_dir` by splitting
-/// it into parent dir + leaf, so the leaf-name guard applies too (the
-/// legitimate leaves on this path are hex-hash names, so verdicts are
-/// unchanged). Go twin: `readFileByPathCapped`.
+/// Bounded read of `path` routed through `read_file_from_dir` by splitting it
+/// into parent dir + leaf, so the leaf-name guard applies too. Two callers
+/// with different leaf provenance: the write-if-absent verify seam
+/// (`blockstore.rs`), whose leaves are synthesized hex-hash names, and
+/// `read_config_file_to_string`, whose leaf is an OPERATOR-CHOSEN filename —
+/// that caller normalizes the path lexically first, and its doc records the
+/// one verdict the split changes. Go twin: `readFileByPathCapped`.
 pub(crate) fn read_file_by_path(path: &Path, max_bytes: u64) -> Result<Vec<u8>, std::io::Error> {
     let dir = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
@@ -220,6 +244,129 @@ pub(crate) fn read_file_by_path(path: &Path, max_bytes: u64) -> Result<Vec<u8>, 
             format!("invalid file name: {}", path.display()),
         )),
     }
+}
+
+/// Bounds the operator-supplied genesis pack JSON (`--genesis-file`) at both
+/// of its readers in `genesis.rs`: `load_genesis_config`, the one on the
+/// startup path (`main.rs`), and `load_chain_id_from_genesis_file`, which has
+/// no caller inside this crate and is reachable only through the `lib.rs`
+/// re-export.
+///
+/// A legitimate pack is tiny: two 64-char hex fields (169 B), an optional
+/// `rotation_descriptor` (246 B) and a couple of `suite_registry` entries come
+/// to 824 B — measured on this client's `GenesisPack`, with 64-char strings
+/// and 20-digit numbers.
+///
+/// 16 MiB is NOT derived from the schema, because the schema imposes no size
+/// ceiling of its own:
+///   - no string member has a schema-enforced length: `name` is only checked
+///     non-empty and the hex fields are trimmed, so surrounding padding is
+///     tolerated. `alg_name` is NOT a padding vector at the startup reader —
+///     `normalize_suite_alg_name` requires it to `trim()` to "ML-DSA-87", so
+///     it admits whitespace only — but that validation runs in
+///     `load_genesis_config` alone; `load_chain_id_from_genesis_file` never
+///     reaches it;
+///   - `openssl_alg` is the real padding vector: a legacy alias, IGNORED
+///     whenever `alg_name` is present, that still counts toward the file —
+///     measured, a 16-entry pack carrying ~900 KB of it per entry is 14.4 MB
+///     and IS ACCEPTED;
+///   - `MAX_EXPLICIT_SUITE_REGISTRY_ITEMS` (16) is checked inside
+///     `build_suite_registry_from_json`, AFTER serde has materialized the
+///     whole `Vec`, so it bounds neither bytes nor allocation. BOTH readers
+///     deserialize that vector, custom per-entry `Deserialize` included; what
+///     `load_chain_id_from_genesis_file` skips is the cap check and the
+///     per-item validation, not the allocation.
+///
+/// The number is therefore SET, not derived: 16 MiB sits orders of magnitude
+/// above any legitimate pack (>10^4 x the 824 B above) and is the only real
+/// size limit at either reader. Reachability (the RUB-1057 lesson): the file
+/// is operator-authored and does not grow with chain or UTXO state, so the
+/// ceiling cannot fire on honest use, while a mistakenly-pointed-at huge file
+/// is refused before its contents are allocated.
+///
+/// The NUMBER is a cross-client contract — Go's `configFileMaxBytes`
+/// (`clients/go/node/safeio.go`) is the same 16 MiB — but the two DERIVATIONS
+/// differ, deliberately and on two counts: the clients parse different
+/// genesis-pack schemas (Go's is four fixed hex fields including a header-bytes
+/// field this client has no member for, and has no repeated member), and Go's
+/// ceiling additionally covers the featurebits DEPLOYMENTS file, a Go-only
+/// surface (the Rust node has no such flag; the born-bounded obligation for a
+/// future port is RUB-1065). Do not harmonize the prose — only the number is
+/// shared. Pinned by `config_bound_pins_derived_value`, twin of Go's
+/// `TestReadFileConfigBoundPinsDerivedValue`.
+pub(crate) const CONFIG_FILE_MAX_BYTES: u64 = 1 << 24;
+
+/// Reads an operator config file as text under `CONFIG_FILE_MAX_BYTES` with
+/// the typed pre-allocation refusal from RUB-1057 (`InvalidData` carrying
+/// `STORE_FILE_TOO_LARGE_PREFIX`). Go twin: `ReadConfigFile` in
+/// `clients/go/node/safeio.go`.
+///
+/// Non-UTF-8 CONTENT is refused with `InvalidData` too, preserving the
+/// `fs::read_to_string` behaviour these call sites had before the bound —
+/// but WITHOUT the size prefix, so the two refusal classes stay
+/// distinguishable (`config_read_rejects_non_utf8_without_size_prefix`).
+///
+/// Path shapes whose disposition this routing changed, all measured against
+/// the Go node and all now AGREEING with it — the deltas are against this
+/// client's own pre-bound `fs::read_to_string`, not against Go:
+///   - lexical normalization accepts paths the KERNEL would refuse, because
+///     `Clean` folds `..` without checking that the component it removes is a
+///     directory: `cfg.json/`, `cfg.json/.`, `cfg.json/./`, `cfg.json/.//`
+///     and — the non-obvious ones — `cfg.json/../cfg.json` and
+///     `cfg.json/.././cfg.json`, which traverse `..` THROUGH a regular file.
+///     `read_to_string` refused all of these (ENOTDIR); Go accepts them, and
+///     matching Go is the point;
+///   - a FILENAME containing a non-UTF-8 byte is refused, because
+///     `read_file_by_path` splits the leaf with
+///     `file_name().and_then(OsStr::to_str)` and gets `None`. Go refuses it
+///     too, for its own reason — `os.DirFS(..).Open` runs `fs.ValidPath`,
+///     which requires `utf8.ValidString`, so it fails with `invalid argument`
+///     before the syscall (measured; an absent UTF-8 leaf gives ENOENT
+///     instead, which is what proves it a validity refusal). `read_to_string`
+///     read such a file, so this shape moved INTO agreement with Go.
+///
+/// One gap is inherited from the reuse: `normalize_data_dir` passes a
+/// non-UTF-8 path through UNCLEANED (its `to_str() == None` arm, pinned by
+/// `normalize_data_dir_preserves_non_utf8_unix_path`). A non-UTF-8 byte in a
+/// DIRECTORY component with a valid filename therefore skips normalization and
+/// lets the kernel resolve `link/..` again — the class this routing closes,
+/// reopened on that one input. Unreachable through the CLI, where
+/// `env::args()` rejects non-UTF-8 first.
+pub(crate) fn read_config_file_to_string(path: &Path) -> Result<String, std::io::Error> {
+    // Normalize lexically BEFORE the bounded read splits the path, mirroring
+    // Go, whose two callers both pass `filepath.Clean(path)` into
+    // `ReadConfigFile` (`cmd/rubin-node/main.go`). `normalize_data_dir` is
+    // that port — `lexical_clean` plus the byte-transparent pass-through for a
+    // non-UTF-8 path — and `--data-dir` already gets it; the genesis file is
+    // the operator path that never did.
+    //
+    // `lexical_clean_matches_go_filepath_clean` is a table of Rust literals
+    // and never executes Go, so it pins drift from those literals, not from
+    // `filepath.Clean` itself; the agreement rests on the port being written
+    // against Go's documented rules and on the measured per-shape rows.
+    //
+    // Not cosmetic: unnormalized, `Path::parent()` leaves a `link/..` segment
+    // for the KERNEL to resolve, so on `<d>/sub/link/../genesis.json` the two
+    // clients read DIFFERENT FILES (measured: Go folds to `<d>/sub`, the
+    // kernel follows the symlink to `<d>/other`) and two nodes given one
+    // command line adopt different chain ids.
+    //
+    // Per-helper normalization is safe HERE in a way `normalize_data_dir`'s
+    // doc warns it is not for the datadir: that warning is about a reader and
+    // a writer drifting apart, and this path is READ-ONLY — nothing writes the
+    // genesis pack.
+    // `normalize_data_dir` is infallible today — both arms return `Ok` — so
+    // this propagation is dead. Kept rather than `.expect()`ed: its signature
+    // is fallible, and the alternative puts a panic on an operator-input path.
+    let path = normalize_data_dir(path)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let raw = read_file_by_path(&path, CONFIG_FILE_MAX_BYTES)?;
+    String::from_utf8(raw).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        )
+    })
 }
 
 /// Bounded read core (Go twin: `readAllCapped`/`readCapped`). Refuses
@@ -458,9 +605,15 @@ fn cut_first_separator(tail: &[u8]) -> Option<(usize, usize)> {
 /// `..` is collapsed against the preceding component textually, NOT
 /// through symlink resolution.
 ///
-/// Called once per node startup from `normalize_data_dir`, which
-/// cleans `cfg.data_dir` at the CLI parse site so every subsystem
-/// that derives a path from it sees an already-normalised root.
+/// Reached only through `normalize_data_dir`, which has three call
+/// sites: `cfg.data_dir` and `cfg.genesis_file` at the CLI parse site
+/// (`main.rs`), so every subsystem deriving a path from either sees an
+/// already-normalised value, and `read_config_file_to_string`, which
+/// re-normalises the genesis path on every read. The genesis path is
+/// therefore cleaned TWICE by design — the call is idempotent, and the
+/// helper's own call is the ONLY one for direct and `lib.rs`-re-exported
+/// callers that never pass through CLI parsing. Deleting either is a
+/// regression; see the note at the `main.rs` site.
 /// Without this step, a path like `link/../foo` where `link` is a
 /// symlink to another directory would resolve via the symlink at
 /// `stat()` time, reading a file under the symlink target instead
@@ -617,16 +770,32 @@ pub(crate) fn lexical_clean(input: &str) -> String {
     out
 }
 
-/// Normalise an operator-supplied `--data-dir` once at the CLI parse
-/// site so every subsystem that derives a path from it
-/// (`ChainState::save` / `load_chain_state`, `BlockStore::open` and
-/// its blocks / headers / undo / index sub-directories, etc.) sees
-/// the same already-cleaned root. With the root normalised once,
-/// internal readers and writers can stay on raw `fs::read` /
-/// `write_file_atomic` and remain symmetric with each other — there
-/// is no per-helper `lexical_clean` step that could diverge between
-/// read and write for operator paths that cross a symlink combined
-/// with `..`.
+/// Normalise an operator-supplied path. THREE call sites, despite the
+/// `data_dir` name:
+///
+///   - `--data-dir`, cleaned once at the CLI parse site so every
+///     subsystem that derives a path from it (`ChainState::save` /
+///     `load_chain_state`, `BlockStore::open` and its blocks /
+///     headers / undo / index sub-directories, etc.) sees the same
+///     already-cleaned root. With the root normalised once, internal
+///     readers and writers stay on raw `fs::read` /
+///     `write_file_atomic` and remain symmetric with each other —
+///     no per-helper `lexical_clean` step can diverge between read
+///     and write for operator paths crossing a symlink plus `..`.
+///   - `--genesis-file`, at the same CLI parse site, so the path
+///     `EffectiveConfig` REPORTS is the path that gets read.
+///   - `--genesis-file` again, per read, inside
+///     `read_config_file_to_string`.
+///
+/// The genesis path is deliberately cleaned TWICE. The call is
+/// idempotent, and neither site subsumes the other: the CLI site is
+/// what makes the reported path truthful, while the helper's own call
+/// is the ONLY normalisation for direct callers and for the
+/// `lib.rs`-re-exported `load_chain_id_from_genesis_file`, which never
+/// passes through CLI parsing. Removing either is a regression, each
+/// with its own pinning row. Neither genesis site is a datadir, and the
+/// read/write asymmetry warned about above does not apply to them —
+/// nothing writes that file.
 ///
 /// If `path` is valid UTF-8, applies `lexical_clean` to its string
 /// form and returns the cleaned `PathBuf`. If `path` is not valid
@@ -659,9 +828,13 @@ pub fn normalize_data_dir(path: &Path) -> Result<PathBuf, String> {
 // Historical note: `resolve_io_path_dir_leaf` and the ORIGINAL (unbounded,
 // `lexical_clean`-applying) `read_file_by_path` / `write_file_atomic_by_path`
 // used to sit here; CLI-level `normalize_data_dir` replaced that per-site
-// cleaning strategy and they were removed. RUB-1057 reintroduced
-// `read_file_by_path` above as a BOUNDED dir+leaf split reader (no
-// `lexical_clean`), used by the blockstore write-if-absent verify seam.
+// cleaning strategy for the DATADIR tree and they were removed. RUB-1057
+// reintroduced `read_file_by_path` above as a BOUNDED dir+leaf split reader,
+// which applies no `lexical_clean` of its own. Of its two callers the
+// blockstore write-if-absent verify seam passes an already-normalised
+// datadir-derived path, while `read_config_file_to_string` (RUB-1069) cleans
+// its operator-supplied path itself — per-site cleaning, deliberately, for
+// the one read-only path that no CLI site normalises.
 
 pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
     let bytes = hex::decode(value).map_err(|e| format!("{name}: {e}"))?;
@@ -1037,9 +1210,9 @@ pub fn unique_temp_path(prefix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_sparse_file, lexical_clean, read_capped, read_file_from_dir, sync_dir,
-        unique_temp_path, volume_prefix_len, write_file_atomic, BLOCK_FILE_MAX_BYTES,
-        STORE_FILE_TOO_LARGE_PREFIX,
+        create_sparse_file, lexical_clean, read_capped, read_config_file_to_string,
+        read_file_from_dir, sync_dir, unique_temp_path, volume_prefix_len, write_file_atomic,
+        BLOCK_FILE_MAX_BYTES, CONFIG_FILE_MAX_BYTES, STORE_FILE_TOO_LARGE_PREFIX,
     };
     use std::fs;
     use std::io::{Cursor, Read};
@@ -1156,8 +1329,9 @@ mod tests {
     /// class: that caller shares the bounded reader at these hard-wired
     /// constants, and its at/over verdicts run at small injectable bounds in
     /// this module. The chainstate snapshot and index marker are deliberately
-    /// absent — they grow with accumulated state, admit no fixed ceiling, and
-    /// are owned by RUB-1062. The write-if-absent verify reads have no
+    /// absent — they grow with accumulated state and admit no fixed ceiling,
+    /// a standing decision recorded on `read_file_from_dir_unbounded` rather
+    /// than a gap awaiting an owner. The write-if-absent verify reads have no
     /// constant of their own: they are bounded by the length of the content
     /// being written. Go twin:
     /// `TestSafeIOClassBoundConstantsPinFrozenValues`.
@@ -1166,6 +1340,133 @@ mod tests {
         assert_eq!(BLOCK_FILE_MAX_BYTES, 72_000_000);
         assert_eq!(super::HEADER_FILE_MAX_BYTES, 116);
         assert_eq!(super::UNDO_FILE_MAX_BYTES, 2_000_000_000);
+    }
+
+    /// Pins THIS client's ceiling against the agreed literal; the derivation
+    /// lives on `CONFIG_FILE_MAX_BYTES`. It compares a Rust constant to a Rust
+    /// literal, so it cannot observe Go and a red row does not mean "drifted
+    /// from Go" — it means this client's constant moved off the agreed number.
+    /// The cross-client binding is the shared literal plus the two doc blocks;
+    /// Go pins its own side the same way, in
+    /// `TestReadFileConfigBoundPinsDerivedValue`.
+    #[test]
+    fn config_bound_pins_derived_value() {
+        assert_eq!(CONFIG_FILE_MAX_BYTES, 1 << 24);
+    }
+
+    /// At-bound and over-bound VERDICTS at the config helper, run against the
+    /// PRODUCTION constant (not an injectable bound) so the row pins the real
+    /// ceiling: at-bound read whole, one byte over refused. It observes only
+    /// the final `Result`, so it does not itself prove the refusal lands
+    /// BEFORE allocation — an allocate-then-refuse implementation would pass
+    /// it. That ordering is enforced in `read_capped` and covered by
+    /// RUB-1057's rows. Go twin: `TestReadFileConfigBoundAtAndOverBound`.
+    #[test]
+    fn config_read_at_and_over_bound() {
+        let dir = unique_temp_path("rubin-io-utils-config-bound");
+        fs::create_dir_all(&dir).expect("create test dir");
+
+        let at = dir.join("at.json");
+        create_sparse_file(&at, CONFIG_FILE_MAX_BYTES);
+        let raw = read_config_file_to_string(&at).expect("at-bound config must be read whole");
+        assert_eq!(raw.len() as u64, CONFIG_FILE_MAX_BYTES);
+
+        let over = dir.join("over.json");
+        create_sparse_file(&over, CONFIG_FILE_MAX_BYTES + 1);
+        let err = read_config_file_to_string(&over).expect_err("over-bound config must refuse");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains(STORE_FILE_TOO_LARGE_PREFIX),
+            "unexpected over-bound error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Path shapes at the config helper: every row asserts THIS client's
+    /// outcome equals the Go NODE's, each Go verdict measured by driving
+    /// `ReadConfigFile(filepath.Clean(path))` — the shape both Go callers use
+    /// (`cmd/rubin-node/main.go`) — so the column records what an operator
+    /// actually gets rather than what the bare Go helper does.
+    ///
+    /// The four accepting rows assert the accepted CONTENT, not merely that
+    /// the read succeeded, because the last of them is about WHICH FILE is
+    /// read: unnormalized, `Path::parent()` leaves `link/..` for the kernel to
+    /// resolve and this client loaded a different file than Go did. The three
+    /// `None` rows pin REJECTION ONLY — any `Err` satisfies them, so they do
+    /// not distinguish an is-a-directory refusal from a normalization that
+    /// failed outright.
+    ///
+    /// These measured rows are the evidence for the agreement.
+    /// `lexical_clean_matches_go_filepath_clean` does NOT bind it: that test
+    /// is a table of Rust literals and never executes Go.
+    #[cfg(unix)]
+    #[test]
+    fn config_read_path_shapes_match_go_node() {
+        use std::path::PathBuf;
+        let dir = unique_temp_path("rubin-io-utils-config-shapes");
+        fs::create_dir_all(dir.join("sub")).expect("create test dir");
+        fs::create_dir_all(dir.join("other/real")).expect("create link target");
+        let file = dir.join("cfg.json");
+        fs::write(&file, b"{}").expect("write config");
+        std::os::unix::fs::symlink(dir.join("absent"), dir.join("dangling")).expect("symlink");
+        // `sub/link` -> `other/real`, so `sub/link/..` folds LEXICALLY to
+        // `sub` but resolves through the KERNEL to `other`.
+        fs::write(dir.join("sub/genesis.json"), b"LEXICAL").expect("write lexical");
+        fs::write(dir.join("other/genesis.json"), b"KERNEL").expect("write kernel");
+        std::os::unix::fs::symlink(dir.join("other/real"), dir.join("sub/link")).expect("symlink");
+        let f = file.display().to_string();
+        // (path, expected content when accepted) with the measured Go verdict.
+        let rows: [(PathBuf, Option<&str>); 7] = [
+            (file.clone(), Some("{}")),                    // Go node: ACCEPT "{}"
+            (PathBuf::from(format!("{f}/")), Some("{}")),  // Go node: ACCEPT "{}"
+            (PathBuf::from(format!("{f}/.")), Some("{}")), // Go node: ACCEPT "{}"
+            (PathBuf::from(format!("{f}/..")), None),      // Go node: REJECT is a directory
+            (dir.join("sub"), None),                       // Go node: REJECT is a directory
+            (dir.join("dangling"), None),                  // Go node: REJECT no such file
+            (dir.join("sub/link/../genesis.json"), Some("LEXICAL")), // Go node: ACCEPT "LEXICAL"
+        ];
+        for (path, want) in rows {
+            assert_eq!(
+                read_config_file_to_string(&path).ok().as_deref(),
+                want,
+                "outcome diverges from the Go node for {}",
+                path.display()
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The encoding refusal must be PRESERVED, not merely kept in the same
+    /// class: what an operator sees is this string interpolated into
+    /// `read genesis file {path}: {e}` at both call sites, so the row pins the
+    /// exact message `fs::read_to_string` produced before the bound. Asserting
+    /// only the kind would let a reworded literal — including one that adopted
+    /// the size prefix — pass while the behaviour changed.
+    ///
+    /// Cross-client: merged Go `ReadConfigFile` ACCEPTS these bytes (measured:
+    /// nil error, 3 bytes) because it returns `[]byte` and leaves encoding to
+    /// the caller, so the refusal lands one layer later at `json.Unmarshal`.
+    /// Rust refuses at the helper, whose callers both want `String`. Both call
+    /// sites end in an error — the layer differs, not the operator verdict.
+    #[test]
+    fn config_read_rejects_non_utf8_without_size_prefix() {
+        let dir = unique_temp_path("rubin-io-utils-config-utf8");
+        fs::create_dir_all(&dir).expect("create test dir");
+
+        let path = dir.join("bad.json");
+        fs::write(&path, [0xffu8, 0xfe, 0x00]).expect("write non-utf8");
+        let err = read_config_file_to_string(&path).expect_err("non-utf8 config must refuse");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "stream did not contain valid UTF-8");
+        // Anchor against the reader these call sites used before the bound,
+        // on the SAME file: asserting our literal against our literal could
+        // not detect us drifting away from what `read_to_string` says.
+        let std_err = fs::read_to_string(&path).expect_err("std must refuse too");
+        assert_eq!(err.kind(), std_err.kind());
+        assert_eq!(err.to_string(), std_err.to_string());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Write/read symmetry guard row for the undo class (the one guarded

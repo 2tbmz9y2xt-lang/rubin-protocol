@@ -1136,6 +1136,15 @@ fn validate_config(cfg: &mut CliConfig) -> Result<(), String> {
     // save produced) — even for operator `--data-dir` values that
     // cross a symlink combined with `..` segments.
     cfg.data_dir = rubin_node::normalize_data_dir(&cfg.data_dir)?;
+    // Same treatment for `--genesis-file`, so the path EffectiveConfig
+    // reports is the path that gets read. `read_config_file_to_string`
+    // normalizes again and must keep doing so: the call is idempotent, and it
+    // is the only normalization for direct callers and for the `lib.rs`-
+    // re-exported `load_chain_id_from_genesis_file`, which never passes
+    // through CLI parsing. Do not simplify either one away.
+    if let Some(genesis_file) = cfg.genesis_file.as_deref() {
+        cfg.genesis_file = Some(rubin_node::normalize_data_dir(genesis_file)?);
+    }
     validate_addr_inner("bind_addr", &cfg.bind_addr, true)?;
     if !cfg.rpc_bind_addr.trim().is_empty() {
         validate_addr_inner("rpc_bind_addr", &cfg.rpc_bind_addr, true)?;
@@ -2052,6 +2061,64 @@ mod tests {
         assert_eq!(
             json["chain_id_hex"].as_str(),
             Some("88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103")
+        );
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// The genesis path `EffectiveConfig` REPORTS must be the path that was
+    /// READ. Normalizing inside the read helper alone left the CLI echoing the
+    /// raw value, so on a symlinked path the node printed a path resolving to
+    /// a different pack, with a different chain id, than the one it loaded.
+    /// Client-local invariant, not parity: Go's EffectiveConfig has no genesis
+    /// field. Reads the reported path with plain `fs::read_to_string` — no
+    /// normalization — because that is what an operator or external tool
+    /// copying it would do.
+    #[cfg(unix)]
+    #[test]
+    fn reported_genesis_path_is_the_path_that_was_read() {
+        let dir = unique_temp_dir("rubin-node-bin-genesis-symlink");
+        fs::create_dir_all(dir.join("sub")).expect("mkdir sub");
+        fs::create_dir_all(dir.join("other/real")).expect("mkdir link target");
+        seed_block_store(&dir);
+        // `sub/link` -> `other/real`, so `sub/link/..` folds LEXICALLY to
+        // `sub` but resolves through the KERNEL to `other`. The two packs
+        // carry different chain ids so the assertion can tell them apart.
+        let lexical = "a".repeat(64);
+        let kernel = "b".repeat(64);
+        fs::write(
+            dir.join("sub/genesis.json"),
+            format!("{{\"chain_id_hex\":\"{lexical}\"}}"),
+        )
+        .expect("write lexical pack");
+        fs::write(
+            dir.join("other/genesis.json"),
+            format!("{{\"chain_id_hex\":\"{kernel}\"}}"),
+        )
+        .expect("write kernel pack");
+        std::os::unix::fs::symlink(dir.join("other/real"), dir.join("sub/link")).expect("symlink");
+
+        let args = vec![
+            "--dry-run".to_string(),
+            "--datadir".to_string(),
+            dir.display().to_string(),
+            "--genesis-file".to_string(),
+            dir.join("sub/link/../genesis.json").display().to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+
+        let json: Value = parse_effective_config_json(&stdout);
+        assert_eq!(json["chain_id_hex"].as_str(), Some(lexical.as_str()));
+        let reported = json["genesis_file"]
+            .as_str()
+            .expect("reported genesis path");
+        let at_reported = fs::read_to_string(reported).expect("reported path must be readable");
+        assert!(
+            at_reported.contains(&lexical),
+            "reported path {reported} resolves to a different pack than the one loaded: {at_reported}"
         );
 
         fs::remove_dir_all(&dir).expect("cleanup");

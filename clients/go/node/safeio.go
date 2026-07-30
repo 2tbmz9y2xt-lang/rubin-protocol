@@ -280,8 +280,8 @@ func checkStoreSaveBound(name string, size int, maxBytes int64) error {
 // born-bounded obligation for a future port is RUB-1065), while the
 // GENESIS-FILE surface exists in Rust (load_genesis_config and
 // load_chain_id_from_genesis_file in crates/rubin-node/src/genesis.rs) and
-// is still unbounded there — the Rust mirror (RUB-1069) carries this same
-// 16 MiB ceiling and the same typed pre-allocation refusal.
+// is bounded there too: the Rust mirror (RUB-1069) carries this same 16 MiB
+// ceiling and the same typed pre-allocation refusal at both readers.
 const configFileMaxBytes = 1 << 24
 
 // ReadConfigFile reads an operator config file under configFileMaxBytes with
