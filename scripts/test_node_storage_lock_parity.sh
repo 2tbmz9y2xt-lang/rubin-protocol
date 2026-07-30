@@ -128,32 +128,69 @@ RUST_TEST_SOURCE="$(rust_artifact "${RUST_TEST_LOG}" test)" || fail 'cargo did n
 [[ -x "${RUST_TEST_SOURCE}" ]] || fail "cargo-reported Rust test binary is not executable: ${RUST_TEST_SOURCE}"
 cp -- "${RUST_TEST_SOURCE}" "${RUST_LOCK_TEST}"
 
-wait_clean() {
-  local pid="$1" label="$2" rc=0
-  wait "${pid}" || rc=$?
-  (( rc == 0 )) || fail "${label}: process exited ${rc}"
+wait_managed_exit() {
+  local marker="$1" label="$2" pid="$3"
+  local line="" extra=""
+  rubin_process_wait_for_log "${marker}" 'exit=' 30 "${pid}" || fail "${label}: process did not publish an exit marker"
+  {
+    IFS= read -r line || fail "${label}: malformed exit marker"
+    if IFS= read -r extra || [[ -n "${extra}" ]]; then
+      fail "${label}: malformed exit marker"
+    fi
+  } <"${marker}"
+  case "${line}" in
+    exit=0) return 0 ;;
+    exit=2) return 2 ;;
+    *) fail "${label}: invalid exit marker ${line}" ;;
+  esac
 }
 HOLDER_PID=""
 HOLDER_RELEASE=""
+HOLDER_STATUS=""
 start_holder() {
-  local impl="$1" label="$2" lock="$3" log="${ART}/${2}.${1}.holder.log" ready="${ART}/markers/${2}.${1}.ready"
+  local impl="$1" label="$2" lock="$3" log="${ART}/${2}.${1}.holder.log" ready="${ART}/markers/${2}.${1}.ready" status="${ART}/markers/${2}.${1}.holder.status"
   HOLDER_RELEASE="${ART}/markers/${label}.${impl}.release"
+  # shellcheck disable=SC2016 # The wrapper owns these positional parameters.
   case "${impl}" in
-    go) rubin_process_start "${log}" env RUBIN_FILELOCK_PROTOCOL_MODE=holder \
+    go) rubin_process_start "${log}" "${BASH_BIN}" -c '
+set -euo pipefail
+status="$1"
+shift
+rc=0
+"$@" || rc=$?
+printf "exit=%s\n" "${rc}" >"${status}.tmp.$$"
+mv -f -- "${status}.tmp.$$" "${status}"
+exit "${rc}"
+' rubin-holder-status "${status}" env RUBIN_FILELOCK_PROTOCOL_MODE=holder \
       RUBIN_FILELOCK_PROTOCOL_LOCK_PATH="${lock}" RUBIN_FILELOCK_PROTOCOL_READY_PATH="${ready}" \
       RUBIN_FILELOCK_PROTOCOL_RELEASE_PATH="${HOLDER_RELEASE}" "${GO_LOCK_TEST}" \
       -test.run '^TestFileLockExternalProtocol$' -test.count=1 ;;
-    rust) rubin_process_start "${log}" env RUBIN_FILE_LOCK_PROTOCOL_MODE=holder \
+    rust) rubin_process_start "${log}" "${BASH_BIN}" -c '
+set -euo pipefail
+status="$1"
+shift
+rc=0
+"$@" || rc=$?
+printf "exit=%s\n" "${rc}" >"${status}.tmp.$$"
+mv -f -- "${status}.tmp.$$" "${status}"
+exit "${rc}"
+' rubin-holder-status "${status}" env RUBIN_FILE_LOCK_PROTOCOL_MODE=holder \
       RUBIN_FILE_LOCK_PROTOCOL_LOCK_PATH="${lock}" RUBIN_FILE_LOCK_PROTOCOL_READY_PATH="${ready}" \
       RUBIN_FILE_LOCK_PROTOCOL_RELEASE_PATH="${HOLDER_RELEASE}" "${RUST_LOCK_TEST}" \
       file_lock::tests::external_file_lock_protocol --exact --nocapture ;;
     *) fail "${label}: unknown holder ${impl}" ;;
   esac || fail "${label}: ${impl} holder start"
   HOLDER_PID="${RUBIN_PROCESS_LAST_PID}"
+  HOLDER_STATUS="${status}"
   rubin_process_wait_for_log "${ready}" ready 15 "${HOLDER_PID}" || fail "${label}: holder did not publish ready marker"
   assert_exact_file "${label}.${impl}.ready" "${ready}" ready
 }
-release_holder() { printf 'release\n' >"${HOLDER_RELEASE}"; wait_clean "${HOLDER_PID}" "$1: holder release"; }
+release_holder() {
+  local rc=0
+  printf 'release\n' >"${HOLDER_RELEASE}"
+  wait_managed_exit "${HOLDER_STATUS}" "$1: holder release" "${HOLDER_PID}" || rc=$?
+  (( rc == 0 )) || fail "$1: holder release exited ${rc}"
+}
 crash_holder() {
   rubin_process_stop_pid "${HOLDER_PID}" || fail "$1: holder stop failed"
   rubin_process_is_alive "${HOLDER_PID}" && fail "$1: holder survived stop"
@@ -303,30 +340,35 @@ assert_create_path_contention() {
   release_holder "${label}"
 }
 
-RACE_PID=""
-RACE_ERR=""
+RACE_PID=""; RACE_ERR=""; RACE_STATUS=""
 start_race_node() {
-  local impl="$1" label="$2" datadir="$3" gate="$4" bin ready out err log
+  local impl="$1" label="$2" datadir="$3" gate="$4" bin ready out err log status
   bin="$(node_bin "${impl}")"
   [[ "${bin}" == /* && -x "${bin}" ]] || fail "${label}: ${impl} race binary is not absolute and executable"
   ready="${ART}/markers/${label}.${impl}.race.ready"
   out="${ART}/${label}.${impl}.race.stdout"
   err="${ART}/${label}.${impl}.race.stderr"
   log="${ART}/${label}.${impl}.race.log"
+  status="${ART}/markers/${label}.${impl}.race.status"
   # shellcheck disable=SC2016 # The wrapper owns these positional parameters.
   rubin_process_start "${log}" "${BASH_BIN}" -c '
 set -euo pipefail
-ready="$1"; gate="$2"; out="$3"; err="$4"
-shift 4
+ready="$1"; gate="$2"; out="$3"; err="$4"; status="$5"
+shift 5
 [[ -p "${gate}" ]] || exit 2
 printf "ready\n" >"${ready}"
 IFS= read -r token <"${gate}"
 [[ "${token}" == release ]] || exit 2
-exec "$@" >"${out}" 2>"${err}"
-' rubin-race-gate "${ready}" "${gate}" "${out}" "${err}" "${bin}" --network devnet --datadir "${datadir}" --create-store --mine-blocks 1 --mine-exit ||
+rc=0
+"$@" >"${out}" 2>"${err}" || rc=$?
+printf "exit=%s\n" "${rc}" >"${status}.tmp.$$"
+mv -f -- "${status}.tmp.$$" "${status}"
+exit "${rc}"
+' rubin-race-gate "${ready}" "${gate}" "${out}" "${err}" "${status}" "${bin}" --network devnet --datadir "${datadir}" --create-store --mine-blocks 1 --mine-exit ||
     fail "${label}: ${impl} race start"
   RACE_PID="${RUBIN_PROCESS_LAST_PID}"
   RACE_ERR="${err}"
+  RACE_STATUS="${status}"
   rubin_process_wait_for_log "${ready}" ready 15 "${RACE_PID}" || fail "${label}: ${impl} race process did not reach barrier"
   assert_exact_file "${label}.${impl}.race.ready" "${ready}" ready
 }
@@ -354,18 +396,18 @@ post_winner_create_refusal() {
   assert_exact_file "$2.$1.post-create.root-exists" "${RUN_ERR}" "blockstore create failed: blockstore root already exists: $3/blockstore"
 }
 assert_create_race() {
-  local first="$1" second="$2" label="$3" datadir="${ART}/fixtures/${3}" first_gate second_gate first_pid second_pid first_err second_err first_rc=0 second_rc=0 winner loser loser_err actual before after
+  local first="$1" second="$2" label="$3" datadir="${ART}/fixtures/${3}" first_gate second_gate first_pid second_pid first_err second_err first_status second_status first_rc=0 second_rc=0 winner loser loser_err actual before after
   assert_absent "${label}: initial datadir" "${datadir}"
   first_gate="${ART}/markers/${label}.${first}.gate"
   second_gate="${ART}/markers/${label}.${second}.gate"
   mkfifo "${first_gate}" "${second_gate}" || fail "${label}: cannot create FIFO race barrier"
   start_race_node "${first}" "${label}" "${datadir}" "${first_gate}"
-  first_pid="${RACE_PID}"; first_err="${RACE_ERR}"
+  first_pid="${RACE_PID}"; first_err="${RACE_ERR}"; first_status="${RACE_STATUS}"
   start_race_node "${second}" "${label}" "${datadir}" "${second_gate}"
-  second_pid="${RACE_PID}"; second_err="${RACE_ERR}"
+  second_pid="${RACE_PID}"; second_err="${RACE_ERR}"; second_status="${RACE_STATUS}"
   release_race_barrier "${first_gate}" "${second_gate}"
-  wait "${first_pid}" || first_rc=$?
-  wait "${second_pid}" || second_rc=$?
+  wait_managed_exit "${first_status}" "${label}: ${first} race" "${first_pid}" || first_rc=$?
+  wait_managed_exit "${second_status}" "${label}: ${second} race" "${second_pid}" || second_rc=$?
   printf '%s\n' "${first_rc}" >"${ART}/${label}.${first}.race.exit"
   printf '%s\n' "${second_rc}" >"${ART}/${label}.${second}.race.exit"
   if (( first_rc == 0 && second_rc == 2 )); then winner="${first}"; loser="${second}"; loser_err="${second_err}";
