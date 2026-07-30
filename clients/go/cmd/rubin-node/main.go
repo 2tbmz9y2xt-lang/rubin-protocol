@@ -309,7 +309,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	legacyExposureScan := fs.Bool("legacy-exposure-scan", false, "emit legacy suite exposure report and exit")
 	fs.Var(&legacySuiteIDs, "legacy-suite-id", "legacy suite_id to watch (decimal or 0xNN); repeatable")
 	legacyExposureIncludeOutpoints := fs.Bool("legacy-exposure-include-outpoints", false, "include deterministic outpoint lists in legacy exposure report")
-	dryRun := fs.Bool("dry-run", false, "print effective config and exit")
+	dryRun := fs.Bool("dry-run", false, "report effective config and on-disk datadir state without writing to it; not a startup preflight — it does not predict whether startup will succeed")
 	createStore := fs.Bool("create-store", false, "create a new blockstore (default: strictly open an existing one)")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -352,9 +352,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	// --create-store mutates storage; --dry-run and --legacy-exposure-scan are
-	// read-only. Reject the combination after the existing config/legacy-suite
-	// validation and before genesis loading, the scan's chainstate read, and
-	// every filesystem write: exit 2 on an untouched filesystem.
+	// read-only — the scan by returning below before the block store is opened,
+	// --dry-run by skipping the chainstate reconcile+save further down (both
+	// enforced by tests, not by convention). Reject the combination after the
+	// existing config/legacy-suite validation and before genesis loading, the
+	// scan's chainstate read, and every filesystem write: exit 2 on an
+	// untouched filesystem.
 	if *createStore && (*dryRun || *legacyExposureScan) {
 		_, _ = fmt.Fprintln(stderr, "--create-store cannot be combined with --dry-run or --legacy-exposure-scan")
 		return 2
@@ -449,13 +452,29 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// and reset+replay from height 0 — correct, just wasteful on large
 	// chains. If the sync engine constructor itself fails later, the
 	// already-repaired chainstate is durable on disk.
-	if _, err := node.ReconcileChainStateWithBlockStore(chainState, blockStore, syncCfg); err != nil {
-		_, _ = fmt.Fprintf(stderr, "chainstate reconcile failed: %v\n", err)
-		return 2
-	}
-	if err := chainState.Save(chainStatePath); err != nil {
-		_, _ = fmt.Fprintf(stderr, "chainstate save failed: %v\n", err)
-		return 2
+	//
+	// Both steps are skipped under --dry-run, which reports the datadir and
+	// must not repair it: the reconcile can truncate the canonical index,
+	// and Save rewrites the snapshot (temp file + rename, so a fresh inode)
+	// on every single invocation. The banners below therefore describe the
+	// chainstate as loaded from disk — a snapshot that disagrees with the
+	// blockstore is reported, not fixed. Ordinary startup is unaffected:
+	// same two calls, same order, same errors, same exit codes.
+	//
+	// The Rust mirror named above therefore holds for ordinary startup ONLY.
+	// It is deliberately broken for --dry-run until RUB-1083 lands the same
+	// skip: Rust still reconciles and saves before its own dry-run return, so
+	// on a datadir with an incomplete canonical suffix Go reports the tip and
+	// leaves the index alone where Rust truncates it and reports the loss.
+	if !*dryRun {
+		if _, err := node.ReconcileChainStateWithBlockStore(chainState, blockStore, syncCfg); err != nil {
+			_, _ = fmt.Fprintf(stderr, "chainstate reconcile failed: %v\n", err)
+			return 2
+		}
+		if err := chainState.Save(chainStatePath); err != nil {
+			_, _ = fmt.Fprintf(stderr, "chainstate save failed: %v\n", err)
+			return 2
+		}
 	}
 	syncEngine, err := newSyncEngineFn(
 		chainState,

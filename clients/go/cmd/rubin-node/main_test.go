@@ -325,9 +325,9 @@ func TestRunDryRunOK(t *testing.T) {
 	if out.Len() == 0 {
 		t.Fatalf("expected stdout output")
 	}
-	// Basic sanity: should have created chainstate file.
-	if _, err := os.Stat(node.ChainStatePath(dir)); err != nil {
-		t.Fatalf("expected chainstate file to exist: %v", err)
+	// RUB-1071: --dry-run reports, it does not initialize.
+	if _, err := os.Stat(node.ChainStatePath(dir)); !os.IsNotExist(err) {
+		t.Fatalf("dry-run must not create a chainstate file: stat err=%v", err)
 	}
 }
 
@@ -353,8 +353,14 @@ func symlinkTraversalDataDir(t *testing.T) (raw string, cleaned string, escaped 
 }
 
 func TestRunNormalizesDataDirBeforeChainStateAndBlockStorePathDerivation(t *testing.T) {
-	raw, cleaned, escaped := symlinkTraversalDataDir(t)
+	raw, cleaned, _ := symlinkTraversalDataDir(t)
 	seedBlockStore(t, cleaned)
+	// Height 7 is the chainstate-path probe: --dry-run no longer writes a
+	// snapshot (RUB-1071), so the derivation is proved by reading this one
+	// back out of the report instead of by stat-ing a file the run created.
+	if err := testLegacyExposureTippedChainState().Save(node.ChainStatePath(cleaned)); err != nil {
+		t.Fatalf("seed chainstate: %v", err)
+	}
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
@@ -370,16 +376,13 @@ func TestRunNormalizesDataDirBeforeChainStateAndBlockStorePathDerivation(t *test
 	if printed.DataDir != cleaned {
 		t.Fatalf("printed data_dir=%q, want normalized %q", printed.DataDir, cleaned)
 	}
-	if _, err := os.Stat(node.ChainStatePath(cleaned)); err != nil {
-		t.Fatalf("expected chainstate under normalized datadir: %v", err)
+	if !strings.Contains(out.String(), "chainstate: has_tip=true height=7") {
+		t.Fatalf("chainstate must be read from the normalized datadir, stdout=%q", out.String())
 	}
 	if info, err := os.Stat(node.BlockStorePath(cleaned)); err != nil {
 		t.Fatalf("expected blockstore under normalized datadir: %v", err)
 	} else if !info.IsDir() {
 		t.Fatalf("blockstore path is not a directory: %s", node.BlockStorePath(cleaned))
-	}
-	if _, err := os.Stat(node.ChainStatePath(escaped)); !os.IsNotExist(err) {
-		t.Fatalf("raw symlink traversal path was used; stat err=%v path=%s", err, node.ChainStatePath(escaped))
 	}
 }
 
@@ -1251,8 +1254,11 @@ func TestRunRejectsInvalidPVModeBeforeStorage(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("valid pv-mode %q exit code %d (stderr=%q)", mode, code, errOut.String())
 			}
-			if _, err := os.Stat(node.ChainStatePath(datadir)); err != nil {
-				t.Fatalf("valid pv-mode %q: expected chainstate file: %v", mode, err)
+			// The report reaches the storage path (it renders the
+			// blockstore banner). It replaces a chainstate-file stat,
+			// which RUB-1071 made a dry-run write rather than evidence.
+			if !strings.Contains(out.String(), "blockstore: empty") {
+				t.Fatalf("valid pv-mode %q: storage path not reached, stdout=%q", mode, out.String())
 			}
 		}
 	})
@@ -1291,7 +1297,21 @@ func TestSaturatingAddUint64(t *testing.T) {
 	}
 }
 
-func TestRunDryRunReconcilesChainStateFromBlockStore(t *testing.T) {
+// stopAfterChainStateSave fails the sync-engine constructor, the first step
+// past the reconcile+save pair. Ordinary startup otherwise runs services
+// until signaled, so rows whose subject is the reconcile or the save need a
+// deterministic terminator; reaching it also pins both steps as pre-service.
+// RUB-1071 moved these rows off --dry-run, which no longer runs either step.
+func stopAfterChainStateSave(t *testing.T) {
+	t.Helper()
+	prev := newSyncEngineFn
+	newSyncEngineFn = func(*node.ChainState, *node.BlockStore, node.SyncConfig) (*node.SyncEngine, error) {
+		return nil, errors.New("stop after reconcile+save")
+	}
+	t.Cleanup(func() { newSyncEngineFn = prev })
+}
+
+func TestRunStartupReconcilesChainStateFromBlockStore(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := node.ChainStatePath(dir)
 	store, err := node.CreateBlockStore(node.BlockStorePath(dir))
@@ -1310,15 +1330,13 @@ func TestRunDryRunReconcilesChainStateFromBlockStore(t *testing.T) {
 	if err := node.NewChainState().Save(chainStatePath); err != nil {
 		t.Fatalf("Save(stale chainstate): %v", err)
 	}
+	stopAfterChainStateSave(t)
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
-	code := run([]string{"--dry-run", "--datadir", dir}, &out, &errOut)
-	if code != 0 {
-		t.Fatalf("run dry-run code=%d stderr=%q", code, errOut.String())
-	}
-	if !strings.Contains(out.String(), "chainstate: has_tip=true height=0") {
-		t.Fatalf("stdout missing reconciled chainstate tip: %q", out.String())
+	code := run([]string{"--datadir", dir}, &out, &errOut)
+	if code != 2 {
+		t.Fatalf("run code=%d, want 2 (stderr=%q)", code, errOut.String())
 	}
 
 	loaded, err := node.LoadChainState(chainStatePath)
@@ -1645,7 +1663,10 @@ func TestRunDryRunShowsTipWhenBlockstoreHasTip(t *testing.T) {
 	}
 }
 
-func TestRunDryRunFailsWhenChainstateReconcileFails(t *testing.T) {
+// unreplayableStoreDataDir commits a canonical entry whose block payload is
+// not a parseable block, so the reconcile's replay fails.
+func unreplayableStoreDataDir(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
 	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
 	if err != nil {
@@ -1655,15 +1676,19 @@ func TestRunDryRunFailsWhenChainstateReconcileFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseBlockBytes(genesis): %v", err)
 	}
-	header := parsed.HeaderBytes
-	hash := node.DevnetGenesisBlockHash()
-	if err := blockStore.CommitCanonicalBlock(0, hash, header, []byte{0x00}, &node.BlockUndo{}); err != nil {
+	if err := blockStore.CommitCanonicalBlock(0, node.DevnetGenesisBlockHash(), parsed.HeaderBytes, []byte{0x00}, &node.BlockUndo{}); err != nil {
 		t.Fatalf("CommitCanonicalBlock: %v", err)
 	}
+	return dir
+}
+
+func TestRunStartupFailsWhenChainstateReconcileFails(t *testing.T) {
+	dir := unreplayableStoreDataDir(t)
+	stopAfterChainStateSave(t)
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
-	code := run([]string{"--dry-run", "--datadir", dir}, &out, &errOut)
+	code := run([]string{"--datadir", dir}, &out, &errOut)
 	if code != 2 {
 		t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
 	}
@@ -1672,36 +1697,17 @@ func TestRunDryRunFailsWhenChainstateReconcileFails(t *testing.T) {
 	}
 }
 
-func TestRunDryRunFailsWhenChainstateSaveFails(t *testing.T) {
-	dir := t.TempDir()
-	chainStatePath := node.ChainStatePath(dir)
-	store, err := node.CreateBlockStore(node.BlockStorePath(dir))
-	if err != nil {
-		t.Fatalf("CreateBlockStore: %v", err)
-	}
-	target := consensus.POW_LIMIT
-	state := node.NewChainState()
-	engine, err := node.NewSyncEngine(state, store, node.DefaultSyncConfig(&target, node.DevnetGenesisChainID(), chainStatePath))
-	if err != nil {
-		t.Fatalf("NewSyncEngine: %v", err)
-	}
-	if _, err := engine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
-		t.Fatalf("ApplyBlock(genesis): %v", err)
-	}
+// A datadir the reconcile cannot replay is exactly when an operator reaches
+// for --dry-run. It must not inherit the startup rejection above: --dry-run
+// never runs the reconcile, so it reports the store as found and exits 0.
+func TestRunDryRunReportsUnreplayableStoreWithoutFailing(t *testing.T) {
+	dir := unreplayableStoreDataDir(t)
+	before := datadirSnapshot(t, dir)
 
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatalf("Chmod(readonly datadir): %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	code := run([]string{"--dry-run", "--datadir", dir}, &out, &errOut)
-	if code != 2 {
-		t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
-	}
-	if !bytes.Contains(errOut.Bytes(), []byte("chainstate save failed")) {
-		t.Fatalf("expected chainstate save failure in stderr, got %q", errOut.String())
+	report := dryRunReport(t, dir)
+	assertNoFilesystemWrite(t, before, datadirSnapshot(t, dir))
+	if !strings.Contains(report, "blockstore: tip_height=0 ") {
+		t.Fatalf("report must show the canonical tip as found on disk, stdout=%q", report)
 	}
 }
 
@@ -2009,23 +2015,12 @@ func TestRunChainstateLoadFailsWhenChainstatePathIsDir(t *testing.T) {
 	}
 }
 
-func TestRunChainstateSaveFailsWhenDatadirNotWritable(t *testing.T) {
-	datadir := filepath.Join(t.TempDir(), "data")
-	if err := os.MkdirAll(datadir, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.Chmod(datadir, 0o500); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(datadir, 0o700) })
-
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	code := run([]string{"--dry-run", "--datadir", datadir}, &out, &errOut)
-	if code != 2 {
-		t.Fatalf("expected exit code 2, got %d", code)
-	}
-}
+// Rows that provoke a write failure by chmod'ing the datadir read-only —
+// TestRunChainstateSaveFailsWhenDatadirNotWritable,
+// TestRunStartupFailsWhenChainstateSaveFails and
+// TestRunDryRunReportsOnAReadOnlyDatadir — live in main_unix_test.go behind
+// a `//go:build unix` tag: they must skip as root, and os.Geteuid() is
+// Unix-only (Copilot review feedback on PR #1218).
 
 func TestRunFailsWhenBlockStoreOpenFails(t *testing.T) {
 	datadir := t.TempDir()
@@ -2760,6 +2755,287 @@ func TestRunOpenExistingStartupDoesNotSynthesizeStore(t *testing.T) {
 	}
 	if code, stderr := runCLI("--datadir", dir, "--dry-run"); code != 0 {
 		t.Fatalf("reopen exit %d (stderr=%q)", code, stderr)
+	}
+}
+
+type datadirEntry struct {
+	path string
+	info os.FileInfo
+}
+
+// datadirSnapshot lists every entry under root in WalkDir's lexical order.
+// os.FileInfo carries the device+inode identity that os.SameFile compares:
+// chainState.Save writes a temp file and renames it over the target, so the
+// replacement has identical content, identical size and (at filesystem mtime
+// granularity) an identical timestamp — only the inode changes.
+func datadirSnapshot(t *testing.T, root string) []datadirEntry {
+	t.Helper()
+	var snap []datadirEntry
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		snap = append(snap, datadirEntry{path: path, info: info})
+		return nil
+	}); err != nil {
+		t.Fatalf("snapshot %s: %v", root, err)
+	}
+	return snap
+}
+
+func datadirPaths(snap []datadirEntry) []string {
+	out := make([]string, len(snap))
+	for i, e := range snap {
+		out[i] = e.path
+	}
+	return out
+}
+
+// assertNoFilesystemWrite compares five axes under root: path, identity
+// (device+inode), size, mtime and mode. A directory mtime bump is a write
+// too — it is how a temp file the run created and then removed still shows
+// up. Two axes it deliberately does NOT cover: CONTENT, so an in-place
+// rewrite preserving inode, size and mtime would pass (the snapshotDir
+// closure in TestRunRejectsInvalidPVModeBeforeStorage is the content-
+// comparing counterpart), and anything OUTSIDE root, since it walks only the
+// datadir. Do not read a pass here as "the process wrote nothing anywhere".
+func assertNoFilesystemWrite(t *testing.T, before, after []datadirEntry) {
+	t.Helper()
+	if len(before) != len(after) {
+		t.Fatalf("listing changed:\nbefore=%v\nafter=%v", datadirPaths(before), datadirPaths(after))
+	}
+	for i, b := range before {
+		a := after[i]
+		switch {
+		case b.path != a.path:
+			t.Fatalf("entry %d: %s became %s", i, b.path, a.path)
+		case !os.SameFile(b.info, a.info):
+			t.Fatalf("%s was replaced by a new inode (temp-and-rename)", b.path)
+		case b.info.Size() != a.info.Size():
+			t.Fatalf("%s size %d -> %d", b.path, b.info.Size(), a.info.Size())
+		case !b.info.ModTime().Equal(a.info.ModTime()):
+			t.Fatalf("%s mtime %v -> %v", b.path, b.info.ModTime(), a.info.ModTime())
+		case b.info.Mode() != a.info.Mode():
+			t.Fatalf("%s mode %v -> %v", b.path, b.info.Mode(), a.info.Mode())
+		}
+	}
+}
+
+// preparedDatadir is the datadir an operator holds after a real startup: a
+// created blockstore with a mined canonical block at height 1 and the
+// chainstate snapshot that startup persisted.
+func preparedDatadir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "data")
+	if code, stderr := runCLI("--datadir", dir, "--create-store", "--mine-blocks", "1", "--mine-exit"); code != 0 {
+		t.Fatalf("prepare datadir: exit %d (stderr=%q)", code, stderr)
+	}
+	return dir
+}
+
+// dryRunReport runs --dry-run against dir and returns the report. A
+// successful read-only inspection has nothing to say on stderr, so any
+// stderr output fails the row even when the exit code is 0.
+func dryRunReport(t *testing.T, dir string) string {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--dry-run", "--datadir", dir}, &out, &errOut); code != 0 {
+		t.Fatalf("dry-run exit %d (stderr=%q)", code, errOut.String())
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("dry-run wrote to stderr: %q", errOut.String())
+	}
+	return out.String()
+}
+
+// TestRunDryRunWritesNothing pins RUB-1071: --dry-run is read-only. Three
+// runs, not one — the pre-fix code re-saved chainstate.json on every
+// invocation, and measured on this datadir the three replacements shared one
+// size and one mtime while burning three consecutive inodes.
+func TestRunDryRunWritesNothing(t *testing.T) {
+	dir := preparedDatadir(t)
+	before := datadirSnapshot(t, dir)
+	for i := 0; i < 3; i++ {
+		if report := dryRunReport(t, dir); !strings.Contains(report, "p2p: peer_slots=") {
+			t.Fatalf("run %d: truncated report %q", i, report)
+		}
+	}
+	assertNoFilesystemWrite(t, before, datadirSnapshot(t, dir))
+}
+
+// TestRunDryRunReportsStaleChainStateWithoutRepairing pins the shape that
+// makes the reconcile want to mutate: a snapshot reset to genesis while the
+// blockstore still holds canonical blocks. --dry-run must print the
+// disagreement and leave it on disk for the operator to decide about.
+func TestRunDryRunReportsStaleChainStateWithoutRepairing(t *testing.T) {
+	dir := preparedDatadir(t)
+	if err := node.NewChainState().Save(node.ChainStatePath(dir)); err != nil {
+		t.Fatalf("write stale chainstate: %v", err)
+	}
+	before := datadirSnapshot(t, dir)
+
+	report := dryRunReport(t, dir)
+	assertNoFilesystemWrite(t, before, datadirSnapshot(t, dir))
+
+	if !strings.Contains(report, "chainstate: has_tip=false height=0") {
+		t.Fatalf("report must show the stale on-disk chainstate, stdout=%q", report)
+	}
+	if !strings.Contains(report, "blockstore: tip_height=1 ") {
+		t.Fatalf("report must show the real blockstore tip, stdout=%q", report)
+	}
+}
+
+// TestRunDryRunDoesNotTruncateCanonicalIndex covers the reconcile's other
+// durable write, and the destructive one: an incomplete canonical suffix
+// (here a tip whose undo record is gone) makes it drop the tip from the
+// index. --dry-run must surface that datadir intact, tip included, so the
+// operator decides whether to lose the block.
+func TestRunDryRunDoesNotTruncateCanonicalIndex(t *testing.T) {
+	dir := preparedDatadir(t)
+	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	tipHeight, tipHash, ok, err := store.Tip()
+	if err != nil || !ok || tipHeight != 1 {
+		t.Fatalf("fixture tip: height=%d ok=%v err=%v", tipHeight, ok, err)
+	}
+	undo := filepath.Join(node.BlockStorePath(dir), "undo", hex.EncodeToString(tipHash[:])+".json")
+	if err := os.Remove(undo); err != nil {
+		t.Fatalf("remove tip undo record: %v", err)
+	}
+	before := datadirSnapshot(t, dir)
+
+	report := dryRunReport(t, dir)
+	assertNoFilesystemWrite(t, before, datadirSnapshot(t, dir))
+	if !strings.Contains(report, "blockstore: tip_height=1 ") {
+		t.Fatalf("report must still show the untruncated tip, stdout=%q", report)
+	}
+}
+
+// TestRunDryRunLeavesALiveNodeDatadirAlone: inspecting a datadir a node is
+// currently serving is the normal reason to reach for this mode. Pre-fix it
+// meant a second process rewriting the running node's chainstate snapshot
+// underneath it.
+func TestRunDryRunLeavesALiveNodeDatadirAlone(t *testing.T) {
+	if dir := os.Getenv("RUBIN_NODE_LIVE_DATADIR"); dir != "" {
+		os.Exit(run([]string{"--create-store", "--datadir", dir, "--bind", "127.0.0.1:0"}, os.Stdout, os.Stderr))
+	}
+	dir := filepath.Join(t.TempDir(), "data")
+	// The context owns the child's lifetime: it kills the node on expiry, so
+	// the Kill below is a backstop rather than the only path out.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestRunDryRunLeavesALiveNodeDatadirAlone")
+	cmd.Env = append(os.Environ(), "RUBIN_NODE_LIVE_DATADIR="+dir)
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+
+	// Banner, not a sleep: the node has opened its store and started its
+	// services by the time it prints this, so the snapshot below is of a
+	// datadir genuinely in use.
+	running := make(chan struct{})
+	go func() {
+		scanner := bufio.NewScanner(stdoutPipe)
+		closed := false
+		for scanner.Scan() {
+			if !closed && strings.Contains(scanner.Text(), "rubin-node skeleton running") {
+				close(running)
+				closed = true
+			}
+		}
+	}()
+	select {
+	case <-running:
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting for the live node to start: %v", ctx.Err())
+	}
+
+	before := datadirSnapshot(t, dir)
+	dryRunReport(t, dir)
+	assertNoFilesystemWrite(t, before, datadirSnapshot(t, dir))
+}
+
+// TestRunDryRunWritesNothingWithEveryLegalFlag: read-only is a property of
+// the mode, not of the bare invocation. --mine-blocks is the load-bearing
+// row — dry-run returns before the miner, so that success-gated side effect
+// must not fire.
+func TestRunDryRunWritesNothingWithEveryLegalFlag(t *testing.T) {
+	deployments := filepath.Join(t.TempDir(), "deployments.json")
+	if err := os.WriteFile(deployments, []byte("[]"), 0o600); err != nil {
+		t.Fatalf("write deployments: %v", err)
+	}
+	for _, extra := range [][]string{
+		{"--log-level", "debug"},
+		{"--bind", "127.0.0.1:0"},
+		{"--rpc-bind", "127.0.0.1:0"},
+		{"--max-peers", "1"},
+		{"--peer", "127.0.0.1:19111"},
+		{"--peers", "127.0.0.1:19111,127.0.0.1:19112"},
+		{"--mempool-max-txs", "7", "--mempool-max-bytes", "4096"},
+		{"--mine-address", strings.Repeat("ab", 32)},
+		{"--mine-blocks", "5", "--mine-exit"},
+		{"--pv-mode", "shadow", "--pv-shadow-max", "1"},
+		{"--pv-mode", "on"},
+		{"--featurebits-deployments", deployments},
+	} {
+		t.Run(strings.Join(extra, "_"), func(t *testing.T) {
+			dir := preparedDatadir(t)
+			before := datadirSnapshot(t, dir)
+			var out, errOut bytes.Buffer
+			args := append([]string{"--dry-run", "--datadir", dir}, extra...)
+			if code := run(args, &out, &errOut); code != 0 {
+				t.Fatalf("exit %d (stderr=%q)", code, errOut.String())
+			}
+			assertNoFilesystemWrite(t, before, datadirSnapshot(t, dir))
+			if strings.Contains(out.String(), "mined:") {
+				t.Fatalf("dry-run must not mine, stdout=%q", out.String())
+			}
+		})
+	}
+}
+
+// TestRunDryRunKeepsChainStateInode is the check a size/mtime comparison
+// cannot make. A hardlink pins the original inode; if the run renames a temp
+// file over chainstate.json the path and the link stop being the same file,
+// which on a real datadir is how an operator's backup link silently detaches.
+func TestRunDryRunKeepsChainStateInode(t *testing.T) {
+	dir := preparedDatadir(t)
+	chainStatePath := node.ChainStatePath(dir)
+	link := filepath.Join(filepath.Dir(dir), "chainstate.hardlink")
+	if err := os.Link(chainStatePath, link); err != nil {
+		t.Skipf("hardlink unavailable: %v", err)
+	}
+	before, err := os.Stat(chainStatePath)
+	if err != nil {
+		t.Fatalf("stat chainstate: %v", err)
+	}
+
+	dryRunReport(t, dir)
+
+	after, err := os.Stat(chainStatePath)
+	if err != nil {
+		t.Fatalf("stat chainstate after run: %v", err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatalf("chainstate.json was replaced by a new inode")
+	}
+	linked, err := os.Stat(link)
+	if err != nil {
+		t.Fatalf("stat hardlink: %v", err)
+	}
+	if !os.SameFile(linked, after) {
+		t.Fatalf("hardlink detached: the chainstate was rewritten under a new inode")
 	}
 }
 
