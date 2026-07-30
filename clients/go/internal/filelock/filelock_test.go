@@ -43,6 +43,29 @@ func TestAcquireContendsUntilRelease(t *testing.T) {
 	}
 }
 
+func TestReleaseAllowsNilAndReleasedHandles(t *testing.T) {
+	var nilHandle *Handle
+	if err := nilHandle.Release(); err != nil {
+		t.Fatalf("release nil handle: %v", err)
+	}
+	handle, result, err := Acquire(filepath.Join(t.TempDir(), "lock"))
+	if err != nil || result != "" {
+		t.Fatalf("Acquire result=%q err=%v", result, err)
+	}
+	if err := handle.Release(); err != nil {
+		t.Fatalf("release handle: %v", err)
+	}
+	if err := handle.Release(); err != nil {
+		t.Fatalf("release released handle: %v", err)
+	}
+}
+
+func TestValidateReportsFstatFailure(t *testing.T) {
+	if err := validate(-1); !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("validate(-1) error=%v, want EBADF", err)
+	}
+}
+
 func TestAcquireRejectsUnsafeLeaves(t *testing.T) {
 	cases := []struct {
 		name  string

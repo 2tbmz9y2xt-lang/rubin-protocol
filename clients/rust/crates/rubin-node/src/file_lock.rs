@@ -115,9 +115,7 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
-
     type LeafSetup = fn(&Path);
-
     fn temp_dir(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -132,7 +130,6 @@ mod tests {
             .unwrap_or_else(|err| panic!("create temp dir {}: {err}", path.display()));
         path
     }
-
     fn assert_invalid(path: &Path) {
         match acquire(path) {
             Ok(lock) => {
@@ -142,7 +139,6 @@ mod tests {
             Err(error) => assert_eq!(error.class(), LockClass::InvalidOrUnopenable),
         }
     }
-
     #[test]
     fn acquire_contends_until_release_and_leaves_empty_file() {
         let dir = temp_dir("contended");
@@ -199,10 +195,34 @@ mod tests {
         }
     }
 
-    // Test-binary-only protocol for an executable built by `cargo test --no-run`.
-    // Set RUBIN_FILE_LOCK_PROTOCOL_MODE to holder or challenger and execute only
-    // this test. The holder needs LOCK_PATH, READY_PATH, and RELEASE_PATH; the
-    // challenger needs LOCK_PATH and RESULT_PATH. Every supplied path is absolute.
+    #[test]
+    fn protocol_helpers_cover_immediate_release_and_outcomes() {
+        let dir = temp_dir("protocol-helpers");
+        let lock = dir.join("lock");
+        let ready = dir.join("ready");
+        let release = dir.join("release");
+        fs::write(&release, b"release\n").expect("release marker");
+        protocol_holder(&lock, &ready, &release);
+        assert_eq!(fs::read(&ready).expect("ready marker"), b"ready\n");
+
+        let result = dir.join("result");
+        protocol_challenger(&lock, &result);
+        assert_eq!(fs::read(&result).expect("acquired result"), b"acquired\n");
+
+        let holder = acquire(&lock).unwrap_or_else(|err| panic!("hold lock: {}", err.cause()));
+        protocol_challenger(&lock, &result);
+        assert_eq!(fs::read(&result).expect("contended result"), b"contended\n");
+        holder.release();
+
+        fs::write(&lock, b"x").expect("invalid leaf");
+        protocol_challenger(&lock, &result);
+        assert_eq!(
+            fs::read(&result).expect("invalid result"),
+            b"invalid_or_unopenable\n"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn external_file_lock_protocol() {
         let Ok(mode) = env::var("RUBIN_FILE_LOCK_PROTOCOL_MODE") else {

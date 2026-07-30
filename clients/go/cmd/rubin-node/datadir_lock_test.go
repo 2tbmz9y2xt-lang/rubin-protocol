@@ -120,6 +120,51 @@ func TestRunStrictOpenMissingDatadirDoesNotCreateLock(t *testing.T) {
 	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
 		t.Fatalf("strict open created datadir or lock: %v", err)
 	}
+
+	t.Run("existing_root_returns_nil", func(t *testing.T) {
+		dataDir := filepath.Join(t.TempDir(), "missing")
+		rootPath := t.TempDir()
+		if err := missingBlockStoreOpenError(dataDir, rootPath); err != nil {
+			t.Fatalf("missingBlockStoreOpenError=%v, want nil", err)
+		}
+		if _, err := os.Lstat(dataDir); !os.IsNotExist(err) {
+			t.Fatalf("missingBlockStoreOpenError mutated datadir: %v", err)
+		}
+	})
+}
+
+func TestCreateOrOpenBlockStoreReportsMkdirFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can create a child beneath a non-writable parent")
+	}
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatalf("chmod parent: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(parent, 0o700); err != nil {
+			t.Errorf("restore parent permissions: %v", err)
+		}
+	})
+	dataDir := filepath.Join(parent, "data")
+	var stderr bytes.Buffer
+	store, lock, code := createOrOpenBlockStore(dataDir, node.ChainStatePath(dataDir), true, false, &stderr)
+	if store != nil || lock != nil || code != 2 {
+		t.Fatalf("store=%v lock=%v code=%d, want nil nil 2", store, lock, code)
+	}
+	if got := stderr.String(); !strings.HasPrefix(got, "datadir create failed: ") {
+		t.Fatalf("stderr=%q, want datadir create failure prefix", got)
+	}
+	for _, path := range []string{
+		dataDir,
+		node.BlockStorePath(dataDir),
+		node.ChainStatePath(dataDir),
+		filepath.Join(dataDir, ".rubin.lock"),
+	} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("artifact %s exists after mkdir failure: %v", path, err)
+		}
+	}
 }
 
 func TestCreateOrOpenBlockStoreReturnsLockOnlyForMutatingStrictOpen(t *testing.T) {

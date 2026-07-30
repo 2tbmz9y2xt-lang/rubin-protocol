@@ -4109,6 +4109,24 @@ mod tests {
         assert!(!chain_state_path(&create).exists());
         holder.release();
         let _ = fs::remove_dir_all(&create);
+
+        let invalid = unique_temp_dir("rubin-node-lock-invalid");
+        fs::create_dir_all(&invalid).expect("mkdir invalid datadir");
+        let invalid_lock = invalid.join(".rubin.lock");
+        fs::write(&invalid_lock, b"x").expect("write invalid lock");
+        let invalid_name = invalid.display().to_string();
+        let (code, err) = cli(&["--datadir", &invalid_name, "--create-store"]);
+        assert_eq!(code, 2);
+        assert_eq!(
+            err,
+            format!(
+                "cannot open datadir lock {}: datadir lock must be empty, got size 1\n",
+                invalid_lock.display()
+            )
+        );
+        assert!(!block_store_path(&invalid).exists());
+        assert!(!chain_state_path(&invalid).exists());
+        let _ = fs::remove_dir_all(&invalid);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
