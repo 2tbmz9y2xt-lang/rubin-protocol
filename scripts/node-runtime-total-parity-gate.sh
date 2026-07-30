@@ -15,19 +15,25 @@ run_stage() {
   "$@"
 }
 
-run_stage "Stage 1/5: live Go↔Rust devnet RPC parity smoke" \
+run_stage "Stage 1/7: dry-run storage parity" \
+  "${DEV_ENV}" -- bash -lc "cd '${REPO_ROOT}' && bash scripts/test_node_dry_run_parity.sh"
+
+run_stage "Stage 2/7: storage writer-lock parity" \
+  "${DEV_ENV}" -- bash -lc "cd '${REPO_ROOT}' && bash scripts/test_node_storage_lock_parity.sh datadir"
+
+run_stage "Stage 3/7: live Go↔Rust devnet RPC parity smoke" \
   "${REPO_ROOT}/scripts/devnet-rpc-parity-smoke.sh"
 
-run_stage "Stage 2/5: live Go↔Rust P2P interop coverage" \
+run_stage "Stage 4/7: live Go↔Rust P2P interop coverage" \
   "${DEV_ENV}" -- bash -lc "cd '${GO_MODULE_ROOT}' && RUBIN_P2P_INTEROP=1 go test ./node/p2p -run '^TestRustInterop_(GoDialRustServerHandshake|RustClientDialGoServerHandshake|RustServerPingGoClientPong|RustClientReceivesTxFromGo|RustClientSyncsFiveBlocksFromGo)$' -count=1"
 
-run_stage "Stage 3/5: Go relay + txpool lifecycle parity checks" \
+run_stage "Stage 5/7: Go relay + txpool lifecycle parity checks" \
   "${DEV_ENV}" -- bash -lc "cd '${GO_MODULE_ROOT}' && go test ./node/p2p -run '^(TestAnnounceTx|TestAnnounceTxMetadataError)$' -count=1 && go test ./node -run '^TestApplyBlockWithReorgRequeuesDisconnectedTransactionsIntoMempool$' -count=1"
 
-run_stage "Stage 4/5: Rust relay + txpool lifecycle parity checks" \
+run_stage "Stage 6/7: Rust relay + txpool lifecycle parity checks" \
   "${DEV_ENV}" -- bash -lc "cd '${RUST_MODULE_ROOT}' && cargo test -p rubin-node handle_received_tx_with_valid_fixture_stores_and_relays -- --test-threads=1 && cargo test -p rubin-node announce_tx_uses_real_metadata_for_relay_pool_priority -- --test-threads=1 && cargo test -p rubin-node apply_block_with_reorg_tip_extension_with_pool -- --test-threads=1 && cargo test -p rubin-node apply_block_with_reorg_tip_extension_removes_conflicting_pool_spends -- --test-threads=1"
 
-run_stage "Stage 5/5: PV/shadow parity soak gate" \
+run_stage "Stage 7/7: PV/shadow parity soak gate" \
   "${REPO_ROOT}/scripts/pv-soak-ci-gate.sh" --report "${PV_REPORT_PATH}"
 
 HEAD_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
@@ -54,6 +60,14 @@ report = {
     "head_sha": head_sha,
     "timestamp_utc": timestamp_utc,
     "stages": [
+        {
+            "name": "dry_run_parity",
+            "command": "bash scripts/test_node_dry_run_parity.sh",
+        },
+        {
+            "name": "storage_lock_parity",
+            "command": "bash scripts/test_node_storage_lock_parity.sh datadir",
+        },
         {
             "name": "live_devnet_rpc_smoke",
             "command": "./scripts/devnet-rpc-parity-smoke.sh",

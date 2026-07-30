@@ -13,6 +13,9 @@ sha3 = "0.10"
 
 rubin-consensus = { path = "../rubin-consensus" }
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = "0.2"
+
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
 
