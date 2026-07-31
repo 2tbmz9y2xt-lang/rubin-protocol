@@ -1,7 +1,13 @@
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
+#[path = "file_lock.rs"]
+#[allow(dead_code)]
+mod atomic_file_lock;
 
 // Per-class local store read bounds (RUB-1057), enforced BEFORE the file's
 // contents are allocated. Every class here holds exactly one wire item whose
@@ -75,24 +81,6 @@ pub(crate) fn check_store_save_bound(name: &str, len: usize, max_bytes: u64) -> 
         ));
     }
     Ok(())
-}
-
-/// Process-wide monotonic sequence counter appended to every temp-file
-/// name so two threads writing to the same destination within the same
-/// process can never collide on a shared `.tmp.<pid>` path (audit
-/// `E.3`). Not a cryptographic nonce — it is a plain uniqueness counter
-/// for filesystem path disambiguation. Name deliberately avoids the
-/// word "nonce" so CodeQL's `Hard-coded cryptographic value` check does
-/// not mis-flag test literals feeding this parameter.
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// Returns the NEW value (1, 2, 3, ...) — mirrors Go's
-/// `atomic.Uint64.Add(1)` semantics so the cross-client naming
-/// convention for `.tmp.<pid>.<seq>` files starts at the same seq in
-/// both runtimes. Using `fetch_add(1) + 1` instead of `fetch_add(1)`
-/// costs nothing at runtime and removes a cross-client drift class.
-fn next_temp_seq() -> u64 {
-    TEMP_SEQ.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 /// Reject a file name (the leaf component, NOT a full path) that would
@@ -846,291 +834,481 @@ pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
-/// Atomically write `data` to `path` with an honest fsync durability
-/// contract (audit `E.1`). Sequence (any failure between open and rename
-/// best-effort removes the partially-written
-/// `<dest>.tmp.<pid>.<seq>`):
-///
-/// 1. resolve the target's effective parent (see `effective_parent`),
-///    `create_dir_all` it if missing;
-/// 2. open `<path>.tmp.<pid>.<seq>` with `O_CREATE|O_EXCL|O_WRONLY` —
-///    NO `O_TRUNC`, so a stale temp leftover from a crashed prior
-///    process that happens to be hard-linked to a live destination
-///    inode cannot be truncated through the shared inode
-///    (`allocate_and_write_temp` retries with a fresh `seq` on
-///    `AlreadyExists`). `<seq>` is a process-wide atomic counter
-///    ensuring concurrent writers in the same process get distinct
-///    temp paths (`E.3`);
-/// 3. `write_all` (loops on short writes per stdlib contract);
-/// 4. `sync_all` — flushes data + inode metadata to disk;
-/// 5. close (implicit on scope exit; see `sync_dir` doc on Rust File close
-///    error semantics);
-/// 6. `fs::rename` temp -> destination (atomic on the same filesystem;
-///    OVERWRITES an existing destination — use `write_file_exclusive`
-///    for create-if-absent semantics);
-/// 7. `sync_dir` on the effective parent so the rename itself is durable.
-///
-/// Mirrors the Go `clients/go/node/chainstate.go` `writeFileAtomic` for
-/// cross-client storage parity.
-pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
-    let parent = effective_parent(path);
-    if let Some(parent) = parent {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("create parent {}: {e}", parent.display()))?;
+pub(crate) const ATOMIC_WRITE_LOCK_LEAF: &str = ".rubin-atomic-write.lock";
+pub(crate) const ATOMIC_WRITE_SCRATCH_LEAF: &str = ".rubin-atomic-write.tmp";
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AtomicWriteStage {
+    BeforeNamespaceCommit,
+    AfterNamespaceCommit,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AtomicWriteOperation {
+    Overwrite,
+    CreateIfAbsent,
+}
+#[derive(Clone, Debug)]
+pub(crate) struct AtomicWriteError {
+    pub(crate) stage: AtomicWriteStage,
+    pub(crate) destination: PathBuf,
+    pub(crate) operation: AtomicWriteOperation,
+    pub(crate) primary: String,
+    pub(crate) secondary: Vec<String>,
+}
+impl AtomicWriteError {
+    fn new(
+        stage: AtomicWriteStage,
+        destination: &Path,
+        operation: AtomicWriteOperation,
+        primary: impl Into<String>,
+    ) -> Self {
+        Self {
+            stage,
+            destination: destination.to_path_buf(),
+            operation,
+            primary: primary.into(),
+            secondary: Vec::new(),
+        }
     }
-    let tmp_path = allocate_and_write_temp(path, data)?;
-    // Rename OVERWRITES an existing destination. If the caller requires
-    // create-if-absent semantics, use `write_file_exclusive` instead.
-    fs::rename(&tmp_path, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp_path);
-        format!(
-            "rename temp {} -> {}: {e}",
-            tmp_path.display(),
-            path.display()
+    pub(crate) fn stage(&self) -> AtomicWriteStage {
+        self.stage
+    }
+    fn append_secondary(&mut self, error: impl Into<String>) {
+        self.secondary.push(error.into());
+    }
+}
+impl std::fmt::Display for AtomicWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let stage = match self.stage {
+            AtomicWriteStage::BeforeNamespaceCommit => "before_namespace_commit",
+            AtomicWriteStage::AfterNamespaceCommit => "after_namespace_commit",
+        };
+        let operation = match self.operation {
+            AtomicWriteOperation::Overwrite => "overwrite",
+            AtomicWriteOperation::CreateIfAbsent => "create_if_absent",
+        };
+        write!(
+            f,
+            "{} (atomic write {stage} {operation} for {})",
+            self.primary,
+            self.destination.display()
+        )?;
+        if !self.secondary.is_empty() {
+            write!(f, " (secondary: {})", self.secondary.join("; "))?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for AtomicWriteError {}
+pub(crate) fn atomic_write_error_before(
+    destination: &Path,
+    operation: AtomicWriteOperation,
+    primary: impl Into<String>,
+) -> AtomicWriteError {
+    AtomicWriteError::new(
+        AtomicWriteStage::BeforeNamespaceCommit,
+        destination,
+        operation,
+        primary,
+    )
+}
+pub(crate) fn atomic_write_error_after(
+    destination: &Path,
+    operation: AtomicWriteOperation,
+    primary: impl Into<String>,
+) -> AtomicWriteError {
+    AtomicWriteError::new(
+        AtomicWriteStage::AfterNamespaceCommit,
+        destination,
+        operation,
+        primary,
+    )
+}
+pub(crate) fn is_atomic_write_post_commit(error: &AtomicWriteError) -> bool {
+    error.stage() == AtomicWriteStage::AfterNamespaceCommit
+}
+static ATOMIC_WRITE_PROCESS_MUTEX: Mutex<()> = Mutex::new(());
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AtomicWriteTestOp {
+    PreUnlink,
+    CleanupUnlink,
+    ExclusiveOpen,
+    Write,
+    FileSync,
+    Rename,
+    HardLink,
+    EexistDecision,
+    ParentSync,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct AtomicWriteTestState {
+    operations: Vec<AtomicWriteTestOp>,
+    failures: Vec<(AtomicWriteTestOp, usize, String)>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static ATOMIC_WRITE_TEST_STATE: std::cell::RefCell<AtomicWriteTestState> =
+        std::cell::RefCell::new(AtomicWriteTestState::default());
+}
+
+#[cfg(test)]
+pub(crate) struct AtomicWriteTestScope;
+
+#[cfg(test)]
+impl AtomicWriteTestScope {
+    pub(crate) fn new() -> Self {
+        ATOMIC_WRITE_TEST_STATE.with(|state| *state.borrow_mut() = AtomicWriteTestState::default());
+        Self
+    }
+
+    pub(crate) fn fail_at(&self, operation: AtomicWriteTestOp, occurrence: usize, error: &str) {
+        ATOMIC_WRITE_TEST_STATE.with(|state| {
+            state
+                .borrow_mut()
+                .failures
+                .push((operation, occurrence, error.into()));
+        });
+    }
+
+    pub(crate) fn operations(&self) -> Vec<AtomicWriteTestOp> {
+        ATOMIC_WRITE_TEST_STATE.with(|state| state.borrow().operations.clone())
+    }
+}
+
+#[cfg(test)]
+impl Drop for AtomicWriteTestScope {
+    fn drop(&mut self) {
+        ATOMIC_WRITE_TEST_STATE.with(|state| *state.borrow_mut() = AtomicWriteTestState::default());
+    }
+}
+
+#[cfg(test)]
+fn atomic_write_test_step(operation: AtomicWriteTestOp) -> Result<(), String> {
+    ATOMIC_WRITE_TEST_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.operations.push(operation);
+        let occurrence = state
+            .operations
+            .iter()
+            .filter(|&&op| op == operation)
+            .count();
+        match state
+            .failures
+            .iter()
+            .position(|(expected, at, _)| *expected == operation && *at == occurrence)
+        {
+            Some(index) => Err(state.failures.remove(index).2),
+            None => Ok(()),
+        }
+    })
+}
+
+pub(crate) fn validate_atomic_write_destination(
+    path: &Path,
+    operation: AtomicWriteOperation,
+) -> Result<(), AtomicWriteError> {
+    let reserved = path.file_name().is_some_and(|leaf| {
+        leaf == std::ffi::OsStr::new(ATOMIC_WRITE_LOCK_LEAF)
+            || leaf == std::ffi::OsStr::new(ATOMIC_WRITE_SCRATCH_LEAF)
+    });
+    if reserved {
+        return Err(atomic_write_error_before(
+            path,
+            operation,
+            format!(
+                "reserved atomic persistence destination: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
+    write_file_atomic_typed(path, data).map_err(|error| error.to_string())
+}
+
+pub(crate) fn write_file_atomic_typed(path: &Path, data: &[u8]) -> Result<(), AtomicWriteError> {
+    write_atomic_file(path, data, AtomicWriteOperation::Overwrite, || Ok(()))
+}
+
+pub(crate) fn write_file_create_if_absent<F>(
+    path: &Path,
+    data: &[u8],
+    resolve_existing: F,
+) -> Result<(), AtomicWriteError>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    write_atomic_file(
+        path,
+        data,
+        AtomicWriteOperation::CreateIfAbsent,
+        resolve_existing,
+    )
+}
+
+fn write_atomic_file<F>(
+    path: &Path,
+    data: &[u8],
+    operation: AtomicWriteOperation,
+    resolve_existing: F,
+) -> Result<(), AtomicWriteError>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    validate_atomic_write_destination(path, operation)?;
+    let parent = effective_parent(path).ok_or_else(|| {
+        atomic_write_error_before(path, operation, "atomic destination has no parent")
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        atomic_write_error_before(
+            path,
+            operation,
+            format!("create parent {}: {error}", parent.display()),
         )
     })?;
-    // Directory fsync makes the rename itself durable. Without this the
-    // destination file's bytes are on disk after the temp `sync_all()` above,
-    // but the directory entry that points the destination name at the new
-    // inode may still live only in the kernel page cache and be lost on
-    // crash. Mirrors the Go `writeFileAtomic` `Sync` on parent directory
-    // for cross-client parity.
-    if let Some(parent) = parent {
-        sync_dir(parent)?;
-    }
-    Ok(())
+
+    let _process_guard = ATOMIC_WRITE_PROCESS_MUTEX.lock().map_err(|_| {
+        atomic_write_error_before(path, operation, "atomic write process mutex is poisoned")
+    })?;
+    let lock_path = parent.join(ATOMIC_WRITE_LOCK_LEAF);
+    let _parent_lock = atomic_file_lock::acquire(&lock_path).map_err(|error| {
+        atomic_write_error_before(
+            path,
+            operation,
+            format!(
+                "atomic write lock failed: {}: {:?}: {}",
+                parent.display(),
+                error.class(),
+                error.cause()
+            ),
+        )
+    })?;
+    write_atomic_file_locked(path, data, parent, operation, resolve_existing)
 }
 
-/// Error returned by [`write_file_exclusive`] distinguishing the
-/// create-if-absent race — caller needs to know "the destination already
-/// exists, read it and verify content" vs "some other I/O failure".
-///
-/// Cross-client parity: matches the error branching in the Go
-/// `writeFileIfAbsent` helper which uses `errors.Is(err, os.ErrExist)`
-/// on the `os.Link` result.
-#[derive(Debug)]
-pub enum AtomicWriteError {
-    /// `path` already exists at link time. Caller must inspect the
-    /// existing content to decide whether this is an idempotent retry
-    /// (content matches) or a corruption/conflict (content differs).
-    AlreadyExists,
-    /// Any other surfaced failure along the atomic-create sequence —
-    /// for example `create_dir_all` on the parent, temp-file exclusive
-    /// open (including exhaustion of the `allocate_and_write_temp`
-    /// retry budget on repeated stale-temp collisions), write,
-    /// file-`sync_all`, `hard_link`, or the parent-directory
-    /// `sync_dir`/directory-fsync durability step that runs after a
-    /// successful link. Best-effort temp-file cleanup failures are not
-    /// reported through this enum (the unlink is run on every exit
-    /// path but its error is intentionally discarded to keep the
-    /// primary error visible).
-    Other(String),
-}
-
-impl From<String> for AtomicWriteError {
-    fn from(msg: String) -> Self {
-        AtomicWriteError::Other(msg)
+fn write_atomic_file_locked<F>(
+    path: &Path,
+    data: &[u8],
+    parent: &Path,
+    operation: AtomicWriteOperation,
+    resolve_existing: F,
+) -> Result<(), AtomicWriteError>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let scratch = parent.join(ATOMIC_WRITE_SCRATCH_LEAF);
+    if let Err(error) = pre_unlink_atomic_scratch(&scratch) {
+        return Err(atomic_write_error_before(path, operation, error));
     }
-}
 
-/// Atomically write `data` to `path` only if `path` does not already
-/// exist (audit `E.3`, the TOCTOU-hardened companion to
-/// `write_file_atomic`). Uses the POSIX `link(2)` primitive to get
-/// create-if-absent semantics at the syscall layer:
-///
-/// 1. resolve effective parent, `create_dir_all` if missing;
-/// 2. allocate a per-call-unique `<path>.tmp.<pid>.<seq>` via
-///    [`allocate_and_write_temp`] and write `data` with the exclusive
-///    `O_CREATE|O_EXCL` contract — same durability semantics as
-///    `write_file_atomic`, retries on stale-temp collisions (PID +
-///    seq reuse after a crash);
-/// 3. `hard_link(temp, path)` — atomic create-if-absent. Fails with
-///    [`AtomicWriteError::AlreadyExists`] if `path` is already on disk
-///    (EEXIST); that race cannot silently overwrite the existing file;
-/// 4. best-effort `unlink(temp)` — the destination (or the pre-existing
-///    file on EEXIST) keeps the inode, so removing the temp name never
-///    drops data. The unlink runs on every exit path, and its error is
-///    intentionally discarded (a leaked temp is operational cleanup,
-///    not a correctness issue) — see [`AtomicWriteError::Other`] doc
-///    for the best-effort cleanup contract;
-/// 5. `sync_dir` on the parent so the new directory entry is durable.
-///
-/// Mirrors the Go `writeFileIfAbsent` hard-link pattern in
-/// `clients/go/node/blockstore.go`. The per-call monotonic `seq`
-/// (filesystem counter, not a cryptographic nonce) closes the thread
-/// race where two concurrent writers in the same process would
-/// otherwise collide on a shared `.tmp.<pid>` path.
-pub fn write_file_exclusive(path: &Path, data: &[u8]) -> Result<(), AtomicWriteError> {
-    let parent = effective_parent(path);
-    if let Some(parent) = parent {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("create parent {}: {e}", parent.display()))?;
-    }
-    let tmp_path = allocate_and_write_temp(path, data)?;
-    let link_result = fs::hard_link(&tmp_path, path);
-    // Best-effort unlink of the temp name. On link success the
-    // destination inode keeps its own reference, so the temp name is
-    // redundant. On link failure the temp must not strand on disk. The
-    // unlink error itself is intentionally discarded to keep the
-    // primary link error visible to the caller — see
-    // `AtomicWriteError::Other` doc on the best-effort cleanup
-    // contract.
-    let _ = fs::remove_file(&tmp_path);
-    match link_result {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(AtomicWriteError::AlreadyExists);
-        }
-        Err(e) => {
-            return Err(AtomicWriteError::Other(format!(
-                "hard_link {} -> {}: {e}",
-                tmp_path.display(),
-                path.display()
-            )));
-        }
-    }
-    if let Some(parent) = parent {
-        sync_dir(parent)?;
-    }
-    Ok(())
-}
-
-/// Bounded retry count for [`allocate_and_write_temp`]. A collision on
-/// `<dest>.tmp.<pid>.<seq>` should be vanishingly rare in practice (it
-/// requires PID reuse PLUS `next_temp_seq` wrapping back over a stale
-/// leftover from a prior process), so 16 attempts is deliberately
-/// generous for the tail case while still bounding pathological loops.
-const MAX_TEMP_ALLOC_RETRIES: u32 = 16;
-/// Internal error from [`write_and_sync_temp`] so callers can
-/// distinguish a stale-temp collision (retry with a new `seq`) from a
-/// fatal I/O failure (surface to the caller).
-enum TempWriteError {
-    /// The `create_new(true)` open failed with `AlreadyExists`, i.e. a
-    /// temp file with this exact `<pid>.<seq>` suffix already exists
-    /// on disk. After a process crash, a leftover temp from the prior
-    /// process can be hard-linked to a live destination inode; if we
-    /// reopened it with `O_TRUNC` we would truncate the destination
-    /// through that shared inode. `O_EXCL` refuses that reuse, and the
-    /// caller retries with a fresh `seq`.
-    AlreadyExists,
-    /// Any other failure along `open → write_all → sync_all`. The temp
-    /// path, if it was created, is best-effort removed by
-    /// `write_and_sync_temp` before returning so callers do not need
-    /// to clean up on the error path.
-    Fatal(String),
-}
-
-/// Internal helper: open a fresh temp file at `tmp_path` with
-/// `O_CREATE | O_EXCL` (Rust's `create_new(true)`) — NO `O_TRUNC`.
-/// Refuses to reuse a pre-existing temp name so a stale leftover from
-/// a crashed prior process cannot be truncated through a shared inode
-/// (Copilot P1 audit on PR #1220). Writes all bytes, `sync_all`,
-/// closes.
-///
-/// Mirrors the Go `writeAndSyncTemp` helper. On any failure this
-/// helper best-effort removes `tmp_path` before returning the error,
-/// so callers do NOT need to perform separate temp cleanup on error;
-/// they may still unlink the temp after success (as
-/// `write_file_exclusive` does after a successful `hard_link`) to
-/// reclaim the redundant name.
-fn write_and_sync_temp(tmp_path: &Path, data: &[u8]) -> Result<(), TempWriteError> {
-    use std::io::Write;
-    let mut tmp = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(tmp_path)
-    {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(TempWriteError::AlreadyExists);
-        }
-        Err(e) => {
-            return Err(TempWriteError::Fatal(format!(
-                "open temp {}: {e}",
-                tmp_path.display()
-            )));
-        }
+    let mut file = match open_atomic_scratch(&scratch) {
+        Ok(file) => file,
+        Err(error) => return Err(pre_commit_failure(path, operation, parent, &scratch, error)),
     };
     let write_result: Result<(), String> = (|| {
-        tmp.write_all(data)
-            .map_err(|e| format!("write temp {}: {e}", tmp_path.display()))?;
-        tmp.sync_all()
-            .map_err(|e| format!("sync temp {}: {e}", tmp_path.display()))
+        #[cfg(test)]
+        atomic_write_test_step(AtomicWriteTestOp::Write)?;
+        file.write_all(data)
+            .map_err(|error| format!("write atomic scratch {}: {error}", scratch.display()))?;
+        #[cfg(test)]
+        atomic_write_test_step(AtomicWriteTestOp::FileSync)?;
+        file.sync_all()
+            .map_err(|error| format!("sync atomic scratch {}: {error}", scratch.display()))
     })();
-    // Drop the file handle BEFORE attempting to unlink the temp path.
-    // On Windows `fs::remove_file` on an open handle fails with
-    // `PermissionDenied`, which would leak the failed temp and, under
-    // repeated I/O failures, burn through the `MAX_TEMP_ALLOC_RETRIES`
-    // budget with stale `.tmp.<pid>.<seq>` leftovers (Codex P2 on PR
-    // #1220). On Unix the drop is harmless ordering (close-then-unlink
-    // always works, and unlink-then-close leaves the inode alive
-    // through the open fd anyway). Explicit `drop` keeps the semantics
-    // portable.
-    drop(tmp);
-    if let Err(e) = write_result {
-        let _ = fs::remove_file(tmp_path);
-        return Err(TempWriteError::Fatal(e));
+    drop(file);
+    if let Err(primary) = write_result {
+        return Err(pre_commit_failure(
+            path, operation, parent, &scratch, primary,
+        ));
+    }
+
+    match operation {
+        AtomicWriteOperation::Overwrite => {
+            #[cfg(test)]
+            if let Err(error) = atomic_write_test_step(AtomicWriteTestOp::Rename) {
+                return Err(pre_commit_failure(path, operation, parent, &scratch, error));
+            }
+            if let Err(error) = fs::rename(&scratch, path) {
+                return Err(pre_commit_failure(
+                    path,
+                    operation,
+                    parent,
+                    &scratch,
+                    format!(
+                        "rename atomic scratch {} -> {}: {error}",
+                        scratch.display(),
+                        path.display()
+                    ),
+                ));
+            }
+        }
+        AtomicWriteOperation::CreateIfAbsent => {
+            #[cfg(test)]
+            if let Err(error) = atomic_write_test_step(AtomicWriteTestOp::HardLink) {
+                return Err(pre_commit_failure(path, operation, parent, &scratch, error));
+            }
+            match fs::hard_link(&scratch, path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    #[cfg(test)]
+                    if let Err(primary) = atomic_write_test_step(AtomicWriteTestOp::EexistDecision)
+                    {
+                        return Err(pre_commit_failure(
+                            path, operation, parent, &scratch, primary,
+                        ));
+                    }
+                    if let Err(primary) = resolve_existing() {
+                        return Err(pre_commit_failure(
+                            path, operation, parent, &scratch, primary,
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return Err(pre_commit_failure(
+                        path,
+                        operation,
+                        parent,
+                        &scratch,
+                        format!(
+                            "link atomic scratch {} -> {}: {error}",
+                            scratch.display(),
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    post_commit_cleanup(path, operation, parent, &scratch)
+}
+
+fn pre_commit_failure(
+    destination: &Path,
+    operation: AtomicWriteOperation,
+    parent: &Path,
+    scratch: &Path,
+    primary: impl Into<String>,
+) -> AtomicWriteError {
+    let mut error = atomic_write_error_before(destination, operation, primary);
+    if let Err(cleanup) = cleanup_atomic_scratch(scratch) {
+        error.append_secondary(cleanup);
+    }
+    if let Err(sync) = sync_atomic_parent(parent) {
+        error.append_secondary(sync);
+    }
+    error
+}
+
+fn post_commit_cleanup(
+    destination: &Path,
+    operation: AtomicWriteOperation,
+    parent: &Path,
+    scratch: &Path,
+) -> Result<(), AtomicWriteError> {
+    let mut result: Option<AtomicWriteError> = None;
+    if let Err(cleanup) = cleanup_atomic_scratch(scratch) {
+        result = Some(atomic_write_error_after(destination, operation, cleanup));
+    }
+    if let Err(sync) = sync_atomic_parent(parent) {
+        match result.as_mut() {
+            Some(error) => error.append_secondary(sync),
+            None => result = Some(atomic_write_error_after(destination, operation, sync)),
+        }
+    }
+    result.map_or(Ok(()), Err)
+}
+
+fn open_atomic_scratch(path: &Path) -> Result<fs::File, String> {
+    #[cfg(test)]
+    atomic_write_test_step(AtomicWriteTestOp::ExclusiveOpen)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| format!("open atomic scratch {}: {error}", path.display()))?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("chmod atomic scratch {}: {error}", path.display()))?;
+    }
+    Ok(file)
+}
+
+fn pre_unlink_atomic_scratch(path: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    atomic_write_test_step(AtomicWriteTestOp::PreUnlink)?;
+    unlink_atomic_scratch(path)
+}
+
+fn cleanup_atomic_scratch(path: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    atomic_write_test_step(AtomicWriteTestOp::CleanupUnlink)?;
+    unlink_atomic_scratch(path)
+}
+
+fn unlink_atomic_scratch(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("unlink atomic scratch {}: {error}", path.display())),
+    }
+}
+
+pub(crate) fn reclaim_atomic_write_parent(parent: &Path) -> Result<(), String> {
+    let _process_guard = ATOMIC_WRITE_PROCESS_MUTEX
+        .lock()
+        .map_err(|_| reclaim_error(parent, "atomic write process mutex is poisoned"))?;
+    let lock_path = parent.join(ATOMIC_WRITE_LOCK_LEAF);
+    let _parent_lock = atomic_file_lock::acquire(&lock_path).map_err(|error| {
+        reclaim_error(
+            parent,
+            format!(
+                "atomic write lock failed: {:?}: {}",
+                error.class(),
+                error.cause()
+            ),
+        )
+    })?;
+    pre_unlink_atomic_scratch(&parent.join(ATOMIC_WRITE_SCRATCH_LEAF))
+        .map_err(|error| reclaim_error(parent, error))?;
+    sync_atomic_parent(parent).map_err(|error| reclaim_error(parent, error))
+}
+
+pub(crate) fn reclaim_atomic_write_scratch(data_dir: &Path) -> Result<(), String> {
+    let blockstore = data_dir.join("blockstore");
+    let parents = [
+        data_dir.to_path_buf(),
+        blockstore.clone(),
+        blockstore.join("blocks"),
+        blockstore.join("headers"),
+        blockstore.join("undo"),
+    ];
+    for parent in parents {
+        reclaim_atomic_write_parent(&parent)?;
     }
     Ok(())
 }
 
-/// Allocate a unique temp path for `path`, write `data` to it with the
-/// exclusive-create + fsync contract, and return the temp path on
-/// success. Retries up to [`MAX_TEMP_ALLOC_RETRIES`] times with a
-/// fresh `next_temp_seq` on the rare `AlreadyExists` case (stale
-/// leftover temp after PID + seq reuse). Fatal I/O errors surface
-/// immediately without retry.
-fn allocate_and_write_temp(path: &Path, data: &[u8]) -> Result<std::path::PathBuf, String> {
-    let pid = std::process::id();
-    let mut last_collision: Option<String> = None;
-    for _ in 0..MAX_TEMP_ALLOC_RETRIES {
-        let tmp_path = temp_path_for(path, pid, next_temp_seq());
-        match write_and_sync_temp(&tmp_path, data) {
-            Ok(()) => return Ok(tmp_path),
-            Err(TempWriteError::AlreadyExists) => {
-                last_collision = Some(format!("temp path already exists: {}", tmp_path.display()));
-                continue;
-            }
-            Err(TempWriteError::Fatal(msg)) => return Err(msg),
-        }
-    }
-    Err(last_collision.unwrap_or_else(|| {
-        format!(
-            "exhausted {MAX_TEMP_ALLOC_RETRIES} retries allocating temp for {}",
-            path.display()
-        )
-    }))
-}
-
-/// Build the `<dest>.tmp.<pid>.<seq>` companion path for a target
-/// `path` without going through lossy `Path::display()`. The `<seq>`
-/// component is a process-wide monotonic uniqueness counter (see
-/// `next_temp_seq`) that closes the thread race where two concurrent
-/// writers in the same process would otherwise share a `.tmp.<pid>`
-/// filename and one would silently overwrite the other's temp bytes
-/// between write and rename/link (audit `E.3`). Not a cryptographic
-/// nonce — it is a plain counter for filesystem path disambiguation;
-/// named `seq` rather than `nonce` so CodeQL's "Hard-coded
-/// cryptographic value" check does not mis-flag test literals that
-/// feed this parameter.
-///
-/// `display()` replaces non-UTF-8 bytes with `U+FFFD`; on Unix a
-/// `PathBuf` can contain any byte sequence other than `/` and `\0`, so a
-/// lossy conversion would produce a temp at a different location than
-/// the caller's actual target — breaking both the atomic rename and the
-/// failure cleanup. `OsString::push` preserves the original bytes
-/// exactly. Split into its own helper so the byte-preservation contract
-/// is independently testable without going through the filesystem (APFS
-/// on macOS rejects non-UTF-8 filenames with EILSEQ, so a filesystem-
-/// level round-trip test is not portable). Copilot + Codex review
-/// feedback on PR #1218 + the E.3 lane.
-fn temp_path_for(path: &Path, pid: u32, seq: u64) -> PathBuf {
-    let mut tmp_os = path.as_os_str().to_os_string();
-    tmp_os.push(".tmp.");
-    tmp_os.push(pid.to_string());
-    tmp_os.push(".");
-    tmp_os.push(seq.to_string());
-    PathBuf::from(tmp_os)
+fn reclaim_error(parent: &Path, cause: impl std::fmt::Display) -> String {
+    format!(
+        "atomic scratch reclaim failed: {}: {cause}",
+        parent.display()
+    )
 }
 
 /// Compute the directory whose existence we must ensure (and whose entry we
@@ -1147,39 +1325,19 @@ pub(crate) fn effective_parent(path: &Path) -> Option<&Path> {
     }
 }
 
-/// Open the parent directory and call `sync_all()` so any rename or unlink
-/// performed in it is itself durable. Splitting this out keeps
-/// `write_file_atomic` linear and lets storage callers fsync ad-hoc
-/// directory mutations later if they need to.
-///
-/// Cross-client note: the Go counterpart `syncDir` uses
-/// `errors.Join(serr, cerr)` to surface a Close error after a successful
-/// Sync. Rust cannot easily mirror that — `std::fs::File::drop` discards
-/// the close error by design, and there is no stable safe API to surface
-/// it. The Sync error itself is returned, so a kernel-level flush failure
-/// is honestly reported; only the rare close-after-successful-sync error
-/// is silently absorbed by Drop. This is an accepted Rust stdlib
-/// limitation, not a missing fix.
-///
-/// Best-effort on permission-denied open: a parent directory with mode
-/// `0300` (write+execute, no read) permits create/rename but blocks
-/// `OpenOptions::new().read(true).open(dir)` (Codex review feedback on
-/// PR #1218). The rename has already succeeded by the time `sync_dir`
-/// runs, so returning an error would make the caller treat committed
-/// state as failed on hardened directory-permission setups. Return
-/// `Ok(())` instead — the destination bytes are already on disk via
-/// the temp file's `sync_all()`; only the directory-entry fsync is
-/// degraded to best-effort. Any other open error (`NotFound`, `Other`,
-/// etc) still propagates as a real anomaly.
 pub fn sync_dir(dir: &Path) -> Result<(), String> {
-    use std::io::ErrorKind;
-    match fs::OpenOptions::new().read(true).open(dir) {
-        Ok(file) => file
-            .sync_all()
-            .map_err(|e| format!("sync dir {}: {e}", dir.display())),
-        Err(e) if e.kind() == ErrorKind::PermissionDenied => Ok(()),
-        Err(e) => Err(format!("open dir {}: {e}", dir.display())),
-    }
+    fs::OpenOptions::new()
+        .read(true)
+        .open(dir)
+        .map_err(|error| format!("open dir {}: {error}", dir.display()))?
+        .sync_all()
+        .map_err(|error| format!("sync dir {}: {error}", dir.display()))
+}
+
+pub(crate) fn sync_atomic_parent(parent: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    atomic_write_test_step(AtomicWriteTestOp::ParentSync)?;
+    sync_dir(parent)
 }
 
 /// Create a hole-only sparse file of the nominal size (no data blocks
@@ -1212,7 +1370,10 @@ mod tests {
     use super::{
         create_sparse_file, lexical_clean, read_capped, read_config_file_to_string,
         read_file_from_dir, sync_dir, unique_temp_path, volume_prefix_len, write_file_atomic,
-        BLOCK_FILE_MAX_BYTES, CONFIG_FILE_MAX_BYTES, STORE_FILE_TOO_LARGE_PREFIX,
+        write_file_atomic_typed, write_file_create_if_absent, AtomicWriteOperation,
+        AtomicWriteStage, AtomicWriteTestOp, AtomicWriteTestScope, ATOMIC_WRITE_PROCESS_MUTEX,
+        ATOMIC_WRITE_SCRATCH_LEAF, BLOCK_FILE_MAX_BYTES, CONFIG_FILE_MAX_BYTES,
+        STORE_FILE_TOO_LARGE_PREFIX,
     };
     use std::fs;
     use std::io::{Cursor, Read};
@@ -1941,7 +2102,20 @@ mod tests {
         let path = dir.join("payload.bin");
         let data = b"E.1 fsync contract: bytes + dir entry must both be durable";
 
+        let scope = AtomicWriteTestScope::new();
         write_file_atomic(&path, data).expect("write_file_atomic");
+        assert_eq!(
+            scope.operations(),
+            [
+                AtomicWriteTestOp::PreUnlink,
+                AtomicWriteTestOp::ExclusiveOpen,
+                AtomicWriteTestOp::Write,
+                AtomicWriteTestOp::FileSync,
+                AtomicWriteTestOp::Rename,
+                AtomicWriteTestOp::CleanupUnlink,
+                AtomicWriteTestOp::ParentSync,
+            ]
+        );
 
         let read_back = fs::read(&path).expect("read back");
         assert_eq!(read_back, data);
@@ -1966,22 +2140,57 @@ mod tests {
         let read_back = fs::read(&path).expect("read back");
         assert_eq!(read_back, b"second");
 
-        // No leftover .tmp.* sibling — temp must have been renamed away.
-        let leftover_tmps: Vec<_> = fs::read_dir(&dir)
-            .expect("list dir")
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
-            .collect();
         assert!(
-            leftover_tmps.is_empty(),
-            "stale .tmp.* file remained after rename: {:?}",
-            leftover_tmps
-                .iter()
-                .map(|e| e.file_name())
-                .collect::<Vec<_>>()
+            !dir.join(ATOMIC_WRITE_SCRATCH_LEAF).exists(),
+            "fixed atomic scratch remained after rename"
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn atomic_write_typed_failure_matrix_covers_five_destinations() {
+        use AtomicWriteOperation::{CreateIfAbsent, Overwrite}; use AtomicWriteStage::{AfterNamespaceCommit, BeforeNamespaceCommit}; use AtomicWriteTestOp::*;
+        let dir = unique_temp_path("rubin-atomic-typed"); fs::create_dir_all(&dir).expect("mkdir");
+        let classes = [("blockstore/blocks/block.bin", CreateIfAbsent), ("blockstore/headers/header.bin", CreateIfAbsent), ("blockstore/undo/undo.bin", Overwrite), ("blockstore/index.json", Overwrite), ("chainstate.json", Overwrite)];
+        let rows = [(PreUnlink, None), (ExclusiveOpen, Some([CleanupUnlink, ParentSync])), (Write, Some([CleanupUnlink, ParentSync])), (FileSync, Some([CleanupUnlink, ParentSync]))];
+        let run = |path: &std::path::Path, operation, row, secondary: Option<[AtomicWriteTestOp; 2]>| {
+            let scope = AtomicWriteTestScope::new(); scope.fail_at(row, 1, "primary"); if let Some(secondary) = secondary { scope.fail_at(secondary[0], 1, "cleanup"); scope.fail_at(secondary[1], 1, "parent"); } let error = match operation { Overwrite => write_file_atomic_typed(path, b"payload"), CreateIfAbsent => write_file_create_if_absent(path, b"payload", || Ok(())) }.expect_err("scripted error");
+            assert_eq!((error.stage, error.destination, error.operation, error.primary), (BeforeNamespaceCommit, path.to_path_buf(), operation, "primary".into()));
+            assert_eq!(error.secondary, secondary.map_or_else(Vec::new, |_| vec!["cleanup".to_string(), "parent".to_string()])); assert_eq!(scope.operations().first(), Some(&PreUnlink));
+        };
+        for (class, operation) in classes {
+            for (row, secondary) in rows { let path = dir.join(format!("{row:?}/{class}")); run(&path, operation, row, secondary); }
+            for row in match operation { Overwrite => &[Rename][..], CreateIfAbsent => &[HardLink, EexistDecision][..] } { let path = dir.join(format!("{row:?}/{class}")); if *row == EexistDecision { fs::create_dir_all(path.parent().expect("parent")).expect("mkdir parent"); fs::write(&path, b"existing").expect("seed eexist"); } run(&path, operation, *row, Some([CleanupUnlink, ParentSync])); }
+            for (primary, secondary) in [(CleanupUnlink, Some(ParentSync)), (ParentSync, None)] { let path = dir.join(format!("post-{primary:?}/{class}")); let scope = AtomicWriteTestScope::new(); scope.fail_at(primary, 1, "primary"); if let Some(op) = secondary { scope.fail_at(op, 1, "secondary"); } let error = match operation { Overwrite => write_file_atomic_typed(&path, b"payload"), CreateIfAbsent => write_file_create_if_absent(&path, b"payload", || Ok(())) }.expect_err("postcommit error"); assert_eq!((error.stage, error.destination, error.operation, error.primary), (AfterNamespaceCommit, path, operation, "primary".into())); assert_eq!(error.secondary, secondary.map_or_else(Vec::new, |_| vec!["secondary".to_string()])); assert!(scope.operations().contains(&match operation { Overwrite => Rename, CreateIfAbsent => HardLink })); }
+        } let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[rustfmt::skip]
+    #[test]
+    fn atomic_unlink_mode_and_process_serialization() {
+        use super::unlink_atomic_scratch; use std::os::unix::{ffi::OsStrExt, fs::{MetadataExt, PermissionsExt, symlink}};
+        struct Umask(libc::mode_t); impl Umask { fn set(mask: libc::mode_t) -> Self { Self(unsafe { libc::umask(mask) }) } } impl Drop for Umask { fn drop(&mut self) { unsafe { libc::umask(self.0); } } }
+        let dir = unique_temp_path("rubin-atomic-unix"); fs::create_dir_all(&dir).expect("mkdir");
+        let live = dir.join("live"); fs::write(&live, b"live").expect("live");
+        for (leaf, make) in [("regular", 0), ("hardlink", 1), ("fifo", 2), ("symlink", 3), ("dangling", 4)] {
+            let path = dir.join(leaf); match make { 0 => fs::write(&path, b"x").expect("regular"), 1 => fs::hard_link(&live, &path).expect("hardlink"), 2 => { let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path"); assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0); }, 3 => symlink(&live, &path).expect("symlink"), _ => symlink(dir.join("absent"), &path).expect("dangling") } unlink_atomic_scratch(&path).expect("unlink"); assert!(path.symlink_metadata().is_err()); assert_eq!(fs::read(&live).expect("live intact"), b"live");
+        }
+        let directory = dir.join("directory"); fs::create_dir(&directory).expect("directory"); assert!(unlink_atomic_scratch(&directory).is_err() && directory.is_dir());
+        for mask in [0, 0o022, 0o077, 0o700] {
+            let _umask = Umask::set(mask); let scratch = dir.join(ATOMIC_WRITE_SCRATCH_LEAF); let dst = dir.join(format!("mode-{mask:o}"));
+            let scope = AtomicWriteTestScope::new(); scope.fail_at(AtomicWriteTestOp::Write, 1, "write"); scope.fail_at(AtomicWriteTestOp::CleanupUnlink, 1, "keep");
+            write_file_atomic_typed(&dst, b"x").expect_err("retain scratch"); assert_eq!(fs::metadata(&scratch).expect("scratch").mode() & 0o777, 0o600); drop(scope); fs::remove_file(&scratch).expect("scratch");
+            write_file_atomic_typed(&dst, b"x").expect("overwrite"); assert_eq!(fs::metadata(&dst).expect("dst").permissions().mode() & 0o777, 0o600);
+            let create = dir.join(format!("create-{mask:o}")); write_file_create_if_absent(&create, b"x", || Ok(())).expect("create"); assert_eq!(fs::metadata(create).expect("create").mode() & 0o777, 0o600);
+        }
+        let guard = ATOMIC_WRITE_PROCESS_MUTEX.lock().expect("mutex"); let barrier = std::sync::Arc::new(std::sync::Barrier::new(3)); let (tx, rx) = std::sync::mpsc::channel(); let mut threads = Vec::new();
+        for (leaf, create) in [("serialized-overwrite", false), ("serialized-create", true)] {
+            let (path, barrier, tx) = (dir.join(leaf), barrier.clone(), tx.clone()); threads.push(std::thread::spawn(move || { barrier.wait(); let result = if create { write_file_create_if_absent(&path, b"x", || Ok(())) } else { write_file_atomic_typed(&path, b"x") }; tx.send(result).expect("send"); }));
+        }
+        barrier.wait(); assert!(matches!(rx.recv_timeout(std::time::Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Timeout))); drop(guard); for _ in 0..2 { rx.recv_timeout(std::time::Duration::from_secs(5)).expect("recv").expect("serialized write"); } for thread in threads { thread.join().expect("join"); } fs::remove_dir_all(dir).expect("cleanup");
     }
 
     /// Standalone `sync_dir` helper accepts an existing directory and
@@ -1996,46 +2205,6 @@ mod tests {
         sync_dir(&dir).expect("sync_dir on existing directory");
 
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// Codex P2 fix from PR #1218: `sync_dir` on an execute-only parent
-    /// (mode `0300` — write+execute, no read) must return `Ok(())`
-    /// instead of surfacing `EACCES`, because the rename has already
-    /// succeeded by the time we call it. Without this, hardened
-    /// directory-permission setups would see writes reported as failed
-    /// even though the destination bytes are durably on disk.
-    #[cfg(unix)]
-    #[test]
-    fn sync_dir_is_best_effort_on_execute_only_parent() {
-        use std::os::unix::fs::PermissionsExt;
-        // Skip when running as root — the chmod-based permission check
-        // does not apply (CAP_DAC_READ_SEARCH bypasses it). Detected via
-        // `id -u` (no extra crate dependency on `libc` or `users`).
-        let is_root = std::process::Command::new("id")
-            .arg("-u")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim() == "0")
-            .unwrap_or(false);
-        if is_root {
-            return;
-        }
-        let dir = unique_temp_path("rubin-io-utils-syncdir-eaccess");
-        fs::create_dir_all(&dir).expect("create test dir");
-        let mut perms = fs::metadata(&dir).expect("stat").permissions();
-        perms.set_mode(0o300);
-        fs::set_permissions(&dir, perms).expect("chmod 0o300");
-
-        let result = sync_dir(&dir);
-
-        // Restore writable mode before any remove call so cleanup works.
-        let mut restore = fs::metadata(&dir).expect("stat").permissions();
-        restore.set_mode(0o700);
-        let _ = fs::set_permissions(&dir, restore);
-        let _ = fs::remove_dir_all(&dir);
-
-        result.expect("sync_dir on execute-only dir must be best-effort (Ok)");
     }
 
     /// Pure-helper unit test for the `path.parent()` edge case: a relative
@@ -2073,86 +2242,9 @@ mod tests {
         );
     }
 
-    /// Copilot P1 regression from PR #1218: the temp path must be built
-    /// via byte-level `OsString::push`, NOT via lossy
-    /// `format!("{}.tmp.{}", path.display(), pid)`. `path.display()`
-    /// replaces non-UTF-8 bytes with `U+FFFD`, so a `PathBuf` containing
-    /// any non-UTF-8 byte would round-trip to a DIFFERENT temp path
-    /// than the caller's actual target.
-    ///
-    /// Tested on the pure helper because APFS on macOS rejects non-UTF-8
-    /// filenames at the syscall layer with `EILSEQ`, which makes a
-    /// filesystem-level round-trip test non-portable. `temp_path_for`
-    /// is the only place where the lossy-vs-exact decision lives, so
-    /// byte-level verification here pins the fix completely.
-    #[cfg(unix)]
-    #[test]
-    fn temp_path_for_preserves_non_utf8_bytes() {
-        use super::temp_path_for;
-        use std::ffi::OsString;
-        use std::os::unix::ffi::{OsStrExt, OsStringExt};
-        use std::path::PathBuf;
-
-        let mut bytes = b"/tmp/bad-".to_vec();
-        bytes.push(0xff);
-        bytes.extend_from_slice(b"-name.bin");
-        let path = PathBuf::from(OsString::from_vec(bytes.clone()));
-
-        let tmp = temp_path_for(&path, 12345, 7);
-
-        let mut expected = bytes.clone();
-        expected.extend_from_slice(b".tmp.12345.7");
-        assert_eq!(tmp.as_os_str().as_bytes(), expected.as_slice());
-
-        // Negative: lossy `format!("{}.tmp.{}.{}", path.display(), ...)`
-        // would replace the 0xff byte with U+FFFD (three bytes
-        // 0xef 0xbf 0xbd), producing DIFFERENT bytes.
-        let lossy = format!("{}.tmp.12345.7", path.display());
-        assert_ne!(
-            tmp.as_os_str().as_bytes(),
-            lossy.as_bytes(),
-            "temp_path_for must not agree with lossy display() on non-UTF-8 input"
-        );
-    }
-
-    /// The seq component is what closes the thread race (`E.3`): two
-    /// consecutive calls within the same process must produce distinct
-    /// temp paths, even though they share the same PID. Without the
-    /// seq, two threads writing to the same destination would overwrite
-    /// each other's temp bytes between open and rename/link.
-    #[test]
-    fn temp_path_for_is_unique_per_seq() {
-        let path = std::path::Path::new("/tmp/shared-dest.bin");
-        let a = super::temp_path_for(path, 42, 0);
-        let b = super::temp_path_for(path, 42, 1);
-        assert_ne!(a, b);
-        // Same pid+seq must remain deterministic for callers that need
-        // to compute the expected temp name in tests.
-        let a_again = super::temp_path_for(path, 42, 0);
-        assert_eq!(a, a_again);
-    }
-
-    /// `next_temp_seq` must never return the same value twice within a
-    /// single process so that concurrent callers pass distinct seq
-    /// values into `temp_path_for`. Verify ordering AND uniqueness in a
-    /// small burst — `AtomicU64::fetch_add` gives strict monotonic
-    /// growth which is stronger than uniqueness and helps diagnose a
-    /// future counter-wrap or reset regression.
-    #[test]
-    fn next_temp_seq_is_monotonic_and_unique() {
-        let a = super::next_temp_seq();
-        let b = super::next_temp_seq();
-        let c = super::next_temp_seq();
-        // Uniqueness.
-        assert!(b != a && c != a && c != b);
-        // Monotonic ordering.
-        assert!(a < b, "seq must be monotonically increasing: a={a} b={b}");
-        assert!(b < c, "seq must be monotonically increasing: b={b} c={c}");
-    }
-
     /// On a sync_all/write_all failure before rename the temp file MUST be
     /// removed, otherwise a real I/O fault (ENOSPC/EIO after data write)
-    /// would strand large `<dest>.tmp.<pid>` siblings on disk while the
+    /// would strand the fixed `.rubin-atomic-write.tmp` scratch on disk while the
     /// caller sees an error.
     ///
     /// We exercise the path indirectly: provoke a `create_parent` failure
@@ -2172,7 +2264,8 @@ mod tests {
         let result = write_file_atomic(&bad_target, b"never-written");
         assert!(result.is_err(), "expected create_parent failure");
 
-        // The directory must contain only the blocker file; no `.tmp.*`
+        // The directory must contain only the blocker file; no fixed
+        // `.rubin-atomic-write.tmp`
         // sibling was created by this failed call.
         let entries: Vec<_> = fs::read_dir(&dir)
             .expect("list dir")
@@ -2183,56 +2276,6 @@ mod tests {
             entries,
             vec!["not-a-dir".to_string()],
             "stranded files present"
-        );
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// Copilot P1 regression on PR #1220: a stale
-    /// `<dest>.tmp.<pid>.<seq>` leftover from a crashed prior process
-    /// (potentially hard-linked to a live destination inode) must NOT
-    /// be reopened with O_TRUNC — that would truncate the destination
-    /// through the shared inode. `write_and_sync_temp` uses
-    /// `create_new(true)` (O_EXCL), so reopening the same path
-    /// returns `AlreadyExists` without touching inode data.
-    ///
-    /// Probe `write_and_sync_temp` directly with an explicit temp
-    /// path so the test does not depend on the global `TEMP_SEQ`
-    /// counter — Rust's `cargo test` runs tests in parallel by
-    /// default, and a probe like `stale_seq = next_temp_seq() + 1`
-    /// would race against any other `TEMP_SEQ`-advancing test and
-    /// silently pass under a regression. The `allocate_and_write_temp`
-    /// retry wrapper is just a loop on top of this primitive, so
-    /// validating the primitive's EEXIST-without-truncate contract is
-    /// sufficient for the retry path. Go-side integration coverage
-    /// (`TestWriteFileAtomic_SkipsStaleTempViaExclusiveCreate`) runs
-    /// in a serial test binary by default and exercises the full
-    /// allocate-then-link flow for end-to-end confidence.
-    #[test]
-    fn write_and_sync_temp_refuses_to_reopen_existing_temp() {
-        use super::{write_and_sync_temp, TempWriteError};
-        let dir = unique_temp_path("rubin-io-utils-excl-temp");
-        fs::create_dir_all(&dir).expect("create test dir");
-        let tmp_path = dir.join("seeded.tmp");
-        let stale_bytes = b"STALE BYTES - must not be truncated";
-        fs::write(&tmp_path, stale_bytes).expect("seed stale temp");
-
-        match write_and_sync_temp(&tmp_path, b"attempted new bytes") {
-            Err(TempWriteError::AlreadyExists) => {}
-            Ok(()) => {
-                panic!("write_and_sync_temp accepted a pre-existing path — O_EXCL is not in effect")
-            }
-            Err(TempWriteError::Fatal(msg)) => {
-                panic!("expected AlreadyExists, got Fatal({msg}) — unexpected error kind")
-            }
-        }
-
-        // The existing temp file must be byte-identical to the seed:
-        // O_EXCL refused the open, so the inode was never touched.
-        assert_eq!(
-            fs::read(&tmp_path).expect("read after"),
-            stale_bytes,
-            "pre-existing temp was truncated — O_TRUNC regression",
         );
 
         let _ = fs::remove_dir_all(&dir);

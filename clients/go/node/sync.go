@@ -15,7 +15,10 @@ const defaultIBDLagSeconds = 24 * 60 * 60
 
 const defaultPVShadowMaxSamples = 3
 
-var ErrParentNotFound = errors.New("parent block not found")
+var (
+	ErrParentNotFound          = errors.New("parent block not found")
+	errStoragePersistenceFault = errors.New("storage persistence fault; restart required")
+)
 
 type SyncConfig struct {
 	ExpectedTarget   *[32]byte
@@ -101,23 +104,45 @@ const (
 )
 
 type SyncEngine struct {
-	chainState      *ChainState
-	blockStore      *BlockStore
-	mempool         *Mempool
-	cfg             SyncConfig
-	stderr          io.Writer
-	mu              sync.RWMutex
-	tipTimestamp    uint64
-	bestKnownHeight uint64
-	lastReorgDepth  uint64
-	reorgCount      uint64
-	blockApply      BlockApplyCounts
+	chainState         *ChainState
+	blockStore         *BlockStore
+	mempool            *Mempool
+	cfg                SyncConfig
+	stderr             io.Writer
+	mu                 sync.RWMutex
+	tipTimestamp       uint64
+	bestKnownHeight    uint64
+	lastReorgDepth     uint64
+	reorgCount         uint64
+	blockApply         BlockApplyCounts
+	mutationMu         sync.Mutex
+	persistenceFaultMu sync.Mutex
+	persistenceFault   *storagePersistenceFault
 
 	pvMode             parallelValidationMode
 	pvShadowMax        uint64
 	pvShadowMismatches uint64
 	pvShadowSamples    []string
 	pvTelemetry        *PVTelemetry
+}
+
+type storagePersistenceFault struct {
+	cause     error
+	reloadErr error
+}
+
+func (e *storagePersistenceFault) Error() string {
+	if e.reloadErr == nil {
+		return fmt.Sprintf("storage persistence fault: %v", e.cause)
+	}
+	return fmt.Sprintf("storage persistence fault: %v (reload failed: %v)", e.cause, e.reloadErr)
+}
+
+func (e *storagePersistenceFault) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
 }
 
 func DefaultSyncConfig(expectedTarget *[32]byte, chainID [32]byte, chainStatePath string) SyncConfig {
@@ -295,29 +320,31 @@ func ValidateDevnetGenesisIdentity(chainID, genesisHash [32]byte) error {
 // exported methods are nil-safe and there are existing tests that exercise
 // the nil-receiver path; this method joins that contract for consistency.
 func (s *SyncEngine) BootstrapCanonicalGenesisIfEmpty() error {
-	if s == nil || s.chainState == nil {
+	if s == nil {
 		return errors.New("sync engine is not initialized")
+	}
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	if err := s.mutationAllowed(); err != nil {
+		return err
 	}
 	if s.chainState.view().hasTip || s.cfg.ChainID != devnetGenesisChainID {
 		return nil
 	}
-	_, applyErr := s.ApplyBlock(devnetGenesisBlockBytes, nil)
+	_, applyErr := s.applyBlock(devnetGenesisBlockBytes, nil)
+	if errors.Is(applyErr, errStoragePersistenceFault) || isAtomicWritePostCommit(applyErr) {
+		return applyErr
+	}
 	return raceTolerantBootstrapResult(applyErr, s.chainState.view().hasTip)
 }
 
-// raceTolerantBootstrapResult absorbs the TOCTOU window between the hasTip
-// check at the start of BootstrapCanonicalGenesisIfEmpty and the ApplyBlock
-// call below it. If another goroutine installs a tip in that window — for
-// example a P2P inbound block path racing a /mine_next request that both
-// observe an empty chain — our ApplyBlock will fail (typically with a
-// linkage error because nextBlockContextFromFields now sees a non-zero
-// next height) even though the chain is no longer empty. In that case the
-// failure is benign: the chain has the tip we wanted to install, and the
-// caller (e.g. Miner.MineOne) can proceed with normal post-genesis mining.
+// raceTolerantBootstrapResult tolerates a directly changed shared ChainState:
+// if apply fails after an external tip appears, bootstrap is already satisfied.
 //
 // Returns:
 //   - nil when ApplyBlock succeeded (applyErr == nil), regardless of hasTip.
-//   - nil when ApplyBlock failed AND hasTip is true at recheck (race-recovery).
+//   - nil when a non-persistence ApplyBlock failure finds a tip at recheck
+//     (race-recovery).
 //   - applyErr when ApplyBlock failed AND hasTip is still false (real failure
 //     unrelated to concurrent tip installation, e.g. blockstore I/O error).
 func raceTolerantBootstrapResult(applyErr error, hasTip bool) error {
@@ -328,6 +355,18 @@ func raceTolerantBootstrapResult(applyErr error, hasTip bool) error {
 }
 
 func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
+	if s == nil {
+		return nil, errors.New("sync engine is not initialized")
+	}
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	return s.applyBlock(blockBytes, prevTimestamps)
+}
+
+func (s *SyncEngine) applyBlock(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
+	if err := s.mutationAllowed(); err != nil {
+		return nil, err
+	}
 	pb, err := consensus.ParseBlockBytes(blockBytes)
 	if err != nil {
 		return nil, err
@@ -558,7 +597,15 @@ func (s *SyncEngine) captureRollbackState() (syncRollbackState, error) {
 }
 
 func (s *SyncEngine) rollbackApplyBlock(cause error, state syncRollbackState) error {
+	if s.persistenceFaulted() {
+		return cause
+	}
 	restoreErr := s.restoreRollbackPersistentState(state)
+	if isAtomicWritePostCommit(restoreErr) {
+		var atomicErr *atomicWriteError
+		reloadStore := errors.As(restoreErr, &atomicErr) && s.blockStore != nil && atomicErr.destination == s.blockStore.indexPath
+		return s.handlePersistenceError(restoreErr, reloadStore, !reloadStore)
+	}
 	s.restoreRollbackRuntimeState(state)
 	if restoreErr != nil {
 		return fmt.Errorf("%w (rollback failed: %v)", cause, restoreErr)
@@ -566,10 +613,89 @@ func (s *SyncEngine) rollbackApplyBlock(cause error, state syncRollbackState) er
 	return cause
 }
 
+func (s *SyncEngine) mutationAllowed() error {
+	if s == nil || s.chainState == nil {
+		return errors.New("sync engine is not initialized")
+	}
+	if s.persistenceFaulted() {
+		return errStoragePersistenceFault
+	}
+	return nil
+}
+
+func (s *SyncEngine) persistenceFaulted() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.persistenceFault != nil
+}
+
+func (s *SyncEngine) handlePersistenceError(err error, reloadStore, reloadState bool) error {
+	if !isAtomicWritePostCommit(err) {
+		return err
+	}
+	s.persistenceFaultMu.Lock()
+	defer s.persistenceFaultMu.Unlock()
+	s.mu.Lock()
+	stable := s.persistenceFault
+	if stable == nil {
+		stable = &storagePersistenceFault{cause: err}
+		s.persistenceFault = stable
+	}
+	s.mu.Unlock()
+
+	reloadErr := s.reloadVisiblePersistenceState(reloadStore, reloadState)
+	if reloadErr == nil {
+		return stable
+	}
+	completed := &storagePersistenceFault{cause: stable.cause, reloadErr: errors.Join(stable.reloadErr, reloadErr)}
+	s.mu.Lock()
+	s.persistenceFault = completed
+	s.mu.Unlock()
+	return completed
+}
+
+func (s *SyncEngine) reloadVisiblePersistenceState(reloadStore, reloadState bool) error {
+	if s == nil {
+		return errors.New("nil sync engine")
+	}
+	s.mu.RLock()
+	store := s.blockStore
+	state := s.chainState
+	chainStatePath := s.cfg.ChainStatePath
+	s.mu.RUnlock()
+	var reloadErr error
+	if reloadStore && store != nil {
+		reloadErr = firstRollbackRestoreErr(reloadErr, store.reloadFromDisk())
+	}
+	if !reloadState || chainStatePath == "" {
+		return reloadErr
+	}
+	loaded, err := LoadChainState(chainStatePath)
+	if err != nil {
+		return firstRollbackRestoreErr(reloadErr, err)
+	}
+	if state == nil {
+		return firstRollbackRestoreErr(reloadErr, errors.New("nil chainstate destination"))
+	}
+	state.mu.RLock()
+	loaded.Rotation = state.Rotation
+	loaded.Registry = state.Registry
+	state.mu.RUnlock()
+	state.replaceFrom(loaded)
+	return reloadErr
+}
+
 func (s *SyncEngine) restoreRollbackPersistentState(state syncRollbackState) error {
 	restoreErr := s.restoreRollbackChainState(state)
 	if s.blockStore != nil {
-		restoreErr = firstRollbackRestoreErr(restoreErr, s.blockStore.RestoreCanonicalIndex(state.canonicalIndex))
+		indexErr := s.blockStore.RestoreCanonicalIndex(state.canonicalIndex)
+		if isAtomicWritePostCommit(indexErr) {
+			return indexErr
+		}
+		restoreErr = firstRollbackRestoreErr(restoreErr, indexErr)
 	}
 	restoreErr = firstRollbackRestoreErr(restoreErr, restoreMempoolSnapshot(s.mempool, state.mempool))
 	if restoreErr == nil && s.cfg.ChainStatePath != "" {
@@ -579,6 +705,9 @@ func (s *SyncEngine) restoreRollbackPersistentState(state syncRollbackState) err
 }
 
 func firstRollbackRestoreErr(current error, next error) error {
+	if isAtomicWritePostCommit(next) {
+		return next
+	}
 	if current != nil {
 		return current
 	}
@@ -612,6 +741,9 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	prevTimestamps []uint64,
 	target *canonicalApplyTarget,
 ) (*ChainStateConnectSummary, error) {
+	if err := s.mutationAllowed(); err != nil {
+		return nil, err
+	}
 	summary, outcome, err := s.applyCanonicalParsedBlockTracked(pb, blockBytes, prevTimestamps, target)
 	s.noteBlockApplyOutcome(outcome)
 	return summary, err

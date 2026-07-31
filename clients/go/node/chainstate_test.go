@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -738,10 +737,6 @@ func TestWriteFileAtomicDurablyPersistsFreshFile(t *testing.T) {
 	}
 }
 
-// TestWriteFileAtomicReplacesExistingFileWithNewDurableBytes verifies the
-// dominant chainstate/blockstore path: rewriting the index file on every
-// commit must atomically replace it AND leave no stale .tmp.* sibling
-// behind once the rename succeeds.
 func TestWriteFileAtomicReplacesExistingFileWithNewDurableBytes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "index.json")
@@ -761,15 +756,8 @@ func TestWriteFileAtomicReplacesExistingFileWithNewDurableBytes(t *testing.T) {
 		t.Fatalf("payload mismatch: got %q want %q", got, "second")
 	}
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read dir: %v", err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if strings.Contains(name, ".tmp.") {
-			t.Fatalf("stale tmp file remained after rename: %s", name)
-		}
+	if _, err := os.Lstat(filepath.Join(dir, atomicWriteScratchLeaf)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fixed scratch remained after rename: %v", err)
 	}
 }
 
@@ -790,91 +778,5 @@ func TestSyncDirFailsOnMissingDirectory(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "no-such-subdir")
 	if err := syncDir(missing); err == nil {
 		t.Fatalf("syncDir on missing dir: expected error, got nil")
-	}
-}
-
-// Permission-based tests that rely on os.Geteuid() (Unix-only) live in
-// chainstate_fsync_unix_test.go behind a `//go:build unix` tag so this
-// file still compiles under GOOS=windows (Copilot review feedback on
-// PR #1218).
-
-// TestAllocateAndWriteTemp_RetriesOnStaleTemp exercises the stale-temp
-// collision retry path added for Copilot P1 on PR #1220. Pre-create a
-// stale `.tmp.<pid>.<seq>` at the next-expected seq, verify the
-// allocator returns a DIFFERENT path on success, and verify the stale
-// file was NOT truncated.
-func TestAllocateAndWriteTemp_RetriesOnStaleTemp(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "target.bin")
-
-	staleSeq := nextTempSeq() + 1
-	staleTmp := tempPathFor(path, os.Getpid(), staleSeq)
-	staleBytes := []byte("stale - must survive")
-	if err := os.WriteFile(staleTmp, staleBytes, 0o600); err != nil {
-		t.Fatalf("seed stale: %v", err)
-	}
-	// Counter is already at staleSeq-1 after the `nextTempSeq()+1`
-	// probe above; the next nextTempSeq() call (first allocator attempt)
-	// returns staleSeq and triggers the O_EXCL AlreadyExists branch.
-	// Do NOT spin a `for nextTempSeq() < staleSeq-1 {}` loop — the
-	// condition itself calls nextTempSeq() and advances the counter,
-	// which can overshoot staleSeq-1 and skip the collision path.
-
-	payload := []byte("new payload")
-	got, err := allocateAndWriteTemp(path, payload, 0o600)
-	if err != nil {
-		t.Fatalf("allocateAndWriteTemp: %v", err)
-	}
-	if got == staleTmp {
-		t.Fatalf("allocator returned stale path %q — O_EXCL retry bypassed", got)
-	}
-	gotBytes, err := os.ReadFile(got)
-	if err != nil {
-		t.Fatalf("read allocated temp: %v", err)
-	}
-	if !bytes.Equal(gotBytes, payload) {
-		t.Fatalf("allocated temp content mismatch")
-	}
-	gotStale, err := os.ReadFile(staleTmp)
-	if err != nil {
-		t.Fatalf("read stale after: %v", err)
-	}
-	if !bytes.Equal(gotStale, staleBytes) {
-		t.Fatalf("stale temp was mutated — O_EXCL retry path broken")
-	}
-	_ = os.Remove(got)
-}
-
-// TestAllocateAndWriteTemp_ExhaustsRetries pre-creates stale files at
-// every seq the allocator would hit within maxTempAllocRetries, so
-// every attempt collides and the function must surface the
-// collision error rather than silently succeed.
-func TestAllocateAndWriteTemp_ExhaustsRetries(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "exhausted.bin")
-
-	baseSeq := nextTempSeq() + 1
-	var created []string
-	for i := 0; i < maxTempAllocRetries; i++ {
-		stale := tempPathFor(path, os.Getpid(), baseSeq+uint64(i))
-		if err := os.WriteFile(stale, []byte("blocker"), 0o600); err != nil {
-			t.Fatalf("seed stale #%d: %v", i, err)
-		}
-		created = append(created, stale)
-	}
-	// Counter is already at baseSeq-1 after the `nextTempSeq()+1`
-	// probe above; the next nextTempSeq() call (first allocator attempt)
-	// returns baseSeq, which is the first seeded stale path.
-
-	_, err := allocateAndWriteTemp(path, []byte("data"), 0o600)
-	if err == nil {
-		t.Fatalf("expected exhaustion error, got nil")
-	}
-	if !strings.Contains(err.Error(), "already exists") &&
-		!strings.Contains(err.Error(), "exhausted") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	for _, stale := range created {
-		_ = os.Remove(stale)
 	}
 }

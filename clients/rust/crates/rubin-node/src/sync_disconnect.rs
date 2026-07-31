@@ -1,6 +1,7 @@
 use rubin_consensus::{parse_block_bytes, parse_block_header_bytes};
 
 use crate::chainstate::ChainState;
+use crate::io_utils::is_atomic_write_post_commit;
 use crate::sync::SyncEngine;
 use crate::undo::ChainStateDisconnectSummary;
 
@@ -8,6 +9,7 @@ impl SyncEngine {
     /// Disconnect the current canonical tip block, restoring the chain state
     /// to the parent. Returns a summary of the disconnection.
     pub fn disconnect_tip(&mut self) -> Result<ChainStateDisconnectSummary, String> {
+        self.mutation_allowed()?;
         let block_store = self
             .block_store
             .as_ref()
@@ -48,11 +50,15 @@ impl SyncEngine {
         // truncate and save leaves the canonical index short while chainstate
         // still has the old tip; the mismatch guard at the top of this
         // function detects and rejects this on restart.
-        let bs = self
+        let truncate_result = self
             .block_store
             .as_mut()
-            .ok_or("sync engine has no blockstore")?;
-        if let Err(err) = bs.truncate_canonical(rollback.canonical_len.saturating_sub(1)) {
+            .ok_or("sync engine has no blockstore")?
+            .truncate_canonical_typed(rollback.canonical_len.saturating_sub(1));
+        if let Err(error) = truncate_result {
+            if is_atomic_write_post_commit(&error) {
+                return Err(self.handle_persistence_error(error, true, false));
+            }
             // truncate_canonical leaves the canonical index unchanged on
             // failure because BlockStore::truncate_canonical updates its
             // in-memory canonical only after the disk write succeeds.
@@ -64,7 +70,7 @@ impl SyncEngine {
             self.chain_state = rollback.chain_state;
             self.tip_timestamp = rollback.tip_timestamp;
             self.best_known_height = rollback.best_known_height;
-            return Err(err);
+            return Err(error.to_string());
         }
 
         // Test-only seam to exercise the otherwise-unreachable
@@ -75,7 +81,11 @@ impl SyncEngine {
         }
 
         if let Some(path) = self.cfg.chain_state_path.as_ref() {
-            if let Err(err) = self.chain_state.save(path) {
+            if let Err(error) = self.chain_state.save_atomic(path) {
+                if is_atomic_write_post_commit(&error) {
+                    return Err(self.handle_persistence_error(error, false, true));
+                }
+                let err = error.to_string();
                 // Restore canonical tip directly, then restore in-memory
                 // state inline.  Going through rollback_apply_block here
                 // would trigger a second canonical write (light-rollback
@@ -88,14 +98,22 @@ impl SyncEngine {
                 // above proves it still is), but we propagate a normal
                 // error if it's somehow missing rather than panic in a
                 // sync hot path.
-                let canonical_rb = match self.block_store.as_mut() {
-                    Some(bs) => bs
-                        .rollback_canonical(
-                            rollback.canonical_len.saturating_sub(1),
-                            vec![hex::encode(tip_hash)],
-                        )
-                        .err()
-                        .map(|e| format!("canonical restore failed: {e}")),
+                let canonical_restore = self.block_store.as_mut().map(|bs| {
+                    bs.rollback_canonical_typed(
+                        rollback.canonical_len.saturating_sub(1),
+                        vec![hex::encode(tip_hash)],
+                    )
+                });
+                let canonical_rb = match canonical_restore {
+                    Some(Ok(())) => None,
+                    Some(Err(error)) if is_atomic_write_post_commit(&error) => {
+                        let error = self.handle_persistence_error(error, true, false);
+                        self.chain_state = rollback.chain_state;
+                        self.tip_timestamp = rollback.tip_timestamp;
+                        self.best_known_height = rollback.best_known_height;
+                        return Err(error);
+                    }
+                    Some(Err(error)) => Some(format!("canonical restore failed: {error}")),
                     None => {
                         // Canonical restore cannot be attempted; align the
                         // in-memory tip with the disconnected parent and
@@ -138,6 +156,7 @@ impl SyncEngine {
         &mut self,
         common_ancestor_height: u64,
     ) -> Result<Vec<Vec<u8>>, String> {
+        self.mutation_allowed()?;
         let (mut current_height, _) = self
             .block_store
             .as_ref()

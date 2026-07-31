@@ -9,10 +9,13 @@ use rubin_consensus::{block_hash, parse_block_bytes, parse_block_header_bytes};
 use rubin_consensus::{RotationProvider, SuiteRegistry};
 
 use crate::blockstore::BlockStore;
-use crate::chainstate::{CanonicalAppliedBlock, ChainState, ChainStateConnectSummary};
+use crate::chainstate::{
+    load_chain_state, CanonicalAppliedBlock, ChainState, ChainStateConnectSummary,
+};
 use crate::chainstate_recovery::should_persist_chainstate_snapshot;
 use crate::da_relay::complete_da_set_ids_from_parsed_block;
 use crate::genesis::devnet_genesis_chain_id;
+use crate::io_utils::{is_atomic_write_post_commit, AtomicWriteError};
 use crate::sync_reorg::PARENT_BLOCK_NOT_FOUND_ERR;
 use crate::target_schedule::{expected_target_for_candidate, TargetScheduleError};
 use crate::undo::build_block_undo;
@@ -21,6 +24,7 @@ pub const DEFAULT_IBD_LAG_SECONDS: u64 = 24 * 60 * 60;
 const DEFAULT_HEADER_BATCH_LIMIT: u64 = 512;
 const DEFAULT_PV_SHADOW_MAX_SAMPLES: u64 = 3;
 const MAX_PV_SHADOW_MAX_SAMPLES: u64 = 10_000;
+const STORAGE_PERSISTENCE_FAULT_ERR: &str = "storage persistence fault; restart required";
 
 #[derive(Clone, Debug)]
 pub struct SyncConfig {
@@ -471,7 +475,6 @@ pub struct HeaderRequest {
     pub has_from: bool,
     pub limit: u64,
 }
-
 #[derive(Debug)]
 pub struct SyncEngine {
     pub(crate) chain_state: ChainState,
@@ -486,12 +489,27 @@ pub struct SyncEngine {
     pv_shadow_mismatches: u64,
     pv_shadow_samples: Vec<String>,
     pv_telemetry: PVTelemetry,
+    persistence_fault: Option<StoragePersistenceFault>,
     /// Test-only: drop block_store after canonical truncate (between
     /// truncate and save) to exercise the otherwise-unreachable
     /// blockstore-missing branch in disconnect_tip's save-failure
     /// recovery.
     #[cfg(test)]
     pub(crate) drop_block_store_after_truncate: bool,
+}
+#[derive(Debug)]
+struct StoragePersistenceFault {
+    cause: AtomicWriteError,
+    reload_error: Option<String>,
+}
+impl std::fmt::Display for StoragePersistenceFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.cause)?;
+        if let Some(reload_error) = &self.reload_error {
+            write!(f, "; persistence reload failed: {reload_error}")?;
+        }
+        Ok(())
+    }
 }
 
 /// Captured state for rollback on failure during reorg.
@@ -632,8 +650,59 @@ pub(crate) fn target_schedule_error_message(err: TargetScheduleError) -> String 
         TargetScheduleError::LocalIo(cause) => format!("target schedule local I/O: {cause}"),
     }
 }
-
 impl SyncEngine {
+    pub(crate) fn mutation_allowed(&self) -> Result<(), String> {
+        if self.persistence_fault.is_some() {
+            return Err(STORAGE_PERSISTENCE_FAULT_ERR.to_string());
+        }
+        Ok(())
+    }
+    pub(crate) fn handle_persistence_error(
+        &mut self,
+        error: AtomicWriteError,
+        reload_store: bool,
+        reload_chainstate: bool,
+    ) -> String {
+        if !is_atomic_write_post_commit(&error) {
+            return error.to_string();
+        }
+        if let Some(fault) = &self.persistence_fault {
+            return fault.to_string();
+        }
+        self.persistence_fault = Some(StoragePersistenceFault {
+            cause: error,
+            reload_error: None,
+        });
+        let reload_error = self
+            .reload_visible_persistence_state(reload_store, reload_chainstate)
+            .err();
+        let fault = self
+            .persistence_fault
+            .as_mut()
+            .expect("persistence fault was just installed");
+        fault.reload_error = reload_error;
+        fault.to_string()
+    }
+    fn reload_visible_persistence_state(
+        &mut self,
+        reload_store: bool,
+        reload_chainstate: bool,
+    ) -> Result<(), String> {
+        let mut first_error = reload_store
+            .then(|| self.block_store.as_mut()?.reload_persistence_state().err())
+            .flatten();
+        if reload_chainstate {
+            let Some(path) = self.cfg.chain_state_path.as_ref() else {
+                return first_error.map_or(Ok(()), Err);
+            };
+            match load_chain_state(path) {
+                Ok(state) => self.chain_state = state,
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
     /// The stock predicate on this engine's own config.
     pub(crate) fn stock_devnet_target_schedule(&self) -> bool {
         stock_devnet_target_schedule(&self.cfg.network, self.cfg.chain_id)
@@ -724,6 +793,7 @@ impl SyncEngine {
             pv_shadow_mismatches: 0,
             pv_shadow_samples: Vec::new(),
             pv_telemetry: PVTelemetry::new(pv_mode),
+            persistence_fault: None,
             #[cfg(test)]
             drop_block_store_after_truncate: false,
         })
@@ -896,6 +966,7 @@ impl SyncEngine {
         prev_timestamps: Option<&[u64]>,
         target: Option<CanonicalApplyTarget>,
     ) -> Result<ChainStateConnectSummary, String> {
+        self.mutation_allowed()?;
         let parsed = parse_block_bytes(block_bytes).map_err(|e| e.to_string())?;
         let block_hash_bytes = block_hash(&parsed.header_bytes).map_err(|e| e.to_string())?;
         // Height and target context are acquired BEFORE the MTP window and
@@ -1068,17 +1139,7 @@ impl SyncEngine {
         }];
 
         let commit_start = Instant::now();
-        // `canonical_len_before` is the rewind target for the ONLY remaining
-        // post-commit failure point: `chain_state.save` below. If
-        // `commit_canonical_block` itself returns `Err`, the persisted
-        // canonical tip has not advanced: the tip write is the last step
-        // inside the atomic API, so an earlier failure leaves the prior
-        // on-disk tip in place. Note that a save failure inside
-        // `set_canonical_tip` mutates in-memory state before a best-effort
-        // reload of the on-disk length; if that reload also fails, the
-        // in-memory length may still be ahead of disk and the blockstore
-        // would require repair. No rewind is needed here for the normal
-        // `commit_canonical_block` error path.
+        // Rewind target only for later precommit chainstate-save failure; canonical precommit preserves tip, while postcommit may advance disk and is reloaded/latched below.
         let canonical_len_before = self.block_store.as_ref().map_or(0, |bs| bs.canonical_len());
         if let Some(block_store) = self.block_store.as_mut() {
             // Atomic canonical commit — Go parity
@@ -1087,17 +1148,25 @@ impl SyncEngine {
             // -> canonical tip (last). A failure before the tip advance
             // leaves the canonical tip at its prior height, so no rewind
             // is required on block/header/undo write failure.
-            if let Err(err) = block_store.commit_canonical_block(
+            if let Err(error) = block_store.commit_canonical_block_typed(
                 summary.block_height,
                 block_hash_bytes,
                 &parsed.header_bytes,
                 block_bytes,
                 &undo,
             ) {
+                if is_atomic_write_post_commit(&error) {
+                    let reload_store = block_store.is_index_destination(&error.destination);
+                    let error = self.handle_persistence_error(error, reload_store, false);
+                    if !reload_store {
+                        self.chain_state = snapshot;
+                    }
+                    return Err(error);
+                }
                 self.chain_state = snapshot;
                 self.tip_timestamp = old_tip_timestamp;
                 self.best_known_height = old_best_known_height;
-                return Err(err);
+                return Err(error.to_string());
             }
         }
 
@@ -1122,24 +1191,28 @@ impl SyncEngine {
             let persist_snapshot = self.block_store.is_none()
                 || should_persist_chainstate_snapshot(Some(&self.chain_state), Some(&summary));
             if persist_snapshot {
-                if let Err(err) = self.chain_state.save(chain_state_path) {
+                if let Err(error) = self.chain_state.save_atomic(chain_state_path) {
+                    if is_atomic_write_post_commit(&error) {
+                        return Err(self.handle_persistence_error(error, false, true));
+                    }
+                    let err = error.to_string();
                     // Canonical commit MAY have advanced the tip. The
                     // same-hash replay path returns Ok(()) without advancing
                     // the canonical index/tip (canonical_len unchanged),
                     // though it may still back-fill missing undo data on
                     // disk, so only rewind when the canonical length
                     // actually grew past the pre-commit snapshot.
-                    let rewind_err = self.block_store.as_mut().and_then(|bs| {
-                        if bs.canonical_len() > canonical_len_before {
-                            bs.truncate_canonical(canonical_len_before).err()
-                        } else {
-                            None
-                        }
+                    let rewind_result = self.block_store.as_mut().and_then(|bs| {
+                        (bs.canonical_len() > canonical_len_before)
+                            .then(|| bs.truncate_canonical_typed(canonical_len_before))
                     });
                     self.chain_state = snapshot;
                     self.tip_timestamp = old_tip_timestamp;
                     self.best_known_height = old_best_known_height;
-                    if let Some(rewind_err) = rewind_err {
+                    if let Some(Err(rewind_err)) = rewind_result {
+                        if is_atomic_write_post_commit(&rewind_err) {
+                            return Err(self.handle_persistence_error(rewind_err, true, false));
+                        }
                         return Err(format!(
                             "{err}; failed to rewind canonical index after chain_state save failure: {rewind_err}; blockstore may require repair"
                         ));
@@ -1209,17 +1282,29 @@ impl SyncEngine {
     /// Returns an error description if persistence failed — callers
     /// should surface this as a repair hint.
     pub(crate) fn rollback_apply_block(&mut self, rb: SyncRollbackState) -> Option<String> {
+        if self.persistence_fault.is_some() {
+            return None;
+        }
         // Phase 1: canonical index rollback (IO) — fail-fast before
         // mutating any in-memory state.
         if let Some(bs) = self.block_store.as_mut() {
             let res = if let Some(suffix) = rb.canonical_removed_suffix {
                 // Reorg path: truncate to base, re-append removed suffix.
-                bs.rollback_canonical(rb.canonical_len, suffix)
+                bs.rollback_canonical_typed(rb.canonical_len, suffix)
             } else {
                 // Light rollback: truncate to saved length (disconnect_tip).
-                bs.truncate_canonical(rb.canonical_len)
+                bs.truncate_canonical_typed(rb.canonical_len)
             };
             if let Err(e) = res {
+                if is_atomic_write_post_commit(&e) {
+                    let error = self.handle_persistence_error(e, true, false);
+                    self.chain_state = rb.chain_state;
+                    self.tip_timestamp = rb.tip_timestamp;
+                    self.best_known_height = rb.best_known_height;
+                    self.last_reorg_depth = rb.last_reorg_depth;
+                    self.reorg_count = rb.reorg_count;
+                    return Some(error);
+                }
                 return Some(format!("canonical rollback failed: {e}"));
             }
         }
@@ -1232,7 +1317,10 @@ impl SyncEngine {
         self.reorg_count = rb.reorg_count;
 
         if let Some(path) = self.cfg.chain_state_path.as_ref() {
-            if let Err(e) = self.chain_state.save(path) {
+            if let Err(e) = self.chain_state.save_atomic(path) {
+                if is_atomic_write_post_commit(&e) {
+                    return Some(self.handle_persistence_error(e, false, true));
+                }
                 return Some(format!(
                     "chain_state save on rollback failed \
                      (canonical already rolled back, may require repair): {e}"
@@ -1545,7 +1633,10 @@ mod tests {
     use crate::chainstate::{chain_state_path, load_chain_state, ChainState};
     use crate::coinbase::{build_coinbase_tx, default_mine_address};
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
-    use crate::io_utils::unique_temp_path;
+    use crate::io_utils::{
+        atomic_write_error_after, unique_temp_path, AtomicWriteOperation, AtomicWriteStage,
+        AtomicWriteTestOp, AtomicWriteTestScope,
+    };
     use crate::sync::{
         boundary_chain_for_test, default_sync_config, next_candidate_block_for_test,
         retarget_block_for_test, run_pv_shadow_validation_guarded, stock_devnet_engine_for_test,
@@ -1679,6 +1770,35 @@ mod tests {
         assert_eq!(tip.0, 0);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+    #[rustfmt::skip]
+    #[test]
+    fn postcommit_faults_latch_real_engine_before_further_mutation() {
+        use AtomicWriteOperation::{CreateIfAbsent, Overwrite}; use AtomicWriteTestOp::{CleanupUnlink, HardLink, ParentSync, Rename};
+        let genesis = devnet_genesis_block_bytes(); let parsed = parse_block_bytes(&genesis).expect("parse genesis");
+        let hash = hex::encode(block_hash(&parsed.header_bytes).expect("genesis hash"));
+        let rows = [("blockstore/blocks", format!("{hash}.bin"), CreateIfAbsent, HardLink, false, false), ("blockstore/headers", format!("{hash}.bin"), CreateIfAbsent, HardLink, false, false), ("blockstore/undo", format!("{hash}.json"), Overwrite, Rename, false, false), ("blockstore", "index.json".into(), Overwrite, Rename, true, true), ("", "chainstate.json".into(), Overwrite, Rename, true, true)];
+        for (index, (parent, leaf, operation, commit, disk_index, chainstate)) in rows.into_iter().enumerate() {
+            let dir = unique_temp_path("rubin-postcommit-engine"); std::fs::create_dir_all(&dir).expect("mkdir");
+            let store = BlockStore::create(block_store_path(&dir)).expect("store"); let mut cfg = default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), Some(chain_state_path(&dir))); if index == 0 { cfg.chain_state_path = None; }
+            let mut engine = SyncEngine::new(ChainState::new(), Some(store), cfg).expect("engine"); let scope = AtomicWriteTestScope::new();
+            scope.fail_at(CleanupUnlink, index + 1, "cleanup-primary"); scope.fail_at(ParentSync, index + 1, "parent-secondary");
+            let error = engine.apply_block(&genesis, None).expect_err("postcommit fault"); let fault = engine.persistence_fault.as_ref().expect("latched fault");
+            assert_eq!((fault.cause.stage, &fault.cause.destination, fault.cause.operation, fault.cause.primary.as_str(), fault.cause.secondary.as_slice()), (AtomicWriteStage::AfterNamespaceCommit, &dir.join(parent).join(leaf), operation, "cleanup-primary", &["parent-secondary".to_string()][..]));
+            assert!(error.contains("cleanup-primary"));
+            assert_eq!((engine.block_store.as_ref().expect("store").canonical_len() > 0, engine.chain_state.has_tip), (disk_index, chainstate));
+            assert_eq!(scope.operations().iter().filter(|&&op| op == commit).count(), if commit == HardLink { index + 1 } else { index - 1 });
+            for blocked in [engine.apply_block(&genesis, None).unwrap_err(), engine.apply_block_with_reorg(&genesis, None).unwrap_err(), engine.disconnect_tip().unwrap_err()] { assert_eq!(blocked, "storage persistence fault; restart required"); }
+            drop(scope); std::fs::remove_dir_all(dir).expect("cleanup");
+        }
+        let path = unique_temp_path("rubin-reload-error"); std::fs::create_dir_all(&path).expect("dir"); let cfg = default_sync_config(None, [0; 32], Some(path.clone())); let mut engine = SyncEngine::new(ChainState::new(), None, cfg).expect("engine");
+        engine.handle_persistence_error(atomic_write_error_after(&path, Overwrite, "postcommit"), false, true); assert!(engine.persistence_fault.expect("fault").reload_error.is_some()); std::fs::remove_dir_all(path).expect("cleanup");
+        let dir = unique_temp_path("rubin-precommit-engine"); std::fs::create_dir_all(&dir).expect("dir");
+        let index = block_store_path(&dir).join("index.json"); let store = BlockStore::create(block_store_path(&dir)).expect("store"); let empty = std::fs::read(&index).expect("index");
+        let cfg = default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), Some(chain_state_path(&dir))); let mut engine = SyncEngine::new(ChainState::new(), Some(store), cfg).expect("engine");
+        std::fs::remove_file(&index).expect("remove"); std::fs::create_dir(&index).expect("block"); let err = engine.apply_block(&genesis, None).unwrap_err(); assert!(err.contains("before_namespace_commit")); assert!(engine.persistence_fault.is_none()); assert_eq!((engine.chain_state.has_tip, engine.block_store.as_ref().expect("store").canonical_len()), (false, 0));
+        std::fs::remove_dir(&index).expect("unblock"); std::fs::write(&index, empty).expect("restore"); engine.apply_block(&genesis, None).expect("retry");
+        std::fs::remove_dir_all(dir).expect("cleanup");
     }
 
     /// B.1 sub-issue #1246: when `cfg.chain_state_path == None`,

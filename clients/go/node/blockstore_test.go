@@ -206,11 +206,6 @@ func TestWriteFileIfAbsentRejectsDifferentContent(t *testing.T) {
 }
 
 func TestWriteFileIfAbsentPropagatesReadError(t *testing.T) {
-	// Only the readFileByPathFn injection is relevant after the E.3
-	// TOCTOU hardening: writeFileIfAbsent no longer routes writes
-	// through writeFileAtomicFn (it goes directly through
-	// allocateAndWriteTemp + os.Link), so mocking writeFileAtomicFn
-	// here was dead-but-harmless and has been removed.
 	prevRead := readFileByPathFn
 	t.Cleanup(func() {
 		readFileByPathFn = prevRead
@@ -362,31 +357,13 @@ func TestWriteFileIfAbsent_ConcurrentDifferentContent(t *testing.T) {
 	}
 }
 
-// Copilot P1 regression on PR #1220: a stale `<dest>.tmp.<pid>.<seq>`
-// leftover from a crashed prior process (potentially hard-linked to
-// a live destination inode) must NOT be reopened with O_TRUNC —
-// that would truncate the destination through the shared inode.
-// writeAndSyncTemp uses O_CREATE|O_EXCL (no O_TRUNC), and
-// allocateAndWriteTemp retries with a fresh seq on os.ErrExist.
-// Verify the retry path by pre-creating a temp at the next seq the
-// allocator would produce, then confirm writeFileAtomic succeeds,
-// the pre-existing stale temp is NOT truncated, and the destination
-// has the expected bytes.
-func TestWriteFileAtomic_SkipsStaleTempViaExclusiveCreate(t *testing.T) {
+func TestWriteFileAtomic_ReclaimsFixedScratchBeforeExclusiveCreate(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "payload.bin")
-
-	// Pre-create stale temp at the seq the next allocation would hit.
-	staleSeq := nextTempSeq() + 1
-	staleTmp := tempPathFor(path, os.Getpid(), staleSeq)
-	staleBytes := []byte("STALE LEFTOVER - must not be truncated")
-	if err := os.WriteFile(staleTmp, staleBytes, 0o600); err != nil {
-		t.Fatalf("seed stale temp: %v", err)
+	scratch := filepath.Join(dir, atomicWriteScratchLeaf)
+	if err := os.WriteFile(scratch, []byte("STALE LEFTOVER"), 0o600); err != nil {
+		t.Fatalf("seed stale scratch: %v", err)
 	}
-
-	// Counter is already at staleSeq-1 after the `nextTempSeq()+1`
-	// probe above; the next nextTempSeq() call (first allocator attempt)
-	// returns staleSeq and triggers the O_EXCL AlreadyExists branch.
 
 	if err := writeFileAtomic(path, []byte("fresh bytes"), 0o600); err != nil {
 		t.Fatalf("writeFileAtomic: %v", err)
@@ -401,13 +378,8 @@ func TestWriteFileAtomic_SkipsStaleTempViaExclusiveCreate(t *testing.T) {
 		t.Fatalf("dest: got %q, want %q", got, "fresh bytes")
 	}
 
-	// Stale temp untouched — O_EXCL refused to reopen/truncate.
-	gotStale, err := os.ReadFile(staleTmp)
-	if err != nil {
-		t.Fatalf("read stale after: %v", err)
-	}
-	if !bytes.Equal(gotStale, staleBytes) {
-		t.Fatalf("stale temp was overwritten — O_EXCL retry path is broken: got %q", gotStale)
+	if _, err := os.Lstat(scratch); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fixed scratch remained after commit: %v", err)
 	}
 }
 

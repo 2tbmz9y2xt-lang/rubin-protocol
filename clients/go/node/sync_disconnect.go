@@ -14,6 +14,15 @@ type disconnectTipContext struct {
 }
 
 func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {
+	if s == nil {
+		return nil, errors.New("sync engine is not initialized")
+	}
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	return s.disconnectTip()
+}
+
+func (s *SyncEngine) disconnectTip() (*ChainStateDisconnectSummary, error) {
 	ctx, err := s.prepareDisconnectTip()
 	if err != nil {
 		return nil, err
@@ -71,8 +80,8 @@ func (s *SyncEngine) prepareDisconnectTip() (disconnectTipContext, error) {
 }
 
 func (s *SyncEngine) validateDisconnectTipReady() error {
-	if s == nil || s.chainState == nil {
-		return errors.New("sync engine is not initialized")
+	if err := s.mutationAllowed(); err != nil {
+		return err
 	}
 	if s.blockStore == nil {
 		return errors.New("sync engine has no blockstore")
@@ -97,7 +106,7 @@ func (s *SyncEngine) disconnectCanonicalToAncestor(commonAncestorHeight uint64) 
 			return nil, 0, err
 		}
 		disconnectedBlocks = append(disconnectedBlocks, append([]byte(nil), disconnectedBlockBytes...))
-		if _, err := s.DisconnectTip(); err != nil {
+		if _, err := s.disconnectTip(); err != nil {
 			return nil, 0, err
 		}
 		currentTipHeight--
@@ -167,10 +176,16 @@ func (s *SyncEngine) getParentTimestamp(tipHeight uint64, prevBlockHash [32]byte
 // finalizeDisconnectState updates chain state after disconnect.
 func (s *SyncEngine) finalizeDisconnectState(rollbackState syncRollbackState, newTipTimestamp uint64) error {
 	if err := s.blockStore.TruncateCanonical(uint64(len(rollbackState.canonicalIndex)) - 1); err != nil {
+		if isAtomicWritePostCommit(err) {
+			return s.handlePersistenceError(err, true, false)
+		}
 		return s.rollbackApplyBlock(err, rollbackState)
 	}
 	if s.cfg.ChainStatePath != "" {
 		if err := s.chainState.Save(s.cfg.ChainStatePath); err != nil {
+			if isAtomicWritePostCommit(err) {
+				return s.handlePersistenceError(err, false, true)
+			}
 			return s.rollbackApplyBlock(err, rollbackState)
 		}
 	}

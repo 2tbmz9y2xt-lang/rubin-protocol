@@ -7,15 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync/atomic"
+	"sync"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
 )
 
 func stateToDisk(s *ChainState) (chainStateDisk, error) {
@@ -128,9 +128,12 @@ func (s *ChainState) Save(path string) error {
 		return fmt.Errorf("encode chainstate: %w", err)
 	}
 	raw = append(raw, '\n')
+	if err := validateAtomicWriteDestination(path, atomicWriteOverwrite); err != nil {
+		return err
+	}
 	// nosemgrep: Semgrep_go.lang.correctness.permissions.file_permission.incorrect-default-permission
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil { // nosemgrep
-		return err
+		return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteOverwrite, err)
 	}
 	return writeFileAtomic(path, raw, 0o600)
 }
@@ -275,195 +278,366 @@ func nextBlockContextFromFields(hasTip bool, height uint64, tipHash [32]byte) (u
 	return nextHeight, &prev, nil
 }
 
-// writeFileAtomic writes data to path via a temp+rename pattern with an
-// honest fsync durability contract (E.1). The actual file IO lives in
-// the helpers allocateAndWriteTemp, writeAndSyncTemp, and syncDir.
-//
-// Sequence (any failure removes the temp file before returning):
-//  1. delegate to allocateAndWriteTemp: pick a unique temp path via
-//     tempPathFor+nextTempSeq and delegate to writeAndSyncTemp, which
-//     opens the temp with O_CREATE|O_EXCL|O_WRONLY (NO O_TRUNC — see
-//     that helper's doc for the crash-safety rationale), loops Write
-//     until all bytes are persisted, Sync, Close, returns joined
-//     errors. A stale-temp collision (PID + seq reuse across a crash)
-//     retries up to maxTempAllocRetries with a fresh seq;
-//  2. Rename temp -> destination (atomic on the same filesystem);
-//  3. delegate to syncDir on the parent directory so the rename itself
-//     is durable (without this the destination's bytes are on disk
-//     after step 1's Sync, but the directory entry mapping `path` to
-//     the new inode may still live only in the kernel page cache and
-//     be lost on crash).
-//
-// Mirrors the Rust `clients/rust/crates/rubin-node/src/io_utils.rs`
-// `write_file_atomic` for cross-client storage parity.
-func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
-	tmpPath, err := allocateAndWriteTemp(path, data, mode)
-	if err != nil {
-		return err
+const (
+	atomicWriteLockLeaf    = ".rubin-atomic-write.lock"
+	atomicWriteScratchLeaf = ".rubin-atomic-write.tmp"
+)
+
+type atomicWriteStage string
+
+const (
+	atomicWriteBeforeNamespaceCommit atomicWriteStage = "before_namespace_commit"
+	atomicWriteAfterNamespaceCommit  atomicWriteStage = "after_namespace_commit"
+)
+
+type atomicWriteOperation string
+
+const (
+	atomicWriteOverwrite      atomicWriteOperation = "overwrite"
+	atomicWriteCreateIfAbsent atomicWriteOperation = "create_if_absent"
+)
+
+type atomicWriteError struct {
+	stage       atomicWriteStage
+	destination string
+	operation   atomicWriteOperation
+	primary     error
+	secondary   []error
+}
+
+func (e *atomicWriteError) Error() string {
+	if e == nil {
+		return ""
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
+	if len(e.secondary) == 0 {
+		return fmt.Sprintf("atomic write %s %s for %s: %v", e.stage, e.operation, e.destination, e.primary)
 	}
-	return syncDir(filepath.Dir(path))
+	return fmt.Sprintf("atomic write %s %s for %s: %v (cleanup: %v)", e.stage, e.operation, e.destination, e.primary, errors.Join(e.secondary...))
 }
 
-// tempSeq is a process-wide monotonic counter appended to every
-// temp-file name so two concurrent writers in the same process
-// (goroutines, or the same goroutine retrying after a previous failed
-// attempt) never collide on a shared `.tmp.<pid>` path (audit E.3).
-// Without this, two goroutines writing different content to the same
-// destination would silently overwrite each other's temp bytes between
-// Write and Rename/Link.
-//
-// Scope is in-process uniqueness only. After a process crash the
-// counter resets to zero, and PID reuse across processes is possible
-// on long-running systems — so a fresh process CAN pick the same
-// `<pid>.<seq>` prefix as a stale leftover on disk. That cross-process
-// collision is handled at a different layer: `writeAndSyncTemp` opens
-// the temp with O_CREATE|O_EXCL (no O_TRUNC) and returns os.ErrExist
-// on collision, and `allocateAndWriteTemp` retries with a fresh seq
-// up to `maxTempAllocRetries` times. tempSeq narrows the collision
-// window; O_EXCL + retries close it.
-//
-// Note: this is a filesystem-uniqueness counter, not a cryptographic
-// nonce.
-var tempSeq atomic.Uint64
-
-func nextTempSeq() uint64 {
-	return tempSeq.Add(1)
+func (e *atomicWriteError) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
+	errList := make([]error, 0, 1+len(e.secondary))
+	if e.primary != nil {
+		errList = append(errList, e.primary)
+	}
+	return append(errList, e.secondary...)
 }
 
-// tempPathFor builds the companion temp path for a destination. Keeps
-// pid + monotonic seq in the filename so the temp is unique across
-// threads, processes, and retries. Mirrors the Rust
-// `io_utils::temp_path_for` helper for cross-client parity.
-func tempPathFor(path string, pid int, seq uint64) string {
-	return fmt.Sprintf("%s.tmp.%d.%d", path, pid, seq)
-}
-
-// maxTempAllocRetries bounds the stale-temp collision retries in
-// allocateAndWriteTemp. A collision on `<dest>.tmp.<pid>.<seq>` should
-// be vanishingly rare (it requires PID reuse PLUS nextTempSeq wrapping
-// back over a stale leftover from a prior process), so 16 is
-// deliberately generous for the tail case while bounding pathological
-// loops.
-const maxTempAllocRetries = 16
-
-// allocateAndWriteTemp picks a unique temp path for `path`, writes
-// `data` to it via writeAndSyncTemp (exclusive-create + fsync), and
-// returns the temp path on success. Retries up to maxTempAllocRetries
-// with a fresh nextTempSeq on the rare os.ErrExist case (stale
-// leftover temp after PID + seq reuse across a crash). Fatal I/O
-// errors surface immediately without retry.
-//
-// On success the caller owns `tmpPath` and is responsible for the
-// final rename/link + removing the temp name on error paths. On
-// failure writeAndSyncTemp already best-effort removes the temp
-// before returning.
-func allocateAndWriteTemp(path string, data []byte, mode os.FileMode) (string, error) {
-	pid := os.Getpid()
-	var lastCollision error
-	for i := 0; i < maxTempAllocRetries; i++ {
-		tmpPath := tempPathFor(path, pid, nextTempSeq())
-		err := writeAndSyncTemp(tmpPath, data, mode)
-		if err == nil {
-			return tmpPath, nil
+func newAtomicWriteError(stage atomicWriteStage, destination string, operation atomicWriteOperation, primary error, secondary ...error) *atomicWriteError {
+	clean := make([]error, 0, len(secondary))
+	for _, err := range secondary {
+		if err != nil {
+			clean = append(clean, err)
 		}
-		if errors.Is(err, os.ErrExist) {
-			lastCollision = fmt.Errorf("temp path already exists: %s", tmpPath)
-			continue
-		}
-		return "", err
 	}
-	if lastCollision == nil {
-		lastCollision = fmt.Errorf("exhausted %d retries allocating temp for %s", maxTempAllocRetries, path)
+	return &atomicWriteError{
+		stage:       stage,
+		destination: destination,
+		operation:   operation,
+		primary:     primary,
+		secondary:   clean,
 	}
-	return "", lastCollision
 }
 
-// writeAndSyncTemp writes data to a fresh temp path, syncs the file's
-// bytes and inode metadata to stable storage, and closes it. Opens
-// with O_CREATE|O_EXCL|O_WRONLY — NO O_TRUNC — so a stale temp
-// leftover from a crashed prior process that happens to be hard-linked
-// to a live destination inode cannot be truncated through the shared
-// inode (Copilot P1 audit on PR #1220). The caller
-// (allocateAndWriteTemp) retries with a fresh seq on os.ErrExist.
-//
-// Write is looped until all bytes are persisted, matching Rust's
-// `Write::write_all` contract: io.Writer is allowed to return a short
-// write without an error, and treating that as success would let us
-// sync+rename a truncated file (Copilot review feedback on PR #1218).
-// A zero-byte short write is reported as io.ErrShortWrite to avoid an
-// infinite loop on a well-behaved-but-stuck writer.
-//
-// We always run Write, Sync and Close, then combine their errors with
-// errors.Join (Go 1.20+). This guarantees:
-//  1. the Close error is NOT silently dropped — it surfaces in the joined
-//     error and reaches the caller;
-//  2. the FD is always released, even when Write or Sync fail, without
-//     duplicating cleanup branches that would otherwise be unreachable
-//     from a unit test (no realistic way to provoke a Write or Sync
-//     failure on an already-opened regular file in CI).
-//
-// On any error after successful open, the temp is best-effort removed
-// before returning so callers (allocateAndWriteTemp / writeFileAtomic
-// / writeFileIfAbsent) do not need to clean up the error path.
-func writeAndSyncTemp(tmpPath string, data []byte, mode os.FileMode) error {
-	// nosemgrep: Semgrep_go_filesystem_rule-fileread
-	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode) // nosemgrep
-	if err != nil {
+func atomicWriteStageOf(err error) (atomicWriteStage, bool) {
+	var atomicErr *atomicWriteError
+	if !errors.As(err, &atomicErr) {
+		return "", false
+	}
+	return atomicErr.stage, true
+}
+
+func isAtomicWritePostCommit(err error) bool {
+	stage, ok := atomicWriteStageOf(err)
+	return ok && stage == atomicWriteAfterNamespaceCommit
+}
+
+type atomicWriteScratchFile interface {
+	io.Writer
+	Sync() error
+	Close() error
+	Chmod(os.FileMode) error
+}
+
+type atomicWriteOps struct {
+	openScratch func(string, int, os.FileMode) (atomicWriteScratchFile, error)
+	rename      func(string, string) error
+	link        func(string, string) error
+	unlink      func(string) error
+	syncParent  func(string) error
+}
+
+var atomicWriteIO = atomicWriteOps{
+	openScratch: func(path string, flag int, mode os.FileMode) (atomicWriteScratchFile, error) {
+		// nosemgrep: Semgrep_go_filesystem_rule-fileread
+		return os.OpenFile(path, flag, mode) // nosemgrep
+	},
+	rename:     os.Rename,
+	link:       os.Link,
+	unlink:     atomicUnlink,
+	syncParent: syncDir,
+}
+
+var atomicWriteProcessMu sync.Mutex
+
+func validateAtomicWriteDestination(path string, operation atomicWriteOperation) error {
+	leaf := filepath.Base(path)
+	if leaf != atomicWriteLockLeaf && leaf != atomicWriteScratchLeaf {
+		return nil
+	}
+	return newAtomicWriteError(
+		atomicWriteBeforeNamespaceCommit,
+		path,
+		operation,
+		fmt.Errorf("reserved atomic persistence destination: %s", path),
+	)
+}
+
+// writeFileAtomic replaces path from a fixed 0600 scratch in its parent.
+func writeFileAtomic(path string, data []byte, _ os.FileMode) error {
+	if err := validateAtomicWriteDestination(path, atomicWriteOverwrite); err != nil {
 		return err
 	}
-	var werr error
+	return writeAtomicFile(path, data, atomicWriteOverwrite, nil)
+}
+
+func writeAtomicFile(path string, data []byte, operation atomicWriteOperation, resolveExisting func() error) error {
+	if err := validateAtomicWriteDestination(path, operation); err != nil {
+		return err
+	}
+	parent := filepath.Dir(path)
+	atomicWriteProcessMu.Lock()
+	defer atomicWriteProcessMu.Unlock()
+
+	lock, result, err := filelock.Acquire(filepath.Join(parent, atomicWriteLockLeaf))
+	if err != nil {
+		return newAtomicWriteError(
+			atomicWriteBeforeNamespaceCommit,
+			path,
+			operation,
+			fmt.Errorf("atomic write lock failed: %s: %s: %w", parent, result, err),
+		)
+	}
+	committed, writeErr := writeAtomicFileLocked(path, data, operation, resolveExisting)
+	if releaseErr := lock.Release(); releaseErr != nil {
+		return appendAtomicWriteReleaseError(writeErr, committed, path, operation, releaseErr)
+	}
+	return writeErr
+}
+
+func appendAtomicWriteReleaseError(writeErr error, committed bool, path string, operation atomicWriteOperation, releaseErr error) error {
+	if writeErr == nil {
+		stage := atomicWriteBeforeNamespaceCommit
+		if committed {
+			stage = atomicWriteAfterNamespaceCommit
+		}
+		return newAtomicWriteError(stage, path, operation, releaseErr)
+	}
+	var atomicErr *atomicWriteError
+	if errors.As(writeErr, &atomicErr) {
+		atomicErr.secondary = append(atomicErr.secondary, releaseErr)
+	}
+	return writeErr
+}
+
+func writeAtomicFileLocked(path string, data []byte, operation atomicWriteOperation, resolveExisting func() error) (bool, error) {
+	parent := filepath.Dir(path)
+	scratch := filepath.Join(parent, atomicWriteScratchLeaf)
+	if err := atomicWriteIO.unlink(scratch); err != nil {
+		return false, newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, operation, err)
+	}
+
+	file, err := atomicWriteIO.openScratch(scratch, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return false, atomicWritePreCommitFailure(path, operation, parent, scratch, err)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		closeErr := file.Close()
+		return false, atomicWritePreCommitFailure(path, operation, parent, scratch, err, closeErr)
+	}
+	writeErr, closeErr := writeAndCloseAtomicScratch(file, data)
+	if writeErr != nil {
+		return false, atomicWritePreCommitFailure(path, operation, parent, scratch, writeErr, closeErr)
+	}
+	return commitAtomicScratch(path, operation, parent, scratch, resolveExisting)
+}
+
+func commitAtomicScratch(path string, operation atomicWriteOperation, parent, scratch string, resolveExisting func() error) (bool, error) {
+	switch operation {
+	case atomicWriteOverwrite:
+		return commitAtomicOverwrite(path, operation, parent, scratch)
+	case atomicWriteCreateIfAbsent:
+		return commitAtomicCreateIfAbsent(path, operation, parent, scratch, resolveExisting)
+	default:
+		return false, atomicWritePreCommitFailure(path, operation, parent, scratch, errors.New("unknown atomic write operation"))
+	}
+}
+
+func commitAtomicOverwrite(path string, operation atomicWriteOperation, parent, scratch string) (bool, error) {
+	if err := atomicWriteIO.rename(scratch, path); err != nil {
+		return false, atomicWritePreCommitFailure(path, operation, parent, scratch, err)
+	}
+	return true, atomicWritePostCommitFailure(path, operation, parent, scratch, nil)
+}
+
+func commitAtomicCreateIfAbsent(path string, operation atomicWriteOperation, parent, scratch string, resolveExisting func() error) (bool, error) {
+	if err := atomicWriteIO.link(scratch, path); err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return false, atomicWritePreCommitFailure(path, operation, parent, scratch, err)
+		}
+		if resolveExisting == nil {
+			return false, atomicWritePreCommitFailure(path, operation, parent, scratch, errors.New("missing create-if-absent destination decision"))
+		}
+		if decisionErr := resolveExisting(); decisionErr != nil {
+			return false, atomicWritePreCommitFailure(path, operation, parent, scratch, decisionErr)
+		}
+	}
+	return true, atomicWritePostCommitFailure(path, operation, parent, scratch, nil)
+}
+
+func writeAndCloseAtomicScratch(file atomicWriteScratchFile, data []byte) (error, error) {
+	writeErr := writeAllAtomicScratch(file, data)
+	var syncErr error
+	if writeErr == nil {
+		syncErr = file.Sync()
+	}
+	closeErr := file.Close()
+	if writeErr != nil {
+		return writeErr, firstNonNil(syncErr, closeErr)
+	}
+	if syncErr != nil {
+		return syncErr, closeErr
+	}
+	return closeErr, nil
+}
+
+func writeAllAtomicScratch(file io.Writer, data []byte) error {
 	for written := 0; written < len(data); {
-		n, e := tmp.Write(data[written:])
-		if e != nil {
-			werr = e
-			break
+		n, err := file.Write(data[written:])
+		if err != nil {
+			return err
 		}
 		if n == 0 {
-			werr = io.ErrShortWrite
-			break
+			return io.ErrShortWrite
 		}
 		written += n
 	}
-	serr := tmp.Sync()
-	cerr := tmp.Close()
-	joined := errors.Join(werr, serr, cerr)
-	if joined != nil {
-		_ = os.Remove(tmpPath)
-	}
-	return joined
+	return nil
 }
 
-// syncDir opens the directory and calls Sync so any rename or unlink
-// performed in it is itself durable. Unix-only: directory Sync is the
-// portable way to flush the parent's directory entry on Linux/macOS;
-// Windows lacks an equivalent and is not a Rubin production target.
-//
-// Sync and Close errors are combined via errors.Join so a Close error after
-// a successful Sync still surfaces (Copilot review feedback on PR #1218,
-// mirrors the writeAndSyncTemp pattern).
-//
-// Best-effort on permission-denied open: a parent directory with mode
-// 0300 (write+execute, no read) permits create/rename but blocks
-// os.Open(dir) for reading (Codex review feedback on PR #1218). The
-// rename has already succeeded by the time we get here, so returning
-// an error would make the caller treat committed state as failed on
-// hardened directory-permission setups. Return nil instead — the
-// destination bytes are already on disk via the temp file's Sync; only
-// the directory-entry fsync is degraded to best-effort. Any other open
-// error (ENOENT, EIO, etc) still propagates as a real anomaly.
+func firstNonNil(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func atomicWritePreCommitFailure(path string, operation atomicWriteOperation, parent, scratch string, primary error, priorSecondary ...error) error {
+	secondary := append([]error(nil), priorSecondary...)
+	if err := atomicWriteIO.unlink(scratch); err != nil {
+		secondary = append(secondary, err)
+	}
+	if err := atomicWriteIO.syncParent(parent); err != nil {
+		secondary = append(secondary, err)
+	}
+	return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, operation, primary, secondary...)
+}
+
+func atomicWritePostCommitFailure(path string, operation atomicWriteOperation, parent, scratch string, primary error) error {
+	secondary := make([]error, 0, 1)
+	if err := atomicWriteIO.unlink(scratch); err != nil {
+		if primary == nil {
+			primary = err
+		} else {
+			secondary = append(secondary, err)
+		}
+	}
+	if err := atomicWriteIO.syncParent(parent); err != nil {
+		if primary == nil {
+			primary = err
+		} else {
+			secondary = append(secondary, err)
+		}
+	}
+	if primary == nil {
+		return nil
+	}
+	return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, operation, primary, secondary...)
+}
+
+// syncDir strictly persists the parent; permission errors remain durability errors.
 func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
-		if errors.Is(err, fs.ErrPermission) {
-			return nil
-		}
 		return err
 	}
-	serr := d.Sync()
-	cerr := d.Close()
-	return errors.Join(serr, cerr)
+	return errors.Join(d.Sync(), d.Close())
+}
+
+type atomicScratchReclaimError struct {
+	parent string
+	cause  error
+}
+
+func (e *atomicScratchReclaimError) Error() string {
+	return fmt.Sprintf("atomic scratch reclaim failed: %s: %v", e.parent, e.cause)
+}
+
+func (e *atomicScratchReclaimError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+// ReclaimAtomicWriteScratch visits the five production parents in frozen order.
+func ReclaimAtomicWriteScratch(dataDir string) error {
+	root := BlockStorePath(dataDir)
+	parents := []string{
+		dataDir,
+		root,
+		filepath.Join(root, "blocks"),
+		filepath.Join(root, "headers"),
+		filepath.Join(root, "undo"),
+	}
+	for _, parent := range parents {
+		if err := ReclaimAtomicWriteScratchInParent(parent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReclaimAtomicWriteScratchInParent reclaims only the named parent's scratch.
+func ReclaimAtomicWriteScratchInParent(parent string) error {
+	if err := reclaimAtomicWriteScratchInParent(parent); err != nil {
+		return &atomicScratchReclaimError{parent: parent, cause: err}
+	}
+	return nil
+}
+
+func reclaimAtomicWriteScratchInParent(parent string) (resultErr error) {
+	atomicWriteProcessMu.Lock()
+	defer atomicWriteProcessMu.Unlock()
+	lock, result, err := filelock.Acquire(filepath.Join(parent, atomicWriteLockLeaf))
+	if err != nil {
+		return fmt.Errorf("atomic write lock failed: %s: %s: %w", parent, result, err)
+	}
+	defer func() {
+		if releaseErr := lock.Release(); resultErr == nil && releaseErr != nil {
+			resultErr = releaseErr
+		}
+	}()
+	if err := atomicWriteIO.unlink(filepath.Join(parent, atomicWriteScratchLeaf)); err != nil {
+		return err
+	}
+	if err := atomicWriteIO.syncParent(parent); err != nil {
+		return err
+	}
+	return nil
 }

@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
 use crate::genesis::validate_incoming_chain_id;
-use crate::io_utils::{parse_hex32, write_file_atomic};
+use crate::io_utils::{
+    atomic_write_error_before, parse_hex32, reclaim_atomic_write_parent,
+    reclaim_atomic_write_scratch, write_file_atomic_typed, AtomicWriteError, AtomicWriteOperation,
+};
 
 pub const CHAIN_STATE_FILE_NAME: &str = "chainstate.json";
 const CHAIN_STATE_DISK_VERSION: u32 = 1;
@@ -98,10 +101,21 @@ impl ChainState {
     }
 
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
+        self.save_atomic(path).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn save_atomic<P: AsRef<Path>>(&self, path: P) -> Result<(), AtomicWriteError> {
         let path = path.as_ref();
-        let disk = state_to_disk(self)?;
-        let mut raw =
-            serde_json::to_vec_pretty(&disk).map_err(|e| format!("encode chainstate: {e}"))?;
+        let disk = state_to_disk(self).map_err(|error| {
+            atomic_write_error_before(path, AtomicWriteOperation::Overwrite, error)
+        })?;
+        let mut raw = serde_json::to_vec_pretty(&disk).map_err(|error| {
+            atomic_write_error_before(
+                path,
+                AtomicWriteOperation::Overwrite,
+                format!("encode chainstate: {error}"),
+            )
+        })?;
         raw.push(b'\n');
         // Parent creation is delegated to `write_file_atomic`, which
         // runs `fs::create_dir_all(effective_parent(path))` on the
@@ -126,7 +140,7 @@ impl ChainState {
         // combined with `..`. Other callers of `ChainState::save`
         // are responsible for their own path hygiene — see
         // `load_chain_state` for the mirror note.
-        write_file_atomic(path, &raw)
+        write_file_atomic_typed(path, &raw)
     }
 
     pub fn connect_block(
@@ -309,6 +323,16 @@ pub(crate) fn copy_utxo_set(src: &HashMap<Outpoint, UtxoEntry>) -> HashMap<Outpo
 
 pub fn chain_state_path<P: AsRef<Path>>(data_dir: P) -> PathBuf {
     data_dir.as_ref().join(CHAIN_STATE_FILE_NAME)
+}
+
+/// Startup scratch reclaim runs after store open/create under the datadir lock.
+pub fn reclaim_atomic_scratch<P: AsRef<Path>>(data_dir: P) -> Result<(), String> {
+    reclaim_atomic_write_scratch(data_dir.as_ref())
+}
+
+/// Fresh-store startup reclaims only its existing datadir parent.
+pub fn reclaim_atomic_scratch_parent<P: AsRef<Path>>(parent: P) -> Result<(), String> {
+    reclaim_atomic_write_parent(parent.as_ref())
 }
 
 pub fn load_chain_state<P: AsRef<Path>>(path: P) -> Result<ChainState, String> {
