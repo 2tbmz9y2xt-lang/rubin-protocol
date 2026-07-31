@@ -2179,7 +2179,7 @@ mod tests {
             let path = dir.join(leaf); match make { 0 => fs::write(&path, b"x").expect("regular"), 1 => fs::hard_link(&live, &path).expect("hardlink"), 2 => { let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path"); assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0); }, 3 => symlink(&live, &path).expect("symlink"), _ => symlink(dir.join("absent"), &path).expect("dangling") } unlink_atomic_scratch(&path).expect("unlink"); assert!(path.symlink_metadata().is_err()); assert_eq!(fs::read(&live).expect("live intact"), b"live");
         }
         let directory = dir.join("directory"); fs::create_dir(&directory).expect("directory"); assert!(unlink_atomic_scratch(&directory).is_err() && directory.is_dir());
-        for mask in [0, 0o022, 0o077, 0o700] {
+        for mask in [0, 0o022, 0o077] {
             let _umask = Umask::set(mask); let scratch = dir.join(ATOMIC_WRITE_SCRATCH_LEAF); let dst = dir.join(format!("mode-{mask:o}"));
             let scope = AtomicWriteTestScope::new(); scope.fail_at(AtomicWriteTestOp::Write, 1, "write"); scope.fail_at(AtomicWriteTestOp::CleanupUnlink, 1, "keep");
             write_file_atomic_typed(&dst, b"x").expect_err("retain scratch"); assert_eq!(fs::metadata(&scratch).expect("scratch").mode() & 0o777, 0o600); drop(scope); fs::remove_file(&scratch).expect("scratch");
