@@ -353,11 +353,11 @@ func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
 	seen := make(map[[32]byte]struct{})
 	current := tipHash
 	for current != zero {
+		if _, exists := seen[current]; exists {
+			return nil, fmt.Errorf("%w: chain-work parent cycle at %x", errBranchStoreCorrupt, current)
+		}
 		if cached, ok := bs.cachedChainWork(current); ok {
 			return bs.chainWorkFromCachedBaseErr(tipHash, cached, hashes, targets)
-		}
-		if _, exists := seen[current]; exists {
-			return nil, errors.New("blockstore parent cycle")
 		}
 		seen[current] = struct{}{}
 		header, err := bs.chainWorkHeader(current)
@@ -396,7 +396,7 @@ func (bs *BlockStore) chainWorkFromCachedBase(tipHash [32]byte, cached *big.Int,
 func (bs *BlockStore) chainWorkFromRoot(hashes [][32]byte, targets [][32]byte) (*big.Int, error) {
 	total, err := consensus.ChainWorkFromTargets(targets)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: chain-work targets are invalid: %v", errBranchStoreCorrupt, err) //nolint:errorlint // %v keeps local corruption out of p2p's consensus-error chain.
 	}
 	if _, err := bs.accumulateChainWorkFromTargets(nil, hashes, targets); err != nil {
 		return nil, err
@@ -407,9 +407,27 @@ func (bs *BlockStore) chainWorkFromRoot(hashes [][32]byte, targets [][32]byte) (
 func (bs *BlockStore) chainWorkHeader(blockHash [32]byte) (consensus.BlockHeader, error) {
 	headerBytes, err := bs.GetHeaderByHash(blockHash)
 	if err != nil {
-		return consensus.BlockHeader{}, err
+		return consensus.BlockHeader{}, chainWorkHeaderCorruption(blockHash, "cannot be read", err)
 	}
-	return consensus.ParseBlockHeaderBytes(headerBytes)
+	header, err := consensus.ParseBlockHeaderBytes(headerBytes)
+	if err != nil {
+		return consensus.BlockHeader{}, chainWorkHeaderCorruption(blockHash, "does not parse", err)
+	}
+	observedHash, err := consensus.BlockHash(headerBytes)
+	if err != nil {
+		return consensus.BlockHeader{}, chainWorkHeaderCorruption(blockHash, "does not hash", err)
+	}
+	if observedHash != blockHash {
+		return consensus.BlockHeader{}, fmt.Errorf(
+			"%w: stored header for %x hashes to %x",
+			errBranchStoreCorrupt, blockHash, observedHash,
+		)
+	}
+	return header, nil
+}
+
+func chainWorkHeaderCorruption(blockHash [32]byte, reason string, err error) error {
+	return fmt.Errorf("%w: stored header for %x %s: %v", errBranchStoreCorrupt, blockHash, reason, err) //nolint:errorlint // %v keeps local corruption out of p2p's consensus-error chain.
 }
 
 func buildCanonicalHeightIndex(canonical []string) (map[[32]byte]uint64, error) {
@@ -485,13 +503,17 @@ func (bs *BlockStore) accumulateChainWorkFromTargets(base *big.Int, hashes [][32
 	if running == nil {
 		running = big.NewInt(0)
 	}
+	pending := make([]*big.Int, len(targets))
 	for i := len(targets) - 1; i >= 0; i-- {
 		work, err := consensus.WorkFromTarget(targets[i])
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: chain-work target for %x is invalid: %v", errBranchStoreCorrupt, hashes[i], err) //nolint:errorlint // %v keeps local corruption out of p2p's consensus-error chain.
 		}
 		running.Add(running, work)
-		bs.storeChainWorkIfCanonical(hashes[i], running)
+		pending[i] = cloneBigInt(running)
+	}
+	for i := len(pending) - 1; i >= 0; i-- {
+		bs.storeChainWorkIfCanonical(hashes[i], pending[i])
 	}
 	return cloneBigInt(running), nil
 }

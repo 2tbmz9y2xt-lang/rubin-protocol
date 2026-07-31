@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1346,6 +1347,77 @@ func TestRelayedCandidateWithCorruptStoredAncestorIsPeerNeutral(t *testing.T) {
 	var txErr *consensus.TxError
 	if errors.As(err, &txErr) {
 		t.Fatalf("local stored corruption leaked consensus error: %v", err)
+	}
+	if state := peer.snapshotState(); state.BanScore != 0 || state.LastError == "" {
+		t.Fatalf("peer state=%+v, want peer-neutral local diagnostic", state)
+	}
+	if sink.service.blockSeen.Has(b2Hash) {
+		t.Fatal("locally failed relayed candidate must not be marked seen")
+	}
+	afterHeight, afterTip, afterOK, err := sink.blockStore.Tip()
+	if err != nil || afterOK != beforeOK || afterHeight != beforeHeight || afterTip != beforeTip {
+		t.Fatalf("sink tip after: height=%d hash=%x ok=%v err=%v", afterHeight, afterTip, afterOK, err)
+	}
+}
+
+func TestRelayedHeavierCandidateWithCorruptStoredChainWorkHeaderIsPeerNeutral(t *testing.T) {
+	// The source's B2 is an honest two-block branch above the genesis common
+	// ancestor. Sink stores the valid B1 body/header as a side ancestor so the
+	// P2P relay reaches fork-choice, where the corrupted canonical genesis
+	// HEADER (not its full block body) is consumed by ChainWork.
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	b1Hash, b1Bytes := testHarnessBlockAtHeight(t, source, 1)
+	_, b2Bytes := testHarnessBlockAtHeight(t, source, 2)
+	_, b2Hash, err := parseRelayedBlock(b2Bytes)
+	if err != nil {
+		t.Fatalf("parseRelayedBlock(B2): %v", err)
+	}
+	candidateWork, err := source.blockStore.ChainWork(b2Hash)
+	if err != nil {
+		t.Fatalf("source ChainWork(B2): %v", err)
+	}
+	genesisWork, err := source.blockStore.ChainWork(node.DevnetGenesisBlockHash())
+	if err != nil || candidateWork.Cmp(genesisWork) <= 0 {
+		t.Fatalf("honest candidate work=%v genesis work=%v err=%v, want heavier branch", candidateWork, genesisWork, err)
+	}
+	b1Header, err := source.blockStore.GetHeaderByHash(b1Hash)
+	if err != nil {
+		t.Fatalf("GetHeaderByHash(B1): %v", err)
+	}
+	if err := sink.blockStore.StoreBlock(b1Hash, b1Header, b1Bytes); err != nil {
+		t.Fatalf("StoreBlock(side B1): %v", err)
+	}
+
+	genesisHash := node.DevnetGenesisBlockHash()
+	storedGenesis, err := sink.blockStore.GetBlockByHash(genesisHash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash(genesis): %v", err)
+	}
+	parsedGenesis, err := consensus.ParseBlockBytes(storedGenesis)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(stored genesis): %v", err)
+	}
+	if bodyHash, err := consensus.BlockHash(parsedGenesis.HeaderBytes); err != nil || bodyHash != genesisHash {
+		t.Fatalf("stored genesis body identity=(%x,%v), want %x,nil", bodyHash, err, genesisHash)
+	}
+	headerPath := filepath.Join(node.BlockStorePath(sink.dataDir), "headers", hex.EncodeToString(genesisHash[:])+".bin")
+	if err := os.WriteFile(headerPath, b1Header, 0o600); err != nil {
+		t.Fatalf("WriteFile(substituted canonical header): %v", err)
+	}
+
+	peer := testPeerForService(sink.service, "remote", 2)
+	beforeHeight, beforeTip, beforeOK, err := sink.blockStore.Tip()
+	if err != nil || !beforeOK {
+		t.Fatalf("sink tip before: height=%d hash=%x ok=%v err=%v", beforeHeight, beforeTip, beforeOK, err)
+	}
+	summary, err := peer.processRelayedBlock(b2Bytes)
+	if err == nil || summary != nil || !strings.Contains(err.Error(), "stored header") {
+		t.Fatalf("processRelayedBlock(corrupt ChainWork header): summary=%v err=%v", summary, err)
+	}
+	var txErr *consensus.TxError
+	if errors.As(err, &txErr) {
+		t.Fatalf("local ChainWork header corruption leaked consensus.TxError: %v", err)
 	}
 	if state := peer.snapshotState(); state.BanScore != 0 || state.LastError == "" {
 		t.Fatalf("peer state=%+v, want peer-neutral local diagnostic", state)
