@@ -46,7 +46,8 @@ pub use block_basic::{
     validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_and_fees_at_height_and_rotation,
     validate_block_basic_with_context_at_height,
-    validate_block_basic_with_context_at_height_and_rotation, BlockBasicSummary, ParsedBlock,
+    validate_block_basic_with_context_at_height_and_rotation, validate_stored_block_commitments,
+    BlockBasicSummary, ParsedBlock,
 };
 pub use compact_relay::compact_shortid;
 pub use compactsize::encode_compact_size;

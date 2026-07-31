@@ -61,6 +61,7 @@ func TestValidateStoredBlockCommitments(t *testing.T) {
 	t.Run("txid Merkle mismatch", func(t *testing.T) {
 		pb := parseStoredCommitmentTestBlock(t, coinbaseWithWitnessCommitment(t))
 		pb.Txids[0][0] ^= 0xff
+		pb.Wtxids[0][0] ^= 0xff
 		requireStoredCommitmentError(t, pb, BLOCK_ERR_MERKLE_INVALID)
 	})
 

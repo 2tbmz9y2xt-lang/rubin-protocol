@@ -117,6 +117,7 @@ func TestDisconnectPreparedTipUsesRetainedVerifiedBlock(t *testing.T) {
 func TestPreparedCanonicalDisconnectRetainsPreviewedBlocks(t *testing.T) {
 	engine, store, target := newReorgTestEngine(t)
 	var hashes [][32]byte
+	blocks := make([][]byte, 0, 2)
 	prevHash := devnetGenesisBlockHash
 	alreadyGenerated := uint64(0)
 	for height := uint64(1); height <= 2; height++ {
@@ -127,9 +128,18 @@ func TestPreparedCanonicalDisconnectRetainsPreviewedBlocks(t *testing.T) {
 			t.Fatalf("ApplyBlock(A%d): %v", height, err)
 		}
 		hashes = append(hashes, summary.BlockHash)
+		blocks = append(blocks, block)
 		prevHash = summary.BlockHash
 		alreadyGenerated += subsidy
 	}
+
+	undoDir := store.undoDir
+	store.undoDir = t.TempDir()
+	writeRawStoreBlockFile(t, store, hashes[0], corruptStoredMerkleBody(t, blocks[0]))
+	_, _, err := engine.previewDisconnectCanonicalToAncestor(cloneChainState(engine.chainState), 0)
+	assertBranchStoreCorruption(t, err)
+	store.undoDir = undoDir
+	writeRawStoreBlockFile(t, store, hashes[0], blocks[0])
 
 	prepared, depth, err := engine.previewDisconnectCanonicalToAncestor(cloneChainState(engine.chainState), 0)
 	if err != nil || depth != 2 || len(prepared) != 2 {

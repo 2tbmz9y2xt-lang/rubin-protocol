@@ -1,7 +1,7 @@
 use rubin_consensus::{
-    block_hash, parse_block_bytes, parse_tx, read_compact_size_bytes,
-    validate_block_basic_with_context_at_height_and_rotation, Outpoint, ParsedBlock,
-    BLOCK_HEADER_BYTES,
+    block_hash, marshal_tx, parse_block_bytes, parse_tx, read_compact_size_bytes,
+    validate_block_basic_with_context_at_height_and_rotation, validate_stored_block_commitments,
+    Outpoint, ParsedBlock, BLOCK_HEADER_BYTES,
 };
 use std::collections::BTreeSet;
 use std::ops::Deref;
@@ -44,6 +44,88 @@ pub(crate) fn branch_store_corrupt(detail: String) -> String {
     format!("{BRANCH_STORE_CORRUPT_ERR}: {detail}")
 }
 
+/// One bounded stored-block read and the single parse of those exact bytes.
+/// The value is retained through canonical preview, commit, and requeue so a
+/// later filesystem change cannot alter an already-validated transition.
+#[derive(Clone, Debug)]
+pub(crate) struct VerifiedStoredBlock {
+    pub(crate) lookup_hash: [u8; 32],
+    pub(crate) block_bytes: Vec<u8>,
+    pub(crate) parsed: ParsedBlock,
+}
+
+pub(crate) enum StoredBlockLoadError {
+    NotFound,
+    Corrupt(String),
+}
+
+impl StoredBlockLoadError {
+    pub(crate) fn render(self, lookup_hash: [u8; 32]) -> String {
+        match self {
+            Self::NotFound => branch_store_corrupt(format!(
+                "stored block for {} is unreadable: not found",
+                hex::encode(lookup_hash)
+            )),
+            Self::Corrupt(err) => err,
+        }
+    }
+}
+
+/// Read, parse, hash-check, and validate one stored block. Every outcome but
+/// raw `NotFound` is rendered as local store corruption; the branch-walk
+/// wrapper below is the sole place that preserves parent-not-found semantics.
+pub(crate) fn load_verified_stored_block(
+    block_store: &BlockStore,
+    lookup_hash: [u8; 32],
+) -> Result<VerifiedStoredBlock, StoredBlockLoadError> {
+    let block_bytes = match block_store.read_block_file_by_hash(lookup_hash) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(StoredBlockLoadError::NotFound);
+        }
+        Err(err) => {
+            return Err(StoredBlockLoadError::Corrupt(branch_store_corrupt(
+                format!(
+                    "stored block for {} is unreadable: {err}",
+                    hex::encode(lookup_hash)
+                ),
+            )));
+        }
+    };
+    let parsed = parse_block_bytes(&block_bytes).map_err(|err| {
+        StoredBlockLoadError::Corrupt(branch_store_corrupt(format!(
+            "stored block for {} does not parse: {err}",
+            hex::encode(lookup_hash)
+        )))
+    })?;
+    let observed_hash = block_hash(&parsed.header_bytes).map_err(|err| {
+        StoredBlockLoadError::Corrupt(branch_store_corrupt(format!(
+            "stored block for {} does not hash: {err}",
+            hex::encode(lookup_hash)
+        )))
+    })?;
+    if observed_hash != lookup_hash {
+        return Err(StoredBlockLoadError::Corrupt(branch_store_corrupt(
+            format!(
+                "stored block for {} hashes to {}",
+                hex::encode(lookup_hash),
+                hex::encode(observed_hash)
+            ),
+        )));
+    }
+    validate_stored_block_commitments(&parsed).map_err(|err| {
+        StoredBlockLoadError::Corrupt(branch_store_corrupt(format!(
+            "stored block for {} has invalid commitments: {err}",
+            hex::encode(lookup_hash)
+        )))
+    })?;
+    Ok(VerifiedStoredBlock {
+        lookup_hash,
+        block_bytes,
+        parsed,
+    })
+}
+
 /// Reads one stored ancestor and PROVES it is the block that was asked for. A
 /// plain file read cannot: [`BlockStore::get_block_by_hash`] returns whatever
 /// bytes sit at the path named by the hash, so a corrupt — or hostile — datadir
@@ -60,39 +142,12 @@ pub(crate) fn branch_store_corrupt(detail: String) -> String {
 fn load_verified_branch_ancestor(
     block_store: &BlockStore,
     parent_hash: [u8; 32],
-) -> Result<(ParsedBlock, Vec<u8>), String> {
-    let parent_bytes = match block_store.read_block_file_by_hash(parent_hash) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(PARENT_BLOCK_NOT_FOUND_ERR.to_string());
-        }
-        Err(err) => {
-            return Err(branch_store_corrupt(format!(
-                "stored block for {} is unreadable: {err}",
-                hex::encode(parent_hash)
-            )));
-        }
-    };
-    let parent_parsed = parse_block_bytes(&parent_bytes).map_err(|err| {
-        branch_store_corrupt(format!(
-            "stored block for {} does not parse: {err}",
-            hex::encode(parent_hash)
-        ))
-    })?;
-    let observed_hash = block_hash(&parent_parsed.header_bytes).map_err(|err| {
-        branch_store_corrupt(format!(
-            "stored block for {} does not hash: {err}",
-            hex::encode(parent_hash)
-        ))
-    })?;
-    if observed_hash != parent_hash {
-        return Err(branch_store_corrupt(format!(
-            "stored block for {} hashes to {}",
-            hex::encode(parent_hash),
-            hex::encode(observed_hash)
-        )));
+) -> Result<VerifiedStoredBlock, String> {
+    match load_verified_stored_block(block_store, parent_hash) {
+        Ok(stored) => Ok(stored),
+        Err(StoredBlockLoadError::NotFound) => Err(PARENT_BLOCK_NOT_FOUND_ERR.to_string()),
+        Err(err) => Err(err.render(parent_hash)),
     }
-    Ok((parent_parsed, parent_bytes))
 }
 
 /// One collected branch row built from an already-parsed block.
@@ -152,6 +207,11 @@ struct ReorgBranchBlock {
 pub struct TxPoolCleanupPlan {
     confirmed_txids: Vec<[u8; 32]>,
     conflicting_inputs: Vec<Outpoint>,
+    requeue_blocks: Vec<VerifiedStoredBlock>,
+    // Compatibility only for existing crate tests that construct a cleanup
+    // plan without a retained verified block. Production reorgs never use
+    // this hash-only shape and therefore never read the store during requeue.
+    #[cfg(test)]
     requeue_block_hashes: Vec<[u8; 32]>,
 }
 
@@ -220,9 +280,17 @@ impl TxPoolCleanupReport {
 
 impl TxPoolCleanupPlan {
     pub fn is_empty(&self) -> bool {
-        self.confirmed_txids.is_empty()
+        let is_empty = self.confirmed_txids.is_empty()
             && self.conflicting_inputs.is_empty()
-            && self.requeue_block_hashes.is_empty()
+            && self.requeue_blocks.is_empty();
+        #[cfg(test)]
+        {
+            is_empty && self.requeue_block_hashes.is_empty()
+        }
+        #[cfg(not(test))]
+        {
+            is_empty
+        }
     }
 
     pub fn apply(
@@ -258,13 +326,8 @@ impl TxPoolCleanupPlan {
             pool.remove_conflicting_outpoints(&self.conflicting_inputs);
         }
         if let Some(block_store) = block_store {
-            for block_hash in self.requeue_block_hashes.iter().rev() {
-                let Ok(block_bytes) = block_store.get_block_by_hash(*block_hash) else {
-                    report.requeue_blocks_unavailable =
-                        report.requeue_blocks_unavailable.saturating_add(1);
-                    continue;
-                };
-                let Ok(txs) = non_coinbase_tx_bytes(&block_bytes) else {
+            for stored in self.requeue_blocks.iter().rev() {
+                let Ok(txs) = non_coinbase_tx_bytes_from_parsed(&stored.parsed) else {
                     report.requeue_blocks_invalid = report.requeue_blocks_invalid.saturating_add(1);
                     continue;
                 };
@@ -294,10 +357,35 @@ impl TxPoolCleanupPlan {
                     }
                 }
             }
-        } else if !self.requeue_block_hashes.is_empty() {
+            #[cfg(test)]
+            for block_hash in self.requeue_block_hashes.iter().rev() {
+                let Ok(block_bytes) = block_store.get_block_by_hash(*block_hash) else {
+                    report.requeue_blocks_unavailable =
+                        report.requeue_blocks_unavailable.saturating_add(1);
+                    continue;
+                };
+                let Ok(txs) = non_coinbase_tx_bytes(&block_bytes) else {
+                    report.requeue_blocks_invalid = report.requeue_blocks_invalid.saturating_add(1);
+                    continue;
+                };
+                for tx_bytes in txs {
+                    report.record_requeue_attempt();
+                    match pool.add_tx_with_source(
+                        &tx_bytes,
+                        chain_state,
+                        Some(block_store),
+                        chain_id,
+                        TxSource::Reorg,
+                    ) {
+                        Ok(_) => report.record_requeue_accepted(),
+                        Err(err) => report.record_requeue_error(&err),
+                    }
+                }
+            }
+        } else {
             report.requeue_blocks_unavailable = report
                 .requeue_blocks_unavailable
-                .saturating_add(self.requeue_block_hashes.len());
+                .saturating_add(self.requeue_block_count());
         }
         report
     }
@@ -306,9 +394,23 @@ impl TxPoolCleanupPlan {
         self.confirmed_txids.append(&mut other.confirmed_txids);
         self.conflicting_inputs
             .append(&mut other.conflicting_inputs);
+        self.requeue_blocks.append(&mut other.requeue_blocks);
+        #[cfg(test)]
         self.requeue_block_hashes
             .append(&mut other.requeue_block_hashes);
         self
+    }
+
+    fn requeue_block_count(&self) -> usize {
+        let count = self.requeue_blocks.len();
+        #[cfg(test)]
+        {
+            count.saturating_add(self.requeue_block_hashes.len())
+        }
+        #[cfg(not(test))]
+        {
+            count
+        }
     }
 
     /// Build a cleanup plan from an already-parsed block. Crate-private
@@ -366,6 +468,7 @@ impl TxPoolCleanupPlan {
         Self {
             confirmed_txids,
             conflicting_inputs,
+            requeue_blocks: Vec::new(),
             requeue_block_hashes,
         }
     }
@@ -582,16 +685,21 @@ impl SyncEngine {
         let rollback = self.capture_reorg_rollback_state(common_ancestor_height);
 
         // Dry-run: preview the disconnect + reconnect on a cloned state.
-        let disconnected_blocks = self.prepare_preferred_branch(&branch, common_ancestor_height)?;
-        let reorg_depth = u64::try_from(disconnected_blocks.len()).unwrap_or(u64::MAX);
+        let prepared_disconnects =
+            self.prepare_preferred_branch(&branch, common_ancestor_height)?;
+        let reorg_depth = u64::try_from(prepared_disconnects.len()).unwrap_or(u64::MAX);
 
         // Disconnect canonical chain back to the common ancestor.
-        if let Err(err) = self.disconnect_canonical_to_ancestor(common_ancestor_height) {
-            return Err(Self::err_with_rollback(
-                err,
-                self.rollback_apply_block(rollback),
-            ));
-        }
+        let disconnected_blocks =
+            match self.disconnect_prepared_canonical_to_ancestor(prepared_disconnects) {
+                Ok(blocks) => blocks,
+                Err(err) => {
+                    return Err(Self::err_with_rollback(
+                        err,
+                        self.rollback_apply_block(rollback),
+                    ));
+                }
+            };
 
         // Connect the preferred branch.  Pass None so apply_block derives
         // fresh timestamps from the (updated) canonical index for each block,
@@ -647,7 +755,9 @@ impl SyncEngine {
                 .iter()
                 .flat_map(|item| non_coinbase_inputs(&item.block_bytes).unwrap_or_default())
                 .collect(),
-            requeue_block_hashes: collect_disconnected_block_hashes(&disconnected_blocks),
+            requeue_blocks: disconnected_blocks,
+            #[cfg(test)]
+            requeue_block_hashes: Vec::new(),
         };
 
         let mut summary = last_summary.ok_or_else(|| "reorg branch was empty".to_string())?;
@@ -667,7 +777,7 @@ impl SyncEngine {
         &self,
         branch: &[ReorgBranchBlock],
         common_ancestor_height: u64,
-    ) -> Result<Vec<Vec<u8>>, String> {
+    ) -> Result<Vec<VerifiedStoredBlock>, String> {
         let mut preview_state = self.chain_state.clone();
 
         let disconnected_blocks = self
@@ -781,11 +891,14 @@ impl SyncEngine {
 
             // Load the parent block from the side-chain store and prove it is
             // the block that was asked for.
-            let (parent_parsed, parent_bytes) =
-                load_verified_branch_ancestor(block_store, parent_hash)?;
-
-            branch.push(branch_row(parent_hash, &parent_parsed, parent_bytes));
-            parent_hash = parent_parsed.header.prev_block_hash;
+            let parent = load_verified_branch_ancestor(block_store, parent_hash)?;
+            let VerifiedStoredBlock {
+                lookup_hash,
+                block_bytes,
+                parsed,
+            } = parent;
+            parent_hash = parsed.header.prev_block_hash;
+            branch.push(branch_row(lookup_hash, &parsed, block_bytes));
         }
     }
 
@@ -812,19 +925,6 @@ impl SyncEngine {
 // ---------------------------------------------------------------------------
 // Mempool helpers
 // ---------------------------------------------------------------------------
-
-/// Track disconnected blocks by hash and re-load them from blockstore when
-/// applying mempool cleanup, instead of copying every tx into the cleanup plan.
-fn collect_disconnected_block_hashes(disconnected_blocks: &[Vec<u8>]) -> Vec<[u8; 32]> {
-    disconnected_blocks
-        .iter()
-        .filter_map(|block_bytes| {
-            parse_block_bytes(block_bytes)
-                .ok()
-                .and_then(|parsed| block_hash(&parsed.header_bytes).ok())
-        })
-        .collect()
-}
 
 /// Remove transactions confirmed in the given block from the mempool.
 #[cfg(test)]
@@ -861,9 +961,18 @@ fn non_coinbase_inputs(block_bytes: &[u8]) -> Result<Vec<Outpoint>, String> {
     Ok(outpoints)
 }
 
-/// Extract raw bytes for each non-coinbase transaction in a block.
-/// This avoids needing a marshal_tx function — we slice directly from
-/// the block bytes using parse_tx consumed lengths.
+/// Serialize each non-coinbase transaction from a retained parsed block.
+fn non_coinbase_tx_bytes_from_parsed(parsed: &ParsedBlock) -> Result<Vec<Vec<u8>>, String> {
+    parsed
+        .txs
+        .iter()
+        .skip(1)
+        .map(|tx| marshal_tx(tx).map_err(|err| err.to_string()))
+        .collect()
+}
+
+/// Extract non-coinbase transaction bytes from a raw block for test fixtures.
+#[cfg(test)]
 fn non_coinbase_tx_bytes(block_bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     if block_bytes.len() < BLOCK_HEADER_BYTES {
         return Err("block too short".into());
@@ -1643,16 +1752,38 @@ mod tests {
         let missing_parent = [0x5c_u8; 32];
         let second_hop = [0x5d_u8; 32];
         let honest_elsewhere = coinbase_only_block(1, [0x6a; 32], 10_000);
+        let mut bad_merkle = honest_elsewhere.clone();
+        bad_merkle[36] ^= 1;
+        let bad_merkle_hash = block_header_hash(&bad_merkle);
+        let mut parsed = parse_block_bytes(&honest_elsewhere).expect("parse stored block");
+        let mut coinbase = parsed.txs.remove(0);
+        coinbase
+            .outputs
+            .iter_mut()
+            .find(|out| out.covenant_type == rubin_consensus::constants::COV_TYPE_ANCHOR)
+            .expect("witness commitment")
+            .covenant_data[0] ^= 1;
+        let bad_witness_tx = marshal_tx(&coinbase).expect("marshal corrupt witness tx");
+        let (_, bad_witness_txid, _, _) = parse_tx(&bad_witness_tx).expect("parse corrupt tx");
+        let bad_witness = crate::test_helpers::build_block_bytes(
+            parsed.header.prev_block_hash,
+            rubin_consensus::merkle_root_txids(&[bad_witness_txid]).expect("merkle root"),
+            parsed.header.target,
+            parsed.header.timestamp,
+            &[bad_witness_tx],
+        );
+        let bad_witness_hash = block_header_hash(&bad_witness);
 
         // Each row plants files, then the walk is driven through the public
         // reorg entry with a candidate whose prev hash names the first file.
         type PlantedStoreFiles = Vec<([u8; 32], Vec<u8>)>;
-        let rows: Vec<(&str, PlantedStoreFiles)> = vec![
+        let rows: Vec<(&str, [u8; 32], PlantedStoreFiles)> = vec![
             (
                 // The former NON-TERMINATION reproduction: a stored file whose
                 // prev pointer names itself. Without verification the walk
                 // re-reads it forever.
                 "self-referencing stored ancestor",
+                missing_parent,
                 vec![(
                     missing_parent,
                     coinbase_only_block(1, missing_parent, 10_001),
@@ -1660,6 +1791,7 @@ mod tests {
             ),
             (
                 "two-file store cycle",
+                missing_parent,
                 vec![
                     (missing_parent, coinbase_only_block(1, second_hop, 10_002)),
                     (second_hop, coinbase_only_block(1, missing_parent, 10_003)),
@@ -1667,10 +1799,12 @@ mod tests {
             ),
             (
                 "stored ancestor present but unparseable",
+                missing_parent,
                 vec![(missing_parent, b"not a block at all".to_vec())],
             ),
             (
                 "real block truncated mid-encoding",
+                missing_parent,
                 vec![(
                     missing_parent,
                     honest_elsewhere[..honest_elsewhere.len() / 2].to_vec(),
@@ -1678,22 +1812,29 @@ mod tests {
             ),
             (
                 "well-formed block stored under another block's hash",
+                missing_parent,
                 vec![(missing_parent, honest_elsewhere.clone())],
+            ),
+            (
+                "stored ancestor with invalid merkle commitment",
+                bad_merkle_hash,
+                vec![(bad_merkle_hash, bad_merkle)],
+            ),
+            (
+                "stored ancestor with invalid witness commitment",
+                bad_witness_hash,
+                vec![(bad_witness_hash, bad_witness)],
             ),
         ];
 
-        for (index, (name, planted)) in rows.into_iter().enumerate() {
+        for (index, (name, parent_hash, planted)) in rows.into_iter().enumerate() {
             let (mut engine, dir, subsidy1, gen_ts) =
                 engine_with_canonical_tip(&format!("rubin-reorg-corrupt-{index}"));
             for (hash, bytes) in &planted {
                 plant_raw_store_block(&dir, *hash, bytes);
             }
-            let candidate = coinbase_only_block_with_gen(
-                2,
-                subsidy1,
-                missing_parent,
-                gen_ts + 20 + index as u64,
-            );
+            let candidate =
+                coinbase_only_block_with_gen(2, subsidy1, parent_hash, gen_ts + 20 + index as u64);
             let err = engine
                 .apply_block_with_reorg(&candidate, None)
                 .expect_err(name);
@@ -2588,6 +2729,7 @@ mod tests {
         let outcome = engine
             .apply_block_with_reorg(&block2_alt, None)
             .expect("reorg to heavier branch");
+        plant_raw_store_block(&dir, block1_hash, b"replaced after reorg preview");
         let report = outcome.tx_pool_cleanup.apply_with_report(
             &mut pool,
             &engine.chain_state,

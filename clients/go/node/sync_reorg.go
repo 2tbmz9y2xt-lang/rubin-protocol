@@ -17,9 +17,7 @@ type reorgBranchBlock struct {
 	header     consensus.BlockHeader
 }
 
-// verifiedStoredBlock owns one bounded block-store read and the one parse of
-// those exact bytes. Callers retain this value through their state transition
-// instead of reading or parsing the same logical block again.
+// verifiedStoredBlock retains one verified block-store read and parse.
 type verifiedStoredBlock struct {
 	lookupHash [32]byte
 	blockBytes []byte
@@ -357,9 +355,7 @@ func advancePrevTimestamps(prev []uint64, newTs uint64) []uint64 {
 	return out
 }
 
-// errBranchStoreCorrupt marks a local block-store defect: a stored block whose
-// bytes do not hash to the lookup key or whose block-level commitments do not
-// close. It is also used for the side-branch walk's defense-in-depth cycle.
+// errBranchStoreCorrupt marks failed stored identity/commitments or a branch cycle.
 //
 // It is deliberately a plain error and NOT a *consensus.TxError, and it is
 // deliberately distinct from ErrParentNotFound. node/p2p classifies an apply
@@ -444,10 +440,7 @@ func (s *SyncEngine) collectBranchToCanonical(
 	}
 }
 
-// loadVerifiedStoredBlock reads exactly one bounded block blob and proves that
-// its header key and all block-level commitments match the parsed contents.
-// Underlying consensus errors are rendered, never wrapped, so local corruption
-// cannot satisfy node/p2p's errors.As(*consensus.TxError) peer-penalty check.
+// loadVerifiedStoredBlock verifies identity and commitments as local corruption.
 func (s *SyncEngine) loadVerifiedStoredBlock(lookupHash [32]byte) (verifiedStoredBlock, error) {
 	blockBytes, err := s.blockStore.GetBlockByHash(lookupHash)
 	if err != nil {
@@ -481,8 +474,7 @@ func storedBlockReadCorruption(lookupHash [32]byte, err error) error {
 	return fmt.Errorf("%w: cannot read stored block for %x: %w", errBranchStoreCorrupt, lookupHash, err)
 }
 
-// loadVerifiedBranchAncestor preserves the pre-existing orphan disposition for
-// an absent side ancestor while sharing the exact verified-store ownership path.
+// loadVerifiedBranchAncestor preserves missing-side-ancestor orphan handling.
 func (s *SyncEngine) loadVerifiedBranchAncestor(parentHash [32]byte) (*consensus.ParsedBlock, []byte, error) {
 	stored, err := s.loadVerifiedStoredBlock(parentHash)
 	if err != nil {
@@ -519,9 +511,7 @@ func (s *SyncEngine) requeueVerifiedDisconnectedTransactions(disconnectedBlocks 
 	s.requeueParsedDisconnectedTransactions(parsedBlocks)
 }
 
-// requeueDisconnectedTransactions remains for direct raw-byte callers. The
-// committed reorg path uses requeueVerifiedDisconnectedTransactions so it
-// retains the already-verified parse rather than parsing again.
+// requeueDisconnectedTransactions is for raw-byte callers; reorgs retain parses.
 func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte) {
 	parsedBlocks := make([]*consensus.ParsedBlock, 0, len(disconnectedBlocks))
 	for _, blockBytes := range disconnectedBlocks {

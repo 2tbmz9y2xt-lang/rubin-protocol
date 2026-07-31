@@ -145,7 +145,38 @@ func (s *ChainState) DisconnectBlock(blockBytes []byte, undo *BlockUndo) (*Chain
 	if err != nil {
 		return nil, err
 	}
+	return s.disconnectParsedBlockLocked(pb, blockHash, undo)
+}
 
+// disconnectVerifiedStoredBlock mirrors DisconnectBlock after the caller has
+// retained the one parsed, hash-verified stored block. It deliberately keeps
+// the public method's lock and validation order while sharing the mutation
+// path below, so a prepared disconnect does not parse the block a second time.
+func (s *ChainState) disconnectVerifiedStoredBlock(storedBlock verifiedStoredBlock, undo *BlockUndo) (*ChainStateDisconnectSummary, error) {
+	if s == nil {
+		return nil, errors.New("nil chainstate")
+	}
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.HasTip {
+		return nil, errors.New("chainstate has no tip")
+	}
+	if undo == nil {
+		return nil, errors.New("nil block undo")
+	}
+	pb, err := validateVerifiedDisconnectStoredBlock(storedBlock, undo, s.TipHash, s.Height)
+	if err != nil {
+		return nil, err
+	}
+	return s.disconnectParsedBlockLocked(pb, storedBlock.lookupHash, undo)
+}
+
+// disconnectParsedBlockLocked performs the common post-parse disconnect
+// transition. Callers hold admissionMu and mu and have checked their distinct
+// raw or retained-block preconditions before entering this method.
+func (s *ChainState) disconnectParsedBlockLocked(pb *consensus.ParsedBlock, blockHash [32]byte, undo *BlockUndo) (*ChainStateDisconnectSummary, error) {
 	work := copyUtxoSet(s.Utxos)
 	if err := applyDisconnectUndo(work, pb, undo); err != nil {
 		return nil, err
@@ -172,6 +203,26 @@ func (s *ChainState) DisconnectBlock(blockBytes []byte, undo *BlockUndo) (*Chain
 		AlreadyGenerated:   s.AlreadyGenerated,
 		UtxoCount:          uint64(len(s.Utxos)),
 	}, nil
+}
+
+func validateVerifiedDisconnectStoredBlock(storedBlock verifiedStoredBlock, undo *BlockUndo, tipHash [32]byte, height uint64) (*consensus.ParsedBlock, error) {
+	if storedBlock.parsed == nil {
+		return nil, errors.New("nil verified stored block")
+	}
+	pb := storedBlock.parsed
+	if len(pb.Txs) != len(pb.Txids) {
+		return nil, errors.New("parsed block txid length mismatch")
+	}
+	if len(undo.Txs) != len(pb.Txs) {
+		return nil, errors.New("undo tx count mismatch")
+	}
+	if tipHash != storedBlock.lookupHash {
+		return nil, errors.New("disconnect block is not current tip")
+	}
+	if height != undo.BlockHeight {
+		return nil, fmt.Errorf("disconnect height mismatch: chainstate=%d undo=%d", height, undo.BlockHeight)
+	}
+	return pb, nil
 }
 
 // parseAndValidateDisconnectBlock parses block bytes and validates undo against chain state.

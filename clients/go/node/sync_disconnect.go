@@ -2,9 +2,6 @@ package node
 
 import (
 	"errors"
-	"fmt"
-
-	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 type disconnectTipContext struct {
@@ -192,107 +189,34 @@ func (s *SyncEngine) previewDisconnectCanonicalToAncestor(previewState *ChainSta
 	currentTipHeight := previewState.Height
 	reorgDepth := currentTipHeight - commonAncestorHeight
 	disconnectedBlocks := make([]verifiedStoredBlock, 0, reorgDepth)
-	for currentTipHeight > commonAncestorHeight {
-		tipHash := previewState.TipHash
+	tipHash := previewState.TipHash
+	for height := currentTipHeight; height > commonAncestorHeight; height-- {
 		storedBlock, err := s.loadVerifiedStoredBlock(tipHash)
 		if err != nil {
 			return nil, 0, err
 		}
-		undo, err := s.blockStore.GetUndo(tipHash)
+		disconnectedBlocks = append(disconnectedBlocks, storedBlock)
+		tipHash = storedBlock.parsed.Header.PrevBlockHash
+	}
+	for _, storedBlock := range disconnectedBlocks {
+		undo, err := s.blockStore.GetUndo(storedBlock.lookupHash)
 		if err != nil {
 			return nil, 0, err
 		}
 		if _, err := previewState.disconnectVerifiedStoredBlock(storedBlock, undo); err != nil {
 			return nil, 0, err
 		}
-		disconnectedBlocks = append(disconnectedBlocks, storedBlock)
-		currentTipHeight--
 	}
 	return disconnectedBlocks, reorgDepth, nil
 }
 
-// fetchDisconnectBlockAndUndo returns one verified stored block and its undo.
 func (s *SyncEngine) fetchDisconnectBlockAndUndo(tipHash [32]byte) (verifiedStoredBlock, *BlockUndo, error) {
 	storedBlock, err := s.loadVerifiedStoredBlock(tipHash)
 	if err != nil {
 		return verifiedStoredBlock{}, nil, err
 	}
 	undo, err := s.blockStore.GetUndo(tipHash)
-	if err != nil {
-		return verifiedStoredBlock{}, nil, err
-	}
-	return storedBlock, undo, nil
-}
-
-// disconnectVerifiedStoredBlock mirrors ChainState.DisconnectBlock after the
-// shared loader has already parsed and verified the exact stored bytes. It
-// preserves its lock, validation, copy-before-mutation, and summary ordering
-// without a second ParseBlockBytes call.
-func (s *ChainState) disconnectVerifiedStoredBlock(storedBlock verifiedStoredBlock, undo *BlockUndo) (*ChainStateDisconnectSummary, error) {
-	if s == nil {
-		return nil, errors.New("nil chainstate")
-	}
-	s.admissionMu.Lock()
-	defer s.admissionMu.Unlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.HasTip {
-		return nil, errors.New("chainstate has no tip")
-	}
-	if undo == nil {
-		return nil, errors.New("nil block undo")
-	}
-	pb, err := validateVerifiedDisconnectStoredBlock(storedBlock, undo, s.TipHash, s.Height)
-	if err != nil {
-		return nil, err
-	}
-
-	work := copyUtxoSet(s.Utxos)
-	if err := applyDisconnectUndo(work, pb, undo); err != nil {
-		return nil, err
-	}
-
-	s.Utxos = work
-	s.AlreadyGenerated = undo.PreviousAlreadyGenerated
-	if s.Height == 0 {
-		s.HasTip = false
-		s.Height = 0
-		s.TipHash = [32]byte{}
-	} else {
-		s.Height--
-		s.TipHash = pb.Header.PrevBlockHash
-		s.HasTip = true
-	}
-
-	return &ChainStateDisconnectSummary{
-		DisconnectedHeight: undo.BlockHeight,
-		BlockHash:          storedBlock.lookupHash,
-		NewHeight:          s.Height,
-		NewTipHash:         s.TipHash,
-		HasTip:             s.HasTip,
-		AlreadyGenerated:   s.AlreadyGenerated,
-		UtxoCount:          uint64(len(s.Utxos)),
-	}, nil
-}
-
-func validateVerifiedDisconnectStoredBlock(storedBlock verifiedStoredBlock, undo *BlockUndo, tipHash [32]byte, height uint64) (*consensus.ParsedBlock, error) {
-	if storedBlock.parsed == nil {
-		return nil, errors.New("nil verified stored block")
-	}
-	pb := storedBlock.parsed
-	if len(pb.Txs) != len(pb.Txids) {
-		return nil, errors.New("parsed block txid length mismatch")
-	}
-	if len(undo.Txs) != len(pb.Txs) {
-		return nil, errors.New("undo tx count mismatch")
-	}
-	if tipHash != storedBlock.lookupHash {
-		return nil, errors.New("disconnect block is not current tip")
-	}
-	if height != undo.BlockHeight {
-		return nil, fmt.Errorf("disconnect height mismatch: chainstate=%d undo=%d", height, undo.BlockHeight)
-	}
-	return pb, nil
+	return storedBlock, undo, err
 }
 
 // getParentTimestamp returns the timestamp of the parent block, or 0 at height 0.
@@ -300,15 +224,8 @@ func (s *SyncEngine) getParentTimestamp(tipHeight uint64, prevBlockHash [32]byte
 	if tipHeight == 0 {
 		return 0, nil
 	}
-	parentHeaderBytes, err := s.blockStore.GetHeaderByHash(prevBlockHash)
-	if err != nil {
-		return 0, err
-	}
-	parentHeader, err := consensus.ParseBlockHeaderBytes(parentHeaderBytes)
-	if err != nil {
-		return 0, err
-	}
-	return parentHeader.Timestamp, nil
+	parentHeader, err := s.blockStore.chainWorkHeader(prevBlockHash)
+	return parentHeader.Timestamp, err
 }
 
 // finalizeDisconnectState updates chain state after disconnect.

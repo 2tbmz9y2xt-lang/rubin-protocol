@@ -1319,9 +1319,7 @@ func TestFaultAttributionSplitConsensusVsIO(t *testing.T) {
 }
 
 func TestRelayedCandidateWithCorruptStoredAncestorIsPeerNeutral(t *testing.T) {
-	// The relayed height-2 block is honest. Only the sink's local file for its
-	// unknown height-1 parent is corrupt, so blockstore verification must return
-	// a local error rather than letting p2p attribute a consensus error to peer.
+	// An honest relay with a corrupt local parent must stay peer-neutral.
 	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	b1Hash, _ := testHarnessBlockAtHeight(t, source, 1)

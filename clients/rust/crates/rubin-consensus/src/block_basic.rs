@@ -1,6 +1,7 @@
 use crate::block::{BlockHeader, BLOCK_HEADER_BYTES};
 use crate::constants::{MAX_ANCHOR_BYTES_PER_BLOCK, MAX_BLOCK_WEIGHT, MAX_DA_BYTES_PER_BLOCK};
 use crate::error::{ErrorCode, TxError};
+use crate::merkle::merkle_root_txids;
 use crate::suite_registry::RotationProvider;
 use crate::tx::Tx;
 
@@ -55,6 +56,40 @@ pub fn parse_block_bytes(block_bytes: &[u8]) -> Result<ParsedBlock, TxError> {
     #[cfg(test)]
     PARSE_BLOCK_BYTES_CALL_COUNT.with(|c| c.set(c.get() + 1));
     parse_block_bytes_impl(block_bytes)
+}
+
+/// Validate the self-contained commitments required before a block read from
+/// local storage can be used for a disconnect or branch walk. This deliberately
+/// excludes network-context checks (linkage, target, time, fees, and state) so
+/// callers can validate retained historical bytes without changing admission
+/// order. The order closes the coinbase/witness self-reference first, then the
+/// header transaction commitment, then the witness commitment itself.
+pub fn validate_stored_block_commitments(pb: &ParsedBlock) -> Result<(), TxError> {
+    let coinbase = pb
+        .txs
+        .first()
+        .ok_or_else(|| TxError::new(ErrorCode::BlockErrCoinbaseInvalid, "missing coinbase"))?;
+    if !coinbase::is_coinbase_tx(coinbase) {
+        return Err(TxError::new(
+            ErrorCode::BlockErrCoinbaseInvalid,
+            "first tx is not canonical coinbase",
+        ));
+    }
+
+    let merkle_root = merkle_root_txids(&pb.txids).map_err(|_| {
+        TxError::new(
+            ErrorCode::BlockErrMerkleInvalid,
+            "failed to compute merkle root",
+        )
+    })?;
+    if merkle_root != pb.header.merkle_root {
+        return Err(TxError::new(
+            ErrorCode::BlockErrMerkleInvalid,
+            "merkle_root mismatch",
+        ));
+    }
+
+    coinbase::validate_coinbase_witness_commitment(pb)
 }
 
 pub fn validate_block_basic(

@@ -1000,9 +1000,7 @@ func TestRequeueDisconnectedTransactionsUsesTipDownOrderAndContinuesAfterReject(
 	if err != nil {
 		t.Fatalf("ParseBlockBytes(low): %v", err)
 	}
-	// The production reorg path retains these parsed blocks. Deliberately bad
-	// byte fields prove requeue reads the retained parses instead of parsing raw
-	// bytes a second time.
+	// Bad byte fields prove production requeue uses the retained parses.
 	engine.requeueVerifiedDisconnectedTransactions([]verifiedStoredBlock{
 		{blockBytes: []byte("not parsed again"), parsed: highParsed},
 		{blockBytes: []byte("not parsed again"), parsed: lowParsed},
@@ -2534,9 +2532,7 @@ func corruptStoredMerkleBody(t *testing.T, blockBytes []byte) []byte {
 	if len(corrupt) < 3 {
 		t.Fatal("test block too short to change coinbase locktime")
 	}
-	// A coinbase wire block ends in locktime(4), witness_count(0), da_len(0).
-	// Changing a locktime byte keeps parsing and the header hash intact while
-	// changing the first txid, so the stored-body Merkle commitment alone fails.
+	// Mutating coinbase locktime keeps parsing/header identity but breaks Merkle.
 	corrupt[len(corrupt)-3] ^= 0x01
 	pb, err := consensus.ParseBlockBytes(corrupt)
 	if err != nil {
