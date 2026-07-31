@@ -18,8 +18,13 @@ type reorgBranchBlock struct {
 }
 
 func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
-	if s == nil || s.chainState == nil {
+	if s == nil {
 		return nil, errors.New("sync engine is not initialized")
+	}
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	if err := s.mutationAllowed(); err != nil {
+		return nil, err
 	}
 	pb, blockHash, err := parseReorgBlock(blockBytes)
 	if err != nil {
@@ -71,6 +76,9 @@ func (s *SyncEngine) evaluateSideBranch(
 }
 
 func (s *SyncEngine) storeSideBlockAndSummary(branch []reorgBranchBlock, commonAncestorHeight uint64, candidateHeight uint64) (*ChainStateConnectSummary, error) {
+	if err := s.mutationAllowed(); err != nil {
+		return nil, err
+	}
 	if len(branch) == 0 {
 		return nil, errors.New("empty side branch")
 	}
@@ -93,6 +101,9 @@ func (s *SyncEngine) storeSideBlockAndSummary(branch []reorgBranchBlock, commonA
 		return nil, err
 	}
 	if err := s.blockStore.StoreBlock(candidate.hash, candidate.parsed.HeaderBytes, candidate.blockBytes); err != nil {
+		if isAtomicWritePostCommit(err) {
+			return nil, s.handlePersistenceError(err, false, false)
+		}
 		return nil, err
 	}
 	return s.syntheticSideChainSummary(candidateHeight, candidate.hash), nil

@@ -8,6 +8,7 @@ use std::ops::Deref;
 
 use crate::blockstore::BlockStore;
 use crate::chainstate::{CanonicalAppliedBlock, ChainStateConnectSummary};
+use crate::io_utils::is_atomic_write_post_commit;
 use crate::sync::SyncEngine;
 use crate::txpool::{TxPool, TxPoolAdmitError, TxPoolAdmitErrorKind, TxSource};
 
@@ -394,6 +395,7 @@ impl SyncEngine {
         block_bytes: &[u8],
         prev_timestamps: Option<&[u64]>,
     ) -> Result<ApplyBlockWithReorgOutcome, String> {
+        self.mutation_allowed()?;
         let parsed = parse_block_bytes(block_bytes).map_err(|e| e.to_string())?;
         let bh = block_hash(&parsed.header_bytes).map_err(|e| e.to_string())?;
 
@@ -452,11 +454,16 @@ impl SyncEngine {
 
             // Validation passed — now persist the side-chain block.
             if !block_store.has_block(candidate.hash) {
-                block_store.store_block(
+                if let Err(error) = block_store.store_block_typed(
                     candidate.hash,
                     &candidate.header_bytes,
                     &candidate.block_bytes,
-                )?;
+                ) {
+                    if is_atomic_write_post_commit(&error) {
+                        return Err(self.handle_persistence_error(error, false, false));
+                    }
+                    return Err(error.to_string());
+                }
             }
 
             return Ok(ApplyBlockWithReorgOutcome {

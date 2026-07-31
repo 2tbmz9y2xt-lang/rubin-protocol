@@ -109,6 +109,23 @@ func OpenBlockStore(rootPath string) (*BlockStore, error) {
 	return newBlockStore(paths, index)
 }
 
+// reloadFromDisk read-only replaces this store's visible index/cache in place.
+func (bs *BlockStore) reloadFromDisk() error {
+	if bs == nil {
+		return errors.New("nil blockstore")
+	}
+	refreshed, err := OpenBlockStore(bs.rootPath)
+	if err != nil {
+		return err
+	}
+	bs.stateMu.Lock()
+	defer bs.stateMu.Unlock()
+	bs.index = refreshed.index
+	bs.canonicalHeightByHash = refreshed.canonicalHeightByHash
+	bs.chainWorkByHash = refreshed.chainWorkByHash
+	return nil
+}
+
 // requireInitialized checks the resolved filesystem kind of every path the store
 // needs. Stat, not Lstat: symlinks resolve normally on open.
 func (p blockStorePaths) requireInitialized() error {

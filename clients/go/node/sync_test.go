@@ -504,7 +504,7 @@ func TestSyncEngineBlockApplyCountsCanonicalAcceptedRejected(t *testing.T) {
 // TestSyncEngineApplyBlockPutUndoFailureRollsBackCanonicalTip lives in
 // sync_unix_test.go behind a `//go:build unix` tag: after the E.3
 // TOCTOU hardening the undo write no longer routes through
-// writeFileAtomicFn (it uses writeAndSyncTemp + os.Link), so the only
+// writeFileAtomicFn (it uses the fixed-scratch hard-link lane), so the only
 // portable way to provoke an undo-write failure is a chmod-based
 // permission error on the undo directory, which needs os.Geteuid() to
 // skip under root. See that file for the actual test body.

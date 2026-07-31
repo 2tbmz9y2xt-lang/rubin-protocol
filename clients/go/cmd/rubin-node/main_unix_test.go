@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -90,6 +91,39 @@ func TestRunChainstateSaveFailsWhenDatadirNotWritable(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "chainstate save failed") {
 		t.Fatalf("must reach and fail at the save, got stderr=%q", errOut.String())
+	}
+}
+
+func TestRunReclaimSyncFailureStopsBeforeChainStateLoad(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod-based permission check does not apply")
+	}
+	dir := preparedDatadir(t)
+	scratch := filepath.Join(dir, ".rubin-atomic-write.tmp")
+	if err := os.WriteFile(scratch, []byte("crash residue"), 0o600); err != nil {
+		t.Fatalf("seed scratch: %v", err)
+	}
+	if err := os.WriteFile(node.ChainStatePath(dir), []byte("{"), 0o600); err != nil {
+		t.Fatalf("seed malformed chainstate: %v", err)
+	}
+	if err := os.Chmod(dir, 0o300); err != nil {
+		t.Fatalf("chmod execute-only datadir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	if code := run([]string{"--datadir", dir}, &out, &errOut); code != 2 {
+		t.Fatalf("run code=%d, want 2 (stderr=%q)", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "atomic scratch reclaim failed: "+dir+":") || strings.Contains(errOut.String(), "chainstate load failed") {
+		t.Fatalf("reclaim sync failure did not stop before chainstate load: %q", errOut.String())
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("restore datadir mode: %v", err)
+	}
+	if _, err := os.Lstat(scratch); !os.IsNotExist(err) {
+		t.Fatalf("reclaim did not unlink scratch before strict sync failure: %v", err)
 	}
 }
 

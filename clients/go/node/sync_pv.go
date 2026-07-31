@@ -1,6 +1,7 @@
 package node
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -103,6 +104,19 @@ func (s *SyncEngine) runPVShadowIfActive(blockBytes []byte, prevTimestamps []uin
 func (s *SyncEngine) finalizeAppliedBlock(summary *ChainStateConnectSummary, blockHash [32]byte, pb *consensus.ParsedBlock, blockBytes []byte, prevState *ChainState, rollbackState syncRollbackState) error {
 	commitStart := time.Now()
 	if err := s.persistAppliedBlock(summary, blockHash, pb, blockBytes, prevState); err != nil {
+		if isAtomicWritePostCommit(err) {
+			var atomicErr *atomicWriteError
+			errors.As(err, &atomicErr)
+			if s.blockStore != nil && atomicErr.destination == s.blockStore.indexPath {
+				return s.handlePersistenceError(err, true, false)
+			}
+			if atomicErr.destination == s.cfg.ChainStatePath {
+				return s.handlePersistenceError(err, false, true)
+			}
+			fault := s.handlePersistenceError(err, false, false)
+			s.chainState.replaceFrom(rollbackState.chainState)
+			return fault
+		}
 		return s.rollbackApplyBlock(err, rollbackState)
 	}
 	s.pvTelemetry.RecordCommitLatency(time.Since(commitStart))

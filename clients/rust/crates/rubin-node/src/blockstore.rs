@@ -8,9 +8,11 @@ use rubin_consensus::{
 use serde::{Deserialize, Serialize};
 
 use crate::io_utils::{
-    parse_hex32, read_file_by_path, read_file_from_dir, read_file_from_dir_unbounded,
-    write_file_atomic, write_file_exclusive, AtomicWriteError, BLOCK_FILE_MAX_BYTES,
-    HEADER_FILE_MAX_BYTES, UNDO_FILE_MAX_BYTES,
+    atomic_write_error_after, atomic_write_error_before, parse_hex32, read_file_by_path,
+    read_file_from_dir, read_file_from_dir_unbounded, sync_atomic_parent,
+    validate_atomic_write_destination, write_file_atomic_typed, write_file_create_if_absent,
+    AtomicWriteError, AtomicWriteOperation, BLOCK_FILE_MAX_BYTES, HEADER_FILE_MAX_BYTES,
+    UNDO_FILE_MAX_BYTES,
 };
 use crate::undo::{marshal_block_undo, unmarshal_block_undo, BlockUndo};
 use std::ffi::OsStr;
@@ -188,11 +190,7 @@ impl BlockStore {
     /// sequence in `sync.rs`, this API shrinks the failure surface: the
     /// tip never advances before undo durability, so no post-hoc
     /// `truncate_canonical` rewind is needed on undo-write failure.
-    /// Note: a subsequent `chain_state.save` failure AFTER a successful
-    /// `commit_canonical_block` still requires the caller to call
-    /// `truncate_canonical(canonical_len_before)` because the tip has
-    /// already advanced; that rewind is outside the atomic boundary of
-    /// this API (see `sync.rs` main commit callsite).
+    /// Precommit preserves tip; postcommit may advance disk. Standalone returns the error; typed SyncEngine reloads index/cache and latches.
     ///
     /// **Orphan semantics on retry.** A failure at any step before the
     /// tip advance may leave block/header/undo files on disk without a
@@ -212,6 +210,17 @@ impl BlockStore {
         block_bytes: &[u8],
         undo: &BlockUndo,
     ) -> Result<(), String> {
+        self.commit_canonical_block_typed(height, block_hash_bytes, header_bytes, block_bytes, undo)
+            .map_err(|error| error.to_string())
+    }
+    pub(crate) fn commit_canonical_block_typed(
+        &mut self,
+        height: u64,
+        block_hash_bytes: [u8; 32],
+        header_bytes: &[u8],
+        block_bytes: &[u8],
+        undo: &BlockUndo,
+    ) -> Result<(), AtomicWriteError> {
         // 0. Reject mismatched undo up front. If `undo.block_height` does
         //    not match the canonical height being committed, a later
         //    `ChainState::disconnect_block` would trip its height invariant
@@ -219,9 +228,13 @@ impl BlockStore {
         //    non-atomic failure mode this API is closing. Rejecting before
         //    any disk write keeps the canonical state untouched.
         if undo.block_height != height {
-            return Err(format!(
-                "undo block_height mismatch: commit height={height}, undo.block_height={}",
-                undo.block_height
+            return Err(atomic_write_error_before(
+                &self.index_path,
+                AtomicWriteOperation::Overwrite,
+                format!(
+                    "undo block_height mismatch: commit height={height}, undo.block_height={}",
+                    undo.block_height
+                ),
             ));
         }
         // 0a. Height-range + idempotent same-hash no-op guards. Semantics
@@ -260,12 +273,18 @@ impl BlockStore {
         //     - `height == canonical_len` is the normal append.
         let current_len = self.canonical_len() as u64;
         if height > current_len {
-            return Err(format!(
-                "commit_canonical_block height gap: height={height} > canonical_len={current_len}"
+            return Err(atomic_write_error_before(
+                &self.index_path,
+                AtomicWriteOperation::Overwrite,
+                format!(
+                    "commit_canonical_block height gap: height={height} > canonical_len={current_len}"
+                ),
             ));
         }
         if height < current_len {
-            let existing = self.canonical_hash(height)?;
+            let existing = self.canonical_hash(height).map_err(|error| {
+                atomic_write_error_before(&self.index_path, AtomicWriteOperation::Overwrite, error)
+            })?;
             if existing == Some(block_hash_bytes) {
                 // Idempotent same-hash replay with symmetric healing.
                 //
@@ -288,9 +307,9 @@ impl BlockStore {
                 //    write), `put_undo` back-fills it.
                 //
                 //  Canonical index / tip remain unchanged regardless.
-                self.persist_block_bytes(block_hash_bytes, header_bytes, block_bytes)?;
+                self.persist_block_bytes_typed(block_hash_bytes, header_bytes, block_bytes)?;
                 if !self.has_undo(block_hash_bytes) {
-                    self.put_undo(block_hash_bytes, undo)?;
+                    self.put_undo_typed(block_hash_bytes, undo)?;
                 }
                 return Ok(());
             }
@@ -298,12 +317,12 @@ impl BlockStore {
             // through to persist + tip replace.
         }
         // 1. Persist block + header bytes (idempotent `write_file_if_absent`).
-        self.persist_block_bytes(block_hash_bytes, header_bytes, block_bytes)?;
+        self.persist_block_bytes_typed(block_hash_bytes, header_bytes, block_bytes)?;
         // 2. Persist undo BEFORE any tip advance. Matches Go ordering in
         //    `CommitCanonicalBlock` (StoreBlock → PutUndo → SetCanonicalTip).
-        self.put_undo(block_hash_bytes, undo)?;
+        self.put_undo_typed(block_hash_bytes, undo)?;
         // 3. Advance canonical tip LAST — this is the atomic commit point.
-        self.set_canonical_tip(height, block_hash_bytes)
+        self.set_canonical_tip_typed(height, block_hash_bytes)
     }
 
     /// Cheap header consistency check — length + computed hash equals
@@ -338,13 +357,23 @@ impl BlockStore {
         header_bytes: &[u8],
         block_bytes: &[u8],
     ) -> Result<(), String> {
-        self.validate_header_matches_hash(header_bytes, block_hash_bytes)?;
+        self.persist_block_bytes_typed(block_hash_bytes, header_bytes, block_bytes)
+            .map_err(|error| error.to_string())
+    }
+    fn persist_block_bytes_typed(
+        &self,
+        block_hash_bytes: [u8; 32],
+        header_bytes: &[u8],
+        block_bytes: &[u8],
+    ) -> Result<(), AtomicWriteError> {
         let hash_hex = hex::encode(block_hash_bytes);
-        write_file_if_absent(
-            &self.blocks_dir.join(format!("{hash_hex}.bin")),
-            block_bytes,
-        )?;
-        write_file_if_absent(
+        let block_path = self.blocks_dir.join(format!("{hash_hex}.bin"));
+        self.validate_header_matches_hash(header_bytes, block_hash_bytes)
+            .map_err(|error| {
+                atomic_write_error_before(&block_path, AtomicWriteOperation::CreateIfAbsent, error)
+            })?;
+        write_file_if_absent_typed(&block_path, block_bytes)?;
+        write_file_if_absent_typed(
             &self.headers_dir.join(format!("{hash_hex}.bin")),
             header_bytes,
         )
@@ -352,38 +381,44 @@ impl BlockStore {
 
     /// Set or replace the canonical tip at `height`.
     ///
-    /// Hot path (called per connected block via `put_block`): mutate
-    /// in-memory then save; on save failure best-effort
-    /// `reload_index_from_disk` to restore in-memory consistency.
-    /// Avoids the O(chain_height) clone that out-of-place transactions
-    /// would cost on every block.
+    /// Precommit restores suffix; postcommit standalone retains local state, while typed SyncEngine reloads index/cache and latches.
     pub fn set_canonical_tip(
         &mut self,
         height: u64,
         block_hash_bytes: [u8; 32],
     ) -> Result<(), String> {
+        self.set_canonical_tip_typed(height, block_hash_bytes)
+            .map_err(|error| error.to_string())
+    }
+    fn set_canonical_tip_typed(
+        &mut self,
+        height: u64,
+        block_hash_bytes: [u8; 32],
+    ) -> Result<(), AtomicWriteError> {
         let hash_hex = hex::encode(block_hash_bytes);
         let current_len = self.index.canonical.len() as u64;
         if height > current_len {
-            return Err(format!(
-                "height gap: got {height}, expected <= {current_len}"
+            return Err(atomic_write_error_before(
+                &self.index_path,
+                AtomicWriteOperation::Overwrite,
+                format!("height gap: got {height}, expected <= {current_len}"),
             ));
         }
         // No-op if in-memory already holds this exact hash at this height.
         if height < current_len && self.index.canonical[height as usize] == hash_hex {
             return Ok(());
         }
-        if height == current_len {
-            self.index.canonical.push(hash_hex);
-            self.canonical_hash_by_height.push(block_hash_bytes);
-        } else {
-            self.index.canonical.truncate(height as usize);
-            self.canonical_hash_by_height.truncate(height as usize);
-            self.index.canonical.push(hash_hex);
-            self.canonical_hash_by_height.push(block_hash_bytes);
-        }
-        if let Err(e) = save_blockstore_index(&self.index_path, &self.index) {
-            self.reload_index_from_disk();
+        let displaced_canonical = self.index.canonical.split_off(height as usize);
+        let displaced_cache = self.canonical_hash_by_height.split_off(height as usize);
+        self.index.canonical.push(hash_hex);
+        self.canonical_hash_by_height.push(block_hash_bytes);
+        if let Err(e) = save_blockstore_index_typed(&self.index_path, &self.index) {
+            if e.stage == crate::io_utils::AtomicWriteStage::BeforeNamespaceCommit {
+                self.index.canonical.truncate(height as usize);
+                self.index.canonical.extend(displaced_canonical);
+                self.canonical_hash_by_height.truncate(height as usize);
+                self.canonical_hash_by_height.extend(displaced_cache);
+            }
             return Err(e);
         }
         Ok(())
@@ -391,9 +426,6 @@ impl BlockStore {
 
     /// Rewind canonical to (height + 1) entries.
     ///
-    /// Same hot-path strategy as `set_canonical_tip`: mutate-then-save
-    /// with reload on failure (avoids per-call clone of the canonical
-    /// vector).
     pub fn rewind_to_height(&mut self, height: u64) -> Result<(), String> {
         if self.index.canonical.is_empty() {
             return Ok(());
@@ -401,13 +433,17 @@ impl BlockStore {
         if height >= self.index.canonical.len() as u64 {
             return Err(format!("rewind height out of range: {height}"));
         }
-        self.index.canonical.truncate(height as usize + 1);
-        self.canonical_hash_by_height.truncate(height as usize + 1);
-        if let Err(e) = save_blockstore_index(&self.index_path, &self.index) {
-            self.reload_index_from_disk();
-            return Err(e);
+        let new_len = height as usize + 1;
+        match self.truncate_canonical_typed(new_len) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if error.stage == crate::io_utils::AtomicWriteStage::AfterNamespaceCommit {
+                    self.index.canonical.truncate(new_len);
+                    self.canonical_hash_by_height.truncate(new_len);
+                }
+                Err(error.to_string())
+            }
         }
-        Ok(())
     }
 
     /// E.7: O(1) hot lookup served from `canonical_hash_by_height`
@@ -607,11 +643,20 @@ impl BlockStore {
         header_bytes: &[u8],
         block_bytes: &[u8],
     ) -> Result<(), String> {
+        self.store_block_typed(block_hash_bytes, header_bytes, block_bytes)
+            .map_err(|error| error.to_string())
+    }
+    pub(crate) fn store_block_typed(
+        &self,
+        block_hash_bytes: [u8; 32],
+        header_bytes: &[u8],
+        block_bytes: &[u8],
+    ) -> Result<(), AtomicWriteError> {
         // Delegate to the shared helper so header validation and
         // block/header file writes stay in one place across all
         // entry points (`put_block`, `commit_canonical_block`,
         // `store_block`).
-        self.persist_block_bytes(block_hash_bytes, header_bytes, block_bytes)
+        self.persist_block_bytes_typed(block_hash_bytes, header_bytes, block_bytes)
     }
 
     // ----- Chain work -----
@@ -650,19 +695,34 @@ impl BlockStore {
     /// A standalone `put_undo` paired with `set_canonical_tip` in the
     /// opposite order would reintroduce the E.4 atomicity gap this task
     /// is closing.
+    #[cfg(test)]
     pub(crate) fn put_undo(
         &self,
         block_hash_bytes: [u8; 32],
         undo: &BlockUndo,
     ) -> Result<(), String> {
-        #[cfg(test)]
-        if self.force_undo_error {
-            return Err("forced undo error (test)".to_string());
-        }
-        let raw = marshal_block_undo(undo)?;
+        self.put_undo_typed(block_hash_bytes, undo)
+            .map_err(|error| error.to_string())
+    }
+    fn put_undo_typed(
+        &self,
+        block_hash_bytes: [u8; 32],
+        undo: &BlockUndo,
+    ) -> Result<(), AtomicWriteError> {
         let path = self
             .undo_dir
             .join(format!("{}.json", hex::encode(block_hash_bytes)));
+        #[cfg(test)]
+        if self.force_undo_error {
+            return Err(atomic_write_error_before(
+                &path,
+                AtomicWriteOperation::Overwrite,
+                "forced undo error (test)",
+            ));
+        }
+        let raw = marshal_block_undo(undo).map_err(|error| {
+            atomic_write_error_before(&path, AtomicWriteOperation::Overwrite, error)
+        })?;
         // Undo files intentionally stay on the raw `write_file_atomic`
         // path (no `lexical_clean`). Writer and readers share one
         // dir-resolution strategy:
@@ -691,8 +751,11 @@ impl BlockStore {
             &path.display().to_string(),
             raw.len(),
             UNDO_FILE_MAX_BYTES,
-        )?;
-        write_file_atomic(&path, &raw)
+        )
+        .map_err(|error| {
+            atomic_write_error_before(&path, AtomicWriteOperation::Overwrite, error)
+        })?;
+        write_file_atomic_typed(&path, &raw)
     }
 
     pub fn get_undo(&self, block_hash_bytes: [u8; 32]) -> Result<BlockUndo, String> {
@@ -738,16 +801,27 @@ impl BlockStore {
     ///
     /// Atomic via out-of-place transaction: build the next index as a
     /// clone, save to disk, then commit to in-memory only on success.
-    /// A failed call leaves the in-memory canonical exactly as it was
-    /// before, so callers can rely on `Err` meaning "no state change".
+    /// Precommit preserves disk and memory; postcommit may replace disk while standalone memory stays old; typed SyncEngine reloads index/cache and latches.
     pub fn rollback_canonical(
         &mut self,
         base_len: usize,
         suffix: Vec<String>,
     ) -> Result<(), String> {
+        self.rollback_canonical_typed(base_len, suffix)
+            .map_err(|error| error.to_string())
+    }
+    pub(crate) fn rollback_canonical_typed(
+        &mut self,
+        base_len: usize,
+        suffix: Vec<String>,
+    ) -> Result<(), AtomicWriteError> {
         #[cfg(test)]
         if self.force_rollback_error {
-            return Err("forced rollback error (test inject)".into());
+            return Err(atomic_write_error_before(
+                &self.index_path,
+                AtomicWriteOperation::Overwrite,
+                "forced rollback error (test inject)",
+            ));
         }
         // Build the target canonical once (owning only `suffix` + a
         // slice clone of `base_len` prefix entries).  No clone of the
@@ -758,15 +832,15 @@ impl BlockStore {
         next_canonical.extend(suffix);
         // Build the next height->hash cache BEFORE the disk write so a
         // malformed entry in `suffix` (e.g. non-hex hash string) fails
-        // closed without touching disk. Documented atomicity contract
-        // ("Err means no state change") requires every fallible step to
-        // run before `save_blockstore_index_serializable`.
-        let next_cache = build_canonical_hash_cache(&next_canonical)?;
+        // closed without touching disk. Precommit preserves disk/memory; postcommit may replace disk while memory stays old; typed SyncEngine reloads index/cache and latches.
+        let next_cache = build_canonical_hash_cache(&next_canonical).map_err(|error| {
+            atomic_write_error_before(&self.index_path, AtomicWriteOperation::Overwrite, error)
+        })?;
         let view = BlockStoreIndexView {
             version: self.index.version,
             canonical: &next_canonical,
         };
-        save_blockstore_index_serializable(&self.index_path, &view)?;
+        save_blockstore_index_serializable_typed(&self.index_path, &view)?;
         // Disk save succeeded — commit to in-memory (E.7 parity: mirror
         // Go's `replaceCanonicalState` rebuild after rollback).
         self.index.canonical = next_canonical;
@@ -776,20 +850,29 @@ impl BlockStore {
 
     /// Truncate canonical index to exactly `new_len` entries.
     ///
-    /// Atomic: in-memory state is updated ONLY after the disk write
-    /// succeeds.  A failed call leaves the in-memory canonical exactly
-    /// as it was before, so callers can rely on `Err` meaning "no
-    /// state change".  Writes a borrowed slice-backed view of the
-    /// target prefix instead of cloning all canonical strings.
+    /// Precommit preserves disk/memory; postcommit may advance disk while standalone memory stays old; typed SyncEngine reloads index/cache and latches. Uses a borrowed slice view.
     pub fn truncate_canonical(&mut self, new_len: usize) -> Result<(), String> {
+        self.truncate_canonical_typed(new_len)
+            .map_err(|error| error.to_string())
+    }
+    pub(crate) fn truncate_canonical_typed(
+        &mut self,
+        new_len: usize,
+    ) -> Result<(), AtomicWriteError> {
         #[cfg(test)]
         if self.force_truncate_error {
-            return Err("forced truncate error (test inject)".into());
+            return Err(atomic_write_error_before(
+                &self.index_path,
+                AtomicWriteOperation::Overwrite,
+                "forced truncate error (test inject)",
+            ));
         }
         let current_len = self.index.canonical.len();
         if new_len > current_len {
-            return Err(format!(
-                "truncate_canonical new_len {new_len} > current {current_len}"
+            return Err(atomic_write_error_before(
+                &self.index_path,
+                AtomicWriteOperation::Overwrite,
+                format!("truncate_canonical new_len {new_len} > current {current_len}"),
             ));
         }
         // Fast-path: already at target length, skip the disk write.
@@ -800,7 +883,7 @@ impl BlockStore {
             version: self.index.version,
             canonical: &self.index.canonical[..new_len],
         };
-        save_blockstore_index_serializable(&self.index_path, &view)?;
+        save_blockstore_index_serializable_typed(&self.index_path, &view)?;
         // Save succeeded — now apply O(1) in-memory truncate.
         self.index.canonical.truncate(new_len);
         // E.7: keep height->hash cache coherent with the canonical
@@ -811,26 +894,15 @@ impl BlockStore {
         Ok(())
     }
 
-    /// Reload the blockstore index from disk to restore in-memory
-    /// consistency after a failed save in a hot-path mutator
-    /// (`set_canonical_tip`, `rewind_to_height`).  Best-effort: if the
-    /// reload itself fails the in-memory state is stale, but we have
-    /// already returned the original error to the caller — the engine
-    /// is in an unrecoverable state and needs repair.  Not used by
-    /// `truncate_canonical` / `rollback_canonical`, which use the
-    /// out-of-place transaction pattern instead.
-    fn reload_index_from_disk(&mut self) {
-        if let Ok(disk) = load_blockstore_index(&self.index_path) {
-            // E.7: canonical hash decoding/validation happens in
-            // `build_canonical_hash_cache` (not in `load_blockstore_index`).
-            // If disk canonical entries are malformed, keep the prior
-            // in-memory state untouched to preserve the documented
-            // unrecoverable-state contract.
-            if let Ok(cache) = build_canonical_hash_cache(&disk.canonical) {
-                self.canonical_hash_by_height = cache;
-                self.index = disk;
-            }
-        }
+    pub(crate) fn reload_persistence_state(&mut self) -> Result<(), String> {
+        let disk = load_blockstore_index(&self.index_path)?;
+        let cache = build_canonical_hash_cache(&disk.canonical)?;
+        self.canonical_hash_by_height = cache;
+        self.index = disk;
+        Ok(())
+    }
+    pub(crate) fn is_index_destination(&self, path: &Path) -> bool {
+        self.index_path == path
     }
 }
 
@@ -946,8 +1018,25 @@ fn save_blockstore_index_serializable<S: serde::Serialize + ?Sized>(
     path: &Path,
     index: &S,
 ) -> Result<(), String> {
-    let mut raw =
-        serde_json::to_vec_pretty(index).map_err(|e| format!("encode blockstore index: {e}"))?;
+    save_blockstore_index_serializable_typed(path, index).map_err(|error| error.to_string())
+}
+fn save_blockstore_index_typed(
+    path: &Path,
+    index: &BlockStoreIndexDisk,
+) -> Result<(), AtomicWriteError> {
+    save_blockstore_index_serializable_typed(path, index)
+}
+fn save_blockstore_index_serializable_typed<S: serde::Serialize + ?Sized>(
+    path: &Path,
+    index: &S,
+) -> Result<(), AtomicWriteError> {
+    let mut raw = serde_json::to_vec_pretty(index).map_err(|error| {
+        atomic_write_error_before(
+            path,
+            AtomicWriteOperation::Overwrite,
+            format!("encode blockstore index: {error}"),
+        )
+    })?;
     raw.push(b'\n');
     // Keep writer on raw `write_file_atomic` (no `lexical_clean`)
     // so the index file persists to the same physical directory
@@ -955,7 +1044,7 @@ fn save_blockstore_index_serializable<S: serde::Serialize + ?Sized>(
     // `load_blockstore_index` reads back from. See the comment in
     // `load_blockstore_index` for the full blockstore-wide symmetry
     // rationale.
-    write_file_atomic(path, &raw)
+    write_file_atomic_typed(path, &raw)
 }
 
 /// Borrowed view of `BlockStoreIndexDisk` that serializes identically
@@ -966,206 +1055,109 @@ struct BlockStoreIndexView<'a> {
     version: u32,
     canonical: &'a [String],
 }
-
-/// Write `content` to `path` only if the destination is absent
-/// (idempotent replay: a subsequent call with matching bytes is a
-/// silent no-op). Hardened against the TOCTOU race audited as `E.3`:
-/// the previous implementation did `fs::read()` then `write_file_atomic`
-/// which could silently overwrite a file that appeared between the two
-/// syscalls. The new implementation keeps a read-compare fast path for
-/// the idempotent-replay case (matches the Go `writeFileIfAbsent` fast
-/// path) and falls through to `io_utils::write_file_exclusive` (which
-/// uses `hard_link(2)` for atomic create-if-absent) only when the
-/// destination is genuinely absent. On EEXIST from the race window we
-/// read back the destination and preserve the idempotent-same-content
-/// contract; on content mismatch we surface an explicit error.
-///
-/// Read-compare fast path matters for two reasons (Codex review on
-/// PR #1220):
-/// 1. idempotent replay during sync-engine restart is the dominant
-///    caller and must not do unnecessary disk I/O;
-/// 2. it keeps the "dest already has matching bytes" case working even
-///    when the parent directory is temporarily unwritable (for example
-///    chmod 0o500 hardening), because read does not need write
-///    permission but the temp-write path does.
-///
-/// Mirrors the Go `writeFileIfAbsent` helper's `os.Link` flow for
-/// cross-client storage parity.
-///
-/// # Threat model
-///
-/// **Concurrent actors**: Two writers race on `fs::hard_link(tmp, path)`;
-/// exactly one link succeeds. The loser sees `AlreadyExists`, reads the
-/// winner's content, and returns `Ok(())` on match (idempotent replay)
-/// or an explicit error on drift (never overwrite). Per-call
-/// `temp_path_for(path, pid, next_temp_seq())` gives distinct temp
-/// paths so in-process threads never collide.
-///
-/// **Process crash**: A crash between `hard_link` and the best-effort
-/// temp-unlink leaves a stale `<pid>.<seq>` hard-linked to the
-/// destination inode. That is safe: `write_and_sync_temp` uses
-/// `O_CREATE|O_EXCL` (no `O_TRUNC`), so any later call hitting the same
-/// temp path returns `AlreadyExists` via `allocate_and_write_temp` and
-/// retries with a fresh `seq` (16-retry budget). NOTHING removes that
-/// sibling today: a crash between the temp write and the link or rename
-/// leaks one `<dest>.tmp.<pid>.<seq>` file, and there is no startup
-/// sweep. The leak exists only because the name is unique per write; the
-/// fix is a FIXED temp name per destination (which the next write
-/// truncates) plus a datadir lock, not a startup deletion pass — Bitcoin
-/// Core and Monero take the naming route and sweep nothing at startup.
-/// Tracked as RUB-1078. A crash before the final
-/// `sync_dir` leaves the dirent in page cache; the fast-path on retry
-/// re-runs `sync_dir` and PROPAGATES its error so the durability
-/// failure is surfaced.
-///
-/// **Cross-platform**: Unix (Linux, macOS) is the production target:
-/// `fs::hard_link`, `create_new(true)` (O_EXCL), and directory fsync
-/// all honoured. Windows: directory fsync is a no-op at the stdlib
-/// level; `fs::remove_file` on an open fd would fail, which is why
-/// `write_and_sync_temp` explicitly `drop(fd)` before `remove_file`.
-/// Rust does not ship Rubin on Windows as a production target.
-///
-/// **Retry / exhaustion**: `allocate_and_write_temp` retries up to
-/// `MAX_TEMP_ALLOC_RETRIES` (16) on `AlreadyExists` with a fresh
-/// `next_temp_seq()`. Fatal I/O surfaces immediately. Exhaustion
-/// surfaces as `Err` mentioning the destination path.
-///
-/// **Inode / fs-layer**: `hard_link` is refcount-safe — destination
-/// and temp share the inode; unlinking temp drops the name without
-/// affecting bytes visible through `path`. `O_TRUNC` on any path that
-/// could share an inode with a live destination is intentionally
-/// avoided everywhere in the helper stack; see `write_and_sync_temp`
-/// for the explicit O_EXCL contract.
-///
-/// **Durability**: `write_and_sync_temp` fsyncs the temp's bytes + inode
-/// metadata before returning. `fs::hard_link` then exposes the inode
-/// under `path`. `sync_dir` on the parent flushes the directory entry
-/// so the link is itself durable. Both the `Ok` fast-path and the
-/// `AlreadyExists`-retry branches PROPAGATE the final `sync_dir` error
-/// — the previous `let _ = sync_dir(parent)` double-swallowed EIO
-/// through `sync_dir`'s own best-effort wrapper (Copilot P1 wave-7 on
-/// PR #1220).
+#[cfg(test)]
 fn write_file_if_absent(path: &Path, content: &[u8]) -> Result<(), String> {
-    // Both verify reads are bounded by the length of the content being
-    // written: they exist ONLY to compare against `content`, so a
-    // destination of any other size cannot match, and bounding by the
-    // caller's own length means a corrupt multi-gigabyte file at a
-    // 116-byte header destination is refused before allocation instead of
-    // being buffered whole (RUB-1057). The size refusal is mapped onto the
-    // pre-existing content-mismatch error by `existing_content_differs`, so
-    // the caller-visible taxonomy is identical for every mismatch whatever
-    // the existing file's size. The closure is the test seam mirroring Go's
-    // `readFileByPathFn` var.
-    let bound = content.len() as u64;
-    write_file_if_absent_with(path, content, move |p| read_file_by_path(p, bound))
+    write_file_if_absent_typed(path, content).map_err(|error| error.to_string())
 }
-
-/// The one caller-visible verdict for a destination whose bytes are not the
-/// bytes being written — including a destination too large to be them.
+fn write_file_if_absent_typed(path: &Path, content: &[u8]) -> Result<(), AtomicWriteError> {
+    let bound = content.len() as u64;
+    write_file_if_absent_with_typed(path, content, move |candidate| {
+        read_file_by_path(candidate, bound)
+    })
+}
 fn existing_content_differs(path: &Path) -> String {
     format!(
         "file already exists with different content: {}",
         path.display()
     )
 }
-
-/// True when `e` is the bounded reader's size refusal, i.e. the existing
-/// destination is larger than the content being written and therefore cannot
-/// equal it. Go twin: `errors.Is(err, errStoreFileTooLarge)` at the same sites.
-fn is_over_bound_refusal(e: &std::io::Error) -> bool {
-    e.kind() == std::io::ErrorKind::InvalidData
-        && e.to_string()
+fn is_over_bound_refusal(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::InvalidData
+        && error
+            .to_string()
             .starts_with(crate::io_utils::STORE_FILE_TOO_LARGE_PREFIX)
 }
-
+#[cfg(test)]
 fn write_file_if_absent_with(
     path: &Path,
     content: &[u8],
     read_existing: impl Fn(&Path) -> Result<Vec<u8>, std::io::Error>,
 ) -> Result<(), String> {
-    // Fast path: destination already on disk. Same behaviour as the Go
-    // helper's `readFileByPathFn(path)` fast path — short-circuit
-    // before any temp write when the file is already present with the
-    // right bytes (dominant idempotent-replay case).
-    //
-    // Copilot P1 on PR #1220: a previous call may have successfully
-    // created the destination but returned an error from the final
-    // `sync_dir(parent)` step (e.g. transient EIO). If the caller
-    // retries, we hit this fast-path and would silently report Ok
-    // without ever making the directory entry durable. Re-run
-    // `sync_dir` on the idempotent match branch and PROPAGATE its
-    // result — `io_utils::sync_dir` already applies the intended
-    // permission policy internally (execute-only/hardened parents
-    // treated as Ok), so propagating does NOT break the
-    // idempotent-replay-on-hardened-dir contract; it only surfaces
-    // real durability failures (EIO / ENOENT) that would otherwise be
-    // silent.
-    //
-    // Copilot P1 wave-7 on PR #1220: `let _ = sync_dir(parent)`
-    // double-swallowed errors — `sync_dir` is already best-effort,
-    // so the outer `let _` discarded the exact failures that MUST
-    // reach the caller. Propagate via `?` instead.
+    write_file_if_absent_with_typed(path, content, read_existing).map_err(|error| error.to_string())
+}
+fn write_file_if_absent_with_typed(
+    path: &Path,
+    content: &[u8],
+    read_existing: impl Fn(&Path) -> Result<Vec<u8>, std::io::Error>,
+) -> Result<(), AtomicWriteError> {
+    validate_atomic_write_destination(path, AtomicWriteOperation::CreateIfAbsent)?;
     match read_existing(path) {
         Ok(existing) => {
             if existing != content {
-                return Err(existing_content_differs(path));
+                return Err(atomic_write_error_before(
+                    path,
+                    AtomicWriteOperation::CreateIfAbsent,
+                    existing_content_differs(path),
+                ));
             }
-            if let Some(parent) = crate::io_utils::effective_parent(path) {
-                crate::io_utils::sync_dir(parent)?;
-            }
+            let parent = crate::io_utils::effective_parent(path).ok_or_else(|| {
+                atomic_write_error_before(
+                    path,
+                    AtomicWriteOperation::CreateIfAbsent,
+                    "atomic destination has no parent",
+                )
+            })?;
+            sync_atomic_parent(parent).map_err(|error| {
+                atomic_write_error_after(path, AtomicWriteOperation::CreateIfAbsent, error)
+            })?;
             return Ok(());
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Fall through to the race-hardened atomic write.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if is_over_bound_refusal(&error) => {
+            return Err(atomic_write_error_before(
+                path,
+                AtomicWriteOperation::CreateIfAbsent,
+                existing_content_differs(path),
+            ));
         }
-        Err(e) if is_over_bound_refusal(&e) => {
-            // Larger than the content being written: cannot be a match.
-            return Err(existing_content_differs(path));
-        }
-        Err(e) => {
-            return Err(format!("read existing {}: {e}", path.display()));
+        Err(error) => {
+            return Err(atomic_write_error_before(
+                path,
+                AtomicWriteOperation::CreateIfAbsent,
+                format!("read existing {}: {error}", path.display()),
+            ));
         }
     }
 
-    match write_file_exclusive(path, content) {
-        Ok(()) => Ok(()),
-        Err(AtomicWriteError::AlreadyExists) => handle_link_eexist(path, content, read_existing),
-        Err(AtomicWriteError::Other(msg)) => Err(msg),
-    }
+    write_file_create_if_absent(path, content, move || {
+        handle_link_eexist(path, content, read_existing)
+    })
 }
 
-/// EEXIST verify arm (Go twin: `handleLinkEEXIST`): the destination
-/// appeared between the fast-path read and our link. Re-read it through
-/// the same bounded seam, verify content matches (idempotent retry) or
-/// surface the drift as an error — never silently overwrite, never Ok on
-/// drift.
 fn handle_link_eexist(
     path: &Path,
     content: &[u8],
     read_existing: impl Fn(&Path) -> Result<Vec<u8>, std::io::Error>,
 ) -> Result<(), String> {
-    let existing = read_existing(path).map_err(|e| {
-        if is_over_bound_refusal(&e) {
+    let existing = read_existing(path).map_err(|error| {
+        if is_over_bound_refusal(&error) {
             existing_content_differs(path)
         } else {
-            format!("read existing {}: {e}", path.display())
+            format!("read existing {}: {error}", path.display())
         }
     })?;
     if existing != content {
         return Err(existing_content_differs(path));
-    }
-    // Propagate parent dir-sync result on the EEXIST-retry branch for the
-    // same reason as the Ok fast-path above: `sync_dir` already applies
-    // the permission policy, so `?` surfaces only real durability failures.
-    if let Some(parent) = crate::io_utils::effective_parent(path) {
-        crate::io_utils::sync_dir(parent)?;
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::io_utils::{create_sparse_file, unique_temp_path, STORE_FILE_TOO_LARGE_PREFIX};
+    use crate::io_utils::{
+        create_sparse_file, unique_temp_path, AtomicWriteTestOp, AtomicWriteTestScope,
+        ATOMIC_WRITE_LOCK_LEAF, ATOMIC_WRITE_SCRATCH_LEAF, STORE_FILE_TOO_LARGE_PREFIX,
+    };
     use std::path::{Path, PathBuf};
 
     use super::{
@@ -1332,20 +1324,33 @@ mod tests {
     /// and a subsequent call with matching bytes is an idempotent
     /// no-op. Mirrors the Go `TestWriteFileIfAbsent_Fresh` for
     /// cross-client parity.
+    #[rustfmt::skip]
     #[test]
     fn write_file_if_absent_fresh_then_idempotent() {
-        let dir = unique_temp_path("rubin-wfia-fresh");
-        std::fs::create_dir_all(&dir).expect("create test dir");
-        let path = dir.join("fresh.bin");
-        let content = b"hello E.3".to_vec();
-
-        write_file_if_absent(&path, &content).expect("fresh write");
-        let got = std::fs::read(&path).expect("read back");
-        assert_eq!(got, content);
-
+        let dir = unique_temp_path("rubin-wfia-fresh"); std::fs::create_dir_all(&dir).expect("create test dir");
+        let path = dir.join("fresh.bin"); let content = b"hello E.3".to_vec();
+        let fresh = AtomicWriteTestScope::new(); write_file_if_absent(&path, &content).expect("fresh write");
+        assert!(fresh.operations().contains(&AtomicWriteTestOp::HardLink)); drop(fresh); assert_eq!(std::fs::read(&path).expect("read back"), content);
         // Idempotent replay: same bytes must succeed as a no-op.
-        write_file_if_absent(&path, &content).expect("idempotent replay");
-
+        for leaf in [ATOMIC_WRITE_LOCK_LEAF, ATOMIC_WRITE_SCRATCH_LEAF] { let _ = std::fs::remove_file(dir.join(leaf)); }
+        #[cfg(unix)]
+        let restore_parent = {
+            use std::os::unix::fs::PermissionsExt; struct Restore(std::path::PathBuf); impl Drop for Restore { fn drop(&mut self) { let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700)); } }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("mode");
+            (unsafe { libc::geteuid() } != 0).then(|| { std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).expect("readonly parent"); Restore(dir.clone()) })
+        };
+        let replay = AtomicWriteTestScope::new(); write_file_if_absent(&path, &content).expect("idempotent replay");
+        assert_eq!(replay.operations(), [AtomicWriteTestOp::ParentSync]); assert!(!dir.join(ATOMIC_WRITE_LOCK_LEAF).exists()); assert!(!dir.join(ATOMIC_WRITE_SCRATCH_LEAF).exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt; assert_eq!(std::fs::metadata(&path).expect("mode").permissions().mode() & 0o777, 0o644); drop(restore_parent);
+        }
+        drop(replay);
+        let reads = std::cell::Cell::new(0); for leaf in [ATOMIC_WRITE_LOCK_LEAF, ATOMIC_WRITE_SCRATCH_LEAF] {
+            let reserved = dir.join(leaf); let err = write_file_if_absent_with(&reserved, b"x", |_| { reads.set(reads.get() + 1); Ok(b"x".to_vec()) }).expect_err("reserved destination");
+            assert!(err.contains("reserved atomic persistence destination"));
+        }
+        assert_eq!(reads.get(), 0, "reserved destination validated before read");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1958,17 +1963,20 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
+    #[rustfmt::skip]
     #[test]
     fn canonical_hash_cache_coherent_after_replace_at_height() {
         // set_canonical_tip(height < current_len, different hash) is
         // the reorg-replace branch (truncate-then-push). The cache
         // must follow exactly: a stale entry at the replaced height
         // is the rejected case.
-        let dir = unique_temp_path("rubin-blockstore-e7-cache-replace");
-        std::fs::create_dir_all(&dir).expect("create test dir");
-        let root = block_store_path(&dir);
-        let mut store = BlockStore::create(&root).expect("create");
+        let dir = unique_temp_path("rubin-blockstore-e7-cache-replace"); std::fs::create_dir_all(&dir).expect("create test dir");
+        let root = block_store_path(&dir); let mut store = BlockStore::create(&root).expect("create");
 
+        let empty = std::fs::read(&store.index_path).expect("empty index");
+        std::fs::remove_file(&store.index_path).expect("remove index"); std::fs::create_dir(&store.index_path).expect("block index");
+        let err = store.set_canonical_tip(0, [0x42; 32]).unwrap_err(); assert!(err.contains("before_namespace_commit")); assert_eq!((store.canonical_len(), store.tip().unwrap()), (0, None));
+        std::fs::remove_dir(&store.index_path).expect("remove blocker"); std::fs::write(&store.index_path, empty).expect("restore index");
         store.set_canonical_tip(0, [0x10; 32]).expect("set 0");
         store.set_canonical_tip(1, [0x11; 32]).expect("set 1");
         store.set_canonical_tip(2, [0x12; 32]).expect("set 2");
@@ -1984,18 +1992,22 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
+    #[rustfmt::skip]
     #[test]
     fn canonical_hash_cache_coherent_after_rewind_to_height() {
-        let dir = unique_temp_path("rubin-blockstore-e7-cache-rewind");
-        std::fs::create_dir_all(&dir).expect("create test dir");
-        let root = block_store_path(&dir);
-        let mut store = BlockStore::create(&root).expect("create");
+        let dir = unique_temp_path("rubin-blockstore-e7-cache-rewind"); std::fs::create_dir_all(&dir).expect("create test dir");
+        let root = block_store_path(&dir); let mut store = BlockStore::create(&root).expect("create");
 
         store.set_canonical_tip(0, [0x21; 32]).expect("set 0");
         store.set_canonical_tip(1, [0x22; 32]).expect("set 1");
         store.set_canonical_tip(2, [0x23; 32]).expect("set 2");
 
-        store.rewind_to_height(0).expect("rewind to 0");
+        let prior = std::fs::read(&store.index_path).expect("prior index");
+        std::fs::remove_file(&store.index_path).expect("remove index"); std::fs::create_dir(&store.index_path).expect("block index");
+        let err = store.rewind_to_height(0).unwrap_err(); assert!(err.contains("before_namespace_commit")); assert_eq!((store.canonical_len(), store.tip().unwrap()), (3, Some((2, [0x23; 32]))));
+        std::fs::remove_dir(&store.index_path).expect("remove blocker"); std::fs::write(&store.index_path, prior).expect("restore index");
+        let scope = AtomicWriteTestScope::new(); scope.fail_at(AtomicWriteTestOp::CleanupUnlink, 1, "postcommit");
+        assert!(store.rewind_to_height(0).is_err()); drop(scope);
         assert_cache_matches_index(&store);
         assert_eq!(store.canonical_len(), 1);
         assert_eq!(store.canonical_hash(0).unwrap(), Some([0x21; 32]));

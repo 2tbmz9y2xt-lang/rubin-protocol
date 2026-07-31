@@ -10,6 +10,7 @@ use rubin_consensus::{
     canonical_rotation_network_name_normalized, normalized_rotation_network_name,
     SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
 };
+use rubin_node::chainstate::{reclaim_atomic_scratch, reclaim_atomic_scratch_parent};
 use rubin_node::devnet_rpc::{
     attach_shutdown_signal_to_devnet_rpc_state, RPC_READINESS_TRANSITION_FAILED,
 };
@@ -150,11 +151,11 @@ fn create_or_open_block_store(
     cfg: &CliConfig,
     chain_state_file: &Path,
     stderr: &mut dyn Write,
-) -> Result<(BlockStore, Option<datadir_lock::HeldDatadirLock>), i32> {
+) -> Result<(BlockStore, Option<datadir_lock::HeldDatadirLock>, bool), i32> {
     let root_path = block_store_path(&cfg.data_dir);
     if !cfg.create_store {
         if cfg.dry_run {
-            return open_block_store(&root_path, stderr).map(|store| (store, None));
+            return open_block_store(&root_path, stderr).map(|store| (store, None, false));
         }
         if let Some(error) = missing_block_store_open_error(&cfg.data_dir, &root_path) {
             let _ = writeln!(stderr, "blockstore open failed: {error}");
@@ -162,7 +163,7 @@ fn create_or_open_block_store(
         }
         let lock = datadir_lock::acquire(&cfg.data_dir, stderr)?;
         return match open_block_store(&root_path, stderr) {
-            Ok(store) => Ok((store, Some(lock))),
+            Ok(store) => Ok((store, Some(lock), false)),
             Err(code) => {
                 lock.release();
                 Err(code)
@@ -188,7 +189,7 @@ fn create_or_open_block_store(
         return Err(2);
     }
     match BlockStore::create(root_path) {
-        Ok(store) => Ok((store, Some(lock))),
+        Ok(store) => Ok((store, Some(lock), true)),
         Err(err) => {
             lock.release();
             let _ = writeln!(stderr, "blockstore create failed: {err}");
@@ -317,11 +318,22 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     // Storage lifecycle runs BEFORE the chainstate load: an uninitialized or
     // half-initialized store must reject before anything reads or writes
     // chainstate. Ordinary startup performs no mkdir at all.
-    let (mut block_store, _datadir_lock) =
+    let (mut block_store, _datadir_lock, fresh_store) =
         match create_or_open_block_store(&cfg, &chain_state_file, stderr) {
             Ok(block_store_and_lock) => block_store_and_lock,
             Err(code) => return code,
         };
+    if !cfg.dry_run {
+        let reclaim = if fresh_store {
+            reclaim_atomic_scratch_parent(&cfg.data_dir)
+        } else {
+            reclaim_atomic_scratch(&cfg.data_dir)
+        };
+        if let Err(err) = reclaim {
+            let _ = writeln!(stderr, "{err}");
+            return 2;
+        }
+    }
     let mut chain_state = match load_chain_state(&chain_state_file) {
         Ok(chain_state) => chain_state,
         Err(err) => {
@@ -4048,7 +4060,7 @@ mod tests {
         let cfg = parse_args(&args).expect("parse strict-open config");
         let chain_state_file = chain_state_path(&dir);
 
-        let (store, lock) =
+        let (store, lock, _) =
             super::create_or_open_block_store(&cfg, &chain_state_file, &mut Vec::new())
                 .expect("mutating strict open");
         assert_eq!(store.root_dir(), block_store_path(&dir).as_path());
@@ -4064,7 +4076,7 @@ mod tests {
 
         let mut dry_run = cfg;
         dry_run.dry_run = true;
-        let (store, lock) =
+        let (store, lock, _) =
             super::create_or_open_block_store(&dry_run, &chain_state_file, &mut Vec::new())
                 .expect("dry-run strict open");
         assert_eq!(store.root_dir(), block_store_path(&dir).as_path());

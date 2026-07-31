@@ -2867,6 +2867,132 @@ func TestRunDryRunWritesNothing(t *testing.T) {
 	assertNoFilesystemWrite(t, before, datadirSnapshot(t, dir))
 }
 
+func TestRunMutatingStartupReclaimsFixedScratchBeforeChainStateLoad(t *testing.T) {
+	dir := t.TempDir()
+	storeRoot := node.BlockStorePath(dir)
+	if _, err := node.CreateBlockStore(storeRoot); err != nil {
+		t.Fatalf("CreateBlockStore: %v", err)
+	}
+	parents := []string{
+		dir,
+		storeRoot,
+		filepath.Join(storeRoot, "blocks"),
+		filepath.Join(storeRoot, "headers"),
+		filepath.Join(storeRoot, "undo"),
+	}
+	for _, parent := range parents {
+		if err := os.WriteFile(filepath.Join(parent, ".rubin-atomic-write.tmp"), []byte("crash residue"), 0o600); err != nil {
+			t.Fatalf("seed scratch in %s: %v", parent, err)
+		}
+	}
+	if err := os.WriteFile(node.ChainStatePath(dir), []byte("{"), 0o600); err != nil {
+		t.Fatalf("seed malformed chainstate: %v", err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	if code := run([]string{"--datadir", dir}, &out, &errOut); code != 2 {
+		t.Fatalf("run code=%d, want 2 (stderr=%q)", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "chainstate load failed") {
+		t.Fatalf("startup did not reach chainstate load after reclaim: %q", errOut.String())
+	}
+	for _, parent := range parents {
+		if _, err := os.Lstat(filepath.Join(parent, ".rubin-atomic-write.tmp")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("scratch remained in %s: %v", parent, err)
+		}
+	}
+}
+
+func TestRunReadOnlyModesLeaveFixedScratchAndLockUntouched(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args func(string) []string
+	}{
+		{name: "dry_run", args: func(dir string) []string { return []string{"--dry-run", "--datadir", dir} }},
+		{name: "legacy_exposure_scan", args: func(dir string) []string {
+			return []string{"--legacy-exposure-scan", "--legacy-suite-id", "1", "--datadir", dir}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := preparedDatadir(t)
+			storeRoot := node.BlockStorePath(dir)
+			parents := []string{
+				dir,
+				storeRoot,
+				filepath.Join(storeRoot, "blocks"),
+				filepath.Join(storeRoot, "headers"),
+				filepath.Join(storeRoot, "undo"),
+			}
+			for _, parent := range parents {
+				if err := os.Remove(filepath.Join(parent, ".rubin-atomic-write.lock")); err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("remove setup lock in %s: %v", parent, err)
+				}
+				if err := os.WriteFile(filepath.Join(parent, ".rubin-atomic-write.tmp"), []byte(parent), 0o600); err != nil {
+					t.Fatalf("seed scratch in %s: %v", parent, err)
+				}
+			}
+			before := datadirSnapshot(t, dir)
+			var out, errOut bytes.Buffer
+			if code := run(tc.args(dir), &out, &errOut); code != 0 {
+				t.Fatalf("read-only run code=%d (stderr=%q)", code, errOut.String())
+			}
+			assertNoFilesystemWrite(t, before, datadirSnapshot(t, dir))
+			for _, parent := range parents {
+				if _, err := os.Lstat(filepath.Join(parent, ".rubin-atomic-write.lock")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("read-only run opened or created a reserved lock in %s: %v", parent, err)
+				}
+				if _, err := os.Lstat(filepath.Join(parent, ".rubin-atomic-write.tmp")); err != nil {
+					t.Fatalf("read-only run removed scratch in %s: %v", parent, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRunFailsClosedWhenFixedScratchIsDirectoryBeforeChainStateLoad(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		createStore bool
+	}{
+		{name: "existing_store"},
+		{name: "fresh_store", createStore: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if !tc.createStore {
+				if _, err := node.CreateBlockStore(node.BlockStorePath(dir)); err != nil {
+					t.Fatalf("CreateBlockStore: %v", err)
+				}
+			}
+			scratch := filepath.Join(dir, ".rubin-atomic-write.tmp")
+			if err := os.Mkdir(scratch, 0o700); err != nil {
+				t.Fatalf("mkdir scratch: %v", err)
+			}
+			args := []string{"--datadir", dir}
+			if tc.createStore {
+				args = append(args, "--create-store")
+			}
+			var out bytes.Buffer
+			var errOut bytes.Buffer
+			if code := run(args, &out, &errOut); code != 2 {
+				t.Fatalf("run code=%d, want 2 (stderr=%q)", code, errOut.String())
+			}
+			wantPrefix := "atomic scratch reclaim failed: " + dir + ":"
+			if !strings.Contains(errOut.String(), wantPrefix) {
+				t.Fatalf("stderr=%q, want prefix %q", errOut.String(), wantPrefix)
+			}
+			info, err := os.Stat(scratch)
+			if err != nil || !info.IsDir() {
+				t.Fatalf("scratch directory changed: info=%v err=%v", info, err)
+			}
+			if _, err := os.Lstat(node.ChainStatePath(dir)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("reclaim failure reached chainstate load or write: %v", err)
+			}
+		})
+	}
+}
+
 // TestRunDryRunReportsStaleChainStateWithoutRepairing pins the shape that
 // makes the reconcile want to mutate: a snapshot reset to genesis while the
 // blockstore still holds canonical blocks. --dry-run must print the

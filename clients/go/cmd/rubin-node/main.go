@@ -465,6 +465,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if datadirLock != nil {
 		defer func() { _ = datadirLock.Release() }()
 	}
+	if !*dryRun {
+		var reclaimErr error
+		if *createStore {
+			reclaimErr = node.ReclaimAtomicWriteScratchInParent(cfg.DataDir)
+		} else {
+			reclaimErr = node.ReclaimAtomicWriteScratch(cfg.DataDir)
+		}
+		if reclaimErr != nil {
+			_, _ = fmt.Fprintf(stderr, "%v\n", reclaimErr)
+			return 2
+		}
+	}
 	chainState, err := node.LoadChainState(chainStatePath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "chainstate load failed: %v\n", err)

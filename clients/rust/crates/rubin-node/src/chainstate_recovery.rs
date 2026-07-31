@@ -233,19 +233,14 @@ pub(crate) const CANONICAL_INDEX_ZERO_COMPLETE_PREFIX_ERR: &str =
 /// file (`E.1`), and the chainstate snapshot is re-saved by the caller
 /// after reconcile returns. Re-entry is idempotent.
 ///
-/// **Cross-platform**: All I/O goes through helpers that already abide
-/// by the storage cluster's OS contracts (`O_EXCL` for temp creates,
-/// `drop(fd)` before unlink on Windows in `write_and_sync_temp`,
-/// best-effort `sync_dir` on permission-hardened parents).
+/// **Cross-platform**: fixed-scratch durability is supported on Linux/macOS only.
 ///
 /// **Retry / exhaustion**: No bounded retry inside reconcile — the
 /// caller (`main.rs`) treats a reconcile error as a fatal startup
 /// failure and exits with non-zero, mirroring Go's `chainstate
 /// reconcile failed: %v` exit path.
 ///
-/// **Inode / fs-layer**: Reconcile reads only — does not create new
-/// files. `truncate_canonical` rewrites the canonical index via the
-/// existing atomic-write helper (no shared-inode hazards).
+/// **Inode / fs-layer**: truncate uses fixed scratch/parent lock; no other files.
 ///
 /// **Durability**: After reconcile returns `Ok(true)`, the caller
 /// MUST persist `chain_state.save(...)` BEFORE starting any sync
