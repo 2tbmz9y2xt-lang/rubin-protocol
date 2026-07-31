@@ -17,6 +17,13 @@ type reorgBranchBlock struct {
 	header     consensus.BlockHeader
 }
 
+// verifiedStoredBlock retains one verified block-store read and parse.
+type verifiedStoredBlock struct {
+	lookupHash [32]byte
+	blockBytes []byte
+	parsed     *consensus.ParsedBlock
+}
+
 func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
 	if s == nil {
 		return nil, errors.New("sync engine is not initialized")
@@ -223,11 +230,11 @@ func (s *SyncEngine) applyPreferredBranch(
 	if err != nil {
 		return nil, err
 	}
-	disconnectedBlocks, reorgDepth, err := s.preparePreferredBranch(branch, commonAncestorHeight, rollbackState)
+	preparedDisconnectedBlocks, reorgDepth, err := s.preparePreferredBranch(branch, commonAncestorHeight, rollbackState)
 	if err != nil {
 		return nil, err
 	}
-	if _, _, err := s.disconnectCanonicalToAncestor(commonAncestorHeight); err != nil {
+	if err := s.disconnectCanonicalToAncestor(commonAncestorHeight, preparedDisconnectedBlocks); err != nil {
 		return nil, s.rollbackApplyBlock(err, rollbackState)
 	}
 
@@ -247,7 +254,7 @@ func (s *SyncEngine) applyPreferredBranch(
 			canonicalBlocks = append(canonicalBlocks, summary.CanonicalAppliedBlocks[0])
 		}
 	}
-	s.requeueDisconnectedTransactions(disconnectedBlocks)
+	s.requeueVerifiedDisconnectedTransactions(preparedDisconnectedBlocks)
 	s.noteBlockApplyAcceptedN(pendingAccepted)
 	s.noteReorg(reorgDepth)
 	if summary != nil {
@@ -290,13 +297,13 @@ func (s *SyncEngine) preparePreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
 	rollbackState syncRollbackState,
-) ([][]byte, uint64, error) {
+) ([]verifiedStoredBlock, uint64, error) {
 	previewState := cloneChainState(rollbackState.chainState)
 	if previewState == nil {
 		return nil, 0, errors.New("nil preview chainstate")
 	}
 	var err error
-	disconnectedBlocks, reorgDepth, err := s.previewDisconnectCanonicalToAncestor(previewState, commonAncestorHeight)
+	preparedDisconnectedBlocks, reorgDepth, err := s.previewDisconnectCanonicalToAncestor(previewState, commonAncestorHeight)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -330,7 +337,7 @@ func (s *SyncEngine) preparePreferredBranch(
 		}
 		slidingTs = advancePrevTimestamps(slidingTs, item.header.Timestamp)
 	}
-	return disconnectedBlocks, reorgDepth, nil
+	return preparedDisconnectedBlocks, reorgDepth, nil
 }
 
 // advancePrevTimestamps prepends newTs to prev and keeps at most 11 entries,
@@ -348,9 +355,7 @@ func advancePrevTimestamps(prev []uint64, newTs uint64) []uint64 {
 	return out
 }
 
-// errBranchStoreCorrupt marks a local block-store defect observed while walking
-// a side branch: a stored block whose bytes do not hash to the hash they were
-// looked up by, or an ancestry that revisits a hash already walked.
+// errBranchStoreCorrupt marks failed stored identity/commitments or a branch cycle.
 //
 // It is deliberately a plain error and NOT a *consensus.TxError, and it is
 // deliberately distinct from ErrParentNotFound. node/p2p classifies an apply
@@ -359,7 +364,7 @@ func advancePrevTimestamps(prev []uint64, newTs uint64) []uint64 {
 // block is never ban-scored for OUR corrupt store; the failure is recorded as a
 // local error instead. Unexported: no caller outside this package should branch
 // on the specific cause, only on "not a consensus fault".
-var errBranchStoreCorrupt = errors.New("block store corruption during side-branch collection")
+var errBranchStoreCorrupt = errors.New("local block-store corruption")
 
 // collectBranchToCanonical walks a candidate's ancestry back to the first block
 // the canonical index knows, returning the branch in canonical (oldest-first)
@@ -435,46 +440,50 @@ func (s *SyncEngine) collectBranchToCanonical(
 	}
 }
 
-// loadVerifiedBranchAncestor reads one stored ancestor and proves it is the
-// block that was asked for. A plain file read cannot: BlockStore.GetBlockByHash
-// returns whatever bytes sit at the path named by the hash. Mirrors the
-// defense-in-depth re-hash verifyReplayBlockHash performs on the startup replay
-// path. A genuinely absent ancestor keeps the pre-existing ErrParentNotFound
-// outcome, which the caller turns into normal orphan handling.
-//
-// EVERY way the stored bytes can fail to be the requested block — unparseable,
-// unhashable, or hashing to something else — is one local-corruption class and
-// is reported as errBranchStoreCorrupt. Bytes that cannot even yield a header
-// certainly do not hash to their lookup key, so parse failure is not a separate
-// verdict. The cause is rendered with %v and deliberately NOT wrapped with %w:
-// consensus.ParseBlockBytes returns a *consensus.TxError, and errors.As unwraps
-// through %w, so a %w-chained cause would still satisfy node/p2p's
-// isConsensusApplyBlockError and bump a relaying peer's ban score by 100 for OUR
-// corrupt datadir. Measured both renderings against that exact predicate: %w =>
-// matched, %v => did not, with identical message text.
+// loadVerifiedStoredBlock verifies identity and commitments as local corruption.
+func (s *SyncEngine) loadVerifiedStoredBlock(lookupHash [32]byte) (verifiedStoredBlock, error) {
+	blockBytes, err := s.blockStore.GetBlockByHash(lookupHash)
+	if err != nil {
+		return verifiedStoredBlock{}, storedBlockReadCorruption(lookupHash, err)
+	}
+	parsed, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		return verifiedStoredBlock{}, storedBlockCorruption(lookupHash, "does not parse", err)
+	}
+	observedHash, err := consensus.BlockHash(parsed.HeaderBytes)
+	if err != nil {
+		return verifiedStoredBlock{}, storedBlockCorruption(lookupHash, "does not hash", err)
+	}
+	if observedHash != lookupHash {
+		return verifiedStoredBlock{}, fmt.Errorf(
+			"%w: stored block for %x hashes to %x",
+			errBranchStoreCorrupt, lookupHash, observedHash,
+		)
+	}
+	if err := consensus.ValidateStoredBlockCommitments(parsed); err != nil {
+		return verifiedStoredBlock{}, storedBlockCorruption(lookupHash, "has invalid commitments", err)
+	}
+	return verifiedStoredBlock{lookupHash: lookupHash, blockBytes: blockBytes, parsed: parsed}, nil
+}
+
+func storedBlockCorruption(lookupHash [32]byte, reason string, err error) error {
+	return fmt.Errorf("%w: stored block for %x %s: %v", errBranchStoreCorrupt, lookupHash, reason, err) //nolint:errorlint // %v is required: wrapped consensus.TxError would satisfy p2p's consensus-error predicate for local corruption.
+}
+
+func storedBlockReadCorruption(lookupHash [32]byte, err error) error {
+	return fmt.Errorf("%w: cannot read stored block for %x: %w", errBranchStoreCorrupt, lookupHash, err)
+}
+
+// loadVerifiedBranchAncestor preserves missing-side-ancestor orphan handling.
 func (s *SyncEngine) loadVerifiedBranchAncestor(parentHash [32]byte) (*consensus.ParsedBlock, []byte, error) {
-	parentBlockBytes, err := s.blockStore.GetBlockByHash(parentHash)
+	stored, err := s.loadVerifiedStoredBlock(parentHash)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil, ErrParentNotFound
 		}
 		return nil, nil, err
 	}
-	parentParsed, err := consensus.ParseBlockBytes(parentBlockBytes)
-	if err != nil {
-		return nil, nil, fmt.Errorf("%w: stored block for %x does not parse: %v", errBranchStoreCorrupt, parentHash, err) //nolint:errorlint // %v is required, not %w: errors.As unwraps %w, so a wrapped *consensus.TxError cause would satisfy p2p isConsensusApplyBlockError and bump the relaying peer's ban score 100 for OUR corrupt store (measured)
-	}
-	observedHash, err := consensus.BlockHash(parentParsed.HeaderBytes)
-	if err != nil {
-		return nil, nil, fmt.Errorf("%w: stored block for %x does not hash: %v", errBranchStoreCorrupt, parentHash, err) //nolint:errorlint // %v is required, not %w: errors.As unwraps %w, so a wrapped *consensus.TxError cause would satisfy p2p isConsensusApplyBlockError and bump the relaying peer's ban score 100 for OUR corrupt store (measured)
-	}
-	if observedHash != parentHash {
-		return nil, nil, fmt.Errorf(
-			"%w: stored block for %x hashes to %x",
-			errBranchStoreCorrupt, parentHash, observedHash,
-		)
-	}
-	return parentParsed, parentBlockBytes, nil
+	return stored.parsed, stored.blockBytes, nil
 }
 
 func (s *SyncEngine) syntheticSideChainSummary(height uint64, blockHash [32]byte) *ChainStateConnectSummary {
@@ -494,13 +503,34 @@ func (s *SyncEngine) syntheticSideChainSummary(height uint64, blockHash [32]byte
 	}
 }
 
+func (s *SyncEngine) requeueVerifiedDisconnectedTransactions(disconnectedBlocks []verifiedStoredBlock) {
+	parsedBlocks := make([]*consensus.ParsedBlock, 0, len(disconnectedBlocks))
+	for _, block := range disconnectedBlocks {
+		parsedBlocks = append(parsedBlocks, block.parsed)
+	}
+	s.requeueParsedDisconnectedTransactions(parsedBlocks)
+}
+
+// requeueDisconnectedTransactions is for raw-byte callers; reorgs retain parses.
 func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte) {
+	parsedBlocks := make([]*consensus.ParsedBlock, 0, len(disconnectedBlocks))
+	for _, blockBytes := range disconnectedBlocks {
+		parsed, err := consensus.ParseBlockBytes(blockBytes)
+		if err != nil {
+			continue
+		}
+		parsedBlocks = append(parsedBlocks, parsed)
+	}
+	s.requeueParsedDisconnectedTransactions(parsedBlocks)
+}
+
+func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []*consensus.ParsedBlock) {
 	if s == nil || s.mempool == nil || len(disconnectedBlocks) == 0 {
 		return
 	}
 	// Disconnect helpers append blocks tip-down, matching h_max -> h_min requeue order.
-	for blockIndex := 0; blockIndex < len(disconnectedBlocks); blockIndex++ {
-		txs, err := nonCoinbaseBlockTransactions(disconnectedBlocks[blockIndex])
+	for _, parsed := range disconnectedBlocks {
+		txs, err := nonCoinbaseParsedBlockTransactions(parsed)
 		if err != nil {
 			continue
 		}
@@ -516,6 +546,13 @@ func nonCoinbaseBlockTransactions(blockBytes []byte) ([][]byte, error) {
 	pb, err := consensus.ParseBlockBytes(blockBytes)
 	if err != nil {
 		return nil, err
+	}
+	return nonCoinbaseParsedBlockTransactions(pb)
+}
+
+func nonCoinbaseParsedBlockTransactions(pb *consensus.ParsedBlock) ([][]byte, error) {
+	if pb == nil {
+		return nil, errors.New("nil parsed block")
 	}
 	if len(pb.Txs) <= 1 {
 		return nil, nil

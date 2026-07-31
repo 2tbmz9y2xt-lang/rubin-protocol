@@ -1,5 +1,6 @@
 use super::*;
 use crate::tx::{Tx, TxInput, TxOutput, WitnessItem};
+use crate::validate_stored_block_commitments;
 
 #[test]
 fn parse_block_bytes_ok() {
@@ -15,6 +16,45 @@ fn parse_block_bytes_ok() {
     assert_eq!(parsed.tx_count, 1);
     assert_eq!(parsed.txs.len(), 1);
     assert_eq!(parsed.txids.len(), 1);
+}
+
+#[test]
+fn validate_stored_block_commitments_checks_coinbase_merkle_then_witness() {
+    let tx = coinbase_with_witness_commitment(0, &[]);
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let root = merkle_root_txids(&[txid]).expect("root");
+    let block = build_block_bytes([0x31; 32], root, [0xff; 32], 8, &[tx]);
+    let parsed = parse_block_bytes(&block).expect("parse block");
+    validate_stored_block_commitments(&parsed).expect("valid stored commitments");
+
+    let mut bad_coinbase = parsed.clone();
+    bad_coinbase.txs[0].tx_kind = 1;
+    bad_coinbase.header.merkle_root = [0; 32];
+    assert_eq!(
+        validate_stored_block_commitments(&bad_coinbase)
+            .expect_err("coinbase must precede merkle")
+            .code,
+        ErrorCode::BlockErrCoinbaseInvalid
+    );
+
+    let mut bad_merkle = parsed.clone();
+    bad_merkle.header.merkle_root[0] ^= 1;
+    bad_merkle.txs[0].outputs[0].covenant_data[0] ^= 1;
+    assert_eq!(
+        validate_stored_block_commitments(&bad_merkle)
+            .expect_err("merkle mismatch")
+            .code,
+        ErrorCode::BlockErrMerkleInvalid
+    );
+
+    let mut bad_witness = parsed;
+    bad_witness.txs[0].outputs[0].covenant_data[0] ^= 1;
+    assert_eq!(
+        validate_stored_block_commitments(&bad_witness)
+            .expect_err("witness mismatch")
+            .code,
+        ErrorCode::BlockErrWitnessCommitment
+    );
 }
 
 #[test]

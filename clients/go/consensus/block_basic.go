@@ -112,6 +112,24 @@ func ParseBlockBytes(b []byte) (*ParsedBlock, error) {
 	}, nil
 }
 
+// ValidateStoredBlockCommitments verifies only the stored-block coinbase, txid, and witness commitments.
+func ValidateStoredBlockCommitments(pb *ParsedBlock) error {
+	if pb == nil {
+		return txerr(BLOCK_ERR_PARSE, "nil parsed block")
+	}
+	if len(pb.Txs) == 0 || !isCoinbaseTx(pb.Txs[0]) {
+		return txerr(BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
+	}
+	root, err := MerkleRootTxids(pb.Txids)
+	if err != nil {
+		return txerr(BLOCK_ERR_MERKLE_INVALID, "failed to compute merkle root")
+	}
+	if root != pb.Header.MerkleRoot {
+		return txerr(BLOCK_ERR_MERKLE_INVALID, "merkle_root mismatch")
+	}
+	return validateCoinbaseWitnessCommitment(pb)
+}
+
 // parseBlockTx parses a single transaction from b at the given offset,
 // advances off past the consumed bytes, and returns the parsed tx.
 func parseBlockTx(b []byte, off *int) (*Tx, [32]byte, [32]byte, int, error) {

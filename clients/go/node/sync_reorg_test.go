@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -24,6 +25,23 @@ func reorgTestTimestamp(n uint64) uint64 {
 		panic("ParseBlockBytes(genesis): " + err.Error())
 	}
 	return genesisParsed.Header.Timestamp + n
+}
+
+type corruptCanonicalOnCreateRotation struct {
+	overwrite func()
+	fires     int
+}
+
+func (p *corruptCanonicalOnCreateRotation) NativeCreateSuites(height uint64) *consensus.NativeSuiteSet {
+	if p.fires == 0 {
+		p.fires++
+		p.overwrite()
+	}
+	return consensus.DefaultRotationProvider{}.NativeCreateSuites(height)
+}
+
+func (p *corruptCanonicalOnCreateRotation) NativeSpendSuites(height uint64) *consensus.NativeSuiteSet {
+	return consensus.DefaultRotationProvider{}.NativeSpendSuites(height)
 }
 
 func TestReorgTwoMiners(t *testing.T) {
@@ -66,9 +84,16 @@ func TestReorgTwoMiners(t *testing.T) {
 		t.Fatalf("BlockHash(B1): %v", err)
 	}
 	blockB2 := buildSingleTxBlock(t, blockB1Hash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+	rotation := &corruptCanonicalOnCreateRotation{overwrite: func() {
+		writeRawStoreBlockFile(t, store, summaryA1.BlockHash, []byte("corrupt after preview"))
+	}}
+	engine.cfg.RotationProvider = rotation
 	summaryB2, err := engine.ApplyBlockWithReorg(blockB2, nil)
 	if err != nil {
 		t.Fatalf("ApplyBlockWithReorg(B2): %v", err)
+	}
+	if rotation.fires != 1 {
+		t.Fatalf("post-preview overwrite fired %d times, want 1", rotation.fires)
 	}
 	if summaryB2.BlockHeight != 2 {
 		t.Fatalf("B2 height=%d, want 2", summaryB2.BlockHeight)
@@ -967,7 +992,19 @@ func TestRequeueDisconnectedTransactionsUsesTipDownOrderAndContinuesAfterReject(
 		txLow,
 	)
 
-	engine.requeueDisconnectedTransactions([][]byte{blockHigh, blockLow})
+	highParsed, err := consensus.ParseBlockBytes(blockHigh)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(high): %v", err)
+	}
+	lowParsed, err := consensus.ParseBlockBytes(blockLow)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(low): %v", err)
+	}
+	// Bad byte fields prove production requeue uses the retained parses.
+	engine.requeueVerifiedDisconnectedTransactions([]verifiedStoredBlock{
+		{blockBytes: []byte("not parsed again"), parsed: highParsed},
+		{blockBytes: []byte("not parsed again"), parsed: lowParsed},
+	})
 
 	if !strings.Contains(stderr.String(), "mempool: requeue-tx:") {
 		t.Fatalf("expected duplicate requeue rejection to be logged, got %q", stderr.String())
@@ -2489,6 +2526,85 @@ func writeRawStoreBlockFile(t *testing.T, store *BlockStore, hash [32]byte, bloc
 	}
 }
 
+func corruptStoredMerkleBody(t *testing.T, blockBytes []byte) []byte {
+	t.Helper()
+	corrupt := append([]byte(nil), blockBytes...)
+	if len(corrupt) < 3 {
+		t.Fatal("test block too short to change coinbase locktime")
+	}
+	// Mutating coinbase locktime keeps parsing/header identity but breaks Merkle.
+	corrupt[len(corrupt)-3] ^= 0x01
+	pb, err := consensus.ParseBlockBytes(corrupt)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(corrupt merkle body): %v", err)
+	}
+	requireConsensusTxErrCode(t, consensus.ValidateStoredBlockCommitments(pb), consensus.BLOCK_ERR_MERKLE_INVALID)
+	return corrupt
+}
+
+func storedWitnessCommitmentTestBlock(t *testing.T, prevHash, target [32]byte, height, timestamp uint64) []byte {
+	t.Helper()
+	spend := &consensus.Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  1,
+		Inputs:   []consensus.TxInput{{PrevTxid: [32]byte{0x91}, PrevVout: 0, Sequence: 0}},
+		Outputs:  []consensus.TxOutput{{Value: 1, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: testP2PKCovenantData(0x77)}},
+		Locktime: 0,
+		Witness:  []consensus.WitnessItem{{SuiteID: 0x7e, Pubkey: []byte{0x01}, Signature: []byte{0x02}}},
+	}
+	spendBytes, err := consensus.MarshalTx(spend)
+	if err != nil {
+		t.Fatalf("MarshalTx(spend): %v", err)
+	}
+	_, _, spendWtxid, _, err := consensus.ParseTx(spendBytes)
+	if err != nil {
+		t.Fatalf("ParseTx(spend): %v", err)
+	}
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueForWtxids(
+		t,
+		height,
+		consensus.BlockSubsidy(height, 0),
+		[][32]byte{{}, spendWtxid},
+	)
+	return buildMultiTxBlock(t, prevHash, target, timestamp, coinbase, spendBytes)
+}
+
+func corruptStoredWitnessOnly(t *testing.T, blockBytes []byte) []byte {
+	t.Helper()
+	pb, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(source): %v", err)
+	}
+	if len(pb.Txs) < 2 || len(pb.Txs[1].Witness) == 0 || len(pb.Txs[1].Witness[0].Signature) == 0 {
+		t.Fatal("test block has no mutable non-coinbase witness")
+	}
+	pb.Txs[1].Witness[0].Signature[0] ^= 0x01
+
+	corrupt := append([]byte(nil), pb.HeaderBytes...)
+	corrupt = consensus.AppendCompactSize(corrupt, uint64(len(pb.Txs)))
+	for _, tx := range pb.Txs {
+		txBytes, err := consensus.MarshalTx(tx)
+		if err != nil {
+			t.Fatalf("MarshalTx(rebuild): %v", err)
+		}
+		corrupt = append(corrupt, txBytes...)
+	}
+	parsed, err := consensus.ParseBlockBytes(corrupt)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(corrupt witness): %v", err)
+	}
+	root, err := consensus.MerkleRootTxids(parsed.Txids)
+	if err != nil {
+		t.Fatalf("MerkleRootTxids(corrupt witness): %v", err)
+	}
+	if root != parsed.Header.MerkleRoot {
+		t.Fatal("witness-only corruption changed the txid Merkle root")
+	}
+	requireConsensusTxErrCode(t, consensus.ValidateStoredBlockCommitments(parsed), consensus.BLOCK_ERR_WITNESS_COMMITMENT)
+	return corrupt
+}
+
 // assertBranchStoreCorruption pins the failure class of a corrupt-store branch
 // walk: a local-corruption error, distinct from ErrParentNotFound, and NOT a
 // *consensus.TxError. That last property is what keeps a peer from being
@@ -2585,6 +2701,14 @@ func TestCollectBranchToCanonicalRejectsCorruptStoreAncestry(t *testing.T) {
 			return truncatedHash
 		},
 	}, {
+		name: "ancestor file with trailing bytes",
+		plant: func(t *testing.T, store *BlockStore, target [32]byte) [32]byte {
+			trailingHash := [32]byte{0x9a, 0x33}
+			full := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(76), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy))
+			writeRawStoreBlockFile(t, store, trailingHash, append(full, 0x00))
+			return trailingHash
+		},
+	}, {
 		// Substitution: a real, well-formed block stored under someone else's
 		// hash. A plain file read cannot tell the difference.
 		name: "ancestor bytes hashing to another value",
@@ -2605,6 +2729,121 @@ func TestCollectBranchToCanonicalRejectsCorruptStoreAncestry(t *testing.T) {
 			_, _, _, err := engine.collectBranchToCanonical(candidateHash, candidate, parsed)
 			assertBranchStoreCorruption(t, err)
 		})
+	}
+}
+
+func TestCollectBranchToCanonicalRejectsStoredCommitmentCorruptionAtEveryDepth(t *testing.T) {
+	corruptions := []struct {
+		name    string
+		block   func(t *testing.T, target [32]byte) []byte
+		corrupt func(t *testing.T, blockBytes []byte) []byte
+	}{
+		{
+			name: "txid Merkle body substitution",
+			block: func(t *testing.T, target [32]byte) []byte {
+				return buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(101), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidy(1, 0)))
+			},
+			corrupt: corruptStoredMerkleBody,
+		},
+		{
+			name: "witness-only substitution",
+			block: func(t *testing.T, target [32]byte) []byte {
+				return storedWitnessCommitmentTestBlock(t, devnetGenesisBlockHash, target, 1, reorgTestTimestamp(102))
+			},
+			corrupt: corruptStoredWitnessOnly,
+		},
+	}
+
+	for _, corruption := range corruptions {
+		for _, depth := range []struct {
+			name string
+			mid  bool
+		}{
+			{name: "branch root"},
+			{name: "branch middle", mid: true},
+		} {
+			t.Run(corruption.name+"/"+depth.name, func(t *testing.T) {
+				engine, store, target := newReorgTestEngine(t)
+				validB1 := corruption.block(t, target)
+				_, b1Hash := mustParseReorgBlockForTest(t, validB1)
+				writeRawStoreBlockFile(t, store, b1Hash, corruption.corrupt(t, validB1))
+
+				parentHash := b1Hash
+				candidateHeight := uint64(2)
+				if depth.mid {
+					b2 := buildSingleTxBlock(t, b1Hash, target, reorgTestTimestamp(103), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidy(2, consensus.BlockSubsidy(1, 0))))
+					b2Parsed, b2Hash := mustParseReorgBlockForTest(t, b2)
+					if err := store.StoreBlock(b2Hash, b2Parsed.HeaderBytes, b2); err != nil {
+						t.Fatalf("StoreBlock(B2): %v", err)
+					}
+					parentHash = b2Hash
+					candidateHeight = 3
+				}
+				candidate := buildSingleTxBlock(t, parentHash, target, reorgTestTimestamp(104), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, candidateHeight, consensus.BlockSubsidy(candidateHeight, 0)))
+				parsed, candidateHash := mustParseReorgBlockForTest(t, candidate)
+
+				_, _, _, err := engine.collectBranchToCanonical(candidateHash, candidate, parsed)
+				assertBranchStoreCorruption(t, err)
+			})
+		}
+	}
+}
+
+func TestApplyBlockWithReorgRejectsCorruptLosingStoredBranchBeforeForkChoice(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+	prevHash := devnetGenesisBlockHash
+	alreadyGenerated := uint64(0)
+	for height := uint64(1); height <= 3; height++ {
+		subsidy := consensus.BlockSubsidy(height, alreadyGenerated)
+		block := buildSingleTxBlock(t, prevHash, target, reorgTestTimestamp(height), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, subsidy))
+		summary, err := engine.ApplyBlock(block, nil)
+		if err != nil {
+			t.Fatalf("ApplyBlock(A%d): %v", height, err)
+		}
+		prevHash = summary.BlockHash
+		alreadyGenerated += subsidy
+	}
+	mempool, err := NewMempool(engine.chainState, store, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	engine.SetMempool(mempool)
+	beforeState, err := stateToDisk(engine.chainState)
+	if err != nil {
+		t.Fatalf("stateToDisk(before): %v", err)
+	}
+	beforeIndex, err := store.CanonicalIndexSnapshot()
+	if err != nil {
+		t.Fatalf("CanonicalIndexSnapshot(before): %v", err)
+	}
+	beforeCounts := engine.BlockApplyCounts()
+	beforeMempoolLen := mempool.Len()
+
+	subsidy1 := consensus.BlockSubsidy(1, 0)
+	validB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(201), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	_, b1Hash := mustParseReorgBlockForTest(t, validB1)
+	writeRawStoreBlockFile(t, store, b1Hash, corruptStoredMerkleBody(t, validB1))
+	b2 := buildSingleTxBlock(t, b1Hash, target, reorgTestTimestamp(202), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidy(2, subsidy1)))
+	_, b2Hash := mustParseReorgBlockForTest(t, b2)
+
+	// A healthy two-block branch loses to the current three-block canonical tip.
+	// Collection must still reject its corrupt stored ancestor before fork choice.
+	_, err = engine.ApplyBlockWithReorg(b2, nil)
+	assertBranchStoreCorruption(t, err)
+	if got, err := stateToDisk(engine.chainState); err != nil || !reflect.DeepEqual(got, beforeState) {
+		t.Fatalf("chainstate after corrupt losing branch: state=%+v err=%v", got, err)
+	}
+	if got, err := store.CanonicalIndexSnapshot(); err != nil || !reflect.DeepEqual(got, beforeIndex) {
+		t.Fatalf("canonical index after corrupt losing branch: index=%v err=%v", got, err)
+	}
+	if got := engine.BlockApplyCounts(); got != beforeCounts {
+		t.Fatalf("BlockApplyCounts=%+v, want %+v", got, beforeCounts)
+	}
+	if got := mempool.Len(); got != beforeMempoolLen {
+		t.Fatalf("mempool len=%d, want %d", got, beforeMempoolLen)
+	}
+	if _, err := store.GetBlockByHash(b2Hash); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("candidate B2 stored despite local failure: %v", err)
 	}
 }
 
@@ -3048,13 +3287,8 @@ func TestCompleteDASetIDsFromParsedBlockIncompleteShapes(t *testing.T) {
 	}
 }
 
-// RUB-1057 hostile row: an over-bound ancestor block file on the branch walk
-// is LOCAL store corruption — never ErrParentNotFound (the orphan path), and
-// never a peer-attributable consensus error. The unreadable arm propagates
-// the typed errStoreFileTooLarge raw (only parse/hash defects are rendered as
-// errBranchStoreCorrupt); the Rust twin renders the same arm through its
-// branch_store_corrupt prefix — same local-corruption verdict class. Rust
-// twin: `branch_walk_over_bound_ancestor_is_local_corruption`.
+// An over-bound ancestor block is local store corruption while retaining its
+// typed size cause for callers that need the operational diagnosis.
 func TestLoadVerifiedBranchAncestorOverBoundBlockIsLocalCorruption(t *testing.T) {
 	dir := t.TempDir()
 	store := mustCreateBlockStore(t, BlockStorePath(dir))
@@ -3067,11 +3301,44 @@ func TestLoadVerifiedBranchAncestorOverBoundBlockIsLocalCorruption(t *testing.T)
 	blockPath := filepath.Join(BlockStorePath(dir), "blocks", hex.EncodeToString(hash[:])+".bin")
 	createSparseFile(t, blockPath, blockFileMaxBytes+1)
 	_, _, err = engine.loadVerifiedBranchAncestor(hash)
-	if !errors.Is(err, errStoreFileTooLarge) || errors.Is(err, ErrParentNotFound) {
-		t.Fatalf("want typed local size error (not ErrParentNotFound), got %v", err)
+	if !errors.Is(err, errBranchStoreCorrupt) || !errors.Is(err, errStoreFileTooLarge) || errors.Is(err, ErrParentNotFound) {
+		t.Fatalf("want local corruption with typed size cause, got %v", err)
 	}
 	var txErr *consensus.TxError
 	if errors.As(err, &txErr) {
 		t.Fatalf("over-bound ancestor must not be peer-attributable: %v", err)
 	}
+}
+
+func TestLoadVerifiedStoredBlockReadFailuresAreLocalCorruption(t *testing.T) {
+	t.Run("missing file", func(t *testing.T) {
+		engine, _, _ := newReorgTestEngine(t)
+		hash := [32]byte{0x71}
+		_, err := engine.loadVerifiedStoredBlock(hash)
+		assertBranchStoreCorruption(t, err)
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("missing stored block must retain os.ErrNotExist: %v", err)
+		}
+		_, _, err = engine.loadVerifiedBranchAncestor(hash)
+		if !errors.Is(err, ErrParentNotFound) || errors.Is(err, errBranchStoreCorrupt) {
+			t.Fatalf("missing side ancestor=%v, want ErrParentNotFound only", err)
+		}
+	})
+
+	t.Run("wrong kind", func(t *testing.T) {
+		engine, store, _ := newReorgTestEngine(t)
+		hash := [32]byte{0x72}
+		path := filepath.Join(store.blocksDir, hex.EncodeToString(hash[:])+".bin")
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatalf("Mkdir(block path): %v", err)
+		}
+		_, err := engine.loadVerifiedStoredBlock(hash)
+		assertBranchStoreCorruption(t, err)
+		var pathErr *fs.PathError
+		if !errors.As(err, &pathErr) {
+			t.Fatalf("wrong-kind read must retain a path error: %v", err)
+		}
+		_, _, err = engine.loadVerifiedBranchAncestor(hash)
+		assertBranchStoreCorruption(t, err)
+	})
 }
