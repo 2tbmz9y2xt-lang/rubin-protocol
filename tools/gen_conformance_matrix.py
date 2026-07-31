@@ -20,6 +20,7 @@ EXPECTED_PROTOCOL_ARTIFACTS = frozenset(
         "legacy_exposure_hook_vectors.json",
         "legacy_exposure_report_v1_example.json",
         "live_binding_policy_v1.json",
+        "operator_path_normalization_v1.json",
         "production_rotation_schedule_v1.json",
         "simplicity_crypto_jets_corpus_v1.json",
         "simplicity_data_jets_corpus_v1.json",
@@ -112,6 +113,10 @@ PROTOCOL_ARTIFACT_META: dict[str, tuple[str, str]] = {
     "live_binding_policy_v1.json": (
         "Canonical live binding policy artifact",
         "Go/Rust consensus embedded copies, loader drift checks, and live binding/runtime parity tests",
+    ),
+    "operator_path_normalization_v1.json": (
+        "Shared Unix UTF-8 lexical operator-path normalization fixture",
+        "Go/Rust fixture consumers and client-local CLI owner tests for shared datadir/genesis plus Go-only featurebits",
     ),
     "production_rotation_schedule_v1.json": (
         "Canonical production rotation schedule artifact",

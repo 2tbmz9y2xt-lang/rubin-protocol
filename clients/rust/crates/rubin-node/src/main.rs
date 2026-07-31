@@ -2281,6 +2281,32 @@ mod tests {
         fs::remove_dir_all(&dir).expect("cleanup");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn dry_run_uses_lexically_normalized_datadir() {
+        let dir = unique_temp_dir("rubin-node-bin-datadir-symlink");
+        fs::create_dir_all(dir.join("sub")).expect("mkdir sub");
+        fs::create_dir_all(dir.join("other/real")).expect("mkdir link target");
+        let lexical = dir.join("sub/data");
+        seed_block_store(&lexical);
+        seed_block_store(&dir.join("other/data"));
+        std::os::unix::fs::symlink(dir.join("other/real"), dir.join("sub/link")).expect("symlink");
+        let raw = dir.join("sub/link/../data");
+        let args = vec![
+            "--dry-run".to_string(),
+            "--datadir".to_string(),
+            raw.display().to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+        let json = parse_effective_config_json(&stdout);
+        assert_eq!(json["data_dir"].as_str(), lexical.to_str());
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
     #[test]
     fn dry_run_loads_chain_id_from_genesis_file() {
         let dir = unique_temp_dir("rubin-node-bin-genesis");

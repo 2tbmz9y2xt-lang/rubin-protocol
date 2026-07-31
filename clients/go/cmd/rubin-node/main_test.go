@@ -343,8 +343,9 @@ func symlinkTraversalDataDir(t *testing.T) (raw string, cleaned string, escaped 
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	raw = filepath.Join(link, "..", "chain")
-	cleaned = node.NormalizeDataDir(raw)
+	sep := string(filepath.Separator)
+	raw = link + sep + ".." + sep + "chain"
+	cleaned = filepath.Clean(raw)
 	escaped = filepath.Join(outside, "chain")
 	if cleaned == escaped {
 		t.Fatalf("invalid fixture: cleaned path equals symlink-resolved escape path %q", cleaned)
@@ -352,7 +353,7 @@ func symlinkTraversalDataDir(t *testing.T) (raw string, cleaned string, escaped 
 	return raw, cleaned, escaped
 }
 
-func TestRunNormalizesDataDirBeforeChainStateAndBlockStorePathDerivation(t *testing.T) {
+func runNormalizesDataDirBeforeChainStateAndBlockStorePathDerivation(t *testing.T) {
 	raw, cleaned, _ := symlinkTraversalDataDir(t)
 	seedBlockStore(t, cleaned)
 	// Height 7 is the chainstate-path probe: --dry-run no longer writes a
@@ -383,6 +384,100 @@ func TestRunNormalizesDataDirBeforeChainStateAndBlockStorePathDerivation(t *test
 		t.Fatalf("expected blockstore under normalized datadir: %v", err)
 	} else if !info.IsDir() {
 		t.Fatalf("blockstore path is not a directory: %s", node.BlockStorePath(cleaned))
+	}
+}
+
+func TestOperatorPathOwnerInventory(t *testing.T) {
+	owners := []struct {
+		surface, ownership, cleanCall string
+		goOwner                       func(*testing.T)
+	}{
+		{"--datadir", "shared", "cfg.DataDir = node.NormalizeDataDir(cfg.DataDir)", runNormalizesDataDirBeforeChainStateAndBlockStorePathDerivation},
+		{"--genesis-file", "shared", "node.ReadConfigFile(filepath.Clean(path))", runGenesisFileUsesLexicallyNormalizedPath},
+		{"--featurebits-deployments", "go-only", "node.ReadConfigFile(filepath.Clean(deploymentsPath))", runFeatureBitsDeploymentsUsesLexicallyNormalizedPath},
+	}
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, owner := range owners {
+		if got := bytes.Count(source, []byte(owner.cleanCall)); got != 1 {
+			t.Fatalf("%s clean call count=%d, want 1", owner.surface, got)
+		}
+		t.Run(owner.ownership+":"+owner.surface, owner.goOwner)
+	}
+}
+
+func runGenesisFileUsesLexicallyNormalizedPath(t *testing.T) {
+	if filepath.Separator != '/' {
+		t.Skip("symlink-plus-parent fixture is Unix-only")
+	}
+	dir := t.TempDir()
+	seedBlockStore(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "other", "real"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lexicalID, kernelID := strings.Repeat("11", 32), strings.Repeat("22", 32)
+	pack := func(id string) []byte {
+		return []byte(fmt.Sprintf(`{"chain_id_hex":%q,"genesis_hash_hex":%q}`, id, strings.Repeat("33", 32)))
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "genesis-pack.json"), pack(lexicalID), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "other", "genesis-pack.json"), pack(kernelID), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "other", "real"), filepath.Join(dir, "sub", "link")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	sep := string(filepath.Separator)
+	raw := filepath.Join(dir, "sub", "link") + sep + ".." + sep + "genesis-pack.json"
+	var out, errOut bytes.Buffer
+	code := run([]string{"--network", "testnet", "--dry-run", "--datadir", dir, "--genesis-file", raw}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("exit %d (stderr=%q)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), lexicalID) || strings.Contains(out.String(), kernelID) {
+		t.Fatalf("run did not select lexical genesis identity: %q", out.String())
+	}
+}
+
+func runFeatureBitsDeploymentsUsesLexicallyNormalizedPath(t *testing.T) {
+	if filepath.Separator != '/' {
+		t.Skip("symlink-plus-parent fixture is Unix-only")
+	}
+	dir := preparedDatadir(t)
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "other", "real"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	deployment := func(name string) []byte {
+		return []byte(fmt.Sprintf(`[{"name":%q,"bit":1,"start_height":0,"timeout_height":1000}]`, name))
+	}
+	if err := os.WriteFile(filepath.Join(root, "sub", "deployments.json"), deployment("lexical-owner"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "other", "deployments.json"), deployment("kernel-owner"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "other", "real"), filepath.Join(root, "sub", "link")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	sep := string(filepath.Separator)
+	raw := filepath.Join(root, "sub", "link") + sep + ".." + sep + "deployments.json"
+	var out, errOut bytes.Buffer
+	code := run([]string{"--dry-run", "--datadir", dir, "--featurebits-deployments", raw}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("exit %d (stderr=%q)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "lexical-owner") || strings.Contains(out.String(), "kernel-owner") {
+		t.Fatalf("run did not select lexical deployment content: %q", out.String())
 	}
 }
 
