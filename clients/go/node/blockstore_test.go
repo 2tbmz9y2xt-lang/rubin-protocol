@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -423,6 +424,198 @@ func testHeaderBytes(seed byte, nonce uint64) []byte {
 	}
 	binary.LittleEndian.PutUint64(header[108:116], nonce)
 	return header
+}
+
+func putChainWorkHeader(t *testing.T, store *BlockStore, height uint64, prev [32]byte, seed byte, target [32]byte) [32]byte {
+	t.Helper()
+	header := testHeaderBytes(seed, uint64(seed))
+	copy(header[4:36], prev[:])
+	copy(header[76:108], target[:])
+	hash := mustHeaderHash(t, header)
+	if err := store.PutBlock(height, hash, header, []byte("chain-work-test")); err != nil {
+		t.Fatalf("PutBlock(%d): %v", height, err)
+	}
+	return hash
+}
+
+func mustChainWorkTestChain(t *testing.T) (*BlockStore, [3][32]byte) {
+	t.Helper()
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	var zero [32]byte
+	var hashes [3][32]byte
+	hashes[0] = putChainWorkHeader(t, store, 0, zero, 0x51, consensus.POW_LIMIT)
+	hashes[1] = putChainWorkHeader(t, store, 1, hashes[0], 0x52, consensus.POW_LIMIT)
+	hashes[2] = putChainWorkHeader(t, store, 2, hashes[1], 0x53, consensus.POW_LIMIT)
+	return store, hashes
+}
+
+func mustGetChainWorkHeader(t *testing.T, store *BlockStore, hash [32]byte) []byte {
+	t.Helper()
+	raw, err := store.GetHeaderByHash(hash)
+	if err != nil {
+		t.Fatalf("GetHeaderByHash(%x): %v", hash, err)
+	}
+	return raw
+}
+
+func assertChainWorkLocalCorruption(t *testing.T, work *big.Int, err error) {
+	t.Helper()
+	if work != nil || !errors.Is(err, errBranchStoreCorrupt) {
+		t.Fatalf("ChainWork=(%v,%v), want nil,errBranchStoreCorrupt", work, err)
+	}
+	var txErr *consensus.TxError
+	if errors.As(err, &txErr) {
+		t.Fatalf("local chain-work corruption leaked consensus.TxError: %v", err)
+	}
+}
+
+func TestBlockStoreChainWorkCacheRows(t *testing.T) {
+	want := big.NewInt(3) // POW_LIMIT contributes exactly one unit per header.
+	uncached, uncachedHashes := mustChainWorkTestChain(t)
+	if _, ok := uncached.cachedChainWork(uncachedHashes[2]); ok {
+		t.Fatal("fresh chain-work fixture unexpectedly has a cached tip")
+	}
+	got, err := uncached.ChainWork(uncachedHashes[2])
+	if err != nil || got.Cmp(want) != 0 {
+		t.Fatalf("uncached ChainWork=(%v,%v), want %s,nil", got, err, want)
+	}
+	partial, partialHashes := mustChainWorkTestChain(t)
+	if _, err := partial.ChainWork(partialHashes[1]); err != nil {
+		t.Fatalf("ChainWork(cached ancestor): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(partial.headersDir, hex.EncodeToString(partialHashes[1][:])+".bin"), []byte("corrupt cached ancestor"), 0o600); err != nil {
+		t.Fatalf("WriteFile(corrupt cached ancestor): %v", err)
+	}
+	got, err = partial.ChainWork(partialHashes[2])
+	if err != nil || got.Cmp(want) != 0 {
+		t.Fatalf("partial-cache ChainWork=(%v,%v), want %s,nil", got, err, want)
+	}
+	if err := os.WriteFile(filepath.Join(partial.headersDir, hex.EncodeToString(partialHashes[2][:])+".bin"), []byte("corrupt cached tip"), 0o600); err != nil {
+		t.Fatalf("WriteFile(corrupt cached tip): %v", err)
+	}
+	got.SetInt64(0)
+	got, err = partial.ChainWork(partialHashes[2])
+	if err != nil || got.Cmp(want) != 0 {
+		t.Fatalf("complete-cache ChainWork=(%v,%v), want %s,nil", got, err, want)
+	}
+	longStore := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "long-blockstore"))
+	const longCount = 33
+	var longTip [32]byte
+	for i := 0; i < longCount; i++ {
+		longTip = putChainWorkHeader(t, longStore, uint64(i), longTip, byte(i+1), consensus.POW_LIMIT)
+	}
+	longGot, err := longStore.ChainWork(longTip)
+	if err != nil || longGot.Cmp(big.NewInt(longCount)) != 0 {
+		t.Fatalf("long uncached ChainWork=(%v,%v), want %d,nil", longGot, err, longCount)
+	}
+}
+
+func TestBlockStoreChainWorkLocalCorruptionRows(t *testing.T) {
+	t.Run("missing_header", func(t *testing.T) {
+		store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+		work, err := store.ChainWork([32]byte{0x01})
+		assertChainWorkLocalCorruption(t, work, err)
+	})
+	t.Run("unreadable_existing_header", func(t *testing.T) {
+		store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+		hash := [32]byte{0x02}
+		if err := os.Mkdir(filepath.Join(store.headersDir, hex.EncodeToString(hash[:])+".bin"), 0o700); err != nil {
+			t.Fatalf("Mkdir(header leaf): %v", err)
+		}
+		work, err := store.ChainWork(hash)
+		assertChainWorkLocalCorruption(t, work, err)
+		if !strings.Contains(err.Error(), "cannot be read") {
+			t.Fatalf("unreadable header diagnostic=%v", err)
+		}
+	})
+	for _, tc := range []struct {
+		name string
+		at   int
+		raw  func(t *testing.T, store *BlockStore, hashes [3][32]byte) []byte
+	}{
+		{"substituted_head", 2, func(t *testing.T, store *BlockStore, hashes [3][32]byte) []byte {
+			return mustGetChainWorkHeader(t, store, hashes[1])
+		}},
+		{"substituted_middle", 1, func(t *testing.T, store *BlockStore, hashes [3][32]byte) []byte {
+			return mustGetChainWorkHeader(t, store, hashes[0])
+		}},
+		{"short_header", 2, func(t *testing.T, _ *BlockStore, _ [3][32]byte) []byte { return []byte{0x01} }},
+		{"long_header", 2, func(t *testing.T, _ *BlockStore, _ [3][32]byte) []byte {
+			return make([]byte, consensus.BLOCK_HEADER_BYTES+1)
+		}},
+		{"dual_invalid_substitution", 2, func(t *testing.T, _ *BlockStore, _ [3][32]byte) []byte {
+			raw := testHeaderBytes(0x44, 44)
+			clear(raw[76:108])
+			return raw
+		}},
+		{"identity_limited_cycle", 2, func(t *testing.T, store *BlockStore, hashes [3][32]byte) []byte {
+			raw := mustGetChainWorkHeader(t, store, hashes[2])
+			copy(raw[4:36], hashes[2][:])
+			return raw
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, hashes := mustChainWorkTestChain(t)
+			path := filepath.Join(store.headersDir, hex.EncodeToString(hashes[tc.at][:])+".bin")
+			if err := os.WriteFile(path, tc.raw(t, store, hashes), 0o600); err != nil {
+				t.Fatalf("WriteFile(%s): %v", tc.name, err)
+			}
+			work, err := store.ChainWork(hashes[2])
+			assertChainWorkLocalCorruption(t, work, err)
+			if tc.name == "dual_invalid_substitution" && (!strings.Contains(err.Error(), "hashes to") || strings.Contains(err.Error(), "target")) {
+				t.Fatalf("dual-invalid diagnostic=%v, want identity mismatch before target ownership", err)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name   string
+		target [32]byte
+		limit  [32]byte
+	}{
+		{"zero_target", [32]byte{}, consensus.POW_LIMIT},
+		{"above_pow_limit", [32]byte{31: 2}, [32]byte{31: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previousLimit := consensus.POW_LIMIT
+			consensus.POW_LIMIT = tc.limit
+			t.Cleanup(func() { consensus.POW_LIMIT = previousLimit })
+			store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+			var zero [32]byte
+			hash := putChainWorkHeader(t, store, 0, zero, 0x61, tc.target)
+			work, err := store.ChainWork(hash)
+			assertChainWorkLocalCorruption(t, work, err)
+		})
+	}
+	for invalidAt, name := range []string{"rootward", "middle", "tip"} {
+		t.Run("failed_segment_does_not_publish_cache_"+name, func(t *testing.T) {
+			store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+			var zero [32]byte
+			root := putChainWorkHeader(t, store, 0, zero, 0x71, consensus.POW_LIMIT)
+			if _, err := store.ChainWork(root); err != nil {
+				t.Fatalf("ChainWork(root): %v", err)
+			}
+			var segment [3][32]byte
+			prev := root
+			for i := range segment {
+				target := consensus.POW_LIMIT
+				if i == invalidAt {
+					target = zero
+				}
+				segment[i] = putChainWorkHeader(t, store, uint64(i+1), prev, byte(0x72+i), target)
+				prev = segment[i]
+			}
+			work, err := store.ChainWork(segment[2])
+			assertChainWorkLocalCorruption(t, work, err)
+			if _, ok := store.cachedChainWork(root); !ok {
+				t.Fatal("cached ancestor disappeared after failed segment")
+			}
+			for _, hash := range segment {
+				if _, ok := store.cachedChainWork(hash); ok {
+					t.Fatalf("failed segment published cache entry for %x", hash)
+				}
+			}
+		})
+	}
 }
 
 // fresh datadir whose blockstore root does NOT exist yet.
