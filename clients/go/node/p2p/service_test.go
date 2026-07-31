@@ -1318,6 +1318,49 @@ func TestFaultAttributionSplitConsensusVsIO(t *testing.T) {
 	}
 }
 
+func TestRelayedCandidateWithCorruptStoredAncestorIsPeerNeutral(t *testing.T) {
+	// The relayed height-2 block is honest. Only the sink's local file for its
+	// unknown height-1 parent is corrupt, so blockstore verification must return
+	// a local error rather than letting p2p attribute a consensus error to peer.
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	b1Hash, _ := testHarnessBlockAtHeight(t, source, 1)
+	_, b2Bytes := testHarnessBlockAtHeight(t, source, 2)
+	b2Parsed, b2Hash, err := parseRelayedBlock(b2Bytes)
+	if err != nil || b2Parsed == nil {
+		t.Fatalf("parseRelayedBlock(B2): parsed=%v err=%v", b2Parsed, err)
+	}
+
+	storePath := filepath.Join(node.BlockStorePath(sink.dataDir), "blocks", hex.EncodeToString(b1Hash[:])+".bin")
+	if err := os.WriteFile(storePath, []byte("corrupt stored parent"), 0o600); err != nil {
+		t.Fatalf("WriteFile(corrupt parent): %v", err)
+	}
+	peer := testPeerForService(sink.service, "remote", 2)
+	beforeHeight, beforeTip, beforeOK, err := sink.blockStore.Tip()
+	if err != nil || !beforeOK {
+		t.Fatalf("sink tip before: height=%d hash=%x ok=%v err=%v", beforeHeight, beforeTip, beforeOK, err)
+	}
+
+	summary, err := peer.processRelayedBlock(b2Bytes)
+	if err == nil || summary != nil {
+		t.Fatalf("processRelayedBlock(corrupt stored parent): summary=%v err=%v", summary, err)
+	}
+	var txErr *consensus.TxError
+	if errors.As(err, &txErr) {
+		t.Fatalf("local stored corruption leaked consensus error: %v", err)
+	}
+	if state := peer.snapshotState(); state.BanScore != 0 || state.LastError == "" {
+		t.Fatalf("peer state=%+v, want peer-neutral local diagnostic", state)
+	}
+	if sink.service.blockSeen.Has(b2Hash) {
+		t.Fatal("locally failed relayed candidate must not be marked seen")
+	}
+	afterHeight, afterTip, afterOK, err := sink.blockStore.Tip()
+	if err != nil || afterOK != beforeOK || afterHeight != beforeHeight || afterTip != beforeTip {
+		t.Fatalf("sink tip after: height=%d hash=%x ok=%v err=%v", afterHeight, afterTip, afterOK, err)
+	}
+}
+
 func TestFaultAttributionSplitLocalApplyErrorDoesNotHardBan(t *testing.T) {
 	// Source has genesis+block1. Sink has genesis only, but we replace the
 	// sync engine with an uninitialized zero-value to force a local/runtime

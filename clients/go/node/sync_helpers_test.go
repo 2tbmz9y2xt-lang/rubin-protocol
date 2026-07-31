@@ -62,7 +62,7 @@ func TestNoteReorgNilReceiver(t *testing.T) {
 }
 
 func TestFetchDisconnectBlockAndUndoWithMissingBlock(t *testing.T) {
-	_, _, _, err := (&SyncEngine{blockStore: &BlockStore{}}).fetchDisconnectBlockAndUndo([32]byte{0xff})
+	_, _, err := (&SyncEngine{blockStore: &BlockStore{}}).fetchDisconnectBlockAndUndo([32]byte{0xff})
 	if err == nil {
 		t.Fatal("expected error for missing block")
 	}
