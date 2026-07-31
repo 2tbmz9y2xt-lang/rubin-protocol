@@ -7481,6 +7481,102 @@ mod tests {
         fs::remove_dir_all(&dir).expect("cleanup");
     }
 
+    #[test]
+    fn corrupt_chain_work_header_is_peer_neutral_for_honest_competing_tip() {
+        use crate::sync::{
+            next_candidate_block_for_test, retarget_block_for_test, stock_devnet_engine_for_test,
+        };
+        use crate::sync_reorg::BRANCH_STORE_CORRUPT_ERR;
+
+        let _metrics = orphan_pool_metrics_test_guard();
+        reset_orphan_pool_metrics_for_test();
+        let (mut engine, dir) = stock_devnet_engine_for_test("rubin-corrupt-chain-work", |_| {});
+        let genesis = engine.chain_state.tip_hash;
+        let canonical = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
+        let canonical_hash = block_hash(&canonical[..BLOCK_HEADER_BYTES]).expect("canonical hash");
+        engine
+            .apply_block_with_reorg(&canonical, None)
+            .expect("apply canonical tip");
+
+        let competing = retarget_block_for_test(
+            coinbase_only_block_with_gen(1, 0, genesis, engine.tip_timestamp + 1),
+            POW_LIMIT,
+        );
+        let competing_hash = block_hash(&competing[..BLOCK_HEADER_BYTES]).expect("competing hash");
+        assert_ne!(
+            competing_hash, canonical_hash,
+            "fixture needs distinct tips"
+        );
+
+        let root = crate::blockstore::block_store_path(&dir);
+        let header_path = root
+            .join("headers")
+            .join(format!("{}.bin", hex::encode(canonical_hash)));
+        let block_path = root
+            .join("blocks")
+            .join(format!("{}.bin", hex::encode(canonical_hash)));
+        let stored_block = fs::read(&block_path).expect("read canonical block");
+        fs::write(&header_path, &competing[..BLOCK_HEADER_BYTES]).expect("substitute header only");
+        assert_eq!(
+            fs::read(&block_path).expect("re-read canonical block"),
+            stored_block,
+            "the full block is not part of this corruption row"
+        );
+
+        let before_height = engine.chain_state.height;
+        let before_tip = engine.chain_state.tip_hash;
+        let before_canonical_len = engine
+            .block_store
+            .as_ref()
+            .expect("blockstore")
+            .canonical_len();
+        let (mut session, _client) = test_peer_session();
+        let err = session
+            .handle_block(&competing, &mut engine)
+            .expect_err("chain-work corruption must surface");
+        let rendered = err.to_string();
+        let detail = format!(
+            "stored header for {} hashes to {}",
+            hex::encode(canonical_hash),
+            hex::encode(competing_hash)
+        );
+
+        assert!(rendered.starts_with(BRANCH_STORE_CORRUPT_ERR), "{rendered}");
+        assert!(
+            rendered.contains(&detail),
+            "missing chain-work detail: {rendered}"
+        );
+        assert_eq!(
+            session.state().ban_score,
+            0,
+            "local store fault is peer-neutral"
+        );
+        assert_eq!(
+            session.orphans.len(),
+            0,
+            "no orphan retention on corruption"
+        );
+        assert_eq!(
+            engine.chain_state.height, before_height,
+            "canonical height unchanged"
+        );
+        assert_eq!(
+            engine.chain_state.tip_hash, before_tip,
+            "canonical tip unchanged"
+        );
+        assert_eq!(
+            engine
+                .block_store
+                .as_ref()
+                .expect("blockstore")
+                .canonical_len(),
+            before_canonical_len,
+            "canonical index unchanged"
+        );
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
     /// The compact-relay gate, BOTH ways. Under the stock predicate the OPTIONAL
     /// static expected-target equality is skipped, so the reconstructed block
     /// reaches the authoritative apply path and is accepted with no ban; with ANY

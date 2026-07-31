@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use num_bigint::BigUint;
 use rubin_consensus::{
-    block_hash, chain_work_from_targets, parse_block_header_bytes, BLOCK_HEADER_BYTES,
+    block_hash, chain_work_from_targets, parse_block_header_bytes, BlockHeader, BLOCK_HEADER_BYTES,
 };
 use serde::{Deserialize, Serialize};
 
@@ -661,6 +661,37 @@ impl BlockStore {
 
     // ----- Chain work -----
 
+    /// Read and verify one bounded header used by [`BlockStore::chain_work`].
+    /// The parse and hash consume those exact bytes before any target or parent.
+    fn chain_work_header(&self, lookup_hash: [u8; 32]) -> Result<BlockHeader, String> {
+        let header_bytes = self.get_header_by_hash(lookup_hash).map_err(|err| {
+            format!(
+                "stored header for {} cannot be read: {err}",
+                hex::encode(lookup_hash)
+            )
+        })?;
+        let header = parse_block_header_bytes(&header_bytes).map_err(|err| {
+            format!(
+                "stored header for {} does not parse: {err}",
+                hex::encode(lookup_hash)
+            )
+        })?;
+        let observed_hash = block_hash(&header_bytes).map_err(|err| {
+            format!(
+                "stored header for {} does not hash: {err}",
+                hex::encode(lookup_hash)
+            )
+        })?;
+        if observed_hash != lookup_hash {
+            return Err(format!(
+                "stored header for {} hashes to {}",
+                hex::encode(lookup_hash),
+                hex::encode(observed_hash)
+            ));
+        }
+        Ok(header)
+    }
+
     /// Compute cumulative proof-of-work from genesis up to (and including)
     /// the block identified by `tip_hash`, by walking parent pointers.
     pub fn chain_work(&self, tip_hash: [u8; 32]) -> Result<BigUint, String> {
@@ -672,10 +703,12 @@ impl BlockStore {
         let mut current = tip_hash;
         while current != [0u8; 32] {
             if !seen.insert(current) {
-                return Err("blockstore parent cycle".into());
+                return Err(format!(
+                    "blockstore chain-work parent cycle at {}",
+                    hex::encode(current)
+                ));
             }
-            let header_bytes = self.get_header_by_hash(current)?;
-            let header = parse_block_header_bytes(&header_bytes).map_err(|e| e.to_string())?;
+            let header = self.chain_work_header(current)?;
             targets.push(header.target);
             current = header.prev_block_hash;
         }
@@ -1160,6 +1193,8 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
 
+    use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
     use super::{
         block_store_path, read_file_by_path, write_file_if_absent, write_file_if_absent_with,
         BlockStore, BLOCK_FILE_MAX_BYTES, BLOCK_STORE_DIR_NAME, HEADER_FILE_MAX_BYTES,
@@ -1506,6 +1541,64 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
+    fn raw_chain_work_header(
+        prev_hash: [u8; 32],
+        target: [u8; 32],
+        seed: u64,
+    ) -> [u8; BLOCK_HEADER_BYTES] {
+        let mut header = [0u8; BLOCK_HEADER_BYTES];
+        header[..4].copy_from_slice(&1u32.to_le_bytes());
+        header[4..36].copy_from_slice(&prev_hash);
+        header[36..68].fill(seed as u8);
+        header[68..76].copy_from_slice(&seed.to_le_bytes());
+        header[76..108].copy_from_slice(&target);
+        header[108..].copy_from_slice(&seed.to_le_bytes());
+        header
+    }
+
+    fn write_chain_work_header(
+        store: &BlockStore,
+        prev_hash: [u8; 32],
+        target: [u8; 32],
+        seed: u64,
+    ) -> ([u8; 32], [u8; BLOCK_HEADER_BYTES]) {
+        let header = raw_chain_work_header(prev_hash, target, seed);
+        let hash = block_hash(&header).expect("chain-work header hash");
+        std::fs::write(
+            store.headers_dir.join(format!("{}.bin", hex::encode(hash))),
+            header,
+        )
+        .expect("write chain-work header");
+        (hash, header)
+    }
+
+    fn chain_work_test_chain() -> (
+        BlockStore,
+        PathBuf,
+        [[u8; 32]; 3],
+        [[u8; BLOCK_HEADER_BYTES]; 3],
+    ) {
+        let dir = unique_temp_path("rubin-blockstore-chain-work");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let store = BlockStore::create(block_store_path(&dir)).expect("create blockstore");
+        let (root_hash, root_header) =
+            write_chain_work_header(&store, [0u8; 32], rubin_consensus::constants::POW_LIMIT, 1);
+        let (middle_hash, middle_header) =
+            write_chain_work_header(&store, root_hash, rubin_consensus::constants::POW_LIMIT, 2);
+        let (tip_hash, tip_header) = write_chain_work_header(
+            &store,
+            middle_hash,
+            rubin_consensus::constants::POW_LIMIT,
+            3,
+        );
+        (
+            store,
+            dir,
+            [root_hash, middle_hash, tip_hash],
+            [root_header, middle_header, tip_header],
+        )
+    }
+
     #[test]
     fn blockstore_chain_work_from_genesis() {
         use crate::genesis::devnet_genesis_block_bytes;
@@ -1523,12 +1616,98 @@ mod tests {
             .expect("put");
 
         let work = store.chain_work(hash).expect("chain_work");
-        assert!(work > num_bigint::BigUint::ZERO);
+        assert_eq!(work, num_bigint::BigUint::from(1u8));
 
+        std::fs::remove_dir_all(root.join("headers")).expect("remove headers");
         let zero_work = store.chain_work([0u8; 32]).expect("zero");
         assert_eq!(zero_work, num_bigint::BigUint::ZERO);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn blockstore_chain_work_rejects_local_header_rows() {
+        let (store, dir, hashes, _) = chain_work_test_chain();
+        assert_eq!(
+            store.chain_work(hashes[2]).expect("multi-header work"),
+            num_bigint::BigUint::from(3u8)
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+
+        for name in [
+            "missing",
+            "unreadable",
+            "short",
+            "long",
+            "substituted_head",
+            "substituted_middle",
+            "identity_before_target",
+            "self_referential_substitution",
+            "zero_target",
+        ] {
+            let (store, dir, hashes, headers) = chain_work_test_chain();
+            let tip_path = store
+                .headers_dir
+                .join(format!("{}.bin", hex::encode(hashes[2])));
+            let (lookup, detail) = match name {
+                "missing" => {
+                    std::fs::remove_file(&tip_path).expect("remove header");
+                    (hashes[2], "cannot be read")
+                }
+                "unreadable" => {
+                    std::fs::remove_file(&tip_path).expect("remove header");
+                    std::fs::create_dir(&tip_path).expect("plant header directory");
+                    (hashes[2], "cannot be read")
+                }
+                "short" => {
+                    std::fs::write(&tip_path, [0u8; BLOCK_HEADER_BYTES - 1]).expect("write short");
+                    (hashes[2], "does not parse")
+                }
+                "long" => {
+                    std::fs::write(&tip_path, vec![0u8; BLOCK_HEADER_BYTES + 1])
+                        .expect("write long");
+                    (hashes[2], "cannot be read")
+                }
+                "substituted_head" => {
+                    std::fs::write(&tip_path, headers[1]).expect("substitute head");
+                    (hashes[2], "hashes to")
+                }
+                "substituted_middle" => {
+                    std::fs::write(
+                        store
+                            .headers_dir
+                            .join(format!("{}.bin", hex::encode(hashes[1]))),
+                        headers[0],
+                    )
+                    .expect("substitute middle");
+                    (hashes[2], "hashes to")
+                }
+                "identity_before_target" => {
+                    std::fs::write(&tip_path, raw_chain_work_header(hashes[1], [0u8; 32], 4))
+                        .expect("write dual-invalid header");
+                    (hashes[2], "hashes to")
+                }
+                "self_referential_substitution" => {
+                    std::fs::write(
+                        &tip_path,
+                        raw_chain_work_header(hashes[2], rubin_consensus::constants::POW_LIMIT, 5),
+                    )
+                    .expect("write self-referential header");
+                    (hashes[2], "hashes to")
+                }
+                "zero_target" => {
+                    let (hash, _) = write_chain_work_header(&store, hashes[1], [0u8; 32], 6);
+                    (hash, "target is zero")
+                }
+                _ => unreachable!("named chain-work row"),
+            };
+            let err = store.chain_work(lookup).expect_err(name);
+            assert!(err.contains(detail), "{name}: {err}");
+            if name == "identity_before_target" {
+                assert!(!err.contains("target is zero"), "identity must win: {err}");
+            }
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
     }
 
     #[test]
