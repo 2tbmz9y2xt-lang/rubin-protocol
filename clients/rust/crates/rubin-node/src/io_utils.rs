@@ -1378,6 +1378,23 @@ mod tests {
     use std::fs;
     use std::io::{Cursor, Read};
 
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct OperatorPathFixture {
+        contract_version: u64,
+        fixture_kind: String,
+        description: String,
+        cases: Vec<OperatorPathCase>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct OperatorPathCase {
+        id: String,
+        input: String,
+        expected_unix: String,
+    }
+
     /// Small injectable bound for the RUB-1057 corpus rows.
     const TEST_READ_BOUND: u64 = 8;
 
@@ -1918,6 +1935,39 @@ mod tests {
             lexical_clean("/var/data/link/../chainstate.json"),
             format!("{sep}var{sep}data{sep}chainstate.json")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn operator_path_normalization_fixture() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../conformance/fixtures/protocol/operator_path_normalization_v1.json");
+        let raw = fs::read_to_string(path).expect("read operator path fixture");
+        let fixture: OperatorPathFixture = serde_json::from_str(&raw).expect("decode fixture");
+        assert_eq!(fixture.contract_version, 1);
+        assert_eq!(fixture.fixture_kind, "operator_path_normalization_v1");
+        assert!(!fixture.description.trim().is_empty());
+        #[rustfmt::skip]
+        let required = [("empty", ""), ("dot", "."), ("parent", ".."), ("dot-prefix", "./name"), ("bare-name", "name"), ("repeated-separator", "a//b"), ("trailing-separator", "a/b/"), ("trailing-dot", "a/b/."), ("trailing-parent", "a/b/.."), ("mid-dot", "a/./b"), ("mid-parent", "a/x/../b"), ("absolute-root", "/"), ("rooted-parent", "/../name"), ("symlink-lexical", "sub/link/../genesis.json")];
+        let mut seen = std::collections::HashSet::new();
+        for case in fixture.cases {
+            let (_, input) = required
+                .iter()
+                .find(|(id, _)| *id == case.id)
+                .unwrap_or_else(|| panic!("unknown id {}", case.id));
+            assert!(seen.insert(case.id.clone()), "duplicate id {}", case.id);
+            assert_eq!(&case.input, input, "{} input", case.id);
+            assert_eq!(
+                lexical_clean(&case.input),
+                case.expected_unix,
+                "{}",
+                case.id
+            );
+        }
+        assert_eq!(seen.len(), required.len());
+        for (id, _) in required {
+            assert!(seen.contains(id), "missing id {id}");
+        }
     }
 
     /// Windows UNC and DOS-device volume-only inputs must pass

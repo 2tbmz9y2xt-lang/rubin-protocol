@@ -2,6 +2,9 @@ package node
 
 import (
 	"bytes"
+	"encoding/json"
+	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -9,6 +12,17 @@ import (
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
+
+type operatorPathFixture struct {
+	ContractVersion uint64 `json:"contract_version"`
+	FixtureKind     string `json:"fixture_kind"`
+	Description     string `json:"description"`
+	Cases           []struct {
+		ID           *string `json:"id"`
+		Input        *string `json:"input"`
+		ExpectedUnix *string `json:"expected_unix"`
+	} `json:"cases"`
+}
 
 func TestNormalizePeers(t *testing.T) {
 	got := NormalizePeers("127.0.0.1:19111, 127.0.0.1:19112", "127.0.0.1:19111", " ", "10.0.0.1:19111")
@@ -108,6 +122,51 @@ func TestNormalizeDataDir(t *testing.T) {
 				t.Fatalf("NormalizeDataDir(%q)=%q, want %q", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestOperatorPathNormalizationFixture(t *testing.T) {
+	if filepath.Separator != '/' {
+		t.Skip("fixture assertions are scoped to Unix")
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "conformance", "fixtures", "protocol", "operator_path_normalization_v1.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var fixture operatorPathFixture
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&fixture); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		t.Fatalf("fixture has trailing JSON: %v", err)
+	}
+	if fixture.ContractVersion != 1 || fixture.FixtureKind != "operator_path_normalization_v1" {
+		t.Fatalf("unexpected fixture identity: version=%d kind=%q", fixture.ContractVersion, fixture.FixtureKind)
+	}
+	if strings.TrimSpace(fixture.Description) == "" {
+		t.Fatal("fixture description must be non-empty")
+	}
+	required := map[string]string{"empty": "", "dot": ".", "parent": "..", "dot-prefix": "./name", "bare-name": "name", "repeated-separator": "a//b", "trailing-separator": "a/b/", "trailing-dot": "a/b/.", "trailing-parent": "a/b/..", "mid-dot": "a/./b", "mid-parent": "a/x/../b", "absolute-root": "/", "rooted-parent": "/../name", "symlink-lexical": "sub/link/../genesis.json"}
+	for _, tc := range fixture.Cases {
+		if tc.ID == nil || tc.Input == nil || tc.ExpectedUnix == nil {
+			t.Fatalf("fixture case has a missing field: %+v", tc)
+		}
+		wantInput, ok := required[*tc.ID]
+		if !ok {
+			t.Fatalf("unknown or duplicate fixture id %q", *tc.ID)
+		}
+		delete(required, *tc.ID)
+		if *tc.Input != wantInput {
+			t.Fatalf("%s: input=%q, want %q", *tc.ID, *tc.Input, wantInput)
+		}
+		if got := NormalizeDataDir(*tc.Input); got != *tc.ExpectedUnix {
+			t.Errorf("%s: NormalizeDataDir(%q)=%q, want %q", *tc.ID, *tc.Input, got, *tc.ExpectedUnix)
+		}
+	}
+	for id := range required {
+		t.Errorf("missing fixture id %q", id)
 	}
 }
 
