@@ -651,8 +651,12 @@ impl SyncEngine {
             .ok_or("sync engine has no blockstore")?;
 
         let current_tip_hash = self.chain_state.tip_hash;
-        let current_work = block_store.chain_work(current_tip_hash)?;
-        let ancestor_work = block_store.chain_work(common_ancestor_hash)?;
+        let current_work = block_store
+            .chain_work(current_tip_hash)
+            .map_err(branch_store_corrupt)?;
+        let ancestor_work = block_store
+            .chain_work(common_ancestor_hash)
+            .map_err(branch_store_corrupt)?;
 
         let branch_targets: Vec<[u8; 32]> = branch.iter().map(|b| b.target).collect();
         let branch_work =
@@ -1739,6 +1743,60 @@ mod tests {
             .expect("block1 canonical");
         let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
         (engine, dir, subsidy1, gen_ts)
+    }
+
+    #[test]
+    fn should_switch_renders_each_chain_work_store_failure_once() {
+        let (engine, dir, _, gen_ts) = engine_with_canonical_tip("rubin-reorg-cw-tip");
+        let (_, genesis_hash, _) = genesis_info();
+        let competing = height_one_coinbase_only_block(genesis_hash, gen_ts + 2);
+        let competing_hash = block_header_hash(&competing);
+        let (branch, ancestor, _) = engine
+            .collect_branch_to_canonical(competing_hash, &competing)
+            .expect("collect honest competing branch");
+        let current_tip = engine.chain_state.tip_hash;
+        let headers = block_store_path(&dir).join("headers");
+        let genesis_header =
+            std::fs::read(headers.join(format!("{}.bin", hex::encode(genesis_hash))))
+                .expect("read genesis header");
+        std::fs::write(
+            headers.join(format!("{}.bin", hex::encode(current_tip))),
+            genesis_header,
+        )
+        .expect("substitute current-tip header");
+
+        let err = engine
+            .should_switch_to_branch(&branch, ancestor)
+            .expect_err("current-tip chain work must fail");
+        assert_branch_store_corruption(&err);
+        assert_eq!(err.matches(BRANCH_STORE_CORRUPT_ERR).count(), 1, "{err}");
+        assert!(err.contains("hashes to"), "{err}");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+
+        let (mut engine, dir) = engine_with_store("rubin-reorg-cw-ancestor");
+        let ancestor = [0x61; 32];
+        engine
+            .block_store
+            .as_mut()
+            .expect("blockstore")
+            .set_canonical_tip(0, ancestor)
+            .expect("set fabricated canonical ancestor");
+        let branch = [ReorgBranchBlock {
+            hash: [0x62; 32],
+            header_bytes: [0u8; BLOCK_HEADER_BYTES],
+            block_bytes: Vec::new(),
+            prev_hash: ancestor,
+            target: POW_LIMIT,
+            timestamp: 0,
+            txids: Vec::new(),
+        }];
+        let err = engine
+            .should_switch_to_branch(&branch, ancestor)
+            .expect_err("common-ancestor chain work must fail");
+        assert_branch_store_corruption(&err);
+        assert_eq!(err.matches(BRANCH_STORE_CORRUPT_ERR).count(), 1, "{err}");
+        assert!(err.contains("cannot be read"), "{err}");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     /// Drives the branch walk against a block store whose files lie. NONE of
