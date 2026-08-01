@@ -10,6 +10,7 @@ from typing import Callable, NamedTuple
 
 
 EXACT_INPUTS = {
+    ".gitattributes",
     ".github/workflows/ci.yml",
     ".node-version",
     "go.work", "go.work.sum",

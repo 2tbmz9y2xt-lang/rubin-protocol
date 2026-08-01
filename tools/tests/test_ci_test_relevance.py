@@ -23,7 +23,7 @@ class TestRelevanceTests(unittest.TestCase):
 
     def test_profile_rows_and_nearest_misses(self):
         cases = {
-            ".github/workflows/ci.yml": True, ".node-version": True, "go.work": True, "go.work.sum": True,
+            ".gitattributes": True, ".github/workflows/ci.yml": True, ".node-version": True, "go.work": True, "go.work.sum": True,
             "evidence/runtime-perf/RUST_RUNTIME_PERF_GUARDRAILS.md": True,
             ".github/actions/a/action.yml": True, "clients/go/x.go": True,
             "conformance/x.go": True, "scripts/x.sh": True, "tools/x.py": True,
