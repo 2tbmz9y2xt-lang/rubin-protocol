@@ -15,7 +15,6 @@ CHECKSUM_EXPR = "${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256')
 MAX_WORKFLOW_YAML_BYTES = 2 * 1024 * 1024
 MAX_WORKFLOW_FILES = 64
 
-
 @dataclass(frozen=True)
 class WorkflowOwner:
     path: str
@@ -208,7 +207,7 @@ def check_workflow_owner(owner: WorkflowOwner, workflow: dict[str, Any], version
         "cache paths": [line.strip() for line in str(cache_with.get("path", "")).splitlines() if line.strip()] == expected_paths,
         "cache key": cache_with.get("key") == expected_key,
         "no restore-key fallback": not any(str(key).startswith("restore-key") for key in cache_with),
-        "bundle prefix": [line.strip() for line in run.splitlines() if re.match(rf'^(?:(?:export|readonly|declare|typeset)(?:\s+-[A-Za-z]+)*\s+)?PREFIX\s*=\s*["\']?\$HOME/\.cache/rubin-openssl/bundle-{VERSION_RE}', line.strip())] == [f'PREFIX="$HOME/.cache/rubin-openssl/bundle-{version}"'],
+        "bundle prefix": [line.strip() for line in run.splitlines() if re.match(r'^(?:(?:export|readonly|declare|typeset)(?:\s+-[A-Za-z]+)*\s+)?PREFIX\s*=', line.strip())] == [f'PREFIX="$HOME/.cache/rubin-openssl/bundle-{version}"'],
         "single literal selector": sum(bool(re.match(rf'^(?:(?:export|readonly|declare|typeset)(?:\s+-[A-Za-z]+)*\s+)?OPENSSL_VERSION\s*=\s*["\']?{VERSION_RE}["\']?(?:\s|$)', line.strip())) for line in run.splitlines()) == 1,
         "canonical builder line": run.count(BUILDER) == 1
         and sum(line.strip() == canonical for line in run.splitlines()) == 1,

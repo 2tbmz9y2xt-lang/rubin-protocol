@@ -153,6 +153,7 @@ class OpenSSLVersionConsistencyTests(unittest.TestCase):
         rejected(lambda steps, i: steps.insert(i - 1, copy.deepcopy(steps[i - 1])), "single cache")
         rejected(lambda steps, i: steps.insert(i - 1, {"with": {"key": "openssl-bundle-spare"}}), "single cache")
         rejected(lambda steps, i: steps[i].__setitem__("run", steps[i]["run"] + "\nexport OPENSSL_VERSION=3.5.4"), "single literal selector")
+        rejected(lambda steps, i: steps[i].__setitem__("run", steps[i]["run"] + '\nPREFIX="${HOME}/.cache/rubin-openssl/bundle-3.5.4"'), "bundle prefix")
         rejected(lambda steps, i: steps.append({"uses": "example/action@pin", "with": {"run": f"bash {BUILDER}"}}), "unregistered literal builder owner")
         with tempfile.TemporaryDirectory() as tmp:
             root = self.fixture(tmp)
