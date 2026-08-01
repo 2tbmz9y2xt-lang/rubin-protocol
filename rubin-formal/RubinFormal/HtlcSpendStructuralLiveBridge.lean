@@ -103,7 +103,7 @@ theorem unknown_path_rejects_parse
 
 /-- Refund path height-lock enforcement on the LIVE spend helper:
     once the refund branch is selected, `TX_ERR_TIMELOCK_NOT_MET` is raised
-    before signature-suite or later key-binding checks. -/
+    before selector-key binding or later signature checks, including a mismatched selector key. -/
 theorem refund_height_timelock_precedes_sig_checks
     (c : CovenantGenesisV1.HtlcCovenant)
     (pathItem sigItem : UtxoBasicV1.WitnessItem)
@@ -112,20 +112,17 @@ theorem refund_height_timelock_precedes_sig_checks
     (hPub : pathItem.pubkey.size = 32)
     (hSize : pathItem.signature.size = 1)
     (hPath1 : (pathItem.signature.get! 0).toNat = 1)
-    (hRefundKey : pathItem.pubkey = c.refundKeyId)
     (hMode : c.lockMode = CovenantGenesisV1.LOCK_MODE_HEIGHT)
     (hLt : blockHeight < c.lockValue) :
     UtxoApplyGenesisV1.validateHTLCSpendNoCrypto c pathItem sigItem blockHeight blockMtp =
       .error "TX_ERR_TIMELOCK_NOT_MET" := by
-  have hRefundSize32 : c.refundKeyId.size = 32 := by
-    simpa [hRefundKey] using hPub
   unfold UtxoApplyGenesisV1.validateHTLCSpendNoCrypto
-  simp [Except.bind, hSuite, hPub, hSize, hPath1, hRefundKey, hRefundSize32, hMode, hLt, bytes_bne_self_false]
+  simp [Except.bind, hSuite, hPub, hSize, hPath1, hMode, hLt]
   change (Except.error "TX_ERR_TIMELOCK_NOT_MET" : Except String Unit) = Except.error "TX_ERR_TIMELOCK_NOT_MET"
   rfl
 
 /-- Refund path timestamp-lock enforcement on the LIVE spend helper:
-    for timestamp-locked HTLCs the same precedence holds on the real path. -/
+    for timestamp-locked HTLCs the same precedence holds on the real path, even with a mismatched selector key. -/
 theorem refund_timestamp_timelock_precedes_sig_checks
     (c : CovenantGenesisV1.HtlcCovenant)
     (pathItem sigItem : UtxoBasicV1.WitnessItem)
@@ -134,20 +131,17 @@ theorem refund_timestamp_timelock_precedes_sig_checks
     (hPub : pathItem.pubkey.size = 32)
     (hSize : pathItem.signature.size = 1)
     (hPath1 : (pathItem.signature.get! 0).toNat = 1)
-    (hRefundKey : pathItem.pubkey = c.refundKeyId)
     (hMode : c.lockMode ≠ CovenantGenesisV1.LOCK_MODE_HEIGHT)
     (hLt : blockMtp < c.lockValue) :
     UtxoApplyGenesisV1.validateHTLCSpendNoCrypto c pathItem sigItem blockHeight blockMtp =
       .error "TX_ERR_TIMELOCK_NOT_MET" := by
-  have hRefundSize32 : c.refundKeyId.size = 32 := by
-    simpa [hRefundKey] using hPub
   unfold UtxoApplyGenesisV1.validateHTLCSpendNoCrypto
-  simp [Except.bind, hSuite, hPub, hSize, hPath1, hRefundKey, hRefundSize32, hMode, hLt, bytes_bne_self_false]
+  simp [Except.bind, hSuite, hPub, hSize, hPath1, hMode, hLt]
   change (Except.error "TX_ERR_TIMELOCK_NOT_MET" : Except String Unit) = Except.error "TX_ERR_TIMELOCK_NOT_MET"
   rfl
 
 /-- Positive LIVE refund-path bridge:
-    once the sentinel/path-shape guards, refund-key binding, timelock, and live
+    once the sentinel/path-shape guards, timelock, refund-key binding, and live
     signature-item structural checks all pass, the real spend helper accepts. -/
 theorem refund_height_path_accepts
     (c : CovenantGenesisV1.HtlcCovenant)

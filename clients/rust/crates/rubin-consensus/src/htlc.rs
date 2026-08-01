@@ -269,12 +269,6 @@ fn validate_htlc_refund_path(
             "CORE_HTLC refund payload length mismatch",
         ));
     }
-    if selector_key_id != cov.refund_key_id {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigInvalid,
-            "CORE_HTLC refund key_id mismatch",
-        ));
-    }
     if cov.lock_mode == LOCK_MODE_HEIGHT {
         if ctx.block_height < cov.lock_value {
             return Err(TxError::new(
@@ -286,6 +280,12 @@ fn validate_htlc_refund_path(
         return Err(TxError::new(
             ErrorCode::TxErrTimelockNotMet,
             "CORE_HTLC timestamp lock not met",
+        ));
+    }
+    if selector_key_id != cov.refund_key_id {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigInvalid,
+            "CORE_HTLC refund key_id mismatch",
         ));
     }
     Ok(cov.refund_key_id)
