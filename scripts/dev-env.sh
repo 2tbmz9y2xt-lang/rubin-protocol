@@ -81,7 +81,7 @@ fi
 select_openssl() {
   # Optional override for CI / Linux / Windows dev envs where we bring our own OpenSSL bundle.
   # Example:
-  #   RUBIN_OPENSSL_PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5" scripts/dev-env.sh -- openssl version -a
+  #   RUBIN_OPENSSL_PREFIX="$HOME/.cache/rubin-openssl/bundle-$(cat scripts/crypto/openssl/VERSION)" scripts/dev-env.sh -- openssl version -a
   if [[ -n "${RUBIN_OPENSSL_PREFIX:-}" ]]; then
     if [[ -x "${RUBIN_OPENSSL_PREFIX}/bin/openssl" ]]; then
       prepend_path_if_exists "${RUBIN_OPENSSL_PREFIX}/bin"

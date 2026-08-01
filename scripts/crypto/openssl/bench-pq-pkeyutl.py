@@ -17,6 +17,20 @@ ALGORITHM_PROFILES = {
 }
 
 
+def selected_openssl_version() -> str:
+    try:
+        raw = Path(__file__).with_name("VERSION").read_bytes().decode("ascii")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SystemExit(f"cannot read OpenSSL VERSION: {exc}") from None
+    version = raw.removesuffix("\n")
+    parts = version.split(".")
+    if raw != f"{version}\n" or len(parts) != 3 or any(
+        not part or not part.isascii() or not part.isdecimal() for part in parts
+    ):
+        raise SystemExit("OpenSSL VERSION must be one MAJOR.MINOR.PATCH decimal line")
+    return version
+
+
 def run(cmd: list[str]) -> None:
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
@@ -118,10 +132,11 @@ def benchmark_algorithm(openssl_bin: Path, algorithm: str, iterations: int, msg_
 
 
 def main() -> int:
+    openssl_version = selected_openssl_version()
     parser = argparse.ArgumentParser(description="Benchmark PQ signature ops via OpenSSL pkeyutl")
     parser.add_argument(
         "--openssl-bin",
-        default=str(Path.home() / ".cache" / "rubin-openssl" / "bundle-3.5.5" / "bin" / "openssl"),
+        default=str(Path.home() / ".cache" / "rubin-openssl" / f"bundle-{openssl_version}" / "bin" / "openssl"),
     )
     parser.add_argument(
         "--output-json",

@@ -291,45 +291,9 @@ jobs:
           print(f"ok: {len(paths)} files")
           PY
 
-      - name: Cache OpenSSL 3.5 bundle
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      - name: Prepare OpenSSL bundle
         if: steps.test_gate.outputs.run_test == 'true'
-        with:
-          path: |
-            ~/.cache/rubin-openssl/bundle-3.5.5
-            ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
-          key: openssl-bundle-${{ runner.os }}-3.5.5-v3-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}
-
-      - name: Build OpenSSL 3.5.5 bundle
-        if: steps.test_gate.outputs.run_test == 'true'
-        run: |
-          set -euo pipefail
-          PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
-          MODULES_DIR="$PREFIX/lib/ossl-modules"
-          if [ ! -d "$MODULES_DIR" ] && [ -d "$PREFIX/lib64/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib64/ossl-modules"
-          fi
-          if [ ! -x "$PREFIX/bin/openssl" ] || [ ! -f "$PREFIX/ssl/openssl-fips.cnf" ] || [ ! -d "$MODULES_DIR" ]; then
-            OPENSSL_VERSION=3.5.5 PREFIX="$PREFIX" bash scripts/crypto/openssl/build-openssl-bundle.sh
-          fi
-          if [ -d "$PREFIX/lib/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib/ossl-modules"
-          elif [ -d "$PREFIX/lib64/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib64/ossl-modules"
-          else
-            echo "ERROR: OpenSSL modules directory not found under $PREFIX/lib*/ossl-modules" >&2
-            exit 1
-          fi
-          {
-            echo "$PREFIX/bin"
-          } >> "$GITHUB_PATH"
-          {
-            echo "OPENSSL_DIR=$PREFIX"
-            echo "PKG_CONFIG_PATH=$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig"
-            echo "LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib"
-            echo "OPENSSL_MODULES=$MODULES_DIR"
-            echo "OPENSSL_CONF=$PREFIX/ssl/openssl-fips.cnf"
-          } >> "$GITHUB_ENV"
+        uses: ./.github/actions/openssl-bundle
 
       - name: Verify OpenSSL PQ algorithms
         if: steps.test_gate.outputs.run_test == 'true'
@@ -503,43 +467,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Cache OpenSSL 3.5 bundle
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
-        with:
-          path: |
-            ~/.cache/rubin-openssl/bundle-3.5.5
-            ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
-          key: openssl-bundle-${{ runner.os }}-3.5.5-v3-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}
-
-      - name: Build OpenSSL 3.5.5 bundle
-        run: |
-          set -euo pipefail
-          PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
-          MODULES_DIR="$PREFIX/lib/ossl-modules"
-          if [ ! -d "$MODULES_DIR" ] && [ -d "$PREFIX/lib64/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib64/ossl-modules"
-          fi
-          if [ ! -x "$PREFIX/bin/openssl" ] || [ ! -f "$PREFIX/ssl/openssl-fips.cnf" ] || [ ! -d "$MODULES_DIR" ]; then
-            OPENSSL_VERSION=3.5.5 PREFIX="$PREFIX" bash scripts/crypto/openssl/build-openssl-bundle.sh
-          fi
-          if [ -d "$PREFIX/lib/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib/ossl-modules"
-          elif [ -d "$PREFIX/lib64/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib64/ossl-modules"
-          else
-            echo "ERROR: OpenSSL modules directory not found under $PREFIX/lib*/ossl-modules" >&2
-            exit 1
-          fi
-          {
-            echo "$PREFIX/bin"
-          } >> "$GITHUB_PATH"
-          {
-            echo "OPENSSL_DIR=$PREFIX"
-            echo "PKG_CONFIG_PATH=$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig"
-            echo "LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib"
-            echo "OPENSSL_MODULES=$MODULES_DIR"
-            echo "OPENSSL_CONF=$PREFIX/ssl/openssl-fips.cnf"
-          } >> "$GITHUB_ENV"
+      - name: Prepare OpenSSL bundle
+        uses: ./.github/actions/openssl-bundle
 
       - name: Verify OpenSSL PQ algorithms
         run: |
@@ -621,46 +550,10 @@ jobs:
             sleep $((attempt * 10))
           done
 
-      - name: Cache OpenSSL 3.5 bundle
-        if: steps.formal_gate.outputs.run_formal == 'true'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
-        with:
-          path: |
-            ~/.cache/rubin-openssl/bundle-3.5.5
-            ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
-          key: openssl-bundle-${{ runner.os }}-3.5.5-v3-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}
-
-      - name: Build OpenSSL 3.5.5 bundle
+      - name: Prepare OpenSSL bundle
         if: steps.formal_gate.outputs.run_formal == 'true'
         id: openssl
-        run: |
-          set -euo pipefail
-          PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
-          MODULES_DIR="$PREFIX/lib/ossl-modules"
-          if [ ! -d "$MODULES_DIR" ] && [ -d "$PREFIX/lib64/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib64/ossl-modules"
-          fi
-          if [ ! -x "$PREFIX/bin/openssl" ] || [ ! -f "$PREFIX/ssl/openssl-fips.cnf" ] || [ ! -d "$MODULES_DIR" ]; then
-            OPENSSL_VERSION=3.5.5 PREFIX="$PREFIX" bash scripts/crypto/openssl/build-openssl-bundle.sh
-          fi
-          if [ -d "$PREFIX/lib/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib/ossl-modules"
-          elif [ -d "$PREFIX/lib64/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib64/ossl-modules"
-          else
-            echo "ERROR: OpenSSL modules directory not found under $PREFIX/lib*/ossl-modules" >&2
-            exit 1
-          fi
-          {
-            echo "$PREFIX/bin"
-          } >> "$GITHUB_PATH"
-          {
-            echo "openssl_dir=$PREFIX"
-            echo "openssl_modules=$MODULES_DIR"
-            echo "openssl_conf=$PREFIX/ssl/openssl-fips.cnf"
-            echo "pkg_config_path=$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig"
-            echo "ld_library_path=$PREFIX/lib64:$PREFIX/lib"
-          } >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/openssl-bundle
 
       - name: Verify OpenSSL PQ algorithms
         if: steps.formal_gate.outputs.run_formal == 'true'
@@ -732,42 +625,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Cache OpenSSL 3.5 bundle
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
-        with:
-          path: |
-            ~/.cache/rubin-openssl/bundle-3.5.5
-            ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
-          key: openssl-bundle-${{ runner.os }}-3.5.5-v3-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}
-      - name: Build OpenSSL 3.5.5 bundle
-        run: |
-          set -euo pipefail
-          PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
-          MODULES_DIR="$PREFIX/lib/ossl-modules"
-          if [ ! -d "$MODULES_DIR" ] && [ -d "$PREFIX/lib64/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib64/ossl-modules"
-          fi
-          if [ ! -x "$PREFIX/bin/openssl" ] || [ ! -f "$PREFIX/ssl/openssl-fips.cnf" ] || [ ! -d "$MODULES_DIR" ]; then
-            OPENSSL_VERSION=3.5.5 PREFIX="$PREFIX" bash scripts/crypto/openssl/build-openssl-bundle.sh
-          fi
-          if [ -d "$PREFIX/lib/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib/ossl-modules"
-          elif [ -d "$PREFIX/lib64/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib64/ossl-modules"
-          else
-            echo "ERROR: OpenSSL modules directory not found under $PREFIX/lib*/ossl-modules" >&2
-            exit 1
-          fi
-          {
-            echo "$PREFIX/bin"
-          } >> "$GITHUB_PATH"
-          {
-            echo "OPENSSL_DIR=$PREFIX"
-            echo "PKG_CONFIG_PATH=$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig"
-            echo "LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib"
-            echo "OPENSSL_MODULES=$MODULES_DIR"
-            echo "OPENSSL_CONF=$PREFIX/ssl/openssl-fips.cnf"
-          } >> "$GITHUB_ENV"
+      - name: Prepare OpenSSL bundle
+        uses: ./.github/actions/openssl-bundle
 
       - name: Verify OpenSSL PQ algorithms
         run: |

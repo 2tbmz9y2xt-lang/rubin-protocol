@@ -18,42 +18,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Cache OpenSSL 3.5 bundle
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
-        with:
-          path: |
-            ~/.cache/rubin-openssl/bundle-3.5.5
-            ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
-          key: openssl-bundle-${{ runner.os }}-3.5.5-v3-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}
-
-      - name: Build OpenSSL 3.5.5 bundle
+      - name: Prepare OpenSSL bundle
         id: openssl
-        run: |
-          set -euo pipefail
-          PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
-          MODULES_DIR="$PREFIX/lib/ossl-modules"
-          if [ ! -d "$MODULES_DIR" ] && [ -d "$PREFIX/lib64/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib64/ossl-modules"
-          fi
-          if [ ! -x "$PREFIX/bin/openssl" ] || [ ! -f "$PREFIX/ssl/openssl-fips.cnf" ] || [ ! -d "$MODULES_DIR" ]; then
-            OPENSSL_VERSION=3.5.5 PREFIX="$PREFIX" bash scripts/crypto/openssl/build-openssl-bundle.sh
-          fi
-          if [ -d "$PREFIX/lib/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib/ossl-modules"
-          elif [ -d "$PREFIX/lib64/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib64/ossl-modules"
-          else
-            echo "ERROR: OpenSSL modules directory not found under $PREFIX/lib*/ossl-modules" >&2
-            exit 1
-          fi
-          echo "$PREFIX/bin" >> "$GITHUB_PATH"
-          {
-            echo "openssl_dir=$PREFIX"
-            echo "openssl_modules=$MODULES_DIR"
-            echo "openssl_conf=$PREFIX/ssl/openssl-fips.cnf"
-            echo "pkg_config_path=$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig"
-            echo "ld_library_path=$PREFIX/lib64:$PREFIX/lib"
-          } >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/openssl-bundle
 
       - name: Export FIPS-only runtime environment
         run: |

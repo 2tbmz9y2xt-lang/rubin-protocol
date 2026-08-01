@@ -9,6 +9,10 @@ on:
       - 'clients/go/node/**'
       - 'clients/rust/crates/rubin-node/**'
       - 'scripts/runtime_perf/**'
+      - 'scripts/crypto/openssl/VERSION'
+      - 'scripts/crypto/openssl/source-checksums.sha256'
+      - 'scripts/crypto/openssl/build-openssl-bundle.sh'
+      - '.github/actions/openssl-bundle/action.yml'
       - '.github/workflows/runtime-perf-guardrails.yml'
   workflow_dispatch:
 
@@ -62,44 +66,9 @@ jobs:
           restore-keys: |
             runtime-perf-v2-${{ runner.os }}-${{ steps.rust_cache_identity.outputs.release }}-${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml', 'clients/rust/crates/**/Cargo.toml', 'scripts/crypto/openssl/source-checksums.sha256') }}-
 
-      - name: Cache OpenSSL 3.5 bundle
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
-        with:
-          path: |
-            ~/.cache/rubin-openssl/bundle-3.5.5
-            ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
-          key: openssl-bundle-${{ runner.os }}-3.5.5-v3-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}
-
-      - name: Build OpenSSL 3.5.5 bundle
+      - name: Prepare OpenSSL bundle
         id: openssl
-        run: |
-          set -euo pipefail
-          PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
-          MODULES_DIR="$PREFIX/lib/ossl-modules"
-          if [ ! -d "$MODULES_DIR" ] && [ -d "$PREFIX/lib64/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib64/ossl-modules"
-          fi
-          if [ ! -x "$PREFIX/bin/openssl" ] || [ ! -f "$PREFIX/ssl/openssl-fips.cnf" ] || [ ! -d "$MODULES_DIR" ]; then
-            OPENSSL_VERSION=3.5.5 PREFIX="$PREFIX" bash scripts/crypto/openssl/build-openssl-bundle.sh
-          fi
-          if [ -d "$PREFIX/lib/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib/ossl-modules"
-          elif [ -d "$PREFIX/lib64/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib64/ossl-modules"
-          else
-            echo "ERROR: OpenSSL modules directory not found under $PREFIX/lib*/ossl-modules" >&2
-            exit 1
-          fi
-          {
-            echo "$PREFIX/bin"
-          } >> "$GITHUB_PATH"
-          {
-            echo "OPENSSL_DIR=$PREFIX"
-            echo "PKG_CONFIG_PATH=$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig"
-            echo "LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib"
-            echo "OPENSSL_MODULES=$MODULES_DIR"
-            echo "OPENSSL_CONF=$PREFIX/ssl/openssl-fips.cnf"
-          } >> "$GITHUB_ENV"
+        uses: ./.github/actions/openssl-bundle
 
       - name: Verify OpenSSL PQ algorithms
         run: |

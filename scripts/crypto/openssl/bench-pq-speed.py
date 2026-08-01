@@ -21,11 +21,28 @@ ROW_RE = re.compile(
 SUPPORTED_ALGORITHMS = ["ML-DSA-87", "SLH-DSA-SHAKE-256f"]
 
 
+def selected_openssl_version() -> str:
+    try:
+        raw = Path(__file__).with_name("VERSION").read_bytes().decode("ascii")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SystemExit(f"cannot read OpenSSL VERSION: {exc}") from None
+    version = raw.removesuffix("\n")
+    parts = version.split(".")
+    if raw != f"{version}\n" or len(parts) != 3 or any(
+        not part or not part.isascii() or not part.isdecimal() for part in parts
+    ):
+        raise SystemExit("OpenSSL VERSION must be one MAJOR.MINOR.PATCH decimal line")
+    return version
+
+
+OPENSSL_VERSION = selected_openssl_version()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run OpenSSL speed benchmark for PQ signature algorithms")
     parser.add_argument(
         "--openssl-bin",
-        default=str(Path.home() / ".cache" / "rubin-openssl" / "bundle-3.5.5" / "bin" / "openssl"),
+        default=str(Path.home() / ".cache" / "rubin-openssl" / f"bundle-{OPENSSL_VERSION}" / "bin" / "openssl"),
     )
     parser.add_argument("--seconds", type=int, default=5)
     parser.add_argument("--output-json", default="")

@@ -1,0 +1,88 @@
+name: Prepare OpenSSL bundle
+description: Restore or build the repository-selected OpenSSL bundle and export its paths
+
+inputs:
+  cache-key-prefix:
+    description: Cache-key namespace for this caller
+    default: openssl-bundle
+  cache-revision:
+    description: Cache layout revision for this caller
+    default: v3
+
+outputs:
+  openssl_dir:
+    description: Installed OpenSSL bundle root
+    value: ${{ steps.prepare.outputs.openssl_dir }}
+  openssl_modules:
+    description: Installed OpenSSL provider modules directory
+    value: ${{ steps.prepare.outputs.openssl_modules }}
+  openssl_conf:
+    description: Installed OpenSSL FIPS configuration
+    value: ${{ steps.prepare.outputs.openssl_conf }}
+  pkg_config_path:
+    description: pkg-config search path for the bundle
+    value: ${{ steps.prepare.outputs.pkg_config_path }}
+  ld_library_path:
+    description: Runtime library search path for the bundle
+    value: ${{ steps.prepare.outputs.ld_library_path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read selected OpenSSL version
+      id: version
+      shell: bash
+      run: |
+        set -euo pipefail
+        version_file="$GITHUB_WORKSPACE/scripts/crypto/openssl/VERSION"
+        unset OPENSSL_VERSION
+        bash "$GITHUB_WORKSPACE/scripts/crypto/openssl/build-openssl-bundle.sh" --check-selection
+        IFS= read -r version < "$version_file"
+        printf 'value=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+    - name: Restore OpenSSL bundle cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      with:
+        path: |
+          ~/.cache/rubin-openssl/bundle-${{ steps.version.outputs.value }}
+          ~/.cache/rubin-openssl/work/openssl-${{ steps.version.outputs.value }}.tar.gz
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ steps.version.outputs.value }}-${{ inputs.cache-revision }}-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256', 'scripts/crypto/openssl/build-openssl-bundle.sh', '.github/actions/openssl-bundle/action.yml') }}
+
+    - name: Build and export OpenSSL bundle
+      id: prepare
+      shell: bash
+      env:
+        OPENSSL_VERSION: ${{ steps.version.outputs.value }}
+      run: |
+        set -euo pipefail
+        prefix="$HOME/.cache/rubin-openssl/bundle-$OPENSSL_VERSION"
+        modules_dir="$prefix/lib/ossl-modules"
+        if [[ ! -d "$modules_dir" && -d "$prefix/lib64/ossl-modules" ]]; then
+          modules_dir="$prefix/lib64/ossl-modules"
+        fi
+        if [[ ! -x "$prefix/bin/openssl" || ! -f "$prefix/ssl/openssl-fips.cnf" || ! -d "$modules_dir" ]]; then
+          PREFIX="$prefix" bash "$GITHUB_WORKSPACE/scripts/crypto/openssl/build-openssl-bundle.sh"
+        fi
+        if [[ -d "$prefix/lib/ossl-modules" ]]; then
+          modules_dir="$prefix/lib/ossl-modules"
+        elif [[ -d "$prefix/lib64/ossl-modules" ]]; then
+          modules_dir="$prefix/lib64/ossl-modules"
+        else
+          echo "ERROR: OpenSSL modules directory not found under $prefix/lib*/ossl-modules" >&2
+          exit 1
+        fi
+        echo "$prefix/bin" >> "$GITHUB_PATH"
+        {
+          echo "OPENSSL_DIR=$prefix"
+          echo "PKG_CONFIG_PATH=$prefix/lib64/pkgconfig:$prefix/lib/pkgconfig"
+          echo "LD_LIBRARY_PATH=$prefix/lib64:$prefix/lib"
+          echo "OPENSSL_MODULES=$modules_dir"
+          echo "OPENSSL_CONF=$prefix/ssl/openssl-fips.cnf"
+        } >> "$GITHUB_ENV"
+        {
+          echo "openssl_dir=$prefix"
+          echo "openssl_modules=$modules_dir"
+          echo "openssl_conf=$prefix/ssl/openssl-fips.cnf"
+          echo "pkg_config_path=$prefix/lib64/pkgconfig:$prefix/lib/pkgconfig"
+          echo "ld_library_path=$prefix/lib64:$prefix/lib"
+        } >> "$GITHUB_OUTPUT"

@@ -86,8 +86,7 @@ jobs:
       # ML-DSA backend provisioning (RUB-1064). The runner's system OpenSSL
       # lacks ML-DSA, so the ML-DSA-gated targets f.Skipf during setup and
       # produce zero fuzz coverage (surfaced as SKIP_FUZZ_SETUP since
-      # RUB-1061). The three steps below follow the proven ci.yml `test` shape
-      # (cache + guarded build + PQ visibility check).
+      # RUB-1061). The steps below follow the proven ci.yml `test` shape.
       #
       # Dedicated key, deliberately NOT the shared openssl-bundle-*-v3 key: this
       # one is written only by this workflow, and since RUB-1067 the bundle
@@ -100,49 +99,11 @@ jobs:
       # entries and would undo both.
       # The key also binds hashFiles of the pinned-digest file, so a pin change
       # rotates it; the prefix stays dedicated because only this lane writes it.
-      - name: Cache OpenSSL 3.5 bundle
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      - name: Prepare OpenSSL bundle
+        uses: ./.github/actions/openssl-bundle
         with:
-          path: |
-            ~/.cache/rubin-openssl/bundle-3.5.5
-            ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
-          key: openssl-bundle-mldsa-verified-${{ runner.os }}-3.5.5-v1-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}
-
-      - name: Build OpenSSL 3.5.5 bundle
-        run: |
-          set -euo pipefail
-          PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
-          MODULES_DIR="$PREFIX/lib/ossl-modules"
-          if [ ! -d "$MODULES_DIR" ] && [ -d "$PREFIX/lib64/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib64/ossl-modules"
-          fi
-          if [ ! -x "$PREFIX/bin/openssl" ] || [ ! -f "$PREFIX/ssl/openssl-fips.cnf" ] || [ ! -d "$MODULES_DIR" ]; then
-            OPENSSL_VERSION=3.5.5 PREFIX="$PREFIX" bash scripts/crypto/openssl/build-openssl-bundle.sh
-          fi
-          if [ -d "$PREFIX/lib/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib/ossl-modules"
-          elif [ -d "$PREFIX/lib64/ossl-modules" ]; then
-            MODULES_DIR="$PREFIX/lib64/ossl-modules"
-          else
-            echo "ERROR: OpenSSL modules directory not found under $PREFIX/lib*/ossl-modules" >&2
-            exit 1
-          fi
-          {
-            echo "$PREFIX/bin"
-          } >> "$GITHUB_PATH"
-          # LD_LIBRARY_PATH is exported here deliberately: dev-env.sh
-          # select_openssl() wires PATH/OPENSSL_DIR/PKG_CONFIG_PATH/
-          # OPENSSL_MODULES from RUBIN_OPENSSL_PREFIX but does NOT export
-          # LD_LIBRARY_PATH, and the fuzz test binary links the bundle's
-          # libcrypto dynamically (#cgo pkg-config: openssl), so the runtime
-          # linker needs it exactly as in ci.yml `test`.
-          {
-            echo "OPENSSL_DIR=$PREFIX"
-            echo "PKG_CONFIG_PATH=$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig"
-            echo "LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib"
-            echo "OPENSSL_MODULES=$MODULES_DIR"
-            echo "OPENSSL_CONF=$PREFIX/ssl/openssl-fips.cnf"
-          } >> "$GITHUB_ENV"
+          cache-key-prefix: openssl-bundle-mldsa-verified
+          cache-revision: v1
 
       # Fail fast with a precise diagnostic if the provisioned backend does
       # not expose ML-DSA-87: a red step here means "backend broken", never
