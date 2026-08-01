@@ -14,6 +14,36 @@ fn validate_tx_covenants_genesis_p2pk_ok() {
 }
 
 #[test]
+fn validate_tx_covenants_genesis_p2pk_forwards_block_height() {
+    use crate::suite_registry::{NativeSuiteSet, RotationProvider};
+    struct HeightSensitive;
+    impl RotationProvider for HeightSensitive {
+        fn native_create_suites(&self, height: u64) -> NativeSuiteSet {
+            if height >= 2 {
+                NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87])
+            } else {
+                NativeSuiteSet::new(&[])
+            }
+        }
+        fn native_spend_suites(&self, _height: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[])
+        }
+    }
+
+    let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+    tx.outputs = vec![crate::tx::TxOutput {
+        value: 1,
+        covenant_type: COV_TYPE_P2PK,
+        covenant_data: vec![SUITE_ID_ML_DSA_87; MAX_P2PK_COVENANT_DATA as usize],
+    }];
+    let rotation = HeightSensitive;
+
+    let err = validate_tx_covenants_genesis(&tx, 1, Some(&rotation)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    validate_tx_covenants_genesis(&tx, 2, Some(&rotation)).expect("height forwarded");
+}
+
+#[test]
 fn validate_tx_covenants_genesis_p2pk_non_native_suite_rejected() {
     let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
     let mut cov = vec![0u8; MAX_P2PK_COVENANT_DATA as usize];
@@ -228,6 +258,103 @@ fn validate_tx_covenants_genesis_htlc_zero_value_rejected() {
     }];
     let err = validate_tx_covenants_genesis(&tx, 0, None).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+}
+
+#[test]
+fn validate_tx_covenants_genesis_htlc_creation_first_error_order() {
+    let hash = [0x42u8; 32];
+    let claim_key_id = [0x11u8; 32];
+    let refund_key_id = [0x22u8; 32];
+    let valid = encode_htlc_covenant_data(hash, LOCK_MODE_HEIGHT, 1, claim_key_id, refund_key_id);
+    let equal = encode_htlc_covenant_data(hash, LOCK_MODE_HEIGHT, 1, claim_key_id, claim_key_id);
+    let bad_mode = encode_htlc_covenant_data(hash, 0xff, 1, claim_key_id, claim_key_id);
+    let zero_lock =
+        encode_htlc_covenant_data(hash, LOCK_MODE_HEIGHT, 0, claim_key_id, claim_key_id);
+    let out = |value, covenant_data| crate::tx::TxOutput {
+        value,
+        covenant_type: COV_TYPE_HTLC,
+        covenant_data,
+    };
+    let cases = vec![
+        ("valid", vec![out(1, valid.clone())], None),
+        (
+            "equal_only",
+            vec![out(1, equal.clone())],
+            Some((
+                ErrorCode::TxErrParse,
+                "CORE_HTLC claim/refund key_id must differ",
+            )),
+        ),
+        (
+            "zero_value_only",
+            vec![out(0, valid.clone())],
+            Some((
+                ErrorCode::TxErrCovenantTypeInvalid,
+                "CORE_HTLC value must be > 0",
+            )),
+        ),
+        (
+            "paired",
+            vec![out(0, equal.clone())],
+            Some((
+                ErrorCode::TxErrParse,
+                "CORE_HTLC claim/refund key_id must differ",
+            )),
+        ),
+        (
+            "bad_length_plus_zero",
+            vec![out(0, valid[..valid.len() - 1].to_vec())],
+            Some((
+                ErrorCode::TxErrCovenantTypeInvalid,
+                "CORE_HTLC covenant_data length mismatch",
+            )),
+        ),
+        (
+            "bad_mode_equal_zero",
+            vec![out(0, bad_mode)],
+            Some((
+                ErrorCode::TxErrCovenantTypeInvalid,
+                "CORE_HTLC lock_mode invalid",
+            )),
+        ),
+        (
+            "zero_lock_equal_zero",
+            vec![out(0, zero_lock)],
+            Some((
+                ErrorCode::TxErrCovenantTypeInvalid,
+                "CORE_HTLC lock_value must be > 0",
+            )),
+        ),
+        (
+            "zero_then_paired",
+            vec![out(0, valid.clone()), out(0, equal.clone())],
+            Some((
+                ErrorCode::TxErrCovenantTypeInvalid,
+                "CORE_HTLC value must be > 0",
+            )),
+        ),
+        (
+            "paired_then_zero",
+            vec![out(0, equal), out(0, valid)],
+            Some((
+                ErrorCode::TxErrParse,
+                "CORE_HTLC claim/refund key_id must differ",
+            )),
+        ),
+    ];
+
+    for (name, outputs, want) in cases {
+        let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+        tx.outputs = outputs;
+        match want {
+            Some((code, msg)) => {
+                let err = validate_tx_covenants_genesis(&tx, 0, None).unwrap_err();
+                assert_eq!(err.code, code, "{name}");
+                assert_eq!(err.msg, msg, "{name}");
+            }
+            None => validate_tx_covenants_genesis(&tx, 0, None).expect(name),
+        }
+    }
 }
 
 // COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED per CANONICAL §14: a well-formed

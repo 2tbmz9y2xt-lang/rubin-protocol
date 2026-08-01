@@ -138,11 +138,13 @@ func validateMultisigGenesisOutput(out TxOutput) error {
 }
 
 func validateHTLCGenesisOutput(out TxOutput) error {
+	if _, err := ParseHTLCCovenantData(out.CovenantData); err != nil {
+		return err
+	}
 	if out.Value == 0 {
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_HTLC value must be > 0")
 	}
-	_, err := ParseHTLCCovenantData(out.CovenantData)
-	return err
+	return nil
 }
 
 func validateCoreStealthGenesisOutput(out TxOutput) error {
