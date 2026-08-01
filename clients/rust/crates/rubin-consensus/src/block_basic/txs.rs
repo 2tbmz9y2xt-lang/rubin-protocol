@@ -47,6 +47,12 @@ pub(super) fn validate_block_tx_semantics(
                     "coinbase-like tx found at index > 0",
                 ));
             }
+            if tx.tx_nonce == 0 && tx.inputs.is_empty() {
+                return Err(TxError::new(
+                    ErrorCode::TxErrTxNonceInvalid,
+                    "tx_nonce must be >= 1 for non-coinbase",
+                ));
+            }
             if tx.inputs.is_empty() {
                 return Err(TxError::new(
                     ErrorCode::TxErrParse,
@@ -203,6 +209,39 @@ mod tests {
         let pb = parsed_block(vec![coinbase(1), spend(42, 1), spend(42, 1)]);
         let err = validate_block_tx_semantics(&pb, 1, None).unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrNonceReplay);
+    }
+
+    #[test]
+    fn section16_nonce_before_input_count() {
+        for (nonce, want) in [
+            (0, ErrorCode::TxErrTxNonceInvalid),
+            (1, ErrorCode::TxErrParse),
+        ] {
+            let tx = Tx {
+                version: TX_WIRE_VERSION,
+                tx_kind: 0x00,
+                tx_nonce: nonce,
+                inputs: Vec::new(),
+                outputs: vec![TxOutput {
+                    value: 1,
+                    covenant_type: COV_TYPE_P2PK,
+                    covenant_data: p2pk_covenant_data_for_pubkey(&[0x44; 32]),
+                }],
+                locktime: 0,
+                da_commit_core: None,
+                da_chunk_core: None,
+                witness: Vec::new(),
+                da_payload: Vec::new(),
+            };
+            let err = validate_block_tx_semantics(&parsed_block(vec![coinbase(1), tx]), 1, None)
+                .expect_err("paired-invalid non-coinbase must reject");
+            assert_eq!(err.code, want);
+        }
+
+        let mut single_nonce = spend(0, 1);
+        single_nonce.inputs[0].script_sig.clear();
+        validate_block_tx_semantics(&parsed_block(vec![coinbase(1), single_nonce]), 1, None)
+            .expect("single nonce must be deferred to transaction validation");
     }
 
     #[test]

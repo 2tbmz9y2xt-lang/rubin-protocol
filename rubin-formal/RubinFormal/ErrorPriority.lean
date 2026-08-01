@@ -15,9 +15,9 @@ linkage → merkle (via explicit-bind equivalence) → witness (existing).
 - `applyDaLenChecks` (LIVE, called from `parseTxFromCursor`):
   4 DA-length checks, all TX_ERR_PARSE.
 - `applyTxPreInputChecks` (LIVE, called from `applyNonCoinbaseTxBasicNoCrypto`):
-  empty inputs → nonce invalid → output covenant loop.
+  nonce invalid → empty inputs → output covenant loop.
 - `validateInputStructural` (LIVE, per-input loop):
-  scriptSig → sequence → coinbase prevout.
+  coinbase prevout → scriptSig → sequence.
 
 ## Coverage notes
 - `parseTxFromCursor` header/bounds (lines 108-139): all TX_ERR_PARSE — same error code,
@@ -382,19 +382,17 @@ on the top checks of the do-block.
 open UtxoApplyGenesisV1 in
 theorem preinput_empty_inputs_priority
     (tx : UtxoBasicV1.Tx) (height : Nat)
-    (h : (tx.inputs.length == 0) = true) :
+    (hNonce : (tx.txNonce == 0) = false)
+    (hInputs : (tx.inputs.length == 0) = true) :
     applyTxPreInputChecks tx height = .error "TX_ERR_PARSE" := by
-  unfold applyTxPreInputChecks; rw [h]; rfl
+  unfold applyTxPreInputChecks; rw [hNonce, hInputs]; rfl
 
 open UtxoApplyGenesisV1 in
 theorem preinput_nonce_zero_priority
     (tx : UtxoBasicV1.Tx) (height : Nat)
-    (hInputs : (tx.inputs.length == 0) = false)
     (hNonce : (tx.txNonce == 0) = true) :
     applyTxPreInputChecks tx height = .error "TX_ERR_TX_NONCE_INVALID" := by
-  unfold applyTxPreInputChecks
-  rw [show (tx.inputs.length == 0) = false from hInputs]
-  simp only [hNonce, ite_true]; rfl
+  unfold applyTxPreInputChecks; rw [hNonce]; rfl
 
 /-! ## Live DA-len checks ordering (applyDaLenChecks)
 
@@ -435,32 +433,32 @@ theorem dalen_kind2_bounds
 /-! ## Per-input structural ordering (validateInputStructural)
 
 LIVE sub-function called from applyNonCoinbaseTxBasicNoCrypto per-input loop.
-Ordering: scriptSig → sequence → coinbase prevout.
+Ordering: coinbase prevout → scriptSig → sequence.
 -/
 
 open UtxoApplyGenesisV1 in
 theorem input_scriptsig_priority
     (i : UtxoBasicV1.TxIn)
+    (hCoinbase : UtxoBasicV1.isCoinbasePrevout i = false)
     (h : (i.scriptSig.size != 0) = true) :
     validateInputStructural i = .error "TX_ERR_PARSE" := by
-  unfold validateInputStructural; rw [h]; rfl
+  unfold validateInputStructural; rw [hCoinbase, h]; rfl
 
 open UtxoApplyGenesisV1 in
 theorem input_sequence_priority
     (i : UtxoBasicV1.TxIn)
+    (hCoinbase : UtxoBasicV1.isCoinbasePrevout i = false)
     (hSS : (i.scriptSig.size != 0) = false)
     (h : (i.sequence > 0x7fffffff) = true) :
     validateInputStructural i = .error "TX_ERR_SEQUENCE_INVALID" := by
-  simp [validateInputStructural, hSS, h]; rfl
+  simp [validateInputStructural, hCoinbase, hSS, h]; rfl
 
 open UtxoApplyGenesisV1 in
 theorem input_coinbase_prevout_priority
     (i : UtxoBasicV1.TxIn)
-    (hSS : (i.scriptSig.size != 0) = false)
-    (hSeq : (i.sequence > 0x7fffffff) = false)
     (h : UtxoBasicV1.isCoinbasePrevout i = true) :
     validateInputStructural i = .error "TX_ERR_PARSE" := by
-  simp [validateInputStructural, hSS, hSeq, h]; rfl
+  unfold validateInputStructural; rw [h]; rfl
 
 /-! ## Header/bounds parse checks (validateTxKind, validateInputCountMin, validateOutputCountMin)
 
@@ -603,21 +601,23 @@ theorem parse_stage_witness_overflow_live : ∀ ws,
 -- applyNonCoinbaseTxBasicNoCrypto ordering
 open UtxoApplyGenesisV1 in
 theorem semantic_stage1_empty_inputs_live : ∀ tx height,
+    (tx.txNonce == 0) = false →
     (tx.inputs.length == 0) = true →
     applyTxPreInputChecks tx height = .error "TX_ERR_PARSE" :=
-  fun tx height h => preinput_empty_inputs_priority tx height h
+  fun tx height h1 h2 => preinput_empty_inputs_priority tx height h1 h2
 
 open UtxoApplyGenesisV1 in
 theorem semantic_stage2_nonce_live : ∀ tx height,
-    (tx.inputs.length == 0) = false → (tx.txNonce == 0) = true →
+    (tx.txNonce == 0) = true →
     applyTxPreInputChecks tx height = .error "TX_ERR_TX_NONCE_INVALID" :=
-  fun tx height h1 h2 => preinput_nonce_zero_priority tx height h1 h2
+  fun tx height h => preinput_nonce_zero_priority tx height h
 
 open UtxoApplyGenesisV1 in
 theorem perinput_scriptsig_live : ∀ i,
+    UtxoBasicV1.isCoinbasePrevout i = false →
     (i.scriptSig.size != 0) = true →
     validateInputStructural i = .error "TX_ERR_PARSE" :=
-  fun i h => input_scriptsig_priority i h
+  fun i h1 h2 => input_scriptsig_priority i h1 h2
 
 open UtxoApplyGenesisV1 in
 theorem perinput_duplicate_live : ∀ e height,
@@ -809,7 +809,7 @@ inductive TxSemanticStage where
 deriving DecidableEq
 
 def txSemanticStageOrd : TxSemanticStage → Nat
-  | .EmptyInputs => 0 | .Nonce => 1 | .OutputCovenants => 2 | .InputStructural => 3
+  | .EmptyInputs => 1 | .Nonce => 0 | .OutputCovenants => 2 | .InputStructural => 3
   | .UtxoLookup => 4 | .CovenantDispatch => 5 | .WitnessCursor => 6 | .ValueConservation => 7
 
 theorem txSemanticStageOrd_injective (a b : TxSemanticStage)
@@ -818,17 +818,18 @@ theorem txSemanticStageOrd_injective (a b : TxSemanticStage)
 
 open UtxoApplyGenesisV1 in
 theorem bridge_semantic_empty (tx : UtxoBasicV1.Tx) (height : Nat)
-    (h : (tx.inputs.length == 0) = true) :
-    txSemanticStageOrd .EmptyInputs = 0 ∧
+    (hNonce : (tx.txNonce == 0) = false)
+    (hInputs : (tx.inputs.length == 0) = true) :
+    txSemanticStageOrd .EmptyInputs = 1 ∧
     applyTxPreInputChecks tx height = .error "TX_ERR_PARSE" :=
-  ⟨rfl, preinput_empty_inputs_priority tx height h⟩
+  ⟨rfl, preinput_empty_inputs_priority tx height hNonce hInputs⟩
 
 open UtxoApplyGenesisV1 in
 theorem bridge_semantic_nonce (tx : UtxoBasicV1.Tx) (height : Nat)
-    (h1 : (tx.inputs.length == 0) = false) (h2 : (tx.txNonce == 0) = true) :
-    txSemanticStageOrd .Nonce = 1 ∧
+    (h : (tx.txNonce == 0) = true) :
+    txSemanticStageOrd .Nonce = 0 ∧
     applyTxPreInputChecks tx height = .error "TX_ERR_TX_NONCE_INVALID" :=
-  ⟨rfl, preinput_nonce_zero_priority tx height h1 h2⟩
+  ⟨rfl, preinput_nonce_zero_priority tx height h⟩
 
 open UtxoApplyGenesisV1 in
 theorem bridge_semantic_duplicate (e : Option UtxoBasicV1.UtxoEntry) (height : Nat) :
@@ -854,8 +855,8 @@ theorem bridge_semantic_value (so si vic siv : Nat) (h : (so > si) = true) :
   ⟨rfl, value_conservation_overspend so si vic siv h⟩
 
 theorem semantic_stage_chain :
-    txSemanticStageOrd .EmptyInputs < txSemanticStageOrd .Nonce ∧
-    txSemanticStageOrd .Nonce < txSemanticStageOrd .OutputCovenants ∧
+    txSemanticStageOrd .Nonce < txSemanticStageOrd .EmptyInputs ∧
+    txSemanticStageOrd .EmptyInputs < txSemanticStageOrd .OutputCovenants ∧
     txSemanticStageOrd .OutputCovenants < txSemanticStageOrd .InputStructural ∧
     txSemanticStageOrd .InputStructural < txSemanticStageOrd .UtxoLookup ∧
     txSemanticStageOrd .UtxoLookup < txSemanticStageOrd .CovenantDispatch ∧
@@ -877,10 +878,11 @@ theorem bridge_semantic_output_covenant (out : CovenantGenesisV1.TxOut)
 
 open UtxoApplyGenesisV1 in
 theorem bridge_semantic_scriptsig (i : UtxoBasicV1.TxIn)
+    (hCoinbase : UtxoBasicV1.isCoinbasePrevout i = false)
     (h : (i.scriptSig.size != 0) = true) :
     txSemanticStageOrd .InputStructural = 3 ∧
     validateInputStructural i = .error "TX_ERR_PARSE" :=
-  ⟨rfl, input_scriptsig_priority i h⟩
+  ⟨rfl, input_scriptsig_priority i hCoinbase h⟩
 
 open UtxoApplyGenesisV1 in
 theorem bridge_semantic_witness_cursor (cursor witnessLen : Nat)
@@ -982,8 +984,8 @@ theorem tx_parse_pipeline_deterministic :
     `input_coinbase_prevout_priority` for InputStructural sub-checks. -/
 theorem tx_semantic_pipeline_deterministic :
     -- Strict stage ordering (complete chain, all 7 adjacent pairs)
-    (txSemanticStageOrd .EmptyInputs < txSemanticStageOrd .Nonce ∧
-     txSemanticStageOrd .Nonce < txSemanticStageOrd .OutputCovenants ∧
+    (txSemanticStageOrd .Nonce < txSemanticStageOrd .EmptyInputs ∧
+     txSemanticStageOrd .EmptyInputs < txSemanticStageOrd .OutputCovenants ∧
      txSemanticStageOrd .OutputCovenants < txSemanticStageOrd .InputStructural ∧
      txSemanticStageOrd .InputStructural < txSemanticStageOrd .UtxoLookup ∧
      txSemanticStageOrd .UtxoLookup < txSemanticStageOrd .CovenantDispatch ∧

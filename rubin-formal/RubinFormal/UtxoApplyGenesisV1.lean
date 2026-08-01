@@ -363,11 +363,11 @@ def vaultSpendOutputsAllowed
 
 /-- Per-input structural checks from the for-loop (lines 218-220).
     LIVE sub-function: called from applyNonCoinbaseTxBasicNoCrypto per-input loop.
-    Ordering: scriptSig non-empty → sequence invalid → coinbase prevout. -/
+    Ordering: coinbase prevout → scriptSig non-empty → sequence invalid. -/
 def validateInputStructural (i : UtxoBasicV1.TxIn) : Except String Unit := do
+  if UtxoBasicV1.isCoinbasePrevout i then throw "TX_ERR_PARSE"
   if i.scriptSig.size != 0 then throw "TX_ERR_PARSE"
   if i.sequence > 0x7fffffff then throw "TX_ERR_SEQUENCE_INVALID"
-  if UtxoBasicV1.isCoinbasePrevout i then throw "TX_ERR_PARSE"
   pure ()
 
 /-- Post-loop witness cursor check.
@@ -396,15 +396,15 @@ def validateInputUtxoLookup
         else Except.ok e
       else Except.ok e
 
-/-- Pre-input semantic checks: parse, nonce, output covenants.
+/-- Pre-input semantic checks: nonce, parse, output covenants.
     LIVE sub-function: applyNonCoinbaseTxBasicNoCrypto calls it directly.
-    Ordering: TX_ERR_PARSE (empty inputs) → TX_ERR_TX_NONCE_INVALID →
+    Ordering: TX_ERR_TX_NONCE_INVALID → TX_ERR_PARSE (empty inputs) →
     TX_ERR_COVENANT_TYPE_INVALID (output validation) → per-input checks. -/
 def applyTxPreInputChecks
     (tx : UtxoBasicV1.Tx)
     (height : Nat) : Except String Unit := do
-  if tx.inputs.length == 0 then throw "TX_ERR_PARSE"
   if tx.txNonce == 0 then throw "TX_ERR_TX_NONCE_INVALID"
+  if tx.inputs.length == 0 then throw "TX_ERR_PARSE"
   for o in tx.outputs do
     CovenantGenesisV1.validateOutGenesis
       { value := o.value, covenantType := o.covenantType, covenantData := o.covenantData }

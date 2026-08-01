@@ -235,11 +235,8 @@ def parseBlock (blockBytes : Bytes) : Except String ParsedBlock := do
   let mut txids : List Bytes := []
   let mut wtxids : List Bytes := []
   let mut coinbaseTx : Bytes := ByteArray.empty
-  let mut anyZeroInputs : Bool := false
   for idx in [0:txCount] do
-    let (inCount, txid, wtxid, fullTx, cur') ← parseTxFromCursor cur
-    if inCount == 0 then
-      anyZeroInputs := true
+    let (_, txid, wtxid, fullTx, cur') ← parseTxFromCursor cur
     if idx == 0 then
       coinbaseTx := fullTx
     txs := txs.concat fullTx
@@ -248,8 +245,6 @@ def parseBlock (blockBytes : Bytes) : Except String ParsedBlock := do
     cur := cur'
   if cur.off != blockBytes.size then
     throw "BLOCK_ERR_PARSE"
-  if anyZeroInputs then
-    throw "TX_ERR_PARSE"
   pure { header := hdr, txs := txs, txids := txids, wtxids := wtxids, coinbaseTx := coinbaseTx }
 
 def merkleRootTxids (txids : List Bytes) : Except String Bytes := do

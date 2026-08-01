@@ -477,9 +477,9 @@ def validateStructuralInputs (inputs : List TxIn) : Except String Unit := do
   match inputs with
   | [] => pure ()
   | i :: rest =>
+      if isCoinbasePrevout i then throw "TX_ERR_PARSE"
       if i.scriptSig.size != 0 then throw "TX_ERR_PARSE"
       if i.sequence > 0x7fffffff then throw "TX_ERR_SEQUENCE_INVALID"
-      if isCoinbasePrevout i then throw "TX_ERR_PARSE"
       validateStructuralInputs rest
 
 structure InputScanState where
@@ -734,10 +734,10 @@ def validateBasicWitnesses
   pure ()
 
 def validateBasicTxEnvelope (tx : Tx) : Except String Unit := do
-  if tx.inputs.length == 0 then
-    throw "TX_ERR_PARSE"
   if tx.txNonce == 0 then
     throw "TX_ERR_TX_NONCE_INVALID"
+  if tx.inputs.length == 0 then
+    throw "TX_ERR_PARSE"
   pure ()
 
 def validateBasicVaultSpend
