@@ -1521,11 +1521,13 @@ fn queued_sigchecks_transaction_entry_unbound_registry_rollback() {
         apply(&late_tx, &registry_a, &mut unbound_queue).unwrap_err(),
         value_error.clone()
     );
-    apply(&valid_tx, &registry_b, &mut unbound_queue).expect("registry B after rollback");
+    let reused_result =
+        apply(&valid_tx, &registry_b, &mut unbound_queue).expect("registry B after rollback");
     unbound_queue.flush().expect("flush registry-B task");
     let mut fresh_b_queue = crate::sig_queue::SigCheckQueue::new(1);
-    apply(&valid_tx, &registry_b, &mut fresh_b_queue).expect("fresh registry B");
+    let fresh_result = apply(&valid_tx, &registry_b, &mut fresh_b_queue).expect("fresh registry B");
     fresh_b_queue.flush().expect("flush fresh registry-B task");
+    assert_eq!(reused_result, fresh_result);
     assert_eq!(
         apply(&valid_tx, &registry_a, &mut unbound_queue).unwrap_err(),
         mismatch_error.clone()
