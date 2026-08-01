@@ -24,7 +24,6 @@ BENCHMARK_PATHS = (
 PAYLOAD = object()  # pin the served bytes; ABSENT writes no checksum file at all
 ABSENT = object()
 VERSION = VERSION_PATH.read_text(encoding="utf-8").removesuffix("\n")
-PUBLISHED_SHA256 = "b28c91532a8b65a1f983b4c28b7488174e4a01008e29ce8e69bd789f28bc2a89"
 MIRROR_URL = "https://mirror.example/openssl.tar.gz"
 GARBAGE = b"not the pinned openssl source"
 
@@ -197,19 +196,13 @@ class OpenSSLBundleContractTests(unittest.TestCase):
             self.assertTrue(run.tarball.exists())
 
     def test_repin_targets_one_line_when_a_second_version_is_pinned(self):
-        text = CHECKSUM_PATH.read_text(encoding="utf-8") + f"{'a' * 64}  openssl-3.6.0.tar.gz\n"
+        original = CHECKSUM_PATH.read_text(encoding="utf-8")
+        old_line = next(line for line in original.splitlines() if line.endswith(f"  openssl-{VERSION}.tar.gz"))
+        text = original + f"{'a' * 64}  openssl-3.6.0.tar.gz\n"
         patched = repin_text(text, "b" * 64, VERSION)
         self.assertIn(f"{'a' * 64}  openssl-3.6.0.tar.gz", patched)
         self.assertIn(f"{'b' * 64}  openssl-{VERSION}.tar.gz", patched)
-        self.assertNotIn(PUBLISHED_SHA256, patched)
-
-    def test_checksum_file_is_the_single_definition_of_the_published_pin(self):
-        self.assertIn(f"{PUBLISHED_SHA256}  openssl-{VERSION}.tar.gz",
-                      CHECKSUM_PATH.read_text(encoding="utf-8"))
-        self.assertNotIn(PUBLISHED_SHA256, SCRIPT_PATH.read_text(encoding="utf-8"))
-        for workflow in sorted((REPO_ROOT / ".github" / "workflows").glob("*.y*ml")):
-            self.assertNotIn(PUBLISHED_SHA256, workflow.read_text(encoding="utf-8"),
-                             f"pin duplicated in {workflow.name}")
+        self.assertNotIn(old_line, patched)
 
     def test_version_file_selects_one_pinned_release(self):
         raw = VERSION_PATH.read_bytes()
@@ -221,6 +214,11 @@ class OpenSSLBundleContractTests(unittest.TestCase):
             if match and match.group(2) == f"openssl-{selected}.tar.gz":
                 rows.append(line)
         self.assertEqual(len(rows), 1, f"expected exactly one checksum row for {selected}")
+        digest = rows[0].split()[0]
+        self.assertNotIn(digest, SCRIPT_PATH.read_text(encoding="utf-8"))
+        for workflow in sorted((REPO_ROOT / ".github" / "workflows").glob("*.y*ml")):
+            self.assertNotIn(digest, workflow.read_text(encoding="utf-8"),
+                             f"pin duplicated in {workflow.name}")
 
     def test_benchmark_defaults_reject_noncanonical_version_file(self):
         for benchmark in BENCHMARK_PATHS:

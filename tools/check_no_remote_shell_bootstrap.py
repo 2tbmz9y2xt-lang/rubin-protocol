@@ -153,7 +153,9 @@ REMOTE_SHELL_PATTERNS = (
 
 def workflow_paths(repo_root: Path) -> list[Path]:
     workflow_dir = repo_root / ".github" / "workflows"
-    return sorted(list(workflow_dir.glob("*.yml")) + list(workflow_dir.glob("*.yaml")))
+    action_dir = repo_root / ".github" / "actions"
+    actions = list(action_dir.rglob("action.yml")) + list(action_dir.rglob("action.yaml"))
+    return sorted(list(workflow_dir.glob("*.yml")) + list(workflow_dir.glob("*.yaml")) + actions)
 
 
 def render_path(path: Path, repo_root: Path | None = None) -> str:
@@ -1273,12 +1275,12 @@ def find_violations(path: Path) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Reject remote shell bootstrap patterns in workflow YAML.")
+    parser = argparse.ArgumentParser(description="Reject remote shell bootstrap patterns in CI YAML.")
     parser.add_argument(
         "--repo-root",
         type=Path,
         default=Path(__file__).resolve().parents[1],
-        help="Repository root containing .github/workflows",
+        help="Repository root containing .github workflows and actions",
     )
     args = parser.parse_args(argv[1:])
 
@@ -1289,7 +1291,7 @@ def main(argv: list[str]) -> int:
     repo_root = args.repo_root.resolve()
     workflows = workflow_paths(repo_root)
     if not workflows:
-        print(f"ERROR: no workflow files found under {repo_root}/.github/workflows", file=sys.stderr)
+        print(f"ERROR: no CI YAML files found under {repo_root}/.github", file=sys.stderr)
         return 1
 
     bad: list[str] = []
@@ -1301,14 +1303,14 @@ def main(argv: list[str]) -> int:
             return 1
 
     if bad:
-        print("ERROR: remote shell bootstrap is not allowed in .github/workflows:", file=sys.stderr)
+        print("ERROR: remote shell bootstrap is not allowed in .github CI YAML:", file=sys.stderr)
         for item in bad:
             print(f" - {item}", file=sys.stderr)
         print(file=sys.stderr)
         print("Fix: download pinned artifacts or use a repo-local helper instead of curl|bash/process substitution.", file=sys.stderr)
         return 1
 
-    print("OK: no remote shell bootstrap patterns found in workflow surface.")
+    print("OK: no remote shell bootstrap patterns found in CI YAML surface.")
     return 0
 
 

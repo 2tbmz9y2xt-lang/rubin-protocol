@@ -98,6 +98,12 @@ class WorkflowYamlSyntaxTests(unittest.TestCase):
 
 
 class OpenSSLBundleCacheIdentityTests(unittest.TestCase):
+    def test_runtime_perf_paths_own_every_bundle_input(self):
+        text = (WORKFLOWS_DIR / "runtime-perf-guardrails.yml").read_text(encoding="utf-8")
+        for path in ("scripts/crypto/openssl/VERSION", CHECKSUMS, BUILDER,
+                     ".github/actions/openssl-bundle/action.yml"):
+            self.assertIn(f"      - '{path}'", text)
+
     @unittest.skipUnless(HAS_PYYAML, "PyYAML unavailable")
     def test_composite_action_owns_versioned_cache_and_builder(self):
         yaml = m.load_yaml_module()
@@ -127,7 +133,7 @@ class OpenSSLBundleCacheIdentityTests(unittest.TestCase):
         self.assertEqual(
             settings["key"],
             "${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ steps.version.outputs.value }}-"
-            "${{ inputs.cache-revision }}-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}",
+            "${{ inputs.cache-revision }}-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256', 'scripts/crypto/openssl/build-openssl-bundle.sh', '.github/actions/openssl-bundle/action.yml') }}",
         )
         self.assertNotIn("restore-keys", settings)
         prepare = next(step for step in steps if step.get("id") == "prepare")
@@ -147,11 +153,11 @@ class OpenSSLBundleCacheIdentityTests(unittest.TestCase):
         observed = set()
 
         for path in workflow_files():
-            text = path.read_text(encoding="utf-8")
-            self.assertNotIn(BUILDER, text, f"{path.name}: direct builder call bypasses the composite action")
-            self.assertNotIn("~/.cache/rubin-openssl/", text, f"{path.name}: versioned cache path is duplicated")
-            document = yaml.safe_load(text)
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
             for job_id, steps in job_steps(document):
+                for step in (item for item in steps if isinstance(item, dict)):
+                    self.assertNotIn(BUILDER, str(step.get("run", "")), f"{path.name}:{job_id}: direct builder call bypasses the composite action")
+                    self.assertNotIn("~/.cache/rubin-openssl/", str(step), f"{path.name}:{job_id}: versioned cache path is duplicated")
                 calls = [step for step in steps if isinstance(step, dict) and step.get("uses") == ACTION_REF]
                 if calls:
                     self.assertEqual(len(calls), 1, f"{path.name}:{job_id}: duplicate OpenSSL action call")

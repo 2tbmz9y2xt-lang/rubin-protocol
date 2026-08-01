@@ -9,6 +9,10 @@ on:
       - 'clients/go/node/**'
       - 'clients/rust/crates/rubin-node/**'
       - 'scripts/runtime_perf/**'
+      - 'scripts/crypto/openssl/VERSION'
+      - 'scripts/crypto/openssl/source-checksums.sha256'
+      - 'scripts/crypto/openssl/build-openssl-bundle.sh'
+      - '.github/actions/openssl-bundle/action.yml'
       - '.github/workflows/runtime-perf-guardrails.yml'
   workflow_dispatch:
 

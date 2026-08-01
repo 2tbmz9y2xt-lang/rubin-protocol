@@ -46,7 +46,7 @@ runs:
         path: |
           ~/.cache/rubin-openssl/bundle-${{ steps.version.outputs.value }}
           ~/.cache/rubin-openssl/work/openssl-${{ steps.version.outputs.value }}.tar.gz
-        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ steps.version.outputs.value }}-${{ inputs.cache-revision }}-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ steps.version.outputs.value }}-${{ inputs.cache-revision }}-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256', 'scripts/crypto/openssl/build-openssl-bundle.sh', '.github/actions/openssl-bundle/action.yml') }}
 
     - name: Build and export OpenSSL bundle
       id: prepare
