@@ -65,6 +65,8 @@ class OpenSSLVersionConsistencyTests(unittest.TestCase):
             ("tools/tests/test_openssl_bundle_contract.py", 'VERSION = "3.5.5"', 'VERSION = "3.5.4"', "bundle contract"),
             (WORKFLOW, "OPENSSL_VERSION=3.5.5", "OPENSSL_VERSION=$DYNAMIC", "unsupported builder"),
             (WORKFLOW, "bash scripts/crypto/openssl/build-openssl-bundle.sh", 'bash scripts/crypto/openssl/build-openssl-"bundle".sh', "unsupported builder"),
+            (WORKFLOW, "bash scripts/crypto/openssl/build-openssl-bundle.sh", 'B=scripts/crypto/openssl/build-openssl-bundle.sh\n          bash "$B"', "unsupported builder"),
+            (WORKFLOW, "bash scripts/crypto/openssl/build-openssl-bundle.sh", "eval 'bash scripts/crypto/openssl/build-openssl-bundle.sh'", "unsupported builder"),
             (WORKFLOW, "bash scripts/crypto/openssl/build-openssl-bundle.sh", "command bash scripts/crypto/openssl/build-openssl-bundle.sh", "unsupported builder"),
             (WORKFLOW, "bash scripts/crypto/openssl/build-openssl-bundle.sh", "if true; then bash scripts/crypto/openssl/build-openssl-bundle.sh; fi", "unsupported builder"),
             (WORKFLOW, 'PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"', 'PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.4"\n          # PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"', "bundle prefix"),
@@ -79,6 +81,12 @@ class OpenSSLVersionConsistencyTests(unittest.TestCase):
         for case in cases:
             with self.subTest(case[0], message=case[3]):
                 self.assert_rejected(*case)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(tmp)
+            self.mutate(root, "scripts/crypto/openssl/build-openssl-bundle.sh", 'OPENSSL_VERSION="${OPENSSL_VERSION:-3.5.5}"', "# default moved into a function")
+            self.mutate(root, "scripts/crypto/openssl/build-openssl-bundle.sh", "lookup_pinned_sha256() {", 'lookup_pinned_sha256 () {\nOPENSSL_VERSION="${OPENSSL_VERSION:-3.5.5}"')
+            errors = check_repo(root)
+            self.assertTrue(any("builder default" in error for error in errors), errors)
 
     def test_shell_and_yaml_non_sites_are_accepted(self) -> None:
         insertions = (

@@ -106,7 +106,7 @@ def builder_occurrences(run: str) -> int:
         for index, token in enumerate(tokens):
             if token and all(char in ";&|()" for char in token):
                 segment_start = index + 1
-            elif token == BUILDER or token.endswith("/" + BUILDER):
+            elif BUILDER in token:
                 segment = tokens[segment_start:index]
                 command = next((item for item in segment if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", item)), "")
                 if command not in ("echo", "printf"):
@@ -208,7 +208,7 @@ def check_repo(root: Path) -> list[str]:
         builder = read(root / "scripts/crypto/openssl/build-openssl-bundle.sh")
         active = [(index, line) for index, line in enumerate(builder.splitlines()) if line.strip() and not line.lstrip().startswith("#")]
         owners = [(index, line) for index, line in active if "OPENSSL_VERSION=" in line]
-        functions = [index for index, line in active if re.match(r"^\s*(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*(?:\(\))?\s*\{", line)]
+        functions = [index for index, line in active if re.match(r"^\s*(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*(?:\s*\(\))?\s*\{", line)]
         if len(owners) != 1 or (functions and owners[0][0] > functions[0]):
             raise ValueError("builder default: expected one active authority before functions")
         version = one_match(owners[0][1], rf'^OPENSSL_VERSION="\$\{{OPENSSL_VERSION:-({VERSION_RE})\}}"$', "builder default")
