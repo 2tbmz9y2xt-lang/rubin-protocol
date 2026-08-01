@@ -136,20 +136,26 @@ pub(crate) fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_
     registry: Option<&SuiteRegistry>,
     sig_queue: &mut SigCheckQueue,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_impl(
-        UtxoApplyImplContext {
-            tx,
-            txid,
-            utxo_set,
-            height,
-            block_timestamp,
-            block_mtp,
-            chain_id,
-            rotation,
-            registry,
-        },
-        Some(sig_queue),
-    )
+    let entry_mark = sig_queue.mark();
+    let result =
+        apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_impl(
+            UtxoApplyImplContext {
+                tx,
+                txid,
+                utxo_set,
+                height,
+                block_timestamp,
+                block_mtp,
+                chain_id,
+                rotation,
+                registry,
+            },
+            Some(&mut *sig_queue),
+        );
+    if result.is_err() {
+        sig_queue.rollback_to(entry_mark);
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
