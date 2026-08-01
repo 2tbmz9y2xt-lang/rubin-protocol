@@ -235,17 +235,17 @@ func validateHTLCSpendQ(
 		if len(pathSig) != 1 {
 			return txerr(TX_ERR_PARSE, "CORE_HTLC refund payload length mismatch")
 		}
-		var pathKeyID [32]byte
-		copy(pathKeyID[:], pathItem.Pubkey)
-		if pathKeyID != c.RefundKeyID {
-			return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC refund key_id mismatch")
-		}
 		if c.LockMode == LOCK_MODE_HEIGHT {
 			if blockHeight < c.LockValue {
 				return txerr(TX_ERR_TIMELOCK_NOT_MET, "CORE_HTLC height lock not met")
 			}
 		} else if blockMTP < c.LockValue {
 			return txerr(TX_ERR_TIMELOCK_NOT_MET, "CORE_HTLC timestamp lock not met")
+		}
+		var pathKeyID [32]byte
+		copy(pathKeyID[:], pathItem.Pubkey)
+		if pathKeyID != c.RefundKeyID {
+			return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC refund key_id mismatch")
 		}
 		expectedKeyID = c.RefundKeyID
 

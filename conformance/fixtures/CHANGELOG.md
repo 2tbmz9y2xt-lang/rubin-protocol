@@ -11,6 +11,10 @@ Policy:
 
 ---
 
+## 2026-08-01 — HTLC refund timelock first-error ordering (RUB-658)
+
+Reason/tools/fixtures/non-goals: changed fixtures: `CV-HTLC.json`, `CV-HTLC-ORDERING.json`. `CV-HTLC-REFUND-FIRST-ERROR-01` combines an immature height refund with a selector-key mismatch to pin `TX_ERR_TIMELOCK_NOT_MET`; `CV-H-RefundTimelockBeforeKey` pins the corresponding policy order while the malformed-selector row remains structural-first. Regenerated `conformance/MATRIX.md`, HTLC Lean companions, and the existing Go trace/refinement outputs through their owners. No fixture schema, runner, API, or canonical-spec change.
+
 ## 2026-08-01 — HTLC creation first-error ordering (RUB-657)
 
 Reason/tools/fixtures/non-goals: `CV-COVENANT-GENESIS.json` adds nine `covenant_genesis_check` rows that pin HTLC parse clauses ahead of zero output value and output-index traversal. Regenerated `conformance/MATRIX.md`, `CVCovenantGenesisVectors.lean`, Go trace, and `GoTraceV1.lean` through their existing owners; no fixture schema, runner, parser, API, or canonical-spec change.

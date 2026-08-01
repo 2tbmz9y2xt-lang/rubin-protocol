@@ -321,15 +321,15 @@ def validateHTLCSpendNoCrypto
   else if pathId == 0x01 then
     if pathItem.signature.size != 1 then
       throw "TX_ERR_PARSE"
-    let pathKeyId := pathItem.pubkey
-    if pathKeyId != c.refundKeyId then
-      throw "TX_ERR_SIG_INVALID"
     if c.lockMode == CovenantGenesisV1.LOCK_MODE_HEIGHT then
       if blockHeight < c.lockValue then
         throw "TX_ERR_TIMELOCK_NOT_MET"
     else
       if blockMtp < c.lockValue then
         throw "TX_ERR_TIMELOCK_NOT_MET"
+    let pathKeyId := pathItem.pubkey
+    if pathKeyId != c.refundKeyId then
+      throw "TX_ERR_SIG_INVALID"
     expectedKeyId := c.refundKeyId
   else
     throw "TX_ERR_PARSE"

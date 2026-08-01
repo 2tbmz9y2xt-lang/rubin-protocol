@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -231,6 +232,79 @@ func TestApplyNonCoinbaseTxBasic_HTLCUnknownPath(t *testing.T) {
 	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
 	}
+}
+
+type htlcRefundTimelockFirstErrorOrderCase struct {
+	name                        string
+	lockMode                    uint8
+	lockValue, height, blockMTP uint64
+	payload                     []byte
+	want                        ErrorCode
+}
+
+var htlcRefundTimelockFirstErrorOrderCases = []htlcRefundTimelockFirstErrorOrderCase{
+	{name: "height_immature_selector_mismatch", lockMode: LOCK_MODE_HEIGHT, lockValue: 10, height: 9, payload: []byte{0x01}, want: TX_ERR_TIMELOCK_NOT_MET},
+	{name: "timestamp_immature_selector_mismatch", lockMode: LOCK_MODE_TIMESTAMP, lockValue: 20, height: 10, blockMTP: 19, payload: []byte{0x01}, want: TX_ERR_TIMELOCK_NOT_MET},
+	{name: "height_mature_selector_mismatch", lockMode: LOCK_MODE_HEIGHT, lockValue: 10, height: 11, payload: []byte{0x01}, want: TX_ERR_SIG_INVALID},
+	{name: "timestamp_mature_selector_mismatch", lockMode: LOCK_MODE_TIMESTAMP, lockValue: 20, height: 10, blockMTP: 21, payload: []byte{0x01}, want: TX_ERR_SIG_INVALID},
+	{name: "malformed_payload_precedes_height_timelock_and_selector_mismatch", lockMode: LOCK_MODE_HEIGHT, lockValue: 10, height: 9, payload: []byte{0x01, 0x00}, want: TX_ERR_PARSE},
+	{name: "height_exact_maturity_selector_mismatch", lockMode: LOCK_MODE_HEIGHT, lockValue: 10, height: 10, payload: []byte{0x01}, want: TX_ERR_SIG_INVALID},
+	{name: "timestamp_exact_maturity_selector_mismatch", lockMode: LOCK_MODE_TIMESTAMP, lockValue: 20, height: 10, blockMTP: 20, payload: []byte{0x01}, want: TX_ERR_SIG_INVALID},
+}
+
+func htlcRefundTimelockFirstErrorOrderInput(tc htlcRefundTimelockFirstErrorOrderCase) (*Tx, map[Outpoint]UtxoEntry) {
+	prev := [32]byte{0xa2}
+	_, refundPub, claimKeyID, refundKeyID := makeMLKeyMaterial(0xa2)
+	selectorKeyID := refundKeyID
+	selectorKeyID[0] ^= 0xff
+	tx := &Tx{
+		Version: TX_WIRE_VERSION,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prev}},
+		Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Witness: []WitnessItem{
+			{SuiteID: SUITE_ID_SENTINEL, Pubkey: selectorKeyID[:], Signature: tc.payload},
+			{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: refundPub, Signature: dummyMLSignature(SIGHASH_ALL)},
+		},
+	}
+	return tx, map[Outpoint]UtxoEntry{
+		{Txid: prev, Vout: 0}: makeHTLCEntry(sha3_256([]byte(tc.name)), tc.lockMode, tc.lockValue, claimKeyID, refundKeyID),
+	}
+}
+
+func runHTLCRefundTimelockFirstErrorOrder(t *testing.T, queueAware bool) {
+	t.Helper()
+	for _, tc := range htlcRefundTimelockFirstErrorOrderCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tx, utxos := htlcRefundTimelockFirstErrorOrderInput(tc)
+			before := cloneUtxoSet(utxos)
+			var err error
+			if queueAware {
+				queue := NewSigCheckQueue(1)
+				work, _, queuedErr := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{0xa3}, utxos, tc.height, tc.blockMTP, [32]byte{}, queue, nil, nil)
+				err = queuedErr
+				if work != nil || queue.Len() != 0 {
+					t.Fatalf("rejection returned work or queued signatures: work=%v queue=%d", work, queue.Len())
+				}
+			} else {
+				_, err = ApplyNonCoinbaseTxBasic(tx, [32]byte{0xa3}, utxos, tc.height, tc.blockMTP, [32]byte{})
+			}
+			if got := mustTxErrCode(t, err); got != tc.want {
+				t.Fatalf("code=%s, want %s", got, tc.want)
+			}
+			if !reflect.DeepEqual(utxos, before) {
+				t.Fatal("caller UTXOs changed on rejection")
+			}
+		})
+	}
+}
+
+func TestApplyNonCoinbaseTxBasic_HTLCRefundTimelockFirstErrorOrder(t *testing.T) {
+	runHTLCRefundTimelockFirstErrorOrder(t, false)
+}
+
+func TestApplyNonCoinbaseTxBasicWorkQ_HTLCRefundTimelockFirstErrorOrder(t *testing.T) {
+	runHTLCRefundTimelockFirstErrorOrder(t, true)
 }
 
 func TestParseHTLCCovenantData_Nil(t *testing.T) {

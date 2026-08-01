@@ -188,15 +188,15 @@ func validateHTLCRefundPath(
 	if len(pathSig) != 1 {
 		return [32]byte{}, txerr(TX_ERR_PARSE, "CORE_HTLC refund payload length mismatch")
 	}
-	if pathKeyID != c.RefundKeyID {
-		return [32]byte{}, txerr(TX_ERR_SIG_INVALID, "CORE_HTLC refund key_id mismatch")
-	}
 	if c.LockMode == LOCK_MODE_HEIGHT {
 		if blockHeight < c.LockValue {
 			return [32]byte{}, txerr(TX_ERR_TIMELOCK_NOT_MET, "CORE_HTLC height lock not met")
 		}
 	} else if blockMTP < c.LockValue {
 		return [32]byte{}, txerr(TX_ERR_TIMELOCK_NOT_MET, "CORE_HTLC timestamp lock not met")
+	}
+	if pathKeyID != c.RefundKeyID {
+		return [32]byte{}, txerr(TX_ERR_SIG_INVALID, "CORE_HTLC refund key_id mismatch")
 	}
 	return c.RefundKeyID, nil
 }
