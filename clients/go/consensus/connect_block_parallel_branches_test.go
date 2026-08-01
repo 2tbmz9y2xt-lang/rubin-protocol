@@ -2,12 +2,158 @@ package consensus
 
 import (
 	"bytes"
+	"errors"
 	"reflect"
 	"testing"
 )
 
-// These tests exercise the covenant-type branches in applyNonCoinbaseTxBasicWorkQ
-// that are not reached by the conformance parity test (which only has P2PK blocks).
+// These tests cover transaction-level signature-queue ownership and the
+// covenant-type branches not reached by the P2PK-only conformance parity test.
+
+func TestApplyNonCoinbaseTxBasicWorkQ_SigQueueRollbackToEntryMark(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+
+	for _, prepopulate := range []bool{false, true} {
+		name := "empty"
+		if prepopulate {
+			name = "prepopulated"
+		}
+		t.Run(name, func(t *testing.T) {
+			q := NewSigCheckQueue(1)
+			if prepopulate {
+				kp2 := mustMLDSA87Keypair(t)
+				covData2 := p2pkCovenantDataForPubkey(kp2.PubkeyBytes())
+				prev1, prev2 := hashWithPrefix(0x91), hashWithPrefix(0x92)
+				tx := &Tx{
+					Version: 1, TxKind: 0, TxNonce: 1,
+					Inputs: []TxInput{
+						{PrevTxid: prev1, PrevVout: 0},
+						{PrevTxid: prev2, PrevVout: 0},
+					},
+					Outputs: []TxOutput{{Value: 199, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+				}
+				tx.Witness = []WitnessItem{
+					signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp),
+					signP2PKInputWitness(t, tx, 1, 100, [32]byte{}, kp2),
+				}
+				utxos := map[Outpoint]UtxoEntry{
+					{Txid: prev1}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: covData},
+					{Txid: prev2}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: covData2},
+				}
+				if _, _, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0x90), utxos, 1, 0, [32]byte{}, q, nil, nil); err != nil {
+					t.Fatalf("prepopulate queue: %v", err)
+				}
+			}
+
+			before := make([]sigCheckTask, len(q.tasks))
+			for i, task := range q.tasks {
+				before[i] = task
+				before[i].pubkey = append([]byte(nil), task.pubkey...)
+				before[i].sig = append([]byte(nil), task.sig...)
+			}
+			assertQueueState := func(stage string) {
+				if len(q.tasks) != len(before) {
+					t.Fatalf("queue after %s differs from entry state: got %v tasks, want %v", stage, len(q.tasks), len(before))
+				}
+				for i, got := range q.tasks {
+					want := before[i]
+					if got.suiteID != want.suiteID ||
+						!bytes.Equal(got.pubkey, want.pubkey) ||
+						!bytes.Equal(got.sig, want.sig) ||
+						got.digest != want.digest ||
+						!errors.Is(got.errOnFail, want.errOnFail) ||
+						!errors.Is(want.errOnFail, got.errOnFail) {
+						t.Fatalf("queue task %d after %s differs from entry state", i, stage)
+					}
+				}
+			}
+			if _, _, err := applyNonCoinbaseTxBasicWorkQ(nil, [32]byte{}, nil, 1, 0, [32]byte{}, q, nil, nil); !isTxErrCode(err, TX_ERR_PARSE) {
+				t.Fatalf("early rejection: expected TX_ERR_PARSE, got %v", err)
+			}
+			assertQueueState("early rejection")
+
+			prev := hashWithPrefix(0x93)
+			tx := &Tx{
+				Version: 1, TxKind: 0, TxNonce: 1,
+				Inputs:  []TxInput{{PrevTxid: prev, PrevVout: 0}},
+				Outputs: []TxOutput{{Value: 101, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+			}
+			tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp)}
+			utxos := map[Outpoint]UtxoEntry{{Txid: prev}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: covData}}
+			utxosBefore := map[Outpoint]UtxoEntry{{Txid: prev}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: append([]byte(nil), covData...)}}
+
+			if _, _, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0x94), utxos, 1, 0, [32]byte{}, q, nil, nil); !isTxErrCode(err, TX_ERR_VALUE_CONSERVATION) {
+				t.Fatalf("expected TX_ERR_VALUE_CONSERVATION, got %v", err)
+			}
+			assertQueueState("late rejection")
+			if !reflect.DeepEqual(utxos, utxosBefore) {
+				t.Fatalf("caller UTXO set changed: got %#v, want %#v", utxos, utxosBefore)
+			}
+			if err := q.Flush(); err != nil {
+				t.Fatalf("flush preserved tasks: %v", err)
+			}
+		})
+	}
+}
+
+func TestApplyNonCoinbaseTxBasicWorkQ_SigQueueSuccessRetainsOrder(t *testing.T) {
+	kp1 := mustMLDSA87Keypair(t)
+	kp2 := mustMLDSA87Keypair(t)
+	cov1 := p2pkCovenantDataForPubkey(kp1.PubkeyBytes())
+	cov2 := p2pkCovenantDataForPubkey(kp2.PubkeyBytes())
+	prev1, prev2 := hashWithPrefix(0x95), hashWithPrefix(0x96)
+	tx := &Tx{
+		Version: 1, TxKind: 0, TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prev1, PrevVout: 0}, {PrevTxid: prev2, PrevVout: 0}},
+		Outputs: []TxOutput{{Value: 199, CovenantType: COV_TYPE_P2PK, CovenantData: cov1}},
+	}
+	tx.Witness = []WitnessItem{
+		signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp1),
+		signP2PKInputWitness(t, tx, 1, 100, [32]byte{}, kp2),
+	}
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev1}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: cov1},
+		{Txid: prev2}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: cov2},
+	}
+	q := NewSigCheckQueue(1)
+	if _, _, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0x97), utxos, 1, 0, [32]byte{}, q, nil, nil); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if q.Len() != 2 {
+		t.Fatalf("queued tasks = %d, want 2", q.Len())
+	}
+	if !bytes.Equal(q.tasks[0].pubkey, kp1.PubkeyBytes()) || !bytes.Equal(q.tasks[1].pubkey, kp2.PubkeyBytes()) {
+		t.Fatal("queued signature tasks do not preserve input order")
+	}
+	if err := q.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+}
+
+func TestApplyNonCoinbaseTxBasicWorkQ_NilSigQueueSafety(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	prev := hashWithPrefix(0x98)
+	utxos := map[Outpoint]UtxoEntry{{Txid: prev}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: covData}}
+
+	for _, outputValue := range []uint64{90, 101} {
+		tx := &Tx{
+			Version: 1, TxKind: 0, TxNonce: 1,
+			Inputs:  []TxInput{{PrevTxid: prev, PrevVout: 0}},
+			Outputs: []TxOutput{{Value: outputValue, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+		}
+		tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp)}
+		_, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0x99), utxos, 1, 0, [32]byte{}, nil, nil, nil)
+		if outputValue == 90 {
+			if err != nil || fee != 10 {
+				t.Fatalf("nil-queue success: fee=%d err=%v", fee, err)
+			}
+		} else if !isTxErrCode(err, TX_ERR_VALUE_CONSERVATION) {
+			t.Fatalf("nil-queue rejection: expected TX_ERR_VALUE_CONSERVATION, got %v", err)
+		}
+	}
+}
 
 func TestApplyNonCoinbaseTxBasicWorkQ_MultisigBranch(t *testing.T) {
 	kp1 := mustMLDSA87Keypair(t)
