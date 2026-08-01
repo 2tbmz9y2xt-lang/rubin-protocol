@@ -1546,3 +1546,68 @@ fn apply_non_coinbase_tx_basic_htlc_creation_first_error_order() {
     assert_eq!(err.msg, "CORE_HTLC claim/refund key_id must differ");
     assert_eq!(utxos, before, "caller UTXOs changed on rejection");
 }
+
+#[test]
+fn apply_non_coinbase_tx_basic_htlc_refund_timelock_first_error_order() {
+    let prev_txid = [0xa2; 32];
+    let claim_key_id = [0x11; 32];
+    let refund_key_id = [0x22; 32];
+    let tx_bytes =
+        tx_with_one_input_one_output(prev_txid, 0, 90, COV_TYPE_P2PK, &valid_p2pk_covenant_data());
+    let (mut tx, _txid, _wtxid, _n) = parse_tx(&tx_bytes).expect("parse");
+    tx.witness = vec![
+        crate::tx::WitnessItem {
+            suite_id: SUITE_ID_SENTINEL,
+            pubkey: vec![0x33; 32],
+            signature: vec![0x01],
+        },
+        crate::tx::WitnessItem {
+            suite_id: SUITE_ID_ML_DSA_87,
+            pubkey: vec![],
+            signature: vec![],
+        },
+    ];
+    let check = |lock_mode, lock_value, height, block_timestamp, want_msg| {
+        let utxos = HashMap::from([(
+            Outpoint {
+                txid: prev_txid,
+                vout: 0,
+            },
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_HTLC,
+                covenant_data: encode_htlc_covenant_data(
+                    [0x44; 32],
+                    lock_mode,
+                    lock_value,
+                    claim_key_id,
+                    refund_key_id,
+                ),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        )]);
+        let before = utxos.clone();
+        let err = apply_non_coinbase_tx_basic(
+            &tx,
+            [0xa3; 32],
+            &utxos,
+            height,
+            block_timestamp,
+            ZERO_CHAIN_ID,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrTimelockNotMet);
+        assert_eq!(err.msg, want_msg);
+        assert_eq!(utxos, before, "caller UTXOs changed on rejection");
+    };
+
+    check(LOCK_MODE_HEIGHT, 10, 9, 0, "CORE_HTLC height lock not met");
+    check(
+        LOCK_MODE_TIMESTAMP,
+        20,
+        10,
+        19,
+        "CORE_HTLC timestamp lock not met",
+    );
+}
