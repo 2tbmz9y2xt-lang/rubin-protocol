@@ -992,6 +992,31 @@ func TestApplyNonCoinbaseTxBasic_Section16StructuralOrder(t *testing.T) {
 	}
 }
 
+func TestApplyNonCoinbaseTxBasic_HTLCCreationFirstErrorOrder(t *testing.T) {
+	prev := hashWithPrefix(0x63)
+	var hash, claimKeyID [32]byte
+	hash[0], claimKeyID[0] = 0x42, 0x11
+	paired := encodeHTLCCovenantData(hash, LOCK_MODE_HEIGHT, 1, claimKeyID, claimKeyID)
+	tx := &Tx{
+		Version: TX_WIRE_VERSION,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prev}},
+		Outputs: []TxOutput{{Value: 0, CovenantType: COV_TYPE_HTLC, CovenantData: paired}},
+	}
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev}: {Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+	}
+	before := cloneUtxoSet(utxos)
+	work, summary, err := ApplyNonCoinbaseTxBasicUpdate(tx, hashWithPrefix(0x64), utxos, 1, 0, [32]byte{})
+	if work != nil || summary != nil {
+		t.Fatalf("rejection returned work=%v summary=%v", work, summary)
+	}
+	assertTxErrCodeMsg(t, err, TX_ERR_PARSE, "CORE_HTLC claim/refund key_id must differ")
+	if !reflect.DeepEqual(utxos, before) {
+		t.Fatal("caller UTXOs changed on rejection")
+	}
+}
+
 func TestApplyNonCoinbaseTxBasicWorkQ_Section16StructuralOrder(t *testing.T) {
 	for _, tc := range section16StructuralCases() {
 		t.Run(tc.name, func(t *testing.T) {
