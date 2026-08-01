@@ -82,13 +82,13 @@ pub fn validate_tx_covenants_genesis(
                 parse_multisig_covenant_data(&out.covenant_data)?;
             }
             COV_TYPE_HTLC => {
+                parse_htlc_covenant_data(&out.covenant_data)?;
                 if out.value == 0 {
                     return Err(TxError::new(
                         ErrorCode::TxErrCovenantTypeInvalid,
                         "CORE_HTLC value must be > 0",
                     ));
                 }
-                parse_htlc_covenant_data(&out.covenant_data)?;
             }
             COV_TYPE_CORE_STEALTH => {
                 if out.value == 0 {

@@ -1263,3 +1263,72 @@ fn apply_non_coinbase_tx_basic_workq_p2pk_spend_q_error() {
     let err = deferred_apply(&tx, [0u8; 32], &utxos, 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
 }
+
+#[test]
+fn apply_non_coinbase_tx_basic_deferred_htlc_creation_first_error_order() {
+    let prev_txid = [0x65u8; 32];
+    let hash = [0x42u8; 32];
+    let claim_key_id = [0x11u8; 32];
+    let tx = crate::tx::Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![crate::tx::TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: vec![],
+            sequence: 0,
+        }],
+        outputs: vec![crate::tx::TxOutput {
+            value: 0,
+            covenant_type: COV_TYPE_HTLC,
+            covenant_data: encode_htlc_covenant_data(
+                hash,
+                LOCK_MODE_HEIGHT,
+                1,
+                claim_key_id,
+                claim_key_id,
+            ),
+        }],
+        locktime: 0,
+        witness: vec![],
+        da_payload: vec![],
+        da_commit_core: None,
+        da_chunk_core: None,
+    };
+    let utxos = HashMap::from([(
+        Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        },
+        UtxoEntry {
+            value: 1,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+            creation_height: 0,
+            created_by_coinbase: false,
+        },
+    )]);
+    let before = utxos.clone();
+    let err = deferred_apply(&tx, [0x66u8; 32], &utxos, 1).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "CORE_HTLC claim/refund key_id must differ");
+    assert_eq!(utxos, before, "caller UTXOs changed on deferred rejection");
+
+    let mut queue = crate::sig_queue::SigCheckQueue::new(1);
+    let queued_err = crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+        &tx,
+        [0x66u8; 32],
+        &utxos,
+        1,
+        0,
+        0,
+        ZERO_CHAIN_ID,
+        None,
+        None,
+        &mut queue,
+    )
+    .unwrap_err();
+    assert_eq!(queued_err.code, ErrorCode::TxErrParse);
+    assert!(queue.is_empty(), "queued rejection left signature work");
+}

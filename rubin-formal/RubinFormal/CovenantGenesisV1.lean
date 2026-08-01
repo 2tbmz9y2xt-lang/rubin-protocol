@@ -251,8 +251,8 @@ def validateOutGenesis (out : TxOut) (txKind : Nat) (_blockHeight : Nat) : Excep
     let _ ← parseMultisigCovenantData out.covenantData
     pure ()
   else if out.covenantType == COV_TYPE_HTLC then
-    if out.value == 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
     let _ ← parseHtlcCovenantData out.covenantData
+    if out.value == 0 then throw "TX_ERR_COVENANT_TYPE_INVALID"
     pure ()
   -- 0x0102 (CORE_EXT) is unassigned per CANONICAL §14 — output creation is rejected
   -- (RUB-585); it falls through to the unknown-covenant_type default below.

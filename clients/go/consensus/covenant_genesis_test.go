@@ -341,6 +341,48 @@ func TestValidateTxCovenantsGenesis_MoreBranches(t *testing.T) {
 	}
 }
 
+func TestValidateTxCovenantsGenesis_HTLCCreationFirstErrorOrder(t *testing.T) {
+	var hash, claimKeyID, refundKeyID [32]byte
+	hash[0], claimKeyID[0], refundKeyID[0] = 0x42, 0x11, 0x22
+	valid := encodeHTLCCovenantData(hash, LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
+	equal := encodeHTLCCovenantData(hash, LOCK_MODE_HEIGHT, 1, claimKeyID, claimKeyID)
+	badMode := encodeHTLCCovenantData(hash, 0xff, 1, claimKeyID, claimKeyID)
+	zeroLock := encodeHTLCCovenantData(hash, LOCK_MODE_HEIGHT, 0, claimKeyID, claimKeyID)
+	out := func(value uint64, data []byte) TxOutput {
+		return TxOutput{Value: value, CovenantType: COV_TYPE_HTLC, CovenantData: data}
+	}
+
+	cases := []struct {
+		name    string
+		outputs []TxOutput
+		want    ErrorCode
+		msg     string
+	}{
+		{"valid", []TxOutput{out(1, valid)}, "", ""},
+		{"equal_only", []TxOutput{out(1, equal)}, TX_ERR_PARSE, "CORE_HTLC claim/refund key_id must differ"},
+		{"zero_value_only", []TxOutput{out(0, valid)}, TX_ERR_COVENANT_TYPE_INVALID, "CORE_HTLC value must be > 0"},
+		{"paired", []TxOutput{out(0, equal)}, TX_ERR_PARSE, "CORE_HTLC claim/refund key_id must differ"},
+		{"bad_length_plus_zero", []TxOutput{out(0, valid[:len(valid)-1])}, TX_ERR_COVENANT_TYPE_INVALID, "CORE_HTLC covenant_data length mismatch"},
+		{"bad_mode_equal_zero", []TxOutput{out(0, badMode)}, TX_ERR_COVENANT_TYPE_INVALID, "CORE_HTLC lock_mode invalid"},
+		{"zero_lock_equal_zero", []TxOutput{out(0, zeroLock)}, TX_ERR_COVENANT_TYPE_INVALID, "CORE_HTLC lock_value must be > 0"},
+		{"zero_then_paired", []TxOutput{out(0, valid), out(0, equal)}, TX_ERR_COVENANT_TYPE_INVALID, "CORE_HTLC value must be > 0"},
+		{"paired_then_zero", []TxOutput{out(0, equal), out(0, valid)}, TX_ERR_PARSE, "CORE_HTLC claim/refund key_id must differ"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateTxCovenantsGenesis(&Tx{Outputs: tc.outputs}, [32]byte{}, 0, nil)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			assertTxErrCodeMsg(t, err, tc.want, tc.msg)
+		})
+	}
+}
+
 func TestValidateTxCovenantsGenesis_DACommitRules(t *testing.T) {
 	var cov32 [32]byte
 	valid := TxOutput{Value: 0, CovenantType: COV_TYPE_DA_COMMIT, CovenantData: cov32[:]}

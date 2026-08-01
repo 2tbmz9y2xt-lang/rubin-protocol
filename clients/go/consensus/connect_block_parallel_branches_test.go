@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 )
 
@@ -1206,6 +1207,32 @@ func TestApplyNonCoinbaseTxBasicWorkQ_P2PKSpendQError(t *testing.T) {
 	}
 	if !isTxErrCode(err, TX_ERR_SIG_ALG_INVALID) {
 		t.Fatalf("expected TX_ERR_SIG_ALG_INVALID, got: %v", err)
+	}
+}
+
+func TestApplyNonCoinbaseTxBasicWorkQ_HTLCCreationFirstErrorOrder(t *testing.T) {
+	prev := hashWithPrefix(0x65)
+	var hash, claimKeyID [32]byte
+	hash[0], claimKeyID[0] = 0x42, 0x11
+	paired := encodeHTLCCovenantData(hash, LOCK_MODE_HEIGHT, 1, claimKeyID, claimKeyID)
+	tx := &Tx{
+		Version: TX_WIRE_VERSION,
+		TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: prev}},
+		Outputs: []TxOutput{{Value: 0, CovenantType: COV_TYPE_HTLC, CovenantData: paired}},
+	}
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: prev}: {Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
+	}
+	before := cloneUtxoSet(utxos)
+	queue := NewSigCheckQueue(1)
+	work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0x66), utxos, 1, 0, [32]byte{}, queue, nil, nil)
+	if work != nil || fee != 0 || queue.Len() != 0 {
+		t.Fatalf("rejection returned work=%v fee=%d queued=%d", work, fee, queue.Len())
+	}
+	assertTxErrCodeMsg(t, err, TX_ERR_PARSE, "CORE_HTLC claim/refund key_id must differ")
+	if !reflect.DeepEqual(utxos, before) {
+		t.Fatal("caller UTXOs changed on queued rejection")
 	}
 }
 
