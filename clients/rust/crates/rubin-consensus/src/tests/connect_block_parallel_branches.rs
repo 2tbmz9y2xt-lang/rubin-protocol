@@ -1322,7 +1322,7 @@ fn apply_non_coinbase_tx_basic_workq_p2pk_spend_q_error() {
 
 #[test]
 fn queued_sigchecks_transaction_entry_rollback_to_mark() {
-    let kp = kp_or_skip!();
+    let kp = test_mldsa87_keypair().expect("ML-DSA-87 backend required for RUB-1096");
     let covenant_data = p2pk_covenant_data_for_pubkey(&kp.pubkey);
     let prev_txid = [0x79; 32];
     let mut late_tx = p2pk_tx(1, vec![p2pk_input(prev_txid)], 101, covenant_data.clone());
@@ -1408,8 +1408,8 @@ fn queued_sigchecks_transaction_entry_rollback_to_mark() {
 
 #[test]
 fn queued_sigchecks_transaction_entry_success_retains_tasks() {
-    let kp1 = kp_or_skip!();
-    let kp2 = kp_or_skip!();
+    let kp1 = test_mldsa87_keypair().expect("ML-DSA-87 backend required for RUB-1096");
+    let kp2 = test_mldsa87_keypair().expect("ML-DSA-87 backend required for RUB-1096");
     let cov1 = p2pk_covenant_data_for_pubkey(&kp1.pubkey);
     let cov2 = p2pk_covenant_data_for_pubkey(&kp2.pubkey);
     let prev1 = [0x7b; 32];
