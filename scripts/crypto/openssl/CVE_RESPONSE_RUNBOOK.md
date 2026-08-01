@@ -54,8 +54,9 @@ If SLA cannot be met, incident owner MUST publish a blocker note with ETA and mi
      4. change every version-bearing cache prefix, cache path and cache key (36 sites):
         `git grep -nE 'bundle-3\.5\.5|openssl-3\.5\.5\.tar\.gz|3\.5\.5-v[0-9]' -- .github/workflows`.
      The counts are as of 2026-07-29 and will drift — re-derive them with the commands
-     above (substituting the outgoing version) rather than trusting the numbers. No
-     checker enforces bump completeness, so finish with `git grep -n '3\.5\.5'` and
+     above (substituting the outgoing version) rather than trusting the numbers.
+     `python3 tools/check_openssl_version_consistency.py --repo-root .` enforces bump
+     completeness; also inspect `git grep -n '3\.5\.5'` and
      confirm every remaining hit is deliberate: workflow step titles, the
      `scripts/crypto/openssl/bench-pq-*.py` defaults, the `scripts/dev-env.sh` example,
      the contract test constant, and any superseded pin line kept for rollback.
