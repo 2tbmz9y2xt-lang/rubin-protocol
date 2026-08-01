@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::test_support::{
     encode_htlc_claim_payload, htlc_claim_fixture, htlc_spend_context, sign_witness,
     test_tx_context,
@@ -11,7 +13,10 @@ use crate::hash::sha3_256;
 use crate::htlc::validate_htlc_spend_q;
 use crate::suite_registry::SuiteRegistry;
 use crate::tx::WitnessItem;
-use crate::utxo_basic::UtxoEntry;
+use crate::utxo_basic::{
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks,
+    Outpoint, UtxoEntry,
+};
 use crate::verify_sig_openssl::Mldsa87Keypair;
 use crate::SighashV1PrehashCache;
 
@@ -279,46 +284,59 @@ fn validate_htlc_refund_key_id_mismatch_q() {
     assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
 }
 
+fn check_refund_deferred(
+    lock_mode: u8,
+    lock_value: u64,
+    block_height: u64,
+    block_mtp: u64,
+    selector_matches: bool,
+    payload: &[u8],
+    want: ErrorCode,
+) {
+    let (mut entry, mut path_item, sig_item, mut tx, _, _, chain_id, registry) =
+        htlc_claim_fixture();
+    let sig_key_id = sha3_256(&sig_item.pubkey);
+    entry.covenant_data[32] = lock_mode;
+    entry.covenant_data[33..41].copy_from_slice(&lock_value.to_le_bytes());
+    entry.covenant_data[41..73].copy_from_slice(&[0x11; 32]);
+    entry.covenant_data[73..105].copy_from_slice(&sig_key_id);
+    tx.outputs[0].covenant_data[0] = SUITE_ID_ML_DSA_87;
+    tx.outputs[0].covenant_data[1..33].copy_from_slice(&sig_key_id);
+    path_item.signature = payload.to_vec();
+    path_item.pubkey = entry.covenant_data[73..105].to_vec();
+    if !selector_matches {
+        path_item.pubkey[0] ^= 1;
+    }
+    tx.witness = vec![path_item, sig_item];
+    let utxos = HashMap::from([(
+        Outpoint {
+            txid: tx.inputs[0].prev_txid,
+            vout: tx.inputs[0].prev_vout,
+        },
+        entry,
+    )]);
+    let before = utxos.clone();
+    let err = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
+        &tx,
+        [0x58; 32],
+        &utxos,
+        block_height,
+        0,
+        block_mtp,
+        chain_id,
+        None,
+        Some(&registry),
+    )
+    .expect_err("refund selector must reject before producing UTXO work");
+    assert_eq!(err.code, want);
+    assert_eq!(utxos, before, "caller UTXOs changed on rejection");
+}
+
 #[test]
 fn validate_htlc_refund_timelock_first_error_order_q() {
     use ErrorCode::{TxErrParse, TxErrSigInvalid, TxErrTimelockNotMet};
 
-    let check = |lock_mode: u8,
-                 lock_value: u64,
-                 block_height: u64,
-                 block_mtp: u64,
-                 selector_matches: bool,
-                 payload: &[u8],
-                 want: ErrorCode| {
-        let (mut entry, mut path_item, sig_item, tx, input_index, input_value, chain_id, registry) =
-            htlc_claim_fixture();
-        entry.covenant_data[32] = lock_mode;
-        entry.covenant_data[33..41].copy_from_slice(&lock_value.to_le_bytes());
-        entry.covenant_data[41..73].copy_from_slice(&[0x11; 32]);
-        entry.covenant_data[73..105].copy_from_slice(&sha3_256(&sig_item.pubkey));
-        path_item.signature = payload.to_vec();
-        path_item.pubkey = entry.covenant_data[73..105].to_vec();
-        if !selector_matches {
-            path_item.pubkey[0] ^= 1;
-        }
-        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
-        let mut queue = SigCheckQueue::new(1).with_registry(&registry);
-        let err = validate_htlc_spend_q(
-            &entry,
-            &path_item,
-            &sig_item,
-            htlc_spend_context(input_index, input_value, chain_id, block_height, block_mtp),
-            &mut cache,
-            Some(&mut queue),
-            None,
-            Some(&registry),
-        )
-        .expect_err("refund selector must reject before signature verification");
-        assert_eq!(err.code, want);
-        assert!(queue.is_empty(), "signature work remained queued");
-    };
-
-    check(
+    check_refund_deferred(
         LOCK_MODE_HEIGHT,
         10,
         9,
@@ -327,7 +345,7 @@ fn validate_htlc_refund_timelock_first_error_order_q() {
         &[0x01],
         TxErrTimelockNotMet,
     );
-    check(
+    check_refund_deferred(
         LOCK_MODE_TIMESTAMP,
         20,
         10,
@@ -336,7 +354,7 @@ fn validate_htlc_refund_timelock_first_error_order_q() {
         &[0x01],
         TxErrTimelockNotMet,
     );
-    check(
+    check_refund_deferred(
         LOCK_MODE_HEIGHT,
         10,
         9,
@@ -345,10 +363,10 @@ fn validate_htlc_refund_timelock_first_error_order_q() {
         &[0x01],
         TxErrTimelockNotMet,
     );
-    check(LOCK_MODE_HEIGHT, 10, 11, 0, false, &[0x01], TxErrSigInvalid);
-    check(LOCK_MODE_HEIGHT, 10, 9, 0, false, &[0x01, 0x00], TxErrParse);
-    check(LOCK_MODE_HEIGHT, 10, 10, 0, false, &[0x01], TxErrSigInvalid);
-    check(
+    check_refund_deferred(LOCK_MODE_HEIGHT, 10, 11, 0, false, &[0x01], TxErrSigInvalid);
+    check_refund_deferred(LOCK_MODE_HEIGHT, 10, 9, 0, false, &[0x01, 0x00], TxErrParse);
+    check_refund_deferred(LOCK_MODE_HEIGHT, 10, 10, 0, false, &[0x01], TxErrSigInvalid);
+    check_refund_deferred(
         LOCK_MODE_TIMESTAMP,
         20,
         10,
