@@ -240,10 +240,60 @@ jobs:
   test:
     needs: policy
     runs-on: ubuntu-latest
+    env:
+      PYTHONSAFEPATH: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Classify test relevance
+        id: test_gate
+        env:
+          RUBIN_TEST_RELEVANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 tools/ci_test_relevance.py
+
+      - name: Strict JSON parse (tracked)
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, sys
+          from pathlib import Path
+
+          def reject_const(x: str):
+            raise ValueError(f"non-standard JSON constant not allowed: {x}")
+
+          tracked = subprocess.check_output(["git", "ls-files", "*.json"], text=True).splitlines()
+          paths = [Path(p) for p in tracked if p.strip()]
+          if not paths:
+            print("no tracked json files found")
+            sys.exit(1)
+
+          bad = False
+          for p in paths:
+            try:
+              s = p.read_text(encoding="utf-8")
+            except Exception as e:
+              print(f"READ_FAIL {p}: {e}")
+              bad = True
+              continue
+            try:
+              v = json.loads(s, parse_constant=reject_const)
+            except Exception as e:
+              print(f"PARSE_FAIL {p}: {e}")
+              bad = True
+              continue
+            if not isinstance(v, (dict, list)):
+              print(f"ROOT_FAIL {p}: root must be object or array")
+              bad = True
+
+          if bad:
+            sys.exit(1)
+          print(f"ok: {len(paths)} files")
+          PY
+
       - name: Cache OpenSSL 3.5 bundle
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+        if: steps.test_gate.outputs.run_test == 'true'
         with:
           path: |
             ~/.cache/rubin-openssl/bundle-3.5.5
@@ -251,6 +301,7 @@ jobs:
           key: openssl-bundle-${{ runner.os }}-3.5.5-v3-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}
 
       - name: Build OpenSSL 3.5.5 bundle
+        if: steps.test_gate.outputs.run_test == 'true'
         run: |
           set -euo pipefail
           PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
@@ -281,11 +332,13 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Verify OpenSSL PQ algorithms
+        if: steps.test_gate.outputs.run_test == 'true'
         run: |
           openssl version
           openssl list -signature-algorithms | grep -E 'ML-DSA-87'
 
       - name: FIPS provider preflight (module + PQ visibility)
+        if: steps.test_gate.outputs.run_test == 'true'
         env:
           RUBIN_OPENSSL_PREFIX: ${{ env.OPENSSL_DIR }}
           RUBIN_OPENSSL_MODULES: ${{ env.OPENSSL_MODULES }}
@@ -295,12 +348,14 @@ jobs:
           scripts/dev-env.sh -- scripts/crypto/openssl/fips-preflight.sh
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: steps.test_gate.outputs.run_test == 'true'
         with:
           go-version: '1.26.5'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
       - name: OpenSSL deterministic ML-DSA-87 signing smoke
+        if: steps.test_gate.outputs.run_test == 'true'
         env:
           RUBIN_OPENSSL_PREFIX: ${{ env.OPENSSL_DIR }}
           RUBIN_OPENSSL_MODULES: ${{ env.OPENSSL_MODULES }}
@@ -328,11 +383,13 @@ jobs:
           fi
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        if: steps.test_gate.outputs.run_test == 'true'
         with:
           components: rustfmt, clippy
 
       - name: Resolve Rust cache identity
         id: rust_cache_identity
+        if: steps.test_gate.outputs.run_test == 'true'
         run: |
           release="$(rustc --version --verbose | sed -n 's/^release: //p')"
           if [[ ! "$release" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
@@ -343,6 +400,7 @@ jobs:
 
       - name: Cache Cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+        if: steps.test_gate.outputs.run_test == 'true'
         with:
           path: |
             ~/.cargo/registry/index
@@ -354,6 +412,7 @@ jobs:
 
       - name: Cache Rust test target
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+        if: steps.test_gate.outputs.run_test == 'true'
         with:
           path: |
             clients/rust/target
@@ -362,101 +421,77 @@ jobs:
             rust-test-v2-${{ runner.os }}-${{ steps.rust_cache_identity.outputs.release }}-${{ hashFiles('clients/rust/Cargo.lock', 'clients/rust/Cargo.toml', 'clients/rust/crates/**/Cargo.toml', 'scripts/crypto/openssl/source-checksums.sha256') }}-
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        if: steps.test_gate.outputs.run_test == 'true'
         with:
           node-version-file: '.node-version'
-
-      - name: Strict JSON parse (tracked)
-        run: |
-          python3 - <<'PY'
-          import json, subprocess, sys
-          from pathlib import Path
-          
-          def reject_const(x: str):
-            raise ValueError(f"non-standard JSON constant not allowed: {x}")
-          
-          tracked = subprocess.check_output(["git", "ls-files", "*.json"], text=True).splitlines()
-          paths = [Path(p) for p in tracked if p.strip()]
-          if not paths:
-            print("no tracked json files found")
-            sys.exit(1)
-          
-          bad = False
-          for p in paths:
-            try:
-              s = p.read_text(encoding="utf-8")
-            except Exception as e:
-              print(f"READ_FAIL {p}: {e}")
-              bad = True
-              continue
-            try:
-              v = json.loads(s, parse_constant=reject_const)
-            except Exception as e:
-              print(f"PARSE_FAIL {p}: {e}")
-              bad = True
-              continue
-            if not isinstance(v, (dict, list)):
-              print(f"ROOT_FAIL {p}: root must be object or array")
-              bad = True
-          
-          if bad:
-            sys.exit(1)
-          print(f"ok: {len(paths)} files")
-          PY
+          package-manager-cache: false
 
       - name: Go fmt
+        if: steps.test_gate.outputs.run_test == 'true'
         run: |
           cd clients/go
           test -z "$(gofmt -l .)"
 
       - name: Conformance Go fmt
+        if: steps.test_gate.outputs.run_test == 'true'
         run: |
           cd conformance
           test -z "$(gofmt -l .)"
 
       - name: Go tests
+        if: steps.test_gate.outputs.run_test == 'true'
         run: |
           cd clients/go
           go test ./...
 
       - name: Conformance Go tests
+        if: steps.test_gate.outputs.run_test == 'true'
         run: |
           cd conformance
           go test ./...
 
       - name: Go vet
+        if: steps.test_gate.outputs.run_test == 'true'
         run: |
           cd clients/go
           go vet ./...
 
       - name: Conformance Go vet
+        if: steps.test_gate.outputs.run_test == 'true'
         run: |
           cd conformance
           go vet ./...
 
       - name: Rust fmt
+        if: steps.test_gate.outputs.run_test == 'true'
         run: |
           cd clients/rust
           cargo fmt -- --check
 
       - name: Rust tests
+        if: steps.test_gate.outputs.run_test == 'true'
         run: |
           cd clients/rust
           cargo test --workspace
 
       - name: Rust clippy
+        if: steps.test_gate.outputs.run_test == 'true'
         run: |
           cd clients/rust
           cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Simplicity corpora drift check
+        if: steps.test_gate.outputs.run_test == 'true'
         run: python3 tools/gen_simplicity_encoding_corpus.py --check
 
       - name: Rust consensus total parity gate
+        if: steps.test_gate.outputs.run_test == 'true'
         run: |
           ./scripts/rust-consensus-total-parity-gate.sh
           cat /tmp/rust-consensus-total-parity-report.json
 
       - name: Node runtime total parity gate
+        if: steps.test_gate.outputs.run_test == 'true'
         run: |
           ./scripts/node-runtime-total-parity-gate.sh
           cat /tmp/node-runtime-total-parity-report.json
