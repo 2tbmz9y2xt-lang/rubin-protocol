@@ -28,7 +28,7 @@ run_stage "Stage 4/8: live Go↔Rust devnet RPC parity smoke" \
   "${REPO_ROOT}/scripts/devnet-rpc-parity-smoke.sh"
 
 run_stage "Stage 5/8: live Go↔Rust P2P interop coverage" \
-  "${DEV_ENV}" -- bash -lc "cd '${GO_MODULE_ROOT}' && RUBIN_P2P_INTEROP=1 go test ./node/p2p -run '^TestRustInterop_(GoDialRustServerHandshake|RustClientDialGoServerHandshake|RustServerPingGoClientPong|RustClientReceivesTxFromGo|RustClientSyncsFiveBlocksFromGo)$' -count=1"
+  "${DEV_ENV}" -- bash -lc "cd '${GO_MODULE_ROOT}' && RUBIN_P2P_INTEROP=1 go test ./node/p2p -run '^TestRustInterop' -count=1"
 
 run_stage "Stage 6/8: Go relay + txpool lifecycle parity checks" \
   "${DEV_ENV}" -- bash -lc "cd '${GO_MODULE_ROOT}' && go test ./node/p2p -run '^(TestAnnounceTx|TestAnnounceTxMetadataError)$' -count=1 && go test ./node -run '^TestApplyBlockWithReorgRequeuesDisconnectedTransactionsIntoMempool$' -count=1"
@@ -81,7 +81,7 @@ report = {
         },
         {
             "name": "live_go_rust_p2p_interop",
-            "command": "RUBIN_P2P_INTEROP=1 go test ./node/p2p -run ^TestRustInterop_(GoDialRustServerHandshake|RustClientDialGoServerHandshake|RustServerPingGoClientPong|RustClientReceivesTxFromGo|RustClientSyncsFiveBlocksFromGo)$ -count=1",
+            "command": "RUBIN_P2P_INTEROP=1 go test ./node/p2p -run ^TestRustInterop -count=1",
         },
         {
             "name": "go_relay_and_txpool_lifecycle",

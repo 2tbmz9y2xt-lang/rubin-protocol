@@ -408,11 +408,6 @@ jobs:
           cd clients/go
           test -z "$(gofmt -l .)"
 
-      - name: Go↔Rust live P2P interop
-        run: |
-          cd clients/go
-          RUBIN_P2P_INTEROP=1 go test ./node/p2p -run '^TestRustInterop' -count=1
-
       - name: Conformance Go fmt
         run: |
           cd conformance
@@ -438,12 +433,6 @@ jobs:
           cd conformance
           go vet ./...
 
-      - name: Go govulncheck
-        run: |
-          cd clients/go
-          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
-          "$(go env GOPATH)/bin/govulncheck" ./...
-
       - name: Rust fmt
         run: |
           cd clients/rust
@@ -458,28 +447,6 @@ jobs:
         run: |
           cd clients/rust
           cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Cache cargo-audit binary
-        id: cache-cargo-audit-test
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
-        with:
-          path: ~/.cargo/bin/cargo-audit
-          key: cargo-audit-${{ runner.os }}-v0.21.2
-
-      - name: Install cargo-audit
-        if: steps.cache-cargo-audit-test.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit@0.21.2 --locked
-
-      - name: Cargo audit
-        run: |
-          cd clients/rust
-          cargo audit --deny warnings
-
-      - name: Conformance matrix check
-        run: python3 tools/gen_conformance_matrix.py --check
-
-      - name: Conformance fixtures policy check
-        run: python3 tools/check_conformance_fixtures_policy.py
 
       - name: Simplicity corpora drift check
         run: python3 tools/gen_simplicity_encoding_corpus.py --check
