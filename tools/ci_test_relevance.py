@@ -16,7 +16,7 @@ EXACT_INPUTS = {
     "go.work", "go.work.sum",
     "evidence/runtime-perf/RUST_RUNTIME_PERF_GUARDRAILS.md",
 }
-PREFIX_INPUTS = (".github/actions/", "clients/", "conformance/", "scripts/", "tools/")
+PREFIX_INPUTS = (".cargo/", ".github/actions/", "clients/", "conformance/", "scripts/", "tools/")
 
 
 class Decision(NamedTuple):

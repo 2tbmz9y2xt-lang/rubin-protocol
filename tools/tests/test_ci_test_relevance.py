@@ -25,8 +25,10 @@ class TestRelevanceTests(unittest.TestCase):
         cases = {
             ".gitattributes": True, ".github/workflows/ci.yml": True, ".node-version": True, "go.work": True, "go.work.sum": True,
             "evidence/runtime-perf/RUST_RUNTIME_PERF_GUARDRAILS.md": True,
+            ".cargo/config": True, ".cargo/config.toml": True,
             ".github/actions/a/action.yml": True, "clients/go/x.go": True,
             "conformance/x.go": True, "scripts/x.sh": True, "tools/x.py": True,
+            ".cargo": False, ".cargos/config.toml": False,
             "client/x.go": False, "tool/x.py": False, "script/x.sh": False,
             ".github/workflows/ci.yaml": False,
         }
