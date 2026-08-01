@@ -436,7 +436,7 @@ fn validate_block_basic_non_coinbase_must_have_input() {
     let block = build_block_bytes(prev, root, target, 23, &[coinbase, invalid_non_coinbase]);
 
     let err = validate_block_basic(&block, Some(prev), Some(target)).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.code, ErrorCode::TxErrTxNonceInvalid);
 }
 
 fn repeated_anchor_outputs(count: usize, payload_len: usize) -> Vec<TestOutput> {

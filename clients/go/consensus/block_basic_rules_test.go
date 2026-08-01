@@ -527,7 +527,7 @@ func TestValidateBlockBasic_NonCoinbaseMustHaveInput(t *testing.T) {
 	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 23, [][]byte{coinbase, invalidNonCoinbase})
 
-	expectValidateBlockBasicErr(t, block, &prev, &target, TX_ERR_PARSE)
+	expectValidateBlockBasicErr(t, block, &prev, &target, TX_ERR_TX_NONCE_INVALID)
 }
 
 func TestValidateBlockBasic_CoinbaseRuleErrors(t *testing.T) {

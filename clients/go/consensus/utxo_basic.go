@@ -84,11 +84,11 @@ func (ctx *nonCoinbaseApplyContext) prepare() error {
 	if ctx.tx == nil {
 		return txerr(TX_ERR_PARSE, "nil tx")
 	}
-	if len(ctx.tx.Inputs) == 0 {
-		return txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
-	}
 	if ctx.tx.TxNonce == 0 {
 		return txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
+	}
+	if len(ctx.tx.Inputs) == 0 {
+		return txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
 	}
 	if err := ValidateTxCovenantsGenesis(ctx.tx, ctx.chainID, ctx.height, ctx.rotation); err != nil {
 		return err
@@ -150,14 +150,14 @@ func (ctx *nonCoinbaseApplyContext) resolveInput(in TxInput, seenInputs map[Outp
 }
 
 func validateNonCoinbaseInputEncoding(in TxInput, zeroTxid [32]byte) error {
+	if in.PrevVout == 0xffff_ffff && in.PrevTxid == zeroTxid {
+		return txerr(TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
+	}
 	if len(in.ScriptSig) != 0 {
 		return txerr(TX_ERR_PARSE, "script_sig must be empty under genesis covenant set")
 	}
 	if in.Sequence > 0x7fffffff {
 		return txerr(TX_ERR_SEQUENCE_INVALID, "sequence exceeds 0x7fffffff")
-	}
-	if in.PrevVout == 0xffff_ffff && in.PrevTxid == zeroTxid {
-		return txerr(TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
 	}
 	return nil
 }

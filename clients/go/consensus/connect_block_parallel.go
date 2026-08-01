@@ -255,11 +255,11 @@ func applyNonCoinbaseTxBasicWorkQ(
 	if tx == nil {
 		return nil, 0, txerr(TX_ERR_PARSE, "nil tx")
 	}
-	if len(tx.Inputs) == 0 {
-		return nil, 0, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
-	}
 	if tx.TxNonce == 0 {
 		return nil, 0, txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
+	}
+	if len(tx.Inputs) == 0 {
+		return nil, 0, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
 	}
 
 	if err := ValidateTxCovenantsGenesis(tx, chainID, height, rotation); err != nil {
@@ -290,14 +290,8 @@ func applyNonCoinbaseTxBasicWorkQ(
 	resolvedOutpoints := make([]Outpoint, 0, len(tx.Inputs))
 	var zeroTxid [32]byte
 	for _, in := range tx.Inputs {
-		if len(in.ScriptSig) != 0 {
-			return nil, 0, txerr(TX_ERR_PARSE, "script_sig must be empty under genesis covenant set")
-		}
-		if in.Sequence > 0x7fffffff {
-			return nil, 0, txerr(TX_ERR_SEQUENCE_INVALID, "sequence exceeds 0x7fffffff")
-		}
-		if in.PrevVout == 0xffff_ffff && in.PrevTxid == zeroTxid {
-			return nil, 0, txerr(TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
+		if err := validateNonCoinbaseInputEncoding(in, zeroTxid); err != nil {
+			return nil, 0, err
 		}
 		op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
 		if _, exists := seenInputs[op]; exists {

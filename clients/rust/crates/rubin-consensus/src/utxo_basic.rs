@@ -206,16 +206,16 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
     } = ctx;
     let _ = block_timestamp;
     let mut sig_queue = sig_queue;
-    if tx.inputs.is_empty() {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "non-coinbase must have at least one input",
-        ));
-    }
     if tx.tx_nonce == 0 {
         return Err(TxError::new(
             ErrorCode::TxErrTxNonceInvalid,
             "tx_nonce must be >= 1 for non-coinbase",
+        ));
+    }
+    if tx.inputs.is_empty() {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "non-coinbase must have at least one input",
         ));
     }
 
@@ -244,6 +244,12 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
     let zero_txid: [u8; 32] = [0u8; 32];
 
     for input in &tx.inputs {
+        if input.prev_vout == 0xffff_ffff && input.prev_txid == zero_txid {
+            return Err(TxError::new(
+                ErrorCode::TxErrParse,
+                "coinbase prevout encoding forbidden in non-coinbase",
+            ));
+        }
         if !input.script_sig.is_empty() {
             return Err(TxError::new(
                 ErrorCode::TxErrParse,
@@ -254,12 +260,6 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
             return Err(TxError::new(
                 ErrorCode::TxErrSequenceInvalid,
                 "sequence exceeds 0x7fffffff",
-            ));
-        }
-        if input.prev_vout == 0xffff_ffff && input.prev_txid == zero_txid {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "coinbase prevout encoding forbidden in non-coinbase",
             ));
         }
         let op = Outpoint {
@@ -1064,6 +1064,126 @@ mod tests {
             da_payload: vec![],
             da_commit_core: None,
             da_chunk_core: None,
+        }
+    }
+
+    #[test]
+    fn section16_structural_first_error_order() {
+        let coinbase_prevout = TxInput {
+            prev_txid: [0u8; 32],
+            prev_vout: u32::MAX,
+            script_sig: vec![],
+            sequence: 0,
+        };
+        let cases = vec![
+            (
+                "nonce_before_input_count",
+                0,
+                vec![],
+                ErrorCode::TxErrTxNonceInvalid,
+                "tx_nonce must be >= 1 for non-coinbase",
+            ),
+            (
+                "input_count_only",
+                1,
+                vec![],
+                ErrorCode::TxErrParse,
+                "non-coinbase must have at least one input",
+            ),
+            (
+                "coinbase_prevout_before_script_sig",
+                1,
+                vec![TxInput {
+                    script_sig: vec![0x01],
+                    ..coinbase_prevout.clone()
+                }],
+                ErrorCode::TxErrParse,
+                "coinbase prevout encoding forbidden in non-coinbase",
+            ),
+            (
+                "coinbase_prevout_before_sequence",
+                1,
+                vec![TxInput {
+                    sequence: 0x8000_0000,
+                    ..coinbase_prevout.clone()
+                }],
+                ErrorCode::TxErrParse,
+                "coinbase prevout encoding forbidden in non-coinbase",
+            ),
+            (
+                "input_index_order",
+                1,
+                vec![
+                    TxInput {
+                        prev_txid: [0x51; 32],
+                        prev_vout: 0,
+                        script_sig: vec![],
+                        sequence: 0x8000_0000,
+                    },
+                    coinbase_prevout.clone(),
+                ],
+                ErrorCode::TxErrSequenceInvalid,
+                "sequence exceeds 0x7fffffff",
+            ),
+            (
+                "script_sig_only",
+                1,
+                vec![TxInput {
+                    prev_txid: [0x52; 32],
+                    prev_vout: 0,
+                    script_sig: vec![0x01],
+                    sequence: 0,
+                }],
+                ErrorCode::TxErrParse,
+                "script_sig must be empty under genesis covenant set",
+            ),
+            (
+                "sequence_only",
+                1,
+                vec![TxInput {
+                    prev_txid: [0x53; 32],
+                    prev_vout: 0,
+                    script_sig: vec![],
+                    sequence: 0x8000_0000,
+                }],
+                ErrorCode::TxErrSequenceInvalid,
+                "sequence exceeds 0x7fffffff",
+            ),
+        ];
+
+        for (name, nonce, inputs, want, message) in cases {
+            let tx = unsigned_tx(
+                0x00,
+                nonce,
+                inputs,
+                vec![tx_output(
+                    1,
+                    COV_TYPE_P2PK,
+                    p2pk_covenant_data_for_pubkey(&[0x54; 32]),
+                )],
+            );
+            let utxo_set = HashMap::from([utxo(
+                [0x55; 32],
+                1,
+                COV_TYPE_P2PK,
+                p2pk_covenant_data_for_pubkey(&[0x55; 32]),
+            )]);
+            let original = utxo_set.clone();
+            let err = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                &tx,
+                [0x56; 32],
+                &utxo_set,
+                1,
+                0,
+                0,
+                [0u8; 32],
+                None,
+                None,
+            )
+            .expect_err(name);
+            assert_eq!(err.code, want, "{name}");
+            assert_eq!(err.msg, message, "{name}");
+            assert_eq!(utxo_set, original, "{name}: caller UTXOs changed");
         }
     }
 

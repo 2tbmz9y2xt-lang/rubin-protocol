@@ -57,6 +57,9 @@ func validateNonCoinbaseBlockTx(tx *Tx, seenNonces map[uint64]struct{}) error {
 	if isCoinbaseTx(tx) {
 		return txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase-like tx is only allowed at index 0")
 	}
+	if tx.TxNonce == 0 && len(tx.Inputs) == 0 {
+		return txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
+	}
 	if len(tx.Inputs) == 0 {
 		return txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
 	}
