@@ -1461,6 +1461,88 @@ fn queued_sigchecks_transaction_entry_success_retains_tasks() {
 }
 
 #[test]
+fn queued_sigchecks_transaction_entry_unbound_registry_rollback() {
+    let kp = test_mldsa87_keypair().expect("ML-DSA-87 backend required for RUB-1096");
+    let covenant_data = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+    let prev_txid = [0x7e; 32];
+    let mut late_tx = p2pk_tx(1, vec![p2pk_input(prev_txid)], 101, covenant_data.clone());
+    late_tx.witness = vec![sign_input_witness(&late_tx, 0, 100, ZERO_CHAIN_ID, &kp)];
+    let mut valid_tx = late_tx.clone();
+    valid_tx.outputs[0].value = 99;
+    valid_tx.witness = vec![sign_input_witness(&valid_tx, 0, 100, ZERO_CHAIN_ID, &kp)];
+    let utxos = HashMap::from([(
+        Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        },
+        p2pk_utxo(covenant_data),
+    )]);
+
+    let registry_a = crate::SuiteRegistry::default_registry();
+    let ml_dsa_87 = registry_a
+        .lookup(SUITE_ID_ML_DSA_87)
+        .expect("default ML-DSA-87 suite")
+        .clone();
+    let registry_b = crate::SuiteRegistry::with_suites(std::collections::BTreeMap::from([
+        (SUITE_ID_ML_DSA_87, ml_dsa_87.clone()),
+        (
+            0x02,
+            crate::suite_registry::SuiteParams {
+                suite_id: 0x02,
+                ..ml_dsa_87
+            },
+        ),
+    ]));
+    let apply = |tx: &crate::tx::Tx,
+                 registry: &crate::SuiteRegistry,
+                 queue: &mut crate::sig_queue::SigCheckQueue| {
+        crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+            tx,
+            [0x7f; 32],
+            &utxos,
+            1,
+            0,
+            0,
+            ZERO_CHAIN_ID,
+            None,
+            Some(registry),
+            queue,
+        )
+    };
+    let value_error =
+        crate::error::TxError::new(ErrorCode::TxErrValueConservation, "sum_out exceeds sum_in");
+    let mismatch_error = crate::error::TxError::new(
+        ErrorCode::TxErrSigAlgInvalid,
+        "SigCheckQueue registry mismatch",
+    );
+
+    let mut unbound_queue = crate::sig_queue::SigCheckQueue::new(1);
+    assert_eq!(
+        apply(&late_tx, &registry_a, &mut unbound_queue).unwrap_err(),
+        value_error.clone()
+    );
+    apply(&valid_tx, &registry_b, &mut unbound_queue).expect("registry B after rollback");
+    unbound_queue.flush().expect("flush registry-B task");
+    let mut fresh_b_queue = crate::sig_queue::SigCheckQueue::new(1);
+    apply(&valid_tx, &registry_b, &mut fresh_b_queue).expect("fresh registry B");
+    fresh_b_queue.flush().expect("flush fresh registry-B task");
+    assert_eq!(
+        apply(&valid_tx, &registry_a, &mut unbound_queue).unwrap_err(),
+        mismatch_error.clone()
+    );
+
+    let mut bound_queue = crate::sig_queue::SigCheckQueue::new(1).with_registry(&registry_a);
+    assert_eq!(
+        apply(&late_tx, &registry_a, &mut bound_queue).unwrap_err(),
+        value_error
+    );
+    assert_eq!(
+        apply(&valid_tx, &registry_b, &mut bound_queue).unwrap_err(),
+        mismatch_error
+    );
+}
+
+#[test]
 fn apply_non_coinbase_tx_basic_deferred_htlc_creation_first_error_order() {
     let prev_txid = [0x65u8; 32];
     let hash = [0x42u8; 32];
