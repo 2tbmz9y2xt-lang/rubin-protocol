@@ -51,6 +51,8 @@ class FormalRelevanceTests(unittest.TestCase):
             "clients/go/go.mod": (False, True),
             "clients/go/cmd/formal-trace/x.go": (False, True),
             "tools/formal/gen_lean_conformance_vectors.py": (False, True),
+            ".github/actions/openssl-bundle/action.yml": (False, True),
+            "scripts/crypto/openssl/VERSION": (False, True),
             "scripts/crypto/openssl/build-openssl-bundle.sh": (False, True),
             "tools/tests/test_ci_formal_relevance.py": (False, False),
             ".github/PULL_REQUEST_TEMPLATE.md": (False, False),
@@ -77,7 +79,7 @@ class FormalRelevanceTests(unittest.TestCase):
         refinement = {path for path in paths if subject.is_refinement_input(path)}
         self.assertEqual(
             (len(formal), len(refinement), len(formal & refinement), len(formal | refinement)),
-            (416, 336, 323, 429),
+            (416, 338, 323, 431),
         )
 
     def test_every_exact_input_uses_its_job_profile(self):

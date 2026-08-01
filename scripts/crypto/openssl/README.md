@@ -4,17 +4,16 @@
 
 ```bash
 cd <REPO_ROOT>
-OPENSSL_VERSION=3.5.5 scripts/dev-env.sh -- bash scripts/crypto/openssl/build-openssl-bundle.sh
+scripts/dev-env.sh -- bash scripts/crypto/openssl/build-openssl-bundle.sh
 ```
 
 Before extracting, the script verifies the source tarball — freshly downloaded or
 cached — against a sha256 pinned per version in `source-checksums.sha256` beside
 it, and refuses to build on a mismatch, on a version with no pin entry, or on a
 pin file that is unreadable, malformed, or ambiguous. That file is the allowlist of
-buildable archives, not the version selector: adding a
-`<sha256>  openssl-<version>.tar.gz` line permits a version, while switching to it also
-requires the builder default, the `OPENSSL_VERSION=` selectors and the version-bearing
-cache paths and keys — see `CVE_RESPONSE_RUNBOOK.md` section 3 for the full procedure.
+buildable archives, not the version selector. `VERSION` beside the builder is the
+single repository-selected version; the local builder and CI bundle action both read
+it. See `CVE_RESPONSE_RUNBOOK.md` section 3 for the version-bump procedure.
 
 Default install prefix:
 

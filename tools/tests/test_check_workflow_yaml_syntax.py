@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import re
 import sys
 import tempfile
 import unittest
@@ -16,46 +15,31 @@ import check_workflow_yaml_syntax as m
 HAS_PYYAML = m.load_yaml_module() is not None
 
 WORKFLOWS_DIR = TOOLS_DIR.parent / ".github" / "workflows"
+ACTION_PATH = TOOLS_DIR.parent / ".github" / "actions" / "openssl-bundle" / "action.yml"
+ACTION_REF = "./.github/actions/openssl-bundle"
 BUILDER = "scripts/crypto/openssl/build-openssl-bundle.sh"
 CHECKSUMS = "scripts/crypto/openssl/source-checksums.sha256"
-CACHE_ACTION = "actions/cache@"
-# The binding must be an evaluated expression: a literal substring or a trailing
-# YAML comment carries the text without ever rotating the cache identity.
-PIN_BINDING = re.compile(r"\$\{\{[^{}]*hashFiles\(\s*'" + re.escape(CHECKSUMS) + r"'\s*\)[^{}]*\}\}")
-BUNDLE_DIR = re.compile(r"~/\.cache/rubin-openssl/bundle-\S+")
-SOURCE_ARCHIVE = re.compile(r"~/\.cache/rubin-openssl/work/openssl-\S+\.tar\.gz")
+CALLERS = (
+    ("ci.yml", "test", "steps.test_gate.outputs.run_test == 'true'", None, {}),
+    ("ci.yml", "go_race_node", None, None, {}),
+    ("ci.yml", "formal_refinement", "steps.formal_gate.outputs.run_formal == 'true'", "openssl", {}),
+    ("ci.yml", "conformance_fixtures_drift", None, None, {}),
+    ("codacy-coverage.yml", "coverage", None, None, {}),
+    ("combined-load-nightly.yml", "combined-load", None, "openssl", {}),
+    ("fips-only-nightly.yml", "fips-only-smoke", None, "openssl", {}),
+    ("fuzz-nightly.yml", "fuzz-stage2", None, None,
+     {"cache-key-prefix": "openssl-bundle-mldsa-verified", "cache-revision": "v1"}),
+    ("runtime-perf-guardrails.yml", "runtime-perf", None, "openssl", {}),
+)
 
 
 def workflow_files() -> list[Path]:
     return sorted(p for p in WORKFLOWS_DIR.iterdir() if p.suffix in (".yml", ".yaml"))
 
 
-def is_builder_call(step: object) -> bool:
-    return isinstance(step, dict) and BUILDER in str(step.get("run", ""))
-
-
-def bundle_cache_settings(step: object) -> dict | None:
-    """The `with:` block of an OpenSSL bundle cache step, or None for any other step."""
-    if not isinstance(step, dict) or CACHE_ACTION not in str(step.get("uses", "")):
-        return None
-    settings = step.get("with") or {}
-    return settings if "rubin-openssl" in str(settings.get("path", "")) else None
-
-
 def job_steps(document: object) -> list[tuple[str, list]]:
     return [(job_id, (job or {}).get("steps") or [])
             for job_id, job in ((document or {}).get("jobs") or {}).items()]
-
-
-def builder_jobs(yaml):
-    """Yield (label, steps, call_indexes) for every job that builds the OpenSSL bundle."""
-    for path in workflow_files():
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
-        for job_id, steps in job_steps(document):
-            calls = [i for i, step in enumerate(steps) if is_builder_call(step)]
-            if calls:
-                yield f"{path.name}:{job_id}", steps, calls
-
 
 class WorkflowYamlSyntaxTests(unittest.TestCase):
     @unittest.skipUnless(HAS_PYYAML, "PyYAML unavailable")
@@ -115,25 +99,73 @@ class WorkflowYamlSyntaxTests(unittest.TestCase):
 
 class OpenSSLBundleCacheIdentityTests(unittest.TestCase):
     @unittest.skipUnless(HAS_PYYAML, "PyYAML unavailable")
-    def test_bundle_cache_keys_bind_the_pinned_source_digest(self):
-        builder_calls = 0
-        bound_keys = 0
+    def test_composite_action_owns_versioned_cache_and_builder(self):
+        yaml = m.load_yaml_module()
+        action = yaml.safe_load(ACTION_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(action["runs"]["using"], "composite")
+        self.assertEqual(action["inputs"]["cache-key-prefix"]["default"], "openssl-bundle")
+        self.assertEqual(action["inputs"]["cache-revision"]["default"], "v3")
+        steps = action["runs"]["steps"]
+        cache_steps = [step for step in steps if str(step.get("uses", "")).startswith("actions/cache@")]
+        self.assertEqual(len(cache_steps), 1)
+        self.assertEqual(
+            cache_steps[0]["uses"],
+            "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+        )
+        version_step = next(step for step in steps if step.get("id") == "version")
+        self.assertLess(steps.index(version_step), steps.index(cache_steps[0]))
+        self.assertLess(version_step["run"].index("--check-selection"),
+                        version_step["run"].index("GITHUB_OUTPUT"))
+        settings = cache_steps[0]["with"]
+        self.assertEqual(
+            str(settings["path"]).splitlines(),
+            [
+                "~/.cache/rubin-openssl/bundle-${{ steps.version.outputs.value }}",
+                "~/.cache/rubin-openssl/work/openssl-${{ steps.version.outputs.value }}.tar.gz",
+            ],
+        )
+        self.assertEqual(
+            settings["key"],
+            "${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ steps.version.outputs.value }}-"
+            "${{ inputs.cache-revision }}-${{ hashFiles('scripts/crypto/openssl/source-checksums.sha256') }}",
+        )
+        self.assertNotIn("restore-keys", settings)
+        prepare = next(step for step in steps if step.get("id") == "prepare")
+        self.assertEqual(prepare["env"]["OPENSSL_VERSION"], "${{ steps.version.outputs.value }}")
+        self.assertIn(BUILDER, prepare["run"])
+        expected_outputs = {
+            name: {"description": action["outputs"][name]["description"],
+                   "value": f"${{{{ steps.prepare.outputs.{name} }}}}"}
+            for name in ("openssl_dir", "openssl_modules", "openssl_conf", "pkg_config_path", "ld_library_path")
+        }
+        self.assertEqual(action["outputs"], expected_outputs)
 
-        for label, steps, calls in builder_jobs(m.load_yaml_module()):
-            builder_calls += len(calls)
-            caches = [s for s in map(bundle_cache_settings, steps[: calls[0]]) if s]
-            with self.subTest(job=label):
-                self.assertEqual(len(caches), 1, f"{label}: expected exactly one OpenSSL bundle cache step before the builder call")
-                settings = caches[0]
-                paths = str(settings.get("path", "")).split()
-                self.assertRegex(str(settings.get("key", "")), PIN_BINDING, f"{label}: cache key does not evaluate hashFiles('{CHECKSUMS}')")
-                self.assertTrue(any(BUNDLE_DIR.fullmatch(p) for p in paths), f"{label}: cache path no longer covers the installed bundle")
-                self.assertTrue(any(SOURCE_ARCHIVE.fullmatch(p) for p in paths), f"{label}: cache path no longer covers the downloaded source archive")
-                self.assertIsNone(settings.get("restore-keys"), f"{label}: a prefix fallback restores entries predating the pin binding")
-                bound_keys += 1
+    @unittest.skipUnless(HAS_PYYAML, "PyYAML unavailable")
+    def test_exact_workflow_jobs_use_the_composite_action(self):
+        yaml = m.load_yaml_module()
+        expected = {(path, job) for path, job, *_ in CALLERS}
+        observed = set()
 
-        self.assertGreater(builder_calls, 0, "no bundle builder call site found; the parse or the builder path is stale")
-        self.assertEqual(builder_calls, bound_keys, "every bundle builder call must sit behind a pin-bound cache key")
+        for path in workflow_files():
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn(BUILDER, text, f"{path.name}: direct builder call bypasses the composite action")
+            self.assertNotIn("~/.cache/rubin-openssl/", text, f"{path.name}: versioned cache path is duplicated")
+            document = yaml.safe_load(text)
+            for job_id, steps in job_steps(document):
+                calls = [step for step in steps if isinstance(step, dict) and step.get("uses") == ACTION_REF]
+                if calls:
+                    self.assertEqual(len(calls), 1, f"{path.name}:{job_id}: duplicate OpenSSL action call")
+                    observed.add((path.name, job_id))
+
+        self.assertEqual(observed, expected)
+
+        for path_name, job_id, expected_if, expected_id, expected_with in CALLERS:
+            document = yaml.safe_load((WORKFLOWS_DIR / path_name).read_text(encoding="utf-8"))
+            steps = document["jobs"][job_id]["steps"]
+            call = next(step for step in steps if step.get("uses") == ACTION_REF)
+            self.assertEqual(call.get("if"), expected_if, f"{path_name}:{job_id}: condition changed")
+            self.assertEqual(call.get("id"), expected_id, f"{path_name}:{job_id}: output id changed")
+            self.assertEqual(call.get("with") or {}, expected_with, f"{path_name}:{job_id}: cache identity changed")
 
 
 if __name__ == "__main__":

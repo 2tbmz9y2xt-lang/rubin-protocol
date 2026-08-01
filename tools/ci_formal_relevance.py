@@ -34,8 +34,10 @@ FORMAL_EXACT = COMMON_EXACT | {
     "tools/formal_risk_score.py",
 }
 REFINEMENT_EXACT = COMMON_EXACT | {
+    ".github/actions/openssl-bundle/action.yml",
     "clients/go/go.mod",
     "clients/go/consensus/live_binding_policy_v1_embedded.json",
+    "scripts/crypto/openssl/VERSION",
     "scripts/crypto/openssl/build-openssl-bundle.sh",
     "scripts/crypto/openssl/source-checksums.sha256",
     "tools/check_lean_conformance_staleness.py",

@@ -40,29 +40,16 @@ If SLA cannot be met, incident owner MUST publish a blocker note with ETA and mi
    - **Consensus-impacting**: can alter accept/reject decisions or signature verification outcomes.
    - **Operational-only**: availability/perf/compliance without consensus drift.
 3. Prepare mitigation:
-   - version bump and bundle rebuild. Pinning only ALLOWLISTS an archive, it does not
-     select one, so all four steps are mandatory — stopping after the pin leaves every
-     lane building the old, vulnerable release:
+   - version bump and bundle rebuild. Pinning only ALLOWLISTS an archive; `VERSION`
+     selects the repository default. Both steps are mandatory:
      1. add the new `<sha256>  openssl-<version>.tar.gz` line to
         `scripts/crypto/openssl/source-checksums.sha256`, taking the digest from the
         upstream `openssl-<version>.tar.gz.sha256` asset named in the refusal message,
-     2. change the builder default in
-        `scripts/crypto/openssl/build-openssl-bundle.sh` (1 site):
-        `grep -n 'OPENSSL_VERSION=' scripts/crypto/openssl/build-openssl-bundle.sh`,
-     3. change every explicit selector (10 sites: 9 workflow steps + 1 README example):
-        `git grep -n 'OPENSSL_VERSION=3\.5\.5'`,
-     4. change every version-bearing cache prefix, cache path and cache key (36 sites):
-        `git grep -nE 'bundle-3\.5\.5|openssl-3\.5\.5\.tar\.gz|3\.5\.5-v[0-9]' -- .github/workflows`.
-     The counts are as of 2026-07-29 and will drift — re-derive them with the commands
-     above (substituting the outgoing version) rather than trusting the numbers.
-     Install the checker's pinned parser prerequisite in the active Python environment:
-     `python3 -m pip install 'PyYAML==6.0.3'`.
-     `python3 tools/check_openssl_version_consistency.py --repo-root .` checks the
-     finite registered OpenSSL literal-owner topology; also inspect
-     `git grep -n '3\.5\.5'` and
-     confirm every remaining hit is deliberate: workflow step titles, the
-     `scripts/crypto/openssl/bench-pq-*.py` defaults, the `scripts/dev-env.sh` example,
-     the contract test constant, and any superseded pin line kept for rollback.
+     2. replace the single line in `scripts/crypto/openssl/VERSION` with the new
+        `MAJOR.MINOR.PATCH` value.
+     The local builder, benchmark defaults, CI cache paths and CI cache keys derive
+     from that file. Validate the selected row and all CI callers with:
+     `python3 -m unittest tools.tests.test_openssl_bundle_contract tools.tests.test_check_workflow_yaml_syntax`.
    - temporary runtime guard (if needed),
    - tests for regression and deterministic behavior.
 4. Open one PR for code/tooling updates and one PR for spec/ops updates when required.

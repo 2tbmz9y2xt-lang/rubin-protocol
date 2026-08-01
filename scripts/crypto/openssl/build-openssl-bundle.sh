@@ -1,7 +1,44 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OPENSSL_VERSION="${OPENSSL_VERSION:-3.5.5}"
+CHECK_SELECTION_ONLY=0
+case "$#" in
+  0) ;;
+  1)
+    if [ "$1" != "--check-selection" ]; then
+      echo "ERROR: unknown argument: $1" >&2
+      exit 2
+    fi
+    CHECK_SELECTION_ONLY=1
+    ;;
+  *)
+    echo "ERROR: expected no arguments or --check-selection" >&2
+    exit 2
+    ;;
+esac
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "${OPENSSL_VERSION:-}" ]; then
+  VERSION_FILE="${SCRIPT_DIR}/VERSION"
+  if [ ! -r "${VERSION_FILE}" ]; then
+    echo "ERROR: cannot read selected OpenSSL version from ${VERSION_FILE}" >&2
+    exit 1
+  fi
+  VERSION_LINE_COUNT="$(wc -l < "${VERSION_FILE}" | tr -d '[:space:]')"
+  VERSION_FINAL_NEWLINE="$(tail -c 1 "${VERSION_FILE}" | wc -l | tr -d '[:space:]')"
+  if [ "${VERSION_LINE_COUNT}" != 1 ] || [ "${VERSION_FINAL_NEWLINE}" != 1 ]; then
+    echo "ERROR: ${VERSION_FILE} must contain exactly one newline-terminated line" >&2
+    exit 1
+  fi
+  IFS= read -r OPENSSL_VERSION < "${VERSION_FILE}"
+fi
+IFS=. read -r VERSION_MAJOR VERSION_MINOR VERSION_PATCH VERSION_EXTRA <<< "${OPENSSL_VERSION}"
+if [ -n "${VERSION_EXTRA:-}" ] || [ -z "${VERSION_MAJOR:-}" ] || [ -z "${VERSION_MINOR:-}" ] || [ -z "${VERSION_PATCH:-}" ] \
+  || [[ "${VERSION_MAJOR}${VERSION_MINOR}${VERSION_PATCH}" == *[!0-9]* ]] \
+  || [ "${OPENSSL_VERSION}" != "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}" ]; then
+  echo "ERROR: OpenSSL version must be MAJOR.MINOR.PATCH decimal" >&2
+  exit 1
+fi
 OPENSSL_TAG="openssl-${OPENSSL_VERSION}"
 ARCHIVE="openssl-${OPENSSL_VERSION}.tar.gz"
 ARCHIVE_URL="${ARCHIVE_URL:-https://github.com/openssl/openssl/releases/download/${OPENSSL_TAG}/${ARCHIVE}}"
@@ -11,7 +48,7 @@ BUILD_DIR="${WORK_ROOT}/openssl-${OPENSSL_VERSION}"
 TARBALL_PATH="${WORK_ROOT}/${ARCHIVE}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)}"
 FIPS_SECTION_NAME="${FIPS_SECTION_NAME:-fips_sect}"
-CHECKSUM_FILE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/source-checksums.sha256"
+CHECKSUM_FILE="${SCRIPT_DIR}/source-checksums.sha256"
 CHECKSUM_LINE_RE='^([0-9a-f]{64})  ([^[:space:]]+)$'
 
 # The pinned sha256 of every supported upstream source tarball lives in
@@ -52,6 +89,10 @@ lookup_pinned_sha256() {
 
 if ! EXPECTED_SHA256="$(lookup_pinned_sha256 "${ARCHIVE}")"; then
   exit 1
+fi
+if [ "${CHECK_SELECTION_ONLY}" -eq 1 ]; then
+  echo "[openssl-bundle] selection-ok version=${OPENSSL_VERSION} source-sha256=${EXPECTED_SHA256}"
+  exit 0
 fi
 
 compute_sha256() {
