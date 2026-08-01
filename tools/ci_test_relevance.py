@@ -7,16 +7,41 @@ import os
 from pathlib import Path
 import subprocess
 from typing import Callable, NamedTuple
+import unicodedata
 
 
 EXACT_INPUTS = {
     ".gitattributes",
     ".github/workflows/ci.yml",
     ".node-version",
-    "go.work", "go.work.sum",
+    ".clippy.toml",
+    ".rustfmt.toml",
+    "clippy.toml",
+    "go.work",
+    "go.work.sum",
+    "rust-toolchain",
+    "rust-toolchain.toml",
+    "rustfmt.toml",
+    "evidence/.gitattributes",
+    "evidence/runtime-perf/.gitattributes",
     "evidence/runtime-perf/RUST_RUNTIME_PERF_GUARDRAILS.md",
 }
-PREFIX_INPUTS = (".cargo/", ".github/actions/", "clients/", "conformance/", "scripts/", "tools/")
+PREFIX_INPUTS = (
+    ".cargo/", ".github/actions/", "clients/", "conformance/",
+    "scripts/", "tools/", "vendor/",
+)
+DELEGATING_CONFIGS = (
+    "go.work",
+    "clients/go.work",
+    "clients/go/go.work",
+    "conformance/go.work",
+    ".cargo/config",
+    ".cargo/config.toml",
+    "clients/.cargo/config",
+    "clients/.cargo/config.toml",
+    "clients/rust/.cargo/config",
+    "clients/rust/.cargo/config.toml",
+)
 
 
 class Decision(NamedTuple):
@@ -53,6 +78,8 @@ def parse_name_status(data: bytes) -> tuple[list[str], str | None]:
         if any(
             not path or path.startswith(("/", "\\"))
             or (len(path) > 2 and path[1] == ":" and path[2] in "/\\")
+            or "\\" in path
+            or any(unicodedata.category(char) == "Cc" for char in path)
             or any(part in {"", ".", ".."} for part in path.split("/"))
             for path in record_paths
         ):
@@ -65,6 +92,7 @@ def parse_name_status(data: bytes) -> tuple[list[str], str | None]:
 def decide(
     event_name: str, base_sha: str,
     run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+    path_present: Callable[[str], bool] = os.path.lexists,
 ) -> Decision:
     if event_name != "pull_request":
         return Decision(True, f"event {event_name or '<missing>'} is not pull_request")
@@ -73,6 +101,12 @@ def decide(
     verify = run(["git", "rev-parse", "--verify", f"{base_sha}^{{commit}}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if verify.returncode:
         return Decision(True, f"missing pull request base SHA: {base_sha}")
+    ancestor = run(["git", "merge-base", "--is-ancestor", base_sha, "HEAD"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if ancestor.returncode:
+        return Decision(True, f"pull request base SHA is not an ancestor of HEAD: {base_sha}")
+    for path in DELEGATING_CONFIGS:
+        if path_present(path):
+            return Decision(True, f"delegating repository config present: {path}")
     diff = run(["git", "diff", "--name-status", "-z", "--find-renames", "--find-copies", "--find-copies-harder", f"{base_sha}..HEAD"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if diff.returncode:
         return Decision(True, f"git diff failed for {base_sha}..HEAD")

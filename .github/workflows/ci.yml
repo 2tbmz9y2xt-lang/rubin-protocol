@@ -240,6 +240,8 @@ jobs:
   test:
     needs: policy
     runs-on: ubuntu-latest
+    env:
+      PYTHONSAFEPATH: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -422,6 +424,7 @@ jobs:
         if: steps.test_gate.outputs.run_test == 'true'
         with:
           node-version-file: '.node-version'
+          package-manager-cache: false
 
       - name: Go fmt
         if: steps.test_gate.outputs.run_test == 'true'
