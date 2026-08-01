@@ -55,8 +55,11 @@ If SLA cannot be met, incident owner MUST publish a blocker note with ETA and mi
         `git grep -nE 'bundle-3\.5\.5|openssl-3\.5\.5\.tar\.gz|3\.5\.5-v[0-9]' -- .github/workflows`.
      The counts are as of 2026-07-29 and will drift — re-derive them with the commands
      above (substituting the outgoing version) rather than trusting the numbers.
-     `python3 tools/check_openssl_version_consistency.py --repo-root .` enforces bump
-     completeness; also inspect `git grep -n '3\.5\.5'` and
+     Install the checker's pinned parser prerequisite in the active Python environment:
+     `python3 -m pip install 'PyYAML==6.0.3'`.
+     `python3 tools/check_openssl_version_consistency.py --repo-root .` checks the
+     finite registered OpenSSL literal-owner topology; also inspect
+     `git grep -n '3\.5\.5'` and
      confirm every remaining hit is deliberate: workflow step titles, the
      `scripts/crypto/openssl/bench-pq-*.py` defaults, the `scripts/dev-env.sh` example,
      the contract test constant, and any superseded pin line kept for rollback.
