@@ -35,6 +35,7 @@ pub(crate) struct SigVerifyRequest {
 pub(crate) struct SigCheckQueueMark {
     len: usize,
     queued_bytes: usize,
+    registry_was_bound: bool,
 }
 
 /// SigCheckQueue collects deferred signature verification tasks during
@@ -171,12 +172,16 @@ impl SigCheckQueue {
         SigCheckQueueMark {
             len: self.tasks.len(),
             queued_bytes: self.queued_bytes,
+            registry_was_bound: self.registry.is_some(),
         }
     }
 
     pub(crate) fn rollback_to(&mut self, mark: SigCheckQueueMark) {
         self.tasks.truncate(mark.len);
         self.queued_bytes = mark.queued_bytes;
+        if !mark.registry_was_bound {
+            self.registry = None;
+        }
     }
 
     fn ensure_registry(&mut self, registry: &SuiteRegistry) -> Result<(), TxError> {
