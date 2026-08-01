@@ -241,6 +241,8 @@ func applyNonCoinbaseTxBasicUpdateWithMTPQ(
 // All non-crypto pre-checks (UTXO lookup, covenant parse, witness assignment,
 // value conservation, vault rules) are performed identically to the sequential
 // path. Only the verifySig calls are deferred.
+// Queue ownership is transaction-atomic: an error rolls back only tasks appended
+// by this call to its entry mark, while success retains them in submission order.
 func applyNonCoinbaseTxBasicWorkQ(
 	tx *Tx,
 	txid [32]byte,
@@ -251,7 +253,14 @@ func applyNonCoinbaseTxBasicWorkQ(
 	sigQueue *SigCheckQueue,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
-) (map[Outpoint]UtxoEntry, uint64, error) {
+) (result map[Outpoint]UtxoEntry, resultFee uint64, err error) {
+	entryMark := sigQueue.mark()
+	defer func() {
+		if err != nil {
+			sigQueue.rollbackTo(entryMark)
+		}
+	}()
+
 	if tx == nil {
 		return nil, 0, txerr(TX_ERR_PARSE, "nil tx")
 	}
