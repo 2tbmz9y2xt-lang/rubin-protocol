@@ -42,9 +42,9 @@ If SLA cannot be met, incident owner MUST publish a blocker note with ETA and mi
 3. Prepare mitigation:
    - version bump and bundle rebuild. Pinning only ALLOWLISTS an archive; `VERSION`
      selects the repository default. Both steps are mandatory:
-     1. add the new `<sha256>  openssl-<version>.tar.gz` line to
-        `scripts/crypto/openssl/source-checksums.sha256`, taking the digest from the
-        upstream `openssl-<version>.tar.gz.sha256` asset named in the refusal message,
+     1. confirm exactly one `<sha256>  openssl-<version>.tar.gz` line exists in
+        `scripts/crypto/openssl/source-checksums.sha256`; add it only when absent,
+        using the upstream `openssl-<version>.tar.gz.sha256` asset named in the refusal message,
      2. replace the single line in `scripts/crypto/openssl/VERSION` with the new
         `MAJOR.MINOR.PATCH` value.
      The local builder, benchmark defaults, CI cache paths and CI cache keys derive

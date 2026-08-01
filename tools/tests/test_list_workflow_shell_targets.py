@@ -43,19 +43,21 @@ class WorkflowShellTargetTests(unittest.TestCase):
             with self.subTest(target=target):
                 self.assertTrue((repo_root / target).is_file())
 
-    def test_collect_targets_reads_yaml_workflows_too(self):
+    def test_collect_targets_reads_yaml_workflows_and_composite_actions(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
             workflow_dir = repo_root / ".github" / "workflows"
+            action_dir = repo_root / ".github" / "actions" / "sample"
             script_path = repo_root / "scripts" / "ci"
             workflow_dir.mkdir(parents=True)
+            action_dir.mkdir(parents=True)
             script_path.mkdir(parents=True)
             (script_path / "sample.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
             (workflow_dir / "sample.yaml").write_text(
                 "jobs:\n  lint:\n    steps:\n      - run: scripts/ci/sample.sh\n",
                 encoding="utf-8",
             )
-
+            (action_dir / "action.yml").write_text("runs:\n  steps:\n    - run: scripts/ci/sample.sh\n", encoding="utf-8")
             self.assertEqual(m.collect_targets(repo_root), ["scripts/ci/sample.sh"])
 
     def test_collect_targets_ignores_longer_suffixes_on_a_sh_prefix(self):

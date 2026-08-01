@@ -12,19 +12,25 @@ def iter_workflows(workflow_dir: Path) -> list[Path]:
     return sorted(list(workflow_dir.glob("*.yml")) + list(workflow_dir.glob("*.yaml")))
 
 
+def iter_ci_yaml(repo_root: Path) -> list[Path]:
+    action_dir = repo_root / ".github" / "actions"
+    actions = list(action_dir.rglob("action.yml")) + list(action_dir.rglob("action.yaml"))
+    return sorted(iter_workflows(repo_root / ".github" / "workflows") + actions)
+
+
 def collect_targets(repo_root: Path) -> list[str]:
     workflow_dir = repo_root / ".github" / "workflows"
     if not workflow_dir.is_dir():
         raise FileNotFoundError(f"workflow directory is missing: {workflow_dir}")
 
     targets: set[str] = set()
-    for workflow in iter_workflows(workflow_dir):
-        text = workflow.read_text(encoding="utf-8")
+    for document in iter_ci_yaml(repo_root):
+        text = document.read_text(encoding="utf-8")
         for match in WORKFLOW_SCRIPT_RE.findall(text):
             target = repo_root / match
             if not target.is_file():
                 raise FileNotFoundError(
-                    f"workflow references missing shell target {match} in {workflow.relative_to(repo_root)}"
+                    f"CI YAML references missing shell target {match} in {document.relative_to(repo_root)}"
                 )
             targets.add(match)
 

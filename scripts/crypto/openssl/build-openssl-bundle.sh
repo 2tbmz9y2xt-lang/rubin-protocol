@@ -2,20 +2,12 @@
 set -euo pipefail
 
 CHECK_SELECTION_ONLY=0
-case "$#" in
-  0) ;;
-  1)
-    if [ "$1" != "--check-selection" ]; then
-      echo "ERROR: unknown argument: $1" >&2
-      exit 2
-    fi
-    CHECK_SELECTION_ONLY=1
-    ;;
-  *)
-    echo "ERROR: expected no arguments or --check-selection" >&2
-    exit 2
-    ;;
-esac
+if [ "$#" -eq 1 ] && [ "$1" = "--check-selection" ]; then
+  CHECK_SELECTION_ONLY=1
+elif [ "$#" -ne 0 ]; then
+  echo "ERROR: expected no arguments or --check-selection" >&2
+  exit 2
+fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 if [ -z "${OPENSSL_VERSION:-}" ]; then
@@ -24,13 +16,11 @@ if [ -z "${OPENSSL_VERSION:-}" ]; then
     echo "ERROR: cannot read selected OpenSSL version from ${VERSION_FILE}" >&2
     exit 1
   fi
-  VERSION_LINE_COUNT="$(wc -l < "${VERSION_FILE}" | tr -d '[:space:]')"
-  VERSION_FINAL_NEWLINE="$(tail -c 1 "${VERSION_FILE}" | wc -l | tr -d '[:space:]')"
-  if [ "${VERSION_LINE_COUNT}" != 1 ] || [ "${VERSION_FINAL_NEWLINE}" != 1 ]; then
-    echo "ERROR: ${VERSION_FILE} must contain exactly one newline-terminated line" >&2
+  IFS= read -r OPENSSL_VERSION < "${VERSION_FILE}" || true
+  if ! printf '%s\n' "${OPENSSL_VERSION}" | cmp -s - "${VERSION_FILE}"; then
+    echo "ERROR: ${VERSION_FILE} must contain exactly one canonical newline-terminated line" >&2
     exit 1
   fi
-  IFS= read -r OPENSSL_VERSION < "${VERSION_FILE}"
 fi
 IFS=. read -r VERSION_MAJOR VERSION_MINOR VERSION_PATCH VERSION_EXTRA <<< "${OPENSSL_VERSION}"
 if [ -n "${VERSION_EXTRA:-}" ] || [ -z "${VERSION_MAJOR:-}" ] || [ -z "${VERSION_MINOR:-}" ] || [ -z "${VERSION_PATCH:-}" ] \
@@ -60,6 +50,10 @@ lookup_pinned_sha256() {
   local archive="$1" line digest="" lineno=0
   if [ ! -r "${CHECKSUM_FILE}" ]; then
     echo "ERROR: cannot read pinned checksum file ${CHECKSUM_FILE}; refusing to build" >&2
+    return 1
+  fi
+  if ! cmp -s "${CHECKSUM_FILE}" <(tr -d '\000' < "${CHECKSUM_FILE}"); then
+    echo "ERROR: NUL byte in pinned checksum file ${CHECKSUM_FILE}; refusing to build" >&2
     return 1
   fi
   while IFS= read -r line || [ -n "${line}" ]; do

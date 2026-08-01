@@ -4,11 +4,9 @@ description: Restore or build the repository-selected OpenSSL bundle and export 
 inputs:
   cache-key-prefix:
     description: Cache-key namespace for this caller
-    required: false
     default: openssl-bundle
   cache-revision:
     description: Cache layout revision for this caller
-    required: false
     default: v3
 
 outputs:

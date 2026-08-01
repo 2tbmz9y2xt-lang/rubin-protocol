@@ -65,7 +65,7 @@ def repin_text(text: str, digest: str, version: str) -> str:
 class OpenSSLBundleContractTests(unittest.TestCase):
     def run_bundle(self, tmp, *, served, pin=None, precache=False, version=VERSION,
                    archive_url=None, break_sha_tools=False, use_default=False,
-                   check_selection=False):
+                   check_selection=False, version_bytes=None):
         """pin=None runs the real script against the repository pin file; anything else copies
         the script beside PAYLOAD (pin the served bytes), ABSENT (no file), or literal text."""
         root = Path(tmp)
@@ -93,7 +93,7 @@ class OpenSSLBundleContractTests(unittest.TestCase):
         if pin is not None:
             script = root / "build-openssl-bundle.sh"
             script.write_text(SCRIPT_PATH.read_text(encoding="utf-8"), encoding="utf-8")
-            (root / "VERSION").write_bytes(VERSION_PATH.read_bytes())
+            (root / "VERSION").write_bytes(VERSION_PATH.read_bytes() if version_bytes is None else version_bytes)
             if pin is not ABSENT:
                 (root / "source-checksums.sha256").write_text(
                     repin_text(CHECKSUM_PATH.read_text(encoding="utf-8"),
@@ -119,41 +119,22 @@ class OpenSSLBundleContractTests(unittest.TestCase):
                 self.assertEqual(run.curl_ran.exists(), downloaded)
                 self.assertTrue(run.extracted.exists())
 
-    def test_repository_selected_version_is_used_by_default(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            run = self.run_bundle(
-                tmp, served=source_tarball(), pin=PAYLOAD, use_default=True
-            )
-            self.assertEqual(run.proc.returncode, 0, run.proc.stderr)
-            self.assertIn(f"[openssl-bundle] version={VERSION}", run.proc.stdout)
-            self.assertTrue(run.extracted.exists())
-
-    def test_selection_check_has_no_build_or_download_effect(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            run = self.run_bundle(
-                tmp, served=source_tarball(), pin=PAYLOAD,
-                use_default=True, check_selection=True,
-            )
-            self.assertEqual(run.proc.returncode, 0, run.proc.stderr)
-            self.assertIn(f"selection-ok version={VERSION}", run.proc.stdout)
-            self.assertFalse(run.curl_ran.exists())
-            self.assertFalse(run.tarball.exists())
-            self.assertFalse(run.extracted.exists())
-
-    def test_selection_check_refuses_unpinned_or_duplicate_release_without_effects(self):
+    def test_selection_check_is_effect_free_and_pin_bound(self):
         pinned = f"{'d' * 64}  openssl-{VERSION}.tar.gz\n"
         cases = (
-            ("unpinned", None, "9.9.9", "no pinned sha256"),
-            ("duplicate", pinned + pinned, VERSION, "duplicate pinned sha256"),
+            (PAYLOAD, VERSION, None, 0, "selection-ok"),
+            (None, "9.9.9", None, 1, "no pinned sha256"),
+            (pinned + pinned, VERSION, None, 1, "duplicate pinned sha256"),
+            (PAYLOAD, VERSION, b"3.5\x00.5\n", 1, "canonical newline-terminated"),
         )
-        for name, pin, version, expected in cases:
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+        for pin, version, version_bytes, code, expected in cases:
+            with self.subTest(version=version, expected=expected), tempfile.TemporaryDirectory() as tmp:
                 run = self.run_bundle(
                     tmp, served=source_tarball(), pin=pin, version=version,
-                    check_selection=True,
+                    use_default=pin is PAYLOAD, check_selection=True, version_bytes=version_bytes,
                 )
-                self.assertNotEqual(run.proc.returncode, 0)
-                self.assertIn(expected, run.proc.stderr)
+                self.assertEqual(run.proc.returncode, code, run.proc.stderr)
+                self.assertIn(expected, run.proc.stdout + run.proc.stderr)
                 self.assertFalse(run.curl_ran.exists())
                 self.assertFalse(run.tarball.exists())
                 self.assertFalse(run.extracted.exists())
@@ -196,6 +177,7 @@ class OpenSSLBundleContractTests(unittest.TestCase):
             ("digest too short", f"{'d' * 63}  openssl-{VERSION}.tar.gz\n", "malformed entry"),
             ("uppercase digest", f"{'D' * 64}  openssl-{VERSION}.tar.gz\n", "malformed entry"),
             ("single-space separator", f"{'d' * 64} openssl-{VERSION}.tar.gz\n", "malformed entry"),
+            ("NUL byte", pinned.replace(".tar.gz", ".tar.gz\x00"), "NUL byte"),
             ("malformed line for another version", pinned + "garbage\n", "malformed entry"),
             ("duplicate entry", pinned + pinned, "duplicate pinned sha256"),
         ):
