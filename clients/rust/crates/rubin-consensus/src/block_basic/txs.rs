@@ -32,6 +32,22 @@ fn add_block_resource_stat(current: u64, delta: u64, msg: &'static str) -> Resul
         .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, msg))
 }
 
+fn validate_non_coinbase_nonce_and_input_count(tx: &Tx) -> Result<(), TxError> {
+    if tx.tx_nonce == 0 && tx.inputs.is_empty() {
+        return Err(TxError::new(
+            ErrorCode::TxErrTxNonceInvalid,
+            "tx_nonce must be >= 1 for non-coinbase",
+        ));
+    }
+    if tx.inputs.is_empty() {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "non-coinbase must have at least one input",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_block_tx_semantics(
     pb: &ParsedBlock,
     block_height: u64,
@@ -47,18 +63,7 @@ pub(super) fn validate_block_tx_semantics(
                     "coinbase-like tx found at index > 0",
                 ));
             }
-            if tx.tx_nonce == 0 && tx.inputs.is_empty() {
-                return Err(TxError::new(
-                    ErrorCode::TxErrTxNonceInvalid,
-                    "tx_nonce must be >= 1 for non-coinbase",
-                ));
-            }
-            if tx.inputs.is_empty() {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "non-coinbase must have at least one input",
-                ));
-            }
+            validate_non_coinbase_nonce_and_input_count(tx)?;
             if seen_nonces.insert(tx.tx_nonce, ()).is_some() {
                 return Err(TxError::new(
                     ErrorCode::TxErrNonceReplay,
