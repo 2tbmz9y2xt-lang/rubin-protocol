@@ -14,6 +14,36 @@ fn validate_tx_covenants_genesis_p2pk_ok() {
 }
 
 #[test]
+fn validate_tx_covenants_genesis_p2pk_forwards_block_height() {
+    use crate::suite_registry::{NativeSuiteSet, RotationProvider};
+    struct HeightSensitive;
+    impl RotationProvider for HeightSensitive {
+        fn native_create_suites(&self, height: u64) -> NativeSuiteSet {
+            if height >= 2 {
+                NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87])
+            } else {
+                NativeSuiteSet::new(&[])
+            }
+        }
+        fn native_spend_suites(&self, _height: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(&[])
+        }
+    }
+
+    let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+    tx.outputs = vec![crate::tx::TxOutput {
+        value: 1,
+        covenant_type: COV_TYPE_P2PK,
+        covenant_data: vec![SUITE_ID_ML_DSA_87; MAX_P2PK_COVENANT_DATA as usize],
+    }];
+    let rotation = HeightSensitive;
+
+    let err = validate_tx_covenants_genesis(&tx, 1, Some(&rotation)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    validate_tx_covenants_genesis(&tx, 2, Some(&rotation)).expect("height forwarded");
+}
+
+#[test]
 fn validate_tx_covenants_genesis_p2pk_non_native_suite_rejected() {
     let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
     let mut cov = vec![0u8; MAX_P2PK_COVENANT_DATA as usize];

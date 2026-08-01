@@ -10,7 +10,7 @@ use crate::simplicity_covenant::{
 };
 use crate::stealth::parse_stealth_covenant_data;
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider};
-use crate::tx::Tx;
+use crate::tx::{Tx, TxOutput};
 use crate::vault::{parse_multisig_covenant_data, parse_vault_covenant_data};
 
 /// Validates covenant structure at creation time. The `rotation` parameter
@@ -25,7 +25,11 @@ pub fn validate_tx_covenants_genesis(
     let default_rp = DefaultRotationProvider;
     let rp: &dyn RotationProvider = rotation.unwrap_or(&default_rp);
 
-    for out in &tx.outputs {
+    fn validate_p2pk_anchor(
+        out: &TxOutput,
+        block_height: u64,
+        rp: &dyn RotationProvider,
+    ) -> Result<bool, TxError> {
         match out.covenant_type {
             COV_TYPE_P2PK => {
                 if out.value == 0 {
@@ -63,6 +67,13 @@ pub fn validate_tx_covenants_genesis(
                     ));
                 }
             }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn validate_vault_multisig_htlc(out: &TxOutput) -> Result<bool, TxError> {
+        match out.covenant_type {
             COV_TYPE_VAULT => {
                 if out.value == 0 {
                     return Err(TxError::new(
@@ -90,6 +101,13 @@ pub fn validate_tx_covenants_genesis(
                     ));
                 }
             }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn validate_stealth_da(out: &TxOutput, tx_kind: u8) -> Result<bool, TxError> {
+        match out.covenant_type {
             COV_TYPE_CORE_STEALTH => {
                 if out.value == 0 {
                     return Err(TxError::new(
@@ -106,7 +124,7 @@ pub fn validate_tx_covenants_genesis(
                 let _ = parse_stealth_covenant_data(&out.covenant_data)?;
             }
             COV_TYPE_DA_COMMIT => {
-                if tx.tx_kind != 0x01 {
+                if tx_kind != 0x01 {
                     return Err(TxError::new(
                         ErrorCode::TxErrCovenantTypeInvalid,
                         "CORE_DA_COMMIT allowed only in tx_kind=0x01",
@@ -125,27 +143,39 @@ pub fn validate_tx_covenants_genesis(
                     ));
                 }
             }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    for out in &tx.outputs {
+        match out.covenant_type {
+            COV_TYPE_P2PK | COV_TYPE_ANCHOR => {
+                validate_p2pk_anchor(out, block_height, rp).map(|_| ())
+            }
+            COV_TYPE_VAULT | COV_TYPE_MULTISIG | COV_TYPE_HTLC => {
+                validate_vault_multisig_htlc(out).map(|_| ())
+            }
+            COV_TYPE_CORE_STEALTH | COV_TYPE_DA_COMMIT => {
+                validate_stealth_da(out, tx.tx_kind).map(|_| ())
+            }
             COV_TYPE_CORE_SIMPLICITY => {
                 // Mirrors Go: gate on the deployment being active first, then
                 // validate covenant_data structure. The default provider reports
                 // inactive, so creation stays fail-closed ("deployment not
                 // active") until a deployment is wired and threaded.
                 validate_core_simplicity_deployment_active(block_height, rp)?;
-                validate_core_simplicity_covenant_data(out.value, &out.covenant_data)?;
+                validate_core_simplicity_covenant_data(out.value, &out.covenant_data)
             }
-            COV_TYPE_RESERVED_FUTURE => {
-                return Err(TxError::new(
-                    ErrorCode::TxErrCovenantTypeInvalid,
-                    "reserved covenant_type",
-                ));
-            }
-            _ => {
-                return Err(TxError::new(
-                    ErrorCode::TxErrCovenantTypeInvalid,
-                    "unknown covenant_type",
-                ));
-            }
-        }
+            COV_TYPE_RESERVED_FUTURE => Err(TxError::new(
+                ErrorCode::TxErrCovenantTypeInvalid,
+                "reserved covenant_type",
+            )),
+            _ => Err(TxError::new(
+                ErrorCode::TxErrCovenantTypeInvalid,
+                "unknown covenant_type",
+            )),
+        }?;
     }
 
     Ok(())
