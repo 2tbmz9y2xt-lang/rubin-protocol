@@ -34,6 +34,7 @@ pub const MIN_HTLC_PREIMAGE_BYTES: u64 = 16; // consensus security floor (Q-A287
 pub const MAX_HTLC_PREIMAGE_BYTES: u64 = 256;
 pub const MAX_SIMPLICITY_STATE_BYTES: u64 = 512;
 pub const SIMPLICITY_MAX_GROUP_INPUTS: usize = 8;
+pub const SIMPLICITY_MAX_GROUP_OUTPUTS: usize = 8;
 pub const MAX_VAULT_KEYS: u8 = 12;
 pub const MAX_VAULT_WHITELIST_ENTRIES: u16 = 1024;
 pub const MAX_MULTISIG_KEYS: u8 = 12;

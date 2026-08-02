@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use crate::constants::{
     COV_TYPE_ANCHOR, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_CORE_STEALTH, COV_TYPE_DA_COMMIT,
     COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_RESERVED_FUTURE, COV_TYPE_VAULT,
     MAX_ANCHOR_PAYLOAD_SIZE, MAX_COVENANT_DATA_PER_OUTPUT, MAX_P2PK_COVENANT_DATA,
+    SIMPLICITY_MAX_GROUP_OUTPUTS,
 };
 use crate::error::{ErrorCode, TxError};
 use crate::htlc::parse_htlc_covenant_data;
@@ -12,6 +15,23 @@ use crate::stealth::parse_stealth_covenant_data;
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider};
 use crate::tx::{Tx, TxOutput};
 use crate::vault::{parse_multisig_covenant_data, parse_vault_covenant_data};
+
+fn validate_simplicity_output_group_cap(
+    simplicity_output_cmrs: &[[u8; 32]],
+) -> Result<(), TxError> {
+    let mut groups = HashMap::with_capacity(simplicity_output_cmrs.len());
+    for program_cmr in simplicity_output_cmrs {
+        let count = groups.entry(*program_cmr).or_insert(0usize);
+        *count += 1;
+        if *count > SIMPLICITY_MAX_GROUP_OUTPUTS {
+            return Err(TxError::new(
+                ErrorCode::TxErrCovenantTypeInvalid,
+                "CORE_SIMPLICITY same-cmr output group exceeds limit",
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Validates covenant structure at creation time. The `rotation` parameter
 /// controls which signature suites are valid for native covenant creation
@@ -148,6 +168,9 @@ pub fn validate_tx_covenants_genesis(
         Ok(true)
     }
 
+    // Complete per-output validation in wire order before applying the
+    // transaction-level same-program_cmr cap, so a later creation error wins.
+    let mut simplicity_output_cmrs = Vec::new();
     for out in &tx.outputs {
         match out.covenant_type {
             COV_TYPE_P2PK | COV_TYPE_ANCHOR => {
@@ -165,7 +188,14 @@ pub fn validate_tx_covenants_genesis(
                 // inactive, so creation stays fail-closed ("deployment not
                 // active") until a deployment is wired and threaded.
                 validate_core_simplicity_deployment_active(block_height, rp)?;
-                validate_core_simplicity_covenant_data(out.value, &out.covenant_data)
+                validate_core_simplicity_covenant_data(out.value, &out.covenant_data)?;
+                // The validator above has parsed the exact envelope, including
+                // its mandatory 32-byte program_cmr prefix, so this copy adds
+                // no fallible validation path or duplicate parse.
+                let mut program_cmr = [0u8; 32];
+                program_cmr.copy_from_slice(&out.covenant_data[..32]);
+                simplicity_output_cmrs.push(program_cmr);
+                Ok(())
             }
             COV_TYPE_RESERVED_FUTURE => Err(TxError::new(
                 ErrorCode::TxErrCovenantTypeInvalid,
@@ -178,5 +208,5 @@ pub fn validate_tx_covenants_genesis(
         }?;
     }
 
-    Ok(())
+    validate_simplicity_output_group_cap(&simplicity_output_cmrs)
 }

@@ -1,8 +1,8 @@
 use super::*;
 use crate::compactsize::encode_compact_size;
 use crate::constants::{
-    COV_TYPE_CORE_SIMPLICITY, COV_TYPE_P2PK, MAX_SIMPLICITY_STATE_BYTES, SIMPLICITY_WITNESS_SLOTS,
-    SUITE_ID_ML_DSA_87,
+    COV_TYPE_CORE_SIMPLICITY, COV_TYPE_P2PK, COV_TYPE_VAULT, MAX_SIMPLICITY_STATE_BYTES,
+    SIMPLICITY_MAX_GROUP_OUTPUTS, SIMPLICITY_WITNESS_SLOTS, SUITE_ID_ML_DSA_87,
 };
 use crate::error::ErrorCode;
 use crate::suite_registry::{DefaultRotationProvider, NativeSuiteSet, RotationProvider};
@@ -161,6 +161,89 @@ fn genesis_deployment_gate() {
     let bad = tx_with_outputs(vec![simplicity_output(1, vec![0u8; 10])]);
     let e = crate::validate_tx_covenants_genesis(&bad, 10, Some(&active)).unwrap_err();
     assert!(err_msg(&e).contains("program_cmr parse failure"));
+}
+
+#[test]
+fn genesis_core_simplicity_output_group_cap() {
+    let active = ActiveSimplicity { active_from: 10 };
+    let same_cmr_outputs = |count: usize, program_cmr: [u8; 32]| {
+        (0..count)
+            .map(|_| simplicity_output(1, encode_simplicity_covenant_data(program_cmr, &[])))
+            .collect::<Vec<_>>()
+    };
+    let cmr = [0x55; 32];
+    let mut other_cmr = [0u8; 32];
+    other_cmr[0] = 0xaa;
+    let group_cap_error = crate::error::TxError::new(
+        ErrorCode::TxErrCovenantTypeInvalid,
+        "CORE_SIMPLICITY same-cmr output group exceeds limit",
+    );
+
+    let exact_cap = tx_with_outputs(same_cmr_outputs(SIMPLICITY_MAX_GROUP_OUTPUTS, cmr));
+    assert!(crate::validate_tx_covenants_genesis(&exact_cap, 10, Some(&active)).is_ok());
+
+    let over_cap = tx_with_outputs(same_cmr_outputs(SIMPLICITY_MAX_GROUP_OUTPUTS + 1, cmr));
+    assert_eq!(
+        crate::validate_tx_covenants_genesis(&over_cap, 10, Some(&active)).unwrap_err(),
+        group_cap_error
+    );
+
+    let mut distinct_groups = same_cmr_outputs(SIMPLICITY_MAX_GROUP_OUTPUTS, cmr);
+    distinct_groups.extend(same_cmr_outputs(SIMPLICITY_MAX_GROUP_OUTPUTS, other_cmr));
+    assert!(crate::validate_tx_covenants_genesis(
+        &tx_with_outputs(distinct_groups),
+        10,
+        Some(&active)
+    )
+    .is_ok());
+
+    // The cap is creation-side and does not require a CORE_SIMPLICITY input.
+    let mut p2pk_input = over_cap.clone();
+    p2pk_input.inputs.push(crate::tx::TxInput {
+        prev_txid: [0x33; 32],
+        prev_vout: 0,
+        script_sig: vec![],
+        sequence: 0,
+    });
+    assert_eq!(
+        crate::validate_tx_covenants_genesis(&p2pk_input, 10, Some(&active)).unwrap_err(),
+        group_cap_error
+    );
+
+    let later_output_error = crate::error::TxError::new(
+        ErrorCode::TxErrVaultParamsInvalid,
+        "CORE_VAULT value must be > 0",
+    );
+    let invalid_output = TxOutput {
+        value: 0,
+        covenant_type: COV_TYPE_VAULT,
+        covenant_data: vec![],
+    };
+    let single_invalid = tx_with_outputs(vec![invalid_output.clone()]);
+    assert_eq!(
+        crate::validate_tx_covenants_genesis(&single_invalid, 10, Some(&active)).unwrap_err(),
+        later_output_error
+    );
+    let mut over_cap_then_invalid = same_cmr_outputs(SIMPLICITY_MAX_GROUP_OUTPUTS + 1, cmr);
+    over_cap_then_invalid.push(invalid_output);
+    assert_eq!(
+        crate::validate_tx_covenants_genesis(
+            &tx_with_outputs(over_cap_then_invalid),
+            10,
+            Some(&active),
+        )
+        .unwrap_err(),
+        later_output_error
+    );
+
+    // An inactive deployment remains the first rejection, before cap counting.
+    assert_eq!(
+        crate::validate_tx_covenants_genesis(&over_cap, 10, None).unwrap_err(),
+        crate::error::TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_SIMPLICITY deployment not active",
+        )
+    );
 }
 
 fn utxo_entry(covenant_type: u16) -> UtxoEntry {
