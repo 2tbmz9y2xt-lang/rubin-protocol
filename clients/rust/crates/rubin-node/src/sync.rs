@@ -490,6 +490,8 @@ pub struct SyncEngine {
     pv_shadow_samples: Vec<String>,
     pv_telemetry: PVTelemetry,
     persistence_fault: Option<StoragePersistenceFault>,
+    #[cfg(test)]
+    undo_preparation_failure: Option<String>,
     /// Test-only: drop block_store after canonical truncate (between
     /// truncate and save) to exercise the otherwise-unreachable
     /// blockstore-missing branch in disconnect_tip's save-failure
@@ -795,8 +797,25 @@ impl SyncEngine {
             pv_telemetry: PVTelemetry::new(pv_mode),
             persistence_fault: None,
             #[cfg(test)]
+            undo_preparation_failure: None,
+            #[cfg(test)]
             drop_block_store_after_truncate: false,
         })
+    }
+
+    fn restore_direct_apply_state(
+        &mut self,
+        chain_state: ChainState,
+        tip_timestamp: u64,
+        best_known_height: u64,
+        last_reorg_depth: u64,
+        reorg_count: u64,
+    ) {
+        self.chain_state = chain_state;
+        self.tip_timestamp = tip_timestamp;
+        self.best_known_height = best_known_height;
+        self.last_reorg_depth = last_reorg_depth;
+        self.reorg_count = reorg_count;
     }
 
     pub fn header_sync_request(&self) -> HeaderRequest {
@@ -990,9 +1009,8 @@ impl SyncEngine {
         let snapshot = self.chain_state.clone();
         let old_tip_timestamp = self.tip_timestamp;
         let old_best_known_height = self.best_known_height;
-
-        // Build undo record from the pre-mutation state.
-        let undo = build_block_undo(&self.chain_state, block_bytes, next_height)?;
+        let old_last_reorg_depth = self.last_reorg_depth;
+        let old_reorg_count = self.reorg_count;
 
         let suite_context = self.cfg.suite_context.clone();
         let (rotation, registry): (Option<&dyn RotationProvider>, Option<&SuiteRegistry>) =
@@ -1057,6 +1075,13 @@ impl SyncEngine {
                 } else {
                     self.pv_telemetry.record_block_skipped();
                 }
+                self.restore_direct_apply_state(
+                    snapshot,
+                    old_tip_timestamp,
+                    old_best_known_height,
+                    old_last_reorg_depth,
+                    old_reorg_count,
+                );
                 return Err(err);
             }
         };
@@ -1127,9 +1152,13 @@ impl SyncEngine {
         let complete_da_ids = match complete_da_set_ids_from_parsed_block(&parsed) {
             Ok(ids) => ids,
             Err(err) => {
-                self.chain_state = snapshot;
-                self.tip_timestamp = old_tip_timestamp;
-                self.best_known_height = old_best_known_height;
+                self.restore_direct_apply_state(
+                    snapshot,
+                    old_tip_timestamp,
+                    old_best_known_height,
+                    old_last_reorg_depth,
+                    old_reorg_count,
+                );
                 return Err(err);
             }
         };
@@ -1138,10 +1167,40 @@ impl SyncEngine {
             complete_da_ids,
         }];
 
+        let undo = if self.block_store.is_some() {
+            #[cfg(test)]
+            if let Some(err) = self.undo_preparation_failure.take() {
+                assert_eq!(summary.canonical_applied_blocks.len(), 1);
+                self.restore_direct_apply_state(
+                    snapshot,
+                    old_tip_timestamp,
+                    old_best_known_height,
+                    old_last_reorg_depth,
+                    old_reorg_count,
+                );
+                return Err(err);
+            }
+            match build_block_undo(&snapshot, block_bytes, next_height) {
+                Ok(undo) => Some(undo),
+                Err(err) => {
+                    self.restore_direct_apply_state(
+                        snapshot,
+                        old_tip_timestamp,
+                        old_best_known_height,
+                        old_last_reorg_depth,
+                        old_reorg_count,
+                    );
+                    return Err(err);
+                }
+            }
+        } else {
+            None
+        };
+
         let commit_start = Instant::now();
         // Rewind target only for later precommit chainstate-save failure; canonical precommit preserves tip, while postcommit may advance disk and is reloaded/latched below.
         let canonical_len_before = self.block_store.as_ref().map_or(0, |bs| bs.canonical_len());
-        if let Some(block_store) = self.block_store.as_mut() {
+        if let (Some(block_store), Some(undo)) = (self.block_store.as_mut(), undo.as_ref()) {
             // Atomic canonical commit — Go parity
             // (`clients/go/node/blockstore.go`, `CommitCanonicalBlock`).
             // Order inside the call: block bytes -> header bytes -> undo
@@ -1153,7 +1212,7 @@ impl SyncEngine {
                 block_hash_bytes,
                 &parsed.header_bytes,
                 block_bytes,
-                &undo,
+                undo,
             ) {
                 if is_atomic_write_post_commit(&error) {
                     let reload_store = block_store.is_index_destination(&error.destination);
@@ -1613,6 +1672,8 @@ pub(crate) fn boundary_chain_for_test(prefix: &str) -> (SyncEngine, std::path::P
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1637,12 +1698,14 @@ mod tests {
         atomic_write_error_after, unique_temp_path, AtomicWriteOperation, AtomicWriteStage,
         AtomicWriteTestOp, AtomicWriteTestScope,
     };
+    use crate::reconcile_chain_state_with_block_store;
     use crate::sync::{
         boundary_chain_for_test, default_sync_config, next_candidate_block_for_test,
         retarget_block_for_test, run_pv_shadow_validation_guarded, stock_devnet_engine_for_test,
         target_context_for_candidate, CanonicalApplyTarget, SuiteContext, SyncEngine,
         MAX_PV_SHADOW_MAX_SAMPLES, PARENT_BLOCK_NOT_FOUND_ERR, UNBOUND_DEVNET_TARGET_ERR,
     };
+    use crate::undo::{build_block_undo, marshal_block_undo};
 
     /// Test-only rotation provider that counts how many times the
     /// spend-suite set is consulted (the lookup native covenant spend
@@ -1688,6 +1751,132 @@ mod tests {
             idx += 2;
         }
         out
+    }
+
+    const RUB1097_UNDO_FAULT: &str = "rub1097 post-connect undo preparation fault";
+
+    fn rub1097_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn read_tree(root: &Path, path: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            for entry in std::fs::read_dir(path).expect("read test datadir") {
+                let path = entry.expect("read test dir entry").path();
+                if path.is_dir() {
+                    read_tree(root, &path, out);
+                } else {
+                    out.insert(
+                        path.strip_prefix(root)
+                            .expect("relative test path")
+                            .to_path_buf(),
+                        std::fs::read(path).expect("read test file"),
+                    );
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        read_tree(root, root, &mut out);
+        out
+    }
+
+    fn rub1097_engine(store: bool, shadow: bool) -> (SyncEngine, Option<PathBuf>) {
+        let dir = store.then(|| {
+            let dir = unique_temp_path("rub1097-consensus-before-undo");
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            dir
+        });
+        let block_store = dir
+            .as_ref()
+            .map(|dir| BlockStore::create(block_store_path(dir)).expect("create store"));
+        let mut cfg = default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), None);
+        cfg.network = "regtest".to_string();
+        cfg.parallel_validation_mode = if shadow { "shadow" } else { "off" }.to_string();
+        let mut state = ChainState::new();
+        if !store {
+            state.has_tip = true;
+            state.tip_hash = [0x41; 32];
+        }
+        let mut engine = SyncEngine::new(state, block_store, cfg).expect("new engine");
+        if store {
+            engine
+                .apply_block(&devnet_genesis_block_bytes(), None)
+                .expect("apply genesis");
+        } else {
+            engine.tip_timestamp = 100;
+        }
+        engine.best_known_height = 7;
+        engine.last_reorg_depth = 3;
+        engine.reorg_count = 5;
+        engine.chain_state.utxos.insert(
+            Outpoint {
+                txid: [0x71; 32],
+                vout: 0,
+            },
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: default_mine_address(),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+        (engine, dir)
+    }
+
+    fn rub1097_spend(txid: [u8; 32], nonce: u64, value: u64) -> Vec<u8> {
+        marshal_tx(&Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0,
+            tx_nonce: nonce,
+            inputs: vec![TxInput {
+                prev_txid: txid,
+                prev_vout: 0,
+                script_sig: Vec::new(),
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: default_mine_address(),
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        })
+        .expect("marshal noncoinbase")
+    }
+
+    fn rub1097_candidate(engine: &mut SyncEngine, family: usize) -> Vec<u8> {
+        let txs = match family {
+            0 => vec![rub1097_spend([0x81; 32], 1, 90)],
+            1 => vec![
+                rub1097_spend([0x82; 32], 1, 90),
+                rub1097_spend([0x83; 32], 2, 0),
+            ],
+            2 => {
+                let (state, first, second) =
+                    crate::test_helpers::signed_conflicting_p2pk_state_and_txs(100, 90, 80);
+                engine.chain_state.utxos.extend(state.utxos);
+                vec![first, second]
+            }
+            _ => unreachable!("three RUB-1097 rejection families"),
+        };
+        crate::test_helpers::block_with_txs(
+            engine.chain_state.height + 1,
+            engine.chain_state.already_generated,
+            engine.chain_state.tip_hash,
+            engine.tip_timestamp + 1,
+            &txs,
+        )
+    }
+
+    fn rub1097_state(engine: &SyncEngine) -> (ChainState, u64, u64, u64, u64) {
+        (
+            engine.chain_state.clone(),
+            engine.tip_timestamp,
+            engine.best_known_height,
+            engine.last_reorg_depth,
+            engine.reorg_count,
+        )
     }
 
     fn build_block_bytes(
@@ -2124,6 +2313,175 @@ mod tests {
         assert_eq!(engine.chain_state, before);
         assert_eq!(engine.tip_timestamp, before_tip_timestamp);
         assert_eq!(engine.best_known_height, before_best_known);
+    }
+
+    #[test]
+    fn sync_engine_consensus_before_undo_rejected_error_and_state() {
+        const MISSING: &str = "TX_ERR_MISSING_UTXO: utxo not found";
+        for family in 0..3 {
+            for stored in [false, true] {
+                for reorg in [false, true] {
+                    let shadow = stored && !reorg && family == 0;
+                    let (mut engine, dir) = rub1097_engine(stored, shadow);
+                    let block = rub1097_candidate(&mut engine, family);
+                    let state = rub1097_state(&engine);
+                    let canonical_len = engine
+                        .block_store
+                        .as_ref()
+                        .map(|store| store.canonical_len());
+                    let files = dir.as_deref().map(rub1097_tree);
+                    let validated = engine.pv_telemetry_snapshot().blocks_validated;
+                    engine.undo_preparation_failure = Some(RUB1097_UNDO_FAULT.to_string());
+                    let timestamps = [engine.tip_timestamp];
+                    let prev = (!stored).then_some(timestamps.as_slice());
+                    if shadow {
+                        assert!(engine.pv_shadow_active());
+                    }
+                    let result = if reorg {
+                        engine.apply_block_with_reorg(&block, prev).map(|_| ())
+                    } else {
+                        engine.apply_block(&block, prev).map(|_| ())
+                    };
+                    assert_eq!(
+                        result.unwrap_err(),
+                        MISSING,
+                        "family={family} stored={stored}"
+                    );
+                    assert_eq!(rub1097_state(&engine), state);
+                    assert!(engine.persistence_fault.is_none());
+                    assert_eq!(
+                        engine.undo_preparation_failure.as_deref(),
+                        Some(RUB1097_UNDO_FAULT)
+                    );
+                    assert_eq!(
+                        engine
+                            .block_store
+                            .as_ref()
+                            .map(|store| store.canonical_len()),
+                        canonical_len
+                    );
+                    if let Some(dir) = dir.as_deref() {
+                        assert_eq!(
+                            &rub1097_tree(dir),
+                            files.as_ref().expect("datadir snapshot")
+                        );
+                    }
+                    if shadow {
+                        assert_eq!(
+                            engine.pv_telemetry_snapshot().blocks_validated,
+                            validated + 1
+                        );
+                    }
+                    if let Some(dir) = dir {
+                        std::fs::remove_dir_all(dir).expect("cleanup");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sync_engine_consensus_before_undo_postconnect_failure_recovery() {
+        let (mut engine, dir) = rub1097_engine(true, false);
+        let dir = dir.expect("configured store");
+        let path = chain_state_path(&dir);
+        engine.cfg.chain_state_path = Some(path.clone());
+        engine.chain_state.save(&path).expect("persist prestate");
+        let state = engine.chain_state.clone();
+        let snapshot = rub1097_state(&engine);
+        let canonical_len = engine.block_store.as_ref().expect("store").canonical_len();
+        let files = rub1097_tree(&dir);
+        let block = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
+        engine.undo_preparation_failure = Some(RUB1097_UNDO_FAULT.to_string());
+        assert_eq!(
+            engine.apply_block(&block, None).unwrap_err(),
+            RUB1097_UNDO_FAULT
+        );
+        assert_eq!(engine.undo_preparation_failure, None);
+        assert_eq!(&rub1097_tree(&dir), &files);
+        assert_eq!(
+            engine.block_store.as_ref().expect("store").canonical_len(),
+            canonical_len
+        );
+        assert_eq!(rub1097_state(&engine), snapshot);
+        assert!(engine.persistence_fault.is_none());
+        let cfg = engine.cfg.clone();
+        drop(engine);
+        let mut restored = load_chain_state(&path).expect("load prestate");
+        let mut store = BlockStore::open(block_store_path(&dir)).expect("reopen store");
+        assert!(
+            !reconcile_chain_state_with_block_store(&mut restored, &mut store, &cfg)
+                .expect("reconcile")
+        );
+        assert_eq!(restored, state);
+        assert_eq!(store.canonical_len(), canonical_len);
+
+        let (mut storeless, _) = rub1097_engine(false, false);
+        storeless.cfg.chain_state_path = Some(path.clone());
+        let valid = crate::test_helpers::block_with_txs(
+            1,
+            storeless.chain_state.already_generated,
+            storeless.chain_state.tip_hash,
+            storeless.tip_timestamp + 1,
+            &[],
+        );
+        let timestamps = [storeless.tip_timestamp];
+        storeless.undo_preparation_failure = Some(RUB1097_UNDO_FAULT.to_string());
+        storeless
+            .apply_block(&valid, Some(&timestamps))
+            .expect("storeless success");
+        assert_eq!(
+            (
+                storeless.undo_preparation_failure.as_deref(),
+                load_chain_state(&path).expect("load storeless state"),
+            ),
+            (Some(RUB1097_UNDO_FAULT), storeless.chain_state)
+        );
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn sync_engine_consensus_before_undo_success_persists_prestate_undo() {
+        let (mut engine, dir) = rub1097_engine(true, false);
+        let dir = dir.expect("configured store");
+        let (state, spend, _) =
+            crate::test_helpers::signed_conflicting_p2pk_state_and_txs(100, 90, 80);
+        engine.chain_state.utxos.extend(state.utxos);
+        let prestate = engine.chain_state.clone();
+        let parent_hash = engine.chain_state.tip_hash;
+        let parent_timestamp = engine.tip_timestamp;
+        let block = crate::test_helpers::block_with_txs(
+            1,
+            engine.chain_state.already_generated,
+            parent_hash,
+            parent_timestamp + 1,
+            &[spend],
+        );
+        let hash = block_hash(&block[..BLOCK_HEADER_BYTES]).expect("block hash");
+        let undo = build_block_undo(&prestate, &block, 1).expect("prestate undo");
+        engine
+            .apply_block(&block, None)
+            .expect("apply stored block");
+        let store = engine.block_store.as_ref().expect("store");
+        assert_eq!(store.get_undo(hash).expect("typed undo"), undo);
+        assert_eq!(
+            std::fs::read(
+                store
+                    .root_dir()
+                    .join("undo")
+                    .join(format!("{}.json", hex::encode(hash))),
+            )
+            .expect("raw undo"),
+            marshal_block_undo(&undo).expect("undo encoding")
+        );
+        engine.disconnect_tip().expect("disconnect tip");
+        assert_eq!(engine.chain_state, prestate);
+        assert_eq!(engine.tip_timestamp, parent_timestamp);
+        let store = engine.block_store.as_ref().expect("store");
+        assert_eq!(store.tip(), Ok(Some((0, parent_hash))));
+        assert_eq!(store.canonical_hash(0), Ok(Some(parent_hash)));
+        assert_eq!(store.canonical_len(), 1);
+        std::fs::remove_dir_all(dir).expect("cleanup");
     }
 
     #[test]

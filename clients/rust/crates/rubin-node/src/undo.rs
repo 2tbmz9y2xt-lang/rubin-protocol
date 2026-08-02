@@ -48,9 +48,9 @@ fn is_spendable_output(covenant_type: u16) -> bool {
     covenant_type != COV_TYPE_ANCHOR && covenant_type != COV_TYPE_DA_COMMIT
 }
 
-/// Build an undo record by replaying UTXO mutations against a copy of the
-/// previous chain state. Must be called *before* `connect_block` modifies the
-/// live state.
+/// Build an undo record by replaying UTXO mutations against an immutable
+/// captured previous chain state. It may run after live `connect_block` when
+/// `prev_state` was captured before that connection.
 pub fn build_block_undo(
     prev_state: &ChainState,
     block_bytes: &[u8],
