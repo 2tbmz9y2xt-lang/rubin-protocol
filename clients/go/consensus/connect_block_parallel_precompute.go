@@ -14,8 +14,13 @@ func addWitnessSlots(total, slots int) (int, error) {
 }
 
 // TxValidationContext holds the immutable, precomputed context for a single
-// non-coinbase transaction within a block. It is computed once against the
-// block-start UTXO snapshot and passed to read-only validation workers.
+// non-coinbase transaction within a block. The caller must provide a ParsedBlock
+// that completed canonical connect preflight, including coinbase structure and
+// locktime. The context covers the block-start UTXO snapshot plus the current
+// coinbase and earlier transactions and is intended for read-only worker
+// validation; PrecomputeTxContexts currently has no production caller.
+// The ParsedBlock and referenced Tx objects remain caller-owned and must stay
+// immutable for the lifetime of any returned context.
 //
 // Fields are intentionally value types or slices of value types to prevent
 // accidental aliasing of mutable consensus state.
@@ -24,16 +29,16 @@ type TxValidationContext struct {
 	// since index 0 is the coinbase).
 	TxIndex int
 
-	// Tx is a pointer to the parsed transaction. The Tx struct itself is
-	// treated as read-only after parsing.
+	// Tx is a pointer to a caller-owned parsed transaction. It must remain
+	// immutable for the lifetime of this context.
 	Tx *Tx
 
 	// Txid is the canonical transaction ID.
 	Txid [32]byte
 
 	// ResolvedInputs contains the UTXO entry for each input, in input order.
-	// Each entry is a snapshot taken from the block-start UTXO set. Workers
-	// MUST NOT modify these entries.
+	// Its UTXO bytes are detached from caller-owned storage, so the caller may
+	// mutate its snapshot after return. Workers MUST NOT modify these entries.
 	ResolvedInputs []UtxoEntry
 
 	// WitnessStart is the starting index into tx.Witness for this
@@ -68,14 +73,25 @@ type precomputeTxInputs struct {
 // non-coinbase transactions in a parsed block. It resolves inputs against the
 // provided block-start UTXO snapshot, computes witness slice boundaries using
 // the deterministic sequential cursor model, and precomputes sighash caches.
+// Precondition: pb completed canonical connect preflight, including coinbase
+// structure and locktime.
 //
-// The utxoSnapshot is NOT modified. Same-block output creation is tracked
-// internally to support parent-child dependencies (a later tx spending an
-// output created by an earlier tx in the same block).
+// During this call, the caller retains read-only ownership of utxoSnapshot. A
+// local overlay adds the current coinbase and earlier same-block outputs to
+// support parent-child dependencies. ParsedBlock and referenced Tx objects
+// remain caller-owned and must stay immutable for the lifetime of returned
+// contexts. Resolved UTXO bytes are detached, so the caller may mutate
+// utxoSnapshot after return. It repeats the connect path's non-coinbase
+// coinbase-like, nonce, and replay checks and validates output creation.
+// Contexts are intended for read-only workers, which validate resolved inputs;
+// this exported API currently has no production caller. Default chain and
+// rotation context match standalone.
 //
 // Returns an error if any input resolution, witness assignment, or value
-// conservation check fails. Error behavior matches the sequential path
-// exactly.
+// conservation check fails. With the default chain and rotation context, errors
+// owned by this precompute path (non-coinbase coinbase-like, nonce, and replay
+// checks; output creation; input resolution; witness boundaries; and value
+// conservation) preserve the corresponding sequential first-error order.
 func PrecomputeTxContexts(
 	pb *ParsedBlock,
 	utxoSnapshot map[Outpoint]UtxoEntry,
@@ -89,24 +105,44 @@ func PrecomputeTxContexts(
 		return nil, txerr(BLOCK_ERR_PARSE, "txids/txs length mismatch")
 	}
 
-	txCount := len(pb.Txs) - 1 // exclude coinbase
-	if txCount == 0 {
-		return nil, nil // coinbase-only block
-	}
-
 	overlay := make(map[Outpoint]UtxoEntry, len(utxoSnapshot))
 	for k, v := range utxoSnapshot {
 		overlay[k] = v
 	}
+	if err := applyInMemoryCoinbaseOutputs(pb, overlay, blockHeight, [32]byte{}, nil); err != nil {
+		return nil, err
+	}
+
+	if len(pb.Txs) == 1 {
+		return nil, nil // coinbase-only block
+	}
+	return precomputeNonCoinbaseTxContexts(pb, overlay, blockHeight)
+}
+
+func precomputeNonCoinbaseTxContexts(
+	pb *ParsedBlock,
+	overlay map[Outpoint]UtxoEntry,
+	blockHeight uint64,
+) ([]TxValidationContext, error) {
+	txCount := len(pb.Txs) - 1
 	results := make([]TxValidationContext, txCount)
+	seenNonces := make(map[uint64]struct{}, txCount)
 
 	for i := 1; i < len(pb.Txs); i++ {
+		if pb.Txs[i] == nil {
+			return nil, txerr(TX_ERR_PARSE, "nil tx")
+		}
+		if err := validateNonCoinbaseBlockTx(pb.Txs[i], seenNonces); err != nil {
+			return nil, err
+		}
 		ctx, err := precomputeTxContext(i, pb.Txs[i], pb.Txids[i], overlay, blockHeight)
 		if err != nil {
 			return nil, err
 		}
 		results[i-1] = ctx
-		updatePrecomputeOverlay(overlay, ctx, blockHeight)
+		if err := updatePrecomputeOverlay(overlay, ctx, blockHeight); err != nil {
+			return nil, err
+		}
 	}
 
 	return results, nil
@@ -118,6 +154,9 @@ func PrecomputeTxContexts(
 func precomputeTxPreChecks(tx *Tx, blockHeight uint64) error {
 	if tx == nil {
 		return txerr(TX_ERR_PARSE, "nil tx")
+	}
+	if tx.TxNonce == 0 {
+		return txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
 	}
 	if len(tx.Inputs) == 0 {
 		return txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
@@ -186,7 +225,7 @@ func collectPrecomputeTxInputs(
 		if err != nil {
 			return precomputeTxInputs{}, err
 		}
-		out.ResolvedInputs = append(out.ResolvedInputs, entry)
+		out.ResolvedInputs = append(out.ResolvedInputs, cloneUtxoEntry(entry))
 		out.InputOutpoints = append(out.InputOutpoints, op)
 		if out.SumIn, err = addU64ToU128(out.SumIn, entry.Value); err != nil {
 			return precomputeTxInputs{}, err
@@ -242,11 +281,11 @@ func rememberPrecomputeInput(op Outpoint, seenInputs map[Outpoint]struct{}) erro
 }
 
 func validatePrecomputeEntry(entry UtxoEntry, blockHeight uint64) error {
-	if entry.CreatedByCoinbase && (blockHeight < entry.CreationHeight || blockHeight-entry.CreationHeight < COINBASE_MATURITY) {
-		return txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
-	}
 	if entry.CovenantType == COV_TYPE_ANCHOR || entry.CovenantType == COV_TYPE_DA_COMMIT {
 		return txerr(TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant")
+	}
+	if entry.CreatedByCoinbase && (blockHeight < entry.CreationHeight || blockHeight-entry.CreationHeight < COINBASE_MATURITY) {
+		return txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
 	}
 	return nil
 }
@@ -304,13 +343,16 @@ func updatePrecomputeOverlay(
 	overlay map[Outpoint]UtxoEntry,
 	ctx TxValidationContext,
 	blockHeight uint64,
-) {
+) error {
 	for _, op := range ctx.InputOutpoints {
 		delete(overlay, op)
 	}
 	for j, out := range ctx.Tx.Outputs {
 		if out.CovenantType == COV_TYPE_ANCHOR || out.CovenantType == COV_TYPE_DA_COMMIT {
 			continue
+		}
+		if uint64(j) > uint64(^uint32(0)) {
+			return txerr(TX_ERR_PARSE, "output index exceeds u32")
 		}
 		op := Outpoint{Txid: ctx.Txid, Vout: uint32(j)}
 		overlay[op] = UtxoEntry{
@@ -320,4 +362,5 @@ func updatePrecomputeOverlay(
 			CreationHeight: blockHeight,
 		}
 	}
+	return nil
 }

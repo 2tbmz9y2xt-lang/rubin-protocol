@@ -1,4 +1,7 @@
-use super::{encode_htlc_covenant_data, p2pk_covenant_data_for_pubkey, test_mldsa87_keypair};
+use super::{
+    encode_htlc_covenant_data, p2pk_covenant_data_for_pubkey, test_mldsa87_keypair,
+    valid_vault_covenant_data_for_p2pk_output,
+};
 use std::collections::HashMap;
 
 use crate::block::{BlockHeader, BLOCK_HEADER_BYTES};
@@ -8,7 +11,7 @@ use crate::hash::sha3_256;
 use crate::precompute::precompute_tx_contexts;
 use crate::tx::{Tx, TxInput, TxOutput, WitnessItem};
 use crate::utxo_basic::{Outpoint, UtxoEntry};
-use crate::ErrorCode;
+use crate::{ErrorCode, TxError};
 
 fn valid_p2pk_covenant_data() -> Vec<u8> {
     // Genesis-valid CORE_P2PK covenant_data: suite_id byte + key-id placeholder.
@@ -24,6 +27,68 @@ fn dummy_witness() -> WitnessItem {
         suite_id: SUITE_ID_ML_DSA_87,
         pubkey: vec![0u8; ML_DSA_87_PUBKEY_BYTES as usize],
         signature: vec![0u8; (ML_DSA_87_SIG_BYTES + 1) as usize],
+    }
+}
+
+fn precompute_p2pk_spend_for_test(nonce: u64, input: TxInput, output_value: u64) -> Tx {
+    Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: nonce,
+        inputs: vec![input],
+        outputs: vec![TxOutput {
+            value: output_value,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: valid_p2pk_covenant_data(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![dummy_witness()],
+        da_payload: Vec::new(),
+    }
+}
+
+fn precompute_input_for_test(prev_txid: [u8; 32], prev_vout: u32) -> TxInput {
+    TxInput {
+        prev_txid,
+        prev_vout,
+        script_sig: Vec::new(),
+        sequence: 0,
+    }
+}
+
+fn precompute_error(pb: ParsedBlock, utxos: &HashMap<Outpoint, UtxoEntry>, height: u64) -> TxError {
+    precompute_tx_contexts(&pb, utxos, height).expect_err("precompute rejection")
+}
+
+fn assert_precompute_error(
+    coinbase: Tx,
+    txs: Vec<Tx>,
+    utxos: &HashMap<Outpoint, UtxoEntry>,
+    code: ErrorCode,
+    message: &str,
+) {
+    let err = precompute_error(make_parsed_block(coinbase, txs), utxos, 100);
+    assert_eq!(err.code, code);
+    assert_eq!(err.msg, message);
+}
+
+fn precompute_p2pk_utxo(value: u64) -> UtxoEntry {
+    UtxoEntry {
+        value,
+        covenant_type: COV_TYPE_P2PK,
+        covenant_data: valid_p2pk_covenant_data(),
+        creation_height: 0,
+        created_by_coinbase: false,
+    }
+}
+
+fn precompute_p2pk_output(value: u64) -> TxOutput {
+    TxOutput {
+        value,
+        covenant_type: COV_TYPE_P2PK,
+        covenant_data: valid_p2pk_covenant_data(),
     }
 }
 
@@ -666,6 +731,10 @@ fn precompute_coinbase_prevout_forbidden() {
     let pb = make_parsed_block(simple_coinbase(), vec![tx]);
     let err = precompute_tx_contexts(&pb, &HashMap::new(), 100).unwrap_err();
     assert_eq!(err.code.as_str(), "TX_ERR_PARSE");
+    assert_eq!(
+        err.msg,
+        "coinbase prevout encoding forbidden in non-coinbase"
+    );
 }
 
 #[test]
@@ -709,7 +778,8 @@ fn precompute_nil_like_non_coinbase_tx_rejected() {
     };
     let pb = make_parsed_block(simple_coinbase(), vec![tx]);
     let err = precompute_tx_contexts(&pb, &HashMap::new(), 0).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.code, ErrorCode::TxErrTxNonceInvalid);
+    assert_eq!(err.msg, "tx_nonce must be >= 1 for non-coinbase");
 }
 
 #[test]
@@ -1018,10 +1088,9 @@ fn add_witness_slots_overflow() {
     );
 }
 
-// RUB-591: a 0x0106 spend input is rejected by precompute with the dedicated
-// "spend evaluation not enabled" message and TX_ERR_COVENANT_TYPE_INVALID — even
-// with a mismatched witness count that would otherwise surface TX_ERR_PARSE
-// ("witness_count mismatch"). Mirrors Go StoppedAtCoreSimplicity priority.
+// Rust standalone precompute rejects 0x0106 under the default context with its
+// dedicated error before a competing witness-count error. Active
+// CORE_SIMPLICITY parity is outside this reject-only boundary.
 #[test]
 fn precompute_core_simplicity_0x0106_spend_rejects_ahead_of_witness_errors() {
     let prev_txid = sha3_256(b"simplicity-spend");
@@ -1072,10 +1141,9 @@ fn precompute_core_simplicity_0x0106_spend_rejects_ahead_of_witness_errors() {
     );
 }
 
-// RUB-591: precompute must STOP at the first 0x0106 input (mirror Go's early
-// return), so a trailing input that is independently invalid (here: a missing
-// UTXO) cannot surface its own error ahead of the dedicated 0x0106 reject. With
-// a `continue` (instead of `break`) this would return TX_ERR_MISSING_UTXO.
+// Rust standalone precompute stops at the first 0x0106 input under the default
+// context, so a trailing missing UTXO cannot precede the dedicated reject.
+// Active CORE_SIMPLICITY parity is outside this reject-only boundary.
 #[test]
 fn precompute_core_simplicity_0x0106_spend_wins_over_trailing_input_error() {
     let simp_prev = sha3_256(b"simplicity-first-input");
@@ -1132,4 +1200,236 @@ fn precompute_core_simplicity_0x0106_spend_wins_over_trailing_input_error() {
         "trailing missing-utxo must not mask the 0x0106 reject; got: {}",
         err.msg
     );
+}
+
+#[test]
+fn precompute_coinbase_overlay() {
+    let coinbase_txid = sha3_256(&[0]);
+    let collision = Outpoint {
+        txid: coinbase_txid,
+        vout: 0,
+    };
+    let utxos = HashMap::from([(collision.clone(), precompute_p2pk_utxo(77))]);
+    let tx = precompute_p2pk_spend_for_test(1, precompute_input_for_test(coinbase_txid, 0), 1);
+    assert_precompute_error(
+        simple_coinbase(),
+        vec![tx],
+        &utxos,
+        ErrorCode::TxErrCoinbaseImmature,
+        "coinbase immature",
+    );
+    assert_eq!(utxos.get(&collision), Some(&precompute_p2pk_utxo(77)));
+
+    let mut coinbase = simple_coinbase();
+    coinbase.outputs.push(TxOutput {
+        value: 0,
+        covenant_type: COV_TYPE_ANCHOR,
+        covenant_data: vec![1],
+    });
+    let tx = precompute_p2pk_spend_for_test(1, precompute_input_for_test(coinbase_txid, 1), 1);
+    assert_precompute_error(
+        coinbase,
+        vec![tx],
+        &HashMap::new(),
+        ErrorCode::TxErrMissingUtxo,
+        "utxo not found",
+    );
+
+    let mut coinbase = simple_coinbase();
+    coinbase.outputs = vec![TxOutput {
+        value: 0,
+        covenant_type: COV_TYPE_DA_COMMIT,
+        covenant_data: vec![0; 32],
+    }];
+    assert_precompute_error(
+        coinbase,
+        vec![],
+        &HashMap::new(),
+        ErrorCode::TxErrCovenantTypeInvalid,
+        "CORE_DA_COMMIT allowed only in tx_kind=0x01",
+    );
+}
+
+#[test]
+fn precompute_coinbase_apply_output_order() {
+    let vault = TxOutput {
+        value: 1,
+        covenant_type: COV_TYPE_VAULT,
+        covenant_data: valid_vault_covenant_data_for_p2pk_output(),
+    };
+    let invalid = precompute_p2pk_output(0);
+    let mut no_inputs = precompute_p2pk_spend_for_test(1, precompute_input_for_test([1; 32], 0), 1);
+    no_inputs.inputs.clear();
+    no_inputs.witness.clear();
+
+    for (outputs, txs, code, message) in [
+        (
+            vec![vault.clone(), invalid.clone()],
+            vec![],
+            ErrorCode::BlockErrCoinbaseInvalid,
+            "coinbase must not create CORE_VAULT outputs",
+        ),
+        (
+            vec![invalid.clone(), vault.clone()],
+            vec![],
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_P2PK value must be > 0",
+        ),
+        (
+            vec![vault],
+            vec![no_inputs],
+            ErrorCode::BlockErrCoinbaseInvalid,
+            "coinbase must not create CORE_VAULT outputs",
+        ),
+    ] {
+        let mut coinbase = simple_coinbase();
+        coinbase.outputs = outputs;
+        assert_precompute_error(coinbase, txs, &HashMap::new(), code, message);
+    }
+}
+
+#[test]
+fn precompute_block_envelope_order() {
+    let prev = sha3_256(b"precompute-envelope");
+    let utxos = HashMap::from([(
+        Outpoint {
+            txid: prev,
+            vout: 0,
+        },
+        precompute_p2pk_utxo(2),
+    )]);
+    let input = precompute_input_for_test(prev, 0);
+
+    assert_precompute_error(
+        simple_coinbase(),
+        vec![precompute_p2pk_spend_for_test(0, input.clone(), 1)],
+        &utxos,
+        ErrorCode::TxErrTxNonceInvalid,
+        "tx_nonce must be >= 1 for non-coinbase",
+    );
+    assert_precompute_error(
+        simple_coinbase(),
+        vec![
+            precompute_p2pk_spend_for_test(1, input.clone(), 1),
+            precompute_p2pk_spend_for_test(1, input.clone(), 1),
+        ],
+        &utxos,
+        ErrorCode::TxErrNonceReplay,
+        "duplicate tx_nonce in block",
+    );
+
+    let mut coinbase_like = simple_coinbase();
+    coinbase_like.inputs[0].sequence = u32::MAX;
+    assert_precompute_error(
+        simple_coinbase(),
+        vec![coinbase_like],
+        &utxos,
+        ErrorCode::BlockErrCoinbaseInvalid,
+        "coinbase-like tx found at index > 0",
+    );
+
+    let missing = precompute_input_for_test(sha3_256(b"precompute-late-missing"), 0);
+    match precompute_tx_contexts(
+        &make_parsed_block(
+            simple_coinbase(),
+            vec![
+                precompute_p2pk_spend_for_test(1, input, 1),
+                precompute_p2pk_spend_for_test(2, missing, 1),
+            ],
+        ),
+        &utxos,
+        100,
+    ) {
+        Err(err) => {
+            assert_eq!(err.code, ErrorCode::TxErrMissingUtxo);
+            assert_eq!(err.msg, "utxo not found");
+        }
+        Ok(contexts) => panic!("returned {} partial contexts", contexts.len()),
+    }
+}
+
+#[test]
+fn precompute_context_detaches_snapshot_bytes() {
+    let prev = sha3_256(b"precompute-detached-bytes");
+    let op = Outpoint {
+        txid: prev,
+        vout: 0,
+    };
+    let mut utxos = HashMap::from([(op.clone(), precompute_p2pk_utxo(2))]);
+    let contexts = precompute_tx_contexts(
+        &make_parsed_block(
+            simple_coinbase(),
+            vec![precompute_p2pk_spend_for_test(
+                1,
+                precompute_input_for_test(prev, 0),
+                1,
+            )],
+        ),
+        &utxos,
+        100,
+    )
+    .expect("precompute");
+    let want = contexts[0].resolved_inputs[0].covenant_data[0];
+    utxos.get_mut(&op).unwrap().covenant_data[0] ^= 0xff;
+    assert_eq!(contexts[0].resolved_inputs[0].covenant_data[0], want);
+}
+
+#[test]
+fn precompute_input_encoding_precedes_lookup() {
+    for (name, input, code, message) in [
+        (
+            "script_sig_before_missing",
+            TxInput {
+                prev_txid: [0x11; 32],
+                prev_vout: 0,
+                script_sig: vec![1],
+                sequence: 0,
+            },
+            ErrorCode::TxErrParse,
+            "script_sig must be empty under genesis covenant set",
+        ),
+        (
+            "sequence_before_missing",
+            TxInput {
+                prev_txid: [0x12; 32],
+                prev_vout: 0,
+                script_sig: Vec::new(),
+                sequence: 0x8000_0000,
+            },
+            ErrorCode::TxErrSequenceInvalid,
+            "sequence exceeds 0x7fffffff",
+        ),
+    ] {
+        let err = precompute_error(
+            make_parsed_block(
+                simple_coinbase(),
+                vec![precompute_p2pk_spend_for_test(1, input, 1)],
+            ),
+            &HashMap::new(),
+            100,
+        );
+        assert_eq!(err.code, code, "{name}");
+        assert_eq!(err.msg, message, "{name}");
+    }
+
+    let prev = sha3_256(b"precompute-input-encoding-boundary");
+    let utxos = HashMap::from([(
+        Outpoint {
+            txid: prev,
+            vout: 0,
+        },
+        precompute_p2pk_utxo(2),
+    )]);
+    let mut input = precompute_input_for_test(prev, 0);
+    input.sequence = 0x7fff_ffff;
+    let contexts = precompute_tx_contexts(
+        &make_parsed_block(
+            simple_coinbase(),
+            vec![precompute_p2pk_spend_for_test(1, input, 1)],
+        ),
+        &utxos,
+        100,
+    )
+    .expect("empty script_sig with sequence 0x7fffffff");
+    assert_eq!(contexts.len(), 1);
 }

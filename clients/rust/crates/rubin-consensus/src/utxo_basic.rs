@@ -15,7 +15,7 @@ use crate::simplicity_covenant::reject_core_simplicity_spend;
 use crate::spend_verify::{validate_p2pk_spend_q, validate_threshold_sig_spend_q};
 use crate::stealth::{parse_stealth_covenant_data, validate_stealth_spend_q};
 use crate::suite_registry::{RotationProvider, SuiteRegistry};
-use crate::tx::Tx;
+use crate::tx::{Tx, TxInput};
 use crate::vault::{
     hash_in_sorted_32, output_descriptor_bytes, parse_multisig_covenant_data,
     parse_vault_covenant_data, parse_vault_covenant_data_for_spend, witness_slots,
@@ -195,6 +195,30 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
     Ok((work, summary))
 }
 
+/// Validates the wire-level encoding that every non-coinbase input must share.
+/// This preserves the sequential check order for standalone precompute.
+pub(crate) fn validate_non_coinbase_input_encoding(input: &TxInput) -> Result<(), TxError> {
+    if input.prev_vout == u32::MAX && input.prev_txid == [0u8; 32] {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "coinbase prevout encoding forbidden in non-coinbase",
+        ));
+    }
+    if !input.script_sig.is_empty() {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "script_sig must be empty under genesis covenant set",
+        ));
+    }
+    if input.sequence > 0x7fff_ffff {
+        return Err(TxError::new(
+            ErrorCode::TxErrSequenceInvalid,
+            "sequence exceeds 0x7fffffff",
+        ));
+    }
+    Ok(())
+}
+
 fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_impl(
     ctx: UtxoApplyImplContext<'_>,
     sig_queue: Option<&mut SigCheckQueue>,
@@ -247,27 +271,9 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
     let mut resolved_inputs: Vec<UtxoEntry> = Vec::with_capacity(tx.inputs.len());
     let mut resolved_witness_ranges: Vec<Range<usize>> = Vec::with_capacity(tx.inputs.len());
     let mut resolved_outpoints: Vec<Outpoint> = Vec::with_capacity(tx.inputs.len());
-    let zero_txid: [u8; 32] = [0u8; 32];
 
     for input in &tx.inputs {
-        if input.prev_vout == 0xffff_ffff && input.prev_txid == zero_txid {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "coinbase prevout encoding forbidden in non-coinbase",
-            ));
-        }
-        if !input.script_sig.is_empty() {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "script_sig must be empty under genesis covenant set",
-            ));
-        }
-        if input.sequence > 0x7fffffff {
-            return Err(TxError::new(
-                ErrorCode::TxErrSequenceInvalid,
-                "sequence exceeds 0x7fffffff",
-            ));
-        }
+        validate_non_coinbase_input_encoding(input)?;
         let op = Outpoint {
             txid: input.prev_txid,
             vout: input.prev_vout,
