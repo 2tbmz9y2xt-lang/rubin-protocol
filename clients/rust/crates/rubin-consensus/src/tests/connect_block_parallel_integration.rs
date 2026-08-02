@@ -1,4 +1,5 @@
 use super::*;
+use std::panic::AssertUnwindSafe;
 
 fn clone_state(
     utxos: &HashMap<Outpoint, UtxoEntry>,
@@ -408,4 +409,289 @@ fn integration_parity_multiple_valid_txs() {
 
     assert_eq!(seq_summary.post_state_digest, par_summary.post_state_digest);
     assert_eq!(seq_summary.sum_fees, par_summary.sum_fees);
+}
+
+#[test]
+fn connect_block_transaction_index_first_error_order() {
+    let height = 1u64;
+    let mut prev = [0u8; 32];
+    prev[0] = 0x59;
+    let target = [0xff; 32];
+    let state = |cov: &[u8]| {
+        let mut utxos = HashMap::new();
+        for vout in 0..3 {
+            utxos.insert(
+                Outpoint { txid: prev, vout },
+                UtxoEntry {
+                    value: 100,
+                    covenant_type: COV_TYPE_P2PK,
+                    covenant_data: cov.to_vec(),
+                    creation_height: 0,
+                    created_by_coinbase: false,
+                },
+            );
+        }
+        crate::InMemoryChainState {
+            utxos,
+            already_generated: 0,
+        }
+    };
+    let spend = |cov: &[u8], nonce, vout, value| crate::tx::Tx {
+        version: 1,
+        tx_kind: 0,
+        tx_nonce: nonce,
+        inputs: vec![crate::tx::TxInput {
+            prev_txid: prev,
+            prev_vout: vout,
+            script_sig: vec![],
+            sequence: 0,
+        }],
+        outputs: vec![crate::tx::TxOutput {
+            value,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov.to_vec(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![],
+        da_payload: vec![],
+    };
+    let encode = |tx: crate::tx::Tx| crate::tx_helpers::marshal_tx(&tx).expect("marshal");
+    let missing = |cov: &[u8], nonce| encode(spend(cov, nonce, 99, 90));
+    let invalid = |cov: &[u8], nonce, vout| encode(spend(cov, nonce, vout, 0));
+    let no_inputs = |cov: &[u8], nonce| {
+        crate::tx_helpers::marshal_tx(&crate::tx::Tx {
+            version: 1,
+            tx_kind: 0,
+            tx_nonce: nonce,
+            inputs: vec![],
+            outputs: vec![crate::tx::TxOutput {
+                value: 1,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: cov.to_vec(),
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: vec![],
+            da_payload: vec![],
+        })
+        .expect("marshal empty-input tx")
+    };
+    let build_block = |coinbase: Vec<u8>, txs: &[Vec<u8>]| {
+        let mut ids = vec![parse_tx(&coinbase).expect("coinbase").1];
+        ids.extend(txs.iter().map(|tx| parse_tx(tx).expect("tx").1));
+        let root = merkle_root_txids(&ids).expect("merkle root");
+        let mut all = vec![coinbase];
+        all.extend(txs.iter().cloned());
+        build_block_bytes(prev, root, target, 1, &all)
+    };
+    let block = |coinbase_value, txs: &[Vec<u8>]| {
+        build_block(
+            coinbase_with_witness_commitment_and_p2pk_value(height as u32, coinbase_value, txs),
+            txs,
+        )
+    };
+    let reject = |block: &[u8], want, cov: &[u8]| {
+        let mut seq = state(cov);
+        let seq_before = seq.clone();
+        let seq_err = crate::connect_block_basic_in_memory_at_height(
+            &block,
+            Some(prev),
+            Some(target),
+            height,
+            Some(&[0]),
+            &mut seq,
+            ZERO_CHAIN_ID,
+        )
+        .expect_err("sequential rejection");
+        assert_eq!(err_code(&seq_err), want);
+        assert_eq!(seq, seq_before);
+        let mut par = state(cov);
+        let par_before = par.clone();
+        let par_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            crate::connect_block_parallel_sig_verify(
+                &block,
+                Some(prev),
+                Some(target),
+                height,
+                Some(&[0]),
+                &mut par,
+                ZERO_CHAIN_ID,
+                2,
+            )
+        }));
+        let par_err = par_result
+            .expect("parallel queue residue")
+            .expect_err("parallel rejection");
+        assert_eq!(err_code(&par_err), want);
+        assert_eq!(par, par_before);
+    };
+    let subsidy = crate::subsidy::block_subsidy(height, 0);
+
+    {
+        let cov = valid_p2pk_covenant_data();
+        let coinbase_like = coinbase_tx_with_outputs(
+            height as u32,
+            &[TestOutput {
+                value: 1,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: cov.clone(),
+            }],
+        );
+        let cases = vec![
+            (
+                subsidy + 20,
+                vec![missing(&cov, 1)],
+                ErrorCode::TxErrMissingUtxo,
+            ),
+            (
+                subsidy + 20,
+                vec![missing(&cov, 1), invalid(&cov, 2, 1)],
+                ErrorCode::TxErrMissingUtxo,
+            ),
+            (
+                subsidy + 20,
+                vec![missing(&cov, 1), coinbase_like],
+                ErrorCode::TxErrMissingUtxo,
+            ),
+            (
+                subsidy + 20,
+                vec![missing(&cov, 1), no_inputs(&cov, 0)],
+                ErrorCode::TxErrMissingUtxo,
+            ),
+            (
+                subsidy + 20,
+                vec![missing(&cov, 1), no_inputs(&cov, 2)],
+                ErrorCode::TxErrMissingUtxo,
+            ),
+            (
+                subsidy + 20,
+                vec![missing(&cov, 1), missing(&cov, 1)],
+                ErrorCode::TxErrMissingUtxo,
+            ),
+            (
+                subsidy + 20,
+                vec![no_inputs(&cov, 3), invalid(&cov, 4, 1)],
+                ErrorCode::TxErrParse,
+            ),
+            (
+                subsidy + 20,
+                vec![invalid(&cov, 1, 99)],
+                ErrorCode::TxErrCovenantTypeInvalid,
+            ),
+            (
+                0,
+                vec![missing(&cov, 1)],
+                ErrorCode::TxErrCovenantTypeInvalid,
+            ),
+        ];
+        for (coinbase_value, txs, want) in cases {
+            reject(&block(coinbase_value, &txs), want, &cov);
+        }
+
+        let missing_tx = missing(&cov, 1);
+        let (_, _, missing_wtxid, _) = parse_tx(&missing_tx).expect("missing tx");
+        let wroot =
+            witness_merkle_root_wtxids(&[[0u8; 32], missing_wtxid]).expect("witness merkle root");
+        let vault_coinbase = coinbase_tx_with_outputs(
+            height as u32,
+            &[
+                TestOutput {
+                    value: 1,
+                    covenant_type: COV_TYPE_VAULT,
+                    covenant_data: valid_vault_covenant_data_for_p2pk_output(),
+                },
+                TestOutput {
+                    value: 0,
+                    covenant_type: COV_TYPE_ANCHOR,
+                    covenant_data: witness_commitment_hash(wroot).to_vec(),
+                },
+            ],
+        );
+        reject(
+            &build_block(vault_coinbase, std::slice::from_ref(&missing_tx)),
+            ErrorCode::BlockErrCoinbaseInvalid,
+            &cov,
+        );
+    }
+
+    {
+        let kp = test_mldsa87_keypair().expect("ML-DSA-87 backend required for RUB-659");
+        let cov = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+        let valid = |nonce, vout, value| {
+            let mut tx = spend(&cov, nonce, vout, value);
+            tx.witness = vec![sign_input_witness(&tx, 0, 100, ZERO_CHAIN_ID, &kp)];
+            encode(tx)
+        };
+        let coinbase_like = coinbase_tx_with_outputs(
+            height as u32,
+            &[TestOutput {
+                value: 1,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: cov.clone(),
+            }],
+        );
+        let cases = vec![
+            (
+                vec![valid(1, 0, 90), invalid(&cov, 2, 1)],
+                ErrorCode::TxErrCovenantTypeInvalid,
+            ),
+            (
+                vec![valid(1, 0, 90), missing(&cov, 1), invalid(&cov, 2, 1)],
+                ErrorCode::TxErrNonceReplay,
+            ),
+            (
+                vec![valid(1, 0, 101), invalid(&cov, 2, 1)],
+                ErrorCode::TxErrValueConservation,
+            ),
+            (
+                vec![valid(1, 0, 90), coinbase_like],
+                ErrorCode::BlockErrCoinbaseInvalid,
+            ),
+            (
+                vec![valid(1, 0, 90), no_inputs(&cov, 0)],
+                ErrorCode::TxErrTxNonceInvalid,
+            ),
+            (
+                vec![valid(1, 0, 90), no_inputs(&cov, 2)],
+                ErrorCode::TxErrParse,
+            ),
+            (
+                vec![missing(&cov, 1), valid(2, 0, 90), invalid(&cov, 3, 1)],
+                ErrorCode::TxErrMissingUtxo,
+            ),
+        ];
+        for (txs, want) in cases {
+            reject(&block(subsidy + 20, &txs), want, &cov);
+        }
+
+        let valid_block = block(subsidy + 20, &[valid(1, 0, 90), valid(2, 1, 90)]);
+        let mut seq = state(&cov);
+        let mut par = state(&cov);
+        let seq_summary = crate::connect_block_basic_in_memory_at_height(
+            &valid_block,
+            Some(prev),
+            Some(target),
+            height,
+            Some(&[0]),
+            &mut seq,
+            ZERO_CHAIN_ID,
+        )
+        .expect("sequential valid");
+        let par_summary = crate::connect_block_parallel_sig_verify(
+            &valid_block,
+            Some(prev),
+            Some(target),
+            height,
+            Some(&[0]),
+            &mut par,
+            ZERO_CHAIN_ID,
+            2,
+        )
+        .expect("parallel valid");
+        assert_eq!(seq_summary.post_state_digest, par_summary.post_state_digest);
+        assert_eq!(seq, par);
+    }
 }

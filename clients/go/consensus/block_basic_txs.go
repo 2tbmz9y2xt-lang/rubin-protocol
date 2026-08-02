@@ -32,15 +32,13 @@ func addBlockResourceStat(a uint64, b uint64, msg string) (uint64, error) {
 }
 
 func validateBlockTxSemantics(pb *ParsedBlock, blockHeight uint64, rotation RotationProvider) error {
-	if err := validateCoinbaseStructure(pb, blockHeight); err != nil {
+	if err := validateCoinbaseBlockTxSemantics(pb, blockHeight, rotation); err != nil {
 		return err
 	}
 	seenNonces := make(map[uint64]struct{}, len(pb.Txs))
-	for i, tx := range pb.Txs {
-		if i > 0 {
-			if err := validateNonCoinbaseBlockTx(tx, seenNonces); err != nil {
-				return err
-			}
+	for _, tx := range pb.Txs[1:] {
+		if err := validateNonCoinbaseBlockTx(tx, seenNonces); err != nil {
+			return err
 		}
 		// pb.ChainID is the validating chain's id (set by the context-bearing
 		// parse+validate entry), so block-body covenant-genesis validation checks a
@@ -51,6 +49,13 @@ func validateBlockTxSemantics(pb *ParsedBlock, blockHeight uint64, rotation Rota
 		}
 	}
 	return nil
+}
+
+func validateCoinbaseBlockTxSemantics(pb *ParsedBlock, blockHeight uint64, rotation RotationProvider) error {
+	if err := validateCoinbaseStructure(pb, blockHeight); err != nil {
+		return err
+	}
+	return ValidateTxCovenantsGenesis(pb.Txs[0], pb.ChainID, blockHeight, rotation)
 }
 
 func validateNonCoinbaseBlockTx(tx *Tx, seenNonces map[uint64]struct{}) error {

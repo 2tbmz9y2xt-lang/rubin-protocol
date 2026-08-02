@@ -1,8 +1,12 @@
 use super::coinbase::validate_coinbase_witness_commitment;
 use super::header::{validate_header_commitments, validate_timestamp_rules};
-use super::txs::{accumulate_block_resource_stats, validate_block_tx_semantics, BlockTxStats};
+use super::txs::{
+    accumulate_block_resource_stats, validate_block_tx_semantics,
+    validate_coinbase_block_tx_semantics, BlockTxStats,
+};
 use super::{
-    validate_block_resource_limits, validate_da_set_integrity, BlockBasicSummary, ParsedBlock,
+    validate_block_resource_limits, validate_coinbase_apply_outputs, validate_da_set_integrity,
+    BlockBasicSummary, ParsedBlock,
 };
 use crate::block::block_hash;
 use crate::error::{ErrorCode, TxError};
@@ -40,6 +44,27 @@ pub(crate) fn validate_parsed_block_basic_with_context_at_height(
     })
 }
 
+impl ParsedBlock {
+    pub(crate) fn validate_connect_preflight(
+        &self,
+        expected_prev_hash: Option<[u8; 32]>,
+        expected_target: Option<[u8; 32]>,
+        block_height: u64,
+        prev_timestamps: Option<&[u64]>,
+        rotation: Option<&dyn RotationProvider>,
+    ) -> Result<(), TxError> {
+        validate_parsed_block_preflight(
+            self,
+            expected_prev_hash,
+            expected_target,
+            block_height,
+            prev_timestamps,
+        )?;
+        validate_coinbase_block_tx_semantics(self, block_height, rotation)?;
+        validate_coinbase_apply_outputs(&self.txs[0])
+    }
+}
+
 fn validate_parsed_block_basic_checks(
     pb: &ParsedBlock,
     expected_prev_hash: Option<[u8; 32]>,
@@ -47,6 +72,24 @@ fn validate_parsed_block_basic_checks(
     block_height: u64,
     prev_timestamps: Option<&[u64]>,
     rotation: Option<&dyn RotationProvider>,
+) -> Result<BlockTxStats, TxError> {
+    let stats = validate_parsed_block_preflight(
+        pb,
+        expected_prev_hash,
+        expected_target,
+        block_height,
+        prev_timestamps,
+    )?;
+    validate_block_tx_semantics(pb, block_height, rotation)?;
+    Ok(stats)
+}
+
+fn validate_parsed_block_preflight(
+    pb: &ParsedBlock,
+    expected_prev_hash: Option<[u8; 32]>,
+    expected_target: Option<[u8; 32]>,
+    block_height: u64,
+    prev_timestamps: Option<&[u64]>,
 ) -> Result<BlockTxStats, TxError> {
     validate_header_commitments(pb, expected_prev_hash, expected_target)
         .and_then(|_| validate_coinbase_witness_commitment(pb))
@@ -57,8 +100,6 @@ fn validate_parsed_block_basic_checks(
     let stats = accumulate_block_resource_stats(pb)?;
     validate_block_resource_limits(stats)?;
 
-    validate_da_set_integrity(&pb.txs)
-        .and_then(|_| validate_block_tx_semantics(pb, block_height, rotation))?;
-
+    validate_da_set_integrity(&pb.txs)?;
     Ok(stats)
 }

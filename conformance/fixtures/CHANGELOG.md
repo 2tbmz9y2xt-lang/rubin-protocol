@@ -11,6 +11,10 @@ Policy:
 
 ---
 
+## 2026-08-02 — Transaction-index first-error ordering (RUB-659)
+
+Manual fixture: `CV-BLOCK-BASIC.json` adds `CV-B-TX-ORDER-FIRST-ERROR-01`, an initialized-state `connect_block_basic` row where an earlier missing input wins over a later invalid output. Regenerated `conformance/MATRIX.md`, `CVBlockBasicVectors.lean`, Go trace, and `GoTraceV1.lean` through existing owners. No schema, runner, API, formal-model, or canonical-spec change.
+
 ## 2026-08-01 — HTLC refund timelock first-error ordering (RUB-658)
 
 Reason/tools/fixtures/non-goals: changed fixtures: `CV-HTLC.json`, `CV-HTLC-ORDERING.json`. `CV-HTLC-REFUND-FIRST-ERROR-01` combines an immature height refund with a selector-key mismatch to pin `TX_ERR_TIMELOCK_NOT_MET`; `CV-H-RefundTimelockBeforeKey` pins the corresponding policy order while the malformed-selector row remains structural-first. Regenerated `conformance/MATRIX.md`, HTLC Lean companions, and the existing Go trace/refinement outputs through their owners. No fixture schema, runner, API, or canonical-spec change.

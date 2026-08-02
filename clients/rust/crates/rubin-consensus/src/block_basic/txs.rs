@@ -1,7 +1,7 @@
 use super::*;
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::suite_registry::RotationProvider;
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct BlockTxStats {
@@ -53,27 +53,44 @@ pub(super) fn validate_block_tx_semantics(
     block_height: u64,
     rotation: Option<&dyn RotationProvider>,
 ) -> Result<(), TxError> {
-    coinbase::validate_coinbase_structure(pb, block_height)?;
-    let mut seen_nonces: HashMap<u64, ()> = HashMap::with_capacity(pb.txs.len());
-    for (i, tx) in pb.txs.iter().enumerate() {
-        if i > 0 {
-            if coinbase::is_coinbase_tx(tx) {
-                return Err(TxError::new(
-                    ErrorCode::BlockErrCoinbaseInvalid,
-                    "coinbase-like tx found at index > 0",
-                ));
-            }
-            validate_non_coinbase_nonce_and_input_count(tx)?;
-            if seen_nonces.insert(tx.tx_nonce, ()).is_some() {
-                return Err(TxError::new(
-                    ErrorCode::TxErrNonceReplay,
-                    "duplicate tx_nonce in block",
-                ));
-            }
-        }
+    validate_coinbase_block_tx_semantics(pb, block_height, rotation)?;
+    let mut seen_nonces = HashSet::with_capacity(pb.txs.len());
+    for tx in pb.txs.iter().skip(1) {
+        ParsedBlock::validate_non_coinbase_block_tx(tx, &mut seen_nonces)?;
         validate_tx_covenants_genesis(tx, block_height, rotation)?;
     }
     Ok(())
+}
+
+pub(super) fn validate_coinbase_block_tx_semantics(
+    pb: &ParsedBlock,
+    block_height: u64,
+    rotation: Option<&dyn RotationProvider>,
+) -> Result<(), TxError> {
+    coinbase::validate_coinbase_structure(pb, block_height)?;
+    validate_tx_covenants_genesis(&pb.txs[0], block_height, rotation)
+}
+
+impl ParsedBlock {
+    pub(crate) fn validate_non_coinbase_block_tx(
+        tx: &Tx,
+        seen_nonces: &mut HashSet<u64>,
+    ) -> Result<(), TxError> {
+        if coinbase::is_coinbase_tx(tx) {
+            return Err(TxError::new(
+                ErrorCode::BlockErrCoinbaseInvalid,
+                "coinbase-like tx found at index > 0",
+            ));
+        }
+        validate_non_coinbase_nonce_and_input_count(tx)?;
+        if !seen_nonces.insert(tx.tx_nonce) {
+            return Err(TxError::new(
+                ErrorCode::TxErrNonceReplay,
+                "duplicate tx_nonce in block",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

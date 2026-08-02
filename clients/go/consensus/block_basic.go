@@ -209,6 +209,30 @@ func parseAndValidateBlockBasicWithContextAtHeight(
 	return pb, summary, nil
 }
 
+// parseAndValidateBlockBasicForConnectWithContextAtHeight performs the shared
+// block-global checks needed before connect-time transaction application. The
+// per-non-coinbase checks deliberately remain in the connect loop so its first
+// synchronous error is selected by transaction index.
+func parseAndValidateBlockBasicForConnectWithContextAtHeight(
+	blockBytes []byte,
+	expectedPrevHash *[32]byte,
+	expectedTarget *[32]byte,
+	blockHeight uint64,
+	prevTimestamps []uint64,
+	chainID [32]byte,
+	rotation RotationProvider,
+) (*ParsedBlock, error) {
+	pb, err := ParseBlockBytes(blockBytes)
+	if err != nil {
+		return nil, err
+	}
+	pb.ChainID = chainID
+	if err := validateParsedBlockConnectWithContextAtHeight(pb, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps, rotation); err != nil {
+		return nil, err
+	}
+	return pb, nil
+}
+
 func validateParsedBlockBasicWithContextAtHeight(
 	pb *ParsedBlock,
 	expectedPrevHash *[32]byte,
@@ -228,6 +252,23 @@ func validateParsedBlockBasicWithContextAtHeight(
 		SumDa:     stats.sumDa,
 		BlockHash: blockHash,
 	}, nil
+}
+
+func validateParsedBlockConnectWithContextAtHeight(
+	pb *ParsedBlock,
+	expectedPrevHash *[32]byte,
+	expectedTarget *[32]byte,
+	blockHeight uint64,
+	prevTimestamps []uint64,
+	rotation RotationProvider,
+) error {
+	if pb == nil {
+		return txerr(BLOCK_ERR_PARSE, "nil parsed block")
+	}
+	if err := validateBlockHeaderChecks(pb, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps); err != nil {
+		return err
+	}
+	return validateBlockBodyConnectChecks(pb, blockHeight, rotation)
 }
 
 // validateParsedBlockChecks runs all basic block validation checks and returns
@@ -282,6 +323,23 @@ func validateBlockBodyChecks(pb *ParsedBlock, blockHeight uint64, rotation Rotat
 		return nil, err
 	}
 	return stats, nil
+}
+
+func validateBlockBodyConnectChecks(pb *ParsedBlock, blockHeight uint64, rotation RotationProvider) error {
+	stats, err := accumulateBlockResourceStats(pb)
+	if err != nil {
+		return err
+	}
+	if err := validateBlockResourceLimits(stats); err != nil {
+		return err
+	}
+	if err := validateDASetIntegrity(pb.Txs); err != nil {
+		return err
+	}
+	if err := validateCoinbaseBlockTxSemantics(pb, blockHeight, rotation); err != nil {
+		return err
+	}
+	return validateCoinbaseApplyOutputs(pb.Txs[0])
 }
 
 // ValidateBlockBasicWithContextAndFeesAtHeight extends basic block validation with the
