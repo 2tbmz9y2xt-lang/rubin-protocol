@@ -170,23 +170,6 @@ pub fn validate_tx_covenants_genesis(
             })
     }
 
-    fn validate_simplicity_output_group_cap(
-        simplicity_output_cmrs: &[[u8; 32]],
-    ) -> Result<(), TxError> {
-        let mut groups = HashMap::with_capacity(simplicity_output_cmrs.len());
-        simplicity_output_cmrs.iter().try_for_each(|program_cmr| {
-            let count = groups.entry(*program_cmr).or_insert(0usize);
-            *count += 1;
-            if *count > SIMPLICITY_MAX_GROUP_OUTPUTS {
-                return Err(TxError::new(
-                    ErrorCode::TxErrCovenantTypeInvalid,
-                    "CORE_SIMPLICITY same-cmr output group exceeds limit",
-                ));
-            }
-            Ok(())
-        })
-    }
-
     // Complete per-output validation in wire order before applying the
     // transaction-level same-program_cmr cap, so a later creation error wins.
     let mut simplicity_output_cmrs = Vec::new();
@@ -218,4 +201,57 @@ pub fn validate_tx_covenants_genesis(
         })?;
 
     validate_simplicity_output_group_cap(&simplicity_output_cmrs)
+}
+
+/// Validates one output with the existing creation validator and returns a
+/// CORE_SIMPLICITY CMR for the caller's coinbase transaction-wide cap accounting.
+pub(crate) fn validate_tx_output_covenant_genesis(
+    tx_kind: u8,
+    out: &TxOutput,
+    block_height: u64,
+    rotation: &dyn RotationProvider,
+) -> Result<Option<[u8; 32]>, TxError> {
+    let tx = Tx {
+        version: 1,
+        tx_kind,
+        tx_nonce: 0,
+        inputs: Vec::new(),
+        outputs: vec![out.clone()],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: Vec::new(),
+        da_payload: Vec::new(),
+    };
+    validate_tx_covenants_genesis(&tx, block_height, Some(rotation))?;
+    if out.covenant_type != COV_TYPE_CORE_SIMPLICITY {
+        return Ok(None);
+    }
+    out.covenant_data
+        .first_chunk::<32>()
+        .copied()
+        .map(Some)
+        .ok_or_else(|| {
+            TxError::new(
+                ErrorCode::TxErrCovenantTypeInvalid,
+                "CORE_SIMPLICITY program_cmr parse failure",
+            )
+        })
+}
+
+pub(crate) fn validate_simplicity_output_group_cap(
+    simplicity_output_cmrs: &[[u8; 32]],
+) -> Result<(), TxError> {
+    let mut groups = HashMap::with_capacity(simplicity_output_cmrs.len());
+    simplicity_output_cmrs.iter().try_for_each(|program_cmr| {
+        let count = groups.entry(*program_cmr).or_insert(0usize);
+        *count += 1;
+        if *count > SIMPLICITY_MAX_GROUP_OUTPUTS {
+            return Err(TxError::new(
+                ErrorCode::TxErrCovenantTypeInvalid,
+                "CORE_SIMPLICITY same-cmr output group exceeds limit",
+            ));
+        }
+        Ok(())
+    })
 }

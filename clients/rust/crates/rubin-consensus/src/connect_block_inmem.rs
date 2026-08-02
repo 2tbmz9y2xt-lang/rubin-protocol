@@ -6,7 +6,6 @@ use crate::block_basic::{
     median_time_past, parse_block_bytes, validate_coinbase_value_bound, ParsedBlock,
 };
 use crate::compactsize::encode_compact_size;
-use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
 use crate::error::{ErrorCode, TxError};
 use crate::sig_queue::SigCheckQueue;
 use crate::subsidy::block_subsidy;
@@ -201,19 +200,55 @@ fn connect_block_basic_in_memory_with_context(
     ctx: &ConnectBlockContext<'_>,
 ) -> Result<ConnectBlockBasicSummary, TxError> {
     let prepared = prepare_connect_block(block_bytes, state.already_generated, ctx)?;
-    let (work_utxos, sum_fees) = apply_non_coinbase_txs_sequential(&prepared, &state.utxos, ctx)?;
+    let (work_utxos, sum_fees) = apply_coinbase_then_non_coinbase_txs_sequential(
+        &prepared.pb,
+        &state.utxos,
+        prepared.block_height,
+        prepared.block_mtp,
+        ctx.chain_id,
+        ctx.rotation,
+        ctx.registry,
+    )?;
     finalize_connected_block(state, &prepared, work_utxos, sum_fees, 0)
 }
 
-fn apply_non_coinbase_txs_sequential(
-    prepared: &PreparedConnectBlock,
+// The sequential production continuation after parsed-block preflight. It
+// applies the coinbase to a local UTXO view before transaction index one.
+pub(crate) fn apply_coinbase_then_non_coinbase_txs_sequential(
+    pb: &ParsedBlock,
     state_utxos: &HashMap<Outpoint, UtxoEntry>,
-    ctx: &ConnectBlockContext<'_>,
+    block_height: u64,
+    block_mtp: u64,
+    chain_id: [u8; 32],
+    rotation: Option<&dyn RotationProvider>,
+    registry: Option<&SuiteRegistry>,
+) -> Result<(HashMap<Outpoint, UtxoEntry>, u64), TxError> {
+    let mut work_utxos = state_utxos.clone();
+    pb.apply_coinbase_outputs(&mut work_utxos, block_height, rotation)?;
+    apply_non_coinbase_txs_sequential(
+        pb,
+        &work_utxos,
+        block_height,
+        block_mtp,
+        chain_id,
+        rotation,
+        registry,
+    )
+}
+
+fn apply_non_coinbase_txs_sequential(
+    pb: &ParsedBlock,
+    state_utxos: &HashMap<Outpoint, UtxoEntry>,
+    block_height: u64,
+    block_mtp: u64,
+    chain_id: [u8; 32],
+    rotation: Option<&dyn RotationProvider>,
+    registry: Option<&SuiteRegistry>,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, u64), TxError> {
     let mut work_utxos = None;
     let mut sum_fees: u64 = 0;
-    let mut seen_nonces = HashSet::with_capacity(prepared.pb.txs.len());
-    for (tx, txid) in prepared.pb.txs.iter().zip(&prepared.pb.txids).skip(1) {
+    let mut seen_nonces = HashSet::with_capacity(pb.txs.len());
+    for (tx, txid) in pb.txs.iter().zip(&pb.txids).skip(1) {
         ParsedBlock::validate_non_coinbase_block_tx(tx, &mut seen_nonces)?;
         let base_utxos = work_utxos.as_ref().unwrap_or(state_utxos);
         let (next_utxos, summary) =
@@ -221,12 +256,12 @@ fn apply_non_coinbase_txs_sequential(
                 tx,
                 *txid,
                 base_utxos,
-                prepared.block_height,
-                prepared.pb.header.timestamp,
-                prepared.block_mtp,
-                ctx.chain_id,
-                ctx.rotation,
-                ctx.registry,
+                block_height,
+                pb.header.timestamp,
+                block_mtp,
+                chain_id,
+                rotation,
+                registry,
             )?;
         work_utxos = Some(next_utxos);
         sum_fees = add_block_fee(sum_fees, summary.fee)?;
@@ -242,8 +277,12 @@ fn connect_block_parallel_sig_verify_with_context(
     workers: usize,
 ) -> Result<ConnectBlockBasicSummary, TxError> {
     let prepared = prepare_connect_block(block_bytes, state.already_generated, ctx)?;
+    let mut work_utxos = state.utxos.clone();
+    prepared
+        .pb
+        .apply_coinbase_outputs(&mut work_utxos, prepared.block_height, ctx.rotation)?;
     let (work_utxos, sum_fees, sig_task_count) =
-        apply_non_coinbase_txs_parallel(&prepared, &state.utxos, ctx, workers)?;
+        apply_non_coinbase_txs_parallel(&prepared, &work_utxos, ctx, workers)?;
     finalize_connected_block(state, &prepared, work_utxos, sum_fees, sig_task_count)
 }
 
@@ -305,7 +344,7 @@ fn add_block_fee(sum_fees: u64, fee: u64) -> Result<u64, TxError> {
 fn finalize_connected_block(
     state: &mut InMemoryChainState,
     prepared: &PreparedConnectBlock,
-    mut work_utxos: HashMap<Outpoint, UtxoEntry>,
+    work_utxos: HashMap<Outpoint, UtxoEntry>,
     sum_fees: u64,
     sig_task_count: u64,
 ) -> Result<ConnectBlockBasicSummary, TxError> {
@@ -315,7 +354,6 @@ fn finalize_connected_block(
         prepared.already_generated,
         sum_fees,
     )?;
-    add_coinbase_outputs(&mut work_utxos, prepared);
     let already_generated_n1 =
         already_generated_after_block(prepared.block_height, prepared.already_generated)?;
 
@@ -335,31 +373,6 @@ fn finalize_connected_block(
         sig_task_count,
         worker_panics: 0,
     })
-}
-
-fn add_coinbase_outputs(
-    work_utxos: &mut HashMap<Outpoint, UtxoEntry>,
-    prepared: &PreparedConnectBlock,
-) {
-    let coinbase_txid = prepared.pb.txids[0];
-    for (i, out) in prepared.pb.txs[0].outputs.iter().enumerate() {
-        if out.covenant_type == COV_TYPE_ANCHOR || out.covenant_type == COV_TYPE_DA_COMMIT {
-            continue;
-        }
-        work_utxos.insert(
-            Outpoint {
-                txid: coinbase_txid,
-                vout: i as u32,
-            },
-            UtxoEntry {
-                value: out.value,
-                covenant_type: out.covenant_type,
-                covenant_data: out.covenant_data.clone(),
-                creation_height: prepared.block_height,
-                created_by_coinbase: true,
-            },
-        );
-    }
 }
 
 fn already_generated_after_block(

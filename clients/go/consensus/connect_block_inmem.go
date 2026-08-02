@@ -123,9 +123,10 @@ func connectBlockBasicInMemoryAtHeightAndSuiteContext(
 		rotation: input.Rotation,
 		registry: input.Registry,
 	}
-	workUtxos, sumFees, err := applyInMemoryNonCoinbaseTxs(
+	workUtxos := cloneUtxoSet(input.State.Utxos)
+	workUtxos, sumFees, err := applyInMemorySequentialConnect(
 		pb,
-		cloneUtxoSet(input.State.Utxos),
+		workUtxos,
 		input.BlockHeight,
 		blockMTP,
 		validation,
@@ -138,9 +139,37 @@ func connectBlockBasicInMemoryAtHeightAndSuiteContext(
 		return nil, err
 	}
 
-	applyInMemoryCoinbaseOutputs(pb, workUtxos, input.BlockHeight)
 	alreadyGeneratedN1 := advanceAlreadyGenerated(input.BlockHeight, alreadyGenerated)
 	return commitInMemoryConnectSummary(input.State, workUtxos, input.BlockHeight, alreadyGenerated, alreadyGeneratedN1, sumFees)
+}
+
+// applyInMemorySequentialConnect is the sequential production continuation
+// after parsed-block preflight. It makes the coinbase outputs visible to every
+// non-coinbase transaction while retaining all effects in the caller's local
+// working UTXO set until final commit.
+func applyInMemorySequentialConnect(
+	pb *ParsedBlock,
+	workUtxos map[Outpoint]UtxoEntry,
+	blockHeight uint64,
+	blockMTP uint64,
+	validation connectBlockInMemoryValidationContext,
+) (map[Outpoint]UtxoEntry, uint64, error) {
+	if err := applyInMemoryCoinbaseOutputs(
+		pb,
+		workUtxos,
+		blockHeight,
+		validation.chainID,
+		validation.rotation,
+	); err != nil {
+		return nil, 0, err
+	}
+	return applyInMemoryNonCoinbaseTxs(
+		pb,
+		workUtxos,
+		blockHeight,
+		blockMTP,
+		validation,
+	)
 }
 
 func prepareInMemoryChainState(state *InMemoryChainState) error {
@@ -224,14 +253,50 @@ func applyInMemoryNonCoinbaseTxs(
 	return workUtxos, sumFees, nil
 }
 
-func applyInMemoryCoinbaseOutputs(pb *ParsedBlock, workUtxos map[Outpoint]UtxoEntry, blockHeight uint64) {
+// applyInMemoryCoinbaseOutputs validates and applies coinbase outputs in vout
+// order before transaction index one. Every output passes the coinbase-only
+// VAULT guard and the existing creation validator before its spendable UTXO is
+// inserted. The same-CMR cap runs only after every output is processed.
+func applyInMemoryCoinbaseOutputs(
+	pb *ParsedBlock,
+	workUtxos map[Outpoint]UtxoEntry,
+	blockHeight uint64,
+	chainID [32]byte,
+	rotation RotationProvider,
+) error {
 	coinbase := pb.Txs[0]
 	coinbaseTxid := pb.Txids[0]
+	if rotation == nil {
+		rotation = DefaultRotationProvider{}
+	}
+	simplicityDeployment := simplicityDeploymentFromRotation(rotation)
+	simplicityOutputCMRs := make([][32]byte, 0, len(coinbase.Outputs))
 	for i, out := range coinbase.Outputs {
-		if out.CovenantType == COV_TYPE_ANCHOR || out.CovenantType == COV_TYPE_DA_COMMIT {
+		if err := validateCoinbaseApplyOutput(out); err != nil {
+			return err
+		}
+		programCMR, isCoreSimplicity, err := validateTxOutputCovenantGenesis(
+			coinbase.TxKind,
+			out,
+			chainID,
+			blockHeight,
+			rotation,
+			simplicityDeployment,
+		)
+		if err != nil {
+			return err
+		}
+		if isCoreSimplicity {
+			simplicityOutputCMRs = append(simplicityOutputCMRs, programCMR)
+		}
+		if isNonSpendableInputCovenant(out.CovenantType) {
 			continue
 		}
-		op := Outpoint{Txid: coinbaseTxid, Vout: uint32(i)}
+		vout, err := coinbaseOutputVout(i)
+		if err != nil {
+			return err
+		}
+		op := Outpoint{Txid: coinbaseTxid, Vout: vout}
 		workUtxos[op] = UtxoEntry{
 			Value:             out.Value,
 			CovenantType:      out.CovenantType,
@@ -240,6 +305,14 @@ func applyInMemoryCoinbaseOutputs(pb *ParsedBlock, workUtxos map[Outpoint]UtxoEn
 			CreatedByCoinbase: true,
 		}
 	}
+	return validateSimplicityOutputGroupCap(simplicityOutputCMRs)
+}
+
+func coinbaseOutputVout(index int) (uint32, error) {
+	if index < 0 || uint64(index) > uint64(^uint32(0)) {
+		return 0, txerr(BLOCK_ERR_PARSE, "coinbase output index exceeds u32")
+	}
+	return uint32(index), nil
 }
 
 func advanceAlreadyGenerated(blockHeight uint64, alreadyGenerated *big.Int) *big.Int {

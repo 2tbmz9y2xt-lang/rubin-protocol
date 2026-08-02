@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"errors"
 	"math/big"
 	"reflect"
 	"testing"
@@ -9,6 +10,50 @@ import (
 // Integration parity suite (Q-PV-15): tests that sequential and parallel
 // validation produce the same verdict, error code, first-invalid behavior,
 // and post-state digest for valid, invalid, and mixed scenarios.
+
+func coinbaseWithWitnessCommitmentAndOutputsAtHeight(t *testing.T, height uint64, outputs []testOutput, nonCoinbaseTxs ...[]byte) []byte {
+	t.Helper()
+	wtxids := make([][32]byte, 1, 1+len(nonCoinbaseTxs))
+	for _, txb := range nonCoinbaseTxs {
+		_, _, wtxid, _, err := ParseTx(txb)
+		if err != nil {
+			t.Fatalf("ParseTx(non-coinbase): %v", err)
+		}
+		wtxids = append(wtxids, wtxid)
+	}
+	wroot, err := WitnessMerkleRootWtxids(wtxids)
+	if err != nil {
+		t.Fatalf("WitnessMerkleRootWtxids: %v", err)
+	}
+	commit := WitnessCommitmentHash(wroot)
+	outputs = append(append([]testOutput(nil), outputs...), testOutput{value: 0, covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]})
+	return coinbaseTxWithOutputs(uint32(height), outputs)
+}
+
+func TestConnectBlock_ApplyCoinbaseBeforeNonCoinbase(t *testing.T) {
+	height := uint64(10)
+	coinbaseTxid := hashWithPrefix(0xa9)
+	cov := validP2PKCovenantData()
+	coinbase := &Tx{TxKind: 0, Outputs: []TxOutput{
+		{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: cov},
+		{Value: 0, CovenantType: COV_TYPE_ANCHOR, CovenantData: []byte{0x01}},
+	}}
+	spend := &Tx{Version: 1, TxKind: 0, TxNonce: 1, Inputs: []TxInput{{PrevTxid: coinbaseTxid, PrevVout: 0, Sequence: 0}}, Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: cov}}}
+	pb := &ParsedBlock{Txs: []*Tx{coinbase, spend}, Txids: [][32]byte{coinbaseTxid, hashWithPrefix(0xaa)}}
+	apply := func() error {
+		_, _, err := applyInMemorySequentialConnect(pb, make(map[Outpoint]UtxoEntry), height, 0, connectBlockInMemoryValidationContext{})
+		return err
+	}
+
+	if got := mustTxErrCode(t, apply()); got != TX_ERR_COINBASE_IMMATURE {
+		t.Fatalf("spendable coinbase output code=%s, want %s", got, TX_ERR_COINBASE_IMMATURE)
+	}
+	spend.Inputs[0].PrevVout = 1
+	if got := mustTxErrCode(t, apply()); got != TX_ERR_MISSING_UTXO {
+		t.Fatalf("ANCHOR coinbase output code=%s, want %s", got, TX_ERR_MISSING_UTXO)
+	}
+	runConnectBlockFirstErrorCases(t, true)
+}
 
 func TestIntegrationParity_ValidOnly(t *testing.T) {
 	height := uint64(1)
@@ -318,6 +363,10 @@ func TestIntegrationParity_MultipleValidTxs(t *testing.T) {
 }
 
 func TestConnectBlock_TransactionIndexFirstErrorOrder(t *testing.T) {
+	runConnectBlockFirstErrorCases(t, false)
+}
+
+func runConnectBlockFirstErrorCases(t *testing.T, rub1099 bool) {
 	height, prev, target := uint64(1), hashWithPrefix(0x59), filledHash(0xff)
 	state := func(cov []byte) *InMemoryChainState {
 		utxos := make(map[Outpoint]UtxoEntry)
@@ -357,18 +406,30 @@ func TestConnectBlock_TransactionIndexFirstErrorOrder(t *testing.T) {
 			t.Fatal("rejection changed initialized chainstate")
 		}
 	}
-	reject := func(t *testing.T, b []byte, want ErrorCode, cov []byte) {
+	var rotation RotationProvider
+	if rub1099 {
+		rotation = testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87, simplicityActiveHeight: height}
+	}
+	reject := func(t *testing.T, b []byte, want ErrorCode, cov []byte, wantMsg ...string) {
 		t.Helper()
 		seq, seqBefore := state(cov), state(cov)
-		_, seqErr := ConnectBlockBasicInMemoryAtHeight(b, &prev, &target, height, []uint64{0}, seq, [32]byte{})
+		_, seqErr := ConnectBlockBasicInMemoryAtHeightAndSuiteContext(b, &prev, &target, height, []uint64{0}, seq, [32]byte{}, rotation, nil)
 		if got := mustTxErrCode(t, seqErr); got != want {
 			t.Fatalf("sequential=%s, want %s", got, want)
 		}
+		var seqTxErr *TxError
+		if len(wantMsg) != 0 && (!errors.As(seqErr, &seqTxErr) || seqTxErr == nil || seqTxErr.Msg != wantMsg[0]) {
+			t.Fatalf("sequential error=%v, want message %q", seqErr, wantMsg[0])
+		}
 		assertState(t, seq, seqBefore)
 		par, parBefore := state(cov), state(cov)
-		_, parErr := ConnectBlockParallelSigVerify(b, &prev, &target, height, []uint64{0}, par, [32]byte{}, 2)
+		_, parErr := ConnectBlockParallelSigVerifyWithSuiteContext(b, &prev, &target, height, []uint64{0}, par, [32]byte{}, rotation, nil, 2)
 		if got := mustTxErrCode(t, parErr); got != want {
 			t.Fatalf("parallel=%s, want %s", got, want)
+		}
+		var parTxErr *TxError
+		if len(wantMsg) != 0 && (!errors.As(parErr, &parTxErr) || parTxErr == nil || parTxErr.Msg != wantMsg[0]) {
+			t.Fatalf("parallel error=%v, want message %q", parErr, wantMsg[0])
 		}
 		assertState(t, par, parBefore)
 	}
@@ -393,13 +454,70 @@ func TestConnectBlock_TransactionIndexFirstErrorOrder(t *testing.T) {
 			{"coinbase_before_later", 0, [][]byte{missing(cov, 1)}, TX_ERR_COVENANT_TYPE_INVALID},
 			{"da_integrity_before_tx_semantics", subsidy, [][]byte{daCommitTxBytes(1, filled32(0x61), 1, filled32(0x62))}, BLOCK_ERR_DA_INCOMPLETE},
 		}
-		for _, tc := range cases {
+		for i, tc := range cases {
+			if rub1099 && i > 0 {
+				break
+			}
 			t.Run(tc.name, func(t *testing.T) { reject(t, block(tc.value, tc.txs...), tc.want, cov) })
 		}
 		missingTx := missing(cov, 1)
 		vaultCoinbase := coinbaseWithWitnessCommitmentAndVaultOutputAtHeight(t, height, 1, validVaultCovenantDataForP2PKOutput(), missingTx)
 		t.Run("coinbase_vault_before_missing", func(t *testing.T) {
 			reject(t, buildBlock(vaultCoinbase, missingTx), BLOCK_ERR_COINBASE_INVALID, cov)
+		})
+		if !rub1099 {
+			return
+		}
+		daCoinbase := coinbaseWithWitnessCommitmentAndOutputsAtHeight(t, height, []testOutput{{value: 0, covenantType: COV_TYPE_DA_COMMIT, covenantData: make([]byte, 32)}})
+		reject(t, buildBlock(daCoinbase), TX_ERR_COVENANT_TYPE_INVALID, cov)
+		simplicityData := encodeSimplicityCovenantData([32]byte{0x5a}, nil)
+		simplicityOutputs := make([]testOutput, 0, SIMPLICITY_MAX_GROUP_OUTPUTS+2)
+		for i := 0; i <= SIMPLICITY_MAX_GROUP_OUTPUTS; i++ {
+			simplicityOutputs = append(simplicityOutputs, testOutput{value: 1, covenantType: COV_TYPE_CORE_SIMPLICITY, covenantData: simplicityData})
+		}
+		capCoinbase := coinbaseWithWitnessCommitmentAndOutputsAtHeight(t, height, simplicityOutputs)
+		reject(t, buildBlock(capCoinbase), TX_ERR_COVENANT_TYPE_INVALID, cov, "CORE_SIMPLICITY same-cmr output group exceeds limit")
+		simplicityOutputs = append(simplicityOutputs, testOutput{value: 0, covenantType: COV_TYPE_P2PK, covenantData: cov})
+		capThenInvalid := coinbaseWithWitnessCommitmentAndOutputsAtHeight(t, height, simplicityOutputs)
+		reject(t, buildBlock(capThenInvalid), TX_ERR_COVENANT_TYPE_INVALID, cov, "CORE_P2PK value must be > 0")
+		vaultOnly := coinbaseWithWitnessCommitmentAndVaultOutputAtHeight(t, height, 1, validVaultCovenantDataForP2PKOutput())
+		t.Run("coinbase_vault_only", func(t *testing.T) {
+			reject(t, buildBlock(vaultOnly), BLOCK_ERR_COINBASE_INVALID, cov)
+		})
+		emptyTx := noInputs(cov, 2)
+		vaultBeforeEmpty := coinbaseWithWitnessCommitmentAndVaultOutputAtHeight(t, height, 1, validVaultCovenantDataForP2PKOutput(), emptyTx)
+		t.Run("coinbase_vault_before_later_empty_input", func(t *testing.T) {
+			reject(t, buildBlock(vaultBeforeEmpty, emptyTx), BLOCK_ERR_COINBASE_INVALID, cov)
+		})
+		invalidTx := invalid(cov, 1, 0)
+		vaultThenInvalid := coinbaseWithWitnessCommitmentAndOutputsAtHeight(t, height, []testOutput{
+			{value: 1, covenantType: COV_TYPE_VAULT, covenantData: validVaultCovenantDataForP2PKOutput()},
+			{value: 0, covenantType: COV_TYPE_P2PK, covenantData: cov},
+		}, invalidTx)
+		t.Run("coinbase_vault_before_later_creation", func(t *testing.T) {
+			reject(t, buildBlock(vaultThenInvalid, invalidTx), BLOCK_ERR_COINBASE_INVALID, cov)
+		})
+		creationOnly := coinbaseWithWitnessCommitmentAndOutputsAtHeight(t, height, []testOutput{
+			{value: 1, covenantType: COV_TYPE_P2PK, covenantData: cov},
+			{value: 0, covenantType: COV_TYPE_P2PK, covenantData: cov},
+		})
+		t.Run("coinbase_creation_only", func(t *testing.T) {
+			reject(t, buildBlock(creationOnly), TX_ERR_COVENANT_TYPE_INVALID, cov)
+		})
+		creationThenVault := coinbaseWithWitnessCommitmentAndOutputsAtHeight(t, height, []testOutput{
+			{value: 0, covenantType: COV_TYPE_P2PK, covenantData: cov},
+			{value: 1, covenantType: COV_TYPE_VAULT, covenantData: validVaultCovenantDataForP2PKOutput()},
+		}, missingTx)
+		t.Run("coinbase_creation_before_vault", func(t *testing.T) {
+			reject(t, buildBlock(creationThenVault, missingTx), TX_ERR_COVENANT_TYPE_INVALID, cov)
+		})
+		t.Run("coinbase_zero_value_vault_before_own_creation_error", func(t *testing.T) {
+			zeroVault := coinbaseWithWitnessCommitmentAndVaultOutputAtHeight(t, height, 0, validVaultCovenantDataForP2PKOutput())
+			reject(t, buildBlock(zeroVault), BLOCK_ERR_COINBASE_INVALID, cov)
+		})
+		vaultExceedingSubsidy := coinbaseWithWitnessCommitmentAndVaultOutputAtHeight(t, height, subsidy+1, validVaultCovenantDataForP2PKOutput())
+		t.Run("coinbase_vault_before_subsidy", func(t *testing.T) {
+			reject(t, buildBlock(vaultExceedingSubsidy), BLOCK_ERR_COINBASE_INVALID, cov)
 		})
 	})
 
@@ -430,7 +548,17 @@ func TestConnectBlock_TransactionIndexFirstErrorOrder(t *testing.T) {
 			{"missing_valid_middle_invalid", [][]byte{missing(cov, 1), valid(2, 0, 90), invalid(cov, 3, 1)}, TX_ERR_MISSING_UTXO},
 		}
 		for _, tc := range cases {
+			if rub1099 {
+				break
+			}
 			t.Run(tc.name, func(t *testing.T) { reject(t, block(subsidy+20, tc.txs...), tc.want, cov) })
+		}
+		if rub1099 {
+			replayFirst, replaySecond := valid(1, 0, 90), valid(1, 1, 90)
+			vaultBeforeReplay := coinbaseWithWitnessCommitmentAndVaultOutputAtHeight(t, height, 1, validVaultCovenantDataForP2PKOutput(), replayFirst, replaySecond)
+			t.Run("coinbase_vault_before_later_nonce_replay", func(t *testing.T) {
+				reject(t, buildBlock(vaultBeforeReplay, replayFirst, replaySecond), BLOCK_ERR_COINBASE_INVALID, cov)
+			})
 		}
 		validBlock := block(subsidy+20, valid(1, 0, 90), valid(2, 1, 90))
 		seq, par := state(cov), state(cov)

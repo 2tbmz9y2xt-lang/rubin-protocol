@@ -397,7 +397,8 @@ fn connect_block_basic_in_memory_at_height_rejects_coinbase_vault_output() {
 }
 
 #[test]
-fn connect_block_basic_in_memory_at_height_coinbase_vault_reject_does_not_mutate_spends() {
+fn connect_block_basic_in_memory_at_height_coinbase_vault_rejects_before_tx1_preserves_initialized_state(
+) {
     let height = 1u64;
     let mut prev = [0u8; 32];
     prev[0] = 0xb2;

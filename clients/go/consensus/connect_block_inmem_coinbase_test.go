@@ -57,7 +57,7 @@ func TestConnectBlockBasicInMemoryAtHeight_RejectsCoinbaseVaultOutput(t *testing
 	}
 }
 
-func TestConnectBlockBasicInMemoryAtHeight_CoinbaseVaultRejectDoesNotMutateAppliedSpends(t *testing.T) {
+func TestConnectBlockBasicInMemoryAtHeight_CoinbaseVaultRejectsBeforeTx1PreservesInitializedState(t *testing.T) {
 	height := uint64(1)
 	prev := hashWithPrefix(0xb2)
 	target := filledHash(0xff)

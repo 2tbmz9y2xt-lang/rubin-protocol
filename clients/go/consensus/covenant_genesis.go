@@ -30,10 +30,13 @@ func ValidateTxCovenantsGenesis(tx *Tx, chainID [32]byte, blockHeight uint64, ro
 		}
 	}
 
-	// Pass 2: transaction-level same-program_cmr CORE_SIMPLICITY output group
-	// cap, counted over the collected outputs in wire order (the map is only a
-	// counter; no map iteration feeds the accept/reject decision). The cap does
-	// not depend on spending a CORE_SIMPLICITY input or on BuildSimplicityTxContext.
+	return validateSimplicityOutputGroupCap(simplicityOutputCMRs)
+}
+
+// validateSimplicityOutputGroupCap enforces the transaction-level same-program_cmr
+// CORE_SIMPLICITY output cap after every output has passed creation validation.
+// The map is a counter only; no map iteration feeds the accept/reject decision.
+func validateSimplicityOutputGroupCap(simplicityOutputCMRs [][32]byte) error {
 	simplicityOutputGroups := make(map[[32]byte]int, len(simplicityOutputCMRs))
 	for _, programCMR := range simplicityOutputCMRs {
 		simplicityOutputGroups[programCMR]++

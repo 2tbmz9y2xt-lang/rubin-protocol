@@ -462,17 +462,15 @@ func TestConnectBlockParallelSigVerify_AlreadyGeneratedN1Overflow(t *testing.T) 
 	}
 }
 
-// TestConnectBlockParallelSigVerify_CoinbaseVaultForbidden covers lines 139-140:
-// a block with a valid VAULT output in the coinbase.
+// Connect preflight preserves coinbase structure and locktime validation; ordered
+// ApplyCoinbase rejects a VAULT output before transaction index one.
 func TestConnectBlockParallelSigVerify_CoinbaseVaultForbidden(t *testing.T) {
 	height := uint64(1)
 	prev := hashWithPrefix(0xBB)
 	target := filledHash(0xff)
 
-	// Build a coinbase-only block where the coinbase contains a VAULT output.
-	// VAULT in coinbase passes basic validation (ValidateTxCovenantsGenesis checks
-	// the vault structure, not its placement in coinbase) but fails at
-	// validateCoinbaseApplyOutputs.
+	// Build a structurally valid coinbase-only block with a VAULT output.
+	// Ordered ApplyCoinbase rejects it before transaction index one.
 	kp := mustMLDSA87Keypair(t)
 	keyID := sha3_256(kp.PubkeyBytes())
 

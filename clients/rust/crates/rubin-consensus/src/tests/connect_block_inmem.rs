@@ -466,13 +466,13 @@ fn connect_block_rejects_coinbase_vault_output() {
     );
 }
 
-/// Go parity: TestConnectBlockBasicInMemoryAtHeight_CoinbaseVaultRejectDoesNotMutateAppliedSpends
+/// Go parity: TestConnectBlockBasicInMemoryAtHeight_CoinbaseVaultRejectsBeforeTx1PreservesInitializedState
 ///
 /// Block with valid spend tx + invalid coinbase (vault output) → BLOCK_ERR_COINBASE_INVALID.
-/// Critical atomicity test: the spend's UTXO removal must be rolled back — original
-/// UTXO must remain intact in state.
+/// The early coinbase rejection precedes non-coinbase application; the original
+/// UTXO must therefore remain intact in caller state.
 #[test]
-fn connect_block_coinbase_vault_reject_does_not_mutate_applied_spends() {
+fn connect_block_coinbase_vault_rejects_before_tx1_preserves_initialized_state() {
     let height = 1u64;
     let mut prev = [0u8; 32];
     prev[0] = 0xb2;
