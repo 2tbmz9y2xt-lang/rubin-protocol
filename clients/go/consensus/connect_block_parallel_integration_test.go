@@ -391,6 +391,7 @@ func TestConnectBlock_TransactionIndexFirstErrorOrder(t *testing.T) {
 			{"structural_before_output", subsidy + 20, [][]byte{noInputs(cov, 3), invalid(cov, 4, 1)}, TX_ERR_PARSE},
 			{"same_tx_output_before_missing", subsidy + 20, [][]byte{invalid(cov, 1, 99)}, TX_ERR_COVENANT_TYPE_INVALID},
 			{"coinbase_before_later", 0, [][]byte{missing(cov, 1)}, TX_ERR_COVENANT_TYPE_INVALID},
+			{"da_integrity_before_tx_semantics", subsidy, [][]byte{daCommitTxBytes(1, filled32(0x61), 1, filled32(0x62))}, BLOCK_ERR_DA_INCOMPLETE},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) { reject(t, block(tc.value, tc.txs...), tc.want, cov) })
