@@ -3,6 +3,10 @@ import argparse
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
+
+
+FIXTURE_PATH = Path(__file__).resolve().parents[1] / "conformance/fixtures/CV-DA-INTEGRITY.json"
 
 
 def sha3_256(b: bytes) -> bytes:
@@ -266,11 +270,7 @@ def build_block(height: int, prev_timestamps: list[int], txs: list[TxParts]) -> 
     }
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="-", help="output path (default: stdout)")
-    args = ap.parse_args()
-
+def generate() -> bytes:
     height = 5
     prev_timestamps = [1000, 1001, 1002, 1003, 1004]
 
@@ -309,10 +309,10 @@ def main() -> None:
             "id": vector_id,
             "op": "block_basic_check",
             "expect_ok": expect_ok,
-            **block_ctx,
         }
         if expect_err is not None:
             vector["expect_err"] = expect_err
+        vector.update(block_ctx)
         vectors.append(vector)
 
     build_vector_from_non_coinbase_txs(
@@ -362,15 +362,43 @@ def main() -> None:
         expect_ok=False,
         expect_err="TX_ERR_PARSE",
     )
+    alias = dict(vectors[-1])
+    alias["id"] = "CV-DA-CHUNK-COUNT-ZERO"
+    alias["note"] = "DA_COMMIT_TX with chunk_count=0 MUST be rejected at parse-time as TX_ERR_PARSE."
+    vectors.append(alias)
 
     out_obj = {"gate": "CV-DA-INTEGRITY", "vectors": vectors}
-    out_text = json.dumps(out_obj, indent=2, sort_keys=False) + "\n"
+    return (json.dumps(out_obj, indent=2, sort_keys=False) + "\n").encode("utf-8")
+
+
+def check_fixture(generated: bytes) -> bool:
+    try:
+        committed = FIXTURE_PATH.read_bytes()
+    except OSError as exc:
+        print(f"CV-DA-INTEGRITY check failed: {exc}")
+        return False
+    if generated != committed:
+        print("CV-DA-INTEGRITY check failed: committed fixture differs")
+        return False
+    print("CV-DA-INTEGRITY check passed")
+    return True
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    outputs = ap.add_mutually_exclusive_group()
+    outputs.add_argument("--out", default="-", help="output path (default: stdout)")
+    outputs.add_argument("--check", action="store_true", help="compare with the committed fixture")
+    args = ap.parse_args()
+
+    generated = generate()
+    if args.check:
+        raise SystemExit(0 if check_fixture(generated) else 1)
 
     if args.out == "-" or args.out == "":
-        print(out_text, end="")
+        print(generated.decode("utf-8"), end="")
     else:
-        with open(args.out, "w", encoding="utf-8") as f:
-            f.write(out_text)
+        Path(args.out).write_bytes(generated)
 
 
 if __name__ == "__main__":
