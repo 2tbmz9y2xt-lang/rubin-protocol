@@ -336,10 +336,10 @@ func validateBlockBodyConnectChecks(pb *ParsedBlock, blockHeight uint64, rotatio
 	if err := validateDASetIntegrity(pb.Txs); err != nil {
 		return err
 	}
-	if err := validateCoinbaseBlockTxSemantics(pb, blockHeight, rotation); err != nil {
-		return err
-	}
-	return validateCoinbaseApplyOutputs(pb.Txs[0])
+	// Connect applies coinbase covenant creation in output order to its local
+	// UTXO map. Keep only its block structure and locktime validation here;
+	// standalone ValidateBlockBasic retains full coinbase semantics above.
+	return validateCoinbaseStructure(pb, blockHeight)
 }
 
 // ValidateBlockBasicWithContextAndFeesAtHeight extends basic block validation with the

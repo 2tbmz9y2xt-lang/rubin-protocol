@@ -113,8 +113,8 @@ fn coinbase_value_limit(
         .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "u128 overflow"))
 }
 
-pub(crate) fn validate_coinbase_apply_outputs(coinbase: &Tx) -> Result<(), TxError> {
-    for out in &coinbase.outputs {
+pub(crate) fn validate_coinbase_apply_outputs(outputs: &[TxOutput]) -> Result<(), TxError> {
+    for out in outputs {
         if out.covenant_type == COV_TYPE_VAULT {
             return Err(TxError::new(
                 ErrorCode::BlockErrCoinbaseInvalid,

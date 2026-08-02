@@ -110,6 +110,9 @@ func ConnectBlockParallelSigVerifyWithSuiteContext(
 	for k, v := range state.Utxos {
 		workUtxos[k] = v
 	}
+	if err := applyInMemoryCoinbaseOutputs(pb, workUtxos, blockHeight, chainID, rot); err != nil {
+		return nil, err
+	}
 
 	// Create a single sig check queue for the entire block (rotation-aware so Flush uses verifySigWithRegistry).
 	sigQueue := NewSigCheckQueue(workers).WithRegistry(reg)
@@ -160,23 +163,6 @@ func ConnectBlockParallelSigVerifyWithSuiteContext(
 	// Enforce coinbase bound using locally computed fees.
 	if err := validateCoinbaseValueBound(pb, blockHeight, alreadyGenerated, sumFees); err != nil {
 		return nil, err
-	}
-
-	// Add coinbase outputs to UTXO set (spendable outputs only).
-	coinbase := pb.Txs[0]
-	coinbaseTxid := pb.Txids[0]
-	for i, out := range coinbase.Outputs {
-		if out.CovenantType == COV_TYPE_ANCHOR || out.CovenantType == COV_TYPE_DA_COMMIT {
-			continue
-		}
-		op := Outpoint{Txid: coinbaseTxid, Vout: uint32(i)}
-		workUtxos[op] = UtxoEntry{
-			Value:             out.Value,
-			CovenantType:      out.CovenantType,
-			CovenantData:      append([]byte(nil), out.CovenantData...),
-			CreationHeight:    blockHeight,
-			CreatedByCoinbase: true,
-		}
 	}
 
 	// Update already_generated(h) -> already_generated(h+1) by adding subsidy(h).

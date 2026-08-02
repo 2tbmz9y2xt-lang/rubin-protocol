@@ -66,9 +66,16 @@ func validateCoinbaseApplyOutputs(coinbase *Tx) error {
 		return txerr(BLOCK_ERR_COINBASE_INVALID, "nil coinbase")
 	}
 	for _, out := range coinbase.Outputs {
-		if out.CovenantType == COV_TYPE_VAULT {
-			return txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase must not create CORE_VAULT outputs")
+		if err := validateCoinbaseApplyOutput(out); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+func validateCoinbaseApplyOutput(out TxOutput) error {
+	if out.CovenantType == COV_TYPE_VAULT {
+		return txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase must not create CORE_VAULT outputs")
 	}
 	return nil
 }

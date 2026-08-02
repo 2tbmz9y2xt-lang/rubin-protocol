@@ -11,6 +11,10 @@ Policy:
 
 ---
 
+## 2026-08-02 — Apply coinbase before noncoinbase (RUB-1099)
+
+Manual fixture: `CV-BLOCK-BASIC.json` adds `CV-B-APPLY-COINBASE-FIRST-ERROR-VAULT-01`, which pins a valid early coinbase VAULT guard ahead of a later invalid coinbase creation output and a later invalid noncoinbase creation output. Regenerated `conformance/MATRIX.md`, `CVBlockBasicVectors.lean`, Go trace, and `GoTraceV1.lean` through existing owners. No fixture schema, runner, API, formal-model, or canonical-spec change.
+
 ## 2026-08-02 — Transaction-index first-error ordering (RUB-659)
 
 Manual fixture: `CV-BLOCK-BASIC.json` adds `CV-B-TX-ORDER-FIRST-ERROR-01`, an initialized-state `connect_block_basic` row where an earlier missing input wins over a later invalid output. Regenerated `conformance/MATRIX.md`, `CVBlockBasicVectors.lean`, Go trace, and `GoTraceV1.lean` through existing owners. No schema, runner, API, formal-model, or canonical-spec change.
