@@ -472,16 +472,12 @@ func TestPrecomputeTxContexts_CoinbasePrevoutForbidden(t *testing.T) {
 
 	pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx})
 	_, err := PrecomputeTxContexts(pb, utxos, 100)
-	if err == nil {
-		t.Fatal("expected error for coinbase prevout in non-coinbase")
-	}
-	if !isTxErrCode(err, TX_ERR_PARSE) {
-		t.Fatalf("expected TX_ERR_PARSE, got: %v", err)
-	}
+	assertTxErrCodeMsg(t, err, TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
 }
 
 func TestPrecomputeTxContexts_NonCoinbaseInputEncoding(t *testing.T) {
 	prevTxid := sha3_256([]byte("precompute-input-encoding"))
+	missingTxid := sha3_256([]byte("precompute-input-encoding-missing"))
 	utxos := map[Outpoint]UtxoEntry{
 		{Txid: prevTxid, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
 	}
@@ -498,14 +494,20 @@ func TestPrecomputeTxContexts_NonCoinbaseInputEncoding(t *testing.T) {
 		message string
 	}{
 		{
+			name:    "coinbase_prevout",
+			input:   TxInput{PrevVout: 0xffff_ffff},
+			code:    TX_ERR_PARSE,
+			message: "coinbase prevout encoding forbidden in non-coinbase",
+		},
+		{
 			name:    "script_sig",
-			input:   TxInput{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0, ScriptSig: []byte{0x01}},
+			input:   TxInput{PrevTxid: missingTxid, PrevVout: 0, Sequence: 0, ScriptSig: []byte{0x01}},
 			code:    TX_ERR_PARSE,
 			message: "script_sig must be empty under genesis covenant set",
 		},
 		{
 			name:    "sequence_high_bit",
-			input:   TxInput{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0x8000_0000},
+			input:   TxInput{PrevTxid: missingTxid, PrevVout: 1, Sequence: 0x8000_0000},
 			code:    TX_ERR_SEQUENCE_INVALID,
 			message: "sequence exceeds 0x7fffffff",
 		},
@@ -519,10 +521,23 @@ func TestPrecomputeTxContexts_NonCoinbaseInputEncoding(t *testing.T) {
 			}
 			pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx})
 
-			_, err := PrecomputeTxContexts(pb, utxos, 100)
+			_, err := PrecomputeTxContexts(pb, nil, 100)
 			assertTxErrCodeMsg(t, err, tc.code, tc.message)
 		})
 	}
+
+	t.Run("sequence_max", func(t *testing.T) {
+		tx := &Tx{
+			Version: 1, TxKind: 0x00, TxNonce: 1,
+			Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0x7fff_ffff}},
+			Outputs: []TxOutput{{Value: 50, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+			Witness: []WitnessItem{dummyWitness},
+		}
+		contexts, err := PrecomputeTxContexts(makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx}), utxos, 100)
+		if err != nil || len(contexts) != 1 {
+			t.Fatalf("sequence 0x7fffffff: contexts=%d err=%v", len(contexts), err)
+		}
+	})
 }
 
 func TestPrecomputeTxContexts_NilTx(t *testing.T) {
@@ -760,5 +775,146 @@ func TestAddWitnessSlots_Overflow(t *testing.T) {
 	_, err = addWitnessSlots(maxInt-10, 20)
 	if err == nil {
 		t.Fatal("expected overflow error")
+	}
+}
+
+func precomputeP2PKSpendForTest(nonce uint64, input TxInput, outputValue uint64) *Tx {
+	return &Tx{
+		Version: 1, TxKind: 0x00, TxNonce: nonce,
+		Inputs:  []TxInput{input},
+		Outputs: []TxOutput{{Value: outputValue, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
+		Witness: []WitnessItem{{
+			SuiteID:   SUITE_ID_ML_DSA_87,
+			Pubkey:    make([]byte, ML_DSA_87_PUBKEY_BYTES),
+			Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
+		}},
+	}
+}
+
+func TestPrecomputeTxContexts_CoinbaseOverlay(t *testing.T) {
+	const height = uint64(100)
+	coinbaseTxid := sha3_256([]byte{0})
+
+	t.Run("current_spendable_output_is_immature", func(t *testing.T) {
+		collision := Outpoint{Txid: coinbaseTxid, Vout: 0}
+		collisionData := validP2PKCovenantData()
+		utxos := map[Outpoint]UtxoEntry{collision: {Value: 77, CovenantType: COV_TYPE_P2PK, CovenantData: collisionData}}
+		tx := precomputeP2PKSpendForTest(1, TxInput{PrevTxid: coinbaseTxid, PrevVout: 0}, 1)
+		_, err := PrecomputeTxContexts(makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx}), utxos, height)
+		assertTxErrCodeMsg(t, err, TX_ERR_COINBASE_IMMATURE, "coinbase immature")
+		if got := utxos[collision]; got.Value != 77 || string(got.CovenantData) != string(collisionData) {
+			t.Fatalf("caller snapshot collision mutated: %#v", got)
+		}
+	})
+
+	t.Run("anchor_is_not_inserted", func(t *testing.T) {
+		coinbase := makeSimpleCoinbase()
+		coinbase.Outputs = append(coinbase.Outputs, TxOutput{Value: 0, CovenantType: COV_TYPE_ANCHOR, CovenantData: []byte{1}})
+		tx := precomputeP2PKSpendForTest(1, TxInput{PrevTxid: coinbaseTxid, PrevVout: 1}, 1)
+		_, err := PrecomputeTxContexts(makeParsedBlockForPrecompute(coinbase, []*Tx{tx}), nil, height)
+		assertTxErrCodeMsg(t, err, TX_ERR_MISSING_UTXO, "utxo not found")
+	})
+
+	t.Run("da_commit_is_rejected", func(t *testing.T) {
+		coinbase := makeSimpleCoinbase()
+		coinbase.Outputs = []TxOutput{{Value: 0, CovenantType: COV_TYPE_DA_COMMIT, CovenantData: make([]byte, 32)}}
+		_, err := PrecomputeTxContexts(makeParsedBlockForPrecompute(coinbase, nil), nil, height)
+		assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_DA_COMMIT allowed only in tx_kind=0x01")
+	})
+}
+
+func TestPrecomputeTxContexts_CoinbaseApplyOutputOrder(t *testing.T) {
+	vault := TxOutput{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: validVaultCovenantDataForP2PKOutput()}
+	invalid := TxOutput{Value: 0, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}
+	noInputs := &Tx{Version: 1, TxKind: 0, TxNonce: 1, Outputs: []TxOutput{invalid}}
+
+	for _, tc := range []struct {
+		name    string
+		outputs []TxOutput
+		txs     []*Tx
+		code    ErrorCode
+		message string
+	}{
+		{"vault_before_later_output", []TxOutput{vault, invalid}, nil, BLOCK_ERR_COINBASE_INVALID, "coinbase must not create CORE_VAULT outputs"},
+		{"output_before_vault", []TxOutput{invalid, vault}, nil, TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK value must be > 0"},
+		{"invalid_coinbase_before_invalid_tx1", []TxOutput{vault}, []*Tx{noInputs}, BLOCK_ERR_COINBASE_INVALID, "coinbase must not create CORE_VAULT outputs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			coinbase := makeSimpleCoinbase()
+			coinbase.Outputs = tc.outputs
+			_, err := PrecomputeTxContexts(makeParsedBlockForPrecompute(coinbase, tc.txs), nil, 100)
+			assertTxErrCodeMsg(t, err, tc.code, tc.message)
+		})
+	}
+}
+
+func TestPrecomputeTxContexts_BlockEnvelopeOrder(t *testing.T) {
+	prev := sha3_256([]byte("precompute-envelope"))
+	inputOp := Outpoint{Txid: prev, Vout: 0}
+	utxos := map[Outpoint]UtxoEntry{inputOp: {Value: 2, CreationHeight: 7, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}}
+	input := TxInput{PrevTxid: prev, PrevVout: 0}
+
+	t.Run("zero_nonce_zero_inputs", func(t *testing.T) {
+		tx := &Tx{Version: 1, TxKind: 0, TxNonce: 0, Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}}}
+		_, err := PrecomputeTxContexts(makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx}), utxos, 100)
+		assertTxErrCodeMsg(t, err, TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
+	})
+
+	t.Run("zero_nonce_with_input", func(t *testing.T) {
+		_, err := PrecomputeTxContexts(makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{precomputeP2PKSpendForTest(0, input, 1)}), utxos, 100)
+		assertTxErrCodeMsg(t, err, TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
+	})
+
+	t.Run("duplicate_nonce", func(t *testing.T) {
+		txs := []*Tx{precomputeP2PKSpendForTest(1, input, 1), precomputeP2PKSpendForTest(1, input, 1)}
+		_, err := PrecomputeTxContexts(makeParsedBlockForPrecompute(makeSimpleCoinbase(), txs), utxos, 100)
+		assertTxErrCodeMsg(t, err, TX_ERR_NONCE_REPLAY, "duplicate tx_nonce in block")
+	})
+
+	t.Run("coinbase_like_at_index_one", func(t *testing.T) {
+		coinbaseLike := makeSimpleCoinbase()
+		coinbaseLike.Inputs[0].Sequence = ^uint32(0)
+		_, err := PrecomputeTxContexts(makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{coinbaseLike}), utxos, 100)
+		assertTxErrCodeMsg(t, err, BLOCK_ERR_COINBASE_INVALID, "coinbase-like tx is only allowed at index 0")
+	})
+
+	t.Run("late_error_discards_contexts", func(t *testing.T) {
+		missing := TxInput{PrevTxid: sha3_256([]byte("precompute-late-missing")), PrevVout: 0}
+		before := cloneUtxoEntry(utxos[inputOp])
+		beforeLen := len(utxos)
+		contexts, err := PrecomputeTxContexts(makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{
+			precomputeP2PKSpendForTest(1, input, 1), precomputeP2PKSpendForTest(2, missing, 1),
+		}), utxos, 100)
+		if contexts != nil {
+			t.Fatalf("returned %d partial contexts", len(contexts))
+		}
+		assertTxErrCodeMsg(t, err, TX_ERR_MISSING_UTXO, "utxo not found")
+		after, ok := utxos[inputOp]
+		if len(utxos) != beforeLen || !ok || after.Value != before.Value ||
+			after.CreationHeight != before.CreationHeight || after.CovenantType != before.CovenantType ||
+			after.CreatedByCoinbase != before.CreatedByCoinbase || string(after.CovenantData) != string(before.CovenantData) {
+			t.Fatalf("caller snapshot mutated after late error: before=%#v after=%#v len=%d", before, after, len(utxos))
+		}
+	})
+}
+
+func TestPrecomputeTxContexts_ContextDetachesSnapshotBytes(t *testing.T) {
+	const height = uint64(100)
+	prev := sha3_256([]byte("precompute-detached-bytes"))
+	op := Outpoint{Txid: prev, Vout: 0}
+	data := validP2PKCovenantData()
+	want := data[0]
+	utxos := map[Outpoint]UtxoEntry{op: {Value: 2, CovenantType: COV_TYPE_P2PK, CovenantData: data}}
+	contexts, err := PrecomputeTxContexts(makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{
+		precomputeP2PKSpendForTest(1, TxInput{PrevTxid: prev, PrevVout: 0}, 1),
+	}), utxos, height)
+	if err != nil {
+		t.Fatalf("precompute: %v", err)
+	}
+	entry := utxos[op]
+	entry.CovenantData[0] ^= 0xff
+	utxos[op] = entry
+	if got := contexts[0].ResolvedInputs[0].CovenantData[0]; got != want {
+		t.Fatalf("context bytes alias caller snapshot: got %x want %x", got, want)
 	}
 }
