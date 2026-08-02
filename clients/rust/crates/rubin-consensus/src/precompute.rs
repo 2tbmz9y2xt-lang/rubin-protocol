@@ -310,7 +310,8 @@ fn compute_precompute_fee(sum_in: u128, outputs: &[TxOutput]) -> Result<u64, TxE
             "fee overflow u64",
         ));
     }
-    Ok(fee as u64)
+    u64::try_from(fee)
+        .map_err(|_| TxError::new(ErrorCode::TxErrValueConservation, "fee overflow u64"))
 }
 
 fn update_precompute_overlay(
