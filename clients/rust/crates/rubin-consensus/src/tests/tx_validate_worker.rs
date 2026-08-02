@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::slice::from_ref;
 
 use crate::block::{BlockHeader, BLOCK_HEADER_BYTES};
 use crate::block_basic::ParsedBlock;
 use crate::constants::*;
-use crate::error::ErrorCode;
+use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
 use crate::precompute::{precompute_tx_contexts, PrecomputedTxContext};
 use crate::tx::{Tx, TxInput, TxOutput, WitnessItem};
@@ -12,6 +13,7 @@ use crate::tx_validate_worker::{
 };
 use crate::utxo_basic::{Outpoint, UtxoEntry};
 use crate::worker_pool::{WorkerCancellationToken, WorkerPoolError, WorkerResult};
+type TxWorkerResult = WorkerResult<TxValidationResult, TxError>;
 
 fn valid_p2pk_covenant_data() -> Vec<u8> {
     // Genesis-valid CORE_P2PK covenant_data: suite_id byte + key-id placeholder.
@@ -727,26 +729,24 @@ fn run_tx_validation_workers_with_sig_cache_reuses_positive_result() {
     )
     .unwrap();
     assert_eq!(first.len(), 1);
-    assert!(
-        first[0].error.is_none(),
-        "first run err: {:?}",
-        first[0].error
-    );
+    assert!(first[0].error.is_none());
+    let first_value = first[0].value.as_ref().expect("first completed value");
+    assert!(first_value.valid);
+    assert!(first_value.err.is_none());
     assert_eq!(cache.hits(), 0);
 
     let second =
         run_tx_validation_workers(&token, 1, ptcs, &pb, [0u8; 32], 100, 0, Some(cache.clone()))
             .unwrap();
     assert_eq!(second.len(), 1);
-    assert!(
-        second[0].error.is_none(),
-        "second run err: {:?}",
-        second[0].error
-    );
+    assert!(second[0].error.is_none());
+    let second_value = second[0].value.as_ref().expect("second completed value");
+    assert!(second_value.valid);
+    assert!(second_value.err.is_none());
     assert_eq!(cache.hits(), 1);
 }
 
-/// Exercises run_tx_validation_workers worker closure (lines 351-367).
+/// Exercises the run_tx_validation_workers worker closure.
 #[test]
 fn validate_tx_local_worker_pool_closure() {
     let tx = simple_p2pk_tx(0x42);
@@ -755,8 +755,16 @@ fn validate_tx_local_worker_pool_closure() {
     let token = WorkerCancellationToken::new();
     let results = run_tx_validation_workers(&token, 2, ptcs, &pb, [0u8; 32], 100, 0, None).unwrap();
     assert_eq!(results.len(), 1);
-    // The result will have an error (dummy sig) but the worker was exercised.
-    assert!(results[0].error.is_some() || results[0].value.is_some());
+    assert!(results[0].error.is_none());
+    let value = results[0].value.as_ref().expect("completed value");
+    assert!(!value.valid);
+    assert_eq!(value.tx_index, 1);
+    let err = value.err.as_ref().expect("domain error");
+    assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    assert_eq!(err.msg, "CORE_P2PK key binding mismatch");
+    let reduced = first_tx_error(&results).expect("reduced domain error");
+    assert_eq!(reduced.code, ErrorCode::TxErrSigInvalid);
+    assert_eq!(reduced.msg, "CORE_P2PK key binding mismatch");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -781,11 +789,15 @@ fn run_tx_validation_workers_cancelled_token() {
 
     let results = run_tx_validation_workers(&token, 2, ptcs, &pb, [0u8; 32], 100, 0, None).unwrap();
     assert_eq!(results.len(), 1);
+    assert!(results[0].value.is_none());
     assert!(results[0].error.is_some());
     match &results[0].error {
         Some(WorkerPoolError::Cancelled) => {}
         other => panic!("expected Cancelled, got {:?}", other),
     }
+    let fallback = first_tx_error(&results).expect("cancel fallback");
+    assert_eq!(fallback.code, ErrorCode::TxErrParse);
+    assert_eq!(fallback.msg, "validation cancelled");
 }
 
 #[test]
@@ -860,6 +872,70 @@ fn run_tx_validation_workers_valid_p2pk_real_signature() {
     assert_eq!(value.fee, 10);
 }
 
+#[test]
+fn run_tx_validation_workers_orders_domain_errors_by_tx_index() {
+    let txs = vec![simple_p2pk_tx(0x41), simple_p2pk_tx(0x42)];
+    let pb = make_parsed_block(simple_coinbase(), txs);
+    let lower = PrecomputedTxContext {
+        tx_index: 1,
+        tx_block_idx: 1,
+        txid: [1u8; 32],
+        resolved_inputs: vec![],
+        witness_start: 0,
+        witness_end: 1,
+        input_outpoints: vec![],
+        fee: 0,
+    };
+    let higher = PrecomputedTxContext {
+        tx_index: 2,
+        tx_block_idx: 2,
+        txid: [2u8; 32],
+        resolved_inputs: vec![UtxoEntry {
+            value: 100,
+            covenant_type: 0xffff,
+            covenant_data: vec![],
+            creation_height: 1,
+            created_by_coinbase: false,
+        }],
+        witness_start: 0,
+        witness_end: 1,
+        input_outpoints: vec![Outpoint {
+            txid: [2u8; 32],
+            vout: 0,
+        }],
+        fee: 10,
+    };
+
+    for max_workers in [1, 2] {
+        let token = WorkerCancellationToken::new();
+        let results = run_tx_validation_workers(
+            &token,
+            max_workers,
+            vec![higher.clone(), lower.clone()],
+            &pb,
+            [0u8; 32],
+            100,
+            0,
+            None,
+        )
+        .expect("run workers");
+        let higher_value = results[0].value.as_ref().unwrap();
+        let lower_value = results[1].value.as_ref().unwrap();
+        assert_eq!(lower_value.tx_index, 1);
+        assert_eq!(
+            higher_value.err.as_ref().unwrap().code,
+            ErrorCode::TxErrCovenantTypeInvalid
+        );
+        assert_eq!(
+            lower_value.err.as_ref().unwrap().msg,
+            "witness_count mismatch"
+        );
+        let got = first_tx_error(&results).expect("domain error");
+        assert_eq!(got.code, ErrorCode::TxErrParse);
+        assert_eq!(got.msg, "witness_count mismatch");
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // first_tx_error
 // ─────────────────────────────────────────────────────────────────────────────
@@ -899,8 +975,6 @@ fn first_tx_error_nil() {
 
 #[test]
 fn first_tx_error_single_error() {
-    use crate::error::TxError;
-
     let err = TxError::new(ErrorCode::TxErrSigInvalid, "sig");
     let results: Vec<WorkerResult<TxValidationResult, _>> = vec![WorkerResult {
         value: Some(TxValidationResult {
@@ -910,7 +984,7 @@ fn first_tx_error_single_error() {
             sig_count: 0,
             fee: 0,
         }),
-        error: Some(WorkerPoolError::Task(err.clone())),
+        error: None,
     }];
 
     let got = first_tx_error(&results).expect("single error");
@@ -920,8 +994,6 @@ fn first_tx_error_single_error() {
 
 #[test]
 fn first_tx_error_picks_smallest_tx_index() {
-    use crate::error::TxError;
-
     let err3 = TxError::new(ErrorCode::TxErrParse, "tx3");
     let err1 = TxError::new(ErrorCode::TxErrMissingUtxo, "tx1");
 
@@ -934,7 +1006,7 @@ fn first_tx_error_picks_smallest_tx_index() {
                 sig_count: 0,
                 fee: 0,
             }),
-            error: Some(WorkerPoolError::Task(err3)),
+            error: None,
         },
         WorkerResult {
             value: Some(TxValidationResult {
@@ -954,7 +1026,7 @@ fn first_tx_error_picks_smallest_tx_index() {
                 sig_count: 0,
                 fee: 0,
             }),
-            error: Some(WorkerPoolError::Task(err1.clone())),
+            error: None,
         },
     ];
 
@@ -967,8 +1039,6 @@ fn first_tx_error_picks_smallest_tx_index() {
 
 #[test]
 fn first_tx_error_fallback_when_tx_index_zero() {
-    use crate::error::TxError;
-
     let err_a = TxError::new(ErrorCode::TxErrParse, "missing index A");
     let err_b = TxError::new(ErrorCode::TxErrParse, "missing index B");
 
@@ -982,7 +1052,7 @@ fn first_tx_error_fallback_when_tx_index_zero() {
                 sig_count: 0,
                 fee: 0,
             }),
-            error: Some(WorkerPoolError::Task(err_a.clone())),
+            error: None,
         },
         WorkerResult {
             value: Some(TxValidationResult {
@@ -992,10 +1062,52 @@ fn first_tx_error_fallback_when_tx_index_zero() {
                 sig_count: 0,
                 fee: 0,
             }),
-            error: Some(WorkerPoolError::Task(err_b)),
+            error: None,
         },
     ];
 
     let got = first_tx_error(&results).unwrap();
     assert!(got.msg.contains("missing index A"));
+}
+
+fn invalid_worker_value(tx_index: usize, code: ErrorCode, msg: &'static str) -> TxWorkerResult {
+    WorkerResult {
+        value: Some(TxValidationResult {
+            tx_index,
+            valid: false,
+            err: Some(TxError::new(code, msg)),
+            sig_count: 0,
+            fee: 0,
+        }),
+        error: None,
+    }
+}
+
+#[test]
+fn first_tx_error_defensive_precedence_and_stability() {
+    let msg = |results: &[TxWorkerResult]| first_tx_error(results).unwrap().msg;
+    let task = TxError::new(ErrorCode::TxErrMissingUtxo, "task fallback");
+    let task_result = WorkerResult {
+        value: None,
+        error: Some(WorkerPoolError::Task(task.clone())),
+    };
+    let panic_result = WorkerResult {
+        value: None,
+        error: Some(WorkerPoolError::Panic("detail is hidden".into())),
+    };
+    assert_eq!(first_tx_error(from_ref(&task_result)), Some(task.clone()));
+    assert_eq!(
+        msg(from_ref(&panic_result)),
+        "worker panicked during validation"
+    );
+
+    let positive = invalid_worker_value(3, ErrorCode::TxErrSigInvalid, "positive");
+    assert_eq!(msg(&[task_result.clone(), positive.clone()]), "positive");
+    let zero = invalid_worker_value(0, ErrorCode::TxErrParse, "zero");
+    assert_eq!(msg(&[zero, positive.clone()]), "positive");
+
+    let tie_first = invalid_worker_value(4, ErrorCode::TxErrParse, "tie first");
+    let tie_second = invalid_worker_value(4, ErrorCode::TxErrSigInvalid, "tie second");
+    assert_eq!(msg(&[tie_first, tie_second]), "tie first");
+    assert_eq!(msg(&[task_result, panic_result]), "task fallback");
 }

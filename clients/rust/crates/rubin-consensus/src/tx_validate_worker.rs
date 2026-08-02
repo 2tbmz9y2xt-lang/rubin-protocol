@@ -335,6 +335,11 @@ fn validate_input_spend(
 /// Validate multiple transactions in parallel using the deterministic
 /// [`WorkerPool`]. Returns results in submission order.
 ///
+/// Every completed validation, including a domain-invalid transaction, is a
+/// successful pool value containing its `tx_index` and canonical error. Only
+/// cancellation or panic before a value is produced uses the pool error field.
+/// Contexts, ParsedBlock, UTXO, and consensus state remain unchanged; optional thread-safe [`SigCache`] may update.
+///
 /// Returns a pool-level error only if the worker-pool substrate itself
 /// rejects the batch before task execution starts.
 #[allow(clippy::too_many_arguments)]
@@ -353,42 +358,51 @@ pub fn run_tx_validation_workers(
         return Ok(Vec::new());
     }
     run_worker_pool(token, max_workers, max_tasks, ptcs, |_cancel, ptc| {
-        let r = validate_tx_local(
+        Ok(validate_tx_local(
             &ptc,
             pb,
             chain_id,
             block_height,
             block_mtp,
             sig_cache.as_ref(),
-        );
-        if let Some(ref e) = r.err {
-            Err(e.clone())
-        } else {
-            Ok(r)
-        }
+        ))
     })
 }
 
-/// Return the first error by transaction index from validation results, or
-/// `None` if all transactions are valid. Deterministic: always selects the
-/// smallest positive `tx_index` among failed results.
+fn tx_error_candidate(
+    result: &WorkerResult<TxValidationResult, TxError>,
+) -> Option<(usize, TxError)> {
+    let domain = result
+        .value
+        .as_ref()
+        .map(|value| (value.tx_index, value.err.as_ref()));
+    if let Some((tx_index, Some(err))) = domain {
+        return Some((tx_index, err.clone()));
+    }
+    result.error.as_ref().map(|error| match error {
+        WorkerPoolError::Task(err) => (0, err.clone()),
+        WorkerPoolError::Cancelled => (
+            0,
+            TxError::new(ErrorCode::TxErrParse, "validation cancelled"),
+        ),
+        WorkerPoolError::Panic(_) => (
+            0,
+            TxError::new(ErrorCode::TxErrParse, "worker panicked during validation"),
+        ),
+    })
+}
+
+/// Return the first validation error, preferring the completed domain error
+/// with the smallest positive transaction index. Equal positive indices retain
+/// stable submission order. Zero-index domain errors and identityless pool
+/// errors are stable fallbacks and cannot preempt a positive-index error.
 pub fn first_tx_error(results: &[WorkerResult<TxValidationResult, TxError>]) -> Option<TxError> {
     let mut best: Option<(usize, TxError)> = None;
     for r in results {
-        let err = match &r.error {
-            Some(WorkerPoolError::Task(e)) => e.clone(),
-            Some(WorkerPoolError::Cancelled) => {
-                TxError::new(ErrorCode::TxErrParse, "validation cancelled")
-            }
-            Some(WorkerPoolError::Panic(_)) => {
-                TxError::new(ErrorCode::TxErrParse, "worker panicked during validation")
-            }
-            None => continue,
+        let Some((tx_index, err)) = tx_error_candidate(r) else {
+            continue;
         };
-        let tx_index = r.value.as_ref().map_or(0, |v| v.tx_index);
         if tx_index == 0 {
-            // Defensive: if tx index is lost (0 = unset), keep the first
-            // such error seen.
             if best.is_none() {
                 best = Some((tx_index, err));
             }
