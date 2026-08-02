@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use crate::constants::{
     COV_TYPE_ANCHOR, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_CORE_STEALTH, COV_TYPE_DA_COMMIT,
     COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_RESERVED_FUTURE, COV_TYPE_VAULT,
     MAX_ANCHOR_PAYLOAD_SIZE, MAX_COVENANT_DATA_PER_OUTPUT, MAX_P2PK_COVENANT_DATA,
+    SIMPLICITY_MAX_GROUP_OUTPUTS,
 };
 use crate::error::{ErrorCode, TxError};
 use crate::htlc::parse_htlc_covenant_data;
@@ -148,8 +151,48 @@ pub fn validate_tx_covenants_genesis(
         Ok(true)
     }
 
-    for out in &tx.outputs {
-        match out.covenant_type {
+    fn validate_core_simplicity_genesis_output(
+        out: &TxOutput,
+        block_height: u64,
+        rp: &dyn RotationProvider,
+    ) -> Result<[u8; 32], TxError> {
+        // Deployment activation must precede covenant_data parsing.
+        validate_core_simplicity_deployment_active(block_height, rp)
+            .and_then(|_| validate_core_simplicity_covenant_data(out.value, &out.covenant_data))
+            .and_then(|_| {
+                out.covenant_data
+                    .first_chunk::<32>()
+                    .copied()
+                    .ok_or(TxError::new(
+                        ErrorCode::TxErrCovenantTypeInvalid,
+                        "CORE_SIMPLICITY program_cmr parse failure",
+                    ))
+            })
+    }
+
+    fn validate_simplicity_output_group_cap(
+        simplicity_output_cmrs: &[[u8; 32]],
+    ) -> Result<(), TxError> {
+        let mut groups = HashMap::with_capacity(simplicity_output_cmrs.len());
+        simplicity_output_cmrs.iter().try_for_each(|program_cmr| {
+            let count = groups.entry(*program_cmr).or_insert(0usize);
+            *count += 1;
+            if *count > SIMPLICITY_MAX_GROUP_OUTPUTS {
+                return Err(TxError::new(
+                    ErrorCode::TxErrCovenantTypeInvalid,
+                    "CORE_SIMPLICITY same-cmr output group exceeds limit",
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    // Complete per-output validation in wire order before applying the
+    // transaction-level same-program_cmr cap, so a later creation error wins.
+    let mut simplicity_output_cmrs = Vec::new();
+    tx.outputs
+        .iter()
+        .try_for_each(|out| match out.covenant_type {
             COV_TYPE_P2PK | COV_TYPE_ANCHOR => {
                 validate_p2pk_anchor(out, block_height, rp).map(|_| ())
             }
@@ -160,12 +203,9 @@ pub fn validate_tx_covenants_genesis(
                 validate_stealth_da(out, tx.tx_kind).map(|_| ())
             }
             COV_TYPE_CORE_SIMPLICITY => {
-                // Mirrors Go: gate on the deployment being active first, then
-                // validate covenant_data structure. The default provider reports
-                // inactive, so creation stays fail-closed ("deployment not
-                // active") until a deployment is wired and threaded.
-                validate_core_simplicity_deployment_active(block_height, rp)?;
-                validate_core_simplicity_covenant_data(out.value, &out.covenant_data)
+                validate_core_simplicity_genesis_output(out, block_height, rp).map(|program_cmr| {
+                    simplicity_output_cmrs.push(program_cmr);
+                })
             }
             COV_TYPE_RESERVED_FUTURE => Err(TxError::new(
                 ErrorCode::TxErrCovenantTypeInvalid,
@@ -175,8 +215,7 @@ pub fn validate_tx_covenants_genesis(
                 ErrorCode::TxErrCovenantTypeInvalid,
                 "unknown covenant_type",
             )),
-        }?;
-    }
+        })?;
 
-    Ok(())
+    validate_simplicity_output_group_cap(&simplicity_output_cmrs)
 }

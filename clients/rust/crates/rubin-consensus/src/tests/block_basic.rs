@@ -260,6 +260,90 @@ fn validate_block_basic_with_fees_core_simplicity_uses_rotation() {
 }
 
 #[test]
+fn validate_block_basic_core_simplicity_output_group_cap_coinbase() {
+    use crate::suite_registry::{DefaultRotationProvider, NativeSuiteSet, RotationProvider};
+
+    struct SimplicityActive;
+    impl RotationProvider for SimplicityActive {
+        fn native_create_suites(&self, h: u64) -> NativeSuiteSet {
+            DefaultRotationProvider.native_create_suites(h)
+        }
+        fn native_spend_suites(&self, h: u64) -> NativeSuiteSet {
+            DefaultRotationProvider.native_spend_suites(h)
+        }
+        fn simplicity_active_at_height(&self, _h: u64) -> bool {
+            true
+        }
+    }
+
+    let height = 10u64;
+    let subsidy = crate::subsidy::block_subsidy(height, 0);
+    let cmr = [0x77; 32];
+    let coinbase_with = |output_count: usize| {
+        let mut covenant_data = cmr.to_vec();
+        crate::compactsize::encode_compact_size(0, &mut covenant_data);
+        let mut outputs = Vec::with_capacity(output_count + 1);
+        let output_count_u64 = u64::try_from(output_count).expect("test output count fits u64");
+        for index in 0..output_count {
+            outputs.push(TestOutput {
+                // Keep the full subsidy constraint live while every
+                // CORE_SIMPLICITY output remains nonzero.
+                value: if index == 0 {
+                    subsidy - (output_count_u64 - 1)
+                } else {
+                    1
+                },
+                covenant_type: COV_TYPE_CORE_SIMPLICITY,
+                covenant_data: covenant_data.clone(),
+            });
+        }
+        let witness_root = witness_merkle_root_wtxids(&[[0u8; 32]]).expect("witness root");
+        outputs.push(TestOutput {
+            value: 0,
+            covenant_type: COV_TYPE_ANCHOR,
+            covenant_data: witness_commitment_hash(witness_root).to_vec(),
+        });
+        coinbase_tx_with_outputs(height as u32, &outputs)
+    };
+    let mut prev = [0u8; 32];
+    prev[0] = 0xa8;
+    let target = [0xffu8; 32];
+    let block_with = |output_count: usize, nonce: u64| {
+        let coinbase = coinbase_with(output_count);
+        let (_tx, txid, _wtxid, _nonce) = parse_tx(&coinbase).expect("coinbase bytes");
+        let root = merkle_root_txids(&[txid]).expect("coinbase merkle root");
+        build_block_bytes(prev, root, target, nonce, &[coinbase])
+    };
+    let active = SimplicityActive;
+    let validate = |block: &[u8]| {
+        crate::validate_block_basic_with_context_and_fees_at_height_and_rotation(
+            block,
+            Some(prev),
+            Some(target),
+            height,
+            None,
+            0,
+            0,
+            Some(&active),
+        )
+    };
+
+    assert_eq!(
+        validate(&block_with(SIMPLICITY_MAX_GROUP_OUTPUTS, 59))
+            .expect("coinbase exactly at group cap must validate")
+            .tx_count,
+        1
+    );
+    assert_eq!(
+        validate(&block_with(SIMPLICITY_MAX_GROUP_OUTPUTS + 1, 60)).unwrap_err(),
+        crate::error::TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_SIMPLICITY same-cmr output group exceeds limit",
+        )
+    );
+}
+
+#[test]
 fn validate_block_basic_linkage_mismatch() {
     let tx = minimal_tx_bytes();
     let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");

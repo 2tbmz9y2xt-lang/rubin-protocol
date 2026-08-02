@@ -1182,6 +1182,183 @@ fn apply_non_coinbase_tx_basic_workq_covenant_genesis_error() {
 }
 
 #[test]
+fn apply_non_coinbase_tx_basic_output_group_cap_atomic() {
+    use crate::suite_registry::{DefaultRotationProvider, NativeSuiteSet, RotationProvider};
+
+    struct SimplicityActive;
+    impl RotationProvider for SimplicityActive {
+        fn native_create_suites(&self, h: u64) -> NativeSuiteSet {
+            DefaultRotationProvider.native_create_suites(h)
+        }
+        fn native_spend_suites(&self, h: u64) -> NativeSuiteSet {
+            DefaultRotationProvider.native_spend_suites(h)
+        }
+        fn simplicity_active_at_height(&self, _h: u64) -> bool {
+            true
+        }
+    }
+
+    let mut simplicity_covenant_data = [0x91; 32].to_vec();
+    crate::compactsize::encode_compact_size(0, &mut simplicity_covenant_data);
+    let simplicity_outputs = |count: usize| {
+        (0..count)
+            .map(|_| crate::tx::TxOutput {
+                value: 1,
+                covenant_type: COV_TYPE_CORE_SIMPLICITY,
+                covenant_data: simplicity_covenant_data.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let tx_with_outputs = |prev_txid: [u8; 32], output_count: usize| crate::tx::Tx {
+        version: 1,
+        tx_kind: 0,
+        tx_nonce: 1,
+        inputs: vec![p2pk_input(prev_txid)],
+        outputs: simplicity_outputs(output_count),
+        locktime: 0,
+        witness: vec![],
+        da_payload: vec![],
+        da_commit_core: None,
+        da_chunk_core: None,
+    };
+    let p2pk_prev_txid = [0xb1; 32];
+    let simplicity_prev_txid = [0xb2; 32];
+    let p2pk_covenant_data = valid_p2pk_covenant_data();
+    let cases = [
+        (
+            "P2PK input",
+            tx_with_outputs(p2pk_prev_txid, SIMPLICITY_MAX_GROUP_OUTPUTS + 1),
+            tx_with_outputs(p2pk_prev_txid, SIMPLICITY_MAX_GROUP_OUTPUTS),
+            HashMap::from([(
+                Outpoint {
+                    txid: p2pk_prev_txid,
+                    vout: 0,
+                },
+                UtxoEntry {
+                    value: 100,
+                    covenant_type: COV_TYPE_P2PK,
+                    covenant_data: p2pk_covenant_data,
+                    creation_height: 0,
+                    created_by_coinbase: false,
+                },
+            )]),
+            crate::error::TxError::new(ErrorCode::TxErrParse, "witness underflow"),
+        ),
+        (
+            "CORE_SIMPLICITY input",
+            tx_with_outputs(simplicity_prev_txid, SIMPLICITY_MAX_GROUP_OUTPUTS + 1),
+            tx_with_outputs(simplicity_prev_txid, SIMPLICITY_MAX_GROUP_OUTPUTS),
+            HashMap::from([(
+                Outpoint {
+                    txid: simplicity_prev_txid,
+                    vout: 0,
+                },
+                UtxoEntry {
+                    value: 100,
+                    covenant_type: COV_TYPE_CORE_SIMPLICITY,
+                    covenant_data: simplicity_covenant_data.clone(),
+                    creation_height: 0,
+                    created_by_coinbase: false,
+                },
+            )]),
+            crate::error::TxError::new(
+                ErrorCode::TxErrCovenantTypeInvalid,
+                "CORE_SIMPLICITY spend evaluation not enabled",
+            ),
+        ),
+    ];
+    let active = SimplicityActive;
+    let group_cap_error = crate::error::TxError::new(
+        ErrorCode::TxErrCovenantTypeInvalid,
+        "CORE_SIMPLICITY same-cmr output group exceeds limit",
+    );
+
+    for (label, over_cap, at_cap, utxos, control_error) in cases {
+        let before = utxos.clone();
+        let sequential = crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+            &over_cap,
+            [0xc1; 32],
+            &utxos,
+            1,
+            0,
+            0,
+            ZERO_CHAIN_ID,
+            Some(&active),
+            None,
+        );
+        match sequential {
+            Ok((work, summary)) => {
+                panic!("{label}: expected no work or summary, got {work:?} / {summary:?}")
+            }
+            Err(error) => assert_eq!(error, group_cap_error, "{label}: sequential error"),
+        }
+        assert_eq!(utxos, before, "{label}: sequential rejection mutated UTXOs");
+
+        assert_eq!(
+            crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                &at_cap,
+                [0xc2; 32],
+                &utxos,
+                1,
+                0,
+                0,
+                ZERO_CHAIN_ID,
+                Some(&active),
+                None,
+            )
+            .unwrap_err(),
+            control_error,
+            "{label}: exactly-at-cap control must reach input validation",
+        );
+
+        let mut queue = crate::sig_queue::SigCheckQueue::new(1);
+        let empty_mark = queue.mark();
+        queue
+            .push(
+                SUITE_ID_ML_DSA_87,
+                &[0x11],
+                &[0x22],
+                [0x33; 32],
+                crate::error::TxError::new(ErrorCode::TxErrSigInvalid, "dummy prefix task"),
+            )
+            .expect("seed deterministic queued prefix");
+        let prefix_mark = queue.mark();
+        let prefix_len = queue.len();
+        let prefix_debug = format!("{queue:?}");
+        assert_eq!(prefix_len, 1, "{label}: queued prefix was not seeded");
+        match crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+            &over_cap,
+            [0xc3; 32],
+            &utxos,
+            1,
+            0,
+            0,
+            ZERO_CHAIN_ID,
+            Some(&active),
+            None,
+            &mut queue,
+        ) {
+            Ok((work, summary)) => {
+                panic!("{label}: expected no queued work or summary, got {work:?} / {summary:?}")
+            }
+            Err(error) => assert_eq!(error, group_cap_error, "{label}: queued error"),
+        }
+        assert_eq!(utxos, before, "{label}: queued rejection mutated UTXOs");
+        assert_eq!(queue.mark(), prefix_mark, "{label}: queue mark changed");
+        assert_eq!(queue.len(), prefix_len, "{label}: queue length changed");
+        assert_eq!(
+            format!("{queue:?}"),
+            prefix_debug,
+            "{label}: queue state changed"
+        );
+        assert!(!queue.is_empty(), "{label}: queued prefix was cleared");
+        queue.rollback_to(empty_mark);
+        assert_eq!(queue.mark(), empty_mark, "{label}: queue cleanup mark");
+        assert!(queue.is_empty(), "{label}: queue cleanup failed");
+    }
+}
+
+#[test]
 fn apply_non_coinbase_tx_basic_workq_sighash_prehash_error() {
     let kp = kp_or_skip!();
     let cov_data = p2pk_covenant_data_for_pubkey(&kp.pubkey);
