@@ -6,9 +6,9 @@ import RubinFormal.TxContextBehavioral
 # Full Block Connection with Coinbase + TxContext (§18/§19/§14)
 
 Models the complete block connection path including:
-1. Non-coinbase transaction validation (via connectBlockTxs)
-2. Coinbase value bound + vault check
-3. Coinbase UTXO creation
+1. Coinbase vault check and UTXO seeding
+2. Non-coinbase transaction validation over the seeded map (via connectBlockTxs)
+3. Coinbase value bound after successful transaction fees
 4. TxContext bundle construction (LIVE — wired, not parallel model)
 
 Written with explicit match (no do) for formal proof access.
@@ -60,16 +60,17 @@ def connectBlockFull
     (activeExtIds : List Nat) (totalIn totalOut : Nat)
     (continuingData : List (Nat × TxContextContinuing))
     : Except String ConnectBlockResult :=
-  match connectBlockTxs nonCoinbaseTxs utxoMap height blockTimestamp chainId with
+  match validateCoinbaseApplyOutputs coinbaseOutputs with
   | .error e => .error e
-  | .ok (sumFees, postTxUtxos) =>
-    match validateCoinbaseValueBound coinbaseOutputs subsidy sumFees with
+  | .ok () =>
+    let seeded := addCoinbaseOutputs coinbaseOutputs coinbaseTxid height utxoMap
+    match connectBlockTxs nonCoinbaseTxs seeded height blockTimestamp chainId with
     | .error e => .error e
-    | .ok () =>
-      match validateCoinbaseApplyOutputs coinbaseOutputs with
+    | .ok (sumFees, postTxUtxos) =>
+      match validateCoinbaseValueBound coinbaseOutputs subsidy sumFees with
       | .error e => .error e
       | .ok () =>
-        .ok { utxoMap := addCoinbaseOutputs coinbaseOutputs coinbaseTxid height postTxUtxos
+        .ok { utxoMap := postTxUtxos
             , sumFees := sumFees
             , txContext := buildTxContext activeExtIds totalIn totalOut height continuingData }
 
@@ -84,25 +85,26 @@ def connectBlockFullComputed
     (height blockTimestamp : Nat) (chainId : Bytes) (subsidy : Nat)
     (txCtxData : Option TxContextInputData)
     : Except String ConnectBlockResult :=
-  match connectBlockTxs nonCoinbaseTxs utxoMap height blockTimestamp chainId with
+  match validateCoinbaseApplyOutputs coinbaseOutputs with
   | .error e => .error e
-  | .ok (sumFees, postTxUtxos) =>
-    match validateCoinbaseValueBound coinbaseOutputs subsidy sumFees with
+  | .ok () =>
+    let seeded := addCoinbaseOutputs coinbaseOutputs coinbaseTxid height utxoMap
+    match connectBlockTxs nonCoinbaseTxs seeded height blockTimestamp chainId with
     | .error e => .error e
-    | .ok () =>
-      match validateCoinbaseApplyOutputs coinbaseOutputs with
+    | .ok (sumFees, postTxUtxos) =>
+      match validateCoinbaseValueBound coinbaseOutputs subsidy sumFees with
       | .error e => .error e
       | .ok () =>
         match txCtxData with
         | none =>
-            .ok { utxoMap := addCoinbaseOutputs coinbaseOutputs coinbaseTxid height postTxUtxos
+            .ok { utxoMap := postTxUtxos
                 , sumFees := sumFees
                 , txContext := none }
         | some d =>
             match validateTxContextContinuingCounts (continuingCountsFromData d.continuingData) with
             | .error e => .error e
             | .ok () =>
-                .ok { utxoMap := addCoinbaseOutputs coinbaseOutputs coinbaseTxid height postTxUtxos
+                .ok { utxoMap := postTxUtxos
                     , sumFees := sumFees
                     , txContext := buildTxContextLive d.activeExtIds d.inputValues d.outputValues height d.continuingData }
 
@@ -146,18 +148,18 @@ theorem connectBlockFullComputed_txcontext_correct
       bundle.base.totalOut = sumOutputValues d.outputValues ∧
       bundle.base.height = h := by
   simp only [connectBlockFullComputed] at hOk
-  match hT : connectBlockTxs nctxs utxos h bt cid with
-  | .error _ => simp [hT] at hOk
-  | .ok (sf, ptx) =>
-    simp [hT] at hOk
-    match hB : validateCoinbaseValueBound couts sub sf with
-    | .error _ => simp [hB] at hOk
-    | .ok () =>
-      simp [hB] at hOk
-      match hV : validateCoinbaseApplyOutputs couts with
-      | .error _ => simp [hV] at hOk
+  match hV : validateCoinbaseApplyOutputs couts with
+  | .error _ => simp [hV] at hOk
+  | .ok () =>
+    simp [hV] at hOk
+    match hT : connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid with
+    | .error _ => simp [hT] at hOk
+    | .ok (sf, ptx) =>
+      simp [hT] at hOk
+      match hB : validateCoinbaseValueBound couts sub sf with
+      | .error _ => simp [hB] at hOk
       | .ok () =>
-        simp [hV] at hOk
+        simp [hB] at hOk
         match hCounts : validateTxContextContinuingCounts (continuingCountsFromData d.continuingData) with
         | .error _ => simp [hCounts] at hOk
         | .ok () =>
@@ -179,18 +181,18 @@ theorem connectBlockFullComputed_txcontext_continuing_data
     (hBundle : result.txContext = some bundle) :
     bundle.continuingByExt = d.continuingData := by
   simp only [connectBlockFullComputed] at hOk
-  match hT : connectBlockTxs nctxs utxos h bt cid with
-  | .error _ => simp [hT] at hOk
-  | .ok (sf, ptx) =>
-    simp [hT] at hOk
-    match hB : validateCoinbaseValueBound couts sub sf with
-    | .error _ => simp [hB] at hOk
-    | .ok () =>
-      simp [hB] at hOk
-      match hV : validateCoinbaseApplyOutputs couts with
-      | .error _ => simp [hV] at hOk
+  match hV : validateCoinbaseApplyOutputs couts with
+  | .error _ => simp [hV] at hOk
+  | .ok () =>
+    simp [hV] at hOk
+    match hT : connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid with
+    | .error _ => simp [hT] at hOk
+    | .ok (sf, ptx) =>
+      simp [hT] at hOk
+      match hB : validateCoinbaseValueBound couts sub sf with
+      | .error _ => simp [hB] at hOk
       | .ok () =>
-        simp [hV] at hOk
+        simp [hB] at hOk
         match hCounts : validateTxContextContinuingCounts (continuingCountsFromData d.continuingData) with
         | .error _ => simp [hCounts] at hOk
         | .ok () =>
@@ -218,18 +220,18 @@ theorem connectBlockFullComputed_ok_implies_txctx_continuing_counts
     (hOk : connectBlockFullComputed nctxs couts ctxid utxos h bt cid sub (some d) = .ok result) :
     validateTxContextContinuingCounts (continuingCountsFromData d.continuingData) = .ok () := by
   simp only [connectBlockFullComputed] at hOk
-  match hT : connectBlockTxs nctxs utxos h bt cid with
-  | .error _ => simp [hT] at hOk
-  | .ok (sf, ptx) =>
-    simp [hT] at hOk
-    match hB : validateCoinbaseValueBound couts sub sf with
-    | .error _ => simp [hB] at hOk
-    | .ok () =>
-      simp [hB] at hOk
-      match hV : validateCoinbaseApplyOutputs couts with
-      | .error _ => simp [hV] at hOk
+  match hV : validateCoinbaseApplyOutputs couts with
+  | .error _ => simp [hV] at hOk
+  | .ok () =>
+    simp [hV] at hOk
+    match hT : connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid with
+    | .error _ => simp [hT] at hOk
+    | .ok (sf, ptx) =>
+      simp [hT] at hOk
+      match hB : validateCoinbaseValueBound couts sub sf with
+      | .error _ => simp [hB] at hOk
       | .ok () =>
-        simp [hV] at hOk
+        simp [hB] at hOk
         match hCounts : validateTxContextContinuingCounts (continuingCountsFromData d.continuingData) with
         | .error _ => simp [hCounts] at hOk
         | .ok () =>
@@ -246,20 +248,23 @@ private theorem connectBlockFull_txs_ok
     (result : ConnectBlockResult)
     (hOk : connectBlockFull nctxs couts ctxid utxos h bt cid sub ids tin tout cd = .ok result) :
     ∃ postTxUtxos,
-      connectBlockTxs nctxs utxos h bt cid = .ok (result.sumFees, postTxUtxos) := by
+      connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid =
+        .ok (result.sumFees, postTxUtxos) := by
   simp only [connectBlockFull] at hOk
-  match hTxs : connectBlockTxs nctxs utxos h bt cid with
-  | .error _ => simp [hTxs] at hOk
-  | .ok (sf, ptx) =>
-    simp [hTxs] at hOk
-    match hBound : validateCoinbaseValueBound couts sub sf with
-    | .error _ => simp [hBound] at hOk
-    | .ok () =>
-      simp [hBound] at hOk
-      match hVault : validateCoinbaseApplyOutputs couts with
-      | .error _ => simp [hVault] at hOk
+  match hVault : validateCoinbaseApplyOutputs couts with
+  | .error _ => simp [hVault] at hOk
+  | .ok () =>
+    simp [hVault] at hOk
+    match hTxs : connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid with
+    | .error _ => simp [hTxs] at hOk
+    | .ok (sf, ptx) =>
+      simp [hTxs] at hOk
+      match hBound : validateCoinbaseValueBound couts sub sf with
+      | .error _ => simp [hBound] at hOk
       | .ok () =>
-        simp [hVault] at hOk; obtain ⟨_, rfl, _⟩ := hOk; exact ⟨ptx, rfl⟩
+        simp [hBound] at hOk
+        obtain ⟨_, rfl, _⟩ := hOk
+        exact ⟨ptx, rfl⟩
 
 /-! ## Non-coinbase behavioral proofs -/
 
@@ -271,8 +276,8 @@ theorem connectBlockFull_preserves_noncoinbase_invariants
     (ids : List Nat) (tin tout : Nat) (cd : List (Nat × TxContextContinuing))
     (result : ConnectBlockResult)
     (hOk : connectBlockFull nctxs couts ctxid utxos h bt cid sub ids tin tout cd = .ok result) :
-    utxo_conserved nctxs utxos h bt cid ∧
-    no_double_spend nctxs utxos h bt cid := by
+    utxo_conserved nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid ∧
+    no_double_spend nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid := by
   obtain ⟨ptx, hTxs⟩ := connectBlockFull_txs_ok _ _ _ _ _ _ _ _ _ _ _ _ _ hOk
   exact ⟨utxo_conservation_theorem _ _ _ _ _ _ _ hTxs,
          no_double_spend_theorem _ _ _ _ _ _ _ hTxs⟩
@@ -287,18 +292,19 @@ theorem connectBlockFull_coinbase_bound
     (hOk : connectBlockFull nctxs couts ctxid utxos h bt cid sub ids tin tout cd = .ok result) :
     ¬(sumCoinbaseOutputs couts > sub + result.sumFees) := by
   simp only [connectBlockFull] at hOk
-  match hTxs : connectBlockTxs nctxs utxos h bt cid with
-  | .error _ => simp [hTxs] at hOk
-  | .ok (sf, ptx) =>
-    simp [hTxs] at hOk
-    match hBound : validateCoinbaseValueBound couts sub sf with
-    | .error _ => simp [hBound] at hOk
-    | .ok () =>
-      simp [hBound] at hOk
-      match hVault : validateCoinbaseApplyOutputs couts with
-      | .error _ => simp [hVault] at hOk
+  match hVault : validateCoinbaseApplyOutputs couts with
+  | .error _ => simp [hVault] at hOk
+  | .ok () =>
+    simp [hVault] at hOk
+    match hTxs : connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid with
+    | .error _ => simp [hTxs] at hOk
+    | .ok (sf, ptx) =>
+      simp [hTxs] at hOk
+      match hBound : validateCoinbaseValueBound couts sub sf with
+      | .error _ => simp [hBound] at hOk
       | .ok () =>
-        simp [hVault] at hOk; obtain ⟨_, rfl, _⟩ := hOk
+        simp [hBound] at hOk
+        obtain ⟨_, rfl, _⟩ := hOk
         simp only [validateCoinbaseValueBound] at hBound
         by_cases hGt : sumCoinbaseOutputs couts > sub + sf
         · simp [hGt] at hBound
@@ -313,23 +319,11 @@ theorem connectBlockFull_no_vault
     (result : ConnectBlockResult)
     (hOk : connectBlockFull nctxs couts ctxid utxos h bt cid sub ids tin tout cd = .ok result) :
     couts.any (·.covenantType == CovenantGenesisV1.COV_TYPE_VAULT) = false := by
-  simp only [connectBlockFull] at hOk
-  match hTxs : connectBlockTxs nctxs utxos h bt cid with
-  | .error _ => simp [hTxs] at hOk
-  | .ok (sf, ptx) =>
-    simp [hTxs] at hOk
-    match hBound : validateCoinbaseValueBound couts sub sf with
-    | .error _ => simp [hBound] at hOk
-    | .ok () =>
-      simp [hBound] at hOk
-      match hVault : validateCoinbaseApplyOutputs couts with
-      | .error _ => simp [hVault] at hOk
-      | .ok () =>
-        by_cases hAny : couts.any (·.covenantType == CovenantGenesisV1.COV_TYPE_VAULT) = true
-        · have : validateCoinbaseApplyOutputs couts = .error "BLOCK_ERR_COINBASE_INVALID" :=
-            coinbase_no_vault_rejects couts hAny
-          rw [this] at hVault; simp at hVault
-        · exact Bool.eq_false_iff.mpr (fun hh => hAny hh)
+  by_cases hAny : couts.any (·.covenantType == CovenantGenesisV1.COV_TYPE_VAULT) = true
+  · have hVault : validateCoinbaseApplyOutputs couts = .error "BLOCK_ERR_COINBASE_INVALID" :=
+      coinbase_no_vault_rejects couts hAny
+    simp [connectBlockFull, hVault] at hOk
+  · exact Bool.eq_false_iff.mpr (fun hh => hAny hh)
 
 /-! ## Error branch proofs -/
 
@@ -340,9 +334,10 @@ theorem connectBlockFull_rejects_bad_txs
     (h bt : Nat) (cid : Bytes) (sub : Nat)
     (ids : List Nat) (tin tout : Nat) (cd : List (Nat × TxContextContinuing))
     (err : String)
-    (hFail : connectBlockTxs nctxs utxos h bt cid = .error err) :
+    (hVault : validateCoinbaseApplyOutputs couts = .ok ())
+    (hFail : connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid = .error err) :
     connectBlockFull nctxs couts ctxid utxos h bt cid sub ids tin tout cd = .error err := by
-  simp [connectBlockFull, hFail]
+  simp [connectBlockFull, hVault, hFail]
 
 /-- Coinbase exceeds subsidy+fees → full connect rejected. -/
 theorem connectBlockFull_rejects_oversized_coinbase
@@ -351,11 +346,12 @@ theorem connectBlockFull_rejects_oversized_coinbase
     (h bt : Nat) (cid : Bytes) (sub : Nat)
     (ids : List Nat) (tin tout : Nat) (cd : List (Nat × TxContextContinuing))
     (sumFees : Nat) (postTxUtxos : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
-    (hTxs : connectBlockTxs nctxs utxos h bt cid = .ok (sumFees, postTxUtxos))
+    (hVault : validateCoinbaseApplyOutputs couts = .ok ())
+    (hTxs : connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid = .ok (sumFees, postTxUtxos))
     (hOver : sumCoinbaseOutputs couts > sub + sumFees) :
     connectBlockFull nctxs couts ctxid utxos h bt cid sub ids tin tout cd =
     .error "BLOCK_ERR_SUBSIDY_EXCEEDED" := by
-  simp [connectBlockFull, hTxs, validateCoinbaseValueBound, hOver]
+  simp [connectBlockFull, hVault, hTxs, validateCoinbaseValueBound, hOver]
 
 /-- CORE_VAULT in coinbase → full connect rejected. -/
 theorem connectBlockFull_rejects_vault_coinbase
@@ -363,30 +359,77 @@ theorem connectBlockFull_rejects_vault_coinbase
     (ctxid : Bytes) (utxos : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
     (h bt : Nat) (cid : Bytes) (sub : Nat)
     (ids : List Nat) (tin tout : Nat) (cd : List (Nat × TxContextContinuing))
-    (sumFees : Nat) (postTxUtxos : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
-    (hTxs : connectBlockTxs nctxs utxos h bt cid = .ok (sumFees, postTxUtxos))
-    (hBound : ¬(sumCoinbaseOutputs couts > sub + sumFees))
     (hVault : couts.any (·.covenantType == CovenantGenesisV1.COV_TYPE_VAULT) = true) :
     connectBlockFull nctxs couts ctxid utxos h bt cid sub ids tin tout cd =
     .error "BLOCK_ERR_COINBASE_INVALID" := by
-  simp [connectBlockFull, hTxs, validateCoinbaseValueBound, hBound,
-        validateCoinbaseApplyOutputs, hVault]
+  simp [connectBlockFull, validateCoinbaseApplyOutputs, hVault]
 
 /-! ## Structural ordering -/
 
-/-- Coinbase processed strictly AFTER all non-coinbase txs. -/
-theorem coinbase_processed_after_noncoinbase
+/-- Coinbase outputs are seeded before non-coinbase transaction processing. -/
+private theorem coinbase_seeded_before_noncoinbase
     (nctxs : List Bytes) (couts : List CovenantGenesisV1.TxOut)
     (ctxid : Bytes) (utxos : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
     (h bt : Nat) (cid : Bytes) (sub : Nat)
     (ids : List Nat) (tin tout : Nat) (cd : List (Nat × TxContextContinuing))
     (result : ConnectBlockResult)
     (hOk : connectBlockFull nctxs couts ctxid utxos h bt cid sub ids tin tout cd = .ok result) :
-    ∃ sf ptx, connectBlockTxs nctxs utxos h bt cid = .ok (sf, ptx) := by
-  simp only [connectBlockFull] at hOk
-  match hT : connectBlockTxs nctxs utxos h bt cid with
-  | .error _ => simp [hT] at hOk
-  | .ok (sf, ptx) => exact ⟨sf, ptx, rfl⟩
+    ∃ sf ptx,
+      connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid = .ok (sf, ptx) := by
+  obtain ⟨ptx, hTxs⟩ := connectBlockFull_txs_ok _ _ _ _ _ _ _ _ _ _ _ _ _ hOk
+  exact ⟨result.sumFees, ptx, hTxs⟩
+
+/-! ## Private ordering evidence -/
+
+private theorem vault_dominates_later_tx_and_subsidy_failures
+    (nctxs : List Bytes) (couts : List CovenantGenesisV1.TxOut)
+    (ctxid : Bytes) (utxos : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
+    (h bt : Nat) (cid : Bytes) (sub : Nat)
+    (ids : List Nat) (tin tout : Nat) (cd : List (Nat × TxContextContinuing))
+    (txErr : String) (sumFees : Nat)
+    (hVault : couts.any (·.covenantType == CovenantGenesisV1.COV_TYPE_VAULT) = true)
+    (hTxFail : connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid = .error txErr)
+    (hBoundFail : validateCoinbaseValueBound couts sub sumFees = .error "BLOCK_ERR_SUBSIDY_EXCEEDED") :
+    connectBlockFull nctxs couts ctxid utxos h bt cid sub ids tin tout cd =
+      .error "BLOCK_ERR_COINBASE_INVALID" ∧
+    connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid = .error txErr ∧
+    validateCoinbaseValueBound couts sub sumFees = .error "BLOCK_ERR_SUBSIDY_EXCEEDED" := by
+  exact ⟨by simp [connectBlockFull, validateCoinbaseApplyOutputs, hVault], hTxFail, hBoundFail⟩
+
+private theorem seeded_spendable_output_is_visible_and_immature
+    (out : CovenantGenesisV1.TxOut) (txid : Bytes) (height : Nat)
+    (hSpend : isSpendableCoinbaseOutput out = true) :
+    addCoinbaseOutputs [out] txid height (Std.RBMap.empty) =
+      (Std.RBMap.empty).insert { txid := txid, vout := 0 } (coinbaseUtxoEntry out height) ∧
+    validateCoinbaseMaturity (coinbaseUtxoEntry out height) height =
+      .error "TX_ERR_COINBASE_IMMATURE" := by
+  constructor
+  · simp [addCoinbaseOutputs, List.enum, List.enumFrom, hSpend]
+  · simp [validateCoinbaseMaturity, coinbaseUtxoEntry, COINBASE_MATURITY]
+    omega
+
+private theorem seeded_anchor_and_da_commit_outputs_are_not_inserted
+    (anchor daCommit : CovenantGenesisV1.TxOut) (txid : Bytes) (height : Nat)
+    (utxos : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
+    (hAnchor : anchor.covenantType = CovenantGenesisV1.COV_TYPE_ANCHOR)
+    (hDaCommit : daCommit.covenantType = CovenantGenesisV1.COV_TYPE_DA_COMMIT) :
+    addCoinbaseOutputs [anchor, daCommit] txid height utxos = utxos := by
+  simp [addCoinbaseOutputs, List.enum, List.enumFrom, isSpendableCoinbaseOutput, hAnchor, hDaCommit]
+
+private theorem successful_full_connection_uses_post_transaction_seeded_map
+    (nctxs : List Bytes) (couts : List CovenantGenesisV1.TxOut)
+    (ctxid : Bytes) (utxos postTxUtxos : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
+    (h bt : Nat) (cid : Bytes) (sub : Nat)
+    (ids : List Nat) (tin tout : Nat) (cd : List (Nat × TxContextContinuing))
+    (sumFees : Nat)
+    (hVault : validateCoinbaseApplyOutputs couts = .ok ())
+    (hTxs : connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid =
+      .ok (sumFees, postTxUtxos))
+    (hBound : validateCoinbaseValueBound couts sub sumFees = .ok ()) :
+    connectBlockFull nctxs couts ctxid utxos h bt cid sub ids tin tout cd =
+      .ok { utxoMap := postTxUtxos, sumFees := sumFees
+          , txContext := buildTxContext ids tin tout h cd } := by
+  simp [connectBlockFull, hVault, hTxs, hBound]
 
 /-! ## Error taxonomy (replaces former axiom) -/
 
@@ -402,28 +445,33 @@ theorem connectBlockFull_error_taxonomy
     (hFail : connectBlockFull nctxs couts ctxid utxos h bt cid sub ids tin tout cd = .error err) :
     err = "BLOCK_ERR_SUBSIDY_EXCEEDED" ∨
     err = "BLOCK_ERR_COINBASE_INVALID" ∨
-    (∃ txErr, connectBlockTxs nctxs utxos h bt cid = .error txErr ∧ err = txErr) := by
+    (∃ txErr,
+      connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid = .error txErr ∧
+      err = txErr) := by
   simp only [connectBlockFull] at hFail
-  match hT : connectBlockTxs nctxs utxos h bt cid with
-  | .error e =>
-    simp [hT] at hFail; exact Or.inr (Or.inr ⟨e, rfl, hFail.symm⟩)
-  | .ok (sf, ptx) =>
-    simp [hT] at hFail
-    by_cases hOver : sumCoinbaseOutputs couts > sub + sf
-    · have hB : validateCoinbaseValueBound couts sub sf = .error "BLOCK_ERR_SUBSIDY_EXCEEDED" :=
-        coinbase_value_bound_rejects couts sub sf hOver
-      simp [hB] at hFail; exact Or.inl hFail.symm
-    · have hB : validateCoinbaseValueBound couts sub sf = .ok () :=
-        coinbase_value_bound_accepts couts sub sf hOver
-      simp [hB] at hFail
-      by_cases hVault : couts.any (·.covenantType == CovenantGenesisV1.COV_TYPE_VAULT) = true
-      · have hV : validateCoinbaseApplyOutputs couts = .error "BLOCK_ERR_COINBASE_INVALID" :=
-          coinbase_no_vault_rejects couts hVault
-        simp [hV] at hFail; exact Or.inr (Or.inl hFail.symm)
-      · have hNotV := Bool.eq_false_iff.mpr (fun hh => hVault hh)
-        have hV : validateCoinbaseApplyOutputs couts = .ok () :=
-          coinbase_no_vault_accepts couts hNotV
-        simp [hV] at hFail
+  by_cases hVault : couts.any (·.covenantType == CovenantGenesisV1.COV_TYPE_VAULT) = true
+  · have hV : validateCoinbaseApplyOutputs couts = .error "BLOCK_ERR_COINBASE_INVALID" :=
+      coinbase_no_vault_rejects couts hVault
+    simp [hV] at hFail
+    exact Or.inr (Or.inl hFail.symm)
+  · have hNotV := Bool.eq_false_iff.mpr (fun hh => hVault hh)
+    have hV : validateCoinbaseApplyOutputs couts = .ok () :=
+      coinbase_no_vault_accepts couts hNotV
+    simp [hV] at hFail
+    match hT : connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid with
+    | .error e =>
+      simp [hT] at hFail
+      exact Or.inr (Or.inr ⟨e, rfl, hFail.symm⟩)
+    | .ok (sf, ptx) =>
+      simp [hT] at hFail
+      by_cases hOver : sumCoinbaseOutputs couts > sub + sf
+      · have hB : validateCoinbaseValueBound couts sub sf = .error "BLOCK_ERR_SUBSIDY_EXCEEDED" :=
+          coinbase_value_bound_rejects couts sub sf hOver
+        simp [hB] at hFail
+        exact Or.inl hFail.symm
+      · have hB : validateCoinbaseValueBound couts sub sf = .ok () :=
+          coinbase_value_bound_accepts couts sub sf hOver
+        simp [hB] at hFail
 
 /-! ## TxContext wiring proofs (LIVE — not parallel model) -/
 
@@ -438,18 +486,19 @@ theorem connectBlockFull_produces_txcontext
     (hOk : connectBlockFull nctxs couts ctxid utxos h bt cid sub ids tin tout cd = .ok result) :
     result.txContext.isSome = true := by
   simp only [connectBlockFull] at hOk
-  match hT : connectBlockTxs nctxs utxos h bt cid with
-  | .error _ => simp [hT] at hOk
-  | .ok (sf, ptx) =>
-    simp [hT] at hOk
-    match hB : validateCoinbaseValueBound couts sub sf with
-    | .error _ => simp [hB] at hOk
-    | .ok () =>
-      simp [hB] at hOk
-      match hV : validateCoinbaseApplyOutputs couts with
-      | .error _ => simp [hV] at hOk
+  match hV : validateCoinbaseApplyOutputs couts with
+  | .error _ => simp [hV] at hOk
+  | .ok () =>
+    simp [hV] at hOk
+    match hT : connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid with
+    | .error _ => simp [hT] at hOk
+    | .ok (sf, ptx) =>
+      simp [hT] at hOk
+      match hB : validateCoinbaseValueBound couts sub sf with
+      | .error _ => simp [hB] at hOk
       | .ok () =>
-        simp [hV] at hOk; obtain ⟨_, _, rfl⟩ := hOk
+        simp [hB] at hOk
+        obtain ⟨_, _, rfl⟩ := hOk
         exact buildTxContext_some ids hIds tin tout h cd
 
 /-- If block connects with no active ext_ids, no TxContext bundle. -/
@@ -462,18 +511,19 @@ theorem connectBlockFull_no_txcontext_when_empty
     (hOk : connectBlockFull nctxs couts ctxid utxos h bt cid sub [] tin tout cd = .ok result) :
     result.txContext = none := by
   simp only [connectBlockFull] at hOk
-  match hT : connectBlockTxs nctxs utxos h bt cid with
-  | .error _ => simp [hT] at hOk
-  | .ok (sf, ptx) =>
-    simp [hT] at hOk
-    match hB : validateCoinbaseValueBound couts sub sf with
-    | .error _ => simp [hB] at hOk
-    | .ok () =>
-      simp [hB] at hOk
-      match hV : validateCoinbaseApplyOutputs couts with
-      | .error _ => simp [hV] at hOk
+  match hV : validateCoinbaseApplyOutputs couts with
+  | .error _ => simp [hV] at hOk
+  | .ok () =>
+    simp [hV] at hOk
+    match hT : connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid with
+    | .error _ => simp [hT] at hOk
+    | .ok (sf, ptx) =>
+      simp [hT] at hOk
+      match hB : validateCoinbaseValueBound couts sub sf with
+      | .error _ => simp [hB] at hOk
       | .ok () =>
-        simp [hV] at hOk; obtain ⟨_, _, rfl⟩ := hOk
+        simp [hB] at hOk
+        obtain ⟨_, _, rfl⟩ := hOk
         rfl
 
 /-- TxContext bundle in result has the live deterministic ext_id order. -/
@@ -488,18 +538,19 @@ theorem connectBlockFull_txcontext_ext_ids
     (hBundle : result.txContext = some bundle) :
     bundle.continuingExtIds = sortExtIds ids := by
   simp only [connectBlockFull] at hOk
-  match hT : connectBlockTxs nctxs utxos h bt cid with
-  | .error _ => simp [hT] at hOk
-  | .ok (sf, ptx) =>
-    simp [hT] at hOk
-    match hB : validateCoinbaseValueBound couts sub sf with
-    | .error _ => simp [hB] at hOk
-    | .ok () =>
-      simp [hB] at hOk
-      match hV : validateCoinbaseApplyOutputs couts with
-      | .error _ => simp [hV] at hOk
+  match hV : validateCoinbaseApplyOutputs couts with
+  | .error _ => simp [hV] at hOk
+  | .ok () =>
+    simp [hV] at hOk
+    match hT : connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid with
+    | .error _ => simp [hT] at hOk
+    | .ok (sf, ptx) =>
+      simp [hT] at hOk
+      match hB : validateCoinbaseValueBound couts sub sf with
+      | .error _ => simp [hB] at hOk
       | .ok () =>
-        simp [hV] at hOk; obtain ⟨_, _, rfl⟩ := hOk
+        simp [hB] at hOk
+        obtain ⟨_, _, rfl⟩ := hOk
         exact buildTxContext_ext_ids ids hIds tin tout h cd bundle hBundle
 
 /-- TxContext bundle has correct base values (totalIn, totalOut, height). -/
@@ -514,18 +565,19 @@ theorem connectBlockFull_txcontext_base_values
     (hBundle : result.txContext = some bundle) :
     bundle.base.totalIn = tin ∧ bundle.base.totalOut = tout ∧ bundle.base.height = h := by
   simp only [connectBlockFull] at hOk
-  match hT : connectBlockTxs nctxs utxos h bt cid with
-  | .error _ => simp [hT] at hOk
-  | .ok (sf, ptx) =>
-    simp [hT] at hOk
-    match hB : validateCoinbaseValueBound couts sub sf with
-    | .error _ => simp [hB] at hOk
-    | .ok () =>
-      simp [hB] at hOk
-      match hV : validateCoinbaseApplyOutputs couts with
-      | .error _ => simp [hV] at hOk
+  match hV : validateCoinbaseApplyOutputs couts with
+  | .error _ => simp [hV] at hOk
+  | .ok () =>
+    simp [hV] at hOk
+    match hT : connectBlockTxs nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid with
+    | .error _ => simp [hT] at hOk
+    | .ok (sf, ptx) =>
+      simp [hT] at hOk
+      match hB : validateCoinbaseValueBound couts sub sf with
+      | .error _ => simp [hB] at hOk
       | .ok () =>
-        simp [hV] at hOk; obtain ⟨_, _, rfl⟩ := hOk
+        simp [hB] at hOk
+        obtain ⟨_, _, rfl⟩ := hOk
         exact buildTxContext_base_values ids hIds tin tout h cd bundle hBundle
 
 /-! ## End-to-end scenario -/
@@ -540,8 +592,8 @@ theorem valid_block_end_to_end
     (tin tout : Nat) (cd : List (Nat × TxContextContinuing))
     (result : ConnectBlockResult)
     (hOk : connectBlockFull nctxs couts ctxid utxos h bt cid sub ids tin tout cd = .ok result) :
-    utxo_conserved nctxs utxos h bt cid ∧
-    no_double_spend nctxs utxos h bt cid ∧
+    utxo_conserved nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid ∧
+    no_double_spend nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid ∧
     ¬(sumCoinbaseOutputs couts > sub + result.sumFees) ∧
     couts.any (·.covenantType == CovenantGenesisV1.COV_TYPE_VAULT) = false ∧
     result.txContext.isSome = true :=
@@ -562,8 +614,8 @@ theorem valid_block_end_to_end_no_extids
     (tin tout : Nat) (cd : List (Nat × TxContextContinuing))
     (result : ConnectBlockResult)
     (hOk : connectBlockFull nctxs couts ctxid utxos h bt cid sub [] tin tout cd = .ok result) :
-    utxo_conserved nctxs utxos h bt cid ∧
-    no_double_spend nctxs utxos h bt cid ∧
+    utxo_conserved nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid ∧
+    no_double_spend nctxs (addCoinbaseOutputs couts ctxid h utxos) h bt cid ∧
     ¬(sumCoinbaseOutputs couts > sub + result.sumFees) ∧
     couts.any (fun o => o.covenantType == CovenantGenesisV1.COV_TYPE_VAULT) = false ∧
     result.txContext = none :=
@@ -639,10 +691,10 @@ All vault errors propagate to block level via connectBlockFull_rejects_bad_txs
 /-! ## Guard lemma
 
 connectBlockFull has exactly 4 match arms + TxContext construction:
-1. connectBlockTxs error → propagate
-2. validateCoinbaseValueBound error → BLOCK_ERR_SUBSIDY_EXCEEDED
-3. validateCoinbaseApplyOutputs error → BLOCK_ERR_COINBASE_INVALID
-4. ok → construct result with coinbase UTXOs + TxContext bundle
+1. validateCoinbaseApplyOutputs error → BLOCK_ERR_COINBASE_INVALID
+2. connectBlockTxs over the seeded coinbase map error → propagate
+3. validateCoinbaseValueBound error → BLOCK_ERR_SUBSIDY_EXCEEDED
+4. ok → construct result from the post-transaction seeded map + TxContext bundle
 
 Adding a 5th validation step requires updating every theorem above.
 Lean's exhaustiveness checker enforces this: missing arm → compile error. -/

@@ -59,6 +59,26 @@ def validateCoinbaseApplyOutputs (coinbaseTxBytes : Bytes) : Except String Unit 
       throw "BLOCK_ERR_COINBASE_INVALID"
   pure ()
 
+/-- Seed the block-local UTXO map from parsed coinbase outputs.  This mirrors
+    the coinbase application loop while keeping the parsed transaction model
+    below the CoinbaseBehavioral import boundary. -/
+def seedParsedCoinbaseOutputs
+    (outputs : List TxOut)
+    (txid : Bytes) (height : Nat)
+    (utxos : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
+    : Std.RBMap Outpoint UtxoEntry cmpOutpoint :=
+  outputs.enum.foldl (fun acc (vout, output) =>
+    if output.covenantType != CovenantGenesisV1.COV_TYPE_ANCHOR &&
+        output.covenantType != CovenantGenesisV1.COV_TYPE_DA_COMMIT then
+      acc.insert { txid := txid, vout := vout }
+        { value := output.value
+        , covenantType := output.covenantType
+        , covenantData := output.covenantData
+        , creationHeight := height
+        , createdByCoinbase := true }
+    else acc
+  ) utxos
+
 def validateCoinbaseValueBound
     (coinbaseTxBytes : Bytes)
     (height : Nat)
@@ -126,12 +146,19 @@ def connectBlockBasic
           match validateCoinbaseLocktime pb.coinbaseTx height with
           | .error e => .error e
           | .ok () =>
-              match connectBlockTxs pb.txs.tail (buildUtxoMap utxos) height pb.header.timestamp chainId with
+              match validateCoinbaseApplyOutputs pb.coinbaseTx with
               | .error e => .error e
-              | .ok (sumFees, _finalMap) =>
-                  match validateCoinbaseValueBound pb.coinbaseTx height alreadyGenerated sumFees with
+              | .ok () =>
+                  match parseTx pb.coinbaseTx with
                   | .error e => .error e
-                  | .ok () => validateCoinbaseApplyOutputs pb.coinbaseTx
+                  | .ok coinbase =>
+                      let seeded :=
+                        seedParsedCoinbaseOutputs coinbase.outputs (pb.txids.getD 0 ByteArray.empty) height
+                          (buildUtxoMap utxos)
+                      match connectBlockTxs pb.txs.tail seeded height pb.header.timestamp chainId with
+                      | .error e => .error e
+                      | .ok (sumFees, _finalMap) =>
+                          validateCoinbaseValueBound pb.coinbaseTx height alreadyGenerated sumFees
 
 def connectBlockEndToEndStatement : Prop :=
   ∀ (blockBytes : Bytes)
@@ -140,20 +167,24 @@ def connectBlockEndToEndStatement : Prop :=
     (utxos : List (Outpoint × UtxoEntry))
     (chainId : Bytes)
     (pb : BlockBasicV1.ParsedBlock)
+    (coinbase : Tx)
     (sumFees : Nat)
     (finalMap : Std.RBMap Outpoint UtxoEntry cmpOutpoint),
       BlockBasicV1.validateBlockBasic blockBytes expectedPrevHash expectedTarget = .ok () →
       BlockBasicV1.parseBlock blockBytes = .ok pb →
       validateCoinbaseLocktime pb.coinbaseTx height = .ok () →
-      connectBlockTxs pb.txs.tail (buildUtxoMap utxos) height pb.header.timestamp chainId = .ok (sumFees, finalMap) →
-      validateCoinbaseValueBound pb.coinbaseTx height alreadyGenerated sumFees = .ok () →
       validateCoinbaseApplyOutputs pb.coinbaseTx = .ok () →
+      parseTx pb.coinbaseTx = .ok coinbase →
+      connectBlockTxs pb.txs.tail
+        (seedParsedCoinbaseOutputs coinbase.outputs (pb.txids.getD 0 ByteArray.empty) height (buildUtxoMap utxos))
+        height pb.header.timestamp chainId = .ok (sumFees, finalMap) →
+      validateCoinbaseValueBound pb.coinbaseTx height alreadyGenerated sumFees = .ok () →
       connectBlockBasic blockBytes expectedPrevHash expectedTarget height alreadyGenerated utxos chainId = .ok ()
 
 theorem connectBlock_end_to_end_proved : connectBlockEndToEndStatement := by
-  intro blockBytes expectedPrevHash expectedTarget height alreadyGenerated utxos chainId pb sumFees finalMap
-    hBasic hParse hLock hLoop hBound hApply
-  simpa [connectBlockBasic, hBasic, hParse, hLock, hLoop, hBound, hApply]
+  intro blockBytes expectedPrevHash expectedTarget height alreadyGenerated utxos chainId pb coinbase sumFees finalMap
+    hBasic hParse hLock hApply hCoinbase hLoop hBound
+  simp [connectBlockBasic, hBasic, hParse, hLock, hApply, hCoinbase, hLoop, hBound]
 
 def blockBasicCheckWithFees
     (blockBytes : Bytes)
