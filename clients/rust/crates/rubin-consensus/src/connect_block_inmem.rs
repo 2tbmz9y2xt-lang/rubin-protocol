@@ -213,13 +213,13 @@ fn apply_non_coinbase_txs_sequential(
     let mut work_utxos = None;
     let mut sum_fees: u64 = 0;
     let mut seen_nonces = HashSet::with_capacity(prepared.pb.txs.len());
-    for i in 1..prepared.pb.txs.len() {
-        ParsedBlock::validate_non_coinbase_block_tx(&prepared.pb.txs[i], &mut seen_nonces)?;
+    for (tx, txid) in prepared.pb.txs.iter().zip(&prepared.pb.txids).skip(1) {
+        ParsedBlock::validate_non_coinbase_block_tx(tx, &mut seen_nonces)?;
         let base_utxos = work_utxos.as_ref().unwrap_or(state_utxos);
         let (next_utxos, summary) =
             apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                &prepared.pb.txs[i],
-                prepared.pb.txids[i],
+                tx,
+                *txid,
                 base_utxos,
                 prepared.block_height,
                 prepared.pb.header.timestamp,
@@ -263,6 +263,7 @@ fn apply_non_coinbase_txs_parallel(
             Ok(result) => result,
             Err(err) => {
                 sig_queue.rollback_to(entry_mark);
+                debug_assert_eq!(sig_queue.mark(), entry_mark, "signature queue rollback");
                 return Err(err);
             }
         };
@@ -282,10 +283,10 @@ fn collect_queued_non_coinbase_txs(
     let mut work_utxos = state_utxos.clone();
     let mut sum_fees = 0;
     let mut seen_nonces = HashSet::with_capacity(prepared.pb.txs.len());
-    for i in 1..prepared.pb.txs.len() {
-        ParsedBlock::validate_non_coinbase_block_tx(&prepared.pb.txs[i], &mut seen_nonces)?;
+    for (tx, txid) in prepared.pb.txs.iter().zip(&prepared.pb.txids).skip(1) {
+        ParsedBlock::validate_non_coinbase_block_tx(tx, &mut seen_nonces)?;
         let (next_utxos, summary) = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
-            &prepared.pb.txs[i], prepared.pb.txids[i], &work_utxos, prepared.block_height,
+            tx, *txid, &work_utxos, prepared.block_height,
             prepared.pb.header.timestamp, prepared.block_mtp, ctx.chain_id, ctx.rotation,
             ctx.registry, sig_queue,
         )?;

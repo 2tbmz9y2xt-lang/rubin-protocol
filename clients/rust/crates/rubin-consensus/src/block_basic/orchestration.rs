@@ -61,7 +61,11 @@ impl ParsedBlock {
             prev_timestamps,
         )?;
         validate_coinbase_block_tx_semantics(self, block_height, rotation)?;
-        validate_coinbase_apply_outputs(&self.txs[0])
+        let coinbase = self
+            .txs
+            .first()
+            .ok_or_else(|| TxError::new(ErrorCode::BlockErrCoinbaseInvalid, "missing coinbase"))?;
+        validate_coinbase_apply_outputs(coinbase)
     }
 }
 

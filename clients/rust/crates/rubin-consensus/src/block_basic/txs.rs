@@ -68,7 +68,11 @@ pub(super) fn validate_coinbase_block_tx_semantics(
     rotation: Option<&dyn RotationProvider>,
 ) -> Result<(), TxError> {
     coinbase::validate_coinbase_structure(pb, block_height)?;
-    validate_tx_covenants_genesis(&pb.txs[0], block_height, rotation)
+    let coinbase = pb
+        .txs
+        .first()
+        .ok_or_else(|| TxError::new(ErrorCode::BlockErrCoinbaseInvalid, "missing coinbase"))?;
+    validate_tx_covenants_genesis(coinbase, block_height, rotation)
 }
 
 impl ParsedBlock {

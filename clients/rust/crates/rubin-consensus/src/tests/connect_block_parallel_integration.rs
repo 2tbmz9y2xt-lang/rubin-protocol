@@ -417,13 +417,13 @@ fn connect_block_transaction_index_first_error_order() {
     let mut prev = [0u8; 32];
     prev[0] = 0x59;
     let target = [0xff; 32];
-    let state = |cov: &[u8]| {
+    let state = |cov: &[u8], value| {
         let mut utxos = HashMap::new();
         for vout in 0..3 {
             utxos.insert(
                 Outpoint { txid: prev, vout },
                 UtxoEntry {
-                    value: 100,
+                    value,
                     covenant_type: COV_TYPE_P2PK,
                     covenant_data: cov.to_vec(),
                     creation_height: 0,
@@ -493,11 +493,11 @@ fn connect_block_transaction_index_first_error_order() {
             txs,
         )
     };
-    let reject = |block: &[u8], want, cov: &[u8]| {
-        let mut seq = state(cov);
+    let reject = |block: &[u8], want, cov: &[u8], value, want_msg: Option<&str>| {
+        let mut seq = state(cov, value);
         let seq_before = seq.clone();
         let seq_err = crate::connect_block_basic_in_memory_at_height(
-            &block,
+            block,
             Some(prev),
             Some(target),
             height,
@@ -507,12 +507,15 @@ fn connect_block_transaction_index_first_error_order() {
         )
         .expect_err("sequential rejection");
         assert_eq!(err_code(&seq_err), want);
+        if let Some(msg) = want_msg {
+            assert_eq!(seq_err.msg, msg);
+        }
         assert_eq!(seq, seq_before);
-        let mut par = state(cov);
+        let mut par = state(cov, value);
         let par_before = par.clone();
         let par_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             crate::connect_block_parallel_sig_verify(
-                &block,
+                block,
                 Some(prev),
                 Some(target),
                 height,
@@ -526,6 +529,9 @@ fn connect_block_transaction_index_first_error_order() {
             .expect("parallel queue residue")
             .expect_err("parallel rejection");
         assert_eq!(err_code(&par_err), want);
+        if let Some(msg) = want_msg {
+            assert_eq!(par_err.msg, msg);
+        }
         assert_eq!(par, par_before);
     };
     let subsidy = crate::subsidy::block_subsidy(height, 0);
@@ -588,7 +594,7 @@ fn connect_block_transaction_index_first_error_order() {
             ),
         ];
         for (coinbase_value, txs, want) in cases {
-            reject(&block(coinbase_value, &txs), want, &cov);
+            reject(&block(coinbase_value, &txs), want, &cov, 100, None);
         }
 
         let missing_tx = missing(&cov, 1);
@@ -614,6 +620,8 @@ fn connect_block_transaction_index_first_error_order() {
             &build_block(vault_coinbase, std::slice::from_ref(&missing_tx)),
             ErrorCode::BlockErrCoinbaseInvalid,
             &cov,
+            100,
+            None,
         );
     }
 
@@ -664,12 +672,25 @@ fn connect_block_transaction_index_first_error_order() {
             ),
         ];
         for (txs, want) in cases {
-            reject(&block(subsidy + 20, &txs), want, &cov);
+            reject(&block(subsidy + 20, &txs), want, &cov, 100, None);
         }
 
+        let max_fee = |nonce, vout| {
+            let mut tx = spend(&cov, nonce, vout, 1);
+            tx.witness = vec![sign_input_witness(&tx, 0, u64::MAX, ZERO_CHAIN_ID, &kp)];
+            encode(tx)
+        };
+        reject(
+            &block(subsidy, &[max_fee(8, 0), max_fee(9, 1)]),
+            ErrorCode::BlockErrParse,
+            &cov,
+            u64::MAX,
+            Some("sum_fees overflow"),
+        );
+
         let valid_block = block(subsidy + 20, &[valid(1, 0, 90), valid(2, 1, 90)]);
-        let mut seq = state(&cov);
-        let mut par = state(&cov);
+        let mut seq = state(&cov, 100);
+        let mut par = state(&cov, 100);
         let seq_summary = crate::connect_block_basic_in_memory_at_height(
             &valid_block,
             Some(prev),
