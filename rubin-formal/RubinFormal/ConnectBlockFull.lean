@@ -367,7 +367,7 @@ theorem connectBlockFull_rejects_vault_coinbase
 /-! ## Structural ordering -/
 
 /-- Coinbase outputs are seeded before non-coinbase transaction processing. -/
-theorem coinbase_seeded_before_noncoinbase
+private theorem coinbase_seeded_before_noncoinbase
     (nctxs : List Bytes) (couts : List CovenantGenesisV1.TxOut)
     (ctxid : Bytes) (utxos : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
     (h bt : Nat) (cid : Bytes) (sub : Nat)
