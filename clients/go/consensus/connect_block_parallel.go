@@ -78,8 +78,8 @@ func ConnectBlockParallelSigVerifyWithSuiteContext(
 		reg = DefaultSuiteRegistry()
 	}
 
-	// Stateless checks first (wire, merkle root, PoW/target, covenant creation, etc).
-	pb, _, err := parseAndValidateBlockBasicWithContextAtHeight(
+	// Block-global checks first; non-coinbase semantics stay in transaction order below.
+	pb, err := parseAndValidateBlockBasicForConnectWithContextAtHeight(
 		blockBytes,
 		expectedPrevHash,
 		expectedTarget,
@@ -116,9 +116,13 @@ func ConnectBlockParallelSigVerifyWithSuiteContext(
 
 	// Apply all non-coinbase transactions with deferred sig verification.
 	var sumFees uint64
+	seenNonces := make(map[uint64]struct{}, len(pb.Txs))
 	for i := 1; i < len(pb.Txs); i++ {
 		tx := pb.Txs[i]
 		txid := pb.Txids[i]
+		if err := validateNonCoinbaseBlockTx(tx, seenNonces); err != nil {
+			return nil, err
+		}
 
 		nextUtxos, s, err := applyNonCoinbaseTxBasicUpdateWithMTPQ(
 			tx,
@@ -155,9 +159,6 @@ func ConnectBlockParallelSigVerifyWithSuiteContext(
 
 	// Enforce coinbase bound using locally computed fees.
 	if err := validateCoinbaseValueBound(pb, blockHeight, alreadyGenerated, sumFees); err != nil {
-		return nil, err
-	}
-	if err := validateCoinbaseApplyOutputs(pb.Txs[0]); err != nil {
 		return nil, err
 	}
 

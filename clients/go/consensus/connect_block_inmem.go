@@ -137,9 +137,6 @@ func connectBlockBasicInMemoryAtHeightAndSuiteContext(
 	if err := validateCoinbaseValueBound(pb, input.BlockHeight, alreadyGenerated, sumFees); err != nil {
 		return nil, err
 	}
-	if err := validateCoinbaseApplyOutputs(pb.Txs[0]); err != nil {
-		return nil, err
-	}
 
 	applyInMemoryCoinbaseOutputs(pb, workUtxos, input.BlockHeight)
 	alreadyGeneratedN1 := advanceAlreadyGenerated(input.BlockHeight, alreadyGenerated)
@@ -163,7 +160,7 @@ func prepareInMemoryChainState(state *InMemoryChainState) error {
 }
 
 func parseInMemoryConnectBlock(input connectBlockBasicInMemorySuiteContext) (*ParsedBlock, error) {
-	pb, _, err := parseAndValidateBlockBasicWithContextAtHeight(
+	pb, err := parseAndValidateBlockBasicForConnectWithContextAtHeight(
 		input.BlockBytes,
 		input.ExpectedPrevHash,
 		input.ExpectedTarget,
@@ -200,7 +197,11 @@ func applyInMemoryNonCoinbaseTxs(
 	validation connectBlockInMemoryValidationContext,
 ) (map[Outpoint]UtxoEntry, uint64, error) {
 	var sumFees uint64
+	seenNonces := make(map[uint64]struct{}, len(pb.Txs))
 	for i := 1; i < len(pb.Txs); i++ {
+		if err := validateNonCoinbaseBlockTx(pb.Txs[i], seenNonces); err != nil {
+			return nil, 0, err
+		}
 		nextUtxos, fee, err := applyNonCoinbaseTxBasicWork(nonCoinbaseApplyWorkInput{
 			tx:       pb.Txs[i],
 			txid:     pb.Txids[i],

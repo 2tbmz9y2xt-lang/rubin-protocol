@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"math/big"
+	"reflect"
 	"testing"
 )
 
@@ -314,6 +315,131 @@ func TestIntegrationParity_MultipleValidTxs(t *testing.T) {
 	if seqSummary.SumFees != parSummary.SumFees {
 		t.Fatalf("SumFees mismatch: seq=%d par=%d", seqSummary.SumFees, parSummary.SumFees)
 	}
+}
+
+func TestConnectBlock_TransactionIndexFirstErrorOrder(t *testing.T) {
+	height, prev, target := uint64(1), hashWithPrefix(0x59), filledHash(0xff)
+	state := func(cov []byte) *InMemoryChainState {
+		utxos := make(map[Outpoint]UtxoEntry)
+		for vout := uint32(0); vout < 3; vout++ {
+			utxos[Outpoint{Txid: prev, Vout: vout}] = UtxoEntry{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: append([]byte(nil), cov...)}
+		}
+		return &InMemoryChainState{Utxos: utxos, AlreadyGenerated: new(big.Int)}
+	}
+	spend := func(cov []byte, nonce uint64, vout uint32, value uint64) *Tx {
+		return &Tx{Version: 1, TxKind: 0, TxNonce: nonce, Inputs: []TxInput{{PrevTxid: prev, PrevVout: vout, Sequence: 0}}, Outputs: []TxOutput{{Value: value, CovenantType: COV_TYPE_P2PK, CovenantData: cov}}}
+	}
+	missing := func(cov []byte, nonce uint64) []byte { return txBytesFromTx(t, spend(cov, nonce, 99, 90)) }
+	invalid := func(cov []byte, nonce uint64, vout uint32) []byte {
+		return txBytesFromTx(t, spend(cov, nonce, vout, 0))
+	}
+	noInputs := func(cov []byte, nonce uint64) []byte {
+		return txBytesFromTx(t, &Tx{Version: 1, TxKind: 0, TxNonce: nonce, Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: cov}}})
+	}
+	buildBlock := func(coinbase []byte, txs ...[]byte) []byte {
+		ids := make([][32]byte, 1, len(txs)+1)
+		ids[0] = testTxID(t, coinbase)
+		for _, tx := range txs {
+			ids = append(ids, testTxID(t, tx))
+		}
+		root, err := MerkleRootTxids(ids)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return buildBlockBytes(t, prev, root, target, 1, append([][]byte{coinbase}, txs...))
+	}
+	block := func(coinbaseValue uint64, txs ...[]byte) []byte {
+		return buildBlock(coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, coinbaseValue, txs...), txs...)
+	}
+	assertState := func(t *testing.T, got, want *InMemoryChainState) {
+		t.Helper()
+		if !reflect.DeepEqual(got.Utxos, want.Utxos) || got.AlreadyGenerated.Cmp(want.AlreadyGenerated) != 0 {
+			t.Fatal("rejection changed initialized chainstate")
+		}
+	}
+	reject := func(t *testing.T, b []byte, want ErrorCode, cov []byte) {
+		t.Helper()
+		seq, seqBefore := state(cov), state(cov)
+		_, seqErr := ConnectBlockBasicInMemoryAtHeight(b, &prev, &target, height, []uint64{0}, seq, [32]byte{})
+		if got := mustTxErrCode(t, seqErr); got != want {
+			t.Fatalf("sequential=%s, want %s", got, want)
+		}
+		assertState(t, seq, seqBefore)
+		par, parBefore := state(cov), state(cov)
+		_, parErr := ConnectBlockParallelSigVerify(b, &prev, &target, height, []uint64{0}, par, [32]byte{}, 2)
+		if got := mustTxErrCode(t, parErr); got != want {
+			t.Fatalf("parallel=%s, want %s", got, want)
+		}
+		assertState(t, par, parBefore)
+	}
+	subsidy := BlockSubsidyBig(height, new(big.Int))
+	t.Run("precrypto", func(t *testing.T) {
+		cov := validP2PKCovenantData()
+		coinbaseLike := coinbaseTxWithOutputs(uint32(height), []testOutput{{value: 1, covenantType: COV_TYPE_P2PK, covenantData: cov}})
+		cases := []struct {
+			name  string
+			value uint64
+			txs   [][]byte
+			want  ErrorCode
+		}{
+			{"missing_only", subsidy + 20, [][]byte{missing(cov, 1)}, TX_ERR_MISSING_UTXO},
+			{"missing_before_invalid_output", subsidy + 20, [][]byte{missing(cov, 1), invalid(cov, 2, 1)}, TX_ERR_MISSING_UTXO},
+			{"missing_before_coinbase_like", subsidy + 20, [][]byte{missing(cov, 1), coinbaseLike}, TX_ERR_MISSING_UTXO},
+			{"missing_before_zero_nonce_empty", subsidy + 20, [][]byte{missing(cov, 1), noInputs(cov, 0)}, TX_ERR_MISSING_UTXO},
+			{"missing_before_empty", subsidy + 20, [][]byte{missing(cov, 1), noInputs(cov, 2)}, TX_ERR_MISSING_UTXO},
+			{"missing_before_replay", subsidy + 20, [][]byte{missing(cov, 1), missing(cov, 1)}, TX_ERR_MISSING_UTXO},
+			{"structural_before_output", subsidy + 20, [][]byte{noInputs(cov, 3), invalid(cov, 4, 1)}, TX_ERR_PARSE},
+			{"same_tx_output_before_missing", subsidy + 20, [][]byte{invalid(cov, 1, 99)}, TX_ERR_COVENANT_TYPE_INVALID},
+			{"coinbase_before_later", 0, [][]byte{missing(cov, 1)}, TX_ERR_COVENANT_TYPE_INVALID},
+			{"da_integrity_before_tx_semantics", subsidy, [][]byte{daCommitTxBytes(1, filled32(0x61), 1, filled32(0x62))}, BLOCK_ERR_DA_INCOMPLETE},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) { reject(t, block(tc.value, tc.txs...), tc.want, cov) })
+		}
+		missingTx := missing(cov, 1)
+		vaultCoinbase := coinbaseWithWitnessCommitmentAndVaultOutputAtHeight(t, height, 1, validVaultCovenantDataForP2PKOutput(), missingTx)
+		t.Run("coinbase_vault_before_missing", func(t *testing.T) {
+			reject(t, buildBlock(vaultCoinbase, missingTx), BLOCK_ERR_COINBASE_INVALID, cov)
+		})
+	})
+
+	t.Run("signed", func(t *testing.T) {
+		kp, err := NewMLDSA87Keypair()
+		if err != nil {
+			t.Fatalf("ML-DSA-87 backend required for RUB-659: %v", err)
+		}
+		t.Cleanup(func() { kp.Close() })
+		cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+		valid := func(nonce uint64, vout uint32, value uint64) []byte {
+			tx := spend(cov, nonce, vout, value)
+			tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp)}
+			return txBytesFromTx(t, tx)
+		}
+		coinbaseLike := coinbaseTxWithOutputs(uint32(height), []testOutput{{value: 1, covenantType: COV_TYPE_P2PK, covenantData: cov}})
+		cases := []struct {
+			name string
+			txs  [][]byte
+			want ErrorCode
+		}{
+			{"later_invalid_output", [][]byte{valid(1, 0, 90), invalid(cov, 2, 1)}, TX_ERR_COVENANT_TYPE_INVALID},
+			{"replay_before_output", [][]byte{valid(1, 0, 90), missing(cov, 1), invalid(cov, 2, 1)}, TX_ERR_NONCE_REPLAY},
+			{"value_before_output", [][]byte{valid(1, 0, 101), invalid(cov, 2, 1)}, TX_ERR_VALUE_CONSERVATION},
+			{"valid_before_coinbase_like", [][]byte{valid(1, 0, 90), coinbaseLike}, BLOCK_ERR_COINBASE_INVALID},
+			{"valid_before_zero_nonce_empty", [][]byte{valid(1, 0, 90), noInputs(cov, 0)}, TX_ERR_TX_NONCE_INVALID},
+			{"valid_before_empty", [][]byte{valid(1, 0, 90), noInputs(cov, 2)}, TX_ERR_PARSE},
+			{"missing_valid_middle_invalid", [][]byte{missing(cov, 1), valid(2, 0, 90), invalid(cov, 3, 1)}, TX_ERR_MISSING_UTXO},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) { reject(t, block(subsidy+20, tc.txs...), tc.want, cov) })
+		}
+		validBlock := block(subsidy+20, valid(1, 0, 90), valid(2, 1, 90))
+		seq, par := state(cov), state(cov)
+		seqSummary, seqErr := ConnectBlockBasicInMemoryAtHeight(validBlock, &prev, &target, height, []uint64{0}, seq, [32]byte{})
+		parSummary, parErr := ConnectBlockParallelSigVerify(validBlock, &prev, &target, height, []uint64{0}, par, [32]byte{}, 2)
+		if seqErr != nil || parErr != nil || seqSummary.PostStateDigest != parSummary.PostStateDigest || !reflect.DeepEqual(seq, par) {
+			t.Fatalf("valid multi-tx parity failed: seq=%v par=%v", seqErr, parErr)
+		}
+	})
 }
 
 func txErrCode(err error) string {
