@@ -20,6 +20,62 @@ fn deferred_apply(
     )
 }
 
+fn p2pk_input(prev_txid: [u8; 32]) -> crate::tx::TxInput {
+    crate::tx::TxInput {
+        prev_txid,
+        prev_vout: 0,
+        script_sig: vec![],
+        sequence: 0,
+    }
+}
+
+fn p2pk_utxo(covenant_data: Vec<u8>) -> UtxoEntry {
+    UtxoEntry {
+        value: 100,
+        covenant_type: COV_TYPE_P2PK,
+        covenant_data,
+        creation_height: 0,
+        created_by_coinbase: false,
+    }
+}
+
+fn p2pk_tx(
+    tx_nonce: u64,
+    inputs: Vec<crate::tx::TxInput>,
+    output_value: u64,
+    covenant_data: Vec<u8>,
+) -> crate::tx::Tx {
+    crate::tx::Tx {
+        version: 1,
+        tx_kind: 0,
+        tx_nonce,
+        inputs,
+        outputs: vec![crate::tx::TxOutput {
+            value: output_value,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data,
+        }],
+        locktime: 0,
+        witness: vec![],
+        da_payload: vec![],
+        da_commit_core: None,
+        da_chunk_core: None,
+    }
+}
+
+fn p2pk_sig_cache_tuple(tx: &crate::tx::Tx, input_index: usize) -> (u8, &[u8], &[u8], [u8; 32]) {
+    let witness = &tx.witness[input_index];
+    let (_, crypto_signature) = witness.signature.split_last().expect("sighash byte");
+    let digest = crate::sighash::sighash_v1_digest(
+        tx,
+        u32::try_from(input_index).expect("input index fits u32"),
+        100,
+        ZERO_CHAIN_ID,
+    )
+    .expect("sighash digest");
+    (witness.suite_id, &witness.pubkey, crypto_signature, digest)
+}
+
 fn core_ext_covdata(ext_id: u16, payload: &[u8]) -> Vec<u8> {
     crate::core_ext::encode_core_ext_covenant_data(ext_id, payload)
         .expect("CORE_EXT covenant_data encode")
@@ -1262,6 +1318,230 @@ fn apply_non_coinbase_tx_basic_workq_p2pk_spend_q_error() {
 
     let err = deferred_apply(&tx, [0u8; 32], &utxos, 1).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+}
+
+#[test]
+fn queued_sigchecks_transaction_entry_rollback_to_mark() {
+    let kp = test_mldsa87_keypair().expect("ML-DSA-87 backend required for RUB-1096");
+    let covenant_data = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+    let prev_txid = [0x79; 32];
+    let mut late_tx = p2pk_tx(1, vec![p2pk_input(prev_txid)], 101, covenant_data.clone());
+    late_tx.witness = vec![sign_input_witness(&late_tx, 0, 100, ZERO_CHAIN_ID, &kp)];
+    let utxos = HashMap::from([(
+        Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        },
+        p2pk_utxo(covenant_data),
+    )]);
+    let apply = |tx: &crate::tx::Tx, queue: &mut crate::sig_queue::SigCheckQueue| {
+        crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+            tx, [0x7a; 32], &utxos, 1, 0, 0, ZERO_CHAIN_ID, None, None, queue,
+        )
+    };
+
+    for prepopulated in [false, true] {
+        let cache = crate::sig_cache::SigCache::new(1);
+        let mut queue = crate::sig_queue::SigCheckQueue::new(1).with_cache(cache.clone());
+        let prefix_tx = if prepopulated {
+            let mut prefix_tx = late_tx.clone();
+            prefix_tx.outputs[0].value = 99;
+            prefix_tx.witness = vec![sign_input_witness(&prefix_tx, 0, 100, ZERO_CHAIN_ID, &kp)];
+            apply(&prefix_tx, &mut queue).expect("queue valid prefix");
+            Some(prefix_tx)
+        } else {
+            None
+        };
+        let entry_mark = queue.mark();
+        let entry_len = queue.len();
+        let before = utxos.clone();
+
+        let mut early_tx = late_tx.clone();
+        early_tx.tx_nonce = 0;
+        early_tx.witness = vec![sign_input_witness(&early_tx, 0, 100, ZERO_CHAIN_ID, &kp)];
+        let early_err = apply(&early_tx, &mut queue).unwrap_err();
+        assert_eq!(
+            early_err,
+            crate::error::TxError::new(
+                ErrorCode::TxErrTxNonceInvalid,
+                "tx_nonce must be >= 1 for non-coinbase",
+            )
+        );
+        assert_eq!(
+            queue.mark(),
+            entry_mark,
+            "early rejection changed entry mark"
+        );
+        assert_eq!(
+            queue.len(),
+            entry_len,
+            "early rejection left a rejected suffix"
+        );
+        assert_eq!(utxos, before, "caller UTXOs changed on early rejection");
+
+        let late_err = apply(&late_tx, &mut queue).unwrap_err();
+        assert_eq!(
+            late_err,
+            crate::error::TxError::new(ErrorCode::TxErrValueConservation, "sum_out exceeds sum_in",)
+        );
+        assert_eq!(
+            queue.mark(),
+            entry_mark,
+            "late rejection changed entry mark"
+        );
+        assert_eq!(
+            queue.len(),
+            entry_len,
+            "late rejection left a rejected suffix"
+        );
+        assert_eq!(utxos, before, "caller UTXOs changed on late rejection");
+        if let Some(prefix_tx) = prefix_tx {
+            queue.flush().expect("preserved prefix flushes");
+            let prefix = p2pk_sig_cache_tuple(&prefix_tx, 0);
+            let rejected = p2pk_sig_cache_tuple(&late_tx, 0);
+            assert_eq!(cache.len(), 1);
+            assert!(cache.lookup(prefix.0, prefix.1, prefix.2, prefix.3));
+            assert!(!cache.lookup(rejected.0, rejected.1, rejected.2, rejected.3));
+        }
+    }
+}
+
+#[test]
+fn queued_sigchecks_transaction_entry_success_retains_tasks() {
+    let kp1 = test_mldsa87_keypair().expect("ML-DSA-87 backend required for RUB-1096");
+    let kp2 = test_mldsa87_keypair().expect("ML-DSA-87 backend required for RUB-1096");
+    let cov1 = p2pk_covenant_data_for_pubkey(&kp1.pubkey);
+    let cov2 = p2pk_covenant_data_for_pubkey(&kp2.pubkey);
+    let prev1 = [0x7b; 32];
+    let prev2 = [0x7c; 32];
+    let mut tx = p2pk_tx(
+        1,
+        vec![p2pk_input(prev1), p2pk_input(prev2)],
+        199,
+        cov1.clone(),
+    );
+    tx.witness = vec![
+        sign_input_witness(&tx, 0, 100, ZERO_CHAIN_ID, &kp1),
+        sign_input_witness(&tx, 1, 100, ZERO_CHAIN_ID, &kp2),
+    ];
+    let utxos = HashMap::from([
+        (
+            Outpoint {
+                txid: prev1,
+                vout: 0,
+            },
+            p2pk_utxo(cov1),
+        ),
+        (
+            Outpoint {
+                txid: prev2,
+                vout: 0,
+            },
+            p2pk_utxo(cov2),
+        ),
+    ]);
+    let cache = crate::sig_cache::SigCache::new(1);
+    let mut queue = crate::sig_queue::SigCheckQueue::new(1).with_cache(cache.clone());
+    assert!(queue.is_empty());
+    crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+        &tx, [0x7d; 32], &utxos, 1, 0, 0, ZERO_CHAIN_ID, None, None, &mut queue,
+    )
+    .expect("queue valid two-input transaction");
+    assert_eq!(
+        queue.len(),
+        2,
+        "success retains both queued signature tasks"
+    );
+    queue.flush().expect("flush queued signatures");
+    let first = p2pk_sig_cache_tuple(&tx, 0);
+    let second = p2pk_sig_cache_tuple(&tx, 1);
+    assert_eq!(cache.len(), 1);
+    assert!(cache.lookup(first.0, first.1, first.2, first.3));
+    assert!(!cache.lookup(second.0, second.1, second.2, second.3));
+}
+
+#[test]
+fn queued_sigchecks_transaction_entry_unbound_registry_rollback() {
+    let kp = test_mldsa87_keypair().expect("ML-DSA-87 backend required for RUB-1096");
+    let covenant_data = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+    let prev_txid = [0x7e; 32];
+    let mut late_tx = p2pk_tx(1, vec![p2pk_input(prev_txid)], 101, covenant_data.clone());
+    late_tx.witness = vec![sign_input_witness(&late_tx, 0, 100, ZERO_CHAIN_ID, &kp)];
+    let mut valid_tx = late_tx.clone();
+    valid_tx.outputs[0].value = 99;
+    valid_tx.witness = vec![sign_input_witness(&valid_tx, 0, 100, ZERO_CHAIN_ID, &kp)];
+    let utxos = HashMap::from([(
+        Outpoint {
+            txid: prev_txid,
+            vout: 0,
+        },
+        p2pk_utxo(covenant_data),
+    )]);
+
+    let registry_a = crate::SuiteRegistry::default_registry();
+    let ml_dsa_87 = registry_a
+        .lookup(SUITE_ID_ML_DSA_87)
+        .expect("default ML-DSA-87 suite")
+        .clone();
+    let registry_b = crate::SuiteRegistry::with_suites(std::collections::BTreeMap::from([
+        (SUITE_ID_ML_DSA_87, ml_dsa_87.clone()),
+        (
+            0x02,
+            crate::suite_registry::SuiteParams {
+                suite_id: 0x02,
+                ..ml_dsa_87
+            },
+        ),
+    ]));
+    let apply = |tx: &crate::tx::Tx,
+                 registry: &crate::SuiteRegistry,
+                 queue: &mut crate::sig_queue::SigCheckQueue| {
+        crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+            tx,
+            [0x7f; 32],
+            &utxos,
+            1,
+            0,
+            0,
+            ZERO_CHAIN_ID,
+            None,
+            Some(registry),
+            queue,
+        )
+    };
+    let value_error =
+        crate::error::TxError::new(ErrorCode::TxErrValueConservation, "sum_out exceeds sum_in");
+    let mismatch_error = crate::error::TxError::new(
+        ErrorCode::TxErrSigAlgInvalid,
+        "SigCheckQueue registry mismatch",
+    );
+
+    let mut unbound_queue = crate::sig_queue::SigCheckQueue::new(1);
+    assert_eq!(
+        apply(&late_tx, &registry_a, &mut unbound_queue).unwrap_err(),
+        value_error.clone()
+    );
+    let reused_result =
+        apply(&valid_tx, &registry_b, &mut unbound_queue).expect("registry B after rollback");
+    unbound_queue.flush().expect("flush registry-B task");
+    let mut fresh_b_queue = crate::sig_queue::SigCheckQueue::new(1);
+    let fresh_result = apply(&valid_tx, &registry_b, &mut fresh_b_queue).expect("fresh registry B");
+    fresh_b_queue.flush().expect("flush fresh registry-B task");
+    assert_eq!(reused_result, fresh_result);
+    assert_eq!(
+        apply(&valid_tx, &registry_a, &mut unbound_queue).unwrap_err(),
+        mismatch_error.clone()
+    );
+
+    let mut bound_queue = crate::sig_queue::SigCheckQueue::new(1).with_registry(&registry_a);
+    assert_eq!(
+        apply(&late_tx, &registry_a, &mut bound_queue).unwrap_err(),
+        value_error
+    );
+    assert_eq!(
+        apply(&valid_tx, &registry_b, &mut bound_queue).unwrap_err(),
+        mismatch_error
+    );
 }
 
 #[test]
