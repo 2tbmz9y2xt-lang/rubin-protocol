@@ -14,8 +14,6 @@ pub const DA_ORPHAN_POOL_PER_DA_ID_BYTES: u64 = 8 << 20;
 pub const DA_ORPHAN_COMMIT_OVERHEAD_BYTES: u64 = 8 << 20;
 pub const DA_ORPHAN_TTL_BLOCKS: u64 = 3;
 pub const DA_PINNED_PAYLOAD_BYTES: u64 = 96_000_000;
-const DA_COMPLETE_SET_RECORD_FOOTPRINT: u64 = 256;
-const DA_COMPLETE_SET_CHUNK_FOOTPRINT: u64 = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DaRelayCaps {
@@ -387,21 +385,19 @@ impl DaRelaySetRecord {
             && self.commit.is_none()
             && self.chunks.is_empty()
     }
-    fn pinned_payload_accounting_bytes(&self) -> DaRelayResult<u64> {
-        if self.state != DaRelaySetState::CompleteSet || self.payload_bytes == 0 {
-            return Ok(0);
+    /// What this record contributes to the `DA_MEMPOOL_PINNED_PAYLOAD_MAX`
+    /// counter. RUBIN_COMPACT_BLOCKS §5.1 counts DA payload bytes only, so a
+    /// retained `CompleteSet` contributes exactly `payload_bytes` (the sum of
+    /// its DA_CHUNK payload lengths, as recorded by `mark_complete`) and every
+    /// other state contributes zero. Commit metadata, retained transaction
+    /// bytes and wire envelope overhead are never counted; a defensive
+    /// zero-payload `CompleteSet` therefore contributes zero as well. Mirrors
+    /// Go `daRelaySetRecord.pinnedPayloadAccountingBytes`.
+    fn pinned_payload_accounting_bytes(&self) -> u64 {
+        if self.state != DaRelaySetState::CompleteSet {
+            return 0;
         }
-        let footprint = if self.wire_bytes == 0 {
-            self.payload_bytes
-        } else {
-            self.wire_bytes
-        };
-        let footprint = checked_add(footprint, DA_COMPLETE_SET_RECORD_FOOTPRINT)?;
-        let chunk_count = self.commit.as_ref().map_or(0, |commit| commit.chunk_count);
-        let chunk_footprint = u64::from(chunk_count)
-            .checked_mul(DA_COMPLETE_SET_CHUNK_FOOTPRINT)
-            .ok_or(DaRelayError::AccountingOverflow)?;
-        checked_add(footprint, chunk_footprint)
+        self.payload_bytes
     }
 
     pub(crate) fn eviction_accounting(&self) -> Option<DaRelayEvictionAccounting> {
@@ -799,7 +795,7 @@ impl DaRelayState {
         if record.state != DaRelaySetState::CompleteSet {
             return Ok(false);
         }
-        let pinned = record.pinned_payload_accounting_bytes()?;
+        let pinned = record.pinned_payload_accounting_bytes();
         // project_counter returns Err on underflow/overflow/cap; the counter and
         // the record below are written only after it succeeds.
         let pinned_payload_bytes = Self::project_counter(
@@ -933,11 +929,10 @@ impl DaRelayState {
         let old = self.sets_by_da_id.get(&record.da_id);
         let old_bytes = old.map_or(Ok(0), DaRelaySetRecord::orphan_wire_bytes)?;
         let old_commit_bytes = old.map_or(0, DaRelaySetRecord::orphan_commit_bytes);
-        let old_pinned_bytes =
-            old.map_or(Ok(0), DaRelaySetRecord::pinned_payload_accounting_bytes)?;
+        let old_pinned_bytes = old.map_or(0, DaRelaySetRecord::pinned_payload_accounting_bytes);
         let new_bytes = record.orphan_wire_bytes()?;
         let new_commit_bytes = record.orphan_commit_bytes();
-        let new_pinned_bytes = record.pinned_payload_accounting_bytes()?;
+        let new_pinned_bytes = record.pinned_payload_accounting_bytes();
         let peer_bytes = self.project_peer_bytes(old, &record)?;
         let da_id_current = self
             .orphan_bytes_by_da_id
@@ -1776,12 +1771,11 @@ mod tests {
             .unwrap();
         let record = &state.sets_by_da_id[&[71; 32]];
         assert_eq!(record.state, DaRelaySetState::CompleteSet);
-        let chunk_count = u64::from(record.commit.as_ref().unwrap().chunk_count);
         assert!(record.chunks.values().all(|chunk| chunk.payload.is_empty()));
-        let pinned = retained_wire
-            + DA_COMPLETE_SET_RECORD_FOOTPRINT
-            + chunk_count * DA_COMPLETE_SET_CHUNK_FOOTPRINT;
-        assert_eq!(state.pinned_payload_bytes, pinned);
+        // Retained commit/chunk tx bytes are relay metadata: they leave
+        // `wire_bytes` non-zero but never reach the pinned payload counter.
+        assert_eq!(record.wire_bytes, retained_wire);
+        assert_eq!(state.pinned_payload_bytes, payload.len() as u64);
         assert_eq!(state.orphan_bytes, 0);
 
         let tight_caps = DaRelayCaps {
@@ -1844,7 +1838,7 @@ mod tests {
         let mut batch = DaRelayState::new(DaRelayCaps::default()).unwrap(); batch.stage_incomplete_da_chunk(peer, chunk([6; 32], 0, b"batch", 5)).unwrap(); assert!(batch.advance_orphan_ttl_by(0).unwrap().is_empty()); assert_eq!(batch.sets_by_da_id[&[6; 32]].ttl_blocks_remaining, 3); assert!(batch.advance_orphan_ttl_by(2).unwrap().is_empty()); assert_eq!(batch.sets_by_da_id[&[6; 32]].ttl_blocks_remaining, 1); assert_eq!(batch.advance_orphan_ttl_by(2).unwrap(), vec![[6; 32]]); assert!(batch.is_empty());
         state.sets_by_da_id.get_mut(&[3; 32]).unwrap().ttl_blocks_remaining = 1; state.sets_by_da_id.get_mut(&[2; 32]).unwrap().ttl_blocks_remaining = 0; let expired = state.advance_orphan_ttl().unwrap();
         assert_eq!(expired, vec![[2; 32], [3; 32]]);
-        assert_eq!(state.sets_by_da_id.get(&[1; 32]), Some(&complete_before)); assert!(!state.sets_by_da_id.contains_key(&[2; 32])); assert!(!state.sets_by_da_id.contains_key(&[3; 32])); assert_eq!(state.orphan_bytes, 0); assert!(state.orphan_bytes_by_da_id.is_empty()); assert!(state.orphan_bytes_by_peer_quota_key.is_empty()); assert_eq!(state.orphan_commit_overhead_bytes, 0); assert_eq!(state.pinned_payload_bytes, complete_before.pinned_payload_accounting_bytes().unwrap()); let before_noop = state.clone(); assert!(state.advance_orphan_ttl().unwrap().is_empty()); assert_eq!(state, before_noop);
+        assert_eq!(state.sets_by_da_id.get(&[1; 32]), Some(&complete_before)); assert!(!state.sets_by_da_id.contains_key(&[2; 32])); assert!(!state.sets_by_da_id.contains_key(&[3; 32])); assert_eq!(state.orphan_bytes, 0); assert!(state.orphan_bytes_by_da_id.is_empty()); assert!(state.orphan_bytes_by_peer_quota_key.is_empty()); assert_eq!(state.orphan_commit_overhead_bytes, 0); assert_eq!(state.pinned_payload_bytes, complete_before.pinned_payload_accounting_bytes()); let before_noop = state.clone(); assert!(state.advance_orphan_ttl().unwrap().is_empty()); assert_eq!(state, before_noop);
         state.stage_incomplete_da_chunk(peer, chunk([4; 32], 0, b"corrupt", 7)).unwrap(); state.sets_by_da_id.get_mut(&[4; 32]).unwrap().ttl_blocks_remaining = 1; state.orphan_bytes = 0; let before = state.clone();
         assert_eq!(state.advance_orphan_ttl(), Err(AccountingUnderflow)); assert_eq!(state, before);
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([4; 32], 0, b"early", 5)).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([5; 32], 0, b"late", 7)).unwrap(); state.sets_by_da_id.get_mut(&[4; 32]).unwrap().ttl_blocks_remaining = 1; state.sets_by_da_id.get_mut(&[5; 32]).unwrap().ttl_blocks_remaining = 1; state.orphan_bytes_by_da_id.insert([5; 32], 0); let before = state.clone();
@@ -1951,11 +1945,103 @@ mod tests {
     #[rustfmt::skip]
     fn da_relay_complete_integrity_matrix() {
         let peer = "peer-a:8333"; let pk = || PeerQuotaKey::from_peer_addr(peer); let commit = |da_id, payloads: &[&[u8]], wire_bytes| DaRelayCommit { da_id, payload_commitment: payload_commitment(payloads), peer_quota_key: pk(), chunk_count: payloads.len() as u16, wire_bytes, tx_bytes: Arc::from([]) }; let chunk = |da_id, index, payload: &[u8], wire_bytes| DaRelayChunk { da_id, chunk_hash: sha3_256(payload), peer_quota_key: pk(), chunk_index: index, payload: Arc::from(payload), wire_bytes, tx_bytes: Arc::from([]) };
-        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_commit(peer, commit([20; 32], &[b"aa", b"bb"], 2)).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([20; 32], 0, b"aa", 2)).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([20; 32], 1, b"bb", 2)).unwrap(); let record = &state.sets_by_da_id[&[20; 32]]; let chunk_count = u64::from(record.commit.as_ref().unwrap().chunk_count); assert_eq!(record.state, DaRelaySetState::CompleteSet); assert_eq!(record.payload_bytes, 4); assert_eq!(record.ttl_blocks_remaining, 0); assert!(record.chunks.values().all(|chunk| chunk.payload.is_empty())); assert_eq!(state.orphan_bytes, 0); assert!(!state.orphan_bytes_by_da_id.contains_key(&[20; 32])); assert_eq!(state.pinned_payload_bytes, record.wire_bytes + DA_COMPLETE_SET_RECORD_FOOTPRINT + chunk_count * DA_COMPLETE_SET_CHUNK_FOOTPRINT);
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_commit(peer, commit([20; 32], &[b"aa", b"bb"], 2)).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([20; 32], 0, b"aa", 2)).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([20; 32], 1, b"bb", 2)).unwrap(); let record = &state.sets_by_da_id[&[20; 32]]; assert_eq!(record.state, DaRelaySetState::CompleteSet); assert_eq!(record.payload_bytes, 4); assert_eq!(record.ttl_blocks_remaining, 0); assert!(record.chunks.values().all(|chunk| chunk.payload.is_empty())); assert_eq!(state.orphan_bytes, 0); assert!(!state.orphan_bytes_by_da_id.contains_key(&[20; 32])); assert_eq!(state.pinned_payload_bytes, record.payload_bytes);
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_commit(peer, commit([21; 32], &[b"good"], 1)).unwrap(); assert_eq!(state.stage_incomplete_da_chunk(peer, chunk([21; 32], 0, b"bad", 3)), Err(PayloadCommitmentMismatch)); let record = &state.sets_by_da_id[&[21; 32]]; assert_eq!(record.state, DaRelaySetState::StagedCommit); assert_eq!(record.payload_bytes, 0); assert!(record.chunks.is_empty() && record.replaceable_chunks.is_empty()); assert_eq!(state.pinned_payload_bytes, 0); state.stage_incomplete_da_chunk(peer, chunk([21; 32], 0, b"good", 4)).unwrap(); let record = &state.sets_by_da_id[&[21; 32]]; assert_eq!(record.state, DaRelaySetState::CompleteSet); assert!(record.replaceable_chunks.is_empty());
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([22; 32], 0, b"bad", 3)).unwrap(); assert_eq!(state.stage_incomplete_da_commit(peer, commit([22; 32], &[b"good"], 1)), Err(PayloadCommitmentMismatch)); let record = &state.sets_by_da_id[&[22; 32]]; assert_eq!(record.state, DaRelaySetState::StagedCommit); assert!(record.chunks.is_empty()); assert_eq!(state.pinned_payload_bytes, 0); state.stage_incomplete_da_chunk(peer, chunk([22; 32], 0, b"good", 4)).unwrap(); assert_eq!(state.sets_by_da_id[&[22; 32]].state, DaRelaySetState::CompleteSet);
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_commit(peer, commit([23; 32], &[b"aa", b"bb"], 1)).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([23; 32], 0, b"aa", 2)).unwrap(); assert_eq!(state.stage_incomplete_da_chunk(peer, chunk([23; 32], 1, b"xx", 2)), Err(PayloadCommitmentMismatch)); let record = &state.sets_by_da_id[&[23; 32]]; assert_eq!(record.state, DaRelaySetState::StagedCommit); assert!(record.chunks.contains_key(&0) && !record.chunks.contains_key(&1)); assert!(record.replaceable_chunks.is_empty()); assert_eq!(state.pinned_payload_bytes, 0); state.stage_incomplete_da_chunk(peer, chunk([23; 32], 1, b"bb", 2)).unwrap(); assert_eq!(state.sets_by_da_id[&[23; 32]].state, DaRelaySetState::CompleteSet);
         let caps = DaRelayCaps { pinned_payload_bytes: 1, ..DaRelayCaps::default() }; let mut state = DaRelayState::new(caps).unwrap(); state.stage_incomplete_da_commit(peer, commit([24; 32], &[b"aa"], 1)).unwrap(); let before = state.clone(); assert_eq!(state.stage_incomplete_da_chunk(peer, chunk([24; 32], 0, b"aa", 2)), Err(AccountingCapExceeded)); assert_eq!(state, before);
+    }
+
+    /// RUB-664: a retained COMPLETE_SET contributes exactly `payload_bytes` —
+    /// the sum of its DA_CHUNK payload lengths — to the pinned relay cap,
+    /// because RUBIN_COMPACT_BLOCKS §5.1 counts DA payload bytes only. Commit
+    /// metadata, retained tx bytes, wire envelope overhead and chunk count
+    /// never consume the cap, and admission projection, the committed counter
+    /// and release all use that one value. Mirror of Go
+    /// `TestDARelayPinnedPayloadAccountingUsesPayloadBytesOnly`.
+    #[test]
+    #[rustfmt::skip]
+    fn da_relay_payload_only_pinned_accounting_matrix() {
+        let peer = "peer-a:8333"; let pk = || PeerQuotaKey::from_peer_addr(peer);
+        let commit = |da_id, payloads: &[&[u8]], wire_bytes, tx_bytes: &[u8]| DaRelayCommit { da_id, payload_commitment: payload_commitment(payloads), peer_quota_key: pk(), chunk_count: payloads.len() as u16, wire_bytes, tx_bytes: Arc::from(tx_bytes) };
+        let chunk = |da_id, index, payload: &[u8], wire_bytes, tx_bytes: &[u8]| DaRelayChunk { da_id, chunk_hash: sha3_256(payload), peer_quota_key: pk(), chunk_index: index, payload: Arc::from(payload), wire_bytes, tx_bytes: Arc::from(tx_bytes) };
+        let whole: &[u8] = b"0123456789abcdef"; let head: &[u8] = b"0123456789"; let tail: &[u8] = b"abcdef";
+        // `want`/`want_head` are payload sums (what must be pinned); `*_wire` are
+        // the wire byte counts staging requires (what must never be pinned).
+        let want = whole.len() as u64; let want_head = head.len() as u64;
+        let head_wire = head.len() as u64; let tail_wire = tail.len() as u64;
+
+        // Incomplete records, and a defensive zero-payload COMPLETE_SET, contribute nothing.
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        state.stage_incomplete_da_chunk(peer, chunk([30; 32], 0, whole, want, &[])).unwrap();
+        state.stage_incomplete_da_commit(peer, commit([31; 32], &[head, tail], 4096, &[])).unwrap();
+        for da_id in [[30u8; 32], [31u8; 32]] { assert_eq!(state.sets_by_da_id[&da_id].pinned_payload_accounting_bytes(), 0); }
+        assert_eq!(state.pinned_payload_bytes, 0);
+        let mut defensive = DaRelaySetRecord::new([32; 32]); defensive.state = DaRelaySetState::CompleteSet; defensive.wire_bytes = 1 << 20; defensive.commit = Some(DaRelayCommit { chunk_count: 8, ..commit([32; 32], &[whole], 4096, b"commit-tx") });
+        assert_eq!(defensive.pinned_payload_accounting_bytes(), 0);
+
+        // Equal payload sum with deliberately unequal retained wire/tx metadata
+        // and chunk count, through both commit-last and chunk-last completion.
+        let mut wire_seen = BTreeSet::new();
+        for order in 0..3u8 {
+            let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); let da_id = [33u8; 32];
+            match order {
+                0 => { state.stage_incomplete_da_commit(peer, commit(da_id, &[whole], 1, &[])).unwrap(); state.stage_incomplete_da_chunk(peer, chunk(da_id, 0, whole, want, &[])).unwrap(); }
+                1 => { state.stage_incomplete_da_chunk(peer, chunk(da_id, 0, head, head_wire, &[])).unwrap(); state.stage_incomplete_da_chunk(peer, chunk(da_id, 1, tail, tail_wire, &[])).unwrap(); state.stage_incomplete_da_commit(peer, commit(da_id, &[head, tail], 4096, &[])).unwrap(); }
+                _ => { state.stage_incomplete_da_commit(peer, commit(da_id, &[head, tail], 9, b"commit-tx-bytes")).unwrap(); state.stage_incomplete_da_chunk(peer, chunk(da_id, 0, head, head_wire, b"chunk-tx-bytes-0")).unwrap(); state.stage_incomplete_da_chunk(peer, chunk(da_id, 1, tail, tail_wire, b"chunk-tx-bytes-1")).unwrap(); }
+            }
+            let record = &state.sets_by_da_id[&da_id];
+            assert_eq!(record.state, DaRelaySetState::CompleteSet); assert_eq!(record.payload_bytes, want);
+            assert_eq!(record.pinned_payload_accounting_bytes(), want); assert_eq!(state.pinned_payload_bytes, want);
+            wire_seen.insert(record.wire_bytes);
+        }
+        assert!(wire_seen.len() > 1, "rows shared one retained wire footprint: {wire_seen:?}");
+
+        // previous_pinned + payload_bytes == cap admits and commits exactly the
+        // cap; one byte more is the native cap error with nothing mutated.
+        let caps = DaRelayCaps { pinned_payload_bytes: want + want_head, ..DaRelayCaps::default() };
+        let mut state = DaRelayState::new(caps).unwrap();
+        state.stage_incomplete_da_commit(peer, commit([34; 32], &[head, tail], 4096, &[])).unwrap();
+        state.stage_incomplete_da_chunk(peer, chunk([34; 32], 0, head, head_wire, &[])).unwrap();
+        state.stage_incomplete_da_chunk(peer, chunk([34; 32], 1, tail, tail_wire, &[])).unwrap();
+        assert_eq!(state.sets_by_da_id[&[34; 32]].state, DaRelaySetState::CompleteSet); assert_eq!(state.pinned_payload_bytes, want);
+        state.stage_incomplete_da_commit(peer, commit([41; 32], &[head], 1, &[])).unwrap();
+        state.stage_incomplete_da_chunk(peer, chunk([41; 32], 0, head, head_wire, &[])).unwrap();
+        assert_eq!(state.sets_by_da_id[&[41; 32]].state, DaRelaySetState::CompleteSet); assert_eq!(state.pinned_payload_bytes, caps.pinned_payload_bytes);
+        // The same exact-cap landing reached commit-last, after releasing the chunk-last one.
+        assert_eq!(state.consume_complete_set([41; 32]), Ok(true)); assert_eq!(state.pinned_payload_bytes, want);
+        state.stage_incomplete_da_chunk(peer, chunk([42; 32], 0, head, head_wire, &[])).unwrap();
+        state.stage_incomplete_da_commit(peer, commit([42; 32], &[head], 1, &[])).unwrap();
+        assert_eq!(state.sets_by_da_id[&[42; 32]].state, DaRelaySetState::CompleteSet); assert_eq!(state.pinned_payload_bytes, caps.pinned_payload_bytes);
+        state.stage_incomplete_da_commit(peer, commit([35; 32], &[b"1"], 1, &[])).unwrap();
+        let before = state.clone();
+        assert_eq!(state.stage_incomplete_da_chunk(peer, chunk([35; 32], 0, b"1", 1, &[])), Err(AccountingCapExceeded));
+        assert_eq!(state, before);
+
+        // Integrity mismatch stays staged and unpinned until a valid retry.
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        state.stage_incomplete_da_commit(peer, commit([36; 32], &[head, tail], 2, &[])).unwrap();
+        state.stage_incomplete_da_chunk(peer, chunk([36; 32], 0, head, head_wire, &[])).unwrap();
+        assert_eq!(state.stage_incomplete_da_chunk(peer, chunk([36; 32], 1, b"ABCDEF", tail_wire, &[])), Err(PayloadCommitmentMismatch));
+        assert_eq!(state.sets_by_da_id[&[36; 32]].state, DaRelaySetState::StagedCommit); assert_eq!(state.pinned_payload_bytes, 0);
+        state.stage_incomplete_da_chunk(peer, chunk([36; 32], 1, tail, tail_wire, &[])).unwrap();
+        assert_eq!(state.sets_by_da_id[&[36; 32]].state, DaRelaySetState::CompleteSet); assert_eq!(state.pinned_payload_bytes, want);
+
+        // First removal releases exactly payload_bytes; repeated, unknown and
+        // incomplete removals stay no-ops.
+        state.stage_incomplete_da_commit(peer, commit([37; 32], &[head], 1, &[])).unwrap();
+        state.stage_incomplete_da_chunk(peer, chunk([37; 32], 0, head, head_wire, &[])).unwrap();
+        state.stage_incomplete_da_commit(peer, commit([38; 32], &[whole], 1, &[])).unwrap();
+        assert_eq!(state.pinned_payload_bytes, want + want_head);
+        assert_eq!(state.consume_complete_set([36; 32]), Ok(true)); assert_eq!(state.pinned_payload_bytes, want_head);
+        for da_id in [[36u8; 32], [39u8; 32], [38u8; 32]] { assert_eq!(state.consume_complete_set(da_id), Ok(false)); assert_eq!(state.pinned_payload_bytes, want_head); }
+
+        // A corrupted projected counter fails with the native arithmetic error
+        // before the cap is evaluated, and mutates nothing.
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.pinned_payload_bytes = 1;
+        let mut corrupt = DaRelaySetRecord::new([40; 32]); corrupt.state = DaRelaySetState::CompleteSet; corrupt.payload_bytes = u64::MAX;
+        let before = state.clone();
+        assert_eq!(state.apply_record(corrupt), Err(AccountingOverflow)); assert_eq!(state, before);
     }
 
     #[test]
@@ -2551,11 +2637,10 @@ mod tests {
         // others; the FIRST error, naming that block, is surfaced. The failure
         // is injected through relay accounting rather than through block bytes,
         // because a canonical-applied record no longer carries bytes to malform.
-        // A set's pinned accounting grows with its chunk COUNT
-        // (`DA_COMPLETE_SET_CHUNK_FOOTPRINT` per chunk), so the middle set is
-        // given two chunks and the counter is rewound to cover only the two
-        // one-chunk sets: consuming the middle block underflows while the blocks
-        // on either side still succeed.
+        // A set's pinned accounting is the sum of its chunk PAYLOAD bytes, so
+        // the middle set is given a second chunk and the counter is rewound to
+        // cover only the two one-chunk sets: consuming the middle block
+        // underflows while the blocks on either side still succeed.
         let id_c = [83u8; 32];
         let id_d = [84u8; 32];
         let id_bad = [85u8; 32];
@@ -2684,7 +2769,7 @@ mod tests {
         let pinned_one = state.pinned_payload_bytes;
         assert!(pinned_one > 0);
 
-        // Second, unrelated complete set with identical pinned footprint.
+        // Second, unrelated complete set with identical pinned payload bytes.
         state
             .stage_incomplete_da_commit(
                 peer_commit,
@@ -2767,7 +2852,7 @@ mod tests {
                 .unwrap();
         }
         let record = state.sets_by_da_id[&da_id].clone();
-        let pinned = record.pinned_payload_accounting_bytes().unwrap();
+        let pinned = record.pinned_payload_accounting_bytes();
         (record, pinned)
     }
 
@@ -3029,7 +3114,7 @@ mod tests {
         let (later_record, _) =
             stage_consume_complete_set(&mut state, later_id, "later", &[b"later"]);
         state.pinned_payload_bytes =
-            current_pinned + later_record.pinned_payload_accounting_bytes().unwrap();
+            current_pinned + later_record.pinned_payload_accounting_bytes();
         let relay = Mutex::new(state);
         poison_relay(&relay);
         let err = consume_canonical_applied_da_sets(
@@ -3059,7 +3144,7 @@ mod tests {
         assert_eq!(guard.sets_by_da_id.get(&later_id), Some(&later_record));
         assert_eq!(
             guard.pinned_payload_bytes,
-            current_pinned + later_record.pinned_payload_accounting_bytes().unwrap()
+            current_pinned + later_record.pinned_payload_accounting_bytes()
         );
     }
 
