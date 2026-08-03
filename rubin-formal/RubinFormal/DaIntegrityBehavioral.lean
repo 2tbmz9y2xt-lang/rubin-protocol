@@ -7,11 +7,11 @@ import RubinFormal.Conformance.CVDaIntegrityReplay
 LIVE behavioral + universal proofs on `validateDASetIntegrity` and
 `validateDaIntegrityGate` (DaIntegrityV1.lean).
 Evidence level: machine_checked_universal for the §21 row.
-`validateDASetIntegrity_ok_constrained` is a ∀-quantified constrained
-theorem decomposing `.ok` into all 4 stages with parse-derived witnesses.
-All DA sub-functions recursive (no foldlM/List.range), fully proved
-with induction (missing/step/empty). parseDATx error taxonomy fully
-machine-checked via 3-phase decomposition (no cross-section assumption).
+`validateDASetIntegrity_ok_constrained` decomposes `.ok` through the ordered
+hash, collection, structural, and payload stages with a parse-derived witness.
+The live pipeline combines recursive or bounded list traversal with finite
+RBMap scans. Registered proofs below target the live helpers.
+`parseDATx` error taxonomy is machine-checked through its three phases.
 Combines:
 
 1. Conformance replay: `cv_da_integrity_vectors_pass` (native_decide on real vectors)
@@ -19,8 +19,8 @@ Combines:
 3. Empty-set acceptance: validateDASetIntegrity on [] = .ok ()
 4. Constants: canonical DA parameters
 
-Go equivalent: validateDASetIntegrity (consensus/da_integrity.go)
-Rust equivalent: validate_da_set_integrity (rubin-consensus/src/da_integrity.rs)
+Go owner: `clients/go/consensus/block_basic.go`
+Rust owner: `clients/rust/crates/rubin-consensus/src/block_basic/da_set.rs`
 -/
 
 namespace RubinFormal
@@ -105,10 +105,7 @@ theorem da_correct_cov_type_counted (out : TxOut)
 /-- validateDASetIntegrity on empty tx list = accepted.
     No DA txs = valid empty DA set. -/
 theorem da_empty_txs_accepted :
-    validateDASetIntegrity [] = .ok () := by
-  unfold validateDASetIntegrity
-  simp only [List.forIn, Std.RBMap.empty, Std.RBMap.size]
-  rfl
+    validateDASetIntegrity [] = .ok () := rfl
 
 /-! ## Batch count rejection (LIVE on validateDaBatchCount) -/
 
@@ -142,35 +139,35 @@ theorem da_chunk_hash_ok (payload hash : Bytes) (h : (SHA3.sha3_256 payload != h
     validateChunkHash payload hash = .ok () := by
   simp only [validateChunkHash, h, ite_false]
 
-/-! ## Duplicate detection (LIVE on validateNoDuplicateCommit / validateNoDuplicateChunk) -/
+/-! ## Duplicate marker scans (LIVE) -/
 
-/-- Duplicate commit ID → BLOCK_ERR_DA_SET_INVALID. -/
+/-- A collected duplicate commit marker yields BLOCK_ERR_DA_SET_INVALID. -/
 theorem da_duplicate_commit_rejects
-    (commits : Std.RBMap Bytes DaCommitInfo cmpBytes) (daId : Bytes)
-    (h : commits.contains daId = true) :
-    validateNoDuplicateCommit commits daId = .error "BLOCK_ERR_DA_SET_INVALID" := by
-  simp only [validateNoDuplicateCommit, h, ite_true]
+    (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
+    (h : commits.toList.any (fun x => x.2.duplicate) = true) :
+    validateNoCollectedDuplicateCommits commits = .error "BLOCK_ERR_DA_SET_INVALID" := by
+  simp only [validateNoCollectedDuplicateCommits, h, ite_true]
 
-/-- New commit ID → accepted. -/
+/-- No collected duplicate commit marker is accepted. -/
 theorem da_duplicate_commit_ok
-    (commits : Std.RBMap Bytes DaCommitInfo cmpBytes) (daId : Bytes)
-    (h : commits.contains daId = false) :
-    validateNoDuplicateCommit commits daId = .ok () := by
-  simp only [validateNoDuplicateCommit, h, ite_false]
+    (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
+    (h : commits.toList.any (fun x => x.2.duplicate) = false) :
+    validateNoCollectedDuplicateCommits commits = .ok () := by
+  simp only [validateNoCollectedDuplicateCommits, h, ite_false]
 
-/-- Duplicate chunk index → BLOCK_ERR_DA_SET_INVALID. -/
+/-- A collected duplicate chunk marker yields BLOCK_ERR_DA_INCOMPLETE. -/
 theorem da_duplicate_chunk_rejects
-    (set : Std.RBMap Nat DaChunkInfo compare) (idx : Nat)
-    (h : set.contains idx = true) :
-    validateNoDuplicateChunk set idx = .error "BLOCK_ERR_DA_SET_INVALID" := by
-  simp only [validateNoDuplicateChunk, h, ite_true]
+    (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
+    (h : chunks.toList.any (fun x => x.2.toList.any (fun y => y.2.duplicate)) = true) :
+    validateNoCollectedDuplicateChunks chunks = .error "BLOCK_ERR_DA_INCOMPLETE" := by
+  simp only [validateNoCollectedDuplicateChunks, h, ite_true]
 
-/-- New chunk index → accepted. -/
+/-- No collected duplicate chunk marker is accepted. -/
 theorem da_duplicate_chunk_ok
-    (set : Std.RBMap Nat DaChunkInfo compare) (idx : Nat)
-    (h : set.contains idx = false) :
-    validateNoDuplicateChunk set idx = .ok () := by
-  simp only [validateNoDuplicateChunk, h, ite_false]
+    (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
+    (h : chunks.toList.any (fun x => x.2.toList.any (fun y => y.2.duplicate)) = false) :
+    validateNoCollectedDuplicateChunks chunks = .ok () := by
+  simp only [validateNoCollectedDuplicateChunks, h, ite_false]
 
 /-! ## Chunk count match (LIVE on validateChunkCountMatch) -/
 
@@ -266,7 +263,7 @@ theorem da_no_orphans_commits_independent
     validateNoOrphanChunks [] c1 = validateNoOrphanChunks [] c2 := rfl
 
 
-/-! ## Parse loop (LIVE on accumulateDATxs) -/
+/-! ## Single parse and parsed collection (LIVE) -/
 
 /-- Empty tx list → returns initial state unchanged. -/
 theorem da_accumulate_empty
@@ -286,25 +283,19 @@ theorem da_accumulate_empty_state_preserved
 /-- Parse failure at head → error propagates. -/
 theorem da_accumulate_parse_fail
     (txBytes : Bytes) (rest : List Bytes)
-    (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
-    (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
     (err : String) (hFail : parseDATx txBytes = .error err) :
-    accumulateDATxs (txBytes :: rest) commits chunks = .error err := by
-  show (match parseDATx txBytes with | .error e => _ | .ok t => _) = _
-  rw [hFail]
+    parseDATxs (txBytes :: rest) = .error err := by
+  simp [parseDATxs, Bind.bind, Except.bind, Pure.pure, Except.pure, hFail]
 
 /-- Commit tx error → propagates through accumulation. -/
 theorem da_accumulate_commit_error
-    (txBytes : Bytes) (rest : List Bytes)
+    (rest : List ParsedDATx)
     (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
     (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
     (t : ParsedDATx) (err : String)
-    (hParse : parseDATx txBytes = .ok t)
     (hKind : (t.txKind == 0x01) = true)
     (hFail : processCommitTx t commits = .error err) :
-    accumulateDATxs (txBytes :: rest) commits chunks = .error err := by
-  show (match parseDATx txBytes with | .error e => _ | .ok t => _) = _
-  rw [hParse]
+    accumulateDATxs (t :: rest) commits chunks = .error err := by
   show (if (t.txKind == 0x01) = true then _ else _) = _
   rw [hKind]; simp only [ite_true]
   show (match processCommitTx t commits with | .error e => _ | .ok nc => _) = _
@@ -312,17 +303,14 @@ theorem da_accumulate_commit_error
 
 /-- Commit tx ok → recurse with updated commits. -/
 theorem da_accumulate_commit_ok
-    (txBytes : Bytes) (rest : List Bytes)
+    (rest : List ParsedDATx)
     (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
     (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
     (t : ParsedDATx) (newCommits : Std.RBMap Bytes DaCommitInfo cmpBytes)
-    (hParse : parseDATx txBytes = .ok t)
     (hKind : (t.txKind == 0x01) = true)
     (hOk : processCommitTx t commits = .ok newCommits) :
-    accumulateDATxs (txBytes :: rest) commits chunks =
+    accumulateDATxs (t :: rest) commits chunks =
     accumulateDATxs rest newCommits chunks := by
-  show (match parseDATx txBytes with | .error e => _ | .ok t => _) = _
-  rw [hParse]
   show (if (t.txKind == 0x01) = true then _ else _) = _
   rw [hKind]; simp only [ite_true]
   show (match processCommitTx t commits with | .error e => _ | .ok nc => _) = _
@@ -330,17 +318,14 @@ theorem da_accumulate_commit_ok
 
 /-- Chunk tx error → propagates through accumulation. -/
 theorem da_accumulate_chunk_error
-    (txBytes : Bytes) (rest : List Bytes)
+    (rest : List ParsedDATx)
     (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
     (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
     (t : ParsedDATx) (err : String)
-    (hParse : parseDATx txBytes = .ok t)
     (hNotCommit : (t.txKind == 0x01) = false)
     (hKind : (t.txKind == 0x02) = true)
     (hFail : processChunkTx t chunks = .error err) :
-    accumulateDATxs (txBytes :: rest) commits chunks = .error err := by
-  show (match parseDATx txBytes with | .error e => _ | .ok t => _) = _
-  rw [hParse]
+    accumulateDATxs (t :: rest) commits chunks = .error err := by
   show (if (t.txKind == 0x01) = true then _ else _) = _
   rw [hNotCommit]; simp only [ite_false]
   show (if (t.txKind == 0x02) = true then _ else _) = _
@@ -350,18 +335,15 @@ theorem da_accumulate_chunk_error
 
 /-- Chunk tx ok → recurse with updated chunks. -/
 theorem da_accumulate_chunk_ok
-    (txBytes : Bytes) (rest : List Bytes)
+    (rest : List ParsedDATx)
     (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
     (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
     (t : ParsedDATx) (newChunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
-    (hParse : parseDATx txBytes = .ok t)
     (hNotCommit : (t.txKind == 0x01) = false)
     (hKind : (t.txKind == 0x02) = true)
     (hOk : processChunkTx t chunks = .ok newChunks) :
-    accumulateDATxs (txBytes :: rest) commits chunks =
+    accumulateDATxs (t :: rest) commits chunks =
     accumulateDATxs rest commits newChunks := by
-  show (match parseDATx txBytes with | .error e => _ | .ok t => _) = _
-  rw [hParse]
   show (if (t.txKind == 0x01) = true then _ else _) = _
   rw [hNotCommit]; simp only [ite_false]
   show (if (t.txKind == 0x02) = true then _ else _) = _
@@ -371,17 +353,14 @@ theorem da_accumulate_chunk_ok
 
 /-- Unknown tx kind → skip, recurse unchanged. -/
 theorem da_accumulate_skip
-    (txBytes : Bytes) (rest : List Bytes)
+    (rest : List ParsedDATx)
     (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
     (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
     (t : ParsedDATx)
-    (hParse : parseDATx txBytes = .ok t)
     (hNotCommit : (t.txKind == 0x01) = false)
     (hNotChunk : (t.txKind == 0x02) = false) :
-    accumulateDATxs (txBytes :: rest) commits chunks =
+    accumulateDATxs (t :: rest) commits chunks =
     accumulateDATxs rest commits chunks := by
-  show (match parseDATx txBytes with | .error e => _ | .ok t => _) = _
-  rw [hParse]
   show (if (t.txKind == 0x01) = true then _ else _) = _
   rw [hNotCommit]; simp only [ite_false]
   show (if (t.txKind == 0x02) = true then _ else _) = _
@@ -556,7 +535,6 @@ theorem da_verify_step_ok
     (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
     (set : Std.RBMap Nat DaChunkInfo compare)
     (hFound : chunks.find? daId = some set)
-    (hCount : (set.size != cinfo.chunkCount) = false)
     (concat : Bytes)
     (hCollect : collectChunkPayloads set cinfo.chunkCount = .ok concat)
     (hOutput : validateCommitOutput cinfo.outputs (SHA3.sha3_256 concat) = .ok ()) :
@@ -564,9 +542,6 @@ theorem da_verify_step_ok
     verifyCommitIntegrity rest chunks := by
   show (match chunks.find? daId with | none => _ | some set => _) = _
   rw [hFound]
-  show (match validateChunkCountMatch set.size cinfo.chunkCount with | .error e => _ | .ok () => _) = _
-  rw [show validateChunkCountMatch set.size cinfo.chunkCount = .ok () from by
-    simp only [validateChunkCountMatch, hCount, ite_false]]
   show (match collectChunkPayloads set cinfo.chunkCount with | .error e => _ | .ok concat => _) = _
   rw [hCollect]
   show (match validateCommitOutput cinfo.outputs (SHA3.sha3_256 concat) with | .error e => _ | .ok () => _) = _
@@ -578,53 +553,71 @@ theorem da_verify_step_ok
 theorem da_integrity_empty :
     validateDASetIntegrity [] = .ok () := rfl
 
-/-- Empty tx list passes ALL 4 stages of validateDASetIntegrity. -/
+/-- Empty tx list passes each ordered stage of validateDASetIntegrity. -/
 theorem da_integrity_empty_all_stages :
     validateDASetIntegrity [] = .ok () ∧
-    validateDaBatchCount 0 = .ok () ∧
+    parseDATxs [] = .ok [] ∧
+    validateAllChunkHashes [] = .ok () ∧
+    accumulateDATxs [] Std.RBMap.empty Std.RBMap.empty = .ok (Std.RBMap.empty, Std.RBMap.empty) ∧
     validateNoOrphanChunks [] Std.RBMap.empty = .ok () ∧
+    validateNoCollectedDuplicateCommits Std.RBMap.empty = .ok () ∧
+    validateNoCollectedDuplicateChunks Std.RBMap.empty = .ok () ∧
+    validateRequiredChunkIndexes [] Std.RBMap.empty = .ok () ∧
+    validateDaBatchCount 0 = .ok () ∧
+    validateCommitChunkCounts [] = .ok () ∧
     verifyCommitIntegrity [] Std.RBMap.empty = .ok () := by
-  exact ⟨rfl, by simp [validateDaBatchCount, MAX_DA_BATCHES_PER_BLOCK], rfl, rfl⟩
+  exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl,
+    by simp [validateDaBatchCount, MAX_DA_BATCHES_PER_BLOCK], rfl, rfl⟩
 
 /-! ## Top-level composition (LIVE on validateDASetIntegrity)
 
-All 4 stages of validateDASetIntegrity proved:
-accumulate → batch count → orphan check → verify integrity -/
+Ordered stages of validateDASetIntegrity:
+single parse → hash pass → collection → orphan → duplicate commit → duplicate/missing index
+→ batch count → defensive chunk count → payload integrity. -/
 
-/-- Accumulation fails → validateDASetIntegrity returns same error. -/
+/-- Successful single parse + hash pass + collection failure → same error. -/
 theorem da_integrity_accumulate_error (txs : List Bytes) (err : String)
-    (hFail : accumulateDATxs txs Std.RBMap.empty Std.RBMap.empty = .error err) :
+    (parsed : List ParsedDATx) (hParse : parseDATxs txs = .ok parsed) (hHash : validateAllChunkHashes parsed = .ok ())
+    (hFail : accumulateDATxs parsed Std.RBMap.empty Std.RBMap.empty = .error err) :
     validateDASetIntegrity txs = .error err := by
-  simp only [validateDASetIntegrity, hFail]
+  simp only [validateDASetIntegrity, Bind.bind, Except.bind, hParse, hHash, hFail]
 
 /-- Batch count exceeded → BLOCK_ERR_DA_BATCH_EXCEEDED. -/
 theorem da_integrity_batch_error (txs : List Bytes)
     (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
     (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
-    (hAcc : accumulateDATxs txs Std.RBMap.empty Std.RBMap.empty = .ok (commits, chunks))
+    (parsed : List ParsedDATx) (hParse : parseDATxs txs = .ok parsed) (hHash : validateAllChunkHashes parsed = .ok ())
+    (hAcc : accumulateDATxs parsed Std.RBMap.empty Std.RBMap.empty = .ok (commits, chunks))
+    (hOrphan : validateNoOrphanChunks chunks.toList commits = .ok ()) (hDupCommit : validateNoCollectedDuplicateCommits commits = .ok ())
+    (hDupChunk : validateNoCollectedDuplicateChunks chunks = .ok ()) (hRequired : validateRequiredChunkIndexes commits.toList chunks = .ok ())
     (hBatch : commits.size > MAX_DA_BATCHES_PER_BLOCK) :
     validateDASetIntegrity txs = .error "BLOCK_ERR_DA_BATCH_EXCEEDED" := by
-  simp only [validateDASetIntegrity, hAcc, validateDaBatchCount, hBatch, ite_true]
+  simp only [validateDASetIntegrity, Bind.bind, Except.bind, hParse, hHash, hAcc,
+    hOrphan, hDupCommit, hDupChunk, hRequired, validateDaBatchCount, hBatch, ite_true]
 
 /-- Orphan chunks → error propagates. -/
 theorem da_integrity_orphan_error (txs : List Bytes)
     (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
     (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
-    (hAcc : accumulateDATxs txs Std.RBMap.empty Std.RBMap.empty = .ok (commits, chunks))
-    (hBatch : ¬(commits.size > MAX_DA_BATCHES_PER_BLOCK))
+    (parsed : List ParsedDATx) (hParse : parseDATxs txs = .ok parsed) (hHash : validateAllChunkHashes parsed = .ok ())
+    (hAcc : accumulateDATxs parsed Std.RBMap.empty Std.RBMap.empty = .ok (commits, chunks))
     (err : String) (hOrphan : validateNoOrphanChunks chunks.toList commits = .error err) :
     validateDASetIntegrity txs = .error err := by
-  simp only [validateDASetIntegrity, hAcc, validateDaBatchCount, hBatch, ite_false, hOrphan]
+  simp only [validateDASetIntegrity, Bind.bind, Except.bind, hParse, hHash, hAcc, hOrphan]
 
 /-- All pre-checks pass → result = verifyCommitIntegrity. -/
 theorem da_integrity_verify_result (txs : List Bytes)
     (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
     (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
-    (hAcc : accumulateDATxs txs Std.RBMap.empty Std.RBMap.empty = .ok (commits, chunks))
+    (parsed : List ParsedDATx) (hParse : parseDATxs txs = .ok parsed) (hHash : validateAllChunkHashes parsed = .ok ())
+    (hAcc : accumulateDATxs parsed Std.RBMap.empty Std.RBMap.empty = .ok (commits, chunks))
     (hBatch : ¬(commits.size > MAX_DA_BATCHES_PER_BLOCK))
-    (hOrphan : validateNoOrphanChunks chunks.toList commits = .ok ()) :
+    (hOrphan : validateNoOrphanChunks chunks.toList commits = .ok ())
+    (hDupCommit : validateNoCollectedDuplicateCommits commits = .ok ()) (hDupChunk : validateNoCollectedDuplicateChunks chunks = .ok ())
+    (hRequired : validateRequiredChunkIndexes commits.toList chunks = .ok ()) (hCount : validateCommitChunkCounts commits.toList = .ok ()) :
     validateDASetIntegrity txs = verifyCommitIntegrity commits.toList chunks := by
-  simp only [validateDASetIntegrity, hAcc, validateDaBatchCount, hBatch, ite_false, hOrphan]
+  simp only [validateDASetIntegrity, Bind.bind, Except.bind, hParse, hHash, hAcc,
+    hOrphan, hDupCommit, hDupChunk, hRequired, validateDaBatchCount, hBatch, ite_false, hCount]
 
 /-! ## Gate error propagation (LIVE)
 
@@ -725,39 +718,31 @@ Does NOT cover BLOCK_ERR_DA_BATCH_EXCEEDED (no CV vector with >128 batches).
 
 /-! ## Universal constrained theorem (LIVE on validateDASetIntegrity)
 
-Decomposes a successful validateDASetIntegrity call into all 4 intermediate
-parse-derived stages, binding witnesses to the actual accumulateDATxs output. -/
+Decomposes success through one parse witness, the hash pass, structural
+collection, every ordered step-11 check, and the final global payload stage. -/
 
-/-- LIVE: If validateDASetIntegrity succeeds, ALL 4 stages passed with
-    parse-derived witnesses. Commits and chunks are bound to accumulateDATxs
-    output for the given txs — not arbitrary existentials. -/
+/-- LIVE: Success binds one parsed list to every ordered stage for the bytes. -/
 theorem validateDASetIntegrity_ok_constrained (txs : List Bytes)
     (h : validateDASetIntegrity txs = .ok ()) :
-    ∃ (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
+    ∃ (parsed : List ParsedDATx)
+      (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
       (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes),
-      accumulateDATxs txs Std.RBMap.empty Std.RBMap.empty = .ok (commits, chunks) ∧
-      ¬(commits.size > MAX_DA_BATCHES_PER_BLOCK) ∧
+      parseDATxs txs = .ok parsed ∧ validateAllChunkHashes parsed = .ok () ∧
+      accumulateDATxs parsed Std.RBMap.empty Std.RBMap.empty = .ok (commits, chunks) ∧
       validateNoOrphanChunks chunks.toList commits = .ok () ∧
+      validateNoCollectedDuplicateCommits commits = .ok () ∧ validateNoCollectedDuplicateChunks chunks = .ok () ∧
+      validateRequiredChunkIndexes commits.toList chunks = .ok () ∧
+      ¬(commits.size > MAX_DA_BATCHES_PER_BLOCK) ∧
+      validateCommitChunkCounts commits.toList = .ok () ∧
       verifyCommitIntegrity commits.toList chunks = .ok () := by
+  have bindOk : ∀ {α β : Type} {x : Except String α} {f : α → Except String β} {y : β}, x >>= f = .ok y → ∃ a, x = .ok a ∧ f a = .ok y := by
+    intro α β x f y hx; cases x with | error e => cases hx | ok a => exact ⟨a, rfl, hx⟩
   unfold validateDASetIntegrity at h
-  cases hAcc : accumulateDATxs txs Std.RBMap.empty Std.RBMap.empty with
-  | error e => simp [hAcc] at h
-  | ok pair =>
-    obtain ⟨commits, chunks⟩ := pair
-    simp only [hAcc] at h
-    cases hBatch : validateDaBatchCount commits.size with
-    | error e => simp [hBatch] at h
-    | ok u =>
-      simp only [hBatch] at h
-      cases hOrphan : validateNoOrphanChunks chunks.toList commits with
-      | error e => simp [hOrphan] at h
-      | ok u2 =>
-        simp only [hOrphan] at h
-        have hBatchOk : ¬(commits.size > MAX_DA_BATCHES_PER_BLOCK) := by
-          unfold validateDaBatchCount at hBatch
-          split at hBatch
-          · exact (nomatch hBatch)
-          · rename_i hle; exact hle
-        exact ⟨commits, chunks, rfl, hBatchOk, hOrphan, h⟩
+  rcases bindOk h with ⟨parsed, hParse, h⟩; rcases bindOk h with ⟨_, hHash, h⟩; rcases bindOk h with ⟨⟨commits, chunks⟩, hAcc, h⟩
+  rcases bindOk h with ⟨_, hOrphan, h⟩; rcases bindOk h with ⟨_, hDupCommit, h⟩; rcases bindOk h with ⟨_, hDupChunk, h⟩
+  rcases bindOk h with ⟨_, hRequired, h⟩; rcases bindOk h with ⟨_, hBatch, h⟩; rcases bindOk h with ⟨_, hCount, hVerify⟩
+  have hBatchOk : ¬(commits.size > MAX_DA_BATCHES_PER_BLOCK) := by
+    unfold validateDaBatchCount at hBatch; split at hBatch <;> simp_all
+  exact ⟨parsed, commits, chunks, hParse, hHash, hAcc, hOrphan, hDupCommit, hDupChunk, hRequired, hBatchOk, hCount, hVerify⟩
 
 end RubinFormal

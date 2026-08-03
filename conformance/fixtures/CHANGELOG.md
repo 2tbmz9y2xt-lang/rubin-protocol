@@ -11,6 +11,10 @@ Policy:
 
 ---
 
+## 2026-08-03 — DA canonical hash, structure, and payload order (RUB-660)
+
+Generated `CV-DA-INTEGRITY.json` appends `CV-DA-HASH-BEFORE-SET-01`, `CV-DA-DUPLICATE-CHUNK-ERROR-01`, and `CV-DA-STEP11-BEFORE-PAYLOAD-01` through `tools/gen_cv_da_integrity.py`: all hashes precede duplicate-index structure, and every step-11 defect precedes payload mismatch. Existing owners regenerate `conformance/MATRIX.md`, `CVDaIntegrityVectors.lean`, and the Go trace/refinement pair. No fixture schema, runner, API, or canonical-spec change.
+
 ## 2026-08-02 — Apply coinbase before noncoinbase (RUB-1099)
 
 Manual fixture: `CV-BLOCK-BASIC.json` adds `CV-B-APPLY-COINBASE-FIRST-ERROR-VAULT-01`, which pins a valid early coinbase VAULT guard ahead of a later invalid coinbase creation output and a later invalid noncoinbase creation output. Regenerated `conformance/MATRIX.md`, `CVBlockBasicVectors.lean`, Go trace, and `GoTraceV1.lean` through existing owners. No fixture schema, runner, API, formal-model, or canonical-spec change.

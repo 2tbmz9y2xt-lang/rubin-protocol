@@ -1,3 +1,4 @@
+use super::block_basic::{canonical_da_block, canonical_da_cases};
 use super::*;
 use std::panic::AssertUnwindSafe;
 
@@ -13,6 +14,58 @@ fn clone_state(
 
 fn err_code(err: &crate::error::TxError) -> ErrorCode {
     err.code
+}
+
+#[test]
+fn connect_block_da_canonical_error_order_preserves_state() {
+    let initial = crate::InMemoryChainState {
+        utxos: HashMap::from([(
+            Outpoint {
+                txid: [0xa0; 32],
+                vout: 3,
+            },
+            UtxoEntry {
+                value: 42,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: vec![0x51, 0x52],
+                creation_height: 7,
+                created_by_coinbase: true,
+            },
+        )]),
+        already_generated: 123,
+    };
+    for (txs, want) in canonical_da_cases()
+        .into_iter()
+        .filter_map(|case| case.1.map(|want| (case.0, want)))
+    {
+        let (block, prev, target) = canonical_da_block(txs);
+        for workers in [None, Some(0), Some(1), Some(4)] {
+            let mut state = initial.clone();
+            let result = match workers {
+                None => crate::connect_block_basic_in_memory_at_height(
+                    &block,
+                    Some(prev),
+                    Some(target),
+                    1,
+                    Some(&[0]),
+                    &mut state,
+                    ZERO_CHAIN_ID,
+                ),
+                Some(workers) => crate::connect_block_parallel_sig_verify(
+                    &block,
+                    Some(prev),
+                    Some(target),
+                    1,
+                    Some(&[0]),
+                    &mut state,
+                    ZERO_CHAIN_ID,
+                    workers,
+                ),
+            };
+            assert_eq!(result.expect_err("canonical DA rejection").code, want);
+            assert_eq!(state, initial);
+        }
+    }
 }
 
 #[test]
