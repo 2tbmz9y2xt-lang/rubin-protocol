@@ -2173,14 +2173,124 @@ func TestMainExitCodeIs0OnDryRun(t *testing.T) {
 	}
 }
 
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+type runningBannerCapture struct {
+	lockedBuffer
+	pending  []byte
+	observed bool
+	ready    chan struct{}
+}
+
+func newRunningBannerCapture() *runningBannerCapture {
+	return &runningBannerCapture{ready: make(chan struct{}, 1)}
+}
+
+func (c *runningBannerCapture) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n, err := c.buf.Write(p)
+	c.pending = append(c.pending, p...)
+	for {
+		newline := bytes.IndexByte(c.pending, '\n')
+		if newline < 0 {
+			break
+		}
+		line := c.pending[:newline]
+		c.pending = c.pending[newline+1:]
+		if !c.observed && string(line) == "rubin-node skeleton running" {
+			c.observed = true
+			c.ready <- struct{}{}
+		}
+	}
+	return n, err
+}
+
+func (c *runningBannerCapture) Observed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.observed
+}
+
+func runChildAfterRunningBanner(t *testing.T, cmd *exec.Cmd) (string, string, error) {
+	t.Helper()
+
+	stdout := newRunningBannerCapture()
+	stderr := new(lockedBuffer)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v (stdout=%q stderr=%q)", err, stdout.String(), stderr.String())
+	}
+
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+	timer := time.NewTimer(20 * time.Second)
+	defer timer.Stop()
+
+	terminateAndReap := func(reason string) {
+		killErr := cmd.Process.Kill()
+		waitErr := <-waitDone
+		t.Fatalf("%s (kill=%v wait=%v banner=%t stdout=%q stderr=%q)", reason, killErr, waitErr, stdout.Observed(), stdout.String(), stderr.String())
+	}
+
+	select {
+	case <-stdout.ready:
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			killErr := cmd.Process.Kill()
+			waitErr := <-waitDone
+			if waitErr != nil {
+				return stdout.String(), stderr.String(), waitErr
+			}
+			t.Fatalf("Signal(SIGINT): %v (kill=%v wait=%v banner=%t stdout=%q stderr=%q)", err, killErr, waitErr, stdout.Observed(), stdout.String(), stderr.String())
+		}
+	case waitErr := <-waitDone:
+		if waitErr != nil {
+			return stdout.String(), stderr.String(), waitErr
+		}
+		if stdout.Observed() {
+			return stdout.String(), stderr.String(), errors.New("child exited after running banner before parent sent SIGINT")
+		}
+		return stdout.String(), stderr.String(), errors.New("child exited before running banner")
+	case <-timer.C:
+		select {
+		case waitErr := <-waitDone:
+			if waitErr != nil {
+				return stdout.String(), stderr.String(), waitErr
+			}
+			return stdout.String(), stderr.String(), errors.New("child exited before parent completed ready-then-SIGINT contract")
+		default:
+		}
+		terminateAndReap("timeout waiting for running banner")
+	}
+
+	select {
+	case waitErr := <-waitDone:
+		return stdout.String(), stderr.String(), waitErr
+	case <-timer.C:
+		terminateAndReap("timeout waiting for child exit after SIGINT")
+	}
+	panic("unreachable")
+}
+
 func TestRunNonDryRunExitsOnSignal(t *testing.T) {
 	if os.Getenv("RUBIN_NODE_SIGNAL_CHILD") == "1" {
 		dir := t.TempDir()
-		go func() {
-			time.Sleep(200 * time.Millisecond)
-			p, _ := os.FindProcess(os.Getpid())
-			_ = p.Signal(syscall.SIGINT)
-		}()
 		code := run([]string{"--create-store", "--datadir", dir, "--bind", "127.0.0.1:0"}, os.Stdout, os.Stderr)
 		os.Exit(code)
 		return
@@ -2188,13 +2298,13 @@ func TestRunNonDryRunExitsOnSignal(t *testing.T) {
 
 	cmd := exec.Command(os.Args[0], "-test.run=TestRunNonDryRunExitsOnSignal")
 	cmd.Env = append(os.Environ(), "RUBIN_NODE_SIGNAL_CHILD=1")
-	err := cmd.Run()
+	stdout, stderr, err := runChildAfterRunningBanner(t, cmd)
 	if err != nil {
 		ee, ok := err.(*exec.ExitError)
 		if ok {
-			t.Fatalf("exit code=%d, want 0 (stderr=%s)", ee.ExitCode(), string(ee.Stderr))
+			t.Fatalf("exit code=%d, want 0 (stdout=%s stderr=%s)", ee.ExitCode(), stdout, stderr)
 		}
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected error: %v (stdout=%s stderr=%s)", err, stdout, stderr)
 	}
 }
 
@@ -2227,11 +2337,6 @@ func TestRunFailsWhenRPCBindPortUnavailable(t *testing.T) {
 func TestRunNonDryRunWithRPCBindExitsOnSignal(t *testing.T) {
 	if os.Getenv("RUBIN_NODE_SIGNAL_RPC_CHILD") == "1" {
 		dir := t.TempDir()
-		go func() {
-			time.Sleep(200 * time.Millisecond)
-			p, _ := os.FindProcess(os.Getpid())
-			_ = p.Signal(syscall.SIGINT)
-		}()
 		code := run(
 			[]string{"--create-store", "--datadir", dir, "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"},
 			os.Stdout,
@@ -2243,26 +2348,22 @@ func TestRunNonDryRunWithRPCBindExitsOnSignal(t *testing.T) {
 
 	cmd := exec.Command(os.Args[0], "-test.run=TestRunNonDryRunWithRPCBindExitsOnSignal")
 	cmd.Env = append(os.Environ(), "RUBIN_NODE_SIGNAL_RPC_CHILD=1")
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+	stdout, stderr, err := runChildAfterRunningBanner(t, cmd)
 	if err != nil {
 		ee, ok := err.(*exec.ExitError)
 		if ok {
-			t.Fatalf("exit code=%d, want 0 (stderr=%s)", ee.ExitCode(), stderr.String())
+			t.Fatalf("exit code=%d, want 0 (stdout=%s stderr=%s)", ee.ExitCode(), stdout, stderr)
 		}
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected error: %v (stdout=%s stderr=%s)", err, stdout, stderr)
 	}
-	if !strings.Contains(stdout.String(), "rpc: listening=") {
-		t.Fatalf("stdout=%q, want rpc listening line", stdout.String())
+	if !strings.Contains(stdout, "rpc: listening=") {
+		t.Fatalf("stdout=%q, want rpc listening line", stdout)
 	}
-	if !strings.Contains(stdout.String(), "rubin-node skeleton running") {
-		t.Fatalf("stdout=%q, want running banner", stdout.String())
+	if !strings.Contains(stdout, "rubin-node skeleton running") {
+		t.Fatalf("stdout=%q, want running banner", stdout)
 	}
-	if !strings.Contains(stdout.String(), "rubin-node skeleton stopped") {
-		t.Fatalf("stdout=%q, want stopped banner", stdout.String())
+	if !strings.Contains(stdout, "rubin-node skeleton stopped") {
+		t.Fatalf("stdout=%q, want stopped banner", stdout)
 	}
 }
 
@@ -2443,11 +2544,6 @@ func TestRunRPCBindReadyEndpointReportsLifecycle(t *testing.T) {
 func TestRunDevnetWithRPCBindInvalidMineAddressLogsStderr(t *testing.T) {
 	if os.Getenv("RUBIN_NODE_TEST_INVALID_MINE_ADDR_CHILD") == "1" {
 		dir := t.TempDir()
-		go func() {
-			time.Sleep(200 * time.Millisecond)
-			p, _ := os.FindProcess(os.Getpid())
-			_ = p.Signal(syscall.SIGINT)
-		}()
 		badSuiteMineAddr := "00" + strings.Repeat("00", 32)
 		code := run(
 			[]string{
@@ -2457,7 +2553,7 @@ func TestRunDevnetWithRPCBindInvalidMineAddressLogsStderr(t *testing.T) {
 				"--rpc-bind", "127.0.0.1:0",
 				"--mine-address", badSuiteMineAddr,
 			},
-			io.Discard,
+			os.Stdout,
 			os.Stderr,
 		)
 		os.Exit(code)
@@ -2465,18 +2561,15 @@ func TestRunDevnetWithRPCBindInvalidMineAddressLogsStderr(t *testing.T) {
 
 	cmd := exec.Command(os.Args[0], "-test.run=TestRunDevnetWithRPCBindInvalidMineAddressLogsStderr")
 	cmd.Env = append(os.Environ(), "RUBIN_NODE_TEST_INVALID_MINE_ADDR_CHILD=1")
-	var stderr bytes.Buffer
-	cmd.Stdout = io.Discard
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+	stdout, stderr, err := runChildAfterRunningBanner(t, cmd)
 	if err != nil {
 		ee, ok := err.(*exec.ExitError)
 		if ok {
-			t.Fatalf("exit code=%d, want 0 (stderr=%s)", ee.ExitCode(), stderr.String())
+			t.Fatalf("exit code=%d, want 0 (stdout=%s stderr=%s)", ee.ExitCode(), stdout, stderr)
 		}
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected error: %v (stdout=%s stderr=%s)", err, stdout, stderr)
 	}
-	s := stderr.String()
+	s := stderr
 	if !strings.Contains(s, "rpc: live mining disabled (invalid --mine-address)") {
 		t.Fatalf("stderr=%q, want invalid mine-address log", s)
 	}
@@ -2531,11 +2624,6 @@ func TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn(t *testing.T
 			return nil, errors.New("test deliberate miner init abort to unblock SIGINT")
 		}
 		dir := t.TempDir()
-		go func() {
-			time.Sleep(200 * time.Millisecond)
-			p, _ := os.FindProcess(os.Getpid())
-			_ = p.Signal(syscall.SIGINT)
-		}()
 		code := run(
 			[]string{
 				"--create-store",
@@ -2544,7 +2632,7 @@ func TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn(t *testing.T
 				"--rpc-bind", "127.0.0.1:0",
 				"--mine-address", strings.Repeat("11", 32),
 			},
-			io.Discard,
+			os.Stdout,
 			os.Stderr,
 		)
 		newMinerFn = prevMiner
@@ -2554,25 +2642,22 @@ func TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn(t *testing.T
 
 	cmd := exec.Command(os.Args[0], "-test.run=TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn")
 	cmd.Env = append(os.Environ(), "RUBIN_NODE_TEST_LIVE_MINER_FN_CHILD=1")
-	var stderr bytes.Buffer
-	cmd.Stdout = io.Discard
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+	stdout, stderr, err := runChildAfterRunningBanner(t, cmd)
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && ee.ExitCode() == 33 {
-			t.Fatalf("T-D regression: live miner cfg.CurrentMempoolMinFeeRateFn is nil; production wiring missing in main.go around `liveMiner, err = newMinerFn(...)` (stderr=%s)", stderr.String())
+			t.Fatalf("T-D regression: live miner cfg.CurrentMempoolMinFeeRateFn is nil; production wiring missing in main.go around `liveMiner, err = newMinerFn(...)` (stdout=%s stderr=%s)", stdout, stderr)
 		}
 		if errors.As(err, &ee) && ee.ExitCode() == 35 {
-			t.Fatalf("T-D regression: live miner CurrentMempoolMinFeeRateFn does not observe the live mempool snapshot (sentinel mismatch); the closure may be a static fallback that bypasses the rolling rolling-floor source (stderr=%s)", stderr.String())
+			t.Fatalf("T-D regression: live miner CurrentMempoolMinFeeRateFn does not observe the live mempool snapshot (sentinel mismatch); the closure may be a static fallback that bypasses the rolling rolling-floor source (stdout=%s stderr=%s)", stdout, stderr)
 		}
 		if errors.As(err, &ee) && ee.ExitCode() == 36 {
-			t.Fatalf("DA provider regression: live miner cfg.CompleteDASetProvider is nil; production wiring missing in main.go around `liveMiner, err = newMinerFn(...)` (stderr=%s)", stderr.String())
+			t.Fatalf("DA provider regression: live miner cfg.CompleteDASetProvider is nil; production wiring missing in main.go around `liveMiner, err = newMinerFn(...)` (stdout=%s stderr=%s)", stdout, stderr)
 		}
-		t.Fatalf("unexpected child error: %v (stderr=%s)", err, stderr.String())
+		t.Fatalf("unexpected child error: %v (stdout=%s stderr=%s)", err, stdout, stderr)
 	}
-	if !strings.Contains(stderr.String(), "rpc: live mining disabled:") {
-		t.Fatalf("stderr=%q, want 'rpc: live mining disabled:' (deliberate abort marker)", stderr.String())
+	if !strings.Contains(stderr, "rpc: live mining disabled:") {
+		t.Fatalf("stderr=%q, want 'rpc: live mining disabled:' (deliberate abort marker)", stderr)
 	}
 }
 
@@ -2583,11 +2668,6 @@ func TestRunDevnetWithRPCBindLiveMinerInitErrorLogsStderr(t *testing.T) {
 			return nil, errors.New("test miner init failed")
 		}
 		dir := t.TempDir()
-		go func() {
-			time.Sleep(200 * time.Millisecond)
-			p, _ := os.FindProcess(os.Getpid())
-			_ = p.Signal(syscall.SIGINT)
-		}()
 		code := run(
 			[]string{
 				"--create-store",
@@ -2596,7 +2676,7 @@ func TestRunDevnetWithRPCBindLiveMinerInitErrorLogsStderr(t *testing.T) {
 				"--rpc-bind", "127.0.0.1:0",
 				"--mine-address", strings.Repeat("11", 32),
 			},
-			io.Discard,
+			os.Stdout,
 			os.Stderr,
 		)
 		newMinerFn = prev
@@ -2605,18 +2685,15 @@ func TestRunDevnetWithRPCBindLiveMinerInitErrorLogsStderr(t *testing.T) {
 
 	cmd := exec.Command(os.Args[0], "-test.run=TestRunDevnetWithRPCBindLiveMinerInitErrorLogsStderr")
 	cmd.Env = append(os.Environ(), "RUBIN_NODE_TEST_LIVE_MINER_INIT_ERR_CHILD=1")
-	var stderr bytes.Buffer
-	cmd.Stdout = io.Discard
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+	stdout, stderr, err := runChildAfterRunningBanner(t, cmd)
 	if err != nil {
 		ee, ok := err.(*exec.ExitError)
 		if ok {
-			t.Fatalf("exit code=%d, want 0 (stderr=%s)", ee.ExitCode(), stderr.String())
+			t.Fatalf("exit code=%d, want 0 (stdout=%s stderr=%s)", ee.ExitCode(), stdout, stderr)
 		}
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected error: %v (stdout=%s stderr=%s)", err, stdout, stderr)
 	}
-	s := stderr.String()
+	s := stderr
 	if !strings.Contains(s, "rpc: live mining disabled:") || !strings.Contains(s, "test miner init failed") {
 		t.Fatalf("stderr=%q, want live mining disabled + test miner init failed", s)
 	}
