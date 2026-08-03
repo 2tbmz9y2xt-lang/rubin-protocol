@@ -2,7 +2,7 @@ use crate::constants::{COV_TYPE_DA_COMMIT, MAX_DA_BATCHES_PER_BLOCK, MAX_DA_CHUN
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
 use crate::tx::Tx;
-use std::collections::BTreeMap;
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
 struct DaCommitSet {
@@ -13,73 +13,135 @@ struct DaCommitSet {
 type DaCommitMap = BTreeMap<[u8; 32], DaCommitSet>;
 type DaChunkMap = BTreeMap<[u8; 32], BTreeMap<u16, Tx>>;
 
-pub(super) fn validate_da_set_integrity(txs: &[Tx]) -> Result<(), TxError> {
-    let (commits, chunks) = collect_da_commits_and_chunks(txs)?;
-    validate_da_commit_completeness(&commits, &chunks)?;
-    validate_da_payload_commitments(&commits, &chunks)
+#[derive(Default)]
+struct DaSetStructure {
+    commits: DaCommitMap,
+    chunks: DaChunkMap,
+    duplicate_commit_ids: BTreeSet<[u8; 32]>,
+    duplicate_chunk_indexes: BTreeMap<[u8; 32], BTreeSet<u16>>,
 }
 
-fn collect_da_commits_and_chunks(txs: &[Tx]) -> Result<(DaCommitMap, DaChunkMap), TxError> {
-    let mut commits = BTreeMap::new();
-    let mut chunks = BTreeMap::new();
+pub(super) fn validate_da_set_integrity(txs: &[Tx]) -> Result<(), TxError> {
+    validate_da_chunk_hashes(txs)?;
+    let sets = collect_da_commits_and_chunks(txs)?;
+    validate_da_set_structure(&sets)?;
+    validate_da_payload_commitments(&sets.commits, &sets.chunks)
+}
+
+// Complete step 10 for every chunk in transaction order before examining DA
+// set structure or payload commitments.
+fn validate_da_chunk_hashes(txs: &[Tx]) -> Result<(), TxError> {
+    for tx in txs {
+        if tx.tx_kind != 0x02 {
+            continue;
+        }
+        let core = tx
+            .da_chunk_core
+            .as_ref()
+            .ok_or_else(|| da_parse_error("missing da_chunk_core for tx_kind=0x02"))?;
+        if sha3_256(&tx.da_payload) != core.chunk_hash {
+            return Err(TxError::new(
+                ErrorCode::BlockErrDaChunkHashInvalid,
+                "chunk_hash mismatch",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn collect_da_commits_and_chunks(txs: &[Tx]) -> Result<DaSetStructure, TxError> {
+    let mut sets = DaSetStructure::default();
     for tx in txs {
         match tx.tx_kind {
-            0x01 => add_da_commit(&mut commits, tx)?,
-            0x02 => add_da_chunk(&mut chunks, tx)?,
+            0x01 => add_da_commit(&mut sets, tx)?,
+            0x02 => add_da_chunk(&mut sets, tx)?,
             _ => {}
         }
     }
-    Ok((commits, chunks))
+    Ok(sets)
 }
 
-fn add_da_commit(commits: &mut DaCommitMap, tx: &Tx) -> Result<(), TxError> {
-    let Some(core) = tx.da_commit_core.as_ref() else {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "missing da_commit_core for tx_kind=0x01",
-        ));
-    };
-    if commits
-        .insert(
-            core.da_id,
-            DaCommitSet {
-                tx: tx.clone(),
-                chunk_count: core.chunk_count,
-            },
-        )
-        .is_some()
-    {
+fn validate_da_set_structure(sets: &DaSetStructure) -> Result<(), TxError> {
+    validate_da_chunk_orphans(&sets.commits, &sets.chunks)?;
+    if !sets.duplicate_commit_ids.is_empty() {
         return Err(TxError::new(
             ErrorCode::BlockErrDaSetInvalid,
             "duplicate DA commit for da_id",
         ));
     }
+    for (da_id, commit) in &sets.commits {
+        if sets
+            .duplicate_chunk_indexes
+            .get(da_id)
+            .is_some_and(|indexes| !indexes.is_empty())
+        {
+            return Err(da_incomplete("duplicate DA chunk index"));
+        }
+        if sets.chunks.get(da_id).map_or(0, BTreeMap::len) != commit.chunk_count as usize {
+            return Err(da_incomplete("DA chunk count mismatch"));
+        }
+        validate_da_chunk_indexes(
+            da_chunk_set_for_id(&sets.chunks, da_id)?,
+            commit.chunk_count,
+        )?;
+    }
+    validate_da_batch_count(&sets.commits)?;
+    for commit in sets.commits.values() {
+        validate_da_chunk_count(commit.chunk_count)?;
+    }
     Ok(())
 }
 
-fn add_da_chunk(chunks: &mut DaChunkMap, tx: &Tx) -> Result<(), TxError> {
-    let Some(core) = tx.da_chunk_core.as_ref() else {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "missing da_chunk_core for tx_kind=0x02",
-        ));
+fn da_parse_error(msg: &'static str) -> TxError {
+    TxError::new(ErrorCode::TxErrParse, msg)
+}
+
+fn da_incomplete(msg: &'static str) -> TxError {
+    TxError::new(ErrorCode::BlockErrDaIncomplete, msg)
+}
+
+fn add_da_commit(sets: &mut DaSetStructure, tx: &Tx) -> Result<(), TxError> {
+    let Some(core) = tx.da_commit_core.as_ref() else {
+        return Err(da_parse_error("missing da_commit_core for tx_kind=0x01"));
     };
-    if sha3_256(&tx.da_payload) != core.chunk_hash {
-        return Err(TxError::new(
-            ErrorCode::BlockErrDaChunkHashInvalid,
-            "chunk_hash mismatch",
-        ));
-    }
-    let set = chunks.entry(core.da_id).or_default();
-    if set.insert(core.chunk_index, tx.clone()).is_some() {
-        return Err(TxError::new(
-            ErrorCode::BlockErrDaSetInvalid,
-            "duplicate DA chunk index",
-        ));
+    match sets.commits.entry(core.da_id) {
+        Entry::Vacant(entry) => {
+            entry.insert(DaCommitSet {
+                tx: tx.clone(),
+                chunk_count: core.chunk_count,
+            });
+        }
+        Entry::Occupied(_) => {
+            sets.duplicate_commit_ids.insert(core.da_id);
+        }
     }
     Ok(())
 }
 
+fn add_da_chunk(sets: &mut DaSetStructure, tx: &Tx) -> Result<(), TxError> {
+    let Some(core) = tx.da_chunk_core.as_ref() else {
+        return Err(da_parse_error("missing da_chunk_core for tx_kind=0x02"));
+    };
+    match sets
+        .chunks
+        .entry(core.da_id)
+        .or_default()
+        .entry(core.chunk_index)
+    {
+        Entry::Vacant(entry) => {
+            entry.insert(tx.clone());
+        }
+        Entry::Occupied(_) => {
+            sets.duplicate_chunk_indexes
+                .entry(core.da_id)
+                .or_default()
+                .insert(core.chunk_index);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn validate_da_commit_completeness(
     commits: &DaCommitMap,
     chunks: &DaChunkMap,
@@ -111,6 +173,7 @@ fn validate_da_chunk_orphans(commits: &DaCommitMap, chunks: &DaChunkMap) -> Resu
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_da_chunk_integrity(commits: &DaCommitMap, chunks: &DaChunkMap) -> Result<(), TxError> {
     for da_id in commits.keys() {
         let commit = da_commit_for_id(commits, da_id)?;

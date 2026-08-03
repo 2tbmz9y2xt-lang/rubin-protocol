@@ -1,3 +1,4 @@
+use super::block_basic::{canonical_da_block, canonical_da_cases};
 use crate::error::ErrorCode;
 use crate::tests::{
     build_block_bytes, coinbase_with_witness_commitment, da_chunk_tx, da_commit_tx,
@@ -227,6 +228,27 @@ fn verify_da_parallel_helpers_accept_valid_multi_set_block() {
         0,
     )
     .expect("payload commitments");
+}
+
+#[test]
+fn da_parallel_helpers_canonical_order() {
+    for workers in [0, 1, 4] {
+        for case in canonical_da_cases() {
+            let (block, _, _) = canonical_da_block(case.0);
+            let parsed = parse_block_bytes(&block).expect("parse canonical DA block");
+            let hash_tasks = collect_da_chunk_hash_tasks(&parsed.txs).expect("collect hash tasks");
+            assert!(hash_tasks
+                .windows(2)
+                .all(|pair| pair[0].tx_index < pair[1].tx_index));
+            let result = verify_da_chunk_hashes_parallel(hash_tasks, workers)
+                .and_then(|_| collect_da_payload_commit_tasks(&parsed.txs))
+                .and_then(|tasks| verify_da_payload_commits_parallel(tasks, workers));
+            match case.1 {
+                Some(want) => assert_eq!(result.expect_err("canonical DA rejection").code, want),
+                None => result.expect("canonical DA acceptance"),
+            }
+        }
+    }
 }
 
 // ---- Additional unit tests to balance Go coverage ----

@@ -125,6 +125,77 @@ func buildDABlockBytes(t *testing.T, daTxs ...[]byte) ([]byte, [32]byte, [32]byt
 	return buildBlockBytes(t, prev, root, target, 31, txs), prev, target
 }
 
+func daSingleChunkSet(commitNonce, chunkNonce uint64, daID [32]byte, chunkCount uint16, commitment [32]byte, payload []byte) [][]byte {
+	commit := daCommitTxBytes(commitNonce, daID, chunkCount, commitment)
+	chunk := daChunkTxBytes(chunkNonce, daID, 0, sha3_256(payload), payload)
+	return [][]byte{commit, chunk}
+}
+
+type canonicalDACase struct {
+	name string
+	txs  [][]byte
+	want ErrorCode
+}
+
+func canonicalDACases() []canonicalDACase {
+	badChunk := func(nonce uint64, daID byte, payload []byte) []byte {
+		hash := sha3_256(payload)
+		hash[0] ^= 1
+		return daChunkTxBytes(nonce, filled32(daID), 0, hash, payload)
+	}
+	cap := daSingleChunkSet(1, 2, filled32(0x40), 1, filled32(0x96), []byte{0})
+	for i := 1; i <= MAX_DA_BATCHES_PER_BLOCK; i++ {
+		id, payload := filled32(byte(0x40+i)), []byte{byte(i)}
+		cap = append(cap, daSingleChunkSet(uint64(10+i), uint64(1_000+i), id, 1, sha3_256(payload), payload)...)
+	}
+	highPayload := []byte("high")
+	highIncomplete := daSingleChunkSet(3, 4, filled32(0x20), 2, sha3_256(highPayload), highPayload)
+	missing := append(append([][]byte{}, highIncomplete...), cap...)
+	duplicate := append([][]byte{
+		daCommitTxBytes(5, filled32(0x07), 2, filled32(0x95)),
+		daChunkTxBytes(6, filled32(0x07), 0, sha3_256([]byte("first")), []byte("first")),
+		daChunkTxBytes(7, filled32(0x07), 0, sha3_256([]byte("second")), []byte("second")),
+		daChunkTxBytes(8, filled32(0x07), 1, sha3_256([]byte("third")), []byte("third")),
+	}, cap...)
+	duplicatePair := daSingleChunkSet(20_001, 20_002, filled32(0x40), 1, sha3_256([]byte{0}), []byte("duplicate"))
+	duplicateCommits := append(append([][]byte{}, cap...), duplicatePair...)
+	orphanPayload := []byte("orphan")
+	orphan := append([][]byte{daChunkTxBytes(9, filled32(0x04), 0, sha3_256(orphanPayload), orphanPayload)}, highIncomplete...)
+	lowPayload := []byte("low")
+	payloadMismatch := daSingleChunkSet(13, 14, filled32(0x10), 1, filled32(0x98), lowPayload)
+	targets := []canonicalDACase{
+		{name: "orphan_over_later_defects", txs: orphan, want: BLOCK_ERR_DA_SET_INVALID},
+		{name: "duplicate_commit_over_completeness_cap_and_payload", txs: duplicateCommits, want: BLOCK_ERR_DA_SET_INVALID},
+		{name: "missing_index_over_cap_and_payload", txs: missing, want: BLOCK_ERR_DA_INCOMPLETE},
+		{name: "duplicate_index_over_cap_and_payload", txs: duplicate, want: BLOCK_ERR_DA_INCOMPLETE},
+		{name: "cap_over_payload", txs: cap, want: BLOCK_ERR_DA_BATCH_EXCEEDED},
+		{name: "payload_mismatch", txs: payloadMismatch, want: BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID},
+	}
+	badCarrier := daSingleChunkSet(20_000, 20_003, filled32(0xff), 1, sha3_256([]byte("bad")), []byte("bad"))
+	badCarrier[1] = badChunk(20_003, 0xff, []byte("bad"))
+	cases := make([]canonicalDACase, 0, 3*len(targets)+4)
+	for _, target := range targets {
+		before := append(append([][]byte{}, badCarrier...), target.txs...)
+		after := append(append([][]byte{}, target.txs...), badCarrier...)
+		cases = append(cases,
+			canonicalDACase{name: target.name + "_bad_hash_before", txs: before, want: BLOCK_ERR_DA_CHUNK_HASH_INVALID},
+			canonicalDACase{name: target.name + "_bad_hash_after", txs: after, want: BLOCK_ERR_DA_CHUNK_HASH_INVALID},
+			target,
+		)
+	}
+	lowFirst := append(append([][]byte{}, payloadMismatch...), highIncomplete...)
+	highFirst := append(append([][]byte{}, highIncomplete...), payloadMismatch...)
+	accepted := daSingleChunkSet(21, 22, filled32(0x30), 1, sha3_256([]byte("first")), []byte("first"))
+	accepted = append(accepted, daSingleChunkSet(23, 24, filled32(0x31), 1, sha3_256([]byte("second")), []byte("second"))...)
+	twoBad := [][]byte{badChunk(25, 0x32, []byte("first")), badChunk(26, 0x33, []byte("second"))}
+	return append(cases,
+		canonicalDACase{name: "lower_sorted_payload_mismatch_txs_before_higher_sorted_incomplete", txs: lowFirst, want: BLOCK_ERR_DA_INCOMPLETE},
+		canonicalDACase{name: "higher_sorted_incomplete_txs_before_lower_sorted_payload_mismatch", txs: highFirst, want: BLOCK_ERR_DA_INCOMPLETE},
+		canonicalDACase{name: "equal_indices_under_distinct_da_ids_accepted", txs: accepted},
+		canonicalDACase{name: "multiple_bad_hashes", txs: twoBad, want: BLOCK_ERR_DA_CHUNK_HASH_INVALID},
+	)
+}
+
 func TestParseTx_DACommitChunkCountZero(t *testing.T) {
 	daID := filled32(0xa1)
 	commitment := filled32(0xb2)
@@ -404,8 +475,24 @@ func TestValidateBlockBasic_DA_DuplicateChunkIndex(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if got := mustTxErrCode(t, err); got != BLOCK_ERR_DA_SET_INVALID {
-		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_DA_SET_INVALID)
+	if got := mustTxErrCode(t, err); got != BLOCK_ERR_DA_INCOMPLETE {
+		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_DA_INCOMPLETE)
+	}
+}
+
+func TestValidateBlockBasic_DA_CanonicalErrorOrder(t *testing.T) {
+	for _, tc := range canonicalDACases() {
+		t.Run(tc.name, func(t *testing.T) {
+			block, prev, target := buildDABlockBytes(t, tc.txs...)
+			_, err := ValidateBlockBasic(block, &prev, &target)
+			got := ErrorCode("")
+			if err != nil {
+				got = mustTxErrCode(t, err)
+			}
+			if got != tc.want {
+				t.Fatalf("code=%s, want %s", got, tc.want)
+			}
+		})
 	}
 }
 

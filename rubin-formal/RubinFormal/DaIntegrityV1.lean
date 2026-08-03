@@ -36,12 +36,14 @@ deriving Repr, DecidableEq
 structure DaCommitInfo where
   chunkCount : Nat
   outputs : List TxOut
+  duplicate : Bool := false
 deriving Repr, DecidableEq
 
 structure DaChunkInfo where
   chunkIndex : Nat
   chunkHash : Bytes
   payload : Bytes
+  duplicate : Bool := false
 deriving Repr, DecidableEq
 
 structure ParsedDATx where
@@ -98,11 +100,8 @@ def parseDaChunkCore (c : Cursor) : Option (Bytes × Nat × Bytes × Cursor) := 
   let (h, c3) ← c2.getBytes? 32
   pure (daId, idx, h, c3)
 
-/-- Witness section error checks from parseDATx (lines 169-172).
-    LIVE sub-function: called directly from parseDATx.
-    Written without do-notation for formal proof access.
-    Returns one of: TX_ERR_WITNESS_OVERFLOW, TX_ERR_SIG_ALG_INVALID,
-    TX_ERR_SIG_NONCANONICAL, or .ok (). -/
+/-- Validate witness-section errors after structural parsing in `parseDATx`.
+    Returns witness overflow, invalid algorithm, noncanonical signature, or success. -/
 def validateWitnessErrors (ws : TxWeightV2.WitnessSectionResult) : Except String Unit :=
   if ws.endOff - ws.startOff > TxWeightV2.MAX_WITNESS_BYTES_PER_TX then
     .error "TX_ERR_WITNESS_OVERFLOW"
@@ -216,14 +215,18 @@ def parseDATx (tx : Bytes) : Except String ParsedDATx :=
                 , outputs := p1.outs
                 , payload := payload }
 
-/-- Batch count limit check. LIVE sub-function (line 226-227). -/
+/-- Parse each bounded block transaction exactly once, preserving order. -/
+def parseDATxs : List Bytes → Except String (List ParsedDATx)
+  | [] => .ok []
+  | tx :: rest => do pure ((← parseDATx tx) :: (← parseDATxs rest))
+
+/-- Enforce the live per-block DA batch limit. -/
 def validateDaBatchCount (commitCount : Nat) : Except String Unit :=
   if commitCount > MAX_DA_BATCHES_PER_BLOCK then
     Except.error "BLOCK_ERR_DA_BATCH_EXCEEDED"
   else Except.ok ()
 
-/-- Orphan chunk check: every chunk daId must have a commit. LIVE sub-function (line 229-231).
-    Recursive version for formal proof access. -/
+/-- Require every collected chunk set to have a matching commit. -/
 def validateNoOrphanChunks
     (chunkList : List (Bytes × Std.RBMap Nat DaChunkInfo compare))
     (commits : Std.RBMap Bytes DaCommitInfo cmpBytes) : Except String Unit :=
@@ -233,24 +236,24 @@ def validateNoOrphanChunks
     if !(commits.contains daId) then .error "BLOCK_ERR_DA_SET_INVALID"
     else validateNoOrphanChunks rest commits
 
-/-- Chunk hash verification: sha3(payload) must match embedded hash. LIVE sub-function (line 219-220). -/
+/-- Require the embedded chunk hash to match its payload. -/
 def validateChunkHash (payload hash : Bytes) : Except String Unit :=
   if SHA3.sha3_256 payload != hash then
     Except.error "BLOCK_ERR_DA_CHUNK_HASH_INVALID"
   else Except.ok ()
 
-/-- Duplicate commit check: daId already in commits map → BLOCK_ERR_DA_SET_INVALID.
-    LIVE sub-function (line 233). Written without do for formal proof access. -/
+/-- Compatibility proof leaf for duplicate commit lookup.
+    The live pipeline marks duplicates during collection and does not call it. -/
 def validateNoDuplicateCommit
     (commits : Std.RBMap Bytes DaCommitInfo cmpBytes) (daId : Bytes) : Except String Unit :=
   if commits.contains daId then Except.error "BLOCK_ERR_DA_SET_INVALID"
   else Except.ok ()
 
-/-- Duplicate chunk index check: idx already in set → BLOCK_ERR_DA_SET_INVALID.
-    LIVE sub-function (line 242). Written without do for formal proof access. -/
+/-- Compatibility proof leaf for duplicate chunk lookup.
+    The live pipeline marks duplicates during collection and does not call it. -/
 def validateNoDuplicateChunk
     (set : Std.RBMap Nat DaChunkInfo compare) (idx : Nat) : Except String Unit :=
-  if set.contains idx then Except.error "BLOCK_ERR_DA_SET_INVALID"
+  if set.contains idx then Except.error "BLOCK_ERR_DA_INCOMPLETE"
   else Except.ok ()
 
 /-- Count DA_COMMIT outputs and extract the single commit hash.
@@ -264,8 +267,7 @@ def countDaCommitOutputs (outputs : List TxOut) : Nat × Bytes :=
     else acc
   ) (0, ByteArray.empty)
 
-/-- Validate commit output: exactly 1 DA_COMMIT output with matching hash.
-    LIVE sub-function (lines 293-303). Written without do for formal proof access. -/
+/-- Require exactly one DA_COMMIT output with the expected payload commitment. -/
 def validateCommitOutput (outputs : List TxOut) (payloadCommit : Bytes)
     : Except String Unit :=
   let (count, got) := countDaCommitOutputs outputs
@@ -273,15 +275,12 @@ def validateCommitOutput (outputs : List TxOut) (payloadCommit : Bytes)
   else if got != payloadCommit then Except.error "BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID"
   else Except.ok ()
 
-/-- Validate chunk count matches commit declaration.
-    LIVE sub-function (lines 284-285). Written without do for formal proof access. -/
+/-- Require the collected chunk count to match the commit declaration. -/
 def validateChunkCountMatch (setSize chunkCount : Nat) : Except String Unit :=
   if setSize != chunkCount then Except.error "BLOCK_ERR_DA_INCOMPLETE"
   else Except.ok ()
 
-/-- Collect and concatenate chunk payloads in index order [start..start+count).
-    Returns error if any index missing. LIVE sub-function (lines 287-295).
-    Recursive version (no foldlM/List.range) for full formal proof access. -/
+/-- Collect payloads in index order, rejecting a missing index. -/
 def collectChunkPayloads
     (set : Std.RBMap Nat DaChunkInfo compare) (count : Nat)
     (acc : Bytes := ByteArray.empty) (start : Nat := 0)
@@ -293,8 +292,8 @@ def collectChunkPayloads
     | none => .error "BLOCK_ERR_DA_INCOMPLETE"
     | some ch => collectChunkPayloads set n (acc ++ ch.payload) (start + 1)
 
-/-- Process one commit tx: extract daId, chunkCount, check duplicate.
-    LIVE sub-function of accumulateDATxs commit branch. -/
+/-- Collect one commit, retaining the first record and marking a duplicate ID.
+    Structural errors are selected only after the full collection. -/
 def processCommitTx
     (t : ParsedDATx)
     (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
@@ -305,12 +304,12 @@ def processCommitTx
     match t.commitChunkCount with
     | none => .error "TX_ERR_PARSE"
     | some cc =>
-      match validateNoDuplicateCommit commits daId with
-      | .error e => .error e
-      | .ok () => .ok (commits.insert daId { chunkCount := cc, outputs := t.outputs })
+      match commits.find? daId with
+      | none => .ok (commits.insert daId { chunkCount := cc, outputs := t.outputs })
+      | some old => .ok (commits.insert daId { old with duplicate := true })
 
-/-- Process one chunk tx: extract daId, index, hash, verify, check duplicate.
-    LIVE sub-function of accumulateDATxs chunk branch. -/
+/-- Collect one chunk, retaining the first record and marking a duplicate index.
+    Hashes are checked globally before this structural collection. -/
 def processChunkTx
     (t : ParsedDATx)
     (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
@@ -324,42 +323,74 @@ def processChunkTx
       match t.chunkHash with
       | none => .error "TX_ERR_PARSE"
       | some h =>
-        match validateChunkHash t.payload h with
-        | .error e => .error e
-        | .ok () =>
-          let set := match chunks.find? daId with | none => Std.RBMap.empty | some m => m
-          match validateNoDuplicateChunk set idx with
-          | .error e => .error e
-          | .ok () => .ok (chunks.insert daId (set.insert idx { chunkIndex := idx, chunkHash := h, payload := t.payload }))
+        let set := match chunks.find? daId with | none => Std.RBMap.empty | some m => m
+        match set.find? idx with
+        | none => .ok (chunks.insert daId (set.insert idx { chunkIndex := idx, chunkHash := h, payload := t.payload }))
+        | some old => .ok (chunks.insert daId (set.insert idx { old with duplicate := true }))
 
-/-- Accumulate DA txs using decomposed processCommitTx / processChunkTx.
-    Each branch delegates to the corresponding sub-function, enabling
-    formal error propagation proofs at the sub-function level. -/
+/-- Bounded structural collection after the global chunk-hash pass.
+    It records duplicate IDs and indices without selecting a step-11 error. -/
 def accumulateDATxs
-    (txs : List Bytes)
+    (txs : List ParsedDATx)
     (commits : Std.RBMap Bytes DaCommitInfo cmpBytes)
     (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
     : Except String (Std.RBMap Bytes DaCommitInfo cmpBytes ×
                       Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes) :=
   match txs with
   | [] => .ok (commits, chunks)
-  | txBytes :: rest =>
-    match parseDATx txBytes with
-    | .error e => .error e
-    | .ok t =>
-      if t.txKind == 0x01 then
-        match processCommitTx t commits with
-        | .error e => .error e
-        | .ok newCommits => accumulateDATxs rest newCommits chunks
-      else if t.txKind == 0x02 then
-        match processChunkTx t chunks with
-        | .error e => .error e
-        | .ok newChunks => accumulateDATxs rest commits newChunks
-      else
-        accumulateDATxs rest commits chunks
+  | t :: rest =>
+    if t.txKind == 0x01 then
+      match processCommitTx t commits with
+      | .error e => .error e
+      | .ok newCommits => accumulateDATxs rest newCommits chunks
+    else if t.txKind == 0x02 then
+      match processChunkTx t chunks with
+      | .error e => .error e
+      | .ok newChunks => accumulateDATxs rest commits newChunks
+    else accumulateDATxs rest commits chunks
 
-/-- Verify loop: check per-commit integrity for each commit.
-    Recursive version for formal proof access. -/
+/-- Complete global step 10 in transaction order before structural collection. -/
+def validateAllChunkHashes (txs : List ParsedDATx) : Except String Unit := do
+  for t in txs do
+    if t.txKind == 0x02 then
+      match t.chunkHash with
+      | none => throw "TX_ERR_PARSE"
+      | some h => validateChunkHash t.payload h
+
+def validateNoCollectedDuplicateCommits
+    (commits : Std.RBMap Bytes DaCommitInfo cmpBytes) : Except String Unit :=
+  if commits.toList.any (fun x => x.2.duplicate) then .error "BLOCK_ERR_DA_SET_INVALID"
+  else .ok ()
+
+def validateNoCollectedDuplicateChunks
+    (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes) : Except String Unit :=
+  if chunks.toList.any (fun x => x.2.toList.any (fun y => y.2.duplicate)) then .error "BLOCK_ERR_DA_INCOMPLETE"
+  else .ok ()
+
+def validateChunkIndexes
+    (set : Std.RBMap Nat DaChunkInfo compare) (count start : Nat) : Except String Unit := do
+  for offset in [0:count] do
+    match set.find? (start + offset) with
+    | none => throw "BLOCK_ERR_DA_INCOMPLETE"
+    | some _ => pure ()
+
+def validateRequiredChunkIndexes
+    (commitList : List (Bytes × DaCommitInfo))
+    (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
+    : Except String Unit := do
+  for (daId, cinfo) in commitList do
+    match chunks.find? daId with
+    | none => throw "BLOCK_ERR_DA_INCOMPLETE"
+    | some set => do
+      validateChunkCountMatch set.size cinfo.chunkCount
+      validateChunkIndexes set cinfo.chunkCount 0
+
+def validateCommitChunkCounts (commitList : List (Bytes × DaCommitInfo)) : Except String Unit := do
+  for (_, cinfo) in commitList do
+    if cinfo.chunkCount < 1 || cinfo.chunkCount > MAX_DA_CHUNK_COUNT then
+      throw "TX_ERR_PARSE"
+
+/-- Global step 12: payload commitments run only after structural success. -/
 def verifyCommitIntegrity
     (commitList : List (Bytes × DaCommitInfo))
     (chunks : Std.RBMap Bytes (Std.RBMap Nat DaChunkInfo compare) cmpBytes)
@@ -370,29 +401,27 @@ def verifyCommitIntegrity
     match chunks.find? daId with
     | none => .error "BLOCK_ERR_DA_INCOMPLETE"
     | some set =>
-      match validateChunkCountMatch set.size cinfo.chunkCount with
+      match collectChunkPayloads set cinfo.chunkCount with
       | .error e => .error e
-      | .ok () =>
-        match collectChunkPayloads set cinfo.chunkCount with
+      | .ok concat =>
+        let payloadCommit := SHA3.sha3_256 concat
+        match validateCommitOutput cinfo.outputs payloadCommit with
         | .error e => .error e
-        | .ok concat =>
-          let payloadCommit := SHA3.sha3_256 concat
-          match validateCommitOutput cinfo.outputs payloadCommit with
-          | .error e => .error e
-          | .ok () => verifyCommitIntegrity rest chunks
+        | .ok () => verifyCommitIntegrity rest chunks
 
-/-- Full DA set integrity validation. Composed from recursive sub-functions.
-    No do-notation for full formal proof access. -/
-def validateDASetIntegrity (txs : List Bytes) : Except String Unit :=
-  match accumulateDATxs txs Std.RBMap.empty Std.RBMap.empty with
-  | .error e => .error e
-  | .ok (commits, chunks) =>
-    match validateDaBatchCount commits.size with
-    | .error e => .error e
-    | .ok () =>
-      match validateNoOrphanChunks chunks.toList commits with
-      | .error e => .error e
-      | .ok () => verifyCommitIntegrity commits.toList chunks
+/-- Full DA integrity: step 10 hash pass; collection; ordered global step 11;
+    then step 12 payload commitments. -/
+def validateDASetIntegrity (txs : List Bytes) : Except String Unit := do
+  let parsed ← parseDATxs txs
+  validateAllChunkHashes parsed
+  let (commits, chunks) ← accumulateDATxs parsed Std.RBMap.empty Std.RBMap.empty
+  validateNoOrphanChunks chunks.toList commits
+  validateNoCollectedDuplicateCommits commits
+  validateNoCollectedDuplicateChunks chunks
+  validateRequiredChunkIndexes commits.toList chunks
+  validateDaBatchCount commits.size
+  validateCommitChunkCounts commits.toList
+  verifyCommitIntegrity commits.toList chunks
 
 def validateDaIntegrityGate
     (blockBytes : Bytes)

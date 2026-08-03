@@ -570,6 +570,53 @@ func runConnectBlockFirstErrorCases(t *testing.T, rub1099 bool) {
 	})
 }
 
+func TestConnectBlock_DA_CanonicalErrorOrderNoMutation(t *testing.T) {
+	newState := func() *InMemoryChainState {
+		return &InMemoryChainState{
+			Utxos: map[Outpoint]UtxoEntry{
+				{Txid: filled32(0xa0), Vout: 3}: {
+					Value:             42,
+					CovenantType:      COV_TYPE_P2PK,
+					CovenantData:      []byte{0x51, 0x52},
+					CreationHeight:    7,
+					CreatedByCoinbase: true,
+				},
+			},
+			AlreadyGenerated: big.NewInt(123),
+		}
+	}
+	cloneState := func(s *InMemoryChainState) *InMemoryChainState {
+		return &InMemoryChainState{Utxos: copyUtxoMap(s.Utxos), AlreadyGenerated: new(big.Int).Set(s.AlreadyGenerated)}
+	}
+	for _, tc := range canonicalDACases() {
+		if tc.want == "" {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			block, prev, target := buildDABlockBytes(t, tc.txs...)
+			for _, workers := range []int{-1, 0, 1, 4} {
+				state := newState()
+				before := cloneState(state)
+				var err error
+				if workers < 0 {
+					_, err = ConnectBlockBasicInMemoryAtHeight(block, &prev, &target, 1, []uint64{0}, state, [32]byte{})
+				} else {
+					_, err = ConnectBlockParallelSigVerify(block, &prev, &target, 1, []uint64{0}, state, [32]byte{}, workers)
+				}
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				if got := mustTxErrCode(t, err); got != tc.want {
+					t.Fatalf("workers=%d code=%s, want %s", workers, got, tc.want)
+				}
+				if !reflect.DeepEqual(state.Utxos, before.Utxos) || state.AlreadyGenerated.Cmp(before.AlreadyGenerated) != 0 {
+					t.Fatalf("workers=%d rejection changed initialized chainstate", workers)
+				}
+			}
+		})
+	}
+}
+
 func txErrCode(err error) string {
 	if te, ok := err.(*TxError); ok {
 		return string(te.Code)
