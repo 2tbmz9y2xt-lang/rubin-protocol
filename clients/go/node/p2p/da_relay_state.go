@@ -19,8 +19,6 @@ const (
 	daOrphanCommitOverheadMaxBytes  uint64 = 8 << 20
 	daOrphanTTLBlocks               uint64 = 3
 	daMempoolPinnedPayloadMaxBytes  uint64 = 96_000_000
-	daCompleteSetRecordFootprint    uint64 = 256
-	daCompleteSetChunkFootprint     uint64 = 128
 	daPrefetchPerPeerBytesPerSecond uint64 = 4_000_000
 	daPrefetchGlobalBytesPerSecond  uint64 = 32_000_000
 	daPrefetchMaxConcurrentSets            = 8
@@ -726,15 +724,7 @@ func (s *daRelayState) projectOrphanAccountingDeltaLocked(oldRecord, newRecord d
 }
 
 func (s *daRelayState) projectPinnedPayloadDeltaLocked(oldRecord, newRecord daRelaySetRecord) (uint64, error) {
-	oldPinnedBytes, err := oldRecord.pinnedPayloadAccountingBytes()
-	if err != nil {
-		return 0, err
-	}
-	newPinnedBytes, err := newRecord.pinnedPayloadAccountingBytes()
-	if err != nil {
-		return 0, err
-	}
-	pinnedBytes, err := checkedApplyUint64Delta(s.pinnedPayloadBytes, oldPinnedBytes, newPinnedBytes)
+	pinnedBytes, err := checkedApplyUint64Delta(s.pinnedPayloadBytes, oldRecord.pinnedPayloadAccountingBytes(), newRecord.pinnedPayloadAccountingBytes())
 	if err != nil {
 		return 0, err
 	}
@@ -1125,25 +1115,18 @@ func (r *daRelaySetRecord) recomputeOrphanTotals() error {
 	return nil
 }
 
-func (r daRelaySetRecord) pinnedPayloadAccountingBytes() (uint64, error) {
-	if r.state != daRelayStateCompleteSet || r.payloadBytes == 0 {
-		return 0, nil
+// pinnedPayloadAccountingBytes reports what this record contributes to the
+// DA_MEMPOOL_PINNED_PAYLOAD_MAX counter. RUBIN_COMPACT_BLOCKS §5.1 counts DA
+// payload bytes only, so a retained COMPLETE_SET contributes exactly
+// payloadBytes (the sum of its DA_CHUNK payload lengths, as recorded by
+// markComplete) and every other state contributes zero. Commit metadata,
+// retained transaction bytes and wire envelope overhead are never counted; a
+// defensive zero-payload COMPLETE_SET therefore contributes zero as well.
+func (r daRelaySetRecord) pinnedPayloadAccountingBytes() uint64 {
+	if r.state != daRelayStateCompleteSet {
+		return 0
 	}
-	footprint := r.wireBytes
-	if footprint == 0 {
-		footprint = r.payloadBytes
-	}
-	var err error
-	footprint, err = checkedAddUint64(footprint, daCompleteSetRecordFootprint)
-	if err != nil {
-		return 0, err
-	}
-	chunkFootprint := uint64(r.commit.chunkCount) * daCompleteSetChunkFootprint
-	footprint, err = checkedAddUint64(footprint, chunkFootprint)
-	if err != nil {
-		return 0, err
-	}
-	return footprint, nil
+	return r.payloadBytes
 }
 
 func (r daRelaySetRecord) orphanAccounting() (daRelayRecordAccounting, error) {
