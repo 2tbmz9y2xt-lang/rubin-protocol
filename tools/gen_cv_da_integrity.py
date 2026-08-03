@@ -367,6 +367,34 @@ def generate() -> bytes:
     alias["note"] = "DA_COMMIT_TX with chunk_count=0 MUST be rejected at parse-time as TX_ERR_PARSE."
     vectors.append(alias)
 
+    def duplicate_index_set(bad_hash: bool) -> list[TxParts]:
+        return [
+            build_da_commit_tx(20, da_id, 2, sha3_256(b"abcghi"), manifest=b"m2", commitment_mode="ok"),
+            build_da_chunk_tx(21, da_id, 0, b"abc", bad_hash=False),
+            build_da_chunk_tx(22, da_id, 0, b"def", bad_hash=False),
+            build_da_chunk_tx(23, da_id, 1, b"ghi", bad_hash=bad_hash),
+        ]
+
+    build_vector_from_non_coinbase_txs(
+        "CV-DA-HASH-BEFORE-SET-01", duplicate_index_set(True), False,
+        "BLOCK_ERR_DA_CHUNK_HASH_INVALID",
+    )
+    build_vector_from_non_coinbase_txs(
+        "CV-DA-DUPLICATE-CHUNK-ERROR-01", duplicate_index_set(False), False,
+        "BLOCK_ERR_DA_INCOMPLETE",
+    )
+    lower_da_id, higher_da_id = b"\x10" * 32, b"\xf0" * 32
+    build_vector_from_non_coinbase_txs(
+        "CV-DA-STEP11-BEFORE-PAYLOAD-01",
+        [
+            build_da_commit_tx(30, lower_da_id, 1, sha3_256(b"low"), manifest=b"m3", commitment_mode="bad"),
+            build_da_chunk_tx(31, lower_da_id, 0, b"low", bad_hash=False),
+            build_da_commit_tx(32, higher_da_id, 1, sha3_256(b"high"), manifest=b"m4", commitment_mode="ok"),
+        ],
+        False,
+        "BLOCK_ERR_DA_INCOMPLETE",
+    )
+
     out_obj = {"gate": "CV-DA-INTEGRITY", "vectors": vectors}
     return (json.dumps(out_obj, indent=2, sort_keys=False) + "\n").encode("utf-8")
 

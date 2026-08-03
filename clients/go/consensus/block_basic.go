@@ -385,6 +385,16 @@ type daCommitSet struct {
 	chunkCount uint16
 }
 
+// daSetStructure retains the first transaction for each DA identity while
+// recording duplicate identities for the later deterministic step-11 checks.
+// Collection itself must not select a step-11 error.
+type daSetStructure struct {
+	commits               map[[32]byte]daCommitSet
+	chunks                map[[32]byte]map[uint16]*Tx
+	duplicateCommitIDs    map[[32]byte]struct{}
+	duplicateChunkIndexes map[[32]byte]map[uint16]struct{}
+}
+
 func validateBlockResourceLimits(stats *blockTxStats) error {
 	if stats.sumWeight > MAX_BLOCK_WEIGHT {
 		return txerr(BLOCK_ERR_WEIGHT_EXCEEDED, "block weight exceeded")
@@ -399,14 +409,163 @@ func validateBlockResourceLimits(stats *blockTxStats) error {
 }
 
 func validateDASetIntegrity(txs []*Tx) error {
-	commits, chunks, err := collectDACommitsAndChunks(txs)
+	if err := validateDAChunkHashes(txs); err != nil {
+		return err
+	}
+	sets, err := collectDASetStructure(txs)
 	if err != nil {
 		return err
 	}
-	if err := validateDACommitCompleteness(commits, chunks); err != nil {
+	if err := validateDASetStructure(sets); err != nil {
 		return err
 	}
-	return validateDAPayloadCommitments(commits, chunks)
+	return validateDAPayloadCommitments(sets.commits, sets.chunks)
+}
+
+// validateDAChunkHashes completes the step-10 transaction-order pass before
+// any DA-set structure or payload commitment is examined.
+func validateDAChunkHashes(txs []*Tx) error {
+	for _, tx := range txs {
+		if tx == nil {
+			return txerr(TX_ERR_PARSE, "nil transaction")
+		}
+		if tx.TxKind != 0x02 {
+			continue
+		}
+		if tx.DaChunkCore == nil {
+			return txerr(TX_ERR_PARSE, "missing da_chunk_core for tx_kind=0x02")
+		}
+		if sha3_256(tx.DaPayload) != tx.DaChunkCore.ChunkHash {
+			return txerr(BLOCK_ERR_DA_CHUNK_HASH_INVALID, "chunk_hash mismatch")
+		}
+	}
+	return nil
+}
+
+func collectDASetStructure(txs []*Tx) (daSetStructure, error) {
+	sets := daSetStructure{
+		commits:               make(map[[32]byte]daCommitSet),
+		chunks:                make(map[[32]byte]map[uint16]*Tx),
+		duplicateCommitIDs:    make(map[[32]byte]struct{}),
+		duplicateChunkIndexes: make(map[[32]byte]map[uint16]struct{}),
+	}
+	for _, tx := range txs {
+		if err := collectDATx(&sets, tx); err != nil {
+			return daSetStructure{}, err
+		}
+	}
+	return sets, nil
+}
+
+func collectDATx(sets *daSetStructure, tx *Tx) error {
+	if tx == nil {
+		return txerr(TX_ERR_PARSE, "nil transaction")
+	}
+	switch tx.TxKind {
+	case 0x01:
+		return collectDACommit(sets, tx)
+	case 0x02:
+		return collectDAChunk(sets, tx)
+	default:
+		return nil
+	}
+}
+
+func collectDACommit(sets *daSetStructure, tx *Tx) error {
+	if tx.DaCommitCore == nil {
+		return txerr(TX_ERR_PARSE, "missing da_commit_core for tx_kind=0x01")
+	}
+	daID := tx.DaCommitCore.DaID
+	if _, exists := sets.commits[daID]; exists {
+		sets.duplicateCommitIDs[daID] = struct{}{}
+		return nil
+	}
+	sets.commits[daID] = daCommitSet{tx: tx, chunkCount: tx.DaCommitCore.ChunkCount}
+	return nil
+}
+
+func collectDAChunk(sets *daSetStructure, tx *Tx) error {
+	if tx.DaChunkCore == nil {
+		return txerr(TX_ERR_PARSE, "missing da_chunk_core for tx_kind=0x02")
+	}
+	daID := tx.DaChunkCore.DaID
+	idx := tx.DaChunkCore.ChunkIndex
+	set := sets.chunks[daID]
+	if set == nil {
+		set = make(map[uint16]*Tx)
+		sets.chunks[daID] = set
+	}
+	if _, exists := set[idx]; exists {
+		duplicates := sets.duplicateChunkIndexes[daID]
+		if duplicates == nil {
+			duplicates = make(map[uint16]struct{})
+			sets.duplicateChunkIndexes[daID] = duplicates
+		}
+		duplicates[idx] = struct{}{}
+		return nil
+	}
+	set[idx] = tx
+	return nil
+}
+
+func validateDASetStructure(sets daSetStructure) error {
+	if err := validateDACommitChunkOrphans(sets.commits, sets.chunks); err != nil {
+		return err
+	}
+	if err := validateDADuplicateCommits(sets.duplicateCommitIDs); err != nil {
+		return err
+	}
+	if err := validateDACommitChunkCompleteness(sets.commits, sets.chunks, sets.duplicateChunkIndexes); err != nil {
+		return err
+	}
+	if err := validateDASetCount(sets.commits); err != nil {
+		return err
+	}
+	return validateDACommitChunkBounds(sets.commits)
+}
+
+func validateDADuplicateCommits(duplicateCommitIDs map[[32]byte]struct{}) error {
+	if len(duplicateCommitIDs) == 0 {
+		return nil
+	}
+	return txerr(BLOCK_ERR_DA_SET_INVALID, "duplicate DA commit for da_id")
+}
+
+func validateDACommitChunkCompleteness(
+	commits map[[32]byte]daCommitSet,
+	chunks map[[32]byte]map[uint16]*Tx,
+	duplicateChunkIndexes map[[32]byte]map[uint16]struct{},
+) error {
+	for _, daID := range sortedDAIDs(commits) {
+		if len(duplicateChunkIndexes[daID]) != 0 {
+			return txerr(BLOCK_ERR_DA_INCOMPLETE, "duplicate DA chunk index")
+		}
+		commit := commits[daID]
+		set := chunks[daID]
+		if len(set) != int(commit.chunkCount) {
+			return txerr(BLOCK_ERR_DA_INCOMPLETE, "DA chunk count mismatch")
+		}
+		if err := validateDACommitChunkIndexes(set, commit.chunkCount); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateDASetCount(commits map[[32]byte]daCommitSet) error {
+	if len(commits) > MAX_DA_BATCHES_PER_BLOCK {
+		return txerr(BLOCK_ERR_DA_BATCH_EXCEEDED, "too many DA commits in block")
+	}
+	return nil
+}
+
+func validateDACommitChunkBounds(commits map[[32]byte]daCommitSet) error {
+	for _, daID := range sortedDAIDs(commits) {
+		if invalidDaCommitChunkCount(commits[daID].chunkCount) {
+			return txerr(TX_ERR_PARSE, "chunk_count out of range for tx_kind=0x01")
+		}
+	}
+	return nil
 }
 
 func collectDACommitsAndChunks(txs []*Tx) (map[[32]byte]daCommitSet, map[[32]byte]map[uint16]*Tx, error) {

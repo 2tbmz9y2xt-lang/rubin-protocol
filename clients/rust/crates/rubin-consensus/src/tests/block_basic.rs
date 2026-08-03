@@ -836,6 +836,141 @@ fn validate_block_basic_da_completeness_priority_over_payload_mismatch() {
     assert_eq!(err.code, ErrorCode::BlockErrDaIncomplete);
 }
 
+pub(super) type CanonicalDaCase = (Vec<Vec<u8>>, Option<ErrorCode>);
+
+pub(super) fn canonical_da_block(da_txs: Vec<Vec<u8>>) -> (Vec<u8>, [u8; 32], [u8; 32]) {
+    let coinbase = coinbase_with_witness_commitment(0, &da_txs);
+    let txs = std::iter::once(coinbase).chain(da_txs).collect::<Vec<_>>();
+    let txids = txs
+        .iter()
+        .map(|tx| parse_tx(tx).expect("parse DA transaction").1)
+        .collect::<Vec<_>>();
+    let mut prev = [0u8; 32];
+    prev[0] = 0x97;
+    let target = [0xffu8; 32];
+    let root = merkle_root_txids(&txids).expect("DA merkle root");
+    let block = build_block_bytes(prev, root, target, 47, &txs);
+    (block, prev, target)
+}
+
+fn canonical_da_set(
+    da_id: [u8; 32],
+    chunk_count: u16,
+    commitment: [u8; 32],
+    payload: &[u8],
+    nonce: u64,
+) -> [Vec<u8>; 2] {
+    [
+        da_commit_tx(da_id, chunk_count, commitment, nonce),
+        da_chunk_tx(da_id, 0, sha3_256(payload), payload, nonce + 1_000),
+    ]
+}
+
+fn canonical_valid_set(
+    da_id: [u8; 32],
+    chunk_count: u16,
+    payload: &[u8],
+    nonce: u64,
+) -> [Vec<u8>; 2] {
+    canonical_da_set(da_id, chunk_count, sha3_256(payload), payload, nonce)
+}
+
+pub(super) fn canonical_da_cases() -> Vec<CanonicalDaCase> {
+    let reject = |txs, want| (txs, Some(want));
+    let chunk = |da_id, index, payload: &[u8], nonce| {
+        da_chunk_tx(da_id, index, sha3_256(payload), payload, nonce)
+    };
+    let bad_chunk = |da_id, payload: &[u8], nonce| {
+        let mut hash = sha3_256(payload);
+        hash[0] ^= 1;
+        da_chunk_tx(da_id, 0, hash, payload, nonce)
+    };
+    let limit = crate::constants::MAX_DA_BATCHES_PER_BLOCK;
+    let mut cap = Vec::from(canonical_da_set([0x40; 32], 1, [0x96; 32], &[0], 1));
+    for i in 1..=limit {
+        let da_id = [0x40u8.wrapping_add(i as u8); 32];
+        let payload = [i as u8];
+        cap.extend(canonical_valid_set(da_id, 1, &payload, 10 + i));
+    }
+    let high_payload = b"high";
+    let high_incomplete = Vec::from(canonical_valid_set([0x20; 32], 2, high_payload, 3));
+    let mut missing_index = high_incomplete.clone();
+    missing_index.extend(cap.clone());
+    let mut duplicate_index = vec![
+        da_commit_tx([0x07; 32], 2, [0x95; 32], 5),
+        chunk([0x07; 32], 0, b"first", 6),
+        chunk([0x07; 32], 1, b"third", 8),
+        chunk([0x07; 32], 0, b"second", 7),
+    ];
+    duplicate_index.extend(cap.clone());
+    let mut duplicate_commits = cap.clone();
+    duplicate_commits.extend(canonical_da_set(
+        [0x40; 32],
+        1,
+        sha3_256(&[0]),
+        b"duplicate",
+        20_001,
+    ));
+    let mut orphan = vec![chunk([0x04; 32], 0, b"orphan", 9)];
+    orphan.extend(high_incomplete.clone());
+    let payload_mismatch = Vec::from(canonical_da_set([0x10; 32], 1, [0x98; 32], b"low", 13));
+    let mut low_first = payload_mismatch.clone();
+    low_first.extend(high_incomplete.clone());
+    let mut high_first = high_incomplete;
+    high_first.extend(payload_mismatch.clone());
+    let targets = [
+        (orphan, ErrorCode::BlockErrDaSetInvalid),
+        (duplicate_commits, ErrorCode::BlockErrDaSetInvalid),
+        (missing_index, ErrorCode::BlockErrDaIncomplete),
+        (duplicate_index, ErrorCode::BlockErrDaIncomplete),
+        (cap, ErrorCode::BlockErrDaBatchExceeded),
+        (payload_mismatch, ErrorCode::BlockErrDaPayloadCommitInvalid),
+    ];
+    let mut bad_carrier = Vec::from(canonical_valid_set([0xff; 32], 1, b"bad", 20_000));
+    bad_carrier[1] = bad_chunk([0xff; 32], b"bad", 20_003);
+    let mut cases = Vec::with_capacity(3 * targets.len() + 4);
+    for (target, want) in targets {
+        let mut before = bad_carrier.clone();
+        before.extend(target.clone());
+        let mut after = target.clone();
+        after.extend(bad_carrier.clone());
+        cases.extend([
+            reject(before, ErrorCode::BlockErrDaChunkHashInvalid),
+            reject(after, ErrorCode::BlockErrDaChunkHashInvalid),
+            reject(target, want),
+        ]);
+    }
+    cases.push(reject(low_first, ErrorCode::BlockErrDaIncomplete));
+    cases.push(reject(high_first, ErrorCode::BlockErrDaIncomplete));
+    let mut accepted = Vec::from(canonical_valid_set([0x30; 32], 1, b"first", 21));
+    accepted.extend(canonical_valid_set([0x31; 32], 1, b"second", 23));
+    cases.push((accepted, None));
+    let two_bad = vec![
+        bad_chunk([0x32; 32], b"first", 25),
+        bad_chunk([0x33; 32], b"second", 26),
+    ];
+    cases.push(reject(two_bad, ErrorCode::BlockErrDaChunkHashInvalid));
+    cases
+}
+
+#[test]
+fn validate_block_basic_da_canonical_error_order() {
+    for case in canonical_da_cases() {
+        let (block, prev, target) = canonical_da_block(case.0);
+        match case.1 {
+            Some(want) => assert_eq!(
+                validate_block_basic(&block, Some(prev), Some(target))
+                    .expect_err("canonical DA rejection")
+                    .code,
+                want
+            ),
+            None => validate_block_basic(&block, Some(prev), Some(target))
+                .map(|_| ())
+                .expect("canonical DA acceptance"),
+        }
+    }
+}
+
 #[test]
 fn verify_sig_rejects_wrong_mldsa_lengths_before_openssl() {
     let digest = [0u8; 32];
