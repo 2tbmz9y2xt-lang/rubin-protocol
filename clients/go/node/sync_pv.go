@@ -46,7 +46,7 @@ func (s *SyncEngine) runPVShadowOnError(blockBytes []byte, prevTimestamps []uint
 	seqCode, parCode := txErrCode(seqErr), txErrCode(parErr)
 	if seqCode != parCode {
 		s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): seq_err=%s par_err=%s", blockHeight, seqCode, parCode))
-		_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d seq_err=%s par_err=%s\n", blockHeight, seqCode, parCode)
+		_, _ = fmt.Fprintf(s.diagnosticWriter(), "pv_shadow: mismatch height=%d seq_err=%s par_err=%s\n", blockHeight, seqCode, parCode)
 		if parErr == nil {
 			s.pvTelemetry.RecordMismatchVerdict()
 		} else {
@@ -77,11 +77,11 @@ func (s *SyncEngine) runPVShadowOnSuccess(blockBytes []byte, prevTimestamps []ui
 	}
 	if parErr != nil {
 		s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): seq_ok par_err=%s", blockHeight, txErrCode(parErr)))
-		_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d seq_ok par_err=%s\n", blockHeight, txErrCode(parErr))
+		_, _ = fmt.Fprintf(s.diagnosticWriter(), "pv_shadow: mismatch height=%d seq_ok par_err=%s\n", blockHeight, txErrCode(parErr))
 		s.pvTelemetry.RecordMismatchVerdict()
 	} else if parSummary.PostStateDigest != seqSummary.PostStateDigest {
 		s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): post_state_digest", blockHeight))
-		_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d post_state_digest\n", blockHeight)
+		_, _ = fmt.Fprintf(s.diagnosticWriter(), "pv_shadow: mismatch height=%d post_state_digest\n", blockHeight)
 		s.pvTelemetry.RecordMismatchState()
 	}
 }

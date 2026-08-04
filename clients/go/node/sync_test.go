@@ -1281,11 +1281,24 @@ func TestSyncPendingOutpointDirectConnectReleasesTokensAndCommitsStableTip(t *te
 	}
 }
 
-// TestSyncPendingOutpointCleanupFailureLeavesCanonicalTipUnmoved pins the
-// sync_pv.go rule that a standard cleanup failure must NOT be logged over a
-// committed tip: it propagates into rollback, so the apply fails and the live
-// canonical tip is exactly where it was.
-func TestSyncPendingOutpointCleanupFailureLeavesCanonicalTipUnmoved(t *testing.T) {
+// TestSyncPendingOutpointCleanupFailureLatchesTerminalFault pins the row this
+// fixture actually reaches, which is NOT an ordinary abort. Breaking a resident
+// record's claim fails the standard cleanup, and then fails the ROLLBACK's
+// restore too, because restoreMempoolSnapshot rebuilds that same broken record
+// through validateRestoredClaimBinding and refuses it. An unprovable restore is
+// terminal by contract (canonicalTransition.end), so the engine latches the
+// storage-persistence fault and leaves admission closed.
+//
+// The name and the assertions therefore state the latch, not a recovery: the
+// canonical tip is unmoved on BOTH ChainState and BlockStore, the owner never
+// reopens, AdmissionContext stays unavailable, a later mutator gets the latched
+// fault, and no block-apply outcome is recorded — a cleanup/rollback failure is
+// an operational fault, never a consensus verdict on the block.
+//
+// There is deliberately no ordinary-abort variant of this row: production has no
+// nonterminal cleanup-abort path here, and inventing one would need a test-only
+// failure seam the contract forbids.
+func TestSyncPendingOutpointCleanupFailureLatchesTerminalFault(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	spend := f.spend(t, 700, 1)
 	if err := f.mempool.AddTx(spend); err != nil {
@@ -1294,6 +1307,7 @@ func TestSyncPendingOutpointCleanupFailureLeavesCanonicalTipUnmoved(t *testing.T
 	f.breakResidentClaim(t, txID(t, spend))
 
 	beforeHash, beforeHeight := f.engine.chainState.TipHash, f.engine.chainState.Height
+	beforeCounts := f.engine.BlockApplyCounts()
 	if _, err := f.engine.ApplyBlock(f.blockIncluding(t, f.tipHash, f.tipHeight+1, f.alreadyGenerated, 202, spend), nil); err == nil {
 		t.Fatal("apply committed a block whose standard cleanup failed")
 	}
@@ -1305,6 +1319,17 @@ func TestSyncPendingOutpointCleanupFailureLeavesCanonicalTipUnmoved(t *testing.T
 	if err != nil || !ok || storeHash != beforeHash || storeHeight != beforeHeight {
 		t.Fatalf("blockstore tip=(%d,%x,ok=%v,err=%v), want the pre-apply canonical tip (%d,%x)",
 			storeHeight, storeHash, ok, err, beforeHeight, beforeHash)
+	}
+	// The exact latch state: owner closed, admission unavailable, and the
+	// storage-persistence fault returned to every later SyncEngine mutator.
+	if ctx, reopened := f.owner.AdmissionContext(); reopened {
+		t.Fatalf("owner reopened at %+v after a cleanup failure whose restore could not be proven", ctx)
+	}
+	if _, err := f.engine.DisconnectTip(); !errors.Is(err, errStoragePersistenceFault) {
+		t.Fatalf("later SyncEngine mutator err=%v, want the latched storage persistence fault", err)
+	}
+	if got := f.engine.BlockApplyCounts(); got != beforeCounts {
+		t.Fatalf("block-apply counts=%+v after a cleanup/rollback fault, want %+v unchanged", got, beforeCounts)
 	}
 }
 
@@ -1460,6 +1485,186 @@ func TestSyncSetMempoolPendingOutpointConstructOnceAndRejectsStaleOrNonemptyBind
 	engine.SetMempool(fresh)
 	if bound := boundMempool(engine); bound != fresh || bound.PendingOutpointOwner() != fresh.PendingOutpointOwner() {
 		t.Fatalf("engine mempool=%p, want the fresh current-tip candidate %p", bound, fresh)
+	}
+}
+
+// poolFingerprint is the deep observable image of one candidate pool and its
+// owner. A refused binding must leave it byte-for-byte identical, so the
+// comparison covers every field the freshness boundary reads AND the static
+// policy configuration it must NOT read, rather than a spot check of two.
+type poolFingerprint struct {
+	len               int
+	bytesUsed         int
+	wtxids            int
+	lastAdmissionSeq  uint64
+	currentMinFeeRate uint64
+	admission         MempoolAdmissionCounts
+	stats             MempoolStats
+	policy            MempoolConfig
+	ownerOutpoints    int
+	ownerClaims       int
+	ownerHighWater    uint64
+	ownerGeneration   uint64
+	ownerInTransition bool
+	ownerStableTip    PendingOutpointTip
+}
+
+func fingerprintPool(pool *Mempool) poolFingerprint {
+	owner := pool.PendingOutpointOwner()
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	return poolFingerprint{
+		len:               len(pool.txs),
+		bytesUsed:         pool.usedBytes,
+		wtxids:            len(pool.wtxids),
+		lastAdmissionSeq:  pool.lastAdmissionSeq,
+		currentMinFeeRate: pool.currentMinFeeRate,
+		admission:         pool.AdmissionCounts(),
+		stats: MempoolStats{
+			TxCount: len(pool.txs), BytesUsed: pool.usedBytes, MaxBytes: pool.maxBytes,
+			LowWaterBytes: pool.effectiveLowWaterBytesLocked(), MinFeeRate: pool.currentMinFeeRateLocked(),
+			EvictedResidentTotal: pool.evictedResidentTotal.Load(),
+		},
+		policy:            pool.policy,
+		ownerOutpoints:    len(owner.byOutpoint),
+		ownerClaims:       len(owner.byToken),
+		ownerHighWater:    owner.tokenHighWater,
+		ownerGeneration:   owner.generation,
+		ownerInTransition: owner.inTransition,
+		ownerStableTip:    owner.stableTip,
+	}
+}
+
+// assertFreshnessRefusal drives ONE SetMempool that must be refused and proves
+// the refusal was mutation-free on both sides: the engine keeps its (absent)
+// binding and the candidate's deep image is unchanged.
+func assertFreshnessRefusal(t *testing.T, engine *SyncEngine, candidate *Mempool, what string) {
+	t.Helper()
+	before := fingerprintPool(candidate)
+	engineBefore := engine.BlockApplyCounts()
+	engine.SetMempool(candidate)
+	if bound := boundMempool(engine); bound != nil {
+		t.Fatalf("%s: engine bound %p, want the refusal to leave it unbound", what, bound)
+	}
+	if after := fingerprintPool(candidate); after != before {
+		t.Fatalf("%s: candidate mutated on refusal\n got=%+v\nwant=%+v", what, after, before)
+	}
+	if after := engine.BlockApplyCounts(); after != engineBefore {
+		t.Fatalf("%s: engine block-apply counts moved to %+v, want %+v", what, after, engineBefore)
+	}
+}
+
+// TestSyncSetMempoolRejectsUsedEmptyHistory pins the freshness boundary that
+// emptiness alone cannot express. A pool that admitted at some tip and was
+// drained back to zero is index-identical to a fresh one; only its
+// history-bearing state — admission sequence, rolling fee floor, cumulative
+// admission and eviction counters, owner token high-water and generation — still
+// records that its records were validated under a canonical history the binding
+// engine never guarded. Every such candidate is refused, byte-for-byte
+// mutation-free, through the real SetMempool entry point; custom STATIC policy
+// configuration is not history and still binds.
+func TestSyncSetMempoolRejectsUsedEmptyHistory(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+
+	// The realistic used-then-emptied candidate, produced entirely through
+	// production paths: admit a spend, then let the canonical connect clean it
+	// out. Residents are back to zero and the owner's stable tip is the new live
+	// tip, so nothing but the history state distinguishes it from fresh.
+	spend := f.spend(t, 700, 1)
+	if err := f.mempool.AddTx(spend); err != nil {
+		t.Fatalf("AddTx(spend): %v", err)
+	}
+	if _, err := f.engine.ApplyBlock(f.blockIncluding(t, f.tipHash, f.tipHeight+1, f.alreadyGenerated, 202, spend), nil); err != nil {
+		t.Fatalf("ApplyBlock(including spend): %v", err)
+	}
+	if drained := fingerprintPool(f.mempool); drained.len != 0 || drained.ownerClaims != 0 {
+		t.Fatalf("the used candidate is not drained: %+v", drained)
+	}
+
+	// A FRESH unbound engine per row. Sharing one would couple the rows: the
+	// first row that wrongly bound would make every later row fail on the
+	// already-bound pointer instead of on its own term, hiding which guard
+	// actually holds.
+	t.Run("used-then-emptied candidate", func(t *testing.T) {
+		assertFreshnessRefusal(t, f.unboundEngineOn(t), f.mempool, "used-then-emptied candidate")
+	})
+
+	// Each isolated taint below is applied to its OWN otherwise-fresh pool at the
+	// current live tip, so every guard is proven to fire on its own rather than
+	// being masked by the combined row above. Every row is its own subtest so a
+	// regression names the exact term of the boundary that stopped holding.
+	for _, tc := range []struct {
+		name  string
+		taint func(t *testing.T, pool *Mempool)
+	}{
+		{"nonzero admission sequence", func(_ *testing.T, pool *Mempool) {
+			pool.mu.Lock()
+			defer pool.mu.Unlock()
+			pool.lastAdmissionSeq = 1
+		}},
+		{"raised then partially decayed rolling floor", func(_ *testing.T, pool *Mempool) {
+			pool.mu.Lock()
+			defer pool.mu.Unlock()
+			pool.currentMinFeeRate = 8
+			pool.decayMinFeeRateAfterConnectedBlockLocked() // 8 -> 4, still above the default
+		}},
+		{"cumulative accepted counter", func(_ *testing.T, pool *Mempool) { pool.admitAccepted.Add(1) }},
+		{"cumulative conflict counter", func(_ *testing.T, pool *Mempool) { pool.admitConflict.Add(1) }},
+		{"cumulative rejected counter", func(_ *testing.T, pool *Mempool) { pool.admitRejected.Add(1) }},
+		{"cumulative unavailable counter", func(_ *testing.T, pool *Mempool) { pool.admitUnavailable.Add(1) }},
+		{"cumulative eviction counter", func(_ *testing.T, pool *Mempool) { pool.evictedResidentTotal.Add(1) }},
+		{"owner token high-water without live claims", func(t *testing.T, pool *Mempool) {
+			owner := pool.PendingOutpointOwner()
+			ctx := mustAdmissionContext(t, owner, "on the taint pool")
+			token, err := owner.Reserve(ctx, PendingOutpointStandardMempool, [32]byte{0x07}, []consensus.Outpoint{f.sourceOutpoint})
+			if err != nil {
+				t.Fatalf("Reserve: %v", err)
+			}
+			if err := owner.Release(token); err != nil {
+				t.Fatalf("Release: %v", err)
+			}
+		}},
+		{"owner generation advanced by an aborted transition", func(t *testing.T, pool *Mempool) {
+			owner := pool.PendingOutpointOwner()
+			if _, err := owner.beginTransition(); err != nil {
+				t.Fatalf("beginTransition: %v", err)
+			}
+			owner.endTransitionAborted()
+		}},
+		{"owner transition still active", func(t *testing.T, pool *Mempool) {
+			if _, err := pool.PendingOutpointOwner().beginTransition(); err != nil {
+				t.Fatalf("beginTransition: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := f.newPool(t)
+			tc.taint(t, pool)
+			assertFreshnessRefusal(t, f.unboundEngineOn(t), pool, tc.name)
+		})
+	}
+
+	// The accepted row: a never-used pool carrying CUSTOM static policy still
+	// binds, and its configuration survives the binding untouched. Only the nil
+	// providers the engine fills in may change.
+	cfg := DefaultMempoolConfig()
+	cfg.MaxTransactions, cfg.MaxBytes, cfg.MinDaFeeRate = 7, 999_999, 3
+	cfg.PolicyRejectNonCoinbaseAnchorOutputs = !cfg.PolicyRejectNonCoinbaseAnchorOutputs
+	custom, err := NewMempoolWithConfig(f.engine.chainState, f.store, devnetGenesisChainID, cfg)
+	if err != nil {
+		t.Fatalf("NewMempoolWithConfig: %v", err)
+	}
+	accepting := f.unboundEngineOn(t)
+	accepting.SetMempool(custom)
+	if bound := boundMempool(accepting); bound != custom {
+		t.Fatalf("engine mempool=%p, want the never-used custom-policy candidate %p", bound, custom)
+	}
+	got := fingerprintPool(custom)
+	if got.policy.MaxTransactions != 7 || got.policy.MaxBytes != 999_999 || got.policy.MinDaFeeRate != 3 ||
+		got.policy.PolicyRejectNonCoinbaseAnchorOutputs != cfg.PolicyRejectNonCoinbaseAnchorOutputs {
+		t.Fatalf("binding altered the custom static policy: %+v", got.policy)
 	}
 }
 

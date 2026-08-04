@@ -335,12 +335,20 @@ func (s *SyncEngine) precleanPreferredBranch(tr *canonicalTransition, rows []pre
 }
 
 // preparePreferredBranch validates the whole winning branch against ONE rolling
-// private clone and retains only the compact per-row commit record. It touches
-// no live state, nothing it does repeats once the guard is held, and it rejects
-// no branch for its depth — retained memory does not grow with depth, so there
-// is nothing to cap. A failed row aborts the whole preparation and discards the
-// rolling clone with it, which is why connecting into that clone IN PLACE is
-// safe even though a rejected connect may leave it partially advanced.
+// private clone and retains only the compact per-row commit record.
+//
+// The retention claim is exactly this and no more: the number of retained full
+// ChainState / UTXO-set images is O(1) in branch depth — ONE rolling clone,
+// whatever the depth. Total retained memory is NOT O(1). Each prepared row still
+// keeps its own block bytes, parse, precomputed undo and block-local delta, so
+// those grow linearly in branch depth; each is bounded by the consensus block
+// limits the row already passed, which is why the path needs no separate depth
+// cap rather than why it uses constant memory.
+//
+// It touches no live state and nothing it does repeats once the guard is held. A
+// failed row aborts the whole preparation and discards the rolling clone with
+// it, which is why connecting into that clone IN PLACE is safe even though a
+// rejected connect may leave it partially advanced.
 func (s *SyncEngine) preparePreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
@@ -382,6 +390,19 @@ func (s *SyncEngine) preparePreferredBranch(
 // MTP window it needs no sliding workaround — it reads headers by hash, never
 // the canonical index, and every ancestor it needs is already stored. Target
 // context resolves first, so its failure short-circuits before the connect.
+//
+// The connect below is the branch path's ONLY consensus verdict — the commit
+// half revalidates nothing — so its failure is where the canonical block-apply
+// rejection is recorded. A failed row aborts the entire preparation, so a branch
+// contributes at most ONE rejected outcome however many rows it has, and the
+// rows that already prepared contribute nothing: the branch never opened a
+// transition, so it never published and they are neither accepted nor rejected.
+//
+// The accounting is scoped to that error and nothing else. The target-context
+// resolution before it and the undo/delta/DA-set derivation after it are local
+// failures, not consensus verdicts on the candidate, and neither may add an
+// outcome — the same rule that keeps side-chain storage, orphan / missing
+// parent, local I/O, persistence, rollback and cleanup failures at zero.
 func (s *SyncEngine) prepareBranchRow(
 	rolling *ChainState,
 	item reorgBranchBlock,
@@ -417,9 +438,9 @@ func (s *SyncEngine) prepareBranchRow(
 		s.pvTelemetry.RecordBlockSkipped()
 	}
 	if err != nil {
-		// No apply-outcome metric: a branch row rejected during preparation was
-		// never a canonical apply attempt, matching the pre-transition behavior
-		// where the preview rejected before any per-row apply was counted.
+		// The ONE canonical block-apply rejection for this whole branch; see the
+		// accounting rule on this function.
+		s.noteBlockApplyRejected()
 		return preparedBranchBlock{}, err
 	}
 	return prepareCommitRow(item, summary, priorTip, preImages, rolling)
@@ -836,7 +857,7 @@ func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []
 		}
 		for _, txBytes := range txs {
 			if err := s.mempool.AddReorgTx(txBytes); err != nil {
-				_, _ = fmt.Fprintf(s.stderr, "mempool: requeue-tx: %v\n", err)
+				_, _ = fmt.Fprintf(s.diagnosticWriter(), "mempool: requeue-tx: %v\n", err)
 			}
 		}
 	}

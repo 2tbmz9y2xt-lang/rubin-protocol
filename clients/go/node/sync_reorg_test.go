@@ -3511,6 +3511,102 @@ func (f *pendingOutpointSyncFixture) applyForkBlock(t *testing.T) *ChainStateCon
 	return summary
 }
 
+// extendCanonical applies count blocks on the fixture tip through the production
+// apply path and advances the fixture's own tip cursor with them.
+func (f *pendingOutpointSyncFixture) extendCanonical(t *testing.T, count int, baseTimestamp uint64) {
+	t.Helper()
+	for i := 0; i < count; i++ {
+		height := f.tipHeight + 1
+		subsidy := consensus.BlockSubsidy(height, f.alreadyGenerated)
+		coinbase := reorgTestCoinbaseForAddress(t, height, subsidy, f.sourceAddress)
+		summary, err := f.engine.ApplyBlock(buildSingleTxBlock(t, f.tipHash, f.target, baseTimestamp+uint64(i), coinbase), nil)
+		if err != nil {
+			t.Fatalf("ApplyBlock(canonical height %d): %v", height, err)
+		}
+		f.tipHash, f.tipHeight, f.alreadyGenerated = summary.BlockHash, height, f.alreadyGenerated+subsidy
+	}
+}
+
+// consensusInvalidTipOn returns one block on prevHash whose timestamp is at or
+// below the canonical MTP, so ConnectBlock rejects it on consensus. It is NOT
+// stored: it arrives through ApplyBlockWithReorg exactly as a peer's block would.
+func (f *pendingOutpointSyncFixture) consensusInvalidTipOn(t *testing.T, prevHash [32]byte, height, alreadyGenerated uint64) []byte {
+	t.Helper()
+	coinbase := reorgTestCoinbaseForAddress(t, height, consensus.BlockSubsidy(height, alreadyGenerated), f.destAddress)
+	return buildSingleTxBlock(t, prevHash, f.target, 1, coinbase)
+}
+
+// TestPreferredBranchConsensusRejectionCountsExactlyOnce pins the canonical
+// block-apply accounting of the preferred-branch path: exactly one rejected
+// outcome for a consensus rejection anywhere in the SELECTED winning branch, and
+// zero for everything that is not a consensus verdict on a selected candidate.
+//
+// The rejection is recorded during preparation because that is where the branch
+// path runs ConnectBlock at all; the commit half revalidates nothing. Rows that
+// prepared successfully before the failing one count neither accepted nor
+// rejected: the branch never opened a transition, so it never published.
+func TestPreferredBranchConsensusRejectionCountsExactlyOnce(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	forkHash, forkHeight, forkGenerated := f.tipHash, f.tipHeight, f.alreadyGenerated
+	f.extendCanonical(t, 1, 202)
+
+	assertCounts := func(t *testing.T, before BlockApplyCounts, wantRejectedDelta uint64, what string) {
+		t.Helper()
+		want := BlockApplyCounts{Accepted: before.Accepted, Rejected: before.Rejected + wantRejectedDelta}
+		if got := f.engine.BlockApplyCounts(); got != want {
+			t.Fatalf("%s: block-apply counts=%+v, want %+v", what, got, want)
+		}
+	}
+
+	t.Run("selected winning branch consensus rejection", func(t *testing.T) {
+		// A two-block stored prefix plus an invalid tip outweighs the one-block
+		// canonical extension, so fork choice SELECTS this branch and preparation
+		// reaches its third row after the first two prepared successfully.
+		branch := f.storedSideBranch(t, forkHash, forkHeight+1, forkGenerated, 2)
+		generated := forkGenerated
+		for i := 0; i < 2; i++ {
+			generated += consensus.BlockSubsidy(forkHeight+1+uint64(i), generated)
+		}
+		invalidTip := f.consensusInvalidTipOn(t, branch[1].hash, forkHeight+3, generated)
+
+		before := f.engine.BlockApplyCounts()
+		canonicalBefore := f.engine.chainState.view()
+		_, err := f.engine.ApplyBlockWithReorg(invalidTip, nil)
+		var txErr *consensus.TxError
+		if !errors.As(err, &txErr) {
+			t.Fatalf("err=%v, want a consensus rejection of the selected branch tip", err)
+		}
+		assertCounts(t, before, 1, "selected-branch consensus rejection")
+		if live := f.engine.chainState.view(); live != canonicalBefore {
+			t.Fatalf("canonical state moved to %+v although the branch never published, want %+v", live, canonicalBefore)
+		}
+	})
+
+	t.Run("orphan candidate counts nothing", func(t *testing.T) {
+		before := f.engine.BlockApplyCounts()
+		orphan := f.consensusInvalidTipOn(t, [32]byte{0xab}, f.tipHeight+1, f.alreadyGenerated)
+		if _, err := f.engine.ApplyBlockWithReorg(orphan, nil); !errors.Is(err, ErrParentNotFound) {
+			t.Fatalf("err=%v, want ErrParentNotFound", err)
+		}
+		assertCounts(t, before, 0, "orphan / missing parent")
+	})
+
+	t.Run("rejected side-chain store counts nothing", func(t *testing.T) {
+		// One more canonical block puts the chain two ahead of the fork, so a
+		// single side block is strictly lower work and takes the side-chain
+		// storage path instead of being selected. Its consensus rejection there
+		// is not a canonical apply outcome.
+		f.extendCanonical(t, 1, 203)
+		before := f.engine.BlockApplyCounts()
+		sideInvalid := f.consensusInvalidTipOn(t, forkHash, forkHeight+1, forkGenerated)
+		var txErr *consensus.TxError
+		if _, err := f.engine.ApplyBlockWithReorg(sideInvalid, nil); !errors.As(err, &txErr) {
+			t.Fatalf("err=%v, want the side-chain candidate's consensus rejection", err)
+		}
+		assertCounts(t, before, 0, "rejected side-chain storage")
+	})
+}
+
 // TestPreparePreferredBranchRetainsCompactRowsWithoutUtxoSnapshots pins the
 // preparation memory shape: a prepared row carries no ChainState, no UTXO map
 // and nothing else that scales with the UTXO set — only the block data the path

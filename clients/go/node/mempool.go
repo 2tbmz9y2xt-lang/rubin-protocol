@@ -110,13 +110,38 @@ func (m *Mempool) PendingOutpointOwner() *PendingOutpointOwner {
 	return m.pendingOutpoints
 }
 
-// checkEmptyForBindingLocked proves the pool holds no resident record in any
-// index. SyncEngine.SetMempool is initialization-only, so a candidate that
+// checkNeverUsedForBindingLocked proves the pool is not merely EMPTY but never
+// used. SyncEngine.SetMempool is initialization-only, so a candidate that
 // already admitted anything cannot be adopted: its records were validated
-// against a canonical tip that engine never guarded. The caller holds m.mu.
-func (m *Mempool) checkEmptyForBindingLocked() error {
+// against a canonical tip that engine never guarded, and emptiness alone cannot
+// see that — a pool admitted at tip A and drained back to zero is
+// index-identical to a fresh one. The history-bearing state is therefore the
+// closed boundary here: resident records, the admission sequence high-water, the
+// rolling fee floor (which congestion control raises and only ever decays back
+// TOWARD the default), and the cumulative admission and eviction counters.
+//
+// STATIC policy configuration is deliberately NOT part of this boundary: limits,
+// providers and the rest of MempoolConfig are an operator's construction-time
+// choice, not evidence of past admission, so a custom-configured fresh pool
+// still binds. The caller holds m.mu.
+func (m *Mempool) checkNeverUsedForBindingLocked() error {
 	if len(m.txs) != 0 || len(m.wtxids) != 0 || m.usedBytes != 0 {
 		return fmt.Errorf("mempool candidate is not empty: entries=%d wtxids=%d used_bytes=%d", len(m.txs), len(m.wtxids), m.usedBytes)
+	}
+	if m.lastAdmissionSeq != 0 {
+		return fmt.Errorf("mempool candidate already admitted: last_admission_seq=%d", m.lastAdmissionSeq)
+	}
+	// The raw field, never currentMinFeeRateLocked: the accessor clamps a
+	// below-default value up to the default and would report a raised floor that
+	// has only PARTIALLY decayed as if it were untouched.
+	if m.currentMinFeeRate != DefaultMempoolMinFeeRate {
+		return fmt.Errorf("mempool candidate carries a non-default rolling fee floor: min_fee_rate=%d want=%d", m.currentMinFeeRate, DefaultMempoolMinFeeRate)
+	}
+	counts := m.AdmissionCounts()
+	evicted := m.evictedResidentTotal.Load()
+	if counts != (MempoolAdmissionCounts{}) || evicted != 0 {
+		return fmt.Errorf("mempool candidate carries admission history: accepted=%d conflict=%d rejected=%d unavailable=%d evicted_resident=%d",
+			counts.Accepted, counts.Conflict, counts.Rejected, counts.Unavailable, evicted)
 	}
 	return nil
 }

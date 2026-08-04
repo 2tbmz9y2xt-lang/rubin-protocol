@@ -1312,9 +1312,9 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		// post-eviction floor maintained by raiseMinFeeRateAfterEvictionLocked
 		// and decayMinFeeRateAfterConnectedBlockLocked. The eviction
 		// counter increments exactly once per resident-entry capacity
-		// eviction (deleteEntryLocked loop in addEntryLocked); candidate-
-		// worst rejection at capacity and fee-floor rejection do not
-		// increment it.
+		// eviction, in the per-victim loop of addEntryLockedWithFloor
+		// after commitStandardDeltaLocked removed the victims; candidate-
+		// worst rejection at capacity and fee-floor rejection do not.
 		"# HELP rubin_node_mempool_max_bytes Configured byte cap for the standard mempool.",
 		"# TYPE rubin_node_mempool_max_bytes gauge",
 		fmt.Sprintf("rubin_node_mempool_max_bytes %d", mempoolStats.MaxBytes),
