@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1665,6 +1666,80 @@ func TestSyncSetMempoolRejectsUsedEmptyHistory(t *testing.T) {
 	if got.policy.MaxTransactions != 7 || got.policy.MaxBytes != 999_999 || got.policy.MinDaFeeRate != 3 ||
 		got.policy.PolicyRejectNonCoinbaseAnchorOutputs != cfg.PolicyRejectNonCoinbaseAnchorOutputs {
 		t.Fatalf("binding altered the custom static policy: %+v", got.policy)
+	}
+}
+
+// TestSyncSetMempoolBindingIsAtomicAgainstConcurrentAdmission proves the
+// never-used decision is a DECISION, not a sample: the binding holds the guard
+// EXCLUSIVELY, so an admission lifecycle — validate, insert, count — falls
+// wholly before or wholly after it, never straddling it.
+func TestSyncSetMempoolBindingIsAtomicAgainstConcurrentAdmission(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	// A distinguishable provider the binding fills in: proof of whose policy won.
+	registry := consensus.DefaultSuiteRegistry()
+	cfg := f.engine.cfg
+	cfg.SuiteRegistry = registry
+	newEngine := func(t *testing.T) *SyncEngine {
+		t.Helper()
+		engine, err := NewSyncEngine(f.engine.chainState, f.store, cfg)
+		if err != nil {
+			t.Fatalf("NewSyncEngine: %v", err)
+		}
+		return engine
+	}
+	// Phase 1 — the exclusion itself, deterministically. An in-flight admission
+	// lifecycle IS a held read guard: under the old read guard the binding decided
+	// straight through one, sampling a pool that had not yet inserted or counted.
+	// Bounded in the safe direction — the only way to fail is completing early.
+	blocked, held := newEngine(t), f.newPool(t)
+	f.engine.chainState.admissionMu.RLock()
+	decided := make(chan struct{})
+	go func() { defer close(decided); blocked.SetMempool(held) }()
+	select {
+	case <-decided:
+		f.engine.chainState.admissionMu.RUnlock()
+		t.Fatal("SetMempool decided while an admission lifecycle still held the guard")
+	case <-time.After(150 * time.Millisecond):
+	}
+	f.engine.chainState.admissionMu.RUnlock()
+	<-decided
+	if got := boundMempool(blocked); got != held {
+		t.Fatalf("engine bound %p once the guard was released, want %p", got, held)
+	}
+
+	// Phase 2 — a real race yields only the two legal serializations.
+	spends := [2][]byte{f.spend(t, 700, 1), f.spend(t, 690, 2)}
+	bound := 0
+	for iter := 0; iter < 12; iter++ {
+		engine, pool := newEngine(t), f.newPool(t)
+		var wg sync.WaitGroup
+		wg.Add(3)
+		for i := range spends {
+			go func(i int) { defer wg.Done(); _ = pool.AddTx(spends[i]) }(i)
+		}
+		go func() { defer wg.Done(); engine.SetMempool(pool) }()
+		wg.Wait()
+
+		fp := fingerprintPool(pool)
+		counted := fp.admission.Accepted + fp.admission.Conflict + fp.admission.Rejected + fp.admission.Unavailable
+		// True of BOTH: one count per call, one claim per resident.
+		if counted != uint64(len(spends)) || fp.len != int(fp.admission.Accepted) || fp.ownerClaims != fp.len || fp.ownerOutpoints != fp.len {
+			t.Fatalf("iter %d: %+v residents=%d claims=%d outpoints=%d, want %d counts in bijection", iter, fp.admission, fp.len, fp.ownerClaims, fp.ownerOutpoints, len(spends))
+		}
+		got := boundMempool(engine)
+		if got == nil { // A: an admission won the guard, so the pool had history.
+			if counted == 0 {
+				t.Fatalf("iter %d: refused a pool with no admission history", iter)
+			}
+			continue
+		}
+		if got != pool || fp.policy.SuiteRegistry != registry { // B: binding won.
+			t.Fatalf("iter %d: bound %p want %p, registry %v", iter, got, pool, fp.policy.SuiteRegistry)
+		}
+		bound++
+	}
+	if bound == 0 {
+		t.Fatal("no iteration bound the pool; the post-binding serialization went unexercised")
 	}
 }
 

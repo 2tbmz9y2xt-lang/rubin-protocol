@@ -505,14 +505,25 @@ func (s *SyncEngine) SetMempool(mempool *Mempool) {
 }
 
 // bindMempoolUnderMutation performs the initialization-only binding under the
-// caller's mutationMu, holding the live admission read guard CONTINUOUSLY from
-// the live tip read through the install. Lock order is mutationMu,
-// admissionMu.RLock, then s.mu before Mempool.mu before owner.mu — never the
-// reverse; the candidate's context is read with owner.mu released, before
-// Mempool.mu is taken.
+// caller's mutationMu, holding the live admission guard EXCLUSIVELY and
+// CONTINUOUSLY from the live tip read through the install. Lock order is
+// unchanged — mutationMu, admissionMu, then s.mu before Mempool.mu before
+// owner.mu, never the reverse; the candidate's context is read with owner.mu
+// released, before Mempool.mu is taken.
+//
+// The guard is a WRITE lock; a read lock would be unsound. Read locks do not
+// exclude each other, so an in-flight admission runs concurrently with the
+// freshness decision — validated against the PRE-binding policy, inserting after
+// the pointer is installed, counting its outcome later still. Only exclusion
+// across the whole span makes "never used" a decision rather than a sample,
+// leaving two serializations: admission-then-binding (refused, the pool now has
+// history) and binding-then-admission (admitted into a bound pool).
+//
+// Blocking indefinitely on a terminally latched engine is unchanged: the read
+// lock blocked there too, because the latch retains admissionMu.
 func (s *SyncEngine) bindMempoolUnderMutation(mempool *Mempool) error {
-	s.chainState.admissionMu.RLock()
-	defer s.chainState.admissionMu.RUnlock()
+	s.chainState.admissionMu.Lock()
+	defer s.chainState.admissionMu.Unlock()
 	settled, err := s.checkMempoolRebinding(mempool)
 	if settled || err != nil {
 		return err

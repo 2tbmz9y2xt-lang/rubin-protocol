@@ -239,21 +239,29 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 	if m == nil {
 		return txAdmitUnavailable("nil mempool")
 	}
-	// Exactly one admission counter increment per non-nil-receiver call,
-	// based on the final return value. Registered AFTER the nil-receiver
-	// guard above so a nil mempool returns the typed unavailable error
-	// without recording a counter — there is no mempool instance to own
-	// the metric state.
-	defer func() { m.noteAdmissionResult(retErr) }()
+	// Exactly one admission counter increment per non-nil-receiver call, and
+	// NEVER outside the admission guard. The two guards below reject before that
+	// guard is available at all — one because there is no ChainState to take it
+	// from — so they count at their own return sites through the same
+	// noteAdmissionResult mapping. A nil receiver counts nothing.
 	if m.chainState == nil {
-		return txAdmitUnavailable("nil chainstate")
+		err := txAdmitUnavailable("nil chainstate")
+		m.noteAdmissionResult(err)
+		return err
 	}
 	if !validMempoolTxSource(source) {
-		return txAdmitRejected(fmt.Sprintf("invalid mempool tx source %q", source))
+		err := txAdmitRejected(fmt.Sprintf("invalid mempool tx source %q", source))
+		m.noteAdmissionResult(err)
+		return err
 	}
 
 	m.chainState.admissionMu.RLock()
 	defer m.chainState.admissionMu.RUnlock()
+	// Registered AFTER the guard, so LIFO runs the count BEFORE the RUnlock
+	// above: the whole lifecycle — validation, insertion, outcome count — is
+	// contained by ONE guard acquisition, which is what SetMempool's exclusive
+	// acquisition must be able to exclude.
+	defer func() { m.noteAdmissionResult(retErr) }()
 
 	snapshot := m.chainState.admissionSnapshot()
 	policy := m.policySnapshot()
