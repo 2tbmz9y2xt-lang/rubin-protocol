@@ -3,7 +3,44 @@ package p2p
 import (
 	"sync"
 	"testing"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
+
+// TestCanonicalMempoolTxPoolPendingOutpointOwner proves the relay adapter hands
+// back the POINTER-IDENTICAL owner of the mempool it adapts, so a relay-side
+// consumer binds to the one authority instead of starting a second, and that
+// the accessor stays off the generic TxPool interface.
+func TestCanonicalMempoolTxPoolPendingOutpointOwner(t *testing.T) {
+	mempool, err := node.NewMempool(node.NewChainState(), nil, [32]byte{})
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	owner := mempool.PendingOutpointOwner()
+	if owner == nil {
+		t.Fatal("mempool has no owner")
+	}
+	if got := NewCanonicalMempoolTxPool(mempool).PendingOutpointOwner(); got != owner {
+		t.Fatalf("adapter owner=%p, want the pointer-identical mempool owner %p", got, owner)
+	}
+
+	var nilAdapter *CanonicalMempoolTxPool
+	if got := nilAdapter.PendingOutpointOwner(); got != nil {
+		t.Fatalf("nil adapter owner=%p, want nil", got)
+	}
+	if got := NewCanonicalMempoolTxPool(nil).PendingOutpointOwner(); got != nil {
+		t.Fatalf("nil-backed adapter owner=%p, want nil", got)
+	}
+
+	// Widening the generic TxPool interface with the accessor would force every
+	// implementation to carry it. MemoryTxPool must not.
+	var generic TxPool = NewMemoryTxPool()
+	if _, widened := generic.(interface {
+		PendingOutpointOwner() *node.PendingOutpointOwner
+	}); widened {
+		t.Fatal("the generic TxPool surface was widened with the owner accessor")
+	}
+}
 
 func TestMemoryTxPool_PutAndGet(t *testing.T) {
 	pool := NewMemoryTxPool()

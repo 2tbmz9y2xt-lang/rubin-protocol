@@ -28,6 +28,20 @@ func NewCanonicalMempoolTxPool(mempool *node.Mempool) *CanonicalMempoolTxPool {
 	return &CanonicalMempoolTxPool{mempool: mempool}
 }
 
+// PendingOutpointOwner returns the pointer-identical pending-outpoint owner of
+// the adapted canonical mempool, so a relay-side consumer binds to the same
+// single authority instead of starting a second one. Nil-safe on a nil adapter
+// or a nil adapted mempool.
+//
+// Deliberately NOT part of the generic TxPool interface: the interface stays
+// the narrow relay contract, and only this concrete adapter exposes the owner.
+func (p *CanonicalMempoolTxPool) PendingOutpointOwner() *node.PendingOutpointOwner {
+	if p == nil {
+		return nil
+	}
+	return p.mempool.PendingOutpointOwner()
+}
+
 func (p *CanonicalMempoolTxPool) Get(txid [32]byte) ([]byte, bool) {
 	if p == nil || p.mempool == nil {
 		return nil, false

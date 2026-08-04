@@ -862,10 +862,10 @@ func TestTargetScheduleRuntimeCallerDerivesOncePerBlockAndRow(t *testing.T) {
 				t.Fatalf("switching reorg: %v", err)
 			}
 		})
-		// Two rows x two passes: one preview derivation and one commit
-		// derivation per row. Linear, not quadratic, and never twice per pass.
-		if got != 4 {
-			t.Fatalf("derivations=%d for a 2-row branch, want 4 (one per row per pass)", got)
+		// One derivation per prepared row during the complete preflight; the
+		// commit-only publication derives none. Linear, not quadratic.
+		if got != 2 {
+			t.Fatalf("derivations=%d for a 2-row branch, want 2 (one per prepared row during preflight)", got)
 		}
 	})
 

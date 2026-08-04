@@ -9,11 +9,17 @@ import (
 )
 
 type mempoolSnapshot struct {
-	entries           []mempoolEntry
+	entries []mempoolEntry
+	// pending is the same-owner pending-outpoint image captured with the
+	// entries: every live claim, the stable tip, and both high-waters.
+	pending           pendingOutpointSnapshot
 	lastAdmissionSeq  uint64
 	currentMinFeeRate uint64
 }
 
+// snapshotMempool captures the exact rollback image: cloned entries with their
+// exact tokens plus the owner's claims, stable tip and high-waters. Lock order
+// is Mempool.mu then owner.mu.
 func snapshotMempool(m *Mempool) (mempoolSnapshot, error) {
 	if m == nil {
 		return mempoolSnapshot{}, nil
@@ -31,9 +37,20 @@ func snapshotMempool(m *Mempool) (mempoolSnapshot, error) {
 	if currentMinFeeRate < DefaultMempoolMinFeeRate {
 		currentMinFeeRate = DefaultMempoolMinFeeRate
 	}
-	return mempoolSnapshot{entries: entries, lastAdmissionSeq: m.lastAdmissionSeq, currentMinFeeRate: currentMinFeeRate}, nil
+	return mempoolSnapshot{
+		entries:           entries,
+		pending:           m.pendingOutpoints.snapshot(),
+		lastAdmissionSeq:  m.lastAdmissionSeq,
+		currentMinFeeRate: currentMinFeeRate,
+	}, nil
 }
 
+// restoreMempoolSnapshot rebuilds the records and the owner claims of the SAME
+// owner from snapshot. It builds every temporary map first, cross-checks each
+// record against its exact finalized standard claim in both directions, and
+// only then publishes all maps or none. Token and generation high-waters are
+// retained at their advanced values, so an aborted transition can never hand
+// out a sequence twice.
 func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 	if m == nil {
 		return nil
@@ -43,20 +60,60 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 	if m.maxTxs <= 0 || m.maxBytes <= 0 {
 		return fmt.Errorf("invalid mempool snapshot restore limits: max_txs=%d max_bytes=%d", m.maxTxs, m.maxBytes)
 	}
-	txs, wtxids, spenders, maxAdmissionSeq, usedBytes, err := buildMempoolRestoreMaps(snapshot.entries, m.maxTxs, m.maxBytes)
+	txs, wtxids, maxAdmissionSeq, usedBytes, err := buildMempoolRestoreMaps(snapshot.entries, m.maxTxs, m.maxBytes)
 	if err != nil {
 		return err
 	}
 	if snapshot.lastAdmissionSeq < maxAdmissionSeq {
 		return fmt.Errorf("mempool snapshot admission high-watermark below restored max: last=%d max=%d", snapshot.lastAdmissionSeq, maxAdmissionSeq)
 	}
+	owner := m.pendingOutpointOwnerLocked()
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	candidate, err := owner.buildRestoreLocked(snapshot.pending)
+	if err != nil {
+		return err
+	}
+	if err := validateRestoredClaimBinding(txs, candidate); err != nil {
+		return err
+	}
+	// Everything fallible is done. Both locks are held, so the owner image and
+	// the records below become visible to any reader as one step.
+	owner.publishRestoreLocked(snapshot.pending, candidate)
 	m.txs = txs
 	m.wtxids = wtxids
-	m.spenders = spenders
 	m.usedBytes = usedBytes
 	m.lastAdmissionSeq = snapshot.lastAdmissionSeq
 	m.currentMinFeeRate = snapshot.currentMinFeeRate
 	m.ensureMinFeeRateLocked()
+	return nil
+}
+
+// validateRestoredClaimBinding proves the bijection between the records about to
+// be installed and the CANDIDATE finalized standard claims that would be
+// published alongside them: every record with inputs holds exactly one finalized
+// standard claim carrying its exact token, txid, domain and ordered inputs, and
+// no finalized standard claim is left without a record. Both sides are still
+// unpublished, so a rejection leaves live owner and records untouched.
+func validateRestoredClaimBinding(txs map[[32]byte]*mempoolEntry, candidate pendingOutpointIndex) error {
+	finalized := 0
+	for _, claim := range candidate.byToken {
+		if claim.domain == PendingOutpointStandardMempool && claim.finalized {
+			finalized++
+		}
+	}
+	claimed := 0
+	for _, entry := range txs {
+		if err := candidate.validateEntryClaim(entry.txid, entry.inputs, entry.token, true); err != nil {
+			return err
+		}
+		if len(entry.inputs) > 0 {
+			claimed++
+		}
+	}
+	if claimed != finalized {
+		return pendingOutpointInternal(fmt.Sprintf("mempool snapshot claim count mismatch: records=%d finalized_claims=%d", claimed, finalized))
+	}
 	return nil
 }
 
@@ -82,6 +139,7 @@ func cloneMempoolEntry(entry *mempoolEntry) mempoolEntry {
 		txid:         entry.txid,
 		wtxid:        entry.wtxid,
 		inputs:       append([]consensus.Outpoint(nil), entry.inputs...),
+		token:        entry.token,
 		fee:          entry.fee,
 		weight:       entry.weight,
 		size:         entry.size,
@@ -90,29 +148,24 @@ func cloneMempoolEntry(entry *mempoolEntry) mempoolEntry {
 	}
 }
 
-// buildMempoolRestoreMaps builds txid/wtxid/spender/admission maps from snapshot entries.
+// buildMempoolRestoreMaps builds txid/wtxid/admission maps from snapshot
+// entries. Outpoint uniqueness is no longer checked here: the owner's
+// restoreLocked rejects a duplicate outpoint across claims, and
+// validateRestoredClaimBinding then binds every record to its exact claim.
 func buildMempoolRestoreMaps(snapshotEntries []mempoolEntry, maxTxs int, maxBytes int) (
 	txs map[[32]byte]*mempoolEntry,
 	wtxids map[[32]byte][32]byte,
-	spenders map[consensus.Outpoint][32]byte,
 	maxAdmissionSeq uint64,
 	usedBytes int,
 	err error,
 ) {
 	txs = make(map[[32]byte]*mempoolEntry, len(snapshotEntries))
 	wtxids = make(map[[32]byte][32]byte, len(snapshotEntries))
-	spenders = make(map[consensus.Outpoint][32]byte)
 	admissionSeqs := make(map[uint64][32]byte, len(snapshotEntries))
 	for _, item := range snapshotEntries {
 		entry := cloneMempoolEntry(&item)
 		if err := validateMempoolRestoreEntry(entry, txs, wtxids, admissionSeqs, len(txs), usedBytes, maxTxs, maxBytes); err != nil {
-			return nil, nil, nil, 0, 0, err
-		}
-		for _, op := range entry.inputs {
-			if existing, exists := spenders[op]; exists {
-				return nil, nil, nil, 0, 0, fmt.Errorf("duplicate mempool snapshot spender txid=%x vout=%d existing=%x new=%x", op.Txid, op.Vout, existing, entry.txid)
-			}
-			spenders[op] = entry.txid
+			return nil, nil, 0, 0, err
 		}
 		entryCopy := entry
 		txs[entryCopy.txid] = &entryCopy

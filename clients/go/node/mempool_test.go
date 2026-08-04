@@ -16,6 +16,22 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
+// assertPostSlotRejectionSnapshot pins the shape of an admission failure that
+// happened AFTER the conflict slot issued a reservation: no entry is published,
+// every record and live claim is byte-identical, and the issued token sequence
+// stays consumed — the owner high-water never decreases, so no sequence can be
+// handed out twice.
+func assertPostSlotRejectionSnapshot(t *testing.T, before, after mempoolSnapshot) {
+	t.Helper()
+	if after.pending.tokenHighWater != before.pending.tokenHighWater+1 {
+		t.Fatalf("token high-water=%d, want exactly one consumed sequence above %d", after.pending.tokenHighWater, before.pending.tokenHighWater)
+	}
+	after.pending.tokenHighWater = before.pending.tokenHighWater
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("rejected candidate mutated mempool: before=%+v after=%+v", before, after)
+	}
+}
+
 func TestMempoolAdd(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
@@ -94,8 +110,8 @@ func TestMempoolAcceptedEntryMetadataAndIndexes(t *testing.T) {
 	if got, ok := mp.wtxids[wtxid]; !ok || got != txid {
 		t.Fatalf("wtxid index got %x ok=%v, want txid %x", got, ok, txid)
 	}
-	if got, ok := mp.spenders[outpoints[0]]; !ok || got != txid {
-		t.Fatalf("spender index got %x ok=%v, want txid %x", got, ok, txid)
+	if got, ok := mp.pendingOutpoints.txidForOutpoint(outpoints[0]); !ok || got != txid {
+		t.Fatalf("pending-outpoint claim got %x ok=%v, want txid %x", got, ok, txid)
 	}
 }
 
@@ -208,8 +224,8 @@ func TestMempoolAddEntryLockedInitializesMetadataIndexes(t *testing.T) {
 		t.Fatalf("addEntryLocked: %v", err)
 	}
 
-	if mp.txs == nil || mp.wtxids == nil || mp.spenders == nil {
-		t.Fatalf("indexes were not initialized: txs=%v wtxids=%v spenders=%v", mp.txs != nil, mp.wtxids != nil, mp.spenders != nil)
+	if mp.txs == nil || mp.wtxids == nil {
+		t.Fatalf("indexes were not initialized: txs=%v wtxids=%v", mp.txs != nil, mp.wtxids != nil)
 	}
 	if got := mp.txs[entry.txid]; got != entry {
 		t.Fatalf("tx index got %p, want entry %p", got, entry)
@@ -217,8 +233,8 @@ func TestMempoolAddEntryLockedInitializesMetadataIndexes(t *testing.T) {
 	if got := mp.wtxids[entry.wtxid]; got != entry.txid {
 		t.Fatalf("wtxid index got %x, want txid %x", got, entry.txid)
 	}
-	if got := mp.spenders[op]; got != entry.txid {
-		t.Fatalf("spender index got %x, want txid %x", got, entry.txid)
+	if got, ok := mp.pendingOutpoints.txidForOutpoint(op); !ok || got != entry.txid {
+		t.Fatalf("pending-outpoint claim got %x ok=%v, want txid %x", got, ok, entry.txid)
 	}
 	if mp.lastAdmissionSeq != entry.admissionSeq {
 		t.Fatalf("lastAdmissionSeq=%d, want %d", mp.lastAdmissionSeq, entry.admissionSeq)
@@ -266,8 +282,8 @@ func TestMempoolAddEntryLockedRejectsZeroTxidWithoutMutation(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "invalid mempool entry txid") {
 		t.Fatalf("expected invalid txid rejection, got %v", err)
 	}
-	if mp.txs != nil || mp.wtxids != nil || mp.spenders != nil {
-		t.Fatalf("indexes initialized after zero txid reject: txs=%v wtxids=%v spenders=%v", mp.txs != nil, mp.wtxids != nil, mp.spenders != nil)
+	if mp.txs != nil || mp.wtxids != nil {
+		t.Fatalf("indexes initialized after zero txid reject: txs=%v wtxids=%v", mp.txs != nil, mp.wtxids != nil)
 	}
 	if mp.usedBytes != 0 {
 		t.Fatalf("usedBytes=%d, want 0 after zero txid reject", mp.usedBytes)
@@ -685,8 +701,8 @@ func TestMempoolAddEntryLockedCapacityPlanRejectsWithoutMutation(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "invalid mempool entry weight") {
 		t.Fatalf("expected capacity plan metadata rejection, got %v", err)
 	}
-	if len(mp.txs) != 1 || mp.txs[badResidentID] == nil || mp.wtxids != nil || mp.spenders != nil || mp.lastAdmissionSeq != 0 || mp.currentMinFeeRate != 0 || mp.usedBytes != 1 {
-		t.Fatalf("capacity-plan error mutated mempool: len=%d wtxids=%v spenders=%v seq=%d floor=%d used=%d", len(mp.txs), mp.wtxids != nil, mp.spenders != nil, mp.lastAdmissionSeq, mp.currentMinFeeRate, mp.usedBytes)
+	if len(mp.txs) != 1 || mp.txs[badResidentID] == nil || mp.wtxids != nil || mp.lastAdmissionSeq != 0 || mp.currentMinFeeRate != 0 || mp.usedBytes != 1 {
+		t.Fatalf("capacity-plan error mutated mempool: len=%d wtxids=%v seq=%d floor=%d used=%d", len(mp.txs), mp.wtxids != nil, mp.lastAdmissionSeq, mp.currentMinFeeRate, mp.usedBytes)
 	}
 }
 
@@ -756,15 +772,17 @@ func TestMempoolEntryIndexesRemovedWithEntry(t *testing.T) {
 	}
 
 	mp.mu.Lock()
-	mp.removeTxLocked(txid)
+	if err := mp.removeTxLocked(txid); err != nil {
+		t.Fatalf("removeTxLocked: %v", err)
+	}
 	if _, ok := mp.txs[txid]; ok {
 		t.Fatalf("removed txid %x still present", txid)
 	}
 	if _, ok := mp.wtxids[wtxid]; ok {
 		t.Fatalf("removed wtxid %x still indexed", wtxid)
 	}
-	if _, ok := mp.spenders[outpoints[0]]; ok {
-		t.Fatalf("removed spender %x:%d still indexed", outpoints[0].Txid, outpoints[0].Vout)
+	if _, ok := mp.pendingOutpoints.txidForOutpoint(outpoints[0]); ok {
+		t.Fatalf("removed claim %x:%d still indexed", outpoints[0].Txid, outpoints[0].Vout)
 	}
 	mp.mu.Unlock()
 }
@@ -2874,8 +2892,8 @@ func TestMempoolDoubleSpend(t *testing.T) {
 		t.Fatalf("AddTx(tx1): %v", err)
 	}
 	tx1ID := txID(t, tx1)
-	if got, ok := mp.spenders[outpoints[0]]; !ok || got != tx1ID {
-		t.Fatalf("spender index got %x ok=%v, want tx1 %x", got, ok, tx1ID)
+	if got, ok := mp.pendingOutpoints.txidForOutpoint(outpoints[0]); !ok || got != tx1ID {
+		t.Fatalf("pending-outpoint claim got %x ok=%v, want tx1 %x", got, ok, tx1ID)
 	}
 	seqAfterTx1 := mp.lastAdmissionSeq
 	if err := mp.AddTx(tx2); err == nil {
@@ -2887,8 +2905,8 @@ func TestMempoolDoubleSpend(t *testing.T) {
 	if mp.Contains(txID(t, tx2)) {
 		t.Fatalf("conflicting tx entered mempool")
 	}
-	if got, ok := mp.spenders[outpoints[0]]; !ok || got != tx1ID {
-		t.Fatalf("spender index after conflict got %x ok=%v, want tx1 %x", got, ok, tx1ID)
+	if got, ok := mp.pendingOutpoints.txidForOutpoint(outpoints[0]); !ok || got != tx1ID {
+		t.Fatalf("pending-outpoint claim after conflict got %x ok=%v, want tx1 %x", got, ok, tx1ID)
 	}
 	if mp.lastAdmissionSeq != seqAfterTx1 {
 		t.Fatalf("lastAdmissionSeq after conflict=%d, want %d", mp.lastAdmissionSeq, seqAfterTx1)
@@ -2983,9 +3001,7 @@ func TestMempoolCandidateWorstRejectsWithoutMutation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot after candidate-worst: %v", err)
 	}
-	if !reflect.DeepEqual(after, before) {
-		t.Fatalf("mempool snapshot mutated after candidate-worst reject: before=%+v after=%+v", before, after)
-	}
+	assertPostSlotRejectionSnapshot(t, before, after)
 	if got := mp.Len(); got != 1 {
 		t.Fatalf("mempool len=%d, want 1", got)
 	}
@@ -3475,9 +3491,7 @@ func TestMempoolAddReorgTxUsesNormalCapacityAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot after lower reorg: %v", err)
 	}
-	if !reflect.DeepEqual(afterReject, before) {
-		t.Fatalf("lower reorg candidate mutated mempool: before=%+v after=%+v", before, afterReject)
-	}
+	assertPostSlotRejectionSnapshot(t, before, afterReject)
 	if mp.Contains(txID(t, lowerReorg)) {
 		t.Fatalf("lower reorg candidate entered mempool")
 	}
@@ -3697,7 +3711,9 @@ func TestRestoreMempoolSnapshotPreservesAdmissionSeqHighWatermark(t *testing.T) 
 	mp.currentMinFeeRate = 7
 	tx2ID := txID(t, tx2)
 	mp.mu.Lock()
-	mp.removeTxLocked(tx2ID)
+	if err := mp.removeTxLocked(tx2ID); err != nil {
+		t.Fatalf("removeTxLocked: %v", err)
+	}
 	if mp.lastAdmissionSeq != 2 {
 		t.Fatalf("lastAdmissionSeq after removing tx2=%d, want 2", mp.lastAdmissionSeq)
 	}
@@ -3796,7 +3812,10 @@ func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T
 		for i := range base.entries {
 			entries = append(entries, cloneMempoolEntry(&base.entries[i]))
 		}
-		return mempoolSnapshot{entries: entries, lastAdmissionSeq: base.lastAdmissionSeq, currentMinFeeRate: base.currentMinFeeRate}
+		// The owner image travels with the entries: each case below corrupts
+		// exactly one thing, so the record/claim binding must stay valid
+		// everywhere else.
+		return mempoolSnapshot{entries: entries, pending: base.pending, lastAdmissionSeq: base.lastAdmissionSeq, currentMinFeeRate: base.currentMinFeeRate}
 	}
 	withEditedFirst := func(edit func(*mempoolEntry)) func(mempoolSnapshot) mempoolSnapshot {
 		return func(base mempoolSnapshot) mempoolSnapshot {
@@ -3922,13 +3941,18 @@ func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T
 			want: "mempool snapshot admission high-watermark below restored max",
 		},
 		{
-			name: "duplicate_spender",
+			// The former standalone spenders map is gone, so a snapshot
+			// double-spend is now caught by the record/claim bijection: the
+			// second record over an already-claimed outpoint has no finalized
+			// standard claim of its own, and the owner is the sole authority.
+			name: "double_spending_record_without_claim",
 			mutate: func(base mempoolSnapshot) mempoolSnapshot {
 				bad := cloneSnapshotForTest(base)
 				bad.entries = append(bad.entries, snapshotEntry(txDoubleSpend, doubleSpendID, []consensus.Outpoint{outpoints[0]}))
+				bad.lastAdmissionSeq = bad.entries[len(bad.entries)-1].admissionSeq
 				return bad
 			},
-			want: "duplicate mempool snapshot spender",
+			want: "zero or foreign pending-outpoint token",
 		},
 		{
 			name: "aggregate_count_over_cap",
@@ -4005,21 +4029,30 @@ func TestRestoreMempoolSnapshotAllowsExactCapacityBoundary(t *testing.T) {
 		t.Fatalf("snapshotMempool: %v", err)
 	}
 
-	target, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
-		MaxTransactions: 2,
-		MaxBytes:        len(tx1) + len(tx2),
-	})
-	if err != nil {
-		t.Fatalf("new target mempool: %v", err)
+	// Restore is SAME-owner restore: the snapshot's tokens belong to this
+	// mempool's owner, so it is restored into the mempool it came from after
+	// its records were cleared. A second Mempool has a second owner and every
+	// token in this snapshot would be foreign to it.
+	source.mu.Lock()
+	for _, txBytes := range [][]byte{tx1, tx2} {
+		if err := source.removeTxLocked(txID(t, txBytes)); err != nil {
+			source.mu.Unlock()
+			t.Fatalf("removeTxLocked: %v", err)
+		}
 	}
-	if err := restoreMempoolSnapshot(target, snapshot); err != nil {
+	source.mu.Unlock()
+	if got := source.Len(); got != 0 {
+		t.Fatalf("mempool len=%d after clearing, want 0", got)
+	}
+
+	if err := restoreMempoolSnapshot(source, snapshot); err != nil {
 		t.Fatalf("restoreMempoolSnapshot exact boundary: %v", err)
 	}
-	if got := target.Len(); got != 2 {
+	if got := source.Len(); got != 2 {
 		t.Fatalf("mempool len=%d, want 2", got)
 	}
-	if target.usedBytes != len(tx1)+len(tx2) {
-		t.Fatalf("usedBytes=%d, want %d", target.usedBytes, len(tx1)+len(tx2))
+	if source.usedBytes != len(tx1)+len(tx2) {
+		t.Fatalf("usedBytes=%d, want %d", source.usedBytes, len(tx1)+len(tx2))
 	}
 }
 
@@ -4039,6 +4072,396 @@ func TestMempoolAddTxHeightOverflow(t *testing.T) {
 	}
 	if txErr.Kind != TxAdmitUnavailable {
 		t.Fatalf("expected TxAdmitUnavailable, got %v", txErr.Kind)
+	}
+}
+
+// residentClaim returns the resident entry for txid together with the live
+// owner claim behind its exact token, so a test asserts the record/claim
+// binding rather than the record alone.
+func residentClaim(t *testing.T, mp *Mempool, txid [32]byte) (*mempoolEntry, *pendingOutpointClaim) {
+	t.Helper()
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+	entry, ok := mp.txs[txid]
+	if !ok {
+		t.Fatalf("no resident entry for %x", txid)
+	}
+	owner := mp.pendingOutpoints
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	return entry, owner.byToken[entry.token]
+}
+
+func ownerCounts(mp *Mempool) (outpoints int, claims int, highWater uint64) {
+	owner := mp.pendingOutpoints
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	return len(owner.byOutpoint), len(owner.byToken), owner.tokenHighWater
+}
+
+// TestMempoolPendingOutpointAdmissionFinalizesExactlyOneToken proves the
+// accepted admission row on the PUBLIC path: every input-bearing candidate
+// reserves and finalizes exactly one standard token from the single owner
+// bound at construction, the claim carries the entry's exact ordered inputs,
+// and independent outpoints admit without interfering. It also pins the
+// restart row: a fresh Mempool has a fresh owner for which every prior token
+// is foreign.
+func TestMempoolPendingOutpointAdmissionFinalizesExactlyOneToken(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000, 1_000_000})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	owner := mp.PendingOutpointOwner()
+	if owner == nil || owner != mp.pendingOutpoints {
+		t.Fatalf("PendingOutpointOwner()=%p, want the single bound owner %p", owner, mp.pendingOutpoints)
+	}
+
+	txs := [][]byte{
+		mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress),
+		mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 100_000, 100_000, 2, fromKey, fromAddress, toAddress),
+	}
+	for i, txBytes := range txs {
+		if err := mp.AddTx(txBytes); err != nil {
+			t.Fatalf("AddTx(%d): %v", i, err)
+		}
+		entry, claim := residentClaim(t, mp, txID(t, txBytes))
+		if entry.token.owner != owner || entry.token.seq != uint64(i+1) {
+			t.Fatalf("entry %d token=(owner=%p,seq=%d), want seq %d from the bound owner", i, entry.token.owner, entry.token.seq, i+1)
+		}
+		if claim == nil || !claim.finalized || claim.domain != PendingOutpointStandardMempool || claim.txid != entry.txid {
+			t.Fatalf("entry %d claim=%+v, want a finalized standard claim for %x", i, claim, entry.txid)
+		}
+		if !reflect.DeepEqual(claim.inputs, entry.inputs) {
+			t.Fatalf("entry %d claim inputs=%v, want the entry inputs %v", i, claim.inputs, entry.inputs)
+		}
+		if got, ok := owner.txidForOutpoint(outpoints[i]); !ok || got != entry.txid {
+			t.Fatalf("entry %d index row=(%x,%v), want %x", i, got, ok, entry.txid)
+		}
+	}
+	gotOutpoints, gotClaims, gotHighWater := ownerCounts(mp)
+	if gotOutpoints != 2 || gotClaims != 2 || gotHighWater != 2 {
+		t.Fatalf("owner state=(outpoints=%d claims=%d high_water=%d), want 2/2/2", gotOutpoints, gotClaims, gotHighWater)
+	}
+
+	// Restart is not same-owner restore: a fresh Mempool gets a fresh owner and
+	// every token the previous owner issued is foreign to it.
+	restarted, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("restart mempool: %v", err)
+	}
+	if restarted.pendingOutpoints == owner {
+		t.Fatal("restart reused the previous owner")
+	}
+	entry, _ := residentClaim(t, mp, txID(t, txs[0]))
+	if got := testOwnerKind(t, restarted.pendingOutpoints.Release(entry.token)); got != PendingOutpointInternal {
+		t.Fatalf("prior-owner token on the restarted owner kind=%d, want internal", got)
+	}
+	if gotOutpoints, gotClaims, gotHighWater := ownerCounts(restarted); gotOutpoints != 0 || gotClaims != 0 || gotHighWater != 0 {
+		t.Fatalf("restarted owner state=(%d,%d,%d), want an empty fresh owner", gotOutpoints, gotClaims, gotHighWater)
+	}
+}
+
+// TestMempoolPendingOutpointInputlessEntryHoldsZeroTokenAndNoClaim pins the
+// input-less row: such a candidate performs the same no-op at the conflict slot
+// the pre-owner loop did, consumes no sequence, carries the zero token and
+// creates no claim — while an input-bearing sibling in the same mempool still
+// holds its exact finalized claim. Terminal removal accepts both shapes.
+func TestMempoolPendingOutpointInputlessEntryHoldsZeroTokenAndNoClaim(t *testing.T) {
+	op := consensus.Outpoint{Txid: [32]byte{0x01}, Vout: 2}
+	inputless := &mempoolEntry{txid: [32]byte{0x0a}, wtxid: [32]byte{0x0b}, fee: 1, weight: 1, size: 1}
+	spending := &mempoolEntry{txid: [32]byte{0x0c}, wtxid: [32]byte{0x0d}, inputs: []consensus.Outpoint{op}, fee: 1, weight: 1, size: 1}
+
+	mp := &Mempool{maxTxs: 10, maxBytes: 100}
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+	for _, entry := range []*mempoolEntry{inputless, spending} {
+		if err := mp.addEntryLocked(entry); err != nil {
+			t.Fatalf("addEntryLocked(%x): %v", entry.txid, err)
+		}
+	}
+
+	var zero PendingOutpointToken
+	if inputless.token != zero {
+		t.Fatalf("input-less entry token=%+v, want the zero token", inputless.token)
+	}
+	owner := mp.pendingOutpoints
+	if spending.token == zero || spending.token.seq != 1 || owner.tokenHighWater != 1 {
+		t.Fatalf("input-less admission consumed a sequence: spending seq=%d high_water=%d", spending.token.seq, owner.tokenHighWater)
+	}
+	if len(owner.byToken) != 1 || len(owner.byOutpoint) != 1 {
+		t.Fatalf("owner holds claims=%d outpoints=%d, want exactly the spending entry's", len(owner.byToken), len(owner.byOutpoint))
+	}
+	if claim := owner.byToken[spending.token]; claim == nil || !claim.finalized {
+		t.Fatalf("spending claim=%+v, want finalized", claim)
+	}
+
+	// The typed delta accepts the input-less shape on the terminal path too.
+	if err := mp.removeTxLocked(inputless.txid); err != nil {
+		t.Fatalf("removeTxLocked(input-less): %v", err)
+	}
+	if err := mp.removeTxLocked(spending.txid); err != nil {
+		t.Fatalf("removeTxLocked(spending): %v", err)
+	}
+	if len(mp.txs) != 0 || len(owner.byToken) != 0 || len(owner.byOutpoint) != 0 {
+		t.Fatalf("after removal records=%d claims=%d outpoints=%d, want all empty", len(mp.txs), len(owner.byToken), len(owner.byOutpoint))
+	}
+	if owner.tokenHighWater != 1 {
+		t.Fatalf("token high-water=%d after removal, want the consumed sequence retained", owner.tokenHighWater)
+	}
+}
+
+// TestMempoolPendingOutpointCapacityReplacementReleasesVictimTokens proves the
+// capacity row: the evicting admission releases every exact victim token and
+// installs plus finalizes the candidate in ONE typed delta, so no victim's
+// outpoint survives its record and no sequence is reused.
+func TestMempoolPendingOutpointCapacityReplacementReleasesVictimTokens(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000, 1_000_000, 1_000_000})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{MaxTransactions: 2, MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	txLow := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+	txHigh := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 100_000, 200_000, 2, fromKey, fromAddress, toAddress)
+	txBest := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[2]}, 100_000, 300_000, 3, fromKey, fromAddress, toAddress)
+	for _, txBytes := range [][]byte{txLow, txHigh} {
+		if err := mp.AddTx(txBytes); err != nil {
+			t.Fatalf("AddTx(setup %x): %v", txID(t, txBytes), err)
+		}
+	}
+	victimEntry, _ := residentClaim(t, mp, txID(t, txLow))
+	victimToken := victimEntry.token
+
+	if err := mp.AddTx(txBest); err != nil {
+		t.Fatalf("AddTx(best): %v", err)
+	}
+	if mp.Contains(txID(t, txLow)) {
+		t.Fatal("victim survived capacity replacement")
+	}
+	owner := mp.PendingOutpointOwner()
+	if _, ok := owner.txidForOutpoint(outpoints[0]); ok {
+		t.Fatal("victim outpoint is still claimed after its record was evicted")
+	}
+	owner.mu.Lock()
+	victimClaim := owner.byToken[victimToken]
+	owner.mu.Unlock()
+	if victimClaim != nil {
+		t.Fatalf("victim claim %+v survived its record", victimClaim)
+	}
+	// An exact retry of the victim release is harmless and leaves no tombstone.
+	if err := owner.Release(victimToken); err != nil {
+		t.Fatalf("exact victim Release retry: %v", err)
+	}
+	for _, txBytes := range [][]byte{txHigh, txBest} {
+		entry, claim := residentClaim(t, mp, txID(t, txBytes))
+		if claim == nil || !claim.finalized || claim.txid != entry.txid {
+			t.Fatalf("survivor %x claim=%+v, want its own finalized claim", entry.txid, claim)
+		}
+	}
+	gotOutpoints, gotClaims, gotHighWater := ownerCounts(mp)
+	if gotOutpoints != 2 || gotClaims != 2 || gotHighWater != 3 {
+		t.Fatalf("owner state=(outpoints=%d claims=%d high_water=%d), want 2/2/3", gotOutpoints, gotClaims, gotHighWater)
+	}
+}
+
+// TestMempoolPendingOutpointBlockCleanupReleasesExactTokens pins the terminal
+// block rows: a connected block releases the exact tokens of both the entries
+// it includes and the entries it conflicts with, and the public eviction entry
+// point does the same for inclusion alone.
+func TestMempoolPendingOutpointBlockCleanupReleasesExactTokens(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000, 1_000_000})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	included := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+	resident := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 100_000, 100_000, 2, fromKey, fromAddress, toAddress)
+	// conflicting spends the same outpoint as resident but never enters the pool.
+	conflicting := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90_000, 100_000, 3, fromKey, fromAddress, toAddress)
+	for _, txBytes := range [][]byte{included, resident} {
+		if err := mp.AddTx(txBytes); err != nil {
+			t.Fatalf("AddTx(%x): %v", txID(t, txBytes), err)
+		}
+	}
+
+	parsed, err := consensus.ParseBlockBytes(buildMultiTxBlock(t, [32]byte{}, consensus.POW_LIMIT, 1, included, conflicting))
+	if err != nil {
+		t.Fatalf("ParseBlockBytes: %v", err)
+	}
+	if err := mp.applyConnectedBlockParsed(parsed); err != nil {
+		t.Fatalf("applyConnectedBlockParsed: %v", err)
+	}
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("mempool len=%d, want 0 after inclusion plus conflict cleanup", got)
+	}
+	gotOutpoints, gotClaims, gotHighWater := ownerCounts(mp)
+	if gotOutpoints != 0 || gotClaims != 0 {
+		t.Fatalf("owner still holds outpoints=%d claims=%d after cleanup", gotOutpoints, gotClaims)
+	}
+	if gotHighWater != 2 {
+		t.Fatalf("token high-water=%d after cleanup, want the two consumed sequences retained", gotHighWater)
+	}
+
+	// Public EvictConfirmedParsed releases the exact token of an included entry.
+	if err := mp.AddTx(resident); err != nil {
+		t.Fatalf("AddTx(re-admit): %v", err)
+	}
+	entry, _ := residentClaim(t, mp, txID(t, resident))
+	if entry.token.seq != 3 {
+		t.Fatalf("re-admitted seq=%d, want 3 (no sequence reuse)", entry.token.seq)
+	}
+	evictBlock, err := consensus.ParseBlockBytes(buildSingleTxBlock(t, [32]byte{}, consensus.POW_LIMIT, 1, resident))
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(evict): %v", err)
+	}
+	if err := mp.EvictConfirmedParsed(evictBlock); err != nil {
+		t.Fatalf("EvictConfirmedParsed: %v", err)
+	}
+	if gotOutpoints, gotClaims, _ := ownerCounts(mp); gotOutpoints != 0 || gotClaims != 0 {
+		t.Fatalf("owner still holds outpoints=%d claims=%d after eviction", gotOutpoints, gotClaims)
+	}
+}
+
+// TestMempoolSnapshotPendingOutpointRoundTripRestoresExactTokens proves the
+// same-owner rollback row: a restore rebuilds every record with its exact token
+// and finalized claim, discards state admitted after the snapshot, and leaves
+// both high-waters at their advanced values so no sequence is ever reused.
+func TestMempoolSnapshotPendingOutpointRoundTripRestoresExactTokens(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000, 1_000_000})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	kept := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+	if err := mp.AddTx(kept); err != nil {
+		t.Fatalf("AddTx(kept): %v", err)
+	}
+	keptEntry, _ := residentClaim(t, mp, txID(t, kept))
+	keptToken := keptEntry.token
+
+	snapshot, err := snapshotMempool(mp)
+	if err != nil {
+		t.Fatalf("snapshotMempool: %v", err)
+	}
+	discarded := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 100_000, 100_000, 2, fromKey, fromAddress, toAddress)
+	if err := mp.AddTx(discarded); err != nil {
+		t.Fatalf("AddTx(discarded): %v", err)
+	}
+	if err := restoreMempoolSnapshot(mp, snapshot); err != nil {
+		t.Fatalf("restoreMempoolSnapshot: %v", err)
+	}
+
+	if mp.Contains(txID(t, discarded)) {
+		t.Fatal("restore kept a record admitted after the snapshot")
+	}
+	restored, claim := residentClaim(t, mp, txID(t, kept))
+	if restored.token != keptToken {
+		t.Fatalf("restored token seq=%d, want the exact pre-snapshot seq %d", restored.token.seq, keptToken.seq)
+	}
+	if claim == nil || !claim.finalized || claim.txid != restored.txid {
+		t.Fatalf("restored claim=%+v, want the exact finalized claim", claim)
+	}
+	if _, ok := mp.PendingOutpointOwner().txidForOutpoint(outpoints[1]); ok {
+		t.Fatal("restore left the discarded candidate's outpoint claimed")
+	}
+	gotOutpoints, gotClaims, gotHighWater := ownerCounts(mp)
+	if gotOutpoints != 1 || gotClaims != 1 {
+		t.Fatalf("restored owner state=(outpoints=%d claims=%d), want 1/1", gotOutpoints, gotClaims)
+	}
+	if gotHighWater != 2 {
+		t.Fatalf("token high-water=%d after restore, want the advanced value 2 retained", gotHighWater)
+	}
+	// The retained high-water is what stops a reused sequence after the abort.
+	next := mustReserve(t, mp.PendingOutpointOwner(), [32]byte{0xfe}, testOutpoint(77))
+	if next.seq != 3 {
+		t.Fatalf("post-restore reservation seq=%d, want 3", next.seq)
+	}
+}
+
+// TestMempoolSnapshotPendingOutpointRejectsBrokenClaimBinding pins all four
+// snapshot rejection rows: a record whose token has no finalized standard claim,
+// a standard claim with no record, an input-less record carrying a token, and a
+// claim whose inputs disagree with its record. A refused restore publishes
+// NEITHER half — records and owner claims both stay exactly pre-restore.
+func TestMempoolSnapshotPendingOutpointRejectsBrokenClaimBinding(t *testing.T) {
+	base := func(t *testing.T) (*Mempool, mempoolSnapshot, [32]byte) {
+		t.Helper()
+		fromKey := mustNodeMLDSA87Keypair(t)
+		toKey := mustNodeMLDSA87Keypair(t)
+		fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+		toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+		st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+		mp, err := NewMempool(st, nil, devnetGenesisChainID)
+		if err != nil {
+			t.Fatalf("new mempool: %v", err)
+		}
+		txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+		if err := mp.AddTx(txBytes); err != nil {
+			t.Fatalf("AddTx: %v", err)
+		}
+		snapshot, err := snapshotMempool(mp)
+		if err != nil {
+			t.Fatalf("snapshotMempool: %v", err)
+		}
+		return mp, snapshot, txID(t, txBytes)
+	}
+	cases := map[string]func(*mempoolSnapshot){
+		"record without claim": func(s *mempoolSnapshot) { s.pending.claims = nil },
+		"claim without record": func(s *mempoolSnapshot) { s.entries = nil },
+		"token on input-less record": func(s *mempoolSnapshot) {
+			s.entries[0].inputs = nil
+			s.pending.claims = nil
+		},
+		"claim input mismatch": func(s *mempoolSnapshot) {
+			s.pending.claims[0].inputs = []consensus.Outpoint{testOutpoint(123)}
+		},
+	}
+	for name, corrupt := range cases {
+		t.Run(name, func(t *testing.T) {
+			mp, snapshot, txid := base(t)
+			beforeLen := mp.Len()
+			mp.mu.RLock()
+			claimedOutpoint := mp.txs[txid].inputs[0]
+			mp.mu.RUnlock()
+			beforeOutpoints, beforeClaims, beforeHighWater := ownerCounts(mp)
+			corrupt(&snapshot)
+			if err := restoreMempoolSnapshot(mp, snapshot); err == nil {
+				t.Fatalf("restore accepted a %s snapshot", name)
+			}
+			if mp.Len() != beforeLen || !mp.Contains(txid) {
+				t.Fatalf("refused restore published records: len=%d contains=%v", mp.Len(), mp.Contains(txid))
+			}
+			// The OWNER half too: publishing the snapshot image while the records
+			// stay pre-restore is exactly the torn state this ordering forbids.
+			gotOutpoints, gotClaims, gotHighWater := ownerCounts(mp)
+			if gotOutpoints != beforeOutpoints || gotClaims != beforeClaims || gotHighWater != beforeHighWater {
+				t.Fatalf("refused restore published owner state=(%d,%d,%d), want (%d,%d,%d)",
+					gotOutpoints, gotClaims, gotHighWater, beforeOutpoints, beforeClaims, beforeHighWater)
+			}
+			if got, ok := mp.PendingOutpointOwner().txidForOutpoint(claimedOutpoint); !ok || got != txid {
+				t.Fatalf("refused restore rewrote the owner index: got=(%x,%v), want %x", got, ok, txid)
+			}
+		})
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -220,42 +221,69 @@ func (s *SyncEngine) shouldSwitchToBranch(
 	}
 }
 
-// applyPreferredBranch applies the candidate branch selected by fork choice:
-// greater ChainWork, or equal ChainWork with a lexicographically lower tip hash.
+// preparedBranchBlock is one fully validated preferred-branch row. It retains NO
+// ChainState: only the parsed block and bytes the existing path already carried,
+// that connect's summary, the exact prior-tip scalars the commit rechecks, the
+// precomputed BlockUndo, and the compact block-local UTXO delta — bounded by the
+// branch's own inputs and outputs, never by branch depth times the UTXO set. The
+// whole branch is validated against ONE rolling private clone, the mechanism
+// Bitcoin Core's DisconnectTip/ConnectTip and btcd's reorganizeChain use when
+// they roll a single coins view with per-block undo. Everything the in-guard
+// commit needs is here, so it repeats no parse, no ConnectBlock, no signature
+// verification and no fallible preparation.
+type preparedBranchBlock struct {
+	item     reorgBranchBlock
+	summary  *ChainStateConnectSummary
+	priorTip canonicalTipScalars
+	undo     *BlockUndo
+	delta    chainStateDelta
+}
+
+// chainStateDelta is the compact block-local change one prepared row publishes:
+// the pre-existing outpoints the block spends, the outpoints it leaves created,
+// and the post-block scalars. One created AND spent inside the same block
+// appears in neither list — the live chainstate never observes it.
+type chainStateDelta struct {
+	spent   []consensus.Outpoint
+	created []createdUtxo
+	post    canonicalTipScalars
+}
+
+type createdUtxo struct {
+	outpoint consensus.Outpoint
+	entry    consensus.UtxoEntry
+}
+
+// applyPreferredBranch applies the candidate branch selected by fork choice —
+// greater ChainWork, or equal ChainWork with a lexicographically lower tip hash
+// — inside EXACTLY ONE canonical transition: one generation for the whole
+// winning branch, one standard pre-clean for the final prepared branch, every
+// per-block inner cleanup suppressed, and the existing deterministic requeue
+// running only after the final stable owner tip is committed. Every row is fully
+// validated BEFORE the transition opens, so nothing under the guard re-runs
+// consensus or re-verifies a signature.
 func (s *SyncEngine) applyPreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
 ) (*ChainStateConnectSummary, error) {
-	rollbackState, err := s.captureRollbackState()
+	canonicalIndex, err := s.canonicalIndexPreflight()
 	if err != nil {
 		return nil, err
 	}
-	preparedDisconnectedBlocks, reorgDepth, err := s.preparePreferredBranch(branch, commonAncestorHeight, rollbackState)
+	rows, preparedDisconnectedBlocks, reorgDepth, err := s.preparePreferredBranch(branch, commonAncestorHeight)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.disconnectCanonicalToAncestor(commonAncestorHeight, preparedDisconnectedBlocks); err != nil {
-		return nil, s.rollbackApplyBlock(err, rollbackState)
+	tr, err := s.beginCanonicalTransition(canonicalIndex)
+	if err != nil {
+		return nil, err
 	}
-
-	var summary *ChainStateConnectSummary
-	var pendingAccepted uint64
-	var canonicalBlocks []CanonicalAppliedBlock
-	for i, item := range branch {
-		var outcome blockApplyMetricOutcome
-		summary, outcome, err = s.applyBranchBlock(item, commonAncestorHeight+1+uint64(i))
-		if err != nil {
-			return nil, s.rollbackBranchBlockApply(err, rollbackState, outcome)
-		}
-		if outcome == blockApplyMetricAccepted {
-			pendingAccepted++
-		}
-		if summary != nil && len(summary.CanonicalAppliedBlocks) > 0 {
-			canonicalBlocks = append(canonicalBlocks, summary.CanonicalAppliedBlocks[0])
-		}
+	summary, canonicalBlocks, err := s.applyPreferredBranchUnderGuard(tr, rows, commonAncestorHeight, preparedDisconnectedBlocks)
+	if endErr := tr.end(err); endErr != nil {
+		return nil, endErr
 	}
 	s.requeueVerifiedDisconnectedTransactions(preparedDisconnectedBlocks)
-	s.noteBlockApplyAcceptedN(pendingAccepted)
+	s.noteBlockApplyAcceptedN(uint64(len(rows)))
 	s.noteReorg(reorgDepth)
 	if summary != nil {
 		summary.CanonicalAppliedBlocks = canonicalBlocks
@@ -263,49 +291,67 @@ func (s *SyncEngine) applyPreferredBranch(
 	return summary, nil
 }
 
-// applyBranchBlock commits one row of the preferred branch at its caller-owned
-// height. Both context windows are re-derived per iteration: the canonical
-// index moved when the previous row committed, and a branch can cross a
-// retarget boundary (the target half of the B.9 / issue #1166 argument). Target
-// context first, so a target-context failure short-circuits before the MTP
-// window is read.
-func (s *SyncEngine) applyBranchBlock(item reorgBranchBlock, nextHeight uint64) (*ChainStateConnectSummary, blockApplyMetricOutcome, error) {
-	targetCtx, err := s.targetContextForCandidate(item.header.PrevBlockHash, nextHeight)
-	if err != nil {
-		return nil, blockApplyMetricNone, err
+// applyPreferredBranchUnderGuard is commit-only: pre-clean, disconnect to the
+// common ancestor, then publish and persist each already-prepared row. Nothing
+// suppresses the per-block inner cleanup — this path never calls it.
+func (s *SyncEngine) applyPreferredBranchUnderGuard(
+	tr *canonicalTransition,
+	rows []preparedBranchBlock,
+	commonAncestorHeight uint64,
+	preparedDisconnectedBlocks []verifiedStoredBlock,
+) (*ChainStateConnectSummary, []CanonicalAppliedBlock, error) {
+	if err := s.precleanPreferredBranch(tr, rows); err != nil {
+		return nil, nil, s.rollbackApplyBlock(err, tr.rollback)
 	}
-	freshTs, err := prevTimestampsFromStore(s.blockStore, nextHeight)
-	if err != nil {
-		return nil, blockApplyMetricNone, err
+	if err := s.disconnectCanonicalToAncestor(commonAncestorHeight, preparedDisconnectedBlocks, tr.rollback); err != nil {
+		return nil, nil, s.rollbackApplyBlock(err, tr.rollback)
 	}
-	return s.applyCanonicalParsedBlockTracked(item.parsed, item.blockBytes, freshTs, targetCtx)
+	var summary *ChainStateConnectSummary
+	canonicalBlocks := make([]CanonicalAppliedBlock, 0, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		if err := s.commitPreparedRowUnderGuard(tr, row); err != nil {
+			return nil, nil, err
+		}
+		tr.appliedHeight, tr.appliedTimestamp, tr.applied = row.summary.BlockHeight, row.item.header.Timestamp, true
+		summary = row.summary
+		canonicalBlocks = append(canonicalBlocks, row.summary.CanonicalAppliedBlocks...)
+	}
+	return summary, canonicalBlocks, nil
 }
 
-func (s *SyncEngine) rollbackBranchBlockApply(
-	err error,
-	rollbackState syncRollbackState,
-	outcome blockApplyMetricOutcome,
-) error {
-	rollbackErr := s.rollbackApplyBlock(err, rollbackState)
-	if outcome == blockApplyMetricRejected {
-		s.noteBlockApplyRejected()
+// precleanPreferredBranch removes, in one standard-domain commit, every entry
+// the final prepared branch includes or conflicts with, before any live
+// ChainState or BlockStore canonical tip change.
+func (s *SyncEngine) precleanPreferredBranch(tr *canonicalTransition, rows []preparedBranchBlock) error {
+	if tr.mempool == nil {
+		return nil
 	}
-	return rollbackErr
+	blocks := make([]*consensus.ParsedBlock, 0, len(rows))
+	for i := range rows {
+		blocks = append(blocks, rows[i].item.parsed)
+	}
+	return tr.mempool.applyConnectedBlocksParsed(blocks)
 }
 
+// preparePreferredBranch validates the whole winning branch against ONE rolling
+// private clone and retains only the compact per-row commit record. It touches
+// no live state, nothing it does repeats once the guard is held, and it rejects
+// no branch for its depth — retained memory does not grow with depth, so there
+// is nothing to cap. A failed row aborts the whole preparation and discards the
+// rolling clone with it, which is why connecting into that clone IN PLACE is
+// safe even though a rejected connect may leave it partially advanced.
 func (s *SyncEngine) preparePreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
-	rollbackState syncRollbackState,
-) ([]verifiedStoredBlock, uint64, error) {
-	previewState := cloneChainState(rollbackState.chainState)
-	if previewState == nil {
-		return nil, 0, errors.New("nil preview chainstate")
+) ([]preparedBranchBlock, []verifiedStoredBlock, uint64, error) {
+	rolling := cloneChainState(s.chainState)
+	if rolling == nil {
+		return nil, nil, 0, errors.New("nil preview chainstate")
 	}
-	var err error
-	preparedDisconnectedBlocks, reorgDepth, err := s.previewDisconnectCanonicalToAncestor(previewState, commonAncestorHeight)
+	preparedDisconnectedBlocks, reorgDepth, err := s.previewDisconnectCanonicalToAncestor(rolling, commonAncestorHeight)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 	// Build a sliding MTP window: start from pre-fork timestamps, advance
 	// after each block.  The blockstore index is NOT updated during preview,
@@ -313,31 +359,281 @@ func (s *SyncEngine) preparePreferredBranch(
 	// re-deriving from the store each iteration (B.9 fix).
 	slidingTs, err := prevTimestampsFromStore(s.blockStore, commonAncestorHeight+1)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
+	rows := make([]preparedBranchBlock, 0, len(branch))
 	for i, item := range branch {
-		// Per-row derivation: a branch can cross a retarget boundary. Unlike
-		// the MTP window this needs no sliding workaround — it reads headers
-		// by hash and never consults the canonical index, and every ancestor
-		// it needs is already stored (collectBranchToCanonical fetched
-		// branch[0..len-2] from the store; the common ancestor is canonical).
-		targetCtx, targetErr := s.targetContextForCandidate(item.header.PrevBlockHash, commonAncestorHeight+1+uint64(i))
-		if targetErr != nil {
-			return nil, 0, targetErr
+		// The rolling state carries row i-1's post-state into row i, matching
+		// exactly what the guard publishes one row at a time.
+		row, rowErr := s.prepareBranchRow(rolling, item, commonAncestorHeight+1+uint64(i), slidingTs)
+		if rowErr != nil {
+			return nil, nil, 0, rowErr
 		}
-		if _, err := previewState.ConnectBlockWithSuiteContext(
-			item.blockBytes,
-			targetCtx.expected,
-			slidingTs,
-			s.cfg.ChainID,
-			s.cfg.RotationProvider,
-			s.cfg.SuiteRegistry,
-		); err != nil {
-			return nil, 0, err
-		}
+		rows = append(rows, row)
 		slidingTs = advancePrevTimestamps(slidingTs, item.header.Timestamp)
 	}
-	return preparedDisconnectedBlocks, reorgDepth, nil
+	return rows, preparedDisconnectedBlocks, reorgDepth, nil
+}
+
+// prepareBranchRow fully validates one branch row by connecting it into the
+// caller's single rolling private state, then retains only what the commit needs.
+//
+// Per-row target derivation: a branch can cross a retarget boundary. Unlike the
+// MTP window it needs no sliding workaround — it reads headers by hash, never
+// the canonical index, and every ancestor it needs is already stored. Target
+// context resolves first, so its failure short-circuits before the connect.
+func (s *SyncEngine) prepareBranchRow(
+	rolling *ChainState,
+	item reorgBranchBlock,
+	height uint64,
+	prevTimestamps []uint64,
+) (preparedBranchBlock, error) {
+	targetCtx, err := s.targetContextForCandidate(item.header.PrevBlockHash, height)
+	if err != nil {
+		return preparedBranchBlock{}, err
+	}
+	priorTip := chainTipScalarsOf(rolling)
+	// The undo needs the pre-block image of every spent outpoint, and the
+	// sequential connect below overwrites the rolling map in place, so the
+	// touched entries — and ONLY those — are read out first.
+	preImages := capturePreImages(rolling, item.parsed)
+	ctx := canonicalBlockApplyContext{
+		blockHeight:    height,
+		blockHash:      item.hash,
+		expectedTarget: targetCtx.expected,
+		prevState:      s.pvShadowPreState(rolling),
+	}
+	summary, err := rolling.ConnectBlockWithSuiteContext(
+		item.blockBytes,
+		ctx.expectedTarget,
+		prevTimestamps,
+		s.cfg.ChainID,
+		s.cfg.RotationProvider,
+		s.cfg.SuiteRegistry,
+	)
+	if ctx.prevState != nil {
+		s.runPVShadow(item.blockBytes, prevTimestamps, ctx, err, summary)
+	} else {
+		s.pvTelemetry.RecordBlockSkipped()
+	}
+	if err != nil {
+		// No apply-outcome metric: a branch row rejected during preparation was
+		// never a canonical apply attempt, matching the pre-transition behavior
+		// where the preview rejected before any per-row apply was counted.
+		return preparedBranchBlock{}, err
+	}
+	return prepareCommitRow(item, summary, priorTip, preImages, rolling)
+}
+
+// prepareCommitRow turns one already-connected row into its compact commit
+// record — precomputed undo, block-local delta, DA-set summary — reading only
+// the captured pre-entries and the rolling post-state.
+func prepareCommitRow(item reorgBranchBlock, summary *ChainStateConnectSummary, priorTip canonicalTipScalars, preImages map[consensus.Outpoint]consensus.UtxoEntry, post *ChainState) (preparedBranchBlock, error) {
+	undo, err := buildPreparedBlockUndo(preImages, item.parsed, summary.BlockHeight, priorTip.alreadyGenerated)
+	if err != nil {
+		return preparedBranchBlock{}, err
+	}
+	delta, err := deriveChainStateDelta(preImages, post, undo, item.parsed)
+	if err != nil {
+		return preparedBranchBlock{}, err
+	}
+	daIDs, err := CompleteDASetIDsFromParsedBlock(item.parsed)
+	if err != nil {
+		return preparedBranchBlock{}, err
+	}
+	summary.CanonicalAppliedBlocks = []CanonicalAppliedBlock{{Hash: item.hash, CompleteDAIDs: daIDs}}
+	return preparedBranchBlock{item: item, summary: summary, priorTip: priorTip, undo: undo, delta: delta}, nil
+}
+
+// capturePreImages reads the pre-block UTXO entry of every outpoint the block's
+// non-coinbase transactions spend, and nothing else — that is what lets undo and
+// delta be derived without copying the whole UTXO map per row. An input absent
+// here was created earlier in the SAME block, which the undo builder resolves
+// from its own block-local map.
+func capturePreImages(state *ChainState, pb *consensus.ParsedBlock) map[consensus.Outpoint]consensus.UtxoEntry {
+	preImages := make(map[consensus.Outpoint]consensus.UtxoEntry)
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	for i := 1; i < len(pb.Txs); i++ {
+		tx := pb.Txs[i]
+		if tx == nil {
+			continue
+		}
+		for _, in := range tx.Inputs {
+			op := outpointFromInput(in)
+			if entry, ok := state.Utxos[op]; ok {
+				preImages[op] = copyUtxoEntry(entry)
+			}
+		}
+	}
+	return preImages
+}
+
+// buildPreparedBlockUndo builds exactly the BlockUndo buildBlockUndo builds, from
+// the captured touched entries instead of a full UTXO-set copy. buildTxUndos adds
+// each transaction's created outputs to its work map as it goes, so an input
+// spending a same-block output resolves identically under either work map.
+func buildPreparedBlockUndo(preImages map[consensus.Outpoint]consensus.UtxoEntry, pb *consensus.ParsedBlock, blockHeight, previousAlreadyGenerated uint64) (*BlockUndo, error) {
+	if pb == nil {
+		return nil, errors.New("nil parsed block")
+	}
+	if len(pb.Txs) != len(pb.Txids) {
+		return nil, errors.New("parsed block txid length mismatch")
+	}
+	work := make(map[consensus.Outpoint]consensus.UtxoEntry, len(preImages))
+	for op, entry := range preImages {
+		work[op] = copyUtxoEntry(entry)
+	}
+	txUndos, err := buildTxUndos(work, pb, blockHeight)
+	if err != nil {
+		return nil, err
+	}
+	return &BlockUndo{
+		BlockHeight:              blockHeight,
+		PreviousAlreadyGenerated: previousAlreadyGenerated,
+		Txs:                      txUndos,
+	}, nil
+}
+
+// deriveChainStateDelta reports the net change the live chainstate must observe
+// for one already-validated row: every spend whose outpoint existed BEFORE the
+// block, and every output the connected post-state still holds. Both halves come
+// from the block's own ordered inputs and outputs plus the touched entries —
+// never a scan or a copy of the UTXO map.
+func deriveChainStateDelta(preImages map[consensus.Outpoint]consensus.UtxoEntry, post *ChainState, undo *BlockUndo, pb *consensus.ParsedBlock) (chainStateDelta, error) {
+	if undo == nil || pb == nil || post == nil || len(pb.Txs) != len(pb.Txids) {
+		return chainStateDelta{}, errors.New("nil or malformed prepared row delta source")
+	}
+	created, err := deriveCreatedUtxos(post, pb)
+	if err != nil {
+		return chainStateDelta{}, err
+	}
+	return chainStateDelta{
+		spent:   derivePreExistingSpends(preImages, undo),
+		created: created,
+		post:    chainTipScalarsOf(post),
+	}, nil
+}
+
+// derivePreExistingSpends lists, in undo order, the outpoints this block spends
+// that ALSO existed before it; one created and spent inside it is absent.
+func derivePreExistingSpends(preImages map[consensus.Outpoint]consensus.UtxoEntry, undo *BlockUndo) []consensus.Outpoint {
+	var spent []consensus.Outpoint
+	for _, txUndo := range undo.Txs {
+		for _, item := range txUndo.Spent {
+			if _, existed := preImages[item.Outpoint]; existed {
+				spent = append(spent, item.Outpoint)
+			}
+		}
+	}
+	return spent
+}
+
+// deriveCreatedUtxos lists every output the connected post-state still holds,
+// with its exact entry read back from that state, so no output-encoding rule is
+// restated here: one the connect did not index, or one a later transaction in
+// the same block already spent, is simply absent.
+func deriveCreatedUtxos(post *ChainState, pb *consensus.ParsedBlock) ([]createdUtxo, error) {
+	var created []createdUtxo
+	post.mu.RLock()
+	defer post.mu.RUnlock()
+	for i, tx := range pb.Txs {
+		if tx == nil {
+			return nil, fmt.Errorf("nil tx at index %d", i)
+		}
+		for outputIndex := range tx.Outputs {
+			op := consensus.Outpoint{Txid: pb.Txids[i], Vout: uint32(outputIndex)}
+			if entry, ok := post.Utxos[op]; ok {
+				created = append(created, createdUtxo{outpoint: op, entry: copyUtxoEntry(entry)})
+			}
+		}
+	}
+	return created, nil
+}
+
+// commitPreparedRowUnderGuard publishes and persists ONE already-validated
+// preferred-branch row: live tip recheck, the compact delta onto the single live
+// ChainState, then that row's precomputed undo through the existing persistence
+// path. ChainState and BlockStore therefore correspond at every successfully
+// persisted row, rather than the store running ahead of a chainstate published
+// once at the end. Nothing here parses, connects, verifies or revalidates.
+func (s *SyncEngine) commitPreparedRowUnderGuard(tr *canonicalTransition, row *preparedBranchBlock) error {
+	if err := s.recheckLiveTipIdentity(tr, row.priorTip); err != nil {
+		return s.rollbackApplyBlock(err, tr.rollback)
+	}
+	if err := applyPreparedRowDelta(tr.chainState, row.delta); err != nil {
+		return s.rollbackApplyBlock(err, tr.rollback)
+	}
+	commitStart := time.Now()
+	if err := s.persistPreparedRow(row); err != nil {
+		return s.classifyPersistenceFailure(err, tr.rollback)
+	}
+	s.pvTelemetry.RecordCommitLatency(time.Since(commitStart))
+	return nil
+}
+
+// applyPreparedRowDelta publishes one compact row onto the live ChainState under
+// ChainState.mu only: the transition already owns the non-reentrant admissionMu,
+// so the ChainState wrappers that reacquire it must not be called here. Every
+// precondition is checked BEFORE the first write, so a live map that is not what
+// the row was prepared against fails into the exact rollback, not half-applied.
+func applyPreparedRowDelta(dst *ChainState, delta chainStateDelta) error {
+	if dst == nil {
+		return errors.New("nil chainstate delta destination")
+	}
+	dst.mu.Lock()
+	defer dst.mu.Unlock()
+	if dst.Utxos == nil {
+		dst.Utxos = make(map[consensus.Outpoint]consensus.UtxoEntry)
+	}
+	if err := checkPreparedRowDeltaLocked(dst, delta); err != nil {
+		return err
+	}
+	for _, op := range delta.spent {
+		delete(dst.Utxos, op)
+	}
+	for _, created := range delta.created {
+		dst.Utxos[created.outpoint] = created.entry
+	}
+	dst.HasTip, dst.Height = delta.post.hasTip, delta.post.height
+	dst.TipHash, dst.AlreadyGenerated = delta.post.tipHash, delta.post.alreadyGenerated
+	return nil
+}
+
+// checkPreparedRowDeltaLocked proves the live map is exactly the pre-image the
+// row was prepared against, for every outpoint it touches. Spent and created are
+// disjoint by construction, so no ordering is implied. The caller holds dst.mu.
+func checkPreparedRowDeltaLocked(dst *ChainState, delta chainStateDelta) error {
+	for _, op := range delta.spent {
+		if _, live := dst.Utxos[op]; !live {
+			return fmt.Errorf("prepared row spends %x:%d which the live chainstate does not hold", op.Txid, op.Vout)
+		}
+	}
+	for _, created := range delta.created {
+		if _, live := dst.Utxos[created.outpoint]; live {
+			return fmt.Errorf("prepared row creates %x:%d which the live chainstate already holds", created.outpoint.Txid, created.outpoint.Vout)
+		}
+	}
+	return nil
+}
+
+// persistPreparedRow commits one prepared row through the existing
+// BlockStore.CommitCanonicalBlock and ChainState.Save semantics, changing no
+// persistence format and no error class: the ONLY difference from
+// persistAppliedBlock is the precomputed undo.
+func (s *SyncEngine) persistPreparedRow(row *preparedBranchBlock) error {
+	if row.undo == nil {
+		return errors.New("nil prepared block undo")
+	}
+	if s.blockStore != nil {
+		if err := s.blockStore.CommitCanonicalBlock(row.summary.BlockHeight, row.item.hash, row.item.parsed.HeaderBytes, row.item.blockBytes, row.undo); err != nil {
+			return err
+		}
+	}
+	if s.cfg.ChainStatePath != "" && (s.blockStore == nil || shouldPersistChainStateSnapshot(s.chainState, row.summary)) {
+		return s.chainState.Save(s.cfg.ChainStatePath)
+	}
+	return nil
 }
 
 // advancePrevTimestamps prepends newTs to prev and keeps at most 11 entries,
@@ -524,6 +820,10 @@ func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte
 	s.requeueParsedDisconnectedTransactions(parsedBlocks)
 }
 
+// requeueParsedDisconnectedTransactions MUST NOT be called under the canonical
+// transition guard: it routes to Mempool.AddReorgTx, which takes
+// ChainState.admissionMu.RLock, and sync.RWMutex is not reentrant. Its only
+// caller runs it after the transition released that guard.
 func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []*consensus.ParsedBlock) {
 	if s == nil || s.mempool == nil || len(disconnectedBlocks) == 0 {
 		return
