@@ -31,10 +31,15 @@ const (
 )
 
 type mempoolEntry struct {
-	raw          []byte
-	txid         [32]byte
-	wtxid        [32]byte
-	inputs       []consensus.Outpoint
+	raw    []byte
+	txid   [32]byte
+	wtxid  [32]byte
+	inputs []consensus.Outpoint
+	// token is the exact pending-outpoint reservation this entry holds. It is
+	// the zero token exactly when the entry spends no outpoint and therefore
+	// claims nothing (the pre-owner validateEntryInputsLocked was likewise a
+	// no-op for an empty input set).
+	token        PendingOutpointToken
 	fee          uint64
 	weight       uint64
 	size         int
@@ -56,7 +61,10 @@ type Mempool struct {
 	currentMinFeeRate uint64
 	txs               map[[32]byte]*mempoolEntry
 	wtxids            map[[32]byte][32]byte
-	spenders          map[consensus.Outpoint][32]byte
+	// pendingOutpoints is the sole conflict-admission authority. It replaces
+	// the former spenders index: outpoint ownership now lives with the claim
+	// and its token, so no second spender map can drift from the records.
+	pendingOutpoints *PendingOutpointOwner
 	// Admission counters are bumped exactly once for each AddTx call on a
 	// non-nil Mempool that reaches the final outcome accounting path.
 	// Nil-receiver calls return before that defer is registered and are
@@ -77,18 +85,29 @@ type Mempool struct {
 	// evictedResidentTotal counts cumulative resident-entry capacity
 	// evictions since process start. It is bumped exactly once per
 	// already-admitted entry that is removed by capacity pressure
-	// (the deleteEntryLocked loop in addEntryLocked after
+	// (the per-victim counter loop in addEntryLockedWithFloor, after
 	// validateCapacityAdmissionLocked classifies the candidate as
-	// admitted-and-evicting). Candidate-worst rejection — where the
-	// incoming candidate is rejected at capacity and no resident is
-	// evicted — does not increment this counter; that path returns
-	// txAdmitUnavailable before the deleteEntryLocked loop. Fee-floor
+	// admitted-and-evicting and commitStandardDeltaLocked removes the
+	// victims with their exact tokens). Candidate-worst rejection —
+	// where the incoming candidate is rejected at capacity and no
+	// resident is evicted — does not increment this counter; that path
+	// returns txAdmitUnavailable with an empty victim list. Fee-floor
 	// rejection of an incoming transaction never reaches this counter
 	// either, because the fee-floor check happens before
 	// validateCapacityAdmissionLocked. Confirmed-block removals via
 	// EvictConfirmed/applyConnectedBlock are conflict resolution, not
 	// policy capacity eviction, and also do not increment this counter.
 	evictedResidentTotal atomic.Uint64
+}
+
+// PendingOutpointOwner returns the single pending-outpoint owner bound to this
+// mempool at construction. The pointer is stable for the mempool's lifetime;
+// a nil receiver returns nil so callers can wire unconditionally.
+func (m *Mempool) PendingOutpointOwner() *PendingOutpointOwner {
+	if m == nil {
+		return nil
+	}
+	return m.pendingOutpoints
 }
 
 // AllTxIDs returns the txids of every transaction currently in the mempool.
@@ -176,6 +195,10 @@ func (m *Mempool) AddReorgTx(txBytes []byte) (retErr error) {
 // addTxWithSource validates and admits a transaction while recording the
 // caller-declared origin in the mempool entry. Source provenance does not
 // grant admission priority or bypass; invalid source values reject.
+//
+// Its ChainState.admissionMu.RLock below BLOCKS INDEFINITELY, by design, once a
+// canonical transition has entered the fail-closed terminal state described on
+// canonicalTransition.end: waiting for the required restart is the contract.
 func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retErr error) {
 	if m == nil {
 		return txAdmitUnavailable("nil mempool")

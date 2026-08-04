@@ -3342,3 +3342,138 @@ func TestLoadVerifiedStoredBlockReadFailuresAreLocalCorruption(t *testing.T) {
 		assertBranchStoreCorruption(t, err)
 	})
 }
+
+// TestApplyBlockWithReorgPendingOutpointUsesOneGenerationForTheWholeBranch
+// proves the preferred-branch row: the whole winning branch runs inside EXACTLY
+// one canonical transition, so exactly one generation is consumed no matter how
+// many blocks are disconnected and connected; the single pre-clean removes the
+// record and its exact claim for a transaction the final prepared branch
+// includes; and the owner's stable tip is the branch tip.
+func TestApplyBlockWithReorgPendingOutpointUsesOneGenerationForTheWholeBranch(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	forkHash, forkHeight, forkGenerated := f.tipHash, f.tipHeight, f.alreadyGenerated
+	spend := f.spend(t, 700, 1)
+
+	subsidyA101 := consensus.BlockSubsidy(forkHeight+1, forkGenerated)
+	blockA101 := buildSingleTxBlock(t, forkHash, f.target, 202, reorgTestCoinbaseForAddress(t, forkHeight+1, subsidyA101, f.sourceAddress))
+	summaryA101, err := f.engine.ApplyBlock(blockA101, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(A101): %v", err)
+	}
+	if err := f.mempool.AddTx(spend); err != nil {
+		t.Fatalf("AddTx(spend): %v", err)
+	}
+	beforeReorg := mustAdmissionContext(t, f.owner, "before the reorg")
+	if beforeReorg.StableTip.Hash != summaryA101.BlockHash {
+		t.Fatalf("stable tip before reorg=%+v, want A101 %x", beforeReorg.StableTip, summaryA101.BlockHash)
+	}
+
+	// B101 includes the spend and B102 extends it, so the B branch outweighs A
+	// and the reorg disconnects one block while connecting two.
+	blockB101 := f.blockIncluding(t, forkHash, forkHeight+1, forkGenerated, 203, spend)
+	b101Parsed, b101Hash := mustParseReorgBlockForTest(t, blockB101)
+	if err := f.store.StoreBlock(b101Hash, b101Parsed.HeaderBytes, blockB101); err != nil {
+		t.Fatalf("StoreBlock(B101): %v", err)
+	}
+	subsidyB101 := consensus.BlockSubsidy(forkHeight+1, forkGenerated)
+	subsidyB102 := consensus.BlockSubsidy(forkHeight+2, forkGenerated+subsidyB101)
+	blockB102 := buildSingleTxBlock(t, b101Hash, f.target, 204, reorgTestCoinbaseForAddress(t, forkHeight+2, subsidyB102, f.destAddress))
+	summaryB102, err := f.engine.ApplyBlockWithReorg(blockB102, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B102): %v", err)
+	}
+
+	afterReorg := mustAdmissionContext(t, f.owner, "after the reorg")
+	if afterReorg.Generation != beforeReorg.Generation+1 {
+		t.Fatalf("generation after reorg=%d, want exactly one advance from %d for the whole branch", afterReorg.Generation, beforeReorg.Generation)
+	}
+	if afterReorg.StableTip.Hash != summaryB102.BlockHash || afterReorg.StableTip.Height != summaryB102.BlockHeight {
+		t.Fatalf("stable tip after reorg=%+v, want B102 (%d,%x)", afterReorg.StableTip, summaryB102.BlockHeight, summaryB102.BlockHash)
+	}
+	if got := f.mempool.Len(); got != 0 {
+		t.Fatalf("mempool len after reorg=%d, want 0 after the single pre-clean", got)
+	}
+	outpoints, claims, highWater := ownerClaimCount(f.owner)
+	if outpoints != 0 || claims != 0 {
+		t.Fatalf("owner still holds outpoints=%d claims=%d after the reorg", outpoints, claims)
+	}
+	if highWater != 1 {
+		t.Fatalf("token high-water=%d after the reorg, want the consumed sequence retained", highWater)
+	}
+}
+
+// TestApplyBlockWithReorgPendingOutpointRestoresExactTokensOnFailure proves the
+// abort row: a reorg that fails after prepared rows restores the record, its
+// exact token and its finalized claim, leaves the owner's stable tip untouched,
+// and still retains the advanced generation high-water so the failed transition
+// can never reproduce an earlier admission context.
+func TestApplyBlockWithReorgPendingOutpointRestoresExactTokensOnFailure(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	forkHash, forkHeight, forkGenerated := f.tipHash, f.tipHeight, f.alreadyGenerated
+	spend := f.spend(t, 700, 1)
+	if err := f.mempool.AddTx(spend); err != nil {
+		t.Fatalf("AddTx(spend): %v", err)
+	}
+	spendID := txID(t, spend)
+	f.mempool.mu.Lock()
+	residentToken := f.mempool.txs[spendID].token
+	f.mempool.mu.Unlock()
+
+	subsidyA101 := consensus.BlockSubsidy(forkHeight+1, forkGenerated)
+	blockA101 := buildSingleTxBlock(t, forkHash, f.target, 202, reorgTestCoinbaseForAddress(t, forkHeight+1, subsidyA101, f.sourceAddress))
+	summaryA101, err := f.engine.ApplyBlock(blockA101, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(A101): %v", err)
+	}
+	beforeReorg := mustAdmissionContext(t, f.owner, "before the failed reorg")
+
+	// A branch that does NOT include the spend, so the pre-clean removes only
+	// the conflicting record if the reorg commits — and must restore it if not.
+	blockB101 := buildSingleTxBlock(t, forkHash, f.target, 203, reorgTestCoinbaseForAddress(t, forkHeight+1, subsidyA101, f.destAddress))
+	b101Parsed, b101Hash := mustParseReorgBlockForTest(t, blockB101)
+	if err := f.store.StoreBlock(b101Hash, b101Parsed.HeaderBytes, blockB101); err != nil {
+		t.Fatalf("StoreBlock(B101): %v", err)
+	}
+	blockB102 := f.blockIncluding(t, b101Hash, forkHeight+2, forkGenerated+subsidyA101, 204, spend)
+
+	prevWrite := writeFileAtomicFn
+	t.Cleanup(func() { writeFileAtomicFn = prevWrite })
+	indexWrites, injected := 0, false
+	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
+		if path == f.store.indexPath {
+			indexWrites++
+			if indexWrites == 3 {
+				injected = true
+				return os.ErrPermission
+			}
+		}
+		return prevWrite(path, data, mode)
+	}
+	if _, err := f.engine.ApplyBlockWithReorg(blockB102, nil); err == nil {
+		t.Fatal("expected the injected reorg persistence failure")
+	}
+	if !injected {
+		t.Fatal("the injected canonical-index write failure never fired")
+	}
+
+	if f.engine.chainState.TipHash != summaryA101.BlockHash {
+		t.Fatalf("chainstate tip=%x after the failed reorg, want A101 %x", f.engine.chainState.TipHash, summaryA101.BlockHash)
+	}
+	entry, claim := residentClaim(t, f.mempool, spendID)
+	if entry.token != residentToken {
+		t.Fatalf("restored token seq=%d, want the exact pre-reorg seq %d", entry.token.seq, residentToken.seq)
+	}
+	if claim == nil || !claim.finalized || claim.txid != spendID {
+		t.Fatalf("restored claim=%+v, want the exact finalized claim", claim)
+	}
+	if got, ok := f.owner.txidForOutpoint(f.sourceOutpoint); !ok || got != spendID {
+		t.Fatalf("restored index row=(%x,%v), want %x", got, ok, spendID)
+	}
+	afterReorg := mustAdmissionContext(t, f.owner, "after the failed reorg")
+	if afterReorg.StableTip != beforeReorg.StableTip {
+		t.Fatalf("stable tip after the failed reorg=%+v, want %+v unchanged", afterReorg.StableTip, beforeReorg.StableTip)
+	}
+	if afterReorg.Generation != beforeReorg.Generation+1 {
+		t.Fatalf("generation after the failed reorg=%d, want the advanced high-water %d", afterReorg.Generation, beforeReorg.Generation+1)
+	}
+}

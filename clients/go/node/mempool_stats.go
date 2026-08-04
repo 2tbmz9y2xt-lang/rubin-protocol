@@ -131,7 +131,9 @@ func NewMempoolWithConfig(chainState *ChainState, blockStore *BlockStore, chainI
 		currentMinFeeRate: DefaultMempoolMinFeeRate,
 		txs:               make(map[[32]byte]*mempoolEntry),
 		wtxids:            make(map[[32]byte][32]byte),
-		spenders:          make(map[consensus.Outpoint][32]byte),
+		// Exactly one owner per mempool, initialized from the bound
+		// ChainState stable tip. Nothing else constructs one.
+		pendingOutpoints: newPendingOutpointOwner(pendingOutpointTipOf(chainState)),
 	}, nil
 }
 
@@ -200,8 +202,8 @@ func (m *Mempool) AdmissionCounts() MempoolAdmissionCounts {
 // adjustments performed by raiseMinFeeRateAfterEvictionLocked and
 // decayMinFeeRateAfterConnectedBlockLocked. EvictedResidentTotal is
 // loaded INSIDE the read-lock window. Writers bump that counter
-// under m.mu.Lock inside addEntryLocked's deleteEntryLocked loop,
-// so the reader's m.mu.RLock pairs with the writer's m.mu.Lock and
+// under m.mu.Lock in addEntryLockedWithFloor's per-victim counter
+// loop, so the reader's m.mu.RLock pairs with the writer's m.mu.Lock and
 // the atomic.Load observes the same critical section as the gauge
 // fields read on the surrounding lines. Covered by
 // TestMempoolStatsScrapePurity and the

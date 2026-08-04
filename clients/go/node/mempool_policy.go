@@ -53,23 +53,43 @@ func (m *Mempool) EvictConfirmed(blockBytes []byte) error {
 }
 
 func (m *Mempool) EvictConfirmedParsed(block *consensus.ParsedBlock) error {
-	return m.withLockedParsedBlock(block, func(block *consensus.ParsedBlock) {
-		for _, txid := range block.Txids {
-			m.removeTxLocked(txid)
-		}
+	return m.withLockedParsedBlock(block, func(block *consensus.ParsedBlock) error {
+		return m.commitStandardDeltaLocked(standardMempoolDelta{
+			removals: m.blockTerminalEntriesLocked(nil, make(map[[32]byte]struct{}), block, false),
+		})
 	})
 }
 
 func (m *Mempool) applyConnectedBlockParsed(block *consensus.ParsedBlock) error {
-	return m.withLockedParsedBlock(block, func(block *consensus.ParsedBlock) {
-		for _, txid := range block.Txids {
-			m.removeTxLocked(txid)
+	return m.applyConnectedBlocksParsed([]*consensus.ParsedBlock{block})
+}
+
+// applyConnectedBlocksParsed removes every standard entry the given canonical
+// blocks include or conflict with, in ONE standard-domain commit, and releases
+// each removed entry's exact token with it. A preferred-branch reorg pre-cleans
+// the whole winning branch through this single call instead of running a
+// per-block cleanup inside the transition.
+func (m *Mempool) applyConnectedBlocksParsed(blocks []*consensus.ParsedBlock) error {
+	if m == nil {
+		return errors.New("nil mempool")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var removals []*mempoolEntry
+	seen := make(map[[32]byte]struct{})
+	for _, block := range blocks {
+		if block == nil {
+			return errors.New("nil parsed block")
 		}
-		for txid := range m.collectConflictsLocked(block) {
-			m.removeTxLocked(txid)
-		}
+		removals = m.blockTerminalEntriesLocked(removals, seen, block, true)
+	}
+	if err := m.commitStandardDeltaLocked(standardMempoolDelta{removals: removals}); err != nil {
+		return err
+	}
+	for range blocks {
 		m.decayMinFeeRateAfterConnectedBlockLocked()
-	})
+	}
+	return nil
 }
 
 func (m *Mempool) RemoveConflicting(blockBytes []byte) error {
@@ -88,24 +108,39 @@ func (m *Mempool) withParsedBlock(blockBytes []byte, fn func(*consensus.ParsedBl
 }
 
 func (m *Mempool) RemoveConflictingParsed(block *consensus.ParsedBlock) error {
-	return m.withLockedParsedBlock(block, func(block *consensus.ParsedBlock) {
-		for txid := range m.collectConflictsLocked(block) {
-			m.removeTxLocked(txid)
-		}
+	return m.withLockedParsedBlock(block, func(block *consensus.ParsedBlock) error {
+		return m.commitStandardDeltaLocked(standardMempoolDelta{
+			removals: m.blockConflictEntriesLocked(nil, make(map[[32]byte]struct{}), block),
+		})
 	})
 }
 
-func (m *Mempool) withLockedParsedBlock(block *consensus.ParsedBlock, fn func(*consensus.ParsedBlock)) error {
+func (m *Mempool) withLockedParsedBlock(block *consensus.ParsedBlock, fn func(*consensus.ParsedBlock) error) error {
 	if m == nil {
 		return errors.New("nil mempool")
 	}
 	if block == nil {
 		return errors.New("nil parsed block")
 	}
+	// A PUBLIC terminal removal takes the same ChainState admission read guard
+	// standard admission takes, then Mempool.mu, then owner.mu. Without it a
+	// terminal removal could delete a record and its claim inside a canonical
+	// transition's snapshot/restore window, and an abort would then resurrect
+	// an entry the caller was told had been removed.
+	//
+	// The unexported connected-block cleanup (applyConnectedBlocksParsed)
+	// deliberately does NOT route through here: it runs under the transition's
+	// own admissionMu.Lock, and sync.RWMutex is not reentrant.
+	//
+	// Like standard admission, that RLock BLOCKS INDEFINITELY by design in the
+	// fail-closed terminal state described on canonicalTransition.end.
+	if m.chainState != nil {
+		m.chainState.admissionMu.RLock()
+		defer m.chainState.admissionMu.RUnlock()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	fn(block)
-	return nil
+	return fn(block)
 }
 
 // policySnapshot returns the current mempool policy under the mempool read lock.
@@ -153,12 +188,19 @@ func policyInputSnapshot(tx *consensus.Tx, utxos map[consensus.Outpoint]consensu
 	return out, nil
 }
 
-func (m *Mempool) removeTxLocked(txid [32]byte) {
+// removeTxLocked terminates one resident entry by txid through the same typed
+// standard delta the admission and capacity paths use, so its record and its
+// claim cannot become observably separated.
+//
+// It has no production caller: every live terminal path already builds a bounded
+// multi-entry delta directly. It survives as the single-entry form the package's
+// own tests drive, and routes through the delta so they exercise the real rule.
+func (m *Mempool) removeTxLocked(txid [32]byte) error {
 	entry, ok := m.txs[txid]
 	if !ok {
-		return
+		return nil
 	}
-	m.deleteEntryLocked(txid, entry)
+	return m.commitStandardDeltaLocked(standardMempoolDelta{removals: []*mempoolEntry{entry}})
 }
 
 func (m *Mempool) validateNonCapacityAdmissionLocked(entry *mempoolEntry) error {
@@ -171,10 +213,13 @@ func (m *Mempool) validateNonCapacityAdmissionLocked(entry *mempoolEntry) error 
 	if err := validateMempoolEntrySource(entry.source); err != nil {
 		return err
 	}
-	if err := m.validateEntryInputsLocked(entry); err != nil {
+	if err := m.reserveEntryInputsLocked(entry); err != nil {
 		return err
 	}
-	return m.validateAdmissionSeqLocked(entry)
+	if err := m.validateAdmissionSeqLocked(entry); err != nil {
+		return m.releaseCandidateLocked(entry, err)
+	}
+	return nil
 }
 
 func validateBasicMempoolEntry(entry *mempoolEntry) error {
@@ -218,13 +263,47 @@ func validateMempoolEntrySource(source mempoolTxSource) error {
 	return nil
 }
 
-func (m *Mempool) validateEntryInputsLocked(entry *mempoolEntry) error {
-	for _, op := range entry.inputs {
-		if existing, ok := m.spenders[op]; ok {
-			return txAdmitConflict(fmt.Sprintf("mempool double-spend conflict with %x", existing))
-		}
+// reserveEntryInputsLocked occupies the conflict slot that validateEntryInputsLocked
+// used to hold. It claims every input of the candidate from the single owner,
+// bound to the ChainState tip the caller's admission read guard is pinning, and
+// records the issued token on the entry. An owner conflict maps to the existing
+// TxAdmitConflict double-spend family; an active transition, an expected-tip
+// mismatch, an exhausted sequence space and any owner-internal failure all map
+// to TxAdmitUnavailable, so no new public TxAdmit kind appears here.
+//
+// A candidate with no inputs claims nothing and takes no token, exactly as the
+// replaced loop was a no-op over an empty input slice.
+func (m *Mempool) reserveEntryInputsLocked(entry *mempoolEntry) error {
+	if len(entry.inputs) == 0 {
+		return nil
 	}
+	token, err := m.pendingOutpointOwnerLocked().Reserve(
+		pendingOutpointTipOf(m.chainState),
+		PendingOutpointStandardMempool,
+		entry.txid,
+		entry.inputs,
+	)
+	if err != nil {
+		return txAdmitFromPendingOutpointError(err)
+	}
+	entry.token = token
 	return nil
+}
+
+// releaseCandidateLocked releases a reservation the conflict slot issued for a
+// candidate that a LATER admission check rejected, and returns cause unchanged
+// so the public error order is preserved. The issued sequence stays consumed;
+// high-waters never decrease. Release cannot fail for a claim this call just
+// installed, and reporting a release fault in place of cause would rewrite the
+// contractual admission error, so the release result is deliberately dropped.
+func (m *Mempool) releaseCandidateLocked(entry *mempoolEntry, cause error) error {
+	var zero PendingOutpointToken
+	if entry == nil || entry.token == zero {
+		return cause
+	}
+	_ = m.pendingOutpoints.Release(entry.token)
+	entry.token = zero
+	return cause
 }
 
 func (m *Mempool) validateAdmissionSeqLocked(entry *mempoolEntry) error {
@@ -294,22 +373,24 @@ func (m *Mempool) addEntryLockedWithFloor(entry *mempoolEntry, snappedFloor uint
 	}
 	evictedEntries, err := m.validateCapacityAdmissionLocked(entry, snappedFloor)
 	if err != nil {
-		return err
+		return m.releaseCandidateLocked(entry, err)
 	}
 	m.ensureMinFeeRateLocked()
-	m.ensureIndexesLocked()
-	for _, evicted := range evictedEntries {
-		m.deleteEntryLocked(evicted.txid, evicted)
+	// One typed delta: every exact victim token is released and the candidate
+	// record plus its token finalization are installed together. A failure here
+	// publishes no entry and exactly releases the candidate reservation.
+	if err := m.commitStandardDeltaLocked(standardMempoolDelta{candidate: entry, removals: evictedEntries}); err != nil {
+		return m.releaseCandidateLocked(entry, err)
+	}
+	for range evictedEntries {
 		// Bump the resident-eviction counter exactly once per
-		// already-admitted entry that capacity pressure removes here.
-		// Candidate-worst rejection returned txAdmitUnavailable above
-		// without populating evictedEntries, so that path skips this
-		// loop entirely. Fee-floor rejection returned earlier from
-		// validateFeeFloorLocked and likewise never reaches here.
+		// already-admitted entry that capacity pressure removed in the
+		// commit above. Candidate-worst rejection returned
+		// txAdmitUnavailable earlier without populating evictedEntries,
+		// and fee-floor rejection returned from validateFeeFloorLocked
+		// before that, so neither path reaches this loop.
 		m.evictedResidentTotal.Add(1)
 	}
-	m.assignAdmissionSeqLocked(entry)
-	m.insertEntryIndexesLocked(entry)
 	m.raiseMinFeeRateAfterEvictionLocked(evictedEntries)
 	return nil
 }
@@ -321,9 +402,19 @@ func (m *Mempool) ensureIndexesLocked() {
 	if m.wtxids == nil {
 		m.wtxids = make(map[[32]byte][32]byte)
 	}
-	if m.spenders == nil {
-		m.spenders = make(map[consensus.Outpoint][32]byte)
+}
+
+// pendingOutpointOwnerLocked returns the single owner, creating it on first use
+// for a bare Mempool value exactly as ensureIndexesLocked creates the txid and
+// wtxid indexes — and as it used to create the spenders index this owner
+// replaces. NewMempoolWithConfig always installs the owner eagerly from the
+// bound ChainState stable tip, so no production path takes the lazy branch and
+// no second owner can exist for one mempool.
+func (m *Mempool) pendingOutpointOwnerLocked() *PendingOutpointOwner {
+	if m.pendingOutpoints == nil {
+		m.pendingOutpoints = newPendingOutpointOwner(pendingOutpointTipOf(m.chainState))
 	}
+	return m.pendingOutpoints
 }
 
 func (m *Mempool) assignAdmissionSeqLocked(entry *mempoolEntry) {
@@ -339,24 +430,48 @@ func (m *Mempool) insertEntryIndexesLocked(entry *mempoolEntry) {
 	m.txs[entry.txid] = entry
 	m.wtxids[entry.wtxid] = entry.txid
 	m.usedBytes += entry.size
-	for _, op := range entry.inputs {
-		m.spenders[op] = entry.txid
-	}
 }
 
-func (m *Mempool) collectConflictsLocked(block *consensus.ParsedBlock) map[[32]byte]struct{} {
-	conflicts := make(map[[32]byte]struct{})
+// blockTerminalEntriesLocked appends the resident entries a canonical block
+// terminates: first the entries it includes by txid, then — when conflicts is
+// true — the entries whose claimed outpoints the block's non-coinbase inputs
+// spend. Order follows block order and then input order, and seen deduplicates
+// across blocks, so the resulting delta is deterministic and never lists the
+// same record twice.
+func (m *Mempool) blockTerminalEntriesLocked(out []*mempoolEntry, seen map[[32]byte]struct{}, block *consensus.ParsedBlock, conflicts bool) []*mempoolEntry {
+	for _, txid := range block.Txids {
+		out = m.appendResidentEntryLocked(out, seen, txid)
+	}
+	if !conflicts {
+		return out
+	}
+	return m.blockConflictEntriesLocked(out, seen, block)
+}
+
+func (m *Mempool) blockConflictEntriesLocked(out []*mempoolEntry, seen map[[32]byte]struct{}, block *consensus.ParsedBlock) []*mempoolEntry {
 	for i, tx := range block.Txs {
 		if i == 0 || tx == nil {
 			continue
 		}
 		for _, in := range tx.Inputs {
-			if txid, ok := m.spenders[outpointFromInput(in)]; ok {
-				conflicts[txid] = struct{}{}
+			if txid, ok := m.pendingOutpoints.txidForOutpoint(outpointFromInput(in)); ok {
+				out = m.appendResidentEntryLocked(out, seen, txid)
 			}
 		}
 	}
-	return conflicts
+	return out
+}
+
+func (m *Mempool) appendResidentEntryLocked(out []*mempoolEntry, seen map[[32]byte]struct{}, txid [32]byte) []*mempoolEntry {
+	if _, done := seen[txid]; done {
+		return out
+	}
+	entry, ok := m.txs[txid]
+	if !ok {
+		return out
+	}
+	seen[txid] = struct{}{}
+	return append(out, entry)
 }
 
 func outpointFromInput(in consensus.TxInput) consensus.Outpoint {
@@ -374,9 +489,6 @@ func (m *Mempool) deleteEntryLocked(txid [32]byte, entry *mempoolEntry) {
 		} else {
 			m.usedBytes = 0
 		}
-	}
-	for _, op := range entry.inputs {
-		delete(m.spenders, op)
 	}
 	if existing, ok := m.wtxids[entry.wtxid]; ok && existing == txid {
 		delete(m.wtxids, entry.wtxid)

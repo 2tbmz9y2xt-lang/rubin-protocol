@@ -100,7 +100,14 @@ func (s *SyncEngine) runPVShadowIfActive(blockBytes []byte, prevTimestamps []uin
 	}
 }
 
-// finalizeAppliedBlock commits persistence, records metrics, and updates mempool.
+// finalizeAppliedBlock persists the already-published canonical block.
+//
+// The standard Mempool and owner cleanup has ALREADY run, before the live
+// canonical tip changed (commitPreparedBlockUnderGuard), and a cleanup failure
+// there propagates into exact rollback instead of being logged over a committed
+// tip. Runtime accepted-tip recording is likewise NOT done here: it happens
+// only after this persistence AND the owner stable-tip commit succeed, in
+// canonicalTransition.finish.
 func (s *SyncEngine) finalizeAppliedBlock(summary *ChainStateConnectSummary, blockHash [32]byte, pb *consensus.ParsedBlock, blockBytes []byte, prevState *ChainState, rollbackState syncRollbackState) error {
 	commitStart := time.Now()
 	if err := s.persistAppliedBlock(summary, blockHash, pb, blockBytes, prevState); err != nil {
@@ -114,17 +121,20 @@ func (s *SyncEngine) finalizeAppliedBlock(summary *ChainStateConnectSummary, blo
 				return s.handlePersistenceError(err, false, true)
 			}
 			fault := s.handlePersistenceError(err, false, false)
-			s.chainState.replaceFrom(rollbackState.chainState)
+			// The standard cleanup already ran, so reverting only the tip would
+			// freeze a cleaned Mempool against a pre-apply canonical tip. The
+			// frozen state is unobservable behind the retained guard, but it is
+			// the state a restart reconciles against, so restore both halves.
+			if restoreErr := errors.Join(
+				publishPreparedChainState(s.chainState, rollbackState.chainState),
+				restoreMempoolSnapshot(s.mempool, rollbackState.mempool),
+			); restoreErr != nil {
+				return errors.Join(fault, restoreErr)
+			}
 			return fault
 		}
 		return s.rollbackApplyBlock(err, rollbackState)
 	}
 	s.pvTelemetry.RecordCommitLatency(time.Since(commitStart))
-	s.recordAppliedBlock(summary.BlockHeight, pb.Header.Timestamp)
-	if s.mempool != nil {
-		if err := s.mempool.applyConnectedBlockParsed(pb); err != nil {
-			_, _ = fmt.Fprintf(s.stderr, "mempool: apply-connected-block: %v\n", err)
-		}
-	}
 	return nil
 }

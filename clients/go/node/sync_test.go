@@ -1111,3 +1111,389 @@ func TestValidateMempoolEntryParsedRejectsBadSource(t *testing.T) {
 		})
 	}
 }
+
+// pendingOutpointSyncFixture is the shared canonical-transition test bed: a
+// devnet engine whose chain is long enough for its height-1 coinbase output to
+// be spendable, the single mempool bound to that engine, and the keys needed to
+// build competing spends of that output.
+type pendingOutpointSyncFixture struct {
+	engine           *SyncEngine
+	store            *BlockStore
+	target           [32]byte
+	mempool          *Mempool
+	owner            *PendingOutpointOwner
+	sourceKP         *consensus.MLDSA87Keypair
+	sourceAddress    []byte
+	destAddress      []byte
+	sourceOutpoint   consensus.Outpoint
+	tipHash          [32]byte
+	tipHeight        uint64
+	alreadyGenerated uint64
+}
+
+func newPendingOutpointSyncFixture(t *testing.T) *pendingOutpointSyncFixture {
+	t.Helper()
+	engine, store, target := newReorgTestEngine(t)
+	sourceKP := mustReorgMLDSA87Keypair(t)
+	destKP := mustReorgMLDSA87Keypair(t)
+	f := &pendingOutpointSyncFixture{
+		engine:        engine,
+		store:         store,
+		target:        target,
+		sourceKP:      sourceKP,
+		sourceAddress: consensus.P2PKCovenantDataForPubkey(sourceKP.PubkeyBytes()),
+		destAddress:   consensus.P2PKCovenantDataForPubkey(destKP.PubkeyBytes()),
+		tipHash:       devnetGenesisBlockHash,
+	}
+	// COINBASE_MATURITY blocks so the height-1 coinbase output is spendable.
+	for height := uint64(1); height <= 100; height++ {
+		subsidy := consensus.BlockSubsidy(height, f.alreadyGenerated)
+		coinbase := reorgTestCoinbaseForAddress(t, height, subsidy, f.sourceAddress)
+		summary, err := engine.ApplyBlock(buildSingleTxBlock(t, f.tipHash, target, height+1, coinbase), nil)
+		if err != nil {
+			t.Fatalf("ApplyBlock(height=%d): %v", height, err)
+		}
+		if height == 1 {
+			_, coinbaseTxid, _, _, err := consensus.ParseTx(coinbase)
+			if err != nil {
+				t.Fatalf("ParseTx(coinbase height 1): %v", err)
+			}
+			f.sourceOutpoint = consensus.Outpoint{Txid: coinbaseTxid, Vout: 0}
+		}
+		f.tipHash, f.tipHeight, f.alreadyGenerated = summary.BlockHash, height, f.alreadyGenerated+subsidy
+	}
+	mempool, err := NewMempool(engine.chainState, store, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	engine.SetMempool(mempool)
+	f.mempool, f.owner = mempool, mempool.PendingOutpointOwner()
+	return f
+}
+
+// spend builds a signed transfer of the fixture's spendable coinbase output.
+// Distinct nonces produce distinct, mutually conflicting transactions.
+func (f *pendingOutpointSyncFixture) spend(t *testing.T, amount uint64, nonce uint64) []byte {
+	t.Helper()
+	return mustBuildSignedTransferTxForSyncTest(
+		t,
+		f.engine.chainState.Utxos,
+		[]consensus.Outpoint{f.sourceOutpoint},
+		amount,
+		100_000,
+		nonce,
+		f.sourceKP,
+		f.sourceAddress,
+		f.destAddress,
+	)
+}
+
+// blockIncluding builds a canonical block at height carrying tx. alreadyGenerated
+// is the branch-local total issued BEFORE height, so a block built on a side
+// branch gets that branch's subsidy rather than the canonical chain's.
+func (f *pendingOutpointSyncFixture) blockIncluding(t *testing.T, prevHash [32]byte, height uint64, alreadyGenerated uint64, timestamp uint64, tx []byte) []byte {
+	t.Helper()
+	_, _, wtxid, _, err := consensus.ParseTx(tx)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+	subsidy := consensus.BlockSubsidy(height, alreadyGenerated)
+	return buildMultiTxBlock(
+		t,
+		prevHash,
+		f.target,
+		timestamp,
+		reorgTestCoinbaseForWtxids(t, height, subsidy+100_000, f.sourceAddress, [][32]byte{{}, wtxid}),
+		tx,
+	)
+}
+
+func mustAdmissionContext(t *testing.T, owner *PendingOutpointOwner, what string) PendingOutpointAdmissionContext {
+	t.Helper()
+	ctx, ok := owner.AdmissionContext()
+	if !ok {
+		t.Fatalf("AdmissionContext unavailable %s", what)
+	}
+	return ctx
+}
+
+// breakResidentClaim rebinds a resident record to a FOREIGN owner's token —
+// precisely the record/claim inconsistency the typed standard delta refuses to
+// mutate through — so the next canonical cleanup of that record fails.
+func (f *pendingOutpointSyncFixture) breakResidentClaim(t *testing.T, txid [32]byte) {
+	t.Helper()
+	foreign := newPendingOutpointOwner(PendingOutpointTip{})
+	token, err := foreign.Reserve(PendingOutpointTip{}, PendingOutpointStandardMempool, [32]byte{0x01}, []consensus.Outpoint{f.sourceOutpoint})
+	if err != nil {
+		t.Fatalf("foreign Reserve: %v", err)
+	}
+	f.mempool.mu.Lock()
+	defer f.mempool.mu.Unlock()
+	f.mempool.txs[txid].token = token
+}
+
+func ownerClaimCount(owner *PendingOutpointOwner) (outpoints int, claims int, highWater uint64) {
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	return len(owner.byOutpoint), len(owner.byToken), owner.tokenHighWater
+}
+
+// TestSyncPendingOutpointDirectConnectReleasesTokensAndCommitsStableTip proves
+// the direct-connect row end to end: an included transaction's record and its
+// exact claim are both gone after the connect, the owner's stable tip is the new
+// canonical tip, exactly one generation was consumed, and the token high-water
+// stayed advanced so no sequence can be reused.
+func TestSyncPendingOutpointDirectConnectReleasesTokensAndCommitsStableTip(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	spend := f.spend(t, 700, 1)
+	if err := f.mempool.AddTx(spend); err != nil {
+		t.Fatalf("AddTx(spend): %v", err)
+	}
+	before := mustAdmissionContext(t, f.owner, "before the direct connect")
+	if before.StableTip.Hash != f.tipHash || before.StableTip.Height != f.tipHeight {
+		t.Fatalf("stable tip before=%+v, want the live tip (%d,%x)", before.StableTip, f.tipHeight, f.tipHash)
+	}
+	if outpoints, claims, _ := ownerClaimCount(f.owner); outpoints != 1 || claims != 1 {
+		t.Fatalf("owner state before connect=(%d,%d), want one claim", outpoints, claims)
+	}
+
+	summary, err := f.engine.ApplyBlock(f.blockIncluding(t, f.tipHash, f.tipHeight+1, f.alreadyGenerated, 202, spend), nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(including spend): %v", err)
+	}
+
+	if got := f.mempool.Len(); got != 0 {
+		t.Fatalf("mempool len after connect=%d, want 0", got)
+	}
+	outpoints, claims, highWater := ownerClaimCount(f.owner)
+	if outpoints != 0 || claims != 0 {
+		t.Fatalf("owner still holds outpoints=%d claims=%d after connect", outpoints, claims)
+	}
+	if highWater != 1 {
+		t.Fatalf("token high-water=%d, want the consumed sequence retained", highWater)
+	}
+	after := mustAdmissionContext(t, f.owner, "after the direct connect")
+	if after.StableTip.Hash != summary.BlockHash || after.StableTip.Height != summary.BlockHeight {
+		t.Fatalf("stable tip after=%+v, want the connected block (%d,%x)", after.StableTip, summary.BlockHeight, summary.BlockHash)
+	}
+	if after.Generation != before.Generation+1 {
+		t.Fatalf("generation after=%d, want exactly one advance from %d", after.Generation, before.Generation)
+	}
+}
+
+// TestSyncPendingOutpointCleanupFailureLeavesCanonicalTipUnmoved pins the
+// sync_pv.go rule that a standard cleanup failure must NOT be logged over a
+// committed tip: it propagates into rollback, so the apply fails and the live
+// canonical tip is exactly where it was.
+func TestSyncPendingOutpointCleanupFailureLeavesCanonicalTipUnmoved(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	spend := f.spend(t, 700, 1)
+	if err := f.mempool.AddTx(spend); err != nil {
+		t.Fatalf("AddTx(spend): %v", err)
+	}
+	f.breakResidentClaim(t, txID(t, spend))
+
+	beforeHash, beforeHeight := f.engine.chainState.TipHash, f.engine.chainState.Height
+	if _, err := f.engine.ApplyBlock(f.blockIncluding(t, f.tipHash, f.tipHeight+1, f.alreadyGenerated, 202, spend), nil); err == nil {
+		t.Fatal("apply committed a block whose standard cleanup failed")
+	}
+	if f.engine.chainState.TipHash != beforeHash || f.engine.chainState.Height != beforeHeight {
+		t.Fatalf("canonical tip moved to (%d,%x) despite the cleanup failure, want (%d,%x)",
+			f.engine.chainState.Height, f.engine.chainState.TipHash, beforeHeight, beforeHash)
+	}
+	storeHeight, storeHash, ok, err := f.store.Tip()
+	if err != nil || !ok || storeHash != beforeHash || storeHeight != beforeHeight {
+		t.Fatalf("blockstore tip=(%d,%x,ok=%v,err=%v), want the pre-apply canonical tip (%d,%x)",
+			storeHeight, storeHash, ok, err, beforeHeight, beforeHash)
+	}
+}
+
+// TestSyncPendingOutpointAdmissionConcurrentWithDirectConnectSmoke is a -race
+// smoke over the hostile row, NOT a forced interleaving: there is no seam that
+// pins an admission inside the guard window, so the schedule is whatever the
+// runtime picks. What it does pin, for every schedule, is the outcome invariant
+// — the racing candidate never survives a connect that consumed its outpoint,
+// no claim outlives the connected block, and the owner reopens afterwards.
+func TestSyncPendingOutpointAdmissionConcurrentWithDirectConnectSmoke(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	included := f.spend(t, 700, 1)
+	racing := f.spend(t, 690, 2)
+	block := f.blockIncluding(t, f.tipHash, f.tipHeight+1, f.alreadyGenerated, 202, included)
+
+	admitted := make(chan error, 1)
+	go func() { admitted <- f.mempool.AddTx(racing) }()
+	if _, err := f.engine.ApplyBlock(block, nil); err != nil {
+		t.Fatalf("ApplyBlock: %v", err)
+	}
+	admitErr := <-admitted
+
+	// Whichever side won, the outpoint has exactly one owner afterwards, and it
+	// is never the racing candidate: the block consumed the outpoint on chain.
+	if f.mempool.Contains(txID(t, racing)) {
+		t.Fatalf("racing candidate survived the connect (admit err=%v)", admitErr)
+	}
+	if _, ok := f.owner.txidForOutpoint(f.sourceOutpoint); ok {
+		t.Fatal("a claim on the spent outpoint outlived the connected block")
+	}
+	if got := f.mempool.Len(); got != 0 {
+		t.Fatalf("mempool len=%d after the race, want 0", got)
+	}
+	if _, ok := f.owner.AdmissionContext(); !ok {
+		t.Fatal("owner did not reopen after the connect")
+	}
+}
+
+// TestSyncSetMempoolPendingOutpointRejectsForeignChainStateBinding proves a
+// transition can only ever own ONE pointer-identical ChainState, Mempool and
+// owner: a mempool bound to a different ChainState is not installed, and the
+// rejection changes neither the engine's binding nor the candidate's own state.
+func TestSyncSetMempoolPendingOutpointRejectsForeignChainStateBinding(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	foreignState := NewChainState()
+	foreign, err := NewMempool(foreignState, f.store, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("NewMempool(foreign): %v", err)
+	}
+	foreignOwner := foreign.PendingOutpointOwner()
+	foreignBefore := mustAdmissionContext(t, foreignOwner, "on the foreign candidate")
+
+	f.engine.SetMempool(foreign)
+
+	f.engine.mu.RLock()
+	bound := f.engine.mempool
+	f.engine.mu.RUnlock()
+	if bound != f.mempool {
+		t.Fatalf("engine mempool=%p, want the original binding %p", bound, f.mempool)
+	}
+	if bound.PendingOutpointOwner() != f.owner {
+		t.Fatal("engine owner changed on a rejected SetMempool")
+	}
+	if got := mustAdmissionContext(t, foreignOwner, "after the rejected SetMempool"); got != foreignBefore {
+		t.Fatalf("rejected candidate context=%+v, want %+v unchanged", got, foreignBefore)
+	}
+
+	// A nil mempool IS installable — the identity guard applies only to a
+	// non-nil candidate — and a same-ChainState mempool binds.
+	f.engine.SetMempool(nil)
+	f.engine.mu.RLock()
+	bound = f.engine.mempool
+	f.engine.mu.RUnlock()
+	if bound != nil {
+		t.Fatalf("SetMempool(nil) left mempool=%p, want the binding cleared", bound)
+	}
+
+	same, err := NewMempool(f.engine.chainState, f.store, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("NewMempool(same chainstate): %v", err)
+	}
+	f.engine.SetMempool(same)
+	f.engine.mu.RLock()
+	bound = f.engine.mempool
+	f.engine.mu.RUnlock()
+	if bound != same || bound.PendingOutpointOwner() != same.PendingOutpointOwner() {
+		t.Fatalf("engine mempool=%p, want the same-chainstate mempool %p", bound, same)
+	}
+}
+
+// TestSyncPendingOutpointUnprovenRestoreLatchesAdmissionClosed pins the
+// fail-closed rule for a rollback whose EXACT restore failed: admission must not
+// reopen over a state nobody can prove. The transition is made to fail at the
+// standard cleanup and its restore is made to fail as well (an invalid mempool
+// capacity limit), so the engine takes the terminal latch, not an ordinary abort.
+func TestSyncPendingOutpointUnprovenRestoreLatchesAdmissionClosed(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	spend := f.spend(t, 700, 1)
+	if err := f.mempool.AddTx(spend); err != nil {
+		t.Fatalf("AddTx(spend): %v", err)
+	}
+	f.breakResidentClaim(t, txID(t, spend))
+	f.mempool.mu.Lock()
+	f.mempool.maxTxs = 0 // the rollback's mempool restore now fails too
+	f.mempool.mu.Unlock()
+
+	block := f.blockIncluding(t, f.tipHash, f.tipHeight+1, f.alreadyGenerated, 202, spend)
+	if _, err := f.engine.ApplyBlock(block, nil); err == nil {
+		t.Fatal("apply reported success although its restore could not be proven")
+	}
+	if ctx, ok := f.owner.AdmissionContext(); ok {
+		t.Fatalf("owner reopened at %+v after an unproven restore", ctx)
+	}
+	if _, err := f.engine.DisconnectTip(); !errors.Is(err, errStoragePersistenceFault) {
+		t.Fatalf("later SyncEngine mutator err=%v, want the latched storage persistence fault", err)
+	}
+}
+
+// TestSyncPendingOutpointCorruptCanonicalIndexOutranksConsensusRejection pins
+// the hostile row on BOTH canonical paths. Each subtest applies the SAME
+// consensus-invalid candidate twice: against a healthy index, proving the path
+// really reaches consensus validation, and against a malformed one, where the
+// local index error must win.
+//
+// On the direct path that precedence IS the rollback preflight, and removing it
+// reddens this test. On the reorg path branch collection scans the same index
+// first, so the preflight cannot be observed here; its value there — supplying
+// the EXACT rollback index — is pinned instead by
+// TestApplyBlockWithReorgRollbackRestoresCanonicalIndexAndChainstateFile, which
+// fails outright when the preflight is removed.
+func TestSyncPendingOutpointCorruptCanonicalIndexOutranksConsensusRejection(t *testing.T) {
+	// Height 0 is outside every MTP window these candidates read, so the
+	// corruption reaches the preflight rather than an earlier context read.
+	corrupt := func(f *pendingOutpointSyncFixture) {
+		f.store.stateMu.Lock()
+		f.store.index.Canonical[0] = "zz"
+		f.store.stateMu.Unlock()
+	}
+	assertConsensusError := func(t *testing.T, err error) {
+		t.Helper()
+		var txErr *consensus.TxError
+		if !errors.As(err, &txErr) {
+			t.Fatalf("healthy-index err=%v, want a consensus rejection", err)
+		}
+	}
+	assertIndexError := func(t *testing.T, err error) {
+		t.Helper()
+		var txErr *consensus.TxError
+		if err == nil || errors.As(err, &txErr) || !strings.Contains(err.Error(), "canonical[0]") {
+			t.Fatalf("err=%v, want the canonical[0] index error rather than a consensus rejection", err)
+		}
+	}
+	coinbaseAt := func(t *testing.T, f *pendingOutpointSyncFixture, height, alreadyGenerated uint64) []byte {
+		t.Helper()
+		return reorgTestCoinbaseForAddress(t, height, consensus.BlockSubsidy(height, alreadyGenerated), f.sourceAddress)
+	}
+
+	t.Run("direct connect", func(t *testing.T) {
+		f := newPendingOutpointSyncFixture(t)
+		// Timestamp 1 is at or below the canonical MTP: consensus-invalid.
+		invalid := buildSingleTxBlock(t, f.tipHash, f.target, 1, coinbaseAt(t, f, f.tipHeight+1, f.alreadyGenerated))
+		_, err := f.engine.ApplyBlockWithReorg(invalid, nil)
+		assertConsensusError(t, err)
+		corrupt(f)
+		_, err = f.engine.ApplyBlockWithReorg(invalid, nil)
+		assertIndexError(t, err)
+	})
+
+	t.Run("preferred branch reorg", func(t *testing.T) {
+		f := newPendingOutpointSyncFixture(t)
+		height, generated := f.tipHeight+1, f.alreadyGenerated
+		canonical := buildSingleTxBlock(t, f.tipHash, f.target, 500, coinbaseAt(t, f, height, generated))
+		if _, err := f.engine.ApplyBlockWithReorg(canonical, nil); err != nil {
+			t.Fatalf("ApplyBlockWithReorg(canonical): %v", err)
+		}
+		// The losing branch's first block is seeded straight into the store:
+		// through fork choice it would tie on work, and a tie-break win would
+		// make the final block a direct connect instead of the reorg this row
+		// needs. Two blocks then outweigh the one-block canonical extension.
+		side1 := buildSingleTxBlock(t, f.tipHash, f.target, 501, coinbaseAt(t, f, height, generated))
+		parsed1, side1Hash := mustParseReorgBlockForTest(t, side1)
+		if err := f.store.StoreBlock(side1Hash, parsed1.HeaderBytes, side1); err != nil {
+			t.Fatalf("StoreBlock(side1): %v", err)
+		}
+		side2 := buildSingleTxBlock(t, side1Hash, f.target, 1, coinbaseAt(t, f, height+1, generated+consensus.BlockSubsidy(height, generated)))
+		_, err := f.engine.ApplyBlockWithReorg(side2, nil)
+		assertConsensusError(t, err)
+		corrupt(f)
+		_, err = f.engine.ApplyBlockWithReorg(side2, nil)
+		assertIndexError(t, err)
+	})
+}

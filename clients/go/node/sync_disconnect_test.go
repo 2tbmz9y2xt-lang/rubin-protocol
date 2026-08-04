@@ -102,9 +102,14 @@ func TestDisconnectPreparedTipUsesRetainedVerifiedBlock(t *testing.T) {
 	}
 	writeRawStoreBlockFile(t, store, summary.BlockHash, []byte("not a block"))
 
-	disconnected, err := engine.disconnectPreparedTip(ctx)
+	tr := mustBeginCanonicalTransition(t, engine)
+	disconnected, err := engine.disconnectPreparedTip(ctx, tr.rollback)
 	if err != nil {
+		tr.abort()
 		t.Fatalf("disconnectPreparedTip reread or reparsed the block: %v", err)
+	}
+	if err := tr.finish(); err != nil {
+		t.Fatalf("canonical transition finish: %v", err)
 	}
 	if disconnected.BlockHash != summary.BlockHash || engine.chainState.Height != 0 || engine.chainState.TipHash != devnetGenesisBlockHash {
 		t.Fatalf("disconnect summary=%+v state=(%d,%x)", disconnected, engine.chainState.Height, engine.chainState.TipHash)
@@ -153,8 +158,13 @@ func TestPreparedCanonicalDisconnectRetainsPreviewedBlocks(t *testing.T) {
 		writeRawStoreBlockFile(t, store, storedBlock.lookupHash, []byte("replaced after preview"))
 	}
 
-	if err := engine.disconnectCanonicalToAncestor(0, prepared); err != nil {
+	tr := mustBeginCanonicalTransition(t, engine)
+	if err := engine.disconnectCanonicalToAncestor(0, prepared, tr.rollback); err != nil {
+		tr.abort()
 		t.Fatalf("disconnectCanonicalToAncestor reread a prepared block: %v", err)
+	}
+	if err := tr.finish(); err != nil {
+		t.Fatalf("canonical transition finish: %v", err)
 	}
 	if engine.chainState.Height != 0 || engine.chainState.TipHash != devnetGenesisBlockHash {
 		t.Fatalf("chainstate after retained disconnect=(%d,%x), want genesis", engine.chainState.Height, engine.chainState.TipHash)
@@ -191,7 +201,7 @@ func TestPreparedDisconnectValidationErrors(t *testing.T) {
 	}{
 		{"prepare uninitialized", "sync engine is not initialized", func() error { _, err := uninitialized.prepareDisconnectTipFromVerified(stored); return err }},
 		{"prepare empty store", "blockstore has no canonical tip", func() error { _, err := empty.prepareDisconnectTipFromVerified(stored); return err }},
-		{"ancestor above tip", "common ancestor is above canonical tip", func() error { return engine.disconnectCanonicalToAncestor(2, prepared) }},
+		{"ancestor above tip", "common ancestor is above canonical tip", func() error { return engine.disconnectCanonicalToAncestor(2, prepared, syncRollbackState{}) }},
 		{"validate uninitialized", "sync engine is not initialized", func() error { return uninitialized.validatePreparedDisconnectBlocks(0, nil) }},
 		{"validate empty store", "blockstore has no canonical tip", func() error { return empty.validatePreparedDisconnectBlocks(0, nil) }},
 		{"wrong count", "prepared disconnect block count mismatch", func() error { return engine.validatePreparedDisconnectBlocks(0, nil) }},
@@ -209,4 +219,99 @@ func TestPreparedDisconnectValidationErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDisconnectTipPendingOutpointAdvancesOneGenerationWithoutRequeue proves the
+// standalone-disconnect row: each disconnect runs as ONE canonical transition
+// that advances exactly one generation and commits the parent as the owner's
+// stable tip, it leaves resident records and their exact tokens untouched, and
+// it invents no requeue policy — a transaction carried by the disconnected
+// block does not reappear in the standard mempool.
+func TestDisconnectTipPendingOutpointAdvancesOneGenerationWithoutRequeue(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	forkHash, forkHeight, forkGenerated := f.tipHash, f.tipHeight, f.alreadyGenerated
+	spend := f.spend(t, 700, 1)
+	spendID := txID(t, spend)
+
+	subsidy101 := consensus.BlockSubsidy(forkHeight+1, forkGenerated)
+	plain := buildSingleTxBlock(t, forkHash, f.target, 202, reorgTestCoinbaseForAddress(t, forkHeight+1, subsidy101, f.sourceAddress))
+	if _, err := f.engine.ApplyBlock(plain, nil); err != nil {
+		t.Fatalf("ApplyBlock(plain 101): %v", err)
+	}
+	if err := f.mempool.AddTx(spend); err != nil {
+		t.Fatalf("AddTx(spend): %v", err)
+	}
+	f.mempool.mu.Lock()
+	residentToken := f.mempool.txs[spendID].token
+	f.mempool.mu.Unlock()
+	beforeDisconnect := mustAdmissionContext(t, f.owner, "before the standalone disconnect")
+
+	if _, err := f.engine.DisconnectTip(); err != nil {
+		t.Fatalf("DisconnectTip(plain 101): %v", err)
+	}
+
+	afterDisconnect := mustAdmissionContext(t, f.owner, "after the standalone disconnect")
+	if afterDisconnect.Generation != beforeDisconnect.Generation+1 {
+		t.Fatalf("generation after disconnect=%d, want exactly one advance from %d", afterDisconnect.Generation, beforeDisconnect.Generation)
+	}
+	if afterDisconnect.StableTip.Hash != forkHash || afterDisconnect.StableTip.Height != forkHeight {
+		t.Fatalf("stable tip after disconnect=%+v, want the parent (%d,%x)", afterDisconnect.StableTip, forkHeight, forkHash)
+	}
+	entry, claim := residentClaim(t, f.mempool, spendID)
+	if entry.token != residentToken {
+		t.Fatalf("resident token seq=%d after disconnect, want the exact seq %d", entry.token.seq, residentToken.seq)
+	}
+	if claim == nil || !claim.finalized {
+		t.Fatalf("resident claim=%+v after disconnect, want it untouched and finalized", claim)
+	}
+	if got := f.mempool.Len(); got != 1 {
+		t.Fatalf("mempool len after disconnect=%d, want the single untouched resident", got)
+	}
+
+	// Now disconnect a block that DID carry the transaction: the connect
+	// released its token, and the disconnect must not requeue it.
+	including := f.blockIncluding(t, forkHash, forkHeight+1, forkGenerated, 203, spend)
+	if _, err := f.engine.ApplyBlock(including, nil); err != nil {
+		t.Fatalf("ApplyBlock(including spend): %v", err)
+	}
+	if got := f.mempool.Len(); got != 0 {
+		t.Fatalf("mempool len after the including connect=%d, want 0", got)
+	}
+	beforeSecond := mustAdmissionContext(t, f.owner, "before the second disconnect")
+	if _, err := f.engine.DisconnectTip(); err != nil {
+		t.Fatalf("DisconnectTip(including 101): %v", err)
+	}
+	afterSecond := mustAdmissionContext(t, f.owner, "after the second disconnect")
+	if afterSecond.Generation != beforeSecond.Generation+1 {
+		t.Fatalf("second disconnect generation=%d, want exactly one advance from %d", afterSecond.Generation, beforeSecond.Generation)
+	}
+	if afterSecond.StableTip.Hash != forkHash {
+		t.Fatalf("stable tip after the second disconnect=%+v, want the parent %x", afterSecond.StableTip, forkHash)
+	}
+	if got := f.mempool.Len(); got != 0 {
+		t.Fatalf("mempool len after the second disconnect=%d, want 0: standalone disconnect adds no requeue", got)
+	}
+	outpoints, claims, highWater := ownerClaimCount(f.owner)
+	if outpoints != 0 || claims != 0 {
+		t.Fatalf("owner holds outpoints=%d claims=%d after the disconnects, want none", outpoints, claims)
+	}
+	if highWater != 1 {
+		t.Fatalf("token high-water=%d, want the single consumed sequence retained", highWater)
+	}
+}
+
+// mustBeginCanonicalTransition runs the canonical-index preflight and opens a
+// transition in the same order production does, so a test never opens one with
+// an unread rollback index.
+func mustBeginCanonicalTransition(t *testing.T, engine *SyncEngine) *canonicalTransition {
+	t.Helper()
+	canonicalIndex, err := engine.canonicalIndexPreflight()
+	if err != nil {
+		t.Fatalf("canonicalIndexPreflight: %v", err)
+	}
+	tr, err := engine.beginCanonicalTransition(canonicalIndex)
+	if err != nil {
+		t.Fatalf("beginCanonicalTransition: %v", err)
+	}
+	return tr
 }

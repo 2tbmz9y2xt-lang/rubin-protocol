@@ -475,8 +475,19 @@ func (s *SyncEngine) targetContextForCandidate(parentHash [32]byte, candidateHei
 	return targetContextForCandidate(s.blockStore, s.cfg, parentHash, candidateHeight)
 }
 
+// SetMempool binds the mempool whose pending-outpoint owner this engine drives.
+// It serializes on mutationMu so a canonical transition can never observe the
+// pointer set change under it. A non-nil mempool bound to a DIFFERENT ChainState
+// than this engine is NOT installed and changes neither engine nor candidate
+// state: a transition must own one pointer-identical ChainState, Mempool and
+// owner for its whole duration.
 func (s *SyncEngine) SetMempool(mempool *Mempool) {
 	if s == nil {
+		return
+	}
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	if mempool != nil && mempool.chainState != s.chainState {
 		return
 	}
 	s.mu.Lock()
@@ -566,18 +577,35 @@ type syncRollbackState struct {
 	reorgCount      uint64
 }
 
+// canonicalIndexPreflight performs the FALLIBLE half of the rollback snapshot —
+// reading the canonical index — while the caller holds mutationMu and BEFORE any
+// clone, ConnectBlock or preferred-branch consensus validation. That order keeps
+// a corrupt local index reported ahead of a candidate's consensus error.
+// mutationMu serializes canonical mutation and admission never touches the
+// canonical index, so the value stays exact until the transition begins.
+func (s *SyncEngine) canonicalIndexPreflight() ([]string, error) {
+	if s == nil || s.blockStore == nil {
+		return nil, nil
+	}
+	return s.blockStore.CanonicalIndexSnapshot()
+}
+
+// captureRollbackState is the standalone form: it runs the preflight itself and
+// then captures the rest. Canonical transitions do NOT use it — they run
+// canonicalIndexPreflight up front and pass the result to
+// captureRollbackStateWithIndex.
 func (s *SyncEngine) captureRollbackState() (syncRollbackState, error) {
+	canonicalIndex, err := s.canonicalIndexPreflight()
+	if err != nil {
+		return syncRollbackState{}, err
+	}
+	return s.captureRollbackStateWithIndex(canonicalIndex)
+}
+
+func (s *SyncEngine) captureRollbackStateWithIndex(canonicalIndex []string) (syncRollbackState, error) {
 	snapshot := cloneChainState(s.chainState)
 	if snapshot == nil {
 		return syncRollbackState{}, errors.New("nil chainstate")
-	}
-	var err error
-	var canonicalIndex []string
-	if s.blockStore != nil {
-		canonicalIndex, err = s.blockStore.CanonicalIndexSnapshot()
-		if err != nil {
-			return syncRollbackState{}, err
-		}
 	}
 	mempoolState, err := snapshotMempool(s.mempool)
 	if err != nil {
@@ -596,8 +624,197 @@ func (s *SyncEngine) captureRollbackState() (syncRollbackState, error) {
 	}, nil
 }
 
+// canonicalTransition is one canonical state transition. It owns
+// ChainState.admissionMu continuously from generation begin through stable
+// commit or exact abort, so neither admission nor a public terminal removal can
+// escape the rollback snapshot captured inside it.
+//
+// The ChainState, Mempool and owner pointers are captured ONCE at begin. Helpers
+// the transition calls (captureRollbackStateWithIndex, restoreRollbackChainState)
+// still read s.chainState / s.mempool; that is safe ONLY because SetMempool and
+// every canonical mutation serialize on mutationMu, which the entry point holds
+// throughout, so no reread can observe a different pointer set.
+type canonicalTransition struct {
+	engine     *SyncEngine
+	chainState *ChainState
+	mempool    *Mempool
+	owner      *PendingOutpointOwner
+	generation uint64
+	rollback   syncRollbackState
+	// suppressInnerCleanup is set by the preferred-branch reorg, which
+	// pre-cleans the whole prepared branch once instead of running the
+	// per-block cleanup inside each row.
+	suppressInnerCleanup bool
+	appliedHeight        uint64
+	appliedTimestamp     uint64
+	applied              bool
+}
+
+// beginCanonicalTransition takes the live admission guard, binds the pointer
+// set, advances the owner generation, and captures the exact rollback snapshot
+// under the guard. The caller holds mutationMu and MUST already have run
+// canonicalIndexPreflight, whose result it passes here: the fallible index read
+// belongs before any clone or consensus validation, not inside the guard.
+func (s *SyncEngine) beginCanonicalTransition(canonicalIndex []string) (*canonicalTransition, error) {
+	if err := s.mutationAllowed(); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	mempool := s.mempool
+	s.mu.RUnlock()
+	chainState := s.chainState
+	if mempool != nil && mempool.chainState != chainState {
+		return nil, errors.New("mempool is bound to a different chainstate")
+	}
+	owner := mempool.PendingOutpointOwner()
+	chainState.admissionMu.Lock()
+	generation, err := owner.beginTransition()
+	if err != nil {
+		chainState.admissionMu.Unlock()
+		return nil, err
+	}
+	rollback, err := s.captureRollbackStateWithIndex(canonicalIndex)
+	if err != nil {
+		owner.endTransitionAborted()
+		chainState.admissionMu.Unlock()
+		return nil, err
+	}
+	return &canonicalTransition{
+		engine:     s,
+		chainState: chainState,
+		mempool:    mempool,
+		owner:      owner,
+		generation: generation,
+		rollback:   rollback,
+	}, nil
+}
+
+// finish commits the owner stable tip from the live ChainState as the LAST
+// state change of the transition, reopens admission, and only then records the
+// runtime accepted-tip metrics.
+func (t *canonicalTransition) finish() error {
+	err := t.owner.commitStableTip(pendingOutpointTipOf(t.chainState))
+	t.chainState.admissionMu.Unlock()
+	if err != nil {
+		return err
+	}
+	if t.applied {
+		t.engine.recordAppliedBlock(t.appliedHeight, t.appliedTimestamp)
+	}
+	return nil
+}
+
+// abort reopens admission after the caller has proven the exact restore. The
+// stable tip keeps its pre-transition value; high-waters stay advanced.
+func (t *canonicalTransition) abort() {
+	t.owner.endTransitionAborted()
+	t.chainState.admissionMu.Unlock()
+}
+
+// end closes the transition for cause, and is the ONLY place that decides
+// between reopening admission and latching it shut.
+//
+// cause == nil commits the stable tip and reopens admission.
+//
+// TWO causes are terminal and fail-closed, because neither leaves the live and
+// persistent states both provable: an already-latched ambiguous atomic
+// POST-COMMIT persistence fault, and a rollback whose exact restore FAILED
+// (*rollbackRestoreFault). Either leaves the owner transition-active,
+// AdmissionContext unavailable and admissionMu deliberately NOT released, and
+// latches the engine fault so later mutators fail closed too. Waiters block
+// until the required restart, which beats reopening over an unproven state.
+//
+// admissionMu is the ONLY lock retained across that terminal state. mutationMu
+// is released by the calling entry point's own deferred unlock as this returns,
+// so a later SyncEngine mutator acquires it and gets the latched fault from
+// mutationAllowed instead of waiting forever.
+//
+// Any other cause is an ordinary abort: the caller has already proven the exact
+// restore, so admission reopens with high-waters left advanced.
+func (t *canonicalTransition) end(cause error) error {
+	if cause == nil {
+		return t.finish()
+	}
+	if t.engine.persistenceFaulted() {
+		t.engine.reportTerminalTransition("post-commit persistence fault", cause)
+		return cause
+	}
+	var restoreFault *rollbackRestoreFault
+	if errors.As(cause, &restoreFault) {
+		t.engine.latchTerminalFault(cause)
+		t.engine.reportTerminalTransition("rollback restore failed", cause)
+		return cause
+	}
+	t.abort()
+	return cause
+}
+
+// latchTerminalFault installs cause as the engine's terminal storage-persistence
+// fault when none is latched yet. It is the SAME latch handlePersistenceError
+// installs — no new recovery mechanism, no new state machine — so mutationAllowed
+// returns it to every later mutator exactly as after an ambiguous write.
+func (s *SyncEngine) latchTerminalFault(cause error) {
+	s.persistenceFaultMu.Lock()
+	defer s.persistenceFaultMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.persistenceFault == nil {
+		s.persistenceFault = &storagePersistenceFault{cause: cause}
+	}
+}
+
+// reportTerminalTransition makes the fail-closed latch visible to an operator:
+// without it a latched node is indistinguishable from a merely hung one.
+func (s *SyncEngine) reportTerminalTransition(reason string, cause error) {
+	_, _ = fmt.Fprintf(s.stderr, "sync: canonical transition terminal (%s), admission stays closed until restart: %v\n", reason, cause)
+}
+
+// rollbackRestoreFault marks a transition failure whose EXACT restore could not
+// be proven. It keeps the historical "cause (rollback failed: ...)" message; the
+// type exists so end() can route it into the fail-closed terminal latch.
+type rollbackRestoreFault struct {
+	cause      error
+	restoreErr error
+}
+
+func (e *rollbackRestoreFault) Error() string {
+	return fmt.Sprintf("%v (rollback failed: %v)", e.cause, e.restoreErr)
+}
+
+func (e *rollbackRestoreFault) Unwrap() error { return e.cause }
+
+// publishPreparedChainState copies a fully prepared chain state onto the live
+// ChainState under ChainState.mu only.
+//
+// The canonical transition already owns ChainState.admissionMu, and
+// ChainState.replaceFrom reacquires that same non-reentrant lock, so calling it
+// from under the guard would self-deadlock. Every restore and publication that
+// can run under the guard MUST use this helper instead.
+func publishPreparedChainState(dst *ChainState, src *ChainState) error {
+	snapshot := cloneChainState(src)
+	if dst == nil || snapshot == nil {
+		return errors.New("nil chainstate publication")
+	}
+	dst.mu.Lock()
+	defer dst.mu.Unlock()
+	dst.Utxos = snapshot.Utxos
+	dst.Height = snapshot.Height
+	dst.AlreadyGenerated = snapshot.AlreadyGenerated
+	dst.TipHash = snapshot.TipHash
+	dst.HasTip = snapshot.HasTip
+	dst.Rotation = snapshot.Rotation
+	dst.Registry = snapshot.Registry
+	return nil
+}
+
 func (s *SyncEngine) rollbackApplyBlock(cause error, state syncRollbackState) error {
 	if s.persistenceFaulted() {
+		return cause
+	}
+	var restoreFault *rollbackRestoreFault
+	if errors.As(cause, &restoreFault) {
+		// An inner restore already failed: retrying cannot make the state
+		// provable, and would mask the original fault. Propagate it to end().
 		return cause
 	}
 	restoreErr := s.restoreRollbackPersistentState(state)
@@ -608,7 +825,7 @@ func (s *SyncEngine) rollbackApplyBlock(cause error, state syncRollbackState) er
 	}
 	s.restoreRollbackRuntimeState(state)
 	if restoreErr != nil {
-		return fmt.Errorf("%w (rollback failed: %v)", cause, restoreErr)
+		return &rollbackRestoreFault{cause: cause, restoreErr: restoreErr}
 	}
 	return cause
 }
@@ -673,19 +890,28 @@ func (s *SyncEngine) reloadVisiblePersistenceState(reloadStore, reloadState bool
 	if !reloadState || chainStatePath == "" {
 		return reloadErr
 	}
-	loaded, err := LoadChainState(chainStatePath)
-	if err != nil {
+	if err := reloadVisibleChainState(state, chainStatePath); err != nil {
 		return firstRollbackRestoreErr(reloadErr, err)
 	}
+	return reloadErr
+}
+
+// reloadVisibleChainState re-reads the persisted chainstate from path and
+// republishes it into state, carrying the live rotation and registry fields
+// across. It touches no Mempool and no pending-outpoint owner.
+func reloadVisibleChainState(state *ChainState, path string) error {
+	loaded, err := LoadChainState(path)
+	if err != nil {
+		return err
+	}
 	if state == nil {
-		return firstRollbackRestoreErr(reloadErr, errors.New("nil chainstate destination"))
+		return errors.New("nil chainstate destination")
 	}
 	state.mu.RLock()
 	loaded.Rotation = state.Rotation
 	loaded.Registry = state.Registry
 	state.mu.RUnlock()
-	state.replaceFrom(loaded)
-	return reloadErr
+	return publishPreparedChainState(state, loaded)
 }
 
 func (s *SyncEngine) restoreRollbackPersistentState(state syncRollbackState) error {
@@ -731,8 +957,7 @@ func (s *SyncEngine) restoreRollbackChainState(state syncRollbackState) error {
 	if recovered == nil {
 		return errors.New("nil rollback chainstate")
 	}
-	s.chainState.replaceFrom(recovered)
-	return nil
+	return publishPreparedChainState(s.chainState, recovered)
 }
 
 func (s *SyncEngine) applyCanonicalParsedBlock(
@@ -753,10 +978,18 @@ type canonicalBlockApplyContext struct {
 	blockHeight    uint64
 	blockHash      [32]byte
 	expectedTarget *[32]byte
-	rollbackState  syncRollbackState
 	prevState      *ChainState
+	// canonicalIndex is the rollback preflight result, read before the clone
+	// below was connected so a local index fault outranks a consensus one.
+	canonicalIndex []string
 }
 
+// applyCanonicalParsedBlockTracked fully validates one direct-connect candidate
+// against a PRIVATE cloned ChainState — the live ChainState, BlockStore
+// canonical state, Mempool and owner are untouched until the block is proven —
+// and only then opens a canonical transition and commits it. A preferred-branch
+// reorg does not come through here: it prepares every row the same way in
+// preparePreferredBranch and commits them all inside ONE transition.
 func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	pb *consensus.ParsedBlock,
 	blockBytes []byte,
@@ -767,7 +1000,18 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	if err != nil {
 		return nil, outcome, err
 	}
-	summary, err := s.connectCanonicalBlock(blockBytes, prevTimestamps, ctx.expectedTarget)
+	prepared := cloneChainState(ctx.prevState)
+	if prepared == nil {
+		return nil, blockApplyMetricNone, errors.New("nil prepared chainstate")
+	}
+	summary, err := prepared.ConnectBlockWithSuiteContext(
+		blockBytes,
+		ctx.expectedTarget,
+		prevTimestamps,
+		s.cfg.ChainID,
+		s.cfg.RotationProvider,
+		s.cfg.SuiteRegistry,
+	)
 	s.runPVShadowIfActive(blockBytes, prevTimestamps, ctx, err, summary)
 	if err != nil {
 		return nil, blockApplyMetricRejected, err
@@ -778,17 +1022,96 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	// no re-parse, no retained bytes — and only AFTER the connect succeeded, so
 	// an over-cap or malformed DA layout is rejected by consensus with its own
 	// public error code before this ever runs. Any error here is therefore a
-	// defensive assertion; it rolls the apply back rather than committing a
-	// block whose canonical-applied report could not be built.
+	// defensive assertion; it happens before the transition begins, so nothing
+	// has been mutated and there is nothing to roll back.
 	daIDs, err := CompleteDASetIDsFromParsedBlock(pb)
 	if err != nil {
-		return nil, blockApplyMetricNone, s.rollbackApplyBlock(err, ctx.rollbackState)
+		return nil, blockApplyMetricNone, err
 	}
 	summary.CanonicalAppliedBlocks = []CanonicalAppliedBlock{{Hash: ctx.blockHash, CompleteDAIDs: daIDs}}
-	if err := s.finalizeAppliedBlock(summary, ctx.blockHash, pb, blockBytes, ctx.prevState, ctx.rollbackState); err != nil {
+	if err := s.commitPreparedBlock(prepared, summary, ctx, pb, blockBytes); err != nil {
 		return nil, blockApplyMetricNone, err
 	}
 	return summary, blockApplyMetricAccepted, nil
+}
+
+// commitPreparedBlock opens the transition for a direct connect and runs the
+// mutating half of the apply inside it.
+func (s *SyncEngine) commitPreparedBlock(
+	prepared *ChainState,
+	summary *ChainStateConnectSummary,
+	ctx canonicalBlockApplyContext,
+	pb *consensus.ParsedBlock,
+	blockBytes []byte,
+) error {
+	tr, err := s.beginCanonicalTransition(ctx.canonicalIndex)
+	if err != nil {
+		return err
+	}
+	err = s.commitPreparedBlockUnderGuard(tr, prepared, summary, ctx, pb, blockBytes)
+	if err == nil {
+		tr.appliedHeight, tr.appliedTimestamp, tr.applied = summary.BlockHeight, pb.Header.Timestamp, true
+	}
+	return tr.end(err)
+}
+
+// commitPreparedBlockUnderGuard commits one already-validated block under an
+// open transition: live tip recheck, standard cleanup BEFORE any observable
+// canonical tip change, prepared-state publication, then persistence. No parse,
+// ConnectBlock, signature verification or consensus validation runs here, and
+// every error it returns has already been through rollback.
+func (s *SyncEngine) commitPreparedBlockUnderGuard(
+	tr *canonicalTransition,
+	prepared *ChainState,
+	summary *ChainStateConnectSummary,
+	ctx canonicalBlockApplyContext,
+	pb *consensus.ParsedBlock,
+	blockBytes []byte,
+) error {
+	if err := s.recheckLiveTipIdentity(tr, ctx); err != nil {
+		return s.rollbackApplyBlock(err, tr.rollback)
+	}
+	// Cleanup precedes publication: the standard records and their exact
+	// claims are gone before any observer can see the new canonical tip.
+	if !tr.suppressInnerCleanup && tr.mempool != nil {
+		if err := tr.mempool.applyConnectedBlockParsed(pb); err != nil {
+			_, _ = fmt.Fprintf(s.stderr, "sync: standard mempool cleanup failed at height %d, rolling back: %v\n", ctx.blockHeight, err)
+			return s.rollbackApplyBlock(err, tr.rollback)
+		}
+	}
+	if err := publishPreparedChainState(tr.chainState, prepared); err != nil {
+		return s.rollbackApplyBlock(err, tr.rollback)
+	}
+	return s.finalizeAppliedBlock(summary, ctx.blockHash, pb, blockBytes, ctx.prevState, tr.rollback)
+}
+
+// recheckLiveTipIdentity proves, under the transition guard, that the live
+// ChainState AND the live BlockStore canonical tip are still exactly the state
+// the candidate was prepared against. mutationMu already serializes canonical
+// mutation in-process, so both halves are defense in depth.
+func (s *SyncEngine) recheckLiveTipIdentity(tr *canonicalTransition, ctx canonicalBlockApplyContext) error {
+	live := tr.chainState.view()
+	if live.hasTip != ctx.prevState.HasTip || live.height != ctx.prevState.Height || live.tipHash != ctx.prevState.TipHash {
+		return errors.New("live chainstate tip moved during canonical apply")
+	}
+	return s.recheckLiveStoreTipIdentity(ctx)
+}
+
+// recheckLiveStoreTipIdentity is the BlockStore half of recheckLiveTipIdentity.
+// An engine with no store has no second tip to disagree with, so it passes. The
+// check only reads the store and mutates nothing.
+func (s *SyncEngine) recheckLiveStoreTipIdentity(ctx canonicalBlockApplyContext) error {
+	if s.blockStore == nil {
+		return nil
+	}
+	storeHeight, storeHash, storeHasTip, err := s.blockStore.Tip()
+	if err != nil {
+		return err
+	}
+	if storeHasTip != ctx.prevState.HasTip || (storeHasTip && (storeHeight != ctx.prevState.Height || storeHash != ctx.prevState.TipHash)) {
+		return errors.New("live blockstore tip moved during canonical apply")
+	}
+	return nil
 }
 
 func (s *SyncEngine) prepareCanonicalBlockApply(pb *consensus.ParsedBlock, target *canonicalApplyTarget) (canonicalBlockApplyContext, blockApplyMetricOutcome, error) {
@@ -810,16 +1133,24 @@ func (s *SyncEngine) prepareCanonicalBlockApply(pb *consensus.ParsedBlock, targe
 	if outcome, err := s.validateGenesisIdentity(blockHeight, blockHash); err != nil {
 		return canonicalBlockApplyContext{}, outcome, err
 	}
-	rollbackState, err := s.captureRollbackState()
+	// The fallible canonical-index rollback preflight sits exactly where it sat
+	// before the transition existed: after the genesis-identity guard and BEFORE
+	// the clone below is connected, so a corrupt local index is reported ahead of
+	// the candidate's consensus error rather than behind it.
+	canonicalIndex, err := s.canonicalIndexPreflight()
 	if err != nil {
 		return canonicalBlockApplyContext{}, blockApplyMetricNone, err
+	}
+	prevState := cloneChainState(s.chainState)
+	if prevState == nil {
+		return canonicalBlockApplyContext{}, blockApplyMetricNone, errors.New("nil chainstate")
 	}
 	return canonicalBlockApplyContext{
 		blockHeight:    blockHeight,
 		blockHash:      blockHash,
 		expectedTarget: expectedTarget,
-		rollbackState:  rollbackState,
-		prevState:      cloneChainState(rollbackState.chainState),
+		prevState:      prevState,
+		canonicalIndex: canonicalIndex,
 	}, blockApplyMetricNone, nil
 }
 
@@ -835,7 +1166,7 @@ func (s *SyncEngine) prepareCanonicalBlockApply(pb *consensus.ParsedBlock, targe
 // candidate to one WINDOW_SIZE walk instead of two. Otherwise the selected
 // parent is the canonical tip from nextBlockContext; at height 0 nothing is
 // derived and the published-genesis path is unchanged. All of it is read-only
-// and runs before captureRollbackState, therefore before any mutation.
+// and runs before the canonical transition opens, therefore before any mutation.
 func (s *SyncEngine) resolveCanonicalApplyTarget(target *canonicalApplyTarget, canonicalTip *[32]byte, blockHeight uint64) (*[32]byte, error) {
 	if target != nil {
 		return target.expected, nil
@@ -859,19 +1190,4 @@ func (s *SyncEngine) validateCanonicalBlockApplyReady(pb *consensus.ParsedBlock)
 		return errors.New("nil parsed block")
 	}
 	return nil
-}
-
-func (s *SyncEngine) connectCanonicalBlock(
-	blockBytes []byte,
-	prevTimestamps []uint64,
-	expectedTarget *[32]byte,
-) (*ChainStateConnectSummary, error) {
-	return s.chainState.ConnectBlockWithSuiteContext(
-		blockBytes,
-		expectedTarget,
-		prevTimestamps,
-		s.cfg.ChainID,
-		s.cfg.RotationProvider,
-		s.cfg.SuiteRegistry,
-	)
 }

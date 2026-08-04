@@ -220,42 +220,48 @@ func (s *SyncEngine) shouldSwitchToBranch(
 	}
 }
 
-// applyPreferredBranch applies the candidate branch selected by fork choice:
-// greater ChainWork, or equal ChainWork with a lexicographically lower tip hash.
+// preparedBranchBlock is one fully validated preferred-branch row: its prepared
+// post-state, that connect's summary, and the canonical context it was validated
+// against. Retaining all three is what keeps the in-guard commit free of any
+// repeated parse, ConnectBlock, signature verification or fallible preparation.
+type preparedBranchBlock struct {
+	item     reorgBranchBlock
+	prepared *ChainState
+	summary  *ChainStateConnectSummary
+	ctx      canonicalBlockApplyContext
+}
+
+// applyPreferredBranch applies the candidate branch selected by fork choice —
+// greater ChainWork, or equal ChainWork with a lexicographically lower tip hash
+// — inside EXACTLY ONE canonical transition: one generation for the whole
+// winning branch, one standard pre-clean for the final prepared branch, every
+// per-block inner cleanup suppressed, and the existing deterministic requeue
+// running only after the final stable owner tip is committed. Every row is fully
+// validated BEFORE the transition opens, so nothing under the guard re-runs
+// consensus or re-verifies a signature.
 func (s *SyncEngine) applyPreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
 ) (*ChainStateConnectSummary, error) {
-	rollbackState, err := s.captureRollbackState()
+	canonicalIndex, err := s.canonicalIndexPreflight()
 	if err != nil {
 		return nil, err
 	}
-	preparedDisconnectedBlocks, reorgDepth, err := s.preparePreferredBranch(branch, commonAncestorHeight, rollbackState)
+	rows, preparedDisconnectedBlocks, reorgDepth, err := s.preparePreferredBranch(branch, commonAncestorHeight)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.disconnectCanonicalToAncestor(commonAncestorHeight, preparedDisconnectedBlocks); err != nil {
-		return nil, s.rollbackApplyBlock(err, rollbackState)
+	tr, err := s.beginCanonicalTransition(canonicalIndex)
+	if err != nil {
+		return nil, err
 	}
-
-	var summary *ChainStateConnectSummary
-	var pendingAccepted uint64
-	var canonicalBlocks []CanonicalAppliedBlock
-	for i, item := range branch {
-		var outcome blockApplyMetricOutcome
-		summary, outcome, err = s.applyBranchBlock(item, commonAncestorHeight+1+uint64(i))
-		if err != nil {
-			return nil, s.rollbackBranchBlockApply(err, rollbackState, outcome)
-		}
-		if outcome == blockApplyMetricAccepted {
-			pendingAccepted++
-		}
-		if summary != nil && len(summary.CanonicalAppliedBlocks) > 0 {
-			canonicalBlocks = append(canonicalBlocks, summary.CanonicalAppliedBlocks[0])
-		}
+	tr.suppressInnerCleanup = true
+	summary, canonicalBlocks, err := s.applyPreferredBranchUnderGuard(tr, rows, commonAncestorHeight, preparedDisconnectedBlocks)
+	if endErr := tr.end(err); endErr != nil {
+		return nil, endErr
 	}
 	s.requeueVerifiedDisconnectedTransactions(preparedDisconnectedBlocks)
-	s.noteBlockApplyAcceptedN(pendingAccepted)
+	s.noteBlockApplyAcceptedN(uint64(len(rows)))
 	s.noteReorg(reorgDepth)
 	if summary != nil {
 		summary.CanonicalAppliedBlocks = canonicalBlocks
@@ -263,49 +269,62 @@ func (s *SyncEngine) applyPreferredBranch(
 	return summary, nil
 }
 
-// applyBranchBlock commits one row of the preferred branch at its caller-owned
-// height. Both context windows are re-derived per iteration: the canonical
-// index moved when the previous row committed, and a branch can cross a
-// retarget boundary (the target half of the B.9 / issue #1166 argument). Target
-// context first, so a target-context failure short-circuits before the MTP
-// window is read.
-func (s *SyncEngine) applyBranchBlock(item reorgBranchBlock, nextHeight uint64) (*ChainStateConnectSummary, blockApplyMetricOutcome, error) {
-	targetCtx, err := s.targetContextForCandidate(item.header.PrevBlockHash, nextHeight)
-	if err != nil {
-		return nil, blockApplyMetricNone, err
+// applyPreferredBranchUnderGuard is commit-only: pre-clean, disconnect to the
+// common ancestor, then publish and persist each already-prepared row.
+func (s *SyncEngine) applyPreferredBranchUnderGuard(
+	tr *canonicalTransition,
+	rows []preparedBranchBlock,
+	commonAncestorHeight uint64,
+	preparedDisconnectedBlocks []verifiedStoredBlock,
+) (*ChainStateConnectSummary, []CanonicalAppliedBlock, error) {
+	if err := s.precleanPreferredBranch(tr, rows); err != nil {
+		return nil, nil, s.rollbackApplyBlock(err, tr.rollback)
 	}
-	freshTs, err := prevTimestampsFromStore(s.blockStore, nextHeight)
-	if err != nil {
-		return nil, blockApplyMetricNone, err
+	if err := s.disconnectCanonicalToAncestor(commonAncestorHeight, preparedDisconnectedBlocks, tr.rollback); err != nil {
+		return nil, nil, s.rollbackApplyBlock(err, tr.rollback)
 	}
-	return s.applyCanonicalParsedBlockTracked(item.parsed, item.blockBytes, freshTs, targetCtx)
+	var summary *ChainStateConnectSummary
+	canonicalBlocks := make([]CanonicalAppliedBlock, 0, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		if err := s.commitPreparedBlockUnderGuard(tr, row.prepared, row.summary, row.ctx, row.item.parsed, row.item.blockBytes); err != nil {
+			return nil, nil, err
+		}
+		tr.appliedHeight, tr.appliedTimestamp, tr.applied = row.summary.BlockHeight, row.item.header.Timestamp, true
+		summary = row.summary
+		canonicalBlocks = append(canonicalBlocks, row.summary.CanonicalAppliedBlocks...)
+	}
+	return summary, canonicalBlocks, nil
 }
 
-func (s *SyncEngine) rollbackBranchBlockApply(
-	err error,
-	rollbackState syncRollbackState,
-	outcome blockApplyMetricOutcome,
-) error {
-	rollbackErr := s.rollbackApplyBlock(err, rollbackState)
-	if outcome == blockApplyMetricRejected {
-		s.noteBlockApplyRejected()
+// precleanPreferredBranch removes, in one standard-domain commit, every entry
+// the final prepared branch includes or conflicts with, before any live
+// ChainState or BlockStore canonical tip change.
+func (s *SyncEngine) precleanPreferredBranch(tr *canonicalTransition, rows []preparedBranchBlock) error {
+	if tr.mempool == nil {
+		return nil
 	}
-	return rollbackErr
+	blocks := make([]*consensus.ParsedBlock, 0, len(rows))
+	for i := range rows {
+		blocks = append(blocks, rows[i].item.parsed)
+	}
+	return tr.mempool.applyConnectedBlocksParsed(blocks)
 }
 
+// preparePreferredBranch validates the whole winning branch against private
+// clones and retains every prepared post-state, summary and canonical context.
+// It touches no live state, and nothing it does repeats once the guard is held.
 func (s *SyncEngine) preparePreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
-	rollbackState syncRollbackState,
-) ([]verifiedStoredBlock, uint64, error) {
-	previewState := cloneChainState(rollbackState.chainState)
+) ([]preparedBranchBlock, []verifiedStoredBlock, uint64, error) {
+	previewState := cloneChainState(s.chainState)
 	if previewState == nil {
-		return nil, 0, errors.New("nil preview chainstate")
+		return nil, nil, 0, errors.New("nil preview chainstate")
 	}
-	var err error
 	preparedDisconnectedBlocks, reorgDepth, err := s.previewDisconnectCanonicalToAncestor(previewState, commonAncestorHeight)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 	// Build a sliding MTP window: start from pre-fork timestamps, advance
 	// after each block.  The blockstore index is NOT updated during preview,
@@ -313,31 +332,72 @@ func (s *SyncEngine) preparePreferredBranch(
 	// re-deriving from the store each iteration (B.9 fix).
 	slidingTs, err := prevTimestampsFromStore(s.blockStore, commonAncestorHeight+1)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
+	rows := make([]preparedBranchBlock, 0, len(branch))
+	// Row i's prev state is row i-1's prepared post-state, matching exactly
+	// what the guard publishes one row at a time.
+	prev := previewState
 	for i, item := range branch {
-		// Per-row derivation: a branch can cross a retarget boundary. Unlike
-		// the MTP window this needs no sliding workaround — it reads headers
-		// by hash and never consults the canonical index, and every ancestor
-		// it needs is already stored (collectBranchToCanonical fetched
-		// branch[0..len-2] from the store; the common ancestor is canonical).
-		targetCtx, targetErr := s.targetContextForCandidate(item.header.PrevBlockHash, commonAncestorHeight+1+uint64(i))
-		if targetErr != nil {
-			return nil, 0, targetErr
+		row, rowErr := s.prepareBranchRow(prev, item, commonAncestorHeight+1+uint64(i), slidingTs)
+		if rowErr != nil {
+			return nil, nil, 0, rowErr
 		}
-		if _, err := previewState.ConnectBlockWithSuiteContext(
-			item.blockBytes,
-			targetCtx.expected,
-			slidingTs,
-			s.cfg.ChainID,
-			s.cfg.RotationProvider,
-			s.cfg.SuiteRegistry,
-		); err != nil {
-			return nil, 0, err
-		}
+		rows = append(rows, row)
+		prev = row.prepared
 		slidingTs = advancePrevTimestamps(slidingTs, item.header.Timestamp)
 	}
-	return preparedDisconnectedBlocks, reorgDepth, nil
+	return rows, preparedDisconnectedBlocks, reorgDepth, nil
+}
+
+// prepareBranchRow fully validates one branch row against a private clone of its
+// predecessor's prepared post-state and retains everything the commit needs.
+//
+// Per-row target derivation: a branch can cross a retarget boundary. Unlike the
+// MTP window it needs no sliding workaround — it reads headers by hash, never
+// the canonical index, and every ancestor it needs is already stored. Target
+// context resolves first, so its failure short-circuits before the connect.
+func (s *SyncEngine) prepareBranchRow(
+	prevState *ChainState,
+	item reorgBranchBlock,
+	height uint64,
+	prevTimestamps []uint64,
+) (preparedBranchBlock, error) {
+	targetCtx, err := s.targetContextForCandidate(item.header.PrevBlockHash, height)
+	if err != nil {
+		return preparedBranchBlock{}, err
+	}
+	ctx := canonicalBlockApplyContext{
+		blockHeight:    height,
+		blockHash:      item.hash,
+		expectedTarget: targetCtx.expected,
+		prevState:      prevState,
+	}
+	prepared := cloneChainState(prevState)
+	if prepared == nil {
+		return preparedBranchBlock{}, errors.New("nil prepared branch chainstate")
+	}
+	summary, err := prepared.ConnectBlockWithSuiteContext(
+		item.blockBytes,
+		ctx.expectedTarget,
+		prevTimestamps,
+		s.cfg.ChainID,
+		s.cfg.RotationProvider,
+		s.cfg.SuiteRegistry,
+	)
+	s.runPVShadowIfActive(item.blockBytes, prevTimestamps, ctx, err, summary)
+	if err != nil {
+		// No apply-outcome metric: a branch row rejected during preparation was
+		// never a canonical apply attempt, matching the pre-transition behavior
+		// where the preview rejected before any per-row apply was counted.
+		return preparedBranchBlock{}, err
+	}
+	daIDs, err := CompleteDASetIDsFromParsedBlock(item.parsed)
+	if err != nil {
+		return preparedBranchBlock{}, err
+	}
+	summary.CanonicalAppliedBlocks = []CanonicalAppliedBlock{{Hash: item.hash, CompleteDAIDs: daIDs}}
+	return preparedBranchBlock{item: item, prepared: prepared, summary: summary, ctx: ctx}, nil
 }
 
 // advancePrevTimestamps prepends newTs to prev and keeps at most 11 entries,
@@ -524,6 +584,10 @@ func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte
 	s.requeueParsedDisconnectedTransactions(parsedBlocks)
 }
 
+// requeueParsedDisconnectedTransactions MUST NOT be called under the canonical
+// transition guard: it routes to Mempool.AddReorgTx, which takes
+// ChainState.admissionMu.RLock, and sync.RWMutex is not reentrant. Its only
+// caller runs it after the transition released that guard.
 func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []*consensus.ParsedBlock) {
 	if s == nil || s.mempool == nil || len(disconnectedBlocks) == 0 {
 		return

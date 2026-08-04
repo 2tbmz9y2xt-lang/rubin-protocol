@@ -151,19 +151,61 @@ func TestSyncEnginePostCommitFailuresReloadVisibleStateWithoutCompensation(t *te
 	requireAtomicTest(t, nilFault.Unwrap() == nil, "nil fault unwrap")
 }
 
-func TestSyncEnginePostCommitFaultLatchesBeforeCapturedStateReplacement(t *testing.T) {
+// TestSyncEnginePostCommitFaultKeepsAdmissionClosedAfterLatch pins the terminal
+// fail-closed contract for an ambiguous atomic POST-COMMIT persistence failure:
+// the fault is latched, the owner stays transition-active so AdmissionContext
+// stays unavailable, the continuous admission guard is never released so a
+// standard-admission waiter cannot pass it, and a later SyncEngine mutator
+// acquires mutationMu and returns the latched fault instead of blocking forever.
+//
+// The controlling goroutine deliberately NEVER acquires admissionMu before it
+// releases the injected block: the transition holds that guard across
+// persistence by design, so taking it here would deadlock the test rather than
+// observe anything. Everything below is proven from the owner and the engine
+// instead, and the admission waiter runs on its own goroutine.
+func TestSyncEnginePostCommitFaultKeepsAdmissionClosedAfterLatch(t *testing.T) {
 	engine, store, _ := newPersistenceFaultEngine(t)
+	mempool, err := NewMempool(engine.chainState, store, devnetGenesisChainID)
+	mustAtomic(t, err)
+	engine.SetMempool(mempool)
+	owner := mempool.PendingOutpointOwner()
+	if _, ok := owner.AdmissionContext(); !ok {
+		t.Fatal("owner was not stable before the blocked apply")
+	}
+
 	release, result := startBlockedApply(t, engine, store, nil)
-	engine.chainState.admissionMu.Lock()
+	// The transition began before persistence ran, so the owner is already
+	// transition-active while the apply is parked inside the injected failure.
+	if _, ok := owner.AdmissionContext(); ok {
+		t.Error("AdmissionContext was available during an active transition")
+	}
 	close(release)
-	for deadline := time.Now().Add(time.Second); !engine.persistenceFaulted() && time.Now().Before(deadline); {
-		time.Sleep(time.Millisecond)
-	}
-	if !engine.persistenceFaulted() {
-		t.Error("persistence fault was not published before replacement")
-	}
-	engine.chainState.admissionMu.Unlock()
 	requirePersistenceFault(t, awaitPersistenceResult(t, result, "failed apply"), atomicWriteCreateIfAbsent)
+
+	if !engine.persistenceFaulted() {
+		t.Fatal("persistence fault was not latched")
+	}
+	if ctx, ok := owner.AdmissionContext(); ok {
+		t.Errorf("AdmissionContext became available after the latched fault: %+v", ctx)
+	}
+
+	// The guard is still held, so a standard-admission attempt blocks. It is
+	// left parked on purpose: nothing in-process may release that guard.
+	admitted := make(chan error, 1)
+	go func() { admitted <- mempool.AddTx(DevnetGenesisBlockBytes()) }()
+	select {
+	case err := <-admitted:
+		t.Errorf("standard admission passed the latched guard: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// mutationMu, unlike admissionMu, was released when the failed transition
+	// returned, so a later mutator reports the latched fault rather than hanging.
+	queued := make(chan error, 1)
+	go func() { _, err := engine.ApplyBlock(DevnetGenesisBlockBytes(), nil); queued <- err }()
+	if err := awaitPersistenceResult(t, queued, "queued mutator"); !errors.Is(err, errStoragePersistenceFault) {
+		t.Fatalf("queued mutator=%v, want the latched persistence fault", err)
+	}
 }
 
 func TestSyncEngineQueuesMutatorsUntilPostCommitFaultIsPublished(t *testing.T) {
