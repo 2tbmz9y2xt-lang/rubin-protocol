@@ -23,7 +23,11 @@ func testOwnerKind(t *testing.T, err error) PendingOutpointErrorKind {
 
 func mustReserve(t *testing.T, o *PendingOutpointOwner, txid [32]byte, inputs ...consensus.Outpoint) PendingOutpointToken {
 	t.Helper()
-	token, err := o.Reserve(o.stableTip, PendingOutpointStandardMempool, txid, inputs)
+	admission, ok := o.AdmissionContext()
+	if !ok {
+		t.Fatalf("AdmissionContext unavailable before Reserve(%x)", txid)
+	}
+	token, err := o.Reserve(admission, PendingOutpointStandardMempool, txid, inputs)
 	if err != nil {
 		t.Fatalf("Reserve(%x): %v", txid, err)
 	}
@@ -63,19 +67,20 @@ func TestPendingOutpointOwnerReserveInstallsCompleteClaim(t *testing.T) {
 func TestPendingOutpointOwnerReserveRejectionsMutateNothing(t *testing.T) {
 	otherTip := PendingOutpointTip{HasTip: true, Height: 7, Hash: [32]byte{0x77}}
 	cases := []struct {
-		name   string
-		setup  func(o *PendingOutpointOwner)
-		tip    PendingOutpointTip
-		domain PendingOutpointDomain
-		txid   [32]byte
-		inputs []consensus.Outpoint
-		want   PendingOutpointErrorKind
+		name      string
+		setup     func(o *PendingOutpointOwner)
+		admission PendingOutpointAdmissionContext
+		domain    PendingOutpointDomain
+		txid      [32]byte
+		inputs    []consensus.Outpoint
+		want      PendingOutpointErrorKind
 	}{
-		{"invalid domain", nil, PendingOutpointTip{}, PendingOutpointDomain(0), [32]byte{0x01}, []consensus.Outpoint{testOutpoint(1)}, PendingOutpointInternal},
-		{"zero txid", nil, PendingOutpointTip{}, PendingOutpointStandardMempool, [32]byte{}, []consensus.Outpoint{testOutpoint(1)}, PendingOutpointInternal},
-		{"empty input set", nil, PendingOutpointTip{}, PendingOutpointStandardMempool, [32]byte{0x01}, nil, PendingOutpointInternal},
-		{"duplicate input", nil, PendingOutpointTip{}, PendingOutpointStandardMempool, [32]byte{0x01}, []consensus.Outpoint{testOutpoint(1), testOutpoint(1)}, PendingOutpointInternal},
-		{"expected tip mismatch", nil, otherTip, PendingOutpointStandardMempool, [32]byte{0x01}, []consensus.Outpoint{testOutpoint(1)}, PendingOutpointUnavailable},
+		{"invalid domain", nil, PendingOutpointAdmissionContext{}, PendingOutpointDomain(0), [32]byte{0x01}, []consensus.Outpoint{testOutpoint(1)}, PendingOutpointInternal},
+		{"zero txid", nil, PendingOutpointAdmissionContext{}, PendingOutpointStandardMempool, [32]byte{}, []consensus.Outpoint{testOutpoint(1)}, PendingOutpointInternal},
+		{"empty input set", nil, PendingOutpointAdmissionContext{}, PendingOutpointStandardMempool, [32]byte{0x01}, nil, PendingOutpointInternal},
+		{"duplicate input", nil, PendingOutpointAdmissionContext{}, PendingOutpointStandardMempool, [32]byte{0x01}, []consensus.Outpoint{testOutpoint(1), testOutpoint(1)}, PendingOutpointInternal},
+		{"expected tip mismatch", nil, PendingOutpointAdmissionContext{StableTip: otherTip}, PendingOutpointStandardMempool, [32]byte{0x01}, []consensus.Outpoint{testOutpoint(1)}, PendingOutpointUnavailable},
+		{"expected generation mismatch", nil, PendingOutpointAdmissionContext{Generation: 1}, PendingOutpointStandardMempool, [32]byte{0x01}, []consensus.Outpoint{testOutpoint(1)}, PendingOutpointUnavailable},
 		{
 			"active transition",
 			func(o *PendingOutpointOwner) {
@@ -83,7 +88,7 @@ func TestPendingOutpointOwnerReserveRejectionsMutateNothing(t *testing.T) {
 					t.Fatalf("beginTransition: %v", err)
 				}
 			},
-			PendingOutpointTip{},
+			PendingOutpointAdmissionContext{},
 			PendingOutpointStandardMempool,
 			[32]byte{0x01},
 			[]consensus.Outpoint{testOutpoint(1)},
@@ -92,7 +97,7 @@ func TestPendingOutpointOwnerReserveRejectionsMutateNothing(t *testing.T) {
 		{
 			"token sequence exhausted",
 			func(o *PendingOutpointOwner) { o.tokenHighWater = ^uint64(0) },
-			PendingOutpointTip{},
+			PendingOutpointAdmissionContext{},
 			PendingOutpointStandardMempool,
 			[32]byte{0x01},
 			[]consensus.Outpoint{testOutpoint(1)},
@@ -106,7 +111,7 @@ func TestPendingOutpointOwnerReserveRejectionsMutateNothing(t *testing.T) {
 				tc.setup(owner)
 			}
 			highWater, generation := owner.tokenHighWater, owner.generation
-			token, err := owner.Reserve(tc.tip, tc.domain, tc.txid, tc.inputs)
+			token, err := owner.Reserve(tc.admission, tc.domain, tc.txid, tc.inputs)
 			if err == nil {
 				t.Fatalf("Reserve accepted %s", tc.name)
 			}
@@ -123,7 +128,7 @@ func TestPendingOutpointOwnerReserveRejectionsMutateNothing(t *testing.T) {
 	}
 	t.Run("nil owner", func(t *testing.T) {
 		var owner *PendingOutpointOwner
-		_, err := owner.Reserve(PendingOutpointTip{}, PendingOutpointStandardMempool, [32]byte{0x01}, []consensus.Outpoint{testOutpoint(1)})
+		_, err := owner.Reserve(PendingOutpointAdmissionContext{}, PendingOutpointStandardMempool, [32]byte{0x01}, []consensus.Outpoint{testOutpoint(1)})
 		if testOwnerKind(t, err) != PendingOutpointInternal {
 			t.Fatalf("nil owner Reserve = %v, want internal", err)
 		}
@@ -139,7 +144,7 @@ func TestPendingOutpointOwnerConflictReportsFirstInputAndInstallsNothing(t *test
 	first := mustReserve(t, owner, [32]byte{0x01}, testOutpoint(5))
 	highWater := owner.tokenHighWater
 
-	_, err := owner.Reserve(PendingOutpointTip{}, PendingOutpointStandardMempool, [32]byte{0x02},
+	_, err := owner.Reserve(PendingOutpointAdmissionContext{}, PendingOutpointStandardMempool, [32]byte{0x02},
 		[]consensus.Outpoint{testOutpoint(1), testOutpoint(2), testOutpoint(5)})
 	var ownerErr *PendingOutpointError
 	if !errors.As(err, &ownerErr) || ownerErr.Kind != PendingOutpointConflict {
@@ -157,7 +162,7 @@ func TestPendingOutpointOwnerConflictReportsFirstInputAndInstallsNothing(t *test
 	if err := owner.Release(first); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
-	if _, err := owner.Reserve(PendingOutpointTip{}, PendingOutpointStandardMempool, [32]byte{0x02},
+	if _, err := owner.Reserve(PendingOutpointAdmissionContext{}, PendingOutpointStandardMempool, [32]byte{0x02},
 		[]consensus.Outpoint{testOutpoint(1), testOutpoint(2), testOutpoint(5)}); err != nil {
 		t.Fatalf("Reserve after release: %v", err)
 	}
@@ -430,11 +435,11 @@ func TestPendingOutpointOwnerRestoreRejectsInconsistentSnapshots(t *testing.T) {
 // standard claim does, so the two can never both hold one outpoint.
 func TestPendingOutpointOwnerDomainsShareOneAuthority(t *testing.T) {
 	owner := newPendingOutpointOwner(PendingOutpointTip{})
-	daToken, err := owner.Reserve(PendingOutpointTip{}, PendingOutpointDA, [32]byte{0xda}, []consensus.Outpoint{testOutpoint(1)})
+	daToken, err := owner.Reserve(PendingOutpointAdmissionContext{}, PendingOutpointDA, [32]byte{0xda}, []consensus.Outpoint{testOutpoint(1)})
 	if err != nil {
 		t.Fatalf("DA Reserve: %v", err)
 	}
-	if _, err := owner.Reserve(PendingOutpointTip{}, PendingOutpointStandardMempool, [32]byte{0x01}, []consensus.Outpoint{testOutpoint(1)}); testOwnerKind(t, err) != PendingOutpointConflict {
+	if _, err := owner.Reserve(PendingOutpointAdmissionContext{}, PendingOutpointStandardMempool, [32]byte{0x01}, []consensus.Outpoint{testOutpoint(1)}); testOwnerKind(t, err) != PendingOutpointConflict {
 		t.Fatalf("standard Reserve over a DA claim = %v, want conflict", err)
 	}
 	// A DA claim is not a standard record: the standard binding check refuses
@@ -464,7 +469,7 @@ func TestPendingOutpointOwnerConcurrentContendersProduceOneWinner(t *testing.T) 
 			go func(i int) {
 				defer wg.Done()
 				txid := [32]byte{byte(0x10 + i)}
-				_, err := owner.Reserve(PendingOutpointTip{}, PendingOutpointStandardMempool, txid,
+				_, err := owner.Reserve(PendingOutpointAdmissionContext{}, PendingOutpointStandardMempool, txid,
 					[]consensus.Outpoint{shared, testOutpoint(uint32(100 + i))})
 				var ownerErr *PendingOutpointError
 				mu.Lock()
@@ -498,7 +503,7 @@ func TestPendingOutpointOwnerConcurrentContendersProduceOneWinner(t *testing.T) 
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				if _, err := owner.Reserve(PendingOutpointTip{}, PendingOutpointStandardMempool,
+				if _, err := owner.Reserve(PendingOutpointAdmissionContext{}, PendingOutpointStandardMempool,
 					[32]byte{byte(0x20 + i)}, []consensus.Outpoint{testOutpoint(uint32(200 + i))}); err != nil {
 					t.Errorf("independent contender %d: %v", i, err)
 				}
@@ -510,6 +515,75 @@ func TestPendingOutpointOwnerConcurrentContendersProduceOneWinner(t *testing.T) 
 				len(owner.byOutpoint), len(owner.byToken), owner.tokenHighWater, contenders)
 		}
 	})
+}
+
+// TestPendingOutpointOwnerReserveRejectsStaleAdmissionGenerationWithoutMutation
+// pins the hostile row a tip comparison cannot see. After A->B->A, and again
+// after an abort, the owner's stable tip compares EQUAL to a context cached
+// before those transitions while everything derived under it is stale. That
+// cached context must lose as unavailable BEFORE the conflict scan — an
+// otherwise-present conflict on the same outpoint proves the order — consuming
+// no sequence, while the current context still reaches that conflict.
+func TestPendingOutpointOwnerReserveRejectsStaleAdmissionGenerationWithoutMutation(t *testing.T) {
+	tipA := PendingOutpointTip{HasTip: true, Height: 9, Hash: [32]byte{0x0a}}
+	tipB := PendingOutpointTip{HasTip: true, Height: 10, Hash: [32]byte{0x0b}}
+	owner := newPendingOutpointOwner(tipA)
+	shared := testOutpoint(1)
+	if err := owner.Finalize(mustReserve(t, owner, [32]byte{0x01}, shared)); err != nil {
+		t.Fatalf("Finalize(held): %v", err)
+	}
+	stale, ok := owner.AdmissionContext()
+	if !ok {
+		t.Fatal("AdmissionContext unavailable on the stable owner")
+	}
+
+	assertStaleReserveLoses := func(what string, expected PendingOutpointAdmissionContext) {
+		t.Helper()
+		highWater, claims := owner.tokenHighWater, len(owner.byToken)
+		token, err := owner.Reserve(expected, PendingOutpointStandardMempool, [32]byte{0x02}, []consensus.Outpoint{shared})
+		if got := testOwnerKind(t, err); got != PendingOutpointUnavailable {
+			t.Fatalf("%s: kind=%d, want unavailable before the conflict scan", what, got)
+		}
+		if (token != PendingOutpointToken{}) || owner.tokenHighWater != highWater || len(owner.byToken) != claims {
+			t.Fatalf("%s: high_water=%d claims=%d, want %d/%d unchanged", what, owner.tokenHighWater, len(owner.byToken), highWater, claims)
+		}
+		if got, live := owner.txidForOutpoint(shared); !live || got != [32]byte{0x01} {
+			t.Fatalf("%s: outpoint row=(%x,%v), want the untouched original claim", what, got, live)
+		}
+	}
+
+	// A->B->A: the stable tip returns to exactly what the cached context holds.
+	for _, tip := range []PendingOutpointTip{tipB, tipA} {
+		if _, err := owner.beginTransition(); err != nil {
+			t.Fatalf("beginTransition(%v): %v", tip, err)
+		}
+		if err := owner.commitStableTip(tip); err != nil {
+			t.Fatalf("commitStableTip(%v): %v", tip, err)
+		}
+	}
+	current, ok := owner.AdmissionContext()
+	if !ok || current.StableTip != stale.StableTip || current.Generation == stale.Generation {
+		t.Fatalf("context after A->B->A=%+v (ok=%v), want the same tip on a later generation than %+v", current, ok, stale)
+	}
+	assertStaleReserveLoses("stale context after A->B->A", stale)
+
+	// The conflict really is present: the CURRENT context reaches it.
+	_, err := owner.Reserve(current, PendingOutpointStandardMempool, [32]byte{0x02}, []consensus.Outpoint{shared})
+	if got := testOwnerKind(t, err); got != PendingOutpointConflict {
+		t.Fatalf("current-context Reserve kind=%d, want the conflict the stale context never reached", got)
+	}
+
+	// An abort leaves the stable tip untouched and still advances the
+	// generation, so a context cached before it is stale in the same way.
+	if _, err := owner.beginTransition(); err != nil {
+		t.Fatalf("beginTransition(aborted): %v", err)
+	}
+	owner.endTransitionAborted()
+	afterAbort, ok := owner.AdmissionContext()
+	if !ok || afterAbort.StableTip != current.StableTip || afterAbort.Generation != current.Generation+1 {
+		t.Fatalf("context after abort=%+v (ok=%v), want the same tip one generation past %+v", afterAbort, ok, current)
+	}
+	assertStaleReserveLoses("stale context after an abort", current)
 }
 
 // TestPendingOutpointOwnerStaleReleaseCannotDeleteNewerClaim pins the hostile

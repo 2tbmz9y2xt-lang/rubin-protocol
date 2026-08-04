@@ -475,34 +475,113 @@ func (s *SyncEngine) targetContextForCandidate(parentHash [32]byte, candidateHei
 	return targetContextForCandidate(s.blockStore, s.cfg, parentHash, candidateHeight)
 }
 
-// SetMempool binds the mempool whose pending-outpoint owner this engine drives.
-// It serializes on mutationMu so a canonical transition can never observe the
-// pointer set change under it. A non-nil mempool bound to a DIFFERENT ChainState
-// than this engine is NOT installed and changes neither engine nor candidate
-// state: a transition must own one pointer-identical ChainState, Mempool and
-// owner for its whole duration.
+// SetMempool binds, EXACTLY ONCE, the mempool whose pending-outpoint owner this
+// engine drives, serializing on mutationMu so a canonical transition can never
+// observe the pointer set change under it. Initialization-only is the contract,
+// not a convenience: a pool detached at tip A, held while the engine advances,
+// and handed back at an apparently equal tip carries records and claims bound to
+// a canonical history this engine no longer has, and a pointer comparison cannot
+// see that. So only a fresh empty pool at the guarded live tip binds, and
+// afterwards only the exact same pointer is accepted; a rejection mutates
+// neither the engine nor the candidate's policy, records, indexes, owner state
+// or high-waters.
 func (s *SyncEngine) SetMempool(mempool *Mempool) {
 	if s == nil {
 		return
 	}
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
-	if mempool != nil && mempool.chainState != s.chainState {
+	if err := s.mutationAllowed(); err != nil {
+		s.reportMempoolBindingRejected(err)
 		return
 	}
+	if err := s.bindMempoolUnderMutation(mempool); err != nil {
+		s.reportMempoolBindingRejected(err)
+	}
+}
+
+// bindMempoolUnderMutation performs the initialization-only binding under the
+// caller's mutationMu, holding the live admission read guard CONTINUOUSLY from
+// the live tip read through the install. Lock order is mutationMu,
+// admissionMu.RLock, then s.mu before Mempool.mu before owner.mu — never the
+// reverse; the candidate's context is read with owner.mu released, before
+// Mempool.mu is taken.
+func (s *SyncEngine) bindMempoolUnderMutation(mempool *Mempool) error {
+	s.chainState.admissionMu.RLock()
+	defer s.chainState.admissionMu.RUnlock()
+	settled, err := s.checkMempoolRebinding(mempool)
+	if settled || err != nil {
+		return err
+	}
+	if mempool.chainState != s.chainState {
+		return errors.New("mempool candidate is bound to a different chainstate")
+	}
+	liveTip := pendingOutpointTipOf(s.chainState)
+	admission, ok := mempool.PendingOutpointOwner().AdmissionContext()
+	if !ok {
+		return errors.New("mempool candidate owner has no available admission context")
+	}
+	if admission.StableTip != liveTip {
+		return errors.New("mempool candidate owner is bound to a different canonical tip")
+	}
+	return s.installInitialMempool(mempool, admission)
+}
+
+// checkMempoolRebinding resolves every already-decided case, reporting
+// settled=true for a call that must do nothing: an exact same-pointer rebind, or
+// a nil call before anything was bound. Every other post-binding call — a nil
+// unbind, or ANY different pointer — is an error.
+func (s *SyncEngine) checkMempoolRebinding(mempool *Mempool) (bool, error) {
+	s.mu.RLock()
+	bound := s.mempool
+	s.mu.RUnlock()
+	if bound == nil {
+		return mempool == nil, nil
+	}
+	if mempool == bound {
+		return true, nil
+	}
+	if mempool == nil {
+		return false, errors.New("mempool unbinding is not supported after the initial binding")
+	}
+	return false, errors.New("mempool replacement is not supported after the initial binding")
+}
+
+// installInitialMempool rechecks the candidate's emptiness and its admission
+// context under s.mu, Mempool.mu and owner.mu — in that order — and only then
+// fills the missing policy providers and installs the pointer. Everything
+// fallible runs before the first write, so a refused candidate is unchanged.
+func (s *SyncEngine) installInitialMempool(mempool *Mempool, admission PendingOutpointAdmissionContext) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if mempool != nil {
-		mempool.mu.Lock()
-		if mempool.policy.RotationProvider == nil {
-			mempool.policy.RotationProvider = s.cfg.RotationProvider
-		}
-		if mempool.policy.SuiteRegistry == nil {
-			mempool.policy.SuiteRegistry = s.cfg.SuiteRegistry
-		}
-		mempool.mu.Unlock()
+	mempool.mu.Lock()
+	defer mempool.mu.Unlock()
+	if err := mempool.checkEmptyForBindingLocked(); err != nil {
+		return err
+	}
+	owner := mempool.pendingOutpointOwnerLocked()
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if err := owner.checkNoClaimsLocked(); err != nil {
+		return err
+	}
+	if current, ok := owner.admissionContextLocked(); !ok || current != admission {
+		return errors.New("mempool candidate admission context moved during binding")
+	}
+	if mempool.policy.RotationProvider == nil {
+		mempool.policy.RotationProvider = s.cfg.RotationProvider
+	}
+	if mempool.policy.SuiteRegistry == nil {
+		mempool.policy.SuiteRegistry = s.cfg.SuiteRegistry
 	}
 	s.mempool = mempool
+	return nil
+}
+
+// reportMempoolBindingRejected makes a refused binding visible: the engine keeps
+// its previous binding, otherwise indistinguishable from an unwired caller.
+func (s *SyncEngine) reportMempoolBindingRejected(err error) {
+	_, _ = fmt.Fprintf(s.stderr, "sync: mempool binding rejected, engine binding unchanged: %v\n", err)
 }
 
 // SetStderr sets the writer for non-fatal error diagnostics (e.g. mempool
@@ -635,19 +714,15 @@ func (s *SyncEngine) captureRollbackStateWithIndex(canonicalIndex []string) (syn
 // every canonical mutation serialize on mutationMu, which the entry point holds
 // throughout, so no reread can observe a different pointer set.
 type canonicalTransition struct {
-	engine     *SyncEngine
-	chainState *ChainState
-	mempool    *Mempool
-	owner      *PendingOutpointOwner
-	generation uint64
-	rollback   syncRollbackState
-	// suppressInnerCleanup is set by the preferred-branch reorg, which
-	// pre-cleans the whole prepared branch once instead of running the
-	// per-block cleanup inside each row.
-	suppressInnerCleanup bool
-	appliedHeight        uint64
-	appliedTimestamp     uint64
-	applied              bool
+	engine           *SyncEngine
+	chainState       *ChainState
+	mempool          *Mempool
+	owner            *PendingOutpointOwner
+	generation       uint64
+	rollback         syncRollbackState
+	appliedHeight    uint64
+	appliedTimestamp uint64
+	applied          bool
 }
 
 // beginCanonicalTransition takes the live admission guard, binds the pointer
@@ -1068,12 +1143,12 @@ func (s *SyncEngine) commitPreparedBlockUnderGuard(
 	pb *consensus.ParsedBlock,
 	blockBytes []byte,
 ) error {
-	if err := s.recheckLiveTipIdentity(tr, ctx); err != nil {
+	if err := s.recheckLiveTipIdentity(tr, chainTipScalarsOf(ctx.prevState)); err != nil {
 		return s.rollbackApplyBlock(err, tr.rollback)
 	}
 	// Cleanup precedes publication: the standard records and their exact
 	// claims are gone before any observer can see the new canonical tip.
-	if !tr.suppressInnerCleanup && tr.mempool != nil {
+	if tr.mempool != nil {
 		if err := tr.mempool.applyConnectedBlockParsed(pb); err != nil {
 			_, _ = fmt.Fprintf(s.stderr, "sync: standard mempool cleanup failed at height %d, rolling back: %v\n", ctx.blockHeight, err)
 			return s.rollbackApplyBlock(err, tr.rollback)
@@ -1085,22 +1160,37 @@ func (s *SyncEngine) commitPreparedBlockUnderGuard(
 	return s.finalizeAppliedBlock(summary, ctx.blockHash, pb, blockBytes, ctx.prevState, tr.rollback)
 }
 
+// canonicalTipScalars is the exact tip identity a prepared candidate was
+// validated against, and the identity its commit publishes. It is the ONLY
+// chain-state data a prepared preferred-branch row keeps.
+type canonicalTipScalars struct {
+	hasTip           bool
+	height           uint64
+	tipHash          [32]byte
+	alreadyGenerated uint64
+}
+
+func chainTipScalarsOf(state *ChainState) canonicalTipScalars {
+	view := state.view()
+	return canonicalTipScalars{hasTip: view.hasTip, height: view.height, tipHash: view.tipHash, alreadyGenerated: view.alreadyGenerated}
+}
+
 // recheckLiveTipIdentity proves, under the transition guard, that the live
 // ChainState AND the live BlockStore canonical tip are still exactly the state
 // the candidate was prepared against. mutationMu already serializes canonical
 // mutation in-process, so both halves are defense in depth.
-func (s *SyncEngine) recheckLiveTipIdentity(tr *canonicalTransition, ctx canonicalBlockApplyContext) error {
+func (s *SyncEngine) recheckLiveTipIdentity(tr *canonicalTransition, prior canonicalTipScalars) error {
 	live := tr.chainState.view()
-	if live.hasTip != ctx.prevState.HasTip || live.height != ctx.prevState.Height || live.tipHash != ctx.prevState.TipHash {
+	if live.hasTip != prior.hasTip || live.height != prior.height || live.tipHash != prior.tipHash {
 		return errors.New("live chainstate tip moved during canonical apply")
 	}
-	return s.recheckLiveStoreTipIdentity(ctx)
+	return s.recheckLiveStoreTipIdentity(prior)
 }
 
 // recheckLiveStoreTipIdentity is the BlockStore half of recheckLiveTipIdentity.
 // An engine with no store has no second tip to disagree with, so it passes. The
 // check only reads the store and mutates nothing.
-func (s *SyncEngine) recheckLiveStoreTipIdentity(ctx canonicalBlockApplyContext) error {
+func (s *SyncEngine) recheckLiveStoreTipIdentity(prior canonicalTipScalars) error {
 	if s.blockStore == nil {
 		return nil
 	}
@@ -1108,7 +1198,7 @@ func (s *SyncEngine) recheckLiveStoreTipIdentity(ctx canonicalBlockApplyContext)
 	if err != nil {
 		return err
 	}
-	if storeHasTip != ctx.prevState.HasTip || (storeHasTip && (storeHeight != ctx.prevState.Height || storeHash != ctx.prevState.TipHash)) {
+	if storeHasTip != prior.hasTip || (storeHasTip && (storeHeight != prior.height || storeHash != prior.tipHash)) {
 		return errors.New("live blockstore tip moved during canonical apply")
 	}
 	return nil

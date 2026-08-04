@@ -264,25 +264,32 @@ func validateMempoolEntrySource(source mempoolTxSource) error {
 }
 
 // reserveEntryInputsLocked occupies the conflict slot that validateEntryInputsLocked
-// used to hold. It claims every input of the candidate from the single owner,
-// bound to the ChainState tip the caller's admission read guard is pinning, and
-// records the issued token on the entry. An owner conflict maps to the existing
-// TxAdmitConflict double-spend family; an active transition, an expected-tip
-// mismatch, an exhausted sequence space and any owner-internal failure all map
-// to TxAdmitUnavailable, so no new public TxAdmit kind appears here.
+// used to hold. It reads ONE exact owner admission context, requires that
+// context's stable tip to equal the ChainState tip the caller's admission read
+// guard is pinning, and claims every input of the candidate against that exact
+// tip/generation pair, recording the issued token on the entry. Passing the
+// whole observed context — not just a tip — is what makes a stale reader lose:
+// Reserve refuses a generation the owner has already left behind.
 //
-// A candidate with no inputs claims nothing and takes no token, exactly as the
-// replaced loop was a no-op over an empty input slice.
+// An owner conflict maps to the existing TxAdmitConflict double-spend family; an
+// active transition, an expected-tip or expected-generation mismatch, an
+// exhausted sequence space and any owner-internal failure all map to
+// TxAdmitUnavailable, so no new public TxAdmit kind appears here. A candidate
+// with no inputs claims nothing and takes no token, exactly as the replaced loop
+// was a no-op over an empty input slice.
 func (m *Mempool) reserveEntryInputsLocked(entry *mempoolEntry) error {
 	if len(entry.inputs) == 0 {
 		return nil
 	}
-	token, err := m.pendingOutpointOwnerLocked().Reserve(
-		pendingOutpointTipOf(m.chainState),
-		PendingOutpointStandardMempool,
-		entry.txid,
-		entry.inputs,
-	)
+	owner := m.pendingOutpointOwnerLocked()
+	admission, ok := owner.AdmissionContext()
+	if !ok {
+		return txAdmitUnavailable("pending-outpoint owner admission context unavailable")
+	}
+	if admission.StableTip != pendingOutpointTipOf(m.chainState) {
+		return txAdmitUnavailable("pending-outpoint owner tip does not match the guarded chainstate tip")
+	}
+	token, err := owner.Reserve(admission, PendingOutpointStandardMempool, entry.txid, entry.inputs)
 	if err != nil {
 		return txAdmitFromPendingOutpointError(err)
 	}

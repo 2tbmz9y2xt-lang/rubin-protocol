@@ -176,14 +176,25 @@ func validatePendingOutpointRequest(
 }
 
 // checkReserveAvailableLocked reports whether the owner can issue a reservation
-// bound to expectedTip at all. It only reads owner state under the caller's
-// o.mu and mutates nothing; every failure here is unavailable, never a conflict.
-func (o *PendingOutpointOwner) checkReserveAvailableLocked(expectedTip PendingOutpointTip) error {
+// bound to the COMPLETE context the caller observed. The checks run in exactly
+// this order — active transition, exact stable tip, exact generation, sequence
+// space — each failure is unavailable rather than a conflict, and it only reads
+// owner state under the caller's o.mu.
+//
+// The generation term is what a tip comparison alone cannot express: after an
+// A->B->A reorg, or an aborted transition, the stable tip compares equal to a
+// context cached BEFORE that transition while everything derived under it is
+// stale. Generation never decreases or repeats, so an older expected generation
+// loses here, before the conflict scan and before any sequence is consumed.
+func (o *PendingOutpointOwner) checkReserveAvailableLocked(expected PendingOutpointAdmissionContext) error {
 	if o.inTransition {
 		return pendingOutpointUnavailable("pending-outpoint owner transition in progress")
 	}
-	if expectedTip != o.stableTip {
+	if expected.StableTip != o.stableTip {
 		return pendingOutpointUnavailable("pending-outpoint expected tip mismatch")
+	}
+	if expected.Generation != o.generation {
+		return pendingOutpointUnavailable("pending-outpoint expected generation mismatch")
 	}
 	if o.tokenHighWater == ^uint64(0) {
 		return pendingOutpointUnavailable("pending-outpoint token sequence exhausted")
@@ -211,15 +222,19 @@ func (o *PendingOutpointOwner) checkNoConflictLocked(orderedInputs []consensus.O
 }
 
 // Reserve claims every outpoint in orderedInputs for txid in domain, bound to
-// expectedTip. It validates the request (owner, domain, txid, input set) before
-// it looks at availability or conflicts, so a malformed request is an internal
-// error that mutates nothing and consumes no sequence. Availability failures —
-// active transition, expected-tip mismatch, sequence exhaustion — and the first
-// conflict in canonical input order likewise mutate nothing. Every check is a
-// pure read that completes before the first write below. On success exactly one
-// sequence is consumed and the complete reserved claim is installed.
+// the COMPLETE admission context the caller observed — stable tip AND
+// generation, deliberately not a tip alone, so a caller that decided anything
+// under an older generation loses instead of reserving against state it never
+// saw. It validates the request (owner, domain, txid, input set) before it looks
+// at availability or conflicts, so a malformed request is an internal error that
+// mutates nothing and consumes no sequence. Availability failures — active
+// transition, expected-tip mismatch, expected-generation mismatch, sequence
+// exhaustion — and the first conflict in canonical input order likewise mutate
+// nothing: every check is a pure read that completes before the first write
+// below. On success exactly one sequence is consumed and the complete reserved
+// claim is installed.
 func (o *PendingOutpointOwner) Reserve(
-	expectedTip PendingOutpointTip,
+	expectedContext PendingOutpointAdmissionContext,
 	domain PendingOutpointDomain,
 	txid [32]byte,
 	orderedInputs []consensus.Outpoint,
@@ -234,7 +249,7 @@ func (o *PendingOutpointOwner) Reserve(
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if err := o.checkReserveAvailableLocked(expectedTip); err != nil {
+	if err := o.checkReserveAvailableLocked(expectedContext); err != nil {
 		return zero, err
 	}
 	if err := o.checkNoConflictLocked(orderedInputs); err != nil {
@@ -276,10 +291,26 @@ func (o *PendingOutpointOwner) AdmissionContext() (PendingOutpointAdmissionConte
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	return o.admissionContextLocked()
+}
+
+// admissionContextLocked is AdmissionContext's body for a caller that already
+// holds o.mu: the binding recheck compares the context and installs the pointer
+// without releasing the owner mutex in between.
+func (o *PendingOutpointOwner) admissionContextLocked() (PendingOutpointAdmissionContext, bool) {
 	if o.inTransition || o.generation == ^uint64(0) {
 		return PendingOutpointAdmissionContext{}, false
 	}
 	return PendingOutpointAdmissionContext{StableTip: o.stableTip, Generation: o.generation}, true
+}
+
+// checkNoClaimsLocked proves the owner holds no live claim in either index. The
+// caller holds o.mu.
+func (o *PendingOutpointOwner) checkNoClaimsLocked() error {
+	if len(o.byOutpoint) != 0 || len(o.byToken) != 0 {
+		return pendingOutpointInternal(fmt.Sprintf("pending-outpoint owner holds %d outpoint and %d token claims", len(o.byOutpoint), len(o.byToken)))
+	}
+	return nil
 }
 
 // Finalize publishes a reserved claim of the current generation. An exact retry

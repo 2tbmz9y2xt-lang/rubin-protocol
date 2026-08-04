@@ -3477,3 +3477,183 @@ func TestApplyBlockWithReorgPendingOutpointRestoresExactTokensOnFailure(t *testi
 		t.Fatalf("generation after the failed reorg=%d, want the advanced high-water %d", afterReorg.Generation, beforeReorg.Generation+1)
 	}
 }
+
+// storedSideBranch builds and stores a side branch of depth blocks on top of
+// prevHash, oldest-first, the shape collectBranchToCanonical hands preparation.
+func (f *pendingOutpointSyncFixture) storedSideBranch(t *testing.T, prevHash [32]byte, height, alreadyGenerated uint64, depth int) []reorgBranchBlock {
+	t.Helper()
+	branch := make([]reorgBranchBlock, 0, depth)
+	for i := 0; i < depth; i++ {
+		blockHeight := height + uint64(i)
+		subsidy := consensus.BlockSubsidy(blockHeight, alreadyGenerated)
+		coinbase := reorgTestCoinbaseForAddress(t, blockHeight, subsidy, f.destAddress)
+		blockBytes := buildSingleTxBlock(t, prevHash, f.target, 300+blockHeight, coinbase)
+		parsed, hash := mustParseReorgBlockForTest(t, blockBytes)
+		if err := f.store.StoreBlock(hash, parsed.HeaderBytes, blockBytes); err != nil {
+			t.Fatalf("StoreBlock(side height %d): %v", blockHeight, err)
+		}
+		branch = append(branch, reorgBranchBlock{hash: hash, blockBytes: blockBytes, parsed: parsed, header: parsed.Header})
+		prevHash, alreadyGenerated = hash, alreadyGenerated+subsidy
+	}
+	return branch
+}
+
+// applyForkBlock applies one canonical block on the fixture tip, so the side
+// branch below has a canonical block to disconnect.
+func (f *pendingOutpointSyncFixture) applyForkBlock(t *testing.T) *ChainStateConnectSummary {
+	t.Helper()
+	subsidy := consensus.BlockSubsidy(f.tipHeight+1, f.alreadyGenerated)
+	coinbase := reorgTestCoinbaseForAddress(t, f.tipHeight+1, subsidy, f.sourceAddress)
+	summary, err := f.engine.ApplyBlock(buildSingleTxBlock(t, f.tipHash, f.target, 202, coinbase), nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(fork block): %v", err)
+	}
+	return summary
+}
+
+// TestPreparePreferredBranchRetainsCompactRowsWithoutUtxoSnapshots pins the
+// preparation memory shape: a prepared row carries no ChainState, no UTXO map
+// and nothing else that scales with the UTXO set — only the block data the path
+// already carried, the summary, the prior-tip scalars, the precomputed undo and
+// a delta bounded by the block's own inputs and outputs. Retained full-state
+// memory is O(1) in branch depth, which is what lets an arbitrarily deep valid
+// branch prepare without a depth cap.
+func TestPreparePreferredBranchRetainsCompactRowsWithoutUtxoSnapshots(t *testing.T) {
+	chainStatePtr := reflect.TypeOf((*ChainState)(nil))
+	for _, structType := range []reflect.Type{reflect.TypeOf(preparedBranchBlock{}), reflect.TypeOf(chainStateDelta{})} {
+		for i := 0; i < structType.NumField(); i++ {
+			field := structType.Field(i)
+			if field.Type == chainStatePtr || field.Type.Kind() == reflect.Map {
+				t.Fatalf("%s.%s is %v: a prepared row must retain no chainstate and no map",
+					structType.Name(), field.Name, field.Type)
+			}
+		}
+	}
+
+	f := newPendingOutpointSyncFixture(t)
+	forkHash, forkHeight, forkGenerated := f.tipHash, f.tipHeight, f.alreadyGenerated
+	summaryA := f.applyForkBlock(t)
+	liveUtxos, liveUtxoHash := len(f.engine.chainState.Utxos), f.engine.chainState.UtxoSetHash()
+
+	branch := f.storedSideBranch(t, forkHash, forkHeight+1, forkGenerated, 2)
+	rows, disconnected, reorgDepth, err := f.engine.preparePreferredBranch(branch, forkHeight)
+	if err != nil {
+		t.Fatalf("preparePreferredBranch: %v", err)
+	}
+	if len(rows) != 2 || len(disconnected) != 1 || reorgDepth != 1 {
+		t.Fatalf("rows=%d disconnected=%d depth=%d, want 2/1/1", len(rows), len(disconnected), reorgDepth)
+	}
+
+	prior := canonicalTipScalars{hasTip: true, height: forkHeight, tipHash: forkHash, alreadyGenerated: forkGenerated}
+	for i := range rows {
+		row := &rows[i]
+		if row.priorTip != prior {
+			t.Fatalf("row %d prior tip=%+v, want %+v", i, row.priorTip, prior)
+		}
+		if row.delta.post.height != forkHeight+1+uint64(i) || row.delta.post.tipHash != branch[i].hash || !row.delta.post.hasTip {
+			t.Fatalf("row %d delta post=%+v, want its own block at height %d", i, row.delta.post, forkHeight+1+uint64(i))
+		}
+		if row.undo == nil || row.undo.BlockHeight != row.delta.post.height || row.undo.PreviousAlreadyGenerated != prior.alreadyGenerated {
+			t.Fatalf("row %d undo=%+v, want the precomputed undo for that row", i, row.undo)
+		}
+		// A coinbase-only branch block spends nothing and creates one indexed
+		// output: the retained delta tracks the block, not the UTXO set.
+		if len(row.delta.spent) != 0 || len(row.delta.created) != 1 || len(row.delta.created) >= liveUtxos {
+			t.Fatalf("row %d delta spent=%d created=%d against a %d-entry live set, want 0/1 and compact",
+				i, len(row.delta.spent), len(row.delta.created), liveUtxos)
+		}
+		prior = row.delta.post
+	}
+
+	// Preparation touches no live state.
+	if f.engine.chainState.TipHash != summaryA.BlockHash || f.engine.chainState.UtxoSetHash() != liveUtxoHash {
+		t.Fatalf("preparation mutated the live chainstate: tip=%x", f.engine.chainState.TipHash)
+	}
+	if storeHeight, storeHash, ok, err := f.store.Tip(); err != nil || !ok || storeHash != summaryA.BlockHash || storeHeight != summaryA.BlockHeight {
+		t.Fatalf("preparation moved the blockstore tip to (%d,%x,ok=%v,err=%v)", storeHeight, storeHash, ok, err)
+	}
+}
+
+// TestApplyBlockWithReorgPendingOutpointCompactRowsPersistAndUndo pins the
+// commit half of the compact-row reorg: each already-validated row is applied to
+// the ONE live ChainState and persisted with its own precomputed undo before the
+// next row starts, so chainstate and blockstore correspond at every persisted
+// row; a failure on the second row restores the live UTXO SET exactly, not just
+// the tip; and the per-row undo is real — disconnecting the branch afterwards
+// returns the chainstate to the fork point byte for byte.
+func TestApplyBlockWithReorgPendingOutpointCompactRowsPersistAndUndo(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	forkHash, forkHeight, forkGenerated := f.tipHash, f.tipHeight, f.alreadyGenerated
+	forkUtxoHash := f.engine.chainState.UtxoSetHash()
+	summaryA := f.applyForkBlock(t)
+	beforeReorgUtxoHash := f.engine.chainState.UtxoSetHash()
+	branch := f.storedSideBranch(t, forkHash, forkHeight+1, forkGenerated, 2)
+	candidate := branch[len(branch)-1]
+
+	// Observe the live chainstate at every canonical-index write and fail the
+	// third — the second row's commit, after the first row was applied and
+	// persisted. Writes 1..3 are the disconnect truncation and the two rows.
+	type indexObservation struct {
+		height uint64
+		hash   [32]byte
+	}
+	prevWrite := writeFileAtomicFn
+	t.Cleanup(func() { writeFileAtomicFn = prevWrite })
+	observed, failThirdWrite, injected := []indexObservation{}, true, false
+	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
+		if path == f.store.indexPath {
+			view := f.engine.chainState.view()
+			observed = append(observed, indexObservation{height: view.height, hash: view.tipHash})
+			if failThirdWrite && len(observed) == 3 {
+				injected = true
+				return os.ErrPermission
+			}
+		}
+		return prevWrite(path, data, mode)
+	}
+
+	if _, err := f.engine.ApplyBlockWithReorg(candidate.blockBytes, nil); err == nil || !injected {
+		t.Fatalf("expected the injected second-row persistence failure (err=%v injected=%v)", err, injected)
+	}
+	if f.engine.chainState.TipHash != summaryA.BlockHash || f.engine.chainState.Height != summaryA.BlockHeight {
+		t.Fatalf("chainstate tip=(%d,%x) after the failed reorg, want A (%d,%x)",
+			f.engine.chainState.Height, f.engine.chainState.TipHash, summaryA.BlockHeight, summaryA.BlockHash)
+	}
+	if got := f.engine.chainState.UtxoSetHash(); got != beforeReorgUtxoHash {
+		t.Fatalf("utxo set hash=%x after the failed reorg, want the exact pre-reorg set %x", got, beforeReorgUtxoHash)
+	}
+
+	// The same branch, with persistence healthy, must now commit.
+	failThirdWrite, observed = false, nil
+	summaryB, err := f.engine.ApplyBlockWithReorg(candidate.blockBytes, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlockWithReorg(retry): %v", err)
+	}
+	if summaryB.BlockHash != candidate.hash || summaryB.BlockHeight != forkHeight+2 || len(observed) < 2 {
+		t.Fatalf("reorg summary=(%d,%x) index_writes=%d, want the branch tip (%d,%x) with one write per row",
+			summaryB.BlockHeight, summaryB.BlockHash, len(observed), forkHeight+2, candidate.hash)
+	}
+	// At each row's index write the live chainstate is ALREADY that row's block,
+	// never one behind: the store cannot run ahead of the state.
+	for i, row := range observed[len(observed)-2:] {
+		want := indexObservation{height: forkHeight + 1 + uint64(i), hash: branch[i].hash}
+		if row != want {
+			t.Fatalf("chainstate at row %d's index write=(%d,%x), want (%d,%x)", i, row.height, row.hash, want.height, want.hash)
+		}
+	}
+
+	// The per-row undo persisted above is the real one.
+	for i := range branch {
+		if _, err := f.engine.DisconnectTip(); err != nil {
+			t.Fatalf("DisconnectTip(%d): %v", i, err)
+		}
+	}
+	view := f.engine.chainState.view()
+	if view.height != forkHeight || view.tipHash != forkHash || view.alreadyGenerated != forkGenerated {
+		t.Fatalf("chainstate after disconnecting the branch=(%d,%x,generated=%d), want the fork point (%d,%x,%d)",
+			view.height, view.tipHash, view.alreadyGenerated, forkHeight, forkHash, forkGenerated)
+	}
+	if got := f.engine.chainState.UtxoSetHash(); got != forkUtxoHash {
+		t.Fatalf("utxo set hash after disconnecting the branch=%x, want the fork-point set %x", got, forkUtxoHash)
+	}
+}

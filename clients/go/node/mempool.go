@@ -110,6 +110,17 @@ func (m *Mempool) PendingOutpointOwner() *PendingOutpointOwner {
 	return m.pendingOutpoints
 }
 
+// checkEmptyForBindingLocked proves the pool holds no resident record in any
+// index. SyncEngine.SetMempool is initialization-only, so a candidate that
+// already admitted anything cannot be adopted: its records were validated
+// against a canonical tip that engine never guarded. The caller holds m.mu.
+func (m *Mempool) checkEmptyForBindingLocked() error {
+	if len(m.txs) != 0 || len(m.wtxids) != 0 || m.usedBytes != 0 {
+		return fmt.Errorf("mempool candidate is not empty: entries=%d wtxids=%d used_bytes=%d", len(m.txs), len(m.wtxids), m.usedBytes)
+	}
+	return nil
+}
+
 // AllTxIDs returns the txids of every transaction currently in the mempool.
 // The slice ordering is not guaranteed to be stable between calls.
 func (m *Mempool) AllTxIDs() [][32]byte {

@@ -1223,7 +1223,7 @@ func mustAdmissionContext(t *testing.T, owner *PendingOutpointOwner, what string
 func (f *pendingOutpointSyncFixture) breakResidentClaim(t *testing.T, txid [32]byte) {
 	t.Helper()
 	foreign := newPendingOutpointOwner(PendingOutpointTip{})
-	token, err := foreign.Reserve(PendingOutpointTip{}, PendingOutpointStandardMempool, [32]byte{0x01}, []consensus.Outpoint{f.sourceOutpoint})
+	token, err := foreign.Reserve(PendingOutpointAdmissionContext{}, PendingOutpointStandardMempool, [32]byte{0x01}, []consensus.Outpoint{f.sourceOutpoint})
 	if err != nil {
 		t.Fatalf("foreign Reserve: %v", err)
 	}
@@ -1343,55 +1343,123 @@ func TestSyncPendingOutpointAdmissionConcurrentWithDirectConnectSmoke(t *testing
 	}
 }
 
-// TestSyncSetMempoolPendingOutpointRejectsForeignChainStateBinding proves a
-// transition can only ever own ONE pointer-identical ChainState, Mempool and
-// owner: a mempool bound to a different ChainState is not installed, and the
-// rejection changes neither the engine's binding nor the candidate's own state.
-func TestSyncSetMempoolPendingOutpointRejectsForeignChainStateBinding(t *testing.T) {
+// boundMempool reads the engine's current binding under the engine lock.
+func boundMempool(engine *SyncEngine) *Mempool {
+	engine.mu.RLock()
+	defer engine.mu.RUnlock()
+	return engine.mempool
+}
+
+// unboundEngineOn builds a SECOND engine over the fixture's exact ChainState and
+// BlockStore, bound to nothing, so the initial-binding rows run against a live
+// chain the fixture already advanced.
+func (f *pendingOutpointSyncFixture) unboundEngineOn(t *testing.T) *SyncEngine {
+	t.Helper()
+	engine, err := NewSyncEngine(f.engine.chainState, f.store, f.engine.cfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine(second): %v", err)
+	}
+	if bound := boundMempool(engine); bound != nil {
+		t.Fatalf("fresh engine already bound to %p", bound)
+	}
+	return engine
+}
+
+// newPool builds another mempool over the fixture's exact ChainState and store.
+func (f *pendingOutpointSyncFixture) newPool(t *testing.T) *Mempool {
+	t.Helper()
+	pool, err := NewMempool(f.engine.chainState, f.store, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	return pool
+}
+
+// assertBindingRejected drives one refused SetMempool and proves it changed
+// neither the engine binding nor the candidate's owner context.
+func assertBindingRejected(t *testing.T, engine *SyncEngine, candidate, want *Mempool, what string) {
+	t.Helper()
+	var before PendingOutpointAdmissionContext
+	if candidate != nil {
+		before = mustAdmissionContext(t, candidate.PendingOutpointOwner(), "before "+what)
+	}
+	engine.SetMempool(candidate)
+	if bound := boundMempool(engine); bound != want {
+		t.Fatalf("%s: engine mempool=%p, want %p", what, bound, want)
+	}
+	if candidate == nil {
+		return
+	}
+	if got := mustAdmissionContext(t, candidate.PendingOutpointOwner(), "after "+what); got != before {
+		t.Fatalf("%s: candidate context=%+v, want %+v unchanged", what, got, before)
+	}
+}
+
+// TestSyncSetMempoolPendingOutpointConstructOnceAndRejectsStaleOrNonemptyBinding
+// proves SetMempool is initialization-only. A transition must own ONE
+// pointer-identical ChainState, Mempool and owner for its whole duration, and a
+// pointer comparison cannot see that a detached pool's records were validated
+// against a canonical history this engine has already left: so exactly one fresh
+// empty candidate at the guarded live tip binds, an exact same-pointer retry is
+// a no-op, and every stale-tip, nonempty, foreign-ChainState, nil-unbind or
+// different-pointer candidate is refused with no mutation on either side.
+func TestSyncSetMempoolPendingOutpointConstructOnceAndRejectsStaleOrNonemptyBinding(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
-	foreignState := NewChainState()
-	foreign, err := NewMempool(foreignState, f.store, devnetGenesisChainID)
+	fixtureContext := mustAdmissionContext(t, f.owner, "on the bound fixture pool")
+
+	// An exact same-pointer rebind is the ONLY accepted post-binding call.
+	f.engine.SetMempool(f.mempool)
+	if bound := boundMempool(f.engine); bound != f.mempool || bound.PendingOutpointOwner() != f.owner {
+		t.Fatalf("same-pointer rebind changed the binding to %p", bound)
+	}
+	if got := mustAdmissionContext(t, f.owner, "after the same-pointer rebind"); got != fixtureContext {
+		t.Fatalf("same-pointer rebind moved the context to %+v, want %+v", got, fixtureContext)
+	}
+	assertBindingRejected(t, f.engine, nil, f.mempool, "nil unbind after the initial binding")
+
+	// A different pointer is refused even when it is fresh, empty, bound to the
+	// same ChainState and reporting the same apparent context.
+	replacement := f.newPool(t)
+	if got := mustAdmissionContext(t, replacement.PendingOutpointOwner(), "on the replacement"); got != fixtureContext {
+		t.Fatalf("replacement context=%+v, want the same apparent context %+v", got, fixtureContext)
+	}
+	assertBindingRejected(t, f.engine, replacement, f.mempool, "different-pointer replacement")
+
+	// Initial-binding rejections, on a second engine that never bound anything.
+	engine := f.unboundEngineOn(t)
+	foreign, err := NewMempool(NewChainState(), f.store, devnetGenesisChainID)
 	if err != nil {
 		t.Fatalf("NewMempool(foreign): %v", err)
 	}
-	foreignOwner := foreign.PendingOutpointOwner()
-	foreignBefore := mustAdmissionContext(t, foreignOwner, "on the foreign candidate")
+	assertBindingRejected(t, engine, foreign, nil, "foreign-chainstate candidate")
 
-	f.engine.SetMempool(foreign)
-
-	f.engine.mu.RLock()
-	bound := f.engine.mempool
-	f.engine.mu.RUnlock()
-	if bound != f.mempool {
-		t.Fatalf("engine mempool=%p, want the original binding %p", bound, f.mempool)
+	// A nonempty candidate at the exact live tip: its records were admitted
+	// against a canonical tip this engine never guarded.
+	if err := f.mempool.AddTx(f.spend(t, 700, 1)); err != nil {
+		t.Fatalf("AddTx(spend): %v", err)
 	}
-	if bound.PendingOutpointOwner() != f.owner {
-		t.Fatal("engine owner changed on a rejected SetMempool")
-	}
-	if got := mustAdmissionContext(t, foreignOwner, "after the rejected SetMempool"); got != foreignBefore {
-		t.Fatalf("rejected candidate context=%+v, want %+v unchanged", got, foreignBefore)
+	assertBindingRejected(t, engine, f.mempool, nil, "nonempty candidate")
+	outpoints, claims, _ := ownerClaimCount(f.owner)
+	if f.mempool.Len() != 1 || outpoints != 1 || claims != 1 {
+		t.Fatalf("rejected nonempty candidate holds len=%d outpoints=%d claims=%d, want its single record untouched",
+			f.mempool.Len(), outpoints, claims)
 	}
 
-	// A nil mempool IS installable — the identity guard applies only to a
-	// non-nil candidate — and a same-ChainState mempool binds.
-	f.engine.SetMempool(nil)
-	f.engine.mu.RLock()
-	bound = f.engine.mempool
-	f.engine.mu.RUnlock()
-	if bound != nil {
-		t.Fatalf("SetMempool(nil) left mempool=%p, want the binding cleared", bound)
+	// A stale candidate: built at the live tip, then left behind while the
+	// canonical tip advanced, so its owner tip no longer matches the guard.
+	stale := f.newPool(t)
+	subsidy := consensus.BlockSubsidy(f.tipHeight+1, f.alreadyGenerated)
+	next := buildSingleTxBlock(t, f.tipHash, f.target, 202, reorgTestCoinbaseForAddress(t, f.tipHeight+1, subsidy, f.sourceAddress))
+	if _, err := f.engine.ApplyBlock(next, nil); err != nil {
+		t.Fatalf("ApplyBlock(next): %v", err)
 	}
+	assertBindingRejected(t, engine, stale, nil, "stale-tip candidate")
 
-	same, err := NewMempool(f.engine.chainState, f.store, devnetGenesisChainID)
-	if err != nil {
-		t.Fatalf("NewMempool(same chainstate): %v", err)
-	}
-	f.engine.SetMempool(same)
-	f.engine.mu.RLock()
-	bound = f.engine.mempool
-	f.engine.mu.RUnlock()
-	if bound != same || bound.PendingOutpointOwner() != same.PendingOutpointOwner() {
-		t.Fatalf("engine mempool=%p, want the same-chainstate mempool %p", bound, same)
+	// And the accepted row: one fresh empty pool at the current guarded tip.
+	fresh := f.newPool(t)
+	engine.SetMempool(fresh)
+	if bound := boundMempool(engine); bound != fresh || bound.PendingOutpointOwner() != fresh.PendingOutpointOwner() {
+		t.Fatalf("engine mempool=%p, want the fresh current-tip candidate %p", bound, fresh)
 	}
 }
 

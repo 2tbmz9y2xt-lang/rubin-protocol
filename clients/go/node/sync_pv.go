@@ -86,18 +86,39 @@ func (s *SyncEngine) runPVShadowOnSuccess(blockBytes []byte, prevTimestamps []ui
 	}
 }
 
+// pvShadowActive reports whether a shadow run would happen right now.
+func (s *SyncEngine) pvShadowActive() bool {
+	return (s.pvMode == pvModeShadow || s.pvMode == pvModeOn) && s.isInIBDUnchecked()
+}
+
+// pvShadowPreState clones state ONLY when a shadow run will actually consume it.
+// The preferred-branch preparation rolls one private state forward in place, so
+// it has no per-row pre-image to hand the shadow unless one is taken here. A nil
+// result keeps that clone off the default path and lets the caller decide once
+// rather than re-evaluate a time-dependent predicate after the connect.
+func (s *SyncEngine) pvShadowPreState(state *ChainState) *ChainState {
+	if !s.pvShadowActive() {
+		return nil
+	}
+	return cloneChainState(state)
+}
+
+// runPVShadow runs the shadow for a caller that already decided it is active.
+func (s *SyncEngine) runPVShadow(blockBytes []byte, prevTimestamps []uint64, ctx canonicalBlockApplyContext, seqErr error, seqSummary *ChainStateConnectSummary) {
+	if seqErr != nil {
+		s.runPVShadowOnError(blockBytes, prevTimestamps, ctx, seqErr)
+		return
+	}
+	s.runPVShadowOnSuccess(blockBytes, prevTimestamps, ctx, seqSummary)
+}
+
 // runPVShadowIfActive runs the appropriate PV shadow validation.
 func (s *SyncEngine) runPVShadowIfActive(blockBytes []byte, prevTimestamps []uint64, ctx canonicalBlockApplyContext, seqErr error, seqSummary *ChainStateConnectSummary) {
-	pvActive := (s.pvMode == pvModeShadow || s.pvMode == pvModeOn) && s.isInIBDUnchecked()
-	if !pvActive {
+	if !s.pvShadowActive() {
 		s.pvTelemetry.RecordBlockSkipped()
 		return
 	}
-	if seqErr != nil {
-		s.runPVShadowOnError(blockBytes, prevTimestamps, ctx, seqErr)
-	} else {
-		s.runPVShadowOnSuccess(blockBytes, prevTimestamps, ctx, seqSummary)
-	}
+	s.runPVShadow(blockBytes, prevTimestamps, ctx, seqErr, seqSummary)
 }
 
 // finalizeAppliedBlock persists the already-published canonical block.
@@ -111,30 +132,38 @@ func (s *SyncEngine) runPVShadowIfActive(blockBytes []byte, prevTimestamps []uin
 func (s *SyncEngine) finalizeAppliedBlock(summary *ChainStateConnectSummary, blockHash [32]byte, pb *consensus.ParsedBlock, blockBytes []byte, prevState *ChainState, rollbackState syncRollbackState) error {
 	commitStart := time.Now()
 	if err := s.persistAppliedBlock(summary, blockHash, pb, blockBytes, prevState); err != nil {
-		if isAtomicWritePostCommit(err) {
-			var atomicErr *atomicWriteError
-			errors.As(err, &atomicErr)
-			if s.blockStore != nil && atomicErr.destination == s.blockStore.indexPath {
-				return s.handlePersistenceError(err, true, false)
-			}
-			if atomicErr.destination == s.cfg.ChainStatePath {
-				return s.handlePersistenceError(err, false, true)
-			}
-			fault := s.handlePersistenceError(err, false, false)
-			// The standard cleanup already ran, so reverting only the tip would
-			// freeze a cleaned Mempool against a pre-apply canonical tip. The
-			// frozen state is unobservable behind the retained guard, but it is
-			// the state a restart reconciles against, so restore both halves.
-			if restoreErr := errors.Join(
-				publishPreparedChainState(s.chainState, rollbackState.chainState),
-				restoreMempoolSnapshot(s.mempool, rollbackState.mempool),
-			); restoreErr != nil {
-				return errors.Join(fault, restoreErr)
-			}
-			return fault
-		}
-		return s.rollbackApplyBlock(err, rollbackState)
+		return s.classifyPersistenceFailure(err, rollbackState)
 	}
 	s.pvTelemetry.RecordCommitLatency(time.Since(commitStart))
 	return nil
+}
+
+// classifyPersistenceFailure is the SINGLE classifier for a persistence failure
+// on an already-published canonical block, shared by the direct-connect path and
+// by each preferred-branch row so neither can drift into a different error class
+// or a different rollback rule.
+func (s *SyncEngine) classifyPersistenceFailure(err error, rollbackState syncRollbackState) error {
+	if !isAtomicWritePostCommit(err) {
+		return s.rollbackApplyBlock(err, rollbackState)
+	}
+	var atomicErr *atomicWriteError
+	errors.As(err, &atomicErr)
+	if s.blockStore != nil && atomicErr.destination == s.blockStore.indexPath {
+		return s.handlePersistenceError(err, true, false)
+	}
+	if atomicErr.destination == s.cfg.ChainStatePath {
+		return s.handlePersistenceError(err, false, true)
+	}
+	fault := s.handlePersistenceError(err, false, false)
+	// The standard cleanup already ran, so reverting only the tip would
+	// freeze a cleaned Mempool against a pre-apply canonical tip. The
+	// frozen state is unobservable behind the retained guard, but it is
+	// the state a restart reconciles against, so restore both halves.
+	if restoreErr := errors.Join(
+		publishPreparedChainState(s.chainState, rollbackState.chainState),
+		restoreMempoolSnapshot(s.mempool, rollbackState.mempool),
+	); restoreErr != nil {
+		return errors.Join(fault, restoreErr)
+	}
+	return fault
 }
