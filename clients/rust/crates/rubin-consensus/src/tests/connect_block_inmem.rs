@@ -769,3 +769,178 @@ fn connect_block_non_coinbase_vault_output_accepted() {
     }
     assert!(found_vault, "vault output not found in UTXO set");
 }
+
+/// Go parity: txBytesFromTx (clients/go/consensus/connect_block_inmem_test.go).
+///
+/// Serializes a tx_kind 0x00 transaction with an arbitrary input count; the
+/// shared single-input builders cannot express the two-input spend below.
+/// Only the fields `parse_tx` reads for tx_kind 0x00 are emitted, so the bytes
+/// round-trip to the same `Tx` that `sign_input_witness` signed over.
+fn tx_bytes_from_tx(tx: &crate::tx::Tx) -> Vec<u8> {
+    let mut b = Vec::with_capacity(256);
+    b.extend_from_slice(&tx.version.to_le_bytes());
+    b.push(tx.tx_kind);
+    b.extend_from_slice(&tx.tx_nonce.to_le_bytes());
+
+    crate::compactsize::encode_compact_size(tx.inputs.len() as u64, &mut b);
+    for input in &tx.inputs {
+        b.extend_from_slice(&input.prev_txid);
+        b.extend_from_slice(&input.prev_vout.to_le_bytes());
+        crate::compactsize::encode_compact_size(input.script_sig.len() as u64, &mut b);
+        b.extend_from_slice(&input.script_sig);
+        b.extend_from_slice(&input.sequence.to_le_bytes());
+    }
+
+    crate::compactsize::encode_compact_size(tx.outputs.len() as u64, &mut b);
+    for out in &tx.outputs {
+        b.extend_from_slice(&out.value.to_le_bytes());
+        b.extend_from_slice(&out.covenant_type.to_le_bytes());
+        crate::compactsize::encode_compact_size(out.covenant_data.len() as u64, &mut b);
+        b.extend_from_slice(&out.covenant_data);
+    }
+
+    b.extend_from_slice(&tx.locktime.to_le_bytes());
+
+    crate::compactsize::encode_compact_size(tx.witness.len() as u64, &mut b);
+    for w in &tx.witness {
+        b.push(w.suite_id);
+        crate::compactsize::encode_compact_size(w.pubkey.len() as u64, &mut b);
+        b.extend_from_slice(&w.pubkey);
+        crate::compactsize::encode_compact_size(w.signature.len() as u64, &mut b);
+        b.extend_from_slice(&w.signature);
+    }
+
+    crate::compactsize::encode_compact_size(tx.da_payload.len() as u64, &mut b);
+    b.extend_from_slice(&tx.da_payload);
+    b
+}
+
+/// Go parity: TestConnectBlockInMemory_SumFeesBindsAnIndividualFeeAboveU64.
+///
+/// Pins an INDIVIDUAL transaction fee whose high u128 limb is non-zero flowing
+/// into sum_fees, on BOTH accumulation sites. CV-SUB-U128-01 and every other
+/// shared vector cross u64 only in the ACCUMULATOR (two txs of fee 2^63, each
+/// with a zero high limb), so narrowing the addend at either accumulation site
+/// stays invisible to all of them and to every other unit test. The coinbase
+/// claims only the subsidy, so the >u64 value is bound purely by the fee path.
+#[test]
+fn connect_block_sum_fees_binds_an_individual_fee_above_u64() {
+    let height = 1u64;
+    let mut prev = [0u8; 32];
+    prev[0] = 0x91;
+    let target = [0xffu8; 32];
+
+    let kp = kp_or_skip!();
+    let cov_data = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+
+    // sum_in = 2^63 + (2^63+1) = 2^64+1, sum_out = 1, so fee is exactly 2^64.
+    const HALF: u64 = 1u64 << 63;
+    let mut spend_tx = crate::tx::Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![
+            crate::tx::TxInput {
+                prev_txid: prev,
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0,
+            },
+            crate::tx::TxInput {
+                prev_txid: prev,
+                prev_vout: 1,
+                script_sig: vec![],
+                sequence: 0,
+            },
+        ],
+        outputs: vec![crate::tx::TxOutput {
+            value: 1,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data.clone(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: vec![],
+        da_payload: vec![],
+    };
+    spend_tx.witness = vec![
+        sign_input_witness(&spend_tx, 0, HALF, ZERO_CHAIN_ID, &kp),
+        sign_input_witness(&spend_tx, 1, HALF + 1, ZERO_CHAIN_ID, &kp),
+    ];
+    let spend_bytes = tx_bytes_from_tx(&spend_tx);
+    let (_tx, spend_txid, _wtxid, _n) = parse_tx(&spend_bytes).expect("parse spend tx");
+
+    let utxo = |value: u64| UtxoEntry {
+        value,
+        covenant_type: COV_TYPE_P2PK,
+        covenant_data: cov_data.clone(),
+        creation_height: 0,
+        created_by_coinbase: false,
+    };
+    let state = InMemoryChainState {
+        utxos: HashMap::from([
+            (
+                Outpoint {
+                    txid: prev,
+                    vout: 0,
+                },
+                utxo(HALF),
+            ),
+            (
+                Outpoint {
+                    txid: prev,
+                    vout: 1,
+                },
+                utxo(HALF + 1),
+            ),
+        ]),
+        already_generated: 0,
+    };
+
+    let subsidy = crate::subsidy::block_subsidy(height, state.already_generated);
+    let coinbase = coinbase_with_witness_commitment_and_p2pk_value(
+        height as u32,
+        subsidy,
+        std::slice::from_ref(&spend_bytes),
+    );
+    let (_cb, coinbase_txid, _cbw, _cbn) = parse_tx(&coinbase).expect("parse coinbase");
+    let root = merkle_root_txids(&[coinbase_txid, spend_txid]).expect("merkle root");
+    let block = build_block_bytes(prev, root, target, 1, &[coinbase, spend_bytes]);
+
+    let want = 1u128 << 64; // exactly 2^64
+    assert!(
+        u64::try_from(want).is_err(),
+        "test premise: the pinned fee must not fit in u64"
+    );
+
+    // Site 1: sequential accumulation (connect_block_inmem.rs, apply_non_coinbase_txs_sequential).
+    let mut seq_state = state.clone();
+    let seq = crate::connect_block_basic_in_memory_at_height(
+        &block,
+        Some(prev),
+        Some(target),
+        height,
+        Some(&[0]),
+        &mut seq_state,
+        ZERO_CHAIN_ID,
+    )
+    .expect("sequential connect");
+    assert_eq!(seq.sum_fees, want, "sequential sum_fees mismatch");
+
+    // Site 2: queued-parallel accumulation (collect_queued_non_coinbase_txs).
+    let mut par_state = state.clone();
+    let par = crate::connect_block_parallel_sig_verify(
+        &block,
+        Some(prev),
+        Some(target),
+        height,
+        Some(&[0]),
+        &mut par_state,
+        ZERO_CHAIN_ID,
+        4,
+    )
+    .expect("parallel connect");
+    assert_eq!(par.sum_fees, want, "queued-parallel sum_fees mismatch");
+    assert_eq!(seq.sum_fees, par.sum_fees, "sequential/parallel divergence");
+}
