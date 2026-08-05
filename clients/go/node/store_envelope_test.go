@@ -125,12 +125,14 @@ func storeEnvelopeSharedRejectRows() []storeIntegrityRow {
 		}
 	}
 	// reframe rebuilds the whole envelope from an alternative SPELLING of the
-	// base64 body, keeping a correct checksum over the real payload.
+	// base64 body, keeping a correct checksum over the real payload. The body
+	// is emitted RAW (%s, not %q), so a row can plant the exact control bytes
+	// a permissive base64 decoder would skip.
 	reframe := func(spell func(string) string) func(*testing.T, []byte, []byte) []byte {
 		return func(t *testing.T, _, payload []byte) []byte {
 			t.Helper()
 			checksum := storeEnvelopeChecksum(storeEnvelopeChainState.domain, payload)
-			return fmt.Appendf(nil, "{\"version\":1,\"payload_b64\":%q,\"checksum\":%q}\n",
+			return fmt.Appendf(nil, "{\"version\":1,\"payload_b64\":\"%s\",\"checksum\":\"%s\"}\n",
 				spell(base64.StdEncoding.EncodeToString(payload)), hex.EncodeToString(checksum[:]))
 		}
 	}
@@ -165,7 +167,10 @@ func storeEnvelopeSharedRejectRows() []storeIntegrityRow {
 			return fmt.Appendf(nil, "{\"payload_b64\":%q,\"version\":1,\"checksum\":%q}\n",
 				base64.StdEncoding.EncodeToString(payload), hex.EncodeToString(checksum[:]))
 		}, notCanonical),
-		sub("duplicate_payload_b64_identical", replaceOnce(`,"checksum":"`, `,"payload_b64":"DUPLICATE","checksum":"`), notBase64),
+		sub("duplicate_payload_b64_identical", func(t *testing.T, valid, payload []byte) []byte {
+			t.Helper()
+			return replaceOnce(`,"checksum":"`, `,"payload_b64":"`+payloadB64Of(t, valid)+`","checksum":"`)(t, valid, payload)
+		}, notBase64),
 		sub("duplicate_payload_b64_conflicting", replaceOnce(`,"checksum":"`, `,"payload_b64":"Zm9vYmFy","checksum":"`), notBase64),
 		sub("duplicate_checksum_identical", duplicateChecksum(same), notBase64),
 		sub("duplicate_checksum_conflicting", duplicateChecksum(fixed(strings.Repeat("b", 64))), notBase64),
@@ -186,8 +191,16 @@ func storeEnvelopeSharedRejectRows() []storeIntegrityRow {
 		sub("payload_b64_unpadded", reframe(func(encoded string) string {
 			return strings.TrimRight(encoded, "=")
 		}), notBase64),
+		// Go's stdlib base64 decoder silently SKIPS raw \n and \r (the reason
+		// the production frame derives the body length instead of decoding
+		// permissively). These two rows plant those exact raw bytes inside the
+		// body, so the canonical decoder refuses what a skipping decoder would
+		// have accepted.
 		sub("payload_b64_embedded_newline", reframe(func(encoded string) string {
-			return encoded[:4] + "\\n" + encoded[4:]
+			return encoded[:4] + "\n" + encoded[4:]
+		}), notBase64),
+		sub("payload_b64_embedded_carriage_return", reframe(func(encoded string) string {
+			return encoded[:4] + "\r" + encoded[4:]
 		}), notBase64),
 		{
 			name:    "checksum_mismatch_zeroed",
@@ -349,8 +362,13 @@ func TestLoadChainStateRejectsIntegrityFailures(t *testing.T) {
 func TestBlockstoreIndexRejectsIntegrityFailures(t *testing.T) {
 	dir := t.TempDir()
 	root := BlockStorePath(dir)
-	store, _, _ := storeAtGenesis(t, dir)
-	sibling := storeSameHeightSibling(t, store)
+	store, live, cfg := storeAtGenesis(t, dir)
+	// Three canonical rows, so the swap below hits a MIDDLE one: row 0 stays
+	// anchored and the tip is untouched, which is the only shape in which the
+	// envelope is provably the sole guard on the edit.
+	appendCanonicalBlock(t, store, live, cfg)
+	appendCanonicalBlock(t, store, live, cfg)
+	sibling := storeSameHeightSibling(t, store, devnetGenesisBlockHash, 1)
 	marker := filepath.Join(root, "index.json")
 	valid, err := os.ReadFile(marker) // #nosec G304 -- test-local path.
 	if err != nil {
@@ -367,10 +385,10 @@ func TestBlockstoreIndexRejectsIntegrityFailures(t *testing.T) {
 		if err := json.Unmarshal(payload, &index); err != nil {
 			t.Fatalf("decode index payload: %v", err)
 		}
-		if len(index.Canonical) == 0 {
-			t.Fatalf("index has no canonical rows")
+		if len(index.Canonical) < 3 {
+			t.Fatalf("a middle-row swap needs >= 3 canonical rows, got %d", len(index.Canonical))
 		}
-		index.Canonical[len(index.Canonical)-1] = hex.EncodeToString(sibling[:])
+		index.Canonical[1] = hex.EncodeToString(sibling[:])
 		edited, err := json.MarshalIndent(index, "", "  ")
 		if err != nil {
 			t.Fatalf("encode index payload: %v", err)
@@ -423,12 +441,17 @@ func TestBlockstoreIndexRejectsIntegrityFailures(t *testing.T) {
 	}, rows)
 
 	// The envelope is the ONLY guard on that swap: with the checksum
-	// recomputed the store opens, which is why it may never be waived.
+	// recomputed the store opens AND the genesis anchor still passes, because
+	// the edited row is not row 0. That is why it may never be waived.
 	if err := os.WriteFile(marker, swapRow(t, valid, payload, true), 0o600); err != nil {
 		t.Fatalf("plant recomputed swap: %v", err)
 	}
-	if _, err := OpenBlockStore(root); err != nil {
+	swapped, err := OpenBlockStore(root)
+	if err != nil {
 		t.Fatalf("recomputed-checksum swap must clear the envelope: %v", err)
+	}
+	if err := swapped.VerifyGenesisAnchor(devnetGenesisBlockHash); err != nil {
+		t.Fatalf("a middle-row swap leaves row 0 anchored: %v", err)
 	}
 
 	if err := os.WriteFile(marker, valid, 0o600); err != nil {
@@ -440,16 +463,17 @@ func TestBlockstoreIndexRejectsIntegrityFailures(t *testing.T) {
 }
 
 // storeSameHeightSibling writes a complete header/block/undo set for a
-// non-canonical block at the tip's height, so a swapped row points at a block
-// every downstream identity check accepts.
-func storeSameHeightSibling(t *testing.T, store *BlockStore) [32]byte {
+// NON-canonical block at `height` on top of `parent`, so a swapped row points
+// at a block every downstream identity check accepts. Its timestamp is one no
+// canonical block uses, which is what keeps it off the chain.
+func storeSameHeightSibling(t *testing.T, store *BlockStore, parent [32]byte, height uint64) [32]byte {
 	t.Helper()
 	parsed, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
 	if err != nil {
 		t.Fatalf("ParseBlockBytes(genesis): %v", err)
 	}
-	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 0, 1)
-	blockBytes := buildSingleTxBlock(t, parsed.Header.PrevBlockHash, consensus.POW_LIMIT, parsed.Header.Timestamp+1, coinbase)
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, 1)
+	blockBytes := buildSingleTxBlock(t, parent, consensus.POW_LIMIT, parsed.Header.Timestamp+1_000, coinbase)
 	siblingParsed, err := consensus.ParseBlockBytes(blockBytes)
 	if err != nil {
 		t.Fatalf("ParseBlockBytes(sibling): %v", err)
@@ -461,7 +485,7 @@ func storeSameHeightSibling(t *testing.T, store *BlockStore) [32]byte {
 	if err := store.StoreBlock(hash, siblingParsed.HeaderBytes, blockBytes); err != nil {
 		t.Fatalf("StoreBlock(sibling): %v", err)
 	}
-	if err := store.PutUndo(hash, &BlockUndo{BlockHeight: 0}); err != nil {
+	if err := store.PutUndo(hash, &BlockUndo{BlockHeight: height}); err != nil {
 		t.Fatalf("PutUndo(sibling): %v", err)
 	}
 	return hash
@@ -626,8 +650,8 @@ func TestReconcileCrashRecoveryOverEnvelopedFiles(t *testing.T) {
 	}
 }
 
-// appendCanonicalBlock applies one real block on top of the canonical genesis
-// and returns its hash.
+// appendCanonicalBlock applies one real block on top of the LIVE tip and
+// returns its hash, so repeated calls extend the canonical chain.
 func appendCanonicalBlock(t *testing.T, store *BlockStore, live *ChainState, cfg SyncConfig) [32]byte {
 	t.Helper()
 	engine, err := NewSyncEngine(live, store, cfg)
@@ -638,11 +662,12 @@ func appendCanonicalBlock(t *testing.T, store *BlockStore, live *ChainState, cfg
 	if err != nil {
 		t.Fatalf("ParseBlockBytes(genesis): %v", err)
 	}
-	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, 1)
-	block := buildSingleTxBlock(t, devnetGenesisBlockHash, consensus.POW_LIMIT, parsed.Header.Timestamp+1, coinbase)
+	height := live.Height + 1
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, 1)
+	block := buildSingleTxBlock(t, live.TipHash, consensus.POW_LIMIT, parsed.Header.Timestamp+height, coinbase)
 	summary, err := engine.ApplyBlock(block, nil)
 	if err != nil {
-		t.Fatalf("ApplyBlock(block1): %v", err)
+		t.Fatalf("ApplyBlock(height %d): %v", height, err)
 	}
 	return summary.BlockHash
 }

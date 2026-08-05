@@ -2828,39 +2828,52 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
-    /// Commits the devnet genesis as canonical row 0 plus a complete
-    /// header/block/undo set for a NON-canonical same-height block, so a
-    /// swapped row points at a block every downstream identity check accepts.
-    fn store_with_same_height_sibling(root: &Path) -> (BlockStore, [u8; 32]) {
+    /// Commits the devnet genesis plus two more canonical rows, and a complete
+    /// header/block/undo set for a NON-canonical block at the MIDDLE height, so
+    /// a row swapped there points at a block every downstream identity check
+    /// accepts while row 0 stays anchored and the tip stays untouched.
+    /// Go twin: `storeAtGenesis` + `appendCanonicalBlock` + `storeSameHeightSibling`.
+    fn store_with_middle_sibling(root: &Path) -> (BlockStore, [u8; 32]) {
         use crate::genesis::devnet_genesis_block_bytes;
         use crate::undo::{BlockUndo, TxUndo};
 
         let mut store = BlockStore::create(root).expect("create");
         let genesis = devnet_genesis_block_bytes();
-        let header = &genesis[..BLOCK_HEADER_BYTES];
-        let undo = BlockUndo {
-            block_height: 0,
+        // `commit_canonical_block` binds undo.block_height to the commit height.
+        let undo_at = |block_height: u64| BlockUndo {
+            block_height,
             previous_already_generated: 0,
             txs: vec![TxUndo { spent: vec![] }],
         };
-        store
-            .commit_canonical_block(
-                0,
-                block_hash(header).expect("hash"),
-                header,
-                &genesis,
-                &undo,
-            )
-            .expect("commit genesis");
+        // Distinct stored blocks derived from the genesis bytes: `open` reads no
+        // artifact, so a unique header hash is all the canonical index needs.
+        let variant = |tag: u8| {
+            let mut bytes = genesis.clone();
+            bytes[BLOCK_HEADER_BYTES - 1] ^= tag;
+            let hash = block_hash(&bytes[..BLOCK_HEADER_BYTES]).expect("hash variant header");
+            (hash, bytes)
+        };
+        for (height, tag) in [(0u64, 0u8), (1, 0x01), (2, 0x02)] {
+            let (hash, bytes) = variant(tag);
+            store
+                .commit_canonical_block(
+                    height,
+                    hash,
+                    &bytes[..BLOCK_HEADER_BYTES],
+                    &bytes,
+                    &undo_at(height),
+                )
+                .expect("commit canonical row");
+        }
 
-        // Same height, different nonce; stored but NOT the canonical row.
-        let mut sibling = genesis.clone();
-        sibling[BLOCK_HEADER_BYTES - 1] ^= 0x01;
-        let sibling_hash = block_hash(&sibling[..BLOCK_HEADER_BYTES]).expect("hash sibling header");
+        // Middle height, different nonce; stored but NOT the canonical row.
+        let (sibling_hash, sibling) = variant(0x03);
         store
             .store_block(sibling_hash, &sibling[..BLOCK_HEADER_BYTES], &sibling)
             .expect("store sibling");
-        store.put_undo(sibling_hash, &undo).expect("sibling undo");
+        store
+            .put_undo(sibling_hash, &undo_at(1))
+            .expect("sibling undo");
         (store, sibling_hash)
     }
 
@@ -2876,7 +2889,7 @@ mod tests {
 
         let dir = fresh_datadir("rubin-bs-integrity");
         let root = block_store_path(&dir);
-        let (_store, sibling_hash) = store_with_same_height_sibling(&root);
+        let (_store, sibling_hash) = store_with_middle_sibling(&root);
         let marker = root.join("index.json");
         let valid = std::fs::read(&marker).expect("read marker");
         let payload =
@@ -2886,9 +2899,11 @@ mod tests {
         fn swapped_payload(payload: &[u8], sibling: [u8; 32]) -> Vec<u8> {
             let mut index: BlockStoreIndexDisk =
                 serde_json::from_slice(payload).expect("decode index payload");
-            assert!(!index.canonical.is_empty(), "index has no canonical rows");
-            let last = index.canonical.len() - 1;
-            index.canonical[last] = hex::encode(sibling);
+            assert!(
+                index.canonical.len() >= 3,
+                "a middle-row swap needs >= 3 canonical rows"
+            );
+            index.canonical[1] = hex::encode(sibling);
             let mut edited = serde_json::to_vec_pretty(&index).expect("encode index payload");
             edited.push(b'\n');
             edited
@@ -2935,11 +2950,18 @@ mod tests {
         assert!(!payload_b64_of(&valid).is_empty());
 
         // The envelope is the ONLY guard on that swap: with the checksum
-        // recomputed the store opens, which is why it may never be waived.
+        // recomputed the store opens AND the genesis anchor still passes,
+        // because the edited row is not row 0. Hence it may never be waived.
         let swapped = swapped_payload(&payload, sibling_hash);
         std::fs::write(&marker, rewrap(STORE_ENVELOPE_BLOCK_INDEX, &swapped))
             .expect("plant recomputed swap");
-        BlockStore::open(&root).expect("recomputed-checksum swap must clear the envelope");
+        let genesis_hash =
+            block_hash(&crate::genesis::devnet_genesis_block_bytes()[..BLOCK_HEADER_BYTES])
+                .expect("genesis hash");
+        BlockStore::open(&root)
+            .expect("recomputed-checksum swap must clear the envelope")
+            .verify_genesis_anchor(genesis_hash)
+            .expect("a middle-row swap leaves row 0 anchored");
 
         std::fs::write(&marker, &valid).expect("restore valid marker");
         BlockStore::open(&root).expect("valid marker must open");
@@ -2964,7 +2986,7 @@ mod tests {
         let genesis_hash =
             block_hash(&crate::genesis::devnet_genesis_block_bytes()[..BLOCK_HEADER_BYTES])
                 .expect("genesis hash");
-        let (store, _sibling) = store_with_same_height_sibling(&root);
+        let (store, _sibling) = store_with_middle_sibling(&root);
         store
             .verify_genesis_anchor(genesis_hash)
             .expect("a legitimate datadir must pass the anchor");
@@ -2982,7 +3004,7 @@ mod tests {
             index_before,
             "the anchor refusal must not mutate the canonical index"
         );
-        assert_eq!(store.canonical_len(), 1);
+        assert_eq!(store.canonical_len(), 3);
         let _ = std::fs::remove_dir_all(&empty_dir);
         let _ = std::fs::remove_dir_all(&dir);
     }

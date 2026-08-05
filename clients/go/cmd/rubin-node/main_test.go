@@ -1914,6 +1914,75 @@ func TestRunStartupFailsWhenChainstateReconcileFails(t *testing.T) {
 	}
 }
 
+// TestRunGenesisAnchorRefusesForeignDatadir drives the RUB-1134 genesis anchor
+// through run(): the node-package anchor test calls the BlockStore method
+// directly, so deleting this call site would leave every other suite green.
+// Row 0 here is a foreign chain's genesis, so a mutating startup must exit 2 on
+// the anchor message BEFORE the reconcile adopts anything and without touching
+// the datadir; --dry-run adopts nothing and therefore still exits 0.
+func TestRunGenesisAnchorRefusesForeignDatadir(t *testing.T) {
+	dir := t.TempDir()
+	store, err := node.CreateBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("CreateBlockStore: %v", err)
+	}
+	// A COHERENT foreign row 0: header, block bytes and index row agree, so the
+	// stored-identity checks all pass and only the anchor can refuse it.
+	block := append([]byte(nil), node.DevnetGenesisBlockBytes()...)
+	block[consensus.BLOCK_HEADER_BYTES-1] ^= 0x01 // another chain's genesis
+	header := block[:consensus.BLOCK_HEADER_BYTES]
+	foreign, err := consensus.BlockHash(header)
+	if err != nil {
+		t.Fatalf("BlockHash(foreign genesis): %v", err)
+	}
+	if foreign == node.DevnetGenesisBlockHash() {
+		t.Fatalf("fixture is not foreign")
+	}
+	if err := store.CommitCanonicalBlock(0, foreign, header, block, &node.BlockUndo{}); err != nil {
+		t.Fatalf("CommitCanonicalBlock: %v", err)
+	}
+	// Scoped to the blockstore subtree, where all canonical state lives: a
+	// mutating startup legitimately creates its datadir-root lock files
+	// (.rubin.lock, .rubin-atomic-write.lock) before the anchor runs, and those
+	// are infrastructure, not state. The marker bytes cover the CONTENT axis
+	// the snapshot does not.
+	storeRoot := node.BlockStorePath(dir)
+	marker := filepath.Join(storeRoot, "index.json")
+	before := datadirSnapshot(t, storeRoot)
+	markerBefore, err := os.ReadFile(marker) // #nosec G304 -- test-local path.
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+
+	// --mine-blocks/--mine-exit only bound the run: the anchor rejects long
+	// before the miner starts. Measured with the anchor call site deleted, a
+	// plain `--datadir` startup ACCEPTS this datadir and serves forever (the
+	// contract's "a coherent foreign datadir boots silently today"), so the
+	// bounded form keeps the regression signal fast and loud.
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--datadir", dir, "--mine-blocks", "1", "--mine-exit"}, &out, &errOut); code != 2 {
+		t.Fatalf("run code=%d, want 2 (stderr=%q)", code, errOut.String())
+	}
+	const want = "canonical index genesis anchor failed: STORE_INTEGRITY: canonical index genesis mismatch."
+	if !strings.Contains(errOut.String(), want) {
+		t.Fatalf("stderr=%q, want %q", errOut.String(), want)
+	}
+	assertNoFilesystemWrite(t, before, datadirSnapshot(t, storeRoot))
+	if markerAfter, err := os.ReadFile(marker); err != nil || !bytes.Equal(markerAfter, markerBefore) {
+		t.Fatalf("the refused startup rewrote the canonical index: %q (%v)", markerAfter, err)
+	}
+	if _, err := os.Lstat(node.ChainStatePath(dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the refused startup wrote a chainstate: %v", err)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"--dry-run", "--datadir", dir}, &out, &errOut); code != 0 {
+		t.Fatalf("dry-run code=%d, want 0 (stderr=%q)", code, errOut.String())
+	}
+	assertNoFilesystemWrite(t, before, datadirSnapshot(t, storeRoot))
+}
+
 // A datadir the reconcile cannot replay is exactly when an operator reaches
 // for --dry-run. It must not inherit the startup rejection above: --dry-run
 // never runs the reconcile, so it reports the store as found and exits 0.

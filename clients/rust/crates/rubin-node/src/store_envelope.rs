@@ -227,8 +227,11 @@ pub(crate) mod tests {
 
     /// The RUB-1134 cross-client vectors; the Go suite embeds these SAME
     /// literals. Rows 1/3 differ only by domain tag (domain separation); rows
-    /// 2/4 pin the length term and the base64 body, and row 4 is also the
-    /// on-disk creation marker.
+    /// 2/4 pin the length term and the base64 body. Row 4 pins the GO writer's
+    /// empty-marker payload and envelope: this crate's own on-disk marker
+    /// differs at baseline by INNER field order (`{version,canonical}` vs
+    /// `{canonical,version}`), so it carries a different checksum and is pinned
+    /// separately by `create_store_commits_exact_empty_marker`.
     #[rustfmt::skip]
     const VECTORS: &[(StoreEnvelopeKind, &str, &str, &str)] = &[
         (STORE_ENVELOPE_CHAIN_STATE, "", "51e3d3a67f6a7c4439465328314723099ea753c512f22a1f197e1528b1f24afe",
@@ -342,13 +345,13 @@ pub(crate) mod tests {
             }, "envelope is not the canonical encoding"),
             // A duplicated field lands INSIDE the derived body slice, so the
             // canonical-base64 check refuses it, identically in both clients.
-            row("duplicate_payload_b64_identical", |valid, _| replace_once(valid, ",\"checksum\":\"", ",\"payload_b64\":\"DUPLICATE\",\"checksum\":\""), "payload_b64 is not canonical padded base64"),
+            row("duplicate_payload_b64_identical", |valid, _| replace_once(valid, ",\"checksum\":\"", &format!(",\"payload_b64\":\"{}\",\"checksum\":\"", payload_b64_of(valid))), "payload_b64 is not canonical padded base64"),
             row("duplicate_payload_b64_conflicting", |valid, payload| {
                 let mut other = b"x".to_vec();
                 other.extend_from_slice(payload);
                 replace_once(valid, ",\"checksum\":\"", &format!(",\"payload_b64\":\"{}\",\"checksum\":\"", base64_encode(&other)))
             }, "payload_b64 is not canonical padded base64"),
-            row("duplicate_checksum_identical", |valid, _| replace_once(valid, "\"}\n", &format!("\",\"checksum\":\"{}\"}}\n", "0".repeat(64))), "payload_b64 is not canonical padded base64"),
+            row("duplicate_checksum_identical", |valid, _| replace_once(valid, "\"}\n", &format!("\",\"checksum\":\"{}\"}}\n", checksum_hex_of(valid))), "payload_b64 is not canonical padded base64"),
             row("duplicate_checksum_conflicting", |valid, _| replace_once(valid, "\"}\n", &format!("\",\"checksum\":\"{}\"}}\n", "b".repeat(64))), "payload_b64 is not canonical padded base64"),
             row("missing_checksum", |valid, _| replace_once(valid, "\",\"checksum\":\"", "\",\"checksu\":\""), "envelope is not the canonical encoding"),
             row("missing_payload_b64", |valid, _| replace_once(valid, ",\"payload_b64\":\"", ",\"payloadb64\":\""), "envelope is not the canonical encoding"),
@@ -363,9 +366,17 @@ pub(crate) mod tests {
                     base64_encode(payload).trim_end_matches('='),
                     hex::encode(store_envelope_checksum(STORE_ENVELOPE_CHAIN_STATE.domain, payload))).into_bytes()
             }, "payload_b64 is not canonical padded base64"),
+            // Raw \n and \r are the bytes a permissive decoder skips; rationale
+            // and the byte-identical twins: `storeEnvelopeSharedRejectRows`.
             row("payload_b64_embedded_newline", |_, payload| {
                 let encoded = base64_encode(payload);
-                format!("{{\"version\":1,\"payload_b64\":\"{}\\n{}\",\"checksum\":\"{}\"}}\n",
+                format!("{{\"version\":1,\"payload_b64\":\"{}\n{}\",\"checksum\":\"{}\"}}\n",
+                    &encoded[..4], &encoded[4..],
+                    hex::encode(store_envelope_checksum(STORE_ENVELOPE_CHAIN_STATE.domain, payload))).into_bytes()
+            }, "payload_b64 is not canonical padded base64"),
+            row("payload_b64_embedded_carriage_return", |_, payload| {
+                let encoded = base64_encode(payload);
+                format!("{{\"version\":1,\"payload_b64\":\"{}\r{}\",\"checksum\":\"{}\"}}\n",
                     &encoded[..4], &encoded[4..],
                     hex::encode(store_envelope_checksum(STORE_ENVELOPE_CHAIN_STATE.domain, payload))).into_bytes()
             }, "payload_b64 is not canonical padded base64"),
