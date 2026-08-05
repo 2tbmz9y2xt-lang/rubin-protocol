@@ -1067,7 +1067,7 @@ func TestRequeueDisconnectedTransactionsUsesAdmissionFeeFloor(t *testing.T) {
 		txBelowFloor,
 	)
 
-	engine.requeueDisconnectedTransactions([][]byte{block}, nil)
+	engine.requeueDisconnectedTransactions([][]byte{block})
 
 	if !strings.Contains(stderr.String(), "mempool fee below rolling minimum") {
 		t.Fatalf("expected rolling-floor rejection in stderr, got %q", stderr.String())

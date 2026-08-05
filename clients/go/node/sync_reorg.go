@@ -838,7 +838,10 @@ func (s *SyncEngine) requeueVerifiedDisconnectedTransactions(disconnectedBlocks 
 }
 
 // requeueDisconnectedTransactions is for raw-byte callers; reorgs retain parses.
-func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte, diag *diagnosticBatch) {
+// It has no production call site — the reorg path uses the verified variant with
+// its mutation's batch — so it takes no batch and emits directly, which is legal
+// exactly because its callers hold none of the engine's locks.
+func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte) {
 	parsedBlocks := make([]*consensus.ParsedBlock, 0, len(disconnectedBlocks))
 	for _, blockBytes := range disconnectedBlocks {
 		parsed, err := consensus.ParseBlockBytes(blockBytes)
@@ -847,7 +850,7 @@ func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte
 		}
 		parsedBlocks = append(parsedBlocks, parsed)
 	}
-	s.requeueParsedDisconnectedTransactions(parsedBlocks, diag)
+	s.requeueParsedDisconnectedTransactions(parsedBlocks, nil)
 }
 
 // requeueParsedDisconnectedTransactions MUST NOT be called under the canonical

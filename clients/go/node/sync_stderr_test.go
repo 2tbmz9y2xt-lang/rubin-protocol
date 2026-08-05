@@ -107,7 +107,7 @@ func stderrProducers(t *testing.T, f *pendingOutpointSyncFixture, spentBlock []b
 		},
 		// Requeue diagnostic: the block's inputs are already spent on chain, so
 		// readmission fails and the failure is reported.
-		"requeue": func() { f.engine.requeueDisconnectedTransactions([][]byte{spentBlock}, nil) },
+		"requeue": func() { f.engine.requeueDisconnectedTransactions([][]byte{spentBlock}) },
 		// PV shadow, sequential-error branch: the parallel run of a VALID block
 		// reports OK against the supplied sequential error, so the codes differ
 		// and the mismatch line is emitted deterministically.
@@ -284,7 +284,7 @@ func TestRequeueDisconnectedNoErrorOnCoinbaseOnly(t *testing.T) {
 	}
 
 	stderrBuf.Reset()
-	engine.requeueDisconnectedTransactions([][]byte{rawBlock}, nil)
+	engine.requeueDisconnectedTransactions([][]byte{rawBlock})
 	if stderrBuf.Len() != 0 {
 		t.Fatalf("expected no errors for coinbase-only block, got: %s", stderrBuf.String())
 	}
@@ -314,7 +314,7 @@ func TestRequeueDisconnectedSkipsUnparseableBlocks(t *testing.T) {
 	var stderrBuf bytes.Buffer
 	engine.SetStderr(&stderrBuf)
 
-	engine.requeueDisconnectedTransactions([][]byte{{0xff, 0xfe}}, nil)
+	engine.requeueDisconnectedTransactions([][]byte{{0xff, 0xfe}})
 	if stderrBuf.Len() != 0 {
 		t.Fatalf("expected no stderr for unparseable block, got: %s", stderrBuf.String())
 	}
@@ -458,7 +458,7 @@ func TestRequeueDisconnectedLogsAddTxError(t *testing.T) {
 	// Requeue the disconnected block: the tx's inputs are already spent,
 	// so AddTx fails and the error is logged to stderr.
 	stderrBuf.Reset()
-	engine.requeueDisconnectedTransactions([][]byte{rawBlock}, nil)
+	engine.requeueDisconnectedTransactions([][]byte{rawBlock})
 
 	output := stderrBuf.String()
 	if !strings.Contains(output, "mempool: requeue-tx:") {
