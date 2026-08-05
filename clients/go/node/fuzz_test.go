@@ -93,12 +93,12 @@ func FuzzMempoolFeeWeightOrdering(f *testing.F) {
 	f.Add(uint64(4), uint64(2), uint64(9), uint64(3), uint64(7), uint64(6), byte(3), byte(4))
 	f.Add(uint64(^uint64(0)), uint64(^uint64(0)-1), uint64(^uint64(0)-2), uint64(^uint64(0)-3), uint64(11), uint64(12), byte(5), byte(6))
 	f.Fuzz(func(t *testing.T, feeA, weightA, feeB, weightB, seqA, seqB uint64, seedA, seedB byte) {
-		gotRate := fuzzSign(compareFeeRateWeightValues(feeA, weightA, feeB, weightB))
+		gotRate := fuzzSign(compareFeeRateWeightValues(consensus.Uint128FromU64(feeA), weightA, consensus.Uint128FromU64(feeB), weightB))
 		wantRate := fuzzFeeRateOracleSign(feeA, weightA, feeB, weightB)
 		if gotRate != wantRate {
 			t.Fatalf("fee/weight compare sign=%d, want %d (feeA=%d weightA=%d feeB=%d weightB=%d)", gotRate, wantRate, feeA, weightA, feeB, weightB)
 		}
-		gotReverse := fuzzSign(compareFeeRateWeightValues(feeB, weightB, feeA, weightA))
+		gotReverse := fuzzSign(compareFeeRateWeightValues(consensus.Uint128FromU64(feeB), weightB, consensus.Uint128FromU64(feeA), weightA))
 		if gotReverse != -wantRate {
 			t.Fatalf("reverse fee/weight compare sign=%d, want %d", gotReverse, -wantRate)
 		}
@@ -106,8 +106,8 @@ func FuzzMempoolFeeWeightOrdering(f *testing.F) {
 			return
 		}
 
-		entryA := &mempoolEntry{txid: fuzzTxid(seedA, 0xa1), fee: feeA, weight: weightA, admissionSeq: seqA, source: mempoolTxSourceLocal}
-		entryB := &mempoolEntry{txid: fuzzTxid(seedB, 0xb2), fee: feeB, weight: weightB, admissionSeq: seqB, source: mempoolTxSourceRemote}
+		entryA := &mempoolEntry{txid: fuzzTxid(seedA, 0xa1), fee: consensus.Uint128FromU64(feeA), weight: weightA, admissionSeq: seqA, source: mempoolTxSourceLocal}
+		entryB := &mempoolEntry{txid: fuzzTxid(seedB, 0xb2), fee: consensus.Uint128FromU64(feeB), weight: weightB, admissionSeq: seqB, source: mempoolTxSourceRemote}
 		gotPriority := fuzzSign(compareMempoolEvictionPriority(mempoolEvictionPlanEntry{entry: entryA}, mempoolEvictionPlanEntry{entry: entryB}))
 		wantPriority := fuzzEvictionPriorityOracleSign(feeA, weightA, seqA, feeB, weightB, seqB)
 		if gotPriority != wantPriority {
@@ -123,8 +123,8 @@ func FuzzMempoolFeeWeightOrdering(f *testing.F) {
 		if residentSeq == 0 {
 			residentSeq = 1
 		}
-		resident := &mempoolEntry{txid: fuzzTxid(seedA, 0xc3), fee: feeA, weight: weightA, admissionSeq: residentSeq, source: mempoolTxSourceRemote}
-		candidate := &mempoolEntry{txid: fuzzTxid(seedB, 0xd4), fee: feeA, weight: weightA, source: mempoolTxSourceLocal}
+		resident := &mempoolEntry{txid: fuzzTxid(seedA, 0xc3), fee: consensus.Uint128FromU64(feeA), weight: weightA, admissionSeq: residentSeq, source: mempoolTxSourceRemote}
+		candidate := &mempoolEntry{txid: fuzzTxid(seedB, 0xd4), fee: consensus.Uint128FromU64(feeA), weight: weightA, source: mempoolTxSourceLocal}
 		gotCandidateTie := fuzzSign(compareMempoolEvictionPriority(mempoolEvictionPlanEntry{entry: candidate, candidate: true}, mempoolEvictionPlanEntry{entry: resident}))
 		if gotCandidateTie != -1 {
 			t.Fatalf("candidate exact tie priority=%d, want -1 to preserve no-RBF capacity behavior", gotCandidateTie)
@@ -162,11 +162,11 @@ func FuzzMempoolRollingFloorBoundaries(f *testing.F) {
 		}
 		product, productOK := fuzzCheckedMul(weight, effectiveFloor)
 		wantBelow := weight == 0 || !productOK || fee < product
-		if gotBelow := feeRateBelowFloor(fee, weight, floor); gotBelow != wantBelow {
+		if gotBelow := feeRateBelowFloor(consensus.Uint128FromU64(fee), weight, floor); gotBelow != wantBelow {
 			t.Fatalf("feeRateBelowFloor=%v, want %v (fee=%d weight=%d floor=%d effective=%d)", gotBelow, wantBelow, fee, weight, floor, effectiveFloor)
 		}
 
-		entry := &mempoolEntry{fee: fee, weight: weight}
+		entry := &mempoolEntry{fee: consensus.Uint128FromU64(fee), weight: weight}
 		entryFloor, ok := entryFloorRate(entry)
 		if weight == 0 {
 			if ok || entryFloor != 0 {
@@ -177,10 +177,10 @@ func FuzzMempoolRollingFloorBoundaries(f *testing.F) {
 		if !ok || entryFloor != fee/weight {
 			t.Fatalf("entryFloorRate=(%d,%v), want (%d,true)", entryFloor, ok, fee/weight)
 		}
-		if entryFloor >= DefaultMempoolMinFeeRate && feeRateBelowFloor(fee, weight, entryFloor) {
+		if entryFloor >= DefaultMempoolMinFeeRate && feeRateBelowFloor(consensus.Uint128FromU64(fee), weight, entryFloor) {
 			t.Fatalf("entry should satisfy its returned floor (fee=%d weight=%d floor=%d)", fee, weight, entryFloor)
 		}
-		if entryFloor != ^uint64(0) && !feeRateBelowFloor(fee, weight, entryFloor+1) {
+		if entryFloor != ^uint64(0) && !feeRateBelowFloor(consensus.Uint128FromU64(fee), weight, entryFloor+1) {
 			t.Fatalf("entry floor is not tight (fee=%d weight=%d floor=%d)", fee, weight, entryFloor)
 		}
 		wantRaised := ^uint64(0)
@@ -298,7 +298,7 @@ func fuzzCheckedDaPolicyTx(
 	if err != nil {
 		t.Fatalf("CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext(signed fuzz tx): %v", err)
 	}
-	if checked.Fee != policyFee {
+	if checked.Fee.Cmp(consensus.Uint128FromU64(policyFee)) != 0 {
 		t.Fatalf("checked fee=%d, want %d", checked.Fee, policyFee)
 	}
 	return checked, utxos
@@ -399,7 +399,7 @@ func FuzzDaFeeFloorPolicyBoundaries(f *testing.F) {
 		if daRequired > required {
 			required = daRequired
 		}
-		wantReject := required != 0 && policyFee < required
+		wantReject := required != 0 && policyFee.Cmp(consensus.Uint128FromU64(required)) < 0
 		if reject != wantReject {
 			t.Fatalf("reject=%v, want %v (fee=%d required=%d relay=%d da=%d surcharge=%d weight=%d daBytes=%d)", reject, wantReject, policyFee, required, relayFloor, daFloor, daSurcharge, weight, wantDaBytes)
 		}

@@ -92,7 +92,7 @@ func TestMempoolAcceptedEntryMetadataAndIndexes(t *testing.T) {
 	if entry.wtxid != wtxid {
 		t.Fatalf("entry wtxid=%x, want %x", entry.wtxid, wtxid)
 	}
-	if entry.fee != 300_000 {
+	if entry.fee.Cmp(consensus.Uint128FromU64(300_000)) != 0 {
 		t.Fatalf("entry fee=%d, want 300000", entry.fee)
 	}
 	if entry.weight != weight {
@@ -212,7 +212,7 @@ func TestMempoolAddEntryLockedInitializesMetadataIndexes(t *testing.T) {
 		txid:         [32]byte{0x02},
 		wtxid:        [32]byte{0x03},
 		inputs:       []consensus.Outpoint{op},
-		fee:          5,
+		fee:          consensus.Uint128FromU64(5),
 		weight:       5,
 		size:         7,
 		admissionSeq: 9,
@@ -247,7 +247,7 @@ func TestMempoolAddEntryLockedInitializesMetadataIndexes(t *testing.T) {
 func TestMempoolAddEntryLockedDefaultsUnsetWtxid(t *testing.T) {
 	entry := &mempoolEntry{
 		txid:   [32]byte{0x0a},
-		fee:    1,
+		fee:    consensus.Uint128FromU64(1),
 		weight: 1,
 		size:   1,
 	}
@@ -269,7 +269,7 @@ func TestMempoolAddEntryLockedDefaultsUnsetWtxid(t *testing.T) {
 	if got, ok := mp.wtxids[[32]byte{}]; ok {
 		t.Fatalf("zero wtxid key unexpectedly indexed txid %x", got)
 	}
-	err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0x0b}, fee: 1, weight: 1, size: 1})
+	err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0x0b}, fee: consensus.Uint128FromU64(1), weight: 1, size: 1})
 	if err == nil || !strings.Contains(err.Error(), "mempool capacity candidate rejected by eviction ordering") {
 		t.Fatalf("expected candidate-worst rejection after zero-wtxid default, got %v", err)
 	}
@@ -299,46 +299,46 @@ func TestMempoolAddEntryLockedRejectsZeroTxidWithoutMutation(t *testing.T) {
 }
 
 func TestMempoolEvictionComparatorTiers(t *testing.T) {
-	lowerRate := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x01}, fee: 1, weight: 2, size: 1, admissionSeq: 1}}
-	higherRate := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x02}, fee: 1, weight: 1, size: 1, admissionSeq: 2}}
+	lowerRate := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x01}, fee: consensus.Uint128FromU64(1), weight: 2, size: 1, admissionSeq: 1}}
+	higherRate := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x02}, fee: consensus.Uint128FromU64(1), weight: 1, size: 1, admissionSeq: 2}}
 	if !evictionPlanEntryWorse(lowerRate, higherRate) {
 		t.Fatal("lower fee/weight entry was not worse")
 	}
 
-	lowerAbsoluteFee := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x03}, fee: 1, weight: 1, size: 1000, admissionSeq: 3}}
-	higherAbsoluteFee := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x04}, fee: 2, weight: 2, size: 1, admissionSeq: 4}}
+	lowerAbsoluteFee := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x03}, fee: consensus.Uint128FromU64(1), weight: 1, size: 1000, admissionSeq: 3}}
+	higherAbsoluteFee := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x04}, fee: consensus.Uint128FromU64(2), weight: 2, size: 1, admissionSeq: 4}}
 	if !evictionPlanEntryWorse(lowerAbsoluteFee, higherAbsoluteFee) {
 		t.Fatal("lower absolute fee tie-break was not worse before admission_seq")
 	}
 
-	older := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x05}, fee: 3, weight: 3, size: 1, admissionSeq: 5}}
-	newer := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x06}, fee: 3, weight: 3, size: 1, admissionSeq: 6}}
+	older := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x05}, fee: consensus.Uint128FromU64(3), weight: 3, size: 1, admissionSeq: 5}}
+	newer := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x06}, fee: consensus.Uint128FromU64(3), weight: 3, size: 1, admissionSeq: 6}}
 	if !evictionPlanEntryWorse(older, newer) {
 		t.Fatal("older admission_seq tie-break was not worse")
 	}
 
-	candidate := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x07}, fee: 3, weight: 3, size: 1}, candidate: true}
+	candidate := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x07}, fee: consensus.Uint128FromU64(3), weight: 3, size: 1}, candidate: true}
 	if !evictionPlanEntryWorse(candidate, older) {
 		t.Fatal("capacity candidate did not compare as virtual admission_seq=0")
 	}
 
-	local := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x09}, fee: 3, weight: 3, size: 1, admissionSeq: 7, source: mempoolTxSourceLocal}}
-	remote := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x08}, fee: 3, weight: 3, size: 1, admissionSeq: 7, source: mempoolTxSourceRemote}}
+	local := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x09}, fee: consensus.Uint128FromU64(3), weight: 3, size: 1, admissionSeq: 7, source: mempoolTxSourceLocal}}
+	remote := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x08}, fee: consensus.Uint128FromU64(3), weight: 3, size: 1, admissionSeq: 7, source: mempoolTxSourceRemote}}
 	if !evictionPlanEntryWorse(local, remote) {
 		t.Fatal("source provenance unexpectedly affected eviction ordering before deterministic txid tie-break")
 	}
-	reorg := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x0a}, fee: 3, weight: 3, size: 1, admissionSeq: 7, source: mempoolTxSourceReorg}}
+	reorg := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x0a}, fee: consensus.Uint128FromU64(3), weight: 3, size: 1, admissionSeq: 7, source: mempoolTxSourceReorg}}
 	if !evictionPlanEntryWorse(reorg, remote) {
 		t.Fatal("reorg source provenance unexpectedly affected eviction ordering before deterministic txid tie-break")
 	}
 }
 
 func TestMempoolFeeRateComparatorUsesWeightAndDoesNotOverflow(t *testing.T) {
-	if got := compareFeeRateWeightValues(^uint64(0), ^uint64(0)-1, ^uint64(0)-1, ^uint64(0)); got <= 0 {
+	if got := compareFeeRateWeightValues(consensus.Uint128FromU64(^uint64(0)), ^uint64(0)-1, consensus.Uint128FromU64(^uint64(0)-1), ^uint64(0)); got <= 0 {
 		t.Fatalf("overflow-sensitive fee-rate compare=%d, want first greater", got)
 	}
-	lowWeightFeeRate := &mempoolEntry{txid: [32]byte{0x01}, fee: 10, weight: 5, size: 10_000, admissionSeq: 1}
-	highWeightFeeRate := &mempoolEntry{txid: [32]byte{0x02}, fee: 10, weight: 10, size: 1, admissionSeq: 2}
+	lowWeightFeeRate := &mempoolEntry{txid: [32]byte{0x01}, fee: consensus.Uint128FromU64(10), weight: 5, size: 10_000, admissionSeq: 1}
+	highWeightFeeRate := &mempoolEntry{txid: [32]byte{0x02}, fee: consensus.Uint128FromU64(10), weight: 10, size: 1, admissionSeq: 2}
 	if !evictionPlanEntryWorse(mempoolEvictionPlanEntry{entry: highWeightFeeRate}, mempoolEvictionPlanEntry{entry: lowWeightFeeRate}) {
 		t.Fatal("eviction comparator used wire bytes instead of weight")
 	}
@@ -348,7 +348,7 @@ func TestMempoolAddEntryLockedRejectsInvalidSourceAndDuplicateAdmissionSeq(t *te
 	mp := &Mempool{maxTxs: 10, maxBytes: 100}
 	first := &mempoolEntry{
 		txid:         [32]byte{0x11},
-		fee:          1,
+		fee:          consensus.Uint128FromU64(1),
 		weight:       1,
 		size:         1,
 		admissionSeq: 7,
@@ -359,7 +359,7 @@ func TestMempoolAddEntryLockedRejectsInvalidSourceAndDuplicateAdmissionSeq(t *te
 	}
 	err := mp.addEntryLocked(&mempoolEntry{
 		txid:         [32]byte{0x12},
-		fee:          1,
+		fee:          consensus.Uint128FromU64(1),
 		weight:       1,
 		size:         1,
 		admissionSeq: 7,
@@ -377,7 +377,7 @@ func TestMempoolAddEntryLockedRejectsInvalidSourceAndDuplicateAdmissionSeq(t *te
 	}
 	if err := mp.addEntryLocked(&mempoolEntry{
 		txid:   [32]byte{0x13},
-		fee:    1,
+		fee:    consensus.Uint128FromU64(1),
 		weight: 1,
 		size:   1,
 		source: "sidecar",
@@ -414,7 +414,7 @@ func TestMempoolCapacityPlanRejectsInvalidDryRunInputs(t *testing.T) {
 	validCandidate := func() *mempoolEntry {
 		return &mempoolEntry{
 			txid:   [32]byte{0x21},
-			fee:    1,
+			fee:    consensus.Uint128FromU64(1),
 			weight: 1,
 			size:   1,
 		}
@@ -448,7 +448,7 @@ func TestMempoolCapacityPlanRejectsInvalidDryRunInputs(t *testing.T) {
 			mp:   &Mempool{maxTxs: 10, maxBytes: 100},
 			candidate: &mempoolEntry{
 				txid:   [32]byte{0x22},
-				fee:    1,
+				fee:    consensus.Uint128FromU64(1),
 				weight: 1,
 				size:   -1,
 			},
@@ -465,7 +465,7 @@ func TestMempoolCapacityPlanRejectsInvalidDryRunInputs(t *testing.T) {
 			mp:   &Mempool{maxTxs: 10, maxBytes: 1},
 			candidate: &mempoolEntry{
 				txid:   [32]byte{0x23},
-				fee:    1,
+				fee:    consensus.Uint128FromU64(1),
 				weight: 1,
 				size:   2,
 			},
@@ -485,7 +485,7 @@ func TestMempoolCapacityPlanRejectsInvalidExistingMetadata(t *testing.T) {
 	validExisting := func(txid [32]byte, seq uint64) *mempoolEntry {
 		return &mempoolEntry{
 			txid:         txid,
-			fee:          10,
+			fee:          consensus.Uint128FromU64(10),
 			weight:       1,
 			size:         1,
 			admissionSeq: seq,
@@ -494,7 +494,7 @@ func TestMempoolCapacityPlanRejectsInvalidExistingMetadata(t *testing.T) {
 	}
 	validCandidate := &mempoolEntry{
 		txid:   [32]byte{0xaa},
-		fee:    10,
+		fee:    consensus.Uint128FromU64(10),
 		weight: 1,
 		size:   1,
 	}
@@ -510,27 +510,27 @@ func TestMempoolCapacityPlanRejectsInvalidExistingMetadata(t *testing.T) {
 		},
 		{
 			name:    "zero_txid",
-			entries: map[[32]byte]*mempoolEntry{{0x02}: {fee: 10, weight: 1, size: 1, admissionSeq: 1}},
+			entries: map[[32]byte]*mempoolEntry{{0x02}: {fee: consensus.Uint128FromU64(10), weight: 1, size: 1, admissionSeq: 1}},
 			want:    "invalid mempool entry txid",
 		},
 		{
 			name: "zero_size",
 			entries: map[[32]byte]*mempoolEntry{
-				{0x03}: {txid: [32]byte{0x03}, fee: 10, weight: 1, admissionSeq: 1},
+				{0x03}: {txid: [32]byte{0x03}, fee: consensus.Uint128FromU64(10), weight: 1, admissionSeq: 1},
 			},
 			want: "invalid mempool entry size",
 		},
 		{
 			name: "zero_weight",
 			entries: map[[32]byte]*mempoolEntry{
-				{0x04}: {txid: [32]byte{0x04}, fee: 10, size: 1, admissionSeq: 1},
+				{0x04}: {txid: [32]byte{0x04}, fee: consensus.Uint128FromU64(10), size: 1, admissionSeq: 1},
 			},
 			want: "invalid mempool entry weight",
 		},
 		{
 			name: "zero_admission_seq",
 			entries: map[[32]byte]*mempoolEntry{
-				{0x05}: {txid: [32]byte{0x05}, fee: 10, weight: 1, size: 1},
+				{0x05}: {txid: [32]byte{0x05}, fee: consensus.Uint128FromU64(10), weight: 1, size: 1},
 			},
 			want: "invalid mempool entry admission_seq",
 		},
@@ -575,7 +575,7 @@ func TestMempoolEntryFloorRateUsesSatisfiableFloor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			entry := &mempoolEntry{
 				txid:   [32]byte{0x71},
-				fee:    tc.fee,
+				fee:    consensus.Uint128FromU64(tc.fee),
 				weight: tc.weight,
 				size:   1,
 			}
@@ -595,7 +595,7 @@ func TestMempoolEntryFloorRateUsesSatisfiableFloor(t *testing.T) {
 			}
 		})
 	}
-	if floor, ok := entryFloorRate(&mempoolEntry{txid: [32]byte{0x72}, fee: 3}); ok || floor != 0 {
+	if floor, ok := entryFloorRate(&mempoolEntry{txid: [32]byte{0x72}, fee: consensus.Uint128FromU64(3)}); ok || floor != 0 {
 		t.Fatalf("zero-weight entryFloorRate=(%d,%v), want (0,false)", floor, ok)
 	}
 }
@@ -603,21 +603,21 @@ func TestMempoolEntryFloorRateUsesSatisfiableFloor(t *testing.T) {
 func TestMempoolRaiseMinFeeRateUsesHighestSatisfiableEvictedFloor(t *testing.T) {
 	mp := &Mempool{maxTxs: 10, maxBytes: 100, currentMinFeeRate: DefaultMempoolMinFeeRate}
 	mp.raiseMinFeeRateAfterEvictionLocked([]*mempoolEntry{
-		{txid: [32]byte{0x81}, fee: 3, weight: 2, size: 1},
-		{txid: [32]byte{0x82}, fee: 10, weight: 2, size: 1},
-		{txid: [32]byte{0x83}, fee: 7, weight: 4, size: 1},
+		{txid: [32]byte{0x81}, fee: consensus.Uint128FromU64(3), weight: 2, size: 1},
+		{txid: [32]byte{0x82}, fee: consensus.Uint128FromU64(10), weight: 2, size: 1},
+		{txid: [32]byte{0x83}, fee: consensus.Uint128FromU64(7), weight: 4, size: 1},
 	})
 
 	wantFloor := uint64(5) + DefaultMempoolMinFeeRate
 	if got := mp.currentMinFeeRate; got != wantFloor {
 		t.Fatalf("currentMinFeeRate=%d, want %d after mixed non-divisible/divisible eviction", got, wantFloor)
 	}
-	if err := mp.validateFeeFloorLocked(&mempoolEntry{txid: [32]byte{0x84}, fee: 12, weight: 2, size: 1}); err != nil {
+	if err := mp.validateFeeFloorLocked(&mempoolEntry{txid: [32]byte{0x84}, fee: consensus.Uint128FromU64(12), weight: 2, size: 1}); err != nil {
 		t.Fatalf("candidate at raised floor was rejected: %v", err)
 	}
 	for _, entry := range []*mempoolEntry{
-		{txid: [32]byte{0x85}, fee: 10, weight: 2, size: 1},
-		{txid: [32]byte{0x86}, fee: 8, weight: 2, size: 1},
+		{txid: [32]byte{0x85}, fee: consensus.Uint128FromU64(10), weight: 2, size: 1},
+		{txid: [32]byte{0x86}, fee: consensus.Uint128FromU64(8), weight: 2, size: 1},
 	} {
 		if err := mp.validateFeeFloorLocked(entry); err == nil || !strings.Contains(err.Error(), "mempool fee below rolling minimum") {
 			t.Fatalf("candidate below raised floor was not rejected as below-floor: fee=%d weight=%d err=%v", entry.fee, entry.weight, err)
@@ -628,15 +628,15 @@ func TestMempoolRaiseMinFeeRateUsesHighestSatisfiableEvictedFloor(t *testing.T) 
 func TestMempoolRaiseMinFeeRateUsesHighestNonDivisibleEvictedFloor(t *testing.T) {
 	mp := &Mempool{maxTxs: 10, maxBytes: 100, currentMinFeeRate: DefaultMempoolMinFeeRate}
 	mp.raiseMinFeeRateAfterEvictionLocked([]*mempoolEntry{
-		{txid: [32]byte{0xa1}, fee: 3, weight: 2, size: 1},
-		{txid: [32]byte{0xa2}, fee: 7, weight: 4, size: 1},
+		{txid: [32]byte{0xa1}, fee: consensus.Uint128FromU64(3), weight: 2, size: 1},
+		{txid: [32]byte{0xa2}, fee: consensus.Uint128FromU64(7), weight: 4, size: 1},
 	})
 
 	wantFloor := uint64(1) + DefaultMempoolMinFeeRate
 	if got := mp.currentMinFeeRate; got != wantFloor {
 		t.Fatalf("currentMinFeeRate=%d, want %d after all-non-divisible eviction", got, wantFloor)
 	}
-	if err := mp.validateFeeFloorLocked(&mempoolEntry{txid: [32]byte{0xa3}, fee: 4, weight: 2, size: 1}); err != nil {
+	if err := mp.validateFeeFloorLocked(&mempoolEntry{txid: [32]byte{0xa3}, fee: consensus.Uint128FromU64(4), weight: 2, size: 1}); err != nil {
 		t.Fatalf("candidate at non-divisible raised floor was rejected: %v", err)
 	}
 }
@@ -644,24 +644,24 @@ func TestMempoolRaiseMinFeeRateUsesHighestNonDivisibleEvictedFloor(t *testing.T)
 func TestMempoolRaiseMinFeeRatePreservesDivisibleEvictedFloor(t *testing.T) {
 	mp := &Mempool{maxTxs: 10, maxBytes: 100, currentMinFeeRate: DefaultMempoolMinFeeRate}
 	mp.raiseMinFeeRateAfterEvictionLocked([]*mempoolEntry{
-		{txid: [32]byte{0x91}, fee: 4, weight: 2, size: 1},
+		{txid: [32]byte{0x91}, fee: consensus.Uint128FromU64(4), weight: 2, size: 1},
 	})
 
 	wantFloor := uint64(2) + DefaultMempoolMinFeeRate
 	if got := mp.currentMinFeeRate; got != wantFloor {
 		t.Fatalf("currentMinFeeRate=%d, want %d after divisible eviction", got, wantFloor)
 	}
-	if err := mp.validateFeeFloorLocked(&mempoolEntry{txid: [32]byte{0x92}, fee: 6, weight: 2, size: 1}); err != nil {
+	if err := mp.validateFeeFloorLocked(&mempoolEntry{txid: [32]byte{0x92}, fee: consensus.Uint128FromU64(6), weight: 2, size: 1}); err != nil {
 		t.Fatalf("candidate at divisible raised floor was rejected: %v", err)
 	}
-	if err := mp.validateFeeFloorLocked(&mempoolEntry{txid: [32]byte{0x93}, fee: 4, weight: 2, size: 1}); err == nil || !strings.Contains(err.Error(), "mempool fee below rolling minimum") {
+	if err := mp.validateFeeFloorLocked(&mempoolEntry{txid: [32]byte{0x93}, fee: consensus.Uint128FromU64(4), weight: 2, size: 1}); err == nil || !strings.Contains(err.Error(), "mempool fee below rolling minimum") {
 		t.Fatalf("candidate below divisible raised floor was not rejected as below-floor: %v", err)
 	}
 }
 
 func TestMempoolSortAndEvictionUseWeightFeeRate(t *testing.T) {
-	feeSizeWinner := &mempoolEntry{txid: [32]byte{0xb1}, fee: 4, weight: 4, size: 1}
-	feeWeightWinner := &mempoolEntry{txid: [32]byte{0xb2}, fee: 2, weight: 1, size: 1}
+	feeSizeWinner := &mempoolEntry{txid: [32]byte{0xb1}, fee: consensus.Uint128FromU64(4), weight: 4, size: 1}
+	feeWeightWinner := &mempoolEntry{txid: [32]byte{0xb2}, fee: consensus.Uint128FromU64(2), weight: 1, size: 1}
 
 	entries := []*mempoolEntry{feeSizeWinner, feeWeightWinner}
 	sortMempoolEntries(entries)
@@ -686,7 +686,7 @@ func TestMempoolAddEntryLockedCapacityPlanRejectsWithoutMutation(t *testing.T) {
 		txs: map[[32]byte]*mempoolEntry{
 			badResidentID: {
 				txid:         badResidentID,
-				fee:          10,
+				fee:          consensus.Uint128FromU64(10),
 				size:         1,
 				admissionSeq: 1,
 			},
@@ -694,7 +694,7 @@ func TestMempoolAddEntryLockedCapacityPlanRejectsWithoutMutation(t *testing.T) {
 	}
 	err := mp.addEntryLocked(&mempoolEntry{
 		txid:   [32]byte{0x31},
-		fee:    10,
+		fee:    consensus.Uint128FromU64(10),
 		weight: 1,
 		size:   1,
 	})
@@ -710,7 +710,7 @@ func TestMempoolAddEntryLockedCandidateWorstRejectsWithoutMutation(t *testing.T)
 	mp := &Mempool{maxTxs: 1, maxBytes: 100}
 	resident := &mempoolEntry{
 		txid:   [32]byte{0x41},
-		fee:    100,
+		fee:    consensus.Uint128FromU64(100),
 		weight: 1,
 		size:   1,
 	}
@@ -723,7 +723,7 @@ func TestMempoolAddEntryLockedCandidateWorstRejectsWithoutMutation(t *testing.T)
 	}
 	err = mp.addEntryLocked(&mempoolEntry{
 		txid:   [32]byte{0x42},
-		fee:    1,
+		fee:    consensus.Uint128FromU64(1),
 		weight: 1,
 		size:   1,
 	})
@@ -743,7 +743,7 @@ func TestMempoolRejectsZeroWeightMetadata(t *testing.T) {
 	mp := &Mempool{maxTxs: 10, maxBytes: 100}
 	err := mp.validateNonCapacityAdmissionLocked(&mempoolEntry{
 		txid: [32]byte{0x21},
-		fee:  1,
+		fee:  consensus.Uint128FromU64(1),
 		size: 1,
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid mempool entry weight") {
@@ -1061,7 +1061,7 @@ func TestMempoolRelayMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RelayMetadata: %v", err)
 	}
-	if meta.Fee != 300_000 {
+	if meta.Fee.Cmp(consensus.Uint128FromU64(300_000)) != 0 {
 		t.Fatalf("fee=%d, want 300000", meta.Fee)
 	}
 	if meta.Size != len(txBytes) {
@@ -2438,7 +2438,7 @@ func TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive(t *testing.T
 	}
 	entry := &mempoolEntry{
 		txid:   [32]byte{0x77},
-		fee:    5,
+		fee:    consensus.Uint128FromU64(5),
 		weight: 1, // fee_rate = 5
 		size:   1,
 	}
@@ -3094,7 +3094,7 @@ func TestMempoolAddEntryLockedRejectsBelowFloor(t *testing.T) {
 	mp := &Mempool{maxTxs: 10, maxBytes: 100, currentMinFeeRate: 8}
 	err := mp.addEntryLocked(&mempoolEntry{
 		txid:   [32]byte{0x51},
-		fee:    7,
+		fee:    consensus.Uint128FromU64(7),
 		weight: 1,
 		size:   1,
 	})
@@ -3205,12 +3205,12 @@ func TestMempoolSmallByteCapKeepsFittingCandidateAfterLowWaterTrim(t *testing.T)
 			residentID := [32]byte{byte(0x60 + tc.maxBytes)}
 			candidateID := [32]byte{byte(0x70 + tc.maxBytes)}
 			mp := &Mempool{maxTxs: 10, maxBytes: tc.maxBytes}
-			resident := &mempoolEntry{txid: residentID, fee: 1, weight: 1, size: tc.maxBytes}
+			resident := &mempoolEntry{txid: residentID, fee: consensus.Uint128FromU64(1), weight: 1, size: tc.maxBytes}
 			if err := mp.addEntryLocked(resident); err != nil {
 				t.Fatalf("addEntryLocked(resident): %v", err)
 			}
 
-			candidate := &mempoolEntry{txid: candidateID, fee: 10, weight: 1, size: 1}
+			candidate := &mempoolEntry{txid: candidateID, fee: consensus.Uint128FromU64(10), weight: 1, size: 1}
 			if err := mp.addEntryLocked(candidate); err != nil {
 				t.Fatalf("addEntryLocked(candidate): %v", err)
 			}
@@ -3234,7 +3234,7 @@ func TestMempoolBytePressureAdmitsCandidateLargerThanLowWaterWhenFitsHardCap(t *
 	residentID := [32]byte{0x80}
 	candidateID := [32]byte{0x81}
 	mp := &Mempool{maxTxs: 10, maxBytes: 100}
-	resident := &mempoolEntry{txid: residentID, fee: 1, weight: 1, size: 95}
+	resident := &mempoolEntry{txid: residentID, fee: consensus.Uint128FromU64(1), weight: 1, size: 95}
 	if err := mp.addEntryLocked(resident); err != nil {
 		t.Fatalf("addEntryLocked(resident): %v", err)
 	}
@@ -3242,7 +3242,7 @@ func TestMempoolBytePressureAdmitsCandidateLargerThanLowWaterWhenFitsHardCap(t *
 		t.Fatalf("lowWater=%d, want %d", got, want)
 	}
 
-	candidate := &mempoolEntry{txid: candidateID, fee: 100, weight: 1, size: 95}
+	candidate := &mempoolEntry{txid: candidateID, fee: consensus.Uint128FromU64(100), weight: 1, size: 95}
 	if err := mp.addEntryLocked(candidate); err != nil {
 		t.Fatalf("addEntryLocked(candidate): %v", err)
 	}
@@ -3378,7 +3378,7 @@ func TestMempoolConnectedBlockDecaySeesConfirmedAndConflictingRemovals(t *testin
 	confirmed := &mempoolEntry{
 		txid:         confirmedID,
 		wtxid:        confirmedID,
-		fee:          8,
+		fee:          consensus.Uint128FromU64(8),
 		weight:       1,
 		size:         5,
 		admissionSeq: 1,
@@ -3388,7 +3388,7 @@ func TestMempoolConnectedBlockDecaySeesConfirmedAndConflictingRemovals(t *testin
 		txid:         conflictingID,
 		wtxid:        conflictingID,
 		inputs:       []consensus.Outpoint{spentByBlock},
-		fee:          8,
+		fee:          consensus.Uint128FromU64(8),
 		weight:       1,
 		size:         90,
 		admissionSeq: 2,
@@ -4174,8 +4174,8 @@ func TestMempoolPendingOutpointAdmissionFinalizesExactlyOneToken(t *testing.T) {
 // holds its exact finalized claim. Terminal removal accepts both shapes.
 func TestMempoolPendingOutpointInputlessEntryHoldsZeroTokenAndNoClaim(t *testing.T) {
 	op := consensus.Outpoint{Txid: [32]byte{0x01}, Vout: 2}
-	inputless := &mempoolEntry{txid: [32]byte{0x0a}, wtxid: [32]byte{0x0b}, fee: 1, weight: 1, size: 1}
-	spending := &mempoolEntry{txid: [32]byte{0x0c}, wtxid: [32]byte{0x0d}, inputs: []consensus.Outpoint{op}, fee: 1, weight: 1, size: 1}
+	inputless := &mempoolEntry{txid: [32]byte{0x0a}, wtxid: [32]byte{0x0b}, fee: consensus.Uint128FromU64(1), weight: 1, size: 1}
+	spending := &mempoolEntry{txid: [32]byte{0x0c}, wtxid: [32]byte{0x0d}, inputs: []consensus.Outpoint{op}, fee: consensus.Uint128FromU64(1), weight: 1, size: 1}
 
 	mp := &Mempool{maxTxs: 10, maxBytes: 100}
 	mp.mu.Lock()
@@ -5373,7 +5373,7 @@ func TestMempoolStatsResidentEvictionIncrementsExactlyOnce(t *testing.T) {
 	mp := &Mempool{maxTxs: 1, maxBytes: 100}
 	resident := &mempoolEntry{
 		txid:   [32]byte{0x01},
-		fee:    10,
+		fee:    consensus.Uint128FromU64(10),
 		weight: 1,
 		size:   1,
 	}
@@ -5385,7 +5385,7 @@ func TestMempoolStatsResidentEvictionIncrementsExactlyOnce(t *testing.T) {
 	}
 	candidate := &mempoolEntry{
 		txid:   [32]byte{0x02},
-		fee:    100,
+		fee:    consensus.Uint128FromU64(100),
 		weight: 1,
 		size:   1,
 	}
@@ -5420,10 +5420,10 @@ func TestMempoolStatsResidentEvictionIncrementsByNOnMultiTrim(t *testing.T) {
 	// resident remains: 5 bytes + 10 candidate = 15 <= 18 ✓).
 	mp := &Mempool{maxTxs: 10, maxBytes: 20}
 	residents := []*mempoolEntry{
-		{txid: [32]byte{0x01}, fee: 1, weight: 1, size: 5},
-		{txid: [32]byte{0x02}, fee: 2, weight: 1, size: 5},
-		{txid: [32]byte{0x03}, fee: 3, weight: 1, size: 5},
-		{txid: [32]byte{0x04}, fee: 4, weight: 1, size: 5},
+		{txid: [32]byte{0x01}, fee: consensus.Uint128FromU64(1), weight: 1, size: 5},
+		{txid: [32]byte{0x02}, fee: consensus.Uint128FromU64(2), weight: 1, size: 5},
+		{txid: [32]byte{0x03}, fee: consensus.Uint128FromU64(3), weight: 1, size: 5},
+		{txid: [32]byte{0x04}, fee: consensus.Uint128FromU64(4), weight: 1, size: 5},
 	}
 	for _, r := range residents {
 		if err := mp.addEntryLocked(r); err != nil {
@@ -5435,7 +5435,7 @@ func TestMempoolStatsResidentEvictionIncrementsByNOnMultiTrim(t *testing.T) {
 	}
 	candidate := &mempoolEntry{
 		txid:   [32]byte{0x10},
-		fee:    1000,
+		fee:    consensus.Uint128FromU64(1000),
 		weight: 1,
 		size:   10,
 	}
@@ -5473,7 +5473,7 @@ func TestMempoolStatsCandidateWorstRejectionDoesNotCount(t *testing.T) {
 	mp := &Mempool{maxTxs: 1, maxBytes: 100}
 	resident := &mempoolEntry{
 		txid:   [32]byte{0x10},
-		fee:    100,
+		fee:    consensus.Uint128FromU64(100),
 		weight: 1,
 		size:   1,
 	}
@@ -5482,7 +5482,7 @@ func TestMempoolStatsCandidateWorstRejectionDoesNotCount(t *testing.T) {
 	}
 	worstCandidate := &mempoolEntry{
 		txid:   [32]byte{0x11},
-		fee:    1,
+		fee:    consensus.Uint128FromU64(1),
 		weight: 1,
 		size:   1,
 	}
@@ -5509,7 +5509,7 @@ func TestMempoolStatsFeeFloorRejectionDoesNotCount(t *testing.T) {
 	}
 	tooCheap := &mempoolEntry{
 		txid:   [32]byte{0x21},
-		fee:    1,
+		fee:    consensus.Uint128FromU64(1),
 		weight: 1,
 		size:   1,
 	}

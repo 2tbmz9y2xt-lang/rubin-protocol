@@ -41,14 +41,14 @@ func TestValidateTxLocal_P2PK_Valid(t *testing.T) {
 		WitnessStart: 0,
 		WitnessEnd:   1,
 		SighashCache: sighashCache,
-		Fee:          10,
+		Fee:          Uint128FromU64(10),
 	}
 
 	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
 	if !result.Valid {
 		t.Fatalf("expected valid, got err: %v", result.Err)
 	}
-	if result.Fee != 10 {
+	if result.Fee.Cmp(Uint128FromU64(10)) != 0 {
 		t.Fatalf("expected fee=10, got %d", result.Fee)
 	}
 	if result.TxIndex != 1 {
@@ -92,7 +92,7 @@ func TestValidateTxLocal_P2PK_InvalidSig(t *testing.T) {
 		WitnessStart: 0,
 		WitnessEnd:   1,
 		SighashCache: sighashCache,
-		Fee:          10,
+		Fee:          Uint128FromU64(10),
 	}
 
 	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
@@ -156,7 +156,7 @@ func TestValidateTxLocal_WitnessUnderflow(t *testing.T) {
 		WitnessStart: 0,
 		WitnessEnd:   0, // no witness available
 		SighashCache: sighashCache,
-		Fee:          10,
+		Fee:          Uint128FromU64(10),
 	}
 
 	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
@@ -233,7 +233,7 @@ func TestValidateTxLocal_CoreSimplicitySpendRejected(t *testing.T) {
 		}},
 		WitnessStart: 0,
 		WitnessEnd:   SIMPLICITY_WITNESS_SLOTS,
-		Fee:          10,
+		Fee:          Uint128FromU64(10),
 	}
 
 	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
@@ -265,7 +265,7 @@ func TestValidateTxLocal_CoreExt0x0102Rejected(t *testing.T) {
 		}},
 		WitnessStart: 0,
 		WitnessEnd:   1,
-		Fee:          10,
+		Fee:          Uint128FromU64(10),
 	}
 
 	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
@@ -312,7 +312,7 @@ func TestValidateTxLocal_CoreSimplicityInputGroupCapDeferredBehindDisabledSpend(
 			WitnessStart:   0,
 			WitnessEnd:     len(tx.Witness),
 			SighashCache:   sighashCache,
-			Fee:            uint64(inputCount - 1),
+			Fee:            Uint128FromU64(uint64(inputCount - 1)),
 		}, [32]byte{}, 1, 0, nil)
 	}
 
@@ -372,7 +372,7 @@ func TestValidateTxLocal_WithSigCache(t *testing.T) {
 		WitnessStart:   0,
 		WitnessEnd:     1,
 		SighashCache:   sighashCache,
-		Fee:            10,
+		Fee:            Uint128FromU64(10),
 	}
 
 	// First call populates sig cache.
@@ -441,7 +441,7 @@ func TestRunTxValidationWorkers_SingleValid(t *testing.T) {
 		WitnessStart: 0,
 		WitnessEnd:   1,
 		SighashCache: sighashCache,
-		Fee:          10,
+		Fee:          Uint128FromU64(10),
 	}}
 
 	results, err := RunTxValidationWorkers(
@@ -498,7 +498,7 @@ func TestRunTxValidationWorkers_MultipleWithOneInvalid(t *testing.T) {
 			WitnessStart: 0,
 			WitnessEnd:   1,
 			SighashCache: sighashCache,
-			Fee:          10,
+			Fee:          Uint128FromU64(10),
 		}
 	}
 
@@ -571,7 +571,7 @@ func TestRunTxValidationWorkers_CancelledContext(t *testing.T) {
 		WitnessStart: 0,
 		WitnessEnd:   1,
 		SighashCache: sighashCache,
-		Fee:          10,
+		Fee:          Uint128FromU64(10),
 	}}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -711,7 +711,7 @@ func TestValidateTxLocal_Multisig_Valid(t *testing.T) {
 		WitnessStart: 0,
 		WitnessEnd:   1,
 		SighashCache: sighashCache,
-		Fee:          10,
+		Fee:          Uint128FromU64(10),
 	}
 
 	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
@@ -768,7 +768,7 @@ func TestValidateTxLocal_HTLC_ClaimValid(t *testing.T) {
 		WitnessStart: 0,
 		WitnessEnd:   2,
 		SighashCache: sighashCache,
-		Fee:          10,
+		Fee:          Uint128FromU64(10),
 	}
 
 	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
@@ -814,7 +814,7 @@ func TestValidateTxLocal_Vault_SigValid(t *testing.T) {
 		WitnessStart: 0,
 		WitnessEnd:   1,
 		SighashCache: sighashCache,
-		Fee:          10,
+		Fee:          Uint128FromU64(10),
 	}
 
 	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
@@ -855,7 +855,7 @@ func TestValidateTxLocal_Stealth_Valid(t *testing.T) {
 		WitnessStart: 0,
 		WitnessEnd:   1,
 		SighashCache: sighashCache,
-		Fee:          10,
+		Fee:          Uint128FromU64(10),
 	}
 
 	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)

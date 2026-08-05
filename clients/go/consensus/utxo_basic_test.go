@@ -107,7 +107,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_P2PKOK(t *testing.T) {
 	if summary == nil {
 		t.Fatalf("expected summary")
 	}
-	if summary.Fee != 10 {
+	if summary.Fee.Cmp(Uint128FromU64(10)) != 0 {
 		t.Fatalf("fee=%d, want %d", summary.Fee, 10)
 	}
 	if summary.UtxoCount != 1 {
@@ -449,7 +449,7 @@ func TestApplyNonCoinbaseTxBasic_P2PKValueConservationCases(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if s.Fee != tc.wantFee {
+			if s.Fee.Cmp(Uint128FromU64(tc.wantFee)) != 0 {
 				t.Fatalf("fee=%d, want %d", s.Fee, tc.wantFee)
 			}
 			if s.UtxoCount != tc.wantUTXOs {
@@ -572,7 +572,7 @@ func TestApplyNonCoinbaseTxBasic_VaultPreservedWithOwnerFeeInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if s.Fee != 10 {
+	if s.Fee.Cmp(Uint128FromU64(10)) != 0 {
 		t.Fatalf("fee=%d, want 10", s.Fee)
 	}
 }
@@ -631,7 +631,7 @@ func TestApplyNonCoinbaseTxBasic_VaultAllowsOwnerTopUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if s.Fee != 5 {
+	if s.Fee.Cmp(Uint128FromU64(5)) != 0 {
 		t.Fatalf("fee=%d, want 5", s.Fee)
 	}
 }
@@ -861,7 +861,7 @@ func TestApplyNonCoinbaseTxBasic_MultisigInputAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if s.Fee != 10 {
+	if s.Fee.Cmp(Uint128FromU64(10)) != 0 {
 		t.Fatalf("fee=%d, want 10", s.Fee)
 	}
 }

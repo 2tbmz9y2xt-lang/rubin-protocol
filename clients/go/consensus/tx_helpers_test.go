@@ -157,7 +157,7 @@ func TestCheckTransaction_ValidTx(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckTransaction: %v", err)
 	}
-	if checked.Fee != 10_000_000 {
+	if checked.Fee.Cmp(Uint128FromU64(10_000_000)) != 0 {
 		t.Fatalf("expected fee 10_000_000, got %d", checked.Fee)
 	}
 	if checked.SerializedSize != len(txBytes) {
@@ -217,7 +217,7 @@ func TestCheckTransaction_CoreSimplicityCreationUsesDeploymentProvider(t *testin
 	if err != nil {
 		t.Fatalf("CheckTransactionWithSuiteContext: %v", err)
 	}
-	if checked.Fee != 10 {
+	if checked.Fee.Cmp(Uint128FromU64(10)) != 0 {
 		t.Fatalf("fee=%d, want 10", checked.Fee)
 	}
 }
@@ -279,7 +279,7 @@ func TestCheckTransactionWithSuiteContext_DoesNotMutateCallerUtxoSet(t *testing.
 	if err != nil {
 		t.Fatalf("CheckTransactionWithSuiteContext: %v", err)
 	}
-	if checked.Fee != 10_000_000 {
+	if checked.Fee.Cmp(Uint128FromU64(10_000_000)) != 0 {
 		t.Fatalf("expected fee 10_000_000, got %d", checked.Fee)
 	}
 	if !reflect.DeepEqual(utxoSet, original) {
@@ -366,7 +366,7 @@ func TestCheckParsedTransactionWithOwnedUtxoSetAndSuiteContext_ValidTx(t *testin
 	if err != nil {
 		t.Fatalf("CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext: %v", err)
 	}
-	if checked.Fee != 10_000_000 {
+	if checked.Fee.Cmp(Uint128FromU64(10_000_000)) != 0 {
 		t.Fatalf("expected fee 10_000_000, got %d", checked.Fee)
 	}
 	if checked.SerializedSize != len(txBytes) {

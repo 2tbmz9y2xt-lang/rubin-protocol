@@ -237,7 +237,7 @@ func TestValidateBlockBasic_SubsidyExceeded(t *testing.T) {
 	prev := hashWithPrefix(0x99)
 	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 55, [][]byte{coinbase})
-	_, err = ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, alreadyGenerated, sumFees)
+	_, err = ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, alreadyGenerated, Uint128FromU64(sumFees))
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -262,7 +262,7 @@ func TestValidateBlockBasic_SubsidyWithFeesOK(t *testing.T) {
 	prev := hashWithPrefix(0x9a)
 	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 56, [][]byte{coinbase})
-	if _, err := ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, alreadyGenerated, sumFees); err != nil {
+	if _, err := ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, alreadyGenerated, Uint128FromU64(sumFees)); err != nil {
 		t.Fatalf("ValidateBlockBasicWithContextAndFeesAtHeight: %v", err)
 	}
 }
@@ -278,9 +278,9 @@ func TestValidateBlockBasicWithFees_CoreSimplicityUsesRotation(t *testing.T) {
 	}
 	prev, target := hashWithPrefix(0x9c), filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 58, [][]byte{coinbase, simp})
-	_, err = ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, 0, 0)
+	_, err = ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, 0, Uint128FromU64(0))
 	assertTxErrCode(t, err, TX_ERR_COVENANT_TYPE_INVALID)
-	if _, err := ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(block, &prev, &target, height, nil, 0, 0, [32]byte{}, testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87, simplicityActiveHeight: height}); err != nil {
+	if _, err := ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(block, &prev, &target, height, nil, 0, Uint128FromU64(0), [32]byte{}, testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87, simplicityActiveHeight: height}); err != nil {
 		t.Fatalf("ValidateBlockBasicWithContextAndFeesAtHeightAndRotation: %v", err)
 	}
 	// Block-body threads the REAL chain_id: a descriptor committed for chainX
@@ -288,7 +288,7 @@ func TestValidateBlockBasicWithFees_CoreSimplicityUsesRotation(t *testing.T) {
 	// reject it as chain_id mismatch — the Copilot/Codex P1).
 	chainX := bytes32(0x7a)
 	rotX := testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87, simplicityActiveHeight: height, chainID: chainX}
-	if _, err := ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(block, &prev, &target, height, nil, 0, 0, chainX, rotX); err != nil {
+	if _, err := ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(block, &prev, &target, height, nil, 0, Uint128FromU64(0), chainX, rotX); err != nil {
 		t.Fatalf("block-body must thread the real chain_id (descriptor for chainX active): %v", err)
 	}
 }
@@ -318,7 +318,7 @@ func TestValidateBlockBasic_SubsidyExceeded_CoinbaseSumUsesU128(t *testing.T) {
 	prev := hashWithPrefix(0x9b)
 	target := filledHash(0xff)
 	block := buildBlockBytes(t, prev, root, target, 57, [][]byte{coinbase})
-	_, err = ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, alreadyGenerated, sumFees)
+	_, err = ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, height, nil, alreadyGenerated, Uint128FromU64(sumFees))
 	if err == nil {
 		t.Fatalf("expected error")
 	}

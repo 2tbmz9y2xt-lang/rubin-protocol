@@ -108,7 +108,7 @@ func TestConnectBlockBasicInMemoryAtHeight_OK_ComputesFeesAndUpdatesState(t *tes
 		t.Fatalf("ConnectBlockBasicInMemoryAtHeight: %v", err)
 	}
 
-	if s.SumFees != sumFees {
+	if s.SumFees.Cmp(Uint128FromU64(sumFees)) != 0 {
 		t.Fatalf("sum_fees=%d, want %d", s.SumFees, sumFees)
 	}
 	if s.AlreadyGenerated != 0 {
@@ -231,7 +231,7 @@ func TestConnectBlockBasicInMemoryAtHeight_Height0_DoesNotAdvanceAlreadyGenerate
 	if err != nil {
 		t.Fatalf("ConnectBlockBasicInMemoryAtHeight: %v", err)
 	}
-	if s.SumFees != 0 {
+	if s.SumFees.Cmp(Uint128FromU64(0)) != 0 {
 		t.Fatalf("sum_fees=%d, want 0", s.SumFees)
 	}
 	if s.AlreadyGenerated != 123 || s.AlreadyGeneratedN1 != 123 || state.AlreadyGenerated.Uint64() != 123 {

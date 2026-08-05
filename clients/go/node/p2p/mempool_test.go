@@ -4,6 +4,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
@@ -48,10 +49,10 @@ func TestMemoryTxPool_PutAndGet(t *testing.T) {
 	txid1[0] = 0x01
 	raw := []byte{0xAA, 0xBB}
 
-	if !pool.Put(txid1, raw, 5, len(raw)) {
+	if !pool.Put(txid1, raw, consensus.Uint128FromU64(5), len(raw)) {
 		t.Fatal("first Put should return true (new)")
 	}
-	if pool.Put(txid1, raw, 5, len(raw)) {
+	if pool.Put(txid1, raw, consensus.Uint128FromU64(5), len(raw)) {
 		t.Fatal("second Put should return false (overwrite)")
 	}
 
@@ -76,7 +77,7 @@ func TestMemoryTxPool_Has(t *testing.T) {
 	txid1[0] = 0x01
 	txid2[0] = 0x02
 
-	pool.Put(txid1, []byte{0x01}, 1, 1)
+	pool.Put(txid1, []byte{0x01}, consensus.Uint128FromU64(1), 1)
 
 	if !pool.Has(txid1) {
 		t.Fatal("Has should return true for known txid")
@@ -103,7 +104,7 @@ func TestMemoryTxPool_GetMissing(t *testing.T) {
 func TestMemoryTxPool_NilReceiver(t *testing.T) {
 	var pool *MemoryTxPool
 
-	if pool.Put([32]byte{}, []byte{0x01}, 1, 1) {
+	if pool.Put([32]byte{}, []byte{0x01}, consensus.Uint128FromU64(1), 1) {
 		t.Fatal("nil pool Put should return false")
 	}
 	if pool.Has([32]byte{}) {
@@ -124,7 +125,7 @@ func TestCanonicalMempoolTxPoolNilSafe(t *testing.T) {
 	if nilPool.Has(txid) {
 		t.Fatal("nil adapter Has should return false")
 	}
-	if nilPool.Put(txid, []byte{0x01}, 1, 1) {
+	if nilPool.Put(txid, []byte{0x01}, consensus.Uint128FromU64(1), 1) {
 		t.Fatal("nil adapter Put should return false")
 	}
 
@@ -135,7 +136,7 @@ func TestCanonicalMempoolTxPoolNilSafe(t *testing.T) {
 	if emptyAdapter.Has(txid) {
 		t.Fatal("nil-backed adapter Has should return false")
 	}
-	if emptyAdapter.Put(txid, []byte{0x01}, 1, 1) {
+	if emptyAdapter.Put(txid, []byte{0x01}, consensus.Uint128FromU64(1), 1) {
 		t.Fatal("nil-backed adapter Put should return false")
 	}
 }
@@ -149,7 +150,7 @@ func TestMemoryTxPool_ConcurrentSafe(t *testing.T) {
 			defer wg.Done()
 			var txid [32]byte
 			txid[0] = byte(idx)
-			pool.Put(txid, []byte{byte(idx)}, uint64(idx+1), 1)
+			pool.Put(txid, []byte{byte(idx)}, consensus.Uint128FromU64(uint64(idx+1)), 1)
 			pool.Has(txid)
 			pool.Get(txid)
 		}(i)
@@ -166,13 +167,13 @@ func TestMemoryTxPoolEvictsWorstFeeRate(t *testing.T) {
 	var high [32]byte
 	high[0] = 0x30
 
-	if !pool.Put(low, []byte{0x01}, 1, 4) {
+	if !pool.Put(low, []byte{0x01}, consensus.Uint128FromU64(1), 4) {
 		t.Fatal("low Put should succeed")
 	}
-	if !pool.Put(mid, []byte{0x02}, 2, 4) {
+	if !pool.Put(mid, []byte{0x02}, consensus.Uint128FromU64(2), 4) {
 		t.Fatal("mid Put should succeed")
 	}
-	if !pool.Put(high, []byte{0x03}, 9, 4) {
+	if !pool.Put(high, []byte{0x03}, consensus.Uint128FromU64(9), 4) {
 		t.Fatal("high Put should evict the lowest feerate entry")
 	}
 	if pool.Has(low) {
@@ -192,13 +193,13 @@ func TestMemoryTxPoolRejectsWorseCandidateWhenFull(t *testing.T) {
 	var candidate [32]byte
 	candidate[0] = 0x03
 
-	if !pool.Put(a, []byte{0x01}, 10, 2) {
+	if !pool.Put(a, []byte{0x01}, consensus.Uint128FromU64(10), 2) {
 		t.Fatal("first Put should succeed")
 	}
-	if !pool.Put(b, []byte{0x02}, 8, 2) {
+	if !pool.Put(b, []byte{0x02}, consensus.Uint128FromU64(8), 2) {
 		t.Fatal("second Put should succeed")
 	}
-	if pool.Put(candidate, []byte{0x03}, 1, 4) {
+	if pool.Put(candidate, []byte{0x03}, consensus.Uint128FromU64(1), 4) {
 		t.Fatal("worse feerate candidate should be rejected")
 	}
 	if !pool.Has(a) || !pool.Has(b) {
@@ -211,7 +212,7 @@ func TestMemoryTxPoolPutFallsBackToRawLength(t *testing.T) {
 	var txid [32]byte
 	txid[0] = 0x44
 	raw := []byte{0xAA, 0xBB, 0xCC}
-	if !pool.Put(txid, raw, 5, 0) {
+	if !pool.Put(txid, raw, consensus.Uint128FromU64(5), 0) {
 		t.Fatal("Put with size=0 should fall back to len(raw)")
 	}
 	if !pool.Has(txid) {
@@ -224,16 +225,16 @@ func TestCompareRelayPriorityTieBreakers(t *testing.T) {
 	low[31] = 0x10
 	var high [32]byte
 	high[31] = 0x20
-	if got := compareRelayPriority(5, 2, low, 4, 2, high); got <= 0 {
+	if got := compareRelayPriority(consensus.Uint128FromU64(5), 2, low, consensus.Uint128FromU64(4), 2, high); got <= 0 {
 		t.Fatalf("higher feerate should win, got %d", got)
 	}
-	if got := compareRelayPriority(6, 3, low, 4, 2, high); got <= 0 {
+	if got := compareRelayPriority(consensus.Uint128FromU64(6), 3, low, consensus.Uint128FromU64(4), 2, high); got <= 0 {
 		t.Fatalf("higher absolute fee should win on equal feerate, got %d", got)
 	}
-	if got := compareRelayPriority(4, 2, low, 4, 2, high); got <= 0 {
+	if got := compareRelayPriority(consensus.Uint128FromU64(4), 2, low, consensus.Uint128FromU64(4), 2, high); got <= 0 {
 		t.Fatalf("lower txid should win final tie-break, got %d", got)
 	}
-	if got := compareRelayFeeRate(0, 0, 1, 1); got != 0 {
+	if got := compareRelayFeeRate(consensus.Uint128FromU64(0), 0, consensus.Uint128FromU64(1), 1); got != 0 {
 		t.Fatalf("invalid sizes should compare equal, got %d", got)
 	}
 }

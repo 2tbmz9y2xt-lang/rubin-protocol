@@ -49,17 +49,31 @@ func TestCoverage_ComputeFeeNoVerifyGuards(t *testing.T) {
 	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
 		{Txid: [32]byte{0x01}, Vout: 0}: {Value: ^uint64(0)},
 	}
+	// RUB-1127: two u64-max inputs. This used to be a "sum_in overflow"
+	// policy error because sum_in was a u64 accumulator; sum_in is now exact
+	// u128, so the fee is derived without error and carries the full value.
 	tx.Inputs = append(tx.Inputs, consensus.TxInput{PrevTxid: [32]byte{0x01}, PrevVout: 0})
-	if _, err := computeFeeNoVerify(tx, utxos); err == nil {
-		t.Fatalf("expected sum_in overflow")
+	wideFee, err := computeFeeNoVerify(tx, utxos)
+	if err != nil {
+		t.Fatalf("two u64-max inputs must derive a fee, got %v", err)
+	}
+	// 2*(2^64-1) - 1 (a single output of value 1), which exceeds u64.
+	wantWideFee := consensus.Uint128{Hi: 1, Lo: ^uint64(0) - 2}
+	if wideFee.Cmp(wantWideFee) != 0 {
+		t.Fatalf("wide fee=%s want=%s", wideFee.String(), wantWideFee.String())
+	}
+	if wideFee.Cmp(consensus.Uint128FromU64(^uint64(0))) <= 0 {
+		t.Fatalf("wide fee=%s must exceed u64", wideFee.String())
 	}
 	tx.Inputs = tx.Inputs[:1]
+	// Output sums still overflow-check, now at the u128 boundary: two
+	// u128-max-scale outputs are unrepresentable and stay fail-closed.
 	tx.Outputs = []consensus.TxOutput{{Value: ^uint64(0)}, {Value: 1}}
 	utxos = map[consensus.Outpoint]consensus.UtxoEntry{
 		{Txid: [32]byte{0x01}, Vout: 0}: {Value: 10},
 	}
 	if _, err := computeFeeNoVerify(tx, utxos); err == nil {
-		t.Fatalf("expected sum_out overflow")
+		t.Fatalf("expected overspend on wide output sum")
 	}
 	tx.Outputs = []consensus.TxOutput{{Value: 11}}
 	if _, err := computeFeeNoVerify(tx, utxos); err == nil {
@@ -105,7 +119,7 @@ func TestCoverage_MempoolHelpers(t *testing.T) {
 		t.Fatalf("expected duplicate tx rejection")
 	}
 	mp.maxTxs = len(mp.txs)
-	if err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0xaa}, fee: 1, weight: 1, size: 1}); err == nil {
+	if err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0xaa}, fee: consensus.Uint128FromU64(1), weight: 1, size: 1}); err == nil {
 		t.Fatalf("expected mempool full")
 	}
 	if got := pickEntries(mp.snapshotEntries(), 1, 1<<20); len(got) != 1 {
