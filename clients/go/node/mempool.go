@@ -110,13 +110,40 @@ func (m *Mempool) PendingOutpointOwner() *PendingOutpointOwner {
 	return m.pendingOutpoints
 }
 
-// checkEmptyForBindingLocked proves the pool holds no resident record in any
-// index. SyncEngine.SetMempool is initialization-only, so a candidate that
+// checkNeverUsedForBindingLocked proves the pool is not merely EMPTY but never
+// used. SyncEngine.SetMempool is initialization-only, so a candidate that
 // already admitted anything cannot be adopted: its records were validated
-// against a canonical tip that engine never guarded. The caller holds m.mu.
-func (m *Mempool) checkEmptyForBindingLocked() error {
+// against a canonical tip that engine never guarded, and emptiness alone cannot
+// see that — a pool admitted at tip A and drained back to zero is
+// index-identical to a fresh one. The history-bearing state is therefore the
+// closed boundary here: resident records, the admission sequence high-water, the
+// rolling fee floor (which congestion control raises and only ever decays back
+// TOWARD the default), and the cumulative admission and eviction counters.
+//
+// STATIC policy configuration is deliberately NOT part of this boundary: limits,
+// providers and the rest of MempoolConfig are an operator's construction-time
+// choice, not evidence of past admission, so a custom-configured fresh pool
+// still binds. The caller holds m.mu.
+func (m *Mempool) checkNeverUsedForBindingLocked() error {
 	if len(m.txs) != 0 || len(m.wtxids) != 0 || m.usedBytes != 0 {
 		return fmt.Errorf("mempool candidate is not empty: entries=%d wtxids=%d used_bytes=%d", len(m.txs), len(m.wtxids), m.usedBytes)
+	}
+	if m.lastAdmissionSeq != 0 {
+		return fmt.Errorf("mempool candidate already admitted: last_admission_seq=%d", m.lastAdmissionSeq)
+	}
+	// The raw field, never currentMinFeeRateLocked. The accessor normalizes ONLY
+	// below-default values: a partially decayed raised floor (say 4 against the
+	// default 1) is visible through either read, but a raw value BELOW the
+	// default is reported AS the default and would be waved through as untouched.
+	// The raw read is load-bearing for exactly that state.
+	if m.currentMinFeeRate != DefaultMempoolMinFeeRate {
+		return fmt.Errorf("mempool candidate carries a non-default rolling fee floor: min_fee_rate=%d want=%d", m.currentMinFeeRate, DefaultMempoolMinFeeRate)
+	}
+	counts := m.AdmissionCounts()
+	evicted := m.evictedResidentTotal.Load()
+	if counts != (MempoolAdmissionCounts{}) || evicted != 0 {
+		return fmt.Errorf("mempool candidate carries admission history: accepted=%d conflict=%d rejected=%d unavailable=%d evicted_resident=%d",
+			counts.Accepted, counts.Conflict, counts.Rejected, counts.Unavailable, evicted)
 	}
 	return nil
 }
@@ -214,21 +241,31 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 	if m == nil {
 		return txAdmitUnavailable("nil mempool")
 	}
-	// Exactly one admission counter increment per non-nil-receiver call,
-	// based on the final return value. Registered AFTER the nil-receiver
-	// guard above so a nil mempool returns the typed unavailable error
-	// without recording a counter — there is no mempool instance to own
-	// the metric state.
-	defer func() { m.noteAdmissionResult(retErr) }()
+	// Exactly one admission counter increment per non-nil-receiver call, and
+	// NEVER outside the admission guard. Only the nil-ChainState guard can
+	// precede it — there is no ChainState to take the guard from — so it counts
+	// at its own return site through the same noteAdmissionResult mapping. A nil
+	// receiver counts nothing.
 	if m.chainState == nil {
-		return txAdmitUnavailable("nil chainstate")
-	}
-	if !validMempoolTxSource(source) {
-		return txAdmitRejected(fmt.Sprintf("invalid mempool tx source %q", source))
+		err := txAdmitUnavailable("nil chainstate")
+		m.noteAdmissionResult(err)
+		return err
 	}
 
 	m.chainState.admissionMu.RLock()
 	defer m.chainState.admissionMu.RUnlock()
+	// Registered AFTER the guard, so LIFO runs the count BEFORE the RUnlock
+	// above: the whole lifecycle — validation, insertion, outcome count — is
+	// contained by ONE guard acquisition, which is what SetMempool's exclusive
+	// acquisition must be able to exclude.
+	defer func() { m.noteAdmissionResult(retErr) }()
+
+	// Inside the guard, so its rejection and count belong to that contained
+	// lifecycle and it waits on a terminally latched engine like every other
+	// admission: caller metadata never reports an outcome the binding cannot see.
+	if !validMempoolTxSource(source) {
+		return txAdmitRejected(fmt.Sprintf("invalid mempool tx source %q", source))
+	}
 
 	snapshot := m.chainState.admissionSnapshot()
 	policy := m.policySnapshot()

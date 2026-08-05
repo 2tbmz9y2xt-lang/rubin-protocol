@@ -481,10 +481,14 @@ func (s *SyncEngine) targetContextForCandidate(parentHash [32]byte, candidateHei
 // not a convenience: a pool detached at tip A, held while the engine advances,
 // and handed back at an apparently equal tip carries records and claims bound to
 // a canonical history this engine no longer has, and a pointer comparison cannot
-// see that. So only a fresh empty pool at the guarded live tip binds, and
-// afterwards only the exact same pointer is accepted; a rejection mutates
-// neither the engine nor the candidate's policy, records, indexes, owner state
-// or high-waters.
+// see that. So only a NEVER-USED pool at the guarded live tip binds — emptiness
+// is not enough, because a pool admitted at tip A and drained back to zero is
+// index-identical to a fresh one and only its history-bearing state (admission
+// sequence, rolling fee floor, cumulative counters, owner high-waters) still
+// says otherwise — and afterwards only the exact same pointer is accepted. A
+// rejection mutates neither the engine nor the candidate's policy, records,
+// indexes, owner state or high-waters, and is reported only through the existing
+// bounded stderr diagnostic; no new public error kind is introduced.
 func (s *SyncEngine) SetMempool(mempool *Mempool) {
 	if s == nil {
 		return
@@ -501,14 +505,25 @@ func (s *SyncEngine) SetMempool(mempool *Mempool) {
 }
 
 // bindMempoolUnderMutation performs the initialization-only binding under the
-// caller's mutationMu, holding the live admission read guard CONTINUOUSLY from
-// the live tip read through the install. Lock order is mutationMu,
-// admissionMu.RLock, then s.mu before Mempool.mu before owner.mu — never the
-// reverse; the candidate's context is read with owner.mu released, before
-// Mempool.mu is taken.
+// caller's mutationMu, holding the live admission guard EXCLUSIVELY and
+// CONTINUOUSLY from the live tip read through the install. Lock order is
+// unchanged — mutationMu, admissionMu, then s.mu before Mempool.mu before
+// owner.mu, never the reverse; the candidate's context is read with owner.mu
+// released, before Mempool.mu is taken.
+//
+// The guard is a WRITE lock; a read lock would be unsound. Read locks do not
+// exclude each other, so an in-flight admission runs concurrently with the
+// freshness decision — validated against the PRE-binding policy, inserting after
+// the pointer is installed, counting its outcome later still. Only exclusion
+// across the whole span makes "never used" a decision rather than a sample,
+// leaving two serializations: admission-then-binding (refused, the pool now has
+// history) and binding-then-admission (admitted into a bound pool).
+//
+// Blocking indefinitely on a terminally latched engine is unchanged: the read
+// lock blocked there too, because the latch retains admissionMu.
 func (s *SyncEngine) bindMempoolUnderMutation(mempool *Mempool) error {
-	s.chainState.admissionMu.RLock()
-	defer s.chainState.admissionMu.RUnlock()
+	s.chainState.admissionMu.Lock()
+	defer s.chainState.admissionMu.Unlock()
 	settled, err := s.checkMempoolRebinding(mempool)
 	if settled || err != nil {
 		return err
@@ -547,22 +562,26 @@ func (s *SyncEngine) checkMempoolRebinding(mempool *Mempool) (bool, error) {
 	return false, errors.New("mempool replacement is not supported after the initial binding")
 }
 
-// installInitialMempool rechecks the candidate's emptiness and its admission
-// context under s.mu, Mempool.mu and owner.mu — in that order — and only then
-// fills the missing policy providers and installs the pointer. Everything
-// fallible runs before the first write, so a refused candidate is unchanged.
+// installInitialMempool rechecks that the candidate is never-used, together with
+// its admission context, under s.mu, Mempool.mu and owner.mu — in that order —
+// and only then fills the missing policy providers and installs the pointer.
+// Everything fallible runs before the first write, so a refused candidate is
+// unchanged.
 func (s *SyncEngine) installInitialMempool(mempool *Mempool, admission PendingOutpointAdmissionContext) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	mempool.mu.Lock()
 	defer mempool.mu.Unlock()
-	if err := mempool.checkEmptyForBindingLocked(); err != nil {
+	if err := mempool.checkNeverUsedForBindingLocked(); err != nil {
 		return err
 	}
 	owner := mempool.pendingOutpointOwnerLocked()
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
 	if err := owner.checkNoClaimsLocked(); err != nil {
+		return err
+	}
+	if err := checkOwnerNeverUsedLocked(owner); err != nil {
 		return err
 	}
 	if current, ok := owner.admissionContextLocked(); !ok || current != admission {
@@ -578,10 +597,29 @@ func (s *SyncEngine) installInitialMempool(mempool *Mempool, admission PendingOu
 	return nil
 }
 
+// checkOwnerNeverUsedLocked proves the candidate's owner never issued a
+// reservation and never entered a canonical transition, which the claim census
+// alone cannot see: a claim reserved and released leaves both indexes empty
+// while the token high-water stays advanced, and an aborted transition leaves
+// the generation advanced. Both high-waters are monotonic by contract, so zero
+// is exactly "never used". It reads owner state only; the caller holds owner.mu.
+//
+// This is a read of existing fields from the binding path, NOT an owner API,
+// lifecycle or invariant change: the owner keeps every rule it already had.
+func checkOwnerNeverUsedLocked(owner *PendingOutpointOwner) error {
+	if owner.inTransition {
+		return errors.New("mempool candidate owner has an active canonical transition")
+	}
+	if owner.tokenHighWater != 0 || owner.generation != 0 {
+		return fmt.Errorf("mempool candidate owner carries reservation history: token_high_water=%d generation=%d", owner.tokenHighWater, owner.generation)
+	}
+	return nil
+}
+
 // reportMempoolBindingRejected makes a refused binding visible: the engine keeps
 // its previous binding, otherwise indistinguishable from an unwired caller.
 func (s *SyncEngine) reportMempoolBindingRejected(err error) {
-	_, _ = fmt.Fprintf(s.stderr, "sync: mempool binding rejected, engine binding unchanged: %v\n", err)
+	_, _ = fmt.Fprintf(s.diagnosticWriter(), "sync: mempool binding rejected, engine binding unchanged: %v\n", err)
 }
 
 // SetStderr sets the writer for non-fatal error diagnostics (e.g. mempool
@@ -596,6 +634,28 @@ func (s *SyncEngine) SetStderr(w io.Writer) {
 		w = io.Discard
 	}
 	s.stderr = w
+}
+
+// diagnosticWriter is the SINGLE synchronized read of the diagnostic writer, and
+// every SyncEngine diagnostic site MUST go through it rather than touch s.stderr
+// directly: the field is written by SetStderr under s.mu, so an unsynchronized
+// read of it races a caller that rewires stderr while the node runs.
+//
+// It snapshots the writer under the lock and RETURNS it, deliberately leaving the
+// I/O to the caller with no lock held. Holding s.mu across a write would put an
+// arbitrary caller-supplied io.Writer — which may block, or itself call back into
+// the engine — inside the engine's own mutex. Nil-safe on both the receiver and
+// the field so a diagnostic can never panic on a path that is already failing.
+func (s *SyncEngine) diagnosticWriter() io.Writer {
+	if s == nil {
+		return io.Discard
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.stderr == nil {
+		return io.Discard
+	}
+	return s.stderr
 }
 
 // isInIBDUnchecked returns true if the engine appears to be in IBD based on
@@ -841,7 +901,7 @@ func (s *SyncEngine) latchTerminalFault(cause error) {
 // reportTerminalTransition makes the fail-closed latch visible to an operator:
 // without it a latched node is indistinguishable from a merely hung one.
 func (s *SyncEngine) reportTerminalTransition(reason string, cause error) {
-	_, _ = fmt.Fprintf(s.stderr, "sync: canonical transition terminal (%s), admission stays closed until restart: %v\n", reason, cause)
+	_, _ = fmt.Fprintf(s.diagnosticWriter(), "sync: canonical transition terminal (%s), admission stays closed until restart: %v\n", reason, cause)
 }
 
 // rollbackRestoreFault marks a transition failure whose EXACT restore could not
@@ -1150,7 +1210,7 @@ func (s *SyncEngine) commitPreparedBlockUnderGuard(
 	// claims are gone before any observer can see the new canonical tip.
 	if tr.mempool != nil {
 		if err := tr.mempool.applyConnectedBlockParsed(pb); err != nil {
-			_, _ = fmt.Fprintf(s.stderr, "sync: standard mempool cleanup failed at height %d, rolling back: %v\n", ctx.blockHeight, err)
+			_, _ = fmt.Fprintf(s.diagnosticWriter(), "sync: standard mempool cleanup failed at height %d, rolling back: %v\n", ctx.blockHeight, err)
 			return s.rollbackApplyBlock(err, tr.rollback)
 		}
 	}

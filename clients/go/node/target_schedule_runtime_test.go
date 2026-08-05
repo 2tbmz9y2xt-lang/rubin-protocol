@@ -443,11 +443,15 @@ func TestTargetScheduleRuntimeReorgPreviewRejectsBeforeDisconnect(t *testing.T) 
 	if _, err := store.ChainWork(sideHash); err == nil {
 		t.Fatal("rejected side block contributed chain work")
 	}
-	// The PREVIEW is the site that rejected it: had the preview skipped
-	// derivation, the commit loop would still reject, but only after the
-	// disconnect and after recording a block-apply rejection.
-	if got := engine.BlockApplyCounts(); got != beforeCounts {
-		t.Fatalf("preview reject recorded a block-apply outcome: %+v -> %+v", beforeCounts, got)
+	// A consensus rejection of a selected winning branch records exactly one
+	// rejected outcome and no accepted one, whichever phase catches it, so the
+	// count no longer distinguishes preview from commit. The four assertions
+	// above are what prove the PREVIEW rejected it: nothing stored, durable
+	// fingerprint unchanged, tip unmoved, no chain work contributed.
+	want := beforeCounts
+	want.Rejected++
+	if got := engine.BlockApplyCounts(); got != want {
+		t.Fatalf("block-apply counts=%+v, want %+v", got, want)
 	}
 }
 

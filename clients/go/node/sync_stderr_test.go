@@ -3,8 +3,10 @@ package node
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -30,6 +32,201 @@ func TestSetStderrSetsWriter(t *testing.T) {
 	if engine.stderr != &buf {
 		t.Fatal("SetStderr should set the provided writer")
 	}
+}
+
+// lockProbeWriter records, from INSIDE Write, whether the engine's own mutex is
+// free at the moment the diagnostic I/O runs. The engine's write lock is taken
+// only if it is uncontended, and released immediately, so a successful TryLock
+// is proof that diagnosticWriter released s.mu before handing the writer over —
+// and a failed one, in this deliberately single-goroutine phase, is proof that
+// it did not.
+type lockProbeWriter struct {
+	engine   *SyncEngine
+	buf      bytes.Buffer
+	writes   int
+	lockHeld bool // set when the engine mutex was NOT free during a write
+}
+
+func (w *lockProbeWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.engine.mu.TryLock() {
+		w.engine.mu.Unlock()
+	} else {
+		w.lockHeld = true
+	}
+	return w.buf.Write(p)
+}
+
+// lockedWriter is a concurrency-safe sink for the racing phase, where several
+// producers and SetStderr run at once.
+type lockedWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+// stderrProducers returns every SyncEngine diagnostic producer reachable WITHOUT
+// an open canonical transition, each driven the way production drives it.
+//
+// One diagnostic site is deliberately absent: the standard-cleanup failure
+// report in commitPreparedBlockUnderGuard, which only fires inside an open
+// transition and would need that whole fixture here. It is exercised by
+// TestSyncPendingOutpointCleanupFailureLatchesTerminalFault, and it reads the
+// writer through the same audited helper — the repository call-site audit, not
+// this list, is what proves no SyncEngine site reads s.stderr raw. Adding a
+// transition-free diagnostic site without adding it here leaves it unproven.
+func stderrProducers(t *testing.T, f *pendingOutpointSyncFixture, spentBlock []byte, pvBlock []byte, pvCtx canonicalBlockApplyContext) map[string]func() {
+	t.Helper()
+	// A target the candidate's header cannot match, so the shadow's parallel
+	// connect fails and runPVShadowOnSuccess takes its parErr branch.
+	badTargetCtx := pvCtx
+	badTarget := f.target
+	badTarget[31] ^= 0xff
+	badTargetCtx.expectedTarget = &badTarget
+	return map[string]func(){
+		// Binding rejection: a different pointer after the initial binding.
+		"binding rejection": func() { f.engine.SetMempool(f.newPool(t)) },
+		// Terminal transition report: the fail-closed latch notice.
+		"terminal transition": func() {
+			f.engine.reportTerminalTransition("stderr probe", errors.New("probe cause"))
+		},
+		// Requeue diagnostic: the block's inputs are already spent on chain, so
+		// readmission fails and the failure is reported.
+		"requeue": func() { f.engine.requeueDisconnectedTransactions([][]byte{spentBlock}) },
+		// PV shadow, sequential-error branch: the parallel run of a VALID block
+		// reports OK against the supplied sequential error, so the codes differ
+		// and the mismatch line is emitted deterministically.
+		"pv shadow seq error": func() {
+			f.engine.runPVShadowOnError(pvBlock, nil, pvCtx, errors.New("probe sequential error"))
+		},
+		// PV shadow, sequential-success branches. Both are driven: the parallel
+		// error branch through a target the block cannot match, and the
+		// post-state-digest branch through a zero-digest sequential summary that
+		// the real connected digest cannot equal.
+		"pv shadow par error": func() {
+			f.engine.runPVShadowOnSuccess(pvBlock, nil, badTargetCtx, &ChainStateConnectSummary{})
+		},
+		"pv shadow digest mismatch": func() {
+			f.engine.runPVShadowOnSuccess(pvBlock, nil, pvCtx, &ChainStateConnectSummary{})
+		},
+	}
+}
+
+// TestSyncEngineStderrRaceAllProducers pins the diagnostic-writer contract on
+// every SyncEngine producer reachable without an open canonical transition —
+// binding rejection, terminal transition report, requeue, and all three PV
+// shadow branches — at once: each reads the writer through the single
+// synchronized helper, none holds a SyncEngine mutex across the writer I/O, the
+// emitted bytes are unchanged, and racing SetStderr against all of them is clean
+// under -race. See stderrProducers for the one site outside that reach and where
+// it is covered instead.
+//
+// The lock probe is the part a race detector cannot give: -race proves the field
+// read is synchronized, but a helper that held s.mu across an arbitrary
+// caller-supplied writer would ALSO be race-clean while putting foreign,
+// possibly blocking or re-entrant, code inside the engine's own mutex.
+func TestSyncEngineStderrRaceAllProducers(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+
+	// A block whose transaction is spent on chain: requeueing it fails.
+	spend := f.spend(t, 700, 1)
+	if err := f.mempool.AddTx(spend); err != nil {
+		t.Fatalf("AddTx(spend): %v", err)
+	}
+	spentBlock := f.blockIncluding(t, f.tipHash, f.tipHeight+1, f.alreadyGenerated, 202, spend)
+	summary, err := f.engine.ApplyBlock(spentBlock, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(including spend): %v", err)
+	}
+
+	// A next block that CONNECTS CLEANLY, plus the context a shadow run
+	// consumes. Height and issuance are read from the live chainstate the shadow
+	// clones, never recomputed here and never taken from the summary: the
+	// summary's issuance field is not the "total issued before the next block"
+	// term BlockSubsidy wants, and a subsidy off by that difference makes the
+	// parallel connect fail — which would silently rob the post-state-digest
+	// branch below of its only reachable path.
+	live := f.engine.chainState.view()
+	nextHeight := summary.BlockHeight + 1
+	pvBlock := buildSingleTxBlock(t, summary.BlockHash, f.target, 303,
+		reorgTestCoinbaseForAddress(t, nextHeight, consensus.BlockSubsidy(nextHeight, live.alreadyGenerated), f.sourceAddress))
+	pvCtx := canonicalBlockApplyContext{
+		blockHeight:    nextHeight,
+		expectedTarget: &f.target,
+		prevState:      cloneChainState(f.engine.chainState),
+	}
+
+	producers := stderrProducers(t, f, spentBlock, pvBlock, pvCtx)
+	// The three PV lines share a prefix, so each wants the fragment that
+	// identifies its own branch: a producer must not be able to pass by
+	// emitting a sibling branch's line.
+	wantContains := map[string]string{
+		"binding rejection":         "sync: mempool binding rejected, engine binding unchanged: ",
+		"terminal transition":       "sync: canonical transition terminal (stderr probe), admission stays closed until restart: ",
+		"requeue":                   "mempool: requeue-tx: ",
+		"pv shadow seq error":       "seq_err=ERR par_err=OK",
+		"pv shadow par error":       "seq_ok par_err=BLOCK_ERR_TARGET_INVALID",
+		"pv shadow digest mismatch": "post_state_digest",
+	}
+
+	// Phase 1 — single goroutine, so a busy engine mutex can only be this
+	// producer's own. Also pins the emitted bytes.
+	for name, produce := range producers {
+		probe := &lockProbeWriter{engine: f.engine}
+		f.engine.SetStderr(probe)
+		produce()
+		if probe.writes == 0 {
+			t.Fatalf("%s: produced no diagnostic; the probe cannot prove anything", name)
+		}
+		if probe.lockHeld {
+			t.Fatalf("%s: the engine mutex was held across the diagnostic writer I/O", name)
+		}
+		if got := probe.buf.String(); !strings.Contains(got, wantContains[name]) {
+			t.Fatalf("%s: emitted %q, want the unchanged line containing %q", name, got, wantContains[name])
+		}
+	}
+
+	// Phase 2 — every producer racing SetStderr. The rewiring CHURNS for the
+	// producers' whole lifetime rather than firing a fixed burst: a burst can
+	// drain before the slower producers reach their diagnostic, and then an
+	// unsynchronized read has nothing to race against. Under -race this fails on
+	// any diagnostic site that reads the writer field directly.
+	sinks := []io.Writer{io.Discard, &lockedWriter{}, &lockedWriter{}}
+	done := make(chan struct{})
+	var churn sync.WaitGroup
+	for w := 0; w < 2; w++ {
+		churn.Add(1)
+		go func(w int) {
+			defer churn.Done()
+			for i := 0; ; i++ {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				f.engine.SetStderr(sinks[(i+w)%len(sinks)])
+			}
+		}(w)
+	}
+	var wg sync.WaitGroup
+	for _, produce := range producers {
+		for i := 0; i < 5; i++ {
+			wg.Add(1)
+			go func(produce func()) {
+				defer wg.Done()
+				produce()
+			}(produce)
+		}
+	}
+	wg.Wait()
+	close(done)
+	churn.Wait()
+	f.engine.SetStderr(io.Discard)
 }
 
 // TestRequeueDisconnectedNoErrorOnCoinbaseOnly verifies that
