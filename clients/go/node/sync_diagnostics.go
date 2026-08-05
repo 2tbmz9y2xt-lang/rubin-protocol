@@ -1,6 +1,9 @@
 package node
 
-import "fmt"
+import (
+	"fmt"
+	"io"
+)
 
 // diagnosticBatchMaxRecords and diagnosticBatchMaxBytes bound what ONE public
 // SyncEngine mutation may retain for its post-unlock flush. They cap RETAINED
@@ -44,7 +47,7 @@ type diagnosticBatch struct {
 
 // append retains one already-formatted record, or drops it and arms the single
 // truncation record. Once either cap is reached the batch is CLOSED: later
-// records are dropped too, so a large record cannot be skipped in favour of a
+// records are dropped too, so a large record cannot be skipped in favor of a
 // smaller one behind it, which would reorder what an operator reads.
 func (b *diagnosticBatch) append(record string) {
 	if b == nil || b.truncated {
@@ -130,15 +133,22 @@ func (s *SyncEngine) flushDiagnostics(batch *diagnosticBatch) {
 	for _, record := range batch.records {
 		_, _ = fmt.Fprint(writer, record)
 	}
-	if batch.truncated {
+	batch.flushTail(writer)
+}
+
+// flushTail emits what follows the retained records: the truncation marker for
+// anything the caps dropped, then the terminal-latch record.
+//
+// The terminal record goes last, which IS its producer order: it is emitted by
+// canonicalTransition.end, after every other producer of that mutation (PV
+// shadow runs before the transition opens, the cleanup report inside it), and
+// the only producer that could follow it — the reorg requeue — is skipped
+// entirely when end returns a terminal cause.
+func (b *diagnosticBatch) flushTail(writer io.Writer) {
+	if b.truncated {
 		_, _ = fmt.Fprint(writer, diagnosticBatchTruncatedRecord)
 	}
-	// The terminal record goes last, which IS its producer order: it is emitted
-	// by canonicalTransition.end, after every other producer of that mutation
-	// (PV shadow runs before the transition opens, the cleanup report inside it),
-	// and the only producer that could follow it — the reorg requeue — is
-	// skipped entirely when end returns a terminal cause.
-	if batch.terminal != "" {
-		_, _ = fmt.Fprint(writer, batch.terminal)
+	if b.terminal != "" {
+		_, _ = fmt.Fprint(writer, b.terminal)
 	}
 }

@@ -3401,7 +3401,11 @@ func TestDevnetRPCHealthFailsClosedOnTerminalFault(t *testing.T) {
 
 	server := httptest.NewServer(newDevnetRPCHandler(state))
 	defer server.Close()
-	resp, err := http.Get(server.URL + "/health")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, server.URL+"/health", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	resp, err := server.Client().Do(req)
 	if err != nil {
 		t.Fatalf("GET /health: %v", err)
 	}
