@@ -167,12 +167,15 @@ pub fn compare_relay_priority(
 ///
 /// The u128 fee by u64 size product needs up to 192 bits, so a plain u128
 /// multiplication would overflow above u64 fees. `compare_fee_rate` retains
-/// every product bit, matching Go `compareRelayFeeRate`.
+/// every product bit and performs the cross-multiplication itself, so each
+/// size is passed straight through with its own fee: swapping them here would
+/// cross twice and compare fee*size products instead of rates. Matches Go
+/// `compareRelayFeeRate`.
 fn compare_relay_fee_rate(a_fee: u128, a_size: usize, b_fee: u128, b_size: usize) -> i32 {
     if a_size == 0 || b_size == 0 {
         return 0;
     }
-    match compare_fee_rate(a_fee, b_size as u64, b_fee, a_size as u64) {
+    match compare_fee_rate(a_fee, a_size as u64, b_fee, b_size as u64) {
         std::cmp::Ordering::Greater => 1,
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
@@ -269,6 +272,43 @@ mod tests {
     fn compare_relay_fee_rate_zero_size() {
         assert_eq!(compare_relay_fee_rate(100, 0, 100, 100), 0);
         assert_eq!(compare_relay_fee_rate(100, 100, 100, 0), 0);
+    }
+
+    /// Distinct sizes on the two operands, where a rate comparison and a
+    /// fee*size product comparison disagree: fee 10 over size 1 is rate 10 but
+    /// product 10, while fee 100 over size 100 is rate 1 but product 10000.
+    /// Every other relay case in this file uses equal sizes, where both
+    /// orientations agree and a doubly crossed comparator passes unnoticed.
+    /// Mirrors Go `TestCompareRelayFeeRateComparesRatesNotProducts`.
+    #[test]
+    fn compare_relay_fee_rate_compares_rates_not_products() {
+        assert_eq!(compare_relay_fee_rate(10, 1, 100, 100), 1);
+        assert_eq!(compare_relay_fee_rate(100, 100, 10, 1), -1);
+        // Equal rates, distinct fees and sizes: 6/3 == 4/2 must tie so that
+        // priority falls through to the absolute fee.
+        assert_eq!(compare_relay_fee_rate(6, 3, 4, 2), 0);
+    }
+
+    /// Drives the same discrimination through the live put/find_worst
+    /// eviction path: a full pool must keep the higher-RATE entry, not the
+    /// one with the larger fee*size product. Mirrors Go
+    /// `TestMemoryTxPoolEvictsByRateNotProduct`.
+    #[test]
+    fn eviction_keeps_higher_rate_not_larger_product() {
+        let pool = RelayTxPool::new_with_limit(1);
+        let bulky = [0x51u8; 32];
+        let dense = [0x52u8; 32];
+
+        // fee 100 over size 100 → rate 1, product 10000.
+        assert!(pool.put(bulky, &[0x01], 100, 100));
+        // fee 10 over size 1 → rate 10, product 10. Higher rate must evict.
+        assert!(pool.put(dense, &[0x02], 10, 1));
+        assert!(!pool.has(&bulky));
+        assert!(pool.has(&dense));
+        // The reverse direction: the lower-rate bulky entry must not displace it.
+        assert!(!pool.put(bulky, &[0x01], 100, 100));
+        assert!(pool.has(&dense));
+        assert!(!pool.has(&bulky));
     }
 
     #[test]

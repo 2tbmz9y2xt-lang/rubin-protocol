@@ -205,9 +205,13 @@ func compareRelayPriority(aFee consensus.Uint128, aSize int, aTxid [32]byte, bFe
 // compareRelayFeeRate compares aFee/aSize against bFee/bSize by exact
 // cross-multiplication over all 192 product bits of a u128 fee by a u64
 // size. No division, truncation, or floating point.
+//
+// consensus.CompareFeeRate performs the cross-multiplication itself, so the
+// sizes are passed straight through with their own fees: swapping them here
+// would cross twice and compare fee*size products instead of rates.
 func compareRelayFeeRate(aFee consensus.Uint128, aSize int, bFee consensus.Uint128, bSize int) int {
 	if aSize <= 0 || bSize <= 0 {
 		return 0
 	}
-	return consensus.CompareFeeRate(aFee, uint64(bSize), bFee, uint64(aSize))
+	return consensus.CompareFeeRate(aFee, uint64(aSize), bFee, uint64(bSize))
 }
