@@ -636,13 +636,25 @@ func (s *SyncEngine) reportMempoolBindingRejected(diag *diagnosticBatch, err err
 // post-acceptance failures). A nil writer maps to io.Discard, which is also the
 // default when SetStderr is never called.
 //
-// Contract for the supplied writer, which the engine ENFORCES rather than
-// assumes: it is never invoked while mutationMu, s.mu, the ChainState admission
-// guard, or any ChainState / Mempool / PendingOutpointOwner lock is held (see
-// flushDiagnostics for the single terminal-latch exception). A writer may
-// therefore block or re-enter a non-diagnostic SyncEngine mutation without
-// stalling or deadlocking another mutator, and its Write errors are ignored: a
+// The writer MUST be safe for concurrent use — the conventional io.Writer
+// property that os.Stderr and *os.File already hold. Flushes deliberately run
+// outside mutationMu, so two mutations' flush windows may overlap; serializing
+// them behind a flush lock was rejected because a wedged writer would then stall
+// another mutator's return, which is the very class this design removes.
+//
+// What the engine ENFORCES rather than assumes: the writer is never invoked
+// while mutationMu, s.mu, or any ChainState / Mempool / PendingOutpointOwner
+// lock is held, so it may block or re-enter a non-diagnostic SyncEngine mutation
+// without stalling or deadlocking a mutator. Write errors are ignored: a
 // diagnostic never changes a consensus, persistence, rollback or mempool result.
+//
+// ONE carve-out: the terminal fail-closed latch (canonicalTransition.end)
+// retains the ChainState admission guard until restart, so that single flush
+// runs with that guard held. A writer that blocks or re-enters there must not
+// expect an admission-taking call to complete — nothing can pass that guard
+// again in this process either way, and every mutation entry point refuses at
+// mutationAllowed before touching it.
+//
 // The replacement is a race-free pointer store under s.mu; a flush already in
 // progress keeps the writer it snapshotted.
 func (s *SyncEngine) SetStderr(w io.Writer) {
@@ -931,8 +943,12 @@ func (s *SyncEngine) latchTerminalFault(cause error) {
 // mutationMu and receiving the latched fault. The admission guard that the
 // terminal state retains until restart is NOT released — that is the latch
 // itself, and no mutation path re-acquires it after this point.
+//
+// It is also the one record the batch caps may not evict (diagnoseTerminal):
+// losing it would leave an operator with shadow noise and a content-free
+// truncation marker as the only stderr trace of a node that latched shut.
 func (s *SyncEngine) reportTerminalTransition(diag *diagnosticBatch, reason string, cause error) {
-	s.diagnose(diag, "sync: canonical transition terminal (%s), admission stays closed until restart: %v\n", reason, cause)
+	s.diagnoseTerminal(diag, "sync: canonical transition terminal (%s), admission stays closed until restart: %v\n", reason, cause)
 }
 
 // rollbackRestoreFault marks a transition failure whose EXACT restore could not

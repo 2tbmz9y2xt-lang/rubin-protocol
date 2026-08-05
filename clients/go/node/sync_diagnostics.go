@@ -33,6 +33,13 @@ type diagnosticBatch struct {
 	bytes     int
 	truncated bool
 	flushed   bool
+	// terminal is the fail-closed latch record, in its OWN slot because it is the
+	// one record the caps must never evict: a >=64-row reorg with systematic
+	// PV-shadow mismatch fills the batch during preparation, and a capped
+	// terminal record would leave stderr showing shadow noise plus a content-free
+	// truncation marker while the node latched shut. It stays bounded — a fixed
+	// format plus the latch cause, and canonicalTransition.end runs once.
+	terminal string
 }
 
 // append retains one already-formatted record, or drops it and arms the single
@@ -59,9 +66,14 @@ func (b *diagnosticBatch) append(record string) {
 // writer snapshot. That direct form is legal ONLY for a caller holding none of
 // the locks in the engine's isolation contract: mutationMu, s.mu, the ChainState
 // admission guard, and any ChainState / Mempool / PendingOutpointOwner lock.
-// Every production producer reaches this through a batch (see the call-site
-// census in sync_stderr_test.go); the direct form serves callers outside a
-// mutation, which hold no engine lock by construction.
+//
+// As of this change the direct form has NO production caller: every production
+// producer is reached beneath a public mutation and therefore carries a batch,
+// and the only batch-free caller of a producer is test code (the raw-byte
+// requeueDisconnectedTransactions has no production call site at all). That is a
+// property of the current call graph — established by grepping every producer's
+// callers, not by any mechanism here — so a new batch-free production caller
+// must re-prove the lock-freedom above.
 func (s *SyncEngine) diagnose(batch *diagnosticBatch, format string, args ...any) {
 	record := fmt.Sprintf(format, args...)
 	if batch != nil {
@@ -70,6 +82,21 @@ func (s *SyncEngine) diagnose(batch *diagnosticBatch, format string, args ...any
 	}
 	// fmt.Fprint with one string operand writes exactly the record's bytes in
 	// one Write call, as the pre-existing fmt.Fprintf sites did.
+	_, _ = fmt.Fprint(s.diagnosticWriter(), record)
+}
+
+// diagnoseTerminal is diagnose for the ONE record class the caps may not evict:
+// the fail-closed terminal-latch report. It bypasses the record and byte caps
+// into the batch's dedicated slot, keeping the retained output bounded because
+// exactly one terminal record exists per mutation. Everything else — the direct
+// write when there is no batch, the bytes, the writer contract — is identical to
+// diagnose.
+func (s *SyncEngine) diagnoseTerminal(batch *diagnosticBatch, format string, args ...any) {
+	record := fmt.Sprintf(format, args...)
+	if batch != nil {
+		batch.terminal = record
+		return
+	}
 	_, _ = fmt.Fprint(s.diagnosticWriter(), record)
 }
 
@@ -96,7 +123,7 @@ func (s *SyncEngine) flushDiagnostics(batch *diagnosticBatch) {
 		return
 	}
 	batch.flushed = true
-	if len(batch.records) == 0 && !batch.truncated {
+	if len(batch.records) == 0 && !batch.truncated && batch.terminal == "" {
 		return
 	}
 	writer := s.diagnosticWriter()
@@ -105,5 +132,13 @@ func (s *SyncEngine) flushDiagnostics(batch *diagnosticBatch) {
 	}
 	if batch.truncated {
 		_, _ = fmt.Fprint(writer, diagnosticBatchTruncatedRecord)
+	}
+	// The terminal record goes last, which IS its producer order: it is emitted
+	// by canonicalTransition.end, after every other producer of that mutation
+	// (PV shadow runs before the transition opens, the cleanup report inside it),
+	// and the only producer that could follow it — the reorg requeue — is
+	// skipped entirely when end returns a terminal cause.
+	if batch.terminal != "" {
+		_, _ = fmt.Fprint(writer, batch.terminal)
 	}
 }

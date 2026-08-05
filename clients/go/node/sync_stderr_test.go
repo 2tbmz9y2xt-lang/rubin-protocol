@@ -500,38 +500,67 @@ func newDiagnosticRejectionCandidate(t *testing.T, chainState *ChainState, block
 }
 
 // diagnosticLockProbe answers the question the race detector cannot: which
-// engine locks were HELD at the moment the caller-supplied writer ran. Every
-// TryLock happens before the writer publishes `entered`, so the measurement is
-// taken before any other goroutine in the test can contend for those locks.
+// engine locks were HELD at the moment the caller-supplied writer ran. It probes
+// all six lock families named in the issue invariant — mutationMu, SyncEngine.mu,
+// the ChainState admission guard, ChainState.mu, Mempool.mu and the
+// PendingOutpointOwner mutex.
+//
+// It is itself safe for concurrent use, as SetStderr requires of any writer:
+// flushes run outside mutationMu, so two mutations' flushes may overlap.
 type diagnosticLockProbe struct {
 	engine  *SyncEngine
+	mempool *Mempool
+	owner   *PendingOutpointOwner
 	entered chan struct{}
 	release chan struct{}
 
+	mu            sync.Mutex
 	buf           bytes.Buffer
 	writes        int
 	mutationHeld  bool
 	stateHeld     bool
 	admissionHeld bool
+	chainHeld     bool
+	mempoolHeld   bool
+	ownerHeld     bool
+}
+
+// tryLock reports whether l was FREE, taking and releasing it when it was.
+func tryLockFree(l interface {
+	TryLock() bool
+	Unlock()
+},
+) bool {
+	if !l.TryLock() {
+		return false
+	}
+	l.Unlock()
+	return true
 }
 
 func (w *diagnosticLockProbe) Write(p []byte) (int, error) {
+	// Measured BEFORE `entered` is published, so in the blocking phases the
+	// sample is taken before any other goroutine can contend for these locks.
+	mutationFree := tryLockFree(&w.engine.mutationMu)
+	stateFree := tryLockFree(&w.engine.mu)
+	admissionFree := tryLockFree(&w.engine.chainState.admissionMu)
+	chainFree := tryLockFree(&w.engine.chainState.mu)
+	mempoolFree, ownerFree := true, true
+	if w.mempool != nil {
+		mempoolFree = tryLockFree(&w.mempool.mu)
+	}
+	if w.owner != nil {
+		ownerFree = tryLockFree(&w.owner.mu)
+	}
+	w.mu.Lock()
 	w.writes++
-	if w.engine.mutationMu.TryLock() {
-		w.engine.mutationMu.Unlock()
-	} else {
-		w.mutationHeld = true
-	}
-	if w.engine.mu.TryLock() {
-		w.engine.mu.Unlock()
-	} else {
-		w.stateHeld = true
-	}
-	if w.engine.chainState.admissionMu.TryLock() {
-		w.engine.chainState.admissionMu.Unlock()
-	} else {
-		w.admissionHeld = true
-	}
+	w.mutationHeld = w.mutationHeld || !mutationFree
+	w.stateHeld = w.stateHeld || !stateFree
+	w.admissionHeld = w.admissionHeld || !admissionFree
+	w.chainHeld = w.chainHeld || !chainFree
+	w.mempoolHeld = w.mempoolHeld || !mempoolFree
+	w.ownerHeld = w.ownerHeld || !ownerFree
+	w.mu.Unlock()
 	if w.entered != nil {
 		select {
 		case w.entered <- struct{}{}:
@@ -539,36 +568,69 @@ func (w *diagnosticLockProbe) Write(p []byte) (int, error) {
 		}
 		<-w.release
 	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	return w.buf.Write(p)
 }
 
+// held reports the six flags plus the write count under the probe's own mutex.
+func (w *diagnosticLockProbe) held() (writes int, anyEngineLock bool, admission bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writes, w.mutationHeld || w.stateHeld || w.chainHeld || w.mempoolHeld || w.ownerHeld, w.admissionHeld
+}
+
+func (w *diagnosticLockProbe) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return fmt.Sprintf("mutationMu=%v s.mu=%v admissionMu=%v ChainState.mu=%v Mempool.mu=%v owner.mu=%v",
+		w.mutationHeld, w.stateHeld, w.admissionHeld, w.chainHeld, w.mempoolHeld, w.ownerHeld)
+}
+
+func (w *diagnosticLockProbe) output() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
 // TestSyncEngineDiagnosticWriterRunsAfterMutationUnlock pins the isolation
-// contract on a public mutation entry point, in two phases. Phase 1 is
-// single-goroutine, so a busy engine lock could only be this mutation's own: it
-// proves mutationMu, s.mu and the admission guard are ALL free when the
-// caller-supplied writer runs, and that the emitted bytes are unchanged. Phase 2
-// parks a writer inside Write and proves the liveness property the batch exists
-// for: a SECOND canonical mutator acquires mutationMu and reaches its own result
-// while the first call's writer is still blocked.
+// contract on a public mutation entry point, in two phases.
+//
+// Phase 1 is single-goroutine, so a busy engine lock could only be this
+// mutation's own: it proves every lock family the invariant names is free when
+// the caller-supplied writer runs, and that the emitted bytes are unchanged. Its
+// admission-guard claim is narrow — this path releases that guard inside
+// bindMempoolUnderMutation before the flush, so the probe only catches a
+// regression moving the flush back into that span; the load-bearing admission
+// evidence is TestSyncEngineTransitionDiagnosticsFlushAfterUnlock, which drives
+// the path that actually holds it.
+//
+// Phase 2 parks a writer inside Write and proves the liveness property the batch
+// exists for: a SECOND canonical mutator acquires mutationMu and reaches its own
+// result while the first call's writer is still blocked.
 func TestSyncEngineDiagnosticWriterRunsAfterMutationUnlock(t *testing.T) {
 	engine, chainState, blockStore := newDiagnosticEngine(t)
+	bound, owner := boundPoolOf(engine)
 
-	probe := &diagnosticLockProbe{engine: engine}
+	probe := &diagnosticLockProbe{engine: engine, mempool: bound, owner: owner}
 	engine.SetStderr(probe)
 	engine.SetMempool(newDiagnosticRejectionCandidate(t, chainState, blockStore))
-	if probe.writes != 1 {
-		t.Fatalf("writes=%d, want exactly one flushed record", probe.writes)
+	writes, engineLockHeld, admissionHeld := probe.held()
+	if writes != 1 {
+		t.Fatalf("writes=%d, want exactly one flushed record", writes)
 	}
-	if probe.mutationHeld || probe.stateHeld || probe.admissionHeld {
-		t.Fatalf("locks held during writer I/O: mutationMu=%v s.mu=%v admissionMu=%v",
-			probe.mutationHeld, probe.stateHeld, probe.admissionHeld)
+	if engineLockHeld || admissionHeld {
+		t.Fatalf("locks held during writer I/O: %s", probe)
 	}
 	const want = "sync: mempool binding rejected, engine binding unchanged: mempool replacement is not supported after the initial binding\n"
-	if got := probe.buf.String(); got != want {
+	if got := probe.output(); got != want {
 		t.Fatalf("emitted %q, want the unchanged diagnostic %q", got, want)
 	}
 
-	blocking := &diagnosticLockProbe{engine: engine, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	blocking := &diagnosticLockProbe{
+		engine: engine, mempool: bound, owner: owner,
+		entered: make(chan struct{}, 1), release: make(chan struct{}),
+	}
 	engine.SetStderr(blocking)
 	firstDone := make(chan struct{})
 	go func() {
@@ -591,11 +653,28 @@ func TestSyncEngineDiagnosticWriterRunsAfterMutationUnlock(t *testing.T) {
 	}
 	close(blocking.release)
 	<-firstDone
-	if blocking.mutationHeld || blocking.stateHeld || blocking.admissionHeld {
-		t.Fatalf("locks held while the writer blocked: mutationMu=%v s.mu=%v admissionMu=%v",
-			blocking.mutationHeld, blocking.stateHeld, blocking.admissionHeld)
+	writes, engineLockHeld, admissionHeld = blocking.held()
+	if engineLockHeld || admissionHeld {
+		t.Fatalf("locks held while the writer blocked: %s", blocking)
+	}
+	// Make the phase-2 dependency explicit instead of implicit: the second
+	// mutator is a tipless DisconnectTip, which produces NO diagnostic, so it
+	// could not have blocked inside this same parked writer. If it ever starts
+	// emitting, this fails rather than silently turning the liveness proof into
+	// a second observation of the same blocked flush.
+	if writes != 1 {
+		t.Fatalf("writes=%d, want exactly the parked binding-rejection record; the second mutator must not emit", writes)
 	}
 	engine.SetStderr(io.Discard)
+}
+
+// boundPoolOf reads the engine's bound mempool and its owner the way production
+// readers do, so a probe can name their locks.
+func boundPoolOf(engine *SyncEngine) (*Mempool, *PendingOutpointOwner) {
+	engine.mu.RLock()
+	bound := engine.mempool
+	engine.mu.RUnlock()
+	return bound, bound.PendingOutpointOwner()
 }
 
 // reentrantDiagnosticWriter calls back into non-diagnostic SyncEngine mutations
@@ -718,6 +797,98 @@ func TestSyncEngineDiagnosticBatchBounded(t *testing.T) {
 	if got, expected := sink.String(), "first\n"+diagnosticBatchTruncatedRecord; got != expected {
 		t.Fatalf("oversized flush emitted %q, want %q", got, expected)
 	}
+
+	// The terminal-latch record is NEVER evicted. This is the >=64-row reorg
+	// with systematic PV-shadow mismatch: the batch is closed on both caps long
+	// before the transition latches, and the one record an operator needs must
+	// still arrive — after the truncation marker that accounts for the dropped
+	// shadow noise.
+	sink.Reset()
+	latched := &diagnosticBatch{}
+	for i := 0; i <= diagnosticBatchMaxRecords; i++ {
+		engine.diagnose(latched, "pv_shadow: mismatch height=%d post_state_digest\n", i)
+	}
+	engine.diagnose(latched, "%s", strings.Repeat("z", diagnosticBatchMaxBytes)+"\n")
+	engine.reportTerminalTransition(latched, "rollback restore failed", errors.New("probe cause"))
+	if !latched.truncated || len(latched.records) != diagnosticBatchMaxRecords {
+		t.Fatalf("closed batch: records=%d truncated=%v", len(latched.records), latched.truncated)
+	}
+	engine.flushDiagnostics(latched)
+	const terminalRecord = "sync: canonical transition terminal (rollback restore failed), admission stays closed until restart: probe cause\n"
+	out := sink.String()
+	if !strings.HasSuffix(out, terminalRecord) {
+		t.Fatalf("the closed batch dropped or reordered the terminal-latch record; flushed %d bytes ending %q", len(out), out[max(0, len(out)-120):])
+	}
+	if truncation := strings.Index(out, diagnosticBatchTruncatedRecord); truncation < 0 || truncation > strings.Index(out, terminalRecord) {
+		t.Fatalf("want the truncation marker present and before the terminal record, got %q", out[max(0, len(out)-200):])
+	}
+}
+
+// overlapWriter parks every Write until the test releases it, so the number of
+// flushes simultaneously inside the writer is observable rather than inferred.
+// It is safe for concurrent use, which is what SetStderr requires of a writer.
+type overlapWriter struct {
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	arrived chan struct{}
+	release chan struct{}
+}
+
+func (w *overlapWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	n, err := w.buf.Write(p)
+	w.mu.Unlock()
+	w.arrived <- struct{}{}
+	<-w.release
+	return n, err
+}
+
+func (w *overlapWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// TestSyncEngineDiagnosticFlushesMayOverlapSafely pins the concurrency contract
+// SetStderr states: because flushes run OUTSIDE mutationMu, several mutations'
+// flush windows overlap by design. The test proves the overlap deterministically
+// — it waits until every mutation's flush is parked inside the writer at the
+// same time, which can only happen if each released mutationMu before flushing —
+// and proves nothing is lost or garbled when they do. Under -race it is also the
+// proof that the batches share no state.
+func TestSyncEngineDiagnosticFlushesMayOverlapSafely(t *testing.T) {
+	const mutations = 3
+	engine, chainState, blockStore := newDiagnosticEngine(t)
+	candidates := make([]*Mempool, 0, mutations)
+	for i := 0; i < mutations; i++ {
+		candidates = append(candidates, newDiagnosticRejectionCandidate(t, chainState, blockStore))
+	}
+	writer := &overlapWriter{arrived: make(chan struct{}, mutations), release: make(chan struct{})}
+	engine.SetStderr(writer)
+
+	var wg sync.WaitGroup
+	for _, candidate := range candidates {
+		wg.Add(1)
+		go func(candidate *Mempool) {
+			defer wg.Done()
+			engine.SetMempool(candidate)
+		}(candidate)
+	}
+	for parked := 0; parked < mutations; parked++ {
+		select {
+		case <-writer.arrived:
+		case <-time.After(10 * time.Second):
+			close(writer.release)
+			wg.Wait()
+			t.Fatalf("only %d of %d flushes were inside the writer at once; flushes are being serialized behind a lock", parked, mutations)
+		}
+	}
+	close(writer.release)
+	wg.Wait()
+	if got := strings.Count(writer.String(), "sync: mempool binding rejected, engine binding unchanged: "); got != mutations {
+		t.Fatalf("overlapping flushes delivered %d records, want %d intact", got, mutations)
+	}
+	engine.SetStderr(io.Discard)
 }
 
 // TestSyncEngineTransitionDiagnosticsFlushAfterUnlock covers the two producers
@@ -741,25 +912,165 @@ func TestSyncEngineTransitionDiagnosticsFlushAfterUnlock(t *testing.T) {
 	}
 	f.breakResidentClaim(t, txID(t, spend))
 
-	probe := &diagnosticLockProbe{engine: f.engine}
+	probe := &diagnosticLockProbe{engine: f.engine, mempool: f.mempool, owner: f.owner}
 	f.engine.SetStderr(probe)
 	if _, err := f.engine.ApplyBlock(f.blockIncluding(t, f.tipHash, f.tipHeight+1, f.alreadyGenerated, 202, spend), nil); err == nil {
 		t.Fatal("apply committed a block whose standard cleanup failed")
 	}
-	if probe.mutationHeld || probe.stateHeld {
-		t.Fatalf("locks held during writer I/O: mutationMu=%v s.mu=%v", probe.mutationHeld, probe.stateHeld)
+	writes, engineLockHeld, admissionHeld := probe.held()
+	if engineLockHeld {
+		t.Fatalf("locks held during writer I/O: %s", probe)
 	}
-	if !probe.admissionHeld {
+	if !admissionHeld {
 		t.Fatal("the terminal latch released the admission guard; the fail-closed contract changed")
 	}
-	if probe.writes != 2 {
-		t.Fatalf("writes=%d, want the cleanup record and the terminal record", probe.writes)
+	if writes != 2 {
+		t.Fatalf("writes=%d, want the cleanup record and the terminal record", writes)
 	}
-	out := probe.buf.String()
+	out := probe.output()
 	cleanup := strings.Index(out, "sync: standard mempool cleanup failed at height ")
 	terminal := strings.Index(out, "sync: canonical transition terminal (rollback restore failed), admission stays closed until restart: ")
 	if cleanup < 0 || terminal < 0 || cleanup > terminal {
 		t.Fatalf("emitted %q, want the unchanged cleanup record before the unchanged terminal record", out)
+	}
+	f.engine.SetStderr(io.Discard)
+}
+
+// flakySpendRotationProvider serves the real ML-DSA-87 spend suite for its first
+// `full` queries and an empty set afterwards. A rotation provider that answers
+// differently for the same height is exactly the divergence class PV shadow
+// exists to catch, and it is reachable through public SyncConfig — no production
+// seam is added to force it.
+type flakySpendRotationProvider struct {
+	mu    sync.Mutex
+	calls int
+	full  int
+}
+
+func (p *flakySpendRotationProvider) NativeCreateSuites(uint64) *consensus.NativeSuiteSet {
+	return consensus.NewNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87)
+}
+
+func (p *flakySpendRotationProvider) NativeSpendSuites(uint64) *consensus.NativeSuiteSet {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	if p.calls <= p.full {
+		return consensus.NewNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87)
+	}
+	return consensus.NewNativeSuiteSet()
+}
+
+func (p *flakySpendRotationProvider) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+// TestSyncEnginePVShadowDiagnosticIsBatchedThroughApplyBlock drives a REAL PV
+// shadow mismatch through the public ApplyBlock entry point, proving the PV
+// producers' batch wiring (the diag literal they read as ctx.diag) end to end:
+// dropping it fails this test, because the record would then be written from
+// under mutationMu.
+//
+// The divergence is honest — the sequential connect consumes exactly one
+// NativeSpendSuites answer (measured), the shadow asks a second time, and a
+// provider answering differently for one height is the class PV shadow reports.
+// RotationProvider is public SyncConfig, so no production seam is added.
+func TestSyncEnginePVShadowDiagnosticIsBatchedThroughApplyBlock(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	f.engine.pvMode = pvModeShadow
+	flaky := &flakySpendRotationProvider{full: 1}
+	f.engine.cfg.RotationProvider = flaky
+	spend := f.spend(t, 700, 1)
+	block := f.blockIncluding(t, f.tipHash, f.tipHeight+1, f.alreadyGenerated, 202, spend)
+
+	probe := &diagnosticLockProbe{engine: f.engine, mempool: f.mempool, owner: f.owner}
+	f.engine.SetStderr(probe)
+	if _, err := f.engine.ApplyBlock(block, nil); err != nil {
+		t.Fatalf("ApplyBlock: %v, want the sequential connect to succeed", err)
+	}
+	if got := flaky.count(); got < 2 {
+		t.Fatalf("NativeSpendSuites calls=%d, want the shadow's second query; the shadow never ran", got)
+	}
+	writes, engineLockHeld, admissionHeld := probe.held()
+	if engineLockHeld || admissionHeld {
+		t.Fatalf("locks held during writer I/O: %s", probe)
+	}
+	if writes != 1 {
+		t.Fatalf("writes=%d, want exactly the flushed PV mismatch record", writes)
+	}
+	want := fmt.Sprintf("pv_shadow: mismatch height=%d seq_ok par_err=", f.tipHeight+1)
+	if got := probe.output(); !strings.HasPrefix(got, want) {
+		t.Fatalf("emitted %q, want the unchanged PV shadow record %q", got, want)
+	}
+	f.engine.SetStderr(io.Discard)
+}
+
+// TestSyncEngineRequeueDiagnosticIsBatchedThroughReorg drives a REAL requeue
+// failure through the public ApplyBlockWithReorg entry point: the winning branch
+// double-spends the outpoint of the block it displaces, so the displaced
+// transaction cannot be readmitted. It is the end-to-end proof for the requeue
+// producer's batch wiring — the diag literal applyPreferredBranch passes after
+// the transition ends but while mutationMu is still held; dropping it fails this
+// test.
+func TestSyncEngineRequeueDiagnosticIsBatchedThroughReorg(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	forkHash, forkHeight, forkGenerated := f.tipHash, f.tipHeight+1, f.alreadyGenerated
+
+	// Both spends are signed BEFORE either branch is applied: they consume the
+	// same live outpoint, so the second could not be built once the first is on
+	// chain — which is exactly why the requeue of the displaced one fails.
+	displaced := f.spend(t, 700, 1)
+	conflicting := f.spend(t, 600, 2)
+
+	// Canonical branch A: one block spending the fixture's mature coinbase.
+	if _, err := f.engine.ApplyBlock(f.blockIncluding(t, forkHash, forkHeight, forkGenerated, 202, displaced), nil); err != nil {
+		t.Fatalf("ApplyBlock(A): %v", err)
+	}
+
+	// Competing branch B at the same height, spending the SAME outpoint with a
+	// different amount, then one more block so B outweighs A.
+	//
+	// The probe is installed BEFORE B1: at equal height and work, fork choice
+	// breaks the tie on the lexicographically lower tip hash, and the fixture's
+	// block hashes come from freshly generated key material, so the switch lands
+	// on B1 or on B2 depending on the run. Both orders disconnect A and requeue
+	// its displaced transaction, so the assertions below hold either way — but
+	// only if the writer is watching the whole sequence.
+	probe := &diagnosticLockProbe{engine: f.engine, mempool: f.mempool, owner: f.owner}
+	f.engine.SetStderr(probe)
+
+	blockB1 := f.blockIncluding(t, forkHash, forkHeight, forkGenerated, 303, conflicting)
+	if _, err := f.engine.ApplyBlockWithReorg(blockB1, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B1): %v", err)
+	}
+	hashB1, err := consensus.BlockHash(blockHeaderBytes(t, blockB1))
+	if err != nil {
+		t.Fatalf("BlockHash(B1): %v", err)
+	}
+	generatedB2 := forkGenerated + consensus.BlockSubsidy(forkHeight, forkGenerated)
+	blockB2 := buildSingleTxBlock(t, hashB1, f.target, 304,
+		reorgTestCoinbaseForAddress(t, forkHeight+1, consensus.BlockSubsidy(forkHeight+1, generatedB2), f.destAddress))
+	hashB2, err := consensus.BlockHash(blockHeaderBytes(t, blockB2))
+	if err != nil {
+		t.Fatalf("BlockHash(B2): %v", err)
+	}
+	if _, err := f.engine.ApplyBlockWithReorg(blockB2, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B2): %v", err)
+	}
+	if got := f.engine.chainState.TipHash; got != hashB2 {
+		t.Fatalf("tip=%x, want branch B's tip %x: nothing was disconnected or requeued", got, hashB2)
+	}
+	writes, engineLockHeld, admissionHeld := probe.held()
+	if engineLockHeld || admissionHeld {
+		t.Fatalf("locks held during writer I/O: %s", probe)
+	}
+	if writes == 0 {
+		t.Fatal("the reorg produced no requeue diagnostic; the double spend was readmitted?")
+	}
+	if got := probe.output(); !strings.Contains(got, "mempool: requeue-tx: ") {
+		t.Fatalf("emitted %q, want the unchanged requeue record", got)
 	}
 	f.engine.SetStderr(io.Discard)
 }
