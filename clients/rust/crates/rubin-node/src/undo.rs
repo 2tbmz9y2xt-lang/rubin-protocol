@@ -403,8 +403,10 @@ fn block_undo_from_disk(disk: BlockUndoDisk) -> Result<BlockUndo, String> {
 //   {"version":1,"block_hash":"<64hex>","payload_b64":"<b64>","checksum":"<64hex>"}\n
 //
 // checksum = SHA3-256("RUBIN_BLOCK_UNDO_V1" || block_hash[32] ||
-// uint64_be(payload.len()) || payload). The length term makes the preimage
-// injective, so no two (hash, payload) pairs share a digest by concatenation.
+// uint64_be(payload.len()) || payload). The length prefix makes the preimage
+// encoding unambiguous: no two distinct (hash, payload) pairs serialize to
+// the same preimage bytes, so concatenation cannot alias one frame into
+// another.
 // The trailing LF counts against the read bound but is NOT in the preimage.
 //
 // Go twin: the same section in clients/go/node/undo.go. Both clients must emit
