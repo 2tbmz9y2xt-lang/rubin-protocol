@@ -565,13 +565,21 @@ func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
 }
 
 // loadBlockStoreIndex reads the sole initialization marker. A missing marker is
-// an error, never an implicit empty index.
+// an error, never an implicit empty index (the RUB-1052/1053 strict-open
+// rejection, unchanged by the envelope). Every present marker must clear the
+// strict store_envelope_v1 BEFORE the inner index decode runs; envelope
+// failures carry the ErrStoreIntegrity identity unwrapped, so the pinned
+// messages reach callers.
 func loadBlockStoreIndex(path string) (blockStoreIndexDisk, error) {
 	raw, err := readFileByPath(path)
 	if err != nil {
 		return blockStoreIndexDisk{}, err
 	}
-	index, err := decodeBlockStoreIndex(raw)
+	payload, err := openStoreEnvelope(storeEnvelopeBlockIndex, raw)
+	if err != nil {
+		return blockStoreIndexDisk{}, err
+	}
+	index, err := decodeBlockStoreIndex(payload)
 	if err != nil {
 		return blockStoreIndexDisk{}, fmt.Errorf("decode blockstore index: %w", err)
 	}
@@ -673,12 +681,42 @@ func validCanonicalHashHex(value string) bool {
 }
 
 func saveBlockStoreIndex(path string, index blockStoreIndexDisk) error {
-	raw, err := json.MarshalIndent(index, "", "  ")
+	payload, err := json.MarshalIndent(index, "", "  ")
 	if err != nil {
 		return err
 	}
-	raw = append(raw, '\n')
+	payload = append(payload, '\n')
+	// The pre-envelope on-disk bytes become the exact envelope payload; the
+	// inner encoding and the atomic write path are unchanged.
+	raw, err := marshalStoreEnvelope(storeEnvelopeBlockIndex, payload)
+	if err != nil {
+		return err
+	}
 	return writeFileAtomicFn(path, raw, 0o600)
+}
+
+// VerifyGenesisAnchor enforces the RUB-1134 genesis anchor: a non-empty
+// canonical index must carry the configured genesis hash at row 0, while an
+// empty index skips the anchor. Failure is the distinct fail-closed
+// foreign-datadir class, not an envelope-integrity failure, and satisfies
+// errors.Is(err, ErrStoreIntegrity). Startup wiring (cmd/rubin-node/main.go)
+// calls this BEFORE ReconcileChainStateWithBlockStore, so no replay, truncate
+// or reconcile adoption ever consumes a foreign index.
+func (bs *BlockStore) VerifyGenesisAnchor(genesisHash [32]byte) error {
+	if bs == nil {
+		return errors.New("nil blockstore")
+	}
+	row0, ok, err := bs.CanonicalHash(0)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	if row0 != genesisHash {
+		return errStoreGenesisAnchor
+	}
+	return nil
 }
 
 func validateBlockHeaderHash(headerBytes []byte, blockHash [32]byte) error {

@@ -17,6 +17,9 @@ use crate::io_utils::{
     atomic_write_error_before, parse_hex32, reclaim_atomic_write_parent,
     reclaim_atomic_write_scratch, write_file_atomic_typed, AtomicWriteError, AtomicWriteOperation,
 };
+use crate::store_envelope::{
+    marshal_store_envelope, open_store_envelope, STORE_ENVELOPE_CHAIN_STATE,
+};
 
 pub const CHAIN_STATE_FILE_NAME: &str = "chainstate.json";
 const CHAIN_STATE_DISK_VERSION: u32 = 1;
@@ -109,14 +112,20 @@ impl ChainState {
         let disk = state_to_disk(self).map_err(|error| {
             atomic_write_error_before(path, AtomicWriteOperation::Overwrite, error)
         })?;
-        let mut raw = serde_json::to_vec_pretty(&disk).map_err(|error| {
+        let mut payload = serde_json::to_vec_pretty(&disk).map_err(|error| {
             atomic_write_error_before(
                 path,
                 AtomicWriteOperation::Overwrite,
                 format!("encode chainstate: {error}"),
             )
         })?;
-        raw.push(b'\n');
+        payload.push(b'\n');
+        // RUB-1134: the pre-envelope bytes become the exact envelope payload;
+        // the inner encoding and the atomic write path below are unchanged.
+        let raw =
+            marshal_store_envelope(STORE_ENVELOPE_CHAIN_STATE, &payload).map_err(|error| {
+                atomic_write_error_before(path, AtomicWriteOperation::Overwrite, error)
+            })?;
         // Parent creation is delegated to `write_file_atomic`, which
         // runs `fs::create_dir_all(effective_parent(path))` on the
         // actual write target. `effective_parent` maps a bare-filename
@@ -355,7 +364,13 @@ pub fn load_chain_state<P: AsRef<Path>>(path: P) -> Result<ChainState, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ChainState::new()),
         Err(e) => return Err(format!("read chainstate {}: {e}", path.display())),
     };
-    let disk: ChainStateDisk = serde_json::from_slice(&raw)
+    // RUB-1134: an ABSENT file keeps the `ChainState::new()`-plus-full-replay
+    // repair path above; every PRESENT file must clear the strict envelope
+    // BEFORE the inner `ChainStateDisk` decode runs. This is a different arm
+    // from the NotFound branch, so a corrupt file can never ride the
+    // absent-file fallback; the STORE_INTEGRITY message is Go's verbatim.
+    let payload = open_store_envelope(STORE_ENVELOPE_CHAIN_STATE, &raw)?;
+    let disk: ChainStateDisk = serde_json::from_slice(&payload)
         .map_err(|e| format!("parse chainstate {}: {e}", path.display()))?;
     chain_state_from_disk(disk)
 }
@@ -495,7 +510,7 @@ mod tests {
 
     use super::{
         chain_state_path, copy_utxo_entry, copy_utxo_set, load_chain_state, ChainState,
-        ChainStateDisk, CHAIN_STATE_FILE_NAME,
+        ChainStateDisk, CHAIN_STATE_FILE_NAME, STORE_ENVELOPE_CHAIN_STATE,
     };
     use rubin_consensus::constants::POW_LIMIT;
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
@@ -826,6 +841,100 @@ mod tests {
         assert_eq!(st.utxo_exposure_count_by_suite_id(0x99), 0);
     }
 
+    /// Every malformed, legacy, checksum-mismatched or parse-valid-but-edited
+    /// `chainstate.json` fails BEFORE the inner decode with the pinned identity
+    /// and never rides the absent-file fallback.
+    #[test]
+    fn load_chainstate_rejects_integrity_failures() {
+        use crate::store_envelope::tests::{
+            restamp_payload_keeping_checksum, rewrap, run_store_integrity_rows, shared_reject_rows,
+            StoreIntegrityRow,
+        };
+        use crate::store_envelope::{STORE_CHECKSUM_MISMATCH_ERR, STORE_LEGACY_CHAINSTATE_ERR};
+
+        let dir = unique_temp_path("rubin-chainstate-integrity");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = chain_state_path(&dir);
+        let mut state = ChainState::new();
+        state.has_tip = true;
+        state.height = 9;
+        state.already_generated = 4_200;
+        state.tip_hash = [0x11; 32];
+        state.save(&path).expect("save chainstate");
+        let valid = std::fs::read(&path).expect("read chainstate");
+        let payload =
+            crate::store_envelope::open_store_envelope(STORE_ENVELOPE_CHAIN_STATE, &valid)
+                .expect("open valid envelope");
+
+        let mut rows = shared_reject_rows();
+        rows.push(StoreIntegrityRow {
+            name: "legacy_unversioned_chainstate",
+            body: Box::new(|_, payload| payload.to_vec()),
+            want_msg: Some(STORE_LEGACY_CHAINSTATE_ERR),
+            want_sub: None,
+            not_integrity: false,
+        });
+        rows.push(StoreIntegrityRow {
+            name: "legacy_unversioned_with_trailing_garbage",
+            body: Box::new(|_, payload| {
+                let mut out = payload.to_vec();
+                out.extend_from_slice(b"trailing");
+                out
+            }),
+            want_msg: Some(STORE_LEGACY_CHAINSTATE_ERR),
+            want_sub: None,
+            not_integrity: false,
+        });
+        rows.push(StoreIntegrityRow {
+            // `already_generated` is a SCALAR outside the UTXO set and the tip
+            // is preserved, so every downstream check passes and only the
+            // stale checksum catches it.
+            name: "already_generated_edited_stale_checksum",
+            body: Box::new(|valid, payload| {
+                let edited = String::from_utf8_lossy(payload).replacen(
+                    "\"already_generated\": 4200",
+                    "\"already_generated\": 4201",
+                    1,
+                );
+                assert_ne!(edited.as_bytes(), payload, "the edit did not apply");
+                restamp_payload_keeping_checksum(valid, edited.as_bytes())
+            }),
+            want_msg: Some(STORE_CHECKSUM_MISMATCH_ERR),
+            want_sub: None,
+            not_integrity: false,
+        });
+        rows.push(StoreIntegrityRow {
+            // Checksum-VALID envelope, malformed payload: a schema fault.
+            name: "inner_payload_malformed",
+            body: Box::new(|_, _| rewrap(STORE_ENVELOPE_CHAIN_STATE, b"{not json")),
+            want_msg: None,
+            want_sub: Some("parse chainstate"),
+            not_integrity: true,
+        });
+
+        run_store_integrity_rows(
+            &path,
+            &valid,
+            &payload,
+            || load_chain_state(&path).map(|_| ()),
+            &rows,
+        );
+
+        std::fs::write(&path, &valid).expect("restore valid envelope");
+        let loaded = load_chain_state(&path).expect("valid envelope must load");
+        assert_eq!(
+            (loaded.has_tip, loaded.height, loaded.already_generated),
+            (true, 9, 4_200)
+        );
+        // An ABSENT file keeps the fresh-state repair path; a corrupt one cannot.
+        std::fs::remove_file(&path).expect("remove chainstate");
+        assert_eq!(
+            load_chain_state(&path).expect("absent chainstate"),
+            ChainState::new()
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
     #[test]
     fn load_chainstate_rejects_wrong_version() {
         let dir = unique_temp_path("rubin-chainstate-version-test");
@@ -840,11 +949,18 @@ mod tests {
             already_generated: 0,
             utxos: vec![],
         };
-        let raw = serde_json::to_vec_pretty(&bad).expect("json");
-        std::fs::write(&path, raw).expect("write");
+        let mut payload = serde_json::to_vec_pretty(&bad).expect("json");
+        payload.push(b'\n');
+        // RUB-1134: planted INSIDE a valid frame, so this row still tests the
+        // INNER version check rather than the envelope's legacy verdict.
+        std::fs::write(
+            &path,
+            crate::store_envelope::tests::rewrap(STORE_ENVELOPE_CHAIN_STATE, &payload),
+        )
+        .expect("write");
 
         let err = load_chain_state(&path).unwrap_err();
-        assert!(err.contains("unsupported chainstate version"));
+        assert!(err.contains("unsupported chainstate version"), "{err}");
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

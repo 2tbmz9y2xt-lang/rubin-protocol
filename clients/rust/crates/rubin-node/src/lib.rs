@@ -14,6 +14,7 @@ pub mod p2p_runtime;
 pub mod p2p_service;
 mod production_rotation_schedule;
 pub mod relay_pool;
+mod store_envelope;
 pub mod sync;
 pub mod sync_disconnect;
 pub mod sync_reorg;

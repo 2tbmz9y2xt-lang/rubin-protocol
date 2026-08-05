@@ -64,8 +64,14 @@ func TestChainStateSaveLoadRoundTripDeterministic(t *testing.T) {
 		t.Fatalf("chainstate encoding is not deterministic")
 	}
 
+	// RUB-1134: the saved file is the frame; the INNER chainStateDisk encoding
+	// this test pins is unchanged, so the payload is opened first.
+	firstPayload, err := openStoreEnvelope(storeEnvelopeChainState, firstBytes)
+	if err != nil {
+		t.Fatalf("open chainstate envelope: %v", err)
+	}
 	var disk chainStateDisk
-	if err := json.Unmarshal(firstBytes, &disk); err != nil {
+	if err := json.Unmarshal(firstPayload, &disk); err != nil {
 		t.Fatalf("decode disk chainstate: %v", err)
 	}
 	if len(disk.Utxos) != 2 {

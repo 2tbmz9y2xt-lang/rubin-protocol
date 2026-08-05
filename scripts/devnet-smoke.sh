@@ -92,6 +92,7 @@ wait_for_height() {
   local deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
     if python3 - "${datadir}" "${want_height}" <<'PY'
+import base64
 import json
 import pathlib
 import sys
@@ -101,7 +102,12 @@ want_height = int(sys.argv[2])
 path = datadir / "chainstate.json"
 if not path.exists():
     raise SystemExit(1)
-data = json.loads(path.read_text())
+# RUB-1134: unwrap the store_envelope_v1 frame (the node verifies the
+# domain-tagged checksum on load); the inner payload encoding is unchanged.
+envelope = json.loads(path.read_text())
+if envelope.get("version") != 1:
+    raise SystemExit(1)
+data = json.loads(base64.b64decode(envelope["payload_b64"], validate=True))
 if data.get("has_tip") and data.get("height") == want_height:
     raise SystemExit(0)
 raise SystemExit(1)
@@ -174,12 +180,17 @@ PY
 read_state_tsv() {
   local datadir="$1"
   python3 - "${datadir}" <<'PY'
+import base64
 import json
 import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1]) / "chainstate.json"
-data = json.loads(path.read_text())
+# RUB-1134: unwrap the store_envelope_v1 frame; the inner payload is unchanged.
+envelope = json.loads(path.read_text())
+if envelope.get("version") != 1:
+    raise SystemExit(f"unsupported chainstate envelope version: {envelope.get('version')!r}")
+data = json.loads(base64.b64decode(envelope["payload_b64"], validate=True))
 print(
     data["height"],
     data["tip_hash"],

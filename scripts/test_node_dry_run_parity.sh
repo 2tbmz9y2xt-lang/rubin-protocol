@@ -467,11 +467,18 @@ grep -F -q -x "blockstore: empty" "${ART}/empty-capture.verify" ||
   fail "empty-chainstate capture store is not empty"
 
 TIP_HASH="$(python3 - "${BASE_DIR}/blockstore/index.json" <<'PY'
+import base64
 import json
 import sys
 
+# RUB-1134: index.json is the store_envelope_v1 frame; the inner index encoding
+# is unchanged. The node verifies the domain-tagged checksum on open, so this
+# reader only unwraps the v1 payload.
 with open(sys.argv[1], "rb") as handle:
-    canonical = json.load(handle)["canonical"]
+    envelope = json.load(handle)
+if envelope.get("version") != 1:
+    raise SystemExit(f"unsupported index envelope version: {envelope.get('version')!r}")
+canonical = json.loads(base64.b64decode(envelope["payload_b64"], validate=True))["canonical"]
 if not canonical:
     raise SystemExit("canonical index is empty")
 print(canonical[-1])

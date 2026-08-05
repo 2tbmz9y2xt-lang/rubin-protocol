@@ -550,6 +550,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// blockstore is reported, not fixed. Ordinary startup is unaffected:
 	// same two calls, same order, same errors, same exit codes.
 	if !*dryRun {
+		// RUB-1134 genesis anchor: a non-empty canonical index whose row 0 is
+		// not the configured genesis hash is a foreign datadir. Checked BEFORE
+		// the reconcile so no replay, truncate or adoption consumes a foreign
+		// index; an empty index skips it. --dry-run adopts nothing, so the
+		// anchor is enforced only on this mutating path, as in the Rust mirror.
+		if err := blockStore.VerifyGenesisAnchor(genesisHashFromGenesis); err != nil {
+			_, _ = fmt.Fprintf(stderr, "canonical index genesis anchor failed: %v\n", err)
+			return 2
+		}
 		if _, err := node.ReconcileChainStateWithBlockStore(chainState, blockStore, syncCfg); err != nil {
 			_, _ = fmt.Fprintf(stderr, "chainstate reconcile failed: %v\n", err)
 			return 2

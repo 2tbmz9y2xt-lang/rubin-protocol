@@ -645,8 +645,21 @@ func TestCreateBlockStoreCommitsExactEmptyMarker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read marker: %v", err)
 	}
-	if want := "{\n  \"canonical\": [],\n  \"version\": 1\n}\n"; string(raw) != want {
+	// RUB-1134: the marker is the frame over the UNCHANGED inner payload; the
+	// literal below is the cross-client vector
+	// `blockstore_index_empty_marker_payload`, so this row doubles as its
+	// on-disk pin.
+	want := `{"version":1,"payload_b64":"ewogICJjYW5vbmljYWwiOiBbXSwKICAidmVyc2lvbiI6IDEKfQo=",` +
+		`"checksum":"7c120c21bc3ffdda6482c8d18a3c669542e89d8500928ce166700a7c7a40fe15"}` + "\n"
+	if string(raw) != want {
 		t.Fatalf("marker = %q, want %q", raw, want)
+	}
+	payload, err := openStoreEnvelope(storeEnvelopeBlockIndex, raw)
+	if err != nil {
+		t.Fatalf("open marker envelope: %v", err)
+	}
+	if wantPayload := "{\n  \"canonical\": [],\n  \"version\": 1\n}\n"; string(payload) != wantPayload {
+		t.Fatalf("marker payload = %q, want %q", payload, wantPayload)
 	}
 	mustOpenBlockStore(t, root)
 }
@@ -761,10 +774,21 @@ func TestOpenBlockStoreRejectsMalformedMarker(t *testing.T) {
 	root := BlockStorePath(freshDataDir(t))
 	mustCreateBlockStore(t, root)
 	marker := filepath.Join(root, "index.json")
-	for _, tc := range rejected {
-		if err := os.WriteFile(marker, []byte(tc.body), 0o600); err != nil {
-			t.Fatalf("%s: write marker: %v", tc.name, err)
+	// RUB-1134: every row is planted INSIDE a valid frame, so this table keeps
+	// testing the inner marker schema; frame-level rejection is pinned by
+	// TestBlockstoreIndexRejectsIntegrityFailures.
+	writeEnvelopedMarker := func(t *testing.T, body string) {
+		t.Helper()
+		raw, err := marshalStoreEnvelope(storeEnvelopeBlockIndex, []byte(body))
+		if err != nil {
+			t.Fatalf("wrap marker: %v", err)
 		}
+		if err := os.WriteFile(marker, raw, 0o600); err != nil {
+			t.Fatalf("write marker: %v", err)
+		}
+	}
+	for _, tc := range rejected {
+		writeEnvelopedMarker(t, tc.body)
 		if _, err := OpenBlockStore(root); err == nil {
 			t.Fatalf("marker row %s must be rejected", tc.name)
 		}
@@ -778,9 +802,7 @@ func TestOpenBlockStoreRejectsMalformedMarker(t *testing.T) {
 		{`{"version":1,"canonical":[]}`, 0},
 		{`{"canonical":["` + hash + `"],"version":1}`, 1},
 	} {
-		if err := os.WriteFile(marker, []byte(tc.body), 0o600); err != nil {
-			t.Fatalf("write marker: %v", err)
-		}
+		writeEnvelopedMarker(t, tc.body)
 		store, err := OpenBlockStore(root)
 		if err != nil {
 			t.Fatalf("%s must be accepted: %v", tc.body, err)
