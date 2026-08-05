@@ -2532,7 +2532,7 @@ mod tests {
         assert_eq!(code, 2, "{err}");
         assert!(
             err.contains(
-                "canonical index genesis anchor failed: STORE_INTEGRITY: canonical index genesis mismatch."
+                "canonical index genesis anchor failed: STORE_INTEGRITY: canonical index genesis mismatch"
             ),
             "unexpected refusal: {err}"
         );

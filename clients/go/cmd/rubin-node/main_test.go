@@ -1963,7 +1963,7 @@ func TestRunGenesisAnchorRefusesForeignDatadir(t *testing.T) {
 	if code := run([]string{"--datadir", dir, "--mine-blocks", "1", "--mine-exit"}, &out, &errOut); code != 2 {
 		t.Fatalf("run code=%d, want 2 (stderr=%q)", code, errOut.String())
 	}
-	const want = "canonical index genesis anchor failed: STORE_INTEGRITY: canonical index genesis mismatch."
+	const want = "canonical index genesis anchor failed: STORE_INTEGRITY: canonical index genesis mismatch"
 	if !strings.Contains(errOut.String(), want) {
 		t.Fatalf("stderr=%q, want %q", errOut.String(), want)
 	}

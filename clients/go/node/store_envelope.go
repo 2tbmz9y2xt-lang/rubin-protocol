@@ -56,10 +56,10 @@ var ErrStoreIntegrity = errors.New("STORE_INTEGRITY")
 var (
 	// Pinned cross-client messages. Rust returns these same strings.
 	// Deliberately no repair command: this build ships no --reindex.
-	errStoreLegacyChainState = fmt.Errorf("%w: legacy/unversioned chainstate; delete chainstate.json and restart to rebuild by validated replay.", ErrStoreIntegrity)
-	errStoreLegacyBlockIndex = fmt.Errorf("%w: legacy/unversioned blockstore index; pre-devnet datadir reset and full resync required.", ErrStoreIntegrity)
-	errStoreChecksumMismatch = fmt.Errorf("%w: checksum mismatch.", ErrStoreIntegrity)
-	errStoreGenesisAnchor    = fmt.Errorf("%w: canonical index genesis mismatch.", ErrStoreIntegrity)
+	errStoreLegacyChainState = fmt.Errorf("%w: legacy/unversioned chainstate; delete chainstate.json and restart to rebuild by validated replay", ErrStoreIntegrity)
+	errStoreLegacyBlockIndex = fmt.Errorf("%w: legacy/unversioned blockstore index; pre-devnet datadir reset and full resync required", ErrStoreIntegrity)
+	errStoreChecksumMismatch = fmt.Errorf("%w: checksum mismatch", ErrStoreIntegrity)
+	errStoreGenesisAnchor    = fmt.Errorf("%w: canonical index genesis mismatch", ErrStoreIntegrity)
 )
 
 // The canonical byte layout is fully determined by these fixed segments plus the

@@ -19,11 +19,11 @@ use crate::undo::base64_encode;
 pub(crate) const STORE_INTEGRITY_PREFIX: &str = "STORE_INTEGRITY";
 
 /// Pinned cross-client messages; no repair command (there is no `--reindex`).
-pub(crate) const STORE_LEGACY_CHAINSTATE_ERR: &str = "STORE_INTEGRITY: legacy/unversioned chainstate; delete chainstate.json and restart to rebuild by validated replay.";
-pub(crate) const STORE_LEGACY_BLOCK_INDEX_ERR: &str = "STORE_INTEGRITY: legacy/unversioned blockstore index; pre-devnet datadir reset and full resync required.";
-pub(crate) const STORE_CHECKSUM_MISMATCH_ERR: &str = "STORE_INTEGRITY: checksum mismatch.";
+pub(crate) const STORE_LEGACY_CHAINSTATE_ERR: &str = "STORE_INTEGRITY: legacy/unversioned chainstate; delete chainstate.json and restart to rebuild by validated replay";
+pub(crate) const STORE_LEGACY_BLOCK_INDEX_ERR: &str = "STORE_INTEGRITY: legacy/unversioned blockstore index; pre-devnet datadir reset and full resync required";
+pub(crate) const STORE_CHECKSUM_MISMATCH_ERR: &str = "STORE_INTEGRITY: checksum mismatch";
 pub(crate) const STORE_GENESIS_ANCHOR_ERR: &str =
-    "STORE_INTEGRITY: canonical index genesis mismatch.";
+    "STORE_INTEGRITY: canonical index genesis mismatch";
 
 const STORE_ENVELOPE_PREFIX: &[u8] = br#"{"version":1,"payload_b64":""#;
 const STORE_ENVELOPE_CHECKSUM_SEP: &[u8] = br#"","checksum":""#;
