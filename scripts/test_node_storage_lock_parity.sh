@@ -536,10 +536,9 @@ import base64, binascii, json, pathlib, sys
 def require(condition, message):
     if not condition:
         raise SystemExit(message)
-# RUB-1134: index.json is the store_envelope_v1 frame; the inner index encoding
-# is unchanged. The node verifies the domain-tagged checksum on open, so this
-# reader only unwraps the v1 payload — every malformed shape stays a
-# deterministic SystemExit rather than a traceback.
+# RUB-1134: unwrap the store_envelope_v1 frame (the node verifies the
+# domain-tagged checksum on open); every malformed shape stays a deterministic
+# SystemExit rather than a traceback.
 try:
     envelope = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
     require(isinstance(envelope, dict), "canonical block index envelope is not an object")

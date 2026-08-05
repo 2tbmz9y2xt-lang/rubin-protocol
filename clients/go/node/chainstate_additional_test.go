@@ -1,6 +1,7 @@
 package node
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,12 +24,20 @@ func TestLoadChainState_InvalidFileName(t *testing.T) {
 func TestLoadChainState_InvalidJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "chainstate.json")
-	if err := os.WriteFile(path, []byte("{\n"), 0o600); err != nil {
+	// RUB-1134: planted INSIDE a valid frame so the row still reaches the INNER
+	// chainStateDisk decode rather than the legacy verdict (owned by
+	// TestLoadChainStateRejectsIntegrityFailures).
+	raw, err := marshalStoreEnvelope(storeEnvelopeChainState, []byte("{\n"))
+	if err != nil {
+		t.Fatalf("wrap chainstate: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	_, err := LoadChainState(path)
-	if err == nil {
+	if _, err := LoadChainState(path); err == nil {
 		t.Fatalf("expected error")
+	} else if errors.Is(err, ErrStoreIntegrity) {
+		t.Fatalf("row must fail on the inner decode class, got %v", err)
 	}
 }
 

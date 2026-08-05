@@ -1,30 +1,10 @@
-//! store_envelope_v1 (RUB-1134)
-//!
-//! The persisted chainstate snapshot (`chainstate.json`) and the canonical
-//! blockstore index (`index.json`) are each stored as one compact JSON object
-//! binding the exact inner payload bytes to a domain-tagged checksum:
-//!
-//! ```text
-//! {"version":1,"payload_b64":"<b64>","checksum":"<64hex>"}\n
-//! ```
-//!
-//! `checksum = SHA3-256(ASCII(domain_tag) || uint64_be(len(payload)) || payload)`.
-//! The length term makes the preimage injective. The trailing LF is NOT in the
-//! preimage. Domain tags: `RUBIN_CHAINSTATE_V1` and
-//! `RUBIN_BLOCKSTORE_INDEX_V1`. Both files are per-datadir singletons, so the
-//! domain tag is the identity; chain identity is enforced by the separate
-//! genesis anchor (`BlockStore::verify_genesis_anchor`), never by an envelope
-//! field.
-//!
-//! Deliberately UNBOUNDED: both payloads grow with accumulated state, so per
-//! the RUB-1057 standing decision no read or save size bound exists here and
-//! none may be added.
-//!
-//! Go twin `clients/go/node/store_envelope.go` carries the full rationale (why
-//! this is a 3-field sibling of `undo_envelope_v1` rather than a reuse, and
-//! the claim boundary: local-corruption detection, NOT authentication). Both
-//! clients must emit byte-identical envelopes for the same payload bytes; the
-//! mirrored cross-client vectors pin those bytes in both test suites.
+//! store_envelope_v1 (RUB-1134): `chainstate.json` and the canonical blockstore
+//! `index.json` are each stored as
+//! `{"version":1,"payload_b64":"<b64>","checksum":"<64hex>"}\n` with
+//! `checksum = SHA3-256(ASCII(domain_tag) || uint64_be(len(payload)) || payload)`
+//! over the exact inner payload bytes (trailing LF excluded). The authoritative
+//! rationale is `clients/go/node/store_envelope.go`; this is its byte-exact
+//! mirror and the vectors below pin the bytes.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -33,27 +13,18 @@ use sha3::{Digest, Sha3_256};
 use crate::blockstore::valid_canonical_hash_hex;
 use crate::undo::base64_encode;
 
-/// Stable cross-client prefix of every envelope, version, base64, checksum and
-/// genesis-anchor rejection class in the RUB-1134 error_contract. Go's
-/// `ErrStoreIntegrity` carries the same identity through `errors.Is`; here the
-/// error channel is `String`, so the prefix IS the identity and the loaders
-/// return these messages verbatim. The inner payload-decode class is
-/// deliberately OUTSIDE this prefix: a file that clears the checksum is intact
-/// on disk, so a failure past it is a schema fault, not an integrity fault.
+/// Stable prefix of every envelope/version/base64/checksum/genesis-anchor
+/// rejection class (Go: `ErrStoreIntegrity`). The channel here is `String`, so
+/// the prefix IS the identity; the inner payload-decode class stays OUTSIDE it.
 pub(crate) const STORE_INTEGRITY_PREFIX: &str = "STORE_INTEGRITY";
 
-/// Pinned cross-client messages. Go returns these same strings. Deliberately
-/// no repair command: this build ships no `--reindex`.
+/// Pinned cross-client messages; no repair command (there is no `--reindex`).
 pub(crate) const STORE_LEGACY_CHAINSTATE_ERR: &str = "STORE_INTEGRITY: legacy/unversioned chainstate; delete chainstate.json and restart to rebuild by validated replay.";
 pub(crate) const STORE_LEGACY_BLOCK_INDEX_ERR: &str = "STORE_INTEGRITY: legacy/unversioned blockstore index; pre-devnet datadir reset and full resync required.";
 pub(crate) const STORE_CHECKSUM_MISMATCH_ERR: &str = "STORE_INTEGRITY: checksum mismatch.";
 pub(crate) const STORE_GENESIS_ANCHOR_ERR: &str =
     "STORE_INTEGRITY: canonical index genesis mismatch.";
 
-/// The layout is fully determined by these fixed segments plus the 64-character
-/// checksum, so the reader validates it by index arithmetic instead of decoding
-/// JSON: no value is materialized on the accept path and `payload_b64` is a
-/// SLICE of the caller's buffer. Go twin: `storeEnvelopePrefix` and friends.
 const STORE_ENVELOPE_PREFIX: &[u8] = br#"{"version":1,"payload_b64":""#;
 const STORE_ENVELOPE_CHECKSUM_SEP: &[u8] = br#"","checksum":""#;
 const STORE_ENVELOPE_SUFFIX: &[u8] = b"\"}\n";
@@ -65,9 +36,6 @@ const STORE_ENVELOPE_FRAME_BYTES: usize = STORE_ENVELOPE_PREFIX.len()
     + STORE_CHECKSUM_HEX_LEN
     + STORE_ENVELOPE_SUFFIX.len();
 
-/// Per-file parameters of the shared frame: the checksum domain tag, the noun
-/// used in shape errors, and the pinned legacy message for a pre-envelope file
-/// of that class.
 #[derive(Clone, Copy)]
 pub(crate) struct StoreEnvelopeKind {
     domain: &'static [u8],
@@ -87,9 +55,7 @@ pub(crate) const STORE_ENVELOPE_BLOCK_INDEX: StoreEnvelopeKind = StoreEnvelopeKi
     legacy_err: STORE_LEGACY_BLOCK_INDEX_ERR,
 };
 
-/// The writer's shape; the reader never decodes into it. Field ORDER is part of
-/// the format: `serde` and `encoding/json` both emit declaration order, which is
-/// what makes the two clients' bytes identical for identical payloads.
+/// Writer shape only; field ORDER is part of the format.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoreEnvelopeDisk {
@@ -98,9 +64,6 @@ struct StoreEnvelopeDisk {
     checksum: String,
 }
 
-/// Streams the preimage into the hash rather than materializing it; the
-/// payload can be large (unbounded class) and the whole point of this path is
-/// one decision before any inner decode. Go twin: `storeEnvelopeChecksum`.
 fn store_envelope_checksum(domain: &[u8], payload: &[u8]) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
     hasher.update(domain);
@@ -109,9 +72,7 @@ fn store_envelope_checksum(domain: &[u8], payload: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Wraps the exact payload bytes in the v1 frame. New writes emit v1 only;
-/// there is deliberately no size bound on either side (RUB-1057 standing
-/// decision for both protected files).
+/// Wraps the exact payload bytes in v1; no size bound (RUB-1057).
 pub(crate) fn marshal_store_envelope(
     kind: StoreEnvelopeKind,
     payload: &[u8],
@@ -127,12 +88,11 @@ pub(crate) fn marshal_store_envelope(
     Ok(raw)
 }
 
-/// Runs the validation order on one protected file: strict canonical layout
-/// (subsuming shape, version-literal, duplicate, unknown, missing, null,
-/// wrong-type, ordering, whitespace and trailing-token rejection, with
-/// unversioned legacy classified before the exact-field-set verdict), canonical
-/// padded base64, then the constant-time checksum compare. Only after checksum
-/// success does the caller decode the inner schema. Go twin: `openStoreEnvelope`.
+/// The validation order for one protected file: strict canonical layout (which
+/// subsumes shape, version, duplicate, unknown, missing, null, wrong-type,
+/// ordering, whitespace and trailing-token rejection, legacy classified first),
+/// canonical padded base64, then the constant-time checksum compare. Only then
+/// may the caller decode the inner schema.
 pub(crate) fn open_store_envelope(kind: StoreEnvelopeKind, raw: &[u8]) -> Result<Vec<u8>, String> {
     let (payload_b64, checksum_hex) = split_store_envelope(kind, raw)?;
     let payload = decode_canonical_store_base64(payload_b64)?;
@@ -146,11 +106,9 @@ pub(crate) fn open_store_envelope(kind: StoreEnvelopeKind, raw: &[u8]) -> Result
     Ok(payload)
 }
 
-/// Validates the canonical layout and returns sub-slices of `raw`. The body
-/// length is DERIVED (`raw.len() - frame`) rather than searched for, so any
-/// inserted, removed, reordered, duplicated or renamed field shifts the trailing
-/// segments and fails. On failure it hands off to
-/// `classify_store_envelope_failure`, the only path that parses JSON at all.
+/// Returns sub-slices of `raw`. The body length is DERIVED (`raw.len() -
+/// frame`), never searched for, so any inserted, removed, reordered, duplicated
+/// or renamed field shifts the tail and fails.
 fn split_store_envelope(kind: StoreEnvelopeKind, raw: &[u8]) -> Result<(&[u8], &[u8]), String> {
     let Some(body) = raw.len().checked_sub(STORE_ENVELOPE_FRAME_BYTES) else {
         return Err(classify_store_envelope_failure(kind, raw));
@@ -174,14 +132,11 @@ fn split_store_envelope(kind: StoreEnvelopeKind, raw: &[u8]) -> Result<(&[u8], &
     Ok((&raw[payload_at..checksum_sep_at], checksum_hex))
 }
 
-/// Names WHY a file that failed the layout check failed it; runs only on files
-/// already being rejected, so its JSON scan is never paid on the accept path. It
-/// deserializes ONE value and does NOT require EOF, and duplicate keys last-win
-/// (both mirrored by the Go twin), so a legacy file with trailing garbage still
-/// reports the actionable legacy message. A pre-envelope legacy file carries
-/// NEITHER `payload_b64` NOR `checksum` — both legacy inner schemas carry their
-/// own top-level `"version": 1`, which is why legacy detection keys on the
-/// envelope fields and runs before the version verdicts.
+/// Names WHY a file failed the layout check; runs only on already-rejected
+/// files. It deserializes ONE value, does NOT require EOF, and duplicate keys
+/// last-win (as in Go), so a legacy file with trailing garbage still reports the
+/// legacy message. Legacy detection keys on the ENVELOPE fields and precedes
+/// the version verdicts: both legacy schemas carry a top-level `"version": 1`.
 fn classify_store_envelope_failure(kind: StoreEnvelopeKind, raw: &[u8]) -> String {
     let mut deserializer = serde_json::Deserializer::from_slice(raw);
     let Ok(probe) = Map::<String, Value>::deserialize(&mut deserializer) else {
@@ -193,9 +148,8 @@ fn classify_store_envelope_failure(kind: StoreEnvelopeKind, raw: &[u8]) -> Strin
     if !probe.contains_key("payload_b64") && !probe.contains_key("checksum") {
         return kind.legacy_err.to_string();
     }
-    // `as_u64` is None for null, strings and non-integral numbers, so those
-    // spellings fall through to the generic verdict exactly as the Go twin's
-    // pointer probe does.
+    // `as_u64` is None for null, strings and non-integral numbers, which fall
+    // through to the generic verdict exactly as Go's probe does.
     match probe.get("version").and_then(Value::as_u64) {
         Some(version) if version != u64::from(STORE_ENVELOPE_VERSION) => {
             format!("{STORE_INTEGRITY_PREFIX}: unsupported store envelope version {version}")
@@ -204,13 +158,9 @@ fn classify_store_envelope_failure(kind: StoreEnvelopeKind, raw: &[u8]) -> Strin
     }
 }
 
-/// Accepts only the one padded RFC 4648 spelling of the payload. Sibling of the
-/// undo-class decoder (`undo.rs`), which is module-private and carries the
-/// UNDO_INTEGRITY identity in its message; this contract forbids touching
-/// undo.rs, so the rules are restated here with the store identity:
-/// non-alphabet bytes are rejected symbol by symbol (so JSON-escaped whitespace
-/// a permissive decoder would skip cannot slip through), and the bits the
-/// padding discards must be zero (so "Zh==" cannot stand in for "Zg==").
+/// Accepts only the one padded RFC 4648 spelling: non-alphabet bytes are
+/// rejected symbol by symbol (JSON-escaped whitespace a permissive decoder would
+/// skip cannot slip through) and the bits padding discards must be zero.
 fn decode_canonical_store_base64(value: &[u8]) -> Result<Vec<u8>, String> {
     let not_canonical =
         || format!("{STORE_INTEGRITY_PREFIX}: payload_b64 is not canonical padded base64");
@@ -220,8 +170,7 @@ fn decode_canonical_store_base64(value: &[u8]) -> Result<Vec<u8>, String> {
     let quads = value.len() / 4;
     let mut out = Vec::with_capacity(quads.saturating_mul(3));
     for (index, quad) in value.chunks_exact(4).enumerate() {
-        // Padding is legal only in the final quad; anywhere else `=` is not an
-        // alphabet symbol and fails below.
+        // Padding is legal only in the final quad; elsewhere `=` fails below.
         let pad = if index + 1 != quads {
             0
         } else if quad[3] == b'=' {
@@ -237,9 +186,7 @@ fn decode_canonical_store_base64(value: &[u8]) -> Result<Vec<u8>, String> {
         for symbol in &quad[..4 - pad] {
             packed = (packed << 6) | base64_symbol_value(*symbol).ok_or_else(not_canonical)?;
         }
-        // The final quad carries 6*(4-pad) bits but only 8*(3-pad) are data;
-        // the 2*pad low bits are padding and a canonical encoder leaves them
-        // zero.
+        // A canonical encoder leaves the 2*pad discarded low bits zero.
         if packed & ((1u32 << (2 * pad)) - 1) != 0 {
             return Err(not_canonical());
         }
@@ -267,9 +214,6 @@ fn base64_symbol_value(symbol: u8) -> Option<u32> {
     Some(value)
 }
 
-/// Data-independent comparison of the stored and computed digests. No `subtle`
-/// crate is available and this contract forbids adding one, so the fold is
-/// written out; both inputs are fixed-size arrays, so no length term leaks.
 fn constant_time_eq32(a: &[u8; 32], b: &[u8; 32]) -> bool {
     a.iter()
         .zip(b.iter())
@@ -281,36 +225,24 @@ fn constant_time_eq32(a: &[u8; 32], b: &[u8; 32]) -> bool {
 pub(crate) mod tests {
     use super::*;
 
-    /// The RUB-1134 cross-client vectors. The Go suite embeds these SAME
-    /// literals (`storeEnvelopeVectors` in clients/go/node/store_envelope_test.go):
-    /// given identical payload bytes, the preimage, checksum and complete
-    /// envelope bytes must be byte-identical in Go and Rust.
-    ///
-    /// The two empty-payload rows differ only by domain tag, so they pin
-    /// domain separation; the two non-empty rows pin the length term and the
-    /// base64 body. Row 4's payload is the exact Go empty canonical-index
-    /// payload, so its envelope is also the on-disk creation marker pinned by
-    /// `create_store_commits_exact_empty_marker`.
+    /// The RUB-1134 cross-client vectors; the Go suite embeds these SAME
+    /// literals. Rows 1/3 differ only by domain tag (domain separation); rows
+    /// 2/4 pin the length term and the base64 body, and row 4 is also the
+    /// on-disk creation marker.
     #[rustfmt::skip]
     const VECTORS: &[(StoreEnvelopeKind, &str, &str, &str)] = &[
-        (STORE_ENVELOPE_CHAIN_STATE, "",
-         "51e3d3a67f6a7c4439465328314723099ea753c512f22a1f197e1528b1f24afe",
+        (STORE_ENVELOPE_CHAIN_STATE, "", "51e3d3a67f6a7c4439465328314723099ea753c512f22a1f197e1528b1f24afe",
          "{\"version\":1,\"payload_b64\":\"\",\"checksum\":\"51e3d3a67f6a7c4439465328314723099ea753c512f22a1f197e1528b1f24afe\"}\n"),
-        (STORE_ENVELOPE_CHAIN_STATE, "{\"version\":1}\n",
-         "6d8ced24b9b3f05ed1aebb46c3bfe0a0bfc96508ce51e1ca6de3dc643ec659d0",
+        (STORE_ENVELOPE_CHAIN_STATE, "{\"version\":1}\n", "6d8ced24b9b3f05ed1aebb46c3bfe0a0bfc96508ce51e1ca6de3dc643ec659d0",
          "{\"version\":1,\"payload_b64\":\"eyJ2ZXJzaW9uIjoxfQo=\",\"checksum\":\"6d8ced24b9b3f05ed1aebb46c3bfe0a0bfc96508ce51e1ca6de3dc643ec659d0\"}\n"),
-        (STORE_ENVELOPE_BLOCK_INDEX, "",
-         "bf1cd3af0b95b8861e3abf40b776f315117e55b28b5c5dbdb811d3fd33018e5a",
+        (STORE_ENVELOPE_BLOCK_INDEX, "", "bf1cd3af0b95b8861e3abf40b776f315117e55b28b5c5dbdb811d3fd33018e5a",
          "{\"version\":1,\"payload_b64\":\"\",\"checksum\":\"bf1cd3af0b95b8861e3abf40b776f315117e55b28b5c5dbdb811d3fd33018e5a\"}\n"),
-        (STORE_ENVELOPE_BLOCK_INDEX, "{\n  \"canonical\": [],\n  \"version\": 1\n}\n",
-         "7c120c21bc3ffdda6482c8d18a3c669542e89d8500928ce166700a7c7a40fe15",
+        (STORE_ENVELOPE_BLOCK_INDEX, "{\n  \"canonical\": [],\n  \"version\": 1\n}\n", "7c120c21bc3ffdda6482c8d18a3c669542e89d8500928ce166700a7c7a40fe15",
          "{\"version\":1,\"payload_b64\":\"ewogICJjYW5vbmljYWwiOiBbXSwKICAidmVyc2lvbiI6IDEKfQo=\",\"checksum\":\"7c120c21bc3ffdda6482c8d18a3c669542e89d8500928ce166700a7c7a40fe15\"}\n"),
     ];
 
-    /// Pins the frame, the preimage and the checksum. The expected checksum is
-    /// ALSO recomputed from the contract's stated preimage
-    /// (ASCII(domain) || uint64_be(len) || payload) with a locally written
-    /// hash call, so the pin cannot drift with the production helper.
+    /// Pins the frame, preimage and checksum, recomputing the checksum locally
+    /// so the pin cannot drift with the production helper.
     #[test]
     fn store_envelope_v1_cross_client_vectors() {
         for (kind, payload, want_checksum, want_envelope) in VECTORS {
@@ -336,8 +268,7 @@ pub(crate) mod tests {
             assert_eq!(back, payload.as_bytes());
         }
 
-        // Domain separation: the same payload under the other domain tag must
-        // not verify, and the two pinned empty-payload checksums differ.
+        // Domain separation: the same payload under the other tag must not verify.
         assert_ne!(VECTORS[0].2, VECTORS[2].2);
         let raw = marshal_store_envelope(STORE_ENVELOPE_CHAIN_STATE, b"{\"version\":1}\n")
             .expect("marshal");
@@ -347,21 +278,14 @@ pub(crate) mod tests {
         );
     }
 
-    /// One hostile/malformed on-disk body. `body` receives the VALID envelope
-    /// bytes and the valid inner payload bytes for that file and returns the
-    /// bytes to plant. Go twin: `storeIntegrityRow`.
+    /// One malformed on-disk body. Go twin: `storeIntegrityRow`.
     pub(crate) struct StoreIntegrityRow {
         pub(crate) name: &'static str,
-        // One boxed builder per row: (valid envelope, valid payload) -> planted
-        // bytes. Not a nested structure, so no `type` alias earns its keep.
-        #[allow(clippy::type_complexity)]
+        #[allow(clippy::type_complexity)] // (valid envelope, valid payload) -> planted bytes
         pub(crate) body: Box<dyn Fn(&[u8], &[u8]) -> Vec<u8>>,
-        /// Exact message, when the contract pins one.
-        pub(crate) want_msg: Option<&'static str>,
-        /// Substring, when the message carries a variable.
-        pub(crate) want_sub: Option<&'static str>,
-        /// The inner-schema class is deliberately OUTSIDE the STORE_INTEGRITY
-        /// identity: those bytes are intact on disk.
+        pub(crate) want_msg: Option<&'static str>, // exact, when pinned
+        pub(crate) want_sub: Option<&'static str>, // substring, when variable
+        /// The inner-schema class is deliberately OUTSIDE STORE_INTEGRITY.
         pub(crate) not_integrity: bool,
     }
 
@@ -386,20 +310,17 @@ pub(crate) mod tests {
         envelope.payload_b64
     }
 
-    /// Re-wraps `payload` under `kind` with a FRESH checksum.
     pub(crate) fn rewrap(kind: StoreEnvelopeKind, payload: &[u8]) -> Vec<u8> {
         marshal_store_envelope(kind, payload).expect("marshal")
     }
 
-    /// Replaces the base64 body WITHOUT touching the checksum, so only the
-    /// checksum comparison can catch the edit.
+    /// Replaces the base64 body WITHOUT touching the checksum.
     pub(crate) fn restamp_payload_keeping_checksum(valid: &[u8], payload: &[u8]) -> Vec<u8> {
         replace_once(valid, &payload_b64_of(valid), &base64_encode(payload))
     }
 
-    /// The frame-level rows both protected files must reject identically.
-    /// Per-file rows (legacy message, payload edits) are added by each caller.
-    /// Go twin: `storeEnvelopeSharedRejectRows`.
+    /// The frame-level rows both protected files must reject identically;
+    /// per-file rows are added by each caller.
     #[rustfmt::skip]
     pub(crate) fn shared_reject_rows() -> Vec<StoreIntegrityRow> {
         fn row(name: &'static str, body: fn(&[u8], &[u8]) -> Vec<u8>, want_sub: &'static str) -> StoreIntegrityRow {
@@ -419,10 +340,8 @@ pub(crate) mod tests {
                     base64_encode(payload),
                     hex::encode(store_envelope_checksum(STORE_ENVELOPE_CHAIN_STATE.domain, payload))).into_bytes()
             }, "envelope is not the canonical encoding"),
-            // A duplicated field lands INSIDE the derived body slice (the body
-            // length is raw.len() - frame, not a searched delimiter), so the
-            // canonical-base64 check is what refuses it. Both clients derive
-            // the same slice and therefore return this same message.
+            // A duplicated field lands INSIDE the derived body slice, so the
+            // canonical-base64 check refuses it, identically in both clients.
             row("duplicate_payload_b64_identical", |valid, _| replace_once(valid, ",\"checksum\":\"", ",\"payload_b64\":\"DUPLICATE\",\"checksum\":\""), "payload_b64 is not canonical padded base64"),
             row("duplicate_payload_b64_conflicting", |valid, payload| {
                 let mut other = b"x".to_vec();
@@ -451,8 +370,7 @@ pub(crate) mod tests {
                     hex::encode(store_envelope_checksum(STORE_ENVELOPE_CHAIN_STATE.domain, payload))).into_bytes()
             }, "payload_b64 is not canonical padded base64"),
             StoreIntegrityRow { name: "checksum_mismatch_zeroed", body: Box::new(|valid, _| replace_once(valid, &checksum_hex_of(valid), &"0".repeat(64))), want_msg: Some(STORE_CHECKSUM_MISMATCH_ERR), want_sub: None, not_integrity: false },
-            // One interior base64 symbol changes, so the file stays canonical
-            // base64 and only the checksum can catch it.
+            // Stays canonical base64, so only the checksum can catch it.
             StoreIntegrityRow { name: "payload_base64_bitflip", body: Box::new(|valid, _| { let encoded = payload_b64_of(valid); replace_once(valid, &encoded, &flip_base64_symbol(&encoded)) }), want_msg: Some(STORE_CHECKSUM_MISMATCH_ERR), want_sub: None, not_integrity: false },
         ]
     }
@@ -468,10 +386,6 @@ pub(crate) mod tests {
 
     /// Plants each row at `path`, calls `load`, and pins the message, the
     /// STORE_INTEGRITY identity, and that the refusal never rewrote the file.
-    /// (The absent-file exclusion Go states as `fs.ErrNotExist` is structural
-    /// here: the loaders return `String`, and the absent-file branch is a
-    /// distinct `ErrorKind::NotFound` arm that never sees these bytes.)
-    /// Go twin: `runStoreIntegrityRows`.
     pub(crate) fn run_store_integrity_rows(
         path: &std::path::Path,
         valid: &[u8],

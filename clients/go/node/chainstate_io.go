@@ -101,11 +101,10 @@ func ChainStatePath(dataDir string) string {
 }
 
 // LoadChainState reads the store_envelope_v1-wrapped snapshot. An ABSENT file
-// keeps the NewChainState-plus-full-replay repair path; every present file
-// must clear the strict envelope (layout, canonical base64, domain-tagged
-// checksum) BEFORE the inner chainStateDisk decode runs. Envelope failures
-// carry the ErrStoreIntegrity identity and never satisfy fs.ErrNotExist, so
-// a corrupt file can never ride the absent-file fallback.
+// keeps the NewChainState-plus-full-replay repair path; every present file must
+// clear the strict envelope BEFORE the inner chainStateDisk decode runs.
+// Envelope failures carry the ErrStoreIntegrity identity and never satisfy
+// fs.ErrNotExist, so a corrupt file can never ride the absent-file fallback.
 func LoadChainState(path string) (*ChainState, error) {
 	raw, err := readFileByPath(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -138,8 +137,7 @@ func (s *ChainState) Save(path string) error {
 		return fmt.Errorf("encode chainstate: %w", err)
 	}
 	payload = append(payload, '\n')
-	// The pre-envelope on-disk bytes become the exact envelope payload: the
-	// inner chainStateDisk encoding is unchanged, only the frame is new.
+	// The pre-envelope on-disk bytes become the exact envelope payload.
 	raw, err := marshalStoreEnvelope(storeEnvelopeChainState, payload)
 	if err != nil {
 		return err

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -34,42 +35,40 @@ func TestLoadBlockStoreIndex_Errors(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid_json", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "index.json")
-		if err := os.WriteFile(path, []byte("{\n"), 0o600); err != nil {
-			t.Fatalf("WriteFile: %v", err)
+	mustMarshal := func(index blockStoreIndexDisk) []byte {
+		raw, err := json.Marshal(index)
+		if err != nil {
+			t.Fatalf("marshal index: %v", err)
 		}
-		if _, err := loadBlockStoreIndex(path); err == nil {
-			t.Fatalf("expected error")
-		}
-	})
-
-	t.Run("version_mismatch", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "index.json")
-		raw, _ := json.Marshal(blockStoreIndexDisk{Version: blockStoreIndexVersion + 1, Canonical: []string{}})
-		raw = append(raw, '\n')
-		if err := os.WriteFile(path, raw, 0o600); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-		if _, err := loadBlockStoreIndex(path); err == nil {
-			t.Fatalf("expected error")
-		}
-	})
-
-	t.Run("invalid_canonical_hash", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "index.json")
-		raw, _ := json.Marshal(blockStoreIndexDisk{Version: blockStoreIndexVersion, Canonical: []string{"zz"}})
-		raw = append(raw, '\n')
-		if err := os.WriteFile(path, raw, 0o600); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-		if _, err := loadBlockStoreIndex(path); err == nil {
-			t.Fatalf("expected error")
-		}
-	})
+		return append(raw, '\n')
+	}
+	// RUB-1134: each payload is planted INSIDE a valid frame, so the row still
+	// reaches the INNER decode class it names rather than the legacy verdict
+	// (owned by TestBlockstoreIndexRejectsIntegrityFailures).
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+	}{
+		{"invalid_json", []byte("{\n")},
+		{"version_mismatch", mustMarshal(blockStoreIndexDisk{Version: blockStoreIndexVersion + 1, Canonical: []string{}})},
+		{"invalid_canonical_hash", mustMarshal(blockStoreIndexDisk{Version: blockStoreIndexVersion, Canonical: []string{"zz"}})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "index.json")
+			raw, err := marshalStoreEnvelope(storeEnvelopeBlockIndex, tc.payload)
+			if err != nil {
+				t.Fatalf("wrap index: %v", err)
+			}
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			if _, err := loadBlockStoreIndex(path); err == nil {
+				t.Fatalf("expected error")
+			} else if errors.Is(err, ErrStoreIntegrity) {
+				t.Fatalf("row must fail on the inner decode class, got %v", err)
+			}
+		})
+	}
 }
 
 func TestBlockStorePutBlock_RejectsInvalidHeaderLen(t *testing.T) {

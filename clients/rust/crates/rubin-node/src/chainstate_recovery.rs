@@ -1215,9 +1215,8 @@ mod tests {
         fs::remove_dir_all(&dir).expect("cleanup");
     }
 
-    /// An ABSENT `chainstate.json` keeps the `ChainState::new()`-plus-full-
-    /// validated-replay repair path over an enveloped index, and a corrupt one
-    /// does NOT. Go twin: `TestAbsentChainstateRebuildsByReplay`.
+    /// An ABSENT `chainstate.json` keeps the full-validated-replay repair path
+    /// over an enveloped index; a corrupt one does NOT.
     #[test]
     fn absent_chainstate_rebuilds_by_replay() {
         use crate::chainstate::{chain_state_path, load_chain_state};
@@ -1250,12 +1249,47 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The hostile "both together" row: a first post-upgrade startup finds BOTH
+    /// files pre-envelope. Startup opens the blockstore before it loads the
+    /// chainstate, so the index verdict is the one an operator sees; each file
+    /// is refused on its own class and neither is rewritten.
+    #[test]
+    fn both_legacy_files_fail_closed_at_first_startup() {
+        use crate::chainstate::{chain_state_path, load_chain_state};
+        use crate::store_envelope::{STORE_LEGACY_BLOCK_INDEX_ERR, STORE_LEGACY_CHAINSTATE_ERR};
+
+        let dir = fresh_dir("rubin-recover-both-legacy");
+        drop(create_store_in(&dir));
+        let (index, chainstate) = (
+            block_store_path(&dir).join("index.json"),
+            chain_state_path(&dir),
+        );
+        // Exactly the pre-envelope encodings the two writers now wrap as payloads.
+        let legacy_index = b"{\n  \"canonical\": [],\n  \"version\": 1\n}\n";
+        let legacy_chainstate = b"{\n  \"version\": 1,\n  \"utxos\": []\n}\n";
+        fs::write(&index, legacy_index).expect("plant legacy index");
+        fs::write(&chainstate, legacy_chainstate).expect("plant legacy chainstate");
+
+        assert_eq!(
+            BlockStore::open(block_store_path(&dir)).expect_err("legacy index"),
+            STORE_LEGACY_BLOCK_INDEX_ERR
+        );
+        assert_eq!(
+            load_chain_state(&chainstate).expect_err("legacy chainstate"),
+            STORE_LEGACY_CHAINSTATE_ERR
+        );
+        assert_eq!(fs::read(&index).expect("re-read index"), legacy_index);
+        assert_eq!(
+            fs::read(&chainstate).expect("re-read chainstate"),
+            legacy_chainstate
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// Re-proves every baseline crash-recovery reconcile scenario over
-    /// enveloped files. A crash is injected at each atomic-write boundary
-    /// (scratch open, scratch write, rename, parent sync) while the canonical
-    /// index and the chainstate snapshot are written in BOTH orders, and the
-    /// datadir is then reopened from disk and reconciled. Go twin:
-    /// `TestReconcileCrashRecoveryOverEnvelopedFiles`.
+    /// enveloped files: a crash at each atomic-write boundary (scratch open,
+    /// scratch write, rename, parent sync) with the index and the snapshot
+    /// written in BOTH orders, then reopen from disk and reconcile.
     #[test]
     fn reconcile_crash_recovery_over_enveloped_files() {
         use crate::chainstate::{chain_state_path, load_chain_state};
@@ -1273,12 +1307,10 @@ mod tests {
                 let path = chain_state_path(&dir);
                 let store = create_store_in(&dir);
                 let (genesis_hash, mut store, state) = apply_genesis(store);
-                // The pre-crash snapshot on disk: genesis only.
                 state.save(&path).expect("baseline save");
 
-                // One real canonical block on top, committed by the engine, so
-                // the index on disk is ahead of the snapshot exactly as after
-                // an ordinary connect.
+                // One canonical block on top, so the index is ahead of the
+                // snapshot exactly as after an ordinary connect.
                 let g_parsed =
                     parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis");
                 let block1 =
@@ -1295,8 +1327,8 @@ mod tests {
                     block_hash(&parse_block_bytes(&block1).expect("parse b1").header_bytes)
                         .expect("hash b1");
 
-                // Crash at one boundary of the FIRST write in this order; the
-                // second write never runs, exactly as after a real crash.
+                // Crash at one boundary of the FIRST write; the second never
+                // runs, as after a real crash.
                 {
                     let scope = AtomicWriteTestScope::new();
                     scope.fail_at(boundary, 1, "crash");
@@ -1313,8 +1345,7 @@ mod tests {
                     );
                 }
 
-                // Whatever the crash left on disk, the reopened datadir must be
-                // envelope-clean and reconcile back to the canonical tip.
+                // The reopened datadir must reconcile back to the tip.
                 let mut reopened =
                     BlockStore::open(block_store_path(&dir)).expect("reopen blockstore");
                 let mut recovered = load_chain_state(&path).expect("post-crash chainstate load");

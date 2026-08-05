@@ -1692,7 +1692,15 @@ pub(crate) fn boundary_chain_for_test(prefix: &str) -> (SyncEngine, std::path::P
         canonical.push(hex::encode(hash));
         prev = hash;
     }
-    let index = serde_json::json!({ "version": 1, "canonical": canonical }).to_string();
+    // RUB-1134: planted through the same store_envelope_v1 frame the production
+    // saver emits, so the reopen below keeps exercising the header walk.
+    let index = crate::store_envelope::marshal_store_envelope(
+        crate::store_envelope::STORE_ENVELOPE_BLOCK_INDEX,
+        serde_json::json!({ "version": 1, "canonical": canonical })
+            .to_string()
+            .as_bytes(),
+    )
+    .expect("wrap canonical index");
     std::fs::write(root.join("index.json"), index).expect("write canonical index");
 
     chain_state.height = WINDOW_SIZE - 2;

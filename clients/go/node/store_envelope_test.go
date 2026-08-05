@@ -18,55 +18,23 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-// storeEnvelopeVectors are the RUB-1134 cross-client vectors. Both clients
-// embed these SAME literals: given identical payload bytes, the preimage,
-// checksum and complete envelope bytes must be byte-identical in Go and Rust.
-// Rust twin: `store_envelope_v1_cross_client_vectors`. The two empty-payload
-// rows differ only by domain tag, so they pin domain separation; the two
-// non-empty rows pin the length term and the base64 body. Row 4's payload is
-// the exact Go empty canonical-index payload, so its envelope is also the
-// on-disk marker pinned by TestCreateBlockStoreCommitsExactEmptyMarker.
+// storeEnvelopeVectors are the RUB-1134 cross-client vectors; Rust embeds these
+// SAME literals. Rows 1/3 differ only by domain tag (domain separation); rows
+// 2/4 pin the length term and the base64 body, and row 4 is also the on-disk
+// marker pinned by TestCreateBlockStoreCommitsExactEmptyMarker.
 var storeEnvelopeVectors = []struct {
-	name         string
-	kind         storeEnvelopeKind
-	payload      string
-	wantChecksum string
-	wantEnvelope string
+	name, payload, wantChecksum, wantEnvelope string
+	kind                                      storeEnvelopeKind
 }{
-	{
-		name:         "chainstate_empty_payload",
-		kind:         storeEnvelopeChainState,
-		payload:      "",
-		wantChecksum: "51e3d3a67f6a7c4439465328314723099ea753c512f22a1f197e1528b1f24afe",
-		wantEnvelope: `{"version":1,"payload_b64":"","checksum":"51e3d3a67f6a7c4439465328314723099ea753c512f22a1f197e1528b1f24afe"}` + "\n",
-	},
-	{
-		name:         "chainstate_small_payload",
-		kind:         storeEnvelopeChainState,
-		payload:      "{\"version\":1}\n",
-		wantChecksum: "6d8ced24b9b3f05ed1aebb46c3bfe0a0bfc96508ce51e1ca6de3dc643ec659d0",
-		wantEnvelope: `{"version":1,"payload_b64":"eyJ2ZXJzaW9uIjoxfQo=","checksum":"6d8ced24b9b3f05ed1aebb46c3bfe0a0bfc96508ce51e1ca6de3dc643ec659d0"}` + "\n",
-	},
-	{
-		name:         "blockstore_index_empty_payload",
-		kind:         storeEnvelopeBlockIndex,
-		payload:      "",
-		wantChecksum: "bf1cd3af0b95b8861e3abf40b776f315117e55b28b5c5dbdb811d3fd33018e5a",
-		wantEnvelope: `{"version":1,"payload_b64":"","checksum":"bf1cd3af0b95b8861e3abf40b776f315117e55b28b5c5dbdb811d3fd33018e5a"}` + "\n",
-	},
-	{
-		name:         "blockstore_index_empty_marker_payload",
-		kind:         storeEnvelopeBlockIndex,
-		payload:      "{\n  \"canonical\": [],\n  \"version\": 1\n}\n",
-		wantChecksum: "7c120c21bc3ffdda6482c8d18a3c669542e89d8500928ce166700a7c7a40fe15",
-		wantEnvelope: `{"version":1,"payload_b64":"ewogICJjYW5vbmljYWwiOiBbXSwKICAidmVyc2lvbiI6IDEKfQo=","checksum":"7c120c21bc3ffdda6482c8d18a3c669542e89d8500928ce166700a7c7a40fe15"}` + "\n",
-	},
+	{"chainstate_empty_payload", "", "51e3d3a67f6a7c4439465328314723099ea753c512f22a1f197e1528b1f24afe", `{"version":1,"payload_b64":"","checksum":"51e3d3a67f6a7c4439465328314723099ea753c512f22a1f197e1528b1f24afe"}` + "\n", storeEnvelopeChainState},
+	{"chainstate_small_payload", "{\"version\":1}\n", "6d8ced24b9b3f05ed1aebb46c3bfe0a0bfc96508ce51e1ca6de3dc643ec659d0", `{"version":1,"payload_b64":"eyJ2ZXJzaW9uIjoxfQo=","checksum":"6d8ced24b9b3f05ed1aebb46c3bfe0a0bfc96508ce51e1ca6de3dc643ec659d0"}` + "\n", storeEnvelopeChainState},
+	{"blockstore_index_empty_payload", "", "bf1cd3af0b95b8861e3abf40b776f315117e55b28b5c5dbdb811d3fd33018e5a", `{"version":1,"payload_b64":"","checksum":"bf1cd3af0b95b8861e3abf40b776f315117e55b28b5c5dbdb811d3fd33018e5a"}` + "\n", storeEnvelopeBlockIndex},
+	{"blockstore_index_empty_marker_payload", "{\n  \"canonical\": [],\n  \"version\": 1\n}\n", "7c120c21bc3ffdda6482c8d18a3c669542e89d8500928ce166700a7c7a40fe15", `{"version":1,"payload_b64":"ewogICJjYW5vbmljYWwiOiBbXSwKICAidmVyc2lvbiI6IDEKfQo=","checksum":"7c120c21bc3ffdda6482c8d18a3c669542e89d8500928ce166700a7c7a40fe15"}` + "\n", storeEnvelopeBlockIndex},
 }
 
 // TestStoreEnvelopeV1CrossClientVectors pins the frame, the preimage and the
-// checksum. The expected checksum is ALSO recomputed here from the contract's
-// stated preimage (ASCII(domain) || uint64_be(len) || payload), so the pin
-// cannot drift with the production helper.
+// checksum, recomputing the checksum from the contract's stated preimage so the
+// pin cannot drift with the production helper.
 func TestStoreEnvelopeV1CrossClientVectors(t *testing.T) {
 	for _, tc := range storeEnvelopeVectors {
 		t.Run(tc.name, func(t *testing.T) {
@@ -103,8 +71,7 @@ func TestStoreEnvelopeV1CrossClientVectors(t *testing.T) {
 		})
 	}
 
-	// Domain separation: the same payload under the other domain tag must not
-	// verify, and the two pinned empty-payload checksums differ.
+	// Domain separation: the same payload under the other tag must not verify.
 	if storeEnvelopeVectors[0].wantChecksum == storeEnvelopeVectors[2].wantChecksum {
 		t.Fatalf("domain tags must produce distinct checksums for the same payload")
 	}
@@ -118,9 +85,8 @@ func TestStoreEnvelopeV1CrossClientVectors(t *testing.T) {
 	}
 }
 
-// storeIntegrityRow is one hostile/malformed on-disk body. `body` receives the
-// VALID envelope bytes and the valid inner payload bytes for that file and
-// returns the bytes to plant.
+// storeIntegrityRow is one malformed on-disk body: body(valid envelope, valid
+// payload) returns the bytes to plant.
 type storeIntegrityRow struct {
 	name    string
 	body    func(t *testing.T, valid, payload []byte) []byte
@@ -132,8 +98,7 @@ type storeIntegrityRow struct {
 }
 
 // storeEnvelopeSharedRejectRows are the frame-level rows both protected files
-// must reject identically. Per-file rows (legacy message, payload edits) are
-// added by each caller.
+// must reject identically; per-file rows are added by each caller.
 func storeEnvelopeSharedRejectRows() []storeIntegrityRow {
 	replaceOnce := func(old, new string) func(*testing.T, []byte, []byte) []byte {
 		return func(t *testing.T, valid, _ []byte) []byte {
@@ -145,7 +110,6 @@ func storeEnvelopeSharedRejectRows() []storeIntegrityRow {
 			return []byte(out)
 		}
 	}
-	// replaceChecksum rewrites the checksum field through `next`.
 	replaceChecksum := func(next func(string) string) func(*testing.T, []byte, []byte) []byte {
 		return func(t *testing.T, valid, payload []byte) []byte {
 			t.Helper()
@@ -153,7 +117,7 @@ func storeEnvelopeSharedRejectRows() []storeIntegrityRow {
 		}
 	}
 	// duplicateChecksum appends a SECOND checksum field carrying `next` of the
-	// real one, so both the identical and the conflicting spelling are reachable.
+	// real one, reaching both the identical and the conflicting spelling.
 	duplicateChecksum := func(next func(string) string) func(*testing.T, []byte, []byte) []byte {
 		return func(t *testing.T, valid, payload []byte) []byte {
 			t.Helper()
@@ -184,10 +148,8 @@ func storeEnvelopeSharedRejectRows() []storeIntegrityRow {
 	sub := func(name string, body func(*testing.T, []byte, []byte) []byte, want string) storeIntegrityRow {
 		return storeIntegrityRow{name: name, body: body, wantSub: want}
 	}
-	// A duplicated field lands INSIDE the derived body slice (the body length
-	// is len(raw) - frame, not a searched delimiter), so the canonical-base64
-	// check is what refuses it. Both clients derive the same slice and
-	// therefore return that same message; those rows pin the agreement.
+	// A duplicated field lands INSIDE the derived body slice, so the
+	// canonical-base64 check refuses it; both clients agree, which those rows pin.
 	return []storeIntegrityRow{
 		sub("empty_file", static(""), notObject),
 		sub("not_an_object", static("[]\n"), notObject),
@@ -233,9 +195,7 @@ func storeEnvelopeSharedRejectRows() []storeIntegrityRow {
 			wantMsg: errStoreChecksumMismatch.Error(),
 		},
 		{
-			// Shared with the undo-class rows (blockstore_test.go): one interior
-			// symbol changes, so the file stays canonical base64 and only the
-			// checksum can catch it.
+			// Stays canonical base64, so only the checksum can catch it.
 			name: "payload_base64_bitflip",
 			body: func(t *testing.T, valid, payload []byte) []byte {
 				t.Helper()
@@ -255,9 +215,7 @@ func decodeValidEnvelope(t *testing.T, valid []byte) storeEnvelopeDisk {
 	return probe
 }
 
-func hexChecksumOf(t *testing.T, valid []byte) string {
-	return decodeValidEnvelope(t, valid).Checksum
-}
+func hexChecksumOf(t *testing.T, valid []byte) string { return decodeValidEnvelope(t, valid).Checksum }
 
 func payloadB64Of(t *testing.T, valid []byte) string {
 	return decodeValidEnvelope(t, valid).PayloadB64
@@ -265,7 +223,7 @@ func payloadB64Of(t *testing.T, valid []byte) string {
 
 // runStoreIntegrityRows plants each row at `path`, calls `load`, and pins the
 // message, the ErrStoreIntegrity identity, the fs.ErrNotExist exclusion, and
-// that the refusal never rewrote the file. Rust twin: run_store_integrity_rows.
+// that the refusal never rewrote the file.
 func runStoreIntegrityRows(t *testing.T, path string, valid, payload []byte, load func() error, rows []storeIntegrityRow) {
 	t.Helper()
 	for _, row := range rows {
@@ -302,9 +260,8 @@ func runStoreIntegrityRows(t *testing.T, path string, valid, payload []byte, loa
 }
 
 // TestLoadChainStateRejectsIntegrityFailures: every malformed, legacy,
-// checksum-mismatched or parse-valid-but-edited chainstate.json fails BEFORE
-// the inner decode, with the pinned identity, and never rides the absent-file
-// fallback. Rust twin: `load_chainstate_rejects_integrity_failures`.
+// checksum-mismatched or parse-valid-but-edited chainstate.json fails BEFORE the
+// inner decode with the pinned identity and never rides the absent-file fallback.
 func TestLoadChainStateRejectsIntegrityFailures(t *testing.T) {
 	dir := t.TempDir()
 	path := ChainStatePath(dir)
@@ -327,8 +284,6 @@ func TestLoadChainStateRejectsIntegrityFailures(t *testing.T) {
 
 	rows := append(storeEnvelopeSharedRejectRows(),
 		storeIntegrityRow{
-			// The whole pre-envelope file, byte for byte: what a first
-			// post-upgrade startup finds on disk.
 			name:    "legacy_unversioned_chainstate",
 			body:    func(_ *testing.T, _, payload []byte) []byte { return payload },
 			wantMsg: errStoreLegacyChainState.Error(),
@@ -342,8 +297,8 @@ func TestLoadChainStateRejectsIntegrityFailures(t *testing.T) {
 		},
 		storeIntegrityRow{
 			// already_generated is a SCALAR outside the UTXO set and the tip is
-			// preserved, so the payload stays parse-valid and every downstream
-			// chainstate check passes: only the stale checksum catches it.
+			// preserved, so every downstream check passes and only the stale
+			// checksum catches it.
 			name: "already_generated_edited_stale_checksum",
 			body: func(t *testing.T, valid, payload []byte) []byte {
 				t.Helper()
@@ -357,9 +312,8 @@ func TestLoadChainStateRejectsIntegrityFailures(t *testing.T) {
 			wantMsg: errStoreChecksumMismatch.Error(),
 		},
 		storeIntegrityRow{
-			// A checksum-VALID envelope over a malformed inner payload: the
-			// bytes on disk are intact, so this is a schema fault and stays
-			// OUTSIDE the STORE_INTEGRITY identity.
+			// Checksum-VALID envelope, malformed inner payload: the bytes are
+			// intact, so this is a schema fault OUTSIDE STORE_INTEGRITY.
 			name: "inner_payload_malformed",
 			body: func(t *testing.T, _, _ []byte) []byte {
 				t.Helper()
@@ -378,7 +332,6 @@ func TestLoadChainStateRejectsIntegrityFailures(t *testing.T) {
 		return err
 	}, rows)
 
-	// Positive control on the same path: the valid envelope still round-trips.
 	if err := os.WriteFile(path, valid, 0o600); err != nil {
 		t.Fatalf("restore valid envelope: %v", err)
 	}
@@ -392,8 +345,7 @@ func TestLoadChainStateRejectsIntegrityFailures(t *testing.T) {
 }
 
 // TestBlockstoreIndexRejectsIntegrityFailures: the same frame rows plus the
-// canonical-row swap, through the real OpenBlockStore path. Rust twin:
-// `blockstore_index_rejects_integrity_failures`.
+// canonical-row swap, through the real OpenBlockStore path.
 func TestBlockstoreIndexRejectsIntegrityFailures(t *testing.T) {
 	dir := t.TempDir()
 	root := BlockStorePath(dir)
@@ -442,9 +394,9 @@ func TestBlockstoreIndexRejectsIntegrityFailures(t *testing.T) {
 			wantMsg: errStoreLegacyBlockIndex.Error(),
 		},
 		storeIntegrityRow{
-			// The swapped row names a same-height sibling whose header, block
-			// and undo artifacts ALL exist, so the stored-identity and undo
-			// bindings both pass: only the envelope catches the file edit.
+			// The sibling's header/block/undo artifacts ALL exist, so the
+			// stored-identity and undo bindings pass: only the envelope catches
+			// the file edit.
 			name: "canonical_row_swapped_to_existing_sibling",
 			body: func(t *testing.T, valid, payload []byte) []byte {
 				return swapRow(t, valid, payload, false)
@@ -471,8 +423,7 @@ func TestBlockstoreIndexRejectsIntegrityFailures(t *testing.T) {
 	}, rows)
 
 	// The envelope is the ONLY guard on that swap: with the checksum
-	// recomputed over the swapped payload the store opens, which is exactly
-	// why the checksum may never be waived.
+	// recomputed the store opens, which is why it may never be waived.
 	if err := os.WriteFile(marker, swapRow(t, valid, payload, true), 0o600); err != nil {
 		t.Fatalf("plant recomputed swap: %v", err)
 	}
@@ -488,9 +439,9 @@ func TestBlockstoreIndexRejectsIntegrityFailures(t *testing.T) {
 	}
 }
 
-// storeSameHeightSibling writes a complete header/block/undo artifact set for a
-// non-canonical block at the canonical tip's height, so a swapped index row can
-// point at a block every downstream identity check accepts.
+// storeSameHeightSibling writes a complete header/block/undo set for a
+// non-canonical block at the tip's height, so a swapped row points at a block
+// every downstream identity check accepts.
 func storeSameHeightSibling(t *testing.T, store *BlockStore) [32]byte {
 	t.Helper()
 	parsed, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
@@ -517,12 +468,9 @@ func storeSameHeightSibling(t *testing.T, store *BlockStore) [32]byte {
 }
 
 // TestStartupGenesisAnchorMismatchFails pins the RUB-1134 genesis anchor: a
-// non-empty canonical index whose row 0 is not the configured genesis hash is
-// a foreign datadir and is refused BEFORE reconcile adopts the index; an EMPTY
-// canonical index skips the anchor. Startup wiring lives in
-// cmd/rubin-node/main.go, which calls this method before
-// ReconcileChainStateWithBlockStore. Rust twin:
-// `startup_genesis_anchor_mismatch_fails`.
+// non-empty index whose row 0 is not the configured genesis hash is refused
+// BEFORE reconcile adopts it; an EMPTY index skips the anchor. Startup wiring
+// (cmd/rubin-node/main.go) calls it before ReconcileChainStateWithBlockStore.
 func TestStartupGenesisAnchorMismatchFails(t *testing.T) {
 	empty := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
 	if err := empty.VerifyGenesisAnchor([32]byte{0xff}); err != nil {
@@ -535,8 +483,7 @@ func TestStartupGenesisAnchorMismatchFails(t *testing.T) {
 		t.Fatalf("a legitimate datadir must pass the anchor: %v", err)
 	}
 
-	// A coherent FOREIGN datadir: both envelopes verify and the tips agree, so
-	// only the anchor refuses it.
+	// A coherent FOREIGN datadir: only the anchor refuses it.
 	foreign := [32]byte{0xab}
 	err := store.VerifyGenesisAnchor(foreign)
 	if err == nil {
@@ -552,8 +499,7 @@ func TestStartupGenesisAnchorMismatchFails(t *testing.T) {
 		t.Fatalf("anchor failure must never satisfy fs.ErrNotExist: %v", err)
 	}
 
-	// The anchor precedes adoption: the refused store is untouched, and the
-	// reconcile that would have adopted it is never reached on the wired path.
+	// The anchor precedes adoption: the refused store is untouched.
 	snapshot, err := store.CanonicalIndexSnapshot()
 	if err != nil || len(snapshot) != 1 || snapshot[0] != hex.EncodeToString(devnetGenesisBlockHash[:]) {
 		t.Fatalf("anchor refusal mutated the canonical index: %v (%v)", snapshot, err)
@@ -564,9 +510,8 @@ func TestStartupGenesisAnchorMismatchFails(t *testing.T) {
 }
 
 // TestAbsentChainstateRebuildsByReplay: an ABSENT chainstate.json keeps the
-// NewChainState-plus-full-validated-replay repair path over an enveloped
-// index, and a corrupt one does NOT. Rust twin:
-// `absent_chainstate_rebuilds_by_replay`.
+// full-validated-replay repair path over an enveloped index; a corrupt one does
+// NOT.
 func TestAbsentChainstateRebuildsByReplay(t *testing.T) {
 	dir := t.TempDir()
 	store, live, cfg := storeAtGenesis(t, dir)
@@ -593,7 +538,6 @@ func TestAbsentChainstateRebuildsByReplay(t *testing.T) {
 		t.Fatalf("replay did not rebuild the tip: changed=%v state=%+v", changed, rebuilt)
 	}
 
-	// The absent-file fallback must NOT extend to a corrupt file.
 	if err := os.WriteFile(path, []byte("{\"version\":1}\n"), 0o600); err != nil {
 		t.Fatalf("plant legacy chainstate: %v", err)
 	}
@@ -602,11 +546,48 @@ func TestAbsentChainstateRebuildsByReplay(t *testing.T) {
 	}
 }
 
+// TestBothLegacyFilesFailClosedAtFirstStartup is the hostile "both together"
+// row: a first post-upgrade startup finds BOTH files pre-envelope. Startup opens
+// the blockstore before it loads the chainstate, so the index verdict is the one
+// an operator sees; each file is refused on its own class and neither is
+// rewritten.
+func TestBothLegacyFilesFailClosedAtFirstStartup(t *testing.T) {
+	dir := t.TempDir()
+	root := BlockStorePath(dir)
+	mustCreateBlockStore(t, root)
+	indexPath, chainStatePath := filepath.Join(root, "index.json"), ChainStatePath(dir)
+	// Exactly the pre-envelope encodings the two writers now wrap as payloads.
+	legacy := map[string][]byte{
+		indexPath:      []byte("{\n  \"canonical\": [],\n  \"version\": 1\n}\n"),
+		chainStatePath: []byte("{\n  \"version\": 1,\n  \"utxos\": []\n}\n"),
+	}
+	for _, path := range []string{indexPath, chainStatePath} {
+		if err := os.WriteFile(path, legacy[path], 0o600); err != nil {
+			t.Fatalf("plant legacy %s: %v", path, err)
+		}
+	}
+
+	if _, err := OpenBlockStore(root); err == nil || err.Error() != errStoreLegacyBlockIndex.Error() {
+		t.Fatalf("legacy index = %v, want %v", err, errStoreLegacyBlockIndex)
+	}
+	if _, err := LoadChainState(chainStatePath); err == nil || err.Error() != errStoreLegacyChainState.Error() {
+		t.Fatalf("legacy chainstate = %v, want %v", err, errStoreLegacyChainState)
+	}
+	for _, path := range []string{indexPath, chainStatePath} {
+		raw, err := os.ReadFile(path) // #nosec G304 -- test-owned temp path
+		if err != nil {
+			t.Fatalf("re-read %s: %v", path, err)
+		}
+		if !bytes.Equal(raw, legacy[path]) {
+			t.Fatalf("%s was rewritten by a refused load", path)
+		}
+	}
+}
+
 // TestReconcileCrashRecoveryOverEnvelopedFiles re-proves every baseline
 // crash-recovery reconcile scenario over enveloped files: a crash at each
-// atomic-write boundary (scratch open/write, rename, parent sync) for each of
-// the two files, in BOTH write orders, then reopen from disk and reconcile.
-// Rust twin: `reconcile_crash_recovery_over_enveloped_files`.
+// atomic-write boundary (scratch open/write, rename, parent sync) for each file,
+// in BOTH write orders, then reopen from disk and reconcile.
 func TestReconcileCrashRecoveryOverEnvelopedFiles(t *testing.T) {
 	for _, boundary := range []string{"scratch_open", "scratch_write", "rename", "parent_sync"} {
 		for _, order := range []string{"index_first", "chainstate_first"} {
@@ -621,8 +602,7 @@ func TestReconcileCrashRecoveryOverEnvelopedFiles(t *testing.T) {
 
 				crashed := crashAtBoundary(t, boundary, order, store, live, chainStatePath)
 
-				// Whatever the crash left on disk, the reopened datadir must be
-				// envelope-clean and reconcile back to the canonical tip.
+				// The reopened datadir must reconcile back to the canonical tip.
 				reopened := mustOpenBlockStore(t, BlockStorePath(dir))
 				state, err := LoadChainState(chainStatePath)
 				if err != nil {
@@ -667,9 +647,8 @@ func appendCanonicalBlock(t *testing.T, store *BlockStore, live *ChainState, cfg
 	return summary.BlockHash
 }
 
-// crashAtBoundary injects one failure at one atomic-write boundary while the
-// two files are written in the given order, scoped to the file the row names,
-// and reports whether the injected write actually failed.
+// crashAtBoundary injects one failure at one atomic-write boundary while the two
+// files are written in the given order, and reports whether it actually failed.
 func crashAtBoundary(t *testing.T, boundary, order string, store *BlockStore, live *ChainState, chainStatePath string) bool {
 	t.Helper()
 	victim := store.indexPath

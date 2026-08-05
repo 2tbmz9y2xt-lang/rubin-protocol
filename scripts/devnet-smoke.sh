@@ -102,9 +102,8 @@ want_height = int(sys.argv[2])
 path = datadir / "chainstate.json"
 if not path.exists():
     raise SystemExit(1)
-# RUB-1134: chainstate.json is the store_envelope_v1 frame; the inner payload
-# encoding is unchanged. The node verifies the domain-tagged checksum on load,
-# so this reader only unwraps the v1 payload.
+# RUB-1134: unwrap the store_envelope_v1 frame (the node verifies the
+# domain-tagged checksum on load); the inner payload encoding is unchanged.
 envelope = json.loads(path.read_text())
 if envelope.get("version") != 1:
     raise SystemExit(1)

@@ -64,9 +64,8 @@ func TestChainStateSaveLoadRoundTripDeterministic(t *testing.T) {
 		t.Fatalf("chainstate encoding is not deterministic")
 	}
 
-	// RUB-1134: the saved file is the store_envelope_v1 frame; the INNER
-	// chainStateDisk encoding this test pins is unchanged, so the payload is
-	// opened first and everything below still asserts the inner bytes.
+	// RUB-1134: the saved file is the frame; the INNER chainStateDisk encoding
+	// this test pins is unchanged, so the payload is opened first.
 	firstPayload, err := openStoreEnvelope(storeEnvelopeChainState, firstBytes)
 	if err != nil {
 		t.Fatalf("open chainstate envelope: %v", err)

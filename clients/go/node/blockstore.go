@@ -567,9 +567,9 @@ func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
 // loadBlockStoreIndex reads the sole initialization marker. A missing marker is
 // an error, never an implicit empty index (the RUB-1052/1053 strict-open
 // rejection, unchanged by the envelope). Every present marker must clear the
-// strict store_envelope_v1 (layout, canonical base64, domain-tagged checksum)
-// BEFORE the inner index decode runs; envelope failures carry the
-// ErrStoreIntegrity identity unwrapped so the pinned messages reach callers.
+// strict store_envelope_v1 BEFORE the inner index decode runs; envelope
+// failures carry the ErrStoreIntegrity identity unwrapped, so the pinned
+// messages reach callers.
 func loadBlockStoreIndex(path string) (blockStoreIndexDisk, error) {
 	raw, err := readFileByPath(path)
 	if err != nil {
@@ -686,9 +686,8 @@ func saveBlockStoreIndex(path string, index blockStoreIndexDisk) error {
 		return err
 	}
 	payload = append(payload, '\n')
-	// The pre-envelope on-disk bytes become the exact envelope payload: the
-	// inner index encoding is unchanged, only the frame is new. The existing
-	// atomic write path (temp, sync, rename, parent-sync) is unchanged.
+	// The pre-envelope on-disk bytes become the exact envelope payload; the
+	// inner encoding and the atomic write path are unchanged.
 	raw, err := marshalStoreEnvelope(storeEnvelopeBlockIndex, payload)
 	if err != nil {
 		return err
@@ -696,16 +695,13 @@ func saveBlockStoreIndex(path string, index blockStoreIndexDisk) error {
 	return writeFileAtomicFn(path, raw, 0o600)
 }
 
-// VerifyGenesisAnchor enforces the RUB-1134 genesis anchor: whenever the
-// loaded canonical index is non-empty, row 0 must equal the configured
-// genesis hash for the active network. An empty canonical index skips the
-// anchor (a fresh store has no rows to anchor). Failure is the distinct
-// fail-closed foreign-datadir class, not an envelope-integrity failure, and
-// satisfies errors.Is(err, ErrStoreIntegrity).
-//
-// Startup wiring (cmd/rubin-node/main.go) calls this BEFORE
-// ReconcileChainStateWithBlockStore, so no replay, truncate, or reconcile
-// adoption ever consumes an index whose row 0 names a foreign chain.
+// VerifyGenesisAnchor enforces the RUB-1134 genesis anchor: a non-empty
+// canonical index must carry the configured genesis hash at row 0, while an
+// empty index skips the anchor. Failure is the distinct fail-closed
+// foreign-datadir class, not an envelope-integrity failure, and satisfies
+// errors.Is(err, ErrStoreIntegrity). Startup wiring (cmd/rubin-node/main.go)
+// calls this BEFORE ReconcileChainStateWithBlockStore, so no replay, truncate
+// or reconcile adoption ever consumes a foreign index.
 func (bs *BlockStore) VerifyGenesisAnchor(genesisHash [32]byte) error {
 	if bs == nil {
 		return errors.New("nil blockstore")

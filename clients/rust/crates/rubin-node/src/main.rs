@@ -371,20 +371,23 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     if !cfg.dry_run {
         // RUB-1134 genesis anchor: a non-empty canonical index whose row 0 is
         // not the configured genesis hash is a foreign datadir. Checked BEFORE
-        // the reconcile so no replay, truncate, or reconcile adoption ever
-        // consumes a foreign index; an empty index skips the anchor. `--dry-run`
-        // adopts nothing and stays a read-only report, so the anchor is enforced
-        // only on this mutating path — the same placement as the Go twin in
-        // `clients/go/cmd/rubin-node/main.go`. A genesis file that carries no
-        // genesis hash for a custom chain_id leaves nothing to anchor AGAINST;
-        // that configuration is refused later by `runtime_genesis_hash` before
-        // any service starts, and Go cannot reach it at all (its genesis parse
-        // requires the hash).
-        if let Some(genesis_hash) = genesis_cfg.genesis_hash {
-            if let Err(err) = block_store.verify_genesis_anchor(genesis_hash) {
-                let _ = writeln!(stderr, "canonical index genesis anchor failed: {err}");
+        // the reconcile so no replay, truncate or adoption consumes a foreign
+        // index; an empty index skips it. `--dry-run` adopts nothing, so the
+        // anchor is enforced only on this mutating path, as in the Go twin.
+        // A genesis file carrying no hash leaves nothing to anchor AGAINST, so
+        // the `runtime_genesis_hash` refusal is hoisted here from its later
+        // call site: it must precede the reconcile, which rewrites the snapshot
+        // and can truncate the index. Go refuses that config even earlier.
+        let genesis_hash = match runtime_genesis_hash(&genesis_cfg) {
+            Ok(hash) => hash,
+            Err(err) => {
+                let _ = writeln!(stderr, "{err}");
                 return 2;
             }
+        };
+        if let Err(err) = block_store.verify_genesis_anchor(genesis_hash) {
+            let _ = writeln!(stderr, "canonical index genesis anchor failed: {err}");
+            return 2;
         }
         if let Err(err) =
             reconcile_chain_state_with_block_store(&mut chain_state, &mut block_store, &sync_cfg)
@@ -2424,6 +2427,57 @@ mod tests {
         let err = runtime_genesis_hash(&genesis_cfg).unwrap_err();
         assert!(err.contains("genesis_hash_hex"), "unexpected error: {err}");
 
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// RUB-1134: a custom chain_id with no genesis hash leaves the anchor
+    /// nothing to check, so the mutating path refuses it AT the anchor site,
+    /// before `reconcile_chain_state_with_block_store` adopts the index and
+    /// rewrites the snapshot. Pinned by the refusal being the genesis-hash one
+    /// (a reconcile verdict means the decision moved after adoption) plus both
+    /// files byte-unchanged.
+    #[test]
+    fn hashless_genesis_refuses_before_reconcile_adopts_the_index() {
+        let dir = unique_temp_dir("rubin-node-bin-anchor-hashless");
+        let d = dir.display().to_string();
+        let mine = [
+            "--datadir",
+            &d,
+            "--create-store",
+            "--mine-blocks",
+            "1",
+            "--mine-exit",
+        ];
+        let (code, err) = cli(&mine);
+        assert_eq!(code, 0, "{err}");
+        let chain_state_file = chain_state_path(&dir);
+        rubin_node::ChainState::new()
+            .save(&chain_state_file)
+            .expect("reset chainstate to the encoded empty state");
+        let index_file = block_store_path(&dir).join("index.json");
+        let before = (
+            fs::read(&chain_state_file).expect("stale chainstate"),
+            fs::read(&index_file).expect("canonical index"),
+        );
+
+        let genesis_file = dir.join("genesis.json");
+        fs::write(
+            &genesis_file,
+            "{\"chain_id_hex\":\"0x1111111111111111111111111111111111111111111111111111111111111111\"}",
+        )
+        .expect("write genesis");
+        let g = genesis_file.display().to_string();
+        let (code, err) = cli(&["--datadir", &d, "--genesis-file", &g]);
+        assert_eq!(code, 2, "{err}");
+        assert!(
+            err.contains("genesis_hash_hex"),
+            "unexpected refusal: {err}"
+        );
+        let after = (
+            fs::read(&chain_state_file).expect("re-read chainstate"),
+            fs::read(&index_file).expect("re-read index"),
+        );
+        assert_eq!(after, before, "the refusal must precede reconcile");
         fs::remove_dir_all(&dir).expect("cleanup");
     }
 

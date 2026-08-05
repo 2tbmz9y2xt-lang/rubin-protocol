@@ -120,10 +120,8 @@ impl ChainState {
             )
         })?;
         payload.push(b'\n');
-        // RUB-1134: the pre-envelope on-disk bytes become the exact envelope
-        // payload — the inner `ChainStateDisk` encoding is unchanged, only the
-        // frame is new — and the existing atomic write path (temp, sync,
-        // rename, parent-sync) below is untouched.
+        // RUB-1134: the pre-envelope bytes become the exact envelope payload;
+        // the inner encoding and the atomic write path below are unchanged.
         let raw =
             marshal_store_envelope(STORE_ENVELOPE_CHAIN_STATE, &payload).map_err(|error| {
                 atomic_write_error_before(path, AtomicWriteOperation::Overwrite, error)
@@ -368,11 +366,9 @@ pub fn load_chain_state<P: AsRef<Path>>(path: P) -> Result<ChainState, String> {
     };
     // RUB-1134: an ABSENT file keeps the `ChainState::new()`-plus-full-replay
     // repair path above; every PRESENT file must clear the strict envelope
-    // (layout, canonical base64, domain-tagged checksum) BEFORE the inner
-    // `ChainStateDisk` decode runs. The STORE_INTEGRITY message is returned
-    // verbatim (Go returns the same string), and it is a different arm from
-    // the NotFound branch, so a corrupt file can never ride the absent-file
-    // fallback.
+    // BEFORE the inner `ChainStateDisk` decode runs. This is a different arm
+    // from the NotFound branch, so a corrupt file can never ride the
+    // absent-file fallback; the STORE_INTEGRITY message is Go's verbatim.
     let payload = open_store_envelope(STORE_ENVELOPE_CHAIN_STATE, &raw)?;
     let disk: ChainStateDisk = serde_json::from_slice(&payload)
         .map_err(|e| format!("parse chainstate {}: {e}", path.display()))?;
@@ -846,9 +842,8 @@ mod tests {
     }
 
     /// Every malformed, legacy, checksum-mismatched or parse-valid-but-edited
-    /// `chainstate.json` fails BEFORE the inner decode, with the pinned
-    /// identity, and never rides the absent-file fallback. Go twin:
-    /// `TestLoadChainStateRejectsIntegrityFailures`.
+    /// `chainstate.json` fails BEFORE the inner decode with the pinned identity
+    /// and never rides the absent-file fallback.
     #[test]
     fn load_chainstate_rejects_integrity_failures() {
         use crate::store_envelope::tests::{
@@ -873,8 +868,6 @@ mod tests {
 
         let mut rows = shared_reject_rows();
         rows.push(StoreIntegrityRow {
-            // The whole pre-envelope file, byte for byte: what a first
-            // post-upgrade startup finds on disk.
             name: "legacy_unversioned_chainstate",
             body: Box::new(|_, payload| payload.to_vec()),
             want_msg: Some(STORE_LEGACY_CHAINSTATE_ERR),
@@ -894,9 +887,8 @@ mod tests {
         });
         rows.push(StoreIntegrityRow {
             // `already_generated` is a SCALAR outside the UTXO set and the tip
-            // is preserved, so the payload stays parse-valid and every
-            // downstream chainstate check passes: only the stale checksum
-            // catches it.
+            // is preserved, so every downstream check passes and only the
+            // stale checksum catches it.
             name: "already_generated_edited_stale_checksum",
             body: Box::new(|valid, payload| {
                 let edited = String::from_utf8_lossy(payload).replacen(
@@ -912,9 +904,7 @@ mod tests {
             not_integrity: false,
         });
         rows.push(StoreIntegrityRow {
-            // A checksum-VALID envelope over a malformed inner payload: the
-            // bytes on disk are intact, so this is a schema fault and stays
-            // OUTSIDE the STORE_INTEGRITY identity.
+            // Checksum-VALID envelope, malformed payload: a schema fault.
             name: "inner_payload_malformed",
             body: Box::new(|_, _| rewrap(STORE_ENVELOPE_CHAIN_STATE, b"{not json")),
             want_msg: None,
@@ -930,15 +920,13 @@ mod tests {
             &rows,
         );
 
-        // Positive control on the same path: the valid envelope round-trips.
         std::fs::write(&path, &valid).expect("restore valid envelope");
         let loaded = load_chain_state(&path).expect("valid envelope must load");
         assert_eq!(
             (loaded.has_tip, loaded.height, loaded.already_generated),
             (true, 9, 4_200)
         );
-        // An ABSENT file keeps the fresh-state repair path; a corrupt one does
-        // not, so no STORE_INTEGRITY failure can ride the absent-file fallback.
+        // An ABSENT file keeps the fresh-state repair path; a corrupt one cannot.
         std::fs::remove_file(&path).expect("remove chainstate");
         assert_eq!(
             load_chain_state(&path).expect("absent chainstate"),
@@ -963,9 +951,8 @@ mod tests {
         };
         let mut payload = serde_json::to_vec_pretty(&bad).expect("json");
         payload.push(b'\n');
-        // RUB-1134: planted INSIDE a valid store_envelope_v1 frame, so this row
-        // still tests the INNER version check rather than being absorbed by the
-        // envelope's legacy verdict.
+        // RUB-1134: planted INSIDE a valid frame, so this row still tests the
+        // INNER version check rather than the envelope's legacy verdict.
         std::fs::write(
             &path,
             crate::store_envelope::tests::rewrap(STORE_ENVELOPE_CHAIN_STATE, &payload),

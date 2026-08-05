@@ -552,12 +552,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if !*dryRun {
 		// RUB-1134 genesis anchor: a non-empty canonical index whose row 0 is
 		// not the configured genesis hash is a foreign datadir. Checked BEFORE
-		// the reconcile so no replay, truncate, or reconcile adoption ever
-		// consumes a foreign index; an empty index skips the anchor. --dry-run
-		// adopts nothing and stays a read-only report, so the anchor is
-		// enforced only on this mutating path. Rust mirror in
-		// clients/rust/crates/rubin-node/src/main.rs uses the same stderr
-		// frame and exit code.
+		// the reconcile so no replay, truncate or adoption consumes a foreign
+		// index; an empty index skips it. --dry-run adopts nothing, so the
+		// anchor is enforced only on this mutating path, as in the Rust mirror.
 		if err := blockStore.VerifyGenesisAnchor(genesisHashFromGenesis); err != nil {
 			_, _ = fmt.Fprintf(stderr, "canonical index genesis anchor failed: %v\n", err)
 			return 2
