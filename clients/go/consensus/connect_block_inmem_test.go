@@ -304,11 +304,15 @@ func TestConnectBlockBasicInMemoryAtHeight_RejectsSubsidyExceeded(t *testing.T) 
 
 // TestConnectBlockInMemory_SumFeesBindsAnIndividualFeeAboveU64 pins an
 // INDIVIDUAL transaction fee whose high u128 limb is non-zero flowing into
-// sum_fees. CV-SUB-U128-01 and every other shared vector cross u64 only in
-// the ACCUMULATOR (two txs of fee 2^63, each Hi=0), so narrowing the addend
-// at the accumulation site stays invisible to all of them and to every other
-// unit test. The coinbase claims only the subsidy, so the >u64 value is
-// bound purely by the fee path.
+// sum_fees, on BOTH accumulation sites: the sequential one in
+// connect_block_inmem.go and the queued-parallel one in
+// connect_block_parallel.go, which is fed by the separate
+// applyNonCoinbaseTxBasicWorkQ apply implementation. CV-SUB-U128-01 and every
+// other shared vector cross u64 only in the ACCUMULATOR (two txs of fee 2^63,
+// each Hi=0), so narrowing the addend at either accumulation site stays
+// invisible to all of them and to every other unit test. The coinbase claims
+// only the subsidy, so the >u64 value is bound purely by the fee path.
+// Mirrors Rust `connect_block_sum_fees_binds_an_individual_fee_above_u64`.
 func TestConnectBlockInMemory_SumFeesBindsAnIndividualFeeAboveU64(t *testing.T) {
 	height := uint64(1)
 	prev := hashWithPrefix(0x91)
@@ -339,15 +343,19 @@ func TestConnectBlockInMemory_SumFeesBindsAnIndividualFeeAboveU64(t *testing.T) 
 	utxo := func(v uint64) UtxoEntry {
 		return UtxoEntry{Value: v, CovenantType: COV_TYPE_P2PK, CovenantData: covData}
 	}
-	state := &InMemoryChainState{
-		Utxos: map[Outpoint]UtxoEntry{
-			{Txid: prev, Vout: 0}: utxo(half),
-			{Txid: prev, Vout: 1}: utxo(half + 1),
-		},
-		AlreadyGenerated: new(big.Int),
+	// Each connect path mutates the state it is handed, so build a fresh one
+	// per path.
+	newState := func() *InMemoryChainState {
+		return &InMemoryChainState{
+			Utxos: map[Outpoint]UtxoEntry{
+				{Txid: prev, Vout: 0}: utxo(half),
+				{Txid: prev, Vout: 1}: utxo(half + 1),
+			},
+			AlreadyGenerated: new(big.Int),
+		}
 	}
 
-	subsidy := BlockSubsidyBig(height, state.AlreadyGenerated)
+	subsidy := BlockSubsidyBig(height, new(big.Int))
 	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, subsidy, spendBytes)
 	cbTxid := testTxID(t, coinbase)
 	root, err := MerkleRootTxids([][32]byte{cbTxid, spendTxid})
@@ -356,15 +364,29 @@ func TestConnectBlockInMemory_SumFeesBindsAnIndividualFeeAboveU64(t *testing.T) 
 	}
 	block := buildBlockBytes(t, prev, root, target, 1, [][]byte{coinbase, spendBytes})
 
-	s, err := ConnectBlockBasicInMemoryAtHeight(block, &prev, &target, height, []uint64{0}, state, [32]byte{})
+	want := Uint128{Hi: 1, Lo: 0} // exactly 2^64
+
+	// Site 1: sequential accumulation.
+	seq, err := ConnectBlockBasicInMemoryAtHeight(block, &prev, &target, height, []uint64{0}, newState(), [32]byte{})
 	if err != nil {
 		t.Fatalf("ConnectBlockBasicInMemoryAtHeight: %v", err)
 	}
-	want := Uint128{Hi: 1, Lo: 0} // exactly 2^64
-	if s.SumFees.Cmp(want) != 0 {
-		t.Fatalf("sum_fees=%s, want %s", s.SumFees.String(), want.String())
+	if seq.SumFees.Cmp(want) != 0 {
+		t.Fatalf("sequential sum_fees=%s, want %s", seq.SumFees.String(), want.String())
 	}
-	if s.SumFees.Hi == 0 {
-		t.Fatalf("sum_fees=%s must carry a non-zero high limb", s.SumFees.String())
+	if seq.SumFees.Hi == 0 {
+		t.Fatalf("sum_fees=%s must carry a non-zero high limb", seq.SumFees.String())
+	}
+
+	// Site 2: queued-parallel accumulation.
+	par, err := ConnectBlockParallelSigVerify(block, &prev, &target, height, []uint64{0}, newState(), [32]byte{}, 4)
+	if err != nil {
+		t.Fatalf("ConnectBlockParallelSigVerify: %v", err)
+	}
+	if par.SumFees.Cmp(want) != 0 {
+		t.Fatalf("queued-parallel sum_fees=%s, want %s", par.SumFees.String(), want.String())
+	}
+	if seq.SumFees.Cmp(par.SumFees) != 0 {
+		t.Fatalf("sequential/parallel divergence: %s vs %s", seq.SumFees.String(), par.SumFees.String())
 	}
 }
