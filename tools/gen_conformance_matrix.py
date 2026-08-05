@@ -27,6 +27,7 @@ EXPECTED_PROTOCOL_ARTIFACTS = frozenset(
         "simplicity_exec_corpus_v1.json",
         "simplicity_jets_registry_corpus_v1.json",
         "simplicity_program_encoding_corpus_v1.json",
+        "undo_integrity_v1.json",
     }
 )
 EXPECTED_GATES = frozenset(
@@ -141,6 +142,10 @@ PROTOCOL_ARTIFACT_META: dict[str, tuple[str, str]] = {
     "simplicity_jets_registry_corpus_v1.json": (
         "Canonical Simplicity jets registry parity corpus",
         "Go/Rust Simplicity jets_registry_hash and disallowed-id rejection tests",
+    ),
+    "undo_integrity_v1.json": (
+        "Shared undo_envelope_v1 block-bound undo record vector",
+        "Go/Rust envelope byte, base64, and SHA3-256 checksum parity tests for persisted block undo records",
     ),
 }
 

@@ -3,9 +3,11 @@ use std::collections::HashSet;
 use rubin_consensus::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
 use rubin_consensus::{block_hash, parse_block_bytes, Outpoint, UtxoEntry};
 use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
 
+use crate::blockstore::valid_canonical_hash_hex;
 use crate::chainstate::ChainState;
-use crate::io_utils::parse_hex32;
+use crate::io_utils::{parse_hex32, UNDO_FILE_MAX_BYTES};
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -274,17 +276,30 @@ struct SpentUndoDisk {
     created_by_coinbase: bool,
 }
 
+/// Canonical undo PAYLOAD: compact JSON in `BlockUndoDisk` field order with no
+/// trailing whitespace or newline. This is NOT the on-disk record —
+/// `undo_envelope_v1` wraps these bytes and binds them to a block hash
+/// (`marshal_undo_envelope`). Go twin: `marshalBlockUndo`.
 pub fn marshal_block_undo(undo: &BlockUndo) -> Result<Vec<u8>, String> {
     let disk = block_undo_to_disk(undo);
-    let mut raw = serde_json::to_vec_pretty(&disk).map_err(|e| format!("encode undo: {e}"))?;
-    raw.push(b'\n');
-    Ok(raw)
+    serde_json::to_vec(&disk).map_err(|e| format!("encode undo: {e}"))
 }
 
+/// Strictly decode a canonical payload. Strictness is one rule rather than a
+/// field-by-field walk: decode, convert, re-encode, and require byte equality
+/// with the input. `serde` already rejects unknown, duplicate, missing and
+/// trailing tokens; the comparison additionally pins field order, insignificant
+/// whitespace and lowercase hex, so the Go twin — whose decoder is far more
+/// permissive on its own — accepts exactly the same byte strings.
+/// Go twin: `unmarshalBlockUndo`.
 pub fn unmarshal_block_undo(raw: &[u8]) -> Result<BlockUndo, String> {
     let disk: BlockUndoDisk =
         serde_json::from_slice(raw).map_err(|e| format!("decode undo: {e}"))?;
-    block_undo_from_disk(disk)
+    let undo = block_undo_from_disk(disk)?;
+    if marshal_block_undo(&undo)? != raw {
+        return Err("decode undo: payload is not the canonical encoding".into());
+    }
+    Ok(undo)
 }
 
 fn block_undo_to_disk(undo: &BlockUndo) -> BlockUndoDisk {
@@ -346,11 +361,440 @@ fn block_undo_from_disk(disk: BlockUndoDisk) -> Result<BlockUndo, String> {
 }
 
 // ---------------------------------------------------------------------------
+// undo_envelope_v1 (RUB-1132)
+//
+// The stored undo record is one compact JSON object binding the canonical
+// payload bytes to the block hash they were built for:
+//
+//   {"version":1,"block_hash":"<64hex>","payload_b64":"<b64>","checksum":"<64hex>"}\n
+//
+// checksum = SHA3-256("RUBIN_BLOCK_UNDO_V1" || block_hash[32] ||
+// uint64_be(payload.len()) || payload). The length term makes the preimage
+// injective, so no two (hash, payload) pairs share a digest by concatenation.
+// The trailing LF counts against the read bound but is NOT in the preimage.
+//
+// Go twin: the same section in clients/go/node/undo.go. Both clients must emit
+// byte-identical envelopes; conformance/fixtures/protocol/undo_integrity_v1.json
+// pins the bytes.
+//
+// Claim boundary: this detects accidental, torn, misnamed and parse-valid local
+// corruption before an undo is used. It is NOT authentication — a local actor
+// able to rewrite the payload can recompute the checksum. There is no secret
+// here and none is claimed.
+// ---------------------------------------------------------------------------
+
+/// Stable cross-client prefix of every `undo_envelope_v1` rejection. Go's
+/// `ErrUndoIntegrity` carries the same identity through `errors.Is`; here the
+/// error channel is `String`, so the prefix IS the identity and `get_undo`
+/// returns these messages verbatim.
+pub const UNDO_INTEGRITY_PREFIX: &str = "UNDO_INTEGRITY";
+
+/// Pinned cross-client messages. Go returns these same strings. Deliberately no
+/// repair command: this build ships no `--reindex`.
+pub const UNDO_LEGACY_ERR: &str =
+    "UNDO_INTEGRITY: legacy/unversioned undo; pre-devnet datadir reset and full resync required";
+pub const UNDO_BLOCK_HASH_MISMATCH_ERR: &str = "UNDO_INTEGRITY: block hash mismatch";
+pub const UNDO_CHECKSUM_MISMATCH_ERR: &str = "UNDO_INTEGRITY: checksum mismatch";
+
+const UNDO_ENVELOPE_VERSION: u32 = 1;
+const UNDO_ENVELOPE_DOMAIN: &[u8] = b"RUBIN_BLOCK_UNDO_V1";
+
+/// The envelope minus the base64 body: the four keys, the punctuation, the two
+/// 64-char hashes and the trailing LF. Pinned by `undo_envelope_frame_overhead`.
+const UNDO_ENVELOPE_FRAME_BYTES: u64 = 189;
+
+/// OUTER read bound, derived mechanically from the payload bound: base64
+/// expands n bytes to ceil(n/3)*4, plus the fixed frame. The decoded payload is
+/// separately re-checked against `UNDO_FILE_MAX_BYTES` before conversion, so the
+/// envelope bound never widens what a `BlockUndo` may hold.
+///
+/// This constant is ~2.67e9 and therefore EXCEEDS 2^31. It is `u64`, and every
+/// comparison widens the `usize` side (`x.len() as u64`) rather than narrowing
+/// the bound, so a 32-bit build refuses exactly what a 64-bit build refuses.
+pub(crate) const UNDO_ENVELOPE_FILE_MAX_BYTES: u64 =
+    UNDO_FILE_MAX_BYTES.div_ceil(3) * 4 + UNDO_ENVELOPE_FRAME_BYTES;
+
+/// Exact stored shape. Field ORDER is part of the format: `serde` emits struct
+/// fields in declaration order and `encoding/json` does the same, which is what
+/// makes the two clients' bytes identical.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UndoEnvelopeDisk {
+    version: u32,
+    block_hash: String,
+    payload_b64: String,
+    checksum: String,
+}
+
+fn undo_envelope_checksum(block_hash: [u8; 32], payload: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha3_256::new();
+    hasher.update(UNDO_ENVELOPE_DOMAIN);
+    hasher.update(block_hash);
+    hasher.update((payload.len() as u64).to_be_bytes());
+    hasher.update(payload);
+    hasher.finalize().into()
+}
+
+pub fn marshal_undo_envelope(block_hash: [u8; 32], undo: &BlockUndo) -> Result<Vec<u8>, String> {
+    let payload = marshal_block_undo(undo)?;
+    let envelope = UndoEnvelopeDisk {
+        version: UNDO_ENVELOPE_VERSION,
+        block_hash: hex::encode(block_hash),
+        payload_b64: base64_encode(&payload),
+        checksum: hex::encode(undo_envelope_checksum(block_hash, &payload)),
+    };
+    let mut raw =
+        serde_json::to_vec(&envelope).map_err(|e| format!("encode undo envelope: {e}"))?;
+    raw.push(b'\n');
+    Ok(raw)
+}
+
+/// Runs the fixed validation order: shape, version, hash equality against the
+/// hash the CALLER asked for, canonical base64, decoded payload bound,
+/// checksum — and only then the payload decode and `BlockUndo` conversion.
+/// Every step before the checksum is cheap and side-effect free, so a corrupt
+/// record costs one hash at most and never reaches a converted undo.
+pub fn unmarshal_undo_envelope(block_hash: [u8; 32], raw: &[u8]) -> Result<BlockUndo, String> {
+    // Presence probe BEFORE the typed decode: an unversioned legacy record must
+    // be recognised by the ABSENCE of "version", or serde's "missing field"
+    // error would shadow the pinned legacy message. The probe also rejects a
+    // non-object and any trailing JSON value.
+    let probe: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(raw)
+        .map_err(|_| format!("{UNDO_INTEGRITY_PREFIX}: undo record is not a single JSON object"))?;
+    if !probe.contains_key("version") {
+        return Err(UNDO_LEGACY_ERR.to_string());
+    }
+    // Typed pass: `deny_unknown_fields` plus serde's own duplicate-field and
+    // missing-field errors cover the rest of step 2.
+    let envelope: UndoEnvelopeDisk = serde_json::from_slice(raw)
+        .map_err(|e| format!("{UNDO_INTEGRITY_PREFIX}: malformed undo envelope: {e}"))?;
+    // Same canonical-form rule as the payload, and it is load-bearing for
+    // PARITY, not just strictness: Go's encoding/json treats a JSON null as
+    // "leave the field at its zero value", so the twin needs this comparison to
+    // reject what serde rejects at decode time. Re-encoding pins field order,
+    // insignificant whitespace and the single trailing LF in one step, so both
+    // clients accept exactly the same byte strings.
+    let mut canonical =
+        serde_json::to_vec(&envelope).map_err(|e| format!("encode undo envelope: {e}"))?;
+    canonical.push(b'\n');
+    if canonical != raw {
+        return Err(format!(
+            "{UNDO_INTEGRITY_PREFIX}: envelope is not the canonical encoding"
+        ));
+    }
+    if envelope.version != UNDO_ENVELOPE_VERSION {
+        return Err(format!(
+            "{UNDO_INTEGRITY_PREFIX}: unsupported undo envelope version {}",
+            envelope.version
+        ));
+    }
+    if !valid_canonical_hash_hex(&envelope.block_hash)
+        || !valid_canonical_hash_hex(&envelope.checksum)
+    {
+        return Err(format!(
+            "{UNDO_INTEGRITY_PREFIX}: block_hash and checksum must be 64 lowercase hex characters"
+        ));
+    }
+    if envelope.block_hash != hex::encode(block_hash) {
+        return Err(UNDO_BLOCK_HASH_MISMATCH_ERR.to_string());
+    }
+    let payload = base64_decode_canonical(&envelope.payload_b64)?;
+    if payload.len() as u64 > UNDO_FILE_MAX_BYTES {
+        return Err(format!(
+            "{UNDO_INTEGRITY_PREFIX}: decoded payload is {} bytes, class bound {UNDO_FILE_MAX_BYTES}",
+            payload.len()
+        ));
+    }
+    // `valid_canonical_hash_hex` already proved this decodes to 32 bytes.
+    let stored = parse_hex32("undo envelope checksum", &envelope.checksum)
+        .map_err(|_| format!("{UNDO_INTEGRITY_PREFIX}: checksum is not hexadecimal"))?;
+    if !constant_time_eq32(&stored, &undo_envelope_checksum(block_hash, &payload)) {
+        return Err(UNDO_CHECKSUM_MISMATCH_ERR.to_string());
+    }
+    unmarshal_block_undo(&payload)
+}
+
+/// Data-independent comparison of the stored and computed digests. No `subtle`
+/// crate is available and this contract forbids adding one, so the fold is
+/// written out; both inputs are fixed-size arrays, so no length term leaks.
+fn constant_time_eq32(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Canonical padded RFC 4648 base64. Hand-written because `base64` is not a
+/// dependency of this crate and this contract forbids adding one; the Go twin
+/// uses `encoding/base64`.
+pub(crate) fn base64_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(3).saturating_mul(4));
+    for chunk in input.chunks(3) {
+        // `chunks(3)` never yields an empty slice, so index 0 is present; the
+        // other two are optional and pad to zero.
+        let packed = (u32::from(chunk[0]) << 16)
+            | (u32::from(chunk.get(1).copied().unwrap_or(0)) << 8)
+            | u32::from(chunk.get(2).copied().unwrap_or(0));
+        for (position, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            if position > chunk.len() {
+                out.push('=');
+                continue;
+            }
+            let symbol_index = ((packed >> shift) & 0x3f) as usize;
+            // 6 bits index a 64-entry table, so this cannot be out of range.
+            out.push(char::from(BASE64_ALPHABET[symbol_index]));
+        }
+    }
+    out
+}
+
+fn base64_symbol_value(symbol: u8) -> Option<u32> {
+    let value = match symbol {
+        b'A'..=b'Z' => u32::from(symbol - b'A'),
+        b'a'..=b'z' => u32::from(symbol - b'a') + 26,
+        b'0'..=b'9' => u32::from(symbol - b'0') + 52,
+        b'+' => 62,
+        b'/' => 63,
+        _ => return None,
+    };
+    Some(value)
+}
+
+/// Accepts only the one padded RFC 4648 spelling of the payload. The decoder
+/// deliberately does not police padding bits itself — the re-encode comparison
+/// at the end is what makes the encoding canonical, and it also rejects
+/// embedded whitespace (reachable here as JSON escapes) that a permissive
+/// decoder would skip. Go twin: `decodeCanonicalBase64`.
+fn base64_decode_canonical(value: &str) -> Result<Vec<u8>, String> {
+    let not_canonical =
+        || format!("{UNDO_INTEGRITY_PREFIX}: payload_b64 is not canonical padded base64");
+    let symbols = value.as_bytes();
+    if !symbols.len().is_multiple_of(4) {
+        return Err(not_canonical());
+    }
+    let quads = symbols.len() / 4;
+    let mut out = Vec::with_capacity(quads.saturating_mul(3));
+    for (index, quad) in symbols.chunks_exact(4).enumerate() {
+        let pad = if index + 1 != quads {
+            0
+        } else if quad[3] == b'=' {
+            if quad[2] == b'=' {
+                2
+            } else {
+                1
+            }
+        } else {
+            0
+        };
+        let mut packed = 0u32;
+        for symbol in &quad[..4 - pad] {
+            packed = (packed << 6) | base64_symbol_value(*symbol).ok_or_else(not_canonical)?;
+        }
+        packed <<= 6 * pad;
+        out.push((packed >> 16) as u8);
+        if pad < 2 {
+            out.push((packed >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(packed as u8);
+        }
+    }
+    if base64_encode(&out) != value {
+        return Err(not_canonical());
+    }
+    Ok(out)
+}
+
+/// Flips one interior base64 symbol of a stored undo record: the file stays
+/// well-formed JSON and canonical base64, the payload still decodes, and only
+/// the checksum comparison can catch it. Returns (corrupted, original) so a
+/// caller can prove a refusal did not rewrite the record AND restore it to
+/// prove the same path accepts a valid v1 record. Go twin:
+/// `corruptStoredUndoChecksum`.
+#[cfg(test)]
+pub(crate) fn corrupt_stored_undo_checksum(
+    undo_dir: &std::path::Path,
+    block_hash: [u8; 32],
+) -> (Vec<u8>, Vec<u8>) {
+    let path = undo_dir.join(format!("{}.json", hex::encode(block_hash)));
+    let original = std::fs::read(&path).expect("read stored undo");
+    let envelope: UndoEnvelopeDisk =
+        serde_json::from_slice(&original).expect("stored undo is not a v1 envelope");
+    let flipped = flip_base64_symbol(&envelope.payload_b64);
+    let corrupted = String::from_utf8(original.clone())
+        .expect("undo record is utf-8")
+        .replacen(&envelope.payload_b64, &flipped, 1)
+        .into_bytes();
+    assert_ne!(corrupted, original, "undo corruption was a no-op");
+    std::fs::write(&path, &corrupted).expect("write corrupted undo");
+    (corrupted, original)
+}
+
+/// Changes one interior symbol to a different valid one, so the result is still
+/// canonical base64 of the same length and fails at the checksum rather than at
+/// the encoding check. Go twin: `flipBase64Symbol`.
+#[cfg(test)]
+pub(crate) fn flip_base64_symbol(value: &str) -> String {
+    let replacement = if value.as_bytes()[1] == b'A' {
+        'B'
+    } else {
+        'A'
+    };
+    format!("{}{replacement}{}", &value[..1], &value[2..])
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+
+    /// Rust half of the cross-client parity proof: every byte the Go client must
+    /// emit for the same input is pinned in
+    /// conformance/fixtures/protocol/undo_integrity_v1.json, and this test
+    /// recomputes all of them from the payload alone. Go half:
+    /// `TestUndoEnvelopeV1CrossClientVector`.
+    #[test]
+    fn undo_envelope_v1_cross_client_vector() {
+        #[derive(Deserialize)]
+        struct Vector {
+            id: String,
+            block_hash: String,
+            payload_json: String,
+            payload_b64: String,
+            checksum: String,
+            envelope: String,
+        }
+        #[derive(Deserialize)]
+        struct Fixture {
+            cases: Vec<Vector>,
+        }
+        let raw = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../conformance/fixtures/protocol/undo_integrity_v1.json"
+        ))
+        .expect("read shared undo fixture");
+        let fixture: Fixture = serde_json::from_slice(&raw).expect("decode shared undo fixture");
+        // An emptied or renamed fixture must fail loudly rather than let the
+        // per-case loop below pass vacuously.
+        assert!(
+            fixture.cases.len() >= 3,
+            "shared undo fixture has {} cases, want at least 3",
+            fixture.cases.len()
+        );
+
+        for case in &fixture.cases {
+            let block_hash = parse_hex32("vector block_hash", &case.block_hash).expect("hash");
+            let undo = unmarshal_block_undo(case.payload_json.as_bytes())
+                .unwrap_or_else(|e| panic!("{}: payload_json not canonical: {e}", case.id));
+
+            let payload = marshal_block_undo(&undo).expect("marshal payload");
+            assert_eq!(
+                String::from_utf8(payload.clone()).expect("payload is utf-8"),
+                case.payload_json,
+                "{}: canonical payload",
+                case.id
+            );
+            assert_eq!(
+                base64_encode(&payload),
+                case.payload_b64,
+                "{}: base64",
+                case.id
+            );
+            assert_eq!(
+                hex::encode(undo_envelope_checksum(block_hash, &payload)),
+                case.checksum,
+                "{}: checksum",
+                case.id
+            );
+
+            let envelope = marshal_undo_envelope(block_hash, &undo).expect("marshal envelope");
+            assert_eq!(
+                String::from_utf8(envelope.clone()).expect("envelope is utf-8"),
+                case.envelope,
+                "{}: envelope bytes",
+                case.id
+            );
+            assert!(
+                envelope.ends_with(b"\n") && envelope.iter().filter(|b| **b == b'\n').count() == 1,
+                "{}: envelope must carry exactly one trailing LF",
+                case.id
+            );
+            assert_eq!(
+                unmarshal_undo_envelope(block_hash, case.envelope.as_bytes()).expect("round trip"),
+                undo,
+                "{}: round trip",
+                case.id
+            );
+        }
+    }
+
+    /// Pins the mechanical derivation of the outer read bound. The 2 GB-scale
+    /// rows are not materialized — allocating them in a unit test is not
+    /// proportionate — so the arithmetic that a maximum legal payload still fits
+    /// inside the envelope bound is proven here instead. Go twin:
+    /// `TestUndoEnvelopeBoundDerivation`.
+    #[test]
+    fn undo_envelope_bound_derivation() {
+        let undo = BlockUndo {
+            block_height: 0,
+            previous_already_generated: 0,
+            txs: Vec::new(),
+        };
+        let envelope = marshal_undo_envelope([0u8; 32], &undo).expect("marshal");
+        let payload = marshal_block_undo(&undo).expect("marshal payload");
+        let frame = envelope.len() as u64 - base64_encode(&payload).len() as u64;
+        assert_eq!(frame, UNDO_ENVELOPE_FRAME_BYTES, "measured envelope frame");
+
+        let base64_len = UNDO_FILE_MAX_BYTES.div_ceil(3) * 4;
+        assert_eq!(
+            base64_len + UNDO_ENVELOPE_FRAME_BYTES,
+            UNDO_ENVELOPE_FILE_MAX_BYTES
+        );
+        assert_eq!(UNDO_ENVELOPE_FILE_MAX_BYTES, 2_666_666_857);
+        // Recorded, not incidental: unlike UNDO_FILE_MAX_BYTES this bound is
+        // above 2^31, which is why every comparison widens the usize side. A
+        // const block so the check is a compile-time failure, not a runtime one.
+        const { assert!(UNDO_ENVELOPE_FILE_MAX_BYTES > (1u64 << 31)) };
+    }
+
+    /// Canonical base64 round-trip over every residue class, plus the
+    /// non-canonical spellings the decoder must refuse. Go relies on
+    /// `encoding/base64` for this; the hand-written Rust codec needs its own row
+    /// or a padding bug would only ever surface as a checksum mismatch.
+    #[test]
+    fn base64_codec_is_canonical() {
+        for len in 0..48usize {
+            let input: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+            let encoded = base64_encode(&input);
+            assert_eq!(encoded.len() % 4, 0, "len {len} is not padded to a quad");
+            assert_eq!(
+                base64_decode_canonical(&encoded).expect("round trip"),
+                input,
+                "len {len}"
+            );
+        }
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        for bad in [
+            "Zg=",    // not a whole quad
+            "Zg",     // unpadded
+            "Zh==",   // non-zero padding bits: decodes, re-encodes as Zg==
+            "Z\ng==", // embedded newline a permissive decoder would skip
+            "Zg*=",   // symbol outside the alphabet
+            "Zg=A",   // padding followed by data
+        ] {
+            assert!(
+                base64_decode_canonical(bad).is_err(),
+                "accepted non-canonical base64 {bad:?}"
+            );
+        }
+    }
     use std::collections::HashMap;
 
     use crate::devnet_genesis_chain_id;

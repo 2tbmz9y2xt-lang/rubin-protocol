@@ -11,6 +11,10 @@ Policy:
 
 ---
 
+## 2026-08-05 — Block-bound undo record envelope (RUB-1132)
+
+Manual fixture: new `conformance/fixtures/protocol/undo_integrity_v1.json` pins the shared `undo_envelope_v1` bytes both clients must emit and accept for a persisted block undo record — canonical compact payload, canonical padded RFC 4648 base64, and `SHA3-256(ASCII("RUBIN_BLOCK_UNDO_V1") || block_hash[32] || uint64_be(payload_len) || payload)` — across an empty, a coinbase-only, and a multi-transaction case. Not generator-owned: authored by hand, and recomputed independently by `TestUndoEnvelopeV1CrossClientVector` (Go) and `undo_envelope_v1_cross_client_vector` (Rust), which fail if either client's bytes drift from the pinned vector. Registered in `tools/gen_conformance_matrix.py` and regenerated `conformance/MATRIX.md` through that tool. No `CV-*.json`, fixture schema, runner, API, formal-model, or canonical-spec change.
+
 ## 2026-08-03 — DA canonical hash, structure, and payload order (RUB-660)
 
 Generated `CV-DA-INTEGRITY.json` appends `CV-DA-HASH-BEFORE-SET-01`, `CV-DA-DUPLICATE-CHUNK-ERROR-01`, and `CV-DA-STEP11-BEFORE-PAYLOAD-01` through `tools/gen_cv_da_integrity.py`: all hashes precede duplicate-index structure, and every step-11 defect precedes payload mismatch. Existing owners regenerate `conformance/MATRIX.md`, `CVDaIntegrityVectors.lean`, and the Go trace/refinement pair. No fixture schema, runner, API, or canonical-spec change.

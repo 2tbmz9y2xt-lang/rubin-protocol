@@ -529,7 +529,7 @@ func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {
 	if bs == nil {
 		return errors.New("nil blockstore")
 	}
-	raw, err := marshalBlockUndo(undo)
+	raw, err := marshalUndoEnvelope(blockHash, undo)
 	if err != nil {
 		return err
 	}
@@ -538,10 +538,15 @@ func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {
 	// wire-cost derivation (>=1 mandatory signature per spent input), so this
 	// guard converts any future derivation drift (a new covenant family,
 	// signature aggregation) into a loud save-time error instead of a
-	// next-restart refusal of the node's own undo file.
-	if err := checkStoreSaveBound(path, len(raw), undoFileMaxBytes); err != nil {
+	// next-restart refusal of the node's own undo file. RUB-1132 moves it to
+	// the envelope bound so the guard still measures the bytes GetUndo reads.
+	if err := checkStoreSaveBound(path, len(raw), undoEnvelopeFileMaxBytes); err != nil {
 		return err
 	}
+	// write-if-absent, not atomic overwrite: an existing record — including a
+	// corrupt one — is never healed or replaced in place. Repairing it here
+	// would let a torn write be laundered into a checksum-valid record for
+	// whatever undo the caller happens to be holding.
 	return writeFileIfAbsent(path, raw)
 }
 
@@ -549,11 +554,14 @@ func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
 	}
-	raw, err := readFileFromDir(bs.undoDir, hex.EncodeToString(blockHash[:])+".json", undoFileMaxBytes)
+	raw, err := readFileFromDir(bs.undoDir, hex.EncodeToString(blockHash[:])+".json", undoEnvelopeFileMaxBytes)
 	if err != nil {
 		return nil, err
 	}
-	return unmarshalBlockUndo(raw)
+	// blockHash is the hash the CALLER asked for, not one read back off disk:
+	// that is what makes a record moved or renamed between two undo files fail
+	// instead of restoring the wrong block's UTXOs.
+	return unmarshalUndoEnvelope(blockHash, raw)
 }
 
 // loadBlockStoreIndex reads the sole initialization marker. A missing marker is
@@ -602,7 +610,7 @@ func requireExactIndexFields(raw []byte) error {
 	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
 		return errors.New("blockstore index must be a JSON object")
 	}
-	keys, err := collectIndexFieldNames(dec)
+	keys, err := collectTopLevelFieldNames(dec)
 	if err != nil {
 		return err
 	}
@@ -613,9 +621,11 @@ func requireExactIndexFields(raw []byte) error {
 	return nil
 }
 
-// collectIndexFieldNames drains the top-level object, returning its key names in
-// encounter order (duplicates included, so the caller can reject them).
-func collectIndexFieldNames(dec *json.Decoder) ([]string, error) {
+// collectTopLevelFieldNames drains the top-level object, returning its key names
+// in encounter order (duplicates included, so the caller can reject them).
+// Shared by the blockstore index and the undo envelope (undo.go); both need the
+// key multiset that struct decoding throws away.
+func collectTopLevelFieldNames(dec *json.Decoder) ([]string, error) {
 	keys := make([]string, 0, 2)
 	for dec.More() {
 		key, err := dec.Token()

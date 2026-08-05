@@ -401,6 +401,7 @@ mod tests {
     use crate::test_helpers::{
         coinbase_only_block_with_gen, genesis_info, height_one_coinbase_only_block,
     };
+    use crate::undo::UNDO_INTEGRITY_PREFIX;
 
     #[derive(Debug, PartialEq, Eq)]
     struct DisconnectSnapshot {
@@ -434,6 +435,74 @@ mod tests {
                 .collect(),
             timestamp: engine.tip_timestamp,
         }
+    }
+
+    /// Pins RUB-1132 step 7 on the standalone disconnect path: a parse-valid but
+    /// checksum-broken undo record must be refused BEFORE any canonical
+    /// mutation, leaving chainstate, the canonical index, the blockstore tip and
+    /// the persisted snapshot exactly as they were. The tail restores the record
+    /// and disconnects for real, so a change that made this path reject
+    /// everything could not pass. Go twin:
+    /// `TestDisconnectCorruptUndoLeavesStateUnchanged`.
+    #[test]
+    fn disconnect_corrupt_undo_leaves_state_unchanged() {
+        use crate::undo::{corrupt_stored_undo_checksum, UNDO_CHECKSUM_MISMATCH_ERR};
+
+        let (mut engine, dir) = engine_with_store("rubin-disc-corrupt-undo");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine.apply_block(&genesis, None).expect("genesis");
+        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
+        let block1_hash =
+            rubin_consensus::block_hash(&block1[..BLOCK_HEADER_BYTES]).expect("block1 hash");
+        engine.apply_block(&block1, None).expect("block 1");
+
+        let before = disconnect_snapshot(&engine);
+        let chain_state_path = chain_state_path(&dir);
+        let before_snapshot = std::fs::read(&chain_state_path).expect("read chainstate snapshot");
+
+        let undo_dir = engine
+            .block_store
+            .as_ref()
+            .expect("blockstore")
+            .root_dir()
+            .join("undo");
+        let (corrupt, original) = corrupt_stored_undo_checksum(&undo_dir, block1_hash);
+
+        let err = engine
+            .disconnect_tip()
+            .expect_err("disconnect accepted a checksum-broken undo record");
+        assert_eq!(err, UNDO_CHECKSUM_MISMATCH_ERR);
+
+        assert_eq!(
+            disconnect_snapshot(&engine),
+            before,
+            "refused disconnect mutated chainstate, tip, or canonical index"
+        );
+        assert_eq!(
+            std::fs::read(&chain_state_path).expect("re-read chainstate snapshot"),
+            before_snapshot,
+            "refused disconnect rewrote the persisted chainstate"
+        );
+        assert_eq!(
+            std::fs::read(undo_dir.join(format!("{}.json", hex::encode(block1_hash))))
+                .expect("re-read undo"),
+            corrupt,
+            "refused disconnect rewrote the undo record"
+        );
+
+        // Positive control: the same disconnect must succeed once the record is
+        // valid again, so the rejection above is attributable to the corruption.
+        std::fs::write(
+            undo_dir.join(format!("{}.json", hex::encode(block1_hash))),
+            &original,
+        )
+        .expect("restore undo");
+        let summary = engine.disconnect_tip().expect("disconnect after restore");
+        assert_eq!(summary.disconnected_height, 1);
+        assert_eq!(engine.chain_state.height, 0);
+        assert_eq!(engine.chain_state.tip_hash, genesis_hash);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]
@@ -516,11 +585,14 @@ mod tests {
                 "block header length mismatch",
             ),
             ("tip undo missing", 'u', None, "read undo"),
+            // RUB-1132: a malformed record is now refused by the envelope
+            // reader before any payload decode, so the stable cross-client
+            // UNDO_INTEGRITY identity is what this row pins.
             (
                 "tip undo malformed",
                 'u',
                 Some(b"{".as_slice()),
-                "decode undo",
+                UNDO_INTEGRITY_PREFIX,
             ),
         ] {
             let (mut engine, dir) = engine_with_store(&format!("rubin-disc-packet-{name}"));

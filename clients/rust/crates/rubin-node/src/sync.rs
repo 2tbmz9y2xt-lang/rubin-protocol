@@ -1705,7 +1705,7 @@ mod tests {
         target_context_for_candidate, CanonicalApplyTarget, SuiteContext, SyncEngine,
         MAX_PV_SHADOW_MAX_SAMPLES, PARENT_BLOCK_NOT_FOUND_ERR, UNBOUND_DEVNET_TARGET_ERR,
     };
-    use crate::undo::{build_block_undo, marshal_block_undo};
+    use crate::undo::{build_block_undo, marshal_undo_envelope};
 
     /// Test-only rotation provider that counts how many times the
     /// spend-suite set is consulted (the lookup native covenant spend
@@ -2472,7 +2472,9 @@ mod tests {
                     .join(format!("{}.json", hex::encode(hash))),
             )
             .expect("raw undo"),
-            marshal_block_undo(&undo).expect("undo encoding")
+            // RUB-1132: the on-disk record is the block-bound v1 envelope, not
+            // the bare payload, so the hash is part of what is pinned here.
+            marshal_undo_envelope(hash, &undo).expect("undo encoding")
         );
         engine.disconnect_tip().expect("disconnect tip");
         assert_eq!(engine.chain_state, prestate);

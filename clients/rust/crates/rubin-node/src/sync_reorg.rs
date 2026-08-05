@@ -1398,6 +1398,114 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
+    /// Pins RUB-1132 step 7 on the preferred-branch path. The corrupt record
+    /// belongs to the CANONICAL block the reorg would have to disconnect, so the
+    /// failure happens inside `prepare_heavier_branch`'s preview — before any
+    /// canonical mutation — and the tip, chainstate, canonical index and reorg
+    /// counters must all be exactly as they were. The tail restores the record
+    /// and drives the same reorg to success, so a change that made this path
+    /// reject everything could not pass. Go twin:
+    /// `TestPreferredReorgCorruptUndoLeavesStateUnchanged`.
+    #[test]
+    fn preferred_reorg_corrupt_undo_leaves_state_unchanged() {
+        use crate::undo::{corrupt_stored_undo_checksum, UNDO_CHECKSUM_MISMATCH_ERR};
+
+        let (mut engine, dir) = engine_with_store("rubin-reorg-corrupt-undo");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+
+        // Canonical A1, which the reorg below must disconnect.
+        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
+        let block1_hash = block_header_hash(&block1);
+        engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("canonical A1");
+
+        // Side branch B1 (stored, not switched to) and its heavier child B2.
+        let block1_alt = height_one_coinbase_only_block(genesis_hash, gen_ts + 2);
+        let block1_alt_hash = block_header_hash(&block1_alt);
+        engine
+            .block_store
+            .as_ref()
+            .expect("blockstore")
+            .store_block(
+                block1_alt_hash,
+                &block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES],
+                &block1_alt,
+            )
+            .expect("store B1");
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let block2_alt = coinbase_only_block_with_gen(2, subsidy1, block1_alt_hash, gen_ts + 3);
+
+        let before_state = engine.chain_state.clone();
+        let store = engine.block_store.as_ref().expect("blockstore");
+        let before_tip = store.tip().expect("tip");
+        let before_index: Vec<[u8; 32]> = (0..store.canonical_len())
+            .map(|height| {
+                store
+                    .canonical_hash(height as u64)
+                    .expect("canonical")
+                    .expect("hash")
+            })
+            .collect();
+        let before_reorgs = engine.reorg_count();
+        let undo_dir = store.root_dir().join("undo");
+        let (corrupt, original) = corrupt_stored_undo_checksum(&undo_dir, block1_hash);
+
+        let err = engine
+            .apply_block_with_reorg(&block2_alt, None)
+            .expect_err("reorg consumed a checksum-broken undo record");
+        assert_eq!(err, UNDO_CHECKSUM_MISMATCH_ERR);
+
+        assert_eq!(
+            engine.chain_state, before_state,
+            "refused reorg mutated chainstate"
+        );
+        assert_eq!(
+            engine.chain_state.tip_hash, block1_hash,
+            "canonical tip moved"
+        );
+        let store = engine.block_store.as_ref().expect("blockstore");
+        assert_eq!(
+            store.tip().expect("tip"),
+            before_tip,
+            "blockstore tip moved"
+        );
+        let after_index: Vec<[u8; 32]> = (0..store.canonical_len())
+            .map(|height| {
+                store
+                    .canonical_hash(height as u64)
+                    .expect("canonical")
+                    .expect("hash")
+            })
+            .collect();
+        assert_eq!(after_index, before_index, "canonical index mutated");
+        assert_eq!(engine.reorg_count(), before_reorgs, "reorg counter moved");
+        assert_eq!(
+            std::fs::read(undo_dir.join(format!("{}.json", hex::encode(block1_hash))))
+                .expect("re-read undo"),
+            corrupt,
+            "refused reorg rewrote the undo record"
+        );
+
+        // Positive control: the same reorg must succeed once the record is valid.
+        std::fs::write(
+            undo_dir.join(format!("{}.json", hex::encode(block1_hash))),
+            &original,
+        )
+        .expect("restore undo");
+        let summary = engine
+            .apply_block_with_reorg(&block2_alt, None)
+            .expect("reorg after restore");
+        assert_eq!(summary.block_height, 2);
+        assert_eq!(engine.chain_state.height, 2);
+        assert_eq!(engine.reorg_count(), before_reorgs + 1);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
     #[test]
     fn apply_block_with_reorg_keeps_tip_when_candidate_has_less_work() {
         let (mut engine, dir) = engine_with_store("rubin-reorg-less-work");

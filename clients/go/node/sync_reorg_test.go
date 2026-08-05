@@ -3753,3 +3753,113 @@ func TestApplyBlockWithReorgPendingOutpointCompactRowsPersistAndUndo(t *testing.
 		t.Fatalf("utxo set hash after disconnecting the branch=%x, want the fork-point set %x", got, forkUtxoHash)
 	}
 }
+
+// TestPreferredReorgCorruptUndoLeavesStateUnchanged pins RUB-1132 step 7 on the
+// preferred-branch path. The corrupt record belongs to the CANONICAL block the
+// reorg would have to disconnect, so the failure happens inside
+// preparePreferredBranch's preview — before beginCanonicalTransition — and the
+// canonical tip, chainstate, index, mempool and apply counters must all be
+// exactly as they were. The tail restores the record and drives the same reorg
+// to success, so a mistake that made this path reject everything could not pass.
+// Rust twin: `preferred_reorg_corrupt_undo_leaves_state_unchanged`.
+func TestPreferredReorgCorruptUndoLeavesStateUnchanged(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+	subsidy1 := consensus.BlockSubsidy(1, 0)
+	canonical := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1),
+		coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	canonicalSummary, err := engine.ApplyBlock(canonical, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(canonical A1): %v", err)
+	}
+
+	sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(2),
+		coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	if _, err := engine.ApplyBlockWithReorg(sideB1, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B1): %v", err)
+	}
+	_, b1Hash := mustParseReorgBlockForTest(t, sideB1)
+	sideB2 := buildSingleTxBlock(t, b1Hash, target, reorgTestTimestamp(3),
+		coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidy(2, subsidy1)))
+
+	mempool, err := NewMempool(engine.chainState, store, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	engine.SetMempool(mempool)
+
+	beforeState, err := stateToDisk(engine.chainState)
+	if err != nil {
+		t.Fatalf("stateToDisk(before): %v", err)
+	}
+	beforeIndex, err := store.CanonicalIndexSnapshot()
+	if err != nil {
+		t.Fatalf("CanonicalIndexSnapshot(before): %v", err)
+	}
+	beforeCounts := engine.BlockApplyCounts()
+	beforeMempoolLen := mempool.Len()
+	beforeReorgCount := engine.ReorgCount()
+	beforeSnapshot, err := os.ReadFile(engine.cfg.ChainStatePath)
+	if err != nil {
+		t.Fatalf("read chainstate snapshot: %v", err)
+	}
+
+	corrupt, original := corruptStoredUndoChecksum(t, store, canonicalSummary.BlockHash)
+
+	_, err = engine.ApplyBlockWithReorg(sideB2, nil)
+	if err == nil {
+		t.Fatal("preferred-branch reorg consumed a checksum-broken undo record")
+	}
+	if !errors.Is(err, ErrUndoIntegrity) {
+		t.Fatalf("err = %v, want errors.Is ErrUndoIntegrity", err)
+	}
+	if err.Error() != "UNDO_INTEGRITY: checksum mismatch" {
+		t.Fatalf("message = %q, want exactly %q", err.Error(), "UNDO_INTEGRITY: checksum mismatch")
+	}
+	// Our own corrupt file must not be charged to the peer that relayed B2:
+	// node/p2p bumpBan(100) fires on any *consensus.TxError in the chain.
+	var txErr *consensus.TxError
+	if errors.As(err, &txErr) {
+		t.Fatalf("local corruption surfaced as consensus.TxError: %v", err)
+	}
+
+	if got, err := stateToDisk(engine.chainState); err != nil || !reflect.DeepEqual(got, beforeState) {
+		t.Fatalf("chainstate mutated by refused reorg: state=%+v err=%v", got, err)
+	}
+	if got, err := store.CanonicalIndexSnapshot(); err != nil || !reflect.DeepEqual(got, beforeIndex) {
+		t.Fatalf("canonical index mutated by refused reorg: index=%v err=%v", got, err)
+	}
+	if engine.chainState.TipHash != canonicalSummary.BlockHash || engine.chainState.Height != 1 {
+		t.Fatalf("canonical tip moved to (%d,%x), want (1,%x)",
+			engine.chainState.Height, engine.chainState.TipHash, canonicalSummary.BlockHash)
+	}
+	if got := engine.BlockApplyCounts(); got != beforeCounts {
+		t.Fatalf("BlockApplyCounts=%+v, want %+v", got, beforeCounts)
+	}
+	if got := mempool.Len(); got != beforeMempoolLen {
+		t.Fatalf("mempool len=%d, want %d", got, beforeMempoolLen)
+	}
+	if got := engine.ReorgCount(); got != beforeReorgCount {
+		t.Fatalf("ReorgCount=%d, want %d", got, beforeReorgCount)
+	}
+	if got, err := os.ReadFile(engine.cfg.ChainStatePath); err != nil || !bytes.Equal(got, beforeSnapshot) {
+		t.Fatalf("persisted chainstate rewritten by a refused reorg (err=%v)", err)
+	}
+	undoPath := filepath.Join(store.undoDir, hex.EncodeToString(canonicalSummary.BlockHash[:])+".json")
+	if got, err := os.ReadFile(undoPath); err != nil || !bytes.Equal(got, corrupt) {
+		t.Fatalf("refused reorg rewrote the undo record (err=%v)", err)
+	}
+
+	// Positive control: the very same reorg must succeed once the record is
+	// valid again, so the rejection above is attributable to the corruption.
+	restoreStoredUndo(t, store, canonicalSummary.BlockHash, original)
+	summaryB2, err := engine.ApplyBlockWithReorg(sideB2, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B2) after restore: %v", err)
+	}
+	if summaryB2.BlockHeight != 2 || engine.chainState.Height != 2 {
+		t.Fatalf("restored reorg height=%d state height=%d, want 2", summaryB2.BlockHeight, engine.chainState.Height)
+	}
+	if got := engine.ReorgCount(); got != beforeReorgCount+1 {
+		t.Fatalf("ReorgCount after restored reorg=%d, want %d", got, beforeReorgCount+1)
+	}
+}
