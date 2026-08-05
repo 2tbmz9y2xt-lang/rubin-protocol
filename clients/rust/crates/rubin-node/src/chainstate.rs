@@ -12,7 +12,7 @@ use rubin_consensus::{
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
-use crate::genesis::validate_incoming_chain_id;
+use crate::genesis::validate_genesis_identity;
 use crate::io_utils::{
     atomic_write_error_before, parse_hex32, reclaim_atomic_write_parent,
     reclaim_atomic_write_scratch, write_file_atomic_typed, AtomicWriteError, AtomicWriteOperation,
@@ -171,7 +171,7 @@ impl ChainState {
         registry: Option<&SuiteRegistry>,
     ) -> Result<ChainStateConnectSummary, String> {
         let (block_height, expected_prev_hash) = self.next_block_context()?;
-        validate_incoming_chain_id(block_height, chain_id)?;
+        validate_genesis_identity(block_height, chain_id, block_bytes)?;
         let mut work_state = InMemoryChainState {
             utxos: copy_utxo_set(&self.utxos),
             already_generated: u128::from(self.already_generated),

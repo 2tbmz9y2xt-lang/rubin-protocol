@@ -383,6 +383,39 @@ pub fn validate_incoming_chain_id(block_height: u64, chain_id: [u8; 32]) -> Resu
     Ok(())
 }
 
+/// Height-0 genesis identity guard, mirroring the Go reference
+/// `SyncEngine.validateGenesisIdentity` (`clients/go/node/sync_pv.go`).
+///
+/// The two verdicts are ordered exactly as Go orders them: the chain_id verdict
+/// (`validate_incoming_chain_id`) first, then the hash verdict. Under a devnet
+/// ChainID a height-0 block whose hash differs from the published devnet genesis
+/// hash is rejected with `"genesis_hash mismatch"`. The all-zero ChainID skips
+/// both verdicts, preserving the synthetic height-0 fixtures unit tests build.
+///
+/// A block too short to carry a header, or one whose header does not hash, is
+/// passed through untouched: Go parses before it guards, so a malformed block
+/// must surface the parser's error, not a genesis verdict.
+pub fn validate_genesis_identity(
+    block_height: u64,
+    chain_id: [u8; 32],
+    block_bytes: &[u8],
+) -> Result<(), String> {
+    validate_incoming_chain_id(block_height, chain_id)?;
+    if block_height != 0 || chain_id != devnet_genesis_chain_id() {
+        return Ok(());
+    }
+    let Some(header) = block_bytes.get(..BLOCK_HEADER_BYTES) else {
+        return Ok(());
+    };
+    let Ok(hash) = block_hash(header) else {
+        return Ok(());
+    };
+    if hash != devnet_genesis_hash() {
+        return Err("genesis_hash mismatch".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 fn derive_devnet_genesis_chain_id() -> [u8; 32] {
     use sha3::{Digest, Sha3_256};
@@ -434,8 +467,9 @@ mod tests {
     use super::{
         build_suite_context_from_descriptor_with_production_lookup, derive_devnet_genesis_chain_id,
         devnet_genesis_block_bytes, devnet_genesis_chain_id, load_chain_id_from_genesis_file,
-        load_genesis_config, validate_incoming_chain_id, CryptoRotationDescriptor,
-        GenesisRotationDescriptor, GenesisSuiteParams, PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR,
+        load_genesis_config, validate_genesis_identity, validate_incoming_chain_id,
+        CryptoRotationDescriptor, GenesisRotationDescriptor, GenesisSuiteParams,
+        BLOCK_HEADER_BYTES, PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR,
     };
     use std::collections::BTreeMap;
 
@@ -1515,6 +1549,71 @@ mod tests {
     fn validate_incoming_chain_id_rejects_wrong_non_zero_genesis_chain_id() {
         let err = validate_incoming_chain_id(0, [0x11; 32]).unwrap_err();
         assert_eq!(err, "genesis chain_id mismatch");
+    }
+
+    /// Mirror of the Go reference fixture `mutatedDevnetGenesisBlock`
+    /// (clients/go/node/sync_genesis_identity_test.go): the published genesis
+    /// with its nonce's first byte flipped — parses identically, hashes
+    /// differently. The offset is derived from `BLOCK_HEADER_BYTES` so the
+    /// fixture survives a header layout that grows trailing fields.
+    fn mutated_devnet_genesis_block() -> Vec<u8> {
+        let mut wrong = devnet_genesis_block_bytes();
+        wrong[BLOCK_HEADER_BYTES - 8] ^= 0xFF;
+        wrong
+    }
+
+    #[test]
+    fn validate_genesis_identity_accepts_published_devnet_genesis_at_height_zero() {
+        validate_genesis_identity(0, devnet_genesis_chain_id(), &devnet_genesis_block_bytes())
+            .expect("published devnet genesis must pass the height-0 guard");
+    }
+
+    #[test]
+    fn validate_genesis_identity_rejects_wrong_devnet_genesis_at_height_zero() {
+        let err = validate_genesis_identity(
+            0,
+            devnet_genesis_chain_id(),
+            &mutated_devnet_genesis_block(),
+        )
+        .unwrap_err();
+        assert_eq!(err, "genesis_hash mismatch");
+    }
+
+    #[test]
+    fn validate_genesis_identity_skips_hash_verdict_when_chain_id_zero() {
+        validate_genesis_identity(0, [0u8; 32], &mutated_devnet_genesis_block())
+            .expect("zero chain_id must skip both height-0 verdicts");
+    }
+
+    /// Ordering row mirroring Go's `validateGenesisIdentity`: the chain_id
+    /// verdict is decided BEFORE the hash verdict, so a block that violates
+    /// both reports the chain_id message.
+    #[test]
+    fn validate_genesis_identity_reports_chain_id_verdict_before_hash_verdict() {
+        let err =
+            validate_genesis_identity(0, [0x11; 32], &mutated_devnet_genesis_block()).unwrap_err();
+        assert_eq!(err, "genesis chain_id mismatch");
+    }
+
+    #[test]
+    fn validate_genesis_identity_is_inert_above_height_zero() {
+        validate_genesis_identity(
+            1,
+            devnet_genesis_chain_id(),
+            &mutated_devnet_genesis_block(),
+        )
+        .expect("the guard applies to height 0 only");
+        validate_genesis_identity(1, [0x11; 32], &mutated_devnet_genesis_block())
+            .expect("the guard applies to height 0 only");
+    }
+
+    /// A block too short to carry a header yields no genesis verdict: Go parses
+    /// before it guards, so the parser owns that error class in both clients.
+    #[test]
+    fn validate_genesis_identity_leaves_headerless_block_to_the_parser() {
+        let short = vec![0u8; BLOCK_HEADER_BYTES - 1];
+        validate_genesis_identity(0, devnet_genesis_chain_id(), &short)
+            .expect("a headerless block must surface the parser's error, not a genesis verdict");
     }
 
     #[test]
