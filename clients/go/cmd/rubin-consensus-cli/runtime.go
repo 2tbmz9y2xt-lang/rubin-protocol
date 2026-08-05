@@ -11,7 +11,6 @@ import (
 	"io"
 	"math"
 	"math/big"
-	"math/bits"
 	"os"
 	"sort"
 	"strings"
@@ -97,7 +96,7 @@ type Request struct {
 	TxCount              int                      `json:"tx_count,omitempty"`
 	PubkeyLength         int                      `json:"pubkey_length,omitempty"`
 	AlreadyGenerated     uint64                   `json:"already_generated,omitempty"`
-	SumFees              uint64                   `json:"sum_fees,omitempty"`
+	SumFees              consensus.Uint128        `json:"sum_fees,omitempty"`
 	ChunkCount           int                      `json:"chunk_count,omitempty"`
 	TTLBlocks            int                      `json:"ttl_blocks,omitempty"`
 	SentinelSigLen       int                      `json:"sentinel_sig_len,omitempty"`
@@ -484,9 +483,9 @@ type Response struct {
 	CountedBytes       int            `json:"counted_bytes,omitempty"`
 	Weight             uint64         `json:"weight"`
 	WireBytes          int            `json:"wire_bytes,omitempty"`
-	Fee                uint64         `json:"fee,omitempty"`
+	Fee                *consensus.Uint128 `json:"fee,omitempty"`
 	IgnoredOverhead    int            `json:"ignored_overhead_bytes,omitempty"`
-	SumFees            uint64         `json:"sum_fees,omitempty"`
+	SumFees            *consensus.Uint128 `json:"sum_fees,omitempty"`
 	Mode               int            `json:"mode,omitempty"`
 	TotalFee           int            `json:"total_fee,omitempty"`
 	RelayFeeFloor      *uint64        `json:"relay_fee_floor,omitempty"`
@@ -843,6 +842,17 @@ func u64Ptr(v uint64) *uint64 {
 	return &v
 }
 
+// u128PtrOmitZero preserves the pre-widening omission semantics of an
+// `omitempty` u64 response field: absent exactly when the value is zero,
+// and otherwise the canonical decimal string form. Widening must not force
+// an absent zero-valued field present.
+func u128PtrOmitZero(v consensus.Uint128) *consensus.Uint128 {
+	if v.IsZero() {
+		return nil
+	}
+	return &v
+}
+
 func boolPtr(v bool) *bool {
 	return &v
 }
@@ -864,55 +874,57 @@ func dominantFeeFloor(relayFeeFloor, daRequiredFee uint64) string {
 	}
 }
 
-func feeFromPolicyUTXOs(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (uint64, error) {
+// feeFromPolicyUTXOs mirrors node.computeFeeNoVerify: per-input and
+// per-output values stay u64, their sums and the difference are exact u128.
+func feeFromPolicyUTXOs(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (consensus.Uint128, error) {
 	if tx == nil {
-		return 0, fmt.Errorf("nil tx")
+		return consensus.Uint128{}, fmt.Errorf("nil tx")
 	}
 	if len(tx.Inputs) == 0 {
-		return 0, fmt.Errorf("missing inputs")
+		return consensus.Uint128{}, fmt.Errorf("missing inputs")
 	}
 	if utxos == nil {
-		return 0, fmt.Errorf("nil utxo set")
+		return consensus.Uint128{}, fmt.Errorf("nil utxo set")
 	}
-	var totalIn uint64
+	var totalIn consensus.Uint128
 	for _, input := range tx.Inputs {
 		entry, ok := utxos[consensus.Outpoint{Txid: input.PrevTxid, Vout: input.PrevVout}]
 		if !ok {
-			return 0, fmt.Errorf("missing utxo")
+			return consensus.Uint128{}, fmt.Errorf("missing utxo")
 		}
-		next, ok := addU64Policy(totalIn, entry.Value)
+		next, ok := totalIn.CheckedAdd(consensus.Uint128FromU64(entry.Value))
 		if !ok {
-			return 0, fmt.Errorf("sum_in overflow")
+			return consensus.Uint128{}, fmt.Errorf("sum_in overflow")
 		}
 		totalIn = next
 	}
 
-	var totalOut uint64
+	var totalOut consensus.Uint128
 	for _, output := range tx.Outputs {
-		next, ok := addU64Policy(totalOut, output.Value)
+		next, ok := totalOut.CheckedAdd(consensus.Uint128FromU64(output.Value))
 		if !ok {
-			return 0, fmt.Errorf("sum_out overflow")
+			return consensus.Uint128{}, fmt.Errorf("sum_out overflow")
 		}
 		totalOut = next
 	}
-	if totalOut > totalIn {
-		return 0, fmt.Errorf("overspend")
+	fee, ok := totalIn.CheckedSub(totalOut)
+	if !ok {
+		return consensus.Uint128{}, fmt.Errorf("overspend")
 	}
-	return totalIn - totalOut, nil
+	return fee, nil
 }
 
-func feeBelowRollingFloorPolicy(fee, weight, floor uint64) bool {
+// feeBelowRollingFloorPolicy mirrors node.feeRateBelowFloor: the required
+// amount is the full 128-bit weight*floor product and the comparison against
+// the u128 fee is exact, so a product above u64 no longer auto-rejects.
+func feeBelowRollingFloorPolicy(fee consensus.Uint128, weight, floor uint64) bool {
 	if weight == 0 {
 		return true
 	}
 	if floor < conformanceDefaultMempoolMinFeeRate {
 		floor = conformanceDefaultMempoolMinFeeRate
 	}
-	hi, required := bits.Mul64(weight, floor)
-	if hi != 0 {
-		return true
-	}
-	return fee < required
+	return consensus.FeeBelowRate(fee, weight, floor)
 }
 
 func relayMetadataPolicyResp(req Request) Response {
@@ -1012,7 +1024,7 @@ func relayMetadataPolicyResp(req Request) Response {
 		resp.Admit = true
 		resp.AdmitClass = "accepted"
 		resp.RejectReason = ""
-		resp.Fee = meta.Fee
+		resp.Fee = u128PtrOmitZero(meta.Fee)
 		resp.WireBytes = meta.Size
 		return resp
 	}
@@ -1165,9 +1177,9 @@ func daFeeFloorPolicyResp(req Request) Response {
 	if err != nil {
 		return Response{Ok: false, Err: err.Error()}
 	}
-	resp.Fee = fee
+	resp.Fee = u128PtrOmitZero(fee)
 
-	if daBytes > 0 && daRequiredFee > 0 && fee < daRequiredFee {
+	if daBytes > 0 && daRequiredFee > 0 && fee.Cmp(consensus.Uint128FromU64(daRequiredFee)) < 0 {
 		resp.AdmitClass = "rejected"
 		resp.RequiredFee = u64Ptr(daRequiredFee)
 		resp.DominantFloor = "da"
@@ -1968,7 +1980,7 @@ func runFromStdin() {
 		}
 		writeResp(os.Stdout, Response{
 			Ok:                 true,
-			SumFees:            s.SumFees,
+			SumFees:            u128PtrOmitZero(s.SumFees),
 			UtxoCount:          s.UtxoCount,
 			AlreadyGenerated:   s.AlreadyGenerated,
 			AlreadyGeneratedN1: s.AlreadyGeneratedN1,
@@ -2048,7 +2060,7 @@ func runFromStdin() {
 			writeConsensusErr(os.Stdout, err)
 			return
 		}
-		writeResp(os.Stdout, Response{Ok: true, Fee: s.Fee, UtxoCount: s.UtxoCount})
+		writeResp(os.Stdout, Response{Ok: true, Fee: u128PtrOmitZero(s.Fee), UtxoCount: s.UtxoCount})
 		return
 
 	case "compact_shortid":

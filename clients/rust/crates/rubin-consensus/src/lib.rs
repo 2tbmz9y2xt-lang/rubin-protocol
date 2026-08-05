@@ -32,6 +32,7 @@ pub mod tx_dep_graph;
 mod tx_helpers;
 pub mod tx_validate_worker;
 pub mod txcontext;
+pub mod uint128_json;
 mod utxo_basic;
 pub mod utxo_snapshot;
 mod vault;

@@ -93,7 +93,7 @@ fn validate_block_basic_subsidy_exceeded() {
         height,
         None,
         already_generated,
-        sum_fees,
+        u128::from(sum_fees),
     )
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::BlockErrSubsidyExceeded);
@@ -144,7 +144,7 @@ fn validate_block_basic_subsidy_exceeded_coinbase_sum_uses_u128() {
         height,
         None,
         already_generated,
-        sum_fees,
+        u128::from(sum_fees),
     )
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::BlockErrSubsidyExceeded);
@@ -173,7 +173,7 @@ fn validate_block_basic_subsidy_with_fees_ok() {
         height,
         None,
         already_generated,
-        sum_fees,
+        u128::from(sum_fees),
     )
     .expect("validate");
     assert_eq!(s.tx_count, 1);

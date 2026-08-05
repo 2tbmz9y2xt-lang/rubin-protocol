@@ -21,8 +21,9 @@ type TxValidationResult struct {
 	// were executed (including deferred+flushed).
 	SigCount int
 
-	// Fee is the precomputed transaction fee, copied from TxValidationContext.
-	Fee uint64
+	// Fee is the precomputed exact u128 transaction fee, copied from
+	// TxValidationContext.
+	Fee Uint128
 }
 
 type txValidationWorkerEnv struct {

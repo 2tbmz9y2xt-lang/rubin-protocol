@@ -22,6 +22,7 @@ use rubin_consensus::{
     ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
     ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM,
 };
+use rubin_consensus::uint128_json;
 use rubin_node::{devnet_genesis_chain_id, ChainState, TxPool, TxPoolAdmitErrorKind, TxPoolConfig};
 use serde::de::{IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -244,8 +245,10 @@ struct Request {
     #[serde(default)]
     already_generated: u64,
 
-    #[serde(default)]
-    sum_fees: u64,
+    /// Legacy numeric tokens read up to u64; canonical decimal strings read
+    /// through u128 max. See `rubin_consensus::uint128_json`.
+    #[serde(default, deserialize_with = "uint128_json::deserialize")]
+    sum_fees: u128,
 
     #[serde(default)]
     chains: Vec<ForkChoiceChainJson>,
@@ -696,14 +699,24 @@ struct Response {
     #[serde(skip_serializing_if = "Option::is_none")]
     target_new: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    fee: Option<u64>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "uint128_json::serialize_opt",
+        deserialize_with = "uint128_json::deserialize_opt",
+        default
+    )]
+    fee: Option<u128>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     utxo_count: Option<u64>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sum_fees: Option<u64>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "uint128_json::serialize_opt",
+        deserialize_with = "uint128_json::deserialize_opt",
+        default
+    )]
+    sum_fees: Option<u128>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     already_generated: Option<u64>,
@@ -1430,11 +1443,13 @@ fn policy_utxo_map(items: &[UtxoJson]) -> Result<HashMap<Outpoint, UtxoEntry>, S
     Ok(utxos)
 }
 
+/// Mirrors Go `feeFromPolicyUTXOs`: per-input and per-output values stay u64,
+/// their sums and the difference are exact u128.
 fn fee_from_policy_utxos(
     tx: &rubin_consensus::tx::Tx,
     utxos: &HashMap<Outpoint, UtxoEntry>,
-) -> Result<u64, String> {
-    let mut total_in = 0u64;
+) -> Result<u128, String> {
+    let mut total_in = 0u128;
     if tx.inputs.is_empty() {
         return Err("missing inputs".to_string());
     }
@@ -1445,27 +1460,31 @@ fn fee_from_policy_utxos(
                 vout: input.prev_vout,
             })
             .ok_or_else(|| "missing utxo".to_string())?;
-        total_in = checked_add_policy(total_in, entry.value)
+        total_in = total_in
+            .checked_add(u128::from(entry.value))
             .ok_or_else(|| "sum_in overflow".to_string())?;
     }
 
-    let mut total_out = 0u64;
+    let mut total_out = 0u128;
     for output in &tx.outputs {
-        total_out = checked_add_policy(total_out, output.value)
+        total_out = total_out
+            .checked_add(u128::from(output.value))
             .ok_or_else(|| "sum_out overflow".to_string())?;
     }
-    if total_out > total_in {
-        return Err("overspend".to_string());
-    }
-    Ok(total_in - total_out)
+    total_in
+        .checked_sub(total_out)
+        .ok_or_else(|| "overspend".to_string())
 }
 
-fn fee_below_rolling_floor_policy(fee: u64, weight: u64, floor: u64) -> bool {
+/// Mirrors Go `feeBelowRollingFloorPolicy`: the required amount is the full
+/// 128-bit weight*floor product and the comparison against the u128 fee is
+/// exact, so a product above u64 no longer auto-rejects.
+fn fee_below_rolling_floor_policy(fee: u128, weight: u64, floor: u64) -> bool {
     if weight == 0 {
         return true;
     }
     let floor = floor.max(CONFORMANCE_DEFAULT_MEMPOOL_MIN_FEE_RATE);
-    (fee as u128) < (weight as u128) * (floor as u128)
+    uint128_json::fee_below_rate(fee, weight, floor)
 }
 
 fn da_fee_floor_policy_response(req: &Request) -> Response {
@@ -1608,7 +1627,7 @@ fn da_fee_floor_policy_response(req: &Request) -> Response {
 
     if da_bytes > 0 {
         if let Some(da_required_fee) = resp.da_required_fee {
-            if da_required_fee > 0 && fee < da_required_fee {
+            if da_required_fee > 0 && fee < u128::from(da_required_fee) {
                 resp.reject_reason = Some("DA_FEE_BELOW_STAGE_C_FLOOR".to_string());
                 resp.admit_class = Some("rejected".to_string());
                 resp.required_fee = Some(da_required_fee);

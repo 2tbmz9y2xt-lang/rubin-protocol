@@ -21,7 +21,11 @@ func validateCoinbaseStructure(pb *ParsedBlock, blockHeight uint64) error {
 	return nil
 }
 
-func validateCoinbaseValueBound(pb *ParsedBlock, blockHeight uint64, alreadyGenerated *big.Int, sumFees uint64) error {
+// validateCoinbaseValueBound enforces CANONICAL §19.2: the coinbase output
+// total must not exceed block_subsidy(h)+sum_fees. The bound is computed in
+// checked u128 from the exact u128 sum_fees, so the exact bound is accepted
+// and only bound+1 yields BLOCK_ERR_SUBSIDY_EXCEEDED.
+func validateCoinbaseValueBound(pb *ParsedBlock, blockHeight uint64, alreadyGenerated *big.Int, sumFees Uint128) error {
 	if pb == nil || len(pb.Txs) == 0 {
 		return txerr(BLOCK_ERR_COINBASE_INVALID, "missing coinbase")
 	}
@@ -38,12 +42,11 @@ func validateCoinbaseValueBound(pb *ParsedBlock, blockHeight uint64, alreadyGene
 		return err
 	}
 	subsidy := BlockSubsidyBig(blockHeight, alreadyGenerated)
-	limit := u128{hi: 0, lo: subsidy}
-	limit, err = addU64ToU128Block(limit, sumFees)
-	if err != nil {
-		return err
+	limit, ok := Uint128FromU64(subsidy).CheckedAdd(sumFees)
+	if !ok {
+		return txerr(BLOCK_ERR_PARSE, "u128 overflow")
 	}
-	if cmpU128(sumCoinbase, limit) > 0 {
+	if cmpU128(sumCoinbase, uint128ToInternal(limit)) > 0 {
 		return txerr(BLOCK_ERR_SUBSIDY_EXCEEDED, "coinbase outputs exceed subsidy+fees bound")
 	}
 	return nil

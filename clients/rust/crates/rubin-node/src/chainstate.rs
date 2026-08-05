@@ -55,7 +55,7 @@ pub struct CanonicalAppliedBlock {
 pub struct ChainStateConnectSummary {
     pub block_height: u64,
     pub block_hash: [u8; 32],
-    pub sum_fees: u64,
+    pub sum_fees: u128,
     pub already_generated: u64,
     pub already_generated_n1: u64,
     pub utxo_count: u64,
@@ -574,7 +574,7 @@ mod tests {
         expected_prev_hash: Option<String>,
         expected_target: String,
         expect_ok: bool,
-        expect_sum_fees: u64,
+        expect_sum_fees: u128,
         expect_utxo_count: u64,
         expect_already_generated: u64,
         expect_already_generated_n1: u64,

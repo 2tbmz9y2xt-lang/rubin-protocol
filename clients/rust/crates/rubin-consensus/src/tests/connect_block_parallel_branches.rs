@@ -265,7 +265,7 @@ fn apply_non_coinbase_tx_basic_workq_htlc_claim_branch() {
     )]);
 
     let (_next_utxos, summary) = deferred_apply(&tx, txid, &utxos, 1).expect("htlc claim branch");
-    assert_eq!(summary.fee, entry.value - 90);
+    assert_eq!(summary.fee, u128::from(entry.value - 90));
 }
 
 #[test]

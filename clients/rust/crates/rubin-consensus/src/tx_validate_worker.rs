@@ -37,8 +37,8 @@ pub struct TxValidationResult {
     pub err: Option<TxError>,
     /// Number of signature verification operations executed.
     pub sig_count: usize,
-    /// Transaction fee, copied from [`PrecomputedTxContext`].
-    pub fee: u64,
+    /// Exact u128 transaction fee, copied from [`PrecomputedTxContext`].
+    pub fee: u128,
 }
 
 struct TxLocalSpendContext<'a> {

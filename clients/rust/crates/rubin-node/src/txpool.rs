@@ -2,6 +2,9 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::OnceLock;
 
+use rubin_consensus::uint128_json::{
+    compare_fee_rate as compare_fee_rate_exact, fee_below_rate,
+};
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
     constants::{COV_TYPE_CORE_EXT, COV_TYPE_CORE_SIMPLICITY, MAX_RELAY_MSG_BYTES},
@@ -120,7 +123,9 @@ pub struct TxPoolConfig {
 pub struct TxPoolEntry {
     pub raw: Vec<u8>,
     pub inputs: Vec<Outpoint>,
-    pub fee: u64,
+    /// Authoritative admitted fee: the exact u128 scalar consensus derived.
+    /// `weight` stays u64 per the policy contract.
+    pub fee: u128,
     pub weight: u64,
     pub size: usize,
     /// Caller-declared admission origin. Mirrors Go `mempoolEntry.source`
@@ -168,13 +173,13 @@ pub struct TxPool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorstEntryKey {
     txid: [u8; 32],
-    fee: u64,
+    fee: u128,
     weight: u64,
     heap_id: u64,
 }
 
 struct AdmitPriority<'a> {
-    fee: u64,
+    fee: u128,
     weight: u64,
     tie: &'a [u8],
 }
@@ -245,7 +250,8 @@ pub struct TxPoolAdmitError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelayTxMetadata {
-    pub fee: u64,
+    /// Authoritative admitted fee, carried unnarrowed to relay ordering.
+    pub fee: u128,
     pub size: usize,
 }
 
@@ -1232,7 +1238,7 @@ pub(crate) fn relay_metadata(
 fn apply_post_consensus_policy_with_floor(
     tx: &rubin_consensus::Tx,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
-    fee: u64,
+    fee: u128,
     weight: u64,
     da_bytes: u64,
     next_height: u64,
@@ -1374,13 +1380,12 @@ fn unavailable(message: impl Into<String>) -> TxPoolAdmitError {
 /// clients/go/node/mempool.go (in-helper clamp inside `feeRateBelowFloor`; grep `DefaultMempoolMinFeeRate` in fn body). Callers therefore always
 /// receive at-least-DEFAULT enforcement even if cfg-static or
 /// rolling-floor sources zero the field.
-fn fee_rate_below_floor(fee: u64, weight: u64, floor: u64) -> bool {
+fn fee_rate_below_floor(fee: u128, weight: u64, floor: u64) -> bool {
     if weight == 0 {
         return true;
     }
     let floor = floor.max(DEFAULT_MEMPOOL_MIN_FEE_RATE);
-    let required = (weight as u128) * (floor as u128);
-    (fee as u128) < required
+    fee_below_rate(fee, weight, floor)
 }
 
 /// Free-function predicate enforcing the rolling-relay-floor invariant.
@@ -1393,7 +1398,7 @@ fn fee_rate_below_floor(fee: u64, weight: u64, floor: u64) -> bool {
 /// clamp lives inside `fee_rate_below_floor` (Go-parity at
 /// clients/go/node/mempool.go in-helper clamp inside `feeRateBelowFloor` — grep `DefaultMempoolMinFeeRate` in fn body. The error message surfaces
 /// the post-clamp value for operator clarity.
-fn validate_fee_floor(fee: u64, weight: u64, cfg_floor: u64) -> Result<(), TxPoolAdmitError> {
+fn validate_fee_floor(fee: u128, weight: u64, cfg_floor: u64) -> Result<(), TxPoolAdmitError> {
     if fee_rate_below_floor(fee, weight, cfg_floor) {
         let surfaced_floor = cfg_floor.max(DEFAULT_MEMPOOL_MIN_FEE_RATE);
         return Err(unavailable(format!(
@@ -1482,7 +1487,11 @@ fn cheap_fee_floor_precheck(
     if weight == 0 {
         return Ok(());
     }
-    let fee = input_value - output_value;
+    // Single-input P2PK shape only, so this difference cannot exceed u64 and
+    // the local u64 arithmetic is exact here. It is a fast-reject hint, never
+    // the authoritative admitted fee: that stays the consensus-derived u128
+    // value carried by the apply summary.
+    let fee = u128::from(input_value - output_value);
     validate_fee_floor(fee, weight, current_min_fee_rate)
 }
 
@@ -2191,13 +2200,11 @@ fn compare_capacity_priority(a: &CapacityPlanEntry<'_>, b: &CapacityPlanEntry<'_
     }
 }
 
-fn compare_fee_rate_values(fee_a: u64, weight_a: u64, fee_b: u64, weight_b: u64) -> Ordering {
-    if weight_a == 0 || weight_b == 0 {
-        return Ordering::Equal;
-    }
-    let left = u128::from(fee_a) * u128::from(weight_b);
-    let right = u128::from(fee_b) * u128::from(weight_a);
-    left.cmp(&right)
+/// Compares fee_a/weight_a against fee_b/weight_b by exact
+/// cross-multiplication over all 192 product bits of a u128 fee by a u64
+/// weight. Mirrors Go `consensus.CompareFeeRate`.
+fn compare_fee_rate_values(fee_a: u128, weight_a: u64, fee_b: u128, weight_b: u64) -> Ordering {
+    compare_fee_rate_exact(fee_a, weight_a, fee_b, weight_b)
 }
 
 #[cfg(test)]
@@ -2275,7 +2282,7 @@ mod tests {
         (store, dir)
     }
 
-    fn test_entry(fee: u64, weight: u64, size: usize, source: TxSource) -> TxPoolEntry {
+    fn test_entry(fee: u128, weight: u64, size: usize, source: TxSource) -> TxPoolEntry {
         TxPoolEntry {
             raw: vec![0xA5; size],
             inputs: Vec::new(),
@@ -2288,7 +2295,7 @@ mod tests {
 
     fn txpool_snapshot_entry_from_raw(
         raw: Vec<u8>,
-        fee: u64,
+        fee: u128,
         source: TxSource,
         heap_id: u64,
     ) -> ([u8; 32], TxPoolSnapshotEntry) {
@@ -3887,8 +3894,8 @@ mod tests {
                 TxPoolEntry {
                     raw: vec![idx],
                     inputs: Vec::new(),
-                    fee: idx as u64 + 1,
-                    weight: idx as u64 + 1,
+                    fee: u128::from(idx) + 1,
+                    weight: u64::from(idx) + 1,
                     size: 1,
                     source: TxSource::Local,
                 },
@@ -3915,8 +3922,8 @@ mod tests {
                 TxPoolEntry {
                     raw: vec![idx],
                     inputs: Vec::new(),
-                    fee: idx as u64 + 10,
-                    weight: idx as u64 + 10,
+                    fee: u128::from(idx) + 10,
+                    weight: u64::from(idx) + 10,
                     size: 1,
                     source: TxSource::Local,
                 },
@@ -5138,7 +5145,7 @@ mod tests {
     #[test]
     fn rub162_fee_rate_below_floor_helper_branches() {
         // Zero weight: always below floor.
-        assert!(fee_rate_below_floor(u64::MAX, 0, 1));
+        assert!(fee_rate_below_floor(u128::from(u64::MAX), 0, 1));
         // Zero floor: clamps to DEFAULT (1). For weight=100: required=100.
         // fee=0 < 100 → true; fee=99 < 100 → true; fee=100 == 100 → false.
         assert!(fee_rate_below_floor(0, 100, 0));
@@ -5149,8 +5156,8 @@ mod tests {
         // One below floor.
         assert!(fee_rate_below_floor(99, 100, 1));
         // u128 boundary: required = u64::MAX * u64::MAX. Fits u128, no wrap.
-        assert!(fee_rate_below_floor(u64::MAX, u64::MAX, 2));
-        assert!(!fee_rate_below_floor(u64::MAX, u64::MAX, 1));
+        assert!(fee_rate_below_floor(u128::from(u64::MAX), u64::MAX, 2));
+        assert!(!fee_rate_below_floor(u128::from(u64::MAX), u64::MAX, 1));
         // Concrete 7653 pin (matches the conformance fixture's weight).
         assert!(fee_rate_below_floor(10, 7653, 1));
         assert!(!fee_rate_below_floor(7653, 7653, 1));

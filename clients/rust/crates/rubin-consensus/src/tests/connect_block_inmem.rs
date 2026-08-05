@@ -141,7 +141,7 @@ fn connect_block_ok_computes_fees_and_updates_state() {
     )
     .expect("connect_block_basic_in_memory_at_height");
 
-    assert_eq!(s.sum_fees, sum_fees, "sum_fees mismatch");
+    assert_eq!(s.sum_fees, u128::from(sum_fees), "sum_fees mismatch");
     assert_eq!(
         s.already_generated, 0,
         "already_generated should be 0 (pre-block)"
@@ -751,7 +751,7 @@ fn connect_block_non_coinbase_vault_output_accepted() {
     )
     .expect("connect_block with vault output in non-coinbase tx");
 
-    assert_eq!(s.sum_fees, sum_fees);
+    assert_eq!(s.sum_fees, u128::from(sum_fees));
     // 2 UTXO entries: vault output (90) + coinbase P2PK output.
     assert_eq!(s.utxo_count, 2, "vault output must be in UTXO set");
 

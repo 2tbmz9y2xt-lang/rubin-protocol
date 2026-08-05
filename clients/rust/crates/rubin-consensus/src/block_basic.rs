@@ -162,7 +162,7 @@ pub fn validate_block_basic_with_context_and_fees_at_height(
     block_height: u64,
     prev_timestamps: Option<&[u64]>,
     already_generated: u128,
-    sum_fees: u64,
+    sum_fees: u128,
 ) -> Result<BlockBasicSummary, TxError> {
     validate_block_basic_with_context_and_fees_at_height_and_rotation(
         block_bytes,
@@ -186,7 +186,7 @@ pub fn validate_block_basic_with_context_and_fees_at_height_and_rotation(
     block_height: u64,
     prev_timestamps: Option<&[u64]>,
     already_generated: u128,
-    sum_fees: u64,
+    sum_fees: u128,
     rotation: Option<&dyn RotationProvider>,
 ) -> Result<BlockBasicSummary, TxError> {
     // G.9: parse once, share `pb` between basic validation and the

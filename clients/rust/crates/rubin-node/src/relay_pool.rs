@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use rubin_consensus::uint128_json::compare_fee_rate;
+
 /// Default maximum relay pool size (matches Go `defaultMaxTxPoolSize` in `mempool.go`).
 const DEFAULT_MAX_RELAY_POOL_SIZE: usize = 1000;
 
@@ -20,7 +22,8 @@ struct RelayTxPoolInner {
 
 struct RelayTxEntry {
     raw: Vec<u8>,
-    fee: u64,
+    /// Authoritative admitted fee as an exact u128 scalar, never narrowed.
+    fee: u128,
     size: usize,
 }
 
@@ -53,7 +56,7 @@ impl RelayTxPool {
     ///
     /// If the pool is full, the lowest fee-rate tx is evicted — but only if
     /// the incoming tx has strictly higher priority. Matches Go `Put`.
-    pub fn put(&self, txid: [u8; 32], raw: &[u8], fee: u64, size: usize) -> bool {
+    pub fn put(&self, txid: [u8; 32], raw: &[u8], fee: u128, size: usize) -> bool {
         let size = if size == 0 { raw.len() } else { size };
         if size == 0 {
             return false;
@@ -116,8 +119,8 @@ impl RelayTxPool {
 }
 
 /// Find the worst (lowest priority) entry in the pool.
-fn find_worst(txs: &HashMap<[u8; 32], RelayTxEntry>) -> Option<([u8; 32], u64, usize)> {
-    let mut worst: Option<([u8; 32], u64, usize)> = None;
+fn find_worst(txs: &HashMap<[u8; 32], RelayTxEntry>) -> Option<([u8; 32], u128, usize)> {
+    let mut worst: Option<([u8; 32], u128, usize)> = None;
     for (&txid, entry) in txs {
         match worst {
             None => worst = Some((txid, entry.fee, entry.size)),
@@ -137,10 +140,10 @@ fn find_worst(txs: &HashMap<[u8; 32], RelayTxEntry>) -> Option<([u8; 32], u64, u
 /// Order: fee-rate (cross-multiply) → raw fee → txid (reversed: lower txid = higher priority).
 /// Matches Go `compareRelayPriority` in `p2p/mempool.go`.
 pub fn compare_relay_priority(
-    a_fee: u64,
+    a_fee: u128,
     a_size: usize,
     a_txid: [u8; 32],
-    b_fee: u64,
+    b_fee: u128,
     b_size: usize,
     b_txid: [u8; 32],
 ) -> i32 {
@@ -161,14 +164,15 @@ pub fn compare_relay_priority(
 
 /// Compare fee rates using cross-multiplication to avoid floating point.
 /// a_fee/a_size vs b_fee/b_size → a_fee * b_size vs b_fee * a_size.
-/// Uses u128 multiplication matching Go's `bits.Mul64`.
-fn compare_relay_fee_rate(a_fee: u64, a_size: usize, b_fee: u64, b_size: usize) -> i32 {
+///
+/// The u128 fee by u64 size product needs up to 192 bits, so a plain u128
+/// multiplication would overflow above u64 fees. `compare_fee_rate` retains
+/// every product bit, matching Go `compareRelayFeeRate`.
+fn compare_relay_fee_rate(a_fee: u128, a_size: usize, b_fee: u128, b_size: usize) -> i32 {
     if a_size == 0 || b_size == 0 {
         return 0;
     }
-    let a_cross = (a_fee as u128) * (b_size as u128);
-    let b_cross = (b_fee as u128) * (a_size as u128);
-    match a_cross.cmp(&b_cross) {
+    match compare_fee_rate(a_fee, b_size as u64, b_fee, a_size as u64) {
         std::cmp::Ordering::Greater => 1,
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,

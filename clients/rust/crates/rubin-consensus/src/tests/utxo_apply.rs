@@ -234,7 +234,7 @@ fn connect_block_basic_in_memory_at_height_ok_computes_fees_and_updates_state() 
     )
     .expect("connect block");
 
-    assert_eq!(s.sum_fees, sum_fees);
+    assert_eq!(s.sum_fees, u128::from(sum_fees));
     assert_eq!(s.already_generated, 0);
     assert_eq!(s.already_generated_n1, u128::from(subsidy));
     assert_eq!(s.utxo_count, 2);

@@ -13,8 +13,14 @@ type UtxoEntry struct {
 	CreatedByCoinbase bool
 }
 
+// UtxoApplySummary carries the public result of a non-coinbase apply.
+//
+// Fee is the exact u128 value sum_in-sum_out. Per-output and per-UTXO values
+// remain u64, but a transaction may legitimately spend up to MAX_TX_INPUTS
+// u64-max inputs, so the fee itself is not bounded by u64 and is never
+// narrowed, rounded, or saturated on the way out of this struct.
 type UtxoApplySummary struct {
-	Fee       uint64
+	Fee       Uint128
 	UtxoCount uint64
 }
 
@@ -177,6 +183,10 @@ func addU64ToU128(x u128, v uint64) (u128, error) {
 	return addU64ToU128WithCode(x, v, TX_ERR_PARSE)
 }
 
+// u128ToU64 is a bounded conversion helper for u64-domain quantities only.
+// It MUST NOT be applied to a transaction fee or a block sum_fees: those are
+// exact u128 values whose protocol-valid range exceeds u64, and narrowing one
+// here would reject a valid transaction on width alone.
 func u128ToU64(x u128) (uint64, error) {
 	if x.hi != 0 {
 		return 0, txerr(TX_ERR_PARSE, "u64 overflow")
