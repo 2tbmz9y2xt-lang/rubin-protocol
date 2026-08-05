@@ -22,8 +22,10 @@ import (
 //	{"version":1,"payload_b64":"<b64>","checksum":"<64hex>"}\n
 //
 // checksum = SHA3-256(ASCII(domain_tag) || uint64_be(len(payload)) || payload).
-// The length term makes the preimage injective, so no two payloads share a
-// digest by concatenation. The trailing LF is NOT in the preimage. Domain tags
+// The length prefix makes the preimage encoding unambiguous: no two distinct
+// (domain, payload) pairs serialize to the same preimage bytes, so
+// concatenation cannot alias one frame into another. The trailing LF is NOT
+// in the preimage. Domain tags
 // are "RUBIN_CHAINSTATE_V1" and "RUBIN_BLOCKSTORE_INDEX_V1": both files are
 // per-datadir singletons, so the domain tag is the identity, and chain identity
 // is enforced by the separate genesis anchor (BlockStore.VerifyGenesisAnchor),
