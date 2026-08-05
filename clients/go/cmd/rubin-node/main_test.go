@@ -481,6 +481,127 @@ func runFeatureBitsDeploymentsUsesLexicallyNormalizedPath(t *testing.T) {
 	}
 }
 
+// TestRunRejectsInvalidFeatureBitsDeploymentsBeforeStorage proves the
+// RUB-876 guard fires BEFORE any filesystem or service side effect:
+// datadir creation, chainstate load/save, blockstore open/create,
+// reconcile, and service construction. Pre-hoist, the file was parsed
+// only inside the telemetry print AFTER blockstore open + reconcile +
+// Save (and silently ignored whenever the store had no tip, as on a
+// fresh --create-store run), so the clean-datadir, snapshot, stdout,
+// and exit-code assertions all turn red without the hoisted guard.
+func TestRunRejectsInvalidFeatureBitsDeploymentsBeforeStorage(t *testing.T) {
+	const wantGuardStderr = "invalid featurebits deployments: "
+	forbiddenStderr := []string{
+		"datadir create failed",
+		"chainstate load failed",
+		"chainstate reconcile failed",
+		"chainstate save failed",
+		"blockstore open failed",
+		"blockstore create failed",
+		"featurebits telemetry failed",
+	}
+	const invalidRow = `[{"name":"x","bit":1,"start_height":10,"timeout_height":9}]`
+
+	writeDeployments := func(t *testing.T, content string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "deployments.json")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write deployments: %v", err)
+		}
+		return path
+	}
+
+	runInvalid := func(t *testing.T, args []string) string {
+		t.Helper()
+		var out, errOut bytes.Buffer
+		if code := run(args, &out, &errOut); code != 2 {
+			t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
+		}
+		if !strings.Contains(errOut.String(), wantGuardStderr) {
+			t.Fatalf("stderr missing featurebits guard error: %q", errOut.String())
+		}
+		for _, marker := range forbiddenStderr {
+			if strings.Contains(errOut.String(), marker) {
+				t.Fatalf("storage path reached despite invalid featurebits deployments (%q): %q", marker, errOut.String())
+			}
+		}
+		if out.String() != "" {
+			t.Fatalf("expected empty stdout, got %q", out.String())
+		}
+		return errOut.String()
+	}
+
+	t.Run("hostile_inputs_clean_datadir_create_store", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, content, wantErr string
+			missing                bool
+		}{
+			{name: "missing_file", missing: true},
+			{name: "malformed_json", content: "{"},
+			{name: "wrong_shape_object", content: `{"name":"x"}`},
+			{name: "bit_out_of_range", content: `[{"name":"x","bit":32,"start_height":0,"timeout_height":10}]`, wantErr: "bit out of range"},
+			{name: "empty_name", content: `[{"name":"","bit":1,"start_height":0,"timeout_height":10}]`, wantErr: "name required"},
+			{name: "timeout_before_start", content: invalidRow, wantErr: "timeout_height < start_height"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "missing.json")
+				if !tc.missing {
+					path = writeDeployments(t, tc.content)
+				}
+				datadir := filepath.Join(t.TempDir(), "data")
+				stderr := runInvalid(t, []string{
+					"--datadir", datadir, "--create-store", "--mine-blocks", "1", "--mine-exit",
+					"--featurebits-deployments", path,
+				})
+				if tc.wantErr != "" && !strings.Contains(stderr, tc.wantErr) {
+					t.Fatalf("stderr missing %q: %q", tc.wantErr, stderr)
+				}
+				if _, err := os.Stat(datadir); !os.IsNotExist(err) {
+					t.Fatalf("datadir must not be created on invalid featurebits deployments: stat err=%v", err)
+				}
+			})
+		}
+	})
+
+	for _, leg := range []struct {
+		name   string
+		dryRun bool
+	}{
+		{name: "normal_preexisting_datadir"},
+		{name: "dry_run_preexisting_datadir", dryRun: true},
+	} {
+		t.Run(leg.name, func(t *testing.T) {
+			datadir := preparedDatadir(t)
+			before := datadirSnapshot(t, datadir)
+			args := []string{"--datadir", datadir, "--featurebits-deployments", writeDeployments(t, invalidRow)}
+			if leg.dryRun {
+				args = append(args, "--dry-run")
+			}
+			runInvalid(t, args)
+			assertNoFilesystemWrite(t, before, datadirSnapshot(t, datadir))
+		})
+	}
+}
+
+// TestRunEmptyFeatureBitsDeploymentsFlagSkipsValidation pins the flag's
+// pre-existing contract that an explicitly empty --featurebits-deployments
+// behaves exactly like an unset flag: no file read, no validation, no
+// telemetry line.
+func TestRunEmptyFeatureBitsDeploymentsFlagSkipsValidation(t *testing.T) {
+	datadir := filepath.Join(t.TempDir(), "data")
+	seedBlockStore(t, datadir)
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--dry-run", "--datadir", datadir, "--featurebits-deployments", ""}, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d (stderr=%q)", code, errOut.String())
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("empty flag must not write to stderr: %q", errOut.String())
+	}
+	if strings.Contains(out.String(), "featurebits:") {
+		t.Fatalf("empty flag must not emit telemetry: %q", out.String())
+	}
+}
+
 func TestRunCreatesPrivatePersistencePaths(t *testing.T) {
 	datadir := filepath.Join(t.TempDir(), "data")
 
