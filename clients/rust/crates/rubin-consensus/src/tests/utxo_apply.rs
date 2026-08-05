@@ -1617,8 +1617,11 @@ fn apply_non_coinbase_tx_basic_htlc_refund_timelock_first_error_order() {
 /// saturated, or rejected on width alone.
 ///
 /// Two 2^63 inputs and zero outputs give a fee of exactly 2^64, one above the
-/// u64 domain. Mirrors Go `TestApplyNonCoinbaseTxBasicFeeAboveU64` and the
-/// shared vector `CV-U-FEE-U128-01`.
+/// u64 domain. Every apply path that can see this transaction must agree:
+/// sequential and precompute — precompute being exactly where the removed
+/// >u64 rejection used to live. Mirrors Go
+/// `TestApplyNonCoinbaseTxBasicFeeAboveU64` and the shared vector
+/// `CV-U-FEE-U128-01`.
 #[test]
 fn apply_non_coinbase_tx_basic_fee_above_u64_is_exact() {
     let kp = kp_or_skip!();
@@ -1673,4 +1676,10 @@ fn apply_non_coinbase_tx_basic_fee_above_u64_is_exact() {
         .expect("fee above u64 must be accepted on ordinary validation");
     assert_eq!(summary.fee, want_fee, "fee must be exact, not narrowed");
     assert_eq!(summary.utxo_count, 0);
+
+    // Precompute must derive the identical fee too.
+    let sum_in = 2 * u128::from(input_value);
+    let precomputed = crate::precompute::compute_precompute_fee(sum_in, &tx.outputs)
+        .expect("precompute must not reject a fee on width alone");
+    assert_eq!(precomputed, want_fee, "precompute fee must be exact");
 }

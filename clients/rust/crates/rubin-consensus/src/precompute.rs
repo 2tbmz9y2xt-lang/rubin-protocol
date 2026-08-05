@@ -293,7 +293,7 @@ fn precompute_witness_bounds(
 /// Derives the same exact u128 fee the sequential and queued-parallel apply
 /// paths derive. A fee above u64 is not an error here, so precompute cannot
 /// reject a transaction the other two paths accept.
-fn compute_precompute_fee(sum_in: u128, outputs: &[TxOutput]) -> Result<u128, TxError> {
+pub(crate) fn compute_precompute_fee(sum_in: u128, outputs: &[TxOutput]) -> Result<u128, TxError> {
     let mut sum_out = 0u128;
     for output in outputs {
         sum_out = sum_out
