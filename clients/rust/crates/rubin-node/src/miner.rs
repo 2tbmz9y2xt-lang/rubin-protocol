@@ -1477,6 +1477,59 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Mirror of Go `TestMinerMineOne_PropagatesBootstrapError`
+    /// (clients/go/node/sync_genesis_identity_test.go): when the bootstrap
+    /// fails, `mine_one` surfaces that error instead of continuing into
+    /// candidate construction on an engine that cannot persist. Go triggers the
+    /// failure by nilling the engine's `chainState`; the Rust engine owns its
+    /// chainstate by value, so the equivalent construction is a latched
+    /// persistence fault — the only failure `bootstrap_canonical_genesis_if_empty`
+    /// can report before it applies anything.
+    ///
+    /// Asserting the returned message alone would be vacuous: a swallowed
+    /// bootstrap error is rediscovered with the SAME message when the candidate
+    /// reaches `apply_block`. The counting timestamp source isolates it — it is
+    /// consulted only during candidate construction.
+    #[test]
+    fn mine_one_propagates_bootstrap_error() {
+        use crate::io_utils::{atomic_write_error_after, AtomicWriteOperation};
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-bootstrap-err");
+        let _ = sync.handle_persistence_error(
+            atomic_write_error_after(&dir, AtomicWriteOperation::Overwrite, "postcommit"),
+            false,
+            false,
+        );
+        let cfg = MinerConfig {
+            timestamp_source: bootstrap_error_timestamp_source,
+            ..MinerConfig::default()
+        };
+        let mut miner = Miner::new(&mut sync, None, cfg).expect("miner");
+
+        assert_eq!(
+            miner
+                .mine_one(&[])
+                .expect_err("a halted engine must not mine"),
+            "storage persistence fault; restart required"
+        );
+        assert_eq!(
+            BOOTSTRAP_ERROR_TIMESTAMP_CALLS.load(Ordering::Relaxed),
+            0,
+            "mine_one must return at the bootstrap call, before building a candidate"
+        );
+        assert!(
+            !miner.sync.chain_state.has_tip,
+            "the failed bootstrap must not leave a tip behind"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Owned by `mine_one_propagates_bootstrap_error`; no other test installs it.
+    static BOOTSTRAP_ERROR_TIMESTAMP_CALLS: AtomicU64 = AtomicU64::new(0);
+    fn bootstrap_error_timestamp_source() -> u64 {
+        BOOTSTRAP_ERROR_TIMESTAMP_CALLS.fetch_add(1, Ordering::Relaxed);
+        1
+    }
+
     /// RUB-1137 accepted row: a fresh empty devnet datadir mined N times ends
     /// with the published devnet genesis at canonical index row 0 — the same
     /// row 0 the Go reference produces — mined heights 1..=N, and a restart
