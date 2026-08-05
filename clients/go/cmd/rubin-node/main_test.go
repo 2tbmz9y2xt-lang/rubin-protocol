@@ -564,19 +564,19 @@ func TestRunRejectsInvalidFeatureBitsDeploymentsBeforeStorage(t *testing.T) {
 	})
 
 	for _, leg := range []struct {
-		name   string
-		dryRun bool
+		name      string
+		extraArgs []string
 	}{
 		{name: "normal_preexisting_datadir"},
-		{name: "dry_run_preexisting_datadir", dryRun: true},
+		{name: "dry_run_preexisting_datadir", extraArgs: []string{"--dry-run"}},
+		// Pre-hoist the scan returned 0 without ever reading the
+		// deployments file; this rejection is a disclosed RUB-876 change.
+		{name: "legacy_exposure_scan_preexisting_datadir", extraArgs: []string{"--legacy-exposure-scan", "--legacy-suite-id", "1"}},
 	} {
 		t.Run(leg.name, func(t *testing.T) {
 			datadir := preparedDatadir(t)
 			before := datadirSnapshot(t, datadir)
-			args := []string{"--datadir", datadir, "--featurebits-deployments", writeDeployments(t, invalidRow)}
-			if leg.dryRun {
-				args = append(args, "--dry-run")
-			}
+			args := append([]string{"--datadir", datadir, "--featurebits-deployments", writeDeployments(t, invalidRow)}, leg.extraArgs...)
 			runInvalid(t, args)
 			assertNoFilesystemWrite(t, before, datadirSnapshot(t, datadir))
 		})
@@ -586,10 +586,11 @@ func TestRunRejectsInvalidFeatureBitsDeploymentsBeforeStorage(t *testing.T) {
 // TestRunEmptyFeatureBitsDeploymentsFlagSkipsValidation pins the flag's
 // pre-existing contract that an explicitly empty --featurebits-deployments
 // behaves exactly like an unset flag: no file read, no validation, no
-// telemetry line.
+// telemetry line. preparedDatadir has a mined tip, so a non-empty valid
+// file WOULD print a "featurebits:" line here — the absence assertion
+// discriminates on the flag, not on the missing tip.
 func TestRunEmptyFeatureBitsDeploymentsFlagSkipsValidation(t *testing.T) {
-	datadir := filepath.Join(t.TempDir(), "data")
-	seedBlockStore(t, datadir)
+	datadir := preparedDatadir(t)
 	var out, errOut bytes.Buffer
 	if code := run([]string{"--dry-run", "--datadir", datadir, "--featurebits-deployments", ""}, &out, &errOut); code != 0 {
 		t.Fatalf("exit %d (stderr=%q)", code, errOut.String())

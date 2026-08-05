@@ -422,7 +422,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// filesystem with no service started. The parsed rows are reused by
 	// the telemetry print below — the file is read exactly once per run.
 	// An empty value skips validation and telemetry alike (the flag's
-	// pre-existing contract).
+	// pre-existing contract). On the --legacy-exposure-scan path and on a
+	// store with no tip this ADDS a new rejection: exit 2 where the
+	// pre-diff code returned 0 with an invalid file silently ignored (the
+	// scan returns before the telemetry branch, which is also tipOK-gated)
+	// — a contracted operator-visible change.
 	var featureBitDeployments []featureBitDeploymentJSON
 	if *featurebitsDeploymentsPath != "" {
 		ds, err := loadFeatureBitDeployments(*featurebitsDeploymentsPath)
