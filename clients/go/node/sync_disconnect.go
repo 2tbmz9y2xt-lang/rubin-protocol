@@ -20,15 +20,17 @@ func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {
 	if s == nil {
 		return nil, errors.New("sync engine is not initialized")
 	}
+	diag := &diagnosticBatch{}
+	defer s.flushDiagnostics(diag)
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
-	return s.disconnectTip()
+	return s.disconnectTip(diag)
 }
 
 // disconnectTip runs a standalone disconnect as ONE canonical transition: it
 // advances a single generation, commits the prepared stable tip under the same
 // guard, and adds no requeue and no full-Mempool revalidation policy.
-func (s *SyncEngine) disconnectTip() (*ChainStateDisconnectSummary, error) {
+func (s *SyncEngine) disconnectTip(diag *diagnosticBatch) (*ChainStateDisconnectSummary, error) {
 	canonicalIndex, err := s.canonicalIndexPreflight()
 	if err != nil {
 		return nil, err
@@ -37,7 +39,7 @@ func (s *SyncEngine) disconnectTip() (*ChainStateDisconnectSummary, error) {
 	if err != nil {
 		return nil, err
 	}
-	tr, err := s.beginCanonicalTransition(canonicalIndex)
+	tr, err := s.beginCanonicalTransition(canonicalIndex, diag)
 	if err != nil {
 		return nil, err
 	}

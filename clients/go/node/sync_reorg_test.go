@@ -762,7 +762,7 @@ func TestCollectBranchToCanonicalPropagatesNonNotExistErrors(t *testing.T) {
 
 func TestApplyCanonicalParsedBlockHelperErrors(t *testing.T) {
 	var nilEngine *SyncEngine
-	if _, err := nilEngine.applyCanonicalParsedBlock(nil, nil, nil, nil); err == nil {
+	if _, err := nilEngine.applyCanonicalParsedBlock(nil, nil, nil, nil, nil); err == nil {
 		t.Fatalf("expected nil sync engine error")
 	}
 
@@ -782,7 +782,7 @@ func TestApplyCanonicalParsedBlockHelperErrors(t *testing.T) {
 	}
 
 	engine := newEmptyEngine(t, devnetGenesisChainID)
-	if _, err := engine.applyCanonicalParsedBlock(nil, nil, nil, nil); err == nil {
+	if _, err := engine.applyCanonicalParsedBlock(nil, nil, nil, nil, nil); err == nil {
 		t.Fatalf("expected nil parsed block error")
 	}
 
@@ -1004,7 +1004,7 @@ func TestRequeueDisconnectedTransactionsUsesTipDownOrderAndContinuesAfterReject(
 	engine.requeueVerifiedDisconnectedTransactions([]verifiedStoredBlock{
 		{blockBytes: []byte("not parsed again"), parsed: highParsed},
 		{blockBytes: []byte("not parsed again"), parsed: lowParsed},
-	})
+	}, nil)
 
 	if !strings.Contains(stderr.String(), "mempool: requeue-tx:") {
 		t.Fatalf("expected duplicate requeue rejection to be logged, got %q", stderr.String())
@@ -3009,7 +3009,7 @@ func TestApplyCanonicalParsedBlockRollsBackWhenCanonicalReportFails(t *testing.T
 		Txs:         completeDASetTxsForCount(consensus.MAX_DA_BATCHES_PER_BLOCK + 1),
 	}
 
-	summary, outcome, err := engine.applyCanonicalParsedBlockTracked(overloaded, blockBytes, nil, nil)
+	summary, outcome, err := engine.applyCanonicalParsedBlockTracked(overloaded, blockBytes, nil, nil, nil)
 	if err == nil {
 		t.Fatal("over-cap canonical-applied report was accepted")
 	}
@@ -3632,7 +3632,7 @@ func TestPreparePreferredBranchRetainsCompactRowsWithoutUtxoSnapshots(t *testing
 	liveUtxos, liveUtxoHash := len(f.engine.chainState.Utxos), f.engine.chainState.UtxoSetHash()
 
 	branch := f.storedSideBranch(t, forkHash, forkHeight+1, forkGenerated, 2)
-	rows, disconnected, reorgDepth, err := f.engine.preparePreferredBranch(branch, forkHeight)
+	rows, disconnected, reorgDepth, err := f.engine.preparePreferredBranch(branch, forkHeight, nil)
 	if err != nil {
 		t.Fatalf("preparePreferredBranch: %v", err)
 	}

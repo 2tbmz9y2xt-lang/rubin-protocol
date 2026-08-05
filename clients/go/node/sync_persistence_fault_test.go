@@ -330,3 +330,67 @@ func TestSyncEngineRollbackAndDisconnectPostCommitFaultsDoNotCompensate(t *testi
 		requireAtomicTest(t, err == nil && !ok, "cache tip=%v err=%v", ok, err)
 	})
 }
+
+// TestSyncEngineTerminalFaultedSnapshot pins the read-only terminal-fault status
+// method against the EXISTING latch, for BOTH terminal causes: an ambiguous
+// atomic post-commit persistence fault, and a transition whose exact rollback
+// restore could not be proven. Both project to the same single boolean, which is
+// what GET /health renders as terminal_fault / restart_required.
+//
+// The status method is proven not to be a second fault authority: reading it
+// repeatedly neither installs, clears nor rewrites the latched cause, and a nil
+// engine reports false rather than a fabricated fault.
+func TestSyncEngineTerminalFaultedSnapshot(t *testing.T) {
+	var nilEngine *SyncEngine
+	requireAtomicTest(t, !nilEngine.TerminalFaulted(), "nil engine reported a terminal fault")
+
+	t.Run("post_commit_persistence_fault", func(t *testing.T) {
+		engine, store, _ := newPersistenceFaultEngine(t)
+		requireAtomicTest(t, !engine.TerminalFaulted(), "fresh engine reported a terminal fault")
+		failed := false
+		withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+			sync := ops.syncParent
+			ops.syncParent = func(parent string) error {
+				if !failed && parent == store.rootPath {
+					failed = true
+					return os.ErrPermission
+				}
+				return sync(parent)
+			}
+		})
+		_, applyErr := engine.ApplyBlock(DevnetGenesisBlockBytes(), nil)
+		fault := requirePersistenceFault(t, applyErr, atomicWriteOverwrite)
+		requireAtomicTest(t, failed && engine.TerminalFaulted(), "injected=%v terminal=%v", failed, engine.TerminalFaulted())
+		// Reading the status is not a state transition: the latched fault
+		// pointer and its cause survive repeated reads unchanged.
+		for i := 0; i < 3; i++ {
+			requireAtomicTest(t, engine.TerminalFaulted(), "terminal status flipped on read %d", i)
+		}
+		requireAtomicTest(t, engine.persistenceFault == fault && errors.Is(fault.cause, os.ErrPermission), "fault=%+v", engine.persistenceFault)
+	})
+
+	t.Run("rollback_restore_fault", func(t *testing.T) {
+		engine, store, _ := newPersistenceFaultEngine(t)
+		requireAtomicTest(t, !engine.TerminalFaulted(), "fresh engine reported a terminal fault")
+		blocked := 0
+		withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+			open := ops.openScratch
+			ops.openScratch = func(path string, flag int, mode os.FileMode) (atomicWriteScratchFile, error) {
+				// Both writes fail BEFORE their namespace commit, so neither is
+				// an ambiguous post-commit fault: the block write fails the
+				// apply, and the canonical-index write fails its rollback
+				// restore. That pair is the rollbackRestoreFault latch.
+				if dir := filepath.Dir(path); dir == store.blocksDir || dir == store.rootPath {
+					blocked++
+					return nil, syscall.ENOSPC
+				}
+				return open(path, flag, mode)
+			}
+		})
+		_, applyErr := engine.ApplyBlock(DevnetGenesisBlockBytes(), nil)
+		var restoreFault *rollbackRestoreFault
+		requireAtomicTest(t, blocked >= 2 && errors.As(applyErr, &restoreFault), "blocked=%d apply=%v", blocked, applyErr)
+		requireAtomicTest(t, engine.TerminalFaulted() && engine.persistenceFault != nil, "terminal=%v fault=%+v", engine.TerminalFaulted(), engine.persistenceFault)
+		requireAtomicTest(t, errors.Is(engine.persistenceFault.cause, applyErr), "latched cause=%v, want the rollback restore fault %v", engine.persistenceFault.cause, applyErr)
+	})
+}

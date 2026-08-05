@@ -314,7 +314,7 @@ func mustBeginCanonicalTransition(t *testing.T, engine *SyncEngine) *canonicalTr
 	if err != nil {
 		t.Fatalf("canonicalIndexPreflight: %v", err)
 	}
-	tr, err := engine.beginCanonicalTransition(canonicalIndex)
+	tr, err := engine.beginCanonicalTransition(canonicalIndex, nil)
 	if err != nil {
 		t.Fatalf("beginCanonicalTransition: %v", err)
 	}
