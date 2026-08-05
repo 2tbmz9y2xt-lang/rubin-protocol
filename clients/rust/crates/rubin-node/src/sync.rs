@@ -969,6 +969,45 @@ impl SyncEngine {
         }
     }
 
+    /// Applies the published canonical genesis block to an empty chainstate when
+    /// the configured network has one, so the chain always starts from the
+    /// published bytes rather than from a miner-synthesized height-0 block.
+    /// Mirrors the Go reference `SyncEngine.BootstrapCanonicalGenesisIfEmpty`
+    /// (`clients/go/node/sync.go`).
+    ///
+    /// The height-0 genesis-identity guard rejects any block at height 0 whose
+    /// hash differs from the published devnet genesis under a devnet ChainID;
+    /// without this bootstrap the miner-driven empty-chain path would always
+    /// build a non-canonical height-0 block and fail under that guard.
+    ///
+    /// Idempotent. No-op when:
+    ///   - the chainstate already has a tip, or
+    ///   - `SyncConfig.chain_id` does not identify a network with a published
+    ///     canonical genesis (currently only `devnet_genesis_chain_id()`; the
+    ///     all-zero ChainID used by ephemeral unit tests is skipped on purpose
+    ///     to preserve those tests' synthetic genesis fixtures, mirroring the
+    ///     chain_id guard's zero-ChainID skip clause).
+    ///
+    /// A halted engine reports its persistence fault before the no-op checks,
+    /// exactly as the Go reference orders `mutationAllowed` first. On success
+    /// the tip is the published devnet genesis at height 0 and its bytes are
+    /// persisted through the NORMAL `apply_block` path, so persistence, index
+    /// row 0 and recovery semantics are the stock ones.
+    ///
+    /// Go's `raceTolerantBootstrapResult` recheck has no mirror here: it exists
+    /// because a Go `SyncEngine` shares its `*ChainState` with other holders
+    /// that can install a tip concurrently. The Rust engine owns `chain_state`
+    /// behind `&mut self`, so no concurrent tip can appear across this call and
+    /// an apply failure is always a real failure.
+    pub fn bootstrap_canonical_genesis_if_empty(&mut self) -> Result<(), String> {
+        self.mutation_allowed()?;
+        if self.chain_state.has_tip || self.cfg.chain_id != devnet_genesis_chain_id() {
+            return Ok(());
+        }
+        self.apply_block(&crate::genesis::devnet_genesis_block_bytes(), None)?;
+        Ok(())
+    }
+
     pub fn apply_block(
         &mut self,
         block_bytes: &[u8],
@@ -1693,7 +1732,9 @@ mod tests {
     use crate::blockstore::{block_store_path, BlockStore};
     use crate::chainstate::{chain_state_path, load_chain_state, ChainState};
     use crate::coinbase::{build_coinbase_tx, default_mine_address};
-    use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
+    use crate::genesis::{
+        devnet_genesis_block_bytes, devnet_genesis_chain_id, devnet_genesis_hash,
+    };
     use crate::io_utils::{
         atomic_write_error_after, unique_temp_path, AtomicWriteOperation, AtomicWriteStage,
         AtomicWriteTestOp, AtomicWriteTestScope,
@@ -2033,6 +2074,220 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    // ---------------------------------------------------------------------
+    // RUB-1137: height-0 genesis identity guard + canonical-genesis bootstrap.
+    // Mirrors clients/go/node/sync_genesis_identity_test.go.
+    // ---------------------------------------------------------------------
+
+    /// Engine on a real datadir, mirroring Go's `newGenesisIdentityTestEngine`:
+    /// a block store and a chainstate file so persistence is observable.
+    fn genesis_identity_engine(prefix: &str, chain_id: [u8; 32]) -> (SyncEngine, PathBuf) {
+        let dir = unique_temp_path(prefix);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let store = BlockStore::create(block_store_path(&dir)).expect("create store");
+        let cfg = default_sync_config(None, chain_id, Some(chain_state_path(&dir)));
+        let engine = SyncEngine::new(ChainState::new(), Some(store), cfg).expect("engine");
+        (engine, dir)
+    }
+
+    /// Mirror of Go's `mutatedDevnetGenesisBlock`: the published genesis with
+    /// its nonce's first byte flipped. Still parses, hashes differently.
+    fn mutated_devnet_genesis_block() -> Vec<u8> {
+        let mut wrong = devnet_genesis_block_bytes();
+        wrong[BLOCK_HEADER_BYTES - 8] ^= 0xFF;
+        wrong
+    }
+
+    /// Every regular file under `dir` with its bytes, sorted by path — a
+    /// deterministic fingerprint for proving a reject path wrote nothing.
+    fn dir_fingerprint(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            for entry in std::fs::read_dir(&current).expect("read_dir") {
+                let entry = entry.expect("dir entry");
+                let path = entry.path();
+                if entry.file_type().expect("file type").is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push((path.clone(), std::fs::read(&path).expect("read file")));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn apply_block_accepts_published_devnet_genesis_at_height_zero() {
+        let (mut engine, dir) =
+            genesis_identity_engine("rubin-rust-genesis-ok", devnet_genesis_chain_id());
+        engine
+            .apply_block(&devnet_genesis_block_bytes(), None)
+            .expect("published devnet genesis must still apply");
+        assert_eq!(engine.chain_state.tip_hash, devnet_genesis_hash());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rejected row + hostile row: the wrong height-0 block under a devnet
+    /// ChainID fails with the mirrored message AND mutates nothing — neither
+    /// the in-memory chainstate nor a single byte on disk.
+    #[test]
+    fn apply_block_rejects_wrong_devnet_genesis_at_height_zero_without_persistence() {
+        let (mut engine, dir) =
+            genesis_identity_engine("rubin-rust-genesis-wrong", devnet_genesis_chain_id());
+        let before = dir_fingerprint(&dir);
+
+        let err = engine
+            .apply_block(&mutated_devnet_genesis_block(), None)
+            .unwrap_err();
+        assert_eq!(err, "genesis_hash mismatch");
+
+        assert!(
+            !engine.chain_state.has_tip,
+            "rejected genesis must not install a tip"
+        );
+        assert_eq!(engine.tip().expect("tip read"), None);
+        assert_eq!(
+            dir_fingerprint(&dir),
+            before,
+            "the reject path must not write to the datadir"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Re-proves the already-shipped chain_id half at the same call site.
+    #[test]
+    fn apply_block_rejects_height_zero_under_non_devnet_chain_id() {
+        let (mut engine, dir) = genesis_identity_engine("rubin-rust-genesis-chainid", [0x11; 32]);
+        let err = engine
+            .apply_block(&devnet_genesis_block_bytes(), None)
+            .unwrap_err();
+        assert_eq!(err, "genesis chain_id mismatch");
+        assert!(!engine.chain_state.has_tip);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Zero-ChainID skip, asserted by the negative shape exactly as Go does:
+    /// the mutated block may still fail further down in consensus connect, but
+    /// it must NOT fail with the genesis-hash verdict.
+    #[test]
+    fn apply_block_genesis_hash_guard_skips_when_chain_id_zero() {
+        let (mut engine, dir) = genesis_identity_engine("rubin-rust-genesis-zero", [0u8; 32]);
+        if let Err(err) = engine.apply_block(&mutated_devnet_genesis_block(), None) {
+            assert_ne!(
+                err, "genesis_hash mismatch",
+                "the hash guard must skip in zero-ChainID test mode"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bootstrap_canonical_genesis_if_empty_devnet_imports_published_genesis() {
+        let (mut engine, dir) =
+            genesis_identity_engine("rubin-rust-bootstrap-devnet", devnet_genesis_chain_id());
+        engine
+            .bootstrap_canonical_genesis_if_empty()
+            .expect("bootstrap canonical genesis");
+
+        assert!(engine.chain_state.has_tip);
+        assert_eq!(engine.chain_state.height, 0);
+        assert_eq!(engine.chain_state.tip_hash, devnet_genesis_hash());
+        let store = engine.block_store_snapshot().expect("blockstore");
+        assert_eq!(
+            store.canonical_hash(0).expect("row 0"),
+            Some(devnet_genesis_hash())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bootstrap_canonical_genesis_if_empty_is_noop_with_zero_chain_id() {
+        let (mut engine, dir) = genesis_identity_engine("rubin-rust-bootstrap-zero", [0u8; 32]);
+        engine
+            .bootstrap_canonical_genesis_if_empty()
+            .expect("zero-ChainID bootstrap must be a no-op");
+        assert!(
+            !engine.chain_state.has_tip,
+            "zero-ChainID bootstrap must leave the chain empty for synthetic-genesis fixtures"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bootstrap_canonical_genesis_if_empty_is_idempotent_after_tip() {
+        let (mut engine, dir) =
+            genesis_identity_engine("rubin-rust-bootstrap-idem", devnet_genesis_chain_id());
+        engine
+            .bootstrap_canonical_genesis_if_empty()
+            .expect("first bootstrap");
+        let tip_before = engine.chain_state.tip_hash;
+        let height_before = engine.chain_state.height;
+
+        engine
+            .bootstrap_canonical_genesis_if_empty()
+            .expect("second bootstrap must be a no-op");
+        engine
+            .bootstrap_canonical_genesis_if_empty()
+            .expect("third bootstrap must be a no-op");
+
+        assert_eq!(engine.chain_state.tip_hash, tip_before);
+        assert_eq!(engine.chain_state.height, height_before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Hostile row: a crash between the bootstrap-applied genesis and the first
+    /// mined block. The store holds the committed genesis while the in-memory
+    /// snapshot is lost; the stock recovery machinery reconciles forward onto
+    /// the published genesis. No new crash class is introduced.
+    #[test]
+    fn bootstrap_then_crash_before_first_mined_block_reconciles_cleanly() {
+        let (mut engine, dir) =
+            genesis_identity_engine("rubin-rust-bootstrap-crash", devnet_genesis_chain_id());
+        engine
+            .bootstrap_canonical_genesis_if_empty()
+            .expect("bootstrap canonical genesis");
+        let mut store = engine.block_store_snapshot().expect("blockstore");
+        let cfg = engine.cfg.clone();
+        drop(engine);
+
+        // Worst-case crash: the chainstate snapshot never reached disk.
+        let mut state = ChainState::new();
+        let changed = reconcile_chain_state_with_block_store(&mut state, &mut store, &cfg)
+            .expect("reconcile after crash");
+        assert!(changed, "reconcile must replay the committed genesis");
+        assert!(state.has_tip);
+        assert_eq!(state.height, 0);
+        assert_eq!(state.tip_hash, devnet_genesis_hash());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Hostile row, documenting observed behavior only: a pre-fix datadir whose
+    /// row 0 is a self-mined height-0 block. The bootstrap does NOT repair,
+    /// migrate or overwrite it — it is a no-op on any tipped chain. Repairing
+    /// such datadirs is explicitly out of this issue's scope; under RUB-1134's
+    /// genesis anchor they are the foreign-datadir class and operators reset.
+    #[test]
+    fn bootstrap_does_not_repair_a_pre_fix_self_mined_row_zero() {
+        let (mut engine, dir) =
+            genesis_identity_engine("rubin-rust-bootstrap-prefix", devnet_genesis_chain_id());
+        engine.chain_state.has_tip = true;
+        engine.chain_state.height = 0;
+        engine.chain_state.tip_hash = [0x11; 32];
+
+        engine
+            .bootstrap_canonical_genesis_if_empty()
+            .expect("bootstrap must be a no-op on a tipped chain");
+
+        assert_eq!(engine.chain_state.height, 0);
+        assert_eq!(
+            engine.chain_state.tip_hash, [0x11; 32],
+            "a foreign row 0 is left untouched, not silently replaced"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

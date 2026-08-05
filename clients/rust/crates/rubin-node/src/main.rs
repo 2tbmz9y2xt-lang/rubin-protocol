@@ -3808,8 +3808,29 @@ mod tests {
         assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
         let out = String::from_utf8(stdout).expect("utf8");
         assert!(out.contains("\"mine_blocks\": 2"), "stdout={out}");
-        assert!(out.contains("mined: height=0"), "stdout={out}");
+        // RUB-1137 migration (bootstrap-first): height 0 is the published
+        // devnet genesis the miner adopts, so the two mined blocks are heights
+        // 1 and 2. Original property — `--mine-blocks N` mines exactly N
+        // consecutive blocks and exits 0 — unchanged.
         assert!(out.contains("mined: height=1"), "stdout={out}");
+        assert!(out.contains("mined: height=2"), "stdout={out}");
+        assert!(!out.contains("mined: height=0"), "stdout={out}");
+
+        // Cross-client row-0 evidence: the freshly mined devnet datadir's
+        // canonical index row 0 is the published devnet genesis hash — the same
+        // literal the Go reference pins as `genesisBlockHashHex`
+        // (clients/go/node/chainstate.go).
+        let store = rubin_node::BlockStore::open(rubin_node::block_store_path(&dir))
+            .expect("open mined store");
+        let row0 = store
+            .canonical_hash(0)
+            .expect("read canonical row 0")
+            .expect("canonical row 0 present");
+        let row0_hex: String = row0.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(
+            row0_hex, "8d48b863805b96e5fcb79ee9652cd6257ae352b2f52088af921212039f9e8aff",
+            "mined devnet datadir row 0 must be the published genesis hash"
+        );
 
         fs::remove_dir_all(&dir).expect("cleanup");
     }
