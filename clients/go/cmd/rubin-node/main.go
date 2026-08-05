@@ -414,6 +414,28 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "--create-store cannot be combined with --dry-run or --legacy-exposure-scan")
 		return 2
 	}
+	// --featurebits-deployments is untrusted operator input: parse and
+	// validate it with the same loader the telemetry print consumes BEFORE
+	// the legacy-exposure-scan chainstate read, the storage lifecycle
+	// (createOrOpenBlockStore below), chainstate load/reconcile/save, and
+	// service startup, so an invalid file exits 2 on an untouched
+	// filesystem with no service started. The parsed rows are reused by
+	// the telemetry print below — the file is read exactly once per run.
+	// An empty value skips validation and telemetry alike (the flag's
+	// pre-existing contract). On the --legacy-exposure-scan path and on a
+	// store with no tip this ADDS a new rejection: exit 2 where the
+	// pre-diff code returned 0 with an invalid file silently ignored (the
+	// scan returns before the telemetry branch, which is also tipOK-gated)
+	// — a contracted operator-visible change.
+	var featureBitDeployments []featureBitDeploymentJSON
+	if *featurebitsDeploymentsPath != "" {
+		ds, err := loadFeatureBitDeployments(*featurebitsDeploymentsPath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "invalid featurebits deployments: %v\n", err)
+			return 2
+		}
+		featureBitDeployments = ds
+	}
 	chainStatePath := node.ChainStatePath(cfg.DataDir)
 	if *legacyExposureScan {
 		chainState, err := loadLegacyExposureScanChainState(chainStatePath)
@@ -580,7 +602,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if *featurebitsDeploymentsPath != "" && tipOK {
 		nextHeight := tipHeight + 1
-		if err := printFeatureBitsTelemetry(stdout, blockStore, nextHeight, *featurebitsDeploymentsPath); err != nil {
+		if err := printFeatureBitsTelemetryRows(stdout, blockStore, nextHeight, featureBitDeployments); err != nil {
 			_, _ = fmt.Fprintf(stderr, "featurebits telemetry failed: %v\n", err)
 			return 2
 		}
@@ -762,17 +784,52 @@ type headerStore interface {
 	GetHeaderByHash(hash [32]byte) ([]byte, error)
 }
 
-func printFeatureBitsTelemetry(w io.Writer, bs headerStore, height uint64, deploymentsPath string) error {
-	// Operator config read, bounded pre-allocation (RUB-1062 rider A; see
-	// node.ReadConfigFile for the ceiling derivation).
+// loadFeatureBitDeployments reads, parses, and validates a
+// --featurebits-deployments file without touching the blockstore: the
+// bounded config read (RUB-1062 rider A; see node.ReadConfigFile for the
+// ceiling derivation), the JSON decode, and the per-row consensus
+// validation that FeatureBitStateAtHeightFromWindowCounts would otherwise
+// report only at telemetry time. It is the validation-only half of the
+// telemetry path, hoisted so run() can reject an invalid file before any
+// filesystem or service side effect (RUB-876).
+func loadFeatureBitDeployments(deploymentsPath string) ([]featureBitDeploymentJSON, error) {
 	raw, err := node.ReadConfigFile(filepath.Clean(deploymentsPath))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var ds []featureBitDeploymentJSON
 	if err := json.Unmarshal(raw, &ds); err != nil {
+		return nil, err
+	}
+	for _, dj := range ds {
+		d := consensus.FeatureBitDeployment{
+			Name:          dj.Name,
+			Bit:           dj.Bit,
+			StartHeight:   dj.StartHeight,
+			TimeoutHeight: dj.TimeoutHeight,
+		}
+		if err := d.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	return ds, nil
+}
+
+// printFeatureBitsTelemetry loads deploymentsPath and prints its telemetry:
+// the pre-RUB-876 single-call shape, kept for callers holding only a path
+// (currently tests in this package). run() does not use it: startup
+// validates early via loadFeatureBitDeployments — before any filesystem or
+// service side effect — and later prints via printFeatureBitsTelemetryRows,
+// so the file is read exactly once per run.
+func printFeatureBitsTelemetry(w io.Writer, bs headerStore, height uint64, deploymentsPath string) error {
+	ds, err := loadFeatureBitDeployments(deploymentsPath)
+	if err != nil {
 		return err
 	}
+	return printFeatureBitsTelemetryRows(w, bs, height, ds)
+}
+
+func printFeatureBitsTelemetryRows(w io.Writer, bs headerStore, height uint64, ds []featureBitDeploymentJSON) error {
 	for _, dj := range ds {
 		d := consensus.FeatureBitDeployment{
 			Name:          dj.Name,
