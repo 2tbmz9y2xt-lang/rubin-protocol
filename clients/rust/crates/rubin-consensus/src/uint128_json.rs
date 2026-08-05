@@ -34,9 +34,9 @@ pub fn parse_canonical_decimal(s: &str) -> Option<u128> {
     if !s.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    // `from_str_radix` on an all-ASCII-digit, no-leading-zero string can only
-    // fail by exceeding u128, which is exactly the remaining rejection.
-    u128::from_str_radix(s, 10).ok()
+    // Parsing an all-ASCII-digit, no-leading-zero string can only fail by
+    // exceeding u128, which is exactly the remaining rejection.
+    s.parse::<u128>().ok()
 }
 
 /// Renders the canonical unsigned base-10 decimal form.
@@ -105,7 +105,12 @@ pub fn deserialize_opt<'de, D: Deserializer<'de>>(
 /// cross-multiplication over all 192 product bits. A zero weight on either
 /// side is an uncomputable rate and compares equal, matching Go
 /// `consensus.CompareFeeRate`.
-pub fn compare_fee_rate(fee_a: u128, weight_a: u64, fee_b: u128, weight_b: u64) -> core::cmp::Ordering {
+pub fn compare_fee_rate(
+    fee_a: u128,
+    weight_a: u64,
+    fee_b: u128,
+    weight_b: u64,
+) -> core::cmp::Ordering {
     if weight_a == 0 || weight_b == 0 {
         return core::cmp::Ordering::Equal;
     }

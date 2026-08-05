@@ -2,9 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::OnceLock;
 
-use rubin_consensus::uint128_json::{
-    compare_fee_rate as compare_fee_rate_exact, fee_below_rate,
-};
+use rubin_consensus::uint128_json::{compare_fee_rate as compare_fee_rate_exact, fee_below_rate};
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
     constants::{COV_TYPE_CORE_EXT, COV_TYPE_CORE_SIMPLICITY, MAX_RELAY_MSG_BYTES},

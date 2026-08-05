@@ -5,6 +5,7 @@ use rubin_consensus::constants::{
     MAX_WITNESS_BYTES_PER_TX, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_SENTINEL,
 };
 use rubin_consensus::merkle::witness_merkle_root_wtxids;
+use rubin_consensus::uint128_json;
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
     block_hash, compact_shortid,
@@ -22,7 +23,6 @@ use rubin_consensus::{
     ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
     ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM,
 };
-use rubin_consensus::uint128_json;
 use rubin_node::{devnet_genesis_chain_id, ChainState, TxPool, TxPoolAdmitErrorKind, TxPoolConfig};
 use serde::de::{IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
