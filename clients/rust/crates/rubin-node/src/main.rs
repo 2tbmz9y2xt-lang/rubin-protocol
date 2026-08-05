@@ -2481,6 +2481,78 @@ mod tests {
         fs::remove_dir_all(&dir).expect("cleanup");
     }
 
+    /// RUB-1134: the genesis anchor is wired into `run()`, not only into
+    /// `BlockStore::verify_genesis_anchor` — the blockstore unit row stays green
+    /// with this call site deleted. Row 0 here is a COHERENT foreign genesis
+    /// (header, block bytes and index row all agree, so every stored-identity
+    /// check passes and only the anchor can refuse it), so a mutating startup
+    /// must exit 2 on the anchor message with the datadir byte-unchanged, while
+    /// `--dry-run` adopts nothing and still exits 0. Go mirror:
+    /// `TestRunGenesisAnchorRefusesForeignDatadir`.
+    #[test]
+    fn genesis_anchor_refuses_foreign_datadir() {
+        let dir = unique_temp_dir("rubin-node-bin-anchor-foreign");
+        seed_block_store(&dir);
+
+        // Another chain's genesis: flip one header byte, then re-derive the
+        // hash so the header/block/index triple stays self-consistent.
+        let mut block = rubin_node::devnet_genesis_block_bytes();
+        block[rubin_consensus::BLOCK_HEADER_BYTES - 1] ^= 0x01;
+        let header = block[..rubin_consensus::BLOCK_HEADER_BYTES].to_vec();
+        let foreign = rubin_consensus::block_hash(&header).expect("hash the foreign genesis");
+        assert_ne!(
+            foreign,
+            rubin_node::genesis::devnet_genesis_hash(),
+            "fixture is not foreign"
+        );
+        let mut store = BlockStore::open(block_store_path(&dir)).expect("open block store");
+        store
+            .commit_canonical_block(
+                0,
+                foreign,
+                &header,
+                &block,
+                &rubin_node::undo::BlockUndo {
+                    block_height: 0,
+                    previous_already_generated: 0,
+                    txs: Vec::new(),
+                },
+            )
+            .expect("commit the foreign canonical row 0");
+        drop(store);
+
+        let index_file = block_store_path(&dir).join("index.json");
+        let before = fs::read(&index_file).expect("canonical index");
+
+        // `--mine-blocks`/`--mine-exit` only BOUND the run: the anchor rejects
+        // long before the miner starts, and an unbounded startup would serve
+        // forever, so the bounded form keeps the regression signal fast.
+        let d = dir.display().to_string();
+        let (code, err) = cli(&["--datadir", &d, "--mine-blocks", "1", "--mine-exit"]);
+        assert_eq!(code, 2, "{err}");
+        assert!(
+            err.contains(
+                "canonical index genesis anchor failed: STORE_INTEGRITY: canonical index genesis mismatch."
+            ),
+            "unexpected refusal: {err}"
+        );
+        assert_eq!(
+            fs::read(&index_file).expect("re-read index"),
+            before,
+            "the refused startup rewrote the canonical index"
+        );
+        assert!(
+            !chain_state_path(&dir).exists(),
+            "the refused startup wrote a chainstate"
+        );
+
+        let (code, err) = cli(&["--dry-run", "--datadir", &d]);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(fs::read(&index_file).expect("re-read index"), before);
+        assert!(!chain_state_path(&dir).exists());
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
     #[test]
     fn parse_args_accepts_rpc_bind() {
         let cfg = parse_args(&[
