@@ -245,20 +245,78 @@ func TestRejectDaAnchorTxPolicy_NonDaTxNotCharged(t *testing.T) {
 
 // Hostile matrix #5: overflow in any term must reject fail-closed,
 // not silently fall through with a zero floor.
-func TestRejectDaAnchorTxPolicy_RelayFloorOverflowFailsClosed(t *testing.T) {
-	tx, utxos, _ := daTestTx(t, 0x17, 100, 0, 10)
-	// weight is recomputed internally by RejectDaAnchorTxPolicy from tx;
-	// pairing it with currentMin=^uint64(0) overflows the multiplication.
-	const currentMin = ^uint64(0)
+// TestRejectDaAnchorTxPolicy_RelayFloorProductAboveU64AdmitsClearingFee pins
+// that a weight*currentMempoolMinFeeRate product above u64 is computed
+// exactly rather than rejected. Before RUB-1127 this product went through
+// mulU64NoOverflow, so any rate that overflowed the u64 product rejected
+// every DA transaction regardless of its fee -- a product-overflow rejection
+// the contract forbids, and one that already did not exist in
+// mempool_fee_floor.go (feeRateBelowFloor) or in the consensus-CLI policy
+// model (feeBelowRollingFloorPolicy).
+func TestRejectDaAnchorTxPolicy_RelayFloorProductAboveU64AdmitsClearingFee(t *testing.T) {
+	// One u64-max input paying nearly everything as fee, plus a second
+	// u64-max input: sum_in crosses u64, so fee ~= 2^65 and only an exact
+	// u128 floor can decide the comparison.
+	tx, utxos, _ := daTestTx(t, 0x17, ^uint64(0), ^uint64(0)-100, 10)
+	var second [32]byte
+	second[0] = 0x17
+	second[1] = 0xFF
+	secondOp := consensus.Outpoint{Txid: second, Vout: 0}
+	utxos[secondOp] = consensus.UtxoEntry{Value: ^uint64(0)}
+	tx.Inputs = append(tx.Inputs, consensus.TxInput{PrevTxid: second, PrevVout: 0})
+
+	weight, _, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil {
+		t.Fatalf("TxWeightAndStats: %v", err)
+	}
+	// Smallest rate whose product with weight exceeds u64.
+	currentMin := (^uint64(0) / weight) + 1
+	exactFloor := mulU64Exact(weight, currentMin)
+	if exactFloor.Cmp(consensus.Uint128FromU64(^uint64(0))) <= 0 {
+		t.Fatalf("test premise: relay floor %s must exceed u64", exactFloor.String())
+	}
+	fee, err := computeFeeNoVerify(tx, utxos)
+	if err != nil {
+		t.Fatalf("computeFeeNoVerify: %v", err)
+	}
+	if fee.Cmp(exactFloor) < 0 {
+		t.Fatalf("test premise: fee %s must clear the exact floor %s", fee.String(), exactFloor.String())
+	}
+
 	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, currentMin, 1, 0)
+	if err != nil {
+		t.Fatalf("exact relay floor must not error: %v (reason=%q)", err, reason)
+	}
+	if reject {
+		t.Fatalf("fee %s clears exact relay floor %s but was rejected: %q", fee.String(), exactFloor.String(), reason)
+	}
+
+	// One unit below the exact floor still rejects, with the honest Stage C
+	// comparison reason rather than an arithmetic-capability error.
+	belowFee, ok := exactFloor.CheckedSub(consensus.Uint128FromU64(1))
+	if !ok {
+		t.Fatal("exact floor must be reducible by one")
+	}
+	shortfall, ok := fee.CheckedSub(belowFee)
+	if !ok {
+		t.Fatal("fee must exceed the reduced floor")
+	}
+	tx.Outputs[0].Value += shortfall.Lo
+	if shortfall.Hi != 0 {
+		t.Fatalf("test premise: shortfall %s must fit an output value", shortfall.String())
+	}
+	reject, _, reason, err = RejectDaAnchorTxPolicy(tx, utxos, currentMin, 1, 0)
+	if err != nil {
+		t.Fatalf("one-below case must not error: %v (reason=%q)", err, reason)
+	}
 	if !reject {
-		t.Fatalf("expected reject on overflow; reason=%q err=%v", reason, err)
+		t.Fatal("fee one below the exact relay floor must reject")
 	}
-	if err == nil {
-		t.Fatalf("expected error on overflow")
+	if !strings.Contains(reason, "DA fee below Stage C floor") {
+		t.Fatalf("expected exact Stage C comparison reason, got %q", reason)
 	}
-	if !strings.Contains(reason, "overflow") {
-		t.Fatalf("reason missing overflow diagnostic: %q", reason)
+	if strings.Contains(reason, "overflow") {
+		t.Fatalf("no overflow rejection may remain on the relay-floor term: %q", reason)
 	}
 }
 

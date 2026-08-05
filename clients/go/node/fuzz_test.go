@@ -367,13 +367,11 @@ func FuzzDaFeeFloorPolicyBoundaries(f *testing.F) {
 			return
 		}
 
-		relayFloor, ok := fuzzCheckedMul(weight, currentMinFeeRate)
-		if !ok {
-			if !reject || policyErr == nil || !strings.Contains(reason, "relay fee floor overflow") {
-				t.Fatalf("relay overflow got reject=%v reason=%q err=%v", reject, reason, policyErr)
-			}
-			return
-		}
+		// RUB-1127: the relay-floor term is the exact 128-bit weight*rate
+		// product and has no overflow branch, so the oracle never expects a
+		// product-overflow rejection here. The DA-side terms below keep their
+		// u64 overflow expectations.
+		relayFloor := mulU64Exact(weight, currentMinFeeRate)
 		daFloor, ok := fuzzCheckedMul(wantDaBytes, minDaFeeRate)
 		if !ok {
 			if !reject || policyErr == nil || !strings.Contains(reason, "DA fee floor overflow") {
@@ -396,12 +394,12 @@ func FuzzDaFeeFloorPolicyBoundaries(f *testing.F) {
 			return
 		}
 		required := relayFloor
-		if daRequired > required {
-			required = daRequired
+		if widened := consensus.Uint128FromU64(daRequired); widened.Cmp(required) > 0 {
+			required = widened
 		}
-		wantReject := required != 0 && policyFee.Cmp(consensus.Uint128FromU64(required)) < 0
+		wantReject := !required.IsZero() && policyFee.Cmp(required) < 0
 		if reject != wantReject {
-			t.Fatalf("reject=%v, want %v (fee=%d required=%d relay=%d da=%d surcharge=%d weight=%d daBytes=%d)", reject, wantReject, policyFee, required, relayFloor, daFloor, daSurcharge, weight, wantDaBytes)
+			t.Fatalf("reject=%v, want %v (fee=%s required=%s relay=%s da=%d surcharge=%d weight=%d daBytes=%d)", reject, wantReject, policyFee.String(), required.String(), relayFloor.String(), daFloor, daSurcharge, weight, wantDaBytes)
 		}
 		if wantReject {
 			if policyErr != nil || !strings.Contains(reason, "DA fee below Stage C floor") {

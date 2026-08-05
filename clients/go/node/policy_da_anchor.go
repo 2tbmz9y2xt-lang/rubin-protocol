@@ -3,6 +3,7 @@ package node
 import (
 	"errors"
 	"fmt"
+	"math/bits"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -97,7 +98,7 @@ func RejectDaAnchorTxPolicy(
 	if err != nil {
 		return true, daBytes, reason, err
 	}
-	if floor.required == 0 {
+	if floor.required.IsZero() {
 		// DA tx but every Stage C rate-derived fee term is zero: the
 		// relay-floor term is zero and both DA-side terms are zero.
 		// Nothing to enforce; admit without fee compute.
@@ -107,20 +108,31 @@ func RejectDaAnchorTxPolicy(
 	if err != nil {
 		return true, daBytes, "cannot compute fee for DA tx (policy)", err
 	}
-	if fee.Cmp(consensus.Uint128FromU64(floor.required)) < 0 {
+	if fee.Cmp(floor.required) < 0 {
 		return true, daBytes, fmt.Sprintf(
-			"DA fee below Stage C floor (fee=%s required_fee=%d relay_fee_floor=%d da_fee_floor=%d da_surcharge=%d weight=%d da_payload_len=%d)",
-			fee.String(), floor.required, floor.relayFloor, floor.daFloor, floor.daSurcharge, weight, daBytes,
+			"DA fee below Stage C floor (fee=%s required_fee=%s relay_fee_floor=%s da_fee_floor=%d da_surcharge=%d weight=%d da_payload_len=%d)",
+			fee.String(), floor.required.String(), floor.relayFloor.String(), floor.daFloor, floor.daSurcharge, weight, daBytes,
 		), nil
 	}
 	return false, daBytes, "", nil
 }
 
 type daAnchorRequiredFee struct {
-	relayFloor  uint64
+	relayFloor  consensus.Uint128
 	daFloor     uint64
 	daSurcharge uint64
-	required    uint64
+	required    consensus.Uint128
+}
+
+// mulU64Exact returns the exact 128-bit product of two u64 rate terms. Every
+// product bit is retained, so a relay fee floor above u64 is measured exactly
+// against the u128 fee instead of rejecting a transaction whose fee genuinely
+// clears it. Mirrors the already-exact predicates in mempool_fee_floor.go
+// (feeRateBelowFloor) and the consensus-CLI policy model
+// (feeBelowRollingFloorPolicy), which never reject on this product.
+func mulU64Exact(a uint64, b uint64) consensus.Uint128 {
+	hi, lo := bits.Mul64(a, b)
+	return consensus.Uint128{Hi: hi, Lo: lo}
 }
 
 func computeDaAnchorRequiredFee(
@@ -130,10 +142,12 @@ func computeDaAnchorRequiredFee(
 	minDaFeeRate uint64,
 	daSurchargePerByte uint64,
 ) (daAnchorRequiredFee, string, error) {
-	relayFloor, err := mulU64NoOverflow(weight, currentMempoolMinFeeRate)
-	if err != nil {
-		return daAnchorRequiredFee{}, fmt.Sprintf("relay fee floor overflow (weight=%d current_mempool_min_fee_rate=%d)", weight, currentMempoolMinFeeRate), err
-	}
+	// The relay-floor term is exact and never rejects: weight and the rolling
+	// rate are both u64, so their full product fits u128 by construction.
+	// The DA-side terms below keep their u64 overflow errors, whose reject
+	// reasons are pinned by the shared CV-DA-FEE-FLOOR vector and by both
+	// consensus-CLI policy models.
+	relayFloor := mulU64Exact(weight, currentMempoolMinFeeRate)
 	daFloor, err := mulU64NoOverflow(daBytes, minDaFeeRate)
 	if err != nil {
 		return daAnchorRequiredFee{}, fmt.Sprintf("DA fee floor overflow (da_payload_len=%d min_da_fee_rate=%d)", daBytes, minDaFeeRate), err
@@ -154,13 +168,14 @@ func computeDaAnchorRequiredFee(
 	}, "", nil
 }
 
-func maxDaAnchorRequiredFee(relayFloor uint64, daFloor uint64, daSurcharge uint64) (uint64, error) {
+func maxDaAnchorRequiredFee(relayFloor consensus.Uint128, daFloor uint64, daSurcharge uint64) (consensus.Uint128, error) {
 	daRequired := daFloor
 	if err := addU64NoOverflow(&daRequired, daSurcharge); err != nil {
-		return 0, err
+		return consensus.Uint128{}, err
 	}
-	if daRequired > relayFloor {
-		return daRequired, nil
+	widened := consensus.Uint128FromU64(daRequired)
+	if widened.Cmp(relayFloor) > 0 {
+		return widened, nil
 	}
 	return relayFloor, nil
 }

@@ -1987,11 +1987,13 @@ pub(crate) fn reject_da_anchor_tx_policy(
         // not compute fee or apply any DA-specific term.
         return Ok(());
     }
-    let relay_floor = weight.checked_mul(current_mempool_min_fee_rate).ok_or_else(|| {
-        format!(
-            "relay fee floor overflow (weight={weight} current_mempool_min_fee_rate={current_mempool_min_fee_rate}): u64 overflow"
-        )
-    })?;
+    // The relay-floor term is exact and never rejects: weight and the rolling
+    // rate are both u64, so their full product is at most (2^64-1)^2 and fits
+    // u128 by construction. Mirrors Go `mulU64Exact` in policy_da_anchor.go
+    // and the already-exact `fee_below_rate` predicate. The DA-side terms
+    // below keep their u64 overflow errors, whose reject reasons are pinned
+    // by the shared CV-DA-FEE-FLOOR vector and both consensus-CLI models.
+    let relay_floor = u128::from(weight) * u128::from(current_mempool_min_fee_rate);
     let da_floor = da_bytes.checked_mul(min_da_fee_rate).ok_or_else(|| {
         format!(
             "DA fee floor overflow (da_payload_len={da_bytes} min_da_fee_rate={min_da_fee_rate}): u64 overflow"
@@ -2007,7 +2009,7 @@ pub(crate) fn reject_da_anchor_tx_policy(
             "DA required fee overflow (da_fee_floor={da_floor} da_surcharge={da_surcharge}): u64 overflow"
         )
     })?;
-    let required = relay_floor.max(da_required);
+    let required = relay_floor.max(u128::from(da_required));
     if required == 0 {
         // DA tx but every Stage C rate-derived fee term is zero: the
         // relay-floor term is zero and both DA-side terms are zero.
@@ -2024,14 +2026,22 @@ pub(crate) fn reject_da_anchor_tx_policy(
     Ok(())
 }
 
+/// Derives the policy-side fee as an exact u128, matching the consensus
+/// derivation's domain and Go `computeFeeNoVerify` in `policy_da_anchor.go`.
+///
+/// Per-input and per-output values stay u64; only their sums and the
+/// difference widen, so a DA transaction whose fee exceeds u64 is measured
+/// against the Stage C floor exactly instead of failing an overflow check.
+/// Two u64-max inputs sum to 2^64 and derive a fee, where a u64 accumulator
+/// returned `sum_in overflow` and diverged from Go.
 pub(crate) fn compute_fee_no_verify(
     tx: &rubin_consensus::Tx,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
-) -> Result<u64, String> {
+) -> Result<u128, String> {
     if tx.inputs.is_empty() {
         return Err("missing inputs".to_string());
     }
-    let mut sum_in = 0u64;
+    let mut sum_in = 0u128;
     for input in &tx.inputs {
         let outpoint = Outpoint {
             txid: input.prev_txid,
@@ -2041,13 +2051,13 @@ pub(crate) fn compute_fee_no_verify(
             .get(&outpoint)
             .ok_or_else(|| "missing utxo".to_string())?;
         sum_in = sum_in
-            .checked_add(entry.value)
+            .checked_add(u128::from(entry.value))
             .ok_or_else(|| "sum_in overflow".to_string())?;
     }
-    let mut sum_out = 0u64;
+    let mut sum_out = 0u128;
     for output in &tx.outputs {
         sum_out = sum_out
-            .checked_add(output.value)
+            .checked_add(u128::from(output.value))
             .ok_or_else(|| "sum_out overflow".to_string())?;
     }
     if sum_out > sum_in {
@@ -2225,11 +2235,12 @@ mod tests {
 
     use super::{
         cheap_fee_floor_precheck, compare_admit_priority, compare_entries_for_mining,
-        compare_fee_rate, conflict, default_tx_pool_low_water_bytes, fee_precheck_p2pk_input_value,
-        fee_precheck_p2pk_output_value, mtp_median, next_block_height, next_block_mtp,
-        reject_da_anchor_tx_policy, rejected, relay_metadata, tx_pool_byte_pressure_target,
-        unavailable, TxPool, TxPoolAdmitErrorKind, TxPoolConfig, TxPoolEntry, TxPoolSnapshot,
-        TxPoolSnapshotEntry, TxSource, DEFAULT_MEMPOOL_MIN_FEE_RATE, MAX_TX_POOL_TRANSACTIONS,
+        compare_fee_rate, compute_fee_no_verify, conflict, default_tx_pool_low_water_bytes,
+        fee_precheck_p2pk_input_value, fee_precheck_p2pk_output_value, mtp_median,
+        next_block_height, next_block_mtp, reject_da_anchor_tx_policy, rejected, relay_metadata,
+        tx_pool_byte_pressure_target, unavailable, TxPool, TxPoolAdmitErrorKind, TxPoolConfig,
+        TxPoolEntry, TxPoolSnapshot, TxPoolSnapshotEntry, TxSource, DEFAULT_MEMPOOL_MIN_FEE_RATE,
+        MAX_TX_POOL_TRANSACTIONS,
     };
     use crate::{
         block_store_path, default_sync_config, devnet_genesis_block_bytes, devnet_genesis_chain_id,
@@ -4507,13 +4518,112 @@ mod tests {
         assert!(err.contains(&format!("da_fee_floor={da_required}")));
     }
 
+    /// Pins that a weight*current_mempool_min_fee_rate product above u64 is
+    /// computed exactly rather than rejected. Before RUB-1127 this product
+    /// went through `weight.checked_mul(..)`, so any rate that overflowed the
+    /// u64 product rejected every DA transaction regardless of its fee -- a
+    /// product-overflow rejection the contract forbids, and one that already
+    /// did not exist in `fee_below_rate` or in either consensus-CLI policy
+    /// model. Mirrors Go
+    /// `TestRejectDaAnchorTxPolicy_RelayFloorProductAboveU64AdmitsClearingFee`.
     #[test]
-    fn stage_c_da_overflow_relay_floor_rejects_fail_closed() {
-        let (state, raw, weight, _) = build_signed_da_tx_with_fee(1_000_000, vec![0x77; 8]);
-        let err = run_da_policy(&raw, &state, u64::MAX, 1, 1)
-            .expect_err("u64::MAX * weight must overflow");
-        assert!(err.starts_with("relay fee floor overflow"), "got: {err}");
-        assert!(err.contains(&format!("weight={weight}")));
+    fn stage_c_relay_floor_product_above_u64_admits_clearing_fee() {
+        // One u64-max input paying nearly everything as fee, plus a second
+        // u64-max input: sum_in crosses u64, so fee ~= 2^65 and only an exact
+        // u128 floor can decide the comparison.
+        let (state, raw, _, _) = build_signed_da_tx_with_fee(u64::MAX - 100, vec![0x77; 8]);
+        let (mut tx, _, _, _) = parse_tx(&raw).expect("parse tx");
+        let second = Outpoint {
+            txid: [0x17; 32],
+            vout: 0,
+        };
+        tx.inputs.push(TxInput {
+            prev_txid: second.txid,
+            prev_vout: second.vout,
+            script_sig: Vec::new(),
+            sequence: 0,
+        });
+        let mut utxos = state.utxos.clone();
+        utxos.insert(
+            second,
+            UtxoEntry {
+                value: u64::MAX,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x23; 2592]),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+        let (weight, da_bytes, _) =
+            tx_weight_and_stats_public(&tx).expect("tx_weight_and_stats_public");
+
+        // Smallest rate whose product with weight exceeds u64.
+        let current_min = (u64::MAX / weight) + 1;
+        let exact_floor = u128::from(weight) * u128::from(current_min);
+        assert!(
+            exact_floor > u128::from(u64::MAX),
+            "test premise: relay floor {exact_floor} must exceed u64"
+        );
+        let fee = compute_fee_no_verify(&tx, &utxos).expect("fee must derive above u64");
+        assert!(
+            fee >= exact_floor,
+            "test premise: fee {fee} must clear the exact floor {exact_floor}"
+        );
+
+        reject_da_anchor_tx_policy(&tx, weight, da_bytes, &utxos, current_min, 1, 0)
+            .expect("fee clearing the exact >u64 relay floor must be admitted");
+
+        // One unit below the exact floor still rejects, with the honest Stage
+        // C comparison reason rather than an arithmetic-capability error.
+        let shortfall = fee - (exact_floor - 1);
+        assert!(
+            shortfall <= u128::from(u64::MAX),
+            "test premise: shortfall {shortfall} must fit an output value"
+        );
+        tx.outputs[0].value += shortfall as u64;
+        let err = reject_da_anchor_tx_policy(&tx, weight, da_bytes, &utxos, current_min, 1, 0)
+            .expect_err("fee one below the exact relay floor must reject");
+        assert!(err.contains("DA fee below Stage C floor"), "got: {err}");
+        assert!(
+            !err.contains("overflow"),
+            "no overflow rejection may remain on the relay-floor term: {err}"
+        );
+    }
+
+    /// Two u64-max inputs sum to 2^64: a u64 accumulator returned
+    /// `sum_in overflow` here while Go derived the fee exactly, so the two
+    /// clients disagreed on admission without any fee above u64 being
+    /// involved. Mirrors the Go coverage in
+    /// `clients/go/node/coverage_hotspots_test.go`.
+    #[test]
+    fn compute_fee_no_verify_sums_two_u64_max_inputs_exactly() {
+        let (state, raw, _, _) = build_signed_da_tx_with_fee(u64::MAX - 100, vec![0x77; 8]);
+        let (mut tx, _, _, _) = parse_tx(&raw).expect("parse tx");
+        let second = Outpoint {
+            txid: [0x18; 32],
+            vout: 0,
+        };
+        tx.inputs.push(TxInput {
+            prev_txid: second.txid,
+            prev_vout: second.vout,
+            script_sig: Vec::new(),
+            sequence: 0,
+        });
+        let mut utxos = state.utxos.clone();
+        utxos.insert(
+            second,
+            UtxoEntry {
+                value: u64::MAX,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x23; 2592]),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+        // sum_in = 2*(2^64-1), sum_out = 100 (the single output).
+        let fee = compute_fee_no_verify(&tx, &utxos).expect("two u64-max inputs must derive a fee");
+        assert_eq!(fee, 2 * u128::from(u64::MAX) - 100);
+        assert!(fee > u128::from(u64::MAX), "fee {fee} must exceed u64");
     }
 
     #[test]
