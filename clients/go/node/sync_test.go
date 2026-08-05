@@ -1611,6 +1611,11 @@ func TestSyncSetMempoolRejectsUsedEmptyHistory(t *testing.T) {
 			pool.currentMinFeeRate = 8
 			pool.decayMinFeeRateAfterConnectedBlockLocked() // 8 -> 4, still above the default
 		}},
+		// The row the RAW read exists for: the accessor reports a below-default
+		// floor AS the default, so a regression to it would accept this pool.
+		{"below-default raw rolling floor", func(_ *testing.T, pool *Mempool) {
+			pool.SetCurrentMinFeeRateForTest(0)
+		}},
 		{"cumulative accepted counter", func(_ *testing.T, pool *Mempool) { pool.admitAccepted.Add(1) }},
 		{"cumulative conflict counter", func(_ *testing.T, pool *Mempool) { pool.admitConflict.Add(1) }},
 		{"cumulative rejected counter", func(_ *testing.T, pool *Mempool) { pool.admitRejected.Add(1) }},
@@ -1707,13 +1712,31 @@ func TestSyncSetMempoolBindingIsAtomicAgainstConcurrentAdmission(t *testing.T) {
 		t.Fatalf("engine bound %p once the guard was released, want %p", got, held)
 	}
 
-	// Phase 2 — a real race yields only the two legal serializations.
+	// Phase 2 — the binding-first serialization, DETERMINISTICALLY: bind, then
+	// admit. Every admission necessarily ran after the binding, so it must land
+	// in the bound pool under the policy the engine completed.
 	spends := [2][]byte{f.spend(t, 700, 1), f.spend(t, 690, 2)}
-	bound := 0
+	first, firstPool := newEngine(t), f.newPool(t)
+	first.SetMempool(firstPool)
+	if got := boundMempool(first); got != firstPool {
+		t.Fatalf("binding-first: engine bound %p, want the fresh candidate %p", got, firstPool)
+	}
+	var firstWg sync.WaitGroup
+	firstWg.Add(len(spends))
+	for i := range spends {
+		go func(i int) { defer firstWg.Done(); _ = firstPool.AddTx(spends[i]) }(i)
+	}
+	firstWg.Wait()
+	if fp := fingerprintPool(firstPool); fp.policy.SuiteRegistry != registry || fp.admission.Accepted != 1 || fp.len != 1 || fp.ownerClaims != 1 {
+		t.Fatalf("binding-first: %+v residents=%d claims=%d registry=%v, want one admitted entry under the engine's policy", fp.admission, fp.len, fp.ownerClaims, fp.policy.SuiteRegistry)
+	}
+
+	// Phase 3 — unconstrained race, deliberately NEUTRAL on which serialization
+	// occurs: it pins only that whichever happens is one of exactly those two.
 	for iter := 0; iter < 12; iter++ {
 		engine, pool := newEngine(t), f.newPool(t)
 		var wg sync.WaitGroup
-		wg.Add(3)
+		wg.Add(len(spends) + 1)
 		for i := range spends {
 			go func(i int) { defer wg.Done(); _ = pool.AddTx(spends[i]) }(i)
 		}
@@ -1736,10 +1759,6 @@ func TestSyncSetMempoolBindingIsAtomicAgainstConcurrentAdmission(t *testing.T) {
 		if got != pool || fp.policy.SuiteRegistry != registry { // B: binding won.
 			t.Fatalf("iter %d: bound %p want %p, registry %v", iter, got, pool, fp.policy.SuiteRegistry)
 		}
-		bound++
-	}
-	if bound == 0 {
-		t.Fatal("no iteration bound the pool; the post-binding serialization went unexercised")
 	}
 }
 

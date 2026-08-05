@@ -131,9 +131,11 @@ func (m *Mempool) checkNeverUsedForBindingLocked() error {
 	if m.lastAdmissionSeq != 0 {
 		return fmt.Errorf("mempool candidate already admitted: last_admission_seq=%d", m.lastAdmissionSeq)
 	}
-	// The raw field, never currentMinFeeRateLocked: the accessor clamps a
-	// below-default value up to the default and would report a raised floor that
-	// has only PARTIALLY decayed as if it were untouched.
+	// The raw field, never currentMinFeeRateLocked. The accessor normalizes ONLY
+	// below-default values: a partially decayed raised floor (say 4 against the
+	// default 1) is visible through either read, but a raw value BELOW the
+	// default is reported AS the default and would be waved through as untouched.
+	// The raw read is load-bearing for exactly that state.
 	if m.currentMinFeeRate != DefaultMempoolMinFeeRate {
 		return fmt.Errorf("mempool candidate carries a non-default rolling fee floor: min_fee_rate=%d want=%d", m.currentMinFeeRate, DefaultMempoolMinFeeRate)
 	}
@@ -240,17 +242,12 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 		return txAdmitUnavailable("nil mempool")
 	}
 	// Exactly one admission counter increment per non-nil-receiver call, and
-	// NEVER outside the admission guard. The two guards below reject before that
-	// guard is available at all — one because there is no ChainState to take it
-	// from — so they count at their own return sites through the same
-	// noteAdmissionResult mapping. A nil receiver counts nothing.
+	// NEVER outside the admission guard. Only the nil-ChainState guard can
+	// precede it — there is no ChainState to take the guard from — so it counts
+	// at its own return site through the same noteAdmissionResult mapping. A nil
+	// receiver counts nothing.
 	if m.chainState == nil {
 		err := txAdmitUnavailable("nil chainstate")
-		m.noteAdmissionResult(err)
-		return err
-	}
-	if !validMempoolTxSource(source) {
-		err := txAdmitRejected(fmt.Sprintf("invalid mempool tx source %q", source))
 		m.noteAdmissionResult(err)
 		return err
 	}
@@ -262,6 +259,13 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 	// contained by ONE guard acquisition, which is what SetMempool's exclusive
 	// acquisition must be able to exclude.
 	defer func() { m.noteAdmissionResult(retErr) }()
+
+	// Inside the guard, so its rejection and count belong to that contained
+	// lifecycle and it waits on a terminally latched engine like every other
+	// admission: caller metadata never reports an outcome the binding cannot see.
+	if !validMempoolTxSource(source) {
+		return txAdmitRejected(fmt.Sprintf("invalid mempool tx source %q", source))
+	}
 
 	snapshot := m.chainState.admissionSnapshot()
 	policy := m.policySnapshot()
