@@ -301,3 +301,70 @@ func TestConnectBlockBasicInMemoryAtHeight_RejectsSubsidyExceeded(t *testing.T) 
 		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_SUBSIDY_EXCEEDED)
 	}
 }
+
+// TestConnectBlockInMemory_SumFeesBindsAnIndividualFeeAboveU64 pins an
+// INDIVIDUAL transaction fee whose high u128 limb is non-zero flowing into
+// sum_fees. CV-SUB-U128-01 and every other shared vector cross u64 only in
+// the ACCUMULATOR (two txs of fee 2^63, each Hi=0), so narrowing the addend
+// at the accumulation site stays invisible to all of them and to every other
+// unit test. The coinbase claims only the subsidy, so the >u64 value is
+// bound purely by the fee path.
+func TestConnectBlockInMemory_SumFeesBindsAnIndividualFeeAboveU64(t *testing.T) {
+	height := uint64(1)
+	prev := hashWithPrefix(0x91)
+	target := filledHash(0xff)
+	kp := mustMLDSA87Keypair(t)
+	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+
+	// sum_in = 2^63 + (2^63+1) = 2^64+1, sum_out = 1, so fee is exactly 2^64.
+	const half = uint64(1) << 63
+	spendTx := &Tx{
+		Version: 1, TxKind: 0x00, TxNonce: 1,
+		Inputs: []TxInput{
+			{PrevTxid: prev, PrevVout: 0},
+			{PrevTxid: prev, PrevVout: 1},
+		},
+		Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+	}
+	spendTx.Witness = []WitnessItem{
+		signP2PKInputWitness(t, spendTx, 0, half, [32]byte{}, kp),
+		signP2PKInputWitness(t, spendTx, 1, half+1, [32]byte{}, kp),
+	}
+	spendBytes := txBytesFromTx(t, spendTx)
+	_, spendTxid, _, _, err := ParseTx(spendBytes)
+	if err != nil {
+		t.Fatalf("ParseTx(spend): %v", err)
+	}
+
+	utxo := func(v uint64) UtxoEntry {
+		return UtxoEntry{Value: v, CovenantType: COV_TYPE_P2PK, CovenantData: covData}
+	}
+	state := &InMemoryChainState{
+		Utxos: map[Outpoint]UtxoEntry{
+			{Txid: prev, Vout: 0}: utxo(half),
+			{Txid: prev, Vout: 1}: utxo(half + 1),
+		},
+		AlreadyGenerated: new(big.Int),
+	}
+
+	subsidy := BlockSubsidyBig(height, state.AlreadyGenerated)
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, subsidy, spendBytes)
+	cbTxid := testTxID(t, coinbase)
+	root, err := MerkleRootTxids([][32]byte{cbTxid, spendTxid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+	block := buildBlockBytes(t, prev, root, target, 1, [][]byte{coinbase, spendBytes})
+
+	s, err := ConnectBlockBasicInMemoryAtHeight(block, &prev, &target, height, []uint64{0}, state, [32]byte{})
+	if err != nil {
+		t.Fatalf("ConnectBlockBasicInMemoryAtHeight: %v", err)
+	}
+	want := Uint128{Hi: 1, Lo: 0} // exactly 2^64
+	if s.SumFees.Cmp(want) != 0 {
+		t.Fatalf("sum_fees=%s, want %s", s.SumFees.String(), want.String())
+	}
+	if s.SumFees.Hi == 0 {
+		t.Fatalf("sum_fees=%s must carry a non-zero high limb", s.SumFees.String())
+	}
+}
