@@ -2,6 +2,7 @@ package devnetcv
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -544,14 +545,49 @@ func snapshotChainState(st *node.ChainState) (ChainStateJSON, error) {
 	if err != nil {
 		return ChainStateJSON{}, err
 	}
+	inner, err := unwrapStoreEnvelopeV1(raw)
+	if err != nil {
+		return ChainStateJSON{}, err
+	}
 	var snapshot ChainStateJSON
-	if err := json.Unmarshal(raw, &snapshot); err != nil {
+	if err := json.Unmarshal(inner, &snapshot); err != nil {
 		return ChainStateJSON{}, err
 	}
 	if snapshot.Utxos == nil {
 		snapshot.Utxos = []UtxoJSON{}
 	}
 	return snapshot, nil
+}
+
+// storeEnvelopeV1Frame is the local unwrap target for the store_envelope_v1
+// frame node.ChainState.Save now emits (RUB-1134). This package cannot import
+// node's unexported envelope helpers, so it re-parses only the two fields it
+// needs; it is not a security boundary, only a decode step for the
+// generator's own in-process snapshot.
+type storeEnvelopeV1Frame struct {
+	Version    uint32 `json:"version"`
+	PayloadB64 string `json:"payload_b64"`
+}
+
+// unwrapStoreEnvelopeV1 strictly parses the outer envelope and returns the
+// decoded inner payload bytes; it fails loudly on any shape or version
+// mismatch instead of silently falling back to the raw envelope bytes.
+func unwrapStoreEnvelopeV1(raw []byte) ([]byte, error) {
+	var frame storeEnvelopeV1Frame
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		return nil, fmt.Errorf("unwrap store envelope: %w", err)
+	}
+	if frame.Version != 1 {
+		return nil, fmt.Errorf("unwrap store envelope: unsupported version %d", frame.Version)
+	}
+	if frame.PayloadB64 == "" {
+		return nil, fmt.Errorf("unwrap store envelope: missing payload_b64")
+	}
+	payload, err := base64.StdEncoding.DecodeString(frame.PayloadB64)
+	if err != nil {
+		return nil, fmt.Errorf("unwrap store envelope: decode payload_b64: %w", err)
+	}
+	return payload, nil
 }
 
 func spendableOutputFromBlock(blockBytes []byte) ([32]byte, uint64, uint32, []byte, string, error) {
