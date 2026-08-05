@@ -200,7 +200,7 @@ fuzz_target!(|data: &[u8]| {
     // Sum input values for fee calculation.
     let sum_in: u64 = resolved_inputs.iter().map(|e| e.value).fold(0u64, |a, b| a.saturating_add(b));
     let sum_out: u64 = tx.outputs.iter().map(|o| o.value).fold(0u64, |a, b| a.saturating_add(b));
-    let fee = sum_in.saturating_sub(sum_out);
+    let fee = u128::from(sum_in.saturating_sub(sum_out));
 
     let ptc = rubin_consensus::PrecomputedTxContext {
         tx_index: 1,

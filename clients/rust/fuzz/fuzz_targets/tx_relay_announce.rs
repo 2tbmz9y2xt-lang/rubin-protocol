@@ -121,7 +121,7 @@ fuzz_target!(|data: &[u8]| {
     let peer_count = usize::from(data[0] % (MAX_PEERS as u8 + 1));
     let fanout = usize::from(data[1]) % (MAX_PEERS + 2);
     let tx_bytes = sample_tx_bytes(data[2], &data[8..]);
-    let fee = u64::from_le_bytes(data[3..11].try_into().unwrap_or([0u8; 8]));
+    let fee: u128 = u64::from_le_bytes(data[3..11].try_into().unwrap_or([0u8; 8])).into();
     let size = usize::from(u16::from_le_bytes([data[11], data[12]])).min(MAX_RAW_BYTES);
     let network = selected_network(data[13]);
     let meta = RelayTxMetadata { fee, size };
