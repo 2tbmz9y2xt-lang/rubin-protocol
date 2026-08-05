@@ -1229,8 +1229,19 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 		{name: "checksum_valid_over_unknown_payload_field", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":[],"x":1}`))},
 		{name: "checksum_valid_over_missing_payload_field", record: envelopeOver([]byte(`{"block_height":0,"txs":[]}`))},
 		{name: "checksum_valid_over_duplicate_payload_field", record: envelopeOver([]byte(`{"block_height":0,"block_height":1,"previous_already_generated":0,"txs":[]}`))},
-		{name: "checksum_valid_over_uppercase_txid", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[{"txid":"` + strings.Repeat("AB", 32) + `","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}`))},
-		{name: "checksum_valid_over_short_txid", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[{"txid":"aabb","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}`))},
+		// These two prove the decision precedes conversion: blockUndoFromDisk's
+		// own message for a bad txid ("expected 32 bytes, got 2") would WIN if
+		// conversion still ran first. Rust emits the identical string.
+		{
+			name:    "checksum_valid_over_uppercase_txid",
+			record:  envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[{"txid":"` + strings.Repeat("AB", 32) + `","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}`)),
+			wantMsg: "decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex",
+		},
+		{
+			name:    "checksum_valid_over_short_txid",
+			record:  envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[{"txid":"aabb","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}`)),
+			wantMsg: "decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(store.undoDir, hex.EncodeToString(blockHash[:])+".json")
@@ -1245,13 +1256,11 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 				t.Fatalf("GetUndo returned an undo alongside its error: %+v", got)
 			}
 			t.Logf("rejected with: %v", err)
-			if tc.wantErr != nil {
-				if !errors.Is(err, tc.wantErr) {
-					t.Fatalf("err = %v, want errors.Is %v", err, tc.wantErr)
-				}
-				if err.Error() != tc.wantMsg {
-					t.Fatalf("message = %q, want exactly %q", err.Error(), tc.wantMsg)
-				}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want errors.Is %v", err, tc.wantErr)
+			}
+			if tc.wantMsg != "" && err.Error() != tc.wantMsg {
+				t.Fatalf("message = %q, want exactly %q", err.Error(), tc.wantMsg)
 			}
 			if tc.wantErr == nil && strings.HasPrefix(tc.name, "checksum_valid_over_") {
 				// These rows carry a CORRECT checksum, so reaching a rejection

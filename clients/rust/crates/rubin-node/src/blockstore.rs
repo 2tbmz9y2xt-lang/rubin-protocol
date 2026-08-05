@@ -1542,14 +1542,17 @@ mod tests {
                     )
                     .as_bytes(),
                 ),
-                None,
+                // This row and the next prove the decision precedes conversion:
+                // `block_undo_from_disk`'s own message for a bad txid would WIN
+                // if conversion still ran first. Go emits the identical string.
+                Some("decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex"),
             ),
             (
                 "checksum_valid_over_short_txid",
                 envelope_over(
                     br#"{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[{"txid":"aabb","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}"#,
                 ),
-                None,
+                Some("decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex"),
             ),
         ];
 

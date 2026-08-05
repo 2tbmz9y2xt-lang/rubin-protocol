@@ -285,21 +285,55 @@ pub fn marshal_block_undo(undo: &BlockUndo) -> Result<Vec<u8>, String> {
     serde_json::to_vec(&disk).map_err(|e| format!("encode undo: {e}"))
 }
 
-/// Strictly decode a canonical payload. Strictness is one rule rather than a
-/// field-by-field walk: decode, convert, re-encode, and require byte equality
-/// with the input. `serde` already rejects unknown, duplicate, missing and
-/// trailing tokens; the comparison additionally pins field order, insignificant
-/// whitespace and lowercase hex, so the Go twin — whose decoder is far more
-/// permissive on its own — accepts exactly the same byte strings.
-/// Go twin: `unmarshalBlockUndo`.
+/// Strictly decode a canonical payload: decode into the DISK struct, check the
+/// one property a byte comparison cannot see, re-encode the DISK struct, and
+/// require byte equality. `serde` already rejects unknown, duplicate, missing and
+/// trailing tokens (and a JSON null, which `Vec` refuses outright); the
+/// comparison pins field order and whitespace, so the far more permissive Go twin
+/// accepts exactly the same byte strings.
+///
+/// The whole decision happens BEFORE `block_undo_from_disk`, so a checksum-valid
+/// but non-canonical payload is refused without allocating the runtime spent
+/// entries. The contract orders strict rejection ahead of `BlockUndo` conversion;
+/// converting first satisfied that only by accident. Go twin: `unmarshalBlockUndo`.
 pub fn unmarshal_block_undo(raw: &[u8]) -> Result<BlockUndo, String> {
     let disk: BlockUndoDisk =
         serde_json::from_slice(raw).map_err(|e| format!("decode undo: {e}"))?;
-    let undo = block_undo_from_disk(disk)?;
-    if marshal_block_undo(&undo)? != raw {
+    check_undo_disk_canonical_fields(&disk)?;
+    if serde_json::to_vec(&disk).map_err(|e| format!("encode undo: {e}"))? != raw {
         return Err("decode undo: payload is not the canonical encoding".into());
     }
-    Ok(undo)
+    block_undo_from_disk(disk)
+}
+
+/// Covers the property the disk-level byte comparison is blind to, allocating
+/// nothing: hex strings pass through the disk struct verbatim, so an uppercase
+/// txid survives the round trip, and two spellings of one undo must not both be
+/// canonical when a checksum is bound to the bytes. The Go twin also rejects nil
+/// slices here — `Vec` has no nil, so `serde` refused a JSON null already. It
+/// used to be enforced by re-encoding the CONVERTED value; stating it is what
+/// lets the decision precede conversion.
+fn check_undo_disk_canonical_fields(disk: &BlockUndoDisk) -> Result<(), String> {
+    for (tx_index, tx_undo) in disk.txs.iter().enumerate() {
+        for (spent_index, spent) in tx_undo.spent.iter().enumerate() {
+            if !valid_canonical_hash_hex(&spent.txid) || !valid_lowercase_hex(&spent.covenant_data)
+            {
+                return Err(format!(
+                    "decode undo: txs[{tx_index}].spent[{spent_index}] txid/covenant_data must be lowercase hex"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// An even number of lowercase hex digits, any length. `valid_canonical_hash_hex`
+/// in blockstore.rs is the fixed-32-byte sibling.
+fn valid_lowercase_hex(value: &str) -> bool {
+    value.len().is_multiple_of(2)
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
 fn block_undo_to_disk(undo: &BlockUndo) -> BlockUndoDisk {

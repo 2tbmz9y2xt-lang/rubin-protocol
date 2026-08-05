@@ -296,33 +296,73 @@ func marshalBlockUndo(undo *BlockUndo) ([]byte, error) {
 	return raw, nil
 }
 
-// unmarshalBlockUndo strictly decodes a canonical payload. Strictness is one
-// rule rather than a field-by-field walk: decode, convert, re-encode, and
-// require byte equality with the input. That single comparison rejects
-// duplicate, unknown, missing, null, and reordered fields at every nesting
-// level, plus insignificant whitespace and uppercase hex — none of which the
-// struct decode alone would catch. json.Unmarshal already rejects trailing
-// tokens. blockUndoFromDisk/blockUndoToDisk always rebuild non-nil slices, so a
-// `null` txs/spent re-encodes as `[]` and fails the comparison; without that
-// normalization Go would accept a null the Rust twin's Vec decode rejects.
-// Rust twin: `unmarshal_block_undo`.
+// unmarshalBlockUndo strictly decodes a canonical payload: decode into the DISK
+// struct, check the two properties a byte comparison cannot see, re-encode the
+// DISK struct, and require byte equality. The comparison rejects duplicate,
+// unknown, missing and reordered fields at every nesting level plus
+// insignificant whitespace; json.Unmarshal already rejects trailing tokens.
+//
+// The whole decision happens BEFORE blockUndoFromDisk, so a checksum-valid but
+// non-canonical payload is refused without allocating the runtime spent entries.
+// The contract orders strict rejection ahead of BlockUndo conversion; converting
+// first satisfied that only by accident. Rust twin: `unmarshal_block_undo`.
 func unmarshalBlockUndo(raw []byte) (*BlockUndo, error) {
 	var disk blockUndoDisk
 	if err := json.Unmarshal(raw, &disk); err != nil {
 		return nil, fmt.Errorf("decode undo: %w", err)
 	}
-	undo, err := blockUndoFromDisk(disk)
-	if err != nil {
+	if err := checkUndoDiskCanonicalFields(disk); err != nil {
 		return nil, err
 	}
-	canonical, err := marshalBlockUndo(undo)
+	canonical, err := json.Marshal(disk)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("encode undo: %w", err)
 	}
 	if !bytes.Equal(canonical, raw) {
 		return nil, errors.New("decode undo: payload is not the canonical encoding")
 	}
-	return undo, nil
+	return blockUndoFromDisk(disk)
+}
+
+// checkUndoDiskCanonicalFields covers the two properties the disk-level byte
+// comparison is blind to, allocating nothing. A JSON null decodes to a nil slice
+// that re-encodes back to `null` and would compare EQUAL, while Rust's Vec
+// rejects null outright — the cross-client divergence already closed at the
+// envelope layer. Hex strings pass through the disk struct verbatim, so an
+// uppercase txid survives the round trip, and two spellings of one undo must not
+// both be canonical when a checksum is bound to the bytes. Both used to be
+// enforced implicitly by re-encoding the CONVERTED value; stating them is what
+// lets the decision precede conversion.
+func checkUndoDiskCanonicalFields(disk blockUndoDisk) error {
+	if disk.Txs == nil {
+		return errors.New("decode undo: txs must not be null")
+	}
+	for txIndex, txUndo := range disk.Txs {
+		if txUndo.Spent == nil {
+			return fmt.Errorf("decode undo: txs[%d].spent must not be null", txIndex)
+		}
+		for spentIndex, input := range txUndo.Spent {
+			if !validCanonicalHashHex(input.Txid) || !validLowercaseHex(input.CovenantData) {
+				return fmt.Errorf(
+					"decode undo: txs[%d].spent[%d] txid/covenant_data must be lowercase hex",
+					txIndex, spentIndex)
+			}
+		}
+	}
+	return nil
+}
+
+// validLowercaseHex: an even number of lowercase hex digits, any length.
+func validLowercaseHex(value string) bool {
+	if len(value)%2 != 0 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if c := value[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func blockUndoToDisk(undo *BlockUndo) (blockUndoDisk, error) {
