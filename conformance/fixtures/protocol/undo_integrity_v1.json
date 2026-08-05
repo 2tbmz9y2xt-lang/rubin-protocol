@@ -1,0 +1,36 @@
+{
+  "contract_version": 1,
+  "fixture_kind": "undo_integrity_v1",
+  "description": "Shared undo_envelope_v1 vector: both clients must emit and accept these exact envelope bytes for the given block hash. checksum = SHA3-256(ASCII(\"RUBIN_BLOCK_UNDO_V1\") || block_hash[32] || uint64_be(len(payload)) || payload); payload is the compact BlockUndoDisk JSON in payload_json, base64 is canonical padded RFC 4648, and the envelope carries exactly one trailing LF which is NOT part of the checksum preimage.",
+  "checksum_domain_ascii": "RUBIN_BLOCK_UNDO_V1",
+  "envelope_version": 1,
+  "cases": [
+    {
+      "id": "empty-undo",
+      "note": "Block with no transactions recorded: txs is the empty array, never null.",
+      "block_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "payload_json": "{\"block_height\":0,\"previous_already_generated\":0,\"txs\":[]}",
+      "payload_b64": "eyJibG9ja19oZWlnaHQiOjAsInByZXZpb3VzX2FscmVhZHlfZ2VuZXJhdGVkIjowLCJ0eHMiOltdfQ==",
+      "checksum": "3b631d39195e9a9614d819169f17321fad8c764ba31c456d8629a3995f62e213",
+      "envelope": "{\"version\":1,\"block_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"payload_b64\":\"eyJibG9ja19oZWlnaHQiOjAsInByZXZpb3VzX2FscmVhZHlfZ2VuZXJhdGVkIjowLCJ0eHMiOltdfQ==\",\"checksum\":\"3b631d39195e9a9614d819169f17321fad8c764ba31c456d8629a3995f62e213\"}\n"
+    },
+    {
+      "id": "coinbase-only",
+      "note": "Height-1 coinbase-only block: one tx undo with no spent entries.",
+      "block_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "payload_json": "{\"block_height\":1,\"previous_already_generated\":5000000000,\"txs\":[{\"spent\":[]}]}",
+      "payload_b64": "eyJibG9ja19oZWlnaHQiOjEsInByZXZpb3VzX2FscmVhZHlfZ2VuZXJhdGVkIjo1MDAwMDAwMDAwLCJ0eHMiOlt7InNwZW50IjpbXX1dfQ==",
+      "checksum": "8df1680b95c12debac61a9400611d53d3f517edb72f19e6a646ca82b683f8591",
+      "envelope": "{\"version\":1,\"block_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"payload_b64\":\"eyJibG9ja19oZWlnaHQiOjEsInByZXZpb3VzX2FscmVhZHlfZ2VuZXJhdGVkIjo1MDAwMDAwMDAwLCJ0eHMiOlt7InNwZW50IjpbXX1dfQ==\",\"checksum\":\"8df1680b95c12debac61a9400611d53d3f517edb72f19e6a646ca82b683f8591\"}\n"
+    },
+    {
+      "id": "multi-tx-one-spend",
+      "note": "Coinbase plus one spending tx: the restored P2PK entry round-trips.",
+      "block_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "payload_json": "{\"block_height\":2,\"previous_already_generated\":10000000000,\"txs\":[{\"spent\":[]},{\"spent\":[{\"txid\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"vout\":0,\"value\":4999999000,\"covenant_type\":1,\"covenant_data\":\"002222222222222222222222222222222222222222222222222222222222222222\",\"creation_height\":1,\"created_by_coinbase\":true}]}]}",
+      "payload_b64": "eyJibG9ja19oZWlnaHQiOjIsInByZXZpb3VzX2FscmVhZHlfZ2VuZXJhdGVkIjoxMDAwMDAwMDAwMCwidHhzIjpbeyJzcGVudCI6W119LHsic3BlbnQiOlt7InR4aWQiOiIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwidm91dCI6MCwidmFsdWUiOjQ5OTk5OTkwMDAsImNvdmVuYW50X3R5cGUiOjEsImNvdmVuYW50X2RhdGEiOiIwMDIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJjcmVhdGlvbl9oZWlnaHQiOjEsImNyZWF0ZWRfYnlfY29pbmJhc2UiOnRydWV9XX1dfQ==",
+      "checksum": "8d9c5b2edf1a67bd2f046f465e859223c1ae78114e6c493b121f67b1e51e21db",
+      "envelope": "{\"version\":1,\"block_hash\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"payload_b64\":\"eyJibG9ja19oZWlnaHQiOjIsInByZXZpb3VzX2FscmVhZHlfZ2VuZXJhdGVkIjoxMDAwMDAwMDAwMCwidHhzIjpbeyJzcGVudCI6W119LHsic3BlbnQiOlt7InR4aWQiOiIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwidm91dCI6MCwidmFsdWUiOjQ5OTk5OTkwMDAsImNvdmVuYW50X3R5cGUiOjEsImNvdmVuYW50X2RhdGEiOiIwMDIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJjcmVhdGlvbl9oZWlnaHQiOjEsImNyZWF0ZWRfYnlfY29pbmJhc2UiOnRydWV9XX1dfQ==\",\"checksum\":\"8d9c5b2edf1a67bd2f046f465e859223c1ae78114e6c493b121f67b1e51e21db\"}\n"
+    }
+  ]
+}

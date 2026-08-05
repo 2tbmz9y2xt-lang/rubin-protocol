@@ -2,13 +2,16 @@ package node
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -894,5 +897,448 @@ func TestWriteFileIfAbsentVerifyReadBoundedByContentLength(t *testing.T) {
 				t.Fatalf("verify read bounds = %v, want [%d]", bounds, len(content))
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// undo_envelope_v1 (RUB-1132)
+// ---------------------------------------------------------------------------
+
+const undoIntegrityFixturePath = "../../../conformance/fixtures/protocol/undo_integrity_v1.json"
+
+type undoIntegrityVector struct {
+	ID          string `json:"id"`
+	BlockHash   string `json:"block_hash"`
+	PayloadJSON string `json:"payload_json"`
+	PayloadB64  string `json:"payload_b64"`
+	Checksum    string `json:"checksum"`
+	Envelope    string `json:"envelope"`
+}
+
+func loadUndoIntegrityVectors(t *testing.T) []undoIntegrityVector {
+	t.Helper()
+	raw, err := os.ReadFile(undoIntegrityFixturePath)
+	if err != nil {
+		t.Fatalf("read shared undo fixture: %v", err)
+	}
+	var fixture struct {
+		Cases []undoIntegrityVector `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("decode shared undo fixture: %v", err)
+	}
+	// An emptied or renamed fixture must fail loudly rather than let the
+	// per-case loop below pass vacuously.
+	if len(fixture.Cases) < 3 {
+		t.Fatalf("shared undo fixture has %d cases, want at least 3", len(fixture.Cases))
+	}
+	return fixture.Cases
+}
+
+func mustUndoTestHash(t *testing.T, hashHex string) [32]byte {
+	t.Helper()
+	hash, err := parseHex32("undo test hash", hashHex)
+	if err != nil {
+		t.Fatalf("parse %q: %v", hashHex, err)
+	}
+	return hash
+}
+
+// TestUndoEnvelopeV1CrossClientVector is the Go half of the cross-client parity
+// proof: every byte the Rust client must emit for the same input is pinned in
+// conformance/fixtures/protocol/undo_integrity_v1.json, and this test recomputes
+// all of them from the payload alone. The Rust half is
+// `undo_envelope_v1_cross_client_vector`.
+func TestUndoEnvelopeV1CrossClientVector(t *testing.T) {
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	for _, vector := range loadUndoIntegrityVectors(t) {
+		t.Run(vector.ID, func(t *testing.T) {
+			blockHash := mustUndoTestHash(t, vector.BlockHash)
+			undo, err := unmarshalBlockUndo([]byte(vector.PayloadJSON))
+			if err != nil {
+				t.Fatalf("payload_json is not accepted as canonical: %v", err)
+			}
+
+			payload, err := marshalBlockUndo(undo)
+			if err != nil {
+				t.Fatalf("marshalBlockUndo: %v", err)
+			}
+			if string(payload) != vector.PayloadJSON {
+				t.Fatalf("canonical payload = %q, want %q", payload, vector.PayloadJSON)
+			}
+			if got := base64.StdEncoding.EncodeToString(payload); got != vector.PayloadB64 {
+				t.Fatalf("payload_b64 = %q, want %q", got, vector.PayloadB64)
+			}
+			checksum := undoEnvelopeChecksum(blockHash, payload)
+			if got := hex.EncodeToString(checksum[:]); got != vector.Checksum {
+				t.Fatalf("checksum = %q, want %q", got, vector.Checksum)
+			}
+			envelope, err := marshalUndoEnvelope(blockHash, undo)
+			if err != nil {
+				t.Fatalf("marshalUndoEnvelope: %v", err)
+			}
+			if string(envelope) != vector.Envelope {
+				t.Fatalf("envelope = %q, want %q", envelope, vector.Envelope)
+			}
+			if !bytes.HasSuffix(envelope, []byte("\n")) || bytes.Count(envelope, []byte("\n")) != 1 {
+				t.Fatalf("envelope must carry exactly one trailing LF: %q", envelope)
+			}
+
+			decoded, err := unmarshalUndoEnvelope(blockHash, []byte(vector.Envelope))
+			if err != nil {
+				t.Fatalf("unmarshalUndoEnvelope(pinned bytes): %v", err)
+			}
+			if !reflect.DeepEqual(decoded, undo) {
+				t.Fatalf("round-trip undo = %+v, want %+v", decoded, undo)
+			}
+
+			// The pinned bytes must also be what the real store accepts, not
+			// only what the codec accepts in isolation.
+			if err := os.WriteFile(filepath.Join(store.undoDir, vector.BlockHash+".json"),
+				[]byte(vector.Envelope), 0o600); err != nil {
+				t.Fatalf("seed undo file: %v", err)
+			}
+			fromStore, err := store.GetUndo(blockHash)
+			if err != nil {
+				t.Fatalf("GetUndo(pinned vector): %v", err)
+			}
+			if !reflect.DeepEqual(fromStore, undo) {
+				t.Fatalf("GetUndo = %+v, want %+v", fromStore, undo)
+			}
+		})
+	}
+}
+
+// TestUndoEnvelopeBoundDerivation pins the bound arithmetic. The two
+// multi-gigabyte hostile rows ("maximum legal payload at the bound" and "one
+// decoded byte above it") are discharged HERE, by exact derivation rather than
+// by materializing ~2 GB in a unit test.
+func TestUndoEnvelopeBoundDerivation(t *testing.T) {
+	base64Len := func(n int64) int64 { return ((n + 2) / 3) * 4 }
+
+	empty, err := marshalUndoEnvelope([32]byte{}, &BlockUndo{})
+	if err != nil {
+		t.Fatalf("marshalUndoEnvelope: %v", err)
+	}
+	payload, err := marshalBlockUndo(&BlockUndo{})
+	if err != nil {
+		t.Fatalf("marshalBlockUndo: %v", err)
+	}
+	// The writer's bytes must match the segment constants the reader indexes by.
+	if frame := len(empty) - len(base64.StdEncoding.EncodeToString(payload)); frame != undoEnvelopeFrameBytes {
+		t.Fatalf("measured envelope frame = %d bytes, constant says %d", frame, undoEnvelopeFrameBytes)
+	}
+	if _, _, _, err := splitUndoEnvelope(empty); err != nil {
+		t.Fatalf("writer output does not satisfy the reader layout: %v", err)
+	}
+
+	// The envelope reuses the UNCHANGED undo class bound. A future edit that
+	// raises it past 2^31-2 breaks readAllCapped's maxBytes+1 probe on a 32-bit
+	// build, so this row exists to make that edit fail loudly here first.
+	if int64(undoFileMaxBytes) != 2_000_000_000 {
+		t.Fatalf("undo class bound = %d, want the unchanged 2000000000", int64(undoFileMaxBytes))
+	}
+	if int64(undoFileMaxBytes) > 1<<31-2 {
+		t.Fatalf("undo class bound %d exceeds 2^31-2; the EOF-probe capacity argument no longer holds",
+			int64(undoFileMaxBytes))
+	}
+	if want := int64(3 * ((undoFileMaxBytes - undoEnvelopeFrameBytes) / 4)); int64(undoPayloadMaxBytes) != want {
+		t.Fatalf("payload ceiling = %d, backwards derivation says %d", int64(undoPayloadMaxBytes), want)
+	}
+	if int64(undoPayloadMaxBytes) != 1_499_999_856 {
+		t.Fatalf("payload ceiling = %d, want 1499999856", int64(undoPayloadMaxBytes))
+	}
+	// The floor must precede the multiply. The naive spelling overshoots by two
+	// bytes, and those two bytes are exactly the save/read asymmetry this
+	// ceiling exists to close — so pin that it would in fact break.
+	naive := int64(undoFileMaxBytes-undoEnvelopeFrameBytes) * 3 / 4
+	if naive <= int64(undoPayloadMaxBytes) {
+		t.Fatalf("naive ceiling %d no longer overshoots %d; the derivation comment is stale",
+			naive, int64(undoPayloadMaxBytes))
+	}
+	if base64Len(naive)+int64(undoEnvelopeFrameBytes) <= int64(undoFileMaxBytes) {
+		t.Fatalf("naive ceiling %d would fit after all; re-derive", naive)
+	}
+
+	// The two bound rows, arithmetically: the largest legal payload's complete
+	// envelope fits, and one byte more does not.
+	atBound := base64Len(int64(undoPayloadMaxBytes)) + int64(undoEnvelopeFrameBytes)
+	if atBound != 1_999_999_997 || atBound > int64(undoFileMaxBytes) {
+		t.Fatalf("maximum legal payload yields a %d-byte envelope, want exactly 1999999997 within the %d bound",
+			atBound, int64(undoFileMaxBytes))
+	}
+	overBound := base64Len(int64(undoPayloadMaxBytes)+1) + int64(undoEnvelopeFrameBytes)
+	if overBound <= int64(undoFileMaxBytes) {
+		t.Fatalf("one byte over the payload ceiling still fits in %d bytes; the ceiling is not tight",
+			overBound)
+	}
+
+	// Save/read symmetry (R3): every pinned fixture payload is far under the
+	// ceiling, so the shared vector cannot be invalidated by the bound.
+	for _, vector := range loadUndoIntegrityVectors(t) {
+		if int64(len(vector.PayloadJSON)) > int64(undoPayloadMaxBytes) {
+			t.Fatalf("fixture case %s payload is %d bytes, over the %d ceiling",
+				vector.ID, len(vector.PayloadJSON), int64(undoPayloadMaxBytes))
+		}
+	}
+}
+
+// undoTestUndo is a small non-empty undo: a coinbase row plus one restored
+// spend, so a corrupted payload has something to get wrong.
+func undoTestUndo() *BlockUndo {
+	return &BlockUndo{
+		BlockHeight:              7,
+		PreviousAlreadyGenerated: 1234,
+		Txs: []TxUndo{
+			{Spent: []SpentUndo{}},
+			{Spent: []SpentUndo{{
+				Outpoint: consensus.Outpoint{Txid: [32]byte{0x11}, Vout: 3},
+				Entry: consensus.UtxoEntry{
+					Value:             99,
+					CovenantType:      consensus.COV_TYPE_P2PK,
+					CovenantData:      []byte{0xaa, 0xbb},
+					CreationHeight:    5,
+					CreatedByCoinbase: true,
+				},
+			}}},
+		},
+	}
+}
+
+func mustMarshalUndoEnvelope(t *testing.T, blockHash [32]byte, undo *BlockUndo) string {
+	t.Helper()
+	raw, err := marshalUndoEnvelope(blockHash, undo)
+	if err != nil {
+		t.Fatalf("marshalUndoEnvelope: %v", err)
+	}
+	return string(raw)
+}
+
+// replaceOnce is deliberately strict: a mutation row that silently matched
+// nothing would assert against an unmodified envelope and pass for the wrong
+// reason.
+func replaceOnce(t *testing.T, envelope, old, replacement string) string {
+	t.Helper()
+	if strings.Count(envelope, old) != 1 {
+		t.Fatalf("mutation target %q occurs %d times, want exactly 1", old, strings.Count(envelope, old))
+	}
+	return strings.Replace(envelope, old, replacement, 1)
+}
+
+// TestGetUndoRejectsIntegrityFailures drives every rejected/hostile row of
+// RUB-1132 through the real BlockStore.GetUndo entry point. Each row also
+// re-reads the file afterwards: a rejection must never rewrite, truncate, or
+// heal the record it refused.
+func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	blockHash := [32]byte{0x0a, 0x0b, 0x0c}
+	otherHash := [32]byte{0x0d, 0x0e, 0x0f}
+	undo := undoTestUndo()
+
+	valid := mustMarshalUndoEnvelope(t, blockHash, undo)
+	otherValid := mustMarshalUndoEnvelope(t, otherHash, undo)
+	payload, err := marshalBlockUndo(undo)
+	if err != nil {
+		t.Fatalf("marshalBlockUndo: %v", err)
+	}
+	payloadB64 := base64.StdEncoding.EncodeToString(payload)
+
+	// A payload that decodes but is not the canonical encoding, carrying a
+	// CORRECT checksum: it can only be rejected by a payload check that runs
+	// after the checksum compare.
+	indented, err := json.MarshalIndent(json.RawMessage(payload), "", "  ")
+	if err != nil {
+		t.Fatalf("indent payload: %v", err)
+	}
+	envelopeOver := func(body []byte) string {
+		sum := undoEnvelopeChecksum(blockHash, body)
+		return fmt.Sprintf("{\"version\":1,\"block_hash\":\"%s\",\"payload_b64\":\"%s\",\"checksum\":\"%s\"}\n",
+			hex.EncodeToString(blockHash[:]),
+			base64.StdEncoding.EncodeToString(body),
+			hex.EncodeToString(sum[:]))
+	}
+
+	legacyIndented, err := json.MarshalIndent(json.RawMessage(payload), "", "  ")
+	if err != nil {
+		t.Fatalf("indent legacy payload: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		record  string
+		wantErr error  // exact error identity when the message is pinned
+		wantMsg string // exact message when pinned
+	}{
+		{name: "legacy_indented_payload", record: string(legacyIndented) + "\n", wantErr: errUndoLegacyRecord, wantMsg: errUndoLegacyRecord.Error()},
+		{name: "legacy_compact_payload", record: string(payload), wantErr: errUndoLegacyRecord, wantMsg: errUndoLegacyRecord.Error()},
+		{name: "version_zero", record: replaceOnce(t, valid, `"version":1`, `"version":0`)},
+		{name: "version_two", record: replaceOnce(t, valid, `"version":1`, `"version":2`)},
+		{name: "version_string", record: replaceOnce(t, valid, `"version":1`, `"version":"1"`)},
+		{name: "version_null", record: replaceOnce(t, valid, `"version":1`, `"version":null`)},
+		{name: "version_float", record: replaceOnce(t, valid, `"version":1`, `"version":1.0`)},
+		{name: "missing_checksum", record: replaceOnce(t, valid, `,"checksum":"`+valid[strings.Index(valid, `"checksum":"`)+12:strings.LastIndex(valid, `"}`)]+`"`, "")},
+		{name: "unknown_field", record: replaceOnce(t, valid, `{"version":1`, `{"note":"x","version":1`)},
+		{name: "duplicate_checksum_identical", record: replaceOnce(t, valid, `{"version":1`, `{"checksum":"`+strings.TrimSuffix(valid[strings.Index(valid, `"checksum":"`)+12:], "\"}\n")+`","version":1`)},
+		{name: "duplicate_checksum_conflicting", record: replaceOnce(t, valid, `{"version":1`, `{"checksum":"`+strings.Repeat("00", 32)+`","version":1`)},
+		{name: "duplicate_payload_conflicting", record: replaceOnce(t, valid, `{"version":1`, `{"payload_b64":"AA==","version":1`)},
+		{name: "null_payload", record: replaceOnce(t, valid, `"payload_b64":"`+payloadB64+`"`, `"payload_b64":null`)},
+		{name: "trailing_json_value", record: strings.TrimSuffix(valid, "\n") + "{}\n"},
+		{name: "trailing_scalar", record: strings.TrimSuffix(valid, "\n") + " 1\n"},
+		{name: "not_an_object", record: "[]\n"},
+		{name: "not_json", record: "definitely not json\n"},
+		{
+			// W4 parity row: classification decodes ONE value and ignores what
+			// follows, so an unversioned record with trailing garbage still
+			// reports the actionable legacy message. Rust classifies identically.
+			name:    "legacy_payload_with_trailing_json",
+			record:  string(payload) + "{}\n",
+			wantErr: errUndoLegacyRecord, wantMsg: errUndoLegacyRecord.Error(),
+		},
+		{
+			name:   "uppercase_block_hash",
+			record: replaceOnce(t, valid, hex.EncodeToString(blockHash[:]), strings.ToUpper(hex.EncodeToString(blockHash[:]))),
+		},
+		{name: "base64_embedded_newline", record: replaceOnce(t, valid, payloadB64, payloadB64[:4]+`\n`+payloadB64[4:])},
+		{name: "base64_unpadded", record: replaceOnce(t, valid, payloadB64, strings.TrimRight(payloadB64, "="))},
+		{name: "base64_bad_symbol", record: replaceOnce(t, valid, payloadB64, "*"+payloadB64[1:])},
+		{
+			name:    "flip_one_base64_char",
+			record:  replaceOnce(t, valid, payloadB64, flipBase64Symbol(payloadB64)),
+			wantErr: errUndoChecksumMismatch, wantMsg: errUndoChecksumMismatch.Error(),
+		},
+		{
+			name:    "foreign_block_hash_field",
+			record:  replaceOnce(t, valid, hex.EncodeToString(blockHash[:]), hex.EncodeToString(otherHash[:])),
+			wantErr: errUndoBlockHashMismatch, wantMsg: errUndoBlockHashMismatch.Error(),
+		},
+		{
+			name:    "envelope_swapped_between_files",
+			record:  otherValid,
+			wantErr: errUndoBlockHashMismatch, wantMsg: errUndoBlockHashMismatch.Error(),
+		},
+		{
+			name: "checksum_computed_for_other_block",
+			record: replaceOnce(t, otherValid, hex.EncodeToString(otherHash[:]),
+				hex.EncodeToString(blockHash[:])),
+			wantErr: errUndoChecksumMismatch, wantMsg: errUndoChecksumMismatch.Error(),
+		},
+		// The two rows below carry a CORRECT checksum, so reaching a rejection
+		// at all proves the payload decode runs strictly after the checksum.
+		{name: "checksum_valid_over_indented_payload", record: envelopeOver(indented)},
+		{name: "checksum_valid_over_null_txs", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":null}`))},
+		{name: "checksum_valid_over_unknown_payload_field", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":[],"x":1}`))},
+		{name: "checksum_valid_over_missing_payload_field", record: envelopeOver([]byte(`{"block_height":0,"txs":[]}`))},
+		{name: "checksum_valid_over_duplicate_payload_field", record: envelopeOver([]byte(`{"block_height":0,"block_height":1,"previous_already_generated":0,"txs":[]}`))},
+		// These two prove the decision precedes conversion: blockUndoFromDisk's
+		// own message for a bad txid ("expected 32 bytes, got 2") would WIN if
+		// conversion still ran first. Rust emits the identical string.
+		{
+			name:    "checksum_valid_over_uppercase_txid",
+			record:  envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[{"txid":"` + strings.Repeat("AB", 32) + `","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}`)),
+			wantMsg: "decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex",
+		},
+		{
+			name:    "checksum_valid_over_short_txid",
+			record:  envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[{"txid":"aabb","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}`)),
+			wantMsg: "decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(store.undoDir, hex.EncodeToString(blockHash[:])+".json")
+			if err := os.WriteFile(path, []byte(tc.record), 0o600); err != nil {
+				t.Fatalf("seed record: %v", err)
+			}
+			got, err := store.GetUndo(blockHash)
+			if err == nil {
+				t.Fatalf("GetUndo accepted %s: %+v", tc.name, got)
+			}
+			if got != nil {
+				t.Fatalf("GetUndo returned an undo alongside its error: %+v", got)
+			}
+			t.Logf("rejected with: %v", err)
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want errors.Is %v", err, tc.wantErr)
+			}
+			if tc.wantMsg != "" && err.Error() != tc.wantMsg {
+				t.Fatalf("message = %q, want exactly %q", err.Error(), tc.wantMsg)
+			}
+			if tc.wantErr == nil && strings.HasPrefix(tc.name, "checksum_valid_over_") {
+				// These rows carry a CORRECT checksum, so reaching a rejection
+				// at all proves the payload decode runs strictly after the
+				// checksum compare. The payload-conversion class sits OUTSIDE
+				// the UNDO_INTEGRITY identity by contract, so this branch
+				// asserts only that the failure is not misreported as one of
+				// the envelope classes.
+				if errors.Is(err, errUndoChecksumMismatch) || errors.Is(err, errUndoBlockHashMismatch) {
+					t.Fatalf("payload defect misreported as an envelope failure: %v", err)
+				}
+			} else if tc.wantErr == nil && !errors.Is(err, ErrUndoIntegrity) {
+				t.Fatalf("err = %v, want errors.Is ErrUndoIntegrity", err)
+			}
+
+			after, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatalf("re-read refused record: %v", readErr)
+			}
+			if string(after) != tc.record {
+				t.Fatalf("refused record was rewritten on disk")
+			}
+			// PutUndo must not launder a corrupt record into a valid one.
+			if err := store.PutUndo(blockHash, undo); err == nil {
+				t.Fatalf("PutUndo overwrote an existing corrupt record")
+			}
+			healed, readErr := os.ReadFile(path)
+			if readErr != nil || string(healed) != tc.record {
+				t.Fatalf("PutUndo healed the corrupt record (err=%v)", readErr)
+			}
+		})
+	}
+}
+
+// flipBase64Symbol changes one interior symbol to a different valid one, so the
+// result is still canonical base64 of the same length and fails at the checksum
+// rather than at the encoding check.
+func flipBase64Symbol(value string) string {
+	replacement := byte('A')
+	if value[1] == 'A' {
+		replacement = 'B'
+	}
+	return value[:1] + string(replacement) + value[2:]
+}
+
+// corruptStoredUndoChecksum flips one interior base64 symbol of a stored undo
+// record: the file stays well-formed JSON and canonical base64, the payload
+// still decodes, and only the checksum comparison can catch it. That is the
+// hostile row the disconnect and reorg tests drive through their public entry
+// points. Returns the corrupted bytes (so a caller can prove a refusal did not
+// rewrite them) and the original bytes (so a caller can restore them and prove
+// the same path accepts a valid v1 record).
+func corruptStoredUndoChecksum(t *testing.T, store *BlockStore, blockHash [32]byte) (corrupt, original []byte) {
+	t.Helper()
+	path := filepath.Join(store.undoDir, hex.EncodeToString(blockHash[:])+".json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read stored undo: %v", err)
+	}
+	var envelope undoEnvelopeDisk
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("stored undo is not a v1 envelope: %v", err)
+	}
+	corrupted := strings.Replace(string(raw), envelope.PayloadB64, flipBase64Symbol(envelope.PayloadB64), 1)
+	if corrupted == string(raw) {
+		t.Fatal("undo corruption was a no-op")
+	}
+	if err := os.WriteFile(path, []byte(corrupted), 0o600); err != nil {
+		t.Fatalf("write corrupted undo: %v", err)
+	}
+	return []byte(corrupted), raw
+}
+
+// restoreStoredUndo puts back bytes captured by corruptStoredUndoChecksum.
+func restoreStoredUndo(t *testing.T, store *BlockStore, blockHash [32]byte, original []byte) {
+	t.Helper()
+	path := filepath.Join(store.undoDir, hex.EncodeToString(blockHash[:])+".json")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatalf("restore undo: %v", err)
 	}
 }

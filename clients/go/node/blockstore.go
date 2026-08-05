@@ -529,7 +529,7 @@ func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {
 	if bs == nil {
 		return errors.New("nil blockstore")
 	}
-	raw, err := marshalBlockUndo(undo)
+	raw, err := marshalUndoEnvelope(blockHash, undo)
 	if err != nil {
 		return err
 	}
@@ -538,10 +538,15 @@ func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {
 	// wire-cost derivation (>=1 mandatory signature per spent input), so this
 	// guard converts any future derivation drift (a new covenant family,
 	// signature aggregation) into a loud save-time error instead of a
-	// next-restart refusal of the node's own undo file.
+	// next-restart refusal of the node's own undo file. RUB-1132 moves it to
+	// the envelope bound so the guard still measures the bytes GetUndo reads.
 	if err := checkStoreSaveBound(path, len(raw), undoFileMaxBytes); err != nil {
 		return err
 	}
+	// write-if-absent, not atomic overwrite: an existing record — including a
+	// corrupt one — is never healed or replaced in place. Repairing it here
+	// would let a torn write be laundered into a checksum-valid record for
+	// whatever undo the caller happens to be holding.
 	return writeFileIfAbsent(path, raw)
 }
 
@@ -553,7 +558,10 @@ func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return unmarshalBlockUndo(raw)
+	// blockHash is the hash the CALLER asked for, not one read back off disk:
+	// that is what makes a record moved or renamed between two undo files fail
+	// instead of restoring the wrong block's UTXOs.
+	return unmarshalUndoEnvelope(blockHash, raw)
 }
 
 // loadBlockStoreIndex reads the sole initialization marker. A missing marker is

@@ -14,7 +14,7 @@ use crate::io_utils::{
     AtomicWriteError, AtomicWriteOperation, BLOCK_FILE_MAX_BYTES, HEADER_FILE_MAX_BYTES,
     UNDO_FILE_MAX_BYTES,
 };
-use crate::undo::{marshal_block_undo, unmarshal_block_undo, BlockUndo};
+use crate::undo::{marshal_undo_envelope, unmarshal_undo_envelope, BlockUndo};
 use std::ffi::OsStr;
 
 pub const BLOCK_STORE_DIR_NAME: &str = "blockstore";
@@ -753,7 +753,7 @@ impl BlockStore {
                 "forced undo error (test)",
             ));
         }
-        let raw = marshal_block_undo(undo).map_err(|error| {
+        let raw = marshal_undo_envelope(block_hash_bytes, undo).map_err(|error| {
             atomic_write_error_before(&path, AtomicWriteOperation::Overwrite, error)
         })?;
         // Undo files intentionally stay on the raw `write_file_atomic`
@@ -780,6 +780,9 @@ impl BlockStore {
         // input), so this guard converts any future derivation drift (a new
         // covenant family, signature aggregation) into a loud save-time
         // error instead of a next-restart refusal of the node's own undo.
+        // RUB-1132 keeps this class bound unchanged: the file it measures is now
+        // the complete v1 envelope, and `marshal_undo_envelope` enforces the
+        // matching payload ceiling.
         crate::io_utils::check_store_save_bound(
             &path.display().to_string(),
             raw.len(),
@@ -796,7 +799,12 @@ impl BlockStore {
         let name = format!("{}.json", hex::encode(block_hash_bytes));
         let raw = read_file_from_dir(&self.undo_dir, &name, UNDO_FILE_MAX_BYTES)
             .map_err(|e| format!("read undo {}: {e}", self.undo_dir.join(&name).display()))?;
-        unmarshal_block_undo(&raw)
+        // `block_hash_bytes` is the hash the CALLER asked for, not one read back
+        // off disk: that is what makes a record moved or renamed between two undo
+        // files fail instead of restoring the wrong block's UTXOs. The error is
+        // returned UNWRAPPED so the pinned UNDO_INTEGRITY message survives to
+        // every caller boundary.
+        unmarshal_undo_envelope(block_hash_bytes, &raw)
     }
 
     /// Cheap undo-presence check used by the same-hash replay branch
@@ -1031,8 +1039,10 @@ fn load_blockstore_index(path: &Path) -> Result<BlockStoreIndexDisk, String> {
     Ok(index)
 }
 
-/// The marker's exact entry shape: 64 lowercase hex characters.
-fn valid_canonical_hash_hex(value: &str) -> bool {
+/// The marker's exact entry shape: 64 lowercase hex characters. Shared with the
+/// undo envelope (undo.rs), whose block_hash/checksum fields carry the same
+/// shape — `hex::decode` alone would accept uppercase.
+pub(crate) fn valid_canonical_hash_hex(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
@@ -1316,12 +1326,323 @@ mod tests {
         }
     }
 
-    /// Pins the measured per-entry JSON byte cost cited by the undo bound
+    /// Drives every rejected/hostile row of RUB-1132 through the real
+    /// `BlockStore::get_undo` entry point. Each row also re-reads the file
+    /// afterwards: a rejection must never rewrite, truncate, or heal the record
+    /// it refused. Go twin: `TestGetUndoRejectsIntegrityFailures`.
+    #[test]
+    fn get_undo_rejects_integrity_failures() {
+        use crate::undo::{
+            flip_base64_symbol, marshal_block_undo, marshal_undo_envelope, BlockUndo, SpentUndo,
+            TxUndo, UNDO_BLOCK_HASH_MISMATCH_ERR, UNDO_CHECKSUM_MISMATCH_ERR, UNDO_LEGACY_ERR,
+        };
+        use rubin_consensus::{Outpoint, UtxoEntry};
+        use sha3::{Digest, Sha3_256};
+
+        let dir = unique_temp_path("rubin-undo-integrity");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let store = BlockStore::create(block_store_path(&dir)).expect("create blockstore");
+        let block_hash = [0x0au8; 32];
+        let other_hash = [0x0du8; 32];
+        let undo = BlockUndo {
+            block_height: 7,
+            previous_already_generated: 1234,
+            txs: vec![
+                TxUndo { spent: vec![] },
+                TxUndo {
+                    spent: vec![SpentUndo {
+                        outpoint: Outpoint {
+                            txid: [0x11u8; 32],
+                            vout: 3,
+                        },
+                        entry: UtxoEntry {
+                            value: 99,
+                            covenant_type: 1,
+                            covenant_data: vec![0xaa, 0xbb],
+                            creation_height: 5,
+                            created_by_coinbase: true,
+                        },
+                    }],
+                },
+            ],
+        };
+
+        let valid = String::from_utf8(marshal_undo_envelope(block_hash, &undo).expect("valid"))
+            .expect("utf-8");
+        let other_valid =
+            String::from_utf8(marshal_undo_envelope(other_hash, &undo).expect("other"))
+                .expect("utf-8");
+        let payload = marshal_block_undo(&undo).expect("payload");
+        let payload_b64 = crate::undo::base64_encode(&payload);
+        let block_hash_hex = hex::encode(block_hash);
+        let valid_json: serde_json::Value =
+            serde_json::from_str(&valid).expect("valid envelope is JSON");
+        let checksum_hex = valid_json["checksum"]
+            .as_str()
+            .expect("valid envelope has a checksum")
+            .to_string();
+
+        // Builds an envelope with a CORRECT checksum over arbitrary payload
+        // bytes: reaching a rejection at all proves the payload decode runs
+        // strictly after the checksum compare.
+        let envelope_over = |body: &[u8]| -> String {
+            let mut hasher = Sha3_256::new();
+            hasher.update(b"RUBIN_BLOCK_UNDO_V1");
+            hasher.update(block_hash);
+            hasher.update((body.len() as u64).to_be_bytes());
+            hasher.update(body);
+            let checksum: [u8; 32] = hasher.finalize().into();
+            format!(
+                "{{\"version\":1,\"block_hash\":\"{}\",\"payload_b64\":\"{}\",\"checksum\":\"{}\"}}\n",
+                block_hash_hex,
+                crate::undo::base64_encode(body),
+                hex::encode(checksum)
+            )
+        };
+        let replace_once = |text: &str, old: &str, new: &str| -> String {
+            assert_eq!(
+                text.matches(old).count(),
+                1,
+                "mutation target {old:?} must occur exactly once"
+            );
+            text.replacen(old, new, 1)
+        };
+
+        let indented = serde_json::to_string_pretty(
+            &serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+        )
+        .expect("indent");
+
+        let rows: Vec<(&str, String, Option<&str>)> = vec![
+            ("legacy_indented_payload", format!("{indented}\n"), Some(UNDO_LEGACY_ERR)),
+            (
+                "legacy_compact_payload",
+                String::from_utf8(payload.clone()).expect("utf-8"),
+                Some(UNDO_LEGACY_ERR),
+            ),
+            ("version_zero", replace_once(&valid, "\"version\":1", "\"version\":0"), None),
+            ("version_two", replace_once(&valid, "\"version\":1", "\"version\":2"), None),
+            ("version_string", replace_once(&valid, "\"version\":1", "\"version\":\"1\""), None),
+            ("version_null", replace_once(&valid, "\"version\":1", "\"version\":null"), None),
+            ("version_float", replace_once(&valid, "\"version\":1", "\"version\":1.0"), None),
+            (
+                "missing_checksum",
+                replace_once(&valid, &format!(",\"checksum\":\"{checksum_hex}\""), ""),
+                None,
+            ),
+            ("unknown_field", replace_once(&valid, "{\"version\":1", "{\"note\":\"x\",\"version\":1"), None),
+            (
+                "duplicate_checksum_identical",
+                replace_once(
+                    &valid,
+                    "{\"version\":1",
+                    &format!("{{\"checksum\":\"{checksum_hex}\",\"version\":1"),
+                ),
+                None,
+            ),
+            (
+                "duplicate_checksum_conflicting",
+                replace_once(
+                    &valid,
+                    "{\"version\":1",
+                    &format!("{{\"checksum\":\"{}\",\"version\":1", "00".repeat(32)),
+                ),
+                None,
+            ),
+            (
+                "duplicate_payload_conflicting",
+                replace_once(&valid, "{\"version\":1", "{\"payload_b64\":\"AA==\",\"version\":1"),
+                None,
+            ),
+            (
+                "null_payload",
+                replace_once(&valid, &format!("\"payload_b64\":\"{payload_b64}\""), "\"payload_b64\":null"),
+                None,
+            ),
+            ("trailing_json_value", format!("{}{{}}\n", valid.trim_end_matches('\n')), None),
+            ("trailing_scalar", format!("{} 1\n", valid.trim_end_matches('\n')), None),
+            ("not_an_object", "[]\n".to_string(), None),
+            ("not_json", "definitely not json\n".to_string(), None),
+            (
+                // W4 parity row: classification decodes ONE value and ignores
+                // what follows, so an unversioned record with trailing garbage
+                // still reports the actionable legacy message. Go classifies
+                // identically.
+                "legacy_payload_with_trailing_json",
+                format!("{}{{}}\n", String::from_utf8(payload.clone()).expect("utf-8")),
+                Some(UNDO_LEGACY_ERR),
+            ),
+            (
+                "uppercase_block_hash",
+                replace_once(&valid, &block_hash_hex, &block_hash_hex.to_uppercase()),
+                None,
+            ),
+            (
+                "base64_embedded_newline",
+                replace_once(&valid, &payload_b64, &format!("{}\\n{}", &payload_b64[..4], &payload_b64[4..])),
+                None,
+            ),
+            (
+                "base64_unpadded",
+                replace_once(&valid, &payload_b64, payload_b64.trim_end_matches('=')),
+                None,
+            ),
+            (
+                "base64_bad_symbol",
+                replace_once(&valid, &payload_b64, &format!("*{}", &payload_b64[1..])),
+                None,
+            ),
+            (
+                "flip_one_base64_char",
+                replace_once(&valid, &payload_b64, &flip_base64_symbol(&payload_b64)),
+                Some(UNDO_CHECKSUM_MISMATCH_ERR),
+            ),
+            (
+                "foreign_block_hash_field",
+                replace_once(&valid, &block_hash_hex, &hex::encode(other_hash)),
+                Some(UNDO_BLOCK_HASH_MISMATCH_ERR),
+            ),
+            (
+                "envelope_swapped_between_files",
+                other_valid.clone(),
+                Some(UNDO_BLOCK_HASH_MISMATCH_ERR),
+            ),
+            (
+                "checksum_computed_for_other_block",
+                replace_once(&other_valid, &hex::encode(other_hash), &block_hash_hex),
+                Some(UNDO_CHECKSUM_MISMATCH_ERR),
+            ),
+            ("checksum_valid_over_indented_payload", envelope_over(indented.as_bytes()), None),
+            (
+                "checksum_valid_over_null_txs",
+                envelope_over(br#"{"block_height":0,"previous_already_generated":0,"txs":null}"#),
+                None,
+            ),
+            (
+                "checksum_valid_over_unknown_payload_field",
+                envelope_over(br#"{"block_height":0,"previous_already_generated":0,"txs":[],"x":1}"#),
+                None,
+            ),
+            (
+                "checksum_valid_over_missing_payload_field",
+                envelope_over(br#"{"block_height":0,"txs":[]}"#),
+                None,
+            ),
+            (
+                "checksum_valid_over_duplicate_payload_field",
+                envelope_over(br#"{"block_height":0,"block_height":1,"previous_already_generated":0,"txs":[]}"#),
+                None,
+            ),
+            (
+                "checksum_valid_over_uppercase_txid",
+                envelope_over(
+                    format!(
+                        r#"{{"block_height":0,"previous_already_generated":0,"txs":[{{"spent":[{{"txid":"{}","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}}]}}]}}"#,
+                        "AB".repeat(32)
+                    )
+                    .as_bytes(),
+                ),
+                // This row and the next prove the decision precedes conversion:
+                // `block_undo_from_disk`'s own message for a bad txid would WIN
+                // if conversion still ran first. Go emits the identical string.
+                Some("decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex"),
+            ),
+            (
+                "checksum_valid_over_short_txid",
+                envelope_over(
+                    br#"{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[{"txid":"aabb","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}"#,
+                ),
+                Some("decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex"),
+            ),
+        ];
+
+        let path = store
+            .root_dir()
+            .join("undo")
+            .join(format!("{block_hash_hex}.json"));
+        for (name, record, exact) in rows {
+            std::fs::write(&path, record.as_bytes()).expect("seed record");
+            let err = match store.get_undo(block_hash) {
+                Ok(accepted) => panic!("get_undo accepted {name}: {accepted:?}"),
+                Err(err) => err,
+            };
+            match exact {
+                Some(want) => assert_eq!(err, want, "{name}: exact message"),
+                None if name.starts_with("checksum_valid_over_") => {
+                    // Payload-class failure: it must NOT be reported as a
+                    // checksum or hash failure, which is what proves the order.
+                    assert_ne!(err, UNDO_CHECKSUM_MISMATCH_ERR, "{name}");
+                    assert_ne!(err, UNDO_BLOCK_HASH_MISMATCH_ERR, "{name}");
+                }
+                None => assert!(
+                    err.starts_with("UNDO_INTEGRITY"),
+                    "{name}: {err} lacks the cross-client prefix"
+                ),
+            }
+
+            let after = std::fs::read(&path).expect("re-read refused record");
+            assert_eq!(
+                after,
+                record.as_bytes(),
+                "{name}: refused record was rewritten"
+            );
+        }
+
+        // Step 8: a same-hash replay must not launder a corrupt record into a
+        // valid one. Rust's back-fill branch writes only when the undo file is
+        // ABSENT, so an existing corrupt record survives the replay untouched.
+        // (Go reaches the same outcome through write-if-absent, which refuses
+        // outright; the shared guarantee is "no silent heal", and each client
+        // keeps the write behavior it already had.)
+        let genesis = crate::genesis::devnet_genesis_block_bytes();
+        let header = &genesis[..rubin_consensus::BLOCK_HEADER_BYTES];
+        let genesis_hash = rubin_consensus::block_hash(header).expect("hash");
+        let mut store = store;
+        store
+            .put_block(0, genesis_hash, header, &genesis)
+            .expect("seed canonical entry");
+        let genesis_undo_path = store
+            .root_dir()
+            .join("undo")
+            .join(format!("{}.json", hex::encode(genesis_hash)));
+        let corrupt = b"{\"version\":1,\"block_hash\":\"deadbeef\"}\n";
+        std::fs::write(&genesis_undo_path, corrupt).expect("seed corrupt undo");
+        let genesis_undo = BlockUndo {
+            block_height: 0,
+            previous_already_generated: 0,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+        store
+            .commit_canonical_block(0, genesis_hash, header, &genesis, &genesis_undo)
+            .expect("same-hash replay is a no-op");
+        assert_eq!(
+            std::fs::read(&genesis_undo_path).expect("re-read"),
+            corrupt,
+            "same-hash replay healed a corrupt undo record"
+        );
+        assert!(
+            store.get_undo(genesis_hash).is_err(),
+            "the corrupt record must still be refused after the replay"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Pins the measured per-entry payload byte cost behind the undo bound
     /// derivation (io_utils.rs), measured through the production encoder
-    /// (`marshal_block_undo`; its trailing newline cancels in the diff). A red
-    /// row means a disk-struct change silently shifted the derivation margin:
-    /// reconcile the io_utils.rs comment and the Go bound table before
-    /// re-pinning. Go twin: `TestReadFileBoundDerivationEntrySizes`.
+    /// (`marshal_block_undo`). A red row means a disk-struct change silently
+    /// shifted the derivation margin: reconcile the io_utils.rs comment and the
+    /// Go bound table before re-pinning.
+    ///
+    /// RUB-1132 changed the payload from indented to compact JSON, so this
+    /// marginal cost dropped 66_707 -> 66_605. The io_utils.rs derivation still
+    /// cites the indented figure and stays SOUND because it is now
+    /// conservative: the compact payload is strictly smaller, so the same
+    /// UNDO_FILE_MAX_BYTES covers strictly more spent entries than derived. The
+    /// Go twin `TestReadFileBoundDerivationEntrySizes` measures
+    /// `json.MarshalIndent` directly rather than the production encoder, so it
+    /// still pins 66_707 — the two numbers are the two encodings of the same
+    /// struct, not a cross-client divergence.
     #[test]
     fn undo_entry_derivation_size() {
         use crate::undo::{marshal_block_undo, BlockUndo, SpentUndo, TxUndo};
@@ -1350,7 +1671,7 @@ mod tests {
         };
         assert_eq!(
             undo_len(vec![spent.clone(), spent.clone()]) - undo_len(vec![spent]),
-            66_707
+            66_605
         );
     }
 

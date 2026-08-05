@@ -1,6 +1,11 @@
 package node
 
 import (
+	"bytes"
+	"encoding/hex"
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -314,4 +319,105 @@ func mustBeginCanonicalTransition(t *testing.T, engine *SyncEngine) *canonicalTr
 		t.Fatalf("beginCanonicalTransition: %v", err)
 	}
 	return tr
+}
+
+// TestDisconnectCorruptUndoLeavesStateUnchanged pins RUB-1132 step 7 on the
+// standalone disconnect path: a parse-valid but checksum-broken undo record
+// must be refused BEFORE the canonical transition opens, leaving chainstate,
+// the canonical index, the blockstore tip and the persisted snapshot exactly as
+// they were. Rust twin: `disconnect_corrupt_undo_leaves_state_unchanged`.
+func TestDisconnectCorruptUndoLeavesStateUnchanged(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+	subsidy := consensus.BlockSubsidy(1, 0)
+	block := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1),
+		coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy))
+	summary, err := engine.ApplyBlock(block, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock: %v", err)
+	}
+
+	beforeState, err := stateToDisk(engine.chainState)
+	if err != nil {
+		t.Fatalf("stateToDisk(before): %v", err)
+	}
+	beforeIndex, err := store.CanonicalIndexSnapshot()
+	if err != nil {
+		t.Fatalf("CanonicalIndexSnapshot(before): %v", err)
+	}
+	beforeHeight, beforeHash, beforeOK, err := store.Tip()
+	if err != nil {
+		t.Fatalf("Tip(before): %v", err)
+	}
+	beforeSnapshot, err := os.ReadFile(engine.cfg.ChainStatePath)
+	if err != nil {
+		t.Fatalf("read chainstate snapshot: %v", err)
+	}
+
+	corrupt, original := corruptStoredUndoChecksum(t, store, summary.BlockHash)
+
+	_, err = engine.DisconnectTip()
+	if err == nil {
+		t.Fatal("DisconnectTip accepted a checksum-broken undo record")
+	}
+	if !errors.Is(err, ErrUndoIntegrity) {
+		t.Fatalf("err = %v, want errors.Is ErrUndoIntegrity", err)
+	}
+	if err.Error() != "UNDO_INTEGRITY: checksum mismatch" {
+		t.Fatalf("message = %q, want exactly %q", err.Error(), "UNDO_INTEGRITY: checksum mismatch")
+	}
+	// A corrupt LOCAL record must never be reported as a consensus fault: node/p2p
+	// ban-scores the relaying peer on any *consensus.TxError in the chain.
+	var txErr *consensus.TxError
+	if errors.As(err, &txErr) {
+		t.Fatalf("local corruption surfaced as consensus.TxError: %v", err)
+	}
+
+	afterState, err := stateToDisk(engine.chainState)
+	if err != nil {
+		t.Fatalf("stateToDisk(after): %v", err)
+	}
+	if !reflect.DeepEqual(afterState, beforeState) {
+		t.Fatalf("chainstate mutated: before=%+v after=%+v", beforeState, afterState)
+	}
+	afterIndex, err := store.CanonicalIndexSnapshot()
+	if err != nil {
+		t.Fatalf("CanonicalIndexSnapshot(after): %v", err)
+	}
+	if !reflect.DeepEqual(afterIndex, beforeIndex) {
+		t.Fatalf("canonical index mutated: before=%v after=%v", beforeIndex, afterIndex)
+	}
+	afterHeight, afterHash, afterOK, err := store.Tip()
+	if err != nil {
+		t.Fatalf("Tip(after): %v", err)
+	}
+	if afterHeight != beforeHeight || afterHash != beforeHash || afterOK != beforeOK {
+		t.Fatalf("blockstore tip moved: before=(%d,%x,%v) after=(%d,%x,%v)",
+			beforeHeight, beforeHash, beforeOK, afterHeight, afterHash, afterOK)
+	}
+	afterSnapshot, err := os.ReadFile(engine.cfg.ChainStatePath)
+	if err != nil {
+		t.Fatalf("re-read chainstate snapshot: %v", err)
+	}
+	if !bytes.Equal(afterSnapshot, beforeSnapshot) {
+		t.Fatal("persisted chainstate snapshot was rewritten by a refused disconnect")
+	}
+	// The refusal must not heal the record either.
+	undoPath := filepath.Join(store.undoDir, hex.EncodeToString(summary.BlockHash[:])+".json")
+	if after, err := os.ReadFile(undoPath); err != nil || !bytes.Equal(after, corrupt) {
+		t.Fatalf("refused disconnect rewrote the undo record (err=%v)", err)
+	}
+
+	// W6 positive control: the same disconnect must succeed once the record is
+	// valid again, so the rejection above is attributable to the corruption and
+	// not to a path that now refuses everything.
+	restoreStoredUndo(t, store, summary.BlockHash, original)
+	disconnected, err := engine.DisconnectTip()
+	if err != nil {
+		t.Fatalf("DisconnectTip after restore: %v", err)
+	}
+	if disconnected.DisconnectedHeight != 1 || engine.chainState.Height != 0 ||
+		engine.chainState.TipHash != devnetGenesisBlockHash {
+		t.Fatalf("restored disconnect=(%d) state=(%d,%x), want height 0 at genesis",
+			disconnected.DisconnectedHeight, engine.chainState.Height, engine.chainState.TipHash)
+	}
 }
