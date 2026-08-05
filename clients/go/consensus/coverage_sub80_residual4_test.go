@@ -214,7 +214,7 @@ func TestCoverageResidual4_ApplyNonCoinbaseTxBasicWorkStealthSpend(t *testing.T)
 	if err != nil {
 		t.Fatalf("ApplyNonCoinbaseTxBasicUpdate(stealth): %v", err)
 	}
-	if summary == nil || summary.Fee != 10 {
+	if summary == nil || summary.Fee.Cmp(Uint128FromU64(10)) != 0 {
 		t.Fatalf("unexpected summary: %+v", summary)
 	}
 	if len(work) != 1 {

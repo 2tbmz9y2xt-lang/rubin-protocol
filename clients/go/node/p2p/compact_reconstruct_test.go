@@ -712,7 +712,7 @@ func TestHandleCmpctBlockIgnoresMalformedLocalCandidates(t *testing.T) {
 	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
 	shortID := compactShortIDForTx(t, txs[0], 201, 202)
 	pool := NewMemoryTxPoolWithLimit(1)
-	pool.txs[[32]byte{0x42}] = &relayTxEntry{raw: append(txs[0], 0x00), fee: 1, size: len(txs[0]) + 1}
+	pool.txs[[32]byte{0x42}] = &relayTxEntry{raw: append(txs[0], 0x00), fee: consensus.Uint128FromU64(1), size: len(txs[0]) + 1}
 	p := newCompactScriptedPeer(t)
 	p.service.cfg.TxPool = pool
 	payload := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Nonce1: 201, Nonce2: 202, ShortIDs: []compactShortID{shortID}})
@@ -1311,7 +1311,7 @@ func TestCompactRelayLocalTransactionsCopiesMemoryPoolBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseTx alias: %v", err)
 	}
-	if !aliasPool.Put(aliasTxid, aliasRaw, 1, len(aliasRaw)) {
+	if !aliasPool.Put(aliasTxid, aliasRaw, consensus.Uint128FromU64(1), len(aliasRaw)) {
 		t.Fatal("Put alias tx rejected")
 	}
 	got := compactRelayLocalTransactions(aliasPool, 1)
@@ -1330,7 +1330,7 @@ func TestCompactRelayLocalTransactionsUsesPurposeSpecificByteCap(t *testing.T) {
 	}
 	pool := NewMemoryTxPoolWithLimit(1)
 	raw := make([]byte, compactLocalTxCandidateBytesLimit+1)
-	if !pool.Put([32]byte{0x44}, raw, 1, len(raw)) {
+	if !pool.Put([32]byte{0x44}, raw, consensus.Uint128FromU64(1), len(raw)) {
 		t.Fatal("Put oversized local candidate")
 	}
 	if got := compactRelayLocalTransactions(pool, 1); len(got) != 0 {
@@ -1347,7 +1347,7 @@ func compactRelayTestMemoryPool(t *testing.T, count int) *MemoryTxPool {
 		if err != nil {
 			t.Fatalf("ParseTx[%d]: %v", i, err)
 		}
-		if !pool.Put(txid, raw, uint64(i+1), len(raw)) {
+		if !pool.Put(txid, raw, consensus.Uint128FromU64(uint64(i+1)), len(raw)) {
 			t.Fatalf("Put[%d] rejected", i)
 		}
 	}
@@ -1356,7 +1356,7 @@ func compactRelayTestMemoryPool(t *testing.T, count int) *MemoryTxPool {
 
 func TestCompactRelayLocalTransactionsForBlockSkipsPrefilledOnly(t *testing.T) {
 	pool := NewMemoryTxPoolWithLimit(1)
-	if !pool.Put([32]byte{0x01}, []byte{0xaa}, 1, 1) {
+	if !pool.Put([32]byte{0x01}, []byte{0xaa}, consensus.Uint128FromU64(1), 1) {
 		t.Fatal("Put local candidate")
 	}
 	if got := compactRelayLocalTransactionsForBlock(cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: []byte{0xbb}}}}, pool); got != nil {

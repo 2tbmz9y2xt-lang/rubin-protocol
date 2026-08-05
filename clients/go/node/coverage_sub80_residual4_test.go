@@ -129,7 +129,7 @@ func TestCoverageResidual4_ReorgAndBlockstoreHelpers(t *testing.T) {
 	if got := nilEngine.ReorgCount(); got != 0 {
 		t.Fatalf("ReorgCount(nil)=%d, want 0", got)
 	}
-	if got := cloneMempoolEntry(nil); len(got.raw) != 0 || len(got.inputs) != 0 || got.fee != 0 || got.weight != 0 || got.size != 0 {
+	if got := cloneMempoolEntry(nil); len(got.raw) != 0 || len(got.inputs) != 0 || got.fee.Cmp(consensus.Uint128FromU64(0)) != 0 || got.weight != 0 || got.size != 0 {
 		t.Fatalf("cloneMempoolEntry(nil)=%+v", got)
 	}
 
