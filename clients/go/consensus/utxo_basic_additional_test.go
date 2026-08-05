@@ -100,12 +100,28 @@ func TestUint128JSONCanonicality(t *testing.T) {
 // TestCompareFeeRateRetainsAll192ProductBits pins the exact fee-rate
 // comparison. Mirrors Rust `fee_rate_product_retains_all_192_bits`.
 func TestCompareFeeRateRetainsAll192ProductBits(t *testing.T) {
-	// Significant product bits above 127: a u128-only cross-product would
-	// wrap and misorder these.
+	// Adjacent products at bit 127 (2^127 against 2^127-1): ordering only,
+	// both still inside u128.
 	feeA := Uint128{Hi: 1 << 63}
 	feeB := Uint128{Hi: 1<<63 - 1, Lo: ^uint64(0)}
 	if got := CompareFeeRate(feeA, 1, feeB, 1); got != 1 {
 		t.Fatalf("compare=%d, want 1", got)
+	}
+	// Products ABOVE 128 bits, where a wrapping or saturating u128
+	// cross-product reverses the verdict. u128max at weight 1 outranks
+	// u128max at weight 2: the exact products are 2^129-2 against 2^128-1,
+	// which wrap to 2^128-2 against 2^128-1.
+	max128 := Uint128{Hi: ^uint64(0), Lo: ^uint64(0)}
+	if got := CompareFeeRate(max128, 1, max128, 2); got != 1 {
+		t.Fatalf("above-128-bit compare=%d, want 1", got)
+	}
+	if got := CompareFeeRate(max128, 2, max128, 1); got != -1 {
+		t.Fatalf("above-128-bit compare=%d, want -1", got)
+	}
+	// Product exactly 2^128 (against 2^126): wrapping annihilates it to zero
+	// and reverses the verdict.
+	if got := CompareFeeRate(Uint128{Hi: 1 << 63}, 1, Uint128{Hi: 1 << 62}, 2); got != 1 {
+		t.Fatalf("2^128-product compare=%d, want 1", got)
 	}
 	// Exact ratio equality with distinct fees and weights.
 	if got := CompareFeeRate(Uint128{Hi: 1 << 36}, 2, Uint128{Hi: 1 << 35}, 1); got != 0 {

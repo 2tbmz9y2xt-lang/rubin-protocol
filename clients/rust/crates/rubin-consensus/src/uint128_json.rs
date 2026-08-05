@@ -214,12 +214,30 @@ mod tests {
 
     #[test]
     fn fee_rate_product_retains_all_192_bits() {
-        // Significant product bits above 127: a u128 comparison of the
-        // cross-products would wrap and misorder these.
+        // Adjacent products at bit 127 (2^127 against 2^127-1): ordering
+        // only, both still inside u128.
         let fee_a = 1u128 << 127;
         let fee_b = (1u128 << 127) - 1;
         assert_eq!(
             compare_fee_rate(fee_a, 1, fee_b, 1),
+            core::cmp::Ordering::Greater
+        );
+        // Products ABOVE 128 bits, where a wrapping or saturating u128
+        // cross-product reverses the verdict. u128::MAX at weight 1 outranks
+        // u128::MAX at weight 2: the exact products are 2^129-2 against
+        // 2^128-1, which wrap to 2^128-2 against 2^128-1.
+        assert_eq!(
+            compare_fee_rate(u128::MAX, 1, u128::MAX, 2),
+            core::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_fee_rate(u128::MAX, 2, u128::MAX, 1),
+            core::cmp::Ordering::Less
+        );
+        // Product exactly 2^128 (against 2^126): wrapping annihilates it to
+        // zero and reverses the verdict.
+        assert_eq!(
+            compare_fee_rate(1u128 << 127, 1, 1u128 << 126, 2),
             core::cmp::Ordering::Greater
         );
         // Exact ratio equality with distinct fees and weights.
