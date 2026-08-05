@@ -532,13 +532,21 @@ assert_atomic_reserved_state() {
 }
 canonical_live_block_path() {
   python3 - "$1/blockstore/index.json" "$1/blockstore/blocks" <<'PY'
-import json, pathlib, sys
+import base64, binascii, json, pathlib, sys
 def require(condition, message):
     if not condition:
         raise SystemExit(message)
+# RUB-1134: index.json is the store_envelope_v1 frame; the inner index encoding
+# is unchanged. The node verifies the domain-tagged checksum on open, so this
+# reader only unwraps the v1 payload — every malformed shape stays a
+# deterministic SystemExit rather than a traceback.
 try:
-    index = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+    envelope = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+    require(isinstance(envelope, dict), "canonical block index envelope is not an object")
+    require(envelope.get("version") == 1, "canonical block index envelope is not version 1")
+    require(isinstance(envelope.get("payload_b64"), str), "canonical block index envelope has no payload")
+    index = json.loads(base64.b64decode(envelope["payload_b64"], validate=True))
+except (OSError, UnicodeError, json.JSONDecodeError, RecursionError, binascii.Error, ValueError) as exc:
     raise SystemExit(f"cannot read canonical block index: {exc}")
 require(isinstance(index, dict), "canonical block index root is not an object")
 canonical = index.get("canonical")

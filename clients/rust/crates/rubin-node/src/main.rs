@@ -369,6 +369,23 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     // the chainstate as loaded from disk. Ordinary startup is unaffected.
     // Go reference: the `if !*dryRun` guard in `cmd/rubin-node/main.go`.
     if !cfg.dry_run {
+        // RUB-1134 genesis anchor: a non-empty canonical index whose row 0 is
+        // not the configured genesis hash is a foreign datadir. Checked BEFORE
+        // the reconcile so no replay, truncate, or reconcile adoption ever
+        // consumes a foreign index; an empty index skips the anchor. `--dry-run`
+        // adopts nothing and stays a read-only report, so the anchor is enforced
+        // only on this mutating path — the same placement as the Go twin in
+        // `clients/go/cmd/rubin-node/main.go`. A genesis file that carries no
+        // genesis hash for a custom chain_id leaves nothing to anchor AGAINST;
+        // that configuration is refused later by `runtime_genesis_hash` before
+        // any service starts, and Go cannot reach it at all (its genesis parse
+        // requires the hash).
+        if let Some(genesis_hash) = genesis_cfg.genesis_hash {
+            if let Err(err) = block_store.verify_genesis_anchor(genesis_hash) {
+                let _ = writeln!(stderr, "canonical index genesis anchor failed: {err}");
+                return 2;
+            }
+        }
         if let Err(err) =
             reconcile_chain_state_with_block_store(&mut chain_state, &mut block_store, &sync_cfg)
         {

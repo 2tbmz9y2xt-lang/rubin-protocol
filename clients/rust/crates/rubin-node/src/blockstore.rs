@@ -14,6 +14,10 @@ use crate::io_utils::{
     AtomicWriteError, AtomicWriteOperation, BLOCK_FILE_MAX_BYTES, HEADER_FILE_MAX_BYTES,
     UNDO_FILE_MAX_BYTES,
 };
+use crate::store_envelope::{
+    marshal_store_envelope, open_store_envelope, STORE_ENVELOPE_BLOCK_INDEX,
+    STORE_GENESIS_ANCHOR_ERR,
+};
 use crate::undo::{marshal_undo_envelope, unmarshal_undo_envelope, BlockUndo};
 use std::ffi::OsStr;
 
@@ -454,6 +458,34 @@ impl BlockStore {
             return Ok(None);
         }
         Ok(Some(self.canonical_hash_by_height[height as usize]))
+    }
+
+    /// RUB-1134 genesis anchor: whenever the loaded canonical index is
+    /// non-empty, row 0 MUST equal the configured genesis hash for the active
+    /// network. An EMPTY canonical index skips the anchor (a fresh store has
+    /// no rows to anchor). Failure is the distinct fail-closed foreign-datadir
+    /// class carrying the STORE_INTEGRITY identity, not an envelope-integrity
+    /// failure, and never an absent-file error.
+    ///
+    /// Startup wiring (`main.rs`) calls this BEFORE
+    /// `reconcile_chain_state_with_block_store`, so no replay, truncate, or
+    /// reconcile adoption ever consumes an index whose row 0 names a foreign
+    /// chain. Go twin: `BlockStore.VerifyGenesisAnchor`.
+    pub fn verify_genesis_anchor(&self, genesis_hash: [u8; 32]) -> Result<(), String> {
+        match self.canonical_hash(0)? {
+            None => Ok(()),
+            Some(row0) if row0 == genesis_hash => Ok(()),
+            Some(_) => Err(STORE_GENESIS_ANCHOR_ERR.to_string()),
+        }
+    }
+
+    /// Test-only: re-persists the canonical index through the ordinary atomic
+    /// write path, without changing any canonical state, so a crash-injection
+    /// row can fail exactly that write. Go twin: the direct
+    /// `saveBlockStoreIndex` call in `crashAtBoundary`.
+    #[cfg(test)]
+    pub(crate) fn resave_canonical_index_for_test(&self) -> Result<(), String> {
+        save_blockstore_index(&self.index_path, &self.index)
     }
 
     pub fn tip(&self) -> Result<Option<(u64, [u8; 32])>, String> {
@@ -1015,6 +1047,12 @@ fn load_blockstore_index(path: &Path) -> Result<BlockStoreIndexDisk, String> {
     // A missing marker is an error, never an implicit empty index.
     let raw = read_file_from_dir_unbounded(parent, name)
         .map_err(|e| format!("read blockstore index {}: {e}", path.display()))?;
+    // RUB-1134: every present marker must clear the strict store_envelope_v1
+    // (layout, canonical base64, domain-tagged checksum) BEFORE the inner
+    // index decode below. The STORE_INTEGRITY message is returned verbatim
+    // (Go returns the same string) and is never an absent-file error, so the
+    // strict-open rejection above stays the only missing-marker path.
+    let raw = open_store_envelope(STORE_ENVELOPE_BLOCK_INDEX, &raw)?;
     // `deny_unknown_fields` plus serde's duplicate/missing-field errors,
     // `from_slice`'s trailing-input rejection and the entry check below pin the
     // exact marker schema: exactly one `version` and one `canonical` field, in
@@ -1073,14 +1111,19 @@ fn save_blockstore_index_serializable_typed<S: serde::Serialize + ?Sized>(
     path: &Path,
     index: &S,
 ) -> Result<(), AtomicWriteError> {
-    let mut raw = serde_json::to_vec_pretty(index).map_err(|error| {
+    let mut payload = serde_json::to_vec_pretty(index).map_err(|error| {
         atomic_write_error_before(
             path,
             AtomicWriteOperation::Overwrite,
             format!("encode blockstore index: {error}"),
         )
     })?;
-    raw.push(b'\n');
+    payload.push(b'\n');
+    // RUB-1134: the pre-envelope on-disk bytes become the exact envelope
+    // payload — the inner index encoding is unchanged, only the frame is new —
+    // and the existing atomic write path below is untouched.
+    let raw = marshal_store_envelope(STORE_ENVELOPE_BLOCK_INDEX, &payload)
+        .map_err(|error| atomic_write_error_before(path, AtomicWriteOperation::Overwrite, error))?;
     // Keep writer on raw `write_file_atomic` (no `lexical_clean`)
     // so the index file persists to the same physical directory
     // that block / header / undo writers use and that
@@ -1207,7 +1250,8 @@ mod tests {
 
     use super::{
         block_store_path, read_file_by_path, write_file_if_absent, write_file_if_absent_with,
-        BlockStore, BLOCK_FILE_MAX_BYTES, BLOCK_STORE_DIR_NAME, HEADER_FILE_MAX_BYTES,
+        BlockStore, BlockStoreIndexDisk, BLOCK_FILE_MAX_BYTES, BLOCK_STORE_DIR_NAME,
+        HEADER_FILE_MAX_BYTES, STORE_ENVELOPE_BLOCK_INDEX,
     };
 
     /// RUB-1057: bound+1 refusal at the two caller paths whose production
@@ -2592,8 +2636,26 @@ mod tests {
         for sub in ["blocks", "headers", "undo"] {
             assert!(root.join(sub).is_dir(), "{sub} must be a directory");
         }
+        // RUB-1134: the marker is the store_envelope_v1 frame over the
+        // UNCHANGED inner payload. The frame is cross-client identical for
+        // identical payload bytes (pinned by the shared vectors in
+        // store_envelope.rs); the inner field ORDER differs from Go's writer at
+        // baseline (`version` first here, `canonical` first there) and this
+        // contract does not redesign the inner formats, so the pinned bytes
+        // below are this client's.
         let raw = std::fs::read_to_string(root.join("index.json")).expect("marker");
-        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("marker json");
+        assert_eq!(
+            raw,
+            concat!(
+                r#"{"version":1,"payload_b64":"ewogICJ2ZXJzaW9uIjogMSwKICAiY2Fub25pY2FsIjogW10KfQo=","#,
+                r#""checksum":"4553e2cde806137955ef1ec93f14575cf5434d4c70c44eae6409257ddc332093"}"#,
+                "\n"
+            )
+        );
+        let payload =
+            crate::store_envelope::open_store_envelope(STORE_ENVELOPE_BLOCK_INDEX, raw.as_bytes())
+                .expect("open marker envelope");
+        let parsed: serde_json::Value = serde_json::from_slice(&payload).expect("marker json");
         assert_eq!(parsed, serde_json::json!({"version": 1, "canonical": []}));
         BlockStore::open(&root).expect("strict open of a freshly created store");
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -2743,27 +2805,34 @@ mod tests {
         let dir = fresh_datadir("rubin-bs-marker-rows");
         let root = block_store_path(&dir);
         BlockStore::create(&root).expect("create");
+        // RUB-1134: every row is planted INSIDE a valid store_envelope_v1 frame
+        // with a correct checksum, so this table keeps testing the inner marker
+        // schema exactly as before. Frame-level rejection (legacy, checksum,
+        // duplicate/unknown envelope fields) is pinned by
+        // `blockstore_index_rejects_integrity_failures`.
+        let write_enveloped_marker = |body: &str| {
+            std::fs::write(
+                root.join("index.json"),
+                crate::store_envelope::tests::rewrap(STORE_ENVELOPE_BLOCK_INDEX, body.as_bytes()),
+            )
+            .expect("write marker");
+        };
         for (name, body) in rows {
-            std::fs::write(root.join("index.json"), body.as_bytes()).expect("write marker");
+            write_enveloped_marker(&body);
             assert!(
                 BlockStore::open(&root).is_err(),
                 "marker row {name} must be rejected"
             );
         }
         // The accepted rows: empty marker, and a well-formed lowercase entry.
-        std::fs::write(root.join("index.json"), br#"{"version":1,"canonical":[]}"#)
-            .expect("write marker");
+        write_enveloped_marker(r#"{"version":1,"canonical":[]}"#);
         assert_eq!(
             BlockStore::open(&root)
                 .expect("empty marker accepted")
                 .canonical_len(),
             0
         );
-        std::fs::write(
-            root.join("index.json"),
-            format!(r#"{{"canonical":["{hash}"],"version":1}}"#).as_bytes(),
-        )
-        .expect("write marker");
+        write_enveloped_marker(&format!(r#"{{"canonical":["{hash}"],"version":1}}"#));
         assert_eq!(
             BlockStore::open(&root)
                 .expect("field order is free")
@@ -2771,6 +2840,177 @@ mod tests {
             1
         );
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Commits the devnet genesis as canonical row 0 and writes a complete
+    /// header/block/undo artifact set for a NON-canonical block at the same
+    /// height, so a swapped index row can point at a block every downstream
+    /// identity check accepts. Go twin: `storeSameHeightSibling`.
+    fn store_with_same_height_sibling(root: &Path) -> (BlockStore, [u8; 32]) {
+        use crate::genesis::devnet_genesis_block_bytes;
+        use crate::undo::{BlockUndo, TxUndo};
+
+        let mut store = BlockStore::create(root).expect("create");
+        let genesis = devnet_genesis_block_bytes();
+        let header = &genesis[..BLOCK_HEADER_BYTES];
+        let undo = BlockUndo {
+            block_height: 0,
+            previous_already_generated: 0,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+        store
+            .commit_canonical_block(
+                0,
+                block_hash(header).expect("hash"),
+                header,
+                &genesis,
+                &undo,
+            )
+            .expect("commit genesis");
+
+        // Same height, different nonce: a real stored block whose artifacts all
+        // exist and which is NOT the canonical row.
+        let mut sibling = genesis.clone();
+        sibling[BLOCK_HEADER_BYTES - 1] ^= 0x01;
+        let sibling_hash = block_hash(&sibling[..BLOCK_HEADER_BYTES]).expect("hash sibling header");
+        store
+            .store_block(sibling_hash, &sibling[..BLOCK_HEADER_BYTES], &sibling)
+            .expect("store sibling");
+        store.put_undo(sibling_hash, &undo).expect("sibling undo");
+        (store, sibling_hash)
+    }
+
+    /// The shared frame rows plus the canonical-row swap, through the real
+    /// `BlockStore::open` path. Go twin:
+    /// `TestBlockstoreIndexRejectsIntegrityFailures`.
+    #[test]
+    fn blockstore_index_rejects_integrity_failures() {
+        use crate::store_envelope::tests::{
+            payload_b64_of, restamp_payload_keeping_checksum, rewrap, run_store_integrity_rows,
+            shared_reject_rows, StoreIntegrityRow,
+        };
+        use crate::store_envelope::{STORE_CHECKSUM_MISMATCH_ERR, STORE_LEGACY_BLOCK_INDEX_ERR};
+
+        let dir = fresh_datadir("rubin-bs-integrity");
+        let root = block_store_path(&dir);
+        let (_store, sibling_hash) = store_with_same_height_sibling(&root);
+        let marker = root.join("index.json");
+        let valid = std::fs::read(&marker).expect("read marker");
+        let payload =
+            crate::store_envelope::open_store_envelope(STORE_ENVELOPE_BLOCK_INDEX, &valid)
+                .expect("open valid envelope");
+
+        let swapped_payload = move |payload: &[u8]| -> Vec<u8> {
+            let mut index: BlockStoreIndexDisk =
+                serde_json::from_slice(payload).expect("decode index payload");
+            assert!(!index.canonical.is_empty(), "index has no canonical rows");
+            let last = index.canonical.len() - 1;
+            index.canonical[last] = hex::encode(sibling_hash);
+            let mut edited = serde_json::to_vec_pretty(&index).expect("encode index payload");
+            edited.push(b'\n');
+            edited
+        };
+
+        let mut rows = shared_reject_rows();
+        rows.push(StoreIntegrityRow {
+            name: "legacy_unversioned_blockstore_index",
+            body: Box::new(|_, payload| payload.to_vec()),
+            want_msg: Some(STORE_LEGACY_BLOCK_INDEX_ERR),
+            want_sub: None,
+            not_integrity: false,
+        });
+        rows.push(StoreIntegrityRow {
+            // The swapped row names a same-height sibling whose header, block
+            // and undo artifacts ALL exist, so the stored-identity and undo
+            // bindings both pass: only the envelope catches the file edit.
+            name: "canonical_row_swapped_to_existing_sibling",
+            body: Box::new(move |valid, payload| {
+                restamp_payload_keeping_checksum(valid, &swapped_payload(payload))
+            }),
+            want_msg: Some(STORE_CHECKSUM_MISMATCH_ERR),
+            want_sub: None,
+            not_integrity: false,
+        });
+        rows.push(StoreIntegrityRow {
+            name: "inner_payload_malformed",
+            body: Box::new(|_, _| {
+                rewrap(
+                    STORE_ENVELOPE_BLOCK_INDEX,
+                    br#"{"version":1,"canonical":["zz"]}"#,
+                )
+            }),
+            want_msg: None,
+            want_sub: Some("canonical[0]"),
+            not_integrity: true,
+        });
+        run_store_integrity_rows(
+            &marker,
+            &valid,
+            &payload,
+            || BlockStore::open(&root).map(|_| ()),
+            &rows,
+        );
+        assert!(!payload_b64_of(&valid).is_empty());
+
+        // The envelope is the ONLY guard on that swap: with the checksum
+        // recomputed over the swapped payload the store opens, which is exactly
+        // why the checksum may never be waived.
+        let mut swapped: BlockStoreIndexDisk =
+            serde_json::from_slice(&payload).expect("decode index payload");
+        let last = swapped.canonical.len() - 1;
+        swapped.canonical[last] = hex::encode(sibling_hash);
+        let mut swapped_bytes = serde_json::to_vec_pretty(&swapped).expect("encode index payload");
+        swapped_bytes.push(b'\n');
+        std::fs::write(&marker, rewrap(STORE_ENVELOPE_BLOCK_INDEX, &swapped_bytes))
+            .expect("plant recomputed swap");
+        BlockStore::open(&root).expect("recomputed-checksum swap must clear the envelope");
+
+        std::fs::write(&marker, &valid).expect("restore valid marker");
+        BlockStore::open(&root).expect("valid marker must open");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The RUB-1134 genesis anchor: a non-empty canonical index whose row 0 is
+    /// not the configured genesis hash is a foreign datadir and is refused
+    /// BEFORE reconcile adopts the index; an EMPTY canonical index skips the
+    /// anchor. Go twin: `TestStartupGenesisAnchorMismatchFails`.
+    #[test]
+    fn startup_genesis_anchor_mismatch_fails() {
+        use crate::store_envelope::STORE_GENESIS_ANCHOR_ERR;
+
+        let empty_dir = fresh_datadir("rubin-bs-anchor-empty");
+        let empty = BlockStore::create(block_store_path(&empty_dir)).expect("create");
+        empty
+            .verify_genesis_anchor([0xff; 32])
+            .expect("an empty canonical index must skip the anchor");
+
+        let dir = fresh_datadir("rubin-bs-anchor");
+        let root = block_store_path(&dir);
+        let genesis_hash =
+            block_hash(&crate::genesis::devnet_genesis_block_bytes()[..BLOCK_HEADER_BYTES])
+                .expect("genesis hash");
+        let (store, _sibling) = store_with_same_height_sibling(&root);
+        store
+            .verify_genesis_anchor(genesis_hash)
+            .expect("a legitimate datadir must pass the anchor");
+
+        // A coherent FOREIGN datadir: both envelopes verify and the tips agree,
+        // so only the anchor refuses it.
+        let index_before = std::fs::read(root.join("index.json")).expect("index before");
+        assert_eq!(
+            store
+                .verify_genesis_anchor([0xab; 32])
+                .expect_err("a foreign canonical index must be refused"),
+            STORE_GENESIS_ANCHOR_ERR
+        );
+        assert_eq!(
+            std::fs::read(root.join("index.json")).expect("index after"),
+            index_before,
+            "the anchor refusal must not mutate the canonical index"
+        );
+        assert_eq!(store.canonical_len(), 1);
+        let _ = std::fs::remove_dir_all(&empty_dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Rule 10 at the LOADER layer: a missing marker must error even though the
