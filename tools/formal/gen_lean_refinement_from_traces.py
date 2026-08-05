@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -63,7 +64,20 @@ def _hex0x(s: str) -> str:
     return "0x" + t
 
 
+_CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)$")
+
+
 def _lean_opt_nat(x: Any) -> str:
+    """Render an optional Lean `Nat` from a trace output value.
+
+    Widened (u128-domain) trace outputs such as `fee` are emitted as
+    canonical unsigned decimal STRINGS, because a widened monetary integer
+    must not depend on interoperable JSON-number precision. Lean `Nat` is
+    unbounded, so the string is rendered as a plain numeral. A legacy JSON
+    integer token is still accepted. Anything else fails closed: a leading
+    zero, a sign, whitespace, a fraction, an exponent, or a non-digit is
+    never silently reinterpreted.
+    """
     if x is None:
         return "none"
     if isinstance(x, bool):
@@ -71,6 +85,10 @@ def _lean_opt_nat(x: Any) -> str:
     if isinstance(x, int):
         if x < 0:
             _fail(f"expected nat, got negative: {x}")
+        return f"some {x}"
+    if isinstance(x, str):
+        if not _CANONICAL_DECIMAL.match(x):
+            _fail(f"expected canonical unsigned decimal string, got: {x!r}")
         return f"some {x}"
     _fail(f"expected nat, got: {type(x)}")
 

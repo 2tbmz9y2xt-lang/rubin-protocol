@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -199,6 +200,9 @@ func runGeneratorCLIWithArgs(args []string) {
 		)
 
 		updateP2PKBurnToFeeVector(f, "CV-U-19", zeroChainID, ownerKP, 100) // burn-to-fee, output_count=0
+
+		// Shared widened-fee vector: fee = 2^64, one above the u64 domain.
+		updateWideFeeVector(f, "CV-U-FEE-U128-01", zeroChainID, ownerKP)
 		mustWriteFixture(remapWritePath(path), f)
 	}
 
@@ -362,7 +366,14 @@ func mustLoadFixture(path string) *fixtureFile {
 		fatalf("read %s: %v", path, err)
 	}
 	var f fixtureFile
-	if err := json.Unmarshal(b, &f); err != nil {
+	// UseNumber keeps every JSON integer as its exact literal instead of
+	// decoding it into float64. Vectors are loaded into map[string]any and
+	// written straight back out, so a float64 round-trip would silently
+	// corrupt any value above 2^53 — including the u64-max UTXO values the
+	// widened-fee vectors depend on.
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	if err := dec.Decode(&f); err != nil {
 		fatalf("parse %s: %v", path, err)
 	}
 	return &f
@@ -590,6 +601,15 @@ func p2pkCovenantData(pub []byte) []byte {
 }
 
 func parseJSONUint32(name string, value any) (uint32, error) {
+	// json.Number (the UseNumber decode path) is parsed exactly; float64 is
+	// still accepted for values the generator itself wrote back into a vector.
+	if num, ok := value.(json.Number); ok {
+		parsed, err := strconv.ParseUint(num.String(), 10, 32)
+		if err != nil {
+			return 0, fmt.Errorf("%s: want uint32-compatible JSON number", name)
+		}
+		return uint32(parsed), nil
+	}
 	n, ok := value.(float64)
 	if !ok || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || n > math.MaxUint32 || math.Trunc(n) != n {
 		return 0, fmt.Errorf("%s: want uint32-compatible JSON number", name)
@@ -729,6 +749,90 @@ func updateP2PKBurnToFeeVector(f *fixtureFile, id string, chainID [32]byte, sign
 	b := mustTxBytes(tx)
 	v["tx_hex"] = hex.EncodeToString(b)
 	v["utxos"] = utxos
+}
+
+// wideFeeInputValue is the per-input value of the widened-fee vectors:
+// 2^63, so two inputs sum to exactly 2^64 and a zero-output (burn-to-fee)
+// transaction has a fee of exactly 2^64 — one above the u64 domain.
+const wideFeeInputValue = uint64(1) << 63
+
+// upsertVector returns the vector with the given id, appending a fresh
+// skeleton when it does not exist yet. New vectors are therefore authored in
+// the generator (their only owner) rather than hand-written into the
+// committed fixture.
+func upsertVector(f *fixtureFile, id string, skeleton map[string]any) map[string]any {
+	for _, v := range f.Vectors {
+		if v["id"] == id {
+			return v
+		}
+	}
+	skeleton["id"] = id
+	f.Vectors = append(f.Vectors, skeleton)
+	return skeleton
+}
+
+// updateWideFeeVector authors the shared >u64 fee vector: two 2^63 P2PK
+// inputs and zero outputs, so the derived fee is exactly 2^64. The expected
+// fee is written as a canonical decimal string because a widened monetary
+// integer must not depend on interoperable JSON-number precision.
+func updateWideFeeVector(f *fixtureFile, id string, chainID [32]byte, signer digestSigner) {
+	pub := signer.PubkeyBytes()
+	cov := p2pkCovenantDataWithSuite(consensus.SUITE_ID_ML_DSA_87, pub)
+	prevTxids := [2][32]byte{{0xe1}, {0xe2}}
+
+	utxos := make([]map[string]any, 0, len(prevTxids))
+	inputs := make([]consensus.TxInput, 0, len(prevTxids))
+	for _, prev := range prevTxids {
+		utxos = append(utxos, map[string]any{
+			"txid":                hex.EncodeToString(prev[:]),
+			"vout":                json.Number("0"),
+			"value":               json.Number(strconv.FormatUint(wideFeeInputValue, 10)),
+			"covenant_type":       json.Number(strconv.FormatUint(uint64(consensus.COV_TYPE_P2PK), 10)),
+			"covenant_data":       hex.EncodeToString(cov),
+			"creation_height":     json.Number("0"),
+			"created_by_coinbase": false,
+		})
+		inputs = append(inputs, consensus.TxInput{PrevTxid: prev, PrevVout: 0})
+	}
+
+	tx := &consensus.Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  1,
+		Inputs:   inputs,
+		Outputs:  nil, // zero outputs: the whole input sum becomes fee
+		Locktime: 0,
+	}
+	witness := make([]consensus.WitnessItem, 0, len(inputs))
+	for i := range inputs {
+		sig := mustSignInputDigest(id, "input", signer, tx, uint32(i), wideFeeInputValue, chainID)
+		witness = append(witness, consensus.WitnessItem{
+			SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+			Pubkey:    pub,
+			Signature: sig,
+		})
+	}
+	tx.Witness = witness
+
+	wideFee := consensus.Uint128FromU64(wideFeeInputValue)
+	wideFee, ok := wideFee.CheckedAdd(consensus.Uint128FromU64(wideFeeInputValue))
+	if !ok {
+		fatalf("%s: wide fee overflow", id)
+	}
+	if wideFee.Cmp(consensus.Uint128FromU64(^uint64(0))) <= 0 {
+		fatalf("%s: wide fee must exceed u64", id)
+	}
+
+	v := upsertVector(f, id, map[string]any{
+		"op":              "utxo_apply_basic",
+		"height":          json.Number("200"),
+		"block_timestamp": json.Number("1000"),
+		"expect_ok":       true,
+	})
+	v["tx_hex"] = hex.EncodeToString(mustTxBytes(tx))
+	v["utxos"] = utxos
+	v["expect_fee"] = wideFee.String()
+	v["expect_utxo_count"] = json.Number("0")
 }
 
 func updateVaultSpendVectorsUTXO(
@@ -1350,6 +1454,8 @@ func updateSubsidyBlocks(
 		return hex.EncodeToString(block)
 	}
 
+	updateWideSumFeesBlocks(f, chainID, spendKP, coinbaseDestKP, sub1)
+
 	sub1["block_hex"] = buildBlock(subsidy + sumFees)
 	sub1["utxos"] = spendUTXO
 	sub1["already_generated"] = float64(alreadyGenerated)
@@ -1357,6 +1463,203 @@ func updateSubsidyBlocks(
 	sub2["block_hex"] = buildBlock(subsidy + sumFees + 1)
 	sub2["utxos"] = spendUTXO
 	sub2["already_generated"] = float64(alreadyGenerated)
+}
+
+// updateWideSumFeesBlocks authors the shared widened-aggregate block rows.
+//
+// Two non-coinbase transactions each burn a 2^63 input to fee, so the block
+// sum_fees is exactly 2^64 — above u64, and above either individual fee. The
+// coinbase pays block_subsidy(1)+sum_fees across two outputs, because that
+// total no longer fits in a single u64 output value.
+//
+//   - the exact bound is accepted and reports sum_fees as a canonical
+//     decimal string;
+//   - the same block with one extra unit is BLOCK_ERR_SUBSIDY_EXCEEDED.
+//
+// #lizard forgive
+func updateWideSumFeesBlocks(
+	f *fixtureFile,
+	chainID [32]byte,
+	spendKP digestSigner,
+	coinbaseDestKP digestSigner,
+	sub1 map[string]any,
+) {
+	const blockHeight = uint32(1)
+	subsidy := consensus.BlockSubsidy(uint64(blockHeight), 0)
+	spendPub := spendKP.PubkeyBytes()
+	spendCov := p2pkCovenantDataWithSuite(consensus.SUITE_ID_ML_DSA_87, spendPub)
+	cbDestCov := p2pkCovenantData(coinbaseDestKP.PubkeyBytes())
+	prevTxids := [2][32]byte{{0xf1}, {0xf2}}
+
+	utxos := make([]map[string]any, 0, len(prevTxids))
+	nonCoinbaseBytes := make([][]byte, 0, len(prevTxids))
+	sumFees := consensus.Uint128{}
+	for i, prev := range prevTxids {
+		utxos = append(utxos, map[string]any{
+			"txid":                hex.EncodeToString(prev[:]),
+			"vout":                json.Number("0"),
+			"value":               json.Number(strconv.FormatUint(wideFeeInputValue, 10)),
+			"covenant_type":       json.Number(strconv.FormatUint(uint64(consensus.COV_TYPE_P2PK), 10)),
+			"covenant_data":       hex.EncodeToString(spendCov),
+			"creation_height":     json.Number("0"),
+			"created_by_coinbase": false,
+		})
+		tx := &consensus.Tx{
+			Version:  1,
+			TxKind:   0x00,
+			TxNonce:  uint64(i) + 1,
+			Inputs:   []consensus.TxInput{{PrevTxid: prev, PrevVout: 0}},
+			Outputs:  nil, // zero outputs: the whole input becomes fee
+			Locktime: 0,
+		}
+		sig := mustSignInputDigest("wide-sum-fees", "input0", spendKP, tx, 0, wideFeeInputValue, chainID)
+		tx.Witness = []consensus.WitnessItem{{
+			SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+			Pubkey:    spendPub,
+			Signature: sig,
+		}}
+		nonCoinbaseBytes = append(nonCoinbaseBytes, mustTxBytes(tx))
+		next, ok := sumFees.CheckedAdd(consensus.Uint128FromU64(wideFeeInputValue))
+		if !ok {
+			fatalf("wide-sum-fees: sum_fees overflow")
+		}
+		sumFees = next
+	}
+	if sumFees.Cmp(consensus.Uint128FromU64(^uint64(0))) <= 0 {
+		fatalf("wide-sum-fees: aggregate must exceed u64")
+	}
+	limit, ok := sumFees.CheckedAdd(consensus.Uint128FromU64(subsidy))
+	if !ok {
+		fatalf("wide-sum-fees: coinbase limit overflow")
+	}
+
+	prevHash := mustHex32(sub1["expected_prev_hash"].(string))
+	build := func(extra uint64) string {
+		// The bound exceeds u64, so it is paid across two coinbase outputs.
+		high := wideFeeInputValue
+		low, ok := limit.CheckedSub(consensus.Uint128FromU64(high))
+		if !ok || low.Hi != 0 {
+			fatalf("wide-sum-fees: coinbase split does not fit u64")
+		}
+		return buildWideSumFeesBlock(wideSumFeesBlockInput{
+			blockHeight:      blockHeight,
+			prevHash:         prevHash,
+			cbDestCov:        cbDestCov,
+			coinbaseValues:   []uint64{high, low.Lo + extra},
+			nonCoinbaseBytes: nonCoinbaseBytes,
+		})
+	}
+
+	ok1 := upsertVector(f, "CV-SUB-U128-01", map[string]any{
+		"op":                 "connect_block_basic",
+		"height":             json.Number("1"),
+		"expected_prev_hash": sub1["expected_prev_hash"],
+		"expected_target":    sub1["expected_target"],
+		"already_generated":  json.Number("0"),
+		"expect_ok":          true,
+	})
+	ok1["block_hex"] = build(0)
+	ok1["utxos"] = utxos
+	ok1["expect_sum_fees"] = sumFees.String()
+	ok1["expect_utxo_count"] = json.Number("2")
+
+	bad := upsertVector(f, "CV-SUB-U128-02", map[string]any{
+		"op":                 "connect_block_basic",
+		"height":             json.Number("1"),
+		"expected_prev_hash": sub1["expected_prev_hash"],
+		"expected_target":    sub1["expected_target"],
+		"already_generated":  json.Number("0"),
+		"expect_ok":          false,
+		"expect_err":         "BLOCK_ERR_SUBSIDY_EXCEEDED",
+	})
+	bad["block_hex"] = build(1)
+	bad["utxos"] = utxos
+}
+
+type wideSumFeesBlockInput struct {
+	prevHash         [32]byte
+	cbDestCov        []byte
+	coinbaseValues   []uint64
+	nonCoinbaseBytes [][]byte
+	blockHeight      uint32
+}
+
+func buildWideSumFeesBlock(in wideSumFeesBlockInput) string {
+	outputs := make([]consensus.TxOutput, 0, len(in.coinbaseValues)+1)
+	for _, value := range in.coinbaseValues {
+		outputs = append(outputs, consensus.TxOutput{
+			Value:        value,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: in.cbDestCov,
+		})
+	}
+	outputs = append(outputs, consensus.TxOutput{
+		Value:        0,
+		CovenantType: consensus.COV_TYPE_ANCHOR,
+		CovenantData: bytes.Repeat([]byte{0x00}, 32),
+	})
+	coinbase := &consensus.Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  0,
+		Inputs:   []consensus.TxInput{{PrevVout: ^uint32(0), Sequence: ^uint32(0)}},
+		Outputs:  outputs,
+		Locktime: in.blockHeight,
+	}
+
+	wtxids := make([][32]byte, 0, len(in.nonCoinbaseBytes)+1)
+	_, _, cbWtxid := mustParseFixtureTx(mustTxBytes(coinbase))
+	wtxids = append(wtxids, cbWtxid)
+	for _, raw := range in.nonCoinbaseBytes {
+		_, _, wtxid := mustParseFixtureTx(raw)
+		wtxids = append(wtxids, wtxid)
+	}
+	wroot, err := consensus.WitnessMerkleRootWtxids(wtxids)
+	if err != nil {
+		fatalf("wide-sum-fees: witness root: %v", err)
+	}
+	wc := consensus.WitnessCommitmentHash(wroot)
+	coinbase.Outputs[len(coinbase.Outputs)-1].CovenantData = wc[:]
+	coinbaseBytes := mustTxBytes(coinbase)
+
+	txids := make([][32]byte, 0, len(in.nonCoinbaseBytes)+1)
+	_, cbTxid, _ := mustParseFixtureTx(coinbaseBytes)
+	txids = append(txids, cbTxid)
+	for _, raw := range in.nonCoinbaseBytes {
+		_, txid, _ := mustParseFixtureTx(raw)
+		txids = append(txids, txid)
+	}
+	merkle, err := consensus.MerkleRootTxids(txids)
+	if err != nil {
+		fatalf("wide-sum-fees: merkle root: %v", err)
+	}
+
+	header := make([]byte, 0, consensus.BLOCK_HEADER_BYTES)
+	header = consensus.AppendU32le(header, 1)
+	header = append(header, in.prevHash[:]...)
+	header = append(header, merkle[:]...)
+	header = consensus.AppendU64le(header, 123)
+	header = append(header, bytes.Repeat([]byte{0xff}, 32)...)
+	header = consensus.AppendU64le(header, 123)
+	if len(header) != consensus.BLOCK_HEADER_BYTES {
+		fatalf("wide-sum-fees: header len=%d", len(header))
+	}
+
+	block := append([]byte(nil), header...)
+	block = consensus.AppendCompactSize(block, uint64(len(in.nonCoinbaseBytes))+1)
+	block = append(block, coinbaseBytes...)
+	for _, raw := range in.nonCoinbaseBytes {
+		block = append(block, raw...)
+	}
+	return hex.EncodeToString(block)
+}
+
+func mustParseFixtureTx(raw []byte) (*consensus.Tx, [32]byte, [32]byte) {
+	tx, txid, wtxid, n, err := consensus.ParseTx(raw)
+	if err != nil || n != len(raw) {
+		fatalf("parse fixture tx: err=%v consumed=%d len=%d", err, n, len(raw))
+	}
+	return tx, txid, wtxid
 }
 
 func mustTxBytes(tx *consensus.Tx) []byte {

@@ -11,6 +11,26 @@ Policy:
 
 ---
 
+## 2026-08-05 — Exact u128 fee and sum_fees (RUB-1127)
+
+Generator-owned: `clients/go/cmd/gen-conformance-fixtures` appends
+`CV-U-FEE-U128-01` to `CV-UTXO-BASIC.json` and `CV-SUB-U128-01` /
+`CV-SUB-U128-02` to `CV-SUBSIDY.json`, then the fixtures are regenerated
+through that tool (never hand-edited). The rows pin the widened fee domain
+both clients now carry: a transaction whose fee is exactly 2^64, a block
+whose aggregate `sum_fees` is exactly 2^64 with a coinbase paying the exact
+`block_subsidy(1) + sum_fees` bound across two outputs, and the same block
+with one extra unit rejecting as `BLOCK_ERR_SUBSIDY_EXCEEDED`. The two
+widened expectations (`expect_fee`, `expect_sum_fees`) are canonical
+unsigned decimal STRINGS, because a widened monetary integer must not
+depend on interoperable JSON-number precision (RFC 8259 section 6); every
+pre-existing numeric expectation is unchanged and still read as a legacy
+u64-bounded token. `conformance/runner/run_cv_bundle.py` reads both forms
+exactly and no longer coerces an unreadable fee token to zero. Regenerated
+`conformance/MATRIX.md`, the CV Lean companions, the Go trace, and
+`GoTraceV1.lean` through their existing owners. No fixture schema, runner
+op, API, or canonical-spec change.
+
 ## 2026-08-05 — Block-bound undo record envelope (RUB-1132)
 
 Manual fixture: new `conformance/fixtures/protocol/undo_integrity_v1.json` pins the shared `undo_envelope_v1` bytes both clients must emit and accept for a persisted block undo record — canonical compact payload, canonical padded RFC 4648 base64, and `SHA3-256(ASCII("RUBIN_BLOCK_UNDO_V1") || block_hash[32] || uint64_be(payload_len) || payload)` — across an empty, a coinbase-only, and a multi-transaction case. Not generator-owned: authored by hand, and recomputed independently by `TestUndoEnvelopeV1CrossClientVector` (Go) and `undo_envelope_v1_cross_client_vector` (Rust), which fail if either client's bytes drift from the pinned vector. Registered in `tools/gen_conformance_matrix.py` and regenerated `conformance/MATRIX.md` through that tool. No `CV-*.json`, fixture schema, runner, API, formal-model, or canonical-spec change.

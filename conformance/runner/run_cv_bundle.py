@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 # This conformance runner invokes fixed local tool commands with shell=False.
 import subprocess  # nosec B404
 import sys
@@ -454,6 +455,40 @@ def as_int(x: Any) -> int:
         return int(x)
     except (ValueError, TypeError):
         return 0
+
+
+CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)$")
+MAX_U64 = (1 << 64) - 1
+MAX_U128 = (1 << 128) - 1
+
+
+def exact_uint(value: Any, problems: List[str], ctx: str) -> Optional[int]:
+    """Read a widened (u128-domain) value exactly, or record a problem.
+
+    Accepts the canonical decimal string form ("0" or [1-9][0-9]*, through
+    u128) and a legacy JSON integer token bounded to u64 — the same reader
+    contract both clients implement. Unlike `as_int`, a malformed token is
+    never silently coerced to 0: a fee that cannot be read exactly must fail
+    the gate rather than compare equal to another unreadable fee.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        problems.append(f"{ctx}: expected an unsigned integer, got bool")
+        return None
+    if isinstance(value, int):
+        if value < 0 or value > MAX_U64:
+            problems.append(f"{ctx}: legacy numeric token out of u64 range: {value}")
+            return None
+        return value
+    if isinstance(value, str) and CANONICAL_DECIMAL.match(value):
+        parsed = int(value)
+        if parsed > MAX_U128:
+            problems.append(f"{ctx}: value exceeds u128: {value}")
+            return None
+        return parsed
+    problems.append(f"{ctx}: not a canonical unsigned decimal value: {value!r}")
+    return None
 
 
 def as_sorted_ints(values: Any) -> List[int]:
@@ -2043,7 +2078,15 @@ def validate_vector(
         if "expect_block_hash" in v and go_resp.get("block_hash") != v["expect_block_hash"]:
             problems.append(f"{gate}/{vid}: expect_block_hash mismatch")
     elif op == "connect_block_basic":
-        for k in ["sum_fees", "utxo_count", "already_generated", "already_generated_n1"]:
+        # sum_fees is a widened (u128) value: read it exactly, never via the
+        # lenient as_int coercion that maps an unreadable token to 0.
+        # An omitted value means zero — the pre-widening `omitempty`
+        # semantics both clients preserve — so absence normalizes to 0 here.
+        go_sum_fees = exact_uint(go_resp.get("sum_fees"), problems, f"{gate}/{vid}: go.sum_fees") or 0
+        rust_sum_fees = exact_uint(rust_resp.get("sum_fees"), problems, f"{gate}/{vid}: rust.sum_fees") or 0
+        if go_sum_fees != rust_sum_fees:
+            problems.append(f"{gate}/{vid}: sum_fees mismatch go={go_sum_fees} rust={rust_sum_fees}")
+        for k in ["utxo_count", "already_generated", "already_generated_n1"]:
             gv = as_int(go_resp.get(k))
             rv = as_int(rust_resp.get(k))
             if gv != rv:
@@ -2053,8 +2096,12 @@ def validate_vector(
             problems.append(
                 f"{gate}/{vid}: digest mismatch go={go_resp.get('digest')} rust={rust_resp.get('digest')}"
             )
-        if "expect_sum_fees" in v and as_int(go_resp.get("sum_fees")) != int(v["expect_sum_fees"]):
-            problems.append(f"{gate}/{vid}: expect_sum_fees mismatch")
+        if "expect_sum_fees" in v:
+            want = exact_uint(v["expect_sum_fees"], problems, f"{gate}/{vid}: expect_sum_fees")
+            # An omitted sum_fees means zero (the pre-widening omitempty
+            # semantics both clients preserve).
+            if (go_sum_fees or 0) != want:
+                problems.append(f"{gate}/{vid}: expect_sum_fees mismatch")
         if "expect_utxo_count" in v and as_int(go_resp.get("utxo_count")) != int(v["expect_utxo_count"]):
             problems.append(f"{gate}/{vid}: expect_utxo_count mismatch")
         if "expect_already_generated" in v and as_int(go_resp.get("already_generated")) != int(v["expect_already_generated"]):
@@ -2067,15 +2114,24 @@ def validate_vector(
         # ok/err parity is already checked above.
         pass
     elif op == "utxo_apply_basic":
-        for k in ["fee", "utxo_count"]:
-            gv = as_int(go_resp.get(k))
-            rv = as_int(rust_resp.get(k))
-            if gv != rv:
-                problems.append(
-                    f"{gate}/{vid}: {k} mismatch go={gv} rust={rv}"
-                )
-        if "expect_fee" in v and as_int(go_resp.get("fee")) != int(v["expect_fee"]):
-            problems.append(f"{gate}/{vid}: expect_fee mismatch")
+        # fee is a widened (u128) value: read it exactly, never via the
+        # lenient as_int coercion that maps an unreadable token to 0.
+        # An omitted value means zero — the pre-widening `omitempty`
+        # semantics both clients preserve — so absence normalizes to 0 here.
+        go_fee = exact_uint(go_resp.get("fee"), problems, f"{gate}/{vid}: go.fee") or 0
+        rust_fee = exact_uint(rust_resp.get("fee"), problems, f"{gate}/{vid}: rust.fee") or 0
+        if go_fee != rust_fee:
+            problems.append(f"{gate}/{vid}: fee mismatch go={go_fee} rust={rust_fee}")
+        gv = as_int(go_resp.get("utxo_count"))
+        rv = as_int(rust_resp.get("utxo_count"))
+        if gv != rv:
+            problems.append(f"{gate}/{vid}: utxo_count mismatch go={gv} rust={rv}")
+        if "expect_fee" in v:
+            want = exact_uint(v["expect_fee"], problems, f"{gate}/{vid}: expect_fee")
+            # An omitted fee means zero (the pre-widening omitempty semantics
+            # both clients preserve).
+            if (go_fee or 0) != want:
+                problems.append(f"{gate}/{vid}: expect_fee mismatch")
         if "expect_utxo_count" in v and as_int(go_resp.get("utxo_count")) != int(v["expect_utxo_count"]):
             problems.append(f"{gate}/{vid}: expect_utxo_count mismatch")
     elif op == "fork_work":
