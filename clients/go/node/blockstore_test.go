@@ -1009,11 +1009,13 @@ func TestUndoEnvelopeV1CrossClientVector(t *testing.T) {
 	}
 }
 
-// TestUndoEnvelopeBoundDerivation pins the mechanical derivation of the outer
-// read bound. The 2 GB-scale rows themselves are not materialized — allocating
-// them in a unit test is not proportionate — so the arithmetic that a maximum
-// legal payload still fits inside the envelope bound is proven here instead.
+// TestUndoEnvelopeBoundDerivation pins the bound arithmetic. The two
+// multi-gigabyte hostile rows ("maximum legal payload at the bound" and "one
+// decoded byte above it") are discharged HERE, by exact derivation rather than
+// by materializing ~2 GB in a unit test.
 func TestUndoEnvelopeBoundDerivation(t *testing.T) {
+	base64Len := func(n int64) int64 { return ((n + 2) / 3) * 4 }
+
 	empty, err := marshalUndoEnvelope([32]byte{}, &BlockUndo{})
 	if err != nil {
 		t.Fatalf("marshalUndoEnvelope: %v", err)
@@ -1022,22 +1024,62 @@ func TestUndoEnvelopeBoundDerivation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshalBlockUndo: %v", err)
 	}
-	frame := len(empty) - len(base64.StdEncoding.EncodeToString(payload))
-	if frame != undoEnvelopeFrameBytes {
+	// The writer's bytes must match the segment constants the reader indexes by.
+	if frame := len(empty) - len(base64.StdEncoding.EncodeToString(payload)); frame != undoEnvelopeFrameBytes {
 		t.Fatalf("measured envelope frame = %d bytes, constant says %d", frame, undoEnvelopeFrameBytes)
 	}
+	if _, _, _, err := splitUndoEnvelope(empty); err != nil {
+		t.Fatalf("writer output does not satisfy the reader layout: %v", err)
+	}
 
-	base64Len := ((int64(undoFileMaxBytes) + 2) / 3) * 4
-	if want := base64Len + int64(undoEnvelopeFrameBytes); want != int64(undoEnvelopeFileMaxBytes) {
-		t.Fatalf("envelope bound = %d, derivation says %d", int64(undoEnvelopeFileMaxBytes), want)
+	// The envelope reuses the UNCHANGED undo class bound. A future edit that
+	// raises it past 2^31-2 breaks readAllCapped's maxBytes+1 probe on a 32-bit
+	// build, so this row exists to make that edit fail loudly here first.
+	if int64(undoFileMaxBytes) != 2_000_000_000 {
+		t.Fatalf("undo class bound = %d, want the unchanged 2000000000", int64(undoFileMaxBytes))
 	}
-	if int64(undoEnvelopeFileMaxBytes) != 2_666_666_857 {
-		t.Fatalf("envelope bound = %d, want 2666666857", int64(undoEnvelopeFileMaxBytes))
+	if int64(undoFileMaxBytes) > 1<<31-2 {
+		t.Fatalf("undo class bound %d exceeds 2^31-2; the EOF-probe capacity argument no longer holds",
+			int64(undoFileMaxBytes))
 	}
-	// Recorded, not incidental: unlike undoFileMaxBytes this bound is above
-	// 2^31, which is why every comparison against it must widen to int64.
-	if int64(undoEnvelopeFileMaxBytes) <= 1<<31 {
-		t.Fatalf("envelope bound %d no longer exceeds 2^31; revisit the 32-bit note", int64(undoEnvelopeFileMaxBytes))
+	if want := int64(3 * ((undoFileMaxBytes - undoEnvelopeFrameBytes) / 4)); int64(undoPayloadMaxBytes) != want {
+		t.Fatalf("payload ceiling = %d, backwards derivation says %d", int64(undoPayloadMaxBytes), want)
+	}
+	if int64(undoPayloadMaxBytes) != 1_499_999_856 {
+		t.Fatalf("payload ceiling = %d, want 1499999856", int64(undoPayloadMaxBytes))
+	}
+	// The floor must precede the multiply. The naive spelling overshoots by two
+	// bytes, and those two bytes are exactly the save/read asymmetry this
+	// ceiling exists to close — so pin that it would in fact break.
+	naive := int64(undoFileMaxBytes-undoEnvelopeFrameBytes) * 3 / 4
+	if naive <= int64(undoPayloadMaxBytes) {
+		t.Fatalf("naive ceiling %d no longer overshoots %d; the derivation comment is stale",
+			naive, int64(undoPayloadMaxBytes))
+	}
+	if base64Len(naive)+int64(undoEnvelopeFrameBytes) <= int64(undoFileMaxBytes) {
+		t.Fatalf("naive ceiling %d would fit after all; re-derive", naive)
+	}
+
+	// The two bound rows, arithmetically: the largest legal payload's complete
+	// envelope fits, and one byte more does not.
+	atBound := base64Len(int64(undoPayloadMaxBytes)) + int64(undoEnvelopeFrameBytes)
+	if atBound != 1_999_999_997 || atBound > int64(undoFileMaxBytes) {
+		t.Fatalf("maximum legal payload yields a %d-byte envelope, want exactly 1999999997 within the %d bound",
+			atBound, int64(undoFileMaxBytes))
+	}
+	overBound := base64Len(int64(undoPayloadMaxBytes)+1) + int64(undoEnvelopeFrameBytes)
+	if overBound <= int64(undoFileMaxBytes) {
+		t.Fatalf("one byte over the payload ceiling still fits in %d bytes; the ceiling is not tight",
+			overBound)
+	}
+
+	// Save/read symmetry (R3): every pinned fixture payload is far under the
+	// ceiling, so the shared vector cannot be invalidated by the bound.
+	for _, vector := range loadUndoIntegrityVectors(t) {
+		if int64(len(vector.PayloadJSON)) > int64(undoPayloadMaxBytes) {
+			t.Fatalf("fixture case %s payload is %d bytes, over the %d ceiling",
+				vector.ID, len(vector.PayloadJSON), int64(undoPayloadMaxBytes))
+		}
 	}
 }
 
@@ -1145,6 +1187,14 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 		{name: "not_an_object", record: "[]\n"},
 		{name: "not_json", record: "definitely not json\n"},
 		{
+			// W4 parity row: classification decodes ONE value and ignores what
+			// follows, so an unversioned record with trailing garbage still
+			// reports the actionable legacy message. Rust classifies identically.
+			name:    "legacy_payload_with_trailing_json",
+			record:  string(payload) + "{}\n",
+			wantErr: errUndoLegacyRecord, wantMsg: errUndoLegacyRecord.Error(),
+		},
+		{
 			name:   "uppercase_block_hash",
 			record: replaceOnce(t, valid, hex.EncodeToString(blockHash[:]), strings.ToUpper(hex.EncodeToString(blockHash[:]))),
 		},
@@ -1204,8 +1254,12 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 				}
 			}
 			if tc.wantErr == nil && strings.HasPrefix(tc.name, "checksum_valid_over_") {
-				// Payload-class failure: it must NOT be reported as a checksum
-				// or hash failure, which is what proves the ordering.
+				// These rows carry a CORRECT checksum, so reaching a rejection
+				// at all proves the payload decode runs strictly after the
+				// checksum compare. The payload-conversion class sits OUTSIDE
+				// the UNDO_INTEGRITY identity by contract, so this branch
+				// asserts only that the failure is not misreported as one of
+				// the envelope classes.
 				if errors.Is(err, errUndoChecksumMismatch) || errors.Is(err, errUndoBlockHashMismatch) {
 					t.Fatalf("payload defect misreported as an envelope failure: %v", err)
 				}

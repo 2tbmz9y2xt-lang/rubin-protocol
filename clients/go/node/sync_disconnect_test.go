@@ -353,7 +353,7 @@ func TestDisconnectCorruptUndoLeavesStateUnchanged(t *testing.T) {
 		t.Fatalf("read chainstate snapshot: %v", err)
 	}
 
-	corrupt, _ := corruptStoredUndoChecksum(t, store, summary.BlockHash)
+	corrupt, original := corruptStoredUndoChecksum(t, store, summary.BlockHash)
 
 	_, err = engine.DisconnectTip()
 	if err == nil {
@@ -405,5 +405,19 @@ func TestDisconnectCorruptUndoLeavesStateUnchanged(t *testing.T) {
 	undoPath := filepath.Join(store.undoDir, hex.EncodeToString(summary.BlockHash[:])+".json")
 	if after, err := os.ReadFile(undoPath); err != nil || !bytes.Equal(after, corrupt) {
 		t.Fatalf("refused disconnect rewrote the undo record (err=%v)", err)
+	}
+
+	// W6 positive control: the same disconnect must succeed once the record is
+	// valid again, so the rejection above is attributable to the corruption and
+	// not to a path that now refuses everything.
+	restoreStoredUndo(t, store, summary.BlockHash, original)
+	disconnected, err := engine.DisconnectTip()
+	if err != nil {
+		t.Fatalf("DisconnectTip after restore: %v", err)
+	}
+	if disconnected.DisconnectedHeight != 1 || engine.chainState.Height != 0 ||
+		engine.chainState.TipHash != devnetGenesisBlockHash {
+		t.Fatalf("restored disconnect=(%d) state=(%d,%x), want height 0 at genesis",
+			disconnected.DisconnectedHeight, engine.chainState.Height, engine.chainState.TipHash)
 	}
 }

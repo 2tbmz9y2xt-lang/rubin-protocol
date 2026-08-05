@@ -12,10 +12,9 @@ use crate::io_utils::{
     read_file_from_dir, read_file_from_dir_unbounded, sync_atomic_parent,
     validate_atomic_write_destination, write_file_atomic_typed, write_file_create_if_absent,
     AtomicWriteError, AtomicWriteOperation, BLOCK_FILE_MAX_BYTES, HEADER_FILE_MAX_BYTES,
+    UNDO_FILE_MAX_BYTES,
 };
-use crate::undo::{
-    marshal_undo_envelope, unmarshal_undo_envelope, BlockUndo, UNDO_ENVELOPE_FILE_MAX_BYTES,
-};
+use crate::undo::{marshal_undo_envelope, unmarshal_undo_envelope, BlockUndo};
 use std::ffi::OsStr;
 
 pub const BLOCK_STORE_DIR_NAME: &str = "blockstore";
@@ -781,12 +780,13 @@ impl BlockStore {
         // input), so this guard converts any future derivation drift (a new
         // covenant family, signature aggregation) into a loud save-time
         // error instead of a next-restart refusal of the node's own undo.
-        // RUB-1132 moves the guard to the envelope bound so it still measures
-        // the bytes `get_undo` reads back.
+        // RUB-1132 keeps this class bound unchanged: the file it measures is now
+        // the complete v1 envelope, and `marshal_undo_envelope` enforces the
+        // matching payload ceiling.
         crate::io_utils::check_store_save_bound(
             &path.display().to_string(),
             raw.len(),
-            UNDO_ENVELOPE_FILE_MAX_BYTES,
+            UNDO_FILE_MAX_BYTES,
         )
         .map_err(|error| {
             atomic_write_error_before(&path, AtomicWriteOperation::Overwrite, error)
@@ -797,7 +797,7 @@ impl BlockStore {
     pub fn get_undo(&self, block_hash_bytes: [u8; 32]) -> Result<BlockUndo, String> {
         // E.10: see `get_block_by_hash` doc.
         let name = format!("{}.json", hex::encode(block_hash_bytes));
-        let raw = read_file_from_dir(&self.undo_dir, &name, UNDO_ENVELOPE_FILE_MAX_BYTES)
+        let raw = read_file_from_dir(&self.undo_dir, &name, UNDO_FILE_MAX_BYTES)
             .map_err(|e| format!("read undo {}: {e}", self.undo_dir.join(&name).display()))?;
         // `block_hash_bytes` is the hash the CALLER asked for, not one read back
         // off disk: that is what makes a record moved or renamed between two undo
@@ -1463,6 +1463,15 @@ mod tests {
             ("trailing_scalar", format!("{} 1\n", valid.trim_end_matches('\n')), None),
             ("not_an_object", "[]\n".to_string(), None),
             ("not_json", "definitely not json\n".to_string(), None),
+            (
+                // W4 parity row: classification decodes ONE value and ignores
+                // what follows, so an unversioned record with trailing garbage
+                // still reports the actionable legacy message. Go classifies
+                // identically.
+                "legacy_payload_with_trailing_json",
+                format!("{}{{}}\n", String::from_utf8(payload.clone()).expect("utf-8")),
+                Some(UNDO_LEGACY_ERR),
+            ),
             (
                 "uppercase_block_hash",
                 replace_once(&valid, &block_hash_hex, &block_hash_hex.to_uppercase()),

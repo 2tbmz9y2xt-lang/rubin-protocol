@@ -383,10 +383,16 @@ fn block_undo_from_disk(disk: BlockUndoDisk) -> Result<BlockUndo, String> {
 // here and none is claimed.
 // ---------------------------------------------------------------------------
 
-/// Stable cross-client prefix of every `undo_envelope_v1` rejection. Go's
+/// Stable cross-client prefix of the envelope, version, hash, base64 and
+/// checksum rejection classes named in the issue's error_contract. Go's
 /// `ErrUndoIntegrity` carries the same identity through `errors.Is`; here the
 /// error channel is `String`, so the prefix IS the identity and `get_undo`
 /// returns these messages verbatim.
+///
+/// The payload-conversion class is deliberately OUTSIDE this prefix. A record
+/// that clears the checksum is intact on disk; a failure past that point is a
+/// schema fault, not a storage-integrity fault, and the contract does not put it
+/// under the prefix.
 pub const UNDO_INTEGRITY_PREFIX: &str = "UNDO_INTEGRITY";
 
 /// Pinned cross-client messages. Go returns these same strings. Deliberately no
@@ -398,25 +404,49 @@ pub const UNDO_CHECKSUM_MISMATCH_ERR: &str = "UNDO_INTEGRITY: checksum mismatch"
 
 const UNDO_ENVELOPE_VERSION: u32 = 1;
 const UNDO_ENVELOPE_DOMAIN: &[u8] = b"RUBIN_BLOCK_UNDO_V1";
+const UNDO_HASH_HEX_LEN: usize = 64;
 
-/// The envelope minus the base64 body: the four keys, the punctuation, the two
-/// 64-char hashes and the trailing LF. Pinned by `undo_envelope_frame_overhead`.
-const UNDO_ENVELOPE_FRAME_BYTES: u64 = 189;
+/// The canonical envelope's byte layout is fully determined by these fixed
+/// segments plus the two 64-character hex fields, so the reader validates the
+/// layout by index arithmetic instead of decoding JSON. That is what keeps peak
+/// memory near the file size: no value is materialized on the accept path and
+/// `payload_b64` is a SLICE of the caller's buffer, never a copy. Go twin:
+/// `undoEnvelopePrefix` and friends in clients/go/node/undo.go.
+const UNDO_ENVELOPE_PREFIX: &[u8] = br#"{"version":1,"block_hash":""#;
+const UNDO_ENVELOPE_PAYLOAD_SEP: &[u8] = br#"","payload_b64":""#;
+const UNDO_ENVELOPE_CHECKSUM_SEP: &[u8] = br#"","checksum":""#;
+const UNDO_ENVELOPE_SUFFIX: &[u8] = b"\"}\n";
 
-/// OUTER read bound, derived mechanically from the payload bound: base64
-/// expands n bytes to ceil(n/3)*4, plus the fixed frame. The decoded payload is
-/// separately re-checked against `UNDO_FILE_MAX_BYTES` before conversion, so the
-/// envelope bound never widens what a `BlockUndo` may hold.
+/// The envelope minus the base64 body. Derived from the segments above rather
+/// than written down, so a format edit cannot leave the bound behind.
+/// Cross-checked against a real envelope by `undo_envelope_bound_derivation`.
+const UNDO_ENVELOPE_FRAME_BYTES: usize = UNDO_ENVELOPE_PREFIX.len()
+    + UNDO_HASH_HEX_LEN
+    + UNDO_ENVELOPE_PAYLOAD_SEP.len()
+    + UNDO_ENVELOPE_CHECKSUM_SEP.len()
+    + UNDO_HASH_HEX_LEN
+    + UNDO_ENVELOPE_SUFFIX.len();
+
+/// Decoded-payload ceiling, run BACKWARDS from the unchanged undo class bound: a
+/// payload of n bytes occupies ceil(n/3)*4 base64 characters, so the largest n
+/// whose complete envelope still fits is 3*floor((UNDO_FILE_MAX_BYTES - frame)/4).
+/// The floor MUST come before the multiply — `(bound-frame)*3/4` overshoots by
+/// two bytes and would let `put_undo` emit a 2_000_000_001-byte envelope that
+/// `get_undo` then refuses.
 ///
-/// This constant is ~2.67e9 and therefore EXCEEDS 2^31. It is `u64`, and every
-/// comparison widens the `usize` side (`x.len() as u64`) rather than narrowing
-/// the bound, so a 32-bit build refuses exactly what a 64-bit build refuses.
-pub(crate) const UNDO_ENVELOPE_FILE_MAX_BYTES: u64 =
-    UNDO_FILE_MAX_BYTES.div_ceil(3) * 4 + UNDO_ENVELOPE_FRAME_BYTES;
+/// The envelope reuses `UNDO_FILE_MAX_BYTES` itself as the outer read/save bound
+/// rather than the raw derivation (~2.67e9): every storage-read bound in this
+/// crate must stay below 2^31-2 because the reader probes with `max_bytes + 1`,
+/// and 2e9 already admits the consensus-reachable envelope maximum
+/// (1_371_851_881 bytes) with ~1.46x margin. Revision conditions are recorded in
+/// the issue's bound-audit amendment.
+pub(crate) const UNDO_PAYLOAD_MAX_BYTES: u64 =
+    3 * ((UNDO_FILE_MAX_BYTES - UNDO_ENVELOPE_FRAME_BYTES as u64) / 4);
 
-/// Exact stored shape. Field ORDER is part of the format: `serde` emits struct
-/// fields in declaration order and `encoding/json` does the same, which is what
-/// makes the two clients' bytes identical.
+/// The writer's shape; the reader never decodes into it. Field ORDER is part of
+/// the format: `serde` emits struct fields in declaration order and
+/// `encoding/json` does the same, which is what makes the two clients' bytes
+/// identical — and what the segment constants above mirror.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UndoEnvelopeDisk {
@@ -424,6 +454,14 @@ struct UndoEnvelopeDisk {
     block_hash: String,
     payload_b64: String,
     checksum: String,
+}
+
+/// Classification probe. Only `version` is captured; `serde` skips the other
+/// fields without materializing them, so even a maximum-size hostile record
+/// costs no proportional allocation here.
+#[derive(Deserialize)]
+struct UndoVersionProbe {
+    version: Option<u32>,
 }
 
 fn undo_envelope_checksum(block_hash: [u8; 32], payload: &[u8]) -> [u8; 32] {
@@ -435,8 +473,18 @@ fn undo_envelope_checksum(block_hash: [u8; 32], payload: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Also enforces the SAVE-side bounds, so the node can never persist a record it
+/// would refuse to read back. Both ends test the same two quantities — decoded
+/// payload and complete envelope — which is what makes the refusal boundary
+/// byte-symmetric rather than off by a rounding step.
 pub fn marshal_undo_envelope(block_hash: [u8; 32], undo: &BlockUndo) -> Result<Vec<u8>, String> {
     let payload = marshal_block_undo(undo)?;
+    if payload.len() as u64 > UNDO_PAYLOAD_MAX_BYTES {
+        return Err(format!(
+            "refusing to save undo: payload is {} bytes, class bound {UNDO_PAYLOAD_MAX_BYTES}",
+            payload.len()
+        ));
+    }
     let envelope = UndoEnvelopeDisk {
         version: UNDO_ENVELOPE_VERSION,
         block_hash: hex::encode(block_hash),
@@ -446,72 +494,115 @@ pub fn marshal_undo_envelope(block_hash: [u8; 32], undo: &BlockUndo) -> Result<V
     let mut raw =
         serde_json::to_vec(&envelope).map_err(|e| format!("encode undo envelope: {e}"))?;
     raw.push(b'\n');
+    if raw.len() as u64 > UNDO_FILE_MAX_BYTES {
+        return Err(format!(
+            "refusing to save undo: envelope is {} bytes, class bound {UNDO_FILE_MAX_BYTES}",
+            raw.len()
+        ));
+    }
     Ok(raw)
 }
 
-/// Runs the fixed validation order: shape, version, hash equality against the
-/// hash the CALLER asked for, canonical base64, decoded payload bound,
-/// checksum — and only then the payload decode and `BlockUndo` conversion.
-/// Every step before the checksum is cheap and side-effect free, so a corrupt
-/// record costs one hash at most and never reaches a converted undo.
+/// Runs the validation order: bound, canonical layout (which subsumes shape,
+/// version-literal, duplicate, unknown, missing, null, ordering, whitespace and
+/// trailing-token rejection), hash equality against the hash the CALLER asked
+/// for, canonical base64, decoded payload bound, checksum — and only then the
+/// payload decode and `BlockUndo` conversion.
+///
+/// MEMORY: everything before the checksum decision allocates exactly ONE
+/// payload-sized buffer — the base64 output, which is unavoidable because the
+/// checksum covers those bytes. Nothing copies or re-encodes the base64 body,
+/// the hash is streamed rather than fed a concatenated preimage, and the hex
+/// fields borrow from `raw`. Peak resident before the decision is the caller's
+/// buffer plus at most 3/4 of it, ~1.75x the file; the Go twin measures 0.750x
+/// in 7 allocations on an 11.9 MB envelope and this path is structurally
+/// identical. The payload decode past the checksum is far more expensive and
+/// runs only once the bytes are proven intact.
 pub fn unmarshal_undo_envelope(block_hash: [u8; 32], raw: &[u8]) -> Result<BlockUndo, String> {
-    // Presence probe BEFORE the typed decode: an unversioned legacy record must
-    // be recognised by the ABSENCE of "version", or serde's "missing field"
-    // error would shadow the pinned legacy message. The probe also rejects a
-    // non-object and any trailing JSON value.
-    let probe: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(raw)
-        .map_err(|_| format!("{UNDO_INTEGRITY_PREFIX}: undo record is not a single JSON object"))?;
-    if !probe.contains_key("version") {
-        return Err(UNDO_LEGACY_ERR.to_string());
-    }
-    // Typed pass: `deny_unknown_fields` plus serde's own duplicate-field and
-    // missing-field errors cover the rest of step 2.
-    let envelope: UndoEnvelopeDisk = serde_json::from_slice(raw)
-        .map_err(|e| format!("{UNDO_INTEGRITY_PREFIX}: malformed undo envelope: {e}"))?;
-    // Same canonical-form rule as the payload, and it is load-bearing for
-    // PARITY, not just strictness: Go's encoding/json treats a JSON null as
-    // "leave the field at its zero value", so the twin needs this comparison to
-    // reject what serde rejects at decode time. Re-encoding pins field order,
-    // insignificant whitespace and the single trailing LF in one step, so both
-    // clients accept exactly the same byte strings.
-    let mut canonical =
-        serde_json::to_vec(&envelope).map_err(|e| format!("encode undo envelope: {e}"))?;
-    canonical.push(b'\n');
-    if canonical != raw {
+    if raw.len() as u64 > UNDO_FILE_MAX_BYTES {
         return Err(format!(
-            "{UNDO_INTEGRITY_PREFIX}: envelope is not the canonical encoding"
+            "{UNDO_INTEGRITY_PREFIX}: undo record is {} bytes, class bound {UNDO_FILE_MAX_BYTES}",
+            raw.len()
         ));
     }
-    if envelope.version != UNDO_ENVELOPE_VERSION {
+    let (hash_hex, payload_b64, checksum_hex) = split_undo_envelope(raw)?;
+    if hash_hex != hex::encode(block_hash).as_bytes() {
+        return Err(UNDO_BLOCK_HASH_MISMATCH_ERR.to_string());
+    }
+    let payload = base64_decode_canonical(payload_b64)?;
+    if payload.len() as u64 > UNDO_PAYLOAD_MAX_BYTES {
         return Err(format!(
-            "{UNDO_INTEGRITY_PREFIX}: unsupported undo envelope version {}",
-            envelope.version
+            "{UNDO_INTEGRITY_PREFIX}: decoded payload is {} bytes, class bound {UNDO_PAYLOAD_MAX_BYTES}",
+            payload.len()
         ));
     }
-    if !valid_canonical_hash_hex(&envelope.block_hash)
-        || !valid_canonical_hash_hex(&envelope.checksum)
+    // `split_undo_envelope` already proved this is 64 lowercase hex characters.
+    let stored = parse_hex32(
+        "undo envelope checksum",
+        &String::from_utf8_lossy(checksum_hex),
+    )
+    .map_err(|_| format!("{UNDO_INTEGRITY_PREFIX}: checksum is not hexadecimal"))?;
+    if !constant_time_eq32(&stored, &undo_envelope_checksum(block_hash, &payload)) {
+        return Err(UNDO_CHECKSUM_MISMATCH_ERR.to_string());
+    }
+    unmarshal_block_undo(&payload)
+}
+
+/// Validates the canonical layout and returns sub-slices of `raw`. The body
+/// length is DERIVED (`raw.len() - frame`) rather than searched for, so the whole
+/// check is a handful of fixed-length comparisons: any inserted, removed,
+/// reordered, duplicated or renamed field shifts the trailing segments and
+/// fails. On failure it hands off to `classify_undo_envelope_failure` for the
+/// operator-facing reason, which is the only path that parses JSON at all.
+#[allow(clippy::type_complexity)] // three borrowed slices of one input, not a nested structure.
+fn split_undo_envelope(raw: &[u8]) -> Result<(&[u8], &[u8], &[u8]), String> {
+    let Some(body) = raw.len().checked_sub(UNDO_ENVELOPE_FRAME_BYTES) else {
+        return Err(classify_undo_envelope_failure(raw));
+    };
+    let hash_at = UNDO_ENVELOPE_PREFIX.len();
+    let payload_sep_at = hash_at + UNDO_HASH_HEX_LEN;
+    let payload_at = payload_sep_at + UNDO_ENVELOPE_PAYLOAD_SEP.len();
+    let checksum_sep_at = payload_at + body;
+    let checksum_at = checksum_sep_at + UNDO_ENVELOPE_CHECKSUM_SEP.len();
+    let suffix_at = checksum_at + UNDO_HASH_HEX_LEN;
+    if &raw[..hash_at] != UNDO_ENVELOPE_PREFIX
+        || &raw[payload_sep_at..payload_at] != UNDO_ENVELOPE_PAYLOAD_SEP
+        || &raw[checksum_sep_at..checksum_at] != UNDO_ENVELOPE_CHECKSUM_SEP
+        || &raw[suffix_at..] != UNDO_ENVELOPE_SUFFIX
+    {
+        return Err(classify_undo_envelope_failure(raw));
+    }
+    let hash_hex = &raw[hash_at..payload_sep_at];
+    let checksum_hex = &raw[checksum_at..suffix_at];
+    if !valid_canonical_hash_hex(&String::from_utf8_lossy(hash_hex))
+        || !valid_canonical_hash_hex(&String::from_utf8_lossy(checksum_hex))
     {
         return Err(format!(
             "{UNDO_INTEGRITY_PREFIX}: block_hash and checksum must be 64 lowercase hex characters"
         ));
     }
-    if envelope.block_hash != hex::encode(block_hash) {
-        return Err(UNDO_BLOCK_HASH_MISMATCH_ERR.to_string());
+    Ok((hash_hex, &raw[payload_at..checksum_sep_at], checksum_hex))
+}
+
+/// Names WHY a record that failed the layout check failed it. It runs only on
+/// records already being rejected, so its JSON scan is never paid on the accept
+/// path. It deserializes ONE value and does NOT require EOF, so an unversioned
+/// record with trailing garbage still reports the actionable legacy message
+/// instead of a generic one. The Go twin classifies identically.
+fn classify_undo_envelope_failure(raw: &[u8]) -> String {
+    let mut deserializer = serde_json::Deserializer::from_slice(raw);
+    let Ok(probe) = UndoVersionProbe::deserialize(&mut deserializer) else {
+        return format!("{UNDO_INTEGRITY_PREFIX}: undo record is not a single JSON object");
+    };
+    match probe.version {
+        None => UNDO_LEGACY_ERR.to_string(),
+        Some(UNDO_ENVELOPE_VERSION) => {
+            format!("{UNDO_INTEGRITY_PREFIX}: envelope is not the canonical encoding")
+        }
+        Some(other) => {
+            format!("{UNDO_INTEGRITY_PREFIX}: unsupported undo envelope version {other}")
+        }
     }
-    let payload = base64_decode_canonical(&envelope.payload_b64)?;
-    if payload.len() as u64 > UNDO_FILE_MAX_BYTES {
-        return Err(format!(
-            "{UNDO_INTEGRITY_PREFIX}: decoded payload is {} bytes, class bound {UNDO_FILE_MAX_BYTES}",
-            payload.len()
-        ));
-    }
-    // `valid_canonical_hash_hex` already proved this decodes to 32 bytes.
-    let stored = parse_hex32("undo envelope checksum", &envelope.checksum)
-        .map_err(|_| format!("{UNDO_INTEGRITY_PREFIX}: checksum is not hexadecimal"))?;
-    if !constant_time_eq32(&stored, &undo_envelope_checksum(block_hash, &payload)) {
-        return Err(UNDO_CHECKSUM_MISMATCH_ERR.to_string());
-    }
-    unmarshal_block_undo(&payload)
 }
 
 /// Data-independent comparison of the stored and computed digests. No `subtle`
@@ -563,21 +654,24 @@ fn base64_symbol_value(symbol: u8) -> Option<u32> {
     Some(value)
 }
 
-/// Accepts only the one padded RFC 4648 spelling of the payload. The decoder
-/// deliberately does not police padding bits itself — the re-encode comparison
-/// at the end is what makes the encoding canonical, and it also rejects
-/// embedded whitespace (reachable here as JSON escapes) that a permissive
-/// decoder would skip. Go twin: `decodeCanonicalBase64`.
-fn base64_decode_canonical(value: &str) -> Result<Vec<u8>, String> {
+/// Accepts only the one padded RFC 4648 spelling of the payload. Canonicality is
+/// enforced without re-encoding, which matters because the body can be ~1.5 GB:
+/// non-alphabet bytes are rejected symbol by symbol (so JSON-escaped whitespace
+/// a permissive decoder would skip cannot slip through), and the bits the
+/// padding discards must be zero (so "Zh==" cannot stand in for "Zg=="). Go twin
+/// `decodeCanonicalBase64` gets the same two properties from
+/// `StdEncoding.Strict()` plus an `EncodedLen` equality.
+fn base64_decode_canonical(value: &[u8]) -> Result<Vec<u8>, String> {
     let not_canonical =
         || format!("{UNDO_INTEGRITY_PREFIX}: payload_b64 is not canonical padded base64");
-    let symbols = value.as_bytes();
-    if !symbols.len().is_multiple_of(4) {
+    if !value.len().is_multiple_of(4) {
         return Err(not_canonical());
     }
-    let quads = symbols.len() / 4;
+    let quads = value.len() / 4;
     let mut out = Vec::with_capacity(quads.saturating_mul(3));
-    for (index, quad) in symbols.chunks_exact(4).enumerate() {
+    for (index, quad) in value.chunks_exact(4).enumerate() {
+        // Padding is legal only in the final quad; anywhere else `=` is not an
+        // alphabet symbol and fails below.
         let pad = if index + 1 != quads {
             0
         } else if quad[3] == b'=' {
@@ -593,6 +687,11 @@ fn base64_decode_canonical(value: &str) -> Result<Vec<u8>, String> {
         for symbol in &quad[..4 - pad] {
             packed = (packed << 6) | base64_symbol_value(*symbol).ok_or_else(not_canonical)?;
         }
+        // The final quad carries 6*(4-pad) bits but only 8*(3-pad) are data; the
+        // 2*pad low bits are padding and a canonical encoder leaves them zero.
+        if packed & ((1u32 << (2 * pad)) - 1) != 0 {
+            return Err(not_canonical());
+        }
         packed <<= 6 * pad;
         out.push((packed >> 16) as u8);
         if pad < 2 {
@@ -601,9 +700,6 @@ fn base64_decode_canonical(value: &str) -> Result<Vec<u8>, String> {
         if pad < 1 {
             out.push(packed as u8);
         }
-    }
-    if base64_encode(&out) != value {
-        return Err(not_canonical());
     }
     Ok(out)
 }
@@ -733,13 +829,14 @@ mod tests {
         }
     }
 
-    /// Pins the mechanical derivation of the outer read bound. The 2 GB-scale
-    /// rows are not materialized — allocating them in a unit test is not
-    /// proportionate — so the arithmetic that a maximum legal payload still fits
-    /// inside the envelope bound is proven here instead. Go twin:
-    /// `TestUndoEnvelopeBoundDerivation`.
+    /// Pins the bound arithmetic. The two multi-gigabyte hostile rows ("maximum
+    /// legal payload at the bound" and "one decoded byte above it") are
+    /// discharged HERE, by exact derivation rather than by materializing ~2 GB
+    /// in a unit test. Go twin: `TestUndoEnvelopeBoundDerivation`.
     #[test]
     fn undo_envelope_bound_derivation() {
+        let base64_len = |n: u64| n.div_ceil(3) * 4;
+
         let undo = BlockUndo {
             block_height: 0,
             previous_already_generated: 0,
@@ -747,19 +844,47 @@ mod tests {
         };
         let envelope = marshal_undo_envelope([0u8; 32], &undo).expect("marshal");
         let payload = marshal_block_undo(&undo).expect("marshal payload");
-        let frame = envelope.len() as u64 - base64_encode(&payload).len() as u64;
+        let frame = envelope.len() - base64_encode(&payload).len();
         assert_eq!(frame, UNDO_ENVELOPE_FRAME_BYTES, "measured envelope frame");
+        // The writer's bytes must satisfy the segment constants the reader indexes by.
+        split_undo_envelope(&envelope).expect("writer output does not satisfy the reader layout");
 
-        let base64_len = UNDO_FILE_MAX_BYTES.div_ceil(3) * 4;
+        // The envelope reuses the UNCHANGED undo class bound. A future edit that
+        // raises it past 2^31-2 breaks the reader's max_bytes+1 probe on a
+        // 32-bit build, so this row exists to make that edit fail loudly first.
+        assert_eq!(UNDO_FILE_MAX_BYTES, 2_000_000_000);
+        // A const block, so raising the bound past 2^31-2 is a COMPILE failure
+        // rather than a test failure someone can skip.
+        const { assert!(UNDO_FILE_MAX_BYTES <= (1u64 << 31) - 2) };
         assert_eq!(
-            base64_len + UNDO_ENVELOPE_FRAME_BYTES,
-            UNDO_ENVELOPE_FILE_MAX_BYTES
+            UNDO_PAYLOAD_MAX_BYTES,
+            3 * ((UNDO_FILE_MAX_BYTES - UNDO_ENVELOPE_FRAME_BYTES as u64) / 4)
         );
-        assert_eq!(UNDO_ENVELOPE_FILE_MAX_BYTES, 2_666_666_857);
-        // Recorded, not incidental: unlike UNDO_FILE_MAX_BYTES this bound is
-        // above 2^31, which is why every comparison widens the usize side. A
-        // const block so the check is a compile-time failure, not a runtime one.
-        const { assert!(UNDO_ENVELOPE_FILE_MAX_BYTES > (1u64 << 31)) };
+        assert_eq!(UNDO_PAYLOAD_MAX_BYTES, 1_499_999_856);
+
+        // The floor must precede the multiply. The naive spelling overshoots by
+        // two bytes, and those two bytes are exactly the save/read asymmetry
+        // this ceiling exists to close — so pin that it would in fact break.
+        let naive = (UNDO_FILE_MAX_BYTES - UNDO_ENVELOPE_FRAME_BYTES as u64) * 3 / 4;
+        assert!(
+            naive > UNDO_PAYLOAD_MAX_BYTES,
+            "naive ceiling no longer overshoots"
+        );
+        assert!(
+            base64_len(naive) + UNDO_ENVELOPE_FRAME_BYTES as u64 > UNDO_FILE_MAX_BYTES,
+            "naive ceiling {naive} would fit after all; re-derive"
+        );
+
+        // The two bound rows, arithmetically: the largest legal payload's
+        // complete envelope fits exactly, and one byte more does not.
+        let at_bound = base64_len(UNDO_PAYLOAD_MAX_BYTES) + UNDO_ENVELOPE_FRAME_BYTES as u64;
+        assert_eq!(at_bound, 1_999_999_997);
+        assert!(at_bound <= UNDO_FILE_MAX_BYTES);
+        let over_bound = base64_len(UNDO_PAYLOAD_MAX_BYTES + 1) + UNDO_ENVELOPE_FRAME_BYTES as u64;
+        assert!(
+            over_bound > UNDO_FILE_MAX_BYTES,
+            "one byte over the payload ceiling still fits in {over_bound} bytes"
+        );
     }
 
     /// Canonical base64 round-trip over every residue class, plus the
@@ -773,7 +898,7 @@ mod tests {
             let encoded = base64_encode(&input);
             assert_eq!(encoded.len() % 4, 0, "len {len} is not padded to a quad");
             assert_eq!(
-                base64_decode_canonical(&encoded).expect("round trip"),
+                base64_decode_canonical(encoded.as_bytes()).expect("round trip"),
                 input,
                 "len {len}"
             );
@@ -790,7 +915,7 @@ mod tests {
             "Zg=A",   // padding followed by data
         ] {
             assert!(
-                base64_decode_canonical(bad).is_err(),
+                base64_decode_canonical(bad.as_bytes()).is_err(),
                 "accepted non-canonical base64 {bad:?}"
             );
         }

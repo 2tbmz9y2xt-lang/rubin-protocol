@@ -540,7 +540,7 @@ func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {
 	// signature aggregation) into a loud save-time error instead of a
 	// next-restart refusal of the node's own undo file. RUB-1132 moves it to
 	// the envelope bound so the guard still measures the bytes GetUndo reads.
-	if err := checkStoreSaveBound(path, len(raw), undoEnvelopeFileMaxBytes); err != nil {
+	if err := checkStoreSaveBound(path, len(raw), undoFileMaxBytes); err != nil {
 		return err
 	}
 	// write-if-absent, not atomic overwrite: an existing record — including a
@@ -554,7 +554,7 @@ func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
 	}
-	raw, err := readFileFromDir(bs.undoDir, hex.EncodeToString(blockHash[:])+".json", undoEnvelopeFileMaxBytes)
+	raw, err := readFileFromDir(bs.undoDir, hex.EncodeToString(blockHash[:])+".json", undoFileMaxBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -610,7 +610,7 @@ func requireExactIndexFields(raw []byte) error {
 	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
 		return errors.New("blockstore index must be a JSON object")
 	}
-	keys, err := collectTopLevelFieldNames(dec)
+	keys, err := collectIndexFieldNames(dec)
 	if err != nil {
 		return err
 	}
@@ -621,11 +621,9 @@ func requireExactIndexFields(raw []byte) error {
 	return nil
 }
 
-// collectTopLevelFieldNames drains the top-level object, returning its key names
-// in encounter order (duplicates included, so the caller can reject them).
-// Shared by the blockstore index and the undo envelope (undo.go); both need the
-// key multiset that struct decoding throws away.
-func collectTopLevelFieldNames(dec *json.Decoder) ([]string, error) {
+// collectIndexFieldNames drains the top-level object, returning its key names in
+// encounter order (duplicates included, so the caller can reject them).
+func collectIndexFieldNames(dec *json.Decoder) ([]string, error) {
 	keys := make([]string, 0, 2)
 	for dec.More() {
 		key, err := dec.Token()

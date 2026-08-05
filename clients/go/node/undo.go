@@ -10,8 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"sort"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -413,11 +411,15 @@ func blockUndoFromDisk(disk blockUndoDisk) (*BlockUndo, error) {
 // here and none is claimed.
 // ---------------------------------------------------------------------------
 
-// ErrUndoIntegrity is the stable identity behind every undo_envelope_v1
-// rejection: errors.Is(err, ErrUndoIntegrity) holds for the legacy, block-hash
-// and checksum classes and for every other envelope/version/base64 failure,
-// while err.Error() keeps the exact cross-client message the Rust client
-// returns verbatim from get_undo.
+// ErrUndoIntegrity is the stable identity behind the envelope, version, hash,
+// base64 and checksum rejection classes named in the issue's error_contract:
+// errors.Is(err, ErrUndoIntegrity) holds for all of them, and err.Error() is the
+// exact cross-client message the Rust client returns verbatim from get_undo.
+//
+// The payload-conversion class is deliberately OUTSIDE this identity. A record
+// that clears the checksum is intact on disk; a failure past that point is a
+// schema fault, not a storage-integrity fault, and the contract does not put it
+// under the prefix.
 var ErrUndoIntegrity = errors.New("UNDO_INTEGRITY")
 
 var (
@@ -428,32 +430,52 @@ var (
 	errUndoChecksumMismatch  = fmt.Errorf("%w: checksum mismatch", ErrUndoIntegrity)
 )
 
+// The canonical envelope's byte layout is fully determined by these fixed
+// segments plus the two 64-character hex fields, so the reader validates the
+// layout by index arithmetic instead of decoding JSON. That is what keeps peak
+// memory near the file size: no value is materialized on the accept path and
+// payload_b64 is a SLICE of the caller's buffer, never a copy. Rust twin:
+// UNDO_ENVELOPE_PREFIX and friends in crates/rubin-node/src/undo.rs.
+const (
+	undoEnvelopePrefix      = `{"version":1,"block_hash":"`
+	undoEnvelopePayloadSep  = `","payload_b64":"`
+	undoEnvelopeChecksumSep = `","checksum":"`
+	undoEnvelopeSuffix      = "\"}\n"
+)
+
 const (
 	undoEnvelopeVersion = 1
 	undoEnvelopeDomain  = "RUBIN_BLOCK_UNDO_V1"
+	undoHashHexLen      = 64
 
-	// undoEnvelopeFrameBytes is the envelope minus the base64 body: the four
-	// keys, the punctuation, the two 64-char hashes and the trailing LF.
-	// Pinned by TestUndoEnvelopeFrameOverhead.
-	undoEnvelopeFrameBytes = 189
+	// undoEnvelopeFrameBytes is the envelope minus the base64 body. Derived from
+	// the segments above rather than written down, so a format edit cannot leave
+	// the bound behind. Cross-checked against a real envelope by
+	// TestUndoEnvelopeBoundDerivation.
+	undoEnvelopeFrameBytes = len(undoEnvelopePrefix) + undoHashHexLen +
+		len(undoEnvelopePayloadSep) + len(undoEnvelopeChecksumSep) +
+		undoHashHexLen + len(undoEnvelopeSuffix)
 
-	// undoEnvelopeFileMaxBytes is the OUTER read bound, derived mechanically
-	// from the payload bound: base64 expands n bytes to ceil(n/3)*4, plus the
-	// fixed frame. The decoded payload is separately re-checked against
-	// undoFileMaxBytes before conversion, so the envelope bound never widens
-	// what a BlockUndo may hold.
+	// undoPayloadMaxBytes is the decoded-payload ceiling, run BACKWARDS from the
+	// unchanged undo class bound: a payload of n bytes occupies ceil(n/3)*4
+	// base64 characters, so the largest n whose complete envelope still fits is
+	// 3*floor((undoFileMaxBytes - frame) / 4). The floor MUST come before the
+	// multiply — (bound-frame)*3/4 overshoots by two bytes and would let
+	// PutUndo emit a 2_000_000_001-byte envelope that GetUndo then refuses.
 	//
-	// This constant is ~2.67e9 and therefore EXCEEDS 2^31 — unlike
-	// undoFileMaxBytes, whose safeio.go note relies on staying below it. Every
-	// comparison against it must widen first (int64(len(x))); a bare
-	// `len(x) > undoEnvelopeFileMaxBytes` does not compile on a 32-bit build,
-	// which is the intended loud failure rather than a silent narrowing.
-	undoEnvelopeFileMaxBytes = ((undoFileMaxBytes+2)/3)*4 + undoEnvelopeFrameBytes
+	// The envelope reuses undoFileMaxBytes itself as the outer read/save bound
+	// rather than the raw derivation (~2.67e9): every storage-read bound in this
+	// package must stay below 2^31-2 because readAllCapped probes with
+	// maxBytes+1, and 2e9 already admits the consensus-reachable envelope
+	// maximum (1_371_851_881 bytes) with ~1.46x margin. Revision conditions are
+	// recorded in the issue's bound-audit amendment.
+	undoPayloadMaxBytes = 3 * ((undoFileMaxBytes - undoEnvelopeFrameBytes) / 4)
 )
 
-// undoEnvelopeDisk is the exact stored shape. Field ORDER is part of the
-// format: encoding/json emits struct fields in declaration order and serde does
-// the same, which is what makes the two clients' bytes identical.
+// undoEnvelopeDisk is the writer's shape; the reader never decodes into it.
+// Field ORDER is part of the format: encoding/json emits struct fields in
+// declaration order and serde does the same, which is what makes the two
+// clients' bytes identical — and what the segment constants above mirror.
 type undoEnvelopeDisk struct {
 	Version    uint32 `json:"version"`
 	BlockHash  string `json:"block_hash"`
@@ -461,19 +483,36 @@ type undoEnvelopeDisk struct {
 	Checksum   string `json:"checksum"`
 }
 
+// undoEnvelopeChecksum STREAMS the preimage into the hash rather than
+// materializing it. Concatenating first would copy the whole payload — a second
+// payload-sized buffer on a path whose entire point is bounded memory before the
+// integrity decision. hash.Hash.Write never returns an error. Rust twin:
+// `undo_envelope_checksum`, which streams the same four segments.
 func undoEnvelopeChecksum(blockHash [32]byte, payload []byte) [32]byte {
-	preimage := make([]byte, 0, len(undoEnvelopeDomain)+32+8+len(payload))
-	preimage = append(preimage, undoEnvelopeDomain...)
-	preimage = append(preimage, blockHash[:]...)
-	preimage = binary.BigEndian.AppendUint64(preimage, uint64(len(payload)))
-	preimage = append(preimage, payload...)
-	return sha3.Sum256(preimage)
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(payload)))
+	hasher := sha3.New256()
+	_, _ = hasher.Write([]byte(undoEnvelopeDomain))
+	_, _ = hasher.Write(blockHash[:])
+	_, _ = hasher.Write(length[:])
+	_, _ = hasher.Write(payload)
+	var out [32]byte
+	hasher.Sum(out[:0])
+	return out
 }
 
+// marshalUndoEnvelope also enforces the SAVE-side bounds, so the node can never
+// persist a record it would refuse to read back. Both ends test the same two
+// quantities — decoded payload and complete envelope — which is what makes the
+// refusal boundary byte-symmetric rather than off by a rounding step.
 func marshalUndoEnvelope(blockHash [32]byte, undo *BlockUndo) ([]byte, error) {
 	payload, err := marshalBlockUndo(undo)
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(payload)) > int64(undoPayloadMaxBytes) {
+		return nil, fmt.Errorf("refusing to save undo: payload is %d bytes, class bound %d: %w",
+			len(payload), int64(undoPayloadMaxBytes), errStoreFileTooLarge)
 	}
 	checksum := undoEnvelopeChecksum(blockHash, payload)
 	raw, err := json.Marshal(undoEnvelopeDisk{
@@ -485,38 +524,50 @@ func marshalUndoEnvelope(blockHash [32]byte, undo *BlockUndo) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode undo envelope: %w", err)
 	}
-	return append(raw, '\n'), nil
+	raw = append(raw, '\n')
+	if int64(len(raw)) > int64(undoFileMaxBytes) {
+		return nil, fmt.Errorf("refusing to save undo: envelope is %d bytes, class bound %d: %w",
+			len(raw), int64(undoFileMaxBytes), errStoreFileTooLarge)
+	}
+	return raw, nil
 }
 
-// unmarshalUndoEnvelope runs the fixed validation order: shape, version, hash
-// equality against the hash the CALLER asked for, canonical base64, decoded
-// payload bound, checksum — and only then the payload decode and BlockUndo
-// conversion. Every step before the checksum is cheap and side-effect free, so
-// a corrupt record costs one hash at most and never reaches a converted undo.
+// unmarshalUndoEnvelope runs the validation order: bound, canonical layout
+// (which subsumes shape, version-literal, duplicate, unknown, missing, null,
+// ordering, whitespace and trailing-token rejection), hash equality against the
+// hash the CALLER asked for, canonical base64, decoded payload bound, checksum —
+// and only then the payload decode and BlockUndo conversion.
+//
+// MEMORY: everything before the checksum decision allocates exactly ONE
+// payload-sized buffer — the base64 output, which is unavoidable because the
+// checksum covers those bytes. Nothing copies or re-encodes the base64 body, and
+// the preimage is streamed rather than concatenated. Measured on an 11.9 MB
+// envelope: 0.750x the file in 7 allocations, so peak resident before the
+// decision is the caller's buffer plus 3/4 of it, ~1.75x. The payload decode
+// past the checksum is far more expensive (~5.7x cumulative, dominated by the
+// per-spent-entry structs) and runs only once the bytes are proven intact.
 func unmarshalUndoEnvelope(blockHash [32]byte, raw []byte) (*BlockUndo, error) {
-	env, err := decodeUndoEnvelope(raw)
+	if int64(len(raw)) > int64(undoFileMaxBytes) {
+		return nil, fmt.Errorf("%w: undo record is %d bytes, class bound %d",
+			ErrUndoIntegrity, len(raw), int64(undoFileMaxBytes))
+	}
+	hashHex, payloadB64, checksumHex, err := splitUndoEnvelope(raw)
 	if err != nil {
 		return nil, err
 	}
-	if env.Version != undoEnvelopeVersion {
-		return nil, fmt.Errorf("%w: unsupported undo envelope version %d", ErrUndoIntegrity, env.Version)
-	}
-	if !validCanonicalHashHex(env.BlockHash) || !validCanonicalHashHex(env.Checksum) {
-		return nil, fmt.Errorf("%w: block_hash and checksum must be 64 lowercase hex characters", ErrUndoIntegrity)
-	}
-	if env.BlockHash != hex.EncodeToString(blockHash[:]) {
+	if string(hashHex) != hex.EncodeToString(blockHash[:]) {
 		return nil, errUndoBlockHashMismatch
 	}
-	payload, err := decodeCanonicalBase64(env.PayloadB64)
+	payload, err := decodeCanonicalBase64(payloadB64)
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(payload)) > int64(undoFileMaxBytes) {
+	if int64(len(payload)) > int64(undoPayloadMaxBytes) {
 		return nil, fmt.Errorf("%w: decoded payload is %d bytes, class bound %d",
-			ErrUndoIntegrity, len(payload), int64(undoFileMaxBytes))
+			ErrUndoIntegrity, len(payload), int64(undoPayloadMaxBytes))
 	}
-	// validCanonicalHashHex already proved this decodes to 32 bytes.
-	stored, err := hex.DecodeString(env.Checksum)
+	// splitUndoEnvelope already proved this is 64 lowercase hex characters.
+	stored, err := hex.DecodeString(string(checksumHex))
 	if err != nil {
 		return nil, fmt.Errorf("%w: checksum is not hexadecimal", ErrUndoIntegrity)
 	}
@@ -527,76 +578,72 @@ func unmarshalUndoEnvelope(blockHash [32]byte, raw []byte) (*BlockUndo, error) {
 	return unmarshalBlockUndo(payload)
 }
 
-// decodeUndoEnvelope enforces step 2 of the validation order. The key multiset
-// is collected first because struct decoding sees none of duplicate, unknown or
-// missing fields — and because an unversioned legacy record must be recognised
-// by the ABSENCE of "version" before the exact-field-set check, or its pinned
-// message becomes unreachable.
-func decodeUndoEnvelope(raw []byte) (undoEnvelopeDisk, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	tok, err := dec.Token()
-	if err != nil {
-		return undoEnvelopeDisk{}, fmt.Errorf("%w: undo record is not JSON", ErrUndoIntegrity)
+// splitUndoEnvelope validates the canonical layout and returns sub-slices of
+// raw. The body length is DERIVED (len(raw) - frame) rather than searched for,
+// so the whole check is a handful of fixed-length comparisons: any inserted,
+// removed, reordered, duplicated or renamed field shifts the trailing segments
+// and fails. On failure it hands off to classifyUndoEnvelopeFailure for the
+// operator-facing reason, which is the only path that parses JSON at all.
+func splitUndoEnvelope(raw []byte) (hashHex, payloadB64, checksumHex []byte, err error) {
+	body := len(raw) - undoEnvelopeFrameBytes
+	if body < 0 {
+		return nil, nil, nil, classifyUndoEnvelopeFailure(raw)
 	}
-	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
-		return undoEnvelopeDisk{}, fmt.Errorf("%w: undo record must be a JSON object", ErrUndoIntegrity)
+	hashAt := len(undoEnvelopePrefix)
+	payloadSepAt := hashAt + undoHashHexLen
+	payloadAt := payloadSepAt + len(undoEnvelopePayloadSep)
+	checksumSepAt := payloadAt + body
+	checksumAt := checksumSepAt + len(undoEnvelopeChecksumSep)
+	suffixAt := checksumAt + undoHashHexLen
+	if string(raw[:hashAt]) != undoEnvelopePrefix ||
+		string(raw[payloadSepAt:payloadAt]) != undoEnvelopePayloadSep ||
+		string(raw[checksumSepAt:checksumAt]) != undoEnvelopeChecksumSep ||
+		string(raw[suffixAt:]) != undoEnvelopeSuffix {
+		return nil, nil, nil, classifyUndoEnvelopeFailure(raw)
 	}
-	keys, err := collectTopLevelFieldNames(dec)
-	if err != nil {
-		return undoEnvelopeDisk{}, fmt.Errorf("%w: undo record is not a well-formed JSON object", ErrUndoIntegrity)
+	hashHex, checksumHex = raw[hashAt:payloadSepAt], raw[checksumAt:suffixAt]
+	if !validCanonicalHashHex(string(hashHex)) || !validCanonicalHashHex(string(checksumHex)) {
+		return nil, nil, nil, fmt.Errorf(
+			"%w: block_hash and checksum must be 64 lowercase hex characters", ErrUndoIntegrity)
 	}
-	hasVersion := false
-	for _, key := range keys {
-		if key == "version" {
-			hasVersion = true
-			break
-		}
-	}
-	if !hasVersion {
-		return undoEnvelopeDisk{}, errUndoLegacyRecord
-	}
-	sorted := append([]string(nil), keys...)
-	sort.Strings(sorted)
-	if len(sorted) != 4 || sorted[0] != "block_hash" || sorted[1] != "checksum" ||
-		sorted[2] != "payload_b64" || sorted[3] != "version" {
-		return undoEnvelopeDisk{}, fmt.Errorf(
-			"%w: envelope fields must be exactly block_hash, checksum, payload_b64, version, got %q",
-			ErrUndoIntegrity, sorted)
-	}
+	return hashHex, raw[payloadAt:checksumSepAt], checksumHex, nil
+}
 
-	var env undoEnvelopeDisk
-	value := json.NewDecoder(bytes.NewReader(raw))
-	if err := value.Decode(&env); err != nil {
-		return undoEnvelopeDisk{}, fmt.Errorf("%w: envelope field has the wrong type", ErrUndoIntegrity)
+// classifyUndoEnvelopeFailure names WHY a record that failed the layout check
+// failed it. It runs only on records already being rejected, so its JSON scan is
+// never paid on the accept path, and it decodes into a probe holding just the
+// version — encoding/json skips the other fields without materializing them, so
+// even a maximum-size hostile record costs no proportional allocation.
+//
+// It decodes ONE value and ignores anything after it, so an unversioned record
+// with trailing garbage still reports the actionable legacy message instead of a
+// generic one. The Rust twin classifies identically.
+func classifyUndoEnvelopeFailure(raw []byte) error {
+	var probe struct {
+		Version *uint32 `json:"version"`
 	}
-	if _, err := value.Token(); !errors.Is(err, io.EOF) {
-		return undoEnvelopeDisk{}, fmt.Errorf("%w: unexpected trailing JSON value", ErrUndoIntegrity)
+	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&probe); err != nil {
+		return fmt.Errorf("%w: undo record is not a single JSON object", ErrUndoIntegrity)
 	}
-	// Same canonical-form rule as the payload, and it is load-bearing for
-	// PARITY, not just strictness: encoding/json treats a JSON null as "leave
-	// the field at its zero value", so `"payload_b64":null` would otherwise
-	// decode to "" and surface as a checksum mismatch here while serde rejects
-	// it outright. Re-encoding pins nulls, silently-zeroed types, field order,
-	// insignificant whitespace and the single trailing LF in one comparison, so
-	// both clients accept exactly the same byte strings.
-	canonical, err := json.Marshal(env)
-	if err != nil {
-		return undoEnvelopeDisk{}, fmt.Errorf("%w: envelope is not re-encodable", ErrUndoIntegrity)
+	if probe.Version == nil {
+		return errUndoLegacyRecord
 	}
-	if !bytes.Equal(append(canonical, '\n'), raw) {
-		return undoEnvelopeDisk{}, fmt.Errorf("%w: envelope is not the canonical encoding", ErrUndoIntegrity)
+	if *probe.Version != undoEnvelopeVersion {
+		return fmt.Errorf("%w: unsupported undo envelope version %d", ErrUndoIntegrity, *probe.Version)
 	}
-	return env, nil
+	return fmt.Errorf("%w: envelope is not the canonical encoding", ErrUndoIntegrity)
 }
 
 // decodeCanonicalBase64 accepts only the one padded RFC 4648 spelling of the
-// payload. The re-encode comparison is what makes it canonical: Go's decoder
-// silently skips \r and \n (reachable here as JSON escapes) and Strict() alone
-// only covers non-zero padding bits.
-func decodeCanonicalBase64(value string) ([]byte, error) {
-	payload, err := base64.StdEncoding.Strict().DecodeString(value)
-	if err != nil || base64.StdEncoding.EncodeToString(payload) != value {
+// payload. Strict() covers non-zero padding bits; the EncodedLen equality covers
+// the rest, notably the \r and \n that Go's decoder silently SKIPS — a skipped
+// byte makes the symbol count disagree with the slice length. Checking the
+// length instead of re-encoding keeps this O(1) on top of the output buffer.
+func decodeCanonicalBase64(value []byte) ([]byte, error) {
+	payload := make([]byte, base64.StdEncoding.DecodedLen(len(value)))
+	n, err := base64.StdEncoding.Strict().Decode(payload, value)
+	if err != nil || base64.StdEncoding.EncodedLen(n) != len(value) {
 		return nil, fmt.Errorf("%w: payload_b64 is not canonical padded base64", ErrUndoIntegrity)
 	}
-	return payload, nil
+	return payload[:n], nil
 }
