@@ -323,6 +323,10 @@ func (s *SyncEngine) BootstrapCanonicalGenesisIfEmpty() error {
 	if s == nil {
 		return errors.New("sync engine is not initialized")
 	}
+	// Deferred BEFORE the mutationMu unlock so it runs AFTER it: the writer is
+	// invoked with no engine lock held. Every entry point repeats this order.
+	diag := &diagnosticBatch{}
+	defer s.flushDiagnostics(diag)
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
 	if err := s.mutationAllowed(); err != nil {
@@ -331,7 +335,7 @@ func (s *SyncEngine) BootstrapCanonicalGenesisIfEmpty() error {
 	if s.chainState.view().hasTip || s.cfg.ChainID != devnetGenesisChainID {
 		return nil
 	}
-	_, applyErr := s.applyBlock(devnetGenesisBlockBytes, nil)
+	_, applyErr := s.applyBlock(devnetGenesisBlockBytes, nil, diag)
 	if errors.Is(applyErr, errStoragePersistenceFault) || isAtomicWritePostCommit(applyErr) {
 		return applyErr
 	}
@@ -358,12 +362,14 @@ func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*Ch
 	if s == nil {
 		return nil, errors.New("sync engine is not initialized")
 	}
+	diag := &diagnosticBatch{}
+	defer s.flushDiagnostics(diag)
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
-	return s.applyBlock(blockBytes, prevTimestamps)
+	return s.applyBlock(blockBytes, prevTimestamps, diag)
 }
 
-func (s *SyncEngine) applyBlock(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
+func (s *SyncEngine) applyBlock(blockBytes []byte, prevTimestamps []uint64, diag *diagnosticBatch) (*ChainStateConnectSummary, error) {
 	if err := s.mutationAllowed(); err != nil {
 		return nil, err
 	}
@@ -371,7 +377,7 @@ func (s *SyncEngine) applyBlock(blockBytes []byte, prevTimestamps []uint64) (*Ch
 	if err != nil {
 		return nil, err
 	}
-	return s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps, nil)
+	return s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps, nil, diag)
 }
 
 // StockDevnetTargetSchedule reports whether the exact stock Phase-0 devnet
@@ -493,14 +499,16 @@ func (s *SyncEngine) SetMempool(mempool *Mempool) {
 	if s == nil {
 		return
 	}
+	diag := &diagnosticBatch{}
+	defer s.flushDiagnostics(diag)
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
 	if err := s.mutationAllowed(); err != nil {
-		s.reportMempoolBindingRejected(err)
+		s.reportMempoolBindingRejected(diag, err)
 		return
 	}
 	if err := s.bindMempoolUnderMutation(mempool); err != nil {
-		s.reportMempoolBindingRejected(err)
+		s.reportMempoolBindingRejected(diag, err)
 	}
 }
 
@@ -617,13 +625,26 @@ func checkOwnerNeverUsedLocked(owner *PendingOutpointOwner) error {
 }
 
 // reportMempoolBindingRejected makes a refused binding visible: the engine keeps
-// its previous binding, otherwise indistinguishable from an unwired caller.
-func (s *SyncEngine) reportMempoolBindingRejected(err error) {
-	_, _ = fmt.Fprintf(s.diagnosticWriter(), "sync: mempool binding rejected, engine binding unchanged: %v\n", err)
+// its previous binding, otherwise indistinguishable from an unwired caller. The
+// record is retained by the caller's batch and emitted after mutationMu is
+// released; the rejection itself mutates nothing.
+func (s *SyncEngine) reportMempoolBindingRejected(diag *diagnosticBatch, err error) {
+	s.diagnose(diag, "sync: mempool binding rejected, engine binding unchanged: %v\n", err)
 }
 
 // SetStderr sets the writer for non-fatal error diagnostics (e.g. mempool
-// post-acceptance failures). Defaults to io.Discard when not explicitly set.
+// post-acceptance failures). A nil writer maps to io.Discard, which is also the
+// default when SetStderr is never called.
+//
+// Contract for the supplied writer, which the engine ENFORCES rather than
+// assumes: it is never invoked while mutationMu, s.mu, the ChainState admission
+// guard, or any ChainState / Mempool / PendingOutpointOwner lock is held (see
+// flushDiagnostics for the single terminal-latch exception). A writer may
+// therefore block or re-enter a non-diagnostic SyncEngine mutation without
+// stalling or deadlocking another mutator, and its Write errors are ignored: a
+// diagnostic never changes a consensus, persistence, rollback or mempool result.
+// The replacement is a race-free pointer store under s.mu; a flush already in
+// progress keeps the writer it snapshotted.
 func (s *SyncEngine) SetStderr(w io.Writer) {
 	if s == nil {
 		return
@@ -774,10 +795,13 @@ func (s *SyncEngine) captureRollbackStateWithIndex(canonicalIndex []string) (syn
 // every canonical mutation serialize on mutationMu, which the entry point holds
 // throughout, so no reread can observe a different pointer set.
 type canonicalTransition struct {
-	engine           *SyncEngine
-	chainState       *ChainState
-	mempool          *Mempool
-	owner            *PendingOutpointOwner
+	engine     *SyncEngine
+	chainState *ChainState
+	mempool    *Mempool
+	owner      *PendingOutpointOwner
+	// diag is the entry point's bounded diagnostic batch. Producers under the
+	// guard append to it; nothing under the guard invokes the writer.
+	diag             *diagnosticBatch
 	generation       uint64
 	rollback         syncRollbackState
 	appliedHeight    uint64
@@ -790,7 +814,7 @@ type canonicalTransition struct {
 // under the guard. The caller holds mutationMu and MUST already have run
 // canonicalIndexPreflight, whose result it passes here: the fallible index read
 // belongs before any clone or consensus validation, not inside the guard.
-func (s *SyncEngine) beginCanonicalTransition(canonicalIndex []string) (*canonicalTransition, error) {
+func (s *SyncEngine) beginCanonicalTransition(canonicalIndex []string, diag *diagnosticBatch) (*canonicalTransition, error) {
 	if err := s.mutationAllowed(); err != nil {
 		return nil, err
 	}
@@ -819,6 +843,7 @@ func (s *SyncEngine) beginCanonicalTransition(canonicalIndex []string) (*canonic
 		chainState: chainState,
 		mempool:    mempool,
 		owner:      owner,
+		diag:       diag,
 		generation: generation,
 		rollback:   rollback,
 	}, nil
@@ -871,13 +896,13 @@ func (t *canonicalTransition) end(cause error) error {
 		return t.finish()
 	}
 	if t.engine.persistenceFaulted() {
-		t.engine.reportTerminalTransition("post-commit persistence fault", cause)
+		t.engine.reportTerminalTransition(t.diag, "post-commit persistence fault", cause)
 		return cause
 	}
 	var restoreFault *rollbackRestoreFault
 	if errors.As(cause, &restoreFault) {
 		t.engine.latchTerminalFault(cause)
-		t.engine.reportTerminalTransition("rollback restore failed", cause)
+		t.engine.reportTerminalTransition(t.diag, "rollback restore failed", cause)
 		return cause
 	}
 	t.abort()
@@ -900,8 +925,14 @@ func (s *SyncEngine) latchTerminalFault(cause error) {
 
 // reportTerminalTransition makes the fail-closed latch visible to an operator:
 // without it a latched node is indistinguishable from a merely hung one.
-func (s *SyncEngine) reportTerminalTransition(reason string, cause error) {
-	_, _ = fmt.Fprintf(s.diagnosticWriter(), "sync: canonical transition terminal (%s), admission stays closed until restart: %v\n", reason, cause)
+//
+// The record is retained by the entry point's batch and emitted once mutationMu
+// is released, so a blocked writer cannot stop a later mutator from acquiring
+// mutationMu and receiving the latched fault. The admission guard that the
+// terminal state retains until restart is NOT released — that is the latch
+// itself, and no mutation path re-acquires it after this point.
+func (s *SyncEngine) reportTerminalTransition(diag *diagnosticBatch, reason string, cause error) {
+	s.diagnose(diag, "sync: canonical transition terminal (%s), admission stays closed until restart: %v\n", reason, cause)
 }
 
 // rollbackRestoreFault marks a transition failure whose EXACT restore could not
@@ -1100,11 +1131,12 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	blockBytes []byte,
 	prevTimestamps []uint64,
 	target *canonicalApplyTarget,
+	diag *diagnosticBatch,
 ) (*ChainStateConnectSummary, error) {
 	if err := s.mutationAllowed(); err != nil {
 		return nil, err
 	}
-	summary, outcome, err := s.applyCanonicalParsedBlockTracked(pb, blockBytes, prevTimestamps, target)
+	summary, outcome, err := s.applyCanonicalParsedBlockTracked(pb, blockBytes, prevTimestamps, target, diag)
 	s.noteBlockApplyOutcome(outcome)
 	return summary, err
 }
@@ -1117,6 +1149,10 @@ type canonicalBlockApplyContext struct {
 	// canonicalIndex is the rollback preflight result, read before the clone
 	// below was connected so a local index fault outranks a consensus one.
 	canonicalIndex []string
+	// diag is the owning public mutation's bounded diagnostic batch, or nil for
+	// a caller outside a mutation (which holds no engine lock and may write
+	// directly). The PV shadow producers read it from here.
+	diag *diagnosticBatch
 }
 
 // applyCanonicalParsedBlockTracked fully validates one direct-connect candidate
@@ -1130,8 +1166,9 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	blockBytes []byte,
 	prevTimestamps []uint64,
 	target *canonicalApplyTarget,
+	diag *diagnosticBatch,
 ) (*ChainStateConnectSummary, blockApplyMetricOutcome, error) {
-	ctx, outcome, err := s.prepareCanonicalBlockApply(pb, target)
+	ctx, outcome, err := s.prepareCanonicalBlockApply(pb, target, diag)
 	if err != nil {
 		return nil, outcome, err
 	}
@@ -1179,7 +1216,7 @@ func (s *SyncEngine) commitPreparedBlock(
 	pb *consensus.ParsedBlock,
 	blockBytes []byte,
 ) error {
-	tr, err := s.beginCanonicalTransition(ctx.canonicalIndex)
+	tr, err := s.beginCanonicalTransition(ctx.canonicalIndex, ctx.diag)
 	if err != nil {
 		return err
 	}
@@ -1210,7 +1247,7 @@ func (s *SyncEngine) commitPreparedBlockUnderGuard(
 	// claims are gone before any observer can see the new canonical tip.
 	if tr.mempool != nil {
 		if err := tr.mempool.applyConnectedBlockParsed(pb); err != nil {
-			_, _ = fmt.Fprintf(s.diagnosticWriter(), "sync: standard mempool cleanup failed at height %d, rolling back: %v\n", ctx.blockHeight, err)
+			s.diagnose(tr.diag, "sync: standard mempool cleanup failed at height %d, rolling back: %v\n", ctx.blockHeight, err)
 			return s.rollbackApplyBlock(err, tr.rollback)
 		}
 	}
@@ -1264,7 +1301,7 @@ func (s *SyncEngine) recheckLiveStoreTipIdentity(prior canonicalTipScalars) erro
 	return nil
 }
 
-func (s *SyncEngine) prepareCanonicalBlockApply(pb *consensus.ParsedBlock, target *canonicalApplyTarget) (canonicalBlockApplyContext, blockApplyMetricOutcome, error) {
+func (s *SyncEngine) prepareCanonicalBlockApply(pb *consensus.ParsedBlock, target *canonicalApplyTarget, diag *diagnosticBatch) (canonicalBlockApplyContext, blockApplyMetricOutcome, error) {
 	if err := s.validateCanonicalBlockApplyReady(pb); err != nil {
 		return canonicalBlockApplyContext{}, blockApplyMetricNone, err
 	}
@@ -1301,6 +1338,7 @@ func (s *SyncEngine) prepareCanonicalBlockApply(pb *consensus.ParsedBlock, targe
 		expectedTarget: expectedTarget,
 		prevState:      prevState,
 		canonicalIndex: canonicalIndex,
+		diag:           diag,
 	}, blockApplyMetricNone, nil
 }
 

@@ -3326,6 +3326,10 @@ func TestDevnetRPCHealthReportsLiveSnapshot(t *testing.T) {
 	if body.MempoolBytes != len(txBytes) {
 		t.Fatalf("mempool_bytes=%d want %d", body.MempoolBytes, len(txBytes))
 	}
+	if body.TerminalFault || body.RestartRequired {
+		t.Fatalf("terminal_fault=%v restart_required=%v on a healthy ready node, want both false",
+			body.TerminalFault, body.RestartRequired)
+	}
 }
 
 // TestDevnetRPCHealthReportsReadyFalseAsField asserts a
@@ -3359,6 +3363,82 @@ func TestDevnetRPCHealthReportsReadyFalseAsField(t *testing.T) {
 	}
 	if body.Height != nil || body.TipHash != nil {
 		t.Fatalf("height/tip_hash non-nil with has_tip=false: %v / %v", body.Height, body.TipHash)
+	}
+	// Not-yet-ready is a startup state, never a terminal fault.
+	if body.TerminalFault || body.RestartRequired {
+		t.Fatalf("terminal_fault=%v restart_required=%v on a healthy not-yet-ready node, want both false",
+			body.TerminalFault, body.RestartRequired)
+	}
+}
+
+// stubTerminalFaultReporter stands in for the live engine's latch so the
+// projection can be exercised without a real storage failure. TEST-only:
+// production binds the projection to the *node.SyncEngine itself (asserted
+// below), and no seam can install or clear a fault on a real engine.
+type stubTerminalFaultReporter struct{ latched bool }
+
+func (s stubTerminalFaultReporter) TerminalFaulted() bool { return s.latched }
+
+// TestDevnetRPCHealthFailsClosedOnTerminalFault proves the WIRING —
+// newDevnetRPCState binds the /health projection to the very *node.SyncEngine it
+// stores, by identity, so node-side TestSyncEngineTerminalFaultedSnapshot (the
+// latch flips exactly on the two terminal causes) carries over to this endpoint
+// — and then the PROJECTION: a latched engine answers 503 with terminal_fault,
+// restart_required and ready:false even though the readiness gate is Ready,
+// while still reporting the bounded tip/peer/mempool snapshot and no cause text.
+func TestDevnetRPCHealthFailsClosedOnTerminalFault(t *testing.T) {
+	state := mustRPCState(t, true)
+	if state.terminalFault != state.syncEngine {
+		t.Fatal("production construction did not bind the /health terminal-fault projection to the live sync engine")
+	}
+	if state.terminalFaulted() {
+		t.Fatal("a freshly constructed engine reported a terminal fault")
+	}
+	if !state.TryMarkReadyOnStartup() {
+		t.Fatal("TryMarkReadyOnStartup: false on a fresh gate")
+	}
+	state.terminalFault = stubTerminalFaultReporter{latched: true}
+
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+	resp, err := http.Get(server.URL + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503 for a terminally latched engine", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	var body healthResponse
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.TerminalFault || !body.RestartRequired {
+		t.Fatalf("terminal_fault=%v restart_required=%v, want both true", body.TerminalFault, body.RestartRequired)
+	}
+	if body.Ready {
+		t.Fatal("ready=true on a terminally latched engine whose gate is Ready")
+	}
+	if !body.HasTip || body.Height == nil || body.TipHash == nil {
+		t.Fatalf("bounded snapshot lost on the latched path: has_tip=%v height=%v tip_hash=%v", body.HasTip, body.Height, body.TipHash)
+	}
+	// The payload stays bounded: booleans only, no cause, path or error text.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("decode fields: %v", err)
+	}
+	for _, want := range []string{"ready", "terminal_fault", "restart_required", "has_tip", "height", "tip_hash", "best_known_height", "in_ibd", "peer_count", "mempool_txs", "mempool_bytes"} {
+		if _, ok := fields[want]; !ok {
+			t.Fatalf("field %q missing from the latched /health payload: %s", want, raw)
+		}
+		delete(fields, want)
+	}
+	if len(fields) != 0 {
+		t.Fatalf("latched /health payload carries unbounded extra fields: %v", fields)
 	}
 }
 

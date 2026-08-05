@@ -53,6 +53,20 @@ func (s *SyncEngine) ReorgCount() uint64 {
 	return s.reorgCount
 }
 
+// TerminalFaulted reports whether this engine has latched the terminal storage
+// persistence fault that closes admission until the node is restarted. It is the
+// read-only projection of the EXISTING latch (the same one mutationAllowed fails
+// closed on), for operator surfaces such as GET /health.
+//
+// It exposes only the boolean: the latched cause is never returned, copied or
+// rendered, and the call neither installs, clears, replaces nor mutates a fault
+// — a latched engine stays latched and an unlatched one stays unlatched however
+// often this is called. Nil-safe like the other exported status readers: a nil
+// engine reports false, never a fabricated fault.
+func (s *SyncEngine) TerminalFaulted() bool {
+	return s.persistenceFaulted()
+}
+
 func (s *SyncEngine) BlockApplyCounts() BlockApplyCounts {
 	if s == nil {
 		return BlockApplyCounts{}

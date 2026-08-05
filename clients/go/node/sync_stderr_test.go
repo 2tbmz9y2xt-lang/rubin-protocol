@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -73,13 +75,21 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 // stderrProducers returns every SyncEngine diagnostic producer reachable WITHOUT
 // an open canonical transition, each driven the way production drives it.
 //
+// "binding rejection" runs through the public SetMempool entry point, so it
+// exercises the BATCHED form: the record is retained and flushed after
+// mutationMu is released. The others are driven directly with a nil batch, which
+// is the direct form legal for a caller holding none of the engine's locks —
+// exactly the position these calls are in. TestSyncEngineDiagnosticWriter*
+// pin the batched isolation properties the direct form cannot show.
+//
 // One diagnostic site is deliberately absent: the standard-cleanup failure
 // report in commitPreparedBlockUnderGuard, which only fires inside an open
-// transition and would need that whole fixture here. It is exercised by
-// TestSyncPendingOutpointCleanupFailureLatchesTerminalFault, and it reads the
-// writer through the same audited helper — the repository call-site audit, not
-// this list, is what proves no SyncEngine site reads s.stderr raw. Adding a
-// transition-free diagnostic site without adding it here leaves it unproven.
+// transition and would need that whole fixture here. It is exercised, together
+// with the in-transition terminal report, by
+// TestSyncEngineTransitionDiagnosticsFlushAfterUnlock — the repository
+// call-site audit, not this list, is what proves no SyncEngine site reads
+// s.stderr raw. Adding a transition-free diagnostic site without adding it here
+// leaves it unproven.
 func stderrProducers(t *testing.T, f *pendingOutpointSyncFixture, spentBlock []byte, pvBlock []byte, pvCtx canonicalBlockApplyContext) map[string]func() {
 	t.Helper()
 	// A target the candidate's header cannot match, so the shadow's parallel
@@ -93,11 +103,11 @@ func stderrProducers(t *testing.T, f *pendingOutpointSyncFixture, spentBlock []b
 		"binding rejection": func() { f.engine.SetMempool(f.newPool(t)) },
 		// Terminal transition report: the fail-closed latch notice.
 		"terminal transition": func() {
-			f.engine.reportTerminalTransition("stderr probe", errors.New("probe cause"))
+			f.engine.reportTerminalTransition(nil, "stderr probe", errors.New("probe cause"))
 		},
 		// Requeue diagnostic: the block's inputs are already spent on chain, so
 		// readmission fails and the failure is reported.
-		"requeue": func() { f.engine.requeueDisconnectedTransactions([][]byte{spentBlock}) },
+		"requeue": func() { f.engine.requeueDisconnectedTransactions([][]byte{spentBlock}, nil) },
 		// PV shadow, sequential-error branch: the parallel run of a VALID block
 		// reports OK against the supplied sequential error, so the codes differ
 		// and the mismatch line is emitted deterministically.
@@ -274,7 +284,7 @@ func TestRequeueDisconnectedNoErrorOnCoinbaseOnly(t *testing.T) {
 	}
 
 	stderrBuf.Reset()
-	engine.requeueDisconnectedTransactions([][]byte{rawBlock})
+	engine.requeueDisconnectedTransactions([][]byte{rawBlock}, nil)
 	if stderrBuf.Len() != 0 {
 		t.Fatalf("expected no errors for coinbase-only block, got: %s", stderrBuf.String())
 	}
@@ -304,7 +314,7 @@ func TestRequeueDisconnectedSkipsUnparseableBlocks(t *testing.T) {
 	var stderrBuf bytes.Buffer
 	engine.SetStderr(&stderrBuf)
 
-	engine.requeueDisconnectedTransactions([][]byte{{0xff, 0xfe}})
+	engine.requeueDisconnectedTransactions([][]byte{{0xff, 0xfe}}, nil)
 	if stderrBuf.Len() != 0 {
 		t.Fatalf("expected no stderr for unparseable block, got: %s", stderrBuf.String())
 	}
@@ -448,10 +458,308 @@ func TestRequeueDisconnectedLogsAddTxError(t *testing.T) {
 	// Requeue the disconnected block: the tx's inputs are already spent,
 	// so AddTx fails and the error is logged to stderr.
 	stderrBuf.Reset()
-	engine.requeueDisconnectedTransactions([][]byte{rawBlock})
+	engine.requeueDisconnectedTransactions([][]byte{rawBlock}, nil)
 
 	output := stderrBuf.String()
 	if !strings.Contains(output, "mempool: requeue-tx:") {
 		t.Fatalf("expected 'mempool: requeue-tx:' in stderr, got: %q", output)
 	}
+}
+
+// newDiagnosticEngine builds the smallest engine that can produce a diagnostic
+// from a PUBLIC mutation entry point: with a mempool bound, any further
+// SetMempool call is a rejection — the cheapest batched producer there is, and
+// it needs no chain, no mined block and no key material.
+func newDiagnosticEngine(t *testing.T) (*SyncEngine, *ChainState, *BlockStore) {
+	t.Helper()
+	dir := t.TempDir()
+	chainState := NewChainState()
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("CreateBlockStore: %v", err)
+	}
+	engine, err := NewSyncEngine(chainState, blockStore, DefaultSyncConfig(nil, [32]byte{}, ChainStatePath(dir)))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	mempool, err := NewMempool(chainState, blockStore, [32]byte{})
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	engine.SetMempool(mempool)
+	return engine, chainState, blockStore
+}
+
+func newDiagnosticRejectionCandidate(t *testing.T, chainState *ChainState, blockStore *BlockStore) *Mempool {
+	t.Helper()
+	candidate, err := NewMempool(chainState, blockStore, [32]byte{})
+	if err != nil {
+		t.Fatalf("NewMempool(candidate): %v", err)
+	}
+	return candidate
+}
+
+// diagnosticLockProbe answers the question the race detector cannot: which
+// engine locks were HELD at the moment the caller-supplied writer ran. Every
+// TryLock happens before the writer publishes `entered`, so the measurement is
+// taken before any other goroutine in the test can contend for those locks.
+type diagnosticLockProbe struct {
+	engine  *SyncEngine
+	entered chan struct{}
+	release chan struct{}
+
+	buf           bytes.Buffer
+	writes        int
+	mutationHeld  bool
+	stateHeld     bool
+	admissionHeld bool
+}
+
+func (w *diagnosticLockProbe) Write(p []byte) (int, error) {
+	w.writes++
+	if w.engine.mutationMu.TryLock() {
+		w.engine.mutationMu.Unlock()
+	} else {
+		w.mutationHeld = true
+	}
+	if w.engine.mu.TryLock() {
+		w.engine.mu.Unlock()
+	} else {
+		w.stateHeld = true
+	}
+	if w.engine.chainState.admissionMu.TryLock() {
+		w.engine.chainState.admissionMu.Unlock()
+	} else {
+		w.admissionHeld = true
+	}
+	if w.entered != nil {
+		select {
+		case w.entered <- struct{}{}:
+		default:
+		}
+		<-w.release
+	}
+	return w.buf.Write(p)
+}
+
+// TestSyncEngineDiagnosticWriterRunsAfterMutationUnlock pins the isolation
+// contract on a public mutation entry point, in two phases. Phase 1 is
+// single-goroutine, so a busy engine lock could only be this mutation's own: it
+// proves mutationMu, s.mu and the admission guard are ALL free when the
+// caller-supplied writer runs, and that the emitted bytes are unchanged. Phase 2
+// parks a writer inside Write and proves the liveness property the batch exists
+// for: a SECOND canonical mutator acquires mutationMu and reaches its own result
+// while the first call's writer is still blocked.
+func TestSyncEngineDiagnosticWriterRunsAfterMutationUnlock(t *testing.T) {
+	engine, chainState, blockStore := newDiagnosticEngine(t)
+
+	probe := &diagnosticLockProbe{engine: engine}
+	engine.SetStderr(probe)
+	engine.SetMempool(newDiagnosticRejectionCandidate(t, chainState, blockStore))
+	if probe.writes != 1 {
+		t.Fatalf("writes=%d, want exactly one flushed record", probe.writes)
+	}
+	if probe.mutationHeld || probe.stateHeld || probe.admissionHeld {
+		t.Fatalf("locks held during writer I/O: mutationMu=%v s.mu=%v admissionMu=%v",
+			probe.mutationHeld, probe.stateHeld, probe.admissionHeld)
+	}
+	const want = "sync: mempool binding rejected, engine binding unchanged: mempool replacement is not supported after the initial binding\n"
+	if got := probe.buf.String(); got != want {
+		t.Fatalf("emitted %q, want the unchanged diagnostic %q", got, want)
+	}
+
+	blocking := &diagnosticLockProbe{engine: engine, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	engine.SetStderr(blocking)
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		engine.SetMempool(newDiagnosticRejectionCandidate(t, chainState, blockStore))
+	}()
+	select {
+	case <-blocking.entered:
+	case <-time.After(5 * time.Second):
+		close(blocking.release)
+		t.Fatal("timed out waiting for the diagnostic writer to be entered")
+	}
+	second := make(chan error, 1)
+	go func() { _, err := engine.DisconnectTip(); second <- err }()
+	select {
+	case <-second:
+	case <-time.After(5 * time.Second):
+		close(blocking.release)
+		t.Fatal("a second canonical mutator could not acquire mutationMu while the diagnostic writer was blocked")
+	}
+	close(blocking.release)
+	<-firstDone
+	if blocking.mutationHeld || blocking.stateHeld || blocking.admissionHeld {
+		t.Fatalf("locks held while the writer blocked: mutationMu=%v s.mu=%v admissionMu=%v",
+			blocking.mutationHeld, blocking.stateHeld, blocking.admissionHeld)
+	}
+	engine.SetStderr(io.Discard)
+}
+
+// reentrantDiagnosticWriter calls back into non-diagnostic SyncEngine mutations
+// from inside Write, which is legal precisely because the flush holds no engine
+// lock. The one-shot guard bounds the depth; this test is about deadlock, not
+// recursion.
+type reentrantDiagnosticWriter struct {
+	engine *SyncEngine
+	bound  *Mempool
+	buf    bytes.Buffer
+	writes int
+}
+
+func (w *reentrantDiagnosticWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes == 1 {
+		w.engine.SetMempool(w.bound) // same pointer: settled, no rebinding, no diagnostic
+		_, _ = w.engine.DisconnectTip()
+	}
+	return w.buf.Write(p)
+}
+
+// TestSyncEngineDiagnosticWriterReentryDoesNotDeadlock drives the case where the
+// operator's writer re-enters the engine from inside Write: the flush runs with
+// mutationMu released, so those mutations acquire it and return instead of
+// self-deadlocking against the call that is emitting.
+func TestSyncEngineDiagnosticWriterReentryDoesNotDeadlock(t *testing.T) {
+	engine, chainState, blockStore := newDiagnosticEngine(t)
+	engine.mu.RLock()
+	bound := engine.mempool
+	engine.mu.RUnlock()
+
+	writer := &reentrantDiagnosticWriter{engine: engine, bound: bound}
+	engine.SetStderr(writer)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		engine.SetMempool(newDiagnosticRejectionCandidate(t, chainState, blockStore))
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("re-entrant diagnostic writer deadlocked the emitting mutation")
+	}
+	if writer.writes == 0 {
+		t.Fatal("the re-entrant writer was never invoked")
+	}
+	if !strings.Contains(writer.buf.String(), "sync: mempool binding rejected") {
+		t.Fatalf("emitted %q, want the unchanged binding-rejection diagnostic", writer.buf.String())
+	}
+	engine.mu.RLock()
+	stillBound := engine.mempool
+	engine.mu.RUnlock()
+	if stillBound != bound {
+		t.Fatal("a re-entrant writer changed the engine's mempool binding")
+	}
+	engine.SetStderr(io.Discard)
+}
+
+// TestSyncEngineDiagnosticBatchBounded pins both caps at their exact boundary,
+// the one-over behavior, the single fixed truncation record, below-cap byte and
+// order fidelity, and flush-exactly-once.
+func TestSyncEngineDiagnosticBatchBounded(t *testing.T) {
+	var sink bytes.Buffer
+	engine := &SyncEngine{stderr: &sink}
+
+	records := &diagnosticBatch{}
+	var want strings.Builder
+	for i := 0; i < diagnosticBatchMaxRecords; i++ {
+		engine.diagnose(records, "diagnostic record %d\n", i)
+		fmt.Fprintf(&want, "diagnostic record %d\n", i)
+	}
+	if len(records.records) != diagnosticBatchMaxRecords || records.truncated {
+		t.Fatalf("at the record cap: records=%d truncated=%v", len(records.records), records.truncated)
+	}
+	engine.diagnose(records, "one over the record cap\n")
+	if !records.truncated || len(records.records) != diagnosticBatchMaxRecords {
+		t.Fatalf("one over the record cap: records=%d truncated=%v", len(records.records), records.truncated)
+	}
+	want.WriteString(diagnosticBatchTruncatedRecord)
+	engine.flushDiagnostics(records)
+	if got := sink.String(); got != want.String() {
+		t.Fatalf("flushed %q, want the below-cap records in producer order plus one truncation record %q", got, want.String())
+	}
+	sink.Reset()
+	engine.flushDiagnostics(records)
+	if sink.Len() != 0 {
+		t.Fatalf("second flush emitted %q, want nothing", sink.String())
+	}
+
+	// Byte cap: a record that exactly fills the budget is retained; the next
+	// one is dropped even though it is tiny.
+	sink.Reset()
+	full := strings.Repeat("x", diagnosticBatchMaxBytes-1) + "\n"
+	bytesBatch := &diagnosticBatch{}
+	engine.diagnose(bytesBatch, "%s", full)
+	if bytesBatch.truncated || bytesBatch.bytes != diagnosticBatchMaxBytes {
+		t.Fatalf("at the byte cap: bytes=%d truncated=%v", bytesBatch.bytes, bytesBatch.truncated)
+	}
+	engine.diagnose(bytesBatch, "one over the byte cap\n")
+	if !bytesBatch.truncated || len(bytesBatch.records) != 1 {
+		t.Fatalf("one over the byte cap: records=%d truncated=%v", len(bytesBatch.records), bytesBatch.truncated)
+	}
+	engine.flushDiagnostics(bytesBatch)
+	if got, expected := sink.String(), full+diagnosticBatchTruncatedRecord; got != expected {
+		t.Fatalf("byte-cap flush emitted %d bytes, want %d", len(got), len(expected))
+	}
+
+	// A record larger than the remaining budget is dropped whole and closes the
+	// batch, so a later small record cannot jump ahead of it in the output.
+	sink.Reset()
+	oversized := &diagnosticBatch{}
+	engine.diagnose(oversized, "first\n")
+	engine.diagnose(oversized, "%s", strings.Repeat("y", diagnosticBatchMaxBytes)+"\n")
+	engine.diagnose(oversized, "later small record\n")
+	if !oversized.truncated || len(oversized.records) != 1 || oversized.bytes != len("first\n") {
+		t.Fatalf("oversized record: records=%d bytes=%d truncated=%v", len(oversized.records), oversized.bytes, oversized.truncated)
+	}
+	engine.flushDiagnostics(oversized)
+	if got, expected := sink.String(), "first\n"+diagnosticBatchTruncatedRecord; got != expected {
+		t.Fatalf("oversized flush emitted %q, want %q", got, expected)
+	}
+}
+
+// TestSyncEngineTransitionDiagnosticsFlushAfterUnlock covers the two producers
+// that fire ONLY under an open canonical transition — the standard-cleanup
+// failure and the terminal-latch report — driven through the public ApplyBlock
+// entry point. Both records reach the writer unchanged and in producer order,
+// with mutationMu and s.mu free.
+//
+// admissionMu is deliberately asserted as STILL HELD: this scenario ends in the
+// terminal fail-closed latch, which retains the admission guard until the node
+// restarts (canonicalTransition.end). That retention is pre-existing behavior
+// this issue does not change, and it is harmless here because no mutation path
+// re-acquires that guard after the latch — every entry point fails closed
+// through mutationAllowed first. The assertion is exact so that any future
+// change to the latch shows up here rather than silently.
+func TestSyncEngineTransitionDiagnosticsFlushAfterUnlock(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	spend := f.spend(t, 700, 1)
+	if err := f.mempool.AddTx(spend); err != nil {
+		t.Fatalf("AddTx(spend): %v", err)
+	}
+	f.breakResidentClaim(t, txID(t, spend))
+
+	probe := &diagnosticLockProbe{engine: f.engine}
+	f.engine.SetStderr(probe)
+	if _, err := f.engine.ApplyBlock(f.blockIncluding(t, f.tipHash, f.tipHeight+1, f.alreadyGenerated, 202, spend), nil); err == nil {
+		t.Fatal("apply committed a block whose standard cleanup failed")
+	}
+	if probe.mutationHeld || probe.stateHeld {
+		t.Fatalf("locks held during writer I/O: mutationMu=%v s.mu=%v", probe.mutationHeld, probe.stateHeld)
+	}
+	if !probe.admissionHeld {
+		t.Fatal("the terminal latch released the admission guard; the fail-closed contract changed")
+	}
+	if probe.writes != 2 {
+		t.Fatalf("writes=%d, want the cleanup record and the terminal record", probe.writes)
+	}
+	out := probe.buf.String()
+	cleanup := strings.Index(out, "sync: standard mempool cleanup failed at height ")
+	terminal := strings.Index(out, "sync: canonical transition terminal (rollback restore failed), admission stays closed until restart: ")
+	if cleanup < 0 || terminal < 0 || cleanup > terminal {
+		t.Fatalf("emitted %q, want the unchanged cleanup record before the unchanged terminal record", out)
+	}
+	f.engine.SetStderr(io.Discard)
 }

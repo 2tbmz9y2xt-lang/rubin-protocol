@@ -29,6 +29,8 @@ func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uin
 	if s == nil {
 		return nil, errors.New("sync engine is not initialized")
 	}
+	diag := &diagnosticBatch{}
+	defer s.flushDiagnostics(diag)
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
 	if err := s.mutationAllowed(); err != nil {
@@ -39,7 +41,7 @@ func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uin
 		return nil, err
 	}
 
-	if summary, handled, err := s.applyDirectBlockIfPossible(pb, blockBytes, prevTimestamps); handled {
+	if summary, handled, err := s.applyDirectBlockIfPossible(pb, blockBytes, prevTimestamps, diag); handled {
 		return summary, err
 	}
 	branch, commonAncestorHeight, switchToBranch, candidateHeight, err := s.evaluateSideBranch(blockHash, blockBytes, pb)
@@ -49,7 +51,7 @@ func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uin
 	if !switchToBranch {
 		return s.storeSideBlockAndSummary(branch, commonAncestorHeight, candidateHeight)
 	}
-	return s.applyPreferredBranch(branch, commonAncestorHeight)
+	return s.applyPreferredBranch(branch, commonAncestorHeight, diag)
 }
 
 func parseReorgBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, error) {
@@ -138,6 +140,7 @@ func (s *SyncEngine) applyDirectBlockIfPossible(
 	pb *consensus.ParsedBlock,
 	blockBytes []byte,
 	prevTimestamps []uint64,
+	diag *diagnosticBatch,
 ) (*ChainStateConnectSummary, bool, error) {
 	var zero [32]byte
 	view := s.chainState.view()
@@ -146,10 +149,10 @@ func (s *SyncEngine) applyDirectBlockIfPossible(
 		if pb.Header.PrevBlockHash != zero {
 			return nil, true, ErrParentNotFound
 		}
-		summary, err := s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps, nil)
+		summary, err := s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps, nil, diag)
 		return summary, true, err
 	case pb.Header.PrevBlockHash == view.tipHash:
-		summary, err := s.applyDirectTipBlock(pb, blockBytes, view)
+		summary, err := s.applyDirectTipBlock(pb, blockBytes, view, diag)
 		return summary, true, err
 	default:
 		return nil, false, nil
@@ -160,7 +163,7 @@ func (s *SyncEngine) applyDirectBlockIfPossible(
 // Acquisition order is target-then-MTP: the target context must precede the
 // RUB-647 canonical MTP window so a target-context failure short-circuits
 // before any MTP state is read. The height-0 genesis branch never reaches here.
-func (s *SyncEngine) applyDirectTipBlock(pb *consensus.ParsedBlock, blockBytes []byte, view chainStateView) (*ChainStateConnectSummary, error) {
+func (s *SyncEngine) applyDirectTipBlock(pb *consensus.ParsedBlock, blockBytes []byte, view chainStateView, diag *diagnosticBatch) (*ChainStateConnectSummary, error) {
 	nextHeight, _, err := nextBlockContextFromFields(view.hasTip, view.height, view.tipHash)
 	if err != nil {
 		return nil, err
@@ -176,7 +179,7 @@ func (s *SyncEngine) applyDirectTipBlock(pb *consensus.ParsedBlock, blockBytes [
 	if err != nil {
 		return nil, err
 	}
-	return s.applyCanonicalParsedBlock(pb, blockBytes, canonicalPrevTimestamps, targetCtx)
+	return s.applyCanonicalParsedBlock(pb, blockBytes, canonicalPrevTimestamps, targetCtx, diag)
 }
 
 func (s *SyncEngine) shouldSwitchToBranch(
@@ -265,16 +268,17 @@ type createdUtxo struct {
 func (s *SyncEngine) applyPreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
+	diag *diagnosticBatch,
 ) (*ChainStateConnectSummary, error) {
 	canonicalIndex, err := s.canonicalIndexPreflight()
 	if err != nil {
 		return nil, err
 	}
-	rows, preparedDisconnectedBlocks, reorgDepth, err := s.preparePreferredBranch(branch, commonAncestorHeight)
+	rows, preparedDisconnectedBlocks, reorgDepth, err := s.preparePreferredBranch(branch, commonAncestorHeight, diag)
 	if err != nil {
 		return nil, err
 	}
-	tr, err := s.beginCanonicalTransition(canonicalIndex)
+	tr, err := s.beginCanonicalTransition(canonicalIndex, diag)
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +286,9 @@ func (s *SyncEngine) applyPreferredBranch(
 	if endErr := tr.end(err); endErr != nil {
 		return nil, endErr
 	}
-	s.requeueVerifiedDisconnectedTransactions(preparedDisconnectedBlocks)
+	// Runs after the transition released the admission guard but still under the
+	// entry point's mutationMu, so its failures join the same batch.
+	s.requeueVerifiedDisconnectedTransactions(preparedDisconnectedBlocks, diag)
 	s.noteBlockApplyAcceptedN(uint64(len(rows)))
 	s.noteReorg(reorgDepth)
 	if summary != nil {
@@ -352,6 +358,7 @@ func (s *SyncEngine) precleanPreferredBranch(tr *canonicalTransition, rows []pre
 func (s *SyncEngine) preparePreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
+	diag *diagnosticBatch,
 ) ([]preparedBranchBlock, []verifiedStoredBlock, uint64, error) {
 	rolling := cloneChainState(s.chainState)
 	if rolling == nil {
@@ -373,7 +380,7 @@ func (s *SyncEngine) preparePreferredBranch(
 	for i, item := range branch {
 		// The rolling state carries row i-1's post-state into row i, matching
 		// exactly what the guard publishes one row at a time.
-		row, rowErr := s.prepareBranchRow(rolling, item, commonAncestorHeight+1+uint64(i), slidingTs)
+		row, rowErr := s.prepareBranchRow(rolling, item, commonAncestorHeight+1+uint64(i), slidingTs, diag)
 		if rowErr != nil {
 			return nil, nil, 0, rowErr
 		}
@@ -408,6 +415,7 @@ func (s *SyncEngine) prepareBranchRow(
 	item reorgBranchBlock,
 	height uint64,
 	prevTimestamps []uint64,
+	diag *diagnosticBatch,
 ) (preparedBranchBlock, error) {
 	targetCtx, err := s.targetContextForCandidate(item.header.PrevBlockHash, height)
 	if err != nil {
@@ -423,6 +431,7 @@ func (s *SyncEngine) prepareBranchRow(
 		blockHash:      item.hash,
 		expectedTarget: targetCtx.expected,
 		prevState:      s.pvShadowPreState(rolling),
+		diag:           diag,
 	}
 	summary, err := rolling.ConnectBlockWithSuiteContext(
 		item.blockBytes,
@@ -820,16 +829,16 @@ func (s *SyncEngine) syntheticSideChainSummary(height uint64, blockHash [32]byte
 	}
 }
 
-func (s *SyncEngine) requeueVerifiedDisconnectedTransactions(disconnectedBlocks []verifiedStoredBlock) {
+func (s *SyncEngine) requeueVerifiedDisconnectedTransactions(disconnectedBlocks []verifiedStoredBlock, diag *diagnosticBatch) {
 	parsedBlocks := make([]*consensus.ParsedBlock, 0, len(disconnectedBlocks))
 	for _, block := range disconnectedBlocks {
 		parsedBlocks = append(parsedBlocks, block.parsed)
 	}
-	s.requeueParsedDisconnectedTransactions(parsedBlocks)
+	s.requeueParsedDisconnectedTransactions(parsedBlocks, diag)
 }
 
 // requeueDisconnectedTransactions is for raw-byte callers; reorgs retain parses.
-func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte) {
+func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte, diag *diagnosticBatch) {
 	parsedBlocks := make([]*consensus.ParsedBlock, 0, len(disconnectedBlocks))
 	for _, blockBytes := range disconnectedBlocks {
 		parsed, err := consensus.ParseBlockBytes(blockBytes)
@@ -838,14 +847,18 @@ func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte
 		}
 		parsedBlocks = append(parsedBlocks, parsed)
 	}
-	s.requeueParsedDisconnectedTransactions(parsedBlocks)
+	s.requeueParsedDisconnectedTransactions(parsedBlocks, diag)
 }
 
 // requeueParsedDisconnectedTransactions MUST NOT be called under the canonical
 // transition guard: it routes to Mempool.AddReorgTx, which takes
 // ChainState.admissionMu.RLock, and sync.RWMutex is not reentrant. Its only
 // caller runs it after the transition released that guard.
-func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []*consensus.ParsedBlock) {
+//
+// diag is the owning mutation's batch when a public entry point drives this
+// (the reorg path), or nil for a caller outside a mutation, which holds none of
+// the engine's locks and may therefore write directly.
+func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []*consensus.ParsedBlock, diag *diagnosticBatch) {
 	if s == nil || s.mempool == nil || len(disconnectedBlocks) == 0 {
 		return
 	}
@@ -857,7 +870,7 @@ func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []
 		}
 		for _, txBytes := range txs {
 			if err := s.mempool.AddReorgTx(txBytes); err != nil {
-				_, _ = fmt.Fprintf(s.diagnosticWriter(), "mempool: requeue-tx: %v\n", err)
+				s.diagnose(diag, "mempool: requeue-tx: %v\n", err)
 			}
 		}
 	}

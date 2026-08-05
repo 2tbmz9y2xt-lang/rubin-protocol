@@ -71,6 +71,32 @@ type devnetRPCState struct {
 	// atomic.Load on the service side, so /metrics rendering does not
 	// mutate any counter.
 	peerLifecycleExits func() uint64
+	// terminalFault is the read-only terminal-latch projection GET /health
+	// reads. newDevnetRPCState binds it to the SAME *node.SyncEngine stored
+	// in syncEngine above, so production observes the live engine's own
+	// latch; there is no setter, latch installer or failure seam, and
+	// TestDevnetRPCHealthFailsClosedOnTerminalFault pins that binding by
+	// identity.
+	terminalFault terminalFaultReporter
+}
+
+// terminalFaultReporter is the one-method read-only view /health needs of the
+// sync engine's terminal storage-persistence latch. *node.SyncEngine satisfies
+// it directly; the interface exists so the projection is provably bound to the
+// live engine by identity rather than to a closure indistinguishable from a
+// constant.
+type terminalFaultReporter interface {
+	TerminalFaulted() bool
+}
+
+// terminalFaulted reports the live latch, treating a missing state or reporter
+// as "not latched": /health already fails closed with 503 on a nil state or nil
+// sync engine before it consults this.
+func (s *devnetRPCState) terminalFaulted() bool {
+	if s == nil || s.terminalFault == nil {
+		return false
+	}
+	return s.terminalFault.TerminalFaulted()
 }
 
 // chainIdentity is a snapshot of startup-wired chain identity. Fields
@@ -404,8 +430,16 @@ type chainIdentityResponse struct {
 // conflating "no tip" with "RPC failure". The remaining fields are
 // non-optional snapshots of existing node state; renaming or adding
 // fields is out of scope for this PR.
+//
+// terminal_fault / restart_required are the bounded projection of the
+// SyncEngine's terminal storage-persistence latch: both true, ready
+// false and status 503 exactly when that latch is installed, with no
+// cause string, path or error text exposed. A merely not-yet-ready node
+// is NOT a terminal fault — it keeps 200 with both booleans false.
 type healthResponse struct {
 	Ready           bool    `json:"ready"`
+	TerminalFault   bool    `json:"terminal_fault"`
+	RestartRequired bool    `json:"restart_required"`
 	HasTip          bool    `json:"has_tip"`
 	Height          *uint64 `json:"height"`
 	TipHash         *string `json:"tip_hash"`
@@ -473,6 +507,9 @@ func newDevnetRPCState(
 		// observe state-only behavior (observeShutdownLocked's select
 		// default branch returns false because TODO never cancels).
 		gate: newReadinessGate(context.TODO()),
+		// The health projection is bound to the very engine stored above:
+		// one live read-only source, no separate fault authority.
+		terminalFault: syncEngine,
 	}
 }
 
@@ -1597,8 +1634,14 @@ func handleHealth(state *devnetRPCState, w http.ResponseWriter, r *http.Request)
 		})
 		return
 	}
+	// A terminally latched engine is fail-closed: admission stays shut until
+	// restart, so /health must report neither ready nor 200. The rest of the
+	// bounded snapshot still ships — an operator needs a broken node's state.
+	terminalFault := state.terminalFaulted()
 	body := healthResponse{
-		Ready:           state.IsReady(),
+		Ready:           state.IsReady() && !terminalFault,
+		TerminalFault:   terminalFault,
+		RestartRequired: terminalFault,
 		HasTip:          hasTip,
 		BestKnownHeight: state.syncEngine.BestKnownHeight(),
 		InIBD:           state.syncEngine.IsInIBD(state.now()),
@@ -1611,7 +1654,11 @@ func handleHealth(state *devnetRPCState, w http.ResponseWriter, r *http.Request)
 		tipHex := hex.EncodeToString(tipHash[:])
 		body.TipHash = &tipHex
 	}
-	writeJSONResponse(state, route, w, http.StatusOK, body)
+	status := http.StatusOK
+	if terminalFault {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSONResponse(state, route, w, status, body)
 }
 
 // handlePeers serves GET /peers, the deterministic snapshot of
