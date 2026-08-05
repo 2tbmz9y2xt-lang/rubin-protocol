@@ -1034,3 +1034,87 @@ func TestApplyNonCoinbaseTxBasicWorkQ_Section16StructuralOrder(t *testing.T) {
 		})
 	}
 }
+
+// TestApplyNonCoinbaseTxBasicFeeAboveU64 pins RUB-1127: a transaction fee
+// above u64 is derived exactly — not narrowed, saturated, or rejected on
+// width alone.
+//
+// Two 2^63 inputs and zero outputs give a fee of exactly 2^64, one above the
+// u64 domain. Every apply path that can see this transaction must agree:
+// sequential, queued-parallel, and precompute. Mirrors Rust
+// `apply_non_coinbase_tx_basic_fee_above_u64_is_exact` and the shared vector
+// CV-U-FEE-U128-01.
+func TestApplyNonCoinbaseTxBasicFeeAboveU64(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	const inputValue = uint64(1) << 63
+	wantFee, ok := Uint128FromU64(inputValue).CheckedAdd(Uint128FromU64(inputValue))
+	if !ok {
+		t.Fatal("want fee overflow")
+	}
+	if wantFee.Cmp(Uint128FromU64(^uint64(0))) <= 0 {
+		t.Fatalf("row must exceed u64: %s", wantFee.String())
+	}
+
+	prevTxids := [][32]byte{{0xe1}, {0xe2}}
+	utxos := map[Outpoint]UtxoEntry{}
+	inputs := make([]TxInput, 0, len(prevTxids))
+	for _, prev := range prevTxids {
+		utxos[Outpoint{Txid: prev, Vout: 0}] = UtxoEntry{
+			Value:        inputValue,
+			CovenantType: COV_TYPE_P2PK,
+			CovenantData: append([]byte(nil), cov...),
+		}
+		inputs = append(inputs, TxInput{PrevTxid: prev, PrevVout: 0})
+	}
+
+	tx := &Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  inputs,
+		Outputs: nil, // burn-to-fee: the whole input sum becomes fee
+	}
+	witness := make([]WitnessItem, 0, len(inputs))
+	for i := range inputs {
+		witness = append(witness, signP2PKInputWitness(t, tx, uint32(i), inputValue, [32]byte{}, kp))
+	}
+	tx.Witness = witness
+	txid := [32]byte{0xe3}
+
+	summary, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, [32]byte{})
+	if err != nil {
+		t.Fatalf("fee above u64 must be accepted on ordinary validation: %v", err)
+	}
+	if summary.Fee.Cmp(wantFee) != 0 {
+		t.Fatalf("sequential fee=%s want=%s", summary.Fee.String(), wantFee.String())
+	}
+
+	// Queued-parallel path must derive the identical fee.
+	queue := NewSigCheckQueue(2).WithRegistry(DefaultSuiteRegistry())
+	_, queued, err := applyNonCoinbaseTxBasicUpdateWithMTPQ(
+		tx, txid, utxos, 200, 1000, 1000, [32]byte{}, queue, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("queued apply: %v", err)
+	}
+	if queued.Fee.Cmp(wantFee) != 0 {
+		t.Fatalf("queued fee=%s want=%s", queued.Fee.String(), wantFee.String())
+	}
+
+	// Precompute must derive the identical fee too.
+	var sumIn u128
+	for range prevTxids {
+		var addErr error
+		if sumIn, addErr = addU64ToU128(sumIn, inputValue); addErr != nil {
+			t.Fatalf("sum_in: %v", addErr)
+		}
+	}
+	precomputed, err := computePrecomputeFee(sumIn, tx.Outputs)
+	if err != nil {
+		t.Fatalf("precompute fee: %v", err)
+	}
+	if precomputed.Cmp(wantFee) != 0 {
+		t.Fatalf("precompute fee=%s want=%s", precomputed.String(), wantFee.String())
+	}
+}

@@ -130,3 +130,108 @@ fn mul_u128_by_u64(a: u128, b: u64) -> (u128, u64) {
 pub fn fee_below_rate(fee: u128, weight: u64, rate: u64) -> bool {
     fee < u128::from(weight) * u128::from(rate)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mirrors Go `TestUint128JSONCanonicality`. Every accepted and rejected
+    /// row below is a row of the RUB-1127 contract.
+    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+    struct Holder {
+        #[serde(serialize_with = "serialize", deserialize_with = "deserialize")]
+        v: u128,
+    }
+
+    fn read(raw: &str) -> Option<u128> {
+        serde_json::from_str::<Holder>(raw).ok().map(|h| h.v)
+    }
+
+    #[test]
+    fn writes_canonical_decimal_strings() {
+        for value in [0u128, 1, u128::from(u64::MAX), 1u128 << 64, u128::MAX] {
+            let encoded = serde_json::to_string(&Holder { v: value }).expect("encode");
+            assert_eq!(encoded, format!("{{\"v\":\"{value}\"}}"));
+            // Round-trips exactly, with no JSON-number precision dependence.
+            assert_eq!(read(&encoded), Some(value));
+        }
+    }
+
+    #[test]
+    fn accepts_legacy_numeric_tokens_up_to_u64() {
+        assert_eq!(read("{\"v\":0}"), Some(0));
+        assert_eq!(
+            read("{\"v\":18446744073709551615}"),
+            Some(u128::from(u64::MAX))
+        );
+    }
+
+    #[test]
+    fn rejects_numeric_token_above_u64() {
+        // The widened domain is only reachable through the string form.
+        assert_eq!(read("{\"v\":18446744073709551616}"), None);
+    }
+
+    #[test]
+    fn accepts_canonical_strings_through_u128_max() {
+        assert_eq!(read("{\"v\":\"0\"}"), Some(0));
+        assert_eq!(read("{\"v\":\"18446744073709551616\"}"), Some(1u128 << 64));
+        assert_eq!(
+            read("{\"v\":\"340282366920938463463374607431768211455\"}"),
+            Some(u128::MAX)
+        );
+    }
+
+    #[test]
+    fn rejects_non_canonical_strings() {
+        for bad in [
+            "\"\"",
+            "\"00\"",
+            "\"01\"",
+            "\"+1\"",
+            "\"-1\"",
+            "\" 1\"",
+            "\"1 \"",
+            "\"1.0\"",
+            "\"1e3\"",
+            // u128 max + 1
+            "\"340282366920938463463374607431768211456\"",
+        ] {
+            assert_eq!(read(&format!("{{\"v\":{bad}}}")), None, "accepted {bad}");
+        }
+    }
+
+    #[test]
+    fn rejects_negative_and_fractional_numeric_tokens() {
+        assert_eq!(read("{\"v\":-1}"), None);
+        assert_eq!(read("{\"v\":1.0}"), None);
+    }
+
+    #[test]
+    fn fee_rate_product_retains_all_192_bits() {
+        // Significant product bits above 127: a u128 comparison of the
+        // cross-products would wrap and misorder these.
+        let fee_a = 1u128 << 127;
+        let fee_b = (1u128 << 127) - 1;
+        assert_eq!(
+            compare_fee_rate(fee_a, 1, fee_b, 1),
+            core::cmp::Ordering::Greater
+        );
+        // Exact ratio equality with distinct fees and weights.
+        assert_eq!(
+            compare_fee_rate(1u128 << 100, 2, 1u128 << 99, 1),
+            core::cmp::Ordering::Equal
+        );
+        // Zero weight is an uncomputable rate on either side.
+        assert_eq!(compare_fee_rate(1, 0, 1, 1), core::cmp::Ordering::Equal);
+        assert_eq!(compare_fee_rate(1, 1, 1, 0), core::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn fee_below_rate_is_exact_at_the_boundary() {
+        // weight*rate = u64::MAX^2, well above u64: no auto-reject.
+        let required = u128::from(u64::MAX) * u128::from(u64::MAX);
+        assert!(fee_below_rate(required - 1, u64::MAX, u64::MAX));
+        assert!(!fee_below_rate(required, u64::MAX, u64::MAX));
+    }
+}
