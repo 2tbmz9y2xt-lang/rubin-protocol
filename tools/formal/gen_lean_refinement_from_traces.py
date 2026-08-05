@@ -64,7 +64,7 @@ def _hex0x(s: str) -> str:
     return "0x" + t
 
 
-_CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)$")
+_CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)\Z")
 
 
 def _lean_opt_nat(x: Any) -> str:

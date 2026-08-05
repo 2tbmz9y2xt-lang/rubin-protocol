@@ -124,6 +124,15 @@ class CanonicalDecimalFeeTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     _lean_opt_nat(bad)
 
+    def test_rejects_trailing_newline(self) -> None:
+        # Python's `$` also matches just before a single trailing newline, so
+        # an anchored `^...$` canonicality regex silently accepted "123\n".
+        # The reader is anchored with `\Z`, which has no such exemption.
+        for bad in ["123\n", "0\n", "\n"]:
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit):
+                    _lean_opt_nat(bad)
+
     def test_rejects_negative_and_bool(self) -> None:
         with self.assertRaises(SystemExit):
             _lean_opt_nat(-1)

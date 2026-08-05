@@ -457,7 +457,7 @@ def as_int(x: Any) -> int:
         return 0
 
 
-CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)$")
+CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)\Z")
 MAX_U64 = (1 << 64) - 1
 MAX_U128 = (1 << 128) - 1
 
@@ -2236,7 +2236,11 @@ def validate_vector(
             if value is None:
                 problems.append(f"{gate}/{vid}: {side}.{key} is null")
                 return None
-            return int(value)
+            # Every policy int_field is an unsigned monetary/size quantity, so
+            # it is read with the same canonical-aware reader the consensus
+            # lane uses. A bare int() accepted " 1", "+1", and "01" here while
+            # rejecting them on the consensus lane for the same `fee` field.
+            return exact_uint(value, problems, f"{gate}/{vid}: {side}.{key}")
 
         def policy_bool(resp: Dict[str, Any], key: str, default: bool) -> bool:
             if not policy_has(resp, key):
