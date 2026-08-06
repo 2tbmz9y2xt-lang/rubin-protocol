@@ -3830,7 +3830,7 @@ mod tests {
     use std::io::Read;
     use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::Duration;
 
@@ -3850,8 +3850,6 @@ mod tests {
         BLOCK_HEADER_BYTES,
     };
     use serde::Deserialize;
-
-    static NEXT_TEST_ROOT_ID: AtomicU64 = AtomicU64::new(1);
 
     #[expect(clippy::type_complexity)]
     #[rustfmt::skip]
@@ -3987,9 +3985,7 @@ mod tests {
     }
 
     fn test_sync_engine_with_genesis() -> SyncEngine {
-        let unique = NEXT_TEST_ROOT_ID.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("rubin-node-p2p-runtime-{unique}"));
-        let _ = fs::remove_dir_all(&root);
+        let root = crate::io_utils::unique_temp_path("rubin-node-p2p-runtime");
         fs::create_dir_all(&root).expect("create temp dir");
         let blockstore_dir = root.join("blockstore");
         let chainstate_path = root.join("chainstate.json");
@@ -7645,6 +7641,14 @@ mod tests {
     #[test]
     fn has_block_local_store_error_propagates_through_p2p_consumers() {
         use crate::sync::{next_candidate_block_for_test, stock_devnet_engine_for_test};
+
+        // Case 6 below inserts into the orphan pool, which mutates the
+        // process-global GLOBAL_ORPHAN_TOTAL_BYTES/GLOBAL_ORPHAN_METRICS
+        // accounting (RUB-1139): serialize with the rest of the
+        // orphan-accounting test group so a sibling's reset/assert cannot
+        // interleave with this insert.
+        let _guard = orphan_pool_metrics_test_guard();
+        reset_orphan_pool_metrics_for_test();
 
         let (mut engine, dir) = stock_devnet_engine_for_test("rubin-b1-consumers", |_| {});
         let block = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
