@@ -126,7 +126,9 @@ fn mul_u128_by_u64(a: u128, b: u64) -> (u128, u64) {
     let high_part = (a >> 64) * b;
     // high_part <= (2^64-1)^2 and (low_part >> 64) <= 2^64-2, so the sum
     // cannot overflow u128.
-    (high_part + (low_part >> 64), low_part as u64)
+    #[allow(clippy::cast_possible_truncation)] // intended low 64 bits; bits >= 64 in high_part
+    let low = low_part as u64;
+    (high_part + (low_part >> 64), low)
 }
 
 /// Reports `fee < weight * rate` exactly. `weight * rate` is the full
