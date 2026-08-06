@@ -1,7 +1,6 @@
 package node
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -470,17 +469,16 @@ func validateConfigLimits(cfg Config) error {
 	return nil
 }
 
+// validateConfigMineAddress accepts exactly what ParseMineAddress accepts and
+// rejects exactly what it rejects. ParseMineAddress is the single authority for
+// the accepted mine-address domain: re-deriving a hex/length rule here drifted
+// from it in both directions — an unsupported suite_id passed config validation
+// and failed only at the miner, while a 0x/0X-prefixed or whitespace-padded
+// value the parser accepts was refused before startup. The parsed bytes are
+// discarded here; cmd/rubin-node produces them once for its consuming sites.
 func validateConfigMineAddress(cfg Config) error {
-	if cfg.MineAddress != "" {
-		raw, err := hex.DecodeString(cfg.MineAddress)
-		if err != nil {
-			return fmt.Errorf("invalid mine_address hex: %w", err)
-		}
-		if len(raw) != 32 && len(raw) != 33 {
-			return fmt.Errorf("mine_address must be 32 (key_id) or 33 (suite_id||key_id) bytes, got %d", len(raw))
-		}
-	}
-	return nil
+	_, err := ParseMineAddress(cfg.MineAddress)
+	return err
 }
 
 func validateConfigRotationAndRegistry(cfg Config, network string) error {

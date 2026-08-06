@@ -377,6 +377,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if canonicalNetwork, ok := node.CanonicalNetworkName(cfg.Network); ok {
 		cfg.Network = canonicalNetwork
 	}
+	// --mine-address is untrusted operator input. node.ValidateConfig above
+	// already rejected everything node.ParseMineAddress rejects
+	// (validateConfigMineAddress delegates to that same pure parser), so on
+	// this path the call below cannot fail and its error branch is defense in
+	// depth for a caller that reorders the two guards. Its purpose here is to
+	// produce the covenant_data bytes EXACTLY ONCE, before the
+	// legacy-exposure-scan chainstate read, the storage lifecycle
+	// (createOrOpenBlockStore below), chainstate load/reconcile/save and
+	// service startup: both consuming sites (the --mine-blocks miner and the
+	// devnet RPC live miner) reuse this value instead of re-parsing the
+	// string, which is what let a rejected value reach the miner after the
+	// whole storage lifecycle — or silently disable RPC mining — before
+	// RUB-1135. An empty or whitespace-only flag yields a nil address and
+	// leaves both miner configs on their built-in default.
+	mineAddress, mineAddressErr := node.ParseMineAddress(cfg.MineAddress)
+	if mineAddressErr != nil {
+		_, _ = fmt.Fprintf(stderr, "invalid mine-address: %v\n", mineAddressErr)
+		return 2
+	}
 	// pv-mode is untrusted operator input: reject an invalid mode BEFORE
 	// the legacy-exposure-scan branch (its chainstate read below) and
 	// BEFORE the storage lifecycle (createOrOpenBlockStore below), so the
@@ -624,13 +643,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if *mineBlocks > 0 {
 		minerCfg := node.DefaultMinerConfig()
-		if cfg.MineAddress != "" {
-			addrBytes, addrErr := node.ParseMineAddress(cfg.MineAddress)
-			if addrErr != nil {
-				_, _ = fmt.Fprintf(stderr, "invalid mine-address: %v\n", addrErr)
-				return 2
-			}
-			minerCfg.MineAddress = addrBytes
+		if mineAddress != nil {
+			minerCfg.MineAddress = mineAddress
 		}
 		minerCfg.CurrentMempoolMinFeeRateFn = mempool.CurrentMinFeeRateSnapshot
 		miner, err := newMinerFn(chainState, blockStore, syncEngine, minerCfg)
@@ -678,25 +692,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 	var liveMiner *node.Miner
 	if cfg.Network == "devnet" && strings.TrimSpace(cfg.RPCBindAddr) != "" && rpcBindHostIsLoopback(cfg.RPCBindAddr) {
 		minerCfg := node.DefaultMinerConfig()
-		var mineAddrErr error
-		if cfg.MineAddress != "" {
-			addrBytes, addrErr := node.ParseMineAddress(cfg.MineAddress)
-			if addrErr != nil {
-				mineAddrErr = addrErr
-				_, _ = fmt.Fprintf(stderr, "rpc: live mining disabled (invalid --mine-address): %v\n", addrErr)
-			} else {
-				minerCfg.MineAddress = addrBytes
-			}
+		// Reuses the single parse above. A rejected --mine-address never
+		// reaches this site: it exits 2 at config validation, so live mining
+		// is no longer silently disabled on operator input the startup check
+		// should have refused.
+		if mineAddress != nil {
+			minerCfg.MineAddress = mineAddress
 		}
-		if mineAddrErr == nil {
-			minerCfg.CurrentMempoolMinFeeRateFn = mempool.CurrentMinFeeRateSnapshot
-			minerCfg.CompleteDASetProvider = p2pService
-			var err error
-			liveMiner, err = newMinerFn(chainState, blockStore, syncEngine, minerCfg)
-			if err != nil {
-				_, _ = fmt.Fprintf(stderr, "rpc: live mining disabled: %v\n", err)
-				liveMiner = nil
-			}
+		minerCfg.CurrentMempoolMinFeeRateFn = mempool.CurrentMinFeeRateSnapshot
+		minerCfg.CompleteDASetProvider = p2pService
+		liveMiner, err = newMinerFn(chainState, blockStore, syncEngine, minerCfg)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "rpc: live mining disabled: %v\n", err)
+			liveMiner = nil
 		}
 	}
 	// newDevnetRPCStateWithLifecycle is the canonical production wiring:
@@ -822,20 +830,6 @@ func loadFeatureBitDeployments(deploymentsPath string) ([]featureBitDeploymentJS
 		}
 	}
 	return ds, nil
-}
-
-// printFeatureBitsTelemetry loads deploymentsPath and prints its telemetry:
-// the pre-RUB-876 single-call shape, kept for callers holding only a path
-// (currently tests in this package). run() does not use it: startup
-// validates early via loadFeatureBitDeployments — before any filesystem or
-// service side effect — and later prints via printFeatureBitsTelemetryRows,
-// so the file is read exactly once per run.
-func printFeatureBitsTelemetry(w io.Writer, bs headerStore, height uint64, deploymentsPath string) error {
-	ds, err := loadFeatureBitDeployments(deploymentsPath)
-	if err != nil {
-		return err
-	}
-	return printFeatureBitsTelemetryRows(w, bs, height, ds)
 }
 
 func printFeatureBitsTelemetryRows(w io.Writer, bs headerStore, height uint64, ds []featureBitDeploymentJSON) error {

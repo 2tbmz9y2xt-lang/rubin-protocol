@@ -111,8 +111,14 @@ func TestPrintFeatureBitsTelemetry(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := printFeatureBitsTelemetry(&out, bs, consensus.SIGNAL_WINDOW, deploymentsPath); err != nil {
-		t.Fatalf("printFeatureBitsTelemetry: %v", err)
+	// The production pair run() itself uses: load the rows once, then print
+	// them. There is no single-call shim between this test and startup.
+	ds, err := loadFeatureBitDeployments(deploymentsPath)
+	if err != nil {
+		t.Fatalf("loadFeatureBitDeployments: %v", err)
+	}
+	if err := printFeatureBitsTelemetryRows(&out, bs, consensus.SIGNAL_WINDOW, ds); err != nil {
+		t.Fatalf("printFeatureBitsTelemetryRows: %v", err)
 	}
 	s := out.String()
 	if !strings.Contains(s, "featurebits: name=X") ||

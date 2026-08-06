@@ -583,6 +583,182 @@ func TestRunRejectsInvalidFeatureBitsDeploymentsBeforeStorage(t *testing.T) {
 	}
 }
 
+// TestRunRejectsInvalidMineAddressBeforeStorage proves the RUB-1135 guard
+// fires BEFORE any filesystem or service side effect: datadir creation,
+// chainstate load/save, blockstore open/create, reconcile, and service
+// construction — on mining and non-mining startups alike. Pre-fix the early
+// check only length-checked the decoded hex, so an unsupported-suite_id value
+// was caught at the late --mine-blocks site AFTER the whole storage lifecycle
+// (exit 2 on a mutated datadir) and, on the RPC path, not at all: it printed
+// "rpc: live mining disabled (invalid --mine-address)" and kept running. The
+// service stubs turn a regression into a failed assertion instead of a node
+// that starts and blocks on its lifecycle ctx.
+func TestRunRejectsInvalidMineAddressBeforeStorage(t *testing.T) {
+	const wantGuardStderr = "invalid config: mine_address: "
+	forbiddenStderr := []string{
+		"datadir create failed",
+		"chainstate load failed",
+		"chainstate reconcile failed",
+		"chainstate save failed",
+		"blockstore open failed",
+		"blockstore create failed",
+		"invalid mine-address",
+		"rpc: live mining disabled",
+	}
+	keyID := strings.Repeat("11", 32)
+
+	forbidServiceStart := func(t *testing.T) {
+		t.Helper()
+		prevSync, prevMempool, prevP2P, prevMiner := newSyncEngineFn, newMempoolFn, newP2PServiceFn, newMinerFn
+		newSyncEngineFn = func(*node.ChainState, *node.BlockStore, node.SyncConfig) (*node.SyncEngine, error) {
+			t.Error("sync engine constructed despite a rejected --mine-address")
+			return nil, errors.New("forbidden by test")
+		}
+		newMempoolFn = func(*node.ChainState, *node.BlockStore, [32]byte, node.MempoolConfig) (*node.Mempool, error) {
+			t.Error("mempool constructed despite a rejected --mine-address")
+			return nil, errors.New("forbidden by test")
+		}
+		newP2PServiceFn = func(p2p.ServiceConfig) (*p2p.Service, error) {
+			t.Error("p2p service constructed despite a rejected --mine-address")
+			return nil, errors.New("forbidden by test")
+		}
+		newMinerFn = func(*node.ChainState, *node.BlockStore, *node.SyncEngine, node.MinerConfig) (*node.Miner, error) {
+			t.Error("miner constructed despite a rejected --mine-address")
+			return nil, errors.New("forbidden by test")
+		}
+		t.Cleanup(func() {
+			newSyncEngineFn, newMempoolFn, newP2PServiceFn, newMinerFn = prevSync, prevMempool, prevP2P, prevMiner
+		})
+	}
+
+	runInvalid := func(t *testing.T, args []string) {
+		t.Helper()
+		forbidServiceStart(t)
+		var out, errOut bytes.Buffer
+		if code := run(args, &out, &errOut); code != 2 {
+			t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
+		}
+		if !strings.Contains(errOut.String(), wantGuardStderr) {
+			t.Fatalf("stderr missing mine-address guard error: %q", errOut.String())
+		}
+		for _, marker := range forbiddenStderr {
+			if strings.Contains(errOut.String(), marker) {
+				t.Fatalf("late path reached despite a rejected --mine-address (%q): %q", marker, errOut.String())
+			}
+		}
+		if out.String() != "" {
+			t.Fatalf("expected empty stdout, got %q", out.String())
+		}
+	}
+
+	t.Run("hostile_values_clean_datadir_create_store", func(t *testing.T) {
+		for _, tc := range []struct{ name, value string }{
+			{name: "unsupported_suite_00", value: "00" + keyID},
+			{name: "unsupported_suite_02", value: "02" + keyID},
+			{name: "unsupported_suite_ff", value: "ff" + keyID},
+			{name: "prefixed_unsupported_suite_ff", value: "0Xff" + keyID},
+			{name: "padded_unsupported_suite_ff", value: "  ff" + keyID + "  "},
+			{name: "odd_length_hex", value: "abc"},
+			{name: "non_hex", value: "0xzz"},
+			{name: "short_31_bytes", value: strings.Repeat("11", 31)},
+			{name: "long_34_bytes", value: strings.Repeat("11", 34)},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				datadir := filepath.Join(t.TempDir(), "data")
+				runInvalid(t, []string{
+					"--datadir", datadir, "--create-store", "--mine-blocks", "1", "--mine-exit",
+					"--mine-address", tc.value,
+				})
+				if _, err := os.Stat(datadir); !os.IsNotExist(err) {
+					t.Fatalf("datadir must not be created on a rejected --mine-address: stat err=%v", err)
+				}
+			})
+		}
+	})
+
+	for _, leg := range []struct {
+		name      string
+		extraArgs []string
+	}{
+		{name: "non_mining_startup"},
+		{name: "mining_startup", extraArgs: []string{"--mine-blocks", "1", "--mine-exit"}},
+		{name: "dry_run", extraArgs: []string{"--dry-run"}},
+		{name: "rpc_bind_live_mining", extraArgs: []string{"--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"}},
+		{name: "legacy_exposure_scan", extraArgs: []string{"--legacy-exposure-scan", "--legacy-suite-id", "1"}},
+	} {
+		t.Run(leg.name, func(t *testing.T) {
+			datadir := preparedDatadir(t)
+			before := datadirSnapshot(t, datadir)
+			args := append([]string{"--datadir", datadir, "--mine-address", "ff" + keyID}, leg.extraArgs...)
+			runInvalid(t, args)
+			assertNoFilesystemWrite(t, before, datadirSnapshot(t, datadir))
+		})
+	}
+
+	// Mixed-violation row: mine_address is validated inside node.ValidateConfig,
+	// which runs ahead of the pv-mode guard, so its message wins.
+	t.Run("invalid_mine_address_wins_over_invalid_pv_mode", func(t *testing.T) {
+		datadir := filepath.Join(t.TempDir(), "data")
+		runInvalid(t, []string{
+			"--datadir", datadir, "--mine-address", "ff" + keyID, "--pv-mode", "nope",
+		})
+		if _, err := os.Stat(datadir); !os.IsNotExist(err) {
+			t.Fatalf("datadir must not be created: stat err=%v", err)
+		}
+	})
+}
+
+// TestRunPassesParsedMineAddressToMiner pins the accepted side of RUB-1135:
+// a 0X-prefixed, whitespace-padded key_id — which ParseMineAddress accepts and
+// the pre-fix config check refused outright — reaches the offline-mining miner
+// as the exact suite_id||key_id bytes the parser produces.
+func TestRunPassesParsedMineAddressToMiner(t *testing.T) {
+	prev := newMinerFn
+	var captured node.MinerConfig
+	newMinerFn = func(_ *node.ChainState, _ *node.BlockStore, _ *node.SyncEngine, cfg node.MinerConfig) (*node.Miner, error) {
+		captured = cfg
+		return nil, errors.New("capture-only miner")
+	}
+	t.Cleanup(func() { newMinerFn = prev })
+
+	datadir := filepath.Join(t.TempDir(), "data")
+	var out, errOut bytes.Buffer
+	code := run([]string{
+		"--create-store", "--datadir", datadir, "--mine-blocks", "1", "--mine-exit",
+		"--mine-address", "  0X" + strings.Repeat("11", 32) + "  ",
+	}, &out, &errOut)
+	if code != 2 {
+		t.Fatalf("expected exit code 2 from the capture-only miner, got %d (stderr=%q)", code, errOut.String())
+	}
+	want := append([]byte{consensus.SUITE_ID_ML_DSA_87}, bytes.Repeat([]byte{0x11}, 32)...)
+	if !bytes.Equal(captured.MineAddress, want) {
+		t.Fatalf("miner cfg.MineAddress=%x, want %x", captured.MineAddress, want)
+	}
+}
+
+// TestRunEmptyMineAddressFlagLeavesMinerDefault pins the unset/empty flag as
+// unchanged: no address is produced and the miner keeps its built-in default.
+func TestRunEmptyMineAddressFlagLeavesMinerDefault(t *testing.T) {
+	prev := newMinerFn
+	var captured node.MinerConfig
+	newMinerFn = func(_ *node.ChainState, _ *node.BlockStore, _ *node.SyncEngine, cfg node.MinerConfig) (*node.Miner, error) {
+		captured = cfg
+		return nil, errors.New("capture-only miner")
+	}
+	t.Cleanup(func() { newMinerFn = prev })
+
+	datadir := filepath.Join(t.TempDir(), "data")
+	var out, errOut bytes.Buffer
+	if code := run([]string{
+		"--create-store", "--datadir", datadir, "--mine-blocks", "1", "--mine-exit", "--mine-address", "  ",
+	}, &out, &errOut); code != 2 {
+		t.Fatalf("expected exit code 2 from the capture-only miner, got %d (stderr=%q)", code, errOut.String())
+	}
+	if !bytes.Equal(captured.MineAddress, node.DefaultMinerConfig().MineAddress) {
+		t.Fatalf("miner cfg.MineAddress=%x, want the default %x", captured.MineAddress, node.DefaultMinerConfig().MineAddress)
+	}
+}
+
 // TestRunEmptyFeatureBitsDeploymentsFlagSkipsValidation pins the flag's
 // pre-existing contract that an explicitly empty --featurebits-deployments
 // behaves exactly like an unset flag: no file read, no validation, no
@@ -2732,37 +2908,33 @@ func TestRunRPCBindReadyEndpointReportsLifecycle(t *testing.T) {
 	}
 }
 
-func TestRunDevnetWithRPCBindInvalidMineAddressLogsStderr(t *testing.T) {
-	if os.Getenv("RUBIN_NODE_TEST_INVALID_MINE_ADDR_CHILD") == "1" {
-		dir := t.TempDir()
-		badSuiteMineAddr := "00" + strings.Repeat("00", 32)
-		code := run(
-			[]string{
-				"--create-store",
-				"--datadir", dir,
-				"--bind", "127.0.0.1:0",
-				"--rpc-bind", "127.0.0.1:0",
-				"--mine-address", badSuiteMineAddr,
-			},
-			os.Stdout,
-			os.Stderr,
-		)
-		os.Exit(code)
+// TestRunDevnetWithRPCBindInvalidMineAddressExitsBeforeStartup replaces the
+// pre-RUB-1135 pin that this exact input started the devnet RPC node and only
+// logged "rpc: live mining disabled (invalid --mine-address)". Silently
+// degrading mining on operator input the startup check should have refused is
+// the behavior this issue retires: the value now exits 2 on an untouched
+// filesystem, so the child-process/SIGINT dance the old pin needed is gone.
+func TestRunDevnetWithRPCBindInvalidMineAddressExitsBeforeStartup(t *testing.T) {
+	datadir := filepath.Join(t.TempDir(), "data")
+	var out, errOut bytes.Buffer
+	code := run([]string{
+		"--create-store",
+		"--datadir", datadir,
+		"--bind", "127.0.0.1:0",
+		"--rpc-bind", "127.0.0.1:0",
+		"--mine-address", "00" + strings.Repeat("00", 32),
+	}, &out, &errOut)
+	if code != 2 {
+		t.Fatalf("exit code=%d, want 2 (stdout=%q stderr=%q)", code, out.String(), errOut.String())
 	}
-
-	cmd := exec.Command(os.Args[0], "-test.run=TestRunDevnetWithRPCBindInvalidMineAddressLogsStderr")
-	cmd.Env = append(os.Environ(), "RUBIN_NODE_TEST_INVALID_MINE_ADDR_CHILD=1")
-	stdout, stderr, err := runChildAfterRunningBanner(t, cmd)
-	if err != nil {
-		ee, ok := err.(*exec.ExitError)
-		if ok {
-			t.Fatalf("exit code=%d, want 0 (stdout=%s stderr=%s)", ee.ExitCode(), stdout, stderr)
-		}
-		t.Fatalf("unexpected error: %v (stdout=%s stderr=%s)", err, stdout, stderr)
+	if !strings.Contains(errOut.String(), "invalid config: mine_address: unsupported suite_id 0x00") {
+		t.Fatalf("stderr=%q, want the startup mine_address rejection", errOut.String())
 	}
-	s := stderr
-	if !strings.Contains(s, "rpc: live mining disabled (invalid --mine-address)") {
-		t.Fatalf("stderr=%q, want invalid mine-address log", s)
+	if strings.Contains(errOut.String(), "rpc: live mining disabled") {
+		t.Fatalf("stderr=%q, want no silent live-mining degradation", errOut.String())
+	}
+	if _, err := os.Stat(datadir); !os.IsNotExist(err) {
+		t.Fatalf("datadir must not be created on a rejected --mine-address: stat err=%v", err)
 	}
 }
 
@@ -2812,6 +2984,16 @@ func TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn(t *testing.T
 				_, _ = fmt.Fprintln(os.Stderr, "DA provider regression: live miner cfg.CompleteDASetProvider=nil")
 				os.Exit(36)
 			}
+			// RUB-1135: the live-mining site consumes the single
+			// startup parse of --mine-address. The flag below is
+			// 0x-prefixed — a value the pre-fix config check refused
+			// before startup — so this row also pins that the accepted
+			// domain is exactly ParseMineAddress's.
+			wantAddr := append([]byte{consensus.SUITE_ID_ML_DSA_87}, bytes.Repeat([]byte{0x11}, 32)...)
+			if !bytes.Equal(cfg.MineAddress, wantAddr) {
+				_, _ = fmt.Fprintf(os.Stderr, "RUB-1135 regression: live miner cfg.MineAddress=%x, want %x\n", cfg.MineAddress, wantAddr)
+				os.Exit(37)
+			}
 			return nil, errors.New("test deliberate miner init abort to unblock SIGINT")
 		}
 		dir := t.TempDir()
@@ -2821,7 +3003,7 @@ func TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn(t *testing.T
 				"--datadir", dir,
 				"--bind", "127.0.0.1:0",
 				"--rpc-bind", "127.0.0.1:0",
-				"--mine-address", strings.Repeat("11", 32),
+				"--mine-address", "0x" + strings.Repeat("11", 32),
 			},
 			os.Stdout,
 			os.Stderr,
@@ -2844,6 +3026,9 @@ func TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn(t *testing.T
 		}
 		if errors.As(err, &ee) && ee.ExitCode() == 36 {
 			t.Fatalf("DA provider regression: live miner cfg.CompleteDASetProvider is nil; production wiring missing in main.go around `liveMiner, err = newMinerFn(...)` (stdout=%s stderr=%s)", stdout, stderr)
+		}
+		if errors.As(err, &ee) && ee.ExitCode() == 37 {
+			t.Fatalf("RUB-1135 regression: the live-mining site did not receive the startup-parsed --mine-address bytes (stdout=%s stderr=%s)", stdout, stderr)
 		}
 		t.Fatalf("unexpected child error: %v (stdout=%s stderr=%s)", err, stdout, stderr)
 	}
@@ -3551,11 +3736,15 @@ func TestReadFileConfigBoundDeploymentsSite(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer
 	at := configBoundTestFile(t, dir, "at.json", "[]", 1<<24)
-	if err := printFeatureBitsTelemetry(&out, nil, 0, at); err != nil {
+	ds, err := loadFeatureBitDeployments(at)
+	if err != nil {
 		t.Fatalf("at-bound deployments must load: %v", err)
 	}
+	if err := printFeatureBitsTelemetryRows(&out, nil, 0, ds); err != nil {
+		t.Fatalf("at-bound deployments must print: %v", err)
+	}
 	over := configBoundTestFile(t, dir, "over.json", "[]", 1<<24+1)
-	if err := printFeatureBitsTelemetry(&out, nil, 0, over); err == nil || !strings.Contains(err.Error(), "exceeds size bound") {
+	if _, err := loadFeatureBitDeployments(over); err == nil || !strings.Contains(err.Error(), "exceeds size bound") {
 		t.Fatalf("over-bound deployments must be refused with the typed size error, got %v", err)
 	}
 }
