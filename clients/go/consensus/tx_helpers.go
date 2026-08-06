@@ -103,6 +103,30 @@ func CheckTransactionWithOwnedUtxoSetAndSuiteContext(
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (*CheckedTransaction, error) {
+	return CheckTransactionWithOwnedUtxoSetAndValidationContext(
+		txBytes,
+		workUtxos,
+		height,
+		blockMTP,
+		chainID,
+		SuiteValidationContext{Rotation: rotation, Registry: registry},
+	)
+}
+
+// CheckTransactionWithOwnedUtxoSetAndValidationContext is the
+// SuiteValidationContext-bearing sibling of
+// CheckTransactionWithOwnedUtxoSetAndSuiteContext: identical parse, validation
+// and error contract, but the caller supplies the whole seam, so a caller that
+// owns a positive signature cache can pass it. The positional wrapper above is
+// exactly this call with SigCache left nil (uncached validation).
+func CheckTransactionWithOwnedUtxoSetAndValidationContext(
+	txBytes []byte,
+	workUtxos map[Outpoint]UtxoEntry,
+	height uint64,
+	blockMTP uint64,
+	chainID [32]byte,
+	suite SuiteValidationContext,
+) (*CheckedTransaction, error) {
 	tx, txid, wtxid, consumed, err := ParseTx(txBytes)
 	if err != nil {
 		return nil, err
@@ -119,7 +143,7 @@ func CheckTransactionWithOwnedUtxoSetAndSuiteContext(
 		height,
 		blockMTP,
 		chainID,
-		SuiteValidationContext{Rotation: rotation, Registry: registry},
+		suite,
 	)
 }
 
