@@ -74,10 +74,13 @@ type Mempool struct {
 	pendingOutpoints *PendingOutpointOwner
 	// sigCache is the one positive-only signature cache this Mempool owns. It
 	// is constructed empty, lives in process memory only, and is never
-	// persisted. It reaches consensus through exactly one call site —
-	// validateTransactionWithConsensus, the suite-aware parsed-transaction
-	// seam — where every sequential native signature path (P2PK, multisig,
-	// Vault threshold, HTLC, CORE_STEALTH) shares it. A hit lets consensus
+	// persisted. It reaches consensus through exactly two ratified call sites,
+	// both landing in the suite-aware validation seam every sequential native
+	// signature path (P2PK, multisig, Vault threshold, HTLC, CORE_STEALTH)
+	// shares: validateTransactionWithConsensus (mempolicy_helpers.go), the
+	// parsed-transaction seam used for relay metadata, and
+	// checkTransactionWithSnapshot (mempool_precheck.go), the live AddTx path,
+	// which enters through the raw-bytes helper. A hit lets consensus
 	// skip ONLY a previously successful backend verification call for the
 	// exact same tuple under the same resolved verifier binding — never an
 	// admission, duplicate, conflict, floor, or capacity decision. Block
