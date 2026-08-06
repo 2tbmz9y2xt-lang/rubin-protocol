@@ -207,6 +207,47 @@ func TestMemoryTxPoolRejectsWorseCandidateWhenFull(t *testing.T) {
 	}
 }
 
+// RUB-1127: relay metadata and relay-pool ordering carry the exact u128 fee.
+// The two entries straddle u64 at equal size, so a fee narrowed to its low
+// limb turns 2^64 into 0 and inverts both the eviction and the rejection.
+func TestMemoryTxPoolOrdersAboveU64FeesExactly(t *testing.T) {
+	aboveU64 := consensus.Uint128{Hi: 1}             // exactly 2^64
+	belowU64 := consensus.Uint128FromU64(^uint64(0)) // 2^64-1
+
+	pool := NewMemoryTxPoolWithLimit(1)
+	var resident [32]byte
+	resident[0] = 0x61
+	var wide [32]byte
+	wide[0] = 0x62
+
+	if !pool.Put(resident, []byte{0x01}, belowU64, 4) {
+		t.Fatal("first Put should succeed")
+	}
+	if !pool.Put(wide, []byte{0x02}, aboveU64, 4) {
+		t.Fatal("above-u64 fee should evict the 2^64-1 entry at equal size")
+	}
+	if pool.Has(resident) || !pool.Has(wide) {
+		t.Fatal("pool should hold only the above-u64 entry")
+	}
+	// The reverse direction: 2^64-1 must not displace 2^64.
+	if pool.Put(resident, []byte{0x01}, belowU64, 4) {
+		t.Fatal("below-u64 fee should be rejected against an above-u64 pool")
+	}
+	if !pool.Has(wide) || pool.Has(resident) {
+		t.Fatal("rejected candidate must leave the pool unchanged")
+	}
+
+	// The relay metadata provider itself: the size it reports is what the
+	// comparator divides the exact fee by.
+	meta, err := CanonicalMempoolRelayMetadata([]byte{0x01, 0x02, 0x03})
+	if err != nil || meta.Size != 3 {
+		t.Fatalf("relay metadata = (%+v, %v), want size 3", meta, err)
+	}
+	if got := compareRelayPriority(aboveU64, meta.Size, wide, belowU64, meta.Size, resident); got <= 0 {
+		t.Fatalf("relay priority for the above-u64 fee = %d, want > 0", got)
+	}
+}
+
 func TestMemoryTxPoolPutFallsBackToRawLength(t *testing.T) {
 	pool := NewMemoryTxPool()
 	var txid [32]byte

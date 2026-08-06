@@ -57,6 +57,19 @@ func TestValidateTxLocal_P2PK_Valid(t *testing.T) {
 	if result.SigCount != 1 {
 		t.Fatalf("expected SigCount=1, got %d", result.SigCount)
 	}
+
+	// RUB-1127: the worker copies the precomputed fee through untouched, so a
+	// fee above u64 must survive the queued-parallel dispatch exactly. 2^64
+	// truncates to 0 under any u64 narrowing of the carried scalar.
+	wideFee := Uint128{Hi: 1}
+	tvc.Fee = wideFee
+	wideResult := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
+	if !wideResult.Valid {
+		t.Fatalf("fee above u64 must not affect validity, got err: %v", wideResult.Err)
+	}
+	if wideResult.Fee.Cmp(wideFee) != 0 {
+		t.Fatalf("worker fee=%s, want the exact %s", wideResult.Fee.String(), wideFee.String())
+	}
 }
 
 func TestValidateTxLocal_P2PK_InvalidSig(t *testing.T) {

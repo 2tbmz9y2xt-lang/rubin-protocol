@@ -600,6 +600,93 @@ func TestMempoolEntryFloorRateUsesSatisfiableFloor(t *testing.T) {
 	}
 }
 
+// RUB-1127: entryFloorRate's two high-limb branches. Both are unreachable
+// with a fee at or below u64 — fee.Hi is zero there, so the clamp never fires
+// and bits.Div64 degenerates to a single-limb divide. A fee narrowed to u64
+// yields 0 on both rows.
+func TestMempoolEntryFloorRateHighLimbBranches(t *testing.T) {
+	// fee.Hi >= weight: the exact quotient is at or above 2^64, so the u64
+	// policy RATE clamps to its maximum. The entry's own fee is not narrowed.
+	clamped, ok := entryFloorRate(&mempoolEntry{txid: [32]byte{0x81}, fee: consensus.Uint128{Hi: 1}, weight: 1, size: 1})
+	if !ok || clamped != ^uint64(0) {
+		t.Fatalf("clamp branch = (%d,%v), want (%d,true)", clamped, ok, ^uint64(0))
+	}
+
+	// fee.Hi != 0 and fee.Hi < weight: the 128-by-64 division runs and keeps
+	// every bit the high limb contributes. 2^64/4 = 2^62.
+	divided, ok := entryFloorRate(&mempoolEntry{txid: [32]byte{0x82}, fee: consensus.Uint128{Hi: 1}, weight: 4, size: 1})
+	if !ok || divided != uint64(1)<<62 {
+		t.Fatalf("high-limb division = (%d,%v), want (%d,true)", divided, ok, uint64(1)<<62)
+	}
+	// The derived floor must be satisfiable by the entry it came from, and one
+	// step above it must not be — the same contract the u64 rows assert.
+	if feeRateBelowFloor(consensus.Uint128{Hi: 1}, 4, divided) {
+		t.Fatalf("entry is below its own derived floor %d", divided)
+	}
+	if !feeRateBelowFloor(consensus.Uint128{Hi: 1}, 4, divided+DefaultMempoolMinFeeRate) {
+		t.Fatalf("entry unexpectedly satisfies raised floor %d", divided+DefaultMempoolMinFeeRate)
+	}
+}
+
+// RUB-1127: the policy layer ranks the exact u128 fee end to end — admission,
+// miner ordering, eviction priority, the capacity victim choice, and live
+// selection. Every row straddles u64: 2^64 truncates to 0 under a u64
+// narrowing while 2^64-1 truncates to itself, so a narrowed comparison
+// inverts each verdict.
+func TestMempoolPolicyAboveU64FeesAdmitOrderAndEvictExactly(t *testing.T) {
+	aboveU64 := consensus.Uint128{Hi: 1}             // exactly 2^64
+	belowU64 := consensus.Uint128FromU64(^uint64(0)) // 2^64-1
+	if aboveU64.Cmp(belowU64) <= 0 {
+		t.Fatal("row must straddle u64")
+	}
+
+	// Admission: weight*floor is 1000, which the exact fee clears and a fee
+	// truncated to its low limb (0) does not.
+	admitting := &Mempool{maxTxs: 10, maxBytes: 100, currentMinFeeRate: 1000}
+	if err := admitting.addEntryLocked(&mempoolEntry{txid: [32]byte{0x91}, fee: aboveU64, weight: 1, size: 1}); err != nil {
+		t.Fatalf("fee above u64 must clear a weight*floor of 1000: %v", err)
+	}
+
+	wide := &mempoolEntry{txid: [32]byte{0x92}, fee: aboveU64, weight: 1, size: 1, raw: []byte{0x92}, admissionSeq: 1}
+	narrow := &mempoolEntry{txid: [32]byte{0x93}, fee: belowU64, weight: 1, size: 1, raw: []byte{0x93}, admissionSeq: 2}
+
+	// Miner ordering.
+	entries := []*mempoolEntry{narrow, wide}
+	sortMempoolEntries(entries)
+	if entries[0] != wide {
+		t.Fatalf("sortMempoolEntries ranked %x first, want the above-u64 fee %x", entries[0].txid, wide.txid)
+	}
+
+	// Eviction priority.
+	if !evictionPlanEntryWorse(mempoolEvictionPlanEntry{entry: narrow}, mempoolEvictionPlanEntry{entry: wide}) {
+		t.Fatal("eviction priority did not rank the below-u64 fee as worse")
+	}
+
+	// Capacity victim: the competing resident fees straddle u64, so the plan
+	// must remove the below-u64 entry and keep the above-u64 one.
+	full := &Mempool{
+		maxTxs:    2,
+		maxBytes:  100,
+		usedBytes: 2,
+		txs:       map[[32]byte]*mempoolEntry{wide.txid: wide, narrow.txid: narrow},
+	}
+	evicted, candidateEvicted, err := full.capacityEvictionPlanLocked(&mempoolEntry{
+		txid: [32]byte{0x94}, fee: consensus.Uint128{Hi: 2}, weight: 1, size: 1,
+	})
+	if err != nil || candidateEvicted {
+		t.Fatalf("capacity plan err=%v candidateEvicted=%v", err, candidateEvicted)
+	}
+	if len(evicted) != 1 || evicted[0] != narrow {
+		t.Fatalf("capacity evicted %d entries (first %x), want exactly the below-u64 entry %x", len(evicted), evicted[0].txid, narrow.txid)
+	}
+
+	// Live miner selection over the same pair.
+	selected := full.SelectTransactions(2, 100)
+	if len(selected) != 2 || !bytes.Equal(selected[0], wide.raw) {
+		t.Fatalf("SelectTransactions=%v, want the above-u64 raw %x first", selected, wide.raw)
+	}
+}
+
 func TestMempoolRaiseMinFeeRateUsesHighestSatisfiableEvictedFloor(t *testing.T) {
 	mp := &Mempool{maxTxs: 10, maxBytes: 100, currentMinFeeRate: DefaultMempoolMinFeeRate}
 	mp.raiseMinFeeRateAfterEvictionLocked([]*mempoolEntry{
