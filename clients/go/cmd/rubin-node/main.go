@@ -832,20 +832,6 @@ func loadFeatureBitDeployments(deploymentsPath string) ([]featureBitDeploymentJS
 	return ds, nil
 }
 
-// printFeatureBitsTelemetry loads deploymentsPath and prints its telemetry:
-// the pre-RUB-876 single-call shape, kept for callers holding only a path
-// (currently tests in this package). run() does not use it: startup
-// validates early via loadFeatureBitDeployments — before any filesystem or
-// service side effect — and later prints via printFeatureBitsTelemetryRows,
-// so the file is read exactly once per run.
-func printFeatureBitsTelemetry(w io.Writer, bs headerStore, height uint64, deploymentsPath string) error {
-	ds, err := loadFeatureBitDeployments(deploymentsPath)
-	if err != nil {
-		return err
-	}
-	return printFeatureBitsTelemetryRows(w, bs, height, ds)
-}
-
 func printFeatureBitsTelemetryRows(w io.Writer, bs headerStore, height uint64, ds []featureBitDeploymentJSON) error {
 	for _, dj := range ds {
 		d := consensus.FeatureBitDeployment{

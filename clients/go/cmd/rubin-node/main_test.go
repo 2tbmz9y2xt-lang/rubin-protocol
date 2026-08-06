@@ -3736,11 +3736,15 @@ func TestReadFileConfigBoundDeploymentsSite(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer
 	at := configBoundTestFile(t, dir, "at.json", "[]", 1<<24)
-	if err := printFeatureBitsTelemetry(&out, nil, 0, at); err != nil {
+	ds, err := loadFeatureBitDeployments(at)
+	if err != nil {
 		t.Fatalf("at-bound deployments must load: %v", err)
 	}
+	if err := printFeatureBitsTelemetryRows(&out, nil, 0, ds); err != nil {
+		t.Fatalf("at-bound deployments must print: %v", err)
+	}
 	over := configBoundTestFile(t, dir, "over.json", "[]", 1<<24+1)
-	if err := printFeatureBitsTelemetry(&out, nil, 0, over); err == nil || !strings.Contains(err.Error(), "exceeds size bound") {
+	if _, err := loadFeatureBitDeployments(over); err == nil || !strings.Contains(err.Error(), "exceeds size bound") {
 		t.Fatalf("over-bound deployments must be refused with the typed size error, got %v", err)
 	}
 }
