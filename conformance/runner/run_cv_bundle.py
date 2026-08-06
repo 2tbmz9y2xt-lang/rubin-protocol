@@ -2120,8 +2120,12 @@ def validate_vector(
     elif op == "connect_block_basic":
         # sum_fees is a widened (u128) value: read it exactly, never via the
         # lenient as_int coercion that maps an unreadable token to 0.
-        # An omitted value means zero — the pre-widening `omitempty`
-        # semantics both clients preserve — so absence normalizes to 0 here.
+        # Zero-emission is ASYMMETRIC across the clients and this lane absorbs
+        # it: Go routes the field through u128PtrOmitZero, so a zero sum_fees
+        # is an absent key, while Rust always emits `Some(summary.sum_fees)`,
+        # so a zero is present as "0". Absence and "0" both normalize to 0
+        # here, which is what makes the comparison below sound. The asymmetry
+        # is pre-existing and is not changed by this slice.
         go_sum_fees = exact_uint(go_resp.get("sum_fees", ABSENT), problems, f"{gate}/{vid}: go.sum_fees") or 0
         rust_sum_fees = exact_uint(rust_resp.get("sum_fees", ABSENT), problems, f"{gate}/{vid}: rust.sum_fees") or 0
         if go_sum_fees != rust_sum_fees:
@@ -2138,8 +2142,8 @@ def validate_vector(
             )
         if "expect_sum_fees" in v:
             want = exact_uint(v["expect_sum_fees"], problems, f"{gate}/{vid}: expect_sum_fees")
-            # An omitted sum_fees means zero (the pre-widening omitempty
-            # semantics both clients preserve).
+            # An omitted go.sum_fees means zero; see the response-side note on
+            # the Go/Rust zero-emission asymmetry above.
             if (go_sum_fees or 0) != want:
                 problems.append(f"{gate}/{vid}: expect_sum_fees mismatch")
         if "expect_utxo_count" in v and as_int(go_resp.get("utxo_count")) != int(v["expect_utxo_count"]):
@@ -2156,8 +2160,9 @@ def validate_vector(
     elif op == "utxo_apply_basic":
         # fee is a widened (u128) value: read it exactly, never via the
         # lenient as_int coercion that maps an unreadable token to 0.
-        # An omitted value means zero — the pre-widening `omitempty`
-        # semantics both clients preserve — so absence normalizes to 0 here.
+        # Zero-emission is ASYMMETRIC exactly as for sum_fees above: Go omits
+        # the key at zero via u128PtrOmitZero, Rust always emits
+        # `Some(summary.fee)`. Absence and "0" both normalize to 0 here.
         go_fee = exact_uint(go_resp.get("fee", ABSENT), problems, f"{gate}/{vid}: go.fee") or 0
         rust_fee = exact_uint(rust_resp.get("fee", ABSENT), problems, f"{gate}/{vid}: rust.fee") or 0
         if go_fee != rust_fee:
@@ -2168,8 +2173,8 @@ def validate_vector(
             problems.append(f"{gate}/{vid}: utxo_count mismatch go={gv} rust={rv}")
         if "expect_fee" in v:
             want = exact_uint(v["expect_fee"], problems, f"{gate}/{vid}: expect_fee")
-            # An omitted fee means zero (the pre-widening omitempty semantics
-            # both clients preserve).
+            # An omitted go.fee means zero; see the response-side note on the
+            # Go/Rust zero-emission asymmetry above.
             if (go_fee or 0) != want:
                 problems.append(f"{gate}/{vid}: expect_fee mismatch")
         if "expect_utxo_count" in v and as_int(go_resp.get("utxo_count")) != int(v["expect_utxo_count"]):
@@ -2375,9 +2380,11 @@ def validate_vector(
             expect_key = f"expect_{key}"
             if expect_key in v:
                 # The expectation side gets the same canonical-aware reader the
-                # response side already uses: `fee`, `required_fee`, and
-                # `relay_fee_floor` are widened, so a bare int() would read an
-                # authored token the clients themselves would reject.
+                # response side already uses. Only `fee` is widened here (the
+                # other int_fields, including `required_fee` and
+                # `relay_fee_floor`, stay u64 in both clients), but a bare
+                # int() would read an authored token the clients themselves
+                # would reject, so every expectation goes through exact_uint.
                 expected = exact_uint(v[expect_key], problems, f"{gate}/{vid}: {expect_key}")
                 if expected is None:
                     continue
