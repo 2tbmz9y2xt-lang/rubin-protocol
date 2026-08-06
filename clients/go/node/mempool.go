@@ -73,13 +73,15 @@ type Mempool struct {
 	// and its token, so no second spender map can drift from the records.
 	pendingOutpoints *PendingOutpointOwner
 	// sigCache is the one positive-only signature cache this Mempool owns. It
-	// is constructed empty, lives in process memory only, is never persisted,
-	// and is shared by every sequential native signature path of live
-	// admission validation. A hit lets consensus skip ONLY a previously
-	// successful backend verification call for the exact same tuple under the
-	// same resolved verifier binding — never an admission, duplicate,
-	// conflict, floor, or capacity decision. Block validation and the deferred
-	// SigCheckQueue never see it.
+	// is constructed empty, lives in process memory only, and is never
+	// persisted. It reaches consensus through exactly one call site —
+	// validateTransactionWithConsensus, the suite-aware parsed-transaction
+	// seam — where every sequential native signature path (P2PK, multisig,
+	// Vault threshold, HTLC, CORE_STEALTH) shares it. A hit lets consensus
+	// skip ONLY a previously successful backend verification call for the
+	// exact same tuple under the same resolved verifier binding — never an
+	// admission, duplicate, conflict, floor, or capacity decision. Block
+	// validation, the miner, and the deferred SigCheckQueue never see it.
 	sigCache *consensus.SigCache
 	// Admission counters are bumped exactly once for each AddTx call on a
 	// non-nil Mempool that reaches the final outcome accounting path.
