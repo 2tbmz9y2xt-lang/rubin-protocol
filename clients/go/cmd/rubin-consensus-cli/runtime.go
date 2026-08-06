@@ -96,7 +96,7 @@ type Request struct {
 	TxCount              int                      `json:"tx_count,omitempty"`
 	PubkeyLength         int                      `json:"pubkey_length,omitempty"`
 	AlreadyGenerated     uint64                   `json:"already_generated,omitempty"`
-	SumFees              consensus.Uint128        `json:"sum_fees,omitempty"`
+	SumFees              consensus.Uint128        `json:"sum_fees,omitzero"` // omitzero (not omitempty): encoding/json never treats a struct value as empty, so omitempty emitted "sum_fees":"0" where the pre-widening uint64 field omitted the key.
 	ChunkCount           int                      `json:"chunk_count,omitempty"`
 	TTLBlocks            int                      `json:"ttl_blocks,omitempty"`
 	SentinelSigLen       int                      `json:"sentinel_sig_len,omitempty"`
