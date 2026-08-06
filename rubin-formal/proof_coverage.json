@@ -1766,7 +1766,7 @@
     "allowed": [
       "Lean executable semantics replay the non-CV-PV conformance fixtures represented by modules imported by RubinFormal.Conformance.Index; runtime/parallel-only CV-PV gates remain outside Lean replay scope",
       "Lean evidence is op-scoped and mixed; any correspondence to Go/Rust is human-reviewed rather than machine-checked implementation equivalence",
-      "The registry currently covers 32 machine-checked coverage entries: 25 proved, 4 proved_with_axiom, and 3 stated. Evidence levels comprise 24 universal, 4 assumption-backed, 3 model, and 1 contract entries.",
+      "The registry currently covers 32 machine-checked coverage entries: 24 proved, 5 proved_with_axiom, and 3 stated. Evidence levels comprise 23 universal, 5 assumption-backed, 3 model, and 1 contract entries.",
       "formal claims are bounded by explicit forbidden claims below",
       "Bridge theorems (LIVE/BRIDGE class) prove properties of Lean transcriptions of Go/Rust functions. Lean-to-Go/Rust parity is verified by human code review, not machine-checked. The behavioral claim applies to the Lean transcription; transfer to Go/Rust binary relies on the reviewed parity."
     ],
