@@ -371,6 +371,15 @@ def _da_fee_floor_policy_utxos(v: Dict[str, Any]) -> List[Dict[str, Any]]:
             "da_fee_floor_policy scenario requires an exact unsigned fee: "
             + ("; ".join(fee_problems) or "missing")
         )
+    if fee > MAX_U64:
+        # This scenario fee funds the single UTXO the transaction spends, and
+        # per-UTXO values stay u64 (RUB-1127 canonical_domain) even though the
+        # derived fee is u128. Diagnose the out-of-domain scenario here rather
+        # than emitting a UTXO both clients reject opaquely at decode.
+        raise ValueError(
+            "da_fee_floor_policy scenario fee exceeds the u64 UTXO value domain: "
+            f"{fee}"
+        )
     kind = str(scenario.get("kind", ""))
     if kind == "da_commit":
         prev_txid = "a1" * 32
