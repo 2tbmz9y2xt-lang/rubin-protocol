@@ -114,14 +114,22 @@ fn assert_outbox_invariants(snapshot: &AnnounceSnapshot) {
 }
 
 fuzz_target!(|data: &[u8]| {
-    if data.len() < 16 {
+    // Byte budget: [0] peer_count, [1] fanout, [2] tx mode, [3..11] fee low limb,
+    // [11..13] size, [13] network tag, [14..22] fee high limb, [8..] tx payload.
+    if data.len() < 22 {
         return;
     }
 
     let peer_count = usize::from(data[0] % (MAX_PEERS as u8 + 1));
     let fanout = usize::from(data[1]) % (MAX_PEERS + 2);
     let tx_bytes = sample_tx_bytes(data[2], &data[8..]);
-    let fee: u128 = u64::from_le_bytes(data[3..11].try_into().unwrap_or([0u8; 8])).into();
+    // Relay fee is u128. An 8-byte decode widened to u128 can never set the high
+    // limb, so the widened relay metadata / ordering / eviction paths would only
+    // ever see fees at or below u64. Take the low limb from [3..11] and an
+    // independent high limb from [14..22] so the whole u128 domain is reachable.
+    let fee_lo = u64::from_le_bytes(data[3..11].try_into().unwrap_or([0u8; 8]));
+    let fee_hi = u64::from_le_bytes(data[14..22].try_into().unwrap_or([0u8; 8]));
+    let fee = (u128::from(fee_hi) << 64) | u128::from(fee_lo);
     let size = usize::from(u16::from_le_bytes([data[11], data[12]])).min(MAX_RAW_BYTES);
     let network = selected_network(data[13]);
     let meta = RelayTxMetadata { fee, size };
