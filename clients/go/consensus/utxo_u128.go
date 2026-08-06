@@ -54,21 +54,32 @@ func (v Uint128) String() string { return v.Big().String() }
 
 var errUint128NotCanonical = errors.New("uint128: value is not a canonical unsigned decimal string")
 
+// checkCanonicalDecimalForm reports whether s is exactly "0" or [1-9][0-9]*,
+// rejecting empty input, leading zeroes, signs, whitespace, fractions,
+// exponents, and any non-digit byte. It is lexical only: the u128 range check
+// belongs to ParseUint128Decimal.
+func checkCanonicalDecimalForm(s string) error {
+	if s == "" {
+		return errUint128NotCanonical
+	}
+	if s[0] == '0' && len(s) != 1 {
+		return errUint128NotCanonical
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return errUint128NotCanonical
+		}
+	}
+	return nil
+}
+
 // ParseUint128Decimal parses the canonical unsigned base-10 decimal form.
 // It accepts exactly "0" or [1-9][0-9]* with value <= 2^128-1 and rejects
 // empty input, leading zeroes, signs, whitespace, fractions, exponents, any
 // non-digit byte, and any value above u128.
 func ParseUint128Decimal(s string) (Uint128, error) {
-	if s == "" {
-		return Uint128{}, errUint128NotCanonical
-	}
-	if s[0] == '0' && len(s) != 1 {
-		return Uint128{}, errUint128NotCanonical
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return Uint128{}, errUint128NotCanonical
-		}
+	if err := checkCanonicalDecimalForm(s); err != nil {
+		return Uint128{}, err
 	}
 	b, ok := new(big.Int).SetString(s, 10)
 	if !ok || b.BitLen() > 128 {
