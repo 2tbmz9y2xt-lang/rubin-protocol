@@ -5836,3 +5836,98 @@ func TestMempoolSigCacheNilCacheAddTxMatchesBaseline(t *testing.T) {
 			uncachedErr, cachedErr, uncachedLen, cachedLen, uncachedTxid, cachedTxid)
 	}
 }
+
+// TestMempoolSigCacheWarmCacheNeverBuysAdmission pins the hostile admission
+// rows on the LIVE AddTx path: a positive cache hit is never an admission-result
+// hit. Each row warms the owner cache through the validation-only relay seam
+// (which claims no outpoint), then proves the conflict and capacity authorities
+// fire exactly as they would with a cold cache.
+func TestMempoolSigCacheWarmCacheNeverBuysAdmission(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	newPool := func(t *testing.T) (*Mempool, *ChainState, []consensus.Outpoint) {
+		t.Helper()
+		st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+		mp, err := NewMempool(st, nil, devnetGenesisChainID)
+		if err != nil {
+			t.Fatalf("new mempool: %v", err)
+		}
+		return mp, st, outpoints
+	}
+
+	// The cache is warmed with the CONFLICTING transaction's own signature, so
+	// its verification is a genuine hit — admission is still refused by the
+	// pending-outpoint authority with its exact existing message.
+	t.Run("conflict", func(t *testing.T) {
+		mp, st, ops := newPool(t)
+		txA := mustBuildSignedTransferTx(t, st.Utxos, ops[:1], 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+		txB := mustBuildSignedTransferTx(t, st.Utxos, ops[:1], 100_000, 200_000, 2, fromKey, fromAddress, toAddress)
+		txidA, txidB := txID(t, txA), txID(t, txB)
+		if txidA == txidB {
+			t.Fatalf("conflict row needs distinct txids, got %x twice", txidA)
+		}
+		if _, err := mp.RelayMetadata(txB); err != nil {
+			t.Fatalf("RelayMetadata(txB): %v", err)
+		}
+		if err := mp.AddTx(txA); err != nil {
+			t.Fatalf("AddTx(txA): %v", err)
+		}
+		if mp.sigCache.Len() != 2 || mp.sigCache.Hits() != 0 || mp.sigCache.Misses() != 2 {
+			t.Fatalf("warm state: len=%d hits=%d misses=%d, want 2/0/2",
+				mp.sigCache.Len(), mp.sigCache.Hits(), mp.sigCache.Misses())
+		}
+		var txErr *TxAdmitError
+		if err := mp.AddTx(txB); !errors.As(err, &txErr) || txErr.Kind != TxAdmitConflict {
+			t.Fatalf("AddTx(txB) err=%T %v, want TxAdmitConflict", err, err)
+		}
+		if want := fmt.Sprintf("mempool double-spend conflict with %x", txidA); txErr.Message != want {
+			t.Fatalf("conflict message %q, want %q", txErr.Message, want)
+		}
+		if mp.Len() != 1 || mp.txs[txidA] == nil || mp.txs[txidB] != nil {
+			t.Fatalf("conflicting tx changed the resident set: len=%d", mp.Len())
+		}
+		if got := mp.AdmissionCounts(); got != (MempoolAdmissionCounts{Accepted: 1, Conflict: 1}) {
+			t.Fatalf("admission counts=%+v, want accepted=1 conflict=1", got)
+		}
+		// B's signature WAS answered from cache (hit, no backend call) and the
+		// rejected admission inserted nothing.
+		if mp.sigCache.Hits() != 1 || mp.sigCache.Misses() != 2 || mp.sigCache.Len() != 2 {
+			t.Fatalf("after conflict: hits=%d misses=%d len=%d, want 1/2/2",
+				mp.sigCache.Hits(), mp.sigCache.Misses(), mp.sigCache.Len())
+		}
+	})
+
+	// Saturation at the production capacity constant is a performance state,
+	// never a verdict. The fill uses the exported legacy-domain API: those keys
+	// only occupy capacity, they live in a different key domain than the live
+	// seam's binding-inclusive keys and can never be mistaken for a result.
+	t.Run("saturation", func(t *testing.T) {
+		mp, st, ops := newPool(t)
+		var digest [32]byte
+		for i := 0; i < mempoolSigCacheCapacity; i++ {
+			digest[0], digest[1], digest[2] = byte(i), byte(i>>8), byte(i>>16)
+			mp.sigCache.Insert(0x01, []byte("saturation-pubkey"), []byte("saturation-sig"), digest)
+		}
+		if mp.sigCache.Len() != mempoolSigCacheCapacity {
+			t.Fatalf("cache not saturated: len=%d, want %d", mp.sigCache.Len(), mempoolSigCacheCapacity)
+		}
+		txBytes := mustBuildSignedTransferTx(t, st.Utxos, ops[:1], 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+		if err := mp.AddTx(txBytes); err != nil {
+			t.Fatalf("saturated cache must never reject admission: %v", err)
+		}
+		if mp.Len() != 1 || mp.txs[txID(t, txBytes)] == nil {
+			t.Fatalf("tx not resident after admission: len=%d", mp.Len())
+		}
+		// FIFO evicted exactly one older entry, and the newest entry survived:
+		// revalidating the same transaction hits with no new backend call.
+		if _, err := mp.RelayMetadata(txBytes); err != nil {
+			t.Fatalf("RelayMetadata(repeat): %v", err)
+		}
+		if mp.sigCache.Len() != mempoolSigCacheCapacity || mp.sigCache.Hits() != 1 || mp.sigCache.Misses() != 1 {
+			t.Fatalf("under saturation: len=%d hits=%d misses=%d, want %d/1/1",
+				mp.sigCache.Len(), mp.sigCache.Hits(), mp.sigCache.Misses(), mempoolSigCacheCapacity)
+		}
+	})
+}
