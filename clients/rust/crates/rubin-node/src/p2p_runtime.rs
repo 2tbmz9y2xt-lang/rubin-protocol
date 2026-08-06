@@ -376,9 +376,10 @@ fn orphan_pool_metrics_sub(blocks: usize, bytes: usize) {
 pub(crate) fn orphan_pool_metrics_test_guard() -> std::sync::MutexGuard<'static, ()> {
     // Recovery is sound: the lock only serializes access to unit test state, and every
     // guarded test resets that state at entry via `reset_orphan_pool_metrics_for_test`.
-    ORPHAN_POOL_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    ORPHAN_POOL_TEST_LOCK.lock().unwrap_or_else(|poisoned| {
+        eprintln!("orphan_pool_metrics_test_guard: recovered from a poisoned lock");
+        poisoned.into_inner()
+    })
 }
 
 #[cfg(test)]
@@ -3987,6 +3988,7 @@ mod tests {
     }
 
     fn test_sync_engine_with_genesis() -> SyncEngine {
+        // pid + epoch-nanos + monotonic counter => fresh path by construction; no pre-cleanup needed.
         let root = crate::io_utils::unique_temp_path("rubin-node-p2p-runtime");
         fs::create_dir_all(&root).expect("create temp dir");
         let blockstore_dir = root.join("blockstore");
