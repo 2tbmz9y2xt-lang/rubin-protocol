@@ -235,6 +235,19 @@ func TestSigCache_NilSafe(t *testing.T) {
 	c.Reset() // should not panic
 }
 
+func TestSigCache_ZeroValueIsANoOp(t *testing.T) {
+	var c SigCache // not built by NewSigCache: no map, no ring
+	pk, sig, d := syntheticSigCacheTuple(0x01)
+	c.Insert(SUITE_ID_ML_DSA_87, pk, sig, d)
+	c.insertBound([]byte("binding"), SUITE_ID_ML_DSA_87, pk, sig, d)
+	if c.Lookup(SUITE_ID_ML_DSA_87, pk, sig, d) || c.lookupBound([]byte("binding"), SUITE_ID_ML_DSA_87, pk, sig, d) {
+		t.Fatal("zero-value cache must never report a hit")
+	}
+	if c.Len() != 0 {
+		t.Fatalf("zero-value cache len=%d, want 0", c.Len())
+	}
+}
+
 func TestSigCache_Reset(t *testing.T) {
 	c := NewSigCache(10)
 	kp := mustMLDSA87Keypair(t)

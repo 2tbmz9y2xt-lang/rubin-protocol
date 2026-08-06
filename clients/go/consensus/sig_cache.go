@@ -174,6 +174,12 @@ func (c *SigCache) lookupKey(key [32]byte) bool {
 func (c *SigCache) insertKey(key [32]byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// A zero-value SigCache was not built by NewSigCache: it has no map and no
+	// ring. Stay a no-op instead of panicking on a nil-map write or a modulo by
+	// zero — this type is exported and a caller may declare one.
+	if c.capacity <= 0 || len(c.order) != c.capacity || c.entries == nil {
+		return
+	}
 	if _, ok := c.entries[key]; ok {
 		return
 	}
