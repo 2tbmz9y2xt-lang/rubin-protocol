@@ -374,9 +374,11 @@ fn orphan_pool_metrics_sub(blocks: usize, bytes: usize) {
 
 #[cfg(test)]
 pub(crate) fn orphan_pool_metrics_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    // Recovery is sound: the lock only serializes access to unit test state, and every
+    // guarded test resets that state at entry via `reset_orphan_pool_metrics_for_test`.
     ORPHAN_POOL_TEST_LOCK
         .lock()
-        .expect("lock orphan metrics tests")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
