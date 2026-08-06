@@ -66,16 +66,156 @@ func TestSigCache_BoundedCapacity(t *testing.T) {
 		t.Fatalf("expected len=2 (bounded), got %d", c.Len())
 	}
 
-	// First two should be present.
-	for i := 0; i < 2; i++ {
+	// FIFO at saturation: the OLDEST insertion left, the newest entered.
+	if c.Lookup(SUITE_ID_ML_DSA_87, kp.PubkeyBytes(), entries[0].sig, entries[0].digest) {
+		t.Fatalf("entry 0 should have been evicted (oldest insertion, capacity=2)")
+	}
+	for i := 1; i < 3; i++ {
 		if !c.Lookup(SUITE_ID_ML_DSA_87, kp.PubkeyBytes(), entries[i].sig, entries[i].digest) {
 			t.Fatalf("entry %d should be in cache", i)
 		}
 	}
+}
 
-	// Third should be absent (dropped due to capacity).
-	if c.Lookup(SUITE_ID_ML_DSA_87, kp.PubkeyBytes(), entries[2].sig, entries[2].digest) {
-		t.Fatalf("entry 2 should have been dropped (capacity=2)")
+// syntheticSigCacheTuple builds distinct, cheap (pubkey, sig, digest) bytes for
+// cache-mechanics tests that do not need a real signature.
+func syntheticSigCacheTuple(seed byte) (pubkey, sig []byte, digest [32]byte) {
+	pubkey = []byte{0xa0, seed}
+	sig = []byte{0x50, seed}
+	digest[0] = seed
+	return pubkey, sig, digest
+}
+
+// TestSigCache_FIFOEvictsOldestAndHitsDoNotRefreshOrder pins the deterministic
+// insertion-order FIFO contract: at saturation the oldest INSERTION is evicted
+// so a newly verified tuple always enters, and a lookup hit never moves an
+// entry's eviction position (which would make eviction access-order/LRU and let
+// lookup traffic steer it).
+func TestSigCache_FIFOEvictsOldestAndHitsDoNotRefreshOrder(t *testing.T) {
+	c := NewSigCache(2)
+	pkA, sigA, dA := syntheticSigCacheTuple(0xa1)
+	pkB, sigB, dB := syntheticSigCacheTuple(0xb2)
+	pkC, sigC, dC := syntheticSigCacheTuple(0xc3)
+
+	c.Insert(SUITE_ID_ML_DSA_87, pkA, sigA, dA)
+	c.Insert(SUITE_ID_ML_DSA_87, pkB, sigB, dB)
+
+	// Hit A repeatedly, then re-insert it: neither may refresh its position.
+	for i := 0; i < 3; i++ {
+		if !c.Lookup(SUITE_ID_ML_DSA_87, pkA, sigA, dA) {
+			t.Fatalf("A must be cached before saturation")
+		}
+	}
+	c.Insert(SUITE_ID_ML_DSA_87, pkA, sigA, dA)
+	if c.Len() != 2 {
+		t.Fatalf("re-insert of a present key changed len: got %d, want 2", c.Len())
+	}
+
+	c.Insert(SUITE_ID_ML_DSA_87, pkC, sigC, dC)
+	if c.Len() != 2 {
+		t.Fatalf("len=%d after saturating insert, want 2", c.Len())
+	}
+	if c.Lookup(SUITE_ID_ML_DSA_87, pkA, sigA, dA) {
+		t.Fatal("A (oldest insertion) must be evicted despite its lookup hits")
+	}
+	if !c.Lookup(SUITE_ID_ML_DSA_87, pkB, sigB, dB) {
+		t.Fatal("B must survive: it was inserted after A")
+	}
+	if !c.Lookup(SUITE_ID_ML_DSA_87, pkC, sigC, dC) {
+		t.Fatal("C (newly verified) must be admitted at saturation")
+	}
+
+	// Next insert evicts B, the new oldest — the ring keeps advancing.
+	pkD, sigD, dD := syntheticSigCacheTuple(0xd4)
+	c.Insert(SUITE_ID_ML_DSA_87, pkD, sigD, dD)
+	if c.Lookup(SUITE_ID_ML_DSA_87, pkB, sigB, dB) {
+		t.Fatal("B must be evicted next")
+	}
+	if !c.Lookup(SUITE_ID_ML_DSA_87, pkC, sigC, dC) || !c.Lookup(SUITE_ID_ML_DSA_87, pkD, sigD, dD) {
+		t.Fatal("C and D must both be resident after the second eviction")
+	}
+}
+
+// TestSigCache_BoundKeyIsInjectiveAndDomainSeparated falsifies a cache key that
+// drops the resolved-binding component or that lets two different component
+// tuples alias each other. Every row below differs in exactly one component and
+// must therefore produce a different key.
+func TestSigCache_BoundKeyIsInjectiveAndDomainSeparated(t *testing.T) {
+	base := struct {
+		bindingID []byte
+		suiteID   uint8
+		pubkey    []byte
+		sig       []byte
+		digest    [32]byte
+	}{
+		bindingID: []byte("binding-v1"),
+		suiteID:   SUITE_ID_ML_DSA_87,
+		pubkey:    []byte{0x01, 0x02, 0x03},
+		sig:       []byte{0x04, 0x05},
+		digest:    [32]byte{0xff},
+	}
+	want := sigCacheBoundKey(base.bindingID, base.suiteID, base.pubkey, base.sig, base.digest)
+	if got := sigCacheBoundKey(base.bindingID, base.suiteID, base.pubkey, base.sig, base.digest); got != want {
+		t.Fatal("same components must produce the same key")
+	}
+
+	otherDigest := base.digest
+	otherDigest[31] = 0x01
+	cases := []struct {
+		name string
+		key  [32]byte
+	}{
+		{"different_binding_identity", sigCacheBoundKey([]byte("binding-v2"), base.suiteID, base.pubkey, base.sig, base.digest)},
+		{"binding_identity_absent", sigCacheBoundKey(nil, base.suiteID, base.pubkey, base.sig, base.digest)},
+		{"different_suite_id", sigCacheBoundKey(base.bindingID, 0x02, base.pubkey, base.sig, base.digest)},
+		{"different_pubkey", sigCacheBoundKey(base.bindingID, base.suiteID, []byte{0x01, 0x02, 0x04}, base.sig, base.digest)},
+		{"different_signature", sigCacheBoundKey(base.bindingID, base.suiteID, base.pubkey, []byte{0x04, 0x06}, base.digest)},
+		{"different_digest", sigCacheBoundKey(base.bindingID, base.suiteID, base.pubkey, base.sig, otherDigest)},
+		// Re-split of the same concatenated bytes across the field boundary.
+		{"pubkey_signature_resplit", sigCacheBoundKey(base.bindingID, base.suiteID, []byte{0x01, 0x02}, []byte{0x03, 0x04, 0x05}, base.digest)},
+		// A binding-inclusive key can never equal a legacy suite-only key.
+		{"legacy_domain", sigCacheKey(base.suiteID, base.pubkey, base.sig, base.digest)},
+	}
+	for _, tc := range cases {
+		if tc.key == want {
+			t.Fatalf("%s: key collides with the base tuple key", tc.name)
+		}
+	}
+}
+
+// TestSigCache_ConcurrentInsertLookupEvictReset drives insert, lookup, FIFO
+// eviction, and Reset from concurrent goroutines under -race. The invariant is
+// that the cache never exceeds capacity and never panics; residency is
+// deliberately not asserted because Reset races with insertion by design.
+func TestSigCache_ConcurrentInsertLookupEvictReset(t *testing.T) {
+	const capacity = 8
+	c := NewSigCache(capacity)
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(gid int) {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				pk, sig, d := syntheticSigCacheTuple(byte(gid*8 + i%8))
+				d[1] = byte(i)
+				c.Insert(SUITE_ID_ML_DSA_87, pk, sig, d)
+				c.lookupBound([]byte("binding"), SUITE_ID_ML_DSA_87, pk, sig, d)
+				c.insertBound([]byte("binding"), SUITE_ID_ML_DSA_87, pk, sig, d)
+				c.Lookup(SUITE_ID_ML_DSA_87, pk, sig, d)
+				if n := c.Len(); n > capacity {
+					t.Errorf("cache len=%d exceeds capacity %d", n, capacity)
+					return
+				}
+				if gid == 0 && i%50 == 0 {
+					c.Reset()
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	if n := c.Len(); n > capacity {
+		t.Fatalf("final cache len=%d exceeds capacity %d", n, capacity)
 	}
 }
 
