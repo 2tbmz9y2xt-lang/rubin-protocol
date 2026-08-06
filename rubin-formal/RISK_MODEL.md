@@ -71,10 +71,10 @@ re-verification/maturity.
 
 На текущем refinement-срезе registry содержит:
 
-- `25` rows со статусом `proved`;
-- `4` rows со статусом `proved_with_axiom`;
-- `24` universal entries;
-- `4` assumption-backed entries;
+- `24` rows со статусом `proved`;
+- `5` rows со статусом `proved_with_axiom`;
+- `23` universal entries;
+- `5` assumption-backed entries;
 - `3` model-level entries;
 - `1` contract-level entry;
 - `3` stated rows;
