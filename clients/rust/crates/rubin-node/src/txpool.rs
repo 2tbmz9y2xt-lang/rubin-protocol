@@ -2224,7 +2224,7 @@ mod tests {
 
     use rubin_consensus::block::BLOCK_HEADER_BYTES;
     use rubin_consensus::constants::{
-        COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_P2PK,
+        COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_P2PK, MAX_TX_INPUTS,
         SUITE_ID_SENTINEL, TX_WIRE_VERSION,
     };
     use rubin_consensus::{
@@ -4701,6 +4701,54 @@ mod tests {
         let fee = compute_fee_no_verify(&tx, &utxos).expect("two u64-max inputs must derive a fee");
         assert_eq!(fee, 2 * u128::from(u64::MAX) - 100);
         assert!(fee > u128::from(u64::MAX), "fee {fee} must exceed u64");
+    }
+
+    /// RUB-1127: the maximum structural transaction fee. MAX_TX_INPUTS=1024
+    /// inputs of u64-max each with zero outputs is the largest fee any
+    /// transaction can carry, and the summation path must return it exactly.
+    /// The row drives compute_fee_no_verify rather than a signed consensus
+    /// transaction: 1024 ML-DSA-87 signatures is not a proportionate test cost,
+    /// and the accumulator is the code the fee width is claimed for.
+    #[test]
+    fn compute_fee_no_verify_sums_the_maximum_structural_fee_exactly() {
+        let outpoint = Outpoint {
+            txid: [0x01; 32],
+            vout: 0,
+        };
+        let tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0,
+            tx_nonce: 0,
+            inputs: vec![
+                TxInput {
+                    prev_txid: outpoint.txid,
+                    prev_vout: outpoint.vout,
+                    script_sig: Vec::new(),
+                    sequence: 0,
+                };
+                MAX_TX_INPUTS as usize
+            ],
+            outputs: Vec::new(),
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        };
+        let mut utxos = HashMap::new();
+        utxos.insert(
+            outpoint,
+            UtxoEntry {
+                value: u64::MAX,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x23; 2592]),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+        let fee = compute_fee_no_verify(&tx, &utxos).expect("maximum structural fee must derive");
+        // 1024*(2^64-1) in canonical decimal.
+        assert_eq!(fee.to_string(), "18889465931478580853760");
     }
 
     #[test]
