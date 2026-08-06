@@ -5647,3 +5647,106 @@ func TestValidateChainSnapshotRejectsNil(t *testing.T) {
 		t.Fatalf("expected TxAdmitUnavailable, got %T %v", err, err)
 	}
 }
+
+// TestMempoolSigCacheOwnerReusesPositiveResultsAcrossValidations pins the one
+// mempool-owned positive signature cache on the live validation seam that
+// currently routes through it (RelayMetadata -> validateTransactionWithConsensus):
+// empty at construction, populated by a successful validation, reused by a later
+// validation of the exact same tuple, per-mempool (never shared), and never an
+// admission-result cache — a hit publishes no entry and claims no outpoint.
+func TestMempoolSigCacheOwnerReusesPositiveResultsAcrossValidations(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	if mp.sigCache == nil {
+		t.Fatal("mempool must own a signature cache")
+	}
+	if mp.sigCache.Len() != 0 || mp.sigCache.Hits() != 0 || mp.sigCache.Misses() != 0 {
+		t.Fatalf("cache must be empty at construction: len=%d hits=%d misses=%d",
+			mp.sigCache.Len(), mp.sigCache.Hits(), mp.sigCache.Misses())
+	}
+
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+	if _, err := mp.RelayMetadata(txBytes); err != nil {
+		t.Fatalf("RelayMetadata: %v", err)
+	}
+	if mp.sigCache.Len() != 1 || mp.sigCache.Misses() != 1 || mp.sigCache.Hits() != 0 {
+		t.Fatalf("after first validation: len=%d misses=%d hits=%d, want 1/1/0",
+			mp.sigCache.Len(), mp.sigCache.Misses(), mp.sigCache.Hits())
+	}
+
+	// A second mempool owns a separate, empty cache.
+	other, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool (other): %v", err)
+	}
+	if other.sigCache == mp.sigCache || other.sigCache.Len() != 0 {
+		t.Fatalf("each mempool must own exactly one fresh cache: len=%d", other.sigCache.Len())
+	}
+
+	if _, err := mp.RelayMetadata(txBytes); err != nil {
+		t.Fatalf("RelayMetadata (repeat): %v", err)
+	}
+	if mp.sigCache.Hits() != 1 {
+		t.Fatalf("repeated validation must hit the cache: hits=%d", mp.sigCache.Hits())
+	}
+	if mp.sigCache.Len() != 1 {
+		t.Fatalf("a hit must not insert: len=%d", mp.sigCache.Len())
+	}
+	if mp.Len() != 0 || mp.AdmissionCounts() != (MempoolAdmissionCounts{}) {
+		t.Fatalf("a cache hit is not an admission: len=%d counts=%+v", mp.Len(), mp.AdmissionCounts())
+	}
+}
+
+// TestMempoolSigCacheAlternateWitnessWithSameTxidCannotHit covers the hostile
+// row: a re-signed transaction has the same txid but different signature bytes,
+// so it must MISS and verify on its own.
+func TestMempoolSigCacheAlternateWitnessWithSameTxidCannotHit(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	first := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+	second := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+	if bytes.Equal(first, second) {
+		t.Skip("signature backend is deterministic: no alternate witness representation available")
+	}
+	_, firstTxid, _, _, err := consensus.ParseTx(first)
+	if err != nil {
+		t.Fatalf("ParseTx(first): %v", err)
+	}
+	_, secondTxid, _, _, err := consensus.ParseTx(second)
+	if err != nil {
+		t.Fatalf("ParseTx(second): %v", err)
+	}
+	if firstTxid != secondTxid {
+		t.Fatalf("txid mismatch: %x vs %x", firstTxid, secondTxid)
+	}
+
+	if _, err := mp.RelayMetadata(first); err != nil {
+		t.Fatalf("RelayMetadata(first): %v", err)
+	}
+	if _, err := mp.RelayMetadata(second); err != nil {
+		t.Fatalf("RelayMetadata(second): %v", err)
+	}
+	if mp.sigCache.Hits() != 0 {
+		t.Fatalf("alternate witness bytes must not hit: hits=%d", mp.sigCache.Hits())
+	}
+	if mp.sigCache.Misses() != 2 || mp.sigCache.Len() != 2 {
+		t.Fatalf("alternate witness must verify on its own: misses=%d len=%d, want 2/2",
+			mp.sigCache.Misses(), mp.sigCache.Len())
+	}
+}
