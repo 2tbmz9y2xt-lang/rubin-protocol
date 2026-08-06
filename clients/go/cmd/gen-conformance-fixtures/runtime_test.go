@@ -30,6 +30,37 @@ func TestMustJSONUint32RejectsNonIntegralAndOverflow(t *testing.T) {
 	}
 }
 
+func TestDecodeFixtureRejectsTrailingContentAndKeepsExactIntegers(t *testing.T) {
+	valid := []byte(`{"gate":"CV-X","vectors":[{"fee":18446744073709551615}]}`)
+	f, err := decodeFixture(valid)
+	if err != nil {
+		t.Fatalf("decodeFixture(valid): %v", err)
+	}
+	// UseNumber, not float64: the u64-max literal must survive verbatim.
+	if got := f.Vectors[0]["fee"]; got != json.Number("18446744073709551615") {
+		t.Fatalf("fee decoded as %#v, want exact json.Number", got)
+	}
+	// A single Decode stops after the first value, so every one of these was
+	// accepted before the trailing-content check and then silently dropped on
+	// the way back out.
+	trailing := []struct {
+		name string
+		body string
+	}{
+		{"second object", `{"gate":"CV-X","vectors":[]} {"gate":"CV-Y","vectors":[]}`},
+		{"stray brace", `{"gate":"CV-X","vectors":[]} }`},
+		{"stray number", `{"gate":"CV-X","vectors":[]} 1`},
+		{"garbage", `{"gate":"CV-X","vectors":[]} not-json`},
+	}
+	for _, tc := range trailing {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := decodeFixture([]byte(tc.body)); err == nil {
+				t.Fatalf("decodeFixture accepted trailing content: %s", tc.body)
+			}
+		})
+	}
+}
+
 func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 	skipIfMLDSA87DERUnavailable(t)
 	tmp := t.TempDir()

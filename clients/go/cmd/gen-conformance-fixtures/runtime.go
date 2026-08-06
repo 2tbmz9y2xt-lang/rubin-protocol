@@ -367,25 +367,35 @@ func mustLoadFixture(path string) *fixtureFile {
 	if err != nil {
 		fatalf("read %s: %v", path, err)
 	}
+	f, err := decodeFixture(b)
+	if err != nil {
+		fatalf("parse %s: %v", path, err)
+	}
+	return f
+}
+
+// decodeFixture reads exactly one fixture document from b.
+//
+// UseNumber keeps every JSON integer as its exact literal instead of decoding
+// it into float64. Vectors are loaded into map[string]any and written straight
+// back out, so a float64 round-trip would silently corrupt any value above
+// 2^53 — including the u64-max UTXO values the widened-fee vectors depend on.
+//
+// Decode stops at the end of the first JSON value, so a second value or
+// trailing garbage would be accepted and then dropped when the file is written
+// back. json.Unmarshal (the pre-UseNumber reader) rejected that; requiring
+// io.EOF from a second Decode keeps the same strictness.
+func decodeFixture(b []byte) (*fixtureFile, error) {
 	var f fixtureFile
-	// UseNumber keeps every JSON integer as its exact literal instead of
-	// decoding it into float64. Vectors are loaded into map[string]any and
-	// written straight back out, so a float64 round-trip would silently
-	// corrupt any value above 2^53 — including the u64-max UTXO values the
-	// widened-fee vectors depend on.
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
 	if err := dec.Decode(&f); err != nil {
-		fatalf("parse %s: %v", path, err)
+		return nil, err
 	}
-	// Decode stops at the end of the first JSON value, so a second value or
-	// trailing garbage would be accepted here and then dropped when the file
-	// is written back. json.Unmarshal (the pre-UseNumber reader) rejected
-	// that; requiring io.EOF from a second Decode keeps the same strictness.
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		fatalf("parse %s: trailing content after top-level JSON value", path)
+		return nil, errors.New("trailing content after top-level JSON value")
 	}
-	return &f
+	return &f, nil
 }
 
 func mustCanonicalFixturePath(path string) string {
