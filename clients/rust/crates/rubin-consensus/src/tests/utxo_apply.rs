@@ -1619,7 +1619,7 @@ fn apply_non_coinbase_tx_basic_htlc_refund_timelock_first_error_order() {
 /// Two 2^63 inputs and zero outputs give a fee of exactly 2^64, one above the
 /// u64 domain. Every apply path that can see this transaction must agree:
 /// sequential and precompute — precompute being exactly where the removed
-/// >u64 rejection used to live. Mirrors Go
+/// above-u64 rejection used to live. Mirrors Go
 /// `TestApplyNonCoinbaseTxBasicFeeAboveU64` and the shared vector
 /// `CV-U-FEE-U128-01`.
 #[test]
