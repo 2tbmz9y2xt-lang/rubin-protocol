@@ -66,6 +66,7 @@ def _hex0x(s: str) -> str:
 
 _CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)\Z")
 _MAX_U64 = (1 << 64) - 1
+_MAX_U128 = (1 << 128) - 1
 
 
 def _lean_opt_nat(x: Any) -> str:
@@ -78,8 +79,11 @@ def _lean_opt_nat(x: Any) -> str:
     integer token is still accepted, bounded to u64 exactly as every other
     reader in this line is: the widened domain is reachable only through the
     string form. Anything else fails closed: a leading zero, a sign,
-    whitespace, a fraction, an exponent, or a non-digit is never silently
-    reinterpreted.
+    whitespace, a fraction, an exponent, a non-digit, or a value above
+    u128 is never silently reinterpreted. Lean `Nat` would happily hold a
+    value no client can represent, so the u128 ceiling is enforced here
+    exactly as Go `Uint128.UnmarshalJSON`, Rust `Uint128Token`, and the
+    conformance runner's `exact_uint` enforce it.
     """
     if x is None:
         return "none"
@@ -94,6 +98,8 @@ def _lean_opt_nat(x: Any) -> str:
     if isinstance(x, str):
         if not _CANONICAL_DECIMAL.match(x):
             _fail(f"expected canonical unsigned decimal string, got: {x!r}")
+        if int(x) > _MAX_U128:
+            _fail(f"canonical decimal string above u128: {x}")
         return f"some {x}"
     _fail(f"expected nat, got: {type(x)}")
 

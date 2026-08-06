@@ -119,6 +119,18 @@ class CanonicalDecimalFeeTests(unittest.TestCase):
         self.assertEqual(_lean_opt_nat(18446744073709551615), "some 18446744073709551615")
         self.assertEqual(_lean_opt_nat(None), "none")
 
+    def test_string_ceiling_is_u128_max(self) -> None:
+        # A canonical decimal string is still bounded: Lean `Nat` is unbounded,
+        # so without this ceiling the generated formal artifact could carry a
+        # value that Go `Uint128.UnmarshalJSON`, Rust `Uint128Token`, and the
+        # runner's `exact_uint` all reject.
+        u128_max = str((1 << 128) - 1)
+        self.assertEqual(_lean_opt_nat(u128_max), f"some {u128_max}")
+        for bad in [str(1 << 128), str((1 << 129) - 1)]:
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit):
+                    _lean_opt_nat(bad)
+
     def test_rejects_legacy_numeric_token_above_u64(self) -> None:
         # The widened domain is reachable only through the string form, so a
         # bare JSON integer stays bounded to u64 here exactly as it is in both
