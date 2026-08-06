@@ -209,6 +209,33 @@ mod tests {
     }
 
     #[test]
+    fn rejects_null_in_a_value_position() {
+        // Mirrors Go: a null never reads as legacy zero.
+        assert_eq!(read("{\"v\":null}"), None);
+    }
+
+    #[test]
+    fn null_reads_as_none_for_an_optional_field() {
+        // Deliberately different from the value position above: rejecting a
+        // null value must not force an absent zero-valued field present.
+        // Mirrors Go's `*consensus.Uint128` fee/sum_fees response fields.
+        #[derive(serde::Deserialize, PartialEq, Debug)]
+        struct OptHolder {
+            #[serde(default, deserialize_with = "deserialize_opt")]
+            v: Option<u128>,
+        }
+        let read_opt = |raw: &str| serde_json::from_str::<OptHolder>(raw).map(|h| h.v);
+        assert_eq!(
+            read_opt("{\"v\":null}").expect("null is not an error"),
+            None
+        );
+        assert_eq!(read_opt("{}").expect("absent is not an error"), None);
+        // The optional reader is still the canonical one.
+        assert_eq!(read_opt("{\"v\":\"7\"}").expect("canonical"), Some(7));
+        assert!(read_opt("{\"v\":\"01\"}").is_err());
+    }
+
+    #[test]
     fn rejects_negative_and_fractional_numeric_tokens() {
         assert_eq!(read("{\"v\":-1}"), None);
         assert_eq!(read("{\"v\":1.0}"), None);
