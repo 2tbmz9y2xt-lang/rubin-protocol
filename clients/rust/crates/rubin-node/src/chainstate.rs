@@ -574,6 +574,13 @@ mod tests {
         expected_prev_hash: Option<String>,
         expected_target: String,
         expect_ok: bool,
+        // `expect_sum_fees` is a widened (u128) fee field shared with the
+        // Python conformance runner (`exact_uint` in
+        // conformance/runner/run_cv_bundle.py). A plain `u128` derive would
+        // diverge from it in both directions: it would reject the canonical
+        // decimal string form that fixed_json_rule mandates and accept a bare
+        // numeric token above u64 that every other reader rejects.
+        #[serde(deserialize_with = "rubin_consensus::uint128_json::deserialize")]
         expect_sum_fees: u128,
         expect_utxo_count: u64,
         expect_already_generated: u64,
@@ -1055,6 +1062,65 @@ mod tests {
             hex::encode(st.state_digest()),
             GENESIS_PLUS_HEIGHT_ONE_STATE_DIGEST_HEX
         );
+    }
+
+    /// RUB-1127: the reader contract for the shared widened `expect_sum_fees`
+    /// field, driven through the real `DevnetConnectBlockVector` deserializer
+    /// on the real fixture bytes.
+    ///
+    /// Every row mirrors `exact_uint` in conformance/runner/run_cv_bundle.py,
+    /// which reads this same field of these same fixtures, and Go
+    /// `consensus.Uint128.UnmarshalJSON`: a legacy numeric token is accepted
+    /// only through u64, the canonical decimal string form through u128, and
+    /// every other spelling is a fixture defect.
+    #[test]
+    fn devnet_expect_sum_fees_reads_the_canonical_json_contract() {
+        fn read(token: &str) -> Option<u128> {
+            const NEEDLE: &str = "\"expect_sum_fees\": 0";
+            assert_eq!(
+                DEVNET_GENESIS_FIXTURE_JSON.matches(NEEDLE).count(),
+                1,
+                "fixture no longer carries exactly one {NEEDLE} to splice"
+            );
+            let patched = DEVNET_GENESIS_FIXTURE_JSON
+                .replace(NEEDLE, &format!("\"expect_sum_fees\": {token}"));
+            serde_json::from_str::<FixtureFile<DevnetConnectBlockVector>>(&patched)
+                .ok()
+                .and_then(|doc| doc.vectors.into_iter().next())
+                .map(|v| v.expect_sum_fees)
+        }
+
+        // Legacy numeric token: accepted only through u64.
+        assert_eq!(read("0"), Some(0));
+        assert_eq!(read("18446744073709551615"), Some(u128::from(u64::MAX)));
+        assert_eq!(read("18446744073709551616"), None);
+
+        // Canonical decimal string: accepted through u128.
+        assert_eq!(read("\"0\""), Some(0));
+        assert_eq!(read("\"18446744073709551616\""), Some(1u128 << 64));
+        assert_eq!(
+            read("\"340282366920938463463374607431768211455\""),
+            Some(u128::MAX)
+        );
+
+        // Every other spelling is rejected.
+        for bad in [
+            "-1",
+            "1.0",
+            "\"\"",
+            "\"00\"",
+            "\"01\"",
+            "\"+1\"",
+            "\"-1\"",
+            "\" 1\"",
+            "\"1 \"",
+            "\"1.0\"",
+            "\"1e3\"",
+            // u128 max + 1
+            "\"340282366920938463463374607431768211456\"",
+        ] {
+            assert_eq!(read(bad), None, "accepted {bad}");
+        }
     }
 
     #[test]

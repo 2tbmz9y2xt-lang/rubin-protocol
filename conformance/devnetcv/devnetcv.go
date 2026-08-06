@@ -49,6 +49,15 @@ type ChainStateJSON struct {
 	HasTip           bool       `json:"has_tip"`
 }
 
+// ConnectBlockVector is WRITE-ONLY: it is marshalled into CV-DEVNET-*.json and
+// never unmarshalled here. ExpectSumFees therefore stays uint64 even though the
+// value it describes is the widened u128 sum_fees (RUB-1127): its readers are
+// conformance/runner/run_cv_bundle.py (exact_uint) and the Rust
+// DevnetConnectBlockVector, and both accept this legacy numeric token through
+// u64. Widening the field to consensus.Uint128 emits "expect_sum_fees": "0"
+// instead of 0 and rewrites every devnet fixture, so a devnet vector whose
+// sum_fees can exceed u64 must widen the field and regenerate the fixtures in
+// the same change.
 type ConnectBlockVector struct {
 	ID                       string          `json:"id"`
 	Op                       string          `json:"op"`
