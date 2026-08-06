@@ -7,8 +7,10 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"math/bits"
 	"os"
@@ -375,6 +377,13 @@ func mustLoadFixture(path string) *fixtureFile {
 	dec.UseNumber()
 	if err := dec.Decode(&f); err != nil {
 		fatalf("parse %s: %v", path, err)
+	}
+	// Decode stops at the end of the first JSON value, so a second value or
+	// trailing garbage would be accepted here and then dropped when the file
+	// is written back. json.Unmarshal (the pre-UseNumber reader) rejected
+	// that; requiring io.EOF from a second Decode keeps the same strictness.
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		fatalf("parse %s: trailing content after top-level JSON value", path)
 	}
 	return &f
 }
