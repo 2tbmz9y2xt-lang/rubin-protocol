@@ -260,6 +260,39 @@ func TestParseMineAddressAcceptsKeyIDAndCanonicalEncoding(t *testing.T) {
 	}
 }
 
+// TestValidateConfigMineAddressMatchesParseMineAddressDomain pins the early
+// config-time check to the single domain authority: it must accept exactly
+// what ParseMineAddress accepts and reject exactly what it rejects, with the
+// parser's own message. The pre-fix check hex-decoded the raw string and only
+// compared the byte length, so it drifted in BOTH directions — the 0x/0X and
+// whitespace rows below were rejected although the parser accepts them, and
+// the unsupported-suite_id rows passed config validation and were caught only
+// at the miner, after the whole storage lifecycle.
+func TestValidateConfigMineAddressMatchesParseMineAddressDomain(t *testing.T) {
+	keyID := strings.Repeat("11", mineAddressKeyIDBytes)
+	cfg := DefaultConfig()
+	for _, value := range []string{
+		"", "   ",
+		keyID, "0x" + keyID, "0X" + keyID, "  " + keyID + "\t",
+		"01" + keyID, "0x01" + keyID,
+		"00" + keyID, "02" + keyID, "ff" + keyID, "0Xff" + keyID,
+		strings.Repeat("11", 31), strings.Repeat("11", 34),
+		"abc", "zz", "0xzz",
+	} {
+		cfg.MineAddress = value
+		_, parseErr := ParseMineAddress(value)
+		err := ValidateConfig(cfg)
+		switch {
+		case parseErr == nil && err != nil:
+			t.Errorf("mine_address %q: ValidateConfig rejected a ParseMineAddress-valid value: %v", value, err)
+		case parseErr != nil && err == nil:
+			t.Errorf("mine_address %q: ValidateConfig accepted a value the parser rejects (%v)", value, parseErr)
+		case parseErr != nil && !strings.Contains(err.Error(), parseErr.Error()):
+			t.Errorf("mine_address %q: ValidateConfig error %q does not carry the parser error %q", value, err, parseErr)
+		}
+	}
+}
+
 func TestValidateConfigRejectsInvalidMineAddress(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MineAddress = "abcd"
