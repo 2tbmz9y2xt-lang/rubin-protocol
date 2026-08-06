@@ -48,6 +48,7 @@ type coreStealthSpendValidation struct {
 	cache       *SighashV1PrehashCache
 	rotation    RotationProvider
 	registry    *SuiteRegistry
+	sigCache    *SigCache
 }
 
 // validateCoreStealthSpendAtHeight validates a stealth spend using the suite
@@ -86,6 +87,7 @@ func validateCoreStealthSpendAtHeight(input coreStealthSpendValidation) error {
 		chainID:    input.chainID,
 		cache:      input.cache,
 		registry:   input.registry,
+		sigCache:   input.sigCache,
 		context:    "CORE_STEALTH",
 	})
 }

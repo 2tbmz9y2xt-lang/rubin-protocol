@@ -176,6 +176,7 @@ static int rubin_verify_sig_oneshot(
 import "C"
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -564,6 +565,56 @@ func runtimeSuiteParamsForVerification(suiteID uint8, registry *SuiteRegistry) (
 // AlgName alone. Runtime verification resolves an explicit v1 binding from
 // the suite parameters so existing suites cannot switch backend silently.
 func verifySigWithRegistry(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte, registry *SuiteRegistry) (bool, error) {
+	return verifySigWithRegistryCache(suiteID, pubkey, signature, digest32, registry, nil)
+}
+
+// sigCacheVerifierBindingIdentity encodes the RESOLVED verifier binding as
+// canonical identity bytes for the live signature-cache key.
+//
+// Injectivity: every component is either fixed-width (the binding kind byte, the
+// suite ID byte, the le64 integers) or length-prefixed (the algorithm names), so
+// the buffer parses back into exactly one (binding, params) pair left-to-right.
+// Two different resolved bindings — a different binding kind, a different
+// backend algorithm, different canonical lengths — and two different registry
+// entries behind the same suite ID therefore always produce different identity
+// bytes, and hence different cache keys.
+func sigCacheVerifierBindingIdentity(params SuiteParams, binding suiteVerifierBinding) []byte {
+	buf := make([]byte, 0, 64+len(binding.opensslAlg)+len(params.AlgName))
+	buf = append(buf, byte(binding.kind))
+	buf = appendSigCacheLenPrefixed(buf, []byte(binding.opensslAlg))
+	buf = appendSigCacheInt(buf, binding.pubkeyLen)
+	buf = appendSigCacheInt(buf, binding.sigLen)
+	buf = append(buf, params.SuiteID)
+	buf = appendSigCacheLenPrefixed(buf, []byte(params.AlgName))
+	buf = appendSigCacheInt(buf, params.PubkeyLen)
+	buf = appendSigCacheInt(buf, params.SigLen)
+	var cost [8]byte
+	binary.LittleEndian.PutUint64(cost[:], params.VerifyCost)
+	return append(buf, cost[:]...)
+}
+
+// verifySigWithRegistryCache is verifySigWithRegistry with an optional
+// positive-only signature cache.
+//
+// A nil cache is byte-for-byte the uncached path. With a cache, the ONLY step a
+// hit may skip is the verifySigWithBinding backend call, and only after every
+// authority check of this run already succeeded on this run:
+//
+//	registry lookup and runtime-registry drift check -> OpenSSL consensus init
+//	-> live verifier-binding resolution -> canonical length check
+//	-> binding-inclusive cache lookup -> backend on miss -> insert on success.
+//
+// Nothing else is cached: an invalid result, a backend error, an unknown suite,
+// a registry or binding resolution failure, and a non-canonical length never
+// insert, and none of them can be answered from the cache.
+func verifySigWithRegistryCache(
+	suiteID uint8,
+	pubkey []byte,
+	signature []byte,
+	digest32 [32]byte,
+	registry *SuiteRegistry,
+	cache *SigCache,
+) (bool, error) {
 	params, err := runtimeSuiteParamsForVerification(suiteID, registry)
 	if err != nil {
 		return false, err
@@ -575,5 +626,25 @@ func verifySigWithRegistry(suiteID uint8, pubkey []byte, signature []byte, diges
 	if err != nil {
 		return false, wrapResolveSuiteVerifierBindingError(suiteID, err)
 	}
-	return verifySigWithBinding(binding, pubkey, signature, digest32)
+	if cache == nil {
+		return verifySigWithBinding(binding, pubkey, signature, digest32)
+	}
+	// The canonical length check runs BEFORE the cache is consulted, so a
+	// non-canonical tuple can never be answered from the cache. This mirrors
+	// verifySigWithBinding's own first check, which the miss path repeats.
+	if len(pubkey) != binding.pubkeyLen || len(signature) != binding.sigLen {
+		return false, nil
+	}
+	bindingID := sigCacheVerifierBindingIdentity(params, binding)
+	if cache.lookupBound(bindingID, suiteID, pubkey, signature, digest32) {
+		return true, nil
+	}
+	ok, err := verifySigWithBinding(binding, pubkey, signature, digest32)
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		cache.insertBound(bindingID, suiteID, pubkey, signature, digest32)
+	}
+	return ok, nil
 }

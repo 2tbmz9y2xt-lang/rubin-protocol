@@ -59,7 +59,10 @@ type spendSigContext struct {
 	chainID    [32]byte
 	cache      *SighashV1PrehashCache
 	registry   *SuiteRegistry
-	context    string
+	// sigCache is the optional caller-owned positive signature cache. Nil (the
+	// default for every block-validation path) means exact uncached behavior.
+	sigCache *SigCache
+	context  string
 }
 
 // verifyKeyAndSigWithRegistryCache verifies a witness item's key binding and
@@ -74,7 +77,7 @@ func verifyKeyAndSigWithRegistryCache(w WitnessItem, expectedKeyID [32]byte, ctx
 	if err != nil {
 		return err
 	}
-	ok, err := verifySigWithRegistry(w.SuiteID, w.Pubkey, cryptoSig, digest, ctx.registry)
+	ok, err := verifySigWithRegistryCache(w.SuiteID, w.Pubkey, cryptoSig, digest, ctx.registry, ctx.sigCache)
 	if err != nil {
 		return err
 	}

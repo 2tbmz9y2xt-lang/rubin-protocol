@@ -94,7 +94,10 @@ func (ctx *nonCoinbaseApplyContext) validateVaultSpendSignature() error {
 			chainID:    ctx.chainID,
 			cache:      ctx.sighashCache,
 			registry:   ctx.registry,
-			context:    "CORE_VAULT",
+			// The Vault threshold path shares the one caller-owned positive
+			// signature cache with every other sequential native path.
+			sigCache: ctx.sigCache,
+			context:  "CORE_VAULT",
 		},
 	})
 }

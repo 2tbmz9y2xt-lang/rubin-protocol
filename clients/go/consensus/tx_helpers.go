@@ -27,9 +27,19 @@ type ParsedTxIDs struct {
 	WTxID [32]byte
 }
 
+// SuiteValidationContext is the suite-aware validation seam for an already
+// parsed transaction.
+//
+// SigCache is the caller-owned positive-only signature cache. It is OPTIONAL:
+// nil means exact uncached validation, which is what every block-validation
+// caller passes. A non-nil cache may only ever let the sequential native
+// signature paths skip a backend verification call for a tuple that already
+// verified successfully under the same resolved verifier binding; it never
+// caches transaction validity, an admission result, or any failure.
 type SuiteValidationContext struct {
 	Rotation RotationProvider
 	Registry *SuiteRegistry
+	SigCache *SigCache
 }
 
 func P2PKCovenantDataForPubkey(pub []byte) []byte {
@@ -142,6 +152,7 @@ func CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext(
 		chainID:  chainID,
 		rotation: suite.Rotation,
 		registry: suite.Registry,
+		sigCache: suite.SigCache,
 	})
 	if err != nil {
 		return nil, err
