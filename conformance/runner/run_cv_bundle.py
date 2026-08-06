@@ -364,9 +364,13 @@ def _da_fee_floor_policy_utxos(v: Dict[str, Any]) -> List[Dict[str, Any]]:
     scenario = v.get("scenario")
     if not isinstance(scenario, dict):
         raise ValueError("da_fee_floor_policy requires scenario or explicit utxos")
-    fee = int(scenario.get("fee", -1))
-    if fee < 0:
-        raise ValueError("da_fee_floor_policy scenario requires non-negative fee")
+    fee_problems: List[str] = []
+    fee = exact_uint(scenario.get("fee"), fee_problems, "da_fee_floor_policy scenario fee")
+    if fee is None:
+        raise ValueError(
+            "da_fee_floor_policy scenario requires an exact unsigned fee: "
+            + ("; ".join(fee_problems) or "missing")
+        )
     kind = str(scenario.get("kind", ""))
     if kind == "da_commit":
         prev_txid = "a1" * 32
@@ -1148,7 +1152,9 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
                 problems.append(f"{prefix}: entry must be object")
                 return problems
             da_id = str(entry.get("da_id", ""))
-            fee = int(entry.get("fee", 0))
+            fee = exact_uint(entry.get("fee", 0), problems, f"{prefix}: entry fee")
+            if fee is None:
+                return problems
             wire_bytes = int(entry.get("wire_bytes", 0))
             received_time = int(entry.get("received_time", 0))
             if da_id == "" or wire_bytes <= 0:

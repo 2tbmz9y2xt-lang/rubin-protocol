@@ -116,7 +116,17 @@ class CanonicalDecimalFeeTests(unittest.TestCase):
     def test_accepts_zero_and_legacy_numeric_token(self) -> None:
         self.assertEqual(_lean_opt_nat("0"), "some 0")
         self.assertEqual(_lean_opt_nat(10), "some 10")
+        self.assertEqual(_lean_opt_nat(18446744073709551615), "some 18446744073709551615")
         self.assertEqual(_lean_opt_nat(None), "none")
+
+    def test_rejects_legacy_numeric_token_above_u64(self) -> None:
+        # The widened domain is reachable only through the string form, so a
+        # bare JSON integer stays bounded to u64 here exactly as it is in both
+        # clients' readers and in the conformance runner's `exact_uint`.
+        for bad in [18446744073709551616, 1 << 128]:
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit):
+                    _lean_opt_nat(bad)
 
     def test_rejects_non_canonical_strings(self) -> None:
         for bad in ["", "00", "01", "+1", "-1", " 1", "1 ", "1.0", "1e3", "0x10", "abc"]:

@@ -65,6 +65,7 @@ def _hex0x(s: str) -> str:
 
 
 _CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)\Z")
+_MAX_U64 = (1 << 64) - 1
 
 
 def _lean_opt_nat(x: Any) -> str:
@@ -74,9 +75,11 @@ def _lean_opt_nat(x: Any) -> str:
     canonical unsigned decimal STRINGS, because a widened monetary integer
     must not depend on interoperable JSON-number precision. Lean `Nat` is
     unbounded, so the string is rendered as a plain numeral. A legacy JSON
-    integer token is still accepted. Anything else fails closed: a leading
-    zero, a sign, whitespace, a fraction, an exponent, or a non-digit is
-    never silently reinterpreted.
+    integer token is still accepted, bounded to u64 exactly as every other
+    reader in this line is: the widened domain is reachable only through the
+    string form. Anything else fails closed: a leading zero, a sign,
+    whitespace, a fraction, an exponent, or a non-digit is never silently
+    reinterpreted.
     """
     if x is None:
         return "none"
@@ -85,6 +88,8 @@ def _lean_opt_nat(x: Any) -> str:
     if isinstance(x, int):
         if x < 0:
             _fail(f"expected nat, got negative: {x}")
+        if x > _MAX_U64:
+            _fail(f"legacy numeric token above u64: {x}")
         return f"some {x}"
     if isinstance(x, str):
         if not _CANONICAL_DECIMAL.match(x):
