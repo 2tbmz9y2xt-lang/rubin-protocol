@@ -1597,6 +1597,23 @@ func updateWideSumFeesBlocks(
 	})
 	bad["block_hex"] = build(1)
 	bad["utxos"] = utxos
+
+	// sum_fees is the only widened value a vector supplies as INPUT, and
+	// block_basic_check_with_fees is the only op that reads it. Authoring it
+	// as a canonical decimal string above u64 binds the request path end to
+	// end: the runner must forward the string unchanged, and both CLIs must
+	// read it back as exactly 2^64. Re-encoding it as a bare JSON number puts
+	// a numeric token above u64 on the wire, which both readers reject.
+	inputSide := upsertVector(f, "CV-SUB-U128-03", map[string]any{
+		"op":                 "block_basic_check_with_fees",
+		"height":             json.Number("1"),
+		"expected_prev_hash": sub1["expected_prev_hash"],
+		"expected_target":    sub1["expected_target"],
+		"already_generated":  json.Number("0"),
+		"expect_ok":          true,
+	})
+	inputSide["block_hex"] = build(0)
+	inputSide["sum_fees"] = sumFees.String()
 }
 
 type wideSumFeesBlockInput struct {

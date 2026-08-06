@@ -11,6 +11,24 @@ Policy:
 
 ---
 
+## 2026-08-06 — Widened sum_fees on the request path (RUB-1127)
+
+Generator-owned: `clients/go/cmd/gen-conformance-fixtures` appends
+`CV-SUB-U128-03` to `CV-SUBSIDY.json` and the fixture is regenerated through
+that tool. `sum_fees` is the only widened value a vector supplies as INPUT,
+and `block_basic_check_with_fees` is the only op that reads it; the row
+authors it as the canonical decimal string `"18446744073709551616"` (exactly
+2^64) against the same block whose coinbase pays `block_subsidy(1) +
+sum_fees`, so the request path is bound end to end: the runner must forward
+the authored token unchanged and both CLIs must read it back exactly.
+`conformance/runner/run_cv_bundle.py` no longer re-encodes that token
+through `int()` — which put a numeric token above u64 on the wire that both
+readers correctly refuse — and its policy lane now reads the `expect_*` side
+of every fee-carrying comparison with the same canonical-aware reader as the
+response side. Regenerated `conformance/MATRIX.md`, the CV Lean companions,
+the Go trace, and `GoTraceV1.lean` through their existing owners. No fixture
+schema, runner op, API, or canonical-spec change.
+
 ## 2026-08-05 — Exact u128 fee and sum_fees (RUB-1127)
 
 Generator-owned: `clients/go/cmd/gen-conformance-fixtures` appends

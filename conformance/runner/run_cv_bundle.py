@@ -1826,7 +1826,16 @@ def validate_vector(
         req["block_hex"] = v["block_hex"]
         include_block_context(require_height=True)
         req["already_generated"] = int(v.get("already_generated", 0))
-        req["sum_fees"] = int(v.get("sum_fees", 0))
+        # sum_fees is the one widened value the runner sends as INPUT. Forward
+        # the authored token unchanged — a canonical string stays a string, a
+        # legacy numeric stays numeric — so both CLIs read exactly what the
+        # fixture wrote. int() re-encoded "18446744073709551616" as a bare JSON
+        # number above u64, which both readers then correctly refused.
+        sum_fees_token = v.get("sum_fees", 0)
+        sum_fees_problems: List[str] = []
+        if exact_uint(sum_fees_token, sum_fees_problems, f"{gate}/{vid}: sum_fees") is None:
+            return sum_fees_problems or [f"{gate}/{vid}: sum_fees is null"]
+        req["sum_fees"] = sum_fees_token
     elif op == "connect_block_basic":
         req["block_hex"] = v["block_hex"]
         include_block_context(require_height=True)
@@ -2340,7 +2349,13 @@ def validate_vector(
         for key in int_fields:
             expect_key = f"expect_{key}"
             if expect_key in v:
-                expected = int(v[expect_key])
+                # The expectation side gets the same canonical-aware reader the
+                # response side already uses: `fee`, `required_fee`, and
+                # `relay_fee_floor` are widened, so a bare int() would read an
+                # authored token the clients themselves would reject.
+                expected = exact_uint(v[expect_key], problems, f"{gate}/{vid}: {expect_key}")
+                if expected is None:
+                    continue
                 for side, resp in (("go", go_resp), ("rust", rust_resp)):
                     if not policy_has(resp, key):
                         problems.append(f"{gate}/{vid}: missing {side}.{key} for {expect_key}")
