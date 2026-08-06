@@ -159,12 +159,14 @@ func (c *SigCache) insertBound(bindingID []byte, suiteID uint8, pubkey, sig []by
 func (c *SigCache) lookupKey(key [32]byte) bool {
 	c.mu.RLock()
 	_, ok := c.entries[key]
-	c.mu.RUnlock()
+	// Counter bump stays under RLock: Reset zeroes the counters under the write
+	// lock, so no add can land after a completed Reset.
 	if ok {
 		c.hits.Add(1)
 	} else {
 		c.misses.Add(1)
 	}
+	c.mu.RUnlock()
 	return ok
 }
 
