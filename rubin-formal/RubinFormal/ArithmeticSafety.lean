@@ -99,15 +99,65 @@ theorem blockSubsidy_in_u64 (h ag : Nat) :
     SubsidyV1.blockSubsidy h ag ≤ maxU64 :=
   Nat.le_trans (blockSubsidy_bounded h ag) mineable_cap_in_u64
 
+/-- Structural ceiling on a block's `sum_fees`.
+
+    A fee is `sum_in - sum_out`, so a block's aggregate fee cannot exceed the
+    total input value its transactions spend. Every input carries a u64 value
+    and consumes at least one weight unit, so the aggregate is bounded by
+    `MAX_BLOCK_WEIGHT * maxU64`. That is `1254378597012249509820000000`, which
+    needs 91 bits — far above u64.
+
+    ASSUMPTION, not a theorem of this model: it is the consensus resource
+    limit `MAX_BLOCK_WEIGHT` (clients/go/consensus/constants.go) restated as a
+    numeric bound. This package models no block weight accounting, so the
+    derivation is not machine-checked here; only the u128 containment below
+    is. Consumers must read `sum_fees ≤ maxBlockSumFees` as an assumption
+    discharged by the consensus implementation and its conformance vectors,
+    not as a proved property. -/
+def maxBlockSumFees : Nat := 68000000 * maxU64
+
+/-- The block sum_fees ceiling genuinely exceeds u64, which is exactly why the
+    previous `fees ≤ maxU64` premise was unsound. -/
+theorem maxBlockSumFees_exceeds_u64 : maxU64 < maxBlockSumFees := by
+  native_decide
+
+/-- The coinbase value bound `blockSubsidy + sum_fees` fits in u128 for every
+    `sum_fees` within the structural ceiling.
+
+    This is the bound the implementations actually compute
+    (`validateCoinbaseValueBound` / `validate_coinbase_value_bound`): the
+    coinbase limit is `block_subsidy(h) + sum_fees` in checked u128. Fees do
+    NOT accumulate into `already_generated`, which is subsidy-only, so they
+    are deliberately not summed with it here. -/
+theorem block_reward_bound_in_u128 (h ag fees : Nat)
+    (hFees : fees ≤ maxBlockSumFees) :
+    SubsidyV1.blockSubsidy h ag + fees ≤ maxU128 := by
+  have hSub := blockSubsidy_bounded h ag
+  calc SubsidyV1.blockSubsidy h ag + fees
+      ≤ SubsidyV1.MINEABLE_CAP + maxBlockSumFees := Nat.add_le_add hSub hFees
+    -- F-AUDIT-11: see mineable_cap_in_u64 comment for native_decide rationale.
+    _ ≤ maxU128 := by native_decide
+
 /-- alreadyGenerated + blockSubsidy + fees fits in u128 when inputs are bounded.
-    This is the key safety theorem for PR #420 (u128 arithmetic). -/
+
+    The fee premise is the structural block ceiling, NOT `maxU64`: a
+    protocol-valid `sum_fees` may exceed u64 (accepted rows pin exactly
+    2^64), so the previous `fees ≤ maxU64` hypothesis was false for
+    reachable blocks and the statement was vacuous there. `maxBlockSumFees`
+    is the strongest honest bound current consensus limits supply, and it is
+    an assumption (see `maxBlockSumFees`), not a theorem of this model.
+
+    The `ag +` term is retained only for backward compatibility of this
+    statement's shape; `already_generated` is subsidy-only and fees never
+    accumulate into it, so `block_reward_bound_in_u128` above is the
+    statement that matches what consensus computes. -/
 theorem subsidy_accumulation_in_u128 (h ag fees : Nat)
     (hAg : ag ≤ SubsidyV1.MINEABLE_CAP)
-    (hFees : fees ≤ maxU64) :
+    (hFees : fees ≤ maxBlockSumFees) :
     ag + SubsidyV1.blockSubsidy h ag + fees ≤ maxU128 := by
   have hSub := blockSubsidy_bounded h ag
   calc ag + SubsidyV1.blockSubsidy h ag + fees
-      ≤ SubsidyV1.MINEABLE_CAP + SubsidyV1.MINEABLE_CAP + maxU64 :=
+      ≤ SubsidyV1.MINEABLE_CAP + SubsidyV1.MINEABLE_CAP + maxBlockSumFees :=
         Nat.add_le_add (Nat.add_le_add hAg hSub) hFees
     -- F-AUDIT-11: see mineable_cap_in_u64 comment for native_decide rationale.
     _ ≤ maxU128 := by native_decide

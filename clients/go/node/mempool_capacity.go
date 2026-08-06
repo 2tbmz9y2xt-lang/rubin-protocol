@@ -221,11 +221,8 @@ func compareMempoolEvictionPriority(a, b mempoolEvictionPlanEntry) int {
 	if cmp := compareEvictionFeeRate(a.entry, b.entry); cmp != 0 {
 		return cmp
 	}
-	if a.entry.fee != b.entry.fee {
-		if a.entry.fee > b.entry.fee {
-			return 1
-		}
-		return -1
+	if cmp := a.entry.fee.Cmp(b.entry.fee); cmp != 0 {
+		return cmp
 	}
 	aSeq := evictionAdmissionSeq(a)
 	bSeq := evictionAdmissionSeq(b)

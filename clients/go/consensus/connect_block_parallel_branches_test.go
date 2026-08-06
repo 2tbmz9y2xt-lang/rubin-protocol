@@ -146,7 +146,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_NilSigQueueSafety(t *testing.T) {
 		tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp)}
 		_, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0x99), utxos, 1, 0, [32]byte{}, nil, nil, nil)
 		if outputValue == 90 {
-			if err != nil || fee != 10 {
+			if err != nil || fee.Cmp(Uint128FromU64(10)) != 0 {
 				t.Fatalf("nil-queue success: fee=%d err=%v", fee, err)
 			}
 		} else if !isTxErrCode(err, TX_ERR_VALUE_CONSERVATION) {
@@ -202,7 +202,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_MultisigBranch(t *testing.T) {
 	if err := q.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
-	if fee != 100 {
+	if fee.Cmp(Uint128FromU64(100)) != 0 {
 		t.Errorf("expected fee=100, got %d", fee)
 	}
 	if len(nextUtxos) != 1 {
@@ -251,7 +251,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_HTLCClaimBranch(t *testing.T) {
 	if err := q.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
-	if fee != entry.Value-90 {
+	if fee.Cmp(Uint128FromU64(entry.Value-90)) != 0 {
 		t.Errorf("expected fee=%d, got %d", entry.Value-90, fee)
 	}
 	_ = nextUtxos
@@ -291,7 +291,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_StealthBranch(t *testing.T) {
 	if err := q.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
-	if fee != 100 {
+	if fee.Cmp(Uint128FromU64(100)) != 0 {
 		t.Errorf("expected fee=100, got %d", fee)
 	}
 	if len(nextUtxos) != 1 {
@@ -745,7 +745,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultSpendOK(t *testing.T) {
 		t.Fatalf("flush: %v", err)
 	}
 	// Fee = (100 + 10) - 100 = 10
-	if fee != 10 {
+	if fee.Cmp(Uint128FromU64(10)) != 0 {
 		t.Errorf("expected fee=10, got %d", fee)
 	}
 	if len(nextUtxos) != 1 {
@@ -794,7 +794,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultCreationOK(t *testing.T) {
 	if err := q.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
-	if fee != 10 {
+	if fee.Cmp(Uint128FromU64(10)) != 0 {
 		t.Errorf("expected fee=10, got %d", fee)
 	}
 	if len(nextUtxos) != 1 {
@@ -1063,7 +1063,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_AnchorOutputSkip(t *testing.T) {
 	if len(nextUtxos) != 1 {
 		t.Errorf("expected 1 UTXO (anchor skipped), got %d", len(nextUtxos))
 	}
-	if fee != 10 {
+	if fee.Cmp(Uint128FromU64(10)) != 0 {
 		t.Errorf("expected fee=10, got %d", fee)
 	}
 }
@@ -1101,7 +1101,7 @@ func TestApplyWrapper(t *testing.T) {
 		if err := q.Flush(); err != nil {
 			t.Fatalf("flush: %v", err)
 		}
-		if summary.Fee != 10 {
+		if summary.Fee.Cmp(Uint128FromU64(10)) != 0 {
 			t.Errorf("expected fee=10, got %d", summary.Fee)
 		}
 		if len(nextUtxos) != 1 {
@@ -1275,7 +1275,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityOutputGroupCapLiveEnforced(
 	// ...and atomically on the queued apply path.
 	q := NewSigCheckQueue(1)
 	workQ, fee, err := applyNonCoinbaseTxBasicWorkQ(makeTx(SIMPLICITY_MAX_GROUP_OUTPUTS+1), hashWithPrefix(0xF3), utxoSet, 1, 0, [32]byte{}, q, rotation, nil)
-	if workQ != nil || fee != 0 || q.Len() != 0 {
+	if workQ != nil || fee.Cmp(Uint128FromU64(0)) != 0 || q.Len() != 0 {
 		t.Fatalf("expected no queued mutation on reject, got work=%v fee=%d sigs=%d", workQ, fee, q.Len())
 	}
 	assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY same-cmr output group exceeds limit")
@@ -1308,7 +1308,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityInputGroupCapDeferredBehind
 		tx, txid, utxos := makeCase(inputCount, splitLast)
 		q := NewSigCheckQueue(1)
 		work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxos, 1, 0, [32]byte{}, q, nil, nil)
-		if work != nil || fee != 0 || q.Len() != 0 {
+		if work != nil || fee.Cmp(Uint128FromU64(0)) != 0 || q.Len() != 0 {
 			t.Fatalf("expected no queued mutation/sigs on reject, got work=%v fee=%d sigs=%d", work, fee, q.Len())
 		}
 		return err
@@ -1373,7 +1373,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_HTLCCreationFirstErrorOrder(t *testing.T) 
 	before := cloneUtxoSet(utxos)
 	queue := NewSigCheckQueue(1)
 	work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0x66), utxos, 1, 0, [32]byte{}, queue, nil, nil)
-	if work != nil || fee != 0 || queue.Len() != 0 {
+	if work != nil || fee.Cmp(Uint128FromU64(0)) != 0 || queue.Len() != 0 {
 		t.Fatalf("rejection returned work=%v fee=%d queued=%d", work, fee, queue.Len())
 	}
 	assertTxErrCodeMsg(t, err, TX_ERR_PARSE, "CORE_HTLC claim/refund key_id must differ")

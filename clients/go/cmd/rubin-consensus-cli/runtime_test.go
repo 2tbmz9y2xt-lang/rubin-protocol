@@ -580,11 +580,11 @@ func testRuntimeKeyOpBlockValidationAndConnect(t *testing.T, fixture runtimeKeyO
 	if !r1.Ok || len(r1.BlockHash) != 64 {
 		t.Fatalf("unexpected resp: %+v", r1)
 	}
-	r2 := runRequest(t, Request{Op: "block_basic_check_with_fees", BlockHex: blockHex, Height: 0, AlreadyGenerated: 0, SumFees: 0})
+	r2 := runRequest(t, Request{Op: "block_basic_check_with_fees", BlockHex: blockHex, Height: 0, AlreadyGenerated: 0, SumFees: consensus.Uint128FromU64(0)})
 	if !r2.Ok || len(r2.BlockHash) != 64 {
 		t.Fatalf("unexpected resp: %+v", r2)
 	}
-	r3 := runRequest(t, Request{Op: "connect_block_basic", BlockHex: blockHex, Height: 0, AlreadyGenerated: 0, SumFees: 0, ChainIDHex: ""})
+	r3 := runRequest(t, Request{Op: "connect_block_basic", BlockHex: blockHex, Height: 0, AlreadyGenerated: 0, SumFees: consensus.Uint128FromU64(0), ChainIDHex: ""})
 	if !r3.Ok {
 		t.Fatalf("unexpected resp: %+v", r3)
 	}

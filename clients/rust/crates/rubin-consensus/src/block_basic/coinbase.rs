@@ -68,11 +68,15 @@ pub(super) fn validate_coinbase_structure(
     Ok(())
 }
 
+/// Enforces CANONICAL §19.2: the coinbase output total must not exceed
+/// `block_subsidy(h) + sum_fees`. The bound is computed in checked u128 from
+/// the exact u128 `sum_fees`, so the exact bound is accepted and only
+/// `bound + 1` yields `BlockErrSubsidyExceeded`.
 pub(crate) fn validate_coinbase_value_bound(
     pb: &ParsedBlock,
     block_height: u64,
     already_generated: u128,
-    sum_fees: u64,
+    sum_fees: u128,
 ) -> Result<(), TxError> {
     if block_height == 0 {
         return Ok(());
@@ -105,11 +109,11 @@ fn sum_coinbase_outputs(coinbase: &Tx) -> Result<u128, TxError> {
 fn coinbase_value_limit(
     block_height: u64,
     already_generated: u128,
-    sum_fees: u64,
+    sum_fees: u128,
 ) -> Result<u128, TxError> {
     let subsidy = block_subsidy(block_height, already_generated);
-    (subsidy as u128)
-        .checked_add(sum_fees as u128)
+    u128::from(subsidy)
+        .checked_add(sum_fees)
         .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "u128 overflow"))
 }
 

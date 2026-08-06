@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
@@ -143,13 +144,13 @@ func TestRelayTxMetadataNilProviderErrors(t *testing.T) {
 	}
 
 	h.service.cfg.TxMetadataFunc = func([]byte) (node.RelayTxMetadata, error) {
-		return node.RelayTxMetadata{Fee: 9, Size: 7}, nil
+		return node.RelayTxMetadata{Fee: consensus.Uint128FromU64(9), Size: 7}, nil
 	}
 	meta, err := h.service.relayTxMetadata([]byte{0x00})
 	if err != nil {
 		t.Fatalf("provider relayTxMetadata: %v", err)
 	}
-	if meta.Fee != 9 || meta.Size != 7 {
+	if meta.Fee.Cmp(consensus.Uint128FromU64(9)) != 0 || meta.Size != 7 {
 		t.Fatalf("provider meta=%+v, want fee=9 size=7", meta)
 	}
 }

@@ -3,6 +3,7 @@ package node
 import (
 	"errors"
 	"fmt"
+	"math/bits"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -97,7 +98,7 @@ func RejectDaAnchorTxPolicy(
 	if err != nil {
 		return true, daBytes, reason, err
 	}
-	if floor.required == 0 {
+	if floor.required.IsZero() {
 		// DA tx but every Stage C rate-derived fee term is zero: the
 		// relay-floor term is zero and both DA-side terms are zero.
 		// Nothing to enforce; admit without fee compute.
@@ -107,20 +108,31 @@ func RejectDaAnchorTxPolicy(
 	if err != nil {
 		return true, daBytes, "cannot compute fee for DA tx (policy)", err
 	}
-	if fee < floor.required {
+	if fee.Cmp(floor.required) < 0 {
 		return true, daBytes, fmt.Sprintf(
-			"DA fee below Stage C floor (fee=%d required_fee=%d relay_fee_floor=%d da_fee_floor=%d da_surcharge=%d weight=%d da_payload_len=%d)",
-			fee, floor.required, floor.relayFloor, floor.daFloor, floor.daSurcharge, weight, daBytes,
+			"DA fee below Stage C floor (fee=%s required_fee=%s relay_fee_floor=%s da_fee_floor=%d da_surcharge=%d weight=%d da_payload_len=%d)",
+			fee.String(), floor.required.String(), floor.relayFloor.String(), floor.daFloor, floor.daSurcharge, weight, daBytes,
 		), nil
 	}
 	return false, daBytes, "", nil
 }
 
 type daAnchorRequiredFee struct {
-	relayFloor  uint64
+	relayFloor  consensus.Uint128
 	daFloor     uint64
 	daSurcharge uint64
-	required    uint64
+	required    consensus.Uint128
+}
+
+// mulU64Exact returns the exact 128-bit product of two u64 rate terms. Every
+// product bit is retained, so a relay fee floor above u64 is measured exactly
+// against the u128 fee instead of rejecting a transaction whose fee genuinely
+// clears it. Mirrors the already-exact predicates in mempool_fee_floor.go
+// (feeRateBelowFloor) and the consensus-CLI policy model
+// (feeBelowRollingFloorPolicy), which never reject on this product.
+func mulU64Exact(a uint64, b uint64) consensus.Uint128 {
+	hi, lo := bits.Mul64(a, b)
+	return consensus.Uint128{Hi: hi, Lo: lo}
 }
 
 func computeDaAnchorRequiredFee(
@@ -130,10 +142,12 @@ func computeDaAnchorRequiredFee(
 	minDaFeeRate uint64,
 	daSurchargePerByte uint64,
 ) (daAnchorRequiredFee, string, error) {
-	relayFloor, err := mulU64NoOverflow(weight, currentMempoolMinFeeRate)
-	if err != nil {
-		return daAnchorRequiredFee{}, fmt.Sprintf("relay fee floor overflow (weight=%d current_mempool_min_fee_rate=%d)", weight, currentMempoolMinFeeRate), err
-	}
+	// The relay-floor term is exact and never rejects: weight and the rolling
+	// rate are both u64, so their full product fits u128 by construction.
+	// The DA-side terms below keep their u64 overflow errors, whose reject
+	// reasons are pinned by the shared CV-DA-FEE-FLOOR vector and by both
+	// consensus-CLI policy models.
+	relayFloor := mulU64Exact(weight, currentMempoolMinFeeRate)
 	daFloor, err := mulU64NoOverflow(daBytes, minDaFeeRate)
 	if err != nil {
 		return daAnchorRequiredFee{}, fmt.Sprintf("DA fee floor overflow (da_payload_len=%d min_da_fee_rate=%d)", daBytes, minDaFeeRate), err
@@ -154,64 +168,71 @@ func computeDaAnchorRequiredFee(
 	}, "", nil
 }
 
-func maxDaAnchorRequiredFee(relayFloor uint64, daFloor uint64, daSurcharge uint64) (uint64, error) {
+func maxDaAnchorRequiredFee(relayFloor consensus.Uint128, daFloor uint64, daSurcharge uint64) (consensus.Uint128, error) {
 	daRequired := daFloor
 	if err := addU64NoOverflow(&daRequired, daSurcharge); err != nil {
-		return 0, err
+		return consensus.Uint128{}, err
 	}
-	if daRequired > relayFloor {
-		return daRequired, nil
+	widened := consensus.Uint128FromU64(daRequired)
+	if widened.Cmp(relayFloor) > 0 {
+		return widened, nil
 	}
 	return relayFloor, nil
 }
 
-func computeFeeNoVerify(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (uint64, error) {
+// computeFeeNoVerify derives the policy-side fee as an exact u128, matching
+// the consensus derivation's domain. Per-input and per-output values stay
+// u64; only their sums and the difference widen, so a DA transaction whose
+// fee exceeds u64 is measured against the Stage C floor exactly instead of
+// failing an overflow check.
+func computeFeeNoVerify(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (consensus.Uint128, error) {
 	if tx == nil {
-		return 0, errors.New("nil tx")
+		return consensus.Uint128{}, errors.New("nil tx")
 	}
 	if len(tx.Inputs) == 0 {
-		return 0, errors.New("missing inputs")
+		return consensus.Uint128{}, errors.New("missing inputs")
 	}
 	if utxos == nil {
-		return 0, errors.New("nil utxo set")
+		return consensus.Uint128{}, errors.New("nil utxo set")
 	}
 	sumIn, err := sumInputValueNoVerify(tx, utxos)
 	if err != nil {
-		return 0, err
+		return consensus.Uint128{}, err
 	}
 	sumOut, err := sumOutputValueNoVerify(tx)
 	if err != nil {
-		return 0, err
+		return consensus.Uint128{}, err
 	}
-	if sumOut > sumIn {
-		return 0, errors.New("overspend")
+	fee, ok := sumIn.CheckedSub(sumOut)
+	if !ok {
+		return consensus.Uint128{}, errors.New("overspend")
 	}
-	return sumIn - sumOut, nil
+	return fee, nil
 }
 
-func sumInputValueNoVerify(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (uint64, error) {
-	var sumIn uint64
+func sumInputValueNoVerify(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (consensus.Uint128, error) {
+	var sumIn consensus.Uint128
 	for _, in := range tx.Inputs {
 		op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
 		entry, ok := utxos[op]
 		if !ok {
-			return 0, errors.New("missing utxo")
+			return consensus.Uint128{}, errors.New("missing utxo")
 		}
-		next := sumIn + entry.Value
-		if next < sumIn {
-			return 0, errors.New("sum_in overflow")
+		next, ok := sumIn.CheckedAdd(consensus.Uint128FromU64(entry.Value))
+		if !ok {
+			return consensus.Uint128{}, errors.New("sum_in overflow")
 		}
 		sumIn = next
 	}
 	return sumIn, nil
 }
 
-func sumOutputValueNoVerify(tx *consensus.Tx) (uint64, error) {
-	var sumOut uint64
+func sumOutputValueNoVerify(tx *consensus.Tx) (consensus.Uint128, error) {
+	var sumOut consensus.Uint128
 	for _, out := range tx.Outputs {
-		next := sumOut + out.Value
-		if next < sumOut {
-			return 0, errors.New("sum_out overflow")
+		next, ok := sumOut.CheckedAdd(consensus.Uint128FromU64(out.Value))
+		if !ok {
+			return consensus.Uint128{}, errors.New("sum_out overflow")
 		}
 		sumOut = next
 	}

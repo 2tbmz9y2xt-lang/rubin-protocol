@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from dataclasses import dataclass
 from decimal import Decimal
 from math import gcd
@@ -32,6 +33,43 @@ def _hex_to_bytes(hex_str: str) -> list[int]:
     for i in range(0, len(s), 2):
         out.append(int(s[i : i + 2], 16))
     return out
+
+
+_MAX_U64 = (1 << 64) - 1
+_MAX_U128 = (1 << 128) - 1
+_CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)\Z")
+
+
+def _widened_fee(v: dict[str, Any], key: str, vid: str) -> int:
+    """Read a widened (u128-domain) fee or sum_fees field exactly.
+
+    Same reader contract as `exact_uint` in conformance/runner/run_cv_bundle.py,
+    Go `consensus.Uint128.UnmarshalJSON`, and Rust `uint128_json::deserialize`:
+    a legacy JSON integer token is accepted only through u64, the canonical
+    decimal string form ("0" or [1-9][0-9]*) through u128, and every other
+    spelling is a fixture defect -- negative, signed, padded, spaced, empty,
+    fractional, exponential, non-digit, or above u128.
+
+    A bare `int()` here would silently normalize "01" to 1 where the conformance
+    runner rejects it (the executable corpus and the formal layer disagreeing
+    about one fixture byte), render a negative as a non-Nat that fails
+    `lake build` with an elaboration error instead of a fixture diagnostic, and
+    pin a value above u128 into the formal layer outside the domain either
+    client can represent.
+    """
+    value = v.get(key)
+    if isinstance(value, bool):
+        raise ValueError(f"{vid}: {key} must be an unsigned integer, got bool")
+    if isinstance(value, int):
+        if value < 0 or value > _MAX_U64:
+            raise ValueError(f"{vid}: {key} legacy numeric token out of u64 range: {value}")
+        return value
+    if isinstance(value, str) and _CANONICAL_DECIMAL.match(value):
+        parsed = int(value)
+        if parsed > _MAX_U128:
+            raise ValueError(f"{vid}: {key} exceeds u128: {value}")
+        return parsed
+    raise ValueError(f"{vid}: {key} must be a canonical unsigned decimal value, got {value!r}")
 
 
 def _lean_opt_str(value: str | None) -> str:
@@ -815,16 +853,17 @@ def load_cv_utxo_basic(path: Path) -> list[UtxoBasicVector]:
                 )
             )
         expect_ok = bool(v.get("expect_ok"))
+        vid = str(v.get("id") or "")
         out.append(
             UtxoBasicVector(
-                vid=str(v.get("id") or ""),
+                vid=vid,
                 tx_hex=tx_hex,
                 utxos=utxos,
                 height=int(v.get("height", 0)),
                 block_timestamp=int(v.get("block_timestamp", 0)),
                 expect_ok=expect_ok,
                 expect_err=(str(v.get("expect_err")) if not expect_ok else None),
-                expect_fee=(int(v.get("expect_fee")) if expect_ok and "expect_fee" in v else None),
+                expect_fee=(_widened_fee(v, "expect_fee", vid) if expect_ok and "expect_fee" in v else None),
                 expect_utxo_count=(
                     int(v.get("expect_utxo_count")) if expect_ok and "expect_utxo_count" in v else None
                 ),
@@ -1092,16 +1131,17 @@ def _load_connect_block_gate(path: Path, gate: str, allowed_ops: tuple[str, ...]
                 )
             )
         expect_ok = bool(v.get("expect_ok"))
+        vid = str(v.get("id") or "")
         out.append(
             SubsidyVector(
-                vid=str(v.get("id") or ""),
+                vid=vid,
                 op=op,
                 block_hex=str(v.get("block_hex") or ""),
                 expected_prev_hash=(str(v.get("expected_prev_hash")) if "expected_prev_hash" in v else None),
                 expected_target=(str(v.get("expected_target")) if "expected_target" in v else None),
                 height=int(v.get("height", 0)),
                 already_generated=int(v.get("already_generated", 0)),
-                sum_fees=(int(v.get("sum_fees")) if "sum_fees" in v else None),
+                sum_fees=(_widened_fee(v, "sum_fees", vid) if "sum_fees" in v else None),
                 utxos=utxos,
                 expect_ok=expect_ok,
                 expect_err=(str(v.get("expect_err")) if not expect_ok else None),
@@ -1826,7 +1866,7 @@ def load_da_fee_floor_policy_vectors(
                 tx_hex=(str(raw["tx_hex"]) if "tx_hex" in raw else None),
                 expect_ok=bool(raw.get("expect_ok", True)),
                 expect_err=(str(raw["expect_err"]) if "expect_err" in raw else None),
-                fee=_optional_int(raw, "expect_fee", vid),
+                fee=(_widened_fee(raw, "expect_fee", vid) if "expect_fee" in raw else None),
                 weight=_optional_int(raw, "expect_weight", vid),
                 da_bytes=_optional_int(raw, "expect_da_bytes", vid),
                 current_mempool_min_fee_rate=_int_default(raw, "current_mempool_min_fee_rate", 1, vid),
@@ -2051,9 +2091,10 @@ def _load_utxo_apply_vectors(doc: dict[str, Any], gate: str) -> list[UtxoApplyVe
                 )
             )
         expect_ok = bool(v.get("expect_ok"))
+        vid = str(v.get("id") or "")
         out.append(
             UtxoApplyVector(
-                vid=str(v.get("id") or ""),
+                vid=vid,
                 tx_hex=tx_hex,
                 utxos=utxos,
                 height=int(v.get("height", 0)),
@@ -2061,7 +2102,7 @@ def _load_utxo_apply_vectors(doc: dict[str, Any], gate: str) -> list[UtxoApplyVe
                 block_mtp=(int(v.get("block_mtp")) if "block_mtp" in v else None),
                 expect_ok=expect_ok,
                 expect_err=(str(v.get("expect_err")) if not expect_ok else None),
-                expect_fee=(int(v.get("expect_fee")) if expect_ok and "expect_fee" in v else None),
+                expect_fee=(_widened_fee(v, "expect_fee", vid) if expect_ok and "expect_fee" in v else None),
                 expect_utxo_count=(
                     int(v.get("expect_utxo_count")) if expect_ok and "expect_utxo_count" in v else None
                 ),

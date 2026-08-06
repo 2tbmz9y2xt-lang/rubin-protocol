@@ -76,7 +76,7 @@ type CanonicalAppliedBlock struct {
 type ChainStateConnectSummary struct {
 	BlockHeight        uint64
 	BlockHash          [32]byte
-	SumFees            uint64
+	SumFees            consensus.Uint128
 	AlreadyGenerated   uint64
 	AlreadyGeneratedN1 uint64
 	UtxoCount          uint64

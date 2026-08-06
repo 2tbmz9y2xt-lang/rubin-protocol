@@ -712,7 +712,7 @@ func TestMempoolPendingOutpointAdmissionSeqExhaustionReleasesReservation(t *test
 		txid:   [32]byte{0x0c},
 		wtxid:  [32]byte{0x0d},
 		inputs: []consensus.Outpoint{testOutpoint(1), testOutpoint(2)},
-		fee:    1, weight: 1, size: 1,
+		fee:    consensus.Uint128FromU64(1), weight: 1, size: 1,
 	}
 	mp := &Mempool{maxTxs: 10, maxBytes: 100, lastAdmissionSeq: ^uint64(0)}
 	mp.mu.Lock()
@@ -733,7 +733,7 @@ func TestMempoolPendingOutpointLiveFloorRecheckReleasesReservation(t *testing.T)
 		txid:   [32]byte{0x1c},
 		wtxid:  [32]byte{0x1d},
 		inputs: []consensus.Outpoint{testOutpoint(3)},
-		fee:    DefaultMempoolMinFeeRate, weight: 1, size: 1,
+		fee:    consensus.Uint128FromU64(DefaultMempoolMinFeeRate), weight: 1, size: 1,
 	}
 	// The snap admits this fee rate; the live floor raised past it does not.
 	mp := &Mempool{maxTxs: 10, maxBytes: 100, currentMinFeeRate: DefaultMempoolMinFeeRate + 1}

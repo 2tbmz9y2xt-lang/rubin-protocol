@@ -57,9 +57,11 @@ type TxValidationContext struct {
 	// order. Used for duplicate-input detection and dependency tracking.
 	InputOutpoints []Outpoint
 
-	// Fee is the transaction fee computed during precompute (sumInputs - sumOutputs).
-	// Validated during precompute to detect overflow early.
-	Fee uint64
+	// Fee is the exact u128 transaction fee computed during precompute
+	// (sumInputs - sumOutputs). It equals the fee the sequential and
+	// queued-parallel apply paths derive for the same transaction; fee
+	// width alone is never a rejection reason.
+	Fee Uint128
 }
 
 type precomputeTxInputs struct {
@@ -185,7 +187,7 @@ func precomputeTxContext(
 		return TxValidationContext{}, err
 	}
 
-	var fee uint64
+	var fee Uint128
 	fee, err = computePrecomputeFee(inputs.SumIn, tx.Outputs)
 	if err != nil {
 		return TxValidationContext{}, err
@@ -317,26 +319,27 @@ func precomputeWitnessBounds(tx *Tx, totalWitnessSlots int) (int, int, error) {
 	return witnessStart, witnessEnd, nil
 }
 
-func computePrecomputeFee(sumIn u128, outputs []TxOutput) (uint64, error) {
+// computePrecomputeFee derives the same exact u128 fee the sequential and
+// queued-parallel apply paths derive. It returns the full u128 difference:
+// a fee above u64 is not an error here, so precompute cannot reject a
+// transaction the other two paths accept.
+func computePrecomputeFee(sumIn u128, outputs []TxOutput) (Uint128, error) {
 	var sumOut u128
 	for _, out := range outputs {
 		var err error
 		sumOut, err = addU64ToU128(sumOut, out.Value)
 		if err != nil {
-			return 0, err
+			return Uint128{}, err
 		}
 	}
 	if cmpU128(sumIn, sumOut) < 0 {
-		return 0, txerr(TX_ERR_VALUE_CONSERVATION, "outputs exceed inputs")
+		return Uint128{}, txerr(TX_ERR_VALUE_CONSERVATION, "outputs exceed inputs")
 	}
-	feeBig, err := subU128(sumIn, sumOut)
+	fee, err := subU128(sumIn, sumOut)
 	if err != nil {
-		return 0, err
+		return Uint128{}, err
 	}
-	if feeBig.hi != 0 {
-		return 0, txerr(TX_ERR_VALUE_CONSERVATION, "fee overflow u64")
-	}
-	return feeBig.lo, nil
+	return uint128FromInternal(fee), nil
 }
 
 func updatePrecomputeOverlay(

@@ -880,7 +880,7 @@ func TestRetainOrResolveOrphanImmediatelyResolvesWhenParentAlreadyExists(t *test
 // still satisfy the NewService non-nil-provider contract. Tests that need a
 // specific provider override the field after construction.
 func testHarnessDefaultTxMetadata(b []byte) (node.RelayTxMetadata, error) {
-	return node.RelayTxMetadata{Fee: 0, Size: len(b)}, nil
+	return node.RelayTxMetadata{Fee: consensus.Uint128FromU64(0), Size: len(b)}, nil
 }
 
 func newTestHarness(t *testing.T, blockCount int, bindAddr string, bootstrapPeers []string) *testHarness {

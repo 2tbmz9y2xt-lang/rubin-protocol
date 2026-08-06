@@ -16,10 +16,10 @@ func TestCoverageResidual_BlockBasicHelpers(t *testing.T) {
 	if _, err := validateParsedBlockBasicWithContextAtHeight(nil, nil, nil, 0, nil, nil); err == nil {
 		t.Fatalf("expected nil parsed block rejection")
 	}
-	if err := validateCoinbaseValueBound(nil, 1, big.NewInt(0), 0); err == nil {
+	if err := validateCoinbaseValueBound(nil, 1, big.NewInt(0), Uint128FromU64(0)); err == nil {
 		t.Fatalf("expected missing coinbase rejection")
 	}
-	if err := validateCoinbaseValueBound(&ParsedBlock{Txs: []*Tx{nil}}, 1, big.NewInt(0), 0); err == nil {
+	if err := validateCoinbaseValueBound(&ParsedBlock{Txs: []*Tx{nil}}, 1, big.NewInt(0), Uint128FromU64(0)); err == nil {
 		t.Fatalf("expected nil coinbase rejection")
 	}
 	if err := validateCoinbaseWitnessCommitment(nil); err == nil {
@@ -217,7 +217,7 @@ func TestCoverageResidual_StealthHappyPathSmoke(t *testing.T) {
 }
 
 func TestCoverageResidual_BlockBasicValueBoundHeightZero(t *testing.T) {
-	if err := validateCoinbaseValueBound(&ParsedBlock{Txs: []*Tx{{}}}, 0, big.NewInt(0), 0); err != nil {
+	if err := validateCoinbaseValueBound(&ParsedBlock{Txs: []*Tx{{}}}, 0, big.NewInt(0), Uint128FromU64(0)); err != nil {
 		t.Fatalf("height zero should bypass subsidy bound: %v", err)
 	}
 }

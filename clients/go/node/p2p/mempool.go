@@ -2,18 +2,25 @@ package p2p
 
 import (
 	"bytes"
-	"math/bits"
 	"sync"
 
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 const defaultMaxTxPoolSize = 1000
 
+// TxPool is the narrow relay-side transaction store contract.
+//
+// Put's fee is the authoritative admitted fee as an exact u128 scalar,
+// carried unnarrowed from consensus through node.RelayTxMetadata. An
+// implementation MUST NOT narrow it to u64, and MUST order by exact
+// fee-rate cross-multiplication rather than a truncated or floating-point
+// rate.
 type TxPool interface {
 	Get(txid [32]byte) ([]byte, bool)
 	Has(txid [32]byte) bool
-	Put(txid [32]byte, raw []byte, fee uint64, size int) bool
+	Put(txid [32]byte, raw []byte, fee consensus.Uint128, size int) bool
 }
 
 // CanonicalMempoolTxPool adapts the node mempool to the P2P relay TxPool
@@ -56,7 +63,7 @@ func (p *CanonicalMempoolTxPool) Has(txid [32]byte) bool {
 	return p.mempool.Contains(txid)
 }
 
-func (p *CanonicalMempoolTxPool) Put(txid [32]byte, raw []byte, _ uint64, _ int) bool {
+func (p *CanonicalMempoolTxPool) Put(txid [32]byte, raw []byte, _ consensus.Uint128, _ int) bool {
 	if p == nil || p.mempool == nil {
 		return false
 	}
@@ -75,7 +82,7 @@ type MemoryTxPool struct {
 
 type relayTxEntry struct {
 	raw  []byte
-	fee  uint64
+	fee  consensus.Uint128
 	size int
 }
 
@@ -93,7 +100,7 @@ func NewMemoryTxPoolWithLimit(maxSize int) *MemoryTxPool {
 	}
 }
 
-func (p *MemoryTxPool) Put(txid [32]byte, raw []byte, fee uint64, size int) bool {
+func (p *MemoryTxPool) Put(txid [32]byte, raw []byte, fee consensus.Uint128, size int) bool {
 	if p == nil {
 		return false
 	}
@@ -178,15 +185,12 @@ func (p *MemoryTxPool) findWorstLocked() ([32]byte, *relayTxEntry, bool) {
 	return worstTxid, worstEntry, !first
 }
 
-func compareRelayPriority(aFee uint64, aSize int, aTxid [32]byte, bFee uint64, bSize int, bTxid [32]byte) int {
+func compareRelayPriority(aFee consensus.Uint128, aSize int, aTxid [32]byte, bFee consensus.Uint128, bSize int, bTxid [32]byte) int {
 	if cmp := compareRelayFeeRate(aFee, aSize, bFee, bSize); cmp != 0 {
 		return cmp
 	}
-	if aFee != bFee {
-		if aFee > bFee {
-			return 1
-		}
-		return -1
+	if cmp := aFee.Cmp(bFee); cmp != 0 {
+		return cmp
 	}
 	switch cmp := bytes.Compare(aTxid[:], bTxid[:]); {
 	case cmp < 0:
@@ -198,23 +202,16 @@ func compareRelayPriority(aFee uint64, aSize int, aTxid [32]byte, bFee uint64, b
 	}
 }
 
-func compareRelayFeeRate(aFee uint64, aSize int, bFee uint64, bSize int) int {
+// compareRelayFeeRate compares aFee/aSize against bFee/bSize by exact
+// cross-multiplication over all 192 product bits of a u128 fee by a u64
+// size. No division, truncation, or floating point.
+//
+// consensus.CompareFeeRate performs the cross-multiplication itself, so the
+// sizes are passed straight through with their own fees: swapping them here
+// would cross twice and compare fee*size products instead of rates.
+func compareRelayFeeRate(aFee consensus.Uint128, aSize int, bFee consensus.Uint128, bSize int) int {
 	if aSize <= 0 || bSize <= 0 {
 		return 0
 	}
-	ahi, alo := bits.Mul64(aFee, uint64(bSize))
-	bhi, blo := bits.Mul64(bFee, uint64(aSize))
-	if ahi != bhi {
-		if ahi > bhi {
-			return 1
-		}
-		return -1
-	}
-	if alo != blo {
-		if alo > blo {
-			return 1
-		}
-		return -1
-	}
-	return 0
+	return consensus.CompareFeeRate(aFee, uint64(aSize), bFee, uint64(bSize))
 }

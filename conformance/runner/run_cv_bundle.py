@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 # This conformance runner invokes fixed local tool commands with shell=False.
 import subprocess  # nosec B404
 import sys
@@ -363,9 +364,22 @@ def _da_fee_floor_policy_utxos(v: Dict[str, Any]) -> List[Dict[str, Any]]:
     scenario = v.get("scenario")
     if not isinstance(scenario, dict):
         raise ValueError("da_fee_floor_policy requires scenario or explicit utxos")
-    fee = int(scenario.get("fee", -1))
-    if fee < 0:
-        raise ValueError("da_fee_floor_policy scenario requires non-negative fee")
+    fee_problems: List[str] = []
+    fee = exact_uint(scenario.get("fee", ABSENT), fee_problems, "da_fee_floor_policy scenario fee")
+    if fee is None:
+        raise ValueError(
+            "da_fee_floor_policy scenario requires an exact unsigned fee: "
+            + ("; ".join(fee_problems) or "missing")
+        )
+    if fee > MAX_U64:
+        # This scenario fee funds the single UTXO the transaction spends, and
+        # per-UTXO values stay u64 (RUB-1127 canonical_domain) even though the
+        # derived fee is u128. Diagnose the out-of-domain scenario here rather
+        # than emitting a UTXO both clients reject opaquely at decode.
+        raise ValueError(
+            "da_fee_floor_policy scenario fee exceeds the u64 UTXO value domain: "
+            f"{fee}"
+        )
     kind = str(scenario.get("kind", ""))
     if kind == "da_commit":
         prev_txid = "a1" * 32
@@ -454,6 +468,54 @@ def as_int(x: Any) -> int:
         return int(x)
     except (ValueError, TypeError):
         return 0
+
+
+CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)\Z")
+MAX_U64 = (1 << 64) - 1
+MAX_U128 = (1 << 128) - 1
+
+# Sentinel separating an ABSENT key from a PRESENT JSON null. Read an optional
+# field as `d.get(key, ABSENT)`: absence keeps its optional semantics, while a
+# null reaching `exact_uint` is a value-position null and fails the gate.
+ABSENT = object()
+
+
+def exact_uint(value: Any, problems: List[str], ctx: str) -> Optional[int]:
+    """Read a widened (u128-domain) value exactly, or record a problem.
+
+    Accepts the canonical decimal string form ("0" or [1-9][0-9]*, through
+    u128) and a legacy JSON integer token bounded to u64 — the same reader
+    contract both clients implement. Unlike `as_int`, a malformed token is
+    never silently coerced to 0: a fee that cannot be read exactly must fail
+    the gate rather than compare equal to another unreadable fee.
+
+    A JSON null is a malformed token, not a missing one: both clients reject
+    null in a value position, so an authored or emitted null records a problem
+    here instead of returning a bare None that a caller's `or 0` or `is None:
+    continue` would silently swallow. Only the `ABSENT` sentinel returns None
+    without a problem.
+    """
+    if value is ABSENT:
+        return None
+    if value is None:
+        problems.append(f"{ctx}: null is not a value in a widened (u128) position")
+        return None
+    if isinstance(value, bool):
+        problems.append(f"{ctx}: expected an unsigned integer, got bool")
+        return None
+    if isinstance(value, int):
+        if value < 0 or value > MAX_U64:
+            problems.append(f"{ctx}: legacy numeric token out of u64 range: {value}")
+            return None
+        return value
+    if isinstance(value, str) and CANONICAL_DECIMAL.match(value):
+        parsed = int(value)
+        if parsed > MAX_U128:
+            problems.append(f"{ctx}: value exceeds u128: {value}")
+            return None
+        return parsed
+    problems.append(f"{ctx}: not a canonical unsigned decimal value: {value!r}")
+    return None
 
 
 def as_sorted_ints(values: Any) -> List[int]:
@@ -1113,7 +1175,9 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
                 problems.append(f"{prefix}: entry must be object")
                 return problems
             da_id = str(entry.get("da_id", ""))
-            fee = int(entry.get("fee", 0))
+            fee = exact_uint(entry.get("fee", 0), problems, f"{prefix}: entry fee")
+            if fee is None:
+                return problems
             wire_bytes = int(entry.get("wire_bytes", 0))
             received_time = int(entry.get("received_time", 0))
             if da_id == "" or wire_bytes <= 0:
@@ -1785,7 +1849,18 @@ def validate_vector(
         req["block_hex"] = v["block_hex"]
         include_block_context(require_height=True)
         req["already_generated"] = int(v.get("already_generated", 0))
-        req["sum_fees"] = int(v.get("sum_fees", 0))
+        # sum_fees is the one widened value the runner sends as INPUT. Forward
+        # the authored token unchanged — a canonical string stays a string, a
+        # legacy numeric stays numeric — so both CLIs read exactly what the
+        # fixture wrote. int() re-encoded "18446744073709551616" as a bare JSON
+        # number above u64, which both readers then correctly refused.
+        sum_fees_token = v.get("sum_fees", 0)
+        sum_fees_problems: List[str] = []
+        # The token is never ABSENT (it defaults to 0), so an unreadable one —
+        # a null included — always leaves a diagnostic behind.
+        if exact_uint(sum_fees_token, sum_fees_problems, f"{gate}/{vid}: sum_fees") is None:
+            return sum_fees_problems
+        req["sum_fees"] = sum_fees_token
     elif op == "connect_block_basic":
         req["block_hex"] = v["block_hex"]
         include_block_context(require_height=True)
@@ -2043,7 +2118,19 @@ def validate_vector(
         if "expect_block_hash" in v and go_resp.get("block_hash") != v["expect_block_hash"]:
             problems.append(f"{gate}/{vid}: expect_block_hash mismatch")
     elif op == "connect_block_basic":
-        for k in ["sum_fees", "utxo_count", "already_generated", "already_generated_n1"]:
+        # sum_fees is a widened (u128) value: read it exactly, never via the
+        # lenient as_int coercion that maps an unreadable token to 0.
+        # Zero-emission is ASYMMETRIC across the clients and this lane absorbs
+        # it: Go routes the field through u128PtrOmitZero, so a zero sum_fees
+        # is an absent key, while Rust always emits `Some(summary.sum_fees)`,
+        # so a zero is present as "0". Absence and "0" both normalize to 0
+        # here, which is what makes the comparison below sound. The asymmetry
+        # is pre-existing and is not changed by this slice.
+        go_sum_fees = exact_uint(go_resp.get("sum_fees", ABSENT), problems, f"{gate}/{vid}: go.sum_fees") or 0
+        rust_sum_fees = exact_uint(rust_resp.get("sum_fees", ABSENT), problems, f"{gate}/{vid}: rust.sum_fees") or 0
+        if go_sum_fees != rust_sum_fees:
+            problems.append(f"{gate}/{vid}: sum_fees mismatch go={go_sum_fees} rust={rust_sum_fees}")
+        for k in ["utxo_count", "already_generated", "already_generated_n1"]:
             gv = as_int(go_resp.get(k))
             rv = as_int(rust_resp.get(k))
             if gv != rv:
@@ -2053,8 +2140,12 @@ def validate_vector(
             problems.append(
                 f"{gate}/{vid}: digest mismatch go={go_resp.get('digest')} rust={rust_resp.get('digest')}"
             )
-        if "expect_sum_fees" in v and as_int(go_resp.get("sum_fees")) != int(v["expect_sum_fees"]):
-            problems.append(f"{gate}/{vid}: expect_sum_fees mismatch")
+        if "expect_sum_fees" in v:
+            want = exact_uint(v["expect_sum_fees"], problems, f"{gate}/{vid}: expect_sum_fees")
+            # An omitted go.sum_fees means zero; see the response-side note on
+            # the Go/Rust zero-emission asymmetry above.
+            if (go_sum_fees or 0) != want:
+                problems.append(f"{gate}/{vid}: expect_sum_fees mismatch")
         if "expect_utxo_count" in v and as_int(go_resp.get("utxo_count")) != int(v["expect_utxo_count"]):
             problems.append(f"{gate}/{vid}: expect_utxo_count mismatch")
         if "expect_already_generated" in v and as_int(go_resp.get("already_generated")) != int(v["expect_already_generated"]):
@@ -2067,15 +2158,25 @@ def validate_vector(
         # ok/err parity is already checked above.
         pass
     elif op == "utxo_apply_basic":
-        for k in ["fee", "utxo_count"]:
-            gv = as_int(go_resp.get(k))
-            rv = as_int(rust_resp.get(k))
-            if gv != rv:
-                problems.append(
-                    f"{gate}/{vid}: {k} mismatch go={gv} rust={rv}"
-                )
-        if "expect_fee" in v and as_int(go_resp.get("fee")) != int(v["expect_fee"]):
-            problems.append(f"{gate}/{vid}: expect_fee mismatch")
+        # fee is a widened (u128) value: read it exactly, never via the
+        # lenient as_int coercion that maps an unreadable token to 0.
+        # Zero-emission is ASYMMETRIC exactly as for sum_fees above: Go omits
+        # the key at zero via u128PtrOmitZero, Rust always emits
+        # `Some(summary.fee)`. Absence and "0" both normalize to 0 here.
+        go_fee = exact_uint(go_resp.get("fee", ABSENT), problems, f"{gate}/{vid}: go.fee") or 0
+        rust_fee = exact_uint(rust_resp.get("fee", ABSENT), problems, f"{gate}/{vid}: rust.fee") or 0
+        if go_fee != rust_fee:
+            problems.append(f"{gate}/{vid}: fee mismatch go={go_fee} rust={rust_fee}")
+        gv = as_int(go_resp.get("utxo_count"))
+        rv = as_int(rust_resp.get("utxo_count"))
+        if gv != rv:
+            problems.append(f"{gate}/{vid}: utxo_count mismatch go={gv} rust={rv}")
+        if "expect_fee" in v:
+            want = exact_uint(v["expect_fee"], problems, f"{gate}/{vid}: expect_fee")
+            # An omitted go.fee means zero; see the response-side note on the
+            # Go/Rust zero-emission asymmetry above.
+            if (go_fee or 0) != want:
+                problems.append(f"{gate}/{vid}: expect_fee mismatch")
         if "expect_utxo_count" in v and as_int(go_resp.get("utxo_count")) != int(v["expect_utxo_count"]):
             problems.append(f"{gate}/{vid}: expect_utxo_count mismatch")
     elif op == "fork_work":
@@ -2180,7 +2281,11 @@ def validate_vector(
             if value is None:
                 problems.append(f"{gate}/{vid}: {side}.{key} is null")
                 return None
-            return int(value)
+            # Every policy int_field is an unsigned monetary/size quantity, so
+            # it is read with the same canonical-aware reader the consensus
+            # lane uses. A bare int() accepted " 1", "+1", and "01" here while
+            # rejecting them on the consensus lane for the same `fee` field.
+            return exact_uint(value, problems, f"{gate}/{vid}: {side}.{key}")
 
         def policy_bool(resp: Dict[str, Any], key: str, default: bool) -> bool:
             if not policy_has(resp, key):
@@ -2274,7 +2379,15 @@ def validate_vector(
         for key in int_fields:
             expect_key = f"expect_{key}"
             if expect_key in v:
-                expected = int(v[expect_key])
+                # The expectation side gets the same canonical-aware reader the
+                # response side already uses. Only `fee` is widened here (the
+                # other int_fields, including `required_fee` and
+                # `relay_fee_floor`, stay u64 in both clients), but a bare
+                # int() would read an authored token the clients themselves
+                # would reject, so every expectation goes through exact_uint.
+                expected = exact_uint(v[expect_key], problems, f"{gate}/{vid}: {expect_key}")
+                if expected is None:
+                    continue
                 for side, resp in (("go", go_resp), ("rust", rust_resp)):
                     if not policy_has(resp, key):
                         problems.append(f"{gate}/{vid}: missing {side}.{key} for {expect_key}")

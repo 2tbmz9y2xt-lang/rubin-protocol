@@ -34,20 +34,31 @@ func fuzzCompareUint64(a, b uint64) int {
 	}
 }
 
-func fuzzFeeRateOracleSign(feeA, weightA, feeB, weightB uint64) int {
+// fuzzFee composes a fuzzed fee from two u64 words so the corpus reaches the
+// full u128 fee domain. Drawing the fee as a single uint64 leaves the high limb
+// provably zero on every input, which hides the carry and high-word limbs of
+// consensus.CompareFeeRate's 192-bit cross product from the whole target.
+func fuzzFee(hi, lo uint64) consensus.Uint128 {
+	return consensus.Uint128{Hi: hi, Lo: lo}
+}
+
+func fuzzFeeRateOracleSign(feeA consensus.Uint128, weightA uint64, feeB consensus.Uint128, weightB uint64) int {
 	if weightA == 0 || weightB == 0 {
 		return 0
 	}
-	left := new(big.Int).Mul(new(big.Int).SetUint64(feeA), new(big.Int).SetUint64(weightB))
-	right := new(big.Int).Mul(new(big.Int).SetUint64(feeB), new(big.Int).SetUint64(weightA))
+	// math/big keeps every product bit of the u128-by-u64 cross multiplication
+	// (canonical_domain permits it for exact products), so the oracle is
+	// independent of the fixed-width limb arithmetic under test.
+	left := new(big.Int).Mul(feeA.Big(), new(big.Int).SetUint64(weightB))
+	right := new(big.Int).Mul(feeB.Big(), new(big.Int).SetUint64(weightA))
 	return left.Cmp(right)
 }
 
-func fuzzEvictionPriorityOracleSign(feeA, weightA, seqA, feeB, weightB, seqB uint64) int {
+func fuzzEvictionPriorityOracleSign(feeA consensus.Uint128, weightA, seqA uint64, feeB consensus.Uint128, weightB, seqB uint64) int {
 	if cmp := fuzzFeeRateOracleSign(feeA, weightA, feeB, weightB); cmp != 0 {
 		return cmp
 	}
-	if cmp := fuzzCompareUint64(feeA, feeB); cmp != 0 {
+	if cmp := feeA.Big().Cmp(feeB.Big()); cmp != 0 {
 		return cmp
 	}
 	return fuzzCompareUint64(seqA, seqB)
@@ -88,15 +99,28 @@ func fuzzCheckedAdd(a, b uint64) (uint64, bool) {
 // result for zero-weight inputs and then stops that row.
 // Direct assertion: helper signs must match a big.Int oracle and source variants
 // must produce identical priority comparisons.
+// Domain: each fee is drawn as two u64 words so the corpus covers the whole
+// u128 fee domain (RUB-1127) and the cross product exercises all 192 bits;
+// weights stay u64 per canonical_domain.
 func FuzzMempoolFeeWeightOrdering(f *testing.F) {
-	f.Add(uint64(3), uint64(2), uint64(5), uint64(3), uint64(1), uint64(2), byte(1), byte(2))
-	f.Add(uint64(4), uint64(2), uint64(9), uint64(3), uint64(7), uint64(6), byte(3), byte(4))
-	f.Add(uint64(^uint64(0)), uint64(^uint64(0)-1), uint64(^uint64(0)-2), uint64(^uint64(0)-3), uint64(11), uint64(12), byte(5), byte(6))
-	f.Fuzz(func(t *testing.T, feeA, weightA, feeB, weightB, seqA, seqB uint64, seedA, seedB byte) {
+	f.Add(uint64(0), uint64(3), uint64(2), uint64(0), uint64(5), uint64(3), uint64(1), uint64(2), byte(1), byte(2))
+	f.Add(uint64(0), uint64(4), uint64(2), uint64(0), uint64(9), uint64(3), uint64(7), uint64(6), byte(3), byte(4))
+	f.Add(uint64(0), ^uint64(0), ^uint64(0)-1, uint64(0), ^uint64(0)-2, ^uint64(0)-3, uint64(11), uint64(12), byte(5), byte(6))
+	// High-word limb: feeA*weightB is exactly 2^128, so a cross product that
+	// drops the high 64 bits of the 192-bit result reads it as 0 and reverses
+	// the verdict against feeB*weightA = 1.
+	f.Add(uint64(1)<<32, uint64(0), uint64(1), uint64(0), uint64(1), uint64(1)<<32, uint64(3), uint64(4), byte(7), byte(8))
+	// Carry limb: feeA*weightB carries out of the middle word into bit 128,
+	// and feeB*weightA = 5*2^127 sits strictly between the correct product and
+	// the product a dropped carry would produce.
+	f.Add(uint64(2), ^uint64(0), uint64(4), uint64(5)<<61, uint64(0), ^uint64(0), uint64(5), uint64(6), byte(9), byte(10))
+	f.Fuzz(func(t *testing.T, feeAHi, feeALo, weightA, feeBHi, feeBLo, weightB, seqA, seqB uint64, seedA, seedB byte) {
+		feeA := fuzzFee(feeAHi, feeALo)
+		feeB := fuzzFee(feeBHi, feeBLo)
 		gotRate := fuzzSign(compareFeeRateWeightValues(feeA, weightA, feeB, weightB))
 		wantRate := fuzzFeeRateOracleSign(feeA, weightA, feeB, weightB)
 		if gotRate != wantRate {
-			t.Fatalf("fee/weight compare sign=%d, want %d (feeA=%d weightA=%d feeB=%d weightB=%d)", gotRate, wantRate, feeA, weightA, feeB, weightB)
+			t.Fatalf("fee/weight compare sign=%d, want %d (feeA=%s weightA=%d feeB=%s weightB=%d)", gotRate, wantRate, feeA.String(), weightA, feeB.String(), weightB)
 		}
 		gotReverse := fuzzSign(compareFeeRateWeightValues(feeB, weightB, feeA, weightA))
 		if gotReverse != -wantRate {
@@ -111,7 +135,7 @@ func FuzzMempoolFeeWeightOrdering(f *testing.F) {
 		gotPriority := fuzzSign(compareMempoolEvictionPriority(mempoolEvictionPlanEntry{entry: entryA}, mempoolEvictionPlanEntry{entry: entryB}))
 		wantPriority := fuzzEvictionPriorityOracleSign(feeA, weightA, seqA, feeB, weightB, seqB)
 		if gotPriority != wantPriority {
-			t.Fatalf("eviction priority sign=%d, want %d (feeA=%d weightA=%d seqA=%d feeB=%d weightB=%d seqB=%d)", gotPriority, wantPriority, feeA, weightA, seqA, feeB, weightB, seqB)
+			t.Fatalf("eviction priority sign=%d, want %d (feeA=%s weightA=%d seqA=%d feeB=%s weightB=%d seqB=%d)", gotPriority, wantPriority, feeA.String(), weightA, seqA, feeB.String(), weightB, seqB)
 		}
 		gotWorse := evictionPlanEntryWorse(mempoolEvictionPlanEntry{entry: entryA}, mempoolEvictionPlanEntry{entry: entryB})
 		wantWorse := gotPriority < 0 || (gotPriority == 0 && bytes.Compare(entryA.txid[:], entryB.txid[:]) > 0)
@@ -162,11 +186,11 @@ func FuzzMempoolRollingFloorBoundaries(f *testing.F) {
 		}
 		product, productOK := fuzzCheckedMul(weight, effectiveFloor)
 		wantBelow := weight == 0 || !productOK || fee < product
-		if gotBelow := feeRateBelowFloor(fee, weight, floor); gotBelow != wantBelow {
+		if gotBelow := feeRateBelowFloor(consensus.Uint128FromU64(fee), weight, floor); gotBelow != wantBelow {
 			t.Fatalf("feeRateBelowFloor=%v, want %v (fee=%d weight=%d floor=%d effective=%d)", gotBelow, wantBelow, fee, weight, floor, effectiveFloor)
 		}
 
-		entry := &mempoolEntry{fee: fee, weight: weight}
+		entry := &mempoolEntry{fee: consensus.Uint128FromU64(fee), weight: weight}
 		entryFloor, ok := entryFloorRate(entry)
 		if weight == 0 {
 			if ok || entryFloor != 0 {
@@ -177,10 +201,10 @@ func FuzzMempoolRollingFloorBoundaries(f *testing.F) {
 		if !ok || entryFloor != fee/weight {
 			t.Fatalf("entryFloorRate=(%d,%v), want (%d,true)", entryFloor, ok, fee/weight)
 		}
-		if entryFloor >= DefaultMempoolMinFeeRate && feeRateBelowFloor(fee, weight, entryFloor) {
+		if entryFloor >= DefaultMempoolMinFeeRate && feeRateBelowFloor(consensus.Uint128FromU64(fee), weight, entryFloor) {
 			t.Fatalf("entry should satisfy its returned floor (fee=%d weight=%d floor=%d)", fee, weight, entryFloor)
 		}
-		if entryFloor != ^uint64(0) && !feeRateBelowFloor(fee, weight, entryFloor+1) {
+		if entryFloor != ^uint64(0) && !feeRateBelowFloor(consensus.Uint128FromU64(fee), weight, entryFloor+1) {
 			t.Fatalf("entry floor is not tight (fee=%d weight=%d floor=%d)", fee, weight, entryFloor)
 		}
 		wantRaised := ^uint64(0)
@@ -298,7 +322,7 @@ func fuzzCheckedDaPolicyTx(
 	if err != nil {
 		t.Fatalf("CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext(signed fuzz tx): %v", err)
 	}
-	if checked.Fee != policyFee {
+	if checked.Fee.Cmp(consensus.Uint128FromU64(policyFee)) != 0 {
 		t.Fatalf("checked fee=%d, want %d", checked.Fee, policyFee)
 	}
 	return checked, utxos
@@ -367,13 +391,14 @@ func FuzzDaFeeFloorPolicyBoundaries(f *testing.F) {
 			return
 		}
 
-		relayFloor, ok := fuzzCheckedMul(weight, currentMinFeeRate)
-		if !ok {
-			if !reject || policyErr == nil || !strings.Contains(reason, "relay fee floor overflow") {
-				t.Fatalf("relay overflow got reject=%v reason=%q err=%v", reject, reason, policyErr)
-			}
-			return
-		}
+		// RUB-1127: the relay-floor term is the exact 128-bit weight*rate
+		// product and has no overflow branch, so the oracle never expects a
+		// product-overflow rejection here. The DA-side terms below keep their
+		// u64 overflow expectations. math/big keeps every product bit and is
+		// independent of the limb arithmetic under test (mulU64Exact in
+		// policy_da_anchor.go); calling that production helper here would move
+		// oracle and implementation together and hide a truncating product.
+		relayFloor := new(big.Int).Mul(new(big.Int).SetUint64(weight), new(big.Int).SetUint64(currentMinFeeRate))
 		daFloor, ok := fuzzCheckedMul(wantDaBytes, minDaFeeRate)
 		if !ok {
 			if !reject || policyErr == nil || !strings.Contains(reason, "DA fee floor overflow") {
@@ -396,12 +421,12 @@ func FuzzDaFeeFloorPolicyBoundaries(f *testing.F) {
 			return
 		}
 		required := relayFloor
-		if daRequired > required {
-			required = daRequired
+		if widened := new(big.Int).SetUint64(daRequired); widened.Cmp(required) > 0 {
+			required = widened
 		}
-		wantReject := required != 0 && policyFee < required
+		wantReject := required.Sign() != 0 && policyFee.Big().Cmp(required) < 0
 		if reject != wantReject {
-			t.Fatalf("reject=%v, want %v (fee=%d required=%d relay=%d da=%d surcharge=%d weight=%d daBytes=%d)", reject, wantReject, policyFee, required, relayFloor, daFloor, daSurcharge, weight, wantDaBytes)
+			t.Fatalf("reject=%v, want %v (fee=%s required=%s relay=%s da=%d surcharge=%d weight=%d daBytes=%d)", reject, wantReject, policyFee.String(), required.String(), relayFloor.String(), daFloor, daSurcharge, weight, wantDaBytes)
 		}
 		if wantReject {
 			if policyErr != nil || !strings.Contains(reason, "DA fee below Stage C floor") {

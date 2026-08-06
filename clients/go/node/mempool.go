@@ -39,8 +39,10 @@ type mempoolEntry struct {
 	// the zero token exactly when the entry spends no outpoint and therefore
 	// claims nothing (the pre-owner validateEntryInputsLocked was likewise a
 	// no-op for an empty input set).
-	token        PendingOutpointToken
-	fee          uint64
+	token PendingOutpointToken
+	// fee is the authoritative admitted fee: the exact u128 scalar
+	// consensus derived. weight stays u64 per the policy contract.
+	fee          consensus.Uint128
 	weight       uint64
 	size         int
 	admissionSeq uint64

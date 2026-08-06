@@ -42,8 +42,10 @@ pub struct PrecomputedTxContext {
     pub witness_end: usize,
     /// Input outpoints in input order, for dependency tracking.
     pub input_outpoints: Vec<Outpoint>,
-    /// Transaction fee (sum_inputs − sum_outputs), validated during precompute.
-    pub fee: u64,
+    /// Exact u128 transaction fee (sum_inputs − sum_outputs). Equals the fee
+    /// the sequential and queued-parallel apply paths derive for the same
+    /// transaction; fee width alone is never a rejection reason.
+    pub fee: u128,
 }
 
 /// Overflow-safe witness slot accumulator. Returns the new total or an error
@@ -288,7 +290,10 @@ fn precompute_witness_bounds(
     Ok((witness_start, witness_end))
 }
 
-fn compute_precompute_fee(sum_in: u128, outputs: &[TxOutput]) -> Result<u64, TxError> {
+/// Derives the same exact u128 fee the sequential and queued-parallel apply
+/// paths derive. A fee above u64 is not an error here, so precompute cannot
+/// reject a transaction the other two paths accept.
+pub(crate) fn compute_precompute_fee(sum_in: u128, outputs: &[TxOutput]) -> Result<u128, TxError> {
     let mut sum_out = 0u128;
     for output in outputs {
         sum_out = sum_out
@@ -303,15 +308,7 @@ fn compute_precompute_fee(sum_in: u128, outputs: &[TxOutput]) -> Result<u64, TxE
             "outputs exceed inputs",
         ));
     }
-    let fee = sum_in - sum_out;
-    if fee > u128::from(u64::MAX) {
-        return Err(TxError::new(
-            ErrorCode::TxErrValueConservation,
-            "fee overflow u64",
-        ));
-    }
-    u64::try_from(fee)
-        .map_err(|_| TxError::new(ErrorCode::TxErrValueConservation, "fee overflow u64"))
+    Ok(sum_in - sum_out)
 }
 
 fn update_precompute_overlay(

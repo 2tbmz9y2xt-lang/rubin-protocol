@@ -197,9 +197,20 @@ fuzz_target!(|data: &[u8]| {
     let expected_witness = tx.inputs.len() * slots_per_input;
     let witness_end = expected_witness.min(tx.witness.len());
 
-    // Sum input values for fee calculation.
-    let sum_in: u64 = resolved_inputs.iter().map(|e| e.value).fold(0u64, |a, b| a.saturating_add(b));
-    let sum_out: u64 = tx.outputs.iter().map(|o| o.value).fold(0u64, |a, b| a.saturating_add(b));
+    // Sum input and output values for fee calculation, mirroring the production
+    // value-conservation path: per-UTXO and per-output values stay u64, but the
+    // sums and the fee are one exact u128 value. `parse_tx` already rejected
+    // anything above MAX_TX_INPUTS / MAX_TX_OUTPUTS (1024 each), so at most 1024
+    // addends below 2^64 accumulate to less than 2^74 — a u128 sum cannot
+    // overflow and needs no saturation. Folding at u64 first silently clamped
+    // both sums at u64::MAX, so once the aggregate crossed u64 the worker was
+    // handed a fee that did not match this target's own synthetic UTXO set:
+    // for two 2^63 outputs the exact fee is 2 and the clamped one was 0.
+    let sum_in: u128 = resolved_inputs.iter().map(|e| u128::from(e.value)).sum();
+    let sum_out: u128 = tx.outputs.iter().map(|o| u128::from(o.value)).sum();
+    // sum_out > sum_in is a value-conservation failure in production, but here
+    // the fee is an INPUT to the worker rather than something it derives, so the
+    // clamp keeps that input domain reachable instead of returning early.
     let fee = sum_in.saturating_sub(sum_out);
 
     let ptc = rubin_consensus::PrecomputedTxContext {

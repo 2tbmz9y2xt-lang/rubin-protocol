@@ -11,7 +11,6 @@ import (
 	"io"
 	"math"
 	"math/big"
-	"math/bits"
 	"os"
 	"sort"
 	"strings"
@@ -97,7 +96,7 @@ type Request struct {
 	TxCount              int                      `json:"tx_count,omitempty"`
 	PubkeyLength         int                      `json:"pubkey_length,omitempty"`
 	AlreadyGenerated     uint64                   `json:"already_generated,omitempty"`
-	SumFees              uint64                   `json:"sum_fees,omitempty"`
+	SumFees              consensus.Uint128        `json:"sum_fees,omitzero"` // omitzero (not omitempty): encoding/json never treats a struct value as empty, so omitempty emitted "sum_fees":"0" where the pre-widening uint64 field omitted the key.
 	ChunkCount           int                      `json:"chunk_count,omitempty"`
 	TTLBlocks            int                      `json:"ttl_blocks,omitempty"`
 	SentinelSigLen       int                      `json:"sentinel_sig_len,omitempty"`
@@ -443,101 +442,101 @@ type Check struct {
 }
 
 type Response struct {
-	Diagnostics        map[string]any `json:"diagnostics,omitempty"`
-	WorkHex            string         `json:"work,omitempty"`
-	Err                string         `json:"err,omitempty"`
-	TxidHex            string         `json:"txid,omitempty"`
-	WtxidHex           string         `json:"wtxid,omitempty"`
-	MerkleHex          string         `json:"merkle_root,omitempty"`
-	WitnessMerkleHex   string         `json:"witness_merkle_root,omitempty"`
-	DigestHex          string         `json:"digest,omitempty"`
-	BlockHash          string         `json:"block_hash,omitempty"`
-	TargetNew          string         `json:"target_new,omitempty"`
-	ShortID            string         `json:"short_id,omitempty"`
-	DescriptorHex      string         `json:"descriptor_hex,omitempty"`
-	State              string         `json:"state,omitempty"`
-	BoundaryHeight     *uint64        `json:"boundary_height,omitempty"`
-	PrevWindowSignal   *uint32        `json:"prev_window_signal_count,omitempty"`
-	SignalWindow       uint64         `json:"signal_window,omitempty"`
-	SignalThreshold    uint32         `json:"signal_threshold,omitempty"`
-	EstimatedActivate  *uint64        `json:"estimated_activation_height,omitempty"`
-	ActivationHeight   *uint64        `json:"activation_height,omitempty"`
-	ConsensusActive    *bool          `json:"consensus_active,omitempty"`
-	RetainedPeer       string         `json:"retained_peer,omitempty"`
-	FirstErr           string         `json:"first_err,omitempty"`
-	Chainwork          string         `json:"chainwork,omitempty"`
-	Winner             string         `json:"winner,omitempty"`
-	MissingOut         []int          `json:"missing_indices,omitempty"`
-	PenalizedPeers     []string       `json:"penalized_peers,omitempty"`
-	MissingFields      []string       `json:"missing_fields,omitempty"`
-	CheckblockResults  []bool         `json:"checkblock_results,omitempty"`
-	EvictOrder         []string       `json:"evict_order,omitempty"`
-	RetainedChunks     []int          `json:"retained_chunks,omitempty"`
-	PrefetchTargets    []int          `json:"prefetch_targets,omitempty"`
-	Duplicates         []uint64       `json:"duplicates,omitempty"`
-	SortedKeys         []string       `json:"sorted_keys,omitempty"`
-	InvalidOut         []int          `json:"invalid_indices,omitempty"`
-	Evaluated          []string       `json:"evaluated,omitempty"`
-	DiscardedChunks    []int          `json:"discarded_chunks,omitempty"`
-	DuplicatesDropped  int            `json:"duplicates_dropped,omitempty"`
-	UtxoCount          uint64         `json:"utxo_count,omitempty"`
-	CountedBytes       int            `json:"counted_bytes,omitempty"`
-	Weight             uint64         `json:"weight"`
-	WireBytes          int            `json:"wire_bytes,omitempty"`
-	Fee                uint64         `json:"fee,omitempty"`
-	IgnoredOverhead    int            `json:"ignored_overhead_bytes,omitempty"`
-	SumFees            uint64         `json:"sum_fees,omitempty"`
-	Mode               int            `json:"mode,omitempty"`
-	TotalFee           int            `json:"total_fee,omitempty"`
-	RelayFeeFloor      *uint64        `json:"relay_fee_floor,omitempty"`
-	DaFeeFloor         *uint64        `json:"da_fee_floor,omitempty"`
-	DaSurcharge        *uint64        `json:"da_surcharge,omitempty"`
-	DaRequiredFee      *uint64        `json:"da_required_fee,omitempty"`
-	RequiredFee        *uint64        `json:"required_fee,omitempty"`
-	AdmitClass         string         `json:"admit_class,omitempty"`
-	DominantFloor      string         `json:"dominant_floor,omitempty"`
-	RejectReason       string         `json:"reject_reason,omitempty"`
-	PolicyEntrypoint   string         `json:"policy_entrypoint,omitempty"`
-	MutationChecked    bool           `json:"mutation_checked,omitempty"`
-	Mutated            *bool          `json:"mutated,omitempty"`
-	PoolLenBefore      *int           `json:"pool_len_before,omitempty"`
-	PoolLenAfter       *int           `json:"pool_len_after,omitempty"`
-	NoDupConflictCap   *bool          `json:"duplicate_conflict_capacity_checked,omitempty"`
-	Consumed           int            `json:"consumed,omitempty"`
-	AlreadyGenerated   uint64         `json:"already_generated,omitempty"`
-	AlreadyGeneratedN1 uint64         `json:"already_generated_n1,omitempty"`
-	TTL                int            `json:"ttl,omitempty"`
-	TTLResetCount      int            `json:"ttl_reset_count,omitempty"`
-	AnchorBytes        uint64         `json:"anchor_bytes"`
-	DaBytes            uint64         `json:"da_bytes"`
-	FillPct            float64        `json:"fill_pct,omitempty"`
-	Rate               float64        `json:"rate,omitempty"`
-	Score              int            `json:"score,omitempty"`
-	BatchOK            bool           `json:"batch_ok,omitempty"`
-	Rollback           bool           `json:"rollback,omitempty"`
-	PeerExceeded       bool           `json:"peer_exceeded,omitempty"`
-	GlobalExceeded     bool           `json:"global_exceeded,omitempty"`
-	QualityPenalty     bool           `json:"quality_penalty,omitempty"`
-	Disconnect         bool           `json:"disconnect,omitempty"`
-	StormMode          bool           `json:"storm_mode,omitempty"`
-	Admit              bool           `json:"admit,omitempty"`
-	Pinned             bool           `json:"pinned,omitempty"`
-	Evicted            bool           `json:"evicted,omitempty"`
-	Reconstructed      bool           `json:"reconstructed,omitempty"`
-	Fallback           bool           `json:"fallback,omitempty"`
-	Ok                 bool           `json:"ok"`
-	RoundtripOK        bool           `json:"roundtrip_ok,omitempty"`
-	PenalizePeer       bool           `json:"penalize_peer,omitempty"`
-	Replaced           bool           `json:"replaced,omitempty"`
-	RequestFullBlock   bool           `json:"request_full_block,omitempty"`
-	RequestGetblocktxn bool           `json:"request_getblocktxn,omitempty"`
-	VerifyCalled       bool           `json:"verify_called,omitempty"`
-	CommitBearing      bool           `json:"commit_bearing,omitempty"`
-	Prioritize         bool           `json:"prioritize,omitempty"`
-	ExtID              uint16         `json:"ext_id,omitempty"`
-	SuiteIDs           []uint8        `json:"suite_ids,omitempty"`
-	Accepted           *bool          `json:"accepted,omitempty"`
-	FinalCounter       *uint64        `json:"final_counter,omitempty"`
+	Diagnostics        map[string]any     `json:"diagnostics,omitempty"`
+	WorkHex            string             `json:"work,omitempty"`
+	Err                string             `json:"err,omitempty"`
+	TxidHex            string             `json:"txid,omitempty"`
+	WtxidHex           string             `json:"wtxid,omitempty"`
+	MerkleHex          string             `json:"merkle_root,omitempty"`
+	WitnessMerkleHex   string             `json:"witness_merkle_root,omitempty"`
+	DigestHex          string             `json:"digest,omitempty"`
+	BlockHash          string             `json:"block_hash,omitempty"`
+	TargetNew          string             `json:"target_new,omitempty"`
+	ShortID            string             `json:"short_id,omitempty"`
+	DescriptorHex      string             `json:"descriptor_hex,omitempty"`
+	State              string             `json:"state,omitempty"`
+	BoundaryHeight     *uint64            `json:"boundary_height,omitempty"`
+	PrevWindowSignal   *uint32            `json:"prev_window_signal_count,omitempty"`
+	SignalWindow       uint64             `json:"signal_window,omitempty"`
+	SignalThreshold    uint32             `json:"signal_threshold,omitempty"`
+	EstimatedActivate  *uint64            `json:"estimated_activation_height,omitempty"`
+	ActivationHeight   *uint64            `json:"activation_height,omitempty"`
+	ConsensusActive    *bool              `json:"consensus_active,omitempty"`
+	RetainedPeer       string             `json:"retained_peer,omitempty"`
+	FirstErr           string             `json:"first_err,omitempty"`
+	Chainwork          string             `json:"chainwork,omitempty"`
+	Winner             string             `json:"winner,omitempty"`
+	MissingOut         []int              `json:"missing_indices,omitempty"`
+	PenalizedPeers     []string           `json:"penalized_peers,omitempty"`
+	MissingFields      []string           `json:"missing_fields,omitempty"`
+	CheckblockResults  []bool             `json:"checkblock_results,omitempty"`
+	EvictOrder         []string           `json:"evict_order,omitempty"`
+	RetainedChunks     []int              `json:"retained_chunks,omitempty"`
+	PrefetchTargets    []int              `json:"prefetch_targets,omitempty"`
+	Duplicates         []uint64           `json:"duplicates,omitempty"`
+	SortedKeys         []string           `json:"sorted_keys,omitempty"`
+	InvalidOut         []int              `json:"invalid_indices,omitempty"`
+	Evaluated          []string           `json:"evaluated,omitempty"`
+	DiscardedChunks    []int              `json:"discarded_chunks,omitempty"`
+	DuplicatesDropped  int                `json:"duplicates_dropped,omitempty"`
+	UtxoCount          uint64             `json:"utxo_count,omitempty"`
+	CountedBytes       int                `json:"counted_bytes,omitempty"`
+	Weight             uint64             `json:"weight"`
+	WireBytes          int                `json:"wire_bytes,omitempty"`
+	Fee                *consensus.Uint128 `json:"fee,omitempty"`
+	IgnoredOverhead    int                `json:"ignored_overhead_bytes,omitempty"`
+	SumFees            *consensus.Uint128 `json:"sum_fees,omitempty"`
+	Mode               int                `json:"mode,omitempty"`
+	TotalFee           int                `json:"total_fee,omitempty"`
+	RelayFeeFloor      *uint64            `json:"relay_fee_floor,omitempty"`
+	DaFeeFloor         *uint64            `json:"da_fee_floor,omitempty"`
+	DaSurcharge        *uint64            `json:"da_surcharge,omitempty"`
+	DaRequiredFee      *uint64            `json:"da_required_fee,omitempty"`
+	RequiredFee        *uint64            `json:"required_fee,omitempty"`
+	AdmitClass         string             `json:"admit_class,omitempty"`
+	DominantFloor      string             `json:"dominant_floor,omitempty"`
+	RejectReason       string             `json:"reject_reason,omitempty"`
+	PolicyEntrypoint   string             `json:"policy_entrypoint,omitempty"`
+	MutationChecked    bool               `json:"mutation_checked,omitempty"`
+	Mutated            *bool              `json:"mutated,omitempty"`
+	PoolLenBefore      *int               `json:"pool_len_before,omitempty"`
+	PoolLenAfter       *int               `json:"pool_len_after,omitempty"`
+	NoDupConflictCap   *bool              `json:"duplicate_conflict_capacity_checked,omitempty"`
+	Consumed           int                `json:"consumed,omitempty"`
+	AlreadyGenerated   uint64             `json:"already_generated,omitempty"`
+	AlreadyGeneratedN1 uint64             `json:"already_generated_n1,omitempty"`
+	TTL                int                `json:"ttl,omitempty"`
+	TTLResetCount      int                `json:"ttl_reset_count,omitempty"`
+	AnchorBytes        uint64             `json:"anchor_bytes"`
+	DaBytes            uint64             `json:"da_bytes"`
+	FillPct            float64            `json:"fill_pct,omitempty"`
+	Rate               float64            `json:"rate,omitempty"`
+	Score              int                `json:"score,omitempty"`
+	BatchOK            bool               `json:"batch_ok,omitempty"`
+	Rollback           bool               `json:"rollback,omitempty"`
+	PeerExceeded       bool               `json:"peer_exceeded,omitempty"`
+	GlobalExceeded     bool               `json:"global_exceeded,omitempty"`
+	QualityPenalty     bool               `json:"quality_penalty,omitempty"`
+	Disconnect         bool               `json:"disconnect,omitempty"`
+	StormMode          bool               `json:"storm_mode,omitempty"`
+	Admit              bool               `json:"admit,omitempty"`
+	Pinned             bool               `json:"pinned,omitempty"`
+	Evicted            bool               `json:"evicted,omitempty"`
+	Reconstructed      bool               `json:"reconstructed,omitempty"`
+	Fallback           bool               `json:"fallback,omitempty"`
+	Ok                 bool               `json:"ok"`
+	RoundtripOK        bool               `json:"roundtrip_ok,omitempty"`
+	PenalizePeer       bool               `json:"penalize_peer,omitempty"`
+	Replaced           bool               `json:"replaced,omitempty"`
+	RequestFullBlock   bool               `json:"request_full_block,omitempty"`
+	RequestGetblocktxn bool               `json:"request_getblocktxn,omitempty"`
+	VerifyCalled       bool               `json:"verify_called,omitempty"`
+	CommitBearing      bool               `json:"commit_bearing,omitempty"`
+	Prioritize         bool               `json:"prioritize,omitempty"`
+	ExtID              uint16             `json:"ext_id,omitempty"`
+	SuiteIDs           []uint8            `json:"suite_ids,omitempty"`
+	Accepted           *bool              `json:"accepted,omitempty"`
+	FinalCounter       *uint64            `json:"final_counter,omitempty"`
 }
 
 func writeResp(w io.Writer, resp Response) {
@@ -843,6 +842,17 @@ func u64Ptr(v uint64) *uint64 {
 	return &v
 }
 
+// u128PtrOmitZero preserves the pre-widening omission semantics of an
+// `omitempty` u64 response field: absent exactly when the value is zero,
+// and otherwise the canonical decimal string form. Widening must not force
+// an absent zero-valued field present.
+func u128PtrOmitZero(v consensus.Uint128) *consensus.Uint128 {
+	if v.IsZero() {
+		return nil
+	}
+	return &v
+}
+
 func boolPtr(v bool) *bool {
 	return &v
 }
@@ -864,55 +874,57 @@ func dominantFeeFloor(relayFeeFloor, daRequiredFee uint64) string {
 	}
 }
 
-func feeFromPolicyUTXOs(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (uint64, error) {
+// feeFromPolicyUTXOs mirrors node.computeFeeNoVerify: per-input and
+// per-output values stay u64, their sums and the difference are exact u128.
+func feeFromPolicyUTXOs(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (consensus.Uint128, error) {
 	if tx == nil {
-		return 0, fmt.Errorf("nil tx")
+		return consensus.Uint128{}, fmt.Errorf("nil tx")
 	}
 	if len(tx.Inputs) == 0 {
-		return 0, fmt.Errorf("missing inputs")
+		return consensus.Uint128{}, fmt.Errorf("missing inputs")
 	}
 	if utxos == nil {
-		return 0, fmt.Errorf("nil utxo set")
+		return consensus.Uint128{}, fmt.Errorf("nil utxo set")
 	}
-	var totalIn uint64
+	var totalIn consensus.Uint128
 	for _, input := range tx.Inputs {
 		entry, ok := utxos[consensus.Outpoint{Txid: input.PrevTxid, Vout: input.PrevVout}]
 		if !ok {
-			return 0, fmt.Errorf("missing utxo")
+			return consensus.Uint128{}, fmt.Errorf("missing utxo")
 		}
-		next, ok := addU64Policy(totalIn, entry.Value)
+		next, ok := totalIn.CheckedAdd(consensus.Uint128FromU64(entry.Value))
 		if !ok {
-			return 0, fmt.Errorf("sum_in overflow")
+			return consensus.Uint128{}, fmt.Errorf("sum_in overflow")
 		}
 		totalIn = next
 	}
 
-	var totalOut uint64
+	var totalOut consensus.Uint128
 	for _, output := range tx.Outputs {
-		next, ok := addU64Policy(totalOut, output.Value)
+		next, ok := totalOut.CheckedAdd(consensus.Uint128FromU64(output.Value))
 		if !ok {
-			return 0, fmt.Errorf("sum_out overflow")
+			return consensus.Uint128{}, fmt.Errorf("sum_out overflow")
 		}
 		totalOut = next
 	}
-	if totalOut > totalIn {
-		return 0, fmt.Errorf("overspend")
+	fee, ok := totalIn.CheckedSub(totalOut)
+	if !ok {
+		return consensus.Uint128{}, fmt.Errorf("overspend")
 	}
-	return totalIn - totalOut, nil
+	return fee, nil
 }
 
-func feeBelowRollingFloorPolicy(fee, weight, floor uint64) bool {
+// feeBelowRollingFloorPolicy mirrors node.feeRateBelowFloor: the required
+// amount is the full 128-bit weight*floor product and the comparison against
+// the u128 fee is exact, so a product above u64 no longer auto-rejects.
+func feeBelowRollingFloorPolicy(fee consensus.Uint128, weight, floor uint64) bool {
 	if weight == 0 {
 		return true
 	}
 	if floor < conformanceDefaultMempoolMinFeeRate {
 		floor = conformanceDefaultMempoolMinFeeRate
 	}
-	hi, required := bits.Mul64(weight, floor)
-	if hi != 0 {
-		return true
-	}
-	return fee < required
+	return consensus.FeeBelowRate(fee, weight, floor)
 }
 
 func relayMetadataPolicyResp(req Request) Response {
@@ -1012,7 +1024,7 @@ func relayMetadataPolicyResp(req Request) Response {
 		resp.Admit = true
 		resp.AdmitClass = "accepted"
 		resp.RejectReason = ""
-		resp.Fee = meta.Fee
+		resp.Fee = u128PtrOmitZero(meta.Fee)
 		resp.WireBytes = meta.Size
 		return resp
 	}
@@ -1165,9 +1177,9 @@ func daFeeFloorPolicyResp(req Request) Response {
 	if err != nil {
 		return Response{Ok: false, Err: err.Error()}
 	}
-	resp.Fee = fee
+	resp.Fee = u128PtrOmitZero(fee)
 
-	if daBytes > 0 && daRequiredFee > 0 && fee < daRequiredFee {
+	if daBytes > 0 && daRequiredFee > 0 && fee.Cmp(consensus.Uint128FromU64(daRequiredFee)) < 0 {
 		resp.AdmitClass = "rejected"
 		resp.RequiredFee = u64Ptr(daRequiredFee)
 		resp.DominantFloor = "da"
@@ -1968,7 +1980,7 @@ func runFromStdin() {
 		}
 		writeResp(os.Stdout, Response{
 			Ok:                 true,
-			SumFees:            s.SumFees,
+			SumFees:            u128PtrOmitZero(s.SumFees),
 			UtxoCount:          s.UtxoCount,
 			AlreadyGenerated:   s.AlreadyGenerated,
 			AlreadyGeneratedN1: s.AlreadyGeneratedN1,
@@ -2048,7 +2060,7 @@ func runFromStdin() {
 			writeConsensusErr(os.Stdout, err)
 			return
 		}
-		writeResp(os.Stdout, Response{Ok: true, Fee: s.Fee, UtxoCount: s.UtxoCount})
+		writeResp(os.Stdout, Response{Ok: true, Fee: u128PtrOmitZero(s.Fee), UtxoCount: s.UtxoCount})
 		return
 
 	case "compact_shortid":
