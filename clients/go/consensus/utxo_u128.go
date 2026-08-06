@@ -97,8 +97,19 @@ func (v Uint128) MarshalJSON() ([]byte, error) { return json.Marshal(v.String())
 // UnmarshalJSON accepts either the canonical decimal string form (full u128
 // range) or a legacy JSON integer token, which is bounded to u64 exactly as
 // the pre-widening readers were. A numeric token above u64, a negative, a
-// fraction, or an exponent is rejected; a string token must be canonical.
+// fraction, an exponent, or a null is rejected; a string token must be
+// canonical.
+//
+// The null reject is explicit because json.Unmarshal of null into a uint64 is
+// a documented no-op: without it the legacy branch below would leave the value
+// at zero and report success, silently reading a null fee position as zero.
+// Omission semantics are unaffected — encoding/json sets a null optional
+// (*Uint128) field to nil without calling this method, matching Rust
+// uint128_json::deserialize_opt.
 func (v *Uint128) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return errUint128NotCanonical
+	}
 	if len(data) > 0 && data[0] == '"' {
 		var s string
 		if err := json.Unmarshal(data, &s); err != nil {

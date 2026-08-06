@@ -76,6 +76,10 @@ func TestUint128JSONCanonicality(t *testing.T) {
 			// A numeric token above u64: the widened domain is only
 			// reachable through the string form.
 			`{"v":18446744073709551616}`,
+			// A null in a value position never reads as legacy zero:
+			// encoding/json's null-into-uint64 no-op made silent-zero the
+			// default trap, so the reject is explicit.
+			`{"v":null}`,
 			`{"v":-1}`,
 			`{"v":1.0}`,
 			`{"v":""}`,
