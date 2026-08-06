@@ -311,6 +311,42 @@ mod tests {
         assert!(!pool.has(&bulky));
     }
 
+    /// RUB-1127: relay-pool ordering carries the exact u128 fee. The two
+    /// entries straddle u64 at equal size, so a fee narrowed to its low 64
+    /// bits turns 2^64 into 0 and inverts both the eviction and the
+    /// reverse-direction rejection. Mirrors Go
+    /// `TestMemoryTxPoolOrdersAboveU64FeesExactly`.
+    #[test]
+    fn orders_above_u64_fees_exactly() {
+        let above_u64 = 1u128 << 64;
+        let below_u64 = u128::from(u64::MAX);
+
+        let pool = RelayTxPool::new_with_limit(1);
+        let resident = [0x61u8; 32];
+        let wide = [0x62u8; 32];
+
+        assert!(pool.put(resident, &[0x01], below_u64, 4));
+        assert!(
+            pool.put(wide, &[0x02], above_u64, 4),
+            "above-u64 fee must evict the 2^64-1 entry at equal size"
+        );
+        assert!(!pool.has(&resident));
+        assert!(pool.has(&wide));
+
+        // The reverse direction: 2^64-1 must not displace 2^64.
+        assert!(
+            !pool.put(resident, &[0x01], below_u64, 4),
+            "below-u64 fee must be rejected against an above-u64 pool"
+        );
+        assert!(pool.has(&wide));
+        assert!(!pool.has(&resident));
+
+        assert_eq!(
+            compare_relay_priority(above_u64, 4, wide, below_u64, 4, resident),
+            1
+        );
+    }
+
     #[test]
     fn compare_relay_priority_tiebreak_by_fee_then_txid() {
         let a = [1u8; 32]; // lower txid = higher priority

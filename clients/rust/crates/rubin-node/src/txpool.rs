@@ -3831,6 +3831,83 @@ mod tests {
         );
     }
 
+    /// RUB-1127: the policy layer ranks the exact u128 fee end to end —
+    /// admission floor, miner ordering, admit priority, live selection, and
+    /// the capacity victim choice. Every row straddles u64: 2^64 truncates to
+    /// 0 under a narrowing to the low 64 bits while 2^64-1 truncates to
+    /// itself, so a narrowed comparison inverts each verdict rather than
+    /// merely losing precision. Mirrors Go
+    /// `TestMempoolPolicyAboveU64FeesAdmitOrderAndEvictExactly`.
+    #[test]
+    fn policy_above_u64_fees_admit_order_and_evict_exactly() {
+        let above_u64 = 1u128 << 64;
+        let below_u64 = u128::from(u64::MAX);
+        assert!(above_u64 > below_u64, "row must straddle u64");
+
+        // Admission floor: weight*floor is 1000, which the exact fee clears
+        // and a fee truncated to its low 64 bits (0) does not.
+        super::validate_fee_floor(above_u64, 1, 1000)
+            .expect("fee above u64 must clear a weight*floor of 1000");
+
+        let wide_txid: [u8; 32] = [0x92; 32];
+        let narrow_txid: [u8; 32] = [0x93; 32];
+        let wide = TxPoolEntry {
+            raw: vec![0x92],
+            inputs: Vec::new(),
+            fee: above_u64,
+            weight: 1,
+            size: 1,
+            source: TxSource::Local,
+        };
+        let narrow = TxPoolEntry {
+            raw: vec![0x93],
+            inputs: Vec::new(),
+            fee: below_u64,
+            weight: 1,
+            size: 1,
+            source: TxSource::Local,
+        };
+
+        // Miner ordering: lower `Ordering` sorts first.
+        assert_eq!(
+            compare_entries_for_mining(&(&wide_txid, &wide), &(&narrow_txid, &narrow)),
+            Ordering::Less,
+            "the above-u64 fee must sort ahead of 2^64-1",
+        );
+        // Admit priority: the below-u64 entry is the worse one.
+        assert_eq!(
+            compare_admit_priority(narrow_txid, &narrow, wide_txid, &wide),
+            Ordering::Less,
+        );
+
+        let mut pool = TxPool::new();
+        pool.set_capacity_for_test(2, 100);
+        pool.insert_entry(wide_txid, wide.clone());
+        pool.insert_entry(narrow_txid, narrow.clone());
+
+        // Live miner selection over the straddling pair.
+        assert_eq!(
+            pool.select_transactions(2, 100),
+            vec![vec![0x92], vec![0x93]],
+        );
+
+        // Capacity victim: count pressure must remove the below-u64 entry and
+        // keep the above-u64 one.
+        pool.insert_capacity_checked_entry_for_test(
+            [0x94; 32],
+            test_entry(1u128 << 65, 1, 1, TxSource::Remote),
+        )
+        .expect("candidate above both resident fees must be admitted");
+        assert!(
+            pool.txs.contains_key(&wide_txid),
+            "above-u64 entry must survive capacity eviction"
+        );
+        assert!(
+            !pool.txs.contains_key(&narrow_txid),
+            "below-u64 entry must be the capacity victim"
+        );
+    }
+
     #[test]
     fn select_transactions_respects_count_and_size_caps() {
         let mut pool = TxPool::new();

@@ -205,6 +205,16 @@ fn validate_tx_local_fee_and_index_preserved() {
     // before any validation error is returned.
     assert_eq!(r.tx_index, ptcs[0].tx_index);
     assert_eq!(r.fee, ptcs[0].fee);
+
+    // RUB-1127: the worker copies the precomputed fee through untouched, so a
+    // fee above u64 must survive the parallel dispatch exactly. 2^64
+    // truncates to 0 under any u64 narrowing of the carried scalar. Mirrors
+    // the Go sibling in `TestValidateTxLocal_P2PK_Valid`.
+    let wide_fee = 1u128 << 64;
+    let mut wide_ptc = ptcs[0].clone();
+    wide_ptc.fee = wide_fee;
+    let wide = validate_tx_local(&wide_ptc, &pb, [0u8; 32], 100, 0, None);
+    assert_eq!(wide.fee, wide_fee, "worker fee must be exact, not narrowed");
 }
 
 #[test]
