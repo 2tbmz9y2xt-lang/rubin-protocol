@@ -16,7 +16,7 @@ type CheckedTransaction struct {
 	Bytes          []byte
 	TxID           [32]byte
 	WTxID          [32]byte
-	Fee            uint64
+	Fee            Uint128
 	Weight         uint64
 	DaBytes        uint64
 	SerializedSize int

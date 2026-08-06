@@ -977,13 +977,42 @@ fn run_connect_block_first_error_cases(
             encode(tx)
         };
         if !rub1099 {
-            reject(
-                &block(subsidy, &[max_fee(8, 0), max_fee(9, 1)]),
-                ErrorCode::BlockErrParse,
-                &cov,
-                u64::MAX,
-                Some("sum_fees overflow"),
-            );
+            // RUB-1127: two transactions whose individual fees are each
+            // <= u64 but whose block sum crosses u64. This used to be
+            // BLOCK_ERR_PARSE "sum_fees overflow" because sum_fees was a u64
+            // accumulator; sum_fees is now checked u128, so the block is
+            // accepted and the aggregate is carried exactly. Both the
+            // sequential and the parallel path must agree on the exact value.
+            let aggregate_block = block(subsidy, &[max_fee(8, 0), max_fee(9, 1)]);
+            let want_sum_fees = 2 * (u128::from(u64::MAX) - 1);
+            assert!(want_sum_fees > u128::from(u64::MAX), "row must cross u64");
+            let mut seq = state(&cov, u64::MAX);
+            let mut par = state(&cov, u64::MAX);
+            let seq_summary = crate::connect_block_basic_in_memory_at_height(
+                &aggregate_block,
+                Some(prev),
+                Some(target),
+                height,
+                Some(&[0]),
+                &mut seq,
+                ZERO_CHAIN_ID,
+            )
+            .expect("aggregate sum_fees above u64 is accepted (sequential)");
+            let par_summary = crate::connect_block_parallel_sig_verify(
+                &aggregate_block,
+                Some(prev),
+                Some(target),
+                height,
+                Some(&[0]),
+                &mut par,
+                ZERO_CHAIN_ID,
+                2,
+            )
+            .expect("aggregate sum_fees above u64 is accepted (parallel)");
+            assert_eq!(seq_summary.sum_fees, want_sum_fees);
+            assert_eq!(par_summary.sum_fees, want_sum_fees);
+            assert_eq!(seq_summary.post_state_digest, par_summary.post_state_digest);
+            assert_eq!(seq, par);
         }
 
         let valid_block = block(subsidy + 20, &[valid(1, 0, 90), valid(2, 1, 90)]);

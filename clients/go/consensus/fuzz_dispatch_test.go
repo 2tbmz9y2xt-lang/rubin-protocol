@@ -138,7 +138,7 @@ func FuzzValidateTxLocalDispatch(f *testing.F) {
 			ResolvedInputs: resolved,
 			WitnessStart:   0,
 			WitnessEnd:     len(tx.Witness),
-			Fee:            42,
+			Fee:            Uint128FromU64(42),
 		}
 
 		r1 := ValidateTxLocal(tvc, chainID, blockHeight, blockMTP, nil)
@@ -157,7 +157,7 @@ func FuzzValidateTxLocalDispatch(f *testing.F) {
 		}
 
 		// Invariant: Fee preserved from TVC.
-		if r1.Fee != 42 {
+		if r1.Fee.Cmp(Uint128FromU64(42)) != 0 {
 			t.Fatalf("Fee not preserved: got %d, want 42", r1.Fee)
 		}
 

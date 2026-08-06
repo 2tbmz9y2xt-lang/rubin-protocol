@@ -68,7 +68,7 @@ func TestTxGenCreateValidTx(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckTransaction: %v", err)
 	}
-	if checked.Fee != 1 {
+	if checked.Fee.Cmp(consensus.Uint128FromU64(1)) != 0 {
 		t.Fatalf("fee=%d, want 1", checked.Fee)
 	}
 	if checked.SerializedSize != len(txBytes) {

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -63,7 +64,27 @@ def _hex0x(s: str) -> str:
     return "0x" + t
 
 
+_CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)\Z")
+_MAX_U64 = (1 << 64) - 1
+_MAX_U128 = (1 << 128) - 1
+
+
 def _lean_opt_nat(x: Any) -> str:
+    """Render an optional Lean `Nat` from a trace output value.
+
+    Widened (u128-domain) trace outputs such as `fee` are emitted as
+    canonical unsigned decimal STRINGS, because a widened monetary integer
+    must not depend on interoperable JSON-number precision. Lean `Nat` is
+    unbounded, so the string is rendered as a plain numeral. A legacy JSON
+    integer token is still accepted, bounded to u64 exactly as every other
+    reader in this line is: the widened domain is reachable only through the
+    string form. Anything else fails closed: a leading zero, a sign,
+    whitespace, a fraction, an exponent, a non-digit, or a value above
+    u128 is never silently reinterpreted. Lean `Nat` would happily hold a
+    value no client can represent, so the u128 ceiling is enforced here
+    exactly as Go `Uint128.UnmarshalJSON`, Rust `Uint128Token`, and the
+    conformance runner's `exact_uint` enforce it.
+    """
     if x is None:
         return "none"
     if isinstance(x, bool):
@@ -71,6 +92,14 @@ def _lean_opt_nat(x: Any) -> str:
     if isinstance(x, int):
         if x < 0:
             _fail(f"expected nat, got negative: {x}")
+        if x > _MAX_U64:
+            _fail(f"legacy numeric token above u64: {x}")
+        return f"some {x}"
+    if isinstance(x, str):
+        if not _CANONICAL_DECIMAL.match(x):
+            _fail(f"expected canonical unsigned decimal string, got: {x!r}")
+        if int(x) > _MAX_U128:
+            _fail(f"canonical decimal string above u128: {x}")
         return f"some {x}"
     _fail(f"expected nat, got: {type(x)}")
 

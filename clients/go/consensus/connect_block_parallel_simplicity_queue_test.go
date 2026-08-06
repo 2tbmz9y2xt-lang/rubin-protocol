@@ -55,7 +55,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicityPreservesEarlierPrevalidatio
 		t.Run(tc.name, func(t *testing.T) {
 			q := NewSigCheckQueue(1)
 			work, fee, err := applyNonCoinbaseTxBasicWorkQ(tc.tx, hashWithPrefix(0xD7), tc.utxos, 1, 0, [32]byte{}, q, nil, nil)
-			if work != nil || fee != 0 || q.Len() != 0 {
+			if work != nil || fee.Cmp(Uint128FromU64(0)) != 0 || q.Len() != 0 {
 				t.Fatalf("expected no queued mutation/sigs on reject, got work=%v fee=%d sigs=%d", work, fee, q.Len())
 			}
 			assertTxErrCodeMsg(t, err, tc.code, tc.message)

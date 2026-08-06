@@ -13,7 +13,7 @@ type InMemoryChainState struct {
 }
 
 type ConnectBlockBasicSummary struct {
-	SumFees            uint64
+	SumFees            Uint128
 	AlreadyGenerated   uint64
 	AlreadyGeneratedN1 uint64
 	UtxoCount          uint64
@@ -153,7 +153,7 @@ func applyInMemorySequentialConnect(
 	blockHeight uint64,
 	blockMTP uint64,
 	validation connectBlockInMemoryValidationContext,
-) (map[Outpoint]UtxoEntry, uint64, error) {
+) (map[Outpoint]UtxoEntry, Uint128, error) {
 	if err := applyInMemoryCoinbaseOutputs(
 		pb,
 		workUtxos,
@@ -161,7 +161,7 @@ func applyInMemorySequentialConnect(
 		validation.chainID,
 		validation.rotation,
 	); err != nil {
-		return nil, 0, err
+		return nil, Uint128{}, err
 	}
 	return applyInMemoryNonCoinbaseTxs(
 		pb,
@@ -224,12 +224,12 @@ func applyInMemoryNonCoinbaseTxs(
 	blockHeight uint64,
 	blockMTP uint64,
 	validation connectBlockInMemoryValidationContext,
-) (map[Outpoint]UtxoEntry, uint64, error) {
-	var sumFees uint64
+) (map[Outpoint]UtxoEntry, Uint128, error) {
+	var sumFees Uint128
 	seenNonces := make(map[uint64]struct{}, len(pb.Txs))
 	for i := 1; i < len(pb.Txs); i++ {
 		if err := validateNonCoinbaseBlockTx(pb.Txs[i], seenNonces); err != nil {
-			return nil, 0, err
+			return nil, Uint128{}, err
 		}
 		nextUtxos, fee, err := applyNonCoinbaseTxBasicWork(nonCoinbaseApplyWorkInput{
 			tx:       pb.Txs[i],
@@ -242,13 +242,14 @@ func applyInMemoryNonCoinbaseTxs(
 			registry: validation.registry,
 		})
 		if err != nil {
-			return nil, 0, err
+			return nil, Uint128{}, err
 		}
 		workUtxos = nextUtxos
-		sumFees, err = addU64(sumFees, fee)
-		if err != nil {
-			return nil, 0, txerr(BLOCK_ERR_PARSE, "sum_fees overflow")
+		next, ok := sumFees.CheckedAdd(fee)
+		if !ok {
+			return nil, Uint128{}, txerr(BLOCK_ERR_PARSE, "sum_fees overflow")
 		}
+		sumFees = next
 	}
 	return workUtxos, sumFees, nil
 }
@@ -330,7 +331,7 @@ func commitInMemoryConnectSummary(
 	blockHeight uint64,
 	alreadyGenerated *big.Int,
 	alreadyGeneratedN1 *big.Int,
-	sumFees uint64,
+	sumFees Uint128,
 ) (*ConnectBlockBasicSummary, error) {
 	alreadyGeneratedU64, err := bigIntToUint64(alreadyGenerated)
 	if err != nil {

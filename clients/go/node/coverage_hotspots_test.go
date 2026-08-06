@@ -49,21 +49,62 @@ func TestCoverage_ComputeFeeNoVerifyGuards(t *testing.T) {
 	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
 		{Txid: [32]byte{0x01}, Vout: 0}: {Value: ^uint64(0)},
 	}
+	// RUB-1127: two u64-max inputs. This used to be a "sum_in overflow"
+	// policy error because sum_in was a u64 accumulator; sum_in is now exact
+	// u128, so the fee is derived without error and carries the full value.
 	tx.Inputs = append(tx.Inputs, consensus.TxInput{PrevTxid: [32]byte{0x01}, PrevVout: 0})
-	if _, err := computeFeeNoVerify(tx, utxos); err == nil {
-		t.Fatalf("expected sum_in overflow")
+	wideFee, err := computeFeeNoVerify(tx, utxos)
+	if err != nil {
+		t.Fatalf("two u64-max inputs must derive a fee, got %v", err)
+	}
+	// 2*(2^64-1) - 1 (a single output of value 1), which exceeds u64.
+	wantWideFee := consensus.Uint128{Hi: 1, Lo: ^uint64(0) - 2}
+	if wideFee.Cmp(wantWideFee) != 0 {
+		t.Fatalf("wide fee=%s want=%s", wideFee.String(), wantWideFee.String())
+	}
+	if wideFee.Cmp(consensus.Uint128FromU64(^uint64(0))) <= 0 {
+		t.Fatalf("wide fee=%s must exceed u64", wideFee.String())
 	}
 	tx.Inputs = tx.Inputs[:1]
+	// RUB-1127: the output sum is a u128 accumulator too, so {u64-max, 1} is
+	// trivially representable and this row pins the OVERSPEND verdict, not an
+	// output-sum overflow: sum_out = 2^64 against a UTXO of value 10. The
+	// sum_in/sum_out CheckedAdd guards are fail-closed guards that MAX_TX_INPUTS
+	// =1024 and MAX_TX_OUTPUTS=1024 make unreachable (1024*(2^64-1) < 2^74), so
+	// no test can drive them; they stay in place and are deliberately unpinned.
 	tx.Outputs = []consensus.TxOutput{{Value: ^uint64(0)}, {Value: 1}}
 	utxos = map[consensus.Outpoint]consensus.UtxoEntry{
 		{Txid: [32]byte{0x01}, Vout: 0}: {Value: 10},
 	}
-	if _, err := computeFeeNoVerify(tx, utxos); err == nil {
-		t.Fatalf("expected sum_out overflow")
+	if _, err := computeFeeNoVerify(tx, utxos); err == nil || err.Error() != "overspend" {
+		t.Fatalf("wide output sum must be overspend, got %v", err)
 	}
 	tx.Outputs = []consensus.TxOutput{{Value: 11}}
-	if _, err := computeFeeNoVerify(tx, utxos); err == nil {
-		t.Fatalf("expected overspend")
+	if _, err := computeFeeNoVerify(tx, utxos); err == nil || err.Error() != "overspend" {
+		t.Fatalf("expected overspend, got %v", err)
+	}
+}
+
+// RUB-1127: the maximum structural transaction fee. MAX_TX_INPUTS=1024 inputs
+// of u64-max each with zero outputs is the largest fee any transaction can
+// carry, and the summation path must return it exactly. The row drives
+// computeFeeNoVerify rather than a signed consensus transaction: 1024 ML-DSA-87
+// signatures is not a proportionate test cost, and the accumulator is the code
+// the fee width is claimed for.
+func TestCoverage_ComputeFeeNoVerifyMaximumStructuralFee(t *testing.T) {
+	outpoint := consensus.Outpoint{Txid: [32]byte{0x01}, Vout: 0}
+	tx := &consensus.Tx{Inputs: make([]consensus.TxInput, consensus.MAX_TX_INPUTS)}
+	for i := range tx.Inputs {
+		tx.Inputs[i] = consensus.TxInput{PrevTxid: outpoint.Txid, PrevVout: outpoint.Vout}
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{outpoint: {Value: ^uint64(0)}}
+	fee, err := computeFeeNoVerify(tx, utxos)
+	if err != nil {
+		t.Fatalf("maximum structural fee must derive, got %v", err)
+	}
+	// 1024*(2^64-1) in canonical decimal.
+	if got := fee.String(); got != "18889465931478580853760" {
+		t.Fatalf("maximum structural fee=%s, want 18889465931478580853760", got)
 	}
 }
 
@@ -105,7 +146,7 @@ func TestCoverage_MempoolHelpers(t *testing.T) {
 		t.Fatalf("expected duplicate tx rejection")
 	}
 	mp.maxTxs = len(mp.txs)
-	if err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0xaa}, fee: 1, weight: 1, size: 1}); err == nil {
+	if err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0xaa}, fee: consensus.Uint128FromU64(1), weight: 1, size: 1}); err == nil {
 		t.Fatalf("expected mempool full")
 	}
 	if got := pickEntries(mp.snapshotEntries(), 1, 1<<20); len(got) != 1 {

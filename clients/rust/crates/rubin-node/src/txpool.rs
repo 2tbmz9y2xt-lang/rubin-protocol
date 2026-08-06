@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::OnceLock;
 
+use rubin_consensus::uint128_json::{compare_fee_rate as compare_fee_rate_exact, fee_below_rate};
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
     constants::{COV_TYPE_CORE_EXT, COV_TYPE_CORE_SIMPLICITY, MAX_RELAY_MSG_BYTES},
@@ -120,7 +121,9 @@ pub struct TxPoolConfig {
 pub struct TxPoolEntry {
     pub raw: Vec<u8>,
     pub inputs: Vec<Outpoint>,
-    pub fee: u64,
+    /// Authoritative admitted fee: the exact u128 scalar consensus derived.
+    /// `weight` stays u64 per the policy contract.
+    pub fee: u128,
     pub weight: u64,
     pub size: usize,
     /// Caller-declared admission origin. Mirrors Go `mempoolEntry.source`
@@ -168,13 +171,13 @@ pub struct TxPool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorstEntryKey {
     txid: [u8; 32],
-    fee: u64,
+    fee: u128,
     weight: u64,
     heap_id: u64,
 }
 
 struct AdmitPriority<'a> {
-    fee: u64,
+    fee: u128,
     weight: u64,
     tie: &'a [u8],
 }
@@ -245,7 +248,8 @@ pub struct TxPoolAdmitError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelayTxMetadata {
-    pub fee: u64,
+    /// Authoritative admitted fee, carried unnarrowed to relay ordering.
+    pub fee: u128,
     pub size: usize,
 }
 
@@ -1232,7 +1236,7 @@ pub(crate) fn relay_metadata(
 fn apply_post_consensus_policy_with_floor(
     tx: &rubin_consensus::Tx,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
-    fee: u64,
+    fee: u128,
     weight: u64,
     da_bytes: u64,
     next_height: u64,
@@ -1374,13 +1378,12 @@ fn unavailable(message: impl Into<String>) -> TxPoolAdmitError {
 /// clients/go/node/mempool.go (in-helper clamp inside `feeRateBelowFloor`; grep `DefaultMempoolMinFeeRate` in fn body). Callers therefore always
 /// receive at-least-DEFAULT enforcement even if cfg-static or
 /// rolling-floor sources zero the field.
-fn fee_rate_below_floor(fee: u64, weight: u64, floor: u64) -> bool {
+fn fee_rate_below_floor(fee: u128, weight: u64, floor: u64) -> bool {
     if weight == 0 {
         return true;
     }
     let floor = floor.max(DEFAULT_MEMPOOL_MIN_FEE_RATE);
-    let required = (weight as u128) * (floor as u128);
-    (fee as u128) < required
+    fee_below_rate(fee, weight, floor)
 }
 
 /// Free-function predicate enforcing the rolling-relay-floor invariant.
@@ -1393,7 +1396,7 @@ fn fee_rate_below_floor(fee: u64, weight: u64, floor: u64) -> bool {
 /// clamp lives inside `fee_rate_below_floor` (Go-parity at
 /// clients/go/node/mempool.go in-helper clamp inside `feeRateBelowFloor` — grep `DefaultMempoolMinFeeRate` in fn body. The error message surfaces
 /// the post-clamp value for operator clarity.
-fn validate_fee_floor(fee: u64, weight: u64, cfg_floor: u64) -> Result<(), TxPoolAdmitError> {
+fn validate_fee_floor(fee: u128, weight: u64, cfg_floor: u64) -> Result<(), TxPoolAdmitError> {
     if fee_rate_below_floor(fee, weight, cfg_floor) {
         let surfaced_floor = cfg_floor.max(DEFAULT_MEMPOOL_MIN_FEE_RATE);
         return Err(unavailable(format!(
@@ -1482,7 +1485,11 @@ fn cheap_fee_floor_precheck(
     if weight == 0 {
         return Ok(());
     }
-    let fee = input_value - output_value;
+    // Single-input P2PK shape only, so this difference cannot exceed u64 and
+    // the local u64 arithmetic is exact here. It is a fast-reject hint, never
+    // the authoritative admitted fee: that stays the consensus-derived u128
+    // value carried by the apply summary.
+    let fee = u128::from(input_value - output_value);
     validate_fee_floor(fee, weight, current_min_fee_rate)
 }
 
@@ -1980,11 +1987,13 @@ pub(crate) fn reject_da_anchor_tx_policy(
         // not compute fee or apply any DA-specific term.
         return Ok(());
     }
-    let relay_floor = weight.checked_mul(current_mempool_min_fee_rate).ok_or_else(|| {
-        format!(
-            "relay fee floor overflow (weight={weight} current_mempool_min_fee_rate={current_mempool_min_fee_rate}): u64 overflow"
-        )
-    })?;
+    // The relay-floor term is exact and never rejects: weight and the rolling
+    // rate are both u64, so their full product is at most (2^64-1)^2 and fits
+    // u128 by construction. Mirrors Go `mulU64Exact` in policy_da_anchor.go
+    // and the already-exact `fee_below_rate` predicate. The DA-side terms
+    // below keep their u64 overflow errors, whose reject reasons are pinned
+    // by the shared CV-DA-FEE-FLOOR vector and both consensus-CLI models.
+    let relay_floor = u128::from(weight) * u128::from(current_mempool_min_fee_rate);
     let da_floor = da_bytes.checked_mul(min_da_fee_rate).ok_or_else(|| {
         format!(
             "DA fee floor overflow (da_payload_len={da_bytes} min_da_fee_rate={min_da_fee_rate}): u64 overflow"
@@ -2000,7 +2009,7 @@ pub(crate) fn reject_da_anchor_tx_policy(
             "DA required fee overflow (da_fee_floor={da_floor} da_surcharge={da_surcharge}): u64 overflow"
         )
     })?;
-    let required = relay_floor.max(da_required);
+    let required = relay_floor.max(u128::from(da_required));
     if required == 0 {
         // DA tx but every Stage C rate-derived fee term is zero: the
         // relay-floor term is zero and both DA-side terms are zero.
@@ -2017,14 +2026,22 @@ pub(crate) fn reject_da_anchor_tx_policy(
     Ok(())
 }
 
+/// Derives the policy-side fee as an exact u128, matching the consensus
+/// derivation's domain and Go `computeFeeNoVerify` in `policy_da_anchor.go`.
+///
+/// Per-input and per-output values stay u64; only their sums and the
+/// difference widen, so a DA transaction whose fee exceeds u64 is measured
+/// against the Stage C floor exactly instead of failing an overflow check.
+/// Two u64-max inputs sum to 2^64 and derive a fee, where a u64 accumulator
+/// returned `sum_in overflow` and diverged from Go.
 pub(crate) fn compute_fee_no_verify(
     tx: &rubin_consensus::Tx,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
-) -> Result<u64, String> {
+) -> Result<u128, String> {
     if tx.inputs.is_empty() {
         return Err("missing inputs".to_string());
     }
-    let mut sum_in = 0u64;
+    let mut sum_in = 0u128;
     for input in &tx.inputs {
         let outpoint = Outpoint {
             txid: input.prev_txid,
@@ -2034,13 +2051,13 @@ pub(crate) fn compute_fee_no_verify(
             .get(&outpoint)
             .ok_or_else(|| "missing utxo".to_string())?;
         sum_in = sum_in
-            .checked_add(entry.value)
+            .checked_add(u128::from(entry.value))
             .ok_or_else(|| "sum_in overflow".to_string())?;
     }
-    let mut sum_out = 0u64;
+    let mut sum_out = 0u128;
     for output in &tx.outputs {
         sum_out = sum_out
-            .checked_add(output.value)
+            .checked_add(u128::from(output.value))
             .ok_or_else(|| "sum_out overflow".to_string())?;
     }
     if sum_out > sum_in {
@@ -2191,13 +2208,11 @@ fn compare_capacity_priority(a: &CapacityPlanEntry<'_>, b: &CapacityPlanEntry<'_
     }
 }
 
-fn compare_fee_rate_values(fee_a: u64, weight_a: u64, fee_b: u64, weight_b: u64) -> Ordering {
-    if weight_a == 0 || weight_b == 0 {
-        return Ordering::Equal;
-    }
-    let left = u128::from(fee_a) * u128::from(weight_b);
-    let right = u128::from(fee_b) * u128::from(weight_a);
-    left.cmp(&right)
+/// Compares fee_a/weight_a against fee_b/weight_b by exact
+/// cross-multiplication over all 192 product bits of a u128 fee by a u64
+/// weight. Mirrors Go `consensus.CompareFeeRate`.
+fn compare_fee_rate_values(fee_a: u128, weight_a: u64, fee_b: u128, weight_b: u64) -> Ordering {
+    compare_fee_rate_exact(fee_a, weight_a, fee_b, weight_b)
 }
 
 #[cfg(test)]
@@ -2209,7 +2224,7 @@ mod tests {
 
     use rubin_consensus::block::BLOCK_HEADER_BYTES;
     use rubin_consensus::constants::{
-        COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_P2PK,
+        COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_P2PK, MAX_TX_INPUTS,
         SUITE_ID_SENTINEL, TX_WIRE_VERSION,
     };
     use rubin_consensus::{
@@ -2220,11 +2235,12 @@ mod tests {
 
     use super::{
         cheap_fee_floor_precheck, compare_admit_priority, compare_entries_for_mining,
-        compare_fee_rate, conflict, default_tx_pool_low_water_bytes, fee_precheck_p2pk_input_value,
-        fee_precheck_p2pk_output_value, mtp_median, next_block_height, next_block_mtp,
-        reject_da_anchor_tx_policy, rejected, relay_metadata, tx_pool_byte_pressure_target,
-        unavailable, TxPool, TxPoolAdmitErrorKind, TxPoolConfig, TxPoolEntry, TxPoolSnapshot,
-        TxPoolSnapshotEntry, TxSource, DEFAULT_MEMPOOL_MIN_FEE_RATE, MAX_TX_POOL_TRANSACTIONS,
+        compare_fee_rate, compute_fee_no_verify, conflict, default_tx_pool_low_water_bytes,
+        fee_precheck_p2pk_input_value, fee_precheck_p2pk_output_value, mtp_median,
+        next_block_height, next_block_mtp, reject_da_anchor_tx_policy, rejected, relay_metadata,
+        tx_pool_byte_pressure_target, unavailable, TxPool, TxPoolAdmitErrorKind, TxPoolConfig,
+        TxPoolEntry, TxPoolSnapshot, TxPoolSnapshotEntry, TxSource, DEFAULT_MEMPOOL_MIN_FEE_RATE,
+        MAX_TX_POOL_TRANSACTIONS,
     };
     use crate::{
         block_store_path, default_sync_config, devnet_genesis_block_bytes, devnet_genesis_chain_id,
@@ -2275,7 +2291,7 @@ mod tests {
         (store, dir)
     }
 
-    fn test_entry(fee: u64, weight: u64, size: usize, source: TxSource) -> TxPoolEntry {
+    fn test_entry(fee: u128, weight: u64, size: usize, source: TxSource) -> TxPoolEntry {
         TxPoolEntry {
             raw: vec![0xA5; size],
             inputs: Vec::new(),
@@ -2288,7 +2304,7 @@ mod tests {
 
     fn txpool_snapshot_entry_from_raw(
         raw: Vec<u8>,
-        fee: u64,
+        fee: u128,
         source: TxSource,
         heap_id: u64,
     ) -> ([u8; 32], TxPoolSnapshotEntry) {
@@ -3815,6 +3831,83 @@ mod tests {
         );
     }
 
+    /// RUB-1127: the policy layer ranks the exact u128 fee end to end —
+    /// admission floor, miner ordering, admit priority, live selection, and
+    /// the capacity victim choice. Every row straddles u64: 2^64 truncates to
+    /// 0 under a narrowing to the low 64 bits while 2^64-1 truncates to
+    /// itself, so a narrowed comparison inverts each verdict rather than
+    /// merely losing precision. Mirrors Go
+    /// `TestMempoolPolicyAboveU64FeesAdmitOrderAndEvictExactly`.
+    #[test]
+    fn policy_above_u64_fees_admit_order_and_evict_exactly() {
+        let above_u64 = 1u128 << 64;
+        let below_u64 = u128::from(u64::MAX);
+        assert!(above_u64 > below_u64, "row must straddle u64");
+
+        // Admission floor: weight*floor is 1000, which the exact fee clears
+        // and a fee truncated to its low 64 bits (0) does not.
+        super::validate_fee_floor(above_u64, 1, 1000)
+            .expect("fee above u64 must clear a weight*floor of 1000");
+
+        let wide_txid: [u8; 32] = [0x92; 32];
+        let narrow_txid: [u8; 32] = [0x93; 32];
+        let wide = TxPoolEntry {
+            raw: vec![0x92],
+            inputs: Vec::new(),
+            fee: above_u64,
+            weight: 1,
+            size: 1,
+            source: TxSource::Local,
+        };
+        let narrow = TxPoolEntry {
+            raw: vec![0x93],
+            inputs: Vec::new(),
+            fee: below_u64,
+            weight: 1,
+            size: 1,
+            source: TxSource::Local,
+        };
+
+        // Miner ordering: lower `Ordering` sorts first.
+        assert_eq!(
+            compare_entries_for_mining(&(&wide_txid, &wide), &(&narrow_txid, &narrow)),
+            Ordering::Less,
+            "the above-u64 fee must sort ahead of 2^64-1",
+        );
+        // Admit priority: the below-u64 entry is the worse one.
+        assert_eq!(
+            compare_admit_priority(narrow_txid, &narrow, wide_txid, &wide),
+            Ordering::Less,
+        );
+
+        let mut pool = TxPool::new();
+        pool.set_capacity_for_test(2, 100);
+        pool.insert_entry(wide_txid, wide.clone());
+        pool.insert_entry(narrow_txid, narrow.clone());
+
+        // Live miner selection over the straddling pair.
+        assert_eq!(
+            pool.select_transactions(2, 100),
+            vec![vec![0x92], vec![0x93]],
+        );
+
+        // Capacity victim: count pressure must remove the below-u64 entry and
+        // keep the above-u64 one.
+        pool.insert_capacity_checked_entry_for_test(
+            [0x94; 32],
+            test_entry(1u128 << 65, 1, 1, TxSource::Remote),
+        )
+        .expect("candidate above both resident fees must be admitted");
+        assert!(
+            pool.txs.contains_key(&wide_txid),
+            "above-u64 entry must survive capacity eviction"
+        );
+        assert!(
+            !pool.txs.contains_key(&narrow_txid),
+            "below-u64 entry must be the capacity victim"
+        );
+    }
+
     #[test]
     fn select_transactions_respects_count_and_size_caps() {
         let mut pool = TxPool::new();
@@ -3887,8 +3980,8 @@ mod tests {
                 TxPoolEntry {
                     raw: vec![idx],
                     inputs: Vec::new(),
-                    fee: idx as u64 + 1,
-                    weight: idx as u64 + 1,
+                    fee: u128::from(idx) + 1,
+                    weight: u64::from(idx) + 1,
                     size: 1,
                     source: TxSource::Local,
                 },
@@ -3915,8 +4008,8 @@ mod tests {
                 TxPoolEntry {
                     raw: vec![idx],
                     inputs: Vec::new(),
-                    fee: idx as u64 + 10,
-                    weight: idx as u64 + 10,
+                    fee: u128::from(idx) + 10,
+                    weight: u64::from(idx) + 10,
                     size: 1,
                     source: TxSource::Local,
                 },
@@ -4502,13 +4595,160 @@ mod tests {
         assert!(err.contains(&format!("da_fee_floor={da_required}")));
     }
 
+    /// Pins that a weight*current_mempool_min_fee_rate product above u64 is
+    /// computed exactly rather than rejected. Before RUB-1127 this product
+    /// went through `weight.checked_mul(..)`, so any rate that overflowed the
+    /// u64 product rejected every DA transaction regardless of its fee -- a
+    /// product-overflow rejection the contract forbids, and one that already
+    /// did not exist in `fee_below_rate` or in either consensus-CLI policy
+    /// model. Mirrors Go
+    /// `TestRejectDaAnchorTxPolicy_RelayFloorProductAboveU64AdmitsClearingFee`.
     #[test]
-    fn stage_c_da_overflow_relay_floor_rejects_fail_closed() {
-        let (state, raw, weight, _) = build_signed_da_tx_with_fee(1_000_000, vec![0x77; 8]);
-        let err = run_da_policy(&raw, &state, u64::MAX, 1, 1)
-            .expect_err("u64::MAX * weight must overflow");
-        assert!(err.starts_with("relay fee floor overflow"), "got: {err}");
-        assert!(err.contains(&format!("weight={weight}")));
+    fn stage_c_relay_floor_product_above_u64_admits_clearing_fee() {
+        // One u64-max input paying nearly everything as fee, plus a second
+        // u64-max input: sum_in crosses u64, so fee ~= 2^65 and only an exact
+        // u128 floor can decide the comparison.
+        let (state, raw, _, _) = build_signed_da_tx_with_fee(u64::MAX - 100, vec![0x77; 8]);
+        let (mut tx, _, _, _) = parse_tx(&raw).expect("parse tx");
+        let second = Outpoint {
+            txid: [0x17; 32],
+            vout: 0,
+        };
+        tx.inputs.push(TxInput {
+            prev_txid: second.txid,
+            prev_vout: second.vout,
+            script_sig: Vec::new(),
+            sequence: 0,
+        });
+        let mut utxos = state.utxos.clone();
+        utxos.insert(
+            second,
+            UtxoEntry {
+                value: u64::MAX,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x23; 2592]),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+        let (weight, da_bytes, _) =
+            tx_weight_and_stats_public(&tx).expect("tx_weight_and_stats_public");
+
+        // Smallest rate whose product with weight exceeds u64.
+        let current_min = (u64::MAX / weight) + 1;
+        let exact_floor = u128::from(weight) * u128::from(current_min);
+        assert!(
+            exact_floor > u128::from(u64::MAX),
+            "test premise: relay floor {exact_floor} must exceed u64"
+        );
+        let fee = compute_fee_no_verify(&tx, &utxos).expect("fee must derive above u64");
+        assert!(
+            fee >= exact_floor,
+            "test premise: fee {fee} must clear the exact floor {exact_floor}"
+        );
+
+        reject_da_anchor_tx_policy(&tx, weight, da_bytes, &utxos, current_min, 1, 0)
+            .expect("fee clearing the exact >u64 relay floor must be admitted");
+
+        // One unit below the exact floor still rejects, with the honest Stage
+        // C comparison reason rather than an arithmetic-capability error.
+        let shortfall = fee - (exact_floor - 1);
+        assert!(
+            shortfall <= u128::from(u64::MAX),
+            "test premise: shortfall {shortfall} must fit an output value"
+        );
+        tx.outputs[0].value += shortfall as u64;
+        let err = reject_da_anchor_tx_policy(&tx, weight, da_bytes, &utxos, current_min, 1, 0)
+            .expect_err("fee one below the exact relay floor must reject");
+        assert!(err.contains("DA fee below Stage C floor"), "got: {err}");
+        assert!(
+            !err.contains("overflow"),
+            "no overflow rejection may remain on the relay-floor term: {err}"
+        );
+    }
+
+    /// Two u64-max inputs sum to 2^64: a u64 accumulator returned
+    /// `sum_in overflow` here while Go derived the fee exactly, so the two
+    /// clients disagreed on admission without any fee above u64 being
+    /// involved. Mirrors the Go coverage in
+    /// `clients/go/node/coverage_hotspots_test.go`.
+    #[test]
+    fn compute_fee_no_verify_sums_two_u64_max_inputs_exactly() {
+        let (state, raw, _, _) = build_signed_da_tx_with_fee(u64::MAX - 100, vec![0x77; 8]);
+        let (mut tx, _, _, _) = parse_tx(&raw).expect("parse tx");
+        let second = Outpoint {
+            txid: [0x18; 32],
+            vout: 0,
+        };
+        tx.inputs.push(TxInput {
+            prev_txid: second.txid,
+            prev_vout: second.vout,
+            script_sig: Vec::new(),
+            sequence: 0,
+        });
+        let mut utxos = state.utxos.clone();
+        utxos.insert(
+            second,
+            UtxoEntry {
+                value: u64::MAX,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x23; 2592]),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+        // sum_in = 2*(2^64-1), sum_out = 100 (the single output).
+        let fee = compute_fee_no_verify(&tx, &utxos).expect("two u64-max inputs must derive a fee");
+        assert_eq!(fee, 2 * u128::from(u64::MAX) - 100);
+        assert!(fee > u128::from(u64::MAX), "fee {fee} must exceed u64");
+    }
+
+    /// RUB-1127: the maximum structural transaction fee. MAX_TX_INPUTS=1024
+    /// inputs of u64-max each with zero outputs is the largest fee any
+    /// transaction can carry, and the summation path must return it exactly.
+    /// The row drives compute_fee_no_verify rather than a signed consensus
+    /// transaction: 1024 ML-DSA-87 signatures is not a proportionate test cost,
+    /// and the accumulator is the code the fee width is claimed for.
+    #[test]
+    fn compute_fee_no_verify_sums_the_maximum_structural_fee_exactly() {
+        let outpoint = Outpoint {
+            txid: [0x01; 32],
+            vout: 0,
+        };
+        let tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0,
+            tx_nonce: 0,
+            inputs: vec![
+                TxInput {
+                    prev_txid: outpoint.txid,
+                    prev_vout: outpoint.vout,
+                    script_sig: Vec::new(),
+                    sequence: 0,
+                };
+                MAX_TX_INPUTS as usize
+            ],
+            outputs: Vec::new(),
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        };
+        let mut utxos = HashMap::new();
+        utxos.insert(
+            outpoint,
+            UtxoEntry {
+                value: u64::MAX,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x23; 2592]),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+        let fee = compute_fee_no_verify(&tx, &utxos).expect("maximum structural fee must derive");
+        // 1024*(2^64-1) in canonical decimal.
+        assert_eq!(fee.to_string(), "18889465931478580853760");
     }
 
     #[test]
@@ -5138,7 +5378,7 @@ mod tests {
     #[test]
     fn rub162_fee_rate_below_floor_helper_branches() {
         // Zero weight: always below floor.
-        assert!(fee_rate_below_floor(u64::MAX, 0, 1));
+        assert!(fee_rate_below_floor(u128::from(u64::MAX), 0, 1));
         // Zero floor: clamps to DEFAULT (1). For weight=100: required=100.
         // fee=0 < 100 → true; fee=99 < 100 → true; fee=100 == 100 → false.
         assert!(fee_rate_below_floor(0, 100, 0));
@@ -5149,8 +5389,8 @@ mod tests {
         // One below floor.
         assert!(fee_rate_below_floor(99, 100, 1));
         // u128 boundary: required = u64::MAX * u64::MAX. Fits u128, no wrap.
-        assert!(fee_rate_below_floor(u64::MAX, u64::MAX, 2));
-        assert!(!fee_rate_below_floor(u64::MAX, u64::MAX, 1));
+        assert!(fee_rate_below_floor(u128::from(u64::MAX), u64::MAX, 2));
+        assert!(!fee_rate_below_floor(u128::from(u64::MAX), u64::MAX, 1));
         // Concrete 7653 pin (matches the conformance fixture's weight).
         assert!(fee_rate_below_floor(10, 7653, 1));
         assert!(!fee_rate_below_floor(7653, 7653, 1));

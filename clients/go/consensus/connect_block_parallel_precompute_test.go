@@ -140,7 +140,7 @@ func TestPrecomputeTxContexts_SingleP2PK(t *testing.T) {
 	}
 
 	// Verify fee.
-	if ctx.Fee != 100 {
+	if ctx.Fee.Cmp(Uint128FromU64(100)) != 0 {
 		t.Errorf("Fee: got %d, want 100", ctx.Fee)
 	}
 
@@ -242,10 +242,10 @@ func TestPrecomputeTxContexts_WitnessCursorParity(t *testing.T) {
 	}
 
 	// Verify fees.
-	if results[0].Fee != 100 {
+	if results[0].Fee.Cmp(Uint128FromU64(100)) != 0 {
 		t.Errorf("tx0 fee: got %d, want 100", results[0].Fee)
 	}
-	if results[1].Fee != 100 {
+	if results[1].Fee.Cmp(Uint128FromU64(100)) != 0 {
 		t.Errorf("tx1 fee: got %d, want 100", results[1].Fee)
 	}
 }
@@ -297,7 +297,7 @@ func TestPrecomputeTxContexts_SameBlockParentChild(t *testing.T) {
 		t.Errorf("tx1 resolved input value: got %d, want 900", results[1].ResolvedInputs[0].Value)
 	}
 	// tx1 fee: 900 - 800 = 100.
-	if results[1].Fee != 100 {
+	if results[1].Fee.Cmp(Uint128FromU64(100)) != 0 {
 		t.Errorf("tx1 fee: got %d, want 100", results[1].Fee)
 	}
 }

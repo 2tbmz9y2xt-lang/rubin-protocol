@@ -114,7 +114,7 @@ func daRelayTestPeer(h *testHarness, addr string) *peer {
 }
 
 func putRelayTx(pool *MemoryTxPool, txid [32]byte, raw []byte) bool {
-	return pool.Put(txid, raw, uint64(len(raw)), len(raw))
+	return pool.Put(txid, raw, consensus.Uint128FromU64(uint64(len(raw))), len(raw))
 }
 
 type rejectingTxPool struct{}
@@ -123,7 +123,7 @@ func (rejectingTxPool) Get([32]byte) ([]byte, bool) { return nil, false }
 
 func (rejectingTxPool) Has([32]byte) bool { return false }
 
-func (rejectingTxPool) Put([32]byte, []byte, uint64, int) bool { return false }
+func (rejectingTxPool) Put([32]byte, []byte, consensus.Uint128, int) bool { return false }
 
 type staticTxPool struct {
 	raw []byte
@@ -140,7 +140,7 @@ func (p staticTxPool) Has([32]byte) bool {
 	return len(p.raw) != 0
 }
 
-func (p staticTxPool) Put([32]byte, []byte, uint64, int) bool {
+func (p staticTxPool) Put([32]byte, []byte, consensus.Uint128, int) bool {
 	return false
 }
 
@@ -163,7 +163,7 @@ func (p *transientGetMissTxPool) Has([32]byte) bool {
 	return len(p.raw) != 0
 }
 
-func (p *transientGetMissTxPool) Put(_ [32]byte, raw []byte, _ uint64, _ int) bool {
+func (p *transientGetMissTxPool) Put(_ [32]byte, raw []byte, _ consensus.Uint128, _ int) bool {
 	p.putCalls++
 	p.raw = append(p.raw[:0], raw...)
 	return true
@@ -775,7 +775,7 @@ func TestHandleTxCanonicalMempoolDuplicateIsIdempotent(t *testing.T) {
 
 	wrongTxid := txid
 	wrongTxid[0] ^= 0x80
-	if h.service.cfg.TxPool.Put(wrongTxid, txBytes, 0, 0) {
+	if h.service.cfg.TxPool.Put(wrongTxid, txBytes, consensus.Uint128FromU64(0), 0) {
 		t.Fatal("canonical adapter should reject txid/raw mismatch")
 	}
 	if got := canonicalMempool.Len(); got != 0 {
@@ -839,7 +839,7 @@ func TestHandleTxDuplicateSkipsMetadataValidation(t *testing.T) {
 	var metadataCalls atomic.Int32
 	h.service.cfg.TxMetadataFunc = func([]byte) (node.RelayTxMetadata, error) {
 		metadataCalls.Add(1)
-		return node.RelayTxMetadata{Fee: 1, Size: 1}, nil
+		return node.RelayTxMetadata{Fee: consensus.Uint128FromU64(1), Size: 1}, nil
 	}
 	if err := h.service.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -1068,7 +1068,7 @@ func TestAnnounceTxAlreadyAdmittedRejectsBadDAChunkVariant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse canonical tx: %v", err)
 	}
-	meta := node.RelayTxMetadata{Fee: 1, Size: len(txBytes)}
+	meta := node.RelayTxMetadata{Fee: consensus.Uint128FromU64(1), Size: len(txBytes)}
 	if !h.service.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size) {
 		t.Fatal("setup admitted DA chunk")
 	}
@@ -1164,7 +1164,7 @@ func TestMemoryTxPoolSizeLimit(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		var txid [32]byte
 		txid[0] = byte(i)
-		if !pool.Put(txid, []byte{byte(i)}, uint64(i+1), 1) {
+		if !pool.Put(txid, []byte{byte(i)}, consensus.Uint128FromU64(uint64(i+1)), 1) {
 			t.Fatalf("Put(%d) should succeed", i)
 		}
 	}
@@ -1172,7 +1172,7 @@ func TestMemoryTxPoolSizeLimit(t *testing.T) {
 	// Pool is full — next Put should fail
 	var overflow [32]byte
 	overflow[0] = 0xFF
-	if pool.Put(overflow, []byte{0xFF}, 0, 1) {
+	if pool.Put(overflow, []byte{0xFF}, consensus.Uint128FromU64(0), 1) {
 		t.Fatal("Put should fail when pool is full")
 	}
 
@@ -1189,7 +1189,7 @@ func TestMemoryTxPoolSizeLimit(t *testing.T) {
 		t.Fatalf("pool.Len()=%d after remove, want 2", pool.Len())
 	}
 
-	if !pool.Put(overflow, []byte{0xFF}, 1, 1) {
+	if !pool.Put(overflow, []byte{0xFF}, consensus.Uint128FromU64(1), 1) {
 		t.Fatal("Put should succeed after Remove freed space")
 	}
 }
@@ -1199,10 +1199,10 @@ func TestMemoryTxPoolDuplicate(t *testing.T) {
 
 	var txid [32]byte
 	txid[0] = 0x42
-	if !pool.Put(txid, []byte{0x01, 0x02}, 2, 2) {
+	if !pool.Put(txid, []byte{0x01, 0x02}, consensus.Uint128FromU64(2), 2) {
 		t.Fatal("first Put should succeed")
 	}
-	if pool.Put(txid, []byte{0x03, 0x04}, 2, 2) {
+	if pool.Put(txid, []byte{0x03, 0x04}, consensus.Uint128FromU64(2), 2) {
 		t.Fatal("duplicate Put should return false")
 	}
 
@@ -1221,7 +1221,7 @@ func TestMemoryTxPoolNilSafe(t *testing.T) {
 	if pool.Has([32]byte{}) {
 		t.Fatal("nil pool Has should return false")
 	}
-	if pool.Put([32]byte{}, nil, 0, 0) {
+	if pool.Put([32]byte{}, nil, consensus.Uint128FromU64(0), 0) {
 		t.Fatal("nil pool Put should return false")
 	}
 	_, ok := pool.Get([32]byte{})
@@ -1239,7 +1239,7 @@ func TestMemoryTxPoolGetCopy(t *testing.T) {
 	var txid [32]byte
 	txid[0] = 0x01
 	original := []byte{0xAA, 0xBB}
-	pool.Put(txid, original, uint64(len(original)), len(original))
+	pool.Put(txid, original, consensus.Uint128FromU64(uint64(len(original))), len(original))
 
 	// Mutate original — pool should be unaffected
 	original[0] = 0x00
@@ -1297,7 +1297,7 @@ func TestMemoryTxPoolWithLimitZeroDefault(t *testing.T) {
 	// Verify the fallback pool is functional.
 	var txid [32]byte
 	txid[0] = 0x42
-	if !pool.Put(txid, []byte{0x01}, 1, 1) {
+	if !pool.Put(txid, []byte{0x01}, consensus.Uint128FromU64(1), 1) {
 		t.Fatal("Put should succeed on fallback-default pool")
 	}
 	if !pool.Has(txid) {

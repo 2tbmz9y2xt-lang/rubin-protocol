@@ -234,7 +234,7 @@ fn connect_block_basic_in_memory_at_height_ok_computes_fees_and_updates_state() 
     )
     .expect("connect block");
 
-    assert_eq!(s.sum_fees, sum_fees);
+    assert_eq!(s.sum_fees, u128::from(sum_fees));
     assert_eq!(s.already_generated, 0);
     assert_eq!(s.already_generated_n1, u128::from(subsidy));
     assert_eq!(s.utxo_count, 2);
@@ -1611,4 +1611,75 @@ fn apply_non_coinbase_tx_basic_htlc_refund_timelock_first_error_order() {
         19,
         "CORE_HTLC timestamp lock not met",
     );
+}
+
+/// RUB-1127: a transaction fee above u64 is derived exactly — not narrowed,
+/// saturated, or rejected on width alone.
+///
+/// Two 2^63 inputs and zero outputs give a fee of exactly 2^64, one above the
+/// u64 domain. Every apply path that can see this transaction must agree:
+/// sequential and precompute — precompute being exactly where the removed
+/// above-u64 rejection used to live. Mirrors Go
+/// `TestApplyNonCoinbaseTxBasicFeeAboveU64` and the shared vector
+/// `CV-U-FEE-U128-01`.
+#[test]
+fn apply_non_coinbase_tx_basic_fee_above_u64_is_exact() {
+    let kp = kp_or_skip!();
+    let cov_data = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+    let input_value: u64 = 1 << 63;
+    let want_fee: u128 = 2 * u128::from(input_value);
+    assert!(want_fee > u128::from(u64::MAX), "row must exceed u64");
+
+    let prev_txids = [[0xe1u8; 32], [0xe2u8; 32]];
+    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::new();
+    let mut inputs = Vec::new();
+    for prev_txid in prev_txids {
+        utxos.insert(
+            Outpoint {
+                txid: prev_txid,
+                vout: 0,
+            },
+            UtxoEntry {
+                value: input_value,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: cov_data.clone(),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+        inputs.push(crate::tx::TxInput {
+            prev_txid,
+            prev_vout: 0,
+            script_sig: vec![],
+            sequence: 0,
+        });
+    }
+
+    let mut tx = crate::tx::Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs,
+        outputs: vec![], // burn-to-fee: the whole input sum becomes fee
+        locktime: 0,
+        witness: vec![],
+        da_payload: vec![],
+        da_commit_core: None,
+        da_chunk_core: None,
+    };
+    tx.witness = (0..tx.inputs.len())
+        .map(|i| sign_input_witness(&tx, i as u32, input_value, ZERO_CHAIN_ID, &kp))
+        .collect();
+    let txid = [0xe3u8; 32];
+
+    let summary = apply_non_coinbase_tx_basic(&tx, txid, &utxos, 200, 1000, ZERO_CHAIN_ID)
+        .expect("fee above u64 must be accepted on ordinary validation");
+    assert_eq!(summary.fee, want_fee, "fee must be exact, not narrowed");
+    assert_eq!(summary.utxo_count, 0);
+
+    // Precompute must derive the identical fee too.
+    let sum_in = 2 * u128::from(input_value);
+    let precomputed = crate::precompute::compute_precompute_fee(sum_in, &tx.outputs)
+        .expect("precompute must not reject a fee on width alone");
+    assert_eq!(precomputed, want_fee, "precompute fee must be exact");
 }

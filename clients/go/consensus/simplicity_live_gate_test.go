@@ -339,7 +339,7 @@ func TestSimplicityLiveGate_NoMutationBothPaths(t *testing.T) {
 	tx, txid, utxos = simplicityLiveTx(1, badSig)
 	q := NewSigCheckQueue(1)
 	parWork, parFee, parErr := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxos, H, 0, chainID, q, rot, nil)
-	if parErr == nil || parWork != nil || parFee != 0 || q.Len() != 0 {
+	if parErr == nil || parWork != nil || parFee.Cmp(Uint128FromU64(0)) != 0 || q.Len() != 0 {
 		t.Fatalf("parallel failed spend mutated: work=%v fee=%d sigs=%d err=%v", parWork, parFee, q.Len(), parErr)
 	}
 }

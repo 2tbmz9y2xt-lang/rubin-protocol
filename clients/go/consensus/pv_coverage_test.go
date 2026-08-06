@@ -87,7 +87,7 @@ func TestPV14_RunTxValidationWorkers_ValidP2PK(t *testing.T) {
 		WitnessStart: 0,
 		WitnessEnd:   1,
 		SighashCache: sighashCache,
-		Fee:          10,
+		Fee:          Uint128FromU64(10),
 	}
 
 	results, err := RunTxValidationWorkers(
@@ -140,7 +140,7 @@ func TestPV14_RunTxValidationWorkers_WithSigCache(t *testing.T) {
 		WitnessStart: 0,
 		WitnessEnd:   1,
 		SighashCache: sighashCache,
-		Fee:          10,
+		Fee:          Uint128FromU64(10),
 	}
 
 	cache := NewSigCache(100)
@@ -187,7 +187,7 @@ func TestPV14_RunTxValidationWorkers_CancelledContext(t *testing.T) {
 	tvc := TxValidationContext{
 		TxIndex: 1, Tx: tx,
 		ResolvedInputs: []UtxoEntry{{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
-		WitnessStart:   0, WitnessEnd: 1, SighashCache: sighashCache, Fee: 10,
+		WitnessStart:   0, WitnessEnd: 1, SighashCache: sighashCache, Fee: Uint128FromU64(10),
 	}
 
 	results, err := RunTxValidationWorkers(ctx, 1, []TxValidationContext{tvc}, [32]byte{}, 1, 0, nil)
@@ -217,7 +217,7 @@ func TestPV14_ValidateTxLocal_WitnessUnderflow(t *testing.T) {
 	tvc := TxValidationContext{
 		TxIndex: 1, Tx: tx,
 		ResolvedInputs: []UtxoEntry{{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
-		WitnessStart:   0, WitnessEnd: 0, SighashCache: sighashCache, Fee: 10,
+		WitnessStart:   0, WitnessEnd: 0, SighashCache: sighashCache, Fee: Uint128FromU64(10),
 	}
 	result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
 	if result.Err == nil {

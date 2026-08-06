@@ -11,7 +11,7 @@ type nonCoinbaseApplyWorkInput struct {
 	registry *SuiteRegistry
 }
 
-func applyNonCoinbaseTxBasicWork(input nonCoinbaseApplyWorkInput) (map[Outpoint]UtxoEntry, uint64, error) {
+func applyNonCoinbaseTxBasicWork(input nonCoinbaseApplyWorkInput) (map[Outpoint]UtxoEntry, Uint128, error) {
 	return (&nonCoinbaseApplyContext{
 		tx:       input.tx,
 		txid:     input.txid,
@@ -24,19 +24,19 @@ func applyNonCoinbaseTxBasicWork(input nonCoinbaseApplyWorkInput) (map[Outpoint]
 	}).apply()
 }
 
-func (ctx *nonCoinbaseApplyContext) apply() (map[Outpoint]UtxoEntry, uint64, error) {
+func (ctx *nonCoinbaseApplyContext) apply() (map[Outpoint]UtxoEntry, Uint128, error) {
 	if err := ctx.applyPreOutputPhases(); err != nil {
-		return nil, 0, err
+		return nil, Uint128{}, err
 	}
 	if err := ctx.addSpendableOutputs(); err != nil {
-		return nil, 0, err
+		return nil, Uint128{}, err
 	}
 	if err := ctx.applyPostOutputRules(); err != nil {
-		return nil, 0, err
+		return nil, Uint128{}, err
 	}
 	fee, err := ctx.finalizeValueAndFee()
 	if err != nil {
-		return nil, 0, err
+		return nil, Uint128{}, err
 	}
 	return ctx.work, fee, nil
 }
@@ -397,18 +397,22 @@ func (ctx *nonCoinbaseApplyContext) addSpendableOutputs() error {
 	return nil
 }
 
-func (ctx *nonCoinbaseApplyContext) finalizeValueAndFee() (uint64, error) {
+// finalizeValueAndFee runs tx-wide value conservation and then derives the
+// fee. The fee is the exact u128 difference sum_in-sum_out and is returned
+// unnarrowed: a fee above u64 is a protocol-valid outcome, never a parse or
+// value-conservation error.
+func (ctx *nonCoinbaseApplyContext) finalizeValueAndFee() (Uint128, error) {
 	valueBase := &TxContextBase{
 		TotalIn:  uint128FromInternal(ctx.spend.sumIn),
 		TotalOut: uint128FromInternal(ctx.sumOut),
 		Height:   ctx.height,
 	}
 	if errTx := CheckValueConservationTxWide(valueBase, ctx.spend.vaultInputCount == 1, uint128FromInternal(ctx.spend.sumInVault)); errTx != nil {
-		return 0, errTx
+		return Uint128{}, errTx
 	}
 	feeU128, err := subU128(ctx.spend.sumIn, ctx.sumOut)
 	if err != nil {
-		return 0, err
+		return Uint128{}, err
 	}
-	return u128ToU64(feeU128)
+	return uint128FromInternal(feeU128), nil
 }

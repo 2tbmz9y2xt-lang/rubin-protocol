@@ -38,7 +38,11 @@ pub struct UtxoEntry {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UtxoApplySummary {
-    pub fee: u64,
+    /// Exact u128 fee (sum_in - sum_out). Per-output and per-UTXO values
+    /// remain u64, but a transaction may spend up to MAX_TX_INPUTS u64-max
+    /// inputs, so the fee itself is not bounded by u64 and is never
+    /// narrowed, rounded, or saturated on the way out of this struct.
+    pub fee: u128,
     pub utxo_count: u64,
 }
 
@@ -605,8 +609,9 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
         ));
     }
 
-    let fee = u64::try_from(sum_in - sum_out)
-        .map_err(|_| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
+    // Exact u128 fee: width alone is never a parse or value-conservation
+    // error, so a fee above u64 is accepted when ordinary validation passes.
+    let fee = sum_in - sum_out;
 
     let summary = UtxoApplySummary {
         fee,

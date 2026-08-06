@@ -27,7 +27,7 @@ pub struct InMemoryChainState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectBlockBasicSummary {
-    pub sum_fees: u64,
+    pub sum_fees: u128,
     pub already_generated: u128,
     pub already_generated_n1: u128,
     pub utxo_count: u64,
@@ -222,7 +222,7 @@ pub(crate) fn apply_coinbase_then_non_coinbase_txs_sequential(
     chain_id: [u8; 32],
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
-) -> Result<(HashMap<Outpoint, UtxoEntry>, u64), TxError> {
+) -> Result<(HashMap<Outpoint, UtxoEntry>, u128), TxError> {
     let mut work_utxos = state_utxos.clone();
     pb.apply_coinbase_outputs(&mut work_utxos, block_height, rotation)?;
     apply_non_coinbase_txs_sequential(
@@ -244,9 +244,9 @@ fn apply_non_coinbase_txs_sequential(
     chain_id: [u8; 32],
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
-) -> Result<(HashMap<Outpoint, UtxoEntry>, u64), TxError> {
+) -> Result<(HashMap<Outpoint, UtxoEntry>, u128), TxError> {
     let mut work_utxos = None;
-    let mut sum_fees: u64 = 0;
+    let mut sum_fees: u128 = 0;
     let mut seen_nonces = HashSet::with_capacity(pb.txs.len());
     for (tx, txid) in pb.txs.iter().zip(&pb.txids).skip(1) {
         ParsedBlock::validate_non_coinbase_block_tx(tx, &mut seen_nonces)?;
@@ -291,7 +291,7 @@ fn apply_non_coinbase_txs_parallel(
     state_utxos: &HashMap<Outpoint, UtxoEntry>,
     ctx: &ConnectBlockContext<'_>,
     workers: usize,
-) -> Result<(HashMap<Outpoint, UtxoEntry>, u64, u64), TxError> {
+) -> Result<(HashMap<Outpoint, UtxoEntry>, u128, u64), TxError> {
     let mut sig_queue = match ctx.registry {
         Some(registry) => SigCheckQueue::new(workers).with_registry(registry),
         None => SigCheckQueue::new(workers),
@@ -318,7 +318,7 @@ fn collect_queued_non_coinbase_txs(
     state_utxos: &HashMap<Outpoint, UtxoEntry>,
     ctx: &ConnectBlockContext<'_>,
     sig_queue: &mut SigCheckQueue,
-) -> Result<(HashMap<Outpoint, UtxoEntry>, u64), TxError> {
+) -> Result<(HashMap<Outpoint, UtxoEntry>, u128), TxError> {
     let mut work_utxos = state_utxos.clone();
     let mut sum_fees = 0;
     let mut seen_nonces = HashSet::with_capacity(prepared.pb.txs.len());
@@ -335,7 +335,9 @@ fn collect_queued_non_coinbase_txs(
     Ok((work_utxos, sum_fees))
 }
 
-fn add_block_fee(sum_fees: u64, fee: u64) -> Result<u64, TxError> {
+/// Accumulates the block sum_fees in checked u128. The addend is the exact
+/// u128 per-transaction fee; no narrowing happens on the way in or out.
+fn add_block_fee(sum_fees: u128, fee: u128) -> Result<u128, TxError> {
     sum_fees
         .checked_add(fee)
         .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "sum_fees overflow"))
@@ -345,7 +347,7 @@ fn finalize_connected_block(
     state: &mut InMemoryChainState,
     prepared: &PreparedConnectBlock,
     work_utxos: HashMap<Outpoint, UtxoEntry>,
-    sum_fees: u64,
+    sum_fees: u128,
     sig_task_count: u64,
 ) -> Result<ConnectBlockBasicSummary, TxError> {
     validate_coinbase_value_bound(

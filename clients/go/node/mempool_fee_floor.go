@@ -3,6 +3,8 @@ package node
 import (
 	"fmt"
 	"math/bits"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 // validateFeeFloorLocked enforces the rolling-relay-floor invariant
@@ -44,7 +46,7 @@ func (m *Mempool) validateFeeFloorLockedWithFloor(entry *mempoolEntry, snappedFl
 		floor = live
 	}
 	if feeRateBelowFloor(entry.fee, entry.weight, floor) {
-		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", entry.fee, entry.weight, floor))
+		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%s weight=%d min_fee_rate=%d", entry.fee.String(), entry.weight, floor))
 	}
 	return nil
 }
@@ -108,18 +110,18 @@ func (m *Mempool) effectiveLowWaterBytesLocked() int {
 	return defaultMempoolLowWaterBytes(m.maxBytes)
 }
 
-func feeRateBelowFloor(fee uint64, weight uint64, floor uint64) bool {
+// feeRateBelowFloor reports fee < weight*floor exactly. weight*floor is the
+// full 128-bit product, so a required amount above u64 no longer forces an
+// automatic reject: a fee that genuinely clears the floor is admitted through
+// the whole u128 domain. Zero weight stays "below floor" (uncomputable rate).
+func feeRateBelowFloor(fee consensus.Uint128, weight uint64, floor uint64) bool {
 	if weight == 0 {
 		return true
 	}
 	if floor < DefaultMempoolMinFeeRate {
 		floor = DefaultMempoolMinFeeRate
 	}
-	hi, lo := bits.Mul64(weight, floor)
-	if hi != 0 {
-		return true
-	}
-	return fee < lo
+	return consensus.FeeBelowRate(fee, weight, floor)
 }
 
 func (m *Mempool) raiseMinFeeRateAfterEvictionLocked(evictedEntries []*mempoolEntry) {
@@ -152,11 +154,20 @@ func (m *Mempool) decayMinFeeRateAfterConnectedBlockLocked() {
 	m.currentMinFeeRate = decayed
 }
 
+// entryFloorRate derives the u64 rolling-floor RATE implied by an evicted
+// entry. The fee is exact u128, but the rolling floor is a u64 policy rate by
+// contract (like currentMinFeeRate and the u64 step below), so a quotient at
+// or above 2^64 clamps to u64 max — the maximum expressible floor. That
+// clamps only the derived rate; the entry's own fee is never narrowed.
 func entryFloorRate(entry *mempoolEntry) (uint64, bool) {
 	if entry == nil || entry.weight == 0 {
 		return 0, false
 	}
-	return entry.fee / entry.weight, true
+	if entry.fee.Hi >= entry.weight {
+		return ^uint64(0), true
+	}
+	quotient, _ := bits.Div64(entry.fee.Hi, entry.fee.Lo, entry.weight)
+	return quotient, true
 }
 
 func saturatingAddMinRelayFeeStep(v uint64) uint64 {

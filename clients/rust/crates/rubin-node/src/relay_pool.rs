@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use rubin_consensus::uint128_json::compare_fee_rate;
+
 /// Default maximum relay pool size (matches Go `defaultMaxTxPoolSize` in `mempool.go`).
 const DEFAULT_MAX_RELAY_POOL_SIZE: usize = 1000;
 
@@ -20,7 +22,8 @@ struct RelayTxPoolInner {
 
 struct RelayTxEntry {
     raw: Vec<u8>,
-    fee: u64,
+    /// Authoritative admitted fee as an exact u128 scalar, never narrowed.
+    fee: u128,
     size: usize,
 }
 
@@ -53,7 +56,7 @@ impl RelayTxPool {
     ///
     /// If the pool is full, the lowest fee-rate tx is evicted — but only if
     /// the incoming tx has strictly higher priority. Matches Go `Put`.
-    pub fn put(&self, txid: [u8; 32], raw: &[u8], fee: u64, size: usize) -> bool {
+    pub fn put(&self, txid: [u8; 32], raw: &[u8], fee: u128, size: usize) -> bool {
         let size = if size == 0 { raw.len() } else { size };
         if size == 0 {
             return false;
@@ -116,8 +119,8 @@ impl RelayTxPool {
 }
 
 /// Find the worst (lowest priority) entry in the pool.
-fn find_worst(txs: &HashMap<[u8; 32], RelayTxEntry>) -> Option<([u8; 32], u64, usize)> {
-    let mut worst: Option<([u8; 32], u64, usize)> = None;
+fn find_worst(txs: &HashMap<[u8; 32], RelayTxEntry>) -> Option<([u8; 32], u128, usize)> {
+    let mut worst: Option<([u8; 32], u128, usize)> = None;
     for (&txid, entry) in txs {
         match worst {
             None => worst = Some((txid, entry.fee, entry.size)),
@@ -137,10 +140,10 @@ fn find_worst(txs: &HashMap<[u8; 32], RelayTxEntry>) -> Option<([u8; 32], u64, u
 /// Order: fee-rate (cross-multiply) → raw fee → txid (reversed: lower txid = higher priority).
 /// Matches Go `compareRelayPriority` in `p2p/mempool.go`.
 pub fn compare_relay_priority(
-    a_fee: u64,
+    a_fee: u128,
     a_size: usize,
     a_txid: [u8; 32],
-    b_fee: u64,
+    b_fee: u128,
     b_size: usize,
     b_txid: [u8; 32],
 ) -> i32 {
@@ -161,14 +164,18 @@ pub fn compare_relay_priority(
 
 /// Compare fee rates using cross-multiplication to avoid floating point.
 /// a_fee/a_size vs b_fee/b_size → a_fee * b_size vs b_fee * a_size.
-/// Uses u128 multiplication matching Go's `bits.Mul64`.
-fn compare_relay_fee_rate(a_fee: u64, a_size: usize, b_fee: u64, b_size: usize) -> i32 {
+///
+/// The u128 fee by u64 size product needs up to 192 bits, so a plain u128
+/// multiplication would overflow above u64 fees. `compare_fee_rate` retains
+/// every product bit and performs the cross-multiplication itself, so each
+/// size is passed straight through with its own fee: swapping them here would
+/// cross twice and compare fee*size products instead of rates. Matches Go
+/// `compareRelayFeeRate`.
+fn compare_relay_fee_rate(a_fee: u128, a_size: usize, b_fee: u128, b_size: usize) -> i32 {
     if a_size == 0 || b_size == 0 {
         return 0;
     }
-    let a_cross = (a_fee as u128) * (b_size as u128);
-    let b_cross = (b_fee as u128) * (a_size as u128);
-    match a_cross.cmp(&b_cross) {
+    match compare_fee_rate(a_fee, a_size as u64, b_fee, b_size as u64) {
         std::cmp::Ordering::Greater => 1,
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
@@ -265,6 +272,79 @@ mod tests {
     fn compare_relay_fee_rate_zero_size() {
         assert_eq!(compare_relay_fee_rate(100, 0, 100, 100), 0);
         assert_eq!(compare_relay_fee_rate(100, 100, 100, 0), 0);
+    }
+
+    /// Distinct sizes on the two operands, where a rate comparison and a
+    /// fee*size product comparison disagree: fee 10 over size 1 is rate 10 but
+    /// product 10, while fee 100 over size 100 is rate 1 but product 10000.
+    /// Every other relay case in this file uses equal sizes, where both
+    /// orientations agree and a doubly crossed comparator passes unnoticed.
+    /// Mirrors Go `TestCompareRelayFeeRateComparesRatesNotProducts`.
+    #[test]
+    fn compare_relay_fee_rate_compares_rates_not_products() {
+        assert_eq!(compare_relay_fee_rate(10, 1, 100, 100), 1);
+        assert_eq!(compare_relay_fee_rate(100, 100, 10, 1), -1);
+        // Equal rates, distinct fees and sizes: 6/3 == 4/2 must tie so that
+        // priority falls through to the absolute fee.
+        assert_eq!(compare_relay_fee_rate(6, 3, 4, 2), 0);
+    }
+
+    /// Drives the same discrimination through the live put/find_worst
+    /// eviction path: a full pool must keep the higher-RATE entry, not the
+    /// one with the larger fee*size product. Mirrors Go
+    /// `TestMemoryTxPoolEvictsByRateNotProduct`.
+    #[test]
+    fn eviction_keeps_higher_rate_not_larger_product() {
+        let pool = RelayTxPool::new_with_limit(1);
+        let bulky = [0x51u8; 32];
+        let dense = [0x52u8; 32];
+
+        // fee 100 over size 100 → rate 1, product 10000.
+        assert!(pool.put(bulky, &[0x01], 100, 100));
+        // fee 10 over size 1 → rate 10, product 10. Higher rate must evict.
+        assert!(pool.put(dense, &[0x02], 10, 1));
+        assert!(!pool.has(&bulky));
+        assert!(pool.has(&dense));
+        // The reverse direction: the lower-rate bulky entry must not displace it.
+        assert!(!pool.put(bulky, &[0x01], 100, 100));
+        assert!(pool.has(&dense));
+        assert!(!pool.has(&bulky));
+    }
+
+    /// RUB-1127: relay-pool ordering carries the exact u128 fee. The two
+    /// entries straddle u64 at equal size, so a fee narrowed to its low 64
+    /// bits turns 2^64 into 0 and inverts both the eviction and the
+    /// reverse-direction rejection. Mirrors Go
+    /// `TestMemoryTxPoolOrdersAboveU64FeesExactly`.
+    #[test]
+    fn orders_above_u64_fees_exactly() {
+        let above_u64 = 1u128 << 64;
+        let below_u64 = u128::from(u64::MAX);
+
+        let pool = RelayTxPool::new_with_limit(1);
+        let resident = [0x61u8; 32];
+        let wide = [0x62u8; 32];
+
+        assert!(pool.put(resident, &[0x01], below_u64, 4));
+        assert!(
+            pool.put(wide, &[0x02], above_u64, 4),
+            "above-u64 fee must evict the 2^64-1 entry at equal size"
+        );
+        assert!(!pool.has(&resident));
+        assert!(pool.has(&wide));
+
+        // The reverse direction: 2^64-1 must not displace 2^64.
+        assert!(
+            !pool.put(resident, &[0x01], below_u64, 4),
+            "below-u64 fee must be rejected against an above-u64 pool"
+        );
+        assert!(pool.has(&wide));
+        assert!(!pool.has(&resident));
+
+        assert_eq!(
+            compare_relay_priority(above_u64, 4, wide, below_u64, 4, resident),
+            1
+        );
     }
 
     #[test]

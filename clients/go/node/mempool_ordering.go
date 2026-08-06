@@ -2,8 +2,9 @@ package node
 
 import (
 	"bytes"
-	"math/bits"
 	"sort"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 func (m *Mempool) SelectTransactions(maxCount int, maxBytes int) [][]byte {
@@ -31,8 +32,8 @@ func sortMempoolEntries(entries []*mempoolEntry) {
 		if cmp := compareFeeRate(entries[i], entries[j]); cmp != 0 {
 			return cmp > 0
 		}
-		if entries[i].fee != entries[j].fee {
-			return entries[i].fee > entries[j].fee
+		if cmp := entries[i].fee.Cmp(entries[j].fee); cmp != 0 {
+			return cmp > 0
 		}
 		if entries[i].weight != entries[j].weight {
 			return entries[i].weight < entries[j].weight
@@ -69,23 +70,10 @@ func compareEvictionFeeRate(a *mempoolEntry, b *mempoolEntry) int {
 	return compareFeeRate(a, b)
 }
 
-func compareFeeRateWeightValues(feeA uint64, weightA uint64, feeB uint64, weightB uint64) int {
-	if weightA == 0 || weightB == 0 {
-		return 0
-	}
-	ahi, alo := bits.Mul64(feeA, weightB)
-	bhi, blo := bits.Mul64(feeB, weightA)
-	if ahi != bhi {
-		if ahi > bhi {
-			return 1
-		}
-		return -1
-	}
-	if alo != blo {
-		if alo > blo {
-			return 1
-		}
-		return -1
-	}
-	return 0
+// compareFeeRateWeightValues compares feeA/weightA against feeB/weightB by
+// exact cross-multiplication. The u128 fee by u64 weight product needs up to
+// 192 bits and consensus.CompareFeeRate retains every one of them, so two
+// entries whose significant product bits exceed bit 127 still order exactly.
+func compareFeeRateWeightValues(feeA consensus.Uint128, weightA uint64, feeB consensus.Uint128, weightB uint64) int {
+	return consensus.CompareFeeRate(feeA, weightA, feeB, weightB)
 }

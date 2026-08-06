@@ -331,7 +331,8 @@
         "CV-U-EXT-01",
         "CV-U-EXT-02",
         "CV-U-EXT-03",
-        "CV-U-EXT-06"
+        "CV-U-EXT-06",
+        "CV-U-FEE-U128-01"
       ],
       "supporting_theorems": [
         "RubinFormal.utxo_conservation_theorem",

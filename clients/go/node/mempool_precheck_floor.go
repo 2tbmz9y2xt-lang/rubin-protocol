@@ -39,9 +39,13 @@ func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapsh
 	if err != nil || weight == 0 {
 		return nil
 	}
-	fee := inputValue - outputValue
+	// Single-input P2PK shape only, so this difference cannot exceed u64 and
+	// the local u64 arithmetic is exact here. It is a fast-reject hint, never
+	// the authoritative admitted fee: that stays the consensus-derived u128
+	// value carried by CheckedTransaction.Fee.
+	fee := consensus.Uint128FromU64(inputValue - outputValue)
 	if feeRateBelowFloor(fee, weight, minFeeRate) {
-		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", fee, weight, minFeeRate))
+		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%s weight=%d min_fee_rate=%d", fee.String(), weight, minFeeRate))
 	}
 	return nil
 }

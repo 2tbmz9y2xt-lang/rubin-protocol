@@ -62,8 +62,11 @@ type MempoolConfig struct {
 	SuiteRegistry                        *consensus.SuiteRegistry
 }
 
+// RelayTxMetadata is the relay-visible view of an admitted transaction.
+// Fee is the same exact u128 scalar the mempool entry holds, so relay
+// ordering and pool eviction see the authoritative admitted fee unnarrowed.
 type RelayTxMetadata struct {
-	Fee  uint64
+	Fee  consensus.Uint128
 	Size int
 }
 

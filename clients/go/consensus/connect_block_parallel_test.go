@@ -304,7 +304,7 @@ func TestConnectBlockParallelSigVerify_CoinbaseOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parallel coinbase-only: %v", err)
 	}
-	if summary.SumFees != 0 {
+	if summary.SumFees.Cmp(Uint128FromU64(0)) != 0 {
 		t.Fatalf("expected 0 fees, got %d", summary.SumFees)
 	}
 	if summary.PostStateDigest != UtxoSetHash(state.Utxos) {
