@@ -56,8 +56,8 @@ Wire model notes:
 - This is **not** a freeze-ready package at the level of "universal byte-accurate wire + state transition model for all sections"
 - Consensus rules are not changed by this formal package
 - The formal coverage registry currently contains 32 machine-checked section entries
-- Registry status counts: 25 `proved`, 4 `proved_with_axiom`, 3 `stated`, 0 `deferred`
-- Claim strength breakdown: 24 universal, 4 assumption-backed, 3 model-level, 1 contract-level
+- Registry status counts: 24 `proved`, 5 `proved_with_axiom`, 3 `stated`, 0 `deferred`
+- Claim strength breakdown: 23 universal, 5 assumption-backed, 3 model-level, 1 contract-level
 - Machine-checked status does not imply uniform claim strength — the honest boundary is set by `status`, `evidence_level`, and `limitations`
 - Extra formal-only theorems are not counted as pinned-section claims unless registered in the machine-readable registry
 

@@ -40,15 +40,15 @@ universal/model section proof evidence.
 Связка с hash-pinning:
 
 - `proof_coverage.json` сейчас содержит 32 machine-checked registry entries.
-- Status counts: `25` `proved`, `4` `proved_with_axiom`, `3` `stated`, `0` `deferred`.
+- Status counts: `24` `proved`, `5` `proved_with_axiom`, `3` `stated`, `0` `deferred`.
 - Не все 32 entries равны по силе claims: честная граница определяется `evidence_level` и `limitations`.
 - Extra formal-only theorems не считаются pinned-section coverage,
   если они не внесены отдельной registry entry.
 
 ## Текущая раскладка evidence levels
 
-- `machine_checked_universal`: 24
-- `machine_checked_assumption_backed`: 4
+- `machine_checked_universal`: 23
+- `machine_checked_assumption_backed`: 5
 - `machine_checked_model`: 3
 - `machine_checked_contract`: 1
 

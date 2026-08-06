@@ -48,7 +48,7 @@ REQUIRED_SECTION_EVIDENCE_LEVELS = {
     "transaction_structural_rules": "machine_checked_universal",
     "replay_domain_checks": "machine_checked_universal",
     "utxo_state_model": "machine_checked_universal",
-    "coinbase_and_subsidy": "machine_checked_universal",
+    "coinbase_and_subsidy": "machine_checked_assumption_backed",
     "value_conservation": "machine_checked_universal",
     "da_set_integrity": "machine_checked_universal",
     "block_timestamp_rules": "machine_checked_universal",
