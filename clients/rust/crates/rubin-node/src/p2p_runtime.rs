@@ -5336,8 +5336,12 @@ mod tests {
     #[test]
     fn compact_fallback_read_message_continues_after_expiry_fallback() {
         let (mut session, mut client) = test_peer_session();
+        // RUB-1139: the client's read here (via assert_fallback_getdata) waits on
+        // the peer thread below, whose own budget is 2s; the client deadline must
+        // stay wider than that budget so a starved peer thread can't make this
+        // read time out first under CPU contention.
         client
-            .set_read_timeout(Some(Duration::from_secs(1)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("client read timeout");
         let block_hash = [0xcc; 32];
         let mut req = compact_outstanding_test_request(block_hash);
@@ -5448,8 +5452,12 @@ mod tests {
     #[test]
     fn late_blocktxn_fragmented_after_expiry_fallback() {
         let (mut session, mut client) = test_peer_session();
+        // RUB-1139: same deadline-ordering requirement as
+        // compact_fallback_read_message_continues_after_expiry_fallback above -
+        // this client read must outlast the peer thread's 2s budget under
+        // contention (measured red: Os { code: 35, kind: WouldBlock } at 1s).
         client
-            .set_read_timeout(Some(Duration::from_secs(1)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("client read timeout");
         let block_hash = [0xe3; 32];
         let mut payload = block_hash.to_vec();
