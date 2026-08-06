@@ -1533,7 +1533,11 @@ func updateWideSumFeesBlocks(
 		fatalf("wide-sum-fees: coinbase limit overflow")
 	}
 
-	prevHash := mustHex32(sub1["expected_prev_hash"].(string))
+	prevHashStr, ok := sub1["expected_prev_hash"].(string)
+	if !ok {
+		fatalf("wide-sum-fees: expected_prev_hash is not a string")
+	}
+	prevHash := mustHex32(prevHashStr)
 	build := func(extra uint64) string {
 		// The bound exceeds u64, so it is paid across two coinbase outputs.
 		high := wideFeeInputValue
