@@ -365,7 +365,7 @@ def _da_fee_floor_policy_utxos(v: Dict[str, Any]) -> List[Dict[str, Any]]:
     if not isinstance(scenario, dict):
         raise ValueError("da_fee_floor_policy requires scenario or explicit utxos")
     fee_problems: List[str] = []
-    fee = exact_uint(scenario.get("fee"), fee_problems, "da_fee_floor_policy scenario fee")
+    fee = exact_uint(scenario.get("fee", ABSENT), fee_problems, "da_fee_floor_policy scenario fee")
     if fee is None:
         raise ValueError(
             "da_fee_floor_policy scenario requires an exact unsigned fee: "
@@ -474,6 +474,11 @@ CANONICAL_DECIMAL = re.compile(r"^(0|[1-9][0-9]*)\Z")
 MAX_U64 = (1 << 64) - 1
 MAX_U128 = (1 << 128) - 1
 
+# Sentinel separating an ABSENT key from a PRESENT JSON null. Read an optional
+# field as `d.get(key, ABSENT)`: absence keeps its optional semantics, while a
+# null reaching `exact_uint` is a value-position null and fails the gate.
+ABSENT = object()
+
 
 def exact_uint(value: Any, problems: List[str], ctx: str) -> Optional[int]:
     """Read a widened (u128-domain) value exactly, or record a problem.
@@ -483,8 +488,17 @@ def exact_uint(value: Any, problems: List[str], ctx: str) -> Optional[int]:
     contract both clients implement. Unlike `as_int`, a malformed token is
     never silently coerced to 0: a fee that cannot be read exactly must fail
     the gate rather than compare equal to another unreadable fee.
+
+    A JSON null is a malformed token, not a missing one: both clients reject
+    null in a value position, so an authored or emitted null records a problem
+    here instead of returning a bare None that a caller's `or 0` or `is None:
+    continue` would silently swallow. Only the `ABSENT` sentinel returns None
+    without a problem.
     """
+    if value is ABSENT:
+        return None
     if value is None:
+        problems.append(f"{ctx}: null is not a value in a widened (u128) position")
         return None
     if isinstance(value, bool):
         problems.append(f"{ctx}: expected an unsigned integer, got bool")
@@ -1842,8 +1856,10 @@ def validate_vector(
         # number above u64, which both readers then correctly refused.
         sum_fees_token = v.get("sum_fees", 0)
         sum_fees_problems: List[str] = []
+        # The token is never ABSENT (it defaults to 0), so an unreadable one —
+        # a null included — always leaves a diagnostic behind.
         if exact_uint(sum_fees_token, sum_fees_problems, f"{gate}/{vid}: sum_fees") is None:
-            return sum_fees_problems or [f"{gate}/{vid}: sum_fees is null"]
+            return sum_fees_problems
         req["sum_fees"] = sum_fees_token
     elif op == "connect_block_basic":
         req["block_hex"] = v["block_hex"]
@@ -2106,8 +2122,8 @@ def validate_vector(
         # lenient as_int coercion that maps an unreadable token to 0.
         # An omitted value means zero — the pre-widening `omitempty`
         # semantics both clients preserve — so absence normalizes to 0 here.
-        go_sum_fees = exact_uint(go_resp.get("sum_fees"), problems, f"{gate}/{vid}: go.sum_fees") or 0
-        rust_sum_fees = exact_uint(rust_resp.get("sum_fees"), problems, f"{gate}/{vid}: rust.sum_fees") or 0
+        go_sum_fees = exact_uint(go_resp.get("sum_fees", ABSENT), problems, f"{gate}/{vid}: go.sum_fees") or 0
+        rust_sum_fees = exact_uint(rust_resp.get("sum_fees", ABSENT), problems, f"{gate}/{vid}: rust.sum_fees") or 0
         if go_sum_fees != rust_sum_fees:
             problems.append(f"{gate}/{vid}: sum_fees mismatch go={go_sum_fees} rust={rust_sum_fees}")
         for k in ["utxo_count", "already_generated", "already_generated_n1"]:
@@ -2142,8 +2158,8 @@ def validate_vector(
         # lenient as_int coercion that maps an unreadable token to 0.
         # An omitted value means zero — the pre-widening `omitempty`
         # semantics both clients preserve — so absence normalizes to 0 here.
-        go_fee = exact_uint(go_resp.get("fee"), problems, f"{gate}/{vid}: go.fee") or 0
-        rust_fee = exact_uint(rust_resp.get("fee"), problems, f"{gate}/{vid}: rust.fee") or 0
+        go_fee = exact_uint(go_resp.get("fee", ABSENT), problems, f"{gate}/{vid}: go.fee") or 0
+        rust_fee = exact_uint(rust_resp.get("fee", ABSENT), problems, f"{gate}/{vid}: rust.fee") or 0
         if go_fee != rust_fee:
             problems.append(f"{gate}/{vid}: fee mismatch go={go_fee} rust={rust_fee}")
         gv = as_int(go_resp.get("utxo_count"))
