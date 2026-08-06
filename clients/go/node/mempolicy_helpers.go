@@ -40,7 +40,13 @@ func (m *Mempool) validateTransactionWithConsensus(
 		nextHeight,
 		blockMTP,
 		m.chainID,
-		consensus.SuiteValidationContext{Rotation: policy.RotationProvider, Registry: policy.SuiteRegistry},
+		// The mempool-owned positive signature cache enters consensus only
+		// here, through the existing suite-aware parsed-transaction seam.
+		consensus.SuiteValidationContext{
+			Rotation: policy.RotationProvider,
+			Registry: policy.SuiteRegistry,
+			SigCache: m.sigCache,
+		},
 	)
 	if err != nil {
 		return nil, txAdmitRejected(err.Error())
