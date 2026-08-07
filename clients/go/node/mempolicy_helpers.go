@@ -128,6 +128,19 @@ func applyPolicyAgainstStateCoreExtUnsupported(checked *consensus.CheckedTransac
 	return nil
 }
 
+// policyImpossibleInvariantError marks an applyPolicyAgainstState outcome that
+// no candidate property can produce — a record shape the live admission path
+// never builds. Error() returns the wrapped message verbatim, so every caller
+// that renders, wraps or compares this error stays byte-identical to baseline;
+// the wrapper is a TYPE signal read only by the relay classifier, never parsed
+// from text. It is the policy fan-out's form of the impossible-invariant tagging
+// the locked admission helpers do inline with selectRelayDisposition.
+type policyImpossibleInvariantError struct{ err error }
+
+func (e *policyImpossibleInvariantError) Error() string { return e.err.Error() }
+
+func (e *policyImpossibleInvariantError) Unwrap() error { return e.err }
+
 // simplicityPreActivationRetryableError marks a CORE_SIMPLICITY pre-activation
 // policy outcome DECIDED FROM a deployment provider, which the published
 // admission context cannot pin. Error() returns the wrapped message

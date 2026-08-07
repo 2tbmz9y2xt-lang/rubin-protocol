@@ -258,12 +258,29 @@ func (p *relayAdmissionProbe) noteIdentity(txid, wtxid [32]byte) {
 // other mutation. It exists for the candidate shape that claims no outpoint and
 // therefore never reaches Reserve, so no candidate shape can bypass the check.
 //
-// tip is the ChainState tip the caller's admission read guard is pinning. The
-// availability and tip-agreement checks are the SAME two the input-bearing
-// sibling runs before Reserve (reserveEntryInputsLocked), with the same messages
-// and the same order, and the equality check below stands in for the generation
-// refusal Reserve would perform — so this seam enforces exactly what the sibling
-// enforces, never less.
+// tip is the ChainState tip the caller's admission read guard is pinning. It
+// performs three checks, in this order, each of them UNAVAILABLE:
+//
+//  1. the owner publishes a complete admission context at all;
+//  2. that context's stable tip equals tip;
+//  3. that context equals the caller's expected context.
+//
+// Checks 1 and 2 are the SAME two the input-bearing sibling
+// (reserveEntryInputsLocked) runs before Reserve, with the same messages in the
+// same order. Check 3 stands in for the two refusals Reserve would raise from
+// the supplied context — "pending-outpoint expected tip mismatch" and
+// "pending-outpoint expected generation mismatch" — but reports both through ONE
+// combined message, so a consumer cannot tell those two apart here.
+//
+// Reserve's remaining refusals do not apply to a candidate that claims no
+// outpoint: it reserves nothing and takes no token, so the token-sequence
+// exhaustion refusal cannot bear on its outcome; the conflict scan has no
+// outpoint of its own to find a live claim for; and Reserve's empty-input-set
+// rejection describes exactly this candidate shape, which is why it must not be
+// routed through Reserve at all. A transition in progress is not missing either:
+// check 1 already reports unavailable while one is active, and the whole
+// admission call holds the ChainState admission read guard a transition needs
+// for write, so none can begin between this seam and the decision it feeds.
 //
 // It is a no-op for the legacy path (nil probe) and for a nil expected context,
 // so an input-less candidate keeps its exact baseline behavior there.
@@ -481,15 +498,34 @@ func relayDispositionForSimplicityPreActivationOutcome(reject bool, rotation con
 // relayDispositionForPolicyError classifies the static-policy fan-out
 // (applyPolicyAgainstState). Every term it applies is a constructor-frozen
 // decision over pinned inputs — anchor outputs, the DA fee/budget terms, the
-// retired CORE_EXT surface — EXCEPT the CORE_SIMPLICITY pre-activation lane,
-// whose provider-DECIDED outcomes arrive as a typed wrapper because the
-// published context does not pin the deployment set they depend on. That lane's
-// well-formedness rejection depends on no such set and arrives unwrapped, so it
-// classifies here with the pinned-input terms. It reads a type, never a message.
+// retired CORE_EXT surface — EXCEPT two outcomes that arrive as typed wrappers
+// and are read by TYPE, never by message:
+//
+//   - the CORE_SIMPLICITY pre-activation lane's provider-DECIDED outcomes, which
+//     are UNAVAILABLE because the published context does not pin the deployment
+//     set they depend on. That lane's well-formedness rejection depends on no
+//     such set, arrives unwrapped, and classifies with the pinned-input terms.
+//   - the fan-out's own impossible invariant, the nil checked transaction no
+//     caller can produce, which is INTERNAL and so never cache-authorizing.
+//
+// The CORE_EXT term (applyPolicyAgainstStateCoreExtUnsupported) has a second
+// branch, "input snapshot unavailable for CORE_EXT unsupported policy", which
+// would be a state-availability outcome rather than static policy. It is
+// deliberately left unwrapped because it is UNREACHABLE from this fan-out: it
+// fires only for a candidate that HAS inputs and whose policy utxo snapshot is
+// nil, and policyNeedsInputSnapshotForTx returns true whenever the candidate has
+// inputs, so buildPolicyInputSnapshotIfNeeded either hands the fan-out a non-nil
+// snapshot for such a candidate or fails before the fan-out runs. A candidate
+// that reaches the fan-out with a nil snapshot therefore has no inputs, and the
+// branch requires len(Inputs) > 0.
 func relayDispositionForPolicyError(err error) RelayAdmissionDisposition {
 	var retryable *simplicityPreActivationRetryableError
 	if errors.As(err, &retryable) {
 		return RelayAdmissionUnavailable
+	}
+	var impossible *policyImpossibleInvariantError
+	if errors.As(err, &impossible) {
+		return RelayAdmissionInternal
 	}
 	return RelayAdmissionStableTerminalReject
 }

@@ -215,8 +215,9 @@ func (m *Mempool) AdmissionCounts() MempoolAdmissionCounts {
 // adjustments performed by raiseMinFeeRateAfterEvictionLocked and
 // decayMinFeeRateAfterConnectedBlockLocked. EvictedResidentTotal is
 // loaded INSIDE the read-lock window. Writers bump that counter
-// under m.mu.Lock in addEntryLockedWithFloor's per-victim counter
-// loop, so the reader's m.mu.RLock pairs with the writer's m.mu.Lock and
+// under m.mu.Lock in the per-victim counter loop of
+// addEntryLockedProbed — the one implementation of the locked
+// admission path — so the reader's m.mu.RLock pairs with the writer's m.mu.Lock and
 // the atomic.Load observes the same critical section as the gauge
 // fields read on the surrounding lines. Covered by
 // TestMempoolStatsScrapePurity and the

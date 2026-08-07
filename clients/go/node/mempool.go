@@ -106,7 +106,8 @@ type Mempool struct {
 	// evictedResidentTotal counts cumulative resident-entry capacity
 	// evictions since process start. It is bumped exactly once per
 	// already-admitted entry that is removed by capacity pressure
-	// (the per-victim counter loop in addEntryLockedWithFloor, after
+	// (the per-victim counter loop in addEntryLockedProbed, the one
+	// implementation of the locked admission path, after
 	// validateCapacityAdmissionLocked classifies the candidate as
 	// admitted-and-evicting and commitStandardDeltaLocked removes the
 	// victims with their exact tokens). Candidate-worst rejection —
@@ -348,7 +349,7 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource, probe 
 //
 // RelayMetadata is not full mempool admission: it does not insert, does not
 // record source/admission_seq, and does not check duplicate, conflict, or
-// capacity state. Those remain owned by addTxWithSource/addEntryLockedWithFloor.
+// capacity state. Those remain owned by addTxWithSource/addEntryLockedProbed.
 func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
 	if m == nil {
 		return RelayTxMetadata{}, txAdmitUnavailable("nil mempool")
@@ -434,7 +435,13 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 
 func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction, nextHeight uint64, utxos map[consensus.Outpoint]consensus.UtxoEntry, policy MempoolConfig) error {
 	if checked == nil || checked.Tx == nil {
-		return errors.New("nil checked transaction")
+		// Both call sites reach here only with the CheckedTransaction a completed
+		// consensus validation returned, so this is an impossible invariant and
+		// never a candidate property. It is TYPED — never message-matched — so the
+		// relay classifier publishes INTERNAL for it instead of the
+		// cache-authorizing stable terminal rejection its default would give. The
+		// message is unchanged, so every public error built from it is unchanged.
+		return &policyImpossibleInvariantError{err: errors.New("nil checked transaction")}
 	}
 	// Apply non-coinbase anchor output policy
 	if err := applyPolicyAgainstStateAnchor(checked, policy); err != nil {

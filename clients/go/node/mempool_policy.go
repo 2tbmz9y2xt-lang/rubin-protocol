@@ -361,9 +361,17 @@ func (m *Mempool) releaseCandidateLocked(entry *mempoolEntry, cause error, probe
 
 func (m *Mempool) validateAdmissionSeqLocked(entry *mempoolEntry) error {
 	if entry.admissionSeq != 0 {
+		// A NEW candidate never carries a sequence: newMempoolEntry leaves the
+		// field zero, normalizeMempoolEntryDefaults does not touch it, and
+		// assignAdmissionSeqLocked issues one only at commit time. A non-zero
+		// sequence on an entry still being validated is therefore corrupted
+		// accounting — the same fault the resident-side duplicate-sequence guard
+		// in evictionPlanPoolLocked reports, and classified the same INTERNAL way
+		// — not the candidate's own admission-sequence outcome. The error, its
+		// message and its kind are unchanged.
 		for existingTxid, existing := range m.txs {
 			if existing != nil && existing.admissionSeq == entry.admissionSeq {
-				return selectRelayDisposition(txAdmitRejected(fmt.Sprintf("mempool admission sequence conflict with %x", existingTxid)), RelayAdmissionAdmissionSequence)
+				return selectRelayDisposition(txAdmitRejected(fmt.Sprintf("mempool admission sequence conflict with %x", existingTxid)), RelayAdmissionInternal)
 			}
 		}
 	}
@@ -400,7 +408,7 @@ func normalizeMempoolEntryDefaults(entry *mempoolEntry) {
 
 // addEntryLocked admits `entry` under `m.mu`, using the live
 // `m.currentMinFeeRate` value for the fee-floor check. Production
-// callers SHOULD use `addEntryLockedWithFloor` (see wave-6 race fix
+// admission goes through `addEntryLockedProbed` (see wave-6 race fix
 // in addTxWithSource); this wrapper exists for test callers that
 // drive the locked admission path in isolation and accept whatever
 // floor is in effect at call time.
