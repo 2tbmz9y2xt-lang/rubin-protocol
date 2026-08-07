@@ -63,10 +63,21 @@ const (
 // cannot express that difference: TX_ERR_PARSE, TX_ERR_SIG_INVALID and
 // TX_ERR_SIG_ALG_INVALID each carry both meanings today.
 //
-// It is additive only. The zero value is UNSPECIFIED and changes nothing: no
-// public code, message, Error() rendering, accept/reject decision, counter or
-// validation order reads it, and an error whose producer selected no cause
-// keeps its exact baseline classification everywhere.
+// It is additive in BEHAVIOR, not in struct shape. Preserved exactly: every
+// public ErrorCode, every message, Error() rendering, every accept/reject
+// decision, every counter, and validation order — none of them read the cause,
+// and an error whose producer selected no cause keeps its exact baseline
+// classification everywhere. NOT preserved: the shape of the exported TxError,
+// which grows an unexported field, so an UNKEYED composite literal such as
+// consensus.TxError{code, msg} no longer compiles.
+//
+// That source break is deliberate and accepted. Keeping the cause unexported
+// is what makes it unforgeable outside this package and invisible to every
+// public view, and an unkeyed literal fails LOUDLY at compile time rather than
+// silently mis-assigning. `go vet` runs the composites check by default, so the
+// fragile form is reported before it can become a hard break, and every TxError
+// literal in this repository is already keyed. To migrate one: name the fields,
+// or construct through txerr / txerrWithCause inside this package.
 //
 // The FIRST producing branch owns the cause. An outer wrapper may carry an
 // already-selected cause forward but must never overwrite or erase it, and no
@@ -133,6 +144,10 @@ func txerr(code ErrorCode, msg string) error {
 // txerrWithCause is the ONE cause-aware constructor. It is used only AT a
 // producing branch that owns the classification, or by a wrapper carrying an
 // already-selected cause forward unchanged.
+//
+// First-wins is a CALLER obligation, not a constructor guard: this function
+// accepts any cause and always builds a fresh error, so a wrapper MUST pass the
+// inner error's own Cause() and never a cause literal of its own.
 func txerrWithCause(code ErrorCode, msg string, cause TxErrorCause) error {
 	return &TxError{Code: code, Msg: msg, cause: cause}
 }

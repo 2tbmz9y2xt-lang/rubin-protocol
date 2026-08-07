@@ -63,8 +63,15 @@ const (
 	// retryable runtime unavailability.
 	RelayAdmissionUnavailable
 	// RelayAdmissionInternal covers an impossible invariant, a retained
-	// identity mismatch, accounting corruption, and an adapter contract
-	// violation.
+	// identity mismatch, accounting corruption, an adapter contract violation,
+	// and a process-local crypto-backend fault — a consensus error carrying
+	// consensus.TxErrorCauseLocalCryptoBackendFault, whose public code says
+	// nothing about whether this node could decide at all.
+	//
+	// That last class is INTERNAL rather than UNAVAILABLE because it is THIS
+	// process failing closed, not a missing admission input the node is waiting
+	// on; either way it is not stable invalidity of these bytes, so neither is
+	// cache-authorizing.
 	//
 	// It is also the ONE disposition a branch does not have to select: a
 	// REQUIRED post-decision cleanup step that reports a fault — pending-outpoint

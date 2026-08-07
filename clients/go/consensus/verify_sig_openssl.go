@@ -258,6 +258,16 @@ func ensureOpenSSLConsensusInit() error {
 // process-start configuration, not a per-call runtime knob. If bootstrap fails after
 // those env vars are misconfigured, the recovery path is process restart. Test code may
 // use resetOpenSSLBootstrapStateForTests to re-arm the bootstrap between isolated cases.
+//
+// Both failure exits below are process-local faults of exactly the same kind as
+// ensureOpenSSLConsensusInit's, yet they deliberately select NO TxErrorCause.
+// That is correct only because of WHO CALLS THEM: every caller is a keygen,
+// signing or conformance-fixture path (openssl_signer.go,
+// openssl_signer_conformance_fixture.go), never transaction validation, so no
+// error from here can reach relay admission. A new caller on the admission path
+// would make these untyped local faults publish as stable terminal rejections
+// under TX_ERR_PARSE — add TxErrorCauseLocalCryptoBackendFault here before
+// adding such a caller.
 func ensureOpenSSLBootstrap() error {
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv("RUBIN_OPENSSL_FIPS_MODE")))
 	switch mode {
@@ -488,6 +498,12 @@ func resolveSuiteVerifierBindingPolicyInvalidError(algName string, pubkeyLen int
 // already-selected cause forward unchanged and never selects, overwrites or
 // erases one. The non-TxError arm cannot classify what it did not produce, so
 // it stays cause-unspecified.
+//
+// That arm is UNREACHABLE today only because resolveSuiteVerifierBinding
+// returns a *TxError on both of its failure exits. If a future exit there
+// returns a plain error, this arm becomes live and starts producing an UNCAUSED
+// local binding fault — which relay admission would publish as a stable
+// terminal rejection. Classify at that new exit, not here.
 func wrapResolveSuiteVerifierBindingError(suiteID uint8, err error) error {
 	var txErr *TxError
 	if errors.As(err, &txErr) {
@@ -549,6 +565,12 @@ func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature
 			// err) is the candidate's own invalidity and stays uncaused; this
 			// arm is the local runtime fault, with the same public
 			// TX_ERR_SIG_INVALID code and the same message as before.
+			//
+			// Both operands here are CANDIDATE bytes, length-checked only, so
+			// this arm is a local fault ONLY while their content cannot make
+			// the backend error instead of returning a false verdict. For
+			// ML-DSA-87 it cannot, and that premise is pinned by
+			// TestVerifyMLDSA87Digest32_CorrectLengthGarbageIsInvalidNotFault.
 			return false, txerrWithCause(
 				TX_ERR_SIG_INVALID,
 				"verify_sig: EVP_DigestVerify internal error",

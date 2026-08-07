@@ -96,6 +96,49 @@ func TestVerifyMLDSA87Digest32UsesNativeBackend(t *testing.T) {
 	}
 }
 
+// TestVerifyMLDSA87Digest32_CorrectLengthGarbageIsInvalidNotFault pins the
+// premise the LOCAL_CRYPTO_BACKEND_FAULT arm of verifySigWithBinding asserts:
+// for ML-DSA-87 the backend never reports a one-shot ERROR because of the
+// CONTENT of a correct-length pubkey or signature, only a false VERDICT. Both
+// operands on that call are candidate bytes, length-checked only, so if a
+// future suite or backend revision started rejecting a malformed key structure
+// with rc<0 instead of a false verdict, a candidate could self-select the
+// local-fault cause and permanently escape the cache-authorizing class. This
+// test fails the moment that becomes possible.
+func TestVerifyMLDSA87Digest32_CorrectLengthGarbageIsInvalidNotFault(t *testing.T) {
+	var digest [32]byte
+	digest[0] = 0x5a
+
+	zeros := func(n int) []byte { return make([]byte, n) }
+	pattern := func(n int, seed byte) []byte {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = byte(i*31) ^ seed
+		}
+		return b
+	}
+
+	for _, tc := range []struct {
+		name   string
+		pubkey []byte
+		sig    []byte
+	}{
+		{"all_zero", zeros(ML_DSA_87_PUBKEY_BYTES), zeros(ML_DSA_87_SIG_BYTES)},
+		{"garbage", pattern(ML_DSA_87_PUBKEY_BYTES, 0xa7), pattern(ML_DSA_87_SIG_BYTES, 0x3c)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, err := VerifyMLDSA87Digest32(tc.pubkey, tc.sig, digest)
+			if err != nil {
+				t.Fatalf("correct-length garbage must be an invalid VERDICT, not an error: %v (cause=%d)",
+					err, txErrorCauseOf(t, err))
+			}
+			if ok {
+				t.Fatal("VerifyMLDSA87Digest32=true for correct-length garbage")
+			}
+		})
+	}
+}
+
 func TestOpenSSLVerifySig_UnknownAlgErrors(t *testing.T) {
 	var d [32]byte
 	ok, err := opensslVerifySigOneShot("NO_SUCH_ALG", []byte{0x01}, []byte{0x02}, d[:])
