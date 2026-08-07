@@ -5647,3 +5647,287 @@ func TestValidateChainSnapshotRejectsNil(t *testing.T) {
 		t.Fatalf("expected TxAdmitUnavailable, got %T %v", err, err)
 	}
 }
+
+// TestMempoolSigCacheOwnerReusesPositiveResultsAcrossValidations pins the one
+// mempool-owned positive signature cache on the live validation seam that
+// currently routes through it (RelayMetadata -> validateTransactionWithConsensus):
+// empty at construction, populated by a successful validation, reused by a later
+// validation of the exact same tuple, per-mempool (never shared), and never an
+// admission-result cache — a hit publishes no entry and claims no outpoint.
+func TestMempoolSigCacheOwnerReusesPositiveResultsAcrossValidations(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	if mp.sigCache == nil {
+		t.Fatal("mempool must own a signature cache")
+	}
+	if mp.sigCache.Len() != 0 || mp.sigCache.Hits() != 0 || mp.sigCache.Misses() != 0 {
+		t.Fatalf("cache must be empty at construction: len=%d hits=%d misses=%d",
+			mp.sigCache.Len(), mp.sigCache.Hits(), mp.sigCache.Misses())
+	}
+
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+	if _, err := mp.RelayMetadata(txBytes); err != nil {
+		t.Fatalf("RelayMetadata: %v", err)
+	}
+	if mp.sigCache.Len() != 1 || mp.sigCache.Misses() != 1 || mp.sigCache.Hits() != 0 {
+		t.Fatalf("after first validation: len=%d misses=%d hits=%d, want 1/1/0",
+			mp.sigCache.Len(), mp.sigCache.Misses(), mp.sigCache.Hits())
+	}
+
+	// A second mempool owns a separate, empty cache.
+	other, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool (other): %v", err)
+	}
+	if other.sigCache == mp.sigCache || other.sigCache.Len() != 0 {
+		t.Fatalf("each mempool must own exactly one fresh cache: len=%d", other.sigCache.Len())
+	}
+
+	if _, err := mp.RelayMetadata(txBytes); err != nil {
+		t.Fatalf("RelayMetadata (repeat): %v", err)
+	}
+	if mp.sigCache.Hits() != 1 {
+		t.Fatalf("repeated validation must hit the cache: hits=%d", mp.sigCache.Hits())
+	}
+	if mp.sigCache.Len() != 1 {
+		t.Fatalf("a hit must not insert: len=%d", mp.sigCache.Len())
+	}
+	if mp.Len() != 0 || mp.AdmissionCounts() != (MempoolAdmissionCounts{}) {
+		t.Fatalf("a cache hit is not an admission: len=%d counts=%+v", mp.Len(), mp.AdmissionCounts())
+	}
+}
+
+// TestMempoolSigCacheAlternateWitnessWithSameTxidCannotHit covers the hostile
+// row: a re-signed transaction has the same txid but different signature bytes,
+// so it must MISS and verify on its own.
+func TestMempoolSigCacheAlternateWitnessWithSameTxidCannotHit(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	first := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+	second := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+	if bytes.Equal(first, second) {
+		t.Skip("signature backend is deterministic: no alternate witness representation available")
+	}
+	_, firstTxid, _, _, err := consensus.ParseTx(first)
+	if err != nil {
+		t.Fatalf("ParseTx(first): %v", err)
+	}
+	_, secondTxid, _, _, err := consensus.ParseTx(second)
+	if err != nil {
+		t.Fatalf("ParseTx(second): %v", err)
+	}
+	if firstTxid != secondTxid {
+		t.Fatalf("txid mismatch: %x vs %x", firstTxid, secondTxid)
+	}
+
+	if _, err := mp.RelayMetadata(first); err != nil {
+		t.Fatalf("RelayMetadata(first): %v", err)
+	}
+	if _, err := mp.RelayMetadata(second); err != nil {
+		t.Fatalf("RelayMetadata(second): %v", err)
+	}
+	if mp.sigCache.Hits() != 0 {
+		t.Fatalf("alternate witness bytes must not hit: hits=%d", mp.sigCache.Hits())
+	}
+	if mp.sigCache.Misses() != 2 || mp.sigCache.Len() != 2 {
+		t.Fatalf("alternate witness must verify on its own: misses=%d len=%d, want 2/2",
+			mp.sigCache.Misses(), mp.sigCache.Len())
+	}
+}
+
+// TestMempoolSigCacheAddTxPathReusesPositiveResults pins the LIVE admission
+// path (AddTx -> addTxWithSource -> checkTransactionWithSnapshot) on the one
+// mempool-owned cache. Backend executions are counted by Misses(): the live
+// seam calls the backend exactly once per miss and never on a hit, which
+// clients/go/consensus/verify_sig_registry_test.go pins directly against the
+// backend call counter. So a second admission of the same signed transaction
+// that adds a hit and no miss added zero backend calls.
+//
+// The repeat is rejected as a duplicate, which is the point: a positive cache
+// hit is not an admission-result hit — every non-backend check still runs.
+func TestMempoolSigCacheAddTxPathReusesPositiveResults(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+
+	if err := mp.AddTx(txBytes); err != nil {
+		t.Fatalf("AddTx: %v", err)
+	}
+	if mp.sigCache.Misses() != 1 || mp.sigCache.Hits() != 0 || mp.sigCache.Len() != 1 {
+		t.Fatalf("first AddTx must miss and insert once: misses=%d hits=%d len=%d, want 1/0/1",
+			mp.sigCache.Misses(), mp.sigCache.Hits(), mp.sigCache.Len())
+	}
+
+	if err := mp.AddTx(txBytes); err == nil {
+		t.Fatal("duplicate AddTx unexpectedly accepted")
+	}
+	if mp.sigCache.Hits() != 1 {
+		t.Fatalf("repeat admission must hit the owner cache: hits=%d, want 1", mp.sigCache.Hits())
+	}
+	if mp.sigCache.Misses() != 1 {
+		t.Fatalf("repeat admission must add zero backend calls: misses=%d, want 1", mp.sigCache.Misses())
+	}
+	if mp.sigCache.Len() != 1 {
+		t.Fatalf("a hit must not insert: len=%d, want 1", mp.sigCache.Len())
+	}
+	if mp.Len() != 1 {
+		t.Fatalf("duplicate must not be admitted twice: len=%d, want 1", mp.Len())
+	}
+}
+
+// TestMempoolSigCacheNilCacheAddTxMatchesBaseline proves the nil-cache AddTx
+// path is exact uncached behavior: same accept, same duplicate rejection text,
+// same resident set as the cache-owning mempool over identical state.
+func TestMempoolSigCacheNilCacheAddTxMatchesBaseline(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	admit := func(t *testing.T, nilCache bool) (string, int, [32]byte) {
+		t.Helper()
+		st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+		mp, err := NewMempool(st, nil, devnetGenesisChainID)
+		if err != nil {
+			t.Fatalf("new mempool: %v", err)
+		}
+		if nilCache {
+			mp.sigCache = nil
+		}
+		txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+		if err := mp.AddTx(txBytes); err != nil {
+			t.Fatalf("AddTx (nilCache=%v): %v", nilCache, err)
+		}
+		dupErr := mp.AddTx(txBytes)
+		if dupErr == nil {
+			t.Fatalf("duplicate AddTx unexpectedly accepted (nilCache=%v)", nilCache)
+		}
+		return dupErr.Error(), mp.Len(), txID(t, txBytes)
+	}
+
+	cachedErr, cachedLen, cachedTxid := admit(t, false)
+	uncachedErr, uncachedLen, uncachedTxid := admit(t, true)
+	if cachedErr != uncachedErr || cachedLen != uncachedLen || cachedTxid != uncachedTxid {
+		t.Fatalf("nil cache diverged from baseline: err %q vs %q, len %d vs %d, txid %x vs %x",
+			uncachedErr, cachedErr, uncachedLen, cachedLen, uncachedTxid, cachedTxid)
+	}
+}
+
+// TestMempoolSigCacheWarmCacheNeverBuysAdmission pins the hostile admission
+// rows on the LIVE AddTx path: a positive cache hit is never an admission-result
+// hit. Each row warms the owner cache through the validation-only relay seam
+// (which claims no outpoint), then proves the conflict and capacity authorities
+// fire exactly as they would with a cold cache.
+func TestMempoolSigCacheWarmCacheNeverBuysAdmission(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	newPool := func(t *testing.T) (*Mempool, *ChainState, []consensus.Outpoint) {
+		t.Helper()
+		st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+		mp, err := NewMempool(st, nil, devnetGenesisChainID)
+		if err != nil {
+			t.Fatalf("new mempool: %v", err)
+		}
+		return mp, st, outpoints
+	}
+
+	// The cache is warmed with the CONFLICTING transaction's own signature, so
+	// its verification is a genuine hit — admission is still refused by the
+	// pending-outpoint authority with its exact existing message.
+	t.Run("conflict", func(t *testing.T) {
+		mp, st, ops := newPool(t)
+		txA := mustBuildSignedTransferTx(t, st.Utxos, ops[:1], 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+		txB := mustBuildSignedTransferTx(t, st.Utxos, ops[:1], 100_000, 200_000, 2, fromKey, fromAddress, toAddress)
+		txidA, txidB := txID(t, txA), txID(t, txB)
+		if txidA == txidB {
+			t.Fatalf("conflict row needs distinct txids, got %x twice", txidA)
+		}
+		if _, err := mp.RelayMetadata(txB); err != nil {
+			t.Fatalf("RelayMetadata(txB): %v", err)
+		}
+		if err := mp.AddTx(txA); err != nil {
+			t.Fatalf("AddTx(txA): %v", err)
+		}
+		if mp.sigCache.Len() != 2 || mp.sigCache.Hits() != 0 || mp.sigCache.Misses() != 2 {
+			t.Fatalf("warm state: len=%d hits=%d misses=%d, want 2/0/2",
+				mp.sigCache.Len(), mp.sigCache.Hits(), mp.sigCache.Misses())
+		}
+		var txErr *TxAdmitError
+		if err := mp.AddTx(txB); !errors.As(err, &txErr) || txErr.Kind != TxAdmitConflict {
+			t.Fatalf("AddTx(txB) err=%T %v, want TxAdmitConflict", err, err)
+		}
+		if want := fmt.Sprintf("mempool double-spend conflict with %x", txidA); txErr.Message != want {
+			t.Fatalf("conflict message %q, want %q", txErr.Message, want)
+		}
+		if mp.Len() != 1 || mp.txs[txidA] == nil || mp.txs[txidB] != nil {
+			t.Fatalf("conflicting tx changed the resident set: len=%d", mp.Len())
+		}
+		if got := mp.AdmissionCounts(); got != (MempoolAdmissionCounts{Accepted: 1, Conflict: 1}) {
+			t.Fatalf("admission counts=%+v, want accepted=1 conflict=1", got)
+		}
+		// B's signature WAS answered from cache (hit, no backend call) and the
+		// rejected admission inserted nothing.
+		if mp.sigCache.Hits() != 1 || mp.sigCache.Misses() != 2 || mp.sigCache.Len() != 2 {
+			t.Fatalf("after conflict: hits=%d misses=%d len=%d, want 1/2/2",
+				mp.sigCache.Hits(), mp.sigCache.Misses(), mp.sigCache.Len())
+		}
+	})
+
+	// Saturation at the production capacity constant is a performance state,
+	// never a verdict. The fill uses the exported legacy-domain API: those keys
+	// only occupy capacity, they live in a different key domain than the live
+	// seam's binding-inclusive keys and can never be mistaken for a result.
+	t.Run("saturation", func(t *testing.T) {
+		mp, st, ops := newPool(t)
+		var digest [32]byte
+		for i := 0; i < mempoolSigCacheCapacity; i++ {
+			digest[0], digest[1], digest[2] = byte(i), byte(i>>8), byte(i>>16)
+			mp.sigCache.Insert(0x01, []byte("saturation-pubkey"), []byte("saturation-sig"), digest)
+		}
+		if mp.sigCache.Len() != mempoolSigCacheCapacity {
+			t.Fatalf("cache not saturated: len=%d, want %d", mp.sigCache.Len(), mempoolSigCacheCapacity)
+		}
+		txBytes := mustBuildSignedTransferTx(t, st.Utxos, ops[:1], 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+		if err := mp.AddTx(txBytes); err != nil {
+			t.Fatalf("saturated cache must never reject admission: %v", err)
+		}
+		if mp.Len() != 1 || mp.txs[txID(t, txBytes)] == nil {
+			t.Fatalf("tx not resident after admission: len=%d", mp.Len())
+		}
+		// FIFO evicted exactly one older entry, and the newest entry survived:
+		// revalidating the same transaction hits with no new backend call.
+		if _, err := mp.RelayMetadata(txBytes); err != nil {
+			t.Fatalf("RelayMetadata(repeat): %v", err)
+		}
+		if mp.sigCache.Len() != mempoolSigCacheCapacity || mp.sigCache.Hits() != 1 || mp.sigCache.Misses() != 1 {
+			t.Fatalf("under saturation: len=%d hits=%d misses=%d, want %d/1/1",
+				mp.sigCache.Len(), mp.sigCache.Hits(), mp.sigCache.Misses(), mempoolSigCacheCapacity)
+		}
+	})
+}

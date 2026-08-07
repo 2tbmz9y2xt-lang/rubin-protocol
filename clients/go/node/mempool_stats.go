@@ -137,6 +137,9 @@ func NewMempoolWithConfig(chainState *ChainState, blockStore *BlockStore, chainI
 		// Exactly one owner per mempool, initialized from the bound
 		// ChainState stable tip. Nothing else constructs one.
 		pendingOutpoints: newPendingOutpointOwner(pendingOutpointTipOf(chainState)),
+		// Exactly one positive signature cache per mempool, empty at
+		// construction and never persisted.
+		sigCache: consensus.NewSigCache(mempoolSigCacheCapacity),
 	}, nil
 }
 

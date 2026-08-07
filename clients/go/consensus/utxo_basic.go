@@ -9,6 +9,10 @@ type nonCoinbaseApplyWorkInput struct {
 	chainID  [32]byte
 	rotation RotationProvider
 	registry *SuiteRegistry
+	// sigCache is the optional caller-owned positive signature cache. Block
+	// validation leaves it nil and keeps exact uncached behavior; only the live
+	// Mempool owner passes one, through SuiteValidationContext.
+	sigCache *SigCache
 }
 
 func applyNonCoinbaseTxBasicWork(input nonCoinbaseApplyWorkInput) (map[Outpoint]UtxoEntry, Uint128, error) {
@@ -21,6 +25,7 @@ func applyNonCoinbaseTxBasicWork(input nonCoinbaseApplyWorkInput) (map[Outpoint]
 		chainID:  input.chainID,
 		rotation: input.rotation,
 		registry: input.registry,
+		sigCache: input.sigCache,
 	}).apply()
 }
 
@@ -287,6 +292,7 @@ func (ctx *nonCoinbaseApplyContext) validateP2PKInput(inputIndex int, entry Utxo
 			chainID:    ctx.chainID,
 			cache:      ctx.sighashCache,
 			registry:   ctx.registry,
+			sigCache:   ctx.sigCache,
 		},
 	})
 }
@@ -309,6 +315,7 @@ func (ctx *nonCoinbaseApplyContext) validateMultisigInput(inputIndex int, entry 
 			chainID:    ctx.chainID,
 			cache:      ctx.sighashCache,
 			registry:   ctx.registry,
+			sigCache:   ctx.sigCache,
 			context:    "CORE_MULTISIG",
 		},
 	})
@@ -334,7 +341,21 @@ func (ctx *nonCoinbaseApplyContext) validateHTLCInput(inputIndex int, entry Utxo
 	if len(assigned) != 2 {
 		return txerr(TX_ERR_PARSE, "CORE_HTLC witness_slots must be 2")
 	}
-	return ValidateHTLCSpendAtHeight(entry, assigned[0], assigned[1], ctx.tx, uint32(inputIndex), entry.Value, ctx.chainID, ctx.height, ctx.blockMTP, ctx.sighashCache, ctx.rotation, ctx.registry)
+	return validateHTLCSpendAtHeightWithSigCache(htlcSpendCheck{
+		entry:       entry,
+		pathItem:    assigned[0],
+		sigItem:     assigned[1],
+		tx:          ctx.tx,
+		inputIndex:  uint32(inputIndex),
+		inputValue:  entry.Value,
+		chainID:     ctx.chainID,
+		blockHeight: ctx.height,
+		blockMTP:    ctx.blockMTP,
+		cache:       ctx.sighashCache,
+		rotation:    ctx.rotation,
+		registry:    ctx.registry,
+		sigCache:    ctx.sigCache,
+	})
 }
 
 func (ctx *nonCoinbaseApplyContext) validateCoreStealthInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
@@ -352,6 +373,7 @@ func (ctx *nonCoinbaseApplyContext) validateCoreStealthInput(inputIndex int, ent
 		cache:       ctx.sighashCache,
 		rotation:    ctx.rotation,
 		registry:    ctx.registry,
+		sigCache:    ctx.sigCache,
 	})
 }
 

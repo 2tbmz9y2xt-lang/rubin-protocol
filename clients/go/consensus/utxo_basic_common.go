@@ -202,6 +202,7 @@ type nonCoinbaseApplyContext struct {
 	rotation      RotationProvider
 	registry      *SuiteRegistry
 	sighashCache  *SighashV1PrehashCache
+	sigCache      *SigCache
 	resolved      []nonCoinbaseResolvedInput
 	simplicityCtx *SimplicityTxContext
 	spend         nonCoinbaseSpendState

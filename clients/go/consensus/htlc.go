@@ -78,27 +78,63 @@ func ValidateHTLCSpendAtHeight(
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) error {
-	rotation, registry = resolveHTLCSpendProviders(rotation, registry)
+	return validateHTLCSpendAtHeightWithSigCache(htlcSpendCheck{
+		entry:       entry,
+		pathItem:    pathItem,
+		sigItem:     sigItem,
+		tx:          tx,
+		inputIndex:  inputIndex,
+		inputValue:  inputValue,
+		chainID:     chainID,
+		blockHeight: blockHeight,
+		blockMTP:    blockMTP,
+		cache:       cache,
+		rotation:    rotation,
+		registry:    registry,
+	})
+}
 
-	c, err := ParseHTLCCovenantData(entry.CovenantData)
+// htlcSpendCheck carries the CORE_HTLC spend inputs plus the optional
+// caller-owned positive signature cache. sigCache is nil for every path that
+// does not own one, which keeps behavior exactly uncached.
+type htlcSpendCheck struct {
+	tx          *Tx
+	rotation    RotationProvider
+	registry    *SuiteRegistry
+	cache       *SighashV1PrehashCache
+	sigCache    *SigCache
+	entry       UtxoEntry
+	pathItem    WitnessItem
+	sigItem     WitnessItem
+	chainID     [32]byte
+	inputValue  uint64
+	blockHeight uint64
+	blockMTP    uint64
+	inputIndex  uint32
+}
+
+func validateHTLCSpendAtHeightWithSigCache(check htlcSpendCheck) error {
+	rotation, registry := resolveHTLCSpendProviders(check.rotation, check.registry)
+
+	c, err := ParseHTLCCovenantData(check.entry.CovenantData)
 	if err != nil {
 		return err
 	}
 
-	expectedKeyID, err := expectedHTLCSpendKeyID(c, pathItem, blockHeight, blockMTP)
+	expectedKeyID, err := expectedHTLCSpendKeyID(c, check.pathItem, check.blockHeight, check.blockMTP)
 	if err != nil {
 		return err
 	}
 
-	if err := validateHTLCSignaturePrecheck(sigItem, expectedKeyID, blockHeight, rotation, registry); err != nil {
+	if err := validateHTLCSignaturePrecheck(check.sigItem, expectedKeyID, check.blockHeight, rotation, registry); err != nil {
 		return err
 	}
 
-	cryptoSig, digest, err := extractSigAndDigestWithCache(sigItem, tx, inputIndex, inputValue, chainID, cache)
+	cryptoSig, digest, err := extractSigAndDigestWithCache(check.sigItem, check.tx, check.inputIndex, check.inputValue, check.chainID, check.cache)
 	if err != nil {
 		return err
 	}
-	ok, err := verifySigWithRegistry(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest, registry)
+	ok, err := verifySigWithRegistryCache(check.sigItem.SuiteID, check.sigItem.Pubkey, cryptoSig, digest, registry, check.sigCache)
 	if err != nil {
 		return err
 	}

@@ -20,6 +20,11 @@ const (
 
 	mempoolLowWaterNumerator   = 9
 	mempoolLowWaterDenominator = 10
+
+	// mempoolSigCacheCapacity is the fixed process-memory capacity of the one
+	// positive signature cache each Mempool owns. It is not configurable: no
+	// CLI, RPC, config, metric, or persistence surface exposes it.
+	mempoolSigCacheCapacity = 50_000
 )
 
 type mempoolTxSource string
@@ -67,6 +72,20 @@ type Mempool struct {
 	// the former spenders index: outpoint ownership now lives with the claim
 	// and its token, so no second spender map can drift from the records.
 	pendingOutpoints *PendingOutpointOwner
+	// sigCache is the one positive-only signature cache this Mempool owns. It
+	// is constructed empty, lives in process memory only, and is never
+	// persisted. It reaches consensus through exactly two ratified call sites,
+	// both landing in the suite-aware validation seam every sequential native
+	// signature path (P2PK, multisig, Vault threshold, HTLC, CORE_STEALTH)
+	// shares: validateTransactionWithConsensus (mempolicy_helpers.go), the
+	// parsed-transaction seam used for relay metadata, and
+	// checkTransactionWithSnapshot (mempool_precheck.go), the live AddTx path,
+	// which enters through the raw-bytes helper. A hit lets consensus
+	// skip ONLY a previously successful backend verification call for the
+	// exact same tuple under the same resolved verifier binding — never an
+	// admission, duplicate, conflict, floor, or capacity decision. Block
+	// validation, the miner, and the deferred SigCheckQueue never see it.
+	sigCache *consensus.SigCache
 	// Admission counters are bumped exactly once for each AddTx call on a
 	// non-nil Mempool that reaches the final outcome accounting path.
 	// Nil-receiver calls return before that defer is registered and are

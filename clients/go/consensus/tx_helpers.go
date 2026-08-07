@@ -27,9 +27,19 @@ type ParsedTxIDs struct {
 	WTxID [32]byte
 }
 
+// SuiteValidationContext is the suite-aware validation seam for an already
+// parsed transaction.
+//
+// SigCache is the caller-owned positive-only signature cache. It is OPTIONAL:
+// nil means exact uncached validation, which is what every block-validation
+// caller passes. A non-nil cache may only ever let the sequential native
+// signature paths skip a backend verification call for a tuple that already
+// verified successfully under the same resolved verifier binding; it never
+// caches transaction validity, an admission result, or any failure.
 type SuiteValidationContext struct {
 	Rotation RotationProvider
 	Registry *SuiteRegistry
+	SigCache *SigCache
 }
 
 func P2PKCovenantDataForPubkey(pub []byte) []byte {
@@ -93,6 +103,30 @@ func CheckTransactionWithOwnedUtxoSetAndSuiteContext(
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (*CheckedTransaction, error) {
+	return CheckTransactionWithOwnedUtxoSetAndValidationContext(
+		txBytes,
+		workUtxos,
+		height,
+		blockMTP,
+		chainID,
+		SuiteValidationContext{Rotation: rotation, Registry: registry},
+	)
+}
+
+// CheckTransactionWithOwnedUtxoSetAndValidationContext is the
+// SuiteValidationContext-bearing sibling of
+// CheckTransactionWithOwnedUtxoSetAndSuiteContext: identical parse, validation
+// and error contract, but the caller supplies the whole seam, so a caller that
+// owns a positive signature cache can pass it. The positional wrapper above is
+// exactly this call with SigCache left nil (uncached validation).
+func CheckTransactionWithOwnedUtxoSetAndValidationContext(
+	txBytes []byte,
+	workUtxos map[Outpoint]UtxoEntry,
+	height uint64,
+	blockMTP uint64,
+	chainID [32]byte,
+	suite SuiteValidationContext,
+) (*CheckedTransaction, error) {
 	tx, txid, wtxid, consumed, err := ParseTx(txBytes)
 	if err != nil {
 		return nil, err
@@ -109,7 +143,7 @@ func CheckTransactionWithOwnedUtxoSetAndSuiteContext(
 		height,
 		blockMTP,
 		chainID,
-		SuiteValidationContext{Rotation: rotation, Registry: registry},
+		suite,
 	)
 }
 
@@ -142,6 +176,7 @@ func CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext(
 		chainID:  chainID,
 		rotation: suite.Rotation,
 		registry: suite.Registry,
+		sigCache: suite.SigCache,
 	})
 	if err != nil {
 		return nil, err

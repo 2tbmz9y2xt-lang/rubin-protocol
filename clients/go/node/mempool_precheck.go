@@ -99,14 +99,20 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 			return nil, nil, txAdmitRejected(reason)
 		}
 	}
-	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndSuiteContext(
+	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndValidationContext(
 		txBytes,
 		snapshot.utxos,
 		nextHeight,
 		blockMTP,
 		m.chainID,
-		policy.RotationProvider,
-		policy.SuiteRegistry,
+		// Same validation, same order, same errors: the only difference from
+		// the positional wrapper is that the live AddTx path carries this
+		// Mempool's positive signature cache into the suite-aware seam.
+		consensus.SuiteValidationContext{
+			Rotation: policy.RotationProvider,
+			Registry: policy.SuiteRegistry,
+			SigCache: m.sigCache,
+		},
 	)
 	if err != nil {
 		return nil, nil, txAdmitRejected(err.Error())
