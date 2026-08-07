@@ -374,9 +374,12 @@ fn orphan_pool_metrics_sub(blocks: usize, bytes: usize) {
 
 #[cfg(test)]
 pub(crate) fn orphan_pool_metrics_test_guard() -> std::sync::MutexGuard<'static, ()> {
-    ORPHAN_POOL_TEST_LOCK
-        .lock()
-        .expect("lock orphan metrics tests")
+    // Recovery is sound: the lock only serializes access to unit test state, and every
+    // guarded test resets that state at entry via `reset_orphan_pool_metrics_for_test`.
+    ORPHAN_POOL_TEST_LOCK.lock().unwrap_or_else(|poisoned| {
+        eprintln!("orphan_pool_metrics_test_guard: recovered from a poisoned lock");
+        poisoned.into_inner()
+    })
 }
 
 #[cfg(test)]
@@ -3830,7 +3833,7 @@ mod tests {
     use std::io::Read;
     use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::Duration;
 
@@ -3850,8 +3853,6 @@ mod tests {
         BLOCK_HEADER_BYTES,
     };
     use serde::Deserialize;
-
-    static NEXT_TEST_ROOT_ID: AtomicU64 = AtomicU64::new(1);
 
     #[expect(clippy::type_complexity)]
     #[rustfmt::skip]
@@ -3987,9 +3988,8 @@ mod tests {
     }
 
     fn test_sync_engine_with_genesis() -> SyncEngine {
-        let unique = NEXT_TEST_ROOT_ID.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("rubin-node-p2p-runtime-{unique}"));
-        let _ = fs::remove_dir_all(&root);
+        // pid + epoch-nanos + monotonic counter => fresh path by construction; no pre-cleanup needed.
+        let root = crate::io_utils::unique_temp_path("rubin-node-p2p-runtime");
         fs::create_dir_all(&root).expect("create temp dir");
         let blockstore_dir = root.join("blockstore");
         let chainstate_path = root.join("chainstate.json");
@@ -5336,8 +5336,12 @@ mod tests {
     #[test]
     fn compact_fallback_read_message_continues_after_expiry_fallback() {
         let (mut session, mut client) = test_peer_session();
+        // RUB-1139: the client's read here (via assert_fallback_getdata) waits on
+        // the peer thread below, whose own budget is 2s; the client deadline must
+        // stay wider than that budget so a starved peer thread can't make this
+        // read time out first under CPU contention.
         client
-            .set_read_timeout(Some(Duration::from_secs(1)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("client read timeout");
         let block_hash = [0xcc; 32];
         let mut req = compact_outstanding_test_request(block_hash);
@@ -5448,8 +5452,12 @@ mod tests {
     #[test]
     fn late_blocktxn_fragmented_after_expiry_fallback() {
         let (mut session, mut client) = test_peer_session();
+        // RUB-1139: same deadline-ordering requirement as
+        // compact_fallback_read_message_continues_after_expiry_fallback above -
+        // this client read must outlast the peer thread's 2s budget under
+        // contention (measured red: Os { code: 35, kind: WouldBlock } at 1s).
         client
-            .set_read_timeout(Some(Duration::from_secs(1)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("client read timeout");
         let block_hash = [0xe3; 32];
         let mut payload = block_hash.to_vec();
@@ -7645,6 +7653,14 @@ mod tests {
     #[test]
     fn has_block_local_store_error_propagates_through_p2p_consumers() {
         use crate::sync::{next_candidate_block_for_test, stock_devnet_engine_for_test};
+
+        // Case 6 below inserts into the orphan pool, which mutates the
+        // process-global GLOBAL_ORPHAN_TOTAL_BYTES/GLOBAL_ORPHAN_METRICS
+        // accounting (RUB-1139): serialize with the rest of the
+        // orphan-accounting test group so a sibling's reset/assert cannot
+        // interleave with this insert.
+        let _guard = orphan_pool_metrics_test_guard();
+        reset_orphan_pool_metrics_for_test();
 
         let (mut engine, dir) = stock_devnet_engine_for_test("rubin-b1-consumers", |_| {});
         let block = next_candidate_block_for_test(&engine, POW_LIMIT, engine.tip_timestamp + 1);
