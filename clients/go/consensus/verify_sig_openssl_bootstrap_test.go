@@ -3,10 +3,158 @@
 package consensus
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 )
+
+// localFaultFixture is one signed single-input CORE_P2PK transaction plus the
+// utxo set it spends, built while the backend is HEALTHY so every row below
+// differs from the accepting baseline only in the fault it injects.
+type localFaultFixture struct {
+	txBytes []byte
+	utxos   map[Outpoint]UtxoEntry
+	chainID [32]byte
+}
+
+func newLocalFaultFixture(t *testing.T) localFaultFixture {
+	t.Helper()
+	kp := mustMLDSA87Keypair(t)
+	covData := P2PKCovenantDataForPubkey(kp.PubkeyBytes())
+	var prevTxid [32]byte
+	prevTxid[0] = 0xAA
+	op := Outpoint{Txid: prevTxid, Vout: 0}
+	utxos := map[Outpoint]UtxoEntry{op: {
+		Value:             100_000_000,
+		CovenantType:      COV_TYPE_P2PK,
+		CovenantData:      covData,
+		CreationHeight:    1,
+		CreatedByCoinbase: true,
+	}}
+	tx := &Tx{
+		Version:  1,
+		TxNonce:  1,
+		Locktime: 0,
+		Inputs:   []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0x7FFFFFFF}},
+		Outputs:  []TxOutput{{Value: 90_000_000, CovenantType: COV_TYPE_P2PK, CovenantData: covData}},
+	}
+	var chainID [32]byte
+	chainID[0] = 0x88
+	if err := SignTransaction(tx, utxos, chainID, kp); err != nil {
+		t.Fatalf("SignTransaction: %v", err)
+	}
+	txBytes, err := MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx: %v", err)
+	}
+	return localFaultFixture{txBytes: txBytes, utxos: utxos, chainID: chainID}
+}
+
+// check drives the LIVE consensus validation entry point over the fixture.
+func (f localFaultFixture) check(chainID [32]byte) error {
+	_, err := CheckTransaction(f.txBytes, f.utxos, 200, 0, chainID)
+	return err
+}
+
+// mustTxErrorCause pins the whole public surface of a consensus error together
+// with the typed cause its producing branch selected: the code, the exact
+// message bytes, the exact Error() rendering, and that errors.As to *TxError
+// still resolves.
+func mustTxErrorCause(t *testing.T, err error, wantCode ErrorCode, wantMsg string, wantCause TxErrorCause) {
+	t.Helper()
+	var txErr *TxError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("errors.As(*TxError) failed for %T: %v", err, err)
+	}
+	if txErr.Code != wantCode {
+		t.Fatalf("Code=%s, want %s", txErr.Code, wantCode)
+	}
+	if txErr.Msg != wantMsg {
+		t.Fatalf("Msg=%q, want %q", txErr.Msg, wantMsg)
+	}
+	if want := string(wantCode) + ": " + wantMsg; txErr.Error() != want {
+		t.Fatalf("Error()=%q, want %q", txErr.Error(), want)
+	}
+	if txErr.Cause() != wantCause {
+		t.Fatalf("Cause()=%d, want %d", txErr.Cause(), wantCause)
+	}
+}
+
+// Matrix row 1: an OpenSSL consensus INIT failure keeps TX_ERR_PARSE and its
+// exact message, and is typed LOCAL_CRYPTO_BACKEND_FAULT at the branch that
+// latched it.
+func TestConsensusValidation_OpenSSLInitFaultCarriesLocalCryptoBackendFaultCause(t *testing.T) {
+	fixture := newLocalFaultFixture(t)
+
+	resetOpenSSLBootstrapStateForTests()
+	t.Cleanup(resetOpenSSLBootstrapStateForTests)
+	opensslConsensusInitFn = func() error {
+		return errors.New("synthetic consensus init failure")
+	}
+
+	mustTxErrorCause(
+		t,
+		fixture.check(fixture.chainID),
+		TX_ERR_PARSE,
+		"openssl consensus init: synthetic consensus init failure",
+		TxErrorCauseLocalCryptoBackendFault,
+	)
+}
+
+// Matrix row 2: the one-shot verifier returning an INTERNAL error keeps
+// TX_ERR_SIG_INVALID and its exact message, typed LOCAL_CRYPTO_BACKEND_FAULT.
+func TestConsensusValidation_OpenSSLOneShotFaultCarriesLocalCryptoBackendFaultCause(t *testing.T) {
+	fixture := newLocalFaultFixture(t)
+
+	resetOpenSSLBootstrapStateForTests()
+	t.Cleanup(resetOpenSSLBootstrapStateForTests)
+	t.Cleanup(func() { opensslVerifySigOneShotFn = opensslVerifySigOneShot })
+	opensslVerifySigOneShotFn = func(string, []byte, []byte, []byte) (bool, error) {
+		return false, errors.New("synthetic EVP_DigestVerify failure")
+	}
+
+	mustTxErrorCause(
+		t,
+		fixture.check(fixture.chainID),
+		TX_ERR_SIG_INVALID,
+		"verify_sig: EVP_DigestVerify internal error",
+		TxErrorCauseLocalCryptoBackendFault,
+	)
+}
+
+// Matrix rows 4 and 5 at the SOURCE: with a healthy backend a
+// cryptographically invalid signature and a structurally malformed candidate
+// keep their public errors and select NO cause, so no consumer can mistake
+// them for a local fault.
+func TestConsensusValidation_HealthyBackendCandidateFailuresCarryNoCause(t *testing.T) {
+	fixture := newLocalFaultFixture(t)
+
+	// Signed against fixture.chainID, validated against a different chain id:
+	// the sighash digest differs, so the backend decides "invalid" with no
+	// error of its own.
+	var otherChainID [32]byte
+	otherChainID[0] = 0x99
+	mustTxErrorCause(
+		t,
+		fixture.check(otherChainID),
+		TX_ERR_SIG_INVALID,
+		"CORE_P2PK signature invalid",
+		TxErrorCauseUnspecified,
+	)
+
+	_, err := CheckTransaction([]byte{0xFF, 0x00, 0x13, 0x37}, fixture.utxos, 200, 0, fixture.chainID)
+	var txErr *TxError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("malformed candidate: errors.As(*TxError) failed for %T: %v", err, err)
+	}
+	if txErr.Code != TX_ERR_PARSE {
+		t.Fatalf("malformed candidate Code=%s, want %s", txErr.Code, TX_ERR_PARSE)
+	}
+	if txErr.Cause() != TxErrorCauseUnspecified {
+		t.Fatalf("malformed candidate Cause()=%d, want TxErrorCauseUnspecified", txErr.Cause())
+	}
+}
 
 func TestEnsureOpenSSLBootstrap_ModeOffNoop(t *testing.T) {
 	resetOpenSSLBootstrapStateForTests()

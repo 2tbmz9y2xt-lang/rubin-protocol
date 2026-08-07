@@ -237,7 +237,15 @@ func defaultRuntimeSuiteRegistry() *SuiteRegistry {
 func ensureOpenSSLConsensusInit() error {
 	opensslConsensusInitOnce.Do(func() {
 		if err := opensslConsensusInitFn(); err != nil {
-			opensslConsensusInitErr = txerr(TX_ERR_PARSE, fmt.Sprintf("openssl consensus init: %v", err))
+			// PROCESS-LOCAL fault, latched by the sync.Once until restart: it
+			// is not evidence about any candidate's bytes. The public
+			// TX_ERR_PARSE code and this exact message are unchanged; only the
+			// typed cause is added, at the branch that owns the decision.
+			opensslConsensusInitErr = txerrWithCause(
+				TX_ERR_PARSE,
+				fmt.Sprintf("openssl consensus init: %v", err),
+				TxErrorCauseLocalCryptoBackendFault,
+			)
 		}
 	})
 	return opensslConsensusInitErr
@@ -438,8 +446,15 @@ type suiteVerifierBinding struct {
 	sigLen     int
 }
 
+// resolveSuiteVerifierBindingUnsupportedError is a LOCAL fault at every call
+// site of resolveSuiteVerifierBinding: the (alg, pubkey_len, sig_len) tuple it
+// reports comes from this node's own constants or from its configured
+// SuiteRegistry entry, never from the candidate. A candidate that selects a
+// suite this node does not authorize is rejected EARLIER — by the native
+// spend-set check, the registry lookup, or verifySig's suite switch — and those
+// exits deliberately select no cause.
 func resolveSuiteVerifierBindingUnsupportedError(algName string, pubkeyLen int, sigLen int) error {
-	return txerr(
+	return txerrWithCause(
 		TX_ERR_SIG_ALG_INVALID,
 		fmt.Sprintf(
 			"resolveSuiteVerifierBinding: unsupported alg=%q pubkey_len=%d sig_len=%d",
@@ -447,11 +462,15 @@ func resolveSuiteVerifierBindingUnsupportedError(algName string, pubkeyLen int, 
 			pubkeyLen,
 			sigLen,
 		),
+		TxErrorCauseLocalCryptoBackendFault,
 	)
 }
 
+// resolveSuiteVerifierBindingPolicyInvalidError reports that this node's local
+// live-binding policy artifact could not be loaded or validated. That is a
+// property of the local installation only.
 func resolveSuiteVerifierBindingPolicyInvalidError(algName string, pubkeyLen int, sigLen int, err error) error {
-	return txerr(
+	return txerrWithCause(
 		TX_ERR_SIG_ALG_INVALID,
 		fmt.Sprintf(
 			"resolveSuiteVerifierBinding: live binding policy invalid alg=%q pubkey_len=%d sig_len=%d: %v",
@@ -460,15 +479,22 @@ func resolveSuiteVerifierBindingPolicyInvalidError(algName string, pubkeyLen int
 			sigLen,
 			err,
 		),
+		TxErrorCauseLocalCryptoBackendFault,
 	)
 }
 
+// wrapResolveSuiteVerifierBindingError adds the suite_id context to a binding
+// resolution failure. It is an OUTER WRAPPER: it CARRIES the inner branch's
+// already-selected cause forward unchanged and never selects, overwrites or
+// erases one. The non-TxError arm cannot classify what it did not produce, so
+// it stays cause-unspecified.
 func wrapResolveSuiteVerifierBindingError(suiteID uint8, err error) error {
 	var txErr *TxError
 	if errors.As(err, &txErr) {
-		return txerr(
+		return txerrWithCause(
 			txErr.Code,
 			fmt.Sprintf("suite_id=0x%02x %s", suiteID, txErr.Msg),
+			txErr.Cause(),
 		)
 	}
 	return txerr(
@@ -519,13 +545,25 @@ func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature
 	case suiteVerifierBindingOpenSSLDigest32V1:
 		ok, err := opensslVerifySigOneShotFn(binding.opensslAlg, pubkey, signature, digest32[:])
 		if err != nil {
-			return false, txerr(TX_ERR_SIG_INVALID, "verify_sig: EVP_DigestVerify internal error")
+			// The backend could not DECIDE. A false verdict (ok == false, nil
+			// err) is the candidate's own invalidity and stays uncaused; this
+			// arm is the local runtime fault, with the same public
+			// TX_ERR_SIG_INVALID code and the same message as before.
+			return false, txerrWithCause(
+				TX_ERR_SIG_INVALID,
+				"verify_sig: EVP_DigestVerify internal error",
+				TxErrorCauseLocalCryptoBackendFault,
+			)
 		}
 		return ok, nil
 	default:
-		return false, txerr(TX_ERR_SIG_ALG_INVALID,
+		// Only resolveSuiteVerifierBinding builds a binding, and it returns
+		// either the one known kind or an error, so this is a local structural
+		// invariant of this build — never a candidate property.
+		return false, txerrWithCause(TX_ERR_SIG_ALG_INVALID,
 			fmt.Sprintf("verifySigWithBinding: unsupported binding kind=%d alg=%q",
-				binding.kind, binding.opensslAlg))
+				binding.kind, binding.opensslAlg),
+			TxErrorCauseLocalCryptoBackendFault)
 	}
 }
 
@@ -537,7 +575,13 @@ func runtimeVerificationRegistry(registry *SuiteRegistry) (*SuiteRegistry, error
 	}
 	registry = defaultRuntimeSuiteRegistryForVerification()
 	if !registry.IsCanonicalDefaultLiveManifest() {
-		return nil, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: default runtime registry drift")
+		// The process-cached default registry no longer matches the live
+		// manifest: local runtime state, not anything the candidate chose.
+		return nil, txerrWithCause(
+			TX_ERR_SIG_ALG_INVALID,
+			"verify_sig: default runtime registry drift",
+			TxErrorCauseLocalCryptoBackendFault,
+		)
 	}
 	return registry, nil
 }

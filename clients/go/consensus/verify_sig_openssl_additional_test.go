@@ -198,6 +198,26 @@ func TestVerifySig_UnsupportedSuiteIDMessageCarriesSuiteID(t *testing.T) {
 	}
 }
 
+// txErrorCauseOf reads the typed cause a consensus error carries.
+func txErrorCauseOf(t *testing.T, err error) TxErrorCause {
+	t.Helper()
+	var txErr *TxError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("errors.As(*TxError) failed for %T: %v", err, err)
+	}
+	return txErr.Cause()
+}
+
+// Cause() is nil-safe exactly like Error(), and a nil receiver carries no
+// meaning: a consumer that dereferences a nil *TxError must not be handed a
+// local-fault classification it can act on.
+func TestTxErrorCause_NilReceiverIsUnspecified(t *testing.T) {
+	var nilErr *TxError
+	if got := nilErr.Cause(); got != TxErrorCauseUnspecified {
+		t.Fatalf("nil Cause()=%d, want TxErrorCauseUnspecified", got)
+	}
+}
+
 func TestResolveSuiteVerifierBinding_UnknownCarriesAlgAndLens(t *testing.T) {
 	_, err := resolveSuiteVerifierBinding("FAKE-ALG", 7, 9)
 	if err == nil {
@@ -205,6 +225,9 @@ func TestResolveSuiteVerifierBinding_UnknownCarriesAlgAndLens(t *testing.T) {
 	}
 	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+	}
+	if got := txErrorCauseOf(t, err); got != TxErrorCauseLocalCryptoBackendFault {
+		t.Fatalf("cause=%d, want TxErrorCauseLocalCryptoBackendFault", got)
 	}
 	msg := err.Error()
 	for _, needle := range []string{
@@ -237,6 +260,80 @@ func TestWrapResolveSuiteVerifierBindingError_PreservesTxErrorCodeAndSuiteID(t *
 	if strings.Count(msg, "resolveSuiteVerifierBinding:") != 1 {
 		t.Fatalf("wrapped error should keep a single resolveSuiteVerifierBinding prefix, got %q", msg)
 	}
+	// The wrapper CARRIES the inner branch's cause and never erases it.
+	if got := txErrorCauseOf(t, err); got != TxErrorCauseLocalCryptoBackendFault {
+		t.Fatalf("wrapped cause=%d, want TxErrorCauseLocalCryptoBackendFault", got)
+	}
+	// ...and never INVENTS one for an inner error that selected none.
+	uncaused := wrapResolveSuiteVerifierBindingError(0x2a, txerr(TX_ERR_SIG_ALG_INVALID, "no cause here"))
+	if got := txErrorCauseOf(t, uncaused); got != TxErrorCauseUnspecified {
+		t.Fatalf("wrapped uncaused cause=%d, want TxErrorCauseUnspecified", got)
+	}
+}
+
+// Matrix row 3: a live verifier binding this node cannot resolve because of its
+// OWN registry configuration keeps the existing public code and message and is
+// typed LOCAL_CRYPTO_BACKEND_FAULT. The registry here is exactly what
+// node.MempoolConfig.SuiteRegistry carries into consensus validation.
+func TestVerifySigWithRegistryCache_LocalBindingFaultCarriesCause(t *testing.T) {
+	const unboundAlg = "ML-DSA-87-NOT-LIVE-BOUND"
+	registry := NewSuiteRegistryFromParams([]SuiteParams{{
+		SuiteID:    SUITE_ID_ML_DSA_87,
+		PubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
+		SigLen:     ML_DSA_87_SIG_BYTES,
+		VerifyCost: VERIFY_COST_ML_DSA_87,
+		AlgName:    unboundAlg,
+	}})
+	_, err := verifySigWithRegistryCache(
+		SUITE_ID_ML_DSA_87,
+		make([]byte, ML_DSA_87_PUBKEY_BYTES),
+		make([]byte, ML_DSA_87_SIG_BYTES),
+		[32]byte{},
+		registry,
+		nil,
+	)
+	wantMsg := fmt.Sprintf(
+		"suite_id=0x%02x resolveSuiteVerifierBinding: unsupported alg=%q pubkey_len=%d sig_len=%d",
+		SUITE_ID_ML_DSA_87, unboundAlg, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES,
+	)
+	mustTxErrorCause(t, err, TX_ERR_SIG_ALG_INVALID, wantMsg, TxErrorCauseLocalCryptoBackendFault)
+}
+
+// The local default-registry drift guard is node-local runtime state too.
+func TestRuntimeVerificationRegistry_DriftCarriesCause(t *testing.T) {
+	previous := defaultRuntimeSuiteRegistryForVerification
+	t.Cleanup(func() { defaultRuntimeSuiteRegistryForVerification = previous })
+	defaultRuntimeSuiteRegistryForVerification = func() *SuiteRegistry {
+		return NewSuiteRegistryFromParams(nil)
+	}
+
+	_, err := runtimeVerificationRegistry(nil)
+	mustTxErrorCause(
+		t,
+		err,
+		TX_ERR_SIG_ALG_INVALID,
+		"verify_sig: default runtime registry drift",
+		TxErrorCauseLocalCryptoBackendFault,
+	)
+}
+
+// Matrix row 6: a suite the CANDIDATE selected and this node does not authorize
+// keeps TX_ERR_SIG_ALG_INVALID and selects NO cause, at both exits that decide
+// it — verifySig's legacy switch and the registry lookup.
+func TestUnauthorizedCandidateSuiteCarriesNoLocalCause(t *testing.T) {
+	var digest [32]byte
+	_, err := verifySig(0x7b, []byte{0x01}, []byte{0x02}, digest)
+	mustTxErrorCause(t, err, TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite_id=0x7b", TxErrorCauseUnspecified)
+
+	_, err = verifySigWithRegistryCache(
+		SUITE_ID_ML_DSA_87,
+		make([]byte, ML_DSA_87_PUBKEY_BYTES),
+		make([]byte, ML_DSA_87_SIG_BYTES),
+		digest,
+		NewSuiteRegistryFromParams(nil),
+		nil,
+	)
+	mustTxErrorCause(t, err, TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite_id", TxErrorCauseUnspecified)
 }
 
 func TestResolveSuiteVerifierBinding_InvalidPolicyReturnsTxError(t *testing.T) {
@@ -261,6 +358,9 @@ func TestResolveSuiteVerifierBinding_InvalidPolicyReturnsTxError(t *testing.T) {
 		if !strings.Contains(msg, needle) {
 			t.Fatalf("invalid policy error missing %q, got %q", needle, msg)
 		}
+	}
+	if got := txErrorCauseOf(t, err); got != TxErrorCauseLocalCryptoBackendFault {
+		t.Fatalf("invalid policy cause=%d, want TxErrorCauseLocalCryptoBackendFault", got)
 	}
 }
 
@@ -287,5 +387,8 @@ func TestVerifySigWithBinding_UnknownKindCarriesContext(t *testing.T) {
 		if !strings.Contains(msg, needle) {
 			t.Fatalf("verifySigWithBinding error missing %q, got %q", needle, msg)
 		}
+	}
+	if got := txErrorCauseOf(t, err); got != TxErrorCauseLocalCryptoBackendFault {
+		t.Fatalf("unknown binding kind cause=%d, want TxErrorCauseLocalCryptoBackendFault", got)
 	}
 }

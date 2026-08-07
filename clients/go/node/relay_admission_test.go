@@ -1508,3 +1508,140 @@ func TestRelayAdmissionDispositionCleanupFailureOutranksTheBranch(t *testing.T) 
 		t.Fatalf("Release error=%q, want %q", releaseErr.Error(), wantRelease)
 	}
 }
+
+// unboundAlgSuiteRegistry is the node-side configuration that makes THIS
+// process unable to resolve a live verifier binding for a suite it otherwise
+// authorizes: the registry entry keeps the canonical suite id, lengths and
+// verify cost — so the candidate passes every suite-authorization and
+// canonical-length check — and only its algorithm identity has no entry in the
+// local live-binding policy artifact. It is reached through
+// MempoolConfig.SuiteRegistry, the exported node configuration seam
+// NewMempoolWithConfig carries into consensus validation; no unexported
+// consensus hook, linkname or production test knob is involved.
+func unboundAlgSuiteRegistry() *consensus.SuiteRegistry {
+	return consensus.NewSuiteRegistryFromParams([]consensus.SuiteParams{{
+		SuiteID:    consensus.SUITE_ID_ML_DSA_87,
+		PubkeyLen:  consensus.ML_DSA_87_PUBKEY_BYTES,
+		SigLen:     consensus.ML_DSA_87_SIG_BYTES,
+		VerifyCost: consensus.VERIFY_COST_ML_DSA_87,
+		AlgName:    "ML-DSA-87-NOT-LIVE-BOUND",
+	}})
+}
+
+// TestRelayAdmissionLocalCryptoBackendFaultPublishesInternal is the END-TO-END
+// row of the classification matrix: a PROCESS-LOCAL crypto-backend fault driven
+// through the real relay-admission entry point publishes INTERNAL and no
+// cache-authorizing context, while the public admission error — kind and
+// message alike — stays byte-identical to what the same fault produced before
+// the typed cause existed.
+//
+// The consumer decides from the typed cause alone. The public code carrying it
+// here, TX_ERR_SIG_ALG_INVALID, is the SAME code an unauthorized candidate suite
+// produces, and that row still classifies as a stable terminal rejection below,
+// so a classifier reading the code — or the message — could not tell them apart.
+func TestRelayAdmissionLocalCryptoBackendFaultPublishesInternal(t *testing.T) {
+	h := newRelayHarness(t, &MempoolConfig{SuiteRegistry: unboundAlgSuiteRegistry()}, 1_000_000)
+	raw := h.tx(0, 100_000, 100_000, 1)
+
+	got := h.mp.AddRemoteTxForRelay(raw, h.context())
+
+	if got.Disposition != RelayAdmissionInternal {
+		t.Fatalf("disposition=%v, want INTERNAL (err=%v)", got.Disposition, got.Err)
+	}
+	if got.HasAdmissionContext {
+		t.Fatal("a local backend fault must publish no cache-authorizing context")
+	}
+	if got.AdmissionContext != (PendingOutpointAdmissionContext{}) {
+		t.Fatalf("published context=%+v, want the zero context", got.AdmissionContext)
+	}
+	if kind := admitKind(t, got.Err); kind != TxAdmitRejected {
+		t.Fatalf("public admission kind=%s, want %s (unchanged)", kind, TxAdmitRejected)
+	}
+	wantMsg := fmt.Sprintf(
+		"%s: suite_id=0x%02x resolveSuiteVerifierBinding: unsupported alg=%q pubkey_len=%d sig_len=%d",
+		consensus.TX_ERR_SIG_ALG_INVALID,
+		consensus.SUITE_ID_ML_DSA_87,
+		"ML-DSA-87-NOT-LIVE-BOUND",
+		consensus.ML_DSA_87_PUBKEY_BYTES,
+		consensus.ML_DSA_87_SIG_BYTES,
+	)
+	if got.Err.Error() != wantMsg {
+		t.Fatalf("public message=%q, want %q (unchanged)", got.Err.Error(), wantMsg)
+	}
+	if h.mp.Len() != 0 {
+		t.Fatalf("mempool len=%d, want 0", h.mp.Len())
+	}
+}
+
+// TestRelayAdmissionCandidateFailuresKeepBaselineClassification pins the three
+// NEGATIVE rows of the matrix: with a healthy backend, invalidity that belongs
+// to the candidate bytes carries no local-fault cause, so each one keeps its
+// baseline STABLE_TERMINAL_REJECT and its cache-authorizing context evidence.
+func TestRelayAdmissionCandidateFailuresKeepBaselineClassification(t *testing.T) {
+	cases := []struct {
+		name string
+		// wantMsg pins the exact public message, so a row can never silently
+		// become a different rejection than the one it is named for.
+		wantMsg string
+		build   func(t *testing.T, h *relayHarness) []byte
+	}{
+		{
+			name:    "cryptographically invalid signature",
+			wantMsg: "TX_ERR_SIG_INVALID: CORE_P2PK signature invalid",
+			build: func(t *testing.T, h *relayHarness) []byte {
+				return corruptFirstWitnessSignature(t, h.tx(0, 100_000, 100_000, 1))
+			},
+		},
+		{
+			name:    "structurally malformed candidate",
+			wantMsg: "TX_ERR_PARSE: unsupported tx version",
+			build: func(t *testing.T, h *relayHarness) []byte {
+				return []byte{0xFF, 0x00, 0x13, 0x37}
+			},
+		},
+		{
+			name:    "candidate selected an unauthorized suite",
+			wantMsg: "TX_ERR_SIG_ALG_INVALID: CORE_P2PK suite not in native spend set",
+			build: func(t *testing.T, h *relayHarness) []byte {
+				return retargetFirstWitnessSuite(t, h.tx(0, 100_000, 100_000, 1), 0x02)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRelayHarness(t, nil, 1_000_000)
+			got := h.mp.AddRemoteTxForRelay(tc.build(t, h), h.context())
+			if got.Disposition != RelayAdmissionStableTerminalReject {
+				t.Fatalf("disposition=%v, want STABLE_TERMINAL_REJECT (err=%v)", got.Disposition, got.Err)
+			}
+			if !got.HasAdmissionContext {
+				t.Fatal("a proven candidate-intrinsic rejection keeps its cache-authorizing context")
+			}
+			if kind := admitKind(t, got.Err); kind != TxAdmitRejected {
+				t.Fatalf("public admission kind=%s, want %s", kind, TxAdmitRejected)
+			}
+			if got.Err.Error() != tc.wantMsg {
+				t.Fatalf("public message=%q, want %q (unchanged)", got.Err.Error(), tc.wantMsg)
+			}
+		})
+	}
+}
+
+// retargetFirstWitnessSuite rewrites the suite_id the CANDIDATE selected in its
+// first witness item, leaving every other byte the producer signed in place.
+func retargetFirstWitnessSuite(t *testing.T, txBytes []byte, suiteID uint8) []byte {
+	t.Helper()
+	tx, _, _, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx before retarget: %v", err)
+	}
+	if len(tx.Witness) == 0 {
+		t.Fatal("expected a first witness item")
+	}
+	tx.Witness[0].SuiteID = suiteID
+	out, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx after retarget: %v", err)
+	}
+	return out
+}

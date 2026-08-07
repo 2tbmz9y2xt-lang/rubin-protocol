@@ -57,9 +57,51 @@ const (
 	BLOCK_ERR_DA_BATCH_EXCEEDED         ErrorCode = "BLOCK_ERR_DA_BATCH_EXCEEDED"
 )
 
+// TxErrorCause is the closed, source-owned classification of WHY a consensus
+// error was produced, for the consumers that must tell a fault of THIS PROCESS
+// apart from invalidity of the candidate bytes. The public ErrorCode alone
+// cannot express that difference: TX_ERR_PARSE, TX_ERR_SIG_INVALID and
+// TX_ERR_SIG_ALG_INVALID each carry both meanings today.
+//
+// It is additive only. The zero value is UNSPECIFIED and changes nothing: no
+// public code, message, Error() rendering, accept/reject decision, counter or
+// validation order reads it, and an error whose producer selected no cause
+// keeps its exact baseline classification everywhere.
+//
+// The FIRST producing branch owns the cause. An outer wrapper may carry an
+// already-selected cause forward but must never overwrite or erase it, and no
+// consumer may infer one from message text.
+//
+// Adding a member is a constant plus one consumer arm. It never changes this
+// type, the accessor, or an existing mapping.
+type TxErrorCause uint8
+
+const (
+	// TxErrorCauseUnspecified means no producing branch selected a cause. It is
+	// the zero value and carries no new meaning.
+	TxErrorCauseUnspecified TxErrorCause = iota
+	// TxErrorCauseLocalCryptoBackendFault means this node's own OpenSSL
+	// consensus backend could not initialize, could not resolve its live
+	// verifier binding from local runtime/configuration state, or failed
+	// INSIDE verification for a reason that is not a property of the candidate.
+	// It is evidence about this process, never about the transaction, so a
+	// consumer must not publish the outcome as a stable terminal rejection of
+	// these bytes and must not let it authorize a negative cache.
+	//
+	// It is deliberately NOT selected when the candidate itself selected an
+	// unsupported or unauthorized suite: that verdict is a property of the
+	// bytes and keeps its baseline classification.
+	TxErrorCauseLocalCryptoBackendFault
+)
+
 type TxError struct {
 	Code ErrorCode
 	Msg  string
+	// cause is the producing branch's own typed classification. It is
+	// unexported and outside every public view — Error(), Code, Msg, the JSON
+	// and HTTP mappings neither read it nor change with it — so a consumer that
+	// wants it MUST call Cause(). Its zero value is TxErrorCauseUnspecified.
+	cause TxErrorCause
 }
 
 func (e *TxError) Error() string {
@@ -72,6 +114,25 @@ func (e *TxError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Code, e.Msg)
 }
 
+// Cause reports the typed cause the producing branch selected, or
+// TxErrorCauseUnspecified when none did. It is a pure read: it allocates
+// nothing, mutates nothing, and is nil-safe like Error().
+func (e *TxError) Cause() TxErrorCause {
+	if e == nil {
+		return TxErrorCauseUnspecified
+	}
+	return e.cause
+}
+
+// txerr is the compatibility constructor: it selects no cause, so every
+// existing call site keeps its exact baseline behavior.
 func txerr(code ErrorCode, msg string) error {
 	return &TxError{Code: code, Msg: msg}
+}
+
+// txerrWithCause is the ONE cause-aware constructor. It is used only AT a
+// producing branch that owns the classification, or by a wrapper carrying an
+// already-selected cause forward unchanged.
+func txerrWithCause(code ErrorCode, msg string, cause TxErrorCause) error {
+	return &TxError{Code: code, Msg: msg, cause: cause}
 }
