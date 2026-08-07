@@ -6017,12 +6017,27 @@ func TestMempoolSigCacheWarmCacheNeverBuysAdmission(t *testing.T) {
 		if err != nil {
 			t.Fatalf("new mempool: %v", err)
 		}
+		// The below-floor rejection message is deterministic here: the tx is
+		// built above with a fixed fee, ML-DSA-87 witnesses are fixed-length
+		// so the weight is stable, and a fresh mempool's rolling floor is
+		// DefaultMempoolMinFeeRate. Compute it once via the same parse/weight
+		// helpers the production floor checks use, and pin the exact string.
+		parsedFloorTx, _, _, _, err := consensus.ParseTx(txBelowFloor)
+		if err != nil {
+			t.Fatalf("ParseTx(txBelowFloor): %v", err)
+		}
+		floorWeight, _, _, err := consensus.TxWeightAndStats(parsedFloorTx)
+		if err != nil {
+			t.Fatalf("TxWeightAndStats(txBelowFloor): %v", err)
+		}
+		wantFloorMsg := fmt.Sprintf("mempool fee below rolling minimum: fee=%s weight=%d min_fee_rate=%d",
+			consensus.Uint128FromU64(1).String(), floorWeight, DefaultMempoolMinFeeRate)
 		// RelayMetadata runs full validation (warming the cache for both
 		// witness items) BEFORE its own read-only floor check, so it also
 		// rejects below-floor — proving the read-only relay seam never
 		// buys admission either, exactly like the AddTx path below.
-		if _, relayErr := mp.RelayMetadata(txBelowFloor); relayErr == nil || !strings.Contains(relayErr.Error(), "mempool fee below rolling minimum") {
-			t.Fatalf("RelayMetadata(txBelowFloor) = %v, want below-floor rejection", relayErr)
+		if _, relayErr := mp.RelayMetadata(txBelowFloor); relayErr == nil || relayErr.Error() != wantFloorMsg {
+			t.Fatalf("RelayMetadata(txBelowFloor) = %v, want %q", relayErr, wantFloorMsg)
 		}
 		if mp.sigCache.Len() != 2 || mp.sigCache.Hits() != 0 || mp.sigCache.Misses() != 2 {
 			t.Fatalf("warm state: len=%d hits=%d misses=%d, want 2/0/2",
@@ -6033,12 +6048,15 @@ func TestMempoolSigCacheWarmCacheNeverBuysAdmission(t *testing.T) {
 			t.Fatalf("snapshot before warm-floor: %v", err)
 		}
 		addErr := mp.AddTx(txBelowFloor)
-		if addErr == nil || !strings.Contains(addErr.Error(), "mempool fee below rolling minimum") {
-			t.Fatalf("expected below-floor rejection, got %v", addErr)
+		if addErr == nil {
+			t.Fatalf("expected below-floor rejection, got nil")
 		}
 		var txErr *TxAdmitError
 		if !errors.As(addErr, &txErr) || txErr.Kind != TxAdmitUnavailable {
 			t.Fatalf("warm-floor err=%v, want TxAdmitUnavailable", addErr)
+		}
+		if txErr.Message != wantFloorMsg {
+			t.Fatalf("warm-floor message = %q, want %q", txErr.Message, wantFloorMsg)
 		}
 		after, err := snapshotMempool(mp)
 		if err != nil {
