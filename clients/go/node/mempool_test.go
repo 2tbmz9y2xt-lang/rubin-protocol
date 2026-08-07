@@ -5839,9 +5839,11 @@ func TestMempoolSigCacheNilCacheAddTxMatchesBaseline(t *testing.T) {
 
 // TestMempoolSigCacheWarmCacheNeverBuysAdmission pins the hostile admission
 // rows on the LIVE AddTx path: a positive cache hit is never an admission-result
-// hit. Each row warms the owner cache through the validation-only relay seam
-// (which claims no outpoint), then proves the conflict and capacity authorities
-// fire exactly as they would with a cold cache.
+// hit. The conflict, capacity, and fee-floor rows warm the owner cache through
+// the validation-only relay seam (which claims no outpoint); the saturation row
+// fills the cache directly via the legacy Insert API. All four rows prove the
+// conflict, saturation/FIFO, capacity, and fee-floor authorities fire exactly
+// as they would with a cold cache.
 func TestMempoolSigCacheWarmCacheNeverBuysAdmission(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
@@ -5928,6 +5930,150 @@ func TestMempoolSigCacheWarmCacheNeverBuysAdmission(t *testing.T) {
 		if mp.sigCache.Len() != mempoolSigCacheCapacity || mp.sigCache.Hits() != 1 || mp.sigCache.Misses() != 1 {
 			t.Fatalf("under saturation: len=%d hits=%d misses=%d, want %d/1/1",
 				mp.sigCache.Len(), mp.sigCache.Hits(), mp.sigCache.Misses(), mempoolSigCacheCapacity)
+		}
+	})
+
+	// The candidate's own signature is warmed through the validation-only
+	// relay seam (a genuine hit target, mirroring "conflict" above), then the
+	// mempool is filled so the candidate is the worst-ranked entry by
+	// fee/weight. The capacity authority must reject it with its exact
+	// existing message and leave the resident set untouched, exactly as it
+	// would for a cold candidate.
+	t.Run("capacity", func(t *testing.T) {
+		st, ops := testSpendableChainState(fromAddress, []uint64{1_000_000, 1_000_000})
+		tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{ops[0]}, 100_000, 200_000, 1, fromKey, fromAddress, toAddress)
+		tx2 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{ops[1]}, 100_000, 100_000, 2, fromKey, fromAddress, toAddress)
+		mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+			MaxTransactions: 10,
+			MaxBytes:        len(tx1) + len(tx2) - 1,
+		})
+		if err != nil {
+			t.Fatalf("new mempool: %v", err)
+		}
+		if err := mp.AddTx(tx1); err != nil {
+			t.Fatalf("AddTx(tx1): %v", err)
+		}
+		if _, err := mp.RelayMetadata(tx2); err != nil {
+			t.Fatalf("RelayMetadata(tx2): %v", err)
+		}
+		if mp.sigCache.Len() != 2 || mp.sigCache.Hits() != 0 || mp.sigCache.Misses() != 2 {
+			t.Fatalf("warm state: len=%d hits=%d misses=%d, want 2/0/2",
+				mp.sigCache.Len(), mp.sigCache.Hits(), mp.sigCache.Misses())
+		}
+		before, err := snapshotMempool(mp)
+		if err != nil {
+			t.Fatalf("snapshot before warm-capacity: %v", err)
+		}
+		usedBytes := mp.usedBytes
+		addErr := mp.AddTx(tx2)
+		if addErr == nil {
+			t.Fatalf("expected candidate-worst rejection, got nil")
+		}
+		var txErr *TxAdmitError
+		if !errors.As(addErr, &txErr) || txErr.Kind != TxAdmitUnavailable {
+			t.Fatalf("warm-capacity err=%v, want TxAdmitUnavailable", addErr)
+		}
+		if want := "mempool capacity candidate rejected by eviction ordering"; txErr.Message != want {
+			t.Fatalf("warm-capacity message %q, want %q", txErr.Message, want)
+		}
+		after, err := snapshotMempool(mp)
+		if err != nil {
+			t.Fatalf("snapshot after warm-capacity: %v", err)
+		}
+		// The capacity reject fires after the conflict slot already reserved
+		// (and released) a token for the candidate, exactly like the cold
+		// candidate-worst row in TestMempoolCandidateWorstRejectsWithoutMutation.
+		assertPostSlotRejectionSnapshot(t, before, after)
+		if mp.Len() != 1 || mp.txs[txID(t, tx1)] == nil || mp.txs[txID(t, tx2)] != nil {
+			t.Fatalf("warm-capacity candidate changed resident set: len=%d", mp.Len())
+		}
+		if mp.usedBytes != usedBytes {
+			t.Fatalf("warm-capacity usedBytes=%d, want %d", mp.usedBytes, usedBytes)
+		}
+		// The warm hit answered tx2's signature from cache: one additional
+		// hit, zero additional backend executions (misses unchanged), and
+		// the hit itself inserted nothing new.
+		if mp.sigCache.Hits() != 1 || mp.sigCache.Misses() != 2 || mp.sigCache.Len() != 2 {
+			t.Fatalf("after warm-capacity: hits=%d misses=%d len=%d, want 1/2/2",
+				mp.sigCache.Hits(), mp.sigCache.Misses(), mp.sigCache.Len())
+		}
+	})
+
+	// The floor authority has two enforcement points: a cheap pre-signature
+	// fast-reject (single-input plain P2PK only, see cheapFeeFloorPrecheck)
+	// and the locked post-validation check (validateFeeFloorLockedWithFloor)
+	// that runs after every witness is verified. A single-input candidate
+	// never reaches the cache on this row: the fast path intercepts it
+	// before verification (feePrecheckP2PKInputValue requires
+	// len(tx.Inputs)==1 && len(tx.Witness)==1). To exercise a GENUINE warm
+	// hit on the floor authority, the candidate spends two outpoints (two
+	// witness items), which is outside the fast path's single-witness
+	// eligibility and always defers to the full validation + locked floor
+	// check below.
+	t.Run("floor", func(t *testing.T) {
+		st, ops := testSpendableChainState(fromAddress, []uint64{600_000, 600_000})
+		txBelowFloor := mustBuildSignedTransferTx(t, st.Utxos, ops, 100_000, 1, 1, fromKey, fromAddress, toAddress)
+		mp, err := NewMempool(st, nil, devnetGenesisChainID)
+		if err != nil {
+			t.Fatalf("new mempool: %v", err)
+		}
+		// The below-floor rejection message is deterministic here: the tx is
+		// built above with a fixed fee, ML-DSA-87 witnesses are fixed-length
+		// so the weight is stable, and a fresh mempool's rolling floor is
+		// DefaultMempoolMinFeeRate. Compute it once via the same parse/weight
+		// helpers the production floor checks use, and pin the exact string.
+		parsedFloorTx, _, _, _, err := consensus.ParseTx(txBelowFloor)
+		if err != nil {
+			t.Fatalf("ParseTx(txBelowFloor): %v", err)
+		}
+		floorWeight, _, _, err := consensus.TxWeightAndStats(parsedFloorTx)
+		if err != nil {
+			t.Fatalf("TxWeightAndStats(txBelowFloor): %v", err)
+		}
+		wantFloorMsg := fmt.Sprintf("mempool fee below rolling minimum: fee=%s weight=%d min_fee_rate=%d",
+			consensus.Uint128FromU64(1).String(), floorWeight, DefaultMempoolMinFeeRate)
+		// RelayMetadata runs full validation (warming the cache for both
+		// witness items) BEFORE its own read-only floor check, so it also
+		// rejects below-floor — proving the read-only relay seam never
+		// buys admission either, exactly like the AddTx path below.
+		if _, relayErr := mp.RelayMetadata(txBelowFloor); relayErr == nil || relayErr.Error() != wantFloorMsg {
+			t.Fatalf("RelayMetadata(txBelowFloor) = %v, want %q", relayErr, wantFloorMsg)
+		}
+		if mp.sigCache.Len() != 2 || mp.sigCache.Hits() != 0 || mp.sigCache.Misses() != 2 {
+			t.Fatalf("warm state: len=%d hits=%d misses=%d, want 2/0/2",
+				mp.sigCache.Len(), mp.sigCache.Hits(), mp.sigCache.Misses())
+		}
+		before, err := snapshotMempool(mp)
+		if err != nil {
+			t.Fatalf("snapshot before warm-floor: %v", err)
+		}
+		addErr := mp.AddTx(txBelowFloor)
+		if addErr == nil {
+			t.Fatalf("expected below-floor rejection, got nil")
+		}
+		var txErr *TxAdmitError
+		if !errors.As(addErr, &txErr) || txErr.Kind != TxAdmitUnavailable {
+			t.Fatalf("warm-floor err=%v, want TxAdmitUnavailable", addErr)
+		}
+		if txErr.Message != wantFloorMsg {
+			t.Fatalf("warm-floor message = %q, want %q", txErr.Message, wantFloorMsg)
+		}
+		after, err := snapshotMempool(mp)
+		if err != nil {
+			t.Fatalf("snapshot after warm-floor: %v", err)
+		}
+		// The locked floor check runs after reserveEntryInputsLocked already
+		// reserved (and released) a token for the two-input candidate.
+		assertPostSlotRejectionSnapshot(t, before, after)
+		if mp.Len() != 0 || mp.txs[txID(t, txBelowFloor)] != nil {
+			t.Fatalf("warm-floor candidate entered resident set: len=%d", mp.Len())
+		}
+		// Both of the candidate's witness items were answered from cache
+		// (two additional hits, the tx's two witness tuples), zero
+		// additional backend executions, and no new insertion.
+		if mp.sigCache.Hits() != 2 || mp.sigCache.Misses() != 2 || mp.sigCache.Len() != 2 {
+			t.Fatalf("after warm-floor: hits=%d misses=%d len=%d, want 2/2/2",
+				mp.sigCache.Hits(), mp.sigCache.Misses(), mp.sigCache.Len())
 		}
 	})
 }
