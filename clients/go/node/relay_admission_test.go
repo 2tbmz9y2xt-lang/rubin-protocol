@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -887,7 +888,7 @@ func TestAddRemoteTxForRelayValidatesExpectedContextAtTheOwnerSeam(t *testing.T)
 		h.advanceOwnerGeneration()
 
 		entry := &mempoolEntry{txid: [32]byte{0x71}, wtxid: [32]byte{0x72}, weight: 1, size: 1}
-		probe := &relayAdmissionProbe{expected: stale}
+		probe := newRelayAdmissionProbe(stale)
 		h.mp.mu.Lock()
 		err := h.mp.reserveEntryInputsLocked(entry, probe)
 		h.mp.mu.Unlock()
@@ -902,7 +903,7 @@ func TestAddRemoteTxForRelayValidatesExpectedContextAtTheOwnerSeam(t *testing.T)
 		}
 
 		// The current context passes, and a nil probe keeps the baseline no-op.
-		probe = &relayAdmissionProbe{expected: h.context()}
+		probe = newRelayAdmissionProbe(h.context())
 		h.mp.mu.Lock()
 		err = h.mp.reserveEntryInputsLocked(entry, probe)
 		if err == nil {
@@ -922,7 +923,7 @@ func TestAddRemoteTxForRelayValidatesExpectedContextAtTheOwnerSeam(t *testing.T)
 		expected := h.context()
 		bare := &Mempool{}
 		entry := &mempoolEntry{txid: [32]byte{0x81}, wtxid: [32]byte{0x82}, weight: 1, size: 1}
-		probe := &relayAdmissionProbe{expected: expected}
+		probe := newRelayAdmissionProbe(expected)
 		bare.mu.Lock()
 		err := bare.reserveEntryInputsLocked(entry, probe)
 		bare.mu.Unlock()
@@ -950,7 +951,7 @@ func TestAddRemoteTxForRelayValidatesExpectedContextAtTheOwnerSeam(t *testing.T)
 		h.st.Height = 101
 
 		entry := &mempoolEntry{txid: [32]byte{0x91}, wtxid: [32]byte{0x92}, weight: 1, size: 1}
-		probe := &relayAdmissionProbe{expected: expected}
+		probe := newRelayAdmissionProbe(expected)
 		h.mp.mu.Lock()
 		err := h.mp.reserveEntryInputsLocked(entry, probe)
 		h.mp.mu.Unlock()
@@ -962,6 +963,89 @@ func TestAddRemoteTxForRelayValidatesExpectedContextAtTheOwnerSeam(t *testing.T)
 		}
 		if got, want := err.Error(), "pending-outpoint owner tip does not match the guarded chainstate tip"; got != want {
 			t.Fatalf("message=%q, want the sibling's %q", got, want)
+		}
+	})
+}
+
+// TestAddRemoteTxForRelaySnapshotsExpectedContextAtEntry pins the API-boundary
+// contract: the caller-supplied expected context is COPIED once at entry, and no
+// later seam reads the caller's memory again. Every row takes the snapshot, then
+// mutates the caller's variable to a context the owner never issued, and asserts
+// the call still behaves as the entry-time value — each row fails if the probe
+// goes back to holding the caller's pointer, because it would then read the
+// mutated value and refuse.
+func TestAddRemoteTxForRelaySnapshotsExpectedContextAtEntry(t *testing.T) {
+	// superseded is the same stable tip with a generation the owner has never
+	// issued: it compares unequal to the current context at every seam.
+	superseded := func(current PendingOutpointAdmissionContext) PendingOutpointAdmissionContext {
+		return PendingOutpointAdmissionContext{StableTip: current.StableTip, Generation: current.Generation + 1}
+	}
+
+	t.Run("the proving read binds the entry-time context", func(t *testing.T) {
+		h := newRelayHarness(t, nil, 1_000_000)
+		expected := h.context()
+		entryTime := *expected
+		probe := newRelayAdmissionProbe(expected)
+		*expected = superseded(entryTime)
+
+		h.mp.chainState.admissionMu.RLock()
+		h.mp.bindRelayAdmissionContext(probe)
+		h.mp.chainState.admissionMu.RUnlock()
+		if !probe.contextProven || probe.observed != entryTime {
+			t.Fatalf("proven=%v observed=%+v, want the entry-time %+v proven", probe.contextProven, probe.observed, entryTime)
+		}
+	})
+
+	t.Run("the input-less seam checks the entry-time context", func(t *testing.T) {
+		h := newRelayHarness(t, nil, 1_000_000)
+		expected := h.context()
+		probe := newRelayAdmissionProbe(expected)
+		*expected = superseded(*expected)
+
+		entry := &mempoolEntry{txid: [32]byte{0xA1}, wtxid: [32]byte{0xA2}, weight: 1, size: 1}
+		h.mp.mu.Lock()
+		err := h.mp.reserveEntryInputsLocked(entry, probe)
+		h.mp.mu.Unlock()
+		if err != nil {
+			t.Fatalf("input-less seam refused the entry-time context: %v", err)
+		}
+	})
+
+	t.Run("the owner seam reserves against the entry-time context", func(t *testing.T) {
+		h := newRelayHarness(t, nil, 1_000_000)
+		expected := h.context()
+		probe := newRelayAdmissionProbe(expected)
+		*expected = superseded(*expected)
+
+		entry := &mempoolEntry{
+			txid: [32]byte{0xB1}, wtxid: [32]byte{0xB2}, weight: 1, size: 1,
+			inputs: []consensus.Outpoint{h.outpoints[0]},
+		}
+		h.mp.mu.Lock()
+		err := h.mp.reserveEntryInputsLocked(entry, probe)
+		h.mp.mu.Unlock()
+		if err != nil {
+			t.Fatalf("owner seam refused the entry-time context: %v", err)
+		}
+		if entry.token == (PendingOutpointToken{}) {
+			t.Fatal("owner seam issued no token for the entry-time context")
+		}
+	})
+
+	t.Run("the published evidence is the entry-time context", func(t *testing.T) {
+		h := newRelayHarness(t, nil, 1_000_000)
+		expected := h.context()
+		entryTime := *expected
+
+		got := h.mp.AddRemoteTxForRelay([]byte{0xFF, 0x00, 0x13, 0x37}, expected)
+		*expected = superseded(entryTime)
+
+		if got.Disposition != RelayAdmissionStableTerminalReject || !got.HasAdmissionContext {
+			t.Fatalf("disposition=%v hasContext=%v, want a STABLE_TERMINAL_REJECT carrying context (err=%v)",
+				got.Disposition, got.HasAdmissionContext, got.Err)
+		}
+		if got.AdmissionContext != entryTime {
+			t.Fatalf("published context=%+v, want the entry-time %+v", got.AdmissionContext, entryTime)
 		}
 	})
 }
@@ -986,5 +1070,441 @@ func TestAddRemoteTxForRelayNilReceiverIsUnavailable(t *testing.T) {
 	}
 	if counts := mp.AdmissionCounts(); counts != (MempoolAdmissionCounts{}) {
 		t.Fatalf("nil receiver moved counters: %+v", counts)
+	}
+}
+
+// relaySimplicityProvider publishes exactly ONE of the deployment states that
+// consensus.SimplicityActiveAtHeight collapses into its single (false, nil)
+// "inactive" answer.
+type relaySimplicityProvider struct {
+	consensus.DefaultRotationProvider
+	descriptors []consensus.SimplicityDeploymentDescriptor
+	anchor      [32]byte
+	ok          bool
+	err         error
+}
+
+func (p relaySimplicityProvider) PublishedSimplicityDeployments() ([]consensus.SimplicityDeploymentDescriptor, [32]byte, bool, error) {
+	return p.descriptors, p.anchor, p.ok, p.err
+}
+
+// knownInactiveSimplicityProvider publishes a COMPLETE anchor-verified set whose
+// only descriptor activates far above the candidate height: state known, and
+// known inactive here.
+func knownInactiveSimplicityProvider(t *testing.T) relaySimplicityProvider {
+	t.Helper()
+	descriptor := consensus.LiveSimplicityDeploymentDescriptor(devnetGenesisChainID)
+	descriptor.ActivationHeight = 1 << 40
+	set := []consensus.SimplicityDeploymentDescriptor{descriptor}
+	anchor, err := consensus.SimplicityDeploymentSetAnchor(devnetGenesisChainID, set)
+	if err != nil {
+		t.Fatalf("SimplicityDeploymentSetAnchor: %v", err)
+	}
+	return relaySimplicityProvider{descriptors: set, anchor: anchor, ok: true}
+}
+
+// simplicityPolicyCandidate defers the cheap P2PK floor precheck and reaches the
+// CORE_SIMPLICITY pre-activation policy lane, the branch under test.
+func simplicityPolicyCandidate(h *relayHarness) []byte {
+	return txWithOneInputOneOutput(h.outpoints[0].Txid, h.outpoints[0].Vout, 1,
+		consensus.COV_TYPE_CORE_SIMPLICITY, simplicityCovenantDataForNodeTest([32]byte{0x53}, nil), nil)
+}
+
+// TestRelayAdmissionDispositionSimplicityDeploymentState proves the
+// CORE_SIMPLICITY pre-activation lane publishes cache authority ONLY when no
+// deployment provider governs the verdict. With a provider present the outcome
+// depends on a published deployment set that a {StableTip, Generation}
+// admission context does not pin — a lookup failure, an ok=false "unobtainable
+// / only partially known" answer, a set failing its own anchor and a complete
+// set with no governing surface alike — so all of them are UNAVAILABLE, never
+// the stable terminal tag that would let a relay cache blacklist bytes which
+// admit as soon as that set answers differently. Every row pins the EXACT
+// public error and message — only the published classification changes.
+func TestRelayAdmissionDispositionSimplicityDeploymentState(t *testing.T) {
+	known := knownInactiveSimplicityProvider(t)
+	mismatchedAnchor := known
+	mismatchedAnchor.anchor[0] ^= 0xFF
+
+	cases := []struct {
+		name        string
+		rotation    consensus.RotationProvider
+		want        RelayAdmissionDisposition
+		wantMessage string
+	}{
+		{"provider I/O failure cannot determine the state",
+			relaySimplicityProvider{err: errors.New("deployment store offline")},
+			RelayAdmissionUnavailable, "CORE_SIMPLICITY deployment lookup failure: deployment store offline"},
+		{"ok=false publishes an unobtainable or partial set",
+			relaySimplicityProvider{ok: false},
+			RelayAdmissionUnavailable, "CORE_SIMPLICITY output pre-ACTIVE"},
+		{"a set failing its own anchor proves nothing",
+			mismatchedAnchor,
+			RelayAdmissionUnavailable, "CORE_SIMPLICITY output pre-ACTIVE"},
+		// A complete anchor-verified set is still a set the context does not pin:
+		// the same bytes admit at this exact tip and generation once the provider
+		// publishes a descriptor governing this height, and a descriptor's
+		// ActivationHeight makes the rejection flip with height regardless.
+		{"known complete set with no governing surface is still not pinned",
+			known,
+			RelayAdmissionUnavailable, "CORE_SIMPLICITY output pre-ACTIVE"},
+		// The regression guard for the legitimate case, and the default node
+		// wiring: the rotation implements no deployment surface at all, so the
+		// verdict rests on the constructor-frozen configuration.
+		{"no deployment provider configured stays terminal",
+			nil,
+			RelayAdmissionStableTerminalReject, "CORE_SIMPLICITY output pre-ACTIVE"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRelayHarness(t, &MempoolConfig{
+				MaxTransactions:                     10,
+				MaxBytes:                            1 << 20,
+				PolicyRejectSimplicityPreActivation: true,
+				RotationProvider:                    tc.rotation,
+			}, 1_000_000)
+			raw := simplicityPolicyCandidate(h)
+
+			got := h.mp.AddRemoteTxForRelay(raw, h.context())
+			if got.Disposition != tc.want {
+				t.Fatalf("disposition=%v, want %v", got.Disposition, tc.want)
+			}
+			if kind := admitKind(t, got.Err); kind != TxAdmitRejected {
+				t.Fatalf("kind=%v, want the unchanged TxAdmitRejected", kind)
+			}
+			if got.Err.Error() != tc.wantMessage {
+				t.Fatalf("message=%q, want the unchanged %q", got.Err.Error(), tc.wantMessage)
+			}
+			if wantContext := tc.want == RelayAdmissionStableTerminalReject; got.HasAdmissionContext != wantContext {
+				t.Fatalf("HasAdmissionContext=%v, want %v", got.HasAdmissionContext, wantContext)
+			}
+			if h.mp.Len() != 0 {
+				t.Fatalf("a rejected candidate became resident: len=%d", h.mp.Len())
+			}
+			// The legacy wrapper observes the byte-identical failure for the same
+			// bytes: the classification is published beside the error, not in it.
+			legacy := h.mp.AddRemoteTx(raw)
+			if legacy == nil || legacy.Error() != tc.wantMessage || admitKind(t, legacy) != TxAdmitRejected {
+				t.Fatalf("legacy AddRemoteTx err=%v, want the identical %q", legacy, tc.wantMessage)
+			}
+		})
+	}
+}
+
+// TestRelayAdmissionDispositionSimplicityPolicyFanOut covers the SECOND
+// CORE_SIMPLICITY site — the applyPolicyAgainstState fan-out reached from
+// mempool_precheck.go — whose plain error is re-wrapped at the seam. The
+// precheck lane returns first for every production candidate, so this site is
+// unreachable end-to-end today and is driven directly; it must still separate
+// the provider-present outcomes from the no-provider one, because the seam
+// consuming it tags the whole fan-out.
+func TestRelayAdmissionDispositionSimplicityPolicyFanOut(t *testing.T) {
+	h := newRelayHarness(t, &MempoolConfig{MaxTransactions: 10, MaxBytes: 1 << 20}, 1_000_000)
+	checked := &consensus.CheckedTransaction{Tx: mustParseTx(t, simplicityPolicyCandidate(h))}
+
+	for _, tc := range []struct {
+		name        string
+		rotation    consensus.RotationProvider
+		want        RelayAdmissionDisposition
+		wantMessage string
+	}{
+		{"provider I/O failure", relaySimplicityProvider{err: errors.New("offline")},
+			RelayAdmissionUnavailable, "CORE_SIMPLICITY deployment lookup failure: offline"},
+		{"unknown deployment state", relaySimplicityProvider{ok: false},
+			RelayAdmissionUnavailable, "CORE_SIMPLICITY output pre-ACTIVE"},
+		{"no deployment provider configured", nil,
+			RelayAdmissionStableTerminalReject, "CORE_SIMPLICITY output pre-ACTIVE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := applyPolicyAgainstStateSimplicity(checked, nil, devnetGenesisChainID, 1, MempoolConfig{
+				PolicyRejectSimplicityPreActivation: true,
+				RotationProvider:                    tc.rotation,
+			})
+			if err == nil || err.Error() != tc.wantMessage {
+				t.Fatalf("err=%v, want the unchanged %q", err, tc.wantMessage)
+			}
+			if got := relayDispositionForPolicyError(err); got != tc.want {
+				t.Fatalf("disposition=%v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// The same carve-out the precheck call site applies: the well-formedness
+	// tuple (reject == false) reads no deployment set, so it must arrive
+	// UNWRAPPED — terminal — even with a provider governing the lane.
+	malformed := &consensus.CheckedTransaction{Tx: mustParseTx(t, simplicityMalformedSiblingCandidate(t, h))}
+	for _, rotation := range []consensus.RotationProvider{nil, knownInactiveSimplicityProvider(t), relaySimplicityProvider{ok: false}} {
+		err := applyPolicyAgainstStateSimplicity(malformed, nil, devnetGenesisChainID, 1, MempoolConfig{
+			PolicyRejectSimplicityPreActivation: true,
+			RotationProvider:                    rotation,
+		})
+		wantMessage := "TX_ERR_COVENANT_TYPE_INVALID: invalid CORE_P2PK covenant_data length"
+		if err == nil || err.Error() != wantMessage {
+			t.Fatalf("rotation=%T err=%v, want the unchanged %q", rotation, err, wantMessage)
+		}
+		if got := relayDispositionForPolicyError(err); got != RelayAdmissionStableTerminalReject {
+			t.Fatalf("rotation=%T disposition=%v, want STABLE_TERMINAL_REJECT for the well-formedness verdict", rotation, got)
+		}
+	}
+
+	// Every other static-policy term is a decision over pinned inputs.
+	if got := relayDispositionForPolicyError(errors.New("non-coinbase CORE_ANCHOR output")); got != RelayAdmissionStableTerminalReject {
+		t.Fatalf("disposition=%v, want STABLE_TERMINAL_REJECT for a pinned-input term", got)
+	}
+}
+
+// TestRelayAdmissionDispositionCoreExtNodeRuntimeReject covers the
+// mempool_precheck.go exit where rejectUnsupportedCoreExtNodeRuntime selects
+// RelayAdmissionStableTerminalReject for a CORE_EXT (covenant_type 0x0102)
+// candidate. CORE_EXT is a RETIRED, permanently consensus-rejected surface —
+// this proves it stays rejected through the live relay entry point, reusing
+// the same generic single-output fixture builder simplicityPolicyCandidate
+// above reuses, parameterized with COV_TYPE_CORE_EXT instead of
+// COV_TYPE_CORE_SIMPLICITY.
+func TestRelayAdmissionDispositionCoreExtNodeRuntimeReject(t *testing.T) {
+	h := newRelayHarness(t, nil, 1_000_000)
+	raw := txWithOneInputOneOutput(h.outpoints[0].Txid, h.outpoints[0].Vout, 1,
+		consensus.COV_TYPE_CORE_EXT, nil, nil)
+
+	got := h.mp.AddRemoteTxForRelay(raw, h.context())
+	if got.Disposition != RelayAdmissionStableTerminalReject {
+		t.Fatalf("disposition=%v, want STABLE_TERMINAL_REJECT (err=%v)", got.Disposition, got.Err)
+	}
+	wantMessage := "CORE_EXT output unsupported by Go node runtime"
+	if got.Err == nil || got.Err.Error() != wantMessage {
+		t.Fatalf("err=%v, want the unchanged %q", got.Err, wantMessage)
+	}
+	if kind := admitKind(t, got.Err); kind != TxAdmitRejected {
+		t.Fatalf("TxAdmitErrorKind=%q, want %q", kind, TxAdmitRejected)
+	}
+	if !got.HasAdmissionContext {
+		t.Fatal("a proven stable terminal rejection must publish its exact context")
+	}
+	if h.mp.Len() != 0 {
+		t.Fatalf("a CORE_EXT candidate became resident: len=%d", h.mp.Len())
+	}
+	// The legacy wrapper observes the byte-identical rejection for the same bytes.
+	legacy := h.mp.AddRemoteTx(raw)
+	if legacy == nil || legacy.Error() != wantMessage || admitKind(t, legacy) != TxAdmitRejected {
+		t.Fatalf("legacy AddRemoteTx err=%v, want the identical %q", legacy, wantMessage)
+	}
+}
+
+// simplicityMalformedSiblingCandidate is a CORE_SIMPLICITY output alongside a
+// malformed CORE_P2PK sibling: it reaches the ValidateTxCovenantsGenesis error
+// branch inside rejectCoreSimplicityPreActivation, whose (false, "", err) tuple
+// is the well-formedness half of the lane.
+func simplicityMalformedSiblingCandidate(t *testing.T, h *relayHarness) []byte {
+	t.Helper()
+	return mustMarshalTxForNodeTest(t, &consensus.Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []consensus.TxInput{{PrevTxid: h.outpoints[0].Txid, PrevVout: h.outpoints[0].Vout}},
+		Outputs: []consensus.TxOutput{
+			{Value: 1, CovenantType: consensus.COV_TYPE_CORE_SIMPLICITY, CovenantData: simplicityCovenantDataForNodeTest([32]byte{0x59}, nil)},
+			{Value: 1, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: nil},
+		},
+	})
+}
+
+// TestRelayAdmissionDispositionSimplicityGenesisWellFormednessReject covers
+// the ValidateTxCovenantsGenesis error branch inside
+// rejectCoreSimplicityPreActivation — a malformed non-Simplicity
+// output alongside a CORE_SIMPLICITY output, the same shape
+// TestMempoolPolicyDoesNotMaskMalformedNonSimplicityOutput (mempool_test.go)
+// pins the message for without asserting a disposition. That test is not
+// itself a relay-path test and mempool_test.go is outside this issue's
+// allowed surface, so the disposition is proven here instead, driving the
+// identical branch through the live relay entry point.
+//
+// The rows prove the CARVE-OUT on ONE candidate shape: the well-formedness
+// verdict is evaluated against a rotation shim that forces Simplicity active, so
+// it reads no deployment set and stays STABLE_TERMINAL_REJECT with published
+// cache authority whether or not a provider is configured. Only the sibling
+// exit of the same helper — the deployment lookup, which returns
+// (true, reason, err) — depends on the provider and is UNAVAILABLE with no cache
+// authority.
+func TestRelayAdmissionDispositionSimplicityGenesisWellFormednessReject(t *testing.T) {
+	const wellFormedness = "TX_ERR_COVENANT_TYPE_INVALID: invalid CORE_P2PK covenant_data length"
+
+	for _, tc := range []struct {
+		name        string
+		rotation    consensus.RotationProvider
+		want        RelayAdmissionDisposition
+		wantMessage string
+	}{
+		{"no deployment provider configured", nil,
+			RelayAdmissionStableTerminalReject, wellFormedness},
+		// The regression this carve-out exists for: a provider present must not
+		// turn a verdict that never consulted its set into a retryable one.
+		{"complete inactive set present stays terminal", knownInactiveSimplicityProvider(t),
+			RelayAdmissionStableTerminalReject, wellFormedness},
+		{"unobtainable set present stays terminal", relaySimplicityProvider{ok: false},
+			RelayAdmissionStableTerminalReject, wellFormedness},
+		// The sibling exit on the SAME bytes: the lookup fails before the
+		// well-formedness check runs, and that verdict does depend on the provider.
+		{"lookup failure stays unavailable", relaySimplicityProvider{err: errors.New("deployment store offline")},
+			RelayAdmissionUnavailable, "CORE_SIMPLICITY deployment lookup failure: deployment store offline"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRelayHarness(t, &MempoolConfig{
+				PolicyRejectSimplicityPreActivation: true,
+				RotationProvider:                    tc.rotation,
+			}, 100)
+			raw := simplicityMalformedSiblingCandidate(t, h)
+
+			got := h.mp.AddRemoteTxForRelay(raw, h.context())
+			if got.Disposition != tc.want {
+				t.Fatalf("disposition=%v, want %v (err=%v)", got.Disposition, tc.want, got.Err)
+			}
+			if got.Err == nil || got.Err.Error() != tc.wantMessage {
+				t.Fatalf("err=%v, want the unchanged %q", got.Err, tc.wantMessage)
+			}
+			if kind := admitKind(t, got.Err); kind != TxAdmitRejected {
+				t.Fatalf("TxAdmitErrorKind=%q, want %q", kind, TxAdmitRejected)
+			}
+			if wantContext := tc.want == RelayAdmissionStableTerminalReject; got.HasAdmissionContext != wantContext {
+				t.Fatalf("HasAdmissionContext=%v, want %v", got.HasAdmissionContext, wantContext)
+			}
+			if h.mp.Len() != 0 {
+				t.Fatalf("a rejected candidate became resident: len=%d", h.mp.Len())
+			}
+			// The legacy wrapper observes the byte-identical rejection for the same bytes.
+			legacy := h.mp.AddRemoteTx(raw)
+			if legacy == nil || legacy.Error() != tc.wantMessage || admitKind(t, legacy) != TxAdmitRejected {
+				t.Fatalf("legacy AddRemoteTx err=%v, want the identical %q", legacy, tc.wantMessage)
+			}
+		})
+	}
+}
+
+// cleanupRejectionMempool is a bare mempool whose admission-sequence space is
+// exhausted, so a candidate that clears the owner seam is rejected by the LATER
+// admission-sequence check — the exact branch whose post-decision cleanup
+// releases the candidate reservation.
+func cleanupRejectionMempool() *Mempool {
+	return &Mempool{maxTxs: 10, maxBytes: 100, lastAdmissionSeq: ^uint64(0)}
+}
+
+// drivePostDecisionCleanup runs the ONE live locked admission implementation
+// with a relay probe and returns the published result.
+func drivePostDecisionCleanup(t *testing.T, mp *Mempool, entry *mempoolEntry) RelayAdmissionResult {
+	t.Helper()
+	probe := &relayAdmissionProbe{}
+	mp.mu.Lock()
+	err := mp.addEntryLockedProbed(entry, 0, probe)
+	mp.mu.Unlock()
+	return probe.result(err)
+}
+
+// corruptedClaimToken reserves a REAL claim on mp's owner and then deletes the
+// by-outpoint row that claim installed, so the owner's own index disagrees with
+// the token. That is exactly the accounting corruption Release detects and
+// reports as an internal fault.
+//
+// The corruption is installed before the drive because the live path leaves no
+// seam between Reserve and the later check: Reserve installs a self-consistent
+// claim and nothing between it and the rejection touches the owner.
+func corruptedClaimToken(t *testing.T, mp *Mempool, op consensus.Outpoint) PendingOutpointToken {
+	t.Helper()
+	mp.mu.Lock()
+	owner := mp.pendingOutpointOwnerLocked()
+	mp.mu.Unlock()
+	token := mustReserve(t, owner, [32]byte{0x3f}, op)
+	owner.mu.Lock()
+	delete(owner.byOutpoint, op)
+	owner.mu.Unlock()
+	return token
+}
+
+// assertSameAdmissionError proves the public compatibility channel is untouched:
+// same concrete type, same TxAdmitErrorKind, same message bytes.
+func assertSameAdmissionError(t *testing.T, got, want error) {
+	t.Helper()
+	if reflect.TypeOf(got) != reflect.TypeOf(want) {
+		t.Fatalf("error type %T, want the identical %T", got, want)
+	}
+	if gotKind, wantKind := admitKind(t, got), admitKind(t, want); gotKind != wantKind {
+		t.Fatalf("TxAdmitErrorKind=%q, want the identical %q", gotKind, wantKind)
+	}
+	if got.Error() != want.Error() {
+		t.Fatalf("message=%q, want the byte-identical %q", got.Error(), want.Error())
+	}
+}
+
+// admissionCounters is every counter and accounting total this surface can move.
+func admissionCounters(mp *Mempool) [7]uint64 {
+	return [7]uint64{
+		mp.admitAccepted.Load(),
+		mp.admitConflict.Load(),
+		mp.admitRejected.Load(),
+		mp.admitUnavailable.Load(),
+		mp.evictedResidentTotal.Load(),
+		uint64(len(mp.txs)),
+		uint64(mp.usedBytes),
+	}
+}
+
+// TestRelayAdmissionDispositionCleanupFailureOutranksTheBranch pins the
+// fail-closed override: a REQUIRED post-decision cleanup that reports owner
+// accounting corruption publishes INTERNAL even though the deciding branch
+// already tagged the error ADMISSION_SEQUENCE and selectRelayDisposition is
+// first-selection-wins.
+//
+// The control row proves the override cannot swallow an ordinary rejection: an
+// identical rejection whose cleanup succeeds still publishes the branch's own
+// disposition, and both rows return the byte-identical public error.
+func TestRelayAdmissionDispositionCleanupFailureOutranksTheBranch(t *testing.T) {
+	const wantMsg = "mempool admission sequence exhausted"
+
+	// Row 1 — ordinary cleanup: the live conflict slot issues the candidate's
+	// own reservation and the post-decision release succeeds.
+	ordinaryMp := cleanupRejectionMempool()
+	ordinaryEntry := &mempoolEntry{
+		txid: [32]byte{0x2c}, wtxid: [32]byte{0x2d},
+		inputs: []consensus.Outpoint{testOutpoint(11)},
+		fee:    consensus.Uint128FromU64(1), weight: 1, size: 1,
+	}
+	ordinary := drivePostDecisionCleanup(t, ordinaryMp, ordinaryEntry)
+	if ordinary.Disposition != RelayAdmissionAdmissionSequence {
+		t.Fatalf("ordinary disposition=%v, want ADMISSION_SEQUENCE (err=%v)", ordinary.Disposition, ordinary.Err)
+	}
+	assertCandidateExactlyReleased(t, ordinaryMp, ordinaryEntry, ordinary.Err, TxAdmitUnavailable, wantMsg)
+
+	// Row 2 — the same rejection, but the cleanup release hits a claim whose
+	// by-outpoint row disagrees with the token.
+	corruptMp := cleanupRejectionMempool()
+	op := testOutpoint(12)
+	token := corruptedClaimToken(t, corruptMp, op)
+	corruptEntry := &mempoolEntry{
+		txid: [32]byte{0x3c}, wtxid: [32]byte{0x3d}, token: token,
+		fee: consensus.Uint128FromU64(1), weight: 1, size: 1,
+	}
+	corrupted := drivePostDecisionCleanup(t, corruptMp, corruptEntry)
+
+	if corrupted.Disposition != RelayAdmissionInternal {
+		t.Fatalf("corrupted disposition=%v, want INTERNAL (err=%v)", corrupted.Disposition, corrupted.Err)
+	}
+	if corrupted.HasAdmissionContext {
+		t.Fatal("an internal cleanup failure must publish no cache-authorizing context")
+	}
+	// The public compatibility channel is byte-identical to the same rejection
+	// whose cleanup succeeded.
+	assertSameAdmissionError(t, corrupted.Err, ordinary.Err)
+	if got := admissionCounters(corruptMp); got != admissionCounters(ordinaryMp) {
+		t.Fatalf("counters=%v, want the ordinary row's %v", got, admissionCounters(ordinaryMp))
+	}
+	if corruptEntry.token != (PendingOutpointToken{}) {
+		t.Fatalf("rejected candidate token=%+v, want the zero token", corruptEntry.token)
+	}
+	// The release really failed: the corrupted claim is still live and the owner
+	// still reports the exact index-mismatch fault the cleanup step hit.
+	releaseErr := corruptMp.pendingOutpoints.Release(token)
+	if testOwnerKind(t, releaseErr) != PendingOutpointInternal {
+		t.Fatalf("Release after cleanup: %v, want an internal owner fault", releaseErr)
+	}
+	wantRelease := fmt.Sprintf("pending-outpoint index mismatch for txid=%x vout=%d", op.Txid, op.Vout)
+	if releaseErr.Error() != wantRelease {
+		t.Fatalf("Release error=%q, want %q", releaseErr.Error(), wantRelease)
 	}
 }

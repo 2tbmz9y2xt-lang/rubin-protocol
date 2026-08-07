@@ -432,9 +432,12 @@ func TestCanonicalMempoolTxPoolRelayAdmissionIdentityMismatchIsInternal(t *testi
 		t.Fatalf("NewMempool: %v", err)
 	}
 	raw := distinctTxBytes(t, 11)
-	canonical, err := canonicalTxID(raw)
-	if err != nil {
-		t.Fatalf("canonicalTxID: %v", err)
+	canonical, canonicalWTxID, ok := canonicalRelayIdentity(raw)
+	if !ok {
+		t.Fatal("canonicalRelayIdentity: the fixture must parse canonically")
+	}
+	if canonicalWTxID == ([32]byte{}) {
+		t.Fatal("the fixture's wtxid must be non-zero for this row to be meaningful")
 	}
 	var announced [32]byte
 	announced[0] = ^canonical[0]
@@ -445,6 +448,12 @@ func TestCanonicalMempoolTxPoolRelayAdmissionIdentityMismatchIsInternal(t *testi
 	}
 	if got.TxID != canonical {
 		t.Fatalf("TxID=%x, want the canonical %x", got.TxID, canonical)
+	}
+	// The branch is entered only because the bytes parsed canonically, so the
+	// published identity must be WHOLE: a zero wtxid here would contradict the
+	// RelayAdmissionResult contract that zero means "never parsed canonically".
+	if got.WTxID != canonicalWTxID {
+		t.Fatalf("WTxID=%x, want the parsed %x", got.WTxID, canonicalWTxID)
 	}
 	var admitErr *node.TxAdmitError
 	if !errors.As(got.Err, &admitErr) {

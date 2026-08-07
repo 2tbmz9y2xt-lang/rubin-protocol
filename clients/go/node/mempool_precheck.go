@@ -100,12 +100,30 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 		return nil, nil, selectRelayDisposition(txAdmitRejected(reason), RelayAdmissionStableTerminalReject)
 	}
 	if policy.PolicyRejectSimplicityPreActivation {
+		// This lane has TWO error exits and they are discriminated by the SHAPE of
+		// the tuple the helper already returns, never by its message text.
+		//
+		// reject == true (with or without err) is the deployment-set-dependent
+		// half: the lookup failure and the pre-ACTIVE verdict alike are decided
+		// from what a provider published, and a {StableTip, Generation} context
+		// does not pin that set — so with a provider present they are UNAVAILABLE,
+		// never cache-authorizing, and with no provider they rest on the
+		// constructor-frozen configuration and stay stable terminal.
+		//
+		// reject == false with a non-nil err is the covenant well-formedness
+		// rejection, evaluated against a rotation shim that forces Simplicity
+		// active: it consults no deployment set at all, only the candidate, the
+		// chain id, the pinned height and the frozen live artifact hashes. Its
+		// context is complete, so it stays stable terminal even with a provider
+		// configured.
+		//
+		// The returned error, its message and its kind are unchanged in every case.
 		reject, reason, err := rejectCoreSimplicityPreActivation(parsedTx, policyUtxos, m.chainID, nextHeight, policy.RotationProvider)
 		if err != nil {
-			return nil, nil, selectRelayDisposition(txAdmitRejected(err.Error()), RelayAdmissionStableTerminalReject)
+			return nil, nil, selectRelayDisposition(txAdmitRejected(err.Error()), relayDispositionForSimplicityPreActivationOutcome(reject, policy.RotationProvider))
 		}
 		if reject {
-			return nil, nil, selectRelayDisposition(txAdmitRejected(reason), RelayAdmissionStableTerminalReject)
+			return nil, nil, selectRelayDisposition(txAdmitRejected(reason), relayDispositionForSimplicityPreActivationOutcome(true, policy.RotationProvider))
 		}
 	}
 	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndValidationContext(
@@ -133,8 +151,10 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	if err := m.applyPolicyAgainstState(checked, nextHeight, policyUtxos, policy); err != nil {
 		// Constructor-frozen, context-bound static policy: anchor outputs, the
 		// DA fee/budget terms, the retired CORE_EXT surface, and Simplicity
-		// pre-activation.
-		return nil, nil, selectRelayDisposition(txAdmitRejected(err.Error()), RelayAdmissionStableTerminalReject)
+		// pre-activation. The one state-availability outcome this fan-out can
+		// produce — an undetermined CORE_SIMPLICITY deployment state — is typed,
+		// and is UNAVAILABLE rather than stable terminal.
+		return nil, nil, selectRelayDisposition(txAdmitRejected(err.Error()), relayDispositionForPolicyError(err))
 	}
 	inputs := extractTxInputs(checked)
 	return checked, inputs, nil

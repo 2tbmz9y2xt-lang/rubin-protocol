@@ -10,7 +10,9 @@ import (
 // admission outcome, published for relay-side download and representation
 // state. The enum is exactly the eleven values below, and every production exit
 // of Mempool.AddRemoteTxForRelay selects one of them AT the branch that decided
-// the outcome, before any compatibility mapping onto TxAdmitErrorKind.
+// the outcome, before any compatibility mapping onto TxAdmitErrorKind — except
+// for the fail-closed RelayAdmissionInternal override a failed REQUIRED
+// post-decision cleanup applies over that selection (see RelayAdmissionInternal).
 //
 // A consumer MUST NOT infer a disposition from TxAdmitError.Kind, from Error(),
 // from message text, from the HTTP status mapping, or from a fallback default:
@@ -30,6 +32,15 @@ const (
 	// consensus, or constructor-frozen context-bound static-policy rejection.
 	// It is the ONLY disposition that may carry cache-authorizing context
 	// evidence, and only when that exact context was proven for this call.
+	//
+	// A policy lane OUTCOME whose verdict depends on state the published context
+	// does NOT pin is therefore not one of these, however static its
+	// configuration looks: a CORE_SIMPLICITY pre-activation outcome decided from
+	// a deployment provider reads a published deployment set that a
+	// {StableTip, Generation} context does not bind, so it is UNAVAILABLE. The
+	// classification is per outcome, not per lane — the same lane's
+	// well-formedness rejection reads no deployment set and stays here
+	// (see relayDispositionForSimplicityPreActivationOutcome).
 	RelayAdmissionStableTerminalReject
 	// RelayAdmissionDuplicate means a resident txid or wtxid duplicate.
 	RelayAdmissionDuplicate
@@ -45,8 +56,7 @@ const (
 	RelayAdmissionRollingFloor
 	// RelayAdmissionCapacity is the retryable capacity outcome.
 	RelayAdmissionCapacity
-	// RelayAdmissionAdmissionSequence is the retryable admission-sequence
-	// outcome.
+	// RelayAdmissionAdmissionSequence is the admission-sequence outcome.
 	RelayAdmissionAdmissionSequence
 	// RelayAdmissionUnavailable covers an absent chain, owner or admission
 	// context, an active canonical transition, a stale expected context, and
@@ -55,6 +65,14 @@ const (
 	// RelayAdmissionInternal covers an impossible invariant, a retained
 	// identity mismatch, accounting corruption, and an adapter contract
 	// violation.
+	//
+	// It is also the ONE disposition a branch does not have to select: a
+	// REQUIRED post-decision cleanup step that reports a fault — pending-outpoint
+	// owner accounting corruption, a claim inconsistency — publishes INTERNAL and
+	// OUTRANKS the disposition the deciding branch already selected, because that
+	// branch's verdict is no longer the whole truth about the call. The public
+	// error still reports the branch's outcome unchanged, so a consumer that
+	// wants the corruption signal MUST read the disposition.
 	RelayAdmissionInternal
 	// RelayAdmissionCancelled is a closed enum value ONLY. This surface
 	// implements no cancellation framework and no production branch selects it.
@@ -99,6 +117,12 @@ func (d RelayAdmissionDisposition) String() string {
 // context this call validated against. Nothing else authorizes a relay
 // representation cache.
 //
+// Disposition is the deciding branch's own selection, EXCEPT when a REQUIRED
+// post-decision cleanup step reported a fault: that publishes
+// RelayAdmissionInternal and outranks the branch's selection, while Err keeps
+// reporting the branch's outcome byte-identically. Disposition is therefore the
+// only field that can report an accounting corruption the cleanup layer found.
+//
 // Err is the unchanged public admission error the equivalent AddRemoteTx call
 // returns: same type, same TxAdmitErrorKind, same message. It is nil exactly on
 // the success exit, whose disposition is RelayAdmissionRetained — or, if the
@@ -123,10 +147,17 @@ type RelayAdmissionResult struct {
 // expected is the caller's own observed pending-outpoint admission context. A
 // nil expected context admits exactly as AddRemoteTx does, never sets
 // HasAdmissionContext, and never authorizes caching. A NON-nil expected context
-// is validated at the existing owner seam (PendingOutpointOwner.Reserve), after
-// the baseline parse, consensus, policy, cheap-floor and duplicate precedence: a
-// stale, superseded or mismatched context is UNAVAILABLE there, before the
-// owner scans for a conflict and before it consumes a sequence.
+// is COPIED BY VALUE at this boundary and never dereferenced again: this call
+// compares against, and publishes evidence for, the snapshot taken here, so a
+// caller that mutates the pointee afterwards — from this goroutine or any
+// other — can change neither this call's admission behavior nor its published
+// evidence. The pointer is a presence flag only; the memory stays the caller's.
+//
+// The snapshot is validated at the existing owner seam
+// (PendingOutpointOwner.Reserve), after the baseline parse, consensus, policy,
+// cheap-floor and duplicate precedence: a stale, superseded or mismatched
+// context is UNAVAILABLE there, before the owner scans for a conflict and
+// before it consumes a sequence.
 //
 // It classifies without mutating: every classification input is either the
 // producing branch's own decision or a pure read. Public errors, messages,
@@ -136,9 +167,23 @@ type RelayAdmissionResult struct {
 // RelayAdmissionUnavailable carrying the legacy "nil mempool" TxAdmitUnavailable
 // error, publishes no identity and no context, and moves no counter.
 func (m *Mempool) AddRemoteTxForRelay(txBytes []byte, expected *PendingOutpointAdmissionContext) RelayAdmissionResult {
-	probe := &relayAdmissionProbe{expected: expected}
+	probe := newRelayAdmissionProbe(expected)
 	err := m.addTxWithSource(txBytes, mempoolTxSourceRemote, probe)
 	return probe.result(err)
+}
+
+// newRelayAdmissionProbe is the ONLY constructor of a probe carrying an expected
+// context. It copies the caller-owned context by value, so the pointer never
+// escapes this function and no later read of the probe can observe a mutation
+// the caller made after entry. A nil expected context leaves hasExpected false,
+// which is the legacy binding every seam already keys off.
+func newRelayAdmissionProbe(expected *PendingOutpointAdmissionContext) *relayAdmissionProbe {
+	probe := &relayAdmissionProbe{}
+	if expected != nil {
+		probe.expected = *expected
+		probe.hasExpected = true
+	}
+	return probe
 }
 
 // relayAdmissionProbe is the per-call producer sink for the relay evidence a
@@ -153,14 +198,47 @@ func (m *Mempool) AddRemoteTxForRelay(txBytes []byte, expected *PendingOutpointA
 // selected at its originating branch and carried by the admission error itself
 // (selectRelayDisposition), so no helper signature, error, message, counter or
 // ordering had to change to make a branch classifiable.
+//
+// internalFailure is the ONE exception, and it is not a branch selection: a
+// REQUIRED post-decision cleanup step ran AFTER its branch already tagged the
+// error, so first-selection-wins leaves the cleanup layer no way to reclassify.
+// It records the fault here instead and result() applies it as a fail-closed
+// override.
+//
+// expected is a VALUE snapshot taken once by newRelayAdmissionProbe, never a
+// caller-owned pointer: every seam below reads memory this call owns, so the
+// context proven, compared and published stays the one supplied at entry.
+// hasExpected — not a sentinel value — distinguishes "no expected context"
+// from a legitimately zero one.
 type relayAdmissionProbe struct {
-	expected      *PendingOutpointAdmissionContext
+	expected      PendingOutpointAdmissionContext
+	hasExpected   bool
 	observed      PendingOutpointAdmissionContext
 	contextProven bool
 	// success is the disposition of the nil-error exit only.
 	success RelayAdmissionDisposition
 	txid    [32]byte
 	wtxid   [32]byte
+	// internalFailure records that a REQUIRED post-decision cleanup step
+	// reported a fault. It is never a branch selection; result() turns it into
+	// the fail-closed INTERNAL override.
+	internalFailure bool
+}
+
+// noteCleanupFailure records a REQUIRED post-decision cleanup fault — an owner
+// accounting inconsistency, a claim inconsistency, or an impossible invariant
+// that only the cleanup step can observe. err is the cleanup step's own result:
+// a nil err records nothing, so the ordinary successful-cleanup path is
+// untouched and keeps the disposition its branch selected.
+//
+// It changes no error, message, kind, counter, ordering or mutation: the caller
+// still returns its unchanged admission cause. A nil probe is the legacy
+// AddTx / AddRemoteTx / AddReorgTx path and this is a no-op there.
+func (p *relayAdmissionProbe) noteCleanupFailure(err error) {
+	if p == nil || err == nil {
+		return
+	}
+	p.internalFailure = true
 }
 
 // noteIdentity records the identity the producer parsed from the candidate
@@ -190,7 +268,7 @@ func (p *relayAdmissionProbe) noteIdentity(txid, wtxid [32]byte) {
 // It is a no-op for the legacy path (nil probe) and for a nil expected context,
 // so an input-less candidate keeps its exact baseline behavior there.
 func (p *relayAdmissionProbe) checkExpectedContext(owner *PendingOutpointOwner, tip PendingOutpointTip) error {
-	if p == nil || p.expected == nil {
+	if p == nil || !p.hasExpected {
 		return nil
 	}
 	observed, ok := owner.AdmissionContext()
@@ -200,7 +278,7 @@ func (p *relayAdmissionProbe) checkExpectedContext(owner *PendingOutpointOwner, 
 	if observed.StableTip != tip {
 		return selectRelayDisposition(txAdmitUnavailable("pending-outpoint owner tip does not match the guarded chainstate tip"), RelayAdmissionUnavailable)
 	}
-	if observed != *p.expected {
+	if observed != p.expected {
 		return selectRelayDisposition(txAdmitUnavailable("pending-outpoint expected admission context mismatch"), RelayAdmissionUnavailable)
 	}
 	return nil
@@ -208,6 +286,12 @@ func (p *relayAdmissionProbe) checkExpectedContext(owner *PendingOutpointOwner, 
 
 // result assembles the immutable published result from the producer's own
 // selections. It reads no error message and no error kind.
+//
+// A recorded REQUIRED-cleanup fault OUTRANKS the branch-selected disposition:
+// the branch decided the outcome before the cleanup ran, and first-selection-wins
+// keeps it from reclassifying, so the override lives here. It publishes INTERNAL
+// and, since INTERNAL is not a stable terminal rejection, no cache-authorizing
+// context.
 func (p *relayAdmissionProbe) result(err error) RelayAdmissionResult {
 	if p == nil {
 		// The legacy path allocates no probe. It publishes no identity and no
@@ -224,6 +308,11 @@ func (p *relayAdmissionProbe) result(err error) RelayAdmissionResult {
 	default:
 		// Unreachable: the success exit always selects. Fail closed rather than
 		// publish an unselected value as a classification.
+		out.Disposition = RelayAdmissionInternal
+	}
+	if p.internalFailure {
+		// Fail-closed override, applied AFTER the selection it outranks: the
+		// branch's verdict is no longer the whole truth about this call.
 		out.Disposition = RelayAdmissionInternal
 	}
 	// Only an explicit stable terminal rejection carries cache-authorizing
@@ -251,14 +340,14 @@ func (p *relayAdmissionProbe) result(err error) RelayAdmissionResult {
 // therefore the exact one every later decision of this call runs against,
 // including the decisions that return before the owner seam.
 func (m *Mempool) bindRelayAdmissionContext(probe *relayAdmissionProbe) {
-	if probe == nil || probe.expected == nil {
+	if probe == nil || !probe.hasExpected {
 		return
 	}
 	m.mu.RLock()
 	owner := m.pendingOutpoints
 	m.mu.RUnlock()
 	observed, ok := owner.AdmissionContext()
-	if !ok || observed.StableTip != pendingOutpointTipOf(m.chainState) || observed != *probe.expected {
+	if !ok || observed.StableTip != pendingOutpointTipOf(m.chainState) || observed != probe.expected {
 		return
 	}
 	probe.observed = observed
@@ -328,6 +417,81 @@ func relayDispositionForOwnerError(err error) RelayAdmissionDisposition {
 	default:
 		return RelayAdmissionInternal
 	}
+}
+
+// relayDispositionForSimplicityPreActivation selects the CORE_SIMPLICITY
+// pre-activation disposition from the ONE thing that decides whether the
+// published admission context is complete for this lane: whether a deployment
+// provider governs the verdict at all.
+//
+// With a provider present EVERY outcome — the lookup failure, an unobtainable
+// or only partially known set, and an inactive one alike — is UNAVAILABLE and
+// never cache-authorizing. consensus.SimplicityActiveAtHeight reads the
+// provider by documented pure I/O, and consensus.SimplicityDeploymentSetAnchor
+// binds that set to (chain_id, descriptors) and to no block or tip, while a
+// PendingOutpointAdmissionContext pins only {StableTip, Generation}. The set can
+// therefore differ at the same tip and generation, so the context is not
+// complete with respect to this decision. A descriptor's ActivationHeight makes
+// a pre-ACTIVE rejection flip to valid by advancing height anyway — the same
+// property for which TX_ERR_TIMELOCK_NOT_MET and TX_ERR_COINBASE_IMMATURE are
+// classified retryable rather than stable terminal.
+//
+// With no provider the rotation implements no deployment surface: the lane does
+// no I/O and reads no descriptor set, so the verdict rests entirely on the
+// constructor-frozen configuration the context does pin, and stays stable
+// terminal. That is the default node wiring, which publishes no provider.
+func relayDispositionForSimplicityPreActivation(rotation consensus.RotationProvider) RelayAdmissionDisposition {
+	if _, ok := rotation.(consensus.SimplicityDeploymentProvider); ok {
+		return RelayAdmissionUnavailable
+	}
+	return RelayAdmissionStableTerminalReject
+}
+
+// relayDispositionForSimplicityPreActivationOutcome narrows the lane-wide rule
+// above to the ONE outcome that actually consulted the deployment set, using the
+// (reject, err) tuple rejectCoreSimplicityPreActivation already returns as the
+// discriminator — never its message text, and never a second probe of the
+// provider.
+//
+// reject == true is the deployment-set-dependent half of the lane, and it is
+// exactly the half the provider governs: the lookup failure returns
+// (true, reason, err) and the pre-ACTIVE verdict returns (true, reason, nil).
+// Both are decided from what the provider published — or, with no provider,
+// from the constructor-frozen configuration — so they take the lane-wide rule.
+//
+// reject == false with a non-nil err is the covenant well-formedness rejection
+// consensus.ValidateTxCovenantsGenesis returned against a rotation shim that
+// FORCES Simplicity active. That verdict never reads the provider's set: it is a
+// function of the candidate bytes, the chain id, the pinned next-block height
+// and the frozen live artifact hashes — every one of which the published
+// {StableTip, Generation} context does pin or the candidate itself carries. It
+// is therefore context-complete and stays stable terminal whether or not a
+// provider is configured, so the same malformed bytes are cacheable exactly as
+// they are on the default no-provider wiring.
+//
+// The remaining tuple, (false, "", nil), is the accept exit and reaches no
+// caller of this function.
+func relayDispositionForSimplicityPreActivationOutcome(reject bool, rotation consensus.RotationProvider) RelayAdmissionDisposition {
+	if !reject {
+		return RelayAdmissionStableTerminalReject
+	}
+	return relayDispositionForSimplicityPreActivation(rotation)
+}
+
+// relayDispositionForPolicyError classifies the static-policy fan-out
+// (applyPolicyAgainstState). Every term it applies is a constructor-frozen
+// decision over pinned inputs — anchor outputs, the DA fee/budget terms, the
+// retired CORE_EXT surface — EXCEPT the CORE_SIMPLICITY pre-activation lane,
+// whose provider-DECIDED outcomes arrive as a typed wrapper because the
+// published context does not pin the deployment set they depend on. That lane's
+// well-formedness rejection depends on no such set and arrives unwrapped, so it
+// classifies here with the pinned-input terms. It reads a type, never a message.
+func relayDispositionForPolicyError(err error) RelayAdmissionDisposition {
+	var retryable *simplicityPreActivationRetryableError
+	if errors.As(err, &retryable) {
+		return RelayAdmissionUnavailable
+	}
+	return RelayAdmissionStableTerminalReject
 }
 
 // relayDispositionForInputError separates the RETRYABLE input-dependency class

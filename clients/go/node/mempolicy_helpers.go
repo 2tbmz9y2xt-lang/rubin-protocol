@@ -128,14 +128,40 @@ func applyPolicyAgainstStateCoreExtUnsupported(checked *consensus.CheckedTransac
 	return nil
 }
 
+// simplicityPreActivationRetryableError marks a CORE_SIMPLICITY pre-activation
+// policy outcome DECIDED FROM a deployment provider, which the published
+// admission context cannot pin. Error() returns the wrapped message
+// verbatim, so every caller that renders, wraps or compares this error stays
+// byte-identical to baseline; the wrapper is a TYPE signal read only by the
+// relay classifier, never parsed from text.
+type simplicityPreActivationRetryableError struct{ err error }
+
+func (e *simplicityPreActivationRetryableError) Error() string { return e.err.Error() }
+
+func (e *simplicityPreActivationRetryableError) Unwrap() error { return e.err }
+
+// markSimplicityPreActivation wraps err ONLY when this outcome is the retryable
+// provider-decided one. reject is the SAME tuple-shape discriminator the
+// precheck call site applies (relayDispositionForSimplicityPreActivationOutcome):
+// reject == true is the half a deployment provider governs, while the
+// reject == false error is the covenant well-formedness verdict, which reads no
+// deployment set and is context-complete. The no-provider verdict rests on the
+// constructor-frozen configuration. Both stay unwrapped, hence stable terminal.
+func markSimplicityPreActivation(err error, reject bool, rotation consensus.RotationProvider) error {
+	if relayDispositionForSimplicityPreActivationOutcome(reject, rotation) != RelayAdmissionUnavailable {
+		return err
+	}
+	return &simplicityPreActivationRetryableError{err: err}
+}
+
 func applyPolicyAgainstStateSimplicity(checked *consensus.CheckedTransaction, utxos map[consensus.Outpoint]consensus.UtxoEntry, chainID [32]byte, nextHeight uint64, policy MempoolConfig) error {
 	if policy.PolicyRejectSimplicityPreActivation {
 		reject, reason, err := rejectCoreSimplicityPreActivation(checked.Tx, utxos, chainID, nextHeight, policy.RotationProvider)
 		if err != nil {
-			return err
+			return markSimplicityPreActivation(err, reject, policy.RotationProvider)
 		}
 		if reject {
-			return errors.New(reason)
+			return markSimplicityPreActivation(errors.New(reason), true, policy.RotationProvider)
 		}
 	}
 	return nil

@@ -92,16 +92,32 @@ func (p *CanonicalMempoolTxPool) AddRemoteTxForRelay(txid [32]byte, raw []byte, 
 			Err:         &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "nil canonical mempool tx pool"},
 		}
 	}
-	if rawTxid, err := canonicalTxID(raw); err == nil && rawTxid != txid {
+	if rawTxid, rawWTxID, ok := canonicalRelayIdentity(raw); ok && rawTxid != txid {
 		return node.RelayAdmissionResult{
 			Disposition: node.RelayAdmissionInternal,
-			TxID:        rawTxid,
+			// The bytes parsed CANONICALLY to reach this branch, so BOTH identities
+			// are known and both are published: the result doc states TxID and
+			// WTxID are zero only when the candidate never parsed canonically.
+			TxID:  rawTxid,
+			WTxID: rawWTxID,
 			// An impossible-invariant admission failure keeps the producer's own
 			// compatibility kind for this class: TxAdmitRejected.
 			Err: &node.TxAdmitError{Kind: node.TxAdmitRejected, Message: fmt.Sprintf("relay adapter identity mismatch: announced %x, canonical %x", txid, rawTxid)},
 		}
 	}
 	return p.mempool.AddRemoteTxForRelay(raw, expected)
+}
+
+// canonicalRelayIdentity returns BOTH identities of canonically encoded tx
+// bytes. It applies exactly the canonical-parse test canonicalTxID applies —
+// consensus.ParseTx plus the full-consumption check — and differs from it only
+// by also yielding the wtxid the same parse already produced.
+func canonicalRelayIdentity(raw []byte) (txid [32]byte, wtxid [32]byte, ok bool) {
+	_, parsedTxid, parsedWTxID, consumed, err := consensus.ParseTx(raw)
+	if err != nil || consumed != len(raw) {
+		return [32]byte{}, [32]byte{}, false
+	}
+	return parsedTxid, parsedWTxID, true
 }
 
 func (p *CanonicalMempoolTxPool) Put(txid [32]byte, raw []byte, _ consensus.Uint128, _ int) bool {

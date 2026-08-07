@@ -211,8 +211,9 @@ func (m *Mempool) validateNonCapacityAdmissionLocked(entry *mempoolEntry) error 
 }
 
 // validateNonCapacityAdmissionLockedProbed is the one implementation. The probe
-// only reaches the owner seam, where a caller-supplied expected admission
-// context is validated; every check, its order and its error are unchanged.
+// reaches the owner seam, where a caller-supplied expected admission context is
+// validated, and the post-decision release seam, which records a cleanup fault
+// on it; every check, its order and its error are unchanged.
 func (m *Mempool) validateNonCapacityAdmissionLockedProbed(entry *mempoolEntry, probe *relayAdmissionProbe) error {
 	if err := validateBasicMempoolEntry(entry); err != nil {
 		return err
@@ -227,7 +228,7 @@ func (m *Mempool) validateNonCapacityAdmissionLockedProbed(entry *mempoolEntry, 
 		return err
 	}
 	if err := m.validateAdmissionSeqLocked(entry); err != nil {
-		return m.releaseCandidateLocked(entry, err)
+		return m.releaseCandidateLocked(entry, err, probe)
 	}
 	return nil
 }
@@ -318,8 +319,8 @@ func (m *Mempool) reserveEntryInputsLocked(entry *mempoolEntry, probe *relayAdmi
 		return selectRelayDisposition(txAdmitUnavailable("pending-outpoint owner tip does not match the guarded chainstate tip"), RelayAdmissionUnavailable)
 	}
 	requested := admission
-	if probe != nil && probe.expected != nil {
-		requested = *probe.expected
+	if probe != nil && probe.hasExpected {
+		requested = probe.expected
 	}
 	token, err := owner.Reserve(requested, PendingOutpointStandardMempool, entry.txid, entry.inputs)
 	if err != nil {
@@ -332,15 +333,28 @@ func (m *Mempool) reserveEntryInputsLocked(entry *mempoolEntry, probe *relayAdmi
 // releaseCandidateLocked releases a reservation the conflict slot issued for a
 // candidate that a LATER admission check rejected, and returns cause unchanged
 // so the public error order is preserved. The issued sequence stays consumed;
-// high-waters never decrease. Release cannot fail for a claim this call just
-// installed, and reporting a release fault in place of cause would rewrite the
-// contractual admission error, so the release result is deliberately dropped.
-func (m *Mempool) releaseCandidateLocked(entry *mempoolEntry, cause error) error {
+// high-waters never decrease.
+//
+// Release cannot fail for a claim this call just installed, so every failure it
+// can report — a nil owner, a token this owner never issued, a by-outpoint row
+// that disagrees with the token — is owner-accounting corruption. Reporting it
+// in place of cause would rewrite the contractual admission error, so cause is
+// still returned byte-identically; the fault is recorded on the relay probe
+// instead, which publishes it as the fail-closed INTERNAL disposition the
+// already-tagged cause can no longer carry (selectRelayDisposition is
+// first-selection-wins and the deciding branch tagged cause before this ran).
+//
+// probe is nil on the legacy AddTx / AddRemoteTx / AddReorgTx path, where
+// noteCleanupFailure is a no-op and the behavior is exactly as before.
+func (m *Mempool) releaseCandidateLocked(entry *mempoolEntry, cause error, probe *relayAdmissionProbe) error {
 	var zero PendingOutpointToken
 	if entry == nil || entry.token == zero {
 		return cause
 	}
-	_ = m.pendingOutpoints.Release(entry.token)
+	probe.noteCleanupFailure(m.pendingOutpoints.Release(entry.token))
+	// The token is zeroed unconditionally, exactly as before: the entry is
+	// discarded on every path that reaches here, and a failed release leaves no
+	// claim this record may keep pointing at.
 	entry.token = zero
 	return cause
 }
@@ -410,8 +424,9 @@ func (m *Mempool) addEntryLockedWithFloor(entry *mempoolEntry, snappedFloor uint
 }
 
 // addEntryLockedProbed is the one implementation of the locked admission path.
-// The probe reaches only the owner seam inside the non-capacity chain; it
-// changes no check, no order, no error and no mutation.
+// The probe reaches the owner seam inside the non-capacity chain and the
+// post-decision release seam; it changes no check, no order, no error and no
+// mutation.
 func (m *Mempool) addEntryLockedProbed(entry *mempoolEntry, snappedFloor uint64, probe *relayAdmissionProbe) error {
 	normalizeMempoolEntryDefaults(entry)
 	if err := m.validateNonCapacityAdmissionLockedProbed(entry, probe); err != nil {
@@ -419,7 +434,7 @@ func (m *Mempool) addEntryLockedProbed(entry *mempoolEntry, snappedFloor uint64,
 	}
 	evictedEntries, err := m.validateCapacityAdmissionLocked(entry, snappedFloor)
 	if err != nil {
-		return m.releaseCandidateLocked(entry, err)
+		return m.releaseCandidateLocked(entry, err, probe)
 	}
 	m.ensureMinFeeRateLocked()
 	// One typed delta: every exact victim token is released and the candidate
@@ -432,7 +447,7 @@ func (m *Mempool) addEntryLockedProbed(entry *mempoolEntry, snappedFloor uint64,
 	// is possible: every remaining failure is an accounting or claim
 	// inconsistency, which is an impossible invariant.
 	if err := m.commitStandardDeltaLocked(standardMempoolDelta{candidate: entry, removals: evictedEntries}); err != nil {
-		return m.releaseCandidateLocked(entry, selectRelayDisposition(err, RelayAdmissionInternal))
+		return m.releaseCandidateLocked(entry, selectRelayDisposition(err, RelayAdmissionInternal), probe)
 	}
 	for range evictedEntries {
 		// Bump the resident-eviction counter exactly once per
