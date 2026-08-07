@@ -58,10 +58,12 @@ const (
 )
 
 // TxErrorCause is the closed, source-owned classification of WHY a consensus
-// error was produced, for the consumers that must tell a fault of THIS PROCESS
-// apart from invalidity of the candidate bytes. The public ErrorCode alone
-// cannot express that difference: TX_ERR_PARSE, TX_ERR_SIG_INVALID and
-// TX_ERR_SIG_ALG_INVALID each carry both meanings today.
+// error was produced, for the consumers that must tell an outcome that is NOT
+// stable invalidity of the candidate bytes — a fault of THIS PROCESS, or an
+// admission input this node could not determine — apart from invalidity of the
+// bytes themselves. The public ErrorCode alone cannot express that difference:
+// TX_ERR_PARSE, TX_ERR_SIG_INVALID, TX_ERR_SIG_ALG_INVALID and
+// TX_ERR_COVENANT_TYPE_INVALID each carry both meanings today.
 //
 // It is additive in BEHAVIOR, not in struct shape. Preserved exactly: every
 // public ErrorCode, every message, Error() rendering, every accept/reject
@@ -103,6 +105,35 @@ const (
 	// unsupported or unauthorized suite: that verdict is a property of the
 	// bytes and keeps its baseline classification.
 	TxErrorCauseLocalCryptoBackendFault
+	// TxErrorCauseSimplicityDeploymentUnavailable means the single provider
+	// observation that had to decide CORE_SIMPLICITY deployment state could not
+	// answer at all: the provider returned an I/O error, or it reported the
+	// published set as unobtainable / only partially known (ok=false). The
+	// activation state is UNDETERMINED, not decided against the candidate, so a
+	// consumer must not publish the outcome as a stable terminal rejection of
+	// these bytes and must not let it authorize a cache.
+	TxErrorCauseSimplicityDeploymentUnavailable
+	// TxErrorCauseSimplicityDeploymentEvidenceInvalid means the provider
+	// answered, but its evidence failed its own set integrity: the published set
+	// does not match the published set anchor, or it carries a duplicate
+	// descriptor anchor. The activation state still cannot be computed from a
+	// required admission input, so it is exactly as undetermined as an absent
+	// answer; the separate cause exists so diagnostics can tell corrupted
+	// evidence from ordinary unavailability.
+	TxErrorCauseSimplicityDeploymentEvidenceInvalid
+	// TxErrorCauseSimplicityDeploymentInactiveProvider means a NON-NIL provider
+	// returned a complete anchor-verified set with no descriptor governing this
+	// height. The state is determined and inactive — but determined FROM a
+	// published deployment set, and the same bytes admit unchanged as soon as
+	// that set publishes a governing descriptor. A consumer whose context does
+	// not pin the deployment set must therefore not treat it as stable.
+	TxErrorCauseSimplicityDeploymentInactiveProvider
+	// TxErrorCauseSimplicityDeploymentInactiveFrozen means no deployment
+	// provider is configured at all. No provider I/O happened and no published
+	// set was read, so the verdict rests entirely on constructor-frozen
+	// configuration: it is the ONE deployment outcome that is stable for these
+	// bytes under a context a consumer has already proven.
+	TxErrorCauseSimplicityDeploymentInactiveFrozen
 )
 
 type TxError struct {
