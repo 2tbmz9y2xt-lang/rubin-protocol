@@ -63,8 +63,15 @@ const (
 	// retryable runtime unavailability.
 	RelayAdmissionUnavailable
 	// RelayAdmissionInternal covers an impossible invariant, a retained
-	// identity mismatch, accounting corruption, and an adapter contract
-	// violation.
+	// identity mismatch, accounting corruption, an adapter contract violation,
+	// and a process-local crypto-backend fault — a consensus error carrying
+	// consensus.TxErrorCauseLocalCryptoBackendFault, whose public code says
+	// nothing about whether this node could decide at all.
+	//
+	// That last class is INTERNAL rather than UNAVAILABLE because it is THIS
+	// process failing closed, not a missing admission input the node is waiting
+	// on; either way it is not stable invalidity of these bytes, so neither is
+	// cache-authorizing.
 	//
 	// It is also the ONE disposition a branch does not have to select: a
 	// REQUIRED post-decision cleanup step that reports a fault — pending-outpoint
@@ -530,11 +537,24 @@ func relayDispositionForPolicyError(err error) RelayAdmissionDisposition {
 	return RelayAdmissionStableTerminalReject
 }
 
-// relayDispositionForInputError separates the RETRYABLE input-dependency class
-// from the branch's own non-dependency selection, discriminating on the typed
-// consensus error CODE rather than on its rendered text. An input that is
-// absent, still immature, or not yet unlocked becomes spendable at a later
-// height, so it must never be published as a stable terminal rejection.
+// relayDispositionForInputError separates the outcomes that are NOT stable
+// invalidity of these exact bytes from the branch's own non-dependency
+// selection, reading only typed values the producer set — never Error(), Msg,
+// backend text, or an OpenSSL error string.
+//
+// It reads the typed CAUSE first, because the cause outranks the code: a
+// process-local crypto-backend fault is published under a public code that also
+// carries genuine candidate invalidity (TX_ERR_PARSE for a latched
+// initialization failure, TX_ERR_SIG_INVALID for a verifier that could not
+// decide, TX_ERR_SIG_ALG_INVALID for a binding this node could not resolve from
+// its own configuration). That error is evidence about THIS process, so it is
+// INTERNAL — never a stable terminal rejection, and therefore never
+// cache-authorizing. A candidate that selected an unsupported or unauthorized
+// suite carries no such cause and keeps its baseline classification.
+//
+// Only then does the CODE fallback apply: an input that is absent, still
+// immature, or not yet unlocked becomes spendable at a later height, so it must
+// never be published as a stable terminal rejection either.
 //
 // nonDependency is the disposition the calling branch selects for everything
 // else it can produce: stable terminal invalidity for the consensus validation
@@ -542,6 +562,9 @@ func relayDispositionForPolicyError(err error) RelayAdmissionDisposition {
 func relayDispositionForInputError(err error, nonDependency RelayAdmissionDisposition) RelayAdmissionDisposition {
 	var txErr *consensus.TxError
 	if errors.As(err, &txErr) {
+		if txErr.Cause() == consensus.TxErrorCauseLocalCryptoBackendFault {
+			return RelayAdmissionInternal
+		}
 		switch txErr.Code {
 		case consensus.TX_ERR_MISSING_UTXO, consensus.TX_ERR_COINBASE_IMMATURE, consensus.TX_ERR_TIMELOCK_NOT_MET:
 			return RelayAdmissionMissingDependency
