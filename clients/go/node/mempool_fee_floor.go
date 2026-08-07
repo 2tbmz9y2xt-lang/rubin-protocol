@@ -39,14 +39,14 @@ func (m *Mempool) validateFeeFloorLocked(entry *mempoolEntry) error {
 // max-of-(snap, live) closes both sides.
 func (m *Mempool) validateFeeFloorLockedWithFloor(entry *mempoolEntry, snappedFloor uint64) error {
 	if entry == nil {
-		return txAdmitRejected("nil mempool entry")
+		return selectRelayDisposition(txAdmitRejected("nil mempool entry"), RelayAdmissionInternal)
 	}
 	floor := snappedFloor
 	if live := m.currentMinFeeRateLocked(); live > floor {
 		floor = live
 	}
 	if feeRateBelowFloor(entry.fee, entry.weight, floor) {
-		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%s weight=%d min_fee_rate=%d", entry.fee.String(), entry.weight, floor))
+		return selectRelayDisposition(txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%s weight=%d min_fee_rate=%d", entry.fee.String(), entry.weight, floor)), RelayAdmissionRollingFloor)
 	}
 	return nil
 }

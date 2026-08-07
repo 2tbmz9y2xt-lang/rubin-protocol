@@ -203,7 +203,18 @@ func (m *Mempool) removeTxLocked(txid [32]byte) error {
 	return m.commitStandardDeltaLocked(standardMempoolDelta{removals: []*mempoolEntry{entry}})
 }
 
+// validateNonCapacityAdmissionLocked runs the non-capacity admission chain with
+// no relay observer. It is the unprobed form the package's own locked-path tests
+// drive; production admission uses validateNonCapacityAdmissionLockedProbed.
 func (m *Mempool) validateNonCapacityAdmissionLocked(entry *mempoolEntry) error {
+	return m.validateNonCapacityAdmissionLockedProbed(entry, nil)
+}
+
+// validateNonCapacityAdmissionLockedProbed is the one implementation. The probe
+// reaches the owner seam, where a caller-supplied expected admission context is
+// validated, and the post-decision release seam, which records a cleanup fault
+// on it; every check, its order and its error are unchanged.
+func (m *Mempool) validateNonCapacityAdmissionLockedProbed(entry *mempoolEntry, probe *relayAdmissionProbe) error {
 	if err := validateBasicMempoolEntry(entry); err != nil {
 		return err
 	}
@@ -213,42 +224,49 @@ func (m *Mempool) validateNonCapacityAdmissionLocked(entry *mempoolEntry) error 
 	if err := validateMempoolEntrySource(entry.source); err != nil {
 		return err
 	}
-	if err := m.reserveEntryInputsLocked(entry); err != nil {
+	if err := m.reserveEntryInputsLocked(entry, probe); err != nil {
 		return err
 	}
 	if err := m.validateAdmissionSeqLocked(entry); err != nil {
-		return m.releaseCandidateLocked(entry, err)
+		return m.releaseCandidateLocked(entry, err, probe)
 	}
 	return nil
 }
 
+// validateBasicMempoolEntry checks the record shape a completed consensus
+// validation always produces. Every failure here is an impossible invariant of
+// the live admission path, never a property of the candidate bytes.
 func validateBasicMempoolEntry(entry *mempoolEntry) error {
 	if entry == nil {
-		return txAdmitRejected("nil mempool entry")
+		return selectRelayDisposition(txAdmitRejected("nil mempool entry"), RelayAdmissionInternal)
 	}
 	if entry.size <= 0 {
-		return txAdmitRejected("invalid mempool entry size")
+		return selectRelayDisposition(txAdmitRejected("invalid mempool entry size"), RelayAdmissionInternal)
 	}
 	if entry.weight == 0 {
-		return txAdmitRejected("invalid mempool entry weight")
+		return selectRelayDisposition(txAdmitRejected("invalid mempool entry weight"), RelayAdmissionInternal)
 	}
 	return nil
 }
 
+// validateEntryIdentityLocked is the resident-duplicate slot. Both duplicate
+// branches keep the existing TxAdmitConflict kind for compatibility, which is
+// exactly why a relay consumer must read the disposition instead: the same
+// public kind also carries the pending-outpoint double-spend conflict.
 func (m *Mempool) validateEntryIdentityLocked(entry *mempoolEntry) error {
 	txid := entry.txid
 	if txid == ([32]byte{}) {
-		return txAdmitRejected("invalid mempool entry txid")
+		return selectRelayDisposition(txAdmitRejected("invalid mempool entry txid"), RelayAdmissionInternal)
 	}
 	if _, exists := m.txs[txid]; exists {
-		return txAdmitConflict("tx already in mempool")
+		return selectRelayDisposition(txAdmitConflict("tx already in mempool"), RelayAdmissionDuplicate)
 	}
 	wtxid := entry.wtxid
 	if wtxid == ([32]byte{}) {
 		wtxid = entry.txid
 	}
 	if existing, exists := m.wtxids[wtxid]; exists {
-		return txAdmitConflict(fmt.Sprintf("mempool wtxid conflict with %x", existing))
+		return selectRelayDisposition(txAdmitConflict(fmt.Sprintf("mempool wtxid conflict with %x", existing)), RelayAdmissionDuplicate)
 	}
 	return nil
 }
@@ -258,7 +276,9 @@ func validateMempoolEntrySource(source mempoolTxSource) error {
 		source = mempoolTxSourceLocal
 	}
 	if !validMempoolTxSource(source) {
-		return txAdmitRejected(fmt.Sprintf("invalid mempool tx source %q", source))
+		// The entry points pin the source constant; a record can only carry an
+		// invalid one through an impossible invariant.
+		return selectRelayDisposition(txAdmitRejected(fmt.Sprintf("invalid mempool tx source %q", source)), RelayAdmissionInternal)
 	}
 	return nil
 }
@@ -277,21 +297,34 @@ func validateMempoolEntrySource(source mempoolTxSource) error {
 // TxAdmitUnavailable, so no new public TxAdmit kind appears here. A candidate
 // with no inputs claims nothing and takes no token, exactly as the replaced loop
 // was a no-op over an empty input slice.
-func (m *Mempool) reserveEntryInputsLocked(entry *mempoolEntry) error {
+//
+// This slot is ALSO the seam at which a relay caller's supplied expected
+// admission context is validated: the supplied context replaces the observed one
+// as Reserve's binding, so the owner's own availability check refuses a stale
+// tip or a superseded generation before it scans for a conflict and before it
+// consumes a sequence. A nil probe or a nil expected context leaves the baseline
+// binding, and therefore the baseline behavior, untouched.
+func (m *Mempool) reserveEntryInputsLocked(entry *mempoolEntry, probe *relayAdmissionProbe) error {
 	if len(entry.inputs) == 0 {
-		return nil
+		// Pure read of the already-bound owner: the lazy owner constructor is
+		// deliberately NOT called here, because classifying must never mutate.
+		return probe.checkExpectedContext(m.pendingOutpoints, pendingOutpointTipOf(m.chainState))
 	}
 	owner := m.pendingOutpointOwnerLocked()
 	admission, ok := owner.AdmissionContext()
 	if !ok {
-		return txAdmitUnavailable("pending-outpoint owner admission context unavailable")
+		return selectRelayDisposition(txAdmitUnavailable("pending-outpoint owner admission context unavailable"), RelayAdmissionUnavailable)
 	}
 	if admission.StableTip != pendingOutpointTipOf(m.chainState) {
-		return txAdmitUnavailable("pending-outpoint owner tip does not match the guarded chainstate tip")
+		return selectRelayDisposition(txAdmitUnavailable("pending-outpoint owner tip does not match the guarded chainstate tip"), RelayAdmissionUnavailable)
 	}
-	token, err := owner.Reserve(admission, PendingOutpointStandardMempool, entry.txid, entry.inputs)
+	requested := admission
+	if probe != nil && probe.hasExpected {
+		requested = probe.expected
+	}
+	token, err := owner.Reserve(requested, PendingOutpointStandardMempool, entry.txid, entry.inputs)
 	if err != nil {
-		return txAdmitFromPendingOutpointError(err)
+		return selectRelayDisposition(txAdmitFromPendingOutpointError(err), relayDispositionForOwnerError(err))
 	}
 	entry.token = token
 	return nil
@@ -300,29 +333,50 @@ func (m *Mempool) reserveEntryInputsLocked(entry *mempoolEntry) error {
 // releaseCandidateLocked releases a reservation the conflict slot issued for a
 // candidate that a LATER admission check rejected, and returns cause unchanged
 // so the public error order is preserved. The issued sequence stays consumed;
-// high-waters never decrease. Release cannot fail for a claim this call just
-// installed, and reporting a release fault in place of cause would rewrite the
-// contractual admission error, so the release result is deliberately dropped.
-func (m *Mempool) releaseCandidateLocked(entry *mempoolEntry, cause error) error {
+// high-waters never decrease.
+//
+// Release cannot fail for a claim this call just installed, so every failure it
+// can report — a nil owner, a token this owner never issued, a by-outpoint row
+// that disagrees with the token — is owner-accounting corruption. Reporting it
+// in place of cause would rewrite the contractual admission error, so cause is
+// still returned byte-identically; the fault is recorded on the relay probe
+// instead, which publishes it as the fail-closed INTERNAL disposition the
+// already-tagged cause can no longer carry (selectRelayDisposition is
+// first-selection-wins and the deciding branch tagged cause before this ran).
+//
+// probe is nil on the legacy AddTx / AddRemoteTx / AddReorgTx path, where
+// noteCleanupFailure is a no-op and the behavior is exactly as before.
+func (m *Mempool) releaseCandidateLocked(entry *mempoolEntry, cause error, probe *relayAdmissionProbe) error {
 	var zero PendingOutpointToken
 	if entry == nil || entry.token == zero {
 		return cause
 	}
-	_ = m.pendingOutpoints.Release(entry.token)
+	probe.noteCleanupFailure(m.pendingOutpoints.Release(entry.token))
+	// The token is zeroed unconditionally, exactly as before: the entry is
+	// discarded on every path that reaches here, and a failed release leaves no
+	// claim this record may keep pointing at.
 	entry.token = zero
 	return cause
 }
 
 func (m *Mempool) validateAdmissionSeqLocked(entry *mempoolEntry) error {
 	if entry.admissionSeq != 0 {
+		// A NEW candidate never carries a sequence: newMempoolEntry leaves the
+		// field zero, normalizeMempoolEntryDefaults does not touch it, and
+		// assignAdmissionSeqLocked issues one only at commit time. A non-zero
+		// sequence on an entry still being validated is therefore corrupted
+		// accounting — the same fault the resident-side duplicate-sequence guard
+		// in evictionPlanPoolLocked reports, and classified the same INTERNAL way
+		// — not the candidate's own admission-sequence outcome. The error, its
+		// message and its kind are unchanged.
 		for existingTxid, existing := range m.txs {
 			if existing != nil && existing.admissionSeq == entry.admissionSeq {
-				return txAdmitRejected(fmt.Sprintf("mempool admission sequence conflict with %x", existingTxid))
+				return selectRelayDisposition(txAdmitRejected(fmt.Sprintf("mempool admission sequence conflict with %x", existingTxid)), RelayAdmissionInternal)
 			}
 		}
 	}
 	if m.lastAdmissionSeq == ^uint64(0) {
-		return txAdmitUnavailable("mempool admission sequence exhausted")
+		return selectRelayDisposition(txAdmitUnavailable("mempool admission sequence exhausted"), RelayAdmissionAdmissionSequence)
 	}
 	return nil
 }
@@ -354,7 +408,7 @@ func normalizeMempoolEntryDefaults(entry *mempoolEntry) {
 
 // addEntryLocked admits `entry` under `m.mu`, using the live
 // `m.currentMinFeeRate` value for the fee-floor check. Production
-// callers SHOULD use `addEntryLockedWithFloor` (see wave-6 race fix
+// admission goes through `addEntryLockedProbed` (see wave-6 race fix
 // in addTxWithSource); this wrapper exists for test callers that
 // drive the locked admission path in isolation and accept whatever
 // floor is in effect at call time.
@@ -374,20 +428,34 @@ func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
 // and a stale-lower snap would otherwise admit a transaction below
 // the current rolling floor.
 func (m *Mempool) addEntryLockedWithFloor(entry *mempoolEntry, snappedFloor uint64) error {
+	return m.addEntryLockedProbed(entry, snappedFloor, nil)
+}
+
+// addEntryLockedProbed is the one implementation of the locked admission path.
+// The probe reaches the owner seam inside the non-capacity chain and the
+// post-decision release seam; it changes no check, no order, no error and no
+// mutation.
+func (m *Mempool) addEntryLockedProbed(entry *mempoolEntry, snappedFloor uint64, probe *relayAdmissionProbe) error {
 	normalizeMempoolEntryDefaults(entry)
-	if err := m.validateNonCapacityAdmissionLocked(entry); err != nil {
+	if err := m.validateNonCapacityAdmissionLockedProbed(entry, probe); err != nil {
 		return err
 	}
 	evictedEntries, err := m.validateCapacityAdmissionLocked(entry, snappedFloor)
 	if err != nil {
-		return m.releaseCandidateLocked(entry, err)
+		return m.releaseCandidateLocked(entry, err, probe)
 	}
 	m.ensureMinFeeRateLocked()
 	// One typed delta: every exact victim token is released and the candidate
 	// record plus its token finalization are installed together. A failure here
 	// publishes no entry and exactly releases the candidate reservation.
+	//
+	// The commit validated its whole delta before writing anything, and the
+	// live admission path reaches it holding the ChainState admission read
+	// guard plus m.mu, so no transition, generation move or concurrent removal
+	// is possible: every remaining failure is an accounting or claim
+	// inconsistency, which is an impossible invariant.
 	if err := m.commitStandardDeltaLocked(standardMempoolDelta{candidate: entry, removals: evictedEntries}); err != nil {
-		return m.releaseCandidateLocked(entry, err)
+		return m.releaseCandidateLocked(entry, selectRelayDisposition(err, RelayAdmissionInternal), probe)
 	}
 	for range evictedEntries {
 		// Bump the resident-eviction counter exactly once per

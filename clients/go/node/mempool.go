@@ -106,7 +106,8 @@ type Mempool struct {
 	// evictedResidentTotal counts cumulative resident-entry capacity
 	// evictions since process start. It is bumped exactly once per
 	// already-admitted entry that is removed by capacity pressure
-	// (the per-victim counter loop in addEntryLockedWithFloor, after
+	// (the per-victim counter loop in addEntryLockedProbed, the one
+	// implementation of the locked admission path, after
 	// validateCapacityAdmissionLocked classifies the candidate as
 	// admitted-and-evicting and commitStandardDeltaLocked removes the
 	// victims with their exact tokens). Candidate-worst rejection —
@@ -236,19 +237,23 @@ func (m *Mempool) Contains(txid [32]byte) bool {
 }
 
 func (m *Mempool) AddTx(txBytes []byte) (retErr error) {
-	return m.addTxWithSource(txBytes, mempoolTxSourceLocal)
+	return m.addTxWithSource(txBytes, mempoolTxSourceLocal, nil)
 }
 
 // AddRemoteTx admits a transaction received from a peer while preserving the
 // same validation and admission policy as AddTx. The source is metadata only.
+//
+// It is the compatibility wrapper over the SAME implementation
+// AddRemoteTxForRelay drives: a nil relay probe is the only difference, and it
+// changes no validation order, no mutation, no error, and no counter.
 func (m *Mempool) AddRemoteTx(txBytes []byte) (retErr error) {
-	return m.addTxWithSource(txBytes, mempoolTxSourceRemote)
+	return m.addTxWithSource(txBytes, mempoolTxSourceRemote, nil)
 }
 
 // AddReorgTx admits a transaction requeued from a disconnected canonical block
 // while preserving the same validation and admission policy as AddTx.
 func (m *Mempool) AddReorgTx(txBytes []byte) (retErr error) {
-	return m.addTxWithSource(txBytes, mempoolTxSourceReorg)
+	return m.addTxWithSource(txBytes, mempoolTxSourceReorg, nil)
 }
 
 // addTxWithSource validates and admits a transaction while recording the
@@ -258,9 +263,14 @@ func (m *Mempool) AddReorgTx(txBytes []byte) (retErr error) {
 // Its ChainState.admissionMu.RLock below BLOCKS INDEFINITELY, by design, once a
 // canonical transition has entered the fail-closed terminal state described on
 // canonicalTransition.end: waiting for the required restart is the contract.
-func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retErr error) {
+//
+// probe is the per-call relay sink AddRemoteTxForRelay supplies and every
+// legacy entry point leaves nil. It carries identity, the proven admission
+// context and the success selection only; a failed admission's disposition
+// rides on the admission error itself, selected at its originating branch.
+func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource, probe *relayAdmissionProbe) (retErr error) {
 	if m == nil {
-		return txAdmitUnavailable("nil mempool")
+		return selectRelayDisposition(txAdmitUnavailable("nil mempool"), RelayAdmissionUnavailable)
 	}
 	// Exactly one admission counter increment per non-nil-receiver call, and
 	// NEVER outside the admission guard. Only the nil-ChainState guard can
@@ -268,7 +278,7 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 	// at its own return site through the same noteAdmissionResult mapping. A nil
 	// receiver counts nothing.
 	if m.chainState == nil {
-		err := txAdmitUnavailable("nil chainstate")
+		err := selectRelayDisposition(txAdmitUnavailable("nil chainstate"), RelayAdmissionUnavailable)
 		m.noteAdmissionResult(err)
 		return err
 	}
@@ -281,11 +291,19 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 	// acquisition must be able to exclude.
 	defer func() { m.noteAdmissionResult(retErr) }()
 
+	// Pure read, inside the guard that pins both the owner context and the
+	// chainstate tip for this whole call. It decides nothing and mutates
+	// nothing; a context it cannot prove simply stays unproven.
+	m.bindRelayAdmissionContext(probe)
+
 	// Inside the guard, so its rejection and count belong to that contained
 	// lifecycle and it waits on a terminally latched engine like every other
 	// admission: caller metadata never reports an outcome the binding cannot see.
+	//
+	// Every entry point pins the source constant itself, so an invalid source is
+	// an impossible invariant rather than a candidate property.
 	if !validMempoolTxSource(source) {
-		return txAdmitRejected(fmt.Sprintf("invalid mempool tx source %q", source))
+		return selectRelayDisposition(txAdmitRejected(fmt.Sprintf("invalid mempool tx source %q", source)), RelayAdmissionInternal)
 	}
 
 	snapshot := m.chainState.admissionSnapshot()
@@ -306,7 +324,7 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 	// Wave-7's snap-once-pass-through fixed only the decay direction
 	// and reopened the opposite race; wave-8 closes both.
 	snappedFloor := m.CurrentMinFeeRateSnapshot()
-	checked, inputs, err := m.checkTransactionWithSnapshot(txBytes, snapshot, policy, snappedFloor)
+	checked, inputs, err := m.checkTransactionWithSnapshot(txBytes, snapshot, policy, snappedFloor, probe)
 	if err != nil {
 		return err
 	}
@@ -315,7 +333,11 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 	defer m.mu.Unlock()
 
 	entry := newMempoolEntry(checked, inputs, source)
-	return m.addEntryLockedWithFloor(entry, snappedFloor)
+	if err := m.addEntryLockedProbed(entry, snappedFloor, probe); err != nil {
+		return err
+	}
+	m.noteRetainedLocked(entry, probe)
+	return nil
 }
 
 // RelayMetadata returns the metadata a relay peer needs to forward the
@@ -327,7 +349,7 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 //
 // RelayMetadata is not full mempool admission: it does not insert, does not
 // record source/admission_seq, and does not check duplicate, conflict, or
-// capacity state. Those remain owned by addTxWithSource/addEntryLockedWithFloor.
+// capacity state. Those remain owned by addTxWithSource/addEntryLockedProbed.
 func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
 	if m == nil {
 		return RelayTxMetadata{}, txAdmitUnavailable("nil mempool")
@@ -413,7 +435,13 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 
 func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction, nextHeight uint64, utxos map[consensus.Outpoint]consensus.UtxoEntry, policy MempoolConfig) error {
 	if checked == nil || checked.Tx == nil {
-		return errors.New("nil checked transaction")
+		// Both call sites reach here only with the CheckedTransaction a completed
+		// consensus validation returned, so this is an impossible invariant and
+		// never a candidate property. It is TYPED — never message-matched — so the
+		// relay classifier publishes INTERNAL for it instead of the
+		// cache-authorizing stable terminal rejection its default would give. The
+		// message is unchanged, so every public error built from it is unchanged.
+		return &policyImpossibleInvariantError{err: errors.New("nil checked transaction")}
 	}
 	// Apply non-coinbase anchor output policy
 	if err := applyPolicyAgainstStateAnchor(checked, policy); err != nil {

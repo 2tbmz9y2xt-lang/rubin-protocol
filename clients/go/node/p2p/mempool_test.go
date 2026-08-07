@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"errors"
 	"sync"
 	"testing"
 
@@ -332,5 +333,171 @@ func TestMemoryTxPoolEvictsByRateNotProduct(t *testing.T) {
 	}
 	if !pool.Has(dense) || pool.Has(bulky) {
 		t.Fatal("pool should still hold only the higher-rate entry")
+	}
+}
+
+// TestCanonicalMempoolTxPoolRelayAdmissionPreservesProducerResult proves the
+// adapter classifies NOTHING itself: for every candidate whose announced txid
+// matches its canonical bytes — including bytes that do not parse at all, which
+// carry no identity to match — the adapter's result is field-for-field the
+// producer's own.
+func TestCanonicalMempoolTxPoolRelayAdmissionPreservesProducerResult(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "unparseable bytes reach the producer", raw: []byte{0xFF, 0x00, 0x13, 0x37}},
+		{name: "minimal canonical tx", raw: minimalValidTxBytes(t)},
+		{name: "distinct canonical tx", raw: distinctTxBytes(t, 7)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mempool, err := node.NewMempool(node.NewChainState(), nil, [32]byte{})
+			if err != nil {
+				t.Fatalf("NewMempool: %v", err)
+			}
+			// A rejected candidate leaves no state behind, so the producer's own
+			// call and the adapter's call observe the identical mempool.
+			direct := mempool.AddRemoteTxForRelay(tc.raw, nil)
+			if direct.Err == nil {
+				t.Fatalf("fixture admitted; this comparison needs a rejected candidate")
+			}
+			announced, err := canonicalTxID(tc.raw)
+			if err != nil {
+				announced = [32]byte{}
+			}
+
+			got := NewCanonicalMempoolTxPool(mempool).AddRemoteTxForRelay(announced, tc.raw, nil)
+			if got.Disposition != direct.Disposition {
+				t.Fatalf("disposition=%v, want the producer's %v", got.Disposition, direct.Disposition)
+			}
+			if got.TxID != direct.TxID || got.WTxID != direct.WTxID {
+				t.Fatalf("identity=(%x,%x), want the producer's (%x,%x)", got.TxID, got.WTxID, direct.TxID, direct.WTxID)
+			}
+			if got.HasAdmissionContext != direct.HasAdmissionContext || got.AdmissionContext != direct.AdmissionContext {
+				t.Fatalf("context=(%v,%+v), want the producer's (%v,%+v)", got.HasAdmissionContext, got.AdmissionContext, direct.HasAdmissionContext, direct.AdmissionContext)
+			}
+			if got.Err == nil || got.Err.Error() != direct.Err.Error() {
+				t.Fatalf("err=%v, want the producer's %v", got.Err, direct.Err)
+			}
+			if got.Disposition == node.RelayAdmissionInternal {
+				t.Fatal("the adapter must not reclassify a delegated candidate as INTERNAL")
+			}
+		})
+	}
+}
+
+// TestCanonicalMempoolTxPoolRelayAdmissionRetainsAdmittedCandidate proves the
+// adapter's SUCCESS pass-through: a candidate that really admits comes back
+// RETAINED, with the producer's own identities and no error.
+func TestCanonicalMempoolTxPoolRelayAdmissionRetainsAdmittedCandidate(t *testing.T) {
+	chainState := node.NewChainState()
+	raw, txid, utxos := signedCanonicalP2PTxWithoutSeeding(t, 1)
+	for op, entry := range utxos {
+		chainState.Utxos[op] = entry
+	}
+	mempool, err := node.NewMempool(chainState, nil, node.DevnetGenesisChainID())
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+
+	got := NewCanonicalMempoolTxPool(mempool).AddRemoteTxForRelay(txid, raw, nil)
+	if got.Disposition != node.RelayAdmissionRetained {
+		t.Fatalf("disposition=%v, want RETAINED (err=%v)", got.Disposition, got.Err)
+	}
+	if got.Err != nil {
+		t.Fatalf("err=%v, want nil", got.Err)
+	}
+	if got.TxID != txid {
+		t.Fatalf("TxID=%x, want the canonical %x", got.TxID, txid)
+	}
+	if got.WTxID == ([32]byte{}) {
+		t.Fatal("WTxID is zero for an admitted candidate")
+	}
+	if got.HasAdmissionContext {
+		t.Fatal("a nil expected context must never authorize caching")
+	}
+	if !mempool.Contains(txid) {
+		t.Fatal("RETAINED was published for a candidate that is not resident")
+	}
+}
+
+// TestCanonicalMempoolTxPoolRelayAdmissionIdentityMismatchIsInternal pins the
+// adapter's OWN contract: an announced txid that is not the txid of the supplied
+// canonical bytes is an adapter contract violation, and the mempool is never
+// reached.
+func TestCanonicalMempoolTxPoolRelayAdmissionIdentityMismatchIsInternal(t *testing.T) {
+	mempool, err := node.NewMempool(node.NewChainState(), nil, [32]byte{})
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	raw := distinctTxBytes(t, 11)
+	canonical, canonicalWTxID, ok := canonicalRelayIdentity(raw)
+	if !ok {
+		t.Fatal("canonicalRelayIdentity: the fixture must parse canonically")
+	}
+	if canonicalWTxID == ([32]byte{}) {
+		t.Fatal("the fixture's wtxid must be non-zero for this row to be meaningful")
+	}
+	var announced [32]byte
+	announced[0] = ^canonical[0]
+
+	got := NewCanonicalMempoolTxPool(mempool).AddRemoteTxForRelay(announced, raw, nil)
+	if got.Disposition != node.RelayAdmissionInternal {
+		t.Fatalf("disposition=%v, want INTERNAL", got.Disposition)
+	}
+	if got.TxID != canonical {
+		t.Fatalf("TxID=%x, want the canonical %x", got.TxID, canonical)
+	}
+	// The branch is entered only because the bytes parsed canonically, so the
+	// published identity must be WHOLE: a zero wtxid here would contradict the
+	// RelayAdmissionResult contract that zero means "never parsed canonically".
+	if got.WTxID != canonicalWTxID {
+		t.Fatalf("WTxID=%x, want the parsed %x", got.WTxID, canonicalWTxID)
+	}
+	var admitErr *node.TxAdmitError
+	if !errors.As(got.Err, &admitErr) {
+		t.Fatalf("err=%v (%T), want a *node.TxAdmitError", got.Err, got.Err)
+	}
+	if got.HasAdmissionContext {
+		t.Fatal("an adapter contract violation must never authorize caching")
+	}
+	if mempool.AdmissionCounts() != (node.MempoolAdmissionCounts{}) {
+		t.Fatalf("the mempool was reached despite the identity mismatch: %+v", mempool.AdmissionCounts())
+	}
+}
+
+// TestCanonicalMempoolTxPoolRelayAdmissionNilSafeAndOffTheGenericInterface pins
+// the nil-receiver contract shared with the adapter's other methods, and that
+// the relay-admission method did NOT widen the generic TxPool contract.
+func TestCanonicalMempoolTxPoolRelayAdmissionNilSafeAndOffTheGenericInterface(t *testing.T) {
+	var nilAdapter *CanonicalMempoolTxPool
+	for name, adapter := range map[string]*CanonicalMempoolTxPool{
+		"nil adapter":        nilAdapter,
+		"nil-backed adapter": NewCanonicalMempoolTxPool(nil),
+	} {
+		got := adapter.AddRemoteTxForRelay([32]byte{}, []byte{0x01}, nil)
+		if got.Disposition != node.RelayAdmissionUnavailable {
+			t.Fatalf("%s: disposition=%v, want UNAVAILABLE", name, got.Disposition)
+		}
+		// The adapter's own exits carry the same typed error every producer
+		// result carries, so a consumer's errors.As always resolves.
+		var admitErr *node.TxAdmitError
+		if !errors.As(got.Err, &admitErr) {
+			t.Fatalf("%s: err=%v (%T), want a *node.TxAdmitError", name, got.Err, got.Err)
+		}
+		if admitErr.Kind != node.TxAdmitUnavailable {
+			t.Fatalf("%s: kind=%q, want %q", name, admitErr.Kind, node.TxAdmitUnavailable)
+		}
+		if got.HasAdmissionContext || got.TxID != ([32]byte{}) {
+			t.Fatalf("%s: published identity or context: %+v", name, got)
+		}
+	}
+
+	var generic TxPool = NewMemoryTxPool()
+	if _, widened := generic.(interface {
+		AddRemoteTxForRelay([32]byte, []byte, *node.PendingOutpointAdmissionContext) node.RelayAdmissionResult
+	}); widened {
+		t.Fatal("the generic TxPool surface was widened with relay admission")
 	}
 }

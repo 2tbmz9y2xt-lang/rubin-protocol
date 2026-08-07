@@ -73,7 +73,7 @@ func TestMempoolAcceptedEntryMetadataAndIndexes(t *testing.T) {
 		t.Fatalf("TxWeightAndStats: %v", err)
 	}
 
-	if err := mp.addTxWithSource(txBytes, mempoolTxSourceRemote); err != nil {
+	if err := mp.addTxWithSource(txBytes, mempoolTxSourceRemote, nil); err != nil {
 		t.Fatalf("addTxWithSource: %v", err)
 	}
 
@@ -187,7 +187,7 @@ func TestMempoolRejectsInvalidEntrySource(t *testing.T) {
 		t.Fatalf("new mempool: %v", err)
 	}
 	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
-	err = mp.addTxWithSource(txBytes, "sidecar")
+	err = mp.addTxWithSource(txBytes, "sidecar", nil)
 	if err == nil || !strings.Contains(err.Error(), "invalid mempool tx source") {
 		t.Fatalf("expected invalid source rejection, got %v", err)
 	}

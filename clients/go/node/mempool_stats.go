@@ -85,6 +85,13 @@ const (
 type TxAdmitError struct {
 	Kind    TxAdmitErrorKind
 	Message string
+	// disposition is the closed relay classification that the branch which
+	// BUILT this error selected for it (see selectRelayDisposition). It is
+	// unexported and deliberately outside every public mapping: Error(), the
+	// TxAdmitErrorKind buckets, noteAdmissionResult and the HTTP status mapping
+	// neither read it nor change with it. Its zero value means "no branch
+	// selected", which relayDispositionOf reports as INTERNAL, fail closed.
+	disposition RelayAdmissionDisposition
 }
 
 func (e *TxAdmitError) Error() string { return e.Message }
@@ -208,8 +215,9 @@ func (m *Mempool) AdmissionCounts() MempoolAdmissionCounts {
 // adjustments performed by raiseMinFeeRateAfterEvictionLocked and
 // decayMinFeeRateAfterConnectedBlockLocked. EvictedResidentTotal is
 // loaded INSIDE the read-lock window. Writers bump that counter
-// under m.mu.Lock in addEntryLockedWithFloor's per-victim counter
-// loop, so the reader's m.mu.RLock pairs with the writer's m.mu.Lock and
+// under m.mu.Lock in the per-victim counter loop of
+// addEntryLockedProbed — the one implementation of the locked
+// admission path — so the reader's m.mu.RLock pairs with the writer's m.mu.Lock and
 // the atomic.Load observes the same critical section as the gauge
 // fields read on the surrounding lines. Covered by
 // TestMempoolStatsScrapePurity and the
