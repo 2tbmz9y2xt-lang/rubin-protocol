@@ -56,6 +56,48 @@ func parseCoreSimplicityCovenantData(value uint64, covenantData []byte) ([32]byt
 	return programCMR, state, nil
 }
 
+// simplicityDeploymentEvidenceAtHeight is the ONE observation that decides
+// CORE_SIMPLICITY deployment state (§23.2.4). It performs EXACTLY ONE provider
+// read and returns, from that same read, the governing surface (nil = not
+// active), the typed cause a rejecting caller attaches, and the provider's own
+// I/O error. Every consumer of deployment state in this package is expressed
+// over this helper, so the evidence a caller publishes is always evidence about
+// the observation that actually decided the outcome — a second provider call
+// would be a DIFFERENT observation and may never authorize a disposition.
+//
+// Rows, in evaluation order (surface, cause, err); the node owns the mapping
+// from cause to relay disposition:
+//
+//	provider == nil                       (nil, InactiveFrozen,   nil)
+//	provider I/O error                    (nil, Unavailable,      err)
+//	ok == false                           (nil, Unavailable,      nil)
+//	set-anchor mismatch / duplicate       (nil, EvidenceInvalid,  nil)
+//	verified set, no governing descriptor (nil, InactiveProvider, nil)
+//	governing descriptor at height        (surface, Unspecified,  nil)
+//
+// The cause is meaningful ONLY on a non-affirmative row: the active row selects
+// TxErrorCauseUnspecified because it produces no error to carry one.
+func simplicityDeploymentEvidenceAtHeight(chainID [32]byte, height uint64, provider SimplicityDeploymentProvider) (*VerifiedSimplicitySurface, TxErrorCause, error) {
+	if provider == nil {
+		return nil, TxErrorCauseSimplicityDeploymentInactiveFrozen, nil
+	}
+	descriptors, setAnchor, ok, err := provider.PublishedSimplicityDeployments()
+	if err != nil {
+		return nil, TxErrorCauseSimplicityDeploymentUnavailable, err
+	}
+	if !ok {
+		return nil, TxErrorCauseSimplicityDeploymentUnavailable, nil
+	}
+	surface, err := selectGoverningSurface(descriptors, setAnchor, chainID, height, liveArtifactHashes())
+	if err != nil {
+		return nil, TxErrorCauseSimplicityDeploymentEvidenceInvalid, nil
+	}
+	if surface == nil {
+		return nil, TxErrorCauseSimplicityDeploymentInactiveProvider, nil
+	}
+	return surface, TxErrorCauseUnspecified, nil
+}
+
 // SimplicityActiveAtHeight reports whether a verified CORE_SIMPLICITY surface
 // governs at height on the validating chain. STATELESS and fail-closed: a provider
 // I/O error is the ONE distinct disposition (returned as an error → "deployment
@@ -64,31 +106,30 @@ func parseCoreSimplicityCovenantData(value uint64, covenantData []byte) ([32]byt
 // output does NOT distinguish "UNKNOWN" from "not active" (both are inactive here).
 // Not deactivating an ALREADY-active surface on a later UNKNOWN lookup is a
 // STATEFUL live-spend property owned by the RUB-601 call-site, not enforced here.
+//
+// It is the evidence helper with the cause COLLAPSED away: the (bool, error)
+// surface, the returned provider error value and the single provider read are
+// byte-for-byte what this function did before the cause existed.
 func SimplicityActiveAtHeight(chainID [32]byte, height uint64, provider SimplicityDeploymentProvider) (bool, error) {
-	if provider == nil {
-		return false, nil
-	}
-	descriptors, setAnchor, ok, err := provider.PublishedSimplicityDeployments()
+	surface, _, err := simplicityDeploymentEvidenceAtHeight(chainID, height, provider)
 	if err != nil {
 		return false, err
-	}
-	if !ok {
-		return false, nil
-	}
-	surface, err := selectGoverningSurface(descriptors, setAnchor, chainID, height, liveArtifactHashes())
-	if err != nil {
-		return false, nil
 	}
 	return surface != nil, nil
 }
 
+// validateCoreSimplicityDeploymentActive is the §23.2.4 activation gate. The
+// two public messages and the single public code are unchanged and still
+// collapse five distinct deployment states onto two strings; the typed cause
+// carries the state the strings lose, taken from the SAME read that decided the
+// rejection, so no consumer has to match on message text.
 func validateCoreSimplicityDeploymentActive(chainID [32]byte, height uint64, provider SimplicityDeploymentProvider) error {
-	active, err := SimplicityActiveAtHeight(chainID, height, provider)
+	surface, cause, err := simplicityDeploymentEvidenceAtHeight(chainID, height, provider)
 	if err != nil {
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment lookup failure")
+		return txerrWithCause(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment lookup failure", cause)
 	}
-	if !active {
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
+	if surface == nil {
+		return txerrWithCause(TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active", cause)
 	}
 	return nil
 }

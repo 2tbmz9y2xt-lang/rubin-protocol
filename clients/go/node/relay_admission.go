@@ -59,8 +59,14 @@ const (
 	// RelayAdmissionAdmissionSequence is the admission-sequence outcome.
 	RelayAdmissionAdmissionSequence
 	// RelayAdmissionUnavailable covers an absent chain, owner or admission
-	// context, an active canonical transition, a stale expected context, and
-	// retryable runtime unavailability.
+	// context, an active canonical transition, a stale expected context,
+	// retryable runtime unavailability, and a CORE_SIMPLICITY deployment state
+	// this node could not determine from the admission inputs it has — a
+	// consensus error carrying TxErrorCauseSimplicityDeployment{Unavailable,
+	// EvidenceInvalid, InactiveProvider}, whose public code and message say only
+	// "not active" while the deployment set the answer came from is not pinned
+	// by the published context. The frozen no-provider state is NOT one of
+	// these: it reads no set and stays a stable terminal rejection.
 	RelayAdmissionUnavailable
 	// RelayAdmissionInternal covers an impossible invariant, a retained
 	// identity mismatch, accounting corruption, an adapter contract violation,
@@ -542,15 +548,53 @@ func relayDispositionForPolicyError(err error) RelayAdmissionDisposition {
 // selection, reading only typed values the producer set — never Error(), Msg,
 // backend text, or an OpenSSL error string.
 //
-// It reads the typed CAUSE first, because the cause outranks the code: a
-// process-local crypto-backend fault is published under a public code that also
-// carries genuine candidate invalidity (TX_ERR_PARSE for a latched
-// initialization failure, TX_ERR_SIG_INVALID for a verifier that could not
-// decide, TX_ERR_SIG_ALG_INVALID for a binding this node could not resolve from
-// its own configuration). That error is evidence about THIS process, so it is
-// INTERNAL — never a stable terminal rejection, and therefore never
-// cache-authorizing. A candidate that selected an unsupported or unauthorized
-// suite carries no such cause and keeps its baseline classification.
+// It reads the typed CAUSE first, because the cause outranks the code. Two
+// families need it:
+//
+//   - A process-local crypto-backend fault is published under a public code that
+//     also carries genuine candidate invalidity (TX_ERR_PARSE for a latched
+//     initialization failure, TX_ERR_SIG_INVALID for a verifier that could not
+//     decide, TX_ERR_SIG_ALG_INVALID for a binding this node could not resolve
+//     from its own configuration). That error is evidence about THIS process, so
+//     it is INTERNAL — never a stable terminal rejection, and therefore never
+//     cache-authorizing. A candidate that selected an unsupported or
+//     unauthorized suite carries no such cause and keeps its baseline
+//     classification.
+//   - A CORE_SIMPLICITY deployment rejection collapses five distinct states onto
+//     TX_ERR_COVENANT_TYPE_INVALID and two fixed messages. Three of them —
+//     provider unavailability, invalid provider evidence, and inactivity
+//     DECIDED FROM a published deployment set — rest on an admission input the
+//     {StableTip, Generation} context does not pin, so they are UNAVAILABLE and
+//     never cache-authorizing: the same bytes admit unchanged once that set
+//     answers differently. Corrupted evidence is UNAVAILABLE, not INTERNAL,
+//     because the activation state simply cannot be computed from a required
+//     admission input; INTERNAL stays reserved for an impossible internal state,
+//     an unknown non-zero cause, or a producer-result contract violation. A
+//     cause a WRAPPER lost is deliberately NOT in that set: losing a cause is
+//     observationally TxErrorCauseUnspecified, and an unspecified cause
+//     preserves every existing ErrorCode-based mapping. Only the
+//     no-provider-configured state rests entirely on constructor-frozen
+//     configuration and stays a stable terminal rejection, with cache authority
+//     still governed by the caller's own exact-context proof.
+//
+// ORDERING NOTE — structural, and deliberately NOT claimed by any test. Reading
+// the cause before the code switch is a PAIRWISE fact, and on today's inputs the
+// two orders are observationally identical: the closed cause set is
+// {LocalCryptoBackendFault, SimplicityDeploymentUnavailable,
+// SimplicityDeploymentEvidenceInvalid, SimplicityDeploymentInactiveProvider,
+// SimplicityDeploymentInactiveFrozen}, every producer of those causes emits
+// TX_ERR_PARSE, TX_ERR_SIG_INVALID, TX_ERR_SIG_ALG_INVALID or
+// TX_ERR_COVENANT_TYPE_INVALID, and none of those codes is a member of the
+// switch set below. No error can therefore carry a cause AND a switch-set code,
+// so no test can separate the two orders — the order is load-bearing only for a
+// FUTURE producer whose cause and code disagree, and none exists today.
+//
+// The cause switch is closed in BOTH directions. TxErrorCauseUnspecified is an
+// explicit arm that falls through to the code fallback below; every other value
+// this consumer does not enumerate takes the default arm and becomes INTERNAL,
+// so a cause added upstream without its arm here fails closed instead of
+// publishing a cache-authorizing stable terminal rejection. Nothing reaches that
+// arm today — the cause set is closed and every member has an arm.
 //
 // Only then does the CODE fallback apply: an input that is absent, still
 // immature, or not yet unlocked becomes spendable at a later height, so it must
@@ -562,7 +606,19 @@ func relayDispositionForPolicyError(err error) RelayAdmissionDisposition {
 func relayDispositionForInputError(err error, nonDependency RelayAdmissionDisposition) RelayAdmissionDisposition {
 	var txErr *consensus.TxError
 	if errors.As(err, &txErr) {
-		if txErr.Cause() == consensus.TxErrorCauseLocalCryptoBackendFault {
+		switch txErr.Cause() {
+		case consensus.TxErrorCauseUnspecified:
+			// No producing branch selected a cause (or a wrapper lost one):
+			// the code fallback below decides, exactly as it did before.
+		case consensus.TxErrorCauseLocalCryptoBackendFault:
+			return RelayAdmissionInternal
+		case consensus.TxErrorCauseSimplicityDeploymentUnavailable,
+			consensus.TxErrorCauseSimplicityDeploymentEvidenceInvalid,
+			consensus.TxErrorCauseSimplicityDeploymentInactiveProvider:
+			return RelayAdmissionUnavailable
+		case consensus.TxErrorCauseSimplicityDeploymentInactiveFrozen:
+			return RelayAdmissionStableTerminalReject
+		default:
 			return RelayAdmissionInternal
 		}
 		switch txErr.Code {
