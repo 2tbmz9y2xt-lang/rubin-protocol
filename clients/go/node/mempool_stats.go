@@ -85,6 +85,13 @@ const (
 type TxAdmitError struct {
 	Kind    TxAdmitErrorKind
 	Message string
+	// disposition is the closed relay classification that the branch which
+	// BUILT this error selected for it (see selectRelayDisposition). It is
+	// unexported and deliberately outside every public mapping: Error(), the
+	// TxAdmitErrorKind buckets, noteAdmissionResult and the HTTP status mapping
+	// neither read it nor change with it. Its zero value means "no branch
+	// selected", which relayDispositionOf reports as INTERNAL, fail closed.
+	disposition RelayAdmissionDisposition
 }
 
 func (e *TxAdmitError) Error() string { return e.Message }

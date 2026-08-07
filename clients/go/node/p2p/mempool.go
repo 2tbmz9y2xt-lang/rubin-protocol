@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"bytes"
+	"fmt"
 	"sync"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -61,6 +62,46 @@ func (p *CanonicalMempoolTxPool) Has(txid [32]byte) bool {
 		return false
 	}
 	return p.mempool.Contains(txid)
+}
+
+// AddRemoteTxForRelay admits a peer transaction through the canonical mempool
+// and returns the producer's result UNCHANGED: the same disposition, the
+// producer's own TxID and WTxID, the same admission-context evidence, and the
+// same error. The adapter classifies nothing itself.
+//
+// It first validates its OWN identity contract — the announced txid must be the
+// txid of the supplied canonical bytes. A mismatch is an adapter contract
+// violation, reported INTERNAL, and the mempool is never called. Bytes that do
+// not parse carry no identity to mismatch, so they are handed to the producer,
+// which owns the parse classification.
+//
+// A nil adapter returns RelayAdmissionUnavailable without reaching a mempool. A
+// nil-backed adapter is NOT special-cased here: the nil *node.Mempool receiver
+// already publishes the legacy "nil mempool" TxAdmitUnavailable result itself.
+//
+// Both adapter-local exits carry a *node.TxAdmitError, exactly like every result
+// the producer returns, so a consumer's errors.As over the Err field always
+// resolves.
+//
+// Deliberately NOT part of the generic TxPool interface: the interface stays the
+// narrow relay contract and only this concrete adapter exposes relay dispositions.
+func (p *CanonicalMempoolTxPool) AddRemoteTxForRelay(txid [32]byte, raw []byte, expected *node.PendingOutpointAdmissionContext) node.RelayAdmissionResult {
+	if p == nil {
+		return node.RelayAdmissionResult{
+			Disposition: node.RelayAdmissionUnavailable,
+			Err:         &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "nil canonical mempool tx pool"},
+		}
+	}
+	if rawTxid, err := canonicalTxID(raw); err == nil && rawTxid != txid {
+		return node.RelayAdmissionResult{
+			Disposition: node.RelayAdmissionInternal,
+			TxID:        rawTxid,
+			// An impossible-invariant admission failure keeps the producer's own
+			// compatibility kind for this class: TxAdmitRejected.
+			Err: &node.TxAdmitError{Kind: node.TxAdmitRejected, Message: fmt.Sprintf("relay adapter identity mismatch: announced %x, canonical %x", txid, rawTxid)},
+		}
+	}
+	return p.mempool.AddRemoteTxForRelay(raw, expected)
 }
 
 func (p *CanonicalMempoolTxPool) Put(txid [32]byte, raw []byte, _ consensus.Uint128, _ int) bool {

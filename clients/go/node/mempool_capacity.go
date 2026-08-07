@@ -42,14 +42,14 @@ func (m *Mempool) validateCapacityAdmissionLocked(entry *mempoolEntry, snappedFl
 		return nil, err
 	}
 	if candidateEvicted {
-		return nil, txAdmitUnavailable("mempool capacity candidate rejected by eviction ordering")
+		return nil, selectRelayDisposition(txAdmitUnavailable("mempool capacity candidate rejected by eviction ordering"), RelayAdmissionCapacity)
 	}
 	return evictedEntries, nil
 }
 
 func (m *Mempool) capacityEvictionPlanLocked(candidate *mempoolEntry) ([]*mempoolEntry, bool, error) {
 	if candidate == nil {
-		return nil, false, txAdmitRejected("nil mempool entry")
+		return nil, false, selectRelayDisposition(txAdmitRejected("nil mempool entry"), RelayAdmissionInternal)
 	}
 	state, err := m.capacityStateLocked(candidate)
 	if err != nil {
@@ -71,7 +71,10 @@ func (m *Mempool) capacityStateLocked(candidate *mempoolEntry) (mempoolCapacityS
 		return mempoolCapacityState{}, err
 	}
 	if m.maxTxs <= 0 || maxBytes == 0 {
-		return mempoolCapacityState{}, txAdmitUnavailable(fmt.Sprintf("invalid mempool capacity limits: max_txs=%d max_bytes=%d", m.maxTxs, m.maxBytes))
+		// Construction normalizes both limits to a positive default, so a
+		// non-positive limit here is corrupted accounting, not capacity
+		// pressure the candidate could ever retry past.
+		return mempoolCapacityState{}, selectRelayDisposition(txAdmitUnavailable(fmt.Sprintf("invalid mempool capacity limits: max_txs=%d max_bytes=%d", m.maxTxs, m.maxBytes)), RelayAdmissionInternal)
 	}
 	candidateSize, err := nonNegativeMempoolIntToUint64("candidate_size", candidate.size)
 	if err != nil {
@@ -82,7 +85,7 @@ func (m *Mempool) capacityStateLocked(candidate *mempoolEntry) (mempoolCapacityS
 		return mempoolCapacityState{}, err
 	}
 	if candidateSize > maxBytes {
-		return mempoolCapacityState{}, txAdmitUnavailable(fmt.Sprintf("mempool byte limit exceeded: current=%d tx=%d max=%d", m.usedBytes, candidate.size, m.maxBytes))
+		return mempoolCapacityState{}, selectRelayDisposition(txAdmitUnavailable(fmt.Sprintf("mempool byte limit exceeded: current=%d tx=%d max=%d", m.usedBytes, candidate.size, m.maxBytes)), RelayAdmissionCapacity)
 	}
 	countPressure := len(m.txs) >= m.maxTxs
 	bytePressure := usedBytes > maxBytes-candidateSize
@@ -121,7 +124,9 @@ func (m *Mempool) evictionPlanPoolLocked(candidate *mempoolEntry) ([]mempoolEvic
 			return nil, err
 		}
 		if existing, exists := admissionSeqs[entry.admissionSeq]; exists {
-			return nil, txAdmitRejected(fmt.Sprintf("duplicate mempool entry admission_seq %d existing=%x new=%x", entry.admissionSeq, existing, entry.txid))
+			// Two RESIDENT records sharing a sequence is corrupted accounting,
+			// not the candidate's own sequence outcome.
+			return nil, selectRelayDisposition(txAdmitRejected(fmt.Sprintf("duplicate mempool entry admission_seq %d existing=%x new=%x", entry.admissionSeq, existing, entry.txid)), RelayAdmissionInternal)
 		}
 		admissionSeqs[entry.admissionSeq] = entry.txid
 		planPool = append(planPool, mempoolEvictionPlanEntry{entry: entry})
@@ -145,7 +150,7 @@ func dryRunCapacityEvictions(planPool []mempoolEvictionPlanEntry, state mempoolC
 		planPool = append(planPool[:worstIndex], planPool[worstIndex+1:]...)
 	}
 	if state.exceedsHardCapacity(maxTxs) {
-		return nil, false, txAdmitUnavailable(fmt.Sprintf("mempool capacity remains exceeded after dry-run eviction: count=%d/%d bytes=%d/%d", state.totalCount, maxTxs, state.totalBytes, state.maxBytes))
+		return nil, false, selectRelayDisposition(txAdmitUnavailable(fmt.Sprintf("mempool capacity remains exceeded after dry-run eviction: count=%d/%d bytes=%d/%d", state.totalCount, maxTxs, state.totalBytes, state.maxBytes)), RelayAdmissionCapacity)
 	}
 	return evictedEntries, false, nil
 }
@@ -161,7 +166,7 @@ func (state mempoolCapacityState) exceedsHardCapacity(maxTxs int) bool {
 func (state *mempoolCapacityState) applyDryRunEviction(entry *mempoolEntry) error {
 	worstSize := uint64(entry.size) // #nosec G115 -- validateEvictionMetadata rejects non-positive entry sizes before this helper.
 	if state.totalBytes < worstSize {
-		return txAdmitUnavailable("mempool eviction byte accounting underflow")
+		return selectRelayDisposition(txAdmitUnavailable("mempool eviction byte accounting underflow"), RelayAdmissionInternal)
 	}
 	state.totalBytes -= worstSize
 	state.totalCount--
@@ -178,28 +183,33 @@ func worstEvictionPlanIndex(planPool []mempoolEvictionPlanEntry) int {
 	return worstIndex
 }
 
+// nonNegativeMempoolIntToUint64 guards a capacity accounting field. A negative
+// byte or size count is corrupted accounting, never capacity pressure.
 func nonNegativeMempoolIntToUint64(label string, value int) (uint64, error) {
 	if value < 0 {
-		return 0, txAdmitUnavailable(fmt.Sprintf("invalid mempool %s: %d", label, value))
+		return 0, selectRelayDisposition(txAdmitUnavailable(fmt.Sprintf("invalid mempool %s: %d", label, value)), RelayAdmissionInternal)
 	}
 	return uint64(value), nil
 }
 
+// validateEvictionMetadata checks an ALREADY-ADMITTED resident record before it
+// enters the eviction plan. Every failure describes corrupted resident
+// accounting, never a property of the incoming candidate.
 func validateEvictionMetadata(entry *mempoolEntry) error {
 	if entry == nil {
-		return txAdmitRejected("nil mempool entry")
+		return selectRelayDisposition(txAdmitRejected("nil mempool entry"), RelayAdmissionInternal)
 	}
 	if entry.txid == ([32]byte{}) {
-		return txAdmitRejected("invalid mempool entry txid")
+		return selectRelayDisposition(txAdmitRejected("invalid mempool entry txid"), RelayAdmissionInternal)
 	}
 	if entry.size <= 0 {
-		return txAdmitRejected("invalid mempool entry size")
+		return selectRelayDisposition(txAdmitRejected("invalid mempool entry size"), RelayAdmissionInternal)
 	}
 	if entry.weight == 0 {
-		return txAdmitRejected("invalid mempool entry weight")
+		return selectRelayDisposition(txAdmitRejected("invalid mempool entry weight"), RelayAdmissionInternal)
 	}
 	if entry.admissionSeq == 0 {
-		return txAdmitRejected(fmt.Sprintf("invalid mempool entry admission_seq for txid %x", entry.txid))
+		return selectRelayDisposition(txAdmitRejected(fmt.Sprintf("invalid mempool entry admission_seq for txid %x", entry.txid)), RelayAdmissionInternal)
 	}
 	return nil
 }

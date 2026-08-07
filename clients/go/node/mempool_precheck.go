@@ -11,14 +11,18 @@ import (
 func buildPolicyInputSnapshotIfNeeded(parsedTx *consensus.Tx, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig) (map[consensus.Outpoint]consensus.UtxoEntry, error) {
 	needs, err := policyNeedsInputSnapshotForTx(parsedTx, policy)
 	if err != nil {
-		return nil, txAdmitRejected(err.Error())
+		// Only a nil parsed transaction reaches here, which the callers cannot
+		// produce: an impossible invariant, never a candidate property.
+		return nil, selectRelayDisposition(txAdmitRejected(err.Error()), RelayAdmissionInternal)
 	}
 	if !needs {
 		return nil, nil
 	}
 	policyUtxos, err := policyInputSnapshot(parsedTx, snapshot.utxos)
 	if err != nil {
-		return nil, txAdmitRejected(err.Error())
+		// An input the snapshot does not carry is a retryable dependency gap;
+		// the remaining shapes (nil tx, nil utxo set) are impossible invariants.
+		return nil, selectRelayDisposition(txAdmitRejected(err.Error()), relayDispositionForInputError(err, RelayAdmissionInternal))
 	}
 	return policyUtxos, nil
 }
@@ -31,25 +35,28 @@ func buildPolicyInputSnapshotIfNeeded(parsedTx *consensus.Tx, snapshot *chainSta
 // height, next-block MTP, or a typed admission error if any step
 // fails (Unavailable for chain-context failure, Rejected for parse
 // failure / trailing bytes).
-func (m *Mempool) checkTxParseAndContext(txBytes []byte, snapshot *chainStateAdmissionSnapshot) (*consensus.Tx, uint64, uint64, error) {
+func (m *Mempool) checkTxParseAndContext(txBytes []byte, snapshot *chainStateAdmissionSnapshot, probe *relayAdmissionProbe) (*consensus.Tx, uint64, uint64, error) {
 	if snapshot == nil {
-		return nil, 0, 0, txAdmitUnavailable("nil chainstate")
+		return nil, 0, 0, selectRelayDisposition(txAdmitUnavailable("nil chainstate"), RelayAdmissionUnavailable)
 	}
 	nextHeight, _, err := nextBlockContextFromFields(snapshot.hasTip, snapshot.height, snapshot.tipHash)
 	if err != nil {
-		return nil, 0, 0, txAdmitUnavailable(err.Error())
+		return nil, 0, 0, selectRelayDisposition(txAdmitUnavailable(err.Error()), RelayAdmissionUnavailable)
 	}
 	blockMTP, err := m.nextBlockMTP(nextHeight)
 	if err != nil {
-		return nil, 0, 0, txAdmitUnavailable(err.Error())
+		return nil, 0, 0, selectRelayDisposition(txAdmitUnavailable(err.Error()), RelayAdmissionUnavailable)
 	}
-	parsedTx, _, _, consumed, err := consensus.ParseTx(txBytes)
+	parsedTx, txid, wtxid, consumed, err := consensus.ParseTx(txBytes)
 	if err != nil {
-		return nil, 0, 0, txAdmitRejected(err.Error())
+		return nil, 0, 0, selectRelayDisposition(txAdmitRejected(err.Error()), RelayAdmissionStableTerminalReject)
 	}
 	if consumed != len(txBytes) {
-		return nil, 0, 0, txAdmitRejected("trailing bytes after canonical tx")
+		return nil, 0, 0, selectRelayDisposition(txAdmitRejected("trailing bytes after canonical tx"), RelayAdmissionStableTerminalReject)
 	}
+	// The canonical identity exists from here on, so every later outcome
+	// reports the real candidate and an unparseable candidate reports none.
+	probe.noteIdentity(txid, wtxid)
 	return parsedTx, nextHeight, blockMTP, nil
 }
 
@@ -65,8 +72,8 @@ func (m *Mempool) checkTxParseAndContext(txBytes []byte, snapshot *chainStateAdm
 // while spurious-reject under `decayMinFeeRateAfterConnectedBlockLocked`
 // remains the lesser evil (caller can retry against the fresher
 // snapshot). Bidirectional race protection biased toward strict.
-func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig, snappedFloor uint64) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
-	parsedTx, nextHeight, blockMTP, err := m.checkTxParseAndContext(txBytes, snapshot)
+func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig, snappedFloor uint64, probe *relayAdmissionProbe) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
+	parsedTx, nextHeight, blockMTP, err := m.checkTxParseAndContext(txBytes, snapshot, probe)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -81,22 +88,24 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	// would be misclassified as transient Unavailable instead of
 	// Rejected (terminal).
 	if err := cheapFeeFloorPrecheck(parsedTx, snapshot, snappedFloor, nextHeight, policy.RotationProvider, policy.SuiteRegistry); err != nil {
-		return nil, nil, err
+		// The cheap precheck produces exactly one failure: below the rolling
+		// floor. Every shape it cannot decide defers to the slow path above.
+		return nil, nil, selectRelayDisposition(err, RelayAdmissionRollingFloor)
 	}
 	policyUtxos, err := buildPolicyInputSnapshotIfNeeded(parsedTx, snapshot, policy)
 	if err != nil {
 		return nil, nil, err
 	}
 	if reject, reason := rejectUnsupportedCoreExtNodeRuntime(parsedTx, policyUtxos); reject {
-		return nil, nil, txAdmitRejected(reason)
+		return nil, nil, selectRelayDisposition(txAdmitRejected(reason), RelayAdmissionStableTerminalReject)
 	}
 	if policy.PolicyRejectSimplicityPreActivation {
 		reject, reason, err := rejectCoreSimplicityPreActivation(parsedTx, policyUtxos, m.chainID, nextHeight, policy.RotationProvider)
 		if err != nil {
-			return nil, nil, txAdmitRejected(err.Error())
+			return nil, nil, selectRelayDisposition(txAdmitRejected(err.Error()), RelayAdmissionStableTerminalReject)
 		}
 		if reject {
-			return nil, nil, txAdmitRejected(reason)
+			return nil, nil, selectRelayDisposition(txAdmitRejected(reason), RelayAdmissionStableTerminalReject)
 		}
 	}
 	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndValidationContext(
@@ -115,10 +124,17 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 		},
 	)
 	if err != nil {
-		return nil, nil, txAdmitRejected(err.Error())
+		// An input that is absent, still immature, or not yet unlocked becomes
+		// spendable at a later height and stays retryable; every other
+		// consensus failure is stable terminal invalidity of these exact bytes
+		// against the exact stable context this call is bound to.
+		return nil, nil, selectRelayDisposition(txAdmitRejected(err.Error()), relayDispositionForInputError(err, RelayAdmissionStableTerminalReject))
 	}
 	if err := m.applyPolicyAgainstState(checked, nextHeight, policyUtxos, policy); err != nil {
-		return nil, nil, txAdmitRejected(err.Error())
+		// Constructor-frozen, context-bound static policy: anchor outputs, the
+		// DA fee/budget terms, the retired CORE_EXT surface, and Simplicity
+		// pre-activation.
+		return nil, nil, selectRelayDisposition(txAdmitRejected(err.Error()), RelayAdmissionStableTerminalReject)
 	}
 	inputs := extractTxInputs(checked)
 	return checked, inputs, nil
