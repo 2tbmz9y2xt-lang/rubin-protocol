@@ -775,17 +775,16 @@ func updateP2PKBurnToFeeVector(f *fixtureFile, id string, chainID [32]byte, sign
 // transaction has a fee of exactly 2^64 — one above the u64 domain.
 const wideFeeInputValue = uint64(1) << 63
 
-// upsertVector returns the vector with the given id, appending a fresh
-// skeleton when it does not exist yet. New vectors are therefore authored in
-// the generator (their only owner) rather than hand-written into the
-// committed fixture.
+// upsertVector installs the authoritative skeleton at the vector's existing
+// slot, or appends it when the id does not exist yet.
 func upsertVector(f *fixtureFile, id string, skeleton map[string]any) map[string]any {
-	for _, v := range f.Vectors {
+	skeleton["id"] = id
+	for i, v := range f.Vectors {
 		if v["id"] == id {
-			return v
+			f.Vectors[i] = skeleton
+			return skeleton
 		}
 	}
-	skeleton["id"] = id
 	f.Vectors = append(f.Vectors, skeleton)
 	return skeleton
 }
@@ -1397,7 +1396,7 @@ func updateSubsidyBlocks(
 	// Coinbase destination output covenant data can be any valid P2PK (no sig required).
 	cbDestCov := p2pkCovenantData(coinbaseDestKP.PubkeyBytes())
 
-	buildBlock := func(coinbaseValue uint64) string {
+	buildBlock := func(height uint32, coinbaseValue uint64) string {
 		coinbase := &consensus.Tx{
 			Version: 1,
 			TxKind:  0x00,
@@ -1412,7 +1411,7 @@ func updateSubsidyBlocks(
 				{Value: coinbaseValue, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: cbDestCov},
 				{Value: 0, CovenantType: consensus.COV_TYPE_ANCHOR, CovenantData: bytes.Repeat([]byte{0x00}, 32)}, // placeholder
 			},
-			Locktime:  blockHeight,
+			Locktime:  height,
 			Witness:   nil,
 			DaPayload: nil,
 		}
@@ -1466,7 +1465,7 @@ func updateSubsidyBlocks(
 		block = append(block, coinbaseBytes...)
 		block = append(block, nonCoinbaseBytes...)
 
-		if _, err := consensus.ValidateBlockBasicWithContextAtHeight(block, nil, nil, uint64(blockHeight), nil); err != nil {
+		if _, err := consensus.ValidateBlockBasicWithContextAtHeight(block, nil, nil, uint64(height), nil); err != nil {
 			fatalf("subsidy: generated block fails basic validation: %v", err)
 		}
 
@@ -1475,13 +1474,65 @@ func updateSubsidyBlocks(
 
 	updateWideSumFeesBlocks(f, chainID, spendKP, coinbaseDestKP, sub1)
 
-	sub1["block_hex"] = buildBlock(subsidy + sumFees)
+	sub1["block_hex"] = buildBlock(blockHeight, subsidy+sumFees)
 	sub1["utxos"] = spendUTXO
-	sub1["already_generated"] = float64(alreadyGenerated)
+	sub1["already_generated"] = json.Number(strconv.FormatUint(alreadyGenerated, 10))
 
-	sub2["block_hex"] = buildBlock(subsidy + sumFees + 1)
+	sub2["block_hex"] = buildBlock(blockHeight, subsidy+sumFees+1)
 	sub2["utxos"] = spendUTXO
-	sub2["already_generated"] = float64(alreadyGenerated)
+	sub2["already_generated"] = json.Number(strconv.FormatUint(alreadyGenerated, 10))
+
+	const (
+		firstTailSubsidyHeight = uint32(5_771_107)
+		crossingSupply         = "18446744073699181041"
+		crossedSupply          = "18446744073718206916"
+		legacyU64MaxSupply     = "18446744073709551615"
+		legacyU64MaxSupplyN1   = "18446744073728577490"
+		maxU128Supply          = "340282366920938463463374607431768211455"
+	)
+	supplyBlock := buildBlock(firstTailSubsidyHeight, consensus.TAIL_EMISSION_PER_BLOCK+sumFees)
+
+	crossing := upsertVector(f, "CV-SUB-SUPPLY-U128-01", map[string]any{
+		"op":                          "connect_block_basic",
+		"height":                      json.Number(strconv.FormatUint(uint64(firstTailSubsidyHeight), 10)),
+		"expected_prev_hash":          sub1["expected_prev_hash"],
+		"expected_target":             sub1["expected_target"],
+		"already_generated":           crossingSupply,
+		"expect_ok":                   true,
+		"expect_sum_fees":             json.Number(strconv.FormatUint(sumFees, 10)),
+		"expect_utxo_count":           json.Number("2"),
+		"expect_already_generated":    crossingSupply,
+		"expect_already_generated_n1": crossedSupply,
+	})
+	crossing["block_hex"] = supplyBlock
+	crossing["utxos"] = spendUTXO
+
+	legacy := upsertVector(f, "CV-SUB-SUPPLY-U128-02", map[string]any{
+		"op":                          "connect_block_basic",
+		"height":                      json.Number(strconv.FormatUint(uint64(firstTailSubsidyHeight), 10)),
+		"expected_prev_hash":          sub1["expected_prev_hash"],
+		"expected_target":             sub1["expected_target"],
+		"already_generated":           json.Number(legacyU64MaxSupply),
+		"expect_ok":                   true,
+		"expect_sum_fees":             json.Number(strconv.FormatUint(sumFees, 10)),
+		"expect_utxo_count":           json.Number("2"),
+		"expect_already_generated":    legacyU64MaxSupply,
+		"expect_already_generated_n1": legacyU64MaxSupplyN1,
+	})
+	legacy["block_hex"] = supplyBlock
+	legacy["utxos"] = spendUTXO
+
+	overflow := upsertVector(f, "CV-SUB-SUPPLY-U128-03", map[string]any{
+		"op":                 "connect_block_basic",
+		"height":             json.Number(strconv.FormatUint(uint64(firstTailSubsidyHeight), 10)),
+		"expected_prev_hash": sub1["expected_prev_hash"],
+		"expected_target":    sub1["expected_target"],
+		"already_generated":  maxU128Supply,
+		"expect_ok":          false,
+		"expect_err":         "BLOCK_ERR_PARSE",
+	})
+	overflow["block_hex"] = supplyBlock
+	overflow["utxos"] = spendUTXO
 }
 
 // updateWideSumFeesBlocks authors the shared widened-aggregate block rows.

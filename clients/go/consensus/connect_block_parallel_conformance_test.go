@@ -79,7 +79,7 @@ type connectBlockTestVector struct {
 	BlockHex         string   `json:"block_hex"`
 	ChainID          string   `json:"chain_id"`
 	Height           uint64   `json:"height"`
-	AlreadyGenerated uint64   `json:"already_generated"`
+	AlreadyGenerated Uint128  `json:"already_generated"`
 	Utxos            []utxoJ  `json:"utxos"`
 	PrevTimestamps   []uint64 `json:"prev_timestamps"`
 	ExpectedPrevHash string   `json:"expected_prev_hash"`
@@ -135,7 +135,7 @@ func testParallelParityFromVector(t *testing.T, v connectBlockTestVector) {
 	// Run sequential path.
 	seqState := &InMemoryChainState{
 		Utxos:            copyUtxoMap(utxos),
-		AlreadyGenerated: new(big.Int).SetUint64(v.AlreadyGenerated),
+		AlreadyGenerated: v.AlreadyGenerated.Big(),
 	}
 	seqResult, seqErr := ConnectBlockBasicInMemoryAtHeight(
 		blockBytes, prevHash, target, v.Height, v.PrevTimestamps, seqState, chainID,
@@ -147,7 +147,7 @@ func testParallelParityFromVector(t *testing.T, v connectBlockTestVector) {
 	// Run parallel path.
 	parState := &InMemoryChainState{
 		Utxos:            copyUtxoMap(utxos),
-		AlreadyGenerated: new(big.Int).SetUint64(v.AlreadyGenerated),
+		AlreadyGenerated: v.AlreadyGenerated.Big(),
 	}
 	parResult, parErr := ConnectBlockParallelSigVerify(
 		blockBytes, prevHash, target, v.Height, v.PrevTimestamps, parState, chainID, 0,
@@ -161,10 +161,10 @@ func testParallelParityFromVector(t *testing.T, v connectBlockTestVector) {
 		t.Errorf("SumFees mismatch: seq=%d par=%d", seqResult.SumFees, parResult.SumFees)
 	}
 	if seqResult.AlreadyGenerated != parResult.AlreadyGenerated {
-		t.Errorf("AlreadyGenerated mismatch: seq=%d par=%d", seqResult.AlreadyGenerated, parResult.AlreadyGenerated)
+		t.Errorf("AlreadyGenerated mismatch: seq=%s par=%s", seqResult.AlreadyGenerated.String(), parResult.AlreadyGenerated.String())
 	}
 	if seqResult.AlreadyGeneratedN1 != parResult.AlreadyGeneratedN1 {
-		t.Errorf("AlreadyGeneratedN1 mismatch: seq=%d par=%d", seqResult.AlreadyGeneratedN1, parResult.AlreadyGeneratedN1)
+		t.Errorf("AlreadyGeneratedN1 mismatch: seq=%s par=%s", seqResult.AlreadyGeneratedN1.String(), parResult.AlreadyGeneratedN1.String())
 	}
 	if seqResult.UtxoCount != parResult.UtxoCount {
 		t.Errorf("UtxoCount mismatch: seq=%d par=%d", seqResult.UtxoCount, parResult.UtxoCount)
@@ -257,12 +257,15 @@ func TestConnectBlockParallelSigVerify_GuardPaths(t *testing.T) {
 			Utxos:            make(map[Outpoint]UtxoEntry),
 			AlreadyGenerated: nil,
 		}
-		// Should normalize nil to zero, then fail at block validation.
+		// Nil is a local zero view; a later block error must not normalize it.
 		_, err := ConnectBlockParallelSigVerify(
 			[]byte{0x00}, nil, nil, 0, nil, state, [32]byte{}, 0,
 		)
 		if err == nil {
 			t.Fatal("expected error for invalid block bytes")
+		}
+		if state.AlreadyGenerated != nil {
+			t.Fatal("failed connect normalized nil AlreadyGenerated")
 		}
 	})
 
@@ -279,20 +282,19 @@ func TestConnectBlockParallelSigVerify_GuardPaths(t *testing.T) {
 		}
 	})
 
-	t.Run("nil_Utxos_normalized", func(t *testing.T) {
+	t.Run("nil_Utxos_unchanged", func(t *testing.T) {
 		state := &InMemoryChainState{
-			Utxos:            nil, // should be normalized to empty map
+			Utxos:            nil,
 			AlreadyGenerated: new(big.Int),
 		}
 		_, err := ConnectBlockParallelSigVerify(
 			[]byte{0x00}, nil, nil, 0, nil, state, [32]byte{}, 0,
 		)
-		// Will fail at block validation but nil Utxos normalization is covered.
 		if err == nil {
 			t.Fatal("expected error for invalid block bytes")
 		}
-		if state.Utxos == nil {
-			t.Fatal("expected Utxos to be normalized to non-nil")
+		if state.Utxos != nil {
+			t.Fatal("failed connect normalized nil Utxos")
 		}
 	})
 
@@ -306,6 +308,9 @@ func TestConnectBlockParallelSigVerify_GuardPaths(t *testing.T) {
 		)
 		if err == nil {
 			t.Fatal("expected error for invalid block bytes")
+		}
+		if state.Utxos != nil || state.AlreadyGenerated != nil {
+			t.Fatal("failed connect normalized nil state fields")
 		}
 	})
 
@@ -411,9 +416,7 @@ func TestConnectBlockParallelSigVerify_CoinbaseValueBound(t *testing.T) {
 	}
 }
 
-// TestConnectBlockParallelSigVerify_AlreadyGeneratedOverflow covers lines 167-168:
-// already_generated > MaxUint64 causes bigIntToUint64 to fail.
-func TestConnectBlockParallelSigVerify_AlreadyGeneratedOverflow(t *testing.T) {
+func TestConnectBlockParallelSigVerify_AlreadyGeneratedAboveU64(t *testing.T) {
 	height := uint64(1)
 
 	// With huge AlreadyGenerated, subsidy = TAIL_EMISSION_PER_BLOCK.
@@ -421,29 +424,35 @@ func TestConnectBlockParallelSigVerify_AlreadyGeneratedOverflow(t *testing.T) {
 	coinbaseVal := uint64(TAIL_EMISSION_PER_BLOCK) + 10
 	block, prev, target, utxos := buildTestBlock(t, coinbaseVal)
 
-	// AlreadyGenerated = 2^64 → overflows uint64 conversion at line 167.
+	// AlreadyGenerated = 2^64 must remain exact through the summary and state.
 	hugeAG := new(big.Int).SetBit(new(big.Int), 64, 1)
 
 	state := &InMemoryChainState{
 		Utxos:            utxos,
 		AlreadyGenerated: hugeAG,
 	}
-	_, err := ConnectBlockParallelSigVerify(
+	summary, err := ConnectBlockParallelSigVerify(
 		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, 4,
 	)
-	if err == nil {
-		t.Fatal("expected already_generated overflow error")
+	if err != nil {
+		t.Fatalf("ConnectBlockParallelSigVerify: %v", err)
+	}
+	wantBefore := Uint128{Hi: 1}
+	wantAfter, ok := wantBefore.CheckedAdd(Uint128FromU64(TAIL_EMISSION_PER_BLOCK))
+	if !ok || summary.AlreadyGenerated != wantBefore || summary.AlreadyGeneratedN1 != wantAfter {
+		t.Fatalf("unexpected supply summary: %#v", summary)
+	}
+	if state.AlreadyGenerated.Cmp(wantAfter.Big()) != 0 {
+		t.Fatalf("state supply=%s, want %s", state.AlreadyGenerated, wantAfter.String())
 	}
 }
 
-// TestConnectBlockParallelSigVerify_AlreadyGeneratedN1Overflow covers lines 171-172:
-// already_generated fits uint64 but already_generated + subsidy overflows.
-func TestConnectBlockParallelSigVerify_AlreadyGeneratedN1Overflow(t *testing.T) {
+func TestConnectBlockParallelSigVerify_AlreadyGeneratedN1AboveU64(t *testing.T) {
 	height := uint64(1)
 
-	// AlreadyGenerated = MaxUint64 - 1000 → fits uint64, passes line 167.
+	// AlreadyGenerated = MaxUint64 - 1000.
 	// Subsidy = TAIL_EMISSION_PER_BLOCK = 19_025_875 (since AG >= MINEABLE_CAP).
-	// N1 = (MaxUint64-1000) + 19_025_875 overflows uint64 → line 171-172.
+	// N1 = (MaxUint64-1000) + 19_025_875 crosses u64 but remains valid u128.
 	// Coinbase value must be <= TAIL + 10 to pass value bound check.
 	coinbaseVal := uint64(TAIL_EMISSION_PER_BLOCK) + 10
 	block, prev, target, utxos := buildTestBlock(t, coinbaseVal)
@@ -454,11 +463,16 @@ func TestConnectBlockParallelSigVerify_AlreadyGeneratedN1Overflow(t *testing.T) 
 		Utxos:            utxos,
 		AlreadyGenerated: ag,
 	}
-	_, err := ConnectBlockParallelSigVerify(
+	summary, err := ConnectBlockParallelSigVerify(
 		block, &prev, &target, height, []uint64{0}, state, [32]byte{}, 4,
 	)
-	if err == nil {
-		t.Fatal("expected already_generated_n1 overflow error")
+	if err != nil {
+		t.Fatalf("ConnectBlockParallelSigVerify: %v", err)
+	}
+	wantBefore := Uint128FromU64(^uint64(0) - 1000)
+	wantAfter, ok := wantBefore.CheckedAdd(Uint128FromU64(TAIL_EMISSION_PER_BLOCK))
+	if !ok || summary.AlreadyGenerated != wantBefore || summary.AlreadyGeneratedN1 != wantAfter {
+		t.Fatalf("unexpected supply summary: %#v", summary)
 	}
 }
 

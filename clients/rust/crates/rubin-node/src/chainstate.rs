@@ -203,29 +203,7 @@ impl ChainState {
         let parsed = parse_block_bytes(block_bytes).map_err(|e| e.to_string())?;
         let tip_hash = block_hash(&parsed.header_bytes).map_err(|e| e.to_string())?;
 
-        self.has_tip = true;
-        self.height = block_height;
-        self.tip_hash = tip_hash;
-        self.already_generated = u64::try_from(work_state.already_generated)
-            .map_err(|_| "already_generated overflow".to_string())?;
-        self.utxos = work_state.utxos;
-
-        Ok(ChainStateConnectSummary {
-            block_height,
-            block_hash: tip_hash,
-            sum_fees: connect_summary.sum_fees,
-            already_generated: u64::try_from(connect_summary.already_generated)
-                .map_err(|_| "already_generated overflow".to_string())?,
-            already_generated_n1: u64::try_from(connect_summary.already_generated_n1)
-                .map_err(|_| "already_generated_n1 overflow".to_string())?,
-            utxo_count: connect_summary.utxo_count,
-            // Left EMPTY on purpose: connecting to an in-memory chain state is
-            // not a canonical-application event. Only the SyncEngine
-            // canonical-apply site mints these records, so the reorg preview,
-            // the startup replay, and side-branch connects — all of which land
-            // here — structurally cannot report a canonical-applied block.
-            canonical_applied_blocks: Vec::new(),
-        })
+        apply_connected_block(self, block_height, tip_hash, work_state, connect_summary)
     }
 
     pub fn utxo_set_hash(&self) -> [u8; 32] {
@@ -304,6 +282,44 @@ impl Default for ChainState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn apply_connected_block(
+    state: &mut ChainState,
+    block_height: u64,
+    tip_hash: [u8; 32],
+    work_state: InMemoryChainState,
+    connect_summary: ConnectBlockBasicSummary,
+) -> Result<ChainStateConnectSummary, String> {
+    let state_already_generated = u64::try_from(work_state.already_generated)
+        .map_err(|_| "already_generated overflow".to_string())?;
+    let already_generated = u64::try_from(connect_summary.already_generated)
+        .map_err(|_| "already_generated overflow".to_string())?;
+    let already_generated_n1 = u64::try_from(connect_summary.already_generated_n1)
+        .map_err(|_| "already_generated overflow".to_string())?;
+
+    let summary = ChainStateConnectSummary {
+        block_height,
+        block_hash: tip_hash,
+        sum_fees: connect_summary.sum_fees,
+        already_generated,
+        already_generated_n1,
+        utxo_count: connect_summary.utxo_count,
+        // Left EMPTY on purpose: connecting to an in-memory chain state is
+        // not a canonical-application event. Only the SyncEngine
+        // canonical-apply site mints these records, so the reorg preview,
+        // the startup replay, and side-branch connects — all of which land
+        // here — structurally cannot report a canonical-applied block.
+        canonical_applied_blocks: Vec::new(),
+    };
+
+    state.has_tip = true;
+    state.height = block_height;
+    state.tip_hash = tip_hash;
+    state.already_generated = state_already_generated;
+    state.utxos = work_state.utxos;
+
+    Ok(summary)
 }
 
 /// Canonical deep-copy helper for a single UTXO entry. Mirrors the Go twin
@@ -509,14 +525,15 @@ mod tests {
     use crate::io_utils::unique_temp_path;
 
     use super::{
-        chain_state_path, copy_utxo_entry, copy_utxo_set, load_chain_state, ChainState,
-        ChainStateDisk, CHAIN_STATE_FILE_NAME, STORE_ENVELOPE_CHAIN_STATE,
+        apply_connected_block, chain_state_path, copy_utxo_entry, copy_utxo_set, load_chain_state,
+        ChainState, ChainStateDisk, CHAIN_STATE_FILE_NAME, STORE_ENVELOPE_CHAIN_STATE,
     };
     use rubin_consensus::constants::POW_LIMIT;
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
     use rubin_consensus::{
         apply_non_coinbase_tx_basic_with_mtp, block_hash, block_subsidy, encode_compact_size,
-        merkle_root_txids, parse_block_bytes, parse_tx, Outpoint, UtxoEntry, BLOCK_HEADER_BYTES,
+        merkle_root_txids, parse_block_bytes, parse_tx, ConnectBlockBasicSummary,
+        InMemoryChainState, Outpoint, UtxoEntry, BLOCK_HEADER_BYTES,
     };
     use serde::Deserialize;
 
@@ -673,15 +690,67 @@ mod tests {
         block
     }
 
-    fn height_one_coinbase_only_block(prev_hash: [u8; 32]) -> Vec<u8> {
+    fn coinbase_only_block_with_supply(
+        height: u64,
+        already_generated: u64,
+        prev_hash: [u8; 32],
+    ) -> Vec<u8> {
         let witness_root = witness_merkle_root_wtxids(&[[0u8; 32]]).expect("witness root");
         let witness_commitment = witness_commitment_hash(witness_root);
-        let coinbase =
-            build_coinbase_tx(1, 0, &default_mine_address(), witness_commitment).expect("coinbase");
+        let coinbase = build_coinbase_tx(
+            height,
+            already_generated,
+            &default_mine_address(),
+            witness_commitment,
+        )
+        .expect("coinbase");
         let (_, coinbase_txid, _, consumed) = parse_tx(&coinbase).expect("parse coinbase");
         assert_eq!(consumed, coinbase.len());
         let merkle_root = merkle_root_txids(&[coinbase_txid]).expect("merkle root");
         build_block_bytes(prev_hash, merkle_root, POW_LIMIT, 1, &[coinbase])
+    }
+
+    fn height_one_coinbase_only_block(prev_hash: [u8; 32]) -> Vec<u8> {
+        coinbase_only_block_with_supply(1, 0, prev_hash)
+    }
+
+    fn nonzero_chainstate_for_supply_overflow() -> ChainState {
+        let mut state = ChainState {
+            has_tip: true,
+            height: 41,
+            tip_hash: [0x41; 32],
+            already_generated: 73,
+            utxos: HashMap::new(),
+        };
+        state.utxos.insert(
+            Outpoint {
+                txid: [0x42; 32],
+                vout: 3,
+            },
+            UtxoEntry {
+                value: 99,
+                covenant_type: 1,
+                covenant_data: vec![0x43; 4],
+                creation_height: 7,
+                created_by_coinbase: false,
+            },
+        );
+        state
+    }
+
+    fn connect_summary_with_supply(
+        already_generated: u128,
+        already_generated_n1: u128,
+    ) -> ConnectBlockBasicSummary {
+        ConnectBlockBasicSummary {
+            sum_fees: 17,
+            already_generated,
+            already_generated_n1,
+            utxo_count: 2,
+            post_state_digest: [0x44; 32],
+            sig_task_count: 0,
+            worker_panics: 0,
+        }
     }
 
     #[test]
@@ -1062,6 +1131,67 @@ mod tests {
             hex::encode(st.state_digest()),
             GENESIS_PLUS_HEIGHT_ONE_STATE_DIGEST_HEX
         );
+    }
+
+    #[test]
+    fn chainstate_supply_adapter_checks_all_values_before_any_mutation() {
+        let above_u64 = u128::from(u64::MAX) + 1;
+        let cases = [
+            (above_u64, 11, 12),
+            (11, above_u64, 12),
+            (11, 12, above_u64),
+        ];
+
+        for (work_supply, summary_supply, summary_supply_n1) in cases {
+            let mut state = nonzero_chainstate_for_supply_overflow();
+            let before = state.clone();
+            let mut work_utxos = HashMap::new();
+            work_utxos.insert(
+                Outpoint {
+                    txid: [0x99; 32],
+                    vout: 1,
+                },
+                UtxoEntry {
+                    value: 1,
+                    covenant_type: 0,
+                    covenant_data: vec![0x98],
+                    creation_height: 42,
+                    created_by_coinbase: true,
+                },
+            );
+
+            let result = apply_connected_block(
+                &mut state,
+                42,
+                [0x97; 32],
+                InMemoryChainState {
+                    utxos: work_utxos,
+                    already_generated: work_supply,
+                },
+                connect_summary_with_supply(summary_supply, summary_supply_n1),
+            );
+
+            assert_eq!(result.unwrap_err(), "already_generated overflow");
+            assert_eq!(state, before);
+        }
+    }
+
+    #[test]
+    fn chainstate_connect_supply_overflow_preserves_nonzero_state() {
+        const FIRST_TAIL_SUBSIDY_HEIGHT: u64 = 5_771_107;
+
+        let mut state = nonzero_chainstate_for_supply_overflow();
+        state.height = FIRST_TAIL_SUBSIDY_HEIGHT - 1;
+        state.tip_hash = [0x55; 32];
+        state.already_generated = u64::MAX;
+        let before = state.clone();
+        let block =
+            coinbase_only_block_with_supply(FIRST_TAIL_SUBSIDY_HEIGHT, u64::MAX, state.tip_hash);
+
+        let result = state.connect_block(&block, Some(POW_LIMIT), None, [0u8; 32]);
+
+        assert_eq!(result.unwrap_err(), "already_generated overflow");
+        assert_eq!(state, before);
     }
 
     /// RUB-1127: the reader contract for the shared widened `expect_sum_fees`

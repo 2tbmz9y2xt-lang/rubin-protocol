@@ -11,6 +11,26 @@ Policy:
 
 ---
 
+## 2026-08-09 — Exact u128 accumulated subsidy boundary (RUB-1128)
+
+Generator-owned: `clients/go/cmd/gen-conformance-fixtures` appends exactly
+`CV-SUB-SUPPLY-U128-01..03` to `CV-SUBSIDY.json`: the tail-subsidy crossing,
+the legacy numeric u64-max input with a canonical decimal-string result, and
+the otherwise-valid u128-max checked-add overflow. The shared runner forwards
+the authored token exactly and independently requires canonical decimal-string
+success outputs from both consensus CLIs through their existing u128 codecs.
+Regenerated with `scripts/dev-env.sh -- bash -lc 'cd clients/go && go run
+./cmd/gen-conformance-fixtures'`, `scripts/dev-env.sh -- python3
+tools/gen_conformance_matrix.py`, `scripts/dev-env.sh -- python3
+tools/formal/gen_lean_conformance_vectors.py`, `scripts/dev-env.sh -- bash -lc
+'cd clients/go && go run ./cmd/formal-trace --fixtures-dir
+../../conformance/fixtures --out ../../rubin-formal/traces/go_trace_v1.jsonl'`,
+and `scripts/dev-env.sh -- python3
+tools/formal/gen_lean_refinement_from_traces.py`. Trace regeneration is
+provenance-digest-only: all five `connect_block_basic` entry rows remain
+byte-for-byte unchanged. Non-goals: no durable state or format, Rust consensus,
+codec, devnet, undo, miner, recovery, operator, or specification change.
+
 ## 2026-08-06 — Widened sum_fees on the request path (RUB-1127)
 
 Generator-owned: `clients/go/cmd/gen-conformance-fixtures` appends

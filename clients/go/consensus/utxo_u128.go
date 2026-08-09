@@ -40,8 +40,8 @@ func (v Uint128) CheckedSub(other Uint128) (Uint128, bool) {
 	return Uint128{Hi: hi, Lo: lo}, true
 }
 
-// Big returns the exact value as a new big.Int. Used only for decimal
-// conversion; consensus comparisons use the fixed-width helpers below.
+// Big returns the exact value as a new independent big.Int for decimal rendering
+// and explicit bridging to existing arbitrary-precision subsidy/state code.
 func (v Uint128) Big() *big.Int {
 	b := new(big.Int).SetUint64(v.Hi)
 	b.Lsh(b, 64)

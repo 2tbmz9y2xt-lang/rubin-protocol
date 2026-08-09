@@ -6,6 +6,8 @@ from unittest import mock
 
 if __package__:
     from .run_cv_bundle import (
+        MAX_U128,
+        MAX_U64,
         RETIRED_GATES,
         is_retired_gate,
         known_gate_names,
@@ -17,6 +19,8 @@ if __package__:
     )
 else:
     from run_cv_bundle import (
+        MAX_U128,
+        MAX_U64,
         RETIRED_GATES,
         is_retired_gate,
         known_gate_names,
@@ -413,6 +417,271 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
             ],
         )
         self.assertFalse(skipped)
+
+
+class RunCvBundleSupplyTests(unittest.TestCase):
+    @staticmethod
+    def _connect_vector(
+        already_generated,
+        expected_n1=None,
+    ):
+        if expected_n1 is None:
+            expected_n1 = already_generated
+        return {
+            "id": "CV-SUPPLY-UNIT",
+            "op": "connect_block_basic",
+            "block_hex": "00",
+            "height": 1,
+            "already_generated": already_generated,
+            "utxos": [],
+            "expect_ok": True,
+            "expect_already_generated": already_generated,
+            "expect_already_generated_n1": expected_n1,
+        }
+
+    @staticmethod
+    def _run_with_responses(vector, responses):
+        seen = []
+        response_iter = iter(responses)
+
+        def fake_call_tool(_tool_path, req):
+            seen.append(req.copy())
+            return next(response_iter)
+
+        with mock.patch(
+            f"{validate_vector.__module__}.call_tool",
+            side_effect=fake_call_tool,
+        ):
+            problems, skipped = normalize_validation_result(
+                validate_vector(
+                    "CV-SUB",
+                    vector,
+                    Path("go-cli"),
+                    Path("rust-cli"),
+                    {},
+                )
+            )
+        return problems, skipped, seen
+
+    def test_supply_input_is_validated_and_forwarded_without_reencoding(self):
+        for op in ("block_basic_check_with_fees", "connect_block_basic"):
+            for token in (0, MAX_U64, str(MAX_U64 + 1)):
+                vector = {
+                    "id": "CV-SUPPLY-FORWARD",
+                    "op": op,
+                    "block_hex": "00",
+                    "height": 1,
+                    "already_generated": token,
+                    "expect_ok": True,
+                }
+                if op == "block_basic_check_with_fees":
+                    vector["sum_fees"] = 0
+                    responses = [{"ok": True}, {"ok": True}]
+                else:
+                    vector["utxos"] = []
+                    vector["expect_already_generated"] = token
+                    vector["expect_already_generated_n1"] = token
+                    responses = [
+                        {
+                            "ok": True,
+                            "already_generated": str(token),
+                            "already_generated_n1": str(token),
+                        },
+                        {
+                            "ok": True,
+                            "already_generated": str(token),
+                            "already_generated_n1": str(token),
+                        },
+                    ]
+
+                with self.subTest(op=op, token=token):
+                    problems, skipped, seen = self._run_with_responses(vector, responses)
+                    self.assertEqual(problems, [])
+                    self.assertFalse(skipped)
+                    self.assertEqual(len(seen), 2)
+                    for req in seen:
+                        self.assertEqual(req["already_generated"], token)
+                        self.assertIs(type(req["already_generated"]), type(token))
+
+    def test_supply_input_preserves_existing_omitted_default_zero(self):
+        for op in ("block_basic_check_with_fees", "connect_block_basic"):
+            vector = {
+                "id": "CV-SUPPLY-DEFAULT",
+                "op": op,
+                "block_hex": "00",
+                "height": 1,
+                "expect_ok": True,
+            }
+            if op == "block_basic_check_with_fees":
+                vector["sum_fees"] = 0
+                responses = [{"ok": True}, {"ok": True}]
+            else:
+                vector["utxos"] = []
+                responses = [
+                    {
+                        "ok": True,
+                        "already_generated": "0",
+                        "already_generated_n1": "0",
+                    },
+                    {
+                        "ok": True,
+                        "already_generated": "0",
+                        "already_generated_n1": "0",
+                    },
+                ]
+
+            with self.subTest(op=op):
+                problems, skipped, seen = self._run_with_responses(vector, responses)
+                self.assertEqual(problems, [])
+                self.assertFalse(skipped)
+                self.assertEqual([req["already_generated"] for req in seen], [0, 0])
+
+    def test_malformed_supply_input_fails_before_client_dispatch(self):
+        malformed = [
+            ("float", 1.5),
+            ("exponent", 1e1),
+            ("bool", True),
+            ("negative", -1),
+            ("null", None),
+            ("numeric-above-u64", MAX_U64 + 1),
+            ("empty", ""),
+            ("leading-zero", "01"),
+            ("plus", "+1"),
+            ("signed", "-1"),
+            ("leading-whitespace", " 1"),
+            ("trailing-whitespace", "1 "),
+            ("string-exponent", "1e1"),
+            ("string-above-u128", str(MAX_U128 + 1)),
+        ]
+        for op in ("block_basic_check_with_fees", "connect_block_basic"):
+            for label, token in malformed:
+                vector = {
+                    "id": "CV-SUPPLY-REJECT",
+                    "op": op,
+                    "block_hex": "00",
+                    "height": 1,
+                    "already_generated": token,
+                }
+                if op == "block_basic_check_with_fees":
+                    vector["sum_fees"] = 0
+                else:
+                    vector["utxos"] = []
+
+                with self.subTest(op=op, token=label):
+                    with mock.patch(
+                        f"{validate_vector.__module__}.call_tool"
+                    ) as call_tool:
+                        problems, skipped = normalize_validation_result(
+                            validate_vector(
+                                "CV-SUB",
+                                vector,
+                                Path("go-cli"),
+                                Path("rust-cli"),
+                                {},
+                            )
+                        )
+                    self.assertTrue(problems)
+                    self.assertFalse(skipped)
+                    call_tool.assert_not_called()
+
+    def test_connect_compares_exact_crossing_values(self):
+        crossing = "18446744073699181041"
+        crossing_n1 = "18446744073718206916"
+        vector = self._connect_vector(crossing, crossing_n1)
+        response = {
+            "ok": True,
+            "already_generated": crossing,
+            "already_generated_n1": crossing_n1,
+        }
+
+        problems, skipped, _seen = self._run_with_responses(
+            vector,
+            [response, response],
+        )
+
+        self.assertEqual(problems, [])
+        self.assertFalse(skipped)
+
+    def test_connect_rejects_each_clients_noncanonical_supply_output(self):
+        omitted = object()
+        malformed = [
+            ("omitted", omitted),
+            ("null", None),
+            ("numeric", 7),
+            ("bool", True),
+            ("empty", ""),
+            ("leading-zero", "07"),
+            ("signed", "-7"),
+            ("whitespace", " 7"),
+            ("exponent", "7e0"),
+            ("unreadable", []),
+            ("above-u128", str(MAX_U128 + 1)),
+        ]
+        for side_index, side in enumerate(("go", "rust")):
+            for field in ("already_generated", "already_generated_n1"):
+                for label, token in malformed:
+                    good = {
+                        "ok": True,
+                        "already_generated": "7",
+                        "already_generated_n1": "8",
+                    }
+                    bad = dict(good)
+                    if token is omitted:
+                        bad.pop(field)
+                    else:
+                        bad[field] = token
+                    responses = [good, good]
+                    responses[side_index] = bad
+
+                    with self.subTest(side=side, field=field, token=label):
+                        problems, skipped, _seen = self._run_with_responses(
+                            self._connect_vector(7, 8),
+                            responses,
+                        )
+                        self.assertFalse(skipped)
+                        self.assertTrue(
+                            any(f"{side}.{field}:" in problem for problem in problems),
+                            problems,
+                        )
+
+    def test_connect_same_wrong_canonical_values_cannot_false_pass(self):
+        crossing = "18446744073699181041"
+        crossing_n1 = "18446744073718206916"
+        vector = self._connect_vector(crossing, crossing_n1)
+        wrong = {
+            "ok": True,
+            "already_generated": str(MAX_U64),
+            "already_generated_n1": str(MAX_U64),
+        }
+
+        problems, skipped, _seen = self._run_with_responses(vector, [wrong, wrong])
+
+        self.assertFalse(skipped)
+        self.assertIn("CV-SUB/CV-SUPPLY-UNIT: go.expect_already_generated mismatch", problems)
+        self.assertIn("CV-SUB/CV-SUPPLY-UNIT: rust.expect_already_generated mismatch", problems)
+        self.assertIn("CV-SUB/CV-SUPPLY-UNIT: go.expect_already_generated_n1 mismatch", problems)
+        self.assertIn("CV-SUB/CV-SUPPLY-UNIT: rust.expect_already_generated_n1 mismatch", problems)
+
+    def test_block_basic_check_with_fees_does_not_require_post_supply_output(self):
+        token = str(MAX_U128)
+        vector = {
+            "id": "CV-SUPPLY-NONMUTATING",
+            "op": "block_basic_check_with_fees",
+            "block_hex": "00",
+            "height": 1,
+            "already_generated": token,
+            "sum_fees": 0,
+            "expect_ok": True,
+        }
+
+        problems, skipped, seen = self._run_with_responses(
+            vector,
+            [{"ok": True}, {"ok": True}],
+        )
+
+        self.assertEqual(problems, [])
+        self.assertFalse(skipped)
+        self.assertEqual([req["already_generated"] for req in seen], [token, token])
 
 
 if __name__ == "__main__":

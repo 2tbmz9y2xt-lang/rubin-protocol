@@ -95,7 +95,7 @@ type Request struct {
 	SigLength            int                      `json:"sig_length,omitempty"`
 	TxCount              int                      `json:"tx_count,omitempty"`
 	PubkeyLength         int                      `json:"pubkey_length,omitempty"`
-	AlreadyGenerated     uint64                   `json:"already_generated,omitempty"`
+	AlreadyGenerated     consensus.Uint128        `json:"already_generated,omitzero"`
 	SumFees              consensus.Uint128        `json:"sum_fees,omitzero"` // omitzero (not omitempty): encoding/json never treats a struct value as empty, so omitempty emitted "sum_fees":"0" where the pre-widening uint64 field omitted the key.
 	ChunkCount           int                      `json:"chunk_count,omitempty"`
 	TTLBlocks            int                      `json:"ttl_blocks,omitempty"`
@@ -503,8 +503,8 @@ type Response struct {
 	PoolLenAfter       *int               `json:"pool_len_after,omitempty"`
 	NoDupConflictCap   *bool              `json:"duplicate_conflict_capacity_checked,omitempty"`
 	Consumed           int                `json:"consumed,omitempty"`
-	AlreadyGenerated   uint64             `json:"already_generated,omitempty"`
-	AlreadyGeneratedN1 uint64             `json:"already_generated_n1,omitempty"`
+	AlreadyGenerated   *consensus.Uint128 `json:"already_generated,omitempty"`
+	AlreadyGeneratedN1 *consensus.Uint128 `json:"already_generated_n1,omitempty"`
 	TTL                int                `json:"ttl,omitempty"`
 	TTLResetCount      int                `json:"ttl_reset_count,omitempty"`
 	AnchorBytes        uint64             `json:"anchor_bytes"`
@@ -1944,7 +1944,7 @@ func runFromStdin() {
 
 		st := consensus.InMemoryChainState{
 			Utxos:            utxos,
-			AlreadyGenerated: new(big.Int).SetUint64(req.AlreadyGenerated),
+			AlreadyGenerated: req.AlreadyGenerated.Big(),
 		}
 
 		chainID, err := parseOptionalChainIDHex(req.ChainIDHex)
@@ -1982,8 +1982,8 @@ func runFromStdin() {
 			Ok:                 true,
 			SumFees:            u128PtrOmitZero(s.SumFees),
 			UtxoCount:          s.UtxoCount,
-			AlreadyGenerated:   s.AlreadyGenerated,
-			AlreadyGeneratedN1: s.AlreadyGeneratedN1,
+			AlreadyGenerated:   &s.AlreadyGenerated,
+			AlreadyGeneratedN1: &s.AlreadyGeneratedN1,
 			DigestHex:          hex.EncodeToString(s.PostStateDigest[:]),
 		})
 		return

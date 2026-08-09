@@ -242,8 +242,10 @@ struct Request {
     #[serde(default)]
     block_mtp: Option<u64>,
 
-    #[serde(default)]
-    already_generated: u64,
+    /// Legacy numeric tokens read up to u64; canonical decimal strings read
+    /// through u128 max. See `rubin_consensus::uint128_json`.
+    #[serde(default, deserialize_with = "uint128_json::deserialize")]
+    already_generated: u128,
 
     /// Legacy numeric tokens read up to u64; canonical decimal strings read
     /// through u128 max. See `rubin_consensus::uint128_json`.
@@ -718,11 +720,21 @@ struct Response {
     )]
     sum_fees: Option<u128>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    already_generated: Option<u64>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "uint128_json::serialize_opt",
+        deserialize_with = "uint128_json::deserialize_opt",
+        default
+    )]
+    already_generated: Option<u128>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    already_generated_n1: Option<u64>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "uint128_json::serialize_opt",
+        deserialize_with = "uint128_json::deserialize_opt",
+        default
+    )]
+    already_generated_n1: Option<u128>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     work: Option<String>,
@@ -3276,7 +3288,7 @@ fn main() {
                 expected_target,
                 req.height,
                 prev_timestamps,
-                u128::from(req.already_generated),
+                req.already_generated,
                 req.sum_fees,
             ) {
                 Ok(summary) => {
@@ -3449,7 +3461,7 @@ fn main() {
 
             let mut state = InMemoryChainState {
                 utxos: utxo_set,
-                already_generated: u128::from(req.already_generated),
+                already_generated: req.already_generated,
             };
 
             let mut chain_id = [0u8; 32];
@@ -3515,36 +3527,12 @@ fn main() {
                 registry.as_ref(),
             ) {
                 Ok(summary) => {
-                    let already_generated = match u64::try_from(summary.already_generated) {
-                        Ok(v) => v,
-                        Err(_) => {
-                            let resp = Response {
-                                ok: false,
-                                err: Some("already_generated_overflow".to_string()),
-                                ..Default::default()
-                            };
-                            let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                            return;
-                        }
-                    };
-                    let already_generated_n1 = match u64::try_from(summary.already_generated_n1) {
-                        Ok(v) => v,
-                        Err(_) => {
-                            let resp = Response {
-                                ok: false,
-                                err: Some("already_generated_overflow".to_string()),
-                                ..Default::default()
-                            };
-                            let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                            return;
-                        }
-                    };
                     let resp = Response {
                         ok: true,
                         sum_fees: Some(summary.sum_fees),
                         utxo_count: Some(summary.utxo_count),
-                        already_generated: Some(already_generated),
-                        already_generated_n1: Some(already_generated_n1),
+                        already_generated: Some(summary.already_generated),
+                        already_generated_n1: Some(summary.already_generated_n1),
                         digest: Some(hex::encode(summary.post_state_digest)),
                         ..Default::default()
                     };
@@ -5255,6 +5243,181 @@ fn encode_compact_size(n: u64) -> Vec<u8> {
 mod tests {
     use super::*;
     use std::fs;
+
+    const FIRST_TAIL_SUBSIDY_HEIGHT: u64 = 5_771_107;
+    const CROSSING_SUPPLY: u64 = 18_446_744_073_699_181_041;
+    const CROSSING_SUPPLY_N1: u128 = 18_446_744_073_718_206_916;
+    const U64_MAX_SUPPLY_N1: u128 = 18_446_744_073_728_577_490;
+
+    fn cli_supply_only_block(height: u64, already_generated: u64) -> Vec<u8> {
+        let witness_root = witness_merkle_root_wtxids(&[[0u8; 32]]).expect("coinbase witness root");
+        let witness_commitment = rubin_consensus::merkle::witness_commitment_hash(witness_root);
+        let coinbase = rubin_node::build_coinbase_tx(
+            height,
+            already_generated,
+            &rubin_node::default_mine_address(),
+            witness_commitment,
+        )
+        .expect("coinbase");
+        let (_, coinbase_txid, _, consumed) = parse_tx(&coinbase).expect("parse coinbase");
+        assert_eq!(consumed, coinbase.len());
+        let merkle_root = merkle_root_txids(&[coinbase_txid]).expect("coinbase merkle root");
+
+        let mut block =
+            Vec::with_capacity(rubin_consensus::BLOCK_HEADER_BYTES + coinbase.len() + 1);
+        block.extend_from_slice(&1u32.to_le_bytes());
+        block.extend_from_slice(&[0u8; 32]);
+        block.extend_from_slice(&merkle_root);
+        block.extend_from_slice(&1u64.to_le_bytes());
+        block.extend_from_slice(&rubin_consensus::constants::POW_LIMIT);
+        block.extend_from_slice(&0u64.to_le_bytes());
+        assert_eq!(block.len(), rubin_consensus::BLOCK_HEADER_BYTES);
+        rubin_consensus::encode_compact_size(1, &mut block);
+        block.extend_from_slice(&coinbase);
+        block
+    }
+
+    fn connect_cli_supply_block(
+        block: &[u8],
+        already_generated: u128,
+    ) -> Result<rubin_consensus::ConnectBlockBasicSummary, rubin_consensus::TxError> {
+        let mut state = InMemoryChainState {
+            utxos: HashMap::new(),
+            already_generated,
+        };
+        connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context(
+            block,
+            None,
+            Some(rubin_consensus::constants::POW_LIMIT),
+            FIRST_TAIL_SUBSIDY_HEIGHT,
+            None,
+            &mut state,
+            [0u8; 32],
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn cli_already_generated_json_rejects_malformed_before_dispatch() {
+        fn read(token: &str) -> Option<u128> {
+            let json = format!(r#"{{"op":"unknown","already_generated":{token}}}"#);
+            serde_json::from_str::<Request>(&json)
+                .ok()
+                .map(|request| request.already_generated)
+        }
+
+        assert_eq!(read("0"), Some(0));
+        assert_eq!(read(&u64::MAX.to_string()), Some(u128::from(u64::MAX)));
+        assert_eq!(read(r#""0""#), Some(0));
+        assert_eq!(
+            read(r#""18446744073709551616""#),
+            Some(u128::from(u64::MAX) + 1)
+        );
+        assert_eq!(read(&format!(r#""{}""#, u128::MAX)), Some(u128::MAX));
+
+        for token in [
+            "null",
+            "-1",
+            "1.0",
+            "1e1",
+            "01",
+            "18446744073709551616",
+            r#""""#,
+            r#""01""#,
+            r#""+1""#,
+            r#""-1""#,
+            r#"" 1""#,
+            r#""1 ""#,
+            r#""1.0""#,
+            r#""1e1""#,
+            r#""340282366920938463463374607431768211456""#,
+        ] {
+            assert_eq!(read(token), None, "accepted malformed token {token}");
+        }
+    }
+
+    #[test]
+    fn cli_already_generated_response_values_are_canonical_strings() {
+        for (already_generated, already_generated_n1) in [
+            (0, 1),
+            (u128::from(u64::MAX), u128::from(u64::MAX) + 1),
+            (u128::MAX, u128::MAX),
+        ] {
+            let encoded = serde_json::to_value(Response {
+                ok: true,
+                already_generated: Some(already_generated),
+                already_generated_n1: Some(already_generated_n1),
+                ..Default::default()
+            })
+            .expect("encode response");
+            assert_eq!(
+                encoded["already_generated"],
+                Value::String(already_generated.to_string())
+            );
+            assert_eq!(
+                encoded["already_generated_n1"],
+                Value::String(already_generated_n1.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn cli_connect_supply_crossing_and_legacy_u64_max_are_exact() {
+        for (already_generated, expected_n1) in [
+            (CROSSING_SUPPLY, CROSSING_SUPPLY_N1),
+            (u64::MAX, U64_MAX_SUPPLY_N1),
+        ] {
+            let block = cli_supply_only_block(FIRST_TAIL_SUBSIDY_HEIGHT, already_generated);
+            let summary = connect_cli_supply_block(&block, u128::from(already_generated))
+                .expect("connect subsidy-only block");
+            assert_eq!(summary.already_generated, u128::from(already_generated));
+            assert_eq!(summary.already_generated_n1, expected_n1);
+
+            let encoded = serde_json::to_value(Response {
+                ok: true,
+                sum_fees: Some(summary.sum_fees),
+                utxo_count: Some(summary.utxo_count),
+                already_generated: Some(summary.already_generated),
+                already_generated_n1: Some(summary.already_generated_n1),
+                ..Default::default()
+            })
+            .expect("encode connect response");
+            assert_eq!(
+                encoded["already_generated"],
+                Value::String(already_generated.to_string())
+            );
+            assert_eq!(
+                encoded["already_generated_n1"],
+                Value::String(expected_n1.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn cli_u128_max_preserves_earlier_error_and_nonmutating_check_order() {
+        let excessive_coinbase = cli_supply_only_block(FIRST_TAIL_SUBSIDY_HEIGHT, 0);
+        let err = connect_cli_supply_block(&excessive_coinbase, u128::MAX)
+            .expect_err("coinbase bound must precede supply addition");
+        assert_eq!(err.code, ErrorCode::BlockErrSubsidyExceeded);
+
+        let tail_coinbase = cli_supply_only_block(FIRST_TAIL_SUBSIDY_HEIGHT, u64::MAX);
+        validate_block_basic_with_context_and_fees_at_height(
+            &tail_coinbase,
+            None,
+            Some(rubin_consensus::constants::POW_LIMIT),
+            FIRST_TAIL_SUBSIDY_HEIGHT,
+            None,
+            u128::MAX,
+            0,
+        )
+        .expect("standalone validation must not add post-state supply");
+
+        let err = connect_cli_supply_block(&tail_coinbase, u128::MAX)
+            .expect_err("valid earlier checks must reach checked supply addition");
+        assert_eq!(err.code, ErrorCode::BlockErrParse);
+        assert_eq!(err.msg, "already_generated overflow");
+    }
 
     fn cli_test_rotation_suites() -> Vec<SuiteParamsJson> {
         vec![

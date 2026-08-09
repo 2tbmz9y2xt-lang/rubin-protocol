@@ -1,7 +1,5 @@
 package consensus
 
-import "math/big"
-
 // ConnectBlockParallelSigVerify connects a block against an in-memory UTXO
 // snapshot with parallel signature verification. This is an IBD-only
 // optimization: all fast pre-checks (UTXO lookup, covenant parse, witness
@@ -57,17 +55,9 @@ func ConnectBlockParallelSigVerifyWithSuiteContext(
 	registry *SuiteRegistry,
 	workers int,
 ) (*ConnectBlockBasicSummary, error) {
-	if state == nil {
-		return nil, txerr(BLOCK_ERR_PARSE, "nil chainstate")
-	}
-	if state.Utxos == nil {
-		state.Utxos = make(map[Outpoint]UtxoEntry)
-	}
-	if state.AlreadyGenerated == nil {
-		state.AlreadyGenerated = new(big.Int)
-	}
-	if state.AlreadyGenerated.Sign() < 0 {
-		return nil, txerr(BLOCK_ERR_PARSE, "already_generated must be unsigned")
+	alreadyGenerated, alreadyGeneratedU128, err := preflightInMemoryChainState(state)
+	if err != nil {
+		return nil, err
 	}
 	rot := rotation
 	if rot == nil {
@@ -95,7 +85,6 @@ func ConnectBlockParallelSigVerifyWithSuiteContext(
 		return nil, txerr(BLOCK_ERR_PARSE, "invalid parsed block")
 	}
 
-	alreadyGenerated := new(big.Int).Set(state.AlreadyGenerated)
 	blockMTP := pb.Header.Timestamp
 	if median, ok, err := medianTimePast(blockHeight, prevTimestamps); err != nil {
 		return nil, err
@@ -106,10 +95,7 @@ func ConnectBlockParallelSigVerifyWithSuiteContext(
 	// coinbase-only blocks (no non-coinbase txs) would insert coinbase outputs
 	// directly into state.Utxos before all fallible checks complete, leaving
 	// the caller's state partially mutated on error paths.
-	workUtxos := make(map[Outpoint]UtxoEntry, len(state.Utxos))
-	for k, v := range state.Utxos {
-		workUtxos[k] = v
-	}
+	workUtxos := cloneUtxoSet(state.Utxos)
 	if err := applyInMemoryCoinbaseOutputs(pb, workUtxos, blockHeight, chainID, rot); err != nil {
 		return nil, err
 	}
@@ -166,35 +152,22 @@ func ConnectBlockParallelSigVerifyWithSuiteContext(
 		return nil, err
 	}
 
-	// Update already_generated(h) -> already_generated(h+1) by adding subsidy(h).
-	alreadyGeneratedN1 := new(big.Int).Set(alreadyGenerated)
-	if blockHeight != 0 {
-		subsidy := BlockSubsidyBig(blockHeight, alreadyGenerated)
-		alreadyGeneratedN1 = new(big.Int).Add(alreadyGeneratedN1, new(big.Int).SetUint64(subsidy))
-	}
-	alreadyGeneratedU64, err := bigIntToUint64(alreadyGenerated)
+	// Update already_generated(h) -> already_generated(h+1) only after every
+	// earlier block, transaction, signature, and coinbase check has passed.
+	alreadyGeneratedN1, err := checkedAdvanceAlreadyGenerated(blockHeight, alreadyGeneratedU128, alreadyGenerated)
 	if err != nil {
-		return nil, txerr(BLOCK_ERR_PARSE, "already_generated overflow")
-	}
-	alreadyGeneratedN1U64, err := bigIntToUint64(alreadyGeneratedN1)
-	if err != nil {
-		return nil, txerr(BLOCK_ERR_PARSE, "already_generated overflow")
+		return nil, err
 	}
 
-	state.Utxos = workUtxos
-	if blockHeight != 0 {
-		state.AlreadyGenerated = new(big.Int).Set(alreadyGeneratedN1)
-	}
-
-	return &ConnectBlockBasicSummary{
-		SumFees:            sumFees,
-		AlreadyGenerated:   alreadyGeneratedU64,
-		AlreadyGeneratedN1: alreadyGeneratedN1U64,
-		UtxoCount:          uint64(len(state.Utxos)),
-		PostStateDigest:    UtxoSetHash(state.Utxos),
-		SigTaskCount:       sigTaskCount,
-		WorkerPanics:       workerPanics,
-	}, nil
+	return commitInMemoryConnectSummary(
+		state,
+		workUtxos,
+		alreadyGeneratedU128,
+		alreadyGeneratedN1,
+		sumFees,
+		sigTaskCount,
+		workerPanics,
+	), nil
 }
 
 // applyNonCoinbaseTxBasicUpdateWithMTPQ is the queue-aware

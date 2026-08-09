@@ -217,6 +217,8 @@ func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 	writeFixture("CV-SUBSIDY.json", []map[string]any{
 		newVector("CV-SUB-01", 1, map[string]any{"expected_prev_hash": mkTxid(0x00)}),
 		newVector("CV-SUB-02", 1, map[string]any{"expected_prev_hash": mkTxid(0x00)}),
+		newVector("CV-SUB-SUPPLY-U128-01", 1, map[string]any{"op": "stale", "height": float64(1), "already_generated": "stale",
+			"expect_ok": false, "expect_err": "STALE", "expected_target": "stale", "stale_extra": true}),
 	})
 
 	wd, err := os.Getwd()
@@ -269,6 +271,76 @@ func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 	mustContainField(filepath.Join("devnet", "devnet-htlc-claim-01.json"), "chain_id_hex")
 	mustContainField(filepath.Join("devnet", "devnet-multisig-spend-01.json"), "tx_hex")
 	mustContainField(filepath.Join("devnet", "devnet-multisig-spend-01.json"), "chain_id_hex")
+
+	subsidyRaw, err := os.ReadFile(filepath.Join(fixturesDir, "CV-SUBSIDY.json"))
+	if err != nil {
+		t.Fatalf("read CV-SUBSIDY.json: %v", err)
+	}
+	subsidyFixture, err := decodeFixture(subsidyRaw)
+	if err != nil {
+		t.Fatalf("decode CV-SUBSIDY.json: %v", err)
+	}
+	vectorByID := make(map[string]map[string]any, len(subsidyFixture.Vectors))
+	for _, vector := range subsidyFixture.Vectors {
+		id, ok := vector["id"].(string)
+		if !ok || id == "" {
+			t.Fatalf("generated subsidy vector has empty or non-string id: %#v", vector["id"])
+		}
+		if _, exists := vectorByID[id]; exists {
+			t.Fatalf("duplicate generated subsidy vector id %q", id)
+		}
+		if strings.HasPrefix(id, "CV-SUB-SUPPLY-U128-") && id != "CV-SUB-SUPPLY-U128-01" &&
+			id != "CV-SUB-SUPPLY-U128-02" && id != "CV-SUB-SUPPLY-U128-03" {
+			t.Fatalf("unexpected generated supply vector id %q", id)
+		}
+		vectorByID[id] = vector
+	}
+	for _, id := range []string{"CV-SUB-01", "CV-SUB-02"} {
+		if got := vectorByID[id]["already_generated"]; got != json.Number("0") {
+			t.Fatalf("%s already_generated=%#v, want exact numeric token 0", id, got)
+		}
+	}
+	assertSupplyFields := func(id string, want map[string]any) {
+		t.Helper()
+		vector, ok := vectorByID[id]
+		if !ok {
+			t.Fatalf("missing generated vector %s", id)
+		}
+		for field, expected := range want {
+			if got := vector[field]; got != expected {
+				t.Fatalf("%s.%s=%#v, want %#v", id, field, got, expected)
+			}
+		}
+		if blockHex, _ := vector["block_hex"].(string); blockHex == "" {
+			t.Fatalf("%s missing generated block_hex", id)
+		}
+	}
+	assertSupplyFields("CV-SUB-SUPPLY-U128-01", map[string]any{
+		"op":                          "connect_block_basic",
+		"height":                      json.Number("5771107"),
+		"expected_target":             nil,
+		"already_generated":           "18446744073699181041",
+		"expect_ok":                   true,
+		"expect_already_generated":    "18446744073699181041",
+		"expect_already_generated_n1": "18446744073718206916",
+	})
+	for _, field := range []string{"expect_err", "stale_extra"} {
+		if _, exists := vectorByID["CV-SUB-SUPPLY-U128-01"][field]; exists {
+			t.Fatalf("authoritative supply vector retained stale field %q", field)
+		}
+	}
+	assertSupplyFields("CV-SUB-SUPPLY-U128-02", map[string]any{
+		"already_generated":           json.Number("18446744073709551615"),
+		"expect_already_generated":    "18446744073709551615",
+		"expect_already_generated_n1": "18446744073728577490",
+	})
+	assertSupplyFields("CV-SUB-SUPPLY-U128-03", map[string]any{
+		"already_generated": "340282366920938463463374607431768211455",
+		"expect_err":        "BLOCK_ERR_PARSE",
+	})
+	if !bytes.Contains(subsidyRaw, []byte(`"already_generated": 18446744073709551615`)) {
+		t.Fatal("legacy u64-max already_generated token was quoted or rounded")
+	}
 }
 
 // TestDevnetVaultCreateArtifactSignedUnderDevnetChainID validates the

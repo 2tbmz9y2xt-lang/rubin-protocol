@@ -28,6 +28,20 @@ def blockSubsidy (height : Nat) (alreadyGenerated : Nat) : Nat :=
     let baseReward := Nat.shiftRight remaining EMISSION_SPEED_FACTOR
     if baseReward < TAIL_EMISSION_PER_BLOCK then TAIL_EMISSION_PER_BLOCK else baseReward
 
+def maxSupplyU128 : Nat := (2 ^ 128) - 1
+
+def accumulatedSubsidy : Nat → Nat
+  | 0 => 0
+  | height + 1 =>
+      accumulatedSubsidy height + blockSubsidy height (accumulatedSubsidy height)
+
+def checkedSupplyAfterBlock (height alreadyGenerated : Nat) : Except String Nat :=
+  let alreadyGeneratedN1 := alreadyGenerated + blockSubsidy height alreadyGenerated
+  if alreadyGeneratedN1 ≤ maxSupplyU128 then
+    .ok alreadyGeneratedN1
+  else
+    .error "BLOCK_ERR_PARSE"
+
 def isCanonicalCoinbase (tx : RubinFormal.UtxoBasicV1.Tx) : Bool :=
   if tx.txKind != 0x00 then false
   else if tx.txNonce != 0 then false
@@ -158,7 +172,12 @@ def connectBlockBasic
                       match connectBlockTxs pb.txs.tail seeded height pb.header.timestamp chainId with
                       | .error e => .error e
                       | .ok (sumFees, _finalMap) =>
-                          validateCoinbaseValueBound pb.coinbaseTx height alreadyGenerated sumFees
+                          match validateCoinbaseValueBound pb.coinbaseTx height alreadyGenerated sumFees with
+                          | .error e => .error e
+                          | .ok () =>
+                              match checkedSupplyAfterBlock height alreadyGenerated with
+                              | .error e => .error e
+                              | .ok _alreadyGeneratedN1 => .ok ()
 
 def connectBlockEndToEndStatement : Prop :=
   ∀ (blockBytes : Bytes)
@@ -168,7 +187,7 @@ def connectBlockEndToEndStatement : Prop :=
     (chainId : Bytes)
     (pb : BlockBasicV1.ParsedBlock)
     (coinbase : Tx)
-    (sumFees : Nat)
+    (sumFees alreadyGeneratedN1 : Nat)
     (finalMap : Std.RBMap Outpoint UtxoEntry cmpOutpoint),
       BlockBasicV1.validateBlockBasic blockBytes expectedPrevHash expectedTarget = .ok () →
       BlockBasicV1.parseBlock blockBytes = .ok pb →
@@ -179,12 +198,13 @@ def connectBlockEndToEndStatement : Prop :=
         (seedParsedCoinbaseOutputs coinbase.outputs (pb.txids.getD 0 ByteArray.empty) height (buildUtxoMap utxos))
         height pb.header.timestamp chainId = .ok (sumFees, finalMap) →
       validateCoinbaseValueBound pb.coinbaseTx height alreadyGenerated sumFees = .ok () →
+      checkedSupplyAfterBlock height alreadyGenerated = .ok alreadyGeneratedN1 →
       connectBlockBasic blockBytes expectedPrevHash expectedTarget height alreadyGenerated utxos chainId = .ok ()
 
 theorem connectBlock_end_to_end_proved : connectBlockEndToEndStatement := by
-  intro blockBytes expectedPrevHash expectedTarget height alreadyGenerated utxos chainId pb coinbase sumFees finalMap
-    hBasic hParse hLock hApply hCoinbase hLoop hBound
-  simp [connectBlockBasic, hBasic, hParse, hLock, hApply, hCoinbase, hLoop, hBound]
+  intro blockBytes expectedPrevHash expectedTarget height alreadyGenerated utxos chainId pb coinbase sumFees
+    alreadyGeneratedN1 finalMap hBasic hParse hLock hApply hCoinbase hLoop hBound hSupply
+  simp [connectBlockBasic, hBasic, hParse, hLock, hApply, hCoinbase, hLoop, hBound, hSupply]
 
 def blockBasicCheckWithFees
     (blockBytes : Bytes)
