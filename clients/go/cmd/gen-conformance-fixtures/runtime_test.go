@@ -217,8 +217,10 @@ func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 	writeFixture("CV-SUBSIDY.json", []map[string]any{
 		newVector("CV-SUB-01", 1, map[string]any{"expected_prev_hash": mkTxid(0x00)}),
 		newVector("CV-SUB-02", 1, map[string]any{"expected_prev_hash": mkTxid(0x00)}),
-		newVector("CV-SUB-SUPPLY-U128-01", 1, map[string]any{"op": "stale", "height": float64(1), "already_generated": "stale",
-			"expect_ok": false, "expect_err": "STALE", "expected_target": "stale", "stale_extra": true}),
+		newVector("CV-SUB-SUPPLY-U128-01", 1, map[string]any{
+			"op": "stale", "height": float64(1), "already_generated": "stale",
+			"expect_ok": false, "expect_err": "STALE", "expected_target": "stale", "stale_extra": true,
+		}),
 	})
 
 	wd, err := os.Getwd()
