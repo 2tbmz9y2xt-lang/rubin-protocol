@@ -187,7 +187,7 @@ theorem subsidy_accumulation_in_u128 (h : Nat) (hHeight : h ≤ maxU64) :
     calc
       2 ^ 117 = (2 ^ 117) * 1 := by simp
       _ < (2 ^ 117) * (2 ^ 11) :=
-        Nat.mul_lt_mul_of_pos_left (by decide) hPow117Pos
+        Nat.mul_lt_mul_of_pos_left (by native_decide) hPow117Pos
       _ = 2 ^ 128 := (Nat.pow_add 2 117 11).symm
   have hAccumulatedBound := hAccumulated h
   have hU128 : SubsidyV1.accumulatedSubsidy (h + 1) ≤ maxU128 := by
