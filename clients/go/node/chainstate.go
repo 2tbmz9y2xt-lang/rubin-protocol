@@ -45,8 +45,9 @@ func init() {
 }
 
 const (
-	chainStateDiskVersion = 1
-	chainStateFileName    = "chainstate.json"
+	chainStateDiskVersionV1 = 1
+	chainStateDiskVersion   = 2
+	chainStateFileName      = "chainstate.json"
 )
 
 type ChainState struct {
@@ -54,7 +55,7 @@ type ChainState struct {
 	mu               sync.RWMutex
 	Utxos            map[consensus.Outpoint]consensus.UtxoEntry
 	Height           uint64
-	AlreadyGenerated uint64
+	AlreadyGenerated consensus.Uint128
 	TipHash          [32]byte
 	HasTip           bool
 	Rotation         consensus.RotationProvider
@@ -77,8 +78,8 @@ type ChainStateConnectSummary struct {
 	BlockHeight        uint64
 	BlockHash          [32]byte
 	SumFees            consensus.Uint128
-	AlreadyGenerated   uint64
-	AlreadyGeneratedN1 uint64
+	AlreadyGenerated   consensus.Uint128
+	AlreadyGeneratedN1 consensus.Uint128
 	UtxoCount          uint64
 	// CanonicalAppliedBlocks is populated ONLY by the SyncEngine canonical-apply
 	// path, in canonical order: a direct apply reports the single connected
@@ -191,12 +192,12 @@ func (s blockDASetTally) complete() bool {
 }
 
 type chainStateDisk struct {
-	TipHash          string          `json:"tip_hash"`
-	Utxos            []utxoDiskEntry `json:"utxos"`
-	Height           uint64          `json:"height"`
-	AlreadyGenerated uint64          `json:"already_generated"`
-	Version          uint32          `json:"version"`
-	HasTip           bool            `json:"has_tip"`
+	TipHash          string            `json:"tip_hash"`
+	Utxos            []utxoDiskEntry   `json:"utxos"`
+	Height           uint64            `json:"height"`
+	AlreadyGenerated consensus.Uint128 `json:"already_generated"`
+	Version          uint32            `json:"version"`
+	HasTip           bool              `json:"has_tip"`
 }
 
 type utxoDiskEntry struct {
@@ -213,7 +214,7 @@ type chainStateView struct {
 	hasTip           bool
 	height           uint64
 	tipHash          [32]byte
-	alreadyGenerated uint64
+	alreadyGenerated consensus.Uint128
 	utxoCount        int
 }
 

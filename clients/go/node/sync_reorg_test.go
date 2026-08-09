@@ -218,7 +218,7 @@ func directTipMTPTestBlock(t *testing.T, engine *SyncEngine, target [32]byte, ti
 	t.Helper()
 	view := engine.chainState.view()
 	height := view.height + 1
-	subsidy := consensus.BlockSubsidy(height, view.alreadyGenerated)
+	subsidy := consensus.BlockSubsidyBig(height, view.alreadyGenerated.Big())
 	return buildSingleTxBlock(t, view.tipHash, target, timestamp, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, subsidy))
 }
 
@@ -3640,7 +3640,7 @@ func TestPreparePreferredBranchRetainsCompactRowsWithoutUtxoSnapshots(t *testing
 		t.Fatalf("rows=%d disconnected=%d depth=%d, want 2/1/1", len(rows), len(disconnected), reorgDepth)
 	}
 
-	prior := canonicalTipScalars{hasTip: true, height: forkHeight, tipHash: forkHash, alreadyGenerated: forkGenerated}
+	prior := canonicalTipScalars{hasTip: true, height: forkHeight, tipHash: forkHash, alreadyGenerated: consensus.Uint128FromU64(forkGenerated)}
 	for i := range rows {
 		row := &rows[i]
 		if row.priorTip != prior {
@@ -3745,7 +3745,7 @@ func TestApplyBlockWithReorgPendingOutpointCompactRowsPersistAndUndo(t *testing.
 		}
 	}
 	view := f.engine.chainState.view()
-	if view.height != forkHeight || view.tipHash != forkHash || view.alreadyGenerated != forkGenerated {
+	if view.height != forkHeight || view.tipHash != forkHash || view.alreadyGenerated != consensus.Uint128FromU64(forkGenerated) {
 		t.Fatalf("chainstate after disconnecting the branch=(%d,%x,generated=%d), want the fork point (%d,%x,%d)",
 			view.height, view.tipHash, view.alreadyGenerated, forkHeight, forkHash, forkGenerated)
 	}
@@ -3861,5 +3861,98 @@ func TestPreferredReorgCorruptUndoLeavesStateUnchanged(t *testing.T) {
 	}
 	if got := engine.ReorgCount(); got != beforeReorgCount+1 {
 		t.Fatalf("ReorgCount after restored reorg=%d, want %d", got, beforeReorgCount+1)
+	}
+}
+
+func TestPreferredReorgPreservesWideSupplyAndFailsAtomicallyOnCorruptUndo(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+	wide := consensus.Uint128{Hi: 1, Lo: 17}
+	engine.chainState.AlreadyGenerated = wide
+	if err := engine.chainState.Save(engine.cfg.ChainStatePath); err != nil {
+		t.Fatalf("Save(wide genesis): %v", err)
+	}
+	subsidy := consensus.BlockSubsidyBig(1, wide.Big())
+	base := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1),
+		coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy))
+	first := blockWithHeaderNonce(t, base, 1)
+	second := blockWithHeaderNonce(t, base, 2)
+	_, firstHash := mustParseReorgBlockForTest(t, first)
+	_, secondHash := mustParseReorgBlockForTest(t, second)
+	canonical, canonicalHash, side, sideHash := first, firstHash, second, secondHash
+	if bytes.Compare(firstHash[:], secondHash[:]) > 0 {
+		canonical, canonicalHash, side, sideHash = second, secondHash, first, firstHash
+	}
+	canonicalSummary, err := engine.ApplyBlock(canonical, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(canonical): %v", err)
+	}
+	if canonicalSummary.BlockHash != canonicalHash {
+		t.Fatal("canonical hash mismatch")
+	}
+	if _, err := engine.ApplyBlockWithReorg(side, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(side height 1): %v", err)
+	}
+	side2 := buildSingleTxBlock(t, sideHash, target, reorgTestTimestamp(2),
+		coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy))
+
+	beforeState, err := stateToDisk(engine.chainState)
+	if err != nil {
+		t.Fatalf("stateToDisk(before): %v", err)
+	}
+	beforeIndex, err := store.CanonicalIndexSnapshot()
+	if err != nil {
+		t.Fatalf("CanonicalIndexSnapshot(before): %v", err)
+	}
+	beforeSnapshot, err := os.ReadFile(engine.cfg.ChainStatePath)
+	if err != nil {
+		t.Fatalf("ReadFile(chainstate before): %v", err)
+	}
+	corrupt, original := corruptStoredUndoChecksum(t, store, canonicalHash)
+	if _, err := engine.ApplyBlockWithReorg(side2, nil); !errors.Is(err, ErrUndoIntegrity) {
+		t.Fatalf("corrupt-undo reorg err=%v, want UNDO_INTEGRITY", err)
+	}
+	if got, err := stateToDisk(engine.chainState); err != nil || !reflect.DeepEqual(got, beforeState) {
+		t.Fatalf("chainstate changed on corrupt undo: state=%+v err=%v", got, err)
+	}
+	if got, err := store.CanonicalIndexSnapshot(); err != nil || !reflect.DeepEqual(got, beforeIndex) {
+		t.Fatalf("canonical index changed on corrupt undo: index=%v err=%v", got, err)
+	}
+	afterSnapshot, err := os.ReadFile(engine.cfg.ChainStatePath)
+	if err != nil || !bytes.Equal(afterSnapshot, beforeSnapshot) {
+		t.Fatalf("chainstate bytes changed on corrupt undo: err=%v", err)
+	}
+	undoPath := filepath.Join(store.undoDir, hex.EncodeToString(canonicalHash[:])+".json")
+	if afterUndo, err := os.ReadFile(undoPath); err != nil || !bytes.Equal(afterUndo, corrupt) {
+		t.Fatalf("corrupt undo was rewritten: err=%v", err)
+	}
+	if err := os.WriteFile(undoPath, original, 0o600); err != nil {
+		t.Fatalf("restore undo: %v", err)
+	}
+
+	reorgSummary, err := engine.ApplyBlockWithReorg(side2, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlockWithReorg(valid): %v", err)
+	}
+	wantFinal, ok := wide.CheckedAdd(consensus.Uint128FromU64(2 * subsidy))
+	if !ok || reorgSummary.AlreadyGeneratedN1 != wantFinal || engine.chainState.AlreadyGenerated != wantFinal {
+		t.Fatalf("reorg supply summary=%s state=%s, want %s", reorgSummary.AlreadyGeneratedN1.String(), engine.chainState.AlreadyGenerated.String(), wantFinal.String())
+	}
+	firstDisconnect, err := engine.DisconnectTip()
+	if err != nil {
+		t.Fatalf("DisconnectTip(side2): %v", err)
+	}
+	wantSide1, ok := wide.CheckedAdd(consensus.Uint128FromU64(subsidy))
+	if !ok {
+		t.Fatal("test setup overflowed u128")
+	}
+	if firstDisconnect.AlreadyGenerated != wantSide1 {
+		t.Fatalf("first disconnect supply=%s, want %s", firstDisconnect.AlreadyGenerated.String(), wantSide1.String())
+	}
+	secondDisconnect, err := engine.DisconnectTip()
+	if err != nil {
+		t.Fatalf("DisconnectTip(side1): %v", err)
+	}
+	if secondDisconnect.AlreadyGenerated != wide || engine.chainState.AlreadyGenerated != wide {
+		t.Fatalf("second disconnect supply summary=%s state=%s, want %s", secondDisconnect.AlreadyGenerated.String(), engine.chainState.AlreadyGenerated.String(), wide.String())
 	}
 }

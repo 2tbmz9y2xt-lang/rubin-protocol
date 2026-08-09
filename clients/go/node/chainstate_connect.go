@@ -147,7 +147,7 @@ func (s *ChainState) connectBlockWorkStateLocked(copyUtxos bool) (uint64, *[32]b
 	}
 	return blockHeight, expectedPrevHash, consensus.InMemoryChainState{
 		Utxos:            utxos,
-		AlreadyGenerated: new(big.Int).SetUint64(s.AlreadyGenerated),
+		AlreadyGenerated: s.AlreadyGenerated.Big(),
 	}, nil
 }
 
@@ -160,15 +160,7 @@ func connectedBlockHash(blockBytes []byte) ([32]byte, error) {
 }
 
 func (s *ChainState) applyConnectedBlockLocked(blockHeight uint64, blockHash [32]byte, workState *consensus.InMemoryChainState, summary *consensus.ConnectBlockBasicSummary) (*ChainStateConnectSummary, error) {
-	alreadyGeneratedState, err := bigIntToUint64Exact(workState.AlreadyGenerated)
-	if err != nil {
-		return nil, err
-	}
-	alreadyGenerated, err := uint128ToUint64Exact(summary.AlreadyGenerated)
-	if err != nil {
-		return nil, err
-	}
-	alreadyGeneratedN1, err := uint128ToUint64Exact(summary.AlreadyGeneratedN1)
+	alreadyGeneratedState, err := bigIntToUint128Exact(workState.AlreadyGenerated)
 	if err != nil {
 		return nil, err
 	}
@@ -176,8 +168,8 @@ func (s *ChainState) applyConnectedBlockLocked(blockHeight uint64, blockHash [32
 		BlockHeight:        blockHeight,
 		BlockHash:          blockHash,
 		SumFees:            summary.SumFees,
-		AlreadyGenerated:   alreadyGenerated,
-		AlreadyGeneratedN1: alreadyGeneratedN1,
+		AlreadyGenerated:   summary.AlreadyGenerated,
+		AlreadyGeneratedN1: summary.AlreadyGeneratedN1,
 		UtxoCount:          summary.UtxoCount,
 		PostStateDigest:    summary.PostStateDigest,
 		SigTaskCount:       summary.SigTaskCount,
@@ -192,16 +184,13 @@ func (s *ChainState) applyConnectedBlockLocked(blockHeight uint64, blockHash [32
 	return out, nil
 }
 
-func bigIntToUint64Exact(value *big.Int) (uint64, error) {
-	if value.Sign() < 0 || !value.IsUint64() {
-		return 0, errors.New("already_generated overflow")
+func bigIntToUint128Exact(value *big.Int) (consensus.Uint128, error) {
+	if value == nil || value.Sign() < 0 || value.BitLen() > 128 {
+		return consensus.Uint128{}, errors.New("already_generated overflow")
 	}
-	return value.Uint64(), nil
-}
-
-func uint128ToUint64Exact(value consensus.Uint128) (uint64, error) {
-	if value.Hi != 0 {
-		return 0, errors.New("already_generated overflow")
+	out, err := consensus.ParseUint128Decimal(value.String())
+	if err != nil {
+		return consensus.Uint128{}, errors.New("already_generated overflow")
 	}
-	return value.Lo, nil
+	return out, nil
 }

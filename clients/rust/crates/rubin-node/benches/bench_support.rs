@@ -111,7 +111,7 @@ fn build_block_bytes(
 
 fn block_with_txs(
     height: u64,
-    already_generated: u64,
+    already_generated: u128,
     prev_hash: [u8; 32],
     timestamp: u64,
     txs: &[Vec<u8>],

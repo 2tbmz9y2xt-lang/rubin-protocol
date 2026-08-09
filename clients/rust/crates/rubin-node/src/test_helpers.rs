@@ -48,7 +48,7 @@ pub fn genesis_info() -> (Vec<u8>, [u8; 32], u64) {
 /// Build a valid coinbase-only block at a given height with explicit already_generated.
 pub fn coinbase_only_block_with_gen(
     height: u64,
-    already_generated: u64,
+    already_generated: impl TryInto<u128>,
     prev_hash: [u8; 32],
     timestamp: u64,
 ) -> Vec<u8> {
@@ -69,7 +69,7 @@ pub fn coinbase_only_block_with_gen(
 
 pub fn block_with_txs(
     height: u64,
-    already_generated: u64,
+    already_generated: impl TryInto<u128>,
     prev_hash: [u8; 32],
     timestamp: u64,
     txs: &[Vec<u8>],

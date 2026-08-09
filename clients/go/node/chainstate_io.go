@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"crypto/sha3"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -54,7 +56,7 @@ func stateToDisk(s *ChainState) (chainStateDisk, error) {
 }
 
 func chainStateFromDisk(disk chainStateDisk) (*ChainState, error) {
-	if disk.Version != chainStateDiskVersion {
+	if disk.Version != chainStateDiskVersionV1 && disk.Version != chainStateDiskVersion {
 		return nil, fmt.Errorf("unsupported chainstate version: %d", disk.Version)
 	}
 
@@ -117,11 +119,276 @@ func LoadChainState(path string) (*ChainState, error) {
 	if err != nil {
 		return nil, err
 	}
-	var disk chainStateDisk
-	if err := json.Unmarshal(payload, &disk); err != nil {
-		return nil, fmt.Errorf("decode chainstate: %w", err)
+	disk, err := decodeChainStateDisk(payload)
+	if err != nil {
+		return nil, err
 	}
 	return chainStateFromDisk(disk)
+}
+
+type chainStateSchemaFields struct {
+	version                   json.RawMessage
+	alreadyGenerated          json.RawMessage
+	utxos                     json.RawMessage
+	versionSeen               bool
+	alreadyGeneratedSeen      bool
+	versionDuplicate          bool
+	alreadyGeneratedDuplicate bool
+	versionNull               bool
+	alreadyGeneratedNull      bool
+	remainingSeen             uint8
+	remainingDuplicate        bool
+	remainingNull             bool
+	unknown                   bool
+}
+
+const (
+	chainStatePayloadNotCanonical = "CHAINSTATE_SCHEMA: payload is not the canonical encoding"
+	chainStateTipHashField        = 1 << iota
+	chainStateUtxosField
+	chainStateHeightField
+	chainStateHasTipField
+	chainStateRemainingFields = chainStateTipHashField | chainStateUtxosField | chainStateHeightField | chainStateHasTipField
+)
+
+func decodeChainStateDisk(payload []byte) (chainStateDisk, error) {
+	fields, err := collectChainStateSchemaFields(payload)
+	if err != nil {
+		return chainStateDisk{}, err
+	}
+	version, err := parseChainStateVersion(fields)
+	if err != nil {
+		return chainStateDisk{}, err
+	}
+	alreadyGenerated, err := parseChainStateAlreadyGenerated(fields, version)
+	if err != nil {
+		return chainStateDisk{}, err
+	}
+	if err := validateChainStateRemainingSchema(fields); err != nil {
+		return chainStateDisk{}, err
+	}
+	var disk chainStateDisk
+	if err := json.Unmarshal(payload, &disk); err != nil {
+		return chainStateDisk{}, errors.New(chainStatePayloadNotCanonical)
+	}
+	if chainStateHasEdgeASCIIWhitespace(disk) {
+		return chainStateDisk{}, errors.New(chainStatePayloadNotCanonical)
+	}
+	disk.Version = version
+	disk.AlreadyGenerated = alreadyGenerated
+	return disk, nil
+}
+
+func collectChainStateSchemaFields(payload []byte) (chainStateSchemaFields, error) {
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	first, err := dec.Token()
+	if err != nil {
+		return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
+	}
+	if delim, ok := first.(json.Delim); !ok || delim != '{' {
+		return chainStateSchemaFields{}, errors.New("decode chainstate: top-level value must be an object")
+	}
+	var fields chainStateSchemaFields
+	for dec.More() {
+		keyToken, err := dec.Token()
+		if err != nil {
+			return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return chainStateSchemaFields{}, errors.New("decode chainstate: object key must be a string")
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
+		}
+		fields.record(key, raw)
+	}
+	if _, err := dec.Token(); err != nil {
+		return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
+	}
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); err != io.EOF {
+		return chainStateSchemaFields{}, errors.New("decode chainstate: trailing content")
+	}
+	return fields, nil
+}
+
+func chainStateHasEdgeASCIIWhitespace(disk chainStateDisk) bool {
+	trim := func(value string) string { return strings.Trim(value, " \t\r\n\v\f") }
+	if trim(disk.TipHash) != disk.TipHash {
+		return true
+	}
+	for _, item := range disk.Utxos {
+		if trim(item.Txid) != item.Txid || trim(item.CovenantData) != item.CovenantData {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *chainStateSchemaFields) record(key string, raw json.RawMessage) {
+	isNull := bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+	switch key {
+	case "version":
+		if f.versionSeen {
+			f.versionDuplicate = true
+		} else {
+			f.version = append(json.RawMessage(nil), raw...)
+		}
+		f.versionSeen = true
+		f.versionNull = f.versionNull || isNull
+	case "already_generated":
+		if f.alreadyGeneratedSeen {
+			f.alreadyGeneratedDuplicate = true
+		} else {
+			f.alreadyGenerated = append(json.RawMessage(nil), raw...)
+		}
+		f.alreadyGeneratedSeen = true
+		f.alreadyGeneratedNull = f.alreadyGeneratedNull || isNull
+	case "tip_hash":
+		f.recordRemaining(chainStateTipHashField, raw)
+	case "utxos":
+		if f.remainingSeen&chainStateUtxosField == 0 {
+			f.utxos = append(json.RawMessage(nil), raw...)
+		}
+		f.recordRemaining(chainStateUtxosField, raw)
+	case "height":
+		f.recordRemaining(chainStateHeightField, raw)
+	case "has_tip":
+		f.recordRemaining(chainStateHasTipField, raw)
+	default:
+		f.unknown = true
+	}
+}
+
+func (f *chainStateSchemaFields) recordRemaining(field uint8, raw json.RawMessage) {
+	if f.remainingSeen&field != 0 {
+		f.remainingDuplicate = true
+	}
+	f.remainingSeen |= field
+	f.remainingNull = f.remainingNull || bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+func validateChainStateRemainingSchema(fields chainStateSchemaFields) error {
+	if fields.unknown || fields.remainingDuplicate || fields.remainingNull || fields.remainingSeen != chainStateRemainingFields {
+		return errors.New(chainStatePayloadNotCanonical)
+	}
+	dec := json.NewDecoder(bytes.NewReader(fields.utxos))
+	first, err := dec.Token()
+	if err != nil || first != json.Delim('[') {
+		return errors.New(chainStatePayloadNotCanonical)
+	}
+	for dec.More() {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil || validateChainStateUtxoSchema(raw) != nil {
+			return errors.New(chainStatePayloadNotCanonical)
+		}
+	}
+	if end, err := dec.Token(); err != nil || end != json.Delim(']') {
+		return errors.New(chainStatePayloadNotCanonical)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New(chainStatePayloadNotCanonical)
+	}
+	return nil
+}
+
+func validateChainStateUtxoSchema(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	first, err := dec.Token()
+	if err != nil || first != json.Delim('{') {
+		return errors.New(chainStatePayloadNotCanonical)
+	}
+	var seen uint8
+	for dec.More() {
+		keyToken, err := dec.Token()
+		if err != nil {
+			return errors.New(chainStatePayloadNotCanonical)
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return errors.New(chainStatePayloadNotCanonical)
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return errors.New(chainStatePayloadNotCanonical)
+		}
+		var field uint8
+		switch key {
+		case "txid":
+			field = 1 << 0
+		case "covenant_data":
+			field = 1 << 1
+		case "value":
+			field = 1 << 2
+		case "creation_height":
+			field = 1 << 3
+		case "vout":
+			field = 1 << 4
+		case "covenant_type":
+			field = 1 << 5
+		case "created_by_coinbase":
+			field = 1 << 6
+		default:
+			return errors.New(chainStatePayloadNotCanonical)
+		}
+		if seen&field != 0 {
+			return errors.New(chainStatePayloadNotCanonical)
+		}
+		seen |= field
+	}
+	if end, err := dec.Token(); err != nil || end != json.Delim('}') || seen != (1<<7)-1 {
+		return errors.New(chainStatePayloadNotCanonical)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New(chainStatePayloadNotCanonical)
+	}
+	return nil
+}
+
+func parseChainStateVersion(fields chainStateSchemaFields) (uint32, error) {
+	if !fields.versionSeen || fields.versionNull {
+		return 0, errors.New("CHAINSTATE_SCHEMA: missing version")
+	}
+	if fields.versionDuplicate {
+		return 0, errors.New("CHAINSTATE_SCHEMA: duplicate version")
+	}
+	token := bytes.TrimSpace(fields.version)
+	var version uint64
+	if err := json.Unmarshal(token, &version); err != nil || string(token) != strconv.FormatUint(version, 10) || version > math.MaxUint32 {
+		return 0, errors.New("CHAINSTATE_SCHEMA: version must be a canonical unsigned JSON integer through u32")
+	}
+	if version != chainStateDiskVersionV1 && version != chainStateDiskVersion {
+		return 0, fmt.Errorf("CHAINSTATE_SCHEMA: unsupported version %d", version)
+	}
+	return uint32(version), nil
+}
+
+func parseChainStateAlreadyGenerated(fields chainStateSchemaFields, version uint32) (consensus.Uint128, error) {
+	if !fields.alreadyGeneratedSeen || fields.alreadyGeneratedNull {
+		return consensus.Uint128{}, errors.New("CHAINSTATE_SCHEMA: missing already_generated")
+	}
+	if fields.alreadyGeneratedDuplicate {
+		return consensus.Uint128{}, errors.New("CHAINSTATE_SCHEMA: duplicate already_generated")
+	}
+	token := bytes.TrimSpace(fields.alreadyGenerated)
+	if version == chainStateDiskVersionV1 {
+		var value uint64
+		if err := json.Unmarshal(token, &value); err != nil || string(token) != strconv.FormatUint(value, 10) {
+			return consensus.Uint128{}, errors.New("CHAINSTATE_SCHEMA: v1 already_generated must be a nonnegative JSON integer through u64")
+		}
+		return consensus.Uint128FromU64(value), nil
+	}
+	var value string
+	if err := json.Unmarshal(token, &value); err != nil || string(token) != `"`+value+`"` {
+		return consensus.Uint128{}, errors.New("CHAINSTATE_SCHEMA: v2 already_generated must be a canonical unsigned decimal string within u128")
+	}
+	parsed, err := consensus.ParseUint128Decimal(value)
+	if err != nil {
+		return consensus.Uint128{}, errors.New("CHAINSTATE_SCHEMA: v2 already_generated must be a canonical unsigned decimal string within u128")
+	}
+	return parsed, nil
 }
 
 func (s *ChainState) Save(path string) error {

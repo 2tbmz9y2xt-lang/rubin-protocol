@@ -161,7 +161,7 @@ func mustDisconnectFuzzFixture(tb testing.TB) ([]byte, []byte, *ChainState, *Cha
 		tb.Fatalf("ParseTx(spend): %v", err)
 	}
 
-	subsidy := consensus.BlockSubsidy(height, prevState.AlreadyGenerated)
+	subsidy := consensus.BlockSubsidyBig(height, prevState.AlreadyGenerated.Big())
 	coinbase, err := coinbaseWithWitnessCommitmentForDisconnectFuzz(height, subsidy, [][32]byte{{}, spendWTxID})
 	if err != nil {
 		tb.Fatalf("coinbaseWithWitnessCommitment: %v", err)

@@ -1459,7 +1459,7 @@ func TestRenderPrometheusMetricsExposesBlockApplyCountersReadOnly(t *testing.T) 
 		summary1.BlockHash,
 		target,
 		mustRPCReorgTestTimestamp(t, 2),
-		mustRPCCoinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidy(2, summary1.AlreadyGenerated)),
+		mustRPCCoinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidyBig(2, summary1.AlreadyGenerated.Big())),
 	)...)
 	invalidBlock2[4+32] ^= 0x01 // keep the block parseable but break merkle-root validation.
 	if _, err := state.syncEngine.ApplyBlock(invalidBlock2, nil); err == nil {
@@ -2271,6 +2271,78 @@ func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 	}
 	if anchorOutputs != 1 {
 		t.Fatalf("coinbase CORE_ANCHOR outputs=%d, want 1", anchorOutputs)
+	}
+}
+
+func TestDevnetRPCMineNextPreservesWideSupply(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := node.ChainStatePath(dir)
+	chainState := node.NewChainState()
+	if err := chainState.Save(chainStatePath); err != nil {
+		t.Fatalf("Save(empty): %v", err)
+	}
+	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("CreateBlockStore: %v", err)
+	}
+	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), chainStatePath)
+	syncEngine, err := node.NewSyncEngine(chainState, blockStore, syncCfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := syncEngine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	wide := consensus.Uint128{Hi: 1}
+	chainState.AlreadyGenerated = wide
+	if err := chainState.Save(chainStatePath); err != nil {
+		t.Fatalf("Save(wide): %v", err)
+	}
+	mempool, err := node.NewMempool(chainState, blockStore, node.DevnetGenesisChainID())
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	syncEngine.SetMempool(mempool)
+	miner, err := node.NewMiner(chainState, blockStore, syncEngine, node.DefaultMinerConfig())
+	if err != nil {
+		t.Fatalf("NewMiner: %v", err)
+	}
+	state := newDevnetRPCState(
+		syncEngine,
+		blockStore,
+		mempool,
+		node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8)),
+		nil,
+		nil,
+		io.Discard,
+		miner,
+	)
+	req := httptest.NewRequest(http.MethodPost, "/mine_next", nil)
+	rec := httptest.NewRecorder()
+	handleMineNext(state, rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response mineNextResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !response.Mined || response.Height == nil || *response.Height != 1 {
+		t.Fatalf("unexpected response: %+v", response)
+	}
+	want, ok := wide.CheckedAdd(consensus.Uint128FromU64(consensus.TAIL_EMISSION_PER_BLOCK))
+	if !ok {
+		t.Fatal("test setup overflowed u128")
+	}
+	if chainState.AlreadyGenerated != want {
+		t.Fatalf("live supply=%s, want %s", chainState.AlreadyGenerated.String(), want.String())
+	}
+	restarted, err := node.LoadChainState(chainStatePath)
+	if err != nil {
+		t.Fatalf("LoadChainState: %v", err)
+	}
+	if restarted.AlreadyGenerated != want {
+		t.Fatalf("persisted supply=%s, want %s", restarted.AlreadyGenerated.String(), want.String())
 	}
 }
 

@@ -2820,8 +2820,8 @@ mod tests {
                     .join(format!("{}.json", hex::encode(hash))),
             )
             .expect("raw undo"),
-            // RUB-1132: the on-disk record is the block-bound v1 envelope, not
-            // the bare payload, so the hash is part of what is pinned here.
+            // RUB-1132/RUB-1153: the on-disk record is a block-bound v1/v2
+            // envelope, not the bare payload, so the hash is pinned here.
             marshal_undo_envelope(hash, &undo).expect("undo encoding")
         );
         engine.disconnect_tip().expect("disconnect tip");

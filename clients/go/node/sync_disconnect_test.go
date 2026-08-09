@@ -41,6 +41,42 @@ func TestDisconnectTipRejectsCorruptStoredCommitmentsBeforeMutation(t *testing.T
 	}
 }
 
+func TestDisconnectTipRestoresWideSupplyFromV2Undo(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+	before := reachableMaximumAccumulatedSubsidy(t)
+	engine.chainState.AlreadyGenerated = before
+	if err := engine.chainState.Save(engine.cfg.ChainStatePath); err != nil {
+		t.Fatalf("Save(wide pre-state): %v", err)
+	}
+	subsidy := consensus.BlockSubsidyBig(1, before.Big())
+	block := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1),
+		coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy))
+	summary, err := engine.ApplyBlock(block, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock: %v", err)
+	}
+	wantAfter, ok := before.CheckedAdd(consensus.Uint128FromU64(subsidy))
+	if !ok || summary.AlreadyGeneratedN1 != wantAfter || engine.chainState.AlreadyGenerated != wantAfter {
+		t.Fatalf("connected supply=%s state=%s, want %s", summary.AlreadyGeneratedN1.String(), engine.chainState.AlreadyGenerated.String(), wantAfter.String())
+	}
+	undoPath := filepath.Join(store.undoDir, hex.EncodeToString(summary.BlockHash[:])+".json")
+	undoRaw, err := os.ReadFile(undoPath)
+	if err != nil || !bytes.HasPrefix(undoRaw, []byte(undoEnvelopePrefixV2)) {
+		t.Fatalf("stored undo is not v2: err=%v raw=%s", err, undoRaw)
+	}
+	disconnected, err := engine.DisconnectTip()
+	if err != nil {
+		t.Fatalf("DisconnectTip: %v", err)
+	}
+	if disconnected.AlreadyGenerated != before || engine.chainState.AlreadyGenerated != before {
+		t.Fatalf("restored supply summary=%s state=%s, want %s", disconnected.AlreadyGenerated.String(), engine.chainState.AlreadyGenerated.String(), before.String())
+	}
+	restarted, err := LoadChainState(engine.cfg.ChainStatePath)
+	if err != nil || restarted.AlreadyGenerated != before {
+		t.Fatalf("persisted restored supply=%v err=%v", restarted, err)
+	}
+}
+
 func TestReorgPreviewRejectsCorruptCanonicalStoredCommitmentsBeforeMutation(t *testing.T) {
 	engine, store, target := newReorgTestEngine(t)
 	subsidy1 := consensus.BlockSubsidy(1, 0)

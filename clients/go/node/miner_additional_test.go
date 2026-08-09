@@ -128,7 +128,7 @@ func TestMinerMineOneRejectsNonCanonicalTxBytesInInput(t *testing.T) {
 		t.Fatalf("new miner: %v", err)
 	}
 
-	coinbaseLike, err := buildCoinbaseTx(0, 0, nil, [32]byte{})
+	coinbaseLike, err := buildCoinbaseTx(0, consensus.Uint128{}, nil, [32]byte{})
 	if err != nil {
 		t.Fatalf("build coinbase tx: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestMinerBuildContextAndAssembleBlockBytes(t *testing.T) {
 		t.Fatalf("new miner: %v", err)
 	}
 
-	txA, err := buildCoinbaseTx(0, 0, nil, [32]byte{})
+	txA, err := buildCoinbaseTx(0, consensus.Uint128{}, nil, [32]byte{})
 	if err != nil {
 		t.Fatalf("build txA: %v", err)
 	}
@@ -308,6 +308,58 @@ func TestMinerBuildContextAndAssembleBlockBytes(t *testing.T) {
 	}
 }
 
+func TestMinerBuildContextAndCoinbasePreserveWideSupply(t *testing.T) {
+	dir := t.TempDir()
+	chainState := NewChainState()
+	chainState.HasTip = true
+	chainState.Height = 0
+	chainState.TipHash = devnetGenesisBlockHash
+	chainState.AlreadyGenerated = consensus.Uint128{Hi: 1}
+	blockStore, err := CreateBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("CreateBlockStore: %v", err)
+	}
+	syncEngine, err := NewSyncEngine(
+		chainState,
+		blockStore,
+		DefaultSyncConfig(nil, devnetGenesisChainID, ChainStatePath(dir)),
+	)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	miner, err := NewMiner(chainState, blockStore, syncEngine, DefaultMinerConfig())
+	if err != nil {
+		t.Fatalf("NewMiner: %v", err)
+	}
+
+	buildCtx, err := miner.buildContext(nil)
+	if err != nil {
+		t.Fatalf("buildContext: %v", err)
+	}
+	if buildCtx.alreadyGenerated != chainState.AlreadyGenerated {
+		t.Fatalf("build context supply=%s, want %s", buildCtx.alreadyGenerated.String(), chainState.AlreadyGenerated.String())
+	}
+	raw, err := buildCoinbaseTx(
+		buildCtx.nextHeight,
+		buildCtx.alreadyGenerated,
+		miner.cfg.MineAddress,
+		[32]byte{},
+	)
+	if err != nil {
+		t.Fatalf("buildCoinbaseTx: %v", err)
+	}
+	coinbase, _, _, consumed, err := consensus.ParseTx(raw)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+	if consumed != len(raw) || len(coinbase.Outputs) != 2 {
+		t.Fatalf("coinbase consumed=%d len=%d outputs=%d", consumed, len(raw), len(coinbase.Outputs))
+	}
+	if got := coinbase.Outputs[0].Value; got != consensus.TAIL_EMISSION_PER_BLOCK {
+		t.Fatalf("wide-supply coinbase value=%d, want tail emission %d", got, consensus.TAIL_EMISSION_PER_BLOCK)
+	}
+}
+
 func TestCanonicalCoinbaseWeightMatchesLegacyWeight(t *testing.T) {
 	t.Parallel()
 
@@ -326,11 +378,11 @@ func TestCanonicalCoinbaseWeightMatchesLegacyWeight(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := canonicalCoinbaseWeight(tc.height, tc.alreadyGenerated, tc.mineAddress)
+			got, err := canonicalCoinbaseWeight(tc.height, consensus.Uint128FromU64(tc.alreadyGenerated), tc.mineAddress)
 			if err != nil {
 				t.Fatalf("canonicalCoinbaseWeight: %v", err)
 			}
-			raw, err := buildCoinbaseTx(tc.height, tc.alreadyGenerated, tc.mineAddress, [32]byte{})
+			raw, err := buildCoinbaseTx(tc.height, consensus.Uint128FromU64(tc.alreadyGenerated), tc.mineAddress, [32]byte{})
 			if err != nil {
 				t.Fatalf("buildCoinbaseTx: %v", err)
 			}
@@ -348,15 +400,15 @@ func TestCanonicalCoinbaseWeightMatchesLegacyWeight(t *testing.T) {
 func TestCanonicalCoinbaseWeightRejectsOverflowAndInvalidAddress(t *testing.T) {
 	t.Parallel()
 
-	if _, err := canonicalCoinbaseWeight(^uint64(0), 0, nil); err == nil {
+	if _, err := canonicalCoinbaseWeight(^uint64(0), consensus.Uint128{}, nil); err == nil {
 		t.Fatal("expected height overflow error")
 	}
-	if _, err := canonicalCoinbaseWeight(1, 0, nil); err == nil {
+	if _, err := canonicalCoinbaseWeight(1, consensus.Uint128{}, nil); err == nil {
 		t.Fatal("expected invalid mine address error")
 	}
 	tooLong := make([]byte, consensus.MAX_P2PK_COVENANT_DATA+1)
 	tooLong[0] = consensus.SUITE_ID_ML_DSA_87
-	if _, err := canonicalCoinbaseWeight(1, 0, tooLong); err == nil {
+	if _, err := canonicalCoinbaseWeight(1, consensus.Uint128{}, tooLong); err == nil {
 		t.Fatal("expected oversized mine address error")
 	}
 }
@@ -656,7 +708,7 @@ func TestAddU64NoOverflowValue(t *testing.T) {
 }
 
 func TestParseCanonicalTx(t *testing.T) {
-	raw, err := buildCoinbaseTx(0, 0, nil, [32]byte{})
+	raw, err := buildCoinbaseTx(0, consensus.Uint128{}, nil, [32]byte{})
 	if err != nil {
 		t.Fatalf("buildCoinbaseTx: %v", err)
 	}

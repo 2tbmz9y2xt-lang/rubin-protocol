@@ -2237,7 +2237,7 @@ func TestRunMineBlocksResetsDirtyChainStateWhenBlockstoreEmpty(t *testing.T) {
 	chainState := node.NewChainState()
 	chainState.HasTip = true
 	chainState.Height = math.MaxUint64
-	chainState.AlreadyGenerated = 123
+	chainState.AlreadyGenerated = consensus.Uint128FromU64(123)
 	var phantomTxid [32]byte
 	phantomTxid[0] = 0xaa
 	chainState.Utxos[consensus.Outpoint{Txid: phantomTxid, Vout: 1}] = consensus.UtxoEntry{Value: 7}
@@ -3411,6 +3411,30 @@ func TestRunDryRunWritesNothing(t *testing.T) {
 		if report := dryRunReport(t, dir); !strings.Contains(report, "p2p: peer_slots=") {
 			t.Fatalf("run %d: truncated report %q", i, report)
 		}
+	}
+	assertNoFilesystemWrite(t, before, datadirSnapshot(t, dir))
+}
+
+func TestRunDryRunReportsWideSupplyExactly(t *testing.T) {
+	dir := preparedDatadir(t)
+	path := node.ChainStatePath(dir)
+	state, err := node.LoadChainState(path)
+	if err != nil {
+		t.Fatalf("LoadChainState: %v", err)
+	}
+	wide, err := consensus.ParseUint128Decimal("350965446908158964928367166")
+	if err != nil {
+		t.Fatalf("ParseUint128Decimal(reachable max): %v", err)
+	}
+	state.AlreadyGenerated = wide
+	if err := state.Save(path); err != nil {
+		t.Fatalf("Save(wide): %v", err)
+	}
+	before := datadirSnapshot(t, dir)
+	report := dryRunReport(t, dir)
+	want := "already_generated=" + wide.String() + " tip="
+	if !strings.Contains(report, want) {
+		t.Fatalf("dry-run report missing %q: %q", want, report)
 	}
 	assertNoFilesystemWrite(t, before, datadirSnapshot(t, dir))
 }

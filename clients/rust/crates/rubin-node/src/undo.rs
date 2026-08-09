@@ -1,8 +1,10 @@
 use std::collections::HashSet;
+use std::fmt;
 
 use rubin_consensus::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
 use rubin_consensus::{block_hash, parse_block_bytes, Outpoint, UtxoEntry};
-use serde::{Deserialize, Serialize};
+use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha3::{Digest, Sha3_256};
 
 use crate::blockstore::valid_canonical_hash_hex;
@@ -27,7 +29,7 @@ pub struct TxUndo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockUndo {
     pub block_height: u64,
-    pub previous_already_generated: u64,
+    pub previous_already_generated: u128,
     pub txs: Vec<TxUndo>,
 }
 
@@ -38,7 +40,7 @@ pub struct ChainStateDisconnectSummary {
     pub new_height: u64,
     pub new_tip_hash: [u8; 32],
     pub has_tip: bool,
-    pub already_generated: u64,
+    pub already_generated: u128,
     pub utxo_count: u64,
 }
 
@@ -253,11 +255,65 @@ impl ChainState {
 // JSON serialization (disk format)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct BlockUndoDisk {
     block_height: u64,
     previous_already_generated: u64,
     txs: Vec<TxUndoDisk>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BlockUndoDiskV2 {
+    block_height: u64,
+    #[serde(serialize_with = "rubin_consensus::uint128_json::serialize")]
+    previous_already_generated: u128,
+    txs: Vec<TxUndoDisk>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlockUndoDiskRaw {
+    block_height: u64,
+    #[serde(rename = "previous_already_generated")]
+    _previous_already_generated: IgnoredAny,
+    txs: Vec<TxUndoDisk>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlockUndoPayloadShape {
+    #[serde(rename = "block_height")]
+    _block_height: IgnoredAny,
+    #[serde(rename = "previous_already_generated")]
+    _previous_already_generated: IgnoredAny,
+    #[serde(rename = "txs")]
+    _txs: Vec<TxUndoPayloadShape>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TxUndoPayloadShape {
+    #[serde(rename = "spent")]
+    _spent: Vec<SpentUndoPayloadShape>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpentUndoPayloadShape {
+    #[serde(rename = "txid")]
+    _txid: IgnoredAny,
+    #[serde(rename = "vout")]
+    _vout: IgnoredAny,
+    #[serde(rename = "value")]
+    _value: IgnoredAny,
+    #[serde(rename = "covenant_type")]
+    _covenant_type: IgnoredAny,
+    #[serde(rename = "covenant_data")]
+    _covenant_data: IgnoredAny,
+    #[serde(rename = "creation_height")]
+    _creation_height: IgnoredAny,
+    #[serde(rename = "created_by_coinbase")]
+    _created_by_coinbase: IgnoredAny,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,34 +332,232 @@ struct SpentUndoDisk {
     created_by_coinbase: bool,
 }
 
+#[derive(Debug)]
+enum UndoSupplyToken {
+    Unsigned(u64),
+    String { value: String, unescaped: bool },
+    Other,
+}
+
+struct UndoSupplyTokenVisitor;
+
+impl<'de> Visitor<'de> for UndoSupplyTokenVisitor {
+    type Value = UndoSupplyToken;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("one undo supply JSON token")
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(UndoSupplyToken::Other)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(UndoSupplyToken::Other)
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(UndoSupplyToken::Unsigned(value))
+    }
+
+    fn visit_u128<E>(self, value: u128) -> Result<Self::Value, E> {
+        Ok(u64::try_from(value).map_or(UndoSupplyToken::Other, UndoSupplyToken::Unsigned))
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(UndoSupplyToken::Other)
+    }
+
+    fn visit_i128<E>(self, _value: i128) -> Result<Self::Value, E> {
+        Ok(UndoSupplyToken::Other)
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(UndoSupplyToken::Other)
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(UndoSupplyToken::Other)
+    }
+
+    fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E> {
+        Ok(UndoSupplyToken::String {
+            value: value.to_owned(),
+            unescaped: true,
+        })
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(UndoSupplyToken::String {
+            value: value.to_owned(),
+            unescaped: false,
+        })
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(UndoSupplyToken::String {
+            value,
+            unescaped: false,
+        })
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(UndoSupplyToken::Other)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(UndoSupplyToken::Other)
+    }
+}
+
+impl<'de> Deserialize<'de> for UndoSupplyToken {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(UndoSupplyTokenVisitor)
+    }
+}
+
+const UNDO_INVALID_V1_SUPPLY: &str =
+    "decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64";
+const UNDO_INVALID_V2_SUPPLY: &str =
+    "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128";
+const UNDO_PAYLOAD_NOT_CANONICAL: &str = "decode undo: payload is not the canonical encoding";
+
+struct UndoSupplyProbe(UndoSupplyToken);
+
+struct UndoSupplyProbeVisitor;
+
+impl<'de> Visitor<'de> for UndoSupplyProbeVisitor {
+    type Value = UndoSupplyProbe;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an undo payload JSON object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut supply = None;
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "previous_already_generated" {
+                if supply.is_some() {
+                    return Err(serde::de::Error::duplicate_field(
+                        "previous_already_generated",
+                    ));
+                }
+                supply = Some(map.next_value::<UndoSupplyToken>()?);
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+        supply
+            .map(UndoSupplyProbe)
+            .ok_or_else(|| serde::de::Error::missing_field("previous_already_generated"))
+    }
+}
+
+impl<'de> Deserialize<'de> for UndoSupplyProbe {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(UndoSupplyProbeVisitor)
+    }
+}
+
+fn decode_block_undo_supply(
+    raw: &[u8],
+    invalid_supply_error: &'static str,
+) -> Result<UndoSupplyToken, String> {
+    serde_json::from_slice::<BlockUndoPayloadShape>(raw)
+        .map_err(|_| UNDO_PAYLOAD_NOT_CANONICAL.to_string())?;
+    let supply = serde_json::from_slice::<UndoSupplyProbe>(raw)
+        .map_err(|_| invalid_supply_error.to_string())?
+        .0;
+    Ok(supply)
+}
+
+fn decode_block_undo_typed(raw: &[u8]) -> Result<BlockUndoDiskRaw, String> {
+    serde_json::from_slice(raw).map_err(|_| UNDO_PAYLOAD_NOT_CANONICAL.to_string())
+}
+
 /// Canonical undo PAYLOAD: compact JSON in `BlockUndoDisk` field order with no
 /// trailing whitespace or newline. This is NOT the on-disk record —
-/// `undo_envelope_v1` wraps these bytes and binds them to a block hash
-/// (`marshal_undo_envelope`). Go twin: `marshalBlockUndo`.
+/// a versioned undo envelope wraps these bytes and binds them to a block hash.
+/// This public helper retains the v1 payload shape for compatibility tests;
+/// new durable writes use the v2 helper below. Go twin: `marshalBlockUndo`.
 pub fn marshal_block_undo(undo: &BlockUndo) -> Result<Vec<u8>, String> {
-    let disk = block_undo_to_disk(undo);
+    let disk = block_undo_to_disk(undo)?;
     serde_json::to_vec(&disk).map_err(|e| format!("encode undo: {e}"))
 }
 
-/// Strictly decode a canonical payload: decode into the DISK struct, check the
-/// one property a byte comparison cannot see, re-encode the DISK struct, and
-/// require byte equality. `serde` already rejects unknown, duplicate, missing and
-/// trailing tokens (and a JSON null, which `Vec` refuses outright); the
-/// comparison pins field order and whitespace, so the far more permissive Go twin
-/// accepts exactly the same byte strings.
+fn marshal_block_undo_v2(undo: &BlockUndo) -> Result<Vec<u8>, String> {
+    let disk = block_undo_to_disk_v2(undo);
+    serde_json::to_vec(&disk).map_err(|e| format!("encode undo: {e}"))
+}
+
+/// Strictly decode a canonical payload. A field/container-shape pass runs before
+/// the version-specific supply token is interpreted, so an unknown, duplicate,
+/// missing or invalid container at any nesting level wins over a simultaneous
+/// supply defect and parser wording never escapes. Remaining scalar conversion
+/// follows supply classification, then the typed disk value is re-encoded to pin
+/// field order and whitespace byte-for-byte.
 ///
 /// The whole decision happens BEFORE `block_undo_from_disk`, so a checksum-valid
 /// but non-canonical payload is refused without allocating the runtime spent
 /// entries. The contract orders strict rejection ahead of `BlockUndo` conversion;
 /// converting first satisfied that only by accident. Go twin: `unmarshalBlockUndo`.
 pub fn unmarshal_block_undo(raw: &[u8]) -> Result<BlockUndo, String> {
-    let disk: BlockUndoDisk =
-        serde_json::from_slice(raw).map_err(|e| format!("decode undo: {e}"))?;
-    check_undo_disk_canonical_fields(&disk)?;
+    let supply = decode_block_undo_supply(raw, UNDO_INVALID_V1_SUPPLY)?;
+    let previous_already_generated = match supply {
+        UndoSupplyToken::Unsigned(value) => value,
+        _ => return Err(UNDO_INVALID_V1_SUPPLY.to_string()),
+    };
+    let decoded = decode_block_undo_typed(raw)?;
+    let disk = BlockUndoDisk {
+        block_height: decoded.block_height,
+        previous_already_generated,
+        txs: decoded.txs,
+    };
+    check_undo_txs_canonical_fields(&disk.txs)?;
     if serde_json::to_vec(&disk).map_err(|e| format!("encode undo: {e}"))? != raw {
-        return Err("decode undo: payload is not the canonical encoding".into());
+        return Err(UNDO_PAYLOAD_NOT_CANONICAL.into());
     }
     block_undo_from_disk(disk)
+}
+
+fn unmarshal_block_undo_v2(raw: &[u8]) -> Result<BlockUndo, String> {
+    let supply = decode_block_undo_supply(raw, UNDO_INVALID_V2_SUPPLY)?;
+    let previous_already_generated = match supply {
+        UndoSupplyToken::String {
+            value,
+            unescaped: true,
+        } => rubin_consensus::uint128_json::parse_canonical_decimal(&value)
+            .ok_or_else(|| UNDO_INVALID_V2_SUPPLY.to_string())?,
+        _ => return Err(UNDO_INVALID_V2_SUPPLY.to_string()),
+    };
+    let decoded = decode_block_undo_typed(raw)?;
+    let disk = BlockUndoDiskV2 {
+        block_height: decoded.block_height,
+        previous_already_generated,
+        txs: decoded.txs,
+    };
+    check_undo_txs_canonical_fields(&disk.txs)?;
+    if serde_json::to_vec(&disk).map_err(|e| format!("encode undo: {e}"))? != raw {
+        return Err(UNDO_PAYLOAD_NOT_CANONICAL.into());
+    }
+    block_undo_from_parts(disk.block_height, previous_already_generated, disk.txs)
 }
 
 /// Covers the property the disk-level byte comparison is blind to, allocating
@@ -313,8 +567,8 @@ pub fn unmarshal_block_undo(raw: &[u8]) -> Result<BlockUndo, String> {
 /// slices here — `Vec` has no nil, so `serde` refused a JSON null already. It
 /// used to be enforced by re-encoding the CONVERTED value; stating it is what
 /// lets the decision precede conversion.
-fn check_undo_disk_canonical_fields(disk: &BlockUndoDisk) -> Result<(), String> {
-    for (tx_index, tx_undo) in disk.txs.iter().enumerate() {
+fn check_undo_txs_canonical_fields(txs: &[TxUndoDisk]) -> Result<(), String> {
+    for (tx_index, tx_undo) in txs.iter().enumerate() {
         for (spent_index, spent) in tx_undo.spent.iter().enumerate() {
             if !valid_canonical_hash_hex(&spent.txid) || !valid_lowercase_hex(&spent.covenant_data)
             {
@@ -336,10 +590,8 @@ fn valid_lowercase_hex(value: &str) -> bool {
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
-fn block_undo_to_disk(undo: &BlockUndo) -> BlockUndoDisk {
-    let txs = undo
-        .txs
-        .iter()
+fn block_undo_txs_to_disk(src: &[TxUndo]) -> Vec<TxUndoDisk> {
+    src.iter()
         .map(|tx_undo| TxUndoDisk {
             spent: tx_undo
                 .spent
@@ -355,17 +607,42 @@ fn block_undo_to_disk(undo: &BlockUndo) -> BlockUndoDisk {
                 })
                 .collect(),
         })
-        .collect();
-    BlockUndoDisk {
+        .collect()
+}
+
+fn block_undo_to_disk(undo: &BlockUndo) -> Result<BlockUndoDisk, String> {
+    let previous_already_generated = u64::try_from(undo.previous_already_generated)
+        .map_err(|_| UNDO_INVALID_V1_SUPPLY.to_string())?;
+    Ok(BlockUndoDisk {
+        block_height: undo.block_height,
+        previous_already_generated,
+        txs: block_undo_txs_to_disk(&undo.txs),
+    })
+}
+
+fn block_undo_to_disk_v2(undo: &BlockUndo) -> BlockUndoDiskV2 {
+    BlockUndoDiskV2 {
         block_height: undo.block_height,
         previous_already_generated: undo.previous_already_generated,
-        txs,
+        txs: block_undo_txs_to_disk(&undo.txs),
     }
 }
 
 fn block_undo_from_disk(disk: BlockUndoDisk) -> Result<BlockUndo, String> {
-    let mut txs = Vec::with_capacity(disk.txs.len());
-    for (tx_index, tx_undo) in disk.txs.into_iter().enumerate() {
+    block_undo_from_parts(
+        disk.block_height,
+        u128::from(disk.previous_already_generated),
+        disk.txs,
+    )
+}
+
+fn block_undo_from_parts(
+    block_height: u64,
+    previous_already_generated: u128,
+    disk_txs: Vec<TxUndoDisk>,
+) -> Result<BlockUndo, String> {
+    let mut txs = Vec::with_capacity(disk_txs.len());
+    for (tx_index, tx_undo) in disk_txs.into_iter().enumerate() {
         let mut spent = Vec::with_capacity(tx_undo.spent.len());
         for (spent_index, s) in tx_undo.spent.into_iter().enumerate() {
             let txid = parse_hex32(
@@ -388,30 +665,31 @@ fn block_undo_from_disk(disk: BlockUndoDisk) -> Result<BlockUndo, String> {
         txs.push(TxUndo { spent });
     }
     Ok(BlockUndo {
-        block_height: disk.block_height,
-        previous_already_generated: disk.previous_already_generated,
+        block_height,
+        previous_already_generated,
         txs,
     })
 }
 
 // ---------------------------------------------------------------------------
-// undo_envelope_v1 (RUB-1132)
+// undo_envelope_v1/v2 (RUB-1132, RUB-1153)
 //
 // The stored undo record is one compact JSON object binding the canonical
 // payload bytes to the block hash they were built for:
 //
-//   {"version":1,"block_hash":"<64hex>","payload_b64":"<b64>","checksum":"<64hex>"}\n
+//   {"version":<1|2>,"block_hash":"<64hex>","payload_b64":"<b64>","checksum":"<64hex>"}\n
 //
-// checksum = SHA3-256("RUBIN_BLOCK_UNDO_V1" || block_hash[32] ||
-// uint64_be(payload.len()) || payload). The length prefix makes the preimage
-// encoding unambiguous: no two distinct (hash, payload) pairs serialize to
-// the same preimage bytes, so concatenation cannot alias one frame into
-// another.
+// checksum = SHA3-256(version_domain || block_hash[32] ||
+// uint64_be(payload.len()) || payload), where version_domain is exactly
+// "RUBIN_BLOCK_UNDO_V1" or "RUBIN_BLOCK_UNDO_V2". The length prefix makes
+// the preimage encoding unambiguous: no two distinct (hash, payload) pairs
+// serialize to the same preimage bytes, so concatenation cannot alias one
+// frame into another.
 // The trailing LF counts against the read bound but is NOT in the preimage.
 //
 // Go twin: the same section in clients/go/node/undo.go. Both clients must emit
-// byte-identical envelopes; conformance/fixtures/protocol/undo_integrity_v1.json
-// pins the bytes.
+// byte-identical envelopes. The shared v1 artifact pins compatibility and the
+// shared v2 artifact pins the new checksum domain, payload and envelope bytes.
 //
 // Claim boundary: this detects accidental, torn, misnamed and parse-valid local
 // corruption before an undo is used. It is NOT authentication — a local actor
@@ -438,8 +716,10 @@ pub const UNDO_LEGACY_ERR: &str =
 pub const UNDO_BLOCK_HASH_MISMATCH_ERR: &str = "UNDO_INTEGRITY: block hash mismatch";
 pub const UNDO_CHECKSUM_MISMATCH_ERR: &str = "UNDO_INTEGRITY: checksum mismatch";
 
-const UNDO_ENVELOPE_VERSION: u32 = 1;
-const UNDO_ENVELOPE_DOMAIN: &[u8] = b"RUBIN_BLOCK_UNDO_V1";
+const UNDO_ENVELOPE_VERSION_V1: u32 = 1;
+const UNDO_ENVELOPE_VERSION: u32 = 2;
+const UNDO_ENVELOPE_DOMAIN_V1: &[u8] = b"RUBIN_BLOCK_UNDO_V1";
+const UNDO_ENVELOPE_DOMAIN_V2: &[u8] = b"RUBIN_BLOCK_UNDO_V2";
 const UNDO_HASH_HEX_LEN: usize = 64;
 
 /// The canonical envelope's byte layout is fully determined by these fixed
@@ -448,7 +728,8 @@ const UNDO_HASH_HEX_LEN: usize = 64;
 /// memory near the file size: no value is materialized on the accept path and
 /// `payload_b64` is a SLICE of the caller's buffer, never a copy. Go twin:
 /// `undoEnvelopePrefix` and friends in clients/go/node/undo.go.
-const UNDO_ENVELOPE_PREFIX: &[u8] = br#"{"version":1,"block_hash":""#;
+const UNDO_ENVELOPE_PREFIX_V1: &[u8] = br#"{"version":1,"block_hash":""#;
+const UNDO_ENVELOPE_PREFIX_V2: &[u8] = br#"{"version":2,"block_hash":""#;
 const UNDO_ENVELOPE_PAYLOAD_SEP: &[u8] = br#"","payload_b64":""#;
 const UNDO_ENVELOPE_CHECKSUM_SEP: &[u8] = br#"","checksum":""#;
 const UNDO_ENVELOPE_SUFFIX: &[u8] = b"\"}\n";
@@ -456,7 +737,7 @@ const UNDO_ENVELOPE_SUFFIX: &[u8] = b"\"}\n";
 /// The envelope minus the base64 body. Derived from the segments above rather
 /// than written down, so a format edit cannot leave the bound behind.
 /// Cross-checked against a real envelope by `undo_envelope_bound_derivation`.
-const UNDO_ENVELOPE_FRAME_BYTES: usize = UNDO_ENVELOPE_PREFIX.len()
+const UNDO_ENVELOPE_FRAME_BYTES: usize = UNDO_ENVELOPE_PREFIX_V2.len()
     + UNDO_HASH_HEX_LEN
     + UNDO_ENVELOPE_PAYLOAD_SEP.len()
     + UNDO_ENVELOPE_CHECKSUM_SEP.len()
@@ -500,9 +781,23 @@ struct UndoVersionProbe {
     version: Option<u32>,
 }
 
+#[cfg(test)]
 fn undo_envelope_checksum(block_hash: [u8; 32], payload: &[u8]) -> [u8; 32] {
+    undo_envelope_checksum_for_version(UNDO_ENVELOPE_VERSION_V1, block_hash, payload)
+}
+
+fn undo_envelope_checksum_for_version(
+    version: u32,
+    block_hash: [u8; 32],
+    payload: &[u8],
+) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
-    hasher.update(UNDO_ENVELOPE_DOMAIN);
+    let domain = if version == UNDO_ENVELOPE_VERSION_V1 {
+        UNDO_ENVELOPE_DOMAIN_V1
+    } else {
+        UNDO_ENVELOPE_DOMAIN_V2
+    };
+    hasher.update(domain);
     hasher.update(block_hash);
     hasher.update((payload.len() as u64).to_be_bytes());
     hasher.update(payload);
@@ -514,7 +809,27 @@ fn undo_envelope_checksum(block_hash: [u8; 32], payload: &[u8]) -> [u8; 32] {
 /// payload and complete envelope — which is what makes the refusal boundary
 /// byte-symmetric rather than off by a rounding step.
 pub fn marshal_undo_envelope(block_hash: [u8; 32], undo: &BlockUndo) -> Result<Vec<u8>, String> {
-    let payload = marshal_block_undo(undo)?;
+    marshal_undo_envelope_version(UNDO_ENVELOPE_VERSION, block_hash, undo)
+}
+
+#[cfg(test)]
+pub(crate) fn marshal_undo_envelope_v1(
+    block_hash: [u8; 32],
+    undo: &BlockUndo,
+) -> Result<Vec<u8>, String> {
+    marshal_undo_envelope_version(UNDO_ENVELOPE_VERSION_V1, block_hash, undo)
+}
+
+fn marshal_undo_envelope_version(
+    version: u32,
+    block_hash: [u8; 32],
+    undo: &BlockUndo,
+) -> Result<Vec<u8>, String> {
+    let payload = if version == UNDO_ENVELOPE_VERSION_V1 {
+        marshal_block_undo(undo)?
+    } else {
+        marshal_block_undo_v2(undo)?
+    };
     if payload.len() as u64 > UNDO_PAYLOAD_MAX_BYTES {
         return Err(format!(
             "refusing to save undo: payload is {} bytes, class bound {UNDO_PAYLOAD_MAX_BYTES}",
@@ -522,10 +837,12 @@ pub fn marshal_undo_envelope(block_hash: [u8; 32], undo: &BlockUndo) -> Result<V
         ));
     }
     let envelope = UndoEnvelopeDisk {
-        version: UNDO_ENVELOPE_VERSION,
+        version,
         block_hash: hex::encode(block_hash),
         payload_b64: base64_encode(&payload),
-        checksum: hex::encode(undo_envelope_checksum(block_hash, &payload)),
+        checksum: hex::encode(undo_envelope_checksum_for_version(
+            version, block_hash, &payload,
+        )),
     };
     let mut raw =
         serde_json::to_vec(&envelope).map_err(|e| format!("encode undo envelope: {e}"))?;
@@ -561,7 +878,7 @@ pub fn unmarshal_undo_envelope(block_hash: [u8; 32], raw: &[u8]) -> Result<Block
             raw.len()
         ));
     }
-    let (hash_hex, payload_b64, checksum_hex) = split_undo_envelope(raw)?;
+    let (version, hash_hex, payload_b64, checksum_hex) = split_undo_envelope_versioned(raw)?;
     if hash_hex != hex::encode(block_hash).as_bytes() {
         return Err(UNDO_BLOCK_HASH_MISMATCH_ERR.to_string());
     }
@@ -578,10 +895,17 @@ pub fn unmarshal_undo_envelope(block_hash: [u8; 32], raw: &[u8]) -> Result<Block
         &String::from_utf8_lossy(checksum_hex),
     )
     .map_err(|_| format!("{UNDO_INTEGRITY_PREFIX}: checksum is not hexadecimal"))?;
-    if !constant_time_eq32(&stored, &undo_envelope_checksum(block_hash, &payload)) {
+    if !constant_time_eq32(
+        &stored,
+        &undo_envelope_checksum_for_version(version, block_hash, &payload),
+    ) {
         return Err(UNDO_CHECKSUM_MISMATCH_ERR.to_string());
     }
-    unmarshal_block_undo(&payload)
+    if version == UNDO_ENVELOPE_VERSION_V1 {
+        unmarshal_block_undo(&payload)
+    } else {
+        unmarshal_block_undo_v2(&payload)
+    }
 }
 
 /// Validates the canonical layout and returns sub-slices of `raw`. The body
@@ -591,17 +915,31 @@ pub fn unmarshal_undo_envelope(block_hash: [u8; 32], raw: &[u8]) -> Result<Block
 /// fails. On failure it hands off to `classify_undo_envelope_failure` for the
 /// operator-facing reason, which is the only path that parses JSON at all.
 #[allow(clippy::type_complexity)] // three borrowed slices of one input, not a nested structure.
+#[cfg(test)]
 fn split_undo_envelope(raw: &[u8]) -> Result<(&[u8], &[u8], &[u8]), String> {
+    let (_, hash_hex, payload_b64, checksum_hex) = split_undo_envelope_versioned(raw)?;
+    Ok((hash_hex, payload_b64, checksum_hex))
+}
+
+#[allow(clippy::type_complexity)]
+fn split_undo_envelope_versioned(raw: &[u8]) -> Result<(u32, &[u8], &[u8], &[u8]), String> {
     let Some(body) = raw.len().checked_sub(UNDO_ENVELOPE_FRAME_BYTES) else {
         return Err(classify_undo_envelope_failure(raw));
     };
-    let hash_at = UNDO_ENVELOPE_PREFIX.len();
+    let (version, prefix) = if raw.starts_with(UNDO_ENVELOPE_PREFIX_V1) {
+        (UNDO_ENVELOPE_VERSION_V1, UNDO_ENVELOPE_PREFIX_V1)
+    } else if raw.starts_with(UNDO_ENVELOPE_PREFIX_V2) {
+        (UNDO_ENVELOPE_VERSION, UNDO_ENVELOPE_PREFIX_V2)
+    } else {
+        return Err(classify_undo_envelope_failure(raw));
+    };
+    let hash_at = prefix.len();
     let payload_sep_at = hash_at + UNDO_HASH_HEX_LEN;
     let payload_at = payload_sep_at + UNDO_ENVELOPE_PAYLOAD_SEP.len();
     let checksum_sep_at = payload_at + body;
     let checksum_at = checksum_sep_at + UNDO_ENVELOPE_CHECKSUM_SEP.len();
     let suffix_at = checksum_at + UNDO_HASH_HEX_LEN;
-    if &raw[..hash_at] != UNDO_ENVELOPE_PREFIX
+    if &raw[..hash_at] != prefix
         || &raw[payload_sep_at..payload_at] != UNDO_ENVELOPE_PAYLOAD_SEP
         || &raw[checksum_sep_at..checksum_at] != UNDO_ENVELOPE_CHECKSUM_SEP
         || &raw[suffix_at..] != UNDO_ENVELOPE_SUFFIX
@@ -617,7 +955,12 @@ fn split_undo_envelope(raw: &[u8]) -> Result<(&[u8], &[u8], &[u8]), String> {
             "{UNDO_INTEGRITY_PREFIX}: block_hash and checksum must be 64 lowercase hex characters"
         ));
     }
-    Ok((hash_hex, &raw[payload_at..checksum_sep_at], checksum_hex))
+    Ok((
+        version,
+        hash_hex,
+        &raw[payload_at..checksum_sep_at],
+        checksum_hex,
+    ))
 }
 
 /// Names WHY a record that failed the layout check failed it. It runs only on
@@ -632,7 +975,9 @@ fn classify_undo_envelope_failure(raw: &[u8]) -> String {
     };
     match probe.version {
         None => UNDO_LEGACY_ERR.to_string(),
-        Some(UNDO_ENVELOPE_VERSION) => {
+        Some(version)
+            if version == UNDO_ENVELOPE_VERSION_V1 || version == UNDO_ENVELOPE_VERSION =>
+        {
             format!("{UNDO_INTEGRITY_PREFIX}: envelope is not the canonical encoding")
         }
         Some(other) => {
@@ -744,7 +1089,7 @@ fn base64_decode_canonical(value: &[u8]) -> Result<Vec<u8>, String> {
 /// well-formed JSON and canonical base64, the payload still decodes, and only
 /// the checksum comparison can catch it. Returns (corrupted, original) so a
 /// caller can prove a refusal did not rewrite the record AND restore it to
-/// prove the same path accepts a valid v1 record. Go twin:
+/// prove the same path accepts a valid versioned record. Go twin:
 /// `corruptStoredUndoChecksum`.
 #[cfg(test)]
 pub(crate) fn corrupt_stored_undo_checksum(
@@ -754,7 +1099,7 @@ pub(crate) fn corrupt_stored_undo_checksum(
     let path = undo_dir.join(format!("{}.json", hex::encode(block_hash)));
     let original = std::fs::read(&path).expect("read stored undo");
     let envelope: UndoEnvelopeDisk =
-        serde_json::from_slice(&original).expect("stored undo is not a v1 envelope");
+        serde_json::from_slice(&original).expect("stored undo is not a versioned envelope");
     let flipped = flip_base64_symbol(&envelope.payload_b64);
     let corrupted = String::from_utf8(original.clone())
         .expect("undo record is utf-8")
@@ -784,6 +1129,10 @@ pub(crate) fn flip_base64_symbol(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use crate::blockstore::BlockStore;
+    use crate::io_utils::unique_temp_path;
 
     /// Rust half of the cross-client parity proof: every byte the Go client must
     /// emit for the same input is pinned in
@@ -844,7 +1193,8 @@ mod tests {
                 case.id
             );
 
-            let envelope = marshal_undo_envelope(block_hash, &undo).expect("marshal envelope");
+            let envelope =
+                marshal_undo_envelope_v1(block_hash, &undo).expect("marshal v1 envelope");
             assert_eq!(
                 String::from_utf8(envelope.clone()).expect("envelope is utf-8"),
                 case.envelope,
@@ -862,6 +1212,490 @@ mod tests {
                 "{}: round trip",
                 case.id
             );
+
+            let parent = unique_temp_path("rubin-undo-v1-vector");
+            std::fs::create_dir_all(&parent).expect("create v1 vector parent");
+            let root = parent.join("blockstore");
+            let store = BlockStore::create(&root).expect("create v1 vector blockstore");
+            let undo_path = root.join("undo").join(format!("{}.json", case.block_hash));
+            std::fs::write(&undo_path, case.envelope.as_bytes()).expect("seed v1 undo envelope");
+            assert_eq!(
+                store.get_undo(block_hash).expect("read seeded v1 undo"),
+                undo,
+                "{}: public BlockStore v1 read",
+                case.id
+            );
+            drop(store);
+            std::fs::remove_dir_all(&parent).expect("cleanup v1 vector blockstore");
+        }
+    }
+
+    /// Rust half of the v2 cross-client parity proof. In addition to pinning the
+    /// production codec and checksum bytes, every row passes through the public
+    /// BlockStore reader and the default absent-path writer.
+    #[test]
+    fn undo_envelope_v2_cross_client_vector() {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Vector {
+            id: String,
+            note: String,
+            block_hash: String,
+            payload_json: String,
+            payload_b64: String,
+            checksum: String,
+            envelope: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fixture {
+            contract_version: u32,
+            fixture_kind: String,
+            description: String,
+            checksum_domain_ascii: String,
+            envelope_version: u32,
+            cases: Vec<Vector>,
+        }
+
+        let raw = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../conformance/fixtures/protocol/undo_integrity_v2.json"
+        ))
+        .expect("read shared v2 undo fixture");
+        let fixture: Fixture = serde_json::from_slice(&raw).expect("decode shared v2 undo fixture");
+        assert_eq!(fixture.contract_version, 1, "fixture contract_version");
+        assert_eq!(fixture.fixture_kind, "undo_integrity_v2", "fixture kind");
+        assert_eq!(
+            fixture.checksum_domain_ascii, "RUBIN_BLOCK_UNDO_V2",
+            "fixture checksum domain"
+        );
+        assert_eq!(
+            fixture.envelope_version, UNDO_ENVELOPE_VERSION,
+            "fixture envelope version"
+        );
+        assert!(
+            !fixture.description.is_empty(),
+            "fixture description is empty"
+        );
+        assert_eq!(fixture.cases.len(), 4, "fixture must contain four cases");
+
+        let mut covenant_data = vec![0x00];
+        covenant_data.extend_from_slice(&[0x22; 32]);
+        let expected_undos = [
+            BlockUndo {
+                block_height: 0,
+                previous_already_generated: 0,
+                txs: Vec::new(),
+            },
+            BlockUndo {
+                block_height: 1,
+                previous_already_generated: u128::from(u64::MAX),
+                txs: vec![TxUndo { spent: Vec::new() }],
+            },
+            BlockUndo {
+                block_height: 2,
+                previous_already_generated: u128::from(u64::MAX) + 1,
+                txs: vec![TxUndo { spent: Vec::new() }],
+            },
+            BlockUndo {
+                block_height: 3,
+                previous_already_generated: u128::MAX,
+                txs: vec![
+                    TxUndo { spent: Vec::new() },
+                    TxUndo {
+                        spent: vec![SpentUndo {
+                            outpoint: Outpoint {
+                                txid: [0x11; 32],
+                                vout: 0,
+                            },
+                            entry: UtxoEntry {
+                                value: 4_999_999_000,
+                                covenant_type: 1,
+                                covenant_data,
+                                creation_height: 1,
+                                created_by_coinbase: true,
+                            },
+                        }],
+                    },
+                ],
+            },
+        ];
+        let expected_ids = [
+            "empty-undo-zero-supply",
+            "u64-max-supply",
+            "above-u64-supply",
+            "multi-tx-one-spend",
+        ];
+        let mut ids = HashSet::new();
+        let mut block_hashes = HashSet::new();
+
+        for (index, case) in fixture.cases.iter().enumerate() {
+            assert_eq!(case.id, expected_ids[index], "case {index} id");
+            assert!(
+                ids.insert(case.id.as_str()),
+                "duplicate case id: {}",
+                case.id
+            );
+            assert!(!case.note.is_empty(), "{}: empty note", case.id);
+            assert!(!case.payload_json.is_empty(), "{}: empty payload", case.id);
+            assert!(!case.payload_b64.is_empty(), "{}: empty base64", case.id);
+            assert!(!case.checksum.is_empty(), "{}: empty checksum", case.id);
+            assert!(!case.envelope.is_empty(), "{}: empty envelope", case.id);
+
+            let block_hash = parse_hex32("vector block_hash", &case.block_hash).expect("hash");
+            assert!(
+                block_hashes.insert(block_hash),
+                "duplicate block hash: {}",
+                case.block_hash
+            );
+            let undo = unmarshal_block_undo_v2(case.payload_json.as_bytes())
+                .unwrap_or_else(|e| panic!("{}: payload_json not canonical: {e}", case.id));
+            assert_eq!(undo, expected_undos[index], "{}: decoded undo", case.id);
+
+            let payload = marshal_block_undo_v2(&undo).expect("marshal v2 payload");
+            assert_eq!(
+                payload,
+                case.payload_json.as_bytes(),
+                "{}: canonical payload",
+                case.id
+            );
+            assert_eq!(
+                base64_encode(&payload),
+                case.payload_b64,
+                "{}: canonical padded base64",
+                case.id
+            );
+            assert_eq!(
+                hex::encode(undo_envelope_checksum_for_version(
+                    UNDO_ENVELOPE_VERSION,
+                    block_hash,
+                    &payload,
+                )),
+                case.checksum,
+                "{}: v2 checksum",
+                case.id
+            );
+
+            let envelope = marshal_undo_envelope(block_hash, &undo).expect("marshal v2 envelope");
+            assert_eq!(
+                envelope,
+                case.envelope.as_bytes(),
+                "{}: envelope bytes",
+                case.id
+            );
+            assert!(
+                envelope.ends_with(b"\n") && envelope.iter().filter(|b| **b == b'\n').count() == 1,
+                "{}: envelope must carry exactly one trailing LF",
+                case.id
+            );
+            assert_eq!(
+                unmarshal_undo_envelope(block_hash, &envelope).expect("round trip v2 envelope"),
+                undo,
+                "{}: envelope round trip",
+                case.id
+            );
+
+            let read_parent = unique_temp_path("rubin-undo-v2-vector-read");
+            std::fs::create_dir_all(&read_parent).expect("create v2 read parent");
+            let read_root = read_parent.join("blockstore");
+            let read_store = BlockStore::create(&read_root).expect("create v2 reader blockstore");
+            let read_path = read_root
+                .join("undo")
+                .join(format!("{}.json", case.block_hash));
+            std::fs::write(&read_path, case.envelope.as_bytes()).expect("seed v2 undo envelope");
+            assert_eq!(
+                read_store
+                    .get_undo(block_hash)
+                    .expect("read seeded v2 undo"),
+                undo,
+                "{}: public BlockStore v2 read",
+                case.id
+            );
+            drop(read_store);
+            std::fs::remove_dir_all(&read_parent).expect("cleanup v2 reader blockstore");
+
+            let write_parent = unique_temp_path("rubin-undo-v2-vector-write");
+            std::fs::create_dir_all(&write_parent).expect("create v2 write parent");
+            let write_root = write_parent.join("blockstore");
+            let write_store = BlockStore::create(&write_root).expect("create v2 writer blockstore");
+            write_store
+                .put_undo(block_hash, &undo)
+                .expect("write absent v2 undo");
+            let write_path = write_root
+                .join("undo")
+                .join(format!("{}.json", case.block_hash));
+            assert_eq!(
+                std::fs::read(&write_path).expect("read written v2 undo envelope"),
+                case.envelope.as_bytes(),
+                "{}: public BlockStore v2 write bytes",
+                case.id
+            );
+            assert_eq!(
+                write_store
+                    .get_undo(block_hash)
+                    .expect("read written v2 undo"),
+                undo,
+                "{}: public BlockStore v2 write/read",
+                case.id
+            );
+            drop(write_store);
+            std::fs::remove_dir_all(&write_parent).expect("cleanup v2 writer blockstore");
+        }
+    }
+
+    fn envelope_over(version: u32, block_hash: [u8; 32], payload: &[u8]) -> Vec<u8> {
+        let envelope = UndoEnvelopeDisk {
+            version,
+            block_hash: hex::encode(block_hash),
+            payload_b64: base64_encode(payload),
+            checksum: hex::encode(undo_envelope_checksum_for_version(
+                version, block_hash, payload,
+            )),
+        };
+        let mut raw = serde_json::to_vec(&envelope).expect("encode test envelope");
+        raw.push(b'\n');
+        raw
+    }
+
+    #[test]
+    fn undo_envelope_v2_round_trip_and_checksum_domain() {
+        let block_hash = [0x91; 32];
+        let undo = BlockUndo {
+            block_height: 11,
+            previous_already_generated: u128::MAX,
+            txs: Vec::new(),
+        };
+        let raw = marshal_undo_envelope(block_hash, &undo).expect("marshal v2");
+        let (version, _, payload_b64, checksum_hex) =
+            split_undo_envelope_versioned(&raw).expect("split v2");
+        assert_eq!(version, UNDO_ENVELOPE_VERSION);
+        assert!(raw.starts_with(UNDO_ENVELOPE_PREFIX_V2));
+        let payload = base64_decode_canonical(payload_b64).expect("decode payload");
+        let expected_payload = br#"{"block_height":11,"previous_already_generated":"340282366920938463463374607431768211455","txs":[]}"#;
+        assert_eq!(payload, expected_payload);
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"RUBIN_BLOCK_UNDO_V2");
+        hasher.update(block_hash);
+        hasher.update((expected_payload.len() as u64).to_be_bytes());
+        hasher.update(expected_payload);
+        let expected_checksum: [u8; 32] = hasher.finalize().into();
+        let expected_envelope = format!(
+            "{{\"version\":2,\"block_hash\":\"{}\",\"payload_b64\":\"{}\",\"checksum\":\"{}\"}}\n",
+            hex::encode(block_hash),
+            base64_encode(expected_payload),
+            hex::encode(expected_checksum)
+        );
+        assert_eq!(raw, expected_envelope.as_bytes());
+        let v1_checksum = undo_envelope_checksum(block_hash, &payload);
+        let v2_checksum = undo_envelope_checksum_for_version(version, block_hash, &payload);
+        assert_ne!(v1_checksum, v2_checksum);
+        assert_eq!(
+            hex::encode(v2_checksum),
+            String::from_utf8_lossy(checksum_hex)
+        );
+        assert_eq!(
+            unmarshal_undo_envelope(block_hash, &raw).expect("read v2"),
+            undo
+        );
+    }
+
+    #[test]
+    fn undo_envelope_supply_types_and_boundaries() {
+        let block_hash = [0x92; 32];
+        let cases = [
+            (
+                "v1_u64_max",
+                1,
+                r#"{"block_height":0,"previous_already_generated":18446744073709551615,"txs":[]}"#,
+                None,
+                u128::from(u64::MAX),
+            ),
+            (
+                "v1_string",
+                1,
+                r#"{"block_height":0,"previous_already_generated":"0","txs":[]}"#,
+                Some(UNDO_INVALID_V1_SUPPLY),
+                0,
+            ),
+            (
+                "v1_negative",
+                1,
+                r#"{"block_height":0,"previous_already_generated":-1,"txs":[]}"#,
+                Some(UNDO_INVALID_V1_SUPPLY),
+                0,
+            ),
+            (
+                "v1_fraction",
+                1,
+                r#"{"block_height":0,"previous_already_generated":0.0,"txs":[]}"#,
+                Some(UNDO_INVALID_V1_SUPPLY),
+                0,
+            ),
+            (
+                "v1_overflow",
+                1,
+                r#"{"block_height":0,"previous_already_generated":18446744073709551616,"txs":[]}"#,
+                Some(UNDO_INVALID_V1_SUPPLY),
+                0,
+            ),
+            (
+                "v1_extreme_exponent",
+                1,
+                r#"{"block_height":0,"previous_already_generated":1e400,"txs":[]}"#,
+                Some(UNDO_INVALID_V1_SUPPLY),
+                0,
+            ),
+            (
+                "v2_u128_max",
+                2,
+                r#"{"block_height":0,"previous_already_generated":"340282366920938463463374607431768211455","txs":[]}"#,
+                None,
+                u128::MAX,
+            ),
+            (
+                "v2_number",
+                2,
+                r#"{"block_height":0,"previous_already_generated":0,"txs":[]}"#,
+                Some(UNDO_INVALID_V2_SUPPLY),
+                0,
+            ),
+            (
+                "v2_extreme_number",
+                2,
+                r#"{"block_height":0,"previous_already_generated":1e400,"txs":[]}"#,
+                Some(UNDO_INVALID_V2_SUPPLY),
+                0,
+            ),
+            (
+                "v2_extreme_block_height",
+                2,
+                r#"{"block_height":1e400,"previous_already_generated":0,"txs":[]}"#,
+                Some(UNDO_INVALID_V2_SUPPLY),
+                0,
+            ),
+            (
+                "v2_null",
+                2,
+                r#"{"block_height":0,"previous_already_generated":null,"txs":[]}"#,
+                Some(UNDO_INVALID_V2_SUPPLY),
+                0,
+            ),
+            (
+                "v2_missing",
+                2,
+                r#"{"block_height":0,"txs":[]}"#,
+                Some(UNDO_PAYLOAD_NOT_CANONICAL),
+                0,
+            ),
+            (
+                "v2_leading_zero",
+                2,
+                r#"{"block_height":0,"previous_already_generated":"00","txs":[]}"#,
+                Some(UNDO_INVALID_V2_SUPPLY),
+                0,
+            ),
+            (
+                "v2_escaped_zero",
+                2,
+                r#"{"block_height":0,"previous_already_generated":"\u0030","txs":[]}"#,
+                Some(UNDO_INVALID_V2_SUPPLY),
+                0,
+            ),
+            (
+                "v2_overflow",
+                2,
+                r#"{"block_height":0,"previous_already_generated":"340282366920938463463374607431768211456","txs":[]}"#,
+                Some(UNDO_INVALID_V2_SUPPLY),
+                0,
+            ),
+        ];
+
+        for (name, version, payload, want_error, want_supply) in cases {
+            let raw = envelope_over(version, block_hash, payload.as_bytes());
+            match want_error {
+                Some(want) => assert_eq!(
+                    unmarshal_undo_envelope(block_hash, &raw).unwrap_err(),
+                    want,
+                    "{name}"
+                ),
+                None => assert_eq!(
+                    unmarshal_undo_envelope(block_hash, &raw)
+                        .unwrap_or_else(|error| panic!("{name}: {error}"))
+                        .previous_already_generated,
+                    want_supply,
+                    "{name}"
+                ),
+            }
+        }
+
+        for (name, payload) in [
+            (
+                "v2_duplicate_supply",
+                r#"{"block_height":0,"previous_already_generated":"0","previous_already_generated":"0","txs":[]}"#,
+            ),
+            (
+                "v2_trailing_json_content",
+                r#"{"block_height":0,"previous_already_generated":"0","txs":[]}{}"#,
+            ),
+        ] {
+            let raw = envelope_over(2, block_hash, payload.as_bytes());
+            let error = unmarshal_undo_envelope(block_hash, &raw).unwrap_err();
+            assert_eq!(error, UNDO_PAYLOAD_NOT_CANONICAL, "{name}");
+            assert!(
+                !error.starts_with(UNDO_INTEGRITY_PREFIX),
+                "{name}: checksum-valid payload gained UNDO_INTEGRITY: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn undo_checksum_and_hash_precede_payload_schema() {
+        let requested_hash = [0xa3; 32];
+        let stored_hash = [0xa4; 32];
+        let payload = br#"{"block_height":0,"previous_already_generated":0,"txs":[]}"#;
+        let mut wrong_hash = envelope_over(2, stored_hash, payload);
+        let payload_at =
+            UNDO_ENVELOPE_PREFIX_V2.len() + UNDO_HASH_HEX_LEN + UNDO_ENVELOPE_PAYLOAD_SEP.len();
+        wrong_hash[payload_at] = b'*';
+        assert_eq!(
+            unmarshal_undo_envelope(requested_hash, &wrong_hash).unwrap_err(),
+            UNDO_BLOCK_HASH_MISMATCH_ERR
+        );
+
+        let mut wrong_checksum = envelope_over(2, requested_hash, payload);
+        let checksum_at = wrong_checksum.len() - UNDO_ENVELOPE_SUFFIX.len() - UNDO_HASH_HEX_LEN;
+        wrong_checksum[checksum_at] = if wrong_checksum[checksum_at] == b'0' {
+            b'1'
+        } else {
+            b'0'
+        };
+        assert_eq!(
+            unmarshal_undo_envelope(requested_hash, &wrong_checksum).unwrap_err(),
+            UNDO_CHECKSUM_MISMATCH_ERR
+        );
+    }
+
+    #[test]
+    fn disconnect_summary_restores_full_u128_supply_boundaries() {
+        let genesis = crate::genesis::devnet_genesis_block_bytes();
+        for supply in [0, u128::from(u64::MAX), u128::from(u64::MAX) + 1, u128::MAX] {
+            let mut state = ChainState::new();
+            state
+                .connect_block(
+                    &genesis,
+                    Some(rubin_consensus::constants::POW_LIMIT),
+                    None,
+                    crate::genesis::devnet_genesis_chain_id(),
+                )
+                .expect("connect genesis");
+            let undo = BlockUndo {
+                block_height: 0,
+                previous_already_generated: supply,
+                txs: vec![TxUndo { spent: Vec::new() }],
+            };
+            let summary = state.disconnect_block(&genesis, &undo).expect("disconnect");
+            assert_eq!(summary.already_generated, supply);
+            assert_eq!(state.already_generated, supply);
         }
     }
 
@@ -879,7 +1713,7 @@ mod tests {
             txs: Vec::new(),
         };
         let envelope = marshal_undo_envelope([0u8; 32], &undo).expect("marshal");
-        let payload = marshal_block_undo(&undo).expect("marshal payload");
+        let payload = marshal_block_undo_v2(&undo).expect("marshal payload");
         let frame = envelope.len() - base64_encode(&payload).len();
         assert_eq!(frame, UNDO_ENVELOPE_FRAME_BYTES, "measured envelope frame");
         // The writer's bytes must satisfy the segment constants the reader indexes by.

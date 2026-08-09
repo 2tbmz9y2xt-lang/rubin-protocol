@@ -75,11 +75,11 @@ func makeHeaderPrefix(prevHash [32]byte, merkleRoot [32]byte, timestamp uint64, 
 	return header
 }
 
-func buildCoinbaseTx(height uint64, alreadyGenerated uint64, mineAddress []byte, witnessCommitment [32]byte) ([]byte, error) {
+func buildCoinbaseTx(height uint64, alreadyGenerated consensus.Uint128, mineAddress []byte, witnessCommitment [32]byte) ([]byte, error) {
 	if height > math.MaxUint32 {
 		return nil, errors.New("block height exceeds coinbase locktime range")
 	}
-	subsidy := consensus.BlockSubsidy(height, alreadyGenerated)
+	subsidy := consensus.BlockSubsidyBig(height, alreadyGenerated.Big())
 	if subsidy > 0 {
 		if err := validateMineAddress(mineAddress); err != nil {
 			return nil, err

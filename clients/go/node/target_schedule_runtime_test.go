@@ -102,7 +102,7 @@ func nextCandidateBlock(t *testing.T, engine *SyncEngine, target [32]byte, times
 	t.Helper()
 	view := engine.chainState.view()
 	height := view.height + 1
-	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, consensus.BlockSubsidy(height, view.alreadyGenerated))
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, consensus.BlockSubsidyBig(height, view.alreadyGenerated.Big()))
 	return mineTargetScheduleBlock(t, view.tipHash, target, timestamp, coinbase)
 }
 
@@ -231,7 +231,7 @@ func runTargetRuntimeCase(t *testing.T, tc targetRuntimeCase) {
 	if tc.prevHash != nil {
 		prev = *tc.prevHash
 	}
-	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidy(1, view.alreadyGenerated))
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidyBig(1, view.alreadyGenerated.Big()))
 	// pinNonce rows MUST skip the search: their targets are unsatisfiable
 	// (zero, or 1) and mineHeaderNonce would spin forever.
 	block := buildSingleTxBlock(t, prev, tc.target, reorgTestTimestamp(1), coinbase)
@@ -761,7 +761,7 @@ func TestTargetScheduleRuntimeParallelValidationOnErrorSeesDerivedTarget(t *test
 	wrong := wrongTarget()
 	setStaticExpectedTargetAfterGenesis(engine, &wrong)
 	view := engine.chainState.view()
-	bad := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidy(1, view.alreadyGenerated)+1)
+	bad := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidyBig(1, view.alreadyGenerated.Big())+1)
 	block := mineTargetScheduleBlock(t, view.tipHash, consensus.POW_LIMIT, reorgTestTimestamp(1), bad)
 	_, err := engine.ApplyBlockWithReorg(block, nil)
 	if err == nil {
@@ -795,7 +795,7 @@ func TestTargetScheduleRuntimeBranchCrossingRetargetBoundary(t *testing.T) {
 	// side block rather than triggering a reorg of its own.
 	heightA := uint64(consensus.WINDOW_SIZE - 1)
 	rowA := mineOrderedBlock(t, forkParent, consensus.POW_LIMIT, times[consensus.WINDOW_SIZE-2]+boundarySpacingSeconds,
-		coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, heightA, consensus.BlockSubsidy(heightA, engine.chainState.view().alreadyGenerated)),
+		coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, heightA, consensus.BlockSubsidyBig(heightA, engine.chainState.view().alreadyGenerated.Big())),
 		canonicalTip, false)
 	if _, err := engine.ApplyBlockWithReorg(rowA, nil); err != nil {
 		t.Fatalf("store losing branch row A at the pre-boundary height: %v", err)
@@ -813,7 +813,7 @@ func TestTargetScheduleRuntimeBranchCrossingRetargetBoundary(t *testing.T) {
 	// Row B sits exactly on the boundary. The canonical-derived value must be
 	// rejected; the branch-derived value must get past the target check.
 	heightB := uint64(consensus.WINDOW_SIZE)
-	coinbaseB := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, heightB, consensus.BlockSubsidy(heightB, engine.chainState.view().alreadyGenerated))
+	coinbaseB := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, heightB, consensus.BlockSubsidyBig(heightB, engine.chainState.view().alreadyGenerated.Big()))
 	tsB := parsedA.Header.Timestamp + boundarySpacingSeconds
 	_, err = engine.ApplyBlockWithReorg(mineTargetScheduleBlock(t, mustBlockHash(t, rowA), canonicalWant, tsB, coinbaseB), nil)
 	requireBlockTxError(t, err, consensus.BLOCK_ERR_TARGET_INVALID, "target mismatch")

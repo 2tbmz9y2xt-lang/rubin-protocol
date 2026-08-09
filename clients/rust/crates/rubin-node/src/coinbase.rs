@@ -70,15 +70,18 @@ pub fn parse_mine_address(value: &str) -> Result<Option<Vec<u8>>, String> {
 
 pub fn build_coinbase_tx(
     height: u64,
-    already_generated: u64,
+    already_generated: impl TryInto<u128>,
     mine_address: &[u8],
     witness_commitment: [u8; 32],
 ) -> Result<Vec<u8>, String> {
     if height > u64::from(u32::MAX) {
         return Err("block height exceeds coinbase locktime range".to_string());
     }
+    let already_generated = already_generated
+        .try_into()
+        .map_err(|_| "already_generated must fit u128".to_string())?;
 
-    let subsidy = block_subsidy(height, u128::from(already_generated));
+    let subsidy = block_subsidy(height, already_generated);
     if subsidy > 0 {
         validate_mine_address(mine_address)?;
     }
@@ -165,6 +168,21 @@ mod tests {
         assert_eq!(tx.outputs[0].covenant_type, COV_TYPE_P2PK);
         assert_eq!(tx.outputs[0].covenant_data, mine_address);
         assert_eq!(tx.outputs[1].covenant_type, COV_TYPE_ANCHOR);
+    }
+
+    #[test]
+    fn build_coinbase_tx_accepts_supply_above_u64_exactly() {
+        let supply = u128::from(u64::MAX) + 1;
+        let mine_address = test_mine_address(0x43);
+        let tx_bytes = build_coinbase_tx(1, supply, &mine_address, [0x12; 32])
+            .expect("build u128-supply coinbase");
+        let (tx, _, _, consumed) = parse_tx(&tx_bytes).expect("parse coinbase");
+        assert_eq!(consumed, tx_bytes.len());
+        assert_eq!(tx.outputs[0].value, block_subsidy(1, supply));
+
+        let legacy_supply = 0u64;
+        build_coinbase_tx(1, legacy_supply, &mine_address, [0x13; 32])
+            .expect("legacy u64 caller remains source-safe");
     }
 
     #[test]

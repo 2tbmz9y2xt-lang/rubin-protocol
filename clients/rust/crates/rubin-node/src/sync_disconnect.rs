@@ -538,6 +538,28 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_tip_restores_supply_above_u64_exactly() {
+        let (mut engine, dir) = engine_with_store("rubin-disc-u128-supply");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine.apply_block(&genesis, None).expect("genesis");
+
+        let previous_supply: u128 = "350965446908158964928367166"
+            .parse()
+            .expect("reachable maximum accumulated subsidy");
+        engine.chain_state.already_generated = previous_supply;
+        let block1 = coinbase_only_block_with_gen(1, previous_supply, genesis_hash, gen_ts + 1);
+        engine.apply_block(&block1, None).expect("block 1");
+        assert!(engine.chain_state.already_generated > previous_supply);
+
+        let summary = engine.disconnect_tip().expect("disconnect");
+        assert_eq!(summary.already_generated, previous_supply);
+        assert_eq!(engine.chain_state.already_generated, previous_supply);
+        assert_eq!(engine.chain_state.tip_hash, genesis_hash);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
     fn disconnect_tip_to_pre_genesis() {
         let (mut engine, dir) = engine_with_store("rubin-disc-gen");
         let (genesis, _, _) = genesis_info();

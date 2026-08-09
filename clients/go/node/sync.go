@@ -1280,7 +1280,7 @@ type canonicalTipScalars struct {
 	hasTip           bool
 	height           uint64
 	tipHash          [32]byte
-	alreadyGenerated uint64
+	alreadyGenerated consensus.Uint128
 }
 
 func chainTipScalarsOf(state *ChainState) canonicalTipScalars {
@@ -1294,7 +1294,7 @@ func chainTipScalarsOf(state *ChainState) canonicalTipScalars {
 // mutation in-process, so both halves are defense in depth.
 func (s *SyncEngine) recheckLiveTipIdentity(tr *canonicalTransition, prior canonicalTipScalars) error {
 	live := tr.chainState.view()
-	if live.hasTip != prior.hasTip || live.height != prior.height || live.tipHash != prior.tipHash {
+	if live.hasTip != prior.hasTip || live.height != prior.height || live.tipHash != prior.tipHash || live.alreadyGenerated != prior.alreadyGenerated {
 		return errors.New("live chainstate tip moved during canonical apply")
 	}
 	return s.recheckLiveStoreTipIdentity(prior)
