@@ -467,7 +467,8 @@ func validateBlockUndoFieldSet(raw []byte, supplyToken *json.RawMessage, scalarN
 }
 
 func recordBlockUndoField(key string, value json.RawMessage, seen *uint8,
-	supplyToken, txsRaw *json.RawMessage, scalarNull *bool) bool {
+	supplyToken, txsRaw *json.RawMessage, scalarNull *bool,
+) bool {
 	field := blockUndoField(key)
 	if field == 0 || *seen&field != 0 {
 		return false
