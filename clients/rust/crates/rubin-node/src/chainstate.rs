@@ -856,6 +856,19 @@ pub fn load_chain_state<P: AsRef<Path>>(path: P) -> Result<ChainState, String> {
     // from the NotFound branch, so a corrupt file can never ride the
     // absent-file fallback; the STORE_INTEGRITY message is Go's verbatim.
     let payload = open_store_envelope(STORE_ENVELOPE_CHAIN_STATE, &raw)?;
+    if payload
+        .iter()
+        .copied()
+        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+        .is_some_and(|byte| byte != b'{')
+    {
+        let mut syntax_deserializer = serde_json::Deserializer::from_slice(&payload);
+        if IgnoredAny::deserialize(&mut syntax_deserializer).is_ok()
+            && syntax_deserializer.end().is_ok()
+        {
+            return Err("decode chainstate: top-level value must be an object".to_string());
+        }
+    }
     // Presence/null/duplicate classification uses `IgnoredAny`, so a later
     // syntactically valid extreme number cannot preempt the target-field order.
     let mut presence_deserializer = serde_json::Deserializer::from_slice(&payload);
@@ -1782,6 +1795,11 @@ mod tests {
     #[test]
     fn chainstate_schema_errors_are_exact_and_version_precedes_supply() {
         let mut cases: Vec<(&str, String, &str)> = [
+            (
+                "top_level_non_object",
+                "[]",
+                "decode chainstate: top-level value must be an object",
+            ),
             ("missing_version", "{}", CHAINSTATE_MISSING_VERSION),
             (
                 "null_version",

@@ -543,32 +543,45 @@ func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {
 	if err := checkStoreSaveBound(path, len(raw), undoFileMaxBytes); err != nil {
 		return err
 	}
-	wantedPayload, err := marshalBlockUndoV2(undo)
-	if err != nil {
+	if err := validateAtomicWriteDestination(path, atomicWriteCreateIfAbsent); err != nil {
 		return err
 	}
 	// An existing v1 or v2 record is accepted only after the same bounded,
 	// hash-bound integrity and payload validation GetUndo performs. Semantic
 	// equality preserves its exact bytes and version; corruption or a different
 	// undo is never healed in place.
-	return writeAtomicFile(path, raw, atomicWriteCreateIfAbsent, func() error {
-		existingRaw, err := readFileFromDir(bs.undoDir, filepath.Base(path), undoFileMaxBytes)
-		if err != nil {
-			return err
-		}
-		existing, err := unmarshalUndoEnvelope(blockHash, existingRaw)
-		if err != nil {
-			return err
-		}
-		existingPayload, err := marshalBlockUndoV2(existing)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(existingPayload, wantedPayload) {
-			return errExistingContentDiffers(path)
-		}
-		return nil
-	})
+	resolveExisting := func() error { return bs.checkExistingUndo(path, blockHash, undo) }
+	existingErr := resolveExisting()
+	if existingErr == nil {
+		return syncMatchingExistingFile(path)
+	}
+	if !errors.Is(existingErr, os.ErrNotExist) {
+		return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteCreateIfAbsent, existingErr)
+	}
+	return writeAtomicFile(path, raw, atomicWriteCreateIfAbsent, resolveExisting)
+}
+
+func (bs *BlockStore) checkExistingUndo(path string, blockHash [32]byte, undo *BlockUndo) error {
+	existingRaw, err := readFileFromDir(bs.undoDir, filepath.Base(path), undoFileMaxBytes)
+	if err != nil {
+		return err
+	}
+	existing, err := unmarshalUndoEnvelope(blockHash, existingRaw)
+	if err != nil {
+		return err
+	}
+	existingPayload, err := marshalBlockUndoV2(existing)
+	if err != nil {
+		return err
+	}
+	wantedPayload, err := marshalBlockUndoV2(undo)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(existingPayload, wantedPayload) {
+		return errExistingContentDiffers(path)
+	}
+	return nil
 }
 
 func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {

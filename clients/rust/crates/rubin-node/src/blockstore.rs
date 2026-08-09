@@ -813,18 +813,47 @@ impl BlockStore {
         .map_err(|error| {
             atomic_write_error_before(&path, AtomicWriteOperation::CreateIfAbsent, error)
         })?;
-        write_file_create_if_absent(&path, &raw, || {
-            let name = path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| format!("invalid undo path: {}", path.display()))?;
-            let existing_raw = read_file_from_dir(&self.undo_dir, name, UNDO_FILE_MAX_BYTES)
-                .map_err(|error| format!("read undo {}: {error}", path.display()))?;
-            let existing = unmarshal_undo_envelope(block_hash_bytes, &existing_raw)?;
+        validate_atomic_write_destination(&path, AtomicWriteOperation::CreateIfAbsent)?;
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                atomic_write_error_before(
+                    &path,
+                    AtomicWriteOperation::CreateIfAbsent,
+                    format!("invalid undo path: {}", path.display()),
+                )
+            })?;
+        let validate_existing = |existing_raw: &[u8]| {
+            let existing = unmarshal_undo_envelope(block_hash_bytes, existing_raw)?;
             if existing != *undo {
                 return Err(existing_content_differs(&path));
             }
             Ok(())
+        };
+        match read_file_from_dir(&self.undo_dir, name, UNDO_FILE_MAX_BYTES) {
+            Ok(existing_raw) => {
+                validate_existing(&existing_raw).map_err(|error| {
+                    atomic_write_error_before(&path, AtomicWriteOperation::CreateIfAbsent, error)
+                })?;
+                sync_atomic_parent(&self.undo_dir).map_err(|error| {
+                    atomic_write_error_after(&path, AtomicWriteOperation::CreateIfAbsent, error)
+                })?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(atomic_write_error_before(
+                    &path,
+                    AtomicWriteOperation::CreateIfAbsent,
+                    format!("read undo {}: {error}", path.display()),
+                ));
+            }
+        }
+        write_file_create_if_absent(&path, &raw, || {
+            let existing_raw = read_file_from_dir(&self.undo_dir, name, UNDO_FILE_MAX_BYTES)
+                .map_err(|error| format!("read undo {}: {error}", path.display()))?;
+            validate_existing(&existing_raw)
         })
     }
 
@@ -2571,6 +2600,7 @@ mod tests {
 
     #[test]
     fn put_undo_preserves_equivalent_existing_v1_and_v2_bytes() {
+        use crate::io_utils::AtomicWriteTestOp::{ExclusiveOpen, ParentSync, Write};
         use crate::undo::{marshal_undo_envelope, marshal_undo_envelope_v1, BlockUndo, TxUndo};
 
         let dir = unique_temp_path("rubin-blockstore-undo-existing-equivalent");
@@ -2608,14 +2638,19 @@ mod tests {
                 .join("undo")
                 .join(format!("{}.json", hex::encode(hash)));
             std::fs::write(&path, &raw).expect("seed existing undo");
-            store
-                .put_undo(hash, &undo)
-                .expect("equivalent existing undo");
-            assert_eq!(
-                std::fs::read(&path).expect("read preserved undo"),
-                raw,
-                "version {version} was rewritten"
-            );
+            for fault in [ExclusiveOpen, Write] {
+                let scope = AtomicWriteTestScope::new();
+                scope.fail_at(fault, 1, "scratch lane must not run");
+                store
+                    .put_undo(hash, &undo)
+                    .expect("equivalent existing undo");
+                assert_eq!(scope.operations(), vec![ParentSync]);
+                assert_eq!(
+                    std::fs::read(&path).expect("read preserved undo"),
+                    raw,
+                    "version {version} was rewritten"
+                );
+            }
         }
 
         std::fs::remove_dir_all(&dir).expect("cleanup");

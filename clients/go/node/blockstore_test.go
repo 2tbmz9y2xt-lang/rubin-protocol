@@ -1416,6 +1416,13 @@ func TestUndoEnvelopeSupplyTypesAndBoundaries(t *testing.T) {
 	}
 }
 
+type putUndoScratchWriteFailure struct{}
+
+func (putUndoScratchWriteFailure) Write([]byte) (int, error) { return 0, os.ErrPermission }
+func (putUndoScratchWriteFailure) Sync() error               { return nil }
+func (putUndoScratchWriteFailure) Close() error              { return nil }
+func (putUndoScratchWriteFailure) Chmod(os.FileMode) error   { return nil }
+
 func TestPutUndoPreservesMatchingExistingV1AndV2Bytes(t *testing.T) {
 	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	for _, tc := range []struct {
@@ -1444,12 +1451,26 @@ func TestPutUndoPreservesMatchingExistingV1AndV2Bytes(t *testing.T) {
 			}
 			matching := *tc.undo
 			matching.Txs = nil
-			if err := store.PutUndo(tc.hash, &matching); err != nil {
-				t.Fatalf("PutUndo(matching): %v", err)
-			}
-			after, err := os.ReadFile(path)
-			if err != nil || !bytes.Equal(after, seeded) {
-				t.Fatalf("matching existing bytes changed: err=%v", err)
+			for _, fault := range []string{"scratch_open", "scratch_write"} {
+				t.Run(fault, func(t *testing.T) {
+					previous, ops := atomicWriteIO, atomicWriteIO
+					t.Cleanup(func() { atomicWriteIO = previous })
+					if fault == "scratch_open" {
+						ops.openScratch = func(string, int, os.FileMode) (atomicWriteScratchFile, error) { return nil, os.ErrPermission }
+					} else {
+						ops.openScratch = func(string, int, os.FileMode) (atomicWriteScratchFile, error) {
+							return putUndoScratchWriteFailure{}, nil
+						}
+					}
+					atomicWriteIO = ops
+					if err := store.PutUndo(tc.hash, &matching); err != nil {
+						t.Fatalf("PutUndo(matching): %v", err)
+					}
+					after, err := os.ReadFile(path)
+					if err != nil || !bytes.Equal(after, seeded) {
+						t.Fatalf("matching existing bytes changed: err=%v", err)
+					}
+				})
 			}
 
 			different := matching

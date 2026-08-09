@@ -160,6 +160,7 @@ func TestChainStateSchemaErrorsAndPrecedence(t *testing.T) {
 		payload string
 		want    string
 	}{
+		{name: "top_level_non_object", payload: `[]`, want: "decode chainstate: top-level value must be an object"},
 		{name: "missing_version", payload: `{}`, want: "CHAINSTATE_SCHEMA: missing version"},
 		{name: "null_version", payload: `{"version":null,"already_generated":"bad"}`, want: "CHAINSTATE_SCHEMA: missing version"},
 		{name: "null_duplicate_version", payload: `{"version":null,"version":2,"already_generated":"0"}`, want: "CHAINSTATE_SCHEMA: missing version"},
