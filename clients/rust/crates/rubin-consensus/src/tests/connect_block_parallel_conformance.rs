@@ -70,8 +70,8 @@ struct ConnectBlockVector {
     #[serde(default)]
     chain_id: String,
     height: u64,
-    #[serde(default)]
-    already_generated: u64,
+    #[serde(default, deserialize_with = "crate::uint128_json::deserialize")]
+    already_generated: u128,
     utxos: Vec<VectorUtxo>,
     #[serde(default)]
     prev_timestamps: Vec<u64>,
@@ -155,7 +155,7 @@ fn test_parallel_parity_from_vector(v: &ConnectBlockVector) {
     };
     let utxos = build_utxo_map_from_vector(&v.utxos);
 
-    let mut seq_state = clone_chain_state(&utxos, u128::from(v.already_generated));
+    let mut seq_state = clone_chain_state(&utxos, v.already_generated);
     let seq_result = crate::connect_block_basic_in_memory_at_height(
         &block_bytes,
         expected_prev_hash,
@@ -167,7 +167,7 @@ fn test_parallel_parity_from_vector(v: &ConnectBlockVector) {
     )
     .expect("sequential connect");
 
-    let mut par_state = clone_chain_state(&utxos, u128::from(v.already_generated));
+    let mut par_state = clone_chain_state(&utxos, v.already_generated);
     let par_result = crate::connect_block_parallel_sig_verify(
         &block_bytes,
         expected_prev_hash,
@@ -180,6 +180,16 @@ fn test_parallel_parity_from_vector(v: &ConnectBlockVector) {
     )
     .expect("parallel connect");
 
+    assert_eq!(
+        seq_result.already_generated, v.already_generated,
+        "{} sequential already_generated mismatch",
+        v.id
+    );
+    assert_eq!(
+        par_result.already_generated, v.already_generated,
+        "{} parallel already_generated mismatch",
+        v.id
+    );
     assert_eq!(seq_result.sum_fees, par_result.sum_fees, "{}", v.id);
     assert_eq!(
         seq_result.already_generated, par_result.already_generated,
@@ -297,6 +307,12 @@ fn connect_block_parallel_sig_verify_conformance_parity() {
             let vector: ConnectBlockVector =
                 serde_json::from_value(raw_vector.clone()).expect("parse connect block vector");
             test_parallel_parity_from_vector(&vector);
+            if vector.id == "CV-SUB-SUPPLY-U128-01" {
+                let mut boundary_vector = vector.clone();
+                boundary_vector.id = "CV-SUB-SUPPLY-U128-01-TEST-U64-PLUS-ONE".to_owned();
+                boundary_vector.already_generated = u128::from(u64::MAX) + 1;
+                test_parallel_parity_from_vector(&boundary_vector);
+            }
             tested += 1;
         }
     }

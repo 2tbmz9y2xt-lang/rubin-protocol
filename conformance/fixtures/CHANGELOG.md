@@ -28,7 +28,7 @@ tools/formal/gen_lean_conformance_vectors.py`, `scripts/dev-env.sh -- bash -lc
 and `scripts/dev-env.sh -- python3
 tools/formal/gen_lean_refinement_from_traces.py`. Trace regeneration is
 provenance-digest-only: all five `connect_block_basic` entry rows remain
-byte-for-byte unchanged. Non-goals: no durable state or format, Rust consensus,
+byte-for-byte unchanged. Non-goals: no durable state or format, Rust consensus production,
 codec, devnet, undo, miner, recovery, operator, or specification change.
 
 ## 2026-08-06 — Widened sum_fees on the request path (RUB-1127)
