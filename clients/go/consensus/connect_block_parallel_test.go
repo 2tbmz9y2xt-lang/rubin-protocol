@@ -2,8 +2,29 @@ package consensus
 
 import (
 	"math/big"
+	"reflect"
+	"strings"
 	"testing"
 )
+
+func buildSupplyOnlyBlock(t *testing.T, height uint64, coinbaseValue uint64) ([]byte, [32]byte, [32]byte) {
+	t.Helper()
+	prev := hashWithPrefix(0xd1)
+	target := filledHash(0xff)
+	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, coinbaseValue)
+	root, err := MerkleRootTxids([][32]byte{testTxID(t, coinbase)})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+	return buildBlockBytes(t, prev, root, target, 1, [][]byte{coinbase}), prev, target
+}
+
+func connectSupplyPath(parallel bool, block []byte, prev, target *[32]byte, height uint64, state *InMemoryChainState) (*ConnectBlockBasicSummary, error) {
+	if parallel {
+		return ConnectBlockParallelSigVerify(block, prev, target, height, nil, state, [32]byte{}, 2)
+	}
+	return ConnectBlockBasicInMemoryAtHeight(block, prev, target, height, nil, state, [32]byte{})
+}
 
 // TestConnectBlockParallelSigVerify_OK exercises the full parallel sig verify
 // path with a block containing a single P2PK spend transaction. The result
@@ -76,10 +97,10 @@ func TestConnectBlockParallelSigVerify_OK(t *testing.T) {
 		t.Fatalf("SumFees mismatch: seq=%d, par=%d", seqSummary.SumFees, parSummary.SumFees)
 	}
 	if seqSummary.AlreadyGenerated != parSummary.AlreadyGenerated {
-		t.Fatalf("AlreadyGenerated mismatch: seq=%d, par=%d", seqSummary.AlreadyGenerated, parSummary.AlreadyGenerated)
+		t.Fatalf("AlreadyGenerated mismatch: seq=%s, par=%s", seqSummary.AlreadyGenerated.String(), parSummary.AlreadyGenerated.String())
 	}
 	if seqSummary.AlreadyGeneratedN1 != parSummary.AlreadyGeneratedN1 {
-		t.Fatalf("AlreadyGeneratedN1 mismatch: seq=%d, par=%d", seqSummary.AlreadyGeneratedN1, parSummary.AlreadyGeneratedN1)
+		t.Fatalf("AlreadyGeneratedN1 mismatch: seq=%s, par=%s", seqSummary.AlreadyGeneratedN1.String(), parSummary.AlreadyGeneratedN1.String())
 	}
 	if seqSummary.UtxoCount != parSummary.UtxoCount {
 		t.Fatalf("UtxoCount mismatch: seq=%d, par=%d", seqSummary.UtxoCount, parSummary.UtxoCount)
@@ -98,6 +119,169 @@ func TestConnectBlockParallelSigVerify_OK(t *testing.T) {
 			t.Fatalf("UTXO %v mismatch: seq=(val=%d,cov=%d), par=(val=%d,cov=%d)",
 				op, seqEntry.Value, seqEntry.CovenantType, parEntry.Value, parEntry.CovenantType)
 		}
+	}
+}
+
+func TestConnectBlockSupplyPreflightWinsBeforeParseWithoutMutation(t *testing.T) {
+	overU128 := new(big.Int).Lsh(big.NewInt(1), 128)
+	for _, supply := range []struct {
+		name  string
+		value *big.Int
+	}{
+		{name: "negative", value: big.NewInt(-1)},
+		{name: "above_u128", value: overU128},
+	} {
+		var firstError string
+		for _, parallel := range []bool{false, true} {
+			path := "sequential"
+			if parallel {
+				path = "parallel"
+			}
+			t.Run(path+"/"+supply.name, func(t *testing.T) {
+				source := new(big.Int).Set(supply.value)
+				utxos := map[Outpoint]UtxoEntry{{Txid: [32]byte{0x41}, Vout: 2}: {Value: 7, CovenantData: []byte{0xaa}}}
+				state := &InMemoryChainState{Utxos: utxos, AlreadyGenerated: source}
+				beforeUtxos := cloneUtxoSet(utxos)
+				beforeSupply := new(big.Int).Set(source)
+
+				summary, err := connectSupplyPath(parallel, []byte{0x00}, nil, nil, 1, state)
+				if err == nil || summary != nil {
+					t.Fatalf("expected supply preflight error, summary=%#v err=%v", summary, err)
+				}
+				if got := mustTxErrCode(t, err); got != BLOCK_ERR_PARSE || !strings.Contains(err.Error(), "already_generated") {
+					t.Fatalf("error=%v, want already_generated %s", err, BLOCK_ERR_PARSE)
+				}
+				if firstError == "" {
+					firstError = err.Error()
+				} else if err.Error() != firstError {
+					t.Fatalf("sequential/parallel preflight error mismatch: %q vs %q", firstError, err)
+				}
+				if state.AlreadyGenerated != source || source.Cmp(beforeSupply) != 0 {
+					t.Fatalf("supply mutated or replaced: state=%p source=%p value=%s", state.AlreadyGenerated, source, source)
+				}
+				if !reflect.DeepEqual(state.Utxos, beforeUtxos) {
+					t.Fatalf("UTXO state changed on preflight error")
+				}
+				probe := Outpoint{Txid: [32]byte{0x42}, Vout: 3}
+				utxos[probe] = UtxoEntry{Value: 8}
+				if _, ok := state.Utxos[probe]; !ok {
+					t.Fatal("UTXO map was replaced on preflight error")
+				}
+			})
+		}
+	}
+}
+
+func TestConnectBlockSupplyCrossesU64ExactlyAndCopiesSource(t *testing.T) {
+	const (
+		height     = uint64(5_771_107)
+		beforeText = "18446744073699181041"
+		afterText  = "18446744073718206916"
+	)
+	before, ok := new(big.Int).SetString(beforeText, 10)
+	if !ok {
+		t.Fatal("parse crossing supply")
+	}
+	wantBefore, err := ParseUint128Decimal(beforeText)
+	if err != nil {
+		t.Fatalf("ParseUint128Decimal(before): %v", err)
+	}
+	wantAfter, err := ParseUint128Decimal(afterText)
+	if err != nil {
+		t.Fatalf("ParseUint128Decimal(after): %v", err)
+	}
+	block, prev, target := buildSupplyOnlyBlock(t, height, TAIL_EMISSION_PER_BLOCK)
+
+	var first *ConnectBlockBasicSummary
+	for _, parallel := range []bool{false, true} {
+		path := "sequential"
+		if parallel {
+			path = "parallel"
+		}
+		t.Run(path, func(t *testing.T) {
+			source := new(big.Int).Set(before)
+			state := &InMemoryChainState{Utxos: map[Outpoint]UtxoEntry{}, AlreadyGenerated: source}
+			summary, err := connectSupplyPath(parallel, block, &prev, &target, height, state)
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			if summary.AlreadyGenerated != wantBefore || summary.AlreadyGeneratedN1 != wantAfter {
+				t.Fatalf("summary supply=%s -> %s", summary.AlreadyGenerated.String(), summary.AlreadyGeneratedN1.String())
+			}
+			if state.AlreadyGenerated == source || state.AlreadyGenerated.Cmp(wantAfter.Big()) != 0 {
+				t.Fatalf("state did not retain an exact copied supply: %s", state.AlreadyGenerated)
+			}
+			source.SetUint64(1)
+			if state.AlreadyGenerated.Cmp(wantAfter.Big()) != 0 || summary.AlreadyGenerated != wantBefore || summary.AlreadyGeneratedN1 != wantAfter {
+				t.Fatal("source big.Int mutation leaked into retained state or summary")
+			}
+			if first == nil {
+				copySummary := *summary
+				first = &copySummary
+				return
+			}
+			if *summary != *first {
+				t.Fatalf("sequential/parallel supply divergence: %#v vs %#v", first, summary)
+			}
+		})
+	}
+}
+
+func TestConnectBlockSupplyOverflowRunsAfterEarlierCoinbaseChecks(t *testing.T) {
+	const height = uint64(5_771_107)
+	maxSupply := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
+	valid, prev, target := buildSupplyOnlyBlock(t, height, TAIL_EMISSION_PER_BLOCK)
+	badCoinbase, _, _ := buildSupplyOnlyBlock(t, height, TAIL_EMISSION_PER_BLOCK+1)
+
+	newState := func() (*InMemoryChainState, *big.Int, map[Outpoint]UtxoEntry, map[Outpoint]UtxoEntry) {
+		source := new(big.Int).Set(maxSupply)
+		utxos := map[Outpoint]UtxoEntry{{Txid: [32]byte{0x52}, Vout: 3}: {Value: 9, CovenantData: []byte{0xbb}}}
+		return &InMemoryChainState{Utxos: utxos, AlreadyGenerated: source}, source, utxos, cloneUtxoSet(utxos)
+	}
+	assertUnchanged := func(t *testing.T, state *InMemoryChainState, source *big.Int, original, want map[Outpoint]UtxoEntry) {
+		t.Helper()
+		if state.AlreadyGenerated != source || source.Cmp(maxSupply) != 0 || !reflect.DeepEqual(state.Utxos, want) {
+			t.Fatal("caller state changed on rejected block")
+		}
+		probe := Outpoint{Txid: [32]byte{0x53}, Vout: 4}
+		original[probe] = UtxoEntry{Value: 10}
+		if _, ok := state.Utxos[probe]; !ok {
+			t.Fatal("UTXO map was replaced on rejected block")
+		}
+	}
+
+	var firstEarlierError, firstOverflowError string
+	for _, parallel := range []bool{false, true} {
+		path := "sequential"
+		if parallel {
+			path = "parallel"
+		}
+		t.Run(path+"/earlier_coinbase_error", func(t *testing.T) {
+			state, source, original, utxos := newState()
+			summary, err := connectSupplyPath(parallel, badCoinbase, &prev, &target, height, state)
+			if err == nil || summary != nil || mustTxErrCode(t, err) != BLOCK_ERR_SUBSIDY_EXCEEDED {
+				t.Fatalf("got summary=%#v err=%v, want earlier subsidy error", summary, err)
+			}
+			if firstEarlierError == "" {
+				firstEarlierError = err.Error()
+			} else if err.Error() != firstEarlierError {
+				t.Fatalf("sequential/parallel earlier error mismatch: %q vs %q", firstEarlierError, err)
+			}
+			assertUnchanged(t, state, source, original, utxos)
+		})
+		t.Run(path+"/checked_add_overflow", func(t *testing.T) {
+			state, source, original, utxos := newState()
+			summary, err := connectSupplyPath(parallel, valid, &prev, &target, height, state)
+			if err == nil || summary != nil || mustTxErrCode(t, err) != BLOCK_ERR_PARSE || !strings.Contains(err.Error(), "already_generated overflow") {
+				t.Fatalf("got summary=%#v err=%v, want checked-add overflow", summary, err)
+			}
+			if firstOverflowError == "" {
+				firstOverflowError = err.Error()
+			} else if err.Error() != firstOverflowError {
+				t.Fatalf("sequential/parallel overflow mismatch: %q vs %q", firstOverflowError, err)
+			}
+			assertUnchanged(t, state, source, original, utxos)
+		})
 	}
 }
 

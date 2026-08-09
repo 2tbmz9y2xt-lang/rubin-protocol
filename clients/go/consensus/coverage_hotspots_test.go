@@ -6,15 +6,10 @@ import (
 	"testing"
 )
 
-func TestCoverage_HasSuiteAndBigIntToUint64(t *testing.T) {
-	if got, err := bigIntToUint64(nil); err != nil || got != 0 {
-		t.Fatalf("bigIntToUint64(nil)=%d,%v want 0,nil", got, err)
-	}
-	if _, err := bigIntToUint64(big.NewInt(-1)); err == nil {
-		t.Fatalf("expected negative big.Int rejection")
-	}
-	if _, err := bigIntToUint64(new(big.Int).Lsh(big.NewInt(1), 65)); err == nil {
-		t.Fatalf("expected overflow rejection")
+func TestCoverage_Uint128FromBigInt(t *testing.T) {
+	max := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
+	if got := uint128FromBigInt(max); got != (Uint128{Hi: ^uint64(0), Lo: ^uint64(0)}) {
+		t.Fatalf("uint128FromBigInt(max)=%#v", got)
 	}
 }
 

@@ -518,6 +518,17 @@ def exact_uint(value: Any, problems: List[str], ctx: str) -> Optional[int]:
     return None
 
 
+def canonical_uint128_output(value: Any, problems: List[str], ctx: str) -> Optional[int]:
+    """Read one required client u128 output in its canonical JSON form."""
+    if value is ABSENT:
+        problems.append(f"{ctx}: missing canonical decimal string")
+        return None
+    if not isinstance(value, str):
+        problems.append(f"{ctx}: expected canonical decimal string, got {value!r}")
+        return None
+    return exact_uint(value, problems, ctx)
+
+
 def as_sorted_ints(values: Any) -> List[int]:
     if not isinstance(values, list):
         return []
@@ -1848,12 +1859,18 @@ def validate_vector(
     elif op == "block_basic_check_with_fees":
         req["block_hex"] = v["block_hex"]
         include_block_context(require_height=True)
-        req["already_generated"] = int(v.get("already_generated", 0))
-        # sum_fees is the one widened value the runner sends as INPUT. Forward
-        # the authored token unchanged — a canonical string stays a string, a
-        # legacy numeric stays numeric — so both CLIs read exactly what the
-        # fixture wrote. int() re-encoded "18446744073709551616" as a bare JSON
-        # number above u64, which both readers then correctly refused.
+        already_generated_token = v.get("already_generated", 0)
+        already_generated_problems: List[str] = []
+        if exact_uint(
+            already_generated_token,
+            already_generated_problems,
+            f"{gate}/{vid}: already_generated",
+        ) is None:
+            return already_generated_problems
+        req["already_generated"] = already_generated_token
+        # sum_fees follows the same widened input contract: forward the authored
+        # token unchanged so a canonical string stays a string and a legacy
+        # numeric stays numeric.
         sum_fees_token = v.get("sum_fees", 0)
         sum_fees_problems: List[str] = []
         # The token is never ABSENT (it defaults to 0), so an unreadable one —
@@ -1864,7 +1881,15 @@ def validate_vector(
     elif op == "connect_block_basic":
         req["block_hex"] = v["block_hex"]
         include_block_context(require_height=True)
-        req["already_generated"] = int(v.get("already_generated", 0))
+        already_generated_token = v.get("already_generated", 0)
+        already_generated_problems = []
+        if exact_uint(
+            already_generated_token,
+            already_generated_problems,
+            f"{gate}/{vid}: already_generated",
+        ) is None:
+            return already_generated_problems
+        req["already_generated"] = already_generated_token
         req["utxos"] = v.get("utxos", [])
     elif op == "covenant_genesis_check":
         if tx_hex == "":
@@ -2130,11 +2155,28 @@ def validate_vector(
         rust_sum_fees = exact_uint(rust_resp.get("sum_fees", ABSENT), problems, f"{gate}/{vid}: rust.sum_fees") or 0
         if go_sum_fees != rust_sum_fees:
             problems.append(f"{gate}/{vid}: sum_fees mismatch go={go_sum_fees} rust={rust_sum_fees}")
-        for k in ["utxo_count", "already_generated", "already_generated_n1"]:
-            gv = as_int(go_resp.get(k))
-            rv = as_int(rust_resp.get(k))
-            if gv != rv:
-                problems.append(f"{gate}/{vid}: {k} mismatch go={gv} rust={rv}")
+        gv = as_int(go_resp.get("utxo_count"))
+        rv = as_int(rust_resp.get("utxo_count"))
+        if gv != rv:
+            problems.append(f"{gate}/{vid}: utxo_count mismatch go={gv} rust={rv}")
+
+        supply_values: Dict[str, Dict[str, int]] = {"go": {}, "rust": {}}
+        for key in ("already_generated", "already_generated_n1"):
+            for side, resp in (("go", go_resp), ("rust", rust_resp)):
+                value = canonical_uint128_output(
+                    resp.get(key, ABSENT),
+                    problems,
+                    f"{gate}/{vid}: {side}.{key}",
+                )
+                if value is not None:
+                    supply_values[side][key] = value
+            if key in supply_values["go"] and key in supply_values["rust"]:
+                go_value = supply_values["go"][key]
+                rust_value = supply_values["rust"][key]
+                if go_value != rust_value:
+                    problems.append(
+                        f"{gate}/{vid}: {key} mismatch go={go_value} rust={rust_value}"
+                    )
 
         if go_resp.get("digest") != rust_resp.get("digest"):
             problems.append(
@@ -2148,10 +2190,16 @@ def validate_vector(
                 problems.append(f"{gate}/{vid}: expect_sum_fees mismatch")
         if "expect_utxo_count" in v and as_int(go_resp.get("utxo_count")) != int(v["expect_utxo_count"]):
             problems.append(f"{gate}/{vid}: expect_utxo_count mismatch")
-        if "expect_already_generated" in v and as_int(go_resp.get("already_generated")) != int(v["expect_already_generated"]):
-            problems.append(f"{gate}/{vid}: expect_already_generated mismatch")
-        if "expect_already_generated_n1" in v and as_int(go_resp.get("already_generated_n1")) != int(v["expect_already_generated_n1"]):
-            problems.append(f"{gate}/{vid}: expect_already_generated_n1 mismatch")
+        for key in ("already_generated", "already_generated_n1"):
+            expect_key = f"expect_{key}"
+            if expect_key not in v:
+                continue
+            want = exact_uint(v[expect_key], problems, f"{gate}/{vid}: {expect_key}")
+            if want is None:
+                continue
+            for side in ("go", "rust"):
+                if key in supply_values[side] and supply_values[side][key] != want:
+                    problems.append(f"{gate}/{vid}: {side}.{expect_key} mismatch")
         if "expect_digest" in v and go_resp.get("digest") != v["expect_digest"]:
             problems.append(f"{gate}/{vid}: expect_digest mismatch")
     elif op == "covenant_genesis_check":

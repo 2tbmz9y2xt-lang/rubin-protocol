@@ -332,7 +332,7 @@ func TestValidateBlockBasicWithContextAndFeesAtHeight_PropagatesBasicErrors(t *t
 	block := buildBlockBytes(t, prev, root, target, 7, [][]byte{coinbase})
 
 	wrongPrev := hashWithPrefix(0x55)
-	_, err = ValidateBlockBasicWithContextAndFeesAtHeight(block, &wrongPrev, &target, 1, nil, 0, Uint128FromU64(0))
+	_, err = ValidateBlockBasicWithContextAndFeesAtHeight(block, &wrongPrev, &target, 1, nil, Uint128{}, Uint128{})
 	if err == nil {
 		t.Fatalf("expected error")
 	}

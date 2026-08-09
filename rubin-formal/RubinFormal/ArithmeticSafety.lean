@@ -138,28 +138,63 @@ theorem block_reward_bound_in_u128 (h ag fees : Nat)
     -- F-AUDIT-11: see mineable_cap_in_u64 comment for native_decide rationale.
     _ ≤ maxU128 := by native_decide
 
-/-- alreadyGenerated + blockSubsidy + fees fits in u128 when inputs are bounded.
+/-- Exact subsidy-only accumulation stays within u128 throughout the u64 height
+    domain. `accumulatedSubsidy (h + 1)` includes subsidies at heights `1..h`;
+    the height-zero term is zero by `blockSubsidy`. -/
+theorem subsidy_accumulation_in_u128 (h : Nat) (hHeight : h ≤ maxU64) :
+    SubsidyV1.accumulatedSubsidy (h + 1) ≤ h * SubsidyV1.MINEABLE_CAP ∧
+    h * SubsidyV1.MINEABLE_CAP < 2 ^ 117 ∧
+    2 ^ 117 < 2 ^ 128 ∧
+    SubsidyV1.accumulatedSubsidy (h + 1) ≤ maxU128 := by
+  have hAccumulated : ∀ n : Nat,
+      SubsidyV1.accumulatedSubsidy (n + 1) ≤ n * SubsidyV1.MINEABLE_CAP := by
+    intro n
+    induction n with
+    | zero =>
+        simp [SubsidyV1.accumulatedSubsidy, SubsidyV1.blockSubsidy]
+    | succ n ih =>
+        rw [SubsidyV1.accumulatedSubsidy]
+        calc
+          SubsidyV1.accumulatedSubsidy (Nat.succ n) +
+              SubsidyV1.blockSubsidy (Nat.succ n)
+                (SubsidyV1.accumulatedSubsidy (Nat.succ n))
+              ≤ n * SubsidyV1.MINEABLE_CAP + SubsidyV1.MINEABLE_CAP :=
+                Nat.add_le_add ih (blockSubsidy_bounded _ _)
+          _ = Nat.succ n * SubsidyV1.MINEABLE_CAP := by
+                exact (Nat.succ_mul n SubsidyV1.MINEABLE_CAP).symm
 
-    The fee premise is the structural block ceiling, NOT `maxU64`: a
-    protocol-valid `sum_fees` may exceed u64 (accepted rows pin exactly
-    2^64), so the previous `fees ≤ maxU64` hypothesis was false for
-    reachable blocks and the statement was vacuous there. `maxBlockSumFees`
-    is the strongest honest bound current consensus limits supply, and it is
-    an assumption (see `maxBlockSumFees`), not a theorem of this model.
-
-    The `ag +` term is retained only for backward compatibility of this
-    statement's shape; `already_generated` is subsidy-only and fees never
-    accumulate into it, so `block_reward_bound_in_u128` above is the
-    statement that matches what consensus computes. -/
-theorem subsidy_accumulation_in_u128 (h ag fees : Nat)
-    (hAg : ag ≤ SubsidyV1.MINEABLE_CAP)
-    (hFees : fees ≤ maxBlockSumFees) :
-    ag + SubsidyV1.blockSubsidy h ag + fees ≤ maxU128 := by
-  have hSub := blockSubsidy_bounded h ag
-  calc ag + SubsidyV1.blockSubsidy h ag + fees
-      ≤ SubsidyV1.MINEABLE_CAP + SubsidyV1.MINEABLE_CAP + maxBlockSumFees :=
-        Nat.add_le_add (Nat.add_le_add hAg hSub) hFees
-    -- F-AUDIT-11: see mineable_cap_in_u64 comment for native_decide rationale.
-    _ ≤ maxU128 := by native_decide
+  have hHeightPow : h < 2 ^ 64 := by
+    have hMax : maxU64 < 2 ^ 64 := by
+      unfold maxU64
+      exact Nat.sub_lt (Nat.pow_pos (by omega)) (by omega)
+    exact Nat.lt_of_le_of_lt hHeight hMax
+  have hCapPow : SubsidyV1.MINEABLE_CAP < 2 ^ 53 := by
+    unfold SubsidyV1.MINEABLE_CAP
+    decide
+  have hCapPos : 0 < SubsidyV1.MINEABLE_CAP := by
+    unfold SubsidyV1.MINEABLE_CAP
+    omega
+  have hPow64Pos : 0 < 2 ^ 64 := Nat.pow_pos (by omega)
+  have hProduct : h * SubsidyV1.MINEABLE_CAP < 2 ^ 117 := by
+    calc
+      h * SubsidyV1.MINEABLE_CAP < (2 ^ 64) * SubsidyV1.MINEABLE_CAP :=
+        Nat.mul_lt_mul_of_pos_right hHeightPow hCapPos
+      _ < (2 ^ 64) * (2 ^ 53) :=
+        Nat.mul_lt_mul_of_pos_left hCapPow hPow64Pos
+      _ = 2 ^ 117 := (Nat.pow_add 2 64 53).symm
+  have hPow117Pos : 0 < 2 ^ 117 := Nat.pow_pos (by omega)
+  have hPowBound : 2 ^ 117 < 2 ^ 128 := by
+    calc
+      2 ^ 117 = (2 ^ 117) * 1 := by simp
+      _ < (2 ^ 117) * (2 ^ 11) :=
+        Nat.mul_lt_mul_of_pos_left (by native_decide) hPow117Pos
+      _ = 2 ^ 128 := (Nat.pow_add 2 117 11).symm
+  have hAccumulatedBound := hAccumulated h
+  have hU128 : SubsidyV1.accumulatedSubsidy (h + 1) ≤ maxU128 := by
+    have hLt : SubsidyV1.accumulatedSubsidy (h + 1) < 2 ^ 128 :=
+      Nat.lt_trans (Nat.lt_of_le_of_lt hAccumulatedBound hProduct) hPowBound
+    unfold maxU128
+    exact Nat.le_sub_one_of_lt hLt
+  exact ⟨hAccumulatedBound, hProduct, hPowBound, hU128⟩
 
 end RubinFormal

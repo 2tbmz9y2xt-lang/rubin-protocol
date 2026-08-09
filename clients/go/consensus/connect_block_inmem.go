@@ -14,8 +14,8 @@ type InMemoryChainState struct {
 
 type ConnectBlockBasicSummary struct {
 	SumFees            Uint128
-	AlreadyGenerated   uint64
-	AlreadyGeneratedN1 uint64
+	AlreadyGenerated   Uint128
+	AlreadyGeneratedN1 Uint128
 	UtxoCount          uint64
 	PostStateDigest    [32]byte
 
@@ -103,7 +103,8 @@ func ConnectBlockBasicInMemoryAtHeightAndSuiteContext(
 func connectBlockBasicInMemoryAtHeightAndSuiteContext(
 	input connectBlockBasicInMemorySuiteContext,
 ) (*ConnectBlockBasicSummary, error) {
-	if err := prepareInMemoryChainState(input.State); err != nil {
+	alreadyGenerated, alreadyGeneratedU128, err := preflightInMemoryChainState(input.State)
+	if err != nil {
 		return nil, err
 	}
 
@@ -112,7 +113,6 @@ func connectBlockBasicInMemoryAtHeightAndSuiteContext(
 		return nil, err
 	}
 
-	alreadyGenerated := new(big.Int).Set(input.State.AlreadyGenerated)
 	blockMTP, err := inMemoryConnectBlockMTP(input.BlockHeight, input.PrevTimestamps, pb.Header.Timestamp)
 	if err != nil {
 		return nil, err
@@ -139,8 +139,11 @@ func connectBlockBasicInMemoryAtHeightAndSuiteContext(
 		return nil, err
 	}
 
-	alreadyGeneratedN1 := advanceAlreadyGenerated(input.BlockHeight, alreadyGenerated)
-	return commitInMemoryConnectSummary(input.State, workUtxos, input.BlockHeight, alreadyGenerated, alreadyGeneratedN1, sumFees)
+	alreadyGeneratedN1, err := checkedAdvanceAlreadyGenerated(input.BlockHeight, alreadyGeneratedU128, alreadyGenerated)
+	if err != nil {
+		return nil, err
+	}
+	return commitInMemoryConnectSummary(input.State, workUtxos, alreadyGeneratedU128, alreadyGeneratedN1, sumFees, 0, 0), nil
 }
 
 // applyInMemorySequentialConnect is the sequential production continuation
@@ -172,20 +175,21 @@ func applyInMemorySequentialConnect(
 	)
 }
 
-func prepareInMemoryChainState(state *InMemoryChainState) error {
+func preflightInMemoryChainState(state *InMemoryChainState) (*big.Int, Uint128, error) {
 	if state == nil {
-		return txerr(BLOCK_ERR_PARSE, "nil chainstate")
+		return nil, Uint128{}, txerr(BLOCK_ERR_PARSE, "nil chainstate")
 	}
-	if state.Utxos == nil {
-		state.Utxos = make(map[Outpoint]UtxoEntry)
+	alreadyGenerated := new(big.Int)
+	if state.AlreadyGenerated != nil {
+		alreadyGenerated.Set(state.AlreadyGenerated)
 	}
-	if state.AlreadyGenerated == nil {
-		state.AlreadyGenerated = new(big.Int)
+	if alreadyGenerated.Sign() < 0 {
+		return nil, Uint128{}, txerr(BLOCK_ERR_PARSE, "already_generated must be unsigned")
 	}
-	if state.AlreadyGenerated.Sign() < 0 {
-		return txerr(BLOCK_ERR_PARSE, "already_generated must be unsigned")
+	if alreadyGenerated.BitLen() > 128 {
+		return nil, Uint128{}, txerr(BLOCK_ERR_PARSE, "already_generated overflow")
 	}
-	return nil
+	return alreadyGenerated, uint128FromBigInt(alreadyGenerated), nil
 }
 
 func parseInMemoryConnectBlock(input connectBlockBasicInMemorySuiteContext) (*ParsedBlock, error) {
@@ -316,51 +320,41 @@ func coinbaseOutputVout(index int) (uint32, error) {
 	return uint32(index), nil
 }
 
-func advanceAlreadyGenerated(blockHeight uint64, alreadyGenerated *big.Int) *big.Int {
-	alreadyGeneratedN1 := new(big.Int).Set(alreadyGenerated)
-	if blockHeight != 0 {
-		subsidy := BlockSubsidyBig(blockHeight, alreadyGenerated)
-		alreadyGeneratedN1 = new(big.Int).Add(alreadyGeneratedN1, new(big.Int).SetUint64(subsidy))
+func checkedAdvanceAlreadyGenerated(blockHeight uint64, alreadyGenerated Uint128, alreadyGeneratedBig *big.Int) (Uint128, error) {
+	if blockHeight == 0 {
+		return alreadyGenerated, nil
 	}
-	return alreadyGeneratedN1
+	alreadyGeneratedN1, ok := alreadyGenerated.CheckedAdd(Uint128FromU64(BlockSubsidyBig(blockHeight, alreadyGeneratedBig)))
+	if !ok {
+		return Uint128{}, txerr(BLOCK_ERR_PARSE, "already_generated overflow")
+	}
+	return alreadyGeneratedN1, nil
 }
 
 func commitInMemoryConnectSummary(
 	state *InMemoryChainState,
 	workUtxos map[Outpoint]UtxoEntry,
-	blockHeight uint64,
-	alreadyGenerated *big.Int,
-	alreadyGeneratedN1 *big.Int,
+	alreadyGenerated Uint128,
+	alreadyGeneratedN1 Uint128,
 	sumFees Uint128,
-) (*ConnectBlockBasicSummary, error) {
-	alreadyGeneratedU64, err := bigIntToUint64(alreadyGenerated)
-	if err != nil {
-		return nil, txerr(BLOCK_ERR_PARSE, "already_generated overflow")
-	}
-	alreadyGeneratedN1U64, err := bigIntToUint64(alreadyGeneratedN1)
-	if err != nil {
-		return nil, txerr(BLOCK_ERR_PARSE, "already_generated overflow")
-	}
-
-	state.Utxos = workUtxos
-	if blockHeight != 0 {
-		state.AlreadyGenerated = new(big.Int).Set(alreadyGeneratedN1)
-	}
-	return &ConnectBlockBasicSummary{
+	sigTaskCount uint64,
+	workerPanics uint64,
+) *ConnectBlockBasicSummary {
+	summary := &ConnectBlockBasicSummary{
 		SumFees:            sumFees,
-		AlreadyGenerated:   alreadyGeneratedU64,
-		AlreadyGeneratedN1: alreadyGeneratedN1U64,
-		UtxoCount:          uint64(len(state.Utxos)),
-		PostStateDigest:    UtxoSetHash(state.Utxos),
-	}, nil
+		AlreadyGenerated:   alreadyGenerated,
+		AlreadyGeneratedN1: alreadyGeneratedN1,
+		UtxoCount:          uint64(len(workUtxos)),
+		PostStateDigest:    UtxoSetHash(workUtxos),
+		SigTaskCount:       sigTaskCount,
+		WorkerPanics:       workerPanics,
+	}
+	state.Utxos = workUtxos
+	state.AlreadyGenerated = alreadyGeneratedN1.Big()
+	return summary
 }
 
-func bigIntToUint64(v *big.Int) (uint64, error) {
-	if v == nil {
-		return 0, nil
-	}
-	if v.Sign() < 0 || !v.IsUint64() {
-		return 0, txerr(BLOCK_ERR_PARSE, "u64 overflow")
-	}
-	return v.Uint64(), nil
+func uint128FromBigInt(v *big.Int) Uint128 {
+	hi := new(big.Int).Rsh(new(big.Int).Set(v), 64)
+	return Uint128{Lo: v.Uint64(), Hi: hi.Uint64()}
 }

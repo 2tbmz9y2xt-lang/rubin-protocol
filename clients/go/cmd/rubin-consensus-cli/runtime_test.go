@@ -92,6 +92,36 @@ func buildAnchorOnlyCoinbaseLikeTxBytes(t *testing.T, height uint32, witnessComm
 	return out
 }
 
+func buildSupplyOnlyRuntimeBlock(t *testing.T, height uint32) ([]byte, [32]byte, [32]byte) {
+	t.Helper()
+	wroot, err := consensus.WitnessMerkleRootWtxids([][32]byte{{}})
+	if err != nil {
+		t.Fatalf("witness merkle root: %v", err)
+	}
+	coinbase := buildAnchorOnlyCoinbaseLikeTxBytes(t, height, consensus.WitnessCommitmentHash(wroot))
+	_, txid, _, _, err := consensus.ParseTx(coinbase)
+	if err != nil {
+		t.Fatalf("parse coinbase: %v", err)
+	}
+	merkleRoot, err := consensus.MerkleRootTxids([][32]byte{txid})
+	if err != nil {
+		t.Fatalf("merkle root: %v", err)
+	}
+	prev := [32]byte{0x81}
+	target := consensus.POW_LIMIT
+	header := make([]byte, 0, consensus.BLOCK_HEADER_BYTES)
+	header = consensus.AppendU32le(header, 1)
+	header = append(header, prev[:]...)
+	header = append(header, merkleRoot[:]...)
+	header = consensus.AppendU64le(header, 1)
+	header = append(header, target[:]...)
+	header = consensus.AppendU64le(header, 9)
+	block := append([]byte(nil), header...)
+	block = append(block, consensus.EncodeCompactSize(1)...)
+	block = append(block, coinbase...)
+	return block, prev, target
+}
+
 func mineGenesisBlockBytes(t *testing.T) (blockBytes []byte, headerBytes []byte) {
 	t.Helper()
 
@@ -135,7 +165,7 @@ func mineGenesisBlockBytes(t *testing.T) (blockBytes []byte, headerBytes []byte)
 	return blockBytes, headerBytes
 }
 
-func runRawJSON(t *testing.T, raw []byte, entry func()) Response {
+func runRawJSONWithOutput(t *testing.T, raw []byte, entry func()) (Response, []byte) {
 	t.Helper()
 
 	rIn, wIn, err := os.Pipe()
@@ -198,6 +228,12 @@ func runRawJSON(t *testing.T, raw []byte, entry func()) Response {
 	if err := json.Unmarshal(bytes.TrimSpace(outBytes), &resp); err != nil {
 		t.Fatalf("unmarshal resp: %v; raw=%q", err, string(outBytes))
 	}
+	return resp, bytes.TrimSpace(outBytes)
+}
+
+func runRawJSON(t *testing.T, raw []byte, entry func()) Response {
+	t.Helper()
+	resp, _ := runRawJSONWithOutput(t, raw, entry)
 	return resp
 }
 
@@ -580,13 +616,95 @@ func testRuntimeKeyOpBlockValidationAndConnect(t *testing.T, fixture runtimeKeyO
 	if !r1.Ok || len(r1.BlockHash) != 64 {
 		t.Fatalf("unexpected resp: %+v", r1)
 	}
-	r2 := runRequest(t, Request{Op: "block_basic_check_with_fees", BlockHex: blockHex, Height: 0, AlreadyGenerated: 0, SumFees: consensus.Uint128FromU64(0)})
+	r2 := runRequest(t, Request{Op: "block_basic_check_with_fees", BlockHex: blockHex, Height: 0, AlreadyGenerated: consensus.Uint128{}, SumFees: consensus.Uint128{}})
 	if !r2.Ok || len(r2.BlockHash) != 64 {
 		t.Fatalf("unexpected resp: %+v", r2)
 	}
-	r3 := runRequest(t, Request{Op: "connect_block_basic", BlockHex: blockHex, Height: 0, AlreadyGenerated: 0, SumFees: consensus.Uint128FromU64(0), ChainIDHex: ""})
+	r3 := runRequest(t, Request{Op: "connect_block_basic", BlockHex: blockHex, Height: 0, AlreadyGenerated: consensus.Uint128{}, SumFees: consensus.Uint128{}, ChainIDHex: ""})
 	if !r3.Ok {
 		t.Fatalf("unexpected resp: %+v", r3)
+	}
+}
+
+func TestConnectBlockSupplyUint128JSON(t *testing.T) {
+	const height = uint32(5_771_107)
+	block, prev, target := buildSupplyOnlyRuntimeBlock(t, height)
+
+	for _, tc := range []struct {
+		name       string
+		input      any
+		beforeText string
+		afterText  string
+	}{
+		{
+			name:       "crosses_u64",
+			input:      "18446744073699181041",
+			beforeText: "18446744073699181041",
+			afterText:  "18446744073718206916",
+		},
+		{
+			name:       "legacy_numeric_u64_max",
+			input:      json.Number("18446744073709551615"),
+			beforeText: "18446744073709551615",
+			afterText:  "18446744073728577490",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(map[string]any{
+				"op":                 "connect_block_basic",
+				"block_hex":          mustHexBytes(block),
+				"expected_prev_hash": mustHex32(prev),
+				"expected_target":    mustHex32(target),
+				"height":             height,
+				"already_generated":  tc.input,
+			})
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			resp, output := runRawJSONWithOutput(t, raw, runFromStdin)
+			if !resp.Ok || resp.AlreadyGenerated == nil || resp.AlreadyGeneratedN1 == nil {
+				t.Fatalf("unexpected response: %+v", resp)
+			}
+			if resp.AlreadyGenerated.String() != tc.beforeText || resp.AlreadyGeneratedN1.String() != tc.afterText {
+				t.Fatalf("response supply=%s -> %s", resp.AlreadyGenerated, resp.AlreadyGeneratedN1)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(output, &fields); err != nil {
+				t.Fatalf("decode raw response: %v", err)
+			}
+			if got, want := string(fields["already_generated"]), `"`+tc.beforeText+`"`; got != want {
+				t.Fatalf("already_generated token=%s, want %s", got, want)
+			}
+			if got, want := string(fields["already_generated_n1"]), `"`+tc.afterText+`"`; got != want {
+				t.Fatalf("already_generated_n1 token=%s, want %s", got, want)
+			}
+		})
+	}
+}
+
+func TestAlreadyGeneratedJSONRejectsMalformedTokensBeforeDispatch(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		token string
+	}{
+		{name: "malformed", token: `"not-a-number"`},
+		{name: "float", token: `1.0`},
+		{name: "exponent", token: `1e1`},
+		{name: "signed_number", token: `-1`},
+		{name: "signed_string", token: `"-1"`},
+		{name: "leading_zero", token: `"01"`},
+		{name: "whitespace", token: `" 1"`},
+		{name: "null", token: `null`},
+		{name: "numeric_above_u64", token: `18446744073709551616`},
+		{name: "string_above_u128", token: `"340282366920938463463374607431768211456"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(`{"op":"unknown","already_generated":` + tc.token + `}`)
+			resp := runRawJSON(t, raw, runFromStdin)
+			if resp.Ok || !strings.HasPrefix(resp.Err, "bad request:") {
+				t.Fatalf("token dispatched or coerced: %+v", resp)
+			}
+		})
 	}
 }
 

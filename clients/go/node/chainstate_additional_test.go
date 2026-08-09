@@ -2,8 +2,10 @@ package node
 
 import (
 	"errors"
+	"math/big"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -279,5 +281,120 @@ func TestChainStateConnectBlock_NilUtxoMapInitialized(t *testing.T) {
 	}
 	if st.Utxos == nil {
 		t.Fatalf("utxo map should be initialized")
+	}
+}
+
+func TestChainStateConnectSupplyOverflowPreservesNonzeroState(t *testing.T) {
+	const height = uint64(5_771_107)
+	target := consensus.POW_LIMIT
+
+	for _, parallel := range []bool{false, true} {
+		path := "sequential"
+		if parallel {
+			path = "parallel"
+		}
+		t.Run(path, func(t *testing.T) {
+			tip := mustHash32Hex(t, "1212121212121212121212121212121212121212121212121212121212121212")
+			originalUtxos := map[consensus.Outpoint]consensus.UtxoEntry{
+				{Txid: mustHash32Hex(t, "3434343434343434343434343434343434343434343434343434343434343434"), Vout: 2}: {
+					Value:             17,
+					CovenantType:      consensus.COV_TYPE_P2PK,
+					CovenantData:      testP2PKCovenantData(0x34),
+					CreationHeight:    11,
+					CreatedByCoinbase: false,
+				},
+			}
+			st := &ChainState{
+				HasTip:           true,
+				Height:           height - 1,
+				TipHash:          tip,
+				AlreadyGenerated: ^uint64(0),
+				Utxos:            originalUtxos,
+			}
+			before, err := stateToDisk(st)
+			if err != nil {
+				t.Fatalf("stateToDisk(before): %v", err)
+			}
+			coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, consensus.TAIL_EMISSION_PER_BLOCK)
+			block := buildSingleTxBlock(t, tip, target, height, coinbase)
+
+			var summary *ChainStateConnectSummary
+			if parallel {
+				summary, err = st.ConnectBlockParallelSigs(block, &target, nil, devnetGenesisChainID, 2)
+			} else {
+				summary, err = st.ConnectBlock(block, &target, nil, devnetGenesisChainID)
+			}
+			if err == nil || summary != nil || !strings.Contains(err.Error(), "already_generated overflow") {
+				t.Fatalf("summary=%#v err=%v, want durable supply overflow", summary, err)
+			}
+			after, diskErr := stateToDisk(st)
+			if diskErr != nil {
+				t.Fatalf("stateToDisk(after): %v", diskErr)
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Fatal("durable state changed on supply overflow")
+			}
+			probe := consensus.Outpoint{Txid: [32]byte{0x56}, Vout: 3}
+			originalUtxos[probe] = consensus.UtxoEntry{Value: 18}
+			if _, ok := st.Utxos[probe]; !ok {
+				t.Fatal("durable UTXO map was replaced on supply overflow")
+			}
+		})
+	}
+}
+
+func TestApplyConnectedBlockConvertsAllSupplyValuesBeforeMutation(t *testing.T) {
+	overU64 := new(big.Int).Lsh(big.NewInt(1), 64)
+	wide := consensus.Uint128{Hi: 1}
+
+	for _, tc := range []struct {
+		name       string
+		workSupply *big.Int
+		before     consensus.Uint128
+		after      consensus.Uint128
+	}{
+		{name: "work_state", workSupply: overU64, before: consensus.Uint128FromU64(9), after: consensus.Uint128FromU64(10)},
+		{name: "summary_before", workSupply: big.NewInt(10), before: wide, after: consensus.Uint128FromU64(10)},
+		{name: "summary_after", workSupply: big.NewInt(10), before: consensus.Uint128FromU64(9), after: wide},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tip := [32]byte{0x71}
+			originalUtxos := map[consensus.Outpoint]consensus.UtxoEntry{
+				{Txid: [32]byte{0x72}, Vout: 1}: {Value: 21, CovenantData: []byte{0xaa}},
+			}
+			st := &ChainState{HasTip: true, Height: 7, TipHash: tip, AlreadyGenerated: 9, Utxos: originalUtxos}
+			beforeState, err := stateToDisk(st)
+			if err != nil {
+				t.Fatalf("stateToDisk(before): %v", err)
+			}
+			work := &consensus.InMemoryChainState{
+				AlreadyGenerated: new(big.Int).Set(tc.workSupply),
+				Utxos: map[consensus.Outpoint]consensus.UtxoEntry{
+					{Txid: [32]byte{0x73}, Vout: 2}: {Value: 22},
+				},
+			}
+			result := &consensus.ConnectBlockBasicSummary{
+				AlreadyGenerated:   tc.before,
+				AlreadyGeneratedN1: tc.after,
+				UtxoCount:          1,
+			}
+
+			out, err := st.applyConnectedBlockLocked(8, [32]byte{0x74}, work, result)
+			if err == nil || out != nil || !strings.Contains(err.Error(), "already_generated overflow") {
+				t.Fatalf("out=%#v err=%v, want supply overflow", out, err)
+			}
+			afterState, diskErr := stateToDisk(st)
+			if diskErr != nil {
+				t.Fatalf("stateToDisk(after): %v", diskErr)
+			}
+			if !reflect.DeepEqual(beforeState, afterState) {
+				t.Fatal("durable state changed before all supply conversions completed")
+			}
+			probe := consensus.Outpoint{Txid: [32]byte{0x75}, Vout: 3}
+			originalUtxos[probe] = consensus.UtxoEntry{Value: 23}
+			if _, ok := st.Utxos[probe]; !ok {
+				t.Fatal("durable UTXO map was replaced before all supply conversions completed")
+			}
+		})
 	}
 }

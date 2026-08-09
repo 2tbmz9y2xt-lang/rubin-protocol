@@ -111,11 +111,11 @@ func TestConnectBlockBasicInMemoryAtHeight_OK_ComputesFeesAndUpdatesState(t *tes
 	if s.SumFees.Cmp(Uint128FromU64(sumFees)) != 0 {
 		t.Fatalf("sum_fees=%d, want %d", s.SumFees, sumFees)
 	}
-	if s.AlreadyGenerated != 0 {
-		t.Fatalf("already_generated=%d, want 0", s.AlreadyGenerated)
+	if s.AlreadyGenerated != (Uint128{}) {
+		t.Fatalf("already_generated=%s, want 0", s.AlreadyGenerated.String())
 	}
-	if s.AlreadyGeneratedN1 != subsidy {
-		t.Fatalf("already_generated_n1=%d, want %d", s.AlreadyGeneratedN1, subsidy)
+	if s.AlreadyGeneratedN1 != Uint128FromU64(subsidy) {
+		t.Fatalf("already_generated_n1=%s, want %d", s.AlreadyGeneratedN1.String(), subsidy)
 	}
 	// UTXO set should contain spend output + coinbase p2pk output (anchor output is not added).
 	if s.UtxoCount != 2 {
@@ -234,7 +234,7 @@ func TestConnectBlockBasicInMemoryAtHeight_Height0_DoesNotAdvanceAlreadyGenerate
 	if s.SumFees.Cmp(Uint128FromU64(0)) != 0 {
 		t.Fatalf("sum_fees=%d, want 0", s.SumFees)
 	}
-	if s.AlreadyGenerated != 123 || s.AlreadyGeneratedN1 != 123 || state.AlreadyGenerated.Uint64() != 123 {
+	if s.AlreadyGenerated != Uint128FromU64(123) || s.AlreadyGeneratedN1 != Uint128FromU64(123) || state.AlreadyGenerated.Uint64() != 123 {
 		t.Fatalf("already_generated advanced at height=0: %#v / state=%d", s, state.AlreadyGenerated.Uint64())
 	}
 	if s.UtxoCount != 1 {

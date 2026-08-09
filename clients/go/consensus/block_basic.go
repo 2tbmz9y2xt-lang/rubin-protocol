@@ -2,7 +2,6 @@ package consensus
 
 import (
 	"bytes"
-	"math/big"
 	"sort"
 )
 
@@ -355,13 +354,13 @@ func ValidateBlockBasicWithContextAndFeesAtHeight(
 	expectedTarget *[32]byte,
 	blockHeight uint64,
 	prevTimestamps []uint64,
-	alreadyGenerated uint64,
+	alreadyGenerated Uint128,
 	sumFees Uint128,
 ) (*BlockBasicSummary, error) {
 	return ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(blockBytes, expectedPrevHash, expectedTarget, blockHeight, prevTimestamps, alreadyGenerated, sumFees, [32]byte{}, nil)
 }
 
-func ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(blockBytes []byte, expectedPrevHash *[32]byte, expectedTarget *[32]byte, blockHeight uint64, prevTimestamps []uint64, alreadyGenerated uint64, sumFees Uint128, chainID [32]byte, rotation RotationProvider) (*BlockBasicSummary, error) {
+func ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(blockBytes []byte, expectedPrevHash *[32]byte, expectedTarget *[32]byte, blockHeight uint64, prevTimestamps []uint64, alreadyGenerated Uint128, sumFees Uint128, chainID [32]byte, rotation RotationProvider) (*BlockBasicSummary, error) {
 	pb, s, err := parseAndValidateBlockBasicWithContextAtHeight(
 		blockBytes,
 		expectedPrevHash,
@@ -374,7 +373,7 @@ func ValidateBlockBasicWithContextAndFeesAtHeightAndRotation(blockBytes []byte, 
 	if err != nil {
 		return nil, err
 	}
-	if err := validateCoinbaseValueBound(pb, blockHeight, new(big.Int).SetUint64(alreadyGenerated), sumFees); err != nil {
+	if err := validateCoinbaseValueBound(pb, blockHeight, alreadyGenerated.Big(), sumFees); err != nil {
 		return nil, err
 	}
 	return s, nil

@@ -62,10 +62,7 @@ func (s *ChainState) ConnectBlockWithSuiteContext(
 	if err != nil {
 		return nil, err
 	}
-	if err := s.applyConnectedBlockLocked(blockHeight, blockHash, &workState); err != nil {
-		return nil, err
-	}
-	return chainStateConnectSummary(blockHeight, blockHash, summary), nil
+	return s.applyConnectedBlockLocked(blockHeight, blockHash, &workState, summary)
 }
 
 // ConnectBlockParallelSigs connects a block using parallel signature
@@ -133,13 +130,7 @@ func (s *ChainState) ConnectBlockParallelSigsWithSuiteContext(
 	if err != nil {
 		return nil, err
 	}
-	if err := s.applyConnectedBlockLocked(blockHeight, blockHash, &workState); err != nil {
-		return nil, err
-	}
-	out := chainStateConnectSummary(blockHeight, blockHash, summary)
-	out.SigTaskCount = summary.SigTaskCount
-	out.WorkerPanics = summary.WorkerPanics
-	return out, nil
+	return s.applyConnectedBlockLocked(blockHeight, blockHash, &workState, summary)
 }
 
 func (s *ChainState) connectBlockWorkStateLocked(copyUtxos bool) (uint64, *[32]byte, consensus.InMemoryChainState, error) {
@@ -147,10 +138,10 @@ func (s *ChainState) connectBlockWorkStateLocked(copyUtxos bool) (uint64, *[32]b
 	if err != nil {
 		return 0, nil, consensus.InMemoryChainState{}, err
 	}
-	if s.Utxos == nil {
-		s.Utxos = make(map[consensus.Outpoint]consensus.UtxoEntry)
-	}
 	utxos := s.Utxos
+	if utxos == nil {
+		utxos = make(map[consensus.Outpoint]consensus.UtxoEntry)
+	}
 	if copyUtxos {
 		utxos = copyUtxoSet(s.Utxos)
 	}
@@ -168,38 +159,49 @@ func connectedBlockHash(blockBytes []byte) ([32]byte, error) {
 	return consensus.BlockHash(pb.HeaderBytes)
 }
 
-func (s *ChainState) applyConnectedBlockLocked(blockHeight uint64, blockHash [32]byte, workState *consensus.InMemoryChainState) error {
-	// Fail-atomic: check overflow BEFORE any state mutation so that an error
-	// does not leave ChainState partially updated.
-	if !workState.AlreadyGenerated.IsUint64() {
-		return errors.New("already_generated overflow")
+func (s *ChainState) applyConnectedBlockLocked(blockHeight uint64, blockHash [32]byte, workState *consensus.InMemoryChainState, summary *consensus.ConnectBlockBasicSummary) (*ChainStateConnectSummary, error) {
+	alreadyGeneratedState, err := bigIntToUint64Exact(workState.AlreadyGenerated)
+	if err != nil {
+		return nil, err
 	}
-	s.HasTip = true
-	s.Height = blockHeight
-	s.TipHash = blockHash
-	s.AlreadyGenerated = workState.AlreadyGenerated.Uint64()
-	s.Utxos = workState.Utxos
-	return nil
-}
-
-// chainStateConnectSummary builds the connect summary for a block that has just
-// been connected to this in-memory chain state.
-//
-// It deliberately leaves CanonicalAppliedBlocks nil. Connecting a block to a
-// ChainState is not by itself a canonical-application event: the reorg preview
-// (preparePreferredBranch) and startup replay (replayCanonicalBlocks) both
-// connect blocks that must never be reported as newly canonical, and both
-// discard this summary. Canonical-applied reporting is attached by the single
-// SyncEngine choke point applyCanonicalParsedBlockTracked, which owns that
-// distinction (RUB-431 reporting, RUB-880 bounds).
-func chainStateConnectSummary(blockHeight uint64, blockHash [32]byte, summary *consensus.ConnectBlockBasicSummary) *ChainStateConnectSummary {
-	return &ChainStateConnectSummary{
+	alreadyGenerated, err := uint128ToUint64Exact(summary.AlreadyGenerated)
+	if err != nil {
+		return nil, err
+	}
+	alreadyGeneratedN1, err := uint128ToUint64Exact(summary.AlreadyGeneratedN1)
+	if err != nil {
+		return nil, err
+	}
+	out := &ChainStateConnectSummary{
 		BlockHeight:        blockHeight,
 		BlockHash:          blockHash,
 		SumFees:            summary.SumFees,
-		AlreadyGenerated:   summary.AlreadyGenerated,
-		AlreadyGeneratedN1: summary.AlreadyGeneratedN1,
+		AlreadyGenerated:   alreadyGenerated,
+		AlreadyGeneratedN1: alreadyGeneratedN1,
 		UtxoCount:          summary.UtxoCount,
 		PostStateDigest:    summary.PostStateDigest,
+		SigTaskCount:       summary.SigTaskCount,
+		WorkerPanics:       summary.WorkerPanics,
 	}
+
+	s.HasTip = true
+	s.Height = blockHeight
+	s.TipHash = blockHash
+	s.AlreadyGenerated = alreadyGeneratedState
+	s.Utxos = workState.Utxos
+	return out, nil
+}
+
+func bigIntToUint64Exact(value *big.Int) (uint64, error) {
+	if value.Sign() < 0 || !value.IsUint64() {
+		return 0, errors.New("already_generated overflow")
+	}
+	return value.Uint64(), nil
+}
+
+func uint128ToUint64Exact(value consensus.Uint128) (uint64, error) {
+	if value.Hi != 0 {
+		return 0, errors.New("already_generated overflow")
+	}
+	return value.Lo, nil
 }

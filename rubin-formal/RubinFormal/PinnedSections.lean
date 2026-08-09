@@ -140,21 +140,20 @@ def valueConservationStatement : Prop :=
   (∀ sumIn sumOut fee : Nat, inU128 sumIn → valueConserved sumIn sumOut → valueConserved (satAddU128 sumIn fee) sumOut)
 def daSetIntegrityStatement : Prop := ¬ daChunkSetValid []
 -- §19.1: subsidy arithmetic fits in machine integer types (PR #420).
--- The fee premise is `maxBlockSumFees`, the structural block ceiling, not
--- `maxU64`: a protocol-valid sum_fees may exceed u64 (RUB-1127), so the
--- former premise was false for reachable blocks. `maxBlockSumFees` is an
--- assumption restating MAX_BLOCK_WEIGHT, not a theorem of this model — see
--- RubinFormal.maxBlockSumFees. The added conjunct is the bound consensus
--- actually computes: block_subsidy + sum_fees, with no already_generated
--- term, because already_generated is subsidy-only and fees never enter it.
+-- `maxBlockSumFees` remains an assumed structural ceiling for the separate
+-- per-block coinbase bound. Fees never enter the exact subsidy-only recurrence,
+-- whose u128 bound is proved throughout the u64 height domain.
 def subsidyU128SafetyStatement : Prop :=
   (∀ h ag : Nat, SubsidyV1.blockSubsidy h ag ≤ SubsidyV1.MINEABLE_CAP) ∧
   (∀ h ag : Nat, SubsidyV1.blockSubsidy h ag ≤ maxU64) ∧
   (maxU64 < maxBlockSumFees) ∧
   (∀ h ag fees : Nat, fees ≤ maxBlockSumFees →
     SubsidyV1.blockSubsidy h ag + fees ≤ maxU128) ∧
-  (∀ h ag fees : Nat, ag ≤ SubsidyV1.MINEABLE_CAP → fees ≤ maxBlockSumFees →
-    ag + SubsidyV1.blockSubsidy h ag + fees ≤ maxU128)
+  (∀ h : Nat, h ≤ maxU64 →
+    SubsidyV1.accumulatedSubsidy (h + 1) ≤ h * SubsidyV1.MINEABLE_CAP ∧
+    h * SubsidyV1.MINEABLE_CAP < 2 ^ 117 ∧
+    2 ^ 117 < 2 ^ 128 ∧
+    SubsidyV1.accumulatedSubsidy (h + 1) ≤ maxU128)
 /-- F-05 fix: ByteWireV2 cursor advancement + TxErr distinctness.
     (1) getU8? advances offset by 1.
     (2) getBytes? advances offset by n.
@@ -293,8 +292,8 @@ theorem subsidy_u128_safety_proved : subsidyU128SafetyStatement := by
   · exact maxBlockSumFees_exceeds_u64
   · intro h ag fees hFees
     exact block_reward_bound_in_u128 h ag fees hFees
-  · intro h ag fees hAg hFees
-    exact subsidy_accumulation_in_u128 h ag fees hAg hFees
+  · intro h hHeight
+    exact subsidy_accumulation_in_u128 h hHeight
 
 theorem byte_wire_v2_cursor_proved : byteWireV2CursorStatement := by
   refine ⟨?_, ?_, ?_⟩
