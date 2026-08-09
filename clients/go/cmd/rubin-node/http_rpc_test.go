@@ -2317,7 +2317,7 @@ func TestDevnetRPCMineNextPreservesWideSupply(t *testing.T) {
 		io.Discard,
 		miner,
 	)
-	req := httptest.NewRequest(http.MethodPost, "/mine_next", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/mine_next", nil)
 	rec := httptest.NewRecorder()
 	handleMineNext(state, rec, req)
 	if rec.Code != http.StatusOK {

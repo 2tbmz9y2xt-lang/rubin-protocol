@@ -260,6 +260,44 @@ func TestChainStateSchemaErrorsAndPrecedence(t *testing.T) {
 	}
 }
 
+func TestSchemaArrayValidationStopsAtFirstInvalidItem(t *testing.T) {
+	const tailCount = 256
+	validUtxo := `{"txid":"` + strings.Repeat("11", 32) + `","covenant_data":"","value":1,"creation_height":0,"vout":0,"covenant_type":0,"created_by_coinbase":false}`
+	validSpent := `{"txid":"` + strings.Repeat("11", 32) + `","vout":0,"value":1,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}`
+	chainShort, chainLong := []byte(`[0]`), []byte(`[0`+strings.Repeat(","+validUtxo, tailCount)+`]`)
+	undoShort, undoLong := []byte(`[0]`), []byte(`[0`+strings.Repeat(`,{"spent":[]}`, tailCount)+`]`)
+	spentShort, spentLong := []byte(`[0]`), []byte(`[0`+strings.Repeat(","+validSpent, tailCount)+`]`)
+	allocs := func(input []byte, rejects func([]byte) bool) float64 {
+		return testing.AllocsPerRun(100, func() {
+			if !rejects(input) {
+				panic("validator accepted first invalid item")
+			}
+		})
+	}
+	undoRejects := func(raw []byte) bool {
+		var scalarNull bool
+		return validateTxUndoArrayFieldSet(raw, &scalarNull) != nil
+	}
+	spentRejects := func(raw []byte) bool {
+		var scalarNull bool
+		return validateSpentUndoArrayFieldSet(raw, &scalarNull) != nil
+	}
+	for _, tc := range []struct {
+		name        string
+		short, long []byte
+		rejects     func([]byte) bool
+	}{
+		{name: "chainstate_utxos", short: chainShort, long: chainLong, rejects: func(raw []byte) bool { return !validateChainStateUtxoArray(raw) }},
+		{name: "undo_txs", short: undoShort, long: undoLong, rejects: undoRejects},
+		{name: "undo_spent", short: spentShort, long: spentLong, rejects: spentRejects},
+	} {
+		small, large := allocs(tc.short, tc.rejects), allocs(tc.long, tc.rejects)
+		if large > small+4 {
+			t.Fatalf("%s allocations grew with an unread valid tail: short=%.1f long=%.1f", tc.name, small, large)
+		}
+	}
+}
+
 func writeChainStatePayload(t *testing.T, path string, payload []byte) {
 	t.Helper()
 	raw, err := marshalStoreEnvelope(storeEnvelopeChainState, payload)

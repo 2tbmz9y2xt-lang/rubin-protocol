@@ -181,26 +181,18 @@ func decodeChainStateDisk(payload []byte) (chainStateDisk, error) {
 
 func collectChainStateSchemaFields(payload []byte) (chainStateSchemaFields, error) {
 	dec := json.NewDecoder(bytes.NewReader(payload))
-	first, err := dec.Token()
+	start, err := dec.Token()
 	if err != nil {
 		return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
 	}
-	if delim, ok := first.(json.Delim); !ok || delim != '{' {
+	if start != json.Delim('{') {
 		return chainStateSchemaFields{}, errors.New("decode chainstate: top-level value must be an object")
 	}
 	var fields chainStateSchemaFields
 	for dec.More() {
-		keyToken, err := dec.Token()
+		key, raw, err := readChainStateRawField(dec)
 		if err != nil {
-			return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
-		}
-		key, ok := keyToken.(string)
-		if !ok {
-			return chainStateSchemaFields{}, errors.New("decode chainstate: object key must be a string")
-		}
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
+			return chainStateSchemaFields{}, err
 		}
 		fields.record(key, raw)
 	}
@@ -212,6 +204,22 @@ func collectChainStateSchemaFields(payload []byte) (chainStateSchemaFields, erro
 		return chainStateSchemaFields{}, errors.New("decode chainstate: trailing content")
 	}
 	return fields, nil
+}
+
+func readChainStateRawField(dec *json.Decoder) (string, json.RawMessage, error) {
+	token, err := dec.Token()
+	if err != nil {
+		return "", nil, fmt.Errorf("decode chainstate: %w", err)
+	}
+	key, ok := token.(string)
+	if !ok {
+		return "", nil, errors.New("decode chainstate: object key must be a string")
+	}
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		return "", nil, fmt.Errorf("decode chainstate: %w", err)
+	}
+	return key, raw, nil
 }
 
 func chainStateHasEdgeASCIIWhitespace(disk chainStateDisk) bool {
@@ -228,38 +236,43 @@ func chainStateHasEdgeASCIIWhitespace(disk chainStateDisk) bool {
 }
 
 func (f *chainStateSchemaFields) record(key string, raw json.RawMessage) {
-	isNull := bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 	switch key {
 	case "version":
-		if f.versionSeen {
-			f.versionDuplicate = true
-		} else {
-			f.version = append(json.RawMessage(nil), raw...)
-		}
-		f.versionSeen = true
-		f.versionNull = f.versionNull || isNull
+		recordChainStateTarget(raw, &f.version, &f.versionSeen, &f.versionDuplicate, &f.versionNull)
+		return
 	case "already_generated":
-		if f.alreadyGeneratedSeen {
-			f.alreadyGeneratedDuplicate = true
-		} else {
-			f.alreadyGenerated = append(json.RawMessage(nil), raw...)
-		}
-		f.alreadyGeneratedSeen = true
-		f.alreadyGeneratedNull = f.alreadyGeneratedNull || isNull
-	case "tip_hash":
-		f.recordRemaining(chainStateTipHashField, raw)
-	case "utxos":
-		if f.remainingSeen&chainStateUtxosField == 0 {
-			f.utxos = append(json.RawMessage(nil), raw...)
-		}
-		f.recordRemaining(chainStateUtxosField, raw)
-	case "height":
-		f.recordRemaining(chainStateHeightField, raw)
-	case "has_tip":
-		f.recordRemaining(chainStateHasTipField, raw)
-	default:
-		f.unknown = true
+		recordChainStateTarget(raw, &f.alreadyGenerated, &f.alreadyGeneratedSeen,
+			&f.alreadyGeneratedDuplicate, &f.alreadyGeneratedNull)
+		return
 	}
+	field := chainStateRemainingField(key)
+	if field == 0 {
+		f.unknown = true
+		return
+	}
+	if field == chainStateUtxosField && f.remainingSeen&field == 0 {
+		f.utxos = append(json.RawMessage(nil), raw...)
+	}
+	f.recordRemaining(field, raw)
+}
+
+func recordChainStateTarget(raw json.RawMessage, target *json.RawMessage, seen, duplicate, null *bool) {
+	if *seen {
+		*duplicate = true
+	} else {
+		*target = append(json.RawMessage(nil), raw...)
+	}
+	*seen = true
+	*null = *null || bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+func chainStateRemainingField(key string) uint8 {
+	for index, name := range [...]string{"tip_hash", "utxos", "height", "has_tip"} {
+		if key == name {
+			return uint8(chainStateTipHashField << index)
+		}
+	}
+	return 0
 }
 
 func (f *chainStateSchemaFields) recordRemaining(field uint8, raw json.RawMessage) {
@@ -271,80 +284,83 @@ func (f *chainStateSchemaFields) recordRemaining(field uint8, raw json.RawMessag
 }
 
 func validateChainStateRemainingSchema(fields chainStateSchemaFields) error {
-	if fields.unknown || fields.remainingDuplicate || fields.remainingNull || fields.remainingSeen != chainStateRemainingFields {
+	if !chainStateRemainingSchemaComplete(fields) {
 		return errors.New(chainStatePayloadNotCanonical)
 	}
-	dec := json.NewDecoder(bytes.NewReader(fields.utxos))
-	first, err := dec.Token()
-	if err != nil || first != json.Delim('[') {
-		return errors.New(chainStatePayloadNotCanonical)
-	}
-	for dec.More() {
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil || validateChainStateUtxoSchema(raw) != nil {
-			return errors.New(chainStatePayloadNotCanonical)
-		}
-	}
-	if end, err := dec.Token(); err != nil || end != json.Delim(']') {
-		return errors.New(chainStatePayloadNotCanonical)
-	}
-	if _, err := dec.Token(); err != io.EOF {
+	if !validateChainStateUtxoArray(fields.utxos) {
 		return errors.New(chainStatePayloadNotCanonical)
 	}
 	return nil
 }
 
+func chainStateRemainingSchemaComplete(fields chainStateSchemaFields) bool {
+	return !fields.unknown && !fields.remainingDuplicate && !fields.remainingNull &&
+		fields.remainingSeen == chainStateRemainingFields
+}
+
+func validateChainStateUtxoArray(raw []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	start, err := dec.Token()
+	if err != nil || start != json.Delim('[') {
+		return false
+	}
+	for dec.More() {
+		var item json.RawMessage
+		if dec.Decode(&item) != nil || validateChainStateUtxoSchema(item) != nil {
+			return false
+		}
+	}
+	return chainStateContainerComplete(dec, ']')
+}
+
 func validateChainStateUtxoSchema(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	first, err := dec.Token()
-	if err != nil || first != json.Delim('{') {
+	start, err := dec.Token()
+	if err != nil || start != json.Delim('{') {
 		return errors.New(chainStatePayloadNotCanonical)
 	}
 	var seen uint8
 	for dec.More() {
-		keyToken, err := dec.Token()
+		key, value, err := readChainStateRawField(dec)
 		if err != nil {
 			return errors.New(chainStatePayloadNotCanonical)
 		}
-		key, ok := keyToken.(string)
-		if !ok {
+		if !recordChainStateUtxoField(key, value, &seen) {
 			return errors.New(chainStatePayloadNotCanonical)
 		}
-		var value json.RawMessage
-		if err := dec.Decode(&value); err != nil || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-			return errors.New(chainStatePayloadNotCanonical)
-		}
-		var field uint8
-		switch key {
-		case "txid":
-			field = 1 << 0
-		case "covenant_data":
-			field = 1 << 1
-		case "value":
-			field = 1 << 2
-		case "creation_height":
-			field = 1 << 3
-		case "vout":
-			field = 1 << 4
-		case "covenant_type":
-			field = 1 << 5
-		case "created_by_coinbase":
-			field = 1 << 6
-		default:
-			return errors.New(chainStatePayloadNotCanonical)
-		}
-		if seen&field != 0 {
-			return errors.New(chainStatePayloadNotCanonical)
-		}
-		seen |= field
 	}
-	if end, err := dec.Token(); err != nil || end != json.Delim('}') || seen != (1<<7)-1 {
-		return errors.New(chainStatePayloadNotCanonical)
-	}
-	if _, err := dec.Token(); err != io.EOF {
+	if !chainStateContainerComplete(dec, '}') || seen != (1<<7)-1 {
 		return errors.New(chainStatePayloadNotCanonical)
 	}
 	return nil
+}
+
+func recordChainStateUtxoField(key string, value json.RawMessage, seen *uint8) bool {
+	field := chainStateUtxoField(key)
+	if field == 0 || *seen&field != 0 || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		return false
+	}
+	*seen |= field
+	return true
+}
+
+func chainStateUtxoField(key string) uint8 {
+	fields := [...]string{"txid", "covenant_data", "value", "creation_height", "vout", "covenant_type", "created_by_coinbase"}
+	for index, name := range fields {
+		if key == name {
+			return uint8(1 << index)
+		}
+	}
+	return 0
+}
+
+func chainStateContainerComplete(dec *json.Decoder, want json.Delim) bool {
+	end, err := dec.Token()
+	if err != nil || end != want {
+		return false
+	}
+	_, err = dec.Token()
+	return err == io.EOF
 }
 
 func parseChainStateVersion(fields chainStateSchemaFields) (uint32, error) {
@@ -355,8 +371,8 @@ func parseChainStateVersion(fields chainStateSchemaFields) (uint32, error) {
 		return 0, errors.New("CHAINSTATE_SCHEMA: duplicate version")
 	}
 	token := bytes.TrimSpace(fields.version)
-	var version uint64
-	if err := json.Unmarshal(token, &version); err != nil || string(token) != strconv.FormatUint(version, 10) || version > math.MaxUint32 {
+	version, ok := parseCanonicalChainStateUint(token, math.MaxUint32)
+	if !ok {
 		return 0, errors.New("CHAINSTATE_SCHEMA: version must be a canonical unsigned JSON integer through u32")
 	}
 	if version != chainStateDiskVersionV1 && version != chainStateDiskVersion {
@@ -374,12 +390,22 @@ func parseChainStateAlreadyGenerated(fields chainStateSchemaFields, version uint
 	}
 	token := bytes.TrimSpace(fields.alreadyGenerated)
 	if version == chainStateDiskVersionV1 {
-		var value uint64
-		if err := json.Unmarshal(token, &value); err != nil || string(token) != strconv.FormatUint(value, 10) {
+		value, ok := parseCanonicalChainStateUint(token, math.MaxUint64)
+		if !ok {
 			return consensus.Uint128{}, errors.New("CHAINSTATE_SCHEMA: v1 already_generated must be a nonnegative JSON integer through u64")
 		}
 		return consensus.Uint128FromU64(value), nil
 	}
+	return parseChainStateV2Supply(token)
+}
+
+func parseCanonicalChainStateUint(token json.RawMessage, max uint64) (uint64, bool) {
+	raw := bytes.TrimSpace(token)
+	value, err := strconv.ParseUint(string(raw), 10, 64)
+	return value, err == nil && value <= max && string(raw) == strconv.FormatUint(value, 10)
+}
+
+func parseChainStateV2Supply(token json.RawMessage) (consensus.Uint128, error) {
 	var value string
 	if err := json.Unmarshal(token, &value); err != nil || string(token) != `"`+value+`"` {
 		return consensus.Uint128{}, errors.New("CHAINSTATE_SCHEMA: v2 already_generated must be a canonical unsigned decimal string within u128")

@@ -1564,13 +1564,16 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("indent payload: %v", err)
 	}
-	envelopeOverVersion := func(version uint32, body []byte) string {
-		sum := undoEnvelopeChecksumForVersion(version, blockHash, body)
+	envelopeOverHash := func(version uint32, hash [32]byte, body []byte) string {
+		sum := undoEnvelopeChecksumForVersion(version, hash, body)
 		return fmt.Sprintf("{\"version\":%d,\"block_hash\":\"%s\",\"payload_b64\":\"%s\",\"checksum\":\"%s\"}\n",
 			version,
-			hex.EncodeToString(blockHash[:]),
+			hex.EncodeToString(hash[:]),
 			base64.StdEncoding.EncodeToString(body),
 			hex.EncodeToString(sum[:]))
+	}
+	envelopeOverVersion := func(version uint32, body []byte) string {
+		return envelopeOverHash(version, blockHash, body)
 	}
 	envelopeOver := func(body []byte) string {
 		return envelopeOverVersion(undoEnvelopeVersionV1, body)
@@ -1585,12 +1588,13 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 	canonicalPayloadError := "decode undo: payload is not the canonical encoding"
 	domainPayloadError := "decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex"
 
-	for _, tc := range []struct {
+	type undoRejectCase struct {
 		name    string
 		record  string
 		wantErr error  // exact error identity when the message is pinned
 		wantMsg string // exact message when pinned
-	}{
+	}
+	cases := []undoRejectCase{
 		{name: "legacy_indented_payload", record: string(legacyIndented) + "\n", wantErr: errUndoLegacyRecord, wantMsg: errUndoLegacyRecord.Error()},
 		{name: "legacy_compact_payload", record: string(payload), wantErr: errUndoLegacyRecord, wantMsg: errUndoLegacyRecord.Error()},
 		{name: "version_zero", record: replaceOnce(t, valid, `"version":1`, `"version":0`)},
@@ -1703,7 +1707,46 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 			record:  envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[{"txid":"aabb","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}`)),
 			wantMsg: domainPayloadError,
 		},
+	}
+	invalidNestedV2 := replaceOnce(t, string(canonicalNestedV2), `"previous_already_generated":"0"`, `"previous_already_generated":0`)
+	for _, row := range []struct{ name, body string }{
+		{name: "checksum_valid_over_missing_block_height_v2", body: strings.Replace(invalidNestedV2, `"block_height":0,`, "", 1)},
+		{name: "checksum_valid_over_missing_txs_v2", body: `{"block_height":0,"previous_already_generated":0}`},
+		{name: "checksum_valid_over_missing_spent_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":[{}]}`},
+		{name: "checksum_valid_over_unknown_tx_invalid_supply_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[],"extra":0}]}`},
+		{name: "checksum_valid_over_duplicate_tx_invalid_supply_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[],"spent":[]}]}`},
+		{name: "checksum_valid_over_nested_unknown_invalid_supply_v2", body: replaceOnce(t, invalidNestedV2, `"vout":0`, `"extra":0,"vout":0`)},
+		{name: "checksum_valid_over_nested_duplicate_invalid_supply_v2", body: replaceOnce(t, invalidNestedV2, `"vout":0`, `"vout":0,"vout":0`)},
+		{name: "checksum_valid_over_null_txs_invalid_supply_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":null}`},
+		{name: "checksum_valid_over_null_spent_invalid_supply_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":[{"spent":null}]}`},
+		{name: "checksum_valid_over_trailing_payload_invalid_supply_v2", body: invalidNestedV2 + `{}`},
+		{name: "checksum_valid_over_wrong_txs_container_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":{}}`},
+		{name: "checksum_valid_over_wrong_tx_item_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":[0]}`},
+		{name: "checksum_valid_over_wrong_spent_container_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":[{"spent":{}}]}`},
+		{name: "checksum_valid_over_wrong_spent_item_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[0]}]}`},
 	} {
+		cases = append(cases, undoRejectCase{name: row.name, record: envelopeOverVersion(undoEnvelopeVersion, []byte(row.body)), wantMsg: canonicalPayloadError})
+	}
+	for _, field := range []struct{ name, fragment string }{
+		{name: "txid", fragment: `"txid":"` + strings.Repeat("11", 32) + `",`},
+		{name: "vout", fragment: `"vout":0,`},
+		{name: "value", fragment: `"value":0,`},
+		{name: "covenant_type", fragment: `"covenant_type":0,`},
+		{name: "covenant_data", fragment: `"covenant_data":"",`},
+		{name: "creation_height", fragment: `"creation_height":0,`},
+		{name: "created_by_coinbase", fragment: `,"created_by_coinbase":false`},
+	} {
+		body := replaceOnce(t, invalidNestedV2, field.fragment, "")
+		cases = append(cases, undoRejectCase{name: "checksum_valid_over_missing_spent_" + field.name + "_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(body)), wantMsg: canonicalPayloadError})
+	}
+	invalidSupply := []byte(`{"block_height":0,"previous_already_generated":0,"txs":[]}`)
+	foreignInvalid := envelopeOverHash(undoEnvelopeVersion, otherHash, invalidSupply)
+	cases = append(cases,
+		undoRejectCase{name: "foreign_hash_valid_checksum_invalid_supply_v2", record: foreignInvalid, wantErr: errUndoBlockHashMismatch, wantMsg: errUndoBlockHashMismatch.Error()},
+		undoRejectCase{name: "bad_checksum_invalid_supply_v2", record: replaceOnce(t, foreignInvalid, hex.EncodeToString(otherHash[:]), hex.EncodeToString(blockHash[:])), wantErr: errUndoChecksumMismatch, wantMsg: errUndoChecksumMismatch.Error()},
+	)
+
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(store.undoDir, hex.EncodeToString(blockHash[:])+".json")
 			if err := os.WriteFile(path, []byte(tc.record), 0o600); err != nil {

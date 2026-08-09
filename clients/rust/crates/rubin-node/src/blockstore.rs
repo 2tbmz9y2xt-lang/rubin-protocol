@@ -1427,24 +1427,26 @@ mod tests {
         // Builds an envelope with a CORRECT checksum over arbitrary payload
         // bytes: reaching a rejection at all proves the payload decode runs
         // strictly after the checksum compare.
-        let envelope_over_version = |version: u32, body: &[u8]| -> String {
+        let envelope_over_hash = |version: u32, hash: [u8; 32], body: &[u8]| -> String {
             let mut hasher = Sha3_256::new();
             if version == 1 {
                 hasher.update(b"RUBIN_BLOCK_UNDO_V1");
             } else {
                 hasher.update(b"RUBIN_BLOCK_UNDO_V2");
             }
-            hasher.update(block_hash);
+            hasher.update(hash);
             hasher.update((body.len() as u64).to_be_bytes());
             hasher.update(body);
             let checksum: [u8; 32] = hasher.finalize().into();
             format!(
                 "{{\"version\":{version},\"block_hash\":\"{}\",\"payload_b64\":\"{}\",\"checksum\":\"{}\"}}\n",
-                block_hash_hex,
+                hex::encode(hash),
                 crate::undo::base64_encode(body),
                 hex::encode(checksum)
             )
         };
+        let envelope_over_version =
+            |version: u32, body: &[u8]| -> String { envelope_over_hash(version, block_hash, body) };
         let envelope_over = |body: &[u8]| envelope_over_version(1, body);
         let replace_once = |text: &str, old: &str, new: &str| -> String {
             assert_eq!(
@@ -1471,7 +1473,7 @@ mod tests {
         let domain_payload_error =
             "decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex";
 
-        let rows: Vec<(&str, String, Option<&str>)> = vec![
+        let mut rows: Vec<(&str, String, Option<&str>)> = vec![
             ("legacy_indented_payload", format!("{indented}\n"), Some(UNDO_LEGACY_ERR)),
             (
                 "legacy_compact_payload",
@@ -1935,6 +1937,128 @@ mod tests {
                 Some(domain_payload_error),
             ),
         ];
+
+        let invalid_nested_v2 = replace_once(
+            &canonical_nested_v2,
+            "\"previous_already_generated\":\"0\"",
+            "\"previous_already_generated\":0",
+        );
+        for (name, body) in [
+            (
+                "checksum_valid_over_missing_block_height_v2",
+                invalid_nested_v2.replacen("\"block_height\":0,", "", 1),
+            ),
+            (
+                "checksum_valid_over_missing_txs_v2",
+                r#"{"block_height":0,"previous_already_generated":0}"#.to_string(),
+            ),
+            (
+                "checksum_valid_over_missing_spent_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":[{}]}"#.to_string(),
+            ),
+            (
+                "checksum_valid_over_unknown_tx_invalid_supply_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[],"extra":0}]}"#.to_string(),
+            ),
+            (
+                "checksum_valid_over_duplicate_tx_invalid_supply_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[],"spent":[]}]}"#.to_string(),
+            ),
+            (
+                "checksum_valid_over_nested_unknown_invalid_supply_v2",
+                replace_once(&invalid_nested_v2, "\"vout\":0", "\"extra\":0,\"vout\":0"),
+            ),
+            (
+                "checksum_valid_over_nested_duplicate_invalid_supply_v2",
+                replace_once(&invalid_nested_v2, "\"vout\":0", "\"vout\":0,\"vout\":0"),
+            ),
+            (
+                "checksum_valid_over_null_txs_invalid_supply_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":null}"#.to_string(),
+            ),
+            (
+                "checksum_valid_over_null_spent_invalid_supply_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":[{"spent":null}]}"#
+                    .to_string(),
+            ),
+            (
+                "checksum_valid_over_trailing_payload_invalid_supply_v2",
+                format!("{invalid_nested_v2}{{}}"),
+            ),
+            (
+                "checksum_valid_over_wrong_txs_container_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":{}}"#.to_string(),
+            ),
+            (
+                "checksum_valid_over_wrong_tx_item_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":[0]}"#.to_string(),
+            ),
+            (
+                "checksum_valid_over_wrong_spent_container_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":[{"spent":{}}]}"#
+                    .to_string(),
+            ),
+            (
+                "checksum_valid_over_wrong_spent_item_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[0]}]}"#
+                    .to_string(),
+            ),
+        ] {
+            rows.push((
+                name,
+                envelope_over_version(2, body.as_bytes()),
+                Some(canonical_payload_error),
+            ));
+        }
+        for (name, fragment) in [
+            (
+                "checksum_valid_over_missing_spent_txid_v2",
+                format!("\"txid\":\"{}\",", "11".repeat(32)),
+            ),
+            (
+                "checksum_valid_over_missing_spent_vout_v2",
+                "\"vout\":0,".to_string(),
+            ),
+            (
+                "checksum_valid_over_missing_spent_value_v2",
+                "\"value\":0,".to_string(),
+            ),
+            (
+                "checksum_valid_over_missing_spent_covenant_type_v2",
+                "\"covenant_type\":0,".to_string(),
+            ),
+            (
+                "checksum_valid_over_missing_spent_covenant_data_v2",
+                "\"covenant_data\":\"\",".to_string(),
+            ),
+            (
+                "checksum_valid_over_missing_spent_creation_height_v2",
+                "\"creation_height\":0,".to_string(),
+            ),
+            (
+                "checksum_valid_over_missing_spent_created_by_coinbase_v2",
+                ",\"created_by_coinbase\":false".to_string(),
+            ),
+        ] {
+            let body = replace_once(&invalid_nested_v2, &fragment, "");
+            rows.push((
+                name,
+                envelope_over_version(2, body.as_bytes()),
+                Some(canonical_payload_error),
+            ));
+        }
+        let invalid_supply = br#"{"block_height":0,"previous_already_generated":0,"txs":[]}"#;
+        let foreign_invalid = envelope_over_hash(2, other_hash, invalid_supply);
+        rows.push((
+            "foreign_hash_valid_checksum_invalid_supply_v2",
+            foreign_invalid.clone(),
+            Some(UNDO_BLOCK_HASH_MISMATCH_ERR),
+        ));
+        rows.push((
+            "bad_checksum_invalid_supply_v2",
+            replace_once(&foreign_invalid, &hex::encode(other_hash), &block_hash_hex),
+            Some(UNDO_CHECKSUM_MISMATCH_ERR),
+        ));
 
         let path = store
             .root_dir()

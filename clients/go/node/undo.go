@@ -296,8 +296,8 @@ func applyDisconnectUndo(work map[consensus.Outpoint]consensus.UtxoEntry, pb *co
 	return nil
 }
 
-// marshalBlockUndo produces the canonical v1 undo payload. It remains for
-// legacy-record reads and the pinned v1 vectors; new records use v2 below.
+// marshalBlockUndo produces the canonical v1 undo payload for pinned vectors
+// and legacy-v1 writer tests. Reads use unmarshalBlockUndo; new records use v2.
 func marshalBlockUndo(undo *BlockUndo) ([]byte, error) {
 	disk, err := blockUndoToDisk(undo)
 	if err != nil {
@@ -402,15 +402,9 @@ func decodeBlockUndoDiskV2(raw []byte) (blockUndoDiskV2, consensus.Uint128, erro
 	if err := validateBlockUndoFieldSet(raw, &supplyToken, &scalarNull); err != nil {
 		return blockUndoDiskV2{}, consensus.Uint128{}, err
 	}
-	supplyRaw := bytes.TrimSpace(supplyToken)
-	var supplyText string
-	if len(supplyRaw) == 0 || bytes.Equal(supplyRaw, []byte("null")) ||
-		json.Unmarshal(supplyRaw, &supplyText) != nil || string(supplyRaw) != `"`+supplyText+`"` {
-		return blockUndoDiskV2{}, consensus.Uint128{}, errors.New("decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128")
-	}
-	supply, err := consensus.ParseUint128Decimal(supplyText)
+	supplyText, supply, err := parseBlockUndoV2Supply(supplyToken)
 	if err != nil {
-		return blockUndoDiskV2{}, consensus.Uint128{}, errors.New("decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128")
+		return blockUndoDiskV2{}, consensus.Uint128{}, err
 	}
 	if scalarNull {
 		return blockUndoDiskV2{}, consensus.Uint128{}, errUndoPayloadNotCanonical
@@ -424,6 +418,20 @@ func decodeBlockUndoDiskV2(raw []byte) (blockUndoDiskV2, consensus.Uint128, erro
 		PreviousAlreadyGenerated: supplyText,
 		Txs:                      decoded.Txs,
 	}, supply, nil
+}
+
+func parseBlockUndoV2Supply(token json.RawMessage) (string, consensus.Uint128, error) {
+	raw := bytes.TrimSpace(token)
+	var text string
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) ||
+		json.Unmarshal(raw, &text) != nil || string(raw) != `"`+text+`"` {
+		return "", consensus.Uint128{}, errors.New("decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128")
+	}
+	value, err := consensus.ParseUint128Decimal(text)
+	if err != nil {
+		return "", consensus.Uint128{}, errors.New("decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128")
+	}
+	return text, value, nil
 }
 
 func decodeBlockUndoTyped(raw []byte) (blockUndoDiskRaw, error) {
@@ -441,135 +449,95 @@ func decodeBlockUndoTyped(raw []byte) (blockUndoDiskRaw, error) {
 // responsibility; RawMessage consumption keeps extreme values lexical.
 func validateBlockUndoFieldSet(raw []byte, supplyToken *json.RawMessage, scalarNull *bool) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	start, err := decoder.Token()
-	if err != nil || start != json.Delim('{') {
+	if !startUndoObject(decoder) {
 		return errUndoPayloadNotCanonical
 	}
 	var seen uint8
 	var txsRaw json.RawMessage
 	for decoder.More() {
-		keyToken, err := decoder.Token()
-		if err != nil {
+		key, value, ok := readUndoRawField(decoder)
+		if !ok || !recordBlockUndoField(key, value, &seen, supplyToken, &txsRaw, scalarNull) {
 			return errUndoPayloadNotCanonical
 		}
-		key, ok := keyToken.(string)
-		if !ok {
-			return errUndoPayloadNotCanonical
-		}
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return errUndoPayloadNotCanonical
-		}
-		var bit uint8
-		switch key {
-		case "block_height":
-			bit = 1 << 0
-			*scalarNull = *scalarNull || bytes.Equal(bytes.TrimSpace(value), []byte("null"))
-		case "previous_already_generated":
-			bit = 1 << 1
-			*supplyToken = value
-		case "txs":
-			bit = 1 << 2
-			txsRaw = value
-		default:
-			return errUndoPayloadNotCanonical
-		}
-		if seen&bit != 0 {
-			return errUndoPayloadNotCanonical
-		}
-		seen |= bit
 	}
-	end, err := decoder.Token()
-	if err != nil || end != json.Delim('}') || seen != (1<<3)-1 {
-		return errUndoPayloadNotCanonical
-	}
-	if _, err := decoder.Token(); err != io.EOF {
+	if !finishUndoContainer(decoder, '}') || seen != (1<<3)-1 {
 		return errUndoPayloadNotCanonical
 	}
 	return validateTxUndoArrayFieldSet(txsRaw, scalarNull)
 }
 
+func recordBlockUndoField(key string, value json.RawMessage, seen *uint8,
+	supplyToken, txsRaw *json.RawMessage, scalarNull *bool) bool {
+	field := blockUndoField(key)
+	if field == 0 || *seen&field != 0 {
+		return false
+	}
+	*seen |= field
+	switch field {
+	case 1 << 0:
+		*scalarNull = *scalarNull || bytes.Equal(bytes.TrimSpace(value), []byte("null"))
+	case 1 << 1:
+		*supplyToken = value
+	case 1 << 2:
+		*txsRaw = value
+	}
+	return true
+}
+
+func blockUndoField(key string) uint8 {
+	for index, name := range [...]string{"block_height", "previous_already_generated", "txs"} {
+		if key == name {
+			return uint8(1 << index)
+		}
+	}
+	return 0
+}
+
 func validateTxUndoArrayFieldSet(raw []byte, scalarNull *bool) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	start, err := decoder.Token()
-	if err != nil || start != json.Delim('[') {
-		return errUndoPayloadNotCanonical
-	}
-	for decoder.More() {
-		var txRaw json.RawMessage
-		if err := decoder.Decode(&txRaw); err != nil {
-			return errUndoPayloadNotCanonical
-		}
-		if err := validateTxUndoFieldSet(txRaw, scalarNull); err != nil {
-			return err
-		}
-	}
-	end, err := decoder.Token()
-	if err != nil || end != json.Delim(']') {
-		return errUndoPayloadNotCanonical
-	}
-	if _, err := decoder.Token(); err != io.EOF {
-		return errUndoPayloadNotCanonical
-	}
-	return nil
+	return validateUndoArrayFieldSet(raw, scalarNull, validateTxUndoFieldSet)
 }
 
 func validateTxUndoFieldSet(raw []byte, scalarNull *bool) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	start, err := decoder.Token()
-	if err != nil || start != json.Delim('{') {
+	if !startUndoObject(decoder) {
 		return errUndoPayloadNotCanonical
 	}
 	seen := false
 	var spentRaw json.RawMessage
 	for decoder.More() {
-		keyToken, err := decoder.Token()
-		if err != nil {
+		key, value, ok := readUndoRawField(decoder)
+		if !ok || seen || key != "spent" {
 			return errUndoPayloadNotCanonical
 		}
-		key, ok := keyToken.(string)
-		if !ok || key != "spent" {
-			return errUndoPayloadNotCanonical
-		}
-		if err := decoder.Decode(&spentRaw); err != nil || seen {
-			return errUndoPayloadNotCanonical
-		}
+		spentRaw = value
 		seen = true
 	}
-	end, err := decoder.Token()
-	if err != nil || end != json.Delim('}') || !seen {
-		return errUndoPayloadNotCanonical
-	}
-	if _, err := decoder.Token(); err != io.EOF {
+	if !finishUndoContainer(decoder, '}') || !seen {
 		return errUndoPayloadNotCanonical
 	}
 	return validateSpentUndoArrayFieldSet(spentRaw, scalarNull)
 }
 
 func validateSpentUndoArrayFieldSet(raw []byte, scalarNull *bool) error {
+	return validateUndoArrayFieldSet(raw, scalarNull, validateSpentUndoFieldSet)
+}
+
+func validateUndoArrayFieldSet(raw []byte, scalarNull *bool, validate func([]byte, *bool) error) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
 	start, err := decoder.Token()
 	if err != nil || start != json.Delim('[') {
 		return errUndoPayloadNotCanonical
 	}
 	for decoder.More() {
-		var spentRaw json.RawMessage
-		if err := decoder.Decode(&spentRaw); err != nil {
+		var item json.RawMessage
+		if decoder.Decode(&item) != nil {
 			return errUndoPayloadNotCanonical
 		}
-		if err := validateSpentUndoFieldSet(spentRaw, scalarNull); err != nil {
+		if err := validate(item, scalarNull); err != nil {
 			return err
 		}
 	}
-	end, err := decoder.Token()
-	if err != nil || end != json.Delim(']') {
-		return errUndoPayloadNotCanonical
-	}
-	if _, err := decoder.Token(); err != io.EOF {
+	if !finishUndoContainer(decoder, ']') {
 		return errUndoPayloadNotCanonical
 	}
 	return nil
@@ -577,58 +545,70 @@ func validateSpentUndoArrayFieldSet(raw []byte, scalarNull *bool) error {
 
 func validateSpentUndoFieldSet(raw []byte, scalarNull *bool) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	start, err := decoder.Token()
-	if err != nil || start != json.Delim('{') {
+	if !startUndoObject(decoder) {
 		return errUndoPayloadNotCanonical
 	}
 	var seen uint8
 	for decoder.More() {
-		keyToken, err := decoder.Token()
-		if err != nil {
+		key, value, ok := readUndoRawField(decoder)
+		if !ok || !recordSpentUndoField(key, value, &seen, scalarNull) {
 			return errUndoPayloadNotCanonical
 		}
-		key, ok := keyToken.(string)
-		if !ok {
-			return errUndoPayloadNotCanonical
-		}
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return errUndoPayloadNotCanonical
-		}
-		*scalarNull = *scalarNull || bytes.Equal(bytes.TrimSpace(value), []byte("null"))
-		var bit uint8
-		switch key {
-		case "txid":
-			bit = 1 << 0
-		case "vout":
-			bit = 1 << 1
-		case "value":
-			bit = 1 << 2
-		case "covenant_type":
-			bit = 1 << 3
-		case "covenant_data":
-			bit = 1 << 4
-		case "creation_height":
-			bit = 1 << 5
-		case "created_by_coinbase":
-			bit = 1 << 6
-		default:
-			return errUndoPayloadNotCanonical
-		}
-		if seen&bit != 0 {
-			return errUndoPayloadNotCanonical
-		}
-		seen |= bit
 	}
-	end, err := decoder.Token()
-	if err != nil || end != json.Delim('}') || seen != (1<<7)-1 {
-		return errUndoPayloadNotCanonical
-	}
-	if _, err := decoder.Token(); err != io.EOF {
+	if !finishUndoContainer(decoder, '}') || seen != (1<<7)-1 {
 		return errUndoPayloadNotCanonical
 	}
 	return nil
+}
+
+func recordSpentUndoField(key string, value json.RawMessage, seen *uint8, scalarNull *bool) bool {
+	field := spentUndoField(key)
+	if field == 0 || *seen&field != 0 {
+		return false
+	}
+	*seen |= field
+	*scalarNull = *scalarNull || bytes.Equal(bytes.TrimSpace(value), []byte("null"))
+	return true
+}
+
+func spentUndoField(key string) uint8 {
+	fields := [...]string{"txid", "vout", "value", "covenant_type", "covenant_data", "creation_height", "created_by_coinbase"}
+	for index, name := range fields {
+		if key == name {
+			return uint8(1 << index)
+		}
+	}
+	return 0
+}
+
+func startUndoObject(decoder *json.Decoder) bool {
+	token, err := decoder.Token()
+	return err == nil && token == json.Delim('{')
+}
+
+func readUndoRawField(decoder *json.Decoder) (string, json.RawMessage, bool) {
+	token, err := decoder.Token()
+	if err != nil {
+		return "", nil, false
+	}
+	key, ok := token.(string)
+	if !ok {
+		return "", nil, false
+	}
+	var value json.RawMessage
+	if decoder.Decode(&value) != nil {
+		return "", nil, false
+	}
+	return key, value, true
+}
+
+func finishUndoContainer(decoder *json.Decoder, want json.Delim) bool {
+	end, err := decoder.Token()
+	if err != nil || end != want {
+		return false
+	}
+	_, err = decoder.Token()
+	return err == io.EOF
 }
 
 // checkUndoDiskCanonicalFields covers the remaining domain property the
@@ -969,19 +949,26 @@ func unmarshalUndoEnvelope(blockHash [32]byte, raw []byte) (*BlockUndo, error) {
 		return nil, fmt.Errorf("%w: decoded payload is %d bytes, class bound %d",
 			ErrUndoIntegrity, len(payload), int64(undoPayloadMaxBytes))
 	}
-	// splitUndoEnvelope already proved this is 64 lowercase hex characters.
-	stored, err := hex.DecodeString(string(checksumHex))
-	if err != nil {
-		return nil, fmt.Errorf("%w: checksum is not hexadecimal", ErrUndoIntegrity)
-	}
-	computed := undoEnvelopeChecksumForVersion(version, blockHash, payload)
-	if subtle.ConstantTimeCompare(stored, computed[:]) != 1 {
-		return nil, errUndoChecksumMismatch
+	if err := validateUndoEnvelopeChecksum(version, blockHash, payload, checksumHex); err != nil {
+		return nil, err
 	}
 	if version == undoEnvelopeVersionV1 {
 		return unmarshalBlockUndo(payload)
 	}
 	return unmarshalBlockUndoV2(payload)
+}
+
+func validateUndoEnvelopeChecksum(version uint32, blockHash [32]byte, payload, checksumHex []byte) error {
+	// splitUndoEnvelope already proved this is 64 lowercase hex characters.
+	stored, err := hex.DecodeString(string(checksumHex))
+	if err != nil {
+		return fmt.Errorf("%w: checksum is not hexadecimal", ErrUndoIntegrity)
+	}
+	computed := undoEnvelopeChecksumForVersion(version, blockHash, payload)
+	if subtle.ConstantTimeCompare(stored, computed[:]) != 1 {
+		return errUndoChecksumMismatch
+	}
+	return nil
 }
 
 // splitUndoEnvelope validates the canonical layout and returns sub-slices of
@@ -1000,12 +987,8 @@ func splitUndoEnvelopeVersioned(raw []byte) (version uint32, hashHex, payloadB64
 	if body < 0 {
 		return 0, nil, nil, nil, classifyUndoEnvelopeFailure(raw)
 	}
-	prefix := undoEnvelopePrefixV2
-	version = undoEnvelopeVersion
-	if string(raw[:len(undoEnvelopePrefixV1)]) == undoEnvelopePrefixV1 {
-		prefix = undoEnvelopePrefixV1
-		version = undoEnvelopeVersionV1
-	} else if string(raw[:len(undoEnvelopePrefixV2)]) != undoEnvelopePrefixV2 {
+	version, prefix, ok := undoEnvelopePrefixVersion(raw)
+	if !ok {
 		return 0, nil, nil, nil, classifyUndoEnvelopeFailure(raw)
 	}
 	hashAt := len(prefix)
@@ -1014,8 +997,7 @@ func splitUndoEnvelopeVersioned(raw []byte) (version uint32, hashHex, payloadB64
 	checksumSepAt := payloadAt + body
 	checksumAt := checksumSepAt + len(undoEnvelopeChecksumSep)
 	suffixAt := checksumAt + undoHashHexLen
-	if string(raw[:hashAt]) != prefix ||
-		string(raw[payloadSepAt:payloadAt]) != undoEnvelopePayloadSep ||
+	if string(raw[payloadSepAt:payloadAt]) != undoEnvelopePayloadSep ||
 		string(raw[checksumSepAt:checksumAt]) != undoEnvelopeChecksumSep ||
 		string(raw[suffixAt:]) != undoEnvelopeSuffix {
 		return 0, nil, nil, nil, classifyUndoEnvelopeFailure(raw)
@@ -1026,6 +1008,18 @@ func splitUndoEnvelopeVersioned(raw []byte) (version uint32, hashHex, payloadB64
 			"%w: block_hash and checksum must be 64 lowercase hex characters", ErrUndoIntegrity)
 	}
 	return version, hashHex, raw[payloadAt:checksumSepAt], checksumHex, nil
+}
+
+func undoEnvelopePrefixVersion(raw []byte) (uint32, string, bool) {
+	for _, candidate := range [...]struct {
+		version uint32
+		prefix  string
+	}{{undoEnvelopeVersionV1, undoEnvelopePrefixV1}, {undoEnvelopeVersion, undoEnvelopePrefixV2}} {
+		if bytes.HasPrefix(raw, []byte(candidate.prefix)) {
+			return candidate.version, candidate.prefix, true
+		}
+	}
+	return 0, "", false
 }
 
 // classifyUndoEnvelopeFailure names WHY a record that failed the layout check
