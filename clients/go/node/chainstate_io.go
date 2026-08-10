@@ -57,7 +57,7 @@ func stateToDisk(s *ChainState) (chainStateDisk, error) {
 
 func chainStateFromDisk(disk chainStateDisk) (*ChainState, error) {
 	if disk.Version != chainStateDiskVersionV1 && disk.Version != chainStateDiskVersion {
-		return nil, fmt.Errorf("unsupported chainstate version: %d", disk.Version)
+		return nil, fmt.Errorf("CHAINSTATE_SCHEMA: unsupported version %d", disk.Version)
 	}
 
 	tipHash, err := parseHex32("tip_hash", disk.TipHash)
@@ -129,7 +129,6 @@ func LoadChainState(path string) (*ChainState, error) {
 type chainStateSchemaFields struct {
 	version                   json.RawMessage
 	alreadyGenerated          json.RawMessage
-	utxos                     json.RawMessage
 	versionSeen               bool
 	alreadyGeneratedSeen      bool
 	versionDuplicate          bool
@@ -139,6 +138,7 @@ type chainStateSchemaFields struct {
 	remainingSeen             uint8
 	remainingDuplicate        bool
 	remainingNull             bool
+	remainingInvalid          bool
 	unknown                   bool
 }
 
@@ -181,6 +181,7 @@ func decodeChainStateDisk(payload []byte) (chainStateDisk, error) {
 
 func collectChainStateSchemaFields(payload []byte) (chainStateSchemaFields, error) {
 	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.UseNumber()
 	start, err := dec.Token()
 	if err != nil {
 		return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
@@ -190,9 +191,29 @@ func collectChainStateSchemaFields(payload []byte) (chainStateSchemaFields, erro
 	}
 	var fields chainStateSchemaFields
 	for dec.More() {
-		key, raw, err := readChainStateRawField(dec)
+		key, err := readChainStateKey(dec)
 		if err != nil {
 			return chainStateSchemaFields{}, err
+		}
+		if key == "utxos" {
+			if !chainStateValueStartsArray(payload, int(dec.InputOffset())) {
+				var raw json.RawMessage
+				if err := dec.Decode(&raw); err != nil {
+					return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
+				}
+				fields.recordUtxos(false, bytes.Equal(bytes.TrimSpace(raw), []byte("null")))
+				continue
+			}
+			valid, err := readChainStateUtxoArray(dec)
+			if err != nil {
+				return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
+			}
+			fields.recordUtxos(valid, false)
+			continue
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
 		}
 		fields.record(key, raw)
 	}
@@ -206,14 +227,22 @@ func collectChainStateSchemaFields(payload []byte) (chainStateSchemaFields, erro
 	return fields, nil
 }
 
-func readChainStateRawField(dec *json.Decoder) (string, json.RawMessage, error) {
+func readChainStateKey(dec *json.Decoder) (string, error) {
 	token, err := dec.Token()
 	if err != nil {
-		return "", nil, fmt.Errorf("decode chainstate: %w", err)
+		return "", fmt.Errorf("decode chainstate: %w", err)
 	}
 	key, ok := token.(string)
 	if !ok {
-		return "", nil, errors.New("decode chainstate: object key must be a string")
+		return "", errors.New("decode chainstate: object key must be a string")
+	}
+	return key, nil
+}
+
+func readChainStateRawField(dec *json.Decoder) (string, json.RawMessage, error) {
+	key, err := readChainStateKey(dec)
+	if err != nil {
+		return "", nil, err
 	}
 	var raw json.RawMessage
 	if err := dec.Decode(&raw); err != nil {
@@ -250,10 +279,16 @@ func (f *chainStateSchemaFields) record(key string, raw json.RawMessage) {
 		f.unknown = true
 		return
 	}
-	if field == chainStateUtxosField && f.remainingSeen&field == 0 {
-		f.utxos = append(json.RawMessage(nil), raw...)
-	}
 	f.recordRemaining(field, raw)
+}
+
+func (f *chainStateSchemaFields) recordUtxos(valid, null bool) {
+	if f.remainingSeen&chainStateUtxosField != 0 {
+		f.remainingDuplicate = true
+	}
+	f.remainingSeen |= chainStateUtxosField
+	f.remainingNull = f.remainingNull || null
+	f.remainingInvalid = f.remainingInvalid || !valid
 }
 
 func recordChainStateTarget(raw json.RawMessage, target *json.RawMessage, seen, duplicate, null *bool) {
@@ -284,10 +319,7 @@ func (f *chainStateSchemaFields) recordRemaining(field uint8, raw json.RawMessag
 }
 
 func validateChainStateRemainingSchema(fields chainStateSchemaFields) error {
-	if !chainStateRemainingSchemaComplete(fields) {
-		return errors.New(chainStatePayloadNotCanonical)
-	}
-	if !validateChainStateUtxoArray(fields.utxos) {
+	if !chainStateRemainingSchemaComplete(fields) || fields.remainingInvalid {
 		return errors.New(chainStatePayloadNotCanonical)
 	}
 	return nil
@@ -298,19 +330,38 @@ func chainStateRemainingSchemaComplete(fields chainStateSchemaFields) bool {
 		fields.remainingSeen == chainStateRemainingFields
 }
 
-func validateChainStateUtxoArray(raw []byte) bool {
-	dec := json.NewDecoder(bytes.NewReader(raw))
+func chainStateValueStartsArray(payload []byte, offset int) bool {
+	for offset < len(payload) && strings.ContainsRune(": \t\r\n", rune(payload[offset])) {
+		offset++
+	}
+	return offset < len(payload) && payload[offset] == '['
+}
+
+func readChainStateUtxoArray(dec *json.Decoder) (bool, error) {
 	start, err := dec.Token()
 	if err != nil || start != json.Delim('[') {
-		return false
+		return false, err
 	}
+	return validateChainStateUtxoItems(dec)
+}
+
+func validateChainStateUtxoItems(dec *json.Decoder) (bool, error) {
+	valid := true
+	var item json.RawMessage
 	for dec.More() {
-		var item json.RawMessage
-		if dec.Decode(&item) != nil || validateChainStateUtxoSchema(item) != nil {
-			return false
+		item = item[:0]
+		if err := dec.Decode(&item); err != nil {
+			return false, err
+		}
+		if valid {
+			valid = validateChainStateUtxoSchema(item) == nil
 		}
 	}
-	return chainStateContainerComplete(dec, ']')
+	end, err := dec.Token()
+	if err != nil || end != json.Delim(']') {
+		return false, err
+	}
+	return valid, nil
 }
 
 func validateChainStateUtxoSchema(raw []byte) error {

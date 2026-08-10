@@ -449,40 +449,44 @@ func decodeBlockUndoTyped(raw []byte) (blockUndoDiskRaw, error) {
 // responsibility; RawMessage consumption keeps extreme values lexical.
 func validateBlockUndoFieldSet(raw []byte, supplyToken *json.RawMessage, scalarNull *bool) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
 	if !startUndoObject(decoder) {
 		return errUndoPayloadNotCanonical
 	}
 	var seen uint8
-	var txsRaw json.RawMessage
 	for decoder.More() {
-		key, value, ok := readUndoRawField(decoder)
-		if !ok || !recordBlockUndoField(key, value, &seen, supplyToken, &txsRaw, scalarNull) {
+		key, ok := readUndoKey(decoder)
+		field := blockUndoField(key)
+		if !ok || field == 0 || seen&field != 0 {
 			return errUndoPayloadNotCanonical
+		}
+		seen |= field
+		if err := readBlockUndoField(decoder, field, supplyToken, scalarNull); err != nil {
+			return err
 		}
 	}
 	if !finishUndoContainer(decoder, '}') || seen != (1<<3)-1 {
 		return errUndoPayloadNotCanonical
 	}
-	return validateTxUndoArrayFieldSet(txsRaw, scalarNull)
+	return nil
 }
 
-func recordBlockUndoField(key string, value json.RawMessage, seen *uint8,
-	supplyToken, txsRaw *json.RawMessage, scalarNull *bool,
-) bool {
-	field := blockUndoField(key)
-	if field == 0 || *seen&field != 0 {
-		return false
-	}
-	*seen |= field
+func readBlockUndoField(decoder *json.Decoder, field uint8, supplyToken *json.RawMessage, scalarNull *bool) error {
 	switch field {
 	case 1 << 0:
+		value, ok := readUndoRawValue(decoder)
+		if !ok {
+			return errUndoPayloadNotCanonical
+		}
 		*scalarNull = *scalarNull || bytes.Equal(bytes.TrimSpace(value), []byte("null"))
 	case 1 << 1:
-		*supplyToken = value
+		if decoder.Decode(supplyToken) != nil {
+			return errUndoPayloadNotCanonical
+		}
 	case 1 << 2:
-		*txsRaw = value
+		return validateTxUndoArray(decoder, scalarNull)
 	}
-	return true
+	return nil
 }
 
 func blockUndoField(key string) uint8 {
@@ -494,82 +498,73 @@ func blockUndoField(key string) uint8 {
 	return 0
 }
 
-func validateTxUndoArrayFieldSet(raw []byte, scalarNull *bool) error {
-	return validateUndoArrayFieldSet(raw, scalarNull, validateTxUndoFieldSet)
+func validateTxUndoArray(decoder *json.Decoder, scalarNull *bool) error {
+	return validateUndoArray(decoder, scalarNull, validateTxUndoFieldSet)
 }
 
-func validateTxUndoFieldSet(raw []byte, scalarNull *bool) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
+func validateTxUndoFieldSet(decoder *json.Decoder, scalarNull *bool) error {
 	if !startUndoObject(decoder) {
 		return errUndoPayloadNotCanonical
 	}
 	seen := false
-	var spentRaw json.RawMessage
 	for decoder.More() {
-		key, value, ok := readUndoRawField(decoder)
+		key, ok := readUndoKey(decoder)
 		if !ok || seen || key != "spent" {
 			return errUndoPayloadNotCanonical
 		}
-		spentRaw = value
 		seen = true
+		if err := validateSpentUndoArray(decoder, scalarNull); err != nil {
+			return err
+		}
 	}
-	if !finishUndoContainer(decoder, '}') || !seen {
+	if !closeUndoContainer(decoder, '}') || !seen {
 		return errUndoPayloadNotCanonical
 	}
-	return validateSpentUndoArrayFieldSet(spentRaw, scalarNull)
+	return nil
 }
 
-func validateSpentUndoArrayFieldSet(raw []byte, scalarNull *bool) error {
-	return validateUndoArrayFieldSet(raw, scalarNull, validateSpentUndoFieldSet)
+func validateSpentUndoArray(decoder *json.Decoder, scalarNull *bool) error {
+	return validateUndoArray(decoder, scalarNull, validateSpentUndoFieldSet)
 }
 
-func validateUndoArrayFieldSet(raw []byte, scalarNull *bool, validate func([]byte, *bool) error) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
+func validateUndoArray(decoder *json.Decoder, scalarNull *bool, validate func(*json.Decoder, *bool) error) error {
 	start, err := decoder.Token()
 	if err != nil || start != json.Delim('[') {
 		return errUndoPayloadNotCanonical
 	}
 	for decoder.More() {
-		var item json.RawMessage
-		if decoder.Decode(&item) != nil {
-			return errUndoPayloadNotCanonical
-		}
-		if err := validate(item, scalarNull); err != nil {
+		if err := validate(decoder, scalarNull); err != nil {
 			return err
 		}
 	}
-	if !finishUndoContainer(decoder, ']') {
+	if !closeUndoContainer(decoder, ']') {
 		return errUndoPayloadNotCanonical
 	}
 	return nil
 }
 
-func validateSpentUndoFieldSet(raw []byte, scalarNull *bool) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
+func validateSpentUndoFieldSet(decoder *json.Decoder, scalarNull *bool) error {
 	if !startUndoObject(decoder) {
 		return errUndoPayloadNotCanonical
 	}
 	var seen uint8
 	for decoder.More() {
-		key, value, ok := readUndoRawField(decoder)
-		if !ok || !recordSpentUndoField(key, value, &seen, scalarNull) {
+		key, ok := readUndoKey(decoder)
+		field := spentUndoField(key)
+		if !ok || field == 0 || seen&field != 0 {
 			return errUndoPayloadNotCanonical
 		}
+		value, ok := readUndoRawValue(decoder)
+		if !ok {
+			return errUndoPayloadNotCanonical
+		}
+		seen |= field
+		*scalarNull = *scalarNull || bytes.Equal(bytes.TrimSpace(value), []byte("null"))
 	}
-	if !finishUndoContainer(decoder, '}') || seen != (1<<7)-1 {
+	if !closeUndoContainer(decoder, '}') || seen != (1<<7)-1 {
 		return errUndoPayloadNotCanonical
 	}
 	return nil
-}
-
-func recordSpentUndoField(key string, value json.RawMessage, seen *uint8, scalarNull *bool) bool {
-	field := spentUndoField(key)
-	if field == 0 || *seen&field != 0 {
-		return false
-	}
-	*seen |= field
-	*scalarNull = *scalarNull || bytes.Equal(bytes.TrimSpace(value), []byte("null"))
-	return true
 }
 
 func spentUndoField(key string) uint8 {
@@ -587,29 +582,35 @@ func startUndoObject(decoder *json.Decoder) bool {
 	return err == nil && token == json.Delim('{')
 }
 
-func readUndoRawField(decoder *json.Decoder) (string, json.RawMessage, bool) {
+func readUndoKey(decoder *json.Decoder) (string, bool) {
 	token, err := decoder.Token()
 	if err != nil {
-		return "", nil, false
+		return "", false
 	}
 	key, ok := token.(string)
-	if !ok {
-		return "", nil, false
-	}
+	return key, ok
+}
+
+func readUndoRawValue(decoder *json.Decoder) (json.RawMessage, bool) {
 	var value json.RawMessage
 	if decoder.Decode(&value) != nil {
-		return "", nil, false
+		return nil, false
 	}
-	return key, value, true
+	return value, true
+}
+
+func closeUndoContainer(decoder *json.Decoder, want json.Delim) bool {
+	end, err := decoder.Token()
+	return err == nil && end == want
+}
+
+func undoDecoderEOF(decoder *json.Decoder) bool {
+	_, err := decoder.Token()
+	return err == io.EOF
 }
 
 func finishUndoContainer(decoder *json.Decoder, want json.Delim) bool {
-	end, err := decoder.Token()
-	if err != nil || end != want {
-		return false
-	}
-	_, err = decoder.Token()
-	return err == io.EOF
+	return closeUndoContainer(decoder, want) && undoDecoderEOF(decoder)
 }
 
 // checkUndoDiskCanonicalFields covers the remaining domain property the
@@ -665,7 +666,7 @@ func blockUndoToDisk(undo *BlockUndo) (blockUndoDisk, error) {
 		return blockUndoDisk{}, errors.New("nil block undo")
 	}
 	if undo.PreviousAlreadyGenerated.Hi != 0 {
-		return blockUndoDisk{}, errors.New("decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64")
+		return blockUndoDisk{}, errors.New("encode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64")
 	}
 	txs := blockUndoTxsToDisk(undo.Txs)
 	return blockUndoDisk{
@@ -1033,6 +1034,10 @@ func undoEnvelopePrefixVersion(raw []byte) (uint32, string, bool) {
 // with trailing garbage still reports the actionable legacy message instead of a
 // generic one. The Rust twin classifies identically.
 func classifyUndoEnvelopeFailure(raw []byte) error {
+	first := bytes.TrimLeft(raw, " \t\r\n")
+	if len(first) > 0 && first[0] != '{' {
+		return fmt.Errorf("%w: undo record is not a single JSON object", ErrUndoIntegrity)
+	}
 	var probe struct {
 		Version *uint32 `json:"version"`
 	}

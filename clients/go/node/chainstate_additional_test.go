@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"math/big"
 	"os"
@@ -161,6 +162,7 @@ func TestChainStateSchemaErrorsAndPrecedence(t *testing.T) {
 		want    string
 	}{
 		{name: "top_level_non_object", payload: `[]`, want: "decode chainstate: top-level value must be an object"},
+		{name: "top_level_non_object_trailing", payload: `[]{}`, want: "decode chainstate: top-level value must be an object"},
 		{name: "missing_version", payload: `{}`, want: "CHAINSTATE_SCHEMA: missing version"},
 		{name: "null_version", payload: `{"version":null,"already_generated":"bad"}`, want: "CHAINSTATE_SCHEMA: missing version"},
 		{name: "null_duplicate_version", payload: `{"version":null,"version":2,"already_generated":"0"}`, want: "CHAINSTATE_SCHEMA: missing version"},
@@ -265,36 +267,47 @@ func TestSchemaArrayValidationStopsAtFirstInvalidItem(t *testing.T) {
 	const tailCount = 256
 	validUtxo := `{"txid":"` + strings.Repeat("11", 32) + `","covenant_data":"","value":1,"creation_height":0,"vout":0,"covenant_type":0,"created_by_coinbase":false}`
 	validSpent := `{"txid":"` + strings.Repeat("11", 32) + `","vout":0,"value":1,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}`
-	chainShort, chainLong := []byte(`[0]`), []byte(`[0`+strings.Repeat(","+validUtxo, tailCount)+`]`)
-	undoShort, undoLong := []byte(`[0]`), []byte(`[0`+strings.Repeat(`,{"spent":[]}`, tailCount)+`]`)
-	spentShort, spentLong := []byte(`[0]`), []byte(`[0`+strings.Repeat(","+validSpent, tailCount)+`]`)
-	allocs := func(input []byte, rejects func([]byte) bool) float64 {
-		return testing.AllocsPerRun(100, func() {
-			if !rejects(input) {
-				panic("validator accepted first invalid item")
+	chainPayload := func(utxos string) []byte {
+		return []byte(`{"tip_hash":"` + strings.Repeat("00", 32) + `","utxos":` + utxos + `,"height":0,"already_generated":"0","version":2,"has_tip":false}`)
+	}
+	undoPayload := func(txs string) []byte {
+		return []byte(`{"block_height":0,"previous_already_generated":"0","txs":` + txs + `}`)
+	}
+	chainShort, chainLong := chainPayload(`[0]`), chainPayload(`[0`+strings.Repeat(","+validUtxo, tailCount)+`]`)
+	undoShort, undoLong := undoPayload(`[0]`), undoPayload(`[0`+strings.Repeat(`,{"spent":[]}`, tailCount)+`]`)
+	spentShort, spentLong := undoPayload(`[{"spent":[0]}]`), undoPayload(`[{"spent":[0`+strings.Repeat(","+validSpent, tailCount)+`]}]`)
+	measure := func(input []byte, rejects func([]byte) bool) (int64, int64) {
+		result := testing.Benchmark(func(b *testing.B) {
+			for range b.N {
+				if !rejects(input) {
+					panic("validator copied input or accepted first invalid item")
+				}
 			}
 		})
+		return result.AllocsPerOp(), result.AllocedBytesPerOp()
+	}
+	chainRejects := func(raw []byte) bool {
+		_, err := decodeChainStateDisk(raw)
+		return err != nil
 	}
 	undoRejects := func(raw []byte) bool {
+		var supply json.RawMessage
 		var scalarNull bool
-		return validateTxUndoArrayFieldSet(raw, &scalarNull) != nil
-	}
-	spentRejects := func(raw []byte) bool {
-		var scalarNull bool
-		return validateSpentUndoArrayFieldSet(raw, &scalarNull) != nil
+		return validateBlockUndoFieldSet(raw, &supply, &scalarNull) != nil
 	}
 	for _, tc := range []struct {
 		name        string
 		short, long []byte
 		rejects     func([]byte) bool
 	}{
-		{name: "chainstate_utxos", short: chainShort, long: chainLong, rejects: func(raw []byte) bool { return !validateChainStateUtxoArray(raw) }},
+		{name: "chainstate_utxos", short: chainShort, long: chainLong, rejects: chainRejects},
 		{name: "undo_txs", short: undoShort, long: undoLong, rejects: undoRejects},
-		{name: "undo_spent", short: spentShort, long: spentLong, rejects: spentRejects},
+		{name: "undo_spent", short: spentShort, long: spentLong, rejects: undoRejects},
 	} {
-		small, large := allocs(tc.short, tc.rejects), allocs(tc.long, tc.rejects)
-		if large > small+4 {
-			t.Fatalf("%s allocations grew with an unread valid tail: short=%.1f long=%.1f", tc.name, small, large)
+		smallAllocs, smallBytes := measure(tc.short, tc.rejects)
+		largeAllocs, largeBytes := measure(tc.long, tc.rejects)
+		if largeAllocs > smallAllocs+4 || largeBytes > smallBytes+4096 {
+			t.Fatalf("%s allocations grew with an unread valid tail: short=%d/%d long=%d/%d", tc.name, smallAllocs, smallBytes, largeAllocs, largeBytes)
 		}
 	}
 }
@@ -466,8 +479,8 @@ func TestChainStateFromDisk_Errors(t *testing.T) {
 
 	t.Run("version_mismatch", func(t *testing.T) {
 		_, err := chainStateFromDisk(chainStateDisk{Version: chainStateDiskVersion + 1})
-		if err == nil {
-			t.Fatalf("expected error")
+		if err == nil || err.Error() != "CHAINSTATE_SCHEMA: unsupported version 3" {
+			t.Fatalf("err=%v, want exact unsupported-version error", err)
 		}
 	})
 	t.Run("bad_tip_hash", func(t *testing.T) {

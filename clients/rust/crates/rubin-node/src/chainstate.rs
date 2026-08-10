@@ -863,9 +863,7 @@ pub fn load_chain_state<P: AsRef<Path>>(path: P) -> Result<ChainState, String> {
         .is_some_and(|byte| byte != b'{')
     {
         let mut syntax_deserializer = serde_json::Deserializer::from_slice(&payload);
-        if IgnoredAny::deserialize(&mut syntax_deserializer).is_ok()
-            && syntax_deserializer.end().is_ok()
-        {
+        if IgnoredAny::deserialize(&mut syntax_deserializer).is_ok() {
             return Err("decode chainstate: top-level value must be an object".to_string());
         }
     }
@@ -1022,7 +1020,10 @@ fn utxo_entry_explicitly_uses_suite(entry: &UtxoEntry, suite_id: u8) -> bool {
 
 fn chain_state_from_disk(disk: ChainStateDisk) -> Result<ChainState, String> {
     if disk.version != CHAIN_STATE_DISK_VERSION_V1 && disk.version != CHAIN_STATE_DISK_VERSION {
-        return Err(format!("unsupported chainstate version: {}", disk.version));
+        return Err(format!(
+            "{}{}",
+            CHAINSTATE_UNSUPPORTED_VERSION_PREFIX, disk.version
+        ));
     }
 
     let tip_hash = parse_hex32("tip_hash", &disk.tip_hash)?;
@@ -1078,11 +1079,11 @@ mod tests {
     use crate::io_utils::unique_temp_path;
 
     use super::{
-        apply_connected_block, chain_state_path, copy_utxo_entry, copy_utxo_set, load_chain_state,
-        ChainState, CHAINSTATE_DUPLICATE_SUPPLY, CHAINSTATE_DUPLICATE_VERSION,
-        CHAINSTATE_INVALID_V1_SUPPLY, CHAINSTATE_INVALID_V2_SUPPLY, CHAINSTATE_INVALID_VERSION,
-        CHAINSTATE_MISSING_SUPPLY, CHAINSTATE_MISSING_VERSION, CHAINSTATE_PAYLOAD_NOT_CANONICAL,
-        CHAIN_STATE_FILE_NAME, STORE_ENVELOPE_CHAIN_STATE,
+        apply_connected_block, chain_state_from_disk, chain_state_path, copy_utxo_entry,
+        copy_utxo_set, load_chain_state, state_to_disk, ChainState, CHAINSTATE_DUPLICATE_SUPPLY,
+        CHAINSTATE_DUPLICATE_VERSION, CHAINSTATE_INVALID_V1_SUPPLY, CHAINSTATE_INVALID_V2_SUPPLY,
+        CHAINSTATE_INVALID_VERSION, CHAINSTATE_MISSING_SUPPLY, CHAINSTATE_MISSING_VERSION,
+        CHAINSTATE_PAYLOAD_NOT_CANONICAL, CHAIN_STATE_FILE_NAME, STORE_ENVELOPE_CHAIN_STATE,
     };
     use rubin_consensus::constants::{
         EMISSION_SPEED_FACTOR, MINEABLE_CAP, POW_LIMIT, TAIL_EMISSION_PER_BLOCK,
@@ -1650,6 +1651,9 @@ mod tests {
 
         let err = load_chain_state(&path).unwrap_err();
         assert_eq!(err, "CHAINSTATE_SCHEMA: unsupported version 999");
+        let mut disk = state_to_disk(&ChainState::new()).expect("disk");
+        disk.version = 999;
+        assert_eq!(chain_state_from_disk(disk).unwrap_err(), err);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -1794,12 +1798,10 @@ mod tests {
 
     #[test]
     fn chainstate_schema_errors_are_exact_and_version_precedes_supply() {
+        let non_object = "decode chainstate: top-level value must be an object";
         let mut cases: Vec<(&str, String, &str)> = [
-            (
-                "top_level_non_object",
-                "[]",
-                "decode chainstate: top-level value must be an object",
-            ),
+            ("top_level_non_object", "[]", non_object),
+            ("top_level_non_object_trailing", "[]{}", non_object),
             ("missing_version", "{}", CHAINSTATE_MISSING_VERSION),
             (
                 "null_version",

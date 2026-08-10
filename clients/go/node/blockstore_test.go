@@ -1097,8 +1097,7 @@ func TestUndoEnvelopeV1CrossClientVector(t *testing.T) {
 	}
 }
 
-// TestUndoEnvelopeV2CrossClientVector pins exact-u128 v2 bytes through the
-// production codec and both public BlockStore undo paths.
+// TestUndoEnvelopeV2CrossClientVector pins exact-u128 v2 bytes through the production codec and public store paths.
 func TestUndoEnvelopeV2CrossClientVector(t *testing.T) {
 	vectors := loadUndoIntegrityV2Vectors(t)
 	wantSupplies := [...]consensus.Uint128{
@@ -1127,7 +1126,6 @@ func TestUndoEnvelopeV2CrossClientVector(t *testing.T) {
 			CreatedByCoinbase: true,
 		},
 	}
-
 	for i, vector := range vectors {
 		t.Run(vector.ID, func(t *testing.T) {
 			blockHash := mustUndoTestHash(t, vector.BlockHash)
@@ -1153,7 +1151,6 @@ func TestUndoEnvelopeV2CrossClientVector(t *testing.T) {
 			if vector.ID == "multi-tx-one-spend" && !reflect.DeepEqual(undo.Txs[1].Spent[0], wantSpent) {
 				t.Fatalf("full spent entry = %+v, want %+v", undo.Txs[1].Spent[0], wantSpent)
 			}
-
 			payload, err := marshalBlockUndoV2(undo)
 			if err != nil {
 				t.Fatalf("marshalBlockUndoV2: %v", err)
@@ -1185,7 +1182,6 @@ func TestUndoEnvelopeV2CrossClientVector(t *testing.T) {
 			if !reflect.DeepEqual(decoded, undo) {
 				t.Fatalf("round-trip undo = %+v, want %+v", decoded, undo)
 			}
-
 			readStore := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "read-store"))
 			readPath := filepath.Join(readStore.undoDir, vector.BlockHash+".json")
 			if err := os.WriteFile(readPath, []byte(vector.Envelope), 0o600); err != nil {
@@ -1198,7 +1194,6 @@ func TestUndoEnvelopeV2CrossClientVector(t *testing.T) {
 			if !reflect.DeepEqual(fromStore, undo) {
 				t.Fatalf("GetUndo = %+v, want %+v", fromStore, undo)
 			}
-
 			writeStore := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "write-store"))
 			if err := writeStore.PutUndo(blockHash, undo); err != nil {
 				t.Fatalf("PutUndo(absent v2 vector): %v", err)
@@ -1378,6 +1373,9 @@ func TestUndoEnvelopeSupplyTypesAndBoundaries(t *testing.T) {
 				t.Fatalf("checksum-valid payload type error gained UNDO_INTEGRITY: %v", err)
 			}
 		})
+	}
+	if _, err := marshalUndoEnvelopeV1(blockHash, &BlockUndo{PreviousAlreadyGenerated: consensus.Uint128{Hi: 1}}); err == nil || err.Error() != "encode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64" {
+		t.Fatalf("v1 encode err=%v, want exact encode-side u64 diagnostic", err)
 	}
 	for _, tc := range []struct {
 		name    string
@@ -1629,9 +1627,14 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 		{name: "duplicate_checksum_conflicting", record: replaceOnce(t, valid, `{"version":1`, `{"checksum":"`+strings.Repeat("00", 32)+`","version":1`)},
 		{name: "duplicate_payload_conflicting", record: replaceOnce(t, valid, `{"version":1`, `{"payload_b64":"AA==","version":1`)},
 		{name: "null_payload", record: replaceOnce(t, valid, `"payload_b64":"`+payloadB64+`"`, `"payload_b64":null`)},
-		{name: "trailing_json_value", record: strings.TrimSuffix(valid, "\n") + "{}\n"},
-		{name: "trailing_scalar", record: strings.TrimSuffix(valid, "\n") + " 1\n"},
+		{name: "trailing_json_value", record: strings.TrimSuffix(valid, "\n") + "{}\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: envelope is not the canonical encoding"},
+		{name: "trailing_scalar", record: strings.TrimSuffix(valid, "\n") + " 1\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: envelope is not the canonical encoding"},
 		{name: "not_an_object", record: "[]\n"},
+		{name: "not_an_object_1", record: "[1]\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object"},
+		{name: "not_an_object_2", record: "[2]\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object"},
+		{name: "not_an_object_3", record: "[3]\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object"},
+		{name: "not_an_object_null", record: "null\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object"},
+		{name: "not_an_object_array_trailing", record: "[1]{}\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object"},
 		{name: "not_json", record: "definitely not json\n"},
 		{
 			// W4 parity row: classification decodes ONE value and ignores what
@@ -1675,8 +1678,7 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 				hex.EncodeToString(blockHash[:])),
 			wantErr: errUndoChecksumMismatch, wantMsg: errUndoChecksumMismatch.Error(),
 		},
-		// The rows below carry a CORRECT checksum, so their exact payload-class
-		// errors prove structural and supply decoding run after the checksum.
+		// A correct checksum makes these exact errors prove payload decoding runs later.
 		{name: "checksum_valid_over_indented_payload", record: envelopeOver(indented), wantMsg: canonicalPayloadError},
 		{name: "checksum_valid_over_null_txs", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":null}`)), wantMsg: canonicalPayloadError},
 		{name: "checksum_valid_over_unknown_payload_field", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":[],"x":1}`)), wantMsg: canonicalPayloadError},

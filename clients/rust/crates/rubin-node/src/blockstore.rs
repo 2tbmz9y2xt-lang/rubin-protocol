@@ -1405,7 +1405,7 @@ mod tests {
         use crate::undo::{
             flip_base64_symbol, marshal_block_undo, marshal_undo_envelope_v1, BlockUndo, SpentUndo,
             TxUndo, UNDO_BLOCK_HASH_MISMATCH_ERR, UNDO_CHECKSUM_MISMATCH_ERR,
-            UNDO_INTEGRITY_PREFIX, UNDO_LEGACY_ERR,
+            UNDO_INTEGRITY_PREFIX, UNDO_LEGACY_ERR, UNDO_RECORD_NOT_OBJECT_ERR,
         };
         use rubin_consensus::{Outpoint, UtxoEntry};
         use sha3::{Digest, Sha3_256};
@@ -1548,9 +1548,22 @@ mod tests {
                 replace_once(&valid, &format!("\"payload_b64\":\"{payload_b64}\""), "\"payload_b64\":null"),
                 None,
             ),
-            ("trailing_json_value", format!("{}{{}}\n", valid.trim_end_matches('\n')), None),
-            ("trailing_scalar", format!("{} 1\n", valid.trim_end_matches('\n')), None),
+            (
+                "trailing_json_value",
+                format!("{}{{}}\n", valid.trim_end_matches('\n')),
+                Some("UNDO_INTEGRITY: envelope is not the canonical encoding"),
+            ),
+            (
+                "trailing_scalar",
+                format!("{} 1\n", valid.trim_end_matches('\n')),
+                Some("UNDO_INTEGRITY: envelope is not the canonical encoding"),
+            ),
             ("not_an_object", "[]\n".to_string(), None),
+            ("not_an_object_1", "[1]\n".to_string(), Some(UNDO_RECORD_NOT_OBJECT_ERR)),
+            ("not_an_object_2", "[2]\n".to_string(), Some(UNDO_RECORD_NOT_OBJECT_ERR)),
+            ("not_an_object_3", "[3]\n".to_string(), Some(UNDO_RECORD_NOT_OBJECT_ERR)),
+            ("not_object_null", "null\n".to_string(), Some(UNDO_RECORD_NOT_OBJECT_ERR)),
+            ("not_object_trailing", "[1]{}\n".to_string(), Some(UNDO_RECORD_NOT_OBJECT_ERR)),
             ("not_json", "definitely not json\n".to_string(), None),
             (
                 // W4 parity row: classification decodes ONE value and ignores

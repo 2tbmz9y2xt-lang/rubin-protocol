@@ -612,7 +612,7 @@ fn block_undo_txs_to_disk(src: &[TxUndo]) -> Vec<TxUndoDisk> {
 
 fn block_undo_to_disk(undo: &BlockUndo) -> Result<BlockUndoDisk, String> {
     let previous_already_generated = u64::try_from(undo.previous_already_generated)
-        .map_err(|_| UNDO_INVALID_V1_SUPPLY.to_string())?;
+        .map_err(|_| "encode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64".to_string())?;
     Ok(BlockUndoDisk {
         block_height: undo.block_height,
         previous_already_generated,
@@ -715,6 +715,8 @@ pub const UNDO_LEGACY_ERR: &str =
     "UNDO_INTEGRITY: legacy/unversioned undo; pre-devnet datadir reset and full resync required";
 pub const UNDO_BLOCK_HASH_MISMATCH_ERR: &str = "UNDO_INTEGRITY: block hash mismatch";
 pub const UNDO_CHECKSUM_MISMATCH_ERR: &str = "UNDO_INTEGRITY: checksum mismatch";
+pub(crate) const UNDO_RECORD_NOT_OBJECT_ERR: &str =
+    "UNDO_INTEGRITY: undo record is not a single JSON object";
 
 const UNDO_ENVELOPE_VERSION_V1: u32 = 1;
 const UNDO_ENVELOPE_VERSION: u32 = 2;
@@ -969,9 +971,18 @@ fn split_undo_envelope_versioned(raw: &[u8]) -> Result<(u32, &[u8], &[u8], &[u8]
 /// record with trailing garbage still reports the actionable legacy message
 /// instead of a generic one. The Go twin classifies identically.
 fn classify_undo_envelope_failure(raw: &[u8]) -> String {
+    if raw
+        .iter()
+        .copied()
+        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+        .is_some_and(|byte| byte != b'{')
+        && IgnoredAny::deserialize(&mut serde_json::Deserializer::from_slice(raw)).is_ok()
+    {
+        return UNDO_RECORD_NOT_OBJECT_ERR.to_string();
+    }
     let mut deserializer = serde_json::Deserializer::from_slice(raw);
     let Ok(probe) = UndoVersionProbe::deserialize(&mut deserializer) else {
-        return format!("{UNDO_INTEGRITY_PREFIX}: undo record is not a single JSON object");
+        return UNDO_RECORD_NOT_OBJECT_ERR.to_string();
     };
     match probe.version {
         None => UNDO_LEGACY_ERR.to_string(),
@@ -1627,6 +1638,17 @@ mod tests {
                 ),
             }
         }
+
+        let encode_error = marshal_undo_envelope_v1(
+            block_hash,
+            &BlockUndo {
+                block_height: 0,
+                previous_already_generated: u128::from(u64::MAX) + 1,
+                txs: Vec::new(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(encode_error, "encode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64");
 
         for (name, payload) in [
             (

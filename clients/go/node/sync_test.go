@@ -280,6 +280,16 @@ func TestNewSyncEngine_NilChainState(t *testing.T) {
 	}
 }
 
+func TestRecheckLiveTipIdentityRejectsSupplyOnlyMove(t *testing.T) {
+	state := NewChainState()
+	prior := chainTipScalarsOf(state)
+	state.AlreadyGenerated = consensus.Uint128FromU64(1)
+	err := (&SyncEngine{}).recheckLiveTipIdentity(&canonicalTransition{chainState: state}, prior)
+	if err == nil || err.Error() != "live chainstate tip moved during canonical apply" {
+		t.Fatalf("err=%v, want exact supply-only tip-move error", err)
+	}
+}
+
 func TestNewSyncEngine_MainnetGuard(t *testing.T) {
 	st := NewChainState()
 
