@@ -322,18 +322,8 @@ func marshalBlockUndoV2(undo *BlockUndo) ([]byte, error) {
 	return raw, nil
 }
 
-// unmarshalBlockUndo strictly decodes a canonical payload. A structural pass
-// proves the complete expected field set before the version-specific supply
-// token is interpreted, so unknown, duplicate and missing fields win over a
-// simultaneous supply defect without exposing parser wording. Supply
-// classification, remaining scalar conversion, and hex domain validation then
-// run before the final canonical byte comparison, so field order or whitespace
-// cannot hide their exact errors.
-//
-// The whole decision happens BEFORE blockUndoFromDisk, so a checksum-valid but
-// non-canonical payload is refused without allocating the runtime spent entries.
-// The contract orders strict rejection ahead of BlockUndo conversion; converting
-// first satisfied that only by accident. Rust twin: `unmarshal_block_undo`.
+// unmarshalBlockUndo checks shape, supply, and scalar domains before conversion,
+// preserving error priority. Rust twin: `unmarshal_block_undo`.
 func unmarshalBlockUndo(raw []byte) (*BlockUndo, error) {
 	disk, err := decodeBlockUndoDiskV1(raw)
 	if err != nil {
@@ -442,11 +432,7 @@ func decodeBlockUndoTyped(raw []byte) (blockUndoDiskRaw, error) {
 	return decoded, nil
 }
 
-// validateBlockUndoFieldSet proves the complete nested field/container shape
-// while preserving the supply token for version-specific validation. Scalar
-// leaf conversion deliberately happens only after the supply decision. Object
-// order and insignificant whitespace remain the final byte-canonical check's
-// responsibility; RawMessage consumption keeps extreme values lexical.
+// validateBlockUndoFieldSet proves nested shape before supply and scalar conversion.
 func validateBlockUndoFieldSet(raw []byte, supplyToken *json.RawMessage, scalarNull *bool) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
@@ -456,14 +442,14 @@ func validateBlockUndoFieldSet(raw []byte, supplyToken *json.RawMessage, scalarN
 	var seen uint8
 	for decoder.More() {
 		key, ok := readUndoKey(decoder)
-		field := blockUndoField(key)
-		if !ok || field == 0 || seen&field != 0 {
+		field := blockUndoField(key, seen)
+		if !validUndoField(ok, field) {
 			return errUndoPayloadNotCanonical
 		}
-		seen |= field
 		if err := readBlockUndoField(decoder, field, supplyToken, scalarNull); err != nil {
 			return err
 		}
+		seen |= field
 	}
 	if !finishUndoContainer(decoder, '}') || seen != (1<<3)-1 {
 		return errUndoPayloadNotCanonical
@@ -489,10 +475,13 @@ func readBlockUndoField(decoder *json.Decoder, field uint8, supplyToken *json.Ra
 	return nil
 }
 
-func blockUndoField(key string) uint8 {
+func blockUndoField(key string, seen uint8) uint8 {
 	for index, name := range [...]string{"block_height", "previous_already_generated", "txs"} {
 		if key == name {
-			return uint8(1 << index)
+			field := uint8(1 << index)
+			if seen&field == 0 {
+				return field
+			}
 		}
 	}
 	return 0
@@ -506,18 +495,20 @@ func validateTxUndoFieldSet(decoder *json.Decoder, scalarNull *bool) error {
 	if !startUndoObject(decoder) {
 		return errUndoPayloadNotCanonical
 	}
-	seen := false
-	for decoder.More() {
-		key, ok := readUndoKey(decoder)
-		if !ok || seen || key != "spent" {
-			return errUndoPayloadNotCanonical
-		}
-		seen = true
-		if err := validateSpentUndoArray(decoder, scalarNull); err != nil {
-			return err
-		}
+	if !decoder.More() {
+		return errUndoPayloadNotCanonical
 	}
-	if !closeUndoContainer(decoder, '}') || !seen {
+	key, ok := readUndoKey(decoder)
+	if !ok || key != "spent" {
+		return errUndoPayloadNotCanonical
+	}
+	if err := validateSpentUndoArray(decoder, scalarNull); err != nil {
+		return err
+	}
+	if decoder.More() {
+		return errUndoPayloadNotCanonical
+	}
+	if !closeUndoContainer(decoder, '}') {
 		return errUndoPayloadNotCanonical
 	}
 	return nil
@@ -550,8 +541,8 @@ func validateSpentUndoFieldSet(decoder *json.Decoder, scalarNull *bool) error {
 	var seen uint8
 	for decoder.More() {
 		key, ok := readUndoKey(decoder)
-		field := spentUndoField(key)
-		if !ok || field == 0 || seen&field != 0 {
+		field := spentUndoField(key, seen)
+		if !validUndoField(ok, field) {
 			return errUndoPayloadNotCanonical
 		}
 		value, ok := readUndoRawValue(decoder)
@@ -567,15 +558,20 @@ func validateSpentUndoFieldSet(decoder *json.Decoder, scalarNull *bool) error {
 	return nil
 }
 
-func spentUndoField(key string) uint8 {
+func spentUndoField(key string, seen uint8) uint8 {
 	fields := [...]string{"txid", "vout", "value", "covenant_type", "covenant_data", "creation_height", "created_by_coinbase"}
 	for index, name := range fields {
 		if key == name {
-			return uint8(1 << index)
+			field := uint8(1 << index)
+			if seen&field == 0 {
+				return field
+			}
 		}
 	}
 	return 0
 }
+
+func validUndoField(ok bool, field uint8) bool { return ok && field != 0 }
 
 func startUndoObject(decoder *json.Decoder) bool {
 	token, err := decoder.Token()
@@ -614,7 +610,7 @@ func finishUndoContainer(decoder *json.Decoder, want json.Delim) bool {
 }
 
 // checkUndoDiskCanonicalFields covers the remaining domain property the
-// disk-level byte comparison is blind to, allocating nothing. Container shape
+// disk-level byte comparison is blind to. Container shape
 // ran before supply validation; remaining scalar/null conversion ran after it.
 // Hex strings pass through the disk struct verbatim, so an uppercase txid
 // survives the round trip, and two spellings of one undo must not

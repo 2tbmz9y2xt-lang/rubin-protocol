@@ -195,27 +195,9 @@ func collectChainStateSchemaFields(payload []byte) (chainStateSchemaFields, erro
 		if err != nil {
 			return chainStateSchemaFields{}, err
 		}
-		if key == "utxos" {
-			if !chainStateValueStartsArray(payload, int(dec.InputOffset())) {
-				var raw json.RawMessage
-				if err := dec.Decode(&raw); err != nil {
-					return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
-				}
-				fields.recordUtxos(false, bytes.Equal(bytes.TrimSpace(raw), []byte("null")))
-				continue
-			}
-			valid, err := readChainStateUtxoArray(dec)
-			if err != nil {
-				return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
-			}
-			fields.recordUtxos(valid, false)
-			continue
+		if err := collectChainStateSchemaField(payload, dec, key, &fields); err != nil {
+			return chainStateSchemaFields{}, err
 		}
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
-		}
-		fields.record(key, raw)
 	}
 	if _, err := dec.Token(); err != nil {
 		return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
@@ -225,6 +207,27 @@ func collectChainStateSchemaFields(payload []byte) (chainStateSchemaFields, erro
 		return chainStateSchemaFields{}, errors.New("decode chainstate: trailing content")
 	}
 	return fields, nil
+}
+
+func collectChainStateSchemaField(payload []byte, dec *json.Decoder, key string, fields *chainStateSchemaFields) error {
+	if key != "utxos" || !chainStateValueStartsArray(payload, int(dec.InputOffset())) {
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return fmt.Errorf("decode chainstate: %w", err)
+		}
+		if key == "utxos" {
+			fields.recordUtxos(false, bytes.Equal(bytes.TrimSpace(raw), []byte("null")))
+		} else {
+			fields.record(key, raw)
+		}
+		return nil
+	}
+	valid, err := readChainStateUtxoArray(dec)
+	if err != nil {
+		return fmt.Errorf("decode chainstate: %w", err)
+	}
+	fields.recordUtxos(valid, false)
+	return nil
 }
 
 func readChainStateKey(dec *json.Decoder) (string, error) {
