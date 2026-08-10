@@ -45,6 +45,10 @@ func TestNativeSuiteRelayContextTrust(t *testing.T) {
 			t.Fatal("typed-nil provider trusted or cache-authorizing")
 		}
 	}
+	uncausedSimplicitySuiteError := &consensus.TxError{Code: consensus.TX_ERR_SIG_ALG_INVALID, Msg: "CORE_SIMPLICITY witness suite must be 0xF0"}
+	if relayDispositionForConsensusError(uncausedSimplicitySuiteError, MempoolConfig{RotationProvider: &deploymentCauseRotation{}}) != RelayAdmissionUnavailable {
+		t.Fatal("uncaused CORE_SIMPLICITY suite error cache-authorizing under untrusted policy")
+	}
 	suiteMessage := "TX_ERR_SIG_ALG_INVALID: CORE_P2PK suite not in native spend set"
 	cases := []struct {
 		name    string
@@ -111,6 +115,20 @@ func TestNativeSuiteRelayContextTrust(t *testing.T) {
 	}
 	if after := h.context(); *after != *context {
 		t.Fatalf("admission context moved: after=%+v before=%+v", *after, *context)
+	}
+	rotation := testSimplicityRotation{activeAt: 0, chainID: devnetGenesisChainID}
+	if nativeSuiteRelayContextTrusted(MempoolConfig{RotationProvider: rotation}) {
+		t.Fatal("custom CORE_SIMPLICITY provider trusted")
+	}
+	h = consensusSeamHarness(t, rotation)
+	entry := h.st.Utxos[h.outpoints[0]]
+	entry.CovenantType, entry.CovenantData = consensus.COV_TYPE_CORE_SIMPLICITY, simplicityCovenantDataForNodeTest([32]byte{0x54}, nil)
+	h.st.Utxos[h.outpoints[0]] = entry
+	expected := h.context()
+	simplicityRaw := txWithOneInputOneOutput(h.outpoints[0].Txid, h.outpoints[0].Vout, 1, consensus.COV_TYPE_P2PK, h.toAddr, []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_SENTINEL}})
+	got = h.mp.AddRemoteTxForRelay(simplicityRaw, expected)
+	if got.Disposition != RelayAdmissionStableTerminalReject || !got.HasAdmissionContext || got.AdmissionContext != *expected || admitKind(t, got.Err) != TxAdmitRejected || got.Err.Error() != "TX_ERR_SIG_ALG_INVALID: CORE_SIMPLICITY witness suite must be 0xF0" || h.mp.Len() != 0 {
+		t.Fatalf("CORE_SIMPLICITY witness suite result=%+v", got)
 	}
 	h = newRelayHarness(t, &MempoolConfig{SuiteRegistry: unboundAlgSuiteRegistry()}, 1_000_000)
 	got = h.mp.AddRemoteTxForRelay(h.tx(0, 100_000, 100_000, 1), h.context())

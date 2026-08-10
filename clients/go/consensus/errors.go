@@ -134,6 +134,10 @@ const (
 	// configuration: it is the ONE deployment outcome that is stable for these
 	// bytes under a context a consumer has already proven.
 	TxErrorCauseSimplicityDeploymentInactiveFrozen
+	// TxErrorCauseSimplicityWitnessSuiteInvalid means a CORE_SIMPLICITY witness
+	// selected a suite other than mandatory 0xF0. It is candidate-intrinsic and
+	// independent of provider or policy, so it remains stable terminal invalidity.
+	TxErrorCauseSimplicityWitnessSuiteInvalid
 )
 
 type TxError struct {

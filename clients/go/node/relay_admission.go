@@ -65,8 +65,8 @@ const (
 	// consensus error carrying TxErrorCauseSimplicityDeployment{Unavailable,
 	// EvidenceInvalid, InactiveProvider}, whose public code and message say only
 	// "not active" while the deployment set the answer came from is not pinned
-	// by the published context. The frozen no-provider state is NOT one of
-	// these: it reads no set and stays a stable terminal rejection.
+	// by the published context. An uncaused TX_ERR_SIG_ALG_INVALID under an untrusted native-suite policy snapshot is also unavailable.
+	// The frozen no-provider state is NOT one of these: it reads no set and stays a stable terminal rejection.
 	RelayAdmissionUnavailable
 	// RelayAdmissionInternal covers an impossible invariant, a retained
 	// identity mismatch, accounting corruption, an adapter contract violation,
@@ -548,8 +548,7 @@ func relayDispositionForPolicyError(err error) RelayAdmissionDisposition {
 // selection, reading only typed values the producer set — never Error(), Msg,
 // backend text, or an OpenSSL error string.
 //
-// It reads the typed CAUSE first, because the cause outranks the code. Two
-// families need it:
+// It reads the typed CAUSE first, because the cause outranks the code. Three families need it:
 //
 //   - A process-local crypto-backend fault is published under a public code that
 //     also carries genuine candidate invalidity (TX_ERR_PARSE for a latched
@@ -559,7 +558,7 @@ func relayDispositionForPolicyError(err error) RelayAdmissionDisposition {
 //     it is INTERNAL — never a stable terminal rejection, and therefore never
 //     cache-authorizing. A candidate that selected an unsupported or
 //     unauthorized suite carries no such cause and keeps its baseline
-//     classification.
+//     classification here; relayDispositionForConsensusError may downgrade an uncaused native-suite failure under an untrusted snapshot.
 //   - A CORE_SIMPLICITY deployment rejection collapses five distinct states onto
 //     TX_ERR_COVENANT_TYPE_INVALID and two fixed messages. Three of them —
 //     provider unavailability, invalid provider evidence, and inactivity
@@ -576,13 +575,14 @@ func relayDispositionForPolicyError(err error) RelayAdmissionDisposition {
 //     no-provider-configured state rests entirely on constructor-frozen
 //     configuration and stays a stable terminal rejection, with cache authority
 //     still governed by the caller's own exact-context proof.
+//   - A non-0xF0 CORE_SIMPLICITY witness is candidate-intrinsic and policy-independent, so it stays STABLE_TERMINAL_REJECT.
 //
 // ORDERING NOTE — structural, and deliberately NOT claimed by any test. Reading
 // the cause before the code switch is a PAIRWISE fact, and on today's inputs the
 // two orders are observationally identical: the closed cause set is
 // {LocalCryptoBackendFault, SimplicityDeploymentUnavailable,
 // SimplicityDeploymentEvidenceInvalid, SimplicityDeploymentInactiveProvider,
-// SimplicityDeploymentInactiveFrozen}, every producer of those causes emits
+// SimplicityDeploymentInactiveFrozen, SimplicityWitnessSuiteInvalid}, every producer of those causes emits
 // TX_ERR_PARSE, TX_ERR_SIG_INVALID, TX_ERR_SIG_ALG_INVALID or
 // TX_ERR_COVENANT_TYPE_INVALID, and none of those codes is a member of the
 // switch set below. No error can therefore carry a cause AND a switch-set code,
@@ -616,7 +616,7 @@ func relayDispositionForInputError(err error, nonDependency RelayAdmissionDispos
 			consensus.TxErrorCauseSimplicityDeploymentEvidenceInvalid,
 			consensus.TxErrorCauseSimplicityDeploymentInactiveProvider:
 			return RelayAdmissionUnavailable
-		case consensus.TxErrorCauseSimplicityDeploymentInactiveFrozen:
+		case consensus.TxErrorCauseSimplicityDeploymentInactiveFrozen, consensus.TxErrorCauseSimplicityWitnessSuiteInvalid:
 			return RelayAdmissionStableTerminalReject
 		default:
 			return RelayAdmissionInternal
