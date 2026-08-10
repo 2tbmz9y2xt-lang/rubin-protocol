@@ -566,19 +566,11 @@ func (bs *BlockStore) checkExistingUndo(path string, blockHash [32]byte, undo *B
 	if err != nil {
 		return err
 	}
-	existing, err := unmarshalUndoEnvelope(blockHash, existingRaw)
+	existing, err := unmarshalUndoEnvelopeDisk(blockHash, existingRaw)
 	if err != nil {
 		return err
 	}
-	existingPayload, err := marshalBlockUndoV2(existing)
-	if err != nil {
-		return err
-	}
-	wantedPayload, err := marshalBlockUndoV2(undo)
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(existingPayload, wantedPayload) {
+	if !validatedBlockUndoMatches(existing, undo) {
 		return errExistingContentDiffers(path)
 	}
 	return nil

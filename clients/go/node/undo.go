@@ -60,6 +60,12 @@ type blockUndoDiskRaw struct {
 	Txs                      []txUndoDisk    `json:"txs"`
 }
 
+type validatedBlockUndoDisk struct {
+	blockHeight              uint64
+	previousAlreadyGenerated consensus.Uint128
+	txs                      []txUndoDisk
+}
+
 type txUndoDisk struct {
 	Spent []spentUndoDisk `json:"spent"`
 }
@@ -326,39 +332,67 @@ func marshalBlockUndoV2(undo *BlockUndo) ([]byte, error) {
 // unmarshalBlockUndo checks shape, supply, and scalar domains before conversion,
 // preserving error priority. Rust twin: `unmarshal_block_undo`.
 func unmarshalBlockUndo(raw []byte) (*BlockUndo, error) {
-	disk, err := decodeBlockUndoDiskV1(raw)
+	disk, err := decodeValidatedBlockUndoV1(raw)
 	if err != nil {
 		return nil, err
 	}
-	if err := checkUndoDiskCanonicalFields(disk); err != nil {
-		return nil, err
-	}
-	canonical, err := json.Marshal(disk)
-	if err != nil {
-		return nil, fmt.Errorf("encode undo: %w", err)
-	}
-	if !bytes.Equal(canonical, raw) {
-		return nil, errUndoPayloadNotCanonical
-	}
-	return blockUndoFromDisk(disk)
+	return blockUndoFromValidatedDisk(disk)
 }
 
 func unmarshalBlockUndoV2(raw []byte) (*BlockUndo, error) {
+	disk, err := decodeValidatedBlockUndoV2(raw)
+	if err != nil {
+		return nil, err
+	}
+	return blockUndoFromValidatedDisk(disk)
+}
+
+func decodeValidatedBlockUndoV1(raw []byte) (validatedBlockUndoDisk, error) {
+	disk, err := decodeBlockUndoDiskV1(raw)
+	if err != nil {
+		return validatedBlockUndoDisk{}, err
+	}
+	if err := checkUndoDiskCanonicalFields(disk); err != nil {
+		return validatedBlockUndoDisk{}, err
+	}
+	if ok, err := canonicalBlockUndoMatches(raw, disk); err != nil {
+		return validatedBlockUndoDisk{}, err
+	} else if !ok {
+		return validatedBlockUndoDisk{}, errUndoPayloadNotCanonical
+	}
+	return validatedBlockUndoDisk{
+		blockHeight:              disk.BlockHeight,
+		previousAlreadyGenerated: consensus.Uint128FromU64(disk.PreviousAlreadyGenerated),
+		txs:                      disk.Txs,
+	}, nil
+}
+
+func decodeValidatedBlockUndoV2(raw []byte) (validatedBlockUndoDisk, error) {
 	disk, supply, err := decodeBlockUndoDiskV2(raw)
 	if err != nil {
-		return nil, err
+		return validatedBlockUndoDisk{}, err
 	}
 	if err := checkUndoDiskCanonicalFieldsV2(disk); err != nil {
-		return nil, err
+		return validatedBlockUndoDisk{}, err
 	}
+	if ok, err := canonicalBlockUndoMatches(raw, disk); err != nil {
+		return validatedBlockUndoDisk{}, err
+	} else if !ok {
+		return validatedBlockUndoDisk{}, errUndoPayloadNotCanonical
+	}
+	return validatedBlockUndoDisk{
+		blockHeight:              disk.BlockHeight,
+		previousAlreadyGenerated: supply,
+		txs:                      disk.Txs,
+	}, nil
+}
+
+func canonicalBlockUndoMatches(raw []byte, disk any) (bool, error) {
 	canonical, err := json.Marshal(disk)
 	if err != nil {
-		return nil, fmt.Errorf("encode undo: %w", err)
+		return false, fmt.Errorf("encode undo: %w", err)
 	}
-	if !bytes.Equal(canonical, raw) {
-		return nil, errUndoPayloadNotCanonical
-	}
-	return blockUndoFromParts(disk.BlockHeight, supply, disk.Txs)
+	return bytes.Equal(canonical, raw), nil
 }
 
 func decodeBlockUndoDiskV1(raw []byte) (blockUndoDisk, error) {
@@ -708,6 +742,49 @@ func blockUndoFromDisk(disk blockUndoDisk) (*BlockUndo, error) {
 	return blockUndoFromParts(disk.BlockHeight, consensus.Uint128FromU64(disk.PreviousAlreadyGenerated), disk.Txs)
 }
 
+func blockUndoFromValidatedDisk(disk validatedBlockUndoDisk) (*BlockUndo, error) {
+	return blockUndoFromParts(disk.blockHeight, disk.previousAlreadyGenerated, disk.txs)
+}
+
+func validatedBlockUndoMatches(disk validatedBlockUndoDisk, candidate *BlockUndo) bool {
+	if candidate == nil || disk.blockHeight != candidate.BlockHeight ||
+		disk.previousAlreadyGenerated != candidate.PreviousAlreadyGenerated || len(disk.txs) != len(candidate.Txs) {
+		return false
+	}
+	for txIndex, diskTx := range disk.txs {
+		candidateSpent := candidate.Txs[txIndex].Spent
+		if len(diskTx.Spent) != len(candidateSpent) {
+			return false
+		}
+		for spentIndex, diskSpent := range diskTx.Spent {
+			candidateSpent := candidateSpent[spentIndex]
+			if diskSpent.Vout != candidateSpent.Outpoint.Vout ||
+				diskSpent.Value != candidateSpent.Entry.Value ||
+				diskSpent.CovenantType != candidateSpent.Entry.CovenantType ||
+				diskSpent.CreationHeight != candidateSpent.Entry.CreationHeight ||
+				diskSpent.CreatedByCoinbase != candidateSpent.Entry.CreatedByCoinbase ||
+				!lowercaseHexMatchesBytes(diskSpent.Txid, candidateSpent.Outpoint.Txid[:]) ||
+				!lowercaseHexMatchesBytes(diskSpent.CovenantData, candidateSpent.Entry.CovenantData) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func lowercaseHexMatchesBytes(value string, bytes []byte) bool {
+	if len(value) != len(bytes)*2 {
+		return false
+	}
+	const hexDigits = "0123456789abcdef"
+	for index, valueByte := range bytes {
+		if value[index*2] != hexDigits[valueByte>>4] || value[index*2+1] != hexDigits[valueByte&0x0f] {
+			return false
+		}
+	}
+	return true
+}
+
 func blockUndoFromParts(blockHeight uint64, previousAlreadyGenerated consensus.Uint128, diskTxs []txUndoDisk) (*BlockUndo, error) {
 	txs := make([]TxUndo, 0, len(diskTxs))
 	for txIndex, txUndo := range diskTxs {
@@ -918,7 +995,7 @@ func marshalUndoEnvelopeVersion(version uint32, blockHash [32]byte, undo *BlockU
 // (which subsumes shape, version-literal, duplicate, unknown, missing, null,
 // ordering, whitespace and trailing-token rejection), hash equality against the
 // hash the CALLER asked for, canonical base64, decoded payload bound, checksum —
-// and only then the payload decode and BlockUndo conversion.
+// and only then the payload decode into the validated disk tree.
 //
 // MEMORY: everything before the checksum decision allocates exactly ONE
 // payload-sized buffer — the base64 output, which is unavoidable because the
@@ -928,33 +1005,41 @@ func marshalUndoEnvelopeVersion(version uint32, blockHash [32]byte, undo *BlockU
 // decision is the caller's buffer plus 3/4 of it, ~1.75x. The payload decode
 // past the checksum is far more expensive (~5.7x cumulative, dominated by the
 // per-spent-entry structs) and runs only once the bytes are proven intact.
-func unmarshalUndoEnvelope(blockHash [32]byte, raw []byte) (*BlockUndo, error) {
+func unmarshalUndoEnvelopeDisk(blockHash [32]byte, raw []byte) (validatedBlockUndoDisk, error) {
 	if int64(len(raw)) > int64(undoFileMaxBytes) {
-		return nil, fmt.Errorf("%w: undo record is %d bytes, class bound %d",
+		return validatedBlockUndoDisk{}, fmt.Errorf("%w: undo record is %d bytes, class bound %d",
 			ErrUndoIntegrity, len(raw), int64(undoFileMaxBytes))
 	}
 	version, hashHex, payloadB64, checksumHex, err := splitUndoEnvelopeVersioned(raw)
 	if err != nil {
-		return nil, err
+		return validatedBlockUndoDisk{}, err
 	}
 	if string(hashHex) != hex.EncodeToString(blockHash[:]) {
-		return nil, errUndoBlockHashMismatch
+		return validatedBlockUndoDisk{}, errUndoBlockHashMismatch
 	}
 	payload, err := decodeCanonicalBase64(payloadB64)
 	if err != nil {
-		return nil, err
+		return validatedBlockUndoDisk{}, err
 	}
 	if int64(len(payload)) > int64(undoPayloadMaxBytes) {
-		return nil, fmt.Errorf("%w: decoded payload is %d bytes, class bound %d",
+		return validatedBlockUndoDisk{}, fmt.Errorf("%w: decoded payload is %d bytes, class bound %d",
 			ErrUndoIntegrity, len(payload), int64(undoPayloadMaxBytes))
 	}
 	if err := validateUndoEnvelopeChecksum(version, blockHash, payload, checksumHex); err != nil {
-		return nil, err
+		return validatedBlockUndoDisk{}, err
 	}
 	if version == undoEnvelopeVersionV1 {
-		return unmarshalBlockUndo(payload)
+		return decodeValidatedBlockUndoV1(payload)
 	}
-	return unmarshalBlockUndoV2(payload)
+	return decodeValidatedBlockUndoV2(payload)
+}
+
+func unmarshalUndoEnvelope(blockHash [32]byte, raw []byte) (*BlockUndo, error) {
+	disk, err := unmarshalUndoEnvelopeDisk(blockHash, raw)
+	if err != nil {
+		return nil, err
+	}
+	return blockUndoFromValidatedDisk(disk)
 }
 
 func validateUndoEnvelopeChecksum(version uint32, blockHash [32]byte, payload, checksumHex []byte) error {

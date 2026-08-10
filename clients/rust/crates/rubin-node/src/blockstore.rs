@@ -18,7 +18,10 @@ use crate::store_envelope::{
     marshal_store_envelope, open_store_envelope, STORE_ENVELOPE_BLOCK_INDEX,
     STORE_GENESIS_ANCHOR_ERR,
 };
-use crate::undo::{marshal_undo_envelope, unmarshal_undo_envelope, BlockUndo};
+use crate::undo::{
+    marshal_undo_envelope, unmarshal_undo_envelope, unmarshal_undo_envelope_disk,
+    validated_block_undo_matches, BlockUndo,
+};
 use std::ffi::OsStr;
 
 pub const BLOCK_STORE_DIR_NAME: &str = "blockstore";
@@ -825,8 +828,8 @@ impl BlockStore {
                 )
             })?;
         let validate_existing = |existing_raw: &[u8]| {
-            let existing = unmarshal_undo_envelope(block_hash_bytes, existing_raw)?;
-            if existing != *undo {
+            let existing = unmarshal_undo_envelope_disk(block_hash_bytes, existing_raw)?;
+            if !validated_block_undo_matches(&existing, undo) {
                 return Err(existing_content_differs(&path));
             }
             Ok(())
