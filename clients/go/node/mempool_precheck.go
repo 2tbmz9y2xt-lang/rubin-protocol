@@ -1,8 +1,34 @@
 package node
 
 import (
+	"errors"
+
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
+
+func nativeSuiteRelayContextTrusted(policy MempoolConfig) bool {
+	switch rotation := policy.RotationProvider.(type) {
+	case nil:
+		return policy.SuiteRegistry == nil
+	case consensus.DefaultRotationProvider:
+		return policy.SuiteRegistry == nil || policy.SuiteRegistry.IsCanonicalDefaultLiveManifest()
+	case *consensus.DefaultRotationProvider:
+		return rotation != nil && (policy.SuiteRegistry == nil || policy.SuiteRegistry.IsCanonicalDefaultLiveManifest())
+	case consensus.DescriptorRotationProvider:
+		return rotation.Descriptor.Validate(policy.SuiteRegistry) == nil
+	default:
+		return false
+	}
+}
+
+func relayDispositionForConsensusError(err error, policy MempoolConfig) RelayAdmissionDisposition {
+	disposition := relayDispositionForInputError(err, RelayAdmissionStableTerminalReject)
+	var txErr *consensus.TxError
+	if disposition == RelayAdmissionStableTerminalReject && errors.As(err, &txErr) && txErr.Cause() == consensus.TxErrorCauseUnspecified && txErr.Code == consensus.TX_ERR_SIG_ALG_INVALID && !nativeSuiteRelayContextTrusted(policy) {
+		return RelayAdmissionUnavailable
+	}
+	return disposition
+}
 
 // buildPolicyInputSnapshotIfNeeded returns the immutable pre-validation
 // snapshot of only the transaction inputs that policy lanes inspect.
@@ -145,8 +171,8 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 		// An input that is absent, still immature, or not yet unlocked becomes
 		// spendable at a later height and stays retryable; every other
 		// consensus failure is stable terminal invalidity of these exact bytes
-		// against the exact stable context this call is bound to.
-		return nil, nil, selectRelayDisposition(txAdmitRejected(err.Error()), relayDispositionForInputError(err, RelayAdmissionStableTerminalReject))
+		// unless its typed cause or untrusted native-suite policy selects otherwise.
+		return nil, nil, selectRelayDisposition(txAdmitRejected(err.Error()), relayDispositionForConsensusError(err, policy))
 	}
 	if err := m.applyPolicyAgainstState(checked, nextHeight, policyUtxos, policy); err != nil {
 		// Constructor-frozen, context-bound static policy: anchor outputs, the
