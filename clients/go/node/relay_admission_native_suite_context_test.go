@@ -23,6 +23,7 @@ func (p *nativeSuiteRelayContextMutableRotation) NativeSpendSuites(uint64) *cons
 	}
 	return consensus.NewNativeSuiteSet(0x03)
 }
+
 func TestNativeSuiteRelayContextTrust(t *testing.T) {
 	registry := reorgTestSuiteRegistry(0x02)
 	descriptor := consensus.CryptoRotationDescriptor{Name: "test", OldSuiteID: consensus.SUITE_ID_ML_DSA_87, NewSuiteID: 0x02, CreateHeight: 200, SpendHeight: 300}
