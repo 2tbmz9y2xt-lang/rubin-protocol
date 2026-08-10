@@ -6,7 +6,7 @@ use rubin_node::undo::{BlockUndo, SpentUndo, TxUndo};
 use rubin_node::{devnet_genesis_block_bytes, BlockStore};
 use sha3::{Digest, Sha3_256};
 
-const ROWS: usize = 1 << 17;
+const ROWS: usize = if cfg!(tarpaulin) { 8 } else { 1 << 17 };
 const MARGIN: isize = 1 << 20;
 const TREE_BYTES: usize = std::mem::size_of::<TxUndo>() + std::mem::size_of::<SpentUndo>();
 const INVALID_SUPPLY: [&str; 2] = [
@@ -142,8 +142,6 @@ fn existing_peak_limit(raw: &[u8], payload: &[u8]) -> isize {
     candidate_encode.max(existing_decode).saturating_add(MARGIN)
 }
 
-// Normal CI owns this resource probe; LLVM coverage exceeds tarpaulin's no-output watchdog.
-#[cfg_attr(tarpaulin, ignore)]
 #[test]
 fn undo_payload_public_paths_have_bounded_allocation() {
     let genesis = devnet_genesis_block_bytes();
@@ -153,7 +151,11 @@ fn undo_payload_public_paths_have_bounded_allocation() {
     let pid = std::process::id();
     let mut corpus = Vec::with_capacity(4);
     for (version, supply) in [(1, "7"), (2, "\"7\"")] {
-        for size in [8 << 20, 12 << 20] {
+        for size in if cfg!(tarpaulin) {
+            [8 << 10, 12 << 10]
+        } else {
+            [8 << 20, 12 << 20]
+        } {
             let undo = BlockUndo {
                 block_height: 0,
                 previous_already_generated: 7,
@@ -195,7 +197,7 @@ fn undo_payload_public_paths_have_bounded_allocation() {
         "counting allocator missed held allocation"
     );
     for (version, undo, payload, raw) in &corpus {
-        let size = undo.txs[0].spent[0].entry.covenant_data.len() >> 20;
+        let size = undo.txs[0].spent[0].entry.covenant_data.len();
         let root = std::env::temp_dir().join(format!("rubin-undo-{version}-{size}-{pid}"));
         let _ = std::fs::remove_dir_all(&root);
         let mut store = BlockStore::create(&root).expect("create store");
@@ -205,7 +207,7 @@ fn undo_payload_public_paths_have_bounded_allocation() {
         assert_eq!(&got, undo);
         assert!(
             get_peak <= get_peak_limit(raw, payload, &undo.txs[0].spent[0].entry.covenant_data),
-            "v{version} {size} MiB get {get_peak}"
+            "v{version} {size} bytes get {get_peak}"
         );
         drop(got);
         let mut commit =
@@ -213,18 +215,18 @@ fn undo_payload_public_paths_have_bounded_allocation() {
         let (_, commit_peak) = measure(|| commit(undo).expect("existing-file commit"));
         assert!(
             commit_peak <= existing_peak_limit(raw, payload),
-            "v{version} {size} MiB commit {commit_peak}"
+            "v{version} {size} bytes commit {commit_peak}"
         );
         // Small Q makes a restored Ue conversion add the large existing U above this decoder-only ceiling.
         let (_, different_peak) = measure(|| commit(&different).expect_err("different existing"));
         assert!(
             different_peak <= get_peak_limit(raw, payload, &[]),
-            "v{version} {size} MiB different {different_peak}"
+            "v{version} {size} bytes different {different_peak}"
         );
         assert_eq!(
             std::fs::read(&path).expect("read undo"),
             *raw,
-            "v{version} {size} MiB rewrote undo"
+            "v{version} {size} bytes rewrote undo"
         );
         std::fs::remove_dir_all(root).expect("cleanup");
     }
