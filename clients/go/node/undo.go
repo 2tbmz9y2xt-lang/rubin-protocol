@@ -1038,6 +1038,7 @@ func undoVersionKey(token json.Token, count *int, alias *bool) (exact, ok bool) 
 	}
 	return false, true
 }
+
 func decodeUndoVersionValue(decoder *json.Decoder, typed, exact bool, version **uint32) error {
 	if typed && exact {
 		return decoder.Decode(version)
@@ -1045,6 +1046,7 @@ func decodeUndoVersionValue(decoder *json.Decoder, typed, exact bool, version **
 	var ignored jsonIgnoredValue
 	return decoder.Decode(&ignored)
 }
+
 func scanUndoVersion(raw []byte, typed bool) (count int, alias bool, version *uint32, ok bool) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
