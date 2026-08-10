@@ -1024,6 +1024,27 @@ func undoEnvelopePrefixVersion(raw []byte) (uint32, string, bool) {
 type jsonIgnoredValue struct{}
 
 func (*jsonIgnoredValue) UnmarshalJSON([]byte) error { return nil }
+func undoVersionKey(token json.Token, count *int, alias *bool) (exact, ok bool) {
+	name, ok := token.(string)
+	if !ok {
+		return false, false
+	}
+	if name == "version" {
+		*count++
+		return true, true
+	}
+	if len(name) == len("version") && strings.EqualFold(name, "version") {
+		*alias = true
+	}
+	return false, true
+}
+func decodeUndoVersionValue(decoder *json.Decoder, typed, exact bool, version **uint32) error {
+	if typed && exact {
+		return decoder.Decode(version)
+	}
+	var ignored jsonIgnoredValue
+	return decoder.Decode(&ignored)
+}
 func scanUndoVersion(raw []byte, typed bool) (count int, alias bool, version *uint32, ok bool) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
@@ -1034,24 +1055,26 @@ func scanUndoVersion(raw []byte, typed bool) (count int, alias bool, version *ui
 		if err != nil {
 			return 0, false, nil, false
 		}
-		exact := key == "version"
-		if exact {
-			count++
-		} else if name := key.(string); len(name) == len("version") && strings.EqualFold(name, "version") {
-			alias = true
+		exact, keyOK := undoVersionKey(key, &count, &alias)
+		if !keyOK {
+			return 0, false, nil, false
 		}
-		var ignored jsonIgnoredValue
-		if typed && exact {
-			err = decoder.Decode(&version)
-		} else {
-			err = decoder.Decode(&ignored)
-		}
-		if err != nil {
+		if err := decodeUndoVersionValue(decoder, typed, exact, &version); err != nil {
 			return 0, false, nil, false
 		}
 	}
 	token, err := decoder.Token()
 	return count, alias, version, err == nil && token == json.Delim('}')
+}
+
+func classifyUndoVersion(version *uint32) error {
+	if version == nil {
+		return errUndoLegacyRecord
+	}
+	if *version != undoEnvelopeVersionV1 && *version != undoEnvelopeVersion {
+		return fmt.Errorf("%w: unsupported undo envelope version %d", ErrUndoIntegrity, *version)
+	}
+	return fmt.Errorf("%w: envelope is not the canonical encoding", ErrUndoIntegrity)
 }
 
 // classifyUndoEnvelopeFailure names WHY a record that failed the layout check
@@ -1076,13 +1099,7 @@ func classifyUndoEnvelopeFailure(raw []byte) error {
 	if !ok {
 		return fmt.Errorf("%w: undo record is not a single JSON object", ErrUndoIntegrity)
 	}
-	if version == nil {
-		return errUndoLegacyRecord
-	}
-	if *version != undoEnvelopeVersionV1 && *version != undoEnvelopeVersion {
-		return fmt.Errorf("%w: unsupported undo envelope version %d", ErrUndoIntegrity, *version)
-	}
-	return fmt.Errorf("%w: envelope is not the canonical encoding", ErrUndoIntegrity)
+	return classifyUndoVersion(version)
 }
 
 // decodeCanonicalBase64 accepts only the one padded RFC 4648 spelling of the
