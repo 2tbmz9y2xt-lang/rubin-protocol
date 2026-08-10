@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -747,29 +748,28 @@ func blockUndoFromValidatedDisk(disk validatedBlockUndoDisk) (*BlockUndo, error)
 }
 
 func validatedBlockUndoMatches(disk validatedBlockUndoDisk, candidate *BlockUndo) bool {
-	if candidate == nil || disk.blockHeight != candidate.BlockHeight ||
-		disk.previousAlreadyGenerated != candidate.PreviousAlreadyGenerated || len(disk.txs) != len(candidate.Txs) {
-		return false
-	}
-	for txIndex, diskTx := range disk.txs {
-		candidateSpent := candidate.Txs[txIndex].Spent
-		if len(diskTx.Spent) != len(candidateSpent) {
-			return false
-		}
-		for spentIndex, diskSpent := range diskTx.Spent {
-			candidateSpent := candidateSpent[spentIndex]
-			if diskSpent.Vout != candidateSpent.Outpoint.Vout ||
-				diskSpent.Value != candidateSpent.Entry.Value ||
-				diskSpent.CovenantType != candidateSpent.Entry.CovenantType ||
-				diskSpent.CreationHeight != candidateSpent.Entry.CreationHeight ||
-				diskSpent.CreatedByCoinbase != candidateSpent.Entry.CreatedByCoinbase ||
-				!lowercaseHexMatchesBytes(diskSpent.Txid, candidateSpent.Outpoint.Txid[:]) ||
-				!lowercaseHexMatchesBytes(diskSpent.CovenantData, candidateSpent.Entry.CovenantData) {
-				return false
-			}
-		}
-	}
-	return true
+	return validatedBlockUndoHeaderMatches(disk, candidate) &&
+		slices.EqualFunc(disk.txs, candidate.Txs, validatedTxUndoMatches)
+}
+
+func validatedBlockUndoHeaderMatches(disk validatedBlockUndoDisk, candidate *BlockUndo) bool {
+	return candidate != nil &&
+		disk.blockHeight == candidate.BlockHeight &&
+		disk.previousAlreadyGenerated == candidate.PreviousAlreadyGenerated
+}
+
+func validatedTxUndoMatches(disk txUndoDisk, candidate TxUndo) bool {
+	return slices.EqualFunc(disk.Spent, candidate.Spent, validatedSpentUndoMatches)
+}
+
+func validatedSpentUndoMatches(disk spentUndoDisk, candidate SpentUndo) bool {
+	return disk.Vout == candidate.Outpoint.Vout &&
+		disk.Value == candidate.Entry.Value &&
+		disk.CovenantType == candidate.Entry.CovenantType &&
+		disk.CreationHeight == candidate.Entry.CreationHeight &&
+		disk.CreatedByCoinbase == candidate.Entry.CreatedByCoinbase &&
+		lowercaseHexMatchesBytes(disk.Txid, candidate.Outpoint.Txid[:]) &&
+		lowercaseHexMatchesBytes(disk.CovenantData, candidate.Entry.CovenantData)
 }
 
 func lowercaseHexMatchesBytes(value string, bytes []byte) bool {
