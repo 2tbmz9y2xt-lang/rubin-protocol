@@ -138,7 +138,7 @@ type simplicityTxContextProvider func() (*SimplicityTxContext, error)
 
 func parseCoreSimplicityWitnessEnvelope(witness WitnessItem) (parsedSimplicityEnvelope, error) {
 	if witness.SuiteID != SUITE_ID_SIMPLICITY_ENVELOPE {
-		return parsedSimplicityEnvelope{}, txerr(TX_ERR_SIG_ALG_INVALID, "CORE_SIMPLICITY witness suite must be 0xF0")
+		return parsedSimplicityEnvelope{}, txerrWithCause(TX_ERR_SIG_ALG_INVALID, "CORE_SIMPLICITY witness suite must be 0xF0", TxErrorCauseSimplicityWitnessSuiteInvalid)
 	}
 	if len(witness.Pubkey) != 0 {
 		return parsedSimplicityEnvelope{}, txerr(TX_ERR_PARSE, "non-canonical Simplicity envelope witness item")

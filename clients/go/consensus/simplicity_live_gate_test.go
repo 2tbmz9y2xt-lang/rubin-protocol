@@ -219,7 +219,7 @@ func TestSimplicityLiveGate_OrderedErrorSet(t *testing.T) {
 			prev := hashWithPrefix(0xA0)
 			w := simplicityAcceptWitnessSig(tc.witness)
 			if tc.witness == nil {
-				w = WitnessItem{SuiteID: SUITE_ID_SENTINEL}
+				w = WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: []byte{1}}
 			}
 			tx := &Tx{
 				Version: TX_WIRE_VERSION, TxKind: 0x00, TxNonce: 1,
@@ -228,7 +228,11 @@ func TestSimplicityLiveGate_OrderedErrorSet(t *testing.T) {
 				Witness: []WitnessItem{w},
 			}
 			utxos := map[Outpoint]UtxoEntry{{Txid: prev, Vout: 0}: tc.entry()}
-			assertTxErrCode(t, runSimplicitySeq(tx, hashWithPrefix(0xA1), utxos, H, chainID, rot), tc.code)
+			err := runSimplicitySeq(tx, hashWithPrefix(0xA1), utxos, H, chainID, rot)
+			assertTxErrCode(t, err, tc.code)
+			if tc.name == "step1_suite" {
+				mustTxErrorCause(t, err, TX_ERR_SIG_ALG_INVALID, "CORE_SIMPLICITY witness suite must be 0xF0", TxErrorCauseSimplicityWitnessSuiteInvalid)
+			}
 		})
 	}
 }
