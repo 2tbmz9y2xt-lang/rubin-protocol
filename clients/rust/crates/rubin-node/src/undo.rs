@@ -775,12 +775,41 @@ struct UndoEnvelopeDisk {
     checksum: String,
 }
 
-/// Classification probe. Only `version` is captured; `serde` skips the other
-/// fields without materializing them, so even a maximum-size hostile record
-/// costs no proportional allocation here.
 #[derive(Deserialize)]
 struct UndoVersionProbe {
     version: Option<u32>,
+}
+
+struct UndoVersionKeys(usize, bool);
+
+impl<'de> Deserialize<'de> for UndoVersionKeys {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ProbeVisitor;
+
+        impl<'de> Visitor<'de> for ProbeVisitor {
+            type Value = UndoVersionKeys;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an undo envelope object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut count = 0;
+                let mut alias = false;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "version" {
+                        count += 1;
+                    } else if key.eq_ignore_ascii_case("version") {
+                        alias = true;
+                    }
+                    map.next_value::<IgnoredAny>()?;
+                }
+                Ok(UndoVersionKeys(count, alias))
+            }
+        }
+
+        deserializer.deserialize_map(ProbeVisitor)
+    }
 }
 
 #[cfg(test)]
@@ -980,8 +1009,18 @@ fn classify_undo_envelope_failure(raw: &[u8]) -> String {
     {
         return UNDO_RECORD_NOT_OBJECT_ERR.to_string();
     }
-    let mut deserializer = serde_json::Deserializer::from_slice(raw);
-    let Ok(probe) = UndoVersionProbe::deserialize(&mut deserializer) else {
+    let mut first_pass = serde_json::Deserializer::from_slice(raw);
+    let Ok(UndoVersionKeys(count, alias)) = UndoVersionKeys::deserialize(&mut first_pass) else {
+        return UNDO_RECORD_NOT_OBJECT_ERR.to_string();
+    };
+    if count > 1 || count == 1 && alias {
+        return format!("{UNDO_INTEGRITY_PREFIX}: envelope is not the canonical encoding");
+    }
+    if count == 0 {
+        return UNDO_LEGACY_ERR.to_string();
+    }
+    let mut second_pass = serde_json::Deserializer::from_slice(raw);
+    let Ok(probe) = UndoVersionProbe::deserialize(&mut second_pass) else {
         return UNDO_RECORD_NOT_OBJECT_ERR.to_string();
     };
     match probe.version {

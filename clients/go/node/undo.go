@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -1020,33 +1021,87 @@ func undoEnvelopePrefixVersion(raw []byte) (uint32, string, bool) {
 	return 0, "", false
 }
 
+type jsonIgnoredValue struct{}
+
+func (*jsonIgnoredValue) UnmarshalJSON([]byte) error { return nil }
+func undoVersionKey(token json.Token, count *int, alias *bool) (exact, ok bool) {
+	name, ok := token.(string)
+	if !ok {
+		return false, false
+	}
+	if name == "version" {
+		*count++
+		return true, true
+	}
+	if len(name) == len("version") && strings.EqualFold(name, "version") {
+		*alias = true
+	}
+	return false, true
+}
+
+func decodeUndoVersionValue(decoder *json.Decoder, typed, exact bool, version **uint32) error {
+	if typed && exact {
+		return decoder.Decode(version)
+	}
+	var ignored jsonIgnoredValue
+	return decoder.Decode(&ignored)
+}
+
+func scanUndoVersion(raw []byte, typed bool) (count int, alias bool, version *uint32, ok bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return 0, false, nil, false
+	}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return 0, false, nil, false
+		}
+		exact, keyOK := undoVersionKey(key, &count, &alias)
+		if !keyOK {
+			return 0, false, nil, false
+		}
+		if err := decodeUndoVersionValue(decoder, typed, exact, &version); err != nil {
+			return 0, false, nil, false
+		}
+	}
+	token, err := decoder.Token()
+	return count, alias, version, err == nil && token == json.Delim('}')
+}
+
+func classifyUndoVersion(version *uint32) error {
+	if version == nil {
+		return errUndoLegacyRecord
+	}
+	if *version != undoEnvelopeVersionV1 && *version != undoEnvelopeVersion {
+		return fmt.Errorf("%w: unsupported undo envelope version %d", ErrUndoIntegrity, *version)
+	}
+	return fmt.Errorf("%w: envelope is not the canonical encoding", ErrUndoIntegrity)
+}
+
 // classifyUndoEnvelopeFailure names WHY a record that failed the layout check
 // failed it. It runs only on records already being rejected, so its JSON scan is
-// never paid on the accept path, and it decodes into a probe holding just the
-// version — encoding/json skips the other fields without materializing them, so
-// even a maximum-size hostile record costs no proportional allocation.
+// never paid on the accept path and retains no semantic tree.
 //
 // It decodes ONE value and ignores anything after it, so an unversioned record
 // with trailing garbage still reports the actionable legacy message instead of a
 // generic one. The Rust twin classifies identically.
 func classifyUndoEnvelopeFailure(raw []byte) error {
-	first := bytes.TrimLeft(raw, " \t\r\n")
-	if len(first) > 0 && first[0] != '{' {
+	versionCount, alias, _, ok := scanUndoVersion(raw, false)
+	if !ok {
 		return fmt.Errorf("%w: undo record is not a single JSON object", ErrUndoIntegrity)
 	}
-	var probe struct {
-		Version *uint32 `json:"version"`
+	if versionCount > 1 || versionCount == 1 && alias {
+		return fmt.Errorf("%w: envelope is not the canonical encoding", ErrUndoIntegrity)
 	}
-	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&probe); err != nil {
-		return fmt.Errorf("%w: undo record is not a single JSON object", ErrUndoIntegrity)
-	}
-	if probe.Version == nil {
+	if versionCount == 0 {
 		return errUndoLegacyRecord
 	}
-	if *probe.Version != undoEnvelopeVersionV1 && *probe.Version != undoEnvelopeVersion {
-		return fmt.Errorf("%w: unsupported undo envelope version %d", ErrUndoIntegrity, *probe.Version)
+	_, _, version, ok := scanUndoVersion(raw, true)
+	if !ok {
+		return fmt.Errorf("%w: undo record is not a single JSON object", ErrUndoIntegrity)
 	}
-	return fmt.Errorf("%w: envelope is not the canonical encoding", ErrUndoIntegrity)
+	return classifyUndoVersion(version)
 }
 
 // decodeCanonicalBase64 accepts only the one padded RFC 4648 spelling of the

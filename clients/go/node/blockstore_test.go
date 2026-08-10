@@ -1421,7 +1421,7 @@ func (putUndoScratchWriteFailure) Sync() error               { return nil }
 func (putUndoScratchWriteFailure) Close() error              { return nil }
 func (putUndoScratchWriteFailure) Chmod(os.FileMode) error   { return nil }
 
-func TestPutUndoPreservesMatchingExistingV1AndV2Bytes(t *testing.T) {
+func TestPutUndoPreservesEquivalentExistingV1AndV2Bytes(t *testing.T) {
 	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
 	for _, tc := range []struct {
 		name    string
@@ -1498,6 +1498,37 @@ func TestPutUndoPreservesMatchingExistingV1AndV2Bytes(t *testing.T) {
 				t.Fatalf("corrupt existing bytes changed: err=%v", err)
 			}
 		})
+	}
+}
+
+func TestPutUndoRefusesCorruptOrDifferentExistingWithoutRewrite(t *testing.T) {
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	hash := [32]byte{0xb3}
+	path := filepath.Join(store.undoDir, hex.EncodeToString(hash[:])+".json")
+	refused := []byte(`{"version":1,"version":2}` + "\n")
+	if err := os.WriteFile(path, refused, 0o600); err != nil {
+		t.Fatalf("seed duplicate-version undo: %v", err)
+	}
+	previous, ops := atomicWriteIO, atomicWriteIO
+	t.Cleanup(func() { atomicWriteIO = previous })
+	var writes int
+	ops.openScratch = func(string, int, os.FileMode) (atomicWriteScratchFile, error) { writes++; return nil, os.ErrPermission }
+	ops.link = func(string, string) error { writes++; return os.ErrPermission }
+	ops.syncParent = func(string) error { writes++; return os.ErrPermission }
+	atomicWriteIO = ops
+	err := store.PutUndo(hash, &BlockUndo{BlockHeight: 1, Txs: []TxUndo{}})
+	var atomicErr *atomicWriteError
+	if !errors.Is(err, ErrUndoIntegrity) || !errors.As(err, &atomicErr) || atomicErr.stage != atomicWriteBeforeNamespaceCommit ||
+		atomicErr.destination != path || atomicErr.operation != atomicWriteCreateIfAbsent ||
+		atomicErr.primary == nil || atomicErr.primary.Error() != "UNDO_INTEGRITY: envelope is not the canonical encoding" || len(atomicErr.secondary) != 0 {
+		t.Fatalf("PutUndo duplicate-version wrapper = %#v", atomicErr)
+	}
+	if writes != 0 {
+		t.Fatalf("PutUndo entered write lane %d times", writes)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil || !bytes.Equal(after, refused) {
+		t.Fatalf("refused existing bytes changed: err=%v", readErr)
 	}
 }
 
@@ -1597,6 +1628,9 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 	envelopeOver := func(body []byte) string {
 		return envelopeOverVersion(undoEnvelopeVersionV1, body)
 	}
+	duplicateEnvelope := func(record string) string {
+		return replaceOnce(t, record, `{"version":1`, `{"version":1,"version":2`)
+	}
 
 	legacyIndented, err := json.MarshalIndent(json.RawMessage(payload), "", "  ")
 	if err != nil {
@@ -1605,6 +1639,7 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 	canonicalNestedV1 := []byte(`{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[{"txid":"` + strings.Repeat("11", 32) + `","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}`)
 	canonicalNestedV2 := []byte(`{"block_height":0,"previous_already_generated":"0","txs":[{"spent":[{"txid":"` + strings.Repeat("11", 32) + `","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}`)
 	canonicalPayloadError := "decode undo: payload is not the canonical encoding"
+	canonicalEnvelopeError := "UNDO_INTEGRITY: envelope is not the canonical encoding"
 	domainPayloadError := "decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex"
 
 	type undoRejectCase struct {
@@ -1616,19 +1651,69 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 	cases := []undoRejectCase{
 		{name: "legacy_indented_payload", record: string(legacyIndented) + "\n", wantErr: errUndoLegacyRecord, wantMsg: errUndoLegacyRecord.Error()},
 		{name: "legacy_compact_payload", record: string(payload), wantErr: errUndoLegacyRecord, wantMsg: errUndoLegacyRecord.Error()},
-		{name: "version_zero", record: replaceOnce(t, valid, `"version":1`, `"version":0`)},
-		{name: "version_two", record: replaceOnce(t, valid, `"version":1`, `"version":2`)},
-		{name: "version_string", record: replaceOnce(t, valid, `"version":1`, `"version":"1"`)},
-		{name: "version_null", record: replaceOnce(t, valid, `"version":1`, `"version":null`)},
-		{name: "version_float", record: replaceOnce(t, valid, `"version":1`, `"version":1.0`)},
+		{name: "version_zero", record: replaceOnce(t, valid, `"version":1`, `"version":0`), wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: unsupported undo envelope version 0"},
+		{name: "version_two", record: replaceOnce(t, valid, `"version":1`, `"version":2`), wantErr: errUndoChecksumMismatch, wantMsg: errUndoChecksumMismatch.Error()},
+		{name: "version_string", record: replaceOnce(t, valid, `"version":1`, `"version":"1"`), wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object"},
+		{name: "version_null", record: replaceOnce(t, valid, `"version":1`, `"version":null`), wantErr: errUndoLegacyRecord, wantMsg: errUndoLegacyRecord.Error()},
+		{name: "version_float", record: replaceOnce(t, valid, `"version":1`, `"version":1.0`), wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object"},
+		{name: "duplicate_version_identical", record: `{"version":1,"version":1}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "duplicate_version_supported", record: `{"version":1,"version":2}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "duplicate_version_supported_unsupported", record: `{"version":1,"version":3}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "duplicate_version_unsupported_supported", record: `{"version":3,"version":2}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "duplicate_version_invalid", record: `{"version":"bad","version":null}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "duplicate_version_boolean", record: `{"version":1,"version":true}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "duplicate_version_fractional", record: `{"version":1,"version":1.5}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "duplicate_version_negative", record: `{"version":-1,"version":2}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "duplicate_version_out_of_u32", record: `{"version":4294967296,"version":1}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "duplicate_version_huge_exponent", record: `{"version":1e400,"version":1}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "duplicate_version_huge_exponent_reverse", record: `{"version":1,"version":1e400}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "duplicate_version_escaped_trailing", record: `{"version":"bad","ver\u0073ion":null}{}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{
+			name:    "duplicate_version_malformed_tail",
+			record:  `{"version":1,"version":2,"x":[}` + "\n",
+			wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object",
+		},
+		{name: "version_case_alias_only", record: `{"Version":1}` + "\n", wantErr: errUndoLegacyRecord, wantMsg: errUndoLegacyRecord.Error()},
+		{name: "version_upper_alias_only", record: `{"VERSION":1}` + "\n", wantErr: errUndoLegacyRecord, wantMsg: errUndoLegacyRecord.Error()},
+		{name: "version_with_case_alias", record: `{"version":1,"Version":0}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "version_with_bad_case_alias", record: `{"version":1,"Version":"bad"}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "version_null_with_alias", record: `{"version":null,"Version":0}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "version_null_with_non_ascii_near_alias", record: `{"version":null,"ver\u017fion":0}` + "\n", wantErr: errUndoLegacyRecord, wantMsg: errUndoLegacyRecord.Error()},
+		{name: "version_invalid_with_alias", record: `{"version":"bad","Version":0}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "version_unsupported_with_alias", record: `{"version":3,"Version":0}` + "\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{
+			name:    "duplicate_version_wrong_hash",
+			record:  duplicateEnvelope(replaceOnce(t, valid, hex.EncodeToString(blockHash[:]), hex.EncodeToString(otherHash[:]))),
+			wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError,
+		},
+		{
+			name:    "duplicate_version_bad_base64",
+			record:  duplicateEnvelope(replaceOnce(t, valid, payloadB64, "*"+payloadB64[1:])),
+			wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError,
+		},
+		{
+			name:    "duplicate_version_bad_checksum",
+			record:  duplicateEnvelope(replaceOnce(t, valid, valid[len(valid)-67:len(valid)-3], strings.Repeat("00", 32))),
+			wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError,
+		},
+		{
+			name:    "duplicate_version_malformed_payload",
+			record:  duplicateEnvelope(envelopeOver([]byte(`{`))),
+			wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError,
+		},
+		{
+			name:    "not_object_array_with_duplicate_version",
+			record:  `[{"version":1,"version":2}]` + "\n",
+			wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object",
+		},
 		{name: "missing_checksum", record: replaceOnce(t, valid, `,"checksum":"`+valid[strings.Index(valid, `"checksum":"`)+12:strings.LastIndex(valid, `"}`)]+`"`, "")},
 		{name: "unknown_field", record: replaceOnce(t, valid, `{"version":1`, `{"note":"x","version":1`)},
 		{name: "duplicate_checksum_identical", record: replaceOnce(t, valid, `{"version":1`, `{"checksum":"`+strings.TrimSuffix(valid[strings.Index(valid, `"checksum":"`)+12:], "\"}\n")+`","version":1`)},
 		{name: "duplicate_checksum_conflicting", record: replaceOnce(t, valid, `{"version":1`, `{"checksum":"`+strings.Repeat("00", 32)+`","version":1`)},
 		{name: "duplicate_payload_conflicting", record: replaceOnce(t, valid, `{"version":1`, `{"payload_b64":"AA==","version":1`)},
 		{name: "null_payload", record: replaceOnce(t, valid, `"payload_b64":"`+payloadB64+`"`, `"payload_b64":null`)},
-		{name: "trailing_json_value", record: strings.TrimSuffix(valid, "\n") + "{}\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: envelope is not the canonical encoding"},
-		{name: "trailing_scalar", record: strings.TrimSuffix(valid, "\n") + " 1\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: envelope is not the canonical encoding"},
+		{name: "trailing_json_value", record: strings.TrimSuffix(valid, "\n") + "{}\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
+		{name: "trailing_scalar", record: strings.TrimSuffix(valid, "\n") + " 1\n", wantErr: ErrUndoIntegrity, wantMsg: canonicalEnvelopeError},
 		{name: "not_an_object", record: "[]\n"},
 		{name: "not_an_object_1", record: "[1]\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object"},
 		{name: "not_an_object_2", record: "[2]\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object"},

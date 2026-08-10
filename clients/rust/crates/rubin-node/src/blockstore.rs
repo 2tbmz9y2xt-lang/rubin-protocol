@@ -1485,6 +1485,21 @@ mod tests {
             );
             text.replacen(old, new, 1)
         };
+        let duplicate =
+            |record: &str| replace_once(record, "{\"version\":1", "{\"version\":1,\"version\":2");
+        let duplicate_wrong_hash = duplicate(&replace_once(
+            &valid,
+            &block_hash_hex,
+            &hex::encode(other_hash),
+        ));
+        let duplicate_bad_base64 = duplicate(&replace_once(
+            &valid,
+            &payload_b64,
+            &format!("*{}", &payload_b64[1..]),
+        ));
+        let duplicate_bad_checksum =
+            duplicate(&replace_once(&valid, &checksum_hex, &"00".repeat(32)));
+        let duplicate_malformed_payload = duplicate(&envelope_over(b"{"));
 
         let indented = serde_json::to_string_pretty(
             &serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
@@ -1499,6 +1514,7 @@ mod tests {
             "11".repeat(32)
         );
         let canonical_payload_error = "decode undo: payload is not the canonical encoding";
+        let canonical_envelope_error = "UNDO_INTEGRITY: envelope is not the canonical encoding";
         let domain_payload_error =
             "decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex";
 
@@ -1509,11 +1525,37 @@ mod tests {
                 String::from_utf8(payload.clone()).expect("utf-8"),
                 Some(UNDO_LEGACY_ERR),
             ),
-            ("version_zero", replace_once(&valid, "\"version\":1", "\"version\":0"), None),
-            ("version_two", replace_once(&valid, "\"version\":1", "\"version\":2"), None),
-            ("version_string", replace_once(&valid, "\"version\":1", "\"version\":\"1\""), None),
-            ("version_null", replace_once(&valid, "\"version\":1", "\"version\":null"), None),
-            ("version_float", replace_once(&valid, "\"version\":1", "\"version\":1.0"), None),
+            ("version_zero", replace_once(&valid, "\"version\":1", "\"version\":0"), Some("UNDO_INTEGRITY: unsupported undo envelope version 0")),
+            ("version_two", replace_once(&valid, "\"version\":1", "\"version\":2"), Some(UNDO_CHECKSUM_MISMATCH_ERR)),
+            ("version_string", replace_once(&valid, "\"version\":1", "\"version\":\"1\""), Some(UNDO_RECORD_NOT_OBJECT_ERR)),
+            ("version_null", replace_once(&valid, "\"version\":1", "\"version\":null"), Some(UNDO_LEGACY_ERR)),
+            ("version_float", replace_once(&valid, "\"version\":1", "\"version\":1.0"), Some(UNDO_RECORD_NOT_OBJECT_ERR)),
+            ("duplicate_version_identical", "{\"version\":1,\"version\":1}\n".into(), Some(canonical_envelope_error)),
+            ("duplicate_version_supported", "{\"version\":1,\"version\":2}\n".into(), Some(canonical_envelope_error)),
+            ("duplicate_version_supported_unsupported", "{\"version\":1,\"version\":3}\n".into(), Some(canonical_envelope_error)),
+            ("duplicate_version_unsupported_supported", "{\"version\":3,\"version\":2}\n".into(), Some(canonical_envelope_error)),
+            ("duplicate_version_invalid", "{\"version\":\"bad\",\"version\":null}\n".into(), Some(canonical_envelope_error)),
+            ("duplicate_version_boolean", "{\"version\":1,\"version\":true}\n".into(), Some(canonical_envelope_error)),
+            ("duplicate_version_fractional", "{\"version\":1,\"version\":1.5}\n".into(), Some(canonical_envelope_error)),
+            ("duplicate_version_negative", "{\"version\":-1,\"version\":2}\n".into(), Some(canonical_envelope_error)),
+            ("duplicate_version_out_of_u32", "{\"version\":4294967296,\"version\":1}\n".into(), Some(canonical_envelope_error)),
+            ("duplicate_version_huge_exponent", "{\"version\":1e400,\"version\":1}\n".into(), Some(canonical_envelope_error)),
+            ("duplicate_version_huge_exponent_reverse", "{\"version\":1,\"version\":1e400}\n".into(), Some(canonical_envelope_error)),
+            ("duplicate_version_escaped_trailing", "{\"version\":\"bad\",\"ver\\u0073ion\":null}{}\n".into(), Some(canonical_envelope_error)),
+            ("duplicate_version_malformed_tail", "{\"version\":1,\"version\":2,\"x\":[}\n".into(), Some(UNDO_RECORD_NOT_OBJECT_ERR)),
+            ("version_case_alias_only", "{\"Version\":1}\n".into(), Some(UNDO_LEGACY_ERR)),
+            ("version_upper_alias_only", "{\"VERSION\":1}\n".into(), Some(UNDO_LEGACY_ERR)),
+            ("version_with_case_alias", "{\"version\":1,\"Version\":0}\n".into(), Some(canonical_envelope_error)),
+            ("version_with_bad_case_alias", "{\"version\":1,\"Version\":\"bad\"}\n".into(), Some(canonical_envelope_error)),
+            ("version_null_with_alias", "{\"version\":null,\"Version\":0}\n".into(), Some(canonical_envelope_error)),
+            ("version_null_with_non_ascii_near_alias", "{\"version\":null,\"ver\\u017fion\":0}\n".into(), Some(UNDO_LEGACY_ERR)),
+            ("version_invalid_with_alias", "{\"version\":\"bad\",\"Version\":0}\n".into(), Some(canonical_envelope_error)),
+            ("version_unsupported_with_alias", "{\"version\":3,\"Version\":0}\n".into(), Some(canonical_envelope_error)),
+            ("duplicate_version_wrong_hash", duplicate_wrong_hash, Some(canonical_envelope_error)),
+            ("duplicate_version_bad_base64", duplicate_bad_base64, Some(canonical_envelope_error)),
+            ("duplicate_version_bad_checksum", duplicate_bad_checksum, Some(canonical_envelope_error)),
+            ("duplicate_version_malformed_payload", duplicate_malformed_payload, Some(canonical_envelope_error)),
+            ("not_object_array_with_duplicate_version", "[{\"version\":1,\"version\":2}]\n".into(), Some(UNDO_RECORD_NOT_OBJECT_ERR)),
             (
                 "missing_checksum",
                 replace_once(&valid, &format!(",\"checksum\":\"{checksum_hex}\""), ""),
@@ -2671,6 +2713,10 @@ mod tests {
 
     #[test]
     fn put_undo_refuses_corrupt_or_different_existing_without_rewrite() {
+        use crate::io_utils::{
+            AtomicWriteOperation, AtomicWriteStage,
+            AtomicWriteTestOp::{ExclusiveOpen, HardLink, ParentSync, Write},
+        };
         use crate::undo::{marshal_undo_envelope, BlockUndo, TxUndo};
 
         let dir = unique_temp_path("rubin-blockstore-undo-existing-refusal");
@@ -2724,6 +2770,41 @@ mod tests {
         assert_eq!(
             std::fs::read(&corrupt_path).expect("re-read corrupt undo"),
             corrupt
+        );
+
+        let duplicate_hash = [0xb3; 32];
+        let duplicate = b"{\"version\":1,\"version\":2}\n";
+        let duplicate_path = root
+            .join("undo")
+            .join(format!("{}.json", hex::encode(duplicate_hash)));
+        std::fs::write(&duplicate_path, duplicate).expect("seed duplicate-version undo");
+        let scope = AtomicWriteTestScope::new();
+        for operation in [ExclusiveOpen, Write, HardLink, ParentSync] {
+            scope.fail_at(operation, 1, "write lane must not run");
+        }
+        let err = store
+            .put_undo_typed(duplicate_hash, &wanted)
+            .expect_err("duplicate-version existing undo");
+        assert_eq!(err.stage, AtomicWriteStage::BeforeNamespaceCommit);
+        assert_eq!(err.destination, duplicate_path);
+        assert_eq!(err.operation, AtomicWriteOperation::CreateIfAbsent);
+        assert_eq!(
+            err.primary,
+            "UNDO_INTEGRITY: envelope is not the canonical encoding"
+        );
+        assert!(err.secondary.is_empty());
+        let public = store
+            .put_undo(duplicate_hash, &wanted)
+            .expect_err("public refusal");
+        let expected = format!(
+            "UNDO_INTEGRITY: envelope is not the canonical encoding (atomic write before_namespace_commit create_if_absent for {})",
+            duplicate_path.display()
+        );
+        assert_eq!(public, expected);
+        assert!(scope.operations().is_empty(), "write lane was entered");
+        assert_eq!(
+            std::fs::read(&duplicate_path).expect("re-read duplicate-version undo"),
+            duplicate
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
