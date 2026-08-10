@@ -34,7 +34,7 @@ name = "runtime_baseline"
 harness = false
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)', 'cfg(tarpaulin_include)'] }
 
 [package.metadata.cargo-machete]
 # RUB-225 uses platform-specific signal dependencies behind cfg gates. Host-only

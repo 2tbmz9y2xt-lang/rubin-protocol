@@ -142,6 +142,8 @@ fn existing_peak_limit(raw: &[u8], payload: &[u8]) -> isize {
     candidate_encode.max(existing_decode).saturating_add(MARGIN)
 }
 
+// Normal CI owns this resource probe; LLVM coverage exceeds tarpaulin's no-output watchdog.
+#[cfg_attr(tarpaulin, ignore)]
 #[test]
 fn undo_payload_public_paths_have_bounded_allocation() {
     let genesis = devnet_genesis_block_bytes();
