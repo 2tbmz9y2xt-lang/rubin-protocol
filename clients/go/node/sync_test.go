@@ -166,7 +166,7 @@ func TestPVShadowMismatch_SequentialTruthPreserved(t *testing.T) {
 	}
 
 	height := st.Height + 1
-	subsidy := consensus.BlockSubsidy(height, st.AlreadyGenerated)
+	subsidy := consensus.BlockSubsidyBig(height, st.AlreadyGenerated.Big())
 	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueForWtxids(t, height, subsidy, [][32]byte{{}, wtxid1, wtxid2})
 	block := buildMultiTxBlock(t, st.TipHash, target, 2, coinbase, tx1, tx2)
 
@@ -260,7 +260,7 @@ func TestPVShadow_NoMismatchOnValidBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseTx(tx1): %v", err)
 	}
-	subsidy := consensus.BlockSubsidy(height, st.AlreadyGenerated)
+	subsidy := consensus.BlockSubsidyBig(height, st.AlreadyGenerated.Big())
 	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueForWtxids(t, height, subsidy, [][32]byte{{}, wtxid1})
 	block := buildMultiTxBlock(t, st.TipHash, target, 2, coinbase, tx1)
 
@@ -277,6 +277,16 @@ func TestNewSyncEngine_NilChainState(t *testing.T) {
 	_, err := NewSyncEngine(nil, nil, SyncConfig{})
 	if err == nil {
 		t.Fatalf("expected error")
+	}
+}
+
+func TestRecheckLiveTipIdentityRejectsSupplyOnlyMove(t *testing.T) {
+	state := NewChainState()
+	prior := chainTipScalarsOf(state)
+	state.AlreadyGenerated = consensus.Uint128FromU64(1)
+	err := (&SyncEngine{}).recheckLiveTipIdentity(&canonicalTransition{chainState: state}, prior)
+	if err == nil || err.Error() != "live chainstate tip moved during canonical apply" {
+		t.Fatalf("err=%v, want exact supply-only tip-move error", err)
 	}
 }
 
@@ -484,7 +494,7 @@ func TestSyncEngineBlockApplyCountsCanonicalAcceptedRejected(t *testing.T) {
 		t.Fatalf("canonical tip after accepted block1=%d/%x ok=%v, want %d/%x", tipHeight, tipHash, ok, summary1.BlockHeight, summary1.BlockHash)
 	}
 
-	block2Coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidy(2, summary1.AlreadyGenerated))
+	block2Coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidyBig(2, summary1.AlreadyGenerated.Big()))
 	invalidBlock2 := append([]byte(nil), buildSingleTxBlock(t, summary1.BlockHash, target, 3, block2Coinbase)...)
 	invalidBlock2[4+32] ^= 0x01 // keep the block parseable but break merkle-root validation.
 	if _, err := engine.ApplyBlock(invalidBlock2, nil); err == nil {
@@ -530,7 +540,7 @@ func TestChainStateDisconnectBlockRestoresSpentUTXOState(t *testing.T) {
 	st.HasTip = true
 	st.Height = 100
 	st.TipHash = mustHash32Hex(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	st.AlreadyGenerated = 123_456
+	st.AlreadyGenerated = consensus.Uint128FromU64(123_456)
 
 	sourceOutpoint := consensus.Outpoint{
 		Txid: mustHash32Hex(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
@@ -568,7 +578,7 @@ func TestChainStateDisconnectBlockRestoresSpentUTXOState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseTx(spend): %v", err)
 	}
-	subsidy := consensus.BlockSubsidy(101, st.AlreadyGenerated)
+	subsidy := consensus.BlockSubsidyBig(101, st.AlreadyGenerated.Big())
 	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueForWtxids(t, 101, subsidy+50, [][32]byte{{}, spendWTxID})
 	target := consensus.POW_LIMIT
 	block := buildMultiTxBlock(t, st.TipHash, target, 2, coinbase, spendTx)
@@ -677,7 +687,7 @@ func TestSyncEngineApplyBlockNoMutationOnFailure(t *testing.T) {
 	st.HasTip = true
 	st.Height = 5
 	st.TipHash = mustHash32Hex(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	st.AlreadyGenerated = 10
+	st.AlreadyGenerated = consensus.Uint128FromU64(10)
 	st.Utxos[consensus.Outpoint{
 		Txid: mustHash32Hex(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
 		Vout: 0,

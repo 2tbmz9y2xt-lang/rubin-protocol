@@ -106,7 +106,7 @@ func TestBuildCoinbaseTxAnchorOnlyCanonical(t *testing.T) {
 	for i := range commitment {
 		commitment[i] = byte(i + 1)
 	}
-	txBytes, err := buildCoinbaseTx(0, 0, nil, commitment)
+	txBytes, err := buildCoinbaseTx(0, consensus.Uint128{}, nil, commitment)
 	if err != nil {
 		t.Fatalf("build coinbase tx: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestBuildCoinbaseTxAnchorOnlyCanonical(t *testing.T) {
 }
 
 func TestBuildCoinbaseTxRejectsHeightOverflow(t *testing.T) {
-	_, err := buildCoinbaseTx(uint64(math.MaxUint32)+1, 0, nil, [32]byte{})
+	_, err := buildCoinbaseTx(uint64(math.MaxUint32)+1, consensus.Uint128{}, nil, [32]byte{})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -149,7 +149,7 @@ func TestBuildCoinbaseTxHeightOnePaysConfiguredMineAddress(t *testing.T) {
 	}
 	mineAddress := testMineAddress(0x42)
 
-	txBytes, err := buildCoinbaseTx(1, 0, mineAddress, commitment)
+	txBytes, err := buildCoinbaseTx(1, consensus.Uint128{}, mineAddress, commitment)
 	if err != nil {
 		t.Fatalf("build coinbase tx: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestBuildCoinbaseTxHeightOnePaysConfiguredMineAddress(t *testing.T) {
 }
 
 func TestBuildCoinbaseTxRejectsMissingMineAddressForSubsidyHeight(t *testing.T) {
-	if _, err := buildCoinbaseTx(1, 0, nil, [32]byte{}); err == nil {
+	if _, err := buildCoinbaseTx(1, consensus.Uint128{}, nil, [32]byte{}); err == nil {
 		t.Fatalf("expected error")
 	}
 }
@@ -341,8 +341,8 @@ func TestMinerMineOneHeightOnePaysConfiguredMineAddressAndTracksCoinbaseMetadata
 	if !entry.CreatedByCoinbase {
 		t.Fatalf("expected coinbase flag on subsidy utxo")
 	}
-	if chainState.AlreadyGenerated != subsidy {
-		t.Fatalf("already_generated=%d, want %d", chainState.AlreadyGenerated, subsidy)
+	if chainState.AlreadyGenerated != consensus.Uint128FromU64(subsidy) {
+		t.Fatalf("already_generated=%s, want %d", chainState.AlreadyGenerated.String(), subsidy)
 	}
 }
 

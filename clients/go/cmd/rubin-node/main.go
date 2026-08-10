@@ -622,10 +622,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if tipOK {
-		_, _ = fmt.Fprintf(stdout, "chainstate: has_tip=%v height=%d utxos=%d already_generated=%d tip=%x\n", chainState.HasTip, chainState.Height, len(chainState.Utxos), chainState.AlreadyGenerated, chainState.TipHash)
+		_, _ = fmt.Fprintf(stdout, "chainstate: has_tip=%v height=%d utxos=%d already_generated=%s tip=%x\n", chainState.HasTip, chainState.Height, len(chainState.Utxos), chainState.AlreadyGenerated.String(), chainState.TipHash)
 		_, _ = fmt.Fprintf(stdout, "blockstore: tip_height=%d tip_hash=%x\n", tipHeight, tipHash) // #nosec G705 -- plain-text CLI diagnostics to stdout, not HTML/template output.
 	} else {
-		_, _ = fmt.Fprintf(stdout, "chainstate: has_tip=%v height=%d utxos=%d already_generated=%d\n", chainState.HasTip, chainState.Height, len(chainState.Utxos), chainState.AlreadyGenerated)
+		_, _ = fmt.Fprintf(stdout, "chainstate: has_tip=%v height=%d utxos=%d already_generated=%s\n", chainState.HasTip, chainState.Height, len(chainState.Utxos), chainState.AlreadyGenerated.String())
 		_, _ = fmt.Fprintln(stdout, "blockstore: empty")
 	}
 	if *featurebitsDeploymentsPath != "" && tipOK {

@@ -106,7 +106,7 @@ type miningBuildContext struct {
 	prevHash         [32]byte
 	remainingWeight  uint64
 	nextHeight       uint64
-	alreadyGenerated uint64
+	alreadyGenerated consensus.Uint128
 	utxos            map[consensus.Outpoint]consensus.UtxoEntry
 	candidateTxs     [][]byte
 }
@@ -122,7 +122,7 @@ type miningChainStateSnapshot struct {
 	hasTip           bool
 	height           uint64
 	tipHash          [32]byte
-	alreadyGenerated uint64
+	alreadyGenerated consensus.Uint128
 	utxos            map[consensus.Outpoint]consensus.UtxoEntry
 }
 
@@ -305,7 +305,7 @@ func (m *Miner) maxSelectedTransactions() int {
 	return maxSelected
 }
 
-func (m *Miner) remainingWeightBudget(nextHeight uint64, alreadyGenerated uint64) (uint64, error) {
+func (m *Miner) remainingWeightBudget(nextHeight uint64, alreadyGenerated consensus.Uint128) (uint64, error) {
 	coinbaseWeight, err := canonicalCoinbaseWeight(nextHeight, alreadyGenerated, m.cfg.MineAddress)
 	if err != nil {
 		return 0, err
@@ -313,11 +313,11 @@ func (m *Miner) remainingWeightBudget(nextHeight uint64, alreadyGenerated uint64
 	return remainingWeightFromCoinbase(coinbaseWeight)
 }
 
-func canonicalCoinbaseWeight(height uint64, alreadyGenerated uint64, mineAddress []byte) (uint64, error) {
+func canonicalCoinbaseWeight(height uint64, alreadyGenerated consensus.Uint128, mineAddress []byte) (uint64, error) {
 	if height > math.MaxUint32 {
 		return 0, errors.New("block height exceeds coinbase locktime range")
 	}
-	subsidy := consensus.BlockSubsidy(height, alreadyGenerated)
+	subsidy := consensus.BlockSubsidyBig(height, alreadyGenerated.Big())
 	if subsidy > 0 {
 		if err := validateMineAddress(mineAddress); err != nil {
 			return 0, err
@@ -770,7 +770,7 @@ func buildWitnessCommitment(parsed []minedCandidate) ([32]byte, error) {
 	return consensus.WitnessCommitmentHash(witnessRoot), nil
 }
 
-func (m *Miner) buildCoinbaseAndMerkleRoot(nextHeight uint64, alreadyGenerated uint64, witnessCommitment [32]byte, parsed []minedCandidate) ([]byte, [32]byte, error) {
+func (m *Miner) buildCoinbaseAndMerkleRoot(nextHeight uint64, alreadyGenerated consensus.Uint128, witnessCommitment [32]byte, parsed []minedCandidate) ([]byte, [32]byte, error) {
 	coinbase, err := buildCoinbaseTx(nextHeight, alreadyGenerated, m.cfg.MineAddress, witnessCommitment)
 	if err != nil {
 		return nil, [32]byte{}, err

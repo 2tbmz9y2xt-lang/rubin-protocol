@@ -11,6 +11,44 @@ Policy:
 
 ---
 
+## 2026-08-09 — Exact u128 durable supply and undo v2 (RUB-1153)
+
+Generator-owned changes are limited to `CV-DEVNET-GENESIS.json` and
+`CV-DEVNET-CHAIN.json`: each `chainstate_after` inner state advances to version
+2 and renders `already_generated` as its equal canonical unsigned decimal JSON
+string; all other semantics, fields, tokens, and ordering are unchanged. The
+new manual `protocol/undo_integrity_v2.json` artifact pins four exact
+`undo_envelope_v2` cases: zero, u64 max, u64 max plus one, and u128 max with a
+multi-transaction full spent-entry record. It is registered in
+`conformance/MATRIX.md`; the Go
+trace/refinement refresh changes only aggregate fixture-provenance digest
+metadata, with no new trace row or theorem/value-row change.
+
+The inner chainstate payload now enforces the complete top-level and per-UTXO
+schema after version/supply validation, and canonical v2 writer bytes use the
+historical Go declaration order in both clients. RUB-1134 explicitly routes
+this inner writer-order normalization to the RUB-1153 payload-version bump;
+the RUB-1134 outer envelope, checksum domain, and atomic write order stay
+unchanged, while historical Go- and Rust-order v1 payloads remain readable.
+
+This change reuses, without editing their owners, the immutable u128 codecs from
+RUB-1127, exact-u128 consensus/CLI behavior from RUB-1128, the unchanged outer
+chainstate envelope and atomic store from RUB-1134, and strict undo framing,
+block binding, bounds, and error order inherited from RUB-1132. None of those
+forbidden owners is edited here.
+
+Exact commands: `(cd conformance && ../scripts/dev-env.sh -- go run
+./cmd/gen-devnet-fixtures --repo-root ..)`, `scripts/dev-env.sh -- python3
+tools/gen_conformance_matrix.py`, `scripts/dev-env.sh -- python3
+tools/formal/gen_lean_conformance_vectors.py`, `(cd clients/go &&
+../../scripts/dev-env.sh -- go run ./cmd/formal-trace --fixtures-dir
+../../conformance/fixtures --out ../../rubin-formal/traces/go_trace_v1.jsonl)`,
+and `scripts/dev-env.sh -- python3
+tools/formal/gen_lean_refinement_from_traces.py`. Non-goals: no consensus,
+schedule, codec, store-envelope, runner, specification, manual-formal/proof
+registry, or other generated CV fixture or generated Lean vector change; no new
+trace row.
+
 ## 2026-08-09 — Exact u128 accumulated subsidy boundary (RUB-1128)
 
 Generator-owned: `clients/go/cmd/gen-conformance-fixtures` appends exactly

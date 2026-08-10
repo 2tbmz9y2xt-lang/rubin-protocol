@@ -281,7 +281,7 @@ func TestLoadChainStateRejectsIntegrityFailures(t *testing.T) {
 	state := NewChainState()
 	state.HasTip = true
 	state.Height = 9
-	state.AlreadyGenerated = 4_200
+	state.AlreadyGenerated = consensus.Uint128FromU64(4_200)
 	state.TipHash = [32]byte{0x11, 0x22}
 	if err := state.Save(path); err != nil {
 		t.Fatalf("save chainstate: %v", err)
@@ -315,7 +315,7 @@ func TestLoadChainStateRejectsIntegrityFailures(t *testing.T) {
 			name: "already_generated_edited_stale_checksum",
 			body: func(t *testing.T, valid, payload []byte) []byte {
 				t.Helper()
-				edited := bytes.Replace(payload, []byte(`"already_generated": 4200`), []byte(`"already_generated": 4201`), 1)
+				edited := bytes.Replace(payload, []byte(`"already_generated": "4200"`), []byte(`"already_generated": "4201"`), 1)
 				if bytes.Equal(edited, payload) {
 					t.Fatalf("already_generated edit did not apply: %s", payload)
 				}
@@ -352,7 +352,7 @@ func TestLoadChainStateRejectsIntegrityFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid envelope must load: %v", err)
 	}
-	if !loaded.HasTip || loaded.Height != 9 || loaded.AlreadyGenerated != 4_200 {
+	if !loaded.HasTip || loaded.Height != 9 || loaded.AlreadyGenerated != consensus.Uint128FromU64(4_200) {
 		t.Fatalf("round trip lost state: %+v", loaded)
 	}
 }

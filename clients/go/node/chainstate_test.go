@@ -21,7 +21,7 @@ func TestChainStateSaveLoadRoundTripDeterministic(t *testing.T) {
 	st := NewChainState()
 	st.HasTip = true
 	st.Height = 42
-	st.AlreadyGenerated = 123_456
+	st.AlreadyGenerated = consensus.Uint128FromU64(123_456)
 	st.TipHash = mustHash32Hex(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
 	st.Utxos[consensus.Outpoint{
@@ -64,8 +64,8 @@ func TestChainStateSaveLoadRoundTripDeterministic(t *testing.T) {
 		t.Fatalf("chainstate encoding is not deterministic")
 	}
 
-	// RUB-1134: the saved file is the frame; the INNER chainStateDisk encoding
-	// this test pins is unchanged, so the payload is opened first.
+	// RUB-1153 canonicalizes the inner-v2 bytes; RUB-1134's outer
+	// RUBIN_CHAINSTATE_V1 envelope and atomic-write path remain unchanged.
 	firstPayload, err := openStoreEnvelope(storeEnvelopeChainState, firstBytes)
 	if err != nil {
 		t.Fatalf("open chainstate envelope: %v", err)
@@ -138,8 +138,8 @@ func TestChainStateConnectBlockDeterministicUpdate(t *testing.T) {
 	if !st.HasTip || st.Height != 0 {
 		t.Fatalf("unexpected tip after genesis: has_tip=%v height=%d", st.HasTip, st.Height)
 	}
-	if st.AlreadyGenerated != 0 {
-		t.Fatalf("already_generated after height 0=%d, want 0", st.AlreadyGenerated)
+	if !st.AlreadyGenerated.IsZero() {
+		t.Fatalf("already_generated after height 0=%s, want 0", st.AlreadyGenerated.String())
 	}
 	if len(st.Utxos) == 0 {
 		t.Fatalf("expected at least one utxo after genesis")
@@ -158,8 +158,8 @@ func TestChainStateConnectBlockDeterministicUpdate(t *testing.T) {
 	if st.Height != 1 {
 		t.Fatalf("state height=%d, want 1", st.Height)
 	}
-	if st.AlreadyGenerated != subsidy1 {
-		t.Fatalf("already_generated=%d, want %d", st.AlreadyGenerated, subsidy1)
+	if st.AlreadyGenerated != consensus.Uint128FromU64(subsidy1) {
+		t.Fatalf("already_generated=%s, want %d", st.AlreadyGenerated.String(), subsidy1)
 	}
 	if len(st.Utxos) != 2 {
 		t.Fatalf("utxo_count=%d, want 2", len(st.Utxos))
@@ -331,7 +331,7 @@ func TestChainStateConnectBlockNoMutationOnFailure(t *testing.T) {
 	st.HasTip = true
 	st.Height = 3
 	st.TipHash = mustHash32Hex(t, "2222222222222222222222222222222222222222222222222222222222222222")
-	st.AlreadyGenerated = 77
+	st.AlreadyGenerated = consensus.Uint128FromU64(77)
 	st.Utxos[consensus.Outpoint{
 		Txid: mustHash32Hex(t, "3333333333333333333333333333333333333333333333333333333333333333"),
 		Vout: 1,
@@ -596,10 +596,10 @@ func TestChainStateConnectBlockParallelSigs(t *testing.T) {
 		t.Fatalf("SumFees mismatch: seq=%d par=%d", seqBlock1.SumFees, parBlock1.SumFees)
 	}
 	if seqBlock1.AlreadyGenerated != parBlock1.AlreadyGenerated {
-		t.Fatalf("AlreadyGenerated mismatch: seq=%d par=%d", seqBlock1.AlreadyGenerated, parBlock1.AlreadyGenerated)
+		t.Fatalf("AlreadyGenerated mismatch: seq=%s par=%s", seqBlock1.AlreadyGenerated.String(), parBlock1.AlreadyGenerated.String())
 	}
 	if seqBlock1.AlreadyGeneratedN1 != parBlock1.AlreadyGeneratedN1 {
-		t.Fatalf("AlreadyGeneratedN1 mismatch: seq=%d par=%d", seqBlock1.AlreadyGeneratedN1, parBlock1.AlreadyGeneratedN1)
+		t.Fatalf("AlreadyGeneratedN1 mismatch: seq=%s par=%s", seqBlock1.AlreadyGeneratedN1.String(), parBlock1.AlreadyGeneratedN1.String())
 	}
 	if seqBlock1.UtxoCount != parBlock1.UtxoCount {
 		t.Fatalf("UtxoCount mismatch: seq=%d par=%d", seqBlock1.UtxoCount, parBlock1.UtxoCount)
@@ -610,7 +610,7 @@ func TestChainStateConnectBlockParallelSigs(t *testing.T) {
 		t.Fatalf("height mismatch: seq=%d par=%d", seqSt.Height, parSt.Height)
 	}
 	if seqSt.AlreadyGenerated != parSt.AlreadyGenerated {
-		t.Fatalf("already_generated mismatch: seq=%d par=%d", seqSt.AlreadyGenerated, parSt.AlreadyGenerated)
+		t.Fatalf("already_generated mismatch: seq=%s par=%s", seqSt.AlreadyGenerated.String(), parSt.AlreadyGenerated.String())
 	}
 	if len(seqSt.Utxos) != len(parSt.Utxos) {
 		t.Fatalf("utxo count mismatch: seq=%d par=%d", len(seqSt.Utxos), len(parSt.Utxos))

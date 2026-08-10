@@ -2016,7 +2016,7 @@ mod tests {
         use AtomicWriteOperation::{CreateIfAbsent, Overwrite}; use AtomicWriteTestOp::{CleanupUnlink, HardLink, ParentSync, Rename};
         let genesis = devnet_genesis_block_bytes(); let parsed = parse_block_bytes(&genesis).expect("parse genesis");
         let hash = hex::encode(block_hash(&parsed.header_bytes).expect("genesis hash"));
-        let rows = [("blockstore/blocks", format!("{hash}.bin"), CreateIfAbsent, HardLink, false, false), ("blockstore/headers", format!("{hash}.bin"), CreateIfAbsent, HardLink, false, false), ("blockstore/undo", format!("{hash}.json"), Overwrite, Rename, false, false), ("blockstore", "index.json".into(), Overwrite, Rename, true, true), ("", "chainstate.json".into(), Overwrite, Rename, true, true)];
+        let rows = [("blockstore/blocks", format!("{hash}.bin"), CreateIfAbsent, HardLink, false, false), ("blockstore/headers", format!("{hash}.bin"), CreateIfAbsent, HardLink, false, false), ("blockstore/undo", format!("{hash}.json"), CreateIfAbsent, HardLink, false, false), ("blockstore", "index.json".into(), Overwrite, Rename, true, true), ("", "chainstate.json".into(), Overwrite, Rename, true, true)];
         for (index, (parent, leaf, operation, commit, disk_index, chainstate)) in rows.into_iter().enumerate() {
             let dir = unique_temp_path("rubin-postcommit-engine"); std::fs::create_dir_all(&dir).expect("mkdir");
             let store = BlockStore::create(block_store_path(&dir)).expect("store"); let mut cfg = default_sync_config(Some(POW_LIMIT), devnet_genesis_chain_id(), Some(chain_state_path(&dir))); if index == 0 { cfg.chain_state_path = None; }
@@ -2026,7 +2026,7 @@ mod tests {
             assert_eq!((fault.cause.stage, &fault.cause.destination, fault.cause.operation, fault.cause.primary.as_str(), fault.cause.secondary.as_slice()), (AtomicWriteStage::AfterNamespaceCommit, &dir.join(parent).join(leaf), operation, "cleanup-primary", &["parent-secondary".to_string()][..]));
             assert!(error.contains("cleanup-primary"));
             assert_eq!((engine.block_store.as_ref().expect("store").canonical_len() > 0, engine.chain_state.has_tip), (disk_index, chainstate));
-            assert_eq!(scope.operations().iter().filter(|&&op| op == commit).count(), if commit == HardLink { index + 1 } else { index - 1 });
+            assert_eq!(scope.operations().iter().filter(|&&op| op == commit).count(), if commit == HardLink { index + 1 } else { index - 2 });
             for blocked in [engine.apply_block(&genesis, None).unwrap_err(), engine.apply_block_with_reorg(&genesis, None).unwrap_err(), engine.disconnect_tip().unwrap_err()] { assert_eq!(blocked, "storage persistence fault; restart required"); }
             drop(scope); std::fs::remove_dir_all(dir).expect("cleanup");
         }
@@ -2820,8 +2820,8 @@ mod tests {
                     .join(format!("{}.json", hex::encode(hash))),
             )
             .expect("raw undo"),
-            // RUB-1132: the on-disk record is the block-bound v1 envelope, not
-            // the bare payload, so the hash is part of what is pinned here.
+            // RUB-1132/RUB-1153: the on-disk record is a block-bound v1/v2
+            // envelope, not the bare payload, so the hash is pinned here.
             marshal_undo_envelope(hash, &undo).expect("undo encoding")
         );
         engine.disconnect_tip().expect("disconnect tip");

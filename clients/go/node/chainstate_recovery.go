@@ -169,7 +169,7 @@ func ReconcileChainStateWithBlockStore(state *ChainState, store *BlockStore, cfg
 
 func reconcileEmptyBlockStore(state *ChainState, truncated bool) bool {
 	view := state.view()
-	dirty := view.hasTip || view.utxoCount != 0 || view.alreadyGenerated != 0 || view.height != 0 || view.tipHash != ([32]byte{})
+	dirty := view.hasTip || view.utxoCount != 0 || !view.alreadyGenerated.IsZero() || view.height != 0 || view.tipHash != ([32]byte{})
 	if truncated || dirty {
 		state.replaceFrom(NewChainState())
 		return true

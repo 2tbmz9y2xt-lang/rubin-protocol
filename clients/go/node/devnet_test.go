@@ -86,8 +86,8 @@ func TestDevnetThreeNodeSyncAndDeterminism(t *testing.T) {
 	wantSubsidy := cumulativeSubsidy(10)
 	for _, current := range []*devnetNode{nodeA, nodeB, nodeC} {
 		state := loadChainState(t, current)
-		if state.AlreadyGenerated != wantSubsidy {
-			t.Fatalf("%s already_generated=%d, want %d", current.name, state.AlreadyGenerated, wantSubsidy)
+		if state.AlreadyGenerated != consensus.Uint128FromU64(wantSubsidy) {
+			t.Fatalf("%s already_generated=%s, want %d", current.name, state.AlreadyGenerated.String(), wantSubsidy)
 		}
 		if state.Height != 10 {
 			t.Fatalf("%s height=%d, want 10", current.name, state.Height)
@@ -261,8 +261,8 @@ func TestDevnetLongestChainWinsReplayGate(t *testing.T) {
 		if state.Height != 6 {
 			t.Fatalf("%s height=%d, want 6", current.name, state.Height)
 		}
-		if state.AlreadyGenerated != wantSubsidy {
-			t.Fatalf("%s already_generated=%d, want %d", current.name, state.AlreadyGenerated, wantSubsidy)
+		if state.AlreadyGenerated != consensus.Uint128FromU64(wantSubsidy) {
+			t.Fatalf("%s already_generated=%s, want %d", current.name, state.AlreadyGenerated.String(), wantSubsidy)
 		}
 	}
 }
@@ -839,12 +839,12 @@ func logMonitoringCheckpoint(t *testing.T, atHeight uint64, nodes ...*devnetNode
 			stateHeight = state.Height
 		}
 		t.Logf(
-			"[checkpoint h=%d] node=%s height=%d tip=%x already_generated=%d utxo_count=%d peers=%d",
+			"[checkpoint h=%d] node=%s height=%d tip=%x already_generated=%s utxo_count=%d peers=%d",
 			atHeight,
 			current.name,
 			stateHeight,
 			state.TipHash,
-			state.AlreadyGenerated,
+			state.AlreadyGenerated.String(),
 			len(state.Utxos),
 			peerCount,
 		)
@@ -1160,10 +1160,10 @@ func assertSoakConsensusMetrics(t *testing.T, nodes ...*devnetNode) {
 
 	// Verify AlreadyGenerated matches cumulative subsidy formula (not just cross-node match)
 	wantSubsidy := cumulativeSubsidy(wantState.Height)
-	if wantState.AlreadyGenerated != wantSubsidy {
+	if wantState.AlreadyGenerated != consensus.Uint128FromU64(wantSubsidy) {
 		t.Fatalf(
-			"%s already_generated=%d, want cumulativeSubsidy(%d)=%d",
-			want.name, wantState.AlreadyGenerated, wantState.Height, wantSubsidy,
+			"%s already_generated=%s, want cumulativeSubsidy(%d)=%d",
+			want.name, wantState.AlreadyGenerated.String(), wantState.Height, wantSubsidy,
 		)
 	}
 
@@ -1176,7 +1176,7 @@ func assertSoakConsensusMetrics(t *testing.T, nodes ...*devnetNode) {
 			t.Fatalf("tip mismatch %s=%x want=%x", current.name, got.TipHash, wantState.TipHash)
 		}
 		if got.AlreadyGenerated != wantState.AlreadyGenerated {
-			t.Fatalf("already_generated mismatch %s=%d want=%d", current.name, got.AlreadyGenerated, wantState.AlreadyGenerated)
+			t.Fatalf("already_generated mismatch %s=%s want=%s", current.name, got.AlreadyGenerated.String(), wantState.AlreadyGenerated.String())
 		}
 		if len(got.Utxos) != len(wantState.Utxos) {
 			t.Fatalf("utxo count mismatch %s=%d want=%d", current.name, len(got.Utxos), len(wantState.Utxos))

@@ -3052,6 +3052,14 @@ mod tests {
             "chainstate: has_tip=true height=7 utxos=0 already_generated=42\nblockstore: empty"
         );
 
+        tipped.already_generated = "350965446908158964928367166"
+            .parse()
+            .expect("reachable maximum accumulated subsidy");
+        assert_eq!(
+            format_dry_run_store_report(&tipped, None),
+            "chainstate: has_tip=true height=7 utxos=0 already_generated=350965446908158964928367166\nblockstore: empty"
+        );
+
         // A no-tip chainstate over a non-empty index still prints `tip=`, with
         // the all-zero chainstate tip hash — the absent-chainstate parity row.
         assert_eq!(

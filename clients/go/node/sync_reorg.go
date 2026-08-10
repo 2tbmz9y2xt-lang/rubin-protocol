@@ -503,7 +503,7 @@ func capturePreImages(state *ChainState, pb *consensus.ParsedBlock) map[consensu
 // the captured touched entries instead of a full UTXO-set copy. buildTxUndos adds
 // each transaction's created outputs to its work map as it goes, so an input
 // spending a same-block output resolves identically under either work map.
-func buildPreparedBlockUndo(preImages map[consensus.Outpoint]consensus.UtxoEntry, pb *consensus.ParsedBlock, blockHeight, previousAlreadyGenerated uint64) (*BlockUndo, error) {
+func buildPreparedBlockUndo(preImages map[consensus.Outpoint]consensus.UtxoEntry, pb *consensus.ParsedBlock, blockHeight uint64, previousAlreadyGenerated consensus.Uint128) (*BlockUndo, error) {
 	if pb == nil {
 		return nil, errors.New("nil parsed block")
 	}
@@ -814,7 +814,7 @@ func (s *SyncEngine) loadVerifiedBranchAncestor(parentHash [32]byte) (*consensus
 
 func (s *SyncEngine) syntheticSideChainSummary(height uint64, blockHash [32]byte) *ChainStateConnectSummary {
 	utxoCount := uint64(0)
-	alreadyGenerated := uint64(0)
+	alreadyGenerated := consensus.Uint128{}
 	if s != nil && s.chainState != nil {
 		view := s.chainState.view()
 		utxoCount = uint64(view.utxoCount) //nolint:gosec // G115: view.utxoCount is non-negative by chainstate invariant

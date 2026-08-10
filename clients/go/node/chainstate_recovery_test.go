@@ -59,7 +59,7 @@ func TestCloneChainState_NilAndDeepCopy(t *testing.T) {
 	src := NewChainState()
 	src.HasTip = true
 	src.Height = 7
-	src.AlreadyGenerated = 42
+	src.AlreadyGenerated = consensus.Uint128FromU64(42)
 	src.TipHash[0] = 0xaa
 	var txid [32]byte
 	txid[0] = 0x11
@@ -186,7 +186,7 @@ func TestReconcileChainStateWithBlockStore_InputValidationAndNoopPaths(t *testin
 	dirty := NewChainState()
 	dirty.HasTip = true
 	dirty.Height = 7
-	dirty.AlreadyGenerated = 99
+	dirty.AlreadyGenerated = consensus.Uint128FromU64(99)
 	dirty.TipHash[0] = 0xaa
 	dirty.Utxos[consensus.Outpoint{Txid: [32]byte{0x01}, Vout: 1}] = consensus.UtxoEntry{Value: 7}
 	changed, err = ReconcileChainStateWithBlockStore(dirty, store, DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(dir)))
@@ -196,7 +196,7 @@ func TestReconcileChainStateWithBlockStore_InputValidationAndNoopPaths(t *testin
 	if !changed {
 		t.Fatalf("dirty empty-store snapshot must be reset")
 	}
-	if dirty.HasTip || dirty.Height != 0 || dirty.AlreadyGenerated != 0 || dirty.TipHash != ([32]byte{}) || len(dirty.Utxos) != 0 {
+	if dirty.HasTip || dirty.Height != 0 || !dirty.AlreadyGenerated.IsZero() || dirty.TipHash != ([32]byte{}) || len(dirty.Utxos) != 0 {
 		t.Fatalf("dirty empty-store snapshot not reset: %+v", dirty)
 	}
 }
@@ -252,6 +252,49 @@ func TestReconcileChainStateWithBlockStore_NoopForCanonicalTipAndResetsAheadSnap
 	}
 	if !ahead.HasTip || ahead.Height != 0 || ahead.TipHash != devnetGenesisBlockHash {
 		t.Fatalf("unexpected reconciled state after ahead reset: has_tip=%v height=%d tip=%x", ahead.HasTip, ahead.Height, ahead.TipHash)
+	}
+}
+
+func TestReconcileChainStateWithBlockStorePreservesWidePersistedSupply(t *testing.T) {
+	dir := t.TempDir()
+	path := ChainStatePath(dir)
+	store, err := CreateBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("CreateBlockStore: %v", err)
+	}
+	target := consensus.POW_LIMIT
+	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, path)
+	live := NewChainState()
+	engine, err := NewSyncEngine(live, store, cfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	want := consensus.Uint128{Hi: 1, Lo: 7}
+	live.AlreadyGenerated = want
+	if err := live.Save(path); err != nil {
+		t.Fatalf("Save(wide): %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(before): %v", err)
+	}
+	restarted, err := LoadChainState(path)
+	if err != nil {
+		t.Fatalf("LoadChainState: %v", err)
+	}
+	changed, err := ReconcileChainStateWithBlockStore(restarted, store, cfg)
+	if err != nil {
+		t.Fatalf("ReconcileChainStateWithBlockStore: %v", err)
+	}
+	if changed || restarted.AlreadyGenerated != want {
+		t.Fatalf("recovery changed wide supply: changed=%v supply=%s", changed, restarted.AlreadyGenerated.String())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("no-op recovery rewrote durable bytes: err=%v", err)
 	}
 }
 
@@ -434,7 +477,7 @@ func TestReconcileChainStateWithBlockStore_ResetsDirtyTiplessSnapshotBeforeRepla
 	}
 
 	dirty := NewChainState()
-	dirty.AlreadyGenerated = 123456789
+	dirty.AlreadyGenerated = consensus.Uint128FromU64(123456789)
 	var phantomTxid [32]byte
 	phantomTxid[0] = 0xaa
 	phantom := consensus.Outpoint{Txid: phantomTxid, Vout: 9}

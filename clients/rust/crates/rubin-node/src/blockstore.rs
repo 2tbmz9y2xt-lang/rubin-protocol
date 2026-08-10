@@ -201,11 +201,11 @@ impl BlockStore {
     /// canonical reference. These are safe and self-healing: block and
     /// header files are written via `write_file_if_absent` (idempotent
     /// no-op if the exact contents already exist on retry), and the
-    /// undo file is written via `write_file_atomic`, whose tmp+rename
-    /// idempotently overwrites at the same path on a subsequent retry
-    /// with the same block hash. No canonical entry references these
-    /// files until the tip advances, so they neither contaminate the
-    /// chain nor leak unboundedly across same-hash retries.
+    /// undo file is written create-if-absent. A retry accepts a fully
+    /// validated, semantically identical v1/v2 record without rewriting
+    /// it and refuses corruption or different content. No canonical entry
+    /// references newly created files until the tip advances, so they do
+    /// not contaminate the chain.
     pub fn commit_canonical_block(
         &mut self,
         height: u64,
@@ -260,10 +260,10 @@ impl BlockStore {
         //       is a no-op when the file already exists and never
         //       overwrites existing bytes; header hash is still
         //       validated against `block_hash_bytes`). Undo is
-        //       conditionally back-filled via `put_undo` only when the
-        //       undo file is missing on disk (pre-E.4 partial-commit
-        //       case); an existing undo file is NOT rewritten. Tip /
-        //       canonical index remain unchanged on both sub-paths.
+        //       passed through `put_undo`, which creates a missing record
+        //       and otherwise fully validates a matching v1/v2 record while
+        //       preserving its exact bytes. Tip / canonical index remain
+        //       unchanged on both sub-paths.
         //
         //     - `height < canonical_len` with a DIFFERENT hash is a real
         //       reorg on the canonical index (same parent, different
@@ -301,20 +301,15 @@ impl BlockStore {
                 //    re-create missing block/header files without
                 //    clobbering existing ones.
                 //
-                //  - Undo is then conditionally back-filled only when
-                //    absent: if the undo file is already on disk the
-                //    historical bytes are NOT rewritten (matches the
-                //    earlier Copilot concern that `write_file_atomic`
-                //    would clobber the historical undo even on a
-                //    same-hash retry); if the undo file is missing
-                //    (pre-E.4 crash between block persist and undo
-                //    write), `put_undo` back-fills it.
+                //  - Undo is then passed through the create-if-absent writer.
+                //    A missing record is back-filled; an existing v1/v2 record
+                //    must clear its bounded integrity/hash/payload checks and
+                //    equal the requested undo semantically. Matching bytes are
+                //    preserved exactly; corruption or different content fails.
                 //
                 //  Canonical index / tip remain unchanged regardless.
                 self.persist_block_bytes_typed(block_hash_bytes, header_bytes, block_bytes)?;
-                if !self.has_undo(block_hash_bytes) {
-                    self.put_undo_typed(block_hash_bytes, undo)?;
-                }
+                self.put_undo_typed(block_hash_bytes, undo)?;
                 return Ok(());
             }
             // Different hash at historical height: real reorg; fall
@@ -776,14 +771,14 @@ impl BlockStore {
         if self.force_undo_error {
             return Err(atomic_write_error_before(
                 &path,
-                AtomicWriteOperation::Overwrite,
+                AtomicWriteOperation::CreateIfAbsent,
                 "forced undo error (test)",
             ));
         }
         let raw = marshal_undo_envelope(block_hash_bytes, undo).map_err(|error| {
-            atomic_write_error_before(&path, AtomicWriteOperation::Overwrite, error)
+            atomic_write_error_before(&path, AtomicWriteOperation::CreateIfAbsent, error)
         })?;
-        // Undo files intentionally stay on the raw `write_file_atomic`
+        // Undo files intentionally stay on the raw create-if-absent
         // path (no `lexical_clean`). Writer and readers share one
         // dir-resolution strategy:
         //   - `get_undo`     → `read_file_from_dir(&self.undo_dir, ...)`
@@ -792,7 +787,7 @@ impl BlockStore {
         //   - `has_undo`     → `self.undo_dir.join(...).is_file()`
         //   - `try_has_undo` → `try_has_file_at(&self.undo_dir.join(...))`
         // None of them apply `lexical_clean` to `self.undo_dir`, so
-        // keeping the writer on raw `write_file_atomic` means a write
+        // keeping the writer on raw `write_file_create_if_absent` means a write
         // that goes to `self.undo_dir.join(<hex>.json)` is the exact
         // same path the readers probe. The symlink-divergence
         // defense matters for the durable chainstate /
@@ -807,18 +802,59 @@ impl BlockStore {
         // input), so this guard converts any future derivation drift (a new
         // covenant family, signature aggregation) into a loud save-time
         // error instead of a next-restart refusal of the node's own undo.
-        // RUB-1132 keeps this class bound unchanged: the file it measures is now
-        // the complete v1 envelope, and `marshal_undo_envelope` enforces the
-        // matching payload ceiling.
+        // RUB-1132 keeps this class bound unchanged: the file it measures is a
+        // complete versioned envelope. RUB-1153 emits v2 while preserving v1
+        // reads, and `marshal_undo_envelope` enforces the matching payload ceiling.
         crate::io_utils::check_store_save_bound(
             &path.display().to_string(),
             raw.len(),
             UNDO_FILE_MAX_BYTES,
         )
         .map_err(|error| {
-            atomic_write_error_before(&path, AtomicWriteOperation::Overwrite, error)
+            atomic_write_error_before(&path, AtomicWriteOperation::CreateIfAbsent, error)
         })?;
-        write_file_atomic_typed(&path, &raw)
+        validate_atomic_write_destination(&path, AtomicWriteOperation::CreateIfAbsent)?;
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                atomic_write_error_before(
+                    &path,
+                    AtomicWriteOperation::CreateIfAbsent,
+                    format!("invalid undo path: {}", path.display()),
+                )
+            })?;
+        let validate_existing = |existing_raw: &[u8]| {
+            let existing = unmarshal_undo_envelope(block_hash_bytes, existing_raw)?;
+            if existing != *undo {
+                return Err(existing_content_differs(&path));
+            }
+            Ok(())
+        };
+        match read_file_from_dir(&self.undo_dir, name, UNDO_FILE_MAX_BYTES) {
+            Ok(existing_raw) => {
+                validate_existing(&existing_raw).map_err(|error| {
+                    atomic_write_error_before(&path, AtomicWriteOperation::CreateIfAbsent, error)
+                })?;
+                sync_atomic_parent(&self.undo_dir).map_err(|error| {
+                    atomic_write_error_after(&path, AtomicWriteOperation::CreateIfAbsent, error)
+                })?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(atomic_write_error_before(
+                    &path,
+                    AtomicWriteOperation::CreateIfAbsent,
+                    format!("read undo {}: {error}", path.display()),
+                ));
+            }
+        }
+        write_file_create_if_absent(&path, &raw, || {
+            let existing_raw = read_file_from_dir(&self.undo_dir, name, UNDO_FILE_MAX_BYTES)
+                .map_err(|error| format!("read undo {}: {error}", path.display()))?;
+            validate_existing(&existing_raw)
+        })
     }
 
     pub fn get_undo(&self, block_hash_bytes: [u8; 32]) -> Result<BlockUndo, String> {
@@ -834,13 +870,10 @@ impl BlockStore {
         unmarshal_undo_envelope(block_hash_bytes, &raw)
     }
 
-    /// Cheap undo-presence check used by the same-hash replay branch
-    /// of `commit_canonical_block` to verify that a canonical entry
-    /// inherited from pre-E.4 disk state (or corrupted in some other
-    /// way) actually has its undo file on disk before accepting the
-    /// replay as a no-op. Reconcile / truncate paths use the fallible
-    /// `try_has_undo` instead so EACCES / EIO surface as Err rather
-    /// than silently looking like NotFound.
+    /// Test-only cheap presence probe for assertions around canonical commit
+    /// and replay. Production paths use fallible `try_has_undo`/`get_undo` so
+    /// EACCES and EIO cannot silently look like NotFound.
+    #[cfg(test)]
     fn has_undo(&self, block_hash_bytes: [u8; 32]) -> bool {
         self.undo_dir
             .join(format!("{}.json", hex::encode(block_hash_bytes)))
@@ -1370,8 +1403,9 @@ mod tests {
     #[test]
     fn get_undo_rejects_integrity_failures() {
         use crate::undo::{
-            flip_base64_symbol, marshal_block_undo, marshal_undo_envelope, BlockUndo, SpentUndo,
-            TxUndo, UNDO_BLOCK_HASH_MISMATCH_ERR, UNDO_CHECKSUM_MISMATCH_ERR, UNDO_LEGACY_ERR,
+            flip_base64_symbol, marshal_block_undo, marshal_undo_envelope_v1, BlockUndo, SpentUndo,
+            TxUndo, UNDO_BLOCK_HASH_MISMATCH_ERR, UNDO_CHECKSUM_MISMATCH_ERR,
+            UNDO_INTEGRITY_PREFIX, UNDO_LEGACY_ERR, UNDO_RECORD_NOT_OBJECT_ERR,
         };
         use rubin_consensus::{Outpoint, UtxoEntry};
         use sha3::{Digest, Sha3_256};
@@ -1404,10 +1438,10 @@ mod tests {
             ],
         };
 
-        let valid = String::from_utf8(marshal_undo_envelope(block_hash, &undo).expect("valid"))
+        let valid = String::from_utf8(marshal_undo_envelope_v1(block_hash, &undo).expect("valid"))
             .expect("utf-8");
         let other_valid =
-            String::from_utf8(marshal_undo_envelope(other_hash, &undo).expect("other"))
+            String::from_utf8(marshal_undo_envelope_v1(other_hash, &undo).expect("other"))
                 .expect("utf-8");
         let payload = marshal_block_undo(&undo).expect("payload");
         let payload_b64 = crate::undo::base64_encode(&payload);
@@ -1422,20 +1456,27 @@ mod tests {
         // Builds an envelope with a CORRECT checksum over arbitrary payload
         // bytes: reaching a rejection at all proves the payload decode runs
         // strictly after the checksum compare.
-        let envelope_over = |body: &[u8]| -> String {
+        let envelope_over_hash = |version: u32, hash: [u8; 32], body: &[u8]| -> String {
             let mut hasher = Sha3_256::new();
-            hasher.update(b"RUBIN_BLOCK_UNDO_V1");
-            hasher.update(block_hash);
+            if version == 1 {
+                hasher.update(b"RUBIN_BLOCK_UNDO_V1");
+            } else {
+                hasher.update(b"RUBIN_BLOCK_UNDO_V2");
+            }
+            hasher.update(hash);
             hasher.update((body.len() as u64).to_be_bytes());
             hasher.update(body);
             let checksum: [u8; 32] = hasher.finalize().into();
             format!(
-                "{{\"version\":1,\"block_hash\":\"{}\",\"payload_b64\":\"{}\",\"checksum\":\"{}\"}}\n",
-                block_hash_hex,
+                "{{\"version\":{version},\"block_hash\":\"{}\",\"payload_b64\":\"{}\",\"checksum\":\"{}\"}}\n",
+                hex::encode(hash),
                 crate::undo::base64_encode(body),
                 hex::encode(checksum)
             )
         };
+        let envelope_over_version =
+            |version: u32, body: &[u8]| -> String { envelope_over_hash(version, block_hash, body) };
+        let envelope_over = |body: &[u8]| envelope_over_version(1, body);
         let replace_once = |text: &str, old: &str, new: &str| -> String {
             assert_eq!(
                 text.matches(old).count(),
@@ -1449,8 +1490,19 @@ mod tests {
             &serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
         )
         .expect("indent");
+        let canonical_nested_v1 = format!(
+            r#"{{"block_height":0,"previous_already_generated":0,"txs":[{{"spent":[{{"txid":"{}","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}}]}}]}}"#,
+            "11".repeat(32)
+        );
+        let canonical_nested_v2 = format!(
+            r#"{{"block_height":0,"previous_already_generated":"0","txs":[{{"spent":[{{"txid":"{}","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}}]}}]}}"#,
+            "11".repeat(32)
+        );
+        let canonical_payload_error = "decode undo: payload is not the canonical encoding";
+        let domain_payload_error =
+            "decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex";
 
-        let rows: Vec<(&str, String, Option<&str>)> = vec![
+        let mut rows: Vec<(&str, String, Option<&str>)> = vec![
             ("legacy_indented_payload", format!("{indented}\n"), Some(UNDO_LEGACY_ERR)),
             (
                 "legacy_compact_payload",
@@ -1496,9 +1548,22 @@ mod tests {
                 replace_once(&valid, &format!("\"payload_b64\":\"{payload_b64}\""), "\"payload_b64\":null"),
                 None,
             ),
-            ("trailing_json_value", format!("{}{{}}\n", valid.trim_end_matches('\n')), None),
-            ("trailing_scalar", format!("{} 1\n", valid.trim_end_matches('\n')), None),
+            (
+                "trailing_json_value",
+                format!("{}{{}}\n", valid.trim_end_matches('\n')),
+                Some("UNDO_INTEGRITY: envelope is not the canonical encoding"),
+            ),
+            (
+                "trailing_scalar",
+                format!("{} 1\n", valid.trim_end_matches('\n')),
+                Some("UNDO_INTEGRITY: envelope is not the canonical encoding"),
+            ),
             ("not_an_object", "[]\n".to_string(), None),
+            ("not_an_object_1", "[1]\n".to_string(), Some(UNDO_RECORD_NOT_OBJECT_ERR)),
+            ("not_an_object_2", "[2]\n".to_string(), Some(UNDO_RECORD_NOT_OBJECT_ERR)),
+            ("not_an_object_3", "[3]\n".to_string(), Some(UNDO_RECORD_NOT_OBJECT_ERR)),
+            ("not_object_null", "null\n".to_string(), Some(UNDO_RECORD_NOT_OBJECT_ERR)),
+            ("not_object_trailing", "[1]{}\n".to_string(), Some(UNDO_RECORD_NOT_OBJECT_ERR)),
             ("not_json", "definitely not json\n".to_string(), None),
             (
                 // W4 parity row: classification decodes ONE value and ignores
@@ -1540,6 +1605,15 @@ mod tests {
                 Some(UNDO_BLOCK_HASH_MISMATCH_ERR),
             ),
             (
+                "foreign_block_hash_with_bad_base64",
+                replace_once(
+                    &replace_once(&valid, &block_hash_hex, &hex::encode(other_hash)),
+                    &payload_b64,
+                    &format!("*{}", &payload_b64[1..]),
+                ),
+                Some(UNDO_BLOCK_HASH_MISMATCH_ERR),
+            ),
+            (
                 "envelope_swapped_between_files",
                 other_valid.clone(),
                 Some(UNDO_BLOCK_HASH_MISMATCH_ERR),
@@ -1549,26 +1623,339 @@ mod tests {
                 replace_once(&other_valid, &hex::encode(other_hash), &block_hash_hex),
                 Some(UNDO_CHECKSUM_MISMATCH_ERR),
             ),
-            ("checksum_valid_over_indented_payload", envelope_over(indented.as_bytes()), None),
+            (
+                "checksum_valid_over_indented_payload",
+                envelope_over(indented.as_bytes()),
+                Some(canonical_payload_error),
+            ),
             (
                 "checksum_valid_over_null_txs",
                 envelope_over(br#"{"block_height":0,"previous_already_generated":0,"txs":null}"#),
-                None,
+                Some(canonical_payload_error),
             ),
             (
                 "checksum_valid_over_unknown_payload_field",
                 envelope_over(br#"{"block_height":0,"previous_already_generated":0,"txs":[],"x":1}"#),
-                None,
+                Some(canonical_payload_error),
             ),
             (
                 "checksum_valid_over_missing_payload_field",
                 envelope_over(br#"{"block_height":0,"txs":[]}"#),
-                None,
+                Some(canonical_payload_error),
             ),
             (
                 "checksum_valid_over_duplicate_payload_field",
                 envelope_over(br#"{"block_height":0,"block_height":1,"previous_already_generated":0,"txs":[]}"#),
-                None,
+                Some(canonical_payload_error),
+            ),
+            (
+                "checksum_valid_over_nested_unknown_v1",
+                envelope_over(
+                    replace_once(
+                        &canonical_nested_v1,
+                        "\"vout\":0",
+                        "\"extra\":0,\"vout\":0",
+                    )
+                    .as_bytes(),
+                ),
+                Some(canonical_payload_error),
+            ),
+            (
+                "checksum_valid_over_nested_duplicate_v1",
+                envelope_over(
+                    replace_once(
+                        &canonical_nested_v1,
+                        "\"vout\":0",
+                        "\"vout\":0,\"vout\":0",
+                    )
+                    .as_bytes(),
+                ),
+                Some(canonical_payload_error),
+            ),
+            (
+                "checksum_valid_over_spent_null_v1",
+                envelope_over(
+                    br#"{"block_height":0,"previous_already_generated":0,"txs":[{"spent":null}]}"#,
+                ),
+                Some(canonical_payload_error),
+            ),
+            (
+                "checksum_valid_over_invalid_covenant_data_v1",
+                envelope_over(
+                    replace_once(
+                        &canonical_nested_v1,
+                        "\"covenant_data\":\"\"",
+                        "\"covenant_data\":\"a\"",
+                    )
+                    .as_bytes(),
+                ),
+                Some(domain_payload_error),
+            ),
+            (
+                "checksum_valid_over_invalid_supply_v1",
+                envelope_over(
+                    br#"{"block_height":0,"previous_already_generated":"0","txs":[]}"#,
+                ),
+                Some("decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64"),
+            ),
+            (
+                "checksum_valid_over_negative_supply_v1",
+                envelope_over(
+                    br#"{"block_height":0,"previous_already_generated":-1,"txs":[]}"#,
+                ),
+                Some("decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64"),
+            ),
+            (
+                "checksum_valid_over_fractional_supply_v1",
+                envelope_over(
+                    br#"{"block_height":0,"previous_already_generated":0.0,"txs":[]}"#,
+                ),
+                Some("decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64"),
+            ),
+            (
+                "checksum_valid_over_overflow_supply_v1",
+                envelope_over(
+                    br#"{"block_height":0,"previous_already_generated":18446744073709551616,"txs":[]}"#,
+                ),
+                Some("decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64"),
+            ),
+            (
+                "checksum_valid_over_extreme_supply_v1",
+                envelope_over(
+                    br#"{"block_height":0,"previous_already_generated":1e400,"txs":[]}"#,
+                ),
+                Some("decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64"),
+            ),
+            (
+                "checksum_valid_over_mixed_unknown_invalid_supply_v1",
+                envelope_over(
+                    br#"{"block_height":0,"previous_already_generated":"0","txs":[],"extra":0}"#,
+                ),
+                Some(canonical_payload_error),
+            ),
+            (
+                "checksum_valid_over_unknown_payload_field_v2",
+                envelope_over_version(
+                    2,
+                    br#"{"block_height":0,"previous_already_generated":"0","txs":[],"x":1}"#,
+                ),
+                Some(canonical_payload_error),
+            ),
+            (
+                "checksum_valid_over_duplicate_payload_field_v2",
+                envelope_over_version(
+                    2,
+                    br#"{"block_height":0,"block_height":1,"previous_already_generated":"0","txs":[]}"#,
+                ),
+                Some(canonical_payload_error),
+            ),
+            (
+                "checksum_valid_over_nested_unknown_v2",
+                envelope_over_version(
+                    2,
+                    replace_once(
+                        &canonical_nested_v2,
+                        "\"vout\":0",
+                        "\"extra\":0,\"vout\":0",
+                    )
+                    .as_bytes(),
+                ),
+                Some(canonical_payload_error),
+            ),
+            (
+                "checksum_valid_over_nested_duplicate_v2",
+                envelope_over_version(
+                    2,
+                    replace_once(
+                        &canonical_nested_v2,
+                        "\"vout\":0",
+                        "\"vout\":0,\"vout\":0",
+                    )
+                    .as_bytes(),
+                ),
+                Some(canonical_payload_error),
+            ),
+            (
+                "checksum_valid_over_spent_null_v2",
+                envelope_over_version(
+                    2,
+                    br#"{"block_height":0,"previous_already_generated":"0","txs":[{"spent":null}]}"#,
+                ),
+                Some(canonical_payload_error),
+            ),
+            (
+                "checksum_valid_over_null_block_height_v2",
+                envelope_over_version(
+                    2,
+                    replace_once(&canonical_nested_v2, "\"block_height\":0", "\"block_height\":null")
+                        .as_bytes(),
+                ),
+                Some(canonical_payload_error),
+            ),
+            (
+                "checksum_valid_over_nested_null_txid_v2",
+                envelope_over_version(
+                    2,
+                    replace_once(
+                        &canonical_nested_v2,
+                        &format!("\"txid\":\"{}\"", "11".repeat(32)),
+                        "\"txid\":null",
+                    )
+                    .as_bytes(),
+                ),
+                Some(canonical_payload_error),
+            ),
+            (
+                "checksum_valid_over_nested_wrong_token_v2",
+                envelope_over_version(
+                    2,
+                    replace_once(
+                        &canonical_nested_v2,
+                        "\"created_by_coinbase\":false",
+                        "\"created_by_coinbase\":0",
+                    )
+                    .as_bytes(),
+                ),
+                Some(canonical_payload_error),
+            ),
+            (
+                "checksum_valid_over_invalid_supply_nested_null_v2",
+                envelope_over_version(
+                    2,
+                    replace_once(
+                        &replace_once(
+                            &canonical_nested_v2,
+                            "\"previous_already_generated\":\"0\"",
+                            "\"previous_already_generated\":0",
+                        ),
+                        &format!("\"txid\":\"{}\"", "11".repeat(32)),
+                        "\"txid\":null",
+                    )
+                    .as_bytes(),
+                ),
+                Some("decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"),
+            ),
+            (
+                "checksum_valid_over_invalid_covenant_data_v2",
+                envelope_over_version(
+                    2,
+                    replace_once(
+                        &canonical_nested_v2,
+                        "\"covenant_data\":\"\"",
+                        "\"covenant_data\":\"a\"",
+                    )
+                    .as_bytes(),
+                ),
+                Some(domain_payload_error),
+            ),
+            (
+                "checksum_valid_over_invalid_supply_v2",
+                envelope_over_version(
+                    2,
+                    br#"{"block_height":0,"previous_already_generated":0,"txs":[]}"#,
+                ),
+                Some("decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"),
+            ),
+            (
+                "checksum_valid_over_extreme_supply_v2",
+                envelope_over_version(
+                    2,
+                    br#"{"block_height":0,"previous_already_generated":1e400,"txs":[]}"#,
+                ),
+                Some("decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"),
+            ),
+            (
+                "checksum_valid_over_extreme_block_height_invalid_supply_v2",
+                envelope_over_version(
+                    2,
+                    br#"{"block_height":1e400,"previous_already_generated":0,"txs":[]}"#,
+                ),
+                Some("decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"),
+            ),
+            (
+                "checksum_valid_over_extreme_nested_scalar_invalid_supply_v2",
+                envelope_over_version(
+                    2,
+                    format!(
+                        r#"{{"block_height":0,"previous_already_generated":0,"txs":[{{"spent":[{{"txid":"{}","vout":4294967296,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}}]}}]}}"#,
+                        "11".repeat(32)
+                    )
+                    .as_bytes(),
+                ),
+                Some("decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"),
+            ),
+            (
+                "checksum_valid_over_null_supply_v2",
+                envelope_over_version(
+                    2,
+                    br#"{"block_height":0,"previous_already_generated":null,"txs":[]}"#,
+                ),
+                Some("decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"),
+            ),
+            (
+                "checksum_valid_over_missing_supply_v2",
+                envelope_over_version(2, br#"{"block_height":0,"txs":[]}"#),
+                Some(canonical_payload_error),
+            ),
+            (
+                "checksum_valid_over_leading_zero_supply_v2",
+                envelope_over_version(
+                    2,
+                    br#"{"block_height":0,"previous_already_generated":"00","txs":[]}"#,
+                ),
+                Some("decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"),
+            ),
+            (
+                "checksum_valid_over_escaped_zero_supply_v2",
+                envelope_over_version(
+                    2,
+                    br#"{"block_height":0,"previous_already_generated":"\u0030","txs":[]}"#,
+                ),
+                Some("decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"),
+            ),
+            (
+                "checksum_valid_over_overflow_supply_v2",
+                envelope_over_version(
+                    2,
+                    br#"{"block_height":0,"previous_already_generated":"340282366920938463463374607431768211456","txs":[]}"#,
+                ),
+                Some("decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"),
+            ),
+            (
+                "checksum_valid_over_reordered_invalid_supply_v2",
+                envelope_over_version(
+                    2,
+                    br#"{"txs":[],"previous_already_generated":0,"block_height":0}"#,
+                ),
+                Some("decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"),
+            ),
+            (
+                "checksum_valid_over_indented_reordered_domain_v2",
+                envelope_over_version(
+                    2,
+                    format!(
+                        "{{\n  \"txs\": [{{\"spent\": [{{\"created_by_coinbase\": false, \"creation_height\": 0, \"covenant_data\": \"a\", \"covenant_type\": 0, \"value\": 0, \"vout\": 0, \"txid\": \"{}\"}}]}}],\n  \"previous_already_generated\": \"0\",\n  \"block_height\": 0\n}}",
+                        "11".repeat(32)
+                    )
+                    .as_bytes(),
+                ),
+                Some(domain_payload_error),
+            ),
+            (
+                "checksum_valid_over_indented_reordered_valid_v2",
+                envelope_over_version(
+                    2,
+                    b"{\n  \"txs\": [],\n  \"previous_already_generated\": \"0\",\n  \"block_height\": 0\n}",
+                ),
+                Some(canonical_payload_error),
+            ),
+            (
+                "checksum_valid_over_mixed_duplicate_invalid_supply_v2",
+                envelope_over_version(
+                    2,
+                    br#"{"block_height":0,"previous_already_generated":0,"previous_already_generated":0,"txs":[]}"#,
+                ),
+                Some(canonical_payload_error),
             ),
             (
                 "checksum_valid_over_uppercase_txid",
@@ -1582,16 +1969,138 @@ mod tests {
                 // This row and the next prove the decision precedes conversion:
                 // `block_undo_from_disk`'s own message for a bad txid would WIN
                 // if conversion still ran first. Go emits the identical string.
-                Some("decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex"),
+                Some(domain_payload_error),
             ),
             (
                 "checksum_valid_over_short_txid",
                 envelope_over(
                     br#"{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[{"txid":"aabb","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}"#,
                 ),
-                Some("decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex"),
+                Some(domain_payload_error),
             ),
         ];
+
+        let invalid_nested_v2 = replace_once(
+            &canonical_nested_v2,
+            "\"previous_already_generated\":\"0\"",
+            "\"previous_already_generated\":0",
+        );
+        for (name, body) in [
+            (
+                "checksum_valid_over_missing_block_height_v2",
+                invalid_nested_v2.replacen("\"block_height\":0,", "", 1),
+            ),
+            (
+                "checksum_valid_over_missing_txs_v2",
+                r#"{"block_height":0,"previous_already_generated":0}"#.to_string(),
+            ),
+            (
+                "checksum_valid_over_missing_spent_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":[{}]}"#.to_string(),
+            ),
+            (
+                "checksum_valid_over_unknown_tx_invalid_supply_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[],"extra":0}]}"#.to_string(),
+            ),
+            (
+                "checksum_valid_over_duplicate_tx_invalid_supply_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[],"spent":[]}]}"#.to_string(),
+            ),
+            (
+                "checksum_valid_over_nested_unknown_invalid_supply_v2",
+                replace_once(&invalid_nested_v2, "\"vout\":0", "\"extra\":0,\"vout\":0"),
+            ),
+            (
+                "checksum_valid_over_nested_duplicate_invalid_supply_v2",
+                replace_once(&invalid_nested_v2, "\"vout\":0", "\"vout\":0,\"vout\":0"),
+            ),
+            (
+                "checksum_valid_over_null_txs_invalid_supply_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":null}"#.to_string(),
+            ),
+            (
+                "checksum_valid_over_null_spent_invalid_supply_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":[{"spent":null}]}"#
+                    .to_string(),
+            ),
+            (
+                "checksum_valid_over_trailing_payload_invalid_supply_v2",
+                format!("{invalid_nested_v2}{{}}"),
+            ),
+            (
+                "checksum_valid_over_wrong_txs_container_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":{}}"#.to_string(),
+            ),
+            (
+                "checksum_valid_over_wrong_tx_item_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":[0]}"#.to_string(),
+            ),
+            (
+                "checksum_valid_over_wrong_spent_container_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":[{"spent":{}}]}"#
+                    .to_string(),
+            ),
+            (
+                "checksum_valid_over_wrong_spent_item_v2",
+                r#"{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[0]}]}"#
+                    .to_string(),
+            ),
+        ] {
+            rows.push((
+                name,
+                envelope_over_version(2, body.as_bytes()),
+                Some(canonical_payload_error),
+            ));
+        }
+        for (name, fragment) in [
+            (
+                "checksum_valid_over_missing_spent_txid_v2",
+                format!("\"txid\":\"{}\",", "11".repeat(32)),
+            ),
+            (
+                "checksum_valid_over_missing_spent_vout_v2",
+                "\"vout\":0,".to_string(),
+            ),
+            (
+                "checksum_valid_over_missing_spent_value_v2",
+                "\"value\":0,".to_string(),
+            ),
+            (
+                "checksum_valid_over_missing_spent_covenant_type_v2",
+                "\"covenant_type\":0,".to_string(),
+            ),
+            (
+                "checksum_valid_over_missing_spent_covenant_data_v2",
+                "\"covenant_data\":\"\",".to_string(),
+            ),
+            (
+                "checksum_valid_over_missing_spent_creation_height_v2",
+                "\"creation_height\":0,".to_string(),
+            ),
+            (
+                "checksum_valid_over_missing_spent_created_by_coinbase_v2",
+                ",\"created_by_coinbase\":false".to_string(),
+            ),
+        ] {
+            let body = replace_once(&invalid_nested_v2, &fragment, "");
+            rows.push((
+                name,
+                envelope_over_version(2, body.as_bytes()),
+                Some(canonical_payload_error),
+            ));
+        }
+        let invalid_supply = br#"{"block_height":0,"previous_already_generated":0,"txs":[]}"#;
+        let foreign_invalid = envelope_over_hash(2, other_hash, invalid_supply);
+        rows.push((
+            "foreign_hash_valid_checksum_invalid_supply_v2",
+            foreign_invalid.clone(),
+            Some(UNDO_BLOCK_HASH_MISMATCH_ERR),
+        ));
+        rows.push((
+            "bad_checksum_invalid_supply_v2",
+            replace_once(&foreign_invalid, &hex::encode(other_hash), &block_hash_hex),
+            Some(UNDO_CHECKSUM_MISMATCH_ERR),
+        ));
 
         let path = store
             .root_dir()
@@ -1606,10 +2115,10 @@ mod tests {
             match exact {
                 Some(want) => assert_eq!(err, want, "{name}: exact message"),
                 None if name.starts_with("checksum_valid_over_") => {
-                    // Payload-class failure: it must NOT be reported as a
-                    // checksum or hash failure, which is what proves the order.
-                    assert_ne!(err, UNDO_CHECKSUM_MISMATCH_ERR, "{name}");
-                    assert_ne!(err, UNDO_BLOCK_HASH_MISMATCH_ERR, "{name}");
+                    assert!(
+                        !err.starts_with(UNDO_INTEGRITY_PREFIX),
+                        "{name}: payload defect gained UNDO_INTEGRITY: {err}"
+                    );
                 }
                 None => assert!(
                     err.starts_with("UNDO_INTEGRITY"),
@@ -1623,14 +2132,22 @@ mod tests {
                 record.as_bytes(),
                 "{name}: refused record was rewritten"
             );
+
+            // A create-if-absent retry must validate and refuse the existing
+            // record instead of laundering it into the canonical v2 bytes.
+            store
+                .put_undo(block_hash, &undo)
+                .expect_err("put_undo overwrote an existing corrupt record");
+            assert_eq!(
+                std::fs::read(&path).expect("re-read put_undo refusal"),
+                record.as_bytes(),
+                "{name}: put_undo healed the corrupt record"
+            );
         }
 
-        // Step 8: a same-hash replay must not launder a corrupt record into a
-        // valid one. Rust's back-fill branch writes only when the undo file is
-        // ABSENT, so an existing corrupt record survives the replay untouched.
-        // (Go reaches the same outcome through write-if-absent, which refuses
-        // outright; the shared guarantee is "no silent heal", and each client
-        // keeps the write behavior it already had.)
+        // Step 8: a same-hash replay must validate and refuse a corrupt record,
+        // without laundering it into a valid one or advancing the canonical
+        // state. This is the same create-if-absent behavior as Go.
         let genesis = crate::genesis::devnet_genesis_block_bytes();
         let header = &genesis[..rubin_consensus::BLOCK_HEADER_BYTES];
         let genesis_hash = rubin_consensus::block_hash(header).expect("hash");
@@ -1649,9 +2166,12 @@ mod tests {
             previous_already_generated: 0,
             txs: vec![TxUndo { spent: vec![] }],
         };
-        store
+        let tip_before = store.tip().expect("tip before replay");
+        let err = store
             .commit_canonical_block(0, genesis_hash, header, &genesis, &genesis_undo)
-            .expect("same-hash replay is a no-op");
+            .expect_err("same-hash replay must refuse corrupt undo");
+        assert!(err.contains(UNDO_INTEGRITY_PREFIX), "{err}");
+        assert_eq!(store.tip().expect("tip after replay"), tip_before);
         assert_eq!(
             std::fs::read(&genesis_undo_path).expect("re-read"),
             corrupt,
@@ -2092,6 +2612,124 @@ mod tests {
     }
 
     #[test]
+    fn put_undo_preserves_equivalent_existing_v1_and_v2_bytes() {
+        use crate::io_utils::AtomicWriteTestOp::{ExclusiveOpen, ParentSync, Write};
+        use crate::undo::{marshal_undo_envelope, marshal_undo_envelope_v1, BlockUndo, TxUndo};
+
+        let dir = unique_temp_path("rubin-blockstore-undo-existing-equivalent");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let root = block_store_path(&dir);
+        let store = BlockStore::create(&root).expect("create");
+        let cases = [
+            (
+                [0xa1; 32],
+                BlockUndo {
+                    block_height: 1,
+                    previous_already_generated: 7,
+                    txs: vec![TxUndo { spent: vec![] }],
+                },
+                1,
+            ),
+            (
+                [0xa2; 32],
+                BlockUndo {
+                    block_height: 2,
+                    previous_already_generated: u128::from(u64::MAX) + 1,
+                    txs: vec![TxUndo { spent: vec![] }],
+                },
+                2,
+            ),
+        ];
+
+        for (hash, undo, version) in cases {
+            let raw = if version == 1 {
+                marshal_undo_envelope_v1(hash, &undo).expect("marshal v1")
+            } else {
+                marshal_undo_envelope(hash, &undo).expect("marshal v2")
+            };
+            let path = root
+                .join("undo")
+                .join(format!("{}.json", hex::encode(hash)));
+            std::fs::write(&path, &raw).expect("seed existing undo");
+            for fault in [ExclusiveOpen, Write] {
+                let scope = AtomicWriteTestScope::new();
+                scope.fail_at(fault, 1, "scratch lane must not run");
+                store
+                    .put_undo(hash, &undo)
+                    .expect("equivalent existing undo");
+                assert_eq!(scope.operations(), vec![ParentSync]);
+                assert_eq!(
+                    std::fs::read(&path).expect("read preserved undo"),
+                    raw,
+                    "version {version} was rewritten"
+                );
+            }
+        }
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn put_undo_refuses_corrupt_or_different_existing_without_rewrite() {
+        use crate::undo::{marshal_undo_envelope, BlockUndo, TxUndo};
+
+        let dir = unique_temp_path("rubin-blockstore-undo-existing-refusal");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let root = block_store_path(&dir);
+        let store = BlockStore::create(&root).expect("create");
+        let wanted = BlockUndo {
+            block_height: 3,
+            previous_already_generated: u128::from(u64::MAX) + 1,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+
+        let different_hash = [0xb1; 32];
+        let different = BlockUndo {
+            previous_already_generated: wanted.previous_already_generated + 1,
+            ..wanted.clone()
+        };
+        let different_raw = marshal_undo_envelope(different_hash, &different).expect("marshal");
+        let different_path = root
+            .join("undo")
+            .join(format!("{}.json", hex::encode(different_hash)));
+        std::fs::write(&different_path, &different_raw).expect("seed different undo");
+        let err = store
+            .put_undo(different_hash, &wanted)
+            .expect_err("different existing undo");
+        assert!(
+            err.contains("file already exists with different content"),
+            "{err}"
+        );
+        assert_eq!(
+            std::fs::read(&different_path).expect("re-read different undo"),
+            different_raw
+        );
+
+        let corrupt_hash = [0xb2; 32];
+        let mut corrupt = marshal_undo_envelope(corrupt_hash, &wanted).expect("marshal");
+        let checksum_at = corrupt.len() - 3 - 64;
+        corrupt[checksum_at] = if corrupt[checksum_at] == b'0' {
+            b'1'
+        } else {
+            b'0'
+        };
+        let corrupt_path = root
+            .join("undo")
+            .join(format!("{}.json", hex::encode(corrupt_hash)));
+        std::fs::write(&corrupt_path, &corrupt).expect("seed corrupt undo");
+        let err = store
+            .put_undo(corrupt_hash, &wanted)
+            .expect_err("corrupt existing undo");
+        assert!(err.contains("UNDO_INTEGRITY: checksum mismatch"), "{err}");
+        assert_eq!(
+            std::fs::read(&corrupt_path).expect("re-read corrupt undo"),
+            corrupt
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
     fn blockstore_truncate_and_canonical_len() {
         let dir = unique_temp_path("rubin-blockstore-trunc");
         std::fs::create_dir_all(&dir).expect("create test dir");
@@ -2375,12 +3013,10 @@ mod tests {
     /// by one or more blocks. On restart `SyncEngine::apply_block`
     /// replays the already-persisted block at its original height and
     /// MUST succeed so recovery can proceed; it MUST NOT rewrite the
-    /// historical undo file (`put_undo` via `write_file_atomic` would
-    /// otherwise clobber the historical bytes on disk). The same-hash
-    /// replay validates the header, runs the idempotent
-    /// `persist_block_bytes` (no-op when block/header already exist,
-    /// self-heals if missing), and only calls `put_undo` when the undo
-    /// file is absent; canonical index / tip stay unchanged.
+    /// historical undo file. The same-hash replay validates the header,
+    /// runs the idempotent `persist_block_bytes` (no-op when block/header
+    /// already exist, self-heals if missing), and passes undo through the
+    /// create-if-absent validator; canonical index / tip stay unchanged.
     /// This test covers the already-present-undo sub-case: byte
     /// equality before/after replay proves no rewrite happened.
     #[test]
@@ -2434,6 +3070,58 @@ mod tests {
         assert_eq!(
             undo_bytes_before, undo_bytes_after,
             "same-hash replay must not rewrite the historical undo file"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn commit_canonical_block_same_hash_replay_refuses_corrupt_undo_without_mutation() {
+        use crate::genesis::devnet_genesis_block_bytes;
+        use crate::undo::{
+            corrupt_stored_undo_checksum, BlockUndo, TxUndo, UNDO_CHECKSUM_MISMATCH_ERR,
+        };
+        use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
+        let dir = unique_temp_path("rubin-blockstore-same-hash-corrupt-undo");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::create(&root).expect("create");
+
+        let genesis = devnet_genesis_block_bytes();
+        let header = &genesis[..BLOCK_HEADER_BYTES];
+        let hash = block_hash(header).expect("hash");
+        let undo = BlockUndo {
+            block_height: 0,
+            previous_already_generated: u128::from(u64::MAX) + 1,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+        store
+            .commit_canonical_block(0, hash, header, &genesis, &undo)
+            .expect("first commit");
+
+        let tip_before = store.tip().expect("tip before");
+        let index_before = std::fs::read(&store.index_path).expect("index before");
+        let (corrupt, _original) = corrupt_stored_undo_checksum(&root.join("undo"), hash);
+
+        let err = store
+            .commit_canonical_block(0, hash, header, &genesis, &undo)
+            .expect_err("corrupt existing undo must refuse replay");
+        assert!(err.contains(UNDO_CHECKSUM_MISMATCH_ERR), "{err}");
+        assert_eq!(store.tip().expect("tip after"), tip_before);
+        assert_eq!(store.canonical_len(), 1);
+        assert_eq!(
+            std::fs::read(&store.index_path).expect("index after"),
+            index_before,
+            "replay refusal changed the durable canonical index"
+        );
+        let undo_path = root
+            .join("undo")
+            .join(format!("{}.json", hex::encode(hash)));
+        assert_eq!(
+            std::fs::read(undo_path).expect("undo after"),
+            corrupt,
+            "replay refusal rewrote the corrupt undo"
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");

@@ -164,7 +164,7 @@ func TestSyncEngineStderrRaceAllProducers(t *testing.T) {
 	live := f.engine.chainState.view()
 	nextHeight := summary.BlockHeight + 1
 	pvBlock := buildSingleTxBlock(t, summary.BlockHash, f.target, 303,
-		reorgTestCoinbaseForAddress(t, nextHeight, consensus.BlockSubsidy(nextHeight, live.alreadyGenerated), f.sourceAddress))
+		reorgTestCoinbaseForAddress(t, nextHeight, consensus.BlockSubsidyBig(nextHeight, live.alreadyGenerated.Big()), f.sourceAddress))
 	pvCtx := canonicalBlockApplyContext{
 		blockHeight:    nextHeight,
 		expectedTarget: &f.target,

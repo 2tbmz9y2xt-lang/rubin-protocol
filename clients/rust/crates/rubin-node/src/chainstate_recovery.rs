@@ -1215,6 +1215,27 @@ mod tests {
         fs::remove_dir_all(&dir).expect("cleanup");
     }
 
+    #[test]
+    fn reconcile_preserves_restarted_supply_above_u64_exactly() {
+        let dir = fresh_dir("rubin-recover-u128-supply");
+        let store = create_store_in(&dir);
+        let (_, mut store, mut state) = apply_genesis(store);
+        let supply = u128::from(u64::MAX) + 1;
+        state.already_generated = supply;
+        let path = crate::chainstate::chain_state_path(&dir);
+        state.save(&path).expect("save u128 snapshot");
+
+        let mut restarted = crate::chainstate::load_chain_state(&path).expect("restart load");
+        assert_eq!(restarted.already_generated, supply);
+        let changed =
+            reconcile_chain_state_with_block_store(&mut restarted, &mut store, &devnet_cfg())
+                .expect("reconcile restarted snapshot");
+        assert!(!changed);
+        assert_eq!(restarted.already_generated, supply);
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
     /// An ABSENT `chainstate.json` keeps the full-validated-replay repair path
     /// over an enveloped index; a corrupt one does NOT.
     #[test]

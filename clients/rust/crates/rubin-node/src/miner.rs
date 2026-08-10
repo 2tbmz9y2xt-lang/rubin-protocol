@@ -1477,6 +1477,26 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn mine_one_observes_supply_above_u64_without_narrowing() {
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-u128-supply");
+        sync.bootstrap_canonical_genesis_if_empty()
+            .expect("bootstrap genesis");
+        let supply = u128::from(u64::MAX) + 1;
+        sync.chain_state.already_generated = supply;
+        let expected = supply + u128::from(rubin_consensus::subsidy::block_subsidy(1, supply));
+        let cfg = MinerConfig {
+            timestamp_source: || 1_777_000_001,
+            ..MinerConfig::default()
+        };
+        let mut miner = Miner::new(&mut sync, None, cfg).expect("miner");
+
+        let mined = miner.mine_one(&[]).expect("mine above u64");
+        assert_eq!(mined.height, 1);
+        assert_eq!(miner.sync.chain_state.already_generated, expected);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// Mirror of Go `TestMinerMineOne_PropagatesBootstrapError`
     /// (clients/go/node/sync_genesis_identity_test.go): when the bootstrap
     /// fails, `mine_one` surfaces that error instead of continuing into

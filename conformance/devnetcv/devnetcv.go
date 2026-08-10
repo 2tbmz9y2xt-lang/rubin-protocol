@@ -41,23 +41,22 @@ type UtxoJSON struct {
 }
 
 type ChainStateJSON struct {
-	TipHash          string     `json:"tip_hash"`
-	Utxos            []UtxoJSON `json:"utxos"`
-	Height           uint64     `json:"height"`
-	AlreadyGenerated uint64     `json:"already_generated"`
-	Version          uint32     `json:"version"`
-	HasTip           bool       `json:"has_tip"`
+	TipHash          string            `json:"tip_hash"`
+	Utxos            []UtxoJSON        `json:"utxos"`
+	Height           uint64            `json:"height"`
+	AlreadyGenerated consensus.Uint128 `json:"already_generated"`
+	Version          uint32            `json:"version"`
+	HasTip           bool              `json:"has_tip"`
 }
 
 // ConnectBlockVector is WRITE-ONLY: it is marshalled into CV-DEVNET-*.json and
-// never unmarshalled here. ExpectSumFees therefore stays uint64 even though the
-// value it describes is the widened u128 sum_fees (RUB-1127): its readers are
-// conformance/runner/run_cv_bundle.py (exact_uint) and the Rust
-// DevnetConnectBlockVector, and both accept this legacy numeric token through
-// u64. Widening the field to consensus.Uint128 emits "expect_sum_fees": "0"
-// instead of 0 and rewrites every devnet fixture, so a devnet vector whose
-// sum_fees can exceed u64 must widen the field and regenerate the fixtures in
-// the same change.
+// never unmarshalled here. Its three supply request/expectation fields retain
+// legacy numeric u64 tokens for fixture byte/schema stability, while the real
+// live ChainstateAfter snapshot keeps AlreadyGenerated exact u128. Generate
+// checked-converts each internal sample at this boundary; a future sample above
+// u64 fails generation and requires an explicit fixture-schema contract.
+// ExpectSumFees likewise stays uint64 because fees in these fixed vectors remain
+// in that range.
 type ConnectBlockVector struct {
 	ID                       string          `json:"id"`
 	Op                       string          `json:"op"`
@@ -120,8 +119,8 @@ type chainSample struct {
 	BlockHash          string
 	ExpectedPrevHash   string
 	PrevTimestamps     []uint64
-	AlreadyGenerated   uint64
-	AlreadyGeneratedN1 uint64
+	AlreadyGenerated   consensus.Uint128
+	AlreadyGeneratedN1 consensus.Uint128
 	CoinbaseTxid       string
 	CoinbaseValue      uint64
 	ChainstateBefore   ChainStateJSON
@@ -151,6 +150,14 @@ func GateOrder() []string {
 	}
 }
 
+func fixtureSupplyUint64(field string, value consensus.Uint128) (uint64, error) {
+	exact := value.Big()
+	if !exact.IsUint64() {
+		return 0, fmt.Errorf("%s value %s exceeds legacy u64 fixture schema", field, value.String())
+	}
+	return exact.Uint64(), nil
+}
+
 func Generate() (*Documents, error) {
 	env, err := newDevnetEnv()
 	if err != nil {
@@ -174,13 +181,21 @@ func Generate() (*Documents, error) {
 	subsidyVectors := make([]ConnectBlockVector, 0, len(samples))
 	chainVectors := make([]ConnectBlockVector, 0, 10)
 	for _, sample := range samples {
+		alreadyGenerated, err := fixtureSupplyUint64("already_generated", sample.AlreadyGenerated)
+		if err != nil {
+			return nil, fmt.Errorf("devnet sample height %d: %w", sample.Height, err)
+		}
+		alreadyGeneratedN1, err := fixtureSupplyUint64("expect_already_generated_n1", sample.AlreadyGeneratedN1)
+		if err != nil {
+			return nil, fmt.Errorf("devnet sample height %d: %w", sample.Height, err)
+		}
 		base := ConnectBlockVector{
 			ID:                       fmt.Sprintf("DEVNET-SUBSIDY-%03d", sample.Height),
 			Op:                       "connect_block_basic",
 			BlockHex:                 sample.BlockHex,
 			ChainID:                  env.chainIDHex,
 			Height:                   sample.Height,
-			AlreadyGenerated:         sample.AlreadyGenerated,
+			AlreadyGenerated:         alreadyGenerated,
 			Utxos:                    cloneUtxos(sample.ChainstateBefore.Utxos),
 			PrevTimestamps:           cloneUint64s(sample.PrevTimestamps),
 			ExpectedPrevHash:         sample.ExpectedPrevHash,
@@ -188,8 +203,8 @@ func Generate() (*Documents, error) {
 			ExpectOK:                 true,
 			ExpectSumFees:            0,
 			ExpectUtxoCount:          uint64(len(sample.ChainstateAfter.Utxos)),
-			ExpectAlreadyGenerated:   sample.AlreadyGenerated,
-			ExpectAlreadyGeneratedN1: sample.AlreadyGeneratedN1,
+			ExpectAlreadyGenerated:   alreadyGenerated,
+			ExpectAlreadyGeneratedN1: alreadyGeneratedN1,
 			BlockHash:                sample.BlockHash,
 			CoinbaseTxid:             sample.CoinbaseTxid,
 			CoinbaseValue:            sample.CoinbaseValue,

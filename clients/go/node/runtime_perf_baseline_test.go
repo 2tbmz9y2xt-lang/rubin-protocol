@@ -474,7 +474,7 @@ func benchmarkLargeChainState(tb testing.TB, count int) *ChainState {
 	state, _ := benchmarkSpendableChainState(fromAddress, values)
 	state.HasTip = true
 	state.Height = 100
-	state.AlreadyGenerated = 50_000
+	state.AlreadyGenerated = consensus.Uint128FromU64(50_000)
 	state.TipHash[0] = 0x44
 	return state
 }
@@ -509,7 +509,7 @@ func benchmarkRecoveryReplayFixture(tb testing.TB, blocks int) (*BlockStore, Syn
 	prevTimestamps := []uint64{genesisParsed.Header.Timestamp}
 	now := genesisParsed.Header.Timestamp + 60
 	for height := uint64(1); height <= uint64(blocks); height++ {
-		subsidy := consensus.BlockSubsidy(height, liveState.AlreadyGenerated)
+		subsidy := consensus.BlockSubsidyBig(height, liveState.AlreadyGenerated.Big())
 		timestamp := chooseValidTimestamp(height, prevTimestamps, now)
 		block := benchmarkBuildSingleTxBlock(
 			tb,

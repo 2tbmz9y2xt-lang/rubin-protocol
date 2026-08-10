@@ -1252,6 +1252,52 @@ mod tests {
     }
 
     #[test]
+    fn preferred_reorg_preserves_supply_above_u64_exactly() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-u128-supply");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+
+        let base_supply = u128::from(u64::MAX) + 1;
+        engine.chain_state.already_generated = base_supply;
+        let canonical1 = coinbase_only_block_with_gen(1, base_supply, genesis_hash, gen_ts + 1);
+        engine
+            .apply_block_with_reorg(&canonical1, None)
+            .expect("canonical block 1");
+
+        let subsidy1 = u128::from(rubin_consensus::subsidy::block_subsidy(1, base_supply));
+        let after_one = base_supply + subsidy1;
+        assert_eq!(engine.chain_state.already_generated, after_one);
+
+        let side1 = coinbase_only_block_with_gen(1, base_supply, genesis_hash, gen_ts + 2);
+        let side1_hash = block_header_hash(&side1);
+        engine
+            .block_store
+            .as_ref()
+            .expect("blockstore")
+            .store_block(
+                side1_hash,
+                &side1[..rubin_consensus::BLOCK_HEADER_BYTES],
+                &side1,
+            )
+            .expect("store side block 1");
+        let side2 = coinbase_only_block_with_gen(2, after_one, side1_hash, gen_ts + 3);
+        let summary = engine
+            .apply_block_with_reorg(&side2, None)
+            .expect("preferred side block 2");
+
+        let subsidy2 = u128::from(rubin_consensus::subsidy::block_subsidy(2, after_one));
+        let expected = after_one + subsidy2;
+        assert_eq!(summary.already_generated, after_one);
+        assert_eq!(summary.already_generated_n1, expected);
+        assert_eq!(engine.chain_state.already_generated, expected);
+        assert_eq!(engine.chain_state.tip_hash, block_header_hash(&side2));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
     fn apply_block_with_reorg_tip_extension_removes_conflicting_pool_spends() {
         // RUB-162 Phase A migration rationale (per controller Q2 / Path A
         // approval 2026-05-03):
@@ -2775,18 +2821,13 @@ mod tests {
 
         // A failed branch apply must leave the canonical chain exactly where it
         // was — the other half of "a failed reorg reports nothing".
-        let before_height = engine.chain_state.height;
-        let before_tip = engine.chain_state.tip_hash;
+        let before_state = engine.chain_state.clone();
 
         let err = engine
             .apply_block_with_reorg(&block2_alt, None)
             .unwrap_err();
 
-        assert_eq!(
-            engine.chain_state.height, before_height,
-            "height rolled back"
-        );
-        assert_eq!(engine.chain_state.tip_hash, before_tip, "tip rolled back");
+        assert_eq!(engine.chain_state, before_state, "chainstate rolled back");
 
         // Restore permissions for cleanup.
         let mut perms = std::fs::metadata(&undo_dir)

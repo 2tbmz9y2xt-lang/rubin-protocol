@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -9,7 +10,8 @@ use rubin_consensus::{
     encode_compact_size, parse_block_bytes, ConnectBlockBasicSummary, InMemoryChainState, Outpoint,
     RotationProvider, SuiteRegistry, UtxoEntry,
 };
-use serde::{Deserialize, Serialize};
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha3::{Digest, Sha3_256};
 
 use crate::genesis::validate_genesis_identity;
@@ -22,7 +24,8 @@ use crate::store_envelope::{
 };
 
 pub const CHAIN_STATE_FILE_NAME: &str = "chainstate.json";
-const CHAIN_STATE_DISK_VERSION: u32 = 1;
+const CHAIN_STATE_DISK_VERSION_V1: u32 = 1;
+const CHAIN_STATE_DISK_VERSION: u32 = 2;
 pub const UTXO_SET_HASH_DST: &[u8] = b"RUBINv1-utxo-set-hash/";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,7 +33,7 @@ pub struct ChainState {
     pub has_tip: bool,
     pub height: u64,
     pub tip_hash: [u8; 32],
-    pub already_generated: u64,
+    pub already_generated: u128,
     pub utxos: HashMap<Outpoint, UtxoEntry>,
 }
 
@@ -56,8 +59,8 @@ pub struct ChainStateConnectSummary {
     pub block_height: u64,
     pub block_hash: [u8; 32],
     pub sum_fees: u128,
-    pub already_generated: u64,
-    pub already_generated_n1: u64,
+    pub already_generated: u128,
+    pub already_generated_n1: u128,
     pub utxo_count: u64,
     /// Populated ONLY by the `SyncEngine` canonical-apply path
     /// (`SyncEngine::apply_block_with_target`), in canonical order: a direct
@@ -71,24 +74,498 @@ pub struct ChainStateConnectSummary {
     pub canonical_applied_blocks: Vec<CanonicalAppliedBlock>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ChainStateDisk {
+    tip_hash: String,
+    utxos: Vec<UtxoDiskEntry>,
+    height: u64,
+    #[serde(serialize_with = "rubin_consensus::uint128_json::serialize")]
+    already_generated: u128,
     version: u32,
     has_tip: bool,
-    height: u64,
-    tip_hash: String,
-    already_generated: u64,
-    utxos: Vec<UtxoDiskEntry>,
+}
+
+const CHAINSTATE_MISSING_VERSION: &str = "CHAINSTATE_SCHEMA: missing version";
+const CHAINSTATE_DUPLICATE_VERSION: &str = "CHAINSTATE_SCHEMA: duplicate version";
+const CHAINSTATE_INVALID_VERSION: &str =
+    "CHAINSTATE_SCHEMA: version must be a canonical unsigned JSON integer through u32";
+const CHAINSTATE_UNSUPPORTED_VERSION_PREFIX: &str = "CHAINSTATE_SCHEMA: unsupported version ";
+const CHAINSTATE_MISSING_SUPPLY: &str = "CHAINSTATE_SCHEMA: missing already_generated";
+const CHAINSTATE_DUPLICATE_SUPPLY: &str = "CHAINSTATE_SCHEMA: duplicate already_generated";
+const CHAINSTATE_INVALID_V1_SUPPLY: &str =
+    "CHAINSTATE_SCHEMA: v1 already_generated must be a nonnegative JSON integer through u64";
+const CHAINSTATE_INVALID_V2_SUPPLY: &str =
+    "CHAINSTATE_SCHEMA: v2 already_generated must be a canonical unsigned decimal string within u128";
+const CHAINSTATE_PAYLOAD_NOT_CANONICAL: &str =
+    "CHAINSTATE_SCHEMA: payload is not the canonical encoding";
+
+enum ChainStateScalarToken {
+    Null,
+    Unsigned(u64),
+    String { value: String, unescaped: bool },
+    Other,
+}
+
+impl ChainStateScalarToken {
+    fn is_null(&self) -> bool {
+        matches!(self, Self::Null)
+    }
+}
+
+struct ChainStateScalarVisitor;
+
+impl<'de> Visitor<'de> for ChainStateScalarVisitor {
+    type Value = ChainStateScalarToken;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("one JSON value")
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(ChainStateScalarToken::Null)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(ChainStateScalarToken::Null)
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(ChainStateScalarToken::Unsigned(value))
+    }
+
+    fn visit_u128<E>(self, value: u128) -> Result<Self::Value, E> {
+        Ok(u64::try_from(value).map_or(
+            ChainStateScalarToken::Other,
+            ChainStateScalarToken::Unsigned,
+        ))
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(ChainStateScalarToken::Other)
+    }
+
+    fn visit_i128<E>(self, _value: i128) -> Result<Self::Value, E> {
+        Ok(ChainStateScalarToken::Other)
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(ChainStateScalarToken::Other)
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(ChainStateScalarToken::Other)
+    }
+
+    fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E> {
+        Ok(ChainStateScalarToken::String {
+            value: value.to_owned(),
+            unescaped: true,
+        })
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(ChainStateScalarToken::String {
+            value: value.to_owned(),
+            unescaped: false,
+        })
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(ChainStateScalarToken::String {
+            value,
+            unescaped: false,
+        })
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(ChainStateScalarToken::Other)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(ChainStateScalarToken::Other)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChainStateScalarToken {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(ChainStateScalarVisitor)
+    }
+}
+
+fn json_number_out_of_range(error: &impl fmt::Display) -> bool {
+    error.to_string().starts_with("number out of range")
+}
+
+fn validate_chainstate_version<E: serde::de::Error>(
+    version_seen: bool,
+    version_duplicate: bool,
+    version_null: bool,
+    version: Option<ChainStateScalarToken>,
+) -> Result<u32, E> {
+    if let Some(error) =
+        chainstate_version_presence_error(version_seen, version_duplicate, version_null)
+    {
+        return Err(E::custom(error));
+    }
+    let version = match version {
+        Some(ChainStateScalarToken::Unsigned(value)) => {
+            u32::try_from(value).map_err(|_| E::custom(CHAINSTATE_INVALID_VERSION))?
+        }
+        _ => return Err(E::custom(CHAINSTATE_INVALID_VERSION)),
+    };
+    if version != CHAIN_STATE_DISK_VERSION_V1 && version != CHAIN_STATE_DISK_VERSION {
+        return Err(E::custom(format!(
+            "{CHAINSTATE_UNSUPPORTED_VERSION_PREFIX}{version}"
+        )));
+    }
+    Ok(version)
+}
+
+fn chainstate_version_presence_error(
+    version_seen: bool,
+    version_duplicate: bool,
+    version_null: bool,
+) -> Option<&'static str> {
+    if !version_seen || version_null {
+        Some(CHAINSTATE_MISSING_VERSION)
+    } else if version_duplicate {
+        Some(CHAINSTATE_DUPLICATE_VERSION)
+    } else {
+        None
+    }
+}
+
+fn chainstate_supply_presence_error(
+    supply_seen: bool,
+    supply_duplicate: bool,
+    supply_null: bool,
+) -> Option<&'static str> {
+    if !supply_seen || supply_null {
+        Some(CHAINSTATE_MISSING_SUPPLY)
+    } else if supply_duplicate {
+        Some(CHAINSTATE_DUPLICATE_SUPPLY)
+    } else {
+        None
+    }
+}
+
+#[derive(Default)]
+struct ChainStateTargetPresence {
+    version_seen: bool,
+    version_duplicate: bool,
+    version_null: bool,
+    supply_seen: bool,
+    supply_duplicate: bool,
+    supply_null: bool,
+}
+
+struct ChainStateTargetPresenceVisitor;
+
+impl<'de> Visitor<'de> for ChainStateTargetPresenceVisitor {
+    type Value = ChainStateTargetPresence;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a chainstate JSON object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut presence = ChainStateTargetPresence::default();
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "version" => {
+                    let is_null = map.next_value::<Option<IgnoredAny>>()?.is_none();
+                    presence.version_duplicate |= presence.version_seen;
+                    presence.version_seen = true;
+                    presence.version_null |= is_null;
+                }
+                "already_generated" => {
+                    let is_null = map.next_value::<Option<IgnoredAny>>()?.is_none();
+                    presence.supply_duplicate |= presence.supply_seen;
+                    presence.supply_seen = true;
+                    presence.supply_null |= is_null;
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(presence)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChainStateTargetPresence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(ChainStateTargetPresenceVisitor)
+    }
+}
+
+struct ChainStateVersion(u32);
+
+struct ChainStateVersionVisitor;
+
+impl<'de> Visitor<'de> for ChainStateVersionVisitor {
+    type Value = ChainStateVersion;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a chainstate JSON object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut version = None;
+        let mut version_seen = false;
+        let mut version_duplicate = false;
+        let mut version_null = false;
+
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "version" {
+                let token = map.next_value::<ChainStateScalarToken>().map_err(|error| {
+                    if json_number_out_of_range(&error) {
+                        serde::de::Error::custom(CHAINSTATE_INVALID_VERSION)
+                    } else {
+                        error
+                    }
+                })?;
+                let token_null = token.is_null();
+                if version_seen {
+                    version_duplicate = true;
+                } else {
+                    version = Some(token);
+                }
+                version_seen = true;
+                version_null |= token_null;
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+
+        validate_chainstate_version(version_seen, version_duplicate, version_null, version)
+            .map(ChainStateVersion)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChainStateVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(ChainStateVersionVisitor)
+    }
+}
+
+struct ChainStateSupplySeed(u32);
+
+struct ChainStateSupplyVisitor {
+    version: u32,
+}
+
+impl<'de> Visitor<'de> for ChainStateSupplyVisitor {
+    type Value = u128;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a chainstate JSON object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut supply = None;
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "already_generated" {
+                let token = map.next_value::<ChainStateScalarToken>().map_err(|error| {
+                    if json_number_out_of_range(&error) {
+                        serde::de::Error::custom(if self.version == CHAIN_STATE_DISK_VERSION_V1 {
+                            CHAINSTATE_INVALID_V1_SUPPLY
+                        } else {
+                            CHAINSTATE_INVALID_V2_SUPPLY
+                        })
+                    } else {
+                        error
+                    }
+                })?;
+                if supply.is_none() {
+                    supply = Some(token);
+                }
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+        validate_chainstate_supply(self.version, supply)
+    }
+}
+
+impl<'de> DeserializeSeed<'de> for ChainStateSupplySeed {
+    type Value = u128;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(ChainStateSupplyVisitor { version: self.0 })
+    }
+}
+
+fn validate_chainstate_supply<E: serde::de::Error>(
+    version: u32,
+    supply: Option<ChainStateScalarToken>,
+) -> Result<u128, E> {
+    match (version, supply) {
+        (CHAIN_STATE_DISK_VERSION_V1, Some(ChainStateScalarToken::Unsigned(value))) => {
+            Ok(u128::from(value))
+        }
+        (CHAIN_STATE_DISK_VERSION_V1, _) => Err(E::custom(CHAINSTATE_INVALID_V1_SUPPLY)),
+        (
+            CHAIN_STATE_DISK_VERSION,
+            Some(ChainStateScalarToken::String {
+                value,
+                unescaped: true,
+            }),
+        ) => rubin_consensus::uint128_json::parse_canonical_decimal(&value)
+            .ok_or_else(|| E::custom(CHAINSTATE_INVALID_V2_SUPPLY)),
+        (CHAIN_STATE_DISK_VERSION, _) => Err(E::custom(CHAINSTATE_INVALID_V2_SUPPLY)),
+        _ => unreachable!("supported chainstate version checked above"),
+    }
+}
+
+struct ChainStateDiskVisitor;
+
+impl<'de> Visitor<'de> for ChainStateDiskVisitor {
+    type Value = ChainStateDisk;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a chainstate JSON object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut version = None;
+        let mut version_seen = false;
+        let mut version_duplicate = false;
+        let mut version_null = false;
+        let mut already_generated = None;
+        let mut supply_seen = false;
+        let mut supply_duplicate = false;
+        let mut supply_null = false;
+        let mut has_tip = None;
+        let mut height = None;
+        let mut tip_hash = None;
+        let mut utxos = None;
+
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "version" => {
+                    let token = map.next_value::<ChainStateScalarToken>()?;
+                    let token_null = token.is_null();
+                    if version_seen {
+                        version_duplicate = true;
+                    } else {
+                        version = Some(token);
+                    }
+                    version_seen = true;
+                    version_null |= token_null;
+                }
+                "already_generated" => {
+                    let token = map.next_value::<ChainStateScalarToken>()?;
+                    let token_null = token.is_null();
+                    if supply_seen {
+                        supply_duplicate = true;
+                    } else {
+                        already_generated = Some(token);
+                    }
+                    supply_seen = true;
+                    supply_null |= token_null;
+                }
+                "has_tip" => {
+                    if has_tip.is_some() {
+                        return Err(serde::de::Error::duplicate_field("has_tip"));
+                    }
+                    has_tip = Some(map.next_value()?);
+                }
+                "height" => {
+                    if height.is_some() {
+                        return Err(serde::de::Error::duplicate_field("height"));
+                    }
+                    height = Some(map.next_value()?);
+                }
+                "tip_hash" => {
+                    if tip_hash.is_some() {
+                        return Err(serde::de::Error::duplicate_field("tip_hash"));
+                    }
+                    tip_hash = Some(map.next_value()?);
+                }
+                "utxos" => {
+                    if utxos.is_some() {
+                        return Err(serde::de::Error::duplicate_field("utxos"));
+                    }
+                    utxos = Some(map.next_value()?);
+                }
+                _ => {
+                    return Err(serde::de::Error::custom(CHAINSTATE_PAYLOAD_NOT_CANONICAL));
+                }
+            }
+        }
+
+        let version =
+            validate_chainstate_version(version_seen, version_duplicate, version_null, version)?;
+
+        if let Some(error) =
+            chainstate_supply_presence_error(supply_seen, supply_duplicate, supply_null)
+        {
+            return Err(serde::de::Error::custom(error));
+        }
+        let already_generated = validate_chainstate_supply(version, already_generated)?;
+
+        Ok(ChainStateDisk {
+            version,
+            has_tip: has_tip.ok_or_else(|| serde::de::Error::missing_field("has_tip"))?,
+            height: height.ok_or_else(|| serde::de::Error::missing_field("height"))?,
+            tip_hash: tip_hash.ok_or_else(|| serde::de::Error::missing_field("tip_hash"))?,
+            already_generated,
+            utxos: utxos.ok_or_else(|| serde::de::Error::missing_field("utxos"))?,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for ChainStateDisk {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(ChainStateDiskVisitor)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UtxoDiskEntry {
     txid: String,
-    vout: u32,
-    value: u64,
-    covenant_type: u16,
     covenant_data: String,
+    value: u64,
     creation_height: u64,
+    vout: u32,
+    covenant_type: u16,
     created_by_coinbase: bool,
 }
 
@@ -120,8 +597,8 @@ impl ChainState {
             )
         })?;
         payload.push(b'\n');
-        // RUB-1134: the pre-envelope bytes become the exact envelope payload;
-        // the inner encoding and the atomic write path below are unchanged.
+        // RUB-1153 canonicalizes the inner-v2 bytes; RUB-1134's outer
+        // RUBIN_CHAINSTATE_V1 envelope and atomic write path stay unchanged.
         let raw =
             marshal_store_envelope(STORE_ENVELOPE_CHAIN_STATE, &payload).map_err(|error| {
                 atomic_write_error_before(path, AtomicWriteOperation::Overwrite, error)
@@ -183,7 +660,7 @@ impl ChainState {
         validate_genesis_identity(block_height, chain_id, block_bytes)?;
         let mut work_state = InMemoryChainState {
             utxos: copy_utxo_set(&self.utxos),
-            already_generated: u128::from(self.already_generated),
+            already_generated: self.already_generated,
         };
 
         let connect_summary: ConnectBlockBasicSummary =
@@ -291,19 +768,12 @@ fn apply_connected_block(
     work_state: InMemoryChainState,
     connect_summary: ConnectBlockBasicSummary,
 ) -> Result<ChainStateConnectSummary, String> {
-    let state_already_generated = u64::try_from(work_state.already_generated)
-        .map_err(|_| "already_generated overflow".to_string())?;
-    let already_generated = u64::try_from(connect_summary.already_generated)
-        .map_err(|_| "already_generated overflow".to_string())?;
-    let already_generated_n1 = u64::try_from(connect_summary.already_generated_n1)
-        .map_err(|_| "already_generated overflow".to_string())?;
-
     let summary = ChainStateConnectSummary {
         block_height,
         block_hash: tip_hash,
         sum_fees: connect_summary.sum_fees,
-        already_generated,
-        already_generated_n1,
+        already_generated: connect_summary.already_generated,
+        already_generated_n1: connect_summary.already_generated_n1,
         utxo_count: connect_summary.utxo_count,
         // Left EMPTY on purpose: connecting to an in-memory chain state is
         // not a canonical-application event. Only the SyncEngine
@@ -316,7 +786,7 @@ fn apply_connected_block(
     state.has_tip = true;
     state.height = block_height;
     state.tip_hash = tip_hash;
-    state.already_generated = state_already_generated;
+    state.already_generated = work_state.already_generated;
     state.utxos = work_state.utxos;
 
     Ok(summary)
@@ -386,9 +856,90 @@ pub fn load_chain_state<P: AsRef<Path>>(path: P) -> Result<ChainState, String> {
     // from the NotFound branch, so a corrupt file can never ride the
     // absent-file fallback; the STORE_INTEGRITY message is Go's verbatim.
     let payload = open_store_envelope(STORE_ENVELOPE_CHAIN_STATE, &raw)?;
-    let disk: ChainStateDisk = serde_json::from_slice(&payload)
-        .map_err(|e| format!("parse chainstate {}: {e}", path.display()))?;
+    if payload
+        .iter()
+        .copied()
+        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+        .is_some_and(|byte| byte != b'{')
+    {
+        let mut syntax_deserializer = serde_json::Deserializer::from_slice(&payload);
+        if IgnoredAny::deserialize(&mut syntax_deserializer).is_ok() {
+            return Err("decode chainstate: top-level value must be an object".to_string());
+        }
+    }
+    // Presence/null/duplicate classification uses `IgnoredAny`, so a later
+    // syntactically valid extreme number cannot preempt the target-field order.
+    let mut presence_deserializer = serde_json::Deserializer::from_slice(&payload);
+    let presence = ChainStateTargetPresence::deserialize(&mut presence_deserializer)
+        .map_err(chainstate_decode_error)?;
+    presence_deserializer
+        .end()
+        .map_err(|_| "decode chainstate: trailing content".to_string())?;
+    if let Some(error) = chainstate_version_presence_error(
+        presence.version_seen,
+        presence.version_duplicate,
+        presence.version_null,
+    ) {
+        return Err(error.to_string());
+    }
+    let mut version_deserializer = serde_json::Deserializer::from_slice(&payload);
+    let version = ChainStateVersion::deserialize(&mut version_deserializer)
+        .map_err(chainstate_decode_error)?
+        .0;
+    if let Some(error) = chainstate_supply_presence_error(
+        presence.supply_seen,
+        presence.supply_duplicate,
+        presence.supply_null,
+    ) {
+        return Err(error.to_string());
+    }
+    let mut supply_deserializer = serde_json::Deserializer::from_slice(&payload);
+    ChainStateSupplySeed(version)
+        .deserialize(&mut supply_deserializer)
+        .map_err(chainstate_decode_error)?;
+    let mut deserializer = serde_json::Deserializer::from_slice(&payload);
+    let disk = ChainStateDisk::deserialize(&mut deserializer)
+        .map_err(|_| CHAINSTATE_PAYLOAD_NOT_CANONICAL.to_string())?;
+    deserializer
+        .end()
+        .map_err(|_| "decode chainstate: trailing content".to_string())?;
+    if chainstate_has_edge_ascii_whitespace(&disk) {
+        return Err(CHAINSTATE_PAYLOAD_NOT_CANONICAL.to_string());
+    }
     chain_state_from_disk(disk)
+}
+
+fn chainstate_has_edge_ascii_whitespace(disk: &ChainStateDisk) -> bool {
+    let whitespace = [' ', '\t', '\n', '\r', '\u{000b}', '\u{000c}'];
+    let has_edge = |value: &str| value.trim_matches(&whitespace[..]) != value;
+    has_edge(&disk.tip_hash)
+        || disk
+            .utxos
+            .iter()
+            .any(|item| has_edge(&item.txid) || has_edge(&item.covenant_data))
+}
+
+fn chainstate_decode_error(error: serde_json::Error) -> String {
+    let rendered = error.to_string();
+    for exact in [
+        CHAINSTATE_MISSING_VERSION,
+        CHAINSTATE_DUPLICATE_VERSION,
+        CHAINSTATE_INVALID_VERSION,
+        CHAINSTATE_MISSING_SUPPLY,
+        CHAINSTATE_DUPLICATE_SUPPLY,
+        CHAINSTATE_INVALID_V1_SUPPLY,
+        CHAINSTATE_INVALID_V2_SUPPLY,
+    ] {
+        if rendered.starts_with(exact) {
+            return exact.to_string();
+        }
+    }
+    if let Some(rest) = rendered.strip_prefix(CHAINSTATE_UNSUPPORTED_VERSION_PREFIX) {
+        if let Some(version) = rest.split_ascii_whitespace().next() {
+            return format!("{CHAINSTATE_UNSUPPORTED_VERSION_PREFIX}{version}");
+        }
+    }
+    format!("decode chainstate: {rendered}")
 }
 
 fn state_to_disk(s: &ChainState) -> Result<ChainStateDisk, String> {
@@ -397,11 +948,11 @@ fn state_to_disk(s: &ChainState) -> Result<ChainStateDisk, String> {
         .iter()
         .map(|(op, entry)| UtxoDiskEntry {
             txid: hex::encode(op.txid),
-            vout: op.vout,
-            value: entry.value,
-            covenant_type: entry.covenant_type,
             covenant_data: hex::encode(&entry.covenant_data),
+            value: entry.value,
             creation_height: entry.creation_height,
+            vout: op.vout,
+            covenant_type: entry.covenant_type,
             created_by_coinbase: entry.created_by_coinbase,
         })
         .collect();
@@ -411,12 +962,12 @@ fn state_to_disk(s: &ChainState) -> Result<ChainStateDisk, String> {
     });
 
     Ok(ChainStateDisk {
+        tip_hash: hex::encode(s.tip_hash),
+        utxos,
+        height: s.height,
+        already_generated: s.already_generated,
         version: CHAIN_STATE_DISK_VERSION,
         has_tip: s.has_tip,
-        height: s.height,
-        tip_hash: hex::encode(s.tip_hash),
-        already_generated: s.already_generated,
-        utxos,
     })
 }
 
@@ -468,8 +1019,11 @@ fn utxo_entry_explicitly_uses_suite(entry: &UtxoEntry, suite_id: u8) -> bool {
 }
 
 fn chain_state_from_disk(disk: ChainStateDisk) -> Result<ChainState, String> {
-    if disk.version != CHAIN_STATE_DISK_VERSION {
-        return Err(format!("unsupported chainstate version: {}", disk.version));
+    if disk.version != CHAIN_STATE_DISK_VERSION_V1 && disk.version != CHAIN_STATE_DISK_VERSION {
+        return Err(format!(
+            "{}{}",
+            CHAINSTATE_UNSUPPORTED_VERSION_PREFIX, disk.version
+        ));
     }
 
     let tip_hash = parse_hex32("tip_hash", &disk.tip_hash)?;
@@ -525,25 +1079,62 @@ mod tests {
     use crate::io_utils::unique_temp_path;
 
     use super::{
-        apply_connected_block, chain_state_path, copy_utxo_entry, copy_utxo_set, load_chain_state,
-        ChainState, ChainStateDisk, CHAIN_STATE_FILE_NAME, STORE_ENVELOPE_CHAIN_STATE,
+        apply_connected_block, chain_state_from_disk, chain_state_path, copy_utxo_entry,
+        copy_utxo_set, load_chain_state, state_to_disk, ChainState, CHAINSTATE_DUPLICATE_SUPPLY,
+        CHAINSTATE_DUPLICATE_VERSION, CHAINSTATE_INVALID_V1_SUPPLY, CHAINSTATE_INVALID_V2_SUPPLY,
+        CHAINSTATE_INVALID_VERSION, CHAINSTATE_MISSING_SUPPLY, CHAINSTATE_MISSING_VERSION,
+        CHAINSTATE_PAYLOAD_NOT_CANONICAL, CHAIN_STATE_FILE_NAME, STORE_ENVELOPE_CHAIN_STATE,
     };
-    use rubin_consensus::constants::POW_LIMIT;
+    use rubin_consensus::constants::{
+        EMISSION_SPEED_FACTOR, MINEABLE_CAP, POW_LIMIT, TAIL_EMISSION_PER_BLOCK,
+    };
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
     use rubin_consensus::{
         apply_non_coinbase_tx_basic_with_mtp, block_hash, block_subsidy, encode_compact_size,
         merkle_root_txids, parse_block_bytes, parse_tx, ConnectBlockBasicSummary,
         InMemoryChainState, Outpoint, UtxoEntry, BLOCK_HEADER_BYTES,
     };
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
 
     const GENESIS_ONLY_STATE_DIGEST_HEX: &str =
         "8b172fb3a5e70b56de9ae78ce750c04eccbc4dd8b3be55751252e5a1b4f2e752";
     const GENESIS_PLUS_HEIGHT_ONE_STATE_DIGEST_HEX: &str =
         "a26ade4263f7659ef250d13c05a05137c61e223d1fdd585d0c70a5165a94bb5e";
+
+    fn reachable_maximum_accumulated_subsidy() -> u128 {
+        let mut height = 1u64;
+        let mut accumulated = 0u64;
+        loop {
+            let base_reward = (MINEABLE_CAP - accumulated) >> EMISSION_SPEED_FACTOR;
+            let subsidy = base_reward.max(TAIL_EMISSION_PER_BLOCK);
+            if subsidy == TAIL_EMISSION_PER_BLOCK {
+                break;
+            }
+            accumulated = accumulated.checked_add(subsidy).expect("pre-tail supply");
+            height = height.checked_add(1).expect("pre-tail height");
+        }
+
+        assert_eq!(height, 5_771_107, "first tail subsidy height");
+        assert_eq!(
+            accumulated, 4_880_049_936_696_791,
+            "accumulated subsidy before first tail block"
+        );
+        assert_eq!(
+            block_subsidy(height, u128::from(accumulated)),
+            TAIL_EMISSION_PER_BLOCK
+        );
+        let tail_blocks = u128::from(u64::MAX - height + 1);
+        let total = u128::from(accumulated) + tail_blocks * u128::from(TAIL_EMISSION_PER_BLOCK);
+        assert_eq!(total, 350_965_446_908_158_964_928_367_166);
+        total
+    }
     const DEVNET_GENESIS_FIXTURE_JSON: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../../../conformance/fixtures/CV-DEVNET-GENESIS.json"
+    ));
+    const DEVNET_CHAIN_FIXTURE_JSON: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../../conformance/fixtures/CV-DEVNET-CHAIN.json"
     ));
     const DEVNET_SUBSIDY_FIXTURE_JSON: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -559,7 +1150,8 @@ mod tests {
         vectors: Vec<T>,
     }
 
-    #[derive(Clone, Debug, Deserialize)]
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
     struct FixtureUtxo {
         txid: String,
         vout: u32,
@@ -570,11 +1162,13 @@ mod tests {
         created_by_coinbase: bool,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
     struct ChainStateAfterFixture {
         tip_hash: String,
         height: u64,
-        already_generated: u64,
+        already_generated: String,
+        version: u32,
         has_tip: bool,
         utxos: Vec<FixtureUtxo>,
     }
@@ -585,7 +1179,8 @@ mod tests {
         block_hex: String,
         chain_id: String,
         height: u64,
-        already_generated: u64,
+        #[serde(deserialize_with = "rubin_consensus::uint128_json::deserialize")]
+        already_generated: u128,
         utxos: Vec<FixtureUtxo>,
         prev_timestamps: Vec<u64>,
         expected_prev_hash: Option<String>,
@@ -600,8 +1195,10 @@ mod tests {
         #[serde(deserialize_with = "rubin_consensus::uint128_json::deserialize")]
         expect_sum_fees: u128,
         expect_utxo_count: u64,
-        expect_already_generated: u64,
-        expect_already_generated_n1: u64,
+        #[serde(deserialize_with = "rubin_consensus::uint128_json::deserialize")]
+        expect_already_generated: u128,
+        #[serde(deserialize_with = "rubin_consensus::uint128_json::deserialize")]
+        expect_already_generated_n1: u128,
         block_hash: String,
         chainstate_after: Option<ChainStateAfterFixture>,
     }
@@ -649,6 +1246,29 @@ mod tests {
         out
     }
 
+    fn fixture_chainstate(value: &ChainStateAfterFixture) -> ChainState {
+        let already_generated = value.already_generated.parse().expect("u128 supply");
+        ChainState {
+            has_tip: value.has_tip,
+            height: value.height,
+            tip_hash: parse_hex32_test("chainstate_after tip_hash", &value.tip_hash),
+            already_generated,
+            utxos: fixture_utxos_to_map(&value.utxos),
+        }
+    }
+
+    fn load_fixture_chainstate(id: &str, value: &ChainStateAfterFixture) -> ChainState {
+        assert_eq!(value.version, 2, "{id}");
+        let dir = unique_temp_path(&format!("rubin-chainstate-fixture-{id}"));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = chain_state_path(&dir);
+        let payload = serde_json::to_vec(value).expect("encode chainstate_after");
+        write_chainstate_payload(&path, &payload);
+        let loaded = load_chain_state(&path).unwrap_or_else(|error| panic!("{id}: {error}"));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        loaded
+    }
+
     fn chainstate_from_connect_fixture(v: &DevnetConnectBlockVector) -> ChainState {
         let mut state = ChainState::new();
         state.already_generated = v.already_generated;
@@ -692,7 +1312,7 @@ mod tests {
 
     fn coinbase_only_block_with_supply(
         height: u64,
-        already_generated: u64,
+        already_generated: u128,
         prev_hash: [u8; 32],
     ) -> Vec<u8> {
         let witness_root = witness_merkle_root_wtxids(&[[0u8; 32]]).expect("witness root");
@@ -968,8 +1588,8 @@ mod tests {
             name: "already_generated_edited_stale_checksum",
             body: Box::new(|valid, payload| {
                 let edited = String::from_utf8_lossy(payload).replacen(
-                    "\"already_generated\": 4200",
-                    "\"already_generated\": 4201",
+                    "\"already_generated\": \"4200\"",
+                    "\"already_generated\": \"4201\"",
                     1,
                 );
                 assert_ne!(edited.as_bytes(), payload, "the edit did not apply");
@@ -984,7 +1604,7 @@ mod tests {
             name: "inner_payload_malformed",
             body: Box::new(|_, _| rewrap(STORE_ENVELOPE_CHAIN_STATE, b"{not json")),
             want_msg: None,
-            want_sub: Some("parse chainstate"),
+            want_sub: Some("decode chainstate"),
             not_integrity: true,
         });
 
@@ -1017,27 +1637,560 @@ mod tests {
         let path = chain_state_path(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
 
-        let bad = ChainStateDisk {
-            version: 999,
-            has_tip: false,
-            height: 0,
-            tip_hash: "00".repeat(32),
-            already_generated: 0,
-            utxos: vec![],
-        };
-        let mut payload = serde_json::to_vec_pretty(&bad).expect("json");
-        payload.push(b'\n');
+        let payload = format!(
+            r#"{{"version":999,"has_tip":false,"height":0,"tip_hash":"{}","already_generated":"0","utxos":[]}}"#,
+            "00".repeat(32)
+        );
         // RUB-1134: planted INSIDE a valid frame, so this row still tests the
         // INNER version check rather than the envelope's legacy verdict.
         std::fs::write(
             &path,
-            crate::store_envelope::tests::rewrap(STORE_ENVELOPE_CHAIN_STATE, &payload),
+            crate::store_envelope::tests::rewrap(STORE_ENVELOPE_CHAIN_STATE, payload.as_bytes()),
         )
         .expect("write");
 
         let err = load_chain_state(&path).unwrap_err();
-        assert!(err.contains("unsupported chainstate version"), "{err}");
+        assert_eq!(err, "CHAINSTATE_SCHEMA: unsupported version 999");
+        let mut disk = state_to_disk(&ChainState::new()).expect("disk");
+        disk.version = 999;
+        assert_eq!(chain_state_from_disk(disk).unwrap_err(), err);
 
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    fn write_chainstate_payload(path: &std::path::Path, payload: &[u8]) {
+        std::fs::write(
+            path,
+            crate::store_envelope::tests::rewrap(STORE_ENVELOPE_CHAIN_STATE, payload),
+        )
+        .expect("write wrapped chainstate payload");
+    }
+
+    #[test]
+    fn chainstate_v1_read_and_v2_u128_round_trip() {
+        let dir = unique_temp_path("rubin-chainstate-v2-roundtrip");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = chain_state_path(&dir);
+        let v1 = format!(
+            r#"{{"tip_hash":"{}","utxos":[],"height":9,"already_generated":18446744073709551615,"version":1,"has_tip":true}}"#,
+            "00".repeat(32)
+        );
+        write_chainstate_payload(&path, v1.as_bytes());
+        let mut state = load_chain_state(&path).expect("load v1");
+        assert_eq!(state.already_generated, u128::from(u64::MAX));
+
+        let reachable_max = reachable_maximum_accumulated_subsidy();
+        state.already_generated = reachable_max;
+        state.save(&path).expect("save v2");
+        let raw = std::fs::read(&path).expect("read v2");
+        let payload = crate::store_envelope::open_store_envelope(STORE_ENVELOPE_CHAIN_STATE, &raw)
+            .expect("open v2 envelope");
+        let payload_text = String::from_utf8(payload).expect("v2 payload utf8");
+        assert!(payload_text.contains("\"version\": 2"), "{payload_text}");
+        assert!(
+            payload_text.contains("\"already_generated\": \"350965446908158964928367166\""),
+            "{payload_text}"
+        );
+        let loaded = load_chain_state(&path).expect("load v2");
+        assert_eq!(loaded.already_generated, reachable_max);
+
+        state.already_generated = u128::MAX;
+        state.save(&path).expect("save v2 u128 max");
+        let raw = std::fs::read(&path).expect("read v2 u128 max");
+        let payload = crate::store_envelope::open_store_envelope(STORE_ENVELOPE_CHAIN_STATE, &raw)
+            .expect("open v2 u128 max envelope");
+        assert!(String::from_utf8(payload)
+            .expect("v2 u128 max payload utf8")
+            .contains("\"already_generated\": \"340282366920938463463374607431768211455\""));
+        assert_eq!(
+            load_chain_state(&path)
+                .expect("load v2 u128 max")
+                .already_generated,
+            u128::MAX
+        );
+
+        const CANONICAL_V2_PAYLOAD: &str = r#"{
+  "tip_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "utxos": [
+    {
+      "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+      "covenant_data": "aabb",
+      "value": 9,
+      "creation_height": 5,
+      "vout": 3,
+      "covenant_type": 1,
+      "created_by_coinbase": false
+    }
+  ],
+  "height": 7,
+  "already_generated": "18446744073709551615",
+  "version": 2,
+  "has_tip": true
+}
+"#;
+        const CANONICAL_V2_ENVELOPE: &str = r#"{"version":1,"payload_b64":"ewogICJ0aXBfaGFzaCI6ICIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwKICAidXR4b3MiOiBbCiAgICB7CiAgICAgICJ0eGlkIjogIjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLAogICAgICAiY292ZW5hbnRfZGF0YSI6ICJhYWJiIiwKICAgICAgInZhbHVlIjogOSwKICAgICAgImNyZWF0aW9uX2hlaWdodCI6IDUsCiAgICAgICJ2b3V0IjogMywKICAgICAgImNvdmVuYW50X3R5cGUiOiAxLAogICAgICAiY3JlYXRlZF9ieV9jb2luYmFzZSI6IGZhbHNlCiAgICB9CiAgXSwKICAiaGVpZ2h0IjogNywKICAiYWxyZWFkeV9nZW5lcmF0ZWQiOiAiMTg0NDY3NDQwNzM3MDk1NTE2MTUiLAogICJ2ZXJzaW9uIjogMiwKICAiaGFzX3RpcCI6IHRydWUKfQo=","checksum":"30b3867741b76acdc408c8e668a5c015dec9660a4403df4cdb8451f0379c737b"}
+"#;
+        const HISTORICAL_GO_V1: &str = r#"{"tip_hash":"1111111111111111111111111111111111111111111111111111111111111111","utxos":[{"txid":"2222222222222222222222222222222222222222222222222222222222222222","covenant_data":"aabb","value":9,"creation_height":5,"vout":3,"covenant_type":1,"created_by_coinbase":false}],"height":7,"already_generated":18446744073709551615,"version":1,"has_tip":true}"#;
+        const HISTORICAL_RUST_V1: &str = r#"{"version":1,"has_tip":true,"height":7,"tip_hash":"1111111111111111111111111111111111111111111111111111111111111111","already_generated":18446744073709551615,"utxos":[{"txid":"2222222222222222222222222222222222222222222222222222222222222222","vout":3,"value":9,"covenant_type":1,"covenant_data":"aabb","creation_height":5,"created_by_coinbase":false}]}"#;
+        let mut expected = ChainState {
+            has_tip: true,
+            height: 7,
+            tip_hash: [0x11; 32],
+            already_generated: u128::from(u64::MAX),
+            utxos: HashMap::new(),
+        };
+        expected.utxos.insert(
+            Outpoint {
+                txid: [0x22; 32],
+                vout: 3,
+            },
+            UtxoEntry {
+                value: 9,
+                covenant_type: 1,
+                covenant_data: vec![0xaa, 0xbb],
+                creation_height: 5,
+                created_by_coinbase: false,
+            },
+        );
+        expected.save(&path).expect("save canonical v2");
+        assert_eq!(
+            std::fs::read(&path).expect("read canonical v2"),
+            CANONICAL_V2_ENVELOPE.as_bytes()
+        );
+        assert_eq!(
+            crate::store_envelope::open_store_envelope(
+                STORE_ENVELOPE_CHAIN_STATE,
+                CANONICAL_V2_ENVELOPE.as_bytes(),
+            )
+            .expect("open canonical v2"),
+            CANONICAL_V2_PAYLOAD.as_bytes()
+        );
+        for (name, raw, enveloped) in [
+            ("canonical_v2", CANONICAL_V2_ENVELOPE, true),
+            ("historical_go_v1", HISTORICAL_GO_V1, false),
+            ("historical_rust_v1", HISTORICAL_RUST_V1, false),
+        ] {
+            if enveloped {
+                std::fs::write(&path, raw).expect("seed canonical envelope");
+            } else {
+                write_chainstate_payload(&path, raw.as_bytes());
+            }
+            let before = std::fs::read(&path).expect("read before load");
+            let loaded =
+                load_chain_state(&path).unwrap_or_else(|error| panic!("load {name}: {error}"));
+            assert_eq!(loaded, expected, "{name}");
+            assert_eq!(
+                std::fs::read(&path).expect("read after load"),
+                before,
+                "{name}"
+            );
+            loaded
+                .save(&path)
+                .unwrap_or_else(|error| panic!("save {name}: {error}"));
+            assert_eq!(
+                std::fs::read(&path).expect("read migrated v2"),
+                CANONICAL_V2_ENVELOPE.as_bytes(),
+                "{name}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn chainstate_schema_errors_are_exact_and_version_precedes_supply() {
+        let non_object = "decode chainstate: top-level value must be an object";
+        let mut cases: Vec<(&str, String, &str)> = [
+            ("top_level_non_object", "[]", non_object),
+            ("top_level_non_object_trailing", "[]{}", non_object),
+            ("missing_version", "{}", CHAINSTATE_MISSING_VERSION),
+            (
+                "null_version",
+                r#"{"version":null,"already_generated":"bad"}"#,
+                CHAINSTATE_MISSING_VERSION,
+            ),
+            (
+                "null_duplicate_version",
+                r#"{"version":null,"version":2,"already_generated":"0"}"#,
+                CHAINSTATE_MISSING_VERSION,
+            ),
+            (
+                "duplicate_version",
+                r#"{"version":2,"version":2,"already_generated":null}"#,
+                CHAINSTATE_DUPLICATE_VERSION,
+            ),
+            (
+                "duplicate_version_later_extreme",
+                r#"{"version":2,"version":1e400,"already_generated":"0"}"#,
+                CHAINSTATE_DUPLICATE_VERSION,
+            ),
+            (
+                "null_version_later_extreme",
+                r#"{"version":null,"version":1e400,"already_generated":"0"}"#,
+                CHAINSTATE_MISSING_VERSION,
+            ),
+            (
+                "extreme_version_then_duplicate",
+                r#"{"version":1e400,"version":2,"already_generated":"0"}"#,
+                CHAINSTATE_DUPLICATE_VERSION,
+            ),
+            (
+                "extreme_version_then_null",
+                r#"{"version":1e400,"version":null,"already_generated":"0","has_tip":false,"height":0,"tip_hash":"0000000000000000000000000000000000000000000000000000000000000000","utxos":[]}"#,
+                CHAINSTATE_MISSING_VERSION,
+            ),
+            (
+                "invalid_version_before_supply",
+                r#"{"version":"2","already_generated":null}"#,
+                CHAINSTATE_INVALID_VERSION,
+            ),
+            (
+                "supply_first_invalid_version",
+                r#"{"already_generated":null,"version":"2"}"#,
+                CHAINSTATE_INVALID_VERSION,
+            ),
+            (
+                "bool_version_before_supply",
+                r#"{"version":false,"already_generated":null}"#,
+                CHAINSTATE_INVALID_VERSION,
+            ),
+            (
+                "array_version_before_supply",
+                r#"{"version":[],"already_generated":null}"#,
+                CHAINSTATE_INVALID_VERSION,
+            ),
+            (
+                "object_version_before_supply",
+                r#"{"version":{},"already_generated":null}"#,
+                CHAINSTATE_INVALID_VERSION,
+            ),
+            (
+                "negative_version_before_supply",
+                r#"{"version":-1,"already_generated":null}"#,
+                CHAINSTATE_INVALID_VERSION,
+            ),
+            (
+                "fractional_version_before_supply",
+                r#"{"version":2.0,"already_generated":null}"#,
+                CHAINSTATE_INVALID_VERSION,
+            ),
+            (
+                "exponent_version_before_supply",
+                r#"{"version":2e0,"already_generated":null}"#,
+                CHAINSTATE_INVALID_VERSION,
+            ),
+            (
+                "extreme_exponent_version_before_supply",
+                r#"{"version":1e400,"already_generated":null}"#,
+                CHAINSTATE_INVALID_VERSION,
+            ),
+            (
+                "version_range_before_supply",
+                r#"{"version":4294967296,"already_generated":null}"#,
+                CHAINSTATE_INVALID_VERSION,
+            ),
+            (
+                "unsupported_before_supply",
+                r#"{"version":3,"already_generated":null}"#,
+                "CHAINSTATE_SCHEMA: unsupported version 3",
+            ),
+            (
+                "missing_supply",
+                r#"{"version":2}"#,
+                CHAINSTATE_MISSING_SUPPLY,
+            ),
+            (
+                "null_supply",
+                r#"{"version":2,"already_generated":null}"#,
+                CHAINSTATE_MISSING_SUPPLY,
+            ),
+            (
+                "null_duplicate_supply",
+                r#"{"version":2,"already_generated":null,"already_generated":"0"}"#,
+                CHAINSTATE_MISSING_SUPPLY,
+            ),
+            (
+                "duplicate_supply",
+                r#"{"version":2,"already_generated":"0","already_generated":"0"}"#,
+                CHAINSTATE_DUPLICATE_SUPPLY,
+            ),
+            (
+                "duplicate_supply_later_extreme",
+                r#"{"version":2,"already_generated":"0","already_generated":1e400}"#,
+                CHAINSTATE_DUPLICATE_SUPPLY,
+            ),
+            (
+                "null_supply_later_extreme",
+                r#"{"version":2,"already_generated":null,"already_generated":1e400}"#,
+                CHAINSTATE_MISSING_SUPPLY,
+            ),
+            (
+                "extreme_supply_then_duplicate",
+                r#"{"version":2,"already_generated":1e400,"already_generated":"0"}"#,
+                CHAINSTATE_DUPLICATE_SUPPLY,
+            ),
+            (
+                "extreme_supply_then_null",
+                r#"{"version":2,"already_generated":1e400,"already_generated":null,"has_tip":false,"height":0,"tip_hash":"0000000000000000000000000000000000000000000000000000000000000000","utxos":[]}"#,
+                CHAINSTATE_MISSING_SUPPLY,
+            ),
+            (
+                "v1_string",
+                r#"{"version":1,"already_generated":"0"}"#,
+                CHAINSTATE_INVALID_V1_SUPPLY,
+            ),
+            (
+                "v1_negative",
+                r#"{"version":1,"already_generated":-1}"#,
+                CHAINSTATE_INVALID_V1_SUPPLY,
+            ),
+            (
+                "v1_fraction",
+                r#"{"version":1,"already_generated":0.0}"#,
+                CHAINSTATE_INVALID_V1_SUPPLY,
+            ),
+            (
+                "v1_overflow",
+                r#"{"version":1,"already_generated":18446744073709551616}"#,
+                CHAINSTATE_INVALID_V1_SUPPLY,
+            ),
+            (
+                "v1_extreme_exponent",
+                r#"{"version":1,"already_generated":1e400}"#,
+                CHAINSTATE_INVALID_V1_SUPPLY,
+            ),
+            (
+                "v2_number",
+                r#"{"version":2,"already_generated":0}"#,
+                CHAINSTATE_INVALID_V2_SUPPLY,
+            ),
+            (
+                "v2_extreme_number",
+                r#"{"version":2,"already_generated":1e400}"#,
+                CHAINSTATE_INVALID_V2_SUPPLY,
+            ),
+            (
+                "remaining_before_invalid_v2_supply",
+                r#"{"height":1e400,"version":2,"already_generated":0}"#,
+                CHAINSTATE_INVALID_V2_SUPPLY,
+            ),
+            (
+                "invalid_v2_supply_before_remaining",
+                r#"{"version":2,"already_generated":0,"height":1e400}"#,
+                CHAINSTATE_INVALID_V2_SUPPLY,
+            ),
+            (
+                "v2_leading_zero",
+                r#"{"version":2,"already_generated":"00"}"#,
+                CHAINSTATE_INVALID_V2_SUPPLY,
+            ),
+            (
+                "v2_escaped_zero",
+                r#"{"version":2,"already_generated":"\u0030"}"#,
+                CHAINSTATE_INVALID_V2_SUPPLY,
+            ),
+            (
+                "v2_overflow",
+                r#"{"version":2,"already_generated":"340282366920938463463374607431768211456"}"#,
+                CHAINSTATE_INVALID_V2_SUPPLY,
+            ),
+            (
+                "empty_object_with_trailing_object",
+                r#"{}{}"#,
+                "decode chainstate: trailing content",
+            ),
+        ]
+        .into_iter()
+        .map(|(name, payload, want)| (name, payload.to_string(), want))
+        .collect();
+
+        let zero_hash = "00".repeat(32);
+        let valid_utxo = format!(
+            r#"{{"txid":"{}","covenant_data":"","value":1,"creation_height":0,"vout":0,"covenant_type":0,"created_by_coinbase":false}}"#,
+            "11".repeat(32)
+        );
+        let wrap_v2 = |utxos: &str| {
+            format!(
+                r#"{{"tip_hash":"{zero_hash}","utxos":{utxos},"height":0,"already_generated":"0","version":2,"has_tip":false}}"#
+            )
+        };
+        let valid_v2 = wrap_v2("[]");
+        cases.extend([
+            (
+                "remaining_missing",
+                valid_v2.replacen(",\"has_tip\":false", "", 1),
+                CHAINSTATE_PAYLOAD_NOT_CANONICAL,
+            ),
+            (
+                "remaining_null",
+                valid_v2.replacen("\"has_tip\":false", "\"has_tip\":null", 1),
+                CHAINSTATE_PAYLOAD_NOT_CANONICAL,
+            ),
+            (
+                "remaining_duplicate",
+                valid_v2.replacen("\"height\":0", "\"height\":0,\"height\":0", 1),
+                CHAINSTATE_PAYLOAD_NOT_CANONICAL,
+            ),
+            (
+                "remaining_unknown",
+                valid_v2.replacen('{', "{\"extra\":0,", 1),
+                CHAINSTATE_PAYLOAD_NOT_CANONICAL,
+            ),
+            (
+                "remaining_wrong_range",
+                valid_v2.replacen("\"height\":0", "\"height\":1e400", 1),
+                CHAINSTATE_PAYLOAD_NOT_CANONICAL,
+            ),
+            (
+                "utxos_null",
+                wrap_v2("null"),
+                CHAINSTATE_PAYLOAD_NOT_CANONICAL,
+            ),
+            (
+                "utxos_non_array",
+                wrap_v2("{}"),
+                CHAINSTATE_PAYLOAD_NOT_CANONICAL,
+            ),
+            (
+                "utxo_non_object",
+                wrap_v2("[0]"),
+                CHAINSTATE_PAYLOAD_NOT_CANONICAL,
+            ),
+            (
+                "utxo_missing",
+                wrap_v2(&format!(
+                    "[{}]",
+                    valid_utxo.replacen(",\"created_by_coinbase\":false", "", 1)
+                )),
+                CHAINSTATE_PAYLOAD_NOT_CANONICAL,
+            ),
+            (
+                "utxo_null",
+                wrap_v2(&format!(
+                    "[{}]",
+                    valid_utxo.replacen(
+                        "\"created_by_coinbase\":false",
+                        "\"created_by_coinbase\":null",
+                        1,
+                    )
+                )),
+                CHAINSTATE_PAYLOAD_NOT_CANONICAL,
+            ),
+            (
+                "utxo_duplicate",
+                wrap_v2(&format!(
+                    "[{}]",
+                    valid_utxo.replacen("\"vout\":0", "\"vout\":0,\"vout\":0", 1)
+                )),
+                CHAINSTATE_PAYLOAD_NOT_CANONICAL,
+            ),
+            (
+                "utxo_unknown",
+                wrap_v2(&format!(
+                    "[{}]",
+                    valid_utxo.replacen('}', ",\"extra\":0}", 1)
+                )),
+                CHAINSTATE_PAYLOAD_NOT_CANONICAL,
+            ),
+            (
+                "utxo_wrong_range",
+                wrap_v2(&format!(
+                    "[{}]",
+                    valid_utxo.replacen("\"vout\":0", "\"vout\":4294967296", 1)
+                )),
+                CHAINSTATE_PAYLOAD_NOT_CANONICAL,
+            ),
+            (
+                "utxo_wrong_token",
+                wrap_v2(&format!(
+                    "[{}]",
+                    valid_utxo.replacen(
+                        "\"created_by_coinbase\":false",
+                        "\"created_by_coinbase\":0",
+                        1,
+                    )
+                )),
+                CHAINSTATE_PAYLOAD_NOT_CANONICAL,
+            ),
+            (
+                "mixed_invalid_targets_and_remaining",
+                valid_v2
+                    .replacen("\"version\":2", "\"version\":\"2\"", 1)
+                    .replacen("\"already_generated\":\"0\"", "\"already_generated\":0", 1)
+                    .replacen("\"height\":0", "\"height\":1e400", 1),
+                CHAINSTATE_INVALID_VERSION,
+            ),
+            (
+                "malformed_trailing_content",
+                valid_v2.clone() + "x",
+                "decode chainstate: trailing content",
+            ),
+        ]);
+
+        let nonempty_utxo =
+            valid_utxo.replacen("\"covenant_data\":\"\"", "\"covenant_data\":\"aa\"", 1);
+        for (names, payload, value) in [
+            (
+                [
+                    "tip_hash_leading",
+                    "tip_hash_trailing",
+                    "tip_hash_vertical_tab",
+                ],
+                valid_v2.clone(),
+                zero_hash.clone(),
+            ),
+            (
+                [
+                    "utxo_txid_leading",
+                    "utxo_txid_trailing",
+                    "utxo_txid_vertical_tab",
+                ],
+                wrap_v2(&format!("[{valid_utxo}]")),
+                "11".repeat(32),
+            ),
+            (
+                [
+                    "utxo_covenant_leading",
+                    "utxo_covenant_trailing",
+                    "utxo_covenant_vertical_tab",
+                ],
+                wrap_v2(&format!("[{nonempty_utxo}]")),
+                "aa".to_string(),
+            ),
+        ] {
+            for (name, replacement) in names.into_iter().zip([
+                format!(" {value}"),
+                format!("{value} "),
+                format!("\\u000b{value}"),
+            ]) {
+                cases.push((
+                    name,
+                    payload.replacen(&value, &replacement, 1),
+                    CHAINSTATE_PAYLOAD_NOT_CANONICAL,
+                ));
+            }
+        }
+
+        for (name, payload, want) in cases {
+            let dir = unique_temp_path(&format!("rubin-chainstate-schema-{name}"));
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            let path = chain_state_path(&dir);
+            write_chainstate_payload(&path, payload.as_bytes());
+            assert_eq!(load_chain_state(&path).unwrap_err(), want, "{name}");
+            std::fs::remove_dir_all(&dir).expect("cleanup");
+        }
+
+        let dir = unique_temp_path("rubin-chainstate-schema-trailing");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = chain_state_path(&dir);
+        let trailing = format!(
+            r#"{{"version":2,"already_generated":"0","has_tip":false,"height":0,"tip_hash":"{}","utxos":[]}}{{}}"#,
+            "00".repeat(32)
+        );
+        write_chainstate_payload(&path, trailing.as_bytes());
+        assert_eq!(
+            load_chain_state(&path).unwrap_err(),
+            "decode chainstate: trailing content"
+        );
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
@@ -1125,8 +2278,11 @@ mod tests {
         );
         assert_eq!(summary.block_height, 1);
         assert_eq!(summary.already_generated, 0);
-        assert_eq!(summary.already_generated_n1, block_subsidy(1, 0));
-        assert_eq!(st.already_generated, block_subsidy(1, 0));
+        assert_eq!(
+            summary.already_generated_n1,
+            u128::from(block_subsidy(1, 0))
+        );
+        assert_eq!(st.already_generated, u128::from(block_subsidy(1, 0)));
         assert_eq!(
             hex::encode(st.state_digest()),
             GENESIS_PLUS_HEIGHT_ONE_STATE_DIGEST_HEX
@@ -1134,17 +2290,15 @@ mod tests {
     }
 
     #[test]
-    fn chainstate_supply_adapter_checks_all_values_before_any_mutation() {
-        let above_u64 = u128::from(u64::MAX) + 1;
-        let cases = [
-            (above_u64, 11, 12),
-            (11, above_u64, 12),
-            (11, 12, above_u64),
-        ];
-
-        for (work_supply, summary_supply, summary_supply_n1) in cases {
+    fn chainstate_supply_preserves_full_u128_in_state_and_summary() {
+        for supply in [
+            0,
+            u128::from(u64::MAX),
+            u128::from(u64::MAX) + 1,
+            reachable_maximum_accumulated_subsidy(),
+            u128::MAX,
+        ] {
             let mut state = nonzero_chainstate_for_supply_overflow();
-            let before = state.clone();
             let mut work_utxos = HashMap::new();
             work_utxos.insert(
                 Outpoint {
@@ -1166,13 +2320,15 @@ mod tests {
                 [0x97; 32],
                 InMemoryChainState {
                     utxos: work_utxos,
-                    already_generated: work_supply,
+                    already_generated: supply,
                 },
-                connect_summary_with_supply(summary_supply, summary_supply_n1),
-            );
+                connect_summary_with_supply(supply, supply),
+            )
+            .expect("u128 supply must not narrow");
 
-            assert_eq!(result.unwrap_err(), "already_generated overflow");
-            assert_eq!(state, before);
+            assert_eq!(result.already_generated, supply);
+            assert_eq!(result.already_generated_n1, supply);
+            assert_eq!(state.already_generated, supply);
         }
     }
 
@@ -1183,14 +2339,17 @@ mod tests {
         let mut state = nonzero_chainstate_for_supply_overflow();
         state.height = FIRST_TAIL_SUBSIDY_HEIGHT - 1;
         state.tip_hash = [0x55; 32];
-        state.already_generated = u64::MAX;
+        state.already_generated = u128::MAX;
         let before = state.clone();
         let block =
-            coinbase_only_block_with_supply(FIRST_TAIL_SUBSIDY_HEIGHT, u64::MAX, state.tip_hash);
+            coinbase_only_block_with_supply(FIRST_TAIL_SUBSIDY_HEIGHT, u128::MAX, state.tip_hash);
 
         let result = state.connect_block(&block, Some(POW_LIMIT), None, [0u8; 32]);
 
-        assert_eq!(result.unwrap_err(), "already_generated overflow");
+        assert_eq!(
+            result.unwrap_err(),
+            "BLOCK_ERR_PARSE: already_generated overflow"
+        );
         assert_eq!(state, before);
     }
 
@@ -1255,6 +2414,7 @@ mod tests {
 
     #[test]
     fn chainstate_replays_devnet_genesis_fixture() {
+        assert!(!DEVNET_GENESIS_FIXTURE_JSON.contains("\\u"));
         let fixture: FixtureFile<DevnetConnectBlockVector> =
             serde_json::from_str(DEVNET_GENESIS_FIXTURE_JSON).expect("parse genesis fixture");
         let vector = fixture
@@ -1300,25 +2460,23 @@ mod tests {
         );
 
         let expected_state = vector.chainstate_after.expect("genesis chainstate_after");
-        assert_eq!(st.has_tip, expected_state.has_tip, "{}", vector.id);
-        assert_eq!(st.height, expected_state.height, "{}", vector.id);
-        assert_eq!(
-            hex::encode(st.tip_hash),
-            expected_state.tip_hash,
-            "{}",
-            vector.id
-        );
-        assert_eq!(
-            st.already_generated, expected_state.already_generated,
-            "{}",
-            vector.id
-        );
-        assert_eq!(
-            st.utxos,
-            fixture_utxos_to_map(&expected_state.utxos),
-            "{}",
-            vector.id
-        );
+        let loaded = load_fixture_chainstate(&vector.id, &expected_state);
+        assert_eq!(loaded, st, "{} production load versus replay", vector.id);
+        assert_eq!(st, fixture_chainstate(&expected_state), "{}", vector.id);
+    }
+
+    #[test]
+    fn chainstate_loads_devnet_chain_snapshots() {
+        assert!(!DEVNET_CHAIN_FIXTURE_JSON.contains("\\u"));
+        let fixture: FixtureFile<DevnetConnectBlockVector> =
+            serde_json::from_str(DEVNET_CHAIN_FIXTURE_JSON).expect("parse chain fixture");
+        assert_eq!(fixture.vectors.len(), 10, "chain fixture vector count");
+        for vector in &fixture.vectors {
+            let expected = vector.chainstate_after.as_ref().expect("chainstate_after");
+            let loaded = load_fixture_chainstate(&vector.id, expected);
+            assert!(!loaded.utxos.is_empty(), "{} empty snapshot", vector.id);
+            assert_eq!(loaded, fixture_chainstate(expected), "{}", vector.id);
+        }
     }
 
     #[test]

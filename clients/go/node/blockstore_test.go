@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -930,11 +931,23 @@ const undoIntegrityFixturePath = "../../../conformance/fixtures/protocol/undo_in
 
 type undoIntegrityVector struct {
 	ID          string `json:"id"`
+	Note        string `json:"note"`
 	BlockHash   string `json:"block_hash"`
 	PayloadJSON string `json:"payload_json"`
 	PayloadB64  string `json:"payload_b64"`
 	Checksum    string `json:"checksum"`
 	Envelope    string `json:"envelope"`
+}
+
+const undoIntegrityV2FixturePath = "../../../conformance/fixtures/protocol/undo_integrity_v2.json"
+
+type undoIntegrityV2Fixture struct {
+	ContractVersion     uint32                `json:"contract_version"`
+	FixtureKind         string                `json:"fixture_kind"`
+	Description         string                `json:"description"`
+	ChecksumDomainASCII string                `json:"checksum_domain_ascii"`
+	EnvelopeVersion     uint32                `json:"envelope_version"`
+	Cases               []undoIntegrityVector `json:"cases"`
 }
 
 func loadUndoIntegrityVectors(t *testing.T) []undoIntegrityVector {
@@ -953,6 +966,59 @@ func loadUndoIntegrityVectors(t *testing.T) []undoIntegrityVector {
 	// per-case loop below pass vacuously.
 	if len(fixture.Cases) < 3 {
 		t.Fatalf("shared undo fixture has %d cases, want at least 3", len(fixture.Cases))
+	}
+	return fixture.Cases
+}
+
+func loadUndoIntegrityV2Vectors(t *testing.T) []undoIntegrityVector {
+	t.Helper()
+	raw, err := os.ReadFile(undoIntegrityV2FixturePath)
+	if err != nil {
+		t.Fatalf("read shared undo v2 fixture: %v", err)
+	}
+	var fixture undoIntegrityV2Fixture
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&fixture); err != nil {
+		t.Fatalf("decode shared undo v2 fixture: %v", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		t.Fatalf("decode shared undo v2 fixture trailing content: %v", err)
+	}
+	if fixture.ContractVersion != 1 || fixture.FixtureKind != "undo_integrity_v2" ||
+		fixture.ChecksumDomainASCII != undoEnvelopeDomainV2 || fixture.EnvelopeVersion != undoEnvelopeVersion ||
+		fixture.Description == "" {
+		t.Fatalf("shared undo v2 fixture metadata = version %d kind %q domain %q envelope %d description_empty=%t",
+			fixture.ContractVersion, fixture.FixtureKind, fixture.ChecksumDomainASCII,
+			fixture.EnvelopeVersion, fixture.Description == "")
+	}
+	wantIDs := [...]string{
+		"empty-undo-zero-supply",
+		"u64-max-supply",
+		"above-u64-supply",
+		"multi-tx-one-spend",
+	}
+	if len(fixture.Cases) != len(wantIDs) {
+		t.Fatalf("shared undo v2 fixture has %d cases, want exactly %d", len(fixture.Cases), len(wantIDs))
+	}
+	seenIDs := make(map[string]struct{}, len(fixture.Cases))
+	seenHashes := make(map[string]struct{}, len(fixture.Cases))
+	for i, vector := range fixture.Cases {
+		if vector.ID != wantIDs[i] {
+			t.Fatalf("shared undo v2 fixture case %d id = %q, want %q", i, vector.ID, wantIDs[i])
+		}
+		if _, duplicate := seenIDs[vector.ID]; duplicate {
+			t.Fatalf("shared undo v2 fixture duplicate case id %q", vector.ID)
+		}
+		if _, duplicate := seenHashes[vector.BlockHash]; duplicate {
+			t.Fatalf("shared undo v2 fixture duplicate block hash %q", vector.BlockHash)
+		}
+		if vector.Note == "" || vector.BlockHash == "" || vector.PayloadJSON == "" ||
+			vector.PayloadB64 == "" || vector.Checksum == "" || vector.Envelope == "" {
+			t.Fatalf("shared undo v2 fixture case %q has an empty required field", vector.ID)
+		}
+		seenIDs[vector.ID] = struct{}{}
+		seenHashes[vector.BlockHash] = struct{}{}
 	}
 	return fixture.Cases
 }
@@ -995,7 +1061,7 @@ func TestUndoEnvelopeV1CrossClientVector(t *testing.T) {
 			if got := hex.EncodeToString(checksum[:]); got != vector.Checksum {
 				t.Fatalf("checksum = %q, want %q", got, vector.Checksum)
 			}
-			envelope, err := marshalUndoEnvelope(blockHash, undo)
+			envelope, err := marshalUndoEnvelopeV1(blockHash, undo)
 			if err != nil {
 				t.Fatalf("marshalUndoEnvelope: %v", err)
 			}
@@ -1026,6 +1092,118 @@ func TestUndoEnvelopeV1CrossClientVector(t *testing.T) {
 			}
 			if !reflect.DeepEqual(fromStore, undo) {
 				t.Fatalf("GetUndo = %+v, want %+v", fromStore, undo)
+			}
+		})
+	}
+}
+
+// TestUndoEnvelopeV2CrossClientVector pins exact-u128 v2 bytes through the production codec and public store paths.
+func TestUndoEnvelopeV2CrossClientVector(t *testing.T) {
+	vectors := loadUndoIntegrityV2Vectors(t)
+	wantSupplies := [...]consensus.Uint128{
+		{},
+		consensus.Uint128FromU64(^uint64(0)),
+		{Hi: 1},
+		{Hi: ^uint64(0), Lo: ^uint64(0)},
+	}
+	wantTxSpentCounts := [...][]int{
+		{},
+		{0},
+		{0},
+		{0, 1},
+	}
+	var spentTxid [32]byte
+	for i := range spentTxid {
+		spentTxid[i] = 0x11
+	}
+	wantSpent := SpentUndo{
+		Outpoint: consensus.Outpoint{Txid: spentTxid},
+		Entry: consensus.UtxoEntry{
+			Value:             4_999_999_000,
+			CovenantType:      1,
+			CovenantData:      append([]byte{0}, bytes.Repeat([]byte{0x22}, 32)...),
+			CreationHeight:    1,
+			CreatedByCoinbase: true,
+		},
+	}
+	for i, vector := range vectors {
+		t.Run(vector.ID, func(t *testing.T) {
+			blockHash := mustUndoTestHash(t, vector.BlockHash)
+			undo, err := unmarshalBlockUndoV2([]byte(vector.PayloadJSON))
+			if err != nil {
+				t.Fatalf("payload_json is not accepted as canonical v2: %v", err)
+			}
+			if undo.PreviousAlreadyGenerated != wantSupplies[i] {
+				t.Fatalf("previous_already_generated = %s, want %s",
+					undo.PreviousAlreadyGenerated.String(), wantSupplies[i].String())
+			}
+			if undo.BlockHeight != uint64(i) {
+				t.Fatalf("block height = %d, want %d", undo.BlockHeight, i)
+			}
+			if len(undo.Txs) != len(wantTxSpentCounts[i]) {
+				t.Fatalf("tx undo count = %d, want %d", len(undo.Txs), len(wantTxSpentCounts[i]))
+			}
+			for txIndex, wantSpentCount := range wantTxSpentCounts[i] {
+				if len(undo.Txs[txIndex].Spent) != wantSpentCount {
+					t.Fatalf("tx %d spent count = %d, want %d", txIndex, len(undo.Txs[txIndex].Spent), wantSpentCount)
+				}
+			}
+			if vector.ID == "multi-tx-one-spend" && !reflect.DeepEqual(undo.Txs[1].Spent[0], wantSpent) {
+				t.Fatalf("full spent entry = %+v, want %+v", undo.Txs[1].Spent[0], wantSpent)
+			}
+			payload, err := marshalBlockUndoV2(undo)
+			if err != nil {
+				t.Fatalf("marshalBlockUndoV2: %v", err)
+			}
+			if string(payload) != vector.PayloadJSON {
+				t.Fatalf("canonical v2 payload = %q, want %q", payload, vector.PayloadJSON)
+			}
+			if got := base64.StdEncoding.EncodeToString(payload); got != vector.PayloadB64 {
+				t.Fatalf("payload_b64 = %q, want %q", got, vector.PayloadB64)
+			}
+			checksum := undoEnvelopeChecksumForVersion(undoEnvelopeVersion, blockHash, payload)
+			if got := hex.EncodeToString(checksum[:]); got != vector.Checksum {
+				t.Fatalf("checksum = %q, want %q", got, vector.Checksum)
+			}
+			envelope, err := marshalUndoEnvelope(blockHash, undo)
+			if err != nil {
+				t.Fatalf("marshalUndoEnvelope: %v", err)
+			}
+			if string(envelope) != vector.Envelope {
+				t.Fatalf("envelope = %q, want %q", envelope, vector.Envelope)
+			}
+			if !bytes.HasSuffix(envelope, []byte("\n")) || bytes.Count(envelope, []byte("\n")) != 1 {
+				t.Fatalf("envelope must carry exactly one trailing LF: %q", envelope)
+			}
+			decoded, err := unmarshalUndoEnvelope(blockHash, []byte(vector.Envelope))
+			if err != nil {
+				t.Fatalf("unmarshalUndoEnvelope(pinned v2 bytes): %v", err)
+			}
+			if !reflect.DeepEqual(decoded, undo) {
+				t.Fatalf("round-trip undo = %+v, want %+v", decoded, undo)
+			}
+			readStore := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "read-store"))
+			readPath := filepath.Join(readStore.undoDir, vector.BlockHash+".json")
+			if err := os.WriteFile(readPath, []byte(vector.Envelope), 0o600); err != nil {
+				t.Fatalf("seed pinned v2 undo file: %v", err)
+			}
+			fromStore, err := readStore.GetUndo(blockHash)
+			if err != nil {
+				t.Fatalf("GetUndo(pinned v2 vector): %v", err)
+			}
+			if !reflect.DeepEqual(fromStore, undo) {
+				t.Fatalf("GetUndo = %+v, want %+v", fromStore, undo)
+			}
+			writeStore := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "write-store"))
+			if err := writeStore.PutUndo(blockHash, undo); err != nil {
+				t.Fatalf("PutUndo(absent v2 vector): %v", err)
+			}
+			written, err := os.ReadFile(filepath.Join(writeStore.undoDir, vector.BlockHash+".json"))
+			if err != nil {
+				t.Fatalf("read PutUndo v2 bytes: %v", err)
+			}
+			if !bytes.Equal(written, []byte(vector.Envelope)) {
+				t.Fatalf("PutUndo bytes = %q, want %q", written, vector.Envelope)
 			}
 		})
 	}
@@ -1105,12 +1283,245 @@ func TestUndoEnvelopeBoundDerivation(t *testing.T) {
 	}
 }
 
+func TestUndoEnvelopeV2RoundTripAndChecksumDomain(t *testing.T) {
+	blockHash := [32]byte{0x91}
+	max := consensus.Uint128{Hi: ^uint64(0), Lo: ^uint64(0)}
+	undo := &BlockUndo{BlockHeight: 11, PreviousAlreadyGenerated: max, Txs: []TxUndo{}}
+	raw, err := marshalUndoEnvelope(blockHash, undo)
+	if err != nil {
+		t.Fatalf("marshalUndoEnvelope(v2): %v", err)
+	}
+	version, _, payloadB64, checksumHex, err := splitUndoEnvelopeVersioned(raw)
+	if err != nil {
+		t.Fatalf("splitUndoEnvelopeVersioned: %v", err)
+	}
+	if version != undoEnvelopeVersion || !bytes.HasPrefix(raw, []byte(undoEnvelopePrefixV2)) {
+		t.Fatalf("new undo is not v2: %s", raw)
+	}
+	payload, err := decodeCanonicalBase64(payloadB64)
+	if err != nil {
+		t.Fatalf("decodeCanonicalBase64: %v", err)
+	}
+	if !bytes.Contains(payload, []byte(`"previous_already_generated":"340282366920938463463374607431768211455"`)) {
+		t.Fatalf("v2 payload supply is not canonical: %s", payload)
+	}
+	v1Checksum := undoEnvelopeChecksum(blockHash, payload)
+	v2Checksum := undoEnvelopeChecksumForVersion(undoEnvelopeVersion, blockHash, payload)
+	if v1Checksum == v2Checksum || hex.EncodeToString(v2Checksum[:]) != string(checksumHex) {
+		t.Fatalf("checksum domain mismatch: v1=%x v2=%x stored=%s", v1Checksum, v2Checksum, checksumHex)
+	}
+	decoded, err := unmarshalUndoEnvelope(blockHash, raw)
+	if err != nil {
+		t.Fatalf("unmarshalUndoEnvelope(v2): %v", err)
+	}
+	if !reflect.DeepEqual(decoded, undo) {
+		t.Fatalf("v2 round trip=%+v, want %+v", decoded, undo)
+	}
+
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	if err := store.PutUndo(blockHash, undo); err != nil {
+		t.Fatalf("PutUndo(v2): %v", err)
+	}
+	fromStore, err := store.GetUndo(blockHash)
+	if err != nil {
+		t.Fatalf("GetUndo(v2): %v", err)
+	}
+	if !reflect.DeepEqual(fromStore, undo) {
+		t.Fatalf("stored v2=%+v, want %+v", fromStore, undo)
+	}
+}
+
+func TestUndoEnvelopeSupplyTypesAndBoundaries(t *testing.T) {
+	blockHash := [32]byte{0x92}
+	for _, tc := range []struct {
+		name    string
+		version uint32
+		payload string
+		want    string
+		ok      bool
+		value   consensus.Uint128
+	}{
+		{name: "v1_u64_max", version: 1, payload: `{"block_height":0,"previous_already_generated":18446744073709551615,"txs":[]}`, ok: true, value: consensus.Uint128FromU64(^uint64(0))},
+		{name: "v1_string", version: 1, payload: `{"block_height":0,"previous_already_generated":"0","txs":[]}`, want: "decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64"},
+		{name: "v1_negative", version: 1, payload: `{"block_height":0,"previous_already_generated":-1,"txs":[]}`, want: "decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64"},
+		{name: "v1_fraction", version: 1, payload: `{"block_height":0,"previous_already_generated":0.0,"txs":[]}`, want: "decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64"},
+		{name: "v1_overflow", version: 1, payload: `{"block_height":0,"previous_already_generated":18446744073709551616,"txs":[]}`, want: "decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64"},
+		{name: "v1_extreme_exponent", version: 1, payload: `{"block_height":0,"previous_already_generated":1e400,"txs":[]}`, want: "decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64"},
+		{name: "v2_u128_max", version: 2, payload: `{"block_height":0,"previous_already_generated":"340282366920938463463374607431768211455","txs":[]}`, ok: true, value: consensus.Uint128{Hi: ^uint64(0), Lo: ^uint64(0)}},
+		{name: "v2_number", version: 2, payload: `{"block_height":0,"previous_already_generated":0,"txs":[]}`, want: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "v2_extreme_number", version: 2, payload: `{"block_height":0,"previous_already_generated":1e400,"txs":[]}`, want: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "v2_extreme_block_height", version: 2, payload: `{"block_height":1e400,"previous_already_generated":0,"txs":[]}`, want: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "v2_null", version: 2, payload: `{"block_height":0,"previous_already_generated":null,"txs":[]}`, want: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "v2_missing", version: 2, payload: `{"block_height":0,"txs":[]}`, want: "decode undo: payload is not the canonical encoding"},
+		{name: "v2_leading_zero", version: 2, payload: `{"block_height":0,"previous_already_generated":"00","txs":[]}`, want: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "v2_escaped_zero", version: 2, payload: `{"block_height":0,"previous_already_generated":"\u0030","txs":[]}`, want: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "v2_overflow", version: 2, payload: `{"block_height":0,"previous_already_generated":"340282366920938463463374607431768211456","txs":[]}`, want: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := marshalUndoEnvelopePayload(t, tc.version, blockHash, []byte(tc.payload))
+			got, err := unmarshalUndoEnvelope(blockHash, raw)
+			if tc.ok {
+				if err != nil || got.PreviousAlreadyGenerated != tc.value {
+					t.Fatalf("undo=%+v err=%v, want supply %s", got, err, tc.value.String())
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("err=%v, want exactly %q", err, tc.want)
+			}
+			if errors.Is(err, ErrUndoIntegrity) {
+				t.Fatalf("checksum-valid payload type error gained UNDO_INTEGRITY: %v", err)
+			}
+		})
+	}
+	if _, err := marshalUndoEnvelopeV1(blockHash, &BlockUndo{PreviousAlreadyGenerated: consensus.Uint128{Hi: 1}}); err == nil || err.Error() != "encode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64" {
+		t.Fatalf("v1 encode err=%v, want exact encode-side u64 diagnostic", err)
+	}
+	for _, tc := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "v2_duplicate_supply", payload: `{"block_height":0,"previous_already_generated":"0","previous_already_generated":"0","txs":[]}`},
+		{name: "v2_trailing_json_content", payload: `{"block_height":0,"previous_already_generated":"0","txs":[]}{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := marshalUndoEnvelopePayload(t, 2, blockHash, []byte(tc.payload))
+			_, err := unmarshalUndoEnvelope(blockHash, raw)
+			if err == nil || err.Error() != "decode undo: payload is not the canonical encoding" {
+				t.Fatalf("err=%v, want exact canonical-payload rejection", err)
+			}
+			if errors.Is(err, ErrUndoIntegrity) {
+				t.Fatalf("checksum-valid structural payload gained UNDO_INTEGRITY: %v", err)
+			}
+		})
+	}
+
+	payload := []byte(`{"block_height":0,"previous_already_generated":"0","txs":[]}`)
+	raw := marshalUndoEnvelopePayload(t, 2, blockHash, payload)
+	v1Sum := undoEnvelopeChecksum(blockHash, payload)
+	var frame undoEnvelopeDisk
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		t.Fatalf("decode v2 frame: %v", err)
+	}
+	frame.Checksum = hex.EncodeToString(v1Sum[:])
+	wrongDomain, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatalf("marshal wrong-domain frame: %v", err)
+	}
+	wrongDomain = append(wrongDomain, '\n')
+	if _, err := unmarshalUndoEnvelope(blockHash, wrongDomain); err == nil || err.Error() != errUndoChecksumMismatch.Error() {
+		t.Fatalf("wrong-domain checksum err=%v, want %q", err, errUndoChecksumMismatch.Error())
+	}
+}
+
+type putUndoScratchWriteFailure struct{}
+
+func (putUndoScratchWriteFailure) Write([]byte) (int, error) { return 0, os.ErrPermission }
+func (putUndoScratchWriteFailure) Sync() error               { return nil }
+func (putUndoScratchWriteFailure) Close() error              { return nil }
+func (putUndoScratchWriteFailure) Chmod(os.FileMode) error   { return nil }
+
+func TestPutUndoPreservesMatchingExistingV1AndV2Bytes(t *testing.T) {
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+	for _, tc := range []struct {
+		name    string
+		version uint32
+		hash    [32]byte
+		undo    *BlockUndo
+	}{
+		{name: "v1", version: 1, hash: [32]byte{0xa1}, undo: &BlockUndo{BlockHeight: 1, PreviousAlreadyGenerated: consensus.Uint128FromU64(7), Txs: []TxUndo{}}},
+		{name: "v2", version: 2, hash: [32]byte{0xa2}, undo: &BlockUndo{BlockHeight: 2, PreviousAlreadyGenerated: consensus.Uint128{Hi: 1}, Txs: []TxUndo{}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var seeded []byte
+			var err error
+			if tc.version == 1 {
+				seeded, err = marshalUndoEnvelopeV1(tc.hash, tc.undo)
+			} else {
+				seeded, err = marshalUndoEnvelope(tc.hash, tc.undo)
+			}
+			if err != nil {
+				t.Fatalf("marshal seeded undo: %v", err)
+			}
+			path := filepath.Join(store.undoDir, hex.EncodeToString(tc.hash[:])+".json")
+			if err := os.WriteFile(path, seeded, 0o600); err != nil {
+				t.Fatalf("seed undo: %v", err)
+			}
+			matching := *tc.undo
+			matching.Txs = nil
+			for _, fault := range []string{"scratch_open", "scratch_write"} {
+				t.Run(fault, func(t *testing.T) {
+					previous, ops := atomicWriteIO, atomicWriteIO
+					t.Cleanup(func() { atomicWriteIO = previous })
+					if fault == "scratch_open" {
+						ops.openScratch = func(string, int, os.FileMode) (atomicWriteScratchFile, error) { return nil, os.ErrPermission }
+					} else {
+						ops.openScratch = func(string, int, os.FileMode) (atomicWriteScratchFile, error) {
+							return putUndoScratchWriteFailure{}, nil
+						}
+					}
+					atomicWriteIO = ops
+					if err := store.PutUndo(tc.hash, &matching); err != nil {
+						t.Fatalf("PutUndo(matching): %v", err)
+					}
+					after, err := os.ReadFile(path)
+					if err != nil || !bytes.Equal(after, seeded) {
+						t.Fatalf("matching existing bytes changed: err=%v", err)
+					}
+				})
+			}
+
+			different := matching
+			different.BlockHeight++
+			if err := store.PutUndo(tc.hash, &different); err == nil {
+				t.Fatal("PutUndo accepted different semantic content")
+			}
+			afterDifferent, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(afterDifferent, seeded) {
+				t.Fatalf("different existing bytes changed: err=%v", err)
+			}
+
+			corrupt := append([]byte(nil), seeded...)
+			if corrupt[len(corrupt)-4] == '0' {
+				corrupt[len(corrupt)-4] = '1'
+			} else {
+				corrupt[len(corrupt)-4] = '0'
+			}
+			if err := os.WriteFile(path, corrupt, 0o600); err != nil {
+				t.Fatalf("seed corrupt undo: %v", err)
+			}
+			if err := store.PutUndo(tc.hash, &matching); err == nil {
+				t.Fatal("PutUndo accepted corrupt existing record")
+			}
+			afterCorrupt, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(afterCorrupt, corrupt) {
+				t.Fatalf("corrupt existing bytes changed: err=%v", err)
+			}
+		})
+	}
+}
+
+func marshalUndoEnvelopePayload(t *testing.T, version uint32, blockHash [32]byte, payload []byte) []byte {
+	t.Helper()
+	checksum := undoEnvelopeChecksumForVersion(version, blockHash, payload)
+	raw, err := json.Marshal(undoEnvelopeDisk{
+		Version:    version,
+		BlockHash:  hex.EncodeToString(blockHash[:]),
+		PayloadB64: base64.StdEncoding.EncodeToString(payload),
+		Checksum:   hex.EncodeToString(checksum[:]),
+	})
+	if err != nil {
+		t.Fatalf("marshal undo envelope: %v", err)
+	}
+	return append(raw, '\n')
+}
+
 // undoTestUndo is a small non-empty undo: a coinbase row plus one restored
 // spend, so a corrupted payload has something to get wrong.
 func undoTestUndo() *BlockUndo {
 	return &BlockUndo{
 		BlockHeight:              7,
-		PreviousAlreadyGenerated: 1234,
+		PreviousAlreadyGenerated: consensus.Uint128FromU64(1234),
 		Txs: []TxUndo{
 			{Spent: []SpentUndo{}},
 			{Spent: []SpentUndo{{
@@ -1129,7 +1540,7 @@ func undoTestUndo() *BlockUndo {
 
 func mustMarshalUndoEnvelope(t *testing.T, blockHash [32]byte, undo *BlockUndo) string {
 	t.Helper()
-	raw, err := marshalUndoEnvelope(blockHash, undo)
+	raw, err := marshalUndoEnvelopeV1(blockHash, undo)
 	if err != nil {
 		t.Fatalf("marshalUndoEnvelope: %v", err)
 	}
@@ -1172,25 +1583,37 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("indent payload: %v", err)
 	}
-	envelopeOver := func(body []byte) string {
-		sum := undoEnvelopeChecksum(blockHash, body)
-		return fmt.Sprintf("{\"version\":1,\"block_hash\":\"%s\",\"payload_b64\":\"%s\",\"checksum\":\"%s\"}\n",
-			hex.EncodeToString(blockHash[:]),
+	envelopeOverHash := func(version uint32, hash [32]byte, body []byte) string {
+		sum := undoEnvelopeChecksumForVersion(version, hash, body)
+		return fmt.Sprintf("{\"version\":%d,\"block_hash\":\"%s\",\"payload_b64\":\"%s\",\"checksum\":\"%s\"}\n",
+			version,
+			hex.EncodeToString(hash[:]),
 			base64.StdEncoding.EncodeToString(body),
 			hex.EncodeToString(sum[:]))
+	}
+	envelopeOverVersion := func(version uint32, body []byte) string {
+		return envelopeOverHash(version, blockHash, body)
+	}
+	envelopeOver := func(body []byte) string {
+		return envelopeOverVersion(undoEnvelopeVersionV1, body)
 	}
 
 	legacyIndented, err := json.MarshalIndent(json.RawMessage(payload), "", "  ")
 	if err != nil {
 		t.Fatalf("indent legacy payload: %v", err)
 	}
+	canonicalNestedV1 := []byte(`{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[{"txid":"` + strings.Repeat("11", 32) + `","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}`)
+	canonicalNestedV2 := []byte(`{"block_height":0,"previous_already_generated":"0","txs":[{"spent":[{"txid":"` + strings.Repeat("11", 32) + `","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}`)
+	canonicalPayloadError := "decode undo: payload is not the canonical encoding"
+	domainPayloadError := "decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex"
 
-	for _, tc := range []struct {
+	type undoRejectCase struct {
 		name    string
 		record  string
 		wantErr error  // exact error identity when the message is pinned
 		wantMsg string // exact message when pinned
-	}{
+	}
+	cases := []undoRejectCase{
 		{name: "legacy_indented_payload", record: string(legacyIndented) + "\n", wantErr: errUndoLegacyRecord, wantMsg: errUndoLegacyRecord.Error()},
 		{name: "legacy_compact_payload", record: string(payload), wantErr: errUndoLegacyRecord, wantMsg: errUndoLegacyRecord.Error()},
 		{name: "version_zero", record: replaceOnce(t, valid, `"version":1`, `"version":0`)},
@@ -1204,9 +1627,14 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 		{name: "duplicate_checksum_conflicting", record: replaceOnce(t, valid, `{"version":1`, `{"checksum":"`+strings.Repeat("00", 32)+`","version":1`)},
 		{name: "duplicate_payload_conflicting", record: replaceOnce(t, valid, `{"version":1`, `{"payload_b64":"AA==","version":1`)},
 		{name: "null_payload", record: replaceOnce(t, valid, `"payload_b64":"`+payloadB64+`"`, `"payload_b64":null`)},
-		{name: "trailing_json_value", record: strings.TrimSuffix(valid, "\n") + "{}\n"},
-		{name: "trailing_scalar", record: strings.TrimSuffix(valid, "\n") + " 1\n"},
+		{name: "trailing_json_value", record: strings.TrimSuffix(valid, "\n") + "{}\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: envelope is not the canonical encoding"},
+		{name: "trailing_scalar", record: strings.TrimSuffix(valid, "\n") + " 1\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: envelope is not the canonical encoding"},
 		{name: "not_an_object", record: "[]\n"},
+		{name: "not_an_object_1", record: "[1]\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object"},
+		{name: "not_an_object_2", record: "[2]\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object"},
+		{name: "not_an_object_3", record: "[3]\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object"},
+		{name: "not_an_object_null", record: "null\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object"},
+		{name: "not_an_object_array_trailing", record: "[1]{}\n", wantErr: ErrUndoIntegrity, wantMsg: "UNDO_INTEGRITY: undo record is not a single JSON object"},
 		{name: "not_json", record: "definitely not json\n"},
 		{
 			// W4 parity row: classification decodes ONE value and ignores what
@@ -1234,6 +1662,12 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 			wantErr: errUndoBlockHashMismatch, wantMsg: errUndoBlockHashMismatch.Error(),
 		},
 		{
+			name: "foreign_block_hash_with_bad_base64",
+			record: replaceOnce(t, replaceOnce(t, valid, hex.EncodeToString(blockHash[:]), hex.EncodeToString(otherHash[:])),
+				payloadB64, "*"+payloadB64[1:]),
+			wantErr: errUndoBlockHashMismatch, wantMsg: errUndoBlockHashMismatch.Error(),
+		},
+		{
 			name:    "envelope_swapped_between_files",
 			record:  otherValid,
 			wantErr: errUndoBlockHashMismatch, wantMsg: errUndoBlockHashMismatch.Error(),
@@ -1244,27 +1678,98 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 				hex.EncodeToString(blockHash[:])),
 			wantErr: errUndoChecksumMismatch, wantMsg: errUndoChecksumMismatch.Error(),
 		},
-		// The two rows below carry a CORRECT checksum, so reaching a rejection
-		// at all proves the payload decode runs strictly after the checksum.
-		{name: "checksum_valid_over_indented_payload", record: envelopeOver(indented)},
-		{name: "checksum_valid_over_null_txs", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":null}`))},
-		{name: "checksum_valid_over_unknown_payload_field", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":[],"x":1}`))},
-		{name: "checksum_valid_over_missing_payload_field", record: envelopeOver([]byte(`{"block_height":0,"txs":[]}`))},
-		{name: "checksum_valid_over_duplicate_payload_field", record: envelopeOver([]byte(`{"block_height":0,"block_height":1,"previous_already_generated":0,"txs":[]}`))},
+		// A correct checksum makes these exact errors prove payload decoding runs later.
+		{name: "checksum_valid_over_indented_payload", record: envelopeOver(indented), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_null_txs", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":null}`)), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_unknown_payload_field", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":[],"x":1}`)), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_missing_payload_field", record: envelopeOver([]byte(`{"block_height":0,"txs":[]}`)), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_duplicate_payload_field", record: envelopeOver([]byte(`{"block_height":0,"block_height":1,"previous_already_generated":0,"txs":[]}`)), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_nested_unknown_v1", record: envelopeOver([]byte(replaceOnce(t, string(canonicalNestedV1), `"vout":0`, `"extra":0,"vout":0`))), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_nested_duplicate_v1", record: envelopeOver([]byte(replaceOnce(t, string(canonicalNestedV1), `"vout":0`, `"vout":0,"vout":0`))), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_spent_null_v1", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":[{"spent":null}]}`)), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_invalid_covenant_data_v1", record: envelopeOver([]byte(replaceOnce(t, string(canonicalNestedV1), `"covenant_data":""`, `"covenant_data":"a"`))), wantMsg: domainPayloadError},
+		{name: "checksum_valid_over_invalid_supply_v1", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":"0","txs":[]}`)), wantMsg: "decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64"},
+		{name: "checksum_valid_over_negative_supply_v1", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":-1,"txs":[]}`)), wantMsg: "decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64"},
+		{name: "checksum_valid_over_fractional_supply_v1", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0.0,"txs":[]}`)), wantMsg: "decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64"},
+		{name: "checksum_valid_over_overflow_supply_v1", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":18446744073709551616,"txs":[]}`)), wantMsg: "decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64"},
+		{name: "checksum_valid_over_extreme_supply_v1", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":1e400,"txs":[]}`)), wantMsg: "decode undo: envelope v1 previous_already_generated must be a nonnegative JSON integer through u64"},
+		{name: "checksum_valid_over_mixed_unknown_invalid_supply_v1", record: envelopeOver([]byte(`{"block_height":0,"previous_already_generated":"0","txs":[],"extra":0}`)), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_unknown_payload_field_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(`{"block_height":0,"previous_already_generated":"0","txs":[],"x":1}`)), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_duplicate_payload_field_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(`{"block_height":0,"block_height":1,"previous_already_generated":"0","txs":[]}`)), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_nested_unknown_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(replaceOnce(t, string(canonicalNestedV2), `"vout":0`, `"extra":0,"vout":0`))), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_nested_duplicate_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(replaceOnce(t, string(canonicalNestedV2), `"vout":0`, `"vout":0,"vout":0`))), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_spent_null_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(`{"block_height":0,"previous_already_generated":"0","txs":[{"spent":null}]}`)), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_null_block_height_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(replaceOnce(t, string(canonicalNestedV2), `"block_height":0`, `"block_height":null`))), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_nested_null_txid_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(replaceOnce(t, string(canonicalNestedV2), `"txid":"`+strings.Repeat("11", 32)+`"`, `"txid":null`))), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_nested_wrong_token_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(replaceOnce(t, string(canonicalNestedV2), `"created_by_coinbase":false`, `"created_by_coinbase":0`))), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_invalid_supply_nested_null_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(replaceOnce(t, replaceOnce(t, string(canonicalNestedV2), `"previous_already_generated":"0"`, `"previous_already_generated":0`), `"txid":"`+strings.Repeat("11", 32)+`"`, `"txid":null`))), wantMsg: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "checksum_valid_over_invalid_covenant_data_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(replaceOnce(t, string(canonicalNestedV2), `"covenant_data":""`, `"covenant_data":"a"`))), wantMsg: domainPayloadError},
+		{name: "checksum_valid_over_invalid_supply_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(`{"block_height":0,"previous_already_generated":0,"txs":[]}`)), wantMsg: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "checksum_valid_over_extreme_supply_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(`{"block_height":0,"previous_already_generated":1e400,"txs":[]}`)), wantMsg: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "checksum_valid_over_extreme_block_height_invalid_supply_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(`{"block_height":1e400,"previous_already_generated":0,"txs":[]}`)), wantMsg: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "checksum_valid_over_extreme_nested_scalar_invalid_supply_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(`{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[{"txid":"`+strings.Repeat("11", 32)+`","vout":4294967296,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}`)), wantMsg: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "checksum_valid_over_null_supply_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(`{"block_height":0,"previous_already_generated":null,"txs":[]}`)), wantMsg: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "checksum_valid_over_missing_supply_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(`{"block_height":0,"txs":[]}`)), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_leading_zero_supply_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(`{"block_height":0,"previous_already_generated":"00","txs":[]}`)), wantMsg: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "checksum_valid_over_escaped_zero_supply_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(`{"block_height":0,"previous_already_generated":"\u0030","txs":[]}`)), wantMsg: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "checksum_valid_over_overflow_supply_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(`{"block_height":0,"previous_already_generated":"340282366920938463463374607431768211456","txs":[]}`)), wantMsg: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "checksum_valid_over_reordered_invalid_supply_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(`{"txs":[],"previous_already_generated":0,"block_height":0}`)), wantMsg: "decode undo: envelope v2 previous_already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "checksum_valid_over_indented_reordered_domain_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte("{\n  \"txs\": [{\"spent\": [{\"created_by_coinbase\": false, \"creation_height\": 0, \"covenant_data\": \"a\", \"covenant_type\": 0, \"value\": 0, \"vout\": 0, \"txid\": \""+strings.Repeat("11", 32)+"\"}]}],\n  \"previous_already_generated\": \"0\",\n  \"block_height\": 0\n}")), wantMsg: domainPayloadError},
+		{name: "checksum_valid_over_indented_reordered_valid_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte("{\n  \"txs\": [],\n  \"previous_already_generated\": \"0\",\n  \"block_height\": 0\n}")), wantMsg: canonicalPayloadError},
+		{name: "checksum_valid_over_mixed_duplicate_invalid_supply_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(`{"block_height":0,"previous_already_generated":0,"previous_already_generated":0,"txs":[]}`)), wantMsg: canonicalPayloadError},
 		// These two prove the decision precedes conversion: blockUndoFromDisk's
 		// own message for a bad txid ("expected 32 bytes, got 2") would WIN if
 		// conversion still ran first. Rust emits the identical string.
 		{
 			name:    "checksum_valid_over_uppercase_txid",
 			record:  envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[{"txid":"` + strings.Repeat("AB", 32) + `","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}`)),
-			wantMsg: "decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex",
+			wantMsg: domainPayloadError,
 		},
 		{
 			name:    "checksum_valid_over_short_txid",
 			record:  envelopeOver([]byte(`{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[{"txid":"aabb","vout":0,"value":0,"covenant_type":0,"covenant_data":"","creation_height":0,"created_by_coinbase":false}]}]}`)),
-			wantMsg: "decode undo: txs[0].spent[0] txid/covenant_data must be lowercase hex",
+			wantMsg: domainPayloadError,
 		},
+	}
+	invalidNestedV2 := replaceOnce(t, string(canonicalNestedV2), `"previous_already_generated":"0"`, `"previous_already_generated":0`)
+	for _, row := range []struct{ name, body string }{
+		{name: "checksum_valid_over_missing_block_height_v2", body: strings.Replace(invalidNestedV2, `"block_height":0,`, "", 1)},
+		{name: "checksum_valid_over_missing_txs_v2", body: `{"block_height":0,"previous_already_generated":0}`},
+		{name: "checksum_valid_over_missing_spent_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":[{}]}`},
+		{name: "checksum_valid_over_unknown_tx_invalid_supply_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[],"extra":0}]}`},
+		{name: "checksum_valid_over_duplicate_tx_invalid_supply_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[],"spent":[]}]}`},
+		{name: "checksum_valid_over_nested_unknown_invalid_supply_v2", body: replaceOnce(t, invalidNestedV2, `"vout":0`, `"extra":0,"vout":0`)},
+		{name: "checksum_valid_over_nested_duplicate_invalid_supply_v2", body: replaceOnce(t, invalidNestedV2, `"vout":0`, `"vout":0,"vout":0`)},
+		{name: "checksum_valid_over_null_txs_invalid_supply_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":null}`},
+		{name: "checksum_valid_over_null_spent_invalid_supply_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":[{"spent":null}]}`},
+		{name: "checksum_valid_over_trailing_payload_invalid_supply_v2", body: invalidNestedV2 + `{}`},
+		{name: "checksum_valid_over_wrong_txs_container_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":{}}`},
+		{name: "checksum_valid_over_wrong_tx_item_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":[0]}`},
+		{name: "checksum_valid_over_wrong_spent_container_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":[{"spent":{}}]}`},
+		{name: "checksum_valid_over_wrong_spent_item_v2", body: `{"block_height":0,"previous_already_generated":0,"txs":[{"spent":[0]}]}`},
 	} {
+		cases = append(cases, undoRejectCase{name: row.name, record: envelopeOverVersion(undoEnvelopeVersion, []byte(row.body)), wantMsg: canonicalPayloadError})
+	}
+	for _, field := range []struct{ name, fragment string }{
+		{name: "txid", fragment: `"txid":"` + strings.Repeat("11", 32) + `",`},
+		{name: "vout", fragment: `"vout":0,`},
+		{name: "value", fragment: `"value":0,`},
+		{name: "covenant_type", fragment: `"covenant_type":0,`},
+		{name: "covenant_data", fragment: `"covenant_data":"",`},
+		{name: "creation_height", fragment: `"creation_height":0,`},
+		{name: "created_by_coinbase", fragment: `,"created_by_coinbase":false`},
+	} {
+		body := replaceOnce(t, invalidNestedV2, field.fragment, "")
+		cases = append(cases, undoRejectCase{name: "checksum_valid_over_missing_spent_" + field.name + "_v2", record: envelopeOverVersion(undoEnvelopeVersion, []byte(body)), wantMsg: canonicalPayloadError})
+	}
+	invalidSupply := []byte(`{"block_height":0,"previous_already_generated":0,"txs":[]}`)
+	foreignInvalid := envelopeOverHash(undoEnvelopeVersion, otherHash, invalidSupply)
+	cases = append(cases,
+		undoRejectCase{name: "foreign_hash_valid_checksum_invalid_supply_v2", record: foreignInvalid, wantErr: errUndoBlockHashMismatch, wantMsg: errUndoBlockHashMismatch.Error()},
+		undoRejectCase{name: "bad_checksum_invalid_supply_v2", record: replaceOnce(t, foreignInvalid, hex.EncodeToString(otherHash[:]), hex.EncodeToString(blockHash[:])), wantErr: errUndoChecksumMismatch, wantMsg: errUndoChecksumMismatch.Error()},
+	)
+
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(store.undoDir, hex.EncodeToString(blockHash[:])+".json")
 			if err := os.WriteFile(path, []byte(tc.record), 0o600); err != nil {
@@ -1291,8 +1796,8 @@ func TestGetUndoRejectsIntegrityFailures(t *testing.T) {
 				// the UNDO_INTEGRITY identity by contract, so this branch
 				// asserts only that the failure is not misreported as one of
 				// the envelope classes.
-				if errors.Is(err, errUndoChecksumMismatch) || errors.Is(err, errUndoBlockHashMismatch) {
-					t.Fatalf("payload defect misreported as an envelope failure: %v", err)
+				if errors.Is(err, ErrUndoIntegrity) {
+					t.Fatalf("payload defect gained UNDO_INTEGRITY: %v", err)
 				}
 			} else if tc.wantErr == nil && !errors.Is(err, ErrUndoIntegrity) {
 				t.Fatalf("err = %v, want errors.Is ErrUndoIntegrity", err)
@@ -1334,7 +1839,7 @@ func flipBase64Symbol(value string) string {
 // hostile row the disconnect and reorg tests drive through their public entry
 // points. Returns the corrupted bytes (so a caller can prove a refusal did not
 // rewrite them) and the original bytes (so a caller can restore them and prove
-// the same path accepts a valid v1 record).
+// the same path accepts the original valid record).
 func corruptStoredUndoChecksum(t *testing.T, store *BlockStore, blockHash [32]byte) (corrupt, original []byte) {
 	t.Helper()
 	path := filepath.Join(store.undoDir, hex.EncodeToString(blockHash[:])+".json")
@@ -1344,7 +1849,7 @@ func corruptStoredUndoChecksum(t *testing.T, store *BlockStore, blockHash [32]by
 	}
 	var envelope undoEnvelopeDisk
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		t.Fatalf("stored undo is not a v1 envelope: %v", err)
+		t.Fatalf("stored undo is not a versioned envelope: %v", err)
 	}
 	corrupted := strings.Replace(string(raw), envelope.PayloadB64, flipBase64Symbol(envelope.PayloadB64), 1)
 	if corrupted == string(raw) {
