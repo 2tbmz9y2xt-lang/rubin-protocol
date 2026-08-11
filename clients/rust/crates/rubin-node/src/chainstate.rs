@@ -1442,13 +1442,26 @@ mod tests {
         // this regression test as a silent no-op. Pass the full path
         // so the child actually re-enters this function through the
         // `CHILD_ENV`-set branch above.
-        let status = Command::new(std::env::current_exe().expect("current test binary"))
-            .current_dir(&dir)
-            .env(CHILD_ENV, "1")
-            .arg("--exact")
-            .arg("chainstate::tests::save_accepts_bare_filename_via_effective_parent")
-            .status()
-            .expect("spawn child test process");
+        // The child of a process spawn (fork/exec or posix_spawn's
+        // vfork-style clone) starts with a copy of the parent's fd table
+        // and co-owns any held flock open-file-description until its
+        // execve completes (O_CLOEXEC only applies at exec), so a spawn
+        // racing a held `.rubin-atomic-write.lock` would leave the child
+        // co-owning a contended lock. Keep the guarded span free of
+        // panicking code (a panic while held would poison the mutex for
+        // the whole suite); the child is a separate process with its own
+        // mutex, so holding this guard across `.status()` cannot deadlock it.
+        let child_exe = std::env::current_exe().expect("current test binary");
+        let status = {
+            let _fork_guard = crate::io_utils::atomic_write_process_lock_for_fork();
+            Command::new(&child_exe)
+                .current_dir(&dir)
+                .env(CHILD_ENV, "1")
+                .arg("--exact")
+                .arg("chainstate::tests::save_accepts_bare_filename_via_effective_parent")
+                .status()
+        };
+        let status = status.expect("spawn child test process");
 
         assert!(
             status.success(),
