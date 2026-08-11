@@ -927,6 +927,22 @@ pub(crate) fn is_atomic_write_post_commit(error: &AtomicWriteError) -> bool {
     error.stage() == AtomicWriteStage::AfterNamespaceCommit
 }
 static ATOMIC_WRITE_PROCESS_MUTEX: Mutex<()> = Mutex::new(());
+
+/// Serializes a test that spawns the test binary against in-flight atomic
+/// writes. `flock` ownership is per open-file-description, and the child of
+/// a process spawn (fork/exec or posix_spawn's vfork-style clone) starts
+/// with a copy of the parent's fd table, co-owning any held
+/// `.rubin-atomic-write.lock` open-file-description until its `execve`
+/// completes (`O_CLOEXEC` only applies at exec). Holding this guard across
+/// the spawn guarantees no atomic-write lock fd is open in the parent when
+/// the child is created.
+#[cfg(test)]
+pub(crate) fn atomic_write_process_lock_for_fork() -> std::sync::MutexGuard<'static, ()> {
+    ATOMIC_WRITE_PROCESS_MUTEX
+        .lock()
+        .expect("atomic write process mutex")
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AtomicWriteTestOp {
