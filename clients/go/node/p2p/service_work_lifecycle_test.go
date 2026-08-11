@@ -16,7 +16,7 @@ import (
 
 // Service work lifecycle evidence. Barriers are channels and sockets; time-based waits are only watchdogs and the negative window asserting Close stays blocked.
 // Dead dial targets are structurally dead: no process can ever listen on TCP port 0, so "127.0.0.%d:0" dials fail immediately with no rebind window at all.
-// normalizeNetAddr rejects port 0, so the normalize-first surfaces (connectDiscoveredAddrs, addrMgr) use loopback port 1 — root-only to bind, and only 127.0.0.1:1 is ever dialed.
+// normalizeNetAddr rejects port 0, so the never-dialed rejection rows on the normalize-first surfaces (connectDiscoveredAddrs, addrMgr) use loopback port 1 — each is rejected before any dial; the one dialed discovered endpoint is a test-owned listener.
 const (
 	lifecycleWatchdog = 5 * time.Second
 	lifecycleSettle   = 100 * time.Millisecond
@@ -107,9 +107,8 @@ func requireRejectedInbound(t *testing.T, s *Service, label string) {
 	must(t, conn.Close(), "close "+label)
 }
 
-// lifecycleGateConn optionally holds the first Write until the test releases it (entered/release non-nil), parking a call
-// inside a real socket write while Close runs; optionally counts every Write (writes non-nil) and every SetReadDeadline
-// made after postDrain is set — a drained worker must arm none.
+// lifecycleGateConn optionally holds the first Write until the test releases it (entered/release non-nil), parking a call inside a real socket write while Close runs;
+// optionally counts every Write (writes non-nil) and every SetReadDeadline made after postDrain is set — a drained worker must arm none.
 type lifecycleGateConn struct {
 	net.Conn
 	once      sync.Once
@@ -204,8 +203,7 @@ func TestServiceWorkLifecycleEntryMatrix(t *testing.T) {
 	for i := 0; i < cap(s.handshakeSlots); i++ {
 		<-s.handshakeSlots
 	}
-	// Registration racing the first Close: the only admissible outcomes are registered-and-waited or rejected-without-Done.
-	// A third outcome (a lease added after Close began waiting) panics the WaitGroup, strands Close, or leaks a reservation.
+	// Registration racing the first Close: the only admissible outcomes are registered-and-waited or rejected-without-Done. A third outcome (a lease added after Close began waiting) panics the WaitGroup, strands Close, or leaks a reservation.
 	var starts sync.WaitGroup
 	for i := 0; i < 16; i++ {
 		addr := fmt.Sprintf("127.0.0.%d:0", 100+i)
@@ -327,8 +325,7 @@ func lifecycleDASetPresent(s *Service, daID [32]byte) bool {
 	return ok
 }
 
-// TestServiceWorkLifecyclePeerWorkerInheritance runs a real peer loop and handler stack: one authorized message finishes its publication
-// and its owed compact fallback while Close waits, and after the drain the worker arms no read deadline and starts no further read.
+// TestServiceWorkLifecyclePeerWorkerInheritance runs a real peer loop and handler stack: one authorized message finishes its publication and its owed compact fallback while Close waits, and after the drain the worker arms no read deadline and starts no further read.
 func TestServiceWorkLifecyclePeerWorkerInheritance(t *testing.T) {
 	s := lifecycleService(t)
 	s.cfg.PeerRuntimeConfig.ReadDeadline = 0
@@ -343,8 +340,7 @@ func TestServiceWorkLifecyclePeerWorkerInheritance(t *testing.T) {
 	}
 	runDone := make(chan error, 1)
 	go func() { defer s.releaseWork(); runDone <- p.run(context.Background()) }()
-	// The gate parks the worker inside its reply write, past every deadline arm of this iteration. The loop
-	// context is never cancelled and the socket is never closed, so only the read-authorization gate stops it.
+	// The gate parks the worker inside its reply write, past every deadline arm of this iteration. The loop context is never cancelled and the socket is never closed, so only the read-authorization gate stops it.
 	_, err := remote.Write(mustPeerRuntimeFrameBytes(t, p, message{Command: messageGetAddr}))
 	must(t, err, "write authorized message")
 	<-gate.entered
@@ -371,11 +367,18 @@ func TestServiceWorkLifecyclePeerWorkerInheritance(t *testing.T) {
 	requireZero(t, int(gate.lateArms.Load()), "post-drain read-deadline arms on the worker conn")
 }
 
-// TestServiceWorkLifecycleDiscoveredDialRejectedDuringDrain proves the discovered-dial child is waited for while OPEN, and that
-// while Close is provably still in flight a concurrent discovered burst leaves no attempt, no reservation and no dial child.
+// TestServiceWorkLifecycleDiscoveredDialRejectedDuringDrain proves the discovered-dial child is waited for while OPEN, and that while Close is provably still in flight a concurrent discovered burst leaves no attempt, no reservation and no dial child.
 func TestServiceWorkLifecycleDiscoveredDialRejectedDuringDrain(t *testing.T) {
 	s := lifecycleService(t)
-	openAddr, drainAddr := "127.0.0.1:1", "127.0.0.2:1"
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	must(t, err, "listen for the discovered dial target")
+	defer func() { _ = lis.Close() }()
+	go func() {
+		if conn, aerr := lis.Accept(); aerr == nil {
+			_ = conn.Close()
+		}
+	}()
+	openAddr, drainAddr := lis.Addr().String(), "127.0.0.2:1"
 	s.addrMgr.AddAddrs([]string{openAddr, drainAddr})
 	s.connectDiscoveredAddrs([]string{openAddr})
 	if attempts := lifecycleAddrAttempts(s, openAddr); attempts != 1 {
@@ -406,9 +409,8 @@ func lifecycleAddrAttempts(s *Service, addr string) int {
 	return s.addrMgr.addrs[normalizeNetAddr(addr)].attempts
 }
 
-// lifecycleDeadlineConn records connection-deadline mutations that are still in flight, so the test can prove no
-// handshake child touches the connection after performHandshake returned. Only non-zero deadlines — the interrupter always
-// sets one — are delayed and counted: delaying performHandshake's own reset-to-zero defer would let the parent's own delay mask an unjoined interrupter instead of exposing it.
+// lifecycleDeadlineConn records connection-deadline mutations that are still in flight, so the test can prove no handshake child touches the connection after performHandshake returned.
+// Only non-zero deadlines — the interrupter always sets one — are delayed and counted: delaying performHandshake's own reset-to-zero defer would let the parent's own delay mask an unjoined interrupter instead of exposing it.
 type lifecycleDeadlineConn struct {
 	net.Conn
 	inFlight atomic.Int64
@@ -426,8 +428,7 @@ func (c *lifecycleDeadlineConn) SetDeadline(deadline time.Time) error {
 		c.late.Add(1)
 	}
 	err := c.Conn.SetDeadline(deadline)
-	// Widen the window in which a non-joined interrupter would still be mutating the connection: with the reset defer
-	// undelayed, an unjoined interrupter is provably still inside this sleep when performHandshake returns, so the in-flight check fails.
+	// Widen the window in which a non-joined interrupter would still be mutating the connection: with the reset defer undelayed, an unjoined interrupter is provably still inside this sleep when performHandshake returns, so the in-flight check fails.
 	time.Sleep(50 * time.Millisecond)
 	return err
 }
@@ -509,9 +510,8 @@ func TestServiceWorkLifecyclePanicRelease(t *testing.T) {
 	requireReturned(t, lifecycleClose(s), "Close after a panicking call")
 }
 
-// TestServiceWorkLifecycleConcurrentClose parks the owning Close in phase 2 and proves later Close calls join that one
-// teardown: every joiner stays parked on the shared completion while the teardown is demonstrably unfinished, and
-// exactly one teardown runs.
+// TestServiceWorkLifecycleConcurrentClose parks the owning Close in phase 2 and proves later Close calls join that one teardown:
+// every joiner stays parked on the shared completion while the teardown is demonstrably unfinished, and exactly one teardown runs.
 func TestServiceWorkLifecycleConcurrentClose(t *testing.T) {
 	s := newTestHarness(t, 0, "127.0.0.1:0", nil).service
 	must(t, s.Start(context.Background()), "Start")
