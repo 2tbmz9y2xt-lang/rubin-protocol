@@ -49,11 +49,19 @@ func (s *Service) connectDiscoveredAddrs(addrs []string) {
 		if s.isConnected(addr) {
 			continue
 		}
+		// Register the discovered-dial worker before the in-flight
+		// reservation and before MarkAttempted: once Close has published
+		// the non-OPEN state this handler-inherited path makes no
+		// reservation, no addr-manager mutation and no goroutine at all,
+		// and no later address in this batch can start one either.
+		if !s.acquireWork() {
+			return
+		}
 		if !s.tryTrackDiscoveredDial(addr, limit) {
+			s.releaseWork()
 			continue
 		}
 		s.addrMgr.MarkAttempted(addr)
-		s.loopWG.Add(1)
 		go s.dialPeer(addr)
 	}
 }

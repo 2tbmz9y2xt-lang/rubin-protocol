@@ -56,6 +56,12 @@ type Service struct {
 	// Close has returned, Start refuses to restart the same Service and the
 	// accept/reconnect loops must not be revived. Guarded by peersMu.
 	closed bool
+	// closeDone is published by the Close that owns the teardown and closed
+	// when that teardown completes; every later Close waits on it instead of
+	// tearing down again. closed==true with a nil closeDone means the flag
+	// was published without a teardown owner, so the next Close still owns
+	// the teardown. Guarded by peersMu.
+	closeDone chan struct{}
 	// boundAddr caches listener.Addr().String() captured when Start
 	// successfully publishes the listener. Addr() returns it so that
 	// wildcard/ephemeral binds (e.g. ":0") still surface the concrete
@@ -215,10 +221,60 @@ func normalizeServicePeerRuntimeConfig(cfg node.PeerRuntimeConfig, syncNetwork s
 	return cfg
 }
 
+// errServiceClosed is the exact rejection a publication-capable public entry
+// returns once Close has published the non-OPEN state.
+var errServiceClosed = errors.New("service already closed")
+
+// acquireWork registers one Service work lease and reports whether the
+// Service was still OPEN. A rejected caller must perform no parsing,
+// producer call, state mutation, queueing, or send. The loopWG increment
+// happens under the same peersMu section that reads closed, and Close
+// publishes closed under that lock before it releases it and waits, so a
+// lease can never be added after Close began waiting for it.
+func (s *Service) acquireWork() bool {
+	if s == nil {
+		return false
+	}
+	s.peersMu.Lock()
+	defer s.peersMu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.loopWG.Add(1)
+	return true
+}
+
+// releaseWork releases exactly one lease taken by acquireWork.
+func (s *Service) releaseWork() {
+	s.loopWG.Done()
+}
+
+// workAuthorized reports whether the Service is still OPEN. A peer worker
+// calls it immediately before authorizing one more frame read; it takes no
+// lease and the caller keeps the worker lease it already owns. A peer with
+// no Service owns no lifecycle gate and stays authorized.
+func (s *Service) workAuthorized() bool {
+	if s == nil {
+		return true
+	}
+	s.peersMu.RLock()
+	defer s.peersMu.RUnlock()
+	return !s.closed
+}
+
+// AnnounceBlock parses a locally accepted block and announces it to the
+// current peers. It takes one Service call lease before parsing, seen-set
+// mutation, broadcast or DA TTL work: once Close has published the non-OPEN
+// state it returns exactly "service already closed" with zero effects, and a
+// call that won the lease first finishes while Close waits for it.
 func (s *Service) AnnounceBlock(blockBytes []byte) error {
 	if s == nil {
 		return errors.New("nil service")
 	}
+	if !s.acquireWork() {
+		return errServiceClosed
+	}
+	defer s.releaseWork()
 	pb, err := consensus.ParseBlockBytes(blockBytes)
 	if err != nil {
 		return err
@@ -238,10 +294,19 @@ func (s *Service) AnnounceBlock(blockBytes []byte) error {
 	return ttlErr
 }
 
+// AnnounceTx admits a locally submitted transaction to the relay pool and
+// announces it. It takes one Service call lease before parsing, admission,
+// DA staging, seen-set mutation or inventory send: once Close has published
+// the non-OPEN state it returns exactly "service already closed" with zero
+// effects, and a call that won the lease first finishes while Close waits.
 func (s *Service) AnnounceTx(txBytes []byte) error {
 	if s == nil {
 		return errors.New("nil service")
 	}
+	if !s.acquireWork() {
+		return errServiceClosed
+	}
+	defer s.releaseWork()
 	tx, txid, err := parseCanonicalTx(txBytes)
 	if err != nil {
 		return err

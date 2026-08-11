@@ -153,9 +153,13 @@ func (s *Service) startOutboundPeers() {
 }
 
 // Close cancels the service context, closes the listener, tears down every
-// tracked peer connection, waits for all background goroutines to exit, and
-// marks the Service as closed. The Service is dormant after Close returns:
-// any subsequent Start call will return "service already closed". Close is
+// tracked peer connection, waits for all background goroutines and every
+// in-flight public call to release their work lease, and marks the Service as
+// closed. No Service-owned network or state effect occurs after Close
+// returns. Concurrent Close calls share one teardown: only the first runs it,
+// the others return once that single completion is published. The Service is
+// dormant after Close returns: a subsequent Start returns "service already
+// closed", and so does every publication-capable public call. Close is
 // idempotent on a nil receiver. The boundAddr cache is retained so that
 // post-close Addr() calls still surface the last resolved listener address
 // for diagnostics/metrics.
@@ -175,10 +179,27 @@ func (s *Service) Close() error {
 	}
 	// Phase 1: publish the closed flag so any in-progress Start observes
 	// it on its write-lock re-check and aborts with "service already
-	// closed", closing its local listener before returning.
+	// closed", closing its local listener before returning. Publishing it
+	// under peersMu is also the registration cutoff: acquireWork increments
+	// loopWG only under this same lock with closed==false, so every lease
+	// this Close will wait for was registered before this section and no
+	// lease can appear after the loopWG.Wait below has begun.
+	//
+	// The first Close to reach this section owns the single teardown and
+	// publishes closeDone; a later Close observes it and waits for that one
+	// completion instead of tearing down again.
 	s.peersMu.Lock()
+	if s.closeDone != nil {
+		joined := s.closeDone
+		s.peersMu.Unlock()
+		<-joined
+		return nil
+	}
 	s.closed = true
+	closeDone := make(chan struct{})
+	s.closeDone = closeDone
 	s.peersMu.Unlock()
+	defer close(closeDone)
 
 	// Phase 2: wait for every in-progress Start to return. After this
 	// wait, s.listener is in its final state — either published by a
@@ -267,11 +288,18 @@ func (s *Service) acceptLoop() {
 			continue
 		}
 		errorBackoff = acceptErrorBackoffInit
+		// Register the connection worker before any handshake-slot
+		// mutation: if Close won the race there is no slot change, no
+		// child and no lease — only the accepted socket is closed.
+		if !s.acquireWork() {
+			_ = conn.Close()
+			return
+		}
 		if !s.tryAcquireHandshakeSlot() {
 			_ = conn.Close()
+			s.releaseWork()
 			continue
 		}
-		s.loopWG.Add(1)
 		go s.runConn(conn, true)
 	}
 }
@@ -322,11 +350,18 @@ func (s *Service) dialPeer(addr string) {
 	}
 }
 
+// startDialPeer registers the dial worker before it reserves the in-flight
+// dial slot, so a dial that loses the race with Close leaves no reservation,
+// no goroutine and no lease behind. The registered lease is transferred to
+// the spawned dialPeer, which releases it exactly once.
 func (s *Service) startDialPeer(addr string) bool {
-	if !s.trackDialPeer(addr) {
+	if !s.acquireWork() {
 		return false
 	}
-	s.loopWG.Add(1)
+	if !s.trackDialPeer(addr) {
+		s.releaseWork()
+		return false
+	}
 	go s.dialPeer(addr)
 	return true
 }

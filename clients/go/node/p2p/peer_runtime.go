@@ -51,6 +51,14 @@ func (p *peer) run(ctx context.Context) error {
 		if err := recordExpiredFallback(); err != nil {
 			return err
 		}
+		// Read authorization: an OPEN observation here authorizes exactly
+		// one further frame attempt. It sits after the compact fallback an
+		// already-authorized message is permitted to finish and before the
+		// read deadline is armed, so once Close has published the non-OPEN
+		// state this worker sets no deadline and starts no further read.
+		if !p.service.workAuthorized() {
+			return nil
+		}
 		frameStart := time.Now()
 		_, activeCompact := p.compactOutstandingExpiry()
 		if err := p.setReadDeadlineAt(frameStart, lateBlockTxn == nil || activeCompact); err != nil {
