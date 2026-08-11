@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"bytes"
 	"errors"
 	"sync"
 	"testing"
@@ -41,6 +42,62 @@ func TestCanonicalMempoolTxPoolPendingOutpointOwner(t *testing.T) {
 		PendingOutpointOwner() *node.PendingOutpointOwner
 	}); widened {
 		t.Fatal("the generic TxPool surface was widened with the owner accessor")
+	}
+}
+
+// TestCanonicalMempoolTxPoolRetainedTxByID proves the adapter surface: nil
+// adapter, nil-backed adapter, and a live miss all return the zero snapshot
+// and false; a healthy canonically-admitted hit carries the producer's own
+// identities and the owner's defensive copy survives caller mutation; the
+// generic TxPool interface stays non-widened. Package p2p cannot construct a
+// corrupted owner row (node internals are unexported with no product
+// mutation hook), so owner-row corruption forwarding (R3-R7) is pinned by
+// the owner-side tests in package node, not through this adapter.
+func TestCanonicalMempoolTxPoolRetainedTxByID(t *testing.T) {
+	chainState := node.NewChainState()
+	raw, txid, utxos := signedCanonicalP2PTxWithoutSeeding(t, 1)
+	for op, entry := range utxos {
+		chainState.Utxos[op] = entry
+	}
+	mempool, err := node.NewMempool(chainState, nil, node.DevnetGenesisChainID())
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	adapter := NewCanonicalMempoolTxPool(mempool)
+
+	var nilAdapter *CanonicalMempoolTxPool
+	for name, pool := range map[string]*CanonicalMempoolTxPool{
+		"nil adapter":               nilAdapter,
+		"nil-backed adapter":        NewCanonicalMempoolTxPool(nil),
+		"live adapter, absent txid": adapter,
+	} {
+		got, ok := pool.RetainedTxByID(txid)
+		if ok || got.IndexedTxID != ([32]byte{}) || got.AdmissionWTxID != ([32]byte{}) || got.Raw != nil {
+			t.Fatalf("%s=(%x,%x,%x,%v), want the zero snapshot and false", name, got.IndexedTxID, got.AdmissionWTxID, got.Raw, ok)
+		}
+	}
+
+	admitted := adapter.AddRemoteTxForRelay(txid, raw, nil)
+	if admitted.Disposition != node.RelayAdmissionRetained {
+		t.Fatalf("disposition=%v, want RETAINED (err=%v)", admitted.Disposition, admitted.Err)
+	}
+	got, ok := adapter.RetainedTxByID(txid)
+	if !ok || got.IndexedTxID != admitted.TxID || got.AdmissionWTxID != admitted.WTxID || !bytes.Equal(got.Raw, raw) {
+		t.Fatalf("snapshot=(%x,%x,%x,%v), want the producer's (%x,%x) and the exact retained bytes", got.IndexedTxID, got.AdmissionWTxID, got.Raw, ok, admitted.TxID, admitted.WTxID)
+	}
+	got.Raw[0] ^= 0xFF
+	again, _ := adapter.RetainedTxByID(txid)
+	if !bytes.Equal(again.Raw, raw) {
+		t.Fatal("the adapter forwarded a mutable alias of the retained bytes")
+	}
+
+	// Widening the generic TxPool interface would force every implementation to
+	// carry the retained accessor. MemoryTxPool must not.
+	var generic TxPool = NewMemoryTxPool()
+	if _, widened := generic.(interface {
+		RetainedTxByID([32]byte) (node.RetainedTxSnapshot, bool)
+	}); widened {
+		t.Fatal("the generic TxPool surface was widened with the retained snapshot accessor")
 	}
 }
 

@@ -224,6 +224,49 @@ func (m *Mempool) TxByID(txid [32]byte) ([]byte, bool) {
 	return raw, true
 }
 
+// RetainedTxSnapshot is one indivisible read of a retained mempool row: the txid
+// it is indexed under, the wtxid stored at its admission, and a defensive copy of
+// its exact retained bytes, all read under one continuously held mempool read lock
+// so that they describe one row incarnation and never a mixed tuple.
+type RetainedTxSnapshot struct {
+	IndexedTxID    [32]byte
+	AdmissionWTxID [32]byte
+	Raw            []byte
+}
+
+// RetainedTxByID snapshots the retained row indexed under txid.
+//
+// The bool reports ONLY whether the primary txid index held that key under the
+// read lock — never validity, availability, standard-domain, or relay authority.
+// The method parses, hashes, validates and repairs nothing, and never consults
+// the separate wtxid index. Raw is a defensive exact-length copy: mutating it
+// cannot alter the retained entry or any later snapshot.
+//
+// A present nil row is CORRUPTION, not absence, and stays distinguishable from
+// it: it returns (IndexedTxID = the requested key, zero AdmissionWTxID, nil Raw,
+// true), where a nil receiver or a missing key returns (zero snapshot, false).
+// Classifying that corruption belongs to the caller.
+func (m *Mempool) RetainedTxByID(txid [32]byte) (RetainedTxSnapshot, bool) {
+	if m == nil {
+		return RetainedTxSnapshot{}, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	entry, ok := m.txs[txid]
+	if !ok {
+		return RetainedTxSnapshot{}, false
+	}
+	// The indexed key, never entry.txid: a [32]byte map hit means the argument IS the key.
+	snapshot := RetainedTxSnapshot{IndexedTxID: txid}
+	if entry == nil {
+		return snapshot, true
+	}
+	snapshot.AdmissionWTxID = entry.wtxid
+	snapshot.Raw = make([]byte, len(entry.raw))
+	copy(snapshot.Raw, entry.raw)
+	return snapshot, true
+}
+
 // Contains reports whether a transaction with the given txid is currently
 // present in the mempool.
 func (m *Mempool) Contains(txid [32]byte) bool {
