@@ -64,6 +64,23 @@ func (p *CanonicalMempoolTxPool) Has(txid [32]byte) bool {
 	return p.mempool.Contains(txid)
 }
 
+// RetainedTxByID forwards the adapted mempool's atomic retained snapshot —
+// indexed txid, admission-time wtxid, and the owner's single defensive copy of
+// the exact retained bytes — with the owner's meaning unchanged: no identity
+// recompute, no second payload copy, no added classification, and a bool that
+// stays primary-index presence only, so a present nil row still reports found and
+// remains distinguishable from absence. A nil adapter or a nil adapted mempool
+// returns the zero snapshot and false.
+//
+// Deliberately NOT part of the generic TxPool interface: the interface stays the
+// narrow relay contract, and only this concrete adapter exposes retained metadata.
+func (p *CanonicalMempoolTxPool) RetainedTxByID(txid [32]byte) (node.RetainedTxSnapshot, bool) {
+	if p == nil || p.mempool == nil {
+		return node.RetainedTxSnapshot{}, false
+	}
+	return p.mempool.RetainedTxByID(txid)
+}
+
 // AddRemoteTxForRelay admits a peer transaction through the canonical mempool
 // and returns the producer's result UNCHANGED: the same disposition, the
 // producer's own TxID and WTxID, the same admission-context evidence, and the

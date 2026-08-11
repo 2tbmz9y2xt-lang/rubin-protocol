@@ -5176,6 +5176,188 @@ func TestMempoolTxByIDNilReceiver(t *testing.T) {
 	}
 }
 
+// TestMempoolRetainedTxByID drives the RUB-1166 hostile matrix R0-R11 over the
+// atomic retained snapshot: nil and absent rows, every admission source, the
+// test-only corruption rows, the defensive copy, every removal and restore path,
+// and a concurrent reader racing complete remove/restore cycles.
+func TestMempoolRetainedTxByID(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	defaultCfg := MempoolConfig{MaxTransactions: 10, MaxBytes: 1 << 20}
+	mustOK := func(t *testing.T, what string, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+	}
+	newPool := func(t *testing.T, cfg MempoolConfig, values ...uint64) (*Mempool, *ChainState, []consensus.Outpoint) {
+		t.Helper()
+		st, outpoints := testSpendableChainState(fromAddress, values)
+		mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, cfg)
+		mustOK(t, "new mempool", err)
+		return mp, st, outpoints
+	}
+	buildTx := func(t *testing.T, st *ChainState, op consensus.Outpoint, fee, nonce uint64) []byte {
+		t.Helper()
+		return mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{op}, 100_000, fee, nonce, fromKey, fromAddress, toAddress)
+	}
+	// wantHit pins the complete triple against the admitted bytes themselves.
+	wantHit := func(t *testing.T, mp *Mempool, raw []byte) RetainedTxSnapshot {
+		t.Helper()
+		_, txid, wtxid, _, err := consensus.ParseTx(raw)
+		mustOK(t, "ParseTx", err)
+		got, ok := mp.RetainedTxByID(txid)
+		if !ok || got.IndexedTxID != txid || got.AdmissionWTxID != wtxid || !bytes.Equal(got.Raw, raw) {
+			t.Fatalf("snapshot=(%x,%x,%x,%v), want (%x,%x,%x,true)", got.IndexedTxID, got.AdmissionWTxID, got.Raw, ok, txid, wtxid, raw)
+		}
+		return got
+	}
+	wantMiss := func(t *testing.T, label string, mp *Mempool, key [32]byte) {
+		t.Helper()
+		got, ok := mp.RetainedTxByID(key)
+		if ok || got.IndexedTxID != ([32]byte{}) || got.AdmissionWTxID != ([32]byte{}) || got.Raw != nil {
+			t.Fatalf("%s=(%x,%x,%x,%v), want the zero snapshot and false", label, got.IndexedTxID, got.AdmissionWTxID, got.Raw, ok)
+		}
+	}
+
+	t.Run("R0/R1 nil receiver and absent txid", func(t *testing.T) {
+		var nilPool *Mempool
+		wantMiss(t, "nil receiver", nilPool, [32]byte{})
+		mp, _, _ := newPool(t, defaultCfg, 1_000_000)
+		wantMiss(t, "absent txid", mp, [32]byte{0xAB})
+	})
+
+	t.Run("R2/R8 every admission source yields the exact triple as a defensive copy", func(t *testing.T) {
+		mp, st, outpoints := newPool(t, defaultCfg, 1_000_000, 1_000_000, 1_000_000)
+		for i, admit := range []func([]byte) error{mp.AddTx, mp.AddRemoteTx, mp.AddReorgTx} {
+			raw := buildTx(t, st, outpoints[i], 300_000, uint64(i+1))
+			mustOK(t, "admit", admit(raw))
+			mutated := wantHit(t, mp, raw)
+			mutated.Raw[0] ^= 0xFF
+			wantHit(t, mp, raw)
+		}
+	})
+
+	t.Run("R3 present nil row is corruption, not absence", func(t *testing.T) {
+		key := [32]byte{0x5A}
+		mp := &Mempool{txs: map[[32]byte]*mempoolEntry{key: nil}}
+		got, ok := mp.RetainedTxByID(key)
+		if !ok || got.IndexedTxID != key || got.AdmissionWTxID != ([32]byte{}) || got.Raw != nil {
+			t.Fatalf("present nil row=(%x,%x,%x,%v), want (%x, zero, nil, true)", got.IndexedTxID, got.AdmissionWTxID, got.Raw, ok, key)
+		}
+		wantMiss(t, "absent key in the same pool", mp, [32]byte{0x5B})
+	})
+
+	// One row corrupted in every dimension at once: the snapshot must report the
+	// primary row's own stored values, unclassified and unrepaired.
+	t.Run("R4-R7 corrupted row is reported from the primary index", func(t *testing.T) {
+		mp, st, outpoints := newPool(t, defaultCfg, 1_000_000)
+		raw := buildTx(t, st, outpoints[0], 100_000, 1)
+		mustOK(t, "AddTx", mp.AddTx(raw))
+		id := txID(t, raw)
+		wantWTxID := [32]byte{0xC0, 0xDE}
+		wantRaw := append(append([]byte(nil), raw...), 0xFF)
+		mp.mu.Lock()
+		entry := mp.txs[id]
+		delete(mp.wtxids, entry.wtxid) // R6: the secondary binding goes missing.
+		entry.wtxid = wantWTxID        // R4: the stored wtxid no longer matches Raw.
+		entry.txid = [32]byte{0x99}    // R5: the entry field disagrees with the index.
+		entry.raw = wantRaw            // R7: retained bytes are no longer canonical.
+		mp.mu.Unlock()
+		got, ok := mp.RetainedTxByID(id)
+		if !ok || got.IndexedTxID != id || got.AdmissionWTxID != wantWTxID || !bytes.Equal(got.Raw, wantRaw) {
+			t.Fatalf("corrupted row=(%x,%x,%x,%v), want (%x,%x,%x,true)", got.IndexedTxID, got.AdmissionWTxID, got.Raw, ok, id, wantWTxID, wantRaw)
+		}
+		mp.mu.RLock()
+		defer mp.mu.RUnlock()
+		if len(mp.wtxids) != 0 {
+			t.Fatalf("the read repaired the secondary wtxid index: %d bindings", len(mp.wtxids))
+		}
+	})
+
+	t.Run("R9 removal makes the row absent", func(t *testing.T) {
+		removalCase := func(t *testing.T, label string, cfg MempoolConfig, remove func(*testing.T, *Mempool, *ChainState, []consensus.Outpoint, []byte, mempoolSnapshot)) {
+			t.Helper()
+			mp, st, outpoints := newPool(t, cfg, 1_000_000, 1_000_000)
+			empty, err := snapshotMempool(mp)
+			mustOK(t, "snapshotMempool", err)
+			raw := buildTx(t, st, outpoints[0], 100_000, 1)
+			mustOK(t, "AddTx", mp.AddTx(raw))
+			wantHit(t, mp, raw)
+			remove(t, mp, st, outpoints, raw, empty)
+			wantMiss(t, label, mp, txID(t, raw))
+		}
+		removalCase(t, "confirmed", defaultCfg, func(t *testing.T, mp *Mempool, _ *ChainState, _ []consensus.Outpoint, raw []byte, _ mempoolSnapshot) {
+			mustOK(t, "EvictConfirmed", mp.EvictConfirmed(buildSingleTxBlock(t, [32]byte{}, consensus.POW_LIMIT, 1, raw)))
+		})
+		removalCase(t, "conflict", defaultCfg, func(t *testing.T, mp *Mempool, st *ChainState, ops []consensus.Outpoint, _ []byte, _ mempoolSnapshot) {
+			conflicting := buildTx(t, st, ops[0], 200_000, 2)
+			coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidy(1, 0))
+			mustOK(t, "RemoveConflicting", mp.RemoveConflicting(buildMultiTxBlock(t, [32]byte{}, consensus.POW_LIMIT, 1, coinbase, conflicting)))
+		})
+		removalCase(t, "capacity", MempoolConfig{MaxTransactions: 1, MaxBytes: 1 << 20}, func(t *testing.T, mp *Mempool, st *ChainState, ops []consensus.Outpoint, _ []byte, _ mempoolSnapshot) {
+			mustOK(t, "AddTx(better fee)", mp.AddTx(buildTx(t, st, ops[1], 400_000, 2)))
+		})
+		removalCase(t, "empty restore", defaultCfg, func(t *testing.T, mp *Mempool, _ *ChainState, _ []consensus.Outpoint, _ []byte, empty mempoolSnapshot) {
+			mustOK(t, "restoreMempoolSnapshot", restoreMempoolSnapshot(mp, empty))
+		})
+	})
+
+	t.Run("R10 restore observations are complete", func(t *testing.T) {
+		mp, st, outpoints := newPool(t, defaultCfg, 1_000_000, 1_000_000)
+		tx1 := buildTx(t, st, outpoints[0], 200_000, 1)
+		mustOK(t, "AddTx(tx1)", mp.AddTx(tx1))
+		withTx1, err := snapshotMempool(mp)
+		mustOK(t, "snapshotMempool", err)
+		tx2 := buildTx(t, st, outpoints[1], 200_000, 2)
+		mustOK(t, "AddTx(tx2)", mp.AddTx(tx2))
+		mustOK(t, "restoreMempoolSnapshot", restoreMempoolSnapshot(mp, withTx1))
+		wantHit(t, mp, tx1)
+		wantMiss(t, "row dropped by the restore", mp, txID(t, tx2))
+		// A rejected restore publishes nothing, so the pre-restore tuple stands.
+		broken := withTx1
+		broken.lastAdmissionSeq = 0
+		if err := restoreMempoolSnapshot(mp, broken); err == nil {
+			t.Fatal("restore accepted an admission high-water below the restored max")
+		}
+		wantHit(t, mp, tx1)
+	})
+
+	t.Run("R11 concurrent remove and restore never yields a mixed tuple", func(t *testing.T) {
+		mp, st, outpoints := newPool(t, defaultCfg, 1_000_000)
+		raw := buildTx(t, st, outpoints[0], 100_000, 1)
+		mustOK(t, "AddTx", mp.AddTx(raw))
+		_, id, wtxid, _, err := consensus.ParseTx(raw)
+		mustOK(t, "ParseTx", err)
+		withRow, err := snapshotMempool(mp)
+		mustOK(t, "snapshotMempool", err)
+		block := buildSingleTxBlock(t, [32]byte{}, consensus.POW_LIMIT, 1, raw)
+		done, stopped := make(chan struct{}), make(chan struct{})
+		defer func() { close(done); <-stopped }()
+		go func() {
+			defer close(stopped)
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				// Absence is a legal observation; a hit must be one whole row.
+				if got, ok := mp.RetainedTxByID(id); ok && (got.IndexedTxID != id || got.AdmissionWTxID != wtxid || !bytes.Equal(got.Raw, raw)) {
+					t.Errorf("mixed tuple: (%x,%x,%x)", got.IndexedTxID, got.AdmissionWTxID, got.Raw)
+					return
+				}
+			}
+		}()
+		for i := 0; i < 200; i++ {
+			mustOK(t, "EvictConfirmed", mp.EvictConfirmed(block))
+			mustOK(t, "restoreMempoolSnapshot", restoreMempoolSnapshot(mp, withRow))
+		}
+	})
+}
+
 func TestMempoolContainsReflectsAdmission(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
