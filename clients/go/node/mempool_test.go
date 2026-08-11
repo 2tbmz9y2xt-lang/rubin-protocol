@@ -5331,6 +5331,13 @@ func TestMempoolRetainedTxByID(t *testing.T) {
 		mustOK(t, "AddTx", mp.AddTx(raw))
 		_, id, wtxid, _, err := consensus.ParseTx(raw)
 		mustOK(t, "ParseTx", err)
+		mp.mu.RLock()
+		entryA := mp.txs[id]
+		mp.mu.RUnlock()
+		wtxidB := wtxid
+		wtxidB[0] ^= 0xFF
+		rawB := append(append([]byte(nil), raw...), 0xEE)
+		entryB := &mempoolEntry{txid: id, wtxid: wtxidB, raw: rawB}
 		withRow, err := snapshotMempool(mp)
 		mustOK(t, "snapshotMempool", err)
 		block := buildSingleTxBlock(t, [32]byte{}, consensus.POW_LIMIT, 1, raw)
@@ -5345,15 +5352,23 @@ func TestMempoolRetainedTxByID(t *testing.T) {
 				default:
 				}
 				// Absence is a legal observation; a hit must be one whole row.
-				if got, ok := mp.RetainedTxByID(id); ok && (got.IndexedTxID != id || got.AdmissionWTxID != wtxid || !bytes.Equal(got.Raw, raw)) {
+				if got, ok := mp.RetainedTxByID(id); ok && (got.IndexedTxID != id || (got.AdmissionWTxID != wtxid || !bytes.Equal(got.Raw, raw)) && (got.AdmissionWTxID != wtxidB || !bytes.Equal(got.Raw, rawB))) {
 					t.Errorf("mixed tuple: (%x,%x,%x)", got.IndexedTxID, got.AdmissionWTxID, got.Raw)
 					return
 				}
 			}
 		}()
+		// Public-path cycles kill stale/fabricated hits and prove race-cleanliness.
 		for i := 0; i < 200; i++ {
 			mustOK(t, "EvictConfirmed", mp.EvictConfirmed(block))
 			mustOK(t, "restoreMempoolSnapshot", restoreMempoolSnapshot(mp, withRow))
+		}
+		// Divergent-incarnation swap kills fields assembled across two incarnations.
+		incarnations := [2]*mempoolEntry{entryA, entryB}
+		for i := 0; i < 200; i++ {
+			mp.mu.Lock()
+			mp.txs[id] = incarnations[i%2]
+			mp.mu.Unlock()
 		}
 	})
 }
