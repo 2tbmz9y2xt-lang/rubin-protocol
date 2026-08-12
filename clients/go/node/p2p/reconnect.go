@@ -36,16 +36,30 @@ func (s *Service) reconnectDuePeers() {
 	if s == nil {
 		return
 	}
-	now := s.cfg.Now()
 	for _, addr := range s.outboundAddrsSnapshot() {
 		if s.isConnected(addr) {
 			continue
 		}
+		// Exact reconnect order: the worker lease precedes the clock producer and
+		// the read-only due check, the in-flight reservation precedes the backoff
+		// advance, and only a fully reserved attempt advances reconnectState and
+		// spawns the dial that inherits the lease. A Close loss, a not-due entry
+		// or a duplicate reservation leaves reconnectState exactly as it found it,
+		// adds no reservation and releases the lease exactly once.
+		if !s.acquireWork() {
+			return
+		}
+		now := s.cfg.Now()
 		if !s.isReconnectDue(addr, now) {
+			s.releaseWork()
+			continue
+		}
+		if !s.trackDialPeer(addr) {
+			s.releaseWork()
 			continue
 		}
 		s.scheduleNextReconnectAttempt(addr, now)
-		s.startDialPeer(addr)
+		go s.dialPeer(addr)
 	}
 }
 
@@ -103,12 +117,15 @@ func (s *Service) scheduleNextReconnectAttempt(addr string, now time.Time) {
 	})
 }
 
+// isReconnectDue reports whether addr may be dialed again at now. It is a
+// read-only peek over reconnectSnapshot: an address with no entry is due (zero
+// nextRetry) but MUST NOT gain one here, so a reconnect rejected after this
+// check leaves reconnectState exactly as it found it.
 func (s *Service) isReconnectDue(addr string, now time.Time) bool {
-	due := false
-	ok := s.withReconnectEntry(addr, func(entry *reconnectEntry) {
-		due = !entry.nextRetry.After(now)
-	})
-	return ok && due
+	if s == nil || normalizeReconnectAddr(addr) == "" {
+		return false
+	}
+	return !s.reconnectSnapshot(addr).nextRetry.After(now)
 }
 
 func (s *Service) reconnectSnapshot(addr string) reconnectEntry {

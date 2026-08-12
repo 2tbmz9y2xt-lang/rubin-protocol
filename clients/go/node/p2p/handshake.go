@@ -53,11 +53,24 @@ func performHandshake(
 		_ = conn.SetDeadline(time.Time{})
 	}()
 
+	// The cancellation interrupter mutates conn's deadline, so performHandshake
+	// joins it before returning on every path: after this defer no child of
+	// this handshake can touch conn, and therefore none can outlive the worker
+	// that owns the connection or the Service drain that waits for that worker.
 	done := make(chan struct{})
-	defer close(done)
+	interrupterExited := make(chan struct{})
 	if ctx != nil {
-		go interruptHandshakeOnContextCancel(ctx, conn, done)
+		go func() {
+			defer close(interrupterExited)
+			interruptHandshakeOnContextCancel(ctx, conn, done)
+		}()
+	} else {
+		close(interrupterExited)
 	}
+	defer func() {
+		close(done)
+		<-interrupterExited
+	}()
 
 	payload, err := encodeVersionPayload(local)
 	if err != nil {

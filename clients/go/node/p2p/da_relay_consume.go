@@ -41,10 +41,19 @@ func (s *Service) consumeCanonicalAppliedDASets(blocks []node.CanonicalAppliedBl
 // cmd/rubin-node. It parses, then delegates to the same
 // node.CompleteDASetIDsFromParsedBlock core the canonical-apply path uses, so
 // the two entry points cannot select different DA sets for the same block.
+//
+// It takes one Service call lease before parsing or DA mutation: once Close
+// has published the non-OPEN state the call returns exactly "service already
+// closed" with no parse, no DA-state mutation and no send, and a call that
+// won the lease first keeps running while Close waits for it.
 func (s *Service) ConsumeAcceptedBlockDASets(blockBytes []byte) error {
 	if s == nil {
 		return errors.New("nil service")
 	}
+	if !s.acquireWork() {
+		return errServiceClosed
+	}
+	defer s.releaseWork()
 	if s.daRelay == nil {
 		return errors.New("nil DA relay")
 	}
