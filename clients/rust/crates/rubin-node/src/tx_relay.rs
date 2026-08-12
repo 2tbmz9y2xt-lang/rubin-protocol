@@ -296,6 +296,21 @@ impl PeerOutbox {
         std::mem::take(&mut self.frames)
     }
 
+    /// Remove and return the oldest queued frame in FIFO order, decrementing
+    /// `total_bytes` by exactly the removed frame's length. Used by the peer
+    /// live loop so every frame gets its own Service `OPEN` observation
+    /// immediately before its dequeue. `MAX_OUTBOX_FRAMES_PER_PEER` bounds the
+    /// `remove(0)` shift to at most `MAX_OUTBOX_FRAMES_PER_PEER - 1` `Vec`
+    /// headers per call; frame payload bytes are never copied.
+    pub(crate) fn pop_frame(&mut self) -> Option<Vec<u8>> {
+        if self.frames.is_empty() {
+            return None;
+        }
+        let frame = self.frames.remove(0);
+        self.total_bytes = self.total_bytes.saturating_sub(frame.len());
+        Some(frame)
+    }
+
     pub fn len(&self) -> usize {
         self.frames.len()
     }
@@ -2881,6 +2896,38 @@ fn handle_received_tx() {
         assert!(outcome.is_banworthy());
         assert!(relay.tx_seen.is_empty());
         assert!(relay.relay_pool.is_empty());
+    }
+
+    #[test]
+    fn service_work_peer_outbox_single_frame_fifo() {
+        let mut outbox = PeerOutbox::default();
+        let first = vec![0xA1; 5];
+        let first_ptr = first.as_ptr();
+        assert!(outbox.push_frame(first));
+        assert!(outbox.push_frame(vec![0xB2; 7]));
+        assert!(outbox.push_frame(vec![0xC3; 9]));
+        assert_eq!(outbox.total_bytes(), 21);
+
+        // Ordered one-frame removal with an exact total_bytes decrement.
+        let popped = outbox.pop_frame().expect("oldest frame");
+        assert_eq!(popped, vec![0xA1; 5]);
+        assert_eq!(
+            popped.as_ptr(),
+            first_ptr,
+            "the frame buffer is moved out, never copied"
+        );
+        assert_eq!(outbox.total_bytes(), 16);
+        assert_eq!(outbox.len(), 2);
+        // The existing frames() slice API and its ordering are unchanged.
+        assert_eq!(outbox.frames(), [vec![0xB2; 7], vec![0xC3; 9]]);
+        assert_eq!(outbox.pop_frame().expect("next frame"), vec![0xB2; 7]);
+        assert_eq!(outbox.total_bytes(), 9);
+        // take_frames still drains everything and zeroes the counter.
+        assert_eq!(outbox.take_frames(), vec![vec![0xC3; 9]]);
+        assert_eq!(outbox.total_bytes(), 0);
+        assert!(outbox.is_empty());
+        assert!(outbox.pop_frame().is_none());
+        assert_eq!(outbox.total_bytes(), 0, "empty dequeue changes nothing");
     }
 
     #[test]
