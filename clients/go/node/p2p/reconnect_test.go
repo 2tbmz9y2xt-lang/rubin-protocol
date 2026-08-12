@@ -136,9 +136,9 @@ func TestDialPeerFailureRecordsReconnect(t *testing.T) {
 	h.service.cfg.Now = func() time.Time { return currentTime }
 	h.service.ctx = context.Background()
 	h.service.loopWG.Add(1)
-	h.service.dialPeer("127.0.0.1:1")
+	h.service.dialPeer("127.0.0.1:0")
 
-	snap := h.service.reconnectSnapshot("127.0.0.1:1")
+	snap := h.service.reconnectSnapshot("127.0.0.1:0")
 	if snap.failures != 1 {
 		t.Fatalf("failures=%d, want 1", snap.failures)
 	}
