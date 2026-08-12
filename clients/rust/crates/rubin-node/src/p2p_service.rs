@@ -2,20 +2,23 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::da_prefetch::DaRelayPrefetchState;
 use crate::da_relay::{
     CompleteDaSetCandidate, CompleteDaSetProvider, DaRelayCaps, DaRelayState, PeerQuotaKey,
 };
 use crate::p2p_runtime::{
-    perform_version_handshake, sendcmpct_advertisement_message, LiveMessageOutcome, PeerManager,
-    PeerRelayContext, PeerRuntimeConfig, VersionPayloadV1, WireMessage,
+    perform_version_handshake_with_read_authorizer, sendcmpct_advertisement_message,
+    LiveMessageOutcome, PeerManager, PeerRelayContext, PeerRuntimeConfig, VersionPayloadV1,
+    WireMessage,
 };
 use crate::sync_reorg::TxPoolCleanupPlan;
 use crate::tx_relay::{PeerOutbox, TxRelayState};
+use crate::tx_seen::BoundedHashSet;
+use crate::txpool::RelayTxMetadata;
 use crate::{SyncEngine, TxPool};
 
 type PeerQuotaLockMap = BTreeMap<PeerQuotaKey, PeerQuotaLockEntry>;
@@ -25,8 +28,6 @@ const RECONNECT_LOOP_SLEEP: Duration = Duration::from_millis(250);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const SERVICE_CLOSE_WAIT_SLEEP: Duration = Duration::from_millis(25);
-const MAX_SHUTDOWN_WAIT: Duration = Duration::from_secs(30);
 const LIVE_LOOP_IDLE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// Hard ceiling on live worker threads to prevent resource exhaustion.
 /// Set to 3× max_peers to allow transient overlap during handshake/teardown.
@@ -37,6 +38,149 @@ const MAX_WORKER_THREADS: usize = 256;
 /// Initial accept-error backoff, doubled on each consecutive error up to cap.
 const ACCEPT_ERROR_BACKOFF_INIT: Duration = Duration::from_millis(100);
 const ACCEPT_ERROR_BACKOFF_CAP: Duration = Duration::from_secs(5);
+
+/// Exact task-local string a publication-capable entry returns once the
+/// Service has left `OPEN`. Intentionally client-local: the Go reference uses
+/// `service already closed` (RUB-1167); both match normative Tables A-D
+/// without matching each other byte for byte.
+const SERVICE_CLOSED_ERR: &str = "p2p service closed";
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LifecyclePhase {
+    Open,
+    Draining,
+    Closed,
+}
+
+struct LifecycleState {
+    phase: LifecyclePhase,
+    /// Number of registered-but-unreleased leases. `CLOSED` is published only
+    /// after this reaches zero.
+    leases: usize,
+}
+
+/// The single Service lifecycle authority (spec RUBIN_L1_P2P_AUX §5). Lease
+/// acquisition is the registration linearization and `OPEN -> DRAINING` is the
+/// cutoff; both take this one mutex, so a lease can never be registered after
+/// close began waiting for it. There is no second lifecycle authority and no
+/// per-operation registry.
+struct ServiceLifecycle {
+    state: Mutex<LifecycleState>,
+    drained: Condvar,
+}
+
+impl ServiceLifecycle {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(LifecycleState {
+                phase: LifecyclePhase::Open,
+                leases: 0,
+            }),
+            drained: Condvar::new(),
+        })
+    }
+
+    /// Recover a poisoned lifecycle mutex instead of propagating the panic:
+    /// a panicking lease owner must still be able to release, and close must
+    /// still be able to drain and publish `CLOSED`.
+    fn lock(&self) -> MutexGuard<'_, LifecycleState> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Registration linearization: increments once under the lifecycle mutex
+    /// and hands back the RAII lease before releasing it. Returns `None` once
+    /// the Service has left `OPEN`, and a rejected caller performs no work.
+    fn acquire(self: &Arc<Self>) -> Option<ServiceLease> {
+        let mut state = self.lock();
+        if state.phase != LifecyclePhase::Open {
+            return None;
+        }
+        state.leases += 1;
+        drop(state);
+        Some(ServiceLease {
+            gate: Arc::clone(self),
+        })
+    }
+
+    /// `true` while the Service is `OPEN`. Takes no lease: a peer worker calls
+    /// it immediately before authorizing one more read or one more frame
+    /// dequeue and keeps the worker lease it already owns.
+    fn authorized(&self) -> bool {
+        self.lock().phase == LifecyclePhase::Open
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn phase(&self) -> LifecyclePhase {
+        self.lock().phase
+    }
+
+    /// Publishes `DRAINING` from `OPEN` and reports the phase observed on
+    /// entry, so a serialized re-entry after a caught unwind resumes the same
+    /// teardown instead of transitioning twice.
+    fn begin_close(&self) -> LifecyclePhase {
+        let mut state = self.lock();
+        let observed = state.phase;
+        if observed == LifecyclePhase::Open {
+            state.phase = LifecyclePhase::Draining;
+        }
+        observed
+    }
+
+    /// Blocks until the active lease count is zero. `Condvar::wait` releases
+    /// the lifecycle mutex for the whole wait, so no lease owner is blocked by
+    /// the waiter.
+    fn wait_drained(&self) {
+        let mut state = self.lock();
+        while state.leases > 0 {
+            state = self
+                .drained
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn publish_closed(&self) {
+        self.lock().phase = LifecyclePhase::Closed;
+    }
+}
+
+/// RAII completion obligation. Drop releases exactly once and wakes the drain
+/// waiter at zero. Never public: callers get one through a task-specific entry
+/// point, never a generic run-with-lease runner.
+struct ServiceLease {
+    gate: Arc<ServiceLifecycle>,
+}
+
+impl Drop for ServiceLease {
+    fn drop(&mut self) {
+        let mut state = self.gate.lock();
+        state.leases = state.leases.saturating_sub(1);
+        if state.leases == 0 {
+            self.gate.drained.notify_all();
+        }
+    }
+}
+
+/// One-shot spawn seam shared by the peer-worker and DNS-child creation sites.
+/// Production spawns a real thread; unit tests return a deterministic
+/// `io::Error` without running or retaining the work, so the ownership rules
+/// on the spawn-`Err` path are executable. No queue, state, retry, or public
+/// surface; dispatch stays static.
+trait OneShotSpawn {
+    fn spawn<W: FnOnce() + Send + 'static>(&self, work: W) -> io::Result<JoinHandle<()>>;
+}
+
+struct ThreadSpawn(Option<&'static str>);
+
+impl OneShotSpawn for ThreadSpawn {
+    fn spawn<W: FnOnce() + Send + 'static>(&self, work: W) -> io::Result<JoinHandle<()>> {
+        let mut builder = thread::Builder::new();
+        if let Some(name) = self.0 {
+            builder = builder.name(name.to_string());
+        }
+        builder.spawn(work)
+    }
+}
 
 #[derive(Clone)]
 pub struct NodeP2PServiceConfig {
@@ -77,6 +221,12 @@ impl CompleteDaSetProvider for ServiceCompleteDaSetProvider {
 
 #[derive(Clone)]
 struct SharedServiceState {
+    /// The one Service lifecycle authority shared by the root workers, the
+    /// peer/DNS children and every retained callback handle.
+    lifecycle: Arc<ServiceLifecycle>,
+    /// Accepted-block TTL dedupe owner. Owned by the Service (not by the
+    /// binary) so the TTL callback mutates it only under a lease.
+    da_ttl_seen: Arc<BoundedHashSet>,
     stop: Arc<AtomicBool>,
     runtime_cfg: PeerRuntimeConfig,
     active_sessions: Arc<AtomicUsize>,
@@ -183,6 +333,10 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
         DaRelayState::new(DaRelayCaps::default()).map_err(|err| format!("{err:?}"))?,
     ));
     let shared = SharedServiceState {
+        lifecycle: ServiceLifecycle::new(),
+        da_ttl_seen: Arc::new(BoundedHashSet::new(
+            crate::tx_seen::DEFAULT_BLOCK_SEEN_CAPACITY,
+        )),
         stop: Arc::clone(&stop),
         runtime_cfg: cfg.runtime_cfg,
         active_sessions: Arc::new(AtomicUsize::new(0)),
@@ -204,10 +358,23 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
         peer_aliases: Arc::new(Mutex::new(HashMap::new())),
         local_addr: addr.clone(),
     };
+    // Each root worker reserves its lifetime lease BEFORE spawn, so close can
+    // never observe a drained gate while a root loop is still starting.
+    let (Some(accept_lease), Some(reconnect_lease)) =
+        (shared.lifecycle.acquire(), shared.lifecycle.acquire())
+    else {
+        return Err(SERVICE_CLOSED_ERR.to_string());
+    };
     let accept_shared = shared.clone();
-    let accept_join = thread::spawn(move || run_accept_loop(listener, accept_shared));
+    let accept_join = thread::spawn(move || {
+        let _root_lease = accept_lease;
+        run_accept_loop(listener, accept_shared);
+    });
     let reconnect_shared = shared.clone();
-    let reconnect_join = thread::spawn(move || run_reconnect_loop(reconnect_shared));
+    let reconnect_join = thread::spawn(move || {
+        let _root_lease = reconnect_lease;
+        run_reconnect_loop(reconnect_shared);
+    });
     for addr in shared.bootstrap_peers.iter() {
         start_outbound_peer(addr.clone(), shared.clone());
     }
@@ -225,18 +392,14 @@ impl RunningNodeP2PService {
         &self.addr
     }
 
-    /// Relay state for tx dedup + relay pool.
-    pub fn relay_state(&self) -> Arc<TxRelayState> {
-        Arc::clone(&self.shared.relay_state)
-    }
-
-    /// Peer outboxes for tx broadcast.
-    pub fn peer_outboxes(&self) -> Arc<Mutex<HashMap<String, PeerOutbox>>> {
-        Arc::clone(&self.shared.peer_outboxes)
-    }
-
-    pub fn da_relay_state(&self) -> Arc<Mutex<DaRelayState>> {
-        Arc::clone(&self.shared.da_relay)
+    /// Opaque, lifecycle-bound handle for the callbacks the devnet RPC state
+    /// retains. It replaces the former raw `relay_state` / `peer_outboxes` /
+    /// `da_relay_state` accessors so no retained callback can reach a mutable
+    /// Service owner without registering a lease first.
+    pub fn callback_handle(&self) -> ServiceCallbackHandle {
+        ServiceCallbackHandle {
+            shared: self.shared.clone(),
+        }
     }
 
     pub fn complete_da_set_provider(&self) -> Arc<dyn CompleteDaSetProvider + Send + Sync> {
@@ -245,7 +408,16 @@ impl RunningNodeP2PService {
         })
     }
 
+    /// Externally serialized by `&mut self`. From `OPEN` it publishes
+    /// `DRAINING` under the gate, wakes ingress, joins every Service-owned
+    /// worker with no bounded-success detach, waits the remaining callback and
+    /// DNS-child leases, and only then publishes `CLOSED`. A serialized
+    /// re-entry from `DRAINING` (after a caught unwind) resumes the same
+    /// idempotent teardown; from `CLOSED` it returns immediately.
     pub fn close(&mut self) {
+        if self.shared.lifecycle.begin_close() == LifecyclePhase::Closed {
+            return;
+        }
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(&self.addr);
         if let Some(join) = self.accept_join.take() {
@@ -254,11 +426,65 @@ impl RunningNodeP2PService {
         if let Some(join) = self.reconnect_join.take() {
             let _ = join.join();
         }
-        // Join workers with bounded timeout so stuck peers don't hang shutdown.
-        // Workers observe stop flag and will exit their read loops, but slow
-        // read_deadline peers may take up to that duration to notice.
-        join_service_workers_bounded(&self.shared, MAX_SHUTDOWN_WAIT);
-        wait_for_service_shutdown(&self.shared);
+        join_all_service_workers(&self.shared);
+        self.shared.lifecycle.wait_drained();
+        self.shared.lifecycle.publish_closed();
+    }
+}
+
+/// Retained-callback surface of a running Service. Cloneable so the binary can
+/// bind one handle per callback; every method registers its own lease before
+/// any parse, producer, storage, queue, relay, DA or TTL effect and releases it
+/// exactly once on every outcome.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ServiceCallbackHandle {
+    shared: SharedServiceState,
+}
+
+impl ServiceCallbackHandle {
+    fn lease(&self) -> Result<ServiceLease, String> {
+        self.shared
+            .lifecycle
+            .acquire()
+            .ok_or_else(|| SERVICE_CLOSED_ERR.to_string())
+    }
+
+    pub fn announce_tx(&self, tx_bytes: &[u8], meta: RelayTxMetadata) -> Result<(), String> {
+        let _lease = self.lease()?;
+        stage_local_da_relay_tx_bytes(&self.shared.da_relay, tx_bytes);
+        crate::tx_relay::announce_tx(
+            tx_bytes,
+            meta,
+            &self.shared.relay_state,
+            &self.shared.peer_manager,
+            &self.shared.local_addr,
+            &self.shared.peer_outboxes,
+        )
+    }
+
+    pub fn announce_block(&self, block_bytes: &[u8]) -> Result<(), String> {
+        let _lease = self.lease()?;
+        crate::tx_relay::announce_block(
+            block_bytes,
+            &self.shared.relay_state,
+            &self.shared.peer_manager,
+            &self.shared.local_addr,
+            &self.shared.peer_outboxes,
+        )
+    }
+
+    pub fn consume_accepted_block_da_sets(&self, block_bytes: &[u8]) -> Result<(), String> {
+        let _lease = self.lease()?;
+        crate::da_relay::consume_accepted_block_da_sets(&self.shared.da_relay, block_bytes)
+    }
+
+    pub fn advance_accepted_block_da_ttl(&self, hash: [u8; 32]) -> Result<(), String> {
+        let _lease = self.lease()?;
+        if !self.shared.da_ttl_seen.add(hash) {
+            return Ok(());
+        }
+        advance_da_orphan_ttl_for_accepted_block(&self.shared.da_relay)
     }
 }
 
@@ -268,7 +494,9 @@ impl Drop for RunningNodeP2PService {
     }
 }
 
-pub fn stage_local_da_relay_tx_bytes(da_relay: &Arc<Mutex<DaRelayState>>, tx_bytes: &[u8]) {
+/// Module-private: reachable only after a `ServiceCallbackHandle` method has
+/// registered its lease.
+fn stage_local_da_relay_tx_bytes(da_relay: &Arc<Mutex<DaRelayState>>, tx_bytes: &[u8]) {
     if !matches!(
         crate::da_relay::relay_da_tx_kind_prefix(tx_bytes),
         Some(0x01) | Some(0x02)
@@ -281,7 +509,9 @@ pub fn stage_local_da_relay_tx_bytes(da_relay: &Arc<Mutex<DaRelayState>>, tx_byt
     let _ = da_relay.stage_relay_da_tx_bytes("", tx_bytes.to_vec());
 }
 
-pub fn advance_da_orphan_ttl_for_accepted_block(
+/// Module-private: reachable only after a `ServiceCallbackHandle` method has
+/// registered its lease.
+fn advance_da_orphan_ttl_for_accepted_block(
     da_relay: &Arc<Mutex<DaRelayState>>,
 ) -> Result<(), String> {
     let mut da_relay = da_relay
@@ -294,18 +524,50 @@ pub fn advance_da_orphan_ttl_for_accepted_block(
 }
 
 fn run_accept_loop(listener: TcpListener, shared: SharedServiceState) {
+    run_accept_loop_with(listener, shared, &ThreadSpawn(None));
+}
+
+/// Accept loop with the one-shot spawn seam as a parameter, so the accepted
+/// child's spawn-`Err` ownership path is executable. Production passes the
+/// same `ThreadSpawn` the direct entry point uses; no other behavior differs.
+fn run_accept_loop_with<S: OneShotSpawn>(
+    listener: TcpListener,
+    shared: SharedServiceState,
+    spawn: &S,
+) {
     let mut error_backoff = ACCEPT_ERROR_BACKOFF_INIT;
-    while !shared.stop.load(Ordering::SeqCst) {
+    // No new root iteration begins after DRAINING; an already-begun iteration
+    // finishes its reap and its current accepted child under the root lease.
+    while !shared.stop.load(Ordering::SeqCst) && shared.lifecycle.authorized() {
         reap_finished_service_workers(&shared);
         match listener.accept() {
             Ok((stream, _)) => {
                 error_backoff = ACCEPT_ERROR_BACKOFF_INIT;
+                // macOS/BSD propagate the listener's O_NONBLOCK to the accepted
+                // socket (Linux does not), which makes the first handshake read
+                // fail instantly with EAGAIN (os error 35) whenever the peer's
+                // version has not landed yet. Clear it before any read; Go's
+                // netpoller has no such inheritance.
+                if stream.set_nonblocking(false).is_err() {
+                    continue;
+                }
+                // Read-only eligibility ran under the root lease; the child
+                // lease is registered before the child handle/spawn and moved
+                // into the work closure so close waits its real end.
+                let Some(child_lease) = shared.lifecycle.acquire() else {
+                    continue;
+                };
                 // Session slot acquired INSIDE handle_peer after handshake.
                 // Pre-handshake reservation lets unauthenticated peers hold slots.
                 let handler_shared = shared.clone();
-                let _ = spawn_service_worker(&shared, move || {
-                    let _ = handle_peer(stream, None, handler_shared);
-                });
+                let _ = spawn_service_worker_with(
+                    &shared,
+                    move || {
+                        let _child_lease = child_lease;
+                        let _ = handle_peer(stream, None, handler_shared);
+                    },
+                    spawn,
+                );
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(ACCEPT_LOOP_SLEEP);
@@ -324,7 +586,9 @@ fn run_reconnect_loop(shared: SharedServiceState) {
 
 fn reconnect_loop_with_interval(shared: SharedServiceState, interval: Duration, sleep: Duration) {
     let mut waited = Duration::ZERO;
-    while !shared.stop.load(Ordering::SeqCst) {
+    // Root bookkeeping (finished-handle reap, bootstrap rotation) belongs to
+    // the root lease; no new root iteration starts after DRAINING.
+    while !shared.stop.load(Ordering::SeqCst) && shared.lifecycle.authorized() {
         reap_finished_service_workers(&shared);
         if waited >= interval {
             reconnect_missing_bootstrap_peers(&shared);
@@ -336,18 +600,35 @@ fn reconnect_loop_with_interval(shared: SharedServiceState, interval: Duration, 
 }
 
 fn start_outbound_peer(addr: String, shared: SharedServiceState) {
+    start_outbound_peer_with(addr, shared, &ThreadSpawn(None));
+}
+
+/// Exact child-attempt order: candidate reads under the caller's existing
+/// root/bootstrap authority, then the child lease, then the `in_flight_dials`
+/// marker, then the lease moves into the work closure, then spawn, then
+/// `JoinHandle` registration. If close wins the child lease, no reservation,
+/// mutation or handle remains.
+fn start_outbound_peer_with<S: OneShotSpawn>(addr: String, shared: SharedServiceState, spawn: &S) {
     let mut guard = lock_in_flight_dials(&shared);
     if should_skip_outbound_dial(&shared, &guard, &addr) {
         return;
     }
+    // The lifecycle mutex is a leaf here: nothing takes `in_flight_dials`
+    // while holding it, so registering under this guard keeps the existing
+    // check-then-insert atomic without a lock cycle.
+    let Some(child_lease) = shared.lifecycle.acquire() else {
+        return;
+    };
     guard.insert(addr.clone());
     drop(guard);
     let worker_shared = shared.clone();
     let cleanup_addr = addr.clone();
     let cleanup_shared = shared.clone();
-    if !spawn_service_worker(&shared, move || {
+    let worker = move || {
+        let _child_lease = child_lease;
         let connect_timeout = outbound_connect_timeout(&worker_shared.runtime_cfg);
-        let result = connect_with_timeout(&addr, connect_timeout).and_then(|stream| {
+        let lifecycle = Arc::clone(&worker_shared.lifecycle);
+        let result = connect_with_timeout(&addr, connect_timeout, &lifecycle).and_then(|stream| {
             // Session slot acquired INSIDE handle_peer after handshake, same as
             // inbound path.  No pre-handshake slot reservation — prevents malicious
             // bootstrap peers from holding slots during slow/stalled handshakes.
@@ -360,9 +641,11 @@ fn start_outbound_peer(addr: String, shared: SharedServiceState) {
             guard.remove(&addr);
         }
         let _ = result;
-    }) {
-        // Worker spawn denied (thread cap) — remove stale in_flight marker
-        // so this peer can be retried on the next reconnect pass.
+    };
+    if !spawn_service_worker_with(&shared, worker, spawn) {
+        // Worker capacity rejection or Builder spawn Err: the captured child
+        // lease dropped with the unrun work, so only the in-flight marker is
+        // left to roll back before return.
         let mut guard = lock_in_flight_dials(&cleanup_shared);
         guard.remove(&cleanup_addr);
     }
@@ -502,9 +785,18 @@ fn lock_worker_handles(
 /// the worker cap was hit and the closure was NOT executed.
 /// Worker cap is shared — inbound/outbound reservation is handled at the
 /// session slot level (try_acquire_session_slot) not here.
+#[cfg_attr(not(test), allow(dead_code))]
 fn spawn_service_worker(
     shared: &SharedServiceState,
     worker: impl FnOnce() + Send + 'static,
+) -> bool {
+    spawn_service_worker_with(shared, worker, &ThreadSpawn(None))
+}
+
+fn spawn_service_worker_with<W: FnOnce() + Send + 'static, S: OneShotSpawn>(
+    shared: &SharedServiceState,
+    worker: W,
+    spawn: &S,
 ) -> bool {
     // Reap finished workers before spawning to prevent unbounded accumulation.
     reap_finished_service_workers(shared);
@@ -523,7 +815,7 @@ fn spawn_service_worker(
         );
         return false;
     }
-    match thread::Builder::new().spawn(worker) {
+    match spawn.spawn(worker) {
         Ok(handle) => {
             handles.push(handle);
             true
@@ -554,7 +846,10 @@ fn reap_finished_service_workers(shared: &SharedServiceState) {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+/// Joins every registered peer worker to its real end. Deliberately unbounded:
+/// a bounded-success detach would let a publication-capable worker outlive
+/// `close`, which normative Table D forbids. Workers are themselves bounded by
+/// the handshake budget, `read_deadline`, and the lifecycle cutoff.
 fn join_all_service_workers(shared: &SharedServiceState) {
     loop {
         let handles = {
@@ -567,51 +862,6 @@ fn join_all_service_workers(shared: &SharedServiceState) {
         for handle in handles {
             let _ = handle.join();
         }
-    }
-}
-
-/// Like `join_all_service_workers` but gives up after `timeout` to prevent
-/// stuck peers from hanging the shutdown sequence indefinitely.
-fn join_service_workers_bounded(shared: &SharedServiceState, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let mut handles = {
-            let mut guard = lock_worker_handles(shared);
-            if guard.is_empty() {
-                return;
-            }
-            std::mem::take(&mut *guard)
-        };
-        let mut remaining = Vec::new();
-        while !handles.is_empty() {
-            if Instant::now() >= deadline {
-                // Put ALL remaining handles back so Drop can attempt cleanup.
-                eprintln!(
-                    "p2p: shutdown timeout reached, {} workers still running",
-                    remaining.len() + handles.len()
-                );
-                let mut guard = lock_worker_handles(shared);
-                guard.extend(handles);
-                guard.extend(remaining);
-                return;
-            }
-            // Pop from back — avoids shifting, order doesn't matter.
-            let handle = handles.pop().unwrap();
-            if handle.is_finished() {
-                let _ = handle.join();
-            } else {
-                remaining.push(handle);
-            }
-        }
-        if remaining.is_empty() {
-            return;
-        }
-        // Put unfinished handles back and poll again after a short sleep.
-        {
-            let mut guard = lock_worker_handles(shared);
-            guard.extend(remaining);
-        }
-        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -675,7 +925,20 @@ const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_DNS_RESOLVER_THREADS: usize = 4;
 static ACTIVE_DNS_RESOLVERS: AtomicUsize = AtomicUsize::new(0);
 
-fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, String> {
+fn connect_with_timeout(
+    addr: &str,
+    timeout: Duration,
+    lifecycle: &Arc<ServiceLifecycle>,
+) -> Result<TcpStream, String> {
+    connect_with_timeout_spawn(addr, timeout, lifecycle, &ThreadSpawn(Some("dns-resolver")))
+}
+
+fn connect_with_timeout_spawn<S: OneShotSpawn>(
+    addr: &str,
+    timeout: Duration,
+    lifecycle: &Arc<ServiceLifecycle>,
+    spawn: &S,
+) -> Result<TcpStream, String> {
     use std::net::ToSocketAddrs;
     use std::sync::mpsc;
     // Fast path: if addr is a literal IP:port, connect directly without DNS
@@ -685,12 +948,21 @@ fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, Stri
         return TcpStream::connect_timeout(&socket_addr, timeout)
             .map_err(|err| format!("connect {addr}: {err}"));
     }
-    // DNS path: atomically increment resolver count, reject if at capacity.
-    // Uses compare_exchange loop to prevent TOCTOU race where concurrent
-    // workers all pass a separate load check before incrementing.
+    // DNS path, exact order: child lease -> read-only capacity check ->
+    // successful CAS reservation -> lease moves into the work closure ->
+    // spawn. The child is publication-capable through its channel send, so it
+    // may never run unleased.
+    let Some(child_lease) = lifecycle.acquire() else {
+        return Err(SERVICE_CLOSED_ERR.to_string());
+    };
+    // Atomically increment resolver count, reject if at capacity. The
+    // compare_exchange loop prevents the TOCTOU race where concurrent workers
+    // all pass a separate load check before incrementing.
     loop {
         let current = ACTIVE_DNS_RESOLVERS.load(Ordering::Acquire);
         if current >= MAX_DNS_RESOLVER_THREADS {
+            // Capacity rejection: the lease drops here and the counter is
+            // untouched.
             return Err(format!("DNS resolver limit reached ({addr})"));
         }
         if ACTIVE_DNS_RESOLVERS
@@ -709,18 +981,20 @@ fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, Stri
             ACTIVE_DNS_RESOLVERS.fetch_sub(1, Ordering::AcqRel);
         }
     }
-    let resolver = match thread::Builder::new()
-        .name("dns-resolver".into())
-        .spawn(move || {
-            let _guard = DnsResolverGuard;
-            let result = addr_owned
-                .to_socket_addrs()
-                .map(|iter| iter.take(MAX_RESOLVED_ADDRS).collect::<Vec<_>>());
-            let _ = tx.send(result);
-        }) {
+    let resolver = match spawn.spawn(move || {
+        // Both the counter guard and the lifecycle lease live inside the
+        // child, so they survive a caller timeout that drops the JoinHandle.
+        let _child_lease = child_lease;
+        let _guard = DnsResolverGuard;
+        let result = addr_owned
+            .to_socket_addrs()
+            .map(|iter| iter.take(MAX_RESOLVED_ADDRS).collect::<Vec<_>>());
+        let _ = tx.send(result);
+    }) {
         Ok(handle) => handle,
         Err(err) => {
-            // Thread creation failed — release the reserved slot.
+            // Spawn Err: roll the successful CAS back. The unrun work was
+            // dropped by the seam, which released the captured child lease.
             ACTIVE_DNS_RESOLVERS.fetch_sub(1, Ordering::AcqRel);
             return Err(format!("DNS resolver thread spawn failed ({addr}): {err}"));
         }
@@ -731,9 +1005,10 @@ fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, Stri
             result.map_err(|err| format!("peer address resolution failed ({addr}): {err}"))?
         }
         Err(_) => {
-            // Timeout — resolver may be stuck in getaddrinfo.  Detach it;
-            // the counter is decremented by the resolver thread itself when
-            // it eventually returns, bounding total threads to MAX_DNS_RESOLVER_THREADS.
+            // Timeout — the resolver may be stuck in getaddrinfo. The caller
+            // returns and drops the JoinHandle, but the child still owns its
+            // counter guard AND its lifecycle lease, so close waits its real
+            // end. This is not lifecycle detachment.
             return Err(format!("DNS resolution timed out ({addr})"));
         }
     };
@@ -748,46 +1023,6 @@ fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<TcpStream, Stri
         }
     }
     Err(last_err)
-}
-
-fn wait_for_service_shutdown(shared: &SharedServiceState) {
-    let wait_budget = (shared
-        .runtime_cfg
-        .read_deadline
-        .max(outbound_connect_timeout(&shared.runtime_cfg))
-        + RECONNECT_LOOP_SLEEP)
-        .min(MAX_SHUTDOWN_WAIT);
-    let deadline = Instant::now() + wait_budget;
-    while Instant::now() < deadline {
-        let dials_drained = lock_in_flight_dials(shared).is_empty();
-        let sessions_drained = shared.active_sessions.load(Ordering::SeqCst) == 0;
-        if dials_drained && sessions_drained {
-            break;
-        }
-        thread::sleep(SERVICE_CLOSE_WAIT_SLEEP);
-    }
-    // Join worker threads with a hard deadline to prevent indefinite hang.
-    // Workers that don't exit by the deadline are detached (JoinHandle dropped).
-    let join_deadline = Instant::now() + MAX_SHUTDOWN_WAIT;
-    let handles: Vec<_> = {
-        let mut guard = lock_worker_handles(shared);
-        std::mem::take(&mut *guard)
-    };
-    for handle in handles {
-        let remaining = join_deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break; // deadline exceeded — detach remaining threads
-        }
-        // thread::JoinHandle doesn't support timeout; poll via is_finished.
-        let poll_start = Instant::now();
-        while !handle.is_finished() && poll_start.elapsed() < remaining {
-            thread::sleep(Duration::from_millis(10));
-        }
-        if handle.is_finished() {
-            let _ = handle.join();
-        }
-        // else: handle dropped → thread detached
-    }
 }
 
 fn handle_peer(
@@ -806,12 +1041,25 @@ fn handle_peer(
         engine.tip()?.map(|(height, _)| height).unwrap_or(0)
     };
     let local = service_local_version(best_height, shared.chain_id, shared.genesis_hash);
-    let mut session = perform_version_handshake(
+    // The worker owns one lifetime lease; it takes no per-message lease. Under
+    // that lease it re-observes OPEN immediately before every handshake read,
+    // so at most the current message finishes and no later read begins.
+    let mut session = perform_version_handshake_with_read_authorizer(
         stream,
         shared.runtime_cfg.clone(),
         local,
         shared.chain_id,
         shared.genesis_hash,
+        || {
+            if shared.lifecycle.authorized() {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    SERVICE_CLOSED_ERR,
+                ))
+            }
+        },
     )
     .map_err(|err| format!("handshake: {err}"))?;
 
@@ -935,7 +1183,14 @@ fn handle_peer(
     }
 
     while !shared.stop.load(Ordering::SeqCst) {
+        // The flush carries its own per-frame OPEN observation, so this one is
+        // the LAST statement before the readiness poll: even when close lands
+        // while a frame write is in flight, no poll — and so no probe read and
+        // no expired-compact fallback write — starts after the cutoff.
         flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
+        if !shared.lifecycle.authorized() {
+            break;
+        }
         match session.poll_read_ready(live_loop_poll_timeout(session.read_deadline())) {
             Ok(true) => {}
             Ok(false) => {
@@ -953,8 +1208,15 @@ fn handle_peer(
             }
             Err(err) => return Err(format!("poll live message readiness: {err}")),
         }
+        // Re-observe between the ready poll and the read it authorizes.
+        if !shared.lifecycle.authorized() {
+            break;
+        }
+        // Absolute per-message deadline: a peer dripping bytes inside this
+        // message cannot extend the read past its window, so the pre-poll
+        // lifecycle re-check stays reachable and close stays deadline-bounded.
         let msg = session
-            .read_message()
+            .read_live_message()
             .map_err(|err| format!("read message: {err}"))?;
         let outbound_messages = {
             // Validate payload size before acquiring engine lock.
@@ -1028,15 +1290,29 @@ fn flush_peer_outbox<F>(
 where
     F: FnMut(&[u8]) -> io::Result<()>,
 {
-    // Drain relay outbox into a local buffer, then release the lock before
-    // performing socket writes so other peers can still enqueue broadcasts.
-    let pending: Vec<Vec<u8>> = shared
+    // One OPEN observation authorizes exactly one FIFO frame: that dequeue and
+    // its write may finish, but no later dequeue begins once close published
+    // DRAINING. The outbox lock is released before each socket write so other
+    // peers can still enqueue broadcasts.
+    // Bounded per call at the queue length observed on entry, like the snapshot
+    // drain it replaces: a broadcaster refilling during the writes cannot
+    // starve the read path, and refills go out on the next live-loop iteration.
+    let mut budget = shared
         .peer_outboxes
         .lock()
         .ok()
-        .and_then(|mut ob| ob.get_mut(peer_addr).map(PeerOutbox::take_frames))
-        .unwrap_or_default();
-    for frame in pending {
+        .and_then(|ob| ob.get(peer_addr).map(PeerOutbox::len))
+        .unwrap_or(0);
+    while budget > 0 && shared.lifecycle.authorized() {
+        budget -= 1;
+        let dequeued = shared
+            .peer_outboxes
+            .lock()
+            .ok()
+            .and_then(|mut ob| ob.get_mut(peer_addr).and_then(PeerOutbox::pop_frame));
+        let Some(frame) = dequeued else {
+            return Ok(());
+        };
         write_frame(&frame).map_err(|err| format!("relay drain: {err}"))?;
     }
     Ok(())
@@ -1406,7 +1682,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::thread;
+    use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
 
     use rubin_consensus::{
@@ -1421,15 +1697,16 @@ mod tests {
         flush_peer_outbox, is_connected_with_alias, join_all_service_workers, lock_in_flight_dials,
         maybe_apply_tx_pool_cleanup, outbound_connect_timeout, reconnect_missing_bootstrap_peers,
         register_peer_alias, register_peer_outbox, should_skip_outbound_dial,
-        start_node_p2p_service, wait_for_service_shutdown, NodeP2PServiceConfig, PeerAliasGuard,
-        PeerGuard, PeerQuotaLockHandle, PendingPeerRegistration, SharedServiceState,
+        start_node_p2p_service, NodeP2PServiceConfig, PeerAliasGuard, PeerGuard,
+        PeerQuotaLockHandle, PendingPeerRegistration, ServiceLifecycle, SharedServiceState,
     };
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::interop::local_version;
     use crate::p2p_runtime::{
         build_envelope_header, decode_inventory_vectors, default_peer_runtime_config,
-        encode_inventory_vectors, network_magic, perform_version_handshake, InventoryVector,
-        LiveMessageOutcome, PeerManager, PeerRuntimeConfig, VersionPayloadV1, WireMessage, MSG_TX,
+        encode_inventory_vectors, network_magic, perform_version_handshake,
+        perform_version_handshake_with_read_authorizer, InventoryVector, LiveMessageOutcome,
+        PeerManager, PeerRuntimeConfig, VersionPayloadV1, WireMessage, MSG_TX,
     };
     use crate::sync_reorg::TxPoolCleanupPlan;
     use crate::test_helpers::{block_with_txs, signed_conflicting_p2pk_state_and_txs};
@@ -1536,12 +1813,20 @@ mod tests {
         marshal_tx(&tx).expect("marshal DA chunk tx")
     }
 
+    fn open_lifecycle() -> Arc<ServiceLifecycle> {
+        ServiceLifecycle::new()
+    }
+
     fn test_shared_state(
         runtime_cfg: PeerRuntimeConfig,
         bootstrap_peers: Vec<String>,
         sync_engine: Arc<Mutex<SyncEngine>>,
     ) -> SharedServiceState {
         SharedServiceState {
+            lifecycle: ServiceLifecycle::new(),
+            da_ttl_seen: Arc::new(crate::tx_seen::BoundedHashSet::new(
+                crate::tx_seen::DEFAULT_BLOCK_SEEN_CAPACITY,
+            )),
             stop: Arc::new(AtomicBool::new(false)),
             runtime_cfg: runtime_cfg.clone(),
             active_sessions: Arc::new(AtomicUsize::new(0)),
@@ -1624,8 +1909,7 @@ mod tests {
             accept_join: None,
             reconnect_join: None,
         };
-        let da_relay = service.da_relay_state();
-        assert!(Arc::ptr_eq(&da_relay, &shared.da_relay));
+        let da_relay = Arc::clone(&shared.da_relay);
         let poison_target = Arc::clone(&da_relay);
         let _ = std::panic::catch_unwind(move || {
             let _guard = poison_target.lock().expect("lock DA relay");
@@ -1663,8 +1947,7 @@ mod tests {
         let commit_tx = relay_da_commit_tx(da_id, payload_commitment);
         let chunk_tx = relay_da_chunk_tx(da_id, payload);
         {
-            let da_relay = service.da_relay_state();
-            let mut da_relay = da_relay.lock().expect("lock DA relay");
+            let mut da_relay = shared.da_relay.lock().expect("lock DA relay");
             da_relay
                 .stage_relay_da_tx_bytes("peer-a:8333", commit_tx)
                 .expect("stage complete-set commit tx");
@@ -1679,7 +1962,7 @@ mod tests {
         assert_eq!(candidates[0].da_id, da_id);
         assert_eq!(candidates[0].payload_bytes, payload.len() as u64);
 
-        let poison_target = service.da_relay_state();
+        let poison_target = Arc::clone(&shared.da_relay);
         let _ = std::panic::catch_unwind(move || {
             let _guard = poison_target.lock().expect("lock DA relay");
             panic!("poison DA provider lock");
@@ -2683,7 +2966,12 @@ mod tests {
     #[test]
     fn connect_with_timeout_rejects_unresolvable_addr() {
         let _dns_guard = DNS_RESOLVER_TEST_LOCK.lock().unwrap();
-        let err = connect_with_timeout("bad host:19111", Duration::from_millis(25)).unwrap_err();
+        let err = connect_with_timeout(
+            "bad host:19111",
+            Duration::from_millis(25),
+            &open_lifecycle(),
+        )
+        .unwrap_err();
         assert!(
             err.contains("peer address resolution failed"),
             "unexpected error: {err}"
@@ -3362,13 +3650,16 @@ mod tests {
         let mut runtime_cfg = default_peer_runtime_config("devnet", 1);
         runtime_cfg.read_deadline = Duration::from_millis(250);
         runtime_cfg.write_deadline = Duration::from_millis(250);
-        let addr = "127.0.0.1:19199".to_string();
+        // Test-owned endpoint that is never dialed: the session cap rejects
+        // the attempt synchronously, so no assertion depends on an ambient
+        // port being bound or refused.
+        let owned = TcpListener::bind("127.0.0.1:0").expect("bind test-owned endpoint");
+        let addr = owned.local_addr().expect("addr").to_string();
         let shared = test_shared_state(runtime_cfg, vec![], sync_engine);
         shared.active_sessions.store(1, Ordering::SeqCst);
 
         super::start_outbound_peer(addr, shared.clone());
 
-        thread::sleep(Duration::from_millis(200));
         assert!(
             lock_in_flight_dials(&shared).is_empty(),
             "skipped dial must not leave an in-flight marker behind"
@@ -3377,22 +3668,13 @@ mod tests {
             shared.peer_manager.snapshot().is_empty(),
             "skipped dial must not register peer"
         );
+        assert_eq!(
+            super::lock_worker_handles(&shared).len(),
+            0,
+            "skipped dial must not spawn a worker"
+        );
 
         shared.stop.store(true, Ordering::SeqCst);
-        fs::remove_dir_all(dir).expect("cleanup");
-    }
-
-    #[test]
-    fn wait_for_service_shutdown_returns_when_state_is_already_drained() {
-        let (sync_engine, dir) = test_engine("rubin-node-p2p-shutdown-drained");
-        let runtime_cfg = default_peer_runtime_config("devnet", 8);
-        let shared = test_shared_state(runtime_cfg, vec![], sync_engine);
-        let started = Instant::now();
-        wait_for_service_shutdown(&shared);
-        assert!(
-            started.elapsed() < Duration::from_millis(50),
-            "drained state should not block shutdown"
-        );
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
@@ -3703,7 +3985,11 @@ mod tests {
     #[test]
     fn connect_with_timeout_returns_error_for_unreachable() {
         // 192.0.2.0/24 is TEST-NET-1 (RFC 5737), guaranteed unreachable.
-        let result = super::connect_with_timeout("192.0.2.1:6553", Duration::from_millis(50));
+        let result = super::connect_with_timeout(
+            "192.0.2.1:6553",
+            Duration::from_millis(50),
+            &open_lifecycle(),
+        );
         assert!(result.is_err(), "should fail for unreachable addr");
     }
 
@@ -3746,34 +4032,15 @@ mod tests {
     }
 
     #[test]
-    fn bounded_join_times_out_for_stuck_workers() {
-        let (sync_engine, dir) = test_engine("rubin-node-p2p-bounded-join-timeout");
-        let runtime_cfg = default_peer_runtime_config("devnet", 8);
-        let shared = test_shared_state(runtime_cfg, vec![], sync_engine);
-        // Spawn a worker that blocks for 5 seconds.
-        let blocker_shared = shared.clone();
-        super::spawn_service_worker(&shared, move || {
-            while !blocker_shared.stop.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(50));
-            }
-        });
-        // Bounded join with 100ms timeout — should give up, not hang.
-        super::join_service_workers_bounded(&shared, Duration::from_millis(100));
-        // Worker handle should be put back (not joined, not lost).
-        let remaining = super::lock_worker_handles(&shared).len();
-        assert!(remaining > 0, "stuck worker handle should be preserved");
-        // Cleanup.
-        shared.stop.store(true, Ordering::SeqCst);
-        super::join_all_service_workers(&shared);
-        fs::remove_dir_all(dir).expect("cleanup");
-    }
-
-    #[test]
     fn connect_with_timeout_rejects_when_dns_resolvers_saturated() {
         let _dns_guard = DNS_RESOLVER_TEST_LOCK.lock().unwrap();
         let prev = super::ACTIVE_DNS_RESOLVERS.load(Ordering::SeqCst);
         super::ACTIVE_DNS_RESOLVERS.store(super::MAX_DNS_RESOLVER_THREADS, Ordering::SeqCst);
-        let result = super::connect_with_timeout("unreachable.test:80", Duration::from_secs(1));
+        let result = super::connect_with_timeout(
+            "unreachable.test:80",
+            Duration::from_secs(1),
+            &open_lifecycle(),
+        );
         super::ACTIVE_DNS_RESOLVERS.store(prev, Ordering::SeqCst);
         let err = result.unwrap_err();
         assert!(
@@ -3784,7 +4051,11 @@ mod tests {
 
     #[test]
     fn connect_with_timeout_ipv4_literal_fast_path() {
-        let result = super::connect_with_timeout("192.0.2.1:6553", Duration::from_millis(100));
+        let result = super::connect_with_timeout(
+            "192.0.2.1:6553",
+            Duration::from_millis(100),
+            &open_lifecycle(),
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -3796,17 +4067,18 @@ mod tests {
     #[test]
     fn connect_with_timeout_hostname_uses_dns_resolver_path() {
         let _dns_guard = DNS_RESOLVER_TEST_LOCK.lock().unwrap();
-        // "localhost:1" resolves via DNS (not IP literal fast path),
-        // covering the resolver thread spawn + channel recv + addr iteration.
-        // Port 1 is refused immediately, so this is fast.
-        let result = super::connect_with_timeout("localhost:1", Duration::from_millis(500));
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        // Should be a connect error, not DNS error (localhost resolves).
-        assert!(
-            err.contains("connect"),
-            "localhost should resolve but connect to port 1 should fail: {err}"
-        );
+        // Test-owned endpoint: bind an ephemeral listener, then dial it by
+        // hostname so the DNS path (resolver spawn, channel recv, resolved
+        // address iteration) executes without depending on any ambient port.
+        let listener = TcpListener::bind("localhost:0").expect("bind test-owned hostname listener");
+        let port = listener.local_addr().expect("addr").port();
+        let stream = super::connect_with_timeout(
+            &format!("localhost:{port}"),
+            Duration::from_secs(1),
+            &open_lifecycle(),
+        )
+        .expect("hostname dial must reach the test-owned listener");
+        assert_eq!(stream.peer_addr().expect("peer addr").port(), port);
     }
 
     #[test]
@@ -3831,5 +4103,977 @@ mod tests {
         handle.join().expect("loop join");
         shared.stop.store(true, Ordering::SeqCst);
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    // ---- RUB-1168 Service work lifecycle (spec RUBIN_L1_P2P_AUX §5) --------
+
+    /// A real running Service plus its temp chain dir.
+    struct ServiceFixture {
+        service: super::RunningNodeP2PService,
+        dir: std::path::PathBuf,
+    }
+
+    impl ServiceFixture {
+        fn new(prefix: &str) -> Self {
+            let (sync_engine, dir) = test_engine(prefix);
+            let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+            // Same widening rationale as `service_accepts_inbound_peer_handshake`:
+            // coverage instrumentation slows the handshake path enough that a
+            // tight deadline would make the assertion about timing jitter.
+            runtime_cfg.read_deadline = Duration::from_secs(2);
+            runtime_cfg.write_deadline = Duration::from_secs(2);
+            let service = start_node_p2p_service(NodeP2PServiceConfig {
+                bind_addr: "127.0.0.1:0".to_string(),
+                bootstrap_peers: Vec::new(),
+                runtime_cfg: runtime_cfg.clone(),
+                peer_manager: Arc::new(PeerManager::new(runtime_cfg)),
+                sync_engine,
+                tx_pool: Arc::new(Mutex::new(TxPool::new())),
+                chain_id: devnet_genesis_chain_id(),
+                genesis_hash: test_genesis_hash(),
+            })
+            .expect("start service");
+            Self { service, dir }
+        }
+
+        fn shared(&self) -> &SharedServiceState {
+            &self.service.shared
+        }
+
+        fn leases(&self) -> usize {
+            self.service.shared.lifecycle.lock().leases
+        }
+
+        fn phase(&self) -> super::LifecyclePhase {
+            self.service.shared.lifecycle.phase()
+        }
+    }
+
+    impl Drop for ServiceFixture {
+        fn drop(&mut self) {
+            self.service.close();
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Complete owner vector reachable from the four retained callbacks.
+    #[derive(Debug, PartialEq, Eq)]
+    struct OwnerVector {
+        tx_seen: usize,
+        block_seen: usize,
+        relay_pool: usize,
+        outboxes: Vec<(String, usize, usize)>,
+        da_empty: bool,
+        ttl_seen: usize,
+    }
+
+    fn owner_vector(shared: &SharedServiceState) -> OwnerVector {
+        let mut outboxes: Vec<(String, usize, usize)> = {
+            let guard = shared.peer_outboxes.lock().expect("outboxes");
+            guard
+                .iter()
+                .map(|(addr, ob)| (addr.clone(), ob.len(), ob.total_bytes()))
+                .collect()
+        };
+        outboxes.sort();
+        OwnerVector {
+            tx_seen: shared.relay_state.tx_seen.len(),
+            block_seen: shared.relay_state.block_seen.len(),
+            relay_pool: shared.relay_state.relay_pool.len(),
+            outboxes,
+            da_empty: shared.da_relay.lock().expect("da relay").is_empty(),
+            ttl_seen: shared.da_ttl_seen.len(),
+        }
+    }
+
+    /// Require the service side to close the dial without writing one byte:
+    /// no version frame means no accepted child ever ran.
+    fn assert_no_version_frame(addr: impl std::net::ToSocketAddrs, why: &str) {
+        let dial = TcpStream::connect(addr).expect("dial the listener");
+        dial.set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("dial read timeout");
+        assert!(matches!(dial.peek(&mut [0u8; 1]), Ok(0) | Err(_)), "{why}");
+    }
+
+    /// Register a peer + outbox so the announce callbacks have a real
+    /// broadcast target and the live dequeue path has a real queue.
+    fn attach_relay_peer(shared: &SharedServiceState, addr: &str) -> super::PeerOutboxGuard {
+        shared
+            .peer_manager
+            .add_peer(crate::p2p_runtime::PeerState {
+                addr: addr.to_string(),
+                ..Default::default()
+            })
+            .expect("add relay peer");
+        super::register_peer_outbox(&shared.peer_outboxes, addr).expect("register outbox")
+    }
+
+    fn service_work_tx() -> Vec<u8> {
+        relay_da_chunk_tx(
+            relay_test_id(b"rub1168-service-work-da"),
+            b"rub1168-payload",
+        )
+    }
+
+    fn tx_meta(tx_bytes: &[u8]) -> crate::txpool::RelayTxMetadata {
+        crate::txpool::RelayTxMetadata {
+            fee: 1,
+            size: tx_bytes.len(),
+        }
+    }
+
+    /// One Table C outcome class: a label and the callback invocation whose
+    /// lease release it exercises.
+    type ReleaseRow = (&'static str, Box<dyn Fn() -> Result<(), String>>);
+
+    /// One-shot spawn seam that never runs or retains the work.
+    struct DeniedSpawn;
+
+    impl super::OneShotSpawn for DeniedSpawn {
+        fn spawn<W: FnOnce() + Send + 'static>(&self, _work: W) -> io::Result<JoinHandle<()>> {
+            Err(io::Error::other("spawn denied"))
+        }
+    }
+
+    /// One-shot spawn seam that runs the real work only after the barrier
+    /// fires, so a resolver child can be held past the caller's timeout.
+    struct BarrierSpawn(Arc<Mutex<std::sync::mpsc::Receiver<()>>>);
+
+    impl super::OneShotSpawn for BarrierSpawn {
+        fn spawn<W: FnOnce() + Send + 'static>(&self, work: W) -> io::Result<JoinHandle<()>> {
+            let gate = Arc::clone(&self.0);
+            thread::Builder::new().spawn(move || {
+                let _ = gate.lock().expect("barrier").recv();
+                work();
+            })
+        }
+    }
+
+    #[test]
+    fn service_work_entry_state_matrix() {
+        let fixture = ServiceFixture::new("rub1168-entry-state");
+        let shared = fixture.shared().clone();
+
+        // Accepted-peer entry row (item 16): a REAL inbound TCP connection
+        // completes the version/verack handshake against the running listener.
+        // The client sends NOTHING until it has seen the service's version, so
+        // the service's first handshake read necessarily starts on an empty
+        // receive buffer: unless the accept path cleared the inherited
+        // O_NONBLOCK, that read fails at once with EAGAIN and the service drops
+        // the connection before verack.
+        let inbound = TcpStream::connect(fixture.service.addr()).expect("inbound dial");
+        inbound
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("client read timeout");
+        inbound
+            .peek(&mut [0u8; 1])
+            .expect("the service must write its version first");
+        let local = local_version(0).expect("local version");
+        let inbound_session = perform_version_handshake(
+            inbound,
+            shared.runtime_cfg.clone(),
+            local,
+            local.chain_id,
+            local.genesis_hash,
+        )
+        .expect("a real inbound handshake must complete on the accepted stream");
+        let peers = Arc::clone(&shared.peer_manager);
+        wait_until(Instant::now() + Duration::from_secs(10), || {
+            !peers.snapshot().is_empty()
+        });
+        // Retire the accepted peer so the later owner-vector comparison sees no
+        // peer-worker outbox churn.
+        drop(inbound_session);
+        wait_until(Instant::now() + Duration::from_secs(10), || {
+            peers.snapshot().is_empty() && shared.peer_outboxes.lock().expect("outboxes").is_empty()
+        });
+
+        let _outbox = attach_relay_peer(&shared, "entry-peer:8333");
+        let handle = fixture.service.callback_handle();
+        let tx = service_work_tx();
+        let block = devnet_genesis_block_bytes();
+
+        // OPEN rows: each retained callback registers, then executes.
+        assert_eq!(fixture.phase(), super::LifecyclePhase::Open);
+        handle.announce_tx(&tx, tx_meta(&tx)).expect("OPEN tx row");
+        handle.announce_block(&block).expect("OPEN block row");
+        handle
+            .consume_accepted_block_da_sets(&block)
+            .expect("OPEN DA consume row");
+        handle
+            .advance_accepted_block_da_ttl([0xA1; 32])
+            .expect("OPEN DA TTL row");
+        let open_effects = owner_vector(&shared);
+        assert!(open_effects.tx_seen == 1 && open_effects.relay_pool == 1);
+        assert!(open_effects.block_seen == 1 && open_effects.ttl_seen == 1);
+        assert!(!open_effects.da_empty, "OPEN tx row must stage the DA tx");
+        // Root accept + reconnect workers each hold a registered lifetime lease.
+        assert!(
+            fixture.leases() >= 2,
+            "root workers must register before spawn"
+        );
+
+        // Expire the staged DA orphan so the DA dimension of the owner vector
+        // is a FALSIFYING observation after close: a rejected callback that
+        // staged anything before its registration would flip it back.
+        for hash in [[0xA2; 32], [0xA3; 32]] {
+            handle
+                .advance_accepted_block_da_ttl(hash)
+                .expect("OPEN DA TTL row");
+        }
+        assert!(
+            owner_vector(&shared).da_empty,
+            "the DA owner must be observably clean before the closed rows"
+        );
+
+        let addr_before_close = fixture.service.addr().to_string();
+        let provider = fixture.service.complete_da_set_provider();
+        let before = owner_vector(&shared);
+
+        let mut service = fixture;
+        // Root-loop rows, driven with DRAINING published and `stop` STILL
+        // FALSE: each root loop can only end through its own authorized()
+        // guard and release its lifetime lease, and a DRAINING listener starts
+        // no child — a connection reaching its accept arm loses the child
+        // lease, so the dial sees zero bytes, never the version frame.
+        assert_eq!(shared.lifecycle.begin_close(), super::LifecyclePhase::Open);
+        assert_no_version_frame(
+            service.service.addr(),
+            "a DRAINING listener must complete no accepted handshake",
+        );
+        wait_until(Instant::now() + Duration::from_secs(10), || {
+            shared.lifecycle.lock().leases == 0
+        });
+        assert!(
+            shared.active_sessions.load(Ordering::SeqCst) == 0
+                && super::lock_in_flight_dials(&shared).is_empty(),
+            "no accepted child reserved a session slot or dial marker"
+        );
+        service.service.close();
+        assert_eq!(service.phase(), super::LifecyclePhase::Closed);
+
+        // DRAINING/CLOSED rows: exact string, before parse, zero effects.
+        for (label, result) in [
+            ("tx", handle.announce_tx(&tx, tx_meta(&tx))),
+            (
+                "tx-malformed",
+                handle.announce_tx(b"\x00\x00", tx_meta(b"")),
+            ),
+            ("block", handle.announce_block(&block)),
+            ("block-malformed", handle.announce_block(b"not-a-block")),
+            ("da-consume", handle.consume_accepted_block_da_sets(&block)),
+            (
+                "da-consume-malformed",
+                handle.consume_accepted_block_da_sets(b"\xff"),
+            ),
+            ("da-ttl", handle.advance_accepted_block_da_ttl([0xB2; 32])),
+        ] {
+            assert_eq!(
+                result.err().as_deref(),
+                Some(super::SERVICE_CLOSED_ERR),
+                "closed {label} row must return the exact closed error before parse"
+            );
+        }
+        assert_eq!(
+            owner_vector(&shared),
+            before,
+            "closed rejection must leave every owner vector unchanged"
+        );
+        assert_eq!(service.leases(), 0, "rejected registration takes no lease");
+
+        // Read-only rows stay callable after close.
+        assert_eq!(service.service.addr(), addr_before_close);
+        assert!(provider.complete_da_set_candidates(u64::MAX).is_empty());
+    }
+
+    #[test]
+    fn service_work_close_ownership_matrix() {
+        // CLOSED row: explicit repeated close and the subsequent Drop are
+        // idempotent and observe CLOSED.
+        let mut idempotent = ServiceFixture::new("rub1168-close-idempotent");
+        idempotent.service.close();
+        assert_eq!(idempotent.phase(), super::LifecyclePhase::Closed);
+        idempotent.service.close();
+        assert_eq!(idempotent.phase(), super::LifecyclePhase::Closed);
+        assert_eq!(idempotent.leases(), 0);
+        drop(idempotent);
+
+        // DRAINING row: a serialized re-entry after a caught unwind resumes
+        // the SAME teardown. Start it with one real blocked lease and one real
+        // unjoined worker.
+        let fixture = ServiceFixture::new("rub1168-close-reentry");
+        let shared = fixture.shared().clone();
+        let (release, hold) = std::sync::mpsc::channel::<()>();
+        let hold = Arc::new(Mutex::new(hold));
+        let blocked_lease = shared
+            .lifecycle
+            .acquire()
+            .expect("acquire lease while OPEN");
+        let lease_gate = Arc::clone(&hold);
+        let lease_thread = thread::spawn(move || {
+            let _lease = blocked_lease;
+            let _ = lease_gate.lock().expect("lease gate").recv();
+        });
+        let worker_gate = Arc::clone(&hold);
+        assert!(super::spawn_service_worker(&shared, move || {
+            let _ = worker_gate.lock().expect("worker gate").recv();
+        }));
+
+        // The first close published DRAINING and then unwound before teardown.
+        assert_eq!(shared.lifecycle.begin_close(), super::LifecyclePhase::Open);
+        assert_eq!(shared.lifecycle.phase(), super::LifecyclePhase::Draining);
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let mut service = fixture;
+        let dir = service.dir.clone();
+        let reentry = thread::spawn(move || {
+            service.service.close();
+            let phase = service.service.shared.lifecycle.phase();
+            let leases = service.service.shared.lifecycle.lock().leases;
+            let _ = done_tx.send(());
+            (phase, leases)
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+            "re-entered close must stay blocked while its owners are unfinished"
+        );
+        assert_eq!(shared.lifecycle.phase(), super::LifecyclePhase::Draining);
+
+        drop(release); // both owners observe the closed channel and end
+        let (phase, leases) = reentry.join().expect("re-entered close");
+        lease_thread.join().expect("lease thread");
+        assert_eq!(phase, super::LifecyclePhase::Closed);
+        assert_eq!(leases, 0, "CLOSED is published only after drain");
+        assert!(super::lock_worker_handles(&shared).is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn service_work_effect_release_matrix() {
+        let fixture = ServiceFixture::new("rub1168-effect-release");
+        let shared = fixture.shared().clone();
+        let _outbox = attach_relay_peer(&shared, "effect-peer:8333");
+        let handle = fixture.service.callback_handle();
+        let roots = fixture.leases();
+        let tx = service_work_tx();
+        let block = devnet_genesis_block_bytes();
+
+        // Table C rows: every outcome class releases exactly once, so the
+        // active count returns to the root baseline after each call.
+        let rows: Vec<ReleaseRow> = vec![
+            ("success", {
+                let h = handle.clone();
+                let tx = tx.clone();
+                Box::new(move || h.announce_tx(&tx, tx_meta(&tx)))
+            }),
+            ("parse error", {
+                let h = handle.clone();
+                Box::new(move || h.announce_block(b"truncated"))
+            }),
+            ("no publication", {
+                let h = handle.clone();
+                Box::new(move || h.advance_accepted_block_da_ttl([0xC3; 32]))
+            }),
+            ("duplicate / early return", {
+                let h = handle.clone();
+                Box::new(move || h.advance_accepted_block_da_ttl([0xC3; 32]))
+            }),
+            ("lower-layer DA error", {
+                let h = handle.clone();
+                Box::new(move || h.consume_accepted_block_da_sets(b"\x01\x02"))
+            }),
+            ("DA consume success", {
+                let h = handle.clone();
+                let block = block.clone();
+                Box::new(move || h.consume_accepted_block_da_sets(&block))
+            }),
+        ];
+        for (label, row) in rows {
+            let _ = row();
+            assert_eq!(
+                fixture.leases(),
+                roots,
+                "{label} must release its lease exactly once"
+            );
+        }
+
+        // Panic/unwind row: RAII release precedes propagation.
+        let unwinding = handle.clone();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _lease = unwinding.lease().expect("lease while OPEN");
+            panic!("rub1168 unwind under lease");
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(
+            fixture.leases(),
+            roots,
+            "an unwinding lease owner must release before propagation"
+        );
+
+        // Closed/Interrupted rejection row takes no lease at all.
+        let mut service = fixture;
+        service.service.close();
+        assert!(handle.announce_tx(&tx, tx_meta(&tx)).is_err());
+        assert_eq!(service.leases(), 0);
+    }
+
+    #[test]
+    fn service_work_race_matrix() {
+        let fixture = ServiceFixture::new("rub1168-race");
+        let shared = fixture.shared().clone();
+        let _outbox = attach_relay_peer(&shared, "race-peer:8333");
+        let handle = fixture.service.callback_handle();
+        let block = devnet_genesis_block_bytes();
+
+        // Race: registration vs first close — registered and waited, or
+        // rejected before every effect; never a third result.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let (release, hold) = std::sync::mpsc::channel::<()>();
+        let racing = handle.clone();
+        let racer = thread::spawn(move || {
+            let _lease = racing.lease().expect("registered before the cutoff");
+            let _ = entered_tx.send(());
+            let _ = hold.recv();
+            racing.shared.relay_state.block_seen.add([0xD4; 32])
+        });
+        entered_rx.recv().expect("racer registered");
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let mut service = fixture;
+        let dir = service.dir.clone();
+        let closer = thread::spawn(move || {
+            service.service.close();
+            let leases = service.service.shared.lifecycle.lock().leases;
+            let _ = done_tx.send(());
+            leases
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+            "close must wait for a callback registered before the cutoff"
+        );
+        // Race: child registration vs close — after DRAINING no child-attempt
+        // reservation, mutation or handle remains.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test-owned endpoint");
+        let dial_addr = listener.local_addr().expect("addr").to_string();
+        let handles_before = super::lock_worker_handles(&shared).len();
+        super::start_outbound_peer(dial_addr, shared.clone());
+        assert!(
+            super::lock_in_flight_dials(&shared).is_empty(),
+            "a close-losing child leaves no in_flight_dials marker"
+        );
+        assert_eq!(
+            super::lock_worker_handles(&shared).len(),
+            handles_before,
+            "a close-losing child registers no JoinHandle"
+        );
+        // Race: retained callback after DRAINING is rejected before any effect.
+        assert_eq!(
+            handle.announce_block(&block).err().as_deref(),
+            Some(super::SERVICE_CLOSED_ERR)
+        );
+
+        drop(release);
+        assert!(
+            racer.join().expect("racer"),
+            "a registrant that won the cutoff completes its effect while close waits"
+        );
+        assert_eq!(closer.join().expect("closer"), 0);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn service_work_peer_handshake_and_live_cutoff() {
+        // Handshake row, driven through the real production authorizer seam:
+        // one already-authorized message finishes and no later read begins.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test-owned listener");
+        let server_addr = listener.local_addr().expect("addr");
+        let cfg = default_peer_runtime_config("devnet", 8);
+        let peer_cfg = cfg.clone();
+        let client = thread::spawn(move || {
+            let stream = TcpStream::connect(server_addr).expect("dial test-owned listener");
+            let local = local_version(0).expect("local version");
+            let _ = perform_version_handshake(
+                stream,
+                peer_cfg,
+                local,
+                local.chain_id,
+                local.genesis_hash,
+            );
+        });
+        let (stream, _) = listener.accept().expect("accept");
+        let local = local_version(0).expect("local version");
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&reads);
+        let err = perform_version_handshake_with_read_authorizer(
+            stream,
+            cfg.clone(),
+            local,
+            local.chain_id,
+            local.genesis_hash,
+            move || {
+                if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        super::SERVICE_CLOSED_ERR,
+                    ))
+                }
+            },
+        );
+        let err = err
+            .err()
+            .expect("a lost authorization must stop the handshake");
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(err.to_string(), super::SERVICE_CLOSED_ERR);
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            2,
+            "the authorizer runs immediately before every handshake read"
+        );
+        let _ = client.join();
+
+        // Live one-frame dequeue row against the real production flush path:
+        // the frame authorized before DRAINING finishes its write, and no
+        // later dequeue begins.
+        let fixture = ServiceFixture::new("rub1168-live-cutoff");
+        let shared = fixture.shared().clone();
+        let _outbox = attach_relay_peer(&shared, "live-peer:8333");
+        // Bounded-drain row: one call writes exactly the frames queued on
+        // ENTRY. The refill lands DURING the flush, through the real production
+        // write seam, and must wait for the next live-loop iteration so a
+        // sustained broadcaster cannot starve the read path.
+        {
+            let mut guard = shared.peer_outboxes.lock().expect("outboxes");
+            let ob = guard.get_mut("live-peer:8333").expect("outbox");
+            assert!(ob.push_frame(vec![0x01; 2]));
+            assert!(ob.push_frame(vec![0x02; 3]));
+        }
+        let refill = shared.clone();
+        let mut bounded_writes = 0usize;
+        super::flush_peer_outbox(&shared, "live-peer:8333", |_frame| {
+            bounded_writes += 1;
+            if bounded_writes == 1 {
+                let mut guard = refill.peer_outboxes.lock().expect("outboxes");
+                let ob = guard.get_mut("live-peer:8333").expect("outbox");
+                for frame in [vec![0x11; 4], vec![0x22; 7], vec![0x33; 9]] {
+                    assert!(ob.push_frame(frame));
+                }
+            }
+            Ok(())
+        })
+        .expect("the bounded drain returns to the live loop");
+        assert_eq!(
+            bounded_writes, 2,
+            "the bounded call writes exactly the entry-queue length"
+        );
+
+        let mut written: Vec<Vec<u8>> = Vec::new();
+        let cutoff = shared.clone();
+        super::flush_peer_outbox(&shared, "live-peer:8333", |frame| {
+            written.push(frame.to_vec());
+            cutoff.lifecycle.begin_close();
+            Ok(())
+        })
+        .expect("authorized frame completes its write");
+        assert_eq!(written, vec![vec![0x11; 4]], "exactly one frame authorized");
+        let guard = shared.peer_outboxes.lock().expect("outboxes");
+        let remaining = guard.get("live-peer:8333").expect("outbox");
+        assert_eq!(remaining.len(), 2, "no dequeue may begin after DRAINING");
+        assert_eq!(remaining.total_bytes(), 16, "exact total_bytes decrement");
+        assert_eq!(remaining.frames(), [vec![0x22; 7], vec![0x33; 9]]);
+        drop(guard);
+
+        // Readiness-poll and following-read rows against a REAL live peer
+        // worker. The service DIALS a test-owned peer that holds the socket
+        // open, then DRAINING is published WITHOUT the stop flag, so the
+        // worker can only end through the live-loop OPEN observations.
+        let live = ServiceFixture::new("rub1168-live-poll-read");
+        let peer_cfg = live.service.shared.runtime_cfg.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test-owned peer");
+        let peer_addr = listener.local_addr().expect("addr").to_string();
+        let (keep_open, held) = std::sync::mpsc::channel::<()>();
+        let peer = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept the service dial");
+            let local = local_version(0).expect("local version");
+            let _session = perform_version_handshake(
+                stream,
+                peer_cfg,
+                local,
+                local.chain_id,
+                local.genesis_hash,
+            )
+            .expect("peer-side handshake");
+            let _ = held.recv();
+        });
+        super::start_outbound_peer(peer_addr, live.service.shared.clone());
+        let peers = Arc::clone(&live.service.shared.peer_manager);
+        wait_until(Instant::now() + Duration::from_secs(10), || {
+            !peers.snapshot().is_empty()
+        });
+        assert_eq!(
+            live.service.shared.lifecycle.begin_close(),
+            super::LifecyclePhase::Open
+        );
+        // The peer socket is still open, so only the pre-poll / pre-read OPEN
+        // observations can end this worker.
+        wait_until(Instant::now() + Duration::from_secs(10), || {
+            peers.snapshot().is_empty()
+        });
+        drop(keep_open);
+        peer.join().expect("test-owned peer");
+
+        // Peer-cutoff row (item 15): a channel-controlled peer that drips bytes
+        // INSIDE one message cannot extend that message's read beyond its
+        // absolute window. The drip interval is far inside `read_deadline`, so
+        // per-recv timeout semantics would never expire and the worker blocked
+        // in that read could never observe DRAINING — close would never join
+        // it. Only the absolute per-message deadline lets close reach CLOSED.
+        const DRIP_PAYLOAD_BYTES: usize = 4096;
+        let drip = ServiceFixture::new("rub1168-drip-cutoff");
+        let read_deadline = drip.service.shared.runtime_cfg.read_deadline;
+        let drip_cfg = drip.service.shared.runtime_cfg.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test-owned dripping peer");
+        let drip_addr = listener.local_addr().expect("addr").to_string();
+        let (stop_drip, drip_gate) = std::sync::mpsc::channel::<()>();
+        let dripper = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept the service dial");
+            let local = local_version(0).expect("local version");
+            let mut session = perform_version_handshake(
+                stream,
+                drip_cfg,
+                local,
+                local.chain_id,
+                local.genesis_hash,
+            )
+            .expect("peer-side handshake");
+            // A complete, well-formed `tx` envelope header declaring a payload
+            // far larger than anything this peer will ever finish sending. The
+            // service is now committed inside ONE message read, and every drip
+            // byte below would reset a per-recv timeout forever.
+            let payload = vec![0u8; DRIP_PAYLOAD_BYTES];
+            let header = build_envelope_header(network_magic("devnet"), "tx", &payload)
+                .expect("drip envelope header");
+            session.write_raw(&header).expect("drip header");
+            while matches!(
+                drip_gate.recv_timeout(read_deadline / 8),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ) {
+                if session.write_raw(&payload[..1]).is_err() {
+                    break;
+                }
+            }
+        });
+        super::start_outbound_peer(drip_addr, drip.service.shared.clone());
+        let drip_peers = Arc::clone(&drip.service.shared.peer_manager);
+        wait_until(Instant::now() + Duration::from_secs(10), || {
+            !drip_peers.snapshot().is_empty()
+        });
+        let drip_lifecycle = Arc::clone(&drip.service.shared.lifecycle);
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let closer = thread::spawn(move || {
+            let mut drip = drip;
+            drip.service.close();
+            let _ = done_tx.send(());
+            drip
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("close must reach CLOSED within the watchdog: a dripping peer cannot extend one message read past its absolute deadline");
+        let drip = closer.join().expect("closer");
+        assert_eq!(drip.phase(), super::LifecyclePhase::Closed);
+        assert_eq!(drip.leases(), 0);
+        assert_eq!(drip_lifecycle.phase(), super::LifecyclePhase::Closed);
+        drop(stop_drip);
+        dripper.join().expect("test-owned dripping peer");
+    }
+
+    #[test]
+    fn service_work_dns_child_and_spawn_failure() {
+        let _dns_guard = DNS_RESOLVER_TEST_LOCK.lock().unwrap();
+        let fixture = ServiceFixture::new("rub1168-dns-child");
+        let shared = fixture.shared().clone();
+        let roots = fixture.leases();
+        let baseline = super::ACTIVE_DNS_RESOLVERS.load(Ordering::SeqCst);
+
+        // DNS-child spawn Err: the successful CAS rolls back and the captured
+        // lease drops with the unrun work.
+        let err = super::connect_with_timeout_spawn(
+            "unreachable.test:80",
+            Duration::from_millis(50),
+            &shared.lifecycle,
+            &DeniedSpawn,
+        )
+        .expect_err("denied spawn");
+        assert!(err.contains("DNS resolver thread spawn failed"), "{err}");
+        assert_eq!(super::ACTIVE_DNS_RESOLVERS.load(Ordering::SeqCst), baseline);
+        assert_eq!(fixture.leases(), roots, "spawn Err drops the child lease");
+
+        // DNS capacity rejection: lease drops, counter untouched.
+        super::ACTIVE_DNS_RESOLVERS.store(super::MAX_DNS_RESOLVER_THREADS, Ordering::SeqCst);
+        let err = super::connect_with_timeout(
+            "unreachable.test:80",
+            Duration::from_millis(50),
+            &shared.lifecycle,
+        )
+        .expect_err("capacity rejection");
+        assert!(err.contains("DNS resolver limit reached"), "{err}");
+        assert_eq!(
+            super::ACTIVE_DNS_RESOLVERS.load(Ordering::SeqCst),
+            super::MAX_DNS_RESOLVER_THREADS
+        );
+        assert_eq!(fixture.leases(), roots);
+        super::ACTIVE_DNS_RESOLVERS.store(baseline, Ordering::SeqCst);
+
+        // Worker-site spawn Err: no in-flight marker, no handle, no lease.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test-owned endpoint");
+        let dial_addr = listener.local_addr().expect("addr").to_string();
+        let handles_before = super::lock_worker_handles(&shared).len();
+        super::start_outbound_peer_with(dial_addr, shared.clone(), &DeniedSpawn);
+        assert!(super::lock_in_flight_dials(&shared).is_empty());
+        assert_eq!(
+            super::lock_worker_handles(&shared).len(),
+            handles_before,
+            "denied worker spawn registers no handle"
+        );
+        assert_eq!(fixture.leases(), roots);
+
+        // Accepted-arm spawn Err through the REAL accept loop: the child lease
+        // is captured before the spawn and dies with the unrun closure, so no
+        // lease, handle or marker survives a denied accepted child.
+        let inbound = TcpListener::bind("127.0.0.1:0").expect("bind test-owned listener");
+        let inbound_addr = inbound.local_addr().expect("addr");
+        inbound.set_nonblocking(true).expect("non-blocking");
+        let inbound_shared = shared.clone();
+        let accept_loop = thread::spawn(move || {
+            super::run_accept_loop_with(inbound, inbound_shared, &DeniedSpawn)
+        });
+        assert_no_version_frame(inbound_addr, "a denied accepted child writes no version");
+        wait_until(Instant::now() + Duration::from_secs(10), || {
+            fixture.leases() == roots
+        });
+        assert_eq!(
+            super::lock_worker_handles(&shared).len(),
+            handles_before,
+            "a denied accepted child registers no handle"
+        );
+        assert!(super::lock_in_flight_dials(&shared).is_empty());
+
+        // Caller timeout row: the caller returns from the production timeout
+        // branch while the channel-controlled child keeps counter AND lease.
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        // Test-owned hostname endpoint: the caller returns from the production
+        // timeout branch before any connect, and the port is never ambient.
+        let owned = TcpListener::bind("localhost:0").expect("bind test-owned resolver target");
+        let owned_port = owned.local_addr().expect("addr").port();
+        let err = super::connect_with_timeout_spawn(
+            &format!("localhost:{owned_port}"),
+            Duration::from_millis(50),
+            &shared.lifecycle,
+            &BarrierSpawn(Arc::new(Mutex::new(gate))),
+        )
+        .expect_err("caller timeout");
+        assert!(err.contains("DNS resolution timed out"), "{err}");
+        assert_eq!(
+            fixture.leases(),
+            roots + 1,
+            "the resolver child keeps its lease past the dropped JoinHandle"
+        );
+        assert_eq!(
+            super::ACTIVE_DNS_RESOLVERS.load(Ordering::SeqCst),
+            baseline + 1
+        );
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let mut service = fixture;
+        let dir = service.dir.clone();
+        let closer = thread::spawn(move || {
+            service.service.close();
+            let leases = service.service.shared.lifecycle.lock().leases;
+            let _ = done_tx.send(());
+            leases
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+            "close must wait the real DNS child end"
+        );
+        // DRAINING row: the DNS child lease is refused BEFORE the resolver
+        // reservation, so a closing Service reserves no counter slot at all.
+        assert_eq!(shared.lifecycle.phase(), super::LifecyclePhase::Draining);
+        let err = super::connect_with_timeout(
+            "host.invalid:80",
+            Duration::from_millis(50),
+            &shared.lifecycle,
+        )
+        .expect_err("DRAINING must reject the DNS child");
+        assert_eq!(err, super::SERVICE_CLOSED_ERR);
+        assert_eq!(
+            super::ACTIVE_DNS_RESOLVERS.load(Ordering::SeqCst),
+            baseline + 1,
+            "a DRAINING rejection reserves no resolver slot"
+        );
+        drop(release);
+        assert_eq!(closer.join().expect("closer"), 0);
+        accept_loop.join().expect("test-driven accept loop");
+        wait_until(Instant::now() + Duration::from_secs(2), || {
+            super::ACTIVE_DNS_RESOLVERS.load(Ordering::SeqCst) == baseline
+        });
+        assert_eq!(shared.lifecycle.phase(), super::LifecyclePhase::Closed);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn service_work_fault_cleanup_matrix() {
+        let fixture = ServiceFixture::new("rub1168-fault-cleanup");
+        let shared = fixture.shared().clone();
+        let _outbox = attach_relay_peer(&shared, "fault-peer:8333");
+        {
+            let mut guard = shared.peer_outboxes.lock().expect("outboxes");
+            let ob = guard.get_mut("fault-peer:8333").expect("outbox");
+            assert!(ob.push_frame(vec![0x55; 5]));
+            assert!(ob.push_frame(vec![0x66; 6]));
+        }
+        // Socket-write failure row: exactly one dequeue, exactly one attempted
+        // write, the sentinel error preserved, no retry and no later dequeue.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&attempts);
+        let err = super::flush_peer_outbox(&shared, "fault-peer:8333", move |_frame| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Err(io::Error::other("rub1168 sentinel write failure"))
+        })
+        .expect_err("write failure must propagate");
+        assert!(err.contains("rub1168 sentinel write failure"), "{err}");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "no post-failure retry");
+        {
+            let guard = shared.peer_outboxes.lock().expect("outboxes");
+            let ob = guard.get("fault-peer:8333").expect("outbox");
+            assert_eq!(ob.len(), 1);
+            assert_eq!(ob.total_bytes(), 6);
+        }
+
+        // Poisoned worker_handles row: the real into_inner recovery runs and
+        // join ownership is exact.
+        let poison_handles = Arc::clone(&shared.worker_handles);
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poison_handles.lock().expect("worker handles");
+            panic!("rub1168 poison worker_handles");
+        });
+        assert!(shared.worker_handles.is_poisoned());
+        // The same worker carries the Table C panic row: it stays unfinished
+        // until close is joining it, so `join_all_service_workers` consumes
+        // the panic instead of propagating it into close.
+        let (panic_gate, held) = std::sync::mpsc::channel::<()>();
+        assert!(super::spawn_service_worker(&shared, move || {
+            let _ = held.recv();
+            panic!("rub1168 worker panic consumed by close");
+        }));
+
+        // Poisoned lifecycle row: release and drain are not skipped and the
+        // Service still reaches CLOSED.
+        let poison_lifecycle = Arc::clone(&shared.lifecycle);
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poison_lifecycle.state.lock().expect("lifecycle");
+            panic!("rub1168 poison lifecycle");
+        });
+        assert!(shared.lifecycle.state.is_poisoned());
+        let handle = fixture.service.callback_handle();
+        let roots = fixture.leases();
+        let block = devnet_genesis_block_bytes();
+        handle
+            .announce_block(&block)
+            .expect("poisoned lifecycle still registers");
+        assert_eq!(fixture.leases(), roots, "release survives poison recovery");
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let mut service = fixture;
+        let closer = thread::spawn(move || {
+            service.service.close();
+            let _ = done_tx.send(());
+            service
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+            "close must wait the unfinished worker"
+        );
+        drop(panic_gate);
+        let service = closer
+            .join()
+            .expect("a worker panic must be consumed, not propagated into close");
+        assert_eq!(service.phase(), super::LifecyclePhase::Closed);
+        assert_eq!(service.leases(), 0);
+    }
+
+    #[test]
+    fn service_work_fresh_instance_isolation() {
+        let mut old = ServiceFixture::new("rub1168-fresh-old");
+        let old_handle = old.service.callback_handle();
+        let block = devnet_genesis_block_bytes();
+        old.service.close();
+
+        let fresh = ServiceFixture::new("rub1168-fresh-new");
+        let fresh_handle = fresh.service.callback_handle();
+        assert_eq!(fresh.phase(), super::LifecyclePhase::Open);
+        fresh_handle
+            .advance_accepted_block_da_ttl([0xE5; 32])
+            .expect("a fresh Service has an independent OPEN lifecycle");
+        assert_eq!(fresh.shared().da_ttl_seen.len(), 1);
+        // The old handle stays closed and inherits no authority from the new
+        // Service; the new Service inherits no state from the old one.
+        assert_eq!(
+            old_handle.announce_block(&block).err().as_deref(),
+            Some(super::SERVICE_CLOSED_ERR)
+        );
+        assert_eq!(old.shared().da_ttl_seen.len(), 0);
+        assert_eq!(old.leases(), 0);
+    }
+
+    #[test]
+    fn service_work_retained_callback_close_waits_for_effect() {
+        let fixture = ServiceFixture::new("rub1168-close-waits");
+        let shared = fixture.shared().clone();
+        let _outbox = attach_relay_peer(&shared, "wait-peer:8333");
+        let handle = fixture.service.callback_handle();
+        let block = devnet_genesis_block_bytes();
+
+        // The callback registers, then blocks on a REAL owner lock (DA relay)
+        // held by the test until after close has proven it cannot return.
+        let owner = Arc::clone(&shared.da_relay);
+        let owner_guard = owner.lock().expect("hold the real DA owner lock");
+        // Barrier on the REGISTRATION, not on thread entry: a signal sent
+        // before the call leaves a window where close wins the cutoff and the
+        // callback is rejected instead of waited.
+        let registered = fixture.leases() + 1;
+        let callback = handle.clone();
+        let worker = thread::spawn(move || callback.advance_accepted_block_da_ttl([0xF6; 32]));
+        wait_until(Instant::now() + Duration::from_secs(10), || {
+            shared.lifecycle.lock().leases == registered
+        });
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let mut service = fixture;
+        let dir = service.dir.clone();
+        let closer = thread::spawn(move || {
+            service.service.close();
+            let _ = done_tx.send(());
+            service
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+            "close must not return before the final owner effect and release"
+        );
+        drop(owner_guard);
+        worker.join().expect("callback thread").expect("TTL row");
+        let service = closer.join().expect("closer");
+        assert_eq!(service.phase(), super::LifecyclePhase::Closed);
+        assert_eq!(service.leases(), 0);
+
+        // No Service-owned effect occurs after close returns.
+        let after = owner_vector(&shared);
+        assert_eq!(
+            handle.announce_block(&block).err().as_deref(),
+            Some(super::SERVICE_CLOSED_ERR)
+        );
+        assert_eq!(owner_vector(&shared), after);
+        let _ = fs::remove_dir_all(dir);
     }
 }

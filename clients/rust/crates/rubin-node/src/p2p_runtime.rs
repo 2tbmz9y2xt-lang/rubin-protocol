@@ -641,6 +641,26 @@ impl PeerSession {
     }
 
     pub fn read_message_with_timeout(&mut self, timeout: Duration) -> io::Result<WireMessage> {
+        self.read_message_bounded(timeout, None)
+    }
+
+    /// Live-loop read bounded by an ABSOLUTE per-message deadline, mirroring
+    /// the handshake's `DeadlineReader`: `read_deadline` is the window for the
+    /// whole message, so a peer dripping bytes inside one message cannot keep
+    /// resetting the recv timeout and the caller's lifecycle re-check between
+    /// messages stays reachable. No timeout constant changes, and every other
+    /// caller (`read_message`, `read_message_with_timeout`, interop) keeps the
+    /// existing per-recv behavior.
+    pub(crate) fn read_live_message(&mut self) -> io::Result<WireMessage> {
+        let timeout = self.cfg.read_deadline;
+        self.read_message_bounded(timeout, Some(Instant::now() + timeout))
+    }
+
+    fn read_message_bounded(
+        &mut self,
+        timeout: Duration,
+        deadline: Option<Instant>,
+    ) -> io::Result<WireMessage> {
         if self.prefetched_read_byte.is_some() {
             self.send_expired_compact_outstanding_fallback()?;
         }
@@ -661,6 +681,7 @@ impl PeerSession {
             compact_outstanding: &mut self.compact_outstanding,
             late_blocktxn: &mut self.late_blocktxn,
             read_timeout: timeout,
+            deadline,
             write_timeout: self.cfg.write_deadline,
             network_magic: network_magic(&self.cfg.network),
         };
@@ -1837,6 +1858,9 @@ struct CompactFallbackFrameReader<'a> {
     compact_outstanding: &'a mut Option<CompactOutstandingRequest>,
     late_blocktxn: &'a mut Option<LateBlockTxnContext>,
     read_timeout: Duration,
+    /// Absolute wall-clock ceiling for the whole message, or `None` for the
+    /// per-recv timeout behavior every non-live caller keeps.
+    deadline: Option<Instant>,
     write_timeout: Duration,
     network_magic: [u8; 4],
 }
@@ -1873,7 +1897,17 @@ impl Read for CompactFallbackFrameReader<'_> {
                 continue;
             }
             let expiry = self.compact_outstanding.as_ref().map(|req| req.expires_at);
-            let timeout = compact_expiry_bounded_read_timeout(expiry, self.read_timeout);
+            let mut timeout = compact_expiry_bounded_read_timeout(expiry, self.read_timeout);
+            if let Some(deadline) = self.deadline {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "peer message read deadline exceeded",
+                    ));
+                }
+                timeout = timeout.min(remaining);
+            }
             self.stream
                 .set_read_timeout(Some(timeout))
                 .map_err(io::Error::other)?;
@@ -1897,6 +1931,33 @@ pub fn perform_version_handshake(
     expected_chain_id: [u8; 32],
     expected_genesis_hash: [u8; 32],
 ) -> io::Result<PeerSession> {
+    perform_version_handshake_with_read_authorizer(
+        stream,
+        cfg,
+        local,
+        expected_chain_id,
+        expected_genesis_hash,
+        || Ok(()),
+    )
+}
+
+/// `perform_version_handshake` with a caller-supplied authorization check run
+/// immediately before every handshake message read. The public wrapper above
+/// passes an always-`Ok` authorizer, so existing callers and interop behavior
+/// are unchanged. The P2P service passes a Service-lifecycle check so a
+/// handshake that loses authorization mid-flight fails with the caller's error
+/// *before* the next read instead of starting one more read.
+pub(crate) fn perform_version_handshake_with_read_authorizer<F>(
+    stream: TcpStream,
+    cfg: PeerRuntimeConfig,
+    local: VersionPayloadV1,
+    expected_chain_id: [u8; 32],
+    expected_genesis_hash: [u8; 32],
+    mut before_read: F,
+) -> io::Result<PeerSession>
+where
+    F: FnMut() -> io::Result<()>,
+{
     let mut session = PeerSession::new(stream, cfg).map_err(io::Error::other)?;
 
     // Enforce an absolute wall-clock deadline for the entire handshake using
@@ -1920,6 +1981,7 @@ pub fn perform_version_handshake(
 
     let mut sent_verack = false;
     loop {
+        before_read()?;
         let msg = read_message_from_with_payload_limit(
             &mut deadline_reader,
             network_magic(&session.cfg.network),
@@ -5385,6 +5447,7 @@ mod tests {
                 compact_outstanding: &mut session.compact_outstanding,
                 late_blocktxn: &mut session.late_blocktxn,
                 read_timeout: Duration::from_secs(1),
+                deadline: None,
                 write_timeout: session.cfg.write_deadline,
                 network_magic: network_magic(&session.cfg.network),
             };
@@ -5399,6 +5462,31 @@ mod tests {
 
         assert!(session.compact_outstanding.is_none());
         assert_fallback_getdata(&mut client, block_hash);
+    }
+
+    #[test]
+    fn compact_fallback_frame_reader_stops_at_an_expired_absolute_deadline() {
+        let (mut session, mut client) = test_peer_session();
+        // Data IS ready, so only the already-expired absolute deadline can end
+        // this read. Without the guard the clamped timeout would be zero and
+        // `set_read_timeout` would report `InvalidInput`, not `TimedOut`.
+        client.write_all(b"x").expect("write ready byte");
+        let mut reader = CompactFallbackFrameReader {
+            stream: &mut session.stream,
+            prefetched_read_byte: None,
+            compact_outstanding: &mut session.compact_outstanding,
+            late_blocktxn: &mut session.late_blocktxn,
+            read_timeout: Duration::from_secs(1),
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+            write_timeout: session.cfg.write_deadline,
+            network_magic: network_magic(&session.cfg.network),
+        };
+        let mut buf = [0u8; 1];
+        let err = reader
+            .read(&mut buf)
+            .expect_err("an expired absolute deadline must end the read");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(err.to_string(), "peer message read deadline exceeded");
     }
 
     #[test]
