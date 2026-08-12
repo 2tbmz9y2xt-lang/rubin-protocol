@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -3760,5 +3762,208 @@ func TestMinedBlockBytesNilBlockStore(t *testing.T) {
 	_, err := minedBlockBytes(state, hash)
 	if err == nil {
 		t.Fatal("nil blockStore returned nil error")
+	}
+}
+
+// closeDrainNegativeWindow bounds the observation that Close has NOT
+// returned. It falsifies a forbidden transition; the expected transition is
+// encoded only by the release barrier below, never by elapsed time. The
+// width also absorbs scheduler starvation of a concurrent Close caller on a
+// loaded machine; it remains a falsification bound, never the ordering oracle.
+const closeDrainNegativeWindow = time.Second
+
+// rpcDrainFixture is a production startDevnetRPCServer whose real
+// /submit_tx route parks inside the retained announce callback until
+// release is closed, so one net/http-owned handler can be held active
+// across Close. No substitute server and no test-only production seam.
+type rpcDrainFixture struct {
+	srv         *runningDevnetRPCServer
+	entered     chan struct{}
+	release     chan struct{}
+	releaseOnce sync.Once
+	calls       atomic.Int64
+	returned    atomic.Bool
+	txHex       string
+	client      *http.Client
+}
+
+func newRPCDrainFixture(t *testing.T) *rpcDrainFixture {
+	t.Helper()
+	f := &rpcDrainFixture{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		// Keep-alives off so every probe below needs a fresh dial: once
+		// native shutdown closes the listener the dial is refused.
+		client: &http.Client{Transport: &http.Transport{DisableKeepAlives: true}},
+	}
+	fromKey := mustRPCMLDSA87Keypair(t)
+	toKey := mustRPCMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	state, input, utxos := mustRPCStateWithSpendableUTXO(t, fromAddress, func([]byte) error {
+		f.calls.Add(1)
+		close(f.entered)
+		<-f.release
+		f.returned.Store(true)
+		return nil
+	})
+	txBytes, _ := mustRPCSignedTransferTx(t, utxos, input, fromKey, consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes()))
+	f.txHex = hex.EncodeToString(txBytes)
+	srv, err := startDevnetRPCServer("127.0.0.1:0", state, nil, nil)
+	if err != nil {
+		t.Fatalf("startDevnetRPCServer: %v", err)
+	}
+	f.srv = srv
+	t.Cleanup(func() { f.releaseHeld(); _ = f.srv.Close(context.Background()) })
+	return f
+}
+
+// releaseHeld unparks the retained callback exactly once, so a failing run
+// leaves no parked handler or blocked Close goroutine behind.
+func (f *rpcDrainFixture) releaseHeld() { f.releaseOnce.Do(func() { close(f.release) }) }
+
+// holdHandler enters one real /submit_tx request and returns only once the
+// retained callback owns the handler.
+func (f *rpcDrainFixture) holdHandler(t *testing.T) chan error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		body, err := json.Marshal(submitTxRequest{TxHex: f.txHex})
+		if err == nil {
+			var resp *http.Response
+			resp, err = f.client.Post("http://"+f.srv.addr+"/submit_tx", "application/json", bytes.NewReader(body))
+			if err == nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				err = resp.Body.Close()
+			}
+		}
+		done <- err
+	}()
+	select {
+	case <-f.entered:
+	case err := <-done:
+		t.Fatalf("/submit_tx finished without entering the retained callback: %v", err)
+	case <-time.After(30 * time.Second): // watchdog only
+		t.Fatal("/submit_tx never entered the retained callback")
+	}
+	return done
+}
+
+// waitIngressFrozen probes an existing non-blocking route until the dial is
+// rejected, which observes that native shutdown froze the listener. A probe
+// that won the pre-shutdown race completes normally and is not the oracle.
+func (f *rpcDrainFixture) waitIngressFrozen(t *testing.T) {
+	t.Helper()
+	watchdog := time.Now().Add(30 * time.Second) // watchdog only
+	for {
+		resp, err := f.client.Get("http://" + f.srv.addr + "/ready")
+		// Only a refused dial observes the freeze; any other failure
+		// (resource pressure, transient dial error) keeps probing.
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			return
+		}
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		if time.Now().After(watchdog) {
+			t.Fatal("ingress still accepting after Close started: native shutdown never froze the listener")
+		}
+		time.Sleep(time.Millisecond) // probe pacing only; the oracle is the refused dial
+	}
+}
+
+func TestRunningDevnetRPCServerCloseDrainsAcceptedHandlers(t *testing.T) {
+	f := newRPCDrainFixture(t)
+	reqDone := f.holdHandler(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- f.srv.Close(ctx) }()
+	f.waitIngressFrozen(t)
+
+	cancel()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned %v on caller-context expiry while net/http still owned an active handler", err)
+	case <-time.After(closeDrainNegativeWindow):
+	}
+
+	f.releaseHeld()
+	closeErr := <-closeDone
+	if !f.returned.Load() {
+		t.Fatal("Close returned before the retained route callback finished")
+	}
+	if closeErr != context.Canceled {
+		t.Fatalf("Close error = %v (%T), want exactly context.Canceled", closeErr, closeErr)
+	}
+	if err := <-reqDone; err != nil {
+		t.Fatalf("held /submit_tx request: %v", err)
+	}
+	if resp, err := f.client.Post("http://"+f.srv.addr+"/submit_tx", "application/json", strings.NewReader("{}")); err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("ingress accepted /submit_tx after Close returned")
+	}
+	if got := f.calls.Load(); got != 1 {
+		t.Fatalf("retained callback invocations = %d, want exactly 1 and none after Close returned", got)
+	}
+}
+
+func TestRunningDevnetRPCServerCloseConcurrentAndRepeated(t *testing.T) {
+	f := newRPCDrainFixture(t)
+	reqDone := f.holdHandler(t)
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// main.go closes RPC with context.WithTimeout, so DeadlineExceeded is
+	// the only expiry flavor the production call site ever produces.
+	deadlineCtx, cancelDeadline := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancelDeadline()
+	<-deadlineCtx.Done() // barrier: expiry is latched before Close starts
+	canceledDone := make(chan error, 1)
+	liveDone := make(chan error, 1)
+	deadlineDone := make(chan error, 1)
+	go func() { canceledDone <- f.srv.Close(canceledCtx) }()
+	go func() { liveDone <- f.srv.Close(context.Background()) }()
+	go func() { deadlineDone <- f.srv.Close(deadlineCtx) }()
+	f.waitIngressFrozen(t)
+
+	select {
+	case err := <-canceledDone:
+		t.Fatalf("canceled-context Close returned %v while a native-owned handler was active", err)
+	case err := <-liveDone:
+		t.Fatalf("live-context Close returned %v while a native-owned handler was active", err)
+	case err := <-deadlineDone:
+		t.Fatalf("deadline-expired Close returned %v while a native-owned handler was active", err)
+	case <-time.After(closeDrainNegativeWindow):
+	}
+
+	f.releaseHeld()
+	if err := <-canceledDone; err != context.Canceled {
+		t.Fatalf("canceled caller got %v, want exactly context.Canceled", err)
+	}
+	if err := <-deadlineDone; err != context.DeadlineExceeded {
+		t.Fatalf("deadline caller got %v, want exactly context.DeadlineExceeded", err)
+	}
+	if err := <-liveDone; err != nil {
+		t.Fatalf("live caller got %v, want the native success result", err)
+	}
+	if !f.returned.Load() {
+		t.Fatal("Close returned before the retained route callback finished")
+	}
+	if err := <-reqDone; err != nil {
+		t.Fatalf("held /submit_tx request: %v", err)
+	}
+	if err := f.srv.Close(context.Background()); err != nil {
+		t.Fatalf("repeated Close after drain: %v", err)
+	}
+	// Quiescent server, already-expired caller context: native Shutdown
+	// returns its own success before observing ctx, so a coincident caller
+	// cancellation must not be reported as the close result.
+	if err := f.srv.Close(canceledCtx); err != nil {
+		t.Fatalf("repeated Close with an expired caller context got %v, want the native success result", err)
+	}
+	if err := (&runningDevnetRPCServer{}).Close(context.Background()); err != nil {
+		t.Fatalf("nil native server Close: %v", err)
+	}
+	if got := f.calls.Load(); got != 1 {
+		t.Fatalf("retained callback invocations = %d, want exactly 1", got)
 	}
 }

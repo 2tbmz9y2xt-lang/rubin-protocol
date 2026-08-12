@@ -677,11 +677,34 @@ func startDevnetRPCServer(
 	return &runningDevnetRPCServer{addr: addr, server: server, state: state}, nil
 }
 
+// Close drains the RPC surface. It is the first deferred teardown to unwind
+// in main.go, so it MUST have returned before p2p.Service.Close begins.
+// Native Shutdown owns both halves of the drain: it freezes ingress (closes
+// the listeners) and then waits until every connection net/http already
+// accepted goes idle. Expiry of the caller-provided ctx is a DIAGNOSTIC
+// only — it must not release the caller while net/http still owns an active
+// handler — so an expired first Shutdown is followed by an unbounded
+// Shutdown on the same server, and the exact caller-context error is
+// returned only after that drain reaches quiescence.
 func (s *runningDevnetRPCServer) Close(ctx context.Context) error {
 	if s == nil || s.server == nil {
 		return nil
 	}
-	return s.server.Shutdown(ctx)
+	err := s.server.Shutdown(ctx)
+	// Guarded on the returned error MATCHING ctx.Err(), not merely on ctx
+	// being expired: a coincident caller cancellation must not swallow a
+	// different native shutdown error (nor turn a successful drain into a
+	// failure).
+	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+		// ctxErr is caller-local and never stored on s, so a concurrent
+		// caller holding a live context still observes the native result.
+		// This second Shutdown runs synchronously on this goroutine and is
+		// unbounded: it returns only at native quiescence. Its result is
+		// deliberately dropped — the caller's contract is the diagnostic.
+		_ = s.server.Shutdown(context.Background())
+		return ctxErr
+	}
+	return err
 }
 
 // readyResponse is the tiny JSON payload served by GET /ready. The shape

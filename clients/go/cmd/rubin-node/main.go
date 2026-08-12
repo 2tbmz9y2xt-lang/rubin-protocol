@@ -684,7 +684,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "p2p init failed: %v\n", err)
 		return 2
 	}
-	if err := p2pService.Start(ctx); err != nil {
+	// The P2P runtime parent is deliberately context.Background(), not the
+	// signal ctx: signal delivery must not cancel the P2P runtime before the
+	// deferred RPC drain below has returned. p2p.Service.Close (deferred on
+	// the next line, so LIFO unwinds it after the later-registered RPC close)
+	// owns the P2P runtime cancellation.
+	if err := p2pService.Start(context.Background()); err != nil {
 		_, _ = fmt.Fprintf(stderr, "p2p start failed: %v\n", err)
 		return 2
 	}
