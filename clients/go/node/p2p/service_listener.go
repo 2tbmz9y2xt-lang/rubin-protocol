@@ -183,11 +183,9 @@ func (s *Service) Close() error {
 	// Phase 1: publish the closed flag so any in-progress Start observes
 	// it on its write-lock re-check and aborts with "service already
 	// closed", closing its local listener before returning. Publishing it under peersMu is also
-	// the registration cutoff: acquireWork increments loopWG only under this same lock with
-	// closed==false, so every lease this Close will wait for was registered before this section
-	// and no lease can appear after the loopWG.Wait below has begun. The first Close to reach
-	// this section owns the single teardown and publishes closeDone; a later Close observes it
-	// and waits for that one completion instead of tearing down again.
+	// the registration cutoff acquireWork documents, so no lease can appear after the
+	// loopWG.Wait below has begun. The first Close to reach this section owns the single
+	// teardown and publishes closeDone; a later Close waits for that one completion.
 	s.peersMu.Lock()
 	if s.closeDone != nil {
 		joined := s.closeDone
