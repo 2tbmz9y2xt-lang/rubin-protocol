@@ -2003,7 +2003,6 @@ impl FrameReadTiming {
             stall_timeout: frame_stall_timeout(stall_timeout),
         }
     }
-
     fn record_positive_read(&mut self, bytes_read: usize) {
         if bytes_read == 0 {
             return;
@@ -2012,7 +2011,6 @@ impl FrameReadTiming {
         self.frame_start.get_or_insert(now);
         self.last_positive_progress = Some(now);
     }
-
     fn validate_payload(&mut self, payload_len: usize) -> io::Result<()> {
         let Some(frame_start) = self.frame_start else {
             return Err(invalid_data(
@@ -2030,21 +2028,18 @@ impl FrameReadTiming {
         });
         self.ensure_not_expired(self.absolute_deadline.expect("set above"))
     }
-
     fn complete_header(&self) -> io::Result<()> {
         let Some(frame_start) = self.frame_start else {
             return Ok(());
         };
         self.ensure_not_expired(frame_start + Duration::from_millis(FRAME_MINIMUM_BUDGET_MS))
     }
-
     fn complete(&self) -> io::Result<()> {
         if let Some(deadline) = self.absolute_deadline {
             self.ensure_not_expired(deadline)?;
         }
         Ok(())
     }
-
     fn finish_payload<T>(&self, result: io::Result<T>) -> io::Result<T> {
         match result {
             Ok(value) => {
@@ -2058,7 +2053,6 @@ impl FrameReadTiming {
             Err(err) => Err(err),
         }
     }
-
     fn transport_deadline(&self) -> Option<Instant> {
         let frame_start = self.frame_start?;
         let absolute = self
@@ -2068,28 +2062,24 @@ impl FrameReadTiming {
         let stall = progress.checked_add(self.stall_timeout).unwrap_or(absolute);
         Some(stall.min(absolute))
     }
-
     fn bounded_timeout(&self, configured_timeout: Duration) -> io::Result<Duration> {
         let Some(deadline) = self.transport_deadline() else {
             return Ok(configured_timeout);
         };
         Ok(configured_timeout.min(self.remaining(deadline)?))
     }
-
     fn ensure_transport_active(&self) -> io::Result<()> {
         let Some(deadline) = self.transport_deadline() else {
             return Ok(());
         };
         self.ensure_not_expired(deadline)
     }
-
     fn ensure_not_expired(&self, deadline: Instant) -> io::Result<()> {
         if frame_deadline_expired(Instant::now(), deadline) {
             return Err(self.timeout_error());
         }
         Ok(())
     }
-
     fn remaining(&self, deadline: Instant) -> io::Result<Duration> {
         self.ensure_not_expired(deadline)?;
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -2099,7 +2089,6 @@ impl FrameReadTiming {
             remaining
         })
     }
-
     fn timeout_error(&self) -> io::Error {
         let phase = if self.validated { "payload" } else { "header" };
         partial_frame_timeout(io::Error::new(
@@ -2530,7 +2519,6 @@ fn write_post_handshake_frame_to_stream<W: PostHandshakeWriter>(
     stream.flush()?;
     ensure_write_completion_deadline(write_timeout, last_positive_progress, absolute_deadline)
 }
-
 fn write_post_handshake_bytes<W: PostHandshakeWriter>(
     stream: &mut W,
     write_timeout: Duration,
@@ -2569,7 +2557,6 @@ fn write_post_handshake_bytes<W: PostHandshakeWriter>(
     }
     Ok(())
 }
-
 fn set_post_handshake_write_timeout<W: PostHandshakeWriter>(
     stream: &mut W,
     write_timeout: Duration,
@@ -2581,7 +2568,6 @@ fn set_post_handshake_write_timeout<W: PostHandshakeWriter>(
     let remaining = remaining_before_deadline(deadline, "peer frame write deadline exceeded")?;
     stream.set_frame_write_timeout(remaining)
 }
-
 fn ensure_write_completion_deadline(
     write_timeout: Duration,
     last_positive_progress: Instant,
@@ -2592,7 +2578,6 @@ fn ensure_write_completion_deadline(
     let _ = remaining_before_deadline(deadline, "peer frame write deadline exceeded")?;
     Ok(())
 }
-
 fn post_handshake_write_deadline(
     write_timeout: Duration,
     last_positive_progress: Instant,

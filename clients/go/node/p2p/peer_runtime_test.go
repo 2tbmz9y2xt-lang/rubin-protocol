@@ -1191,26 +1191,26 @@ func TestCompactFallbackExpiryStopsBeforePopOrWrite(t *testing.T) {
 	}
 	p.conn = conn
 	_, err := (&compactFallbackReader{peer: p, ctx: context.Background(), timing: timing}).Read(make([]byte, 1))
-	preWriteOK := isPartialFrameTimeout(err) && conn.Len() == 0 && timing.frameStart == start.Add(-frameMinimumBudget()-time.Second) && timing.lastProgress == start && timing.absoluteDeadline.IsZero() && p.compact.outstanding != nil && p.compact.outstanding.BlockHash == [32]byte{0x11}
+	preWriteOK := isPartialFrameTimeout(err) && conn.Len() == 0 && timing.frameStart.Equal(start.Add(-frameMinimumBudget()-time.Second)) && timing.lastProgress.Equal(start) && timing.absoluteDeadline.IsZero() && p.compact.outstanding != nil && p.compact.outstanding.BlockHash == [32]byte{0x11}
 	start = time.Now().Add(-time.Second)
 	timing = &postHandshakeFrameTiming{peer: p, frameStart: start, lastProgress: start, bytesRead: 1}
 	*conn = expiryWakeConn{scriptedConn: scriptedConn{reads: []scriptedRead{{err: timeoutErr{}}}, writes: []scriptedWrite{{n: wireHeaderSize}, {err: timeoutErr{}}}}}
 	reader := &compactFallbackReader{peer: p, ctx: context.Background(), timing: timing}
 	_, err = reader.Read(make([]byte, 1))
-	midWriteOK := isPartialFrameTimeout(err) && conn.Len() == wireHeaderSize && reader.lateBlockTxn == nil && p.compact.outstanding != nil && p.compact.outstanding.BlockHash == [32]byte{0x11} && len(conn.writeDeadlines) == 2 && conn.writeDeadlines[0] == timing.transportDeadline() && conn.writeDeadlines[1] == timing.transportDeadline()
+	midWriteOK := isPartialFrameTimeout(err) && conn.Len() == wireHeaderSize && reader.lateBlockTxn == nil && p.compact.outstanding != nil && p.compact.outstanding.BlockHash == [32]byte{0x11} && len(conn.writeDeadlines) == 2 && conn.writeDeadlines[0].Equal(timing.transportDeadline()) && conn.writeDeadlines[1].Equal(timing.transportDeadline())
 	*conn = expiryWakeConn{}
 	started, done := make(chan struct{}), make(chan struct{})
 	p.writeMu.Lock()
 	go func() {
 		close(started)
-		reader.lateBlockTxn, err = p.sendExpiredCompactOutstandingFallback(context.Background(), timing)
+		_, reader.sent, err = p.sendExpiredCompactOutstandingFallbackWithin(context.Background(), timing)
 		close(done)
 	}()
 	<-started
 	timing.frameStart = timing.lastProgress.Add(-frameMinimumBudget() - time.Second)
 	p.writeMu.Unlock()
 	<-done
-	if !preWriteOK || !midWriteOK || !isPartialFrameTimeout(err) || conn.Len() != 0 || reader.lateBlockTxn != nil || p.compact.outstanding == nil || p.compact.outstanding.BlockHash != [32]byte{0x11} {
+	if !preWriteOK || !midWriteOK || !isPartialFrameTimeout(err) || conn.Len() != 0 || reader.sent || p.compact.outstanding == nil || p.compact.outstanding.BlockHash != [32]byte{0x11} {
 		t.Fatalf("pre=%t mid=%t post-lock err=%v bytes=%d late=%v", preWriteOK, midWriteOK, err, conn.Len(), reader.lateBlockTxn)
 	}
 }
@@ -1311,11 +1311,11 @@ func TestPostHandshakeFrameTimingUsesOneStartAndAbsoluteBudget(t *testing.T) {
 	start := time.Now()
 	timing := &postHandshakeFrameTiming{peer: p, frameStart: start, lastProgress: start, bytesRead: wireHeaderSize}
 	requireNoCompactErr(t, timing.validatePayload(32_000_000), "validate payload")
-	if want := start.Add(53_334 * time.Millisecond); timing.absoluteDeadline != want || conn.readDeadlines[len(conn.readDeadlines)-1] != start.Add(15*time.Second) {
+	if want := start.Add(53_334 * time.Millisecond); !timing.absoluteDeadline.Equal(want) || !conn.readDeadlines[len(conn.readDeadlines)-1].Equal(start.Add(15*time.Second)) {
 		t.Fatalf("absolute=%v read deadlines=%v, want %v with 15s stall", timing.absoluteDeadline, conn.readDeadlines, want)
 	}
 	requireNoCompactErr(t, timing.afterCompactFallback(), "compact wake")
-	if timing.frameStart != start || timing.lastProgress != start || timing.absoluteDeadline != start.Add(53_334*time.Millisecond) || conn.readDeadlines[len(conn.readDeadlines)-1] != start.Add(15*time.Second) {
+	if !timing.frameStart.Equal(start) || !timing.lastProgress.Equal(start) || !timing.absoluteDeadline.Equal(start.Add(53_334*time.Millisecond)) || !conn.readDeadlines[len(conn.readDeadlines)-1].Equal(start.Add(15*time.Second)) {
 		t.Fatal("compact wake changed timing")
 	}
 }
