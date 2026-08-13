@@ -1239,6 +1239,9 @@ func TestPostHandshakeFrameTimingUsesOneStartAndAbsoluteBudget(t *testing.T) {
 		t.Fatal(io.EOF)
 	}
 	timing.deadlineErr = nil
+	timing.recordRead(0)
+	timing.validated = true
+	requireNoCompactErr(t, timing.validatePayload(0), "repeat validation")
 	var partial partialFrameTimeoutError
 	if err := timing.finishHeader(commandPayloadCapError{command: messageTx}); !errors.As(err, &partial) || partial.part != "header" {
 		t.Fatalf("late header err=%v, want header timeout before cap error", err)
