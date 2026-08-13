@@ -37,6 +37,8 @@ const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CHUNK_LINE_BYTES: usize = 4096;
 const MAX_CONCURRENT_RPC_CONNS: usize = 8;
 const RPC_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Single site both bounded producers format and the classifier matches on.
+const RPC_SHUTDOWN_TIMEOUT_PREFIX: &str = "rpc shutdown timeout after ";
 pub const RPC_READINESS_TRANSITION_FAILED: &str =
     "rpc readiness transition failed: server is already ready or shutdown";
 
@@ -91,6 +93,14 @@ pub struct RunningDevnetRPCServer {
     active_handlers: Arc<AtomicUsize>,
     join: Option<JoinHandle<()>>,
     done: Option<mpsc::Receiver<()>>,
+    /// RUB-1178: the single private admission gate shared with the accept
+    /// loop (`true` == FROZEN). The loop acquires its handler unit under this
+    /// same mutex, so mutex order IS the cutoff: per accepted socket exactly
+    /// one of {admission, freeze} wins, with no third state.
+    admission: Arc<Mutex<bool>>,
+    /// RUB-1178: first non-timeout terminal close fault, retained across
+    /// bounded passes and surfaced only at frozen ingress / zero handlers.
+    terminal_fault: Option<String>,
     /// RUB-10 / GitHub #1151: handle to the same `ReadinessGate` the
     /// `DevnetRPCState` references, kept on the server so `close()`
     /// can stamp `Shutdown` before stopping the accept loop. Mirrors
@@ -604,6 +614,8 @@ pub fn start_devnet_rpc_server(
     let stop_flag = Arc::clone(&stop);
     let active_handlers = Arc::new(AtomicUsize::new(0));
     let active_handlers_for_loop = Arc::clone(&active_handlers);
+    let admission = Arc::new(Mutex::new(false));
+    let admission_for_loop = Arc::clone(&admission);
     let (done_tx, done_rx) = mpsc::channel();
     let state = Arc::new(state);
     // RUB-10 / GitHub #1151: stamp `Ready` BEFORE the accept thread
@@ -630,7 +642,13 @@ pub fn start_devnet_rpc_server(
         .name("rubin-devnet-rpc".to_string())
         .spawn(move || {
             let _done = AcceptLoopDone(Some(done_tx));
-            run_accept_loop(listener, state, stop_flag, active_handlers_for_loop);
+            run_accept_loop(
+                listener,
+                state,
+                stop_flag,
+                active_handlers_for_loop,
+                admission_for_loop,
+            );
         })
         .map_err(|err| {
             readiness.mark_shutdown();
@@ -642,6 +660,8 @@ pub fn start_devnet_rpc_server(
         active_handlers,
         join: Some(join),
         done: Some(done_rx),
+        admission,
+        terminal_fault: None,
         readiness,
     })
 }
@@ -651,10 +671,32 @@ impl RunningDevnetRPCServer {
         &self.addr
     }
 
+    /// RUB-1178: the public close is UNBOUNDED. `RPC_SHUTDOWN_TIMEOUT` stays a
+    /// private diagnostic interval, so a bounded pass reporting a pending loop
+    /// or live handler only causes another pass on the same teardown.
+    ///
+    /// Postcondition on BOTH `Ok` and `Err`: ingress frozen at the shared gate,
+    /// no accepted socket can still become admitted work, accept-loop ownership
+    /// resolved, active-handler count zero. `main.rs` records the RPC error and
+    /// then closes P2P on either result, so both variants must establish it.
+    /// A live admitted handler therefore pins shutdown without bound; the first
+    /// discarded diagnostic is logged once per call and is diagnostic only.
     pub fn close(&mut self) -> Result<(), String> {
-        self.close_with_timeout(RPC_SHUTDOWN_TIMEOUT)
+        let mut logged = false;
+        loop {
+            match self.close_with_timeout(RPC_SHUTDOWN_TIMEOUT) {
+                Err(err) if Self::is_shutdown_timeout(&err) => {
+                    if !logged {
+                        logged = true;
+                        eprintln!("rpc: close waiting on drain: {err}");
+                    }
+                }
+                result => return result,
+            }
+        }
     }
 
+    /// One bounded pass; its `Err` may be the diagnostic "keep waiting" timeout.
     fn close_with_timeout(&mut self, timeout: Duration) -> Result<(), String> {
         let started = Instant::now();
         // RUB-10 / GitHub #1151: stamp `Shutdown` BEFORE stopping the
@@ -665,24 +707,60 @@ impl RunningDevnetRPCServer {
         // Idempotent: re-calling close (e.g., explicit close + Drop)
         // re-stamps Shutdown without effect.
         self.readiness.mark_shutdown();
+        // Step 2: the admission cutoff, monotone and idempotent.
+        self.freeze_admission();
+        match self.resolve_accept_loop(started, timeout) {
+            Ok(()) => {}
+            // Pending inside the diagnostic interval; ownership retained.
+            Err(err) if Self::is_shutdown_timeout(&err) => return Err(err),
+            // Step 4: retain the first terminal fault; never return it here.
+            Err(err) => {
+                self.terminal_fault.get_or_insert(err);
+            }
+        }
+        // Step 5; its only `Err` is diagnostic, leaving the fault on `self`.
+        self.wait_for_handlers(started, timeout)?;
+        self.terminal_fault.clone().map_or(Ok(()), Err) // step 6
+    }
+
+    /// Step 2: flip to `FROZEN`. Sticky — every later socket loses the cutoff.
+    fn freeze_admission(&self) {
+        let mut frozen = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *frozen = true;
+    }
+
+    /// Step 3: request accept-loop termination and resolve it. A bounded
+    /// timeout is reported with the join handle AND completion channel still
+    /// owned, so a retry resumes the same teardown (B4); any other fault is
+    /// reported only after that ownership is consumed (B5). Idempotent (B7/B8).
+    fn resolve_accept_loop(&mut self, started: Instant, timeout: Duration) -> Result<(), String> {
         if self.join.is_none() {
-            return self.wait_for_handlers(started, timeout);
+            return Ok(());
         }
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(&self.addr);
+        // Past the early return the two are paired-Some (consumed together
+        // below); an impossible unpaired state fails closed as a fault.
         let done = self
             .done
             .as_ref()
             .ok_or_else(|| "rpc shutdown missing accept-loop completion channel".to_string())?;
         Self::wait_for_accept_loop_done(done, started, timeout)?;
-        let join = self
-            .join
-            .take()
-            .ok_or_else(|| "rpc shutdown missing accept-loop handle".to_string())?;
         self.done.take();
-        join.join()
-            .map_err(|_| "rpc accept loop panicked during shutdown".to_string())?;
-        self.wait_for_handlers(started, timeout)
+        self.join
+            .take()
+            .ok_or_else(|| "rpc shutdown missing accept-loop handle".to_string())?
+            .join()
+            .map_err(|_| "rpc accept loop panicked during shutdown".to_string())
+    }
+
+    /// Both bounded observations format `RPC_SHUTDOWN_TIMEOUT` expiry with this
+    /// prefix; it is exactly what the public `close()` keeps waiting on.
+    fn is_shutdown_timeout(err: &str) -> bool {
+        err.starts_with(RPC_SHUTDOWN_TIMEOUT_PREFIX)
     }
 
     fn wait_for_accept_loop_done(
@@ -728,7 +806,7 @@ impl RunningDevnetRPCServer {
 
     fn accept_loop_timeout_error(timeout: Duration) -> String {
         format!(
-            "rpc shutdown timeout after {} ms: accept loop still running",
+            "{RPC_SHUTDOWN_TIMEOUT_PREFIX}{} ms: accept loop still running",
             timeout.as_millis()
         )
     }
@@ -755,7 +833,7 @@ impl RunningDevnetRPCServer {
             return Ok(());
         }
         Err(format!(
-            "rpc shutdown timeout after {} ms: {active} handler(s) still running",
+            "{RPC_SHUTDOWN_TIMEOUT_PREFIX}{} ms: {active} handler(s) still running",
             timeout.as_millis()
         ))
     }
@@ -803,33 +881,64 @@ impl RpcMetrics {
     }
 }
 
+/// RUB-1178: outcome of one accepted socket's pass through the admission gate.
+/// `Admitted` == one unit acquired BEFORE the gate released, so a `close()`
+/// later winning the gate observes it; `Frozen` == no route, spawn or
+/// increment, whatever the loop had previously observed for `stop`.
+enum Admission {
+    Admitted,
+    AtCapacity,
+    Frozen,
+}
+
+/// The admission cutoff. Holds the gate across the whole observe-`FROZEN` /
+/// apply-capacity / acquire-unit span, so the freeze cannot interleave. No I/O
+/// runs under it: the socket is accepted before entry, dropped by the caller.
+fn admit_under_gate(gate: &Mutex<bool>, active: &AtomicUsize) -> Admission {
+    let frozen = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if *frozen {
+        return Admission::Frozen;
+    }
+    if active.load(Ordering::SeqCst) >= MAX_CONCURRENT_RPC_CONNS {
+        return Admission::AtCapacity;
+    }
+    active.fetch_add(1, Ordering::SeqCst);
+    Admission::Admitted
+}
+
 fn run_accept_loop(
     listener: TcpListener,
     state: Arc<DevnetRPCState>,
     stop: Arc<AtomicBool>,
     active: Arc<AtomicUsize>,
+    admission: Arc<Mutex<bool>>,
 ) {
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
-            Ok((stream, _)) => {
-                if active.load(Ordering::SeqCst) >= MAX_CONCURRENT_RPC_CONNS {
+            Ok((stream, _)) => match admit_under_gate(&admission, &active) {
+                // No backoff: the freeze must not delay loop termination.
+                Admission::Frozen => drop(stream),
+                Admission::AtCapacity => {
                     drop(stream);
                     thread::sleep(Duration::from_millis(25));
-                    continue;
                 }
-                let st = Arc::clone(&state);
-                let ctr = Arc::clone(&active);
-                ctr.fetch_add(1, Ordering::SeqCst);
-                if thread::Builder::new()
-                    .spawn(move || {
-                        let _active = ActiveHandler(ctr);
-                        let _ = handle_connection(stream, &st);
-                    })
-                    .is_err()
-                {
-                    active.fetch_sub(1, Ordering::SeqCst);
+                Admission::Admitted => {
+                    let st = Arc::clone(&state);
+                    let ctr = Arc::clone(&active);
+                    if thread::Builder::new()
+                        .spawn(move || {
+                            // Adopts the unit acquired under the gate; the
+                            // closure owns only the `Arc`, so spawn-`Err` frees
+                            // nothing when it drops this closure un-run.
+                            let _active = ActiveHandler(ctr);
+                            let _ = handle_connection(stream, &st);
+                        })
+                        .is_err()
+                    {
+                        active.fetch_sub(1, Ordering::SeqCst); // sole A4 release
+                    }
                 }
-            }
+            },
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(25));
             }
@@ -3056,6 +3165,126 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(25));
         }
+    }
+
+    /// RUB-1178 fixtures: routable request, unit-holding prefix, intervals.
+    const READY_GET: &[u8] = b"GET /ready HTTP/1.1\r\n\r\n";
+    const READY_HEAD: &[u8] = b"GET /ready HTTP/1.1\r\n";
+    const MS500: Duration = Duration::from_millis(500);
+    const SEC5: Duration = Duration::from_secs(5);
+
+    /// True iff `err` is a bounded observation, not a terminal close fault.
+    fn is_diagnostic(err: &str) -> bool {
+        super::RunningDevnetRPCServer::is_shutdown_timeout(err)
+    }
+
+    /// Runs `F` on scope exit, so a panic frees synthetic state (a held unit, a
+    /// loop parked on a channel) a server's `Drop` would else wait on forever.
+    /// Declare it AFTER the guarded server: it drops first, so failure is RED.
+    struct OnUnwind<F: FnOnce()>(Option<F>);
+
+    impl<F: FnOnce()> Drop for OnUnwind<F> {
+        fn drop(&mut self) {
+            if let Some(f) = self.0.take() {
+                f();
+            }
+        }
+    }
+
+    fn active_units(server: &super::RunningDevnetRPCServer) -> usize {
+        server.active_handlers.load(Ordering::SeqCst)
+    }
+
+    fn ingress_frozen(server: &super::RunningDevnetRPCServer) -> bool {
+        *server.admission.lock().expect("gate")
+    }
+
+    /// Watchdog bounding a release that must happen; never decides a cutoff.
+    fn wait_until_handlers_drop_to(server: &super::RunningDevnetRPCServer, expected: usize) {
+        let deadline = Instant::now() + SEC5 + SEC5;
+        while active_units(server) > expected {
+            assert!(Instant::now() < deadline, "drain stalled at {expected}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Empty result == dropped unanswered: the signature of losing the cutoff.
+    fn request_to_eof(addr: &str, request: &[u8]) -> String {
+        let mut sock = TcpStream::connect(addr).expect("connect");
+        sock.set_read_timeout(Some(SEC5)).expect("read timeout");
+        sock.write_all(request).expect("write request");
+        let mut out = Vec::new();
+        let _ = sock.read_to_end(&mut out);
+        String::from_utf8_lossy(&out).to_string()
+    }
+
+    /// One admitted unit whose liveness is scheduler-independent: a keepalive
+    /// thread trickles a header byte inside the server's 5s per-read window, so
+    /// only `Drop` (stop + join + socket close) releases it, never load. The
+    /// oracle stays the gate/count; this keepalive decides no cutoff.
+    struct HeldUnit(Option<(std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>)>);
+
+    impl HeldUnit {
+        /// The partial request holds one admitted unit until the socket drops.
+        fn hold(addr: &str) -> Self {
+            let mut sock = TcpStream::connect(addr).expect("connect holder");
+            sock.write_all(READY_HEAD).expect("partial request");
+            let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+            let keepalive = std::thread::spawn(move || {
+                use std::sync::mpsc::RecvTimeoutError::Timeout;
+                while stop_rx.recv_timeout(Duration::from_millis(100)) == Err(Timeout) {
+                    if sock.write_all(b"x").is_err() {
+                        return;
+                    }
+                }
+            });
+            Self(Some((stop_tx, keepalive)))
+        }
+    }
+
+    impl Drop for HeldUnit {
+        fn drop(&mut self) {
+            if let Some((stop_tx, keepalive)) = self.0.take() {
+                drop(stop_tx);
+                let _ = keepalive.join();
+            }
+        }
+    }
+
+    /// Synthetic lifecycle server on test-owned ephemeral loopback state; the
+    /// returned listener stays bound so the wake connect hits a port we own.
+    fn synthetic_server(
+        state: &super::DevnetRPCState,
+        active_handlers: Arc<AtomicUsize>,
+        join: std::thread::JoinHandle<()>,
+        done: std::sync::mpsc::Receiver<()>,
+    ) -> (TcpListener, super::RunningDevnetRPCServer) {
+        let wake = TcpListener::bind("127.0.0.1:0").expect("bind wake listener");
+        let addr = wake.local_addr().expect("wake addr").to_string();
+        let server = super::RunningDevnetRPCServer {
+            addr,
+            stop: Arc::new(AtomicBool::new(false)),
+            active_handlers,
+            join: Some(join),
+            done: Some(done),
+            admission: Arc::new(Mutex::new(false)),
+            terminal_fault: None,
+            readiness: Arc::clone(&state.readiness),
+        };
+        (wake, server)
+    }
+
+    /// A4: spawn failure is unreachable through the production listener without
+    /// exhausting the thread table, so the row is pinned on the same counter:
+    /// the un-run closure frees nothing, the spawn-`Err` arm is the release.
+    fn assert_spawn_failure_releases_unit_once() {
+        let ctr = Arc::new(AtomicUsize::new(0));
+        ctr.fetch_add(1, Ordering::SeqCst);
+        let moved = Arc::clone(&ctr);
+        drop(move || drop(super::ActiveHandler(moved)));
+        assert_eq!(ctr.load(Ordering::SeqCst), 1, "A4 closure holds");
+        ctr.fetch_sub(1, Ordering::SeqCst);
+        assert_eq!(ctr.load(Ordering::SeqCst), 0, "A4 released once");
     }
 
     fn response_json(response: &super::HttpResponse) -> Value {
@@ -5499,7 +5728,7 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_close_is_bounded_idempotent_and_stops_listener() {
+    fn shutdown_close_is_idempotent_and_stops_listener() {
         let (state, dir) = build_state(false);
         let mut server =
             start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start server");
@@ -5592,23 +5821,264 @@ mod tests {
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
+    /// RUB-1178 Table A, against the production listener and real loopback
+    /// sockets; accept-versus-freeze is decided by the gate, never by a sleep.
+    #[test]
+    fn rpc_drain_accept_cutoff_matrix() {
+        let cap = super::MAX_CONCURRENT_RPC_CONNS;
+        let (state, dir) = build_state(false);
+        let mut server = start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start");
+        let addr = server.addr().to_string();
+
+        // A1: admission wins — the unit is acquired BEFORE the gate releases, so
+        // the next gate holder (close()'s role) observes it. Every A holder is
+        // keepalive-backed: load cannot expire a read timeout and free it.
+        let holder = HeldUnit::hold(&addr);
+        wait_until_active_handlers(&server, 1);
+        {
+            let frozen = server.admission.lock().expect("gate");
+            assert!(!*frozen, "A1 gate OPEN before cutoff");
+            assert_eq!(active_units(&server), 1, "A1 acquired under gate");
+        }
+
+        // A3: capacity rejects under an OPEN gate without acquiring.
+        let fillers: Vec<HeldUnit> = (1..cap).map(|_| HeldUnit::hold(&addr)).collect();
+        wait_until_active_handlers(&server, cap);
+        assert!(request_to_eof(&addr, READY_GET).is_empty(), "A3 dropped");
+        assert_eq!(active_units(&server), cap, "A3 no unit");
+        drop(fillers);
+        wait_until_handlers_drop_to(&server, 1);
+
+        // A2 + A5: the cutoff wins while the loop still sees `stop == false`.
+        assert!(!server.stop.load(Ordering::SeqCst), "A5 stop==false");
+        let before = state.metrics.snapshot();
+        server.freeze_admission();
+        assert!(request_to_eof(&addr, READY_GET).is_empty(), "A2 no reply");
+        assert_eq!(state.metrics.snapshot(), before, "A2 no route work");
+        assert_eq!(active_units(&server), 1, "A2 no increment");
+
+        assert_spawn_failure_releases_unit_once(); // A4
+
+        drop(holder);
+        server.close().expect("close after cutoff matrix");
+        assert_eq!(active_units(&server), 0, "A1 zero before return");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-1178 Table B: close, timeout, retry, and the public result.
+    #[test]
+    fn rpc_drain_close_ownership_matrix() {
+        const FAULT: &str = "rpc accept loop panicked during shutdown";
+        let (state, dir) = build_state(false);
+
+        // B1 + Section 8 steps 1 < 2: readiness shutdown publishes BEFORE the
+        // freeze. Holding the shared gate blocks step 2 outright, so observing
+        // not-ready while still holding it is the ordering proof; releasing it
+        // lets the SAME close finish the normal no-handler teardown.
+        let mut idle = start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("idle");
+        let idle_addr = idle.addr().to_string();
+        let gate = Arc::clone(&idle.admission);
+        let held = gate.lock().expect("hold gate");
+        let closer = std::thread::spawn(move || {
+            let result = idle.close();
+            (idle, result)
+        });
+        let watch = Instant::now() + SEC5;
+        while state.readiness.is_ready() {
+            assert!(Instant::now() < watch, "readiness before freeze");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!*held, "B1 freeze still blocked on the held gate");
+        drop(held);
+        let (mut idle, result) = closer.join().expect("B1 closer");
+        result.expect("B1 Ok");
+        assert!(idle.join.is_none(), "B1 loop resolved");
+        assert_eq!(active_units(&idle), 0, "B1 zero at Ok");
+        assert!(ingress_frozen(&idle), "B1 frozen at Ok");
+
+        // B7: a repeated explicit close repeats no ownership release.
+        idle.close().expect("B7 same state");
+        assert_eq!(active_units(&idle), 0, "B7 no re-release");
+        assert!(idle.join.is_none() && idle.done.is_none(), "B7 no re-join");
+        assert!(ingress_frozen(&idle), "B7 still frozen");
+
+        // B8: `Drop` after the completed close never reopens ingress.
+        drop(idle);
+        assert!(wait_until_connect_fails(&idle_addr, SEC5), "B8 no reopen");
+
+        // B4: a zero-duration observation of a loop that provably cannot have
+        // finished keeps BOTH the join handle and the completion state, and the
+        // retry resumes it. The loop is channel-gated; no race decides this.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let pending = std::thread::spawn(move || {
+            let _done = super::AcceptLoopDone(Some(done_tx));
+            release_rx.recv().expect("release pending loop");
+        });
+        let zero = Arc::new(AtomicUsize::new(0));
+        let (_gate, mut pend) = synthetic_server(&state, zero, pending, done_rx);
+        // After `pend`: ANY panic below frees the loop before `pend`'s Drop.
+        let release = OnUnwind(Some(move || _ = release_tx.send(())));
+        let err = pend
+            .close_with_timeout(Duration::ZERO)
+            .expect_err("B4 pending");
+        assert!(is_diagnostic(&err), "B4 diagnostic not fault: {err}");
+        assert!(pend.join.is_some(), "B4 join retained");
+        assert!(pend.done.is_some(), "B4 completion retained");
+        assert!(pend.terminal_fault.is_none(), "B4 no fault");
+        drop(release); // releases the pending loop
+        pend.close().expect("B4 retry resumes the same teardown");
+        assert!(pend.join.is_none(), "B4 retry consumed the handle");
+
+        // B2: bounded observation reports the held unit (fresh one-shot state).
+        let (state, dir2) = build_state(false);
+        let mut server = start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start");
+        let addr = server.addr().to_string();
+        let holder = HeldUnit::hold(&addr);
+        wait_until_active_handlers(&server, 1);
+        let err = server
+            .close_with_timeout(Duration::from_secs(2))
+            .expect_err("B2 held");
+        assert!(err.contains("handler(s) still running"), "B2: {err}");
+        assert!(server.join.is_none(), "B2 loop resolved first");
+
+        // B2 public + B3: the SAME attempt returns only once the unit releases.
+        let closer = std::thread::spawn(move || {
+            let result = server.close();
+            (server, result)
+        });
+        let watchdog = Instant::now() + super::RPC_SHUTDOWN_TIMEOUT + MS500;
+        while Instant::now() < watchdog {
+            assert!(!closer.is_finished(), "B2 returned while held");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(holder);
+        let (server, result) = closer.join().expect("B3 closer");
+        result.expect("B3 same attempt returns Ok");
+        assert_eq!(active_units(&server), 0, "B3 zero at return");
+        assert!(ingress_frozen(&server), "B3 still frozen");
+        drop(server);
+        assert!(wait_until_connect_fails(&addr, SEC5), "B3 no reopen");
+
+        // B5 + B6: fault retained, never early, returned at frozen/count-zero.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let faulted = std::thread::spawn(move || {
+            let _done = super::AcceptLoopDone(Some(done_tx));
+            panic!("synthetic accept-loop fault");
+        });
+        let active = Arc::new(AtomicUsize::new(1));
+        let (_wake, mut server) = synthetic_server(&state, Arc::clone(&active), faulted, done_rx);
+        // Declared after `server` so it drops first (see OnUnwind).
+        let guarded_units = Arc::clone(&active);
+        let _release = OnUnwind(Some(move || guarded_units.store(0, Ordering::SeqCst)));
+        let err = server
+            .close_with_timeout(MS500)
+            .expect_err("B5 no early Ok");
+        assert!(is_diagnostic(&err), "B5 fault not surfaced yet: {err}");
+        assert_eq!(server.terminal_fault.as_deref(), Some(FAULT), "B5 kept");
+        assert!(server.join.is_none(), "B5 faulted handle consumed");
+        active.store(0, Ordering::SeqCst);
+        let err = server.close().expect_err("B6 preserved Err");
+        assert_eq!(err, FAULT, "B6 preserved fault is the result");
+        assert!(ingress_frozen(&server), "B6 frozen at Err");
+        assert_eq!(active_units(&server), 0, "B6 zero at Err");
+        assert!(server.done.is_none(), "B6 completion resolved");
+        assert_eq!(server.close().expect_err("B7 repeat"), err, "B7 same Err");
+        drop(server);
+
+        // B8 (second arm): `Drop` after a partial private timeout that left live
+        // ownership continues the same close instead of detaching the work.
+        // `holder` is declared after `server`, so a panic frees it first.
+        let (state8, dir8) = build_state(false);
+        let mut server = start_devnet_rpc_server("127.0.0.1:0", state8).expect("B8 start");
+        let addr = server.addr().to_string();
+        let units = Arc::clone(&server.active_handlers);
+        let holder = HeldUnit::hold(&addr);
+        wait_until_active_handlers(&server, 1);
+        let err = server.close_with_timeout(MS500).expect_err("B8 timed out");
+        assert!(is_diagnostic(&err), "B8 diagnostic: {err}");
+        assert_eq!(units.load(Ordering::SeqCst), 1, "B8 live at Drop");
+        // The margin only makes a detaching `Drop` observable; the oracle is
+        // the count read after `drop` RETURNS, never this delay.
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(MS500);
+            drop(holder);
+        });
+        drop(server);
+        assert_eq!(units.load(Ordering::SeqCst), 0, "B8 drained at Drop");
+        assert!(wait_until_connect_fails(&addr, SEC5), "B8 no reopen");
+        releaser.join().expect("B8 releaser");
+        fs::remove_dir_all(dir).expect("cleanup");
+        fs::remove_dir_all(dir2).expect("cleanup");
+        fs::remove_dir_all(dir8).expect("cleanup");
+    }
+
+    /// RUB-1178 Table C: every handler outcome releases its unit exactly once.
+    #[test]
+    fn rpc_drain_fault_release_matrix() {
+        let (state, dir) = build_state(false);
+        let mut server = start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start");
+        let addr = server.addr().to_string();
+
+        // C1/C2/C3: success, request-framing error, app error — one release each.
+        for (id, request, want) in [
+            ("C1", READY_GET, " 200 "),
+            ("C2", &b"\r\n\r\n"[..], " 400 "),
+            ("C3", &b"POST /ready HTTP/1.1\r\n\r\n"[..], " 405 "),
+        ] {
+            let got = request_to_eof(&addr, request);
+            assert!(got.contains(want), "{id} want {want} in: {got}");
+            wait_until_handlers_drop_to(&server, 0);
+        }
+
+        // C4: disconnect before a response, and a write into a vanished peer.
+        // Each arm OBSERVES the unit it releases; a 0 -> 0 wait proves nothing.
+        let bare = TcpStream::connect(&addr).expect("C4 connect");
+        wait_until_active_handlers(&server, 1);
+        drop(bare);
+        wait_until_handlers_drop_to(&server, 0);
+        let mut doomed = TcpStream::connect(&addr).expect("C4 doomed");
+        wait_until_active_handlers(&server, 1);
+        doomed.write_all(READY_GET).expect("C4 request");
+        drop(doomed);
+        wait_until_handlers_drop_to(&server, 0);
+
+        // C6: a partial request holds the unit across a bounded observation.
+        let holder = HeldUnit::hold(&addr);
+        wait_until_active_handlers(&server, 1);
+        let err = server.close_with_timeout(MS500).expect_err("C6 blocked");
+        assert!(err.contains("handler(s) still running"), "C6: {err}");
+        assert_eq!(active_units(&server), 1, "C6 unit still held");
+        drop(holder);
+        server.close().expect("C6 completes on release");
+        assert_eq!(active_units(&server), 0, "C6 zero at return");
+
+        // C5: the production thread body holds the unit across
+        // `handle_connection`, so an unwind runs this same `Drop` directly.
+        let ctr = Arc::new(AtomicUsize::new(0));
+        ctr.fetch_add(1, Ordering::SeqCst);
+        let moved = Arc::clone(&ctr);
+        let unwound = std::thread::spawn(move || {
+            let _active = super::ActiveHandler(moved);
+            panic!("synthetic handler unwind");
+        });
+        assert!(unwound.join().is_err(), "C5 thread must unwind");
+        assert_eq!(ctr.load(Ordering::SeqCst), 0, "C5 released on unwind");
+
+        assert_spawn_failure_releases_unit_once();
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
     #[test]
     fn shutdown_close_accepts_queued_accept_loop_completion_at_timeout_boundary() {
         let (state, dir) = build_state(false);
         assert!(state.readiness.try_mark_ready_on_startup());
-        let stop = Arc::new(AtomicBool::new(false));
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         done_tx.send(()).expect("queue synthetic completion");
         drop(done_tx);
         let join = std::thread::spawn(|| {});
-        let mut server = super::RunningDevnetRPCServer {
-            addr: "127.0.0.1:9".to_string(),
-            stop,
-            active_handlers: Arc::new(AtomicUsize::new(0)),
-            join: Some(join),
-            done: Some(done_rx),
-            readiness: Arc::clone(&state.readiness),
-        };
+        let (_wake, mut server) =
+            synthetic_server(&state, Arc::new(AtomicUsize::new(0)), join, done_rx);
 
         server
             .close_with_timeout(Duration::ZERO)
@@ -5632,21 +6102,16 @@ mod tests {
     fn shutdown_close_reports_timeout_without_consuming_live_handle() {
         let (state, dir) = build_state(false);
         assert!(state.readiness.try_mark_ready_on_startup());
-        let stop = Arc::new(AtomicBool::new(false));
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let join = std::thread::spawn(move || {
             release_rx.recv().expect("wait for synthetic release");
             done_tx.send(()).expect("report synthetic completion");
         });
-        let mut server = super::RunningDevnetRPCServer {
-            addr: "127.0.0.1:9".to_string(),
-            stop,
-            active_handlers: Arc::new(AtomicUsize::new(0)),
-            join: Some(join),
-            done: Some(done_rx),
-            readiness: Arc::clone(&state.readiness),
-        };
+        let (_wake, mut server) =
+            synthetic_server(&state, Arc::new(AtomicUsize::new(0)), join, done_rx);
+        // After `server`: a panic must free the loop before `Drop` waits on it.
+        let release = OnUnwind(Some(move || _ = release_tx.send(())));
 
         let err = server
             .close_with_timeout(Duration::from_millis(25))
@@ -5668,7 +6133,7 @@ mod tests {
             "timeout path still stamps sticky shutdown"
         );
 
-        release_tx.send(()).expect("release synthetic accept loop");
+        drop(release); // releases the synthetic accept loop
         server
             .close_with_timeout(Duration::from_secs(1))
             .expect("cleanup close after release");
