@@ -4754,8 +4754,6 @@ mod tests {
                 local.genesis_hash,
             )
             .expect("peer-side handshake");
-            // This valid `tx` enters one message read. Once close publishes
-            // DRAINING, the real authorizer interrupts before its next progress attempt.
             let payload = vec![0u8; DRIP_PAYLOAD_BYTES];
             let header = build_envelope_header(network_magic("devnet"), "tx", &payload)
                 .expect("drip envelope header");

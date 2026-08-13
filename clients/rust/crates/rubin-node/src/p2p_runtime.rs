@@ -105,6 +105,10 @@ fn frame_budget_duration(length: usize) -> Duration {
     Duration::from_millis(absolute_budget_ms(length as u64))
 }
 
+fn frame_stall_timeout(configured: Duration) -> Duration {
+    configured.min(Duration::from_millis(FRAME_MINIMUM_BUDGET_MS))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct OrphanPoolMetricsSnapshot {
     pub live_blocks: usize,
@@ -112,6 +116,11 @@ pub(crate) struct OrphanPoolMetricsSnapshot {
 }
 
 static GLOBAL_ORPHAN_TOTAL_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+std::thread_local! {
+    static TEST_ALLOCS: std::cell::RefCell<Option<Vec<usize>>> = const { std::cell::RefCell::new(None) };
+    static TEST_EXPIRE_BLOCKTXN_PREFIX_LEN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 static GLOBAL_ORPHAN_METRICS: Mutex<OrphanPoolMetricsSnapshot> =
     Mutex::new(OrphanPoolMetricsSnapshot {
         live_blocks: 0,
@@ -476,15 +485,10 @@ impl PeerManager {
 
 impl PeerSession {
     /// Write raw pre-serialized bytes to the peer's TcpStream.
-    /// Used by tests that deliberately fragment a frame.
     pub fn write_raw(&mut self, data: &[u8]) -> io::Result<()> {
         self.stream.write_all(data)
     }
 
-    /// Write one validated relay-outbox envelope with post-handshake frame
-    /// deadlines. The public raw helper stays available for the deliberately
-    /// fragmented test paths; the Service uses this checked path for complete
-    /// queued frames only.
     pub(crate) fn write_raw_outbox<F>(&mut self, data: &[u8], mut before_io: F) -> io::Result<()>
     where
         F: FnMut() -> io::Result<()>,
@@ -858,10 +862,7 @@ impl PeerSession {
             let msg = match self.read_message() {
                 Ok(m) => m,
                 Err(err) => {
-                    if matches!(
-                        err.kind(),
-                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                    ) {
+                    if is_socket_read_timeout(&err) && !is_partial_frame_timeout(&err) {
                         continue;
                     }
                     if err.kind() == io::ErrorKind::UnexpectedEof {
@@ -1984,7 +1985,7 @@ impl FrameReadTiming {
             last_positive_progress: frame_start,
             absolute_deadline: None,
             validated: false,
-            stall_timeout,
+            stall_timeout: frame_stall_timeout(stall_timeout),
         }
     }
 
@@ -2006,6 +2007,12 @@ impl FrameReadTiming {
         self.ensure_not_expired(frame_start + Duration::from_millis(FRAME_MINIMUM_BUDGET_MS))?;
         self.absolute_deadline = Some(frame_start + frame_budget_duration(payload_len));
         self.validated = true;
+        #[cfg(test)]
+        TEST_EXPIRE_BLOCKTXN_PREFIX_LEN.with(|n| {
+            if n.get() == payload_len {
+                n.set(usize::MAX);
+            }
+        });
         self.ensure_not_expired(self.absolute_deadline.expect("set above"))
     }
 
@@ -2080,11 +2087,31 @@ impl FrameReadTiming {
 
     fn timeout_error(&self) -> io::Error {
         let phase = if self.validated { "payload" } else { "header" };
-        io::Error::new(
+        partial_frame_timeout(io::Error::new(
             io::ErrorKind::TimedOut,
             format!("peer frame {phase} deadline exceeded"),
-        )
+        ))
     }
+}
+
+#[derive(Debug)]
+struct PartialFrameTimeout(io::Error);
+
+impl std::fmt::Display for PartialFrameTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for PartialFrameTimeout {}
+
+fn partial_frame_timeout(err: io::Error) -> io::Error {
+    io::Error::new(err.kind(), PartialFrameTimeout(err))
+}
+
+fn is_partial_frame_timeout(err: &io::Error) -> bool {
+    err.get_ref()
+        .is_some_and(|source| source.downcast_ref::<PartialFrameTimeout>().is_some())
 }
 
 struct CompactFallbackFrameReader<'a> {
@@ -2154,9 +2181,6 @@ impl Read for CompactFallbackFrameReader<'_> {
             }
             let expiry = self.compact_outstanding.as_ref().map(|req| req.expires_at);
             if let Err(err) = (*self.before_io)() {
-                // `Read::read_exact` transparently retries Interrupted errors.
-                // Lifecycle loss is terminal for this frame, so preserve the
-                // error text but make it non-retryable at this reader boundary.
                 return Err(io::Error::other(err));
             }
             let timeout = compact_expiry_bounded_read_timeout(expiry, self.read_timeout)
@@ -2173,7 +2197,11 @@ impl Read for CompactFallbackFrameReader<'_> {
                     if self.send_expired_compact_outstanding_fallback()? {
                         continue;
                     }
-                    return Err(err);
+                    return Err(if self.timing.frame_start.is_some() {
+                        partial_frame_timeout(err)
+                    } else {
+                        err
+                    });
                 }
                 Err(err) => return Err(err),
             }
@@ -2546,7 +2574,7 @@ fn post_handshake_write_deadline(
     absolute_deadline: Instant,
 ) -> Instant {
     last_positive_progress
-        .checked_add(write_timeout)
+        .checked_add(frame_stall_timeout(write_timeout))
         .unwrap_or(absolute_deadline)
         .min(absolute_deadline)
 }
@@ -2624,8 +2652,8 @@ fn read_blocktxn_from_compact_reader(
     reader: &mut CompactFallbackFrameReader<'_>,
     envelope: ParsedEnvelopeHeader,
 ) -> io::Result<WireMessage> {
+    reader.validate_payload(envelope.payload_len)?;
     if envelope.payload_len < BLOCKTXN_HASH_PAYLOAD_BYTES {
-        reader.validate_payload(envelope.payload_len)?;
         let result = read_payload_with_checksum(reader, envelope.payload_len, envelope.checksum);
         let payload = reader.timing.finish_payload(result)?;
         return Ok(WireMessage {
@@ -2636,7 +2664,13 @@ fn read_blocktxn_from_compact_reader(
 
     let mut prefix = [0u8; BLOCKTXN_HASH_PAYLOAD_BYTES];
     reader.read_exact(&mut prefix)?;
-    reader.timing.complete_header()?;
+    #[cfg(test)]
+    if TEST_EXPIRE_BLOCKTXN_PREFIX_LEN.with(|n| n.get()) == usize::MAX {
+        TEST_EXPIRE_BLOCKTXN_PREFIX_LEN.with(|n| n.set(0));
+        reader.timing.last_positive_progress = reader.timing.absolute_deadline;
+        reader.timing.absolute_deadline = Some(Instant::now() - Duration::from_nanos(1));
+    }
+    reader.timing.complete()?;
     let active_cap = reader
         .compact_outstanding
         .as_ref()
@@ -2661,17 +2695,12 @@ fn read_blocktxn_from_compact_reader(
         return Err(invalid_data("stale blocktxn response has body"));
     }
 
-    reader.validate_payload(envelope.payload_len)?;
-    let mut payload = vec![0; envelope.payload_len];
-    payload[..BLOCKTXN_HASH_PAYLOAD_BYTES].copy_from_slice(&prefix);
-    if envelope.payload_len > BLOCKTXN_HASH_PAYLOAD_BYTES {
-        reader.read_exact(&mut payload[BLOCKTXN_HASH_PAYLOAD_BYTES..])?;
-    }
-    let result = if envelope.checksum == wire_checksum(&payload) {
-        Ok(payload)
-    } else {
-        Err(invalid_data("invalid envelope checksum"))
-    };
+    let result = read_payload_with_checksum_prefixed(
+        reader,
+        envelope.payload_len,
+        envelope.checksum,
+        &prefix,
+    );
     let payload = reader.timing.finish_payload(result)?;
     Ok(WireMessage {
         command: envelope.command,
@@ -2684,6 +2713,21 @@ fn read_payload_with_checksum<R: Read>(
     payload_len: usize,
     want_checksum: [u8; 4],
 ) -> io::Result<Vec<u8>> {
+    read_payload_with_checksum_prefixed(reader, payload_len, want_checksum, &[])
+}
+
+fn allocate_payload(len: usize) -> Vec<u8> {
+    #[cfg(test)]
+    TEST_ALLOCS.with(|a| a.borrow_mut().iter_mut().for_each(|a| a.push(len)));
+    vec![0; len]
+}
+
+fn read_payload_with_checksum_prefixed<R: Read>(
+    reader: &mut R,
+    payload_len: usize,
+    want_checksum: [u8; 4],
+    prefix: &[u8],
+) -> io::Result<Vec<u8>> {
     if payload_len == 0 {
         if want_checksum != wire_checksum(&[]) {
             return Err(io::Error::new(
@@ -2695,13 +2739,15 @@ fn read_payload_with_checksum<R: Read>(
     }
 
     let mut hasher = Sha3_256::new();
-    let mut payload = vec![0; payload_len];
-    let mut offset = 0;
-    while offset < payload.len() {
-        let end = (offset + STREAM_READ_CHUNK_BYTES).min(payload.len());
-        reader.read_exact(&mut payload[offset..end])?;
-        hasher.update(&payload[offset..end]);
-        offset = end;
+    hasher.update(prefix);
+    let mut chunks = Vec::new();
+    let mut received = prefix.len();
+    while received < payload_len {
+        let mut chunk = allocate_payload(STREAM_READ_CHUNK_BYTES.min(payload_len - received));
+        reader.read_exact(&mut chunk)?;
+        hasher.update(&chunk);
+        received += chunk.len();
+        chunks.push(chunk);
     }
 
     let digest = hasher.finalize();
@@ -2713,6 +2759,13 @@ fn read_payload_with_checksum<R: Read>(
         ));
     }
 
+    let mut payload = allocate_payload(payload_len);
+    payload[..prefix.len()].copy_from_slice(prefix);
+    let mut offset = prefix.len();
+    for chunk in chunks {
+        payload[offset..offset + chunk.len()].copy_from_slice(&chunk);
+        offset += chunk.len();
+    }
     Ok(payload)
 }
 
@@ -4575,6 +4628,10 @@ mod tests {
         }
     }
 
+    fn take_allocs() -> Vec<usize> {
+        TEST_ALLOCS.with(|a| a.borrow_mut().take().unwrap())
+    }
+
     #[test]
     fn p2p_absolute_budget_ms_boundaries() {
         for (payload_len, want_ms) in [
@@ -4592,18 +4649,55 @@ mod tests {
     }
 
     #[test]
-    fn p2p_frame_timing_uses_prefetched_start_and_strict_absolute_completion() {
+    fn p2p_blocktxn_prefix_uses_declared_deadline_and_bounded_read() {
         let frame_start = Instant::now();
-        let prefetched = PrefetchedReadByte {
-            byte: 0x01,
+        let mut reader = std::io::empty();
+        let prefix = [0u8; BLOCKTXN_HASH_PAYLOAD_BYTES];
+        TEST_ALLOCS.with(|a| *a.borrow_mut() = Some(Vec::new()));
+        read_payload_with_checksum_prefixed(&mut reader, 32_000_000, [0; 4], &prefix).unwrap_err();
+        assert_eq!(take_allocs(), [STREAM_READ_CHUNK_BYTES]);
+
+        let (mut session, mut client) = test_peer_session();
+        let block_hash = [0x44; BLOCKTXN_HASH_PAYLOAD_BYTES];
+        let mut req = compact_outstanding_test_request(block_hash);
+        req.blocktxn_payload_cap = 64;
+        session.compact_outstanding = Some(req);
+        client.write_all(&block_hash[1..]).expect("prefix");
+        let prefetched = Some(PrefetchedReadByte {
+            byte: block_hash[0],
             received_at: frame_start,
+        });
+        let mut allow = || {
+            assert_eq!(
+                TEST_EXPIRE_BLOCKTXN_PREFIX_LEN.with(|n| n.get()),
+                usize::MAX
+            );
+            Ok(())
         };
-        let mut timing = FrameReadTiming::new(Some(prefetched), DEFAULT_READ_DEADLINE);
-        timing.validate_payload(32_000_000).unwrap();
-        assert_eq!(
-            timing.absolute_deadline,
-            Some(frame_start + Duration::from_millis(53_334))
-        );
+        let mut reader = CompactFallbackFrameReader {
+            stream: &mut session.stream,
+            prefetched_read_byte: prefetched,
+            compact_outstanding: &mut session.compact_outstanding,
+            late_blocktxn: &mut session.late_blocktxn,
+            read_timeout: Duration::from_secs(30),
+            timing: FrameReadTiming::new(prefetched, Duration::from_secs(30)),
+            write_timeout: session.cfg.write_deadline,
+            network_magic: network_magic(&session.cfg.network),
+            before_io: &mut allow,
+        };
+        TEST_EXPIRE_BLOCKTXN_PREFIX_LEN.with(|n| n.set(32_000_000));
+        let envelope = ParsedEnvelopeHeader {
+            command: MESSAGE_BLOCKTXN.into(),
+            payload_len: 32_000_000,
+            checksum: [0; 4],
+        };
+        let err = read_blocktxn_from_compact_reader(&mut reader, envelope).unwrap_err();
+        assert!(is_partial_frame_timeout(&err) && reader.compact_outstanding.is_some());
+        let declared = reader.timing.last_positive_progress.unwrap();
+        assert_eq!(declared, frame_start + Duration::from_millis(53_334));
+        assert_eq!(reader.timing.stall_timeout, Duration::from_secs(15));
+        let short = FrameReadTiming::new(None, Duration::from_secs(2));
+        assert_eq!(short.stall_timeout, Duration::from_secs(2));
     }
 
     #[test]
@@ -4626,17 +4720,23 @@ mod tests {
         assert_eq!(timing.absolute_deadline, Some(absolute));
         timing.frame_start = Some(Instant::now() - Duration::from_secs(16));
         timing.absolute_deadline = None;
-        let header_err = timing.complete_header().unwrap_err();
-        assert_eq!(header_err.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            timing.complete_header().unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
         timing.absolute_deadline = Some(Instant::now() - Duration::from_secs(1));
-        let checksum = Err(invalid_data("invalid envelope checksum"));
-        let err = timing.finish_payload::<()>(checksum).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            timing
+                .finish_payload::<()>(Err(invalid_data("invalid envelope checksum")))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
     }
 
     #[test]
     fn p2p_raw_outbox_rejects_malformed_envelope_before_write() {
-        let (mut session, mut client) = test_peer_session();
+        let (mut session, _client) = test_peer_session();
         let calls = std::cell::Cell::new(0usize);
         let err = session
             .write_raw_outbox(b"short", || {
@@ -4646,15 +4746,6 @@ mod tests {
             .expect_err("short raw outbox frame must fail before I/O");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert_eq!(calls.get(), 0, "raw validation precedes lifecycle/I/O");
-        client.set_nonblocking(true).expect("set nonblocking");
-        let mut byte = [0u8; 1];
-        let err = client
-            .read(&mut byte)
-            .expect_err("malformed raw frame wrote no byte");
-        assert!(matches!(
-            err.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-        ));
     }
 
     #[test]
@@ -4785,15 +4876,15 @@ mod tests {
         let absolute = start + Duration::from_secs(160);
         assert_eq!(
             post_handshake_write_deadline(Duration::MAX, start, absolute),
-            absolute
+            start + Duration::from_secs(15)
         );
         assert_eq!(
             post_handshake_write_deadline(
-                Duration::from_secs(15),
+                Duration::from_secs(2),
                 start + Duration::from_secs(20),
                 absolute,
             ),
-            start + Duration::from_secs(35),
+            start + Duration::from_secs(22),
             "positive progress moves only the stall deadline"
         );
     }
@@ -6507,14 +6598,11 @@ mod tests {
         let payload = vec![0xabu8; STREAM_READ_CHUNK_BYTES + 17];
         let checksum = wire_checksum(&payload);
         let mut reader = std::io::Cursor::new(payload.clone());
+        TEST_ALLOCS.with(|a| *a.borrow_mut() = Some(Vec::new()));
         let got =
             read_payload_with_checksum(&mut reader, payload.len(), checksum).expect("payload");
         assert_eq!(got, payload);
-        assert_eq!(
-            got.capacity(),
-            got.len(),
-            "validated payload uses one exact buffer"
-        );
+        assert_eq!(take_allocs(), [STREAM_READ_CHUNK_BYTES, 17, got.len()]);
     }
 
     #[test]
@@ -6523,10 +6611,16 @@ mod tests {
         let mut checksum = wire_checksum(&payload);
         checksum[0] ^= 0xff;
         let mut reader = std::io::Cursor::new(payload);
+        TEST_ALLOCS.with(|a| *a.borrow_mut() = Some(Vec::new()));
         let err = read_payload_with_checksum(&mut reader, STREAM_READ_CHUNK_BYTES + 9, checksum)
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert_eq!(err.to_string(), "invalid envelope checksum");
+        assert_eq!(take_allocs(), [STREAM_READ_CHUNK_BYTES, 9]);
+
+        let mut reader = std::io::empty();
+        TEST_ALLOCS.with(|a| *a.borrow_mut() = Some(Vec::new()));
+        read_payload_with_checksum(&mut reader, 96_000_000, [0; 4]).unwrap_err();
+        assert_eq!(take_allocs(), [STREAM_READ_CHUNK_BYTES]);
     }
 
     #[test]
@@ -7651,6 +7745,28 @@ mod tests {
         assert!(msg.payload.is_empty());
 
         server.join().expect("server join");
+    }
+
+    #[test]
+    fn run_message_loop_does_not_retry_partial_frame_timeout() {
+        let (mut session, mut client) = test_peer_session();
+        session.prefetched_read_byte = Some(PrefetchedReadByte {
+            byte: 0x01,
+            received_at: Instant::now() - Duration::from_secs(16),
+        });
+        let ping = build_envelope_header(network_magic("devnet"), "ping", &[]).expect("ping");
+        client.write_all(&ping).expect("queue valid frame");
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .expect("finish input");
+
+        let err = session
+            .run_message_loop()
+            .expect_err("partial-frame timeout must terminate the public loop");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(is_partial_frame_timeout(&err));
+        let idle = io::Error::new(io::ErrorKind::WouldBlock, "idle");
+        assert!(is_socket_read_timeout(&idle) && !is_partial_frame_timeout(&idle));
     }
 
     #[test]

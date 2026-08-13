@@ -12,10 +12,14 @@ import (
 )
 
 type errReader struct {
-	err error
+	err         error
+	maxRequest  int
+	maxCapacity int
 }
 
-func (r errReader) Read(_ []byte) (int, error) {
+func (r *errReader) Read(p []byte) (int, error) {
+	r.maxRequest = max(r.maxRequest, len(p))
+	r.maxCapacity = max(r.maxCapacity, cap(p))
 	return 0, r.err
 }
 
@@ -247,12 +251,14 @@ func TestReadPayloadPrefixHandlesBoundariesAndShortRead(t *testing.T) {
 }
 
 func TestReadPayloadWithChecksumPropagatesNonEOFReadError(t *testing.T) {
-	payload := bytes.Repeat([]byte{0x11}, streamReadChunkBytes)
-	checksum := wireChecksum(payload)
 	boom := errors.New("boom")
-	_, err := readPayloadWithChecksum(errReader{err: boom}, uint32(len(payload)), checksum)
+	reader := &errReader{err: boom}
+	_, err := readPayloadWithChecksum(reader, 96_000_000, [4]byte{})
 	if !errors.Is(err, boom) {
 		t.Fatalf("expected boom, got %v", err)
+	}
+	if reader.maxRequest != streamReadChunkBytes || reader.maxCapacity != streamReadChunkBytes {
+		t.Fatalf("payload read len/cap=%d/%d, want %d", reader.maxRequest, reader.maxCapacity, streamReadChunkBytes)
 	}
 }
 

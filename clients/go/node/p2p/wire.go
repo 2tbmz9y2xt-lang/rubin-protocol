@@ -48,9 +48,6 @@ const (
 	frameBudgetDenominator  = uint64(72_000_000)
 )
 
-// absoluteBudgetMS is the post-handshake frame completion budget. Wire payload
-// lengths are u32, but the helper keeps its arithmetic safe for every u64
-// input so callers cannot accidentally wrap the deadline calculation.
 func absoluteBudgetMS(length uint64) uint64 {
 	const roundUp = frameBudgetDenominator - 1
 	if length > (math.MaxUint64-roundUp)/frameBudgetNumeratorMS {
@@ -158,12 +155,17 @@ func readPayloadWithChecksum(r io.Reader, size uint32, wantChecksum [4]byte) ([]
 		return readZeroLengthPayload(wantChecksum)
 	}
 
-	payload, gotChecksum, err := readPayloadChunks(r, size)
+	chunks, gotChecksum, err := readPayloadChunks(r, size)
 	if err != nil {
 		return nil, err
 	}
 	if !bytes.Equal(wantChecksum[:], gotChecksum[:]) {
 		return nil, errInvalidEnvelopeChecksum
+	}
+	payload := make([]byte, int(size))
+	offset := 0
+	for _, chunk := range chunks {
+		offset += copy(payload[offset:], chunk)
 	}
 	return payload, nil
 }
@@ -190,26 +192,28 @@ func readPayloadPrefix(r io.Reader, size uint32, prefixSize uint32) ([]byte, err
 	return prefix, nil
 }
 
-func readPayloadChunks(r io.Reader, size uint32) ([]byte, [4]byte, error) {
+func readPayloadChunks(r io.Reader, size uint32) ([][]byte, [4]byte, error) {
 	hasher := sha3.New256()
-	payload := make([]byte, int(size))
-	for offset := 0; offset < len(payload); {
-		end := offset + streamReadChunkBytes
-		if end > len(payload) {
-			end = len(payload)
+	var chunks [][]byte
+	for received := uint32(0); received < size; {
+		chunkLen := int(size - received)
+		if chunkLen > streamReadChunkBytes {
+			chunkLen = streamReadChunkBytes
 		}
-		n, err := io.ReadFull(r, payload[offset:end])
+		chunk := make([]byte, chunkLen)
+		n, err := io.ReadFull(r, chunk)
 		if err != nil {
-			return nil, [4]byte{}, payloadReadError(size, offset, n, err)
+			return nil, [4]byte{}, payloadReadError(size, int(received), n, err)
 		}
-		if _, err := hasher.Write(payload[offset:end]); err != nil {
+		if _, err := hasher.Write(chunk); err != nil {
 			return nil, [4]byte{}, err
 		}
-		offset = end
+		chunks = append(chunks, chunk)
+		received += uint32(chunkLen)
 	}
 
 	sum := hasher.Sum(nil)
-	return payload, [4]byte{sum[0], sum[1], sum[2], sum[3]}, nil
+	return chunks, [4]byte{sum[0], sum[1], sum[2], sum[3]}, nil
 }
 
 func payloadReadError(size uint32, payloadLen int, n int, err error) error {
