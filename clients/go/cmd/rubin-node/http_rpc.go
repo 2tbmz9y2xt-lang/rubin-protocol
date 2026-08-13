@@ -43,6 +43,19 @@ type devnetRPCState struct {
 	// so concurrent HTTP handlers cannot interleave chain/mempool updates.
 	rpcMut sync.Mutex
 	miner  *node.Miner // devnet live mining for POST /mine_next; nil disables the route
+	// lifecycleCtx is the single server-owned handler lifecycle source
+	// (RUBIN_NODE_RPC_DEVNET.md 2.1). startDevnetRPCServer creates it,
+	// installs it as the http.Server BaseContext — so every r.Context()
+	// descends from it — and hands its cancel to the single
+	// http.Server.RegisterOnShutdown callback, so native Shutdown itself
+	// publishes the cancellation after its ingress freeze.
+	// It is written once before the serving goroutine starts, so every
+	// handler read happens-after that write. A nil value means no server
+	// owns this state (direct-handler tests, fixtures): the lifecycle is
+	// then never canceled and every route keeps its baseline behavior.
+	// It is deliberately NOT the readiness gate's shutdownCtx: that one
+	// is the process signal context and does not fire on a direct Close.
+	lifecycleCtx context.Context
 	// gate is the operator-visible readiness latch observed via GET
 	// /ready. All transitions and reads go through a single
 	// sync.Mutex inside the gate, AND every public read (IsReady)
@@ -316,6 +329,19 @@ func (s *devnetRPCState) SetPeerLifecycleExitsFunc(fn func() uint64) {
 		return
 	}
 	s.peerLifecycleExits = fn
+}
+
+// lifecycleErr returns the server-owned lifecycle source's cancellation
+// cause, or nil while that source is live or absent. It is the ONLY
+// cancellation input the mutating routes classify as lifecycle
+// unavailability: r.Context() also fires on client disconnect, and a
+// request-local cancellation must keep its baseline classification
+// (RUBIN_NODE_RPC_DEVNET.md 3.3, 3.4). Nil-receiver safe.
+func (s *devnetRPCState) lifecycleErr() error {
+	if s == nil || s.lifecycleCtx == nil {
+		return nil
+	}
+	return s.lifecycleCtx.Err()
 }
 
 type runningDevnetRPCServer struct {
@@ -647,8 +673,14 @@ func startDevnetRPCServer(
 	if err != nil {
 		return nil, err
 	}
+	// One lifecycle source per server, published on the state before the
+	// serving goroutine starts and installed as BaseContext so every
+	// connection — and therefore every r.Context() — descends from it.
+	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
+	state.lifecycleCtx = lifecycleCtx
 	server := &http.Server{
 		Handler:           newDevnetRPCHandler(state),
+		BaseContext:       func(net.Listener) context.Context { return lifecycleCtx },
 		ReadHeaderTimeout: 5 * time.Second,
 		// ReadTimeout bounds the total duration for reading the entire
 		// request (headers + body) — it is NOT a body-only budget layered
@@ -664,6 +696,19 @@ func startDevnetRPCServer(
 		ReadTimeout: 10 * time.Second,
 		IdleTimeout: 60 * time.Second,
 	}
+	// RUBIN_NODE_RPC_DEVNET.md 2.1 mandates freeze-then-publish, and
+	// RegisterOnShutdown is the stdlib seam with exactly that order:
+	// Shutdown stores inShutdown, closes the listeners under s.mu and only
+	// then launches the registered callbacks (net/http/server.go:3151-3160),
+	// ahead of its drain-wait loop. The launch is asynchronous, yet it
+	// precedes drain completion whenever an observer exists: a handler
+	// parked on this source keeps its connection non-idle until it answers
+	// 503, so the drain wait cannot return before the callback has run; with
+	// no accepted handler the ordering is unobservable. Callbacks fire on
+	// EVERY Shutdown call, so repeated and concurrent Close rely on
+	// context.CancelFunc being idempotent. Exactly one callback is
+	// registered here — this is not a callback registry.
+	server.RegisterOnShutdown(cancelLifecycle)
 	go func() {
 		err := server.Serve(listener)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) && stderr != nil {
@@ -686,6 +731,21 @@ func startDevnetRPCServer(
 // handler — so an expired first Shutdown is followed by an unbounded
 // Shutdown on the same server, and the exact caller-context error is
 // returned only after that drain reaches quiescence.
+//
+// Close deliberately does NOT publish the server-owned lifecycle
+// cancellation itself: startDevnetRPCServer hands that cancel to
+// http.Server.RegisterOnShutdown, so native Shutdown publishes it AFTER the
+// ingress freeze and BEFORE the drain wait — the RUBIN_NODE_RPC_DEVNET.md
+// 2.1 step order (freeze, publish, drain). Canceling here instead would
+// publish before the freeze, and a request accepted in that window would be
+// 503-drained where a conforming node refuses it outright. Both shutdown
+// initiators — main.go's deferred Close on the signal unwind and a direct
+// Close — funnel into this same Shutdown, so they stay equivalent by
+// construction; publication repeats idempotently on every Shutdown call.
+// Cancellation only makes already-accepted mutating handlers finish faster
+// at their own defined pre-mutation checks — ingress freeze and drain stay
+// native-Shutdown-owned, no handler is aborted, and work that already
+// entered its result-selecting boundary keeps its result.
 func (s *runningDevnetRPCServer) Close(ctx context.Context) error {
 	if s == nil || s.server == nil {
 		return nil
@@ -993,6 +1053,21 @@ func handleSubmitTx(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	state.rpcMut.Lock()
+	// RUBIN_NODE_RPC_DEVNET.md 3.3: the last defined cancellation check runs
+	// after every validation above and after rpcMut acquisition, immediately
+	// before mempool admission entry. Observing it here MUST leave pool state
+	// untouched and answer 503 `rpc unavailable` with accepted=false and no
+	// txid, counted under the existing `unavailable` result value. A clean
+	// check hands the decision to AddTx: nothing observed later remaps it.
+	if state.lifecycleErr() != nil {
+		state.rpcMut.Unlock()
+		state.metrics.noteSubmit("unavailable")
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, submitTxResponse{
+			Accepted: false,
+			Error:    "rpc unavailable",
+		})
+		return
+	}
 	admitErr := state.mempool.AddTx(raw)
 	state.rpcMut.Unlock()
 	if admitErr != nil {
@@ -1046,6 +1121,18 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 	mb, err := state.miner.MineOne(r.Context(), nil)
 	if err != nil {
 		state.rpcMut.Unlock()
+		// RUBIN_NODE_RPC_DEVNET.md 3.4: errors.Is(err, lifeErr) is
+		// flavor-agnostic by construction -- it tests the source's own live
+		// cause, today only context.Canceled (source built with WithCancel),
+		// and would still classify a future deadline-bearing source. A
+		// request-local cancellation with the lifecycle live keeps the baseline 422.
+		if lifeErr := state.lifecycleErr(); lifeErr != nil && errors.Is(err, lifeErr) {
+			writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextResponse{
+				Mined: false,
+				Error: "rpc unavailable",
+			})
+			return
+		}
 		writeJSONResponse(state, route, w, http.StatusUnprocessableEntity, mineNextResponse{
 			Mined: false,
 			Error: err.Error(),

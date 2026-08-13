@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3785,6 +3786,13 @@ type rpcDrainFixture struct {
 	returned    atomic.Bool
 	txHex       string
 	client      *http.Client
+	state       *devnetRPCState
+	txid        [32]byte
+	// status and body hold the held request's decoded reply. They are
+	// written by the holdHandler goroutine and are safe to read only after
+	// that goroutine's done channel has delivered.
+	status int
+	body   submitTxResponse
 }
 
 func newRPCDrainFixture(t *testing.T) *rpcDrainFixture {
@@ -3808,6 +3816,12 @@ func newRPCDrainFixture(t *testing.T) *rpcDrainFixture {
 	})
 	txBytes, _ := mustRPCSignedTransferTx(t, utxos, input, fromKey, consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes()))
 	f.txHex = hex.EncodeToString(txBytes)
+	f.state = state
+	if _, txid, _, _, err := consensus.ParseTx(txBytes); err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	} else {
+		f.txid = txid
+	}
 	srv, err := startDevnetRPCServer("127.0.0.1:0", state, nil, nil)
 	if err != nil {
 		t.Fatalf("startDevnetRPCServer: %v", err)
@@ -3832,8 +3846,11 @@ func (f *rpcDrainFixture) holdHandler(t *testing.T) chan error {
 			var resp *http.Response
 			resp, err = f.client.Post("http://"+f.srv.addr+"/submit_tx", "application/json", bytes.NewReader(body))
 			if err == nil {
-				_, _ = io.Copy(io.Discard, resp.Body)
-				err = resp.Body.Close()
+				f.status = resp.StatusCode
+				err = json.NewDecoder(resp.Body).Decode(&f.body)
+				if closeErr := resp.Body.Close(); err == nil {
+					err = closeErr
+				}
 			}
 		}
 		done <- err
@@ -3965,5 +3982,378 @@ func TestRunningDevnetRPCServerCloseConcurrentAndRepeated(t *testing.T) {
 	}
 	if got := f.calls.Load(); got != 1 {
 		t.Fatalf("retained callback invocations = %d, want exactly 1", got)
+	}
+}
+
+// --- RUB-1185: graceful-shutdown cancellation of active mutating RPC work ---
+
+// waitBlockedOnRPCMut polls the goroutine dump until the named handler parks
+// in rpcMut acquisition. The oracle is the observed frame pair, never elapsed
+// time; the sleep only paces the probe.
+func waitBlockedOnRPCMut(t *testing.T, handler string) {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	watchdog := time.Now().Add(30 * time.Second) // watchdog only
+	for {
+		// Grow buf until the dump fits — runtime.Stack truncates silently.
+		n := runtime.Stack(buf, true)
+		for n == len(buf) {
+			buf = make([]byte, 2*len(buf))
+			n = runtime.Stack(buf, true)
+		}
+		for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+			if strings.Contains(g, handler) && strings.Contains(g, "sync.(*Mutex).Lock") {
+				return
+			}
+		}
+		if time.Now().After(watchdog) {
+			t.Fatalf("%s never parked on rpcMut", handler)
+		}
+		time.Sleep(time.Millisecond) // probe pacing only
+	}
+}
+
+// waitLifecycleCanceled observes the exact input the pre-mutation checks read,
+// so a parked handler is released only once cancellation is latched.
+// Publication is owned by native Shutdown, which launches the registered
+// RegisterOnShutdown callback after freezing ingress; this poll is what makes
+// that asynchronous launch an observed fact rather than an assumed one.
+func waitLifecycleCanceled(t *testing.T, state *devnetRPCState) {
+	t.Helper()
+	watchdog := time.Now().Add(30 * time.Second) // watchdog only
+	for state.lifecycleErr() == nil {
+		if time.Now().After(watchdog) {
+			t.Fatal("Shutdown never published the lifecycle cancellation to the parked handler")
+		}
+		time.Sleep(time.Millisecond) // probe pacing only
+	}
+}
+
+// closeAfterSignalPath reproduces main.go's deferred Close — the single
+// termination the SIGINT/SIGTERM unwind reaches — with its 5 s diagnostic
+// timeout; closeDirect is the direct-Close initiator.
+func closeAfterSignalPath(s *runningDevnetRPCServer) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := s.Close(ctx)
+	// RUB-1175: ctx expiry is diagnostic only — the drain has already
+	// completed by the time Close returns it, so treat it as success.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil
+	}
+	return err
+}
+
+func closeDirect(s *runningDevnetRPCServer) error { return s.Close(context.Background()) }
+
+func mustLifecycleServer(t *testing.T, state *devnetRPCState) *runningDevnetRPCServer {
+	t.Helper()
+	srv, err := startDevnetRPCServer("127.0.0.1:0", state, nil, nil)
+	if err != nil {
+		t.Fatalf("startDevnetRPCServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close(context.Background()) })
+	return srv
+}
+
+// postWhileLocked holds rpcMut, sends one real request, waits until the named
+// handler parks on the lock, closes the server through closer, waits for the
+// cancellation to latch and only then releases the lock — so the route's
+// post-acquisition check is the single point that decides the reply.
+func postWhileLocked(t *testing.T, srv *runningDevnetRPCServer, path, handler, body string, closer func(*runningDevnetRPCServer) error) (int, []byte) {
+	t.Helper()
+	srv.state.rpcMut.Lock()
+	unlocked := false
+	defer func() {
+		if !unlocked {
+			srv.state.rpcMut.Unlock()
+		}
+	}()
+	type reply struct {
+		status int
+		raw    []byte
+		err    error
+	}
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	done := make(chan reply, 1)
+	go func() {
+		resp, err := client.Post("http://"+srv.addr+path, "application/json", strings.NewReader(body))
+		if err != nil {
+			done <- reply{err: err}
+			return
+		}
+		raw, err := io.ReadAll(resp.Body)
+		if closeErr := resp.Body.Close(); err == nil {
+			err = closeErr
+		}
+		done <- reply{status: resp.StatusCode, raw: raw, err: err}
+	}()
+	waitBlockedOnRPCMut(t, handler)
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- closer(srv) }()
+	waitLifecycleCanceled(t, srv.state)
+	unlocked = true
+	srv.state.rpcMut.Unlock()
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("%s request: %v", path, got.err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	return got.status, got.raw
+}
+
+func assertMineCanceledBeforeApply(t *testing.T, closer func(*runningDevnetRPCServer) error) {
+	t.Helper()
+	state := mustRPCMineNextState(t)
+	status, raw := postWhileLocked(t, mustLifecycleServer(t, state), "/mine_next", "handleMineNext", "{}", closer)
+	var got mineNextResponse
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal %q: %v", raw, err)
+	}
+	if status != http.StatusServiceUnavailable || got.Mined || got.Error != "rpc unavailable" {
+		t.Fatalf("canceled /mine_next = %d %s, want 503 mined=false error=\"rpc unavailable\"", status, raw)
+	}
+	if got.Height != nil || got.BlockHash != nil || got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
+		t.Fatalf("mine reject carried success fields: %s", raw)
+	}
+	height, _, ok, err := state.blockStore.Tip()
+	if err != nil {
+		t.Fatalf("Tip: %v", err)
+	}
+	if !ok || height != 0 {
+		t.Fatalf("tip height=%d ok=%v after a canceled mine, want the untouched genesis tip 0", height, ok)
+	}
+}
+
+func TestRunningDevnetRPCServerProcessCancellationCancelsActiveMineBeforeApply(t *testing.T) {
+	assertMineCanceledBeforeApply(t, closeAfterSignalPath)
+}
+
+func TestRunningDevnetRPCServerCloseCancelsActiveMineBeforeApply(t *testing.T) {
+	assertMineCanceledBeforeApply(t, closeDirect)
+}
+
+// mustSubmitFixture builds one spendable-UTXO state plus the signed transfer
+// body the /submit_tx lifecycle tests post.
+func mustSubmitFixture(t *testing.T) (*devnetRPCState, string, [32]byte, string) {
+	t.Helper()
+	fromKey := mustRPCMLDSA87Keypair(t)
+	toKey := mustRPCMLDSA87Keypair(t)
+	state, input, utxos := mustRPCStateWithSpendableUTXO(t, consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes()), nil)
+	txBytes, txidHex := mustRPCSignedTransferTx(t, utxos, input, fromKey, consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes()))
+	_, txid, _, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+	body, err := json.Marshal(submitTxRequest{TxHex: hex.EncodeToString(txBytes)})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	return state, string(body), txid, txidHex
+}
+
+func assertSubmitCanceledBeforeAdmission(t *testing.T, closer func(*runningDevnetRPCServer) error) {
+	t.Helper()
+	state, body, txid, _ := mustSubmitFixture(t)
+	status, raw := postWhileLocked(t, mustLifecycleServer(t, state), "/submit_tx", "handleSubmitTx", body, closer)
+	var got submitTxResponse
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal %q: %v", raw, err)
+	}
+	if status != http.StatusServiceUnavailable || got.Accepted || got.Error != "rpc unavailable" ||
+		bytes.Contains(raw, []byte("txid")) {
+		t.Fatalf("canceled /submit_tx = %d %s, want 503 accepted=false error=\"rpc unavailable\" and no txid field", status, raw)
+	}
+	if state.mempool.Contains(txid) {
+		t.Fatal("canceled /submit_tx admitted the transaction: the check ran after mempool admission")
+	}
+	_, submits := state.metrics.snapshot()
+	if submits["unavailable"] != 1 || submits["accepted"] != 0 {
+		t.Fatalf("submit_tx result counters = %v, want exactly one existing `unavailable` and no `accepted`", submits)
+	}
+}
+
+func TestRunningDevnetRPCServerProcessCancellationCancelsActiveSubmitBeforeAdmission(t *testing.T) {
+	assertSubmitCanceledBeforeAdmission(t, closeAfterSignalPath)
+}
+
+func TestRunningDevnetRPCServerCloseCancelsActiveSubmitBeforeAdmission(t *testing.T) {
+	assertSubmitCanceledBeforeAdmission(t, closeDirect)
+}
+
+func TestSubmitTxLifecycleWinnerPreservesAdmissionResult(t *testing.T) {
+	// The retained announce callback parks the handler AFTER admission
+	// returned, so cancellation here arrives strictly past the route's
+	// result-selecting boundary and must not remap the admission result.
+	f := newRPCDrainFixture(t)
+	reqDone := f.holdHandler(t)
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- f.srv.Close(context.Background()) }()
+	waitLifecycleCanceled(t, f.srv.state)
+	f.releaseHeld()
+	if err := <-reqDone; err != nil {
+		t.Fatalf("held /submit_tx request: %v", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if f.status != http.StatusOK || !f.body.Accepted || f.body.TxID == "" || f.body.Error != "" {
+		t.Fatalf("post-admission cancellation remapped the winner: %d %+v", f.status, f.body)
+	}
+	if !f.state.mempool.Contains(f.txid) {
+		t.Fatal("admitted transaction is absent from the pool after a post-admission cancellation")
+	}
+}
+
+// pollCountingCtx reports done only from its doneAt-th Done() poll onwards.
+// MineOne's real poll sequence is the entry (pre-bootstrap) check, one check
+// per nonce attempt in mineHeaderNonce including the winning attempt, and the
+// executeMineOne pre-apply check: 1 + (Nonce+1) + 1 polls. Single-goroutine
+// use only; the counter is deliberately unsynchronized.
+type pollCountingCtx struct {
+	context.Context
+	doneAt int
+	polls  int
+	closed chan struct{}
+}
+
+func (c *pollCountingCtx) done() bool { return c.doneAt > 0 && c.polls >= c.doneAt }
+
+func (c *pollCountingCtx) Done() <-chan struct{} {
+	c.polls++
+	if c.done() {
+		return c.closed
+	}
+	return nil // a nil channel is never ready, so the select takes its default
+}
+
+func (c *pollCountingCtx) Err() error {
+	if c.done() {
+		return context.Canceled
+	}
+	return c.Context.Err()
+}
+
+// mustPreApplyMiner builds a devnet miner over a fresh genesis chain with a
+// pinned timestamp source, so two fixtures produce byte-identical block
+// templates and therefore the same nonce-attempt count.
+func mustPreApplyMiner(t *testing.T, timestamp uint64) (*node.Miner, *node.BlockStore) {
+	t.Helper()
+	dir := t.TempDir()
+	chainStatePath := node.ChainStatePath(dir)
+	chainState := node.NewChainState()
+	if err := chainState.Save(chainStatePath); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	blockStore, err := node.CreateBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("CreateBlockStore: %v", err)
+	}
+	syncEngine, err := node.NewSyncEngine(chainState, blockStore, node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), chainStatePath))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := syncEngine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	cfg := node.DefaultMinerConfig()
+	cfg.TimestampSource = func() uint64 { return timestamp }
+	miner, err := node.NewMiner(chainState, blockStore, syncEngine, cfg)
+	if err != nil {
+		t.Fatalf("NewMiner: %v", err)
+	}
+	return miner, blockStore
+}
+
+func TestMineOnePreApplyCancellationCheckpoint(t *testing.T) {
+	timestamp := uint64(time.Now().Unix())
+	calibMiner, _ := mustPreApplyMiner(t, timestamp)
+	calibration := &pollCountingCtx{Context: context.Background()}
+	mb, err := calibMiner.MineOne(calibration, nil)
+	if err != nil {
+		t.Fatalf("calibration MineOne: %v", err)
+	}
+	// Entry check + one check per nonce attempt (winning attempt included) +
+	// the pre-apply check. Deleting the pre-apply check drops the observed
+	// count to Nonce+2 and fails here.
+	wantPolls := int(mb.Nonce) + 3
+	if calibration.polls != wantPolls {
+		t.Fatalf("MineOne context polls = %d, want %d (entry + %d nonce attempts + pre-apply)", calibration.polls, wantPolls, mb.Nonce+1)
+	}
+	miner, blockStore := mustPreApplyMiner(t, timestamp)
+	closed := make(chan struct{})
+	close(closed)
+	preApply := &pollCountingCtx{Context: context.Background(), doneAt: wantPolls, closed: closed}
+	if _, err := miner.MineOne(preApply, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("MineOne observing cancellation at the pre-apply check = %v, want context.Canceled", err)
+	}
+	if preApply.polls != wantPolls {
+		t.Fatalf("canceled run polled %d times, want %d: the observation was not the pre-apply check", preApply.polls, wantPolls)
+	}
+	height, _, ok, err := blockStore.Tip()
+	if err != nil {
+		t.Fatalf("Tip: %v", err)
+	}
+	if !ok || height != 0 {
+		t.Fatalf("tip height=%d ok=%v after a pre-apply cancellation, want the untouched genesis tip 0", height, ok)
+	}
+}
+
+// liveLifecycle binds a live (never canceled) lifecycle source to state, so
+// the request-local cancellation tests exercise the real discriminator.
+func liveLifecycle(t *testing.T, state *devnetRPCState) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	state.lifecycleCtx = ctx
+}
+
+func canceledRequestCtx() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+func TestMineNextRequestCancellationPreservesExistingError(t *testing.T) {
+	state := mustRPCMineNextState(t)
+	liveLifecycle(t, state)
+	rec := httptest.NewRecorder()
+	handleMineNext(state, rec, httptest.NewRequest(http.MethodPost, "/mine_next", nil).WithContext(canceledRequestCtx()))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d want the baseline 422 body=%s", rec.Code, rec.Body.String())
+	}
+	var got mineNextResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Mined || got.Error != context.Canceled.Error() {
+		t.Fatalf("request-local cancellation reclassified as lifecycle unavailability: %+v", got)
+	}
+}
+
+func TestSubmitTxRequestCancellationPreservesExistingError(t *testing.T) {
+	state, body, txid, txidHex := mustSubmitFixture(t)
+	liveLifecycle(t, state)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/submit_tx", strings.NewReader(body)).WithContext(canceledRequestCtx())
+	handleSubmitTx(state, rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d want the baseline 200 body=%s", rec.Code, rec.Body.String())
+	}
+	var got submitTxResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !got.Accepted || got.TxID != txidHex {
+		t.Fatalf("request-local cancellation changed the admission result: %+v", got)
+	}
+	if !state.mempool.Contains(txid) {
+		t.Fatal("baseline admission lost under a request-local cancellation")
+	}
+	_, submits := state.metrics.snapshot()
+	if submits["accepted"] != 1 || submits["unavailable"] != 0 {
+		t.Fatalf("submit_tx result counters = %v, want exactly one `accepted` and no `unavailable`", submits)
 	}
 }

@@ -26,11 +26,26 @@ func (m *Miner) bootstrapGenesisIfNeeded() error {
 	return m.sync.BootstrapCanonicalGenesisIfEmpty()
 }
 
-// executeMineOne executes the core mining logic
+// executeMineOne observes ctx at the pre-apply checkpoint (after buildBlock,
+// before ApplyBlock): cancellation there returns ctx.Err() with no write; a
+// clean check hands the result to ApplyBlock, never re-checked.
 func (m *Miner) executeMineOne(ctx context.Context, txs [][]byte) (*MinedBlock, error) {
 	blockBytes, prevTimestamps, timestamp, nonce, txCount, err := m.buildBlock(ctx, txs)
 	if err != nil {
 		return nil, err
+	}
+	// Pre-apply cancellation checkpoint (RUBIN_NODE_RPC_DEVNET.md 3.4): the
+	// last defined observation before canonical-apply entry. buildBlock above
+	// persists no canonical state, so returning here leaves the chain
+	// unchanged; a clean check hands the result to ApplyBlock, which is never
+	// re-checked or rolled back afterwards. Same form as the MineOne entry
+	// check so both checkpoints report the caller's own cancellation cause.
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
 	}
 	summary, err := m.sync.ApplyBlock(blockBytes, prevTimestamps)
 	if err != nil {
