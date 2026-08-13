@@ -6186,7 +6186,6 @@ mod tests {
                     blocktxn_payload_cap: 64,
                 })
             );
-            drop(reader);
             assert_fallback_getdata(&mut client, active_hash);
             assert!(session.peer.last_error.is_empty());
             match case {

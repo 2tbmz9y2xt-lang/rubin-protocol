@@ -867,19 +867,19 @@ func TestRunFallsBackAndClearsExpiredCompactOutstandingOnIdleTimeout(t *testing.
 	p.service.cfg.Now = func() time.Time { cancel(); return ck.now.Add(compactOutstandingRequestTTL + time.Second) }
 	p.conn = &scriptedConn{}
 	p.writeMu.Lock()
-	sent, err := p.sendExpiredCompactOutstandingFallback(ctx, time.Now().Add(time.Minute))
+	_, committed, err := p.sendExpiredCompactOutstandingFallback(ctx, time.Now().Add(time.Minute))
 	p.writeMu.Unlock()
-	if sent != nil || err != nil || p.conn.(*scriptedConn).Len() != 0 || p.compact.outstanding == nil {
-		t.Fatalf("cancel-after-pop sent=%v err=%v bytes=%d", sent, err, p.conn.(*scriptedConn).Len())
+	if committed || err != nil || p.conn.(*scriptedConn).Len() != 0 || p.compact.outstanding == nil {
+		t.Fatalf("cancel-after-snapshot committed=%v err=%v bytes=%d", committed, err, p.conn.(*scriptedConn).Len())
 	}
 	p, ck = setupCompactFallbackPeer(t)
 	ck.advance(compactOutstandingRequestTTL + time.Second)
 	ctx, cancel = context.WithCancel(context.Background())
 	conn = &expiryWakeConn{scriptedConn: scriptedConn{writeHook: func(int) { cancel() }}}
 	p.conn = conn
-	sent, err = p.sendExpiredCompactOutstandingFallback(ctx, time.Now().Add(time.Minute))
-	if sent != nil || err != nil || p.compact.outstanding == nil {
-		t.Fatalf("cancel-during-write sent=%v err=%v outstanding=%+v", sent, err, p.compact.outstanding)
+	_, committed, err = p.sendExpiredCompactOutstandingFallback(ctx, time.Now().Add(time.Minute))
+	if committed || err != nil || p.compact.outstanding == nil {
+		t.Fatalf("cancel-during-write committed=%v err=%v outstanding=%+v", committed, err, p.compact.outstanding)
 	}
 	requireFirstGetDataBlock(t, p, conn.Bytes(), [32]byte{0x11})
 }
@@ -1232,12 +1232,12 @@ func TestRunReturnsCompactFallbackWakeErrors(t *testing.T) {
 	}
 	p.writeMu.Lock()
 	beforeWrites := p.conn.(*expiryWakeConn).writeCount
-	_, err = p.sendExpiredCompactOutstandingFallback(context.Background(), time.Now().Add(-time.Nanosecond))
+	_, _, err = p.sendExpiredCompactOutstandingFallback(context.Background(), time.Now().Add(-time.Nanosecond))
 	p.writeMu.Unlock()
 	if !errors.Is(err, os.ErrDeadlineExceeded) || p.compact.outstanding == nil || p.conn.(*expiryWakeConn).writeCount != beforeWrites {
 		t.Fatalf("expired fallback err=%v outstanding=%+v", err, p.compact.outstanding)
 	}
-	_, err = p.sendExpiredCompactOutstandingFallback(context.Background(), time.Now().Add(-time.Nanosecond))
+	_, _, err = p.sendExpiredCompactOutstandingFallback(context.Background(), time.Now().Add(-time.Nanosecond))
 	if !errors.Is(err, os.ErrDeadlineExceeded) || p.compact.outstanding == nil || p.conn.(*expiryWakeConn).writeCount != beforeWrites {
 		t.Fatalf("free-lock expired fallback err=%v outstanding=%+v", err, p.compact.outstanding)
 	}
