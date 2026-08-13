@@ -8,8 +8,7 @@
 ## 0. Scope Boundary
 
 This document is a protocol-side policy baseline. It does not change consensus
-validity, P2P wire format, conformance fixtures, Go implementation, Rust
-implementation, or CI behavior.
+validity, P2P wire format, conformance fixtures, or CI behavior.
 
 The envelope shown below describes the bounded transport policy surface. It is
 illustrative only; it does not define a new wire format or, by itself, an
@@ -69,16 +68,45 @@ P2P_MAX_INFLIGHT_MSGS_PER_CONN = 64
 P2P_MAX_QUEUED_DECODED_BYTES_PER_CONN = 8_388_608
 ```
 
-The read-deadline default is a single frame-read guardrail because the current
-Go and Rust runtimes expose one read deadline for whole-frame reads.
+For every post-handshake frame with validated payload length `L`, Go and Rust
+use the same absolute completion budget, calculated with unsigned 64-bit
+integer arithmetic and no floating point:
+
+```text
+absolute_budget_ms(L) = max(15_000, (120_000 * L + 71_999_999) div 72_000_000)
+```
+
+The required boundary values are `15_000 ms` through `L = 9_000_000`,
+`53_334 ms` at `L = 32_000_000`, `120_000 ms` at `L = 72_000_000`, and
+`160_000 ms` at `L = 96_000_000`.
+
+For reads, idle behavior before the first envelope-header byte is unchanged.
+That first received byte starts the frame clock and permits only a provisional
+15-second header deadline. After structural, global, and command-cap validation
+of `L`, the deadline becomes `frame_start + absolute_budget_ms(L)`; it is not a
+second budget. Equality is accepted and only a strictly later instant expires.
+
+For writes, the frame clock starts immediately before the first header-byte
+attempt, after payload validation. Before the first positive write byte, the
+stall deadline is `frame_start + 15_000 ms`; initializing the frame clock is not
+progress. Before each potentially blocking read or write chunk, the transport
+uses the earlier of the absolute deadline and 15 seconds after actual positive
+bytes transferred. Positive bytes refresh it even when that I/O returns an
+error; zero-byte errors and retries do not. A checksum, parsing, unknown command,
+or semantic failure never resets or extends frame timing.
+
+Compact fallback may shorten a pending read to execute the existing fallback,
+but it MUST NOT reset or extend the interrupted frame deadline or compact
+request TTL/state. Handshake timing is unchanged.
 
 ## 4. Enforcement
 
 Disconnect the peer if:
 
-1. Header read exceeds the read deadline after partial header bytes were
-   received.
-2. Payload read exceeds the read deadline after the frame header was received.
+1. Header read is strictly later than the provisional 15-second deadline after
+   the first partial-header byte was received.
+2. Payload read completion is strictly later than the size-derived absolute
+   deadline measured from that same first header byte.
 3. Payload exceeds maximum read bytes.
 4. Frame checksum validation fails for a received frame.
 5. Compact payload is malformed and peer score reaches or exceeds disconnect

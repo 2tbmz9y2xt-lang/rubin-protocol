@@ -43,12 +43,32 @@ const (
 	maxInventoryVectors     = 4096
 	maxCompactSizeBytes     = 9
 	streamReadChunkBytes    = 32 * 1024
+	frameMinimumBudgetMS    = uint64(15_000)
+	frameBudgetNumeratorMS  = uint64(120_000)
+	frameBudgetDenominator  = uint64(72_000_000)
 )
+
+// absoluteBudgetMS is the post-handshake frame completion budget. Wire payload
+// lengths are u32, but the helper keeps its arithmetic safe for every u64
+// input so callers cannot accidentally wrap the deadline calculation.
+func absoluteBudgetMS(length uint64) uint64 {
+	const roundUp = frameBudgetDenominator - 1
+	if length > (math.MaxUint64-roundUp)/frameBudgetNumeratorMS {
+		return math.MaxUint64
+	}
+	budget := (frameBudgetNumeratorMS*length + roundUp) / frameBudgetDenominator
+	if budget < frameMinimumBudgetMS {
+		return frameMinimumBudgetMS
+	}
+	return budget
+}
 
 type message struct {
 	Command string
 	Payload []byte
 }
+
+var errInvalidEnvelopeChecksum = errors.New("invalid envelope checksum")
 
 type payloadLimitFn func(command string) uint32
 
@@ -143,14 +163,14 @@ func readPayloadWithChecksum(r io.Reader, size uint32, wantChecksum [4]byte) ([]
 		return nil, err
 	}
 	if !bytes.Equal(wantChecksum[:], gotChecksum[:]) {
-		return nil, errors.New("invalid envelope checksum")
+		return nil, errInvalidEnvelopeChecksum
 	}
 	return payload, nil
 }
 
 func readZeroLengthPayload(wantChecksum [4]byte) ([]byte, error) {
 	if wantChecksum != wireChecksum(nil) {
-		return nil, errors.New("invalid envelope checksum")
+		return nil, errInvalidEnvelopeChecksum
 	}
 	return make([]byte, 0), nil
 }
@@ -172,27 +192,20 @@ func readPayloadPrefix(r io.Reader, size uint32, prefixSize uint32) ([]byte, err
 
 func readPayloadChunks(r io.Reader, size uint32) ([]byte, [4]byte, error) {
 	hasher := sha3.New256()
-	initialCap := int(size)
-	if initialCap > streamReadChunkBytes {
-		initialCap = streamReadChunkBytes
-	}
-	payload := make([]byte, 0, initialCap)
-	remaining := int(size)
-	for remaining > 0 {
-		chunkLen := remaining
-		if chunkLen > streamReadChunkBytes {
-			chunkLen = streamReadChunkBytes
+	payload := make([]byte, int(size))
+	for offset := 0; offset < len(payload); {
+		end := offset + streamReadChunkBytes
+		if end > len(payload) {
+			end = len(payload)
 		}
-		chunk := make([]byte, chunkLen)
-		n, err := io.ReadFull(r, chunk)
+		n, err := io.ReadFull(r, payload[offset:end])
 		if err != nil {
-			return nil, [4]byte{}, payloadReadError(size, len(payload), n, err)
+			return nil, [4]byte{}, payloadReadError(size, offset, n, err)
 		}
-		if _, err := hasher.Write(chunk); err != nil {
+		if _, err := hasher.Write(payload[offset:end]); err != nil {
 			return nil, [4]byte{}, err
 		}
-		payload = append(payload, chunk...)
-		remaining -= chunkLen
+		offset = end
 	}
 
 	sum := hasher.Sum(nil)

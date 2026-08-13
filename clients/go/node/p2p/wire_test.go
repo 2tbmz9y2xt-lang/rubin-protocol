@@ -151,6 +151,29 @@ func TestReadFrameWithPayloadLimitReadsTxPayloadExact(t *testing.T) {
 	}
 }
 
+func TestAbsoluteBudgetMSBoundaries(t *testing.T) {
+	cases := []struct {
+		length uint64
+		want   uint64
+	}{
+		{0, 15_000},
+		{9_000_000, 15_000},
+		{9_000_001, 15_001},
+		{32_000_000, 53_334},
+		{72_000_000 - 1, 120_000},
+		{72_000_000, 120_000},
+		{96_000_000, 160_000},
+	}
+	for _, tc := range cases {
+		if got := absoluteBudgetMS(tc.length); got != tc.want {
+			t.Errorf("absoluteBudgetMS(%d)=%d, want %d", tc.length, got, tc.want)
+		}
+	}
+	if got := absoluteBudgetMS(^uint64(0)); got != ^uint64(0) {
+		t.Fatalf("overflow input budget=%d, want saturated max", got)
+	}
+}
+
 func TestReadPayloadWithChecksumChunkedRoundtrip(t *testing.T) {
 	payload := bytes.Repeat([]byte{0xab}, streamReadChunkBytes+17)
 	checksum := wireChecksum(payload)
@@ -160,6 +183,9 @@ func TestReadPayloadWithChecksumChunkedRoundtrip(t *testing.T) {
 	}
 	if !bytes.Equal(got, payload) {
 		t.Fatal("payload mismatch")
+	}
+	if cap(got) != len(got) {
+		t.Fatalf("payload cap=%d, want exact allocation %d", cap(got), len(got))
 	}
 }
 
