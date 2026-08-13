@@ -1274,8 +1274,9 @@ func TestPostHandshakeFrameTimingUsesOneStartAndAbsoluteBudget(t *testing.T) {
 	if want := start.Add(53_334 * time.Millisecond); !timing.absoluteDeadline.Equal(want) || !conn.readDeadlines[len(conn.readDeadlines)-1].Equal(want) {
 		t.Fatalf("read deadlines=%v, want absolute deadline %v", conn.readDeadlines, timing.absoluteDeadline)
 	}
+	absoluteBefore := timing.absoluteDeadline
 	requireNoCompactErr(t, timing.afterCompactFallback(), "compact wake")
-	if timing.frameStart != start || timing.lastProgress != start || !conn.readDeadlines[len(conn.readDeadlines)-1].Equal(timing.absoluteDeadline) {
+	if timing.frameStart != start || timing.lastProgress != start || timing.absoluteDeadline != absoluteBefore || !conn.readDeadlines[len(conn.readDeadlines)-1].Equal(timing.absoluteDeadline) {
 		t.Fatal("compact wake changed timing")
 	}
 }
