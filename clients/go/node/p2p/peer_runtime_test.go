@@ -760,17 +760,26 @@ func TestRunRejectsStaleBlockTxnBodyBeforeChecksum(t *testing.T) {
 }
 
 func TestRunPropagatesBlockTxnPrefixReadFailure(t *testing.T) {
-	p := newPeerRuntimeTestPeer(t)
-	p.service.cfg.EnableCompactReceive = true
-	blockHash := [32]byte{0x69}
-	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
-	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: blockHash, BlockTxnPayloadCap: 128})
+	p, ck := setupCompactFallbackPeer(t)
+	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Hour
+	blockHash := [32]byte{0x11}
 	payload := append(blockHash[:], make([]byte, 33)...)
 	header, err := buildEnvelopeHeader(networkMagic(p.service.cfg.PeerRuntimeConfig.Network), messageBlockTxn, payload)
 	if err != nil {
 		t.Fatalf("buildEnvelopeHeader: %v", err)
 	}
-	p.conn = &scriptedConn{reads: []scriptedRead{{data: header[:]}}}
+	conn := &expiryWakeConn{scriptedConn: scriptedConn{reads: []scriptedRead{{data: header[:]}}}}
+	var initialDeadline time.Time
+	conn.onRead = func(n int) {
+		if n == 1 {
+			initialDeadline = conn.readDeadlines[len(conn.readDeadlines)-1]
+			ck.advance(5 * time.Second)
+		}
+		if n == 2 && (initialDeadline.IsZero() || !conn.readDeadlines[len(conn.readDeadlines)-1].Equal(initialDeadline)) {
+			t.Fatalf("blocktxn prefix deadline=%v, want original %v", conn.readDeadlines, initialDeadline)
+		}
+	}
+	p.conn = conn
 	err = p.run(context.Background())
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("run err=%v, want prefix short-read error", err)
@@ -965,7 +974,7 @@ func TestReadLateBlockTxnKeepsActiveResponseAndThenIgnoresLateContext(t *testing
 	p := setupLateBlockTxnReadPeer(t, compactOutstandingRequest{BlockHash: activeHash, BlockTxnPayloadCap: 128}, activePayload, oldPayload)
 	lateCtx := &compactOutstandingRequest{BlockHash: oldHash, BlockTxnPayloadCap: 64}
 
-	frame, lateCtx, err := p.readPostHandshakeFrame(context.Background(), time.Now(), lateCtx)
+	frame, lateCtx, err := p.readPostHandshakeFrame(context.Background(), time.Now(), p.readDeadlineAt(time.Now(), true), lateCtx)
 	if err != nil {
 		t.Fatalf("read late blocktxn with active response: %v", err)
 	}
@@ -975,7 +984,7 @@ func TestReadLateBlockTxnKeepsActiveResponseAndThenIgnoresLateContext(t *testing
 	if frame.Command != messageBlockTxn || !bytes.Equal(frame.Payload, activePayload) {
 		t.Fatalf("frame=%+v, want active blocktxn payload", frame)
 	}
-	_, lateCtx, err = p.readPostHandshakeFrame(context.Background(), time.Now(), lateCtx)
+	_, lateCtx, err = p.readPostHandshakeFrame(context.Background(), time.Now(), p.readDeadlineAt(time.Now(), true), lateCtx)
 	if !errors.Is(err, errLateBlockTxnIgnored) || lateCtx != nil {
 		t.Fatalf("stale late read err=%v lateCtx=%+v, want ignored late blocktxn and cleared context", err, lateCtx)
 	}
@@ -986,7 +995,7 @@ func TestReadLateBlockTxnActiveCapErrorPreservesLateContext(t *testing.T) {
 	activePayload := append(activeHash[:], bytes.Repeat([]byte{0x01}, 33)...)
 	p := setupLateBlockTxnReadPeer(t, compactOutstandingRequest{BlockHash: activeHash, BlockTxnPayloadCap: 64}, activePayload)
 
-	_, lateCtx, err := p.readPostHandshakeFrame(context.Background(), time.Now(), &compactOutstandingRequest{BlockHash: oldHash, BlockTxnPayloadCap: 128})
+	_, lateCtx, err := p.readPostHandshakeFrame(context.Background(), time.Now(), p.readDeadlineAt(time.Now(), true), &compactOutstandingRequest{BlockHash: oldHash, BlockTxnPayloadCap: 128})
 	if err == nil || err.Error() != "message exceeds command cap" || lateCtx == nil {
 		t.Fatalf("active cap err=%v lateCtx=%+v, want cap error preserving late context", err, lateCtx)
 	}
@@ -997,7 +1006,7 @@ func TestReadLateBlockTxnStaleBodyDoesNotBanActiveOutstanding(t *testing.T) {
 	stalePayload := append(oldHash[:], bytes.Repeat([]byte{0x02}, 33)...)
 	p := setupLateBlockTxnReadPeer(t, compactOutstandingTestRequest(activeHash), stalePayload)
 
-	_, _, err := p.readPostHandshakeFrame(context.Background(), time.Now(), &compactOutstandingRequest{BlockHash: oldHash, BlockTxnPayloadCap: blockTxnHashPayloadBytes})
+	_, _, err := p.readPostHandshakeFrame(context.Background(), time.Now(), p.readDeadlineAt(time.Now(), true), &compactOutstandingRequest{BlockHash: oldHash, BlockTxnPayloadCap: blockTxnHashPayloadBytes})
 	requireBlockTxnStaleBodyError(t, err)
 	p.applyPostHandshakeDisconnectError(err)
 	if state := p.snapshotState(); state.BanScore != 0 || p.blockTxnPayloadCap() == 0 {

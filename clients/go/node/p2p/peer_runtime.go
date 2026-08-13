@@ -211,10 +211,11 @@ func (p *peer) run(ctx context.Context) error {
 		}
 		frameStart := time.Now()
 		_, activeCompact := p.compactOutstandingExpiry()
-		if err := p.setReadDeadlineAt(frameStart, lateBlockTxn == nil || activeCompact); err != nil {
+		specializedDeadline := p.readDeadlineAt(frameStart, lateBlockTxn == nil || activeCompact)
+		if err := p.conn.SetReadDeadline(specializedDeadline); err != nil {
 			return err
 		}
-		frame, nextLateBlockTxn, err := p.readPostHandshakeFrame(ctx, frameStart, lateBlockTxn)
+		frame, nextLateBlockTxn, err := p.readPostHandshakeFrame(ctx, frameStart, specializedDeadline, lateBlockTxn)
 		lateBlockTxn = nextLateBlockTxn
 		if err != nil {
 			if errors.Is(err, errLateBlockTxnIgnored) || shouldIgnoreReadError(err) {
@@ -241,20 +242,26 @@ func (p *peer) run(ctx context.Context) error {
 
 const blockTxnHashPayloadBytes = 32
 
-func (p *peer) readPostHandshakeFrame(ctx context.Context, frameStart time.Time, lateBlockTxn *compactOutstandingRequest) (message, *compactOutstandingRequest, error) {
+func (p *peer) readPostHandshakeFrame(ctx context.Context, frameStart, specializedDeadline time.Time, lateBlockTxn *compactOutstandingRequest) (message, *compactOutstandingRequest, error) {
 	var frame message
 	timing := &postHandshakeFrameTiming{peer: p}
-	reader := &compactFallbackReader{peer: p, ctx: ctx, frameStart: frameStart, timing: timing, lateBlockTxn: lateBlockTxn}
+	reader := &compactFallbackReader{peer: p, ctx: ctx, frameStart: frameStart, specializedDeadline: specializedDeadline, timing: timing, lateBlockTxn: lateBlockTxn}
 	header, err := readFrameHeader(reader, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
 	lateBlockTxn = reader.lateBlockTxn
 	if err := timing.finishHeader(err); err != nil {
 		return frame, lateBlockTxn, err
 	}
 	if header.Command == messageBlockTxn {
+		acceptsBlockTxn := p.acceptsBlockTxnResponses()
+		if lateBlockTxn != nil || acceptsBlockTxn {
+			if err := p.conn.SetReadDeadline(reader.specializedDeadline); err != nil {
+				return frame, lateBlockTxn, err
+			}
+		}
 		if lateBlockTxn != nil {
 			return p.readLateBlockTxnFrame(header, lateBlockTxn)
 		}
-		if p.acceptsBlockTxnResponses() {
+		if acceptsBlockTxn {
 			frame, err := p.readBlockTxnFrame(header)
 			return frame, nil, err
 		}
@@ -275,12 +282,13 @@ func (p *peer) readPostHandshakeFrame(ctx context.Context, frameStart time.Time,
 }
 
 type compactFallbackReader struct {
-	peer         *peer
-	ctx          context.Context
-	frameStart   time.Time
-	timing       *postHandshakeFrameTiming
-	sent         bool
-	lateBlockTxn *compactOutstandingRequest
+	peer                *peer
+	ctx                 context.Context
+	frameStart          time.Time
+	specializedDeadline time.Time
+	timing              *postHandshakeFrameTiming
+	sent                bool
+	lateBlockTxn        *compactOutstandingRequest
 }
 
 func (r *compactFallbackReader) Read(p []byte) (int, error) {
@@ -305,7 +313,8 @@ func (r *compactFallbackReader) Read(p []byte) (int, error) {
 		}
 		r.sent = true
 		r.lateBlockTxn = lateBlockTxn
-		if err := r.peer.setReadDeadlineAt(r.frameStart, false); err != nil {
+		r.specializedDeadline = r.peer.readDeadlineAt(r.frameStart, false)
+		if err := r.peer.conn.SetReadDeadline(r.specializedDeadline); err != nil {
 			return 0, err
 		}
 	}
@@ -520,6 +529,10 @@ func (p *peer) setReadDeadline() error {
 }
 
 func (p *peer) setReadDeadlineAt(wallNow time.Time, includeCompact bool) error {
+	return p.conn.SetReadDeadline(p.readDeadlineAt(wallNow, includeCompact))
+}
+
+func (p *peer) readDeadlineAt(wallNow time.Time, includeCompact bool) time.Time {
 	var deadlineTime time.Time
 	if deadline := p.service.cfg.PeerRuntimeConfig.ReadDeadline; deadline > 0 {
 		deadlineTime = wallNow.Add(deadline)
@@ -536,7 +549,7 @@ func (p *peer) setReadDeadlineAt(wallNow time.Time, includeCompact bool) error {
 			}
 		}
 	}
-	return p.conn.SetReadDeadline(deadlineTime)
+	return deadlineTime
 }
 
 func (p *peer) writePostHandshakeFrame(command string, payload []byte) error {
