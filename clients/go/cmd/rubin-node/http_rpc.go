@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -47,8 +48,8 @@ type devnetRPCState struct {
 	// (RUBIN_NODE_RPC_DEVNET.md 2.1). startDevnetRPCServer creates it with
 	// context.WithCancelCause, installs it as the http.Server BaseContext —
 	// so every r.Context() descends from it — and stores its cancel on the
-	// running server, where Close step (b) publishes it synchronously between
-	// the ingress freeze and the native drain call. Routes classify on THIS
+	// running server, where Close step 3 publishes it synchronously between
+	// the ingress cutoff and the native drain call. Routes classify on THIS
 	// source read at their own defined checks — /submit_tx directly,
 	// /mine_next through mineLifecycleObservingCtx — never on the merged
 	// request context's cause. The cause is always errRPCLifecycleCanceled and
@@ -338,10 +339,11 @@ func (s *devnetRPCState) SetPeerLifecycleExitsFunc(fn func() uint64) {
 // errRPCLifecycleCanceled is the cancellation cause startDevnetRPCServer
 // attaches to the server-owned lifecycle source. No route classifies on it:
 // /mine_next observes the source directly through mineLifecycleObservingCtx
-// and /submit_tx through lifecycleErr, so this sentinel is kept purely as
-// cancellation provenance for logs and debugging. It never appears in a
-// response body, log line or metric label — the routes keep answering
-// exactly `rpc unavailable` (RUBIN_NODE_RPC_DEVNET.md 3.3, 3.4).
+// and /submit_tx through lifecycleErr, so this sentinel exists only to make
+// the shutdown provenance observable via context.Cause, for tests and
+// debugger inspection. It never appears in a response body, log line or
+// metric label — the routes keep answering exactly `rpc unavailable`
+// (RUBIN_NODE_RPC_DEVNET.md 3.3, 3.4).
 var errRPCLifecycleCanceled = errors.New("rpc lifecycle canceled")
 
 // lifecycleErr returns the server-owned lifecycle source's cancellation
@@ -364,7 +366,9 @@ func (s *devnetRPCState) lifecycleErr() error {
 // mineLifecycleObservingCtx turns every miner cancellation poll into a literal
 // check of the server-owned lifecycle source (RUBIN_NODE_RPC_DEVNET.md 2.1):
 // Done and Err consult that source FIRST, latch what they saw, and otherwise
-// fall through to the request context. All three MineOne checkpoints — entry,
+// fall through to the request context. Once the latch is set they answer from
+// it without re-reading the source, which is equivalent because cancellation
+// is irreversible. All three MineOne checkpoints — entry,
 // every nonce attempt, pre-apply — are non-blocking polls, so observedLifecycle
 // records exactly what a defined check observed at the moment it observed it,
 // rather than something inferred afterwards from an immutable first cause or
@@ -379,20 +383,21 @@ type mineLifecycleObservingCtx struct {
 	// observedLifecycle latches at the first poll that read the lifecycle
 	// source canceled and is never cleared: an observation stays made.
 	observedLifecycle bool
-	// closed is pre-closed, so a poll observing lifecycle cancellation reports
-	// Done immediately instead of waiting on the request context.
-	closed chan struct{}
 }
 
 func newMineLifecycleObservingCtx(request, lifecycle context.Context) *mineLifecycleObservingCtx {
-	closed := make(chan struct{})
-	close(closed)
-	return &mineLifecycleObservingCtx{Context: request, lifecycle: lifecycle, closed: closed}
+	return &mineLifecycleObservingCtx{Context: request, lifecycle: lifecycle}
 }
 
 // observeLifecycle reports whether this poll sees the lifecycle source
-// canceled, latching the observation when it does.
+// canceled, latching the observation when it does. Once latched the answer
+// cannot change — cancellation is irreversible and the latch is never cleared
+// — so later polls skip the source read entirely, which also keeps every
+// nonce attempt after the first observation off the shared parent's mutex.
 func (c *mineLifecycleObservingCtx) observeLifecycle() bool {
+	if c.observedLifecycle {
+		return true
+	}
 	if c.lifecycle == nil || c.lifecycle.Err() == nil {
 		return false
 	}
@@ -402,7 +407,9 @@ func (c *mineLifecycleObservingCtx) observeLifecycle() bool {
 
 func (c *mineLifecycleObservingCtx) Done() <-chan struct{} {
 	if c.observeLifecycle() {
-		return c.closed
+		// observeLifecycle true implies c.lifecycle.Err() != nil, so the
+		// source's own Done channel is already closed and reports immediately.
+		return c.lifecycle.Done()
 	}
 	return c.Context.Done()
 }
@@ -418,16 +425,15 @@ type runningDevnetRPCServer struct {
 	addr   string
 	server *http.Server
 	state  *devnetRPCState
-	// listener is the bound ingress socket. Close closes it together with
-	// server.SetKeepAlivesEnabled(false) as its very first step — the
-	// atomic ingress freeze of RUBIN_NODE_RPC_DEVNET.md 2.1, whose ingress
-	// unit is transport acceptance of a HANDLER, not of a socket: closing
-	// the listener alone still admits a pipelined request on an already
-	// established keep-alive connection. Nothing published afterwards can
-	// precede the freeze.
-	listener net.Listener
+	// ingressFrozen is the ingress cutoff of RUBIN_NODE_RPC_DEVNET.md 2.1,
+	// whose ingress unit is transport acceptance of a HANDLER, not of a
+	// socket. The same pointer is loaded by the production http.Server
+	// Handler wrapper installed in startDevnetRPCServer, so the cutoff also
+	// covers a request pipelined on an already established keep-alive
+	// connection — which closing the listener alone does not.
+	ingressFrozen *atomic.Bool
 	// cancelLifecycle publishes the handler-visible lifecycle cancellation
-	// (2.1 step 2). Close invokes it directly rather than through
+	// (2.1 step 3). Close invokes it directly rather than through
 	// http.Server.RegisterOnShutdown, whose callbacks run in NEW goroutines
 	// (`go f()`) with no happens-before edge to the drain wait — with no
 	// parked observer that launch can even land after the drain completed.
@@ -760,12 +766,41 @@ func startDevnetRPCServer(
 	// One lifecycle source per server, published on the state before the
 	// serving goroutine starts and installed as BaseContext so every
 	// connection — and therefore every r.Context() — descends from it.
-	// WithCancelCause, not WithCancel: the cause is the provenance /mine_next
-	// classifies on after MineOne has returned.
+	// WithCancelCause, not WithCancel: the cause names the shutdown provenance
+	// so tests and a debugger can distinguish it via context.Cause. No route
+	// classifies on it — /mine_next classifies on the checkpoint-observation
+	// latch, /submit_tx on the source read at its own check.
 	lifecycleCtx, cancelLifecycle := context.WithCancelCause(context.Background())
 	state.lifecycleCtx = lifecycleCtx
+	mux := newDevnetRPCHandler(state)
+	ingressFrozen := new(atomic.Bool)
 	server := &http.Server{
-		Handler:           newDevnetRPCHandler(state),
+		// Ingress cutoff (RUBIN_NODE_RPC_DEVNET.md 2.1). A load of false
+		// linearizes this request's acceptance BEFORE the cutoff: it becomes an
+		// accepted handler, reaches the mux, and is a drain unit native
+		// Shutdown owns. A load of true lost the cutoff and terminates with
+		// panic(http.ErrAbortHandler) BEFORE mux dispatch — no mux route
+		// executes, no route or submit metric is counted, no mutation runs and
+		// no response is attempted. net/http's conn.serve recovers that exact
+		// sentinel without logging a stack and closes the transport, so the
+		// client observes connection termination rather than a reply. The gate
+		// is a single atomic load per request and is the admission authority
+		// OF THE CUTOFF: from the freeze store onward no request reaches the
+		// mux, including one pipelined on an already established keep-alive
+		// connection in the window before native Shutdown (step 4). Once
+		// Shutdown begins, its own keep-alive refusal joins downstream of this
+		// same cutoff.
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if ingressFrozen.Load() {
+				// http.ErrAbortHandler is the stdlib's documented abort sentinel:
+				// conn.serve recovers it without a stack log and closes the
+				// transport. The contract mandates this exact post-cutoff
+				// termination; returning an error is not available inside
+				// http.Handler and writing a response is forbidden past the cutoff.
+				panic(http.ErrAbortHandler) //nolint:forbidigo // documented net/http abort sentinel, see comment above
+			}
+			mux.ServeHTTP(w, r)
+		}),
 		BaseContext:       func(net.Listener) context.Context { return lifecycleCtx },
 		ReadHeaderTimeout: 5 * time.Second,
 		// ReadTimeout bounds the total duration for reading the entire
@@ -783,12 +818,10 @@ func startDevnetRPCServer(
 		IdleTimeout: 60 * time.Second,
 	}
 	go func() {
-		err := server.Serve(listener)
-		// net.ErrClosed is the expected exit once Close froze ingress: it
-		// closes this very listener before calling Shutdown, so Accept fails
-		// before the server has marked itself shutting down and Serve reports
-		// the raw error instead of http.ErrServerClosed.
-		if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) && stderr != nil {
+		// Nothing but native Shutdown closes this listener, and Shutdown marks
+		// the server shutting down before closing it, so the failed Accept
+		// always surfaces as http.ErrServerClosed.
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) && stderr != nil {
 			_, _ = fmt.Fprintf(stderr, "rpc server failed: %v\n", err)
 		}
 	}()
@@ -800,68 +833,55 @@ func startDevnetRPCServer(
 		addr:            addr,
 		server:          server,
 		state:           state,
-		listener:        listener,
+		ingressFrozen:   ingressFrozen,
 		cancelLifecycle: cancelLifecycle,
 	}, nil
 }
 
-// Close drains the RPC surface, performing the three RUBIN_NODE_RPC_DEVNET.md
-// 2.1 steps as sequential statements on this one goroutine: (a) freeze ingress,
-// (b) publish the handler-visible lifecycle cancellation, (c) drain through
-// native Shutdown. Their order is program order, so publication follows the
-// freeze and precedes the drain CALL unconditionally, including the case where
-// no handler was ever accepted. (The previous wiring handed the cancel to
-// http.Server.RegisterOnShutdown, whose `go f()` launch carries no ordering
-// edge to the drain wait at all.) Both shutdown initiators — main.go's
-// deferred Close on the signal unwind and a direct Close — funnel through
-// here, so they stay equivalent by construction.
+// Close performs the RUBIN_NODE_RPC_DEVNET.md 2.1 monotone transition as four
+// sequential statements on this one goroutine: (1) publish the sticky
+// not-ready stamp, (2) freeze handler admission atomically, (3) publish the
+// handler-visible lifecycle cancellation, (4) drain the accepted handlers
+// through native Shutdown. Their order is program order, so each step precedes
+// the next unconditionally, including when no handler was ever accepted. (The
+// previous wiring handed the cancel to http.Server.RegisterOnShutdown, whose
+// `go f()` launch carries no ordering edge to the drain wait at all.) Both
+// shutdown initiators — main.go's deferred Close on the signal unwind and a
+// direct Close — funnel through here, so they stay equivalent by construction;
+// main.go's own MarkShutdown ahead of that defer is idempotent.
 //
-// Step (a) is the COMPLETE handler-acceptance cutoff, because 2.1's ingress
-// unit is transport acceptance of a HANDLER: listener.Close stops new
-// connections and SetKeepAlivesEnabled(false) stops new requests on the
-// connections already established (net/http server.go:3633-3644 — it stores
-// disableKeepAlives and SYNCHRONOUSLY closes idle HTTP/1 conns via
-// closeIdleConns; a connection mid-request finishes its in-flight response and
-// is then closed through closeAfterReply, so no further request is ever
-// accepted on it). That is the same handler cutoff native Shutdown enforces,
-// hoisted ahead of publication: without it a pipelined /submit_tx or
-// /mine_next could still be accepted in the window between (a) and (b) and
-// reach a live pre-mutation check AFTER the claimed ingress freeze. Order
-// inside (a) is irrelevant — both parts precede (b). A request racing the
-// cutoff resolves under the spec's acceptance-vs-cutoff linearization
-// totality: accepted-and-drained XOR rejected-with-no-unit-of-work.
+// Step 2 is the COMPLETE handler-admission cutoff because 2.1's ingress unit is
+// transport acceptance of a HANDLER: the Handler wrapper installed in
+// startDevnetRPCServer loads ingressFrozen ahead of every mux dispatch, so a
+// request pipelined on an already established keep-alive connection is cut off
+// exactly like a fresh one. A pre-cutoff request is an accepted handler that
+// runs to completion and is drained in step 4; a post-cutoff request executes
+// no mux route, no route or submit metric, no mutation and no response attempt.
 //
 // Close is the first deferred teardown to unwind in main.go, so it MUST have
 // returned before p2p.Service.Close begins. Expiry of the caller-provided ctx
 // is a DIAGNOSTIC only — it must not release the caller while net/http still
-// owns an active handler — so an expired first Shutdown is followed by an
+// owns an accepted handler — so an expired first Shutdown is followed by an
 // unbounded Shutdown on the same server, and the exact caller-context error is
 // returned only after that drain reaches quiescence.
 //
-// Repeated and concurrent Close stay idempotent: a second listener Close
-// reports an error we deliberately drop because the freeze is already in
-// force, SetKeepAlivesEnabled(false) is an atomic store plus an idle-conn
-// sweep and so is safe to repeat and to race with itself, a cancel cause is
-// first-wins and immutable, and net/http's Shutdown is safe to call repeatedly
-// and concurrently.
+// Repeated and concurrent Close stay idempotent: the not-ready stamp and the
+// freeze are idempotent stores, a cancel cause is first-wins and immutable, and
+// net/http's Shutdown is safe to call repeatedly and concurrently — it closes
+// the listener through its own onceCloseListener, so a racing Shutdown reports
+// the first close's result and never a self-inflicted net.ErrClosed.
 //
 // Cancellation only makes already-accepted mutating handlers finish faster at
-// their own defined pre-mutation checks — no handler is aborted, and work that
-// already entered its result-selecting boundary keeps its result. The race
-// between publication and a handler's check stays governed by the spec's "no
-// shared atomic gate required" clause: a check that observes a live source
-// still wins and is never remapped afterwards.
+// their own pre-mutation checkpoints — no accepted handler is aborted, and work
+// that already entered its mutation boundary keeps its result: a checkpoint
+// that observes a live source still wins and is never remapped afterwards.
 func (s *runningDevnetRPCServer) Close(ctx context.Context) error {
 	if s == nil || s.server == nil {
 		return nil
 	}
-	if s.listener != nil {
-		_ = s.listener.Close()
-	}
-	s.server.SetKeepAlivesEnabled(false)
-	if s.cancelLifecycle != nil {
-		s.cancelLifecycle(errRPCLifecycleCanceled)
-	}
+	s.state.MarkShutdown()
+	s.ingressFrozen.Store(true)
+	s.cancelLifecycle(errRPCLifecycleCanceled)
 	err := s.server.Shutdown(ctx)
 	// Guarded on the returned error MATCHING ctx.Err(), not merely on ctx
 	// being expired: a coincident caller cancellation must not swallow a
@@ -875,15 +895,6 @@ func (s *runningDevnetRPCServer) Close(ctx context.Context) error {
 		// deliberately dropped — the caller's contract is the diagnostic.
 		_ = s.server.Shutdown(context.Background())
 		return ctxErr
-	}
-	// What remains can only carry net.ErrClosed from native Shutdown closing
-	// the listener step (a) already closed (or nil, when the Serve loop had
-	// already deregistered it — a benign race between the two). That is a
-	// self-inflicted echo of our own freeze and never a drain failure:
-	// Shutdown reports an incomplete drain as the caller ctx error, handled
-	// above.
-	if errors.Is(err, net.ErrClosed) {
-		return nil
 	}
 	return err
 }
@@ -1261,9 +1272,14 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		// already-pinned request-local first cause, and a run whose every poll
 		// saw a live source keeps the baseline 422 permanently — nothing polls
 		// mineCtx after MineOne returned, so the latch cannot move underneath
-		// this classification. The errors.Is(err, context.Canceled) gate keeps a
-		// non-cancellation MineOne failure at 422 even under a canceled
-		// lifecycle: that exit was formed by the failure, not by an observation.
+		// this classification. The errors.Is(err, context.Canceled) conjunct
+		// transcribes the contract's classification formula (cancellation AND
+		// observation) and guards a future poll site that might wrap or replace
+		// the error after a latching poll; with the current poll sites — the
+		// latch is set only inside a Done()/Err() poll and every MineOne
+		// checkpoint returns the unwrapped ctx.Err() on the same statement — a
+		// true latch already implies err is context.Canceled, so the term is
+		// structurally redundant today but contract-prescribed.
 		if errors.Is(err, context.Canceled) && mineCtx.observedLifecycle {
 			writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextResponse{
 				Mined: false,

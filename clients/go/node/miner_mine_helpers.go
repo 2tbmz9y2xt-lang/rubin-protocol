@@ -39,7 +39,8 @@ func (m *Miner) executeMineOne(ctx context.Context, txs [][]byte) (*MinedBlock, 
 	// persists no canonical state, so returning here leaves the chain
 	// unchanged; a clean check hands the result to ApplyBlock, which is never
 	// re-checked or rolled back afterwards. Same form as the MineOne entry
-	// check so both checkpoints report the caller's own cancellation cause.
+	// check so both checkpoints report the caller's own cancellation
+	// error (ctx.Err()).
 	if ctx != nil {
 		select {
 		case <-ctx.Done():

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha3"
@@ -9,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3807,7 +3810,7 @@ func newRPCDrainFixture(t *testing.T) *rpcDrainFixture {
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 		// Keep-alives off so every probe below needs a fresh dial: once
-		// native shutdown closes the listener the dial is refused.
+		// native Shutdown closes the listener the dial is refused.
 		client: &http.Client{Transport: &http.Transport{DisableKeepAlives: true}},
 	}
 	fromKey := mustRPCMLDSA87Keypair(t)
@@ -3871,10 +3874,13 @@ func (f *rpcDrainFixture) holdHandler(t *testing.T) chan error {
 	return done
 }
 
-// waitIngressFrozen probes an existing non-blocking route until the dial is
-// rejected, which observes that native shutdown froze the listener. A probe
-// that won the pre-shutdown race completes normally and is not the oracle.
-func (f *rpcDrainFixture) waitIngressFrozen(t *testing.T) {
+// waitFreshDialRefused probes an existing non-blocking route until the dial is
+// rejected, which observes that native Shutdown has closed the listener and so
+// that Close is already past its ingress cutoff. The listener is NOT the cutoff
+// authority — that is the Handler wrapper's ingressFrozen load — this is only a
+// cheap barrier proving Close reached the drain. A probe that won the
+// pre-shutdown race completes normally and is not the oracle.
+func (f *rpcDrainFixture) waitFreshDialRefused(t *testing.T) {
 	t.Helper()
 	watchdog := time.Now().Add(30 * time.Second) // watchdog only
 	for {
@@ -3888,7 +3894,7 @@ func (f *rpcDrainFixture) waitIngressFrozen(t *testing.T) {
 			_ = resp.Body.Close()
 		}
 		if time.Now().After(watchdog) {
-			t.Fatal("ingress still accepting after Close started: native shutdown never froze the listener")
+			t.Fatal("fresh dials still accepted after Close started: native Shutdown never closed the listener")
 		}
 		time.Sleep(time.Millisecond) // probe pacing only; the oracle is the refused dial
 	}
@@ -3901,7 +3907,7 @@ func TestRunningDevnetRPCServerCloseDrainsAcceptedHandlers(t *testing.T) {
 	defer cancel()
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- f.srv.Close(ctx) }()
-	f.waitIngressFrozen(t)
+	f.waitFreshDialRefused(t)
 
 	cancel()
 	select {
@@ -3946,7 +3952,7 @@ func TestRunningDevnetRPCServerCloseConcurrentAndRepeated(t *testing.T) {
 	go func() { canceledDone <- f.srv.Close(canceledCtx) }()
 	go func() { liveDone <- f.srv.Close(context.Background()) }()
 	go func() { deadlineDone <- f.srv.Close(deadlineCtx) }()
-	f.waitIngressFrozen(t)
+	f.waitFreshDialRefused(t)
 
 	select {
 	case err := <-canceledDone:
@@ -4062,32 +4068,182 @@ func mustLifecycleServer(t *testing.T, state *devnetRPCState) *runningDevnetRPCS
 	return srv
 }
 
-// TestCloseFreezesIngressBeforePublishingCancellation pins that a RETURNED
-// Close has BOTH frozen ingress AND published the lifecycle cancellation with
-// the production cause on a server that never accepted a handler — the case
-// where an asynchronously launched publisher can land after the drain already
-// completed, or never observably at all. The test deliberately cannot
-// distinguish the internal order of the two steps: that order is program order
-// in Close (the listener Close statement precedes the cancel statement, both on
-// the caller's goroutine) and is proven structurally, not here.
-func TestCloseFreezesIngressBeforePublishingCancellation(t *testing.T) {
-	state := mustRPCState(t, false)
-	srv := mustLifecycleServer(t, state)
-	if err := srv.Close(context.Background()); err != nil {
-		t.Fatalf("Close: %v", err)
+// testJoinWatchdog bounds every test-local join in this block. The barriers are
+// the oracle; this only turns a hang into a diagnostic failure.
+const testJoinWatchdog = 60 * time.Second
+
+// joinErr receives from done within the watchdog, failing with what the join was
+// waiting for instead of hanging the package.
+func joinErr(t *testing.T, done <-chan error, what string) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(testJoinWatchdog):
+		t.Fatalf("%s never completed", what)
+		return nil
 	}
-	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+srv.addr+"/ready", nil)
+}
+
+// rawPipelinedPost renders one complete HTTP/1.1 POST with an explicit
+// Content-Length, so several of them concatenated form a single pipelined write.
+func rawPipelinedPost(host, path, body string) string {
+	return "POST " + path + " HTTP/1.1\r\nHost: " + host + "\r\nContent-Type: application/json\r\n" +
+		"Content-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
+}
+
+// mustSubmitBody marshals one /submit_tx request body around raw tx bytes.
+func mustSubmitBody(t *testing.T, txBytes []byte) string {
+	t.Helper()
+	body, err := json.Marshal(submitTxRequest{TxHex: hex.EncodeToString(txBytes)})
 	if err != nil {
-		t.Fatalf("NewRequestWithContext: %v", err)
+		t.Fatalf("Marshal: %v", err)
 	}
-	resp, err := client.Do(req)
-	if err == nil {
-		_ = resp.Body.Close()
-		t.Fatal("ingress accepted a fresh dial after Close returned: the freeze never happened")
+	return string(body)
+}
+
+// TestCloseFreezesIngressBeforePublishingCancellation executes the cutoff cell
+// the listener cannot decide: TWO pipelined /submit_tx requests on ONE
+// keep-alive connection, the first accepted before the cutoff and parked on
+// rpcMut, the second buffered in the same write and therefore dispatched only
+// after Close froze ingress. Close is stalled inside a wrapped cancelLifecycle,
+// so the observation point is exactly step 3 of the 2.1 transition: the sticky
+// not-ready stamp (step 1) and the ingress cutoff (step 2) must both already be
+// in force there. The pre-cutoff handler is then released and must be drained
+// to a complete response with its transaction admitted; the post-cutoff request
+// must produce no response, no route outcome, no submit metric and no mutation.
+func TestCloseFreezesIngressBeforePublishingCancellation(t *testing.T) {
+	fromKey := mustRPCMLDSA87Keypair(t)
+	toKey := mustRPCMLDSA87Keypair(t)
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	state, inputs, utxos := mustRPCStateWithSpendableUTXOsAndMempoolConfig(
+		t,
+		consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes()),
+		[]uint64{1_000_000, 1_000_000},
+		nil,
+		node.DefaultMempoolConfig(),
+	)
+	preCutoffTx, preCutoffTxIDHex := mustRPCSignedTransferTx(t, utxos, inputs[0], fromKey, toAddress)
+	postCutoffTx, _ := mustRPCSignedTransferTx(t, utxos, inputs[1], fromKey, toAddress)
+	_, preCutoffTxID, _, _, err := consensus.ParseTx(preCutoffTx)
+	if err != nil {
+		t.Fatalf("ParseTx(pre-cutoff): %v", err)
 	}
-	if !errors.Is(err, syscall.ECONNREFUSED) {
-		t.Fatalf("dial after Close = %v, want ECONNREFUSED", err)
+	_, postCutoffTxID, _, _, err := consensus.ParseTx(postCutoffTx)
+	if err != nil {
+		t.Fatalf("ParseTx(post-cutoff): %v", err)
+	}
+	srv := mustLifecycleServer(t, state)
+	if !state.TryMarkReadyOnStartup() {
+		t.Fatal("readiness gate refused the startup transition")
+	}
+
+	// The wrapper parks Close at step 3 with the real cancellation still
+	// unpublished, so the pre-cutoff handler's own lifecycle checkpoint sees a
+	// live source and the post-cutoff request meets an already-frozen ingress.
+	realCancel := srv.cancelLifecycle
+	atCancel := make(chan struct{})
+	releaseCancel := make(chan struct{})
+	var cancelOnce sync.Once
+	srv.cancelLifecycle = func(cause error) {
+		cancelOnce.Do(func() {
+			close(atCancel)
+			<-releaseCancel
+		})
+		realCancel(cause)
+	}
+	releaseCancelOnce := sync.OnceFunc(func() { close(releaseCancel) })
+	t.Cleanup(releaseCancelOnce)
+
+	state.rpcMut.Lock()
+	rpcMutHeld := true
+	defer func() {
+		if rpcMutHeld {
+			state.rpcMut.Unlock()
+		}
+	}()
+
+	conn, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", srv.addr)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := conn.SetDeadline(time.Now().Add(testJoinWatchdog)); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+	pipelined := rawPipelinedPost(srv.addr, "/submit_tx", mustSubmitBody(t, preCutoffTx)) +
+		rawPipelinedPost(srv.addr, "/submit_tx", mustSubmitBody(t, postCutoffTx))
+	if _, err := io.WriteString(conn, pipelined); err != nil {
+		t.Fatalf("write pipelined requests: %v", err)
+	}
+	waitBlockedOnRPCMut(t, "handleSubmitTx")
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- srv.Close(context.Background()) }()
+	select {
+	case <-atCancel:
+	case err := <-closeDone:
+		t.Fatalf("Close returned %v without reaching lifecycle cancellation", err)
+	case <-time.After(testJoinWatchdog):
+		t.Fatal("Close never reached lifecycle cancellation")
+	}
+	if state.IsReady() {
+		t.Fatal("Close published lifecycle cancellation while readiness was still true: the sticky not-ready stamp does not precede it")
+	}
+	if !srv.ingressFrozen.Load() {
+		t.Fatal("Close published lifecycle cancellation before freezing ingress: a post-cutoff request could still reach a live pre-mutation checkpoint")
+	}
+
+	rpcMutHeld = false
+	state.rpcMut.Unlock()
+
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("read pre-cutoff response: %v", err)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if closeErr := resp.Body.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("read pre-cutoff body: %v", err)
+	}
+	var got submitTxResponse
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal %q: %v", raw, err)
+	}
+	if resp.StatusCode != http.StatusOK || !got.Accepted || got.TxID != preCutoffTxIDHex {
+		t.Fatalf("pre-cutoff /submit_tx = %d %s, want 200 accepted=true txid=%s: an accepted handler must be drained, not cut off", resp.StatusCode, raw, preCutoffTxIDHex)
+	}
+	if second, err := http.ReadResponse(reader, nil); err == nil {
+		body, _ := io.ReadAll(second.Body)
+		_ = second.Body.Close()
+		t.Fatalf("post-cutoff pipelined request got a second response %d %s: the ingress cutoff does not cover an established keep-alive connection", second.StatusCode, body)
+		// ReadResponse maps a clean close on the status line to
+		// io.ErrUnexpectedEOF (net/http/response.go:161-167); ECONNRESET is the
+		// tolerated variant on a platform that answers with an RST instead.
+	} else if !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, syscall.ECONNRESET) {
+		t.Fatalf("post-cutoff read = %v, want connection termination", err)
+	}
+
+	routes, submits := state.metrics.snapshot()
+	if len(routes) != 1 || routes["/submit_tx|200"] != 1 {
+		t.Fatalf("route outcomes = %v, want exactly one /submit_tx|200: the post-cutoff request executed a mux route", routes)
+	}
+	if len(submits) != 1 || submits["accepted"] != 1 {
+		t.Fatalf("submit result counters = %v, want exactly one `accepted`: the post-cutoff request counted a submit metric", submits)
+	}
+	if !state.mempool.Contains(preCutoffTxID) {
+		t.Fatal("pre-cutoff transaction is absent from the pool: the accepted handler lost its admission")
+	}
+	if state.mempool.Contains(postCutoffTxID) {
+		t.Fatal("post-cutoff transaction was admitted: a request past the ingress cutoff reached the mutation boundary")
+	}
+
+	releaseCancelOnce()
+	if err := joinErr(t, closeDone, "Close"); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 	if cause := context.Cause(state.lifecycleCtx); !errors.Is(cause, errRPCLifecycleCanceled) {
 		t.Fatalf("lifecycle cause after Close = %v, want errRPCLifecycleCanceled", cause)
@@ -4138,14 +4294,123 @@ func postWhileLocked(t *testing.T, srv *runningDevnetRPCServer, path, handler, b
 	waitLifecycleCanceled(t, srv.state)
 	unlocked = true
 	srv.state.rpcMut.Unlock()
-	got := <-done
+	var got reply
+	select {
+	case got = <-done:
+	case <-time.After(testJoinWatchdog):
+		t.Fatalf("%s request never completed after the lock was released", path)
+	}
 	if got.err != nil {
 		t.Fatalf("%s request: %v", path, got.err)
 	}
-	if err := <-closeDone; err != nil {
+	if err := joinErr(t, closeDone, "Close"); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	return got.status, got.raw
+}
+
+// TestMineNextPostApplyWinnerSurvivesLifecycleCancellation executes the cell on
+// the far side of the mutation boundary: the rendezvous is the post-apply
+// acceptedBlockDASetConsumer callback, so ApplyBlock has already committed the
+// canonical block when the lifecycle cancellation is published. /mine_next has
+// no checkpoint left after MineOne returned, so the successful result stays
+// authoritative — any post-boundary recheck that remaps it to 503 fails here.
+func TestMineNextPostApplyWinnerSurvivesLifecycleCancellation(t *testing.T) {
+	state := mustRPCMineNextState(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce sync.Once
+	// Wired before the server starts serving, so the handler goroutine reads it
+	// through the server's own start ordering rather than racing this write.
+	state.SetAcceptedBlockDASetConsumer(func([]byte) error {
+		enterOnce.Do(func() {
+			close(entered)
+			<-release
+		})
+		return nil
+	})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce)
+	srv := mustLifecycleServer(t, state)
+	beforeHeight, _, beforeOK, err := state.blockStore.Tip()
+	if err != nil {
+		t.Fatalf("Tip: %v", err)
+	}
+	if !beforeOK {
+		t.Fatal("mine fixture has no genesis tip")
+	}
+
+	type reply struct {
+		status int
+		raw    []byte
+	}
+	replies := make(chan reply, 1)
+	mineDone := make(chan error, 1)
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	go func() {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+			"http://"+srv.addr+"/mine_next", strings.NewReader("{}"))
+		if err != nil {
+			mineDone <- err
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			mineDone <- err
+			return
+		}
+		raw, err := io.ReadAll(resp.Body)
+		if closeErr := resp.Body.Close(); err == nil {
+			err = closeErr
+		}
+		replies <- reply{status: resp.StatusCode, raw: raw}
+		mineDone <- err
+	}()
+	select {
+	case <-entered:
+	case err := <-mineDone:
+		t.Fatalf("/mine_next finished without reaching the post-apply callback: %v", err)
+	case <-time.After(testJoinWatchdog):
+		t.Fatal("/mine_next never reached the post-apply callback")
+	}
+
+	afterHeight, _, afterOK, err := state.blockStore.Tip()
+	if err != nil {
+		t.Fatalf("Tip: %v", err)
+	}
+	if !afterOK || afterHeight != beforeHeight+1 {
+		t.Fatalf("tip height=%d ok=%v at the post-apply callback, want %d: the rendezvous is not past canonical apply", afterHeight, afterOK, beforeHeight+1)
+	}
+	// Publication lands strictly after the mutation boundary this route already
+	// crossed, and strictly before the route selects its response.
+	srv.cancelLifecycle(errRPCLifecycleCanceled)
+	if state.lifecycleErr() == nil {
+		t.Fatal("lifecycle cancellation was not published before the route selected its response")
+	}
+	releaseOnce()
+
+	if err := joinErr(t, mineDone, "/mine_next request"); err != nil {
+		t.Fatalf("/mine_next request: %v", err)
+	}
+	got := <-replies
+	var body mineNextResponse
+	if err := json.Unmarshal(got.raw, &body); err != nil {
+		t.Fatalf("Unmarshal %q: %v", got.raw, err)
+	}
+	if got.status != http.StatusOK || !body.Mined || body.Error != "" {
+		t.Fatalf("post-boundary lifecycle cancellation remapped the mine winner: %d %s", got.status, got.raw)
+	}
+	if body.Height == nil || *body.Height != beforeHeight+1 {
+		t.Fatalf("mine winner height = %v, want %d", body.Height, beforeHeight+1)
+	}
+	finalHeight, _, finalOK, err := state.blockStore.Tip()
+	if err != nil {
+		t.Fatalf("Tip: %v", err)
+	}
+	if !finalOK || finalHeight != beforeHeight+1 {
+		t.Fatalf("tip height=%d ok=%v after the response, want the applied %d", finalHeight, finalOK, beforeHeight+1)
+	}
 }
 
 func assertMineCanceledBeforeApply(t *testing.T, closer func(*runningDevnetRPCServer) error) {
@@ -4237,10 +4502,10 @@ func TestSubmitTxLifecycleWinnerPreservesAdmissionResult(t *testing.T) {
 	go func() { closeDone <- f.srv.Close(context.Background()) }()
 	waitLifecycleCanceled(t, f.srv.state)
 	f.releaseHeld()
-	if err := <-reqDone; err != nil {
+	if err := joinErr(t, reqDone, "held /submit_tx request"); err != nil {
 		t.Fatalf("held /submit_tx request: %v", err)
 	}
-	if err := <-closeDone; err != nil {
+	if err := joinErr(t, closeDone, "Close"); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if f.status != http.StatusOK || !f.body.Accepted || f.body.TxID == "" || f.body.Error != "" {
