@@ -4310,6 +4310,17 @@ func liveLifecycle(t *testing.T, state *devnetRPCState) {
 	state.lifecycleCtx = ctx
 }
 
+// canceledLifecycle binds a lifecycle source already canceled with the
+// PRODUCTION cause, modeling a shutdown that completed before the handler
+// classified its result. It reuses errRPCLifecycleCanceled itself, so a
+// production sentinel change cannot leave this fixture silently passing.
+func canceledLifecycle(t *testing.T, state *devnetRPCState) {
+	t.Helper()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(errRPCLifecycleCanceled)
+	state.lifecycleCtx = ctx
+}
+
 func canceledRequestCtx() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -4330,6 +4341,30 @@ func TestMineNextRequestCancellationPreservesExistingError(t *testing.T) {
 	}
 	if got.Mined || got.Error != context.Canceled.Error() {
 		t.Fatalf("request-local cancellation reclassified as lifecycle unavailability: %+v", got)
+	}
+}
+
+// TestMineNextLateLifecycleCancelKeepsRequestLocalClassification pins the
+// interleaving the current-state predicate got wrong: MineOne observes a
+// request-local cancellation while the lifecycle is live, then shutdown
+// cancels the lifecycle source before the handler classifies. The request
+// context's own cause is context.Canceled and never the lifecycle sentinel,
+// so the 422 formed at the defined check stands with no later
+// reclassification (RUBIN_NODE_RPC_DEVNET.md section 2 race rule, 3.4).
+func TestMineNextLateLifecycleCancelKeepsRequestLocalClassification(t *testing.T) {
+	state := mustRPCMineNextState(t)
+	canceledLifecycle(t, state)
+	rec := httptest.NewRecorder()
+	handleMineNext(state, rec, httptest.NewRequest(http.MethodPost, "/mine_next", nil).WithContext(canceledRequestCtx()))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d want the baseline 422: a lifecycle cancellation the miner never observed reclassified the formed failure body=%s", rec.Code, rec.Body.String())
+	}
+	var got mineNextResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Mined || got.Error != context.Canceled.Error() {
+		t.Fatalf("late lifecycle cancellation replaced the request-local failure result: %+v", got)
 	}
 }
 

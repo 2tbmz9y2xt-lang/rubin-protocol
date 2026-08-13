@@ -44,11 +44,14 @@ type devnetRPCState struct {
 	rpcMut sync.Mutex
 	miner  *node.Miner // devnet live mining for POST /mine_next; nil disables the route
 	// lifecycleCtx is the single server-owned handler lifecycle source
-	// (RUBIN_NODE_RPC_DEVNET.md 2.1). startDevnetRPCServer creates it,
-	// installs it as the http.Server BaseContext — so every r.Context()
-	// descends from it — and hands its cancel to the single
-	// http.Server.RegisterOnShutdown callback, so native Shutdown itself
-	// publishes the cancellation after its ingress freeze.
+	// (RUBIN_NODE_RPC_DEVNET.md 2.1). startDevnetRPCServer creates it with
+	// context.WithCancelCause, installs it as the http.Server BaseContext —
+	// so every r.Context() descends from it — and hands its cancel to the
+	// single http.Server.RegisterOnShutdown callback, so native Shutdown
+	// itself publishes the cancellation after its ingress freeze. The cause
+	// is always errRPCLifecycleCanceled and is provenance only: it lets
+	// /mine_next tell a lifecycle-caused cancellation from a request-local
+	// one and never reaches a response body, log line or metric label.
 	// It is written once before the serving goroutine starts, so every
 	// handler read happens-after that write. A nil value means no server
 	// owns this state (direct-handler tests, fixtures): the lifecycle is
@@ -331,12 +334,22 @@ func (s *devnetRPCState) SetPeerLifecycleExitsFunc(fn func() uint64) {
 	s.peerLifecycleExits = fn
 }
 
+// errRPCLifecycleCanceled is the cancellation cause startDevnetRPCServer
+// attaches to the server-owned lifecycle source. It is provenance only:
+// /mine_next reads it through context.Cause to tell a lifecycle-caused
+// MineOne cancellation from a request-local one. It never appears in a
+// response body, log line or metric label — the routes keep answering
+// exactly `rpc unavailable` (RUBIN_NODE_RPC_DEVNET.md 3.3, 3.4).
+var errRPCLifecycleCanceled = errors.New("rpc lifecycle canceled")
+
 // lifecycleErr returns the server-owned lifecycle source's cancellation
-// cause, or nil while that source is live or absent. It is the ONLY
-// cancellation input the mutating routes classify as lifecycle
-// unavailability: r.Context() also fires on client disconnect, and a
-// request-local cancellation must keep its baseline classification
-// (RUBIN_NODE_RPC_DEVNET.md 3.3, 3.4). Nil-receiver safe.
+// error, or nil while that source is live or absent. It is the input of the
+// /submit_tx pre-admission check only: that check is defined on the state of
+// the source read directly AT the check (RUBIN_NODE_RPC_DEVNET.md 3.3), where
+// r.Context() would misclassify a client disconnect as unavailability.
+// /mine_next must not use it — it classifies after MineOne returned, so it
+// needs the cancellation's provenance rather than the source's state at that
+// later moment; see handleMineNext. Nil-receiver safe.
 func (s *devnetRPCState) lifecycleErr() error {
 	if s == nil || s.lifecycleCtx == nil {
 		return nil
@@ -676,7 +689,9 @@ func startDevnetRPCServer(
 	// One lifecycle source per server, published on the state before the
 	// serving goroutine starts and installed as BaseContext so every
 	// connection — and therefore every r.Context() — descends from it.
-	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
+	// WithCancelCause, not WithCancel: the cause is the provenance /mine_next
+	// classifies on after MineOne has returned.
+	lifecycleCtx, cancelLifecycle := context.WithCancelCause(context.Background())
 	state.lifecycleCtx = lifecycleCtx
 	server := &http.Server{
 		Handler:           newDevnetRPCHandler(state),
@@ -705,10 +720,11 @@ func startDevnetRPCServer(
 	// parked on this source keeps its connection non-idle until it answers
 	// 503, so the drain wait cannot return before the callback has run; with
 	// no accepted handler the ordering is unobservable. Callbacks fire on
-	// EVERY Shutdown call, so repeated and concurrent Close rely on
-	// context.CancelFunc being idempotent. Exactly one callback is
-	// registered here — this is not a callback registry.
-	server.RegisterOnShutdown(cancelLifecycle)
+	// EVERY Shutdown call, so repeated and concurrent Close rely on context
+	// cancellation being idempotent — a later call keeps the first cause.
+	// Exactly one callback is registered here — this is not a callback
+	// registry.
+	server.RegisterOnShutdown(func() { cancelLifecycle(errRPCLifecycleCanceled) })
 	go func() {
 		err := server.Serve(listener)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) && stderr != nil {
@@ -1121,12 +1137,20 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 	mb, err := state.miner.MineOne(r.Context(), nil)
 	if err != nil {
 		state.rpcMut.Unlock()
-		// RUBIN_NODE_RPC_DEVNET.md 3.4: errors.Is(err, lifeErr) is
-		// flavor-agnostic by construction -- it tests the source's own live
-		// cause, today only context.Canceled (source built with WithCancel),
-		// and would still classify a future deadline-bearing source. A
-		// request-local cancellation with the lifecycle live keeps the baseline 422.
-		if lifeErr := state.lifecycleErr(); lifeErr != nil && errors.Is(err, lifeErr) {
+		// RUBIN_NODE_RPC_DEVNET.md 3.4 and the section-2 race rule: the
+		// classification is decided by the cancellation's PROVENANCE, not by
+		// the lifecycle source's state at this line. Shutdown can cancel that
+		// source after MineOne already returned a request-local cancellation,
+		// and the failure result formed at the defined check must not be
+		// reclassified afterwards. context.Cause reports the cause of the
+		// FIRST cancellation of this context, and a child canceled through its
+		// parent inherits the parent's cause, so the answer is immutable once
+		// either source fires: lifecycle-first yields errRPCLifecycleCanceled
+		// permanently, request-local-first yields context.Canceled
+		// permanently. A non-cancellation MineOne failure keeps the baseline
+		// 422 even under a canceled lifecycle, because it is not a
+		// context.Canceled error — the failure exit stands.
+		if cause := context.Cause(r.Context()); errors.Is(cause, errRPCLifecycleCanceled) && errors.Is(err, context.Canceled) {
 			writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextResponse{
 				Mined: false,
 				Error: "rpc unavailable",
