@@ -2349,7 +2349,9 @@ func TestDevnetRPCMineNextPreservesWideSupply(t *testing.T) {
 	}
 }
 
-func mustRPCMineNextState(t *testing.T) *devnetRPCState {
+// mustRPCMineNextState builds the /mine_next fixture; minerCfgTweaks mutate the
+// miner config before node.NewMiner (used to install an in-MineOne rendezvous).
+func mustRPCMineNextState(t *testing.T, minerCfgTweaks ...func(*node.MinerConfig)) *devnetRPCState {
 	t.Helper()
 	dir := t.TempDir()
 	chainStatePath := node.ChainStatePath(dir)
@@ -2375,7 +2377,11 @@ func mustRPCMineNextState(t *testing.T) *devnetRPCState {
 	}
 	syncEngine.SetMempool(mempool)
 	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
-	miner, err := node.NewMiner(chainState, blockStore, syncEngine, node.DefaultMinerConfig())
+	minerCfg := node.DefaultMinerConfig()
+	for _, tweak := range minerCfgTweaks {
+		tweak(&minerCfg)
+	}
+	miner, err := node.NewMiner(chainState, blockStore, syncEngine, minerCfg)
 	if err != nil {
 		t.Fatalf("NewMiner: %v", err)
 	}
@@ -4014,16 +4020,16 @@ func waitBlockedOnRPCMut(t *testing.T, handler string) {
 }
 
 // waitLifecycleCanceled observes the exact input the pre-mutation checks read,
-// so a parked handler is released only once cancellation is latched.
-// Publication is owned by native Shutdown, which launches the registered
-// RegisterOnShutdown callback after freezing ingress; this poll is what makes
-// that asynchronous launch an observed fact rather than an assumed one.
+// so a parked handler is released only once cancellation is latched. Close
+// publishes synchronously before it invokes the drain, so this poll waits on a
+// concurrent Close goroutine reaching that statement, not on any asynchronous
+// callback launch.
 func waitLifecycleCanceled(t *testing.T, state *devnetRPCState) {
 	t.Helper()
 	watchdog := time.Now().Add(30 * time.Second) // watchdog only
 	for state.lifecycleErr() == nil {
 		if time.Now().After(watchdog) {
-			t.Fatal("Shutdown never published the lifecycle cancellation to the parked handler")
+			t.Fatal("lifecycle cancellation was never published to the parked handler")
 		}
 		time.Sleep(time.Millisecond) // probe pacing only
 	}
@@ -4056,6 +4062,38 @@ func mustLifecycleServer(t *testing.T, state *devnetRPCState) *runningDevnetRPCS
 	return srv
 }
 
+// TestCloseFreezesIngressBeforePublishingCancellation pins that a RETURNED
+// Close has BOTH frozen ingress AND published the lifecycle cancellation with
+// the production cause on a server that never accepted a handler — the case
+// where an asynchronously launched publisher can land after the drain already
+// completed, or never observably at all. The test deliberately cannot
+// distinguish the internal order of the two steps: that order is program order
+// in Close (the listener Close statement precedes the cancel statement, both on
+// the caller's goroutine) and is proven structurally, not here.
+func TestCloseFreezesIngressBeforePublishingCancellation(t *testing.T) {
+	state := mustRPCState(t, false)
+	srv := mustLifecycleServer(t, state)
+	if err := srv.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+srv.addr+"/ready", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("ingress accepted a fresh dial after Close returned: the freeze never happened")
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("dial after Close = %v, want ECONNREFUSED", err)
+	}
+	if cause := context.Cause(state.lifecycleCtx); !errors.Is(cause, errRPCLifecycleCanceled) {
+		t.Fatalf("lifecycle cause after Close = %v, want errRPCLifecycleCanceled", cause)
+	}
+}
+
 // postWhileLocked holds rpcMut, sends one real request, waits until the named
 // handler parks on the lock, closes the server through closer, waits for the
 // cancellation to latch and only then releases the lock — so the route's
@@ -4077,7 +4115,13 @@ func postWhileLocked(t *testing.T, srv *runningDevnetRPCServer, path, handler, b
 	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 	done := make(chan reply, 1)
 	go func() {
-		resp, err := client.Post("http://"+srv.addr+path, "application/json", strings.NewReader(body))
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://"+srv.addr+path, strings.NewReader(body))
+		if err != nil {
+			done <- reply{err: err}
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
 		if err != nil {
 			done <- reply{err: err}
 			return
@@ -4236,10 +4280,12 @@ func (c *pollCountingCtx) Err() error {
 	return c.Context.Err()
 }
 
-// mustPreApplyMiner builds a devnet miner over a fresh genesis chain with a
-// pinned timestamp source, so two fixtures produce byte-identical block
-// templates and therefore the same nonce-attempt count.
-func mustPreApplyMiner(t *testing.T, timestamp uint64) (*node.Miner, *node.BlockStore) {
+// mustPreApplyMiner builds a devnet miner over a fresh chain with a pinned
+// timestamp source, so two fixtures produce byte-identical block templates and
+// therefore the same nonce-attempt count. applyGenesis=false leaves the store
+// completely empty, which is what makes MineOne's entry check observable
+// BEFORE bootstrapGenesisIfNeeded persists the canonical genesis.
+func mustPreApplyMiner(t *testing.T, timestamp uint64, applyGenesis bool) (*node.Miner, *node.BlockStore) {
 	t.Helper()
 	dir := t.TempDir()
 	chainStatePath := node.ChainStatePath(dir)
@@ -4255,8 +4301,10 @@ func mustPreApplyMiner(t *testing.T, timestamp uint64) (*node.Miner, *node.Block
 	if err != nil {
 		t.Fatalf("NewSyncEngine: %v", err)
 	}
-	if _, err := syncEngine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
-		t.Fatalf("ApplyBlock(genesis): %v", err)
+	if applyGenesis {
+		if _, err := syncEngine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+			t.Fatalf("ApplyBlock(genesis): %v", err)
+		}
 	}
 	cfg := node.DefaultMinerConfig()
 	cfg.TimestampSource = func() uint64 { return timestamp }
@@ -4269,7 +4317,7 @@ func mustPreApplyMiner(t *testing.T, timestamp uint64) (*node.Miner, *node.Block
 
 func TestMineOnePreApplyCancellationCheckpoint(t *testing.T) {
 	timestamp := uint64(time.Now().Unix())
-	calibMiner, _ := mustPreApplyMiner(t, timestamp)
+	calibMiner, _ := mustPreApplyMiner(t, timestamp, true)
 	calibration := &pollCountingCtx{Context: context.Background()}
 	mb, err := calibMiner.MineOne(calibration, nil)
 	if err != nil {
@@ -4282,7 +4330,7 @@ func TestMineOnePreApplyCancellationCheckpoint(t *testing.T) {
 	if calibration.polls != wantPolls {
 		t.Fatalf("MineOne context polls = %d, want %d (entry + %d nonce attempts + pre-apply)", calibration.polls, wantPolls, mb.Nonce+1)
 	}
-	miner, blockStore := mustPreApplyMiner(t, timestamp)
+	miner, blockStore := mustPreApplyMiner(t, timestamp, true)
 	closed := make(chan struct{})
 	close(closed)
 	preApply := &pollCountingCtx{Context: context.Background(), doneAt: wantPolls, closed: closed}
@@ -4331,7 +4379,7 @@ func TestMineNextRequestCancellationPreservesExistingError(t *testing.T) {
 	state := mustRPCMineNextState(t)
 	liveLifecycle(t, state)
 	rec := httptest.NewRecorder()
-	handleMineNext(state, rec, httptest.NewRequest(http.MethodPost, "/mine_next", nil).WithContext(canceledRequestCtx()))
+	handleMineNext(state, rec, httptest.NewRequestWithContext(canceledRequestCtx(), http.MethodPost, "/mine_next", nil))
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d want the baseline 422 body=%s", rec.Code, rec.Body.String())
 	}
@@ -4344,27 +4392,91 @@ func TestMineNextRequestCancellationPreservesExistingError(t *testing.T) {
 	}
 }
 
-// TestMineNextLateLifecycleCancelKeepsRequestLocalClassification pins the
-// interleaving the current-state predicate got wrong: MineOne observes a
-// request-local cancellation while the lifecycle is live, then shutdown
-// cancels the lifecycle source before the handler classifies. The request
-// context's own cause is context.Canceled and never the lifecycle sentinel,
-// so the 422 formed at the defined check stands with no later
-// reclassification (RUBIN_NODE_RPC_DEVNET.md section 2 race rule, 3.4).
-func TestMineNextLateLifecycleCancelKeepsRequestLocalClassification(t *testing.T) {
+// TestMineNextDualCanceledSourcesSelectLifecycleUnavailability executes the
+// hostile cell where BOTH sources are canceled before the route's first
+// defined check: the lifecycle source is already canceled with the production
+// sentinel and the request context is independently canceled, so the immutable
+// first cause is context.Canceled, not the sentinel. The entry check therefore
+// observes lifecycle cancellation and RUBIN_NODE_RPC_DEVNET.md section 2 makes
+// the lifecycle answer win "even when a per-request cancellation has also
+// fired": 503 `rpc unavailable`. Kills both a pure first-cause predicate
+// (answers 422 here) and dropping the entry read entirely.
+func TestMineNextDualCanceledSourcesSelectLifecycleUnavailability(t *testing.T) {
 	state := mustRPCMineNextState(t)
 	canceledLifecycle(t, state)
 	rec := httptest.NewRecorder()
-	handleMineNext(state, rec, httptest.NewRequest(http.MethodPost, "/mine_next", nil).WithContext(canceledRequestCtx()))
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status=%d want the baseline 422: a lifecycle cancellation the miner never observed reclassified the formed failure body=%s", rec.Code, rec.Body.String())
+	handleMineNext(state, rec, httptest.NewRequestWithContext(canceledRequestCtx(), http.MethodPost, "/mine_next", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503: a lifecycle source canceled at the defined check must win over the concurrent request-local cancellation body=%s", rec.Code, rec.Body.String())
 	}
 	var got mineNextResponse
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if got.Mined || got.Error != context.Canceled.Error() {
-		t.Fatalf("late lifecycle cancellation replaced the request-local failure result: %+v", got)
+	if got.Mined || got.Error != "rpc unavailable" {
+		t.Fatalf("dual-canceled /mine_next = %+v, want mined=false error=\"rpc unavailable\"", got)
+	}
+	if got.Height != nil || got.BlockHash != nil || got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
+		t.Fatalf("unavailable /mine_next carried success fields: %+v", got)
+	}
+}
+
+// TestMineNextMidMiningLifecycleCancelSelectsUnavailability executes the cell the
+// entry read alone cannot decide: the lifecycle source is LIVE at handleMineNext's
+// entry read (asserted below, pinning lifecycleLiveAtEntry=true) and is canceled
+// WHILE MineOne runs. The request context is a real child of state.lifecycleCtx, as
+// BaseContext wires it in production, so MineOne's nonce-quantum check returns
+// context.Canceled off a merged cancellation whose inherited cause is
+// errRPCLifecycleCanceled — a defined check observing lifecycle cancellation
+// (RUBIN_NODE_RPC_DEVNET.md section 2 + 3.4): 503 `rpc unavailable`, no success
+// fields, canonical tip untouched. Only the classification's cause term can yield
+// that 503 here, so dropping it answers 422 — a mutant no other test in this
+// package kills.
+func TestMineNextMidMiningLifecycleCancelSelectsUnavailability(t *testing.T) {
+	lifecycleCtx, cancelLifecycle := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { cancelLifecycle(context.Canceled) })
+	var cancelOnce sync.Once
+	state := mustRPCMineNextState(t, func(cfg *node.MinerConfig) {
+		// node/miner.go mineHeader invokes TimestampSource inside MineOne,
+		// after its entry check and before the nonce search — the rendezvous.
+		// Deterministic without any sleep: the cancellation is published
+		// before mineHeaderNonce's first per-attempt check.
+		cfg.TimestampSource = func() uint64 {
+			cancelOnce.Do(func() { cancelLifecycle(errRPCLifecycleCanceled) })
+			return 1_777_000_000
+		}
+	})
+	state.lifecycleCtx = lifecycleCtx
+	if err := state.lifecycleErr(); err != nil {
+		t.Fatalf("lifecycle source = %v at the entry read, want live: this test's cell requires lifecycleLiveAtEntry=true", err)
+	}
+	reqCtx, cancelReq := context.WithCancel(lifecycleCtx)
+	t.Cleanup(cancelReq)
+	beforeHeight, _, beforeOK, err := state.blockStore.Tip()
+	if err != nil {
+		t.Fatalf("Tip: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handleMineNext(state, rec, httptest.NewRequestWithContext(reqCtx, http.MethodPost, "/mine_next", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503: a lifecycle cancellation observed at a defined check inside MineOne must answer unavailability body=%s", rec.Code, rec.Body.String())
+	}
+	var got mineNextResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Mined || got.Error != "rpc unavailable" || got.Height != nil || got.BlockHash != nil ||
+		got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
+		t.Fatalf("mid-mining lifecycle cancellation = %+v, want mined=false error=\"rpc unavailable\" and no success fields", got)
+	}
+	afterHeight, _, afterOK, err := state.blockStore.Tip()
+	if err != nil {
+		t.Fatalf("Tip: %v", err)
+	}
+	if afterOK != beforeOK || afterHeight != beforeHeight {
+		t.Fatalf("canonical tip moved from (height=%d ok=%v) to (height=%d ok=%v): the canceled mine must not apply a block", beforeHeight, beforeOK, afterHeight, afterOK)
 	}
 }
 
@@ -4372,7 +4484,7 @@ func TestSubmitTxRequestCancellationPreservesExistingError(t *testing.T) {
 	state, body, txid, txidHex := mustSubmitFixture(t)
 	liveLifecycle(t, state)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/submit_tx", strings.NewReader(body)).WithContext(canceledRequestCtx())
+	req := httptest.NewRequestWithContext(canceledRequestCtx(), http.MethodPost, "/submit_tx", strings.NewReader(body))
 	handleSubmitTx(state, rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d want the baseline 200 body=%s", rec.Code, rec.Body.String())
@@ -4390,5 +4502,59 @@ func TestSubmitTxRequestCancellationPreservesExistingError(t *testing.T) {
 	_, submits := state.metrics.snapshot()
 	if submits["accepted"] != 1 || submits["unavailable"] != 0 {
 		t.Fatalf("submit_tx result counters = %v, want exactly one `accepted` and no `unavailable`", submits)
+	}
+}
+
+// TestSubmitTxDualCanceledSourcesSelectLifecycleUnavailability is the submit
+// side of the same hostile cell: both sources canceled before the route's
+// pre-admission check. /submit_tx reads the lifecycle source directly at that
+// check, so the concurrent request-local cancellation cannot shadow it — 503
+// `rpc unavailable`, no admission, no txid.
+func TestSubmitTxDualCanceledSourcesSelectLifecycleUnavailability(t *testing.T) {
+	state, body, txid, _ := mustSubmitFixture(t)
+	canceledLifecycle(t, state)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(canceledRequestCtx(), http.MethodPost, "/submit_tx", strings.NewReader(body))
+	handleSubmitTx(state, rec, req)
+	raw := rec.Body.Bytes()
+	var got submitTxResponse
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal %q: %v", raw, err)
+	}
+	if rec.Code != http.StatusServiceUnavailable || got.Accepted || got.Error != "rpc unavailable" ||
+		bytes.Contains(raw, []byte("txid")) {
+		t.Fatalf("dual-canceled /submit_tx = %d %s, want 503 accepted=false error=\"rpc unavailable\" and no txid field", rec.Code, raw)
+	}
+	if state.mempool.Contains(txid) {
+		t.Fatal("dual-canceled /submit_tx admitted the transaction: the lifecycle check lost to the request-local cancellation")
+	}
+	_, submits := state.metrics.snapshot()
+	if submits["unavailable"] != 1 || submits["accepted"] != 0 {
+		t.Fatalf("submit_tx result counters = %v, want exactly one `unavailable` and no `accepted`", submits)
+	}
+}
+
+// TestMineOneEntryCancellationPrecedesBootstrap pins the POSITION of MineOne's
+// entry checkpoint: RUBIN_NODE_RPC_DEVNET.md 3.4 puts it before the bootstrap
+// mutation, so a cancellation observed there must leave the canonical store
+// with no tip at all. Moving the check below bootstrapGenesisIfNeeded persists
+// the canonical genesis and fails the emptiness assertion.
+func TestMineOneEntryCancellationPrecedesBootstrap(t *testing.T) {
+	miner, blockStore := mustPreApplyMiner(t, uint64(time.Now().Unix()), false)
+	closed := make(chan struct{})
+	close(closed)
+	entry := &pollCountingCtx{Context: context.Background(), doneAt: 1, closed: closed}
+	if _, err := miner.MineOne(entry, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("MineOne observing cancellation at the entry check = %v, want context.Canceled", err)
+	}
+	if entry.polls != 1 {
+		t.Fatalf("canceled run polled %d times, want 1: the observation was not the entry check", entry.polls)
+	}
+	height, _, ok, err := blockStore.Tip()
+	if err != nil {
+		t.Fatalf("Tip: %v", err)
+	}
+	if ok {
+		t.Fatalf("tip height=%d present after an entry cancellation, want an untouched empty store: the entry check ran after the genesis bootstrap mutation", height)
 	}
 }

@@ -46,9 +46,9 @@ type devnetRPCState struct {
 	// lifecycleCtx is the single server-owned handler lifecycle source
 	// (RUBIN_NODE_RPC_DEVNET.md 2.1). startDevnetRPCServer creates it with
 	// context.WithCancelCause, installs it as the http.Server BaseContext —
-	// so every r.Context() descends from it — and hands its cancel to the
-	// single http.Server.RegisterOnShutdown callback, so native Shutdown
-	// itself publishes the cancellation after its ingress freeze. The cause
+	// so every r.Context() descends from it — and stores its cancel on the
+	// running server, where Close step (b) publishes it synchronously between
+	// the ingress freeze and the native drain call. The cause
 	// is always errRPCLifecycleCanceled and is provenance only: it lets
 	// /mine_next tell a lifecycle-caused cancellation from a request-local
 	// one and never reaches a response body, log line or metric label.
@@ -344,12 +344,14 @@ var errRPCLifecycleCanceled = errors.New("rpc lifecycle canceled")
 
 // lifecycleErr returns the server-owned lifecycle source's cancellation
 // error, or nil while that source is live or absent. It is the input of the
-// /submit_tx pre-admission check only: that check is defined on the state of
-// the source read directly AT the check (RUBIN_NODE_RPC_DEVNET.md 3.3), where
+// /submit_tx pre-admission check (RUBIN_NODE_RPC_DEVNET.md 3.3), which is
+// defined on the state of the source read directly AT the check, where
 // r.Context() would misclassify a client disconnect as unavailability.
-// /mine_next must not use it — it classifies after MineOne returned, so it
-// needs the cancellation's provenance rather than the source's state at that
-// later moment; see handleMineNext. Nil-receiver safe.
+// /mine_next's single sanctioned use is the ENTRY read taken immediately
+// before MineOne, i.e. at that route's first defined-check position; it must
+// not be read again to classify after MineOne returned, because the source's
+// state at that later moment is not the state at any defined check. See
+// handleMineNext. Nil-receiver safe.
 func (s *devnetRPCState) lifecycleErr() error {
 	if s == nil || s.lifecycleCtx == nil {
 		return nil
@@ -361,6 +363,16 @@ type runningDevnetRPCServer struct {
 	addr   string
 	server *http.Server
 	state  *devnetRPCState
+	// listener is the bound ingress socket. Close closes it as its very
+	// first step — the atomic ingress freeze of RUBIN_NODE_RPC_DEVNET.md
+	// 2.1 — so nothing published afterwards can precede the freeze.
+	listener net.Listener
+	// cancelLifecycle publishes the handler-visible lifecycle cancellation
+	// (2.1 step 2). Close invokes it directly rather than through
+	// http.Server.RegisterOnShutdown, whose callbacks run in NEW goroutines
+	// (`go f()`) with no happens-before edge to the drain wait — with no
+	// parked observer that launch can even land after the drain completed.
+	cancelLifecycle context.CancelCauseFunc
 }
 
 // TryMarkReadyOnStartup forwards through to the underlying gate.
@@ -711,23 +723,13 @@ func startDevnetRPCServer(
 		ReadTimeout: 10 * time.Second,
 		IdleTimeout: 60 * time.Second,
 	}
-	// RUBIN_NODE_RPC_DEVNET.md 2.1 mandates freeze-then-publish, and
-	// RegisterOnShutdown is the stdlib seam with exactly that order:
-	// Shutdown stores inShutdown, closes the listeners under s.mu and only
-	// then launches the registered callbacks (net/http/server.go:3151-3160),
-	// ahead of its drain-wait loop. The launch is asynchronous, yet it
-	// precedes drain completion whenever an observer exists: a handler
-	// parked on this source keeps its connection non-idle until it answers
-	// 503, so the drain wait cannot return before the callback has run; with
-	// no accepted handler the ordering is unobservable. Callbacks fire on
-	// EVERY Shutdown call, so repeated and concurrent Close rely on context
-	// cancellation being idempotent — a later call keeps the first cause.
-	// Exactly one callback is registered here — this is not a callback
-	// registry.
-	server.RegisterOnShutdown(func() { cancelLifecycle(errRPCLifecycleCanceled) })
 	go func() {
 		err := server.Serve(listener)
-		if err != nil && !errors.Is(err, http.ErrServerClosed) && stderr != nil {
+		// net.ErrClosed is the expected exit once Close froze ingress: it
+		// closes this very listener before calling Shutdown, so Accept fails
+		// before the server has marked itself shutting down and Serve reports
+		// the raw error instead of http.ErrServerClosed.
+		if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) && stderr != nil {
 			_, _ = fmt.Fprintf(stderr, "rpc server failed: %v\n", err)
 		}
 	}()
@@ -735,36 +737,54 @@ func startDevnetRPCServer(
 	if stdout != nil {
 		_, _ = fmt.Fprintf(stdout, "rpc: listening=%s\n", addr)
 	}
-	return &runningDevnetRPCServer{addr: addr, server: server, state: state}, nil
+	return &runningDevnetRPCServer{
+		addr:            addr,
+		server:          server,
+		state:           state,
+		listener:        listener,
+		cancelLifecycle: cancelLifecycle,
+	}, nil
 }
 
-// Close drains the RPC surface. It is the first deferred teardown to unwind
-// in main.go, so it MUST have returned before p2p.Service.Close begins.
-// Native Shutdown owns both halves of the drain: it freezes ingress (closes
-// the listeners) and then waits until every connection net/http already
-// accepted goes idle. Expiry of the caller-provided ctx is a DIAGNOSTIC
-// only — it must not release the caller while net/http still owns an active
-// handler — so an expired first Shutdown is followed by an unbounded
-// Shutdown on the same server, and the exact caller-context error is
+// Close drains the RPC surface, performing the three RUBIN_NODE_RPC_DEVNET.md
+// 2.1 steps as sequential statements on this one goroutine: (a) freeze ingress
+// by closing the listener — the same action native Shutdown performs first —
+// (b) publish the handler-visible lifecycle cancellation, (c) drain through
+// native Shutdown. Their order is program order, so publication follows the
+// freeze and precedes the drain CALL unconditionally, including the case where
+// no handler was ever accepted. (The previous wiring handed the cancel to
+// http.Server.RegisterOnShutdown, whose `go f()` launch carries no ordering
+// edge to the drain wait at all.) Both shutdown initiators — main.go's
+// deferred Close on the signal unwind and a direct Close — funnel through
+// here, so they stay equivalent by construction.
+//
+// Close is the first deferred teardown to unwind in main.go, so it MUST have
+// returned before p2p.Service.Close begins. Expiry of the caller-provided ctx
+// is a DIAGNOSTIC only — it must not release the caller while net/http still
+// owns an active handler — so an expired first Shutdown is followed by an
+// unbounded Shutdown on the same server, and the exact caller-context error is
 // returned only after that drain reaches quiescence.
 //
-// Close deliberately does NOT publish the server-owned lifecycle
-// cancellation itself: startDevnetRPCServer hands that cancel to
-// http.Server.RegisterOnShutdown, so native Shutdown publishes it AFTER the
-// ingress freeze and BEFORE the drain wait — the RUBIN_NODE_RPC_DEVNET.md
-// 2.1 step order (freeze, publish, drain). Canceling here instead would
-// publish before the freeze, and a request accepted in that window would be
-// 503-drained where a conforming node refuses it outright. Both shutdown
-// initiators — main.go's deferred Close on the signal unwind and a direct
-// Close — funnel into this same Shutdown, so they stay equivalent by
-// construction; publication repeats idempotently on every Shutdown call.
-// Cancellation only makes already-accepted mutating handlers finish faster
-// at their own defined pre-mutation checks — ingress freeze and drain stay
-// native-Shutdown-owned, no handler is aborted, and work that already
-// entered its result-selecting boundary keeps its result.
+// Repeated and concurrent Close stay idempotent: a second listener Close
+// reports an error we deliberately drop because the freeze is already in
+// force, a cancel cause is first-wins and immutable, and net/http's Shutdown
+// is safe to call repeatedly and concurrently.
+//
+// Cancellation only makes already-accepted mutating handlers finish faster at
+// their own defined pre-mutation checks — no handler is aborted, and work that
+// already entered its result-selecting boundary keeps its result. The race
+// between publication and a handler's check stays governed by the spec's "no
+// shared atomic gate required" clause: a check that observes a live source
+// still wins and is never remapped afterwards.
 func (s *runningDevnetRPCServer) Close(ctx context.Context) error {
 	if s == nil || s.server == nil {
 		return nil
+	}
+	if s.listener != nil {
+		_ = s.listener.Close()
+	}
+	if s.cancelLifecycle != nil {
+		s.cancelLifecycle(errRPCLifecycleCanceled)
 	}
 	err := s.server.Shutdown(ctx)
 	// Guarded on the returned error MATCHING ctx.Err(), not merely on ctx
@@ -779,6 +799,15 @@ func (s *runningDevnetRPCServer) Close(ctx context.Context) error {
 		// deliberately dropped — the caller's contract is the diagnostic.
 		_ = s.server.Shutdown(context.Background())
 		return ctxErr
+	}
+	// What remains can only carry net.ErrClosed from native Shutdown closing
+	// the listener step (a) already closed (or nil, when the Serve loop had
+	// already deregistered it — a benign race between the two). That is a
+	// self-inflicted echo of our own freeze and never a drain failure:
+	// Shutdown reports an incomplete drain as the caller ctx error, handled
+	// above.
+	if errors.Is(err, net.ErrClosed) {
+		return nil
 	}
 	return err
 }
@@ -1134,23 +1163,55 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	state.rpcMut.Lock()
+	// Entry state of the lifecycle source, read at the route's first defined
+	// check position — the observation MineOne's own pre-bootstrap entry check
+	// makes (RUBIN_NODE_RPC_DEVNET.md 3.4). It is captured BEFORE the call
+	// because the classification below must be bounded by the state at a
+	// defined check, never by the state at response time.
+	lifecycleLiveAtEntry := state.lifecycleErr() == nil
 	mb, err := state.miner.MineOne(r.Context(), nil)
 	if err != nil {
 		state.rpcMut.Unlock()
-		// RUBIN_NODE_RPC_DEVNET.md 3.4 and the section-2 race rule: the
-		// classification is decided by the cancellation's PROVENANCE, not by
-		// the lifecycle source's state at this line. Shutdown can cancel that
-		// source after MineOne already returned a request-local cancellation,
-		// and the failure result formed at the defined check must not be
-		// reclassified afterwards. context.Cause reports the cause of the
-		// FIRST cancellation of this context, and a child canceled through its
-		// parent inherits the parent's cause, so the answer is immutable once
-		// either source fires: lifecycle-first yields errRPCLifecycleCanceled
-		// permanently, request-local-first yields context.Canceled
-		// permanently. A non-cancellation MineOne failure keeps the baseline
-		// 422 even under a canceled lifecycle, because it is not a
-		// context.Canceled error — the failure exit stands.
-		if cause := context.Cause(r.Context()); errors.Is(cause, errRPCLifecycleCanceled) && errors.Is(err, context.Canceled) {
+		// RUBIN_NODE_RPC_DEVNET.md section 2 + 3.4. The rule in full: a defined
+		// check that OBSERVES lifecycle cancellation answers 503 `rpc
+		// unavailable` even when a per-request cancellation has also fired; the
+		// 422-preserving carve-out is a per-request cancellation ALONE, with the
+		// lifecycle source not canceled; and a route exit that formed a failure
+		// result stands with no later reclassification. So the two terms below
+		// are the two ways a defined check of this route can have observed the
+		// lifecycle source:
+		//   !lifecycleLiveAtEntry — the source was already canceled at the entry
+		//     check, so that check observed it regardless of which source
+		//     canceled the merged request context first;
+		//   cause == errRPCLifecycleCanceled — the source canceled during
+		//     MineOne and was observed through the merged context at the
+		//     nonce-quantum or pre-apply check, context.Cause reporting the
+		//     inherited lifecycle sentinel.
+		// Both are gated on errors.Is(err, context.Canceled): a non-cancellation
+		// MineOne failure keeps the baseline 422 even under a canceled
+		// lifecycle, because no check observed cancellation — the failure exit
+		// stands.
+		//
+		// Two measured failure modes this shape exists to exclude:
+		//   (i) response-time state inspection (`state.lifecycleErr() != nil`
+		//     read HERE) reclassified the protected request-local failure exit
+		//     when shutdown canceled the source after MineOne had already
+		//     returned (Codex P2);
+		//   (ii) pure first-cause provenance (the cause term alone) answered 422
+		//     in the cell where the lifecycle source was already canceled at the
+		//     check but a request-local cancellation had pinned the immutable
+		//     first cause (fanout round).
+		//
+		// Documented approximation, not an accident: the remaining sliver is a
+		// lifecycle cancellation that lands between a request-first cancellation
+		// and the observing check while the source was still live at entry. The
+		// cause is pinned to context.Canceled and the entry read is live, so
+		// this answers 422. That is consistent — the sliver is indistinguishable
+		// by any external observer or test from a conforming execution in which
+		// the observing check ran before the lifecycle cancellation, whose
+		// mandated answer is exactly this 422.
+		if errors.Is(err, context.Canceled) &&
+			(!lifecycleLiveAtEntry || errors.Is(context.Cause(r.Context()), errRPCLifecycleCanceled)) {
 			writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextResponse{
 				Mined: false,
 				Error: "rpc unavailable",
