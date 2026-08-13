@@ -4480,6 +4480,67 @@ func TestMineNextMidMiningLifecycleCancelSelectsUnavailability(t *testing.T) {
 	}
 }
 
+// TestMineNextLifecycleCancelAfterRequestCancelSelectsUnavailability executes the
+// cell no provenance-based predicate can decide: the lifecycle source is LIVE at
+// entry (asserted below), the request-local cancellation fires FIRST while MineOne
+// runs — pinning the merged context's immutable first cause to context.Canceled —
+// and the lifecycle source is canceled immediately afterwards, still BEFORE the
+// next nonce-attempt checkpoint. That checkpoint therefore runs after lifecycle
+// cancellation and observes it, so RUBIN_NODE_RPC_DEVNET.md section 2 + 3.4 mandate
+// 503 `rpc unavailable` — "even when a per-request cancellation has also fired".
+// The entry-read-plus-context.Cause predicate answers 422 here.
+func TestMineNextLifecycleCancelAfterRequestCancelSelectsUnavailability(t *testing.T) {
+	lifecycleCtx, cancelLifecycle := context.WithCancelCause(context.Background())
+	t.Cleanup(func() { cancelLifecycle(context.Canceled) })
+	reqCtx, cancelReq := context.WithCancel(lifecycleCtx)
+	t.Cleanup(cancelReq)
+	var rendezvous sync.Once
+	state := mustRPCMineNextState(t, func(cfg *node.MinerConfig) {
+		// node/miner.go mineHeader invokes TimestampSource inside MineOne, after
+		// its entry check and before the nonce search — the rendezvous. Ordering
+		// is deterministic without any sleep: request-local cancellation first,
+		// lifecycle cancellation second, both before mineHeaderNonce's first
+		// per-attempt check.
+		cfg.TimestampSource = func() uint64 {
+			rendezvous.Do(func() {
+				cancelReq()
+				cancelLifecycle(errRPCLifecycleCanceled)
+			})
+			return 1_777_000_000
+		}
+	})
+	state.lifecycleCtx = lifecycleCtx
+	if err := state.lifecycleErr(); err != nil {
+		t.Fatalf("lifecycle source = %v at entry, want live: this test's cell requires a live-at-entry source", err)
+	}
+	beforeHeight, _, beforeOK, err := state.blockStore.Tip()
+	if err != nil {
+		t.Fatalf("Tip: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handleMineNext(state, rec, httptest.NewRequestWithContext(reqCtx, http.MethodPost, "/mine_next", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503: the checkpoint ran after lifecycle cancellation, so the lifecycle answer wins over the earlier request-local cancellation body=%s", rec.Code, rec.Body.String())
+	}
+	var got mineNextResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Mined || got.Error != "rpc unavailable" || got.Height != nil || got.BlockHash != nil ||
+		got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
+		t.Fatalf("request-then-lifecycle cancellation = %+v, want mined=false error=\"rpc unavailable\" and no success fields", got)
+	}
+	afterHeight, _, afterOK, err := state.blockStore.Tip()
+	if err != nil {
+		t.Fatalf("Tip: %v", err)
+	}
+	if afterOK != beforeOK || afterHeight != beforeHeight {
+		t.Fatalf("canonical tip moved from (height=%d ok=%v) to (height=%d ok=%v): the canceled mine must not apply a block", beforeHeight, beforeOK, afterHeight, afterOK)
+	}
+}
+
 func TestSubmitTxRequestCancellationPreservesExistingError(t *testing.T) {
 	state, body, txid, txidHex := mustSubmitFixture(t)
 	liveLifecycle(t, state)

@@ -48,10 +48,11 @@ type devnetRPCState struct {
 	// context.WithCancelCause, installs it as the http.Server BaseContext —
 	// so every r.Context() descends from it — and stores its cancel on the
 	// running server, where Close step (b) publishes it synchronously between
-	// the ingress freeze and the native drain call. The cause
-	// is always errRPCLifecycleCanceled and is provenance only: it lets
-	// /mine_next tell a lifecycle-caused cancellation from a request-local
-	// one and never reaches a response body, log line or metric label.
+	// the ingress freeze and the native drain call. Routes classify on THIS
+	// source read at their own defined checks — /submit_tx directly,
+	// /mine_next through mineLifecycleObservingCtx — never on the merged
+	// request context's cause. The cause is always errRPCLifecycleCanceled and
+	// never reaches a response body, log line or metric label.
 	// It is written once before the serving goroutine starts, so every
 	// handler read happens-after that write. A nil value means no server
 	// owns this state (direct-handler tests, fixtures): the lifecycle is
@@ -335,9 +336,10 @@ func (s *devnetRPCState) SetPeerLifecycleExitsFunc(fn func() uint64) {
 }
 
 // errRPCLifecycleCanceled is the cancellation cause startDevnetRPCServer
-// attaches to the server-owned lifecycle source. It is provenance only:
-// /mine_next reads it through context.Cause to tell a lifecycle-caused
-// MineOne cancellation from a request-local one. It never appears in a
+// attaches to the server-owned lifecycle source. No route classifies on it:
+// /mine_next observes the source directly through mineLifecycleObservingCtx
+// and /submit_tx through lifecycleErr, so this sentinel is kept purely as
+// cancellation provenance for logs and debugging. It never appears in a
 // response body, log line or metric label — the routes keep answering
 // exactly `rpc unavailable` (RUBIN_NODE_RPC_DEVNET.md 3.3, 3.4).
 var errRPCLifecycleCanceled = errors.New("rpc lifecycle canceled")
@@ -347,16 +349,69 @@ var errRPCLifecycleCanceled = errors.New("rpc lifecycle canceled")
 // /submit_tx pre-admission check (RUBIN_NODE_RPC_DEVNET.md 3.3), which is
 // defined on the state of the source read directly AT the check, where
 // r.Context() would misclassify a client disconnect as unavailability.
-// /mine_next's single sanctioned use is the ENTRY read taken immediately
-// before MineOne, i.e. at that route's first defined-check position; it must
-// not be read again to classify after MineOne returned, because the source's
-// state at that later moment is not the state at any defined check. See
-// handleMineNext. Nil-receiver safe.
+// /mine_next does NOT classify on this helper: its defined checks live inside
+// MineOne, so it observes the source through mineLifecycleObservingCtx at each
+// of those checks instead. Reading the source to classify after MineOne
+// returned is wrong on both routes, because the source's state at that later
+// moment is not the state at any defined check. Nil-receiver safe.
 func (s *devnetRPCState) lifecycleErr() error {
 	if s == nil || s.lifecycleCtx == nil {
 		return nil
 	}
 	return s.lifecycleCtx.Err()
+}
+
+// mineLifecycleObservingCtx turns every miner cancellation poll into a literal
+// check of the server-owned lifecycle source (RUBIN_NODE_RPC_DEVNET.md 2.1):
+// Done and Err consult that source FIRST, latch what they saw, and otherwise
+// fall through to the request context. All three MineOne checkpoints — entry,
+// every nonce attempt, pre-apply — are non-blocking polls, so observedLifecycle
+// records exactly what a defined check observed at the moment it observed it,
+// rather than something inferred afterwards from an immutable first cause or
+// from response-time state. Single-goroutine use only: handleMineNext runs
+// MineOne synchronously on the handler goroutine and hands this context to
+// nothing else, so the latch needs no synchronization.
+type mineLifecycleObservingCtx struct {
+	context.Context // the request context, i.e. r.Context()
+	// lifecycle is the server-owned lifecycle source, nil when no server owns
+	// the state (direct-handler tests, fixtures).
+	lifecycle context.Context
+	// observedLifecycle latches at the first poll that read the lifecycle
+	// source canceled and is never cleared: an observation stays made.
+	observedLifecycle bool
+	// closed is pre-closed, so a poll observing lifecycle cancellation reports
+	// Done immediately instead of waiting on the request context.
+	closed chan struct{}
+}
+
+func newMineLifecycleObservingCtx(request, lifecycle context.Context) *mineLifecycleObservingCtx {
+	closed := make(chan struct{})
+	close(closed)
+	return &mineLifecycleObservingCtx{Context: request, lifecycle: lifecycle, closed: closed}
+}
+
+// observeLifecycle reports whether this poll sees the lifecycle source
+// canceled, latching the observation when it does.
+func (c *mineLifecycleObservingCtx) observeLifecycle() bool {
+	if c.lifecycle == nil || c.lifecycle.Err() == nil {
+		return false
+	}
+	c.observedLifecycle = true
+	return true
+}
+
+func (c *mineLifecycleObservingCtx) Done() <-chan struct{} {
+	if c.observeLifecycle() {
+		return c.closed
+	}
+	return c.Context.Done()
+}
+
+func (c *mineLifecycleObservingCtx) Err() error {
+	if c.observeLifecycle() {
+		return context.Canceled
+	}
+	return c.Context.Err()
 }
 
 type runningDevnetRPCServer struct {
@@ -1163,55 +1218,32 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	state.rpcMut.Lock()
-	// Entry state of the lifecycle source, read at the route's first defined
-	// check position — the observation MineOne's own pre-bootstrap entry check
-	// makes (RUBIN_NODE_RPC_DEVNET.md 3.4). It is captured BEFORE the call
-	// because the classification below must be bounded by the state at a
-	// defined check, never by the state at response time.
-	lifecycleLiveAtEntry := state.lifecycleErr() == nil
-	mb, err := state.miner.MineOne(r.Context(), nil)
+	// Every MineOne checkpoint (entry, nonce quantum, pre-apply) polls this
+	// wrapper, which reads the lifecycle source at the check itself and latches
+	// what it saw (RUBIN_NODE_RPC_DEVNET.md 3.4).
+	mineCtx := newMineLifecycleObservingCtx(r.Context(), state.lifecycleCtx)
+	// The nolint below is a linter blind spot, not a suppressed finding: mineCtx
+	// IS derived from r.Context() — it embeds it and falls through to it — but
+	// contextcheck only recognizes derivation through context.WithXXX.
+	mb, err := state.miner.MineOne(mineCtx, nil) //nolint:contextcheck
 	if err != nil {
 		state.rpcMut.Unlock()
 		// RUBIN_NODE_RPC_DEVNET.md section 2 + 3.4. The rule in full: a defined
 		// check that OBSERVES lifecycle cancellation answers 503 `rpc
 		// unavailable` even when a per-request cancellation has also fired; the
-		// 422-preserving carve-out is a per-request cancellation ALONE, with the
-		// lifecycle source not canceled; and a route exit that formed a failure
-		// result stands with no later reclassification. So the two terms below
-		// are the two ways a defined check of this route can have observed the
-		// lifecycle source:
-		//   !lifecycleLiveAtEntry — the source was already canceled at the entry
-		//     check, so that check observed it regardless of which source
-		//     canceled the merged request context first;
-		//   cause == errRPCLifecycleCanceled — the source canceled during
-		//     MineOne and was observed through the merged context at the
-		//     nonce-quantum or pre-apply check, context.Cause reporting the
-		//     inherited lifecycle sentinel.
-		// Both are gated on errors.Is(err, context.Canceled): a non-cancellation
-		// MineOne failure keeps the baseline 422 even under a canceled
-		// lifecycle, because no check observed cancellation — the failure exit
-		// stands.
-		//
-		// Two measured failure modes this shape exists to exclude:
-		//   (i) response-time state inspection (`state.lifecycleErr() != nil`
-		//     read HERE) reclassified the protected request-local failure exit
-		//     when shutdown canceled the source after MineOne had already
-		//     returned (Codex P2);
-		//   (ii) pure first-cause provenance (the cause term alone) answered 422
-		//     in the cell where the lifecycle source was already canceled at the
-		//     check but a request-local cancellation had pinned the immutable
-		//     first cause (fanout round).
-		//
-		// Documented approximation, not an accident: the remaining sliver is a
-		// lifecycle cancellation that lands between a request-first cancellation
-		// and the observing check while the source was still live at entry. The
-		// cause is pinned to context.Canceled and the entry read is live, so
-		// this answers 422. That is consistent — the sliver is indistinguishable
-		// by any external observer or test from a conforming execution in which
-		// the observing check ran before the lifecycle cancellation, whose
-		// mandated answer is exactly this 422.
-		if errors.Is(err, context.Canceled) &&
-			(!lifecycleLiveAtEntry || errors.Is(context.Cause(r.Context()), errRPCLifecycleCanceled)) {
+		// 422-preserving carve-out is a per-request cancellation ALONE, with
+		// every check seeing a live lifecycle source; and a route exit that
+		// formed a failure result stands with no later reclassification.
+		// mineCtx.observedLifecycle IS that observation, captured at the check
+		// rather than reconstructed from provenance: it is set only by a poll
+		// that read the source canceled, so lifecycle-at-poll wins even over an
+		// already-pinned request-local first cause, and a run whose every poll
+		// saw a live source keeps the baseline 422 permanently — nothing polls
+		// mineCtx after MineOne returned, so the latch cannot move underneath
+		// this classification. The errors.Is(err, context.Canceled) gate keeps a
+		// non-cancellation MineOne failure at 422 even under a canceled
+		// lifecycle: that exit was formed by the failure, not by an observation.
+		if errors.Is(err, context.Canceled) && mineCtx.observedLifecycle {
 			writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextResponse{
 				Mined: false,
 				Error: "rpc unavailable",
