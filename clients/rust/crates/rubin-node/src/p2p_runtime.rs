@@ -120,6 +120,10 @@ pub(crate) struct OrphanPoolMetricsSnapshot {
 }
 
 static GLOBAL_ORPHAN_TOTAL_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+std::thread_local! {
+    static TEST_ALLOCS: std::cell::RefCell<Option<Vec<usize>>> = const { std::cell::RefCell::new(None) };
+}
 static GLOBAL_ORPHAN_METRICS: Mutex<OrphanPoolMetricsSnapshot> =
     Mutex::new(OrphanPoolMetricsSnapshot {
         live_blocks: 0,
@@ -2512,14 +2516,9 @@ fn read_blocktxn_from_compact_reader(
         return Err(invalid_data("stale blocktxn response has body"));
     }
 
-    let mut payload = prefix.to_vec();
-    payload.resize(envelope.payload_len, 0);
-    if envelope.payload_len > BLOCKTXN_HASH_PAYLOAD_BYTES {
-        reader.read_exact(&mut payload[BLOCKTXN_HASH_PAYLOAD_BYTES..])?;
-    }
-    if envelope.checksum != wire_checksum(&payload) {
-        return Err(invalid_data("invalid envelope checksum"));
-    }
+    let mut payload_reader = Cursor::new(prefix).chain(reader);
+    let payload =
+        read_payload_with_checksum(&mut payload_reader, envelope.payload_len, envelope.checksum)?;
     Ok(WireMessage {
         command: envelope.command,
         payload,
@@ -2542,16 +2541,14 @@ fn read_payload_with_checksum<R: Read>(
     }
 
     let mut hasher = Sha3_256::new();
-    let mut payload = Vec::with_capacity(payload_len.min(STREAM_READ_CHUNK_BYTES));
-    let mut chunk = [0u8; STREAM_READ_CHUNK_BYTES];
-    let mut remaining = payload_len;
-    while remaining > 0 {
-        let chunk_len = remaining.min(STREAM_READ_CHUNK_BYTES);
-        let chunk = &mut chunk[..chunk_len];
-        reader.read_exact(chunk)?;
-        hasher.update(&*chunk);
-        payload.extend_from_slice(chunk);
-        remaining -= chunk_len;
+    let mut chunks = Vec::new();
+    let mut received = 0;
+    while received < payload_len {
+        let mut chunk = allocate_payload(STREAM_READ_CHUNK_BYTES.min(payload_len - received));
+        reader.read_exact(&mut chunk)?;
+        hasher.update(&chunk);
+        received += chunk.len();
+        chunks.push(chunk);
     }
 
     let digest = hasher.finalize();
@@ -2563,7 +2560,19 @@ fn read_payload_with_checksum<R: Read>(
         ));
     }
 
+    let mut payload = allocate_payload(payload_len);
+    let mut offset = 0;
+    for chunk in chunks {
+        payload[offset..offset + chunk.len()].copy_from_slice(&chunk);
+        offset += chunk.len();
+    }
     Ok(payload)
+}
+
+fn allocate_payload(len: usize) -> Vec<u8> {
+    #[cfg(test)]
+    TEST_ALLOCS.with(|allocs| allocs.borrow_mut().iter_mut().for_each(|a| a.push(len)));
+    vec![0; len]
 }
 
 fn protocol_versions_compatible(local: u32, remote: u32) -> bool {
@@ -4198,6 +4207,10 @@ mod tests {
         BLOCK_HEADER_BYTES,
     };
     use serde::Deserialize;
+
+    fn take_allocs() -> Vec<usize> {
+        TEST_ALLOCS.with(|allocs| allocs.borrow_mut().take().unwrap())
+    }
 
     #[expect(clippy::type_complexity)]
     #[rustfmt::skip]
@@ -5913,9 +5926,17 @@ mod tests {
             payload.push(0x01);
             payload
         };
+        TEST_ALLOCS.with(|allocs| *allocs.borrow_mut() = Some(Vec::new()));
         let (mut session, mut client, result) =
             run_late_blocktxn_after_expiry(block_hash, matching);
         result.expect("matching late blocktxn ignored");
+        assert_eq!(
+            take_allocs(),
+            [
+                BLOCKTXN_HASH_PAYLOAD_BYTES + 1,
+                BLOCKTXN_HASH_PAYLOAD_BYTES + 1
+            ]
+        );
         assert_fallback_getdata(&mut client, block_hash);
         assert!(session.compact_outstanding.is_none());
         assert!(session.late_blocktxn.is_none());
@@ -6229,9 +6250,12 @@ mod tests {
         let payload = vec![0xabu8; STREAM_READ_CHUNK_BYTES + 17];
         let checksum = wire_checksum(&payload);
         let mut reader = std::io::Cursor::new(payload.clone());
+        TEST_ALLOCS.with(|allocs| *allocs.borrow_mut() = Some(Vec::new()));
         let got =
             read_payload_with_checksum(&mut reader, payload.len(), checksum).expect("payload");
         assert_eq!(got, payload);
+        assert_eq!(got.capacity(), got.len());
+        assert_eq!(take_allocs(), [STREAM_READ_CHUNK_BYTES, 17, got.len()]);
     }
 
     #[test]
@@ -6240,10 +6264,20 @@ mod tests {
         let mut checksum = wire_checksum(&payload);
         checksum[0] ^= 0xff;
         let mut reader = std::io::Cursor::new(payload);
+        TEST_ALLOCS.with(|allocs| *allocs.borrow_mut() = Some(Vec::new()));
         let err = read_payload_with_checksum(&mut reader, STREAM_READ_CHUNK_BYTES + 9, checksum)
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert_eq!(err.to_string(), "invalid envelope checksum");
+        assert_eq!(take_allocs(), [STREAM_READ_CHUNK_BYTES, 9]);
+
+        for payload_len in [72_000_000, 96_000_000] {
+            let mut reader = std::io::empty();
+            TEST_ALLOCS.with(|allocs| *allocs.borrow_mut() = Some(Vec::new()));
+            let err = read_payload_with_checksum(&mut reader, payload_len, [0; 4]).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+            assert_eq!(take_allocs(), [STREAM_READ_CHUNK_BYTES]);
+        }
     }
 
     #[test]

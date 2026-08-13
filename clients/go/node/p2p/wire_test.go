@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"runtime"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -12,10 +13,19 @@ import (
 )
 
 type errReader struct {
-	err error
+	err         error
+	zeroOnce    bool
+	maxRequest  int
+	maxCapacity int
 }
 
-func (r errReader) Read(_ []byte) (int, error) {
+func (r *errReader) Read(p []byte) (int, error) {
+	r.maxRequest = max(r.maxRequest, len(p))
+	r.maxCapacity = max(r.maxCapacity, cap(p))
+	if r.zeroOnce {
+		r.zeroOnce = false
+		return 0, nil
+	}
 	return 0, r.err
 }
 
@@ -169,15 +179,26 @@ func TestReadPayloadWithChecksumChunkedRoundtrip(t *testing.T) {
 	if !bytes.Equal(got, payload) {
 		t.Fatal("payload mismatch")
 	}
+	if cap(got) != len(got) {
+		t.Fatalf("payload cap=%d, want exact allocation %d", cap(got), len(got))
+	}
 }
 
 func TestReadPayloadWithChecksumRejectsBadChecksumAfterChunkedRead(t *testing.T) {
-	payload := bytes.Repeat([]byte{0xcd}, streamReadChunkBytes+9)
+	payload := bytes.Repeat([]byte{0xcd}, 8<<20)
 	checksum := wireChecksum(payload)
 	checksum[0] ^= 0xff
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
 	_, err := readPayloadWithChecksum(bytes.NewReader(payload), uint32(len(payload)), checksum)
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
 	if err == nil || err.Error() != "invalid envelope checksum" {
 		t.Fatalf("expected invalid envelope checksum, got %v", err)
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated >= uint64(3*len(payload)/2) {
+		t.Fatalf("allocated %d bytes for %d-byte rejected payload, want less than %d", allocated, len(payload), 3*len(payload)/2)
 	}
 }
 
@@ -229,12 +250,19 @@ func TestReadPayloadPrefixHandlesBoundariesAndShortRead(t *testing.T) {
 }
 
 func TestReadPayloadWithChecksumPropagatesNonEOFReadError(t *testing.T) {
-	payload := bytes.Repeat([]byte{0x11}, streamReadChunkBytes)
-	checksum := wireChecksum(payload)
 	boom := errors.New("boom")
-	_, err := readPayloadWithChecksum(errReader{err: boom}, uint32(len(payload)), checksum)
-	if !errors.Is(err, boom) {
-		t.Fatalf("expected boom, got %v", err)
+	for _, tc := range []struct {
+		size     uint32
+		zeroOnce bool
+	}{{72_000_000, true}, {96_000_000, false}} {
+		reader := &errReader{err: boom, zeroOnce: tc.zeroOnce}
+		_, err := readPayloadWithChecksum(reader, tc.size, [4]byte{})
+		if !errors.Is(err, boom) {
+			t.Fatalf("size %d: expected boom, got %v", tc.size, err)
+		}
+		if reader.maxRequest != streamReadChunkBytes || reader.maxCapacity != streamReadChunkBytes {
+			t.Fatalf("size %d: payload read len/cap=%d/%d, want %d", tc.size, reader.maxRequest, reader.maxCapacity, streamReadChunkBytes)
+		}
 	}
 }
 

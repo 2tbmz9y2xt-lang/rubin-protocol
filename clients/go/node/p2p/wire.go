@@ -153,12 +153,17 @@ func readPayloadWithChecksum(r io.Reader, size uint32, wantChecksum [4]byte) ([]
 		return readZeroLengthPayload(wantChecksum)
 	}
 
-	payload, gotChecksum, err := readPayloadChunks(r, size)
+	chunks, gotChecksum, err := readPayloadChunks(r, size)
 	if err != nil {
 		return nil, err
 	}
 	if !bytes.Equal(wantChecksum[:], gotChecksum[:]) {
 		return nil, errors.New("invalid envelope checksum")
+	}
+	payload := make([]byte, int(size))
+	offset := 0
+	for _, chunk := range chunks {
+		offset += copy(payload[offset:], chunk)
 	}
 	return payload, nil
 }
@@ -185,33 +190,28 @@ func readPayloadPrefix(r io.Reader, size uint32, prefixSize uint32) ([]byte, err
 	return prefix, nil
 }
 
-func readPayloadChunks(r io.Reader, size uint32) ([]byte, [4]byte, error) {
+func readPayloadChunks(r io.Reader, size uint32) ([][]byte, [4]byte, error) {
 	hasher := sha3.New256()
-	initialCap := int(size)
-	if initialCap > streamReadChunkBytes {
-		initialCap = streamReadChunkBytes
-	}
-	payload := make([]byte, 0, initialCap)
-	remaining := int(size)
-	for remaining > 0 {
-		chunkLen := remaining
+	var chunks [][]byte
+	for received := uint32(0); received < size; {
+		chunkLen := int(size - received)
 		if chunkLen > streamReadChunkBytes {
 			chunkLen = streamReadChunkBytes
 		}
 		chunk := make([]byte, chunkLen)
 		n, err := io.ReadFull(r, chunk)
 		if err != nil {
-			return nil, [4]byte{}, payloadReadError(size, len(payload), n, err)
+			return nil, [4]byte{}, payloadReadError(size, int(received), n, err)
 		}
 		if _, err := hasher.Write(chunk); err != nil {
 			return nil, [4]byte{}, err
 		}
-		payload = append(payload, chunk...)
-		remaining -= chunkLen
+		chunks = append(chunks, chunk)
+		received += uint32(chunkLen)
 	}
 
 	sum := hasher.Sum(nil)
-	return payload, [4]byte{sum[0], sum[1], sum[2], sum[3]}, nil
+	return chunks, [4]byte{sum[0], sum[1], sum[2], sum[3]}, nil
 }
 
 func payloadReadError(size uint32, payloadLen int, n int, err error) error {
