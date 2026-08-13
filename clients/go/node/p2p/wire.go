@@ -43,7 +43,22 @@ const (
 	maxInventoryVectors     = 4096
 	maxCompactSizeBytes     = 9
 	streamReadChunkBytes    = 32 * 1024
+	frameMinimumBudgetMS    = uint64(15_000)
+	frameBudgetNumeratorMS  = uint64(120_000)
+	frameBudgetDenominator  = uint64(72_000_000)
 )
+
+func absoluteBudgetMS(length uint64) uint64 {
+	const roundUp = frameBudgetDenominator - 1
+	if length > (math.MaxUint64-roundUp)/frameBudgetNumeratorMS {
+		return math.MaxUint64
+	}
+	budget := (frameBudgetNumeratorMS*length + roundUp) / frameBudgetDenominator
+	if budget < frameMinimumBudgetMS {
+		return frameMinimumBudgetMS
+	}
+	return budget
+}
 
 type message struct {
 	Command string

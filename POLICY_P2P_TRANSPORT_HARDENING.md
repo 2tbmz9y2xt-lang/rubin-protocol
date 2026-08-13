@@ -69,16 +69,18 @@ P2P_MAX_INFLIGHT_MSGS_PER_CONN = 64
 P2P_MAX_QUEUED_DECODED_BYTES_PER_CONN = 8_388_608
 ```
 
-The read-deadline default is a single frame-read guardrail because the current
-Go and Rust runtimes expose one read deadline for whole-frame reads.
+Every ordinary post-handshake Go/Rust frame with validated payload length `L` uses `absolute_budget_ms(L) = max(15_000, (120_000 * L + 71_999_999) div 72_000_000)`. The compact-specialized `blocktxn` receive path is excluded. Boundaries are `15_000 ms` through `L = 9_000_000`, `53_334 ms` at `32_000_000`, `120_000 ms` at `72_000_000`, and `160_000 ms` at `96_000_000`.
+Read idle behavior before the first envelope-header byte is unchanged. That byte starts a provisional 15-second header deadline, effective as `min(provisional_header_deadline, stall_deadline)`; after structural, global, and command-cap validation it becomes `frame_start + absolute_budget_ms(L)`, not a second budget.
+For reads/writes, the stall interval is `min(configured positive timeout, 15_000 ms)`. Its deadline starts at `frame_start`, refreshes only on positive bytes (including bytes returned with an error), and is unchanged by zero-byte errors/retries. The effective deadline is `min(stall_deadline, absolute_deadline)`. A write clock starts before its first header-byte attempt, after payload validation. Equality is accepted; later failures never reset/extend timing. Handshake timing is unchanged.
 
 ## 4. Enforcement
 
 Disconnect the peer if:
 
-1. Header read exceeds the read deadline after partial header bytes were
-   received.
-2. Payload read exceeds the read deadline after the frame header was received.
+1. Header read is strictly later than its effective provisional/stall deadline
+   after the first partial header byte was received.
+2. A payload read or frame write is strictly later than its effective stall or
+   size-derived absolute deadline.
 3. Payload exceeds maximum read bytes.
 4. Frame checksum validation fails for a received frame.
 5. Compact payload is malformed and peer score reaches or exceeds disconnect

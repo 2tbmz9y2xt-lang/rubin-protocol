@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
+	"os"
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
@@ -32,6 +34,154 @@ func (e blockTxnStaleBodyError) Error() string {
 
 var errLateBlockTxnIgnored = errors.New("ignored late blocktxn response")
 
+type postHandshakeFrameTiming struct {
+	peer             *peer
+	frameStart       time.Time
+	lastProgress     time.Time
+	absoluteDeadline time.Time
+	payloadSize      uint32
+	bytesRead        int
+	validated        bool
+	deadlineErr      error
+}
+
+func (t *postHandshakeFrameTiming) beforeRead() error {
+	if t.deadlineErr != nil {
+		return t.deadlineErr
+	}
+	if t.frameStart.IsZero() {
+		return nil
+	}
+	return t.armReadDeadline(true)
+}
+
+func (t *postHandshakeFrameTiming) recordRead(n int) {
+	if n <= 0 {
+		return
+	}
+	now := time.Now()
+	if t.frameStart.IsZero() {
+		t.frameStart = now
+	}
+	t.lastProgress = now
+	t.bytesRead += n
+	if err := t.armReadDeadline(true); err != nil {
+		t.deadlineErr = err
+	}
+}
+
+func (t *postHandshakeFrameTiming) validatePayload(size uint32) error {
+	if t.deadlineErr != nil {
+		return t.deadlineErr
+	}
+	if t.validated {
+		return nil
+	}
+	now := time.Now()
+	if frameDeadlineExpired(now, t.frameStart.Add(frameMinimumBudget)) {
+		return t.timeoutError("header", wireHeaderSize)
+	}
+	t.payloadSize = size
+	t.absoluteDeadline = t.frameStart.Add(frameBudgetDuration(uint64(size)))
+	t.validated = true
+	if frameDeadlineExpired(now, t.absoluteDeadline) {
+		return t.timeoutError("payload", wireHeaderSize+int(size))
+	}
+	return t.armReadDeadline(true)
+}
+
+func (t *postHandshakeFrameTiming) finishHeader(err error) error {
+	if err != nil && t.bytesRead < wireHeaderSize {
+		return err
+	}
+	if t.deadlineErr != nil {
+		return t.deadlineErr
+	}
+	if frameDeadlineExpired(time.Now(), t.frameStart.Add(frameMinimumBudget)) {
+		return t.timeoutError("header", wireHeaderSize)
+	}
+	return err
+}
+
+func (t *postHandshakeFrameTiming) complete() error {
+	if t.deadlineErr != nil {
+		return t.deadlineErr
+	}
+	if t.validated && frameDeadlineExpired(time.Now(), t.absoluteDeadline) {
+		return t.timeoutError("payload", wireHeaderSize+int(t.payloadSize))
+	}
+	return nil
+}
+
+func (t *postHandshakeFrameTiming) finishPayload(err error) error {
+	if t.deadlineErr != nil || err == nil || t.validated && t.bytesRead >= wireHeaderSize+int(t.payloadSize) {
+		if deadlineErr := t.complete(); deadlineErr != nil {
+			return deadlineErr
+		}
+	}
+	return err
+}
+
+func (t *postHandshakeFrameTiming) armReadDeadline(includeCompact bool) error {
+	deadline := t.transportDeadline()
+	if frameDeadlineExpired(time.Now(), deadline) {
+		part, want := "header", wireHeaderSize
+		if t.validated {
+			part, want = "payload", wireHeaderSize+int(t.payloadSize)
+		}
+		return t.timeoutError(part, want)
+	}
+	if includeCompact {
+		if expiry, ok := t.peer.compactOutstandingExpiry(); ok {
+			remaining := expiry.Sub(t.peer.service.cfg.Now())
+			compactDeadline := time.Now()
+			if remaining > 0 {
+				compactDeadline = compactDeadline.Add(remaining)
+			}
+			deadline = earlierDeadline(deadline, compactDeadline)
+		}
+	}
+	return t.peer.conn.SetReadDeadline(deadline)
+}
+
+func (t *postHandshakeFrameTiming) transportDeadline() time.Time {
+	stallDeadline := t.lastProgress.Add(boundedFrameStallBudget(t.peer.service.cfg.PeerRuntimeConfig.ReadDeadline))
+	if !t.validated {
+		return earlierDeadline(t.frameStart.Add(frameMinimumBudget), stallDeadline)
+	}
+	return earlierDeadline(t.absoluteDeadline, stallDeadline)
+}
+
+func (t *postHandshakeFrameTiming) timeoutError(part string, want int) error {
+	return partialFrameTimeoutError{part: part, read: t.bytesRead, want: want, err: os.ErrDeadlineExceeded}
+}
+
+const frameMinimumBudget = time.Duration(frameMinimumBudgetMS) * time.Millisecond
+
+func frameDeadlineExpired(now, deadline time.Time) bool { return now.After(deadline) }
+
+func frameBudgetDuration(size uint64) time.Duration {
+	budgetMS := absoluteBudgetMS(size)
+	if budgetMS > uint64(math.MaxInt64)/uint64(time.Millisecond) {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(budgetMS) * time.Millisecond
+}
+
+func earlierDeadline(a, b time.Time) time.Time {
+	if b.IsZero() || (!a.IsZero() && !b.Before(a)) {
+		return a
+	}
+	return b
+}
+
+func boundedFrameStallBudget(configured time.Duration) time.Duration {
+	if configured > 0 && configured < frameMinimumBudget {
+		return configured
+	}
+	return frameMinimumBudget
+}
+
 func (p *peer) run(ctx context.Context) error {
 	var lateBlockTxn *compactOutstandingRequest
 	recordExpiredFallback := func() error {
@@ -44,6 +194,7 @@ func (p *peer) run(ctx context.Context) error {
 		}
 		return nil
 	}
+	// #lizard forgive
 	for {
 		if peerRunContextDone(ctx) {
 			return nil
@@ -61,10 +212,11 @@ func (p *peer) run(ctx context.Context) error {
 		}
 		frameStart := time.Now()
 		_, activeCompact := p.compactOutstandingExpiry()
-		if err := p.setReadDeadlineAt(frameStart, lateBlockTxn == nil || activeCompact); err != nil {
+		specializedDeadline := p.readDeadlineAt(frameStart, lateBlockTxn == nil || activeCompact)
+		if err := p.conn.SetReadDeadline(specializedDeadline); err != nil {
 			return err
 		}
-		frame, nextLateBlockTxn, err := p.readPostHandshakeFrame(ctx, frameStart, lateBlockTxn)
+		frame, nextLateBlockTxn, err := p.readPostHandshakeFrame(ctx, frameStart, specializedDeadline, lateBlockTxn)
 		lateBlockTxn = nextLateBlockTxn
 		if err != nil {
 			if errors.Is(err, errLateBlockTxnIgnored) || shouldIgnoreReadError(err) {
@@ -91,53 +243,72 @@ func (p *peer) run(ctx context.Context) error {
 
 const blockTxnHashPayloadBytes = 32
 
-func (p *peer) readPostHandshakeFrame(ctx context.Context, frameStart time.Time, lateBlockTxn *compactOutstandingRequest) (message, *compactOutstandingRequest, error) {
+func (p *peer) readPostHandshakeFrame(ctx context.Context, frameStart, specializedDeadline time.Time, lateBlockTxn *compactOutstandingRequest) (message, *compactOutstandingRequest, error) {
 	var frame message
-	reader := &compactFallbackReader{peer: p, ctx: ctx, frameStart: frameStart, lateBlockTxn: lateBlockTxn}
+	timing := &postHandshakeFrameTiming{peer: p}
+	reader := &compactFallbackReader{peer: p, ctx: ctx, frameStart: frameStart, specializedDeadline: specializedDeadline, timing: timing, lateBlockTxn: lateBlockTxn}
 	header, err := readFrameHeader(reader, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
 	lateBlockTxn = reader.lateBlockTxn
-	if err != nil {
+	if err := timing.finishHeader(err); err != nil {
 		return frame, lateBlockTxn, err
 	}
 	if header.Command == messageBlockTxn {
-		if lateBlockTxn != nil {
-			return p.readLateBlockTxnFrame(header, lateBlockTxn)
+		if frame, nextLate, handled, err := p.readRecognizedBlockTxnFrame(header, reader.specializedDeadline, lateBlockTxn); handled {
+			return frame, nextLate, err
 		}
-		if p.acceptsBlockTxnResponses() {
-			frame, err := p.readBlockTxnFrame(header)
-			return frame, nil, err
-		}
-	}
-	if err := p.setReadDeadlineAt(frameStart, true); err != nil {
-		return frame, lateBlockTxn, err
 	}
 	limit := p.postHandshakePayloadCap()
 	if header.Size > limit(header.Command) {
 		return frame, lateBlockTxn, commandPayloadCapError{command: header.Command}
 	}
+	if err := timing.validatePayload(header.Size); err != nil {
+		return frame, lateBlockTxn, err
+	}
 	payload, err := readPayloadWithChecksum(reader, header.Size, header.Checksum)
 	lateBlockTxn = reader.lateBlockTxn
-	if err != nil {
+	if err := timing.finishPayload(err); err != nil {
 		return frame, lateBlockTxn, err
 	}
 	return message{Command: header.Command, Payload: payload}, lateBlockTxn, nil
 }
 
+func (p *peer) readRecognizedBlockTxnFrame(header frameHeader, deadline time.Time, lateBlockTxn *compactOutstandingRequest) (message, *compactOutstandingRequest, bool, error) {
+	acceptsBlockTxn := p.acceptsBlockTxnResponses()
+	if lateBlockTxn == nil && !acceptsBlockTxn {
+		return message{}, nil, false, nil
+	}
+	if err := p.conn.SetReadDeadline(deadline); err != nil {
+		return message{}, lateBlockTxn, true, err
+	}
+	if lateBlockTxn != nil {
+		frame, nextLate, err := p.readLateBlockTxnFrame(header, lateBlockTxn)
+		return frame, nextLate, true, err
+	}
+	frame, err := p.readBlockTxnFrame(header)
+	return frame, nil, true, err
+}
+
 type compactFallbackReader struct {
-	peer         *peer
-	ctx          context.Context
-	frameStart   time.Time
-	sent         bool
-	lateBlockTxn *compactOutstandingRequest
+	peer                *peer
+	ctx                 context.Context
+	frameStart          time.Time
+	specializedDeadline time.Time
+	timing              *postHandshakeFrameTiming
+	sent                bool
+	lateBlockTxn        *compactOutstandingRequest
 }
 
 func (r *compactFallbackReader) Read(p []byte) (int, error) {
 	for {
+		if err := r.timing.beforeRead(); err != nil {
+			return 0, err
+		}
 		n, err := r.peer.conn.Read(p)
 		if n > 0 {
-			return n, nil
+			r.timing.recordRead(n)
+			return n, err
 		}
-		if !isReadTimeout(err) || r.sent {
+		if !r.canRecoverReadTimeout(err) {
 			return n, err
 		}
 		lateBlockTxn, sendErr := r.peer.sendExpiredCompactOutstandingFallback(r.ctx)
@@ -149,10 +320,15 @@ func (r *compactFallbackReader) Read(p []byte) (int, error) {
 		}
 		r.sent = true
 		r.lateBlockTxn = lateBlockTxn
-		if err := r.peer.setReadDeadlineAt(r.frameStart, false); err != nil {
+		r.specializedDeadline = r.peer.readDeadlineAt(r.frameStart, false)
+		if err := r.peer.conn.SetReadDeadline(r.specializedDeadline); err != nil {
 			return 0, err
 		}
 	}
+}
+
+func (r *compactFallbackReader) canRecoverReadTimeout(err error) bool {
+	return isReadTimeout(err) && !r.sent
 }
 
 func (p *peer) sendExpiredCompactOutstandingFallback(ctx context.Context) (*compactOutstandingRequest, error) {
@@ -360,6 +536,10 @@ func (p *peer) setReadDeadline() error {
 }
 
 func (p *peer) setReadDeadlineAt(wallNow time.Time, includeCompact bool) error {
+	return p.conn.SetReadDeadline(p.readDeadlineAt(wallNow, includeCompact))
+}
+
+func (p *peer) readDeadlineAt(wallNow time.Time, includeCompact bool) time.Time {
 	var deadlineTime time.Time
 	if deadline := p.service.cfg.PeerRuntimeConfig.ReadDeadline; deadline > 0 {
 		deadlineTime = wallNow.Add(deadline)
@@ -376,7 +556,64 @@ func (p *peer) setReadDeadlineAt(wallNow time.Time, includeCompact bool) error {
 			}
 		}
 	}
-	return p.conn.SetReadDeadline(deadlineTime)
+	return deadlineTime
+}
+
+func (p *peer) writePostHandshakeFrame(command string, payload []byte) error {
+	if uint64(len(payload)) > uint64(p.service.cfg.PeerRuntimeConfig.MaxMessageSize) {
+		return errors.New("message exceeds cap")
+	}
+	header, err := buildEnvelopeHeader(networkMagic(p.service.cfg.PeerRuntimeConfig.Network), command, payload)
+	if err != nil {
+		return err
+	}
+	frameStart := time.Now()
+	absoluteDeadline := frameStart.Add(frameBudgetDuration(uint64(len(payload))))
+	lastProgress := frameStart
+	if err := p.writePostHandshakeChunk(header[:], &lastProgress, absoluteDeadline); err != nil {
+		return err
+	}
+	for offset := 0; offset < len(payload); {
+		end := offset + streamReadChunkBytes
+		if end > len(payload) {
+			end = len(payload)
+		}
+		if err := p.writePostHandshakeChunk(payload[offset:end], &lastProgress, absoluteDeadline); err != nil {
+			return err
+		}
+		offset = end
+	}
+	if frameDeadlineExpired(time.Now(), absoluteDeadline) {
+		return os.ErrDeadlineExceeded
+	}
+	return nil
+}
+
+func (p *peer) writePostHandshakeChunk(chunk []byte, lastProgress *time.Time, absoluteDeadline time.Time) error {
+	for len(chunk) > 0 {
+		deadline := earlierDeadline(absoluteDeadline, lastProgress.Add(boundedFrameStallBudget(p.service.cfg.PeerRuntimeConfig.WriteDeadline)))
+		if frameDeadlineExpired(time.Now(), deadline) {
+			return os.ErrDeadlineExceeded
+		}
+		if err := p.conn.SetWriteDeadline(deadline); err != nil {
+			return err
+		}
+		n, err := p.conn.Write(chunk)
+		if n > 0 {
+			if n > len(chunk) {
+				return io.ErrShortWrite
+			}
+			*lastProgress = time.Now()
+			chunk = chunk[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
 }
 
 func shouldIgnoreReadError(err error) bool {
@@ -497,16 +734,10 @@ func unknownCommandPolicyReason(err error) (string, bool) {
 func (p *peer) send(command string, payload []byte) error {
 	announcementHash, hasAnnouncement := compactAnnouncementHashForSentMessage(command, payload)
 	p.writeMu.Lock()
-	if deadline := p.service.cfg.PeerRuntimeConfig.WriteDeadline; deadline > 0 {
-		if err := p.conn.SetWriteDeadline(time.Now().Add(deadline)); err != nil {
-			p.writeMu.Unlock()
-			return err
-		}
-	}
 	if hasAnnouncement {
 		p.beginCompactBlockAnnouncementSend(announcementHash)
 	}
-	err := writeFrame(p.conn, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), message{Command: command, Payload: payload}, p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+	err := p.writePostHandshakeFrame(command, payload)
 	if hasAnnouncement {
 		p.finishCompactBlockAnnouncementSend(announcementHash, err)
 	}

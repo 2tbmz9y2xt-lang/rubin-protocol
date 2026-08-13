@@ -151,6 +151,14 @@ func TestReadFrameWithPayloadLimitReadsTxPayloadExact(t *testing.T) {
 	}
 }
 
+func TestAbsoluteBudgetMSBoundaries(t *testing.T) {
+	for _, tc := range [][2]uint64{{0, 15_000}, {9_000_000, 15_000}, {9_000_001, 15_001}, {32_000_000, 53_334}, {72_000_000, 120_000}, {96_000_000, 160_000}} {
+		if got := absoluteBudgetMS(tc[0]); got != tc[1] {
+			t.Errorf("absoluteBudgetMS(%d)=%d, want %d", tc[0], got, tc[1])
+		}
+	}
+}
+
 func TestReadPayloadWithChecksumChunkedRoundtrip(t *testing.T) {
 	payload := bytes.Repeat([]byte{0xab}, streamReadChunkBytes+17)
 	checksum := wireChecksum(payload)
