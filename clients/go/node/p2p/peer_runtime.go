@@ -78,13 +78,13 @@ func (t *postHandshakeFrameTiming) validatePayload(size uint32) error {
 		return nil
 	}
 	now := time.Now()
-	if now.After(t.frameStart.Add(frameMinimumBudget())) {
+	if frameDeadlineExpired(now, t.frameStart.Add(frameMinimumBudget())) {
 		return t.timeoutError("header", wireHeaderSize)
 	}
 	t.payloadSize = size
 	t.absoluteDeadline = t.frameStart.Add(frameBudgetDuration(uint64(size)))
 	t.validated = true
-	if now.After(t.absoluteDeadline) {
+	if frameDeadlineExpired(now, t.absoluteDeadline) {
 		return t.timeoutError("payload", wireHeaderSize+int(size))
 	}
 	return t.armReadDeadline(true)
@@ -97,7 +97,7 @@ func (t *postHandshakeFrameTiming) finishHeader(err error) error {
 	if t.deadlineErr != nil {
 		return t.deadlineErr
 	}
-	if time.Now().After(t.frameStart.Add(frameMinimumBudget())) {
+	if frameDeadlineExpired(time.Now(), t.frameStart.Add(frameMinimumBudget())) {
 		return t.timeoutError("header", wireHeaderSize)
 	}
 	return err
@@ -107,7 +107,7 @@ func (t *postHandshakeFrameTiming) complete() error {
 	if t.deadlineErr != nil {
 		return t.deadlineErr
 	}
-	if t.validated && time.Now().After(t.absoluteDeadline) {
+	if t.validated && frameDeadlineExpired(time.Now(), t.absoluteDeadline) {
 		return t.timeoutError("payload", wireHeaderSize+int(t.payloadSize))
 	}
 	return nil
@@ -135,9 +135,13 @@ func (t *postHandshakeFrameTiming) ensureTransportActive() error {
 		return nil
 	}
 	deadline := t.transportDeadline()
-	if !time.Now().After(deadline) {
+	if !frameDeadlineExpired(time.Now(), deadline) {
 		return nil
 	}
+	return t.transportTimeoutError()
+}
+
+func (t *postHandshakeFrameTiming) transportTimeoutError() error {
 	part, want := "header", wireHeaderSize
 	if t.validated {
 		part, want = "payload", wireHeaderSize+int(t.payloadSize)
@@ -147,7 +151,7 @@ func (t *postHandshakeFrameTiming) ensureTransportActive() error {
 
 func (t *postHandshakeFrameTiming) armReadDeadline(includeCompact bool) error {
 	deadline := t.transportDeadline()
-	if time.Now().After(deadline) {
+	if frameDeadlineExpired(time.Now(), deadline) {
 		part, want := "header", wireHeaderSize
 		if t.validated {
 			part, want = "payload", wireHeaderSize+int(t.payloadSize)
@@ -175,6 +179,8 @@ func (t *postHandshakeFrameTiming) timeoutError(part string, want int) error {
 func frameMinimumBudget() time.Duration {
 	return time.Duration(frameMinimumBudgetMS) * time.Millisecond
 }
+
+func frameDeadlineExpired(now, deadline time.Time) bool { return now.After(deadline) }
 
 func frameBudgetDuration(size uint64) time.Duration {
 	budgetMS := absoluteBudgetMS(size)
@@ -213,7 +219,7 @@ func (p *peer) compactReadDeadline() time.Time {
 func (p *peer) run(ctx context.Context) error {
 	var lateBlockTxn *compactOutstandingRequest
 	recordExpiredFallback := func() error {
-		expired, err := p.sendExpiredCompactOutstandingFallback(ctx)
+		expired, err := p.sendExpiredCompactOutstandingFallback(ctx, nil)
 		if err != nil {
 			return err
 		}
@@ -334,7 +340,7 @@ func (r *compactFallbackReader) recoverTimeout(n int, readErr error) (bool, int,
 	if err := r.timing.ensureTransportActive(); err != nil {
 		return false, 0, err
 	}
-	lateBlockTxn, err := r.peer.sendExpiredCompactOutstandingFallback(r.ctx)
+	lateBlockTxn, err := r.peer.sendExpiredCompactOutstandingFallback(r.ctx, r.timing)
 	if err != nil {
 		return false, 0, err
 	}
@@ -349,19 +355,50 @@ func (r *compactFallbackReader) recoverTimeout(n int, readErr error) (bool, int,
 	return true, 0, nil
 }
 
-func (p *peer) sendExpiredCompactOutstandingFallback(ctx context.Context) (*compactOutstandingRequest, error) {
+func (p *peer) sendExpiredCompactOutstandingFallback(ctx context.Context, timing *postHandshakeFrameTiming) (*compactOutstandingRequest, error) {
 	if peerRunContextDone(ctx) {
 		return nil, nil
 	}
-	blockHash, payloadCap, ok := p.popExpiredCompactOutstandingBlockHashAndPayloadCap()
-	if !ok || peerRunContextDone(ctx) {
+	p.compactMu.Lock()
+	req := p.compact.outstanding
+	if req == nil || !p.compactOutstandingRequestExpiredLocked() {
+		p.compactMu.Unlock()
 		return nil, nil
 	}
-	body := append([]byte{MSG_BLOCK}, blockHash[:]...)
-	if err := p.send(messageGetData, body); err != nil {
+	p.compactMu.Unlock()
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	if peerRunContextDone(ctx) {
+		return nil, nil
+	}
+	p.compactMu.Lock()
+	stillExpired := p.compact.outstanding == req && p.compactOutstandingRequestExpiredLocked()
+	p.compactMu.Unlock()
+	if !stillExpired {
+		return nil, nil
+	}
+	var outerDeadline time.Time
+	if timing != nil && !timing.frameStart.IsZero() {
+		outerDeadline = timing.transportDeadline()
+	}
+	body := append([]byte{MSG_BLOCK}, req.BlockHash[:]...)
+	if err := p.writePostHandshakeFrame(messageGetData, body, outerDeadline); err != nil {
+		if timing != nil && !timing.frameStart.IsZero() && isReadTimeout(err) {
+			return nil, timing.transportTimeoutError()
+		}
+		if timing != nil && !timing.frameStart.IsZero() {
+			if deadlineErr := timing.ensureTransportActive(); deadlineErr != nil {
+				return nil, deadlineErr
+			}
+		}
 		return nil, err
 	}
-	return &compactOutstandingRequest{BlockHash: blockHash, BlockTxnPayloadCap: payloadCap}, nil
+	p.compactMu.Lock()
+	if p.compact.outstanding == req {
+		p.compact.outstanding = nil
+	}
+	p.compactMu.Unlock()
+	return &compactOutstandingRequest{BlockHash: req.BlockHash, BlockTxnPayloadCap: req.BlockTxnPayloadCap}, nil
 }
 
 func (p *peer) readBlockTxnFrame(header frameHeader, reader io.Reader, timing *postHandshakeFrameTiming) (message, error) {
@@ -599,7 +636,7 @@ func (p *peer) setReadDeadlineAt(wallNow time.Time, includeCompact bool) error {
 	return p.conn.SetReadDeadline(deadlineTime)
 }
 
-func (p *peer) writePostHandshakeFrame(command string, payload []byte) error {
+func (p *peer) writePostHandshakeFrame(command string, payload []byte, outerDeadline time.Time) error {
 	if uint64(len(payload)) > uint64(p.service.cfg.PeerRuntimeConfig.MaxMessageSize) {
 		return errors.New("message exceeds cap")
 	}
@@ -609,6 +646,9 @@ func (p *peer) writePostHandshakeFrame(command string, payload []byte) error {
 	}
 	frameStart := time.Now()
 	absoluteDeadline := frameStart.Add(frameBudgetDuration(uint64(len(payload))))
+	if !outerDeadline.IsZero() {
+		absoluteDeadline = earlierDeadline(absoluteDeadline, outerDeadline)
+	}
 	lastProgress := frameStart
 	if err := p.writePostHandshakeChunk(header[:], &lastProgress, absoluteDeadline); err != nil {
 		return err
@@ -623,7 +663,7 @@ func (p *peer) writePostHandshakeFrame(command string, payload []byte) error {
 		}
 		offset = end
 	}
-	if time.Now().After(absoluteDeadline) {
+	if frameDeadlineExpired(time.Now(), absoluteDeadline) {
 		return os.ErrDeadlineExceeded
 	}
 	return nil
@@ -632,7 +672,7 @@ func (p *peer) writePostHandshakeFrame(command string, payload []byte) error {
 func (p *peer) writePostHandshakeChunk(chunk []byte, lastProgress *time.Time, absoluteDeadline time.Time) error {
 	for len(chunk) > 0 {
 		deadline := earlierDeadline(absoluteDeadline, lastProgress.Add(boundedFrameStallBudget(p.service.cfg.PeerRuntimeConfig.WriteDeadline)))
-		if time.Now().After(deadline) {
+		if frameDeadlineExpired(time.Now(), deadline) {
 			return os.ErrDeadlineExceeded
 		}
 		if err := p.conn.SetWriteDeadline(deadline); err != nil {
@@ -777,7 +817,7 @@ func (p *peer) send(command string, payload []byte) error {
 	if hasAnnouncement {
 		p.beginCompactBlockAnnouncementSend(announcementHash)
 	}
-	err := p.writePostHandshakeFrame(command, payload)
+	err := p.writePostHandshakeFrame(command, payload, time.Time{})
 	if hasAnnouncement {
 		p.finishCompactBlockAnnouncementSend(announcementHash, err)
 	}

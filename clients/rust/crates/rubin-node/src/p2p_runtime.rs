@@ -109,6 +109,10 @@ fn frame_stall_timeout(configured: Duration) -> Duration {
     configured.min(Duration::from_millis(FRAME_MINIMUM_BUDGET_MS))
 }
 
+fn frame_deadline_expired(now: Instant, deadline: Instant) -> bool {
+    now > deadline
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct OrphanPoolMetricsSnapshot {
     pub live_blocks: usize,
@@ -797,7 +801,7 @@ impl PeerSession {
 
     pub fn write_message(&mut self, msg: &WireMessage) -> io::Result<()> {
         let mut allow = || Ok(());
-        self.write_message_with_authorizer(msg, self.peer.handshake_complete, &mut allow)
+        self.write_message_with_authorizer(msg, self.peer.handshake_complete, None, &mut allow)
     }
 
     pub(crate) fn write_live_message<F>(
@@ -808,13 +812,14 @@ impl PeerSession {
     where
         F: FnMut() -> io::Result<()>,
     {
-        self.write_message_with_authorizer(msg, true, &mut before_io)
+        self.write_message_with_authorizer(msg, true, None, &mut before_io)
     }
 
     fn write_message_with_authorizer(
         &mut self,
         msg: &WireMessage,
         post_handshake: bool,
+        outer_deadline: Option<Instant>,
         before_io: &mut dyn FnMut() -> io::Result<()>,
     ) -> io::Result<()> {
         if !post_handshake {
@@ -841,6 +846,7 @@ impl PeerSession {
                 self.cfg.write_deadline,
                 &header,
                 &msg.payload,
+                outer_deadline,
                 before_io,
             )?;
         } else {
@@ -1498,13 +1504,22 @@ impl PeerSession {
         if let Some(timing) = timing {
             timing.ensure_transport_active()?;
         }
-        let Some((block_hash, payload_cap)) =
-            self.pop_expired_compact_outstanding_block_hash_and_payload_cap()
-        else {
+        let Some(req) = self.compact_outstanding.as_ref() else {
             return Ok(false);
         };
+        let (block_hash, payload_cap) = (req.block_hash, req.blocktxn_payload_cap);
         let msg = compact_full_block_fallback_message(block_hash)?;
-        self.write_message_with_authorizer(&msg, true, before_io)?;
+        self.write_message_with_authorizer(
+            &msg,
+            true,
+            timing.and_then(FrameReadTiming::transport_deadline),
+            before_io,
+        )
+        .map_err(|err| match timing {
+            Some(timing) => timing.fallback_write_error(err),
+            None => err,
+        })?;
+        self.compact_outstanding = None;
         self.late_blocktxn = Some(LateBlockTxnContext {
             block_hash,
             blocktxn_payload_cap: payload_cap,
@@ -2069,7 +2084,7 @@ impl FrameReadTiming {
     }
 
     fn ensure_not_expired(&self, deadline: Instant) -> io::Result<()> {
-        if Instant::now() > deadline {
+        if frame_deadline_expired(Instant::now(), deadline) {
             return Err(self.timeout_error());
         }
         Ok(())
@@ -2091,6 +2106,15 @@ impl FrameReadTiming {
             io::ErrorKind::TimedOut,
             format!("peer frame {phase} deadline exceeded"),
         ))
+    }
+    fn fallback_write_error(&self, err: io::Error) -> io::Error {
+        if is_socket_read_timeout(&err) || self.ensure_transport_active().is_err() {
+            self.timeout_error()
+        } else if err.kind() == io::ErrorKind::Interrupted {
+            io::Error::other(err)
+        } else {
+            err
+        }
     }
 }
 
@@ -2140,11 +2164,10 @@ impl CompactFallbackFrameReader<'_> {
             return Ok(false);
         }
         self.timing.ensure_transport_active()?;
-        let Some((block_hash, payload_cap)) =
-            pop_expired_compact_outstanding(self.compact_outstanding)
-        else {
+        let Some(req) = self.compact_outstanding.as_ref() else {
             return Ok(false);
         };
+        let (block_hash, payload_cap) = (req.block_hash, req.blocktxn_payload_cap);
         let msg = compact_full_block_fallback_message(block_hash)?;
         let header = build_envelope_header(self.network_magic, &msg.command, &msg.payload)?;
         write_post_handshake_frame_to_stream(
@@ -2152,12 +2175,11 @@ impl CompactFallbackFrameReader<'_> {
             self.write_timeout,
             &header,
             &msg.payload,
+            self.timing.transport_deadline(),
             &mut *self.before_io,
         )
-        .map_err(|err| match err.kind() {
-            io::ErrorKind::Interrupted => io::Error::other(err),
-            _ => err,
-        })?;
+        .map_err(|err| self.timing.fallback_write_error(err))?;
+        *self.compact_outstanding = None;
         *self.late_blocktxn = Some(LateBlockTxnContext {
             block_hash,
             blocktxn_payload_cap: payload_cap,
@@ -2463,7 +2485,7 @@ fn write_raw_outbox_to<W: PostHandshakeWriter>(
     if envelope.checksum != wire_checksum(payload) {
         return Err(invalid_data("invalid relay outbox envelope checksum"));
     }
-    write_post_handshake_frame_to_stream(writer, write_timeout, header, payload, before_io)
+    write_post_handshake_frame_to_stream(writer, write_timeout, header, payload, None, before_io)
 }
 
 fn write_post_handshake_frame_to_stream<W: PostHandshakeWriter>(
@@ -2471,11 +2493,14 @@ fn write_post_handshake_frame_to_stream<W: PostHandshakeWriter>(
     write_timeout: Duration,
     header: &[u8; WIRE_HEADER_SIZE],
     payload: &[u8],
+    outer_deadline: Option<Instant>,
     before_io: &mut dyn FnMut() -> io::Result<()>,
 ) -> io::Result<()> {
     before_io()?;
     let frame_start = Instant::now();
-    let absolute_deadline = frame_start + frame_budget_duration(payload.len());
+    let frame_deadline = frame_start + frame_budget_duration(payload.len());
+    let absolute_deadline =
+        outer_deadline.map_or(frame_deadline, |outer| outer.min(frame_deadline));
     let mut last_positive_progress = frame_start;
     write_post_handshake_bytes(
         stream,
@@ -2580,7 +2605,7 @@ fn post_handshake_write_deadline(
 }
 
 fn remaining_before_deadline(deadline: Instant, message: &'static str) -> io::Result<Duration> {
-    if Instant::now() > deadline {
+    if frame_deadline_expired(Instant::now(), deadline) {
         return Err(io::Error::new(io::ErrorKind::TimedOut, message));
     }
     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -4656,7 +4681,6 @@ mod tests {
         TEST_ALLOCS.with(|a| *a.borrow_mut() = Some(Vec::new()));
         read_payload_with_checksum_prefixed(&mut reader, 32_000_000, [0; 4], &prefix).unwrap_err();
         assert_eq!(take_allocs(), [STREAM_READ_CHUNK_BYTES]);
-
         let (mut session, mut client) = test_peer_session();
         let block_hash = [0x44; BLOCKTXN_HASH_PAYLOAD_BYTES];
         let mut req = compact_outstanding_test_request(block_hash);
@@ -4716,7 +4740,12 @@ mod tests {
         assert_eq!(timing.transport_deadline(), Some(absolute));
         timing.record_positive_read(1);
         assert_eq!(timing.frame_start, Some(start));
-        assert!(timing.last_positive_progress.expect("progress") > start);
+        assert!(
+            timing.last_positive_progress.expect("progress") > start
+                && !frame_deadline_expired(start - Duration::from_nanos(1), start)
+                && !frame_deadline_expired(start, start)
+                && frame_deadline_expired(start + Duration::from_nanos(1), start)
+        );
         assert_eq!(timing.absolute_deadline, Some(absolute));
         timing.frame_start = Some(Instant::now() - Duration::from_secs(16));
         timing.absolute_deadline = None;
@@ -4782,6 +4811,7 @@ mod tests {
             DEFAULT_WRITE_DEADLINE,
             &framed_header,
             &payload,
+            None,
             &mut || {
                 framed_calls += 1;
                 if framed_calls == 3 {
@@ -4800,7 +4830,6 @@ mod tests {
         let mut want = framed_header.to_vec();
         want.extend_from_slice(&payload[..STREAM_READ_CHUNK_BYTES]);
         assert_eq!(framed.bytes, want, "framed peer bytes omit denied chunk");
-
         let raw_header = build_envelope_header(network_magic("devnet"), MESSAGE_INV, &payload)
             .expect("raw header");
         let mut frame = raw_header.to_vec();
@@ -4844,13 +4873,16 @@ mod tests {
             DEFAULT_WRITE_DEADLINE,
             &header,
             &[],
+            Some(Instant::now() + Duration::from_secs(1)),
             &mut || Ok(()),
         )
         .expect("short write retries remaining suffix");
         assert_eq!(short.bytes, header);
         assert_eq!(short.timeouts.len(), 3);
-        assert!(short.timeouts.iter().all(|timeout| !timeout.is_zero()));
-
+        assert!(short
+            .timeouts
+            .iter()
+            .all(|timeout| !timeout.is_zero() && *timeout <= Duration::from_secs(1)));
         for (result, want_kind) in [
             (Ok(0), io::ErrorKind::WriteZero),
             (Err(io::ErrorKind::BrokenPipe), io::ErrorKind::BrokenPipe),
@@ -4864,6 +4896,7 @@ mod tests {
                 DEFAULT_WRITE_DEADLINE,
                 &header,
                 &[],
+                None,
                 &mut || Ok(()),
             )
             .expect_err("zero/error write must terminate");
@@ -4871,7 +4904,6 @@ mod tests {
             assert!(writer.bytes.is_empty());
             assert_eq!(writer.timeouts.len(), 1);
         }
-
         let start = Instant::now();
         let absolute = start + Duration::from_secs(160);
         assert_eq!(
@@ -6141,7 +6173,6 @@ mod tests {
         let mut req = compact_outstanding_test_request(block_hash);
         req.expires_at = Instant::now() - Duration::from_secs(1);
         session.compact_outstanding = Some(req);
-
         assert!(!session
             .poll_read_ready(Duration::from_millis(10))
             .expect("poll read ready"));
@@ -6190,7 +6221,6 @@ mod tests {
         let header =
             build_envelope_header(network_magic("devnet"), "ping", &[]).expect("ping header");
         client.write_all(&header[..1]).expect("write partial ping");
-
         let reader = thread::spawn(move || {
             let msg = session
                 .read_message_with_timeout(Duration::from_secs(2))
@@ -6198,7 +6228,6 @@ mod tests {
             assert_eq!(msg.command, "ping");
             assert!(session.compact_outstanding.is_none());
         });
-
         assert_fallback_getdata(&mut client, block_hash);
         client
             .write_all(&header[1..])
@@ -6218,7 +6247,6 @@ mod tests {
             byte: 0x01,
             received_at: frame_start,
         });
-
         let err = session
             .read_message_with_timeout(Duration::from_secs(15))
             .expect_err("expired prefetched frame must beat compact fallback");
@@ -6272,6 +6300,46 @@ mod tests {
         let source = err.into_inner().unwrap().downcast::<io::Error>().unwrap();
         assert_eq!(source.kind(), io::ErrorKind::Interrupted);
         assert_eq!(calls.get(), 1, "read_exact retried fallback denial");
+        let (mut session, mut client) = test_peer_session();
+        let mut req = compact_outstanding_test_request([0xe1; 32]);
+        req.expires_at = Instant::now() - Duration::from_secs(1);
+        session.compact_outstanding = Some(req);
+        let prefetched = Some(PrefetchedReadByte {
+            byte: 1,
+            received_at: Instant::now(),
+        });
+        let mut calls = 0;
+        let mut expire = || {
+            calls += 1;
+            if calls == 2 {
+                Err(io::ErrorKind::TimedOut.into())
+            } else {
+                Ok(())
+            }
+        };
+        let mut reader = CompactFallbackFrameReader {
+            stream: &mut session.stream,
+            prefetched_read_byte: prefetched,
+            compact_outstanding: &mut session.compact_outstanding,
+            late_blocktxn: &mut session.late_blocktxn,
+            read_timeout: Duration::from_secs(1),
+            timing: FrameReadTiming::new(prefetched, Duration::from_secs(1)),
+            write_timeout: session.cfg.write_deadline,
+            network_magic: network_magic(&session.cfg.network),
+            before_io: &mut expire,
+        };
+        let err = reader.read_exact(&mut [0; 2]).unwrap_err();
+        assert!(is_partial_frame_timeout(&err) && reader.compact_outstanding.is_some());
+        assert!(reader.late_blocktxn.is_none());
+        client
+            .set_read_timeout(Some(DEFAULT_READ_DEADLINE))
+            .unwrap();
+        client.read_exact(&mut [0; WIRE_HEADER_SIZE]).unwrap();
+        client.set_nonblocking(true).unwrap();
+        assert_eq!(
+            client.read(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]
