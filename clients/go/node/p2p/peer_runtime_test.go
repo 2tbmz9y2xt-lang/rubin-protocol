@@ -1286,6 +1286,12 @@ func TestPostHandshakeFrameTimingRejectsStrictlyLateCompletion(t *testing.T) {
 	p.conn = &scriptedConn{}
 	now := time.Now()
 	timing := &postHandshakeFrameTiming{peer: p, frameStart: now.Add(-frameMinimumBudget() - time.Second), bytesRead: wireHeaderSize}
+	deadlineErr := errors.New("deadline")
+	timing.deadlineErr = deadlineErr
+	if !errors.Is(timing.beforeRead(), deadlineErr) || !errors.Is(timing.validatePayload(0), deadlineErr) || !errors.Is(timing.finishHeader(nil), deadlineErr) || !errors.Is(timing.complete(), deadlineErr) {
+		t.Fatal(deadlineErr)
+	}
+	timing.deadlineErr = nil
 	var partial partialFrameTimeoutError
 	if err := timing.finishHeader(commandPayloadCapError{command: messageTx}); !errors.As(err, &partial) || partial.part != "header" {
 		t.Fatalf("late header err=%v, want header timeout before cap error", err)
