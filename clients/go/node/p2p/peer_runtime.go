@@ -293,7 +293,7 @@ func (r *compactFallbackReader) Read(p []byte) (int, error) {
 			r.timing.recordRead(n)
 			return n, err
 		}
-		if !isReadTimeout(err) || r.sent {
+		if !r.canRecoverReadTimeout(err) {
 			return n, err
 		}
 		lateBlockTxn, sendErr := r.peer.sendExpiredCompactOutstandingFallback(r.ctx)
@@ -309,6 +309,10 @@ func (r *compactFallbackReader) Read(p []byte) (int, error) {
 			return 0, err
 		}
 	}
+}
+
+func (r *compactFallbackReader) canRecoverReadTimeout(err error) bool {
+	return isReadTimeout(err) && !r.sent
 }
 
 func (p *peer) sendExpiredCompactOutstandingFallback(ctx context.Context) (*compactOutstandingRequest, error) {
