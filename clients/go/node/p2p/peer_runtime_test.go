@@ -174,6 +174,7 @@ func (c *scriptedConn) SetReadDeadline(t time.Time) error {
 	c.readDeadlines = append(c.readDeadlines, t)
 	return c.readDeadlineErr
 }
+
 func (c *scriptedConn) SetWriteDeadline(t time.Time) error {
 	c.writeDeadlines = append(c.writeDeadlines, t)
 	return nil
@@ -1167,8 +1168,7 @@ func TestCompactFallbackExpiryStopsBeforePopOrWrite(t *testing.T) {
 	start := time.Now()
 	conn := &expiryWakeConn{scriptedConn: scriptedConn{reads: []scriptedRead{{err: timeoutErr{}}}}}
 	conn.onRead = func(int) {
-		timing.frameStart = start.Add(-frameMinimumBudget() - time.Second)
-		timing.lastProgress = start
+		timing.frameStart, timing.lastProgress = start.Add(-frameMinimumBudget()-time.Second), start
 	}
 	p.conn = conn
 	_, err := (&compactFallbackReader{peer: p, ctx: context.Background(), timing: timing}).Read(make([]byte, 1))
@@ -1176,11 +1176,9 @@ func TestCompactFallbackExpiryStopsBeforePopOrWrite(t *testing.T) {
 	if !errors.As(err, &partial) || partial.part != "header" || conn.Len() != 0 {
 		t.Fatalf("err=%v writes=%d, want terminal header timeout and zero fallback", err, conn.Len())
 	}
-	if timing.frameStart != start.Add(-frameMinimumBudget()-time.Second) || timing.lastProgress != start || !timing.absoluteDeadline.IsZero() {
-		t.Fatal("failed fallback changed frame timing")
-	}
-	if hash, _, ok := p.popExpiredCompactOutstandingBlockHashAndPayloadCap(); !ok || hash != [32]byte{0x11} {
-		t.Fatal("expired frame fallback popped outstanding state")
+	hash, _, ok := p.popExpiredCompactOutstandingBlockHashAndPayloadCap()
+	if timing.frameStart != start.Add(-frameMinimumBudget()-time.Second) || timing.lastProgress != start || !timing.absoluteDeadline.IsZero() || !ok || hash != [32]byte{0x11} {
+		t.Fatal("failed fallback changed timing or popped state")
 	}
 }
 
@@ -1270,29 +1268,15 @@ func TestPostHandshakeFrameTimingUsesOneStartAndAbsoluteBudget(t *testing.T) {
 	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Hour
 	conn := &scriptedConn{}
 	p.conn = conn
-	timing := newPostHandshakeFrameTiming(p)
 	start := time.Now()
-	timing.frameStart = start
-	timing.lastProgress = start
-	timing.bytesRead = wireHeaderSize
-	if err := timing.validatePayload(32_000_000); err != nil {
-		t.Fatalf("validate payload: %v", err)
-	}
-	if got, want := timing.absoluteDeadline, start.Add(53_334*time.Millisecond); !got.Equal(want) {
-		t.Fatalf("absolute deadline=%v, want %v", got, want)
-	}
-	if len(conn.readDeadlines) == 0 || !conn.readDeadlines[len(conn.readDeadlines)-1].Equal(timing.absoluteDeadline) {
+	timing := &postHandshakeFrameTiming{peer: p, frameStart: start, lastProgress: start, bytesRead: wireHeaderSize}
+	requireNoCompactErr(t, timing.validatePayload(32_000_000), "validate payload")
+	if want := start.Add(53_334 * time.Millisecond); !timing.absoluteDeadline.Equal(want) || !conn.readDeadlines[len(conn.readDeadlines)-1].Equal(want) {
 		t.Fatalf("read deadlines=%v, want absolute deadline %v", conn.readDeadlines, timing.absoluteDeadline)
 	}
-	frameStartBefore, progressBefore, absoluteBefore := timing.frameStart, timing.lastProgress, timing.absoluteDeadline
-	if err := timing.afterCompactFallback(); err != nil {
-		t.Fatalf("compact wake: %v", err)
-	}
-	if timing.frameStart != frameStartBefore || timing.lastProgress != progressBefore || timing.absoluteDeadline != absoluteBefore {
-		t.Fatalf("compact wake changed timing: start=%v progress=%v absolute=%v", timing.frameStart, timing.lastProgress, timing.absoluteDeadline)
-	}
-	if got := conn.readDeadlines[len(conn.readDeadlines)-1]; !got.Equal(absoluteBefore) {
-		t.Fatalf("compact wake reset deadline to %v, want %v", got, absoluteBefore)
+	requireNoCompactErr(t, timing.afterCompactFallback(), "compact wake")
+	if timing.frameStart != start || timing.lastProgress != start || !conn.readDeadlines[len(conn.readDeadlines)-1].Equal(timing.absoluteDeadline) {
+		t.Fatal("compact wake changed timing")
 	}
 }
 
@@ -1300,27 +1284,19 @@ func TestPostHandshakeFrameTimingRejectsStrictlyLateCompletion(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{}
 	now := time.Now()
-	timing := newPostHandshakeFrameTiming(p)
-	timing.frameStart, timing.bytesRead = now.Add(-frameMinimumBudget()-time.Second), wireHeaderSize
+	timing := &postHandshakeFrameTiming{peer: p, frameStart: now.Add(-frameMinimumBudget() - time.Second), bytesRead: wireHeaderSize}
 	var partial partialFrameTimeoutError
 	if err := timing.finishHeader(commandPayloadCapError{command: messageTx}); !errors.As(err, &partial) || partial.part != "header" {
 		t.Fatalf("late header err=%v, want header timeout before cap error", err)
 	}
 	timing.validated = true
 	for _, size := range []uint32{72_000_000, 96_000_000} {
-		budget := frameBudgetDuration(size)
+		budget := frameBudgetDuration(uint64(size))
 		timing.payloadSize = size
-		timing.frameStart = now.Add(-20 * time.Second)
-		timing.lastProgress = now
+		timing.frameStart, timing.lastProgress = now.Add(-20*time.Second), now
 		timing.absoluteDeadline = timing.frameStart.Add(budget)
-		if err := timing.complete(); err != nil {
-			t.Fatalf("L=%d progressing frame after 15s: %v", size, err)
-		}
-		if got := timing.absoluteDeadline.Sub(timing.frameStart); got != budget {
-			t.Fatalf("L=%d budget=%v, want %v", size, got, budget)
-		}
-		timing.frameStart = now.Add(-budget - time.Nanosecond)
-		timing.lastProgress = now
+		requireNoCompactErr(t, timing.complete(), "progressing frame after 15s")
+		timing.frameStart, timing.lastProgress = now.Add(-budget-time.Nanosecond), now
 		timing.absoluteDeadline = timing.frameStart.Add(budget)
 		err := timing.finishPayload(errInvalidEnvelopeChecksum)
 		if !errors.As(err, &partial) || partial.part != "payload" {
@@ -1335,46 +1311,31 @@ func TestPostHandshakeWriteUsesBoundedChunks(t *testing.T) {
 	conn := &scriptedConn{}
 	p.conn = conn
 	payload := bytes.Repeat([]byte{0xa5}, streamReadChunkBytes+1)
-	if err := p.send(messageTx, payload); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	if got, want := conn.writeCount, 3; got != want {
-		t.Fatalf("write calls=%d, want header plus two bounded payload chunks (%d)", got, want)
-	}
-	if got, want := len(conn.writeDeadlines), 3; got != want {
-		t.Fatalf("write deadlines=%d, want %d", got, want)
+	requireNoCompactErr(t, p.send(messageTx, payload), "send")
+	if conn.writeCount != 3 || len(conn.writeDeadlines) != 3 {
+		t.Fatalf("writes=%d deadlines=%d, want header plus two bounded payload chunks", conn.writeCount, len(conn.writeDeadlines))
 	}
 }
 
 func TestPostHandshakeWriteAccountsForEveryWriteResult(t *testing.T) {
 	sentinel := errors.New("write sentinel")
 	for _, tc := range []struct {
-		name   string
 		writes []scriptedWrite
 		want   error
 	}{
-		{name: "short completes", writes: []scriptedWrite{{n: 3}}},
-		{name: "zero stops", writes: []scriptedWrite{{n: 0}}, want: io.ErrShortWrite},
-		{name: "progress error preserved", writes: []scriptedWrite{{n: 3, err: sentinel}}, want: sentinel},
+		{writes: []scriptedWrite{{n: 3}}},
+		{writes: []scriptedWrite{{n: 0}}, want: io.ErrShortWrite},
+		{writes: []scriptedWrite{{n: 3, err: sentinel}}, want: sentinel},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := newPeerRuntimeTestPeer(t)
-			conn := &scriptedConn{writes: tc.writes}
-			p.conn = conn
-			msg := message{Command: messagePing}
-			err := p.send(msg.Command, msg.Payload)
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("send err=%v, want %v", err, tc.want)
-			}
-			if tc.want == nil {
-				want := mustPeerRuntimeFrameBytes(t, p, msg)
-				if !bytes.Equal(conn.Bytes(), want) || len(conn.writeDeadlines) != conn.writeCount || conn.writeCount < 2 {
-					t.Fatalf("short write bytes=%d/%d writes=%d deadlines=%d", conn.Len(), len(want), conn.writeCount, len(conn.writeDeadlines))
-				}
-			} else if conn.Len() != 3 && errors.Is(tc.want, sentinel) {
-				t.Fatalf("progress+error wrote %d bytes, want 3", conn.Len())
-			}
-		})
+		p := newPeerRuntimeTestPeer(t)
+		conn := &scriptedConn{writes: tc.writes}
+		p.conn = conn
+		msg := message{Command: messagePing}
+		err := p.send(msg.Command, msg.Payload)
+		want := mustPeerRuntimeFrameBytes(t, p, msg)
+		if !errors.Is(err, tc.want) || tc.want == nil && (!bytes.Equal(conn.Bytes(), want) || len(conn.writeDeadlines) != conn.writeCount || conn.writeCount < 2) || errors.Is(tc.want, sentinel) && conn.Len() != 3 {
+			t.Fatalf("err=%v bytes=%d/%d writes=%d deadlines=%d", err, conn.Len(), len(want), conn.writeCount, len(conn.writeDeadlines))
+		}
 	}
 }
 
