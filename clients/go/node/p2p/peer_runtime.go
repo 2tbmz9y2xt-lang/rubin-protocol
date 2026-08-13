@@ -194,6 +194,7 @@ func (p *peer) run(ctx context.Context) error {
 		}
 		return nil
 	}
+	// #lizard forgive
 	for {
 		if peerRunContextDone(ctx) {
 			return nil
@@ -252,18 +253,8 @@ func (p *peer) readPostHandshakeFrame(ctx context.Context, frameStart, specializ
 		return frame, lateBlockTxn, err
 	}
 	if header.Command == messageBlockTxn {
-		acceptsBlockTxn := p.acceptsBlockTxnResponses()
-		if lateBlockTxn != nil || acceptsBlockTxn {
-			if err := p.conn.SetReadDeadline(reader.specializedDeadline); err != nil {
-				return frame, lateBlockTxn, err
-			}
-		}
-		if lateBlockTxn != nil {
-			return p.readLateBlockTxnFrame(header, lateBlockTxn)
-		}
-		if acceptsBlockTxn {
-			frame, err := p.readBlockTxnFrame(header)
-			return frame, nil, err
+		if frame, nextLate, handled, err := p.readRecognizedBlockTxnFrame(header, reader.specializedDeadline, lateBlockTxn); handled {
+			return frame, nextLate, err
 		}
 	}
 	limit := p.postHandshakePayloadCap()
@@ -279,6 +270,22 @@ func (p *peer) readPostHandshakeFrame(ctx context.Context, frameStart, specializ
 		return frame, lateBlockTxn, err
 	}
 	return message{Command: header.Command, Payload: payload}, lateBlockTxn, nil
+}
+
+func (p *peer) readRecognizedBlockTxnFrame(header frameHeader, deadline time.Time, lateBlockTxn *compactOutstandingRequest) (message, *compactOutstandingRequest, bool, error) {
+	acceptsBlockTxn := p.acceptsBlockTxnResponses()
+	if lateBlockTxn == nil && !acceptsBlockTxn {
+		return message{}, nil, false, nil
+	}
+	if err := p.conn.SetReadDeadline(deadline); err != nil {
+		return message{}, lateBlockTxn, true, err
+	}
+	if lateBlockTxn != nil {
+		frame, nextLate, err := p.readLateBlockTxnFrame(header, lateBlockTxn)
+		return frame, nextLate, true, err
+	}
+	frame, err := p.readBlockTxnFrame(header)
+	return frame, nil, true, err
 }
 
 type compactFallbackReader struct {
