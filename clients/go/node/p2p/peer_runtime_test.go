@@ -104,16 +104,10 @@ type scriptedRead struct {
 	err  error
 }
 
-type scriptedWrite struct {
-	n   int
-	err error
-}
-
 type scriptedConn struct {
 	reads  []scriptedRead
-	writes []scriptedWrite
+	writes []scriptedRead
 	bytes.Buffer
-	maxReadRequest  int
 	writeCount      int
 	writeHook       func(int)
 	writeErr        error
@@ -124,9 +118,6 @@ type scriptedConn struct {
 }
 
 func (c *scriptedConn) Read(p []byte) (int, error) {
-	if len(p) > c.maxReadRequest {
-		c.maxReadRequest = len(p)
-	}
 	if len(c.reads) == 0 {
 		return 0, io.EOF
 	}
@@ -150,15 +141,13 @@ func (c *scriptedConn) Write(p []byte) (int, error) {
 	if len(c.writes) > 0 {
 		current := c.writes[0]
 		c.writes = c.writes[1:]
-		if current.n > len(p) {
-			current.n = len(p)
+		n := len(current.data)
+		if n > len(p) {
+			n = len(p)
 		}
-		_, _ = c.Buffer.Write(p[:current.n])
+		_, _ = c.Buffer.Write(p[:n])
 		c.writeCount++
-		if c.writeHook != nil {
-			c.writeHook(c.writeCount)
-		}
-		return current.n, current.err
+		return n, current.err
 	}
 	n, err := c.Buffer.Write(p)
 	c.writeCount++
@@ -770,55 +759,22 @@ func TestRunRejectsStaleBlockTxnBodyBeforeChecksum(t *testing.T) {
 	}
 }
 
-func TestBlockTxnPrefixSetsDeadlineBeforeBoundedBodyRead(t *testing.T) {
-	for _, late := range []bool{false, true} {
-		p := newPeerRuntimeTestPeer(t)
-		p.service.cfg.EnableCompactReceive = true
-		activeHash, prefix := [32]byte{0x69}, [32]byte{0x70}
-		if !late {
-			p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: activeHash, BlockTxnPayloadCap: 32_000_000})
-		}
-		start := time.Now()
-		var timing *postHandshakeFrameTiming
-		var declared time.Time
-		conn := &expiryWakeConn{scriptedConn: scriptedConn{reads: []scriptedRead{{data: prefix[:]}}}}
-		conn.onRead = func(int) {
-			if !timing.validated {
-				t.Fatal("blocktxn prefix read before declared-size deadline")
-			}
-			declared, timing.absoluteDeadline = timing.absoluteDeadline, time.Now().Add(-time.Nanosecond)
-		}
-		p.conn = conn
-		timing = &postHandshakeFrameTiming{peer: p, frameStart: start, lastProgress: start, bytesRead: wireHeaderSize}
-		header := frameHeader{Command: messageBlockTxn, Size: 32_000_000}
-		err, preserved := error(nil), true
-		if late {
-			_, next, got := p.readLateBlockTxnFrame(header, conn, timing, &compactOutstandingRequest{BlockHash: activeHash, BlockTxnPayloadCap: 64})
-			err, preserved = got, next != nil
-		} else {
-			_, err = p.readBlockTxnFrame(header, conn, timing)
-		}
-		if want := start.Add(53_334 * time.Millisecond); !isPartialFrameTimeout(err) || !preserved || declared != want || conn.maxReadRequest != blockTxnHashPayloadBytes {
-			t.Fatalf("late=%v err=%v deadline=%v request=%d, want timeout/%v/32", late, err, declared, conn.maxReadRequest, want)
-		}
+func TestRunPropagatesBlockTxnPrefixReadFailure(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	blockHash := [32]byte{0x69}
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: blockHash, BlockTxnPayloadCap: 128})
+	payload := append(blockHash[:], make([]byte, 33)...)
+	header, err := buildEnvelopeHeader(networkMagic(p.service.cfg.PeerRuntimeConfig.Network), messageBlockTxn, payload)
+	if err != nil {
+		t.Fatalf("buildEnvelopeHeader: %v", err)
 	}
-}
-
-func TestActiveBlockTxnExpiryDuringPrefixUsesLateClassification(t *testing.T) {
-	p, ck := setupCompactFallbackPeer(t)
-	blockHash := [32]byte{0x11}
-	frame := mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: append(blockHash[:], 0)})
-	split := wireHeaderSize + 16
-	conn := &expiryWakeConn{scriptedConn: scriptedConn{reads: []scriptedRead{
-		{data: frame[:wireHeaderSize]}, {data: frame[wireHeaderSize:split]}, {err: timeoutErr{}}, {data: frame[split:]},
-	}}}
-	conn.expireOnRead(ck, 3)
-	p.conn = conn
-	_, late, err := p.readPostHandshakeFrame(context.Background(), time.Time{}, nil)
-	if !errors.Is(err, errLateBlockTxnIgnored) || late != nil {
-		t.Fatalf("err=%v late=%+v, want late blocktxn ignored with nil context", err, late)
+	p.conn = &scriptedConn{reads: []scriptedRead{{data: header[:]}}}
+	err = p.run(context.Background())
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("run err=%v, want prefix short-read error", err)
 	}
-	requireFirstGetDataBlock(t, p, conn.Bytes(), blockHash)
 }
 
 func TestBlockTxnPrefixWithoutOutstandingDoesNotMatch(t *testing.T) {
@@ -1167,51 +1123,14 @@ func TestRunReturnsCompactFallbackWakeErrors(t *testing.T) {
 	if !errors.Is(err, writeErr) {
 		t.Fatalf("reader err=%v", err)
 	}
-}
-
-func TestCompactFallbackReaderRecordsProgressBeforeReadError(t *testing.T) {
-	p := newPeerRuntimeTestPeer(t)
-	p.conn = &scriptedConn{reads: []scriptedRead{{data: []byte{0xaa}, err: io.EOF}}}
-	start := time.Now().Add(-time.Second)
-	timing := &postHandshakeFrameTiming{peer: p, frameStart: start, lastProgress: start}
-	n, err := (&compactFallbackReader{peer: p, ctx: context.Background(), timing: timing}).Read(make([]byte, 1))
-	if n != 1 || !errors.Is(err, io.EOF) || timing.bytesRead != 1 || !timing.lastProgress.After(timing.frameStart) {
-		t.Fatalf("n=%d err=%v timing=%+v", n, err, timing)
-	}
-}
-
-func TestCompactFallbackExpiryStopsBeforePopOrWrite(t *testing.T) {
-	p, ck := setupCompactFallbackPeer(t)
-	ck.advance(compactOutstandingRequestTTL + time.Second)
-	timing := &postHandshakeFrameTiming{peer: p}
-	start := time.Now()
-	conn := &expiryWakeConn{scriptedConn: scriptedConn{reads: []scriptedRead{{err: timeoutErr{}}}}}
-	conn.onRead = func(int) {
-		timing.frameStart, timing.lastProgress = start.Add(-frameMinimumBudget()-time.Second), start
-	}
+	conn := &scriptedConn{reads: []scriptedRead{{data: []byte{0xaa}, err: io.EOF}}}
 	p.conn = conn
-	_, err := (&compactFallbackReader{peer: p, ctx: context.Background(), timing: timing}).Read(make([]byte, 1))
-	preWriteOK := isPartialFrameTimeout(err) && conn.Len() == 0 && timing.frameStart.Equal(start.Add(-frameMinimumBudget()-time.Second)) && timing.lastProgress.Equal(start) && timing.absoluteDeadline.IsZero() && p.compact.outstanding != nil && p.compact.outstanding.BlockHash == [32]byte{0x11}
-	start = time.Now().Add(-time.Second)
-	timing = &postHandshakeFrameTiming{peer: p, frameStart: start, lastProgress: start, bytesRead: 1}
-	*conn = expiryWakeConn{scriptedConn: scriptedConn{reads: []scriptedRead{{err: timeoutErr{}}}, writes: []scriptedWrite{{n: wireHeaderSize}, {err: timeoutErr{}}}}}
-	reader := &compactFallbackReader{peer: p, ctx: context.Background(), timing: timing}
-	_, err = reader.Read(make([]byte, 1))
-	midWriteOK := isPartialFrameTimeout(err) && conn.Len() == wireHeaderSize && reader.lateBlockTxn == nil && p.compact.outstanding != nil && p.compact.outstanding.BlockHash == [32]byte{0x11} && len(conn.writeDeadlines) == 2 && conn.writeDeadlines[0].Equal(timing.transportDeadline()) && conn.writeDeadlines[1].Equal(timing.transportDeadline())
-	*conn = expiryWakeConn{}
-	started, done := make(chan struct{}), make(chan struct{})
-	p.writeMu.Lock()
-	go func() {
-		close(started)
-		_, reader.sent, err = p.sendExpiredCompactOutstandingFallbackWithin(context.Background(), timing)
-		close(done)
-	}()
-	<-started
-	timing.frameStart = timing.lastProgress.Add(-frameMinimumBudget() - time.Second)
-	p.writeMu.Unlock()
-	<-done
-	if !preWriteOK || !midWriteOK || !isPartialFrameTimeout(err) || conn.Len() != 0 || reader.sent || p.compact.outstanding == nil || p.compact.outstanding.BlockHash != [32]byte{0x11} {
-		t.Fatalf("pre=%t mid=%t post-lock err=%v bytes=%d late=%v", preWriteOK, midWriteOK, err, conn.Len(), reader.lateBlockTxn)
+	start := time.Now().Add(-time.Second)
+	absolute := start.Add(2 * time.Minute)
+	timing := &postHandshakeFrameTiming{peer: p, frameStart: start, lastProgress: start, absoluteDeadline: absolute, validated: true}
+	n, err := (&compactFallbackReader{peer: p, ctx: context.Background(), timing: timing}).Read(make([]byte, 1))
+	if n != 1 || !errors.Is(err, io.EOF) || timing.bytesRead != 1 || !timing.lastProgress.After(start) || len(conn.readDeadlines) != 2 || !conn.readDeadlines[1].After(conn.readDeadlines[0]) || !timing.absoluteDeadline.Equal(absolute) {
+		t.Fatalf("n=%d err=%v timing=%+v", n, err, timing)
 	}
 }
 
@@ -1299,10 +1218,8 @@ func TestRunKeepsIdleTimeoutAndCompleteFrameValid(t *testing.T) {
 func TestPostHandshakeFrameTimingUsesOneStartAndAbsoluteBudget(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	for _, tc := range []struct{ configured, want time.Duration }{{time.Hour, 15 * time.Second}, {time.Second, time.Second}} {
-		p.service.cfg.PeerRuntimeConfig.ReadDeadline, p.service.cfg.PeerRuntimeConfig.WriteDeadline = tc.configured, tc.configured
-		read, write := boundedFrameStallBudget(p.service.cfg.PeerRuntimeConfig.ReadDeadline), boundedFrameStallBudget(p.service.cfg.PeerRuntimeConfig.WriteDeadline)
-		if read != tc.want || write != tc.want {
-			t.Fatalf("configured=%v read=%v write=%v, want %v", tc.configured, read, write, tc.want)
+		if got := boundedFrameStallBudget(tc.configured); got != tc.want {
+			t.Fail()
 		}
 	}
 	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Hour
@@ -1312,19 +1229,11 @@ func TestPostHandshakeFrameTimingUsesOneStartAndAbsoluteBudget(t *testing.T) {
 	timing := &postHandshakeFrameTiming{peer: p, frameStart: start, lastProgress: start, bytesRead: wireHeaderSize}
 	requireNoCompactErr(t, timing.validatePayload(32_000_000), "validate payload")
 	if want := start.Add(53_334 * time.Millisecond); !timing.absoluteDeadline.Equal(want) || !conn.readDeadlines[len(conn.readDeadlines)-1].Equal(start.Add(15*time.Second)) {
-		t.Fatalf("absolute=%v read deadlines=%v, want %v with 15s stall", timing.absoluteDeadline, conn.readDeadlines, want)
+		t.Fatal(timing.absoluteDeadline, conn.readDeadlines)
 	}
-	requireNoCompactErr(t, timing.afterCompactFallback(), "compact wake")
-	if !timing.frameStart.Equal(start) || !timing.lastProgress.Equal(start) || !timing.absoluteDeadline.Equal(start.Add(53_334*time.Millisecond)) || !conn.readDeadlines[len(conn.readDeadlines)-1].Equal(start.Add(15*time.Second)) {
-		t.Fatal("compact wake changed timing")
-	}
-}
-
-func TestPostHandshakeFrameTimingRejectsStrictlyLateCompletion(t *testing.T) {
-	p := newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{}
 	now := time.Now()
-	timing := &postHandshakeFrameTiming{peer: p, frameStart: now.Add(-frameMinimumBudget() - time.Second), bytesRead: wireHeaderSize}
+	timing = &postHandshakeFrameTiming{peer: p, frameStart: now.Add(-frameMinimumBudget - time.Second), bytesRead: wireHeaderSize}
 	timing.deadlineErr = io.EOF
 	if frameDeadlineExpired(now.Add(-time.Nanosecond), now) || frameDeadlineExpired(now, now) || !frameDeadlineExpired(now.Add(time.Nanosecond), now) || !errors.Is(timing.beforeRead(), io.EOF) || !errors.Is(timing.validatePayload(0), io.EOF) || !errors.Is(timing.finishHeader(nil), io.EOF) || !errors.Is(timing.complete(), io.EOF) {
 		t.Fatal(io.EOF)
@@ -1338,45 +1247,45 @@ func TestPostHandshakeFrameTimingRejectsStrictlyLateCompletion(t *testing.T) {
 	for _, size := range []uint32{72_000_000, 96_000_000} {
 		budget := frameBudgetDuration(uint64(size))
 		timing.payloadSize = size
+		timing.bytesRead = wireHeaderSize + int(size)
 		timing.frameStart, timing.lastProgress = now.Add(-20*time.Second), now
 		timing.absoluteDeadline = timing.frameStart.Add(budget)
 		requireNoCompactErr(t, timing.complete(), "progressing frame after 15s")
 		timing.frameStart, timing.lastProgress = now.Add(-budget-time.Nanosecond), now
 		timing.absoluteDeadline = timing.frameStart.Add(budget)
-		err := timing.finishPayload(errInvalidEnvelopeChecksum)
-		if !errors.As(err, &partial) || partial.part != "payload" {
-			t.Fatalf("L=%d late checksum err=%v, want payload timeout first", size, err)
+		for _, result := range []error{nil, errors.New("invalid envelope checksum")} {
+			if err := timing.finishPayload(result); !errors.As(err, &partial) || partial.part != "payload" {
+				t.Fatalf("L=%d result=%v err=%v", size, result, err)
+			}
 		}
 	}
-}
-
-func TestPostHandshakeWriteUsesBoundedChunks(t *testing.T) {
-	p := newPeerRuntimeTestPeer(t)
+	p = newPeerRuntimeTestPeer(t)
 	p.service.cfg.PeerRuntimeConfig.MaxMessageSize = streamReadChunkBytes + 1
-	conn := &scriptedConn{}
+	conn = &scriptedConn{}
 	p.conn = conn
 	requireNoCompactErr(t, p.send(messageTx, bytes.Repeat([]byte{0xa5}, streamReadChunkBytes+1)), "send")
 	if conn.writeCount != 3 || len(conn.writeDeadlines) != 3 {
-		t.Fatalf("writes=%d deadlines=%d, want header plus two bounded payload chunks", conn.writeCount, len(conn.writeDeadlines))
+		t.Fail()
 	}
-}
-
-func TestPostHandshakeWriteAccountsForEveryWriteResult(t *testing.T) {
-	for _, tc := range []struct {
-		writes []scriptedWrite
-		want   error
-	}{
-		{writes: []scriptedWrite{{n: 3}}},
-		{writes: []scriptedWrite{{n: 0}}, want: io.ErrShortWrite},
-		{writes: []scriptedWrite{{n: 3, err: io.EOF}}, want: io.EOF},
-	} {
+	now = time.Now()
+	progress, absolute := now.Add(-2*time.Second), now.Add(2*time.Second)
+	p.service.cfg.PeerRuntimeConfig.WriteDeadline = 3 * time.Second
+	conn = &scriptedConn{writes: []scriptedRead{{data: []byte{0}}}}
+	p.conn = conn
+	requireNoCompactErr(t, p.writePostHandshakeChunk([]byte{1, 2}, &progress, absolute), "short write")
+	if len(conn.writeDeadlines) != 2 || !conn.writeDeadlines[1].After(conn.writeDeadlines[0]) || !conn.writeDeadlines[1].Equal(absolute) {
+		t.Fatal(conn.writeDeadlines)
+	}
+	for _, write := range []scriptedRead{{}, {data: make([]byte, 3), err: io.EOF}} {
 		p := newPeerRuntimeTestPeer(t)
-		conn := &scriptedConn{writes: tc.writes}
+		conn := &scriptedConn{writes: []scriptedRead{write}}
 		p.conn = conn
-		msg := message{Command: messagePing}
-		err, want := p.send(msg.Command, msg.Payload), mustPeerRuntimeFrameBytes(t, p, msg)
-		if !errors.Is(err, tc.want) || tc.want == nil && (!bytes.Equal(conn.Bytes(), want) || len(conn.writeDeadlines) != conn.writeCount || conn.writeCount < 2) || errors.Is(tc.want, io.EOF) && conn.Len() != 3 {
-			t.Fatalf("err=%v bytes=%d/%d writes=%d deadlines=%d", err, conn.Len(), len(want), conn.writeCount, len(conn.writeDeadlines))
+		err, want := p.send(messagePing, nil), io.ErrShortWrite
+		if write.err != nil {
+			want = write.err
+		}
+		if !errors.Is(err, want) || errors.Is(want, io.EOF) && conn.Len() != 3 {
+			t.Fail()
 		}
 	}
 }

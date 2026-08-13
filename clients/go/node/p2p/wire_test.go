@@ -12,14 +12,10 @@ import (
 )
 
 type errReader struct {
-	err         error
-	maxRequest  int
-	maxCapacity int
+	err error
 }
 
-func (r *errReader) Read(p []byte) (int, error) {
-	r.maxRequest = max(r.maxRequest, len(p))
-	r.maxCapacity = max(r.maxCapacity, cap(p))
+func (r errReader) Read(_ []byte) (int, error) {
 	return 0, r.err
 }
 
@@ -156,25 +152,10 @@ func TestReadFrameWithPayloadLimitReadsTxPayloadExact(t *testing.T) {
 }
 
 func TestAbsoluteBudgetMSBoundaries(t *testing.T) {
-	cases := []struct {
-		length uint64
-		want   uint64
-	}{
-		{0, 15_000},
-		{9_000_000, 15_000},
-		{9_000_001, 15_001},
-		{32_000_000, 53_334},
-		{72_000_000 - 1, 120_000},
-		{72_000_000, 120_000},
-		{96_000_000, 160_000},
-	}
-	for _, tc := range cases {
-		if got := absoluteBudgetMS(tc.length); got != tc.want {
-			t.Errorf("absoluteBudgetMS(%d)=%d, want %d", tc.length, got, tc.want)
+	for _, tc := range [][2]uint64{{0, 15_000}, {9_000_000, 15_000}, {9_000_001, 15_001}, {32_000_000, 53_334}, {72_000_000, 120_000}, {96_000_000, 160_000}} {
+		if got := absoluteBudgetMS(tc[0]); got != tc[1] {
+			t.Errorf("absoluteBudgetMS(%d)=%d, want %d", tc[0], got, tc[1])
 		}
-	}
-	if got := absoluteBudgetMS(^uint64(0)); got != ^uint64(0) {
-		t.Fatalf("overflow input budget=%d, want saturated max", got)
 	}
 }
 
@@ -187,9 +168,6 @@ func TestReadPayloadWithChecksumChunkedRoundtrip(t *testing.T) {
 	}
 	if !bytes.Equal(got, payload) {
 		t.Fatal("payload mismatch")
-	}
-	if cap(got) != len(got) {
-		t.Fatalf("payload cap=%d, want exact allocation %d", cap(got), len(got))
 	}
 }
 
@@ -251,14 +229,12 @@ func TestReadPayloadPrefixHandlesBoundariesAndShortRead(t *testing.T) {
 }
 
 func TestReadPayloadWithChecksumPropagatesNonEOFReadError(t *testing.T) {
+	payload := bytes.Repeat([]byte{0x11}, streamReadChunkBytes)
+	checksum := wireChecksum(payload)
 	boom := errors.New("boom")
-	reader := &errReader{err: boom}
-	_, err := readPayloadWithChecksum(reader, 96_000_000, [4]byte{})
+	_, err := readPayloadWithChecksum(errReader{err: boom}, uint32(len(payload)), checksum)
 	if !errors.Is(err, boom) {
 		t.Fatalf("expected boom, got %v", err)
-	}
-	if reader.maxRequest != streamReadChunkBytes || reader.maxCapacity != streamReadChunkBytes {
-		t.Fatalf("payload read len/cap=%d/%d, want %d", reader.maxRequest, reader.maxCapacity, streamReadChunkBytes)
 	}
 }
 

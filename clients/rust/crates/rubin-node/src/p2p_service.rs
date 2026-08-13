@@ -1025,17 +1025,6 @@ fn connect_with_timeout_spawn<S: OneShotSpawn>(
     Err(last_err)
 }
 
-fn service_io_authorized(shared: &SharedServiceState) -> io::Result<()> {
-    if shared.lifecycle.authorized() {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            SERVICE_CLOSED_ERR,
-        ))
-    }
-}
-
 fn handle_peer(
     stream: TcpStream,
     outbound_addr: Option<String>,
@@ -1173,9 +1162,7 @@ fn handle_peer(
     // peer records our mode via `handle_sendcmpct`; mode 0 keeps block
     // announcement on the full-block path and changes no relay behavior.
     session
-        .write_live_message(&sendcmpct_advertisement_message(), || {
-            service_io_authorized(&shared)
-        })
+        .write_message(&sendcmpct_advertisement_message())
         .map_err(|err| format!("advertise compact mode: {err}"))?;
 
     {
@@ -1190,7 +1177,7 @@ fn handle_peer(
         drop(engine);
         if let Some(msg) = initial_request {
             session
-                .write_live_message(&msg, || service_io_authorized(&shared))
+                .write_message(&msg)
                 .map_err(|err| format!("initial sync request: {err}"))?;
         }
     }
@@ -1200,20 +1187,14 @@ fn handle_peer(
         // the LAST statement before the readiness poll: even when close lands
         // while a frame write is in flight, no poll — and so no probe read and
         // no expired-compact fallback write — starts after the cutoff.
-        flush_peer_outbox(&shared, &peer_addr, |frame| {
-            session.write_raw_outbox(frame, || service_io_authorized(&shared))
-        })?;
+        flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
         if !shared.lifecycle.authorized() {
             break;
         }
-        match session.poll_live_read_ready(live_loop_poll_timeout(session.read_deadline()), || {
-            service_io_authorized(&shared)
-        }) {
+        match session.poll_read_ready(live_loop_poll_timeout(session.read_deadline())) {
             Ok(true) => {}
             Ok(false) => {
-                flush_peer_outbox(&shared, &peer_addr, |frame| {
-                    session.write_raw_outbox(frame, || service_io_authorized(&shared))
-                })?;
+                flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
                 continue;
             }
             Err(err)
@@ -1222,9 +1203,7 @@ fn handle_peer(
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                 ) =>
             {
-                flush_peer_outbox(&shared, &peer_addr, |frame| {
-                    session.write_raw_outbox(frame, || service_io_authorized(&shared))
-                })?;
+                flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
                 continue;
             }
             Err(err) => return Err(format!("poll live message readiness: {err}")),
@@ -1233,8 +1212,11 @@ fn handle_peer(
         if !shared.lifecycle.authorized() {
             break;
         }
+        // Absolute per-message deadline: a peer dripping bytes inside this
+        // message cannot extend the read past its window, so the pre-poll
+        // lifecycle re-check stays reachable and close stays deadline-bounded.
         let msg = session
-            .read_live_message_with_authorizer(&mut || service_io_authorized(&shared))
+            .read_live_message()
             .map_err(|err| format!("read message: {err}"))?;
         let outbound_messages = {
             // Validate payload size before acquiring engine lock.
@@ -1283,7 +1265,7 @@ fn handle_peer(
         };
         for outbound in outbound_messages {
             session
-                .write_live_message(&outbound, || service_io_authorized(&shared))
+                .write_message(&outbound)
                 .map_err(|err| format!("handle live message: {err}"))?;
         }
         // Surface the peer's negotiated compact mode (e.g. after a sendcmpct) into
@@ -1291,9 +1273,7 @@ fn handle_peer(
         shared
             .peer_manager
             .set_compact_mode(&peer_addr, session.negotiated_compact_mode());
-        flush_peer_outbox(&shared, &peer_addr, |frame| {
-            session.write_raw_outbox(frame, || service_io_authorized(&shared))
-        })?;
+        flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
     }
     Ok(())
 }
@@ -1310,6 +1290,10 @@ fn flush_peer_outbox<F>(
 where
     F: FnMut(&[u8]) -> io::Result<()>,
 {
+    // One OPEN observation authorizes exactly one FIFO frame: that dequeue and
+    // its write may finish, but no later dequeue begins once close published
+    // DRAINING. The outbox lock is released before each socket write so other
+    // peers can still enqueue broadcasts.
     // Bounded per call at the queue length observed on entry, like the snapshot
     // drain it replaces: a broadcaster refilling during the writes cannot
     // starve the read path, and refills go out on the next live-loop iteration.
@@ -4649,6 +4633,9 @@ mod tests {
         );
         let _ = client.join();
 
+        // Live one-frame dequeue row against the real production flush path:
+        // the frame authorized before DRAINING finishes its write, and no
+        // later dequeue begins.
         let fixture = ServiceFixture::new("rub1168-live-cutoff");
         let shared = fixture.shared().clone();
         let _outbox = attach_relay_peer(&shared, "live-peer:8333");
@@ -4688,7 +4675,7 @@ mod tests {
             cutoff.lifecycle.begin_close();
             Ok(())
         })
-        .expect("authorized dequeue returns from its write callback");
+        .expect("authorized frame completes its write");
         assert_eq!(written, vec![vec![0x11; 4]], "exactly one frame authorized");
         let guard = shared.peer_outboxes.lock().expect("outboxes");
         let remaining = guard.get("live-peer:8333").expect("outbox");
@@ -4736,6 +4723,12 @@ mod tests {
         drop(keep_open);
         peer.join().expect("test-owned peer");
 
+        // Peer-cutoff row (item 15): a channel-controlled peer that drips bytes
+        // INSIDE one message cannot extend that message's read beyond its
+        // absolute window. The drip interval is far inside `read_deadline`, so
+        // per-recv timeout semantics would never expire and the worker blocked
+        // in that read could never observe DRAINING — close would never join
+        // it. Only the absolute per-message deadline lets close reach CLOSED.
         const DRIP_PAYLOAD_BYTES: usize = 4096;
         let drip = ServiceFixture::new("rub1168-drip-cutoff");
         let read_deadline = drip.service.shared.runtime_cfg.read_deadline;
@@ -4754,6 +4747,10 @@ mod tests {
                 local.genesis_hash,
             )
             .expect("peer-side handshake");
+            // A complete, well-formed `tx` envelope header declaring a payload
+            // far larger than anything this peer will ever finish sending. The
+            // service is now committed inside ONE message read, and every drip
+            // byte below would reset a per-recv timeout forever.
             let payload = vec![0u8; DRIP_PAYLOAD_BYTES];
             let header = build_envelope_header(network_magic("devnet"), "tx", &payload)
                 .expect("drip envelope header");
@@ -4782,7 +4779,7 @@ mod tests {
         });
         done_rx
             .recv_timeout(Duration::from_secs(30))
-            .expect("DRAINING authority must interrupt before the next read/progress attempt");
+            .expect("close must reach CLOSED within the watchdog: a dripping peer cannot extend one message read past its absolute deadline");
         let drip = closer.join().expect("closer");
         assert_eq!(drip.phase(), super::LifecyclePhase::Closed);
         assert_eq!(drip.leases(), 0);
