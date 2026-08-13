@@ -418,9 +418,13 @@ type runningDevnetRPCServer struct {
 	addr   string
 	server *http.Server
 	state  *devnetRPCState
-	// listener is the bound ingress socket. Close closes it as its very
-	// first step — the atomic ingress freeze of RUBIN_NODE_RPC_DEVNET.md
-	// 2.1 — so nothing published afterwards can precede the freeze.
+	// listener is the bound ingress socket. Close closes it together with
+	// server.SetKeepAlivesEnabled(false) as its very first step — the
+	// atomic ingress freeze of RUBIN_NODE_RPC_DEVNET.md 2.1, whose ingress
+	// unit is transport acceptance of a HANDLER, not of a socket: closing
+	// the listener alone still admits a pipelined request on an already
+	// established keep-alive connection. Nothing published afterwards can
+	// precede the freeze.
 	listener net.Listener
 	// cancelLifecycle publishes the handler-visible lifecycle cancellation
 	// (2.1 step 2). Close invokes it directly rather than through
@@ -802,8 +806,7 @@ func startDevnetRPCServer(
 }
 
 // Close drains the RPC surface, performing the three RUBIN_NODE_RPC_DEVNET.md
-// 2.1 steps as sequential statements on this one goroutine: (a) freeze ingress
-// by closing the listener — the same action native Shutdown performs first —
+// 2.1 steps as sequential statements on this one goroutine: (a) freeze ingress,
 // (b) publish the handler-visible lifecycle cancellation, (c) drain through
 // native Shutdown. Their order is program order, so publication follows the
 // freeze and precedes the drain CALL unconditionally, including the case where
@@ -812,6 +815,21 @@ func startDevnetRPCServer(
 // edge to the drain wait at all.) Both shutdown initiators — main.go's
 // deferred Close on the signal unwind and a direct Close — funnel through
 // here, so they stay equivalent by construction.
+//
+// Step (a) is the COMPLETE handler-acceptance cutoff, because 2.1's ingress
+// unit is transport acceptance of a HANDLER: listener.Close stops new
+// connections and SetKeepAlivesEnabled(false) stops new requests on the
+// connections already established (net/http server.go:3633-3644 — it stores
+// disableKeepAlives and SYNCHRONOUSLY closes idle HTTP/1 conns via
+// closeIdleConns; a connection mid-request finishes its in-flight response and
+// is then closed through closeAfterReply, so no further request is ever
+// accepted on it). That is the same handler cutoff native Shutdown enforces,
+// hoisted ahead of publication: without it a pipelined /submit_tx or
+// /mine_next could still be accepted in the window between (a) and (b) and
+// reach a live pre-mutation check AFTER the claimed ingress freeze. Order
+// inside (a) is irrelevant — both parts precede (b). A request racing the
+// cutoff resolves under the spec's acceptance-vs-cutoff linearization
+// totality: accepted-and-drained XOR rejected-with-no-unit-of-work.
 //
 // Close is the first deferred teardown to unwind in main.go, so it MUST have
 // returned before p2p.Service.Close begins. Expiry of the caller-provided ctx
@@ -822,8 +840,10 @@ func startDevnetRPCServer(
 //
 // Repeated and concurrent Close stay idempotent: a second listener Close
 // reports an error we deliberately drop because the freeze is already in
-// force, a cancel cause is first-wins and immutable, and net/http's Shutdown
-// is safe to call repeatedly and concurrently.
+// force, SetKeepAlivesEnabled(false) is an atomic store plus an idle-conn
+// sweep and so is safe to repeat and to race with itself, a cancel cause is
+// first-wins and immutable, and net/http's Shutdown is safe to call repeatedly
+// and concurrently.
 //
 // Cancellation only makes already-accepted mutating handlers finish faster at
 // their own defined pre-mutation checks — no handler is aborted, and work that
@@ -838,6 +858,7 @@ func (s *runningDevnetRPCServer) Close(ctx context.Context) error {
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}
+	s.server.SetKeepAlivesEnabled(false)
 	if s.cancelLifecycle != nil {
 		s.cancelLifecycle(errRPCLifecycleCanceled)
 	}
