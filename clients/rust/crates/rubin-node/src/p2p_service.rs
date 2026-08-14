@@ -1197,18 +1197,14 @@ fn handle_peer(
     }
 
     while !shared.stop.load(Ordering::SeqCst) {
-        flush_peer_outbox(&shared, &peer_addr, |frame| {
-            session.write_live_raw_frame_with_authorizer(frame, &mut authorize_live_io)
-        })?;
+        flush_live_peer_outbox(&shared, &peer_addr, &mut session, &mut authorize_live_io)?;
         match session.poll_read_ready_with_authorizer(
             live_loop_poll_timeout(session.read_deadline()),
             &mut authorize_live_io,
         ) {
             Ok(true) => {}
             Ok(false) => {
-                flush_peer_outbox(&shared, &peer_addr, |frame| {
-                    session.write_live_raw_frame_with_authorizer(frame, &mut authorize_live_io)
-                })?;
+                flush_live_peer_outbox(&shared, &peer_addr, &mut session, &mut authorize_live_io)?;
                 continue;
             }
             Err(err)
@@ -1217,9 +1213,7 @@ fn handle_peer(
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                 ) =>
             {
-                flush_peer_outbox(&shared, &peer_addr, |frame| {
-                    session.write_live_raw_frame_with_authorizer(frame, &mut authorize_live_io)
-                })?;
+                flush_live_peer_outbox(&shared, &peer_addr, &mut session, &mut authorize_live_io)?;
                 continue;
             }
             Err(err) => return Err(format!("poll live message readiness: {err}")),
@@ -1282,9 +1276,7 @@ fn handle_peer(
         shared
             .peer_manager
             .set_compact_mode(&peer_addr, session.negotiated_compact_mode());
-        flush_peer_outbox(&shared, &peer_addr, |frame| {
-            session.write_live_raw_frame_with_authorizer(frame, &mut authorize_live_io)
-        })?;
+        flush_live_peer_outbox(&shared, &peer_addr, &mut session, &mut authorize_live_io)?;
     }
     Ok(())
 }
@@ -1293,6 +1285,15 @@ fn live_loop_poll_timeout(read_deadline: Duration) -> Duration {
     read_deadline.min(LIVE_LOOP_IDLE_DRAIN_POLL_INTERVAL)
 }
 
+fn flush_live_peer_outbox(
+    shared: &SharedServiceState,
+    addr: &str,
+    p: &mut crate::p2p_runtime::PeerSession,
+    auth: &mut impl FnMut() -> io::Result<()>,
+) -> Result<(), String> {
+    let write = |f: &[u8]| p.write_live_raw_frame_with_authorizer(f, auth);
+    flush_peer_outbox(shared, addr, write)
+}
 fn flush_peer_outbox<F>(
     shared: &SharedServiceState,
     peer_addr: &str,
@@ -4640,7 +4641,6 @@ mod tests {
         );
         let _ = client.join();
 
-        // Inherited FIFO gate rows against the real production flush path.
         let fixture = ServiceFixture::new("rub1168-live-cutoff");
         let shared = fixture.shared().clone();
         let _outbox = attach_relay_peer(&shared, "live-peer:8333");
