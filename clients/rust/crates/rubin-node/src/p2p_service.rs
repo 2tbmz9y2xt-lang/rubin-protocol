@@ -102,9 +102,9 @@ impl ServiceLifecycle {
         })
     }
 
-    /// `true` while the Service is `OPEN`. Takes no lease: a peer worker calls
-    /// it immediately before authorizing one more read or one more frame
-    /// dequeue and keeps the worker lease it already owns.
+    /// `true` while the Service is `OPEN`. The inherited dequeue gate and each
+    /// socket authorizer call observe it independently under an existing worker
+    /// lease; neither observation holds this mutex across socket I/O.
     fn authorized(&self) -> bool {
         self.lock().phase == LifecyclePhase::Open
     }
@@ -1157,12 +1157,26 @@ fn handle_peer(
         prefetch: &shared.prefetch_state,
     };
 
+    let mut authorize_live_io = || {
+        if shared.lifecycle.authorized() {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                SERVICE_CLOSED_ERR,
+            ))
+        }
+    };
+
     // Advertise local compact-relay capability immediately after handshake,
     // mirroring Go `advertiseLocalCompactMode` (service_peer_lifecycle.go). The
     // peer records our mode via `handle_sendcmpct`; mode 0 keeps block
     // announcement on the full-block path and changes no relay behavior.
     session
-        .write_message(&sendcmpct_advertisement_message())
+        .write_live_message_with_authorizer(
+            &sendcmpct_advertisement_message(),
+            &mut authorize_live_io,
+        )
         .map_err(|err| format!("advertise compact mode: {err}"))?;
 
     {
@@ -1177,24 +1191,24 @@ fn handle_peer(
         drop(engine);
         if let Some(msg) = initial_request {
             session
-                .write_message(&msg)
+                .write_live_message_with_authorizer(&msg, &mut authorize_live_io)
                 .map_err(|err| format!("initial sync request: {err}"))?;
         }
     }
 
     while !shared.stop.load(Ordering::SeqCst) {
-        // The flush carries its own per-frame OPEN observation, so this one is
-        // the LAST statement before the readiness poll: even when close lands
-        // while a frame write is in flight, no poll — and so no probe read and
-        // no expired-compact fallback write — starts after the cutoff.
-        flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
-        if !shared.lifecycle.authorized() {
-            break;
-        }
-        match session.poll_read_ready(live_loop_poll_timeout(session.read_deadline())) {
+        flush_peer_outbox(&shared, &peer_addr, |frame| {
+            session.write_live_raw_frame_with_authorizer(frame, &mut authorize_live_io)
+        })?;
+        match session.poll_read_ready_with_authorizer(
+            live_loop_poll_timeout(session.read_deadline()),
+            &mut authorize_live_io,
+        ) {
             Ok(true) => {}
             Ok(false) => {
-                flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
+                flush_peer_outbox(&shared, &peer_addr, |frame| {
+                    session.write_live_raw_frame_with_authorizer(frame, &mut authorize_live_io)
+                })?;
                 continue;
             }
             Err(err)
@@ -1203,20 +1217,15 @@ fn handle_peer(
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                 ) =>
             {
-                flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
+                flush_peer_outbox(&shared, &peer_addr, |frame| {
+                    session.write_live_raw_frame_with_authorizer(frame, &mut authorize_live_io)
+                })?;
                 continue;
             }
             Err(err) => return Err(format!("poll live message readiness: {err}")),
         }
-        // Re-observe between the ready poll and the read it authorizes.
-        if !shared.lifecycle.authorized() {
-            break;
-        }
-        // Absolute per-message deadline: a peer dripping bytes inside this
-        // message cannot extend the read past its window, so the pre-poll
-        // lifecycle re-check stays reachable and close stays deadline-bounded.
         let msg = session
-            .read_live_message()
+            .read_live_message_with_authorizer(&mut authorize_live_io)
             .map_err(|err| format!("read message: {err}"))?;
         let outbound_messages = {
             // Validate payload size before acquiring engine lock.
@@ -1265,7 +1274,7 @@ fn handle_peer(
         };
         for outbound in outbound_messages {
             session
-                .write_message(&outbound)
+                .write_live_message_with_authorizer(&outbound, &mut authorize_live_io)
                 .map_err(|err| format!("handle live message: {err}"))?;
         }
         // Surface the peer's negotiated compact mode (e.g. after a sendcmpct) into
@@ -1273,7 +1282,9 @@ fn handle_peer(
         shared
             .peer_manager
             .set_compact_mode(&peer_addr, session.negotiated_compact_mode());
-        flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
+        flush_peer_outbox(&shared, &peer_addr, |frame| {
+            session.write_live_raw_frame_with_authorizer(frame, &mut authorize_live_io)
+        })?;
     }
     Ok(())
 }
@@ -1290,10 +1301,6 @@ fn flush_peer_outbox<F>(
 where
     F: FnMut(&[u8]) -> io::Result<()>,
 {
-    // One OPEN observation authorizes exactly one FIFO frame: that dequeue and
-    // its write may finish, but no later dequeue begins once close published
-    // DRAINING. The outbox lock is released before each socket write so other
-    // peers can still enqueue broadcasts.
     // Bounded per call at the queue length observed on entry, like the snapshot
     // drain it replaces: a broadcaster refilling during the writes cannot
     // starve the read path, and refills go out on the next live-loop iteration.
@@ -4633,9 +4640,7 @@ mod tests {
         );
         let _ = client.join();
 
-        // Live one-frame dequeue row against the real production flush path:
-        // the frame authorized before DRAINING finishes its write, and no
-        // later dequeue begins.
+        // Inherited FIFO gate rows against the real production flush path.
         let fixture = ServiceFixture::new("rub1168-live-cutoff");
         let shared = fixture.shared().clone();
         let _outbox = attach_relay_peer(&shared, "live-peer:8333");
@@ -4668,20 +4673,52 @@ mod tests {
             "the bounded call writes exactly the entry-queue length"
         );
 
-        let mut written: Vec<Vec<u8>> = Vec::new();
+        // DRAINING after one completed write wins the next pre-dequeue gate.
+        let mut written = Vec::new();
         let cutoff = shared.clone();
         super::flush_peer_outbox(&shared, "live-peer:8333", |frame| {
             written.push(frame.to_vec());
             cutoff.lifecycle.begin_close();
             Ok(())
         })
-        .expect("authorized frame completes its write");
-        assert_eq!(written, vec![vec![0x11; 4]], "exactly one frame authorized");
+        .expect("DRAINING before the next gate leaves that frame queued");
+        assert_eq!(written, vec![vec![0x11; 4]], "one OPEN write completes");
         let guard = shared.peer_outboxes.lock().expect("outboxes");
         let remaining = guard.get("live-peer:8333").expect("outbox");
-        assert_eq!(remaining.len(), 2, "no dequeue may begin after DRAINING");
-        assert_eq!(remaining.total_bytes(), 16, "exact total_bytes decrement");
+        assert_eq!(remaining.len(), 2, "no second frame is dequeued");
+        assert_eq!(remaining.total_bytes(), 16);
         assert_eq!(remaining.frames(), [vec![0x22; 7], vec![0x33; 9]]);
+        drop(guard);
+
+        // If dequeue wins under OPEN, a later I/O denial drops only that frame.
+        let denied = ServiceFixture::new("rub1192-live-after-dequeue-denial");
+        let denied_shared = denied.shared().clone();
+        let _denied_outbox = attach_relay_peer(&denied_shared, "denied-peer:8333");
+        {
+            let mut guard = denied_shared.peer_outboxes.lock().expect("outboxes");
+            let ob = guard.get_mut("denied-peer:8333").expect("outbox");
+            for frame in [vec![0x41; 4], vec![0x42; 5], vec![0x43; 6]] {
+                assert!(ob.push_frame(frame));
+            }
+        }
+        let cutoff = denied_shared.clone();
+        let mut authorizations = 0;
+        let err = super::flush_peer_outbox(&denied_shared, "denied-peer:8333", |_frame| {
+            cutoff.lifecycle.begin_close();
+            authorizations += 1;
+            assert!(!cutoff.lifecycle.authorized());
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                super::SERVICE_CLOSED_ERR,
+            ))
+        })
+        .expect_err("dequeued frame loses its later I/O authorization");
+        assert_eq!(err, format!("relay drain: {}", super::SERVICE_CLOSED_ERR));
+        assert_eq!(authorizations, 1);
+        let guard = denied_shared.peer_outboxes.lock().expect("outboxes");
+        let remaining = guard.get("denied-peer:8333").expect("outbox");
+        assert_eq!(remaining.frames(), [vec![0x42; 5], vec![0x43; 6]]);
+        assert_eq!((remaining.len(), remaining.total_bytes()), (2, 11));
         drop(guard);
 
         // Readiness-poll and following-read rows against a REAL live peer
