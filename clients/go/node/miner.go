@@ -168,6 +168,8 @@ func NewMiner(chainState *ChainState, blockStore *BlockStore, sync *SyncEngine, 
 	}, nil
 }
 
+// MineN mines blocks sequentially via MineOne, inheriting its cancellation
+// postconditions; cancellation between blocks surfaces from the next call.
 func (m *Miner) MineN(ctx context.Context, blocks int, txs [][]byte) ([]MinedBlock, error) {
 	if blocks < 0 {
 		return nil, errors.New("blocks must be >= 0")
@@ -183,6 +185,15 @@ func (m *Miner) MineN(ctx context.Context, blocks int, txs [][]byte) ([]MinedBlo
 	return out, nil
 }
 
+// MineOne observes ctx at entry (pre-bootstrap), every nonce attempt, and
+// immediately before canonical apply; observing cancellation returns
+// ctx.Err() with no write past the check. A nil ctx disables observation.
+//
+// Callee-side ctx contract: every checkpoint is a NON-BLOCKING poll (a select
+// with a default). MineOne never blocks on ctx.Done(), never retains ctx or
+// its Done channel across checkpoints, and never shares ctx with another
+// goroutine — so a caller may pass a single-goroutine context implementation
+// whose Done/Err are only valid on the calling goroutine.
 func (m *Miner) MineOne(ctx context.Context, txs [][]byte) (*MinedBlock, error) {
 	// Validate miner state
 	if err := m.validateMineOneInput(); err != nil {
