@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::da_relay::CompleteDaSetProvider;
-use crate::miner::{Miner, MinerConfig};
+use crate::miner::{MineCancelObserver, MineCheckpoint, Miner, MinerConfig};
 use crate::p2p_runtime::{orphan_pool_metrics_snapshot, PeerManager};
 use crate::txpool::TxSource;
 use crate::{BlockStore, SyncEngine, TxPool, TxPoolAdmitErrorKind, TxPoolConfig};
@@ -85,6 +85,11 @@ pub struct DevnetRPCState {
     /// exercise all three states (`ready_endpoint_reports_503_after_shutdown_sticky`
     /// drives the gate through `Shutdown` via `RunningDevnetRPCServer::close`).
     readiness: Arc<ReadinessGate>,
+    /// RUB-1186: the one server-owned lifecycle cancellation source. The accept
+    /// loop and every `DevnetRPCState` clone share this exact atomic; `close()`
+    /// publishes it only after the RUB-1178 admission freeze. Handlers read it
+    /// only at their defined pre-mutation checkpoints.
+    lifecycle_stop: Arc<AtomicBool>,
 }
 
 pub struct RunningDevnetRPCServer {
@@ -158,7 +163,7 @@ pub struct RunningDevnetRPCServer {
 ///     * sync engine has reached chain tip or has any peer
 ///       (`PeerManager` peer count is observable via `/peers`, not
 ///       `/ready`);
-///     * the lifecycle context has not been canceled by an external
+///     * the lifecycle context has not been cancelled by an external
 ///       signal before production lifecycle shutdown starts. Rust
 ///       production `main.rs` wires the process stop flag into this
 ///       gate for the Go-aligned graceful-stop set: SIGINT and SIGTERM
@@ -558,10 +563,19 @@ pub fn new_devnet_rpc_state_with_tx_pool(
         // `GET /ready` cannot report 200 before the node is actually
         // serving requests.
         readiness: Arc::new(ReadinessGate::default()),
+        // RUB-1186: the future server, accept loop, and all state clones share
+        // this one source from construction onward.
+        lifecycle_stop: Arc::new(AtomicBool::new(false)),
     }
 }
 
 impl DevnetRPCState {
+    /// RUB-1186: handler-side read of the shared lifecycle source at a defined
+    /// pre-mutation checkpoint. The accept loop reads the same `Arc` directly.
+    fn lifecycle_cancelled(&self) -> bool {
+        self.lifecycle_stop.load(Ordering::SeqCst)
+    }
+
     pub fn set_accepted_block_hook(&mut self, accepted_block: AcceptedBlockFn) {
         self.accepted_block = Some(accepted_block);
     }
@@ -610,7 +624,8 @@ pub fn start_devnet_rpc_server(
         .local_addr()
         .map_err(|err| format!("local_addr: {err}"))?
         .to_string();
-    let stop = Arc::new(AtomicBool::new(false));
+    // The accept loop and handlers share the state-owned lifecycle source.
+    let stop = Arc::clone(&state.lifecycle_stop);
     let stop_flag = Arc::clone(&stop);
     let active_handlers = Arc::new(AtomicUsize::new(0));
     let active_handlers_for_loop = Arc::clone(&active_handlers);
@@ -698,6 +713,15 @@ impl RunningDevnetRPCServer {
 
     /// One bounded pass; its `Err` may be the diagnostic "keep waiting" timeout.
     fn close_with_timeout(&mut self, timeout: Duration) -> Result<(), String> {
+        self.close_with_timeout_at_freeze(timeout, || {})
+    }
+
+    /// One bounded pass with an observation immediately before admission freeze.
+    fn close_with_timeout_at_freeze(
+        &mut self,
+        timeout: Duration,
+        before_freeze: impl FnOnce(),
+    ) -> Result<(), String> {
         let started = Instant::now();
         // RUB-10 / GitHub #1151: stamp `Shutdown` BEFORE stopping the
         // accept loop so any in-flight `/ready` request that races the
@@ -708,7 +732,16 @@ impl RunningDevnetRPCServer {
         // re-stamps Shutdown without effect.
         self.readiness.mark_shutdown();
         // Step 2: the admission cutoff, monotone and idempotent.
-        self.freeze_admission();
+        self.freeze_admission_at_boundary(before_freeze);
+        // Step 2b (RUB-1186): publish lifecycle cancellation. It MUST come after
+        // the freeze — a socket admitted before the freeze is the only one that
+        // can still reach a handler, and it must be able to observe this — and
+        // before the accept-loop resolution and the active-handler wait, which
+        // otherwise blocks forever on a handler parked at a checkpoint. Stored
+        // here rather than inside `resolve_accept_loop` because that step
+        // early-returns once the join handle is consumed, and a later pass must
+        // still publish. Monotone and idempotent like the freeze.
+        self.stop.store(true, Ordering::SeqCst);
         match self.resolve_accept_loop(started, timeout) {
             Ok(()) => {}
             // Pending inside the diagnostic interval; ownership retained.
@@ -723,8 +756,8 @@ impl RunningDevnetRPCServer {
         self.terminal_fault.clone().map_or(Ok(()), Err) // step 6
     }
 
-    /// Step 2: flip to `FROZEN`. Sticky — every later socket loses the cutoff.
-    fn freeze_admission(&self) {
+    fn freeze_admission_at_boundary(&self, before_freeze: impl FnOnce()) {
+        before_freeze();
         let mut frozen = self
             .admission
             .lock()
@@ -732,15 +765,15 @@ impl RunningDevnetRPCServer {
         *frozen = true;
     }
 
-    /// Step 3: request accept-loop termination and resolve it. A bounded
-    /// timeout is reported with the join handle AND completion channel still
-    /// owned, so a retry resumes the same teardown (B4); any other fault is
-    /// reported only after that ownership is consumed (B5). Idempotent (B7/B8).
+    /// Step 3: resolve accept-loop ownership. The loop's termination flag was
+    /// already published by step 2b. A bounded timeout is reported with the join
+    /// handle AND completion channel still owned, so a retry resumes the same
+    /// teardown (B4); any other fault is reported only after that ownership is
+    /// consumed (B5). Idempotent (B7/B8).
     fn resolve_accept_loop(&mut self, started: Instant, timeout: Duration) -> Result<(), String> {
         if self.join.is_none() {
             return Ok(());
         }
-        self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(&self.addr);
         // Past the early return the two are paired-Some (consumed together
         // below); an impossible unpaired state fails closed as a fault.
@@ -894,7 +927,11 @@ enum Admission {
 /// The admission cutoff. Holds the gate across the whole observe-`FROZEN` /
 /// apply-capacity / acquire-unit span, so the freeze cannot interleave. No I/O
 /// runs under it: the socket is accepted before entry, dropped by the caller.
-fn admit_under_gate(gate: &Mutex<bool>, active: &AtomicUsize) -> Admission {
+fn admit_under_gate(
+    gate: &Mutex<bool>,
+    active: &AtomicUsize,
+    after_acquire: impl FnOnce(),
+) -> Admission {
     let frozen = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if *frozen {
         return Admission::Frozen;
@@ -903,6 +940,7 @@ fn admit_under_gate(gate: &Mutex<bool>, active: &AtomicUsize) -> Admission {
         return Admission::AtCapacity;
     }
     active.fetch_add(1, Ordering::SeqCst);
+    after_acquire();
     Admission::Admitted
 }
 
@@ -915,7 +953,7 @@ fn run_accept_loop(
 ) {
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
-            Ok((stream, _)) => match admit_under_gate(&admission, &active) {
+            Ok((stream, _)) => match admit_under_gate(&admission, &active, || {}) {
                 // No backoff: the freeze must not delay loop termination.
                 Admission::Frozen => drop(stream),
                 Admission::AtCapacity => {
@@ -1418,6 +1456,28 @@ fn handle_get_block(state: &DevnetRPCState, method: &str, query: &str) -> HttpRe
     }
 }
 
+/// RUB-1186: handler-side canonical prevalidation, byte-identical in kind and
+/// message to the first two rejections inside `TxPool::add_tx_with_source`
+/// (`clients/rust/crates/rubin-node/src/txpool.rs`, the `parse_tx` and
+/// `consumed != len` arms), so hoisting them ahead of the lifecycle checkpoint
+/// changes no response a client can observe. It exists only so the ordering
+/// "reject invalid bytes, THEN check lifecycle" holds; `add_tx_with_source`
+/// still repeats both checks and its body is untouched.
+fn prevalidate_canonical_tx(tx_bytes: &[u8]) -> Result<(), crate::TxPoolAdmitError> {
+    let rejected = |message: String| crate::TxPoolAdmitError {
+        kind: TxPoolAdmitErrorKind::Rejected,
+        message,
+    };
+    let (_, _, _, consumed) = rubin_consensus::parse_tx(tx_bytes)
+        .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
+    if consumed != tx_bytes.len() {
+        return Err(rejected(
+            "transaction rejected: non-canonical tx bytes".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpResponse {
     const ROUTE: &str = "/submit_tx";
     if method != "POST" {
@@ -1525,13 +1585,31 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
     // is recorded on the resulting `TxPoolEntry` and surfaced via
     // `TxPool::entry_source` for downstream parity tests.
     let admit_result = match state.tx_pool.lock() {
-        Ok(mut pool) => pool.add_tx_with_source(
-            &tx_bytes,
-            &chain_state,
-            fresh_block_store.as_ref(),
-            chain_id,
-            TxSource::Local,
-        ),
+        Ok(mut pool) => match prevalidate_canonical_tx(&tx_bytes) {
+            // RUB-1186: a canonical-parse failure keeps its baseline 422 even
+            // when shutdown is concurrent, because the prevalidation runs
+            // BEFORE the lifecycle load. Mirrors the Go reference ordering
+            // (`ParseTx` at clients/go/cmd/rubin-node/http_rpc.go:1178-1182,
+            // `lifecycleErr()` at :1194).
+            Err(rejection) => Err(rejection),
+            // RUB-1186: the last defined pre-mutation checkpoint, immediately
+            // before admission — the mirror of Go's `lifecycleErr()` load
+            // immediately before `mempool.AddTx` (http_rpc.go:1194 / :1203).
+            // Observing here returns without admission and without mutation;
+            // nothing observes cancellation inside or after
+            // `add_tx_with_source`, so a completed admission result is final.
+            Ok(()) if state.lifecycle_cancelled() => Err(crate::TxPoolAdmitError {
+                kind: TxPoolAdmitErrorKind::Unavailable,
+                message: "rpc unavailable".to_string(),
+            }),
+            Ok(()) => pool.add_tx_with_source(
+                &tx_bytes,
+                &chain_state,
+                fresh_block_store.as_ref(),
+                chain_id,
+                TxSource::Local,
+            ),
+        },
         Err(_) => Err(crate::TxPoolAdmitError {
             kind: TxPoolAdmitErrorKind::Unavailable,
             message: "tx pool unavailable".to_string(),
@@ -1698,13 +1776,27 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
     if let Some(provider) = state.live_complete_da_set_provider.as_ref() {
         miner.set_complete_da_set_provider(provider.as_ref());
     }
-    let mined = match miner.mine_one(&[]) {
+    // RUB-1186: a borrowed, thread-free observer over the shared lifecycle
+    // atomic. `mine_one_observed` polls it before the bootstrap mutation, at
+    // every bounded nonce quantum, and immediately before `apply_block`.
+    let cancelled = |_: MineCheckpoint| state.lifecycle_cancelled();
+    let mut cancel = MineCancelObserver::new(&cancelled);
+    let mined = match miner.mine_one_observed(&[], &mut cancel) {
         Ok(b) => b,
         Err(err) => {
+            // Classification reads ONLY the checkpoint latch, never the atomic
+            // again: a post-return read would remap a mining failure that
+            // formed while the node was still live into a cancellation just
+            // because shutdown was published before the response was assembled.
+            let (status, error) = if cancel.observed() {
+                (503, "rpc unavailable".to_string())
+            } else {
+                (422, err)
+            };
             return json_response(
                 state,
                 ROUTE,
-                422,
+                status,
                 &MineNextResponse {
                     mined: false,
                     height: None,
@@ -1712,9 +1804,9 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
                     timestamp: None,
                     nonce: None,
                     tx_count: None,
-                    error: Some(err),
+                    error: Some(error),
                 },
-            )
+            );
         }
     };
     let mined_hash = mined.hash;
@@ -3419,6 +3511,9 @@ mod tests {
             // benefit from the default-NotReady wiring there. Keep
             // the boot value explicit here for parity.
             readiness: Arc::new(super::ReadinessGate::default()),
+            // RUB-1186: route-level rows use the same state-owned source and
+            // may publish it directly without starting a listener.
+            lifecycle_stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -5369,6 +5464,9 @@ mod tests {
             // RUB-10 / GitHub #1151: render_prometheus_metrics test does
             // not exercise `/ready`; default `NotReady` is fine.
             readiness: Arc::new(super::ReadinessGate::default()),
+            // RUB-1186: this route-only state starts with its shared source
+            // not cancelled.
+            lifecycle_stop: Arc::new(AtomicBool::new(false)),
         };
 
         let body = render_prometheus_metrics(&state);
@@ -5826,9 +5924,34 @@ mod tests {
     #[test]
     fn rpc_drain_accept_cutoff_matrix() {
         let cap = super::MAX_CONCURRENT_RPC_CONNS;
-        let (state, dir) = build_state(false);
+        let (chain_state, raw, chain_id) = floor_compliant_signed_tx_and_state();
+        let state = build_state_with_chain_state(chain_state, chain_id);
         let mut server = start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start");
         let addr = server.addr().to_string();
+
+        // Capture the only point that matters for A1: the unit is acquired
+        // while the same admission mutex is still held. Moving `fetch_add`
+        // outside the guard leaves this callback able to lock the mutex.
+        let captured_gate = Mutex::new(false);
+        let captured_active = AtomicUsize::new(0);
+        let captured = super::admit_under_gate(&captured_gate, &captured_active, || {
+            assert_eq!(
+                captured_active.load(Ordering::SeqCst),
+                1,
+                "A1 unit acquired at the captured point"
+            );
+            assert!(
+                matches!(
+                    captured_gate.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ),
+                "A1 admission mutex remains held at acquisition"
+            );
+        });
+        assert!(
+            matches!(captured, super::Admission::Admitted),
+            "A1 admitted"
+        );
 
         // A1: admission wins — the unit is acquired BEFORE the gate releases, so
         // the next gate holder (close()'s role) observes it. Every A holder is
@@ -5851,10 +5974,28 @@ mod tests {
 
         // A2 + A5: the cutoff wins while the loop still sees `stop == false`.
         assert!(!server.stop.load(Ordering::SeqCst), "A5 stop==false");
-        let before = state.metrics.snapshot();
-        server.freeze_admission();
-        assert!(request_to_eof(&addr, READY_GET).is_empty(), "A2 no reply");
-        assert_eq!(state.metrics.snapshot(), before, "A2 no route work");
+        let body = format!(r#"{{"tx_hex":"{}"}}"#, hex::encode(&raw));
+        let valid_submit = format!(
+            "POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let before_metrics = state.metrics.snapshot();
+        let before_pool = state.tx_pool.lock().expect("pool").len();
+        server.freeze_admission_at_boundary(|| {});
+        assert!(
+            request_to_eof(&addr, valid_submit.as_bytes()).is_empty(),
+            "A2 valid submit loses without a response"
+        );
+        assert_eq!(
+            state.metrics.snapshot(),
+            before_metrics,
+            "A2 no route or submit metric"
+        );
+        assert_eq!(
+            state.tx_pool.lock().expect("pool").len(),
+            before_pool,
+            "A2 no pool mutation"
+        );
         assert_eq!(active_units(&server), 1, "A2 no increment");
 
         assert_spawn_failure_releases_unit_once(); // A4
@@ -5862,7 +6003,6 @@ mod tests {
         drop(holder);
         server.close().expect("close after cutoff matrix");
         assert_eq!(active_units(&server), 0, "A1 zero before return");
-        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     /// RUB-1178 Table B: close, timeout, retry, and the public result.
@@ -7789,6 +7929,580 @@ mod tests {
             addrs,
             vec!["10.0.0.1:0", "198.51.100.4:0"],
             "wire-level peers list must be sorted by addr ascending"
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    // ---- RUB-1186 lifecycle cancellation rows ----
+
+    /// RUB-1186 helper: the `/mine_next` request every row below sends.
+    fn mine_next_request() -> HttpRequest {
+        HttpRequest {
+            method: "POST".to_string(),
+            target: "/mine_next".to_string(),
+            body: Vec::new(),
+        }
+    }
+
+    fn submit_tx_request(tx_hex: &str) -> HttpRequest {
+        HttpRequest {
+            method: "POST".to_string(),
+            target: "/submit_tx".to_string(),
+            body: format!(r#"{{"tx_hex":"{tx_hex}"}}"#).into_bytes(),
+        }
+    }
+
+    /// RUB-1186 raw-socket reader: consumes exactly ONE framed response — head
+    /// plus its `Content-Length` body — and not a byte more. `read_to_end` is
+    /// wrong against this server: it closes the socket as soon as it answered,
+    /// and when unread request bytes are still buffered the kernel answers that
+    /// close with a reset, which surfaces as a read error that discards a
+    /// complete response the test already had. Bounded by a watchdog; it
+    /// decides no cutoff.
+    fn read_one_framed_response(sock: &mut TcpStream) -> String {
+        let deadline = Instant::now() + SEC5 + SEC5;
+        let mut buf = Vec::new();
+        let mut framed: Option<usize> = None;
+        loop {
+            if framed.is_none() {
+                framed = buf
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|head_end| {
+                        let length: usize = String::from_utf8_lossy(&buf[..head_end])
+                            .split("\r\n")
+                            .find_map(|line| line.strip_prefix("Content-Length: "))
+                            .expect("Content-Length header")
+                            .parse()
+                            .expect("Content-Length value");
+                        head_end + 4 + length
+                    });
+            }
+            if let Some(total) = framed.filter(|total| buf.len() >= *total) {
+                buf.truncate(total);
+                return String::from_utf8_lossy(&buf).to_string();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no complete response: {}",
+                String::from_utf8_lossy(&buf)
+            );
+            let mut chunk = [0u8; 512];
+            match sock.read(&mut chunk) {
+                Ok(0) => panic!(
+                    "eof before a complete response: {}",
+                    String::from_utf8_lossy(&buf)
+                ),
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(err) => panic!("read response: {err}"),
+            }
+        }
+    }
+
+    /// Everything the peer sends until the stream ends, with a RESET counted as
+    /// an ordinary end. Measured behaviour of this server on a pipelined
+    /// socket (macOS, 5 runs, byte-stable): it writes the response head, writes
+    /// the body as a second small write, and closes with the second frame still
+    /// unread; the close becomes a reset that discards the still-unsent body,
+    /// so the client receives exactly the 90-byte head. The status line is
+    /// therefore always observable and the body never is — which is why the
+    /// caller asserts on STATUS LINES and on the metric/pool effects, and never
+    /// on this response body. `read_to_end` here would have hidden that reset
+    /// behind a discarded `Result`.
+    fn read_until_stream_end(sock: &mut TcpStream) -> String {
+        let mut got = Vec::new();
+        let mut chunk = [0u8; 512];
+        while let Ok(read) = sock.read(&mut chunk) {
+            if read == 0 {
+                break;
+            }
+            got.extend_from_slice(&chunk[..read]);
+        }
+        String::from_utf8_lossy(&got).to_string()
+    }
+
+    /// RUB-1186 seam: publishes lifecycle cancellation the moment the miner
+    /// consults it. The provider is read inside `select_candidate_transactions`,
+    /// i.e. strictly AFTER the pre-bootstrap checkpoint passed clean and
+    /// strictly BEFORE the first nonce quantum — the only in-process ordering
+    /// that isolates a mid-mine publication without a timing window. What this
+    /// seam proves is exactly that: a checkpoint no later than search entry
+    /// answers a publication that lands mid-mine. That the poll also runs at
+    /// EVERY later quantum, so an arbitrarily long search stays bounded, is a
+    /// property of `mine_header_nonce` alone and is pinned by its own unit
+    /// killer (`mine_header_nonce_polls_at_every_quantum_not_only_at_search_entry`).
+    struct CancelPublishingDaProvider {
+        publish: Arc<AtomicBool>,
+        sets: Vec<crate::da_relay::CompleteDaSetCandidate>,
+    }
+
+    impl crate::da_relay::CompleteDaSetProvider for CancelPublishingDaProvider {
+        fn complete_da_set_candidates(
+            &self,
+            _max_payload_bytes: u64,
+        ) -> Vec<crate::da_relay::CompleteDaSetCandidate> {
+            self.publish.store(true, Ordering::SeqCst);
+            self.sets.clone()
+        }
+    }
+
+    /// Live-mining state wired to `CancelPublishingDaProvider`. `hard_target`
+    /// picks a non-stock network so `Miner::template_target` honours the static
+    /// config target verbatim, and a target no search can satisfy in test time —
+    /// so a nonce search can only be ended by a quantum checkpoint.
+    fn build_state_for_mine_cancel(
+        hard_target: bool,
+        sets: Vec<crate::da_relay::CompleteDaSetCandidate>,
+    ) -> (super::DevnetRPCState, PathBuf) {
+        let dir = unique_temp_path("rubin-devnet-rpc-cancel");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let block_store = BlockStore::create(block_store_path(&dir)).expect("blockstore");
+        let mut sync_cfg = default_sync_config(None, devnet_genesis_chain_id(), None);
+        let mut miner_cfg = MinerConfig::default();
+        if hard_target {
+            sync_cfg.network = "regtest".to_string();
+            miner_cfg.target[0] = 0x00;
+            miner_cfg.target[1] = 0x00;
+            miner_cfg.target[2] = 0x00;
+            miner_cfg.target[3] = 0x00;
+        }
+        let engine =
+            SyncEngine::new(ChainState::new(), Some(block_store.clone()), sync_cfg).expect("sync");
+        let rpc_block_store = BlockStore::open(block_store_path(&dir)).expect("reopen blockstore");
+        let sync_engine = Arc::new(Mutex::new(engine));
+        let tx_pool = new_shared_runtime_tx_pool(&sync_engine);
+        let mut state = new_devnet_rpc_state_with_tx_pool(
+            sync_engine,
+            Some(rpc_block_store),
+            tx_pool,
+            Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
+            None,
+            None,
+            Some(miner_cfg),
+        );
+        state.set_complete_da_set_provider(Arc::new(CancelPublishingDaProvider {
+            publish: Arc::clone(&state.lifecycle_stop),
+            sets,
+        }));
+        (state, dir)
+    }
+
+    /// RUB-1186 ordering matrix: `mark_shutdown` < admission freeze < lifecycle
+    /// publication < active-handler wait, on the production listener. Holding
+    /// the shared admission gate blocks the freeze outright, so anything
+    /// observed while it is held provably ordered BEFORE the freeze; a parked
+    /// admitted handler keeps the drain wait open, so publication observed
+    /// while it is still held provably ordered BEFORE that wait completed.
+    #[test]
+    fn rpc_lifecycle_publication_ordering_matrix() {
+        let (state, dir) = build_state(false);
+        let mut server = start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start");
+        assert!(
+            Arc::ptr_eq(&state.lifecycle_stop, &server.stop),
+            "pre-start state clone and server must share one lifecycle source"
+        );
+        let addr = server.addr().to_string();
+        let stop = Arc::clone(&server.stop);
+        let gate = Arc::clone(&server.admission);
+
+        let holder = HeldUnit::hold(&addr);
+        wait_until_active_handlers(&server, 1);
+        let held = gate.lock().expect("hold gate");
+        let (at_freeze_tx, at_freeze_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let closer = std::thread::spawn(move || {
+            let result = server.close_with_timeout_at_freeze(SEC5, || {
+                at_freeze_tx.send(()).expect("signal pre-freeze");
+                release_rx
+                    .recv_timeout(SEC5)
+                    .expect("bounded pre-freeze release");
+            });
+            (server, result)
+        });
+
+        at_freeze_rx
+            .recv_timeout(SEC5)
+            .expect("closer reached the pre-freeze boundary");
+        assert!(
+            !state.readiness.is_ready(),
+            "mark_shutdown precedes the freeze"
+        );
+        assert!(!*held, "the freeze is still blocked on the held gate");
+        assert!(
+            !stop.load(Ordering::SeqCst),
+            "publication must not precede the admission freeze"
+        );
+        release_tx.send(()).expect("release pre-freeze boundary");
+        assert!(
+            !stop.load(Ordering::SeqCst),
+            "held admission gate prevents publication before the freeze"
+        );
+        drop(held);
+
+        let watch = Instant::now() + SEC5;
+        while !stop.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < watch,
+                "publication precedes the drain wait"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!closer.is_finished(), "close returned before the drain");
+        drop(holder);
+        let (mut server, result) = closer.join().expect("closer");
+        result.expect("close completes once the parked handler releases");
+        assert_eq!(active_units(&server), 0, "drained at return");
+        assert!(ingress_frozen(&server), "frozen at return");
+
+        // Repeated close joins the same domain; publication stays sticky even
+        // though the accept-loop handle was already consumed.
+        server.close().expect("repeated close");
+        assert!(stop.load(Ordering::SeqCst), "publication is sticky");
+        drop(server);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-1186 transport totality, proved on a raw socket rather than cited.
+    /// One admitted socket dispatches at most ONE framed request: a complete
+    /// second HTTP request written into the same buffer gets no route, no
+    /// response, no submit metric and no mutation. The assertions count STATUS
+    /// LINES and metric entries rather than pin the status of a hypothetical
+    /// second response: measured against a redispatching mutant, the second
+    /// response is a 400, not the duplicate-submit 409 one might expect,
+    /// because the framing reader already buffered part of the second frame
+    /// while reading the first. What a redispatch cannot hide is that there is
+    /// a second response and a second route metric at all.
+    #[test]
+    fn rpc_admitted_socket_dispatches_exactly_one_framed_request() {
+        let (chain_state, raw, chain_id) = floor_compliant_signed_tx_and_state();
+        let state = build_state_with_chain_state(chain_state, chain_id);
+        let mut server = start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start");
+        let addr = server.addr().to_string();
+
+        let body = format!(r#"{{"tx_hex":"{}"}}"#, hex::encode(&raw));
+        let framed = format!(
+            "POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let mut sock = TcpStream::connect(&addr).expect("connect");
+        // This reader deliberately outlives the server's own 5s per-read
+        // window: a handler that re-entered the socket would consume the second
+        // frame at once, answer it, and only then park on an exhausted third
+        // read for that whole window before closing. The reader must still be
+        // here to count that second status line instead of timing out first and
+        // mistaking a redispatch for totality.
+        sock.set_read_timeout(Some(SEC5 + SEC5))
+            .expect("read timeout");
+        sock.write_all(format!("{framed}{framed}").as_bytes())
+            .expect("write both frames");
+        let got = read_until_stream_end(&mut sock);
+        assert_eq!(got.matches("HTTP/1.1 ").count(), 1, "one response: {got}");
+        assert!(got.contains("HTTP/1.1 200 "), "the first frame won: {got}");
+        wait_until_handlers_drop_to(&server, 0);
+
+        let (routes, submits) = state.metrics.snapshot();
+        assert_eq!(routes.values().sum::<u64>(), 1, "one route invocation");
+        assert_eq!(routes.get(&("/submit_tx".to_string(), 200)), Some(&1));
+        assert_eq!(submits.values().sum::<u64>(), 1, "one submit metric");
+        assert_eq!(submits.get("accepted"), Some(&1));
+        assert_eq!(
+            state.tx_pool.lock().expect("pool").len(),
+            1,
+            "one possible mutation"
+        );
+        server.close().expect("close");
+    }
+
+    /// RUB-1186 END-TO-END, on the production listener: a complete valid
+    /// request holds an admitted unit at the existing `rpc_op_lock`, then the
+    /// held pool guard prevents its final pre-admission checkpoint. `close()`
+    /// publishes cancellation before the guard is released, so the handler
+    /// returns 503 without pool mutation.
+    #[test]
+    fn submit_tx_parked_handler_observes_close_publication_end_to_end() {
+        let (chain_state, raw, chain_id) = floor_compliant_signed_tx_and_state();
+        let state = build_state_with_chain_state(chain_state, chain_id);
+        let mut server = start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start");
+        let addr = server.addr().to_string();
+        let stop = Arc::clone(&server.stop);
+        let held_pool = state.tx_pool.lock().expect("hold tx pool");
+
+        let body = format!(r#"{{"tx_hex":"{}"}}"#, hex::encode(&raw));
+        let request = format!(
+            "POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let mut sock = TcpStream::connect(&addr).expect("connect");
+        sock.set_read_timeout(Some(SEC5 + SEC5))
+            .expect("read timeout");
+        sock.write_all(request.as_bytes()).expect("write request");
+        sock.shutdown(std::net::Shutdown::Write)
+            .expect("finish request");
+        wait_until_active_handlers(&server, 1);
+        let lock_deadline = Instant::now() + SEC5;
+        loop {
+            match state.rpc_op_lock.try_lock() {
+                Err(std::sync::TryLockError::WouldBlock) => break,
+                Err(std::sync::TryLockError::Poisoned(_)) => panic!("rpc_op_lock poisoned"),
+                Ok(temporary) => drop(temporary),
+            }
+            assert!(
+                Instant::now() < lock_deadline,
+                "admitted handler did not acquire rpc_op_lock"
+            );
+            std::thread::yield_now();
+        }
+        assert!(
+            !stop.load(Ordering::SeqCst),
+            "lifecycle publication has not started"
+        );
+
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        let closer = std::thread::spawn(move || {
+            let result = server.close();
+            let _ = closed_tx.send(());
+            (server, result)
+        });
+        let watch = Instant::now() + SEC5;
+        while !stop.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < watch,
+                "close must publish lifecycle cancellation while a handler is parked"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // The handler holds `rpc_op_lock` and waits for this pool guard, so its
+        // final lifecycle check observes the close publication after release.
+        drop(held_pool);
+        let got = read_one_framed_response(&mut sock);
+        assert!(
+            got.contains("HTTP/1.1 503 "),
+            "the parked handler must observe the publication: {got}"
+        );
+        let json: Value =
+            serde_json::from_str(got.split_once("\r\n\r\n").expect("response body").1)
+                .expect("json body");
+        assert_eq!(json["accepted"].as_bool(), Some(false));
+        assert!(json["txid"].is_null(), "no txid without admission: {json}");
+        assert_eq!(json["error"].as_str(), Some("rpc unavailable"));
+
+        closed_rx
+            .recv_timeout(SEC5 + SEC5)
+            .expect("close returns once the parked handler answered");
+        let (server, result) = closer.join().expect("closer");
+        result.expect("close completes once the parked handler answered");
+        assert_eq!(active_units(&server), 0, "drained at return");
+        let (_, submits) = state.metrics.snapshot();
+        assert_eq!(
+            submits.get("unavailable"),
+            Some(&1),
+            "counted as unavailable"
+        );
+        assert_eq!(
+            state.tx_pool.lock().expect("pool").len(),
+            0,
+            "an observing checkpoint admits nothing"
+        );
+        drop(server);
+    }
+
+    /// RUB-1186: `prevalidate_canonical_tx` claims byte-identity in kind AND
+    /// message with the first two rejections inside `add_tx_with_source`.
+    /// That claim is what makes hoisting them ahead of the lifecycle checkpoint
+    /// invisible to a client, so it is EXECUTED here rather than asserted in a
+    /// comment. Both inputs are rejected before either path reaches deeper
+    /// validation, so a fresh pool and the fixture chain state suffice.
+    #[test]
+    fn prevalidate_canonical_tx_matches_add_tx_with_source_rejections() {
+        let (chain_state, raw, chain_id) = floor_compliant_signed_tx_and_state();
+        let mut trailing = raw.clone();
+        trailing.push(0x00);
+        for (label, bytes) in [("parse failure", vec![0x00]), ("trailing bytes", trailing)] {
+            let hoisted =
+                super::prevalidate_canonical_tx(&bytes).expect_err("prevalidation rejects");
+            let in_pool = TxPool::new()
+                .add_tx_with_source(&bytes, &chain_state, None, chain_id, TxSource::Local)
+                .expect_err("admission rejects");
+            assert_eq!(
+                hoisted, in_pool,
+                "{label}: hoisted rejection must be identical"
+            );
+        }
+    }
+
+    /// RUB-1186: canonical prevalidation runs BEFORE the lifecycle checkpoint,
+    /// so invalid bytes arriving during a shutdown keep their baseline 422 and
+    /// their baseline rejection text instead of being reclassified as 503.
+    #[test]
+    fn submit_tx_invalid_canonical_bytes_keep_422_under_published_shutdown() {
+        let (state, dir) = build_state(true);
+        state.lifecycle_stop.store(true, Ordering::SeqCst);
+        let response = route_request(&state, submit_tx_request("00"));
+        assert_eq!(
+            response.status, 422,
+            "parse failure precedes the checkpoint"
+        );
+        let body = response_json(&response);
+        assert_eq!(body["accepted"].as_bool(), Some(false));
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("transaction rejected"),
+            "baseline rejection text: {body}"
+        );
+        let (_, submits) = state.metrics.snapshot();
+        assert_eq!(submits.get("rejected"), Some(&1));
+        assert_eq!(submits.get("unavailable"), None, "not remapped to shutdown");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-1186: the last pre-mutation checkpoint. A canonically valid request
+    /// whose lifecycle load observes cancellation releases its locks without
+    /// admission and answers the existing 503 shape.
+    #[test]
+    fn submit_tx_pre_admission_checkpoint_returns_503_without_mutation() {
+        let (chain_state, raw, chain_id) = floor_compliant_signed_tx_and_state();
+        let state = build_state_with_chain_state(chain_state, chain_id);
+        state.lifecycle_stop.store(true, Ordering::SeqCst);
+        let response = route_request(&state, submit_tx_request(&hex::encode(&raw)));
+        assert_eq!(response.status, 503);
+        let body = response_json(&response);
+        assert_eq!(body["accepted"].as_bool(), Some(false));
+        assert!(body["txid"].is_null(), "no txid without admission: {body}");
+        assert_eq!(body["error"].as_str(), Some("rpc unavailable"));
+        let (_, submits) = state.metrics.snapshot();
+        assert_eq!(submits.get("unavailable"), Some(&1));
+        assert_eq!(
+            state.tx_pool.lock().expect("pool").len(),
+            0,
+            "the pool must be untouched"
+        );
+    }
+
+    /// RUB-1186 submit winner: a clean checkpoint hands the request to
+    /// admission and the admission result is final. The announce hook runs
+    /// strictly after `add_tx_with_source` returned, so publishing from it is
+    /// the deterministic "shutdown lands after the boundary" case.
+    #[test]
+    fn submit_tx_admission_result_stands_when_shutdown_publishes_after_the_check() {
+        let (chain_state, raw, chain_id) = floor_compliant_signed_tx_and_state();
+        let mut state = build_state_with_chain_state(chain_state, chain_id);
+        let publish = Arc::clone(&state.lifecycle_stop);
+        state.announce_tx = Some(Arc::new(
+            move |_: &[u8], _: crate::txpool::RelayTxMetadata| {
+                publish.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        ));
+        let response = route_request(&state, submit_tx_request(&hex::encode(&raw)));
+        assert_eq!(
+            response.status, 200,
+            "a completed admission is never remapped"
+        );
+        assert_eq!(response_json(&response)["accepted"].as_bool(), Some(true));
+        assert!(state.lifecycle_cancelled(), "the hook published shutdown");
+        assert_eq!(state.tx_pool.lock().expect("pool").len(), 1, "admitted");
+    }
+
+    /// RUB-1186 mine checkpoint 1: observed before the bootstrap MUTATION, so
+    /// an empty canonical store stays empty.
+    #[test]
+    fn mine_next_pre_bootstrap_checkpoint_returns_503_and_leaves_the_store_empty() {
+        let (state, dir) = build_state_with_live_mining(false);
+        state.lifecycle_stop.store(true, Ordering::SeqCst);
+        let response = route_request(&state, mine_next_request());
+        assert_eq!(response.status, 503);
+        let body = response_json(&response);
+        assert_eq!(body["mined"].as_bool(), Some(false));
+        assert_eq!(body["error"].as_str(), Some("rpc unavailable"));
+        assert!(
+            !state.sync_engine.lock().expect("sync").chain_state.has_tip,
+            "bootstrap must not have run"
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-1186 mine checkpoint 2 on the route: a search that cannot terminate
+    /// on its own is ended by a quantum checkpoint. Cancellation is published
+    /// from the DA provider — after the pre-bootstrap checkpoint passed clean,
+    /// before the first quantum — so no other checkpoint can answer this. What
+    /// this row proves is that a checkpoint no later than search entry answers
+    /// a mid-mine publication with the route-shaped 503; the stronger in-search
+    /// bound (a poll at EVERY quantum, not just the first) is proved by the
+    /// `mine_header_nonce` unit killer in `miner.rs`.
+    #[test]
+    fn mine_next_nonce_quantum_checkpoint_ends_a_held_search() {
+        let (state, dir) = build_state_for_mine_cancel(true, Vec::new());
+        assert!(
+            !state.lifecycle_cancelled(),
+            "clean at the first checkpoint"
+        );
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let mining = std::thread::spawn(move || {
+            let response = route_request(&state, mine_next_request());
+            let _ = done_tx.send(());
+            (state, response)
+        });
+        done_rx
+            .recv_timeout(SEC5)
+            .expect("a quantum checkpoint must end the held search");
+        let (state, response) = mining.join().expect("mine thread");
+        assert_eq!(response.status, 503);
+        let body = response_json(&response);
+        assert_eq!(body["mined"].as_bool(), Some(false));
+        assert_eq!(body["error"].as_str(), Some("rpc unavailable"));
+        assert!(state.lifecycle_cancelled(), "the provider published");
+        drop(state);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-1186: 503 requires the checkpoint LATCH, never a later read of the
+    /// atomic. Here the provider publishes cancellation and then hands the
+    /// miner a non-canonical set, so the mining failure forms with no
+    /// checkpoint ever observing and the response stays the baseline 422.
+    #[test]
+    fn mine_next_formed_failure_is_not_remapped_by_a_later_publication() {
+        let bad = crate::da_relay::CompleteDaSetCandidate {
+            da_id: [0x11; 32],
+            payload_bytes: 0,
+            commit_tx: vec![0xff, 0xff, 0xff, 0xff],
+            chunks: Vec::new(),
+        };
+        let (state, dir) = build_state_for_mine_cancel(false, vec![bad]);
+        let response = route_request(&state, mine_next_request());
+        assert!(state.lifecycle_cancelled(), "publication happened mid-mine");
+        assert_eq!(response.status, 422, "a formed failure keeps its status");
+        let body = response_json(&response);
+        assert_ne!(
+            body["error"].as_str(),
+            Some("rpc unavailable"),
+            "a formed failure is not a cancellation: {body}"
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-1186 mine winner: apply entry is final. The accepted-block hook runs
+    /// only after a successful mine+apply, so publishing from it is the
+    /// deterministic "shutdown lands after the boundary" case — the 200 stands
+    /// and the applied tip is never rolled back or remapped to `mined:false`.
+    #[test]
+    fn mine_next_apply_winner_stands_when_shutdown_publishes_after_apply_entry() {
+        let (mut state, dir) = build_state_with_live_mining(true);
+        let publish = Arc::clone(&state.lifecycle_stop);
+        state.set_accepted_block_hook(Arc::new(move |_: [u8; 32]| {
+            publish.store(true, Ordering::SeqCst);
+            Ok(())
+        }));
+        let response = route_request(&state, mine_next_request());
+        assert_eq!(response.status, 200, "apply truth is never remapped");
+        let body = response_json(&response);
+        assert_eq!(body["mined"].as_bool(), Some(true));
+        assert!(state.lifecycle_cancelled(), "the hook published shutdown");
+        assert!(
+            state.sync_engine.lock().expect("sync").chain_state.has_tip,
+            "the applied block stands"
         );
         fs::remove_dir_all(dir).expect("cleanup");
     }

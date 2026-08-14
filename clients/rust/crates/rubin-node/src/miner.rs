@@ -101,6 +101,64 @@ pub(crate) struct CompleteDaSetGroupProjection<'a> {
     pub(crate) policy_da_included: u64,
 }
 
+/// RUB-1186: checkpoints before their next mutation boundary. `PreBootstrap`
+/// precedes genesis bootstrap; `NonceQuantum` and `PreApply` may follow a
+/// completed bootstrap. Named so a test can isolate one checkpoint
+/// deterministically; the production poll ignores the value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MineCheckpoint {
+    PreBootstrap,
+    NonceQuantum,
+    PreApply,
+}
+
+/// RUB-1186: a borrowed, thread-free lifecycle observer over a caller-owned
+/// cancellation source, carrying the latch its caller classifies from.
+///
+/// Postconditions the code cannot show on its own:
+/// - `check` latches ONLY on an ACTUAL checkpoint observation. Callers must
+///   classify cancellation from `observed()`, never by reading the source
+///   again after the mine returned: a post-return read would remap a mining
+///   failure that formed before any observation into a cancellation.
+/// - the latch is monotone; once set it stays set for the rest of the mine.
+/// - it is local control flow, not a registry: it owns no thread, no channel
+///   and no state beyond the borrow and the latch bit.
+pub(crate) struct MineCancelObserver<'a> {
+    poll: &'a dyn Fn(MineCheckpoint) -> bool,
+    observed: bool,
+}
+
+impl<'a> MineCancelObserver<'a> {
+    pub(crate) fn new(poll: &'a dyn Fn(MineCheckpoint) -> bool) -> Self {
+        Self {
+            poll,
+            observed: false,
+        }
+    }
+
+    fn check(&mut self, at: MineCheckpoint) -> bool {
+        if !self.observed && (self.poll)(at) {
+            self.observed = true;
+        }
+        self.observed
+    }
+
+    pub(crate) fn observed(&self) -> bool {
+        self.observed
+    }
+}
+
+/// The `Err` a cancelled mine returns. It is never surfaced to a client: the
+/// caller answers a latched observation with its own route-shaped 503.
+pub(crate) const MINE_CANCELLED: &str = "mining cancelled by rpc shutdown";
+
+/// Nonces tried between two lifecycle checkpoints in `mine_header_nonce`. The
+/// search itself is unchanged — nonces are still tried in order from 0 and the
+/// first one satisfying `target` still wins — so the header/nonce this returns
+/// for a given prefix and target is byte-identical to the baseline unbounded
+/// loop. The quantum only bounds how long the search runs between two checks.
+const MINE_NONCE_QUANTUM: u64 = 1024;
+
 pub struct Miner<'a> {
     sync: &'a mut SyncEngine,
     tx_pool: Option<&'a mut TxPool>,
@@ -155,6 +213,43 @@ impl<'a> Miner<'a> {
     }
 
     pub fn mine_one(&mut self, txs: &[Vec<u8>]) -> Result<MinedBlock, String> {
+        // RUB-1186: ordinary mining for every existing caller (`mine_n`, the
+        // `--mine-blocks` bin path, `da_txgen`, benches, tests). A
+        // never-observing observer keeps the baseline behaviour and the exact
+        // public signature; only devnet RPC `/mine_next` passes a live one.
+        let never = |_: MineCheckpoint| false;
+        self.mine_one_observed(txs, &mut MineCancelObserver::new(&never))
+    }
+
+    /// RUB-1186: `mine_one` with the three lifecycle checkpoints devnet RPC
+    /// `/mine_next` needs to answer a graceful shutdown without mutating the
+    /// chain. Mirrors the merged Go reference observables — `Miner.MineOne`
+    /// entry (`clients/go/node/miner.go:197`), the `mineHeaderNonce` quantum
+    /// polls (`clients/go/node/miner.go:853`) and the `executeMineOne`
+    /// pre-apply check (`clients/go/node/miner_mine_helpers.go:32`) — not its
+    /// implementation shape.
+    ///
+    /// Postcondition, in the Go reference's own wording (`clients/go/node/miner.go:188-190`):
+    /// on `Err` with `MineCancelObserver::observed`, there was NO WRITE PAST
+    /// THE CHECK THAT LATCHED. It is not "nothing was mutated": a
+    /// `PreBootstrap` latch leaves an empty canonical store empty, but a
+    /// `NonceQuantum` or `PreApply` latch means the earlier pre-bootstrap check
+    /// was clean, so the idempotent genesis bootstrap below already ran and its
+    /// effect stands. What every latch does guarantee is that the mine stops at
+    /// that checkpoint: it never reaches `apply_block` and never rolls back
+    /// what an earlier stage already did. Once `apply_block` is entered the
+    /// result stands and is never rolled back or remapped by a later
+    /// cancellation.
+    pub(crate) fn mine_one_observed(
+        &mut self,
+        txs: &[Vec<u8>],
+        cancel: &mut MineCancelObserver<'_>,
+    ) -> Result<MinedBlock, String> {
+        // Checkpoint 1: before the bootstrap MUTATION below, so an observing
+        // check leaves an empty canonical store empty.
+        if cancel.check(MineCheckpoint::PreBootstrap) {
+            return Err(MINE_CANCELLED.to_string());
+        }
         // Ensure the chain is bootstrapped at the canonical published genesis
         // before any candidate is built, mirroring the Go reference's
         // `bootstrapGenesisIfNeeded` call position in `Miner.MineOne`
@@ -214,8 +309,15 @@ impl<'a> Miner<'a> {
         }
         let merkle_root = merkle_root_txids(&txids).map_err(|e| e.to_string())?;
         let block_without_nonce = make_header_prefix(prev_hash, merkle_root, timestamp, target);
-        let (header_bytes, nonce) = mine_header_nonce(&block_without_nonce, target)?;
+        // Checkpoint 2 lives inside the search, at every quantum entry.
+        let (header_bytes, nonce) = mine_header_nonce(&block_without_nonce, target, cancel)?;
         let block_bytes = assemble_block_bytes(&header_bytes, &coinbase, &parsed);
+        // Checkpoint 3: the last instant before the canonical apply MUTATION.
+        // Nothing observes cancellation inside or after `apply_block` — once
+        // entered, apply/postcommit truth is final.
+        if cancel.check(MineCheckpoint::PreApply) {
+            return Err(MINE_CANCELLED.to_string());
+        }
         let summary = self
             .sync
             .apply_block(&block_bytes, prev_timestamps.as_deref())?;
@@ -795,17 +897,26 @@ fn make_header_prefix(
 fn mine_header_nonce(
     block_without_nonce: &[u8],
     target: [u8; 32],
+    cancel: &mut MineCancelObserver<'_>,
 ) -> Result<(Vec<u8>, u64), String> {
     let mut nonce = 0u64;
     loop {
-        let mut header = block_without_nonce.to_vec();
-        header.extend_from_slice(&nonce.to_le_bytes());
-        if pow_check(&header, target).is_ok() {
-            return Ok((header, nonce));
+        // RUB-1186 checkpoint 2: at the entry of every finite quantum, so an
+        // arbitrarily hard target cannot pin a draining node. Polling only
+        // before or after the whole search would not bound it.
+        if cancel.check(MineCheckpoint::NonceQuantum) {
+            return Err(MINE_CANCELLED.to_string());
         }
-        nonce = nonce.wrapping_add(1);
-        if nonce == 0 {
-            return Err("exhausted nonce space without valid header".to_string());
+        for _ in 0..MINE_NONCE_QUANTUM {
+            let mut header = block_without_nonce.to_vec();
+            header.extend_from_slice(&nonce.to_le_bytes());
+            if pow_check(&header, target).is_ok() {
+                return Ok((header, nonce));
+            }
+            nonce = nonce.wrapping_add(1);
+            if nonce == 0 {
+                return Err("exhausted nonce space without valid header".to_string());
+            }
         }
     }
 }
@@ -866,7 +977,8 @@ mod tests {
         choose_valid_timestamp, default_mine_address, make_header_prefix, mine_header_nonce,
         mtp_median, parse_complete_da_set_candidate, parse_mine_address_arg,
         parse_mining_candidate, pick_flat_candidate_raw, updated_policy_da_bytes,
-        validate_complete_da_set_candidate_shape, Miner, MinerConfig,
+        validate_complete_da_set_candidate_shape, MineCancelObserver, MineCheckpoint, Miner,
+        MinerConfig, MINE_CANCELLED,
     };
 
     use std::path::Path;
@@ -2086,7 +2198,13 @@ mod tests {
         // The NONCE SEARCH must take the derived target too, not just the
         // header field: the mined nonce has to be the FIRST that satisfies the
         // derived value, which a search against the static one would skip.
-        let (_, first) = mine_header_nonce(&header[..108], POW_LIMIT).expect("first nonce");
+        let never = |_: MineCheckpoint| false;
+        let (_, first) = mine_header_nonce(
+            &header[..108],
+            POW_LIMIT,
+            &mut MineCancelObserver::new(&never),
+        )
+        .expect("first nonce");
         assert_eq!(
             mined.nonce, first,
             "nonce searched against the static target"
@@ -2120,5 +2238,135 @@ mod tests {
         }
         drop(regtest);
         fs::remove_dir_all(&regtest_dir).expect("cleanup");
+    }
+
+    // ---- RUB-1186 lifecycle checkpoint rows ----
+
+    /// RUB-1186 checkpoint 3 in isolation. `/mine_next` has no in-process seam
+    /// between the last nonce quantum and `apply_block`, so the pre-apply
+    /// observation is isolated here instead: the named checkpoint makes the
+    /// earlier two provably clean without a thread or a timing window. Removing
+    /// only the pre-apply check lets the staged candidate reach `apply_block`
+    /// and move the tip, which these assertions forbid.
+    #[test]
+    fn mine_one_observed_pre_apply_checkpoint_leaves_tip_unchanged() {
+        use crate::sync::stock_devnet_engine_for_test;
+
+        let (mut sync, dir) = stock_devnet_engine_for_test("rubin-mn-preapply", |_| {});
+        let tip_before = sync.chain_state.tip_hash;
+        let height_before = sync.chain_state.height;
+        let at_pre_apply = |at: MineCheckpoint| at == MineCheckpoint::PreApply;
+        let mut cancel = MineCancelObserver::new(&at_pre_apply);
+        let err = {
+            let mut miner = Miner::new(&mut sync, None, MinerConfig::default()).expect("miner");
+            miner
+                .mine_one_observed(&[], &mut cancel)
+                .expect_err("pre-apply cancellation")
+        };
+        assert_eq!(err, MINE_CANCELLED, "cancelled, not a mining failure");
+        assert!(cancel.observed(), "an actual checkpoint must latch");
+        assert_eq!(sync.chain_state.tip_hash, tip_before, "apply must not run");
+        assert_eq!(sync.chain_state.height, height_before, "tip unchanged");
+        drop(sync);
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// RUB-1186: the quantum restructure is search-neutral. Against a target
+    /// hard enough that the winner lies past the first quantum, the bounded
+    /// loop returns the byte-identical header and nonce a plain unbounded scan
+    /// finds — the property the checkpoint may not buy at the cost of.
+    #[test]
+    fn mine_header_nonce_quantum_preserves_the_first_valid_nonce() {
+        use rubin_consensus::constants::POW_LIMIT;
+        use rubin_consensus::pow_check;
+
+        let mut hard = POW_LIMIT;
+        hard[0] = 0x00;
+        hard[1] = 0x00;
+        let prefix = make_header_prefix([7u8; 32], [9u8; 32], 1_777_000_000, hard);
+        let never = |_: MineCheckpoint| false;
+        let (header, nonce) =
+            mine_header_nonce(&prefix, hard, &mut MineCancelObserver::new(&never))
+                .expect("bounded search");
+
+        // Oracle: the baseline unbounded scan, inlined.
+        let mut want = 0u64;
+        let want_header = loop {
+            let mut candidate = prefix.clone();
+            candidate.extend_from_slice(&want.to_le_bytes());
+            if pow_check(&candidate, hard).is_ok() {
+                break candidate;
+            }
+            want = want.wrapping_add(1);
+            assert_ne!(want, 0, "reference scan exhausted the nonce space");
+        };
+        assert_eq!(nonce, want, "same first valid nonce");
+        assert_eq!(header, want_header, "byte-identical header");
+        assert!(
+            nonce >= super::MINE_NONCE_QUANTUM,
+            "the fixture must cross a quantum boundary to be meaningful: {nonce}"
+        );
+    }
+
+    /// RUB-1186 checkpoint 2, proved INSIDE the search rather than around it.
+    /// The poll answers `false` on its first invocation and `true` afterwards,
+    /// so only a checkpoint at the entry of the SECOND quantum can end the
+    /// search. The exact cancellation result plus `polls == 2` makes that
+    /// second-quantum entry non-vacuous. A search polled only once, at entry,
+    /// cannot latch at all and runs to a mined header instead. The
+    /// bounded `recv_timeout` keeps a mutant that removes the in-loop poll from
+    /// pinning the suite when its target is unsatisfiable.
+    #[test]
+    fn mine_header_nonce_polls_at_every_quantum_not_only_at_search_entry() {
+        use rubin_consensus::constants::POW_LIMIT;
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let searching = std::thread::spawn(move || {
+            let mut hard = POW_LIMIT;
+            hard[0] = 0x00;
+            hard[1] = 0x00;
+            let prefix = make_header_prefix([3u8; 32], [4u8; 32], 1_777_000_000, hard);
+            let polls = AtomicU64::new(0);
+            let poll = |_: MineCheckpoint| polls.fetch_add(1, Ordering::SeqCst) > 0;
+            let mut cancel = MineCancelObserver::new(&poll);
+            let outcome = mine_header_nonce(&prefix, hard, &mut cancel);
+            let _ = done_tx.send(());
+            (outcome, polls.load(Ordering::SeqCst), cancel.observed())
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("an in-search checkpoint must end the search");
+        let (outcome, polls, observed) = searching.join().expect("search thread");
+        assert_eq!(
+            outcome.expect_err("the second quantum entry cancels"),
+            MINE_CANCELLED
+        );
+        assert!(observed, "the latch records an ACTUAL checkpoint");
+        assert_eq!(polls, 2, "polled at every quantum entry, not once");
+    }
+
+    /// RUB-1186: a never-observing observer keeps ordinary `mine_one` behaviour
+    /// for every existing caller, and the latch stays clear when no checkpoint
+    /// ever observed — the precondition `/mine_next` classification relies on.
+    #[test]
+    fn mine_one_without_observation_keeps_baseline_behaviour() {
+        use crate::sync::stock_devnet_engine_for_test;
+
+        let (mut sync, dir) = stock_devnet_engine_for_test("rubin-mn-nocancel", |_| {});
+        let height_before = sync.chain_state.height;
+        let never = |_: MineCheckpoint| false;
+        let mut cancel = MineCancelObserver::new(&never);
+        let mined = {
+            let mut miner = Miner::new(&mut sync, None, MinerConfig::default()).expect("miner");
+            miner.mine_one_observed(&[], &mut cancel).expect("mine one")
+        };
+        assert!(!cancel.observed(), "no checkpoint observed");
+        assert_eq!(mined.height, height_before + 1, "apply advanced the tip");
+        assert_eq!(
+            sync.chain_state.tip_hash, mined.hash,
+            "tip is the new block"
+        );
+        drop(sync);
+        fs::remove_dir_all(&dir).expect("cleanup");
     }
 }
