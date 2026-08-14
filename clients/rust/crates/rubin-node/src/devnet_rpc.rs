@@ -85,22 +85,10 @@ pub struct DevnetRPCState {
     /// exercise all three states (`ready_endpoint_reports_503_after_shutdown_sticky`
     /// drives the gate through `Shutdown` via `RunningDevnetRPCServer::close`).
     readiness: Arc<ReadinessGate>,
-    /// RUB-1186: a read-only share of the SAME `RunningDevnetRPCServer::stop`
-    /// atomic the accept loop already owns — the single handler lifecycle
-    /// cancellation source, published by `close()` AFTER the RUB-1178 admission
-    /// freeze. `start_devnet_rpc_server` installs the server's atomic here; a
-    /// state built without a server keeps this never-true default, which is
-    /// construction convenience for `route_request`-level tests, NOT a second
-    /// cancellation domain. The install happens on the state that call OWNS, so
-    /// it reaches the SERVING state — the one every admitted handler routes
-    /// against. A clone taken BEFORE the call (only tests do this, to read
-    /// metrics and the pool after the state moved) keeps the inert default and
-    /// must publish into `lifecycle_stop` itself or read the server's `stop`.
-    /// The process stop signal is deliberately NOT bound
-    /// here: it is published before `close()` enters, so it cannot order after
-    /// the freeze. Mirrors the observable of Go's `cancelLifecycle` call in
-    /// `runningDevnetRPCServer.Close` (`clients/go/cmd/rubin-node/http_rpc.go:878`),
-    /// never its `net/http` mechanism.
+    /// RUB-1186: the one server-owned lifecycle cancellation source. The accept
+    /// loop and every `DevnetRPCState` clone share this exact atomic; `close()`
+    /// publishes it only after the RUB-1178 admission freeze. Handlers read it
+    /// only at their defined pre-mutation checkpoints.
     lifecycle_stop: Arc<AtomicBool>,
 }
 
@@ -175,7 +163,7 @@ pub struct RunningDevnetRPCServer {
 ///     * sync engine has reached chain tip or has any peer
 ///       (`PeerManager` peer count is observable via `/peers`, not
 ///       `/ready`);
-///     * the lifecycle context has not been canceled by an external
+///     * the lifecycle context has not been cancelled by an external
 ///       signal before production lifecycle shutdown starts. Rust
 ///       production `main.rs` wires the process stop flag into this
 ///       gate for the Go-aligned graceful-stop set: SIGINT and SIGTERM
@@ -575,17 +563,15 @@ pub fn new_devnet_rpc_state_with_tx_pool(
         // `GET /ready` cannot report 200 before the node is actually
         // serving requests.
         readiness: Arc::new(ReadinessGate::default()),
-        // RUB-1186: never-true until `start_devnet_rpc_server` installs the
-        // server's own accept-loop atomic (see the field doc).
+        // RUB-1186: the future server, accept loop, and all state clones share
+        // this one source from construction onward.
         lifecycle_stop: Arc::new(AtomicBool::new(false)),
     }
 }
 
 impl DevnetRPCState {
-    /// RUB-1186: true iff lifecycle cancellation has been published for the
-    /// server owning this state. The ONLY read of the lifecycle source outside
-    /// `RunningDevnetRPCServer`; handlers call it at a defined pre-mutation
-    /// checkpoint, never after a mutation boundary was entered.
+    /// RUB-1186: handler-side read of the shared lifecycle source at a defined
+    /// pre-mutation checkpoint. The accept loop reads the same `Arc` directly.
     fn lifecycle_cancelled(&self) -> bool {
         self.lifecycle_stop.load(Ordering::SeqCst)
     }
@@ -627,7 +613,7 @@ pub fn new_shared_runtime_tx_pool(sync_engine: &Arc<Mutex<SyncEngine>>) -> Arc<M
 
 pub fn start_devnet_rpc_server(
     bind_addr: &str,
-    mut state: DevnetRPCState,
+    state: DevnetRPCState,
 ) -> Result<RunningDevnetRPCServer, String> {
     let listener =
         TcpListener::bind(bind_addr).map_err(|err| format!("bind {bind_addr}: {err}"))?;
@@ -638,16 +624,8 @@ pub fn start_devnet_rpc_server(
         .local_addr()
         .map_err(|err| format!("local_addr: {err}"))?
         .to_string();
-    let stop = Arc::new(AtomicBool::new(false));
-    // RUB-1186: the accept-loop stop atomic IS the handler lifecycle source.
-    // One atomic serves both roles because `close()` publishes it only after
-    // the RUB-1178 admission freeze, so every socket that can still reach a
-    // handler was admitted before publication. Installed here, on the owned
-    // `state` this call is about to move into the accept loop, so the SERVING
-    // state's handlers all read this one atomic. A clone a caller took before
-    // this call keeps its own inert default (see the field doc); production
-    // `main.rs` moves the state here without cloning, so no other copy exists.
-    state.lifecycle_stop = Arc::clone(&stop);
+    // The accept loop and handlers share the state-owned lifecycle source.
+    let stop = Arc::clone(&state.lifecycle_stop);
     let stop_flag = Arc::clone(&stop);
     let active_handlers = Arc::new(AtomicUsize::new(0));
     let active_handlers_for_loop = Arc::clone(&active_handlers);
@@ -735,6 +713,15 @@ impl RunningDevnetRPCServer {
 
     /// One bounded pass; its `Err` may be the diagnostic "keep waiting" timeout.
     fn close_with_timeout(&mut self, timeout: Duration) -> Result<(), String> {
+        self.close_with_timeout_at_freeze(timeout, || {})
+    }
+
+    /// One bounded pass with an observation immediately before admission freeze.
+    fn close_with_timeout_at_freeze(
+        &mut self,
+        timeout: Duration,
+        before_freeze: impl FnOnce(),
+    ) -> Result<(), String> {
         let started = Instant::now();
         // RUB-10 / GitHub #1151: stamp `Shutdown` BEFORE stopping the
         // accept loop so any in-flight `/ready` request that races the
@@ -745,7 +732,7 @@ impl RunningDevnetRPCServer {
         // re-stamps Shutdown without effect.
         self.readiness.mark_shutdown();
         // Step 2: the admission cutoff, monotone and idempotent.
-        self.freeze_admission();
+        self.freeze_admission_at_boundary(before_freeze);
         // Step 2b (RUB-1186): publish lifecycle cancellation. It MUST come after
         // the freeze — a socket admitted before the freeze is the only one that
         // can still reach a handler, and it must be able to observe this — and
@@ -769,8 +756,8 @@ impl RunningDevnetRPCServer {
         self.terminal_fault.clone().map_or(Ok(()), Err) // step 6
     }
 
-    /// Step 2: flip to `FROZEN`. Sticky — every later socket loses the cutoff.
-    fn freeze_admission(&self) {
+    fn freeze_admission_at_boundary(&self, before_freeze: impl FnOnce()) {
+        before_freeze();
         let mut frozen = self
             .admission
             .lock()
@@ -940,7 +927,11 @@ enum Admission {
 /// The admission cutoff. Holds the gate across the whole observe-`FROZEN` /
 /// apply-capacity / acquire-unit span, so the freeze cannot interleave. No I/O
 /// runs under it: the socket is accepted before entry, dropped by the caller.
-fn admit_under_gate(gate: &Mutex<bool>, active: &AtomicUsize) -> Admission {
+fn admit_under_gate(
+    gate: &Mutex<bool>,
+    active: &AtomicUsize,
+    after_acquire: impl FnOnce(),
+) -> Admission {
     let frozen = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if *frozen {
         return Admission::Frozen;
@@ -949,6 +940,7 @@ fn admit_under_gate(gate: &Mutex<bool>, active: &AtomicUsize) -> Admission {
         return Admission::AtCapacity;
     }
     active.fetch_add(1, Ordering::SeqCst);
+    after_acquire();
     Admission::Admitted
 }
 
@@ -961,7 +953,7 @@ fn run_accept_loop(
 ) {
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
-            Ok((stream, _)) => match admit_under_gate(&admission, &active) {
+            Ok((stream, _)) => match admit_under_gate(&admission, &active, || {}) {
                 // No backoff: the freeze must not delay loop termination.
                 Admission::Frozen => drop(stream),
                 Admission::AtCapacity => {
@@ -3519,9 +3511,8 @@ mod tests {
             // benefit from the default-NotReady wiring there. Keep
             // the boot value explicit here for parity.
             readiness: Arc::new(super::ReadinessGate::default()),
-            // RUB-1186: no server owns this state, so the lifecycle source is
-            // the never-true default (see the field doc). Tests that need a
-            // published cancellation store into `lifecycle_stop` directly.
+            // RUB-1186: route-level rows use the same state-owned source and
+            // may publish it directly without starting a listener.
             lifecycle_stop: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -5473,8 +5464,8 @@ mod tests {
             // RUB-10 / GitHub #1151: render_prometheus_metrics test does
             // not exercise `/ready`; default `NotReady` is fine.
             readiness: Arc::new(super::ReadinessGate::default()),
-            // RUB-1186: no server owns this state, so the lifecycle
-            // source is the never-true default (see the field doc).
+            // RUB-1186: this route-only state starts with its shared source
+            // not cancelled.
             lifecycle_stop: Arc::new(AtomicBool::new(false)),
         };
 
@@ -5933,9 +5924,34 @@ mod tests {
     #[test]
     fn rpc_drain_accept_cutoff_matrix() {
         let cap = super::MAX_CONCURRENT_RPC_CONNS;
-        let (state, dir) = build_state(false);
+        let (chain_state, raw, chain_id) = floor_compliant_signed_tx_and_state();
+        let state = build_state_with_chain_state(chain_state, chain_id);
         let mut server = start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start");
         let addr = server.addr().to_string();
+
+        // Capture the only point that matters for A1: the unit is acquired
+        // while the same admission mutex is still held. Moving `fetch_add`
+        // outside the guard leaves this callback able to lock the mutex.
+        let captured_gate = Mutex::new(false);
+        let captured_active = AtomicUsize::new(0);
+        let captured = super::admit_under_gate(&captured_gate, &captured_active, || {
+            assert_eq!(
+                captured_active.load(Ordering::SeqCst),
+                1,
+                "A1 unit acquired at the captured point"
+            );
+            assert!(
+                matches!(
+                    captured_gate.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ),
+                "A1 admission mutex remains held at acquisition"
+            );
+        });
+        assert!(
+            matches!(captured, super::Admission::Admitted),
+            "A1 admitted"
+        );
 
         // A1: admission wins — the unit is acquired BEFORE the gate releases, so
         // the next gate holder (close()'s role) observes it. Every A holder is
@@ -5958,10 +5974,28 @@ mod tests {
 
         // A2 + A5: the cutoff wins while the loop still sees `stop == false`.
         assert!(!server.stop.load(Ordering::SeqCst), "A5 stop==false");
-        let before = state.metrics.snapshot();
-        server.freeze_admission();
-        assert!(request_to_eof(&addr, READY_GET).is_empty(), "A2 no reply");
-        assert_eq!(state.metrics.snapshot(), before, "A2 no route work");
+        let body = format!(r#"{{"tx_hex":"{}"}}"#, hex::encode(&raw));
+        let valid_submit = format!(
+            "POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let before_metrics = state.metrics.snapshot();
+        let before_pool = state.tx_pool.lock().expect("pool").len();
+        server.freeze_admission_at_boundary(|| {});
+        assert!(
+            request_to_eof(&addr, valid_submit.as_bytes()).is_empty(),
+            "A2 valid submit loses without a response"
+        );
+        assert_eq!(
+            state.metrics.snapshot(),
+            before_metrics,
+            "A2 no route or submit metric"
+        );
+        assert_eq!(
+            state.tx_pool.lock().expect("pool").len(),
+            before_pool,
+            "A2 no pool mutation"
+        );
         assert_eq!(active_units(&server), 1, "A2 no increment");
 
         assert_spawn_failure_releases_unit_once(); // A4
@@ -5969,7 +6003,6 @@ mod tests {
         drop(holder);
         server.close().expect("close after cutoff matrix");
         assert_eq!(active_units(&server), 0, "A1 zero before return");
-        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     /// RUB-1178 Table B: close, timeout, retry, and the public result.
@@ -8064,6 +8097,10 @@ mod tests {
     fn rpc_lifecycle_publication_ordering_matrix() {
         let (state, dir) = build_state(false);
         let mut server = start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start");
+        assert!(
+            Arc::ptr_eq(&state.lifecycle_stop, &server.stop),
+            "pre-start state clone and server must share one lifecycle source"
+        );
         let addr = server.addr().to_string();
         let stop = Arc::clone(&server.stop);
         let gate = Arc::clone(&server.admission);
@@ -8071,30 +8108,35 @@ mod tests {
         let holder = HeldUnit::hold(&addr);
         wait_until_active_handlers(&server, 1);
         let held = gate.lock().expect("hold gate");
+        let (at_freeze_tx, at_freeze_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let closer = std::thread::spawn(move || {
-            let result = server.close();
+            let result = server.close_with_timeout_at_freeze(SEC5, || {
+                at_freeze_tx.send(()).expect("signal pre-freeze");
+                release_rx
+                    .recv_timeout(SEC5)
+                    .expect("bounded pre-freeze release");
+            });
             (server, result)
         });
 
-        let watch = Instant::now() + SEC5;
-        while state.readiness.is_ready() {
-            assert!(Instant::now() < watch, "mark_shutdown precedes the freeze");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        at_freeze_rx
+            .recv_timeout(SEC5)
+            .expect("closer reached the pre-freeze boundary");
+        assert!(
+            !state.readiness.is_ready(),
+            "mark_shutdown precedes the freeze"
+        );
         assert!(!*held, "the freeze is still blocked on the held gate");
-        // Hold the gate and RESAMPLE for a fixed interval instead of taking one
-        // sample. `close()` cannot make progress past the freeze while this
-        // guard is held, so a publication placed anywhere before the freeze has
-        // the whole interval to surface; a single sample could be taken before
-        // the closer thread even reached that placement and see nothing.
-        let resample_until = Instant::now() + Duration::from_millis(300);
-        while Instant::now() < resample_until {
-            assert!(
-                !stop.load(Ordering::SeqCst),
-                "publication must not precede the admission freeze"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        assert!(
+            !stop.load(Ordering::SeqCst),
+            "publication must not precede the admission freeze"
+        );
+        release_tx.send(()).expect("release pre-freeze boundary");
+        assert!(
+            !stop.load(Ordering::SeqCst),
+            "held admission gate prevents publication before the freeze"
+        );
         drop(held);
 
         let watch = Instant::now() + SEC5;
@@ -8171,43 +8213,49 @@ mod tests {
         server.close().expect("close");
     }
 
-    /// RUB-1186 END-TO-END, on the production listener: proves the BINDING
-    /// `start_devnet_rpc_server` installs, not just the checkpoint. Every other
-    /// submit/mine row publishes into a server-less state's own
-    /// `lifecycle_stop`, so all of them stay green with that binding deleted
-    /// while production is feature-dead; this row goes red. The socket sends a
-    /// complete request HEAD and no body, so the admitted handler parks inside
-    /// its body read; `close()` then runs its real ordering — freeze, then
-    /// publication — and only afterwards does the body arrive, so the
-    /// checkpoint this handler reaches is the one the drain is waiting on.
-    /// Discharges the matrix row "Lifecycle publication is between freeze and
-    /// drain" and the hostile case "an admitted handler waits on `rpc_op_lock`
-    /// or the tx-pool lock when cancellation is published".
+    /// RUB-1186 END-TO-END, on the production listener: a complete valid
+    /// request holds an admitted unit at the existing `rpc_op_lock`, then the
+    /// held pool guard prevents its final pre-admission checkpoint. `close()`
+    /// publishes cancellation before the guard is released, so the handler
+    /// returns 503 without pool mutation.
     #[test]
     fn submit_tx_parked_handler_observes_close_publication_end_to_end() {
         let (chain_state, raw, chain_id) = floor_compliant_signed_tx_and_state();
-        // Taken BEFORE the move: this clone keeps the inert default lifecycle
-        // source (see the `lifecycle_stop` field doc) and shares only the pool
-        // and metrics, which is all the post-close assertions read. The SERVING
-        // state is the moved one, and it is the only state a handler routes on.
         let state = build_state_with_chain_state(chain_state, chain_id);
         let mut server = start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start");
         let addr = server.addr().to_string();
         let stop = Arc::clone(&server.stop);
+        let held_pool = state.tx_pool.lock().expect("hold tx pool");
 
         let body = format!(r#"{{"tx_hex":"{}"}}"#, hex::encode(&raw));
+        let request = format!(
+            "POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
         let mut sock = TcpStream::connect(&addr).expect("connect");
         sock.set_read_timeout(Some(SEC5 + SEC5))
             .expect("read timeout");
-        sock.write_all(
-            format!(
-                "POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
-                body.len()
-            )
-            .as_bytes(),
-        )
-        .expect("write request head");
+        sock.write_all(request.as_bytes()).expect("write request");
+        sock.shutdown(std::net::Shutdown::Write)
+            .expect("finish request");
         wait_until_active_handlers(&server, 1);
+        let lock_deadline = Instant::now() + SEC5;
+        loop {
+            match state.rpc_op_lock.try_lock() {
+                Err(std::sync::TryLockError::WouldBlock) => break,
+                Err(std::sync::TryLockError::Poisoned(_)) => panic!("rpc_op_lock poisoned"),
+                Ok(temporary) => drop(temporary),
+            }
+            assert!(
+                Instant::now() < lock_deadline,
+                "admitted handler did not acquire rpc_op_lock"
+            );
+            std::thread::yield_now();
+        }
+        assert!(
+            !stop.load(Ordering::SeqCst),
+            "lifecycle publication has not started"
+        );
 
         let (closed_tx, closed_rx) = std::sync::mpsc::channel();
         let closer = std::thread::spawn(move || {
@@ -8224,11 +8272,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
 
-        // Publication happened; the drain is now waiting on this parked
-        // handler. Everything from here must complete well inside the server's
-        // 5s per-read window, or the handler would fail its body read instead
-        // of reaching the pre-admission checkpoint.
-        sock.write_all(body.as_bytes()).expect("write request body");
+        // The handler holds `rpc_op_lock` and waits for this pool guard, so its
+        // final lifecycle check observes the close publication after release.
+        drop(held_pool);
         let got = read_one_framed_response(&mut sock);
         assert!(
             got.contains("HTTP/1.1 503 "),

@@ -101,9 +101,10 @@ pub(crate) struct CompleteDaSetGroupProjection<'a> {
     pub(crate) policy_da_included: u64,
 }
 
-/// RUB-1186: the three points a cancellation-aware mine passes before it can
-/// mutate anything. Named so a test can isolate ONE checkpoint deterministically
-/// without a thread or a timing window; the production poll ignores the value.
+/// RUB-1186: checkpoints before their next mutation boundary. `PreBootstrap`
+/// precedes genesis bootstrap; `NonceQuantum` and `PreApply` may follow a
+/// completed bootstrap. Named so a test can isolate one checkpoint
+/// deterministically; the production poll ignores the value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MineCheckpoint {
     PreBootstrap,
@@ -2310,10 +2311,9 @@ mod tests {
     /// RUB-1186 checkpoint 2, proved INSIDE the search rather than around it.
     /// The poll answers `false` on its first invocation and `true` afterwards,
     /// so only a checkpoint at the entry of the SECOND quantum can end the
-    /// search; a target the first quantum provably cannot satisfy (the sibling
-    /// test above pins its winning nonce past `MINE_NONCE_QUANTUM`) makes that
-    /// deterministic with no timing window. A search polled only once, at
-    /// entry, cannot latch at all and runs to a mined header instead. The
+    /// search. The exact cancellation result plus `polls == 2` makes that
+    /// second-quantum entry non-vacuous. A search polled only once, at entry,
+    /// cannot latch at all and runs to a mined header instead. The
     /// bounded `recv_timeout` keeps a mutant that removes the in-loop poll from
     /// pinning the suite when its target is unsatisfiable.
     #[test]
