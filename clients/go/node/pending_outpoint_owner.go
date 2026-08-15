@@ -9,16 +9,13 @@ import (
 )
 
 // PendingOutpointDomain names the pool that owns a pending-outpoint claim.
-// StandardMempool is the only domain this issue creates claims for; the DA
-// value exists so a later DA consumer binds to the same owner instead of
-// starting a second spend authority.
+// StandardMempool and DA share one owner through distinct domains.
 type PendingOutpointDomain uint8
 
 const (
 	// PendingOutpointStandardMempool is the standard Mempool admission domain.
 	PendingOutpointStandardMempool PendingOutpointDomain = 1
-	// PendingOutpointDA is the data-availability domain. No record, route,
-	// lock, eviction or lifecycle behavior is attached to it here.
+	// PendingOutpointDA is the data-availability domain.
 	PendingOutpointDA PendingOutpointDomain = 2
 )
 
@@ -125,9 +122,11 @@ type pendingOutpointRow struct {
 // PendingOutpointOwner is the single authority over outpoints claimed by
 // in-flight and resident pool candidates.
 //
-// Lock contract: callers acquire ChainState.admissionMu, then Mempool.mu, then
-// this owner's mutex. The mutex is never held across parsing, consensus
-// validation, signature work, I/O, relay or waiting.
+// Lock contract: standard callers use ChainState.admissionMu -> Mempool.mu ->
+// owner. DA callers hold the continuous ChainState admission guard and a
+// downstream DA state lock before owner; this primitive never takes that lock.
+// Callers materialize buffers and scratch before owner; only bounded owner-map
+// bucket growth may occur while publishing one prepared candidate claim.
 type PendingOutpointOwner struct {
 	mu             sync.Mutex
 	byOutpoint     map[consensus.Outpoint]pendingOutpointRow
@@ -218,6 +217,93 @@ func (o *PendingOutpointOwner) checkNoConflictLocked(orderedInputs []consensus.O
 		}
 	}
 	return nil
+}
+
+// reserveDAAdmissionLocked reserves a prepared input-bearing DA candidate. The
+// caller holds o.mu; caller buffers and scratch were materialized before it.
+// Only bounded Go map bucket growth may occur while publishing the prepared rows.
+func (o *PendingOutpointOwner) reserveDAAdmissionLocked(
+	expected PendingOutpointAdmissionContext,
+	claim *pendingOutpointClaim,
+) (PendingOutpointToken, PendingOutpointError, bool) {
+	var zero PendingOutpointToken
+	if o.inTransition {
+		return zero, PendingOutpointError{Kind: PendingOutpointUnavailable, Msg: "pending-outpoint owner transition in progress"}, true
+	}
+	if expected.StableTip != o.stableTip {
+		return zero, PendingOutpointError{Kind: PendingOutpointUnavailable, Msg: "pending-outpoint expected tip mismatch"}, true
+	}
+	if expected.Generation != o.generation {
+		return zero, PendingOutpointError{Kind: PendingOutpointUnavailable, Msg: "pending-outpoint expected generation mismatch"}, true
+	}
+	if o.tokenHighWater == ^uint64(0) {
+		return zero, PendingOutpointError{Kind: PendingOutpointUnavailable, Msg: "pending-outpoint token sequence exhausted"}, true
+	}
+	for index, op := range claim.inputs {
+		if row, taken := o.byOutpoint[op]; taken {
+			return zero, PendingOutpointError{Kind: PendingOutpointConflict, Outpoint: op, InputIndex: index, ExistingTxid: row.txid}, true
+		}
+	}
+	o.tokenHighWater++
+	token := PendingOutpointToken{owner: o, seq: o.tokenHighWater}
+	claim.token = token
+	claim.generation = o.generation
+	o.byToken[token] = claim
+	for _, op := range claim.inputs {
+		o.byOutpoint[op] = pendingOutpointRow{token: token, txid: claim.txid}
+	}
+	return token, PendingOutpointError{}, false
+}
+
+// validateDAAdmissionVictimsLocked checks already-copied, shape-valid victim
+// descriptors without allocating. The candidate is never a removable victim.
+func (o *PendingOutpointOwner) validateDAAdmissionVictimsLocked(
+	victims []DAAdmissionVictim,
+	candidateToken PendingOutpointToken,
+) (PendingOutpointError, bool) {
+	available := len(o.byToken)
+	if candidateToken != (PendingOutpointToken{}) {
+		available--
+	}
+	if len(victims) > available {
+		return PendingOutpointError{Kind: PendingOutpointInternal, Msg: "DA victim batch exceeds live claim population"}, true
+	}
+	for _, victim := range victims {
+		if victim.Token == candidateToken {
+			return PendingOutpointError{Kind: PendingOutpointInternal, Msg: "DA candidate token is also a victim"}, true
+		}
+		claim, failure := o.daAdmissionVictimClaimLocked(victim)
+		if failure.Kind != 0 {
+			return failure, true
+		}
+		if !o.daAdmissionVictimInputsMatchLocked(victim, claim) {
+			return PendingOutpointError{Kind: PendingOutpointInternal, Msg: "DA victim input mismatch"}, true
+		}
+	}
+	return PendingOutpointError{}, false
+}
+
+func (o *PendingOutpointOwner) daAdmissionVictimClaimLocked(victim DAAdmissionVictim) (*pendingOutpointClaim, PendingOutpointError) {
+	if victim.Token.owner != o || victim.Token.seq == 0 || victim.Token.seq > o.tokenHighWater {
+		return nil, PendingOutpointError{Kind: PendingOutpointInternal, Msg: "invalid DA victim token"}
+	}
+	claim := o.byToken[victim.Token]
+	if claim == nil || claim.domain != PendingOutpointDA || claim.txid != victim.TxID || !claim.finalized {
+		return nil, PendingOutpointError{Kind: PendingOutpointInternal, Msg: "DA victim claim mismatch"}
+	}
+	return claim, PendingOutpointError{}
+}
+
+func (o *PendingOutpointOwner) daAdmissionVictimInputsMatchLocked(victim DAAdmissionVictim, claim *pendingOutpointClaim) bool {
+	if len(claim.inputs) != len(victim.Inputs) {
+		return false
+	}
+	for j, input := range victim.Inputs {
+		if claim.inputs[j] != input || o.byOutpoint[input] != (pendingOutpointRow{token: victim.Token, txid: victim.TxID}) {
+			return false
+		}
+	}
+	return true
 }
 
 // Reserve claims every outpoint in orderedInputs for txid in domain, bound to
@@ -618,6 +704,9 @@ func txAdmitFromPendingOutpointError(err error) error {
 		return txAdmitUnavailable(err.Error())
 	}
 	if ownerErr.Kind == PendingOutpointConflict {
+		if ownerErr.Msg == "" {
+			ownerErr.Msg = fmt.Sprintf("mempool double-spend conflict with %x", ownerErr.ExistingTxid)
+		}
 		return txAdmitConflict(ownerErr.Msg)
 	}
 	return txAdmitUnavailable(ownerErr.Msg)
