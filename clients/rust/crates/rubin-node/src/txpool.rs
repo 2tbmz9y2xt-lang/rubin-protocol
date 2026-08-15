@@ -4346,16 +4346,27 @@ mod tests {
         pool.txs.insert(
             [0x55; 32],
             TxPoolEntry {
-                raw: vec![0x55, 0x55, 0x55],
+                raw: vec![0x55, 0x55, 0x55, 0x55],
                 inputs: Vec::new(),
                 fee: 100,
                 weight: 10,
-                size: 3,
+                size: 4,
+                source: TxSource::Local,
+            },
+        );
+        pool.txs.insert(
+            [0x66; 32],
+            TxPoolEntry {
+                raw: vec![0x66],
+                inputs: Vec::new(),
+                fee: 1,
+                weight: 10,
+                size: 1,
                 source: TxSource::Local,
             },
         );
 
-        let selected = pool.select_transactions(1, 2);
+        let selected = pool.select_transactions(1, 3);
         assert_eq!(selected, vec![vec![0x44, 0x44]]);
     }
 
