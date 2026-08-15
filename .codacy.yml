@@ -92,6 +92,7 @@ engines:
       - "clients/go/node/chainstate_io.go"
       - "clients/go/node/chainstate_recovery.go"
       - "clients/go/node/config.go"
+      - "clients/go/node/da_admission.go"
       - "clients/go/node/mempool.go"
       - "clients/go/node/mempool_capacity.go"
       - "clients/go/node/mempool_policy.go"
