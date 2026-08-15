@@ -544,6 +544,18 @@ pub fn new_devnet_rpc_state_with_tx_pool(
     announce_block: Option<AnnounceBlockFn>,
     live_mining_cfg: Option<MinerConfig>,
 ) -> DevnetRPCState {
+    let binding = {
+        let mut engine = sync_engine
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut pool = tx_pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        pool.reconcile_pending_outpoint_owner(&mut engine)
+    };
+    if let Err(error) = binding {
+        panic!("new_devnet_rpc_state_with_tx_pool pending-outpoint owner reconciliation failed: {error}");
+    }
     DevnetRPCState {
         sync_engine,
         block_store,
@@ -617,9 +629,6 @@ pub fn new_shared_runtime_tx_pool(sync_engine: &Arc<Mutex<SyncEngine>>) -> Arc<M
         drop(engine);
         panic!("new_shared_runtime_tx_pool pending-outpoint owner binding failed: {error}");
     }
-    debug_assert!(engine
-        .pending_outpoint_owner()
-        .is_some_and(|bound| bound.same_owner(&owner)));
     Arc::new(Mutex::new(TxPool::new_bound_with_config(
         TxPoolConfig {
             suite_context,
@@ -3161,38 +3170,73 @@ mod tests {
 
     #[test]
     fn shared_runtime_pool_binds_one_pointer_identical_owner() {
-        let engine = SyncEngine::new(
-            ChainState::new(),
-            None,
-            default_sync_config(None, devnet_genesis_chain_id(), None),
-        )
-        .expect("sync engine");
-        let sync_engine = Arc::new(Mutex::new(engine));
+        let new_engine = || {
+            SyncEngine::new(
+                ChainState::new(),
+                None,
+                default_sync_config(None, devnet_genesis_chain_id(), None),
+            )
+            .expect("sync engine")
+        };
+        let same_owner = |engine: &Arc<Mutex<SyncEngine>>, pool: &Arc<Mutex<TxPool>>| {
+            let engine = engine
+                .lock()
+                .expect("sync")
+                .pending_outpoint_owner()
+                .expect("engine");
+            let pool = pool
+                .lock()
+                .expect("pool")
+                .test_owner_handle()
+                .expect("owner");
+            engine.same_owner(&pool)
+        };
+        let sync_engine = Arc::new(Mutex::new(new_engine()));
         let pool = new_shared_runtime_tx_pool(&sync_engine);
-        let engine_owner = sync_engine
-            .lock()
-            .expect("sync lock")
-            .pending_outpoint_owner()
-            .expect("bound engine owner");
-        let pool_owner = pool
-            .lock()
-            .expect("pool lock")
-            .test_owner_handle()
-            .expect("bound pool owner");
-        assert!(engine_owner.same_owner(&pool_owner));
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             new_shared_runtime_tx_pool(&sync_engine)
         }))
         .expect_err("second factory call must fail before binding");
-        assert_eq!(
-            panic.downcast_ref::<&str>(),
-            Some(&"new_shared_runtime_tx_pool called after pending-outpoint owner binding")
-        );
-        assert!(sync_engine
+        let expected = "new_shared_runtime_tx_pool called after pending-outpoint owner binding";
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&expected));
+        assert!(same_owner(&sync_engine, &pool));
+        let standalone_engine = Arc::new(Mutex::new(new_engine()));
+        let standalone_pool = Arc::new(Mutex::new(TxPool::new()));
+        let state_with = |engine, pool| {
+            new_devnet_rpc_state_with_tx_pool(
+                engine,
+                None,
+                pool,
+                Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
+                None,
+                None,
+                None,
+            )
+        };
+        state_with(standalone_engine.clone(), standalone_pool.clone());
+        let fresh_pool = Arc::new(Mutex::new(TxPool::new()));
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state_with(standalone_engine.clone(), fresh_pool.clone())
+        }));
+        let panic = failed.err().expect("second live pool must fail");
+        let expected = "new_devnet_rpc_state_with_tx_pool pending-outpoint owner reconciliation failed: pending-outpoint owner mismatch".to_string();
+        assert_eq!(panic.downcast_ref::<String>(), Some(&expected));
+        assert!(same_owner(&standalone_engine, &standalone_pool));
+        let fresh_owner = fresh_pool.lock().expect("fresh").test_owner_handle();
+        assert!(fresh_owner.is_none());
+        let chain_state = {
+            let mut engine = standalone_engine.lock().expect("standalone sync lock");
+            engine
+                .apply_block(&devnet_genesis_block_bytes(), None)
+                .expect("apply genesis");
+            engine.chain_state.clone()
+        };
+        let error = standalone_pool
             .lock()
-            .expect("sync lock after repeated factory panic")
-            .pending_outpoint_owner()
-            .is_some_and(|owner| owner.same_owner(&engine_owner)));
+            .expect("standalone pool lock")
+            .admit(&[0xff], &chain_state, None, devnet_genesis_chain_id())
+            .expect_err("invalid bytes reach parser after tip change");
+        assert_eq!(error.kind, crate::TxPoolAdmitErrorKind::Rejected);
     }
 
     fn read_request_from_bytes(raw: &[u8]) -> Result<HttpRequest, String> {

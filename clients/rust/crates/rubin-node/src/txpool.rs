@@ -16,7 +16,7 @@ use crate::pending_outpoint_owner::{
     PendingOutpointAdmissionContext, PendingOutpointError, PendingOutpointErrorKind,
     PendingOutpointOwnerHandle, PendingOutpointTip, PendingOutpointToken,
 };
-use crate::sync::SuiteContext;
+use crate::sync::{SuiteContext, SyncEngine};
 use crate::{BlockStore, ChainState};
 
 const MAX_TX_POOL_TRANSACTIONS: usize = 300;
@@ -319,6 +319,23 @@ impl TxPool {
             ));
         }
         Ok((owner, context))
+    }
+
+    pub(crate) fn reconcile_pending_outpoint_owner(
+        &mut self,
+        engine: &mut SyncEngine,
+    ) -> Result<(), String> {
+        match (engine.pending_outpoint_owner(), self.owner.clone()) {
+            (None, None) => {
+                let tip = PendingOutpointTip::from_chain_state(&engine.chain_state);
+                let owner = PendingOutpointOwnerHandle::new(tip);
+                engine.bind_pending_outpoint_owner(owner.clone())?;
+                self.owner = Some(owner);
+                Ok(())
+            }
+            (Some(sync_owner), Some(pool_owner)) if sync_owner.same_owner(&pool_owner) => Ok(()),
+            _ => Err("pending-outpoint owner mismatch".into()),
+        }
     }
 
     #[cfg(test)]
