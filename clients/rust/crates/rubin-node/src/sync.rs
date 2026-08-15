@@ -16,6 +16,9 @@ use crate::chainstate_recovery::should_persist_chainstate_snapshot;
 use crate::da_relay::complete_da_set_ids_from_parsed_block;
 use crate::genesis::devnet_genesis_chain_id;
 use crate::io_utils::{is_atomic_write_post_commit, AtomicWriteError};
+#[cfg(test)]
+use crate::pending_outpoint_owner::PendingOutpointErrorKind;
+use crate::pending_outpoint_owner::{PendingOutpointOwnerHandle, PendingOutpointTip};
 use crate::sync_reorg::PARENT_BLOCK_NOT_FOUND_ERR;
 use crate::target_schedule::{expected_target_for_candidate, TargetScheduleError};
 use crate::undo::build_block_undo;
@@ -490,6 +493,13 @@ pub struct SyncEngine {
     pv_shadow_samples: Vec<String>,
     pv_telemetry: PVTelemetry,
     persistence_fault: Option<StoragePersistenceFault>,
+    pending_outpoint_owner: Option<PendingOutpointOwnerHandle>,
+    pending_outpoint_transition_active: bool,
+    #[cfg(test)]
+    pending_outpoint_transition_checkpoint: Option<(
+        std::sync::mpsc::SyncSender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>,
     #[cfg(test)]
     undo_preparation_failure: Option<String>,
     /// Test-only: drop block_store after canonical truncate (between
@@ -659,6 +669,106 @@ impl SyncEngine {
         }
         Ok(())
     }
+
+    pub(crate) fn bind_pending_outpoint_owner(
+        &mut self,
+        owner: PendingOutpointOwnerHandle,
+    ) -> Result<(), String> {
+        if self.pending_outpoint_owner.is_some() {
+            return Err("pending-outpoint owner already bound".to_string());
+        }
+        let context = owner.admission_context().map_err(|error| error.message)?;
+        if context.tip != PendingOutpointTip::from_chain_state(&self.chain_state) {
+            return Err("pending-outpoint owner tip does not match sync engine".to_string());
+        }
+        self.pending_outpoint_owner = Some(owner);
+        Ok(())
+    }
+
+    pub(crate) fn pending_outpoint_owner(&self) -> Option<PendingOutpointOwnerHandle> {
+        self.pending_outpoint_owner.clone()
+    }
+
+    pub(crate) fn begin_pending_outpoint_transition(&mut self) -> Result<bool, String> {
+        if self.pending_outpoint_transition_active {
+            return Ok(false);
+        }
+        let Some(owner) = self.pending_outpoint_owner.clone() else {
+            return Ok(false);
+        };
+        owner.begin_transition().map_err(|error| error.message)?;
+        self.pending_outpoint_transition_active = true;
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pending_outpoint_checkpoint(&mut self) {
+        if let Some((reached, release)) = self.pending_outpoint_transition_checkpoint.take() {
+            let _ = reached.send(());
+            let _ = release.recv_timeout(Duration::from_secs(1));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_while_pending_outpoint_transition<T: Send>(
+        &mut self,
+        owner: &PendingOutpointOwnerHandle,
+        run: impl FnOnce(&mut Self) -> T + Send,
+    ) -> T {
+        let (reached, wait) = std::sync::mpsc::sync_channel(1);
+        let (release, resume) = std::sync::mpsc::sync_channel(1);
+        self.pending_outpoint_transition_checkpoint = Some((reached, resume));
+        let output = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| run(self));
+            wait.recv_timeout(Duration::from_secs(1))
+                .expect("transition checkpoint");
+            let admission = owner.admission_context();
+            let _ = release.send(());
+            let error = admission.expect_err("owner is fenced");
+            assert_eq!(error.kind, PendingOutpointErrorKind::Unavailable);
+            worker.join().expect("transition worker")
+        });
+        self.pending_outpoint_transition_checkpoint = None;
+        output
+    }
+
+    pub(crate) fn finish_pending_outpoint_transition_success(&mut self, started: bool) {
+        if !started {
+            return;
+        }
+        self.pending_outpoint_transition_active = false;
+        if let Some(owner) = self.pending_outpoint_owner.clone() {
+            if owner
+                .commit_stable_tip(PendingOutpointTip::from_chain_state(&self.chain_state))
+                .is_err()
+            {
+                owner.latch_unavailable();
+            }
+        }
+    }
+
+    pub(crate) fn finish_pending_outpoint_transition_failure(
+        &mut self,
+        started: bool,
+        old_state: &ChainState,
+        proven_old: bool,
+    ) {
+        if !started {
+            return;
+        }
+        self.pending_outpoint_transition_active = false;
+        let Some(owner) = self.pending_outpoint_owner.clone() else {
+            return;
+        };
+        if proven_old
+            && self.persistence_fault.is_none()
+            && self.chain_state == *old_state
+            && owner.reopen_old_tip().is_ok()
+        {
+            return;
+        }
+        owner.latch_unavailable();
+    }
     pub(crate) fn handle_persistence_error(
         &mut self,
         error: AtomicWriteError,
@@ -796,6 +906,10 @@ impl SyncEngine {
             pv_shadow_samples: Vec::new(),
             pv_telemetry: PVTelemetry::new(pv_mode),
             persistence_fault: None,
+            pending_outpoint_owner: None,
+            pending_outpoint_transition_active: false,
+            #[cfg(test)]
+            pending_outpoint_transition_checkpoint: None,
             #[cfg(test)]
             undo_preparation_failure: None,
             #[cfg(test)]
@@ -1057,6 +1171,9 @@ impl SyncEngine {
                 Some(ctx) => (Some(ctx.rotation.as_ref()), Some(ctx.registry.as_ref())),
                 None => (None, None),
             };
+        let transitioned = self.begin_pending_outpoint_transition()?;
+        #[cfg(test)]
+        self.test_pending_outpoint_checkpoint();
         let mut summary = match self.chain_state.connect_block_with_suite_context(
             block_bytes,
             expected_target,
@@ -1115,12 +1232,13 @@ impl SyncEngine {
                     self.pv_telemetry.record_block_skipped();
                 }
                 self.restore_direct_apply_state(
-                    snapshot,
+                    snapshot.clone(),
                     old_tip_timestamp,
                     old_best_known_height,
                     old_last_reorg_depth,
                     old_reorg_count,
                 );
+                self.finish_pending_outpoint_transition_failure(transitioned, &snapshot, true);
                 return Err(err);
             }
         };
@@ -1192,12 +1310,13 @@ impl SyncEngine {
             Ok(ids) => ids,
             Err(err) => {
                 self.restore_direct_apply_state(
-                    snapshot,
+                    snapshot.clone(),
                     old_tip_timestamp,
                     old_best_known_height,
                     old_last_reorg_depth,
                     old_reorg_count,
                 );
+                self.finish_pending_outpoint_transition_failure(transitioned, &snapshot, true);
                 return Err(err);
             }
         };
@@ -1211,24 +1330,26 @@ impl SyncEngine {
             if let Some(err) = self.undo_preparation_failure.take() {
                 assert_eq!(summary.canonical_applied_blocks.len(), 1);
                 self.restore_direct_apply_state(
-                    snapshot,
+                    snapshot.clone(),
                     old_tip_timestamp,
                     old_best_known_height,
                     old_last_reorg_depth,
                     old_reorg_count,
                 );
+                self.finish_pending_outpoint_transition_failure(transitioned, &snapshot, true);
                 return Err(err);
             }
             match build_block_undo(&snapshot, block_bytes, next_height) {
                 Ok(undo) => Some(undo),
                 Err(err) => {
                     self.restore_direct_apply_state(
-                        snapshot,
+                        snapshot.clone(),
                         old_tip_timestamp,
                         old_best_known_height,
                         old_last_reorg_depth,
                         old_reorg_count,
                     );
+                    self.finish_pending_outpoint_transition_failure(transitioned, &snapshot, true);
                     return Err(err);
                 }
             }
@@ -1257,13 +1378,15 @@ impl SyncEngine {
                     let reload_store = block_store.is_index_destination(&error.destination);
                     let error = self.handle_persistence_error(error, reload_store, false);
                     if !reload_store {
-                        self.chain_state = snapshot;
+                        self.chain_state = snapshot.clone();
                     }
+                    self.finish_pending_outpoint_transition_failure(transitioned, &snapshot, false);
                     return Err(error);
                 }
-                self.chain_state = snapshot;
+                self.chain_state = snapshot.clone();
                 self.tip_timestamp = old_tip_timestamp;
                 self.best_known_height = old_best_known_height;
+                self.finish_pending_outpoint_transition_failure(transitioned, &snapshot, true);
                 return Err(error.to_string());
             }
         }
@@ -1291,7 +1414,13 @@ impl SyncEngine {
             if persist_snapshot {
                 if let Err(error) = self.chain_state.save_atomic(chain_state_path) {
                     if is_atomic_write_post_commit(&error) {
-                        return Err(self.handle_persistence_error(error, false, true));
+                        let error = self.handle_persistence_error(error, false, true);
+                        self.finish_pending_outpoint_transition_failure(
+                            transitioned,
+                            &snapshot,
+                            false,
+                        );
+                        return Err(error);
                     }
                     let err = error.to_string();
                     // Canonical commit MAY have advanced the tip. The
@@ -1304,17 +1433,30 @@ impl SyncEngine {
                         (bs.canonical_len() > canonical_len_before)
                             .then(|| bs.truncate_canonical_typed(canonical_len_before))
                     });
-                    self.chain_state = snapshot;
+                    self.chain_state = snapshot.clone();
                     self.tip_timestamp = old_tip_timestamp;
                     self.best_known_height = old_best_known_height;
                     if let Some(Err(rewind_err)) = rewind_result {
                         if is_atomic_write_post_commit(&rewind_err) {
-                            return Err(self.handle_persistence_error(rewind_err, true, false));
+                            let error = self.handle_persistence_error(rewind_err, true, false);
+                            self.finish_pending_outpoint_transition_failure(
+                                transitioned,
+                                &snapshot,
+                                false,
+                            );
+                            return Err(error);
                         }
-                        return Err(format!(
+                        let error = format!(
                             "{err}; failed to rewind canonical index after chain_state save failure: {rewind_err}; blockstore may require repair"
-                        ));
+                        );
+                        self.finish_pending_outpoint_transition_failure(
+                            transitioned,
+                            &snapshot,
+                            false,
+                        );
+                        return Err(error);
                     }
+                    self.finish_pending_outpoint_transition_failure(transitioned, &snapshot, true);
                     return Err(err);
                 }
             }
@@ -1332,6 +1474,7 @@ impl SyncEngine {
                 .record_commit_latency(commit_start.elapsed());
         }
 
+        self.finish_pending_outpoint_transition_success(transitioned);
         Ok(summary)
     }
 
@@ -1747,6 +1890,7 @@ mod tests {
         atomic_write_error_after, unique_temp_path, AtomicWriteOperation, AtomicWriteStage,
         AtomicWriteTestOp, AtomicWriteTestScope,
     };
+    use crate::pending_outpoint_owner::{PendingOutpointOwnerHandle, PendingOutpointTip};
     use crate::reconcile_chain_state_with_block_store;
     use crate::sync::{
         boundary_chain_for_test, default_sync_config, next_candidate_block_for_test,
@@ -2101,6 +2245,16 @@ mod tests {
         (engine, dir)
     }
 
+    fn bind_owner(engine: &mut SyncEngine) -> PendingOutpointOwnerHandle {
+        let owner = PendingOutpointOwnerHandle::new(PendingOutpointTip::from_chain_state(
+            &engine.chain_state,
+        ));
+        engine
+            .bind_pending_outpoint_owner(owner.clone())
+            .expect("bind owner");
+        owner
+    }
+
     /// Mirror of Go's `mutatedDevnetGenesisBlock`: the published genesis with
     /// its nonce's first byte flipped. Still parses, hashes differently.
     fn mutated_devnet_genesis_block() -> Vec<u8> {
@@ -2133,10 +2287,19 @@ mod tests {
     fn apply_block_accepts_published_devnet_genesis_at_height_zero() {
         let (mut engine, dir) =
             genesis_identity_engine("rubin-rust-genesis-ok", devnet_genesis_chain_id());
+        let owner = bind_owner(&mut engine);
         engine
-            .apply_block(&devnet_genesis_block_bytes(), None)
+            .test_while_pending_outpoint_transition(&owner, |engine| {
+                engine.apply_block(&devnet_genesis_block_bytes(), None)
+            })
             .expect("published devnet genesis must still apply");
         assert_eq!(engine.chain_state.tip_hash, devnet_genesis_hash());
+        let context = owner.admission_context().expect("owner reopened");
+        assert_eq!(context.generation, 1);
+        assert_eq!(
+            context.tip,
+            PendingOutpointTip::from_chain_state(&engine.chain_state)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2219,6 +2382,7 @@ mod tests {
     fn bootstrap_canonical_genesis_if_empty_devnet_imports_published_genesis() {
         let (mut engine, dir) =
             genesis_identity_engine("rubin-rust-bootstrap-devnet", devnet_genesis_chain_id());
+        let owner = bind_owner(&mut engine);
         engine
             .bootstrap_canonical_genesis_if_empty()
             .expect("bootstrap canonical genesis");
@@ -2230,6 +2394,13 @@ mod tests {
         assert_eq!(
             store.canonical_hash(0).expect("row 0"),
             Some(devnet_genesis_hash())
+        );
+        assert_eq!(
+            owner
+                .admission_context()
+                .expect("owner reopened")
+                .generation,
+            1
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2736,6 +2907,7 @@ mod tests {
         engine.cfg.chain_state_path = Some(path.clone());
         engine.chain_state.save(&path).expect("persist prestate");
         let state = engine.chain_state.clone();
+        let owner = bind_owner(&mut engine);
         let snapshot = rub1097_state(&engine);
         let canonical_len = engine.block_store.as_ref().expect("store").canonical_len();
         let files = rub1097_tree(&dir);
@@ -2753,6 +2925,11 @@ mod tests {
         );
         assert_eq!(rub1097_state(&engine), snapshot);
         assert!(engine.persistence_fault.is_none());
+        let context = owner
+            .admission_context()
+            .expect("proven-old owner reopened");
+        assert_eq!(context.generation, 1);
+        assert_eq!(context.tip, PendingOutpointTip::from_chain_state(&state));
         let cfg = engine.cfg.clone();
         drop(engine);
         let mut restored = load_chain_state(&path).expect("load prestate");
