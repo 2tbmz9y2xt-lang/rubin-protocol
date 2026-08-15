@@ -10,6 +10,7 @@ use crate::blockstore::BlockStore;
 use crate::chainstate::{CanonicalAppliedBlock, ChainStateConnectSummary};
 use crate::io_utils::is_atomic_write_post_commit;
 use crate::sync::SyncEngine;
+use crate::sync_disconnect::PreparedDisconnect;
 use crate::txpool::{TxPool, TxPoolAdmitError, TxPoolAdmitErrorKind, TxSource};
 
 pub(crate) const PARENT_BLOCK_NOT_FOUND_ERR: &str = "parent block not found";
@@ -687,21 +688,26 @@ impl SyncEngine {
         common_ancestor_height: u64,
     ) -> Result<ApplyBlockWithReorgOutcome, String> {
         let rollback = self.capture_reorg_rollback_state(common_ancestor_height);
+        let old_state = self.chain_state.clone();
 
         // Dry-run: preview the disconnect + reconnect on a cloned state.
         let prepared_disconnects =
             self.prepare_preferred_branch(&branch, common_ancestor_height)?;
         let reorg_depth = u64::try_from(prepared_disconnects.len()).unwrap_or(u64::MAX);
+        let transition_started = self.begin_pending_outpoint_transition()?;
 
         // Disconnect canonical chain back to the common ancestor.
         let disconnected_blocks =
             match self.disconnect_prepared_canonical_to_ancestor(prepared_disconnects) {
                 Ok(blocks) => blocks,
                 Err(err) => {
-                    return Err(Self::err_with_rollback(
-                        err,
-                        self.rollback_apply_block(rollback),
-                    ));
+                    let rollback_error = self.rollback_apply_block(rollback);
+                    self.finish_pending_outpoint_transition_failure(
+                        transition_started,
+                        &old_state,
+                        rollback_error.is_none(),
+                    );
+                    return Err(Self::err_with_rollback(err, rollback_error));
                 }
             };
 
@@ -722,10 +728,13 @@ impl SyncEngine {
             {
                 Ok(target) => target,
                 Err(err) => {
-                    return Err(Self::err_with_rollback(
-                        err,
-                        self.rollback_apply_block(rollback),
-                    ));
+                    let rollback_error = self.rollback_apply_block(rollback);
+                    self.finish_pending_outpoint_transition_failure(
+                        transition_started,
+                        &old_state,
+                        rollback_error.is_none(),
+                    );
+                    return Err(Self::err_with_rollback(err, rollback_error));
                 }
             };
             match self.apply_block_with_target(&item.block_bytes, None, Some(target)) {
@@ -739,10 +748,13 @@ impl SyncEngine {
                     last_summary = Some(summary);
                 }
                 Err(err) => {
-                    return Err(Self::err_with_rollback(
-                        err,
-                        self.rollback_apply_block(rollback),
-                    ));
+                    let rollback_error = self.rollback_apply_block(rollback);
+                    self.finish_pending_outpoint_transition_failure(
+                        transition_started,
+                        &old_state,
+                        rollback_error.is_none(),
+                    );
+                    return Err(Self::err_with_rollback(err, rollback_error));
                 }
             }
         }
@@ -764,11 +776,23 @@ impl SyncEngine {
             requeue_block_hashes: Vec::new(),
         };
 
-        let mut summary = last_summary.ok_or_else(|| "reorg branch was empty".to_string())?;
+        let Some(mut summary) = last_summary else {
+            let rollback_error = self.rollback_apply_block(rollback);
+            self.finish_pending_outpoint_transition_failure(
+                transition_started,
+                &old_state,
+                rollback_error.is_none(),
+            );
+            return Err(Self::err_with_rollback(
+                "reorg branch was empty".to_string(),
+                rollback_error,
+            ));
+        };
         // Report every block that became canonical in this reorg (the returned
         // summary's scalar fields otherwise reflect only the new tip).
         summary.canonical_applied_blocks = canonical_applied_blocks;
         self.note_reorg(reorg_depth);
+        self.finish_pending_outpoint_transition_success(transition_started);
         Ok(ApplyBlockWithReorgOutcome {
             summary,
             tx_pool_cleanup: cleanup,
@@ -781,7 +805,7 @@ impl SyncEngine {
         &self,
         branch: &[ReorgBranchBlock],
         common_ancestor_height: u64,
-    ) -> Result<Vec<VerifiedStoredBlock>, String> {
+    ) -> Result<Vec<PreparedDisconnect>, String> {
         let mut preview_state = self.chain_state.clone();
 
         let disconnected_blocks = self
@@ -1021,6 +1045,7 @@ mod tests {
     use crate::chainstate::{chain_state_path, ChainState};
     use crate::devnet_genesis_chain_id;
     use crate::io_utils::unique_temp_path;
+    use crate::pending_outpoint_owner::{PendingOutpointOwnerHandle, PendingOutpointTip};
     use crate::sync::{
         boundary_chain_for_test, default_sync_config, next_candidate_block_for_test,
         retarget_block_for_test, stock_devnet_engine_for_test, SuiteContext, SyncEngine,
@@ -1457,6 +1482,12 @@ mod tests {
         use crate::undo::{corrupt_stored_undo_checksum, UNDO_CHECKSUM_MISMATCH_ERR};
 
         let (mut engine, dir) = engine_with_store("rubin-reorg-corrupt-undo");
+        let owner = PendingOutpointOwnerHandle::new(PendingOutpointTip::from_chain_state(
+            &engine.chain_state,
+        ));
+        engine
+            .bind_pending_outpoint_owner(owner.clone())
+            .expect("bind owner");
         let (genesis, genesis_hash, gen_ts) = genesis_info();
         engine
             .apply_block_with_reorg(&genesis, None)
@@ -1486,6 +1517,7 @@ mod tests {
         let block2_alt = coinbase_only_block_with_gen(2, subsidy1, block1_alt_hash, gen_ts + 3);
 
         let before_state = engine.chain_state.clone();
+        let before_context = owner.admission_context().expect("owner context");
         let store = engine.block_store.as_ref().expect("blockstore");
         let before_tip = store.tip().expect("tip");
         let before_index: Vec<[u8; 32]> = (0..store.canonical_len())
@@ -1504,6 +1536,8 @@ mod tests {
             .apply_block_with_reorg(&block2_alt, None)
             .expect_err("reorg consumed a checksum-broken undo record");
         assert_eq!(err, UNDO_CHECKSUM_MISMATCH_ERR);
+        let after = owner.admission_context().expect("owner reopened");
+        assert_eq!(after, before_context);
 
         assert_eq!(
             engine.chain_state, before_state,
@@ -1548,6 +1582,8 @@ mod tests {
         assert_eq!(summary.block_height, 2);
         assert_eq!(engine.chain_state.height, 2);
         assert_eq!(engine.reorg_count(), before_reorgs + 1);
+        let after = owner.admission_context().expect("owner reopened");
+        assert_eq!(after.generation, before_context.generation + 1);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -2466,6 +2502,12 @@ mod tests {
     #[test]
     fn apply_block_with_reorg_heavier_branch_wins() {
         let (mut engine, dir) = engine_with_store("rubin-reorg-heavy");
+        let owner = PendingOutpointOwnerHandle::new(PendingOutpointTip::from_chain_state(
+            &engine.chain_state,
+        ));
+        engine
+            .bind_pending_outpoint_owner(owner.clone())
+            .expect("bind owner");
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
         engine
@@ -2504,7 +2546,9 @@ mod tests {
         // Reorg: branch [block1', block2'] work=2 > canonical [block1] work=1.
         let mut pool = TxPool::new();
         let summary = engine
-            .apply_block_with_reorg(&block2_alt, None)
+            .test_while_pending_outpoint_transition(&owner, |engine| {
+                engine.apply_block_with_reorg(&block2_alt, None)
+            })
             .expect("reorg to heavier branch");
         summary.tx_pool_cleanup.apply(
             &mut pool,
@@ -2517,6 +2561,12 @@ mod tests {
         assert_eq!(summary.block_height, 2);
         assert_eq!(engine.reorg_count(), 1);
         assert_eq!(engine.last_reorg_depth(), 1);
+        let context = owner.admission_context().expect("owner reopened");
+        assert_eq!(context.generation, 3, "one outer reorg transition");
+        assert_eq!(
+            context.tip,
+            PendingOutpointTip::from_chain_state(&engine.chain_state)
+        );
 
         let block2_alt_hash =
             rubin_consensus::block_hash(&block2_alt[..rubin_consensus::BLOCK_HEADER_BYTES])

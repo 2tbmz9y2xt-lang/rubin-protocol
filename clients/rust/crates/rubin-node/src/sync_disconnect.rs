@@ -9,6 +9,14 @@ use crate::sync::SyncEngine;
 use crate::sync_reorg::{load_verified_stored_block, VerifiedStoredBlock};
 use crate::undo::{BlockUndo, ChainStateDisconnectSummary};
 
+#[derive(Debug)]
+pub(crate) struct PreparedDisconnect {
+    stored: VerifiedStoredBlock,
+    tip_height: u64,
+    undo: BlockUndo,
+    parent_timestamp: u64,
+}
+
 impl ChainState {
     /// Disconnect one already-loaded stored block without parsing its bytes a
     /// second time. This preserves `disconnect_block`'s validation and
@@ -133,18 +141,32 @@ impl SyncEngine {
     /// Disconnect the current canonical tip block, restoring the chain state
     /// to the parent. Returns a summary of the disconnection.
     pub fn disconnect_tip(&mut self) -> Result<ChainStateDisconnectSummary, String> {
-        let stored = self.prepare_disconnect_tip()?;
-        self.disconnect_prepared_tip(&stored)
+        let prepared = self.prepare_disconnect_tip()?;
+        let old_state = self.chain_state.clone();
+        let transitioned = self.begin_pending_outpoint_transition()?;
+        match self.disconnect_prepared_tip(&prepared) {
+            Ok(summary) => {
+                self.finish_pending_outpoint_transition_success(transitioned);
+                Ok(summary)
+            }
+            Err(error) => {
+                self.finish_pending_outpoint_transition_failure(transitioned, &old_state, true);
+                Err(error)
+            }
+        }
     }
 
-    fn prepare_disconnect_tip(&self) -> Result<VerifiedStoredBlock, String> {
+    fn prepare_disconnect_tip(&self) -> Result<PreparedDisconnect, String> {
         self.mutation_allowed()?;
-        let (_, tip_hash) = self.current_disconnect_tip()?;
+        let (tip_height, tip_hash) = self.current_disconnect_tip()?;
         let block_store = self
             .block_store
             .as_ref()
             .ok_or("sync engine has no blockstore")?;
-        load_verified_stored_block(block_store, tip_hash).map_err(|err| err.render(tip_hash))
+        let prepared = self.prepare_disconnect(block_store, tip_height, tip_hash)?;
+        let mut preview = self.chain_state.clone();
+        self.preview_disconnect_packet(&mut preview, std::slice::from_ref(&prepared))?;
+        Ok(prepared)
     }
 
     fn current_disconnect_tip(&self) -> Result<(u64, [u8; 32]), String> {
@@ -164,41 +186,62 @@ impl SyncEngine {
     }
 
     fn parent_timestamp(
-        &self,
+        block_store: &crate::blockstore::BlockStore,
         tip_height: u64,
         stored: &VerifiedStoredBlock,
     ) -> Result<u64, String> {
         if tip_height == 0 {
             return Ok(0);
         }
-        let parent_header_bytes = self
-            .block_store
-            .as_ref()
-            .ok_or("sync engine has no blockstore")?
-            .get_header_by_hash(stored.parsed.header.prev_block_hash)?;
+        let parent_header_bytes =
+            block_store.get_header_by_hash(stored.parsed.header.prev_block_hash)?;
         Ok(parse_block_header_bytes(&parent_header_bytes)
             .map_err(|err| err.to_string())?
             .timestamp)
     }
 
+    fn prepare_disconnect(
+        &self,
+        block_store: &crate::blockstore::BlockStore,
+        tip_height: u64,
+        tip_hash: [u8; 32],
+    ) -> Result<PreparedDisconnect, String> {
+        let stored = load_verified_stored_block(block_store, tip_hash)
+            .map_err(|err| err.render(tip_hash))?;
+        let undo = block_store.get_undo(tip_hash)?;
+        if undo.block_height != tip_height {
+            return Err(format!(
+                "disconnect height mismatch: chainstate={} undo={}",
+                tip_height, undo.block_height
+            ));
+        }
+        Ok(PreparedDisconnect {
+            parent_timestamp: Self::parent_timestamp(block_store, tip_height, &stored)?,
+            stored,
+            tip_height,
+            undo,
+        })
+    }
+
     fn disconnect_prepared_tip(
         &mut self,
-        stored: &VerifiedStoredBlock,
+        prepared: &PreparedDisconnect,
     ) -> Result<ChainStateDisconnectSummary, String> {
-        let (tip_height, tip_hash) = self.current_disconnect_tip()?;
-        if tip_hash != stored.lookup_hash {
-            return Err("disconnect block is not current canonical tip".into());
+        let stored = &prepared.stored;
+        if self.chain_state.height != prepared.tip_height {
+            return Err(format!(
+                "disconnect height mismatch: chainstate={} undo={}",
+                self.chain_state.height, prepared.undo.block_height
+            ));
         }
-        let undo = self
-            .block_store
-            .as_ref()
-            .ok_or("sync engine has no blockstore")?
-            .get_undo(tip_hash)?;
-        let new_tip_timestamp = self.parent_timestamp(tip_height, stored)?;
+        let tip_hash = stored.lookup_hash;
+        let new_tip_timestamp = prepared.parent_timestamp;
         let rollback = self.capture_rollback_state();
+        #[cfg(test)]
+        self.test_pending_outpoint_checkpoint();
         let summary = self
             .chain_state
-            .disconnect_verified_stored_block(stored, &undo)?;
+            .disconnect_verified_stored_block(stored, &prepared.undo)?;
 
         // Truncate canonical index FIRST, then persist chain state — matching
         // Go DisconnectTip ordering (B.7 fix, issue #1170).  A crash between
@@ -314,18 +357,31 @@ impl SyncEngine {
         let mut preview_state = self.chain_state.clone();
         let prepared =
             self.prepare_canonical_disconnect_packet(&mut preview_state, common_ancestor_height)?;
-        Ok(self
-            .disconnect_prepared_canonical_to_ancestor(prepared)?
-            .into_iter()
-            .map(|stored| stored.block_bytes)
-            .collect())
+        if prepared.is_empty() {
+            return Ok(Vec::new());
+        }
+        let old_state = self.chain_state.clone();
+        let transitioned = self.begin_pending_outpoint_transition()?;
+        match self.disconnect_prepared_canonical_to_ancestor(prepared) {
+            Ok(disconnected) => {
+                self.finish_pending_outpoint_transition_success(transitioned);
+                Ok(disconnected
+                    .into_iter()
+                    .map(|stored| stored.block_bytes)
+                    .collect())
+            }
+            Err(error) => {
+                self.finish_pending_outpoint_transition_failure(transitioned, &old_state, true);
+                Err(error)
+            }
+        }
     }
 
     fn prepare_canonical_disconnect_packet(
         &self,
         preview_state: &mut ChainState,
         common_ancestor_height: u64,
-    ) -> Result<Vec<VerifiedStoredBlock>, String> {
+    ) -> Result<Vec<PreparedDisconnect>, String> {
         self.mutation_allowed()?;
         let (tip_height, _) = self.current_disconnect_tip()?;
         if common_ancestor_height >= tip_height {
@@ -340,9 +396,7 @@ impl SyncEngine {
             let hash = block_store
                 .canonical_hash(height)?
                 .ok_or("blockstore has no canonical tip")?;
-            let stored =
-                load_verified_stored_block(block_store, hash).map_err(|err| err.render(hash))?;
-            packet.push(stored);
+            packet.push(self.prepare_disconnect(block_store, height, hash)?);
         }
         self.preview_disconnect_packet(preview_state, &packet)?;
         Ok(packet)
@@ -354,35 +408,30 @@ impl SyncEngine {
         &self,
         preview_state: &mut ChainState,
         common_ancestor_height: u64,
-    ) -> Result<Vec<VerifiedStoredBlock>, String> {
+    ) -> Result<Vec<PreparedDisconnect>, String> {
         self.prepare_canonical_disconnect_packet(preview_state, common_ancestor_height)
     }
 
     fn preview_disconnect_packet(
         &self,
         state: &mut ChainState,
-        packet: &[VerifiedStoredBlock],
+        packet: &[PreparedDisconnect],
     ) -> Result<(), String> {
-        let block_store = self
-            .block_store
-            .as_ref()
-            .ok_or("sync engine has no blockstore")?;
-        for stored in packet {
-            let undo = block_store.get_undo(stored.lookup_hash)?;
-            state.disconnect_verified_stored_block(stored, &undo)?;
+        for prepared in packet {
+            state.disconnect_verified_stored_block(&prepared.stored, &prepared.undo)?;
         }
         Ok(())
     }
 
     pub(crate) fn disconnect_prepared_canonical_to_ancestor(
         &mut self,
-        packet: Vec<VerifiedStoredBlock>,
+        packet: Vec<PreparedDisconnect>,
     ) -> Result<Vec<VerifiedStoredBlock>, String> {
         self.mutation_allowed()?;
         let mut disconnected = Vec::with_capacity(packet.len());
-        for stored in packet {
-            self.disconnect_prepared_tip(&stored)?;
-            disconnected.push(stored);
+        for prepared in packet {
+            self.disconnect_prepared_tip(&prepared)?;
+            disconnected.push(prepared.stored);
         }
         Ok(disconnected)
     }
@@ -391,11 +440,12 @@ impl SyncEngine {
 #[cfg(test)]
 mod tests {
     use rubin_consensus::constants::POW_LIMIT;
-    use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+    use rubin_consensus::{block_hash, Outpoint, BLOCK_HEADER_BYTES};
 
     use crate::blockstore::{block_store_path, BlockStore};
     use crate::chainstate::{chain_state_path, ChainState};
     use crate::io_utils::unique_temp_path;
+    use crate::pending_outpoint_owner::{PendingOutpointOwnerHandle, PendingOutpointTip};
     use crate::sync::{default_sync_config, SyncEngine};
     use crate::sync_reorg::BRANCH_STORE_CORRUPT_ERR;
     use crate::test_helpers::{
@@ -418,6 +468,16 @@ mod tests {
         let cfg = default_sync_config(Some(POW_LIMIT), [0u8; 32], Some(chain_state_path(&dir)));
         let engine = SyncEngine::new(ChainState::new(), Some(store), cfg).expect("new sync");
         (engine, dir)
+    }
+
+    fn bind_owner(engine: &mut SyncEngine) -> PendingOutpointOwnerHandle {
+        let owner = PendingOutpointOwnerHandle::new(PendingOutpointTip::from_chain_state(
+            &engine.chain_state,
+        ));
+        engine
+            .bind_pending_outpoint_owner(owner.clone())
+            .expect("bind owner");
+        owner
     }
 
     fn disconnect_snapshot(engine: &SyncEngine) -> DisconnectSnapshot {
@@ -449,6 +509,7 @@ mod tests {
         use crate::undo::{corrupt_stored_undo_checksum, UNDO_CHECKSUM_MISMATCH_ERR};
 
         let (mut engine, dir) = engine_with_store("rubin-disc-corrupt-undo");
+        let owner = bind_owner(&mut engine);
         let (genesis, genesis_hash, gen_ts) = genesis_info();
         engine.apply_block(&genesis, None).expect("genesis");
         let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
@@ -457,6 +518,7 @@ mod tests {
         engine.apply_block(&block1, None).expect("block 1");
 
         let before = disconnect_snapshot(&engine);
+        let before_context = owner.admission_context().expect("owner context");
         let chain_state_path = chain_state_path(&dir);
         let before_snapshot = std::fs::read(&chain_state_path).expect("read chainstate snapshot");
 
@@ -472,6 +534,8 @@ mod tests {
             .disconnect_tip()
             .expect_err("disconnect accepted a checksum-broken undo record");
         assert_eq!(err, UNDO_CHECKSUM_MISMATCH_ERR);
+        let after = owner.admission_context().expect("owner reopened");
+        assert_eq!(after, before_context);
 
         assert_eq!(
             disconnect_snapshot(&engine),
@@ -501,6 +565,8 @@ mod tests {
         assert_eq!(summary.disconnected_height, 1);
         assert_eq!(engine.chain_state.height, 0);
         assert_eq!(engine.chain_state.tip_hash, genesis_hash);
+        let after = owner.admission_context().expect("owner reopened");
+        assert_eq!(after.generation, before_context.generation + 1);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -508,6 +574,7 @@ mod tests {
     #[test]
     fn disconnect_tip_restores_genesis_state() {
         let (mut engine, dir) = engine_with_store("rubin-disc-tip");
+        let owner = bind_owner(&mut engine);
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
         engine.apply_block(&genesis, None).expect("genesis");
@@ -516,7 +583,9 @@ mod tests {
         assert_eq!(engine.chain_state.height, 1);
         let utxos_h1 = engine.chain_state.utxos.len();
 
-        let summary = engine.disconnect_tip().expect("disconnect");
+        let summary = engine
+            .test_while_pending_outpoint_transition(&owner, |engine| engine.disconnect_tip())
+            .expect("disconnect");
         assert_eq!(summary.disconnected_height, 1);
         assert_eq!(summary.new_height, 0);
         assert_eq!(summary.new_tip_hash, genesis_hash);
@@ -533,6 +602,12 @@ mod tests {
             .expect("some");
         assert_eq!(tip.0, 0);
         assert_eq!(tip.1, genesis_hash);
+        let context = owner.admission_context().expect("owner reopened");
+        assert_eq!(context.generation, 3);
+        assert_eq!(
+            context.tip,
+            PendingOutpointTip::from_chain_state(&engine.chain_state)
+        );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -562,6 +637,8 @@ mod tests {
     #[test]
     fn disconnect_tip_to_pre_genesis() {
         let (mut engine, dir) = engine_with_store("rubin-disc-gen");
+        let owner = bind_owner(&mut engine);
+        let initial = owner.admission_context().expect("initial context");
         let (genesis, _, _) = genesis_info();
 
         engine.apply_block(&genesis, None).expect("genesis");
@@ -571,6 +648,31 @@ mod tests {
         assert_eq!(summary.disconnected_height, 0);
         assert!(!summary.has_tip);
         assert!(!engine.chain_state.has_tip);
+        let before = (
+            owner.test_high_water(),
+            owner.test_row_count().expect("rows"),
+        );
+        let error = owner
+            .reserve(
+                initial,
+                [9; 32],
+                vec![Outpoint {
+                    txid: [9; 32],
+                    vout: 0,
+                }],
+            )
+            .expect_err("A-B-A context is stale");
+        assert_eq!(
+            error.message,
+            "pending-outpoint expected generation mismatch"
+        );
+        assert_eq!(
+            (
+                owner.test_high_water(),
+                owner.test_row_count().expect("rows")
+            ),
+            before
+        );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -628,17 +730,6 @@ mod tests {
             let block2_hash = block_hash(&block2[..BLOCK_HEADER_BYTES]).expect("block 2 hash");
             engine.apply_block(&block2, None).expect("block 2");
             let before = disconnect_snapshot(&engine);
-            let packet = if kind != 'b' {
-                let mut preview = engine.chain_state.clone();
-                let packet = engine
-                    .preview_disconnect_canonical_to_ancestor(&mut preview, 0)
-                    .expect("preview");
-                assert_eq!(packet.len(), 2);
-                assert_eq!(preview.tip_hash, genesis_hash);
-                packet
-            } else {
-                Vec::new()
-            };
             let (sidecar, extension, hash, bytes) = match kind {
                 'h' => ("headers", "bin", block1_hash, malformed.map(Vec::from)),
                 'u' => ("undo", "json", block2_hash, malformed.map(Vec::from)),
@@ -657,22 +748,7 @@ mod tests {
                 Some(bytes) => std::fs::write(path, bytes).expect("overwrite sidecar"),
                 None => std::fs::remove_file(path).expect("remove sidecar"),
             }
-            let err = if kind != 'b' {
-                engine
-                    .disconnect_prepared_canonical_to_ancestor(packet)
-                    .expect_err(name)
-            } else {
-                let mut preview = engine.chain_state.clone();
-                let preview_err = engine
-                    .preview_disconnect_canonical_to_ancestor(&mut preview, 0)
-                    .expect_err("preview must reject corrupt lower packet member");
-                assert!(preview_err.starts_with(BRANCH_STORE_CORRUPT_ERR));
-                assert_eq!(
-                    preview, before.state,
-                    "preview must not partially disconnect"
-                );
-                engine.disconnect_canonical_to_ancestor(0).expect_err(name)
-            };
+            let err = engine.disconnect_canonical_to_ancestor(0).expect_err(name);
             assert!(err.contains(want), "{name}: {err}");
             assert_eq!(disconnect_snapshot(&engine), before, "{name}: mutation");
             std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -857,6 +933,7 @@ mod tests {
         // create a mismatch with the truncated canonical.  Engine remains in
         // post-disconnect state (parent tip, canonical missing original tip).
         let (mut engine, dir) = engine_with_store("rubin-disc-double-fail");
+        let owner = bind_owner(&mut engine);
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
         engine.apply_block(&genesis, None).expect("genesis");
@@ -881,6 +958,10 @@ mod tests {
         assert!(
             err.contains("canonical restore failed"),
             "expected canonical restore failure note, got: {err}"
+        );
+        assert!(
+            owner.admission_context().is_err(),
+            "ambiguous rollback latches owner"
         );
 
         // Disarm so cleanup succeeds.

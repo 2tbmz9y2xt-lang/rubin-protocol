@@ -12,6 +12,7 @@ mod io_utils;
 pub mod miner;
 pub mod p2p_runtime;
 pub mod p2p_service;
+mod pending_outpoint_owner;
 mod production_rotation_schedule;
 pub mod relay_pool;
 mod store_envelope;

@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+#[cfg(test)]
+use std::collections::HashSet;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::OnceLock;
 
 use rubin_consensus::uint128_json::{compare_fee_rate as compare_fee_rate_exact, fee_below_rate};
@@ -10,7 +12,11 @@ use rubin_consensus::{
     DefaultRotationProvider, NativeSuiteSet, Outpoint, RotationProvider, SuiteRegistry,
 };
 
-use crate::sync::SuiteContext;
+use crate::pending_outpoint_owner::{
+    PendingOutpointAdmissionContext, PendingOutpointError, PendingOutpointErrorKind,
+    PendingOutpointOwnerHandle, PendingOutpointTip, PendingOutpointToken,
+};
+use crate::sync::{SuiteContext, SyncEngine};
 use crate::{BlockStore, ChainState};
 
 const MAX_TX_POOL_TRANSACTIONS: usize = 300;
@@ -138,6 +144,7 @@ pub struct TxPoolEntry {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct TxPoolSnapshot {
     current_mempool_min_fee_rate: u64,
+    owner_context: PendingOutpointAdmissionContext,
     entries: Vec<TxPoolSnapshotEntry>,
     next_heap_id: u64,
     used_bytes: usize,
@@ -152,11 +159,12 @@ struct TxPoolSnapshotEntry {
     heap_id: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TxPool {
     cfg: TxPoolConfig,
     txs: HashMap<[u8; 32], TxPoolEntry>,
-    spenders: HashMap<Outpoint, [u8; 32]>,
+    owner: Option<PendingOutpointOwnerHandle>,
+    owner_tokens: HashMap<[u8; 32], PendingOutpointToken>,
     worst_heap: BinaryHeap<WorstEntryKey>,
     // Stable admission sequence per resident txid. It also tags worst_heap
     // entries for lazy stale-entry filtering.
@@ -267,11 +275,23 @@ impl TxPool {
     }
 
     pub fn new_with_config(cfg: TxPoolConfig) -> Self {
+        Self::new_with_owner(cfg, None)
+    }
+
+    pub(crate) fn new_bound_with_config(
+        cfg: TxPoolConfig,
+        owner: PendingOutpointOwnerHandle,
+    ) -> Self {
+        Self::new_with_owner(cfg, Some(owner))
+    }
+
+    fn new_with_owner(cfg: TxPoolConfig, owner: Option<PendingOutpointOwnerHandle>) -> Self {
         let max_bytes = DEFAULT_TX_POOL_MAX_BYTES;
         Self {
             cfg,
             txs: HashMap::new(),
-            spenders: HashMap::new(),
+            owner,
+            owner_tokens: HashMap::new(),
             worst_heap: BinaryHeap::new(),
             heap_seqs: HashMap::new(),
             next_heap_id: 0,
@@ -280,6 +300,85 @@ impl TxPool {
             low_water_bytes: default_tx_pool_low_water_bytes(max_bytes),
             used_bytes: 0,
         }
+    }
+
+    fn admission_context(
+        &mut self,
+        chain_state: &ChainState,
+    ) -> Result<(PendingOutpointOwnerHandle, PendingOutpointAdmissionContext), TxPoolAdmitError>
+    {
+        let expected_tip = PendingOutpointTip::from_chain_state(chain_state);
+        let owner = self
+            .owner
+            .get_or_insert_with(|| PendingOutpointOwnerHandle::new(expected_tip))
+            .clone();
+        let context = owner.admission_context().map_err(owner_error)?;
+        if context.tip != expected_tip {
+            return Err(unavailable(
+                "pending-outpoint owner context does not match chain tip",
+            ));
+        }
+        Ok((owner, context))
+    }
+
+    pub(crate) fn reconcile_pending_outpoint_owner(
+        &mut self,
+        engine: &mut SyncEngine,
+    ) -> Result<(), String> {
+        match (engine.pending_outpoint_owner(), self.owner.clone()) {
+            (None, None) => {
+                let tip = PendingOutpointTip::from_chain_state(&engine.chain_state);
+                let owner = PendingOutpointOwnerHandle::new(tip);
+                engine.bind_pending_outpoint_owner(owner.clone())?;
+                self.owner = Some(owner);
+                Ok(())
+            }
+            (Some(sync_owner), Some(pool_owner)) if sync_owner.same_owner(&pool_owner) => Ok(()),
+            _ => Err("pending-outpoint owner mismatch".into()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_owner_handle(&self) -> Option<PendingOutpointOwnerHandle> {
+        self.owner.clone()
+    }
+
+    #[cfg(test)]
+    fn test_owner(&self) -> PendingOutpointOwnerHandle {
+        self.owner.clone().expect("test owner")
+    }
+
+    #[cfg(test)]
+    fn owner_txid_for_outpoint(&self, outpoint: &Outpoint) -> Option<[u8; 32]> {
+        self.test_owner()
+            .txid_for_outpoint(outpoint)
+            .expect("owner lookup")
+    }
+
+    #[cfg(test)]
+    fn owner_row_count(&self) -> usize {
+        self.test_owner().test_row_count().expect("owner rows")
+    }
+
+    #[cfg(test)]
+    fn owner_claim_is_finalized(&self, txid: &[u8; 32]) -> bool {
+        let Some(entry) = self.txs.get(txid) else {
+            return false;
+        };
+        if entry.inputs.is_empty() {
+            return !self.owner_tokens.contains_key(txid);
+        }
+        let Some(owner) = self.owner.clone() else {
+            return false;
+        };
+        let Some(token) = self.owner_tokens.get(txid) else {
+            return false;
+        };
+        owner.lock().is_ok_and(|guard| {
+            guard
+                .validate_standard_entry(&owner, *txid, &entry.inputs, Some(token), true)
+                .is_ok()
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -292,6 +391,13 @@ impl TxPool {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn snapshot(&self) -> Result<TxPoolSnapshot, TxPoolAdmitError> {
+        let owner_context = match self.owner.clone() {
+            Some(owner) => owner.admission_context().map_err(owner_error)?,
+            None => PendingOutpointAdmissionContext {
+                tip: PendingOutpointTip::default(),
+                generation: 0,
+            },
+        };
         let mut entries = Vec::with_capacity(self.txs.len());
         let mut used_bytes = 0usize;
         let mut max_heap_id = 0u64;
@@ -309,6 +415,22 @@ impl TxPool {
                 .ok_or_else(|| unavailable("txpool snapshot byte accounting overflow"))?;
             max_heap_id = max_heap_id.max(heap_id);
             let wtxid = validate_txpool_snapshot_entry(*txid, None, entry)?;
+            if !entry.inputs.is_empty() {
+                let owner = self
+                    .owner
+                    .clone()
+                    .ok_or_else(|| rejected("txpool snapshot missing pending-outpoint owner"))?;
+                let guard = owner.lock().map_err(owner_error)?;
+                guard
+                    .validate_standard_entry(
+                        &owner,
+                        *txid,
+                        &entry.inputs,
+                        self.owner_tokens.get(txid),
+                        true,
+                    )
+                    .map_err(owner_error)?;
+            }
             entries.push(TxPoolSnapshotEntry {
                 txid: *txid,
                 wtxid,
@@ -329,6 +451,7 @@ impl TxPool {
         let floor = self.cfg.policy_current_mempool_min_fee_rate;
         Ok(TxPoolSnapshot {
             current_mempool_min_fee_rate: floor.max(DEFAULT_MEMPOOL_MIN_FEE_RATE),
+            owner_context,
             entries,
             next_heap_id: self.next_heap_id,
             used_bytes,
@@ -352,13 +475,15 @@ impl TxPool {
         }
 
         let mut txs = HashMap::with_capacity(snapshot.entries.len());
+        let mut owner_tokens = HashMap::with_capacity(snapshot.entries.len());
         let mut wtxids = HashMap::with_capacity(snapshot.entries.len());
-        let mut spenders = HashMap::new();
+        let mut snapshot_outpoints = HashMap::new();
         let mut heap_seqs = HashMap::with_capacity(snapshot.entries.len());
         let mut admission_seqs = HashMap::with_capacity(snapshot.entries.len());
         let mut worst_heap = BinaryHeap::with_capacity(snapshot.entries.len());
         let mut used_bytes = 0usize;
         let mut max_heap_id = 0u64;
+        let owner = PendingOutpointOwnerHandle::new_with_context(snapshot.owner_context);
 
         for item in &snapshot.entries {
             if txs.contains_key(&item.txid) {
@@ -399,16 +524,24 @@ impl TxPool {
                     used_bytes, item.entry.size, self.max_bytes
                 )));
             }
-            for input in &item.entry.inputs {
-                if let Some(existing) = spenders.insert(input.clone(), item.txid) {
-                    return Err(rejected(format!(
-                        "duplicate txpool snapshot spender txid={} vout={} existing={} new={}",
-                        hex::encode(input.txid),
-                        input.vout,
-                        hex::encode(existing),
-                        hex::encode(item.txid)
-                    )));
+            let entry = item.entry.clone();
+            if !entry.inputs.is_empty() {
+                for input in &entry.inputs {
+                    if let Some(existing) = snapshot_outpoints.insert(input.clone(), item.txid) {
+                        return Err(rejected(format!(
+                            "duplicate txpool snapshot spender txid={} vout={} existing={} new={}",
+                            hex::encode(input.txid),
+                            input.vout,
+                            hex::encode(existing),
+                            hex::encode(item.txid)
+                        )));
+                    }
                 }
+                let token = owner
+                    .reserve(snapshot.owner_context, item.txid, entry.inputs.clone())
+                    .map_err(owner_error)?;
+                owner.finalize(&token).map_err(owner_error)?;
+                owner_tokens.insert(item.txid, token);
             }
             used_bytes = next_used;
             max_heap_id = max_heap_id.max(heap_id);
@@ -419,7 +552,7 @@ impl TxPool {
                 weight: item.entry.weight,
                 heap_id,
             });
-            txs.insert(item.txid, item.entry.clone());
+            txs.insert(item.txid, entry);
         }
 
         if snapshot.used_bytes != used_bytes {
@@ -441,7 +574,8 @@ impl TxPool {
         let floor = snapshot.current_mempool_min_fee_rate;
         self.cfg.policy_current_mempool_min_fee_rate = floor.max(DEFAULT_MEMPOOL_MIN_FEE_RATE);
         self.txs = txs;
-        self.spenders = spenders;
+        self.owner = Some(owner);
+        self.owner_tokens = owner_tokens;
         self.heap_seqs = heap_seqs;
         self.worst_heap = worst_heap;
         self.next_heap_id = snapshot.next_heap_id;
@@ -591,6 +725,7 @@ impl TxPool {
         chain_id: [u8; 32],
         source: TxSource,
     ) -> Result<([u8; 32], RelayTxMetadata), TxPoolAdmitError> {
+        let (owner, owner_context) = self.admission_context(chain_state)?;
         let (tx, txid, _wtxid, consumed) =
             parse_tx(tx_bytes).map_err(|err| rejected(format!("transaction rejected: {err}")))?;
         if consumed != tx_bytes.len() {
@@ -717,23 +852,28 @@ impl TxPool {
         if self.txs.contains_key(&txid) {
             return Err(conflict("tx already in mempool"));
         }
-        for input in &inputs {
-            if let Some(existing) = self.spenders.get(input) {
-                return Err(conflict(format!(
-                    "mempool double-spend conflict with {}",
-                    hex::encode(existing)
-                )));
-            }
-        }
-        validate_fee_floor(
+        let raw = tx_bytes.to_vec();
+        let mut reservation = if inputs.is_empty() {
+            None
+        } else {
+            Some(
+                owner
+                    .reserve(owner_context, txid, inputs.clone())
+                    .map_err(owner_error)?,
+            )
+        };
+        if let Err(error) = validate_fee_floor(
             summary.fee,
             weight,
             self.cfg.policy_current_mempool_min_fee_rate,
-        )?;
+        ) {
+            release_reservation(&owner, reservation.as_ref());
+            return Err(error);
+        }
 
         let entry = TxPoolEntry {
-            raw: tx_bytes.to_vec(),
-            inputs: inputs.clone(),
+            raw,
+            inputs,
             fee: summary.fee,
             weight,
             size: tx_bytes.len(),
@@ -744,11 +884,29 @@ impl TxPool {
         // policy, and rolling-floor checks. The low-water byte cap is an
         // eviction target under pressure, not a hard upper bound on a
         // fitting candidate.
-        for evicted_txid in self.capacity_eviction_plan(txid, &entry)? {
-            self.remove_entry(&evicted_txid);
+        let evicted = match self.capacity_eviction_plan(txid, &entry) {
+            Ok(evicted) => evicted,
+            Err(error) => {
+                release_reservation(&owner, reservation.as_ref());
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.preflight_standard_delta(&evicted, reservation.is_some()) {
+            release_reservation(&owner, reservation.as_ref());
+            return Err(error);
         }
-
-        self.insert_entry(txid, entry);
+        let mut candidate = Some(entry);
+        if let Err(error) = self.commit_standard_delta(
+            &owner,
+            owner_context,
+            txid,
+            &mut candidate,
+            &mut reservation,
+            &evicted,
+        ) {
+            release_reservation(&owner, reservation.as_ref());
+            return Err(error);
+        }
         Ok((
             txid,
             RelayTxMetadata {
@@ -769,11 +927,8 @@ impl TxPool {
     }
 
     /// Remove transactions by txid (e.g. after block confirmation).
-    /// Cleans up the spender index for any removed entries.
     pub fn evict_txids(&mut self, txids: &[[u8; 32]]) {
-        for txid in txids {
-            self.remove_entry(txid);
-        }
+        self.remove_entries_exact(txids);
     }
 
     pub fn remove_conflicting_inputs(&mut self, txs: &[rubin_consensus::Tx]) {
@@ -788,26 +943,170 @@ impl TxPool {
     }
 
     pub fn remove_conflicting_outpoints(&mut self, outpoints: &[Outpoint]) {
-        let mut conflicting = HashSet::new();
+        let Some(owner) = self.owner.clone() else {
+            return;
+        };
+        let mut conflicting = Vec::new();
         for outpoint in outpoints {
-            if let Some(txid) = self.spenders.get(outpoint) {
-                conflicting.insert(*txid);
+            match owner.txid_for_outpoint(outpoint) {
+                Ok(Some(txid)) if !conflicting.contains(&txid) => conflicting.push(txid),
+                Ok(_) => {}
+                Err(_) => return,
             }
         }
-        if conflicting.is_empty() {
-            return;
-        }
-        let txids: Vec<[u8; 32]> = conflicting.into_iter().collect();
-        self.evict_txids(&txids);
+        self.evict_txids(&conflicting);
     }
 
-    fn insert_entry(&mut self, txid: [u8; 32], entry: TxPoolEntry) {
+    fn preflight_standard_delta(
+        &mut self,
+        evicted: &[[u8; 32]],
+        needs_token: bool,
+    ) -> Result<(), TxPoolAdmitError> {
+        if self.next_heap_id == u64::MAX {
+            return Err(unavailable("txpool heap sequence exhausted"));
+        }
+        if evicted.iter().any(|txid| !self.txs.contains_key(txid)) {
+            return Err(unavailable("txpool eviction plan changed before commit"));
+        }
+        self.txs
+            .try_reserve(1)
+            .map_err(|_| unavailable("txpool entry capacity unavailable"))?;
+        self.heap_seqs
+            .try_reserve(1)
+            .map_err(|_| unavailable("txpool heap index capacity unavailable"))?;
+        if needs_token {
+            self.owner_tokens
+                .try_reserve(1)
+                .map_err(|_| unavailable("txpool token capacity unavailable"))?;
+        }
+        self.worst_heap
+            .try_reserve(1)
+            .map_err(|_| unavailable("txpool heap capacity unavailable"))?;
+        Ok(())
+    }
+
+    fn commit_standard_delta(
+        &mut self,
+        owner: &PendingOutpointOwnerHandle,
+        context: PendingOutpointAdmissionContext,
+        txid: [u8; 32],
+        candidate: &mut Option<TxPoolEntry>,
+        candidate_token: &mut Option<PendingOutpointToken>,
+        evicted: &[[u8; 32]],
+    ) -> Result<(), TxPoolAdmitError> {
+        let entry = candidate
+            .as_ref()
+            .ok_or_else(|| rejected("txpool candidate missing before commit"))?;
+        let mut owner_guard = owner.lock().map_err(owner_error)?;
+        owner_guard.check_available(context).map_err(owner_error)?;
+        if evicted.len() > MAX_TX_POOL_TRANSACTIONS {
+            return Err(unavailable("txpool delta victim bound exceeded"));
+        }
+        for (index, victim_txid) in evicted.iter().enumerate() {
+            if *victim_txid == txid || evicted[..index].contains(victim_txid) {
+                return Err(unavailable("txpool delta victim shape invalid"));
+            }
+        }
+        if let Some(token) = candidate_token.as_ref() {
+            owner_guard
+                .check_candidate(owner, token)
+                .map_err(owner_error)?;
+        }
+        owner_guard
+            .validate_standard_entry(owner, txid, &entry.inputs, candidate_token.as_ref(), false)
+            .map_err(owner_error)?;
+        for evicted_txid in evicted {
+            let Some(victim) = self.txs.get(evicted_txid) else {
+                return Err(unavailable("txpool eviction plan changed before commit"));
+            };
+            owner_guard
+                .validate_standard_entry(
+                    owner,
+                    *evicted_txid,
+                    &victim.inputs,
+                    self.owner_tokens.get(evicted_txid),
+                    true,
+                )
+                .map_err(owner_error)?;
+        }
+        let entry = candidate
+            .take()
+            .ok_or_else(|| rejected("txpool candidate missing during commit"))?;
+        for evicted_txid in evicted {
+            if self.remove_entry_raw(evicted_txid).is_some() {
+                if let Some(token) = self.owner_tokens.remove(evicted_txid) {
+                    owner_guard.drop_after_validation(&token);
+                }
+            }
+        }
+        self.insert_entry_raw(txid, entry);
+        if let Some(token) = candidate_token.take() {
+            self.owner_tokens.insert(txid, token.clone());
+            owner_guard.finalize_after_validation(&token);
+        }
+        drop(owner_guard);
+        self.compact_worst_heap_if_needed();
+        Ok(())
+    }
+
+    fn remove_entries_exact(&mut self, txids: &[[u8; 32]]) {
+        let mut live = Vec::new();
+        for txid in txids {
+            if self.txs.contains_key(txid) && !live.contains(txid) {
+                live.push(*txid);
+            }
+        }
+        if live.is_empty() {
+            return;
+        }
+        let Some(owner) = self.owner.clone() else {
+            if live.iter().all(|txid| {
+                self.txs
+                    .get(txid)
+                    .is_some_and(|entry| entry.inputs.is_empty())
+            }) {
+                for txid in &live {
+                    self.remove_entry_raw(txid);
+                }
+                self.compact_worst_heap_if_needed();
+            }
+            return;
+        };
+        let Ok(mut owner_guard) = owner.lock() else {
+            return;
+        };
+        for txid in &live {
+            let Some(entry) = self.txs.get(txid) else {
+                return;
+            };
+            if owner_guard
+                .validate_standard_entry(
+                    &owner,
+                    *txid,
+                    &entry.inputs,
+                    self.owner_tokens.get(txid),
+                    true,
+                )
+                .is_err()
+            {
+                return;
+            }
+        }
+        for txid in &live {
+            if self.remove_entry_raw(txid).is_some() {
+                if let Some(token) = self.owner_tokens.remove(txid) {
+                    owner_guard.drop_after_validation(&token);
+                }
+            }
+        }
+        drop(owner_guard);
+        self.compact_worst_heap_if_needed();
+    }
+
+    fn insert_entry_raw(&mut self, txid: [u8; 32], entry: TxPoolEntry) {
         self.next_heap_id = self.next_heap_id.saturating_add(1);
         let heap_id = self.next_heap_id;
         self.used_bytes = self.used_bytes.saturating_add(entry.size);
-        for input in &entry.inputs {
-            self.spenders.insert(input.clone(), txid);
-        }
         self.heap_seqs.insert(txid, heap_id);
         self.worst_heap.push(WorstEntryKey {
             txid,
@@ -818,15 +1117,42 @@ impl TxPool {
         self.txs.insert(txid, entry);
     }
 
-    fn remove_entry(&mut self, txid: &[u8; 32]) {
+    fn remove_entry_raw(&mut self, txid: &[u8; 32]) -> Option<TxPoolEntry> {
         if let Some(entry) = self.txs.remove(txid) {
             self.heap_seqs.remove(txid);
             self.used_bytes = self.used_bytes.saturating_sub(entry.size);
-            for input in &entry.inputs {
-                self.spenders.remove(input);
-            }
+            return Some(entry);
         }
-        self.compact_worst_heap_if_needed();
+        None
+    }
+
+    #[cfg(test)]
+    fn insert_entry(&mut self, txid: [u8; 32], entry: TxPoolEntry) {
+        let token = if entry.inputs.is_empty() {
+            None
+        } else {
+            let owner = self
+                .owner
+                .get_or_insert_with(|| {
+                    PendingOutpointOwnerHandle::new(PendingOutpointTip::default())
+                })
+                .clone();
+            let context = owner.admission_context().expect("test owner context");
+            let token = owner
+                .reserve(context, txid, entry.inputs.clone())
+                .expect("test owner reservation");
+            owner.finalize(&token).expect("test owner finalization");
+            Some(token)
+        };
+        self.insert_entry_raw(txid, entry);
+        if let Some(token) = token {
+            self.owner_tokens.insert(txid, token);
+        }
+    }
+
+    #[cfg(test)]
+    fn remove_entry(&mut self, txid: &[u8; 32]) {
+        self.remove_entries_exact(&[*txid]);
     }
 
     fn capacity_eviction_plan(
@@ -868,10 +1194,25 @@ impl TxPool {
         } else {
             CapacityOrdering::LegacyCountPressure
         };
+        let plan_cap = self
+            .txs
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| unavailable("txpool capacity plan overflow"))?;
         let mut total_count = self.txs.len().saturating_add(1);
         let mut total_bytes = self.used_bytes.saturating_add(candidate.size);
-        let mut plan_pool = Vec::with_capacity(self.txs.len() + 1);
-        let mut admission_seqs = HashMap::with_capacity(self.txs.len());
+        let mut plan_pool = Vec::new();
+        plan_pool
+            .try_reserve(plan_cap)
+            .map_err(|_| unavailable("txpool capacity plan unavailable"))?;
+        let mut admission_seqs = HashMap::new();
+        admission_seqs
+            .try_reserve(self.txs.len())
+            .map_err(|_| unavailable("txpool capacity sequence unavailable"))?;
+        let mut evicted = Vec::new();
+        evicted
+            .try_reserve(self.txs.len())
+            .map_err(|_| unavailable("txpool eviction plan unavailable"))?;
         for (txid, entry) in &self.txs {
             if *txid == [0u8; 32] {
                 return Err(rejected(
@@ -909,7 +1250,6 @@ impl TxPool {
             admission_seq: 0,
         });
 
-        let mut evicted = Vec::new();
         while (total_count > self.max_transactions || total_bytes > target_bytes)
             && !plan_pool.is_empty()
         {
@@ -1006,10 +1346,15 @@ impl TxPool {
         let live = self.txs.len();
         let threshold = live.saturating_mul(2);
         if self.worst_heap.len() > threshold {
-            self.rebuild_worst_heap();
+            self.worst_heap.retain(|entry| {
+                self.heap_seqs
+                    .get(&entry.txid)
+                    .is_some_and(|heap_id| *heap_id == entry.heap_id)
+            });
         }
     }
 
+    #[cfg(test)]
     fn rebuild_worst_heap(&mut self) {
         let mut rebuilt = BinaryHeap::with_capacity(self.txs.len());
         let live_txids: HashSet<[u8; 32]> = self.txs.keys().copied().collect();
@@ -1345,6 +1690,20 @@ fn conflict(message: impl Into<String>) -> TxPoolAdmitError {
     TxPoolAdmitError {
         kind: TxPoolAdmitErrorKind::Conflict,
         message: message.into(),
+    }
+}
+
+fn owner_error(error: PendingOutpointError) -> TxPoolAdmitError {
+    match error.kind {
+        PendingOutpointErrorKind::Conflict => conflict(error.message),
+        PendingOutpointErrorKind::Unavailable => unavailable(error.message),
+        PendingOutpointErrorKind::Internal => unavailable(error.message),
+    }
+}
+
+fn release_reservation(owner: &PendingOutpointOwnerHandle, token: Option<&PendingOutpointToken>) {
+    if let Some(token) = token {
+        let _ = owner.release(token);
     }
 }
 
@@ -2302,6 +2661,21 @@ mod tests {
         }
     }
 
+    #[test]
+    #[rustfmt::skip]
+    fn compact_defensive_branch_coverage() {
+        let snapshot=|p:&TxPool|(p.txs.clone(),p.owner_tokens.clone(),p.heap_seqs.clone(),p.worst_heap.clone().into_sorted_vec(),p.next_heap_id,p.used_bytes);
+        let input=Outpoint{txid:[3;32],vout:0}; let mut poisoned=TxPool::new(); poisoned.insert_entry([3;32],TxPoolEntry{inputs:vec![input.clone()],..test_entry(1,1,1,TxSource::Local)});
+        let owner=poisoned.test_owner(); let clone=owner.clone(); let _=std::thread::spawn(move||{let _guard=clone.lock().unwrap(); panic!("poison");}).join(); let before=snapshot(&poisoned);
+        poisoned.remove_conflicting_outpoints(std::slice::from_ref(&input)); assert_eq!(snapshot(&poisoned),before); poisoned.evict_txids(&[[3;32]]); assert_eq!(snapshot(&poisoned),before);
+        let mut invalid=TxPool::new(); invalid.insert_entry([4;32],TxPoolEntry{inputs:vec![input.clone()],..test_entry(2,1,1,TxSource::Local)}); invalid.owner_tokens.remove(&[4;32]); let before=snapshot(&invalid); let owner_before=(invalid.test_owner().test_high_water(),invalid.owner_row_count(),invalid.owner_txid_for_outpoint(&input)); invalid.evict_txids(&[[4;32]]); assert_eq!(snapshot(&invalid),before); assert_eq!((invalid.test_owner().test_high_water(),invalid.owner_row_count(),invalid.owner_txid_for_outpoint(&input)),owner_before);
+        assert_eq!(invalid.select_transactions(1,usize::MAX).len(),1); assert!(invalid.select_transactions(0,usize::MAX).is_empty()); assert!(invalid.select_transactions_with_filter(1,usize::MAX,|_|true).is_empty()); assert!(invalid.select_transactions(1,0).is_empty());
+        let mut oversized=TxPool::new(); oversized.txs.insert([8;32],test_entry(1,1,2,TxSource::Local)); assert!(oversized.select_transactions(1,1).is_empty());
+        let mut pool=TxPool::new(); pool.insert_entry([7;32],test_entry(3,2,2,TxSource::Reorg)); let saved_id=pool.next_heap_id; pool.next_heap_id=u64::MAX; let before=snapshot(&pool); let e=pool.preflight_standard_delta(&[],false).unwrap_err(); assert_eq!((e.kind,e.message.as_str()),(TxPoolAdmitErrorKind::Unavailable,"txpool heap sequence exhausted")); assert_eq!(snapshot(&pool),before);
+        pool.next_heap_id=saved_id; let before=snapshot(&pool); let e=pool.preflight_standard_delta(&[[9;32]],false).unwrap_err(); assert_eq!((e.kind,e.message.as_str()),(TxPoolAdmitErrorKind::Unavailable,"txpool eviction plan changed before commit")); assert_eq!(snapshot(&pool),before);
+        let before=snapshot(&pool); assert!(pool.remove_entry_raw(&[9;32]).is_none()); assert_eq!(snapshot(&pool),before);
+    }
+
     fn txpool_snapshot_entry_from_raw(
         raw: Vec<u8>,
         fee: u128,
@@ -2578,8 +2952,6 @@ mod tests {
         //     directly (the new correct behaviour); the floor-compliant
         //     index-population smoke equivalent lives in
         //     `rub162_admit_da_above_both_floors_admits_with_indexes`,
-        //     which exercises the same `insert_entry` + `spenders` /
-        //     `heap_seqs` population path under a fee-floor-compliant
         //     DA fixture. The conformance fixture itself (RUB-54 scope)
         //     is unchanged; only the in-test pool config is adapted.
         let vector = positive_fixture_vector();
@@ -2601,12 +2973,11 @@ mod tests {
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
         assert!(err.message.contains("mempool fee below rolling minimum"));
 
-        // Proof assertion: pool.len(), pool.spenders.is_empty(), and
-        // pool.heap_seqs.len() pin the post-Err pool state to its pre-call
-        // baseline (0 / empty / 0); any partial insert by admit_with_metadata
-        // would surface as a non-zero mismatch on one of these three checks.
         assert_eq!(pool.len(), 0, "no entry inserted on Unavailable");
-        assert!(pool.spenders.is_empty(), "no spenders inserted on Err");
+        assert!(
+            pool.owner_row_count() == 0,
+            "no owner claim rows inserted on Err"
+        );
         assert_eq!(pool.heap_seqs.len(), 0, "no heap state on Err");
     }
 
@@ -2674,7 +3045,7 @@ mod tests {
         for item in &snapshot.entries {
             assert_eq!(pool.heap_seqs.get(&item.txid), Some(&item.heap_id));
             for input in &item.entry.inputs {
-                assert_eq!(pool.spenders.get(input), Some(&item.txid));
+                assert_eq!(pool.owner_txid_for_outpoint(input), Some(item.txid));
             }
         }
         assert_eq!(pool.select_transactions(10, usize::MAX), selected_before);
@@ -2846,6 +3217,57 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Conflict);
         assert!(err.message.contains("already in mempool"));
+    }
+
+    #[test]
+    fn owner_context_and_token_exhaustion_preserve_admission_order() {
+        let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let owner = super::PendingOutpointOwnerHandle::new(
+            super::PendingOutpointTip::from_chain_state(&state),
+        );
+        let mut pool = TxPool::new_bound_with_config(TxPoolConfig::default(), owner.clone());
+        owner.begin_transition().expect("fence owner");
+        let err = pool
+            .admit(&[0xff], &state, None, devnet_genesis_chain_id())
+            .expect_err("owner context precedes parse");
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
+        owner.reopen_old_tip().expect("reopen owner");
+        let mut tip_b = state.clone();
+        tip_b.has_tip = true;
+        tip_b.height = 1;
+        tip_b.tip_hash = [0xB; 32];
+        let before = (owner.test_high_water(), pool.owner_row_count());
+        let err = pool
+            .admit(&[0xff], &tip_b, None, devnet_genesis_chain_id())
+            .expect_err("tip mismatch precedes parse");
+        assert_eq!(
+            err.message,
+            "pending-outpoint owner context does not match chain tip"
+        );
+        assert_eq!((owner.test_high_water(), pool.owner_row_count()), before);
+        owner.test_set_high_water(u64::MAX);
+        let err = pool
+            .admit(&[0xff], &state, None, devnet_genesis_chain_id())
+            .expect_err("parse precedes exhausted reservation");
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        let err = pool
+            .admit(&raw, &state, None, devnet_genesis_chain_id())
+            .expect_err("valid reservation is exhausted");
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
+
+        let duplicate_owner = super::PendingOutpointOwnerHandle::new(
+            super::PendingOutpointTip::from_chain_state(&state),
+        );
+        let mut duplicate_pool =
+            TxPool::new_bound_with_config(TxPoolConfig::default(), duplicate_owner.clone());
+        duplicate_pool
+            .admit(&raw, &state, None, devnet_genesis_chain_id())
+            .expect("first admission");
+        duplicate_owner.test_set_high_water(u64::MAX);
+        let err = duplicate_pool
+            .admit(&raw, &state, None, devnet_genesis_chain_id())
+            .expect_err("duplicate precedes exhausted reservation");
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Conflict);
     }
 
     #[test]
@@ -3239,6 +3661,19 @@ mod tests {
             "expected eviction-ordering message, got: {}",
             err.message
         );
+        assert_eq!(
+            pool.owner_row_count(),
+            0,
+            "capacity failure releases candidate claim"
+        );
+        assert_eq!(
+            pool.owner
+                .clone()
+                .expect("candidate owner")
+                .test_high_water(),
+            1,
+            "capacity failure retains exactly one reserved token sequence"
+        );
     }
 
     /// PR-1410 wave-2 — direct `insert_entry` populates the worst_heap
@@ -3265,9 +3700,6 @@ mod tests {
         assert_eq!(consumed, raw.len());
 
         let mut pool = TxPool::new();
-        // Populate via the production `insert_entry` path so worst_heap +
-        // heap_seqs + spenders are all coherent — exercises the
-        // legitimate eviction-ordering rejection branch (NOT corruption).
         for idx in 0..MAX_TX_POOL_TRANSACTIONS {
             let mut key = [0u8; 32];
             key[..8].copy_from_slice(&(idx as u64 + 1).to_le_bytes());
@@ -3335,11 +3767,15 @@ mod tests {
 
         let mut pool = TxPool::new();
         let worst = [0x11; 32];
+        let worst_input = Outpoint {
+            txid: [0xF1; 32],
+            vout: 0,
+        };
         pool.insert_entry(
             worst,
             TxPoolEntry {
                 raw: vec![0x01],
-                inputs: Vec::new(),
+                inputs: vec![worst_input.clone()],
                 fee: 0,
                 weight: 100,
                 size: 1,
@@ -3372,6 +3808,8 @@ mod tests {
         assert_eq!(pool.txs.len(), MAX_TX_POOL_TRANSACTIONS);
         assert!(pool.txs.contains_key(&txid));
         assert!(!pool.txs.contains_key(&worst));
+        assert!(pool.owner_claim_is_finalized(&txid));
+        assert!(pool.owner_txid_for_outpoint(&worst_input).is_none());
     }
 
     #[test]
@@ -3925,16 +4363,27 @@ mod tests {
         pool.txs.insert(
             [0x55; 32],
             TxPoolEntry {
-                raw: vec![0x55, 0x55, 0x55],
+                raw: vec![0x55, 0x55, 0x55, 0x55],
                 inputs: Vec::new(),
                 fee: 100,
                 weight: 10,
-                size: 3,
+                size: 4,
+                source: TxSource::Local,
+            },
+        );
+        pool.txs.insert(
+            [0x66; 32],
+            TxPoolEntry {
+                raw: vec![0x66],
+                inputs: Vec::new(),
+                fee: 1,
+                weight: 10,
+                size: 1,
                 source: TxSource::Local,
             },
         );
 
-        let selected = pool.select_transactions(1, 2);
+        let selected = pool.select_transactions(1, 3);
         assert_eq!(selected, vec![vec![0x44, 0x44]]);
     }
 
@@ -4398,6 +4847,94 @@ mod tests {
         let unavailable_err = unavailable("unavailable");
         assert_eq!(unavailable_err.kind, TxPoolAdmitErrorKind::Unavailable);
         assert_eq!(unavailable_err.to_string(), "unavailable");
+
+        let owner_internal = super::owner_error(super::PendingOutpointError {
+            kind: super::PendingOutpointErrorKind::Internal,
+            message: "owner internal".to_string(),
+            existing_txid: None,
+        });
+        assert_eq!(owner_internal.kind, TxPoolAdmitErrorKind::Unavailable);
+        assert_eq!(owner_internal.message, "owner internal");
+    }
+
+    #[test]
+    fn standard_delta_shape_and_invalid_victim_fail_before_mutation() {
+        let state = ChainState::new();
+        let owner = super::PendingOutpointOwnerHandle::new(
+            super::PendingOutpointTip::from_chain_state(&state),
+        );
+        let context = owner.admission_context().expect("owner context");
+        let mut pool = TxPool::new_bound_with_config(TxPoolConfig::default(), owner.clone());
+        let entry = |tag| TxPoolEntry {
+            inputs: vec![Outpoint {
+                txid: [tag; 32],
+                vout: 0,
+            }],
+            ..test_entry(1, 1, 1, TxSource::Local)
+        };
+        let (valid, invalid, candidate_txid) = ([0x31; 32], [0x32; 32], [0x33; 32]);
+        pool.insert_entry(valid, entry(0x41));
+        pool.insert_entry(invalid, entry(0x42));
+        pool.owner_tokens.remove(&invalid);
+        let high_water = owner.test_high_water();
+        let mut candidate = Some(entry(0x43));
+        let inputs = candidate.as_ref().unwrap().inputs.clone();
+        let mut token = Some(
+            owner
+                .reserve(context, candidate_txid, inputs)
+                .expect("candidate reservation"),
+        );
+        let snapshot = |pool: &TxPool| {
+            (
+                pool.txs.clone(),
+                pool.owner_tokens.clone(),
+                pool.heap_seqs.clone(),
+                pool.worst_heap.clone().into_sorted_vec(),
+                pool.next_heap_id,
+                pool.used_bytes,
+                owner.test_row_count().expect("rows"),
+            )
+        };
+        let before = snapshot(&pool);
+        let candidate_as_victim = [candidate_txid];
+        let duplicate_victims = [valid, valid];
+        for victims in [&candidate_as_victim[..], &duplicate_victims[..]] {
+            assert_eq!(
+                pool.commit_standard_delta(
+                    &owner,
+                    context,
+                    candidate_txid,
+                    &mut candidate,
+                    &mut token,
+                    victims,
+                )
+                .expect_err("invalid delta shape")
+                .kind,
+                TxPoolAdmitErrorKind::Unavailable
+            );
+        }
+        let error = pool
+            .commit_standard_delta(
+                &owner,
+                context,
+                candidate_txid,
+                &mut candidate,
+                &mut token,
+                &[valid, invalid],
+            )
+            .expect_err("invalid final victim");
+        assert_eq!(error.kind, TxPoolAdmitErrorKind::Unavailable);
+        assert_eq!(error.message, "missing pending-outpoint token");
+        assert_eq!(
+            snapshot(&pool),
+            before,
+            "invalid deltas leave records, tokens, rows, and heap state unchanged"
+        );
+        owner
+            .release(token.as_ref().expect("candidate token"))
+            .expect("candidate release");
+        assert_eq!(owner.test_high_water(), high_water + 1);
+        assert_eq!(owner.test_row_count().expect("rows"), 2);
     }
 
     // ----- Stage C DA fee policy parity tests (Linear RUB-122) -----
@@ -4983,20 +5520,10 @@ mod tests {
             .expect("DA tx above both floors must admit");
         assert_eq!(pool.len(), 1);
         assert!(pool.txs.contains_key(&txid));
-        // PR-1410 wave-7 — prove the `_with_indexes` claim in the test
-        // name. Admit must populate ALL FOUR secondary indexes per the
-        // Phase A atomicity invariant (`insert_entry` in this file
-        // populates `spenders` / `heap_seqs` / `worst_heap` / `txs`
-        // together). Without these assertions the test would still pass
-        // even if `insert_entry` silently stopped updating one of the
-        // secondary indexes — leaving the atomicity / index-invariant
-        // path unpinned. The fixture is single-input single-output
-        // (`signed_p2pk_state_and_tx` in this file inserts one
-        // outpoint), so every index size is exactly 1 after admit.
         assert_eq!(
-            pool.spenders.len(),
+            pool.owner_row_count(),
             1,
-            "single-input tx must populate exactly one spenders entry"
+            "single-input tx must populate exactly one owner claim row"
         );
         assert_eq!(
             pool.heap_seqs.len(),
@@ -5011,17 +5538,15 @@ mod tests {
     }
 
     /// P1 #2 atomicity through public admit — Unavailable on relay-floor
-    /// failure leaves all four pool indexes (txs / spenders / heap_seqs /
-    /// worst_heap) unchanged AND the lazy worst_heap filter
+    /// failure leaves pool records, owner claim rows, and lazy heap filtering
     /// (current_worst_txid) unchanged. This proves admit_with_metadata
     /// performs the rolling-floor classification BEFORE any insert_entry
     /// call.
     ///
     /// Proof assertion: pre-populate via the production `insert_entry`
-    /// path (so all four indexes plus next_heap_id receive the resident
-    /// snapshot); capture every observable baseline; trigger the
+    /// path (so resident record/claim and next_heap_id receive the snapshot);
     /// rolling-floor rejection through the public admit entry; assert
-    /// the four index lengths + worst_heap length + next_heap_id +
+    /// record/claim state, worst_heap length, next_heap_id, and
     /// current_worst_txid lookup are all unchanged.
     #[test]
     fn rub162_admit_atomicity_unavailable_floor_leaves_no_partial_state() {
@@ -5032,10 +5557,6 @@ mod tests {
             policy_da_surcharge_per_byte: 0,
             ..TxPoolConfig::default()
         });
-        // Pre-populate via the production `insert_entry` path so all four
-        // indexes (txs + spenders + heap_seqs + worst_heap) AND next_heap_id
-        // receive the resident state — required to detect any spurious
-        // mutation of cross-tx state during the failed admit.
         let resident_txid = [0xAB; 32];
         let resident_input = Outpoint {
             txid: [0x77; 32],
@@ -5053,25 +5574,28 @@ mod tests {
             },
         );
         let pool_len_before = pool.len();
-        let spenders_before = pool.spenders.len();
+        let owner_rows_before = pool.owner_row_count();
         let heap_seqs_before = pool.heap_seqs.len();
         let worst_heap_before = pool.worst_heap.len();
         let next_heap_id_before = pool.next_heap_id;
         let worst_txid_before = pool.current_worst_txid();
+        let owner_high_water_before = pool.test_owner().test_high_water();
 
         let err = pool
             .admit(&raw, &state, None, [0u8; 32])
             .expect_err("must fail rolling floor");
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
 
-        // Atomicity: every observable pool surface UNCHANGED across the
-        // failed admit (txs / spenders / heap_seqs / worst_heap len +
-        // next_heap_id + current_worst_txid lookup).
         assert_eq!(pool.len(), pool_len_before, "txs unchanged on Err");
         assert_eq!(
-            pool.spenders.len(),
-            spenders_before,
-            "spenders unchanged on Err"
+            pool.test_owner().test_high_water(),
+            owner_high_water_before + 1,
+            "final-floor failure releases its claim but retains token high-water"
+        );
+        assert_eq!(
+            pool.owner_row_count(),
+            owner_rows_before,
+            "owner claim rows unchanged on Err"
         );
         assert_eq!(
             pool.heap_seqs.len(),
@@ -5094,27 +5618,12 @@ mod tests {
         );
         assert!(pool.txs.contains_key(&resident_txid), "resident untouched");
         assert_eq!(
-            pool.spenders.get(&resident_input),
-            Some(&resident_txid),
-            "resident spenders entry untouched"
+            pool.owner_txid_for_outpoint(&resident_input),
+            Some(resident_txid),
+            "resident owner claim row untouched"
         );
     }
 
-    /// P1 #3 cleanup state symmetry — `evict_txids` removes the three
-    /// eager index maps that `insert_entry` adds (txs + spenders +
-    /// heap_seqs). The fourth structure `worst_heap` is intentionally
-    /// lazy: `remove_entry` does NOT pop the heap entry directly;
-    /// instead `compact_worst_heap_if_needed` rebuilds when the heap
-    /// grows past 2x the live count, and `current_worst_txid` filters
-    /// stale entries via the heap_seqs lookup. The test below pins both
-    /// the eager map clears AND the lazy filter (current_worst_txid is
-    /// None after eviction even though the heap entry is still
-    /// physically present).
-    ///
-    /// This is a regression guard: if a future change adds a new index
-    /// (e.g. wtxids) maintained by insert_entry, evict_txids must mirror
-    /// it via the same delete path; this test will then need extension
-    /// rather than letting the asymmetry leak silently.
     #[test]
     fn rub162_evict_txids_clears_all_indexes_added_by_insert_entry() {
         let mut pool = TxPool::new_with_config(TxPoolConfig {
@@ -5140,12 +5649,15 @@ mod tests {
             },
         );
         assert!(pool.txs.contains_key(&txid));
-        assert_eq!(pool.spenders.get(&outpoint), Some(&txid));
+        assert_eq!(pool.owner_txid_for_outpoint(&outpoint), Some(txid));
         assert!(pool.heap_seqs.contains_key(&txid));
 
         pool.evict_txids(&[txid]);
         assert!(!pool.txs.contains_key(&txid), "txs cleared");
-        assert!(!pool.spenders.contains_key(&outpoint), "spenders cleared");
+        assert!(
+            pool.owner_txid_for_outpoint(&outpoint).is_none(),
+            "owner claim rows cleared"
+        );
         assert!(!pool.heap_seqs.contains_key(&txid), "heap_seqs cleared");
         // Lazy worst_heap behaviour: the physical heap entry MAY still
         // exist (compaction is delayed via 2x threshold), but the
@@ -5158,9 +5670,7 @@ mod tests {
 
     /// P1 #3 cleanup state symmetry — `remove_conflicting_outpoints`
     /// (the public path used by reorg/conflict cleanup) routes through
-    /// `evict_txids` and clears the same indexes. The test populates a
-    /// resident, builds a conflicting outpoint, and asserts symmetric
-    /// removal.
+    /// `evict_txids` and clears the same coordinated record/claim state.
     #[test]
     fn rub162_remove_conflicting_outpoints_clears_all_indexes() {
         let mut pool = TxPool::new_with_config(TxPoolConfig {
@@ -5184,15 +5694,18 @@ mod tests {
             },
         );
 
-        // Conflict feed contains the resident's outpoint.
-        pool.remove_conflicting_outpoints(std::slice::from_ref(&outpoint));
+        let unrelated = Outpoint {
+            txid: [0xBC; 32],
+            vout: 1,
+        };
+        pool.remove_conflicting_outpoints(&[unrelated, outpoint.clone()]);
         assert!(
             !pool.txs.contains_key(&txid),
             "resident removed on conflict"
         );
         assert!(
-            !pool.spenders.contains_key(&outpoint),
-            "spenders cleared on conflict"
+            pool.owner_txid_for_outpoint(&outpoint).is_none(),
+            "owner claim rows cleared on conflict"
         );
         assert!(
             !pool.heap_seqs.contains_key(&txid),
@@ -5252,8 +5765,8 @@ mod tests {
 
         assert!(!pool.txs.contains_key(&removed_txid), "removed tx gone");
         assert!(
-            !pool.spenders.contains_key(&removed_outpoint),
-            "removed spender index gone"
+            pool.owner_txid_for_outpoint(&removed_outpoint).is_none(),
+            "removed owner claim row gone"
         );
         assert!(
             !pool.heap_seqs.contains_key(&removed_txid),
@@ -5262,9 +5775,9 @@ mod tests {
         assert_eq!(pool.len(), 1, "only survivor remains");
         assert_eq!(pool.used_bytes, 5, "used_bytes counts only survivor");
         assert_eq!(
-            pool.spenders.get(&survivor_outpoint),
-            Some(&survivor_txid),
-            "survivor spender index preserved"
+            pool.owner_txid_for_outpoint(&survivor_outpoint),
+            Some(survivor_txid),
+            "survivor owner claim row preserved"
         );
         assert_eq!(
             pool.entry_source(&survivor_txid),
@@ -5291,10 +5804,6 @@ mod tests {
         );
     }
 
-    /// RUB-17 direct-helper coverage: after the private `remove_entry`
-    /// clears all indexes, re-adding the same txid/outpoint must create
-    /// fresh accounting rather than inheriting stale bytes, source, or
-    /// heap sequence state.
     #[test]
     fn rub17_remove_entry_then_readd_same_txid_has_fresh_accounting() {
         let mut pool = TxPool::new();
@@ -5320,7 +5829,10 @@ mod tests {
         pool.remove_entry(&txid);
         assert_eq!(pool.len(), 0, "entry removed");
         assert_eq!(pool.used_bytes, 0, "bytes cleared after remove_entry");
-        assert!(!pool.spenders.contains_key(&outpoint), "spender cleared");
+        assert!(
+            pool.owner_txid_for_outpoint(&outpoint).is_none(),
+            "owner claim row cleared"
+        );
         assert!(!pool.heap_seqs.contains_key(&txid), "heap seq cleared");
         assert_eq!(pool.entry_source(&txid), None, "source cleared");
         assert_eq!(pool.current_worst_txid(), None, "no live worst entry");
@@ -5340,9 +5852,9 @@ mod tests {
         assert_eq!(pool.len(), 1, "re-add succeeds");
         assert_eq!(pool.used_bytes, 11, "bytes reflect fresh entry only");
         assert_eq!(
-            pool.spenders.get(&outpoint),
-            Some(&txid),
-            "spender index rebuilt for fresh entry"
+            pool.owner_txid_for_outpoint(&outpoint),
+            Some(txid),
+            "owner claim row rebuilt for fresh entry"
         );
         assert_eq!(
             pool.entry_source(&txid),
@@ -5648,7 +6160,7 @@ mod tests {
         );
         // Atomicity: no partial insert on cross-pollination reject.
         assert_eq!(pool.len(), 0);
-        assert!(pool.spenders.is_empty());
+        assert!(pool.owner_row_count() == 0);
         assert_eq!(pool.heap_seqs.len(), 0);
     }
 
@@ -5694,7 +6206,7 @@ mod tests {
         );
         // Atomicity: no partial insert on cross-pollination reject.
         assert_eq!(pool.len(), 0);
-        assert!(pool.spenders.is_empty());
+        assert!(pool.owner_row_count() == 0);
         assert_eq!(pool.heap_seqs.len(), 0);
     }
 
@@ -5747,7 +6259,7 @@ mod tests {
             err.message
         );
         assert_eq!(pool.len(), 0);
-        assert!(pool.spenders.is_empty());
+        assert!(pool.owner_row_count() == 0);
     }
 
     /// RUB-18 ordering parity: Go's `addTxWithSource` runs the plain-P2PK
@@ -5791,9 +6303,6 @@ mod tests {
         assert_eq!(pool.len(), 1, "failed duplicate retry must not mutate pool");
     }
 
-    /// RUB-18 ordering parity: Go's plain-P2PK cheap fee-floor precheck also
-    /// runs before the locked spender conflict check. A conflicting candidate
-    /// that is below floor must return `Unavailable`, not `Conflict`.
     #[test]
     fn rub18_admit_below_floor_spender_conflict_fast_rejects_before_conflict() {
         let (state, resident, conflicting) = signed_conflicting_p2pk_state_and_txs(7700, 10, 7699);
@@ -6779,6 +7288,8 @@ mod tests {
             TxSource::Local,
             "Local source must be recorded on entry"
         );
+        assert!(pool.owner_claim_is_finalized(&txid));
+        assert_eq!(pool.owner_row_count(), entry.inputs.len());
     }
 
     /// `add_tx_with_source(_, TxSource::Remote)` admits successfully and
@@ -6806,6 +7317,8 @@ mod tests {
             TxSource::Remote,
             "Remote source must be recorded on entry"
         );
+        assert!(pool.owner_claim_is_finalized(&txid));
+        assert_eq!(pool.owner_row_count(), entry.inputs.len());
     }
 
     /// `add_tx_with_source(_, TxSource::Reorg)` admits successfully and
@@ -6833,6 +7346,8 @@ mod tests {
             TxSource::Reorg,
             "Reorg source must be recorded on entry"
         );
+        assert!(pool.owner_claim_is_finalized(&txid));
+        assert_eq!(pool.owner_row_count(), entry.inputs.len());
     }
 
     /// Backward-compat: `admit()` defaults the recorded source to `Local`
@@ -6888,7 +7403,6 @@ mod tests {
     /// `select_transactions`) with equal-priority distinct-txid entries
     /// that production admission would not normally produce together
     /// (because they would double-spend the same input). The injected
-    /// entries' `inputs` field is empty so no spender-index conflict.
     /// Worst-heap source-blindness is exercised by the capacity tests
     /// elsewhere in this module; this leg focuses on the selection
     /// comparator.
