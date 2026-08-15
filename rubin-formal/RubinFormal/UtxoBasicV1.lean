@@ -694,17 +694,32 @@ def validateBasicP2PKSpend
   validateBasicWitnessItemLengths w
   if w.signature.size == 0 then
     throw "TX_ERR_PARSE"
-  let sighashType := w.signature.get! (w.signature.size - 1)
-  if !(isValidSighashType sighashType) then
-    throw "TX_ERR_SIGHASH_TYPE_INVALID"
   let keyId := entry.covenantData.extract 1 33
   if SHA3.sha3_256 w.pubkey != keyId then
     throw "TX_ERR_SIG_INVALID"
+  let sighashType := w.signature.get! (w.signature.size - 1)
+  if !(isValidSighashType sighashType) then
+    throw "TX_ERR_SIGHASH_TYPE_INVALID"
   if enforceSigOracle then
     let wtxid := SHA3.sha3_256 txBytes
     if !(KNOWN_VALID_P2PK_WTXIDS.contains wtxid) then
       throw "TX_ERR_SIG_INVALID"
   pure ()
+
+private theorem validateBasicP2PKSpend_key_before_sighash_mixed_invalid
+    (entry : UtxoEntry) (w : WitnessItem) (txBytes : Bytes) (enforceSigOracle : Bool)
+    (hDataLength : entry.covenantData.size = MAX_P2PK_COVENANT_DATA)
+    (hEntrySuite : (entry.covenantData.get! 0).toNat = SUITE_ID_ML_DSA_87)
+    (hWitnessSuite : w.suiteId = SUITE_ID_ML_DSA_87)
+    (hPubkeyLength : w.pubkey.size = ML_DSA_87_PUBKEY_BYTES)
+    (hSignatureLength : w.signature.size = ML_DSA_87_SIG_BYTES + 1)
+    (hKeyMismatch : SHA3.sha3_256 w.pubkey != entry.covenantData.extract 1 33)
+    (hInvalidSighash : isValidSighashType (w.signature.get! (w.signature.size - 1)) = false) :
+    validateBasicP2PKSpend entry w txBytes enforceSigOracle = .error "TX_ERR_SIG_INVALID" := by
+  simp [validateBasicP2PKSpend, validateBasicWitnessItemLengths, hDataLength,
+    hEntrySuite, hWitnessSuite, hPubkeyLength, hSignatureLength, hKeyMismatch,
+    hInvalidSighash, ML_DSA_87_SIG_BYTES]
+  rfl
 
 def validateBasicWitnesses
     (txBytes : Bytes)

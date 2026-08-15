@@ -85,12 +85,26 @@ def validateP2PKSpendPreSig
       if entry.covenantData.size != CovenantGenesisV1.MAX_P2PK_COVENANT_DATA then
         throw "TX_ERR_COVENANT_TYPE_INVALID"
       if (entry.covenantData.get! 0).toNat != suite then
-        throw "TX_ERR_COVENANT_TYPE_INVALID"
+        throw "TX_ERR_SIG_ALG_INVALID"
   let keyId := entry.covenantData.extract 1 33
   if SHA3.sha3_256 w.pubkey != keyId then
     throw "TX_ERR_SIG_INVALID"
   -- crypto verify omitted (out-of-scope for formal replay)
   pure ()
+
+private theorem validateP2PKSpendPreSig_suite_mismatch_before_key_mixed_invalid
+    (entry : UtxoEntry) (w : WitnessItem) (blockHeight : Nat)
+    (descriptor : NativeSuiteRotation.RotationDeploymentDescriptor)
+    (hActive : NativeSpendCreateGate.liveSpendGateAllows
+      (some descriptor) blockHeight w.suiteId = true)
+    (hDataLength : entry.covenantData.size = 33)
+    (hEmbeddedSuiteMismatch : (entry.covenantData.get! 0).toNat != w.suiteId)
+    (hKeyMismatch : SHA3.sha3_256 w.pubkey != entry.covenantData.extract 1 33) :
+    validateP2PKSpendPreSig entry w blockHeight (some descriptor) =
+      .error "TX_ERR_SIG_ALG_INVALID" := by
+  simp [validateP2PKSpendPreSig, hActive, hDataLength, hEmbeddedSuiteMismatch,
+    hKeyMismatch, CovenantGenesisV1.MAX_P2PK_COVENANT_DATA]
+  rfl
 
 def validateWitnessItemLengths (w : WitnessItem) (_blockHeight : Nat) : Except String Unit := do
   if w.suiteId == SUITE_ID_SENTINEL then
