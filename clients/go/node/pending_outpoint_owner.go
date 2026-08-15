@@ -272,23 +272,38 @@ func (o *PendingOutpointOwner) validateDAAdmissionVictimsLocked(
 		if victim.Token == candidateToken {
 			return PendingOutpointError{Kind: PendingOutpointInternal, Msg: "DA candidate token is also a victim"}, true
 		}
-		if victim.Token.owner != o || victim.Token.seq == 0 || victim.Token.seq > o.tokenHighWater {
-			return PendingOutpointError{Kind: PendingOutpointInternal, Msg: "invalid DA victim token"}, true
+		claim, failure := o.daAdmissionVictimClaimLocked(victim)
+		if failure.Kind != 0 {
+			return failure, true
 		}
-		claim := o.byToken[victim.Token]
-		if claim == nil || claim.domain != PendingOutpointDA || claim.txid != victim.TxID || !claim.finalized {
-			return PendingOutpointError{Kind: PendingOutpointInternal, Msg: "DA victim claim mismatch"}, true
-		}
-		if len(claim.inputs) != len(victim.Inputs) {
+		if !o.daAdmissionVictimInputsMatchLocked(victim, claim) {
 			return PendingOutpointError{Kind: PendingOutpointInternal, Msg: "DA victim input mismatch"}, true
-		}
-		for j, input := range victim.Inputs {
-			if claim.inputs[j] != input || o.byOutpoint[input] != (pendingOutpointRow{token: victim.Token, txid: victim.TxID}) {
-				return PendingOutpointError{Kind: PendingOutpointInternal, Msg: "DA victim input mismatch"}, true
-			}
 		}
 	}
 	return PendingOutpointError{}, false
+}
+
+func (o *PendingOutpointOwner) daAdmissionVictimClaimLocked(victim DAAdmissionVictim) (*pendingOutpointClaim, PendingOutpointError) {
+	if victim.Token.owner != o || victim.Token.seq == 0 || victim.Token.seq > o.tokenHighWater {
+		return nil, PendingOutpointError{Kind: PendingOutpointInternal, Msg: "invalid DA victim token"}
+	}
+	claim := o.byToken[victim.Token]
+	if claim == nil || claim.domain != PendingOutpointDA || claim.txid != victim.TxID || !claim.finalized {
+		return nil, PendingOutpointError{Kind: PendingOutpointInternal, Msg: "DA victim claim mismatch"}
+	}
+	return claim, PendingOutpointError{}
+}
+
+func (o *PendingOutpointOwner) daAdmissionVictimInputsMatchLocked(victim DAAdmissionVictim, claim *pendingOutpointClaim) bool {
+	if len(claim.inputs) != len(victim.Inputs) {
+		return false
+	}
+	for j, input := range victim.Inputs {
+		if claim.inputs[j] != input || o.byOutpoint[input] != (pendingOutpointRow{token: victim.Token, txid: victim.TxID}) {
+			return false
+		}
+	}
+	return true
 }
 
 // Reserve claims every outpoint in orderedInputs for txid in domain, bound to

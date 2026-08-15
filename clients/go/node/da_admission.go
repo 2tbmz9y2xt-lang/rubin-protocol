@@ -1,3 +1,4 @@
+//nolint:forbidigo // Contract-required lifecycle misuse fails fast.
 package node
 
 import (
@@ -75,27 +76,47 @@ func (m *Mempool) BeginDAAdmission(raw []byte) (*DAAdmission, error) {
 	if owner == nil {
 		return nil, txAdmitUnavailable("nil pending-outpoint owner")
 	}
-	if len(raw) == 0 {
-		return nil, txAdmitRejected("empty DA transaction")
-	}
-	if len(raw) > consensus.MAX_RELAY_MSG_BYTES {
-		return nil, txAdmitRejected(fmt.Sprintf("tx payload exceeds MAX_RELAY_MSG_BYTES: %d > %d", len(raw), consensus.MAX_RELAY_MSG_BYTES))
-	}
-	owned := append([]byte(nil), raw...)
-	tx, txid, wtxid, err := parseRelayMetadataTx(owned)
+	owned, tx, txid, wtxid, inputs, err := parseDAAdmission(raw)
 	if err != nil {
 		return nil, err
 	}
+	return m.beginDAAdmissionGuarded(owner, owned, tx, txid, wtxid, inputs)
+}
+
+func parseDAAdmission(raw []byte) (owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint, err error) {
+	if len(raw) == 0 {
+		err = txAdmitRejected("empty DA transaction")
+		return
+	}
+	if len(raw) > consensus.MAX_RELAY_MSG_BYTES {
+		err = txAdmitRejected(fmt.Sprintf("tx payload exceeds MAX_RELAY_MSG_BYTES: %d > %d", len(raw), consensus.MAX_RELAY_MSG_BYTES))
+		return
+	}
+	owned = append([]byte(nil), raw...)
+	tx, txid, wtxid, err = parseRelayMetadataTx(owned)
+	if err != nil {
+		return
+	}
 	if !isDAAdmissionTx(tx) {
-		return nil, txAdmitRejected("transaction is not a DA commit or DA chunk")
+		err = txAdmitRejected("transaction is not a DA commit or DA chunk")
+		return
 	}
-	inputs := relayMetadataInputs(tx)
+	inputs = relayMetadataInputs(tx)
 	if len(inputs) == 0 || len(inputs) > consensus.MAX_TX_INPUTS {
-		return nil, txAdmitRejected("DA transaction must have 1..MAX_TX_INPUTS inputs")
+		err = txAdmitRejected("DA transaction must have 1..MAX_TX_INPUTS inputs")
+		return
 	}
-	if tx.TxKind == 0x02 && sha3.Sum256(tx.DaPayload) != tx.DaChunkCore.ChunkHash {
-		return nil, txAdmitRejected("DA chunk payload hash mismatch")
+	if !matchingDAChunkPayloadHash(tx) {
+		err = txAdmitRejected("DA chunk payload hash mismatch")
 	}
+	return
+}
+
+func matchingDAChunkPayloadHash(tx *consensus.Tx) bool {
+	return tx.TxKind != 0x02 || sha3.Sum256(tx.DaPayload) == tx.DaChunkCore.ChunkHash
+}
+
+func (m *Mempool) beginDAAdmissionGuarded(owner *PendingOutpointOwner, owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint) (*DAAdmission, error) {
 	m.chainState.admissionMu.RLock()
 	locked := true
 	defer func() {
@@ -132,6 +153,7 @@ func (m *Mempool) BeginDAAdmission(raw []byte) (*DAAdmission, error) {
 	locked = false
 	return a, nil
 }
+
 func isDAAdmissionTx(tx *consensus.Tx) bool {
 	return tx != nil && (tx.TxKind == 0x01 && tx.DaCommitCore != nil && tx.DaChunkCore == nil || tx.TxKind == 0x02 && tx.DaChunkCore != nil && tx.DaCommitCore == nil)
 }
@@ -202,17 +224,8 @@ func prepareDAAdmissionVictims(victims []DAAdmissionVictim, candidate [32]byte) 
 	seenTxID := make(map[[32]byte]struct{}, len(victims))
 	seenToken := make(map[PendingOutpointToken]struct{}, len(victims))
 	for i, victim := range victims {
-		if victim.TxID == ([32]byte{}) || victim.Token == (PendingOutpointToken{}) {
-			return nil, pendingOutpointInternal("zero DA victim txid or token")
-		}
-		if len(victim.Inputs) == 0 || len(victim.Inputs) > consensus.MAX_TX_INPUTS {
-			return nil, pendingOutpointInternal("invalid DA victim input count")
-		}
-		if err := validatePendingOutpointRequest(PendingOutpointDA, victim.TxID, victim.Inputs); err != nil {
+		if err := validateDAAdmissionVictimShape(victim, candidate); err != nil {
 			return nil, err
-		}
-		if candidate != ([32]byte{}) && victim.TxID == candidate {
-			return nil, pendingOutpointInternal("DA candidate is also a victim")
 		}
 		if _, duplicate := seenTxID[victim.TxID]; duplicate {
 			return nil, pendingOutpointInternal("duplicate DA victim txid")
@@ -227,9 +240,26 @@ func prepareDAAdmissionVictims(victims []DAAdmissionVictim, candidate [32]byte) 
 	return batch, nil
 }
 
+func validateDAAdmissionVictimShape(victim DAAdmissionVictim, candidate [32]byte) error {
+	if victim.TxID == ([32]byte{}) || victim.Token == (PendingOutpointToken{}) {
+		return pendingOutpointInternal("zero DA victim txid or token")
+	}
+	if len(victim.Inputs) == 0 || len(victim.Inputs) > consensus.MAX_TX_INPUTS {
+		return pendingOutpointInternal("invalid DA victim input count")
+	}
+	if err := validatePendingOutpointRequest(PendingOutpointDA, victim.TxID, victim.Inputs); err != nil {
+		return err
+	}
+	if candidate != ([32]byte{}) && victim.TxID == candidate {
+		return pendingOutpointInternal("DA candidate is also a victim")
+	}
+	return nil
+}
+
 // Close releases the admission guard after a failed attempt or terminal commit;
 // a copied, live, or repeated Close fails fast without a second unlock.
 func (a *DAAdmission) Close() { a.mustLiveValue(); a.guard.close() }
+
 func (a *DAAdmission) mustLiveValue() {
 	if a == nil || a.self != a || a.guard == nil {
 		panic("invalid DAAdmission")
@@ -279,11 +309,13 @@ func (r *DARemoval) BeginCommit(victims []DAAdmissionVictim) (*DACommit, error) 
 
 // Close releases the removal guard after a failed attempt or terminal commit; copied, live, and repeated calls fail fast without a second unlock.
 func (r *DARemoval) Close() { r.mustLiveValue(); r.guard.close() }
+
 func (r *DARemoval) mustLiveValue() {
 	if r == nil || r.self != r || r.guard == nil {
 		panic("invalid DARemoval")
 	}
 }
+
 func (g *daAdmissionGuard) close() {
 	state := g.state.Load()
 	if (state != daAdmissionOpen && state != daAdmissionResolved) || !g.state.CompareAndSwap(state, daAdmissionClosed) {
@@ -328,6 +360,7 @@ func (g *DACommit) finish(finalize bool) {
 	owner.mu.Unlock()
 	g.guard.state.Store(daAdmissionResolved)
 }
+
 func (g *DACommit) mustValue() {
 	if g == nil || g.self != g || g.guard == nil || g.guard.owner == nil {
 		panic("invalid DACommit")

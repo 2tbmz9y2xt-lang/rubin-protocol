@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"crypto/sha3"
+	"errors"
 	"fmt"
 	"runtime"
 	"testing"
@@ -35,6 +36,7 @@ func daAdmissionTestMempool(t *testing.T, count int) (*Mempool, [][]byte) {
 	}
 	return mp, raw
 }
+
 func mustDAAdmission(t *testing.T, mp *Mempool, raw []byte) *DAAdmission {
 	a, err := mp.BeginDAAdmission(raw)
 	if err != nil {
@@ -42,6 +44,17 @@ func mustDAAdmission(t *testing.T, mp *Mempool, raw []byte) *DAAdmission {
 	}
 	return a
 }
+
+func mustFinalizeDAAdmission(t *testing.T, mp *Mempool, raw []byte) (DAAdmissionSnapshot, PendingOutpointToken) {
+	a := mustDAAdmission(t, mp, raw)
+	snapshot := a.Snapshot()
+	commit, _ := a.BeginCommit(nil)
+	token := commit.CandidateToken()
+	commit.Commit()
+	a.Close()
+	return snapshot, token
+}
+
 func mustPanic(t *testing.T, fn func()) {
 	defer func() {
 		if recover() == nil {
@@ -50,14 +63,16 @@ func mustPanic(t *testing.T, fn func()) {
 	}()
 	fn()
 }
+
 func daAdmit(t *testing.T, err error, want TxAdmitErrorKind) *TxAdmitError {
 	t.Helper()
-	got, ok := err.(*TxAdmitError)
-	if !ok || got.Kind != want {
+	var got *TxAdmitError
+	if !errors.As(err, &got) || got.Kind != want {
 		t.Fatalf("admission error=%v, want %s", err, want)
 	}
 	return got
 }
+
 func TestBeginDAAdmission(t *testing.T) {
 	mp, raw := daAdmissionTestMempool(t, 2)
 	owner := mp.PendingOutpointOwner()
@@ -88,22 +103,31 @@ func TestBeginDAAdmission(t *testing.T) {
 	if a, err := mp.BeginDAAdmission(inputlessBytes); a != nil || daAdmit(t, err, TxAdmitRejected) == nil {
 		t.Fatal("inputless DA transaction admitted")
 	}
-	high, state, done := owner.tokenHighWater, mp.chainState, make(chan error, 1)
-	state.admissionMu.Lock()
-	go func() { _, err := mp.BeginDAAdmission(badChunk); done <- err }()
-	select {
-	case err := <-done:
-		state.admissionMu.Unlock()
-		daAdmit(t, err, TxAdmitRejected)
-	case <-time.After(time.Second):
-		state.admissionMu.Unlock()
-		<-done
-		t.Fatal("payload hash rejection took admission guard")
-	}
-	if owner.tokenHighWater != high || len(owner.byToken) != 0 {
-		t.Fatal("context-free rejection changed owner")
+	oversized := make([]byte, consensus.MAX_RELAY_MSG_BYTES+1)
+	for _, tc := range []struct {
+		raw  []byte
+		want string
+	}{{badChunk, ""}, {oversized, fmt.Sprintf("tx payload exceeds MAX_RELAY_MSG_BYTES: %d > %d", len(oversized), consensus.MAX_RELAY_MSG_BYTES)}} {
+		high, claims, rows, state, done := owner.tokenHighWater, len(owner.byToken), len(owner.byOutpoint), mp.chainState, make(chan error, 1)
+		state.admissionMu.Lock()
+		go func() { _, err := mp.BeginDAAdmission(tc.raw); done <- err }()
+		select {
+		case err := <-done:
+			state.admissionMu.Unlock()
+			if got := daAdmit(t, err, TxAdmitRejected); tc.want != "" && got.Message != tc.want {
+				t.Fatalf("context-free rejection=%q, want %q", got.Message, tc.want)
+			}
+		case <-time.After(time.Second):
+			state.admissionMu.Unlock()
+			<-done
+			t.Fatal("context-free rejection took admission guard")
+		}
+		if owner.tokenHighWater != high || len(owner.byToken) != claims || len(owner.byOutpoint) != rows {
+			t.Fatal("context-free rejection changed owner")
+		}
 	}
 }
+
 func TestDAAdmissionSnapshot(t *testing.T) {
 	mp, raw := daAdmissionTestMempool(t, 1)
 	a := mustDAAdmission(t, mp, raw[0])
@@ -126,16 +150,14 @@ func TestDAAdmissionSnapshot(t *testing.T) {
 		t.Fatalf("public/input/full snapshot allocations small=%v input=%v full=%v", small, got, full)
 	}
 }
+
 func TestDAAdmissionBeginCommit(t *testing.T) {
 	mp, raw := daAdmissionTestMempool(t, 2)
 	owner := mp.PendingOutpointOwner()
-	a := mustDAAdmission(t, mp, raw[0])
-	commit, err := a.BeginCommit(nil)
-	if err != nil || commit.CandidateToken() == (PendingOutpointToken{}) {
-		t.Fatalf("BeginCommit=(%v,%v), want nonzero candidate", commit, err)
+	_, token := mustFinalizeDAAdmission(t, mp, raw[0])
+	if token == (PendingOutpointToken{}) {
+		t.Fatal("BeginCommit returned a zero candidate")
 	}
-	commit.Commit()
-	a.Close()
 	type raceResult struct {
 		commit *DACommit
 		token  PendingOutpointToken
@@ -191,7 +213,7 @@ func TestDAAdmissionBeginCommit(t *testing.T) {
 	}
 	blocked := mustDAAdmission(t, mp, raw[1])
 	owner.inTransition = true
-	if _, err = blocked.BeginCommit(nil); daAdmit(t, err, TxAdmitUnavailable).Message != "pending-outpoint owner transition in progress" {
+	if _, err := blocked.BeginCommit(nil); daAdmit(t, err, TxAdmitUnavailable).Message != "pending-outpoint owner transition in progress" {
 		t.Fatal("wrong unavailable error")
 	}
 	owner.inTransition = false
@@ -205,15 +227,46 @@ func TestDAAdmissionBeginCommit(t *testing.T) {
 		t.Fatal("stale DA context was accepted")
 	}
 	stale.Close()
+	exhausted := mustDAAdmission(t, mp, raw[1])
+	high, claims, rows := owner.tokenHighWater, len(owner.byToken), len(owner.byOutpoint)
+	owner.tokenHighWater = ^uint64(0)
+	got, err := exhausted.BeginCommit(nil)
+	unchanged := owner.tokenHighWater == ^uint64(0) && len(owner.byToken) == claims && len(owner.byOutpoint) == rows
+	owner.tokenHighWater = high
+	if got != nil || daAdmit(t, err, TxAdmitUnavailable).Message != "pending-outpoint token sequence exhausted" || !unchanged {
+		t.Fatalf("exhausted BeginCommit=(%v,%v), changed=%v", got, err, !unchanged)
+	}
+	exhausted.Close()
+	conflictOwner := newPendingOutpointOwner(PendingOutpointTip{})
+	inputs := []consensus.Outpoint{testOutpoint(7), testOutpoint(8)}
+	firstTxID, secondTxID := [32]byte{1}, [32]byte{2}
+	mustReserve(t, conflictOwner, firstTxID, inputs[0])
+	mustReserve(t, conflictOwner, secondTxID, inputs[1])
+	context, _ := conflictOwner.AdmissionContext()
+	conflictOwner.mu.Lock()
+	conflictHigh, conflictClaims, conflictRows := conflictOwner.tokenHighWater, len(conflictOwner.byToken), len(conflictOwner.byOutpoint)
+	reserved, failure, failed := conflictOwner.reserveDAAdmissionLocked(context, &pendingOutpointClaim{domain: PendingOutpointDA, txid: [32]byte{3}, inputs: inputs})
+	conflictOwner.mu.Unlock()
+	if !failed || reserved != (PendingOutpointToken{}) || failure.Kind != PendingOutpointConflict || failure.InputIndex != 0 || failure.Outpoint != inputs[0] || failure.ExistingTxid != firstTxID || conflictOwner.tokenHighWater != conflictHigh || len(conflictOwner.byToken) != conflictClaims || len(conflictOwner.byOutpoint) != conflictRows {
+		t.Fatal("DA candidate conflict did not retain first canonical outpoint evidence")
+	}
+	if got := daAdmit(t, txAdmitFromPendingOutpointError(&failure), TxAdmitConflict); got.Message != fmt.Sprintf("mempool double-spend conflict with %x", firstTxID) {
+		t.Fatalf("DA candidate conflict message=%q", got.Message)
+	}
 }
+
 func TestDAAdmissionVictimBatch(t *testing.T) {
 	mp, raw := daAdmissionTestMempool(t, 4)
 	owner := mp.PendingOutpointOwner()
 	base := DAAdmissionVictim{TxID: [32]byte{2}, Inputs: []consensus.Outpoint{testOutpoint(1)}, Token: PendingOutpointToken{owner: owner, seq: 1}}
 	other := PendingOutpointToken{owner: owner, seq: 2}
 	for _, victims := range [][]DAAdmissionVictim{
-		{{Token: base.Token, Inputs: base.Inputs}}, {{TxID: base.TxID, Inputs: base.Inputs}}, {{TxID: base.TxID, Token: base.Token}},
-		{{TxID: base.TxID, Token: base.Token, Inputs: []consensus.Outpoint{testOutpoint(1), testOutpoint(1)}}}, {base, {TxID: base.TxID, Token: other, Inputs: base.Inputs}}, {base, {TxID: [32]byte{3}, Token: base.Token, Inputs: base.Inputs}},
+		{{Token: base.Token, Inputs: base.Inputs}},
+		{{TxID: base.TxID, Inputs: base.Inputs}},
+		{{TxID: base.TxID, Token: base.Token}},
+		{{TxID: base.TxID, Token: base.Token, Inputs: []consensus.Outpoint{testOutpoint(1), testOutpoint(1)}}},
+		{base, {TxID: base.TxID, Token: other, Inputs: base.Inputs}},
+		{base, {TxID: [32]byte{3}, Token: base.Token, Inputs: base.Inputs}},
 	} {
 		a := mustDAAdmission(t, mp, raw[0])
 		if _, err := a.BeginCommit(victims); daAdmit(t, err, TxAdmitUnavailable) == nil {
@@ -260,12 +313,7 @@ func TestDAAdmissionVictimBatch(t *testing.T) {
 		t.Fatal("malformed victim changed owner")
 	}
 	probe.Close()
-	first := mustDAAdmission(t, mp, raw[0])
-	firstSnapshot := first.Snapshot()
-	firstCommit, _ := first.BeginCommit(nil)
-	firstToken := firstCommit.CandidateToken()
-	firstCommit.Commit()
-	first.Close()
+	firstSnapshot, firstToken := mustFinalizeDAAdmission(t, mp, raw[0])
 	population := mustDAAdmission(t, mp, raw[1])
 	populationSnapshot, beforePopulation := population.Snapshot(), owner.tokenHighWater
 	populationVictims := []DAAdmissionVictim{{TxID: firstSnapshot.TxID, Inputs: firstSnapshot.Inputs, Token: firstToken}, {TxID: [32]byte{9}, Inputs: []consensus.Outpoint{testOutpoint(9)}, Token: PendingOutpointToken{owner: owner, seq: beforePopulation + 2}}}
@@ -277,12 +325,7 @@ func TestDAAdmissionVictimBatch(t *testing.T) {
 		t.Fatal("population failure changed live claims or caller victims")
 	}
 	population.Close()
-	second := mustDAAdmission(t, mp, raw[1])
-	secondSnapshot := second.Snapshot()
-	secondCommit, _ := second.BeginCommit(nil)
-	secondToken := secondCommit.CandidateToken()
-	secondCommit.Commit()
-	second.Close()
+	secondSnapshot, secondToken := mustFinalizeDAAdmission(t, mp, raw[1])
 	failed := mustDAAdmission(t, mp, raw[2])
 	before := owner.tokenHighWater
 	failedSnapshot, failedToken := failed.Snapshot(), PendingOutpointToken{owner: owner, seq: before + 1}
@@ -306,6 +349,7 @@ func TestDAAdmissionVictimBatch(t *testing.T) {
 		t.Fatal("multi-victim Commit did not atomically replace claims")
 	}
 }
+
 func TestDAAdmissionClose(t *testing.T) {
 	mp, raw := daAdmissionTestMempool(t, 1)
 	a := mustDAAdmission(t, mp, raw[0])
@@ -376,6 +420,7 @@ func TestDAAdmissionClose(t *testing.T) {
 	commit.Abort()
 	attempt.Close()
 }
+
 func TestDARemovalBeginCommit(t *testing.T) {
 	mp, raw := daAdmissionTestMempool(t, 1)
 	for _, bad := range []*Mempool{nil, {}, {chainState: mp.chainState}} {
@@ -387,12 +432,7 @@ func TestDARemovalBeginCommit(t *testing.T) {
 		}
 	}
 	owner := mp.PendingOutpointOwner()
-	a := mustDAAdmission(t, mp, raw[0])
-	snapshot := a.Snapshot()
-	commit, _ := a.BeginCommit(nil)
-	token := commit.CandidateToken()
-	commit.Commit()
-	a.Close()
+	snapshot, token := mustFinalizeDAAdmission(t, mp, raw[0])
 	empty, _ := mp.BeginDARemoval()
 	copy := *empty
 	mustPanic(t, copy.Close)
@@ -412,8 +452,24 @@ func TestDARemovalBeginCommit(t *testing.T) {
 	if mp.PendingOutpointOwner().byToken[token] == nil {
 		t.Fatal("removal Abort deleted victim")
 	}
-	valid := DAAdmissionVictim{TxID: snapshot.TxID, Inputs: snapshot.Inputs, Token: token}
 	context, _ := owner.AdmissionContext()
+	multiTxID, multiInputs := [32]byte{5}, []consensus.Outpoint{testOutpoint(5), testOutpoint(6)}
+	multi, err := owner.Reserve(context, PendingOutpointDA, multiTxID, multiInputs)
+	if err != nil || owner.Finalize(multi) != nil {
+		t.Fatal("could not create finalized multi-input DA victim")
+	}
+	multiVictim := DAAdmissionVictim{TxID: multiTxID, Inputs: multiInputs, Token: multi}
+	r, _ = mp.BeginDARemoval()
+	remove, err = r.BeginCommit([]DAAdmissionVictim{multiVictim})
+	if err != nil || remove.CandidateToken() != (PendingOutpointToken{}) {
+		t.Fatalf("multi-input removal BeginCommit=(%v,%v)", remove, err)
+	}
+	remove.Abort()
+	r.Close()
+	if owner.byToken[multi] == nil || owner.byOutpoint[multiInputs[0]].token != multi || owner.byOutpoint[multiInputs[1]].token != multi {
+		t.Fatal("multi-input removal Abort changed victim")
+	}
+	valid := DAAdmissionVictim{TxID: snapshot.TxID, Inputs: snapshot.Inputs, Token: token}
 	stale, _ := owner.Reserve(context, PendingOutpointDA, [32]byte{2}, []consensus.Outpoint{testOutpoint(2)})
 	_ = owner.Release(stale)
 	standard, _ := owner.Reserve(context, PendingOutpointStandardMempool, [32]byte{3}, []consensus.Outpoint{testOutpoint(3)})
@@ -432,6 +488,7 @@ func TestDARemovalBeginCommit(t *testing.T) {
 		{[]DAAdmissionVictim{{TxID: [32]byte{4}, Inputs: []consensus.Outpoint{testOutpoint(4)}, Token: unfinalized}}, "DA victim claim mismatch", false},
 		{[]DAAdmissionVictim{{TxID: [32]byte{9}, Inputs: snapshot.Inputs, Token: token}}, "DA victim claim mismatch", false},
 		{[]DAAdmissionVictim{{TxID: snapshot.TxID, Inputs: []consensus.Outpoint{testOutpoint(99)}, Token: token}}, "DA victim input mismatch", false},
+		{[]DAAdmissionVictim{{TxID: multiTxID, Inputs: []consensus.Outpoint{multiInputs[1], multiInputs[0]}, Token: multi}}, "DA victim input mismatch", false},
 		{[]DAAdmissionVictim{valid}, "DA victim input mismatch", true},
 		{[]DAAdmissionVictim{{TxID: [32]byte{8}, Inputs: snapshot.Inputs, Token: foreign}, valid}, "invalid DA victim token", false},
 	} {
@@ -444,7 +501,7 @@ func TestDARemovalBeginCommit(t *testing.T) {
 		if tc.corrupt {
 			owner.byOutpoint[victim.Inputs[0]] = pendingOutpointRow{token: token, txid: snapshot.TxID}
 		}
-		if got != nil || daAdmit(t, err, TxAdmitUnavailable).Message != tc.want || owner.tokenHighWater != high || len(owner.byToken) != claims || len(owner.byOutpoint) != rows || tc.victims[0].TxID != victim.TxID || tc.victims[0].Token != victim.Token || tc.victims[0].Inputs[0] != victim.Inputs[0] {
+		if got != nil || daAdmit(t, err, TxAdmitUnavailable).Message != tc.want || owner.tokenHighWater != high || len(owner.byToken) != claims || len(owner.byOutpoint) != rows || owner.byToken[multi] == nil || owner.byOutpoint[multiInputs[0]].token != multi || owner.byOutpoint[multiInputs[1]].token != multi || tc.victims[0].TxID != victim.TxID || tc.victims[0].Token != victim.Token || tc.victims[0].Inputs[0] != victim.Inputs[0] {
 			t.Fatalf("invalid removal BeginCommit=(%v,%v), want %q", got, err, tc.want)
 		}
 		r.Close()
@@ -457,6 +514,7 @@ func TestDARemovalBeginCommit(t *testing.T) {
 		t.Fatal("removal left victim claim live")
 	}
 }
+
 func TestDACommit(t *testing.T) {
 	mp, raw := daAdmissionTestMempool(t, 2)
 	a := mustDAAdmission(t, mp, raw[0])
