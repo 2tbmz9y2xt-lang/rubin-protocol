@@ -2644,6 +2644,21 @@ mod tests {
         }
     }
 
+    #[test]
+    #[rustfmt::skip]
+    fn compact_defensive_branch_coverage() {
+        let snapshot=|p:&TxPool|(p.txs.clone(),p.owner_tokens.clone(),p.heap_seqs.clone(),p.worst_heap.clone().into_sorted_vec(),p.next_heap_id,p.used_bytes);
+        let input=Outpoint{txid:[3;32],vout:0}; let mut poisoned=TxPool::new(); poisoned.insert_entry([3;32],TxPoolEntry{inputs:vec![input.clone()],..test_entry(1,1,1,TxSource::Local)});
+        let owner=poisoned.test_owner(); let clone=owner.clone(); let _=std::thread::spawn(move||{let _guard=clone.lock().unwrap(); panic!("poison");}).join(); let before=snapshot(&poisoned);
+        poisoned.remove_conflicting_outpoints(std::slice::from_ref(&input)); assert_eq!(snapshot(&poisoned),before); poisoned.evict_txids(&[[3;32]]); assert_eq!(snapshot(&poisoned),before);
+        let mut invalid=TxPool::new(); invalid.insert_entry([4;32],TxPoolEntry{inputs:vec![input.clone()],..test_entry(2,1,1,TxSource::Local)}); invalid.owner_tokens.remove(&[4;32]); let before=snapshot(&invalid); let owner_before=(invalid.test_owner().test_high_water(),invalid.owner_row_count(),invalid.owner_txid_for_outpoint(&input)); invalid.evict_txids(&[[4;32]]); assert_eq!(snapshot(&invalid),before); assert_eq!((invalid.test_owner().test_high_water(),invalid.owner_row_count(),invalid.owner_txid_for_outpoint(&input)),owner_before);
+        assert_eq!(invalid.select_transactions(1,usize::MAX).len(),1); assert!(invalid.select_transactions(0,usize::MAX).is_empty()); assert!(invalid.select_transactions_with_filter(1,usize::MAX,|_|true).is_empty()); assert!(invalid.select_transactions(1,0).is_empty());
+        let mut oversized=TxPool::new(); oversized.txs.insert([8;32],test_entry(1,1,2,TxSource::Local)); assert!(oversized.select_transactions(1,1).is_empty());
+        let mut pool=TxPool::new(); pool.insert_entry([7;32],test_entry(3,2,2,TxSource::Reorg)); let saved_id=pool.next_heap_id; pool.next_heap_id=u64::MAX; let before=snapshot(&pool); let e=pool.preflight_standard_delta(&[],false).unwrap_err(); assert_eq!((e.kind,e.message.as_str()),(TxPoolAdmitErrorKind::Unavailable,"txpool heap sequence exhausted")); assert_eq!(snapshot(&pool),before);
+        pool.next_heap_id=saved_id; let before=snapshot(&pool); let e=pool.preflight_standard_delta(&[[9;32]],false).unwrap_err(); assert_eq!((e.kind,e.message.as_str()),(TxPoolAdmitErrorKind::Unavailable,"txpool eviction plan changed before commit")); assert_eq!(snapshot(&pool),before);
+        let before=snapshot(&pool); assert!(pool.remove_entry_raw(&[9;32]).is_none()); assert_eq!(snapshot(&pool),before);
+    }
+
     fn txpool_snapshot_entry_from_raw(
         raw: Vec<u8>,
         fee: u128,

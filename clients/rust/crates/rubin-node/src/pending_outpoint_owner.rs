@@ -656,4 +656,28 @@ mod tests {
         drop(guard);
         owner.release(&partial).expect("absent cleanup");
     }
+    #[test]
+    #[rustfmt::skip]
+    fn defensive_error_kinds_and_messages_are_exact() {
+        macro_rules! err { ($e:expr,$k:ident,$m:literal) => {{ let e=$e.expect_err($m); assert_eq!((e.kind,e.message.as_str()),(PendingOutpointErrorKind::$k,$m)); }} }
+        let snap=|o:&PendingOutpointOwnerHandle,seq:u64,op:&Outpoint| { let g=o.lock().unwrap(); (g.token_high_water,g.generation,g.transition,g.unavailable,g.stable_tip,g.by_token.get(&seq).map(|c|(c.txid,c.inputs.clone(),c.generation,c.finalized)),g.by_outpoint.get(op).map(|r|(r.sequence,r.txid))) };
+        let owner=new_owner(); let context=owner.admission_context().unwrap();
+        assert_eq!(format!("{:?}",owner),"PendingOutpointOwnerHandle { .. }");
+        let before=state(&owner); for (txid,inputs,message) in [([0;32],vec![outpoint(1)],"zero pending-outpoint txid"),([1;32],vec![],"invalid pending-outpoint input count"),([1;32],vec![outpoint(1),outpoint(1)],"duplicate pending-outpoint input")] { let e=owner.reserve(context,txid,inputs).unwrap_err(); assert_eq!((e.kind,e.message.as_str()),(PendingOutpointErrorKind::Internal,message)); } assert_eq!(state(&owner),before);
+        let token=owner.reserve(context,[2;32],vec![outpoint(2)]).unwrap(); assert_eq!(format!("{token:?}"),"PendingOutpointToken(1)");
+        { let guard=owner.lock().unwrap(); err!(guard.validate_standard_entry(&owner,[2;32],&[],Some(&token),false),Internal,"pending-outpoint token on inputless entry"); err!(guard.validate_standard_entry(&owner,[3;32],&[outpoint(2)],Some(&token),false),Internal,"pending-outpoint claim mismatch"); }
+        owner.finalize(&token).unwrap(); { let guard=owner.lock().unwrap(); err!(guard.validate_standard_entry(&owner,[2;32],&[outpoint(2)],Some(&token),false),Internal,"pending-outpoint claim mismatch"); }
+        { owner.lock().unwrap().by_outpoint.remove(&outpoint(2)); let guard=owner.lock().unwrap(); err!(guard.validate_standard_entry(&owner,[2;32],&[outpoint(2)],Some(&token),true),Internal,"pending-outpoint row is missing"); }
+        { owner.lock().unwrap().by_outpoint.insert(outpoint(2),PendingOutpointRow{sequence:2,txid:[2;32]}); let guard=owner.lock().unwrap(); err!(guard.validate_standard_entry(&owner,[2;32],&[outpoint(2)],Some(&token),true),Internal,"pending-outpoint row mismatch"); }
+        let before=snap(&owner,token.sequence,&outpoint(2)); err!(owner.release(&token),Internal,"pending-outpoint row mismatch"); assert_eq!(snap(&owner,token.sequence,&outpoint(2)),before); owner.lock().unwrap().by_outpoint.insert(outpoint(2),PendingOutpointRow{sequence:token.sequence,txid:[2;32]}); owner.release(&token).unwrap();
+        let before=snap(&owner,token.sequence,&outpoint(2)); err!(owner.finalize(&token),Unavailable,"pending-outpoint token is no longer live"); owner.lock().unwrap().drop_claim(u64::MAX); assert_eq!(snap(&owner,token.sequence,&outpoint(2)),before);
+        let before=snap(&owner,token.sequence,&outpoint(2)); err!(owner.commit_stable_tip(context.tip),Internal,"pending-outpoint stable tip commit without active transition"); err!(owner.reopen_old_tip(),Internal,"pending-outpoint transition abort without active transition"); assert_eq!(snap(&owner,token.sequence,&outpoint(2)),before);
+        owner.begin_transition().unwrap(); let before=snap(&owner,token.sequence,&outpoint(2)); err!(owner.begin_transition(),Unavailable,"pending-outpoint owner transition already active");
+        { let guard=owner.lock().unwrap(); err!(guard.check_available(context),Unavailable,"pending-outpoint owner transition in progress"); } assert_eq!(snap(&owner,token.sequence,&outpoint(2)),before);
+        owner.reopen_old_tip().unwrap(); let wrong=PendingOutpointAdmissionContext{tip:PendingOutpointTip{hash:[9;32],..context.tip},..context};
+        { let guard=owner.lock().unwrap(); err!(guard.check_available(wrong),Unavailable,"pending-outpoint expected tip mismatch"); }
+        owner.lock().unwrap().generation=u64::MAX; let before=snap(&owner,token.sequence,&outpoint(2)); err!(owner.begin_transition(),Unavailable,"pending-outpoint generation exhausted"); assert_eq!(snap(&owner,token.sequence,&outpoint(2)),before);
+        let poisoned=new_owner(); let clone=poisoned.clone(); let _=std::thread::spawn(move||{let _guard=clone.inner.lock().unwrap(); panic!("poison");}).join();
+        err!(poisoned.admission_context(),Unavailable,"pending-outpoint owner lock unavailable");
+    }
 }
