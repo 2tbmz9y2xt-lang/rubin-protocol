@@ -3,15 +3,13 @@
 
   Q-FORMAL-ROTATION-01: bedrock theorems for native crypto rotation.
 
-  FI-ROT-01: at most one active rotation descriptor at any height.
-  FI-ROT-02: for any well-formed descriptor, the rotation lifecycle
+  FI-ROT-01: at most one active rotation descriptor in the bounded model.
+  FI-ROT-02: for any well-formed descriptor, the bounded phase model
              partitions heights into five mutually exclusive phases
              with uniquely determined NATIVE_CREATE_SUITES / NATIVE_SPEND_SUITES.
 
-  Spec: CANONICAL §4.1.2 (five-case table), §4.1.3 (descriptor validity),
-        §23.2.1 (at-most-one).
-  Formal invariants: FI-ROT-01, FI-ROT-02 from
-        RUBIN_NATIVE_CRYPTO_ROTATION_SPEC_v1.md §15.
+  Scope: bounded universal single-descriptor phase/registry evidence for the
+         applicable CANONICAL §4.1 subset; not all of §4.1.2 or §4.1.3.
 
   Closes #120, #121.
 -/
@@ -26,7 +24,7 @@ open Rotation
 
 /-! ### Rotation Deployment Descriptor (extended from RotationPrelude) -/
 
-/-- A full rotation deployment descriptor with all lifecycle heights. -/
+/-- A bounded rotation deployment descriptor for the modeled phase heights. -/
 structure RotationDeploymentDescriptor where
   oldSuiteId : Nat
   newSuiteId : Nat
@@ -40,7 +38,7 @@ def descriptorRegistryConsistent
     (reg : SuiteRegistry) (d : RotationDeploymentDescriptor) : Prop :=
   isRegistered reg d.oldSuiteId ∧ isRegistered reg d.newSuiteId
 
-/-- A descriptor is well-formed per CANONICAL §4.1.3:
+/-- Descriptor well-formedness for the applicable CANONICAL §4.1 subset:
     - old ≠ new
     - neither old nor new is SENTINEL (0x00)
     - old and new are present in the canonical registry
@@ -60,7 +58,7 @@ theorem wellFormedDescriptor_registryConsistent
     descriptorRegistryConsistent reg d :=
   hwf.2.2.2.1
 
-/-! ### Phase-dependent suite sets (CANONICAL §4.1.2 five-case table) -/
+/-! ### Phase-dependent suite sets (applicable CANONICAL §4.1 subset) -/
 
 /-- NATIVE_CREATE_SUITES(h) given a descriptor `d`.
     Phase 1 (h < h1):          {old}
@@ -87,15 +85,14 @@ def NativeSpendSuites (h : Nat) (d : RotationDeploymentDescriptor) : List Nat :=
 
 /-! ### FI-ROT-01: at-most-one active descriptor (state-machine model)
 
-  The at-most-one constraint is enforced by protocol rules at the
-  descriptor activation point (§23.2.1).  Previously modeled as an axiom;
-  now derived from a state-machine model of the activation lifecycle.
+  The at-most-one constraint is derived within this bounded state-machine
+  model. Previously modeled as an axiom, it is now proved over model states.
 
-  The chain state for rotation descriptors is modeled as a list that
-  transitions through protocol-valid operations only:
+  The bounded state for rotation descriptors is modeled as a list with these
+  model transitions:
   - `init`: empty list (genesis / pre-rotation)
   - `activate`: append a descriptor ONLY when the list is empty
-  - `deactivate`: clear the list (rotation completed / sunset)
+  - `deactivate`: clear the modeled active list
 
   The at-most-one invariant is proved by induction over reachable states. -/
 
@@ -104,18 +101,17 @@ structure RotationActivationState where
   active : List RotationDeploymentDescriptor
   deriving Repr, DecidableEq
 
-/-- A rotation activation state is reachable from genesis via protocol-valid
-    transitions.  This models §23.2.1: a new descriptor can only be activated
-    when no other descriptor is currently active. -/
+/-- A rotation activation state is reachable from genesis via the bounded
+    single-descriptor model transitions. -/
 inductive ReachableRotationState : RotationActivationState → Prop where
   /-- Genesis / pre-rotation: no active descriptors. -/
   | init : ReachableRotationState ⟨[]⟩
-  /-- §23.2.1 activation: a new descriptor is activated only when none is active. -/
+  /-- A new descriptor is activated only when none is active. -/
   | activate :
       ReachableRotationState ⟨[]⟩ →
       (d : RotationDeploymentDescriptor) →
       ReachableRotationState ⟨[d]⟩
-  /-- Deactivation: rotation completed or descriptor sunset. -/
+  /-- Clear the modeled active list. -/
   | deactivate :
       ReachableRotationState st →
       ReachableRotationState ⟨[]⟩
@@ -134,8 +130,8 @@ theorem fi_rot_01_descriptor_unique (st : RotationActivationState)
   | activate _ _ => simp
   | deactivate _ _ => simp
 
-/-- Backward-compatible alias: for any height, IF we can exhibit a reachable
-    state at that height, its active descriptor list has length ≤ 1.
+/-- Backward-compatible alias: a reachable model state's active descriptor
+    list has length ≤ 1.
     Callers that previously used the axiom-based `fi_rot_01_descriptor_unique h`
     now pass a `ReachableRotationState` witness instead. -/
 theorem fi_rot_01_at_most_one_active (st : RotationActivationState)
