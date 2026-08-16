@@ -12,7 +12,7 @@ const (
 
 // IsV1ProductionRotationNetwork reports whether the node or harness network name
 // uses the v1 production rotation profile (finite H4 required). This matches
-// RUBIN_NATIVE_CRYPTO_ROTATION_SPEC_v1.md: mainnet and public testnet.
+// CANONICAL §4.1.3 and §23.2.1 for mainnet and public testnet.
 func IsV1ProductionRotationNetwork(network string) bool {
 	n := strings.ToLower(strings.TrimSpace(network))
 	return n == "mainnet" || n == "testnet"

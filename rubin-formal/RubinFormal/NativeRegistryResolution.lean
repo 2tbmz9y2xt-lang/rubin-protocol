@@ -2,16 +2,14 @@
   RubinFormal/NativeRegistryResolution.lean — FI-ROT-03 + universal
 
   Evidence level: machine_checked_universal.
-  `native_rotation_ok_constrained` proves: ∀ well-formed descriptor in
-  well-formed registry, ∀ height → phase partition holds ∧ all active
-  create/spend suites resolve to unique entries. Covers all 5 rotation
-  phases including post-rotation dispatch.
-  No claim about byte-level wire encoding trace (G7 residual).
+  `native_rotation_ok_constrained` gives universal evidence for the applicable
+  CANONICAL §4.1 single-descriptor phase/registry model: modeled phase
+  partition and unique active create/spend suite resolution.
 
   Q-FORMAL-ROTATION-02: native registry resolution is deterministic.
   suite_id ∈ ActiveNativeSuites(h) → ∃! entry, registryLookup(suite_id)
 
-  Spec: CANONICAL §4.1.1, §4.1.2, §4.1.3, §23.2.1.
+  Scope: applicable CANONICAL §4.1 single-descriptor phase/registry model.
   Depends: Q-FORMAL-ROTATION-01 (NativeSuiteRotation.lean).
   Closes #122, #368.
 -/
@@ -188,15 +186,15 @@ theorem fi_rot_03_pre_rotation_no_duplicates :
   single_entry_registry_no_duplicates PRE_ROTATION_REGISTRY ML_DSA_87_ENTRY rfl
 
 -- ═══════════════════════════════════════════════════════════════════
--- §  Constrained universal theorem (§4.1.2, §4.1.3, §23.2.1)
+-- §  Constrained universal theorem (applicable §4.1 subset)
 -- ═══════════════════════════════════════════════════════════════════
 
-/-- **Native rotation constrained universal** (§4.1.2/§4.1.3/§23.2.1):
+/-- **Native rotation constrained universal** (applicable §4.1 subset):
     for any well-formed descriptor in a well-formed registry, at every
     height the phase partition holds and all active suites (create and
     spend) resolve to unique registry entries.
-    Scope: structural model parity with Go/Rust suite_registry.
-    No claim about byte-level wire encoding trace (G7 residual). -/
+    Scope excludes descriptor history, the full canonical descriptor schema,
+    production gates, byte-level traces, and implementation parity. -/
 theorem native_rotation_ok_constrained
     (d : RotationDeploymentDescriptor) (reg : SuiteRegistry)
     (hwf : wellFormedDescriptor reg d)

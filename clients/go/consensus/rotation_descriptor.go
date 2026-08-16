@@ -3,13 +3,13 @@ package consensus
 import "fmt"
 
 // CryptoRotationDescriptor defines a scheduled transition from one native
-// signature suite to another. It specifies the heights at which the new
-// suite becomes valid for creation and spending.
+// signature suite to another. Its legacy fields carry H1 activation, the H2
+// creation cutoff and optional H4 spend sunset for the old suite.
 //
-// Implements CANONICAL §23 rotation lifecycle:
-//   - H1 (CreateHeight): new suite becomes valid for covenant creation
-//   - H2 (SpendHeight):  new suite becomes valid for covenant spending
-//   - H4 (SunsetHeight): optional — old suite ceases to be valid for creation
+// Implements the applicable CANONICAL §4.1 single-descriptor phase rules:
+//   - activation_height/H1 (legacy CreateHeight): new enters both create and spend sets
+//   - create_cutoff_height/H2 (legacy SpendHeight): old leaves the create set
+//   - sunset_height/H4 (SunsetHeight): optional — old leaves the spend set
 //
 // Invariants enforced by Validate():
 //   - OldSuiteID != NewSuiteID
@@ -21,9 +21,9 @@ type CryptoRotationDescriptor struct {
 	Name         string
 	OldSuiteID   uint8
 	NewSuiteID   uint8
-	CreateHeight uint64 // H1: new suite valid for creation
-	SpendHeight  uint64 // H2: new suite valid for spending
-	SunsetHeight uint64 // H4: old suite ceases creation (0 = not defined)
+	CreateHeight uint64 // legacy: activation_height/H1; new enters create and spend
+	SpendHeight  uint64 // legacy: create_cutoff_height/H2; old leaves create
+	SunsetHeight uint64 // sunset_height/H4; old leaves spend (0 = not defined)
 }
 
 // Validate checks the descriptor's invariants against the given registry.
@@ -78,8 +78,8 @@ func (d CryptoRotationDescriptor) validateHeights() error {
 
 // ValidateRotationSet checks a set of descriptors for internal consistency:
 //   - Each descriptor must be individually valid
-//   - At most one rotation may be active at any given height
-//     (i.e., no overlapping [CreateHeight, SpendHeight) intervals)
+//   - Legacy [CreateHeight, SpendHeight) / [H1, H2) transition intervals
+//     must not overlap
 func ValidateRotationSet(descriptors []CryptoRotationDescriptor, registry *SuiteRegistry) error {
 	if registry == nil {
 		registry = DefaultSuiteRegistry()
@@ -111,7 +111,7 @@ func ValidateRotationSet(descriptors []CryptoRotationDescriptor, registry *Suite
 // DescriptorRotationProvider implements RotationProvider using a validated
 // CryptoRotationDescriptor. It assumes Validate() has already been called.
 //
-// Spec §6 phases (RUBIN_NATIVE_CRYPTO_ROTATION_SPEC_v1.md):
+// CANONICAL §4.1 single-descriptor phases:
 //
 //	Phase 0 (h < H1):           create={old}       spend={old}
 //	Phase 1 (H1 ≤ h < H2):     create={old,new}   spend={old,new}

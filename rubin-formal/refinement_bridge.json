@@ -7,8 +7,8 @@
     "inventory_sha256": "77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6",
     "original_imported_source_paths": 116,
     "active_imported_source_paths": 102,
-    "byte_exact_path_count": 72,
-    "reconcile_current_protocol_path_count": 20,
+    "byte_exact_path_count": 70,
+    "reconcile_current_protocol_path_count": 22,
     "reconcile_current_protocol_paths": [
       "RubinFormal/BlockValidationOrder.lean",
       "RubinFormal/Conformance/CVVaultLifecycleReplay.lean",
@@ -20,6 +20,8 @@
       "RubinFormal/FeatureActivationLiveBridge.lean",
       "RubinFormal/ForkChoiceSelect.lean",
       "RubinFormal/HtlcSpendStructuralLiveBridge.lean",
+      "RubinFormal/NativeRegistryResolution.lean",
+      "RubinFormal/NativeSuiteRotation.lean",
       "RubinFormal/PerTxStateMachine.lean",
       "RubinFormal/RefinementBridgeV1.lean",
       "RubinFormal/RotationPrelude.lean",
@@ -54,7 +56,7 @@
       "tests/test_strip_lean_comments.py",
       "tests/test_validation.py"
     ],
-    "active_partition_equation": "72 + 20 + 1 + 2 + 7 = 102",
+    "active_partition_equation": "70 + 22 + 1 + 2 + 7 = 102",
     "original_inventory_equation": "102 + 4 + 3 + 7 = 116",
     "active_path_manifest": {
       "REGISTRY_COMPLETENESS_POLICY.md": {"disposition":"IMPORT_ADAPT_SINGLE_OWNER","source_sha256":"9af957d4fefad13471a00ca18f1ee1c146c8b34e551cf3f9b179c517e5be8c3c","candidate_sha256":"b8808d222b5ebbc120993b5c4082551c35b24d0b6c4afee44060d6c2b74c8846"},
@@ -87,9 +89,9 @@
       "RubinFormal/HtlcSpendStructuralLiveBridge.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"bacc2f83c35db73400c08ee610f8979666b89a39b43b68e5b2e25c25984b36ea","candidate_sha256":"4e164d9d7e65455b182650d9546ce48f6f3a3c9f561e0398843ffeebd90444e9"},
       "RubinFormal/LegacySunset.lean": {"disposition":"BYTE_EXACT","source_sha256":"c89513a14713cc35b6d8f54e1e46a8a84909262bd60e6b55681013efe87241f3","candidate_sha256":"c89513a14713cc35b6d8f54e1e46a8a84909262bd60e6b55681013efe87241f3"},
       "RubinFormal/MerkleStructure.lean": {"disposition":"BYTE_EXACT","source_sha256":"20cec5bce152f00f40bb4fadbaa08d49bda36a11023dc07cc7fdfa9d68027530","candidate_sha256":"20cec5bce152f00f40bb4fadbaa08d49bda36a11023dc07cc7fdfa9d68027530"},
-      "RubinFormal/NativeRegistryResolution.lean": {"disposition":"BYTE_EXACT","source_sha256":"aedf173855f265a3d100c944197398dd38ddc9496cb645b4d5a021105addfd28","candidate_sha256":"aedf173855f265a3d100c944197398dd38ddc9496cb645b4d5a021105addfd28"},
+      "RubinFormal/NativeRegistryResolution.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"aedf173855f265a3d100c944197398dd38ddc9496cb645b4d5a021105addfd28","candidate_sha256":"7c4c183d51833827243bc54bea1548eb967a12764e423b170d725dddc070965a"},
       "RubinFormal/NativeSpendCreateGate.lean": {"disposition":"BYTE_EXACT","source_sha256":"22220172555bf402c42104f90a3b8706b8eb5c2d3b06265a48cddae799aaaeae","candidate_sha256":"22220172555bf402c42104f90a3b8706b8eb5c2d3b06265a48cddae799aaaeae"},
-      "RubinFormal/NativeSuiteRotation.lean": {"disposition":"BYTE_EXACT","source_sha256":"9bd781f9b8c2b9961ac8ca4aa2a07b35693f42308172c4c4c108db4dfc7a7658","candidate_sha256":"9bd781f9b8c2b9961ac8ca4aa2a07b35693f42308172c4c4c108db4dfc7a7658"},
+      "RubinFormal/NativeSuiteRotation.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"9bd781f9b8c2b9961ac8ca4aa2a07b35693f42308172c4c4c108db4dfc7a7658","candidate_sha256":"deecde2b0f4e7b25392b2d939ac038f50e833657e356d2571801881ddd7ec56f"},
       "RubinFormal/PerTxStateMachine.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"e33dcd76ea9aa30b87c03e539e08e7ca51b23d4e61a54654d7692b31e1fbcacb","candidate_sha256":"974d35748a9af1917616885dcf31e4e7de58fdd85d8fad3ec2ec70f2ed7e8989"},
       "RubinFormal/PrimitiveEncodingRoundtrip.lean": {"disposition":"BYTE_EXACT","source_sha256":"c38203178af4b122279ea8d5cb4a7f7eed7c86ad80efb7a040fd114a11938f02","candidate_sha256":"c38203178af4b122279ea8d5cb4a7f7eed7c86ad80efb7a040fd114a11938f02"},
       "RubinFormal/Refinement/AbortSoundness.lean": {"disposition":"BYTE_EXACT","source_sha256":"05bf8f3ab9d6a1395ce61bb5c5caaa62591c6c07385de3618f2bd4ea44d26eac","candidate_sha256":"05bf8f3ab9d6a1395ce61bb5c5caaa62591c6c07385de3618f2bd4ea44d26eac"},
@@ -483,9 +485,9 @@
       },
       "evidence_level": "machine_checked_behavioral",
       "proof_trust": "compiler_trusted",
-      "contract_scope": "Behavioral state-machine model of §23.2.1 descriptor activation lifecycle proving at-most-one uniqueness (inductive), five-phase exhaustive height partition with mutual exclusion. Conformance: 11 vectors (6 cutoff + 5 sunset) structurally replayed.",
+      "contract_scope": "Bounded behavioral evidence for the applicable §4.1 single-descriptor phase model: at-most-one uniqueness within the modeled states and an exhaustive five-phase height partition with mutual exclusion. Conformance: 11 vectors (6 cutoff + 5 sunset) structurally replayed.",
       "limitations": [
-        "Behavioral model only. No Go/Rust implementation bridge is claimed; the phase functions are Lean definitions rather than extracted production code."
+        "Excluded: ordered descriptor history, succession, and anti-reactivation; the full canonical descriptor schema, alias rules, and hash validation; per-witness mixed-suite threshold semantics and error order; production evidence gates and readiness; byte-level descriptor traces; and Go/Rust public-path parity."
       ]
     },
     {
@@ -558,12 +560,12 @@
       "lean_file": "rubin-formal/RubinFormal/NativeRegistryResolution.lean",
       "evidence_level": "machine_checked_universal",
       "proof_trust": "compiler_trusted",
-      "spec_section": "§4.1.2/§4.1.3/§23.2.1",
+      "spec_section": "applicable §4.1 subset",
       "go_function": "DescriptorRotationProvider",
-      "contract_scope": "Universal for native crypto suite rotation. Constrained theorem: ∀ well-formed descriptor+registry, ∀ height → phase partition holds ∧ all active create/spend suites resolve uniquely.",
-      "notes": "Universal for the native suite rotation model surface. Composes fi_rot_02_phase_partition + fi_rot_03_active_{create,suite}_resolves. No claim about byte-level wire encoding trace (G7 residual).",
+      "contract_scope": "Universal bounded evidence for the applicable §4.1 single-descriptor phase/registry model: for every model-well-formed descriptor and registry and every height, the modeled phase partition holds and active create/spend suite identifiers resolve uniquely.",
+      "notes": "Universal only for the bounded single-descriptor phase/registry model, composing fi_rot_02_phase_partition with fi_rot_03_active_{create,suite}_resolves.",
       "limitations": [
-        "The model is machine-checked in Lean; correspondence to Go/Rust is human-reviewed, and byte-level wire encoding trace remains unformalized (G7 residual)."
+        "Excluded: ordered descriptor history, succession, and anti-reactivation; the full canonical descriptor schema, alias rules, and hash validation; per-witness mixed-suite threshold semantics and error order; production evidence gates and readiness; byte-level descriptor or registry traces; and Go/Rust public-path parity."
       ],
       "supporting_theorems": [
         "RubinFormal.NativeSuiteRotation.fi_rot_02_phase_partition",
