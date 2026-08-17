@@ -39,7 +39,7 @@
       "items": { "enum": ["OLD", "NEW", "UNKNOWN", "NOT_APPLICABLE"] }
     },
     "coverage_receipt": {
-      "description": "Generated receipt mapping every enumerated class (closed result taxonomy plus every named observable, accepted, rejected and hostile bullet of RUB-922) to the row ids that define it. A class mapping to no row is a generation failure, never a corpus state.",
+      "description": "Generated definition receipt mapping every enumerated class (closed result taxonomy plus every named observable, accepted, rejected and hostile bullet of RUB-922) to the row ids that define it; it records which rows freeze each class, not that each class is runtime-compared — only kind=observation rows are compared, so a class whose only carriers are authority/forbidden rows has no C01 runtime comparison (kind-aware split is RUB-1204). A class mapping to no row is a generation failure, never a corpus state.",
       "type": "object",
       "minProperties": 59,
       "propertyNames": { "pattern": "^(taxonomy:[A-Z0-9_]+|(observable|accepted|rejected|hostile):[a-z0-9_]+)$" },

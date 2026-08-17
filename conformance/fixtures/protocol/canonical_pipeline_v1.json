@@ -313,12 +313,12 @@
         "rejected_delta": "0"
       },
       "effects": {
+        "gc_attempted": true,
         "release_notification": false,
         "retry_slots": 0,
         "rows_reclaimed": 0
       },
       "detail": {
-        "gc_attempted": true,
         "retriable": false
       }
     },
