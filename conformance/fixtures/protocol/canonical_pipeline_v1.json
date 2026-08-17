@@ -467,7 +467,7 @@
       "kind": "authority",
       "scenario": "Complete postcommit effect enumeration with exact zero, once or count dispositions; there is no durable outbox.",
       "detail": {
-        "block_inventory_relay": "per specification section 19; disposition frozen in C01-RELAY-STORED-001 / C01-RELAY-ACCEPTED-001 (pending_owner RUB-910)",
+        "block_inventory_relay": "per specification section 19; disposition frozen in C01-RELAY-STORED-001 / C01-RELAY-ACCEPTED-001 (pending_owner RUB-1195)",
         "block_seen": "once per fresh row",
         "canonical_da_consume": "identity of the published image, never a post-return step",
         "checkpoint": "derived cadence, never canonical authority",
@@ -489,7 +489,7 @@
         "relay_authority": false,
         "spec_ref": "rubin-spec@c14b0100 RUBIN_COMPACT_BLOCKS.md section 19"
       },
-      "pending_owner": "RUB-910"
+      "pending_owner": "RUB-1195"
     },
     {
       "id": "C01-RELAY-ACCEPTED-001",
@@ -507,7 +507,7 @@
         "spec_ref": "rubin-spec@c14b0100 RUBIN_COMPACT_BLOCKS.md section 19",
         "write_failure": "stops only that owner's remaining suffix; other owners remain eligible"
       },
-      "pending_owner": "RUB-910"
+      "pending_owner": "RUB-1195"
     },
     {
       "id": "C01-INVENTORY-001",
@@ -665,7 +665,7 @@
       "scenario": "The resource identities are exact and closed across this row and C01-RES-IDENTITIES-PENDING-001; this row carries the owned identities. Every resource identity is LOCAL_RESOURCE_UNAVAILABLE and never consensus invalidity, and invalid configured bounds are startup or config failures outside peer retry.",
       "detail": {
         "admission": "never latched for any resource identity; preserves OLD",
-        "identities": "noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact",
+        "identities": "noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact, apply_plan_metadata",
         "invalid_configured_bounds": "startup/config failure, outside peer retry",
         "recovery_artifact": "non-retriable; profile-permitted pruned suffix awaiting validated reacquisition; distinct from bounded-storage reservation failure"
       }
@@ -688,12 +688,12 @@
     {
       "id": "C01-RES-IDENTITIES-PENDING-001",
       "kind": "authority",
-      "scenario": "The resource identities whose machinery no slice of this chain delivers; they are excluded from the RUB-926 zero-mismatch acceptance until RUB-910 is Done.",
+      "scenario": "The resource identities whose machinery no slice of this chain delivers; excluded from the RUB-926 zero-mismatch acceptance until RUB-893 is Done.",
       "detail": {
-        "identities": "inbound_budget_capacity, inbound_budget_overflow, apply_plan_metadata",
+        "identities": "inbound_budget_capacity, inbound_budget_overflow",
         "retriable": "inbound_budget_capacity only, and only with an independently proven exact block hash"
       },
-      "pending_owner": "RUB-910"
+      "pending_owner": "RUB-893"
     },
     {
       "id": "C01-APPLYMETA-CAP-001",
@@ -709,8 +709,7 @@
         "cap_bytes": 67108864,
         "charge_bytes": "exactly cap",
         "charge_formula": "48+40*(disconnect_rows+connect_rows)+32*complete_da_ids"
-      },
-      "pending_owner": "RUB-910"
+      }
     },
     {
       "id": "C01-APPLYMETA-OVER-001",
@@ -732,8 +731,7 @@
       "detail": {
         "release_notification": false,
         "retriable": false
-      },
-      "pending_owner": "RUB-910"
+      }
     },
     {
       "id": "C01-BUSY-001",
@@ -789,7 +787,7 @@
         "retriable": false,
         "wire_error_precedence": "frame_length, frame_read, frame_checksum"
       },
-      "pending_owner": "RUB-910"
+      "pending_owner": "RUB-893"
     },
     {
       "id": "C01-GO-CONSTANTS-001",

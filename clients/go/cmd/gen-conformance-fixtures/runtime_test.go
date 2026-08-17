@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -1236,29 +1236,22 @@ func TestCanonicalPipelineCoverageReceiptIsCompleteAndClosed(t *testing.T) {
 // excluded from the RUB-926 zero-mismatch gate. Adding an exclusion silently
 // would hide a real Go/Rust divergence behind a pending owner.
 func TestCanonicalPipelinePendingOwnerRowsAreFrozen(t *testing.T) {
-	want := []string{
-		"C01-APPLYMETA-CAP-001",
-		"C01-APPLYMETA-OVER-001",
-		"C01-BUDGET-RACE-001",
-		"C01-BUSY-001",
-		"C01-INVENTORY-RECLAIMED-001",
-		"C01-RELAY-ACCEPTED-001",
-		"C01-RELAY-STORED-001",
-		"C01-RES-IDENTITIES-PENDING-001",
-		"C01-WIRE-OVERFLOW-001",
+	want := map[string]string{
+		"C01-RELAY-STORED-001":           pendingOwnerRUB1195,
+		"C01-RELAY-ACCEPTED-001":         pendingOwnerRUB1195,
+		"C01-RES-IDENTITIES-PENDING-001": pendingOwnerRUB893,
+		"C01-WIRE-OVERFLOW-001":          pendingOwnerRUB893,
+		"C01-BUSY-001":                   pendingOwnerRUB910,
+		"C01-BUDGET-RACE-001":            pendingOwnerRUB910,
+		"C01-INVENTORY-RECLAIMED-001":    pendingOwnerRUB910,
 	}
-	var got []string
+	got := make(map[string]string)
 	for _, row := range canonicalPipelineRows() {
-		if row.PendingOwner == "" {
-			continue
+		if row.PendingOwner != "" {
+			got[row.ID] = row.PendingOwner
 		}
-		if row.PendingOwner != pendingOwnerRUB910 {
-			t.Fatalf("row %s names pending owner %q, want %q", row.ID, row.PendingOwner, pendingOwnerRUB910)
-		}
-		got = append(got, row.ID)
 	}
-	slices.Sort(got)
-	if !slices.Equal(got, want) {
+	if !maps.Equal(got, want) {
 		t.Fatalf("pending-owner rows = %v, want %v", got, want)
 	}
 }

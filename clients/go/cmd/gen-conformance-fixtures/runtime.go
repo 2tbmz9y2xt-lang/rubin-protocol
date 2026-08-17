@@ -1861,10 +1861,15 @@ const (
 	canonicalPipelineArtifactName = "canonical_pipeline_v1"
 	canonicalPipelineSchemaRel    = "conformance/schemas/cv-canonical-pipeline-v1.json"
 	canonicalPipelineSchemaVer    = 1
-	// pendingOwnerRUB910 marks a row whose machinery no slice of the
-	// RUB-922 -> RUB-890 -> RUB-908 -> RUB-1200 -> RUB-1201 -> RUB-1202 ->
-	// RUB-911 -> RUB-678 -> RUB-679 -> RUB-680 chain delivers.
-	pendingOwnerRUB910 = "RUB-910"
+	// pendingOwnerRUB1195, pendingOwnerRUB893 and pendingOwnerRUB910 name the
+	// owner of a row whose machinery no slice of the RUB-922 -> RUB-890 ->
+	// RUB-908 -> RUB-1200 -> RUB-1201 -> RUB-1202 -> RUB-911 -> RUB-678 ->
+	// RUB-679 -> RUB-680 chain delivers: RUB-1195 owns section-19 relay,
+	// RUB-893 owns the inbound-budget resource identities, RUB-910 owns the
+	// permit/retry-budget and reclaimed-hash-inventory rows.
+	pendingOwnerRUB1195 = "RUB-1195"
+	pendingOwnerRUB893  = "RUB-893"
+	pendingOwnerRUB910  = "RUB-910"
 )
 
 type cpMap = map[string]any
@@ -1968,7 +1973,7 @@ func (r cpRow) detail(detail cpMap) cpRow { r.Detail = detail; return r }
 
 func (r cpRow) rpc(projection string) cpRow { r.RPC = projection; return r }
 
-func (r cpRow) pending() cpRow { r.PendingOwner = pendingOwnerRUB910; return r }
+func (r cpRow) pending(owner string) cpRow { r.PendingOwner = owner; return r }
 
 func cpPathRows() []cpRow {
 	return []cpRow{
@@ -2052,7 +2057,7 @@ func cpPresenceRows() []cpRow {
 
 func cpEffectRows() []cpRow {
 	frozenOrder := []string{"record_candidate_best_height", "set_block_seen", "block_inventory_relay_per_section_19", "attempt_one_da_orphan_ttl_advance", "wake_resolver_once"}
-	relayDisposition := "per specification section 19; disposition frozen in C01-RELAY-STORED-001 / C01-RELAY-ACCEPTED-001 (pending_owner RUB-910)"
+	relayDisposition := "per specification section 19; disposition frozen in C01-RELAY-STORED-001 / C01-RELAY-ACCEPTED-001 (pending_owner RUB-1195)"
 	return []cpRow{
 		cpObs("C01-NOOP-FULL-001", "KNOWN_BLOCK_NOOP(CANONICAL)", "NOT_APPLICABLE", "A duplicate full receive with blockSeen already set is a strict no-op: it clears only matching compact outstanding state, even though the production helper returns nil and sends no wire response.",
 			"observable:known_block_noop", "taxonomy:KNOWN_BLOCK_NOOP", "hostile:duplicate_and_corrupt_combinations").counters("0", "0").
@@ -2093,7 +2098,7 @@ func cpEffectRows() []cpRow {
 			"inv_attempt":        0,
 			"no_authority_cases": "STORED_NONCANONICAL side-branch processing; NEW with an empty, unresolved, duplicate or absent summary, including a standalone disconnect; every non-NEW commit truth",
 			"spec_ref":           "rubin-spec@c14b0100 RUBIN_COMPACT_BLOCKS.md section 19",
-		}, "observable:frozen_effect_order", "observable:postcommit_effects").pending(),
+		}, "observable:frozen_effect_order", "observable:postcommit_effects").pending(pendingOwnerRUB1195),
 		cpAuth("C01-RELAY-ACCEPTED-001", "The section-19 relay disposition for one authorized publication: proven NEW with a non-empty ordered canonical-applied summary.", cpMap{
 			"ibd":             "sampled after the transition publication; if IBD, no attempt",
 			"owner_snapshot":  "one snapshot of post-handshake send owners, deduplicated by owner identity; a captured handle is never re-resolved or retargeted",
@@ -2105,13 +2110,13 @@ func cpEffectRows() []cpRow {
 			"orphan_apply":    "a separately accepted orphan apply uses its existing client schedule and, if it publishes an eligible new summary, is evaluated as a separate publication",
 			"client_specific": "cross-peer scheduling and the client-local boundary of an immediate send-owner attempt remain client-specific (not a comparator mismatch)",
 			"spec_ref":        "rubin-spec@c14b0100 RUBIN_COMPACT_BLOCKS.md section 19",
-		}, "observable:frozen_effect_order", "observable:postcommit_effects").pending(),
+		}, "observable:frozen_effect_order", "observable:postcommit_effects").pending(pendingOwnerRUB1195),
 		cpAuth("C01-INVENTORY-001", "Inventory answers from current complete BlockStore or orphan residency; a partial or corrupt row returns its local store disposition without entering a receive loop.", cpMap{
 			"block_seen_role": "relay dedup only", "residency_authority": "current BlockStore/orphan", "partial_or_corrupt": "local store disposition, no receive loop",
 		}, "observable:block_seen_inventory", "rejected:presence_authority_misuse"),
 		cpAuth("C01-INVENTORY-RECLAIMED-001", "A reclaimed or ABSENT hash stays requestable without a GC callback or tombstone; RUB-908 exposes current strict presence only and assigns this observable to RUB-910.", cpMap{
 			"requestable_after_reclaim": true, "gc_callback": false, "tombstone": false,
-		}, "observable:block_seen_inventory").pending(),
+		}, "observable:block_seen_inventory").pending(pendingOwnerRUB910),
 	}
 }
 
@@ -2160,33 +2165,33 @@ func cpOrphanRows() []cpRow {
 func cpResourceRows() []cpRow {
 	return []cpRow{
 		cpAuth("C01-RES-IDENTITIES-001", "The resource identities are exact and closed across this row and C01-RES-IDENTITIES-PENDING-001; this row carries the owned identities. Every resource identity is LOCAL_RESOURCE_UNAVAILABLE and never consensus invalidity, and invalid configured bounds are startup or config failures outside peer retry.", cpMap{
-			"identities":                "noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact",
+			"identities":                "noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact, apply_plan_metadata",
 			"recovery_artifact":         "non-retriable; profile-permitted pruned suffix awaiting validated reacquisition; distinct from bounded-storage reservation failure",
 			"admission":                 "never latched for any resource identity; preserves OLD",
 			"invalid_configured_bounds": "startup/config failure, outside peer retry",
 		}, "observable:resource_identities", "taxonomy:LOCAL_RESOURCE_UNAVAILABLE"),
 		cpObs("C01-RES-RECOVERY-001", "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)", "OLD", "Profile-permitted pruned suffix data awaiting validated reacquisition is non-retriable, preserves OLD, does not latch admission and arms no peer retry; it is distinct from bounded-storage reservation failure and from loss of an artifact the active retention profile already required.",
 			"observable:resource_identities", "taxonomy:LOCAL_RESOURCE_UNAVAILABLE").counters("0", "0").effects(cpMap{"retry_slots": 0, "peer_penalty": 0}),
-		cpAuth("C01-RES-IDENTITIES-PENDING-001", "The resource identities whose machinery no slice of this chain delivers; they are excluded from the RUB-926 zero-mismatch acceptance until RUB-910 is Done.", cpMap{
-			"identities": "inbound_budget_capacity, inbound_budget_overflow, apply_plan_metadata",
+		cpAuth("C01-RES-IDENTITIES-PENDING-001", "The resource identities whose machinery no slice of this chain delivers; excluded from the RUB-926 zero-mismatch acceptance until RUB-893 is Done.", cpMap{
+			"identities": "inbound_budget_capacity, inbound_budget_overflow",
 			"retriable":  "inbound_budget_capacity only, and only with an independently proven exact block hash",
-		}, "observable:resource_identities", "taxonomy:LOCAL_RESOURCE_UNAVAILABLE").pending(),
+		}, "observable:resource_identities", "taxonomy:LOCAL_RESOURCE_UNAVAILABLE").pending(pendingOwnerRUB893),
 		cpObs("C01-APPLYMETA-CAP-001", "ACCEPTED", "NEW", "An apply plan whose checked metadata charge lands exactly on the 64 MiB cap succeeds.",
 			"hostile:apply_plan_metadata_caps").counters("+connect_count", "0").
-			detail(cpMap{"charge_formula": "48+40*(disconnect_rows+connect_rows)+32*complete_da_ids", "cap_bytes": 67108864, "charge_bytes": "exactly cap"}).pending(),
+			detail(cpMap{"charge_formula": "48+40*(disconnect_rows+connect_rows)+32*complete_da_ids", "cap_bytes": 67108864, "charge_bytes": "exactly cap"}),
 		cpObs("C01-APPLYMETA-OVER-001", "LOCAL_RESOURCE_UNAVAILABLE(apply_plan_metadata)", "OLD", "Cap+1 is non-retriable and preserves canonical, store, mempool, counter and effect state completely; it creates no peer penalty, no retry slot and no release notification.",
 			"hostile:apply_plan_metadata_caps").counters("0", "0").
 			effects(cpMap{"peer_penalty": 0, "retry_slots": 0, "getdata_sent": 0, "record_best_height": 0, "block_seen": "unchanged"}).
-			detail(cpMap{"retriable": false, "release_notification": false}).pending(),
+			detail(cpMap{"retriable": false, "release_notification": false}),
 		cpObs("C01-BUSY-001", "LOCAL_BUSY", "OLD", "LOCAL_BUSY carries the canonical-permit observed-generation notification and arms the single peer retry slot with one joined waiter; it retains no candidate, never blocks the socket reader and never follows strict presence or stateful consensus.",
 			"taxonomy:LOCAL_BUSY", "observable:permit_retry_budget").counters("0", "0").effects(cpMap{"retry_slots": 1, "peer_penalty": 0}).
-			detail(cpMap{"joined_waiters_max": 1, "deadline": "original receive-start +30 second absolute deadline", "fixed_backoff": false, "candidate_retained": false}).pending(),
+			detail(cpMap{"joined_waiters_max": 1, "deadline": "original receive-start +30 second absolute deadline", "fixed_backoff": false, "candidate_retained": false}).pending(pendingOwnerRUB910),
 		cpObs("C01-BUDGET-RACE-001", "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_capacity)", "OLD", "Registration-versus-release races, an already-closed notification, capacity released before the waiter is scheduled, a duplicate or different hash while the slot is armed, and disconnect or deadline races all resolve deterministically.",
 			"hostile:permit_budget_races", "observable:permit_retry_budget").effects(cpMap{"retry_slots": 1, "peer_penalty": 0}).
-			detail(cpMap{"retriable": true, "requires_proven_exact_hash": true, "observed_generation_notification": true, "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool"}).pending(),
+			detail(cpMap{"retriable": true, "requires_proven_exact_hash": true, "observed_generation_notification": true, "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool"}).pending(pendingOwnerRUB910),
 		cpObs("C01-WIRE-OVERFLOW-001", "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_overflow)", "OLD", "A checked inbound reservation overflow or replacement failure is non-retriable; a valid payload discarded because of a bad checksum, read or declared length keeps the documented wire-error precedence and never becomes a resource result.",
 			"hostile:inbound_reservation_and_wire_errors").effects(cpMap{"retry_slots": 0, "getdata_sent": 0}).
-			detail(cpMap{"retriable": false, "wire_error_precedence": "frame_length, frame_read, frame_checksum"}).pending(),
+			detail(cpMap{"retriable": false, "wire_error_precedence": "frame_length, frame_read, frame_checksum"}).pending(pendingOwnerRUB893),
 		cpAuth("C01-GO-CONSTANTS-001", "Go resource authority constants for this corpus. C01 freezes behavior and formulas, not imported Go heap coefficients: the Rust rows require a fresh identical runtime corpus repeated after the Go freeze.", cpMap{
 			"inbound_default_bytes": 1073741824, "inbound_hard_bytes": 8589934592,
 			"charge_full": "6x", "charge_compact": "12x", "charge_relay_fallback": "3x",
