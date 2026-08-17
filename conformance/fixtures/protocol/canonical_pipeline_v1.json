@@ -377,7 +377,6 @@
       "result": "STORED_NONCANONICAL",
       "commit_truth": "NOT_APPLICABLE",
       "effects": {
-        "block_inventory_relay": "per specification section 19; disposition frozen in C01-RELAY-STORED-001 / C01-RELAY-ACCEPTED-001 (pending_owner RUB-910)",
         "block_seen": "set",
         "canonical_da_sets_consumed": 0,
         "da_ttl_attempt": 1,
@@ -399,7 +398,6 @@
       "result": "ACCEPTED",
       "commit_truth": "NEW",
       "effects": {
-        "block_inventory_relay": "per specification section 19; disposition frozen in C01-RELAY-STORED-001 / C01-RELAY-ACCEPTED-001 (pending_owner RUB-910)",
         "block_seen": "set",
         "canonical_da_sets_consumed": "every nonempty summary entry exactly once, inside the published image",
         "da_ttl_attempt": 1,
@@ -491,10 +489,13 @@
       "kind": "authority",
       "scenario": "The section-19 relay disposition for one authorized publication: proven NEW with a non-empty ordered canonical-applied summary.",
       "detail": {
-        "best_effort": "no retry and no rollback; a relay result cannot change commit truth or the published summary",
+        "best_effort": "no retry and no rollback; a relay result cannot change canonical state, cleanup, commit truth or the published summary",
+        "client_specific": "cross-peer scheduling and the client-local boundary of an immediate send-owner attempt remain client-specific (not a comparator mismatch)",
+        "compact_modes": "compact modes 0, 1 and 2 are additive and MUST NOT replace or suppress this ordinary block inventory",
         "exclusion": "only the invocation-local (captured source owner, exact row hash) pair; never another owner and never another row",
         "frames": "per summary row in canonical order, exactly one ordinary single-vector MSG_BLOCK inv frame per (owner x row)",
         "ibd": "sampled after the transition publication; if IBD, no attempt",
+        "orphan_apply": "a separately accepted orphan apply uses its existing client schedule and, if it publishes an eligible new summary, is evaluated as a separate publication",
         "owner_snapshot": "one snapshot of post-handshake send owners, deduplicated by owner identity; a captured handle is never re-resolved or retargeted",
         "spec_ref": "rubin-spec@c14b0100 RUBIN_COMPACT_BLOCKS.md section 19",
         "write_failure": "stops only that owner's remaining suffix; other owners remain eligible"
@@ -653,7 +654,7 @@
     {
       "id": "C01-RES-IDENTITIES-001",
       "kind": "authority",
-      "scenario": "The owned resource identities. Every resource identity is LOCAL_RESOURCE_UNAVAILABLE and never consensus invalidity, and invalid configured bounds are startup or config failures outside peer retry. The identities no chain slice delivers are frozen separately in C01-RES-IDENTITIES-PENDING-001.",
+      "scenario": "The resource identities are exact and closed across this row and C01-RES-IDENTITIES-PENDING-001: The owned resource identities. Every resource identity is LOCAL_RESOURCE_UNAVAILABLE and never consensus invalidity, and invalid configured bounds are startup or config failures outside peer retry. The identities no chain slice delivers are frozen separately in C01-RES-IDENTITIES-PENDING-001.",
       "detail": {
         "admission": "never latched for any resource identity; preserves OLD",
         "identities": "noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact",
@@ -746,6 +747,7 @@
       },
       "detail": {
         "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool",
+        "observed_generation_notification": true,
         "requires_proven_exact_hash": true,
         "retriable": true
       },

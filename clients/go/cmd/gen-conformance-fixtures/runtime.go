@@ -2063,10 +2063,10 @@ func cpEffectRows() []cpRow {
 			"observable:block_seen_inventory", "hostile:duplicate_and_corrupt_combinations").effects(cpMap{"block_seen": "preserved"}),
 		cpObs("C01-EFFECT-STORED-001", "STORED_NONCANONICAL", "NOT_APPLICABLE", "A fresh STORED_NONCANONICAL freezes the POST-RUB-911 P2P-owned effect order, which has no consume step; the side block consumes zero canonical-DA sets.",
 			"observable:frozen_effect_order", "observable:postcommit_effects", "taxonomy:STORED_NONCANONICAL").
-			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "block_inventory_relay": relayDisposition, "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": 0}),
+			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": 0}),
 		cpObs("C01-EFFECT-ACCEPTED-001", "ACCEPTED", "NEW", "A fresh ACCEPTED freezes the same P2P-owned effect order; canonical-DA consumption is not a step of it but an identity of the transition image, consuming every nonempty canonical-applied summary entry exactly once and never from a post-return caller.",
 			"observable:frozen_effect_order", "taxonomy:ACCEPTED").
-			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "block_inventory_relay": relayDisposition, "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": "every nonempty summary entry exactly once, inside the published image"}).
+			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": "every nonempty summary entry exactly once, inside the published image"}).
 			detail(cpMap{"da_ttl_fence": "the DA-orphan TTL advance never interleaves with a canonical transition", "post_return_consume_callers": 0}),
 		cpObs("C01-FAULT-STORED-001", "STORED_NONCANONICAL", "NOT_APPLICABLE", "A fault injected at each fallible post-store effect boundary still runs every subsequent best-effort effect and the final resolver wake exactly once, in the frozen order.",
 			"hostile:postcommit_fault_boundaries").effects(cpMap{"record_best_height": 1, "da_ttl_attempt": 1, "resolver_wake": 1}).
@@ -2093,13 +2093,16 @@ func cpEffectRows() []cpRow {
 			"spec_ref":           "rubin-spec@c14b0100 RUBIN_COMPACT_BLOCKS.md section 19",
 		}, "observable:frozen_effect_order", "observable:postcommit_effects").pending(),
 		cpAuth("C01-RELAY-ACCEPTED-001", "The section-19 relay disposition for one authorized publication: proven NEW with a non-empty ordered canonical-applied summary.", cpMap{
-			"ibd":            "sampled after the transition publication; if IBD, no attempt",
-			"owner_snapshot": "one snapshot of post-handshake send owners, deduplicated by owner identity; a captured handle is never re-resolved or retargeted",
-			"frames":         "per summary row in canonical order, exactly one ordinary single-vector MSG_BLOCK inv frame per (owner x row)",
-			"exclusion":      "only the invocation-local (captured source owner, exact row hash) pair; never another owner and never another row",
-			"write_failure":  "stops only that owner's remaining suffix; other owners remain eligible",
-			"best_effort":    "no retry and no rollback; a relay result cannot change commit truth or the published summary",
-			"spec_ref":       "rubin-spec@c14b0100 RUBIN_COMPACT_BLOCKS.md section 19",
+			"ibd":             "sampled after the transition publication; if IBD, no attempt",
+			"owner_snapshot":  "one snapshot of post-handshake send owners, deduplicated by owner identity; a captured handle is never re-resolved or retargeted",
+			"frames":          "per summary row in canonical order, exactly one ordinary single-vector MSG_BLOCK inv frame per (owner x row)",
+			"exclusion":       "only the invocation-local (captured source owner, exact row hash) pair; never another owner and never another row",
+			"write_failure":   "stops only that owner's remaining suffix; other owners remain eligible",
+			"best_effort":     "no retry and no rollback; a relay result cannot change canonical state, cleanup, commit truth or the published summary",
+			"compact_modes":   "compact modes 0, 1 and 2 are additive and MUST NOT replace or suppress this ordinary block inventory",
+			"orphan_apply":    "a separately accepted orphan apply uses its existing client schedule and, if it publishes an eligible new summary, is evaluated as a separate publication",
+			"client_specific": "cross-peer scheduling and the client-local boundary of an immediate send-owner attempt remain client-specific (not a comparator mismatch)",
+			"spec_ref":        "rubin-spec@c14b0100 RUBIN_COMPACT_BLOCKS.md section 19",
 		}, "observable:frozen_effect_order", "observable:postcommit_effects").pending(),
 		cpAuth("C01-INVENTORY-001", "Inventory answers from current complete BlockStore or orphan residency; a partial or corrupt row returns its local store disposition without entering a receive loop.", cpMap{
 			"block_seen_role": "relay dedup only", "residency_authority": "current BlockStore/orphan", "partial_or_corrupt": "local store disposition, no receive loop",
@@ -2154,7 +2157,7 @@ func cpOrphanRows() []cpRow {
 
 func cpResourceRows() []cpRow {
 	return []cpRow{
-		cpAuth("C01-RES-IDENTITIES-001", "The owned resource identities. Every resource identity is LOCAL_RESOURCE_UNAVAILABLE and never consensus invalidity, and invalid configured bounds are startup or config failures outside peer retry. The identities no chain slice delivers are frozen separately in C01-RES-IDENTITIES-PENDING-001.", cpMap{
+		cpAuth("C01-RES-IDENTITIES-001", "The resource identities are exact and closed across this row and C01-RES-IDENTITIES-PENDING-001: The owned resource identities. Every resource identity is LOCAL_RESOURCE_UNAVAILABLE and never consensus invalidity, and invalid configured bounds are startup or config failures outside peer retry. The identities no chain slice delivers are frozen separately in C01-RES-IDENTITIES-PENDING-001.", cpMap{
 			"identities":                "noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact",
 			"recovery_artifact":         "non-retriable; profile-permitted pruned suffix awaiting validated reacquisition; distinct from bounded-storage reservation failure",
 			"admission":                 "never latched for any resource identity; preserves OLD",
@@ -2176,7 +2179,7 @@ func cpResourceRows() []cpRow {
 			detail(cpMap{"joined_waiters_max": 1, "deadline": "original receive-start +30 second absolute deadline", "fixed_backoff": false, "candidate_retained": false}).pending(),
 		cpObs("C01-BUDGET-RACE-001", "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_capacity)", "OLD", "Registration-versus-release races, an already-closed notification, capacity released before the waiter is scheduled, a duplicate or different hash while the slot is armed, and disconnect or deadline races all resolve deterministically.",
 			"hostile:permit_budget_races", "observable:permit_retry_budget").effects(cpMap{"retry_slots": 1, "peer_penalty": 0}).
-			detail(cpMap{"retriable": true, "requires_proven_exact_hash": true, "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool"}).pending(),
+			detail(cpMap{"retriable": true, "requires_proven_exact_hash": true, "observed_generation_notification": true, "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool"}).pending(),
 		cpObs("C01-WIRE-OVERFLOW-001", "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_overflow)", "OLD", "A checked inbound reservation overflow or replacement failure is non-retriable; a valid payload discarded because of a bad checksum, read or declared length keeps the documented wire-error precedence and never becomes a resource result.",
 			"hostile:inbound_reservation_and_wire_errors").effects(cpMap{"retry_slots": 0, "getdata_sent": 0}).
 			detail(cpMap{"retriable": false, "wire_error_precedence": "frame_length, frame_read, frame_checksum"}).pending(),

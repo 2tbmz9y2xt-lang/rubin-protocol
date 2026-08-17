@@ -26,10 +26,11 @@ Expected rows are authored architecture authority from RUB-882 as superseded by
 RUB-1180; the generator never calls a Go or Rust node production path to compute
 an expected value.
 
-Rows carrying `pending_owner: RUB-910` — the two section-19 relay rows and the
-un-owned resource identities — are excluded from the RUB-926 zero-mismatch
-acceptance and from RUB-901 equality until that issue is Done. The artifact is
-INERT (see `conformance/README.md`).
+Rows carrying `pending_owner: RUB-910` (the section-19 relay rows, the
+un-owned resource identities, the permit/retry-budget and inbound-budget rows,
+apply-plan metadata and reclaimed-hash inventory) are excluded from the
+RUB-926 zero-mismatch acceptance and from RUB-901 equality until that issue is
+Done. The artifact is INERT (see `conformance/README.md`).
 
 Exact commands: `scripts/dev-env.sh -- bash -lc 'cd clients/go && go run
 ./cmd/gen-conformance-fixtures --output-dir <abs>'` and `scripts/dev-env.sh --

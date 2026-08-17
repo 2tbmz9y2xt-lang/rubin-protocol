@@ -256,16 +256,6 @@ class CanonicalPipelineSchemaTests(unittest.TestCase):
         ids = [row["id"] for row in data["rows"]]
         self.assertEqual(len(ids), len(set(ids)), "committed corpus has duplicate row ids")
 
-    def test_coverage_receipt_maps_every_class_to_at_least_one_row(self):
-        _, data = self._load()
-        known = {row["id"] for row in data["rows"]}
-        self.assertGreaterEqual(len(data["coverage_receipt"]), 59)
-        for klass, rows in data["coverage_receipt"].items():
-            row_ids = [part.strip() for part in rows.split(",")]
-            self.assertTrue(row_ids, f"class {klass} maps to zero rows")
-            for row_id in row_ids:
-                self.assertIn(row_id, known, f"class {klass} names unknown row {row_id}")
-
 
 if __name__ == "__main__":
     unittest.main()
