@@ -2061,8 +2061,8 @@ func cpPresenceRows() []cpRow {
 			}),
 		cpObs("C01-GC-HEALTHY-001", "LOCAL_RESOURCE_UNAVAILABLE(noncanonical_bytes)", "OLD", "Quota exhaustion with only healthy rows returns the non-retriable resource result after the damaged-only GC attempt; noncanonical_count behaves identically.",
 			"taxonomy:LOCAL_RESOURCE_UNAVAILABLE", "observable:resource_identities", "observable:gc_damage_order").counters("0", "0").
-			effects(cpMap{"retry_slots": 0}).
-			detail(cpMap{"retriable": false, "gc_attempted": true, "rows_reclaimed": 0, "release_notification": false}),
+			effects(cpMap{"retry_slots": 0, "release_notification": false, "rows_reclaimed": 0}).
+			detail(cpMap{"retriable": false, "gc_attempted": true}),
 		cpAuth("C01-GC-CRASH-001", "Quota cap+1, partial create and a crash at each delete or fsync boundary stay fail-closed; a canonical-to-side reclassification with an open reader keeps that reader's artifact readable.", cpMap{
 			"crash_boundaries":                  "before_delete, after_delete_before_fsync, after_fsync",
 			"partial_create":                    "reclaimed, never counted as healthy",
