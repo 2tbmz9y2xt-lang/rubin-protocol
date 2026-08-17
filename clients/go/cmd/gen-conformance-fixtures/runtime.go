@@ -1982,7 +1982,8 @@ func cpPathRows() []cpRow {
 			"compact_absent_cycle": "release_first_lease, reconstruction_or_network, reacquire_lease, repeat_strict_presence",
 		}, "observable:paths", "observable:path_precedence", "observable:p2p_precedence"),
 		cpObs("C01-DIRECT-001", "ACCEPTED", "NEW", "One coherent A capture, one rolling private B, one process-local capacity-1 permit and one durable canonical-index commit publish the complete chain, standard, DA and owner image with no-fail RAM publication.",
-			"taxonomy:ACCEPTED", "observable:counter_deltas", "accepted:coherent_capture_publication").counters("+1", "0"),
+			"taxonomy:ACCEPTED", "observable:counter_deltas", "accepted:coherent_capture_publication").counters("+1", "0").
+			rpc("result-selecting mined candidate: committed with identity; bootstrap: continuation-only"),
 		cpObs("C01-GENESIS-001", "ACCEPTED", "NEW", "Genesis bootstrap from the exact empty pre-genesis state; the genesis guard runs after the direct target check and before the strict initial canonical-index preflight.",
 			"observable:path_precedence").counters("+1", "0").rpc("bootstrap: continuation-only"),
 		cpObs("C01-SIDE-001", "STORED_NONCANONICAL", "NOT_APPLICABLE", "A losing side block passes target, MTP and basic validation and is stored; no canonical mutation and no counter change.",
@@ -2058,22 +2059,23 @@ func cpEffectRows() []cpRow {
 			effects(cpMap{"block_seen": "preserved", "record_best_height": 0, "inv_attempt": 0, "da_ttl_attempt": 0, "resolver_wake": 0, "canonical_da_sets_consumed": 0, "broadcast": 0, "wire_response": 0, "peer_penalty": 0, "provider_reads": 0}).
 			detail(cpMap{"derivation": "strict presence plus proven no-effect behavior"}),
 		cpObs("C01-NOOP-CMPCT-001", "KNOWN_BLOCK_NOOP(STORED_NONCANONICAL)", "NOT_APPLICABLE", "A duplicate compact receive whose blockSeen is unset leaves it unset: blockSeen is relay dedup only and is neither residency nor invalidity authority.",
-			"observable:known_block_noop", "observable:block_seen_inventory").counters("0", "0").effects(cpMap{"block_seen": "unset", "inv_attempt": 0, "resolver_wake": 0}),
-		cpObs("C01-NOOP-RECLAIMED-001", "STORED_NONCANONICAL", "NOT_APPLICABLE", "A reclaimed row with a stale blockSeen is ABSENT under strict presence, so the receive stores it again and preserves the stale blockSeen value.",
+			"observable:known_block_noop", "observable:block_seen_inventory", "taxonomy:KNOWN_BLOCK_NOOP").counters("0", "0").effects(cpMap{"block_seen": "unset", "inv_attempt": 0, "resolver_wake": 0}),
+		cpObs("C01-RECLAIMED-RECEIVE-001", "STORED_NONCANONICAL", "NOT_APPLICABLE", "A reclaimed row with a stale blockSeen is ABSENT under strict presence, so the receive stores it again and preserves the stale blockSeen value.",
 			"observable:block_seen_inventory", "hostile:duplicate_and_corrupt_combinations").effects(cpMap{"block_seen": "preserved"}),
 		cpObs("C01-EFFECT-STORED-001", "STORED_NONCANONICAL", "NOT_APPLICABLE", "A fresh STORED_NONCANONICAL freezes the POST-RUB-911 P2P-owned effect order, which has no consume step; the side block consumes zero canonical-DA sets.",
 			"observable:frozen_effect_order", "observable:postcommit_effects", "taxonomy:STORED_NONCANONICAL").
 			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": 0}),
 		cpObs("C01-EFFECT-ACCEPTED-001", "ACCEPTED", "NEW", "A fresh ACCEPTED freezes the same P2P-owned effect order; canonical-DA consumption is not a step of it but an identity of the transition image, consuming every nonempty canonical-applied summary entry exactly once and never from a post-return caller.",
 			"observable:frozen_effect_order", "taxonomy:ACCEPTED").
-			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": "every nonempty summary entry exactly once, inside the published image"}).
+			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": "+summary_entry_count"}).
 			detail(cpMap{"da_ttl_fence": "the DA-orphan TTL advance never interleaves with a canonical transition", "post_return_consume_callers": 0}),
 		cpObs("C01-FAULT-STORED-001", "STORED_NONCANONICAL", "NOT_APPLICABLE", "A fault injected at each fallible post-store effect boundary still runs every subsequent best-effort effect and the final resolver wake exactly once, in the frozen order.",
 			"hostile:postcommit_fault_boundaries").effects(cpMap{"record_best_height": 1, "da_ttl_attempt": 1, "resolver_wake": 1}).
 			detail(cpMap{"fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt", "short_circuit": false, "replay": false, "reordered_continuation": false, "result_changed_by_failure": false}),
 		cpObs("C01-FAULT-ACCEPTED-001", "ACCEPTED", "NEW", "The same fault matrix on an ACCEPTED row with a nonempty canonical-applied summary: failures add bounded diagnostics only and never duplicate the planner-owned counter or re-consume a DA set.",
-			"hostile:postcommit_fault_boundaries").counters("+1", "0").effects(cpMap{"resolver_wake": 1, "canonical_da_sets_consumed": "unchanged by any post-store failure"}).
-			detail(cpMap{"duplicate_counter_mutation": false, "artifact_state_changed_by_failure": false, "peer_policy_changed_by_failure": false}),
+			"hostile:postcommit_fault_boundaries").counters("+1", "0").
+			effects(cpMap{"record_best_height": 1, "da_ttl_attempt": 1, "resolver_wake": 1}).
+			detail(cpMap{"duplicate_counter_mutation": false, "artifact_state_changed_by_failure": false, "peer_policy_changed_by_failure": false, "fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt", "short_circuit": false, "replay": false, "reordered_continuation": false, "canonical_da_reconsumed": false}),
 		cpAuth("C01-POSTCOMMIT-001", "Complete postcommit effect enumeration with exact zero, once or count dispositions; there is no durable outbox.", cpMap{
 			"metrics":               "once",
 			"checkpoint":            "derived cadence, never canonical authority",
@@ -2121,7 +2123,7 @@ func cpOrphanRows() []cpRow {
 		cpObs("C01-ORPH-DUP-001", "ORPHAN_ALREADY_RETAINED", "OLD", "A duplicate orphan is already-retained: no copy, no effect and no eviction.",
 			"taxonomy:ORPHAN_ALREADY_RETAINED", "observable:orphan_pool").effects(cpMap{"evictions": 0, "block_seen": "unchanged"}),
 		cpObs("C01-ORPH-EVICT-001", "ORPHAN_RETAINED", "OLD", "Crossing 500 to 501 unique entries, or 64 MiB to cap+1 raw bytes, retains the newest row and evicts oldest FIFO rows until both caps hold; each eviction removes that row and clears its blockSeen.",
-			"observable:orphan_pool", "hostile:orphan_cap_boundaries_and_source_keys").effects(cpMap{"evictions": 1, "block_seen": "set for the new row, cleared for the evicted row"}).
+			"observable:orphan_pool", "hostile:orphan_cap_boundaries_and_source_keys").effects(cpMap{"evictions": 1, "block_seen": "set", "evicted_block_seen": "cleared"}).
 			detail(cpMap{"boundaries": "unique_count 500->501 and raw_bytes 64MiB->cap+1", "retained": "newest", "eviction_policy": "oldest FIFO first"}),
 		cpObs("C01-ORPH-INFLIGHT-001", "ORPHAN_RETAINED", "OLD", "Eviction is unconditional and there is no pin set: a row under resolution has already been removed from the pool before the resolver sees it, so no in-pool row is pin-protected and no cap infeasibility can arise.",
 			"hostile:orphan_admission_eviction_refusal", "observable:orphan_pool").
@@ -2157,12 +2159,14 @@ func cpOrphanRows() []cpRow {
 
 func cpResourceRows() []cpRow {
 	return []cpRow{
-		cpAuth("C01-RES-IDENTITIES-001", "The resource identities are exact and closed across this row and C01-RES-IDENTITIES-PENDING-001: The owned resource identities. Every resource identity is LOCAL_RESOURCE_UNAVAILABLE and never consensus invalidity, and invalid configured bounds are startup or config failures outside peer retry. The identities no chain slice delivers are frozen separately in C01-RES-IDENTITIES-PENDING-001.", cpMap{
+		cpAuth("C01-RES-IDENTITIES-001", "The resource identities are exact and closed across this row and C01-RES-IDENTITIES-PENDING-001; this row carries the owned identities. Every resource identity is LOCAL_RESOURCE_UNAVAILABLE and never consensus invalidity, and invalid configured bounds are startup or config failures outside peer retry.", cpMap{
 			"identities":                "noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact",
 			"recovery_artifact":         "non-retriable; profile-permitted pruned suffix awaiting validated reacquisition; distinct from bounded-storage reservation failure",
 			"admission":                 "never latched for any resource identity; preserves OLD",
 			"invalid_configured_bounds": "startup/config failure, outside peer retry",
 		}, "observable:resource_identities", "taxonomy:LOCAL_RESOURCE_UNAVAILABLE"),
+		cpObs("C01-RES-RECOVERY-001", "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)", "OLD", "Profile-permitted pruned suffix data awaiting validated reacquisition is non-retriable, preserves OLD, does not latch admission and arms no peer retry; it is distinct from bounded-storage reservation failure and from loss of an artifact the active retention profile already required.",
+			"observable:resource_identities", "taxonomy:LOCAL_RESOURCE_UNAVAILABLE").counters("0", "0").effects(cpMap{"retry_slots": 0, "peer_penalty": 0}),
 		cpAuth("C01-RES-IDENTITIES-PENDING-001", "The resource identities whose machinery no slice of this chain delivers; they are excluded from the RUB-926 zero-mismatch acceptance until RUB-910 is Done.", cpMap{
 			"identities": "inbound_budget_capacity, inbound_budget_overflow, apply_plan_metadata",
 			"retriable":  "inbound_budget_capacity only, and only with an independently proven exact block hash",
@@ -2175,7 +2179,7 @@ func cpResourceRows() []cpRow {
 			effects(cpMap{"peer_penalty": 0, "retry_slots": 0, "getdata_sent": 0, "record_best_height": 0, "block_seen": "unchanged"}).
 			detail(cpMap{"retriable": false, "release_notification": false}).pending(),
 		cpObs("C01-BUSY-001", "LOCAL_BUSY", "OLD", "LOCAL_BUSY carries the canonical-permit observed-generation notification and arms the single peer retry slot with one joined waiter; it retains no candidate, never blocks the socket reader and never follows strict presence or stateful consensus.",
-			"taxonomy:LOCAL_BUSY", "observable:permit_retry_budget").counters("0", "0").effects(cpMap{"retry_slots": 1, "getdata_sent": 1, "peer_penalty": 0}).
+			"taxonomy:LOCAL_BUSY", "observable:permit_retry_budget").counters("0", "0").effects(cpMap{"retry_slots": 1, "peer_penalty": 0}).
 			detail(cpMap{"joined_waiters_max": 1, "deadline": "original receive-start +30 second absolute deadline", "fixed_backoff": false, "candidate_retained": false}).pending(),
 		cpObs("C01-BUDGET-RACE-001", "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_capacity)", "OLD", "Registration-versus-release races, an already-closed notification, capacity released before the waiter is scheduled, a duplicate or different hash while the slot is armed, and disconnect or deadline races all resolve deterministically.",
 			"hostile:permit_budget_races", "observable:permit_retry_budget").effects(cpMap{"retry_slots": 1, "peer_penalty": 0}).
@@ -2197,15 +2201,15 @@ func cpTerminalRows() []cpRow {
 	return []cpRow{
 		cpObs("C01-PRENS-001", "LOCAL_PERSISTENCE_ERROR(precommit)", "OLD", "A canonical-index failure before the namespace change reports the exact old state with no admission latch, no counter change and no retry.",
 			"accepted:pre_namespace_index_failure", "taxonomy:LOCAL_PERSISTENCE_ERROR").counters("0", "0").rpc("not_committed").
-			detail(cpMap{"admission": "not latched", "retry_slots": 0, "old_image": "exact"}),
+			detail(cpMap{"admission": "not latched", "retry_slots": 0, "old_image": "exact", "triggers": "canonical-index atomic write before the namespace change; durable write of the verified precommit recovery checkpoint or either suffix proof set"}),
 		cpObs("C01-TP-OLD-001", "TERMINAL_PERSISTENCE(old)", "OLD", "One strict readback after a fault that may have crossed the commit point sees the exact old canonical-index identity; no rollback, retry, rewrite or heuristic classification follows.",
 			"taxonomy:TERMINAL_PERSISTENCE", "accepted:post_namespace_terminal_class").counters("0", "0").
 			rpc("not_committed, never ordinary retry").detail(cpMap{"admission": "latched", "rollback_attempted": false}),
 		cpObs("C01-TP-NEW-001", "TERMINAL_PERSISTENCE(new)", "NEW", "The strict readback sees the exact planned-new identity: the new chain, standard, DA and owner images are truth and the committed identity is reported.",
-			"accepted:post_namespace_terminal_class").detail(cpMap{"admission": "latched"}).
+			"accepted:post_namespace_terminal_class", "taxonomy:TERMINAL_PERSISTENCE").detail(cpMap{"admission": "latched"}).
 			rpc("committed; mined candidate identity only when the result-selecting mined candidate apply committed"),
 		cpObs("C01-TP-UNKNOWN-001", "TERMINAL_PERSISTENCE(neither_or_unreadable)", "UNKNOWN", "Every other or unreadable readback publishes neither guessed image and exposes no summary and no relay authority.",
-			"accepted:post_namespace_terminal_class", "hostile:canonical_ambiguity_and_readers").counters("0", "0").
+			"accepted:post_namespace_terminal_class", "hostile:canonical_ambiguity_and_readers", "taxonomy:TERMINAL_PERSISTENCE").counters("0", "0").
 			rpc("unknown; legacy mined absent").detail(cpMap{"admission": "latched", "summary_rows": 0, "relay_authority": false, "guessed_image": false, "stable_live_aliases": "a malformed live cache against a valid disk image, a retained-alias mutation under a continuously held permit, and admission readers active at terminal detection all keep stable aliases", "final_ram_cache_drift_check": "against the committed index bytes"}),
 		cpObs("C01-TERMINV-001", "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD", "A missing or corrupt selected retained record or accounting value, an exact-token mismatch, a duplicate claim, or a checked arithmetic underflow or overflow preserves OLD, publishes no candidate delta and keeps mutation admission latched.",
 			"taxonomy:TERMINAL_LOCAL_INVARIANT").counters("0", "0").rpc("not_committed with the existing terminal result surface").
@@ -2216,7 +2220,7 @@ func cpTerminalRows() []cpRow {
 			"taxonomy:STALE_LOCAL_PLAN").counters("0", "0").rpc("not_committed"),
 		cpObs("C01-CANCEL-001", "LOCAL_CANCELLED", "OLD", "A miner snapshot cancelled or released before PoW at the reorg peak returns LOCAL_CANCELLED with the exact old image, no canonical mutation and no peer effect.", //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
 			"taxonomy:LOCAL_CANCELLED", "hostile:miner_reorg_peak_cancellation").counters("0", "0").effects(cpMap{"peer_penalty": 0}).rpc("not_committed"), //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
-		cpAuth("C01-CKPT-001", "The derived checkpoint is not canonical authority: an accepted transition may report degraded, a subsequent success clears it, startup is fail-closed, and a multi-row cadence writes only the final state once.", cpMap{
+		cpAuth("C01-CKPT-001", "The derived post-commit checkpoint is not canonical authority: an accepted transition may report degraded, a subsequent success clears it, startup is fail-closed, and a multi-row cadence writes only the final state once.", cpMap{
 			"accepted_with_degraded": true, "subsequent_success_clears_degraded": true,
 			"startup_on_missing_or_corrupt_required_artifact": "fail-closed as TERMINAL_STORE_INTEGRITY(canonical); no reader, admission or relay exposure",
 			"multi_row_cadence_writes":                        1,
@@ -2296,9 +2300,10 @@ func mustValidateCanonicalPipelineRows(rows []cpRow) {
 }
 
 // mustValidateCanonicalPipelineKind checks only what the JSON schema cannot:
-// closed-taxonomy and commit-truth membership. Row shapes (which fields each
-// kind requires and forbids) are owned by the schema's allOf/if-then rules and
-// asserted by tools/tests/test_check_conformance_fixtures_drift.py.
+// closed-taxonomy and commit-truth membership. Row shapes (the required
+// fields per kind, and result being forbidden on non-observation kinds) are
+// owned by the schema's allOf/if-then rules and asserted by
+// tools/tests/test_check_conformance_fixtures_drift.py.
 func mustValidateCanonicalPipelineKind(row cpRow, taxonomy, truths map[string]bool) {
 	switch row.Kind {
 	case "observation":

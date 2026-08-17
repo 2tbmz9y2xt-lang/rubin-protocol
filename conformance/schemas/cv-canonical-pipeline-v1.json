@@ -65,10 +65,14 @@
             "rejected_delta": { "type": "string", "pattern": "^([+][a-z_0-9]+|0)$" }
           }
         },
-        "effects": { "type": "object", "minProperties": 1 },
+        "effects": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "`order` is the normative ordering specification of the named effect boundaries — an observed sequence must be consistent with it — not a count; a boundary that makes no attempt (e.g. block inventory relay without section-19 authority) still occupies its position."
+        },
         "detail": { "type": "object", "minProperties": 1, "description": "Static authored authority for the row. Adapters do not emit it and comparators do not compare it; every adapter-emitted disposition lives in a typed row field or in effects." },
         "pending_owner": {
-          "description": "NORMATIVE ACCEPTANCE SEMANTICS. A row carrying pending_owner names the RUB issue that must deliver the machinery the row describes. Until that issue is Done the row is excluded from the RUB-926 zero-mismatch acceptance comparison and from RUB-901 Go-versus-Rust equality: an adapter MUST still emit whatever it observes for the row, and a comparator MUST NOT report the row as a mismatch. When the named issue is Done the field is removed by a C01 revision and the row becomes gate-bearing. Only RUB-922 (C01) may add, change or remove this field; a consumer that mutates it is out of contract.",
+          "description": "NORMATIVE ACCEPTANCE SEMANTICS. A row carrying pending_owner names the RUB issue that must deliver the machinery the row describes. Until that issue is Done the row is excluded from the RUB-926 zero-mismatch acceptance comparison and from RUB-901 Go-versus-Rust equality: for an observation row an adapter MUST still emit whatever it observes and a comparator MUST NOT report the row as a mismatch; on an authority or forbidden row the field is a provenance marker only, since that kind is never emitted or compared. When the named issue is Done the field is removed by a C01 revision and an observation row becomes gate-bearing. Only RUB-922 (C01) may add, change or remove this field; a consumer that mutates it is out of contract.",
           "type": "string",
           "pattern": "^RUB-[0-9]+$"
         }

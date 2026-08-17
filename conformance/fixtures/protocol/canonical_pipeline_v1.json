@@ -50,7 +50,7 @@
     "accepted:rust_repeat_corpus": "C01-GO-CONSTANTS-001",
     "hostile:apply_plan_metadata_caps": "C01-APPLYMETA-CAP-001, C01-APPLYMETA-OVER-001",
     "hostile:canonical_ambiguity_and_readers": "C01-TP-UNKNOWN-001",
-    "hostile:duplicate_and_corrupt_combinations": "C01-PRESENCE-TERMINAL-001, C01-PRESENCE-STOREERR-001, C01-NOOP-FULL-001, C01-NOOP-RECLAIMED-001",
+    "hostile:duplicate_and_corrupt_combinations": "C01-PRESENCE-TERMINAL-001, C01-PRESENCE-STOREERR-001, C01-NOOP-FULL-001, C01-RECLAIMED-RECEIVE-001",
     "hostile:equal_work_opposite_orders": "C01-EQUALWORK-001",
     "hostile:inbound_reservation_and_wire_errors": "C01-WIRE-OVERFLOW-001",
     "hostile:late_consensus_invalid_wins": "C01-FIRSTERR-LATE-001",
@@ -61,7 +61,7 @@
     "hostile:permit_budget_races": "C01-BUDGET-RACE-001",
     "hostile:postcommit_fault_boundaries": "C01-FAULT-STORED-001, C01-FAULT-ACCEPTED-001",
     "hostile:quota_crash_and_reclassification": "C01-GC-ORDER-001, C01-GC-CRASH-001",
-    "observable:block_seen_inventory": "C01-NOOP-CMPCT-001, C01-NOOP-RECLAIMED-001, C01-INVENTORY-001, C01-INVENTORY-RECLAIMED-001",
+    "observable:block_seen_inventory": "C01-NOOP-CMPCT-001, C01-RECLAIMED-RECEIVE-001, C01-INVENTORY-001, C01-INVENTORY-RECLAIMED-001",
     "observable:checkpoint_rows": "C01-CKPT-001",
     "observable:counter_deltas": "C01-DIRECT-001, C01-SIDE-001, C01-REORG-001, C01-DISCONNECT-001, C01-NEUTRAL-001",
     "observable:final_state_atomicity": "C01-REORG-001",
@@ -76,7 +76,7 @@
     "observable:permit_retry_budget": "C01-BUSY-001, C01-BUDGET-RACE-001",
     "observable:postcommit_effects": "C01-EFFECT-STORED-001, C01-POSTCOMMIT-001, C01-RELAY-STORED-001, C01-RELAY-ACCEPTED-001",
     "observable:presence_truth_table": "C01-PRESENCE-001, C01-PRESENCE-TERMINAL-001, C01-PRESENCE-STOREERR-001",
-    "observable:resource_identities": "C01-GC-HEALTHY-001, C01-RES-IDENTITIES-001, C01-RES-IDENTITIES-PENDING-001",
+    "observable:resource_identities": "C01-GC-HEALTHY-001, C01-RES-IDENTITIES-001, C01-RES-RECOVERY-001, C01-RES-IDENTITIES-PENDING-001",
     "observable:source_quota_key": "C01-SRCKEY-001",
     "rejected:foreign_surface_mutation": "C01-FORBID-SURFACE-001",
     "rejected:intermediate_or_duplicate_visibility": "C01-FORBID-INTERMEDIATE-001",
@@ -86,11 +86,11 @@
     "rejected:retry_and_pool_shape": "C01-FORBID-RETRY-001",
     "taxonomy:ACCEPTED": "C01-DIRECT-001, C01-EFFECT-ACCEPTED-001",
     "taxonomy:CONSENSUS_INVALID": "C01-FIRSTERR-LATE-001",
-    "taxonomy:KNOWN_BLOCK_NOOP": "C01-NOOP-FULL-001, C01-TERMINV-BOOT-001",
+    "taxonomy:KNOWN_BLOCK_NOOP": "C01-NOOP-FULL-001, C01-NOOP-CMPCT-001, C01-TERMINV-BOOT-001",
     "taxonomy:LOCAL_BUSY": "C01-BUSY-001",
     "taxonomy:LOCAL_CANCELLED": "C01-CANCEL-001",
     "taxonomy:LOCAL_PERSISTENCE_ERROR": "C01-PRENS-001",
-    "taxonomy:LOCAL_RESOURCE_UNAVAILABLE": "C01-GC-HEALTHY-001, C01-RES-IDENTITIES-001, C01-RES-IDENTITIES-PENDING-001",
+    "taxonomy:LOCAL_RESOURCE_UNAVAILABLE": "C01-GC-HEALTHY-001, C01-RES-IDENTITIES-001, C01-RES-RECOVERY-001, C01-RES-IDENTITIES-PENDING-001",
     "taxonomy:LOCAL_STORE_ERROR": "C01-PRESENCE-STOREERR-001",
     "taxonomy:MISSING_PARENT": "C01-ORPH-MISSING-PARENT-001",
     "taxonomy:ORPHAN_ALREADY_RETAINED": "C01-ORPH-DUP-001",
@@ -98,7 +98,7 @@
     "taxonomy:STALE_LOCAL_PLAN": "C01-STALE-001",
     "taxonomy:STORED_NONCANONICAL": "C01-SIDE-001, C01-EFFECT-STORED-001",
     "taxonomy:TERMINAL_LOCAL_INVARIANT": "C01-TERMINV-001, C01-TERMINV-BOOT-001",
-    "taxonomy:TERMINAL_PERSISTENCE": "C01-TP-OLD-001",
+    "taxonomy:TERMINAL_PERSISTENCE": "C01-TP-OLD-001, C01-TP-NEW-001, C01-TP-UNKNOWN-001",
     "taxonomy:TERMINAL_STORE_INTEGRITY": "C01-FIRSTERR-INDEX-001"
   },
   "rows": [
@@ -122,6 +122,7 @@
       "scenario": "One coherent A capture, one rolling private B, one process-local capacity-1 permit and one durable canonical-index commit publish the complete chain, standard, DA and owner image with no-fail RAM publication.",
       "result": "ACCEPTED",
       "commit_truth": "NEW",
+      "rpc_projection": "result-selecting mined candidate: committed with identity; bootstrap: continuation-only",
       "canonical_counters": {
         "accepted_delta": "+1",
         "rejected_delta": "0"
@@ -361,7 +362,7 @@
       }
     },
     {
-      "id": "C01-NOOP-RECLAIMED-001",
+      "id": "C01-RECLAIMED-RECEIVE-001",
       "kind": "observation",
       "scenario": "A reclaimed row with a stale blockSeen is ABSENT under strict presence, so the receive stores it again and preserves the stale blockSeen value.",
       "result": "STORED_NONCANONICAL",
@@ -399,7 +400,7 @@
       "commit_truth": "NEW",
       "effects": {
         "block_seen": "set",
-        "canonical_da_sets_consumed": "every nonempty summary entry exactly once, inside the published image",
+        "canonical_da_sets_consumed": "+summary_entry_count",
         "da_ttl_attempt": 1,
         "order": [
           "record_candidate_best_height",
@@ -446,13 +447,19 @@
         "rejected_delta": "0"
       },
       "effects": {
-        "canonical_da_sets_consumed": "unchanged by any post-store failure",
+        "da_ttl_attempt": 1,
+        "record_best_height": 1,
         "resolver_wake": 1
       },
       "detail": {
         "artifact_state_changed_by_failure": false,
+        "canonical_da_reconsumed": false,
         "duplicate_counter_mutation": false,
-        "peer_policy_changed_by_failure": false
+        "fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt",
+        "peer_policy_changed_by_failure": false,
+        "reordered_continuation": false,
+        "replay": false,
+        "short_circuit": false
       }
     },
     {
@@ -560,7 +567,8 @@
       "result": "ORPHAN_RETAINED",
       "commit_truth": "OLD",
       "effects": {
-        "block_seen": "set for the new row, cleared for the evicted row",
+        "block_seen": "set",
+        "evicted_block_seen": "cleared",
         "evictions": 1
       },
       "detail": {
@@ -654,12 +662,27 @@
     {
       "id": "C01-RES-IDENTITIES-001",
       "kind": "authority",
-      "scenario": "The resource identities are exact and closed across this row and C01-RES-IDENTITIES-PENDING-001: The owned resource identities. Every resource identity is LOCAL_RESOURCE_UNAVAILABLE and never consensus invalidity, and invalid configured bounds are startup or config failures outside peer retry. The identities no chain slice delivers are frozen separately in C01-RES-IDENTITIES-PENDING-001.",
+      "scenario": "The resource identities are exact and closed across this row and C01-RES-IDENTITIES-PENDING-001; this row carries the owned identities. Every resource identity is LOCAL_RESOURCE_UNAVAILABLE and never consensus invalidity, and invalid configured bounds are startup or config failures outside peer retry.",
       "detail": {
         "admission": "never latched for any resource identity; preserves OLD",
         "identities": "noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact",
         "invalid_configured_bounds": "startup/config failure, outside peer retry",
         "recovery_artifact": "non-retriable; profile-permitted pruned suffix awaiting validated reacquisition; distinct from bounded-storage reservation failure"
+      }
+    },
+    {
+      "id": "C01-RES-RECOVERY-001",
+      "kind": "observation",
+      "scenario": "Profile-permitted pruned suffix data awaiting validated reacquisition is non-retriable, preserves OLD, does not latch admission and arms no peer retry; it is distinct from bounded-storage reservation failure and from loss of an artifact the active retention profile already required.",
+      "result": "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)",
+      "commit_truth": "OLD",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "peer_penalty": 0,
+        "retry_slots": 0
       }
     },
     {
@@ -723,7 +746,6 @@
         "rejected_delta": "0"
       },
       "effects": {
-        "getdata_sent": 1,
         "peer_penalty": 0,
         "retry_slots": 1
       },
@@ -801,7 +823,8 @@
       "detail": {
         "admission": "not latched",
         "old_image": "exact",
-        "retry_slots": 0
+        "retry_slots": 0,
+        "triggers": "canonical-index atomic write before the namespace change; durable write of the verified precommit recovery checkpoint or either suffix proof set"
       }
     },
     {
@@ -910,7 +933,7 @@
     {
       "id": "C01-CKPT-001",
       "kind": "authority",
-      "scenario": "The derived checkpoint is not canonical authority: an accepted transition may report degraded, a subsequent success clears it, startup is fail-closed, and a multi-row cadence writes only the final state once.",
+      "scenario": "The derived post-commit checkpoint is not canonical authority: an accepted transition may report degraded, a subsequent success clears it, startup is fail-closed, and a multi-row cadence writes only the final state once.",
       "detail": {
         "accepted_with_degraded": true,
         "multi_row_cadence_degraded": "logical OR across every row of the transition",
