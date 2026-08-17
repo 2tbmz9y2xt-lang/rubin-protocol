@@ -2000,7 +2000,7 @@ func cpPathRows() []cpRow {
 			"observable:counter_deltas").counters("0", "0").detail(cpMap{"summary_rows": 0, "connected_block_decay_events": 0}),
 		cpAuth("C01-NEUTRAL-001", "Results that change neither planner-owned canonical counter, carry no peer penalty and perform no unauthorized canonical mutation and do not latch mutation admission, plus the exact plan and candidate-queue bounds.", cpMap{
 			"neutral_results":                    "LOCAL_BUSY, LOCAL_RESOURCE_UNAVAILABLE, STALE_LOCAL_PLAN, LOCAL_CANCELLED, KNOWN_BLOCK_NOOP, STORED_NONCANONICAL, ORPHAN_RETAINED, ORPHAN_ALREADY_RETAINED, MISSING_PARENT, LOCAL_STORE_ERROR(noncanonical), LOCAL_PERSISTENCE_ERROR(precommit)", //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
-			"no_peer_penalty_results":            "every neutral result above plus LOCAL_STORE_ERROR(noncanonical), LOCAL_PERSISTENCE_ERROR(precommit), TERMINAL_STORE_INTEGRITY(canonical), TERMINAL_LOCAL_INVARIANT(evidence) and TERMINAL_PERSISTENCE",
+			"no_peer_penalty_results":            "every neutral result above plus TERMINAL_STORE_INTEGRITY(canonical), TERMINAL_LOCAL_INVARIANT(evidence) and TERMINAL_PERSISTENCE",
 			"p2p_duplicate_counter_mutations":    0,
 			"peer_penalty":                       0,
 			"unauthorized_canonical_mutations":   0,
@@ -2009,7 +2009,7 @@ func cpPathRows() []cpRow {
 			"queued_candidate_objects":           0,
 			"wholly_unpublished_selected_branch": "accepted +0",
 		}, "observable:counter_deltas", "observable:no_penalty_bounds"),
-		cpObs("C01-FIRSTERR-INDEX-001", "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", "A malformed canonical index paired with an invalid candidate: the strict initial canonical-index preflight owns the first error and the candidate is never validated.",
+		cpObs("C01-FIRSTERR-INDEX-001", "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", "A malformed canonical index paired with a candidate whose defect is detected only at MTP or validation (a target defect precedes the preflight per C01-PATHS-001): the strict initial canonical-index preflight owns the first error and the candidate is never validated.",
 			"hostile:paired_first_errors", "observable:path_precedence", "taxonomy:TERMINAL_STORE_INTEGRITY").counters("0", "0").
 			rpc("not_committed with the existing terminal result surface").detail(cpMap{"first_error_source": "strict_initial_canonical_index_preflight", "admission": "latched"}),
 		cpObs("C01-FIRSTERR-LATE-001", "CONSENSUS_INVALID(BLOCK_ERR_MERKLE_INVALID)", "OLD", "A late consensus-invalid candidate paired with an earlier best-effort artifact-write failure: the exact consensus error wins whenever validation can complete.",
@@ -2038,8 +2038,8 @@ func cpPresenceRows() []cpRow {
 			"observable:gc_damage_order", "hostile:quota_crash_and_reclassification").detail(cpMap{
 			"class_order":        "D0_INVALID_BLOCK, D1_HEADER_WITHOUT_VALID_BLOCK, D2_UNDO_WITHOUT_BLOCK_OR_HEADER, D3_INVALID_HEADER, D4_UNDO_WITHOUT_VALID_HEADER, D5_INVALID_UNDO",
 			"class_predicates":   "D0_INVALID_BLOCK: block leaf exists but strict parse or hash fails; D1_HEADER_WITHOUT_VALID_BLOCK: block leaf missing or failing strict parse or hash (a valid block is absent) AND a header leaf is present on disk, regardless of the header's own validity and regardless of undo presence or validity; D2_UNDO_WITHOUT_BLOCK_OR_HEADER: no valid block, no header, undo exists; D3_INVALID_HEADER: valid block and header exists but is malformed or mismatched; D4_UNDO_WITHOUT_VALID_HEADER: valid block, header absent, undo exists; D5_INVALID_UNDO: valid block and matching header and the undo envelope, binding or exact rederived bytes are invalid",
-			"candidates":         "D0+D5 at hash 0x..02, D1 at hash 0x..01, D1 at hash 0x..03, D5 at hash 0x..00",
-			"expected_victim":    "D0+D5 at hash 0x..02",
+			"candidates":         "D0+D1 at hash 0x..02, D1 at hash 0x..01, D1 at hash 0x..03, D5 at hash 0x..00",
+			"expected_victim":    "D0+D1 at hash 0x..02",
 			"tie_break":          "lexicographically lower hash inside one class (D1 0x..01 before D1 0x..03)",
 			"fail_closed_leaves": "strict read failure, non-regular, unexpected leaves are never GC candidates",
 		}),
@@ -2061,7 +2061,7 @@ func cpEffectRows() []cpRow {
 	return []cpRow{
 		cpObs("C01-NOOP-FULL-001", "KNOWN_BLOCK_NOOP(CANONICAL)", "NOT_APPLICABLE", "A duplicate full receive with blockSeen already set is a strict no-op: it clears only matching compact outstanding state, even though the production helper returns nil and sends no wire response.",
 			"observable:known_block_noop", "taxonomy:KNOWN_BLOCK_NOOP", "hostile:duplicate_and_corrupt_combinations").counters("0", "0").
-			effects(cpMap{"block_seen": "unchanged", "record_best_height": 0, "inv_attempt": 0, "da_ttl_attempt": 0, "resolver_wake": 0, "canonical_da_sets_consumed": 0, "broadcast": 0, "wire_response": 0, "peer_penalty": 0, "provider_reads": 0}).
+			effects(cpMap{"block_seen": "unchanged", "record_best_height": 0, "inv_attempt": 0, "da_ttl_attempt": 0, "resolver_wake": 0, "canonical_da_sets_consumed": "0", "broadcast": 0, "wire_response": 0, "peer_penalty": 0, "provider_reads": 0}).
 			detail(cpMap{"derivation": "strict presence plus proven no-effect behavior"}),
 		cpObs("C01-NOOP-CMPCT-001", "KNOWN_BLOCK_NOOP(STORED_NONCANONICAL)", "NOT_APPLICABLE", "A duplicate compact receive whose blockSeen is unset leaves it unset: blockSeen is relay dedup only and is neither residency nor invalidity authority.",
 			"observable:known_block_noop", "observable:block_seen_inventory", "taxonomy:KNOWN_BLOCK_NOOP").counters("0", "0").effects(cpMap{"block_seen": "unchanged", "inv_attempt": 0, "resolver_wake": 0}),
@@ -2069,8 +2069,8 @@ func cpEffectRows() []cpRow {
 			"observable:block_seen_inventory", "hostile:duplicate_and_corrupt_combinations").effects(cpMap{"block_seen": "unchanged"}),
 		cpObs("C01-EFFECT-STORED-001", "STORED_NONCANONICAL", "NOT_APPLICABLE", "A fresh STORED_NONCANONICAL freezes the POST-RUB-911 P2P-owned effect order, which has no consume step; the side block consumes zero canonical-DA sets.",
 			"observable:frozen_effect_order", "observable:postcommit_effects", "taxonomy:STORED_NONCANONICAL").
-			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": 0}),
-		cpObs("C01-EFFECT-ACCEPTED-001", "ACCEPTED", "NEW", "A fresh ACCEPTED freezes the same P2P-owned effect order; canonical-DA consumption is not a step of it but an identity of the transition image, consuming every nonempty canonical-applied summary entry exactly once and never from a post-return caller.",
+			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": "0"}),
+		cpObs("C01-EFFECT-ACCEPTED-001", "ACCEPTED", "NEW", "A fresh ACCEPTED freezes the same P2P-owned effect order; canonical-DA consumption is not a step of it but an identity of the transition image, consuming each exact included-matching retained COMPLETE_SET once, deduplicated by `set_identity` across the full plan, and never from a post-return caller.",
 			"observable:frozen_effect_order", "taxonomy:ACCEPTED").
 			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": "+included_matching_sets"}).
 			detail(cpMap{"da_ttl_fence": "the DA-orphan TTL advance never interleaves with a canonical transition", "post_return_consume_callers": 0}),

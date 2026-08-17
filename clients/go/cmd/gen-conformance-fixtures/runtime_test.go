@@ -1232,9 +1232,9 @@ func TestCanonicalPipelineCoverageReceiptIsCompleteAndClosed(t *testing.T) {
 	mustValidateCanonicalPipelineRows(rows)
 }
 
-// TestCanonicalPipelinePendingOwnerRowsAreFrozen pins the exact set of rows
-// excluded from the RUB-926 zero-mismatch gate. Adding an exclusion silently
-// would hide a real Go/Rust divergence behind a pending owner.
+// TestCanonicalPipelinePendingOwnerRowsAreFrozen pins the exact `pending_owner`
+// map (the observation rows among them are the RUB-926 exclusions). Adding an
+// exclusion silently would hide a real Go/Rust divergence behind a pending owner.
 func TestCanonicalPipelinePendingOwnerRowsAreFrozen(t *testing.T) {
 	want := map[string]string{
 		"C01-RELAY-STORED-001":           pendingOwnerRUB1195,

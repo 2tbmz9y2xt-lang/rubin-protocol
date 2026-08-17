@@ -191,7 +191,7 @@
       "detail": {
         "active_stateful_plans_max": 1,
         "neutral_results": "LOCAL_BUSY, LOCAL_RESOURCE_UNAVAILABLE, STALE_LOCAL_PLAN, LOCAL_CANCELLED, KNOWN_BLOCK_NOOP, STORED_NONCANONICAL, ORPHAN_RETAINED, ORPHAN_ALREADY_RETAINED, MISSING_PARENT, LOCAL_STORE_ERROR(noncanonical), LOCAL_PERSISTENCE_ERROR(precommit)",
-        "no_peer_penalty_results": "every neutral result above plus LOCAL_STORE_ERROR(noncanonical), LOCAL_PERSISTENCE_ERROR(precommit), TERMINAL_STORE_INTEGRITY(canonical), TERMINAL_LOCAL_INVARIANT(evidence) and TERMINAL_PERSISTENCE",
+        "no_peer_penalty_results": "every neutral result above plus TERMINAL_STORE_INTEGRITY(canonical), TERMINAL_LOCAL_INVARIANT(evidence) and TERMINAL_PERSISTENCE",
         "p2p_duplicate_counter_mutations": 0,
         "peer_penalty": 0,
         "queued_candidate_bytes": 0,
@@ -203,7 +203,7 @@
     {
       "id": "C01-FIRSTERR-INDEX-001",
       "kind": "observation",
-      "scenario": "A malformed canonical index paired with an invalid candidate: the strict initial canonical-index preflight owns the first error and the candidate is never validated.",
+      "scenario": "A malformed canonical index paired with a candidate whose defect is detected only at MTP or validation (a target defect precedes the preflight per C01-PATHS-001): the strict initial canonical-index preflight owns the first error and the candidate is never validated.",
       "result": "TERMINAL_STORE_INTEGRITY(canonical)",
       "commit_truth": "OLD",
       "rpc_projection": "not_committed with the existing terminal result surface",
@@ -283,10 +283,10 @@
       "result": "STORED_NONCANONICAL",
       "commit_truth": "NOT_APPLICABLE",
       "detail": {
-        "candidates": "D0+D5 at hash 0x..02, D1 at hash 0x..01, D1 at hash 0x..03, D5 at hash 0x..00",
+        "candidates": "D0+D1 at hash 0x..02, D1 at hash 0x..01, D1 at hash 0x..03, D5 at hash 0x..00",
         "class_order": "D0_INVALID_BLOCK, D1_HEADER_WITHOUT_VALID_BLOCK, D2_UNDO_WITHOUT_BLOCK_OR_HEADER, D3_INVALID_HEADER, D4_UNDO_WITHOUT_VALID_HEADER, D5_INVALID_UNDO",
         "class_predicates": "D0_INVALID_BLOCK: block leaf exists but strict parse or hash fails; D1_HEADER_WITHOUT_VALID_BLOCK: block leaf missing or failing strict parse or hash (a valid block is absent) AND a header leaf is present on disk, regardless of the header's own validity and regardless of undo presence or validity; D2_UNDO_WITHOUT_BLOCK_OR_HEADER: no valid block, no header, undo exists; D3_INVALID_HEADER: valid block and header exists but is malformed or mismatched; D4_UNDO_WITHOUT_VALID_HEADER: valid block, header absent, undo exists; D5_INVALID_UNDO: valid block and matching header and the undo envelope, binding or exact rederived bytes are invalid",
-        "expected_victim": "D0+D5 at hash 0x..02",
+        "expected_victim": "D0+D1 at hash 0x..02",
         "fail_closed_leaves": "strict read failure, non-regular, unexpected leaves are never GC candidates",
         "tie_break": "lexicographically lower hash inside one class (D1 0x..01 before D1 0x..03)"
       }
@@ -332,7 +332,7 @@
       "effects": {
         "block_seen": "unchanged",
         "broadcast": 0,
-        "canonical_da_sets_consumed": 0,
+        "canonical_da_sets_consumed": "0",
         "da_ttl_attempt": 0,
         "inv_attempt": 0,
         "peer_penalty": 0,
@@ -379,7 +379,7 @@
       "commit_truth": "NOT_APPLICABLE",
       "effects": {
         "block_seen": "set",
-        "canonical_da_sets_consumed": 0,
+        "canonical_da_sets_consumed": "0",
         "da_ttl_attempt": 1,
         "order": [
           "record_candidate_best_height",
@@ -395,7 +395,7 @@
     {
       "id": "C01-EFFECT-ACCEPTED-001",
       "kind": "observation",
-      "scenario": "A fresh ACCEPTED freezes the same P2P-owned effect order; canonical-DA consumption is not a step of it but an identity of the transition image, consuming every nonempty canonical-applied summary entry exactly once and never from a post-return caller.",
+      "scenario": "A fresh ACCEPTED freezes the same P2P-owned effect order; canonical-DA consumption is not a step of it but an identity of the transition image, consuming each exact included-matching retained COMPLETE_SET once, deduplicated by `set_identity` across the full plan, and never from a post-return caller.",
       "result": "ACCEPTED",
       "commit_truth": "NEW",
       "effects": {

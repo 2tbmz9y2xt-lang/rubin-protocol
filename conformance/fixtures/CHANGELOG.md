@@ -13,7 +13,7 @@ Policy:
 
 ## 2026-08-17 — Frozen canonical publication observables corpus (RUB-922 / C01)
 
-New generator-owned artifact `protocol/canonical_pipeline_v1.json`, with the
+The generator-owned artifact `protocol/canonical_pipeline_v1.json`, with the
 versioned schema `conformance/schemas/cv-canonical-pipeline-v1.json`. It freezes
 the external canonical-pipeline authority — the closed result taxonomy, path
 and P2P first-error precedence, counter deltas, publication atomicity, the
@@ -35,7 +35,7 @@ and reclaimed-hash-inventory rows name RUB-910. Apply-plan metadata carries no
 `conformance/README.md`).
 
 Exact commands: `scripts/dev-env.sh -- bash -lc 'cd clients/go && go run
-./cmd/gen-conformance-fixtures --output-dir <abs>'` and `scripts/dev-env.sh --
+./cmd/gen-conformance-fixtures'` and `scripts/dev-env.sh --
 python3 tools/gen_conformance_matrix.py`. Non-goals: no client implementation,
 adapter, acceptance runner, comparator, specification, formal, runner or other
 CV fixture change; no CV-*.json vector is added or modified.
