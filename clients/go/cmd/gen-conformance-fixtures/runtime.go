@@ -1849,22 +1849,12 @@ func sortedUnique32(xs [][32]byte) [][32]byte {
 // ---------------------------------------------------------------------------
 // RUB-922 / C01 — frozen canonical publication observables corpus.
 //
-// conformance/fixtures/protocol/canonical_pipeline_v1.json is the sole external
-// authority for canonical-pipeline results and effects. Every expected value
-// below is transcribed from the RUB-882 architecture parent AS SUPERSEDED by
-// RUB-1180 (Done, normative for canonical publication and retained-DA
-// ownership). No expected value is computed by calling a Go or Rust node
-// production path, and no row prescribes a mutex name, an internal struct,
-// allocator behavior, or a second persistent state machine.
-//
-// The artifact lives outside the auto-executed top-level CV-*.json glob. Its
-// only executors are RUB-923 (Go adapter), RUB-926 (Go acceptance), RUB-924
-// (Rust adapter) and RUB-901 (comparator); none exists yet, so the corpus is
-// INERT and no canonical-publication slice may claim it as a passing gate.
-//
-// The canonical-DA consume rows are frozen at their POST-RUB-911 target: the
-// frozen P2P effect order carries no consume step, and consumption is an
-// identity of the published transition image.
+// Every expected value below is transcribed from the RUB-882 architecture
+// parent AS SUPERSEDED by RUB-1180; no expected value is computed by calling a
+// Go or Rust node production path, and no row prescribes a mutex name, an
+// internal struct, allocator behavior, or a second persistent state machine.
+// Provenance, INERT status and the POST-RUB-911 consume freeze point are stated
+// once, in the emitted artifact's authority block and conformance/README.md.
 // ---------------------------------------------------------------------------
 
 const (

@@ -13,20 +13,18 @@ Policy:
 
 ## 2026-08-17 — Frozen canonical publication observables corpus (RUB-922 / C01)
 
-New generator-owned artifact `protocol/canonical_pipeline_v1.json` with its
+New generator-owned artifact `protocol/canonical_pipeline_v1.json`, with the
 versioned schema `conformance/schemas/cv-canonical-pipeline-v1.json`. It freezes
-the external canonical-pipeline authority: the closed result taxonomy, the
-path-specific and P2P first-error precedence, exact canonical counter deltas,
-old-or-new publication atomicity, the closed strict-presence truth table, the
-D0..D5 damaged-GC order and its class predicates, the known-block no-op, the
-POST-RUB-911 P2P effect order (no canonical-DA consume step), the block
-inventory relay disposition of `rubin-spec@c14b0100
-RUBIN_COMPACT_BLOCKS.md` section 19, orphan-pool admission and eviction, the
-byte-frozen source-quota key mapping, the resource identities split into their
-owned and un-owned rows, and the terminal store, invariant and persistence
-classes. Expected rows are authored architecture authority from RUB-882 as
-superseded by RUB-1180; the generator never calls a Go or Rust node production
-path to compute an expected value.
+the external canonical-pipeline authority — the closed result taxonomy, path
+and P2P first-error precedence, counter deltas, publication atomicity, the
+presence and damaged-GC tables, the POST-RUB-911 P2P effect order (no
+canonical-DA consume step) with the `rubin-spec@c14b0100
+RUBIN_COMPACT_BLOCKS.md` section 19 block inventory relay disposition,
+orphan-pool and source-quota rules, the owned and un-owned resource identities,
+and the terminal classes; its `coverage_receipt` enumerates every frozen class.
+Expected rows are authored architecture authority from RUB-882 as superseded by
+RUB-1180; the generator never calls a Go or Rust node production path to compute
+an expected value.
 
 Rows carrying `pending_owner: RUB-910` — the two section-19 relay rows and the
 un-owned resource identities — are excluded from the RUB-926 zero-mismatch
