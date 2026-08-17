@@ -40,7 +40,6 @@
     "UNKNOWN",
     "NOT_APPLICABLE"
   ],
-  "pending_owner_semantics": "A row carrying pending_owner is excluded from the RUB-926 zero-mismatch comparison and from RUB-901 equality until the named issue is Done; the field is then removed by a C01 revision. Only C01 may add, change or remove it.",
   "coverage_receipt": {
     "accepted:coherent_capture_publication": "C01-DIRECT-001, C01-REORG-001",
     "accepted:go_resource_authority": "C01-GO-CONSTANTS-001",
@@ -66,7 +65,7 @@
     "observable:checkpoint_rows": "C01-CKPT-001",
     "observable:counter_deltas": "C01-DIRECT-001, C01-SIDE-001, C01-REORG-001, C01-DISCONNECT-001, C01-NEUTRAL-001",
     "observable:final_state_atomicity": "C01-REORG-001",
-    "observable:frozen_effect_order": "C01-EFFECT-STORED-001, C01-EFFECT-ACCEPTED-001",
+    "observable:frozen_effect_order": "C01-EFFECT-STORED-001, C01-EFFECT-ACCEPTED-001, C01-RELAY-STORED-001, C01-RELAY-ACCEPTED-001",
     "observable:gc_damage_order": "C01-GC-ORDER-001, C01-GC-HEALTHY-001",
     "observable:known_block_noop": "C01-NOOP-FULL-001, C01-NOOP-CMPCT-001",
     "observable:no_penalty_bounds": "C01-NEUTRAL-001",
@@ -75,9 +74,9 @@
     "observable:path_precedence": "C01-PATHS-001, C01-GENESIS-001, C01-FIRSTERR-INDEX-001",
     "observable:paths": "C01-PATHS-001",
     "observable:permit_retry_budget": "C01-BUSY-001, C01-BUDGET-RACE-001",
-    "observable:postcommit_effects": "C01-EFFECT-STORED-001, C01-POSTCOMMIT-001",
+    "observable:postcommit_effects": "C01-EFFECT-STORED-001, C01-POSTCOMMIT-001, C01-RELAY-STORED-001, C01-RELAY-ACCEPTED-001",
     "observable:presence_truth_table": "C01-PRESENCE-001, C01-PRESENCE-TERMINAL-001, C01-PRESENCE-STOREERR-001",
-    "observable:resource_identities": "C01-GC-HEALTHY-001, C01-RES-IDENTITIES-001",
+    "observable:resource_identities": "C01-GC-HEALTHY-001, C01-RES-IDENTITIES-001, C01-RES-IDENTITIES-PENDING-001",
     "observable:source_quota_key": "C01-SRCKEY-001",
     "rejected:foreign_surface_mutation": "C01-FORBID-SURFACE-001",
     "rejected:intermediate_or_duplicate_visibility": "C01-FORBID-INTERMEDIATE-001",
@@ -91,7 +90,7 @@
     "taxonomy:LOCAL_BUSY": "C01-BUSY-001",
     "taxonomy:LOCAL_CANCELLED": "C01-CANCEL-001",
     "taxonomy:LOCAL_PERSISTENCE_ERROR": "C01-PRENS-001",
-    "taxonomy:LOCAL_RESOURCE_UNAVAILABLE": "C01-GC-HEALTHY-001, C01-RES-IDENTITIES-001",
+    "taxonomy:LOCAL_RESOURCE_UNAVAILABLE": "C01-GC-HEALTHY-001, C01-RES-IDENTITIES-001, C01-RES-IDENTITIES-PENDING-001",
     "taxonomy:LOCAL_STORE_ERROR": "C01-PRESENCE-STOREERR-001",
     "taxonomy:MISSING_PARENT": "C01-ORPH-MISSING-PARENT-001",
     "taxonomy:ORPHAN_ALREADY_RETAINED": "C01-ORPH-DUP-001",
@@ -134,6 +133,7 @@
       "scenario": "Genesis bootstrap from the exact empty pre-genesis state; the genesis guard runs after the direct target check and before the strict initial canonical-index preflight.",
       "result": "ACCEPTED",
       "commit_truth": "NEW",
+      "rpc_projection": "bootstrap: continuation-only",
       "canonical_counters": {
         "accepted_delta": "+1",
         "rejected_delta": "0"
@@ -190,6 +190,7 @@
       "detail": {
         "active_stateful_plans_max": 1,
         "neutral_results": "LOCAL_BUSY, LOCAL_RESOURCE_UNAVAILABLE, STALE_LOCAL_PLAN, LOCAL_CANCELLED, KNOWN_BLOCK_NOOP, STORED_NONCANONICAL, ORPHAN_RETAINED, ORPHAN_ALREADY_RETAINED, MISSING_PARENT",
+        "no_peer_penalty_results": "every neutral result above plus LOCAL_STORE_ERROR(noncanonical), LOCAL_PERSISTENCE_ERROR(precommit), TERMINAL_STORE_INTEGRITY(canonical), TERMINAL_LOCAL_INVARIANT(evidence) and TERMINAL_PERSISTENCE",
         "p2p_duplicate_counter_mutations": 0,
         "peer_penalty": 0,
         "queued_candidate_bytes": 0,
@@ -269,6 +270,7 @@
       "scenario": "Every other recognized noncanonical combination is a local store error and leaves the canonical images unchanged.",
       "result": "LOCAL_STORE_ERROR(noncanonical)",
       "commit_truth": "NOT_APPLICABLE",
+      "rpc_projection": "no committed mine result",
       "detail": {
         "combinations": "block=absent|header=present|undo=absent; block=absent|header=absent|undo=present; block=valid|header=mismatch|undo=absent; block=valid|header=match|undo=invalid"
       }
@@ -282,6 +284,7 @@
       "detail": {
         "candidates": "D0+D5 at hash 0x..02, D1 at hash 0x..01, D1 at hash 0x..03, D5 at hash 0x..00",
         "class_order": "D0_INVALID_BLOCK, D1_HEADER_WITHOUT_VALID_BLOCK, D2_UNDO_WITHOUT_BLOCK_OR_HEADER, D3_INVALID_HEADER, D4_UNDO_WITHOUT_VALID_HEADER, D5_INVALID_UNDO",
+        "class_predicates": "D0_INVALID_BLOCK: block leaf exists but strict parse or hash fails; D1_HEADER_WITHOUT_VALID_BLOCK: block leaf missing or failing strict parse or hash (a valid block is absent) AND a header leaf is present on disk, regardless of the header's own validity and regardless of undo presence or validity; D2_UNDO_WITHOUT_BLOCK_OR_HEADER: no valid block, no header, undo exists; D3_INVALID_HEADER: valid block and header exists but is malformed or mismatched; D4_UNDO_WITHOUT_VALID_HEADER: valid block, header absent, undo exists; D5_INVALID_UNDO: valid block and matching header and the undo envelope, binding or exact rederived bytes are invalid",
         "expected_victim": "D0+D5 at hash 0x..02",
         "fail_closed_leaves": "strict read failure, non-regular, unexpected leaves are never GC candidates",
         "tie_break": "lexicographically lower hash inside one class (D1 0x..01 before D1 0x..03)"
@@ -299,6 +302,7 @@
       },
       "detail": {
         "gc_attempted": true,
+        "release_notification": false,
         "retriable": false,
         "rows_reclaimed": 0
       }
@@ -373,14 +377,14 @@
       "result": "STORED_NONCANONICAL",
       "commit_truth": "NOT_APPLICABLE",
       "effects": {
+        "block_inventory_relay": "per specification section 19; disposition frozen in C01-RELAY-STORED-001 / C01-RELAY-ACCEPTED-001 (pending_owner RUB-910)",
         "block_seen": "set",
         "canonical_da_sets_consumed": 0,
         "da_ttl_attempt": 1,
-        "inv_attempt": 1,
         "order": [
           "record_candidate_best_height",
           "set_block_seen",
-          "attempt_one_inv_except_source",
+          "block_inventory_relay_per_section_19",
           "attempt_one_da_orphan_ttl_advance",
           "wake_resolver_once"
         ],
@@ -395,14 +399,14 @@
       "result": "ACCEPTED",
       "commit_truth": "NEW",
       "effects": {
+        "block_inventory_relay": "per specification section 19; disposition frozen in C01-RELAY-STORED-001 / C01-RELAY-ACCEPTED-001 (pending_owner RUB-910)",
         "block_seen": "set",
         "canonical_da_sets_consumed": "every nonempty summary entry exactly once, inside the published image",
         "da_ttl_attempt": 1,
-        "inv_attempt": 1,
         "order": [
           "record_candidate_best_height",
           "set_block_seen",
-          "attempt_one_inv_except_source",
+          "block_inventory_relay_per_section_19",
           "attempt_one_da_orphan_ttl_advance",
           "wake_resolver_once"
         ],
@@ -410,7 +414,7 @@
         "resolver_wake": 1
       },
       "detail": {
-        "da_ttl_fence": "the DA-orphan TTL advance is fenced under the canonical admission read lock",
+        "da_ttl_fence": "the DA-orphan TTL advance never interleaves with a canonical transition",
         "post_return_consume_callers": 0
       }
     },
@@ -422,12 +426,11 @@
       "commit_truth": "NOT_APPLICABLE",
       "effects": {
         "da_ttl_attempt": 1,
-        "inv_attempt": 1,
         "record_best_height": 1,
         "resolver_wake": 1
       },
       "detail": {
-        "fault_boundaries": "record_best_height, block_seen, inv_attempt, da_ttl_attempt",
+        "fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt",
         "reordered_continuation": false,
         "replay": false,
         "result_changed_by_failure": false,
@@ -459,17 +462,44 @@
       "kind": "authority",
       "scenario": "Complete postcommit effect enumeration with exact zero, once or count dispositions; there is no durable outbox.",
       "detail": {
+        "block_inventory_relay": "per specification section 19; disposition frozen in C01-RELAY-STORED-001 / C01-RELAY-ACCEPTED-001 (pending_owner RUB-910)",
         "block_seen": "once per fresh row",
         "canonical_da_consume": "identity of the published image, never a post-return step",
         "checkpoint": "derived cadence, never canonical authority",
         "da_ttl_attempt": "once, fenced",
         "durable_outbox": false,
-        "inv_attempt": "once, except the source peer",
         "metrics": "once",
         "record_best_height": "once per fresh row",
         "requeue_attempt": "ordered best-effort normal admission, after publication",
         "resolver_wake": "once"
       }
+    },
+    {
+      "id": "C01-RELAY-STORED-001",
+      "kind": "authority",
+      "scenario": "Block inventory relay authority under the pinned specification section 19: stored side-branch processing, a proven NEW carrying an empty canonical-applied summary (a standalone disconnect), and every non-NEW commit truth grant no authority and make no attempt.",
+      "detail": {
+        "inv_attempt": 0,
+        "no_authority_cases": "STORED_NONCANONICAL side-branch processing; NEW with an empty, unresolved, duplicate or absent summary, including a standalone disconnect; every non-NEW commit truth",
+        "relay_authority": false,
+        "spec_ref": "rubin-spec@c14b0100 RUBIN_COMPACT_BLOCKS.md section 19"
+      },
+      "pending_owner": "RUB-910"
+    },
+    {
+      "id": "C01-RELAY-ACCEPTED-001",
+      "kind": "authority",
+      "scenario": "The section-19 relay disposition for one authorized publication: proven NEW with a non-empty ordered canonical-applied summary.",
+      "detail": {
+        "best_effort": "no retry and no rollback; a relay result cannot change commit truth or the published summary",
+        "exclusion": "only the invocation-local (captured source owner, exact row hash) pair; never another owner and never another row",
+        "frames": "per summary row in canonical order, exactly one ordinary single-vector MSG_BLOCK inv frame per (owner x row)",
+        "ibd": "sampled after the transition publication; if IBD, no attempt",
+        "owner_snapshot": "one snapshot of post-handshake send owners, deduplicated by owner identity; a captured handle is never re-resolved or retargeted",
+        "spec_ref": "rubin-spec@c14b0100 RUBIN_COMPACT_BLOCKS.md section 19",
+        "write_failure": "stops only that owner's remaining suffix; other owners remain eligible"
+      },
+      "pending_owner": "RUB-910"
     },
     {
       "id": "C01-INVENTORY-001",
@@ -591,6 +621,7 @@
       "scenario": "An apply entered without orphan retention whose parent is neither canonical nor stored returns MISSING_PARENT and preserves the exact old image.",
       "result": "MISSING_PARENT",
       "commit_truth": "OLD",
+      "rpc_projection": "not_committed only when reached by a mining entrypoint",
       "canonical_counters": {
         "accepted_delta": "0",
         "rejected_delta": "0"
@@ -622,12 +653,23 @@
     {
       "id": "C01-RES-IDENTITIES-001",
       "kind": "authority",
-      "scenario": "The resource identities are exact and closed; every one is LOCAL_RESOURCE_UNAVAILABLE and never consensus invalidity, and invalid configured bounds are startup or config failures outside peer retry.",
+      "scenario": "The owned resource identities. Every resource identity is LOCAL_RESOURCE_UNAVAILABLE and never consensus invalidity, and invalid configured bounds are startup or config failures outside peer retry. The identities no chain slice delivers are frozen separately in C01-RES-IDENTITIES-PENDING-001.",
       "detail": {
-        "identities": "inbound_budget_capacity, inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool",
+        "admission": "never latched for any resource identity; preserves OLD",
+        "identities": "noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact",
         "invalid_configured_bounds": "startup/config failure, outside peer retry",
-        "retriable": "inbound_budget_capacity only, and only with an independently proven exact block hash"
+        "recovery_artifact": "non-retriable; profile-permitted pruned suffix awaiting validated reacquisition; distinct from bounded-storage reservation failure"
       }
+    },
+    {
+      "id": "C01-RES-IDENTITIES-PENDING-001",
+      "kind": "authority",
+      "scenario": "The resource identities whose machinery no slice of this chain delivers; they are excluded from the RUB-926 zero-mismatch acceptance until RUB-910 is Done.",
+      "detail": {
+        "identities": "inbound_budget_capacity, inbound_budget_overflow, apply_plan_metadata",
+        "retriable": "inbound_budget_capacity only, and only with an independently proven exact block hash"
+      },
+      "pending_owner": "RUB-910"
     },
     {
       "id": "C01-APPLYMETA-CAP-001",
@@ -783,10 +825,6 @@
       "result": "TERMINAL_PERSISTENCE(new)",
       "commit_truth": "NEW",
       "rpc_projection": "committed; mined candidate identity only when the result-selecting mined candidate apply committed",
-      "canonical_counters": {
-        "accepted_delta": "+1",
-        "rejected_delta": "0"
-      },
       "detail": {
         "admission": "latched"
       }
@@ -831,7 +869,7 @@
     {
       "id": "C01-TERMINV-BOOT-001",
       "kind": "observation",
-      "scenario": "At the bootstrap boundary a STORED_NONCANONICAL result, or a KNOWN_BLOCK_NOOP(STORED_NONCANONICAL), is a terminal local invariant; bootstrap ACCEPTED and KNOWN_BLOCK_NOOP(CANONICAL) remain continuation-only.",
+      "scenario": "At the bootstrap boundary a STORED_NONCANONICAL result, or a KNOWN_BLOCK_NOOP(STORED_NONCANONICAL), is a terminal local invariant that publishes no candidate delta and keeps mutation admission latched; bootstrap ACCEPTED and KNOWN_BLOCK_NOOP(CANONICAL) remain continuation-only.",
       "result": "TERMINAL_LOCAL_INVARIANT(evidence)",
       "commit_truth": "OLD",
       "rpc_projection": "not_committed with the existing terminal result surface",
@@ -873,6 +911,7 @@
       "scenario": "The derived checkpoint is not canonical authority: an accepted transition may report degraded, a subsequent success clears it, startup is fail-closed, and a multi-row cadence writes only the final state once.",
       "detail": {
         "accepted_with_degraded": true,
+        "multi_row_cadence_degraded": "logical OR across every row of the transition",
         "multi_row_cadence_writes": 1,
         "startup_on_missing_or_corrupt_required_artifact": "fail-closed as TERMINAL_STORE_INTEGRITY(canonical); no reader, admission or relay exposure",
         "subsequent_success_clears_degraded": true

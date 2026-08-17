@@ -251,17 +251,10 @@ class CanonicalPipelineSchemaTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertTrue(data["rows"])
 
-    def test_duplicate_row_id_is_rejected(self):
+    def test_committed_corpus_has_no_duplicate_row_ids(self):
         _, data = self._load()
         ids = [row["id"] for row in data["rows"]]
         self.assertEqual(len(ids), len(set(ids)), "committed corpus has duplicate row ids")
-        mutated = list(data["rows"]) + [dict(data["rows"][0])]
-        mutated_ids = [row["id"] for row in mutated]
-        self.assertNotEqual(
-            len(mutated_ids),
-            len(set(mutated_ids)),
-            "duplicate-id detection must reject a repeated row id",
-        )
 
     def test_coverage_receipt_maps_every_class_to_at_least_one_row(self):
         _, data = self._load()

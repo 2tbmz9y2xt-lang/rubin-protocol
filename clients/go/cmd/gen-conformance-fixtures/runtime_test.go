@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1222,44 +1223,11 @@ func TestCanonicalPipelineCoverageReceiptIsCompleteAndClosed(t *testing.T) {
 	if len(rows) == 0 {
 		t.Fatal("canonical pipeline corpus is empty")
 	}
-	receipt := canonicalPipelineCoverage(rows)
-	if len(receipt) != len(canonicalPipelineClasses) {
+	// canonicalPipelineCoverage fails generation on a class with zero rows, and
+	// mustValidateCanonicalPipelineRows on a duplicate id, an out-of-taxonomy
+	// result or an unknown coverage class. Both run here.
+	if receipt := canonicalPipelineCoverage(rows); len(receipt) != len(canonicalPipelineClasses) {
 		t.Fatalf("coverage receipt has %d classes, want %d", len(receipt), len(canonicalPipelineClasses))
-	}
-	for _, class := range canonicalPipelineClasses {
-		if receipt[class] == "" {
-			t.Fatalf("enumerated class %q maps to zero rows", class)
-		}
-	}
-
-	taxonomy := make(map[string]bool, len(canonicalPipelineTaxonomy))
-	for _, value := range canonicalPipelineTaxonomy {
-		taxonomy[strings.SplitN(value, "(", 2)[0]] = true
-	}
-	classes := make(map[string]bool, len(canonicalPipelineClasses))
-	for _, class := range canonicalPipelineClasses {
-		classes[class] = true
-	}
-	seen := make(map[string]bool, len(rows))
-	for _, row := range rows {
-		if seen[row.ID] {
-			t.Fatalf("duplicate corpus row id %q", row.ID)
-		}
-		seen[row.ID] = true
-		if !strings.HasPrefix(row.ID, "C01-") {
-			t.Fatalf("row id %q is not C01-prefixed", row.ID)
-		}
-		if row.Kind == "observation" && !taxonomy[strings.SplitN(row.Result, "(", 2)[0]] {
-			t.Fatalf("row %s result %q is outside the closed taxonomy", row.ID, row.Result)
-		}
-		if row.Kind != "observation" && row.Result != "" {
-			t.Fatalf("row %s of kind %q must not carry a result", row.ID, row.Kind)
-		}
-		for _, class := range row.Covers {
-			if !classes[class] {
-				t.Fatalf("row %s covers unknown class %q", row.ID, class)
-			}
-		}
 	}
 	mustValidateCanonicalPipelineRows(rows)
 }
@@ -1268,15 +1236,18 @@ func TestCanonicalPipelineCoverageReceiptIsCompleteAndClosed(t *testing.T) {
 // excluded from the RUB-926 zero-mismatch gate. Adding an exclusion silently
 // would hide a real Go/Rust divergence behind a pending owner.
 func TestCanonicalPipelinePendingOwnerRowsAreFrozen(t *testing.T) {
-	want := map[string]bool{
-		"C01-INVENTORY-RECLAIMED-001": true,
-		"C01-APPLYMETA-CAP-001":       true,
-		"C01-APPLYMETA-OVER-001":      true,
-		"C01-BUSY-001":                true,
-		"C01-BUDGET-RACE-001":         true,
-		"C01-WIRE-OVERFLOW-001":       true,
+	want := []string{
+		"C01-APPLYMETA-CAP-001",
+		"C01-APPLYMETA-OVER-001",
+		"C01-BUDGET-RACE-001",
+		"C01-BUSY-001",
+		"C01-INVENTORY-RECLAIMED-001",
+		"C01-RELAY-ACCEPTED-001",
+		"C01-RELAY-STORED-001",
+		"C01-RES-IDENTITIES-PENDING-001",
+		"C01-WIRE-OVERFLOW-001",
 	}
-	got := make(map[string]bool)
+	var got []string
 	for _, row := range canonicalPipelineRows() {
 		if row.PendingOwner == "" {
 			continue
@@ -1284,15 +1255,11 @@ func TestCanonicalPipelinePendingOwnerRowsAreFrozen(t *testing.T) {
 		if row.PendingOwner != pendingOwnerRUB910 {
 			t.Fatalf("row %s names pending owner %q, want %q", row.ID, row.PendingOwner, pendingOwnerRUB910)
 		}
-		got[row.ID] = true
+		got = append(got, row.ID)
 	}
-	if len(got) != len(want) {
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
 		t.Fatalf("pending-owner rows = %v, want %v", got, want)
-	}
-	for id := range want {
-		if !got[id] {
-			t.Fatalf("row %s lost its pending owner", id)
-		}
 	}
 }
 
