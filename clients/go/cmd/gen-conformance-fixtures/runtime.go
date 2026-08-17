@@ -2321,11 +2321,11 @@ func mustValidateCanonicalPipelineRows(rows []cpRow) {
 	}
 }
 
-// mustValidateCanonicalPipelineKind checks only what the JSON schema cannot:
-// closed-taxonomy and commit-truth membership. Row shapes (the required
-// fields per kind, and result being forbidden on non-observation kinds) are
-// owned by the schema's allOf/if-then rules and asserted by
-// tools/tests/test_check_conformance_fixtures_drift.py.
+// mustValidateCanonicalPipelineKind mirrors, in the generator, the two
+// schema constraints — closed-taxonomy via result.pattern and commit-truth
+// via commit_truth.enum — so generation fails closed before the artifact
+// is written; both layers are deliberate. Row shapes stay schema-owned
+// (required fields per kind), asserted by test_check_conformance_fixtures_drift.py.
 func mustValidateCanonicalPipelineKind(row cpRow, truths map[string]bool) {
 	switch row.Kind {
 	case "observation":
