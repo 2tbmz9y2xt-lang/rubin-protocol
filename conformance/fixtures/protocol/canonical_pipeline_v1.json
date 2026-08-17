@@ -161,10 +161,12 @@
         "accepted_delta": "+connect_count",
         "rejected_delta": "0"
       },
+      "effects": {
+        "final_state_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest"
+      },
       "detail": {
         "external_visibility": "old_or_new",
         "intermediate_tip_rows": 0,
-        "observed_final_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest",
         "publication_events": 1,
         "summary_rows": "one per newly canonical block"
       }
@@ -234,6 +236,9 @@
       "scenario": "Two equal-cumulative-work candidates delivered and validation-completed in opposite orders select the same lexicographically lower canonical tip hash in both clients.",
       "result": "ACCEPTED",
       "commit_truth": "NEW",
+      "effects": {
+        "winning_tip": "lexicographically_lower"
+      },
       "detail": {
         "stable_under": "reversed delivery order, reversed validation completion, reversed worker schedule, best-ready status"
       }

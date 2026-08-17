@@ -2002,7 +2002,8 @@ func cpPathRows() []cpRow {
 			"taxonomy:STORED_NONCANONICAL", "observable:counter_deltas").counters("0", "0"),
 		cpObs("C01-REORG-001", "ACCEPTED", "NEW", "A winning multi-block reorg is one plan: the whole transition is externally old or new and never row-wise intermediate.",
 			"observable:counter_deltas", "observable:final_state_atomicity", "accepted:coherent_capture_publication").counters("+connect_count", "0").
-			detail(cpMap{"external_visibility": "old_or_new", "intermediate_tip_rows": 0, "summary_rows": "one per newly canonical block", "observed_final_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest", "publication_events": 1}),
+			effects(cpMap{"final_state_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest"}).
+			detail(cpMap{"external_visibility": "old_or_new", "intermediate_tip_rows": 0, "summary_rows": "one per newly canonical block", "publication_events": 1}),
 		cpObs("C01-DISCONNECT-001", "ACCEPTED", "NEW", "An explicit standalone disconnect publishes proven NEW with an empty canonical-applied summary and zero connected-block fee-floor decay events.",
 			"observable:counter_deltas").counters("0", "0").detail(cpMap{"summary_rows": 0, "connected_block_decay_events": 0}),
 		cpAuth("C01-NEUTRAL-001", "Results that change neither planner-owned canonical counter, carry no peer penalty and perform no unauthorized canonical mutation and do not latch mutation admission, plus the exact plan and candidate-queue bounds.", cpMap{
@@ -2022,7 +2023,8 @@ func cpPathRows() []cpRow {
 		cpObs("C01-FIRSTERR-LATE-001", "CONSENSUS_INVALID(BLOCK_ERR_MERKLE_INVALID)", "OLD", "A late consensus-invalid candidate paired with an earlier best-effort artifact-write failure: the exact consensus error wins whenever validation can complete.",
 			"hostile:late_consensus_invalid_wins", "taxonomy:CONSENSUS_INVALID").counters("0", "+1").rpc("not_committed"),
 		cpObs("C01-EQUALWORK-001", "ACCEPTED", "NEW", "Two equal-cumulative-work candidates delivered and validation-completed in opposite orders select the same lexicographically lower canonical tip hash in both clients.",
-			"hostile:equal_work_opposite_orders").detail(cpMap{"stable_under": "reversed delivery order, reversed validation completion, reversed worker schedule, best-ready status"}),
+			"hostile:equal_work_opposite_orders").effects(cpMap{"winning_tip": "lexicographically_lower"}).
+			detail(cpMap{"stable_under": "reversed delivery order, reversed validation completion, reversed worker schedule, best-ready status"}),
 	}
 }
 
