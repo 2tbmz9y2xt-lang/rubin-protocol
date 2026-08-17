@@ -1258,6 +1258,24 @@ func TestCanonicalPipelinePendingOwnerRowsAreFrozen(t *testing.T) {
 	}
 }
 
+// TestCanonicalPipelineObservationDetailNeverCarriesEffectKeys pins detail/effects disjointness on observation rows.
+func TestCanonicalPipelineObservationDetailNeverCarriesEffectKeys(t *testing.T) {
+	rows := canonicalPipelineRows()
+	effectKeys := make(map[string]bool)
+	for _, row := range rows {
+		for k := range row.Effects {
+			effectKeys[k] = true
+		}
+	}
+	for _, row := range rows {
+		for _, k := range slices.Sorted(maps.Keys(row.Detail)) {
+			if row.Kind == "observation" && effectKeys[k] {
+				t.Errorf("%s: detail carries compared effect key %q", row.ID, k)
+			}
+		}
+	}
+}
+
 // TestCanonicalPipelineCorpusIsByteDeterministic proves the corpus writer is
 // reproducible: two writes into different directories are byte-identical and
 // never carry the authoring-only covers field.
