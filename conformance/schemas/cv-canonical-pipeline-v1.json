@@ -42,8 +42,8 @@
       "description": "Generated definition receipt mapping every enumerated class (closed result taxonomy plus every named observable, accepted, rejected and hostile bullet of RUB-922) to the row ids that define it; it records which rows freeze each class, not that each class is runtime-compared — only kind=observation rows are compared, so a class whose only carriers are authority/forbidden rows has no C01 runtime comparison (kind-aware split is RUB-1204). A class mapping to no row is a generation failure, never a corpus state.",
       "type": "object",
       "minProperties": 59,
-      "propertyNames": { "pattern": "^(taxonomy:[A-Z0-9_]+|(observable|accepted|rejected|hostile):[a-z0-9_]+)$" },
-      "additionalProperties": { "type": "string", "pattern": "^C01-[A-Z0-9-]+(, C01-[A-Z0-9-]+)*$" }
+      "propertyNames": { "pattern": "^(taxonomy:[A-Z0-9_]+|(observable|accepted|rejected|hostile):[a-z0-9_]+)$", "not": { "pattern": "\\s" } },
+      "additionalProperties": { "type": "string", "pattern": "^C01-[A-Z0-9-]+(, C01-[A-Z0-9-]+)*$", "not": { "pattern": "\\n" } }
     },
     "rows": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/row" } }
   },
@@ -53,7 +53,7 @@
       "additionalProperties": false,
       "required": ["id", "kind"],
       "properties": {
-        "id": { "type": "string", "pattern": "^C01-[A-Z0-9-]+$" },
+        "id": { "type": "string", "pattern": "^C01-[A-Z0-9-]+$", "not": { "pattern": "\\s" } },
         "kind": { "enum": ["observation", "authority", "forbidden"], "description": "Acceptance semantics: only kind=observation rows are adapter-emitted and enter the RUB-926/RUB-901 record-ID union (their id is the consumers' row_id); authority and forbidden rows are static authority read directly and are never emitted or compared as records." },
         "scenario": { "type": "string", "minLength": 1 },
         "result": { "type": "string", "pattern": "^(ACCEPTED|STORED_NONCANONICAL|KNOWN_BLOCK_NOOP\\((CANONICAL|STORED_NONCANONICAL)\\)|MISSING_PARENT|ORPHAN_RETAINED|ORPHAN_ALREADY_RETAINED|CONSENSUS_INVALID\\([A-Z][A-Z0-9_]*\\)|LOCAL_BUSY|LOCAL_RESOURCE_UNAVAILABLE\\((inbound_budget_capacity|inbound_budget_overflow|apply_plan_metadata|noncanonical_bytes|noncanonical_count|orphan_pool|recovery_artifact)\\)|STALE_LOCAL_PLAN|LOCAL_CANCELLED|LOCAL_STORE_ERROR\\(noncanonical\\)|LOCAL_PERSISTENCE_ERROR\\(precommit\\)|TERMINAL_STORE_INTEGRITY\\(canonical\\)|TERMINAL_LOCAL_INVARIANT\\(evidence\\)|TERMINAL_PERSISTENCE\\((old|new|neither_or_unreadable)\\))$", "not": { "pattern": "\\s" } },
@@ -66,8 +66,8 @@
           "additionalProperties": false,
           "required": ["accepted_delta", "rejected_delta"],
           "properties": {
-            "accepted_delta": { "type": "string", "pattern": "^([+][a-z_0-9]+|0)$" },
-            "rejected_delta": { "type": "string", "pattern": "^([+][a-z_0-9]+|0)$" }
+            "accepted_delta": { "type": "string", "pattern": "^([+][a-z_0-9]+|0)$", "not": { "pattern": "\\s" } },
+            "rejected_delta": { "type": "string", "pattern": "^([+][a-z_0-9]+|0)$", "not": { "pattern": "\\s" } }
           }
         },
         "effects": {
@@ -79,7 +79,7 @@
         "pending_owner": {
           "description": "NORMATIVE ACCEPTANCE SEMANTICS. A row carrying pending_owner names the RUB issue that must deliver the machinery the row describes. Until that issue is Done the row is excluded from the RUB-926 zero-mismatch acceptance comparison and from RUB-901 Go-versus-Rust equality: for an observation row an adapter MUST still emit whatever it observes and a comparator MUST NOT report the row as a mismatch; on an authority or forbidden row the field is a provenance marker only, since that kind is never emitted or compared. When the named issue is Done the field is removed by a C01 revision and an observation row becomes gate-bearing. Only RUB-922 (C01) may add, change or remove this field; a consumer that mutates it is out of contract.",
           "type": "string",
-          "pattern": "^RUB-[0-9]+$"
+          "pattern": "^RUB-[0-9]+$", "not": { "pattern": "\\s" }
         }
       },
       "allOf": [

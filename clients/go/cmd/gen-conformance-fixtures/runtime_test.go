@@ -1222,8 +1222,8 @@ func skipIfMLDSA87DERUnavailable(t *testing.T) {
 // policy gates; it fails here.
 func TestCanonicalPipelineCoverageReceiptIsCompleteAndClosed(t *testing.T) {
 	rows := canonicalPipelineRows()
-	if len(rows) == 0 {
-		t.Fatal("canonical pipeline corpus is empty")
+	if len(rows) != 62 {
+		t.Fatalf("canonical pipeline corpus has %d rows, want the frozen 62 (bump deliberately with a corpus revision)", len(rows))
 	}
 	// canonicalPipelineCoverage fails generation on a class with zero rows, and
 	// mustValidateCanonicalPipelineRows on a duplicate id, an out-of-taxonomy

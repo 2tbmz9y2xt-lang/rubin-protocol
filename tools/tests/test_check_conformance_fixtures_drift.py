@@ -261,6 +261,13 @@ class CanonicalPipelineSchemaTests(unittest.TestCase):
         row = next(r for r in data["rows"] if r["kind"] == "observation")
         self.assertFalse(any(validator.is_valid({**data, "rows": [{**row, "result": s}]}) for s in ("ACCEPTED(extra)", "KNOWN_BLOCK_NOOP(OTHER)", "TERMINAL_PERSISTENCE", "LOCAL_RESOURCE_UNAVAILABLE(bogus)", "CONSENSUS_INVALID()", "bogus", "ACCEPTED\n")))
 
+    def test_machine_tokens_reject_trailing_newline(self):
+        validator, data = self._load()
+        rows = data["rows"]
+        po = next(r for r in rows if r.get("pending_owner"))
+        cc = next(r for r in rows if r.get("canonical_counters"))
+        self.assertFalse(any(validator.is_valid({**data, "rows": [m]}) for m in ({**rows[0], "id": rows[0]["id"] + "\n"}, {**po, "pending_owner": po["pending_owner"] + "\n"}, {**cc, "canonical_counters": {**cc["canonical_counters"], "accepted_delta": cc["canonical_counters"]["accepted_delta"] + "\n"}})))
+        self.assertFalse(validator.is_valid({**data, "coverage_receipt": {**data["coverage_receipt"], next(iter(data["coverage_receipt"])) + "\n": "x"}}))
 
 if __name__ == "__main__":
     unittest.main()
