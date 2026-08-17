@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Canonical publication observables corpus (RUB-922 / C01), schema version 1",
+  "description": "Machine contract for conformance/fixtures/protocol/canonical_pipeline_v1.json, the sole external authority for canonical-pipeline results and effects. It constrains observable old-or-new publication, exact first-error and result identity, bounded resource outcomes and effect counts, and never names a mutex, an internal struct or a client-private type. An omitted optional row field states no expectation: it is neither a zero nor a wildcard match. Ordered sequences carried as strings list their elements in document order, separated by ', ' (or by '; ' where an element itself contains a comma).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact", "schema_version", "schema", "_meta", "authority", "result_taxonomy", "commit_truth_values", "pending_owner_semantics", "coverage_receipt", "rows"],
+  "properties": {
+    "artifact": { "const": "canonical_pipeline_v1" },
+    "schema_version": { "const": 1 },
+    "schema": { "const": "conformance/schemas/cv-canonical-pipeline-v1.json" },
+    "_meta": {
+      "type": "object",
+      "required": ["generated_by", "warning"],
+      "properties": { "generated_by": { "const": "clients/go/cmd/gen-conformance-fixtures" } }
+    },
+    "authority": {
+      "description": "Provenance of every expected value: the architecture parent as superseded, the pinned normative spec and repository baselines, the executors that may consume this artifact, and the frozen consume direction. Expected rows are authored architecture authority; the generator never calls a node production path to compute one.",
+      "type": "object",
+      "required": ["issue", "architecture_parent", "normative_spec_ref", "baseline_ref", "expected_row_origin", "executors", "status", "consume_freeze_point"],
+      "additionalProperties": { "type": "string" }
+    },
+    "result_taxonomy": {
+      "description": "The closed result taxonomy. Every observation row result is a member name, optionally followed by its exact parenthesized argument.",
+      "type": "array",
+      "minItems": 16,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "commit_truth_values": {
+      "type": "array",
+      "minItems": 4,
+      "uniqueItems": true,
+      "items": { "enum": ["OLD", "NEW", "UNKNOWN", "NOT_APPLICABLE"] }
+    },
+    "pending_owner_semantics": { "type": "string", "minLength": 1 },
+    "coverage_receipt": {
+      "description": "Generated receipt mapping every enumerated class (closed result taxonomy plus every named observable, accepted, rejected and hostile bullet of RUB-922) to the row ids that define it. A class mapping to no row is a generation failure, never a corpus state.",
+      "type": "object",
+      "minProperties": 59,
+      "propertyNames": { "pattern": "^(taxonomy:[A-Z0-9_]+|(observable|accepted|rejected|hostile):[a-z0-9_]+)$" },
+      "additionalProperties": { "type": "string", "pattern": "^C01-[A-Z0-9-]+(, C01-[A-Z0-9-]+)*$" }
+    },
+    "rows": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/row" } }
+  },
+  "$defs": {
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^C01-[A-Z0-9-]+$" },
+        "kind": { "enum": ["observation", "authority", "forbidden"] },
+        "scenario": { "type": "string", "minLength": 1 },
+        "result": { "type": "string", "minLength": 1 },
+        "commit_truth": { "enum": ["OLD", "NEW", "UNKNOWN", "NOT_APPLICABLE"] },
+        "rpc_projection": { "type": "string", "minLength": 1 },
+        "forbidden_observation": { "type": "string", "minLength": 1 },
+        "canonical_counters": {
+          "description": "Exact planner-owned canonical counter deltas as exact decimal or symbolic tokens, for example '+1', '0' or '+connect_count'.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["accepted_delta", "rejected_delta"],
+          "properties": {
+            "accepted_delta": { "type": "string", "pattern": "^([+][a-z_0-9]+|0)$" },
+            "rejected_delta": { "type": "string", "pattern": "^([+][a-z_0-9]+|0)$" }
+          }
+        },
+        "effects": { "type": "object", "minProperties": 1 },
+        "detail": { "type": "object", "minProperties": 1 },
+        "pending_owner": {
+          "description": "NORMATIVE ACCEPTANCE SEMANTICS. A row carrying pending_owner names the RUB issue that must deliver the machinery the row describes. Until that issue is Done the row is excluded from the RUB-926 zero-mismatch acceptance comparison and from RUB-901 Go-versus-Rust equality: an adapter MUST still emit whatever it observes for the row, and a comparator MUST NOT report the row as a mismatch. When the named issue is Done the field is removed by a C01 revision and the row becomes gate-bearing. Only RUB-922 (C01) may add, change or remove this field; a consumer that mutates it is out of contract.",
+          "type": "string",
+          "pattern": "^RUB-[0-9]+$"
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "observation" } }, "required": ["kind"] },
+          "then": { "required": ["scenario", "result", "commit_truth"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "authority" } }, "required": ["kind"] },
+          "then": { "required": ["scenario", "detail"], "not": { "required": ["result"] } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "forbidden" } }, "required": ["kind"] },
+          "then": { "required": ["forbidden_observation"], "not": { "required": ["result"] } }
+        }
+      ]
+    }
+  }
+}

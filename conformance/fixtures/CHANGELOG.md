@@ -11,6 +11,32 @@ Policy:
 
 ---
 
+## 2026-08-17 — Frozen canonical publication observables corpus (RUB-922 / C01)
+
+New generator-owned artifact `protocol/canonical_pipeline_v1.json` with its
+versioned schema `conformance/schemas/cv-canonical-pipeline-v1.json`. It freezes
+the external canonical-pipeline authority: the closed result taxonomy, the
+path-specific and P2P first-error precedence, exact canonical counter deltas,
+old-or-new publication atomicity, the closed strict-presence truth table, the
+D0..D5 damaged-GC order, the known-block no-op, the POST-RUB-911 P2P effect
+order (no canonical-DA consume step), orphan-pool admission and eviction, the
+byte-frozen source-quota key mapping, the exact resource identities, and the
+terminal store, invariant and persistence classes. Expected rows are authored
+architecture authority from RUB-882 as superseded by RUB-1180; the generator
+never calls a Go or Rust node production path to compute an expected value.
+
+Rows carrying `pending_owner: RUB-910` are excluded from the RUB-926
+zero-mismatch acceptance and from RUB-901 equality until that issue is Done. The
+artifact is INERT: its only executors are RUB-923, RUB-926, RUB-924 and RUB-901,
+none of which exists yet, and no canonical-publication slice may claim it as a
+passing gate.
+
+Exact commands: `scripts/dev-env.sh -- bash -lc 'cd clients/go && go run
+./cmd/gen-conformance-fixtures --output-dir <abs>'` and `scripts/dev-env.sh --
+python3 tools/gen_conformance_matrix.py`. Non-goals: no client implementation,
+adapter, acceptance runner, comparator, specification, formal, runner or other
+CV fixture change; no CV-*.json vector is added or modified.
+
 ## 2026-08-09 — Exact u128 durable supply and undo v2 (RUB-1153)
 
 Generator-owned changes are limited to `CV-DEVNET-GENESIS.json` and

@@ -43,6 +43,9 @@ EXPECTED_FIXTURES: tuple[Path, ...] = (
     Path("devnet/devnet-vault-create-01.json"),
     Path("devnet/devnet-htlc-claim-01.json"),
     Path("devnet/devnet-multisig-spend-01.json"),
+    # RUB-922 / C01 canonical publication observables corpus. Generator-owned
+    # and byte-frozen: only RUB-922 may change its expected rows.
+    Path("protocol/canonical_pipeline_v1.json"),
 )
 
 

@@ -158,6 +158,31 @@ environment error. The script **never** writes under `conformance/fixtures/**`
 (auto-regeneration in CI is forbidden); manual regeneration remains the
 authoritative path.
 
+## Canonical publication observables corpus (RUB-922 / C01)
+
+`conformance/fixtures/protocol/canonical_pipeline_v1.json` is the frozen
+external authority for canonical-pipeline results and effects, constrained by
+`conformance/schemas/cv-canonical-pipeline-v1.json` (schema version 1). It is
+generator-owned by `clients/go/cmd/gen-conformance-fixtures`, byte-guarded by
+the drift gate, and lives outside the auto-executed top-level `CV-*.json` glob.
+
+Status: **INERT**. Its only executors are the RUB-923 Go adapter, the RUB-926 Go
+acceptance gate, the RUB-924 Rust adapter and the RUB-901 comparator; none of
+them exists yet, so no canonical-publication slice may claim this corpus as a
+passing gate. Expected rows are authored architecture authority (RUB-882 as
+superseded by RUB-1180) — the generator never calls a Go or Rust node production
+path to compute an expected value.
+
+Row semantics: `kind: observation` pins an exact result, commit truth and, where
+the contract fixes them, counter deltas and effect dispositions; `kind:
+authority` pins constants, orders and tables; `kind: forbidden` pins an
+observation that must never occur. An omitted optional field states no
+expectation — neither a zero nor a wildcard. `pending_owner` excludes a row from
+the RUB-926 zero-mismatch comparison and from RUB-901 equality until the named
+issue is Done, and only RUB-922 may add, change or remove it. `coverage_receipt`
+maps every enumerated class to the row ids that define it; generation fails when
+a class maps to zero rows.
+
 ## Fuzz crash promotion (manual-only)
 
 Nightly fuzz jobs are discovery jobs only. They upload crash artifacts and

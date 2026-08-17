@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -224,6 +225,53 @@ class MainExitCodeTests(unittest.TestCase):
                     rc = m.main(["--repo-root", str(repo_root)])
         self.assertEqual(rc, 1)
         self.assertIn(f"- {target}", captured.getvalue())
+
+
+class CanonicalPipelineSchemaTests(unittest.TestCase):
+    """RUB-922 / C01: the committed corpus validates and rejects duplicate ids."""
+
+    REPO_ROOT = TOOLS_DIR.parent
+    ARTIFACT = REPO_ROOT / "conformance/fixtures/protocol/canonical_pipeline_v1.json"
+    SCHEMA = REPO_ROOT / "conformance/schemas/cv-canonical-pipeline-v1.json"
+
+    def _load(self):
+        import jsonschema  # fail closed: the schema gate requires the library
+
+        schema = json.loads(self.SCHEMA.read_text(encoding="utf-8", errors="strict"))
+        data = json.loads(self.ARTIFACT.read_text(encoding="utf-8", errors="strict"))
+        jsonschema.Draft202012Validator.check_schema(schema)
+        return jsonschema.Draft202012Validator(schema), data
+
+    def test_every_row_validates_against_the_versioned_schema(self):
+        validator, data = self._load()
+        errors = [
+            f"{'.'.join(str(p) for p in e.absolute_path)}: {e.message}"
+            for e in sorted(validator.iter_errors(data), key=lambda e: list(e.path))
+        ]
+        self.assertEqual(errors, [])
+        self.assertTrue(data["rows"])
+
+    def test_duplicate_row_id_is_rejected(self):
+        _, data = self._load()
+        ids = [row["id"] for row in data["rows"]]
+        self.assertEqual(len(ids), len(set(ids)), "committed corpus has duplicate row ids")
+        mutated = list(data["rows"]) + [dict(data["rows"][0])]
+        mutated_ids = [row["id"] for row in mutated]
+        self.assertNotEqual(
+            len(mutated_ids),
+            len(set(mutated_ids)),
+            "duplicate-id detection must reject a repeated row id",
+        )
+
+    def test_coverage_receipt_maps_every_class_to_at_least_one_row(self):
+        _, data = self._load()
+        known = {row["id"] for row in data["rows"]}
+        self.assertGreaterEqual(len(data["coverage_receipt"]), 59)
+        for klass, rows in data["coverage_receipt"].items():
+            row_ids = [part.strip() for part in rows.split(",")]
+            self.assertTrue(row_ids, f"class {klass} maps to zero rows")
+            for row_id in row_ids:
+                self.assertIn(row_id, known, f"class {klass} names unknown row {row_id}")
 
 
 if __name__ == "__main__":

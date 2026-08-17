@@ -1209,3 +1209,113 @@ func skipIfMLDSA87DERUnavailable(t *testing.T) {
 	}
 	t.Fatalf("NewMLDSA87KeypairFromDER (probe) unexpected error: %v", err)
 }
+
+// TestCanonicalPipelineCoverageReceiptIsCompleteAndClosed is the RUB-922
+// coverage receipt assertion: every enumerated class (the closed taxonomy plus
+// every named observable, accepted, rejected and hostile bullet of the
+// contract) maps to at least one row, and every row stays inside the closed
+// taxonomy and class set. A generator that silently dropped
+// ORPHAN_ALREADY_RETAINED or TERMINAL_LOCAL_INVARIANT would pass the drift and
+// policy gates; it fails here.
+func TestCanonicalPipelineCoverageReceiptIsCompleteAndClosed(t *testing.T) {
+	rows := canonicalPipelineRows()
+	if len(rows) == 0 {
+		t.Fatal("canonical pipeline corpus is empty")
+	}
+	receipt := canonicalPipelineCoverage(rows)
+	if len(receipt) != len(canonicalPipelineClasses) {
+		t.Fatalf("coverage receipt has %d classes, want %d", len(receipt), len(canonicalPipelineClasses))
+	}
+	for _, class := range canonicalPipelineClasses {
+		if receipt[class] == "" {
+			t.Fatalf("enumerated class %q maps to zero rows", class)
+		}
+	}
+
+	taxonomy := make(map[string]bool, len(canonicalPipelineTaxonomy))
+	for _, value := range canonicalPipelineTaxonomy {
+		taxonomy[strings.SplitN(value, "(", 2)[0]] = true
+	}
+	classes := make(map[string]bool, len(canonicalPipelineClasses))
+	for _, class := range canonicalPipelineClasses {
+		classes[class] = true
+	}
+	seen := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		if seen[row.ID] {
+			t.Fatalf("duplicate corpus row id %q", row.ID)
+		}
+		seen[row.ID] = true
+		if !strings.HasPrefix(row.ID, "C01-") {
+			t.Fatalf("row id %q is not C01-prefixed", row.ID)
+		}
+		if row.Kind == "observation" && !taxonomy[strings.SplitN(row.Result, "(", 2)[0]] {
+			t.Fatalf("row %s result %q is outside the closed taxonomy", row.ID, row.Result)
+		}
+		if row.Kind != "observation" && row.Result != "" {
+			t.Fatalf("row %s of kind %q must not carry a result", row.ID, row.Kind)
+		}
+		for _, class := range row.Covers {
+			if !classes[class] {
+				t.Fatalf("row %s covers unknown class %q", row.ID, class)
+			}
+		}
+	}
+	mustValidateCanonicalPipelineRows(rows)
+}
+
+// TestCanonicalPipelinePendingOwnerRowsAreFrozen pins the exact set of rows
+// excluded from the RUB-926 zero-mismatch gate. Adding an exclusion silently
+// would hide a real Go/Rust divergence behind a pending owner.
+func TestCanonicalPipelinePendingOwnerRowsAreFrozen(t *testing.T) {
+	want := map[string]bool{
+		"C01-INVENTORY-RECLAIMED-001": true,
+		"C01-APPLYMETA-CAP-001":       true,
+		"C01-APPLYMETA-OVER-001":      true,
+		"C01-BUSY-001":                true,
+		"C01-BUDGET-RACE-001":         true,
+		"C01-WIRE-OVERFLOW-001":       true,
+	}
+	got := make(map[string]bool)
+	for _, row := range canonicalPipelineRows() {
+		if row.PendingOwner == "" {
+			continue
+		}
+		if row.PendingOwner != pendingOwnerRUB910 {
+			t.Fatalf("row %s names pending owner %q, want %q", row.ID, row.PendingOwner, pendingOwnerRUB910)
+		}
+		got[row.ID] = true
+	}
+	if len(got) != len(want) {
+		t.Fatalf("pending-owner rows = %v, want %v", got, want)
+	}
+	for id := range want {
+		if !got[id] {
+			t.Fatalf("row %s lost its pending owner", id)
+		}
+	}
+}
+
+// TestCanonicalPipelineCorpusIsByteDeterministic proves the corpus writer is
+// reproducible: two writes into different directories are byte-identical and
+// never carry the authoring-only covers field.
+func TestCanonicalPipelineCorpusIsByteDeterministic(t *testing.T) {
+	first := filepath.Join(t.TempDir(), "canonical_pipeline_v1.json")
+	second := filepath.Join(t.TempDir(), "canonical_pipeline_v1.json")
+	mustWriteCanonicalPipelineCorpus(first)
+	mustWriteCanonicalPipelineCorpus(second)
+	a, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatalf("read first: %v", err)
+	}
+	b, err := os.ReadFile(second)
+	if err != nil {
+		t.Fatalf("read second: %v", err)
+	}
+	if !bytes.Equal(a, b) {
+		t.Fatal("canonical pipeline corpus is not byte-deterministic across runs")
+	}
+	if bytes.Contains(a, []byte(`"covers"`)) {
+		t.Fatal("emitted corpus leaked the authoring-only covers field")
+	}
+}
