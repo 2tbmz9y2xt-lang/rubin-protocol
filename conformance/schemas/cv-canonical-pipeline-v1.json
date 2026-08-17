@@ -68,7 +68,7 @@
         "effects": {
           "type": "object",
           "minProperties": 1,
-          "description": "`order` is the normative ordering specification of the named effect boundaries — an observed sequence must be consistent with it — not a count; a boundary that makes no attempt (e.g. block inventory relay without section-19 authority) still occupies its position."
+          "description": "`order` is the normative ordering specification of the named effect boundaries — an observed sequence must be consistent with it — not a count; a boundary that makes no attempt (e.g. block inventory relay without section-19 authority) still occupies its position. `block_seen`/`evicted_block_seen` are transition tokens for the row's block hash: `set` (unset→set), `cleared` (set→unset), `unchanged` (before equals after, either value); the precondition value lives in `scenario`."
         },
         "detail": { "type": "object", "minProperties": 1, "description": "Static authored authority for the row. Adapters do not emit it and comparators do not compare it; every adapter-emitted disposition lives in a typed row field or in effects." },
         "pending_owner": {

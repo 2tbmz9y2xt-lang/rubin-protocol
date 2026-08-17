@@ -187,10 +187,10 @@
     {
       "id": "C01-NEUTRAL-001",
       "kind": "authority",
-      "scenario": "Results that change neither planner-owned canonical counter, carry no peer penalty and perform no unauthorized canonical mutation, plus the exact plan and candidate-queue bounds.",
+      "scenario": "Results that change neither planner-owned canonical counter, carry no peer penalty and perform no unauthorized canonical mutation and do not latch mutation admission, plus the exact plan and candidate-queue bounds.",
       "detail": {
         "active_stateful_plans_max": 1,
-        "neutral_results": "LOCAL_BUSY, LOCAL_RESOURCE_UNAVAILABLE, STALE_LOCAL_PLAN, LOCAL_CANCELLED, KNOWN_BLOCK_NOOP, STORED_NONCANONICAL, ORPHAN_RETAINED, ORPHAN_ALREADY_RETAINED, MISSING_PARENT",
+        "neutral_results": "LOCAL_BUSY, LOCAL_RESOURCE_UNAVAILABLE, STALE_LOCAL_PLAN, LOCAL_CANCELLED, KNOWN_BLOCK_NOOP, STORED_NONCANONICAL, ORPHAN_RETAINED, ORPHAN_ALREADY_RETAINED, MISSING_PARENT, LOCAL_STORE_ERROR(noncanonical), LOCAL_PERSISTENCE_ERROR(precommit)",
         "no_peer_penalty_results": "every neutral result above plus LOCAL_STORE_ERROR(noncanonical), LOCAL_PERSISTENCE_ERROR(precommit), TERMINAL_STORE_INTEGRITY(canonical), TERMINAL_LOCAL_INVARIANT(evidence) and TERMINAL_PERSISTENCE",
         "p2p_duplicate_counter_mutations": 0,
         "peer_penalty": 0,
@@ -330,7 +330,7 @@
         "rejected_delta": "0"
       },
       "effects": {
-        "block_seen": "preserved",
+        "block_seen": "unchanged",
         "broadcast": 0,
         "canonical_da_sets_consumed": 0,
         "da_ttl_attempt": 0,
@@ -356,7 +356,7 @@
         "rejected_delta": "0"
       },
       "effects": {
-        "block_seen": "unset",
+        "block_seen": "unchanged",
         "inv_attempt": 0,
         "resolver_wake": 0
       }
@@ -368,7 +368,7 @@
       "result": "STORED_NONCANONICAL",
       "commit_truth": "NOT_APPLICABLE",
       "effects": {
-        "block_seen": "preserved"
+        "block_seen": "unchanged"
       }
     },
     {
@@ -400,7 +400,7 @@
       "commit_truth": "NEW",
       "effects": {
         "block_seen": "set",
-        "canonical_da_sets_consumed": "+summary_entry_count",
+        "canonical_da_sets_consumed": "+included_matching_sets",
         "da_ttl_attempt": 1,
         "order": [
           "record_candidate_best_height",
@@ -766,8 +766,9 @@
         "retry_slots": 1
       },
       "detail": {
-        "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool",
+        "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact",
         "observed_generation_notification": true,
+        "pending_owner_release_requires": "RUB-910 and RUB-893 both Done; the compared result identity is RUB-893-owned and the compared retry slot is RUB-910-owned",
         "requires_proven_exact_hash": true,
         "retriable": true
       },
