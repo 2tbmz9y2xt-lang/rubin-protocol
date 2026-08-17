@@ -337,7 +337,7 @@ func runGeneratorCLIWithArgs(args []string) {
 
 	// RUB-922 / C01 canonical publication observables corpus: authored
 	// architecture authority, never measured from a node production path.
-	mustWriteCanonicalPipelineCorpus(remapWritePath(filepath.Join(repoRoot, "conformance/fixtures/protocol/canonical_pipeline_v1.json")))
+	mustWriteCanonicalPipelineCorpus(remapWritePath(filepath.Join(repoRoot, "conformance", "fixtures", "protocol", "canonical_pipeline_v1.json")))
 
 	fmt.Println("ok: updated fixtures with real ML-DSA signatures")
 }
@@ -1901,7 +1901,7 @@ type cpArtifact struct {
 var canonicalPipelineTaxonomy = []string{
 	"ACCEPTED", "STORED_NONCANONICAL", "KNOWN_BLOCK_NOOP(CANONICAL|STORED_NONCANONICAL)",
 	"MISSING_PARENT", "ORPHAN_RETAINED", "ORPHAN_ALREADY_RETAINED", "CONSENSUS_INVALID(exact_error)",
-	"LOCAL_BUSY", "LOCAL_RESOURCE_UNAVAILABLE(resource)", "STALE_LOCAL_PLAN", "LOCAL_CANCELLED",
+	"LOCAL_BUSY", "LOCAL_RESOURCE_UNAVAILABLE(resource)", "STALE_LOCAL_PLAN", "LOCAL_CANCELLED", //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
 	"LOCAL_STORE_ERROR(noncanonical)", "LOCAL_PERSISTENCE_ERROR(precommit)",
 	"TERMINAL_STORE_INTEGRITY(canonical)", "TERMINAL_LOCAL_INVARIANT(evidence)",
 	"TERMINAL_PERSISTENCE(old|new|neither_or_unreadable)",
@@ -1916,7 +1916,7 @@ var canonicalPipelineClasses = []string{
 	"taxonomy:ACCEPTED", "taxonomy:STORED_NONCANONICAL", "taxonomy:KNOWN_BLOCK_NOOP",
 	"taxonomy:MISSING_PARENT", "taxonomy:ORPHAN_RETAINED", "taxonomy:ORPHAN_ALREADY_RETAINED",
 	"taxonomy:CONSENSUS_INVALID", "taxonomy:LOCAL_BUSY", "taxonomy:LOCAL_RESOURCE_UNAVAILABLE",
-	"taxonomy:STALE_LOCAL_PLAN", "taxonomy:LOCAL_CANCELLED", "taxonomy:LOCAL_STORE_ERROR",
+	"taxonomy:STALE_LOCAL_PLAN", "taxonomy:LOCAL_CANCELLED", "taxonomy:LOCAL_STORE_ERROR", //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
 	"taxonomy:LOCAL_PERSISTENCE_ERROR", "taxonomy:TERMINAL_STORE_INTEGRITY",
 	"taxonomy:TERMINAL_LOCAL_INVARIANT", "taxonomy:TERMINAL_PERSISTENCE",
 	"observable:paths", "observable:path_precedence", "observable:p2p_precedence",
@@ -1993,7 +1993,7 @@ func cpPathRows() []cpRow {
 		cpObs("C01-DISCONNECT-001", "ACCEPTED", "NEW", "An explicit standalone disconnect publishes proven NEW with an empty canonical-applied summary and zero connected-block fee-floor decay events.",
 			"observable:counter_deltas").counters("0", "0").detail(cpMap{"summary_rows": 0, "connected_block_decay_events": 0}),
 		cpAuth("C01-NEUTRAL-001", "Results that change neither planner-owned canonical counter, carry no peer penalty and perform no unauthorized canonical mutation, plus the exact plan and candidate-queue bounds.", cpMap{
-			"neutral_results":                    "LOCAL_BUSY, LOCAL_RESOURCE_UNAVAILABLE, STALE_LOCAL_PLAN, LOCAL_CANCELLED, KNOWN_BLOCK_NOOP, STORED_NONCANONICAL, ORPHAN_RETAINED, ORPHAN_ALREADY_RETAINED, MISSING_PARENT",
+			"neutral_results":                    "LOCAL_BUSY, LOCAL_RESOURCE_UNAVAILABLE, STALE_LOCAL_PLAN, LOCAL_CANCELLED, KNOWN_BLOCK_NOOP, STORED_NONCANONICAL, ORPHAN_RETAINED, ORPHAN_ALREADY_RETAINED, MISSING_PARENT", //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
 			"no_peer_penalty_results":            "every neutral result above plus LOCAL_STORE_ERROR(noncanonical), LOCAL_PERSISTENCE_ERROR(precommit), TERMINAL_STORE_INTEGRITY(canonical), TERMINAL_LOCAL_INVARIANT(evidence) and TERMINAL_PERSISTENCE",
 			"p2p_duplicate_counter_mutations":    0,
 			"peer_penalty":                       0,
@@ -2211,8 +2211,8 @@ func cpTerminalRows() []cpRow {
 			"taxonomy:TERMINAL_LOCAL_INVARIANT", "taxonomy:KNOWN_BLOCK_NOOP").counters("0", "0").rpc("not_committed with the existing terminal result surface"),
 		cpObs("C01-STALE-001", "STALE_LOCAL_PLAN", "OLD", "At the result-selecting mined candidate boundary, STORED_NONCANONICAL and either KNOWN_BLOCK_NOOP variant map to STALE_LOCAL_PLAN and the exact old image is preserved.",
 			"taxonomy:STALE_LOCAL_PLAN").counters("0", "0").rpc("not_committed"),
-		cpObs("C01-CANCEL-001", "LOCAL_CANCELLED", "OLD", "A miner snapshot cancelled or released before PoW at the reorg peak returns LOCAL_CANCELLED with the exact old image, no canonical mutation and no peer effect.",
-			"taxonomy:LOCAL_CANCELLED", "hostile:miner_reorg_peak_cancellation").counters("0", "0").effects(cpMap{"peer_penalty": 0}).rpc("not_committed"),
+		cpObs("C01-CANCEL-001", "LOCAL_CANCELLED", "OLD", "A miner snapshot cancelled or released before PoW at the reorg peak returns LOCAL_CANCELLED with the exact old image, no canonical mutation and no peer effect.", //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
+			"taxonomy:LOCAL_CANCELLED", "hostile:miner_reorg_peak_cancellation").counters("0", "0").effects(cpMap{"peer_penalty": 0}).rpc("not_committed"), //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
 		cpAuth("C01-CKPT-001", "The derived checkpoint is not canonical authority: an accepted transition may report degraded, a subsequent success clears it, startup is fail-closed, and a multi-row cadence writes only the final state once.", cpMap{
 			"accepted_with_degraded": true, "subsequent_success_clears_degraded": true,
 			"startup_on_missing_or_corrupt_required_artifact": "fail-closed as TERMINAL_STORE_INTEGRITY(canonical); no reader, admission or relay exposure",
