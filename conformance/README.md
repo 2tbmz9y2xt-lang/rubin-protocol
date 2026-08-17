@@ -167,7 +167,8 @@ defined field by field (`kind`, `pending_owner`, `coverage_receipt`) by
 `conformance/schemas/cv-canonical-pipeline-v1.json` (schema version 1). The artifact's own
 `pending_owner` fields are the current map; the 2026-08-17 `conformance/fixtures/CHANGELOG.md` entry
 records it at freeze (RUB-1195 owns section-19 relay; RUB-893 owns inbound-budget identities, budget
-races and reservation overflow; RUB-910 owns permit/LOCAL_BUSY and reclaimed-hash inventory). It is
+races and reservation overflow; RUB-910 owns permit/LOCAL_BUSY, retry-slot races and reclaimed-hash
+inventory). It is
 **INERT**: its only executors are the RUB-923 Go adapter, the RUB-926 acceptance gate, the RUB-924
 Rust adapter and the RUB-901 comparator, none of which exists yet, so no canonical-publication slice
 may claim it as a passing gate.

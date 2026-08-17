@@ -58,7 +58,7 @@
     "hostile:orphan_admission_eviction_refusal": "C01-ORPH-INFLIGHT-001, C01-ORPH-OVERSIZE-001, C01-ORPH-SOURCE51-001",
     "hostile:orphan_cap_boundaries_and_source_keys": "C01-ORPH-EVICT-001, C01-ORPH-SOURCE51-001, C01-SRCKEY-001",
     "hostile:paired_first_errors": "C01-FIRSTERR-INDEX-001",
-    "hostile:permit_budget_races": "C01-BUDGET-RACE-001",
+    "hostile:permit_budget_races": "C01-BUSY-001, C01-BUDGET-RACE-001",
     "hostile:postcommit_fault_boundaries": "C01-FAULT-STORED-001, C01-FAULT-ACCEPTED-001",
     "hostile:quota_crash_and_reclassification": "C01-GC-ORDER-001, C01-GC-CRASH-001",
     "observable:block_seen_inventory": "C01-NOOP-CMPCT-001, C01-RECLAIMED-RECEIVE-001, C01-INVENTORY-001, C01-INVENTORY-RECLAIMED-001",
@@ -753,7 +753,7 @@
     {
       "id": "C01-BUSY-001",
       "kind": "observation",
-      "scenario": "LOCAL_BUSY carries the canonical-permit observed-generation notification and arms the single peer retry slot with one joined waiter; it retains no candidate, never blocks the socket reader and never follows strict presence or stateful consensus.",
+      "scenario": "LOCAL_BUSY carries the canonical-permit observed-generation notification and arms the single peer retry slot with one joined waiter; it retains no candidate, never blocks the socket reader and never follows strict presence or stateful consensus. A duplicate or different hash while the slot is armed and disconnect or deadline races resolve deterministically, and non-retriable resource classes arm no slot and send no getdata.",
       "result": "LOCAL_BUSY",
       "commit_truth": "OLD",
       "canonical_counters": {
@@ -768,21 +768,21 @@
         "candidate_retained": false,
         "deadline": "original receive-start +30 second absolute deadline",
         "fixed_backoff": false,
-        "joined_waiters_max": 1
+        "joined_waiters_max": 1,
+        "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact"
       },
       "pending_owner": "RUB-910"
     },
     {
       "id": "C01-BUDGET-RACE-001",
       "kind": "observation",
-      "scenario": "Registration-versus-release races, an already-closed notification, capacity released before the waiter is scheduled, a duplicate or different hash while the slot is armed, and disconnect or deadline races all resolve deterministically.",
+      "scenario": "Inbound-budget registration-versus-release races, an already-closed notification and capacity released before the waiter is scheduled all resolve deterministically; the retriable result carries the inbound-budget observed-generation notification and requires an independently proven exact block hash.",
       "result": "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_capacity)",
       "commit_truth": "OLD",
       "effects": {
         "peer_penalty": 0
       },
       "detail": {
-        "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact",
         "observed_generation_notification": true,
         "requires_proven_exact_hash": true,
         "retriable": true

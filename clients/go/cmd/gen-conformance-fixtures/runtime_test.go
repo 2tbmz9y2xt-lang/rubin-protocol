@@ -1258,7 +1258,6 @@ func TestCanonicalPipelinePendingOwnerRowsAreFrozen(t *testing.T) {
 	}
 }
 
-// TestCanonicalPipelineObservationDetailNeverCarriesEffectKeys pins detail/effects disjointness on observation rows.
 func TestCanonicalPipelineObservationDetailNeverCarriesEffectKeys(t *testing.T) {
 	rows := canonicalPipelineRows()
 	effectKeys := make(map[string]bool)
