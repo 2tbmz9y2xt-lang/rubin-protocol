@@ -2006,10 +2006,10 @@ func cpPathRows() []cpRow {
 			"taxonomy:STORED_NONCANONICAL", "observable:counter_deltas").counters("0", "0"),
 		cpObs("C01-REORG-001", "ACCEPTED", "NEW", "A winning multi-block reorg is one plan: the whole transition is externally old or new and never row-wise intermediate.",
 			"observable:counter_deltas", "observable:final_state_atomicity", "accepted:coherent_capture_publication").counters("+connect_count", "0").
-			effects(cpMap{"final_state_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest", "summary_rows": "+connect_count"}).
-			detail(cpMap{"external_visibility": "old_or_new", "intermediate_tip_rows": 0, "publication_events": 1}),
+			effects(cpMap{"final_state_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest", "summary_rows": "+connect_count", "intermediate_tip_rows": 0, "publication_events": 1}).
+			detail(cpMap{"external_visibility": "old_or_new"}),
 		cpObs("C01-DISCONNECT-001", "ACCEPTED", "NEW", "An explicit standalone disconnect publishes proven NEW with an empty canonical-applied summary and zero connected-block fee-floor decay events.",
-			"observable:counter_deltas").counters("0", "0").effects(cpMap{"summary_rows": 0}).detail(cpMap{"connected_block_decay_events": 0}),
+			"observable:counter_deltas").counters("0", "0").effects(cpMap{"summary_rows": 0, "connected_block_decay_events": 0}),
 		cpAuth("C01-NEUTRAL-001", "Results that change neither planner-owned canonical counter, carry no peer penalty and perform no unauthorized canonical mutation and do not latch mutation admission, plus the exact plan and candidate-queue bounds.", cpMap{
 			"neutral_results":                    "LOCAL_BUSY, LOCAL_RESOURCE_UNAVAILABLE, STALE_LOCAL_PLAN, LOCAL_CANCELLED, KNOWN_BLOCK_NOOP, STORED_NONCANONICAL, ORPHAN_RETAINED, ORPHAN_ALREADY_RETAINED, MISSING_PARENT, LOCAL_STORE_ERROR(noncanonical), LOCAL_PERSISTENCE_ERROR(precommit)", //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
 			"no_peer_penalty_results":            "every neutral result above plus TERMINAL_STORE_INTEGRITY(canonical), TERMINAL_LOCAL_INVARIANT(evidence) and TERMINAL_PERSISTENCE",
@@ -2089,15 +2089,15 @@ func cpEffectRows() []cpRow {
 			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": "0"}),
 		cpObs("C01-EFFECT-ACCEPTED-001", "ACCEPTED", "NEW", "A fresh ACCEPTED freezes the same P2P-owned effect order; canonical-DA consumption is not a step of it but an identity of the transition image, consuming each exact included-matching retained COMPLETE_SET once, deduplicated by `set_identity` across the full plan, and never from a post-return caller.",
 			"observable:frozen_effect_order", "taxonomy:ACCEPTED").
-			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": "+included_matching_sets"}).
-			detail(cpMap{"da_ttl_fence": "the DA-orphan TTL advance never interleaves with a canonical transition", "post_return_consume_callers": 0}),
+			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": "+included_matching_sets", "post_return_consume_callers": 0}).
+			detail(cpMap{"da_ttl_fence": "the DA-orphan TTL advance never interleaves with a canonical transition"}),
 		cpObs("C01-FAULT-STORED-001", "STORED_NONCANONICAL", "NOT_APPLICABLE", "A fault injected at each fallible post-store effect boundary still runs every subsequent best-effort effect and the final resolver wake exactly once, in the frozen order.",
-			"hostile:postcommit_fault_boundaries").effects(cpMap{"order": frozenOrder, "record_best_height": 1, "da_ttl_attempt": 1, "resolver_wake": 1}).
-			detail(cpMap{"fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt", "short_circuit": false, "replay": false, "result_changed_by_failure": false}),
+			"hostile:postcommit_fault_boundaries").effects(cpMap{"order": frozenOrder, "record_best_height": 1, "da_ttl_attempt": 1, "resolver_wake": 1, "short_circuit": false, "replay": false, "result_changed_by_failure": false}).
+			detail(cpMap{"fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt"}),
 		cpObs("C01-FAULT-ACCEPTED-001", "ACCEPTED", "NEW", "The same fault matrix on an ACCEPTED row with a nonempty canonical-applied summary: failures add bounded diagnostics only and never duplicate the planner-owned counter or re-consume a DA set.",
 			"hostile:postcommit_fault_boundaries").counters("+1", "0").
-			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "da_ttl_attempt": 1, "resolver_wake": 1}).
-			detail(cpMap{"duplicate_counter_mutation": false, "artifact_state_changed_by_failure": false, "peer_policy_changed_by_failure": false, "fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt", "short_circuit": false, "replay": false, "canonical_da_reconsumed": false}),
+			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "da_ttl_attempt": 1, "resolver_wake": 1, "duplicate_counter_mutation": false, "artifact_state_changed_by_failure": false, "peer_policy_changed_by_failure": false, "short_circuit": false, "replay": false, "canonical_da_reconsumed": false}).
+			detail(cpMap{"fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt"}),
 		cpAuth("C01-POSTCOMMIT-001", "Complete postcommit effect enumeration with exact zero, once or count dispositions; there is no durable outbox.", cpMap{
 			"metrics":               "once",
 			"checkpoint":            "derived cadence, never canonical authority",
@@ -2149,13 +2149,13 @@ func cpOrphanRows() []cpRow {
 			detail(cpMap{"boundaries": "unique_count 500->501 and raw_bytes 64MiB->cap+1", "retained": "newest", "eviction_policy": "oldest FIFO first"}),
 		cpObs("C01-ORPH-INFLIGHT-001", "ORPHAN_RETAINED", "OLD", "Eviction is unconditional and there is no pin set: a row under resolution has already been removed from the pool before the resolver sees it, so no in-pool row is pin-protected and no cap infeasibility can arise.",
 			"hostile:orphan_admission_eviction_refusal", "observable:orphan_pool").
-			detail(cpMap{"pin_set": false, "pre_insertion_feasibility_proof": false, "resolving_row_in_pool": false}),
+			effects(cpMap{"resolving_row_in_pool": false}).detail(cpMap{"pin_set": false, "pre_insertion_feasibility_proof": false}),
 		cpObs("C01-ORPH-OVERSIZE-001", "LOCAL_RESOURCE_UNAVAILABLE(orphan_pool)", "OLD", "A single entry larger than 64 MiB is a non-retriable orphan_pool refusal: no insertion, no eviction, and blockSeen unchanged in both the initially unset and the stale-set case.",
-			"hostile:orphan_admission_eviction_refusal").effects(cpMap{"evictions": 0, "block_seen": "unchanged", "retry_slots": 0}).
-			detail(cpMap{"retriable": false, "initial_unset_stays": "unset", "stale_set_stays": "set", "pool_bytes_delta": 0}),
+			"hostile:orphan_admission_eviction_refusal").effects(cpMap{"evictions": 0, "block_seen": "unchanged", "retry_slots": 0, "pool_bytes_delta": 0}).
+			detail(cpMap{"retriable": false, "initial_unset_stays": "unset", "stale_set_stays": "set"}),
 		cpObs("C01-ORPH-SOURCE51-001", "LOCAL_RESOURCE_UNAVAILABLE(orphan_pool)", "OLD", "Entry 51 for one nonempty normalized source is a non-retriable refusal with the entire prior pool, FIFO, source counts and blockSeen byte-for-byte unchanged.",
 			"hostile:orphan_admission_eviction_refusal", "hostile:orphan_cap_boundaries_and_source_keys").
-			effects(cpMap{"evictions": 0, "block_seen": "unchanged", "retry_slots": 0}).detail(cpMap{"retriable": false, "source_count_delta": 0, "fifo_delta": 0}),
+			effects(cpMap{"evictions": 0, "block_seen": "unchanged", "retry_slots": 0, "source_count_delta": 0, "fifo_delta": 0}).detail(cpMap{"retriable": false}),
 		cpObs("C01-ORPH-MISSING-PARENT-001", "MISSING_PARENT", "OLD", "An apply entered without orphan retention whose parent is neither canonical nor stored returns MISSING_PARENT and preserves the exact old image.",
 			"taxonomy:MISSING_PARENT").counters("0", "0").rpc("not_committed only when reached by a mining entrypoint"),
 		cpAuth("C01-SRCKEY-001", "The orphan source-quota key mapping is frozen byte-for-byte: SplitHostPort success selects the host regardless of a numeric, nonnumeric or empty port and of bracketed non-IP spelling, its failure keeps the complete input, ParseAddr success returns WithZone(\"\").String() without Unmap, and its failure preserves host bytes and case. Rust must reproduce these bytes and may not substitute a socket-address grammar.", cpMap{
@@ -2292,8 +2292,8 @@ func canonicalPipelineRows() []cpRow {
 
 // mustValidateCanonicalPipelineRows fails generation on any structural defect a
 // downstream adapter could not repair: a duplicate row id, a result outside the
-// closed taxonomy, an unknown commit-truth value, an unknown coverage class, or
-// a kind missing its required payload.
+// closed taxonomy, an unknown commit-truth value, or an unknown coverage class; per-kind
+// payload shapes are schema-owned (see mustValidateCanonicalPipelineKind).
 func mustValidateCanonicalPipelineRows(rows []cpRow) {
 	truths := make(map[string]bool, len(canonicalPipelineCommitTruth))
 	for _, value := range canonicalPipelineCommitTruth {

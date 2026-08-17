@@ -163,12 +163,12 @@
       },
       "effects": {
         "final_state_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest",
+        "intermediate_tip_rows": 0,
+        "publication_events": 1,
         "summary_rows": "+connect_count"
       },
       "detail": {
-        "external_visibility": "old_or_new",
-        "intermediate_tip_rows": 0,
-        "publication_events": 1
+        "external_visibility": "old_or_new"
       }
     },
     {
@@ -182,10 +182,8 @@
         "rejected_delta": "0"
       },
       "effects": {
+        "connected_block_decay_events": 0,
         "summary_rows": 0
-      },
-      "detail": {
-        "connected_block_decay_events": 0
       }
     },
     {
@@ -426,12 +424,12 @@
           "attempt_one_da_orphan_ttl_advance",
           "wake_resolver_once"
         ],
+        "post_return_consume_callers": 0,
         "record_best_height": 1,
         "resolver_wake": 1
       },
       "detail": {
-        "da_ttl_fence": "the DA-orphan TTL advance never interleaves with a canonical transition",
-        "post_return_consume_callers": 0
+        "da_ttl_fence": "the DA-orphan TTL advance never interleaves with a canonical transition"
       }
     },
     {
@@ -450,13 +448,13 @@
           "wake_resolver_once"
         ],
         "record_best_height": 1,
-        "resolver_wake": 1
-      },
-      "detail": {
-        "fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt",
         "replay": false,
+        "resolver_wake": 1,
         "result_changed_by_failure": false,
         "short_circuit": false
+      },
+      "detail": {
+        "fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt"
       }
     },
     {
@@ -470,7 +468,10 @@
         "rejected_delta": "0"
       },
       "effects": {
+        "artifact_state_changed_by_failure": false,
+        "canonical_da_reconsumed": false,
         "da_ttl_attempt": 1,
+        "duplicate_counter_mutation": false,
         "order": [
           "record_candidate_best_height",
           "set_block_seen",
@@ -478,17 +479,14 @@
           "attempt_one_da_orphan_ttl_advance",
           "wake_resolver_once"
         ],
+        "peer_policy_changed_by_failure": false,
         "record_best_height": 1,
-        "resolver_wake": 1
+        "replay": false,
+        "resolver_wake": 1,
+        "short_circuit": false
       },
       "detail": {
-        "artifact_state_changed_by_failure": false,
-        "canonical_da_reconsumed": false,
-        "duplicate_counter_mutation": false,
-        "fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt",
-        "peer_policy_changed_by_failure": false,
-        "replay": false,
-        "short_circuit": false
+        "fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt"
       }
     },
     {
@@ -612,10 +610,12 @@
       "scenario": "Eviction is unconditional and there is no pin set: a row under resolution has already been removed from the pool before the resolver sees it, so no in-pool row is pin-protected and no cap infeasibility can arise.",
       "result": "ORPHAN_RETAINED",
       "commit_truth": "OLD",
+      "effects": {
+        "resolving_row_in_pool": false
+      },
       "detail": {
         "pin_set": false,
-        "pre_insertion_feasibility_proof": false,
-        "resolving_row_in_pool": false
+        "pre_insertion_feasibility_proof": false
       }
     },
     {
@@ -627,11 +627,11 @@
       "effects": {
         "block_seen": "unchanged",
         "evictions": 0,
+        "pool_bytes_delta": 0,
         "retry_slots": 0
       },
       "detail": {
         "initial_unset_stays": "unset",
-        "pool_bytes_delta": 0,
         "retriable": false,
         "stale_set_stays": "set"
       }
@@ -645,12 +645,12 @@
       "effects": {
         "block_seen": "unchanged",
         "evictions": 0,
-        "retry_slots": 0
+        "fifo_delta": 0,
+        "retry_slots": 0,
+        "source_count_delta": 0
       },
       "detail": {
-        "fifo_delta": 0,
-        "retriable": false,
-        "source_count_delta": 0
+        "retriable": false
       }
     },
     {
