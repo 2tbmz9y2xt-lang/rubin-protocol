@@ -7,7 +7,9 @@ import (
 	"maps"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1285,6 +1287,48 @@ func TestCanonicalPipelineResultPatternIsClosed(t *testing.T) {
 	for s, ok := range want {
 		if got := canonicalPipelineResultRE.MatchString(s); got != ok {
 			t.Errorf("MatchString(%q) = %v, want %v", s, got, ok)
+		}
+	}
+}
+
+// TestCanonicalPipelineValidatorFailsClosed re-execs the test binary so each
+// generator fatalf path (which calls os.Exit) is observable as a child exit
+// code, mirroring cmd/formal-trace.TestMainExitCodeIs2OnError.
+func TestCanonicalPipelineValidatorFailsClosed(t *testing.T) {
+	if c := os.Getenv("CP_NEGATIVE_CASE"); c != "" {
+		rows := canonicalPipelineRows()
+		switch c {
+		case "zero_class":
+			const drop = "accepted:lazy_memoized_provider" // sole row: C01-PROVIDER-001
+			kept := rows[:0]
+			for _, row := range rows {
+				if !slices.Contains(row.Covers, drop) {
+					kept = append(kept, row)
+				}
+			}
+			canonicalPipelineCoverage(kept)
+		case "duplicate_id":
+			mustValidateCanonicalPipelineRows(append(rows, rows[0]))
+		case "bad_result":
+			for i := range rows { // rows[0].Kind=authority is never Result-checked
+				if rows[i].Kind == "observation" {
+					rows[i].Result = "ACCEPTED(extra)"
+					break
+				}
+			}
+			mustValidateCanonicalPipelineRows(rows)
+		}
+		return
+	}
+	for _, c := range []string{"zero_class", "duplicate_id", "bad_result"} {
+		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=TestCanonicalPipelineValidatorFailsClosed") //nolint:gosec // re-exec of the test binary with fixed args
+		cmd.Env = append(os.Environ(), "CP_NEGATIVE_CASE="+c)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err == nil {
+			t.Fatalf("case %s: expected non-zero exit, stderr=%s", c, stderr.String())
+		} else if !strings.Contains(stderr.String(), "fatal: canonical pipeline:") {
+			t.Fatalf("case %s: stderr = %q, want \"fatal: canonical pipeline:\"", c, stderr.String())
 		}
 	}
 }

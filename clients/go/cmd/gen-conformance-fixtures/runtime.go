@@ -423,22 +423,26 @@ func mustCanonicalFixturePath(path string) string {
 	return clean
 }
 
-func mustWriteFixture(path string, f *fixtureFile) {
-	b, err := json.MarshalIndent(f, "", "  ")
+// mustWriteJSON marshals v as indented JSON with a trailing newline and
+// writes it to path, creating parent directories as needed (a no-op in
+// default mutating mode; needed for nested --output-dir targets, e.g.
+// devnet/). Fails closed via fatalf.
+func mustWriteJSON(path string, v any) {
+	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		fatalf("marshal %s: %v", path, err)
 	}
 	b = append(b, '\n')
-	// MkdirAll the parent so --output-dir writes can land in nested
-	// targets (e.g. devnet/) without requiring the caller to pre-create
-	// them. In default mutating mode the parent always already exists,
-	// so MkdirAll is a no-op.
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		fatalf("mkdir %s: %v", filepath.Dir(path), err)
 	}
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		fatalf("write %s: %v", path, err)
 	}
+}
+
+func mustWriteFixture(path string, f *fixtureFile) {
+	mustWriteJSON(path, f)
 }
 
 // mustResolveWriteRoot is the CLI-boundary wrapper around
@@ -2019,7 +2023,8 @@ func cpPathRows() []cpRow {
 		}, "observable:counter_deltas", "observable:no_penalty_bounds"),
 		cpObs("C01-FIRSTERR-INDEX-001", "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", "A malformed canonical index paired with a candidate whose defect is detected only at MTP or validation (a target defect precedes the preflight per C01-PATHS-001): the strict initial canonical-index preflight owns the first error and the candidate is never validated.",
 			"hostile:paired_first_errors", "observable:path_precedence", "taxonomy:TERMINAL_STORE_INTEGRITY").counters("0", "0").
-			rpc("not_committed with the existing terminal result surface").detail(cpMap{"first_error_source": "strict_initial_canonical_index_preflight", "admission": "latched"}),
+			rpc("not_committed with the existing terminal result surface").effects(cpMap{"admission": "latched"}).
+			detail(cpMap{"first_error_source": "strict_initial_canonical_index_preflight"}),
 		cpObs("C01-FIRSTERR-LATE-001", "CONSENSUS_INVALID(BLOCK_ERR_MERKLE_INVALID)", "OLD", "A late consensus-invalid candidate paired with an earlier best-effort artifact-write failure: the exact consensus error wins whenever validation can complete.",
 			"hostile:late_consensus_invalid_wins", "taxonomy:CONSENSUS_INVALID").counters("0", "+1").rpc("not_committed"),
 		cpObs("C01-EQUALWORK-001", "ACCEPTED", "NEW", "Two equal-cumulative-work candidates delivered and validation-completed in opposite orders select the same lexicographically lower canonical tip hash in both clients.",
@@ -2039,21 +2044,24 @@ func cpPresenceRows() []cpRow {
 		}, "observable:presence_truth_table"),
 		cpObs("C01-PRESENCE-TERMINAL-001", "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", "A canonical member with a missing, partial, corrupt or mismatched artifact is terminal and keeps mutation admission latched.",
 			"observable:presence_truth_table", "hostile:duplicate_and_corrupt_combinations").counters("0", "0").
-			detail(cpMap{"combinations": "block=absent|header=match|undo=valid; block=valid|header=absent|undo=valid; block=valid|header=mismatch|undo=valid; block=valid|header=match|undo=absent; block=valid|header=match|undo=invalid; block=corrupt|header=match|undo=valid", "admission": "latched"}),
+			effects(cpMap{"admission": "latched"}).
+			detail(cpMap{"combinations": "block=absent|header=match|undo=valid; block=valid|header=absent|undo=valid; block=valid|header=mismatch|undo=valid; block=valid|header=match|undo=absent; block=valid|header=match|undo=invalid; block=corrupt|header=match|undo=valid"}),
 		cpObs("C01-PRESENCE-STOREERR-001", "LOCAL_STORE_ERROR(noncanonical)", "NOT_APPLICABLE", "Every other recognized noncanonical combination is a local store error and leaves the canonical images unchanged.",
 			"taxonomy:LOCAL_STORE_ERROR", "observable:presence_truth_table", "hostile:duplicate_and_corrupt_combinations").rpc("no committed mine result").
 			detail(cpMap{"combinations": "block=absent|header=present|undo=absent; block=absent|header=absent|undo=present; block=valid|header=mismatch|undo=absent; block=valid|header=match|undo=invalid"}),
 		cpObs("C01-GC-ORDER-001", "STORED_NONCANONICAL", "NOT_APPLICABLE", "Damaged-noncanonical GC ranks candidates by the closed ascending damage class order, then by lexicographic hash; the first matching class owns a multi-fault row and healthy rows are never candidates.",
-			"observable:gc_damage_order", "hostile:quota_crash_and_reclassification").detail(cpMap{
-			"class_order":        "D0_INVALID_BLOCK, D1_HEADER_WITHOUT_VALID_BLOCK, D2_UNDO_WITHOUT_BLOCK_OR_HEADER, D3_INVALID_HEADER, D4_UNDO_WITHOUT_VALID_HEADER, D5_INVALID_UNDO",
-			"class_predicates":   "D0_INVALID_BLOCK: block leaf exists but strict parse or hash fails; D1_HEADER_WITHOUT_VALID_BLOCK: block leaf missing or failing strict parse or hash (a valid block is absent) AND a header leaf is present on disk, regardless of the header's own validity and regardless of undo presence or validity; D2_UNDO_WITHOUT_BLOCK_OR_HEADER: no valid block, no header, undo exists; D3_INVALID_HEADER: valid block and header exists but is malformed or mismatched; D4_UNDO_WITHOUT_VALID_HEADER: valid block, header absent, undo exists; D5_INVALID_UNDO: valid block and matching header and the undo envelope, binding or exact rederived bytes are invalid",
-			"candidates":         "D0+D1 at hash 0x..02, D1 at hash 0x..01, D1 at hash 0x..03, D5 at hash 0x..00",
-			"expected_victim":    "D0+D1 at hash 0x..02",
-			"tie_break":          "lexicographically lower hash inside one class (D1 0x..01 before D1 0x..03)",
-			"fail_closed_leaves": "strict read failure, non-regular, unexpected leaves are never GC candidates",
-		}),
+			"observable:gc_damage_order", "hostile:quota_crash_and_reclassification").
+			effects(cpMap{"expected_victim": "D0+D1 at hash 0x..02"}).
+			detail(cpMap{
+				"class_order":        "D0_INVALID_BLOCK, D1_HEADER_WITHOUT_VALID_BLOCK, D2_UNDO_WITHOUT_BLOCK_OR_HEADER, D3_INVALID_HEADER, D4_UNDO_WITHOUT_VALID_HEADER, D5_INVALID_UNDO",
+				"class_predicates":   "D0_INVALID_BLOCK: block leaf exists but strict parse or hash fails; D1_HEADER_WITHOUT_VALID_BLOCK: block leaf missing or failing strict parse or hash (a valid block is absent) AND a header leaf is present on disk, regardless of the header's own validity and regardless of undo presence or validity; D2_UNDO_WITHOUT_BLOCK_OR_HEADER: no valid block, no header, undo exists; D3_INVALID_HEADER: valid block and header exists but is malformed or mismatched; D4_UNDO_WITHOUT_VALID_HEADER: valid block, header absent, undo exists; D5_INVALID_UNDO: valid block and matching header and the undo envelope, binding or exact rederived bytes are invalid",
+				"candidates":         "D0+D1 at hash 0x..02, D1 at hash 0x..01, D1 at hash 0x..03, D5 at hash 0x..00",
+				"tie_break":          "lexicographically lower hash inside one class (D1 0x..01 before D1 0x..03)",
+				"fail_closed_leaves": "strict read failure, non-regular, unexpected leaves are never GC candidates",
+			}),
 		cpObs("C01-GC-HEALTHY-001", "LOCAL_RESOURCE_UNAVAILABLE(noncanonical_bytes)", "OLD", "Quota exhaustion with only healthy rows returns the non-retriable resource result after the damaged-only GC attempt; noncanonical_count behaves identically.",
 			"taxonomy:LOCAL_RESOURCE_UNAVAILABLE", "observable:resource_identities", "observable:gc_damage_order").counters("0", "0").
+			effects(cpMap{"retry_slots": 0}).
 			detail(cpMap{"retriable": false, "gc_attempted": true, "rows_reclaimed": 0, "release_notification": false}),
 		cpAuth("C01-GC-CRASH-001", "Quota cap+1, partial create and a crash at each delete or fsync boundary stay fail-closed; a canonical-to-side reclassification with an open reader keeps that reader's artifact readable.", cpMap{
 			"crash_boundaries":                  "before_delete, after_delete_before_fsync, after_fsync",
@@ -2070,7 +2078,7 @@ func cpEffectRows() []cpRow {
 	return []cpRow{
 		cpObs("C01-NOOP-FULL-001", "KNOWN_BLOCK_NOOP(CANONICAL)", "NOT_APPLICABLE", "A duplicate full receive with blockSeen already set is a strict no-op: it clears only matching compact outstanding state, even though the production helper returns nil and sends no wire response.",
 			"observable:known_block_noop", "taxonomy:KNOWN_BLOCK_NOOP", "hostile:duplicate_and_corrupt_combinations").counters("0", "0").
-			effects(cpMap{"block_seen": "unchanged", "record_best_height": 0, "inv_attempt": 0, "da_ttl_attempt": 0, "resolver_wake": 0, "canonical_da_sets_consumed": "0", "broadcast": 0, "wire_response": 0, "peer_penalty": 0, "provider_reads": 0}).
+			effects(cpMap{"block_seen": "unchanged", "record_best_height": 0, "inv_attempt": 0, "da_ttl_attempt": 0, "resolver_wake": 0, "canonical_da_sets_consumed": "0", "broadcast": 0, "wire_response": 0, "peer_penalty": 0, "provider_reads": 0, "compact_outstanding_cleared": "matching_only"}).
 			detail(cpMap{"derivation": "strict presence plus proven no-effect behavior"}),
 		cpObs("C01-NOOP-CMPCT-001", "KNOWN_BLOCK_NOOP(STORED_NONCANONICAL)", "NOT_APPLICABLE", "A duplicate compact receive whose blockSeen is unset leaves it unset: blockSeen is relay dedup only and is neither residency nor invalidity authority.",
 			"observable:known_block_noop", "observable:block_seen_inventory", "taxonomy:KNOWN_BLOCK_NOOP").counters("0", "0").effects(cpMap{"block_seen": "unchanged", "inv_attempt": 0, "resolver_wake": 0}),
@@ -2180,7 +2188,7 @@ func cpResourceRows() []cpRow {
 			"invalid_configured_bounds": "startup/config failure, outside peer retry",
 		}, "observable:resource_identities", "taxonomy:LOCAL_RESOURCE_UNAVAILABLE"),
 		cpObs("C01-RES-RECOVERY-001", "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)", "OLD", "Profile-permitted pruned suffix data awaiting validated reacquisition is non-retriable, preserves OLD, does not latch admission and arms no peer retry; it is distinct from bounded-storage reservation failure and from loss of an artifact the active retention profile already required.",
-			"observable:resource_identities", "taxonomy:LOCAL_RESOURCE_UNAVAILABLE").counters("0", "0").effects(cpMap{"retry_slots": 0, "peer_penalty": 0}),
+			"observable:resource_identities", "taxonomy:LOCAL_RESOURCE_UNAVAILABLE").counters("0", "0").effects(cpMap{"retry_slots": 0, "peer_penalty": 0, "admission": "not_latched"}),
 		cpAuth("C01-RES-IDENTITIES-PENDING-001", "The resource identities whose machinery no slice of this chain delivers; excluded from the RUB-926 zero-mismatch acceptance until RUB-893 is Done.", cpMap{
 			"identities": "inbound_budget_capacity, inbound_budget_overflow",
 			"retriable":  "inbound_budget_capacity only, and only with an independently proven exact block hash",
@@ -2190,8 +2198,8 @@ func cpResourceRows() []cpRow {
 			detail(cpMap{"charge_formula": "48+40*(disconnect_rows+connect_rows)+32*complete_da_ids", "cap_bytes": 67108864, "charge_bytes": "exactly cap"}),
 		cpObs("C01-APPLYMETA-OVER-001", "LOCAL_RESOURCE_UNAVAILABLE(apply_plan_metadata)", "OLD", "Cap+1 is non-retriable and preserves canonical, store, mempool, counter and effect state completely; it creates no peer penalty, no retry slot and no release notification.",
 			"hostile:apply_plan_metadata_caps").counters("0", "0").
-			effects(cpMap{"peer_penalty": 0, "retry_slots": 0, "getdata_sent": 0, "record_best_height": 0, "block_seen": "unchanged"}).
-			detail(cpMap{"retriable": false, "release_notification": false}),
+			effects(cpMap{"peer_penalty": 0, "retry_slots": 0, "getdata_sent": 0, "record_best_height": 0, "block_seen": "unchanged", "release_notification": false, "admission": "not_latched"}).
+			detail(cpMap{"retriable": false}),
 		cpObs("C01-BUSY-001", "LOCAL_BUSY", "OLD", "LOCAL_BUSY carries the canonical-permit observed-generation notification and arms the single peer retry slot with one joined waiter; it retains no candidate, never blocks the socket reader and never follows strict presence or stateful consensus.",
 			"taxonomy:LOCAL_BUSY", "observable:permit_retry_budget").counters("0", "0").effects(cpMap{"retry_slots": 1, "peer_penalty": 0}).
 			detail(cpMap{"joined_waiters_max": 1, "deadline": "original receive-start +30 second absolute deadline", "fixed_backoff": false, "candidate_retained": false}).pending(pendingOwnerRUB910),
@@ -2215,21 +2223,25 @@ func cpTerminalRows() []cpRow {
 	return []cpRow{
 		cpObs("C01-PRENS-001", "LOCAL_PERSISTENCE_ERROR(precommit)", "OLD", "A canonical-index failure before the namespace change reports the exact old state with no admission latch, no counter change and no retry.",
 			"accepted:pre_namespace_index_failure", "taxonomy:LOCAL_PERSISTENCE_ERROR").counters("0", "0").rpc("not_committed").
-			detail(cpMap{"admission": "not latched", "retry_slots": 0, "old_image": "exact", "triggers": "canonical-index atomic write before the namespace change; durable write of the verified precommit recovery checkpoint or either suffix proof set"}),
+			effects(cpMap{"admission": "not_latched", "retry_slots": 0}).
+			detail(cpMap{"old_image": "exact", "triggers": "canonical-index atomic write before the namespace change; durable write of the verified precommit recovery checkpoint or either suffix proof set"}),
 		cpObs("C01-TP-OLD-001", "TERMINAL_PERSISTENCE(old)", "OLD", "One strict readback after a fault that may have crossed the commit point sees the exact old canonical-index identity; no rollback, retry, rewrite or heuristic classification follows.",
 			"taxonomy:TERMINAL_PERSISTENCE", "accepted:post_namespace_terminal_class").counters("0", "0").
-			rpc("not_committed, never ordinary retry").detail(cpMap{"admission": "latched", "rollback_attempted": false}),
+			rpc("not_committed, never ordinary retry").effects(cpMap{"admission": "latched"}).detail(cpMap{"rollback_attempted": false}),
 		cpObs("C01-TP-NEW-001", "TERMINAL_PERSISTENCE(new)", "NEW", "The strict readback sees the exact planned-new identity: the new chain, standard, DA and owner images are truth and the committed identity is reported.",
-			"accepted:post_namespace_terminal_class", "taxonomy:TERMINAL_PERSISTENCE").detail(cpMap{"admission": "latched"}).
+			"accepted:post_namespace_terminal_class", "taxonomy:TERMINAL_PERSISTENCE").effects(cpMap{"admission": "latched"}).
 			rpc("committed; mined candidate identity only when the result-selecting mined candidate apply committed"),
 		cpObs("C01-TP-UNKNOWN-001", "TERMINAL_PERSISTENCE(neither_or_unreadable)", "UNKNOWN", "Every other or unreadable readback publishes neither guessed image and exposes no summary and no relay authority.",
 			"accepted:post_namespace_terminal_class", "hostile:canonical_ambiguity_and_readers", "taxonomy:TERMINAL_PERSISTENCE").counters("0", "0").
-			rpc("unknown; legacy mined absent").detail(cpMap{"admission": "latched", "summary_rows": 0, "relay_authority": false, "guessed_image": false, "stable_live_aliases": "a malformed live cache against a valid disk image, a retained-alias mutation under a continuously held permit, and admission readers active at terminal detection all keep stable aliases", "final_ram_cache_drift_check": "against the committed index bytes"}),
+			rpc("unknown; legacy mined absent").effects(cpMap{"admission": "latched"}).
+			detail(cpMap{"summary_rows": 0, "relay_authority": false, "guessed_image": false, "stable_live_aliases": "a malformed live cache against a valid disk image, a retained-alias mutation under a continuously held permit, and admission readers active at terminal detection all keep stable aliases", "final_ram_cache_drift_check": "against the committed index bytes"}),
 		cpObs("C01-TERMINV-001", "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD", "A missing or corrupt selected retained record or accounting value, an exact-token mismatch, a duplicate claim, or a checked arithmetic underflow or overflow preserves OLD, publishes no candidate delta and keeps mutation admission latched.",
 			"taxonomy:TERMINAL_LOCAL_INVARIANT").counters("0", "0").rpc("not_committed with the existing terminal result surface").
-			detail(cpMap{"triggers": "missing or corrupt selected retained record, missing or corrupt accounting value, exact-token mismatch, duplicate claim, checked arithmetic underflow or overflow", "admission": "latched", "never_reclassified_as": "LOCAL_RESOURCE_UNAVAILABLE(resource), which preserves OLD and does not latch, or STALE_LOCAL_PLAN"}),
+			effects(cpMap{"admission": "latched"}).
+			detail(cpMap{"triggers": "missing or corrupt selected retained record, missing or corrupt accounting value, exact-token mismatch, duplicate claim, checked arithmetic underflow or overflow", "never_reclassified_as": "LOCAL_RESOURCE_UNAVAILABLE(resource), which preserves OLD and does not latch, or STALE_LOCAL_PLAN"}),
 		cpObs("C01-TERMINV-BOOT-001", "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD", "At the bootstrap boundary a STORED_NONCANONICAL result, or a KNOWN_BLOCK_NOOP(STORED_NONCANONICAL), is a terminal local invariant that publishes no candidate delta and keeps mutation admission latched; bootstrap ACCEPTED and KNOWN_BLOCK_NOOP(CANONICAL) remain continuation-only.",
-			"taxonomy:TERMINAL_LOCAL_INVARIANT", "taxonomy:KNOWN_BLOCK_NOOP").counters("0", "0").rpc("not_committed with the existing terminal result surface"),
+			"taxonomy:TERMINAL_LOCAL_INVARIANT", "taxonomy:KNOWN_BLOCK_NOOP").counters("0", "0").rpc("not_committed with the existing terminal result surface").
+			effects(cpMap{"admission": "latched"}),
 		cpObs("C01-STALE-001", "STALE_LOCAL_PLAN", "OLD", "At the result-selecting mined candidate boundary, STORED_NONCANONICAL and either KNOWN_BLOCK_NOOP variant map to STALE_LOCAL_PLAN and the exact old image is preserved.",
 			"taxonomy:STALE_LOCAL_PLAN").counters("0", "0").rpc("not_committed"),
 		cpObs("C01-CANCEL-001", "LOCAL_CANCELLED", "OLD", "A miner snapshot cancelled or released before PoW at the reorg peak returns LOCAL_CANCELLED with the exact old image, no canonical mutation and no peer effect.", //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
@@ -2377,15 +2389,5 @@ func mustWriteCanonicalPipelineCorpus(path string) {
 		CoverageReceipt:   coverage,
 		Rows:              rows,
 	}
-	b, err := json.MarshalIndent(&artifact, "", "  ")
-	if err != nil {
-		fatalf("canonical pipeline: marshal: %v", err)
-	}
-	b = append(b, '\n')
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		fatalf("canonical pipeline: mkdir %s: %v", filepath.Dir(path), err)
-	}
-	if err := os.WriteFile(path, b, 0o600); err != nil {
-		fatalf("canonical pipeline: write %s: %v", path, err)
-	}
+	mustWriteJSON(path, &artifact)
 }

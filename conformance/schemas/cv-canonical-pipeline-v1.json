@@ -12,13 +12,18 @@
     "_meta": {
       "type": "object",
       "required": ["generated_by", "warning"],
-      "properties": { "generated_by": { "const": "clients/go/cmd/gen-conformance-fixtures" } }
+      "properties": { "generated_by": { "const": "clients/go/cmd/gen-conformance-fixtures" }, "warning": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
     },
     "authority": {
       "description": "Provenance of every expected value: the architecture parent as superseded, the pinned normative spec and repository baselines, the executors that may consume this artifact, and the frozen consume direction. Expected rows are authored architecture authority; the generator never calls a node production path to compute one.",
       "type": "object",
       "required": ["issue", "architecture_parent", "normative_spec_ref", "baseline_ref", "expected_row_origin", "executors", "status", "consume_freeze_point"],
-      "additionalProperties": { "type": "string" }
+      "properties": {
+        "issue": { "type": "string" }, "architecture_parent": { "type": "string" }, "normative_spec_ref": { "type": "string" }, "baseline_ref": { "type": "string" },
+        "expected_row_origin": { "type": "string" }, "executors": { "type": "string" }, "status": { "type": "string" }, "consume_freeze_point": { "type": "string" }
+      },
+      "additionalProperties": false
     },
     "result_taxonomy": {
       "description": "The closed result taxonomy. Every observation row result is a member name, optionally followed by its exact parenthesized argument.",
@@ -80,17 +85,20 @@
       "allOf": [
         {
           "if": { "properties": { "kind": { "const": "observation" } }, "required": ["kind"] },
-          "then": { "required": ["scenario", "result", "commit_truth"] }
+          "then": { "required": ["scenario", "result", "commit_truth"], "not": { "required": ["forbidden_observation"] } }
         },
         {
           "if": { "properties": { "kind": { "const": "authority" } }, "required": ["kind"] },
-          "then": { "required": ["scenario", "detail"], "not": { "required": ["result"] } }
+          "then": { "required": ["scenario", "detail"], "not": { "$ref": "#/$defs/nonObservationForbiddenFields" } }
         },
         {
           "if": { "properties": { "kind": { "const": "forbidden" } }, "required": ["kind"] },
-          "then": { "required": ["forbidden_observation"], "not": { "required": ["result"] } }
+          "then": { "required": ["forbidden_observation"], "not": { "$ref": "#/$defs/nonObservationForbiddenFields" } }
         }
       ]
+    },
+    "nonObservationForbiddenFields": {
+      "anyOf": [{ "required": ["result"] }, { "required": ["commit_truth"] }, { "required": ["canonical_counters"] }, { "required": ["effects"] }, { "required": ["rpc_projection"] }]
     }
   }
 }

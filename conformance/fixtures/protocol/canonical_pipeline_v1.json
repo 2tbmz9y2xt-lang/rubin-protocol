@@ -213,8 +213,10 @@
         "accepted_delta": "0",
         "rejected_delta": "0"
       },
+      "effects": {
+        "admission": "latched"
+      },
       "detail": {
-        "admission": "latched",
         "first_error_source": "strict_initial_canonical_index_preflight"
       }
     },
@@ -265,8 +267,10 @@
         "accepted_delta": "0",
         "rejected_delta": "0"
       },
+      "effects": {
+        "admission": "latched"
+      },
       "detail": {
-        "admission": "latched",
         "combinations": "block=absent|header=match|undo=valid; block=valid|header=absent|undo=valid; block=valid|header=mismatch|undo=valid; block=valid|header=match|undo=absent; block=valid|header=match|undo=invalid; block=corrupt|header=match|undo=valid"
       }
     },
@@ -287,11 +291,13 @@
       "scenario": "Damaged-noncanonical GC ranks candidates by the closed ascending damage class order, then by lexicographic hash; the first matching class owns a multi-fault row and healthy rows are never candidates.",
       "result": "STORED_NONCANONICAL",
       "commit_truth": "NOT_APPLICABLE",
+      "effects": {
+        "expected_victim": "D0+D1 at hash 0x..02"
+      },
       "detail": {
         "candidates": "D0+D1 at hash 0x..02, D1 at hash 0x..01, D1 at hash 0x..03, D5 at hash 0x..00",
         "class_order": "D0_INVALID_BLOCK, D1_HEADER_WITHOUT_VALID_BLOCK, D2_UNDO_WITHOUT_BLOCK_OR_HEADER, D3_INVALID_HEADER, D4_UNDO_WITHOUT_VALID_HEADER, D5_INVALID_UNDO",
         "class_predicates": "D0_INVALID_BLOCK: block leaf exists but strict parse or hash fails; D1_HEADER_WITHOUT_VALID_BLOCK: block leaf missing or failing strict parse or hash (a valid block is absent) AND a header leaf is present on disk, regardless of the header's own validity and regardless of undo presence or validity; D2_UNDO_WITHOUT_BLOCK_OR_HEADER: no valid block, no header, undo exists; D3_INVALID_HEADER: valid block and header exists but is malformed or mismatched; D4_UNDO_WITHOUT_VALID_HEADER: valid block, header absent, undo exists; D5_INVALID_UNDO: valid block and matching header and the undo envelope, binding or exact rederived bytes are invalid",
-        "expected_victim": "D0+D1 at hash 0x..02",
         "fail_closed_leaves": "strict read failure, non-regular, unexpected leaves are never GC candidates",
         "tie_break": "lexicographically lower hash inside one class (D1 0x..01 before D1 0x..03)"
       }
@@ -305,6 +311,9 @@
       "canonical_counters": {
         "accepted_delta": "0",
         "rejected_delta": "0"
+      },
+      "effects": {
+        "retry_slots": 0
       },
       "detail": {
         "gc_attempted": true,
@@ -338,6 +347,7 @@
         "block_seen": "unchanged",
         "broadcast": 0,
         "canonical_da_sets_consumed": "0",
+        "compact_outstanding_cleared": "matching_only",
         "da_ttl_attempt": 0,
         "inv_attempt": 0,
         "peer_penalty": 0,
@@ -686,6 +696,7 @@
         "rejected_delta": "0"
       },
       "effects": {
+        "admission": "not_latched",
         "peer_penalty": 0,
         "retry_slots": 0
       }
@@ -727,14 +738,15 @@
         "rejected_delta": "0"
       },
       "effects": {
+        "admission": "not_latched",
         "block_seen": "unchanged",
         "getdata_sent": 0,
         "peer_penalty": 0,
         "record_best_height": 0,
+        "release_notification": false,
         "retry_slots": 0
       },
       "detail": {
-        "release_notification": false,
         "retriable": false
       }
     },
@@ -822,10 +834,12 @@
         "accepted_delta": "0",
         "rejected_delta": "0"
       },
+      "effects": {
+        "admission": "not_latched",
+        "retry_slots": 0
+      },
       "detail": {
-        "admission": "not latched",
         "old_image": "exact",
-        "retry_slots": 0,
         "triggers": "canonical-index atomic write before the namespace change; durable write of the verified precommit recovery checkpoint or either suffix proof set"
       }
     },
@@ -840,8 +854,10 @@
         "accepted_delta": "0",
         "rejected_delta": "0"
       },
+      "effects": {
+        "admission": "latched"
+      },
       "detail": {
-        "admission": "latched",
         "rollback_attempted": false
       }
     },
@@ -852,7 +868,7 @@
       "result": "TERMINAL_PERSISTENCE(new)",
       "commit_truth": "NEW",
       "rpc_projection": "committed; mined candidate identity only when the result-selecting mined candidate apply committed",
-      "detail": {
+      "effects": {
         "admission": "latched"
       }
     },
@@ -867,8 +883,10 @@
         "accepted_delta": "0",
         "rejected_delta": "0"
       },
+      "effects": {
+        "admission": "latched"
+      },
       "detail": {
-        "admission": "latched",
         "final_ram_cache_drift_check": "against the committed index bytes",
         "guessed_image": false,
         "relay_authority": false,
@@ -887,8 +905,10 @@
         "accepted_delta": "0",
         "rejected_delta": "0"
       },
+      "effects": {
+        "admission": "latched"
+      },
       "detail": {
-        "admission": "latched",
         "never_reclassified_as": "LOCAL_RESOURCE_UNAVAILABLE(resource), which preserves OLD and does not latch, or STALE_LOCAL_PLAN",
         "triggers": "missing or corrupt selected retained record, missing or corrupt accounting value, exact-token mismatch, duplicate claim, checked arithmetic underflow or overflow"
       }
@@ -903,6 +923,9 @@
       "canonical_counters": {
         "accepted_delta": "0",
         "rejected_delta": "0"
+      },
+      "effects": {
+        "admission": "latched"
       }
     },
     {
