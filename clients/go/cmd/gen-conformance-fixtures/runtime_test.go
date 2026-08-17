@@ -1300,7 +1300,7 @@ func TestCanonicalPipelineCorpusIsByteDeterministic(t *testing.T) {
 }
 
 func TestCanonicalPipelineResultPatternIsClosed(t *testing.T) {
-	want := map[string]bool{"ACCEPTED(extra)": false, "KNOWN_BLOCK_NOOP(OTHER)": false, "TERMINAL_PERSISTENCE": false, "LOCAL_RESOURCE_UNAVAILABLE(bogus)": false, "CONSENSUS_INVALID()": false, "bogus": false, "ACCEPTED": true, "KNOWN_BLOCK_NOOP(CANONICAL)": true}
+	want := map[string]bool{"ACCEPTED(extra)": false, "KNOWN_BLOCK_NOOP(OTHER)": false, "TERMINAL_PERSISTENCE": false, "LOCAL_RESOURCE_UNAVAILABLE(bogus)": false, "CONSENSUS_INVALID()": false, "bogus": false, "ACCEPTED\n": false, "ACCEPTED": true, "KNOWN_BLOCK_NOOP(CANONICAL)": true}
 	for s, ok := range want {
 		if got := canonicalPipelineResultRE.MatchString(s); got != ok {
 			t.Errorf("MatchString(%q) = %v, want %v", s, got, ok)

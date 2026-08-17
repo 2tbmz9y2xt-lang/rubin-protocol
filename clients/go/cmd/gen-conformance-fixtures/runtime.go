@@ -2092,12 +2092,12 @@ func cpEffectRows() []cpRow {
 			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": "+included_matching_sets"}).
 			detail(cpMap{"da_ttl_fence": "the DA-orphan TTL advance never interleaves with a canonical transition", "post_return_consume_callers": 0}),
 		cpObs("C01-FAULT-STORED-001", "STORED_NONCANONICAL", "NOT_APPLICABLE", "A fault injected at each fallible post-store effect boundary still runs every subsequent best-effort effect and the final resolver wake exactly once, in the frozen order.",
-			"hostile:postcommit_fault_boundaries").effects(cpMap{"record_best_height": 1, "da_ttl_attempt": 1, "resolver_wake": 1}).
-			detail(cpMap{"fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt", "short_circuit": false, "replay": false, "reordered_continuation": false, "result_changed_by_failure": false}),
+			"hostile:postcommit_fault_boundaries").effects(cpMap{"order": frozenOrder, "record_best_height": 1, "da_ttl_attempt": 1, "resolver_wake": 1}).
+			detail(cpMap{"fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt", "short_circuit": false, "replay": false, "result_changed_by_failure": false}),
 		cpObs("C01-FAULT-ACCEPTED-001", "ACCEPTED", "NEW", "The same fault matrix on an ACCEPTED row with a nonempty canonical-applied summary: failures add bounded diagnostics only and never duplicate the planner-owned counter or re-consume a DA set.",
 			"hostile:postcommit_fault_boundaries").counters("+1", "0").
-			effects(cpMap{"record_best_height": 1, "da_ttl_attempt": 1, "resolver_wake": 1}).
-			detail(cpMap{"duplicate_counter_mutation": false, "artifact_state_changed_by_failure": false, "peer_policy_changed_by_failure": false, "fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt", "short_circuit": false, "replay": false, "reordered_continuation": false, "canonical_da_reconsumed": false}),
+			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "da_ttl_attempt": 1, "resolver_wake": 1}).
+			detail(cpMap{"duplicate_counter_mutation": false, "artifact_state_changed_by_failure": false, "peer_policy_changed_by_failure": false, "fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt", "short_circuit": false, "replay": false, "canonical_da_reconsumed": false}),
 		cpAuth("C01-POSTCOMMIT-001", "Complete postcommit effect enumeration with exact zero, once or count dispositions; there is no durable outbox.", cpMap{
 			"metrics":               "once",
 			"checkpoint":            "derived cadence, never canonical authority",

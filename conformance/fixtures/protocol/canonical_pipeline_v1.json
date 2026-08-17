@@ -440,12 +440,18 @@
       "commit_truth": "NOT_APPLICABLE",
       "effects": {
         "da_ttl_attempt": 1,
+        "order": [
+          "record_candidate_best_height",
+          "set_block_seen",
+          "block_inventory_relay_per_section_19",
+          "attempt_one_da_orphan_ttl_advance",
+          "wake_resolver_once"
+        ],
         "record_best_height": 1,
         "resolver_wake": 1
       },
       "detail": {
         "fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt",
-        "reordered_continuation": false,
         "replay": false,
         "result_changed_by_failure": false,
         "short_circuit": false
@@ -463,6 +469,13 @@
       },
       "effects": {
         "da_ttl_attempt": 1,
+        "order": [
+          "record_candidate_best_height",
+          "set_block_seen",
+          "block_inventory_relay_per_section_19",
+          "attempt_one_da_orphan_ttl_advance",
+          "wake_resolver_once"
+        ],
         "record_best_height": 1,
         "resolver_wake": 1
       },
@@ -472,7 +485,6 @@
         "duplicate_counter_mutation": false,
         "fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt",
         "peer_policy_changed_by_failure": false,
-        "reordered_continuation": false,
         "replay": false,
         "short_circuit": false
       }

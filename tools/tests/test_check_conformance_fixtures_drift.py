@@ -259,7 +259,7 @@ class CanonicalPipelineSchemaTests(unittest.TestCase):
     def test_result_pattern_rejects_malformed_taxonomy_strings(self):
         validator, data = self._load()
         row = next(r for r in data["rows"] if r["kind"] == "observation")
-        self.assertFalse(any(validator.is_valid({**data, "rows": [{**row, "result": s}]}) for s in ("ACCEPTED(extra)", "KNOWN_BLOCK_NOOP(OTHER)", "TERMINAL_PERSISTENCE", "LOCAL_RESOURCE_UNAVAILABLE(bogus)", "CONSENSUS_INVALID()", "bogus")))
+        self.assertFalse(any(validator.is_valid({**data, "rows": [{**row, "result": s}]}) for s in ("ACCEPTED(extra)", "KNOWN_BLOCK_NOOP(OTHER)", "TERMINAL_PERSISTENCE", "LOCAL_RESOURCE_UNAVAILABLE(bogus)", "CONSENSUS_INVALID()", "bogus", "ACCEPTED\n")))
 
 
 if __name__ == "__main__":
