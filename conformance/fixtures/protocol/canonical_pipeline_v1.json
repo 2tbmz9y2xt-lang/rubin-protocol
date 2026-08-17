@@ -162,13 +162,13 @@
         "rejected_delta": "0"
       },
       "effects": {
-        "final_state_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest"
+        "final_state_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest",
+        "summary_rows": "+connect_count"
       },
       "detail": {
         "external_visibility": "old_or_new",
         "intermediate_tip_rows": 0,
-        "publication_events": 1,
-        "summary_rows": "one per newly canonical block"
+        "publication_events": 1
       }
     },
     {
@@ -181,9 +181,11 @@
         "accepted_delta": "0",
         "rejected_delta": "0"
       },
-      "detail": {
-        "connected_block_decay_events": 0,
+      "effects": {
         "summary_rows": 0
+      },
+      "detail": {
+        "connected_block_decay_events": 0
       }
     },
     {
@@ -773,14 +775,14 @@
         "rejected_delta": "0"
       },
       "effects": {
+        "candidate_retained": false,
+        "fixed_backoff": false,
+        "joined_waiters_max": 1,
         "peer_penalty": 0,
         "retry_slots": 1
       },
       "detail": {
-        "candidate_retained": false,
         "deadline": "original receive-start +30 second absolute deadline",
-        "fixed_backoff": false,
-        "joined_waiters_max": 1,
         "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact"
       },
       "pending_owner": "RUB-910"
@@ -792,10 +794,10 @@
       "result": "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_capacity)",
       "commit_truth": "OLD",
       "effects": {
+        "observed_generation_notification": true,
         "peer_penalty": 0
       },
       "detail": {
-        "observed_generation_notification": true,
         "requires_proven_exact_hash": true,
         "retriable": true
       },
@@ -867,9 +869,7 @@
         "rejected_delta": "0"
       },
       "effects": {
-        "admission": "latched"
-      },
-      "detail": {
+        "admission": "latched",
         "rollback_attempted": false
       }
     },
@@ -896,14 +896,14 @@
         "rejected_delta": "0"
       },
       "effects": {
-        "admission": "latched"
+        "admission": "latched",
+        "guessed_image": false,
+        "relay_authority": false,
+        "summary_rows": 0
       },
       "detail": {
         "final_ram_cache_drift_check": "against the committed index bytes",
-        "guessed_image": false,
-        "relay_authority": false,
-        "stable_live_aliases": "a malformed live cache against a valid disk image, a retained-alias mutation under a continuously held permit, and admission readers active at terminal detection all keep stable aliases",
-        "summary_rows": 0
+        "stable_live_aliases": "a malformed live cache against a valid disk image, a retained-alias mutation under a continuously held permit, and admission readers active at terminal detection all keep stable aliases"
       }
     },
     {

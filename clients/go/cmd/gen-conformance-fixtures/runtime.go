@@ -2006,10 +2006,10 @@ func cpPathRows() []cpRow {
 			"taxonomy:STORED_NONCANONICAL", "observable:counter_deltas").counters("0", "0"),
 		cpObs("C01-REORG-001", "ACCEPTED", "NEW", "A winning multi-block reorg is one plan: the whole transition is externally old or new and never row-wise intermediate.",
 			"observable:counter_deltas", "observable:final_state_atomicity", "accepted:coherent_capture_publication").counters("+connect_count", "0").
-			effects(cpMap{"final_state_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest"}).
-			detail(cpMap{"external_visibility": "old_or_new", "intermediate_tip_rows": 0, "summary_rows": "one per newly canonical block", "publication_events": 1}),
+			effects(cpMap{"final_state_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest", "summary_rows": "+connect_count"}).
+			detail(cpMap{"external_visibility": "old_or_new", "intermediate_tip_rows": 0, "publication_events": 1}),
 		cpObs("C01-DISCONNECT-001", "ACCEPTED", "NEW", "An explicit standalone disconnect publishes proven NEW with an empty canonical-applied summary and zero connected-block fee-floor decay events.",
-			"observable:counter_deltas").counters("0", "0").detail(cpMap{"summary_rows": 0, "connected_block_decay_events": 0}),
+			"observable:counter_deltas").counters("0", "0").effects(cpMap{"summary_rows": 0}).detail(cpMap{"connected_block_decay_events": 0}),
 		cpAuth("C01-NEUTRAL-001", "Results that change neither planner-owned canonical counter, carry no peer penalty and perform no unauthorized canonical mutation and do not latch mutation admission, plus the exact plan and candidate-queue bounds.", cpMap{
 			"neutral_results":                    "LOCAL_BUSY, LOCAL_RESOURCE_UNAVAILABLE, STALE_LOCAL_PLAN, LOCAL_CANCELLED, KNOWN_BLOCK_NOOP, STORED_NONCANONICAL, ORPHAN_RETAINED, ORPHAN_ALREADY_RETAINED, MISSING_PARENT, LOCAL_STORE_ERROR(noncanonical), LOCAL_PERSISTENCE_ERROR(precommit)", //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
 			"no_peer_penalty_results":            "every neutral result above plus TERMINAL_STORE_INTEGRITY(canonical), TERMINAL_LOCAL_INVARIANT(evidence) and TERMINAL_PERSISTENCE",
@@ -2201,11 +2201,11 @@ func cpResourceRows() []cpRow {
 			effects(cpMap{"peer_penalty": 0, "retry_slots": 0, "getdata_sent": 0, "record_best_height": 0, "block_seen": "unchanged", "release_notification": false, "admission": "not_latched"}).
 			detail(cpMap{"retriable": false}),
 		cpObs("C01-BUSY-001", "LOCAL_BUSY", "OLD", "LOCAL_BUSY carries the canonical-permit observed-generation notification and arms the single peer retry slot with one joined waiter; it retains no candidate, never blocks the socket reader and never follows strict presence or stateful consensus. A duplicate or different hash while the slot is armed and disconnect or deadline races resolve deterministically, and non-retriable resource classes arm no slot and send no getdata.",
-			"taxonomy:LOCAL_BUSY", "observable:permit_retry_budget", "hostile:permit_budget_races").counters("0", "0").effects(cpMap{"retry_slots": 1, "peer_penalty": 0}).
-			detail(cpMap{"joined_waiters_max": 1, "deadline": "original receive-start +30 second absolute deadline", "fixed_backoff": false, "candidate_retained": false, "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact"}).pending(pendingOwnerRUB910),
+			"taxonomy:LOCAL_BUSY", "observable:permit_retry_budget", "hostile:permit_budget_races").counters("0", "0").effects(cpMap{"retry_slots": 1, "peer_penalty": 0, "joined_waiters_max": 1, "fixed_backoff": false, "candidate_retained": false}).
+			detail(cpMap{"deadline": "original receive-start +30 second absolute deadline", "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact"}).pending(pendingOwnerRUB910),
 		cpObs("C01-BUDGET-RACE-001", "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_capacity)", "OLD", "Inbound-budget registration-versus-release races, an already-closed notification and capacity released before the waiter is scheduled all resolve deterministically; the retriable result carries the inbound-budget observed-generation notification and requires an independently proven exact block hash.",
-			"hostile:permit_budget_races", "observable:permit_retry_budget").effects(cpMap{"peer_penalty": 0}).
-			detail(cpMap{"retriable": true, "requires_proven_exact_hash": true, "observed_generation_notification": true}).pending(pendingOwnerRUB893),
+			"hostile:permit_budget_races", "observable:permit_retry_budget").effects(cpMap{"peer_penalty": 0, "observed_generation_notification": true}).
+			detail(cpMap{"retriable": true, "requires_proven_exact_hash": true}).pending(pendingOwnerRUB893),
 		cpObs("C01-WIRE-OVERFLOW-001", "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_overflow)", "OLD", "A checked inbound reservation overflow or replacement failure is non-retriable; a valid payload discarded because of a bad checksum, read or declared length keeps the documented wire-error precedence and never becomes a resource result.",
 			"hostile:inbound_reservation_and_wire_errors").effects(cpMap{"retry_slots": 0, "getdata_sent": 0}).
 			detail(cpMap{"retriable": false, "wire_error_precedence": "frame_length, frame_read, frame_checksum"}).pending(pendingOwnerRUB893),
@@ -2227,14 +2227,14 @@ func cpTerminalRows() []cpRow {
 			detail(cpMap{"old_image": "exact", "triggers": "canonical-index atomic write before the namespace change; durable write of the verified precommit recovery checkpoint or either suffix proof set"}),
 		cpObs("C01-TP-OLD-001", "TERMINAL_PERSISTENCE(old)", "OLD", "One strict readback after a fault that may have crossed the commit point sees the exact old canonical-index identity; no rollback, retry, rewrite or heuristic classification follows.",
 			"taxonomy:TERMINAL_PERSISTENCE", "accepted:post_namespace_terminal_class").counters("0", "0").
-			rpc("not_committed, never ordinary retry").effects(cpMap{"admission": "latched"}).detail(cpMap{"rollback_attempted": false}),
+			rpc("not_committed, never ordinary retry").effects(cpMap{"admission": "latched", "rollback_attempted": false}),
 		cpObs("C01-TP-NEW-001", "TERMINAL_PERSISTENCE(new)", "NEW", "The strict readback sees the exact planned-new identity: the new chain, standard, DA and owner images are truth and the committed identity is reported.",
 			"accepted:post_namespace_terminal_class", "taxonomy:TERMINAL_PERSISTENCE").effects(cpMap{"admission": "latched"}).
 			rpc("committed; mined candidate identity only when the result-selecting mined candidate apply committed"),
 		cpObs("C01-TP-UNKNOWN-001", "TERMINAL_PERSISTENCE(neither_or_unreadable)", "UNKNOWN", "Every other or unreadable readback publishes neither guessed image and exposes no summary and no relay authority.",
 			"accepted:post_namespace_terminal_class", "hostile:canonical_ambiguity_and_readers", "taxonomy:TERMINAL_PERSISTENCE").counters("0", "0").
-			rpc("unknown; legacy mined absent").effects(cpMap{"admission": "latched"}).
-			detail(cpMap{"summary_rows": 0, "relay_authority": false, "guessed_image": false, "stable_live_aliases": "a malformed live cache against a valid disk image, a retained-alias mutation under a continuously held permit, and admission readers active at terminal detection all keep stable aliases", "final_ram_cache_drift_check": "against the committed index bytes"}),
+			rpc("unknown; legacy mined absent").effects(cpMap{"admission": "latched", "guessed_image": false, "relay_authority": false, "summary_rows": 0}).
+			detail(cpMap{"stable_live_aliases": "a malformed live cache against a valid disk image, a retained-alias mutation under a continuously held permit, and admission readers active at terminal detection all keep stable aliases", "final_ram_cache_drift_check": "against the committed index bytes"}),
 		cpObs("C01-TERMINV-001", "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD", "A missing or corrupt selected retained record or accounting value, an exact-token mismatch, a duplicate claim, or a checked arithmetic underflow or overflow preserves OLD, publishes no candidate delta and keeps mutation admission latched.",
 			"taxonomy:TERMINAL_LOCAL_INVARIANT").counters("0", "0").rpc("not_committed with the existing terminal result surface").
 			effects(cpMap{"admission": "latched"}).
