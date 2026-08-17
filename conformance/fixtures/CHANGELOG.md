@@ -13,7 +13,7 @@ Policy:
 
 ## 2026-08-17 — Frozen canonical publication observables corpus (RUB-922 / C01)
 
-The generator-owned artifact `protocol/canonical_pipeline_v1.json`, with the
+The generator-owned artifact `protocol/canonical_pipeline_v1.json`, refrozen after the v6 `reorg` fork-choice correction, with the
 versioned schema `conformance/schemas/cv-canonical-pipeline-v1.json`. It freezes
 the external canonical-pipeline authority — the closed result taxonomy, path
 and P2P first-error precedence, counter deltas, publication atomicity, the

@@ -113,7 +113,7 @@
         "losing_side": "strict_index_read_during_branch_collection, fork_choice, target, mtp, basic_validation, store_block",
         "p2p": "frame_length, frame_read, frame_checksum, documented_early_parse, header_check, pow_check, try_acquire_result, lease_owned_strict_presence, stateful_target_mtp_provider_consensus",
         "paths": "direct, genesis, losing_side, reorg, disconnect, miner, p2p_full, p2p_compact_probe, p2p_compact_reconstructed, p2p_relay_fallback, orphan_resolved",
-        "reorg": "initial_mtp_snapshot, per_connect_row_target, connect_block_with_sliding_mtp, advance_mtp"
+        "reorg": "strict_index_read_during_branch_collection, fork_choice, initial_mtp_snapshot, per_connect_row_target, connect_block_with_sliding_mtp, advance_mtp"
       }
     },
     {

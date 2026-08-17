@@ -1854,7 +1854,7 @@ func sortedUnique32(xs [][32]byte) [][32]byte {
 // Go or Rust node production path, and no row prescribes a mutex name, an
 // internal struct, allocator behavior, or a second persistent state machine.
 // Provenance, INERT status and the POST-RUB-911 consume freeze point are stated
-// once, in the emitted artifact's authority block and conformance/README.md.
+// once, in the emitted artifact's authority block and conformance/fixtures/CHANGELOG.md.
 // ---------------------------------------------------------------------------
 
 const (
@@ -1981,7 +1981,7 @@ func cpPathRows() []cpRow {
 			"paths":                "direct, genesis, losing_side, reorg, disconnect, miner, p2p_full, p2p_compact_probe, p2p_compact_reconstructed, p2p_relay_fallback, orphan_resolved",
 			"direct_or_genesis":    "target, genesis_guard_when_applicable, strict_initial_canonical_index_preflight, mtp, validation",
 			"losing_side":          "strict_index_read_during_branch_collection, fork_choice, target, mtp, basic_validation, store_block",
-			"reorg":                "initial_mtp_snapshot, per_connect_row_target, connect_block_with_sliding_mtp, advance_mtp",
+			"reorg":                "strict_index_read_during_branch_collection, fork_choice, initial_mtp_snapshot, per_connect_row_target, connect_block_with_sliding_mtp, advance_mtp",
 			"fork_choice":          "maximum cumulative ChainWork, then lexicographically lower canonical tip-hash bytes; independent of arrival order, worker schedule, validation completion and best-ready status",
 			"p2p":                  "frame_length, frame_read, frame_checksum, documented_early_parse, header_check, pow_check, try_acquire_result, lease_owned_strict_presence, stateful_target_mtp_provider_consensus",
 			"compact_absent_cycle": "release_first_lease, reconstruction_or_network, reacquire_lease, repeat_strict_presence",
