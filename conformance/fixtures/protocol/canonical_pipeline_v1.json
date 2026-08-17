@@ -762,17 +762,15 @@
       "result": "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_capacity)",
       "commit_truth": "OLD",
       "effects": {
-        "peer_penalty": 0,
-        "retry_slots": 1
+        "peer_penalty": 0
       },
       "detail": {
         "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact",
         "observed_generation_notification": true,
-        "pending_owner_release_requires": "RUB-910 and RUB-893 both Done; the compared result identity is RUB-893-owned and the compared retry slot is RUB-910-owned",
         "requires_proven_exact_hash": true,
         "retriable": true
       },
-      "pending_owner": "RUB-910"
+      "pending_owner": "RUB-893"
     },
     {
       "id": "C01-WIRE-OVERFLOW-001",

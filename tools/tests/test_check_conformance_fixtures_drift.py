@@ -256,6 +256,11 @@ class CanonicalPipelineSchemaTests(unittest.TestCase):
         ids = [row["id"] for row in data["rows"]]
         self.assertEqual(len(ids), len(set(ids)), "committed corpus has duplicate row ids")
 
+    def test_result_pattern_rejects_malformed_taxonomy_strings(self):
+        validator, data = self._load()
+        row = next(r for r in data["rows"] if r["kind"] == "observation")
+        self.assertFalse(any(validator.is_valid({**data, "rows": [{**row, "result": s}]}) for s in ("ACCEPTED(extra)", "KNOWN_BLOCK_NOOP(OTHER)", "TERMINAL_PERSISTENCE", "LOCAL_RESOURCE_UNAVAILABLE(bogus)", "CONSENSUS_INVALID()", "bogus")))
+
 
 if __name__ == "__main__":
     unittest.main()

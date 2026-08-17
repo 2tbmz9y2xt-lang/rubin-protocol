@@ -15,6 +15,7 @@ import (
 	"math/bits"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1912,6 +1913,12 @@ var canonicalPipelineTaxonomy = []string{
 	"TERMINAL_PERSISTENCE(old|new|neither_or_unreadable)",
 }
 
+// canonicalPipelineResultPattern anchors the full result string (not just the
+// prefix before "("); hand-mirrored in the schema's result.pattern, both pinned by tests.
+const canonicalPipelineResultPattern = `^(ACCEPTED|STORED_NONCANONICAL|KNOWN_BLOCK_NOOP\((CANONICAL|STORED_NONCANONICAL)\)|MISSING_PARENT|ORPHAN_RETAINED|ORPHAN_ALREADY_RETAINED|CONSENSUS_INVALID\([A-Z][A-Z0-9_]*\)|LOCAL_BUSY|LOCAL_RESOURCE_UNAVAILABLE\((inbound_budget_capacity|inbound_budget_overflow|apply_plan_metadata|noncanonical_bytes|noncanonical_count|orphan_pool|recovery_artifact)\)|STALE_LOCAL_PLAN|LOCAL_CANCELLED|LOCAL_STORE_ERROR\(noncanonical\)|LOCAL_PERSISTENCE_ERROR\(precommit\)|TERMINAL_STORE_INTEGRITY\(canonical\)|TERMINAL_LOCAL_INVARIANT\(evidence\)|TERMINAL_PERSISTENCE\((old|new|neither_or_unreadable)\))$` //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
+
+var canonicalPipelineResultRE = regexp.MustCompile(canonicalPipelineResultPattern)
+
 var canonicalPipelineCommitTruth = []string{"OLD", "NEW", "UNKNOWN", "NOT_APPLICABLE"}
 
 // canonicalPipelineClasses enumerates every class the coverage receipt must map
@@ -2187,8 +2194,8 @@ func cpResourceRows() []cpRow {
 			"taxonomy:LOCAL_BUSY", "observable:permit_retry_budget").counters("0", "0").effects(cpMap{"retry_slots": 1, "peer_penalty": 0}).
 			detail(cpMap{"joined_waiters_max": 1, "deadline": "original receive-start +30 second absolute deadline", "fixed_backoff": false, "candidate_retained": false}).pending(pendingOwnerRUB910),
 		cpObs("C01-BUDGET-RACE-001", "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_capacity)", "OLD", "Registration-versus-release races, an already-closed notification, capacity released before the waiter is scheduled, a duplicate or different hash while the slot is armed, and disconnect or deadline races all resolve deterministically.",
-			"hostile:permit_budget_races", "observable:permit_retry_budget").effects(cpMap{"retry_slots": 1, "peer_penalty": 0}).
-			detail(cpMap{"retriable": true, "requires_proven_exact_hash": true, "observed_generation_notification": true, "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact", "pending_owner_release_requires": "RUB-910 and RUB-893 both Done; the compared result identity is RUB-893-owned and the compared retry slot is RUB-910-owned"}).pending(pendingOwnerRUB910),
+			"hostile:permit_budget_races", "observable:permit_retry_budget").effects(cpMap{"peer_penalty": 0}).
+			detail(cpMap{"retriable": true, "requires_proven_exact_hash": true, "observed_generation_notification": true, "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact"}).pending(pendingOwnerRUB893),
 		cpObs("C01-WIRE-OVERFLOW-001", "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_overflow)", "OLD", "A checked inbound reservation overflow or replacement failure is non-retriable; a valid payload discarded because of a bad checksum, read or declared length keeps the documented wire-error precedence and never becomes a resource result.",
 			"hostile:inbound_reservation_and_wire_errors").effects(cpMap{"retry_slots": 0, "getdata_sent": 0}).
 			detail(cpMap{"retriable": false, "wire_error_precedence": "frame_length, frame_read, frame_checksum"}).pending(pendingOwnerRUB893),
@@ -2274,10 +2281,6 @@ func canonicalPipelineRows() []cpRow {
 // closed taxonomy, an unknown commit-truth value, an unknown coverage class, or
 // a kind missing its required payload.
 func mustValidateCanonicalPipelineRows(rows []cpRow) {
-	taxonomy := make(map[string]bool, len(canonicalPipelineTaxonomy))
-	for _, value := range canonicalPipelineTaxonomy {
-		taxonomy[strings.SplitN(value, "(", 2)[0]] = true
-	}
 	truths := make(map[string]bool, len(canonicalPipelineCommitTruth))
 	for _, value := range canonicalPipelineCommitTruth {
 		truths[value] = true
@@ -2292,7 +2295,7 @@ func mustValidateCanonicalPipelineRows(rows []cpRow) {
 			fatalf("canonical pipeline: row id %q must start with C01- and be unique", row.ID)
 		}
 		seen[row.ID] = true
-		mustValidateCanonicalPipelineKind(row, taxonomy, truths)
+		mustValidateCanonicalPipelineKind(row, truths)
 		if len(row.Covers) == 0 {
 			fatalf("canonical pipeline: row %s covers no enumerated class", row.ID)
 		}
@@ -2309,10 +2312,10 @@ func mustValidateCanonicalPipelineRows(rows []cpRow) {
 // fields per kind, and result being forbidden on non-observation kinds) are
 // owned by the schema's allOf/if-then rules and asserted by
 // tools/tests/test_check_conformance_fixtures_drift.py.
-func mustValidateCanonicalPipelineKind(row cpRow, taxonomy, truths map[string]bool) {
+func mustValidateCanonicalPipelineKind(row cpRow, truths map[string]bool) {
 	switch row.Kind {
 	case "observation":
-		if !taxonomy[strings.SplitN(row.Result, "(", 2)[0]] {
+		if !canonicalPipelineResultRE.MatchString(row.Result) {
 			fatalf("canonical pipeline: row %s result %q is outside the closed taxonomy", row.ID, row.Result)
 		}
 		if !truths[row.CommitTruth] {

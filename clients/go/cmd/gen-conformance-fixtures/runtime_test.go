@@ -1242,7 +1242,7 @@ func TestCanonicalPipelinePendingOwnerRowsAreFrozen(t *testing.T) {
 		"C01-RES-IDENTITIES-PENDING-001": pendingOwnerRUB893,
 		"C01-WIRE-OVERFLOW-001":          pendingOwnerRUB893,
 		"C01-BUSY-001":                   pendingOwnerRUB910,
-		"C01-BUDGET-RACE-001":            pendingOwnerRUB910,
+		"C01-BUDGET-RACE-001":            pendingOwnerRUB893,
 		"C01-INVENTORY-RECLAIMED-001":    pendingOwnerRUB910,
 	}
 	got := make(map[string]string)
@@ -1277,5 +1277,14 @@ func TestCanonicalPipelineCorpusIsByteDeterministic(t *testing.T) {
 	}
 	if bytes.Contains(a, []byte(`"covers"`)) {
 		t.Fatal("emitted corpus leaked the authoring-only covers field")
+	}
+}
+
+func TestCanonicalPipelineResultPatternIsClosed(t *testing.T) {
+	want := map[string]bool{"ACCEPTED(extra)": false, "KNOWN_BLOCK_NOOP(OTHER)": false, "TERMINAL_PERSISTENCE": false, "LOCAL_RESOURCE_UNAVAILABLE(bogus)": false, "CONSENSUS_INVALID()": false, "bogus": false, "ACCEPTED": true, "KNOWN_BLOCK_NOOP(CANONICAL)": true}
+	for s, ok := range want {
+		if got := canonicalPipelineResultRE.MatchString(s); got != ok {
+			t.Errorf("MatchString(%q) = %v, want %v", s, got, ok)
+		}
 	}
 }

@@ -13,32 +13,11 @@ Policy:
 
 ## 2026-08-17 — Frozen canonical publication observables corpus (RUB-922 / C01)
 
-The generator-owned artifact `protocol/canonical_pipeline_v1.json`, refrozen after the v6 `reorg` fork-choice correction, with the
-versioned schema `conformance/schemas/cv-canonical-pipeline-v1.json`. It freezes
-the external canonical-pipeline authority — the closed result taxonomy, path
-and P2P first-error precedence, counter deltas, publication atomicity, the
-presence and damaged-GC tables, the POST-RUB-911 P2P effect order (no
-canonical-DA consume step) with the `rubin-spec@c14b0100
-RUBIN_COMPACT_BLOCKS.md` section 19 block inventory relay disposition,
-orphan-pool and source-quota rules, the owned and un-owned resource identities,
-and the terminal classes; its `coverage_receipt` enumerates every frozen class.
-Expected rows are authored architecture authority from RUB-882 as superseded by
-RUB-1180; the generator never calls a Go or Rust node production path to compute
-an expected value.
+The generator-owned artifact `protocol/canonical_pipeline_v1.json`, refrozen after the v6 `reorg` fork-choice correction, with the versioned schema `conformance/schemas/cv-canonical-pipeline-v1.json`. It freezes the external canonical-pipeline authority — the closed result taxonomy, path and P2P first-error precedence, counter deltas, publication atomicity, the presence and damaged-GC tables, the POST-RUB-911 P2P effect order (no canonical-DA consume step) with the `rubin-spec@c14b0100 RUBIN_COMPACT_BLOCKS.md` section 19 block inventory relay disposition, orphan-pool and source-quota rules, the owned and un-owned resource identities, and the terminal classes; its `coverage_receipt` enumerates every frozen class. Expected rows are authored architecture authority from RUB-882 as superseded by RUB-1180; the generator never calls a Go or Rust node production path to compute an expected value.
 
-Rows carrying `pending_owner` in `protocol/canonical_pipeline_v1.json` are
-excluded from the RUB-926 zero-mismatch acceptance and from RUB-901 equality
-until their named owner is Done: the section-19 relay rows name RUB-1195, the
-inbound-budget resource identities name RUB-893, and the permit/retry-budget
-and reclaimed-hash-inventory rows name RUB-910. Apply-plan metadata carries no
-`pending_owner` and is gate-bearing on RUB-1202. The artifact is INERT (see
-`conformance/README.md`).
+Rows carrying `pending_owner` in `protocol/canonical_pipeline_v1.json` are excluded from the RUB-926 zero-mismatch acceptance and from RUB-901 equality until their named owner is Done: RUB-1195 owns the section-19 relay rows; RUB-893 owns the inbound-budget identities, budget races and reservation overflow; RUB-910 owns permit/LOCAL_BUSY and reclaimed-hash inventory. Apply-plan metadata carries no `pending_owner` and is gate-bearing on RUB-1202. The artifact is INERT (see `conformance/README.md`).
 
-Exact commands: `scripts/dev-env.sh -- bash -lc 'cd clients/go && go run
-./cmd/gen-conformance-fixtures'` and `scripts/dev-env.sh --
-python3 tools/gen_conformance_matrix.py`. Non-goals: no client implementation,
-adapter, acceptance runner, comparator, specification, formal, runner or other
-CV fixture change; no CV-*.json vector is added or modified.
+Exact commands: `scripts/dev-env.sh -- bash -lc 'cd clients/go && go run ./cmd/gen-conformance-fixtures'` and `scripts/dev-env.sh -- python3 tools/gen_conformance_matrix.py`. Non-goals: no client implementation, adapter, acceptance runner, comparator, specification, formal, runner or other CV fixture change; no CV-*.json vector is added or modified.
 
 ## 2026-08-09 — Exact u128 durable supply and undo v2 (RUB-1153)
 
