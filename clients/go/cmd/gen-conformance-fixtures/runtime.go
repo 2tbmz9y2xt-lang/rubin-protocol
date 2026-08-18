@@ -2533,9 +2533,9 @@ func cp2UintOf(v any) (uint64, bool) {
 	case uint64:
 		return n, true
 	case int:
-		return uint64(n), n >= 0
+		return cp2UintOfSigned(int64(n))
 	case int64:
-		return uint64(n), n >= 0
+		return cp2UintOfSigned(n)
 	case json.Number:
 		u, err := strconv.ParseUint(n.String(), 10, 64)
 		return u, err == nil
@@ -2543,6 +2543,14 @@ func cp2UintOf(v any) (uint64, bool) {
 		return uint64(n), n >= 0 && n == math.Trunc(n) && n < math.Exp2(64)
 	}
 	return 0, false
+}
+
+// cp2UintOfSigned guards the sign BEFORE the conversion: uint64(negative) wraps.
+func cp2UintOfSigned(n int64) (uint64, bool) {
+	if n < 0 {
+		return 0, false
+	}
+	return uint64(n), true
 }
 
 func cp2UintOK(v any, max uint64) bool {
