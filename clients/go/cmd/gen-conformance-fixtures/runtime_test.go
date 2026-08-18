@@ -1835,41 +1835,80 @@ func cp2SchemaTruthOf(t *testing.T, member string) string {
 	return ""
 }
 
-// TestCanonicalPipelineV2ValidatorsNeverPanic drives random, often malformed,
-// caller shapes through every validator: untrusted-looking input must produce a
-// typed error, never a panic.
+// cp2FuzzValues are the Go kinds a caller can hand a validator.
+var cp2FuzzValues = []any{
+	nil, true, 0, -1, 1.5, uint64(math.MaxUint64), json.Number("1"), json.Number("x"), "B1", "a b",
+	[]any{nil, "B1"},
+	[]string{"B1"},
+	[]bool{true},
+	map[string]any{"k": nil},
+	cpMap{"K": 1},
+	struct{ A int }{1},
+}
+
+// cp2Mutations each break ONE nested field of an otherwise valid row, so the
+// validator under test is reached instead of short-circuiting on identity.
+var cp2Mutations = []func(r *cp2Row, token string, value any){
+	func(r *cp2Row, token string, value any) { r.Cases[0].CaseID = token },
+	func(r *cp2Row, token string, value any) { r.Cases[0].ScheduleID = cp2Ptr(token) },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Input[0].Pointer = token },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Input[0].Type = token },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Input[0].ValueOrAlias = value },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Input[0].Provenance = token },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Input[0].ProductionSetupSink = token },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Input[0].ConsumptionProofOwner = token },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Expected.Result = nil },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Expected.Result = cp2Ptr(token) },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Expected.CommitTruth = token },
+	func(r *cp2Row, token string, value any) {
+		e := &r.Cases[0].Expected
+		e.Result, e.PipelineReached, e.RPC.Class, e.CommitTruth = nil, cp2Ptr(false), "NOT_REACHED", token
+		e.WireDisposition = cp2Ptr("CHECKSUM_REJECT")
+	},
+	func(r *cp2Row, token string, value any) {
+		e := &r.Cases[0].Expected
+		e.Result, e.PipelineReached, e.RPC.Class, e.CommitTruth = nil, cp2Ptr(false), "STARTUP_UNAVAILABLE_503", token
+		e.RecoveryOutcome = cp2Ptr("fail_closed_no_exposure")
+	},
+	func(r *cp2Row, token string, value any) {
+		rpc := &r.Cases[0].Expected.RPC
+		rpc.Class, rpc.Phase, rpc.Mined, rpc.SuccessIdentity = token, token, token, token
+	},
+	func(r *cp2Row, token string, value any) {
+		rpc := &r.Cases[0].Expected.RPC
+		rpc.HTTP, rpc.CommitState, rpc.ErrorClass = nil, nil, cp2Ptr(token)
+	},
+	func(r *cp2Row, token string, value any) { r.Kind = token },
+}
+
+// TestCanonicalPipelineV2ValidatorsNeverPanic drives random malformed shapes
+// through every validator: untrusted-looking input must yield a typed error,
+// never a panic. Each iteration starts from a VALID registered row so one nested
+// mutation reaches the validator it targets.
 func TestCanonicalPipelineV2ValidatorsNeverPanic(t *testing.T) {
 	const seed = 1207
 	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // deterministic test corpus, not cryptographic
-	tokens := []string{"", " ", "\n", "C01-DIRECT-001", "MAIN", "a b", "/input/a", "RUB-923", "ünïcode", "token", "object"}
+	tokens := []string{"", " ", "\n", "C01-DIRECT-001", "MAIN", "a b", "/input/a", "RUB-923", "\u00fcn\u00efcode", "token", "object", "NOT_REACHED", "OLD", "NOT_APPLICABLE", "FRAME_BOGUS"}
 	pick := func() string { return tokens[rng.Intn(len(tokens))] }
-	values := []any{
-		nil, true, 0, -1, 1.5, uint64(math.MaxUint64), json.Number("1"), json.Number("x"), "B1", "a b",
-		[]any{nil, "B1"},
-		[]string{"B1"},
-		[]bool{true},
-		map[string]any{"k": nil},
-		cpMap{"K": 1},
-		struct{ A int }{1},
-	}
 	registry := cp2RowRegistry()
 	for i := 0; i < 2000; i++ {
-		value := values[rng.Intn(len(values))]
-		in := cp2Input{Pointer: pick(), Type: pick(), ValueOrAlias: value, Provenance: pick(), ProductionSetupSink: pick(), ConsumptionProofOwner: pick()}
-		row := cp2Row{RowID: pick(), Kind: pick(), Cases: []cp2Case{{CaseID: pick(), Input: []cp2Input{in}}}}
-		if rng.Intn(2) == 0 {
-			row.Cases[0].ScheduleID = cp2Ptr(pick())
-		}
+		value := cp2FuzzValues[rng.Intn(len(cp2FuzzValues))]
+		row := cp2Row{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}
+		cp2Mutations[rng.Intn(len(cp2Mutations))](&row, pick(), value)
 		fixtures := map[string]cp2Fixture{pick(): {Type: pick(), Value: value}}
+		in := cp2Input{Pointer: pick(), Type: pick(), ValueOrAlias: value, Provenance: pick(), ProductionSetupSink: pick(), ConsumptionProofOwner: pick()}
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
 					t.Fatalf("seed %d iteration %d: panic %v on value %#v", seed, i, r, value)
 				}
 			}()
-			_ = cp2ValidateRows([]cp2Row{row}, registry)
-			_ = cp2ValidateFixtures(fixtures)
-			_ = cp2ValidateAliases([]cp2Row{row}, fixtures)
+			rows := []cp2Row{row}
+			_, _ = cp2ValidateRows(rows, registry), cp2ValidateFixtures(fixtures)
+			_, _ = cp2ValidateAliases(rows, fixtures), cp2ValidateCases(pick(), row.Cases)
+			_, _ = cp2ValidateInputs(pick(), []cp2Input{in}), cp2ValidateExpected(pick(), row.Cases[0].Expected)
+			_, _ = cp2ValidateRPC(pick(), row.Cases[0].Expected.RPC), cp2InputOK(in)
+			_, _ = cp2FixtureValueOK(cp2Fixture{Type: pick(), Value: value}), cp2ClosedValueOK(value)
 		}()
 	}
 }
