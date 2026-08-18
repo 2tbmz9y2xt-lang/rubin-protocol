@@ -1499,6 +1499,12 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 			e.Result, e.PipelineReached, e.WireDisposition, e.RPC.Class = nil, cp2Ptr(false), cp2Ptr("CHECKSUM_REJECT"), "NOT_REACHED"
 		},
 		"empty input": func(r *cp2Row) { r.Cases[0].Input = nil },
+		"array tag scalar": func(r *cp2Row) {
+			r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "array<u64>", "1")}
+		},
+		"no cases":             func(r *cp2Row) { r.Cases = nil },
+		"authority with cases": func(r *cp2Row) { r.RowID, r.Kind = "C01-PATHS-001", "authority" },
+		"surplus error class":  func(r *cp2Row) { r.Cases[0].Expected.RPC.ErrorClass = cp2Ptr("LOCAL_BUSY") },
 		"null result class": func(r *cp2Row) {
 			e := &r.Cases[0].Expected
 			e.Result, e.PipelineReached, e.WireDisposition = nil, cp2Ptr(false), cp2Ptr("CHECKSUM_REJECT")
@@ -1552,7 +1558,7 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		"token whitespace": "is not a machine token", "class tuple": "requires [result_selecting_mined_candidate 200",
 		"wire truth": "wire_disposition requires commit truth OLD", "classified wire": "set only when result is null",
 		"reached flag true": "requires pipeline_reached false", "both dispositions": "exactly one of", "neither disposition": "exactly one of", "duplicate pointer": "duplicate input pointer /input/b",
-		"schedule prose": "is not an alias", "empty input": "carries no input stimulus", "u64 two to the 64": "is not a u64 literal", "u16 over bound": "is not a u16 literal", "pointer grammar": "input pointer \"/Input/B\" is malformed", "blank sink": "blank production setup sink", "zero width sink": "blank production setup sink",
+		"schedule prose": "is not an alias", "empty input": "carries no input stimulus", "array tag scalar": "is not a array<u64> literal", "no cases": "contradicts the kind exclusions", "authority with cases": "contradicts the kind exclusions", "surplus error class": "requires [result_selecting_mined_candidate 200", "u64 two to the 64": "is not a u64 literal", "u16 over bound": "is not a u16 literal", "pointer grammar": "input pointer \"/Input/B\" is malformed", "blank sink": "blank production setup sink", "zero width sink": "blank production setup sink",
 		"owner grammar": "malformed consumption owner", "null result class": "unreached or startup RPC class", "u64 not a number": "is not a u64 literal", "u64 negative": "is not a u64 literal",
 		"bool not a bool": "is not a bool literal", "bytes32 uppercase": "is not a bytes32_hex literal", "token with a space": "is not a token literal",
 		"inline object": "is not a object literal", "not reached bounds": "exceeds its bounds", "wire domain": "is outside its closed domain", "duplicate case id": "duplicate case id",
@@ -1567,6 +1573,38 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 			t.Errorf("%s: expected a fail-closed rejection", name)
 		} else if !strings.Contains(err.Error(), want[name]) {
 			t.Errorf("%s: error = %q, want it to name %q", name, err, want[name])
+		}
+	}
+}
+
+// TestCanonicalPipelineV2ValidatorAcceptsTheStatedShapes covers the success side
+// of the rules whose failure rows the table above pins.
+func TestCanonicalPipelineV2ValidatorAcceptsTheStatedShapes(t *testing.T) {
+	registry := cp2RowRegistry()
+	short := cp2RowRegistry()
+	delete(short, "C01-DIRECT-001")
+	if err := cp2ValidateRows(nil, short); err == nil || !strings.Contains(err.Error(), "want the frozen 79") {
+		t.Errorf("78-entry registry: error = %v, want the frozen-size rejection", err)
+	}
+	for name, mutate := range map[string]func(*cp2Row){
+		"unreached wire case": func(r *cp2Row) {
+			e := &r.Cases[0].Expected
+			e.Result, e.PipelineReached, e.WireDisposition, e.CommitTruth = nil, cp2Ptr(false), cp2Ptr("CHECKSUM_REJECT"), "OLD"
+			e.RPC = cp2RPC{Class: "NOT_REACHED", Mined: "not_applicable", SuccessIdentity: "not_applicable", Phase: "not_reached"}
+		},
+		"pinned class carrying an error class": func(r *cp2Row) {
+			e := &r.Cases[0].Expected
+			e.Result, e.CommitTruth = cp2Ptr("LOCAL_BUSY"), "OLD"
+			e.RPC = cp2RPC{
+				Class: "MINED_503_NOT_COMMITTED", HTTP: cp2Ptr(503), CommitState: cp2Ptr("not_committed"), Mined: "false",
+				SuccessIdentity: "absent", ErrorClass: cp2Ptr("LOCAL_BUSY"), Phase: "result_selecting_mined_candidate",
+			}
+		},
+	} {
+		row := cp2Row{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}
+		mutate(&row)
+		if err := cp2ValidateRows([]cp2Row{row}, registry); err != nil {
+			t.Errorf("%s must validate: %v", name, err)
 		}
 	}
 }
@@ -1620,35 +1658,6 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	rows[0].Cases[0].Input[0].Type, rows[0].Cases[0].Input[0].ValueOrAlias = "token", "ABSENT"
 	if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}); err != nil {
 		t.Fatalf("token input must not demand a fixture: %v", err)
-	}
-	for value, want := range map[any]bool{
-		json.Number("18446744073709551615"): true, uint64(math.MaxUint64): true, math.Exp2(53): true,
-		json.Number("18446744073709551616"): false, math.Exp2(64): false, json.Number("1.5"): false, int(-1): false,
-	} {
-		if got := cp2UintOK(cp2JSONImage(value), math.MaxUint64); got != want {
-			t.Errorf("cp2UintOK(%v) = %v, want %v", value, got, want)
-		}
-	}
-	for name, tc := range map[string]struct {
-		in cp2Input
-		ok bool
-	}{
-		"bool slice":    {cp2ValidInput("/input/a", "array<bool>", []bool{true}), true},
-		"uint64 slice":  {cp2ValidInput("/input/a", "array<u64>", []uint64{1}), true},
-		"nested string": {cp2ValidInput("/input/a", "array<token>", []string{"TOK"}), true},
-		"signed slice":  {cp2ValidInput("/input/a", "array<u64>", []int{-1}), false},
-		"prose slice":   {cp2ValidInput("/input/a", "array<token>", []any{"a b"}), false},
-		"struct value":  {cp2ValidInput("/input/a", "object", struct{ A int }{1}), false},
-	} {
-		if err := cp2InputOK(tc.in); (err == nil) != tc.ok {
-			t.Errorf("%s: err = %v, want ok = %v", name, err, tc.ok)
-		}
-	}
-	if err := cp2ValidateFixtures(map[string]cp2Fixture{"B1": {Type: "object", Value: struct{ A int }{1}}}); err == nil {
-		t.Error("a struct fixture images to a non-snake key and must be rejected")
-	}
-	if err := cp2ValidateFixtures(map[string]cp2Fixture{"B1": {Type: "object", Value: cpMap{"tags": []string{"TOK"}}}}); err != nil {
-		t.Errorf("a nested string slice images to an array of tokens: %v", err)
 	}
 	for name, catalog := range map[string]map[string]cp2Fixture{
 		"nested object":   {"B1": {Type: "object", Value: cpMap{"plan": cpMap{"rows": []any{1, "B_TWO"}}, "fenced": true}}},
@@ -1910,6 +1919,61 @@ func TestCanonicalPipelineV2ValidatorsNeverPanic(t *testing.T) {
 			_, _ = cp2ValidateRPC(pick(), row.Cases[0].Expected.RPC), cp2InputOK(in)
 			_, _ = cp2FixtureValueOK(cp2Fixture{Type: pick(), Value: value}), cp2ClosedValueOK(value)
 		}()
+	}
+}
+
+// TestCanonicalPipelineV2IntegerAndScheduleAliases covers the exact-integer
+// reader and the schedule-alias resolution the catalog gates.
+func TestCanonicalPipelineV2IntegerAndScheduleAliases(t *testing.T) {
+	for value, want := range map[any]bool{
+		json.Number("18446744073709551615"): true, uint64(math.MaxUint64): true, math.Exp2(53): true,
+		json.Number("18446744073709551616"): false, math.Exp2(64): false, json.Number("1.5"): false, int(-1): false,
+	} {
+		if cp2UintOK(value, 65535) && !want {
+			t.Errorf("%v must not fit u16 when it is not a u64", value)
+		}
+		if got := cp2UintOK(cp2JSONImage(value), math.MaxUint64); got != want {
+			t.Errorf("cp2UintOK(%v) = %v, want %v", value, got, want)
+		}
+	}
+	for name, tc := range map[string]struct {
+		in cp2Input
+		ok bool
+	}{
+		"bool slice":    {cp2ValidInput("/input/a", "array<bool>", []bool{true}), true},
+		"uint64 slice":  {cp2ValidInput("/input/a", "array<u64>", []uint64{1}), true},
+		"nested string": {cp2ValidInput("/input/a", "array<token>", []string{"TOK"}), true},
+		"signed slice":  {cp2ValidInput("/input/a", "array<u64>", []int{-1}), false},
+		"prose slice":   {cp2ValidInput("/input/a", "array<token>", []any{"a b"}), false},
+		"struct value":  {cp2ValidInput("/input/a", "object", struct{ A int }{1}), false},
+	} {
+		if err := cp2InputOK(tc.in); (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok = %v", name, err, tc.ok)
+		}
+	}
+	if err := cp2ValidateFixtures(map[string]cp2Fixture{"B1": {Type: "object", Value: struct{ A int }{1}}}); err == nil {
+		t.Error("a struct fixture images to a non-snake key and must be rejected")
+	}
+	if err := cp2ValidateFixtures(map[string]cp2Fixture{"B1": {Type: "object", Value: cpMap{"tags": []string{"TOK"}}}}); err != nil {
+		t.Errorf("a nested string slice images to an array of tokens: %v", err)
+	}
+	if !cp2UintOK(float64(5), math.MaxUint64) || !cp2UintOK(float64(65535), 65535) || cp2UintOK(float64(65536), 65535) {
+		t.Error("the float64 arm must accept integral values inside the bound and reject one above it")
+	}
+	sched := cp2Row{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}
+	sched.Cases[0].ScheduleID = cp2Ptr("SCHED")
+	block1 := cp2Fixture{Type: "object", Value: cpMap{"h": 1}}
+	for name, tc := range map[string]struct {
+		catalog map[string]cp2Fixture
+		ok      bool
+	}{
+		"schedule present":       {map[string]cp2Fixture{"B1": block1, "SCHED": {Type: "object", Value: cpMap{"barrier": "A"}}}, true},
+		"schedule absent":        {map[string]cp2Fixture{"B1": block1}, false},
+		"schedule not an object": {map[string]cp2Fixture{"B1": block1, "SCHED": {Type: "u64", Value: 1}}, false},
+	} {
+		if err := cp2ValidateAliases([]cp2Row{sched}, tc.catalog); (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok = %v", name, err, tc.ok)
+		}
 	}
 }
 
