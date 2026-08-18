@@ -800,8 +800,7 @@
       "effects": {
         "admission": "not_latched",
         "observed_generation_notification": true,
-        "peer_penalty": 0,
-        "retry_slots": 1
+        "peer_penalty": 0
       },
       "detail": {
         "requires_proven_exact_hash": true,
