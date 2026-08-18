@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -928,6 +931,7 @@ func TestGenerator_OutputDirContainmentNoCommittedWrite(t *testing.T) {
 		filepath.Join("devnet", "devnet-vault-create-01.json"),
 		filepath.Join("devnet", "devnet-htlc-claim-01.json"),
 		filepath.Join("devnet", "devnet-multisig-spend-01.json"),
+		filepath.Join("protocol", "canonical_pipeline_v1.json"),
 	}
 	beforeContents := make(map[string][]byte, len(committedSamples))
 	for _, rel := range committedSamples {
@@ -1208,4 +1212,160 @@ func skipIfMLDSA87DERUnavailable(t *testing.T) {
 		t.Skipf("ML-DSA-87 DER decoder unavailable in this OpenSSL build (OpenSSL ≥3.5 with ML-DSA provider required): %v", err)
 	}
 	t.Fatalf("NewMLDSA87KeypairFromDER (probe) unexpected error: %v", err)
+}
+
+// TestCanonicalPipelineCoverageReceiptIsCompleteAndClosed is the RUB-922
+// coverage receipt assertion: every enumerated class (the closed taxonomy plus
+// every named observable, accepted, rejected and hostile bullet of the
+// contract) maps to at least one row, and every row stays inside the closed
+// taxonomy and class set. A generator that silently dropped
+// ORPHAN_ALREADY_RETAINED or TERMINAL_LOCAL_INVARIANT would pass the drift and
+// policy gates; it fails here.
+func TestCanonicalPipelineCoverageReceiptIsCompleteAndClosed(t *testing.T) {
+	rows := canonicalPipelineRows()
+	if len(rows) != 62 {
+		t.Fatalf("canonical pipeline corpus has %d rows, want the frozen 62 (bump deliberately with a corpus revision)", len(rows))
+	}
+	// canonicalPipelineCoverage exits on a class with zero rows and otherwise
+	// returns exactly one entry per enumerated class, so this count guard fires
+	// only on a duplicate entry in canonicalPipelineClasses itself.
+	if receipt := canonicalPipelineCoverage(rows); len(receipt) != len(canonicalPipelineClasses) {
+		t.Fatalf("coverage receipt has %d classes, want %d", len(receipt), len(canonicalPipelineClasses))
+	}
+	mustValidateCanonicalPipelineRows(rows)
+}
+
+// TestCanonicalPipelinePendingOwnerRowsAreFrozen pins the exact `pending_owner`
+// map (the observation rows among them are the RUB-926 exclusions). Adding an
+// exclusion silently would hide a real Go/Rust divergence behind a pending owner.
+func TestCanonicalPipelinePendingOwnerRowsAreFrozen(t *testing.T) {
+	want := map[string]string{
+		"C01-RELAY-STORED-001":           pendingOwnerRUB1195,
+		"C01-RELAY-ACCEPTED-001":         pendingOwnerRUB1195,
+		"C01-RES-IDENTITIES-PENDING-001": pendingOwnerRUB893,
+		"C01-WIRE-OVERFLOW-001":          pendingOwnerRUB893,
+		"C01-BUSY-001":                   pendingOwnerRUB910,
+		"C01-BUDGET-RACE-001":            pendingOwnerRUB893,
+		"C01-INVENTORY-RECLAIMED-001":    pendingOwnerRUB910,
+		"C01-ORPH-DUP-001":               pendingOwnerRUB910,
+		"C01-ORPH-OVERSIZE-001":          pendingOwnerRUB910,
+		"C01-ORPH-SOURCE51-001":          pendingOwnerRUB910,
+	}
+	got := make(map[string]string)
+	for _, row := range canonicalPipelineRows() {
+		if row.PendingOwner != "" {
+			got[row.ID] = row.PendingOwner
+		}
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("pending-owner rows = %v, want %v", got, want)
+	}
+}
+
+func TestCanonicalPipelineObservationDetailNeverCarriesEffectKeys(t *testing.T) {
+	rows := canonicalPipelineRows()
+	effectKeys := make(map[string]bool)
+	for _, row := range rows {
+		for k := range row.Effects {
+			effectKeys[k] = true
+		}
+	}
+	for _, row := range rows {
+		for _, k := range slices.Sorted(maps.Keys(row.Detail)) {
+			if row.Kind == "observation" && effectKeys[k] {
+				t.Errorf("%s: detail carries compared effect key %q", row.ID, k)
+			}
+		}
+	}
+}
+
+// TestCanonicalPipelineCorpusIsByteDeterministic proves the corpus writer is
+// reproducible: two writes into different directories are byte-identical and
+// never carry the authoring-only covers field.
+func TestCanonicalPipelineCorpusIsByteDeterministic(t *testing.T) {
+	first := filepath.Join(t.TempDir(), "canonical_pipeline_v1.json")
+	second := filepath.Join(t.TempDir(), "canonical_pipeline_v1.json")
+	mustWriteCanonicalPipelineCorpus(first)
+	mustWriteCanonicalPipelineCorpus(second)
+	a, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatalf("read first: %v", err)
+	}
+	b, err := os.ReadFile(second)
+	if err != nil {
+		t.Fatalf("read second: %v", err)
+	}
+	if !bytes.Equal(a, b) {
+		t.Fatal("canonical pipeline corpus is not byte-deterministic across runs")
+	}
+	if bytes.Contains(a, []byte(`"covers"`)) {
+		t.Fatal("emitted corpus leaked the authoring-only covers field")
+	}
+}
+
+func TestCanonicalPipelineResultPatternIsClosed(t *testing.T) {
+	want := map[string]bool{"ACCEPTED(extra)": false, "KNOWN_BLOCK_NOOP(OTHER)": false, "TERMINAL_PERSISTENCE": false, "LOCAL_RESOURCE_UNAVAILABLE(bogus)": false, "CONSENSUS_INVALID()": false, "bogus": false, "ACCEPTED\n": false, "ACCEPTED": true, "KNOWN_BLOCK_NOOP(CANONICAL)": true}
+	for s, ok := range want {
+		if got := canonicalPipelineResultRE.MatchString(s); got != ok {
+			t.Errorf("MatchString(%q) = %v, want %v", s, got, ok)
+		}
+	}
+}
+
+// TestCanonicalPipelineValidatorFailsClosed re-execs the test binary so every
+// generator fatalf path (each calls os.Exit) is observable as a child exit code
+// carrying its own message, mirroring cmd/formal-trace.TestMainExitCodeIs2OnError.
+// The cases below cover all eight canonical-pipeline fatalf branches; bad_prefix
+// and duplicate_id share one message and are both exercised.
+func TestCanonicalPipelineValidatorFailsClosed(t *testing.T) {
+	if c := os.Getenv("CP_NEGATIVE_CASE"); c != "" {
+		rows := canonicalPipelineRows()
+		if c == "zero_class" {
+			const drop = "accepted:lazy_memoized_provider" // sole row: C01-PROVIDER-001
+			canonicalPipelineCoverage(slices.DeleteFunc(rows, func(r cpRow) bool { return slices.Contains(r.Covers, drop) }))
+			return
+		}
+		obs := slices.IndexFunc(rows, func(r cpRow) bool { return r.Kind == "observation" }) // rows[0] is authority: never Result- or CommitTruth-checked
+		switch c {
+		case "duplicate_id":
+			rows = append(rows, rows[0])
+		case "bad_prefix":
+			rows[0].ID = "X01-BAD"
+		case "no_covers":
+			rows[0].Covers = nil
+		case "unknown_class":
+			rows[0].Covers = []string{"bogus:class"}
+		case "duplicate_cover":
+			rows[0].Covers = append(rows[0].Covers, rows[0].Covers[0])
+		case "unknown_kind":
+			rows[0].Kind = "conjecture"
+		case "bad_result":
+			rows[obs].Result = "ACCEPTED(extra)"
+		case "unknown_truth":
+			rows[obs].CommitTruth = "MAYBE"
+		}
+		mustValidateCanonicalPipelineRows(rows)
+		return
+	}
+	for _, c := range []struct{ name, want string }{
+		{"zero_class", "maps to zero rows"},
+		{"duplicate_id", "must start with C01- and be unique"},
+		{"bad_prefix", "must start with C01- and be unique"},
+		{"no_covers", "covers no enumerated class"},
+		{"unknown_class", "covers unknown class"},
+		{"duplicate_cover", "twice"},
+		{"unknown_kind", "has unknown kind"},
+		{"bad_result", "outside the closed taxonomy"},
+		{"unknown_truth", "commit truth"},
+	} {
+		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=TestCanonicalPipelineValidatorFailsClosed") //nolint:gosec // re-exec of the test binary with fixed args
+		cmd.Env = append(os.Environ(), "CP_NEGATIVE_CASE="+c.name)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err == nil {
+			t.Fatalf("case %s: expected non-zero exit, stderr=%s", c.name, stderr.String())
+		} else if got := stderr.String(); !strings.Contains(got, "fatal: canonical pipeline: ") || !strings.Contains(got, c.want) {
+			t.Fatalf("case %s: stderr = %q, want a canonical-pipeline fatal containing %q", c.name, got, c.want)
+		}
+	}
 }

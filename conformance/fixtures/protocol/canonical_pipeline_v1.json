@@ -1,0 +1,1059 @@
+{
+  "artifact": "canonical_pipeline_v1",
+  "schema_version": 1,
+  "schema": "conformance/schemas/cv-canonical-pipeline-v1.json",
+  "_meta": {
+    "generated_by": "clients/go/cmd/gen-conformance-fixtures",
+    "warning": "MACHINE-GENERATED FILE. Do not edit manually."
+  },
+  "authority": {
+    "architecture_parent": "RUB-882 as superseded by RUB-1180",
+    "baseline_ref": "2tbmz9y2xt-lang/rubin-protocol@86571857571736862e3194daa61491639cea5138",
+    "consume_freeze_point": "POST-RUB-911 target: the frozen P2P effect order carries no canonical-DA consume step",
+    "executors": "RUB-923, RUB-926, RUB-924, RUB-901",
+    "expected_row_origin": "authored architecture authority; no Go or Rust node production path is called to compute an expected value",
+    "issue": "RUB-922",
+    "normative_spec_ref": "2tbmz9y2xt-lang/rubin-spec@c14b010024ce633e1027bf891af3c49741db544a",
+    "status": "INERT until its adapters and comparator land; no canonical-publication slice may claim it as a passing gate"
+  },
+  "result_taxonomy": [
+    "ACCEPTED",
+    "STORED_NONCANONICAL",
+    "KNOWN_BLOCK_NOOP(CANONICAL|STORED_NONCANONICAL)",
+    "MISSING_PARENT",
+    "ORPHAN_RETAINED",
+    "ORPHAN_ALREADY_RETAINED",
+    "CONSENSUS_INVALID(exact_error)",
+    "LOCAL_BUSY",
+    "LOCAL_RESOURCE_UNAVAILABLE(resource)",
+    "STALE_LOCAL_PLAN",
+    "LOCAL_CANCELLED",
+    "LOCAL_STORE_ERROR(noncanonical)",
+    "LOCAL_PERSISTENCE_ERROR(precommit)",
+    "TERMINAL_STORE_INTEGRITY(canonical)",
+    "TERMINAL_LOCAL_INVARIANT(evidence)",
+    "TERMINAL_PERSISTENCE(old|new|neither_or_unreadable)"
+  ],
+  "commit_truth_values": [
+    "OLD",
+    "NEW",
+    "UNKNOWN",
+    "NOT_APPLICABLE"
+  ],
+  "coverage_receipt": {
+    "accepted:coherent_capture_publication": "C01-DIRECT-001, C01-REORG-001",
+    "accepted:go_resource_authority": "C01-GO-CONSTANTS-001",
+    "accepted:lazy_memoized_provider": "C01-PROVIDER-001",
+    "accepted:post_namespace_terminal_class": "C01-TP-OLD-001, C01-TP-NEW-001, C01-TP-UNKNOWN-001",
+    "accepted:pre_namespace_index_failure": "C01-PRENS-001",
+    "accepted:reorg_metadata_charge": "C01-REORGMETA-001",
+    "accepted:rust_repeat_corpus": "C01-GO-CONSTANTS-001",
+    "hostile:apply_plan_metadata_caps": "C01-APPLYMETA-CAP-001, C01-APPLYMETA-OVER-001",
+    "hostile:canonical_ambiguity_and_readers": "C01-TP-UNKNOWN-001",
+    "hostile:duplicate_and_corrupt_combinations": "C01-PRESENCE-TERMINAL-001, C01-PRESENCE-STOREERR-001, C01-NOOP-FULL-001, C01-NOOP-CMPCT-001, C01-RECLAIMED-RECEIVE-001",
+    "hostile:equal_work_opposite_orders": "C01-EQUALWORK-001",
+    "hostile:inbound_reservation_and_wire_errors": "C01-WIRE-OVERFLOW-001",
+    "hostile:late_consensus_invalid_wins": "C01-FIRSTERR-LATE-001",
+    "hostile:miner_reorg_peak_cancellation": "C01-CANCEL-001",
+    "hostile:orphan_admission_eviction_refusal": "C01-ORPH-INFLIGHT-001, C01-ORPH-OVERSIZE-001, C01-ORPH-SOURCE51-001",
+    "hostile:orphan_cap_boundaries_and_source_keys": "C01-ORPH-EVICT-001, C01-ORPH-SOURCE51-001, C01-SRCKEY-001",
+    "hostile:paired_first_errors": "C01-FIRSTERR-INDEX-001",
+    "hostile:permit_budget_races": "C01-BUSY-001, C01-BUDGET-RACE-001",
+    "hostile:postcommit_fault_boundaries": "C01-FAULT-STORED-001, C01-FAULT-ACCEPTED-001",
+    "hostile:quota_crash_and_reclassification": "C01-GC-ORDER-001, C01-GC-CRASH-001",
+    "observable:block_seen_inventory": "C01-NOOP-CMPCT-001, C01-RECLAIMED-RECEIVE-001, C01-INVENTORY-001, C01-INVENTORY-RECLAIMED-001",
+    "observable:checkpoint_rows": "C01-CKPT-001",
+    "observable:counter_deltas": "C01-DIRECT-001, C01-SIDE-001, C01-REORG-001, C01-DISCONNECT-001, C01-NEUTRAL-001, C01-FIRSTERR-LATE-001",
+    "observable:final_state_atomicity": "C01-REORG-001",
+    "observable:frozen_effect_order": "C01-EFFECT-STORED-001, C01-EFFECT-ACCEPTED-001, C01-RELAY-STORED-001, C01-RELAY-ACCEPTED-001",
+    "observable:gc_damage_order": "C01-GC-ORDER-001, C01-GC-HEALTHY-001",
+    "observable:known_block_noop": "C01-NOOP-FULL-001, C01-NOOP-CMPCT-001",
+    "observable:no_penalty_bounds": "C01-NEUTRAL-001",
+    "observable:orphan_pool": "C01-ORPH-RETAIN-001, C01-ORPH-DUP-001, C01-ORPH-EVICT-001, C01-ORPH-INFLIGHT-001",
+    "observable:p2p_precedence": "C01-PATHS-001",
+    "observable:path_precedence": "C01-PATHS-001, C01-GENESIS-001, C01-FIRSTERR-INDEX-001",
+    "observable:paths": "C01-PATHS-001",
+    "observable:permit_retry_budget": "C01-BUSY-001, C01-BUDGET-RACE-001",
+    "observable:postcommit_effects": "C01-EFFECT-STORED-001, C01-POSTCOMMIT-001, C01-RELAY-STORED-001, C01-RELAY-ACCEPTED-001",
+    "observable:presence_truth_table": "C01-PRESENCE-001, C01-PRESENCE-TERMINAL-001, C01-PRESENCE-STOREERR-001",
+    "observable:resource_identities": "C01-GC-HEALTHY-001, C01-RES-IDENTITIES-001, C01-RES-RECOVERY-001, C01-RES-IDENTITIES-PENDING-001",
+    "observable:source_quota_key": "C01-SRCKEY-001",
+    "rejected:foreign_surface_mutation": "C01-FORBID-SURFACE-001",
+    "rejected:intermediate_or_duplicate_visibility": "C01-FORBID-INTERMEDIATE-001",
+    "rejected:late_or_retaining_busy": "C01-FORBID-BUSY-001",
+    "rejected:persistent_state_machinery": "C01-FORBID-PERSIST-001",
+    "rejected:presence_authority_misuse": "C01-INVENTORY-001, C01-FORBID-PRESENCE-001",
+    "rejected:retry_and_pool_shape": "C01-FORBID-RETRY-001",
+    "taxonomy:ACCEPTED": "C01-DIRECT-001, C01-EFFECT-ACCEPTED-001",
+    "taxonomy:CONSENSUS_INVALID": "C01-FIRSTERR-LATE-001",
+    "taxonomy:KNOWN_BLOCK_NOOP": "C01-NOOP-FULL-001, C01-NOOP-CMPCT-001",
+    "taxonomy:LOCAL_BUSY": "C01-BUSY-001",
+    "taxonomy:LOCAL_CANCELLED": "C01-CANCEL-001",
+    "taxonomy:LOCAL_PERSISTENCE_ERROR": "C01-PRENS-001",
+    "taxonomy:LOCAL_RESOURCE_UNAVAILABLE": "C01-GC-HEALTHY-001, C01-RES-RECOVERY-001",
+    "taxonomy:LOCAL_STORE_ERROR": "C01-PRESENCE-STOREERR-001",
+    "taxonomy:MISSING_PARENT": "C01-ORPH-MISSING-PARENT-001",
+    "taxonomy:ORPHAN_ALREADY_RETAINED": "C01-ORPH-DUP-001",
+    "taxonomy:ORPHAN_RETAINED": "C01-ORPH-RETAIN-001",
+    "taxonomy:STALE_LOCAL_PLAN": "C01-STALE-001",
+    "taxonomy:STORED_NONCANONICAL": "C01-SIDE-001, C01-EFFECT-STORED-001",
+    "taxonomy:TERMINAL_LOCAL_INVARIANT": "C01-TERMINV-001, C01-TERMINV-BOOT-001",
+    "taxonomy:TERMINAL_PERSISTENCE": "C01-TP-OLD-001, C01-TP-NEW-001, C01-TP-UNKNOWN-001",
+    "taxonomy:TERMINAL_STORE_INTEGRITY": "C01-FIRSTERR-INDEX-001"
+  },
+  "rows": [
+    {
+      "id": "C01-PATHS-001",
+      "kind": "authority",
+      "scenario": "Closed set of canonical-pipeline entry paths and their path-specific first-error precedence, including the exact fork choice every side path uses during branch collection.",
+      "detail": {
+        "compact_absent_cycle": "release_first_lease, reconstruction_or_network, reacquire_lease, repeat_strict_presence",
+        "direct_or_genesis": "target, genesis_guard_when_applicable, strict_initial_canonical_index_preflight, mtp, validation",
+        "fork_choice": "maximum cumulative ChainWork, then lexicographically lower canonical tip-hash bytes; independent of arrival order, worker schedule, validation completion and best-ready status",
+        "losing_side": "strict_index_read_during_branch_collection, fork_choice, target, mtp, basic_validation, store_block",
+        "p2p": "frame_length, frame_read, frame_checksum, documented_early_parse, header_check, pow_check, try_acquire_result, lease_owned_strict_presence, stateful_target_mtp_provider_consensus",
+        "paths": "direct, genesis, losing_side, reorg, disconnect, miner, p2p_full, p2p_compact_probe, p2p_compact_reconstructed, p2p_relay_fallback, orphan_resolved",
+        "reorg": "strict_index_read_during_branch_collection, fork_choice, initial_mtp_snapshot, per_connect_row_target, connect_block_with_sliding_mtp, advance_mtp"
+      }
+    },
+    {
+      "id": "C01-DIRECT-001",
+      "kind": "observation",
+      "scenario": "A direct child of the canonical tip commits one durable canonical index and then publishes the complete chain, standard-mempool, DA and owner image; readers see either the exact old image or the complete new one, never a partial one, and the accepted counter moves by exactly one.",
+      "result": "ACCEPTED",
+      "commit_truth": "NEW",
+      "rpc_projection": "result-selecting mined candidate: committed with identity; bootstrap: continuation-only",
+      "canonical_counters": {
+        "accepted_delta": "+1",
+        "rejected_delta": "0"
+      }
+    },
+    {
+      "id": "C01-GENESIS-001",
+      "kind": "observation",
+      "scenario": "Genesis bootstrap from the exact empty pre-genesis state; the genesis guard runs after the direct target check and before the strict initial canonical-index preflight.",
+      "result": "ACCEPTED",
+      "commit_truth": "NEW",
+      "rpc_projection": "bootstrap: continuation-only",
+      "canonical_counters": {
+        "accepted_delta": "+1",
+        "rejected_delta": "0"
+      }
+    },
+    {
+      "id": "C01-SIDE-001",
+      "kind": "observation",
+      "scenario": "A losing side block passes target, MTP and basic validation and is stored; no canonical mutation and no counter change.",
+      "result": "STORED_NONCANONICAL",
+      "commit_truth": "NOT_APPLICABLE",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      }
+    },
+    {
+      "id": "C01-REORG-001",
+      "kind": "observation",
+      "scenario": "A winning multi-block reorg is one plan: the whole transition is externally old or new and never row-wise intermediate.",
+      "result": "ACCEPTED",
+      "commit_truth": "NEW",
+      "canonical_counters": {
+        "accepted_delta": "+connect_count",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "external_visibility": "old_or_new",
+        "final_state_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest",
+        "intermediate_tip_rows": 0,
+        "publication_events": 1,
+        "summary_rows": "+connect_count"
+      }
+    },
+    {
+      "id": "C01-DISCONNECT-001",
+      "kind": "observation",
+      "scenario": "An explicit standalone disconnect publishes proven NEW with an empty canonical-applied summary and zero connected-block fee-floor decay events.",
+      "result": "ACCEPTED",
+      "commit_truth": "NEW",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "connected_block_decay_events": 0,
+        "summary_rows": "0"
+      },
+      "detail": {
+        "precondition": "the rolling standard fee floor is raised above the default before the disconnect (a decay event is falsifiable only then)"
+      }
+    },
+    {
+      "id": "C01-NEUTRAL-001",
+      "kind": "authority",
+      "scenario": "Results that change neither planner-owned canonical counter, carry no peer penalty and perform no unauthorized canonical mutation and do not latch mutation admission, plus the exact plan and candidate-queue bounds.",
+      "detail": {
+        "active_stateful_plans_max": 1,
+        "neutral_results": "LOCAL_BUSY, LOCAL_RESOURCE_UNAVAILABLE, STALE_LOCAL_PLAN, LOCAL_CANCELLED, KNOWN_BLOCK_NOOP, STORED_NONCANONICAL, ORPHAN_RETAINED, ORPHAN_ALREADY_RETAINED, MISSING_PARENT, LOCAL_STORE_ERROR(noncanonical), LOCAL_PERSISTENCE_ERROR(precommit)",
+        "no_peer_penalty_results": "every neutral result above plus TERMINAL_STORE_INTEGRITY(canonical), TERMINAL_LOCAL_INVARIANT(evidence) and TERMINAL_PERSISTENCE",
+        "p2p_duplicate_counter_mutations": 0,
+        "peer_penalty": 0,
+        "queued_candidate_bytes": 0,
+        "queued_candidate_objects": 0,
+        "unauthorized_canonical_mutations": 0,
+        "wholly_unpublished_selected_branch": "accepted +0"
+      }
+    },
+    {
+      "id": "C01-FIRSTERR-INDEX-001",
+      "kind": "observation",
+      "scenario": "A malformed canonical index paired with a candidate whose defect is detected only at MTP or validation (a target defect precedes the preflight per C01-PATHS-001): the strict initial canonical-index preflight owns the first error and the candidate is never validated.",
+      "result": "TERMINAL_STORE_INTEGRITY(canonical)",
+      "commit_truth": "OLD",
+      "rpc_projection": "not_committed with the existing terminal result surface",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "admission": "latched",
+        "first_error_source": "strict_initial_canonical_index_preflight"
+      }
+    },
+    {
+      "id": "C01-FIRSTERR-LATE-001",
+      "kind": "observation",
+      "scenario": "A late consensus-invalid candidate paired with an earlier best-effort artifact-write failure: the exact consensus error wins whenever validation can complete.",
+      "result": "CONSENSUS_INVALID(BLOCK_ERR_MERKLE_INVALID)",
+      "commit_truth": "OLD",
+      "rpc_projection": "not_committed",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "+1"
+      }
+    },
+    {
+      "id": "C01-EQUALWORK-001",
+      "kind": "observation",
+      "scenario": "Two equal-cumulative-work candidates delivered and validation-completed in opposite orders select the same lexicographically lower canonical tip hash in both clients.",
+      "result": "ACCEPTED",
+      "commit_truth": "NEW",
+      "effects": {
+        "winning_tip": "lexicographically_lower"
+      },
+      "detail": {
+        "stable_under": "reversed delivery order, reversed validation completion, reversed worker schedule, best-ready status"
+      }
+    },
+    {
+      "id": "C01-PRESENCE-001",
+      "kind": "authority",
+      "scenario": "The strict presence truth table is closed and no repair is observable.",
+      "detail": {
+        "canonical_member": "block=valid|header=match|undo=valid =\u003e CANONICAL; every other recognized canonical combination of an artifact the active retention profile requires to be present (or already validated and retained) =\u003e TERMINAL_STORE_INTEGRITY(canonical); profile-permitted pruned suffix data =\u003e LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)",
+        "noncanonical_absent": "block=absent|header=absent|undo=absent =\u003e ABSENT",
+        "noncanonical_other": "every other recognized combination =\u003e LOCAL_STORE_ERROR(noncanonical)",
+        "noncanonical_stored": "block=valid|header=absent|undo=absent; block=valid|header=match|undo=absent; block=valid|header=match|undo=valid",
+        "repair_or_truncation": false
+      }
+    },
+    {
+      "id": "C01-PRESENCE-TERMINAL-001",
+      "kind": "observation",
+      "scenario": "A canonical member whose artifact the active retention profile requires is missing, partial, corrupt or mismatched: terminal, and mutation admission stays latched.",
+      "result": "TERMINAL_STORE_INTEGRITY(canonical)",
+      "commit_truth": "OLD",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "admission": "latched"
+      },
+      "detail": {
+        "combinations": "block=absent|header=match|undo=valid; block=valid|header=absent|undo=valid; block=valid|header=mismatch|undo=valid; block=valid|header=match|undo=absent; block=valid|header=match|undo=invalid; block=corrupt|header=match|undo=valid"
+      }
+    },
+    {
+      "id": "C01-PRESENCE-STOREERR-001",
+      "kind": "observation",
+      "scenario": "Every other recognized noncanonical combination is a local store error and leaves the canonical images unchanged.",
+      "result": "LOCAL_STORE_ERROR(noncanonical)",
+      "commit_truth": "NOT_APPLICABLE",
+      "rpc_projection": "no committed mine result",
+      "detail": {
+        "combinations": "block=absent|header=present|undo=absent; block=absent|header=absent|undo=present; block=valid|header=mismatch|undo=absent; block=valid|header=match|undo=invalid"
+      }
+    },
+    {
+      "id": "C01-GC-ORDER-001",
+      "kind": "observation",
+      "scenario": "Damaged-noncanonical GC ranks candidates by the closed ascending damage class order, then by lexicographic hash; the first matching class owns a multi-fault row and healthy rows are never candidates.",
+      "result": "STORED_NONCANONICAL",
+      "commit_truth": "NOT_APPLICABLE",
+      "effects": {
+        "expected_victim": "0x..02"
+      },
+      "detail": {
+        "candidates": "D0+D1 at hash 0x..02, D1 at hash 0x..01, D1 at hash 0x..03, D5 at hash 0x..00",
+        "class_order": "D0_INVALID_BLOCK, D1_HEADER_WITHOUT_VALID_BLOCK, D2_UNDO_WITHOUT_BLOCK_OR_HEADER, D3_INVALID_HEADER, D4_UNDO_WITHOUT_VALID_HEADER, D5_INVALID_UNDO",
+        "class_predicates": "D0_INVALID_BLOCK: block leaf exists but strict parse or hash fails; D1_HEADER_WITHOUT_VALID_BLOCK: block leaf missing or failing strict parse or hash (a valid block is absent) AND a header leaf is present on disk, regardless of the header's own validity and regardless of undo presence or validity; D2_UNDO_WITHOUT_BLOCK_OR_HEADER: no valid block, no header, undo exists; D3_INVALID_HEADER: valid block and header exists but is malformed or mismatched; D4_UNDO_WITHOUT_VALID_HEADER: valid block, header absent, undo exists; D5_INVALID_UNDO: valid block and matching header and the undo envelope, binding or exact rederived bytes are invalid",
+        "fail_closed_leaves": "strict read failure, non-regular, unexpected leaves are never GC candidates",
+        "tie_break": "lexicographically lower hash inside one class (D1 0x..01 before D1 0x..03)"
+      }
+    },
+    {
+      "id": "C01-GC-HEALTHY-001",
+      "kind": "observation",
+      "scenario": "Quota exhaustion with only healthy rows returns the non-retriable resource result after the damaged-only GC attempt; noncanonical_count behaves identically.",
+      "result": "LOCAL_RESOURCE_UNAVAILABLE(noncanonical_bytes)",
+      "commit_truth": "OLD",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "admission": "not_latched",
+        "gc_attempted": true,
+        "release_notification": false,
+        "retry_slots": 0,
+        "rows_reclaimed": 0
+      },
+      "detail": {
+        "retriable": false
+      }
+    },
+    {
+      "id": "C01-GC-CRASH-001",
+      "kind": "authority",
+      "scenario": "Quota cap+1, partial create and a crash at each delete or fsync boundary stay fail-closed; a canonical-to-side reclassification with an open reader keeps that reader's artifact readable.",
+      "detail": {
+        "canonical_state_mutations": 0,
+        "crash_boundaries": "before_delete, after_delete_before_fsync, after_fsync",
+        "partial_create": "reclaimed, never counted as healthy",
+        "reclassification_with_open_reader": "stable reader registry, no truncation"
+      }
+    },
+    {
+      "id": "C01-NOOP-FULL-001",
+      "kind": "observation",
+      "scenario": "A duplicate full receive with blockSeen already set is a strict no-op: it clears only matching compact outstanding state, even though the production helper returns nil and sends no wire response.",
+      "result": "KNOWN_BLOCK_NOOP(CANONICAL)",
+      "commit_truth": "NOT_APPLICABLE",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "block_seen": "unchanged",
+        "broadcast": 0,
+        "canonical_da_sets_consumed": "0",
+        "compact_outstanding_cleared": "matching_only",
+        "da_ttl_attempt": 0,
+        "inv_attempt": 0,
+        "peer_penalty": 0,
+        "provider_reads": 0,
+        "record_best_height": 0,
+        "resolver_wake": 0,
+        "wire_response": 0
+      },
+      "detail": {
+        "derivation": "strict presence plus proven no-effect behavior"
+      }
+    },
+    {
+      "id": "C01-NOOP-CMPCT-001",
+      "kind": "observation",
+      "scenario": "A duplicate compact receive whose blockSeen is unset leaves it unset: blockSeen is relay dedup only and is neither residency nor invalidity authority.",
+      "result": "KNOWN_BLOCK_NOOP(STORED_NONCANONICAL)",
+      "commit_truth": "NOT_APPLICABLE",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "block_seen": "unchanged",
+        "inv_attempt": 0,
+        "resolver_wake": 0
+      }
+    },
+    {
+      "id": "C01-RECLAIMED-RECEIVE-001",
+      "kind": "observation",
+      "scenario": "A reclaimed row with a stale blockSeen is ABSENT under strict presence, so the receive stores it again and preserves the stale blockSeen value.",
+      "result": "STORED_NONCANONICAL",
+      "commit_truth": "NOT_APPLICABLE",
+      "effects": {
+        "block_seen": "unchanged",
+        "canonical_da_sets_consumed": "0",
+        "da_ttl_attempt": 1,
+        "order": [
+          "record_candidate_best_height",
+          "set_block_seen",
+          "block_inventory_relay_per_section_19",
+          "attempt_one_da_orphan_ttl_advance",
+          "wake_resolver_once"
+        ],
+        "record_best_height": 1,
+        "resolver_wake": 1
+      }
+    },
+    {
+      "id": "C01-EFFECT-STORED-001",
+      "kind": "observation",
+      "scenario": "A fresh STORED_NONCANONICAL freezes the POST-RUB-911 P2P-owned effect order, which has no consume step; the side block consumes zero canonical-DA sets.",
+      "result": "STORED_NONCANONICAL",
+      "commit_truth": "NOT_APPLICABLE",
+      "effects": {
+        "block_seen": "set",
+        "canonical_da_sets_consumed": "0",
+        "da_ttl_attempt": 1,
+        "order": [
+          "record_candidate_best_height",
+          "set_block_seen",
+          "block_inventory_relay_per_section_19",
+          "attempt_one_da_orphan_ttl_advance",
+          "wake_resolver_once"
+        ],
+        "record_best_height": 1,
+        "resolver_wake": 1
+      }
+    },
+    {
+      "id": "C01-EFFECT-ACCEPTED-001",
+      "kind": "observation",
+      "scenario": "A fresh ACCEPTED freezes the same P2P-owned effect order; canonical-DA consumption is not a step of it but an identity of the transition image, consuming each exact included-matching retained COMPLETE_SET once, deduplicated by `set_identity` across the full plan, and never from a post-return caller.",
+      "result": "ACCEPTED",
+      "commit_truth": "NEW",
+      "effects": {
+        "block_seen": "set",
+        "canonical_da_sets_consumed": "+included_matching_sets",
+        "da_ttl_attempt": 1,
+        "da_ttl_fenced": true,
+        "order": [
+          "record_candidate_best_height",
+          "set_block_seen",
+          "block_inventory_relay_per_section_19",
+          "attempt_one_da_orphan_ttl_advance",
+          "wake_resolver_once"
+        ],
+        "record_best_height": 1,
+        "resolver_wake": 1
+      },
+      "detail": {
+        "post_return_consume_callers": "none: RUB-911 deletes every post-return consume caller; a source-level prohibition, not a value a scenario run observes"
+      }
+    },
+    {
+      "id": "C01-FAULT-STORED-001",
+      "kind": "observation",
+      "scenario": "A fault injected at each fallible post-store effect boundary still runs every subsequent best-effort effect and the final resolver wake exactly once, in the frozen order.",
+      "result": "STORED_NONCANONICAL",
+      "commit_truth": "NOT_APPLICABLE",
+      "effects": {
+        "artifact_state_changed_by_failure": false,
+        "da_ttl_attempt": 1,
+        "order": [
+          "record_candidate_best_height",
+          "set_block_seen",
+          "block_inventory_relay_per_section_19",
+          "attempt_one_da_orphan_ttl_advance",
+          "wake_resolver_once"
+        ],
+        "peer_policy_changed_by_failure": false,
+        "record_best_height": 1,
+        "replay": false,
+        "resolver_wake": 1,
+        "result_changed_by_failure": false,
+        "short_circuit": false
+      },
+      "detail": {
+        "fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt"
+      }
+    },
+    {
+      "id": "C01-FAULT-ACCEPTED-001",
+      "kind": "observation",
+      "scenario": "The same fault matrix on an ACCEPTED row with a nonempty canonical-applied summary: failures add bounded diagnostics only and never duplicate the planner-owned counter or re-consume a DA set.",
+      "result": "ACCEPTED",
+      "commit_truth": "NEW",
+      "canonical_counters": {
+        "accepted_delta": "+1",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "artifact_state_changed_by_failure": false,
+        "canonical_da_reconsumed": false,
+        "da_ttl_attempt": 1,
+        "duplicate_counter_mutation": false,
+        "order": [
+          "record_candidate_best_height",
+          "set_block_seen",
+          "block_inventory_relay_per_section_19",
+          "attempt_one_da_orphan_ttl_advance",
+          "wake_resolver_once"
+        ],
+        "peer_policy_changed_by_failure": false,
+        "record_best_height": 1,
+        "replay": false,
+        "resolver_wake": 1,
+        "short_circuit": false
+      },
+      "detail": {
+        "fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt"
+      }
+    },
+    {
+      "id": "C01-POSTCOMMIT-001",
+      "kind": "authority",
+      "scenario": "Complete postcommit effect enumeration with exact zero, once or count dispositions; there is no durable outbox.",
+      "detail": {
+        "block_inventory_relay": "per specification section 19; disposition frozen in C01-RELAY-STORED-001 / C01-RELAY-ACCEPTED-001 (pending_owner RUB-1195)",
+        "block_seen": "once per fresh row",
+        "canonical_da_consume": "identity of the published image, never a post-return step",
+        "checkpoint": "derived cadence, never canonical authority",
+        "da_ttl_attempt": "once, fenced",
+        "durable_outbox": false,
+        "metrics": "once",
+        "record_best_height": "once per fresh row",
+        "requeue_attempt": "ordered best-effort normal admission, after publication",
+        "resolver_wake": "once"
+      }
+    },
+    {
+      "id": "C01-RELAY-STORED-001",
+      "kind": "authority",
+      "scenario": "Block inventory relay authority under the pinned specification section 19: stored side-branch processing, a proven NEW carrying an empty canonical-applied summary (a standalone disconnect), and every non-NEW commit truth grant no authority and make no attempt.",
+      "detail": {
+        "inv_attempt": 0,
+        "no_authority_cases": "STORED_NONCANONICAL side-branch processing; NEW with an empty, unresolved, duplicate or absent summary, including a standalone disconnect; every non-NEW commit truth",
+        "relay_authority": false,
+        "spec_ref": "rubin-spec@c14b0100 RUBIN_COMPACT_BLOCKS.md section 19"
+      },
+      "pending_owner": "RUB-1195"
+    },
+    {
+      "id": "C01-RELAY-ACCEPTED-001",
+      "kind": "authority",
+      "scenario": "The section-19 relay disposition for one authorized publication: proven NEW with a non-empty ordered canonical-applied summary.",
+      "detail": {
+        "best_effort": "no retry and no rollback; a relay result cannot change canonical state, cleanup, commit truth or the published summary",
+        "client_specific": "cross-peer scheduling and the client-local boundary of an immediate send-owner attempt remain client-specific (not a comparator mismatch)",
+        "compact_modes": "compact modes 0, 1 and 2 are additive and MUST NOT replace or suppress this ordinary block inventory",
+        "exclusion": "only the invocation-local (captured source owner, exact row hash) pair; never another owner and never another row",
+        "frames": "per summary row in canonical order, exactly one ordinary single-vector MSG_BLOCK inv frame per (owner x row)",
+        "ibd": "sampled after the transition publication; if IBD, no attempt",
+        "orphan_apply": "a separately accepted orphan apply uses its existing client schedule and, if it publishes an eligible new summary, is evaluated as a separate publication",
+        "owner_snapshot": "one snapshot of post-handshake send owners, deduplicated by owner identity; a captured handle is never re-resolved or retargeted",
+        "spec_ref": "rubin-spec@c14b0100 RUBIN_COMPACT_BLOCKS.md section 19",
+        "write_failure": "stops only that owner's remaining suffix; other owners remain eligible"
+      },
+      "pending_owner": "RUB-1195"
+    },
+    {
+      "id": "C01-INVENTORY-001",
+      "kind": "authority",
+      "scenario": "Inventory answers from current complete BlockStore or orphan residency; a partial or corrupt row returns its local store disposition without entering a receive loop.",
+      "detail": {
+        "block_seen_role": "relay dedup only",
+        "partial_or_corrupt": "local store disposition, no receive loop",
+        "residency_authority": "current BlockStore/orphan"
+      }
+    },
+    {
+      "id": "C01-INVENTORY-RECLAIMED-001",
+      "kind": "authority",
+      "scenario": "A reclaimed or ABSENT hash stays requestable without a GC callback or tombstone; RUB-908 exposes current strict presence only and assigns this observable to RUB-910.",
+      "detail": {
+        "gc_callback": false,
+        "requestable_after_reclaim": true,
+        "tombstone": false
+      },
+      "pending_owner": "RUB-910"
+    },
+    {
+      "id": "C01-ORPH-RETAIN-001",
+      "kind": "observation",
+      "scenario": "One service-global orphan pool uses insert-then-evict semantics: a unique entry of at most 64 MiB with an empty source key, or a current nonempty normalized-source count below 50, is inserted and marked in blockSeen.",
+      "result": "ORPHAN_RETAINED",
+      "commit_truth": "OLD",
+      "effects": {
+        "block_seen": "set",
+        "evictions": 0
+      },
+      "detail": {
+        "aggregate_byte_cap": 67108864,
+        "empty_source_key": "unmetered, admitted beyond 50",
+        "entry_max_bytes": 67108864,
+        "nonempty_source_cap": 50,
+        "pool_scope": "one service-global pool",
+        "unique_entry_cap": 500
+      }
+    },
+    {
+      "id": "C01-ORPH-DUP-001",
+      "kind": "observation",
+      "scenario": "A duplicate orphan is already-retained: no copy, no effect and no eviction.",
+      "result": "ORPHAN_ALREADY_RETAINED",
+      "commit_truth": "OLD",
+      "effects": {
+        "block_seen": "unchanged",
+        "evictions": 0
+      },
+      "pending_owner": "RUB-910"
+    },
+    {
+      "id": "C01-ORPH-EVICT-001",
+      "kind": "observation",
+      "scenario": "Crossing 500 to 501 unique entries, or 64 MiB to cap+1 raw bytes, retains the newest row and evicts oldest FIFO rows until both caps hold; each eviction removes that row and clears its blockSeen.",
+      "result": "ORPHAN_RETAINED",
+      "commit_truth": "OLD",
+      "effects": {
+        "block_seen": "set",
+        "evicted_block_seen": "cleared",
+        "evictions": 1,
+        "victim": "oldest_fifo"
+      },
+      "detail": {
+        "boundaries": "unique_count 500-\u003e501 and raw_bytes 64MiB-\u003ecap+1",
+        "eviction_policy": "oldest FIFO first",
+        "retained": "newest"
+      }
+    },
+    {
+      "id": "C01-ORPH-INFLIGHT-001",
+      "kind": "observation",
+      "scenario": "Eviction is unconditional and there is no pin set: a row under resolution has already been removed from the pool before the resolver sees it, so no in-pool row is pin-protected and no cap infeasibility can arise.",
+      "result": "ORPHAN_RETAINED",
+      "commit_truth": "OLD",
+      "effects": {
+        "resolving_row_in_pool": false
+      },
+      "detail": {
+        "pin_set": false,
+        "pre_insertion_feasibility_proof": false
+      }
+    },
+    {
+      "id": "C01-ORPH-OVERSIZE-001",
+      "kind": "observation",
+      "scenario": "A single entry larger than 64 MiB is a non-retriable orphan_pool refusal: no insertion, no eviction, and blockSeen unchanged in both the initially unset and the stale-set case.",
+      "result": "LOCAL_RESOURCE_UNAVAILABLE(orphan_pool)",
+      "commit_truth": "OLD",
+      "effects": {
+        "admission": "not_latched",
+        "block_seen": "unchanged",
+        "evictions": 0,
+        "fifo_delta": 0,
+        "pool_bytes_delta": 0,
+        "retry_slots": 0,
+        "source_count_delta": 0
+      },
+      "detail": {
+        "initial_unset_stays": "unset",
+        "retriable": false,
+        "stale_set_stays": "set"
+      },
+      "pending_owner": "RUB-910"
+    },
+    {
+      "id": "C01-ORPH-SOURCE51-001",
+      "kind": "observation",
+      "scenario": "Entry 51 for one nonempty normalized source is a non-retriable refusal with the entire prior pool, FIFO, source counts and blockSeen byte-for-byte unchanged.",
+      "result": "LOCAL_RESOURCE_UNAVAILABLE(orphan_pool)",
+      "commit_truth": "OLD",
+      "effects": {
+        "admission": "not_latched",
+        "block_seen": "unchanged",
+        "evictions": 0,
+        "fifo_delta": 0,
+        "pool_bytes_delta": 0,
+        "retry_slots": 0,
+        "source_count_delta": 0
+      },
+      "detail": {
+        "retriable": false
+      },
+      "pending_owner": "RUB-910"
+    },
+    {
+      "id": "C01-ORPH-MISSING-PARENT-001",
+      "kind": "observation",
+      "scenario": "An apply entered without orphan retention whose parent is neither canonical nor stored returns MISSING_PARENT and preserves the exact old image.",
+      "result": "MISSING_PARENT",
+      "commit_truth": "OLD",
+      "rpc_projection": "not_committed only when reached by a mining entrypoint",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      }
+    },
+    {
+      "id": "C01-SRCKEY-001",
+      "kind": "authority",
+      "scenario": "The orphan source-quota key mapping is frozen byte-for-byte: SplitHostPort success selects the host regardless of a numeric, nonnumeric or empty port and of bracketed non-IP spelling, its failure keeps the complete input, ParseAddr success returns WithZone(\"\").String() without Unmap, and its failure preserves host bytes and case. Rust must reproduce these bytes and may not substitute a socket-address grammar.",
+      "detail": {
+        "cases": [
+          "\"\" =\u003e \"\"",
+          "\"192.0.2.7:8333\" =\u003e \"192.0.2.7\"",
+          "\"192.0.2.7:notaport\" =\u003e \"192.0.2.7\"",
+          "\"192.0.2.7:\" =\u003e \"192.0.2.7\"",
+          "\":8333\" =\u003e \"\"",
+          "\"[example.com]:8333\" =\u003e \"example.com\"",
+          "\"[2001:db8::1]\" =\u003e \"[2001:db8::1]\"",
+          "\"2001:db8::1\" =\u003e \"2001:db8::1\"",
+          "\"[fe80::1%eth0]:8333\" =\u003e \"fe80::1\"",
+          "\"[2001:0db8:0000:0000:0000:0000:0000:0001]:8333\" =\u003e \"2001:db8::1\"",
+          "\"[::ffff:192.0.2.7]:8333\" =\u003e \"::ffff:192.0.2.7\"",
+          "\"Example.COM:8333\" =\u003e \"Example.COM\"",
+          "\"example.com:8333\" =\u003e \"example.com\""
+        ],
+        "empty_key_exempt_from_source_cap": true
+      }
+    },
+    {
+      "id": "C01-RES-IDENTITIES-001",
+      "kind": "authority",
+      "scenario": "The resource identities are exact and closed across this row and C01-RES-IDENTITIES-PENDING-001; this row carries the owned identities. Every resource identity is LOCAL_RESOURCE_UNAVAILABLE and never consensus invalidity, and invalid configured bounds are startup or config failures outside peer retry.",
+      "detail": {
+        "admission": "never latched for any resource identity; preserves OLD",
+        "identities": "noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact, apply_plan_metadata",
+        "invalid_configured_bounds": "startup/config failure, outside peer retry",
+        "recovery_artifact": "non-retriable; profile-permitted pruned suffix awaiting validated reacquisition; distinct from bounded-storage reservation failure"
+      }
+    },
+    {
+      "id": "C01-RES-RECOVERY-001",
+      "kind": "observation",
+      "scenario": "Profile-permitted pruned suffix data awaiting validated reacquisition is non-retriable, preserves OLD, does not latch admission and arms no peer retry; it is distinct from bounded-storage reservation failure and from loss of an artifact the active retention profile already required.",
+      "result": "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)",
+      "commit_truth": "OLD",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "admission": "not_latched",
+        "peer_penalty": 0,
+        "retry_slots": 0
+      }
+    },
+    {
+      "id": "C01-RES-IDENTITIES-PENDING-001",
+      "kind": "authority",
+      "scenario": "The resource identities whose machinery no slice of this chain delivers; RUB-893 is the delivering owner (provenance marker — an authority row is never compared; the gate-bearing exclusions live on the observation rows C01-BUDGET-RACE-001 / C01-WIRE-OVERFLOW-001).",
+      "detail": {
+        "identities": "inbound_budget_capacity, inbound_budget_overflow",
+        "retriable": "inbound_budget_capacity only, and only with an independently proven exact block hash"
+      },
+      "pending_owner": "RUB-893"
+    },
+    {
+      "id": "C01-APPLYMETA-CAP-001",
+      "kind": "observation",
+      "scenario": "An apply plan whose checked metadata charge lands exactly on the 64 MiB cap succeeds.",
+      "result": "ACCEPTED",
+      "commit_truth": "NEW",
+      "canonical_counters": {
+        "accepted_delta": "+connect_count",
+        "rejected_delta": "0"
+      },
+      "detail": {
+        "cap_bytes": 67108864,
+        "charge_bytes": "exactly cap",
+        "charge_formula": "48+40*(disconnect_rows+connect_rows)+32*complete_da_ids"
+      }
+    },
+    {
+      "id": "C01-APPLYMETA-OVER-001",
+      "kind": "observation",
+      "scenario": "The smallest realizable charge above the cap (cap+8 under the frozen 8-byte-granular formula 48+40*rows+32*complete_da_ids) is non-retriable and preserves canonical, store, mempool, counter and effect state completely; it creates no peer penalty, no retry slot and no release notification.",
+      "result": "LOCAL_RESOURCE_UNAVAILABLE(apply_plan_metadata)",
+      "commit_truth": "OLD",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "admission": "not_latched",
+        "block_seen": "unchanged",
+        "getdata_sent": 0,
+        "peer_penalty": 0,
+        "record_best_height": 0,
+        "release_notification": false,
+        "retry_slots": 0
+      },
+      "detail": {
+        "overflow_charge": "cap+8 = 67108872 (every charge is a multiple of 8; cap+1 is unreachable)",
+        "retriable": false
+      }
+    },
+    {
+      "id": "C01-BUSY-001",
+      "kind": "observation",
+      "scenario": "LOCAL_BUSY carries the canonical-permit observed-generation notification and arms the single peer retry slot with one joined waiter; it retains no candidate, never blocks the socket reader and never follows strict presence or stateful consensus. A duplicate or different hash while the slot is armed and disconnect or deadline races resolve deterministically, and non-retriable resource classes arm no slot and send no getdata.",
+      "result": "LOCAL_BUSY",
+      "commit_truth": "OLD",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "candidate_retained": false,
+        "fixed_backoff": false,
+        "joined_waiters_max": 1,
+        "observed_generation_notification": true,
+        "peer_penalty": 0,
+        "retry_slots": 1
+      },
+      "detail": {
+        "deadline": "original receive-start +30 second absolute deadline",
+        "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact"
+      },
+      "pending_owner": "RUB-910"
+    },
+    {
+      "id": "C01-BUDGET-RACE-001",
+      "kind": "observation",
+      "scenario": "Inbound-budget registration-versus-release races, an already-closed notification and capacity released before the waiter is scheduled all resolve deterministically; the retriable result carries the inbound-budget observed-generation notification and requires an independently proven exact block hash.",
+      "result": "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_capacity)",
+      "commit_truth": "OLD",
+      "effects": {
+        "admission": "not_latched",
+        "observed_generation_notification": true,
+        "peer_penalty": 0
+      },
+      "detail": {
+        "requires_proven_exact_hash": true,
+        "retriable": true
+      },
+      "pending_owner": "RUB-893"
+    },
+    {
+      "id": "C01-WIRE-OVERFLOW-001",
+      "kind": "observation",
+      "scenario": "A checked inbound reservation overflow or replacement failure is non-retriable; a valid payload discarded because of a bad checksum, read or declared length keeps the documented wire-error precedence and never becomes a resource result.",
+      "result": "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_overflow)",
+      "commit_truth": "OLD",
+      "effects": {
+        "admission": "not_latched",
+        "getdata_sent": 0,
+        "retry_slots": 0
+      },
+      "detail": {
+        "retriable": false,
+        "wire_error_precedence": "frame_length, frame_read, frame_checksum"
+      },
+      "pending_owner": "RUB-893"
+    },
+    {
+      "id": "C01-GO-CONSTANTS-001",
+      "kind": "authority",
+      "scenario": "Go resource authority constants for this corpus. C01 freezes behavior and formulas, not imported Go heap coefficients: the Rust rows require a fresh identical runtime corpus repeated after the Go freeze.",
+      "detail": {
+        "charge_compact": "12x",
+        "charge_full": "6x",
+        "charge_relay_fallback": "3x",
+        "compact_inventory_row_max_bytes": 128,
+        "inbound_default_bytes": 1073741824,
+        "inbound_hard_bytes": 8589934592,
+        "inventory_metadata_max_bytes": 67108864,
+        "noncanonical_default_bytes": 8589934592,
+        "noncanonical_hard_bytes": 34359738368,
+        "noncanonical_unique_hashes": 524288,
+        "rust_repeat_required": true
+      }
+    },
+    {
+      "id": "C01-PRENS-001",
+      "kind": "observation",
+      "scenario": "A canonical-index failure before the namespace change reports the exact old state with no admission latch, no counter change and no retry.",
+      "result": "LOCAL_PERSISTENCE_ERROR(precommit)",
+      "commit_truth": "OLD",
+      "rpc_projection": "not_committed",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "admission": "not_latched",
+        "published_image": "old",
+        "retry_slots": 0
+      },
+      "detail": {
+        "triggers": "canonical-index atomic write before the namespace change; durable write of the verified precommit recovery checkpoint or either suffix proof set"
+      }
+    },
+    {
+      "id": "C01-TP-OLD-001",
+      "kind": "observation",
+      "scenario": "One strict readback after a fault that may have crossed the commit point sees the exact old canonical-index identity; no rollback, retry, rewrite or heuristic classification follows.",
+      "result": "TERMINAL_PERSISTENCE(old)",
+      "commit_truth": "OLD",
+      "rpc_projection": "not_committed, never ordinary retry",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "admission": "latched",
+        "published_image": "old",
+        "rollback_attempted": false
+      }
+    },
+    {
+      "id": "C01-TP-NEW-001",
+      "kind": "observation",
+      "scenario": "The strict readback sees the exact planned-new identity: the new chain, standard, DA and owner images are truth and the committed identity is reported.",
+      "result": "TERMINAL_PERSISTENCE(new)",
+      "commit_truth": "NEW",
+      "rpc_projection": "committed; mined candidate identity only when the result-selecting mined candidate apply committed",
+      "effects": {
+        "admission": "latched",
+        "published_image": "new"
+      }
+    },
+    {
+      "id": "C01-TP-UNKNOWN-001",
+      "kind": "observation",
+      "scenario": "Every other or unreadable readback publishes neither guessed image and exposes no summary and no relay authority.",
+      "result": "TERMINAL_PERSISTENCE(neither_or_unreadable)",
+      "commit_truth": "UNKNOWN",
+      "rpc_projection": "unknown; legacy mined absent",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "admission": "latched",
+        "guessed_image": false,
+        "published_image": "withheld",
+        "relay_authority": false,
+        "summary_rows": "0"
+      },
+      "detail": {
+        "final_ram_cache_drift_check": "against the committed index bytes",
+        "stable_live_aliases": "a malformed live cache against a valid disk image, a retained-alias mutation under a continuously held permit, and admission readers active at terminal detection all keep stable aliases"
+      }
+    },
+    {
+      "id": "C01-TERMINV-001",
+      "kind": "observation",
+      "scenario": "A missing or corrupt selected retained record or accounting value, an exact-token mismatch, a duplicate claim, or a checked arithmetic underflow or overflow preserves OLD, publishes no candidate delta and keeps mutation admission latched.",
+      "result": "TERMINAL_LOCAL_INVARIANT(evidence)",
+      "commit_truth": "OLD",
+      "rpc_projection": "not_committed with the existing terminal result surface",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "admission": "latched"
+      },
+      "detail": {
+        "never_reclassified_as": "LOCAL_RESOURCE_UNAVAILABLE(resource), which preserves OLD and does not latch, or STALE_LOCAL_PLAN",
+        "triggers": "missing or corrupt selected retained record, missing or corrupt accounting value, exact-token mismatch, duplicate claim, checked arithmetic underflow or overflow"
+      }
+    },
+    {
+      "id": "C01-TERMINV-BOOT-001",
+      "kind": "observation",
+      "scenario": "At the bootstrap boundary a STORED_NONCANONICAL result, or a KNOWN_BLOCK_NOOP(STORED_NONCANONICAL), is a terminal local invariant that publishes no candidate delta and keeps mutation admission latched; bootstrap ACCEPTED and KNOWN_BLOCK_NOOP(CANONICAL) remain continuation-only.",
+      "result": "TERMINAL_LOCAL_INVARIANT(evidence)",
+      "commit_truth": "OLD",
+      "rpc_projection": "not_committed with the existing terminal result surface",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      },
+      "effects": {
+        "admission": "latched"
+      }
+    },
+    {
+      "id": "C01-STALE-001",
+      "kind": "observation",
+      "scenario": "At the result-selecting mined candidate boundary, STORED_NONCANONICAL and either KNOWN_BLOCK_NOOP variant map to STALE_LOCAL_PLAN and the exact old image is preserved.",
+      "result": "STALE_LOCAL_PLAN",
+      "commit_truth": "OLD",
+      "rpc_projection": "not_committed",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      }
+    },
+    {
+      "id": "C01-CANCEL-001",
+      "kind": "observation",
+      "scenario": "A miner snapshot cancelled or released before PoW at the reorg peak returns LOCAL_CANCELLED with the exact old image, no canonical mutation and no peer effect.",
+      "result": "LOCAL_CANCELLED",
+      "commit_truth": "OLD",
+      "rpc_projection": "not_committed",
+      "canonical_counters": {
+        "accepted_delta": "0",
+        "rejected_delta": "0"
+      }
+    },
+    {
+      "id": "C01-CKPT-001",
+      "kind": "authority",
+      "scenario": "The derived post-commit checkpoint is not canonical authority: an accepted transition may report degraded, a subsequent success clears it, startup is fail-closed, and a multi-row cadence writes only the final state once.",
+      "detail": {
+        "accepted_with_degraded": true,
+        "multi_row_cadence_degraded": "logical OR across every row of the transition",
+        "multi_row_cadence_writes": 1,
+        "startup_on_missing_or_corrupt_required_artifact": "fail-closed as TERMINAL_STORE_INTEGRITY(canonical); no reader, admission or relay exposure",
+        "subsequent_success_clears_degraded": true
+      }
+    },
+    {
+      "id": "C01-PROVIDER-001",
+      "kind": "authority",
+      "scenario": "Provider reads are plan-local, lazy and memoized once per plan and preserve the path-specific first-error order; rotation create and spend stay separate by exact height.",
+      "detail": {
+        "lazy": true,
+        "provider_reads_per_plan": 1,
+        "rotation_create_and_spend": "separate by exact height"
+      }
+    },
+    {
+      "id": "C01-REORGMETA-001",
+      "kind": "authority",
+      "scenario": "Reorg metadata charges the disconnect and connect rows plus the complete DA identifiers and retains no depth-proportional raw block, parse, undo or delta payload.",
+      "detail": {
+        "cap_bytes": 67108864,
+        "charge_formula": "48+40*(disconnect_rows+connect_rows)+32*complete_da_ids",
+        "depth_proportional_retention": false
+      }
+    },
+    {
+      "id": "C01-FORBID-INTERMEDIATE-001",
+      "kind": "forbidden",
+      "forbidden_observation": "An intermediate reorg tip, an accepted-counter mutation per prepared row, or a duplicate receive that reprocesses, broadcasts or changes a counter."
+    },
+    {
+      "id": "C01-FORBID-BUSY-001",
+      "kind": "forbidden",
+      "forbidden_observation": "LOCAL_BUSY after strict presence or stateful consensus, or a BUSY that retains candidate data, penalizes a peer, or blocks the socket reader."
+    },
+    {
+      "id": "C01-FORBID-PRESENCE-001",
+      "kind": "forbidden",
+      "forbidden_observation": "Header existence used as complete presence, blockSeen used as residency or invalidity authority, or a stored-noncanonical artifact used as a validation cache."
+    },
+    {
+      "id": "C01-FORBID-RETRY-001",
+      "kind": "forbidden",
+      "forbidden_observation": "A fixed retry sleep, more than one peer retry slot or waiter, a per-peer orphan pool, a new invalid-block cache, or a second candidate queue."
+    },
+    {
+      "id": "C01-FORBID-PERSIST-001",
+      "kind": "forbidden",
+      "forbidden_observation": "Any persistent StateGeneration, CandidateLog, coordinator, durable outbox, plan directory, generic ReadView, new scratch parent, or implementation-specific schema field."
+    },
+    {
+      "id": "C01-FORBID-SURFACE-001",
+      "kind": "forbidden",
+      "forbidden_observation": "Any specification, Lean, client implementation, adapter, acceptance-runner or final-comparator mutation attributed to the C01 freeze."
+    }
+  ]
+}

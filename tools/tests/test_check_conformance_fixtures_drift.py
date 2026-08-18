@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ TOOLS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS_DIR))
 
 import check_conformance_fixtures_drift as m
+from gen_conformance_matrix import reject_duplicate_json_object_pairs
 
 
 def _populate_committed(root: Path) -> None:
@@ -225,6 +227,60 @@ class MainExitCodeTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn(f"- {target}", captured.getvalue())
 
+
+class CanonicalPipelineSchemaTests(unittest.TestCase):
+    """RUB-922 / C01: the committed corpus validates and rejects duplicate ids."""
+
+    REPO_ROOT = TOOLS_DIR.parent
+    ARTIFACT = REPO_ROOT / "conformance/fixtures/protocol/canonical_pipeline_v1.json"
+    SCHEMA = REPO_ROOT / "conformance/schemas/cv-canonical-pipeline-v1.json"
+
+    def _load(self):
+        import jsonschema  # fail closed: the schema gate requires the library
+
+        # A duplicate JSON key would silently drop the expectation it repeats.
+        schema = json.loads(self.SCHEMA.read_text(encoding="utf-8", errors="strict"), object_pairs_hook=reject_duplicate_json_object_pairs)
+        data = json.loads(self.ARTIFACT.read_text(encoding="utf-8", errors="strict"), object_pairs_hook=reject_duplicate_json_object_pairs)
+        jsonschema.Draft202012Validator.check_schema(schema)
+        return jsonschema.Draft202012Validator(schema), data
+
+    def test_every_row_validates_against_the_versioned_schema(self):
+        validator, data = self._load()
+        errors = [
+            f"{'.'.join(str(p) for p in e.absolute_path)}: {e.message}"
+            for e in sorted(validator.iter_errors(data), key=lambda e: list(e.path))
+        ]
+        self.assertEqual(errors, [])
+        self.assertTrue(data["rows"])
+
+    def test_committed_corpus_has_no_duplicate_row_ids(self):
+        _, data = self._load()
+        ids = [row["id"] for row in data["rows"]]
+        self.assertEqual(len(ids), len(set(ids)), "committed corpus has duplicate row ids")
+
+    def test_result_pattern_rejects_malformed_taxonomy_strings(self):
+        validator, data = self._load()
+        row = next(r for r in data["rows"] if r["kind"] == "observation")
+        self.assertFalse(any(validator.is_valid({**data, "rows": [{**row, "result": s}]}) for s in ("ACCEPTED(extra)", "KNOWN_BLOCK_NOOP(OTHER)", "TERMINAL_PERSISTENCE", "LOCAL_RESOURCE_UNAVAILABLE(bogus)", "CONSENSUS_INVALID()", "bogus", "ACCEPTED\n")))
+
+    def test_row_kind_exclusions_and_receipt_size_are_closed(self):
+        validator, data = self._load()
+        rows = {r["kind"]: r for r in data["rows"]}
+        self.assertFalse(any(validator.is_valid({**data, "rows": [{**rows[k], "forbidden_observation": "x"}]}) for k in ("authority", "observation")))
+        self.assertTrue(validator.is_valid({**data, "rows": [rows["forbidden"]]}))
+        self.assertFalse(validator.is_valid({**data, "authority": {**data["authority"], "status": ""}}))
+        self.assertFalse(any(validator.is_valid({**data, "coverage_receipt": r}) for r in ({**data["coverage_receipt"], "taxonomy:EXTRA": "C01-DIRECT-001"}, dict(list(data["coverage_receipt"].items())[1:]))))
+
+    def test_machine_tokens_reject_trailing_newline(self):
+        validator, data = self._load()
+        rows = data["rows"]
+        po = next(r for r in rows if r.get("pending_owner"))
+        cc = next(r for r in rows if r.get("canonical_counters"))
+        self.assertFalse(any(validator.is_valid({**data, "rows": [m]}) for m in ({**rows[0], "id": rows[0]["id"] + "\n"}, {**po, "pending_owner": po["pending_owner"] + "\n"}, {**cc, "canonical_counters": {**cc["canonical_counters"], "accepted_delta": cc["canonical_counters"]["accepted_delta"] + "\n"}})))
+        k, v = next(iter(data["coverage_receipt"].items()))
+        self.assertTrue(validator.is_valid({**data, "coverage_receipt": {**data["coverage_receipt"], k: v}}))
+        self.assertFalse(any(validator.is_valid({**data, "coverage_receipt": r}) for r in ({**data["coverage_receipt"], k + "\n": v}, {**data["coverage_receipt"], k: v + "\n"})))
+        self.assertFalse(any(validator.is_valid({**data, "result_taxonomy": t}) for t in (["BOGUS"] + data["result_taxonomy"][1:], data["result_taxonomy"] + ["EXTRA"])))
 
 if __name__ == "__main__":
     unittest.main()

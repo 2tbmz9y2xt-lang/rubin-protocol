@@ -17,6 +17,7 @@ OUT_PATH = REPO_ROOT / "conformance" / "MATRIX.md"
 _RUNNER_MODULE: Any | None = None
 EXPECTED_PROTOCOL_ARTIFACTS = frozenset(
     {
+        "canonical_pipeline_v1.json",
         "legacy_exposure_hook_vectors.json",
         "legacy_exposure_report_v1_example.json",
         "live_binding_policy_v1.json",
@@ -104,6 +105,10 @@ class ProtocolArtifactRow:
 
 
 PROTOCOL_ARTIFACT_META: dict[str, tuple[str, str]] = {
+    "canonical_pipeline_v1.json": (
+        "Frozen canonical publication observables corpus (RUB-922 / C01)",
+        "external authority for canonical-pipeline results, effects and bounded resource outcomes; INERT (see conformance/README.md)",
+    ),
     "legacy_exposure_hook_vectors.json": (
         "Operational protocol artifact",
         "legacy exposure scanner / hook-driven verification receipts",

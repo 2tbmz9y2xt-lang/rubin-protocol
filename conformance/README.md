@@ -158,6 +158,21 @@ environment error. The script **never** writes under `conformance/fixtures/**`
 (auto-regeneration in CI is forbidden); manual regeneration remains the
 authoritative path.
 
+## Canonical publication observables corpus (RUB-922 / C01)
+
+`conformance/fixtures/protocol/canonical_pipeline_v1.json` freezes the external authority for
+canonical-pipeline results and effects. It is generator-owned by `clients/go/cmd/gen-conformance-fixtures`,
+byte-guarded by the drift gate, kept outside the auto-executed top-level `CV-*.json` glob, and
+defined field by field (`kind`, `pending_owner`, `coverage_receipt`) by
+`conformance/schemas/cv-canonical-pipeline-v1.json` (schema version 1). The artifact's own
+`pending_owner` fields are the current map; the 2026-08-17 `conformance/fixtures/CHANGELOG.md` entry
+records it at freeze (RUB-1195 owns section-19 relay; RUB-893 owns inbound-budget identities, budget
+races and reservation overflow; RUB-910 owns permit/LOCAL_BUSY, retry-slot races, reclaimed-hash
+inventory and the orphan-pool result classification — duplicate / oversize / source-51 refusal). It is
+**INERT**: its only executors are the RUB-923 Go adapter, the RUB-926 acceptance gate, the RUB-924
+Rust adapter and the RUB-901 comparator, none of which exists yet, so no canonical-publication slice
+may claim it as a passing gate.
+
 ## Fuzz crash promotion (manual-only)
 
 Nightly fuzz jobs are discovery jobs only. They upload crash artifacts and
