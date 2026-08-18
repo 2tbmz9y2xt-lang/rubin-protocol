@@ -1478,6 +1478,16 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		"rpc error class":      func(r *cp2Row) { r.Cases[0].Expected.RPC.ErrorClass = cp2Ptr("LOCAL BUSY") },
 		"token whitespace":     func(r *cp2Row) { r.Cases[0].CaseID = "MAIN CASE" },
 		"class tuple":          func(r *cp2Row) { r.Cases[0].Expected.RPC.HTTP = cp2Ptr(503) },
+		"classified wire":      func(r *cp2Row) { r.Cases[0].Expected.WireDisposition = cp2Ptr("CHECKSUM_REJECT") },
+		"reached flag true": func(r *cp2Row) {
+			e := &r.Cases[0].Expected
+			e.Result, e.PipelineReached, e.WireDisposition = nil, cp2Ptr(true), cp2Ptr("CHECKSUM_REJECT")
+		},
+		"both dispositions": func(r *cp2Row) {
+			e := &r.Cases[0].Expected
+			e.Result, e.PipelineReached, e.WireDisposition, e.RecoveryOutcome = nil, cp2Ptr(false), cp2Ptr("CHECKSUM_REJECT"), cp2Ptr("fail_closed_no_exposure")
+		},
+		"neither disposition": func(r *cp2Row) { e := &r.Cases[0].Expected; e.Result, e.PipelineReached = nil, cp2Ptr(false) },
 		"wire truth": func(r *cp2Row) {
 			r.Cases[0].Expected.Result, r.Cases[0].Expected.PipelineReached, r.Cases[0].Expected.WireDisposition = nil, cp2Ptr(false), cp2Ptr("CHECKSUM_REJECT")
 		},
@@ -1496,9 +1506,10 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		"rpc mined": "rpc_projection.mined", "rpc http": "rpc_projection.http",
 		"rpc commit state": "rpc_projection.commit_state", "rpc error class": "neither a taxonomy token",
 		"token whitespace": "is not a machine token", "class tuple": "requires [result_selecting_mined_candidate 200",
-		"wire truth": "wire_disposition requires commit truth OLD", "duplicate pointer": "duplicate input pointer /input/b", "duplicate case id": "duplicate case id",
+		"wire truth": "wire_disposition requires commit truth OLD", "classified wire": "set only when result is null",
+		"reached flag true": "requires pipeline_reached false", "both dispositions": "exactly one of", "neither disposition": "exactly one of", "duplicate pointer": "duplicate input pointer /input/b", "duplicate case id": "duplicate case id",
 		"missing reached flag": "null result requires pipeline_reached",
-		"surplus reached flag": "only when result is null",
+		"surplus reached flag": "set only when result is null",
 	}
 	for name, apply := range mutate {
 		row := cp2Row{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}
@@ -1530,6 +1541,14 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	if err := cp2ValidateAliases(rows, block); err != nil {
 		t.Fatalf("catalog carrying B1 must validate: %v", err)
 	}
+	// An alias array marshals to a schema-valid array in either Go shape.
+	for _, arr := range []any{[]any{"B1"}, []string{"B1"}} {
+		rows[0].Cases[0].Input[0] = cp2Input{Pointer: "/input/prestate", Type: "array<alias>", ValueOrAlias: arr}
+		if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}); err == nil || !strings.Contains(err.Error(), `alias "B1"`) {
+			t.Fatalf("array alias %T: error = %v, want a rejection naming B1", arr, err)
+		}
+	}
+	rows[0].Cases[0].Input[0] = c.Input[0]
 	// A pointer tagged u64 may not resolve to an object fixture.
 	rows[0].Cases[0].Input[0].Type = "u64"
 	if err := cp2ValidateAliases(rows, block); err == nil || !strings.Contains(err.Error(), "is a object fixture, want u64") {

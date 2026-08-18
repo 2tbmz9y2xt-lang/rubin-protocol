@@ -412,6 +412,10 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
                 lambda r: r["cases"][0]["input"][0].update({"type": "bool", "value_or_alias": "yes"}),
                 ("rows/0/cases/0/input/0/value_or_alias", "oneOf"),
             ),
+            "whitespace-only setup sink": (
+                lambda r: r["cases"][0]["input"][0].__setitem__("production_setup_sink", "   "),
+                ("rows/0/cases/0/input/0/production_setup_sink", "pattern"),
+            ),
             "inline object stimulus": (
                 lambda r: r["cases"][0]["input"][0].update({"type": "object", "value_or_alias": {"height": 1}}),
                 ("rows/0/cases/0/input/0/value_or_alias", "type"),
@@ -482,14 +486,10 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
     def test_top_level_consts_equal_the_enums_that_use_them(self):
         _, data = self._load()
         schema = load_json_fail_closed(self.SCHEMA)
-        defs, exp = schema["$defs"], schema["$defs"]["expected"]["properties"]
-        for const, enum in (
-            (data["rpc_projection_classes"], defs["rpcProjection"]["properties"]["class"]["enum"]),
-            (data["commit_truth_values"], exp["commit_truth"]["enum"]),
-            (data["wire_disposition_values"], exp["wire_disposition"]["enum"]),
-            (data["recovery_outcome_values"], exp["recovery_outcome"]["enum"]),
-        ):
-            self.assertEqual(sorted(const), sorted(enum))
+        # The RPC/wire/recovery arrays are pinned Go-vs-schema by the generator's
+        # parity test and are the artifact's own source, so only commit_truth is left.
+        exp = schema["$defs"]["expected"]["properties"]
+        self.assertEqual(sorted(data["commit_truth_values"]), sorted(exp["commit_truth"]["enum"]))
 
     def test_row_registry_is_pinned_as_an_exact_map(self):
         # The schema pins the map as a `const`, independently of the generator

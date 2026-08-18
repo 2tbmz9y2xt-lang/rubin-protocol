@@ -2714,8 +2714,8 @@ func cp2ValidateResultTruth(where string, e cp2Expected) error {
 	if e.Result == nil {
 		return cp2ValidateNullResult(where, e)
 	}
-	if e.PipelineReached != nil {
-		return fmt.Errorf("case %s: pipeline_reached is set only when result is null", where)
+	if e.PipelineReached != nil || e.WireDisposition != nil || e.RecoveryOutcome != nil {
+		return fmt.Errorf("case %s: pipeline_reached, wire_disposition and recovery_outcome are set only when result is null", where)
 	}
 	truth, ok := cp2CommitTruthFor(*e.Result)
 	if !ok {
@@ -2731,8 +2731,11 @@ func cp2ValidateResultTruth(where string, e cp2Expected) error {
 // classification: a wire-layer disposal leaves the old image, and a
 // startup/recovery case attempts no canonical transition at all.
 func cp2ValidateNullResult(where string, e cp2Expected) error {
-	if e.PipelineReached == nil {
-		return fmt.Errorf("case %s: a null result requires pipeline_reached", where)
+	if e.PipelineReached == nil || *e.PipelineReached {
+		return fmt.Errorf("case %s: a null result requires pipeline_reached false", where)
+	}
+	if (e.WireDisposition != nil) == (e.RecoveryOutcome != nil) {
+		return fmt.Errorf("case %s: a null result requires exactly one of wire_disposition, recovery_outcome", where)
 	}
 	if e.WireDisposition != nil && e.CommitTruth != "OLD" {
 		return fmt.Errorf("case %s: wire_disposition requires commit truth OLD, got %q", where, e.CommitTruth)
@@ -2860,20 +2863,22 @@ func cp2AliasesOf(in cp2Input) []string {
 	}
 	var out []string
 	switch v := in.ValueOrAlias.(type) {
-	case string:
-		out = cp2AppendAlias(out, v)
+	case []string:
+		for _, e := range v {
+			out = cp2AppendAlias(out, e)
+		}
 	case []any:
 		for _, e := range v {
-			if s, ok := e.(string); ok {
-				out = cp2AppendAlias(out, s)
-			}
+			out = cp2AppendAlias(out, e)
 		}
+	default:
+		out = cp2AppendAlias(out, v)
 	}
 	return out
 }
 
-func cp2AppendAlias(out []string, s string) []string {
-	if cp2UpperTokenRE.MatchString(s) {
+func cp2AppendAlias(out []string, v any) []string {
+	if s, ok := v.(string); ok && cp2UpperTokenRE.MatchString(s) {
 		return append(out, s)
 	}
 	return out

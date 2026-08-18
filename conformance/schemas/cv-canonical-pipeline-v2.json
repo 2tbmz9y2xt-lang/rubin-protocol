@@ -220,7 +220,7 @@
         "type": { "$ref": "#/$defs/inputType" },
         "value_or_alias": { "description": "A literal of the declared type, or an alias resolving in the top-level `fixtures` catalog. An `object` or `array<object>` stimulus is ALWAYS an alias: a structured value lives only in the catalog, never inline here.", "not": { "type": "null" } },
         "provenance": { "enum": ["normative_boundary", "witness_fixture", "deterministic_schedule_control", "configured_bound"] },
-        "production_setup_sink": { "description": "The exact production entrypoint or test seam the adapter drives to deliver this input. An input production cannot receive is a design defect, not a schema-legal value.", "type": "string", "minLength": 1 },
+        "production_setup_sink": { "description": "The exact production entrypoint or test seam the adapter drives to deliver this input. An input production cannot receive is a design defect, not a schema-legal value.", "$ref": "#/$defs/text" },
         "consumption_proof_owner": { "$ref": "#/$defs/issueId" }
       },
       "allOf": [
@@ -276,24 +276,10 @@
           },
           "else": { "not": { "anyOf": [{ "required": ["pipeline_reached"] }, { "required": ["wire_disposition"] }, { "required": ["recovery_outcome"] }] } }
         },
-        {
-          "if": { "properties": { "canonical_counters": { "properties": { "accepted_delta": { "not": { "const": "0" } } }, "required": ["accepted_delta"] } }, "required": ["canonical_counters"] },
-          "then": { "properties": { "commit_truth": { "const": "NEW" } } }
-        },
-        {
-          "if": { "properties": { "canonical_counters": { "properties": { "rejected_delta": { "const": "+1" } }, "required": ["rejected_delta"] } }, "required": ["canonical_counters"] },
-          "then": { "properties": { "commit_truth": { "const": "OLD" } } }
-        },
-        {
-          "if": { "properties": { "commit_truth": { "const": "NEW" } }, "required": ["commit_truth"] },
-          "then": { "properties": { "canonical_applied_blocks": { "type": "array" } } },
-          "else": { "properties": { "canonical_applied_blocks": { "type": "null" } } }
-        },
-        {
-          "if": { "properties": { "commit_truth": { "const": "UNKNOWN" } }, "required": ["commit_truth"] },
-          "then": { "properties": { "state_image": { "additionalProperties": { "properties": { "relation": { "const": "withheld" } } } } } },
-          "else": { "properties": { "state_image": { "additionalProperties": { "properties": { "relation": { "enum": ["new", "old", "unchanged"] } } } } } }
-        }
+        { "if": { "properties": { "canonical_counters": { "properties": { "accepted_delta": { "not": { "const": "0" } } }, "required": ["accepted_delta"] } }, "required": ["canonical_counters"] }, "then": { "properties": { "commit_truth": { "const": "NEW" } } } },
+        { "if": { "properties": { "canonical_counters": { "properties": { "rejected_delta": { "const": "+1" } }, "required": ["rejected_delta"] } }, "required": ["canonical_counters"] }, "then": { "properties": { "commit_truth": { "const": "OLD" } } } },
+        { "if": { "properties": { "commit_truth": { "const": "NEW" } }, "required": ["commit_truth"] }, "then": { "properties": { "canonical_applied_blocks": { "type": "array" } } }, "else": { "properties": { "canonical_applied_blocks": { "type": "null" } } } },
+        { "if": { "properties": { "commit_truth": { "const": "UNKNOWN" } }, "required": ["commit_truth"] }, "then": { "properties": { "state_image": { "additionalProperties": { "properties": { "relation": { "const": "withheld" } } } } } }, "else": { "properties": { "state_image": { "additionalProperties": { "properties": { "relation": { "enum": ["new", "old", "unchanged"] } } } } } } }
       ]
     },
     "rpcProjection": {
