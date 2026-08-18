@@ -18,6 +18,7 @@ _RUNNER_MODULE: Any | None = None
 EXPECTED_PROTOCOL_ARTIFACTS = frozenset(
     {
         "canonical_pipeline_v1.json",
+        "canonical_pipeline_v2.json",
         "legacy_exposure_hook_vectors.json",
         "legacy_exposure_report_v1_example.json",
         "live_binding_policy_v1.json",
@@ -108,6 +109,10 @@ PROTOCOL_ARTIFACT_META: dict[str, tuple[str, str]] = {
     "canonical_pipeline_v1.json": (
         "Frozen canonical publication observables corpus (RUB-922 / C01)",
         "external authority for canonical-pipeline results, effects and bounded resource outcomes; INERT (see conformance/README.md)",
+    ),
+    "canonical_pipeline_v2.json": (
+        "BUILDING C01-R2 authority — not active; v1 remains the inert authority",
+        "closure-epoch-bound C01-R2 identity and shape foundation (RUB-1207): frozen 79-entry row registry, no migrated row; no consumer may bind it (see conformance/README.md)",
     ),
     "legacy_exposure_hook_vectors.json": (
         "Operational protocol artifact",

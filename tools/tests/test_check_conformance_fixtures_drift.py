@@ -13,7 +13,73 @@ TOOLS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS_DIR))
 
 import check_conformance_fixtures_drift as m
-from gen_conformance_matrix import reject_duplicate_json_object_pairs
+from gen_conformance_matrix import load_json_fail_closed, reject_duplicate_json_object_pairs
+
+# RUB-1207 / C01-R2: the known-valid observation row every schema negative below
+# mutates in exactly one dimension. It carries the complete required shape --
+# typed input, typed expected output, per-image projection and summary rows --
+# so a negative that passes proves the closure, not a missing constraint.
+_IMAGES = ("CHAIN_IMAGE_V1", "STANDARD_MEMPOOL_IMAGE_V1", "RETAINED_DA_IMAGE_V1", "OWNER_IMAGE_V1")
+V2_CONTROL_ROW = {
+    "row_id": "C01-DIRECT-001",
+    "kind": "observation",
+    "notes": ["control row for the RUB-1207 schema negatives"],
+    "release_requirements": {
+        "go": [{"issue": "RUB-890", "surface": "one canonical index commit", "delivery_receipt_required": True}],
+        "rust": [],
+    },
+    "cases": [
+        {
+            "case_id": "MAIN",
+            "input": [
+                {
+                    "pointer": "/input/stimulus_block",
+                    "type": "alias",
+                    "value_or_alias": "B1",
+                    "provenance": "normative_boundary",
+                    "production_setup_sink": "node.Miner.MineOne (clients/go/node/miner.go)",
+                    "consumption_proof_owner": "RUB-923",
+                }
+            ],
+            "schedule_id": None,
+            "expected": {
+                "result": "ACCEPTED",
+                "commit_truth": "NEW",
+                "rpc_projection": {
+                    "class": "MINED_200_COMMITTED",
+                    "http": 200,
+                    "commit_state": "committed",
+                    "mined": "true",
+                    "success_identity": "present",
+                    "error_class": None,
+                    "phase": "result_selecting_mined_candidate",
+                },
+                "canonical_counters": {"accepted_delta": "+1", "rejected_delta": "0"},
+                "effects": {
+                    "publication_events": {
+                        "value": 1,
+                        "type": "u64",
+                        "required": True,
+                        "observer": "publication counter on the canonical publication seam",
+                    }
+                },
+                "state_image": {
+                    image: {
+                        "relation": "new",
+                        "digest_alias": f"{image}@C01-DIRECT-001/MAIN:new",
+                        "direct_fields": {"tip_hash": "tip_hash@C01-DIRECT-001/MAIN:new"},
+                    }
+                    for image in _IMAGES
+                },
+                "canonical_applied_blocks": [
+                    {"block_id": "B1", "block_hash": "B1_HASH", "complete_da_ids": ["DA_ID_1"]}
+                ],
+            },
+            "obligation_ids": ["OBL-OWN-PUBCHAIN-018"],
+            "sources": ["canonical_pipeline_v1.json row C01-DIRECT-001"],
+        }
+    ],
+}
 
 
 def _populate_committed(root: Path) -> None:
@@ -281,6 +347,144 @@ class CanonicalPipelineSchemaTests(unittest.TestCase):
         self.assertTrue(validator.is_valid({**data, "coverage_receipt": {**data["coverage_receipt"], k: v}}))
         self.assertFalse(any(validator.is_valid({**data, "coverage_receipt": r}) for r in ({**data["coverage_receipt"], k + "\n": v}, {**data["coverage_receipt"], k: v + "\n"})))
         self.assertFalse(any(validator.is_valid({**data, "result_taxonomy": t}) for t in (["BOGUS"] + data["result_taxonomy"][1:], data["result_taxonomy"] + ["EXTRA"])))
+
+class CanonicalPipelineV2SchemaTests(unittest.TestCase):
+    """RUB-1207 / C01-R2: the dormant pair strict-loads, validates, and fails closed."""
+
+    REPO_ROOT = TOOLS_DIR.parent
+    ARTIFACT = REPO_ROOT / "conformance/fixtures/protocol/canonical_pipeline_v2.json"
+    SCHEMA = REPO_ROOT / "conformance/schemas/cv-canonical-pipeline-v2.json"
+
+    def _load(self):
+        import jsonschema  # fail closed: the schema gate requires the library
+
+        # load_json_fail_closed is the repo's one strict loader: UTF-8 strict,
+        # duplicate-key reject, NaN/Infinity reject, single JSON document.
+        schema = load_json_fail_closed(self.SCHEMA)
+        data = load_json_fail_closed(self.ARTIFACT)
+        jsonschema.Draft202012Validator.check_schema(schema)
+        return jsonschema.Draft202012Validator(schema), data
+
+    def test_committed_pair_validates_and_is_a_dormant_building_revision(self):
+        validator, data = self._load()
+        errors = [
+            f"{'.'.join(str(p) for p in e.absolute_path)}: {e.message}"
+            for e in sorted(validator.iter_errors(data), key=lambda e: list(e.path))
+        ]
+        self.assertEqual(errors, [])
+        self.assertEqual(data["rows"], [])
+        self.assertEqual(data["_meta"]["closure_epoch"]["status"], "building")
+        self.assertEqual(len(data["row_registry"]), 79)
+        self.assertNotIn("pending_owner", self.ARTIFACT.read_text(encoding="utf-8", errors="strict"))
+
+    def test_inherited_identities_match_the_byte_frozen_v1_parent(self):
+        _, data = self._load()
+        v1 = load_json_fail_closed(
+            self.REPO_ROOT / "conformance/fixtures/protocol/canonical_pipeline_v1.json"
+        )
+        registry = data["row_registry"]
+        self.assertEqual(len(v1["rows"]), 62)
+        self.assertEqual(
+            {r["id"]: r["kind"] for r in v1["rows"]},
+            {rid: kind for rid, kind in registry.items() if rid in {r["id"] for r in v1["rows"]}},
+        )
+        # The 17 remaining identities are the closure-authorized R2 rows.
+        self.assertEqual(len(registry) - len(v1["rows"]), 17)
+
+    def test_control_row_validates(self):
+        validator, data = self._load()
+        errors = [e.message for e in validator.iter_errors({**data, "rows": [V2_CONTROL_ROW]})]
+        self.assertEqual(errors, [])
+
+    def _row_rejections(self, mutate) -> set:
+        """Return {(json pointer, failing keyword)} for a one-dimension mutation."""
+        validator, data = self._load()
+        row = json.loads(json.dumps(V2_CONTROL_ROW))
+        mutate(row)
+        return {
+            ("/".join(str(p) for p in e.absolute_path), e.validator)
+            for e in validator.iter_errors({**data, "rows": [row]})
+        }
+
+    def test_one_dimension_row_mutations_are_rejected_for_the_exact_reason(self):
+        def set_expected(key, value):
+            return lambda r: r["cases"][0]["expected"].__setitem__(key, value)
+
+        def set_rpc(key, value):
+            return lambda r: r["cases"][0]["expected"]["rpc_projection"].__setitem__(key, value)
+
+        expected = "rows/0/cases/0/expected"
+        for name, (mutate, reason) in {
+            "row id off grammar": (lambda r: r.__setitem__("row_id", "X01-DIRECT-001"), ("rows/0/row_id", "pattern")),
+            "kind carries foreign payload": (lambda r: r.__setitem__("forbidden_observation", "x"), ("rows/0", "not")),
+            "kind change": (lambda r: r.__setitem__("kind", "authority"), ("rows/0", "not")),
+            "unknown compared field": (set_expected("detail", {"note": "x"}), (expected, "additionalProperties")),
+            "missing compared field": (lambda r: r["cases"][0]["expected"].pop("commit_truth"), (expected, "required")),
+            "commit truth off domain": (set_expected("commit_truth", "MAYBE"), (f"{expected}/commit_truth", "enum")),
+            "result off taxonomy": (set_expected("result", "ACCEPTED(extra)"), (f"{expected}/result", "oneOf")),
+            "rpc class off domain": (set_rpc("class", "MINED_201_COMMITTED"), (f"{expected}/rpc_projection/class", "enum")),
+            "rpc http off domain": (set_rpc("http", 418), (f"{expected}/rpc_projection/http", "enum")),
+            "rpc mined off domain": (set_rpc("mined", "yes"), (f"{expected}/rpc_projection/mined", "enum")),
+            "surplus pipeline_reached": (set_expected("pipeline_reached", False), (expected, "not")),
+            "missing pipeline_reached": (set_expected("result", None), (expected, "required")),
+            "case id whitespace": (lambda r: r["cases"][0].__setitem__("case_id", "MAIN CASE"), ("rows/0/cases/0/case_id", "pattern")),
+            "digest alias newline": (
+                lambda r: r["cases"][0]["expected"]["state_image"]["CHAIN_IMAGE_V1"].__setitem__("digest_alias", "CHAIN\n"),
+                (f"{expected}/state_image/CHAIN_IMAGE_V1/digest_alias", "not"),
+            ),
+            "notes carry a machine value": (lambda r: r.__setitem__("notes", [7]), ("rows/0/notes/0", "type")),
+            "input carries an expected value": (
+                lambda r: r["cases"][0]["input"][0].__setitem__("result", "ACCEPTED"),
+                ("rows/0/cases/0/input/0", "additionalProperties"),
+            ),
+            "wire disposition off domain": (set_expected("wire_disposition", "FRAME_BOGUS"), (f"{expected}/wire_disposition", "enum")),
+            "release requirement without receipt flag": (
+                lambda r: r["release_requirements"]["go"][0].pop("delivery_receipt_required"),
+                ("rows/0/release_requirements/go/0", "required"),
+            ),
+        }.items():
+            with self.subTest(mutation=name):
+                self.assertIn(reason, self._row_rejections(mutate))
+
+    def test_closure_epoch_and_parent_pins_are_const(self):
+        validator, data = self._load()
+        for pointer, value in (
+            ("manifest_root_sha256", "0" * 64),
+            ("status", "complete_ish"),
+        ):
+            with self.subTest(field=pointer):
+                epoch = {**data["_meta"]["closure_epoch"], pointer: value}
+                self.assertFalse(validator.is_valid({**data, "_meta": {**data["_meta"], "closure_epoch": epoch}}))
+        self.assertFalse(
+            validator.is_valid({**data, "_meta": {**data["_meta"], "parent_artifact_sha256": "0" * 64}})
+        )
+        # A removed identity, an unauthorized key and a kind change all fail the map.
+        registry = data["row_registry"]
+        for broken in (
+            dict(list(registry.items())[1:]),
+            {**registry, "C01-NOT-AUTHORIZED-001": "observation"},
+            {**registry, "C01-PATHS-001": "conjecture"},
+        ):
+            self.assertFalse(validator.is_valid({**data, "row_registry": broken}))
+
+    def test_strict_loader_rejects_every_parser_boundary(self):
+        raw = self.SCHEMA.read_text(encoding="utf-8", errors="strict")
+        artifact_raw = self.ARTIFACT.read_text(encoding="utf-8", errors="strict")
+        cases = {
+            "schema duplicate key": (raw.replace('"type": "object",', '"type": "object", "type": "object",', 1).encode(), 'duplicate JSON key "type"'),
+            "artifact duplicate key": (artifact_raw.replace('"artifact":', '"artifact": "x", "artifact":', 1).encode(), 'duplicate JSON key "artifact"'),
+            "artifact NaN constant": (artifact_raw.replace('"schema_version": 2', '"schema_version": NaN', 1).encode(), "invalid JSON constant 'NaN'"),
+            "artifact trailing document": ((artifact_raw + "{}").encode(), "invalid JSON artifact"),
+            "artifact non-utf8": (artifact_raw.encode() + b"\xff", "invalid JSON artifact"),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            for name, (body, expected) in cases.items():
+                with self.subTest(boundary=name):
+                    path = Path(td) / "candidate.json"
+                    path.write_bytes(body)
+                    with self.assertRaisesRegex(RuntimeError, expected):
+                        load_json_fail_closed(path)
+
 
 if __name__ == "__main__":
     unittest.main()

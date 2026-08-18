@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"maps"
@@ -1367,5 +1368,177 @@ func TestCanonicalPipelineValidatorFailsClosed(t *testing.T) {
 		} else if got := stderr.String(); !strings.Contains(got, "fatal: canonical pipeline: ") || !strings.Contains(got, c.want) {
 			t.Fatalf("case %s: stderr = %q, want a canonical-pipeline fatal containing %q", c.name, got, c.want)
 		}
+	}
+}
+
+// TestCanonicalPipelineV2ParentPairIsByteFrozen makes the RUB-1207 "the R1 pair
+// is a byte-frozen read-only parent" clause executable: the pins the v2 _meta
+// publishes are recomputed from the committed files, so any byte change to
+// either parent fails here rather than silently re-parenting the revision.
+func TestCanonicalPipelineV2ParentPairIsByteFrozen(t *testing.T) {
+	repoRoot, err := repoRootFromGoModule()
+	if err != nil {
+		t.Fatalf("repoRoot: %v", err)
+	}
+	for _, c := range []struct{ rel, want string }{
+		{"conformance/fixtures/protocol/canonical_pipeline_v1.json", cp2ParentArtifactSHA},
+		{"conformance/schemas/cv-canonical-pipeline-v1.json", cp2ParentSchemaSHA},
+	} {
+		raw, readErr := os.ReadFile(filepath.Join(repoRoot, c.rel))
+		if readErr != nil {
+			t.Fatalf("read %s: %v", c.rel, readErr)
+		}
+		if got := hex.EncodeToString(sha256Sum(raw)); got != c.want {
+			t.Fatalf("%s sha256 = %s, want the frozen parent pin %s", c.rel, got, c.want)
+		}
+	}
+}
+
+func sha256Sum(b []byte) []byte {
+	sum := sha256.Sum256(b)
+	return sum[:]
+}
+
+// TestCanonicalPipelineV2RegistryIsFrozen pins the C01-R2 identity map: the 62
+// inherited (row_id, kind) pairs must equal the byte-frozen v1 corpus exactly
+// and the 17 R2 rows must equal the closure-authorized constant list. A rename,
+// removal, kind change or unauthorized addition on either side fails here, as
+// does a collision that would silently shrink the merged map.
+func TestCanonicalPipelineV2RegistryIsFrozen(t *testing.T) {
+	registry := cp2RowRegistry()
+	if len(registry) != cp2RegistrySize {
+		t.Fatalf("row registry has %d identities, want the frozen %d (62 inherited + 17 R2)", len(registry), cp2RegistrySize)
+	}
+	want := make(map[string]string, cp2RegistrySize)
+	for _, row := range canonicalPipelineRows() {
+		want[row.ID] = row.Kind
+	}
+	if len(want) != cp2RegistrySize-len(cp2NewRows) {
+		t.Fatalf("inherited corpus has %d identities, want 62", len(want))
+	}
+	maps.Copy(want, cp2NewRows)
+	if !maps.Equal(registry, want) {
+		t.Fatal("row registry is not the inherited v1 identities plus the closure-authorized R2 rows")
+	}
+}
+
+// TestCanonicalPipelineV2CommitTruthRelationIsExact checks the spec 6.4.1
+// relation against the 62 merged R1 rows themselves, not against a restatement
+// of the table: every observation row's (result, commit_truth) pair must be the
+// one cp2CommitTruthFor derives, and the relation must be total on the closed
+// taxonomy.
+func TestCanonicalPipelineV2CommitTruthRelationIsExact(t *testing.T) {
+	for _, row := range canonicalPipelineRows() {
+		if row.Kind != "observation" {
+			continue
+		}
+		truth, ok := cp2CommitTruthFor(row.Result)
+		if !ok {
+			t.Errorf("%s: result %q is unmapped by the 6.4.1 relation", row.ID, row.Result)
+		} else if truth != row.CommitTruth {
+			t.Errorf("%s: relation maps %q to %s, but the merged R1 row states %s", row.ID, row.Result, truth, row.CommitTruth)
+		}
+	}
+	for _, member := range []string{"ACCEPTED", "STORED_NONCANONICAL", "KNOWN_BLOCK_NOOP(CANONICAL)", "MISSING_PARENT",
+		"ORPHAN_RETAINED", "ORPHAN_ALREADY_RETAINED", "CONSENSUS_INVALID(BLOCK_ERR_MERKLE_INVALID)", "LOCAL_BUSY",
+		"LOCAL_RESOURCE_UNAVAILABLE(orphan_pool)", "STALE_LOCAL_PLAN", "LOCAL_CANCELLED", "LOCAL_STORE_ERROR(noncanonical)", //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
+		"LOCAL_PERSISTENCE_ERROR(precommit)", "TERMINAL_STORE_INTEGRITY(canonical)", "TERMINAL_LOCAL_INVARIANT(evidence)",
+		"TERMINAL_PERSISTENCE(old)", "TERMINAL_PERSISTENCE(new)", "TERMINAL_PERSISTENCE(neither_or_unreadable)"} {
+		if _, ok := cp2CommitTruthFor(member); !ok {
+			t.Errorf("taxonomy member %q has no commit truth", member)
+		}
+	}
+	if _, ok := cp2CommitTruthFor("ACCEPTED(extra)"); ok {
+		t.Error("a malformed result must not resolve to a commit truth")
+	}
+}
+
+func cp2Ptr[T any](v T) *T { return &v }
+
+// cp2ValidCase is the known-valid control every RUB-1207 negative mutates in
+// exactly one dimension.
+func cp2ValidCase() cp2Case {
+	return cp2Case{CaseID: "MAIN", Expected: cp2Expected{
+		Result: cp2Ptr("ACCEPTED"), CommitTruth: "NEW",
+		RPC: cp2RPC{Class: "MINED_200_COMMITTED", HTTP: cp2Ptr(200), CommitState: cp2Ptr("committed"),
+			Mined: "true", SuccessIdentity: "present", Phase: "result_selecting_mined_candidate"},
+	}}
+}
+
+// TestCanonicalPipelineV2ValidatorFailsClosed drives the RUB-1207 mutation set:
+// row-id substitution, kind change, a wrong result/truth relation, malformed RPC
+// shape and a machine token carrying whitespace. Each case changes exactly one
+// dimension of the control and asserts the specific reason.
+func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
+	registry := cp2RowRegistry()
+	if err := cp2ValidateRows([]cp2Row{{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}}, registry); err != nil {
+		t.Fatalf("control row must validate: %v", err)
+	}
+	mutate := map[string]func(*cp2Row){
+		"row id substitution":  func(r *cp2Row) { r.RowID = "C01-DIRECT-002" },
+		"kind change":          func(r *cp2Row) { r.Kind = "authority" },
+		"wrong result truth":   func(r *cp2Row) { r.Cases[0].Expected.CommitTruth = "OLD" },
+		"result off taxonomy":  func(r *cp2Row) { r.Cases[0].Expected.Result = cp2Ptr("ACCEPTED(extra)") },
+		"unknown commit truth": func(r *cp2Row) { r.Cases[0].Expected.CommitTruth = "MAYBE" },
+		"rpc class":            func(r *cp2Row) { r.Cases[0].Expected.RPC.Class = "MINED_201_COMMITTED" },
+		"rpc mined":            func(r *cp2Row) { r.Cases[0].Expected.RPC.Mined = "yes" },
+		"rpc http":             func(r *cp2Row) { r.Cases[0].Expected.RPC.HTTP = cp2Ptr(418) },
+		"rpc commit state":     func(r *cp2Row) { r.Cases[0].Expected.RPC.CommitState = cp2Ptr("maybe_committed") },
+		"rpc error class":      func(r *cp2Row) { r.Cases[0].Expected.RPC.ErrorClass = cp2Ptr("LOCAL BUSY") },
+		"token whitespace":     func(r *cp2Row) { r.Cases[0].CaseID = "MAIN CASE" },
+		"missing reached flag": func(r *cp2Row) { r.Cases[0].Expected.Result = nil },
+		"surplus reached flag": func(r *cp2Row) { r.Cases[0].Expected.PipelineReached = cp2Ptr(false) },
+	}
+	want := map[string]string{
+		"row id substitution": "is not a frozen registry pair", "kind change": "is not a frozen registry pair",
+		"wrong result truth": "requires commit truth NEW", "result off taxonomy": "outside the closed taxonomy",
+		"unknown commit truth": "commit truth \"MAYBE\" is unknown", "rpc class": "rpc_projection.class",
+		"rpc mined": "rpc_projection.mined", "rpc http": "rpc_projection.http",
+		"rpc commit state": "rpc_projection.commit_state", "rpc error class": "neither a taxonomy token",
+		"token whitespace": "is not a machine token", "missing reached flag": "null result requires pipeline_reached",
+		"surplus reached flag": "only when result is null",
+	}
+	for name, apply := range mutate {
+		row := cp2Row{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}
+		apply(&row)
+		err := cp2ValidateRows([]cp2Row{row}, registry)
+		if err == nil {
+			t.Errorf("%s: expected a fail-closed rejection", name)
+		} else if !strings.Contains(err.Error(), want[name]) {
+			t.Errorf("%s: error = %q, want it to name %q", name, err, want[name])
+		}
+	}
+}
+
+// TestCanonicalPipelineV2CorpusIsByteDeterministic proves the dormant revision
+// is reproducible and carries neither retired v1 field.
+func TestCanonicalPipelineV2CorpusIsByteDeterministic(t *testing.T) {
+	first := filepath.Join(t.TempDir(), "canonical_pipeline_v2.json")
+	second := filepath.Join(t.TempDir(), "canonical_pipeline_v2.json")
+	mustWriteCanonicalPipelineV2Corpus(first)
+	mustWriteCanonicalPipelineV2Corpus(second)
+	a, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatalf("read first: %v", err)
+	}
+	b, err := os.ReadFile(second)
+	if err != nil {
+		t.Fatalf("read second: %v", err)
+	}
+	if !bytes.Equal(a, b) {
+		t.Fatal("canonical pipeline v2 corpus is not byte-deterministic across runs")
+	}
+	for _, retired := range []string{`"pending_owner"`, `"detail"`, `"scenario"`} {
+		if bytes.Contains(a, []byte(retired)) {
+			t.Errorf("emitted v2 corpus carries the retired v1 field %s", retired)
+		}
+	}
+	var artifact map[string]any
+	if err := json.Unmarshal(a, &artifact); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	epoch, _ := artifact["_meta"].(map[string]any)["closure_epoch"].(map[string]any)
+	if epoch["manifest_root_sha256"] != cp2ManifestRootSHA256 || epoch["status"] != cp2ClosureStatus {
+		t.Fatalf("closure epoch = %v, want the bound RUB-1206 manifest identity in status %q", epoch, cp2ClosureStatus)
 	}
 }

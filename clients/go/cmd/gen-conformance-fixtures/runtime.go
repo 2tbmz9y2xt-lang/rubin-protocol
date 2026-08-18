@@ -11,11 +11,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"math/bits"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -339,6 +341,10 @@ func runGeneratorCLIWithArgs(args []string) {
 	// RUB-922 / C01 canonical publication observables corpus: authored
 	// architecture authority, never measured from a node production path.
 	mustWriteCanonicalPipelineCorpus(remapWritePath(filepath.Join(repoRoot, "conformance", "fixtures", "protocol", "canonical_pipeline_v1.json")))
+
+	// RUB-1207 / C01-R2: the dormant BUILDING successor pair. Same provenance
+	// rule as v1; it carries identity and shape only, never a migrated row.
+	mustWriteCanonicalPipelineV2Corpus(remapWritePath(filepath.Join(repoRoot, "conformance", "fixtures", "protocol", "canonical_pipeline_v2.json")))
 
 	fmt.Println("ok: updated fixtures with real ML-DSA signatures")
 }
@@ -2396,6 +2402,363 @@ func mustWriteCanonicalPipelineCorpus(path string) {
 		CommitTruthValues: canonicalPipelineCommitTruth,
 		CoverageReceipt:   coverage,
 		Rows:              rows,
+	}
+	mustWriteJSON(path, &artifact)
+}
+
+// ---------------------------------------------------------------------------
+// RUB-1207 / C01-R2 — dormant BUILDING successor of the v1 pair.
+//
+// This revision carries IDENTITY and SHAPE only: the closure epoch that binds
+// it, the frozen 79-entry row registry, the closed token domains, and the
+// validators RUB-1208..RUB-1212 land their migrated rows against. `rows` is
+// empty by contract; the byte-frozen v1 pair stays the inert authority until
+// RUB-1204 activates v2. No expected value is computed by calling a Go or Rust
+// node production path, and no row carries `pending_owner` or `detail`.
+// ---------------------------------------------------------------------------
+
+const (
+	cp2ArtifactName   = "canonical_pipeline_v2"
+	cp2SchemaRel      = "conformance/schemas/cv-canonical-pipeline-v2.json"
+	cp2SchemaVer      = 2
+	cp2CorpusRev      = "C01-R2"
+	cp2RegistrySize   = 79 // 62 inherited R1 identities + 17 closure-authorized R2 rows
+	cp2RPCUnavailable = "RPC_UNAVAILABLE"
+
+	// Closure epoch: the RUB-1206 design-closure manifest identity this
+	// revision is bound to (snapshot rub1206-closure-snapshot.tar.gz, verified
+	// at claim). Every value below is mirrored as a schema `const`, so a drift
+	// on either side fails generation or validation rather than shipping a
+	// revision bound to a manifest nobody closed.
+	cp2ClosureManifestVersion = "rubin-c01-design-closure-v3"
+	cp2ManifestRootSHA256     = "da48730ad29963d94499a6fce1b5c58fe39e9a3779e643cbfcd8148b9b2c98b7"
+	cp2ObligationSetHash      = "4af7520a185bfa732ece69f5a6c12f4d012917b9c6fd1d8f42b98195284f59b0"
+	cp2RowCaseDesignHash      = "8bcfd02557f63893a6dc43690e8091dea10c02bfd3af7c0a9639193ff9ef4221"
+	cp2StageOwnerRelationHash = "4513e667a03dabca78e7369e989676ea5ab3d75d59a817493d84fe968b3a8518"
+	cp2MutationAssignmentHash = "fcd8d3dab8ec9a5e6d233e8539f31751e6446118d519f1f14f581b77cf9f84fc"
+	cp2ImageManifestHash      = "e014000b71102e54be70af0dc756f8930c57573f7346db05935964053230f928"
+	cp2SummaryManifestHash    = "39e39d94593d434e7051a3f77ca94d3dd31a5a8d65a3f12a764e29a5fde041dd"
+	cp2RelationSnapshotHash   = "3e7db40fa6917b5a7d61ab113a74f7107f8f166080393e1c9789dbd927b24edb"
+	cp2ClosureStatus          = "building"
+
+	// Byte-frozen R1 parent identity. RUB-1204 activates v2 and deletes the
+	// parent in one PR; until then v1 is reachable by these pins only.
+	cp2ParentSourceOID   = "1e24b0249dab04b21de492ad307b6a47c63f12b5"
+	cp2ParentMergeOID    = "3b1e45590b18994b4ce5f6e3ec2d9dc6b416e880"
+	cp2ParentArtifactSHA = "68a1f551333ca17b93ebe3e6d737658cc661e40b40a3b41dbe27b37b74537246"
+	cp2ParentSchemaSHA   = "c962f5434d373ac5268527cc82ef8eb68fd45ddac50c849da32b3f8ef87cdca7"
+	cp2GoverningSpecOID  = "c14b010024ce633e1027bf891af3c49741db544a"
+)
+
+// cp2RPCClasses is the closed RPC projection class enum (RUB-1206 DD-009):
+// every class is derived from (phase, http, commit_state, mined).
+var cp2RPCClasses = []string{
+	"NOT_REACHED", "STARTUP_UNAVAILABLE_503", "BOOTSTRAP_CONTINUATION_ONLY",
+	"BOOTSTRAP_TERMINAL_INVARIANT_503", "BOOTSTRAP_TERMINAL_NEW_503_COMMITTED",
+	"MINED_200_COMMITTED", "MINED_422_NOT_COMMITTED", "MINED_503_NOT_COMMITTED",
+	"MINED_503_COMMITTED_TERMINAL_NEW", "MINED_503_UNKNOWN",
+}
+
+// cp2WireDispositionValues (DD-001) and cp2RecoveryOutcomeValues (DD-002) are
+// the closed dispositions of cases that terminate before a consensus
+// classification, where `result` is null: the P2P frame/message layer and the
+// startup/recovery boundary respectively.
+var (
+	cp2WireDispositionValues = []string{"CHECKSUM_REJECT", "CMPCT_DECODE_REJECT", "EXACT_HASH_MISMATCH", "FRAME_LENGTH_REJECT", "FRAME_READ_ERROR"}
+	cp2RecoveryOutcomeValues = []string{"bootstrap_only_pregenesis", "fail_closed_no_exposure", "identity_proven_route1"}
+
+	cp2MinedValues           = []string{"true", "false", "absent", "not_applicable"}
+	cp2SuccessIdentityValues = []string{"present", "absent", "not_applicable"}
+	cp2CommitStateValues     = []string{"committed", "not_committed", "unknown"}
+	cp2PhaseValues           = []string{"result_selecting_mined_candidate", "continuation_only_bootstrap", "startup", "not_reached"}
+	cp2HTTPValues            = []int{200, 422, 503}
+)
+
+var cp2CaseIDRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+
+// cp2NewRows are the 17 R2 rows the closure epoch authorizes on top of the 62
+// inherited identities, which are derived from canonicalPipelineRows() rather
+// than restated: a rename, removal or kind change on the R1 side therefore
+// fails the registry pin instead of silently forking the identity map.
+var cp2NewRows = map[string]string{
+	"C01-CKPT-CASES-001":      "observation",
+	"C01-DACLEAN-001":         "observation",
+	"C01-GC-CRASH-CASES-001":  "observation",
+	"C01-INVENTORY-CASES-001": "observation",
+	"C01-PATH-COMPACT-001":    "observation",
+	"C01-PATH-FALLBACK-001":   "observation",
+	"C01-PATH-FULL-001":       "observation",
+	"C01-PRESENCE-STORED-001": "observation",
+	"C01-PROVIDER-CASES-001":  "observation",
+	"C01-RECOVERY-001":        "observation",
+	"C01-RELAY-OBS-001":       "observation",
+	"C01-REORGMETA-CASES-001": "observation",
+	"C01-RESOLVER-001":        "observation",
+	"C01-RPC-PHASE-001":       "observation",
+	"C01-SRCKEY-CASES-001":    "observation",
+	"C01-SUMMARY-001":         "observation",
+	"C01-TTLFENCE-001":        "observation",
+}
+
+// cp2RPC is the typed RPC projection (DD-009). A nil pointer is JSON `null`:
+// legal for http, commit_state and error_class only.
+type cp2RPC struct {
+	Class           string  `json:"class"`
+	HTTP            *int    `json:"http"`
+	CommitState     *string `json:"commit_state"`
+	Mined           string  `json:"mined"`
+	SuccessIdentity string  `json:"success_identity"`
+	ErrorClass      *string `json:"error_class"`
+	Phase           string  `json:"phase"`
+}
+
+// cp2Expected carries the generator-validated projection of a case's expected
+// output. The complete expected/input shape is owned by the v2 schema; the
+// fields below are the ones the generator itself decides, so RUB-1208..1212
+// extend this struct as they migrate the remaining projections.
+type cp2Expected struct {
+	Result          *string `json:"result"`
+	CommitTruth     string  `json:"commit_truth"`
+	PipelineReached *bool   `json:"pipeline_reached,omitempty"`
+	RPC             cp2RPC  `json:"rpc_projection"`
+}
+
+type cp2Case struct {
+	CaseID   string      `json:"case_id"`
+	Expected cp2Expected `json:"expected"`
+}
+
+type cp2Row struct {
+	RowID string    `json:"row_id"`
+	Kind  string    `json:"kind"`
+	Cases []cp2Case `json:"cases,omitempty"`
+}
+
+type cp2Artifact struct {
+	Artifact              string            `json:"artifact"`
+	SchemaVersion         int               `json:"schema_version"`
+	Schema                string            `json:"schema"`
+	Meta                  cpMap             `json:"_meta"`
+	Authority             cpMap             `json:"authority"`
+	ResultTaxonomy        []string          `json:"result_taxonomy"`
+	CommitTruthValues     []string          `json:"commit_truth_values"`
+	RPCProjectionClasses  []string          `json:"rpc_projection_classes"`
+	WireDispositionValues []string          `json:"wire_disposition_values"`
+	RecoveryOutcomeValues []string          `json:"recovery_outcome_values"`
+	RowRegistry           map[string]string `json:"row_registry"`
+	Fixtures              cpMap             `json:"fixtures"`
+	Rows                  []cp2Row          `json:"rows"`
+}
+
+// cp2RowRegistry is the frozen C01-R2 identity map (row_id -> kind): the 62
+// identities inherited from the v1 corpus plus the 17 rows the closure epoch
+// authorizes. Migration status is DERIVED, never stored: a row is migrated
+// exactly when its id appears in `rows`.
+func cp2RowRegistry() map[string]string {
+	registry := make(map[string]string, cp2RegistrySize)
+	for _, row := range canonicalPipelineRows() {
+		registry[row.ID] = row.Kind
+	}
+	maps.Copy(registry, cp2NewRows)
+	return registry
+}
+
+// cp2CommitTruthFor is the exact result -> commit truth relation of spec 6.4.1
+// (rubin-spec@c14b0100 RUBIN_MEMPOOL_POLICY.md L436-L446). It is total on the
+// closed taxonomy: an unmapped result is a corpus defect, never a default.
+func cp2CommitTruthFor(result string) (string, bool) {
+	if !canonicalPipelineResultRE.MatchString(result) {
+		return "", false // the relation is defined only on the closed taxonomy
+	}
+	switch result {
+	case "TERMINAL_PERSISTENCE(new)":
+		return "NEW", true
+	case "TERMINAL_PERSISTENCE(neither_or_unreadable)":
+		return "UNKNOWN", true
+	}
+	head, _, _ := strings.Cut(result, "(")
+	switch head {
+	case "ACCEPTED":
+		return "NEW", true
+	case "STORED_NONCANONICAL", "KNOWN_BLOCK_NOOP", "LOCAL_STORE_ERROR":
+		return "NOT_APPLICABLE", true
+	case "MISSING_PARENT", "ORPHAN_RETAINED", "ORPHAN_ALREADY_RETAINED", "CONSENSUS_INVALID",
+		"LOCAL_BUSY", "LOCAL_RESOURCE_UNAVAILABLE", "STALE_LOCAL_PLAN", "LOCAL_CANCELLED", //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
+		"LOCAL_PERSISTENCE_ERROR", "TERMINAL_STORE_INTEGRITY", "TERMINAL_LOCAL_INVARIANT",
+		"TERMINAL_PERSISTENCE": // TERMINAL_PERSISTENCE(old); the other two arms are handled above
+		return "OLD", true
+	}
+	return "", false
+}
+
+// cp2ValidateRPC is the typed RPC structural/domain validator: every field is a
+// closed token domain, and error_class is a taxonomy token or RPC_UNAVAILABLE.
+func cp2ValidateRPC(where string, r cp2RPC) error {
+	for _, c := range []struct {
+		field, value string
+		allowed      []string
+	}{
+		{"class", r.Class, cp2RPCClasses},
+		{"mined", r.Mined, cp2MinedValues},
+		{"success_identity", r.SuccessIdentity, cp2SuccessIdentityValues},
+		{"phase", r.Phase, cp2PhaseValues},
+	} {
+		if !slices.Contains(c.allowed, c.value) {
+			return fmt.Errorf("case %s: rpc_projection.%s %q is outside its closed domain", where, c.field, c.value)
+		}
+	}
+	return cp2ValidateRPCNullable(where, r)
+}
+
+// cp2ValidateRPCNullable covers the three fields a case may report as JSON null.
+func cp2ValidateRPCNullable(where string, r cp2RPC) error {
+	if r.CommitState != nil && !slices.Contains(cp2CommitStateValues, *r.CommitState) {
+		return fmt.Errorf("case %s: rpc_projection.commit_state %q is outside its closed domain", where, *r.CommitState)
+	}
+	if r.HTTP != nil && !slices.Contains(cp2HTTPValues, *r.HTTP) {
+		return fmt.Errorf("case %s: rpc_projection.http %d is outside its closed domain", where, *r.HTTP)
+	}
+	if r.ErrorClass != nil && !cp2IsErrorClass(*r.ErrorClass) {
+		return fmt.Errorf("case %s: rpc_projection.error_class %q is neither a taxonomy token nor %s", where, *r.ErrorClass, cp2RPCUnavailable)
+	}
+	return nil
+}
+
+func cp2IsErrorClass(token string) bool {
+	return token == cp2RPCUnavailable || canonicalPipelineResultRE.MatchString(token)
+}
+
+// cp2ValidateExpected pins the commit-truth domain, the result -> commit truth
+// relation and the RPC domain of one case.
+func cp2ValidateExpected(where string, e cp2Expected) error {
+	if !slices.Contains(canonicalPipelineCommitTruth, e.CommitTruth) {
+		return fmt.Errorf("case %s: commit truth %q is unknown", where, e.CommitTruth)
+	}
+	if err := cp2ValidateResultTruth(where, e); err != nil {
+		return err
+	}
+	return cp2ValidateRPC(where, e.RPC)
+}
+
+// cp2ValidateResultTruth is the exact spec 6.4.1 relation check. A null result
+// is a case disposed before a consensus classification (DD-001 wire layer,
+// DD-002 startup/recovery) and carries pipeline_reached instead; a classified
+// case may not carry it.
+func cp2ValidateResultTruth(where string, e cp2Expected) error {
+	if e.Result == nil {
+		if e.PipelineReached == nil {
+			return fmt.Errorf("case %s: a null result requires pipeline_reached", where)
+		}
+		return nil
+	}
+	if e.PipelineReached != nil {
+		return fmt.Errorf("case %s: pipeline_reached is set only when result is null", where)
+	}
+	truth, ok := cp2CommitTruthFor(*e.Result)
+	if !ok {
+		return fmt.Errorf("case %s: result %q is outside the closed taxonomy", where, *e.Result)
+	}
+	if truth != e.CommitTruth {
+		return fmt.Errorf("case %s: result %q requires commit truth %s, got %q", where, *e.Result, truth, e.CommitTruth)
+	}
+	return nil
+}
+
+func cp2ValidateCases(rowID string, cases []cp2Case) error {
+	for _, c := range cases {
+		if !cp2CaseIDRE.MatchString(c.CaseID) {
+			return fmt.Errorf("row %s: case id %q is not a machine token", rowID, c.CaseID)
+		}
+		if err := cp2ValidateExpected(rowID+"/"+c.CaseID, c.Expected); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cp2ValidateRows is the fail-closed gate the migrating slices land against:
+// every migrated row must be a frozen (row_id, kind) registry pair, and every
+// case a machine-token id whose expected projection satisfies the closed
+// relations. A row removal, rename, kind change or unauthorized addition on
+// either side of the registry fails generation.
+func cp2ValidateRows(rows []cp2Row, registry map[string]string) error {
+	if len(registry) != cp2RegistrySize {
+		return fmt.Errorf("row registry: %d identities, want the frozen %d", len(registry), cp2RegistrySize)
+	}
+	for _, row := range rows {
+		if kind, ok := registry[row.RowID]; !ok || kind != row.Kind {
+			return fmt.Errorf("row %s: (row_id, kind=%q) is not a frozen registry pair", row.RowID, row.Kind)
+		}
+		if err := cp2ValidateCases(row.RowID, row.Cases); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cp2Meta is the revision identity block: generator provenance, the byte-frozen
+// R1 parent pins, the governing spec OID and the bound closure epoch.
+func cp2Meta() cpMap {
+	return cpMap{
+		"generated_by":           "clients/go/cmd/gen-conformance-fixtures",
+		"warning":                "MACHINE-GENERATED FILE. Do not edit manually.",
+		"schema_version":         cp2SchemaVer,
+		"corpus_revision":        cp2CorpusRev,
+		"parent_r1_source_oid":   cp2ParentSourceOID,
+		"parent_r1_merge_oid":    cp2ParentMergeOID,
+		"parent_artifact_sha256": cp2ParentArtifactSHA,
+		"parent_schema_sha256":   cp2ParentSchemaSHA,
+		"governing_spec_oid":     cp2GoverningSpecOID,
+		"closure_epoch": cpMap{
+			"closure_manifest_version":  cp2ClosureManifestVersion,
+			"manifest_root_sha256":      cp2ManifestRootSHA256,
+			"obligation_set_hash":       cp2ObligationSetHash,
+			"row_case_design_hash":      cp2RowCaseDesignHash,
+			"stage_owner_relation_hash": cp2StageOwnerRelationHash,
+			"mutation_assignment_hash":  cp2MutationAssignmentHash,
+			"image_manifest_hash":       cp2ImageManifestHash,
+			"summary_manifest_hash":     cp2SummaryManifestHash,
+			"relation_snapshot_hash":    cp2RelationSnapshotHash,
+			"status":                    cp2ClosureStatus,
+		},
+	}
+}
+
+// cp2Authority mirrors the v1 provenance block: every expected value is authored
+// architecture authority, never measured from a node production path.
+func cp2Authority() cpMap {
+	return cpMap{
+		"issue":                "RUB-1207",
+		"architecture_parent":  "RUB-882 as superseded by RUB-1180; row and case design closed by RUB-1206",
+		"normative_spec_ref":   "2tbmz9y2xt-lang/rubin-spec@" + cp2GoverningSpecOID,
+		"baseline_ref":         "2tbmz9y2xt-lang/rubin-protocol@" + cp2ParentMergeOID,
+		"expected_row_origin":  "authored architecture authority; no Go or Rust node production path is called to compute an expected value",
+		"executors":            "none while status is building: no C02/C02A/C03/C04 consumer may bind this revision",
+		"status":               "BUILDING C01-R2 authority — not active; conformance/fixtures/protocol/canonical_pipeline_v1.json remains the inert authority. rows is empty: RUB-1208..RUB-1212 migrate the registered rows and RUB-1204 completes the revision",
+		"consume_freeze_point": "POST-RUB-911 target: the frozen P2P effect order carries no canonical-DA consume step",
+	}
+}
+
+func mustWriteCanonicalPipelineV2Corpus(path string) {
+	registry := cp2RowRegistry()
+	rows := []cp2Row{} // BUILDING: RUB-1208..RUB-1212 migrate rows, RUB-1204 completes.
+	if err := cp2ValidateRows(rows, registry); err != nil {
+		fatalf("canonical pipeline v2: %v", err)
+	}
+	artifact := cp2Artifact{
+		Artifact:              cp2ArtifactName,
+		SchemaVersion:         cp2SchemaVer,
+		Schema:                cp2SchemaRel,
+		Meta:                  cp2Meta(),
+		Authority:             cp2Authority(),
+		ResultTaxonomy:        canonicalPipelineTaxonomy,
+		CommitTruthValues:     canonicalPipelineCommitTruth,
+		RPCProjectionClasses:  cp2RPCClasses,
+		WireDispositionValues: cp2WireDispositionValues,
+		RecoveryOutcomeValues: cp2RecoveryOutcomeValues,
+		RowRegistry:           registry,
+		Fixtures:              cpMap{},
+		Rows:                  rows,
 	}
 	mustWriteJSON(path, &artifact)
 }

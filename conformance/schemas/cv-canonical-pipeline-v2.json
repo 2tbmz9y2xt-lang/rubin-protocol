@@ -1,0 +1,284 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Canonical publication observables corpus (C01-R2), schema version 2 — BUILDING",
+  "description": "Machine contract for conformance/fixtures/protocol/canonical_pipeline_v2.json, the DORMANT C01-R2 successor of cv-canonical-pipeline-v1.json. It is BUILDING, not an authority: while `_meta.closure_epoch.status` is `building` no C02/C02A/C03/C04 consumer may claim or bind it, and the byte-frozen v1 pair stays the inert authority until RUB-1204 activates v2 and deletes the parent in one PR. Machine stimulus lives ONLY in a case's `input`, runtime expectation ONLY in `expected`, static machine authority ONLY in a row's `authority`, and human explanation ONLY in `notes` (array of strings): there is no `detail`, no `scenario` and no `pending_owner` in this shape. Aliases (`B1`, `B1_HASH`, `DA_ID_1`) resolve in the top-level `fixtures` catalog. `additionalProperties` is false everywhere; an omitted optional field states no expectation and is neither a zero nor a wildcard.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact", "schema_version", "schema", "_meta", "authority", "result_taxonomy", "commit_truth_values", "rpc_projection_classes", "wire_disposition_values", "recovery_outcome_values", "row_registry", "fixtures", "rows"],
+  "properties": {
+    "artifact": { "const": "canonical_pipeline_v2" },
+    "schema_version": { "const": 2 },
+    "schema": { "const": "conformance/schemas/cv-canonical-pipeline-v2.json" },
+    "_meta": {
+      "description": "Revision identity: the generator, the byte-frozen R1 parent pins, the governing spec OID and the RUB-1206 closure epoch this revision is bound to. Every closure-epoch value is a `const` here and a constant in the generator, so drift on either side fails validation or generation instead of shipping a revision bound to a manifest nobody closed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generated_by", "warning", "schema_version", "corpus_revision", "parent_r1_source_oid", "parent_r1_merge_oid", "parent_artifact_sha256", "parent_schema_sha256", "governing_spec_oid", "closure_epoch"],
+      "properties": {
+        "generated_by": { "const": "clients/go/cmd/gen-conformance-fixtures" },
+        "warning": { "type": "string", "minLength": 1 },
+        "schema_version": { "const": 2 },
+        "corpus_revision": { "const": "C01-R2" },
+        "parent_r1_source_oid": { "const": "1e24b0249dab04b21de492ad307b6a47c63f12b5" },
+        "parent_r1_merge_oid": { "const": "3b1e45590b18994b4ce5f6e3ec2d9dc6b416e880" },
+        "parent_artifact_sha256": { "const": "68a1f551333ca17b93ebe3e6d737658cc661e40b40a3b41dbe27b37b74537246" },
+        "parent_schema_sha256": { "const": "c962f5434d373ac5268527cc82ef8eb68fd45ddac50c849da32b3f8ef87cdca7" },
+        "governing_spec_oid": { "const": "c14b010024ce633e1027bf891af3c49741db544a" },
+        "closure_epoch": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["closure_manifest_version", "manifest_root_sha256", "obligation_set_hash", "row_case_design_hash", "stage_owner_relation_hash", "mutation_assignment_hash", "image_manifest_hash", "summary_manifest_hash", "relation_snapshot_hash", "status"],
+          "properties": {
+            "closure_manifest_version": { "const": "rubin-c01-design-closure-v3" },
+            "manifest_root_sha256": { "const": "da48730ad29963d94499a6fce1b5c58fe39e9a3779e643cbfcd8148b9b2c98b7" },
+            "obligation_set_hash": { "const": "4af7520a185bfa732ece69f5a6c12f4d012917b9c6fd1d8f42b98195284f59b0" },
+            "row_case_design_hash": { "const": "8bcfd02557f63893a6dc43690e8091dea10c02bfd3af7c0a9639193ff9ef4221" },
+            "stage_owner_relation_hash": { "const": "4513e667a03dabca78e7369e989676ea5ab3d75d59a817493d84fe968b3a8518" },
+            "mutation_assignment_hash": { "const": "fcd8d3dab8ec9a5e6d233e8539f31751e6446118d519f1f14f581b77cf9f84fc" },
+            "image_manifest_hash": { "const": "e014000b71102e54be70af0dc756f8930c57573f7346db05935964053230f928" },
+            "summary_manifest_hash": { "const": "39e39d94593d434e7051a3f77ca94d3dd31a5a8d65a3f12a764e29a5fde041dd" },
+            "relation_snapshot_hash": { "const": "3e7db40fa6917b5a7d61ab113a74f7107f8f166080393e1c9789dbd927b24edb" },
+            "status": { "enum": ["building", "complete"], "description": "Only the final C01-R2 integration (RUB-1204) may set `complete`; every intermediate revision is `building` and is not a passing authority for any consumer." }
+          }
+        }
+      }
+    },
+    "authority": {
+      "description": "Provenance of every expected value, mirroring the v1 authority block: expected rows are authored architecture authority and the generator never calls a Go or Rust node production path to compute one.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issue", "architecture_parent", "normative_spec_ref", "baseline_ref", "expected_row_origin", "executors", "status", "consume_freeze_point"],
+      "properties": {
+        "issue": { "type": "string", "minLength": 1 }, "architecture_parent": { "type": "string", "minLength": 1 }, "normative_spec_ref": { "type": "string", "minLength": 1 }, "baseline_ref": { "type": "string", "minLength": 1 },
+        "expected_row_origin": { "type": "string", "minLength": 1 }, "executors": { "type": "string", "minLength": 1 }, "status": { "type": "string", "minLength": 1 }, "consume_freeze_point": { "type": "string", "minLength": 1 }
+      }
+    },
+    "result_taxonomy": {
+      "description": "The closed result taxonomy, unchanged from v1. An observation case result is a member name optionally followed by its exact parenthesized argument; the LOCAL_RESOURCE_UNAVAILABLE argument is the closed resource-identity list.",
+      "type": "array",
+      "const": ["ACCEPTED", "STORED_NONCANONICAL", "KNOWN_BLOCK_NOOP(CANONICAL|STORED_NONCANONICAL)", "MISSING_PARENT", "ORPHAN_RETAINED", "ORPHAN_ALREADY_RETAINED", "CONSENSUS_INVALID(exact_error)", "LOCAL_BUSY", "LOCAL_RESOURCE_UNAVAILABLE(resource)", "STALE_LOCAL_PLAN", "LOCAL_CANCELLED", "LOCAL_STORE_ERROR(noncanonical)", "LOCAL_PERSISTENCE_ERROR(precommit)", "TERMINAL_STORE_INTEGRITY(canonical)", "TERMINAL_LOCAL_INVARIANT(evidence)", "TERMINAL_PERSISTENCE(old|new|neither_or_unreadable)"]
+    },
+    "commit_truth_values": { "type": "array", "const": ["OLD", "NEW", "UNKNOWN", "NOT_APPLICABLE"] },
+    "rpc_projection_classes": {
+      "description": "Closed RPC projection classes (RUB-1206 DD-009); each is derived from (phase, http, commit_state, mined).",
+      "type": "array",
+      "const": ["NOT_REACHED", "STARTUP_UNAVAILABLE_503", "BOOTSTRAP_CONTINUATION_ONLY", "BOOTSTRAP_TERMINAL_INVARIANT_503", "BOOTSTRAP_TERMINAL_NEW_503_COMMITTED", "MINED_200_COMMITTED", "MINED_422_NOT_COMMITTED", "MINED_503_NOT_COMMITTED", "MINED_503_COMMITTED_TERMINAL_NEW", "MINED_503_UNKNOWN"]
+    },
+    "wire_disposition_values": {
+      "description": "Closed dispositions of a case the P2P frame/message layer disposes of before any consensus classification (DD-001): `expected.result` is null there and the taxonomy is not extended.",
+      "type": "array",
+      "const": ["CHECKSUM_REJECT", "CMPCT_DECODE_REJECT", "EXACT_HASH_MISMATCH", "FRAME_LENGTH_REJECT", "FRAME_READ_ERROR"]
+    },
+    "recovery_outcome_values": {
+      "description": "Closed outcomes of a startup/recovery case (DD-002): `expected.result` is null there too.",
+      "type": "array",
+      "const": ["bootstrap_only_pregenesis", "fail_closed_no_exposure", "identity_proven_route1"]
+    },
+    "row_registry": {
+      "description": "The frozen C01-R2 identity map `row_id -> kind`: the 62 identities inherited from the byte-frozen v1 corpus plus the 17 R2 rows the closure epoch authorizes. A row removal, rename, kind change or unauthorized key fails generation. Migration status is DERIVED, never stored: a row is migrated exactly when its id appears in `rows`, which RUB-1208..RUB-1212 fill and RUB-1204 completes.",
+      "type": "object",
+      "minProperties": 79,
+      "maxProperties": 79,
+      "propertyNames": { "$ref": "#/$defs/rowId" },
+      "additionalProperties": { "$ref": "#/$defs/rowKind" }
+    },
+    "fixtures": {
+      "description": "Deterministic alias catalog: every alias used by an `input` value or an `expected` projection resolves here to one typed fixture object tagged by a closed input type. Empty while no row is migrated. A free-form object or a row-id-only hard-coded setup is not a substitute.",
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/alias" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "value"],
+        "properties": { "type": { "$ref": "#/$defs/inputType" }, "value": true }
+      }
+    },
+    "rows": { "type": "array", "items": { "$ref": "#/$defs/row" } }
+  },
+  "$defs": {
+    "rowId": { "type": "string", "pattern": "^C01-[A-Z0-9-]+$", "not": { "pattern": "\\s" } },
+    "rowKind": { "enum": ["observation", "authority", "forbidden"], "description": "Acceptance semantics inherited from v1: only kind=observation rows are adapter-emitted and compared (their cases carry the machine input and expected output); authority and forbidden rows are static authority read directly and are never emitted or compared as records." },
+    "alias": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "not": { "pattern": "\\s" } },
+    "machineToken": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_@/:()|+.-]+$", "not": { "pattern": "\\s" } },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "bytes32OrAlias": { "type": "string", "pattern": "^([0-9a-f]{64}|[A-Z][A-Z0-9_]*)$", "not": { "pattern": "\\s" } },
+    "issueId": { "type": "string", "pattern": "^RUB-[0-9]+$", "not": { "pattern": "\\s" } },
+    "snakeToken": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "not": { "pattern": "\\s" } },
+    "resultToken": { "type": "string", "pattern": "^(ACCEPTED|STORED_NONCANONICAL|KNOWN_BLOCK_NOOP\\((CANONICAL|STORED_NONCANONICAL)\\)|MISSING_PARENT|ORPHAN_RETAINED|ORPHAN_ALREADY_RETAINED|CONSENSUS_INVALID\\([A-Z][A-Z0-9_]*\\)|LOCAL_BUSY|LOCAL_RESOURCE_UNAVAILABLE\\((inbound_budget_capacity|inbound_budget_overflow|apply_plan_metadata|noncanonical_bytes|noncanonical_count|orphan_pool|recovery_artifact)\\)|STALE_LOCAL_PLAN|LOCAL_CANCELLED|LOCAL_STORE_ERROR\\(noncanonical\\)|LOCAL_PERSISTENCE_ERROR\\(precommit\\)|TERMINAL_STORE_INTEGRITY\\(canonical\\)|TERMINAL_LOCAL_INVARIANT\\(evidence\\)|TERMINAL_PERSISTENCE\\((old|new|neither_or_unreadable)\\))$", "not": { "pattern": "\\s" } },
+    "errorClassToken": { "type": "string", "pattern": "^(RPC_UNAVAILABLE|ACCEPTED|STORED_NONCANONICAL|KNOWN_BLOCK_NOOP\\((CANONICAL|STORED_NONCANONICAL)\\)|MISSING_PARENT|ORPHAN_RETAINED|ORPHAN_ALREADY_RETAINED|CONSENSUS_INVALID\\([A-Z][A-Z0-9_]*\\)|LOCAL_BUSY|LOCAL_RESOURCE_UNAVAILABLE\\((inbound_budget_capacity|inbound_budget_overflow|apply_plan_metadata|noncanonical_bytes|noncanonical_count|orphan_pool|recovery_artifact)\\)|STALE_LOCAL_PLAN|LOCAL_CANCELLED|LOCAL_STORE_ERROR\\(noncanonical\\)|LOCAL_PERSISTENCE_ERROR\\(precommit\\)|TERMINAL_STORE_INTEGRITY\\(canonical\\)|TERMINAL_LOCAL_INVARIANT\\(evidence\\)|TERMINAL_PERSISTENCE\\((old|new|neither_or_unreadable)\\))$", "not": { "pattern": "\\s" } },
+    "inputType": { "enum": ["alias", "array<alias>", "array<bool>", "array<bytes32_hex>", "array<object>", "array<token>", "array<u64>", "bool", "bytes", "bytes32_hex", "object", "token", "u16", "u64"] },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_id", "kind", "notes"],
+      "properties": {
+        "row_id": { "$ref": "#/$defs/rowId" },
+        "kind": { "$ref": "#/$defs/rowKind" },
+        "notes": { "description": "Human explanation only. Numeric, boolean and map entries are rejected: a machine value belongs in `input`, `expected` or `authority`.", "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "authority": { "description": "Static machine authority of an authority row: the closed sets, orders and bounds it freezes. Never adapter-emitted and never compared as a record.", "type": "object", "minProperties": 1 },
+        "forbidden_observation": { "type": "string", "minLength": 1 },
+        "release_requirements": { "$ref": "#/$defs/releaseRequirements" },
+        "cases": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/case" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "observation" } }, "required": ["kind"] },
+          "then": { "required": ["cases", "release_requirements"], "not": { "anyOf": [{ "required": ["authority"] }, { "required": ["forbidden_observation"] }] } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "authority" } }, "required": ["kind"] },
+          "then": { "required": ["authority"], "not": { "anyOf": [{ "required": ["cases"] }, { "required": ["forbidden_observation"] }] } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "forbidden" } }, "required": ["kind"] },
+          "then": { "required": ["forbidden_observation"], "not": { "anyOf": [{ "required": ["cases"] }, { "required": ["authority"] }] } }
+        }
+      ]
+    },
+    "releaseRequirements": {
+      "description": "STATIC per-row release requirement replacing v1 `pending_owner`: the Go and Rust surfaces whose delivery a consumer must verify at claim. It is a requirement, never current readiness; issue state and delivery OIDs are verified by the consumer and are never stored here.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["go", "rust"],
+      "properties": { "go": { "$ref": "#/$defs/releaseList" }, "rust": { "$ref": "#/$defs/releaseList" } }
+    },
+    "releaseList": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issue", "surface", "delivery_receipt_required"],
+        "properties": { "issue": { "$ref": "#/$defs/issueId" }, "surface": { "type": "string", "minLength": 1 }, "delivery_receipt_required": { "type": "boolean" } }
+      }
+    },
+    "case": {
+      "description": "One case = one stimulus. `input` carries only machine stimulus (never an expected value) and `expected` only runtime expectation (never a stimulus parameter).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case_id", "input", "schedule_id", "expected", "obligation_ids", "sources"],
+      "properties": {
+        "case_id": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "not": { "pattern": "\\s" } },
+        "input": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/inputPointer" } },
+        "schedule_id": { "description": "Deterministic schedule identity for an interleaved stimulus (barriers/events named by the schedule), or null when the stimulus needs no interleaving. Never a sleep.", "oneOf": [{ "$ref": "#/$defs/machineToken" }, { "type": "null" }] },
+        "expected": { "$ref": "#/$defs/expected" },
+        "obligation_ids": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^OBL-[A-Z0-9-]+$", "not": { "pattern": "\\s" } } },
+        "sources": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "inputPointer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pointer", "type", "value_or_alias", "provenance", "production_setup_sink", "consumption_proof_owner"],
+      "properties": {
+        "pointer": { "type": "string", "pattern": "^/input/[a-z][a-z0-9_]*$", "not": { "pattern": "\\s" } },
+        "type": { "$ref": "#/$defs/inputType" },
+        "value_or_alias": { "description": "A literal of the declared type, or an alias resolving in the top-level `fixtures` catalog.", "not": { "type": "null" } },
+        "provenance": { "enum": ["normative_boundary", "witness_fixture", "deterministic_schedule_control", "configured_bound"] },
+        "production_setup_sink": { "description": "The exact production entrypoint or test seam the adapter drives to deliver this input. An input production cannot receive is a design defect, not a schema-legal value.", "type": "string", "minLength": 1 },
+        "consumption_proof_owner": { "$ref": "#/$defs/issueId" }
+      }
+    },
+    "expected": {
+      "description": "The typed expected output. It is never included in adapter input. `result` is null exactly for a case disposed before a consensus classification (DD-001 wire layer, DD-002 startup/recovery); such a case carries `pipeline_reached` instead, and a classified case may not carry it. The result -> commit_truth relation is spec 6.4.1 (RUBIN_MEMPOOL_POLICY.md L436-L446 @ rubin-spec c14b0100) and is pinned by the generator.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result", "commit_truth", "rpc_projection", "canonical_counters", "effects", "state_image", "canonical_applied_blocks"],
+      "properties": {
+        "result": { "oneOf": [{ "$ref": "#/$defs/resultToken" }, { "type": "null" }] },
+        "commit_truth": { "enum": ["OLD", "NEW", "UNKNOWN", "NOT_APPLICABLE"] },
+        "pipeline_reached": { "type": "boolean" },
+        "wire_disposition": { "enum": ["CHECKSUM_REJECT", "CMPCT_DECODE_REJECT", "EXACT_HASH_MISMATCH", "FRAME_LENGTH_REJECT", "FRAME_READ_ERROR"] },
+        "recovery_outcome": { "enum": ["bootstrap_only_pregenesis", "fail_closed_no_exposure", "identity_proven_route1"] },
+        "rpc_projection": { "$ref": "#/$defs/rpcProjection" },
+        "canonical_counters": {
+          "description": "Exact planner-owned canonical counter deltas as exact decimal or symbolic tokens; `+connect_count` resolves to the number of newly canonical connect rows in the plan the consumer itself constructs, never to a value read back from client output.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["accepted_delta", "rejected_delta"],
+          "properties": {
+            "accepted_delta": { "type": "string", "pattern": "^(0|[+]1|[+]connect_count)$", "not": { "pattern": "\\s" } },
+            "rejected_delta": { "type": "string", "pattern": "^(0|[+]1)$", "not": { "pattern": "\\s" } }
+          }
+        },
+        "effects": { "type": "object", "propertyNames": { "$ref": "#/$defs/snakeToken" }, "additionalProperties": { "$ref": "#/$defs/effect" } },
+        "state_image": { "$ref": "#/$defs/stateImage" },
+        "canonical_applied_blocks": {
+          "description": "The published canonical-applied summary projection (DD-007): `null` when the truth class exposes no summary (every non-NEW truth), `[]` exactly for a proven-NEW standalone disconnect that connects no new row, otherwise one row per newly canonical block in ascending height, including a row whose complete_da_ids is empty.",
+          "oneOf": [{ "type": "null" }, { "type": "array", "items": { "$ref": "#/$defs/summaryRow" } }]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "result": { "type": "null" } }, "required": ["result"] },
+          "then": { "required": ["pipeline_reached"] },
+          "else": { "not": { "required": ["pipeline_reached"] } }
+        }
+      ]
+    },
+    "rpcProjection": {
+      "description": "Typed RPC projection (DD-009). `class` is the derived closed class; `null` is the explicit absence of an http status, commit state or error class. Family values may be unpopulated only while the closure epoch status is `building`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "http", "commit_state", "mined", "success_identity", "error_class", "phase"],
+      "properties": {
+        "class": { "enum": ["NOT_REACHED", "STARTUP_UNAVAILABLE_503", "BOOTSTRAP_CONTINUATION_ONLY", "BOOTSTRAP_TERMINAL_INVARIANT_503", "BOOTSTRAP_TERMINAL_NEW_503_COMMITTED", "MINED_200_COMMITTED", "MINED_422_NOT_COMMITTED", "MINED_503_NOT_COMMITTED", "MINED_503_COMMITTED_TERMINAL_NEW", "MINED_503_UNKNOWN"] },
+        "http": { "enum": [200, 422, 503, null] },
+        "commit_state": { "enum": ["committed", "not_committed", "unknown", null] },
+        "mined": { "enum": ["true", "false", "absent", "not_applicable"] },
+        "success_identity": { "enum": ["present", "absent", "not_applicable"] },
+        "error_class": { "oneOf": [{ "$ref": "#/$defs/errorClassToken" }, { "type": "null" }] },
+        "phase": { "enum": ["result_selecting_mined_candidate", "continuation_only_bootstrap", "startup", "not_reached"] }
+      }
+    },
+    "effect": {
+      "description": "One compared effect: the expected value, its type tag, whether the comparison is required, and the production observation that yields it. A missing or unknown compared field is a mismatch, never a wildcard.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "type", "required", "observer"],
+      "properties": {
+        "value": { "not": { "type": "null" } },
+        "type": { "enum": ["array", "bool", "hash", "object", "token", "u64"] },
+        "required": { "type": "boolean" },
+        "observer": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "token" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/machineToken" } } } },
+        { "if": { "properties": { "type": { "const": "hash" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/sha256" } } } },
+        { "if": { "properties": { "type": { "const": "u64" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "integer", "minimum": 0 } } } },
+        { "if": { "properties": { "type": { "const": "bool" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "boolean" } } } }
+      ]
+    },
+    "stateImage": {
+      "description": "Per-image projection (DD-010): each image is compared as its digest plus the small direct fields that localize a same-tip wrong image. `relation` is digest equality against the prestate image — `new`/`old`/`unchanged` — or `withheld` where UNKNOWN truth publishes no image; publication occurrence itself is carried by an effect, never by the relation.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["CHAIN_IMAGE_V1", "STANDARD_MEMPOOL_IMAGE_V1", "RETAINED_DA_IMAGE_V1", "OWNER_IMAGE_V1"],
+      "properties": {
+        "CHAIN_IMAGE_V1": { "$ref": "#/$defs/imageProjection" },
+        "STANDARD_MEMPOOL_IMAGE_V1": { "$ref": "#/$defs/imageProjection" },
+        "RETAINED_DA_IMAGE_V1": { "$ref": "#/$defs/imageProjection" },
+        "OWNER_IMAGE_V1": { "$ref": "#/$defs/imageProjection" }
+      }
+    },
+    "imageProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relation", "digest_alias", "direct_fields"],
+      "properties": {
+        "relation": { "enum": ["new", "old", "withheld", "unchanged"] },
+        "digest_alias": { "$ref": "#/$defs/machineToken" },
+        "direct_fields": { "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/snakeToken" }, "additionalProperties": { "$ref": "#/$defs/machineToken" } }
+      }
+    },
+    "summaryRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["block_id", "block_hash", "complete_da_ids"],
+      "properties": {
+        "block_id": { "$ref": "#/$defs/alias" },
+        "block_hash": { "$ref": "#/$defs/bytes32OrAlias" },
+        "complete_da_ids": { "description": "Ascending raw bytes; may be empty; compared element-wise in order. Cross-block occurrences remain in their own row.", "type": "array", "items": { "$ref": "#/$defs/bytes32OrAlias" } }
+      }
+    }
+  }
+}

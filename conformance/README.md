@@ -173,6 +173,25 @@ inventory and the orphan-pool result classification — duplicate / oversize / s
 Rust adapter and the RUB-901 comparator, none of which exists yet, so no canonical-publication slice
 may claim it as a passing gate.
 
+### The dormant C01-R2 successor pair (RUB-1207)
+
+`conformance/fixtures/protocol/canonical_pipeline_v2.json` and
+`conformance/schemas/cv-canonical-pipeline-v2.json` (schema version 2) are the **BUILDING** C01-R2
+successor. Status: `UNDER DESIGN` — not an authority. The v1 pair above stays the inert authority
+and a byte-frozen read-only parent (its exact bytes are pinned in the v2 `_meta` and asserted by the
+generator tests) until RUB-1204 activates v2 and deletes the parent in the same PR; two active
+authorities never coexist.
+
+This revision carries identity and shape only. Its `_meta.closure_epoch` binds it to the RUB-1206
+design-closure manifest (`rubin-c01-design-closure-v3`) — every hash is a generator constant and a
+schema `const`, so drift fails generation or validation. `row_registry` is the frozen `row_id ->
+kind` map of the 79 C01-R2 identities (62 inherited from v1, plus the 17 the closure epoch
+authorizes); migration status is derived, never stored — a row is migrated exactly when its id
+appears in `rows`, which is empty here, as is the deterministic alias catalog `fixtures`.
+RUB-1208..RUB-1212 migrate rows into the v2 normal form, which the schema defines field by field,
+and RUB-1204 completes the revision. While `_meta.closure_epoch.status` is `building`, no
+C02/C02A/C03/C04 consumer may claim or bind this revision; only RUB-1204 may set `complete`.
+
 ## Fuzz crash promotion (manual-only)
 
 Nightly fuzz jobs are discovery jobs only. They upload crash artifacts and
