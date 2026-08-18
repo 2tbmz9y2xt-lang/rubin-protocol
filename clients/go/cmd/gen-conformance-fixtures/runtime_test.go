@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1613,9 +1614,30 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 		json.Number("18446744073709551615"): true, uint64(math.MaxUint64): true, math.Exp2(53): true,
 		json.Number("18446744073709551616"): false, math.Exp2(64): false, json.Number("1.5"): false, int(-1): false,
 	} {
-		if got := cp2UintOK(value, math.MaxUint64); got != want {
+		if got := cp2UintOK(cp2JSONImage(value), math.MaxUint64); got != want {
 			t.Errorf("cp2UintOK(%v) = %v, want %v", value, got, want)
 		}
+	}
+	for name, tc := range map[string]struct {
+		in cp2Input
+		ok bool
+	}{
+		"bool slice":    {cp2ValidInput("/input/a", "array<bool>", []bool{true}), true},
+		"uint64 slice":  {cp2ValidInput("/input/a", "array<u64>", []uint64{1}), true},
+		"nested string": {cp2ValidInput("/input/a", "array<token>", []string{"TOK"}), true},
+		"signed slice":  {cp2ValidInput("/input/a", "array<u64>", []int{-1}), false},
+		"prose slice":   {cp2ValidInput("/input/a", "array<token>", []any{"a b"}), false},
+		"struct value":  {cp2ValidInput("/input/a", "object", struct{ A int }{1}), false},
+	} {
+		if err := cp2InputOK(tc.in); (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok = %v", name, err, tc.ok)
+		}
+	}
+	if err := cp2ValidateFixtures(map[string]cp2Fixture{"B1": {Type: "object", Value: struct{ A int }{1}}}); err == nil {
+		t.Error("a struct fixture images to a non-snake key and must be rejected")
+	}
+	if err := cp2ValidateFixtures(map[string]cp2Fixture{"B1": {Type: "object", Value: cpMap{"tags": []string{"TOK"}}}}); err != nil {
+		t.Errorf("a nested string slice images to an array of tokens: %v", err)
 	}
 	for name, catalog := range map[string]map[string]cp2Fixture{
 		"nested object":   {"B1": {Type: "object", Value: cpMap{"plan": cpMap{"rows": []any{1, "B_TWO"}}, "fenced": true}}},
@@ -1629,9 +1651,9 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	}
 }
 
-// TestCanonicalPipelineV2GoSchemaParity pins every closed list the generator
-// keeps against the committed schema: one vocabulary, two copies, no drift.
-func TestCanonicalPipelineV2GoSchemaParity(t *testing.T) {
+// cp2SchemaOf loads the committed v2 schema as a generic JSON image.
+func cp2SchemaOf(t *testing.T) map[string]any {
+	t.Helper()
 	repoRoot, err := repoRootFromGoModule()
 	if err != nil {
 		t.Fatalf("repoRoot: %v", err)
@@ -1644,6 +1666,13 @@ func TestCanonicalPipelineV2GoSchemaParity(t *testing.T) {
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		t.Fatalf("parse schema: %v", err)
 	}
+	return schema
+}
+
+// TestCanonicalPipelineV2GoSchemaParity pins every closed list the generator
+// keeps against the committed schema: one vocabulary, two copies, no drift.
+func TestCanonicalPipelineV2GoSchemaParity(t *testing.T) {
+	schema := cp2SchemaOf(t)
 	list := func(path ...string) []string {
 		node := any(schema)
 		for _, key := range path {
@@ -1684,6 +1713,76 @@ func TestCanonicalPipelineV2GoSchemaParity(t *testing.T) {
 	}
 	if !maps.Equal(registry, cp2RowRegistry()) {
 		t.Error("row_registry const and the generator registry disagree")
+	}
+}
+
+// TestCanonicalPipelineV2GrammarParity pins the regexp sources the generator
+// keeps against the schema patterns they mirror.
+func TestCanonicalPipelineV2GrammarParity(t *testing.T) {
+	schema := cp2SchemaOf(t)
+	str := func(path ...string) string {
+		node := any(schema)
+		for _, key := range path {
+			node = node.(map[string]any)[key]
+		}
+		return node.(string)
+	}
+	defs := []string{"$defs"}
+	for name, pair := range map[string][2]string{
+		"machineToken": {cp2TokenRE.String(), str(append(defs, "machineToken", "pattern")...)},
+		"snakeToken":   {cp2SnakeRE.String(), str(append(defs, "snakeToken", "pattern")...)},
+		"alias":        {cp2UpperTokenRE.String(), str(append(defs, "alias", "pattern")...)},
+		"case_id":      {cp2UpperTokenRE.String(), str(append(defs, "case", "properties", "case_id", "pattern")...)},
+		"issueId":      {cp2IssueRE.String(), str(append(defs, "issueId", "pattern")...)},
+		"bytesLit":     {cp2BytesRE.String(), str(append(defs, "bytesLit", "pattern")...)},
+		"bytes32Lit":   {cp2HexRE.String(), str(append(defs, "bytes32Lit", "pattern")...)},
+		"resultToken":  {canonicalPipelineResultRE.String(), str(append(defs, "resultToken", "pattern")...)},
+		"pointer":      {cp2PointerRE.String(), str(append(defs, "inputPointer", "properties", "pointer", "pattern")...)},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%s grammar: generator %q, schema %q", name, pair[0], pair[1])
+		}
+	}
+	// $defs/rowId has no generator twin on purpose: a row id must be a key of the
+	// frozen registry, which is strictly stronger than matching its grammar.
+}
+
+// TestCanonicalPipelineV2ValidatorsNeverPanic drives random, often malformed,
+// caller shapes through every validator: untrusted-looking input must produce a
+// typed error, never a panic.
+func TestCanonicalPipelineV2ValidatorsNeverPanic(t *testing.T) {
+	const seed = 1207
+	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // deterministic test corpus, not cryptographic
+	tokens := []string{"", " ", "\n", "C01-DIRECT-001", "MAIN", "a b", "/input/a", "RUB-923", "ünïcode", "token", "object"}
+	pick := func() string { return tokens[rng.Intn(len(tokens))] }
+	values := []any{
+		nil, true, 0, -1, 1.5, uint64(math.MaxUint64), json.Number("1"), json.Number("x"), "B1", "a b",
+		[]any{nil, "B1"},
+		[]string{"B1"},
+		[]bool{true},
+		map[string]any{"k": nil},
+		cpMap{"K": 1},
+		struct{ A int }{1},
+	}
+	registry := cp2RowRegistry()
+	for i := 0; i < 2000; i++ {
+		value := values[rng.Intn(len(values))]
+		in := cp2Input{Pointer: pick(), Type: pick(), ValueOrAlias: value, Provenance: pick(), ProductionSetupSink: pick(), ConsumptionProofOwner: pick()}
+		row := cp2Row{RowID: pick(), Kind: pick(), Cases: []cp2Case{{CaseID: pick(), Input: []cp2Input{in}}}}
+		if rng.Intn(2) == 0 {
+			row.Cases[0].ScheduleID = cp2Ptr(pick())
+		}
+		fixtures := map[string]cp2Fixture{pick(): {Type: pick(), Value: value}}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("seed %d iteration %d: panic %v on value %#v", seed, i, r, value)
+				}
+			}()
+			_ = cp2ValidateRows([]cp2Row{row}, registry)
+			_ = cp2ValidateFixtures(fixtures)
+			_ = cp2ValidateAliases([]cp2Row{row}, fixtures)
+		}()
 	}
 }
 

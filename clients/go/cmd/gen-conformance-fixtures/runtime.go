@@ -2528,33 +2528,39 @@ var cp2FixtureTypes = slices.DeleteFunc(slices.Clone(cp2InputTypes), func(t stri
 
 func cp2MatchOK(v any, re *regexp.Regexp) bool { s, ok := v.(string); return ok && re.MatchString(s) }
 
-// cp2UintOf reads an unsigned integer EXACTLY: an integer Go type and a
-// json.Number are parsed without a float round trip, so 2^64-1 survives; a
-// float64 is accepted only when it is integral, non-negative and below 2^64
-// (math.MaxUint64 rounds UP to 2^64 as a float64).
-func cp2UintOf(v any) (uint64, bool) {
-	switch n := v.(type) {
-	case uint64:
-		return n, true
-	case int:
-		return cp2UintOfSigned(int64(n))
-	case int64:
-		return cp2UintOfSigned(n)
-	case json.Number:
-		u, err := strconv.ParseUint(n.String(), 10, 64)
-		return u, err == nil
-	case float64:
-		return uint64(n), n >= 0 && n == math.Trunc(n) && n < math.Exp2(64)
+// cp2JSONImage returns a value as it will appear in the artifact. The round trip
+// collapses every Go shape ([]string, []bool, []uint64, a struct, cpMap) to the
+// JSON kinds map[string]any / []any / json.Number / string / bool / nil, so one
+// predicate set covers them all and no Go-only shape can slip past. A value that
+// cannot marshal returns a sentinel no predicate accepts.
+func cp2JSONImage(v any) any {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return struct{}{}
 	}
-	return 0, false
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var image any
+	if err := decoder.Decode(&image); err != nil {
+		return struct{}{}
+	}
+	return image
 }
 
-// cp2UintOfSigned guards the sign BEFORE the conversion: uint64(negative) wraps.
-func cp2UintOfSigned(n int64) (uint64, bool) {
-	if n < 0 {
+// cp2UintOf reads an unsigned integer EXACTLY from a JSON image: json.Number is
+// parsed without a float round trip, so 2^64-1 survives. float64 is kept for a
+// direct caller and accepted only when integral, non-negative and below 2^64
+// (math.MaxUint64 rounds UP to 2^64 as a float64).
+func cp2UintOf(v any) (uint64, bool) {
+	if n, ok := v.(json.Number); ok {
+		u, err := strconv.ParseUint(n.String(), 10, 64)
+		return u, err == nil
+	}
+	f, ok := v.(float64)
+	if !ok || f < 0 || f != math.Trunc(f) || f >= math.Exp2(64) {
 		return 0, false
 	}
-	return uint64(n), true
+	return uint64(f), true
 }
 
 func cp2UintOK(v any, max uint64) bool {
@@ -2595,22 +2601,7 @@ func cp2ClosedValueOK(v any) bool {
 	return ok
 }
 
-// cp2Elements normalizes the two Go shapes an array value takes.
-func cp2Elements(v any) ([]any, bool) {
-	switch s := v.(type) {
-	case []any:
-		return s, true
-	case []string:
-		out := make([]any, len(s))
-		for i, e := range s {
-			out[i] = e
-		}
-		return out, true
-	}
-	return nil, false
-}
-
-// cp2ValueOK mirrors the schema: every tag admits its literal form or an alias
+// cp2ValueOK mirrors the schema over a JSON image: every tag admits its literal form or an alias
 // (aliasOK), an array tag admits an array of those, and a tag with no literal
 // predicate is alias-only.
 func cp2ValueOK(tag string, v any, aliasOK bool) bool {
@@ -2618,7 +2609,7 @@ func cp2ValueOK(tag string, v any, aliasOK bool) bool {
 	if !isArray {
 		return cp2ElemOK(elem, v, aliasOK)
 	}
-	items, ok := cp2Elements(v)
+	items, ok := v.([]any)
 	if !ok {
 		return false
 	}
@@ -2644,7 +2635,7 @@ func cp2InputOK(in cp2Input) error {
 	if !cp2PointerRE.MatchString(in.Pointer) || !cp2IssueRE.MatchString(in.ConsumptionProofOwner) || strings.TrimSpace(in.ProductionSetupSink) == "" {
 		return fmt.Errorf("input %s has a malformed pointer, consumption owner or production setup sink", in.Pointer)
 	}
-	if !cp2ValueOK(in.Type, in.ValueOrAlias, true) {
+	if !cp2ValueOK(in.Type, cp2JSONImage(in.ValueOrAlias), true) {
 		return fmt.Errorf("input %s value is not a %s literal or alias", in.Pointer, in.Type)
 	}
 	return nil
@@ -2653,14 +2644,15 @@ func cp2InputOK(in cp2Input) error {
 // cp2FixtureValueOK routes a structured entry to the closed-object grammar and
 // every other entry to its literal predicate.
 func cp2FixtureValueOK(f cp2Fixture) bool {
+	value := cp2JSONImage(f.Value)
 	switch f.Type {
 	case "object":
-		return cp2ClosedObjectOK(f.Value)
+		return cp2ClosedObjectOK(value)
 	case "array<object>":
-		items, ok := cp2Elements(f.Value)
+		items, ok := value.([]any)
 		return ok && !slices.ContainsFunc(items, func(e any) bool { return !cp2ClosedObjectOK(e) })
 	}
-	return cp2ValueOK(f.Type, f.Value, false)
+	return cp2ValueOK(f.Type, value, false)
 }
 
 // cp2ValidateFixtures closes the catalog: an alias key, a literal type, and a
@@ -3061,11 +3053,7 @@ func cp2AliasesOf(in cp2Input) []string {
 		return nil
 	}
 	var out []string
-	switch v := in.ValueOrAlias.(type) {
-	case []string:
-		for _, e := range v {
-			out = cp2AppendAlias(out, e)
-		}
+	switch v := cp2JSONImage(in.ValueOrAlias).(type) {
 	case []any:
 		for _, e := range v {
 			out = cp2AppendAlias(out, e)
