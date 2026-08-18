@@ -1533,6 +1533,11 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	if err := cp2ValidateAliases(rows, cpMap{"B1": cpMap{}}); err != nil {
 		t.Fatalf("catalog carrying B1 must validate: %v", err)
 	}
+	// A token tag carries a machine token, never a catalog alias.
+	rows[0].Cases[0].Input[0].Type, rows[0].Cases[0].Input[0].ValueOrAlias = "token", "ABSENT"
+	if err := cp2ValidateAliases(rows, cpMap{}); err != nil {
+		t.Fatalf("token input must not demand a fixture: %v", err)
+	}
 }
 
 // TestCanonicalPipelineV2CorpusIsByteDeterministic proves the dormant revision

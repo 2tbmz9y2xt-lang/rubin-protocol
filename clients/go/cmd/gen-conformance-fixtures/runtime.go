@@ -2760,7 +2760,13 @@ func cp2Authority() cpMap {
 }
 
 // cp2AliasesOf returns the alias-shaped strings one stimulus pointer carries.
+// A token tag carries a machine token, never a catalog alias (the schema maps
+// `token`/`array<token>` to machineToken, not to an *OrAlias form), so an
+// uppercase value there resolves to nothing.
 func cp2AliasesOf(in cp2Input) []string {
+	if in.Type == "token" || in.Type == "array<token>" {
+		return nil
+	}
 	var out []string
 	switch v := in.ValueOrAlias.(type) {
 	case string:
