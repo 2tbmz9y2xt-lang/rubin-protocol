@@ -2514,7 +2514,7 @@ var (
 // representable here; switch to json.Number if a case ever needs one.
 var cp2LiteralOf = map[string]func(any) bool{
 	"bool": func(v any) bool { _, ok := v.(bool); return ok },
-	"u16":  func(v any) bool { return cp2UintOK(v, 65536) }, "u64": func(v any) bool { return cp2UintOK(v, math.Exp2(64)) },
+	"u16":  func(v any) bool { return cp2UintOK(v, 65535) }, "u64": func(v any) bool { return cp2UintOK(v, math.MaxUint64) },
 	"token": func(v any) bool { return cp2MatchOK(v, cp2TokenRE) }, "bytes": func(v any) bool { return cp2MatchOK(v, cp2BytesRE) },
 	"bytes32_hex": func(v any) bool { return cp2MatchOK(v, cp2HexRE) },
 }
@@ -2524,25 +2524,30 @@ var cp2FixtureTypes = slices.DeleteFunc(slices.Clone(cp2InputTypes), func(t stri
 
 func cp2MatchOK(v any, re *regexp.Regexp) bool { s, ok := v.(string); return ok && re.MatchString(s) }
 
-// cp2NumberOK returns v as a float64 when it is an integral Go or JSON number.
-// A width other than int/float64 is rejected rather than converted: fail closed.
-func cp2NumberOK(v any) (float64, bool) {
+// cp2UintOf reads an unsigned integer EXACTLY: an integer Go type and a
+// json.Number are parsed without a float round trip, so 2^64-1 survives; a
+// float64 is accepted only when it is integral, non-negative and below 2^64
+// (math.MaxUint64 rounds UP to 2^64 as a float64).
+func cp2UintOf(v any) (uint64, bool) {
 	switch n := v.(type) {
-	case float64:
-		return n, n == math.Trunc(n)
+	case uint64:
+		return n, true
 	case int:
-		return float64(n), true
+		return uint64(n), n >= 0
+	case int64:
+		return uint64(n), n >= 0
+	case json.Number:
+		u, err := strconv.ParseUint(n.String(), 10, 64)
+		return u, err == nil
+	case float64:
+		return uint64(n), n >= 0 && n == math.Trunc(n) && n < math.Exp2(64)
 	}
 	return 0, false
 }
 
-// cp2UintOK bounds an integral number to [0, limit). The limit is exclusive
-// because a float64 cannot represent 2^64: math.MaxUint64 rounds UP to 2^64, so
-// an inclusive bound would accept it.
-// ponytail: above 2^53 a float64 is not exact; json.Number is the upgrade.
-func cp2UintOK(v any, limit float64) bool {
-	f, ok := cp2NumberOK(v)
-	return ok && f >= 0 && f < limit
+func cp2UintOK(v any, max uint64) bool {
+	u, ok := cp2UintOf(v)
+	return ok && u <= max
 }
 
 // cp2ClosedObjectOK mirrors the schema's closedObject: non-empty, snake_case
@@ -2574,7 +2579,7 @@ func cp2ClosedValueOK(v any) bool {
 	case map[string]any:
 		return cp2ClosedObjectOK(t)
 	}
-	_, ok := cp2NumberOK(v)
+	_, ok := cp2UintOf(v)
 	return ok
 }
 

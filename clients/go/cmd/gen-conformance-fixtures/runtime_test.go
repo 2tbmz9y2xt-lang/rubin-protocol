@@ -1607,6 +1607,14 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}); err != nil {
 		t.Fatalf("token input must not demand a fixture: %v", err)
 	}
+	for value, want := range map[any]bool{
+		json.Number("18446744073709551615"): true, uint64(math.MaxUint64): true, math.Exp2(53): true,
+		json.Number("18446744073709551616"): false, math.Exp2(64): false, json.Number("1.5"): false, int(-1): false,
+	} {
+		if got := cp2UintOK(value, math.MaxUint64); got != want {
+			t.Errorf("cp2UintOK(%v) = %v, want %v", value, got, want)
+		}
+	}
 	for name, catalog := range map[string]map[string]cp2Fixture{
 		"nested object":   {"B1": {Type: "object", Value: cpMap{"plan": cpMap{"rows": []any{1, "B_TWO"}}, "fenced": true}}},
 		"object array":    {"B1": {Type: "array<object>", Value: []any{cpMap{"height": 1}}}},

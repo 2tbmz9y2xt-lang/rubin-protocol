@@ -416,6 +416,14 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
                 lambda r: r["cases"][0]["input"][0].__setitem__("production_setup_sink", "   "),
                 ("rows/0/cases/0/input/0/production_setup_sink", "pattern"),
             ),
+            "unauthorized row id": (lambda r: r.__setitem__("row_id", "C01-UNAUTHORIZED-001"), ("rows/0/row_id", "enum")),
+            "authority id as observation": (lambda r: r.__setitem__("row_id", "C01-PATHS-001"), ("rows/0/row_id", "enum")),
+            "not reached commit state": (
+                lambda r: r["cases"][0]["expected"]["rpc_projection"].update(
+                    {"class": "NOT_REACHED", "http": None, "mined": "not_applicable", "success_identity": "not_applicable", "phase": "not_reached", "commit_state": "unknown"}
+                ),
+                (f"{expected}/rpc_projection/commit_state", "enum"),
+            ),
             "inline object stimulus": (
                 lambda r: r["cases"][0]["input"][0].update({"type": "object", "value_or_alias": {"height": 1}}),
                 ("rows/0/cases/0/input/0/value_or_alias", "type"),
@@ -490,6 +498,13 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
         # parity test and are the artifact's own source, so only commit_truth is left.
         exp = schema["$defs"]["expected"]["properties"]
         self.assertEqual(sorted(data["commit_truth_values"]), sorted(exp["commit_truth"]["enum"]))
+        # Each per-kind row_id enum is exactly the registry slice of that kind.
+        for arm in schema["$defs"]["row"]["allOf"]:
+            kind = arm["if"]["properties"]["kind"]["const"]
+            self.assertEqual(
+                sorted(arm["then"]["properties"]["row_id"]["enum"]),
+                sorted(rid for rid, k in data["row_registry"].items() if k == kind),
+            )
 
     def test_row_registry_is_pinned_as_an_exact_map(self):
         # The schema pins the map as a `const`, independently of the generator
