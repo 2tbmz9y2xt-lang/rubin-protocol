@@ -111,9 +111,10 @@
     "bytesLit": { "type": "string", "pattern": "^([0-9a-f]{2})*$", "not": { "pattern": "\\s" } }, "bytes32Lit": { "type": "string", "pattern": "^[0-9a-f]{64}$", "not": { "pattern": "\\s" } },
     "boolOrAlias": { "oneOf": [{ "$ref": "#/$defs/boolLit" }, { "$ref": "#/$defs/alias" }] }, "u16OrAlias": { "oneOf": [{ "$ref": "#/$defs/u16Lit" }, { "$ref": "#/$defs/alias" }] },
     "u64OrAlias": { "oneOf": [{ "$ref": "#/$defs/u64Lit" }, { "$ref": "#/$defs/alias" }] }, "bytesOrAlias": { "oneOf": [{ "$ref": "#/$defs/bytesLit" }, { "$ref": "#/$defs/alias" }] },
-    "closedObject": { "description": "A structured stimulus lives only in the catalog and is grammar-closed: snake_case keys, leaves that are a boolean, an integer, a machine token (an alias is one) or an array of those, and nested objects under the same rule. A value-owning slice adds its family-specific closed shape as a `oneOf` variant on the fixture value.", "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/snakeToken" }, "additionalProperties": { "$ref": "#/$defs/closedValue" } },
-    "closedValue": { "oneOf": [{ "$ref": "#/$defs/boolLit" }, { "type": "integer", "minimum": 0 }, { "$ref": "#/$defs/machineToken" }, { "type": "array", "items": { "$ref": "#/$defs/closedValue" } }, { "$ref": "#/$defs/closedObject" }] },
+    "closedObject": { "description": "A structured stimulus lives only in the catalog and is grammar-closed: open-map keys, leaves that are a boolean, an integer, a machine token (an alias is one) or an array of those, and nested objects under the same rule. A value-owning slice adds its family-specific closed shape as a `oneOf` variant on the fixture value.", "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/mapKey" }, "additionalProperties": { "$ref": "#/$defs/closedValue" } },
+    "closedValue": { "oneOf": [{ "$ref": "#/$defs/boolLit" }, { "$ref": "#/$defs/u64Lit" }, { "$ref": "#/$defs/machineToken" }, { "type": "array", "items": { "$ref": "#/$defs/closedValue" } }, { "$ref": "#/$defs/closedObject" }] },
     "issueId": { "type": "string", "pattern": "^RUB-[1-9][0-9]*$", "not": { "pattern": "\\s" } },
+    "mapKey": { "description": "An open-map key: snake_case, and never a retired v1 field name.", "$ref": "#/$defs/snakeToken", "not": { "enum": ["pending_owner", "detail", "scenario"] } },
     "snakeToken": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "not": { "pattern": "\\s" } },
     "resultToken": { "type": "string", "pattern": "^(ACCEPTED|STORED_NONCANONICAL|KNOWN_BLOCK_NOOP\\((CANONICAL|STORED_NONCANONICAL)\\)|MISSING_PARENT|ORPHAN_RETAINED|ORPHAN_ALREADY_RETAINED|CONSENSUS_INVALID\\([A-Z][A-Z0-9_]*\\)|LOCAL_BUSY|LOCAL_RESOURCE_UNAVAILABLE\\((inbound_budget_capacity|inbound_budget_overflow|apply_plan_metadata|noncanonical_bytes|noncanonical_count|orphan_pool|recovery_artifact)\\)|STALE_LOCAL_PLAN|LOCAL_CANCELLED|LOCAL_STORE_ERROR\\(noncanonical\\)|LOCAL_PERSISTENCE_ERROR\\(precommit\\)|TERMINAL_STORE_INTEGRITY\\(canonical\\)|TERMINAL_LOCAL_INVARIANT\\(evidence\\)|TERMINAL_PERSISTENCE\\((old|new|neither_or_unreadable)\\))$", "not": { "pattern": "\\s" } },
     "errorClassToken": { "description": "A taxonomy result token or RPC_UNAVAILABLE; one grammar, shared with `resultToken`.", "oneOf": [{ "$ref": "#/$defs/resultToken" }, { "const": "RPC_UNAVAILABLE" }] },
@@ -141,7 +142,7 @@
         "row_id": { "$ref": "#/$defs/rowId" },
         "kind": { "$ref": "#/$defs/rowKind" },
         "notes": { "$ref": "#/$defs/notes" },
-        "authority": { "description": "Static machine authority: the closed sets, orders and bounds the row freezes. Required on an authority row, optional on an observation row whose cases are read against static bounds (the R1 detail keys classified STATIC_AUTHORITY live here). Never adapter-emitted and never compared as a record.", "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/snakeToken" }, "additionalProperties": { "$ref": "#/$defs/closedValue" } },
+        "authority": { "description": "Static machine authority: the closed sets, orders and bounds the row freezes. Required on an authority row, optional on an observation row whose cases are read against static bounds (the R1 detail keys classified STATIC_AUTHORITY live here). Never adapter-emitted and never compared as a record.", "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/mapKey" }, "additionalProperties": { "$ref": "#/$defs/closedValue" } },
         "forbidden_observation": { "$ref": "#/$defs/text" },
         "release_requirements": { "$ref": "#/$defs/releaseRequirements" },
         "cases": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/case" } }
@@ -239,7 +240,7 @@
             "rejected_delta": { "type": "string", "pattern": "^(0|[+]1)$", "not": { "pattern": "\\s" } }
           }
         },
-        "effects": { "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/snakeToken" }, "additionalProperties": { "$ref": "#/$defs/effect" } },
+        "effects": { "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/mapKey" }, "additionalProperties": { "$ref": "#/$defs/effect" } },
         "state_image": { "$ref": "#/$defs/stateImage" },
         "canonical_applied_blocks": {
           "description": "The published canonical-applied summary projection (DD-007): `null` when the truth class exposes no summary (every non-NEW truth), `[]` exactly for a proven-NEW standalone disconnect that connects no new row, otherwise one row per newly canonical block in ascending height, including a row whose complete_da_ids is empty.",
@@ -312,7 +313,7 @@
       "additionalProperties": false,
       "required": ["relation", "digest_alias", "direct_fields"],
       "properties": {
-        "relation": { "enum": ["new", "old", "withheld", "unchanged"] }, "digest_alias": { "description": "Generator-named machine token, not a catalog key; RUB-1208 lands the resolver that checks uniqueness and resolution.", "$ref": "#/$defs/machineToken" }, "direct_fields": { "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/snakeToken" }, "additionalProperties": { "$ref": "#/$defs/machineToken" } }
+        "relation": { "enum": ["new", "old", "withheld", "unchanged"] }, "digest_alias": { "description": "Generator-named machine token, not a catalog key; RUB-1208 lands the resolver that checks uniqueness and resolution.", "$ref": "#/$defs/machineToken" }, "direct_fields": { "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/mapKey" }, "additionalProperties": { "$ref": "#/$defs/machineToken" } }
       }
     },
     "summaryRow": {

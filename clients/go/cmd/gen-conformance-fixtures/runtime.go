@@ -2519,6 +2519,10 @@ var cp2LiteralOf = map[string]func(any) bool{
 	"bytes32_hex": func(v any) bool { return cp2MatchOK(v, cp2HexRE) },
 }
 
+// cp2RetiredKeys are the v1 field names the v2 shape retires: they may not
+// reappear as a key inside any open map either.
+var cp2RetiredKeys = []string{"pending_owner", "detail", "scenario"}
+
 // cp2FixtureTypes is cp2InputTypes minus the alias tags: an entry is a literal.
 var cp2FixtureTypes = slices.DeleteFunc(slices.Clone(cp2InputTypes), func(t string) bool { return strings.Contains(t, "alias") })
 
@@ -2567,7 +2571,7 @@ func cp2ClosedObjectOK(v any) bool {
 		return false
 	}
 	for key, value := range m {
-		if !cp2SnakeRE.MatchString(key) || !cp2ClosedValueOK(value) {
+		if !cp2SnakeRE.MatchString(key) || slices.Contains(cp2RetiredKeys, key) || !cp2ClosedValueOK(value) {
 			return false
 		}
 	}

@@ -1586,12 +1586,14 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	}
 	rows[0].Cases[0].Input[0] = c.Input[0]
 	for name, broken := range map[string]map[string]cp2Fixture{
-		"fixture type alias": {"B1": {Type: "alias", Value: "B2"}},
-		"fixture u64 value":  {"B1": {Type: "u64", Value: "abc"}},
-		"fixture key case":   {"b1": {Type: "u64", Value: 1}},
-		"fixture prose leaf": {"B1": {Type: "object", Value: cpMap{"note": "a b"}}},
-		"fixture object key": {"B1": {Type: "object", Value: cpMap{"Key": 1}}},
-		"fixture empty obj":  {"B1": {Type: "object", Value: cpMap{}}},
+		"fixture type alias":    {"B1": {Type: "alias", Value: "B2"}},
+		"fixture u64 value":     {"B1": {Type: "u64", Value: "abc"}},
+		"fixture key case":      {"b1": {Type: "u64", Value: 1}},
+		"fixture prose leaf":    {"B1": {Type: "object", Value: cpMap{"note": "a b"}}},
+		"fixture object key":    {"B1": {Type: "object", Value: cpMap{"Key": 1}}},
+		"fixture empty obj":     {"B1": {Type: "object", Value: cpMap{}}},
+		"fixture retired key":   {"B1": {Type: "object", Value: cpMap{"scenario": "X"}}},
+		"fixture leaf over u64": {"B1": {Type: "object", Value: cpMap{"height": json.Number("18446744073709551616")}}},
 	} {
 		if err := cp2ValidateFixtures(broken); err == nil {
 			t.Errorf("%s: expected a fail-closed rejection", name)
@@ -1619,6 +1621,7 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 		"nested object":   {"B1": {Type: "object", Value: cpMap{"plan": cpMap{"rows": []any{1, "B_TWO"}}, "fenced": true}}},
 		"object array":    {"B1": {Type: "array<object>", Value: []any{cpMap{"height": 1}}}},
 		"u64 at two ^ 53": {"B1": {Type: "u64", Value: math.Exp2(53)}},
+		"leaf at u64 max": {"B1": {Type: "object", Value: cpMap{"height": json.Number("18446744073709551615")}}},
 	} {
 		if err := cp2ValidateFixtures(catalog); err != nil {
 			t.Errorf("%s must validate: %v", name, err)

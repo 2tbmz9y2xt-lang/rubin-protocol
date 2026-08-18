@@ -439,6 +439,16 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
                 lambda r: r["cases"][0]["expected"]["state_image"]["CHAIN_IMAGE_V1"].__setitem__("relation", "withheld"),
                 (f"{expected}/state_image/CHAIN_IMAGE_V1/relation", "enum"),
             ),
+            "authority carries a retired key": (
+                lambda r: r.__setitem__("authority", {"pending_owner": "RUB_1195"}),
+                ("rows/0/authority", "not"),
+            ),
+            "effect key is a retired name": (
+                lambda r: r["cases"][0]["expected"]["effects"].__setitem__(
+                    "detail", {"value": 1, "type": "u64", "required": True, "observer": "observer"}
+                ),
+                (f"{expected}/effects", "not"),
+            ),
             "authority carries a non-machine value": (
                 lambda r: r.__setitem__("authority", {"class_order": [None]}),
                 ("rows/0/authority/class_order", "oneOf"),
@@ -490,6 +500,7 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
             {"B1": {"type": "u64", "value": "abc"}},
             {"B1": {"type": "alias", "value": "B2"}},
             {"B1": {"type": "object", "value": {"note": "a b"}}},
+            {"B1": {"type": "object", "value": {"height": 18446744073709551616}}},
         ):
             self.assertFalse(validator.is_valid({**data, "fixtures": broken}), broken)
 
