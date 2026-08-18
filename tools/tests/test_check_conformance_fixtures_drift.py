@@ -267,7 +267,8 @@ class CanonicalPipelineSchemaTests(unittest.TestCase):
         po = next(r for r in rows if r.get("pending_owner"))
         cc = next(r for r in rows if r.get("canonical_counters"))
         self.assertFalse(any(validator.is_valid({**data, "rows": [m]}) for m in ({**rows[0], "id": rows[0]["id"] + "\n"}, {**po, "pending_owner": po["pending_owner"] + "\n"}, {**cc, "canonical_counters": {**cc["canonical_counters"], "accepted_delta": cc["canonical_counters"]["accepted_delta"] + "\n"}})))
-        self.assertFalse(validator.is_valid({**data, "coverage_receipt": {**data["coverage_receipt"], next(iter(data["coverage_receipt"])) + "\n": "x"}}))
+        k, v = next(iter(data["coverage_receipt"].items()))
+        self.assertTrue(validator.is_valid({**data, "coverage_receipt": {**data["coverage_receipt"], k: v}})); self.assertFalse(any(validator.is_valid({**data, "coverage_receipt": r}) for r in ({**data["coverage_receipt"], k + "\n": v}, {**data["coverage_receipt"], k: v + "\n"})))
         self.assertFalse(any(validator.is_valid({**data, "result_taxonomy": t}) for t in (["BOGUS"] + data["result_taxonomy"][1:], data["result_taxonomy"] + ["EXTRA"])))
 
 if __name__ == "__main__":
