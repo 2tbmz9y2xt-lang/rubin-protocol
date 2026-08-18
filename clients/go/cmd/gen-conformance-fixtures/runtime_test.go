@@ -1526,16 +1526,22 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 		Provenance: "normative_boundary", ProductionSetupSink: "node.Miner.MineOne", ConsumptionProofOwner: "RUB-923",
 	}}
 	rows := []cp2Row{{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{c}}}
-	err := cp2ValidateAliases(rows, cpMap{})
+	block := map[string]cp2Fixture{"B1": {Type: "object", Value: cpMap{"height": 1}}}
+	err := cp2ValidateAliases(rows, map[string]cp2Fixture{})
 	if err == nil || !strings.Contains(err.Error(), `alias "B1"`) {
 		t.Fatalf("empty catalog: error = %v, want a rejection naming alias B1", err)
 	}
-	if err := cp2ValidateAliases(rows, cpMap{"B1": cpMap{}}); err != nil {
+	if err := cp2ValidateAliases(rows, block); err != nil {
 		t.Fatalf("catalog carrying B1 must validate: %v", err)
+	}
+	// A pointer tagged u64 may not resolve to an object fixture.
+	rows[0].Cases[0].Input[0].Type = "u64"
+	if err := cp2ValidateAliases(rows, block); err == nil || !strings.Contains(err.Error(), "is a object fixture, want u64") {
+		t.Fatalf("type mismatch: error = %v, want the fixture type named", err)
 	}
 	// A token tag carries a machine token, never a catalog alias.
 	rows[0].Cases[0].Input[0].Type, rows[0].Cases[0].Input[0].ValueOrAlias = "token", "ABSENT"
-	if err := cp2ValidateAliases(rows, cpMap{}); err != nil {
+	if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}); err != nil {
 		t.Fatalf("token input must not demand a fixture: %v", err)
 	}
 }

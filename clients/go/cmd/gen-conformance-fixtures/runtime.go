@@ -2526,6 +2526,12 @@ type cp2Expected struct {
 	RPC             cp2RPC  `json:"rpc_projection"`
 }
 
+// cp2Fixture is one catalog entry: a typed literal, never an alias to an alias.
+type cp2Fixture struct {
+	Type  string `json:"type"`
+	Value any    `json:"value"`
+}
+
 // cp2Input is one typed stimulus pointer; the json tags mirror the schema.
 type cp2Input struct {
 	Pointer               string `json:"pointer"`
@@ -2549,19 +2555,19 @@ type cp2Row struct {
 }
 
 type cp2Artifact struct {
-	Artifact              string            `json:"artifact"`
-	SchemaVersion         int               `json:"schema_version"`
-	Schema                string            `json:"schema"`
-	Meta                  cpMap             `json:"_meta"`
-	Authority             cpMap             `json:"authority"`
-	ResultTaxonomy        []string          `json:"result_taxonomy"`
-	CommitTruthValues     []string          `json:"commit_truth_values"`
-	RPCProjectionClasses  []string          `json:"rpc_projection_classes"`
-	WireDispositionValues []string          `json:"wire_disposition_values"`
-	RecoveryOutcomeValues []string          `json:"recovery_outcome_values"`
-	RowRegistry           map[string]string `json:"row_registry"`
-	Fixtures              cpMap             `json:"fixtures"`
-	Rows                  []cp2Row          `json:"rows"`
+	Artifact              string                `json:"artifact"`
+	SchemaVersion         int                   `json:"schema_version"`
+	Schema                string                `json:"schema"`
+	Meta                  cpMap                 `json:"_meta"`
+	Authority             cpMap                 `json:"authority"`
+	ResultTaxonomy        []string              `json:"result_taxonomy"`
+	CommitTruthValues     []string              `json:"commit_truth_values"`
+	RPCProjectionClasses  []string              `json:"rpc_projection_classes"`
+	WireDispositionValues []string              `json:"wire_disposition_values"`
+	RecoveryOutcomeValues []string              `json:"recovery_outcome_values"`
+	RowRegistry           map[string]string     `json:"row_registry"`
+	Fixtures              map[string]cp2Fixture `json:"fixtures"`
+	Rows                  []cp2Row              `json:"rows"`
 }
 
 // cp2RowRegistry is the frozen C01-R2 identity map (row_id -> kind): the 62
@@ -2799,16 +2805,31 @@ func cp2AppendAlias(out []string, s string) []string {
 // rejected until then — the intended fail-closed order.
 // ponytail: input side only; the expected struct carries no effects or summary
 // yet, so RUB-1208 extends this walk when it lands those alias positions.
-func cp2ValidateAliases(rows []cp2Row, fixtures cpMap) error {
+func cp2ValidateAliases(rows []cp2Row, fixtures map[string]cp2Fixture) error {
 	for _, row := range rows {
 		for _, c := range row.Cases {
 			for _, in := range c.Input {
-				for _, alias := range cp2AliasesOf(in) {
-					if _, ok := fixtures[alias]; !ok {
-						return fmt.Errorf("row %s/%s: input %s names alias %q, absent from the fixtures catalog", row.RowID, c.CaseID, in.Pointer, alias)
-					}
+				if err := cp2ResolveAliases(row.RowID+"/"+c.CaseID, in, fixtures); err != nil {
+					return err
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// cp2ResolveAliases requires every alias one pointer names to exist in the
+// catalog AND to carry the fixture type the pointer tag declares; an `alias`
+// tag accepts any catalog type, since the tag names no literal form itself.
+func cp2ResolveAliases(where string, in cp2Input, fixtures map[string]cp2Fixture) error {
+	want := strings.TrimSuffix(strings.TrimPrefix(in.Type, "array<"), ">")
+	for _, alias := range cp2AliasesOf(in) {
+		fixture, ok := fixtures[alias]
+		if !ok {
+			return fmt.Errorf("case %s: input %s names alias %q, absent from the fixtures catalog", where, in.Pointer, alias)
+		}
+		if want != "alias" && fixture.Type != want {
+			return fmt.Errorf("case %s: input %s alias %q is a %s fixture, want %s", where, in.Pointer, alias, fixture.Type, want)
 		}
 	}
 	return nil
@@ -2817,7 +2838,7 @@ func cp2ValidateAliases(rows []cp2Row, fixtures cpMap) error {
 func mustWriteCanonicalPipelineV2Corpus(path string) {
 	registry := cp2RowRegistry()
 	rows := []cp2Row{} // BUILDING: RUB-1208..RUB-1212 migrate rows, RUB-1204 completes.
-	fixtures := cpMap{}
+	fixtures := map[string]cp2Fixture{}
 	if err := cp2ValidateRows(rows, registry); err != nil {
 		fatalf("canonical pipeline v2: %v", err)
 	}

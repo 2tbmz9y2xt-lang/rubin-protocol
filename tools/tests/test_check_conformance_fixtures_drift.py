@@ -446,6 +446,10 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
                 lambda r: r["cases"][0]["input"][0].update({"type": "bool", "value_or_alias": "yes"}),
                 ("rows/0/cases/0/input/0/value_or_alias", "oneOf"),
             ),
+            "inline object stimulus": (
+                lambda r: r["cases"][0]["input"][0].update({"type": "object", "value_or_alias": {"height": 1}}),
+                ("rows/0/cases/0/input/0/value_or_alias", "type"),
+            ),
             "array effect with a scalar value": (
                 lambda r: r["cases"][0]["expected"]["effects"].__setitem__(
                     "relay_frames", {"value": 1, "type": "array", "required": True, "observer": "inv frame capture"}
@@ -457,7 +461,7 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
                     "gc_victim_hash",
                     {"value": "H FULL 1", "type": "hash", "required": True, "observer": "damaged-GC victim identity"},
                 ),
-                (f"{expected}/effects/gc_victim_hash/value", "pattern"),
+                (f"{expected}/effects/gc_victim_hash/value", "oneOf"),
             ),
             "release requirement without receipt flag": (
                 lambda r: r["release_requirements"]["go"][0].pop("delivery_receipt_required"),
@@ -480,6 +484,18 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
         self.assertFalse(
             validator.is_valid({**data, "_meta": {**data["_meta"], "parent_artifact_sha256": "0" * 64}})
         )
+
+    def test_fixture_entries_are_typed_literals(self):
+        # A catalog entry is a typed literal, never an alias to an alias, and a
+        # structured one is grammar-closed.
+        validator, data = self._load()
+        self.assertTrue(validator.is_valid({**data, "fixtures": {"B1": {"type": "u64", "value": 7}}}))
+        for broken in (
+            {"B1": {"type": "u64", "value": "abc"}},
+            {"B1": {"type": "alias", "value": "B2"}},
+            {"B1": {"type": "object", "value": {"note": "a b"}}},
+        ):
+            self.assertFalse(validator.is_valid({**data, "fixtures": broken}), broken)
 
     def test_row_registry_is_pinned_as_an_exact_map(self):
         # The schema pins the map as a `const`, independently of the generator

@@ -106,15 +106,10 @@
       }
     },
     "fixtures": {
-      "description": "Deterministic alias catalog, keyed by alias. Exactly three positions resolve here: an input pointer's `value_or_alias`, the bytes32-or-alias positions (a summary row's `block_hash` and `complete_da_ids`), and a `hash`-typed effect value. `digest_alias` and `direct_fields` values are generator-named machine tokens, not catalog keys. Resolution is checked by the generator once rows carry aliases (RUB-1208 lands the first ones); the catalog is empty while no row is migrated. A free-form object or a row-id-only hard-coded setup is not a substitute.",
+      "description": "Deterministic alias catalog, keyed by alias. Exactly three positions resolve here: an input pointer's `value_or_alias`, the bytes32-or-alias positions (a summary row's `block_hash` and `complete_da_ids`), and a `hash`-typed effect value. `digest_alias` and `direct_fields` values are generator-named machine tokens, not catalog keys. Each entry is a typed literal whose value is validated against its tag, and the generator checks both that a named alias exists and that its fixture type matches the pointer tag; the catalog is empty while no row is migrated. A free-form object or a row-id-only hard-coded setup is not a substitute.",
       "type": "object",
       "propertyNames": { "$ref": "#/$defs/alias" },
-      "additionalProperties": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["type", "value"],
-        "properties": { "type": { "$ref": "#/$defs/inputType" }, "value": true }
-      }
+      "additionalProperties": { "$ref": "#/$defs/fixtureEntry" }
     },
     "rows": { "type": "array", "items": { "$ref": "#/$defs/row" } }
   },
@@ -123,18 +118,36 @@
     "rowKind": { "enum": ["observation", "authority", "forbidden"], "description": "Acceptance semantics inherited from v1: only kind=observation rows are adapter-emitted and compared (their cases carry the machine input and expected output); authority and forbidden rows are static authority read directly and are never emitted or compared as records. An observation row may also carry an `authority` block for the static bounds and closed sets its cases are read against — that block is still never emitted or compared." },
     "alias": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "not": { "pattern": "\\s" } },
     "machineToken": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_@/:()|+.-]+$", "not": { "pattern": "\\s" } },
-    "bytes32OrAlias": { "type": "string", "pattern": "^([0-9a-f]{64}|[A-Z][A-Z0-9_]*)$", "not": { "pattern": "\\s" } },
-    "boolOrAlias": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/alias" }] },
-    "u16OrAlias": { "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 65535 }, { "$ref": "#/$defs/alias" }] },
-    "u64OrAlias": { "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }, { "$ref": "#/$defs/alias" }] },
-    "bytesOrAlias": { "oneOf": [{ "type": "string", "pattern": "^([0-9a-f]{2})*$" }, { "$ref": "#/$defs/alias" }] },
-    "objectOrAlias": { "oneOf": [{ "type": "object" }, { "$ref": "#/$defs/alias" }] },
+    "bytes32OrAlias": { "oneOf": [{ "$ref": "#/$defs/bytes32Lit" }, { "$ref": "#/$defs/alias" }] },
+    "boolLit": { "type": "boolean" }, "u16Lit": { "type": "integer", "minimum": 0, "maximum": 65535 }, "u64Lit": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+    "bytesLit": { "type": "string", "pattern": "^([0-9a-f]{2})*$", "not": { "pattern": "\\s" } }, "bytes32Lit": { "type": "string", "pattern": "^[0-9a-f]{64}$", "not": { "pattern": "\\s" } },
+    "boolOrAlias": { "oneOf": [{ "$ref": "#/$defs/boolLit" }, { "$ref": "#/$defs/alias" }] }, "u16OrAlias": { "oneOf": [{ "$ref": "#/$defs/u16Lit" }, { "$ref": "#/$defs/alias" }] },
+    "u64OrAlias": { "oneOf": [{ "$ref": "#/$defs/u64Lit" }, { "$ref": "#/$defs/alias" }] }, "bytesOrAlias": { "oneOf": [{ "$ref": "#/$defs/bytesLit" }, { "$ref": "#/$defs/alias" }] },
+    "closedObject": { "description": "A structured stimulus lives only in the catalog and is grammar-closed: snake_case keys, leaves that are a boolean, an integer, a machine token (an alias is one) or an array of those, and nested objects under the same rule. A value-owning slice adds its family-specific closed shape as a `oneOf` variant on the fixture value.", "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/snakeToken" }, "additionalProperties": { "$ref": "#/$defs/closedValue" } },
+    "closedValue": { "oneOf": [{ "$ref": "#/$defs/boolLit" }, { "type": "integer" }, { "$ref": "#/$defs/machineToken" }, { "type": "array", "items": { "$ref": "#/$defs/closedValue" } }, { "$ref": "#/$defs/closedObject" }] },
     "issueId": { "type": "string", "pattern": "^RUB-[0-9]+$", "not": { "pattern": "\\s" } },
     "snakeToken": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "not": { "pattern": "\\s" } },
     "resultToken": { "type": "string", "pattern": "^(ACCEPTED|STORED_NONCANONICAL|KNOWN_BLOCK_NOOP\\((CANONICAL|STORED_NONCANONICAL)\\)|MISSING_PARENT|ORPHAN_RETAINED|ORPHAN_ALREADY_RETAINED|CONSENSUS_INVALID\\([A-Z][A-Z0-9_]*\\)|LOCAL_BUSY|LOCAL_RESOURCE_UNAVAILABLE\\((inbound_budget_capacity|inbound_budget_overflow|apply_plan_metadata|noncanonical_bytes|noncanonical_count|orphan_pool|recovery_artifact)\\)|STALE_LOCAL_PLAN|LOCAL_CANCELLED|LOCAL_STORE_ERROR\\(noncanonical\\)|LOCAL_PERSISTENCE_ERROR\\(precommit\\)|TERMINAL_STORE_INTEGRITY\\(canonical\\)|TERMINAL_LOCAL_INVARIANT\\(evidence\\)|TERMINAL_PERSISTENCE\\((old|new|neither_or_unreadable)\\))$", "not": { "pattern": "\\s" } },
     "errorClassToken": { "description": "A taxonomy result token or RPC_UNAVAILABLE; one grammar, shared with `resultToken`.", "oneOf": [{ "$ref": "#/$defs/resultToken" }, { "const": "RPC_UNAVAILABLE" }] },
     "notes": { "description": "Human explanation only, on a row or on one case. Numeric, boolean and map entries are rejected: a machine value belongs in `input`, `expected` or `authority`.", "type": "array", "items": { "type": "string", "minLength": 1 } },
     "inputType": { "enum": ["alias", "array<alias>", "array<bool>", "array<bytes32_hex>", "array<object>", "array<token>", "array<u64>", "bool", "bytes", "bytes32_hex", "object", "token", "u16", "u64"] },
+    "fixtureEntry": {
+      "description": "One catalog entry: a typed LITERAL, never an alias to an alias, so `type` excludes the alias tags and `value` is validated against it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": { "type": { "$ref": "#/$defs/inputType", "not": { "enum": ["alias", "array<alias>"] } }, "value": true },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "bool" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/boolLit" } } } },
+        { "if": { "properties": { "type": { "const": "u16" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/u16Lit" } } } },
+        { "if": { "properties": { "type": { "const": "u64" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/u64Lit" } } } },
+        { "if": { "properties": { "type": { "const": "bytes" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/bytesLit" } } } },
+        { "if": { "properties": { "type": { "const": "bytes32_hex" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/bytes32Lit" } } } },
+        { "if": { "properties": { "type": { "const": "token" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/machineToken" } } } },
+        { "if": { "properties": { "type": { "const": "object" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/closedObject" } } } },
+        { "if": { "properties": { "type": { "const": "array<bool>" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "array", "items": { "$ref": "#/$defs/boolLit" } } } } }, { "if": { "properties": { "type": { "const": "array<u64>" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "array", "items": { "$ref": "#/$defs/u64Lit" } } } } }, { "if": { "properties": { "type": { "const": "array<token>" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "array", "items": { "$ref": "#/$defs/machineToken" } } } } }, { "if": { "properties": { "type": { "const": "array<bytes32_hex>" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "array", "items": { "$ref": "#/$defs/bytes32Lit" } } } } }, { "if": { "properties": { "type": { "const": "array<object>" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "array", "items": { "$ref": "#/$defs/closedObject" } } } } }
+      ]
+    },
     "row": {
       "type": "object",
       "additionalProperties": false,
@@ -202,7 +215,7 @@
       "properties": {
         "pointer": { "type": "string", "pattern": "^/input/[a-z][a-z0-9_]*$", "not": { "pattern": "\\s" } },
         "type": { "$ref": "#/$defs/inputType" },
-        "value_or_alias": { "description": "A literal of the declared type, or an alias resolving in the top-level `fixtures` catalog.", "not": { "type": "null" } },
+        "value_or_alias": { "description": "A literal of the declared type, or an alias resolving in the top-level `fixtures` catalog. An `object` or `array<object>` stimulus is ALWAYS an alias: a structured value lives only in the catalog, never inline here.", "not": { "type": "null" } },
         "provenance": { "enum": ["normative_boundary", "witness_fixture", "deterministic_schedule_control", "configured_bound"] },
         "production_setup_sink": { "description": "The exact production entrypoint or test seam the adapter drives to deliver this input. An input production cannot receive is a design defect, not a schema-legal value.", "type": "string", "minLength": 1 },
         "consumption_proof_owner": { "$ref": "#/$defs/issueId" }
@@ -215,13 +228,13 @@
         { "if": { "properties": { "type": { "const": "bytes32_hex" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "$ref": "#/$defs/bytes32OrAlias" } } } },
         { "if": { "properties": { "type": { "const": "bytes" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "$ref": "#/$defs/bytesOrAlias" } } } },
         { "if": { "properties": { "type": { "const": "token" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "$ref": "#/$defs/machineToken" } } } },
-        { "if": { "properties": { "type": { "const": "object" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "$ref": "#/$defs/objectOrAlias" } } } },
+        { "if": { "properties": { "type": { "const": "object" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "$ref": "#/$defs/alias" } } } },
         { "if": { "properties": { "type": { "const": "array<alias>" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "type": "array", "items": { "$ref": "#/$defs/alias" } } } } },
         { "if": { "properties": { "type": { "const": "array<bool>" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "type": "array", "items": { "$ref": "#/$defs/boolOrAlias" } } } } },
         { "if": { "properties": { "type": { "const": "array<u64>" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "type": "array", "items": { "$ref": "#/$defs/u64OrAlias" } } } } },
         { "if": { "properties": { "type": { "const": "array<token>" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "type": "array", "items": { "$ref": "#/$defs/machineToken" } } } } },
         { "if": { "properties": { "type": { "const": "array<bytes32_hex>" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "type": "array", "items": { "$ref": "#/$defs/bytes32OrAlias" } } } } },
-        { "if": { "properties": { "type": { "const": "array<object>" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "type": "array", "items": { "$ref": "#/$defs/objectOrAlias" } } } } }
+        { "if": { "properties": { "type": { "const": "array<object>" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "type": "array", "items": { "$ref": "#/$defs/alias" } } } } }
       ]
     },
     "expected": {
