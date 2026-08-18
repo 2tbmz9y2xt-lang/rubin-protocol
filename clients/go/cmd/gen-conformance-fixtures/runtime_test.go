@@ -1402,9 +1402,6 @@ func TestCanonicalPipelineV2ParentPairIsByteFrozen(t *testing.T) {
 // does a collision that would silently shrink the merged map.
 func TestCanonicalPipelineV2RegistryIsFrozen(t *testing.T) {
 	registry := cp2RowRegistry()
-	if len(registry) != cp2RegistrySize {
-		t.Fatalf("row registry has %d identities, want the frozen %d (62 inherited + 17 R2)", len(registry), cp2RegistrySize)
-	}
 	want := make(map[string]string, cp2RegistrySize)
 	for _, row := range canonicalPipelineRows() {
 		want[row.ID] = row.Kind

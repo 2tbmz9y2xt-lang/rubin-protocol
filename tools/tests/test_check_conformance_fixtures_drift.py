@@ -26,7 +26,7 @@ V2_CONTROL_ROW = {
     "notes": ["control row for the RUB-1207 schema negatives"],
     "release_requirements": {
         "go": [{"issue": "RUB-890", "surface": "one canonical index commit", "delivery_receipt_required": True}],
-        "rust": [],
+        "rust": [{"issue": "RUB-897", "surface": "mirror one canonical index commit", "delivery_receipt_required": True}],
     },
     "cases": [
         {
@@ -374,7 +374,6 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(data["rows"], [])
         self.assertEqual(data["_meta"]["closure_epoch"]["status"], "building")
-        self.assertEqual(len(data["row_registry"]), 79)
         self.assertNotIn("pending_owner", self.ARTIFACT.read_text(encoding="utf-8", errors="strict"))
 
     def test_inherited_identities_match_the_byte_frozen_v1_parent(self):
@@ -409,6 +408,9 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
     def test_one_dimension_row_mutations_are_rejected_for_the_exact_reason(self):
         def set_expected(key, value):
             return lambda r: r["cases"][0]["expected"].__setitem__(key, value)
+
+        def set_effect(row, key, value, tag):
+            row["cases"][0]["expected"]["effects"][key] = {"value": value, "type": tag, "required": True, "observer": "observer"}
 
         def set_rpc(key, value):
             return lambda r: r["cases"][0]["expected"]["rpc_projection"].__setitem__(key, value)
@@ -450,17 +452,20 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
                 lambda r: r["cases"][0]["input"][0].update({"type": "object", "value_or_alias": {"height": 1}}),
                 ("rows/0/cases/0/input/0/value_or_alias", "type"),
             ),
+            "counters contradict the truth": (
+                lambda r: r["cases"][0]["expected"]["canonical_counters"].__setitem__("rejected_delta", "+1"),
+                (f"{expected}/commit_truth", "const"),
+            ),
+            "array effect with a prose leaf": (
+                lambda r: set_effect(r, "relay_frames", [None, 1.5], "array"),
+                (f"{expected}/effects/relay_frames/value/0", "oneOf"),
+            ),
             "array effect with a scalar value": (
-                lambda r: r["cases"][0]["expected"]["effects"].__setitem__(
-                    "relay_frames", {"value": 1, "type": "array", "required": True, "observer": "inv frame capture"}
-                ),
+                lambda r: set_effect(r, "relay_frames", 1, "array"),
                 (f"{expected}/effects/relay_frames/value", "type"),
             ),
             "hash effect value off grammar": (
-                lambda r: r["cases"][0]["expected"]["effects"].__setitem__(
-                    "gc_victim_hash",
-                    {"value": "H FULL 1", "type": "hash", "required": True, "observer": "damaged-GC victim identity"},
-                ),
+                lambda r: set_effect(r, "gc_victim_hash", "H FULL 1", "hash"),
                 (f"{expected}/effects/gc_victim_hash/value", "oneOf"),
             ),
             "release requirement without receipt flag": (

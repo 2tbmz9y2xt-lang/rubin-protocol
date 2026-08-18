@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Canonical publication observables corpus (C01-R2), schema version 2 — BUILDING",
-  "description": "Machine contract for conformance/fixtures/protocol/canonical_pipeline_v2.json, the DORMANT C01-R2 successor of cv-canonical-pipeline-v1.json. It is BUILDING, not an authority: while `_meta.closure_epoch.status` is `building` no C02/C02A/C03/C04 consumer may claim or bind it, and the byte-frozen v1 pair stays the inert authority until RUB-1204 activates v2 and deletes the parent in one PR. Machine stimulus lives ONLY in a case's `input`, runtime expectation ONLY in `expected`, static machine authority ONLY in a row's `authority`, and human explanation ONLY in `notes` (array of strings): there is no `detail`, no `scenario` and no `pending_owner` in this shape. Aliases (`B1`, `B1_HASH`, `DA_ID_1`) resolve in the top-level `fixtures` catalog, from an input pointer's `value_or_alias`, a summary row's `block_hash`/`complete_da_ids`, and a `hash`-typed effect value. `additionalProperties` is false everywhere; an omitted optional field states no expectation and is neither a zero nor a wildcard.",
+  "description": "Machine contract for conformance/fixtures/protocol/canonical_pipeline_v2.json, the DORMANT C01-R2 successor of cv-canonical-pipeline-v1.json. It is BUILDING, not an authority: while `_meta.closure_epoch.status` is `building` no C02/C02A/C03/C04 consumer may claim or bind it, and the byte-frozen v1 pair stays the inert authority until RUB-1204 activates v2 and deletes the parent in one PR. Machine stimulus lives ONLY in a case's `input`, runtime expectation ONLY in `expected`, static machine authority ONLY in a row's `authority`, and human explanation ONLY in `notes` (array of strings): there is no `detail`, no `scenario` and no `pending_owner` in this shape. Aliases (`B1`, `B1_HASH`, `DA_ID_1`) resolve in the top-level `fixtures` catalog, from an input pointer's `value_or_alias`, a summary row's `block_hash`/`complete_da_ids`, and a `hash`-typed effect value. `additionalProperties` is false on every object with a fixed property set, and the open maps (`fixtures`, `effects`, `authority`, `direct_fields`) close their keys and their value grammar instead; an omitted optional field states no expectation and is neither a zero nor a wildcard.",
   "type": "object",
   "additionalProperties": false,
   "required": ["artifact", "schema_version", "schema", "_meta", "authority", "result_taxonomy", "commit_truth_values", "rpc_projection_classes", "wire_disposition_values", "recovery_outcome_values", "row_registry", "fixtures", "rows"],
@@ -16,7 +16,7 @@
       "required": ["generated_by", "warning", "schema_version", "corpus_revision", "parent_r1_source_oid", "parent_r1_merge_oid", "parent_artifact_sha256", "parent_schema_sha256", "governing_spec_oid", "closure_epoch"],
       "properties": {
         "generated_by": { "const": "clients/go/cmd/gen-conformance-fixtures" },
-        "warning": { "type": "string", "minLength": 1 },
+        "warning": { "$ref": "#/$defs/text" },
         "schema_version": { "const": 2 },
         "corpus_revision": { "const": "C01-R2" },
         "parent_r1_source_oid": { "const": "1e24b0249dab04b21de492ad307b6a47c63f12b5" },
@@ -49,8 +49,8 @@
       "additionalProperties": false,
       "required": ["issue", "architecture_parent", "normative_spec_ref", "baseline_ref", "expected_row_origin", "executors", "status", "consume_freeze_point"],
       "properties": {
-        "issue": { "type": "string", "minLength": 1 }, "architecture_parent": { "type": "string", "minLength": 1 }, "normative_spec_ref": { "type": "string", "minLength": 1 }, "baseline_ref": { "type": "string", "minLength": 1 },
-        "expected_row_origin": { "type": "string", "minLength": 1 }, "executors": { "type": "string", "minLength": 1 }, "status": { "type": "string", "minLength": 1 }, "consume_freeze_point": { "type": "string", "minLength": 1 }
+        "issue": { "$ref": "#/$defs/text" }, "architecture_parent": { "$ref": "#/$defs/text" }, "normative_spec_ref": { "$ref": "#/$defs/text" }, "baseline_ref": { "$ref": "#/$defs/text" },
+        "expected_row_origin": { "$ref": "#/$defs/text" }, "executors": { "$ref": "#/$defs/text" }, "status": { "$ref": "#/$defs/text" }, "consume_freeze_point": { "$ref": "#/$defs/text" }
       }
     },
     "result_taxonomy": {
@@ -114,7 +114,7 @@
     "rows": { "type": "array", "items": { "$ref": "#/$defs/row" } }
   },
   "$defs": {
-    "rowId": { "type": "string", "pattern": "^C01-[A-Z0-9-]+$", "not": { "pattern": "\\s" } },
+    "rowId": { "type": "string", "pattern": "^C01(-[A-Z0-9]+)+-[0-9]{3}$", "not": { "pattern": "\\s" } },
     "rowKind": { "enum": ["observation", "authority", "forbidden"], "description": "Acceptance semantics inherited from v1: only kind=observation rows are adapter-emitted and compared (their cases carry the machine input and expected output); authority and forbidden rows are static authority read directly and are never emitted or compared as records. An observation row may also carry an `authority` block for the static bounds and closed sets its cases are read against — that block is still never emitted or compared." },
     "alias": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "not": { "pattern": "\\s" } },
     "machineToken": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_@/:()|+.-]+$", "not": { "pattern": "\\s" } },
@@ -125,11 +125,12 @@
     "u64OrAlias": { "oneOf": [{ "$ref": "#/$defs/u64Lit" }, { "$ref": "#/$defs/alias" }] }, "bytesOrAlias": { "oneOf": [{ "$ref": "#/$defs/bytesLit" }, { "$ref": "#/$defs/alias" }] },
     "closedObject": { "description": "A structured stimulus lives only in the catalog and is grammar-closed: snake_case keys, leaves that are a boolean, an integer, a machine token (an alias is one) or an array of those, and nested objects under the same rule. A value-owning slice adds its family-specific closed shape as a `oneOf` variant on the fixture value.", "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/snakeToken" }, "additionalProperties": { "$ref": "#/$defs/closedValue" } },
     "closedValue": { "oneOf": [{ "$ref": "#/$defs/boolLit" }, { "type": "integer" }, { "$ref": "#/$defs/machineToken" }, { "type": "array", "items": { "$ref": "#/$defs/closedValue" } }, { "$ref": "#/$defs/closedObject" }] },
-    "issueId": { "type": "string", "pattern": "^RUB-[0-9]+$", "not": { "pattern": "\\s" } },
+    "issueId": { "type": "string", "pattern": "^RUB-[1-9][0-9]*$", "not": { "pattern": "\\s" } },
     "snakeToken": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "not": { "pattern": "\\s" } },
     "resultToken": { "type": "string", "pattern": "^(ACCEPTED|STORED_NONCANONICAL|KNOWN_BLOCK_NOOP\\((CANONICAL|STORED_NONCANONICAL)\\)|MISSING_PARENT|ORPHAN_RETAINED|ORPHAN_ALREADY_RETAINED|CONSENSUS_INVALID\\([A-Z][A-Z0-9_]*\\)|LOCAL_BUSY|LOCAL_RESOURCE_UNAVAILABLE\\((inbound_budget_capacity|inbound_budget_overflow|apply_plan_metadata|noncanonical_bytes|noncanonical_count|orphan_pool|recovery_artifact)\\)|STALE_LOCAL_PLAN|LOCAL_CANCELLED|LOCAL_STORE_ERROR\\(noncanonical\\)|LOCAL_PERSISTENCE_ERROR\\(precommit\\)|TERMINAL_STORE_INTEGRITY\\(canonical\\)|TERMINAL_LOCAL_INVARIANT\\(evidence\\)|TERMINAL_PERSISTENCE\\((old|new|neither_or_unreadable)\\))$", "not": { "pattern": "\\s" } },
     "errorClassToken": { "description": "A taxonomy result token or RPC_UNAVAILABLE; one grammar, shared with `resultToken`.", "oneOf": [{ "$ref": "#/$defs/resultToken" }, { "const": "RPC_UNAVAILABLE" }] },
-    "notes": { "description": "Human explanation only, on a row or on one case. Numeric, boolean and map entries are rejected: a machine value belongs in `input`, `expected` or `authority`.", "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "text": { "type": "string", "minLength": 1, "pattern": "\\S" },
+    "notes": { "description": "Human explanation only, on a row or on one case. Numeric, boolean and map entries are rejected: a machine value belongs in `input`, `expected` or `authority`.", "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
     "inputType": { "enum": ["alias", "array<alias>", "array<bool>", "array<bytes32_hex>", "array<object>", "array<token>", "array<u64>", "bool", "bytes", "bytes32_hex", "object", "token", "u16", "u64"] },
     "fixtureEntry": {
       "description": "One catalog entry: a typed LITERAL, never an alias to an alias, so `type` excludes the alias tags and `value` is validated against it.",
@@ -151,13 +152,13 @@
     "row": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["row_id", "kind", "notes"],
+      "required": ["row_id", "kind"],
       "properties": {
         "row_id": { "$ref": "#/$defs/rowId" },
         "kind": { "$ref": "#/$defs/rowKind" },
         "notes": { "$ref": "#/$defs/notes" },
         "authority": { "description": "Static machine authority: the closed sets, orders and bounds the row freezes. Required on an authority row, optional on an observation row whose cases are read against static bounds (the R1 detail keys classified STATIC_AUTHORITY live here). Never adapter-emitted and never compared as a record.", "type": "object", "minProperties": 1 },
-        "forbidden_observation": { "type": "string", "minLength": 1 },
+        "forbidden_observation": { "$ref": "#/$defs/text" },
         "release_requirements": { "$ref": "#/$defs/releaseRequirements" },
         "cases": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/case" } }
       },
@@ -185,11 +186,13 @@
     },
     "releaseList": {
       "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["issue", "surface", "delivery_receipt_required"],
-        "properties": { "issue": { "$ref": "#/$defs/issueId" }, "surface": { "type": "string", "minLength": 1 }, "delivery_receipt_required": { "type": "boolean" } }
+        "properties": { "issue": { "$ref": "#/$defs/issueId" }, "surface": { "$ref": "#/$defs/text" }, "delivery_receipt_required": { "type": "boolean" } }
       }
     },
     "case": {
@@ -199,11 +202,11 @@
       "required": ["case_id", "input", "schedule_id", "expected", "obligation_ids", "sources"],
       "properties": {
         "case_id": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "not": { "pattern": "\\s" } },
-        "input": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/inputPointer" } },
+        "input": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/inputPointer" } },
         "schedule_id": { "description": "Deterministic schedule identity for an interleaved stimulus (barriers/events named by the schedule), or null when the stimulus needs no interleaving. Never a sleep.", "oneOf": [{ "$ref": "#/$defs/machineToken" }, { "type": "null" }] },
         "expected": { "$ref": "#/$defs/expected" },
-        "obligation_ids": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^OBL-[A-Z0-9-]+$", "not": { "pattern": "\\s" } } },
-        "sources": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "obligation_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^OBL-[A-Z0-9-]+$", "not": { "pattern": "\\s" } } },
+        "sources": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
         "notes": { "$ref": "#/$defs/notes" },
         "release_requirements": { "description": "Optional per-case override where one case of the row requires a different delivery set; the row-level map is the default.", "$ref": "#/$defs/releaseRequirements" }
       }
@@ -263,7 +266,7 @@
         "state_image": { "$ref": "#/$defs/stateImage" },
         "canonical_applied_blocks": {
           "description": "The published canonical-applied summary projection (DD-007): `null` when the truth class exposes no summary (every non-NEW truth), `[]` exactly for a proven-NEW standalone disconnect that connects no new row, otherwise one row per newly canonical block in ascending height, including a row whose complete_da_ids is empty.",
-          "oneOf": [{ "type": "null" }, { "type": "array", "items": { "$ref": "#/$defs/summaryRow" } }]
+          "oneOf": [{ "type": "null" }, { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/summaryRow" } }]
         }
       },
       "allOf": [
@@ -275,6 +278,14 @@
             "oneOf": [{ "required": ["wire_disposition"] }, { "required": ["recovery_outcome"] }]
           },
           "else": { "not": { "anyOf": [{ "required": ["pipeline_reached"] }, { "required": ["wire_disposition"] }, { "required": ["recovery_outcome"] }] } }
+        },
+        {
+          "if": { "properties": { "canonical_counters": { "properties": { "accepted_delta": { "not": { "const": "0" } } }, "required": ["accepted_delta"] } }, "required": ["canonical_counters"] },
+          "then": { "properties": { "commit_truth": { "const": "NEW" } } }
+        },
+        {
+          "if": { "properties": { "canonical_counters": { "properties": { "rejected_delta": { "const": "+1" } }, "required": ["rejected_delta"] } }, "required": ["canonical_counters"] },
+          "then": { "properties": { "commit_truth": { "const": "OLD" } } }
         },
         {
           "if": { "properties": { "commit_truth": { "const": "NEW" } }, "required": ["commit_truth"] },
@@ -307,14 +318,14 @@
         "value": { "not": { "type": "null" } },
         "type": { "enum": ["array", "bool", "hash", "object", "token", "u64"] },
         "required": { "type": "boolean" },
-        "observer": { "type": "string", "minLength": 1 }
+        "observer": { "$ref": "#/$defs/text" }
       },
       "allOf": [
         { "if": { "properties": { "type": { "const": "token" } }, "required": ["type"] }, "then": { "properties": { "value": { "oneOf": [{ "$ref": "#/$defs/machineToken" }, { "const": "" }] } } } },
         { "if": { "properties": { "type": { "const": "hash" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/bytes32OrAlias" } } } },
         { "if": { "properties": { "type": { "const": "u64" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 } } } },
-        { "if": { "properties": { "type": { "const": "array" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "array" } } } },
-        { "if": { "properties": { "type": { "const": "object" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "object" } } } },
+        { "if": { "properties": { "type": { "const": "array" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "array", "items": { "$ref": "#/$defs/closedValue" } } } } },
+        { "if": { "properties": { "type": { "const": "object" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/closedObject" } } } },
         { "if": { "properties": { "type": { "const": "bool" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "boolean" } } } }
       ]
     },
@@ -336,7 +347,7 @@
       "required": ["relation", "digest_alias", "direct_fields"],
       "properties": {
         "relation": { "enum": ["new", "old", "withheld", "unchanged"] },
-        "digest_alias": { "$ref": "#/$defs/machineToken" },
+        "digest_alias": { "description": "Generator-named machine token, not a catalog key; RUB-1208 lands the resolver that checks uniqueness and resolution.", "$ref": "#/$defs/machineToken" },
         "direct_fields": { "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/snakeToken" }, "additionalProperties": { "$ref": "#/$defs/machineToken" } }
       }
     },
@@ -347,7 +358,7 @@
       "properties": {
         "block_id": { "$ref": "#/$defs/alias" },
         "block_hash": { "$ref": "#/$defs/bytes32OrAlias" },
-        "complete_da_ids": { "description": "Ascending raw bytes; may be empty; compared element-wise in order. Cross-block occurrences remain in their own row.", "type": "array", "items": { "$ref": "#/$defs/bytes32OrAlias" } }
+        "complete_da_ids": { "description": "Ascending raw bytes; may be empty. Order and cross-block duplicates are comparator-enforced (RUB-926 / RUB-901), not by this schema.", "type": "array", "items": { "$ref": "#/$defs/bytes32OrAlias" } }
       }
     }
   }

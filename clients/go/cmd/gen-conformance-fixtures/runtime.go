@@ -2777,10 +2777,6 @@ func cp2AliasesOf(in cp2Input) []string {
 	switch v := in.ValueOrAlias.(type) {
 	case string:
 		out = cp2AppendAlias(out, v)
-	case []string:
-		for _, s := range v {
-			out = cp2AppendAlias(out, s)
-		}
 	case []any:
 		for _, e := range v {
 			if s, ok := e.(string); ok {
