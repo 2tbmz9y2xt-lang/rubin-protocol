@@ -175,17 +175,12 @@ may claim it as a passing gate.
 
 ### The dormant C01-R2 successor pair (RUB-1207)
 
-`conformance/fixtures/protocol/canonical_pipeline_v2.json` and
-`conformance/schemas/cv-canonical-pipeline-v2.json` (schema version 2). Status: **BUILDING** — not an
-authority. The v1 pair above stays the inert authority and a byte-frozen read-only parent (its exact
-bytes are pinned in the v2 `_meta` and recomputed by the generator tests) until RUB-1204 activates v2
-and deletes the parent in the same PR; two active authorities never coexist. `_meta.closure_epoch`
-pins the RUB-1206 design-closure manifest (`rubin-c01-design-closure-v3`) as generator constants and
-schema `const`s, so a one-sided edit of either copy fails generation or validation. `row_registry` is
-the frozen `row_id -> kind` map of the 79 C01-R2 identities; migration status is derived — a row is
-migrated exactly when its id appears in `rows`, empty here, as is the alias catalog `fixtures`. The
-schema defines the row and case shape field by field. RUB-1208..RUB-1212 migrate rows and RUB-1204
-completes the revision; while the status is `building` no C02/C02A/C03/C04 consumer may bind it.
+`conformance/fixtures/protocol/canonical_pipeline_v2.json` + `conformance/schemas/cv-canonical-pipeline-v2.json`
+(schema version 2). Status: **BUILDING** — not an authority, and no C02/C02A/C03/C04 consumer may bind it.
+The v1 pair above stays the inert authority and a byte-frozen read-only parent until RUB-1204 activates v2
+and deletes it in the same PR. `_meta.closure_epoch` pins the RUB-1206 design closure; `row_registry` freezes
+the 79 `row_id -> kind` identities and migration status is derived from `rows`, empty here with `fixtures`.
+The schema defines the row and case shape; RUB-1208..RUB-1212 migrate rows and RUB-1204 completes.
 
 ## Fuzz crash promotion (manual-only)
 

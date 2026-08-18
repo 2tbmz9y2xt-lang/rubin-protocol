@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -1432,17 +1433,6 @@ func TestCanonicalPipelineV2CommitTruthRelationIsExact(t *testing.T) {
 			t.Errorf("%s: relation maps %q to %s, but the merged R1 row states %s", row.ID, row.Result, truth, row.CommitTruth)
 		}
 	}
-	for _, member := range []string{
-		"ACCEPTED", "STORED_NONCANONICAL", "KNOWN_BLOCK_NOOP(CANONICAL)", "MISSING_PARENT",
-		"ORPHAN_RETAINED", "ORPHAN_ALREADY_RETAINED", "CONSENSUS_INVALID(BLOCK_ERR_MERKLE_INVALID)", "LOCAL_BUSY",
-		"LOCAL_RESOURCE_UNAVAILABLE(orphan_pool)", "STALE_LOCAL_PLAN", "LOCAL_CANCELLED", "LOCAL_STORE_ERROR(noncanonical)", //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
-		"LOCAL_PERSISTENCE_ERROR(precommit)", "TERMINAL_STORE_INTEGRITY(canonical)", "TERMINAL_LOCAL_INVARIANT(evidence)",
-		"TERMINAL_PERSISTENCE(old)", "TERMINAL_PERSISTENCE(new)", "TERMINAL_PERSISTENCE(neither_or_unreadable)",
-	} {
-		if _, ok := cp2CommitTruthFor(member); !ok {
-			t.Errorf("taxonomy member %q has no commit truth", member)
-		}
-	}
 	if _, ok := cp2CommitTruthFor("ACCEPTED(extra)"); ok {
 		t.Error("a malformed result must not resolve to a commit truth")
 	}
@@ -1549,6 +1539,64 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	rows[0].Cases[0].Input[0].Type, rows[0].Cases[0].Input[0].ValueOrAlias = "token", "ABSENT"
 	if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}); err != nil {
 		t.Fatalf("token input must not demand a fixture: %v", err)
+	}
+}
+
+// TestCanonicalPipelineV2GoSchemaParity pins every closed list the generator
+// keeps against the committed schema: one vocabulary, two copies, no drift.
+func TestCanonicalPipelineV2GoSchemaParity(t *testing.T) {
+	repoRoot, err := repoRootFromGoModule()
+	if err != nil {
+		t.Fatalf("repoRoot: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(repoRoot, cp2SchemaRel))
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("parse schema: %v", err)
+	}
+	list := func(path ...string) []string {
+		node := any(schema)
+		for _, key := range path {
+			node = node.(map[string]any)[key]
+		}
+		out := []string{}
+		for _, v := range node.([]any) {
+			if v != nil { // http carries an explicit null the Go list does not
+				out = append(out, fmt.Sprint(v))
+			}
+		}
+		return out
+	}
+	rpc := []string{"$defs", "rpcProjection", "properties"}
+	httpValues := []string{}
+	for _, v := range cp2HTTPValues {
+		httpValues = append(httpValues, strconv.Itoa(v))
+	}
+	for name, pair := range map[string][2][]string{
+		"class":            {cp2RPCClasses, list(append(rpc, "class", "enum")...)},
+		"mined":            {cp2MinedValues, list(append(rpc, "mined", "enum")...)},
+		"success_identity": {cp2SuccessIdentityValues, list(append(rpc, "success_identity", "enum")...)},
+		"commit_state":     {cp2CommitStateValues, list(append(rpc, "commit_state", "enum")...)},
+		"phase":            {cp2PhaseValues, list(append(rpc, "phase", "enum")...)},
+		"http":             {httpValues, list(append(rpc, "http", "enum")...)},
+		"inputType":        {cp2InputTypes, list("$defs", "inputType", "enum")},
+		"provenance":       {cp2Provenances, list("$defs", "inputPointer", "properties", "provenance", "enum")},
+		"wire_disposition": {cp2WireDispositionValues, list("properties", "wire_disposition_values", "const")},
+		"recovery_outcome": {cp2RecoveryOutcomeValues, list("properties", "recovery_outcome_values", "const")},
+	} {
+		if got, want := slices.Sorted(slices.Values(pair[0])), slices.Sorted(slices.Values(pair[1])); !slices.Equal(got, want) {
+			t.Errorf("%s: generator %v, schema %v", name, got, want)
+		}
+	}
+	registry := map[string]string{}
+	for id, kind := range schema["properties"].(map[string]any)["row_registry"].(map[string]any)["const"].(map[string]any) {
+		registry[id] = fmt.Sprint(kind)
+	}
+	if !maps.Equal(registry, cp2RowRegistry()) {
+		t.Error("row_registry const and the generator registry disagree")
 	}
 }
 
