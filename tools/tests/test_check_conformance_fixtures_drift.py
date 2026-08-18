@@ -438,6 +438,20 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
                 ("rows/0/cases/0/input/0", "additionalProperties"),
             ),
             "wire disposition off domain": (set_expected("wire_disposition", "FRAME_BOGUS"), (f"{expected}/wire_disposition", "enum")),
+            "u64 input literal mismatch": (
+                lambda r: r["cases"][0]["input"][0].update({"type": "u64", "value_or_alias": "abc"}),
+                ("rows/0/cases/0/input/0/value_or_alias", "oneOf"),
+            ),
+            "bool input literal mismatch": (
+                lambda r: r["cases"][0]["input"][0].update({"type": "bool", "value_or_alias": "yes"}),
+                ("rows/0/cases/0/input/0/value_or_alias", "oneOf"),
+            ),
+            "array effect with a scalar value": (
+                lambda r: r["cases"][0]["expected"]["effects"].__setitem__(
+                    "relay_frames", {"value": 1, "type": "array", "required": True, "observer": "inv frame capture"}
+                ),
+                (f"{expected}/effects/relay_frames/value", "type"),
+            ),
             "hash effect value off grammar": (
                 lambda r: r["cases"][0]["expected"]["effects"].__setitem__(
                     "gc_victim_hash",
@@ -457,7 +471,8 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
         validator, data = self._load()
         for pointer, value in (
             ("manifest_root_sha256", "0" * 64),
-            ("status", "complete_ish"),
+            # `complete` is the value RUB-1204 will set; this revision pins `building`.
+            ("status", "complete"),
         ):
             with self.subTest(field=pointer):
                 epoch = {**data["_meta"]["closure_epoch"], pointer: value}
@@ -466,16 +481,19 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
             validator.is_valid({**data, "_meta": {**data["_meta"], "parent_artifact_sha256": "0" * 64}})
         )
 
-    def test_row_registry_cardinality_and_kind_domain_are_closed(self):
-        # Identity itself is pinned by the v1-parent test and the Go registry test;
-        # this closes the shape: a removed identity, an unauthorized key, a kind
-        # outside the domain.
+    def test_row_registry_is_pinned_as_an_exact_map(self):
+        # The schema pins the map as a `const`, independently of the generator
+        # constant: a removed identity, an unauthorized key, a kind change and a
+        # same-cardinality substitution all fail on this side alone.
         validator, data = self._load()
         registry = data["row_registry"]
+        substituted = dict(list(registry.items())[1:]) | {"C01-SUBSTITUTED-001": "observation"}
+        self.assertEqual(len(substituted), len(registry))
         for broken in (
             dict(list(registry.items())[1:]),
             {**registry, "C01-NOT-AUTHORIZED-001": "observation"},
             {**registry, "C01-PATHS-001": "conjecture"},
+            substituted,
         ):
             self.assertFalse(validator.is_valid({**data, "row_registry": broken}))
 

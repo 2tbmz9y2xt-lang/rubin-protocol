@@ -2475,7 +2475,9 @@ var (
 	cp2HTTPValues            = []int{200, 422, 503}
 )
 
-var cp2CaseIDRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+// cp2UpperTokenRE is the one uppercase machine-identifier grammar the schema
+// applies to both a case id and a fixtures alias.
+var cp2UpperTokenRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 
 // cp2NewRows are the 17 R2 rows the closure epoch authorizes on top of the 62
 // inherited identities, which are derived from canonicalPipelineRows() rather
@@ -2524,8 +2526,19 @@ type cp2Expected struct {
 	RPC             cp2RPC  `json:"rpc_projection"`
 }
 
+// cp2Input is one typed stimulus pointer; the json tags mirror the schema.
+type cp2Input struct {
+	Pointer               string `json:"pointer"`
+	Type                  string `json:"type"`
+	ValueOrAlias          any    `json:"value_or_alias"`
+	Provenance            string `json:"provenance"`
+	ProductionSetupSink   string `json:"production_setup_sink"`
+	ConsumptionProofOwner string `json:"consumption_proof_owner"`
+}
+
 type cp2Case struct {
 	CaseID   string      `json:"case_id"`
+	Input    []cp2Input  `json:"input,omitempty"`
 	Expected cp2Expected `json:"expected"`
 }
 
@@ -2664,7 +2677,7 @@ func cp2ValidateResultTruth(where string, e cp2Expected) error {
 func cp2ValidateCases(rowID string, cases []cp2Case) error {
 	seen := make(map[string]bool, len(cases))
 	for _, c := range cases {
-		if !cp2CaseIDRE.MatchString(c.CaseID) {
+		if !cp2UpperTokenRE.MatchString(c.CaseID) {
 			return fmt.Errorf("row %s: case id %q is not a machine token", rowID, c.CaseID)
 		}
 		if seen[c.CaseID] {
@@ -2746,10 +2759,63 @@ func cp2Authority() cpMap {
 	}
 }
 
+// cp2AliasesOf returns the alias-shaped strings one stimulus pointer carries.
+func cp2AliasesOf(in cp2Input) []string {
+	var out []string
+	switch v := in.ValueOrAlias.(type) {
+	case string:
+		out = cp2AppendAlias(out, v)
+	case []string:
+		for _, s := range v {
+			out = cp2AppendAlias(out, s)
+		}
+	case []any:
+		for _, e := range v {
+			if s, ok := e.(string); ok {
+				out = cp2AppendAlias(out, s)
+			}
+		}
+	}
+	return out
+}
+
+func cp2AppendAlias(out []string, s string) []string {
+	if cp2UpperTokenRE.MatchString(s) {
+		return append(out, s)
+	}
+	return out
+}
+
+// cp2ValidateAliases resolves every alias a stimulus pointer names against the
+// top-level fixtures catalog. JSON Schema pins an alias's grammar but cannot
+// express its EXISTENCE, so this is the only gate that catches a dangling one.
+// The catalog is empty until RUB-1208 populates it, so an alias-carrying row is
+// rejected until then — the intended fail-closed order.
+// ponytail: input side only; the expected struct carries no effects or summary
+// yet, so RUB-1208 extends this walk when it lands those alias positions.
+func cp2ValidateAliases(rows []cp2Row, fixtures cpMap) error {
+	for _, row := range rows {
+		for _, c := range row.Cases {
+			for _, in := range c.Input {
+				for _, alias := range cp2AliasesOf(in) {
+					if _, ok := fixtures[alias]; !ok {
+						return fmt.Errorf("row %s/%s: input %s names alias %q, absent from the fixtures catalog", row.RowID, c.CaseID, in.Pointer, alias)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func mustWriteCanonicalPipelineV2Corpus(path string) {
 	registry := cp2RowRegistry()
 	rows := []cp2Row{} // BUILDING: RUB-1208..RUB-1212 migrate rows, RUB-1204 completes.
+	fixtures := cpMap{}
 	if err := cp2ValidateRows(rows, registry); err != nil {
+		fatalf("canonical pipeline v2: %v", err)
+	}
+	if err := cp2ValidateAliases(rows, fixtures); err != nil {
 		fatalf("canonical pipeline v2: %v", err)
 	}
 	artifact := cp2Artifact{
@@ -2764,7 +2830,7 @@ func mustWriteCanonicalPipelineV2Corpus(path string) {
 		WireDispositionValues: cp2WireDispositionValues,
 		RecoveryOutcomeValues: cp2RecoveryOutcomeValues,
 		RowRegistry:           registry,
-		Fixtures:              cpMap{},
+		Fixtures:              fixtures,
 		Rows:                  rows,
 	}
 	mustWriteJSON(path, &artifact)

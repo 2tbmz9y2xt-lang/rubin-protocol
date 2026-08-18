@@ -38,7 +38,7 @@
             "image_manifest_hash": { "const": "e014000b71102e54be70af0dc756f8930c57573f7346db05935964053230f928" },
             "summary_manifest_hash": { "const": "39e39d94593d434e7051a3f77ca94d3dd31a5a8d65a3f12a764e29a5fde041dd" },
             "relation_snapshot_hash": { "const": "3e7db40fa6917b5a7d61ab113a74f7107f8f166080393e1c9789dbd927b24edb" },
-            "status": { "enum": ["building", "complete"], "description": "Only the final C01-R2 integration (RUB-1204) may set `complete`; every intermediate revision is `building` and is not a passing authority for any consumer." }
+            "status": { "const": "building", "description": "This revision is BUILDING and is not a passing authority for any consumer; RUB-1204 changes this const to `complete` when it activates v2." }
           }
         }
       }
@@ -75,12 +75,35 @@
       "const": ["bootstrap_only_pregenesis", "fail_closed_no_exposure", "identity_proven_route1"]
     },
     "row_registry": {
-      "description": "The frozen C01-R2 identity map `row_id -> kind`: the 62 identities inherited from the byte-frozen v1 corpus plus the 17 R2 rows the closure epoch authorizes. A row removal, rename, kind change or unauthorized key fails generation. Migration status is DERIVED, never stored: a row is migrated exactly when its id appears in `rows`, which RUB-1208..RUB-1212 fill and RUB-1204 completes.",
+      "description": "The frozen C01-R2 identity map `row_id -> kind`: the 62 identities inherited from the byte-frozen v1 corpus plus the 17 R2 rows the closure epoch authorizes. The map is pinned here as an exact `const` and independently in the generator, so a one-sided rename, removal, kind change or same-cardinality substitution fails validation or generation. Migration status is DERIVED, never stored: a row is migrated exactly when its id appears in `rows`, which RUB-1208..RUB-1212 fill and RUB-1204 completes.",
       "type": "object",
-      "minProperties": 79,
-      "maxProperties": 79,
-      "propertyNames": { "$ref": "#/$defs/rowId" },
-      "additionalProperties": { "$ref": "#/$defs/rowKind" }
+      "const": {
+        "C01-APPLYMETA-CAP-001": "observation", "C01-APPLYMETA-OVER-001": "observation", "C01-BUDGET-RACE-001": "observation",
+        "C01-BUSY-001": "observation", "C01-CANCEL-001": "observation", "C01-CKPT-001": "authority", "C01-CKPT-CASES-001": "observation",
+        "C01-DACLEAN-001": "observation", "C01-DIRECT-001": "observation", "C01-DISCONNECT-001": "observation",
+        "C01-EFFECT-ACCEPTED-001": "observation", "C01-EFFECT-STORED-001": "observation", "C01-EQUALWORK-001": "observation",
+        "C01-FAULT-ACCEPTED-001": "observation", "C01-FAULT-STORED-001": "observation", "C01-FIRSTERR-INDEX-001": "observation",
+        "C01-FIRSTERR-LATE-001": "observation", "C01-FORBID-BUSY-001": "forbidden", "C01-FORBID-INTERMEDIATE-001": "forbidden",
+        "C01-FORBID-PERSIST-001": "forbidden", "C01-FORBID-PRESENCE-001": "forbidden", "C01-FORBID-RETRY-001": "forbidden",
+        "C01-FORBID-SURFACE-001": "forbidden", "C01-GC-CRASH-001": "authority", "C01-GC-CRASH-CASES-001": "observation",
+        "C01-GC-HEALTHY-001": "observation", "C01-GC-ORDER-001": "observation", "C01-GENESIS-001": "observation",
+        "C01-GO-CONSTANTS-001": "authority", "C01-INVENTORY-001": "authority", "C01-INVENTORY-CASES-001": "observation",
+        "C01-INVENTORY-RECLAIMED-001": "authority", "C01-NEUTRAL-001": "authority", "C01-NOOP-CMPCT-001": "observation",
+        "C01-NOOP-FULL-001": "observation", "C01-ORPH-DUP-001": "observation", "C01-ORPH-EVICT-001": "observation",
+        "C01-ORPH-INFLIGHT-001": "observation", "C01-ORPH-MISSING-PARENT-001": "observation", "C01-ORPH-OVERSIZE-001": "observation",
+        "C01-ORPH-RETAIN-001": "observation", "C01-ORPH-SOURCE51-001": "observation", "C01-PATH-COMPACT-001": "observation",
+        "C01-PATH-FALLBACK-001": "observation", "C01-PATH-FULL-001": "observation", "C01-PATHS-001": "authority", "C01-POSTCOMMIT-001": "authority",
+        "C01-PRENS-001": "observation", "C01-PRESENCE-001": "authority", "C01-PRESENCE-STORED-001": "observation",
+        "C01-PRESENCE-STOREERR-001": "observation", "C01-PRESENCE-TERMINAL-001": "observation", "C01-PROVIDER-001": "authority",
+        "C01-PROVIDER-CASES-001": "observation", "C01-RECLAIMED-RECEIVE-001": "observation", "C01-RECOVERY-001": "observation",
+        "C01-RELAY-ACCEPTED-001": "authority", "C01-RELAY-OBS-001": "observation", "C01-RELAY-STORED-001": "authority",
+        "C01-REORG-001": "observation", "C01-REORGMETA-001": "authority", "C01-REORGMETA-CASES-001": "observation",
+        "C01-RES-IDENTITIES-001": "authority", "C01-RES-IDENTITIES-PENDING-001": "authority", "C01-RES-RECOVERY-001": "observation",
+        "C01-RESOLVER-001": "observation", "C01-RPC-PHASE-001": "observation", "C01-SIDE-001": "observation", "C01-SRCKEY-001": "authority",
+        "C01-SRCKEY-CASES-001": "observation", "C01-STALE-001": "observation", "C01-SUMMARY-001": "observation", "C01-TERMINV-001": "observation",
+        "C01-TERMINV-BOOT-001": "observation", "C01-TP-NEW-001": "observation", "C01-TP-OLD-001": "observation", "C01-TP-UNKNOWN-001": "observation",
+        "C01-TTLFENCE-001": "observation", "C01-WIRE-OVERFLOW-001": "observation"
+      }
     },
     "fixtures": {
       "description": "Deterministic alias catalog, keyed by alias. Exactly three positions resolve here: an input pointer's `value_or_alias`, the bytes32-or-alias positions (a summary row's `block_hash` and `complete_da_ids`), and a `hash`-typed effect value. `digest_alias` and `direct_fields` values are generator-named machine tokens, not catalog keys. Resolution is checked by the generator once rows carry aliases (RUB-1208 lands the first ones); the catalog is empty while no row is migrated. A free-form object or a row-id-only hard-coded setup is not a substitute.",
@@ -101,6 +124,11 @@
     "alias": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "not": { "pattern": "\\s" } },
     "machineToken": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_@/:()|+.-]+$", "not": { "pattern": "\\s" } },
     "bytes32OrAlias": { "type": "string", "pattern": "^([0-9a-f]{64}|[A-Z][A-Z0-9_]*)$", "not": { "pattern": "\\s" } },
+    "boolOrAlias": { "oneOf": [{ "type": "boolean" }, { "$ref": "#/$defs/alias" }] },
+    "u16OrAlias": { "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 65535 }, { "$ref": "#/$defs/alias" }] },
+    "u64OrAlias": { "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }, { "$ref": "#/$defs/alias" }] },
+    "bytesOrAlias": { "oneOf": [{ "type": "string", "pattern": "^([0-9a-f]{2})*$" }, { "$ref": "#/$defs/alias" }] },
+    "objectOrAlias": { "oneOf": [{ "type": "object" }, { "$ref": "#/$defs/alias" }] },
     "issueId": { "type": "string", "pattern": "^RUB-[0-9]+$", "not": { "pattern": "\\s" } },
     "snakeToken": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "not": { "pattern": "\\s" } },
     "resultToken": { "type": "string", "pattern": "^(ACCEPTED|STORED_NONCANONICAL|KNOWN_BLOCK_NOOP\\((CANONICAL|STORED_NONCANONICAL)\\)|MISSING_PARENT|ORPHAN_RETAINED|ORPHAN_ALREADY_RETAINED|CONSENSUS_INVALID\\([A-Z][A-Z0-9_]*\\)|LOCAL_BUSY|LOCAL_RESOURCE_UNAVAILABLE\\((inbound_budget_capacity|inbound_budget_overflow|apply_plan_metadata|noncanonical_bytes|noncanonical_count|orphan_pool|recovery_artifact)\\)|STALE_LOCAL_PLAN|LOCAL_CANCELLED|LOCAL_STORE_ERROR\\(noncanonical\\)|LOCAL_PERSISTENCE_ERROR\\(precommit\\)|TERMINAL_STORE_INTEGRITY\\(canonical\\)|TERMINAL_LOCAL_INVARIANT\\(evidence\\)|TERMINAL_PERSISTENCE\\((old|new|neither_or_unreadable)\\))$", "not": { "pattern": "\\s" } },
@@ -178,7 +206,23 @@
         "provenance": { "enum": ["normative_boundary", "witness_fixture", "deterministic_schedule_control", "configured_bound"] },
         "production_setup_sink": { "description": "The exact production entrypoint or test seam the adapter drives to deliver this input. An input production cannot receive is a design defect, not a schema-legal value.", "type": "string", "minLength": 1 },
         "consumption_proof_owner": { "$ref": "#/$defs/issueId" }
-      }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "alias" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "$ref": "#/$defs/alias" } } } },
+        { "if": { "properties": { "type": { "const": "bool" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "$ref": "#/$defs/boolOrAlias" } } } },
+        { "if": { "properties": { "type": { "const": "u16" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "$ref": "#/$defs/u16OrAlias" } } } },
+        { "if": { "properties": { "type": { "const": "u64" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "$ref": "#/$defs/u64OrAlias" } } } },
+        { "if": { "properties": { "type": { "const": "bytes32_hex" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "$ref": "#/$defs/bytes32OrAlias" } } } },
+        { "if": { "properties": { "type": { "const": "bytes" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "$ref": "#/$defs/bytesOrAlias" } } } },
+        { "if": { "properties": { "type": { "const": "token" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "$ref": "#/$defs/machineToken" } } } },
+        { "if": { "properties": { "type": { "const": "object" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "$ref": "#/$defs/objectOrAlias" } } } },
+        { "if": { "properties": { "type": { "const": "array<alias>" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "type": "array", "items": { "$ref": "#/$defs/alias" } } } } },
+        { "if": { "properties": { "type": { "const": "array<bool>" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "type": "array", "items": { "$ref": "#/$defs/boolOrAlias" } } } } },
+        { "if": { "properties": { "type": { "const": "array<u64>" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "type": "array", "items": { "$ref": "#/$defs/u64OrAlias" } } } } },
+        { "if": { "properties": { "type": { "const": "array<token>" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "type": "array", "items": { "$ref": "#/$defs/machineToken" } } } } },
+        { "if": { "properties": { "type": { "const": "array<bytes32_hex>" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "type": "array", "items": { "$ref": "#/$defs/bytes32OrAlias" } } } } },
+        { "if": { "properties": { "type": { "const": "array<object>" } }, "required": ["type"] }, "then": { "properties": { "value_or_alias": { "type": "array", "items": { "$ref": "#/$defs/objectOrAlias" } } } } }
+      ]
     },
     "expected": {
       "description": "The typed expected output. It is never included in adapter input. `result` is null exactly for a case disposed before a consensus classification: such a case carries `pipeline_reached: false` and exactly one of `wire_disposition` (DD-001 wire layer) or `recovery_outcome` (DD-002 startup/recovery), and a classified case carries none of the three. `canonical_applied_blocks` is an array exactly when `commit_truth` is NEW and null otherwise (DD-007: only NEW exposes the planned summary). The result -> commit_truth relation is spec 6.4.1 (RUBIN_MEMPOOL_POLICY.md L436-L446 @ rubin-spec c14b0100) and is pinned by the generator.",
@@ -255,7 +299,9 @@
       "allOf": [
         { "if": { "properties": { "type": { "const": "token" } }, "required": ["type"] }, "then": { "properties": { "value": { "oneOf": [{ "$ref": "#/$defs/machineToken" }, { "const": "" }] } } } },
         { "if": { "properties": { "type": { "const": "hash" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/bytes32OrAlias" } } } },
-        { "if": { "properties": { "type": { "const": "u64" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "integer", "minimum": 0 } } } },
+        { "if": { "properties": { "type": { "const": "u64" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 } } } },
+        { "if": { "properties": { "type": { "const": "array" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "array" } } } },
+        { "if": { "properties": { "type": { "const": "object" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "object" } } } },
         { "if": { "properties": { "type": { "const": "bool" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "boolean" } } } }
       ]
     },

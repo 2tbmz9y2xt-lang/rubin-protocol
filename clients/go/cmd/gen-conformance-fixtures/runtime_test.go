@@ -1516,6 +1516,25 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 	}
 }
 
+// TestCanonicalPipelineV2AliasesResolveInFixtures pins the one rule JSON Schema
+// cannot express: an alias must exist in the catalog. Until RUB-1208 populates
+// `fixtures`, an alias-carrying row is rejected — the intended fail-closed order.
+func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
+	c := cp2ValidCase()
+	c.Input = []cp2Input{{
+		Pointer: "/input/stimulus_block", Type: "alias", ValueOrAlias: "B1",
+		Provenance: "normative_boundary", ProductionSetupSink: "node.Miner.MineOne", ConsumptionProofOwner: "RUB-923",
+	}}
+	rows := []cp2Row{{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{c}}}
+	err := cp2ValidateAliases(rows, cpMap{})
+	if err == nil || !strings.Contains(err.Error(), `alias "B1"`) {
+		t.Fatalf("empty catalog: error = %v, want a rejection naming alias B1", err)
+	}
+	if err := cp2ValidateAliases(rows, cpMap{"B1": cpMap{}}); err != nil {
+		t.Fatalf("catalog carrying B1 must validate: %v", err)
+	}
+}
+
 // TestCanonicalPipelineV2CorpusIsByteDeterministic proves the dormant revision
 // is reproducible and carries neither retired v1 field.
 func TestCanonicalPipelineV2CorpusIsByteDeterministic(t *testing.T) {
