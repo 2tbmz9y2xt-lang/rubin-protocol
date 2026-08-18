@@ -1487,6 +1487,14 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		"rpc commit state":     func(r *cp2Row) { r.Cases[0].Expected.RPC.CommitState = cp2Ptr("maybe_committed") },
 		"rpc error class":      func(r *cp2Row) { r.Cases[0].Expected.RPC.ErrorClass = cp2Ptr("LOCAL BUSY") },
 		"token whitespace":     func(r *cp2Row) { r.Cases[0].CaseID = "MAIN CASE" },
+		"class tuple":          func(r *cp2Row) { r.Cases[0].Expected.RPC.HTTP = cp2Ptr(503) },
+		"wire truth": func(r *cp2Row) {
+			r.Cases[0].Expected.Result, r.Cases[0].Expected.PipelineReached, r.Cases[0].Expected.WireDisposition = nil, cp2Ptr(false), cp2Ptr("CHECKSUM_REJECT")
+		},
+		"duplicate pointer": func(r *cp2Row) {
+			p := cp2Input{Pointer: "/input/b", Type: "token", Provenance: "witness_fixture"}
+			r.Cases[0].Input = []cp2Input{p, p}
+		},
 		"duplicate case id":    func(r *cp2Row) { r.Cases = append(r.Cases, r.Cases[0]) },
 		"missing reached flag": func(r *cp2Row) { r.Cases[0].Expected.Result = nil },
 		"surplus reached flag": func(r *cp2Row) { r.Cases[0].Expected.PipelineReached = cp2Ptr(false) },
@@ -1497,7 +1505,8 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		"unknown commit truth": "commit truth \"MAYBE\" is unknown", "rpc class": "rpc_projection.class",
 		"rpc mined": "rpc_projection.mined", "rpc http": "rpc_projection.http",
 		"rpc commit state": "rpc_projection.commit_state", "rpc error class": "neither a taxonomy token",
-		"token whitespace": "is not a machine token", "duplicate case id": "duplicate case id",
+		"token whitespace": "is not a machine token", "class tuple": "requires [result_selecting_mined_candidate 200",
+		"wire truth": "wire_disposition requires commit truth OLD", "duplicate pointer": "duplicate input pointer /input/b", "duplicate case id": "duplicate case id",
 		"missing reached flag": "null result requires pipeline_reached",
 		"surplus reached flag": "only when result is null",
 	}

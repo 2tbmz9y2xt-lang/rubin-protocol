@@ -2477,6 +2477,28 @@ var (
 
 // cp2UpperTokenRE is the one uppercase machine-identifier grammar the schema
 // applies to both a case id and a fixtures alias.
+// cp2ClassTuple pins each derived RPC class to its exact
+// (phase, http, commit_state, mined, success_identity, error_class-present)
+// tuple, mirroring the schema's per-class arms. "" is JSON null. NOT_REACHED is
+// deliberately absent: it is the one open class and the schema pins its bounds.
+var cp2ClassTuple = map[string][6]string{
+	"BOOTSTRAP_CONTINUATION_ONLY":          {"continuation_only_bootstrap", "", "", "not_applicable", "not_applicable", "no"},
+	"BOOTSTRAP_TERMINAL_INVARIANT_503":     {"continuation_only_bootstrap", "503", "not_committed", "false", "absent", "yes"},
+	"BOOTSTRAP_TERMINAL_NEW_503_COMMITTED": {"continuation_only_bootstrap", "503", "committed", "false", "absent", "yes"},
+	"MINED_200_COMMITTED":                  {"result_selecting_mined_candidate", "200", "committed", "true", "present", "no"},
+	"MINED_422_NOT_COMMITTED":              {"result_selecting_mined_candidate", "422", "not_committed", "false", "absent", "yes"},
+	"MINED_503_COMMITTED_TERMINAL_NEW":     {"result_selecting_mined_candidate", "503", "committed", "true", "present", "yes"},
+	"MINED_503_NOT_COMMITTED":              {"result_selecting_mined_candidate", "503", "not_committed", "false", "absent", "yes"},
+	"MINED_503_UNKNOWN":                    {"result_selecting_mined_candidate", "503", "unknown", "absent", "absent", "yes"},
+	"STARTUP_UNAVAILABLE_503":              {"startup", "503", "", "absent", "not_applicable", "yes"},
+}
+
+// cp2InputTypes and cp2Provenances mirror the schema's closed stimulus vocabulary.
+var (
+	cp2InputTypes  = []string{"alias", "array<alias>", "array<bool>", "array<bytes32_hex>", "array<object>", "array<token>", "array<u64>", "bool", "bytes", "bytes32_hex", "object", "token", "u16", "u64"}
+	cp2Provenances = []string{"normative_boundary", "witness_fixture", "deterministic_schedule_control", "configured_bound"}
+)
+
 var cp2UpperTokenRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 
 // cp2NewRows are the 17 R2 rows the closure epoch authorizes on top of the 62
@@ -2523,6 +2545,8 @@ type cp2Expected struct {
 	Result          *string `json:"result"`
 	CommitTruth     string  `json:"commit_truth"`
 	PipelineReached *bool   `json:"pipeline_reached,omitempty"`
+	WireDisposition *string `json:"wire_disposition,omitempty"`
+	RecoveryOutcome *string `json:"recovery_outcome,omitempty"`
 	RPC             cp2RPC  `json:"rpc_projection"`
 }
 
@@ -2543,9 +2567,10 @@ type cp2Input struct {
 }
 
 type cp2Case struct {
-	CaseID   string      `json:"case_id"`
-	Input    []cp2Input  `json:"input,omitempty"`
-	Expected cp2Expected `json:"expected"`
+	CaseID     string      `json:"case_id"`
+	ScheduleID *string     `json:"schedule_id"`
+	Input      []cp2Input  `json:"input,omitempty"`
+	Expected   cp2Expected `json:"expected"`
 }
 
 type cp2Row struct {
@@ -2627,7 +2652,32 @@ func cp2ValidateRPC(where string, r cp2RPC) error {
 			return fmt.Errorf("case %s: rpc_projection.%s %q is outside its closed domain", where, c.field, c.value)
 		}
 	}
-	return cp2ValidateRPCNullable(where, r)
+	if err := cp2ValidateRPCNullable(where, r); err != nil {
+		return err
+	}
+	return cp2ValidateRPCClass(where, r)
+}
+
+// cp2ValidateRPCClass pins the derived class to its exact field tuple.
+func cp2ValidateRPCClass(where string, r cp2RPC) error {
+	want, pinned := cp2ClassTuple[r.Class]
+	if !pinned {
+		return nil
+	}
+	http, commit, errClass := "", "", "no"
+	if r.HTTP != nil {
+		http = strconv.Itoa(*r.HTTP)
+	}
+	if r.CommitState != nil {
+		commit = *r.CommitState
+	}
+	if r.ErrorClass != nil {
+		errClass = "yes"
+	}
+	if got := [6]string{r.Phase, http, commit, r.Mined, r.SuccessIdentity, errClass}; got != want {
+		return fmt.Errorf("case %s: rpc_projection class %s requires %v, got %v", where, r.Class, want, got)
+	}
+	return nil
 }
 
 // cp2ValidateRPCNullable covers the three fields a case may report as JSON null.
@@ -2662,10 +2712,7 @@ func cp2ValidateExpected(where string, e cp2Expected) error {
 // case may not carry it.
 func cp2ValidateResultTruth(where string, e cp2Expected) error {
 	if e.Result == nil {
-		if e.PipelineReached == nil {
-			return fmt.Errorf("case %s: a null result requires pipeline_reached", where)
-		}
-		return nil
+		return cp2ValidateNullResult(where, e)
 	}
 	if e.PipelineReached != nil {
 		return fmt.Errorf("case %s: pipeline_reached is set only when result is null", where)
@@ -2680,6 +2727,38 @@ func cp2ValidateResultTruth(where string, e cp2Expected) error {
 	return nil
 }
 
+// cp2ValidateNullResult covers a case disposed before a consensus
+// classification: a wire-layer disposal leaves the old image, and a
+// startup/recovery case attempts no canonical transition at all.
+func cp2ValidateNullResult(where string, e cp2Expected) error {
+	if e.PipelineReached == nil {
+		return fmt.Errorf("case %s: a null result requires pipeline_reached", where)
+	}
+	if e.WireDisposition != nil && e.CommitTruth != "OLD" {
+		return fmt.Errorf("case %s: wire_disposition requires commit truth OLD, got %q", where, e.CommitTruth)
+	}
+	if e.RecoveryOutcome != nil && e.CommitTruth != "NOT_APPLICABLE" {
+		return fmt.Errorf("case %s: recovery_outcome requires commit truth NOT_APPLICABLE, got %q", where, e.CommitTruth)
+	}
+	return nil
+}
+
+// cp2ValidateInputs closes the stimulus vocabulary the schema also pins and
+// rejects two pointers of one case naming the same input.
+func cp2ValidateInputs(where string, inputs []cp2Input) error {
+	seen := make(map[string]bool, len(inputs))
+	for _, in := range inputs {
+		if !slices.Contains(cp2InputTypes, in.Type) || !slices.Contains(cp2Provenances, in.Provenance) {
+			return fmt.Errorf("case %s: input %s has unknown type %q or provenance %q", where, in.Pointer, in.Type, in.Provenance)
+		}
+		if seen[in.Pointer] {
+			return fmt.Errorf("case %s: duplicate input pointer %s", where, in.Pointer)
+		}
+		seen[in.Pointer] = true
+	}
+	return nil
+}
+
 func cp2ValidateCases(rowID string, cases []cp2Case) error {
 	seen := make(map[string]bool, len(cases))
 	for _, c := range cases {
@@ -2690,6 +2769,9 @@ func cp2ValidateCases(rowID string, cases []cp2Case) error {
 			return fmt.Errorf("row %s: duplicate case id %q", rowID, c.CaseID)
 		}
 		seen[c.CaseID] = true
+		if err := cp2ValidateInputs(rowID+"/"+c.CaseID, c.Input); err != nil {
+			return err
+		}
 		if err := cp2ValidateExpected(rowID+"/"+c.CaseID, c.Expected); err != nil {
 			return err
 		}
@@ -2715,6 +2797,9 @@ func cp2ValidateRows(rows []cp2Row, registry map[string]string) error {
 			return fmt.Errorf("row %s: duplicate row id", row.RowID)
 		}
 		seen[row.RowID] = true
+		if (row.Kind == "observation") != (len(row.Cases) > 0) {
+			return fmt.Errorf("row %s: kind %q with %d cases contradicts the kind exclusions", row.RowID, row.Kind, len(row.Cases))
+		}
 		if err := cp2ValidateCases(row.RowID, row.Cases); err != nil {
 			return err
 		}
@@ -2806,6 +2891,12 @@ func cp2ValidateAliases(rows []cp2Row, fixtures map[string]cp2Fixture) error {
 		for _, c := range row.Cases {
 			for _, in := range c.Input {
 				if err := cp2ResolveAliases(row.RowID+"/"+c.CaseID, in, fixtures); err != nil {
+					return err
+				}
+			}
+			if c.ScheduleID != nil {
+				sched := cp2Input{Pointer: "/schedule_id", Type: "object", ValueOrAlias: *c.ScheduleID}
+				if err := cp2ResolveAliases(row.RowID+"/"+c.CaseID, sched, fixtures); err != nil {
 					return err
 				}
 			}

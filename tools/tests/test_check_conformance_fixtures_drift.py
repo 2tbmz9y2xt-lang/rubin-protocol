@@ -21,64 +21,28 @@ from gen_conformance_matrix import load_json_fail_closed, reject_duplicate_json_
 # so a negative that passes proves the closure, not a missing constraint.
 _IMAGES = ("CHAIN_IMAGE_V1", "STANDARD_MEMPOOL_IMAGE_V1", "RETAINED_DA_IMAGE_V1", "OWNER_IMAGE_V1")
 V2_CONTROL_ROW = {
-    "row_id": "C01-DIRECT-001",
-    "kind": "observation",
-    "notes": ["control row for the RUB-1207 schema negatives"],
+    "row_id": "C01-DIRECT-001", "kind": "observation", "notes": ["control row for the RUB-1207 schema negatives"],
     "release_requirements": {
         "go": [{"issue": "RUB-890", "surface": "one canonical index commit", "delivery_receipt_required": True}],
         "rust": [{"issue": "RUB-897", "surface": "mirror one canonical index commit", "delivery_receipt_required": True}],
     },
-    "cases": [
-        {
-            "case_id": "MAIN",
-            "input": [
-                {
-                    "pointer": "/input/stimulus_block",
-                    "type": "alias",
-                    "value_or_alias": "B1",
-                    "provenance": "normative_boundary",
-                    "production_setup_sink": "node.Miner.MineOne (clients/go/node/miner.go)",
-                    "consumption_proof_owner": "RUB-923",
-                }
-            ],
-            "schedule_id": None,
-            "expected": {
-                "result": "ACCEPTED",
-                "commit_truth": "NEW",
-                "rpc_projection": {
-                    "class": "MINED_200_COMMITTED",
-                    "http": 200,
-                    "commit_state": "committed",
-                    "mined": "true",
-                    "success_identity": "present",
-                    "error_class": None,
-                    "phase": "result_selecting_mined_candidate",
-                },
-                "canonical_counters": {"accepted_delta": "+1", "rejected_delta": "0"},
-                "effects": {
-                    "publication_events": {
-                        "value": 1,
-                        "type": "u64",
-                        "required": True,
-                        "observer": "publication counter on the canonical publication seam",
-                    }
-                },
-                "state_image": {
-                    image: {
-                        "relation": "new",
-                        "digest_alias": f"{image}@C01-DIRECT-001/MAIN:new",
-                        "direct_fields": {"tip_hash": "tip_hash@C01-DIRECT-001/MAIN:new"},
-                    }
-                    for image in _IMAGES
-                },
-                "canonical_applied_blocks": [
-                    {"block_id": "B1", "block_hash": "B1_HASH", "complete_da_ids": ["DA_ID_1"]}
-                ],
-            },
-            "obligation_ids": ["OBL-OWN-PUBCHAIN-018"],
-            "sources": ["canonical_pipeline_v1.json row C01-DIRECT-001"],
-        }
-    ],
+    "cases": [{
+        "case_id": "MAIN",
+        "input": [{"pointer": "/input/stimulus_block", "type": "alias", "value_or_alias": "B1",
+                   "provenance": "normative_boundary", "production_setup_sink": "node.Miner.MineOne", "consumption_proof_owner": "RUB-923"}],
+        "schedule_id": None,
+        "expected": {
+            "result": "ACCEPTED", "commit_truth": "NEW",
+            "rpc_projection": {"class": "MINED_200_COMMITTED", "http": 200, "commit_state": "committed", "mined": "true",
+                               "success_identity": "present", "error_class": None, "phase": "result_selecting_mined_candidate"},
+            "canonical_counters": {"accepted_delta": "+1", "rejected_delta": "0"},
+            "effects": {"publication_events": {"value": 1, "type": "u64", "required": True, "observer": "publication counter"}},
+            "state_image": {image: {"relation": "new", "digest_alias": f"{image}@C01-DIRECT-001/MAIN:new",
+                                    "direct_fields": {"tip_hash": "tip_hash@C01-DIRECT-001/MAIN:new"}} for image in _IMAGES},
+            "canonical_applied_blocks": [{"block_id": "B1", "block_hash": "B1_HASH", "complete_da_ids": ["DA_ID_1"]}],
+        },
+        "obligation_ids": ["OBL-OWN-PUBCHAIN-018"], "sources": ["canonical_pipeline_v1.json row C01-DIRECT-001"],
+    }],
 }
 
 
@@ -452,6 +416,19 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
                 lambda r: r["cases"][0]["input"][0].update({"type": "object", "value_or_alias": {"height": 1}}),
                 ("rows/0/cases/0/input/0/value_or_alias", "type"),
             ),
+            "rpc class contradicts its fields": (set_rpc("http", 503), (f"{expected}/rpc_projection/http", "const")),
+            "wire disposition under NEW": (
+                lambda r: r["cases"][0]["expected"].update({"result": None, "pipeline_reached": False, "wire_disposition": "CHECKSUM_REJECT"}),
+                (f"{expected}/commit_truth", "const"),
+            ),
+            "withheld image under NEW": (
+                lambda r: r["cases"][0]["expected"]["state_image"]["CHAIN_IMAGE_V1"].__setitem__("relation", "withheld"),
+                (f"{expected}/state_image/CHAIN_IMAGE_V1/relation", "enum"),
+            ),
+            "authority carries a non-machine value": (
+                lambda r: r.__setitem__("authority", {"class_order": [None]}),
+                ("rows/0/authority/class_order", "oneOf"),
+            ),
             "counters contradict the truth": (
                 lambda r: r["cases"][0]["expected"]["canonical_counters"].__setitem__("rejected_delta", "+1"),
                 (f"{expected}/commit_truth", "const"),
@@ -501,6 +478,18 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
             {"B1": {"type": "object", "value": {"note": "a b"}}},
         ):
             self.assertFalse(validator.is_valid({**data, "fixtures": broken}), broken)
+
+    def test_top_level_consts_equal_the_enums_that_use_them(self):
+        _, data = self._load()
+        schema = load_json_fail_closed(self.SCHEMA)
+        defs, exp = schema["$defs"], schema["$defs"]["expected"]["properties"]
+        for const, enum in (
+            (data["rpc_projection_classes"], defs["rpcProjection"]["properties"]["class"]["enum"]),
+            (data["commit_truth_values"], exp["commit_truth"]["enum"]),
+            (data["wire_disposition_values"], exp["wire_disposition"]["enum"]),
+            (data["recovery_outcome_values"], exp["recovery_outcome"]["enum"]),
+        ):
+            self.assertEqual(sorted(const), sorted(enum))
 
     def test_row_registry_is_pinned_as_an_exact_map(self):
         # The schema pins the map as a `const`, independently of the generator
