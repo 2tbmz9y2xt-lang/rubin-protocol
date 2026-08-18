@@ -46,6 +46,12 @@ EXPECTED_FIXTURES: tuple[Path, ...] = (
     # RUB-922 / C01 canonical publication observables corpus. Generator-owned
     # and byte-frozen: only the C01 owner issue (RUB-922, then its R2 successor RUB-1204) may change its expected rows.
     Path("protocol/canonical_pipeline_v1.json"),
+    # RUB-1207 / C01-R2 dormant BUILDING successor. Generator-owned; its schema
+    # and row registry are strict-loaded and validated by
+    # tools/tests/test_check_conformance_fixtures_drift.py, and the artifact
+    # additionally passes tools/gen_conformance_matrix.py load_json_fail_closed
+    # on every matrix run.
+    Path("protocol/canonical_pipeline_v2.json"),
 )
 
 

@@ -26,14 +26,15 @@ class GenConformanceMatrixTests(unittest.TestCase):
         )
 
     def test_canonical_pipeline_corpus_is_a_registered_protocol_artifact(self) -> None:
-        # RUB-922 / C01: the frozen corpus must appear in the generated matrix
-        # inventory, so a silently dropped artifact fails the --check gate.
-        self.assertIn("canonical_pipeline_v1.json", m.EXPECTED_PROTOCOL_ARTIFACTS)
-        rows = m.load_protocol_artifact_rows()
-        self.assertIn(
-            "protocol/canonical_pipeline_v1.json",
-            {row.path for row in rows},
-        )
+        # RUB-922 / C01 and RUB-1207 / C01-R2: both revisions must appear in the
+        # generated matrix inventory, so a silently dropped artifact fails the
+        # --check gate. Registration also strict-loads each artifact.
+        rows = {row.path: row for row in m.load_protocol_artifact_rows()}
+        for name in ("canonical_pipeline_v1.json", "canonical_pipeline_v2.json"):
+            self.assertIn(name, m.EXPECTED_PROTOCOL_ARTIFACTS)
+            self.assertIn(f"protocol/{name}", rows)
+        # The dormant R2 revision must never be published as an active authority.
+        self.assertIn("BUILDING", rows["protocol/canonical_pipeline_v2.json"].purpose)
 
     def test_load_protocol_artifact_rows_rejects_duplicate_json_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

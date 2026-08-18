@@ -2,14 +2,19 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"math"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -1367,5 +1372,640 @@ func TestCanonicalPipelineValidatorFailsClosed(t *testing.T) {
 		} else if got := stderr.String(); !strings.Contains(got, "fatal: canonical pipeline: ") || !strings.Contains(got, c.want) {
 			t.Fatalf("case %s: stderr = %q, want a canonical-pipeline fatal containing %q", c.name, got, c.want)
 		}
+	}
+}
+
+// TestCanonicalPipelineV2ParentPairIsByteFrozen makes the RUB-1207 "the R1 pair
+// is a byte-frozen read-only parent" clause executable: the pins the v2 _meta
+// publishes are recomputed from the committed files, so any byte change to
+// either parent fails here rather than silently re-parenting the revision.
+func TestCanonicalPipelineV2ParentPairIsByteFrozen(t *testing.T) {
+	repoRoot, err := repoRootFromGoModule()
+	if err != nil {
+		t.Fatalf("repoRoot: %v", err)
+	}
+	for _, c := range []struct{ rel, want string }{
+		{"conformance/fixtures/protocol/canonical_pipeline_v1.json", cp2ParentArtifactSHA},
+		{"conformance/schemas/cv-canonical-pipeline-v1.json", cp2ParentSchemaSHA},
+	} {
+		raw, readErr := os.ReadFile(filepath.Join(repoRoot, c.rel))
+		if readErr != nil {
+			t.Fatalf("read %s: %v", c.rel, readErr)
+		}
+		if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != c.want {
+			t.Fatalf("%s sha256 = %s, want the frozen parent pin %s", c.rel, got, c.want)
+		}
+	}
+}
+
+// TestCanonicalPipelineV2RegistryIsFrozen pins the C01-R2 identity map: the 62
+// inherited (row_id, kind) pairs must equal the byte-frozen v1 corpus exactly
+// and the 17 R2 rows must equal the closure-authorized constant list. A rename,
+// removal, kind change or unauthorized addition on either side fails here, as
+// does a collision that would silently shrink the merged map.
+func TestCanonicalPipelineV2RegistryIsFrozen(t *testing.T) {
+	registry := cp2RowRegistry()
+	want := make(map[string]string, cp2RegistrySize)
+	for _, row := range canonicalPipelineRows() {
+		want[row.ID] = row.Kind
+	}
+	if len(want) != cp2RegistrySize-len(cp2NewRows) {
+		t.Fatalf("inherited corpus has %d identities, want 62", len(want))
+	}
+	maps.Copy(want, cp2NewRows)
+	if !maps.Equal(registry, want) {
+		t.Fatal("row registry is not the inherited v1 identities plus the closure-authorized R2 rows")
+	}
+}
+
+// TestCanonicalPipelineV2CommitTruthRelationIsExact checks the spec 6.4.1
+// relation against the 62 merged R1 rows themselves, not against a restatement
+// of the table: every observation row's (result, commit_truth) pair must be the
+// one cp2CommitTruthFor derives, and the relation must be total on the closed
+// taxonomy.
+func TestCanonicalPipelineV2CommitTruthRelationIsExact(t *testing.T) {
+	for _, row := range canonicalPipelineRows() {
+		if row.Kind != "observation" {
+			continue
+		}
+		truth, ok := cp2CommitTruthFor(row.Result)
+		if !ok {
+			t.Errorf("%s: result %q is unmapped by the 6.4.1 relation", row.ID, row.Result)
+		} else if truth != row.CommitTruth {
+			t.Errorf("%s: relation maps %q to %s, but the merged R1 row states %s", row.ID, row.Result, truth, row.CommitTruth)
+		}
+	}
+	if _, ok := cp2CommitTruthFor("ACCEPTED(extra)"); ok {
+		t.Error("a malformed result must not resolve to a commit truth")
+	}
+}
+
+func cp2Ptr[T any](v T) *T { return &v }
+
+func cp2ValidInput(pointer, tag string, value any) cp2Input {
+	return cp2Input{Pointer: pointer, Type: tag, ValueOrAlias: value, Provenance: "witness_fixture", ProductionSetupSink: "sink", ConsumptionProofOwner: "RUB-923"}
+}
+
+// cp2ValidCase is the known-valid control every RUB-1207 negative mutates in
+// exactly one dimension.
+func cp2ValidCase() cp2Case {
+	return cp2Case{CaseID: "MAIN", Input: []cp2Input{cp2ValidInput("/input/stimulus_block", "alias", "B1")}, Expected: cp2Expected{
+		Result: cp2Ptr("ACCEPTED"), CommitTruth: "NEW",
+		RPC: cp2RPC{
+			Class: "MINED_200_COMMITTED", HTTP: cp2Ptr(200), CommitState: cp2Ptr("committed"),
+			Mined: "true", SuccessIdentity: "present", Phase: "result_selecting_mined_candidate",
+		},
+	}}
+}
+
+// TestCanonicalPipelineV2ValidatorFailsClosed drives the RUB-1207 mutation set:
+// row-id substitution, kind change, a wrong result/truth relation, malformed RPC
+// shape and a machine token carrying whitespace. Each case changes exactly one
+// dimension of the control and asserts the specific reason.
+func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
+	registry := cp2RowRegistry()
+	if err := cp2ValidateRows([]cp2Row{{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}}, registry); err != nil {
+		t.Fatalf("control row must validate: %v", err)
+	}
+	dup := cp2Row{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}
+	if err := cp2ValidateRows([]cp2Row{dup, dup}, registry); err == nil || !strings.Contains(err.Error(), "duplicate row id") {
+		t.Errorf("two rows sharing an id: error = %v, want a duplicate row id rejection", err)
+	}
+	mutate := map[string]func(*cp2Row){
+		"row id substitution":  func(r *cp2Row) { r.RowID = "C01-DIRECT-002" },
+		"kind change":          func(r *cp2Row) { r.Kind = "authority" },
+		"wrong result truth":   func(r *cp2Row) { r.Cases[0].Expected.CommitTruth = "OLD" },
+		"result off taxonomy":  func(r *cp2Row) { r.Cases[0].Expected.Result = cp2Ptr("ACCEPTED(extra)") },
+		"unknown commit truth": func(r *cp2Row) { r.Cases[0].Expected.CommitTruth = "MAYBE" },
+		"rpc class":            func(r *cp2Row) { r.Cases[0].Expected.RPC.Class = "MINED_201_COMMITTED" },
+		"rpc mined":            func(r *cp2Row) { r.Cases[0].Expected.RPC.Mined = "yes" },
+		"rpc http":             func(r *cp2Row) { r.Cases[0].Expected.RPC.HTTP = cp2Ptr(418) },
+		"rpc commit state":     func(r *cp2Row) { r.Cases[0].Expected.RPC.CommitState = cp2Ptr("maybe_committed") },
+		"rpc error class":      func(r *cp2Row) { r.Cases[0].Expected.RPC.ErrorClass = cp2Ptr("LOCAL BUSY") },
+		"token whitespace":     func(r *cp2Row) { r.Cases[0].CaseID = "MAIN CASE" },
+		"class tuple":          func(r *cp2Row) { r.Cases[0].Expected.RPC.HTTP = cp2Ptr(503) },
+		"classified wire":      func(r *cp2Row) { r.Cases[0].Expected.WireDisposition = cp2Ptr("CHECKSUM_REJECT") },
+		"reached flag true": func(r *cp2Row) {
+			e := &r.Cases[0].Expected
+			e.Result, e.PipelineReached, e.WireDisposition = nil, cp2Ptr(true), cp2Ptr("CHECKSUM_REJECT")
+		},
+		"both dispositions": func(r *cp2Row) {
+			e := &r.Cases[0].Expected
+			e.Result, e.PipelineReached, e.WireDisposition, e.RecoveryOutcome = nil, cp2Ptr(false), cp2Ptr("CHECKSUM_REJECT"), cp2Ptr("fail_closed_no_exposure")
+		},
+		"neither disposition": func(r *cp2Row) { e := &r.Cases[0].Expected; e.Result, e.PipelineReached = nil, cp2Ptr(false) },
+		"wire truth": func(r *cp2Row) {
+			e := &r.Cases[0].Expected
+			e.Result, e.PipelineReached, e.WireDisposition, e.RPC.Class = nil, cp2Ptr(false), cp2Ptr("CHECKSUM_REJECT"), "NOT_REACHED"
+		},
+		"empty input": func(r *cp2Row) { r.Cases[0].Input = nil },
+		"array tag scalar": func(r *cp2Row) {
+			r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "array<u64>", "1")}
+		},
+		"no cases":             func(r *cp2Row) { r.Cases = nil },
+		"authority with cases": func(r *cp2Row) { r.RowID, r.Kind = "C01-PATHS-001", "authority" },
+		"surplus error class":  func(r *cp2Row) { r.Cases[0].Expected.RPC.ErrorClass = cp2Ptr("LOCAL_BUSY") },
+		"null result class": func(r *cp2Row) {
+			e := &r.Cases[0].Expected
+			e.Result, e.PipelineReached, e.WireDisposition = nil, cp2Ptr(false), cp2Ptr("CHECKSUM_REJECT")
+		},
+		"zero width sink": func(r *cp2Row) {
+			in := cp2ValidInput("/input/a", "token", "T")
+			in.ProductionSetupSink = "\uFEFF"
+			r.Cases[0].Input = []cp2Input{in}
+		},
+		"u64 two to the 64": func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "u64", math.Exp2(64))} },
+		"u16 over bound":    func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "u16", 65536)} },
+		"schedule prose":    func(r *cp2Row) { r.Cases[0].ScheduleID = cp2Ptr("two arm schedule") },
+		"pointer grammar":   func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/Input/B", "token", "T")} },
+		"u64 not a number":  func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "u64", "abc")} },
+		"u64 negative":      func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "u64", -1)} },
+		"bool not a bool":   func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "bool", "yes")} },
+		"bytes32 uppercase": func(r *cp2Row) {
+			r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "bytes32_hex", strings.Repeat("0A", 32))}
+		},
+		"token with a space": func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "token", "a b")} },
+		"inline object":      func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "object", cpMap{"h": 1})} },
+		"blank sink": func(r *cp2Row) {
+			in := cp2ValidInput("/input/a", "token", "T")
+			in.ProductionSetupSink = "  "
+			r.Cases[0].Input = []cp2Input{in}
+		},
+		"owner grammar": func(r *cp2Row) {
+			in := cp2ValidInput("/input/a", "token", "T")
+			in.ConsumptionProofOwner = "RUB-0"
+			r.Cases[0].Input = []cp2Input{in}
+		},
+		"not reached bounds": func(r *cp2Row) { e := &r.Cases[0].Expected.RPC; e.Class, e.Phase = "NOT_REACHED", "not_reached" },
+		"wire domain": func(r *cp2Row) {
+			e := &r.Cases[0].Expected
+			e.Result, e.PipelineReached, e.WireDisposition, e.RPC.Class = nil, cp2Ptr(false), cp2Ptr("FRAME_BOGUS"), "NOT_REACHED"
+		},
+		"duplicate pointer": func(r *cp2Row) {
+			p := cp2Input{Pointer: "/input/b", Type: "token", ValueOrAlias: "T", Provenance: "witness_fixture", ProductionSetupSink: "sink", ConsumptionProofOwner: "RUB-923"}
+			r.Cases[0].Input = []cp2Input{p, p}
+		},
+		"duplicate case id":    func(r *cp2Row) { r.Cases = append(r.Cases, r.Cases[0]) },
+		"missing reached flag": func(r *cp2Row) { r.Cases[0].Expected.Result = nil },
+		"surplus reached flag": func(r *cp2Row) { r.Cases[0].Expected.PipelineReached = cp2Ptr(false) },
+	}
+	want := map[string]string{
+		"row id substitution": "is not a frozen registry pair", "kind change": "is not a frozen registry pair",
+		"wrong result truth": "requires commit truth NEW", "result off taxonomy": "outside the closed taxonomy",
+		"unknown commit truth": "commit truth \"MAYBE\" is unknown", "rpc class": "rpc_projection.class",
+		"rpc mined": "rpc_projection.mined", "rpc http": "rpc_projection.http",
+		"rpc commit state": "rpc_projection.commit_state", "rpc error class": "neither a taxonomy token",
+		"token whitespace": "is not a machine token", "class tuple": "requires [result_selecting_mined_candidate 200",
+		"wire truth": "wire_disposition requires commit truth OLD", "classified wire": "set only when result is null",
+		"reached flag true": "requires pipeline_reached false", "both dispositions": "exactly one of", "neither disposition": "exactly one of", "duplicate pointer": "duplicate input pointer /input/b",
+		"schedule prose": "is not an alias", "empty input": "carries no input stimulus", "array tag scalar": "is not a array<u64> literal", "no cases": "contradicts the kind exclusions", "authority with cases": "contradicts the kind exclusions", "surplus error class": "requires [result_selecting_mined_candidate 200", "u64 two to the 64": "is not a u64 literal", "u16 over bound": "is not a u16 literal", "pointer grammar": "input pointer \"/Input/B\" is malformed", "blank sink": "blank production setup sink", "zero width sink": "blank production setup sink",
+		"owner grammar": "malformed consumption owner", "null result class": "unreached or startup RPC class", "u64 not a number": "is not a u64 literal", "u64 negative": "is not a u64 literal",
+		"bool not a bool": "is not a bool literal", "bytes32 uppercase": "is not a bytes32_hex literal", "token with a space": "is not a token literal",
+		"inline object": "is not a object literal", "not reached bounds": "exceeds its bounds", "wire domain": "is outside its closed domain", "duplicate case id": "duplicate case id",
+		"missing reached flag": "null result requires pipeline_reached",
+		"surplus reached flag": "set only when result is null",
+	}
+	for name, apply := range mutate {
+		row := cp2Row{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}
+		apply(&row)
+		err := cp2ValidateRows([]cp2Row{row}, registry)
+		if err == nil {
+			t.Errorf("%s: expected a fail-closed rejection", name)
+		} else if !strings.Contains(err.Error(), want[name]) {
+			t.Errorf("%s: error = %q, want it to name %q", name, err, want[name])
+		}
+	}
+}
+
+// TestCanonicalPipelineV2ValidatorAcceptsTheStatedShapes covers the success side
+// of the rules whose failure rows the table above pins.
+func TestCanonicalPipelineV2ValidatorAcceptsTheStatedShapes(t *testing.T) {
+	registry := cp2RowRegistry()
+	short := cp2RowRegistry()
+	delete(short, "C01-DIRECT-001")
+	if err := cp2ValidateRows(nil, short); err == nil || !strings.Contains(err.Error(), "want the frozen 79") {
+		t.Errorf("78-entry registry: error = %v, want the frozen-size rejection", err)
+	}
+	for name, mutate := range map[string]func(*cp2Row){
+		"unreached wire case": func(r *cp2Row) {
+			e := &r.Cases[0].Expected
+			e.Result, e.PipelineReached, e.WireDisposition, e.CommitTruth = nil, cp2Ptr(false), cp2Ptr("CHECKSUM_REJECT"), "OLD"
+			e.RPC = cp2RPC{Class: "NOT_REACHED", Mined: "not_applicable", SuccessIdentity: "not_applicable", Phase: "not_reached"}
+		},
+		"pinned class carrying an error class": func(r *cp2Row) {
+			e := &r.Cases[0].Expected
+			e.Result, e.CommitTruth = cp2Ptr("LOCAL_BUSY"), "OLD"
+			e.RPC = cp2RPC{
+				Class: "MINED_503_NOT_COMMITTED", HTTP: cp2Ptr(503), CommitState: cp2Ptr("not_committed"), Mined: "false",
+				SuccessIdentity: "absent", ErrorClass: cp2Ptr("LOCAL_BUSY"), Phase: "result_selecting_mined_candidate",
+			}
+		},
+	} {
+		row := cp2Row{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}
+		mutate(&row)
+		if err := cp2ValidateRows([]cp2Row{row}, registry); err != nil {
+			t.Errorf("%s must validate: %v", name, err)
+		}
+	}
+}
+
+// TestCanonicalPipelineV2AliasesResolveInFixtures pins the one rule JSON Schema
+// cannot express: an alias must exist in the catalog. Until RUB-1208 populates
+// `fixtures`, an alias-carrying row is rejected — the intended fail-closed order.
+func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
+	c := cp2ValidCase()
+	c.Input = []cp2Input{{
+		Pointer: "/input/stimulus_block", Type: "alias", ValueOrAlias: "B1",
+		Provenance: "normative_boundary", ProductionSetupSink: "node.Miner.MineOne", ConsumptionProofOwner: "RUB-923",
+	}}
+	rows := []cp2Row{{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{c}}}
+	block := map[string]cp2Fixture{"B1": {Type: "object", Value: cpMap{"height": 1}}}
+	err := cp2ValidateAliases(rows, map[string]cp2Fixture{})
+	if err == nil || !strings.Contains(err.Error(), `alias "B1"`) {
+		t.Fatalf("empty catalog: error = %v, want a rejection naming alias B1", err)
+	}
+	if err := cp2ValidateAliases(rows, block); err != nil {
+		t.Fatalf("catalog carrying B1 must validate: %v", err)
+	}
+	// An alias array marshals to a schema-valid array in either Go shape.
+	for _, arr := range []any{[]any{"B1"}, []string{"B1"}} {
+		rows[0].Cases[0].Input[0] = cp2Input{Pointer: "/input/prestate", Type: "array<alias>", ValueOrAlias: arr}
+		if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}); err == nil || !strings.Contains(err.Error(), `alias "B1"`) {
+			t.Fatalf("array alias %T: error = %v, want a rejection naming B1", arr, err)
+		}
+	}
+	rows[0].Cases[0].Input[0] = c.Input[0]
+	for name, broken := range map[string]map[string]cp2Fixture{
+		"fixture type alias":    {"B1": {Type: "alias", Value: "B2"}},
+		"fixture u64 value":     {"B1": {Type: "u64", Value: "abc"}},
+		"fixture key case":      {"b1": {Type: "u64", Value: 1}},
+		"fixture prose leaf":    {"B1": {Type: "object", Value: cpMap{"note": "a b"}}},
+		"fixture object key":    {"B1": {Type: "object", Value: cpMap{"Key": 1}}},
+		"fixture empty obj":     {"B1": {Type: "object", Value: cpMap{}}},
+		"fixture retired key":   {"B1": {Type: "object", Value: cpMap{"scenario": "X"}}},
+		"fixture leaf over u64": {"B1": {Type: "object", Value: cpMap{"height": json.Number("18446744073709551616")}}},
+	} {
+		if err := cp2ValidateFixtures(broken); err == nil {
+			t.Errorf("%s: expected a fail-closed rejection", name)
+		}
+	}
+	// A pointer tagged u64 may not resolve to an object fixture.
+	rows[0].Cases[0].Input[0].Type = "u64"
+	if err := cp2ValidateAliases(rows, block); err == nil || !strings.Contains(err.Error(), "is a object fixture, want u64") {
+		t.Fatalf("type mismatch: error = %v, want the fixture type named", err)
+	}
+	// A token tag carries a machine token, never a catalog alias.
+	rows[0].Cases[0].Input[0].Type, rows[0].Cases[0].Input[0].ValueOrAlias = "token", "ABSENT"
+	if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}); err != nil {
+		t.Fatalf("token input must not demand a fixture: %v", err)
+	}
+	for name, catalog := range map[string]map[string]cp2Fixture{
+		"nested object":   {"B1": {Type: "object", Value: cpMap{"plan": cpMap{"rows": []any{1, "B_TWO"}}, "fenced": true}}},
+		"object array":    {"B1": {Type: "array<object>", Value: []any{cpMap{"height": 1}}}},
+		"u64 at two ^ 53": {"B1": {Type: "u64", Value: math.Exp2(53)}},
+		"leaf at u64 max": {"B1": {Type: "object", Value: cpMap{"height": json.Number("18446744073709551615")}}},
+	} {
+		if err := cp2ValidateFixtures(catalog); err != nil {
+			t.Errorf("%s must validate: %v", name, err)
+		}
+	}
+}
+
+// cp2SchemaOf loads the committed v2 schema as a generic JSON image.
+func cp2SchemaOf(t *testing.T) map[string]any {
+	t.Helper()
+	repoRoot, err := repoRootFromGoModule()
+	if err != nil {
+		t.Fatalf("repoRoot: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(repoRoot, cp2SchemaRel))
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("parse schema: %v", err)
+	}
+	return schema
+}
+
+// TestCanonicalPipelineV2GoSchemaParity pins every closed list the generator
+// keeps against the committed schema: one vocabulary, two copies, no drift.
+func TestCanonicalPipelineV2GoSchemaParity(t *testing.T) {
+	schema := cp2SchemaOf(t)
+	list := func(path ...string) []string {
+		node := any(schema)
+		for _, key := range path {
+			node = node.(map[string]any)[key]
+		}
+		out := []string{}
+		for _, v := range node.([]any) {
+			if v != nil { // http carries an explicit null the Go list does not
+				out = append(out, fmt.Sprint(v))
+			}
+		}
+		return out
+	}
+	rpc := []string{"$defs", "rpcProjection", "properties"}
+	httpValues := []string{}
+	for _, v := range cp2HTTPValues {
+		httpValues = append(httpValues, strconv.Itoa(v))
+	}
+	for name, pair := range map[string][2][]string{
+		"class":             {cp2RPCClasses, list(append(rpc, "class", "enum")...)},
+		"mined":             {cp2MinedValues, list(append(rpc, "mined", "enum")...)},
+		"success_identity":  {cp2SuccessIdentityValues, list(append(rpc, "success_identity", "enum")...)},
+		"commit_state":      {cp2CommitStateValues, list(append(rpc, "commit_state", "enum")...)},
+		"phase":             {cp2PhaseValues, list(append(rpc, "phase", "enum")...)},
+		"http":              {httpValues, list(append(rpc, "http", "enum")...)},
+		"inputType":         {cp2InputTypes, list("$defs", "inputType", "enum")},
+		"provenance":        {cp2Provenances, list("$defs", "inputPointer", "properties", "provenance", "enum")},
+		"wire_disposition":  {cp2WireDispositionValues, list("properties", "wire_disposition_values", "const")},
+		"recovery_outcome":  {cp2RecoveryOutcomeValues, list("properties", "recovery_outcome_values", "const")},
+		"expected wire":     {cp2WireDispositionValues, list("$defs", "expected", "properties", "wire_disposition", "enum")},
+		"expected recovery": {cp2RecoveryOutcomeValues, list("$defs", "expected", "properties", "recovery_outcome", "enum")},
+	} {
+		if got, want := slices.Sorted(slices.Values(pair[0])), slices.Sorted(slices.Values(pair[1])); !slices.Equal(got, want) {
+			t.Errorf("%s: generator %v, schema %v", name, got, want)
+		}
+	}
+	registry := map[string]string{}
+	for id, kind := range schema["properties"].(map[string]any)["row_registry"].(map[string]any)["const"].(map[string]any) {
+		registry[id] = fmt.Sprint(kind)
+	}
+	if !maps.Equal(registry, cp2RowRegistry()) {
+		t.Error("row_registry const and the generator registry disagree")
+	}
+}
+
+// TestCanonicalPipelineV2GrammarParity pins the regexp sources the generator
+// keeps against the schema patterns they mirror.
+func TestCanonicalPipelineV2GrammarParity(t *testing.T) {
+	schema := cp2SchemaOf(t)
+	str := func(path ...string) string {
+		node := any(schema)
+		for _, key := range path {
+			node = node.(map[string]any)[key]
+		}
+		return node.(string)
+	}
+	defs := []string{"$defs"}
+	for name, pair := range map[string][2]string{
+		"machineToken": {cp2TokenRE.String(), str(append(defs, "machineToken", "pattern")...)},
+		"snakeToken":   {cp2SnakeRE.String(), str(append(defs, "snakeToken", "pattern")...)},
+		"alias":        {cp2UpperTokenRE.String(), str(append(defs, "alias", "pattern")...)},
+		"case_id":      {cp2UpperTokenRE.String(), str(append(defs, "case", "properties", "case_id", "pattern")...)},
+		"issueId":      {cp2IssueRE.String(), str(append(defs, "issueId", "pattern")...)},
+		"bytesLit":     {cp2BytesRE.String(), str(append(defs, "bytesLit", "pattern")...)},
+		"bytes32Lit":   {cp2HexRE.String(), str(append(defs, "bytes32Lit", "pattern")...)},
+		"resultToken":  {canonicalPipelineResultRE.String(), str(append(defs, "resultToken", "pattern")...)},
+		"pointer":      {cp2PointerRE.String(), str(append(defs, "inputPointer", "properties", "pointer", "pattern")...)},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%s grammar: generator %q, schema %q", name, pair[0], pair[1])
+		}
+	}
+	// $defs/rowId has no generator twin on purpose: a row id must be a key of the
+	// frozen registry, which is strictly stronger than matching its grammar.
+}
+
+// TestCanonicalPipelineV2RelationParity derives the two relation tables from the
+// schema arms and compares them to the generator's copies, so neither side can
+// drift alone.
+func TestCanonicalPipelineV2RelationParity(t *testing.T) {
+	arms, ok := cp2SchemaOf(t)["$defs"].(map[string]any)["rpcProjection"].(map[string]any)["allOf"].([]any)
+	if !ok {
+		t.Fatal("rpcProjection carries no arms")
+	}
+	for _, arm := range arms {
+		cond := arm.(map[string]any)["if"].(map[string]any)["properties"].(map[string]any)["class"].(map[string]any)
+		then := arm.(map[string]any)["then"].(map[string]any)["properties"].(map[string]any)
+		want, pinned := cp2ClassTuple[cond["const"].(string)]
+		if !pinned {
+			continue // NOT_REACHED is bounded, not pinned; its bounds are checked below
+		}
+		got := [6]string{
+			cp2ConstOf(then, "phase"), cp2ConstOf(then, "http"), cp2ConstOf(then, "commit_state"),
+			cp2ConstOf(then, "mined"), cp2ConstOf(then, "success_identity"), cp2ErrorClassOf(then),
+		}
+		if got != want {
+			t.Errorf("class %v: schema %v, generator %v", cond["const"], got, want)
+		}
+	}
+	for _, member := range []string{
+		"ACCEPTED", "STORED_NONCANONICAL", "KNOWN_BLOCK_NOOP(CANONICAL)", "MISSING_PARENT",
+		"ORPHAN_RETAINED", "ORPHAN_ALREADY_RETAINED", "CONSENSUS_INVALID(X)", "LOCAL_BUSY", "LOCAL_RESOURCE_UNAVAILABLE(orphan_pool)",
+		"STALE_LOCAL_PLAN", "LOCAL_CANCELLED", "LOCAL_STORE_ERROR(noncanonical)", "LOCAL_PERSISTENCE_ERROR(precommit)", //nolint:misspell // normative spelling
+		"TERMINAL_STORE_INTEGRITY(canonical)", "TERMINAL_LOCAL_INVARIANT(evidence)", "TERMINAL_PERSISTENCE(old)",
+		"TERMINAL_PERSISTENCE(new)", "TERMINAL_PERSISTENCE(neither_or_unreadable)", "KNOWN_BLOCK_NOOP(STORED_NONCANONICAL)",
+	} {
+		want, _ := cp2CommitTruthFor(member)
+		if got := cp2SchemaTruthOf(t, member); got != want {
+			t.Errorf("%s: schema arm %q, generator %q", member, got, want)
+		}
+	}
+}
+
+// cp2ConstOf reads an arm field as the generator's tuple spells it: "" is null.
+func cp2ConstOf(then map[string]any, field string) string {
+	spec, ok := then[field].(map[string]any)
+	if !ok {
+		return ""
+	}
+	if value, has := spec["const"]; has {
+		return fmt.Sprint(value)
+	}
+	return ""
+}
+
+func cp2ErrorClassOf(then map[string]any) string {
+	spec, _ := then["error_class"].(map[string]any)
+	if spec["type"] == "null" {
+		return "no"
+	}
+	return "yes"
+}
+
+// cp2SchemaTruthOf evaluates the schema's result arms for one taxonomy member.
+func cp2SchemaTruthOf(t *testing.T, member string) string {
+	for _, arm := range cp2SchemaOf(t)["$defs"].(map[string]any)["expected"].(map[string]any)["allOf"].([]any) {
+		cond, _ := arm.(map[string]any)["if"].(map[string]any)["properties"].(map[string]any)["result"].(map[string]any)
+		if cond["type"] != "string" {
+			continue
+		}
+		pattern, negated := cond["pattern"], false
+		if not, wrapped := cond["not"].(map[string]any); wrapped {
+			pattern, negated = not["pattern"], true
+		}
+		if regexp.MustCompile(pattern.(string)).MatchString(member) != negated {
+			return fmt.Sprint(arm.(map[string]any)["then"].(map[string]any)["properties"].(map[string]any)["commit_truth"].(map[string]any)["const"])
+		}
+	}
+	return ""
+}
+
+// cp2FuzzValues are the Go kinds a caller can hand a validator.
+var cp2FuzzValues = []any{
+	nil, true, 0, -1, 1.5, uint64(math.MaxUint64), json.Number("1"), json.Number("x"), "B1", "a b",
+	[]any{nil, "B1"},
+	[]string{"B1"},
+	[]bool{true},
+	map[string]any{"k": nil},
+	cpMap{"K": 1},
+	struct{ A int }{1},
+}
+
+// cp2Mutations each break ONE nested field of an otherwise valid row, so the
+// validator under test is reached instead of short-circuiting on identity.
+var cp2Mutations = []func(r *cp2Row, token string, value any){
+	func(r *cp2Row, token string, value any) { r.Cases[0].CaseID = token },
+	func(r *cp2Row, token string, value any) { r.Cases[0].ScheduleID = cp2Ptr(token) },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Input[0].Pointer = token },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Input[0].Type = token },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Input[0].ValueOrAlias = value },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Input[0].Provenance = token },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Input[0].ProductionSetupSink = token },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Input[0].ConsumptionProofOwner = token },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Expected.Result = nil },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Expected.Result = cp2Ptr(token) },
+	func(r *cp2Row, token string, value any) { r.Cases[0].Expected.CommitTruth = token },
+	func(r *cp2Row, token string, value any) {
+		e := &r.Cases[0].Expected
+		e.Result, e.PipelineReached, e.RPC.Class, e.CommitTruth = nil, cp2Ptr(false), "NOT_REACHED", token
+		e.WireDisposition = cp2Ptr("CHECKSUM_REJECT")
+	},
+	func(r *cp2Row, token string, value any) {
+		e := &r.Cases[0].Expected
+		e.Result, e.PipelineReached, e.RPC.Class, e.CommitTruth = nil, cp2Ptr(false), "STARTUP_UNAVAILABLE_503", token
+		e.RecoveryOutcome = cp2Ptr("fail_closed_no_exposure")
+	},
+	func(r *cp2Row, token string, value any) {
+		rpc := &r.Cases[0].Expected.RPC
+		rpc.Class, rpc.Phase, rpc.Mined, rpc.SuccessIdentity = token, token, token, token
+	},
+	func(r *cp2Row, token string, value any) {
+		rpc := &r.Cases[0].Expected.RPC
+		rpc.HTTP, rpc.CommitState, rpc.ErrorClass = nil, nil, cp2Ptr(token)
+	},
+	func(r *cp2Row, token string, value any) { r.Kind = token },
+}
+
+// TestCanonicalPipelineV2ValidatorsNeverPanic drives random malformed shapes
+// through every validator: untrusted-looking input must yield a typed error,
+// never a panic. Each iteration starts from a VALID registered row so one nested
+// mutation reaches the validator it targets.
+func TestCanonicalPipelineV2ValidatorsNeverPanic(t *testing.T) {
+	const seed = 1207
+	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // deterministic test corpus, not cryptographic
+	tokens := []string{"", " ", "\n", "C01-DIRECT-001", "MAIN", "a b", "/input/a", "RUB-923", "\u00fcn\u00efcode", "token", "object", "NOT_REACHED", "OLD", "NOT_APPLICABLE", "FRAME_BOGUS"}
+	pick := func() string { return tokens[rng.Intn(len(tokens))] }
+	registry := cp2RowRegistry()
+	for i := 0; i < 2000; i++ {
+		value := cp2FuzzValues[rng.Intn(len(cp2FuzzValues))]
+		row := cp2Row{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}
+		cp2Mutations[rng.Intn(len(cp2Mutations))](&row, pick(), value)
+		fixtures := map[string]cp2Fixture{pick(): {Type: pick(), Value: value}}
+		in := cp2Input{Pointer: pick(), Type: pick(), ValueOrAlias: value, Provenance: pick(), ProductionSetupSink: pick(), ConsumptionProofOwner: pick()}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("seed %d iteration %d: panic %v on value %#v", seed, i, r, value)
+				}
+			}()
+			rows := []cp2Row{row}
+			_, _ = cp2ValidateRows(rows, registry), cp2ValidateFixtures(fixtures)
+			_, _ = cp2ValidateAliases(rows, fixtures), cp2ValidateCases(pick(), row.Cases)
+			_, _ = cp2ValidateInputs(pick(), []cp2Input{in}), cp2ValidateExpected(pick(), row.Cases[0].Expected)
+			_, _ = cp2ValidateRPC(pick(), row.Cases[0].Expected.RPC), cp2InputOK(in)
+			_, _ = cp2FixtureValueOK(cp2Fixture{Type: pick(), Value: value}), cp2ClosedValueOK(value)
+		}()
+	}
+}
+
+// TestCanonicalPipelineV2IntegerAndScheduleAliases covers the exact-integer
+// reader and the schedule-alias resolution the catalog gates.
+func TestCanonicalPipelineV2IntegerAndScheduleAliases(t *testing.T) {
+	for value, want := range map[any]bool{
+		json.Number("18446744073709551615"): true, uint64(math.MaxUint64): true, math.Exp2(53): true,
+		json.Number("18446744073709551616"): false, math.Exp2(64): false, json.Number("1.5"): false, int(-1): false,
+	} {
+		if cp2UintOK(value, 65535) && !want {
+			t.Errorf("%v must not fit u16 when it is not a u64", value)
+		}
+		if got := cp2UintOK(cp2JSONImage(value), math.MaxUint64); got != want {
+			t.Errorf("cp2UintOK(%v) = %v, want %v", value, got, want)
+		}
+	}
+	for name, tc := range map[string]struct {
+		in cp2Input
+		ok bool
+	}{
+		"bool slice":    {cp2ValidInput("/input/a", "array<bool>", []bool{true}), true},
+		"uint64 slice":  {cp2ValidInput("/input/a", "array<u64>", []uint64{1}), true},
+		"nested string": {cp2ValidInput("/input/a", "array<token>", []string{"TOK"}), true},
+		"signed slice":  {cp2ValidInput("/input/a", "array<u64>", []int{-1}), false},
+		"prose slice":   {cp2ValidInput("/input/a", "array<token>", []any{"a b"}), false},
+		"struct value":  {cp2ValidInput("/input/a", "object", struct{ A int }{1}), false},
+	} {
+		if err := cp2InputOK(tc.in); (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok = %v", name, err, tc.ok)
+		}
+	}
+	if err := cp2ValidateFixtures(map[string]cp2Fixture{"B1": {Type: "object", Value: struct{ A int }{1}}}); err == nil {
+		t.Error("a struct fixture images to a non-snake key and must be rejected")
+	}
+	if err := cp2ValidateFixtures(map[string]cp2Fixture{"B1": {Type: "object", Value: cpMap{"tags": []string{"TOK"}}}}); err != nil {
+		t.Errorf("a nested string slice images to an array of tokens: %v", err)
+	}
+	if !cp2UintOK(float64(5), math.MaxUint64) || !cp2UintOK(float64(65535), 65535) || cp2UintOK(float64(65536), 65535) {
+		t.Error("the float64 arm must accept integral values inside the bound and reject one above it")
+	}
+	sched := cp2Row{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}
+	sched.Cases[0].ScheduleID = cp2Ptr("SCHED")
+	block1 := cp2Fixture{Type: "object", Value: cpMap{"h": 1}}
+	for name, tc := range map[string]struct {
+		catalog map[string]cp2Fixture
+		ok      bool
+	}{
+		"schedule present":       {map[string]cp2Fixture{"B1": block1, "SCHED": {Type: "object", Value: cpMap{"barrier": "A"}}}, true},
+		"schedule absent":        {map[string]cp2Fixture{"B1": block1}, false},
+		"schedule not an object": {map[string]cp2Fixture{"B1": block1, "SCHED": {Type: "u64", Value: 1}}, false},
+	} {
+		if err := cp2ValidateAliases([]cp2Row{sched}, tc.catalog); (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok = %v", name, err, tc.ok)
+		}
+	}
+}
+
+// TestCanonicalPipelineV2CorpusIsByteDeterministic proves the dormant revision
+// is reproducible and carries neither retired v1 field.
+func TestCanonicalPipelineV2CorpusIsByteDeterministic(t *testing.T) {
+	first := filepath.Join(t.TempDir(), "canonical_pipeline_v2.json")
+	second := filepath.Join(t.TempDir(), "canonical_pipeline_v2.json")
+	mustWriteCanonicalPipelineV2Corpus(first)
+	mustWriteCanonicalPipelineV2Corpus(second)
+	a, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatalf("read first: %v", err)
+	}
+	b, err := os.ReadFile(second)
+	if err != nil {
+		t.Fatalf("read second: %v", err)
+	}
+	if !bytes.Equal(a, b) {
+		t.Fatal("canonical pipeline v2 corpus is not byte-deterministic across runs")
+	}
+	for _, retired := range []string{`"pending_owner"`, `"detail"`, `"scenario"`} {
+		if bytes.Contains(a, []byte(retired)) {
+			t.Errorf("emitted v2 corpus carries the retired v1 field %s", retired)
+		}
+	}
+	var artifact map[string]any
+	if err := json.Unmarshal(a, &artifact); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	epoch, _ := artifact["_meta"].(map[string]any)["closure_epoch"].(map[string]any)
+	if epoch["manifest_root_sha256"] != cp2ManifestRootSHA256 || epoch["status"] != cp2ClosureStatus {
+		t.Fatalf("closure epoch = %v, want the bound RUB-1206 manifest identity in status %q", epoch, cp2ClosureStatus)
 	}
 }
