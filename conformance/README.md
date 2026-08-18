@@ -177,7 +177,7 @@ may claim it as a passing gate.
 
 `conformance/fixtures/protocol/canonical_pipeline_v2.json` and
 `conformance/schemas/cv-canonical-pipeline-v2.json` (schema version 2) are the **BUILDING** C01-R2
-successor. Status: `UNDER DESIGN` — not an authority. The v1 pair above stays the inert authority
+successor. Status: **BUILDING** — not an authority. The v1 pair above stays the inert authority
 and a byte-frozen read-only parent (its exact bytes are pinned in the v2 `_meta` and asserted by the
 generator tests) until RUB-1204 activates v2 and deletes the parent in the same PR; two active
 authorities never coexist.

@@ -100,7 +100,6 @@
     "rowKind": { "enum": ["observation", "authority", "forbidden"], "description": "Acceptance semantics inherited from v1: only kind=observation rows are adapter-emitted and compared (their cases carry the machine input and expected output); authority and forbidden rows are static authority read directly and are never emitted or compared as records." },
     "alias": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "not": { "pattern": "\\s" } },
     "machineToken": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_@/:()|+.-]+$", "not": { "pattern": "\\s" } },
-    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "bytes32OrAlias": { "type": "string", "pattern": "^([0-9a-f]{64}|[A-Z][A-Z0-9_]*)$", "not": { "pattern": "\\s" } },
     "issueId": { "type": "string", "pattern": "^RUB-[0-9]+$", "not": { "pattern": "\\s" } },
     "snakeToken": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "not": { "pattern": "\\s" } },
@@ -231,7 +230,7 @@
       }
     },
     "effect": {
-      "description": "One compared effect: the expected value, its type tag, whether the comparison is required, and the production observation that yields it. A missing or unknown compared field is a mismatch, never a wildcard.",
+      "description": "One compared effect: the expected value, its type tag, whether the comparison is required, and the production observation that yields it. A missing or unknown compared field is a mismatch, never a wildcard. A `hash` value is a bytes32 hex literal or an alias resolving in `fixtures` — the same rule as a summary row's block_hash, since a generator-computed digest is carried by alias.",
       "type": "object",
       "additionalProperties": false,
       "required": ["value", "type", "required", "observer"],
@@ -243,7 +242,7 @@
       },
       "allOf": [
         { "if": { "properties": { "type": { "const": "token" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/machineToken" } } } },
-        { "if": { "properties": { "type": { "const": "hash" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/sha256" } } } },
+        { "if": { "properties": { "type": { "const": "hash" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/bytes32OrAlias" } } } },
         { "if": { "properties": { "type": { "const": "u64" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "integer", "minimum": 0 } } } },
         { "if": { "properties": { "type": { "const": "bool" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "boolean" } } } }
       ]

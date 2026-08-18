@@ -438,6 +438,13 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
                 ("rows/0/cases/0/input/0", "additionalProperties"),
             ),
             "wire disposition off domain": (set_expected("wire_disposition", "FRAME_BOGUS"), (f"{expected}/wire_disposition", "enum")),
+            "hash effect value off grammar": (
+                lambda r: r["cases"][0]["expected"]["effects"].__setitem__(
+                    "gc_victim_hash",
+                    {"value": "H FULL 1", "type": "hash", "required": True, "observer": "damaged-GC victim identity"},
+                ),
+                (f"{expected}/effects/gc_victim_hash/value", "pattern"),
+            ),
             "release requirement without receipt flag": (
                 lambda r: r["release_requirements"]["go"][0].pop("delivery_receipt_required"),
                 ("rows/0/release_requirements/go/0", "required"),
