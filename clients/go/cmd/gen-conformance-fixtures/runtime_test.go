@@ -1247,6 +1247,9 @@ func TestCanonicalPipelinePendingOwnerRowsAreFrozen(t *testing.T) {
 		"C01-BUSY-001":                   pendingOwnerRUB910,
 		"C01-BUDGET-RACE-001":            pendingOwnerRUB893,
 		"C01-INVENTORY-RECLAIMED-001":    pendingOwnerRUB910,
+		"C01-ORPH-DUP-001":               pendingOwnerRUB910,
+		"C01-ORPH-OVERSIZE-001":          pendingOwnerRUB910,
+		"C01-ORPH-SOURCE51-001":          pendingOwnerRUB910,
 	}
 	got := make(map[string]string)
 	for _, row := range canonicalPipelineRows() {

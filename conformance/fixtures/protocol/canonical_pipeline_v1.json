@@ -119,7 +119,7 @@
     {
       "id": "C01-DIRECT-001",
       "kind": "observation",
-      "scenario": "One coherent A capture, one rolling private B, one process-local capacity-1 permit and one durable canonical-index commit publish the complete chain, standard, DA and owner image with no-fail RAM publication.",
+      "scenario": "A direct child of the canonical tip commits one durable canonical index and then publishes the complete chain, standard-mempool, DA and owner image; readers see either the exact old image or the complete new one, never a partial one, and the accepted counter moves by exactly one.",
       "result": "ACCEPTED",
       "commit_truth": "NEW",
       "rpc_projection": "result-selecting mined candidate: committed with identity; bootstrap: continuation-only",
@@ -182,6 +182,9 @@
       "effects": {
         "connected_block_decay_events": 0,
         "summary_rows": "0"
+      },
+      "detail": {
+        "precondition": "the rolling standard fee floor is raised above the default before the disconnect (a decay event is falsifiable only then)"
       }
     },
     {
@@ -288,7 +291,7 @@
       "result": "STORED_NONCANONICAL",
       "commit_truth": "NOT_APPLICABLE",
       "effects": {
-        "expected_victim": "D0+D1 at hash 0x..02"
+        "expected_victim": "0x..02"
       },
       "detail": {
         "candidates": "D0+D1 at hash 0x..02, D1 at hash 0x..01, D1 at hash 0x..03, D5 at hash 0x..00",
@@ -380,7 +383,18 @@
       "result": "STORED_NONCANONICAL",
       "commit_truth": "NOT_APPLICABLE",
       "effects": {
-        "block_seen": "unchanged"
+        "block_seen": "unchanged",
+        "canonical_da_sets_consumed": "0",
+        "da_ttl_attempt": 1,
+        "order": [
+          "record_candidate_best_height",
+          "set_block_seen",
+          "block_inventory_relay_per_section_19",
+          "attempt_one_da_orphan_ttl_advance",
+          "wake_resolver_once"
+        ],
+        "record_best_height": 1,
+        "resolver_wake": 1
       }
     },
     {
@@ -422,9 +436,11 @@
           "attempt_one_da_orphan_ttl_advance",
           "wake_resolver_once"
         ],
-        "post_return_consume_callers": 0,
         "record_best_height": 1,
         "resolver_wake": 1
+      },
+      "detail": {
+        "post_return_consume_callers": "none: RUB-911 deletes every post-return consume caller; a source-level prohibition, not a value a scenario run observes"
       }
     },
     {
@@ -582,7 +598,8 @@
       "effects": {
         "block_seen": "unchanged",
         "evictions": 0
-      }
+      },
+      "pending_owner": "RUB-910"
     },
     {
       "id": "C01-ORPH-EVICT-001",
@@ -635,7 +652,8 @@
         "initial_unset_stays": "unset",
         "retriable": false,
         "stale_set_stays": "set"
-      }
+      },
+      "pending_owner": "RUB-910"
     },
     {
       "id": "C01-ORPH-SOURCE51-001",
@@ -654,7 +672,8 @@
       },
       "detail": {
         "retriable": false
-      }
+      },
+      "pending_owner": "RUB-910"
     },
     {
       "id": "C01-ORPH-MISSING-PARENT-001",
@@ -721,7 +740,7 @@
     {
       "id": "C01-RES-IDENTITIES-PENDING-001",
       "kind": "authority",
-      "scenario": "The resource identities whose machinery no slice of this chain delivers; excluded from the RUB-926 zero-mismatch acceptance until RUB-893 is Done.",
+      "scenario": "The resource identities whose machinery no slice of this chain delivers; RUB-893 is the delivering owner (provenance marker — an authority row is never compared; the gate-bearing exclusions live on the observation rows C01-BUDGET-RACE-001 / C01-WIRE-OVERFLOW-001).",
       "detail": {
         "identities": "inbound_budget_capacity, inbound_budget_overflow",
         "retriable": "inbound_budget_capacity only, and only with an independently proven exact block hash"
@@ -747,7 +766,7 @@
     {
       "id": "C01-APPLYMETA-OVER-001",
       "kind": "observation",
-      "scenario": "Cap+1 is non-retriable and preserves canonical, store, mempool, counter and effect state completely; it creates no peer penalty, no retry slot and no release notification.",
+      "scenario": "The smallest realizable charge above the cap (cap+8 under the frozen 8-byte-granular formula 48+40*rows+32*complete_da_ids) is non-retriable and preserves canonical, store, mempool, counter and effect state completely; it creates no peer penalty, no retry slot and no release notification.",
       "result": "LOCAL_RESOURCE_UNAVAILABLE(apply_plan_metadata)",
       "commit_truth": "OLD",
       "canonical_counters": {
@@ -764,6 +783,7 @@
         "retry_slots": 0
       },
       "detail": {
+        "overflow_charge": "cap+8 = 67108872 (every charge is a multiple of 8; cap+1 is unreachable)",
         "retriable": false
       }
     },
@@ -856,10 +876,10 @@
       },
       "effects": {
         "admission": "not_latched",
+        "published_image": "old",
         "retry_slots": 0
       },
       "detail": {
-        "old_image": "exact",
         "triggers": "canonical-index atomic write before the namespace change; durable write of the verified precommit recovery checkpoint or either suffix proof set"
       }
     },
@@ -876,6 +896,7 @@
       },
       "effects": {
         "admission": "latched",
+        "published_image": "old",
         "rollback_attempted": false
       }
     },
@@ -887,7 +908,8 @@
       "commit_truth": "NEW",
       "rpc_projection": "committed; mined candidate identity only when the result-selecting mined candidate apply committed",
       "effects": {
-        "admission": "latched"
+        "admission": "latched",
+        "published_image": "new"
       }
     },
     {
@@ -904,6 +926,7 @@
       "effects": {
         "admission": "latched",
         "guessed_image": false,
+        "published_image": "withheld",
         "relay_authority": false,
         "summary_rows": "0"
       },
@@ -968,9 +991,6 @@
       "canonical_counters": {
         "accepted_delta": "0",
         "rejected_delta": "0"
-      },
-      "effects": {
-        "peer_penalty": 0
       }
     },
     {
