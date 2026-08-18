@@ -2510,8 +2510,8 @@ var (
 // cp2LiteralOf maps an element tag to its literal predicate, mirroring the
 // schema's per-tag arms. `object` is absent on purpose: a structured stimulus is
 // an alias, and a structured fixture's grammar is schema-owned (closedObject).
-// ponytail: a JSON number decodes to float64, so a u64 above 2^53 is not exactly
-// representable here; switch to json.Number if a case ever needs one.
+// ponytail: only a float64 input loses precision above 2^53 (uint64 and
+// json.Number are exact to MaxUint64); decode JSON with UseNumber to keep u64.
 var cp2LiteralOf = map[string]func(any) bool{
 	"bool": func(v any) bool { _, ok := v.(bool); return ok },
 	"u16":  func(v any) bool { return cp2UintOK(v, 65535) }, "u64": func(v any) bool { return cp2UintOK(v, math.MaxUint64) },
