@@ -20,8 +20,8 @@
       "type": "object",
       "required": ["issue", "architecture_parent", "normative_spec_ref", "baseline_ref", "expected_row_origin", "executors", "status", "consume_freeze_point"],
       "properties": {
-        "issue": { "type": "string" }, "architecture_parent": { "type": "string" }, "normative_spec_ref": { "type": "string" }, "baseline_ref": { "type": "string" },
-        "expected_row_origin": { "type": "string" }, "executors": { "type": "string" }, "status": { "type": "string" }, "consume_freeze_point": { "type": "string" }
+        "issue": { "type": "string", "minLength": 1 }, "architecture_parent": { "type": "string", "minLength": 1 }, "normative_spec_ref": { "type": "string", "minLength": 1 }, "baseline_ref": { "type": "string", "minLength": 1 },
+        "expected_row_origin": { "type": "string", "minLength": 1 }, "executors": { "type": "string", "minLength": 1 }, "status": { "type": "string", "minLength": 1 }, "consume_freeze_point": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": false
     },
@@ -35,9 +35,10 @@
       "const": ["OLD", "NEW", "UNKNOWN", "NOT_APPLICABLE"]
     },
     "coverage_receipt": {
-      "description": "Generated definition receipt mapping every enumerated class (closed result taxonomy plus every named observable, accepted, rejected and hostile bullet of RUB-922) to the row ids that define it; it records which rows freeze each class, not that each class is runtime-compared — only kind=observation rows are compared, so a class whose only carriers are authority/forbidden rows has no C01 runtime comparison (kind-aware split is RUB-1204). A class mapping to no row is a generation failure, never a corpus state.",
+      "description": "Generated definition receipt mapping every enumerated class (closed result taxonomy plus every named observable, accepted, rejected and hostile bullet of RUB-922) to the row ids that define it; it records which rows freeze each class, not that each class is runtime-compared — only kind=observation rows are compared, so a class whose only carriers are authority/forbidden rows has no C01 runtime comparison (kind-aware split is RUB-1204). A class mapping to no row is a generation failure, never a corpus state: 59 = 16 taxonomy + 17 observable + 7 accepted + 6 rejected + 13 hostile classes enumerated by RUB-922.",
       "type": "object",
       "minProperties": 59,
+      "maxProperties": 59,
       "propertyNames": { "pattern": "^(taxonomy:[A-Z0-9_]+|(observable|accepted|rejected|hostile):[a-z0-9_]+)$", "not": { "pattern": "\\s" } },
       "additionalProperties": { "type": "string", "pattern": "^C01-[A-Z0-9-]+(, C01-[A-Z0-9-]+)*$", "not": { "pattern": "\\n" } }
     },
@@ -69,11 +70,11 @@
         "effects": {
           "type": "object",
           "minProperties": 1,
-          "description": "`order` is the normative ordering specification of the named effect boundaries — not a count: an observed sequence MUST equal it element for element, including a boundary that makes no attempt (e.g. block inventory relay without section-19 authority), which keeps its position rather than being omitted. `block_seen`/`evicted_block_seen` are transition tokens for the row's block hash (`evicted_block_seen`: for the evicted row's hash): `set` (unset→set), `cleared` (set→unset), `unchanged` (before equals after, either value); the precondition value lives in `scenario`. `canonical_da_sets_consumed` is a symbolic-token count in the `canonical_counters` grammar ('0', '+included_matching_sets'), never a JSON integer; `+included_matching_sets` is the number of exact included-matching retained COMPLETE_SET records removed, deduplicated by `set_identity` across the full plan, resolved by the consumer from the row's `scenario`."
+          "description": "`order` is the normative ordering specification of the named effect boundaries — not a count: an observed sequence MUST equal it element for element, including a boundary that makes no attempt (e.g. block inventory relay without section-19 authority), which keeps its position rather than being omitted. `block_seen`/`evicted_block_seen` are transition tokens for the row's block hash (`evicted_block_seen`: for the evicted row's hash): `set` (unset→set), `cleared` (set→unset), `unchanged` (before equals after, either value); the precondition value lives in `scenario`. `canonical_da_sets_consumed` and `summary_rows` are symbolic-token counts ('0', '+included_matching_sets', '+connect_count') encoded as strings, never JSON integers; `+included_matching_sets` is the number of exact included-matching retained COMPLETE_SET records removed, deduplicated by `set_identity` across the full plan, resolved by the consumer from the row's `scenario`."
         },
         "detail": { "type": "object", "minProperties": 1, "description": "Static authored authority for the row. Adapters do not emit it and comparators do not compare it; every adapter-emitted disposition lives in a typed row field or in effects." },
         "pending_owner": {
-          "description": "NORMATIVE ACCEPTANCE SEMANTICS. A row carrying pending_owner names the RUB issue that must deliver the machinery the row describes. Until that issue is Done the row is excluded from the RUB-926 zero-mismatch acceptance comparison and from RUB-901 Go-versus-Rust equality: for an observation row an adapter MUST still emit whatever it observes and a comparator MUST NOT report the row as a mismatch; on an authority or forbidden row the field is a provenance marker only, since that kind is never emitted or compared. When the named issue is Done the field is removed by a C01 revision and an observation row becomes gate-bearing. Only RUB-922 (C01) may add, change or remove this field; a consumer that mutates it is out of contract.",
+          "description": "NORMATIVE ACCEPTANCE SEMANTICS. A row carrying pending_owner names the RUB issue that must deliver the machinery the row describes. Until that issue is Done the row is excluded from the RUB-926 zero-mismatch acceptance comparison and from RUB-901 Go-versus-Rust equality: for an observation row an adapter MUST still emit whatever it observes and a comparator MUST NOT report the row as a mismatch; on an authority or forbidden row the field is a provenance marker only, since that kind is never emitted or compared. When the named issue is Done the field is removed by a C01 revision and an observation row becomes gate-bearing. Only the C01 owner issue (RUB-922, then its R2 successor RUB-1204) may add, change or remove this field; a consumer that mutates it is out of contract.",
           "type": "string",
           "pattern": "^RUB-[0-9]+$", "not": { "pattern": "\\s" }
         }
@@ -85,7 +86,7 @@
         },
         {
           "if": { "properties": { "kind": { "const": "authority" } }, "required": ["kind"] },
-          "then": { "required": ["scenario", "detail"], "not": { "$ref": "#/$defs/nonObservationForbiddenFields" } }
+          "then": { "required": ["scenario", "detail"], "not": { "anyOf": [{ "$ref": "#/$defs/nonObservationForbiddenFields" }, { "required": ["forbidden_observation"] }] } }
         },
         {
           "if": { "properties": { "kind": { "const": "forbidden" } }, "required": ["kind"] },

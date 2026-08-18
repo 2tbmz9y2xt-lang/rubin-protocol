@@ -1869,9 +1869,9 @@ const (
 	// pendingOwnerRUB1195, pendingOwnerRUB893 and pendingOwnerRUB910 name the
 	// owner of a row whose machinery no slice of the RUB-922 -> RUB-890 ->
 	// RUB-908 -> RUB-1200 -> RUB-1201 -> RUB-1202 -> RUB-911 -> RUB-678 ->
-	// RUB-679 -> RUB-680 chain delivers: RUB-1195 owns section-19 relay,
-	// RUB-893 owns the inbound-budget resource identities, RUB-910 owns the
-	// permit/retry-budget and reclaimed-hash-inventory rows.
+	// RUB-679 -> RUB-680 chain delivers: RUB-1195 owns the section-19 relay
+	// rows; RUB-893 the inbound-budget identities, the inbound-budget races
+	// and reservation overflow; RUB-910 permit/LOCAL_BUSY, retry-slot races and reclaimed-hash inventory.
 	pendingOwnerRUB1195 = "RUB-1195"
 	pendingOwnerRUB893  = "RUB-893"
 	pendingOwnerRUB910  = "RUB-910"
@@ -2008,7 +2008,7 @@ func cpPathRows() []cpRow {
 			"observable:counter_deltas", "observable:final_state_atomicity", "accepted:coherent_capture_publication").counters("+connect_count", "0").
 			effects(cpMap{"final_state_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest", "summary_rows": "+connect_count", "intermediate_tip_rows": 0, "publication_events": 1, "external_visibility": "old_or_new"}),
 		cpObs("C01-DISCONNECT-001", "ACCEPTED", "NEW", "An explicit standalone disconnect publishes proven NEW with an empty canonical-applied summary and zero connected-block fee-floor decay events.",
-			"observable:counter_deltas").counters("0", "0").effects(cpMap{"summary_rows": 0, "connected_block_decay_events": 0}),
+			"observable:counter_deltas").counters("0", "0").effects(cpMap{"summary_rows": "0", "connected_block_decay_events": 0}),
 		cpAuth("C01-NEUTRAL-001", "Results that change neither planner-owned canonical counter, carry no peer penalty and perform no unauthorized canonical mutation and do not latch mutation admission, plus the exact plan and candidate-queue bounds.", cpMap{
 			"neutral_results":                    "LOCAL_BUSY, LOCAL_RESOURCE_UNAVAILABLE, STALE_LOCAL_PLAN, LOCAL_CANCELLED, KNOWN_BLOCK_NOOP, STORED_NONCANONICAL, ORPHAN_RETAINED, ORPHAN_ALREADY_RETAINED, MISSING_PARENT, LOCAL_STORE_ERROR(noncanonical), LOCAL_PERSISTENCE_ERROR(precommit)", //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
 			"no_peer_penalty_results":            "every neutral result above plus TERMINAL_STORE_INTEGRITY(canonical), TERMINAL_LOCAL_INVARIANT(evidence) and TERMINAL_PERSISTENCE",
@@ -2024,7 +2024,7 @@ func cpPathRows() []cpRow {
 			"hostile:paired_first_errors", "observable:path_precedence", "taxonomy:TERMINAL_STORE_INTEGRITY").counters("0", "0").
 			rpc("not_committed with the existing terminal result surface").effects(cpMap{"admission": "latched", "first_error_source": "strict_initial_canonical_index_preflight"}),
 		cpObs("C01-FIRSTERR-LATE-001", "CONSENSUS_INVALID(BLOCK_ERR_MERKLE_INVALID)", "OLD", "A late consensus-invalid candidate paired with an earlier best-effort artifact-write failure: the exact consensus error wins whenever validation can complete.",
-			"hostile:late_consensus_invalid_wins", "taxonomy:CONSENSUS_INVALID").counters("0", "+1").rpc("not_committed"),
+			"hostile:late_consensus_invalid_wins", "taxonomy:CONSENSUS_INVALID", "observable:counter_deltas").counters("0", "+1").rpc("not_committed"),
 		cpObs("C01-EQUALWORK-001", "ACCEPTED", "NEW", "Two equal-cumulative-work candidates delivered and validation-completed in opposite orders select the same lexicographically lower canonical tip hash in both clients.",
 			"hostile:equal_work_opposite_orders").effects(cpMap{"winning_tip": "lexicographically_lower"}).
 			detail(cpMap{"stable_under": "reversed delivery order, reversed validation completion, reversed worker schedule, best-ready status"}),
@@ -2034,13 +2034,13 @@ func cpPathRows() []cpRow {
 func cpPresenceRows() []cpRow {
 	return []cpRow{
 		cpAuth("C01-PRESENCE-001", "The strict presence truth table is closed and no repair is observable.", cpMap{
-			"canonical_member":     "block=valid|header=match|undo=valid => CANONICAL; every other recognized canonical combination => TERMINAL_STORE_INTEGRITY(canonical)",
+			"canonical_member":     "block=valid|header=match|undo=valid => CANONICAL; every other recognized canonical combination of an artifact the active retention profile requires to be present (or already validated and retained) => TERMINAL_STORE_INTEGRITY(canonical); profile-permitted pruned suffix data => LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)",
 			"noncanonical_absent":  "block=absent|header=absent|undo=absent => ABSENT",
 			"noncanonical_stored":  "block=valid|header=absent|undo=absent; block=valid|header=match|undo=absent; block=valid|header=match|undo=valid",
 			"noncanonical_other":   "every other recognized combination => LOCAL_STORE_ERROR(noncanonical)",
 			"repair_or_truncation": false,
 		}, "observable:presence_truth_table"),
-		cpObs("C01-PRESENCE-TERMINAL-001", "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", "A canonical member with a missing, partial, corrupt or mismatched artifact is terminal and keeps mutation admission latched.",
+		cpObs("C01-PRESENCE-TERMINAL-001", "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", "A canonical member whose artifact the active retention profile requires is missing, partial, corrupt or mismatched: terminal, and mutation admission stays latched.",
 			"observable:presence_truth_table", "hostile:duplicate_and_corrupt_combinations").counters("0", "0").
 			effects(cpMap{"admission": "latched"}).
 			detail(cpMap{"combinations": "block=absent|header=match|undo=valid; block=valid|header=absent|undo=valid; block=valid|header=mismatch|undo=valid; block=valid|header=match|undo=absent; block=valid|header=match|undo=invalid; block=corrupt|header=match|undo=valid"}),
@@ -2059,7 +2059,7 @@ func cpPresenceRows() []cpRow {
 			}),
 		cpObs("C01-GC-HEALTHY-001", "LOCAL_RESOURCE_UNAVAILABLE(noncanonical_bytes)", "OLD", "Quota exhaustion with only healthy rows returns the non-retriable resource result after the damaged-only GC attempt; noncanonical_count behaves identically.",
 			"taxonomy:LOCAL_RESOURCE_UNAVAILABLE", "observable:resource_identities", "observable:gc_damage_order").counters("0", "0").
-			effects(cpMap{"retry_slots": 0, "release_notification": false, "rows_reclaimed": 0, "gc_attempted": true}).
+			effects(cpMap{"retry_slots": 0, "release_notification": false, "rows_reclaimed": 0, "gc_attempted": true, "admission": "not_latched"}).
 			detail(cpMap{"retriable": false}),
 		cpAuth("C01-GC-CRASH-001", "Quota cap+1, partial create and a crash at each delete or fsync boundary stay fail-closed; a canonical-to-side reclassification with an open reader keeps that reader's artifact readable.", cpMap{
 			"crash_boundaries":                  "before_delete, after_delete_before_fsync, after_fsync",
@@ -2079,7 +2079,7 @@ func cpEffectRows() []cpRow {
 			effects(cpMap{"block_seen": "unchanged", "record_best_height": 0, "inv_attempt": 0, "da_ttl_attempt": 0, "resolver_wake": 0, "canonical_da_sets_consumed": "0", "broadcast": 0, "wire_response": 0, "peer_penalty": 0, "provider_reads": 0, "compact_outstanding_cleared": "matching_only"}).
 			detail(cpMap{"derivation": "strict presence plus proven no-effect behavior"}),
 		cpObs("C01-NOOP-CMPCT-001", "KNOWN_BLOCK_NOOP(STORED_NONCANONICAL)", "NOT_APPLICABLE", "A duplicate compact receive whose blockSeen is unset leaves it unset: blockSeen is relay dedup only and is neither residency nor invalidity authority.",
-			"observable:known_block_noop", "observable:block_seen_inventory", "taxonomy:KNOWN_BLOCK_NOOP").counters("0", "0").effects(cpMap{"block_seen": "unchanged", "inv_attempt": 0, "resolver_wake": 0}),
+			"observable:known_block_noop", "observable:block_seen_inventory", "taxonomy:KNOWN_BLOCK_NOOP", "hostile:duplicate_and_corrupt_combinations").counters("0", "0").effects(cpMap{"block_seen": "unchanged", "inv_attempt": 0, "resolver_wake": 0}),
 		cpObs("C01-RECLAIMED-RECEIVE-001", "STORED_NONCANONICAL", "NOT_APPLICABLE", "A reclaimed row with a stale blockSeen is ABSENT under strict presence, so the receive stores it again and preserves the stale blockSeen value.",
 			"observable:block_seen_inventory", "hostile:duplicate_and_corrupt_combinations").effects(cpMap{"block_seen": "unchanged"}),
 		cpObs("C01-EFFECT-STORED-001", "STORED_NONCANONICAL", "NOT_APPLICABLE", "A fresh STORED_NONCANONICAL freezes the POST-RUB-911 P2P-owned effect order, which has no consume step; the side block consumes zero canonical-DA sets.",
@@ -2087,10 +2087,9 @@ func cpEffectRows() []cpRow {
 			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": "0"}),
 		cpObs("C01-EFFECT-ACCEPTED-001", "ACCEPTED", "NEW", "A fresh ACCEPTED freezes the same P2P-owned effect order; canonical-DA consumption is not a step of it but an identity of the transition image, consuming each exact included-matching retained COMPLETE_SET once, deduplicated by `set_identity` across the full plan, and never from a post-return caller.",
 			"observable:frozen_effect_order", "taxonomy:ACCEPTED").
-			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": "+included_matching_sets", "post_return_consume_callers": 0}).
-			detail(cpMap{"da_ttl_fence": "the DA-orphan TTL advance never interleaves with a canonical transition"}),
+			effects(cpMap{"order": frozenOrder, "record_best_height": 1, "block_seen": "set", "da_ttl_attempt": 1, "resolver_wake": 1, "canonical_da_sets_consumed": "+included_matching_sets", "post_return_consume_callers": 0, "da_ttl_fenced": true}),
 		cpObs("C01-FAULT-STORED-001", "STORED_NONCANONICAL", "NOT_APPLICABLE", "A fault injected at each fallible post-store effect boundary still runs every subsequent best-effort effect and the final resolver wake exactly once, in the frozen order.",
-			"hostile:postcommit_fault_boundaries").effects(cpMap{"order": frozenOrder, "record_best_height": 1, "da_ttl_attempt": 1, "resolver_wake": 1, "short_circuit": false, "replay": false, "result_changed_by_failure": false}).
+			"hostile:postcommit_fault_boundaries").effects(cpMap{"order": frozenOrder, "record_best_height": 1, "da_ttl_attempt": 1, "resolver_wake": 1, "short_circuit": false, "replay": false, "result_changed_by_failure": false, "artifact_state_changed_by_failure": false, "peer_policy_changed_by_failure": false}).
 			detail(cpMap{"fault_boundaries": "record_best_height, block_seen, block_inventory_relay, da_ttl_attempt"}),
 		cpObs("C01-FAULT-ACCEPTED-001", "ACCEPTED", "NEW", "The same fault matrix on an ACCEPTED row with a nonempty canonical-applied summary: failures add bounded diagnostics only and never duplicate the planner-owned counter or re-consume a DA set.",
 			"hostile:postcommit_fault_boundaries").counters("+1", "0").
@@ -2143,17 +2142,17 @@ func cpOrphanRows() []cpRow {
 		cpObs("C01-ORPH-DUP-001", "ORPHAN_ALREADY_RETAINED", "OLD", "A duplicate orphan is already-retained: no copy, no effect and no eviction.",
 			"taxonomy:ORPHAN_ALREADY_RETAINED", "observable:orphan_pool").effects(cpMap{"evictions": 0, "block_seen": "unchanged"}),
 		cpObs("C01-ORPH-EVICT-001", "ORPHAN_RETAINED", "OLD", "Crossing 500 to 501 unique entries, or 64 MiB to cap+1 raw bytes, retains the newest row and evicts oldest FIFO rows until both caps hold; each eviction removes that row and clears its blockSeen.",
-			"observable:orphan_pool", "hostile:orphan_cap_boundaries_and_source_keys").effects(cpMap{"evictions": 1, "block_seen": "set", "evicted_block_seen": "cleared"}).
+			"observable:orphan_pool", "hostile:orphan_cap_boundaries_and_source_keys").effects(cpMap{"evictions": 1, "block_seen": "set", "evicted_block_seen": "cleared", "victim": "oldest_fifo"}).
 			detail(cpMap{"boundaries": "unique_count 500->501 and raw_bytes 64MiB->cap+1", "retained": "newest", "eviction_policy": "oldest FIFO first"}),
 		cpObs("C01-ORPH-INFLIGHT-001", "ORPHAN_RETAINED", "OLD", "Eviction is unconditional and there is no pin set: a row under resolution has already been removed from the pool before the resolver sees it, so no in-pool row is pin-protected and no cap infeasibility can arise.",
 			"hostile:orphan_admission_eviction_refusal", "observable:orphan_pool").
 			effects(cpMap{"resolving_row_in_pool": false}).detail(cpMap{"pin_set": false, "pre_insertion_feasibility_proof": false}),
 		cpObs("C01-ORPH-OVERSIZE-001", "LOCAL_RESOURCE_UNAVAILABLE(orphan_pool)", "OLD", "A single entry larger than 64 MiB is a non-retriable orphan_pool refusal: no insertion, no eviction, and blockSeen unchanged in both the initially unset and the stale-set case.",
-			"hostile:orphan_admission_eviction_refusal").effects(cpMap{"evictions": 0, "block_seen": "unchanged", "retry_slots": 0, "pool_bytes_delta": 0}).
+			"hostile:orphan_admission_eviction_refusal").effects(cpMap{"evictions": 0, "block_seen": "unchanged", "retry_slots": 0, "pool_bytes_delta": 0, "fifo_delta": 0, "source_count_delta": 0, "admission": "not_latched"}).
 			detail(cpMap{"retriable": false, "initial_unset_stays": "unset", "stale_set_stays": "set"}),
 		cpObs("C01-ORPH-SOURCE51-001", "LOCAL_RESOURCE_UNAVAILABLE(orphan_pool)", "OLD", "Entry 51 for one nonempty normalized source is a non-retriable refusal with the entire prior pool, FIFO, source counts and blockSeen byte-for-byte unchanged.",
 			"hostile:orphan_admission_eviction_refusal", "hostile:orphan_cap_boundaries_and_source_keys").
-			effects(cpMap{"evictions": 0, "block_seen": "unchanged", "retry_slots": 0, "source_count_delta": 0, "fifo_delta": 0}).detail(cpMap{"retriable": false}),
+			effects(cpMap{"evictions": 0, "block_seen": "unchanged", "retry_slots": 0, "source_count_delta": 0, "fifo_delta": 0, "pool_bytes_delta": 0, "admission": "not_latched"}).detail(cpMap{"retriable": false}),
 		cpObs("C01-ORPH-MISSING-PARENT-001", "MISSING_PARENT", "OLD", "An apply entered without orphan retention whose parent is neither canonical nor stored returns MISSING_PARENT and preserves the exact old image.",
 			"taxonomy:MISSING_PARENT").counters("0", "0").rpc("not_committed only when reached by a mining entrypoint"),
 		cpAuth("C01-SRCKEY-001", "The orphan source-quota key mapping is frozen byte-for-byte: SplitHostPort success selects the host regardless of a numeric, nonnumeric or empty port and of bracketed non-IP spelling, its failure keeps the complete input, ParseAddr success returns WithZone(\"\").String() without Unmap, and its failure preserves host bytes and case. Rust must reproduce these bytes and may not substitute a socket-address grammar.", cpMap{
@@ -2199,13 +2198,13 @@ func cpResourceRows() []cpRow {
 			effects(cpMap{"peer_penalty": 0, "retry_slots": 0, "getdata_sent": 0, "record_best_height": 0, "block_seen": "unchanged", "release_notification": false, "admission": "not_latched"}).
 			detail(cpMap{"retriable": false}),
 		cpObs("C01-BUSY-001", "LOCAL_BUSY", "OLD", "LOCAL_BUSY carries the canonical-permit observed-generation notification and arms the single peer retry slot with one joined waiter; it retains no candidate, never blocks the socket reader and never follows strict presence or stateful consensus. A duplicate or different hash while the slot is armed and disconnect or deadline races resolve deterministically, and non-retriable resource classes arm no slot and send no getdata.",
-			"taxonomy:LOCAL_BUSY", "observable:permit_retry_budget", "hostile:permit_budget_races").counters("0", "0").effects(cpMap{"retry_slots": 1, "peer_penalty": 0, "joined_waiters_max": 1, "fixed_backoff": false, "candidate_retained": false}).
+			"taxonomy:LOCAL_BUSY", "observable:permit_retry_budget", "hostile:permit_budget_races").counters("0", "0").effects(cpMap{"retry_slots": 1, "peer_penalty": 0, "joined_waiters_max": 1, "fixed_backoff": false, "candidate_retained": false, "observed_generation_notification": true}).
 			detail(cpMap{"deadline": "original receive-start +30 second absolute deadline", "non_retriable_classes_arm_no_slot_and_no_getdata": "inbound_budget_overflow, apply_plan_metadata, noncanonical_bytes, noncanonical_count, orphan_pool, recovery_artifact"}).pending(pendingOwnerRUB910),
 		cpObs("C01-BUDGET-RACE-001", "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_capacity)", "OLD", "Inbound-budget registration-versus-release races, an already-closed notification and capacity released before the waiter is scheduled all resolve deterministically; the retriable result carries the inbound-budget observed-generation notification and requires an independently proven exact block hash.",
-			"hostile:permit_budget_races", "observable:permit_retry_budget").effects(cpMap{"peer_penalty": 0, "observed_generation_notification": true}).
+			"hostile:permit_budget_races", "observable:permit_retry_budget").effects(cpMap{"peer_penalty": 0, "observed_generation_notification": true, "retry_slots": 1, "admission": "not_latched"}).
 			detail(cpMap{"retriable": true, "requires_proven_exact_hash": true}).pending(pendingOwnerRUB893),
 		cpObs("C01-WIRE-OVERFLOW-001", "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_overflow)", "OLD", "A checked inbound reservation overflow or replacement failure is non-retriable; a valid payload discarded because of a bad checksum, read or declared length keeps the documented wire-error precedence and never becomes a resource result.",
-			"hostile:inbound_reservation_and_wire_errors").effects(cpMap{"retry_slots": 0, "getdata_sent": 0}).
+			"hostile:inbound_reservation_and_wire_errors").effects(cpMap{"retry_slots": 0, "getdata_sent": 0, "admission": "not_latched"}).
 			detail(cpMap{"retriable": false, "wire_error_precedence": "frame_length, frame_read, frame_checksum"}).pending(pendingOwnerRUB893),
 		cpAuth("C01-GO-CONSTANTS-001", "Go resource authority constants for this corpus. C01 freezes behavior and formulas, not imported Go heap coefficients: the Rust rows require a fresh identical runtime corpus repeated after the Go freeze.", cpMap{
 			"inbound_default_bytes": 1073741824, "inbound_hard_bytes": 8589934592,
@@ -2231,7 +2230,7 @@ func cpTerminalRows() []cpRow {
 			rpc("committed; mined candidate identity only when the result-selecting mined candidate apply committed"),
 		cpObs("C01-TP-UNKNOWN-001", "TERMINAL_PERSISTENCE(neither_or_unreadable)", "UNKNOWN", "Every other or unreadable readback publishes neither guessed image and exposes no summary and no relay authority.",
 			"accepted:post_namespace_terminal_class", "hostile:canonical_ambiguity_and_readers", "taxonomy:TERMINAL_PERSISTENCE").counters("0", "0").
-			rpc("unknown; legacy mined absent").effects(cpMap{"admission": "latched", "guessed_image": false, "relay_authority": false, "summary_rows": 0}).
+			rpc("unknown; legacy mined absent").effects(cpMap{"admission": "latched", "guessed_image": false, "relay_authority": false, "summary_rows": "0"}).
 			detail(cpMap{"stable_live_aliases": "a malformed live cache against a valid disk image, a retained-alias mutation under a continuously held permit, and admission readers active at terminal detection all keep stable aliases", "final_ram_cache_drift_check": "against the committed index bytes"}),
 		cpObs("C01-TERMINV-001", "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD", "A missing or corrupt selected retained record or accounting value, an exact-token mismatch, a duplicate claim, or a checked arithmetic underflow or overflow preserves OLD, publishes no candidate delta and keeps mutation admission latched.",
 			"taxonomy:TERMINAL_LOCAL_INVARIANT").counters("0", "0").rpc("not_committed with the existing terminal result surface").
@@ -2290,8 +2289,8 @@ func canonicalPipelineRows() []cpRow {
 
 // mustValidateCanonicalPipelineRows fails generation on any structural defect a
 // downstream adapter could not repair: a duplicate row id, a result outside the
-// closed taxonomy, an unknown commit-truth value, or an unknown coverage class; per-kind
-// payload shapes are schema-owned (see mustValidateCanonicalPipelineKind).
+// closed taxonomy, an unknown commit-truth value, or a coverage class unknown or repeated
+// in one row; per-kind payload shapes are schema-owned (see mustValidateCanonicalPipelineKind).
 func mustValidateCanonicalPipelineRows(rows []cpRow) {
 	truths := make(map[string]bool, len(canonicalPipelineCommitTruth))
 	for _, value := range canonicalPipelineCommitTruth {
@@ -2311,10 +2310,15 @@ func mustValidateCanonicalPipelineRows(rows []cpRow) {
 		if len(row.Covers) == 0 {
 			fatalf("canonical pipeline: row %s covers no enumerated class", row.ID)
 		}
+		covered := make(map[string]bool, len(row.Covers))
 		for _, class := range row.Covers {
 			if !classes[class] {
 				fatalf("canonical pipeline: row %s covers unknown class %q", row.ID, class)
 			}
+			if covered[class] {
+				fatalf("canonical pipeline: row %s covers class %q twice", row.ID, class)
+			}
+			covered[class] = true
 		}
 	}
 }

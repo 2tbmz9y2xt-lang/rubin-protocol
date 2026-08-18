@@ -931,6 +931,7 @@ func TestGenerator_OutputDirContainmentNoCommittedWrite(t *testing.T) {
 		filepath.Join("devnet", "devnet-vault-create-01.json"),
 		filepath.Join("devnet", "devnet-htlc-claim-01.json"),
 		filepath.Join("devnet", "devnet-multisig-spend-01.json"),
+		filepath.Join("protocol", "canonical_pipeline_v1.json"),
 	}
 	beforeContents := make(map[string][]byte, len(committedSamples))
 	for _, rel := range committedSamples {
@@ -1225,9 +1226,9 @@ func TestCanonicalPipelineCoverageReceiptIsCompleteAndClosed(t *testing.T) {
 	if len(rows) != 62 {
 		t.Fatalf("canonical pipeline corpus has %d rows, want the frozen 62 (bump deliberately with a corpus revision)", len(rows))
 	}
-	// canonicalPipelineCoverage fails generation on a class with zero rows, and
-	// mustValidateCanonicalPipelineRows on a duplicate id, an out-of-taxonomy
-	// result or an unknown coverage class. Both run here.
+	// canonicalPipelineCoverage exits on a class with zero rows and otherwise
+	// returns exactly one entry per enumerated class, so this count guard fires
+	// only on a duplicate entry in canonicalPipelineClasses itself.
 	if receipt := canonicalPipelineCoverage(rows); len(receipt) != len(canonicalPipelineClasses) {
 		t.Fatalf("coverage receipt has %d classes, want %d", len(receipt), len(canonicalPipelineClasses))
 	}
@@ -1308,44 +1309,60 @@ func TestCanonicalPipelineResultPatternIsClosed(t *testing.T) {
 	}
 }
 
-// TestCanonicalPipelineValidatorFailsClosed re-execs the test binary so each
-// generator fatalf path (which calls os.Exit) is observable as a child exit
-// code, mirroring cmd/formal-trace.TestMainExitCodeIs2OnError.
+// TestCanonicalPipelineValidatorFailsClosed re-execs the test binary so every
+// generator fatalf path (each calls os.Exit) is observable as a child exit code
+// carrying its own message, mirroring cmd/formal-trace.TestMainExitCodeIs2OnError.
+// The cases below cover all eight canonical-pipeline fatalf branches; bad_prefix
+// and duplicate_id share one message and are both exercised.
 func TestCanonicalPipelineValidatorFailsClosed(t *testing.T) {
 	if c := os.Getenv("CP_NEGATIVE_CASE"); c != "" {
 		rows := canonicalPipelineRows()
-		switch c {
-		case "zero_class":
+		if c == "zero_class" {
 			const drop = "accepted:lazy_memoized_provider" // sole row: C01-PROVIDER-001
-			kept := rows[:0]
-			for _, row := range rows {
-				if !slices.Contains(row.Covers, drop) {
-					kept = append(kept, row)
-				}
-			}
-			canonicalPipelineCoverage(kept)
-		case "duplicate_id":
-			mustValidateCanonicalPipelineRows(append(rows, rows[0]))
-		case "bad_result":
-			for i := range rows { // rows[0].Kind=authority is never Result-checked
-				if rows[i].Kind == "observation" {
-					rows[i].Result = "ACCEPTED(extra)"
-					break
-				}
-			}
-			mustValidateCanonicalPipelineRows(rows)
+			canonicalPipelineCoverage(slices.DeleteFunc(rows, func(r cpRow) bool { return slices.Contains(r.Covers, drop) }))
+			return
 		}
+		obs := slices.IndexFunc(rows, func(r cpRow) bool { return r.Kind == "observation" }) // rows[0] is authority: never Result- or CommitTruth-checked
+		switch c {
+		case "duplicate_id":
+			rows = append(rows, rows[0])
+		case "bad_prefix":
+			rows[0].ID = "X01-BAD"
+		case "no_covers":
+			rows[0].Covers = nil
+		case "unknown_class":
+			rows[0].Covers = []string{"bogus:class"}
+		case "duplicate_cover":
+			rows[0].Covers = append(rows[0].Covers, rows[0].Covers[0])
+		case "unknown_kind":
+			rows[0].Kind = "conjecture"
+		case "bad_result":
+			rows[obs].Result = "ACCEPTED(extra)"
+		case "unknown_truth":
+			rows[obs].CommitTruth = "MAYBE"
+		}
+		mustValidateCanonicalPipelineRows(rows)
 		return
 	}
-	for _, c := range []string{"zero_class", "duplicate_id", "bad_result"} {
+	for _, c := range []struct{ name, want string }{
+		{"zero_class", "maps to zero rows"},
+		{"duplicate_id", "must start with C01- and be unique"},
+		{"bad_prefix", "must start with C01- and be unique"},
+		{"no_covers", "covers no enumerated class"},
+		{"unknown_class", "covers unknown class"},
+		{"duplicate_cover", "twice"},
+		{"unknown_kind", "has unknown kind"},
+		{"bad_result", "outside the closed taxonomy"},
+		{"unknown_truth", "commit truth"},
+	} {
 		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=TestCanonicalPipelineValidatorFailsClosed") //nolint:gosec // re-exec of the test binary with fixed args
-		cmd.Env = append(os.Environ(), "CP_NEGATIVE_CASE="+c)
+		cmd.Env = append(os.Environ(), "CP_NEGATIVE_CASE="+c.name)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err == nil {
-			t.Fatalf("case %s: expected non-zero exit, stderr=%s", c, stderr.String())
-		} else if !strings.Contains(stderr.String(), "fatal: canonical pipeline:") {
-			t.Fatalf("case %s: stderr = %q, want \"fatal: canonical pipeline:\"", c, stderr.String())
+			t.Fatalf("case %s: expected non-zero exit, stderr=%s", c.name, stderr.String())
+		} else if got := stderr.String(); !strings.Contains(got, "fatal: canonical pipeline: ") || !strings.Contains(got, c.want) {
+			t.Fatalf("case %s: stderr = %q, want a canonical-pipeline fatal containing %q", c.name, got, c.want)
 		}
 	}
 }

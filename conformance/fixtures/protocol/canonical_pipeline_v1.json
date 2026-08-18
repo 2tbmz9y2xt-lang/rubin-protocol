@@ -50,7 +50,7 @@
     "accepted:rust_repeat_corpus": "C01-GO-CONSTANTS-001",
     "hostile:apply_plan_metadata_caps": "C01-APPLYMETA-CAP-001, C01-APPLYMETA-OVER-001",
     "hostile:canonical_ambiguity_and_readers": "C01-TP-UNKNOWN-001",
-    "hostile:duplicate_and_corrupt_combinations": "C01-PRESENCE-TERMINAL-001, C01-PRESENCE-STOREERR-001, C01-NOOP-FULL-001, C01-RECLAIMED-RECEIVE-001",
+    "hostile:duplicate_and_corrupt_combinations": "C01-PRESENCE-TERMINAL-001, C01-PRESENCE-STOREERR-001, C01-NOOP-FULL-001, C01-NOOP-CMPCT-001, C01-RECLAIMED-RECEIVE-001",
     "hostile:equal_work_opposite_orders": "C01-EQUALWORK-001",
     "hostile:inbound_reservation_and_wire_errors": "C01-WIRE-OVERFLOW-001",
     "hostile:late_consensus_invalid_wins": "C01-FIRSTERR-LATE-001",
@@ -63,7 +63,7 @@
     "hostile:quota_crash_and_reclassification": "C01-GC-ORDER-001, C01-GC-CRASH-001",
     "observable:block_seen_inventory": "C01-NOOP-CMPCT-001, C01-RECLAIMED-RECEIVE-001, C01-INVENTORY-001, C01-INVENTORY-RECLAIMED-001",
     "observable:checkpoint_rows": "C01-CKPT-001",
-    "observable:counter_deltas": "C01-DIRECT-001, C01-SIDE-001, C01-REORG-001, C01-DISCONNECT-001, C01-NEUTRAL-001",
+    "observable:counter_deltas": "C01-DIRECT-001, C01-SIDE-001, C01-REORG-001, C01-DISCONNECT-001, C01-NEUTRAL-001, C01-FIRSTERR-LATE-001",
     "observable:final_state_atomicity": "C01-REORG-001",
     "observable:frozen_effect_order": "C01-EFFECT-STORED-001, C01-EFFECT-ACCEPTED-001, C01-RELAY-STORED-001, C01-RELAY-ACCEPTED-001",
     "observable:gc_damage_order": "C01-GC-ORDER-001, C01-GC-HEALTHY-001",
@@ -181,7 +181,7 @@
       },
       "effects": {
         "connected_block_decay_events": 0,
-        "summary_rows": 0
+        "summary_rows": "0"
       }
     },
     {
@@ -246,7 +246,7 @@
       "kind": "authority",
       "scenario": "The strict presence truth table is closed and no repair is observable.",
       "detail": {
-        "canonical_member": "block=valid|header=match|undo=valid =\u003e CANONICAL; every other recognized canonical combination =\u003e TERMINAL_STORE_INTEGRITY(canonical)",
+        "canonical_member": "block=valid|header=match|undo=valid =\u003e CANONICAL; every other recognized canonical combination of an artifact the active retention profile requires to be present (or already validated and retained) =\u003e TERMINAL_STORE_INTEGRITY(canonical); profile-permitted pruned suffix data =\u003e LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)",
         "noncanonical_absent": "block=absent|header=absent|undo=absent =\u003e ABSENT",
         "noncanonical_other": "every other recognized combination =\u003e LOCAL_STORE_ERROR(noncanonical)",
         "noncanonical_stored": "block=valid|header=absent|undo=absent; block=valid|header=match|undo=absent; block=valid|header=match|undo=valid",
@@ -256,7 +256,7 @@
     {
       "id": "C01-PRESENCE-TERMINAL-001",
       "kind": "observation",
-      "scenario": "A canonical member with a missing, partial, corrupt or mismatched artifact is terminal and keeps mutation admission latched.",
+      "scenario": "A canonical member whose artifact the active retention profile requires is missing, partial, corrupt or mismatched: terminal, and mutation admission stays latched.",
       "result": "TERMINAL_STORE_INTEGRITY(canonical)",
       "commit_truth": "OLD",
       "canonical_counters": {
@@ -309,6 +309,7 @@
         "rejected_delta": "0"
       },
       "effects": {
+        "admission": "not_latched",
         "gc_attempted": true,
         "release_notification": false,
         "retry_slots": 0,
@@ -413,6 +414,7 @@
         "block_seen": "set",
         "canonical_da_sets_consumed": "+included_matching_sets",
         "da_ttl_attempt": 1,
+        "da_ttl_fenced": true,
         "order": [
           "record_candidate_best_height",
           "set_block_seen",
@@ -423,9 +425,6 @@
         "post_return_consume_callers": 0,
         "record_best_height": 1,
         "resolver_wake": 1
-      },
-      "detail": {
-        "da_ttl_fence": "the DA-orphan TTL advance never interleaves with a canonical transition"
       }
     },
     {
@@ -435,6 +434,7 @@
       "result": "STORED_NONCANONICAL",
       "commit_truth": "NOT_APPLICABLE",
       "effects": {
+        "artifact_state_changed_by_failure": false,
         "da_ttl_attempt": 1,
         "order": [
           "record_candidate_best_height",
@@ -443,6 +443,7 @@
           "attempt_one_da_orphan_ttl_advance",
           "wake_resolver_once"
         ],
+        "peer_policy_changed_by_failure": false,
         "record_best_height": 1,
         "replay": false,
         "resolver_wake": 1,
@@ -592,7 +593,8 @@
       "effects": {
         "block_seen": "set",
         "evicted_block_seen": "cleared",
-        "evictions": 1
+        "evictions": 1,
+        "victim": "oldest_fifo"
       },
       "detail": {
         "boundaries": "unique_count 500-\u003e501 and raw_bytes 64MiB-\u003ecap+1",
@@ -621,10 +623,13 @@
       "result": "LOCAL_RESOURCE_UNAVAILABLE(orphan_pool)",
       "commit_truth": "OLD",
       "effects": {
+        "admission": "not_latched",
         "block_seen": "unchanged",
         "evictions": 0,
+        "fifo_delta": 0,
         "pool_bytes_delta": 0,
-        "retry_slots": 0
+        "retry_slots": 0,
+        "source_count_delta": 0
       },
       "detail": {
         "initial_unset_stays": "unset",
@@ -639,9 +644,11 @@
       "result": "LOCAL_RESOURCE_UNAVAILABLE(orphan_pool)",
       "commit_truth": "OLD",
       "effects": {
+        "admission": "not_latched",
         "block_seen": "unchanged",
         "evictions": 0,
         "fifo_delta": 0,
+        "pool_bytes_delta": 0,
         "retry_slots": 0,
         "source_count_delta": 0
       },
@@ -774,6 +781,7 @@
         "candidate_retained": false,
         "fixed_backoff": false,
         "joined_waiters_max": 1,
+        "observed_generation_notification": true,
         "peer_penalty": 0,
         "retry_slots": 1
       },
@@ -790,8 +798,10 @@
       "result": "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_capacity)",
       "commit_truth": "OLD",
       "effects": {
+        "admission": "not_latched",
         "observed_generation_notification": true,
-        "peer_penalty": 0
+        "peer_penalty": 0,
+        "retry_slots": 1
       },
       "detail": {
         "requires_proven_exact_hash": true,
@@ -806,6 +816,7 @@
       "result": "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_overflow)",
       "commit_truth": "OLD",
       "effects": {
+        "admission": "not_latched",
         "getdata_sent": 0,
         "retry_slots": 0
       },
@@ -895,7 +906,7 @@
         "admission": "latched",
         "guessed_image": false,
         "relay_authority": false,
-        "summary_rows": 0
+        "summary_rows": "0"
       },
       "detail": {
         "final_ram_cache_drift_check": "against the committed index bytes",
