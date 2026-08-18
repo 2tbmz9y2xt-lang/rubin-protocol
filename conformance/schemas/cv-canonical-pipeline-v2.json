@@ -15,29 +15,17 @@
       "additionalProperties": false,
       "required": ["generated_by", "warning", "schema_version", "corpus_revision", "parent_r1_source_oid", "parent_r1_merge_oid", "parent_artifact_sha256", "parent_schema_sha256", "governing_spec_oid", "closure_epoch"],
       "properties": {
-        "generated_by": { "const": "clients/go/cmd/gen-conformance-fixtures" },
-        "warning": { "$ref": "#/$defs/text" },
-        "schema_version": { "const": 2 },
-        "corpus_revision": { "const": "C01-R2" },
-        "parent_r1_source_oid": { "const": "1e24b0249dab04b21de492ad307b6a47c63f12b5" },
-        "parent_r1_merge_oid": { "const": "3b1e45590b18994b4ce5f6e3ec2d9dc6b416e880" },
-        "parent_artifact_sha256": { "const": "68a1f551333ca17b93ebe3e6d737658cc661e40b40a3b41dbe27b37b74537246" },
-        "parent_schema_sha256": { "const": "c962f5434d373ac5268527cc82ef8eb68fd45ddac50c849da32b3f8ef87cdca7" },
-        "governing_spec_oid": { "const": "c14b010024ce633e1027bf891af3c49741db544a" },
+        "generated_by": { "const": "clients/go/cmd/gen-conformance-fixtures" }, "warning": { "$ref": "#/$defs/text" }, "schema_version": { "const": 2 },
+        "corpus_revision": { "const": "C01-R2" }, "parent_r1_source_oid": { "const": "1e24b0249dab04b21de492ad307b6a47c63f12b5" }, "parent_r1_merge_oid": { "const": "3b1e45590b18994b4ce5f6e3ec2d9dc6b416e880" },
+        "parent_artifact_sha256": { "const": "68a1f551333ca17b93ebe3e6d737658cc661e40b40a3b41dbe27b37b74537246" }, "parent_schema_sha256": { "const": "c962f5434d373ac5268527cc82ef8eb68fd45ddac50c849da32b3f8ef87cdca7" }, "governing_spec_oid": { "const": "c14b010024ce633e1027bf891af3c49741db544a" },
         "closure_epoch": {
           "type": "object",
           "additionalProperties": false,
           "required": ["closure_manifest_version", "manifest_root_sha256", "obligation_set_hash", "row_case_design_hash", "stage_owner_relation_hash", "mutation_assignment_hash", "image_manifest_hash", "summary_manifest_hash", "relation_snapshot_hash", "status"],
           "properties": {
-            "closure_manifest_version": { "const": "rubin-c01-design-closure-v3" },
-            "manifest_root_sha256": { "const": "da48730ad29963d94499a6fce1b5c58fe39e9a3779e643cbfcd8148b9b2c98b7" },
-            "obligation_set_hash": { "const": "4af7520a185bfa732ece69f5a6c12f4d012917b9c6fd1d8f42b98195284f59b0" },
-            "row_case_design_hash": { "const": "8bcfd02557f63893a6dc43690e8091dea10c02bfd3af7c0a9639193ff9ef4221" },
-            "stage_owner_relation_hash": { "const": "4513e667a03dabca78e7369e989676ea5ab3d75d59a817493d84fe968b3a8518" },
-            "mutation_assignment_hash": { "const": "fcd8d3dab8ec9a5e6d233e8539f31751e6446118d519f1f14f581b77cf9f84fc" },
-            "image_manifest_hash": { "const": "e014000b71102e54be70af0dc756f8930c57573f7346db05935964053230f928" },
-            "summary_manifest_hash": { "const": "39e39d94593d434e7051a3f77ca94d3dd31a5a8d65a3f12a764e29a5fde041dd" },
-            "relation_snapshot_hash": { "const": "3e7db40fa6917b5a7d61ab113a74f7107f8f166080393e1c9789dbd927b24edb" },
+            "closure_manifest_version": { "const": "rubin-c01-design-closure-v3" }, "manifest_root_sha256": { "const": "da48730ad29963d94499a6fce1b5c58fe39e9a3779e643cbfcd8148b9b2c98b7" }, "obligation_set_hash": { "const": "4af7520a185bfa732ece69f5a6c12f4d012917b9c6fd1d8f42b98195284f59b0" },
+            "row_case_design_hash": { "const": "8bcfd02557f63893a6dc43690e8091dea10c02bfd3af7c0a9639193ff9ef4221" }, "stage_owner_relation_hash": { "const": "4513e667a03dabca78e7369e989676ea5ab3d75d59a817493d84fe968b3a8518" }, "mutation_assignment_hash": { "const": "fcd8d3dab8ec9a5e6d233e8539f31751e6446118d519f1f14f581b77cf9f84fc" },
+            "image_manifest_hash": { "const": "e014000b71102e54be70af0dc756f8930c57573f7346db05935964053230f928" }, "summary_manifest_hash": { "const": "39e39d94593d434e7051a3f77ca94d3dd31a5a8d65a3f12a764e29a5fde041dd" }, "relation_snapshot_hash": { "const": "3e7db40fa6917b5a7d61ab113a74f7107f8f166080393e1c9789dbd927b24edb" },
             "status": { "const": "building", "description": "This revision is BUILDING and is not a passing authority for any consumer; RUB-1204 changes this const to `complete` when it activates v2." }
           }
         }
@@ -139,12 +127,8 @@
       "required": ["type", "value"],
       "properties": { "type": { "$ref": "#/$defs/inputType", "not": { "enum": ["alias", "array<alias>"] } }, "value": true },
       "allOf": [
-        { "if": { "properties": { "type": { "const": "bool" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/boolLit" } } } },
-        { "if": { "properties": { "type": { "const": "u16" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/u16Lit" } } } },
-        { "if": { "properties": { "type": { "const": "u64" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/u64Lit" } } } },
-        { "if": { "properties": { "type": { "const": "bytes" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/bytesLit" } } } },
-        { "if": { "properties": { "type": { "const": "bytes32_hex" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/bytes32Lit" } } } },
-        { "if": { "properties": { "type": { "const": "token" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/machineToken" } } } },
+        { "if": { "properties": { "type": { "const": "bool" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/boolLit" } } } }, { "if": { "properties": { "type": { "const": "u16" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/u16Lit" } } } }, { "if": { "properties": { "type": { "const": "u64" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/u64Lit" } } } },
+        { "if": { "properties": { "type": { "const": "bytes" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/bytesLit" } } } }, { "if": { "properties": { "type": { "const": "bytes32_hex" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/bytes32Lit" } } } }, { "if": { "properties": { "type": { "const": "token" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/machineToken" } } } },
         { "if": { "properties": { "type": { "const": "object" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/closedObject" } } } },
         { "if": { "properties": { "type": { "const": "array<bool>" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "array", "items": { "$ref": "#/$defs/boolLit" } } } } }, { "if": { "properties": { "type": { "const": "array<u64>" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "array", "items": { "$ref": "#/$defs/u64Lit" } } } } }, { "if": { "properties": { "type": { "const": "array<token>" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "array", "items": { "$ref": "#/$defs/machineToken" } } } } }, { "if": { "properties": { "type": { "const": "array<bytes32_hex>" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "array", "items": { "$ref": "#/$defs/bytes32Lit" } } } } }, { "if": { "properties": { "type": { "const": "array<object>" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "array", "items": { "$ref": "#/$defs/closedObject" } } } } }
       ]
@@ -288,12 +272,8 @@
       "additionalProperties": false,
       "required": ["class", "http", "commit_state", "mined", "success_identity", "error_class", "phase"],
       "properties": {
-        "class": { "enum": ["NOT_REACHED", "STARTUP_UNAVAILABLE_503", "BOOTSTRAP_CONTINUATION_ONLY", "BOOTSTRAP_TERMINAL_INVARIANT_503", "BOOTSTRAP_TERMINAL_NEW_503_COMMITTED", "MINED_200_COMMITTED", "MINED_422_NOT_COMMITTED", "MINED_503_NOT_COMMITTED", "MINED_503_COMMITTED_TERMINAL_NEW", "MINED_503_UNKNOWN"] },
-        "http": { "enum": [200, 422, 503, null] },
-        "commit_state": { "enum": ["committed", "not_committed", "unknown", null] },
-        "mined": { "enum": ["true", "false", "absent", "not_applicable"] },
-        "success_identity": { "enum": ["present", "absent", "not_applicable"] },
-        "error_class": { "oneOf": [{ "$ref": "#/$defs/errorClassToken" }, { "type": "null" }] },
+        "class": { "enum": ["NOT_REACHED", "STARTUP_UNAVAILABLE_503", "BOOTSTRAP_CONTINUATION_ONLY", "BOOTSTRAP_TERMINAL_INVARIANT_503", "BOOTSTRAP_TERMINAL_NEW_503_COMMITTED", "MINED_200_COMMITTED", "MINED_422_NOT_COMMITTED", "MINED_503_NOT_COMMITTED", "MINED_503_COMMITTED_TERMINAL_NEW", "MINED_503_UNKNOWN"] }, "http": { "enum": [200, 422, 503, null] }, "commit_state": { "enum": ["committed", "not_committed", "unknown", null] },
+        "mined": { "enum": ["true", "false", "absent", "not_applicable"] }, "success_identity": { "enum": ["present", "absent", "not_applicable"] }, "error_class": { "oneOf": [{ "$ref": "#/$defs/errorClassToken" }, { "type": "null" }] },
         "phase": { "enum": ["result_selecting_mined_candidate", "continuation_only_bootstrap", "startup", "not_reached"] }
       },
       "allOf": [
@@ -330,9 +310,7 @@
       "additionalProperties": false,
       "required": ["CHAIN_IMAGE_V1", "STANDARD_MEMPOOL_IMAGE_V1", "RETAINED_DA_IMAGE_V1", "OWNER_IMAGE_V1"],
       "properties": {
-        "CHAIN_IMAGE_V1": { "$ref": "#/$defs/imageProjection" },
-        "STANDARD_MEMPOOL_IMAGE_V1": { "$ref": "#/$defs/imageProjection" },
-        "RETAINED_DA_IMAGE_V1": { "$ref": "#/$defs/imageProjection" },
+        "CHAIN_IMAGE_V1": { "$ref": "#/$defs/imageProjection" }, "STANDARD_MEMPOOL_IMAGE_V1": { "$ref": "#/$defs/imageProjection" }, "RETAINED_DA_IMAGE_V1": { "$ref": "#/$defs/imageProjection" },
         "OWNER_IMAGE_V1": { "$ref": "#/$defs/imageProjection" }
       }
     },

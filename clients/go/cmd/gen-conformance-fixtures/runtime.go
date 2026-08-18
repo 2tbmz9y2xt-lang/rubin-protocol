@@ -2499,7 +2499,107 @@ var (
 	cp2Provenances = []string{"normative_boundary", "witness_fixture", "deterministic_schedule_control", "configured_bound"}
 )
 
-var cp2UpperTokenRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+var (
+	cp2UpperTokenRE          = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+	cp2TokenRE               = regexp.MustCompile(`^[A-Za-z0-9_@/:()|+.-]+$`)
+	cp2BytesRE, cp2HexRE     = regexp.MustCompile(`^([0-9a-f]{2})*$`), regexp.MustCompile(`^[0-9a-f]{64}$`)
+	cp2PointerRE, cp2IssueRE = regexp.MustCompile(`^/input/[a-z][a-z0-9_]*$`), regexp.MustCompile(`^RUB-[1-9][0-9]*$`)
+)
+
+// cp2LiteralOf maps an element tag to its literal predicate, mirroring the
+// schema's per-tag arms. `object` is absent on purpose: a structured stimulus is
+// an alias, and a structured fixture's grammar is schema-owned (closedObject).
+// ponytail: a JSON number decodes to float64, so a u64 above 2^53 is not exactly
+// representable here; switch to json.Number if a case ever needs one.
+var cp2LiteralOf = map[string]func(any) bool{
+	"bool": func(v any) bool { _, ok := v.(bool); return ok },
+	"u16":  func(v any) bool { return cp2UintOK(v, 65535) }, "u64": func(v any) bool { return cp2UintOK(v, math.MaxUint64) },
+	"token": func(v any) bool { return cp2MatchOK(v, cp2TokenRE) }, "bytes": func(v any) bool { return cp2MatchOK(v, cp2BytesRE) },
+	"bytes32_hex": func(v any) bool { return cp2MatchOK(v, cp2HexRE) },
+}
+
+// cp2FixtureTypes is cp2InputTypes minus the alias tags: an entry is a literal.
+var cp2FixtureTypes = slices.DeleteFunc(slices.Clone(cp2InputTypes), func(t string) bool { return strings.Contains(t, "alias") })
+
+func cp2MatchOK(v any, re *regexp.Regexp) bool { s, ok := v.(string); return ok && re.MatchString(s) }
+
+func cp2UintOK(v any, max float64) bool {
+	f, ok := v.(float64)
+	if n, isInt := v.(int); isInt {
+		f, ok = float64(n), true
+	}
+	return ok && f >= 0 && f <= max && f == math.Trunc(f)
+}
+
+// cp2Elements normalizes the two Go shapes an array value takes.
+func cp2Elements(v any) ([]any, bool) {
+	switch s := v.(type) {
+	case []any:
+		return s, true
+	case []string:
+		out := make([]any, len(s))
+		for i, e := range s {
+			out[i] = e
+		}
+		return out, true
+	}
+	return nil, false
+}
+
+// cp2ValueOK mirrors the schema: every tag admits its literal form or an alias
+// (aliasOK), an array tag admits an array of those, and a tag with no literal
+// predicate is alias-only.
+func cp2ValueOK(tag string, v any, aliasOK bool) bool {
+	elem, isArray := strings.CutPrefix(tag, "array<")
+	if !isArray {
+		return cp2ElemOK(elem, v, aliasOK)
+	}
+	items, ok := cp2Elements(v)
+	if !ok {
+		return false
+	}
+	elem = strings.TrimSuffix(elem, ">")
+	for _, item := range items {
+		if !cp2ElemOK(elem, item, aliasOK) {
+			return false
+		}
+	}
+	return true
+}
+
+func cp2ElemOK(elem string, v any, aliasOK bool) bool {
+	if aliasOK && cp2MatchOK(v, cp2UpperTokenRE) {
+		return true
+	}
+	lit, ok := cp2LiteralOf[elem]
+	return ok && lit(v)
+}
+
+// cp2InputOK mirrors every schema constraint on one stimulus pointer.
+func cp2InputOK(in cp2Input) error {
+	if !cp2PointerRE.MatchString(in.Pointer) || !cp2IssueRE.MatchString(in.ConsumptionProofOwner) || strings.TrimSpace(in.ProductionSetupSink) == "" {
+		return fmt.Errorf("input %s has a malformed pointer, consumption owner or production setup sink", in.Pointer)
+	}
+	if !cp2ValueOK(in.Type, in.ValueOrAlias, true) {
+		return fmt.Errorf("input %s value is not a %s literal or alias", in.Pointer, in.Type)
+	}
+	return nil
+}
+
+// cp2ValidateFixtures closes the catalog: an alias key, a literal type, and a
+// value of that type.
+func cp2ValidateFixtures(fixtures map[string]cp2Fixture) error {
+	for _, alias := range slices.Sorted(maps.Keys(fixtures)) {
+		f := fixtures[alias]
+		if !cp2UpperTokenRE.MatchString(alias) || !slices.Contains(cp2FixtureTypes, f.Type) {
+			return fmt.Errorf("fixtures: entry %q has a non-alias key or a non-literal type %q", alias, f.Type)
+		}
+		if _, structured := cp2LiteralOf[strings.TrimSuffix(strings.TrimPrefix(f.Type, "array<"), ">")]; structured && !cp2ValueOK(f.Type, f.Value, false) {
+			return fmt.Errorf("fixtures: entry %q value is not a %s literal", alias, f.Type)
+		}
+	}
+	return nil
+}
 
 // cp2NewRows are the 17 R2 rows the closure epoch authorizes on top of the 62
 // inherited identities, which are derived from canonicalPipelineRows() rather
@@ -2661,7 +2761,11 @@ func cp2ValidateRPC(where string, r cp2RPC) error {
 // cp2ValidateRPCClass pins the derived class to its exact field tuple.
 func cp2ValidateRPCClass(where string, r cp2RPC) error {
 	want, pinned := cp2ClassTuple[r.Class]
-	if !pinned {
+	if !pinned { // NOT_REACHED: the one open class, bounded rather than pinned
+		reached := r.HTTP != nil || r.Mined != "not_applicable" || r.SuccessIdentity != "not_applicable"
+		if reached || !slices.Contains([]string{"not_reached", "continuation_only_bootstrap", "startup"}, r.Phase) || (r.CommitState != nil && *r.CommitState == "unknown") {
+			return fmt.Errorf("case %s: rpc_projection class %s exceeds its bounds", where, r.Class)
+		}
 		return nil
 	}
 	http, commit, errClass := "", "", "no"
@@ -2699,6 +2803,15 @@ func cp2ValidateRPCNullable(where string, r cp2RPC) error {
 func cp2ValidateExpected(where string, e cp2Expected) error {
 	if !slices.Contains(canonicalPipelineCommitTruth, e.CommitTruth) {
 		return fmt.Errorf("case %s: commit truth %q is unknown", where, e.CommitTruth)
+	}
+	for _, d := range []struct {
+		name    string
+		value   *string
+		allowed []string
+	}{{"wire_disposition", e.WireDisposition, cp2WireDispositionValues}, {"recovery_outcome", e.RecoveryOutcome, cp2RecoveryOutcomeValues}} {
+		if d.value != nil && !slices.Contains(d.allowed, *d.value) {
+			return fmt.Errorf("case %s: %s %q is outside its closed domain", where, d.name, *d.value)
+		}
 	}
 	if err := cp2ValidateResultTruth(where, e); err != nil {
 		return err
@@ -2754,6 +2867,9 @@ func cp2ValidateInputs(where string, inputs []cp2Input) error {
 		if !slices.Contains(cp2InputTypes, in.Type) || !slices.Contains(cp2Provenances, in.Provenance) {
 			return fmt.Errorf("case %s: input %s has unknown type %q or provenance %q", where, in.Pointer, in.Type, in.Provenance)
 		}
+		if err := cp2InputOK(in); err != nil {
+			return fmt.Errorf("case %s: %w", where, err)
+		}
 		if seen[in.Pointer] {
 			return fmt.Errorf("case %s: duplicate input pointer %s", where, in.Pointer)
 		}
@@ -2772,6 +2888,9 @@ func cp2ValidateCases(rowID string, cases []cp2Case) error {
 			return fmt.Errorf("row %s: duplicate case id %q", rowID, c.CaseID)
 		}
 		seen[c.CaseID] = true
+		if c.ScheduleID != nil && !cp2UpperTokenRE.MatchString(*c.ScheduleID) {
+			return fmt.Errorf("case %s/%s: schedule_id %q is not an alias", rowID, c.CaseID, *c.ScheduleID)
+		}
 		if err := cp2ValidateInputs(rowID+"/"+c.CaseID, c.Input); err != nil {
 			return err
 		}
@@ -2932,6 +3051,9 @@ func mustWriteCanonicalPipelineV2Corpus(path string) {
 	rows := []cp2Row{} // BUILDING: RUB-1208..RUB-1212 migrate rows, RUB-1204 completes.
 	fixtures := map[string]cp2Fixture{}
 	if err := cp2ValidateRows(rows, registry); err != nil {
+		fatalf("canonical pipeline v2: %v", err)
+	}
+	if err := cp2ValidateFixtures(fixtures); err != nil {
 		fatalf("canonical pipeline v2: %v", err)
 	}
 	if err := cp2ValidateAliases(rows, fixtures); err != nil {

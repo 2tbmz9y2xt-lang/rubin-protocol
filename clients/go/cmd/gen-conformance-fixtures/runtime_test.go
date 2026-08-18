@@ -1440,6 +1440,10 @@ func TestCanonicalPipelineV2CommitTruthRelationIsExact(t *testing.T) {
 
 func cp2Ptr[T any](v T) *T { return &v }
 
+func cp2ValidInput(pointer, tag string, value any) cp2Input {
+	return cp2Input{Pointer: pointer, Type: tag, ValueOrAlias: value, Provenance: "witness_fixture", ProductionSetupSink: "sink", ConsumptionProofOwner: "RUB-923"}
+}
+
 // cp2ValidCase is the known-valid control every RUB-1207 negative mutates in
 // exactly one dimension.
 func cp2ValidCase() cp2Case {
@@ -1491,8 +1495,33 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		"wire truth": func(r *cp2Row) {
 			r.Cases[0].Expected.Result, r.Cases[0].Expected.PipelineReached, r.Cases[0].Expected.WireDisposition = nil, cp2Ptr(false), cp2Ptr("CHECKSUM_REJECT")
 		},
+		"schedule prose":   func(r *cp2Row) { r.Cases[0].ScheduleID = cp2Ptr("two arm schedule") },
+		"pointer grammar":  func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/Input/B", "token", "T")} },
+		"u64 not a number": func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "u64", "abc")} },
+		"u64 negative":     func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "u64", -1)} },
+		"bool not a bool":  func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "bool", "yes")} },
+		"bytes32 uppercase": func(r *cp2Row) {
+			r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "bytes32_hex", strings.Repeat("0A", 32))}
+		},
+		"token with a space": func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "token", "a b")} },
+		"inline object":      func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "object", cpMap{"h": 1})} },
+		"blank sink": func(r *cp2Row) {
+			in := cp2ValidInput("/input/a", "token", "T")
+			in.ProductionSetupSink = "  "
+			r.Cases[0].Input = []cp2Input{in}
+		},
+		"owner grammar": func(r *cp2Row) {
+			in := cp2ValidInput("/input/a", "token", "T")
+			in.ConsumptionProofOwner = "RUB-0"
+			r.Cases[0].Input = []cp2Input{in}
+		},
+		"not reached bounds": func(r *cp2Row) { e := &r.Cases[0].Expected.RPC; e.Class, e.Phase = "NOT_REACHED", "not_reached" },
+		"wire domain": func(r *cp2Row) {
+			e := &r.Cases[0].Expected
+			e.Result, e.PipelineReached, e.WireDisposition = nil, cp2Ptr(false), cp2Ptr("FRAME_BOGUS")
+		},
 		"duplicate pointer": func(r *cp2Row) {
-			p := cp2Input{Pointer: "/input/b", Type: "token", Provenance: "witness_fixture"}
+			p := cp2Input{Pointer: "/input/b", Type: "token", ValueOrAlias: "T", Provenance: "witness_fixture", ProductionSetupSink: "sink", ConsumptionProofOwner: "RUB-923"}
 			r.Cases[0].Input = []cp2Input{p, p}
 		},
 		"duplicate case id":    func(r *cp2Row) { r.Cases = append(r.Cases, r.Cases[0]) },
@@ -1507,7 +1536,11 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		"rpc commit state": "rpc_projection.commit_state", "rpc error class": "neither a taxonomy token",
 		"token whitespace": "is not a machine token", "class tuple": "requires [result_selecting_mined_candidate 200",
 		"wire truth": "wire_disposition requires commit truth OLD", "classified wire": "set only when result is null",
-		"reached flag true": "requires pipeline_reached false", "both dispositions": "exactly one of", "neither disposition": "exactly one of", "duplicate pointer": "duplicate input pointer /input/b", "duplicate case id": "duplicate case id",
+		"reached flag true": "requires pipeline_reached false", "both dispositions": "exactly one of", "neither disposition": "exactly one of", "duplicate pointer": "duplicate input pointer /input/b",
+		"schedule prose": "is not an alias", "pointer grammar": "malformed pointer", "blank sink": "production setup sink",
+		"owner grammar": "consumption owner", "u64 not a number": "is not a u64 literal", "u64 negative": "is not a u64 literal",
+		"bool not a bool": "is not a bool literal", "bytes32 uppercase": "is not a bytes32_hex literal", "token with a space": "is not a token literal",
+		"inline object": "is not a object literal", "not reached bounds": "exceeds its bounds", "wire domain": "is outside its closed domain", "duplicate case id": "duplicate case id",
 		"missing reached flag": "null result requires pipeline_reached",
 		"surplus reached flag": "set only when result is null",
 	}
@@ -1549,6 +1582,15 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 		}
 	}
 	rows[0].Cases[0].Input[0] = c.Input[0]
+	for name, broken := range map[string]map[string]cp2Fixture{
+		"fixture type alias": {"B1": {Type: "alias", Value: "B2"}},
+		"fixture u64 value":  {"B1": {Type: "u64", Value: "abc"}},
+		"fixture key case":   {"b1": {Type: "u64", Value: 1}},
+	} {
+		if err := cp2ValidateFixtures(broken); err == nil {
+			t.Errorf("%s: expected a fail-closed rejection", name)
+		}
+	}
 	// A pointer tagged u64 may not resolve to an object fixture.
 	rows[0].Cases[0].Input[0].Type = "u64"
 	if err := cp2ValidateAliases(rows, block); err == nil || !strings.Contains(err.Error(), "is a object fixture, want u64") {
