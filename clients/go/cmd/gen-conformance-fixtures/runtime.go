@@ -2006,8 +2006,7 @@ func cpPathRows() []cpRow {
 			"taxonomy:STORED_NONCANONICAL", "observable:counter_deltas").counters("0", "0"),
 		cpObs("C01-REORG-001", "ACCEPTED", "NEW", "A winning multi-block reorg is one plan: the whole transition is externally old or new and never row-wise intermediate.",
 			"observable:counter_deltas", "observable:final_state_atomicity", "accepted:coherent_capture_publication").counters("+connect_count", "0").
-			effects(cpMap{"final_state_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest", "summary_rows": "+connect_count", "intermediate_tip_rows": 0, "publication_events": 1}).
-			detail(cpMap{"external_visibility": "old_or_new"}),
+			effects(cpMap{"final_state_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest", "summary_rows": "+connect_count", "intermediate_tip_rows": 0, "publication_events": 1, "external_visibility": "old_or_new"}),
 		cpObs("C01-DISCONNECT-001", "ACCEPTED", "NEW", "An explicit standalone disconnect publishes proven NEW with an empty canonical-applied summary and zero connected-block fee-floor decay events.",
 			"observable:counter_deltas").counters("0", "0").effects(cpMap{"summary_rows": 0, "connected_block_decay_events": 0}),
 		cpAuth("C01-NEUTRAL-001", "Results that change neither planner-owned canonical counter, carry no peer penalty and perform no unauthorized canonical mutation and do not latch mutation admission, plus the exact plan and candidate-queue bounds.", cpMap{
@@ -2023,8 +2022,7 @@ func cpPathRows() []cpRow {
 		}, "observable:counter_deltas", "observable:no_penalty_bounds"),
 		cpObs("C01-FIRSTERR-INDEX-001", "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", "A malformed canonical index paired with a candidate whose defect is detected only at MTP or validation (a target defect precedes the preflight per C01-PATHS-001): the strict initial canonical-index preflight owns the first error and the candidate is never validated.",
 			"hostile:paired_first_errors", "observable:path_precedence", "taxonomy:TERMINAL_STORE_INTEGRITY").counters("0", "0").
-			rpc("not_committed with the existing terminal result surface").effects(cpMap{"admission": "latched"}).
-			detail(cpMap{"first_error_source": "strict_initial_canonical_index_preflight"}),
+			rpc("not_committed with the existing terminal result surface").effects(cpMap{"admission": "latched", "first_error_source": "strict_initial_canonical_index_preflight"}),
 		cpObs("C01-FIRSTERR-LATE-001", "CONSENSUS_INVALID(BLOCK_ERR_MERKLE_INVALID)", "OLD", "A late consensus-invalid candidate paired with an earlier best-effort artifact-write failure: the exact consensus error wins whenever validation can complete.",
 			"hostile:late_consensus_invalid_wins", "taxonomy:CONSENSUS_INVALID").counters("0", "+1").rpc("not_committed"),
 		cpObs("C01-EQUALWORK-001", "ACCEPTED", "NEW", "Two equal-cumulative-work candidates delivered and validation-completed in opposite orders select the same lexicographically lower canonical tip hash in both clients.",
@@ -2186,13 +2184,13 @@ func cpResourceRows() []cpRow {
 			"recovery_artifact":         "non-retriable; profile-permitted pruned suffix awaiting validated reacquisition; distinct from bounded-storage reservation failure",
 			"admission":                 "never latched for any resource identity; preserves OLD",
 			"invalid_configured_bounds": "startup/config failure, outside peer retry",
-		}, "observable:resource_identities", "taxonomy:LOCAL_RESOURCE_UNAVAILABLE"),
+		}, "observable:resource_identities"),
 		cpObs("C01-RES-RECOVERY-001", "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)", "OLD", "Profile-permitted pruned suffix data awaiting validated reacquisition is non-retriable, preserves OLD, does not latch admission and arms no peer retry; it is distinct from bounded-storage reservation failure and from loss of an artifact the active retention profile already required.",
 			"observable:resource_identities", "taxonomy:LOCAL_RESOURCE_UNAVAILABLE").counters("0", "0").effects(cpMap{"retry_slots": 0, "peer_penalty": 0, "admission": "not_latched"}),
 		cpAuth("C01-RES-IDENTITIES-PENDING-001", "The resource identities whose machinery no slice of this chain delivers; excluded from the RUB-926 zero-mismatch acceptance until RUB-893 is Done.", cpMap{
 			"identities": "inbound_budget_capacity, inbound_budget_overflow",
 			"retriable":  "inbound_budget_capacity only, and only with an independently proven exact block hash",
-		}, "observable:resource_identities", "taxonomy:LOCAL_RESOURCE_UNAVAILABLE").pending(pendingOwnerRUB893),
+		}, "observable:resource_identities").pending(pendingOwnerRUB893),
 		cpObs("C01-APPLYMETA-CAP-001", "ACCEPTED", "NEW", "An apply plan whose checked metadata charge lands exactly on the 64 MiB cap succeeds.",
 			"hostile:apply_plan_metadata_caps").counters("+connect_count", "0").
 			detail(cpMap{"charge_formula": "48+40*(disconnect_rows+connect_rows)+32*complete_da_ids", "cap_bytes": 67108864, "charge_bytes": "exactly cap"}),
@@ -2240,7 +2238,7 @@ func cpTerminalRows() []cpRow {
 			effects(cpMap{"admission": "latched"}).
 			detail(cpMap{"triggers": "missing or corrupt selected retained record, missing or corrupt accounting value, exact-token mismatch, duplicate claim, checked arithmetic underflow or overflow", "never_reclassified_as": "LOCAL_RESOURCE_UNAVAILABLE(resource), which preserves OLD and does not latch, or STALE_LOCAL_PLAN"}),
 		cpObs("C01-TERMINV-BOOT-001", "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD", "At the bootstrap boundary a STORED_NONCANONICAL result, or a KNOWN_BLOCK_NOOP(STORED_NONCANONICAL), is a terminal local invariant that publishes no candidate delta and keeps mutation admission latched; bootstrap ACCEPTED and KNOWN_BLOCK_NOOP(CANONICAL) remain continuation-only.",
-			"taxonomy:TERMINAL_LOCAL_INVARIANT", "taxonomy:KNOWN_BLOCK_NOOP").counters("0", "0").rpc("not_committed with the existing terminal result surface").
+			"taxonomy:TERMINAL_LOCAL_INVARIANT").counters("0", "0").rpc("not_committed with the existing terminal result surface").
 			effects(cpMap{"admission": "latched"}),
 		cpObs("C01-STALE-001", "STALE_LOCAL_PLAN", "OLD", "At the result-selecting mined candidate boundary, STORED_NONCANONICAL and either KNOWN_BLOCK_NOOP variant map to STALE_LOCAL_PLAN and the exact old image is preserved.",
 			"taxonomy:STALE_LOCAL_PLAN").counters("0", "0").rpc("not_committed"),

@@ -28,15 +28,11 @@
     "result_taxonomy": {
       "description": "The closed result taxonomy. Every observation row result is a member name, optionally followed by its exact parenthesized argument.",
       "type": "array",
-      "minItems": 16,
-      "uniqueItems": true,
-      "items": { "type": "string", "minLength": 1 }
+      "const": ["ACCEPTED", "STORED_NONCANONICAL", "KNOWN_BLOCK_NOOP(CANONICAL|STORED_NONCANONICAL)", "MISSING_PARENT", "ORPHAN_RETAINED", "ORPHAN_ALREADY_RETAINED", "CONSENSUS_INVALID(exact_error)", "LOCAL_BUSY", "LOCAL_RESOURCE_UNAVAILABLE(resource)", "STALE_LOCAL_PLAN", "LOCAL_CANCELLED", "LOCAL_STORE_ERROR(noncanonical)", "LOCAL_PERSISTENCE_ERROR(precommit)", "TERMINAL_STORE_INTEGRITY(canonical)", "TERMINAL_LOCAL_INVARIANT(evidence)", "TERMINAL_PERSISTENCE(old|new|neither_or_unreadable)"]
     },
     "commit_truth_values": {
       "type": "array",
-      "minItems": 4,
-      "uniqueItems": true,
-      "items": { "enum": ["OLD", "NEW", "UNKNOWN", "NOT_APPLICABLE"] }
+      "const": ["OLD", "NEW", "UNKNOWN", "NOT_APPLICABLE"]
     },
     "coverage_receipt": {
       "description": "Generated definition receipt mapping every enumerated class (closed result taxonomy plus every named observable, accepted, rejected and hostile bullet of RUB-922) to the row ids that define it; it records which rows freeze each class, not that each class is runtime-compared — only kind=observation rows are compared, so a class whose only carriers are authority/forbidden rows has no C01 runtime comparison (kind-aware split is RUB-1204). A class mapping to no row is a generation failure, never a corpus state.",

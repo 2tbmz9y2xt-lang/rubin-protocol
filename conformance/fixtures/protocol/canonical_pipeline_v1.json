@@ -86,11 +86,11 @@
     "rejected:retry_and_pool_shape": "C01-FORBID-RETRY-001",
     "taxonomy:ACCEPTED": "C01-DIRECT-001, C01-EFFECT-ACCEPTED-001",
     "taxonomy:CONSENSUS_INVALID": "C01-FIRSTERR-LATE-001",
-    "taxonomy:KNOWN_BLOCK_NOOP": "C01-NOOP-FULL-001, C01-NOOP-CMPCT-001, C01-TERMINV-BOOT-001",
+    "taxonomy:KNOWN_BLOCK_NOOP": "C01-NOOP-FULL-001, C01-NOOP-CMPCT-001",
     "taxonomy:LOCAL_BUSY": "C01-BUSY-001",
     "taxonomy:LOCAL_CANCELLED": "C01-CANCEL-001",
     "taxonomy:LOCAL_PERSISTENCE_ERROR": "C01-PRENS-001",
-    "taxonomy:LOCAL_RESOURCE_UNAVAILABLE": "C01-GC-HEALTHY-001, C01-RES-IDENTITIES-001, C01-RES-RECOVERY-001, C01-RES-IDENTITIES-PENDING-001",
+    "taxonomy:LOCAL_RESOURCE_UNAVAILABLE": "C01-GC-HEALTHY-001, C01-RES-RECOVERY-001",
     "taxonomy:LOCAL_STORE_ERROR": "C01-PRESENCE-STOREERR-001",
     "taxonomy:MISSING_PARENT": "C01-ORPH-MISSING-PARENT-001",
     "taxonomy:ORPHAN_ALREADY_RETAINED": "C01-ORPH-DUP-001",
@@ -162,13 +162,11 @@
         "rejected_delta": "0"
       },
       "effects": {
+        "external_visibility": "old_or_new",
         "final_state_fields": "tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest",
         "intermediate_tip_rows": 0,
         "publication_events": 1,
         "summary_rows": "+connect_count"
-      },
-      "detail": {
-        "external_visibility": "old_or_new"
       }
     },
     {
@@ -214,9 +212,7 @@
         "rejected_delta": "0"
       },
       "effects": {
-        "admission": "latched"
-      },
-      "detail": {
+        "admission": "latched",
         "first_error_source": "strict_initial_canonical_index_preflight"
       }
     },
