@@ -2503,6 +2503,7 @@ var (
 	cp2UpperTokenRE          = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 	cp2TokenRE               = regexp.MustCompile(`^[A-Za-z0-9_@/:()|+.-]+$`)
 	cp2BytesRE, cp2HexRE     = regexp.MustCompile(`^([0-9a-f]{2})*$`), regexp.MustCompile(`^[0-9a-f]{64}$`)
+	cp2SnakeRE               = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 	cp2PointerRE, cp2IssueRE = regexp.MustCompile(`^/input/[a-z][a-z0-9_]*$`), regexp.MustCompile(`^RUB-[1-9][0-9]*$`)
 )
 
@@ -2513,7 +2514,7 @@ var (
 // representable here; switch to json.Number if a case ever needs one.
 var cp2LiteralOf = map[string]func(any) bool{
 	"bool": func(v any) bool { _, ok := v.(bool); return ok },
-	"u16":  func(v any) bool { return cp2UintOK(v, 65535) }, "u64": func(v any) bool { return cp2UintOK(v, math.MaxUint64) },
+	"u16":  func(v any) bool { return cp2UintOK(v, 65536) }, "u64": func(v any) bool { return cp2UintOK(v, math.Exp2(64)) },
 	"token": func(v any) bool { return cp2MatchOK(v, cp2TokenRE) }, "bytes": func(v any) bool { return cp2MatchOK(v, cp2BytesRE) },
 	"bytes32_hex": func(v any) bool { return cp2MatchOK(v, cp2HexRE) },
 }
@@ -2523,12 +2524,58 @@ var cp2FixtureTypes = slices.DeleteFunc(slices.Clone(cp2InputTypes), func(t stri
 
 func cp2MatchOK(v any, re *regexp.Regexp) bool { s, ok := v.(string); return ok && re.MatchString(s) }
 
-func cp2UintOK(v any, max float64) bool {
-	f, ok := v.(float64)
-	if n, isInt := v.(int); isInt {
-		f, ok = float64(n), true
+// cp2NumberOK returns v as a float64 when it is an integral Go or JSON number.
+// A width other than int/float64 is rejected rather than converted: fail closed.
+func cp2NumberOK(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, n == math.Trunc(n)
+	case int:
+		return float64(n), true
 	}
-	return ok && f >= 0 && f <= max && f == math.Trunc(f)
+	return 0, false
+}
+
+// cp2UintOK bounds an integral number to [0, limit). The limit is exclusive
+// because a float64 cannot represent 2^64: math.MaxUint64 rounds UP to 2^64, so
+// an inclusive bound would accept it.
+// ponytail: above 2^53 a float64 is not exact; json.Number is the upgrade.
+func cp2UintOK(v any, limit float64) bool {
+	f, ok := cp2NumberOK(v)
+	return ok && f >= 0 && f < limit
+}
+
+// cp2ClosedObjectOK mirrors the schema's closedObject: non-empty, snake_case
+// keys, closed values. cpMap is an alias of map[string]any, so both shapes hit
+// the same assertion.
+func cp2ClosedObjectOK(v any) bool {
+	m, ok := v.(map[string]any)
+	if !ok || len(m) == 0 {
+		return false
+	}
+	for key, value := range m {
+		if !cp2SnakeRE.MatchString(key) || !cp2ClosedValueOK(value) {
+			return false
+		}
+	}
+	return true
+}
+
+// cp2ClosedValueOK mirrors closedValue: bool, integral number, machine token,
+// array of those, or a nested closed object.
+func cp2ClosedValueOK(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return true
+	case string:
+		return cp2TokenRE.MatchString(t)
+	case []any:
+		return !slices.ContainsFunc(t, func(e any) bool { return !cp2ClosedValueOK(e) })
+	case map[string]any:
+		return cp2ClosedObjectOK(t)
+	}
+	_, ok := cp2NumberOK(v)
+	return ok
 }
 
 // cp2Elements normalizes the two Go shapes an array value takes.
@@ -2586,6 +2633,19 @@ func cp2InputOK(in cp2Input) error {
 	return nil
 }
 
+// cp2FixtureValueOK routes a structured entry to the closed-object grammar and
+// every other entry to its literal predicate.
+func cp2FixtureValueOK(f cp2Fixture) bool {
+	switch f.Type {
+	case "object":
+		return cp2ClosedObjectOK(f.Value)
+	case "array<object>":
+		items, ok := cp2Elements(f.Value)
+		return ok && !slices.ContainsFunc(items, func(e any) bool { return !cp2ClosedObjectOK(e) })
+	}
+	return cp2ValueOK(f.Type, f.Value, false)
+}
+
 // cp2ValidateFixtures closes the catalog: an alias key, a literal type, and a
 // value of that type.
 func cp2ValidateFixtures(fixtures map[string]cp2Fixture) error {
@@ -2594,7 +2654,7 @@ func cp2ValidateFixtures(fixtures map[string]cp2Fixture) error {
 		if !cp2UpperTokenRE.MatchString(alias) || !slices.Contains(cp2FixtureTypes, f.Type) {
 			return fmt.Errorf("fixtures: entry %q has a non-alias key or a non-literal type %q", alias, f.Type)
 		}
-		if _, structured := cp2LiteralOf[strings.TrimSuffix(strings.TrimPrefix(f.Type, "array<"), ">")]; structured && !cp2ValueOK(f.Type, f.Value, false) {
+		if !cp2FixtureValueOK(f) {
 			return fmt.Errorf("fixtures: entry %q value is not a %s literal", alias, f.Type)
 		}
 	}
@@ -2862,6 +2922,9 @@ func cp2ValidateNullResult(where string, e cp2Expected) error {
 // cp2ValidateInputs closes the stimulus vocabulary the schema also pins and
 // rejects two pointers of one case naming the same input.
 func cp2ValidateInputs(where string, inputs []cp2Input) error {
+	if len(inputs) == 0 {
+		return fmt.Errorf("case %s: carries no input stimulus", where)
+	}
 	seen := make(map[string]bool, len(inputs))
 	for _, in := range inputs {
 		if !slices.Contains(cp2InputTypes, in.Type) || !slices.Contains(cp2Provenances, in.Provenance) {

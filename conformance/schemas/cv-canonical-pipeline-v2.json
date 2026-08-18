@@ -290,9 +290,7 @@
       "additionalProperties": false,
       "required": ["value", "type", "required", "observer"],
       "properties": {
-        "value": { "not": { "type": "null" } },
-        "type": { "enum": ["array", "bool", "hash", "object", "token", "u64"] },
-        "required": { "type": "boolean" },
+        "value": { "not": { "type": "null" } }, "type": { "enum": ["array", "bool", "hash", "object", "token", "u64"] }, "required": { "type": "boolean" },
         "observer": { "$ref": "#/$defs/text" }
       },
       "allOf": [
@@ -319,9 +317,7 @@
       "additionalProperties": false,
       "required": ["relation", "digest_alias", "direct_fields"],
       "properties": {
-        "relation": { "enum": ["new", "old", "withheld", "unchanged"] },
-        "digest_alias": { "description": "Generator-named machine token, not a catalog key; RUB-1208 lands the resolver that checks uniqueness and resolution.", "$ref": "#/$defs/machineToken" },
-        "direct_fields": { "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/snakeToken" }, "additionalProperties": { "$ref": "#/$defs/machineToken" } }
+        "relation": { "enum": ["new", "old", "withheld", "unchanged"] }, "digest_alias": { "description": "Generator-named machine token, not a catalog key; RUB-1208 lands the resolver that checks uniqueness and resolution.", "$ref": "#/$defs/machineToken" }, "direct_fields": { "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/snakeToken" }, "additionalProperties": { "$ref": "#/$defs/machineToken" } }
       }
     },
     "summaryRow": {
@@ -329,9 +325,7 @@
       "additionalProperties": false,
       "required": ["block_id", "block_hash", "complete_da_ids"],
       "properties": {
-        "block_id": { "$ref": "#/$defs/alias" },
-        "block_hash": { "$ref": "#/$defs/bytes32OrAlias" },
-        "complete_da_ids": { "description": "Ascending raw bytes; may be empty. Order and cross-block duplicates are comparator-enforced (RUB-926 / RUB-901), not by this schema.", "type": "array", "items": { "$ref": "#/$defs/bytes32OrAlias" } }
+        "block_id": { "$ref": "#/$defs/alias" }, "block_hash": { "$ref": "#/$defs/bytes32OrAlias" }, "complete_da_ids": { "description": "Ascending raw bytes; may be empty. Order and cross-block duplicates are comparator-enforced (RUB-926 / RUB-901), not by this schema.", "type": "array", "items": { "$ref": "#/$defs/bytes32OrAlias" } }
       }
     }
   }

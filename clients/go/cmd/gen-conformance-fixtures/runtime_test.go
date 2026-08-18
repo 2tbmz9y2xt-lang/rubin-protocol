@@ -1447,7 +1447,7 @@ func cp2ValidInput(pointer, tag string, value any) cp2Input {
 // cp2ValidCase is the known-valid control every RUB-1207 negative mutates in
 // exactly one dimension.
 func cp2ValidCase() cp2Case {
-	return cp2Case{CaseID: "MAIN", Expected: cp2Expected{
+	return cp2Case{CaseID: "MAIN", Input: []cp2Input{cp2ValidInput("/input/stimulus_block", "alias", "B1")}, Expected: cp2Expected{
 		Result: cp2Ptr("ACCEPTED"), CommitTruth: "NEW",
 		RPC: cp2RPC{
 			Class: "MINED_200_COMMITTED", HTTP: cp2Ptr(200), CommitState: cp2Ptr("committed"),
@@ -1495,11 +1495,14 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		"wire truth": func(r *cp2Row) {
 			r.Cases[0].Expected.Result, r.Cases[0].Expected.PipelineReached, r.Cases[0].Expected.WireDisposition = nil, cp2Ptr(false), cp2Ptr("CHECKSUM_REJECT")
 		},
-		"schedule prose":   func(r *cp2Row) { r.Cases[0].ScheduleID = cp2Ptr("two arm schedule") },
-		"pointer grammar":  func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/Input/B", "token", "T")} },
-		"u64 not a number": func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "u64", "abc")} },
-		"u64 negative":     func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "u64", -1)} },
-		"bool not a bool":  func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "bool", "yes")} },
+		"empty input":       func(r *cp2Row) { r.Cases[0].Input = nil },
+		"u64 two to the 64": func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "u64", math.Exp2(64))} },
+		"u16 over bound":    func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "u16", 65536)} },
+		"schedule prose":    func(r *cp2Row) { r.Cases[0].ScheduleID = cp2Ptr("two arm schedule") },
+		"pointer grammar":   func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/Input/B", "token", "T")} },
+		"u64 not a number":  func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "u64", "abc")} },
+		"u64 negative":      func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "u64", -1)} },
+		"bool not a bool":   func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "bool", "yes")} },
 		"bytes32 uppercase": func(r *cp2Row) {
 			r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "bytes32_hex", strings.Repeat("0A", 32))}
 		},
@@ -1537,7 +1540,7 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		"token whitespace": "is not a machine token", "class tuple": "requires [result_selecting_mined_candidate 200",
 		"wire truth": "wire_disposition requires commit truth OLD", "classified wire": "set only when result is null",
 		"reached flag true": "requires pipeline_reached false", "both dispositions": "exactly one of", "neither disposition": "exactly one of", "duplicate pointer": "duplicate input pointer /input/b",
-		"schedule prose": "is not an alias", "pointer grammar": "malformed pointer", "blank sink": "production setup sink",
+		"schedule prose": "is not an alias", "empty input": "carries no input stimulus", "u64 two to the 64": "is not a u64 literal", "u16 over bound": "is not a u16 literal", "pointer grammar": "malformed pointer", "blank sink": "production setup sink",
 		"owner grammar": "consumption owner", "u64 not a number": "is not a u64 literal", "u64 negative": "is not a u64 literal",
 		"bool not a bool": "is not a bool literal", "bytes32 uppercase": "is not a bytes32_hex literal", "token with a space": "is not a token literal",
 		"inline object": "is not a object literal", "not reached bounds": "exceeds its bounds", "wire domain": "is outside its closed domain", "duplicate case id": "duplicate case id",
@@ -1586,6 +1589,9 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 		"fixture type alias": {"B1": {Type: "alias", Value: "B2"}},
 		"fixture u64 value":  {"B1": {Type: "u64", Value: "abc"}},
 		"fixture key case":   {"b1": {Type: "u64", Value: 1}},
+		"fixture prose leaf": {"B1": {Type: "object", Value: cpMap{"note": "a b"}}},
+		"fixture object key": {"B1": {Type: "object", Value: cpMap{"Key": 1}}},
+		"fixture empty obj":  {"B1": {Type: "object", Value: cpMap{}}},
 	} {
 		if err := cp2ValidateFixtures(broken); err == nil {
 			t.Errorf("%s: expected a fail-closed rejection", name)
@@ -1600,6 +1606,15 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	rows[0].Cases[0].Input[0].Type, rows[0].Cases[0].Input[0].ValueOrAlias = "token", "ABSENT"
 	if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}); err != nil {
 		t.Fatalf("token input must not demand a fixture: %v", err)
+	}
+	for name, catalog := range map[string]map[string]cp2Fixture{
+		"nested object":   {"B1": {Type: "object", Value: cpMap{"plan": cpMap{"rows": []any{1, "B_TWO"}}, "fenced": true}}},
+		"object array":    {"B1": {Type: "array<object>", Value: []any{cpMap{"height": 1}}}},
+		"u64 at two ^ 53": {"B1": {Type: "u64", Value: math.Exp2(53)}},
+	} {
+		if err := cp2ValidateFixtures(catalog); err != nil {
+			t.Errorf("%s must validate: %v", name, err)
+		}
 	}
 }
 
