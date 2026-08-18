@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -416,6 +417,7 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
                 lambda r: r["cases"][0]["input"][0].__setitem__("production_setup_sink", "   "),
                 ("rows/0/cases/0/input/0/production_setup_sink", "pattern"),
             ),
+            "accepted with old truth": (lambda r: r["cases"][0]["expected"].__setitem__("commit_truth", "OLD"), (f"{expected}/commit_truth", "const")),
             "unauthorized row id": (lambda r: r.__setitem__("row_id", "C01-UNAUTHORIZED-001"), ("rows/0/row_id", "enum")),
             "authority id as observation": (lambda r: r.__setitem__("row_id", "C01-PATHS-001"), ("rows/0/row_id", "enum")),
             "not reached commit state": (
@@ -505,6 +507,19 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
                 sorted(arm["then"]["properties"]["row_id"]["enum"]),
                 sorted(rid for rid, k in data["row_registry"].items() if k == kind),
             )
+
+    def test_result_truth_arms_partition_the_taxonomy(self):
+        # Every taxonomy member, expanded to its argument forms, matches exactly one arm.
+        _, data = self._load()
+        arms = [(a["if"]["properties"]["result"], a["then"]["properties"]["commit_truth"]["const"])
+                for a in load_json_fail_closed(self.SCHEMA)["$defs"]["expected"]["allOf"]
+                if a["if"]["properties"].get("result", {}).get("type") == "string"]
+        self.assertEqual(len(arms), 4)
+        for entry in data["result_taxonomy"]:
+            head, _, args = entry.partition("(")
+            for member in ([head] if not args else [f"{head}({a})" for a in args.rstrip(")").split("|")]):
+                member = member.replace("exact_error", "X").replace("resource", "orphan_pool")
+                self.assertEqual(len([t for c, t in arms if bool(re.fullmatch(c.get("pattern") or c["not"]["pattern"], member)) != ("not" in c)]), 1, member)
 
     def test_row_registry_is_pinned_as_an_exact_map(self):
         # The schema pins the map as a `const`, independently of the generator

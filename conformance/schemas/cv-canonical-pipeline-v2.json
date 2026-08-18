@@ -218,7 +218,7 @@
       ]
     },
     "expected": {
-      "description": "The typed expected output. It is never included in adapter input. `result` is null exactly for a case disposed before a consensus classification: such a case carries `pipeline_reached: false` and exactly one of `wire_disposition` (DD-001 wire layer) or `recovery_outcome` (DD-002 startup/recovery), and a classified case carries none of the three. `canonical_applied_blocks` is an array exactly when `commit_truth` is NEW and null otherwise (DD-007: only NEW exposes the planned summary). The result -> commit_truth relation is spec 6.4.1 (RUBIN_MEMPOOL_POLICY.md L436-L446 @ rubin-spec c14b0100) and is pinned by the generator.",
+      "description": "The typed expected output. It is never included in adapter input. `result` is null exactly for a case disposed before a consensus classification: such a case carries `pipeline_reached: false` and exactly one of `wire_disposition` (DD-001 wire layer) or `recovery_outcome` (DD-002 startup/recovery), and a classified case carries none of the three. `canonical_applied_blocks` is an array exactly when `commit_truth` is NEW and null otherwise (DD-007: only NEW exposes the planned summary). The result -> commit_truth relation is spec 6.4.1 (RUBIN_MEMPOOL_POLICY.md L436-L446 @ rubin-spec c14b0100) and is pinned by both the arms below and the generator.",
       "type": "object",
       "additionalProperties": false,
       "required": ["result", "commit_truth", "rpc_projection", "canonical_counters", "effects", "state_image", "canonical_applied_blocks"],
@@ -247,19 +247,14 @@
         }
       },
       "allOf": [
-        {
-          "if": { "properties": { "result": { "type": "null" } }, "required": ["result"] },
-          "then": {
-            "required": ["pipeline_reached"],
-            "properties": { "pipeline_reached": { "const": false } },
+        { "if": { "properties": { "result": { "type": "string", "pattern": "^(ACCEPTED|TERMINAL_PERSISTENCE\\(new\\))$" } }, "required": ["result"] }, "then": { "properties": { "commit_truth": { "const": "NEW" } } } }, { "if": { "properties": { "result": { "type": "string", "pattern": "^(STORED_NONCANONICAL|KNOWN_BLOCK_NOOP\\((CANONICAL|STORED_NONCANONICAL)\\)|LOCAL_STORE_ERROR\\(noncanonical\\))$" } }, "required": ["result"] }, "then": { "properties": { "commit_truth": { "const": "NOT_APPLICABLE" } } } },
+        { "if": { "properties": { "result": { "type": "string", "pattern": "^TERMINAL_PERSISTENCE\\(neither_or_unreadable\\)$" } }, "required": ["result"] }, "then": { "properties": { "commit_truth": { "const": "UNKNOWN" } } } }, { "if": { "properties": { "result": { "type": "string", "not": { "pattern": "^(ACCEPTED|TERMINAL_PERSISTENCE\\((new|neither_or_unreadable)\\)|STORED_NONCANONICAL|KNOWN_BLOCK_NOOP\\((CANONICAL|STORED_NONCANONICAL)\\)|LOCAL_STORE_ERROR\\(noncanonical\\))$" } } }, "required": ["result"] }, "then": { "properties": { "commit_truth": { "const": "OLD" } } } },
+        { "if": { "properties": { "result": { "type": "null" } }, "required": ["result"] },
+          "then": { "required": ["pipeline_reached"], "properties": { "pipeline_reached": { "const": false } },
             "oneOf": [{ "required": ["wire_disposition"] }, { "required": ["recovery_outcome"] }],
-            "allOf": [
-              { "if": { "required": ["wire_disposition"] }, "then": { "properties": { "commit_truth": { "const": "OLD" } } } },
-              { "if": { "required": ["recovery_outcome"] }, "then": { "properties": { "commit_truth": { "const": "NOT_APPLICABLE" } } } }
-            ]
-          },
-          "else": { "not": { "anyOf": [{ "required": ["pipeline_reached"] }, { "required": ["wire_disposition"] }, { "required": ["recovery_outcome"] }] } }
-        },
+            "allOf": [{ "if": { "required": ["wire_disposition"] }, "then": { "properties": { "commit_truth": { "const": "OLD" } } } },
+              { "if": { "required": ["recovery_outcome"] }, "then": { "properties": { "commit_truth": { "const": "NOT_APPLICABLE" } } } }] },
+          "else": { "not": { "anyOf": [{ "required": ["pipeline_reached"] }, { "required": ["wire_disposition"] }, { "required": ["recovery_outcome"] }] } } },
         { "if": { "properties": { "canonical_counters": { "properties": { "accepted_delta": { "not": { "const": "0" } } }, "required": ["accepted_delta"] } }, "required": ["canonical_counters"] }, "then": { "properties": { "commit_truth": { "const": "NEW" } } } },
         { "if": { "properties": { "canonical_counters": { "properties": { "rejected_delta": { "const": "+1" } }, "required": ["rejected_delta"] } }, "required": ["canonical_counters"] }, "then": { "properties": { "commit_truth": { "const": "OLD" } } } },
         { "if": { "properties": { "commit_truth": { "const": "NEW" } }, "required": ["commit_truth"] }, "then": { "properties": { "canonical_applied_blocks": { "type": "array" } } }, "else": { "properties": { "canonical_applied_blocks": { "type": "null" } } } },
