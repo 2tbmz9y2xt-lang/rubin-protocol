@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1494,9 +1495,19 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		},
 		"neither disposition": func(r *cp2Row) { e := &r.Cases[0].Expected; e.Result, e.PipelineReached = nil, cp2Ptr(false) },
 		"wire truth": func(r *cp2Row) {
-			r.Cases[0].Expected.Result, r.Cases[0].Expected.PipelineReached, r.Cases[0].Expected.WireDisposition = nil, cp2Ptr(false), cp2Ptr("CHECKSUM_REJECT")
+			e := &r.Cases[0].Expected
+			e.Result, e.PipelineReached, e.WireDisposition, e.RPC.Class = nil, cp2Ptr(false), cp2Ptr("CHECKSUM_REJECT"), "NOT_REACHED"
 		},
-		"empty input":       func(r *cp2Row) { r.Cases[0].Input = nil },
+		"empty input": func(r *cp2Row) { r.Cases[0].Input = nil },
+		"null result class": func(r *cp2Row) {
+			e := &r.Cases[0].Expected
+			e.Result, e.PipelineReached, e.WireDisposition = nil, cp2Ptr(false), cp2Ptr("CHECKSUM_REJECT")
+		},
+		"zero width sink": func(r *cp2Row) {
+			in := cp2ValidInput("/input/a", "token", "T")
+			in.ProductionSetupSink = "\uFEFF"
+			r.Cases[0].Input = []cp2Input{in}
+		},
 		"u64 two to the 64": func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "u64", math.Exp2(64))} },
 		"u16 over bound":    func(r *cp2Row) { r.Cases[0].Input = []cp2Input{cp2ValidInput("/input/a", "u16", 65536)} },
 		"schedule prose":    func(r *cp2Row) { r.Cases[0].ScheduleID = cp2Ptr("two arm schedule") },
@@ -1522,7 +1533,7 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		"not reached bounds": func(r *cp2Row) { e := &r.Cases[0].Expected.RPC; e.Class, e.Phase = "NOT_REACHED", "not_reached" },
 		"wire domain": func(r *cp2Row) {
 			e := &r.Cases[0].Expected
-			e.Result, e.PipelineReached, e.WireDisposition = nil, cp2Ptr(false), cp2Ptr("FRAME_BOGUS")
+			e.Result, e.PipelineReached, e.WireDisposition, e.RPC.Class = nil, cp2Ptr(false), cp2Ptr("FRAME_BOGUS"), "NOT_REACHED"
 		},
 		"duplicate pointer": func(r *cp2Row) {
 			p := cp2Input{Pointer: "/input/b", Type: "token", ValueOrAlias: "T", Provenance: "witness_fixture", ProductionSetupSink: "sink", ConsumptionProofOwner: "RUB-923"}
@@ -1541,8 +1552,8 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		"token whitespace": "is not a machine token", "class tuple": "requires [result_selecting_mined_candidate 200",
 		"wire truth": "wire_disposition requires commit truth OLD", "classified wire": "set only when result is null",
 		"reached flag true": "requires pipeline_reached false", "both dispositions": "exactly one of", "neither disposition": "exactly one of", "duplicate pointer": "duplicate input pointer /input/b",
-		"schedule prose": "is not an alias", "empty input": "carries no input stimulus", "u64 two to the 64": "is not a u64 literal", "u16 over bound": "is not a u16 literal", "pointer grammar": "malformed pointer", "blank sink": "production setup sink",
-		"owner grammar": "consumption owner", "u64 not a number": "is not a u64 literal", "u64 negative": "is not a u64 literal",
+		"schedule prose": "is not an alias", "empty input": "carries no input stimulus", "u64 two to the 64": "is not a u64 literal", "u16 over bound": "is not a u16 literal", "pointer grammar": "input pointer \"/Input/B\" is malformed", "blank sink": "blank production setup sink", "zero width sink": "blank production setup sink",
+		"owner grammar": "malformed consumption owner", "null result class": "unreached or startup RPC class", "u64 not a number": "is not a u64 literal", "u64 negative": "is not a u64 literal",
 		"bool not a bool": "is not a bool literal", "bytes32 uppercase": "is not a bytes32_hex literal", "token with a space": "is not a token literal",
 		"inline object": "is not a object literal", "not reached bounds": "exceeds its bounds", "wire domain": "is outside its closed domain", "duplicate case id": "duplicate case id",
 		"missing reached flag": "null result requires pipeline_reached",
@@ -1692,16 +1703,18 @@ func TestCanonicalPipelineV2GoSchemaParity(t *testing.T) {
 		httpValues = append(httpValues, strconv.Itoa(v))
 	}
 	for name, pair := range map[string][2][]string{
-		"class":            {cp2RPCClasses, list(append(rpc, "class", "enum")...)},
-		"mined":            {cp2MinedValues, list(append(rpc, "mined", "enum")...)},
-		"success_identity": {cp2SuccessIdentityValues, list(append(rpc, "success_identity", "enum")...)},
-		"commit_state":     {cp2CommitStateValues, list(append(rpc, "commit_state", "enum")...)},
-		"phase":            {cp2PhaseValues, list(append(rpc, "phase", "enum")...)},
-		"http":             {httpValues, list(append(rpc, "http", "enum")...)},
-		"inputType":        {cp2InputTypes, list("$defs", "inputType", "enum")},
-		"provenance":       {cp2Provenances, list("$defs", "inputPointer", "properties", "provenance", "enum")},
-		"wire_disposition": {cp2WireDispositionValues, list("properties", "wire_disposition_values", "const")},
-		"recovery_outcome": {cp2RecoveryOutcomeValues, list("properties", "recovery_outcome_values", "const")},
+		"class":             {cp2RPCClasses, list(append(rpc, "class", "enum")...)},
+		"mined":             {cp2MinedValues, list(append(rpc, "mined", "enum")...)},
+		"success_identity":  {cp2SuccessIdentityValues, list(append(rpc, "success_identity", "enum")...)},
+		"commit_state":      {cp2CommitStateValues, list(append(rpc, "commit_state", "enum")...)},
+		"phase":             {cp2PhaseValues, list(append(rpc, "phase", "enum")...)},
+		"http":              {httpValues, list(append(rpc, "http", "enum")...)},
+		"inputType":         {cp2InputTypes, list("$defs", "inputType", "enum")},
+		"provenance":        {cp2Provenances, list("$defs", "inputPointer", "properties", "provenance", "enum")},
+		"wire_disposition":  {cp2WireDispositionValues, list("properties", "wire_disposition_values", "const")},
+		"recovery_outcome":  {cp2RecoveryOutcomeValues, list("properties", "recovery_outcome_values", "const")},
+		"expected wire":     {cp2WireDispositionValues, list("$defs", "expected", "properties", "wire_disposition", "enum")},
+		"expected recovery": {cp2RecoveryOutcomeValues, list("$defs", "expected", "properties", "recovery_outcome", "enum")},
 	} {
 		if got, want := slices.Sorted(slices.Values(pair[0])), slices.Sorted(slices.Values(pair[1])); !slices.Equal(got, want) {
 			t.Errorf("%s: generator %v, schema %v", name, got, want)
@@ -1745,6 +1758,81 @@ func TestCanonicalPipelineV2GrammarParity(t *testing.T) {
 	}
 	// $defs/rowId has no generator twin on purpose: a row id must be a key of the
 	// frozen registry, which is strictly stronger than matching its grammar.
+}
+
+// TestCanonicalPipelineV2RelationParity derives the two relation tables from the
+// schema arms and compares them to the generator's copies, so neither side can
+// drift alone.
+func TestCanonicalPipelineV2RelationParity(t *testing.T) {
+	arms, ok := cp2SchemaOf(t)["$defs"].(map[string]any)["rpcProjection"].(map[string]any)["allOf"].([]any)
+	if !ok {
+		t.Fatal("rpcProjection carries no arms")
+	}
+	for _, arm := range arms {
+		cond := arm.(map[string]any)["if"].(map[string]any)["properties"].(map[string]any)["class"].(map[string]any)
+		then := arm.(map[string]any)["then"].(map[string]any)["properties"].(map[string]any)
+		want, pinned := cp2ClassTuple[cond["const"].(string)]
+		if !pinned {
+			continue // NOT_REACHED is bounded, not pinned; its bounds are checked below
+		}
+		got := [6]string{
+			cp2ConstOf(then, "phase"), cp2ConstOf(then, "http"), cp2ConstOf(then, "commit_state"),
+			cp2ConstOf(then, "mined"), cp2ConstOf(then, "success_identity"), cp2ErrorClassOf(then),
+		}
+		if got != want {
+			t.Errorf("class %v: schema %v, generator %v", cond["const"], got, want)
+		}
+	}
+	for _, member := range []string{
+		"ACCEPTED", "STORED_NONCANONICAL", "KNOWN_BLOCK_NOOP(CANONICAL)", "MISSING_PARENT",
+		"ORPHAN_RETAINED", "ORPHAN_ALREADY_RETAINED", "CONSENSUS_INVALID(X)", "LOCAL_BUSY", "LOCAL_RESOURCE_UNAVAILABLE(orphan_pool)",
+		"STALE_LOCAL_PLAN", "LOCAL_CANCELLED", "LOCAL_STORE_ERROR(noncanonical)", "LOCAL_PERSISTENCE_ERROR(precommit)", //nolint:misspell // normative spelling
+		"TERMINAL_STORE_INTEGRITY(canonical)", "TERMINAL_LOCAL_INVARIANT(evidence)", "TERMINAL_PERSISTENCE(old)",
+		"TERMINAL_PERSISTENCE(new)", "TERMINAL_PERSISTENCE(neither_or_unreadable)", "KNOWN_BLOCK_NOOP(STORED_NONCANONICAL)",
+	} {
+		want, _ := cp2CommitTruthFor(member)
+		if got := cp2SchemaTruthOf(t, member); got != want {
+			t.Errorf("%s: schema arm %q, generator %q", member, got, want)
+		}
+	}
+}
+
+// cp2ConstOf reads an arm field as the generator's tuple spells it: "" is null.
+func cp2ConstOf(then map[string]any, field string) string {
+	spec, ok := then[field].(map[string]any)
+	if !ok {
+		return ""
+	}
+	if value, has := spec["const"]; has {
+		return fmt.Sprint(value)
+	}
+	return ""
+}
+
+func cp2ErrorClassOf(then map[string]any) string {
+	spec, _ := then["error_class"].(map[string]any)
+	if spec["type"] == "null" {
+		return "no"
+	}
+	return "yes"
+}
+
+// cp2SchemaTruthOf evaluates the schema's result arms for one taxonomy member.
+func cp2SchemaTruthOf(t *testing.T, member string) string {
+	for _, arm := range cp2SchemaOf(t)["$defs"].(map[string]any)["expected"].(map[string]any)["allOf"].([]any) {
+		cond, _ := arm.(map[string]any)["if"].(map[string]any)["properties"].(map[string]any)["result"].(map[string]any)
+		if cond["type"] != "string" {
+			continue
+		}
+		pattern, negated := cond["pattern"], false
+		if not, wrapped := cond["not"].(map[string]any); wrapped {
+			pattern, negated = not["pattern"], true
+		}
+		if regexp.MustCompile(pattern.(string)).MatchString(member) != negated {
+			return fmt.Sprint(arm.(map[string]any)["then"].(map[string]any)["properties"].(map[string]any)["commit_truth"].(map[string]any)["const"])
+		}
+	}
+	return ""
 }
 
 // TestCanonicalPipelineV2ValidatorsNeverPanic drives random, often malformed,

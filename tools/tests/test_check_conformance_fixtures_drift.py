@@ -413,6 +413,20 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
                 lambda r: r["cases"][0]["input"][0].update({"type": "bool", "value_or_alias": "yes"}),
                 ("rows/0/cases/0/input/0/value_or_alias", "oneOf"),
             ),
+            "zero width setup sink": (
+                lambda r: r["cases"][0]["input"][0].__setitem__("production_setup_sink", "\ufeff"),
+                ("rows/0/cases/0/input/0/production_setup_sink", "pattern"),
+            ),
+            "wire disposed image relation": (
+                lambda r: r["cases"][0]["expected"].update(
+                    {"result": None, "pipeline_reached": False, "wire_disposition": "CHECKSUM_REJECT", "commit_truth": "OLD",
+                     "canonical_applied_blocks": None,
+                     "rpc_projection": {**r["cases"][0]["expected"]["rpc_projection"], "class": "NOT_REACHED", "http": None,
+                                        "commit_state": None, "mined": "not_applicable", "success_identity": "not_applicable",
+                                        "phase": "not_reached"}}
+                ),
+                (f"{expected}/state_image/CHAIN_IMAGE_V1/relation", "const"),
+            ),
             "whitespace-only setup sink": (
                 lambda r: r["cases"][0]["input"][0].__setitem__("production_setup_sink", "   "),
                 ("rows/0/cases/0/input/0/production_setup_sink", "pattern"),
@@ -490,6 +504,16 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
         self.assertFalse(
             validator.is_valid({**data, "_meta": {**data["_meta"], "parent_artifact_sha256": "0" * 64}})
         )
+
+    def test_recursion_error_is_an_invalid_json_artifact(self):
+        # CPython's C scanner is iterative, so no depth raises here; the pure-Python
+        # fallback scanner does, and the translation must keep it fail-closed.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "deep.json"
+            path.write_text("[[1]]", encoding="utf-8")
+            with mock.patch("json.loads", side_effect=RecursionError):
+                with self.assertRaisesRegex(RuntimeError, "nesting too deep"):
+                    load_json_fail_closed(path)
 
     def test_fixture_entries_are_typed_literals(self):
         # A catalog entry is a typed literal, never an alias to an alias, and a

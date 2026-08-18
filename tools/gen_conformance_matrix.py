@@ -242,6 +242,8 @@ def load_json_fail_closed(path: Path) -> Any:
     except OSError as err:
         reason = err.strerror or err.__class__.__name__
         raise RuntimeError(f"cannot read JSON artifact {path.name}: {reason}") from err
+    except RecursionError as err:
+        raise RuntimeError(f"invalid JSON artifact {path}: nesting too deep") from err
     except ValueError as err:
         raise RuntimeError(f"invalid JSON artifact {path}: {err}") from err
 

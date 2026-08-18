@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
@@ -2475,8 +2476,6 @@ var (
 	cp2HTTPValues            = []int{200, 422, 503}
 )
 
-// cp2UpperTokenRE is the one uppercase machine-identifier grammar the schema
-// applies to both a case id and a fixtures alias.
 // cp2ClassTuple pins each derived RPC class to its exact
 // (phase, http, commit_state, mined, success_identity, error_class-present)
 // tuple, mirroring the schema's per-class arms. "" is JSON null. NOT_REACHED is
@@ -2500,7 +2499,7 @@ var (
 )
 
 var (
-	cp2UpperTokenRE          = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+	cp2UpperTokenRE          = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`) // one grammar for a case id and a fixtures alias
 	cp2TokenRE               = regexp.MustCompile(`^[A-Za-z0-9_@/:()|+.-]+$`)
 	cp2BytesRE, cp2HexRE     = regexp.MustCompile(`^([0-9a-f]{2})*$`), regexp.MustCompile(`^[0-9a-f]{64}$`)
 	cp2SnakeRE               = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
@@ -2630,10 +2629,24 @@ func cp2ElemOK(elem string, v any, aliasOK bool) bool {
 	return ok && lit(v)
 }
 
+// cp2Blank reports whether s carries no visible character: whitespace, a BOM or
+// a zero-width mark does not make a production setup sink real.
+func cp2Blank(s string) bool {
+	return strings.TrimFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || r == '\uFEFF' || (r >= '\u200B' && r <= '\u200D') || r == '\u2060'
+	}) == ""
+}
+
 // cp2InputOK mirrors every schema constraint on one stimulus pointer.
 func cp2InputOK(in cp2Input) error {
-	if !cp2PointerRE.MatchString(in.Pointer) || !cp2IssueRE.MatchString(in.ConsumptionProofOwner) || strings.TrimSpace(in.ProductionSetupSink) == "" {
-		return fmt.Errorf("input %s has a malformed pointer, consumption owner or production setup sink", in.Pointer)
+	if !cp2PointerRE.MatchString(in.Pointer) {
+		return fmt.Errorf("input pointer %q is malformed", in.Pointer)
+	}
+	if !cp2IssueRE.MatchString(in.ConsumptionProofOwner) {
+		return fmt.Errorf("input %s has a malformed consumption owner %q", in.Pointer, in.ConsumptionProofOwner)
+	}
+	if cp2Blank(in.ProductionSetupSink) {
+		return fmt.Errorf("input %s has a blank production setup sink", in.Pointer)
 	}
 	if !cp2ValueOK(in.Type, cp2JSONImage(in.ValueOrAlias), true) {
 		return fmt.Errorf("input %s value is not a %s literal or alias", in.Pointer, in.Type)
@@ -2919,6 +2932,15 @@ func cp2ValidateNullResult(where string, e cp2Expected) error {
 	if (e.WireDisposition != nil) == (e.RecoveryOutcome != nil) {
 		return fmt.Errorf("case %s: a null result requires exactly one of wire_disposition, recovery_outcome", where)
 	}
+	if !slices.Contains([]string{"NOT_REACHED", "STARTUP_UNAVAILABLE_503"}, e.RPC.Class) {
+		return fmt.Errorf("case %s: a null result requires an unreached or startup RPC class, got %s", where, e.RPC.Class)
+	}
+	return cp2ValidateNullTruth(where, e)
+}
+
+// cp2ValidateNullTruth binds the disposition of an unclassified case to its
+// commit truth: the wire layer leaves the old image, startup attempts nothing.
+func cp2ValidateNullTruth(where string, e cp2Expected) error {
 	if e.WireDisposition != nil && e.CommitTruth != "OLD" {
 		return fmt.Errorf("case %s: wire_disposition requires commit truth OLD, got %q", where, e.CommitTruth)
 	}
@@ -2973,11 +2995,13 @@ func cp2ValidateCases(rowID string, cases []cp2Case) error {
 	return nil
 }
 
-// cp2ValidateRows is the fail-closed gate the migrating slices land against:
-// every migrated row must be a frozen (row_id, kind) registry pair, and every
-// case a machine-token id whose expected projection satisfies the closed
-// relations. A row removal, rename, kind change or unauthorized addition on
-// either side of the registry fails generation.
+// cp2ValidateRows gates the fields the Go structs carry: registry identity, the
+// row-kind exclusions, row and case ids, the input vocabulary and pointers, the
+// schedule alias, and the result/truth/RPC relations; cp2ValidateAliases and
+// cp2ValidateFixtures cover the catalog. The schema-only fields
+// (release_requirements, obligation_ids, sources, counters, effects, images,
+// summary) are gated by validating the committed artifact against the committed
+// schema, which stays the complete gate until RUB-1208 lands their values.
 func cp2ValidateRows(rows []cp2Row, registry map[string]string) error {
 	if len(registry) != cp2RegistrySize {
 		return fmt.Errorf("row registry: %d identities, want the frozen %d", len(registry), cp2RegistrySize)
