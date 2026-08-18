@@ -2450,8 +2450,9 @@ const (
 	cp2GoverningSpecOID  = "c14b010024ce633e1027bf891af3c49741db544a"
 )
 
-// cp2RPCClasses is the closed RPC projection class enum (RUB-1206 DD-009):
-// every class is derived from (phase, http, commit_state, mined).
+// cp2RPCClasses is the closed RPC projection class enum (RUB-1206 DD-009). The
+// class is authored, not computed: one (phase, http, commit_state, mined) tuple
+// maps to two classes in the bound design, so the tuple does not determine it.
 var cp2RPCClasses = []string{
 	"NOT_REACHED", "STARTUP_UNAVAILABLE_503", "BOOTSTRAP_CONTINUATION_ONLY",
 	"BOOTSTRAP_TERMINAL_INVARIANT_503", "BOOTSTRAP_TERMINAL_NEW_503_COMMITTED",
@@ -2618,14 +2619,10 @@ func cp2ValidateRPCNullable(where string, r cp2RPC) error {
 	if r.HTTP != nil && !slices.Contains(cp2HTTPValues, *r.HTTP) {
 		return fmt.Errorf("case %s: rpc_projection.http %d is outside its closed domain", where, *r.HTTP)
 	}
-	if r.ErrorClass != nil && !cp2IsErrorClass(*r.ErrorClass) {
+	if r.ErrorClass != nil && *r.ErrorClass != cp2RPCUnavailable && !canonicalPipelineResultRE.MatchString(*r.ErrorClass) {
 		return fmt.Errorf("case %s: rpc_projection.error_class %q is neither a taxonomy token nor %s", where, *r.ErrorClass, cp2RPCUnavailable)
 	}
 	return nil
-}
-
-func cp2IsErrorClass(token string) bool {
-	return token == cp2RPCUnavailable || canonicalPipelineResultRE.MatchString(token)
 }
 
 // cp2ValidateExpected pins the commit-truth domain, the result -> commit truth
@@ -2665,10 +2662,15 @@ func cp2ValidateResultTruth(where string, e cp2Expected) error {
 }
 
 func cp2ValidateCases(rowID string, cases []cp2Case) error {
+	seen := make(map[string]bool, len(cases))
 	for _, c := range cases {
 		if !cp2CaseIDRE.MatchString(c.CaseID) {
 			return fmt.Errorf("row %s: case id %q is not a machine token", rowID, c.CaseID)
 		}
+		if seen[c.CaseID] {
+			return fmt.Errorf("row %s: duplicate case id %q", rowID, c.CaseID)
+		}
+		seen[c.CaseID] = true
 		if err := cp2ValidateExpected(rowID+"/"+c.CaseID, c.Expected); err != nil {
 			return err
 		}
@@ -2685,10 +2687,15 @@ func cp2ValidateRows(rows []cp2Row, registry map[string]string) error {
 	if len(registry) != cp2RegistrySize {
 		return fmt.Errorf("row registry: %d identities, want the frozen %d", len(registry), cp2RegistrySize)
 	}
+	seen := make(map[string]bool, len(rows))
 	for _, row := range rows {
 		if kind, ok := registry[row.RowID]; !ok || kind != row.Kind {
 			return fmt.Errorf("row %s: (row_id, kind=%q) is not a frozen registry pair", row.RowID, row.Kind)
 		}
+		if seen[row.RowID] {
+			return fmt.Errorf("row %s: duplicate row id", row.RowID)
+		}
+		seen[row.RowID] = true
 		if err := cp2ValidateCases(row.RowID, row.Cases); err != nil {
 			return err
 		}

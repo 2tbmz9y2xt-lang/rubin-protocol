@@ -465,7 +465,12 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
         self.assertFalse(
             validator.is_valid({**data, "_meta": {**data["_meta"], "parent_artifact_sha256": "0" * 64}})
         )
-        # A removed identity, an unauthorized key and a kind change all fail the map.
+
+    def test_row_registry_cardinality_and_kind_domain_are_closed(self):
+        # Identity itself is pinned by the v1-parent test and the Go registry test;
+        # this closes the shape: a removed identity, an unauthorized key, a kind
+        # outside the domain.
+        validator, data = self._load()
         registry = data["row_registry"]
         for broken in (
             dict(list(registry.items())[1:]),

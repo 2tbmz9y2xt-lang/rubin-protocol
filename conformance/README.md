@@ -184,7 +184,8 @@ authorities never coexist.
 
 This revision carries identity and shape only. Its `_meta.closure_epoch` binds it to the RUB-1206
 design-closure manifest (`rubin-c01-design-closure-v3`) — every hash is a generator constant and a
-schema `const`, so drift fails generation or validation. `row_registry` is the frozen `row_id ->
+schema `const`, so a one-sided edit of either copy fails generation or validation; the binding to
+the RUB-1206 snapshot itself is by pinned hash (verified at claim), not re-verified in-tree. `row_registry` is the frozen `row_id ->
 kind` map of the 79 C01-R2 identities (62 inherited from v1, plus the 17 the closure epoch
 authorizes); migration status is derived, never stored — a row is migrated exactly when its id
 appears in `rows`, which is empty here, as is the deterministic alias catalog `fixtures`.

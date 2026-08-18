@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"math"
 	"os"
@@ -1388,15 +1389,10 @@ func TestCanonicalPipelineV2ParentPairIsByteFrozen(t *testing.T) {
 		if readErr != nil {
 			t.Fatalf("read %s: %v", c.rel, readErr)
 		}
-		if got := hex.EncodeToString(sha256Sum(raw)); got != c.want {
+		if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != c.want {
 			t.Fatalf("%s sha256 = %s, want the frozen parent pin %s", c.rel, got, c.want)
 		}
 	}
-}
-
-func sha256Sum(b []byte) []byte {
-	sum := sha256.Sum256(b)
-	return sum[:]
 }
 
 // TestCanonicalPipelineV2RegistryIsFrozen pins the C01-R2 identity map: the 62
@@ -1439,11 +1435,13 @@ func TestCanonicalPipelineV2CommitTruthRelationIsExact(t *testing.T) {
 			t.Errorf("%s: relation maps %q to %s, but the merged R1 row states %s", row.ID, row.Result, truth, row.CommitTruth)
 		}
 	}
-	for _, member := range []string{"ACCEPTED", "STORED_NONCANONICAL", "KNOWN_BLOCK_NOOP(CANONICAL)", "MISSING_PARENT",
+	for _, member := range []string{
+		"ACCEPTED", "STORED_NONCANONICAL", "KNOWN_BLOCK_NOOP(CANONICAL)", "MISSING_PARENT",
 		"ORPHAN_RETAINED", "ORPHAN_ALREADY_RETAINED", "CONSENSUS_INVALID(BLOCK_ERR_MERKLE_INVALID)", "LOCAL_BUSY",
 		"LOCAL_RESOURCE_UNAVAILABLE(orphan_pool)", "STALE_LOCAL_PLAN", "LOCAL_CANCELLED", "LOCAL_STORE_ERROR(noncanonical)", //nolint:misspell // LOCAL_CANCELLED is the normative specification token spelling
 		"LOCAL_PERSISTENCE_ERROR(precommit)", "TERMINAL_STORE_INTEGRITY(canonical)", "TERMINAL_LOCAL_INVARIANT(evidence)",
-		"TERMINAL_PERSISTENCE(old)", "TERMINAL_PERSISTENCE(new)", "TERMINAL_PERSISTENCE(neither_or_unreadable)"} {
+		"TERMINAL_PERSISTENCE(old)", "TERMINAL_PERSISTENCE(new)", "TERMINAL_PERSISTENCE(neither_or_unreadable)",
+	} {
 		if _, ok := cp2CommitTruthFor(member); !ok {
 			t.Errorf("taxonomy member %q has no commit truth", member)
 		}
@@ -1460,8 +1458,10 @@ func cp2Ptr[T any](v T) *T { return &v }
 func cp2ValidCase() cp2Case {
 	return cp2Case{CaseID: "MAIN", Expected: cp2Expected{
 		Result: cp2Ptr("ACCEPTED"), CommitTruth: "NEW",
-		RPC: cp2RPC{Class: "MINED_200_COMMITTED", HTTP: cp2Ptr(200), CommitState: cp2Ptr("committed"),
-			Mined: "true", SuccessIdentity: "present", Phase: "result_selecting_mined_candidate"},
+		RPC: cp2RPC{
+			Class: "MINED_200_COMMITTED", HTTP: cp2Ptr(200), CommitState: cp2Ptr("committed"),
+			Mined: "true", SuccessIdentity: "present", Phase: "result_selecting_mined_candidate",
+		},
 	}}
 }
 
@@ -1473,6 +1473,10 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 	registry := cp2RowRegistry()
 	if err := cp2ValidateRows([]cp2Row{{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}}, registry); err != nil {
 		t.Fatalf("control row must validate: %v", err)
+	}
+	dup := cp2Row{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}
+	if err := cp2ValidateRows([]cp2Row{dup, dup}, registry); err == nil || !strings.Contains(err.Error(), "duplicate row id") {
+		t.Errorf("two rows sharing an id: error = %v, want a duplicate row id rejection", err)
 	}
 	mutate := map[string]func(*cp2Row){
 		"row id substitution":  func(r *cp2Row) { r.RowID = "C01-DIRECT-002" },
@@ -1486,6 +1490,7 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		"rpc commit state":     func(r *cp2Row) { r.Cases[0].Expected.RPC.CommitState = cp2Ptr("maybe_committed") },
 		"rpc error class":      func(r *cp2Row) { r.Cases[0].Expected.RPC.ErrorClass = cp2Ptr("LOCAL BUSY") },
 		"token whitespace":     func(r *cp2Row) { r.Cases[0].CaseID = "MAIN CASE" },
+		"duplicate case id":    func(r *cp2Row) { r.Cases = append(r.Cases, r.Cases[0]) },
 		"missing reached flag": func(r *cp2Row) { r.Cases[0].Expected.Result = nil },
 		"surplus reached flag": func(r *cp2Row) { r.Cases[0].Expected.PipelineReached = cp2Ptr(false) },
 	}
@@ -1495,7 +1500,8 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		"unknown commit truth": "commit truth \"MAYBE\" is unknown", "rpc class": "rpc_projection.class",
 		"rpc mined": "rpc_projection.mined", "rpc http": "rpc_projection.http",
 		"rpc commit state": "rpc_projection.commit_state", "rpc error class": "neither a taxonomy token",
-		"token whitespace": "is not a machine token", "missing reached flag": "null result requires pipeline_reached",
+		"token whitespace": "is not a machine token", "duplicate case id": "duplicate case id",
+		"missing reached flag": "null result requires pipeline_reached",
 		"surplus reached flag": "only when result is null",
 	}
 	for name, apply := range mutate {
