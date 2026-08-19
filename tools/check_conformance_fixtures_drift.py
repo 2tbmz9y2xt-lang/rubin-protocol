@@ -16,7 +16,10 @@ detects drift after the fact.
 from __future__ import annotations
 
 import argparse
+import copy
 import filecmp
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -25,10 +28,31 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Sequence
 
+from gen_conformance_matrix import load_json_fail_closed
+
 
 COMMITTED_FIXTURES_REL = Path("conformance/fixtures")
 GENERATOR_PACKAGE = "./cmd/gen-conformance-fixtures"
 GO_MODULE_REL = Path("clients/go")
+V2_REL = Path("protocol/canonical_pipeline_v2.json")
+V2_SCHEMA_REL = Path("conformance/schemas/cv-canonical-pipeline-v2.json")
+V2_RUB1208_CASE_COUNTS = {
+    "C01-DACLEAN-001": 12,
+    "C01-DIRECT-001": 1,
+    "C01-DISCONNECT-001": 1,
+    "C01-EQUALWORK-001": 1,
+    "C01-GENESIS-001": 1,
+    "C01-REORG-001": 1,
+    "C01-SIDE-001": 1,
+    "C01-SUMMARY-001": 6,
+}
+# Canonical SHA-256 of the 24-case obligation receipts. Forward is
+# {row/case -> sorted obligation_ids}; reverse is {obligation_id -> sorted row/case}.
+# Both are independently derived from the corrected RUB-1206 v8 payload.
+V2_RUB1208_OBLIGATION_FORWARD_SHA256 = "f0be2577e0e5ed13ab2bcf50163d5289f7a04fd48352dea29fa7b216f310d45b"
+V2_RUB1208_OBLIGATION_REVERSE_SHA256 = "378f3789d24c2a43bc2c29e50e0efa96232b666ede32bc8e9b30dcdebf71c60b"
+V2_RUB1208_OBLIGATION_UNIQUE = 143
+V2_RUB1208_OBLIGATION_OCCURRENCES = 259
 
 # Hardcoded expected generator-owned fixture set per
 # rubin-protocol#1358 task body. Every entry MUST be emitted by the
@@ -46,12 +70,11 @@ EXPECTED_FIXTURES: tuple[Path, ...] = (
     # RUB-922 / C01 canonical publication observables corpus. Generator-owned
     # and byte-frozen: only the C01 owner issue (RUB-922, then its R2 successor RUB-1204) may change its expected rows.
     Path("protocol/canonical_pipeline_v1.json"),
-    # RUB-1207 / C01-R2 dormant BUILDING successor. Generator-owned; its schema
-    # and row registry are strict-loaded and validated by
-    # tools/tests/test_check_conformance_fixtures_drift.py, and the artifact
-    # additionally passes tools/gen_conformance_matrix.py load_json_fail_closed
-    # on every matrix run.
-    Path("protocol/canonical_pipeline_v2.json"),
+    # RUB-1208 / C01-R2 BUILDING successor. Generator-owned; schema shape is
+    # checked by tools/tests/test_check_conformance_fixtures_drift.py and the
+    # semantic cross-image / summary relations are checked below for both the
+    # generated candidate and committed artifact before byte equality is accepted.
+    V2_REL,
 )
 
 
@@ -135,6 +158,235 @@ def diff_set(
     return missing_committed, differing, matching, missing_candidate, extra_candidate
 
 
+def _canonical_sha256(value: object) -> str:
+    raw = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _typed_value(values: dict, alias: object, want: str, where: str):
+    if not isinstance(alias, str):
+        raise RuntimeError(f"{where}: alias is not a string")
+    entry = values.get(alias)
+    if not isinstance(entry, dict):
+        raise RuntimeError(f"{where}: resolved alias {alias!r} is absent")
+    if entry.get("type") != want:
+        raise RuntimeError(
+            f"{where}: resolved alias {alias!r} type={entry.get('type')!r} want {want}"
+        )
+    return entry.get("value")
+
+
+def _fixture_value(fixtures: dict, alias: object, want: str, where: str):
+    if not isinstance(alias, str):
+        raise RuntimeError(f"{where}: fixture alias is not a string")
+    entry = fixtures.get(alias)
+    if not isinstance(entry, dict):
+        raise RuntimeError(f"{where}: fixture alias {alias!r} is absent")
+    if entry.get("type") != want:
+        raise RuntimeError(
+            f"{where}: fixture alias {alias!r} type={entry.get('type')!r} want {want}"
+        )
+    return entry.get("value")
+
+
+def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
+    """RUB-1208 relation/receipt gate independent of generator byte equality."""
+    data = load_json_fail_closed(path)
+    if not isinstance(data, dict):
+        raise RuntimeError("canonical_pipeline_v2: top-level value is not an object")
+    epoch = data.get("_meta", {}).get("closure_epoch", {})
+    if epoch.get("closure_manifest_version") != "rubin-c01-design-closure-v8":
+        raise RuntimeError("canonical_pipeline_v2: closure epoch is not frozen v8")
+    if epoch.get("status") != "building":
+        raise RuntimeError("canonical_pipeline_v2: closure status is not building")
+
+    fixtures = data.get("fixtures")
+    resolved = data.get("resolved_values")
+    rows = data.get("rows")
+    if not isinstance(fixtures, dict) or not isinstance(resolved, dict) or not isinstance(rows, list):
+        raise RuntimeError("canonical_pipeline_v2: fixtures/resolved_values/rows shape")
+    got_counts = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("cases"), list):
+            raise RuntimeError("canonical_pipeline_v2: migrated row shape")
+        row_id = row.get("row_id")
+        if row_id in got_counts:
+            raise RuntimeError(f"canonical_pipeline_v2: duplicate migrated row {row_id!r}")
+        got_counts[row_id] = len(row["cases"])
+    if got_counts != V2_RUB1208_CASE_COUNTS:
+        raise RuntimeError(
+            f"canonical_pipeline_v2: RUB-1208 row/case census {got_counts!r} "
+            f"!= {V2_RUB1208_CASE_COUNTS!r}"
+        )
+
+    obligation_forward = {}
+    obligation_reverse = {}
+    obligation_occurrences = 0
+
+    for row in rows:
+        row_id = row["row_id"]
+        for case in row["cases"]:
+            case_id = case.get("case_id")
+            where = f"{row_id}/{case_id}"
+            obligations = case.get("obligation_ids")
+            if (
+                not isinstance(obligations, list)
+                or not obligations
+                or len(obligations) != len(set(obligations))
+                or not all(isinstance(value, str) for value in obligations)
+            ):
+                raise RuntimeError(f"{where}/obligation_ids: must be non-empty unique strings")
+            sorted_obligations = sorted(obligations)
+            obligation_forward[where] = sorted_obligations
+            obligation_occurrences += len(sorted_obligations)
+            for obligation in sorted_obligations:
+                obligation_reverse.setdefault(obligation, []).append(where)
+
+            expected = case.get("expected")
+            if not isinstance(expected, dict):
+                raise RuntimeError(f"{where}: expected is not an object")
+            images = expected.get("state_image")
+            if not isinstance(images, dict) or set(images) != {
+                "CHAIN_IMAGE_V1",
+                "STANDARD_MEMPOOL_IMAGE_V1",
+                "RETAINED_DA_IMAGE_V1",
+                "OWNER_IMAGE_V1",
+            }:
+                raise RuntimeError(f"{where}: state_image must carry exactly four images")
+
+            chain = images["CHAIN_IMAGE_V1"].get("direct_fields", {})
+            owner = images["OWNER_IMAGE_V1"].get("direct_fields", {})
+            chain_hash = _typed_value(
+                resolved, chain.get("tip_hash"), "bytes32_hex", f"{where}/CHAIN/tip_hash"
+            )
+            chain_height = _typed_value(
+                resolved, chain.get("height"), "u64", f"{where}/CHAIN/height"
+            )
+            stable_tip = _typed_value(
+                resolved, owner.get("stable_tip"), "object", f"{where}/OWNER/stable_tip"
+            )
+            if not isinstance(stable_tip, dict) or stable_tip != {
+                "has_tip": True,
+                "height": chain_height,
+                "hash": chain_hash,
+            }:
+                raise RuntimeError(
+                    f"{where}/OWNER/stable_tip: must equal published CHAIN tip hash/height"
+                )
+
+            truth = expected.get("commit_truth")
+            summary = expected.get("canonical_applied_blocks")
+            if truth != "NEW":
+                if summary is not None:
+                    raise RuntimeError(f"{where}/canonical_applied_blocks: non-NEW must be null")
+                continue
+            if not isinstance(summary, list):
+                raise RuntimeError(f"{where}/canonical_applied_blocks: NEW must be an array")
+
+            last_height = None
+            for index, summary_row in enumerate(summary):
+                sw = f"{where}/canonical_applied_blocks/{index}"
+                if not isinstance(summary_row, dict):
+                    raise RuntimeError(f"{sw}: row is not an object")
+                block = _fixture_value(
+                    fixtures, summary_row.get("block_id"), "object", f"{sw}/block_id"
+                )
+                _fixture_value(
+                    fixtures, summary_row.get("block_hash"), "bytes32_hex", f"{sw}/block_hash"
+                )
+                if not isinstance(block, dict) or type(block.get("height")) is not int:
+                    raise RuntimeError(f"{sw}/block_id: fixture has no integer height")
+                height = block["height"]
+                if last_height is not None and height <= last_height:
+                    raise RuntimeError(f"{where}/canonical_applied_blocks: heights not strictly canonical")
+                last_height = height
+
+                da_ids = summary_row.get("complete_da_ids")
+                if not isinstance(da_ids, list):
+                    raise RuntimeError(f"{sw}/complete_da_ids: not an array")
+                raw_ids = [
+                    _fixture_value(fixtures, alias, "bytes32_hex", f"{sw}/complete_da_ids/{i}")
+                    for i, alias in enumerate(da_ids)
+                ]
+                if raw_ids != sorted(raw_ids):
+                    raise RuntimeError(f"{sw}/complete_da_ids: not ascending raw bytes")
+
+    for cases in obligation_reverse.values():
+        cases.sort()
+    if obligation_occurrences != V2_RUB1208_OBLIGATION_OCCURRENCES:
+        raise RuntimeError(
+            f"canonical_pipeline_v2: obligation occurrences={obligation_occurrences} "
+            f"want {V2_RUB1208_OBLIGATION_OCCURRENCES}"
+        )
+    if len(obligation_reverse) != V2_RUB1208_OBLIGATION_UNIQUE:
+        raise RuntimeError(
+            f"canonical_pipeline_v2: unique obligations={len(obligation_reverse)} "
+            f"want {V2_RUB1208_OBLIGATION_UNIQUE}"
+        )
+    if _canonical_sha256(obligation_forward) != V2_RUB1208_OBLIGATION_FORWARD_SHA256:
+        raise RuntimeError("canonical_pipeline_v2: obligation forward receipt hash mismatch")
+    if _canonical_sha256(obligation_reverse) != V2_RUB1208_OBLIGATION_REVERSE_SHA256:
+        raise RuntimeError("canonical_pipeline_v2: obligation reverse receipt hash mismatch")
+
+
+def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
+    """Run RUB-1208 single-dimension hostile mutations from a valid artifact."""
+    control = load_json_fail_closed(path)
+
+    def case_of(data: dict, row_id: str, case_id: str) -> dict:
+        row = next(row for row in data["rows"] if row["row_id"] == row_id)
+        return next(case for case in row["cases"] if case["case_id"] == case_id)
+
+    def stale_owner_tip(data: dict) -> None:
+        case = case_of(data, "C01-DIRECT-001", "MAIN")
+        alias = case["expected"]["state_image"]["OWNER_IMAGE_V1"]["direct_fields"]["stable_tip"]
+        data["resolved_values"][alias]["value"]["hash"] = "00" * 32
+
+    def reverse_summary(data: dict) -> None:
+        case = case_of(data, "C01-SUMMARY-001", "MULTI_BLOCK_ORDER")
+        case["expected"]["canonical_applied_blocks"].reverse()
+
+    def reverse_da_ids(data: dict) -> None:
+        case = case_of(data, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
+        case["expected"]["canonical_applied_blocks"][0]["complete_da_ids"].reverse()
+
+    def non_new_summary(data: dict) -> None:
+        case = case_of(data, "C01-SIDE-001", "MAIN")
+        case["expected"]["canonical_applied_blocks"] = []
+
+    def drop_obligation(data: dict) -> None:
+        case = case_of(data, "C01-DIRECT-001", "MAIN")
+        case["obligation_ids"].pop()
+
+    mutations = (
+        ("stale OWNER stable_tip", stale_owner_tip, "OWNER/stable_tip"),
+        ("reversed same-count summary", reverse_summary, "heights not strictly canonical"),
+        ("reversed DA ids", reverse_da_ids, "not ascending raw bytes"),
+        ("non-NEW summary", non_new_summary, "non-NEW must be null"),
+        ("dropped obligation receipt", drop_obligation, "obligation occurrences"),
+    )
+    with tempfile.TemporaryDirectory(prefix="rubin-r1208-negative-") as td:
+        for name, mutate, expected_reason in mutations:
+            candidate = copy.deepcopy(control)
+            mutate(candidate)
+            mutated_path = Path(td) / (name.replace(" ", "_") + ".json")
+            mutated_path.write_text(
+                json.dumps(candidate, ensure_ascii=False, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            try:
+                validate_canonical_pipeline_v2_semantics(mutated_path)
+            except RuntimeError as exc:
+                if expected_reason not in str(exc):
+                    raise RuntimeError(
+                        f"RUB-1208 negative {name!r} failed for wrong reason: {exc}"
+                    ) from exc
+            else:
+                raise RuntimeError(f"RUB-1208 negative {name!r} was accepted")
+
+
 def assert_committed_untouched(
     repo_root: Path, candidate_root: Path
 ) -> None:
@@ -171,6 +423,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         assert_committed_untouched(repo_root, output_dir)
         run_generator(repo_root, output_dir)
+        # Isolated unit tests for the generic drift machinery intentionally build
+        # a minimal fake repo without schemas and replace generated files with
+        # sentinel bytes. The real repository always has the v2 schema; only in
+        # that real context does the semantic relation gate apply.
+        if (repo_root / V2_SCHEMA_REL).is_file():
+            validate_canonical_pipeline_v2_semantics(output_dir / V2_REL)
+            validate_canonical_pipeline_v2_semantics(committed_root / V2_REL)
+            assert_canonical_pipeline_v2_negative_controls(committed_root / V2_REL)
         (
             missing_committed,
             differing,
@@ -225,7 +485,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for rel in differing:
                 print(f"  ~ {rel}", file=sys.stderr)
         return 1
-    except (RuntimeError, FileNotFoundError, OSError) as exc:
+    except (RuntimeError, FileNotFoundError, OSError, StopIteration, KeyError, TypeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     finally:

@@ -173,14 +173,19 @@ inventory and the orphan-pool result classification — duplicate / oversize / s
 Rust adapter and the RUB-901 comparator, none of which exists yet, so no canonical-publication slice
 may claim it as a passing gate.
 
-### The dormant C01-R2 successor pair (RUB-1207)
+### The dormant C01-R2 successor pair (RUB-1207 / RUB-1208)
 
 `conformance/fixtures/protocol/canonical_pipeline_v2.json` + `conformance/schemas/cv-canonical-pipeline-v2.json`
 (schema version 2). Status: **BUILDING** — not an authority, and no C02/C02A/C03/C04 consumer may bind it.
 The v1 pair above stays the inert authority and a byte-frozen read-only parent until RUB-1204 activates v2
-and deletes it in the same PR. `_meta.closure_epoch` pins the RUB-1206 design closure; `row_registry` freezes
-the 79 `row_id -> kind` identities and migration status is derived from `rows`, empty here with `fixtures`.
-The schema defines the row and case shape; RUB-1208..RUB-1212 migrate rows and RUB-1204 completes.
+and deletes it in the same PR. `_meta.closure_epoch` pins the corrected RUB-1206 closure epoch v8 and
+`row_registry` freezes the 79 `row_id -> kind` identities. RUB-1208 migrates exactly 8 publication/image
+rows with 24 cases, including the 12-case DA cleanup classifier and exact ordered canonical-applied summaries;
+its fixture catalog and `resolved_values` carry the typed stimuli and image/direct-field resolver values. The
+remaining registered rows stay unmigrated for RUB-1209..RUB-1212, and RUB-1204 completes the revision.
+The migrated pair is schema-validated by `CanonicalPipelineV2SchemaTests` in
+`tools/tests/test_check_conformance_fixtures_drift.py`; generator byte identity remains enforced by the
+conformance fixture drift gate above.
 
 ## Fuzz crash promotion (manual-only)
 
