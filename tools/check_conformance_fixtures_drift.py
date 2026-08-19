@@ -343,7 +343,7 @@ def _derived_counts(where: str, image: str, relation: str, inputs: object, fixtu
         return {"claim_count": len(records)}
     used = 0
     for record in records:
-        if not isinstance(record, dict) or type(record.get("size")) is not int:
+        if not isinstance(record, dict) or type(record.get("size")) is not int or not 0 <= record["size"] < 2**64:
             raise RuntimeError(f"{where}{pointer}: carries a record without a u64 size")
         used += record["size"]
     return {"record_count": len(records), "tx_count": len(records), "used_bytes": used}
@@ -599,11 +599,10 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             stable_tip = _resolved_entry(
                 resolved, owner.get("stable_tip"), "object", f"{where}/OWNER/stable_tip"
             )
-            if not isinstance(stable_tip, dict) or stable_tip != {
-                "has_tip": True,
-                "height": chain_height,
-                "hash": chain_hash,
-            }:
+            # Value AND type, like Go cp2ValidateOwnerStableTip: `1 == True` and
+            # `4 == 4.0` in Python, so a bare equality admits what cp2UintOf rejects.
+            want_tip = {"has_tip": (True, bool), "height": (chain_height, int), "hash": (chain_hash, str)}
+            if {k: (v, type(v)) for k, v in stable_tip.items()} != want_tip:
                 raise RuntimeError(
                     f"{where}/OWNER/stable_tip: must equal published CHAIN tip hash/height"
                 )
@@ -653,8 +652,8 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                 block_hash = _fixture_value(
                     fixtures, summary_row.get("block_hash"), "bytes32_hex", f"{sw}/block_hash"
                 )
-                if not isinstance(block, dict) or type(block.get("height")) is not int:
-                    raise RuntimeError(f"{sw}/block_id: fixture has no integer height")
+                if not isinstance(block, dict) or type(block.get("height")) is not int or not 0 <= block["height"] < 2**64:
+                    raise RuntimeError(f"{sw}/block_id: fixture has no u64 height")
                 # Exact block identity (summary_manifest M14/identity).
                 if block.get("block_hash") != block_hash:
                     raise RuntimeError(
@@ -799,6 +798,16 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         alias = case["expected"]["state_image"]["OWNER_IMAGE_V1"]["direct_fields"]["stable_tip"]
         data["resolved_values"][alias]["value"]["hash"] = "00" * 32
 
+    def float_stable_tip_height(data: dict) -> None:
+        # Type-exactness pair: 4.0 equals 4 and -1 is an int, so both pass every value arm.
+        stable = resolved_of(data, "C01-DIRECT-001", "MAIN", "OWNER_IMAGE_V1", "stable_tip")["value"]
+        stable["height"] = float(stable["height"])
+
+    def negative_summary_block_height(data: dict) -> None:
+        # Row 0 of 3: ordering and the CHAIN-tip binding (last row) both still hold.
+        row = case_of(data, "C01-REORG-001", "MAIN")["expected"]["canonical_applied_blocks"][0]
+        data["fixtures"][row["block_id"]]["value"]["height"] = -1
+
     def reverse_summary(data: dict) -> None:
         case = case_of(data, "C01-SUMMARY-001", "MULTI_BLOCK_ORDER")
         case["expected"]["canonical_applied_blocks"].reverse()
@@ -929,6 +938,8 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
 
     mutations = (
         ("stale OWNER stable_tip", stale_owner_tip, "OWNER/stable_tip"),
+        ("OWNER stable_tip height stated as a float", float_stable_tip_height, "must equal published CHAIN tip"),
+        ("summary block height stated as a negative integer", negative_summary_block_height, "fixture has no u64 height"),
         ("reversed same-count summary", reverse_summary, "heights not strictly canonical"),
         ("reversed DA ids", reverse_da_ids, "not strictly ascending raw bytes"),
         ("non-NEW summary", non_new_summary, "non-NEW must be null"),
