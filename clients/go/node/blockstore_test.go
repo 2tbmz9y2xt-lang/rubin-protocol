@@ -2872,11 +2872,14 @@ func TestBlockStoreIndexRawTracksVisibleBytes(t *testing.T) {
 		// unrefused restore would persist an index this store cannot reopen.
 		store := freshStore(t)
 		disk := mustReadIndexFile(t, store)
-		if err := store.RestoreCanonicalIndex([]string{strings.ToUpper(hex.EncodeToString(hash[:]))}); err == nil {
-			t.Fatal("RestoreCanonicalIndex accepted an uppercase row")
-		}
-		if _, err := OpenBlockStore(store.rootPath); err != nil || !bytes.Equal(mustReadIndexFile(t, store), disk) {
-			t.Fatalf("the refused restore left an index the strict open refuses: %v", err)
+		hashHex := hex.EncodeToString(hash[:])
+		for _, row := range []string{strings.ToUpper(hashHex), " " + hashHex, hashHex + " "} {
+			if err := store.RestoreCanonicalIndex([]string{row}); err == nil || !strings.Contains(err.Error(), "not 64 lowercase hex characters") {
+				t.Fatalf("RestoreCanonicalIndex(%q) = %v, want the strict spelling refusal", row, err)
+			}
+			if _, err := OpenBlockStore(store.rootPath); err != nil || !bytes.Equal(mustReadIndexFile(t, store), disk) {
+				t.Fatalf("the refused restore left an index the strict open refuses: %v", err)
+			}
 		}
 	})
 
@@ -3361,7 +3364,7 @@ func TestInspectBlockPresenceNilStoreIsStoreError(t *testing.T) {
 		Scope:  BlockPresenceScopeCanonical,
 		Leaves: BlockArtifactLeaves{Block: BlockArtifactInvalid, Header: BlockArtifactInvalid, Undo: BlockArtifactInvalid},
 	}
-	if got := store.InspectBlockPresence([32]byte{}); got != want || got.String() == "LOCAL_STORE_ERROR(noncanonical)" {
+	if got := store.InspectBlockPresence([32]byte{}); got != want || got.String() != "LOCAL_STORE_ERROR" {
 		t.Fatalf("nil-store presence = %s leaves=%+v, want %s leaves=%+v", got, got.Leaves, want, want.Leaves)
 	}
 }

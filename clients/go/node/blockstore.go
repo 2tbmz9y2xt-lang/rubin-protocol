@@ -45,9 +45,9 @@ type BlockStore struct {
 	canonicalHeightByHash map[[32]byte]uint64
 	chainWorkByHash       map[[32]byte]*big.Int
 
-	// leafProbe runs at the top of EACH of the three presence artifact reads,
-	// so hoisting any one leaf out of the read lock is observable. nil in
-	// production; per store, so no two tests can share one.
+	// leafProbe runs via probeLeaf at the top of EACH of the three presence artifact
+	// reads, so hoisting a leaf out of the read lock is observable for a store a test
+	// instruments. nil in production; per store, so no two tests can share one.
 	leafProbe func()
 }
 
@@ -337,7 +337,9 @@ func (bs *BlockStore) RestoreCanonicalIndex(canonical []string) error {
 	}
 	// A persisted index must be REOPENABLE: parseHex accepts uppercase and padded rows
 	// the strict on-disk decoder refuses, so the spelling is proven before the lock, as
-	// prepareCanonicalIndex proves it; the copy keeps an empty list non-nil for it.
+	// prepareCanonicalIndex proves it; the copy keeps an empty list non-nil for it, and
+	// nil folds to that empty identity, unlike prepare — the rollback caller
+	// (sync.go:1102) passes the nil CanonicalIndexSnapshot returns for an empty index.
 	nextCanonical := append(make([]string, 0, len(canonical)), canonical...)
 	if err := validateBlockStoreIndex(blockStoreIndexDisk{Version: blockStoreIndexVersion, Canonical: nextCanonical}); err != nil {
 		return err
@@ -797,20 +799,20 @@ func writeCanonicalIndexFile(path string, index blockStoreIndexDisk) ([]byte, er
 
 // saveCanonicalIndexLocked is the write step of the legacy mutate-then-save path: the
 // caller already mutated bs.index under stateMu.Lock, so this records the bytes the
-// disk actually holds as the new visible identity. Its three callers (SetCanonicalTip,
-// TruncateCanonical, RestoreCanonicalIndex) hold stateMu across their whole body while
+// disk holds as the new visible identity. Every caller holds stateMu across the
+// mutation AND this save (RestoreCanonicalIndex proves its list before the lock), while
 // a prepared commit writes OUTSIDE it, so the two paths interleave safely only under
-// the canonical writer fence RUB-1202 installs; until then the primitive is dormant.
+// RUB-1202's canonical writer fence; until then the PREPARED primitive is dormant.
 //
 // After a PRE-commit failure the old bytes are still visible and indexRaw keeps
 // naming them, while bs.index and the height map — already mutated by the caller —
-// LEAD the disk: the visible canonical identity is indexRaw, never bs.index, while
-// the public readers (Tip, CanonicalHash, CanonicalIndexSnapshot) serve bs.index and
-// so report state the disk refused. A POST-commit failure did rename, so the visible
-// identity IS the new bytes even though the call returns an error, and indexRaw
-// moves with it. An UNTAGGED error keeps the OLD identity, asymmetric to commit's
-// "untagged takes the readback" and unreachable: this lane returns only
-// stage-tagged errors.
+// LEAD the disk: for a prepared commit the visible canonical identity is indexRaw,
+// never bs.index, while the public readers (Tip, CanonicalHash,
+// CanonicalIndexSnapshot) serve bs.index and so report state the disk refused. A
+// POST-commit failure did rename, so the visible identity IS the new bytes even
+// though the call returns an error, and indexRaw moves with it. An UNTAGGED error
+// keeps the OLD identity, asymmetric to commit's "untagged takes the readback" and
+// unreachable: this lane returns only stage-tagged errors.
 func (bs *BlockStore) saveCanonicalIndexLocked() error {
 	raw, err := encodeBlockStoreIndex(bs.index)
 	if err != nil {
@@ -1072,10 +1074,9 @@ func (p *preparedCanonicalIndex) commit(bs *BlockStore) canonicalCommitResult {
 // BYTES, never by the error text, and compares the complete identity: a shared tip
 // or a matching hash is not one, so anything that is not exactly the old or exactly
 // the new image is neither. A read failure is neither too — nothing is guessed,
-// retried or rewritten. The read is BOUNDED at the longer of the two images: only
-// those two byte strings
-// can match, so anything longer is provably neither identity and is refused
-// (errStoreFileTooLarge) before it is allocated on this untrusted on-disk path,
+// retried or rewritten. The read is BOUNDED at the longer of the two images: only those
+// two byte strings can match, so anything longer is provably neither identity and is
+// refused (errStoreFileTooLarge) before it is allocated on this untrusted on-disk path,
 // where the planned images fix the bound. That is why it does not inherit
 // loadBlockStoreIndex's deliberately unbounded read, which has no such ceiling to
 // derive (RUB-1057).
@@ -1246,7 +1247,7 @@ func (p BlockPresence) String() string {
 // leaf READS, fully PARSES and hashes up to consensus.MAX_BLOCK_BYTES and the undo
 // leaf READS and JSON-decodes up to undoFileMaxBytes (2 GB), so a publication waits
 // behind an inspection and a pending writer blocks every arriving reader. It takes no
-// second lock, repairs nothing, and never treats a present header as presence.
+// second lock, repairs nothing, and never treats a present header ALONE as presence.
 func (bs *BlockStore) InspectBlockPresence(blockHash [32]byte) BlockPresence {
 	if bs == nil {
 		return BlockPresence{
@@ -1302,13 +1303,17 @@ func noncanonicalPresence(leaves BlockArtifactLeaves) BlockPresence {
 	}
 }
 
+func (bs *BlockStore) probeLeaf() {
+	if bs.leafProbe != nil {
+		bs.leafProbe()
+	}
+}
+
 // inspectBlockLeaf: stored block bytes are valid only when they parse and their
 // own header re-hashes to the requested hash — the same content-addressed
 // identity replay's re-hash defense enforces.
 func (bs *BlockStore) inspectBlockLeaf(blockHash [32]byte) BlockArtifactState {
-	if bs.leafProbe != nil {
-		bs.leafProbe()
-	}
+	bs.probeLeaf()
 	blockBytes, err := bs.GetBlockByHash(blockHash)
 	if err != nil {
 		return artifactStateFromErr(err)
@@ -1325,9 +1330,7 @@ func (bs *BlockStore) inspectBlockLeaf(blockHash [32]byte) BlockArtifactState {
 // inspectHeaderLeaf: a stored header is valid only when it hashes to the
 // requested hash. Existence alone is never presence.
 func (bs *BlockStore) inspectHeaderLeaf(blockHash [32]byte) BlockArtifactState {
-	if bs.leafProbe != nil {
-		bs.leafProbe()
-	}
+	bs.probeLeaf()
 	headerBytes, err := bs.GetHeaderByHash(blockHash)
 	if err != nil {
 		return artifactStateFromErr(err)
@@ -1342,9 +1345,7 @@ func (bs *BlockStore) inspectHeaderLeaf(blockHash [32]byte) BlockArtifactState {
 // inspectUndoLeaf: GetUndo binds the record to the hash the CALLER asked for
 // (RUB-1132), so a record moved between two undo files reads as invalid.
 func (bs *BlockStore) inspectUndoLeaf(blockHash [32]byte) BlockArtifactState {
-	if bs.leafProbe != nil {
-		bs.leafProbe()
-	}
+	bs.probeLeaf()
 	_, err := bs.GetUndo(blockHash)
 	return artifactStateFromErr(err)
 }
