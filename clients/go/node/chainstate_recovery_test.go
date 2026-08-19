@@ -661,6 +661,16 @@ func TestChainStateRecoveryStrictArtifactsRejectPresentButUnboundFiles(t *testin
 			},
 		},
 		{
+			// Length is validateBlockHeaderHash's other leg: an emptied file
+			// is the residue closest to absence — present, inside the size
+			// bound, zero bytes — and still an identity failure, not a gap.
+			name:   "header_emptied_to_zero_bytes",
+			wantIs: errCanonicalArtifactUnbound,
+			corrupt: func(t *testing.T, store *BlockStore, _ []byte, _ []byte) {
+				plantCanonicalArtifact(t, store.headersDir, devnetGenesisBlockHash, nil)
+			},
+		},
+		{
 			name:   "block_bytes_of_another_block",
 			wantIs: errCanonicalArtifactUnbound,
 			corrupt: func(t *testing.T, store *BlockStore, otherBlock []byte, _ []byte) {
