@@ -3323,10 +3323,10 @@ func cp2ComposedAlias(name, where, relation string) string {
 // and are never mixed: a grouped entry {block_id, identities[]} binds to the
 // summary row whose block alias ends in that suffix, and a flat entry
 // {commit, chunks, da_id} carries no block binding and therefore requires a
-// single-row summary. The returned map is keyed by the summary row's block alias;
-// a nil map means the case states no included-set stimulus and the derivation
-// makes no claim. Deriving here is what reddens a dropped, duplicated or
-// substituted occurrence (summary_manifest M14/occurrence).
+// single-row summary. The returned map is keyed by the summary row's block alias
+// and is EMPTY when the case states no included-set stimulus, so the derivation
+// then constrains nothing. Deriving here is what reddens a dropped, duplicated
+// or substituted occurrence (summary_manifest M14/occurrence).
 func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixture, summary []any) (map[string][]string, error) {
 	var aliases []string
 	stated := false
@@ -3352,7 +3352,7 @@ func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixt
 		}
 	}
 	if !stated {
-		return nil, nil
+		return map[string][]string{}, nil
 	}
 
 	grouped := map[string][]string{}
@@ -3677,7 +3677,7 @@ func cp2ValidateR1208Summary(where string, c, expected map[string]any, images ma
 			if !ok {
 				return fmt.Errorf("%s summary[%d] da id fixture is not a string", where, i)
 			}
-			// Strictly ascending: an equal neighbour is a duplicated occurrence,
+			// Strictly ascending: an equal neighbor is a duplicated occurrence,
 			// which the row (a complete set) may never carry.
 			if j > 0 && v <= prev {
 				return fmt.Errorf("%s summary[%d] da ids not strictly raw-byte ascending", where, i)
@@ -3730,6 +3730,19 @@ func cp2ResolvedFixtureAlias(fixtures map[string]cp2Fixture, alias, want string)
 	return nil
 }
 
+// cp2ManifestHashOK re-derives a frozen manifest's canonical hash and compares
+// it to the closure-epoch pin, so an edited manifest fails generation.
+func cp2ManifestHashOK(what string, manifest cpMap, want string) error {
+	got, err := cp2CanonicalSHA(manifest)
+	if err != nil {
+		return fmt.Errorf("%s hash: %w", what, err)
+	}
+	if got != want {
+		return fmt.Errorf("%s hash=%s want %s", what, got, want)
+	}
+	return nil
+}
+
 func cp2ValidateR1208Payload(payload cp2R1208Payload) error {
 	wantBindings := map[string]string{
 		"closure_manifest_version": cp2ClosureManifestVersion, "manifest_root_sha256": cp2ManifestRootSHA256,
@@ -3740,11 +3753,11 @@ func cp2ValidateR1208Payload(payload cp2R1208Payload) error {
 	if !maps.Equal(payload.ClosureBindings, wantBindings) {
 		return errors.New("RUB-1208 closure bindings differ from frozen v8 pins")
 	}
-	if got, err := cp2CanonicalSHA(payload.ImageManifest); err != nil || got != cp2ImageManifestHash {
-		return fmt.Errorf("image manifest hash=%s err=%v", got, err)
+	if err := cp2ManifestHashOK("image manifest", payload.ImageManifest, cp2ImageManifestHash); err != nil {
+		return err
 	}
-	if got, err := cp2CanonicalSHA(payload.SummaryManifest); err != nil || got != cp2SummaryManifestHash {
-		return fmt.Errorf("summary manifest hash=%s err=%v", got, err)
+	if err := cp2ManifestHashOK("summary manifest", payload.SummaryManifest, cp2SummaryManifestHash); err != nil {
+		return err
 	}
 	if err := cp2ValidateFixtures(payload.Fixtures); err != nil {
 		return err
@@ -3798,7 +3811,7 @@ func cp2ValidateR1208Payload(payload cp2R1208Payload) error {
 			if err := cp2ValidateR1208Expected(where, c, payload.Fixtures, payload.ResolvedValues, direct); err != nil {
 				return err
 			}
-			cp2CollectResolvedRefs(where, c, direct, referenced)
+			cp2CollectResolvedRefs(c, direct, referenced)
 		}
 	}
 	// Every resolved value is reachable from a projection: an orphan entry is a
@@ -3816,7 +3829,7 @@ func cp2ValidateR1208Payload(payload cp2R1208Payload) error {
 
 // cp2CollectResolvedRefs records every resolved alias one case names. It runs
 // after cp2ValidateR1208Expected has already proven the shape, so it only reads.
-func cp2CollectResolvedRefs(where string, c map[string]any, direct map[string][]string, out map[string]bool) {
+func cp2CollectResolvedRefs(c map[string]any, direct map[string][]string, out map[string]bool) {
 	expected, _ := c["expected"].(map[string]any)
 	images, _ := expected["state_image"].(map[string]any)
 	for image, fields := range direct {

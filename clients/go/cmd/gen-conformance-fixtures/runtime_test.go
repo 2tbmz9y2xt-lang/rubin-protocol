@@ -2183,14 +2183,12 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			values["bad key"] = values[first]
 		},
 		"orphan resolved value": func(t *testing.T, d map[string]any) {
-			d["resolved_values"].(map[string]any)["tip_hash@C01-DIRECT-001/ORPHAN:new"] =
-				map[string]any{"type": "bytes32_hex", "value": strings.Repeat("22", 32)}
+			d["resolved_values"].(map[string]any)["tip_hash@C01-DIRECT-001/ORPHAN:new"] = map[string]any{"type": "bytes32_hex", "value": strings.Repeat("22", 32)}
 		},
 		"digest alias substituted": func(t *testing.T, d map[string]any) {
 			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "MULTI_BLOCK_ORDER")
 			other := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
-			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["digest_alias"] =
-				cp2CaseImage(t, other, "CHAIN_IMAGE_V1")["digest_alias"]
+			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["digest_alias"] = cp2CaseImage(t, other, "CHAIN_IMAGE_V1")["digest_alias"]
 		},
 		"digest alias absent": func(t *testing.T, d map[string]any) {
 			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
@@ -2212,8 +2210,7 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"direct field alias substituted": func(t *testing.T, d map[string]any) {
 			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
 			other := cp2AuthorityCase(t, d, "C01-GENESIS-001", "MAIN")
-			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["direct_fields"].(map[string]any)["height"] =
-				cp2CaseImage(t, other, "CHAIN_IMAGE_V1")["direct_fields"].(map[string]any)["height"]
+			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["direct_fields"].(map[string]any)["height"] = cp2CaseImage(t, other, "CHAIN_IMAGE_V1")["direct_fields"].(map[string]any)["height"]
 		},
 		"one image omitted": func(t *testing.T, d map[string]any) {
 			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
