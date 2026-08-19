@@ -20,10 +20,10 @@ var (
 	readFileByPathFn  = readFileByPathCapped
 	writeFileAtomicFn = writeFileAtomic
 
-	// presenceLeafProbe runs at the top of the presence block-artifact read.
-	// Nil in production; a test installs it to observe the lock state that
-	// read actually runs under.
-	presenceLeafProbe func()
+	// presenceLeafProbe runs at the top of EACH of the three presence artifact
+	// reads, so hoisting any one leaf out of the read lock is observable. A
+	// no-op in production; a test swaps in its own and RESTORES it, never nil.
+	presenceLeafProbe = func() {}
 )
 
 const (
@@ -456,9 +456,11 @@ func chainWorkHeaderCorruption(blockHash [32]byte, reason string, err error) err
 // RestoreCanonicalIndex — every writer that builds the map from a
 // caller-supplied list, so none can persist an index it would refuse to reopen.
 // SetCanonicalTip mutates the live map in place and rests on the caller
-// invariant alone. The shared on-disk decoder is deliberately NOT tightened with
-// it: decodeBlockStoreIndex is cross-client mirrored (Rust
-// load_blockstore_index) and still accepts such an index — RUB-897.
+// invariant alone — one canonical height per hash in any prev-linked chain,
+// whose breach persists an index this store would refuse to reopen. The shared
+// on-disk decoder is deliberately NOT tightened with it: decodeBlockStoreIndex
+// is cross-client mirrored (Rust load_blockstore_index) and still accepts such
+// an index — RUB-897.
 var errCanonicalIndexDuplicateRow = errors.New("canonical index repeats a block hash")
 
 // duplicateCanonicalRowErr is the one message shape for that refusal, so the
@@ -895,11 +897,13 @@ const (
 	canonicalCommitted canonicalCommitClass = "COMMITTED"
 
 	// canonicalCommitStale is the prepared image refusing to build on a
-	// visible identity it never observed, or refusing a second use. It is a
-	// LOCAL name too: nothing was written, so the owning canonical transition
-	// maps it to STALE_LOCAL_PLAN, never to the frozen precommit identity
-	// (whose C01-PRENS-001 triggers are the atomic write and the precommit
-	// checkpoint writes).
+	// visible identity it never observed, or refusing a second use, and the err
+	// splits those. errCanonicalIndexMoved attempted nothing, so the owning
+	// canonical transition maps it to STALE_LOCAL_PLAN, never to the frozen
+	// precommit identity (whose C01-PRENS-001 triggers are the atomic write and
+	// the precommit checkpoint writes). errPreparedIndexSpent is instead a
+	// caller fence/latch violation whose commit truth is whatever the FIRST
+	// attempt returned — it can follow TERMINAL_PERSISTENCE(new).
 	canonicalCommitStale canonicalCommitClass = "STALE_PREPARED_IMAGE"
 
 	canonicalCommitPrecommit       canonicalCommitClass = "LOCAL_PERSISTENCE_ERROR(precommit)"
@@ -1291,18 +1295,15 @@ func noncanonicalPresence(leaves BlockArtifactLeaves) BlockPresence {
 // own header re-hashes to the requested hash — the same content-addressed
 // identity replay's re-hash defense enforces.
 func (bs *BlockStore) inspectBlockLeaf(blockHash [32]byte) BlockArtifactState {
-	if presenceLeafProbe != nil {
-		presenceLeafProbe()
-	}
+	presenceLeafProbe()
 	blockBytes, err := bs.GetBlockByHash(blockHash)
 	if err != nil {
 		return artifactStateFromErr(err)
 	}
+	// A parse/hash failure over bytes already read is computation, never
+	// absence — artifactStateFromErr's os.ErrNotExist arm is unreachable here.
 	observed, _, err := storedBlockHeaderHash(blockBytes)
-	if err != nil {
-		return artifactStateFromErr(err)
-	}
-	if observed != blockHash {
+	if err != nil || observed != blockHash {
 		return BlockArtifactInvalid
 	}
 	return BlockArtifactValid
@@ -1311,6 +1312,7 @@ func (bs *BlockStore) inspectBlockLeaf(blockHash [32]byte) BlockArtifactState {
 // inspectHeaderLeaf: a stored header is valid only when it hashes to the
 // requested hash. Existence alone is never presence.
 func (bs *BlockStore) inspectHeaderLeaf(blockHash [32]byte) BlockArtifactState {
+	presenceLeafProbe()
 	headerBytes, err := bs.GetHeaderByHash(blockHash)
 	if err != nil {
 		return artifactStateFromErr(err)
@@ -1321,6 +1323,7 @@ func (bs *BlockStore) inspectHeaderLeaf(blockHash [32]byte) BlockArtifactState {
 // inspectUndoLeaf: GetUndo binds the record to the hash the CALLER asked for
 // (RUB-1132), so a record moved between two undo files reads as invalid.
 func (bs *BlockStore) inspectUndoLeaf(blockHash [32]byte) BlockArtifactState {
+	presenceLeafProbe()
 	_, err := bs.GetUndo(blockHash)
 	return artifactStateFromErr(err)
 }

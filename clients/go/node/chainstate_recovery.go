@@ -178,23 +178,26 @@ func (bs *BlockStore) canonicalArtifactsComplete(hashHex string) (canonicalRowAr
 	row := canonicalRowArtifacts{complete: true, hash: blockHash}
 
 	prev, err := bs.canonicalHeaderPrev(blockHash)
-	if errors.Is(err, os.ErrNotExist) {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
 		row.complete = false
-	} else if err != nil {
+	case err != nil:
 		return canonicalRowArtifacts{}, fmt.Errorf("canonical header artifact %x: %w", blockHash, err)
-	} else {
+	default:
 		row.hasHeader, row.prev = true, prev
 	}
 
-	if err := bs.verifyCanonicalBlock(blockHash); errors.Is(err, os.ErrNotExist) {
+	switch err := bs.verifyCanonicalBlock(blockHash); {
+	case errors.Is(err, os.ErrNotExist):
 		row.complete = false
-	} else if err != nil {
+	case err != nil:
 		return canonicalRowArtifacts{}, fmt.Errorf("canonical block artifact %x: %w", blockHash, err)
 	}
 
-	if err := bs.verifyCanonicalUndo(blockHash); errors.Is(err, os.ErrNotExist) {
+	switch err := bs.verifyCanonicalUndo(blockHash); {
+	case errors.Is(err, os.ErrNotExist):
 		row.complete = false
-	} else if err != nil {
+	case err != nil:
 		return canonicalRowArtifacts{}, fmt.Errorf("canonical undo artifact %x: %w", blockHash, err)
 	}
 	return row, nil

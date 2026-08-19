@@ -1962,8 +1962,8 @@ func restoreStoredUndo(t *testing.T, store *BlockStore, blockHash [32]byte, orig
 // ---------------------------------------------------------------------------
 // RUB-890: prepared canonical-index commit and strict block presence.
 // The primitive is package-private and has NO production caller in this slice;
-// these tests are its only drivers. Several of these tests replace package-level
-// seams (writeFileAtomicFn, atomicWriteIO), so none of them may call t.Parallel.
+// these tests are its only drivers. Several replace package-level seams
+// (writeFileAtomicFn, atomicWriteIO, presenceLeafProbe): none may call t.Parallel.
 // ---------------------------------------------------------------------------
 
 // canonicalIndexRow returns a deterministic, canonically-spelled index row.
@@ -2410,7 +2410,9 @@ func TestPreparedCanonicalIndexPostCommitVisibleBytesClassify(t *testing.T) {
 			prepared := mustPrepareCanonicalIndex(t, store, []string{row0, row1})
 			before := captureCanonicalRAMImage(store)
 
+			writes := 0
 			withWriteFileAtomicFn(t, func(path string, _ []byte, _ os.FileMode) error {
+				writes++
 				if tc.visible != nil {
 					tc.visible(t, store, prepared)
 				}
@@ -2429,6 +2431,12 @@ func TestPreparedCanonicalIndexPostCommitVisibleBytesClassify(t *testing.T) {
 			}
 			if tc.alsoIs != nil && !errors.Is(got.err, tc.alsoIs) {
 				t.Fatalf("terminal result dropped the readback failure: %v", got.err)
+			}
+			if second := prepared.commit(store); second.class != canonicalCommitStale || !errors.Is(second.err, errPreparedIndexSpent) {
+				t.Fatalf("second commit = %s (%v), want the spent refusal", second, second.err)
+			}
+			if writes != 1 {
+				t.Fatalf("the write lane ran %d times, want exactly one attempt", writes)
 			}
 			if tc.published {
 				assertPublishedCanonicalImage(t, store, []string{row0, row1}, prepared.newRaw)
@@ -2601,26 +2609,27 @@ func TestPreparedCanonicalIndexConcurrentReadersPinOldImage(t *testing.T) {
 }
 
 // TestInspectBlockPresenceConcurrentWithPublication: presence classification
-// reads canonical membership and the index image, so it has to hold the read
-// lock across the whole snapshot. Under -race a publication running concurrently
-// with these inspections is what proves the lock is really taken.
+// reads canonical membership and the three artifact leaves, so it has to hold
+// the read lock across the whole snapshot. Under -race a publication running
+// concurrently with these inspections is what proves the lock is really taken.
 func TestInspectBlockPresenceConcurrentWithPublication(t *testing.T) {
 	fixture := newPresenceFixture(t)
 	store := fixture.store
 	row := hex.EncodeToString(fixture.hash[:])
 	prepared := mustPrepareCanonicalIndex(t, store, []string{row})
 
-	// Nothing is stored, so the hash is ABSENT while it is not a canonical
-	// member and canonical-scoped store-integrity evidence once the publication
-	// makes it one — and never ABSENT again after ANY reader saw the
-	// publication, or a reader observed a torn image.
+	// Nothing is stored, so the hash is ABSENT until the publication makes it a
+	// canonical member with canonical-scoped evidence, and never ABSENT after a
+	// reader saw that — or the image tore. `was` is sampled BEFORE the
+	// inspection; reading it after would fail a legitimately earlier ABSENT.
 	var published atomic.Bool
 	spawnReaders(t, 8, func() bool {
+		was := published.Load()
 		got := store.InspectBlockPresence(fixture.hash)
 		switch {
 		case got.Class == BlockPresenceLocalStoreError && got.Scope == BlockPresenceScopeCanonical:
 			published.Store(true)
-		case got.Class == BlockPresenceAbsent && !published.Load():
+		case got.Class == BlockPresenceAbsent && !was:
 		default:
 			t.Errorf("presence during publication = %+v", got)
 			return false
@@ -3083,8 +3092,8 @@ func TestInspectBlockPresenceTruthTable(t *testing.T) {
 	}
 	seen := make(map[string]bool, wantCombinations)
 	fixture := newPresenceFixture(t)
-	// The artifact reads must run INSIDE the one presence snapshot: the block
-	// leaf reports the lock state it actually runs under, and the store's write
+	// The artifact reads must run INSIDE the one presence snapshot: every leaf
+	// reports the lock state it actually runs under, and the store's write
 	// lock is unobtainable while the snapshot holds its RLock — so a read
 	// hoisted out of the snapshot takes it and fails here.
 	previousProbe := presenceLeafProbe
