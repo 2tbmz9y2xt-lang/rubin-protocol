@@ -3,7 +3,7 @@
   "schema_version": 2,
   "schema": "conformance/schemas/cv-canonical-pipeline-v2.json",
   "_meta": {
-    "authority_source_sha256": "26b9e671cb168769b6fcb7ac61025fa5770273238431f1f66bd066b7a408d771",
+    "authority_source_sha256": "d9f3a4ba81a2e8c115ab559990da26e81cefdbe8ba4a92d81010e81dc94ec1e3",
     "closure_epoch": {
       "closure_manifest_version": "rubin-c01-design-closure-v8",
       "expected_projection_design_hash": "b1e539c3cb7155c5821b5788c4de9aea40cf706fb9faf4c44af7e4ae21586d8c",
@@ -5515,7 +5515,7 @@
                 "value": true
               },
               "removal_before_tip_observable": {
-                "observer": "reader sampling (tip_hash, RETAINED_DA digest, OWNER digest) as one triple: no sample pairs the new tip with the retained DA_SET_1 or CLAIM_DA_SET_1",
+                "observer": "reader sampling (tip_hash, RETAINED_DA digest, OWNER digest) as one triple: no sample pairs the new tip with the retained R1208_DIRECT_001_MAIN_DA_SET_1 or R1208_DIRECT_001_MAIN_CLAIM_DA_SET_1",
                 "required": true,
                 "type": "bool",
                 "value": true
@@ -6391,7 +6391,7 @@
                 ]
               },
               "intermediate_tip_rows": {
-                "observer": "tip-hash sampler: no sample equals B1P or B2P",
+                "observer": "tip-hash sampler: no sample equals R1208_REORG_001_MAIN_B1P or R1208_REORG_001_MAIN_B2P",
                 "required": true,
                 "type": "u64",
                 "value": 0
@@ -7043,7 +7043,7 @@
                 "value": "new"
               },
               "winning_tip": {
-                "observer": "CHAIN_IMAGE_V1.tip_hash equals min(hash(BA), hash(BB)) by raw-byte comparison, identically in both schedule arms",
+                "observer": "CHAIN_IMAGE_V1.tip_hash equals min(hash(R1208_EQUALWORK_001_MAIN_BA), hash(R1208_EQUALWORK_001_MAIN_BB)) by raw-byte comparison, identically in both schedule arms",
                 "required": true,
                 "type": "token",
                 "value": "lexicographically_lower"
@@ -7308,13 +7308,13 @@
                 "value": 0
               },
               "da_record_removals": {
-                "observer": "retained-DA set registry membership before vs after: DA_SET_1 absent",
+                "observer": "retained-DA set registry membership before vs after: R1208_DACLEAN_001_EXACT_MATCH_DA_SET_1 absent",
                 "required": true,
                 "type": "u64",
                 "value": 1
               },
               "owner_claims_released": {
-                "observer": "OWNER_IMAGE_V1 claim_count delta; CLAIM_DA_SET_1 absent by exact token",
+                "observer": "OWNER_IMAGE_V1 claim_count delta; R1208_DACLEAN_001_EXACT_MATCH_CLAIM_DA_SET_1 absent by exact token",
                 "required": true,
                 "type": "u64",
                 "value": 1
@@ -7326,7 +7326,7 @@
                 "value": "new"
               },
               "removal_before_tip_observable": {
-                "observer": "reader sampling (tip_hash, RETAINED_DA digest) as one pair: no sample pairs the new tip with the retained DA_SET_1",
+                "observer": "reader sampling (tip_hash, RETAINED_DA digest) as one pair: no sample pairs the new tip with the retained R1208_DACLEAN_001_EXACT_MATCH_DA_SET_1",
                 "required": true,
                 "type": "bool",
                 "value": true
@@ -7498,7 +7498,7 @@
                 "value": true
               },
               "da_record_removals": {
-                "observer": "retained-DA set registry: DA_SET_1 removed exactly once across the whole plan",
+                "observer": "retained-DA set registry: R1208_DACLEAN_001_REPEATED_IDENTITY_DA_SET_1 removed exactly once across the whole plan",
                 "required": true,
                 "type": "u64",
                 "value": 1
@@ -7516,7 +7516,7 @@
                 "value": "new"
               },
               "summary_occurrences_for_included_da_id": {
-                "observer": "published summary: DA_ID_1 appears in both rows (cleanup dedup must not remove a public occurrence)",
+                "observer": "published summary: R1208_DACLEAN_001_REPEATED_IDENTITY_DA_ID_1 appears in both rows (cleanup dedup must not remove a public occurrence)",
                 "required": true,
                 "type": "u64",
                 "value": 2
@@ -7705,13 +7705,13 @@
                 "value": 1
               },
               "da_record_removals": {
-                "observer": "retained-DA set registry: DA_SET_1 still present with its original identity",
+                "observer": "retained-DA set registry: R1208_DACLEAN_001_SAME_DAID_DIFF_IDENTITY_DA_SET_1 still present with its original identity",
                 "required": true,
                 "type": "u64",
                 "value": 0
               },
               "owner_claims_released": {
-                "observer": "OWNER_IMAGE_V1 claim_count unchanged; CLAIM_DA_SET_1 still held",
+                "observer": "OWNER_IMAGE_V1 claim_count unchanged; R1208_DACLEAN_001_SAME_DAID_DIFF_IDENTITY_CLAIM_DA_SET_1 still held",
                 "required": true,
                 "type": "u64",
                 "value": 0
@@ -8051,7 +8051,7 @@
                 "value": 1
               },
               "da_record_removals": {
-                "observer": "retained-DA set registry: DA_SET_1 (commit wtxid W1) still present",
+                "observer": "retained-DA set registry: R1208_DACLEAN_001_SAME_TXID_DIFF_WTXID_DA_SET_1 (commit wtxid W1) still present",
                 "required": true,
                 "type": "u64",
                 "value": 0
@@ -9098,7 +9098,7 @@
                 "value": "latched"
               },
               "da_record_removals": {
-                "observer": "retained-DA set registry: DA_SET_1 still present",
+                "observer": "retained-DA set registry: R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_DA_SET_1 still present",
                 "required": true,
                 "type": "u64",
                 "value": 0
@@ -9547,7 +9547,7 @@
             }
           ],
           "notes": [
-            "ID2 carries da_id DA_ID_1 (a reusable da_id) but a different identity; here DA_SET_2 is the retained record whose exact identity IS ID2, so the B2P row's da_id list is [DA_ID_1] while the removed record is DA_SET_2 — the case separates public da_id from exact set identity within one plan."
+            "ID2 carries da_id R1208_DACLEAN_001_MULTI_SET_SUCCESS_DA_ID_1 (a reusable da_id) but a different identity; here R1208_DACLEAN_001_MULTI_SET_SUCCESS_DA_SET_2 is the retained record whose exact identity IS ID2, so the R1208_DACLEAN_001_MULTI_SET_SUCCESS_B2P row's da_id list is [R1208_DACLEAN_001_MULTI_SET_SUCCESS_DA_ID_1] while the removed record is R1208_DACLEAN_001_MULTI_SET_SUCCESS_DA_SET_2 — the case separates public da_id from exact set identity within one plan."
           ],
           "obligation_ids": [
             "OBL-R1180-093",
@@ -9599,7 +9599,7 @@
                 "value": true
               },
               "da_record_removals": {
-                "observer": "retained-DA set registry: DA_SET_1 removed exactly once despite qualifying under both the invalid-chain and the exact-inclusion rule",
+                "observer": "retained-DA set registry: R1208_DACLEAN_001_OVERLAP_INVALID_REMOVAL_DA_SET_1 removed exactly once despite qualifying under both the invalid-chain and the exact-inclusion rule",
                 "required": true,
                 "type": "u64",
                 "value": 1
@@ -9743,7 +9743,7 @@
             }
           ],
           "notes": [
-            "Chain-invalidity is expressed as `B1 spends the same confirmed outpoint a DA_SET_1 member spends`, the unambiguous chain-dependent form the already-dispositioned SPEC_GAP-003 conservative_design prescribes; no expected value depends on the §5.2 delegation ambiguity."
+            "Chain-invalidity is expressed as `R1208_DACLEAN_001_OVERLAP_INVALID_REMOVAL_B1 spends the same confirmed outpoint a R1208_DACLEAN_001_OVERLAP_INVALID_REMOVAL_DA_SET_1 member spends`, the unambiguous chain-dependent form the already-dispositioned SPEC_GAP-003 conservative_design prescribes; no expected value depends on the §5.2 delegation ambiguity."
           ],
           "obligation_ids": [
             "OBL-SPEC-MP641-035",
@@ -9788,13 +9788,13 @@
                 "value": true
               },
               "da_record_removals": {
-                "observer": "retained-DA set registry: DA_SET_1 absent, DA_SET_2 present",
+                "observer": "retained-DA set registry: R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_DA_SET_1 absent, R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_DA_SET_2 present",
                 "required": true,
                 "type": "u64",
                 "value": 1
               },
               "owner_claims_released": {
-                "observer": "OWNER_IMAGE_V1 claim_count delta = 2, exactly the claims owned by TX_S1 and DA_SET_1",
+                "observer": "OWNER_IMAGE_V1 claim_count delta = 2, exactly the claims owned by R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_TX_S1 and R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_DA_SET_1",
                 "required": true,
                 "type": "u64",
                 "value": 2
@@ -9818,7 +9818,7 @@
                 "value": true
               },
               "standard_record_removals": {
-                "observer": "STANDARD_MEMPOOL_IMAGE_V1 record set: TX_S1 absent, TX_S2 present",
+                "observer": "STANDARD_MEMPOOL_IMAGE_V1 record set: R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_TX_S1 absent, R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_TX_S2 present",
                 "required": true,
                 "type": "u64",
                 "value": 1
@@ -9958,7 +9958,7 @@
             }
           ],
           "notes": [
-            "A DA record is excluded from D1 when ANY member fails final_chain_valid (spec L352) — the fixture makes exactly one member of DA_SET_1 invalid so the all-members quantifier is the compared behaviour."
+            "A DA record is excluded from D1 when ANY member fails final_chain_valid (spec L352) — the fixture makes exactly one member of R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_DA_SET_1 invalid so the all-members quantifier is the compared behaviour."
           ],
           "obligation_ids": [
             "OBL-SPEC-MP641-006",
@@ -10652,7 +10652,7 @@
                 "value": true
               },
               "summary_occurrences_for_cross_block_da_id": {
-                "observer": "DA_ID_1 present in row 0 and row 1 of the published summary",
+                "observer": "R1208_SUMMARY_001_CROSS_BLOCK_OCCURRENCE_DA_ID_1 present in row 0 and row 1 of the published summary",
                 "required": true,
                 "type": "u64",
                 "value": 2

@@ -18,7 +18,7 @@
         "generated_by": { "const": "clients/go/cmd/gen-conformance-fixtures" }, "warning": { "const": "MACHINE-GENERATED FILE. Do not edit manually." }, "schema_version": { "const": 2 },
         "corpus_revision": { "const": "C01-R2" }, "parent_r1_source_oid": { "const": "1e24b0249dab04b21de492ad307b6a47c63f12b5" }, "parent_r1_merge_oid": { "const": "3b1e45590b18994b4ce5f6e3ec2d9dc6b416e880" },
         "parent_artifact_sha256": { "const": "68a1f551333ca17b93ebe3e6d737658cc661e40b40a3b41dbe27b37b74537246" }, "parent_schema_sha256": { "const": "c962f5434d373ac5268527cc82ef8eb68fd45ddac50c849da32b3f8ef87cdca7" }, "governing_spec_oid": { "const": "c14b010024ce633e1027bf891af3c49741db544a" },
-        "authority_source_sha256": { "description": "SHA-256 of clients/go/cmd/gen-conformance-fixtures/canonical_pipeline_v2_authority.json, the human-readable authority source the generator embeds. Pinned here and as cp2AuthoritySourceSHA256 in the generator, so an edit to that file without re-pinning both sides fails generation.", "const": "26b9e671cb168769b6fcb7ac61025fa5770273238431f1f66bd066b7a408d771" },
+        "authority_source_sha256": { "description": "SHA-256 of clients/go/cmd/gen-conformance-fixtures/canonical_pipeline_v2_authority.json, the human-readable authority source the generator embeds. Pinned here and as cp2AuthoritySourceSHA256 in the generator, so an edit to that file without re-pinning both sides fails generation.", "const": "d9f3a4ba81a2e8c115ab559990da26e81cefdbe8ba4a92d81010e81dc94ec1e3" },
         "closure_epoch": {
           "type": "object",
           "additionalProperties": false,

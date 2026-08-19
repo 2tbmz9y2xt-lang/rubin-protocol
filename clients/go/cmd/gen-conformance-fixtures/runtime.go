@@ -2447,7 +2447,7 @@ const (
 	cp2RelationSnapshotHash         = "3e7db40fa6917b5a7d61ab113a74f7107f8f166080393e1c9789dbd927b24edb"
 	cp2InputSchemaDesignHash        = "468b2b5401e12915b9bcdd76cb2714eda837fcd9401324ac7677770bb7069f57"
 	cp2ExpectedProjectionDesignHash = "b1e539c3cb7155c5821b5788c4de9aea40cf706fb9faf4c44af7e4ae21586d8c"
-	cp2AuthoritySourceSHA256        = "26b9e671cb168769b6fcb7ac61025fa5770273238431f1f66bd066b7a408d771"
+	cp2AuthoritySourceSHA256        = "d9f3a4ba81a2e8c115ab559990da26e81cefdbe8ba4a92d81010e81dc94ec1e3"
 	cp2ClosureStatus                = "building"
 
 	// Byte-frozen R1 parent identity. RUB-1204 activates v2 and deletes the
@@ -3761,6 +3761,14 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 	}
 	if len(rows) != 0 && disconnect {
 		return fmt.Errorf("%s is a standalone disconnect and must carry an exact empty summary", where)
+	}
+	// A stated connect count is the number of blocks the frame connects, which
+	// is exactly the number of summary rows.
+	if value, ok := cp2InputValue(inputs, "/input/connect_count"); ok {
+		want, numeric := cp2UintOf(value)
+		if !numeric || want != uint64(len(rows)) {
+			return fmt.Errorf("%s summary carries %d rows, the case states connect_count %v", where, len(rows), value)
+		}
 	}
 
 	wantDA, err := cp2IncludedSetDAIDs(where, inputs, fixtures, rows)

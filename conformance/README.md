@@ -205,7 +205,12 @@ Two conventions the shape does not state by itself. `release_requirements[go|rus
 with different surfaces. Where a case carries its own block, that block is the case's complete blocking set
 and replaces the row-level default, exactly as `$defs/case.release_requirements` in the schema states. A `sources[]` entry resolves against `_meta.governing_spec_oid` for a spec citation, an
 in-repo path for a fixture citation, the bound closure snapshot `rubin-c01-design-closure-v8` for a design
-citation, and the obligation census for an `OBL-` id.
+citation, and the obligation census for an `OBL-` id. The schema is the SINGLE owner of the fields the
+generator's typed decode deliberately ignores — the `obligation_ids` grammar, `sources`,
+`release_requirements` shape and unknown or retired keys — so those carry no generator-side mirror check
+and are proven by `CanonicalPipelineV2SchemaTests` alone. Enforcement of the remaining `effects` relations
+(`connected_block_decay_events`, `relay_authority`, `intermediate_tip_rows`, `external_visibility`, and a
+closed effect-key vocabulary) is deferred to RUB-1204 with the rest of the deferred closure work.
 
 ## Fuzz crash promotion (manual-only)
 

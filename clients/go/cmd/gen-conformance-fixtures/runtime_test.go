@@ -2361,6 +2361,14 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			expected["result"], expected["wire_disposition"], expected["commit_truth"] = nil, "CHECKSUM_REJECT", "OLD"
 			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["relation"] = "old"
 		},
+		"standalone disconnect publishes a row": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DISCONNECT-001", "MAIN")
+			c["expected"].(map[string]any)["canonical_applied_blocks"] = []any{map[string]any{}}
+		},
+		"connected block dropped from the summary": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-REORG-001", "MAIN")
+			c["expected"].(map[string]any)["canonical_applied_blocks"] = cp2CaseSummary(t, c)[1:]
+		},
 		"included-set identity substituted": func(t *testing.T, d map[string]any) {
 			fixtures := d["fixtures"].(map[string]any)
 			entry := fixtures["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
@@ -2409,6 +2417,8 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"non-NEW summary is not null":                        "summary must be null for NOT_APPLICABLE",
 		"summary_rows effect drift":                          "effects.summary_rows",
 		"included-set identity substituted":                  "differ from the included-set identities",
+		"standalone disconnect publishes a row":              "standalone disconnect and must carry an exact empty summary",
+		"connected block dropped from the summary":           "summary carries 2 rows, the case states connect_count 3",
 	}
 	for _, name := range slices.Sorted(maps.Keys(mutate)) {
 		t.Run(name, func(t *testing.T) {

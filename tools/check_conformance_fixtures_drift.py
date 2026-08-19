@@ -5,8 +5,10 @@ Generates the deterministic generator-owned fixture set into an isolated
 temporary output directory via `clients/go/cmd/gen-conformance-fixtures
 --output-dir <abs>` and compares each produced file byte-for-byte against
 the corresponding file under `conformance/fixtures/`. Exits 0 when every
-generated file matches its committed counterpart, exits 1 on any drift,
-exits 2 on usage / environment errors. Never writes inside
+generated file matches its committed counterpart, exits 1 on any drift --
+byte drift, a missing or unexpected generated file, and a
+canonical_pipeline_v2 semantic/receipt violation alike -- and exits 2 on
+usage / environment errors only. Never writes inside
 `conformance/fixtures/**` and never invokes the generator without the
 `--output-dir` flag, so committed fixtures are never mutated. Manual
 fixture regeneration remains the authoritative path; this gate only
@@ -33,6 +35,8 @@ from gen_conformance_matrix import load_json_fail_closed
 
 
 COMMITTED_FIXTURES_REL = Path("conformance/fixtures")
+# Set only by the isolated fake-repo unit tests; see main().
+FAKE_REPO_ENV = "_RUBIN_DRIFT_FAKE_REPO"
 GENERATOR_PACKAGE = "./cmd/gen-conformance-fixtures"
 GO_MODULE_REL = Path("clients/go")
 V2_REL = Path("protocol/canonical_pipeline_v2.json")
@@ -102,14 +106,6 @@ def parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
         "--keep-output-dir",
         action="store_true",
         help="Do not delete the candidate output directory on exit.",
-    )
-    parser.add_argument(
-        "--skip-v2-semantics",
-        action="store_true",
-        help=(
-            "Skip the RUB-1208 canonical-pipeline-v2 relation/receipt gate. For the "
-            "isolated fake-repo unit tests only; the real repository always runs it."
-        ),
     )
     return parser.parse_args(argv)
 
@@ -634,6 +630,16 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                     f"{where}/canonical_applied_blocks: a standalone disconnect must carry "
                     f"an exact empty summary"
                 )
+            # A stated connect count is the number of blocks the frame connects,
+            # which is exactly the number of summary rows.
+            stated_connects = _input_value(inputs, "/input/connect_count")
+            if stated_connects is not _ABSENT and (
+                type(stated_connects) is not int or stated_connects != len(summary)
+            ):
+                raise RuntimeError(
+                    f"{where}/canonical_applied_blocks: {len(summary)} rows, the case "
+                    f"states connect_count {stated_connects!r}"
+                )
             want_da = _included_set_da_ids(where, inputs, fixtures, summary)
 
             last_height, last_block, occurrences = None, None, 0
@@ -908,6 +914,14 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         alias = next(k for k, v in sorted(data["resolved_values"].items()) if v["type"] == "bytes32_hex")
         data["resolved_values"][alias]["value"] += "\n"
 
+    def standalone_disconnect_publishes_a_row(data: dict) -> None:
+        case = case_of(data, "C01-DISCONNECT-001", "MAIN")
+        case["expected"]["canonical_applied_blocks"] = [{}]
+
+    def drop_a_connected_block(data: dict) -> None:
+        case = case_of(data, "C01-REORG-001", "MAIN")
+        case["expected"]["canonical_applied_blocks"].pop(0)
+
     def summary_rows_effect_drift(data: dict) -> None:
         case = case_of(data, "C01-REORG-001", "MAIN")
         case["expected"]["effects"]["summary_rows"]["value"] = 99
@@ -942,6 +956,8 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("resolved key trailing newline", resolved_key_trailing_newline, "is not the composed full form"),
         ("resolved key leading space", resolved_key_leading_space, "is not the composed full form"),
         ("bytes32 value trailing newline", bytes32_trailing_newline, "is not a valid bytes32_hex literal"),
+        ("standalone disconnect publishes a row", standalone_disconnect_publishes_a_row, "a standalone disconnect must carry"),
+        ("connected block dropped from the summary", drop_a_connected_block, "2 rows, the case states connect_count 3"),
     )
     with tempfile.TemporaryDirectory(prefix="rubin-r1208-negative-") as td:
         for name, mutate, expected_reason in mutations:
@@ -961,6 +977,22 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
                     ) from exc
             else:
                 raise RuntimeError(f"RUB-1208 negative {name!r} was accepted")
+
+
+def run_v2_gate(candidate: Path, committed: Path) -> None:
+    """RUB-1208 semantic/receipt gate over both sides of the v2 pair: a violation
+    is DRIFT (exit 1), not an environment failure, and a programming error raised
+    INSIDE the gate by a hostile artifact is re-raised labelled rather than
+    escaping as a traceback -- the same types raised elsewhere stay unhandled."""
+    for check, path in (
+        (validate_canonical_pipeline_v2_semantics, candidate),
+        (validate_canonical_pipeline_v2_semantics, committed),
+        (assert_canonical_pipeline_v2_negative_controls, committed),
+    ):
+        try:
+            check(path)
+        except (KeyError, TypeError, StopIteration) as exc:
+            raise RuntimeError(f"canonical_pipeline_v2 {path}: {exc!r}") from exc
 
 
 def assert_committed_untouched(
@@ -999,14 +1031,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         assert_committed_untouched(repo_root, output_dir)
         run_generator(repo_root, output_dir)
-        # Isolated unit tests for the generic drift machinery intentionally build
-        # a minimal fake repo and replace generated files with sentinel bytes.
-        # Gate on an explicit opt-out, never on an unrelated file's presence, so
-        # deleting or renaming a file can never silently switch the gate off.
-        if not args.skip_v2_semantics:
-            validate_canonical_pipeline_v2_semantics(output_dir / V2_REL)
-            validate_canonical_pipeline_v2_semantics(committed_root / V2_REL)
-            assert_canonical_pipeline_v2_negative_controls(committed_root / V2_REL)
+        # An absent v2 artifact on either side is drift with its own diagnostic
+        # below, so the gate runs only when both files exist. The isolated
+        # fake-repo tests, whose generated files are sentinel bytes, opt out
+        # through an environment sentinel -- never a public CLI flag, and never
+        # an unrelated file's presence.
+        candidate_v2, committed_v2 = output_dir / V2_REL, committed_root / V2_REL
+        if os.environ.get(FAKE_REPO_ENV) != "1" and candidate_v2.is_file() and committed_v2.is_file():
+            try:
+                run_v2_gate(candidate_v2, committed_v2)
+            except RuntimeError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 1
         (
             missing_committed,
             differing,
@@ -1061,7 +1097,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for rel in differing:
                 print(f"  ~ {rel}", file=sys.stderr)
         return 1
-    except (RuntimeError, FileNotFoundError, OSError, StopIteration, KeyError, TypeError) as exc:
+    except (RuntimeError, FileNotFoundError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     finally:

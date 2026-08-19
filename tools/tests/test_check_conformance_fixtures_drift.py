@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import sys
 import tempfile
@@ -157,6 +158,13 @@ class DiffSetTests(unittest.TestCase):
 
 
 class MainExitCodeTests(unittest.TestCase):
+    def setUp(self):
+        # The fake repo's sentinel bytes are not the real v2 artifact, so these
+        # tests opt out through the environment sentinel; no CLI flag can.
+        patcher = mock.patch.dict(os.environ, {m.FAKE_REPO_ENV: "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_main_clean_returns_zero(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -171,7 +179,7 @@ class MainExitCodeTests(unittest.TestCase):
             captured = io.StringIO()
             with mock.patch.object(m, "run_generator", side_effect=fake_run):
                 with mock.patch("sys.stdout", captured):
-                    rc = m.main(["--repo-root", str(repo_root), "--skip-v2-semantics"])
+                    rc = m.main(["--repo-root", str(repo_root)])
         self.assertEqual(rc, 0)
         self.assertIn(
             f"OK: conformance fixture drift check passed ({len(m.EXPECTED_FIXTURES)} generator-owned files match committed)",
@@ -183,7 +191,7 @@ class MainExitCodeTests(unittest.TestCase):
             repo_root = Path(td)
             captured = io.StringIO()
             with mock.patch("sys.stderr", captured):
-                rc = m.main(["--repo-root", str(repo_root), "--skip-v2-semantics"])
+                rc = m.main(["--repo-root", str(repo_root)])
         self.assertEqual(rc, 2)
         self.assertIn("ERROR: committed fixtures dir not found", captured.getvalue())
 
@@ -201,7 +209,7 @@ class MainExitCodeTests(unittest.TestCase):
             captured = io.StringIO()
             with mock.patch("subprocess.run", side_effect=raise_fnf):
                 with mock.patch("sys.stderr", captured):
-                    rc = m.main(["--repo-root", str(repo_root), "--skip-v2-semantics"])
+                    rc = m.main(["--repo-root", str(repo_root)])
         self.assertEqual(rc, 2)
         self.assertIn("ERROR:", captured.getvalue())
         self.assertNotIn("Traceback", captured.getvalue())
@@ -224,7 +232,7 @@ class MainExitCodeTests(unittest.TestCase):
             captured = io.StringIO()
             with mock.patch("tempfile.mkdtemp", side_effect=fake_mkdtemp):
                 with mock.patch("sys.stderr", captured):
-                    rc = m.main(["--repo-root", str(repo_root), "--skip-v2-semantics"])
+                    rc = m.main(["--repo-root", str(repo_root)])
         self.assertEqual(rc, 2)
         self.assertIn(
             "candidate output", captured.getvalue()
@@ -245,7 +253,7 @@ class MainExitCodeTests(unittest.TestCase):
             captured = io.StringIO()
             with mock.patch.object(m, "run_generator", side_effect=fake_run):
                 with mock.patch("sys.stderr", captured):
-                    rc = m.main(["--repo-root", str(repo_root), "--skip-v2-semantics"])
+                    rc = m.main(["--repo-root", str(repo_root)])
         self.assertEqual(rc, 1)
         self.assertIn(f"~ {target}", captured.getvalue())
 
@@ -264,9 +272,62 @@ class MainExitCodeTests(unittest.TestCase):
             captured = io.StringIO()
             with mock.patch.object(m, "run_generator", side_effect=fake_run):
                 with mock.patch("sys.stderr", captured):
-                    rc = m.main(["--repo-root", str(repo_root), "--skip-v2-semantics"])
+                    rc = m.main(["--repo-root", str(repo_root)])
         self.assertEqual(rc, 1)
         self.assertIn(f"- {target}", captured.getvalue())
+
+
+class V2SemanticGateExitCodeTests(unittest.TestCase):
+    """A v2 semantic/receipt violation is DRIFT (exit 1), never an environment
+    error, and a programming error raised outside the gate is never swallowed."""
+
+    BROKEN_V2 = b'{"_meta": "not an object"}\n'
+
+    def _run(self, *, skip=(), v2_body=None):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            committed = repo_root / m.COMMITTED_FIXTURES_REL
+            committed.mkdir(parents=True)
+            _populate_committed(committed)
+            (repo_root / m.GO_MODULE_REL).mkdir(parents=True, exist_ok=True)
+            if v2_body is not None:
+                (committed / m.V2_REL).write_bytes(v2_body)
+
+            def fake_run(_repo_root, out_dir):
+                _populate_candidate(out_dir, skip=skip)
+                if v2_body is not None and m.V2_REL not in skip:
+                    (out_dir / m.V2_REL).write_bytes(v2_body)
+
+            err = io.StringIO()
+            with mock.patch.object(m, "run_generator", side_effect=fake_run):
+                with mock.patch("sys.stderr", err), mock.patch("sys.stdout", io.StringIO()):
+                    rc = m.main(["--repo-root", str(repo_root)])
+        return rc, err.getvalue()
+
+    def test_semantic_violation_is_drift(self):
+        rc, err = self._run(v2_body=self.BROKEN_V2)
+        self.assertEqual(rc, 1)
+        self.assertIn("ERROR: canonical_pipeline_v2: _meta.closure_epoch is not an object", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_missing_generated_v2_reaches_the_regression_diagnostic(self):
+        rc, err = self._run(skip=(m.V2_REL,))
+        self.assertEqual(rc, 1)
+        self.assertIn("regression in generator output set", err)
+        self.assertIn(f"- {m.V2_REL}", err)
+
+    def test_programming_errors_are_labelled_inside_the_gate_only(self):
+        with mock.patch.object(m, "validate_canonical_pipeline_v2_semantics", side_effect=KeyError("rows")):
+            rc, err = self._run(v2_body=self.BROKEN_V2)
+        self.assertEqual(rc, 1)
+        self.assertIn("ERROR: canonical_pipeline_v2 ", err)
+        self.assertIn("KeyError('rows')", err)
+        # Outside the gate the same exception type stays unhandled: the tool must
+        # not turn a bug in its own machinery into a fixture verdict.
+        with mock.patch.dict(os.environ, {m.FAKE_REPO_ENV: "1"}):
+            with mock.patch.object(m, "diff_set", side_effect=KeyError("outside")):
+                with self.assertRaises(KeyError):
+                    self._run()
 
 
 class CanonicalPipelineSchemaTests(unittest.TestCase):
@@ -630,13 +691,27 @@ class CanonicalPipelineV2RUB1208Tests(unittest.TestCase):
     def _first_resolved(self, data, tag):
         return next(k for k, v in data["resolved_values"].items() if v["type"] == tag)
 
-    def _reject(self, mutate):
-        """Mutate a deep copy of the KNOWN-VALID control in one dimension."""
+    def _rejections(self, mutate) -> set:
+        """{(json pointer, failing keyword)} after mutating a deep copy of the
+        KNOWN-VALID control in one dimension. Asserting the POINTER, not bare
+        invalidity, is what ties each negative to its own arm."""
         data = json.loads(json.dumps(self.data))
         mutate(data)
-        return self.validator.is_valid(data)
+        return {
+            ("/".join(str(p) for p in e.absolute_path), e.validator)
+            for e in self.validator.iter_errors(data)
+        }
+
+    def _pointer(self, row_id, case_id, tail) -> str:
+        row = next(i for i, r in enumerate(self.data["rows"]) if r["row_id"] == row_id)
+        case = next(i for i, c in enumerate(self.data["rows"][row]["cases"]) if c["case_id"] == case_id)
+        return f"rows/{row}/cases/{case}/{tail}"
 
     def test_schema_rejects_every_assigned_single_dimension_mutation(self):
+        at = self._pointer
+        u64_key = self._first_resolved(self.data, "u64")
+        b32_key = self._first_resolved(self.data, "bytes32_hex")
+
         def swap_manifest_member(d):
             # Same cardinality, one authorized member replaced by an unauthorized
             # one of identical shape (mechanic 2, identity not count).
@@ -648,41 +723,41 @@ class CanonicalPipelineV2RUB1208Tests(unittest.TestCase):
             d["summary_manifest"]["assigned_mutations"][0]["id"] = "M99"
 
         mutations = {
-            "image_manifest same-cardinality substitution": swap_manifest_member,
-            "summary_manifest same-cardinality substitution": swap_summary_manifest_member,
-            "closure input_schema_design_hash": lambda d: d["_meta"]["closure_epoch"].__setitem__("input_schema_design_hash", "00" * 32),
-            "closure expected_projection_design_hash": lambda d: d["_meta"]["closure_epoch"].__setitem__("expected_projection_design_hash", "00" * 32),
-            "closure image_manifest_hash": lambda d: d["_meta"]["closure_epoch"].__setitem__("image_manifest_hash", "00" * 32),
-            "closure summary_manifest_hash": lambda d: d["_meta"]["closure_epoch"].__setitem__("summary_manifest_hash", "00" * 32),
-            "authority_source_sha256": lambda d: d["_meta"].__setitem__("authority_source_sha256", "00" * 32),
-            "generated warning reworded": lambda d: d["_meta"].__setitem__("warning", "machine-generated file"),
-            "generated warning trailing newline": lambda d: d["_meta"].__setitem__("warning", d["_meta"]["warning"] + "\n"),
-            "resolvedEntry unknown tag": lambda d: d["resolved_values"][self._first_resolved(d, "u64")].__setitem__("type", "bytes"),
-            "resolvedEntry extra property": lambda d: d["resolved_values"][self._first_resolved(d, "u64")].__setitem__("note", "x"),
-            "resolvedEntry bytes32 short": lambda d: d["resolved_values"][self._first_resolved(d, "bytes32_hex")].__setitem__("value", "ab"),
-            "resolvedEntry bytes32 uppercase": lambda d: d["resolved_values"][self._first_resolved(d, "bytes32_hex")].__setitem__("value", "AB" * 32),
-            "resolvedEntry u64 as string": lambda d: d["resolved_values"][self._first_resolved(d, "u64")].__setitem__("value", "12"),
-            "resolvedEntry u64 negative": lambda d: d["resolved_values"][self._first_resolved(d, "u64")].__setitem__("value", -1),
-            "resolvedEntry u64 two to the 64": lambda d: d["resolved_values"][self._first_resolved(d, "u64")].__setitem__("value", 2 ** 64),
-            "resolved key whitespace only": lambda d: d["resolved_values"].__setitem__(" ", {"type": "u64", "value": 1}),
-            "resolved key trailing newline": lambda d: d["resolved_values"].__setitem__(self._first_resolved(d, "u64") + "\n", {"type": "u64", "value": 1}),
-            "resolved key missing argument": lambda d: d["resolved_values"].__setitem__("tip_hash", {"type": "u64", "value": 1}),
-            "resolved key invalid relation suffix": lambda d: d["resolved_values"].__setitem__("tip_hash@C01-DIRECT-001/MAIN:bogus", {"type": "u64", "value": 1}),
-            "direct_fields dropped key": lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["expected"]["state_image"]["STANDARD_MEMPOOL_IMAGE_V1"]["direct_fields"].pop("used_bytes"),
-            "direct_fields extra key": lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["expected"]["state_image"]["CHAIN_IMAGE_V1"]["direct_fields"].__setitem__("bogus", "tip_hash@C01-DIRECT-001/MAIN:new"),
-            "relation contradicts NEW": lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["expected"]["state_image"]["CHAIN_IMAGE_V1"].__setitem__("relation", "old"),
-            "relation contradicts OLD": lambda d: self._case(d, "C01-DACLEAN-001", "CORRUPT_FIRST")["expected"]["state_image"]["CHAIN_IMAGE_V1"].__setitem__("relation", "new"),
-            "relation contradicts NOT_APPLICABLE": lambda d: self._case(d, "C01-SIDE-001", "MAIN")["expected"]["state_image"]["CHAIN_IMAGE_V1"].__setitem__("relation", "new"),
-            "summary block_hash inline literal": lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["expected"]["canonical_applied_blocks"][0].__setitem__("block_hash", "ab" * 32),
-            "obligation id trailing dash": lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["obligation_ids"].__setitem__(0, "OBL-X-"),
-            "obligation id empty segment": lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["obligation_ids"].__setitem__(0, "OBL--X"),
-            "disconnect summary null instead of []": lambda d: self._case(d, "C01-DISCONNECT-001", "MAIN")["expected"].__setitem__("canonical_applied_blocks", None),
-            "non-NEW summary is an array": lambda d: self._case(d, "C01-SIDE-001", "MAIN")["expected"].__setitem__("canonical_applied_blocks", []),
-            "hash effect value as an alias": lambda d: self._case(d, "C01-REORG-001", "MAIN")["expected"]["effects"].__setitem__("gc_victim_hash", {"value": "NO_SUCH_ALIAS_XYZ", "type": "hash", "required": True, "observer": "probe"}),
+            "image_manifest same-cardinality substitution": (swap_manifest_member, ("image_manifest", "const")),
+            "summary_manifest same-cardinality substitution": (swap_summary_manifest_member, ("summary_manifest", "const")),
+            "closure input_schema_design_hash": (lambda d: d["_meta"]["closure_epoch"].__setitem__("input_schema_design_hash", "00" * 32), ("_meta/closure_epoch/input_schema_design_hash", "const")),
+            "closure expected_projection_design_hash": (lambda d: d["_meta"]["closure_epoch"].__setitem__("expected_projection_design_hash", "00" * 32), ("_meta/closure_epoch/expected_projection_design_hash", "const")),
+            "closure image_manifest_hash": (lambda d: d["_meta"]["closure_epoch"].__setitem__("image_manifest_hash", "00" * 32), ("_meta/closure_epoch/image_manifest_hash", "const")),
+            "closure summary_manifest_hash": (lambda d: d["_meta"]["closure_epoch"].__setitem__("summary_manifest_hash", "00" * 32), ("_meta/closure_epoch/summary_manifest_hash", "const")),
+            "authority_source_sha256": (lambda d: d["_meta"].__setitem__("authority_source_sha256", "00" * 32), ("_meta/authority_source_sha256", "const")),
+            "generated warning reworded": (lambda d: d["_meta"].__setitem__("warning", "machine-generated file"), ("_meta/warning", "const")),
+            "generated warning trailing newline": (lambda d: d["_meta"].__setitem__("warning", d["_meta"]["warning"] + "\n"), ("_meta/warning", "const")),
+            "resolvedEntry unknown tag": (lambda d: d["resolved_values"][self._first_resolved(d, "u64")].__setitem__("type", "bytes"), (f"resolved_values/{u64_key}/type", "enum")),
+            "resolvedEntry extra property": (lambda d: d["resolved_values"][self._first_resolved(d, "u64")].__setitem__("note", "x"), (f"resolved_values/{u64_key}", "additionalProperties")),
+            "resolvedEntry bytes32 short": (lambda d: d["resolved_values"][self._first_resolved(d, "bytes32_hex")].__setitem__("value", "ab"), (f"resolved_values/{b32_key}/value", "pattern")),
+            "resolvedEntry bytes32 uppercase": (lambda d: d["resolved_values"][self._first_resolved(d, "bytes32_hex")].__setitem__("value", "AB" * 32), (f"resolved_values/{b32_key}/value", "pattern")),
+            "resolvedEntry u64 as string": (lambda d: d["resolved_values"][self._first_resolved(d, "u64")].__setitem__("value", "12"), (f"resolved_values/{u64_key}/value", "type")),
+            "resolvedEntry u64 negative": (lambda d: d["resolved_values"][self._first_resolved(d, "u64")].__setitem__("value", -1), (f"resolved_values/{u64_key}/value", "minimum")),
+            "resolvedEntry u64 two to the 64": (lambda d: d["resolved_values"][self._first_resolved(d, "u64")].__setitem__("value", 2 ** 64), (f"resolved_values/{u64_key}/value", "maximum")),
+            "resolved key whitespace only": (lambda d: d["resolved_values"].__setitem__(" ", {"type": "u64", "value": 1}), ("resolved_values", "not")),
+            "resolved key trailing newline": (lambda d: d["resolved_values"].__setitem__(self._first_resolved(d, "u64") + "\n", {"type": "u64", "value": 1}), ("resolved_values", "not")),
+            "resolved key missing argument": (lambda d: d["resolved_values"].__setitem__("tip_hash", {"type": "u64", "value": 1}), ("resolved_values", "pattern")),
+            "resolved key invalid relation suffix": (lambda d: d["resolved_values"].__setitem__("tip_hash@C01-DIRECT-001/MAIN:bogus", {"type": "u64", "value": 1}), ("resolved_values", "pattern")),
+            "direct_fields dropped key": (lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["expected"]["state_image"]["STANDARD_MEMPOOL_IMAGE_V1"]["direct_fields"].pop("used_bytes"), (at("C01-DIRECT-001", "MAIN", "expected/state_image/STANDARD_MEMPOOL_IMAGE_V1/direct_fields"), "required")),
+            "direct_fields extra key": (lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["expected"]["state_image"]["CHAIN_IMAGE_V1"]["direct_fields"].__setitem__("bogus", "tip_hash@C01-DIRECT-001/MAIN:new"), (at("C01-DIRECT-001", "MAIN", "expected/state_image/CHAIN_IMAGE_V1/direct_fields"), "enum")),
+            "relation contradicts NEW": (lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["expected"]["state_image"]["CHAIN_IMAGE_V1"].__setitem__("relation", "old"), (at("C01-DIRECT-001", "MAIN", "expected/state_image/CHAIN_IMAGE_V1/relation"), "const")),
+            "relation contradicts OLD": (lambda d: self._case(d, "C01-DACLEAN-001", "CORRUPT_FIRST")["expected"]["state_image"]["CHAIN_IMAGE_V1"].__setitem__("relation", "new"), (at("C01-DACLEAN-001", "CORRUPT_FIRST", "expected/state_image/CHAIN_IMAGE_V1/relation"), "const")),
+            "relation contradicts NOT_APPLICABLE": (lambda d: self._case(d, "C01-SIDE-001", "MAIN")["expected"]["state_image"]["CHAIN_IMAGE_V1"].__setitem__("relation", "new"), (at("C01-SIDE-001", "MAIN", "expected/state_image/CHAIN_IMAGE_V1/relation"), "const")),
+            "summary block_hash inline literal": (lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["expected"]["canonical_applied_blocks"][0].__setitem__("block_hash", "ab" * 32), (at("C01-DIRECT-001", "MAIN", "expected/canonical_applied_blocks"), "oneOf")),
+            "obligation id trailing dash": (lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["obligation_ids"].__setitem__(0, "OBL-X-"), (at("C01-DIRECT-001", "MAIN", "obligation_ids/0"), "pattern")),
+            "obligation id empty segment": (lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["obligation_ids"].__setitem__(0, "OBL--X"), (at("C01-DIRECT-001", "MAIN", "obligation_ids/0"), "pattern")),
+            "disconnect summary null instead of []": (lambda d: self._case(d, "C01-DISCONNECT-001", "MAIN")["expected"].__setitem__("canonical_applied_blocks", None), (at("C01-DISCONNECT-001", "MAIN", "expected/canonical_applied_blocks"), "type")),
+            "non-NEW summary is an array": (lambda d: self._case(d, "C01-SIDE-001", "MAIN")["expected"].__setitem__("canonical_applied_blocks", []), (at("C01-SIDE-001", "MAIN", "expected/canonical_applied_blocks"), "type")),
+            "hash effect value as an alias": (lambda d: self._case(d, "C01-REORG-001", "MAIN")["expected"]["effects"].__setitem__("gc_victim_hash", {"value": "NO_SUCH_ALIAS_XYZ", "type": "hash", "required": True, "observer": "probe"}), (at("C01-REORG-001", "MAIN", "expected/effects/gc_victim_hash/value"), "pattern")),
         }
-        for name, mutate in mutations.items():
+        for name, (mutate, reason) in mutations.items():
             with self.subTest(name):
-                self.assertFalse(self._reject(mutate), f"schema accepted {name}")
+                self.assertIn(reason, self._rejections(mutate), f"schema accepted {name}")
 
     def test_relation_arms_keep_wire_and_recovery_rows_expressible(self):
         # The truth -> relation arms are guarded on a CLASSIFIED result on all
@@ -754,11 +829,13 @@ class CanonicalPipelineV2RUB1208Tests(unittest.TestCase):
         # Regression: the gate used to run only `if V2_SCHEMA_REL.is_file()`, so
         # deleting or renaming an unrelated file switched it off silently.
         self.assertNotIn("V2_SCHEMA_REL", INSPECT_SOURCE)
-        self.assertIn("if not args.skip_v2_semantics:", INSPECT_SOURCE)
+        # And it is not switchable from the command line at all: the only opt-out
+        # is the environment sentinel the fake-repo tests set.
+        self.assertNotIn("skip-v2-semantics", INSPECT_SOURCE)
+        self.assertIn('os.environ.get(FAKE_REPO_ENV) != "1"', INSPECT_SOURCE)
 
     def test_meta_is_read_fail_closed(self):
         for label, mutate in (
-            ("_meta is a string", lambda d: d.__setitem__("_meta", "x")),
             ("closure_epoch is a list", lambda d: d["_meta"].__setitem__("closure_epoch", [])),
         ):
             with self.subTest(label):
