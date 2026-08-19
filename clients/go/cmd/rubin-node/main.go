@@ -572,7 +572,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// The banners therefore describe the RAW snapshot as loaded from disk — a
 	// snapshot that disagrees with the blockstore is reported, not fixed, and a
 	// datadir the mutating path would refuse is shown intact. Ordinary startup
-	// is unaffected: same three calls, same order, same errors, same exit codes.
+	// is unaffected by this gate: same three calls, same order, same exit codes.
 	if !*dryRun {
 		// RUB-1134 genesis anchor: a non-empty canonical index whose row 0 is
 		// not the configured genesis hash is a foreign datadir. Checked BEFORE

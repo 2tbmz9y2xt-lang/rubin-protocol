@@ -614,8 +614,8 @@ func storeAtGenesis(t *testing.T, dir string) (*BlockStore, *ChainState, SyncCon
 
 // B2 rules 5-6 + parity matrix row 12: a canonical index that claims blocks but
 // has NO complete artifact set at height 0 is fatal. The guard fires before any
-// index write and before any chainstate reset/save, carrying the exact
-// cross-client literal as its message prefix. Rust mirror:
+// index write and before any chainstate reset/save, rendering the cross-client
+// literal EXACTLY: Rust asserts equality against it. Rust mirror:
 // `zero_complete_canonical_prefix_is_fatal_before_any_mutation`.
 func TestReconcileZeroCompleteCanonicalPrefixIsFatal(t *testing.T) {
 	dir := t.TempDir()
@@ -628,7 +628,7 @@ func TestReconcileZeroCompleteCanonicalPrefixIsFatal(t *testing.T) {
 	if !errors.Is(err, errCanonicalIndexZeroCompletePrefix) {
 		t.Fatalf("reconcile err = %v, want errCanonicalIndexZeroCompletePrefix", err)
 	}
-	if got, want := err.Error(), "persisted canonical index has zero complete prefix: datadir reset and full resync required"; got != want {
+	if got, want := err.Error(), "persisted canonical index has zero complete prefix"; got != want {
 		t.Fatalf("message = %q, want %q", got, want)
 	}
 	if got, snapErr := store.CanonicalIndexSnapshot(); snapErr != nil || len(got) != 1 {
@@ -777,13 +777,13 @@ func TestReconcileZeroCompletePrefixLosesToArtifactError(t *testing.T) {
 
 // TestChainStateRecoveryStructuralErrorWinsAcrossTheWholeIndex: the prefix check
 // is a FULL scan of the declared index, not a stop-at-the-first-gap scan. A
-// structural/corruption error anywhere in the index outranks both fail-closed
-// classes, even when it sits behind an absent artifact of the same row (a) or
-// behind an already-incomplete row (b). Stopping earlier would report committed
-// corruption as the zero-prefix or incomplete-suffix class and send the operator
-// after the wrong file. Rows (c) and (d) pin the ORDER inside one row: with two
-// artifacts unbound, the refusal names the earlier kind in the fixed
-// header -> block -> undo order, so reordering it renames the condemned file.
+// structural/corruption error anywhere in the index outranks both fail-closed classes,
+// even when it sits behind an absent artifact of the same row (a) or behind an
+// already-incomplete row (b). Stopping earlier would report committed corruption as
+// the zero-prefix or incomplete-suffix class and send the operator after the wrong
+// file. Rows (c) and (d) pin the ORDER inside one row: with two artifacts unbound, the
+// refusal names the earlier kind in the fixed header -> block -> undo order, so
+// reordering it renames the condemned file.
 func TestChainStateRecoveryStructuralErrorWinsAcrossTheWholeIndex(t *testing.T) {
 	for _, tc := range []struct {
 		name string

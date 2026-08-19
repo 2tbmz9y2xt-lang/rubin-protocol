@@ -49,36 +49,35 @@ func cloneChainState(src *ChainState) *ChainState {
 // silently destroy the operator's whole chain, so this is fatal. Raised AFTER the
 // scan's structural/IO/corruption errors (they keep precedence) and BEFORE
 // any chainstate reset/replay/save and any service start.
-// Cross-client literal — Rust mirror CANONICAL_INDEX_ZERO_COMPLETE_PREFIX_ERR;
-// the caller appends the operator remedy, so it stays the exact message PREFIX.
+// Cross-client literal — the EXACT message, never a prefix: the Rust mirror
+// CANONICAL_INDEX_ZERO_COMPLETE_PREFIX_ERR is asserted by equality, so nothing
+// may be appended to it here.
 var errCanonicalIndexZeroCompletePrefix = errors.New("persisted canonical index has zero complete prefix")
 
-// errCanonicalIndexIncompleteSuffix: the canonical index declares committed
-// entries whose header/block/undo set is incomplete. Committed canonical rows
-// are never truncated or repaired to hide that, so startup fails closed and the
-// operator decides. Go-primary; the Rust mirror is RUB-897.
+// errCanonicalIndexIncompleteSuffix: the canonical index declares committed entries
+// whose header/block/undo set is incomplete. Committed canonical rows are never
+// truncated or repaired to hide that, so startup fails closed and the operator
+// decides. Go-primary; the Rust mirror is RUB-897.
 var errCanonicalIndexIncompleteSuffix = errors.New("persisted canonical index has an incomplete committed suffix")
 
-// errCanonicalArtifactUnbound: a canonical artifact is present but does not
-// belong to the row that indexes it — its identity does not re-derive, or its
-// header links to a parent the index does not name. Go-only evidence (the Rust
-// mirror is RUB-897), deliberately NOT ErrStoreIntegrity: that identity is the
-// pinned cross-client ENVELOPE class, and undo keeps its own ErrUndoIntegrity.
-// Plain read/IO failures stay unwrapped — they prove nothing about binding.
+// errCanonicalArtifactUnbound: a canonical artifact is present but does not belong to
+// the row that indexes it — its identity does not re-derive, or its header links to a
+// parent the index does not name. Go-only evidence (the Rust mirror is RUB-897),
+// deliberately NOT ErrStoreIntegrity: that identity is the pinned cross-client
+// ENVELOPE class, and undo keeps its own ErrUndoIntegrity. Plain read/IO failures stay
+// unwrapped — they prove nothing about binding.
 var errCanonicalArtifactUnbound = errors.New("canonical artifact is not bound to its indexed hash")
 
 // requireCompleteCanonicalPrefix proves every entry the canonical index already
 // declares committed has a complete header/block/undo set. It WRITES NOTHING:
 // its domain is store.CanonicalIndexSnapshot(), so every state it can reach is
 // index-declared-committed and dropping the suffix would discard committed
-// chain to hide corruption. Precedence is unchanged from the scan it replaces:
-// structural/IO/corruption errors first, then the zero-complete-prefix literal,
-// then the incomplete-suffix refusal.
-//
-// That precedence is why the scan is FULL, not stop-at-the-first-gap: every
-// artifact of every declared row is checked until the first structural error,
-// so a structural error behind an absent artifact still outranks both
-// fail-closed classes instead of being reported as a missing suffix.
+// chain to hide corruption. Precedence: structural/IO/corruption errors first, then
+// the zero-complete-prefix literal, then the incomplete-suffix refusal. That is why
+// the scan is FULL, not stop-at-the-first-gap: every artifact of every declared row
+// is checked until the first structural error, so a structural error BEHIND a gap now
+// outranks both fail-closed classes instead of being reported as a missing suffix —
+// the scan this replaces broke at the first gap and never reached it.
 //
 // The scan proves both §6.4.1 restart rules over the same pass: every indexed
 // row resolves to a header whose block_hash IS the indexed value (identity),
@@ -106,22 +105,21 @@ func requireCompleteCanonicalPrefix(store *BlockStore) error {
 		return nil
 	}
 	if validCount == 0 {
-		return fmt.Errorf("%w: datadir reset and full resync required", errCanonicalIndexZeroCompletePrefix)
+		return errCanonicalIndexZeroCompletePrefix
 	}
 	return fmt.Errorf("%w: index declares %d entries; the complete header/block/undo prefix ends after %d; datadir reset and full resync required",
 		errCanonicalIndexIncompleteSuffix, len(canonical), validCount)
 }
 
 // countCompleteCanonicalPrefix returns the index of the FIRST incomplete row
-// (len(canonical) when every row is complete), after visiting every row: a
-// structural error in a later row must not be masked by an earlier gap.
-//
-// It also enforces the §6.4.1 linkage MUST. The predecessor is the INDEXED hash
-// of row i-1, not that row's header: the index is the identity, so an absent
-// header at i-1 leaves its own row unlinked but still anchors row i. Row 0 has
-// no predecessor — the genesis anchor is VerifyGenesisAnchor's job — and a row
-// whose header is absent carries no prev to compare. Within a row the artifact
-// scan runs FIRST, so an unbound artifact outranks that row's linkage violation.
+// (len(canonical) when every row is complete), after visiting every row: a structural
+// error in a later row must not be masked by an earlier gap. It also enforces the
+// §6.4.1 linkage MUST. The predecessor is the INDEXED hash of row i-1, not that row's
+// header: the index is the identity, so an absent header at i-1 leaves its own row
+// unlinked but still anchors row i. Row 0 has no predecessor — the genesis anchor is
+// VerifyGenesisAnchor's job — and a row whose header is absent carries no prev to
+// compare. Within a row the artifact scan runs FIRST, so an unbound artifact outranks
+// that row's linkage violation.
 func countCompleteCanonicalPrefix(store *BlockStore, canonical []string) (uint64, error) {
 	validCount := uint64(len(canonical))
 	var previous [32]byte
@@ -152,28 +150,27 @@ type canonicalRowArtifacts struct {
 	prev      [32]byte
 }
 
-// canonicalArtifactsComplete checks header, then block, then undo — ALL three,
-// in that fixed statement order, because an absent artifact must not hide a
-// corrupt one behind it in the same row. That order is a precedence choice, not
-// a snapshot concern like InspectBlockPresence's reverse-order leaves: reconcile
-// runs before any service or artifact writer exists, so nothing can write
-// between two of these reads. It stamps every propagated structural
-// error with the artifact kind and the indexed hash: the operator reads this as
-// "chainstate reconcile failed: <err>", so a leaf reason like "header hash
-// mismatch" that names no artifact and no row is unactionable. Only
-// os.ErrNotExist is absence, and only absence feeds the complete-prefix count.
+// canonicalArtifactsComplete checks header, then block, then undo — ALL three, in
+// that fixed statement order, because an absent artifact must not hide a corrupt one
+// behind it in the same row. That order is a precedence choice, not a snapshot
+// concern like InspectBlockPresence's reverse-order leaves: reconcile runs before any
+// service or artifact writer exists, so nothing can write between two of these reads.
+// It stamps every propagated structural error with the artifact kind and the indexed
+// hash: the operator reads this as "chainstate reconcile failed: <err>", so a leaf
+// reason like "header hash mismatch" that names no artifact and no row is
+// unactionable. Only os.ErrNotExist is absence, and only absence feeds the
+// complete-prefix count.
 //
-// All three leaves are STRICT: an artifact that is merely present is not a
-// complete canonical artifact. They apply the same identity rules as
-// InspectBlockPresence's leaves — validateBlockHeaderHash for the header,
-// storedBlockHeaderHash for the block, GetUndo's hash binding for the undo — so
-// startup and presence can never disagree on what "complete" means. A present
-// but unbound artifact propagates as a structural error with FIRST precedence,
-// exactly like the corrupt-undo path. The header and block leaves carry the
-// errCanonicalArtifactUnbound identity alongside their own detail, so a caller
-// can tell "present but not bound to this row" from a plain read failure
-// without matching on text; the sentinel marks IDENTITY failures only, and a
-// read-class refusal — absence, or the RUB-1057 size bound — propagates
+// All three leaves are STRICT: an artifact that is merely present is not a complete
+// canonical artifact. They apply the same identity rules as InspectBlockPresence's
+// leaves — validateBlockHeaderHash for the header, storedBlockHeaderHash for the
+// block, GetUndo's hash binding for the undo — so startup and presence can never
+// disagree on what "complete" means. A present but unbound artifact propagates as a
+// structural error with FIRST precedence, exactly like the corrupt-undo path. The
+// header and block leaves carry the errCanonicalArtifactUnbound identity alongside
+// their own detail, so a caller can tell "present but not bound to this row" from a
+// plain read failure without matching on text; the sentinel marks IDENTITY failures
+// only, and a read-class refusal — absence, or the RUB-1057 size bound — propagates
 // unwrapped and carries neither.
 func (bs *BlockStore) canonicalArtifactsComplete(hashHex string) (canonicalRowArtifacts, error) {
 	blockHash, err := parseHex32("canonical hash", hashHex)
