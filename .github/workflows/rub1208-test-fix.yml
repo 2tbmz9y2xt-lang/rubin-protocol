@@ -2,6 +2,8 @@ name: RUB-1208 test fix
 on:
   push:
     branches: [rub-1208-transport]
+  pull_request:
+    branches: [rub-1208-transport]
 permissions:
   contents: write
 jobs:
@@ -22,8 +24,6 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          # Generator-side family relation: OWNER stable_tip is part of the
-          # compared publication image and must equal the CHAIN tip/height.
           p = Path('clients/go/cmd/gen-conformance-fixtures/runtime.go')
           s = p.read_text()
           needle = '''\t}\n\tsummary := expected["canonical_applied_blocks"]\n'''
@@ -34,7 +34,6 @@ jobs:
               s = s.replace(needle, relation, 1)
           p.write_text(s)
 
-          # Generator-side executed RUB-1208 negatives and literal pins.
           p = Path('clients/go/cmd/gen-conformance-fixtures/runtime_test.go')
           s = p.read_text()
           marker = '// RUB-1208 semantic-image closure tests.'
@@ -178,7 +177,6 @@ func TestCanonicalPipelineV2R1208FamilyRelationsFailClosed(t *testing.T) {
 '''
           p.write_text(s)
 
-          # Changelog receipt is required whenever protocol/canonical_pipeline_v2.json changes.
           p = Path('conformance/fixtures/CHANGELOG.md')
           s = p.read_text()
           title = '## 2026-08-19 — C01-R2 semantic image and exact summary authority (RUB-1208)'
@@ -190,7 +188,6 @@ func TestCanonicalPipelineV2R1208FamilyRelationsFailClosed(t *testing.T) {
               s = s.replace(marker, marker + entry, 1)
           p.write_text(s)
           PY
-
           gofmt -w clients/go/cmd/gen-conformance-fixtures/runtime.go clients/go/cmd/gen-conformance-fixtures/runtime_test.go
           python3 -m unittest tools.tests.test_check_conformance_fixtures_drift
           git diff --check
