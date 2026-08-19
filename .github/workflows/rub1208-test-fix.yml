@@ -45,3 +45,4 @@ jobs:
           git add tools/tests/test_check_conformance_fixtures_drift.py
           git commit -m 'RUB-1208: align strict loader tests with migrated v2 corpus'
           git push origin HEAD:rub-1208-c01-r2-semantic-image
+# transport trigger via contents API
