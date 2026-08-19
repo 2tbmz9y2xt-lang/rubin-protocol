@@ -579,7 +579,7 @@ func TestReconcileChainStateWithBlockStore_PropagatesCorruptBlockBytesSwap(t *te
 	if errors.Is(err, errCanonicalIndexZeroCompletePrefix) || errors.Is(err, errCanonicalIndexIncompleteSuffix) {
 		t.Fatalf("a corrupt artifact must keep structural precedence, got %v", err)
 	}
-	want := "canonical block artifact for " + hex.EncodeToString(block1Hash[:]) + " hashes to "
+	want := "canonical block artifact " + hex.EncodeToString(block1Hash[:]) + ": hashes to "
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("expected error containing %q, got %v", want, err)
 	}
@@ -648,12 +648,13 @@ func TestReconcileZeroCompleteCanonicalPrefixIsFatal(t *testing.T) {
 }
 
 // TestChainStateRecoveryStrictArtifactsRejectPresentButUnboundFiles: startup
-// must be STRICT, not merely present-file counting. A header or block file that
-// EXISTS but is not bound to the indexed hash is committed-canonical corruption:
-// it is a structural error (first precedence, like the corrupt-undo path), never
-// an absent artifact that would degrade into the zero-prefix or incomplete-suffix
-// class, and it is never truncated or repaired. The chainstate is already at the
-// tip here, so no replay runs — only the strict prefix check can catch it.
+// must be STRICT, not merely present-file counting. A header, block or undo
+// file that EXISTS but is not bound to the indexed hash is committed-canonical
+// corruption: it is a structural error (first precedence, like the corrupt-undo
+// path), never an absent artifact that would degrade into the zero-prefix or
+// incomplete-suffix class, and it is never truncated or repaired. The chainstate
+// is already at the tip here, so no replay runs — only the strict prefix check
+// can catch it.
 func TestChainStateRecoveryStrictArtifactsRejectPresentButUnboundFiles(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -675,6 +676,13 @@ func TestChainStateRecoveryStrictArtifactsRejectPresentButUnboundFiles(t *testin
 			name: "unparseable_block_bytes",
 			corrupt: func(t *testing.T, store *BlockStore, _ []byte, _ []byte) {
 				plantCanonicalArtifact(t, store.blocksDir, devnetGenesisBlockHash, []byte("not a block"))
+			},
+		},
+		{
+			name: "undecodable_undo_record",
+			corrupt: func(t *testing.T, store *BlockStore, _ []byte, _ []byte) {
+				mustWriteFile(t, filepath.Join(store.undoDir,
+					hex.EncodeToString(devnetGenesisBlockHash[:])+".json"), []byte("not json"))
 			},
 		},
 	} {
@@ -705,6 +713,12 @@ func TestChainStateRecoveryStrictArtifactsRejectPresentButUnboundFiles(t *testin
 			}
 			if errors.Is(err, errCanonicalIndexZeroCompletePrefix) || errors.Is(err, errCanonicalIndexIncompleteSuffix) {
 				t.Fatalf("structural error must keep precedence, got %v", err)
+			}
+			// The operator sees this as "chainstate reconcile failed: <err>":
+			// every leaf must name the canonical row it condemns, or the
+			// message identifies no artifact at all.
+			if !strings.Contains(err.Error(), hex.EncodeToString(devnetGenesisBlockHash[:])) {
+				t.Fatalf("refusal must name the corrupt canonical row: %v", err)
 			}
 			if changed {
 				t.Fatalf("a refused recovery must report no change")

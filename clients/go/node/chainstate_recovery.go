@@ -102,29 +102,32 @@ func countCompleteCanonicalPrefix(store *BlockStore, canonical []string) (uint64
 	return validCount, nil
 }
 
+// canonicalArtifactsComplete checks header, then block, then undo. It stamps
+// every propagated structural error with the artifact kind and the indexed
+// hash: the operator reads this as "chainstate reconcile failed: <err>", so a
+// leaf reason like "header hash mismatch" that names no artifact and no row is
+// unactionable. Only os.ErrNotExist is absence, and only absence feeds the
+// complete-prefix count.
 func (bs *BlockStore) canonicalArtifactsComplete(hashHex string) (bool, error) {
 	blockHash, err := parseHex32("canonical hash", hashHex)
 	if err != nil {
 		return false, err
 	}
-	if complete, err := canonicalArtifactExists(bs.headerExists, blockHash); err != nil || !complete {
-		return complete, err
-	}
-	if complete, err := canonicalArtifactExists(bs.blockExists, blockHash); err != nil || !complete {
-		return complete, err
-	}
-	if complete, err := canonicalArtifactExists(bs.undoExists, blockHash); err != nil || !complete {
-		return complete, err
-	}
-	return true, nil
-}
-
-func canonicalArtifactExists(check func([32]byte) error, blockHash [32]byte) (bool, error) {
-	if err := check(blockHash); err != nil {
+	for _, artifact := range []struct {
+		kind  string
+		check func([32]byte) error
+	}{
+		{"header", bs.headerExists},
+		{"block", bs.blockExists},
+		{"undo", bs.undoExists},
+	} {
+		err := artifact.check(blockHash)
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
 		}
-		return false, err
+		if err != nil {
+			return false, fmt.Errorf("canonical %s artifact %x: %w", artifact.kind, blockHash, err)
+		}
 	}
 	return true, nil
 }
@@ -135,9 +138,9 @@ func canonicalArtifactExists(check func([32]byte) error, blockHash [32]byte) (bo
 // storedBlockHeaderHash for the block, GetUndo's hash binding for the undo — so
 // startup and presence can never disagree on what "complete" means. A present
 // but unbound artifact returns a non-ErrNotExist error, which
-// canonicalArtifactExists propagates as a structural error with FIRST
-// precedence, exactly like the corrupt-undo path; only ErrNotExist feeds the
-// complete-prefix count.
+// canonicalArtifactsComplete stamps and propagates as a structural error with
+// FIRST precedence, exactly like the corrupt-undo path; only ErrNotExist feeds
+// the complete-prefix count.
 func (bs *BlockStore) headerExists(blockHash [32]byte) error {
 	headerBytes, err := bs.GetHeaderByHash(blockHash)
 	if err != nil {
@@ -153,10 +156,10 @@ func (bs *BlockStore) blockExists(blockHash [32]byte) error {
 	}
 	observed, step, err := storedBlockHeaderHash(blockBytes)
 	if err != nil {
-		return fmt.Errorf("canonical block artifact for %x: %s: %w", blockHash, step, err)
+		return fmt.Errorf("%s: %w", step, err)
 	}
 	if observed != blockHash {
-		return fmt.Errorf("canonical block artifact for %x hashes to %x", blockHash, observed)
+		return fmt.Errorf("hashes to %x", observed)
 	}
 	return nil
 }
