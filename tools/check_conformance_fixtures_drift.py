@@ -360,7 +360,8 @@ def _flat_stated_da_ids(where: str, inputs: object, fixtures: dict) -> tuple:
     /input/block_includes states one block's complete DA-set identities inline
     and /input/block_complete_da_ids_in_transaction_order states that block's
     da_ids by catalog alias. Neither carries a block binding, exactly like a flat
-    included-set identity. Mirrors Go cp2FlatStatedDAIDs."""
+    included-set identity. Two stated spellings must name the SAME id set: a union
+    would let either drop one. Mirrors Go cp2FlatStatedDAIDs."""
     out, stated = [], False
     includes = _input_value(inputs, "/input/block_includes")
     if includes is not _ABSENT:
@@ -377,8 +378,10 @@ def _flat_stated_da_ids(where: str, inputs: object, fixtures: dict) -> tuple:
     where_in = f"{where}/input/block_complete_da_ids_in_transaction_order"
     if not isinstance(ordered, list):
         raise RuntimeError(f"{where_in}: not an array")
-    out.extend(_fixture_value(fixtures, alias, "bytes32_hex", where_in) for alias in ordered)
-    return out, True
+    ids = [_fixture_value(fixtures, alias, "bytes32_hex", where_in) for alias in ordered]
+    if out and ids and sorted(set(out)) != sorted(set(ids)):
+        raise RuntimeError(f"{where}: stated occurrence spellings disagree on the complete DA-set identities")
+    return out + ids, True
 
 
 def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: list):
@@ -407,7 +410,6 @@ def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: li
     grouped, flat, shapes = {}, [], set()
     if extra_stated:
         shapes.add("flat")
-        flat.extend(extra)
     for alias in aliases:
         value = _fixture_value(
             fixtures, alias, "object", f"{where}/input/block_included_set_identities"
@@ -431,6 +433,9 @@ def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: li
             )
     if len(shapes) > 1:
         raise RuntimeError(f"{where}: mixes flat and grouped included-set identities")
+    if flat and extra and sorted(set(flat)) != sorted(set(extra)):
+        raise RuntimeError(f"{where}: stated occurrence spellings disagree on the complete DA-set identities")
+    flat.extend(extra)
 
     def block_alias(index: int) -> str:
         row = summary[index]
@@ -465,10 +470,11 @@ def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: li
 def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
     """RUB-1208 relation/receipt gate independent of generator byte equality.
 
-    Every relation below is also enforced by the generator
+    Most relations below are also enforced by the generator
     (clients/go/cmd/gen-conformance-fixtures/runtime.go cp2ValidateR1208Payload
-    and cp2ValidateR1208Expected): no field may be accepted on one side and
-    rejected on the other.
+    and cp2ValidateR1208Expected), but neither side is the other's superset: the
+    `fixtures` catalog literals are validated by Go (cp2ValidateFixtures) and the
+    schema, the obligation forward/reverse receipts only here.
     """
     data = load_json_fail_closed(path)
     if not isinstance(data, dict):
@@ -780,6 +786,12 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
             "R1208_SUMMARY_001_SINGLE_BLOCK_NO_DA_B1_HASH"
         ]
 
+    def drop_one_occurrence_spelling(data: dict) -> None:
+        # Both spellings state the same set, so a union let a drop from ONE through.
+        case = case_of(data, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
+        stated = next(i for i in case["input"] if i["pointer"].endswith("da_ids_in_transaction_order"))
+        stated["value_or_alias"] = stated["value_or_alias"][:1]
+
     def borrow_another_cases_da_alias(data: dict) -> None:
         case = case_of(data, "C01-REORG-001", "MAIN")
         case["expected"]["canonical_applied_blocks"][0]["complete_da_ids"][0] = "R1208_DACLEAN_001_EXACT_MATCH_DA_ID_1"
@@ -978,6 +990,7 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("stale retained set_count", stale_retained_set_count, "differs from the 1 the stated prestate derives"),
         ("stale owner claim_count", stale_owner_claim_count, "differs from the 3 the stated prestate derives"),
         ("dropped occurrence on a block_includes case", drop_block_includes_occurrence, "differ from the included-set"),
+        ("one occurrence spelling dropped", drop_one_occurrence_spelling, "stated occurrence spellings disagree"),
         ("occurrence added where the stated count is zero", add_occurrence_where_count_is_zero, "the case states 0"),
         ("summary borrows another case's da alias", borrow_another_cases_da_alias, "outside the case namespace"),
         ("wire disposed row with an old image", wire_disposed_row_with_an_old_image, "invalid for OLD"),
@@ -1020,7 +1033,7 @@ def run_v2_gate(candidate: Path, committed: Path) -> None:
     ):
         try:
             check(path)
-        except (KeyError, TypeError, StopIteration) as exc:
+        except (KeyError, TypeError, StopIteration, IndexError, AttributeError, ValueError) as exc:
             raise RuntimeError(f"canonical_pipeline_v2 {path}: {exc!r}") from exc
 
 

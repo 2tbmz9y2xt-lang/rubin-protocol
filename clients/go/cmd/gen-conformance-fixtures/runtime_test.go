@@ -1614,8 +1614,8 @@ func TestCanonicalPipelineV2ValidatorAcceptsTheStatedShapes(t *testing.T) {
 }
 
 // TestCanonicalPipelineV2AliasesResolveInFixtures pins the one rule JSON Schema
-// cannot express: an alias must exist in the catalog. Until RUB-1208 populates
-// `fixtures`, an alias-carrying row is rejected — the intended fail-closed order.
+// cannot express: an alias must exist in the catalog, so a row naming an alias
+// absent from `fixtures` is rejected — the intended fail-closed order.
 func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	c := cp2ValidCase()
 	c.Input = []cp2Input{{
@@ -2374,6 +2374,11 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "DISCONNECT_EMPTY")
 			c["expected"].(map[string]any)["effects"].(map[string]any)["summary_rows"].(map[string]any)["value"] = true
 		},
+		"one occurrence spelling disagrees": func(t *testing.T, d map[string]any) {
+			// Only the included-set spelling moves; the ordered spelling still names the old id.
+			f := d["fixtures"].(map[string]any)["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
+			f["value"].(map[string]any)["da_id"] = strings.Repeat("0", 63) + "9"
+		},
 		"included-set identity substituted": func(t *testing.T, d map[string]any) {
 			fixtures := d["fixtures"].(map[string]any)
 			entry := fixtures["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
@@ -2423,6 +2428,7 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"summary_rows effect drift":                          "effects.summary_rows",
 		"summary_rows effect is a bool on a zero-row case":   "effects.summary_rows=true differs from the 0 published rows",
 		"included-set identity substituted":                  "differ from the included-set identities",
+		"one occurrence spelling disagrees":                  "stated occurrence spellings disagree",
 		"standalone disconnect publishes a row":              "standalone disconnect and must carry an exact empty summary",
 		"connected block dropped from the summary":           "summary carries 2 rows, the case states connect_count 3",
 	}

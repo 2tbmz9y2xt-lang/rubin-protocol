@@ -3380,7 +3380,6 @@ func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixt
 	shapes := map[string]bool{}
 	if extraStated {
 		shapes["flat"] = true
-		flat = append(flat, extra...)
 	}
 	for _, alias := range aliases {
 		f, err := cp2CaseFixture(fixtures, where, alias, "object")
@@ -3417,6 +3416,10 @@ func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixt
 	if len(shapes) > 1 {
 		return nil, fmt.Errorf("%s mixes flat and grouped included-set identities", where)
 	}
+	if len(flat) > 0 && len(extra) > 0 && !slices.Equal(cp2SortedUnique(flat), cp2SortedUnique(extra)) {
+		return nil, fmt.Errorf("%s stated occurrence spellings disagree on the complete DA-set identities", where)
+	}
+	flat = append(flat, extra...)
 
 	out := map[string][]string{}
 	if shapes["grouped"] {
@@ -3473,7 +3476,8 @@ func cp2InputValue(inputs []any, pointer string) (any, bool) {
 // `/input/block_includes` states one block's complete DA-set identities inline,
 // and `/input/block_complete_da_ids_in_transaction_order` states that block's
 // da_ids by catalog alias. Neither carries a block binding, exactly like a flat
-// included-set identity, so a case stating either binds its summary row.
+// included-set identity, so a case stating either binds its summary row. Two
+// stated spellings must name the SAME id set: a union would let either drop one.
 func cp2FlatStatedDAIDs(where string, inputs []any, fixtures map[string]cp2Fixture) ([]string, bool, error) {
 	var out []string
 	stated := false
@@ -3505,6 +3509,7 @@ func cp2FlatStatedDAIDs(where string, inputs []any, fixtures map[string]cp2Fixtu
 	if !ok {
 		return nil, false, fmt.Errorf("%s/input/block_complete_da_ids_in_transaction_order is not an array", where)
 	}
+	var ordered []string
 	for _, v := range ids {
 		alias, _ := v.(string)
 		f, err := cp2CaseFixture(fixtures, where, alias, "bytes32_hex")
@@ -3512,9 +3517,12 @@ func cp2FlatStatedDAIDs(where string, inputs []any, fixtures map[string]cp2Fixtu
 			return nil, false, fmt.Errorf("%s/input/block_complete_da_ids_in_transaction_order: %w", where, err)
 		}
 		id, _ := f.Value.(string)
-		out = append(out, id)
+		ordered = append(ordered, id)
 	}
-	return out, true, nil
+	if len(out) > 0 && len(ordered) > 0 && !slices.Equal(cp2SortedUnique(out), cp2SortedUnique(ordered)) {
+		return nil, false, fmt.Errorf("%s stated occurrence spellings disagree on the complete DA-set identities", where)
+	}
+	return append(out, ordered...), true, nil
 }
 
 func cp2SetIdentityDAID(where, alias string, raw any) (string, error) {

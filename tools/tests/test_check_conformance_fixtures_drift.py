@@ -322,6 +322,10 @@ class V2SemanticGateExitCodeTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("ERROR: canonical_pipeline_v2 ", err)
         self.assertIn("KeyError('rows')", err)
+        for exc in (IndexError("rows[0]"), AttributeError("pop"), ValueError("bad literal")):
+            with mock.patch.object(m, "validate_canonical_pipeline_v2_semantics", side_effect=exc):
+                rc, err = self._run(v2_body=self.BROKEN_V2)
+            self.assertEqual((rc, repr(exc) in err, "Traceback" in err), (1, True, False), err)
         # Outside the gate the same exception type stays unhandled: the tool must
         # not turn a bug in its own machinery into a fixture verdict.
         with mock.patch.dict(os.environ, {m.FAKE_REPO_ENV: "1"}):
@@ -401,7 +405,7 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
         jsonschema.Draft202012Validator.check_schema(schema)
         return jsonschema.Draft202012Validator(schema), data
 
-    def test_committed_pair_validates_and_is_a_dormant_building_revision(self):
+    def test_committed_pair_validates_and_is_a_building_revision(self):
         validator, data = self._load()
         errors = [
             f"{'.'.join(str(p) for p in e.absolute_path)}: {e.message}"
