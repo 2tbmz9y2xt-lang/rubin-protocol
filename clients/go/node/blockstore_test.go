@@ -2300,6 +2300,7 @@ func sameLengthDifferentBytes(raw []byte) []byte {
 // the VISIBLE BYTES. The error text never classifies, a stale RAM identity never
 // classifies, a matching LENGTH is not an identity, and only the exact new image
 // publishes.
+// Every row also pins single use: one write, a spent second commit, one image.
 func TestPreparedCanonicalIndexPostCommitVisibleBytesClassify(t *testing.T) {
 	row0, row1, row2 := canonicalIndexRow(0x40), canonicalIndexRow(0x41), canonicalIndexRow(0x42)
 	postCommitCause := errors.New("post-commit fault")
@@ -2631,7 +2632,7 @@ func TestInspectBlockPresenceConcurrentWithPublication(t *testing.T) {
 			published.Store(true)
 		case got.Class == BlockPresenceAbsent && !was:
 		default:
-			t.Errorf("presence during publication = %+v", got)
+			t.Errorf("presence during publication = %s leaves=%+v", got, got.Leaves)
 			return false
 		}
 		return true
@@ -2642,7 +2643,7 @@ func TestInspectBlockPresenceConcurrentWithPublication(t *testing.T) {
 		return
 	}
 	if got := store.InspectBlockPresence(fixture.hash); got.Class != BlockPresenceLocalStoreError || got.Scope != BlockPresenceScopeCanonical {
-		t.Fatalf("presence after publication = %+v, want canonical-scoped store evidence", got)
+		t.Fatalf("presence after publication = %s leaves=%+v, want canonical-scoped store evidence", got, got.Leaves)
 	}
 }
 
@@ -3117,7 +3118,7 @@ func TestInspectBlockPresenceTruthTable(t *testing.T) {
 			before := fixture.artifactFingerprint(t)
 
 			if got := fixture.store.InspectBlockPresence(fixture.hash); got != want {
-				t.Fatalf("presence = %+v (%s), want %+v (%s)", got, got, want, want)
+				t.Fatalf("presence = %s leaves=%+v, want %s leaves=%+v", got, got.Leaves, want, want.Leaves)
 			}
 			if after := fixture.artifactFingerprint(t); after != before {
 				t.Fatalf("inspection rewrote an artifact")
@@ -3216,7 +3217,7 @@ func TestInspectBlockPresenceHostileArtifactSpellings(t *testing.T) {
 
 			want := BlockPresence{Class: tc.wantClass, Scope: tc.wantScope, Leaves: tc.wantLeaves}
 			if got := fixture.store.InspectBlockPresence(fixture.hash); got != want {
-				t.Fatalf("noncanonical presence = %+v (%s), want %+v (%s)", got, got, want, want)
+				t.Fatalf("noncanonical presence = %s leaves=%+v, want %s leaves=%+v", got, got.Leaves, want, want.Leaves)
 			}
 			if after := fixture.artifactFingerprint(t); after != before {
 				t.Fatalf("inspection rewrote an artifact")
@@ -3230,7 +3231,7 @@ func TestInspectBlockPresenceHostileArtifactSpellings(t *testing.T) {
 				wantCanonical = BlockPresence{Class: BlockPresenceCanonical, Leaves: tc.wantLeaves}
 			}
 			if got := fixture.store.InspectBlockPresence(fixture.hash); got != wantCanonical {
-				t.Fatalf("canonical presence = %+v (%s), want %+v (%s)", got, got, wantCanonical, wantCanonical)
+				t.Fatalf("canonical presence = %s leaves=%+v, want %s leaves=%+v", got, got.Leaves, wantCanonical, wantCanonical.Leaves)
 			}
 		})
 	}
@@ -3300,6 +3301,6 @@ func TestInspectBlockPresenceNilStoreIsStoreError(t *testing.T) {
 		Leaves: BlockArtifactLeaves{Block: BlockArtifactInvalid, Header: BlockArtifactInvalid, Undo: BlockArtifactInvalid},
 	}
 	if got := store.InspectBlockPresence([32]byte{}); got != want {
-		t.Fatalf("nil-store presence = %+v (%s), want %+v", got, got, want)
+		t.Fatalf("nil-store presence = %s leaves=%+v, want %s leaves=%+v", got, got.Leaves, want, want.Leaves)
 	}
 }

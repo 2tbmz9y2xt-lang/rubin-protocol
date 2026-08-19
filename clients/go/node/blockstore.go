@@ -1317,7 +1317,11 @@ func (bs *BlockStore) inspectHeaderLeaf(blockHash [32]byte) BlockArtifactState {
 	if err != nil {
 		return artifactStateFromErr(err)
 	}
-	return artifactStateFromErr(validateBlockHeaderHash(headerBytes, blockHash))
+	// A length/hash failure over bytes already read is computation, never absence.
+	if validateBlockHeaderHash(headerBytes, blockHash) != nil {
+		return BlockArtifactInvalid
+	}
+	return BlockArtifactValid
 }
 
 // inspectUndoLeaf: GetUndo binds the record to the hash the CALLER asked for
