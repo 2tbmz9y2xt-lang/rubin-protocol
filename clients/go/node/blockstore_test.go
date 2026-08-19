@@ -2445,14 +2445,25 @@ func TestPreparedCanonicalIndexTerminalUnknownLeavesIdentityStale(t *testing.T) 
 // heights into one height-by-hash entry, so the store would run with a map that
 // does not describe its own list. The cross-client decoder is untouched (Rust
 // still accepts it — startup divergence window, RUB-897); this is the Go-side
-// open guard, and it covers Create/Open/reload alike.
+// guard, covering Create/Open/reload alike and the one legacy writer that
+// builds its own map.
 func TestBlockStoreOpenRejectsDuplicateCanonicalRow(t *testing.T) {
 	root := BlockStorePath(t.TempDir())
 	store := mustCreateBlockStore(t, root)
 	row := canonicalIndexRow(0xf0)
 	mustPlantIndex(t, store, mustEncodeCanonicalIndex(t, []string{row, row}))
-	if _, err := OpenBlockStore(root); !errors.Is(err, errCanonicalIndexDuplicateRow) {
-		t.Fatalf("OpenBlockStore err = %v, want the duplicate-row refusal", err)
+	if _, err := OpenBlockStore(root); !errors.Is(err, errCanonicalIndexDuplicateRow) || !strings.Contains(err.Error(), store.indexPath) {
+		t.Fatalf("OpenBlockStore err = %v, want the duplicate-row refusal naming %s", err, store.indexPath)
+	}
+
+	// The write side refuses the same list before touching the file, so the node
+	// cannot persist an index it would refuse to reopen.
+	planted := mustReadIndexFile(t, store)
+	if err := store.RestoreCanonicalIndex([]string{row, row}); !errors.Is(err, errCanonicalIndexDuplicateRow) {
+		t.Fatalf("RestoreCanonicalIndex err = %v, want the duplicate-row refusal", err)
+	}
+	if !bytes.Equal(mustReadIndexFile(t, store), planted) {
+		t.Fatalf("a refused restore rewrote the canonical index")
 	}
 }
 
@@ -2580,6 +2591,7 @@ func TestInspectBlockPresenceConcurrentWithPublication(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			member := false
 			for {
 				select {
 				case <-stop:
@@ -2588,9 +2600,13 @@ func TestInspectBlockPresenceConcurrentWithPublication(t *testing.T) {
 				}
 				// Nothing is stored, so the hash is ABSENT while it is not a
 				// canonical member and canonical-scoped store-integrity
-				// evidence once the publication makes it one.
-				switch got := store.InspectBlockPresence(fixture.hash); got.Class {
-				case BlockPresenceAbsent, BlockPresenceLocalStoreError:
+				// evidence once the publication makes it one — and never ABSENT
+				// again afterwards, or a reader observed a torn image.
+				got := store.InspectBlockPresence(fixture.hash)
+				member = member || got.Class == BlockPresenceLocalStoreError
+				switch {
+				case got.Class == BlockPresenceAbsent && !member:
+				case got.Class == BlockPresenceLocalStoreError && got.Scope == BlockPresenceScopeCanonical:
 				default:
 					t.Errorf("presence during publication = %+v", got)
 					return
@@ -3246,7 +3262,7 @@ func TestInspectBlockPresenceFrozenAndLocalIdentityStrings(t *testing.T) {
 
 // TestInspectBlockPresenceNilStoreIsStoreError: a nil store proves nothing about
 // any artifact, and the class set is closed — so it reports the noncanonical
-// store error with every leaf unknown rather than inventing a new row or
+// store error with every leaf invalid rather than inventing a new row or
 // dereferencing nil.
 func TestInspectBlockPresenceNilStoreIsStoreError(t *testing.T) {
 	var store *BlockStore

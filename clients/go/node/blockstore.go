@@ -162,7 +162,7 @@ func newBlockStore(paths blockStorePaths, index blockStoreIndexDisk, indexRaw []
 		return nil, err
 	}
 	if len(canonicalHeightByHash) != len(index.Canonical) {
-		return nil, errCanonicalIndexDuplicateRow
+		return nil, fmt.Errorf("%w: %s", errCanonicalIndexDuplicateRow, paths.index)
 	}
 	return &BlockStore{
 		rootPath:   paths.root,
@@ -327,6 +327,9 @@ func (bs *BlockStore) RestoreCanonicalIndex(canonical []string) error {
 	if err != nil {
 		return err
 	}
+	if len(nextIndex) != len(nextCanonical) {
+		return errCanonicalIndexDuplicateRow
+	}
 	bs.stateMu.Lock()
 	defer bs.stateMu.Unlock()
 	bs.index.Canonical = nextCanonical
@@ -444,8 +447,15 @@ func chainWorkHeaderCorruption(blockHash [32]byte, reason string, err error) err
 
 // errCanonicalIndexDuplicateRow: a repeated hash collapses two heights into one
 // height-by-hash entry, so the store would run with a map that does not
-// describe its own list. It is refused on the Go side at every constructor and
-// at prepare. The shared on-disk decoder is deliberately NOT tightened with it:
+// describe its own list. It is refused on the Go side at every constructor, at
+// prepare, and at RestoreCanonicalIndex — the one legacy writer that builds the
+// map from a caller-supplied list. No honest writer produces one: a hash is
+// canonical at a single height in any prev-linked chain, RestoreCanonicalIndex
+// replays a CanonicalIndexSnapshot of this same store, and SetCanonicalTip
+// appends the header its caller just connected. That is a caller invariant, not
+// a structural one, and the writer-side check is one length comparison — so the
+// node cannot persist an index it would refuse to reopen. The shared on-disk
+// decoder is deliberately NOT tightened with it:
 // decodeBlockStoreIndex is cross-client mirrored (Rust load_blockstore_index)
 // and would need its sibling to move in step — Rust still accepts such an
 // index, a startup divergence window owned by RUB-897.
@@ -961,7 +971,7 @@ func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalInde
 	// while the success path publishes — one transition with two different RAM
 	// outcomes (the publication also resets the derived chain-work cache).
 	if bytes.Equal(oldRaw, newRaw) {
-		return nil, errors.New("prepared canonical index is a no-op: next list equals the visible index")
+		return nil, errors.New("prepared canonical index is a no-op: the planned image equals the visible index bytes")
 	}
 	return &preparedCanonicalIndex{
 		oldRaw:       append([]byte(nil), oldRaw...),

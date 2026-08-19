@@ -511,8 +511,8 @@ func TestTargetScheduleRuntimeRecoveryDerivesPerBlock(t *testing.T) {
 	// its own right — structural error, chainstate untouched, nothing written.
 	refused := NewChainState()
 	refusedBefore := refused.view()
-	if _, rerr := ReconcileChainStateWithBlockStore(refused, store, cfg); rerr == nil || errors.Is(rerr, errTargetHistoryCorrupt) {
-		t.Fatalf("startup err=%v, want a structural refusal before replay", rerr)
+	if _, rerr := ReconcileChainStateWithBlockStore(refused, store, cfg); !errors.Is(rerr, errCanonicalArtifactUnbound) {
+		t.Fatalf("startup err=%v, want the unbound-artifact refusal before replay", rerr)
 	}
 	if after := refused.view(); after != refusedBefore {
 		t.Fatalf("chainstate mutated before the refusal: %+v -> %+v", refusedBefore, after)

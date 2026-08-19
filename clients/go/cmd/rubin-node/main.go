@@ -564,14 +564,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// constructor itself fails later, the already-repaired chainstate is
 	// durable on disk.
 	//
-	// Both steps are skipped under --dry-run, which reports the datadir and
+	// All three steps — VerifyGenesisAnchor, ReconcileChainStateWithBlockStore
+	// and Save — are skipped under --dry-run, which reports the datadir and
 	// must not write to it: Save rewrites the snapshot (temp file + rename,
-	// so a fresh inode) on every single invocation. The banners below
-	// therefore describe the chainstate as loaded from disk — a snapshot
-	// that disagrees with the blockstore is reported, not fixed, and a
-	// datadir the mutating path would refuse is shown intact. Ordinary
-	// startup is unaffected: same two calls, same order, same errors, same
-	// exit codes.
+	// so a fresh inode) on every single invocation, and the reconcile —
+	// write-free since RUB-890 — would still reset the in-memory chainstate
+	// the banners report. The banners below therefore describe the chainstate
+	// as loaded from disk — a snapshot that disagrees with the blockstore is
+	// reported, not fixed, and a datadir the mutating path would refuse is
+	// shown intact. Ordinary startup is unaffected: same three calls, same
+	// order, same errors, same exit codes.
 	if !*dryRun {
 		// RUB-1134 genesis anchor: a non-empty canonical index whose row 0 is
 		// not the configured genesis hash is a foreign datadir. Checked BEFORE

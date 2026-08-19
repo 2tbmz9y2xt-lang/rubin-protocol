@@ -3660,8 +3660,17 @@ func TestRunStartupRefusesIncompleteCanonicalSuffix(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
 	}
-	if !strings.Contains(errOut.String(), "chainstate reconcile failed") {
-		t.Fatalf("expected reconcile failure in stderr, got %q", errOut.String())
+	// The specific fail-closed class, not just the generic wrapper: the wrapper
+	// is shared with every other reconcile failure, so it would stay green if
+	// the refusal degraded into a plain error.
+	for _, want := range []string{
+		"chainstate reconcile failed",
+		"persisted canonical index has an incomplete committed suffix",
+		"index declares 2 entries; the complete header/block/undo prefix ends after 1",
+	} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Fatalf("expected %q in stderr, got %q", want, errOut.String())
+		}
 	}
 
 	assertNoFilesystemWrite(t, before, datadirSnapshot(t, storeRoot))

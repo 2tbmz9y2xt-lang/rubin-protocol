@@ -120,7 +120,8 @@ func requireCompleteCanonicalPrefix(store *BlockStore) error {
 // of row i-1, not that row's header: the index is the identity, so an absent
 // header at i-1 leaves its own row unlinked but still anchors row i. Row 0 has
 // no predecessor — the genesis anchor is VerifyGenesisAnchor's job — and a row
-// whose header is absent carries no prev to compare.
+// whose header is absent carries no prev to compare. Within a row the artifact
+// scan runs FIRST, so an unbound artifact outranks that row's linkage violation.
 func countCompleteCanonicalPrefix(store *BlockStore, canonical []string) (uint64, error) {
 	validCount := uint64(len(canonical))
 	var previous [32]byte
@@ -201,7 +202,9 @@ func (bs *BlockStore) canonicalArtifactsComplete(hashHex string) (canonicalRowAr
 // FIRST precedence, exactly like the corrupt-undo path; only ErrNotExist feeds
 // the complete-prefix count. Both carry the errCanonicalArtifactUnbound
 // identity alongside their own detail, so a caller can tell "present but not
-// bound to this row" from a plain read failure without matching on text.
+// bound to this row" from a plain read failure without matching on text. The
+// sentinel marks IDENTITY failures only: a read-class refusal — absence, or the
+// RUB-1057 size bound — propagates unwrapped and carries neither.
 //
 // headerExists also returns the parent the validated header names, so the
 // linkage rule is proved from the bytes this read already holds instead of a
