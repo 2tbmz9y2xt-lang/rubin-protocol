@@ -66,6 +66,9 @@ var errCanonicalIndexIncompleteSuffix = errors.New("persisted canonical index ha
 // structural/IO/corruption errors first, then the zero-complete-prefix literal,
 // then the incomplete-suffix refusal.
 func requireCompleteCanonicalPrefix(store *BlockStore) error {
+	if store == nil {
+		return errors.New("nil blockstore")
+	}
 	canonical, err := store.CanonicalIndexSnapshot()
 	if err != nil {
 		return err
@@ -80,7 +83,7 @@ func requireCompleteCanonicalPrefix(store *BlockStore) error {
 	if validCount == 0 {
 		return errCanonicalIndexZeroCompletePrefix
 	}
-	return fmt.Errorf("%w: index declares %d entries but only %d have a complete header/block/undo set",
+	return fmt.Errorf("%w: index declares %d entries; the complete header/block/undo prefix ends after %d",
 		errCanonicalIndexIncompleteSuffix, len(canonical), validCount)
 }
 
@@ -126,14 +129,36 @@ func canonicalArtifactExists(check func([32]byte) error, blockHash [32]byte) (bo
 	return true, nil
 }
 
+// headerExists and blockExists are STRICT: an artifact that is merely present
+// is not a complete canonical artifact. They apply the same identity rules as
+// InspectBlockPresence's leaves — validateBlockHeaderHash for the header,
+// storedBlockHeaderHash for the block, GetUndo's hash binding for the undo — so
+// startup and presence can never disagree on what "complete" means. A present
+// but unbound artifact returns a non-ErrNotExist error, which
+// canonicalArtifactExists propagates as a structural error with FIRST
+// precedence, exactly like the corrupt-undo path; only ErrNotExist feeds the
+// complete-prefix count.
 func (bs *BlockStore) headerExists(blockHash [32]byte) error {
-	_, err := bs.GetHeaderByHash(blockHash)
-	return err
+	headerBytes, err := bs.GetHeaderByHash(blockHash)
+	if err != nil {
+		return err
+	}
+	return validateBlockHeaderHash(headerBytes, blockHash)
 }
 
 func (bs *BlockStore) blockExists(blockHash [32]byte) error {
-	_, err := bs.GetBlockByHash(blockHash)
-	return err
+	blockBytes, err := bs.GetBlockByHash(blockHash)
+	if err != nil {
+		return err
+	}
+	observed, step, err := storedBlockHeaderHash(blockBytes)
+	if err != nil {
+		return fmt.Errorf("canonical block artifact for %x: %s: %w", blockHash, step, err)
+	}
+	if observed != blockHash {
+		return fmt.Errorf("canonical block artifact for %x hashes to %x", blockHash, observed)
+	}
+	return nil
 }
 
 func (bs *BlockStore) undoExists(blockHash [32]byte) error {
@@ -252,10 +277,9 @@ func replayCanonicalBlocks(state *ChainState, store *BlockStore, cfg SyncConfig,
 // cmd/rubin-node/main.go, which exits 2 BEFORE chainState.Save, before
 // newSyncEngineFn, and before the mempool, peer manager and every service
 // start. This helper writes nothing, and neither does any other step of the
-// reconcile: the incomplete-suffix truncation that used to run first is gone,
-// so a failed recovery leaves the datadir byte-identical. The in-memory reset
-// reconcileReplayStart may have done is not durable — chainState.Save is never
-// reached.
+// reconcile, so a failed recovery leaves the datadir byte-identical. The
+// in-memory reset reconcileReplayStart may have done is not durable —
+// chainState.Save is never reached.
 func replayExpectedTarget(store *BlockStore, cfg SyncConfig, height uint64, tipHeight uint64) (*[32]byte, error) {
 	if height == 0 {
 		return cfg.ExpectedTarget, nil
@@ -294,9 +318,10 @@ func replayBlockInputs(store *BlockStore, blockHash [32]byte, height uint64) ([]
 
 // storedBlockHeaderHash re-derives the content-addressed identity of stored
 // block bytes: parse, then hash the contained header. step names the stage that
-// failed so each caller keeps its own message. It is shared by replay's re-hash
-// defense and InspectBlockPresence's block leaf, so the two can never disagree
-// on what makes stored block bytes valid.
+// failed so each caller keeps its own message, and is MEANINGFUL ONLY when err
+// is non-nil. It is shared by replay's re-hash defense, startup's strict
+// canonical-artifact check and InspectBlockPresence's block leaf, so none of
+// them can disagree on what makes stored block bytes valid.
 func storedBlockHeaderHash(blockBytes []byte) (blockHash [32]byte, step string, err error) {
 	parsed, err := consensus.ParseBlockBytes(blockBytes)
 	if err != nil {

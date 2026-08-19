@@ -205,8 +205,10 @@ func TestReconcileChainStateWithBlockStore_InputValidationAndNoopPaths(t *testin
 // TestChainStateRecoveryReplayHashMessagesArePinned: verifyReplayBlockHash now
 // composes its per-stage prefix from the shared identity helper. The two stages
 // reachable through it must still produce the exact baseline strings — the
-// third ("hash header") is defense-in-depth only, since ParseBlockBytes cannot
-// hand back a header of the wrong length.
+// third ("hash header") is defense-in-depth only: ParseBlockBytes returns
+// HeaderBytes sliced to exactly BLOCK_HEADER_BYTES
+// (consensus/block_basic.go:71), and the only error BlockHash returns is a
+// header length other than BLOCK_HEADER_BYTES (consensus/block_parse.go:56-59).
 func TestChainStateRecoveryReplayHashMessagesArePinned(t *testing.T) {
 	parsed, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
 	if err != nil {
@@ -342,14 +344,11 @@ func TestReconcileChainStateWithBlockStorePreservesWidePersistedSupply(t *testin
 	}
 }
 
-// TestChainStateRecoveryIncompleteCanonicalSuffixIsFatal replaces the baseline
-// truncate-the-suffix behavior. A committed canonical row whose undo record is
-// gone is corruption of committed chain, not garbage to drop: recovery refuses,
-// writes NOTHING (the writeFileAtomicFn probe is never reached), leaves the RAM
-// index, the on-disk index bytes and the chainstate exactly as they were, and
-// never reaches any service start. It also carries the "no index write occurs"
-// row of the deleted TestTruncateIncompleteCanonicalSuffix_PropagatesIndexWriteFailure:
-// with no write there is no write failure to propagate.
+// TestChainStateRecoveryIncompleteCanonicalSuffixIsFatal: a committed canonical
+// row whose undo record is gone is corruption of committed chain, not garbage to
+// drop. Recovery refuses, writes NOTHING (the writeFileAtomicFn probe is never
+// reached), leaves the RAM index, the on-disk index bytes and the chainstate
+// exactly as they were, and never reaches any service start.
 func TestChainStateRecoveryIncompleteCanonicalSuffixIsFatal(t *testing.T) {
 	dir := t.TempDir()
 	store, liveState, cfg := storeAtGenesis(t, dir)
@@ -358,7 +357,7 @@ func TestChainStateRecoveryIncompleteCanonicalSuffixIsFatal(t *testing.T) {
 		t.Fatalf("Remove(block1 undo): %v", err)
 	}
 
-	markerPath := filepath.Join(BlockStorePath(dir), "index.json")
+	markerPath := store.indexPath
 	indexBefore, err := os.ReadFile(markerPath) // #nosec G304 -- test-local path.
 	if err != nil {
 		t.Fatalf("read marker: %v", err)
@@ -380,7 +379,7 @@ func TestChainStateRecoveryIncompleteCanonicalSuffixIsFatal(t *testing.T) {
 	if changed {
 		t.Fatalf("a refused recovery must report no change")
 	}
-	if want := "index declares 2 entries but only 1 have a complete header/block/undo set"; !strings.Contains(err.Error(), want) {
+	if want := "index declares 2 entries; the complete header/block/undo prefix ends after 1"; !strings.Contains(err.Error(), want) {
 		t.Fatalf("message = %q, want it to contain %q", err.Error(), want)
 	}
 	if writes != 0 {
@@ -508,9 +507,16 @@ func TestReconcileChainStateWithBlockStore_ResetsDirtyTiplessSnapshotBeforeRepla
 // pins the cross-client re-hash defense: a parseable-but-wrong
 // <hash>.bin (block 1's payload overwritten with block 2's bytes,
 // which still link to b1_hash as prev_hash so chain-integrity
-// inside ConnectBlock would PASS) MUST be rejected by reconcile's
-// pre-replay re-hash check. Mirror of Rust
+// inside ConnectBlock would PASS) MUST be rejected before any state
+// changes. Mirror of Rust
 // `reconcile_propagates_corrupt_canonical_block_artifact`.
+//
+// Go-primary divergence (RUB-890, sibling RUB-897): the STRICT canonical
+// artifact check now catches this swap in the complete-prefix scan, ahead of
+// replay, so the message is the artifact one rather than the replay one — a
+// strictly earlier refusal on the same input. Replay's own re-hash defense is
+// unchanged and still pinned by
+// TestChainStateRecoveryReplayHashMessagesArePinned.
 func TestReconcileChainStateWithBlockStore_PropagatesCorruptBlockBytesSwap(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
@@ -570,7 +576,10 @@ func TestReconcileChainStateWithBlockStore_PropagatesCorruptBlockBytesSwap(t *te
 	if err == nil {
 		t.Fatalf("expected canonical-artifact-corruption error, got nil")
 	}
-	want := "canonical artifact corruption during chainstate replay at height 1"
+	if errors.Is(err, errCanonicalIndexZeroCompletePrefix) || errors.Is(err, errCanonicalIndexIncompleteSuffix) {
+		t.Fatalf("a corrupt artifact must keep structural precedence, got %v", err)
+	}
+	want := "canonical block artifact for " + hex.EncodeToString(block1Hash[:]) + " hashes to "
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("expected error containing %q, got %v", want, err)
 	}
@@ -598,14 +607,14 @@ func storeAtGenesis(t *testing.T, dir string) (*BlockStore, *ChainState, SyncCon
 }
 
 // B2 rules 5-6 + parity matrix row 12: a canonical index that claims blocks but
-// has NO complete artifact set at height 0 is fatal. The guard fires before
-// TruncateCanonical, before any chainstate reset/save, with the exact
-// cross-client message. Rust mirror:
+// has NO complete artifact set at height 0 is fatal. The guard fires before any
+// index write and before any chainstate reset/save, with the exact cross-client
+// message. Rust mirror:
 // `zero_complete_canonical_prefix_is_fatal_before_any_mutation`.
 func TestReconcileZeroCompleteCanonicalPrefixIsFatal(t *testing.T) {
 	dir := t.TempDir()
 	store, liveState, cfg := storeAtGenesis(t, dir)
-	markerPath := filepath.Join(BlockStorePath(dir), "index.json")
+	markerPath := store.indexPath
 	if err := os.Remove(filepath.Join(store.headersDir, hex.EncodeToString(devnetGenesisBlockHash[:])+".bin")); err != nil {
 		t.Fatalf("Remove(genesis header): %v", err)
 	}
@@ -628,13 +637,117 @@ func TestReconcileZeroCompleteCanonicalPrefixIsFatal(t *testing.T) {
 		t.Fatalf("read marker: %v", err)
 	}
 	if string(indexAfter) != string(indexBefore) {
-		t.Fatalf("guard must fire before TruncateCanonical(0): marker changed")
+		t.Fatalf("guard must fire before any index write: marker changed")
 	}
 	if got, err := store.CanonicalIndexSnapshot(); err != nil || len(got) != 1 {
 		t.Fatalf("canonical index = %v (%v), want length 1", got, err)
 	}
 	if after := state.view(); after != before {
 		t.Fatalf("chainstate mutated before the guard: %+v -> %+v", before, after)
+	}
+}
+
+// TestChainStateRecoveryStrictArtifactsRejectPresentButUnboundFiles: startup
+// must be STRICT, not merely present-file counting. A header or block file that
+// EXISTS but is not bound to the indexed hash is committed-canonical corruption:
+// it is a structural error (first precedence, like the corrupt-undo path), never
+// an absent artifact that would degrade into the zero-prefix or incomplete-suffix
+// class, and it is never truncated or repaired. The chainstate is already at the
+// tip here, so no replay runs — only the strict prefix check can catch it.
+func TestChainStateRecoveryStrictArtifactsRejectPresentButUnboundFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		corrupt func(t *testing.T, store *BlockStore, otherBlock []byte, otherHeader []byte)
+	}{
+		{
+			name: "header_of_another_block",
+			corrupt: func(t *testing.T, store *BlockStore, _ []byte, otherHeader []byte) {
+				plantCanonicalArtifact(t, store.headersDir, devnetGenesisBlockHash, otherHeader)
+			},
+		},
+		{
+			name: "block_bytes_of_another_block",
+			corrupt: func(t *testing.T, store *BlockStore, otherBlock []byte, _ []byte) {
+				plantCanonicalArtifact(t, store.blocksDir, devnetGenesisBlockHash, otherBlock)
+			},
+		},
+		{
+			name: "unparseable_block_bytes",
+			corrupt: func(t *testing.T, store *BlockStore, _ []byte, _ []byte) {
+				plantCanonicalArtifact(t, store.blocksDir, devnetGenesisBlockHash, []byte("not a block"))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, liveState, cfg := storeAtGenesis(t, dir)
+			otherBlock, otherHeader := otherDevnetBlock(t, cfg)
+
+			indexBefore, err := os.ReadFile(store.indexPath) // #nosec G304 -- test-local path.
+			if err != nil {
+				t.Fatalf("read marker: %v", err)
+			}
+			tc.corrupt(t, store, otherBlock, otherHeader)
+
+			prevWrite := writeFileAtomicFn
+			t.Cleanup(func() { writeFileAtomicFn = prevWrite })
+			writes := 0
+			writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
+				writes++
+				return prevWrite(path, data, mode)
+			}
+
+			state := cloneChainState(liveState)
+			before := state.view()
+			changed, err := ReconcileChainStateWithBlockStore(state, store, cfg)
+			if err == nil {
+				t.Fatalf("a present-but-unbound canonical artifact must fail closed")
+			}
+			if errors.Is(err, errCanonicalIndexZeroCompletePrefix) || errors.Is(err, errCanonicalIndexIncompleteSuffix) {
+				t.Fatalf("structural error must keep precedence, got %v", err)
+			}
+			if changed {
+				t.Fatalf("a refused recovery must report no change")
+			}
+			if writes != 0 {
+				t.Fatalf("fail-closed recovery performed %d atomic writes, want 0", writes)
+			}
+			indexAfter, err := os.ReadFile(store.indexPath) // #nosec G304 -- test-local path.
+			if err != nil {
+				t.Fatalf("read marker: %v", err)
+			}
+			if !bytes.Equal(indexAfter, indexBefore) {
+				t.Fatalf("canonical index bytes changed on the fail-closed path")
+			}
+			if after := state.view(); after != before {
+				t.Fatalf("chainstate mutated before the refusal: %+v -> %+v", before, after)
+			}
+		})
+	}
+}
+
+// otherDevnetBlock builds a second valid devnet block: its bytes parse and its
+// header hashes, but to a DIFFERENT identity than genesis — the strongest
+// "present but not bound" spelling.
+func otherDevnetBlock(t *testing.T, cfg SyncConfig) (blockBytes []byte, headerBytes []byte) {
+	t.Helper()
+	genesis, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(genesis): %v", err)
+	}
+	other := buildSingleTxBlock(t, devnetGenesisBlockHash, *cfg.ExpectedTarget, genesis.Header.Timestamp+1,
+		coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, 1))
+	parsed, err := consensus.ParseBlockBytes(other)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(other): %v", err)
+	}
+	return other, parsed.HeaderBytes
+}
+
+func plantCanonicalArtifact(t *testing.T, dir string, blockHash [32]byte, content []byte) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, hex.EncodeToString(blockHash[:])+".bin"), content, 0o600); err != nil {
+		t.Fatalf("plant artifact: %v", err)
 	}
 }
 

@@ -743,8 +743,11 @@ func writeCanonicalIndexFile(path string, index blockStoreIndexDisk) ([]byte, er
 	return raw, nil
 }
 
-// saveBlockStoreIndex is the write step for callers that track no visible
-// identity of their own.
+// saveBlockStoreIndex is a TEST-ONLY shim, retained for the envelope
+// round-trip probe in store_envelope_test.go. It writes the index but updates
+// no store's visible identity, so no BlockStore method may call it: a store
+// whose indexRaw stopped naming the bytes on disk would make a strict readback
+// classify against an image the disk does not hold.
 func saveBlockStoreIndex(path string, index blockStoreIndexDisk) error {
 	_, err := writeCanonicalIndexFile(path, index)
 	return err
@@ -752,16 +755,24 @@ func saveBlockStoreIndex(path string, index blockStoreIndexDisk) error {
 
 // saveCanonicalIndexLocked is the write step of the legacy mutate-then-save
 // path: the caller already mutated bs.index under stateMu.Lock, so this records
-// the committed bytes as the new visible identity. A failed write leaves
-// indexRaw naming the bytes still on disk, which is what makes a prepared
-// commit refuse to build on RAM the disk never accepted.
+// the bytes the disk actually holds as the new visible identity.
+//
+// A PRE-commit failure never renamed, so the old bytes are still visible and
+// indexRaw keeps naming them — which is what makes a prepared commit refuse to
+// build on RAM the disk never accepted. A POST-commit failure did rename, so
+// the visible identity IS the new bytes even though the call returns an error,
+// and indexRaw has to move with it or a later readback would compare against an
+// image no longer on disk.
 func (bs *BlockStore) saveCanonicalIndexLocked() error {
-	raw, err := writeCanonicalIndexFile(bs.indexPath, bs.index)
+	raw, err := encodeBlockStoreIndex(bs.index)
 	if err != nil {
 		return err
 	}
-	bs.indexRaw = raw
-	return nil
+	err = writeFileAtomicFn(bs.indexPath, raw, 0o600)
+	if err == nil || isAtomicWritePostCommit(err) {
+		bs.indexRaw = raw
+	}
+	return err
 }
 
 // VerifyGenesisAnchor enforces the RUB-1134 genesis anchor: a non-empty
@@ -769,8 +780,8 @@ func (bs *BlockStore) saveCanonicalIndexLocked() error {
 // empty index skips the anchor. Failure is the distinct fail-closed
 // foreign-datadir class, not an envelope-integrity failure, and satisfies
 // errors.Is(err, ErrStoreIntegrity). Startup wiring (cmd/rubin-node/main.go)
-// calls this BEFORE ReconcileChainStateWithBlockStore, so no replay, truncate
-// or reconcile adoption ever consumes a foreign index.
+// calls this BEFORE ReconcileChainStateWithBlockStore, so no replay or
+// reconcile adoption ever consumes a foreign index.
 func (bs *BlockStore) VerifyGenesisAnchor(genesisHash [32]byte) error {
 	if bs == nil {
 		return errors.New("nil blockstore")
@@ -835,9 +846,10 @@ func canonicalTipHeight(canonical []string) (uint64, bool) {
 }
 
 // canonicalCommitClass is the outcome class of one prepared canonical-index
-// commit. Every value except canonicalCommitted is a frozen RUB-922 C01
-// identity string, so the identity has exactly one source and cannot drift from
-// a mapping table.
+// commit. Exactly four values are frozen RUB-922 C01 identity strings —
+// canonicalCommitPrecommit and the three canonicalCommitTerminal* — so those
+// identities have one source and cannot drift from a mapping table. The other
+// two are LOCAL names the owning canonical transition maps to its own result.
 type canonicalCommitClass string
 
 const (
@@ -845,6 +857,14 @@ const (
 	// not a frozen C01 identity: the owning canonical transition is what maps
 	// a committed index to ACCEPTED / commit truth NEW.
 	canonicalCommitted canonicalCommitClass = "COMMITTED"
+
+	// canonicalCommitStale is the prepared image refusing to build on a
+	// visible identity it never observed, or refusing a second use. It is a
+	// LOCAL name too: nothing was written, so the owning canonical transition
+	// maps it to STALE_LOCAL_PLAN, never to the frozen precommit identity
+	// (whose C01-PRENS-001 triggers are the atomic write and the precommit
+	// checkpoint writes).
+	canonicalCommitStale canonicalCommitClass = "STALE_PREPARED_IMAGE"
 
 	canonicalCommitPrecommit       canonicalCommitClass = "LOCAL_PERSISTENCE_ERROR(precommit)"
 	canonicalCommitTerminalOld     canonicalCommitClass = "TERMINAL_PERSISTENCE(old)"
@@ -868,20 +888,30 @@ func (r canonicalCommitResult) String() string { return string(r.class) }
 // last check under it, never a substitute for it.
 var errCanonicalIndexMoved = errors.New("prepared canonical index is stale: visible index bytes changed")
 
+// errPreparedIndexSpent: this prepared image already made its one write
+// attempt. Spec §6.4.1 forbids any rollback, retry, rewrite or heuristic
+// classification after a terminal persistence result, so a second commit is
+// refused instead of writing again.
+var errPreparedIndexSpent = errors.New("prepared canonical index was already committed")
+
 // preparedCanonicalIndex is one complete next canonical-index image: the exact
 // bytes to commit plus every RAM object publication installs, all built BEFORE
 // any write touches the filesystem.
 //
-// Single use. After a successful publication the store's visible identity is
-// newRaw, so a second commit fails its freshness precondition unless the
-// replacement was a byte-identical no-op, in which case republishing the same
-// image is inert.
+// Single use, enforced on the image itself: commit marks it spent before the
+// write attempt, so no result — including a terminal one that left the visible
+// identity OLD and would still pass the freshness check — can be followed by a
+// second write from the same image.
 type preparedCanonicalIndex struct {
 	oldRaw       []byte
 	newRaw       []byte
 	index        blockStoreIndexDisk
 	heightByHash map[[32]byte]uint64
 	chainWork    map[[32]byte]*big.Int
+
+	// spent is set before the write attempt, so a terminal result cannot be
+	// followed by a second write from the same image.
+	spent bool
 }
 
 // prepareCanonicalIndex validates the complete planned canonical list and
@@ -911,6 +941,14 @@ func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalInde
 	if err != nil {
 		return nil, err
 	}
+	// A repeated hash collapses two heights into one map entry, so the image
+	// would publish a height map that does not describe its own list. The
+	// shared on-disk decoder is deliberately NOT tightened with it:
+	// decodeBlockStoreIndex is cross-client mirrored (Rust
+	// load_blockstore_index) and would need its sibling to move in step.
+	if len(heightByHash) != len(index.Canonical) {
+		return nil, errors.New("canonical list repeats a block hash")
+	}
 	newRaw, err := encodeBlockStoreIndex(index)
 	if err != nil {
 		return nil, err
@@ -924,35 +962,45 @@ func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalInde
 	}, nil
 }
 
-// commit performs the one durable canonical-index transition: freshness check,
-// the existing RUB-1084 atomic write with NO store lock held, exactly one
-// strict visible readback when the write may have crossed the namespace commit,
-// then a non-fallible publication of the prebuilt image.
+// commit performs the one durable canonical-index transition: single-use and
+// freshness checks, the existing RUB-1084 atomic write with NO store lock held,
+// exactly one strict visible readback whenever the write may have crossed the
+// namespace commit, then a non-fallible publication of the prebuilt image.
+//
+// REQUIRES the caller to hold the canonical writer fence (SyncEngine.mutationMu
+// plus ChainState.admissionMu.W, RUB-1202). The freshness comparison is a
+// staleness ASSERT, not mutual exclusion: it reads and releases the store's read
+// lock before the write, so only that fence closes the check-then-act window.
 //
 // It never rolls back, retries, rewrites or repairs, and it latches nothing:
 // the owning canonical transition consumes the returned evidence.
 func (p *preparedCanonicalIndex) commit(bs *BlockStore) canonicalCommitResult {
+	if p.spent {
+		return canonicalCommitResult{class: canonicalCommitStale, err: errPreparedIndexSpent}
+	}
 	bs.stateMu.RLock()
 	fresh := bytes.Equal(bs.indexRaw, p.oldRaw)
 	bs.stateMu.RUnlock()
 	if !fresh {
-		return canonicalCommitResult{class: canonicalCommitPrecommit, err: errCanonicalIndexMoved}
+		return canonicalCommitResult{class: canonicalCommitStale, err: errCanonicalIndexMoved}
 	}
+	p.spent = true
 
 	// No publication lock is held while waiting for or executing this write.
 	err := writeFileAtomicFn(bs.indexPath, p.newRaw, 0o600)
-	switch {
-	case err == nil:
+	if err == nil {
 		p.publish(bs)
 		return canonicalCommitResult{class: canonicalCommitted}
-	case isAtomicWritePostCommit(err):
-		return p.classifyVisibleIndex(bs, err)
-	default:
-		// before_namespace_commit, and every error the atomic lane did not
-		// classify at all: the rename never happened, so old disk and old RAM
-		// are exactly as they were.
+	}
+	// The frozen precommit identity means "no commit attempt may have crossed",
+	// so only the lane's own before_namespace_commit tag may claim it. An error
+	// the lane never classified is NOT proof of that, and spec §6.4.1 requires
+	// one strict readback before every result persistence may have crossed —
+	// so after_namespace_commit and every untagged error take the readback.
+	if stage, tagged := atomicWriteStageOf(err); tagged && stage == atomicWriteBeforeNamespaceCommit {
 		return canonicalCommitResult{class: canonicalCommitPrecommit, err: err}
 	}
+	return p.classifyVisibleIndex(bs, err)
 }
 
 // classifyVisibleIndex is the one strict readback. It classifies by the VISIBLE
@@ -960,11 +1008,20 @@ func (p *preparedCanonicalIndex) commit(bs *BlockStore) canonicalCommitResult {
 // tip or a matching hash is not an identity, so anything that is not exactly
 // the old or exactly the new image is neither. A read failure is neither too —
 // nothing is guessed, retried or rewritten.
+//
+// It reads through the same UNBOUNDED readFileByPath that loadBlockStoreIndex
+// uses, deliberately: the index payload carries no size cap (store_envelope.go,
+// RUB-1057), and a capped read would turn an oversized visible image into
+// "unreadable" instead of comparing it. Byte equality is also deliberately
+// STRONGER than comparing decoded lists — two spellings decode alike but only
+// one is the identity the commit planned — so do not "simplify" it to a decode.
 func (p *preparedCanonicalIndex) classifyVisibleIndex(bs *BlockStore, cause error) canonicalCommitResult {
 	raw, err := readFileByPath(bs.indexPath)
 	switch {
 	case err != nil:
-		return canonicalCommitResult{class: canonicalCommitTerminalUnknown, err: cause}
+		// Both causes survive errors.Is: the write failure that sent us here
+		// and the readback failure that left the identity unprovable.
+		return canonicalCommitResult{class: canonicalCommitTerminalUnknown, err: errors.Join(cause, err)}
 	case bytes.Equal(raw, p.oldRaw):
 		return canonicalCommitResult{class: canonicalCommitTerminalOld, err: cause}
 	case bytes.Equal(raw, p.newRaw):
@@ -975,23 +1032,53 @@ func (p *preparedCanonicalIndex) classifyVisibleIndex(bs *BlockStore, cause erro
 	}
 }
 
-// publish installs the prebuilt image. Everything assigned here was built
-// before the write, so between the durable commit and this assignment there is
-// no allocation, parse, callback, clone or ordinary error return — only this
-// lock and four plain assignments, which every reader under stateMu.RLock()
-// therefore observes wholly as the old image or wholly as the new one.
-// TestPreparedCanonicalIndexPublishAllocatesNothing measures the zero.
+// publish takes the store's write lock for the one publication of this image.
 func (p *preparedCanonicalIndex) publish(bs *BlockStore) {
 	bs.stateMu.Lock()
+	p.publishLocked(bs)
+	bs.stateMu.Unlock()
+}
+
+// publishLocked installs the prebuilt image. PRECONDITION: the caller holds
+// bs.stateMu.Lock(). It is split out because RUB-1202 composes this transition
+// with RUB-908's prebuilt accounting-image assignment inside the SAME critical
+// section (contract clause), so both become ONE complete published image and a
+// reader under RLock() never observes a partial replacement.
+//
+// Everything assigned here was built before the write, so on the SUCCESS path
+// there is no allocation, parse, callback, clone or ordinary error return
+// between the durable commit and these four plain assignments;
+// TestPreparedCanonicalIndexPublishAllocatesNothing measures that zero. The
+// post-commit-ambiguity path interposes exactly ONE strict readback first: the
+// lane's durable boundary is rename plus parent fsync, but the PUBLISHED image
+// is decided by that readback, so a parent-fsync failure over a visible new
+// image publishes here as TERMINAL_PERSISTENCE(new) and the owning transition
+// is what latches admission on the class.
+//
+// chainWorkByHash is REPLACED with the prepared empty map rather than carried:
+// cachedChainWork serves entries without re-checking canonical membership, so
+// work derived under the old index would survive a reorg as an answer for a
+// hash this image no longer contains. The legacy pure-append mutator keeps its
+// cache (only its reorg branch resets) — a deliberate divergence RUB-1202 sizes
+// when it cuts the production callers over.
+func (p *preparedCanonicalIndex) publishLocked(bs *BlockStore) {
 	bs.index = p.index
 	bs.indexRaw = p.newRaw
 	bs.canonicalHeightByHash = p.heightByHash
 	bs.chainWorkByHash = p.chainWork
-	bs.stateMu.Unlock()
+}
+
+// visibleIndexBytes returns a copy of the store's visible canonical identity
+// under the read lock. Helpers and tests use it instead of reading indexRaw
+// directly, so observing the identity can never race a concurrent publication.
+func (bs *BlockStore) visibleIndexBytes() []byte {
+	bs.stateMu.RLock()
+	defer bs.stateMu.RUnlock()
+	return append([]byte(nil), bs.indexRaw...)
 }
 
 // BlockPresenceClass is the closed set of presence classifications for a block
-// hash in this store. The strings are the frozen RUB-922 C01 identities.
+// hash in this store. All four CLASS strings are frozen RUB-922 C01 identities.
 type BlockPresenceClass string
 
 const (
@@ -1002,9 +1089,12 @@ const (
 )
 
 // BlockPresenceScope qualifies LOCAL_STORE_ERROR and is empty for every other
-// class. Canonical scope is the store-integrity evidence the owning canonical
-// transition latches as TERMINAL_STORE_INTEGRITY(canonical); noncanonical scope
-// leaves every canonical image untouched.
+// class. Only the noncanonical spelling is a frozen corpus identity
+// (LOCAL_STORE_ERROR(noncanonical)); it leaves every canonical image untouched.
+// Canonical scope is LOCAL evidence: the scope and the leaves stay in the struct
+// as what the owning canonical transition latches as
+// TERMINAL_STORE_INTEGRITY(canonical), and the rendered identity stays the bare
+// contract class.
 type BlockPresenceScope string
 
 const (
@@ -1040,25 +1130,43 @@ type BlockPresence struct {
 	Leaves BlockArtifactLeaves
 }
 
-// String renders the frozen identity; LOCAL_STORE_ERROR carries its scope.
+// String renders the identity. Only the noncanonical store error is scoped —
+// LOCAL_STORE_ERROR(noncanonical) is the frozen corpus row; a canonical-scoped
+// store error renders the bare contract class and carries its scope and leaves
+// in the struct instead. Nothing else renders a scope, so no class can ever
+// print an empty parenthesis.
 func (p BlockPresence) String() string {
-	if p.Class == BlockPresenceLocalStoreError {
+	if p.Class == BlockPresenceLocalStoreError && p.Scope == BlockPresenceScopeNoncanonical {
 		return fmt.Sprintf("%s(%s)", p.Class, p.Scope)
 	}
 	return string(p.Class)
 }
 
 // InspectBlockPresence classifies blockHash against this store's canonical
-// membership and its three stored artifacts. The receiver must be non-nil: no
-// caller reaches it without a constructed store, and inventing a class for a
-// nil store would add a row this closed set does not have.
+// membership and its three stored artifacts. A nil receiver proves nothing
+// about any artifact, so it reports the noncanonical store error with every
+// leaf invalid — the file's nil-guard idiom, and it keeps the class set closed
+// instead of adding a row or dereferencing nil.
 //
 // The whole classification runs under ONE stateMu.RLock, which by contract
 // spans the artifact reads as well, so canonical membership and artifact state
 // are one snapshot instead of two observations a concurrent replacement could
-// interleave. It takes no second lock (the artifact readers are lock-free),
-// repairs nothing, and never treats a present header as presence on its own.
+// interleave. The RLock protects the MEMBERSHIP map and the index image; the
+// artifact FILES are read under no lock of their own, which is sound because
+// their writers are lock-free, content-addressed and monotone absent->present
+// (writeFileIfAbsent, undo reconciliation), never in-place rewrites. The cost is
+// real and accepted: holding the read lock across three bounded file reads
+// blocks index publication for that long, and the contract asks for the single
+// snapshot. It takes no second lock, repairs nothing, and never treats a present
+// header as presence on its own.
 func (bs *BlockStore) InspectBlockPresence(blockHash [32]byte) BlockPresence {
+	if bs == nil {
+		return BlockPresence{
+			Class:  BlockPresenceLocalStoreError,
+			Scope:  BlockPresenceScopeNoncanonical,
+			Leaves: BlockArtifactLeaves{Block: BlockArtifactInvalid, Header: BlockArtifactInvalid, Undo: BlockArtifactInvalid},
+		}
+	}
 	bs.stateMu.RLock()
 	defer bs.stateMu.RUnlock()
 
