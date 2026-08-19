@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -579,7 +580,11 @@ func TestReconcileChainStateWithBlockStore_PropagatesCorruptBlockBytesSwap(t *te
 	if errors.Is(err, errCanonicalIndexZeroCompletePrefix) || errors.Is(err, errCanonicalIndexIncompleteSuffix) {
 		t.Fatalf("a corrupt artifact must keep structural precedence, got %v", err)
 	}
-	want := "canonical block artifact " + hex.EncodeToString(block1Hash[:]) + ": hashes to "
+	if !errors.Is(err, errCanonicalArtifactUnbound) {
+		t.Fatalf("refusal = %v, want it to carry errCanonicalArtifactUnbound", err)
+	}
+	want := "canonical block artifact " + hex.EncodeToString(block1Hash[:]) + ": " +
+		errCanonicalArtifactUnbound.Error() + ": hashes to "
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("expected error containing %q, got %v", want, err)
 	}
@@ -657,29 +662,37 @@ func TestReconcileZeroCompleteCanonicalPrefixIsFatal(t *testing.T) {
 // can catch it.
 func TestChainStateRecoveryStrictArtifactsRejectPresentButUnboundFiles(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
+		name string
+		// wantIs is the typed identity the refusal must carry: unbound
+		// header/block artifacts are the Go-only errCanonicalArtifactUnbound
+		// class, undo keeps its own cross-client ErrUndoIntegrity.
+		wantIs  error
 		corrupt func(t *testing.T, store *BlockStore, otherBlock []byte, otherHeader []byte)
 	}{
 		{
-			name: "header_of_another_block",
+			name:   "header_of_another_block",
+			wantIs: errCanonicalArtifactUnbound,
 			corrupt: func(t *testing.T, store *BlockStore, _ []byte, otherHeader []byte) {
 				plantCanonicalArtifact(t, store.headersDir, devnetGenesisBlockHash, otherHeader)
 			},
 		},
 		{
-			name: "block_bytes_of_another_block",
+			name:   "block_bytes_of_another_block",
+			wantIs: errCanonicalArtifactUnbound,
 			corrupt: func(t *testing.T, store *BlockStore, otherBlock []byte, _ []byte) {
 				plantCanonicalArtifact(t, store.blocksDir, devnetGenesisBlockHash, otherBlock)
 			},
 		},
 		{
-			name: "unparseable_block_bytes",
+			name:   "unparseable_block_bytes",
+			wantIs: errCanonicalArtifactUnbound,
 			corrupt: func(t *testing.T, store *BlockStore, _ []byte, _ []byte) {
 				plantCanonicalArtifact(t, store.blocksDir, devnetGenesisBlockHash, []byte("not a block"))
 			},
 		},
 		{
-			name: "undecodable_undo_record",
+			name:   "undecodable_undo_record",
+			wantIs: ErrUndoIntegrity,
 			corrupt: func(t *testing.T, store *BlockStore, _ []byte, _ []byte) {
 				mustWriteFile(t, filepath.Join(store.undoDir,
 					hex.EncodeToString(devnetGenesisBlockHash[:])+".json"), []byte("not json"))
@@ -713,6 +726,9 @@ func TestChainStateRecoveryStrictArtifactsRejectPresentButUnboundFiles(t *testin
 			}
 			if errors.Is(err, errCanonicalIndexZeroCompletePrefix) || errors.Is(err, errCanonicalIndexIncompleteSuffix) {
 				t.Fatalf("structural error must keep precedence, got %v", err)
+			}
+			if !errors.Is(err, tc.wantIs) {
+				t.Fatalf("refusal = %v, want it to carry %v", err, tc.wantIs)
 			}
 			// The operator sees this as "chainstate reconcile failed: <err>":
 			// every leaf must name the canonical row it condemns, or the
@@ -790,7 +806,9 @@ func TestReconcileZeroCompletePrefixLosesToArtifactError(t *testing.T) {
 // classes, even when it sits behind an absent artifact of the same row (a) or
 // behind an already-incomplete row (b). Stopping earlier would report committed
 // corruption as the zero-prefix or incomplete-suffix class and send the operator
-// after the wrong file.
+// after the wrong file. Row (c) pins the ORDER inside one row: with the header
+// and the block both unbound, the refusal names the header — the first kind the
+// fixed header -> block -> undo table visits.
 func TestChainStateRecoveryStructuralErrorWinsAcrossTheWholeIndex(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -830,6 +848,18 @@ func TestChainStateRecoveryStructuralErrorWinsAcrossTheWholeIndex(t *testing.T) 
 				return "canonical header artifact " + hex.EncodeToString(block2Hash[:])
 			},
 		},
+		{
+			// Row 0 header AND block both unbound: the fixed header -> block
+			// -> undo order is what decides which artifact the refusal names,
+			// so a reordered table renames the condemned file.
+			name: "first_artifact_of_a_row_in_the_fixed_order",
+			corrupt: func(t *testing.T, store *BlockStore, _ *ChainState, cfg SyncConfig) string {
+				otherBlock, otherHeader := otherDevnetBlock(t, cfg)
+				plantCanonicalArtifact(t, store.headersDir, devnetGenesisBlockHash, otherHeader)
+				plantCanonicalArtifact(t, store.blocksDir, devnetGenesisBlockHash, otherBlock)
+				return "canonical header artifact " + hex.EncodeToString(devnetGenesisBlockHash[:])
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -857,6 +887,9 @@ func TestChainStateRecoveryStructuralErrorWinsAcrossTheWholeIndex(t *testing.T) 
 			if errors.Is(err, errCanonicalIndexZeroCompletePrefix) || errors.Is(err, errCanonicalIndexIncompleteSuffix) {
 				t.Fatalf("structural error must win over both fail-closed classes, got %v", err)
 			}
+			if !errors.Is(err, errCanonicalArtifactUnbound) {
+				t.Fatalf("refusal = %v, want it to carry errCanonicalArtifactUnbound", err)
+			}
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("refusal = %v, want it to name %q", err, want)
 			}
@@ -875,6 +908,144 @@ func TestChainStateRecoveryStructuralErrorWinsAcrossTheWholeIndex(t *testing.T) 
 			}
 			if after := state.view(); after != before {
 				t.Fatalf("chainstate mutated before the refusal: %+v -> %+v", before, after)
+			}
+		})
+	}
+}
+
+// TestChainStateRecoveryRejectsBrokenCanonicalLinkage: spec §6.4.1 requires
+// every later header's prev_block_hash to equal the PRECEDING INDEXED hash. A
+// spliced index can satisfy every identity rule — all twelve artifacts present
+// and hash-bound — and still describe a chain that was never built, so only the
+// linkage rule refuses it. The snapshot sits AT the spliced tip here, so the
+// replay step never runs and the prefix scan is the only defense left.
+func TestChainStateRecoveryRejectsBrokenCanonicalLinkage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// breakRow1 also makes row 1 incomplete, so the row proves the
+		// structural linkage error outranks the incomplete-suffix class.
+		breakRow1 bool
+	}{
+		{name: "every_artifact_bound"},
+		{name: "linkage_outranks_an_earlier_incomplete_row", breakRow1: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, liveState, cfg := storeAtGenesis(t, dir)
+			block1 := appendCanonicalBlock(t, store, liveState, cfg)
+			block2 := appendCanonicalBlock(t, store, liveState, cfg)
+			block3 := appendCanonicalBlock(t, store, liveState, cfg)
+			// [g, b1, b3, b2]: row 2's header links to b2, but the preceding
+			// INDEXED hash is b1. Every row keeps all three bound artifacts.
+			spliced := []string{
+				hex.EncodeToString(devnetGenesisBlockHash[:]),
+				hex.EncodeToString(block1[:]),
+				hex.EncodeToString(block3[:]),
+				hex.EncodeToString(block2[:]),
+			}
+			if err := store.RestoreCanonicalIndex(spliced); err != nil {
+				t.Fatalf("RestoreCanonicalIndex: %v", err)
+			}
+			if tc.breakRow1 {
+				if err := os.Remove(filepath.Join(store.undoDir, hex.EncodeToString(block1[:])+".json")); err != nil {
+					t.Fatalf("Remove(block1 undo): %v", err)
+				}
+			}
+			indexBefore, err := os.ReadFile(store.indexPath) // #nosec G304 -- test-local path.
+			if err != nil {
+				t.Fatalf("read marker: %v", err)
+			}
+			prevWrite := writeFileAtomicFn
+			t.Cleanup(func() { writeFileAtomicFn = prevWrite })
+			writes := 0
+			writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
+				writes++
+				return prevWrite(path, data, mode)
+			}
+
+			// The snapshot matches the spliced tip, so no replay is scheduled.
+			atTip := cloneChainState(liveState)
+			atTip.Height, atTip.TipHash = 3, block2
+			if _, _, replayNeeded, rerr := reconcileReplayStart(cloneChainState(atTip), store, 3); rerr != nil || replayNeeded {
+				t.Fatalf("replay start: needed=%v err=%v, want no replay to run", replayNeeded, rerr)
+			}
+
+			before := atTip.view()
+			changed, err := ReconcileChainStateWithBlockStore(atTip, store, cfg)
+			if err == nil {
+				t.Fatalf("a spliced canonical index must fail closed")
+			}
+			if errors.Is(err, errCanonicalIndexZeroCompletePrefix) || errors.Is(err, errCanonicalIndexIncompleteSuffix) {
+				t.Fatalf("linkage is structural and must outrank both fail-closed classes, got %v", err)
+			}
+			if !errors.Is(err, errCanonicalArtifactUnbound) {
+				t.Fatalf("refusal = %v, want it to carry errCanonicalArtifactUnbound", err)
+			}
+			want := fmt.Sprintf("canonical header artifact %x links to %x, expected %x", block3, block2, block1)
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("refusal = %v, want it to contain %q", err, want)
+			}
+			if changed {
+				t.Fatalf("a refused recovery must report no change")
+			}
+			if writes != 0 {
+				t.Fatalf("fail-closed recovery performed %d atomic writes, want 0", writes)
+			}
+			indexAfter, err := os.ReadFile(store.indexPath) // #nosec G304 -- test-local path.
+			if err != nil {
+				t.Fatalf("read marker: %v", err)
+			}
+			if !bytes.Equal(indexAfter, indexBefore) {
+				t.Fatalf("canonical index bytes changed on the fail-closed path")
+			}
+			if after := atTip.view(); after != before {
+				t.Fatalf("chainstate mutated before the refusal: %+v -> %+v", before, after)
+			}
+		})
+	}
+}
+
+// TestChainStateRecoveryCompletePrefixEndsAtTheFirstIncompleteRow: the complete
+// prefix ends at the FIRST incomplete row, never at the last one. Recording the
+// last would claim a longer proven prefix than the store holds (i) and would
+// hide a zero-length prefix behind a later complete row (ii).
+func TestChainStateRecoveryCompletePrefixEndsAtTheFirstIncompleteRow(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		incomplete []int
+		wantErr    error
+		wantMsg    string
+	}{
+		{
+			name: "first_of_two_incomplete_rows", incomplete: []int{1, 2},
+			wantErr: errCanonicalIndexIncompleteSuffix,
+			wantMsg: "index declares 3 entries; the complete header/block/undo prefix ends after 1",
+		},
+		{
+			name: "incomplete_row_zero_behind_a_complete_row", incomplete: []int{0, 2},
+			wantErr: errCanonicalIndexZeroCompletePrefix,
+			wantMsg: "persisted canonical index has zero complete prefix",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, liveState, cfg := storeAtGenesis(t, dir)
+			rows := [][32]byte{
+				devnetGenesisBlockHash,
+				appendCanonicalBlock(t, store, liveState, cfg),
+				appendCanonicalBlock(t, store, liveState, cfg),
+			}
+			for _, row := range tc.incomplete {
+				if err := os.Remove(filepath.Join(store.undoDir, hex.EncodeToString(rows[row][:])+".json")); err != nil {
+					t.Fatalf("Remove(row %d undo): %v", row, err)
+				}
+			}
+			_, err := ReconcileChainStateWithBlockStore(cloneChainState(liveState), store, cfg)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("reconcile err = %v, want %v", err, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Fatalf("message = %q, want it to contain %q", err.Error(), tc.wantMsg)
 			}
 		})
 	}

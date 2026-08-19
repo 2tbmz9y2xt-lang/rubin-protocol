@@ -161,6 +161,9 @@ func newBlockStore(paths blockStorePaths, index blockStoreIndexDisk, indexRaw []
 	if err != nil {
 		return nil, err
 	}
+	if len(canonicalHeightByHash) != len(index.Canonical) {
+		return nil, errCanonicalIndexDuplicateRow
+	}
 	return &BlockStore{
 		rootPath:   paths.root,
 		indexPath:  paths.index,
@@ -438,6 +441,15 @@ func (bs *BlockStore) chainWorkHeader(blockHash [32]byte) (consensus.BlockHeader
 func chainWorkHeaderCorruption(blockHash [32]byte, reason string, err error) error {
 	return fmt.Errorf("%w: stored header for %x %s: %v", errBranchStoreCorrupt, blockHash, reason, err) //nolint:errorlint // %v keeps local corruption out of p2p's consensus-error chain.
 }
+
+// errCanonicalIndexDuplicateRow: a repeated hash collapses two heights into one
+// height-by-hash entry, so the store would run with a map that does not
+// describe its own list. It is refused on the Go side at every constructor and
+// at prepare. The shared on-disk decoder is deliberately NOT tightened with it:
+// decodeBlockStoreIndex is cross-client mirrored (Rust load_blockstore_index)
+// and would need its sibling to move in step — Rust still accepts such an
+// index, a startup divergence window owned by RUB-897.
+var errCanonicalIndexDuplicateRow = errors.New("canonical index repeats a block hash")
 
 func buildCanonicalHeightIndex(canonical []string) (map[[32]byte]uint64, error) {
 	out := make(map[[32]byte]uint64, len(canonical))
@@ -748,11 +760,17 @@ func writeCanonicalIndexFile(path string, index blockStoreIndexDisk) ([]byte, er
 // the bytes the disk actually holds as the new visible identity.
 //
 // A PRE-commit failure never renamed, so the old bytes are still visible and
-// indexRaw keeps naming them — which is what makes a prepared commit refuse to
-// build on RAM the disk never accepted. A POST-commit failure did rename, so
-// the visible identity IS the new bytes even though the call returns an error,
-// and indexRaw has to move with it or a later readback would compare against an
-// image no longer on disk.
+// indexRaw keeps naming them — but bs.index and the height map were already
+// mutated by the caller and now LEAD the disk. Nothing here refuses that: it is
+// the baseline mutate-then-save ordering, out of this slice's scope. What it
+// means for the consumer is concrete — a caller that derives its next canonical
+// list from RAM after a failed legacy save would promote state the disk never
+// accepted, so RUB-1202 must derive `next` from the visible identity
+// (visibleIndexBytes / the decoded image it names), never from bs.index.
+//
+// A POST-commit failure did rename, so the visible identity IS the new bytes
+// even though the call returns an error, and indexRaw has to move with it or a
+// later readback would compare against an image no longer on disk.
 func (bs *BlockStore) saveCanonicalIndexLocked() error {
 	raw, err := encodeBlockStoreIndex(bs.index)
 	if err != nil {
@@ -931,17 +949,19 @@ func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalInde
 	if err != nil {
 		return nil, err
 	}
-	// A repeated hash collapses two heights into one map entry, so the image
-	// would publish a height map that does not describe its own list. The
-	// shared on-disk decoder is deliberately NOT tightened with it:
-	// decodeBlockStoreIndex is cross-client mirrored (Rust
-	// load_blockstore_index) and would need its sibling to move in step.
 	if len(heightByHash) != len(index.Canonical) {
-		return nil, errors.New("canonical list repeats a block hash")
+		return nil, errCanonicalIndexDuplicateRow
 	}
 	newRaw, err := encodeBlockStoreIndex(index)
 	if err != nil {
 		return nil, err
+	}
+	// The identical image is refused rather than staged: a post-commit
+	// ambiguity would read it back as the OLD identity and publish nothing,
+	// while the success path publishes — one transition with two different RAM
+	// outcomes (the publication also resets the derived chain-work cache).
+	if bytes.Equal(oldRaw, newRaw) {
+		return nil, errors.New("prepared canonical index is a no-op: next list equals the visible index")
 	}
 	return &preparedCanonicalIndex{
 		oldRaw:       append([]byte(nil), oldRaw...),
@@ -961,6 +981,9 @@ func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalInde
 // plus ChainState.admissionMu.W, RUB-1202). The freshness comparison is a
 // staleness ASSERT, not mutual exclusion: it reads and releases the store's read
 // lock before the write, so only that fence closes the check-then-act window.
+// Under that same fence p.spent needs no synchronization of its own, and a nil
+// bs is a programming error — the fence holder owns the receiver it commits
+// into — so there is deliberately no nil guard here.
 //
 // It never rolls back, retries, rewrites or repairs, and it latches nothing:
 // the owning canonical transition consumes the returned evidence.
@@ -999,14 +1022,29 @@ func (p *preparedCanonicalIndex) commit(bs *BlockStore) canonicalCommitResult {
 // the old or exactly the new image is neither. A read failure is neither too —
 // nothing is guessed, retried or rewritten.
 //
-// It reads through the same UNBOUNDED readFileByPath that loadBlockStoreIndex
-// uses, deliberately: the index payload carries no size cap (store_envelope.go,
-// RUB-1057), and a capped read would turn an oversized visible image into
-// "unreadable" instead of comparing it. Byte equality is also deliberately
-// STRONGER than comparing decoded lists — two spellings decode alike but only
-// one is the identity the commit planned — so do not "simplify" it to a decode.
+// The read is BOUNDED at one byte past the longer of the two images. Only those
+// two byte strings can match, so anything longer is provably neither identity
+// and is refused (errStoreFileTooLarge) before it is allocated — this is an
+// untrusted on-disk path, and here the planned images fix the bound. That is
+// why it does not inherit loadBlockStoreIndex's deliberately unbounded read,
+// which has no such ceiling to derive (RUB-1057).
+//
+// Byte equality is deliberately STRONGER than comparing decoded lists — two
+// spellings decode alike but only one is the identity the commit planned — so
+// do not "simplify" it to a decode. It is also a deliberate divergence from
+// §6.4.1, which words the identity as the (height, block_hash) SEQUENCE: bytes
+// can only refuse an image the sequence rule would accept, so the divergence
+// runs in the fail-closed direction, and it is unreachable in practice because
+// both writers encode through encodeBlockStoreIndex.
+//
+// After a terminal result the store's cached identity may no longer describe
+// the disk (a third identity, or an unreadable file), and nothing here repairs
+// that: the freshness check in commit is a staleness ASSERT, not a guard
+// against a post-terminal rewrite — the owning transition's latch is what stops
+// the next write. TestPreparedCanonicalIndexTerminalUnknownLeavesIdentityStale
+// pins the stale identity.
 func (p *preparedCanonicalIndex) classifyVisibleIndex(bs *BlockStore, cause error) canonicalCommitResult {
-	raw, err := readFileByPath(bs.indexPath)
+	raw, err := readFileByPathCapped(bs.indexPath, int64(max(len(p.oldRaw), len(p.newRaw)))+1)
 	switch {
 	case err != nil:
 		// Both causes survive errors.Is: the write failure that sent us here
@@ -1038,12 +1076,12 @@ func (p *preparedCanonicalIndex) publish(bs *BlockStore) {
 // Everything assigned here was built before the write, so on the SUCCESS path
 // there is no allocation, parse, callback, clone or ordinary error return
 // between the durable commit and these four plain assignments;
-// TestPreparedCanonicalIndexPublishAllocatesNothing measures that zero. The
-// post-commit-ambiguity path interposes exactly ONE strict readback first: the
-// lane's durable boundary is rename plus parent fsync, but the PUBLISHED image
-// is decided by that readback, so a parent-fsync failure over a visible new
-// image publishes here as TERMINAL_PERSISTENCE(new) and the owning transition
-// is what latches admission on the class.
+// TestPreparedCanonicalIndexPublishLockedAllocatesNothing measures that zero.
+// The post-commit-ambiguity path interposes exactly ONE strict readback first:
+// the lane's durable boundary is rename plus parent fsync, but the PUBLISHED
+// image is decided by that readback, so a parent-fsync failure over a visible
+// new image publishes here as TERMINAL_PERSISTENCE(new) and the owning
+// transition is what latches admission on the class.
 //
 // chainWorkByHash is REPLACED with the prepared empty map rather than carried:
 // cachedChainWork serves entries without re-checking canonical membership, so
@@ -1059,8 +1097,10 @@ func (p *preparedCanonicalIndex) publishLocked(bs *BlockStore) {
 }
 
 // visibleIndexBytes returns a copy of the store's visible canonical identity
-// under the read lock. Helpers and tests use it instead of reading indexRaw
-// directly, so observing the identity can never race a concurrent publication.
+// under the read lock. Tests use it instead of reading indexRaw directly, so
+// observing the identity can never race a concurrent publication; RUB-1202's
+// production caller derives its next list from this identity, not from bs.index
+// (saveCanonicalIndexLocked explains why RAM can lead the disk).
 func (bs *BlockStore) visibleIndexBytes() []byte {
 	bs.stateMu.RLock()
 	defer bs.stateMu.RUnlock()
@@ -1125,6 +1165,12 @@ type BlockPresence struct {
 // store error renders the bare contract class and carries its scope and leaves
 // in the struct instead. Nothing else renders a scope, so no class can ever
 // print an empty parenthesis.
+//
+// It is a RENDERING, not a classification. The zero value renders "" (no class
+// was assigned), and the bare LOCAL_STORE_ERROR token is the class name of BOTH
+// scopes, so the consumer that must tell the latching canonical case
+// (TERMINAL_STORE_INTEGRITY(canonical)) from the non-latching noncanonical
+// corpus row reads Scope, never the rendered string.
 func (p BlockPresence) String() string {
 	if p.Class == BlockPresenceLocalStoreError && p.Scope == BlockPresenceScopeNoncanonical {
 		return fmt.Sprintf("%s(%s)", p.Class, p.Scope)
@@ -1144,11 +1190,17 @@ func (p BlockPresence) String() string {
 // interleave. The RLock protects the MEMBERSHIP map and the index image; the
 // artifact FILES are read under no lock of their own, which is sound because
 // their writers are lock-free, content-addressed and monotone absent->present
-// (writeFileIfAbsent, undo reconciliation), never in-place rewrites. The cost is
-// real and accepted: holding the read lock across three bounded file reads
-// blocks index publication for that long, and the contract asks for the single
-// snapshot. It takes no second lock, repairs nothing, and never treats a present
-// header as presence on its own.
+// (writeFileIfAbsent, undo reconciliation), never in-place rewrites. RUB-908
+// introduces noncanonical reclaim (present->absent) and must re-derive that
+// monotone-artifacts soundness argument.
+//
+// The cost is real and accepted: the block leaf READS, fully PARSES and hashes
+// up to consensus.MAX_BLOCK_BYTES, and all of it runs under the read lock, so a
+// publication waits behind an inspection — and, symmetrically, a pending writer
+// (a legacy save holds stateMu.Lock across its atomic write, fsync included)
+// blocks every arriving reader. The contract asks for the single snapshot. It
+// takes no second lock, repairs nothing, and never treats a present header as
+// presence on its own.
 func (bs *BlockStore) InspectBlockPresence(blockHash [32]byte) BlockPresence {
 	if bs == nil {
 		return BlockPresence{

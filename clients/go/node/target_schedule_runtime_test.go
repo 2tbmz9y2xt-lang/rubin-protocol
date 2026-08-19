@@ -462,9 +462,10 @@ func TestTargetScheduleRuntimeReorgPreviewRejectsBeforeDisconnect(t *testing.T) 
 // Rewired for RUB-890: strict fail-closed startup now refuses that datadir at
 // the complete-prefix scan, ahead of replay, so the test asserts that refusal
 // explicitly and then drives the per-block evidence through
-// replayCanonicalBlocks — the same step ReconcileChainStateWithBlockStore
-// reaches once the scan passes. Every assertion the reconcile-driven version
-// made is still made, on the same inputs.
+// replayCanonicalBlocks — entered one step lower, but the same step
+// ReconcileChainStateWithBlockStore reaches once the scan passes. The
+// reconcile-level propagation is asserted by the structural-refusal row below;
+// the per-block rows no longer travel through the reconcile entry point.
 func TestTargetScheduleRuntimeRecoveryDerivesPerBlock(t *testing.T) {
 	engine, store, dir := newStockDevnetEngine(t, nil)
 	genesisSnapshot := cloneChainState(engine.chainState)
@@ -528,9 +529,6 @@ func TestTargetScheduleRuntimeRecoveryDerivesPerBlock(t *testing.T) {
 	// entered with exactly the arguments a tipless snapshot produces (replay
 	// from height 0 through the canonical tip).
 	//
-	// No additional durable write after a target-context failure: the
-	// canonical index, the artifacts, and the absent chainstate snapshot must
-	// all be exactly as they were.
 	// The selected parent is the canonical index entry at height-1, never the
 	// replayed block's own hash. With ONLY the height-1 header corrupted, a
 	// self-parenting derivation would already fail at height 1; the canonical
@@ -555,6 +553,9 @@ func TestTargetScheduleRuntimeRecoveryDerivesPerBlock(t *testing.T) {
 	if _, err := replayCanonicalBlocks(NewChainState(), store, nonStock, 0, tipHeight, true); err == nil || errors.Is(err, errTargetHistoryCorrupt) {
 		t.Fatalf("non-devnet replay err=%v, want a failure that is not the schedule class", err)
 	}
+	// No additional durable write after a target-context failure: the
+	// canonical index, the artifacts, and the absent chainstate snapshot must
+	// all be exactly as they were.
 	if durableStoreFingerprint(t, store) != before {
 		t.Fatalf("durable store state changed after a target-context failure")
 	}

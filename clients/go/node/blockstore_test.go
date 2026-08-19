@@ -2074,10 +2074,12 @@ func assertCanonicalRAMUnchanged(t *testing.T, store *BlockStore, want canonical
 }
 
 // TestPreparedCanonicalIndexAcceptedTransitions drives the accepted set through
-// the primitive: empty store, genesis index, one-entry append, reorg
-// replacement list, each followed by the restart that reopens the identity it
-// committed. Every subtest owns its store and establishes its own precondition,
-// so `-run .../genesis_index` alone proves the same thing the full run does.
+// the primitive: the empty-store identity, genesis index, one-entry append and
+// reorg replacement list, each followed by a restart that REOPENS THE COMMITTED
+// INDEX BYTES (the artifacts behind the rows are the startup scan's business,
+// not this primitive's). Every subtest owns its store and establishes its own
+// precondition, so `-run .../genesis_index` alone proves the same thing the
+// full run does.
 func TestPreparedCanonicalIndexAcceptedTransitions(t *testing.T) {
 	row0, row1, row1b := canonicalIndexRow(0x10), canonicalIndexRow(0x11), canonicalIndexRow(0x12)
 
@@ -2086,7 +2088,10 @@ func TestPreparedCanonicalIndexAcceptedTransitions(t *testing.T) {
 		seed []string
 		next []string
 	}{
-		{name: "empty_store", next: []string{}},
+		// The empty-store identity is committable, but only as a real
+		// transition: preparing it against an already-empty visible index is
+		// the refused no-op (RejectsInvalidNextList/no_op).
+		{name: "empty_store", seed: []string{row0}, next: []string{}},
 		{name: "genesis_index", next: []string{row0}},
 		{name: "one_entry_append", seed: []string{row0}, next: []string{row0, row1}},
 		{name: "reorg_replacement_list", seed: []string{row0, row1}, next: []string{row0, row1b}},
@@ -2142,6 +2147,10 @@ func TestPreparedCanonicalIndexRejectsInvalidNextList(t *testing.T) {
 		{"padded_hex", []string{padded}},
 		// A repeated row would silently collapse the height-by-hash map.
 		{"duplicate_row", []string{canonicalIndexRow(0x02), canonicalIndexRow(0x02)}},
+		// The identical image: a post-commit ambiguity would classify it as
+		// TERMINAL_PERSISTENCE(old) and publish nothing, while the success
+		// path publishes — one transition with two different RAM outcomes.
+		{"no_op", []string{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := prepareCanonicalIndex(store.visibleIndexBytes(), tc.next); err == nil {
@@ -2310,7 +2319,9 @@ func TestPreparedCanonicalIndexPostCommitVisibleBytesClassify(t *testing.T) {
 			store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
 			mustCommitCanonicalIndex(t, store, []string{row0})
 			if tc.staleRAM {
+				store.stateMu.Lock()
 				store.indexRaw = []byte("malformed cached identity")
+				store.stateMu.Unlock()
 			}
 			prepared := mustPrepareCanonicalIndex(t, store, []string{row0, row1})
 			before := captureCanonicalRAMImage(store)
@@ -2384,10 +2395,71 @@ func TestPreparedCanonicalIndexTipOnlyAmbiguityIsNeither(t *testing.T) {
 	assertCanonicalRAMUnchanged(t, store, before, "tip-only ambiguity")
 }
 
-// TestPreparedCanonicalIndexPublishAllocatesNothing measures the commit-to-RAM
-// step itself, held under the same lock the commit path holds: it is plain field
-// and pointer assignment, nothing else.
-func TestPreparedCanonicalIndexPublishAllocatesNothing(t *testing.T) {
+// TestPreparedCanonicalIndexOversizedVisibleImageIsNeither: the one strict
+// readback is BOUNDED. Only two byte strings can match, so a visible image
+// longer than both is provably neither identity and is refused before it is
+// allocated — the bound refusal travels back as part of the evidence.
+func TestPreparedCanonicalIndexOversizedVisibleImageIsNeither(t *testing.T) {
+	store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
+	row0, row1 := canonicalIndexRow(0xe0), canonicalIndexRow(0xe1)
+	mustCommitCanonicalIndex(t, store, []string{row0})
+	prepared := mustPrepareCanonicalIndex(t, store, []string{row0, row1})
+	before := captureCanonicalRAMImage(store)
+
+	withWriteFileAtomicFn(t, func(path string, _ []byte, _ os.FileMode) error {
+		mustPlantIndex(t, store, append(append([]byte(nil), prepared.newRaw...), bytes.Repeat([]byte{' '}, 4096)...))
+		return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
+	})
+
+	got := prepared.commit(store)
+	if got.class != canonicalCommitTerminalUnknown || !errors.Is(got.err, errStoreFileTooLarge) {
+		t.Fatalf("commit = %s (%v), want %s carrying the bound refusal", got, got.err, canonicalCommitTerminalUnknown)
+	}
+	assertCanonicalRAMUnchanged(t, store, before, "oversized visible image")
+}
+
+// TestPreparedCanonicalIndexTerminalUnknownLeavesIdentityStale pins the
+// consequence documented on classifyVisibleIndex: after a terminal result the
+// cached identity may no longer describe the disk. The freshness ASSERT is not
+// what stops a later write from building on it — the owning transition's latch
+// is.
+func TestPreparedCanonicalIndexTerminalUnknownLeavesIdentityStale(t *testing.T) {
+	store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
+	row0, row1, row2 := canonicalIndexRow(0xa1), canonicalIndexRow(0xa2), canonicalIndexRow(0xa3)
+	mustCommitCanonicalIndex(t, store, []string{row0})
+	prepared := mustPrepareCanonicalIndex(t, store, []string{row0, row1})
+
+	withWriteFileAtomicFn(t, func(path string, _ []byte, _ os.FileMode) error {
+		mustPlantIndex(t, store, mustEncodeCanonicalIndex(t, []string{row0, row2}))
+		return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
+	})
+	if got := prepared.commit(store); got.class != canonicalCommitTerminalUnknown {
+		t.Fatalf("commit = %s (%v), want %s", got, got.err, canonicalCommitTerminalUnknown)
+	}
+	if bytes.Equal(store.visibleIndexBytes(), mustReadIndexFile(t, store)) {
+		t.Fatalf("a third visible identity must leave the cached identity stale")
+	}
+}
+
+// TestBlockStoreOpenRejectsDuplicateCanonicalRow: a repeated row collapses two
+// heights into one height-by-hash entry, so the store would run with a map that
+// does not describe its own list. The cross-client decoder is untouched (Rust
+// still accepts it — startup divergence window, RUB-897); this is the Go-side
+// open guard, and it covers Create/Open/reload alike.
+func TestBlockStoreOpenRejectsDuplicateCanonicalRow(t *testing.T) {
+	root := BlockStorePath(t.TempDir())
+	store := mustCreateBlockStore(t, root)
+	row := canonicalIndexRow(0xf0)
+	mustPlantIndex(t, store, mustEncodeCanonicalIndex(t, []string{row, row}))
+	if _, err := OpenBlockStore(root); !errors.Is(err, errCanonicalIndexDuplicateRow) {
+		t.Fatalf("OpenBlockStore err = %v, want the duplicate-row refusal", err)
+	}
+}
+
+// TestPreparedCanonicalIndexPublishLockedAllocatesNothing measures the
+// commit-to-RAM step itself, held under the same lock the commit path holds: it
+// is plain field and pointer assignment, nothing else.
+func TestPreparedCanonicalIndexPublishLockedAllocatesNothing(t *testing.T) {
 	store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
 	prepared := mustPrepareCanonicalIndex(t, store, []string{canonicalIndexRow(0x60), canonicalIndexRow(0x61)})
 	store.stateMu.Lock()
@@ -2678,31 +2750,41 @@ func TestBlockStoreCanonicalIndexCommitFaultMatrix(t *testing.T) {
 // bytes on disk — including after a failed save, where the disk still holds the
 // PREVIOUS image.
 func TestBlockStoreIndexRawTracksVisibleBytes(t *testing.T) {
-	store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
 	header := testHeaderBytes(0xa0, 7)
 	hash := mustHeaderHash(t, header)
-	if err := store.PutBlock(0, hash, header, []byte("block")); err != nil {
-		t.Fatalf("PutBlock: %v", err)
+	// Each subtest owns its store: sharing one would make truncate_canonical's
+	// empty index the silent precondition of every step after it.
+	freshStore := func(t *testing.T) *BlockStore {
+		t.Helper()
+		store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
+		if err := store.PutBlock(0, hash, header, []byte("block")); err != nil {
+			t.Fatalf("PutBlock: %v", err)
+		}
+		return store
 	}
 	for _, step := range []struct {
 		name string
-		call func() error
+		call func(*BlockStore) error
 	}{
-		{"set_canonical_tip", func() error { return store.SetCanonicalTip(0, hash) }},
-		{"restore_canonical_index", func() error { return store.RestoreCanonicalIndex([]string{hex.EncodeToString(hash[:])}) }},
-		{"truncate_canonical", func() error { return store.TruncateCanonical(0) }},
+		{"set_canonical_tip", func(store *BlockStore) error { return store.SetCanonicalTip(0, hash) }},
+		{"restore_canonical_index", func(store *BlockStore) error {
+			return store.RestoreCanonicalIndex([]string{hex.EncodeToString(hash[:])})
+		}},
+		{"truncate_canonical", func(store *BlockStore) error { return store.TruncateCanonical(0) }},
 	} {
 		t.Run(step.name, func(t *testing.T) {
-			if err := step.call(); err != nil {
+			store := freshStore(t)
+			if err := step.call(store); err != nil {
 				t.Fatalf("%s: %v", step.name, err)
 			}
-			if !bytes.Equal(store.indexRaw, mustReadIndexFile(t, store)) {
+			if !bytes.Equal(store.visibleIndexBytes(), mustReadIndexFile(t, store)) {
 				t.Fatalf("%s left the visible identity out of step with the disk", step.name)
 			}
 		})
 	}
 
 	t.Run("failed_save_keeps_the_disk_identity", func(t *testing.T) {
+		store := freshStore(t)
 		identityBefore, diskBefore := store.visibleIndexBytes(), mustReadIndexFile(t, store)
 		withWriteFileAtomicFn(t, func(string, []byte, os.FileMode) error { return os.ErrPermission })
 		if err := store.SetCanonicalTip(0, hash); !errors.Is(err, os.ErrPermission) {
@@ -2717,6 +2799,13 @@ func TestBlockStoreIndexRawTracksVisibleBytes(t *testing.T) {
 	// bytes, so the disk holds the NEW image and the visible identity must move
 	// with it even though the call returned an error.
 	t.Run("post_commit_save_failure_adopts_the_new_disk_identity", func(t *testing.T) {
+		store := freshStore(t)
+		// Start from the empty index so the save that crosses the rename
+		// really writes DIFFERENT bytes: re-saving the same image would make
+		// "the identity moved" unobservable.
+		if err := store.TruncateCanonical(0); err != nil {
+			t.Fatalf("TruncateCanonical: %v", err)
+		}
 		before := store.visibleIndexBytes()
 		withAtomicWriteOps(t, func(ops *atomicWriteOps) {
 			ops.syncParent = func(string) error { return os.ErrPermission }
