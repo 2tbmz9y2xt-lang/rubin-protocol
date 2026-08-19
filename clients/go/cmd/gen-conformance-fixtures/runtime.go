@@ -3608,12 +3608,13 @@ func cp2DerivedCounts(where, image, relation string, inputs []any, fixtures map[
 		"RETAINED_DA_IMAGE_V1":      "/input/prestate_retained_da_sets",
 		"OWNER_IMAGE_V1":            "/input/prestate_owner_claims",
 	}[image]
+	derived := map[string]uint64{}
 	if pointer == "" || (relation != "unchanged" && relation != "old") {
-		return nil, nil
+		return derived, nil
 	}
 	records, stated, err := cp2PrestateRecords(where, inputs, fixtures, pointer)
 	if err != nil || !stated {
-		return nil, err
+		return derived, err
 	}
 	n := uint64(len(records))
 	switch image {
