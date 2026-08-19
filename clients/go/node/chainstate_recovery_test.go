@@ -783,3 +783,99 @@ func TestReconcileZeroCompletePrefixLosesToArtifactError(t *testing.T) {
 		t.Fatalf("structural error must win over the zero-prefix guard, got %v", err)
 	}
 }
+
+// TestChainStateRecoveryStructuralErrorWinsAcrossTheWholeIndex: the prefix check
+// is a FULL scan of the declared index, not a stop-at-the-first-gap scan. A
+// structural/corruption error anywhere in the index outranks both fail-closed
+// classes, even when it sits behind an absent artifact of the same row (a) or
+// behind an already-incomplete row (b). Stopping earlier would report committed
+// corruption as the zero-prefix or incomplete-suffix class and send the operator
+// after the wrong file.
+func TestChainStateRecoveryStructuralErrorWinsAcrossTheWholeIndex(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// corrupt plants the corruption and returns the artifact clause the
+		// refusal must name.
+		corrupt func(t *testing.T, store *BlockStore, live *ChainState, cfg SyncConfig) string
+	}{
+		{
+			// Row 0 header ABSENT, row 0 block bound to another identity: a
+			// scan that stops at the first absent artifact of a row never
+			// reads the block and reports zero-complete-prefix.
+			name: "later_artifact_of_the_same_row",
+			corrupt: func(t *testing.T, store *BlockStore, _ *ChainState, cfg SyncConfig) string {
+				otherBlock, _ := otherDevnetBlock(t, cfg)
+				if err := os.Remove(filepath.Join(store.headersDir,
+					hex.EncodeToString(devnetGenesisBlockHash[:])+".bin")); err != nil {
+					t.Fatalf("Remove(genesis header): %v", err)
+				}
+				plantCanonicalArtifact(t, store.blocksDir, devnetGenesisBlockHash, otherBlock)
+				return "canonical block artifact " + hex.EncodeToString(devnetGenesisBlockHash[:])
+			},
+		},
+		{
+			// Row 1 incomplete (undo gone), row 2 header bound to another
+			// identity: a scan that stops at the first incomplete ROW never
+			// reads row 2 and reports incomplete-suffix.
+			name: "row_after_the_first_incomplete_row",
+			corrupt: func(t *testing.T, store *BlockStore, live *ChainState, cfg SyncConfig) string {
+				block1Hash := appendCanonicalBlock(t, store, live, cfg)
+				block2Hash := appendCanonicalBlock(t, store, live, cfg)
+				_, otherHeader := otherDevnetBlock(t, cfg)
+				if err := os.Remove(filepath.Join(store.undoDir,
+					hex.EncodeToString(block1Hash[:])+".json")); err != nil {
+					t.Fatalf("Remove(block1 undo): %v", err)
+				}
+				plantCanonicalArtifact(t, store.headersDir, block2Hash, otherHeader)
+				return "canonical header artifact " + hex.EncodeToString(block2Hash[:])
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, liveState, cfg := storeAtGenesis(t, dir)
+			want := tc.corrupt(t, store, liveState, cfg)
+
+			indexBefore, err := os.ReadFile(store.indexPath) // #nosec G304 -- test-local path.
+			if err != nil {
+				t.Fatalf("read marker: %v", err)
+			}
+			prevWrite := writeFileAtomicFn
+			t.Cleanup(func() { writeFileAtomicFn = prevWrite })
+			writes := 0
+			writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
+				writes++
+				return prevWrite(path, data, mode)
+			}
+
+			state := cloneChainState(liveState)
+			before := state.view()
+			changed, err := ReconcileChainStateWithBlockStore(state, store, cfg)
+			if err == nil {
+				t.Fatalf("committed canonical corruption must fail closed")
+			}
+			if errors.Is(err, errCanonicalIndexZeroCompletePrefix) || errors.Is(err, errCanonicalIndexIncompleteSuffix) {
+				t.Fatalf("structural error must win over both fail-closed classes, got %v", err)
+			}
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("refusal = %v, want it to name %q", err, want)
+			}
+			if changed {
+				t.Fatalf("a refused recovery must report no change")
+			}
+			if writes != 0 {
+				t.Fatalf("fail-closed recovery performed %d atomic writes, want 0", writes)
+			}
+			indexAfter, err := os.ReadFile(store.indexPath) // #nosec G304 -- test-local path.
+			if err != nil {
+				t.Fatalf("read marker: %v", err)
+			}
+			if !bytes.Equal(indexAfter, indexBefore) {
+				t.Fatalf("canonical index bytes changed on the fail-closed path")
+			}
+			if after := state.view(); after != before {
+				t.Fatalf("chainstate mutated before the refusal: %+v -> %+v", before, after)
+			}
+		})
+	}
+}

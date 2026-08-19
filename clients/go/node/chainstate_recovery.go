@@ -65,6 +65,14 @@ var errCanonicalIndexIncompleteSuffix = errors.New("persisted canonical index ha
 // chain to hide corruption. Precedence is unchanged from the scan it replaces:
 // structural/IO/corruption errors first, then the zero-complete-prefix literal,
 // then the incomplete-suffix refusal.
+//
+// That precedence is why the scan is FULL, not stop-at-the-first-gap: every
+// artifact of every declared row is checked, so a structural error behind an
+// absent artifact still outranks both fail-closed classes instead of being
+// reported as a missing suffix. Cost is O(rows) artifact reads on every boot,
+// which is what a healthy boot already pays; only corrupt boots now read past
+// the first gap. Go-primary: the Rust mirror still stops at the first
+// incomplete row (and still truncates) — sibling RUB-897.
 func requireCompleteCanonicalPrefix(store *BlockStore) error {
 	if store == nil {
 		return errors.New("nil blockstore")
@@ -87,32 +95,36 @@ func requireCompleteCanonicalPrefix(store *BlockStore) error {
 		errCanonicalIndexIncompleteSuffix, len(canonical), validCount)
 }
 
+// countCompleteCanonicalPrefix returns the index of the FIRST incomplete row
+// (len(canonical) when every row is complete), after visiting every row: a
+// structural error in a later row must not be masked by an earlier gap.
 func countCompleteCanonicalPrefix(store *BlockStore, canonical []string) (uint64, error) {
-	validCount := uint64(0)
+	validCount := uint64(len(canonical))
 	for i, hashHex := range canonical {
 		complete, err := store.canonicalArtifactsComplete(hashHex)
 		if err != nil {
 			return 0, err
 		}
-		if !complete {
-			break
+		if !complete && uint64(i) < validCount {
+			validCount = uint64(i)
 		}
-		validCount = uint64(i + 1)
 	}
 	return validCount, nil
 }
 
-// canonicalArtifactsComplete checks header, then block, then undo. It stamps
-// every propagated structural error with the artifact kind and the indexed
-// hash: the operator reads this as "chainstate reconcile failed: <err>", so a
-// leaf reason like "header hash mismatch" that names no artifact and no row is
-// unactionable. Only os.ErrNotExist is absence, and only absence feeds the
-// complete-prefix count.
+// canonicalArtifactsComplete checks header, then block, then undo — ALL three,
+// in that fixed order, because an absent artifact must not hide a corrupt one
+// behind it in the same row. It stamps every propagated structural error with
+// the artifact kind and the indexed hash: the operator reads this as
+// "chainstate reconcile failed: <err>", so a leaf reason like "header hash
+// mismatch" that names no artifact and no row is unactionable. Only
+// os.ErrNotExist is absence, and only absence feeds the complete-prefix count.
 func (bs *BlockStore) canonicalArtifactsComplete(hashHex string) (bool, error) {
 	blockHash, err := parseHex32("canonical hash", hashHex)
 	if err != nil {
 		return false, err
 	}
+	complete := true
 	for _, artifact := range []struct {
 		kind  string
 		check func([32]byte) error
@@ -123,13 +135,14 @@ func (bs *BlockStore) canonicalArtifactsComplete(hashHex string) (bool, error) {
 	} {
 		err := artifact.check(blockHash)
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
+			complete = false
+			continue
 		}
 		if err != nil {
 			return false, fmt.Errorf("canonical %s artifact %x: %w", artifact.kind, blockHash, err)
 		}
 	}
-	return true, nil
+	return complete, nil
 }
 
 // headerExists and blockExists are STRICT: an artifact that is merely present
