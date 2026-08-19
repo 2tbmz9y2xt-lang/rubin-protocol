@@ -1,0 +1,47 @@
+name: RUB-1208 test fix
+on:
+  push:
+    branches: [rub-1208-transport]
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch allowlisted RUB-1208 drift tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin rub-1208-c01-r2-semantic-image
+          test "$(git rev-parse origin/rub-1208-c01-r2-semantic-image)" = "c27a17e1638dcd0b78bca90b014faf74677bb427"
+          git switch -C rub-1208-c01-r2-semantic-image origin/rub-1208-c01-r2-semantic-image
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('tools/tests/test_check_conformance_fixtures_drift.py')
+          s=p.read_text()
+          old='''        self.assertEqual(data["rows"], [])\n        self.assertEqual(data["_meta"]["closure_epoch"]["status"], "building")\n'''
+          new='''        self.assertEqual(len(data["rows"]), 8)\n        self.assertEqual(sum(len(row["cases"]) for row in data["rows"]), 24)\n        self.assertTrue(data["fixtures"])\n        self.assertTrue(data["resolved_values"])\n        self.assertEqual(data["_meta"]["closure_epoch"]["status"], "building")\n'''
+          if old not in s: raise SystemExit('missing dormant-row assertion')
+          s=s.replace(old,new,1)
+          old='''            "schema duplicate key": (raw.replace('"type": "object",', '"type": "object", "type": "object",', 1).encode(), 'duplicate JSON key "type"'),\n'''
+          new='''            "schema duplicate key": (re.sub(r'"type"\\s*:\\s*"object"\\s*,', '"type":"object","type":"object",', raw, count=1).encode(), 'duplicate JSON key "type"'),\n'''
+          if old not in s: raise SystemExit('missing schema duplicate mutator')
+          s=s.replace(old,new,1)
+          old='''            "artifact NaN constant": (artifact_raw.replace('"schema_version": 2', '"schema_version": NaN', 1).encode(), "invalid JSON constant 'NaN'"),\n'''
+          new='''            "artifact NaN constant": (re.sub(r'"schema_version"\\s*:\\s*2', '"schema_version":NaN', artifact_raw, count=1).encode(), "invalid JSON constant 'NaN'"),\n'''
+          if old not in s: raise SystemExit('missing NaN mutator')
+          s=s.replace(old,new,1)
+          s=s.replace('"""RUB-1207 / C01-R2: the dormant pair strict-loads, validates, and fails closed."""','"""RUB-1208 / C01-R2: the building migrated pair strict-loads, validates, and fails closed."""',1)
+          p.write_text(s)
+          PY
+          python3 -m unittest tools.tests.test_check_conformance_fixtures_drift
+          git diff --check
+          git diff --name-only | grep -qx 'tools/tests/test_check_conformance_fixtures_drift.py'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tools/tests/test_check_conformance_fixtures_drift.py
+          git commit -m 'RUB-1208: align strict loader tests with migrated v2 corpus'
+          git push origin HEAD:rub-1208-c01-r2-semantic-image
