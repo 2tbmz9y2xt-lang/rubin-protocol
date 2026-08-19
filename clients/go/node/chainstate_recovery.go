@@ -152,7 +152,10 @@ type canonicalRowArtifacts struct {
 
 // canonicalArtifactsComplete checks header, then block, then undo — ALL three,
 // in that fixed statement order, because an absent artifact must not hide a
-// corrupt one behind it in the same row. It stamps every propagated structural
+// corrupt one behind it in the same row. That order is a precedence choice, not
+// a snapshot concern like InspectBlockPresence's reverse-order leaves: reconcile
+// runs before any service or artifact writer exists, so nothing can write
+// between two of these reads. It stamps every propagated structural
 // error with the artifact kind and the indexed hash: the operator reads this as
 // "chainstate reconcile failed: <err>", so a leaf reason like "header hash
 // mismatch" that names no artifact and no row is unactionable. Only

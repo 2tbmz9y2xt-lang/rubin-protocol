@@ -2647,6 +2647,37 @@ func TestInspectBlockPresenceConcurrentWithPublication(t *testing.T) {
 	}
 }
 
+// TestInspectBlockPresenceStraddledByStoreNeverShowsImpossibleState: artifact
+// writers hold no store lock, so the probe lands a real StoreBlock -> PutUndo
+// between the first and second leaf read instead of leaving that interleaving
+// to the scheduler. Reverse leaf order keeps the observed tuple prefix-closed;
+// forward order reports {Block:absent Header:valid Undo:valid} here, and the
+// same tuple in a genuinely concurrent -race run pinned to GOMAXPROCS=1.
+func TestInspectBlockPresenceStraddledByStoreNeverShowsImpossibleState(t *testing.T) {
+	store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
+	header := testHeaderBytes(0x89, 890)
+	hash := mustHeaderHash(t, header)
+	reads, previousProbe := 0, presenceLeafProbe
+	t.Cleanup(func() { presenceLeafProbe = previousProbe })
+	presenceLeafProbe = func() {
+		if reads++; reads != 2 {
+			return
+		}
+		if err := store.StoreBlock(hash, header, []byte("presence-order")); err != nil {
+			t.Fatalf("StoreBlock: %v", err)
+		}
+		if err := store.PutUndo(hash, undoTestUndo()); err != nil {
+			t.Fatalf("PutUndo: %v", err)
+		}
+	}
+
+	leaves := store.InspectBlockPresence(hash).Leaves
+	if (leaves.Header != BlockArtifactAbsent && leaves.Block == BlockArtifactAbsent) ||
+		(leaves.Undo != BlockArtifactAbsent && (leaves.Header == BlockArtifactAbsent || leaves.Block == BlockArtifactAbsent)) {
+		t.Fatalf("leaves %+v existed at no instant", leaves)
+	}
+}
+
 // failUnlinkAroundRename fails the scratch cleanup on exactly one SIDE of the
 // namespace commit: the wrapped rename is what says which side the lane is on,
 // so the row keeps its meaning however many times cleanup runs.

@@ -1226,11 +1226,11 @@ func (p BlockPresence) String() string {
 // The whole classification runs under ONE stateMu.RLock, which by contract
 // spans the artifact reads as well, so canonical membership and artifact state
 // are one snapshot instead of two observations a concurrent replacement could
-// interleave. The RLock protects the MEMBERSHIP map; the artifact FILES are read
-// under no lock of their own, which is sound because their writers are
-// lock-free, content-addressed and monotone absent->present (writeFileIfAbsent,
-// undo reconciliation), never in-place rewrites. RUB-908's reclaim makes
-// artifacts present->absent and must re-derive that monotone-artifact argument.
+// interleave. The RLock protects the MEMBERSHIP map; the artifact FILES have
+// lock-free, monotone absent->present writers, so the leaves are read in
+// REVERSE persistence order and every observed tuple is a state the store
+// really held. RUB-908's reclaim makes artifacts present->absent and must
+// re-derive that argument.
 //
 // The cost is real and accepted: the block leaf READS, fully PARSES and hashes
 // up to consensus.MAX_BLOCK_BYTES under the read lock, so a publication waits
@@ -1249,11 +1249,12 @@ func (bs *BlockStore) InspectBlockPresence(blockHash [32]byte) BlockPresence {
 	defer bs.stateMu.RUnlock()
 
 	_, member := bs.canonicalHeightByHash[blockHash]
-	leaves := BlockArtifactLeaves{
-		Block:  bs.inspectBlockLeaf(blockHash),
-		Header: bs.inspectHeaderLeaf(blockHash),
-		Undo:   bs.inspectUndoLeaf(blockHash),
-	}
+	// The reverse persistence order the doc argues for, in explicit statements
+	// rather than composite-literal fields: undo, then header, then block.
+	undo := bs.inspectUndoLeaf(blockHash)
+	header := bs.inspectHeaderLeaf(blockHash)
+	block := bs.inspectBlockLeaf(blockHash)
+	leaves := BlockArtifactLeaves{Block: block, Header: header, Undo: undo}
 	if member {
 		return canonicalPresence(leaves)
 	}
