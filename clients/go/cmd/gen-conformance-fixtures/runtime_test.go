@@ -2369,6 +2369,11 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			c := cp2AuthorityCase(t, d, "C01-REORG-001", "MAIN")
 			c["expected"].(map[string]any)["canonical_applied_blocks"] = cp2CaseSummary(t, c)[1:]
 		},
+		"summary_rows effect is a bool on a zero-row case": func(t *testing.T, d map[string]any) {
+			// 0 rows: cp2UintOf(true)=0 would equal len(rows), so only the type arm rejects it.
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "DISCONNECT_EMPTY")
+			c["expected"].(map[string]any)["effects"].(map[string]any)["summary_rows"].(map[string]any)["value"] = true
+		},
 		"included-set identity substituted": func(t *testing.T, d map[string]any) {
 			fixtures := d["fixtures"].(map[string]any)
 			entry := fixtures["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
@@ -2416,6 +2421,7 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"disconnect summary null instead of empty":           "summary must be array for NEW",
 		"non-NEW summary is not null":                        "summary must be null for NOT_APPLICABLE",
 		"summary_rows effect drift":                          "effects.summary_rows",
+		"summary_rows effect is a bool on a zero-row case":   "effects.summary_rows=true differs from the 0 published rows",
 		"included-set identity substituted":                  "differ from the included-set identities",
 		"standalone disconnect publishes a row":              "standalone disconnect and must carry an exact empty summary",
 		"connected block dropped from the summary":           "summary carries 2 rows, the case states connect_count 3",

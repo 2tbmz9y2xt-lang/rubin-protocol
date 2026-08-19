@@ -808,6 +808,20 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         row = case_of(data, "C01-REORG-001", "MAIN")["expected"]["canonical_applied_blocks"][0]
         data["fixtures"][row["block_id"]]["value"]["height"] = -1
 
+    def float_connect_count(data: dict) -> None:
+        # 3.0 equals 3 in the count arm, so only the type arm can reject it.
+        stated = case_of(data, "C01-REORG-001", "MAIN")["input"]
+        next(i for i in stated if i["pointer"] == "/input/connect_count")["value_or_alias"] = 3.0
+
+    def float_da_set_count(data: dict) -> None:
+        stated = case_of(data, "C01-SUMMARY-001", "SINGLE_BLOCK_NO_DA")["input"]
+        next(i for i in stated if i["pointer"] == "/input/block_complete_da_set_count")["value_or_alias"] = 0.0
+
+    def stale_chain_height(data: dict) -> None:
+        # Same block hash, one-off height: the hash arm and the OWNER tip both pass.
+        row = case_of(data, "C01-DIRECT-001", "MAIN")["expected"]["canonical_applied_blocks"][0]
+        data["fixtures"][row["block_id"]]["value"]["height"] += 1
+
     def reverse_summary(data: dict) -> None:
         case = case_of(data, "C01-SUMMARY-001", "MULTI_BLOCK_ORDER")
         case["expected"]["canonical_applied_blocks"].reverse()
@@ -938,6 +952,9 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
 
     mutations = (
         ("stale OWNER stable_tip", stale_owner_tip, "OWNER/stable_tip"),
+        ("connect_count stated as a float", float_connect_count, "states connect_count 3.0"),
+        ("block_complete_da_set_count stated as a float", float_da_set_count, "the case states 0.0"),
+        ("stale CHAIN height with a consistent owner", stale_chain_height, "tip must equal the last canonical-applied block"),
         ("OWNER stable_tip height stated as a float", float_stable_tip_height, "must equal published CHAIN tip"),
         ("summary block height stated as a negative integer", negative_summary_block_height, "fixture has no u64 height"),
         ("reversed same-count summary", reverse_summary, "heights not strictly canonical"),
