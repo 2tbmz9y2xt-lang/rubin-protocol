@@ -2672,9 +2672,9 @@ func TestInspectBlockPresenceStraddledByStoreNeverShowsImpossibleState(t *testin
 			}
 
 			leaves := store.InspectBlockPresence(hash).Leaves
-			if (leaves.Header != BlockArtifactAbsent && leaves.Block == BlockArtifactAbsent) ||
+			if reads != 3 || (leaves.Header != BlockArtifactAbsent && leaves.Block == BlockArtifactAbsent) ||
 				(leaves.Undo != BlockArtifactAbsent && (leaves.Header == BlockArtifactAbsent || leaves.Block == BlockArtifactAbsent)) {
-				t.Fatalf("leaves %+v existed at no instant", leaves)
+				t.Fatalf("leaves %+v existed at no instant, reads=%d", leaves, reads)
 			}
 		})
 	}

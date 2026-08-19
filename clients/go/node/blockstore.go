@@ -339,7 +339,7 @@ func (bs *BlockStore) RestoreCanonicalIndex(canonical []string) error {
 	// the strict on-disk decoder refuses, so the spelling is proven before the lock, as
 	// prepareCanonicalIndex proves it; the copy keeps an empty list non-nil for it, and
 	// nil folds to that empty identity, unlike prepare — the rollback caller
-	// (sync.go:1102) passes the nil CanonicalIndexSnapshot returns for an empty index.
+	// (SyncEngine.restoreRollbackPersistentState) passes the nil CanonicalIndexSnapshot returns for an empty index.
 	nextCanonical := append(make([]string, 0, len(canonical)), canonical...)
 	if err := validateBlockStoreIndex(blockStoreIndexDisk{Version: blockStoreIndexVersion, Canonical: nextCanonical}); err != nil {
 		return err
