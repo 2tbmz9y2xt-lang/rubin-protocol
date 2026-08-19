@@ -2220,6 +2220,26 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			expected := c["expected"].(map[string]any)
 			delete(expected["state_image"].(map[string]any), "RETAINED_DA_IMAGE_V1")
 		},
+		"relation and its aliases moved together": func(t *testing.T, d map[string]any) {
+			// Dual violation: the relation moves AND every alias that encodes it
+			// moves with it, so the composed-alias check still passes and the
+			// truth -> relation arm is the only thing that can reject this.
+			c := cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")
+			values := d["resolved_values"].(map[string]any)
+			p := cp2CaseImage(t, c, "RETAINED_DA_IMAGE_V1")
+			rename := func(old string) string {
+				renamed := strings.Replace(old, ":unchanged", ":new", 1)
+				values[renamed] = values[old]
+				delete(values, old)
+				return renamed
+			}
+			p["relation"] = "new"
+			p["digest_alias"] = rename(p["digest_alias"].(string))
+			fields := p["direct_fields"].(map[string]any)
+			for _, f := range slices.Sorted(maps.Keys(fields)) {
+				fields[f] = rename(fields[f].(string))
+			}
+		},
 		"relation contradicts NEW truth": func(t *testing.T, d map[string]any) {
 			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
 			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["relation"] = "old"
@@ -2316,6 +2336,7 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"direct field dropped":                      "direct_fields shape",
 		"direct field alias substituted":            "alias=",
 		"one image omitted":                         "must carry exactly 4 images",
+		"relation and its aliases moved together":   "invalid for NOT_APPLICABLE",
 		"relation contradicts NEW truth":            "invalid for NEW",
 		"relation contradicts OLD truth":            "invalid for OLD",
 		"relation contradicts NOT_APPLICABLE truth": "invalid for NOT_APPLICABLE",

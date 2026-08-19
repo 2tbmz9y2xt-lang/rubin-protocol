@@ -722,6 +722,24 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         case = case_of(data, "C01-SIDE-001", "MAIN")
         case["expected"]["state_image"]["CHAIN_IMAGE_V1"]["relation"] = "new"
 
+    def relation_and_aliases_moved_together(data: dict) -> None:
+        # Dual violation: the relation moves AND every alias encoding it moves
+        # with it, so the composed-alias check still passes and only the
+        # truth -> relation arm can reject this.
+        case = case_of(data, "C01-SIDE-001", "MAIN")
+        projection = case["expected"]["state_image"]["RETAINED_DA_IMAGE_V1"]
+        values = data["resolved_values"]
+
+        def rename(old_alias: str) -> str:
+            renamed = old_alias.replace(":unchanged", ":new", 1)
+            values[renamed] = values.pop(old_alias)
+            return renamed
+
+        projection["relation"] = "new"
+        projection["digest_alias"] = rename(projection["digest_alias"])
+        for field in sorted(projection["direct_fields"]):
+            projection["direct_fields"][field] = rename(projection["direct_fields"][field])
+
     def stale_chain_tip(data: dict) -> None:
         # Dual violation: CHAIN tip AND the OWNER stable tip move together, so
         # the OWNER<->CHAIN relation still holds and only the summary binding
@@ -764,6 +782,7 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("empty summary on a NEW connect", empty_new_summary, "/input/disconnect_command"),
         ("disconnect summary null instead of []", disconnect_summary_null, "NEW must be an array"),
         ("relation contradicts commit truth", relation_contradicts_truth, "invalid for NOT_APPLICABLE"),
+        ("relation and its aliases moved together", relation_and_aliases_moved_together, "invalid for NOT_APPLICABLE"),
         ("stale CHAIN tip with a consistent owner", stale_chain_tip, "tip must equal the last canonical-applied block"),
         ("orphan resolved value", orphan_resolved_value, "referenced by no image projection"),
         ("substituted digest alias", substituted_digest_alias, "digest_alias="),
