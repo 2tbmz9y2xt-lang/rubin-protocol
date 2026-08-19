@@ -16,7 +16,9 @@ detects drift after the fact.
 from __future__ import annotations
 
 import argparse
+import copy
 import filecmp
+import json
 import os
 import shutil
 import subprocess
@@ -279,6 +281,57 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                     raise RuntimeError(f"{sw}/complete_da_ids: not ascending raw bytes")
 
 
+def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
+    """Run RUB-1208 single-dimension hostile mutations from a valid artifact."""
+    control = load_json_fail_closed(path)
+
+    def case_of(data: dict, row_id: str, case_id: str) -> dict:
+        row = next(row for row in data["rows"] if row["row_id"] == row_id)
+        return next(case for case in row["cases"] if case["case_id"] == case_id)
+
+    def stale_owner_tip(data: dict) -> None:
+        case = case_of(data, "C01-DIRECT-001", "MAIN")
+        alias = case["expected"]["state_image"]["OWNER_IMAGE_V1"]["direct_fields"]["stable_tip"]
+        data["resolved_values"][alias]["value"]["hash"] = "00" * 32
+
+    def reverse_summary(data: dict) -> None:
+        case = case_of(data, "C01-SUMMARY-001", "MULTI_BLOCK_ORDER")
+        case["expected"]["canonical_applied_blocks"].reverse()
+
+    def reverse_da_ids(data: dict) -> None:
+        case = case_of(data, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
+        case["expected"]["canonical_applied_blocks"][0]["complete_da_ids"].reverse()
+
+    def non_new_summary(data: dict) -> None:
+        case = case_of(data, "C01-SIDE-001", "MAIN")
+        case["expected"]["canonical_applied_blocks"] = []
+
+    mutations = (
+        ("stale OWNER stable_tip", stale_owner_tip, "OWNER/stable_tip"),
+        ("reversed same-count summary", reverse_summary, "heights not strictly canonical"),
+        ("reversed DA ids", reverse_da_ids, "not ascending raw bytes"),
+        ("non-NEW summary", non_new_summary, "non-NEW must be null"),
+    )
+    with tempfile.TemporaryDirectory(prefix="rubin-r1208-negative-") as td:
+        for name, mutate, expected_reason in mutations:
+            candidate = copy.deepcopy(control)
+            mutate(candidate)
+            mutated_path = Path(td) / (name.replace(" ", "_") + ".json")
+            mutated_path.write_text(
+                json.dumps(candidate, ensure_ascii=False, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            try:
+                validate_canonical_pipeline_v2_semantics(mutated_path)
+            except RuntimeError as exc:
+                if expected_reason not in str(exc):
+                    raise RuntimeError(
+                        f"RUB-1208 negative {name!r} failed for wrong reason: {exc}"
+                    ) from exc
+            else:
+                raise RuntimeError(f"RUB-1208 negative {name!r} was accepted")
+
+
 def assert_committed_untouched(
     repo_root: Path, candidate_root: Path
 ) -> None:
@@ -322,6 +375,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if (repo_root / V2_SCHEMA_REL).is_file():
             validate_canonical_pipeline_v2_semantics(output_dir / V2_REL)
             validate_canonical_pipeline_v2_semantics(committed_root / V2_REL)
+            assert_canonical_pipeline_v2_negative_controls(committed_root / V2_REL)
         (
             missing_committed,
             differing,
@@ -376,7 +430,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for rel in differing:
                 print(f"  ~ {rel}", file=sys.stderr)
         return 1
-    except (RuntimeError, FileNotFoundError, OSError) as exc:
+    except (RuntimeError, FileNotFoundError, OSError, StopIteration, KeyError, TypeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     finally:
