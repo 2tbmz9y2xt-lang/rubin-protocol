@@ -2009,3 +2009,439 @@ func TestCanonicalPipelineV2CorpusIsByteDeterministic(t *testing.T) {
 		t.Fatalf("closure epoch = %v, want the bound RUB-1206 manifest identity in status %q", epoch, cp2ClosureStatus)
 	}
 }
+
+// cp2AuthorityControl decodes the embedded authority source into a generic
+// document. Every RUB-1208 negative below starts from this KNOWN-VALID control
+// and changes exactly one dimension.
+func cp2AuthorityControl(t *testing.T) map[string]any {
+	t.Helper()
+	var doc map[string]any
+	dec := json.NewDecoder(bytes.NewReader(cp2AuthoritySource))
+	dec.UseNumber()
+	if err := dec.Decode(&doc); err != nil {
+		t.Fatalf("decode authority control: %v", err)
+	}
+	return doc
+}
+
+// cp2ValidateAuthorityDoc re-encodes a mutated control and drives the real
+// decode + validate path. The sha is recomputed on purpose: the pin is tested
+// separately, and re-pinning here is what lets a SEMANTIC negative reach the
+// validators instead of stopping at the byte pin.
+func cp2ValidateAuthorityDoc(t *testing.T, doc map[string]any) error {
+	t.Helper()
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("re-encode mutated authority: %v", err)
+	}
+	payload, err := cp2DecodeAuthority(raw, fmt.Sprintf("%x", sha256.Sum256(raw)))
+	if err != nil {
+		return err
+	}
+	return cp2ValidateR1208Payload(payload)
+}
+
+func cp2AuthorityCase(t *testing.T, doc map[string]any, rowID, caseID string) map[string]any {
+	t.Helper()
+	rows, _ := doc["rows"].([]any)
+	for _, raw := range rows {
+		row, _ := raw.(map[string]any)
+		if id, _ := row["row_id"].(string); id != rowID {
+			continue
+		}
+		cases, _ := row["cases"].([]any)
+		for _, rawCase := range cases {
+			c, _ := rawCase.(map[string]any)
+			if id, _ := c["case_id"].(string); id == caseID {
+				return c
+			}
+		}
+	}
+	t.Fatalf("negative control target %s/%s is gone", rowID, caseID)
+	return nil
+}
+
+func cp2CaseImage(t *testing.T, c map[string]any, image string) map[string]any {
+	t.Helper()
+	expected, _ := c["expected"].(map[string]any)
+	images, _ := expected["state_image"].(map[string]any)
+	p, ok := images[image].(map[string]any)
+	if !ok {
+		t.Fatalf("case carries no %s projection", image)
+	}
+	return p
+}
+
+func cp2CaseSummary(t *testing.T, c map[string]any) []any {
+	t.Helper()
+	expected, _ := c["expected"].(map[string]any)
+	rows, ok := expected["canonical_applied_blocks"].([]any)
+	if !ok {
+		t.Fatalf("case carries no summary array")
+	}
+	return rows
+}
+
+// TestCanonicalPipelineV2AuthorityPinIsExact proves the byte pin rejects an
+// edited authority source before any semantic validator sees it, and that the
+// decoder accepts exactly one document.
+func TestCanonicalPipelineV2AuthorityPinIsExact(t *testing.T) {
+	if _, err := cp2DecodeAuthority(cp2AuthoritySource, cp2AuthoritySourceSHA256); err != nil {
+		t.Fatalf("control must decode under its pin: %v", err)
+	}
+	mutated := append(slices.Clone(cp2AuthoritySource), ' ')
+	if _, err := cp2DecodeAuthority(mutated, cp2AuthoritySourceSHA256); err == nil ||
+		!strings.Contains(err.Error(), "authority source sha256=") {
+		t.Errorf("one appended byte: error = %v, want a sha256 pin rejection", err)
+	}
+	if _, err := cp2DecodeAuthority([]byte("{}{}"), fmt.Sprintf("%x", sha256.Sum256([]byte("{}{}")))); err == nil ||
+		!strings.Contains(err.Error(), "trailing JSON") {
+		t.Errorf("two documents: error = %v, want a trailing JSON rejection", err)
+	}
+	if _, err := cp2DecodeAuthority([]byte("{"), fmt.Sprintf("%x", sha256.Sum256([]byte("{")))); err == nil ||
+		!strings.Contains(err.Error(), "authority source json") {
+		t.Errorf("truncated document: error = %v, want a json rejection", err)
+	}
+	// The pinned sha is the sha of the file the generator embeds.
+	if got := fmt.Sprintf("%x", sha256.Sum256(cp2AuthoritySource)); got != cp2AuthoritySourceSHA256 {
+		t.Errorf("embedded authority sha256 = %s, want the pinned %s", got, cp2AuthoritySourceSHA256)
+	}
+}
+
+// TestCanonicalPipelineV2DirectFieldsMatchTheManifest pins the two lists this
+// slice maintains on two sides: the per-image direct-field names come from the
+// frozen manifest, and every one of them has a declared type here.
+func TestCanonicalPipelineV2DirectFieldsMatchTheManifest(t *testing.T) {
+	payload, err := cp2DecodeAuthority(cp2AuthoritySource, cp2AuthoritySourceSHA256)
+	if err != nil {
+		t.Fatalf("decode authority: %v", err)
+	}
+	direct, err := cp2DirectFieldNames(payload.ImageManifest)
+	if err != nil {
+		t.Fatalf("derive direct fields: %v", err)
+	}
+	named := map[string]bool{}
+	for _, fields := range direct {
+		for _, f := range fields {
+			named[f] = true
+		}
+	}
+	for field := range cp2DirectFieldTypes {
+		if !named[field] {
+			t.Errorf("cp2DirectFieldTypes declares %q, which no manifest image names", field)
+		}
+	}
+	if len(named) != len(cp2DirectFieldTypes) {
+		t.Errorf("manifest names %d direct fields, cp2DirectFieldTypes declares %d", len(named), len(cp2DirectFieldTypes))
+	}
+	// A manifest whose direct_fields list changed must not leave the Go check
+	// enforcing the old set.
+	manifest := cp2JSONImage(payload.ImageManifest).(map[string]any)
+	images := manifest["images"].(map[string]any)
+	chain := images["CHAIN_IMAGE_V1"].(map[string]any)
+	chain["direct_fields"] = []any{"tip_hash", "height", "already_generated"}
+	if _, err := cp2DirectFieldNames(manifest); err == nil ||
+		!strings.Contains(err.Error(), "has no declared type") {
+		t.Errorf("substituted manifest direct field: error = %v, want an undeclared-type rejection", err)
+	}
+}
+
+// TestCanonicalPipelineV2R1208ValidatorFailsClosed drives one single-dimension
+// mutation per rejection branch the RUB-1208 validators add, from a KNOWN-VALID
+// control, asserting the exact reason each time.
+func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
+	if err := cp2ValidateAuthorityDoc(t, cp2AuthorityControl(t)); err != nil {
+		t.Fatalf("control authority must validate: %v", err)
+	}
+	mutate := map[string]func(*testing.T, map[string]any){
+		"closure binding substituted": func(t *testing.T, d map[string]any) {
+			d["closure_bindings"].(map[string]any)["image_manifest_hash"] = strings.Repeat("00", 32)
+		},
+		"image manifest edited": func(t *testing.T, d map[string]any) {
+			m := d["image_manifest"].(map[string]any)
+			m["image_manifest_version"] = "rubin-c01-image-manifest-v2-draft"
+		},
+		"summary manifest edited": func(t *testing.T, d map[string]any) {
+			m := d["summary_manifest"].(map[string]any)
+			m["summary_manifest_version"] = "tampered"
+		},
+		"unauthorized row id": func(t *testing.T, d map[string]any) {
+			d["rows"].([]any)[0].(map[string]any)["row_id"] = "C01-DIRECT-002"
+		},
+		"case count off the census": func(t *testing.T, d map[string]any) {
+			row := d["rows"].([]any)[0].(map[string]any)
+			cases := row["cases"].([]any)
+			row["cases"] = append(cases, cases[0])
+		},
+		"resolved value unknown tag": func(t *testing.T, d map[string]any) {
+			values := d["resolved_values"].(map[string]any)
+			values[slices.Sorted(maps.Keys(values))[0]].(map[string]any)["type"] = "bytes"
+		},
+		"resolved key not a token": func(t *testing.T, d map[string]any) {
+			values := d["resolved_values"].(map[string]any)
+			first := slices.Sorted(maps.Keys(values))[0]
+			values["bad key"] = values[first]
+		},
+		"orphan resolved value": func(t *testing.T, d map[string]any) {
+			d["resolved_values"].(map[string]any)["tip_hash@C01-DIRECT-001/ORPHAN:new"] =
+				map[string]any{"type": "bytes32_hex", "value": strings.Repeat("22", 32)}
+		},
+		"digest alias substituted": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "MULTI_BLOCK_ORDER")
+			other := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["digest_alias"] =
+				cp2CaseImage(t, other, "CHAIN_IMAGE_V1")["digest_alias"]
+		},
+		"digest alias absent": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			delete(cp2CaseImage(t, c, "CHAIN_IMAGE_V1"), "digest_alias")
+		},
+		"digest alias wrong type": func(t *testing.T, d map[string]any) {
+			// Retag the entry AND give it a valid literal of the new tag, so the
+			// only thing left to reject is the alias/tag relation itself.
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			alias := cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["digest_alias"].(string)
+			entry := d["resolved_values"].(map[string]any)[alias].(map[string]any)
+			entry["type"], entry["value"] = "u64", json.Number("7")
+		},
+		"direct field dropped": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			fields := cp2CaseImage(t, c, "STANDARD_MEMPOOL_IMAGE_V1")["direct_fields"].(map[string]any)
+			delete(fields, "used_bytes")
+		},
+		"direct field alias substituted": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			other := cp2AuthorityCase(t, d, "C01-GENESIS-001", "MAIN")
+			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["direct_fields"].(map[string]any)["height"] =
+				cp2CaseImage(t, other, "CHAIN_IMAGE_V1")["direct_fields"].(map[string]any)["height"]
+		},
+		"one image omitted": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			expected := c["expected"].(map[string]any)
+			delete(expected["state_image"].(map[string]any), "RETAINED_DA_IMAGE_V1")
+		},
+		"relation contradicts NEW truth": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["relation"] = "old"
+		},
+		"relation contradicts OLD truth": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DACLEAN-001", "CORRUPT_FIRST")
+			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["relation"] = "new"
+		},
+		"relation contradicts NOT_APPLICABLE truth": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")
+			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["relation"] = "new"
+		},
+		"stale owner stable tip": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			alias := cp2CaseImage(t, c, "OWNER_IMAGE_V1")["direct_fields"].(map[string]any)["stable_tip"].(string)
+			entry := d["resolved_values"].(map[string]any)[alias].(map[string]any)
+			entry["value"].(map[string]any)["hash"] = strings.Repeat("00", 32)
+		},
+		"stale chain tip with a consistent owner": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			tip := cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["direct_fields"].(map[string]any)["tip_hash"].(string)
+			stable := cp2CaseImage(t, c, "OWNER_IMAGE_V1")["direct_fields"].(map[string]any)["stable_tip"].(string)
+			values := d["resolved_values"].(map[string]any)
+			values[tip].(map[string]any)["value"] = strings.Repeat("11", 32)
+			values[stable].(map[string]any)["value"].(map[string]any)["hash"] = strings.Repeat("11", 32)
+		},
+		"summary row substituted block_hash": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "MULTI_BLOCK_ORDER")
+			rows := cp2CaseSummary(t, c)
+			a, b := rows[0].(map[string]any), rows[1].(map[string]any)
+			a["block_hash"], b["block_hash"] = b["block_hash"], a["block_hash"]
+		},
+		"summary rows reversed": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "MULTI_BLOCK_ORDER")
+			rows := cp2CaseSummary(t, c)
+			slices.Reverse(rows)
+		},
+		"da occurrence duplicated": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
+			ids := cp2CaseSummary(t, c)[0].(map[string]any)["complete_da_ids"].([]any)
+			ids[1] = ids[0]
+		},
+		"da occurrence dropped": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DACLEAN-001", "MULTI_SET_SUCCESS")
+			row := cp2CaseSummary(t, c)[0].(map[string]any)
+			ids := row["complete_da_ids"].([]any)
+			row["complete_da_ids"] = ids[:len(ids)-1]
+		},
+		"da occurrence reordered": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
+			ids := cp2CaseSummary(t, c)[0].(map[string]any)["complete_da_ids"].([]any)
+			slices.Reverse(ids)
+		},
+		"da alias absent from the catalog": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
+			cp2CaseSummary(t, c)[0].(map[string]any)["complete_da_ids"].([]any)[0] = "R1208_ABSENT_DA_ID"
+		},
+		"empty summary on a NEW connect": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			c["expected"].(map[string]any)["canonical_applied_blocks"] = []any{}
+		},
+		"disconnect summary null instead of empty": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DISCONNECT-001", "MAIN")
+			c["expected"].(map[string]any)["canonical_applied_blocks"] = nil
+		},
+		"non-NEW summary is not null": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")
+			c["expected"].(map[string]any)["canonical_applied_blocks"] = []any{}
+		},
+		"summary_rows effect drift": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-REORG-001", "MAIN")
+			effects := c["expected"].(map[string]any)["effects"].(map[string]any)
+			effects["summary_rows"].(map[string]any)["value"] = json.Number("99")
+		},
+		"included-set identity substituted": func(t *testing.T, d map[string]any) {
+			fixtures := d["fixtures"].(map[string]any)
+			entry := fixtures["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
+			identities := entry["value"].(map[string]any)["identities"].([]any)
+			identities[0].(map[string]any)["da_id"] = strings.Repeat("0", 63) + "9"
+		},
+	}
+	want := map[string]string{
+		"closure binding substituted":               "closure bindings differ from frozen v8 pins",
+		"image manifest edited":                     "image manifest hash=",
+		"summary manifest edited":                   "summary manifest hash=",
+		"unauthorized row id":                       "unauthorized",
+		"case count off the census":                 "unauthorized",
+		"resolved value unknown tag":                "is not a valid bytes literal",
+		"resolved key not a token":                  "is not a machine token",
+		"orphan resolved value":                     "is referenced by no image projection",
+		"digest alias substituted":                  "digest_alias=",
+		"digest alias absent":                       "digest_alias missing",
+		"digest alias wrong type":                   "type=u64 want bytes32_hex",
+		"direct field dropped":                      "direct_fields shape",
+		"direct field alias substituted":            "alias=",
+		"one image omitted":                         "must carry exactly 4 images",
+		"relation contradicts NEW truth":            "invalid for NEW",
+		"relation contradicts OLD truth":            "invalid for OLD",
+		"relation contradicts NOT_APPLICABLE truth": "invalid for NOT_APPLICABLE",
+		"stale owner stable tip":                    "OWNER/stable_tip must equal the published CHAIN tip",
+		"stale chain tip with a consistent owner":   "CHAIN tip must equal the last canonical-applied block",
+		"summary row substituted block_hash":        "is not the hash of block_id",
+		"summary rows reversed":                     "heights not strictly canonical",
+		"da occurrence duplicated":                  "not strictly raw-byte ascending",
+		"da occurrence dropped":                     "differ from the included-set identities",
+		"da occurrence reordered":                   "not strictly raw-byte ascending",
+		"da alias absent from the catalog":          "is absent",
+		"empty summary on a NEW connect":            "/input/disconnect_command",
+		"disconnect summary null instead of empty":  "summary must be array for NEW",
+		"non-NEW summary is not null":               "summary must be null for NOT_APPLICABLE",
+		"summary_rows effect drift":                 "effects.summary_rows",
+		"included-set identity substituted":         "differ from the included-set identities",
+	}
+	for _, name := range slices.Sorted(maps.Keys(mutate)) {
+		t.Run(name, func(t *testing.T) {
+			doc := cp2AuthorityControl(t)
+			mutate[name](t, doc)
+			err := cp2ValidateAuthorityDoc(t, doc)
+			if err == nil {
+				t.Fatalf("mutation %q was accepted", name)
+			}
+			if !strings.Contains(err.Error(), want[name]) {
+				t.Errorf("mutation %q: error = %v, want it to contain %q", name, err, want[name])
+			}
+		})
+	}
+}
+
+// TestCanonicalPipelineV2ProbeFile validates an arbitrary v2 artifact through
+// the real generator validators, so an external probe run can drive exactly the
+// checks the generator itself applies. It is skipped unless RUBIN_CP2_PROBE_FILE
+// names a file.
+func TestCanonicalPipelineV2ProbeFile(t *testing.T) {
+	path := os.Getenv("RUBIN_CP2_PROBE_FILE")
+	if path == "" {
+		t.Skip("RUBIN_CP2_PROBE_FILE is unset")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read probe file: %v", err)
+	}
+	var doc map[string]any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&doc); err != nil {
+		t.Fatalf("probe file is not one JSON document: %v", err)
+	}
+	payload := cp2R1208Payload{
+		ClosureBindings: map[string]string{},
+		ImageManifest:   cpMap{},
+		SummaryManifest: cpMap{},
+	}
+	// An emitted artifact carries the manifests and maps at top level and the
+	// closure bindings under _meta.closure_epoch; project it back onto the
+	// authority shape the validators consume.
+	if meta, ok := doc["_meta"].(map[string]any); ok {
+		if epoch, ok := meta["closure_epoch"].(map[string]any); ok {
+			for _, k := range []string{
+				"closure_manifest_version", "manifest_root_sha256", "row_case_design_hash",
+				"input_schema_design_hash", "expected_projection_design_hash",
+				"image_manifest_hash", "summary_manifest_hash", "mutation_assignment_hash",
+			} {
+				if v, ok := epoch[k].(string); ok {
+					payload.ClosureBindings[k] = v
+				}
+			}
+		}
+	}
+	remarshal(t, doc["image_manifest"], &payload.ImageManifest)
+	remarshal(t, doc["summary_manifest"], &payload.SummaryManifest)
+	remarshal(t, doc["fixtures"], &payload.Fixtures)
+	remarshal(t, doc["resolved_values"], &payload.ResolvedValues)
+	rows, _ := doc["rows"].([]any)
+	for _, row := range rows {
+		encoded, err := json.Marshal(row)
+		if err != nil {
+			t.Fatalf("re-encode probe row: %v", err)
+		}
+		payload.Rows = append(payload.Rows, encoded)
+	}
+	if err := cp2ValidateR1208Payload(payload); err != nil {
+		t.Fatalf("probe file rejected: %v", err)
+	}
+}
+
+func remarshal(t *testing.T, from any, into any) {
+	t.Helper()
+	raw, err := json.Marshal(from)
+	if err != nil {
+		t.Fatalf("re-encode probe section: %v", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(into); err != nil {
+		t.Fatalf("decode probe section: %v", err)
+	}
+}
+
+// TestCanonicalPipelineV2AliasNamespacesCannotCollide pins the argument that
+// replaces a runtime disjointness check between `fixtures` and `resolved_values`:
+// a catalog key may carry no `@`, and every composed resolved key carries one,
+// so no string can be a legal key in both maps.
+func TestCanonicalPipelineV2AliasNamespacesCannotCollide(t *testing.T) {
+	composed := cp2ComposedAlias("tip_hash", "C01-DIRECT-001/MAIN", "new")
+	if !strings.Contains(composed, "@") {
+		t.Fatalf("composed alias %q carries no @, the argument does not hold", composed)
+	}
+	if cp2UpperTokenRE.MatchString(composed) {
+		t.Errorf("catalog alias grammar accepts the composed key %q", composed)
+	}
+	for _, s := range []string{"A@B", "A:B", "A/B"} {
+		if cp2UpperTokenRE.MatchString(s) {
+			t.Errorf("catalog alias grammar accepts %q, which a composed key may contain", s)
+		}
+	}
+	payload, err := cp2DecodeAuthority(cp2AuthoritySource, cp2AuthoritySourceSHA256)
+	if err != nil {
+		t.Fatalf("decode authority: %v", err)
+	}
+	for name := range payload.ResolvedValues {
+		if _, clash := payload.Fixtures[name]; clash {
+			t.Fatalf("alias %q is in both namespaces", name)
+		}
+	}
+}

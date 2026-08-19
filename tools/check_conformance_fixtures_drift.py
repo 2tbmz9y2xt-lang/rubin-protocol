@@ -21,6 +21,7 @@ import filecmp
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,7 +36,6 @@ COMMITTED_FIXTURES_REL = Path("conformance/fixtures")
 GENERATOR_PACKAGE = "./cmd/gen-conformance-fixtures"
 GO_MODULE_REL = Path("clients/go")
 V2_REL = Path("protocol/canonical_pipeline_v2.json")
-V2_SCHEMA_REL = Path("conformance/schemas/cv-canonical-pipeline-v2.json")
 V2_RUB1208_CASE_COUNTS = {
     "C01-DACLEAN-001": 12,
     "C01-DIRECT-001": 1,
@@ -48,7 +48,17 @@ V2_RUB1208_CASE_COUNTS = {
 }
 # Canonical SHA-256 of the 24-case obligation receipts. Forward is
 # {row/case -> sorted obligation_ids}; reverse is {obligation_id -> sorted row/case}.
-# Both are independently derived from the corrected RUB-1206 v8 payload.
+# Both literals were recomputed from the bound closure snapshot
+# rubin-c01-design-closure-v8 case_design.canonical.json (slice RUB-1208, the 24
+# entries whose sha256 is _meta.closure_epoch.row_case_design_hash), NOT from the
+# artifact they pin, so the pin is independent of its subject.
+# The reverse receipt is a pure function of the forward map built below, so it
+# can only redden when the forward receipt does; it is kept because the mandatory
+# gate names a forward-AND-reverse receipt, and its killer is the forward one.
+# Killers: test_obligation_receipts_reject_a_census_preserving_edit renames one
+# obligation id and moves one between cases, both leaving the unique and
+# occurrence counts untouched, so the hash path is the only thing left to reject
+# them.
 V2_RUB1208_OBLIGATION_FORWARD_SHA256 = "f0be2577e0e5ed13ab2bcf50163d5289f7a04fd48352dea29fa7b216f310d45b"
 V2_RUB1208_OBLIGATION_REVERSE_SHA256 = "378f3789d24c2a43bc2c29e50e0efa96232b666ede32bc8e9b30dcdebf71c60b"
 V2_RUB1208_OBLIGATION_UNIQUE = 143
@@ -95,6 +105,14 @@ def parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
         "--keep-output-dir",
         action="store_true",
         help="Do not delete the candidate output directory on exit.",
+    )
+    parser.add_argument(
+        "--skip-v2-semantics",
+        action="store_true",
+        help=(
+            "Skip the RUB-1208 canonical-pipeline-v2 relation/receipt gate. For the "
+            "isolated fake-repo unit tests only; the real repository always runs it."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -191,12 +209,201 @@ def _fixture_value(fixtures: dict, alias: object, want: str, where: str):
     return entry.get("value")
 
 
+# Type of every direct field. The frozen image manifest names the per-image
+# field LIST but not the tags, so the names come from the manifest at run time
+# and only the name -> type mapping lives here. Mirrors Go cp2DirectFieldTypes.
+V2_DIRECT_FIELD_TYPES = {
+    "claim_count": "u64",
+    "current_mempool_min_fee_rate": "u64",
+    "height": "u64",
+    "last_admission_seq": "u64",
+    "orphan_bytes": "u64",
+    "pinned_payload_bytes": "u64",
+    "record_count": "u64",
+    "set_count": "u64",
+    "stable_tip": "object",
+    "tip_hash": "bytes32_hex",
+    "tx_count": "u64",
+    "used_bytes": "u64",
+    "utxo_count": "u64",
+}
+V2_RESOLVED_KEY_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_]*@C01(-[A-Z0-9]+)+-[0-9]{3}/[A-Z][A-Z0-9_]*:(new|old|unchanged|withheld)$"
+)
+V2_BYTES32_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _relations_for_truth(truth: str, image: str) -> tuple:
+    """Relations one image may carry under a commit truth. Mirrors Go
+    cp2RelationForTruth; the v2 schema carries the same arms."""
+    if truth == "UNKNOWN":
+        return ("withheld",)
+    if truth == "OLD":
+        return ("old",)
+    if truth == "NOT_APPLICABLE":
+        return ("unchanged",)
+    if truth == "NEW":
+        if image in ("CHAIN_IMAGE_V1", "OWNER_IMAGE_V1"):
+            return ("new",)
+        return ("new", "unchanged")
+    return ()
+
+
+def _direct_field_names(manifest: object) -> dict:
+    """Per-image direct-field list, read from the frozen image manifest."""
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("images"), dict):
+        raise RuntimeError("canonical_pipeline_v2: image_manifest carries no images map")
+    out = {}
+    for image, entry in sorted(manifest["images"].items()):
+        fields = entry.get("direct_fields") if isinstance(entry, dict) else None
+        if not isinstance(fields, list) or not fields:
+            raise RuntimeError(f"canonical_pipeline_v2: image manifest {image} names no direct_fields")
+        for name in fields:
+            if name not in V2_DIRECT_FIELD_TYPES:
+                raise RuntimeError(
+                    f"canonical_pipeline_v2: image manifest {image} direct field {name!r} has no declared type"
+                )
+        out[image] = list(fields)
+    return out
+
+
+def _resolved_entry(values: dict, alias: object, want: str, where: str):
+    """Resolve one composed alias in resolved_values, fail-closed on absence,
+    key grammar and tag. Mirrors Go cp2ResolvedType plus cp2ValidateResolved."""
+    if not isinstance(alias, str):
+        raise RuntimeError(f"{where}: alias is not a string")
+    if not V2_RESOLVED_KEY_RE.match(alias):
+        raise RuntimeError(f"{where}: resolved alias {alias!r} is not the composed full form")
+    entry = values.get(alias)
+    if not isinstance(entry, dict):
+        raise RuntimeError(f"{where}: resolved alias {alias!r} is absent")
+    if entry.get("type") != want:
+        raise RuntimeError(
+            f"{where}: resolved alias {alias!r} type={entry.get('type')!r} want {want}"
+        )
+    return entry.get("value")
+
+
+def _validate_resolved_values(resolved: dict) -> None:
+    """Every entry is a typed literal of its declared tag, keyed by the composed
+    full form. Mirrors Go cp2ValidateResolved."""
+    for name in sorted(resolved):
+        if not V2_RESOLVED_KEY_RE.match(name):
+            raise RuntimeError(f"resolved_values key {name!r} is not the composed full form")
+        entry = resolved[name]
+        if not isinstance(entry, dict) or set(entry) != {"type", "value"}:
+            raise RuntimeError(f"resolved_values[{name}] is not a closed typed literal")
+        tag, value = entry["type"], entry["value"]
+        if tag == "bytes32_hex":
+            ok = isinstance(value, str) and bool(V2_BYTES32_RE.match(value))
+        elif tag == "u64":
+            ok = type(value) is int and 0 <= value <= 18446744073709551615
+        elif tag == "object":
+            ok = isinstance(value, dict) and bool(value)
+        else:
+            raise RuntimeError(f"resolved_values[{name}] type {tag!r} is outside the closed tag set")
+        if not ok:
+            raise RuntimeError(f"resolved_values[{name}] is not a valid {tag} literal")
+
+
+def _set_identity_da_id(raw: object, where: str) -> str:
+    if not isinstance(raw, dict) or not isinstance(raw.get("da_id"), str):
+        raise RuntimeError(f"{where}: included-set identity carries no da_id")
+    return raw["da_id"]
+
+
+def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: list):
+    """Expected per-block da_id lists derived from the case's own
+    /input/block_included_set_identities. Mirrors Go cp2IncludedSetDAIDs:
+    grouped {block_id, identities} entries bind by block-alias suffix, flat
+    entries carry no block binding and need a single-row summary, and the two
+    shapes are never mixed. Returns None when the case states no such stimulus."""
+    if not isinstance(inputs, list):
+        return None
+    aliases, stated = [], False
+    for entry in inputs:
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"{where}: input entry is not an object")
+        if entry.get("pointer") != "/input/block_included_set_identities":
+            continue
+        stated = True
+        values = entry.get("value_or_alias")
+        if not isinstance(values, list):
+            raise RuntimeError(f"{where}/input/block_included_set_identities: not an array")
+        aliases.extend(values)
+    if not stated:
+        return None
+
+    grouped, flat, shapes = {}, [], set()
+    for alias in aliases:
+        value = _fixture_value(
+            fixtures, alias, "object", f"{where}/input/block_included_set_identities"
+        )
+        if not isinstance(value, dict):
+            raise RuntimeError(f"{where}: included-set fixture {alias!r} is not an object")
+        has_block = isinstance(value.get("block_id"), str)
+        has_identities = isinstance(value.get("identities"), list)
+        if has_block and has_identities:
+            shapes.add("grouped")
+            grouped.setdefault(value["block_id"], []).extend(
+                _set_identity_da_id(x, f"{where}/{alias}") for x in value["identities"]
+            )
+        elif not has_block and not has_identities:
+            shapes.add("flat")
+            flat.append(_set_identity_da_id(value, f"{where}/{alias}"))
+        else:
+            raise RuntimeError(
+                f"{where}: included-set fixture {alias!r} is neither a flat identity "
+                f"nor a {{block_id, identities}} group"
+            )
+    if len(shapes) > 1:
+        raise RuntimeError(f"{where}: mixes flat and grouped included-set identities")
+
+    def block_alias(index: int) -> str:
+        row = summary[index]
+        if not isinstance(row, dict) or not isinstance(row.get("block_id"), str):
+            raise RuntimeError(f"{where}/canonical_applied_blocks/{index}: block_id is not an alias")
+        return row["block_id"]
+
+    out = {}
+    if "grouped" in shapes:
+        for suffix in sorted(grouped):
+            matches = [
+                block_alias(i) for i in range(len(summary))
+                if block_alias(i).endswith("_" + suffix)
+            ]
+            if len(matches) != 1:
+                raise RuntimeError(
+                    f"{where}: included-set block {suffix!r} matches {len(matches)} summary rows"
+                )
+            out[matches[0]] = sorted(set(grouped[suffix]))
+        return out
+    want = sorted(set(flat))
+    if not want:
+        return {block_alias(i): [] for i in range(len(summary))}
+    if len(summary) != 1:
+        raise RuntimeError(
+            f"{where}: carries {len(want)} flat included-set identities but "
+            f"{len(summary)} summary rows, so no row binding is derivable"
+        )
+    return {block_alias(0): want}
+
+
 def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
-    """RUB-1208 relation/receipt gate independent of generator byte equality."""
+    """RUB-1208 relation/receipt gate independent of generator byte equality.
+
+    Every relation below is also enforced by the generator
+    (clients/go/cmd/gen-conformance-fixtures/runtime.go cp2ValidateR1208Payload
+    and cp2ValidateR1208Expected): no field may be accepted on one side and
+    rejected on the other.
+    """
     data = load_json_fail_closed(path)
     if not isinstance(data, dict):
         raise RuntimeError("canonical_pipeline_v2: top-level value is not an object")
-    epoch = data.get("_meta", {}).get("closure_epoch", {})
+    meta = data.get("_meta")
+    epoch = meta.get("closure_epoch") if isinstance(meta, dict) else None
+    if not isinstance(epoch, dict):
+        raise RuntimeError("canonical_pipeline_v2: _meta.closure_epoch is not an object")
     if epoch.get("closure_manifest_version") != "rubin-c01-design-closure-v8":
         raise RuntimeError("canonical_pipeline_v2: closure epoch is not frozen v8")
     if epoch.get("status") != "building":
@@ -207,6 +414,12 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
     rows = data.get("rows")
     if not isinstance(fixtures, dict) or not isinstance(resolved, dict) or not isinstance(rows, list):
         raise RuntimeError("canonical_pipeline_v2: fixtures/resolved_values/rows shape")
+    _validate_resolved_values(resolved)
+    # No fixtures/resolved_values disjointness check exists because a collision is
+    # unreachable: a catalog key matches ^[A-Z][A-Z0-9_]*$ (no `@`) while every
+    # resolved key is the composed NAME@ROW/CASE:relation form (always one `@`).
+    direct_fields = _direct_field_names(data.get("image_manifest"))
+
     got_counts = {}
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("cases"), list):
@@ -224,6 +437,7 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
     obligation_forward = {}
     obligation_reverse = {}
     obligation_occurrences = 0
+    referenced = set()
 
     for row in rows:
         row_id = row["row_id"]
@@ -247,24 +461,62 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             expected = case.get("expected")
             if not isinstance(expected, dict):
                 raise RuntimeError(f"{where}: expected is not an object")
+            truth = expected.get("commit_truth")
             images = expected.get("state_image")
-            if not isinstance(images, dict) or set(images) != {
-                "CHAIN_IMAGE_V1",
-                "STANDARD_MEMPOOL_IMAGE_V1",
-                "RETAINED_DA_IMAGE_V1",
-                "OWNER_IMAGE_V1",
-            }:
-                raise RuntimeError(f"{where}: state_image must carry exactly four images")
+            if not isinstance(images, dict) or set(images) != set(direct_fields):
+                raise RuntimeError(
+                    f"{where}: state_image must carry exactly the {len(direct_fields)} manifest images"
+                )
 
-            chain = images["CHAIN_IMAGE_V1"].get("direct_fields", {})
-            owner = images["OWNER_IMAGE_V1"].get("direct_fields", {})
-            chain_hash = _typed_value(
+            for image in sorted(direct_fields):
+                projection = images[image]
+                if not isinstance(projection, dict):
+                    raise RuntimeError(f"{where}/{image}: projection is not an object")
+                relation = projection.get("relation")
+                allowed = _relations_for_truth(truth, image)
+                if not allowed:
+                    raise RuntimeError(f"{where}: commit truth {truth!r} is unknown")
+                if relation not in allowed:
+                    raise RuntimeError(
+                        f"{where}/{image}: relation={relation!r} invalid for {truth}, "
+                        f"want one of {list(allowed)}"
+                    )
+                digest = projection.get("digest_alias")
+                want_digest = f"{image}@{where}:{relation}"
+                if digest != want_digest:
+                    raise RuntimeError(
+                        f"{where}/{image}: digest_alias={digest!r} want {want_digest!r}"
+                    )
+                _resolved_entry(resolved, digest, "bytes32_hex", f"{where}/{image}/digest_alias")
+                referenced.add(digest)
+                written = projection.get("direct_fields")
+                if not isinstance(written, dict) or set(written) != set(direct_fields[image]):
+                    raise RuntimeError(
+                        f"{where}/{image}/direct_fields: key set differs from the manifest "
+                        f"{sorted(direct_fields[image])!r}"
+                    )
+                for field in sorted(direct_fields[image]):
+                    alias = written[field]
+                    want_alias = f"{field}@{where}:{relation}"
+                    if alias != want_alias:
+                        raise RuntimeError(
+                            f"{where}/{image}/{field}: alias={alias!r} want {want_alias!r}"
+                        )
+                    _resolved_entry(
+                        resolved, alias, V2_DIRECT_FIELD_TYPES[field],
+                        f"{where}/{image}/{field}",
+                    )
+                    referenced.add(alias)
+
+            chain = images["CHAIN_IMAGE_V1"]["direct_fields"]
+            owner = images["OWNER_IMAGE_V1"]["direct_fields"]
+            chain_hash = _resolved_entry(
                 resolved, chain.get("tip_hash"), "bytes32_hex", f"{where}/CHAIN/tip_hash"
             )
-            chain_height = _typed_value(
+            chain_height = _resolved_entry(
                 resolved, chain.get("height"), "u64", f"{where}/CHAIN/height"
             )
-            stable_tip = _typed_value(
+            stable_tip = _resolved_entry(
                 resolved, owner.get("stable_tip"), "object", f"{where}/OWNER/stable_tip"
             )
             if not isinstance(stable_tip, dict) or stable_tip != {
@@ -276,7 +528,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                     f"{where}/OWNER/stable_tip: must equal published CHAIN tip hash/height"
                 )
 
-            truth = expected.get("commit_truth")
             summary = expected.get("canonical_applied_blocks")
             if truth != "NEW":
                 if summary is not None:
@@ -285,7 +536,25 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             if not isinstance(summary, list):
                 raise RuntimeError(f"{where}/canonical_applied_blocks: NEW must be an array")
 
+            inputs = case.get("input")
+            disconnect = isinstance(inputs, list) and any(
+                isinstance(x, dict) and x.get("pointer") == "/input/disconnect_command"
+                for x in inputs
+            )
+            if not summary and not disconnect:
+                raise RuntimeError(
+                    f"{where}/canonical_applied_blocks: empty but the case carries no "
+                    f"/input/disconnect_command stimulus"
+                )
+            if summary and disconnect:
+                raise RuntimeError(
+                    f"{where}/canonical_applied_blocks: a standalone disconnect must carry "
+                    f"an exact empty summary"
+                )
+            want_da = _included_set_da_ids(where, inputs, fixtures, summary)
+
             last_height = None
+            last_block = None
             for index, summary_row in enumerate(summary):
                 sw = f"{where}/canonical_applied_blocks/{index}"
                 if not isinstance(summary_row, dict):
@@ -293,15 +562,21 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                 block = _fixture_value(
                     fixtures, summary_row.get("block_id"), "object", f"{sw}/block_id"
                 )
-                _fixture_value(
+                block_hash = _fixture_value(
                     fixtures, summary_row.get("block_hash"), "bytes32_hex", f"{sw}/block_hash"
                 )
                 if not isinstance(block, dict) or type(block.get("height")) is not int:
                     raise RuntimeError(f"{sw}/block_id: fixture has no integer height")
+                # Exact block identity (summary_manifest M14/identity).
+                if block.get("block_hash") != block_hash:
+                    raise RuntimeError(
+                        f"{sw}/block_hash: {summary_row.get('block_hash')!r} is not the hash of "
+                        f"block_id {summary_row.get('block_id')!r}"
+                    )
                 height = block["height"]
                 if last_height is not None and height <= last_height:
                     raise RuntimeError(f"{where}/canonical_applied_blocks: heights not strictly canonical")
-                last_height = height
+                last_height, last_block = height, block
 
                 da_ids = summary_row.get("complete_da_ids")
                 if not isinstance(da_ids, list):
@@ -310,8 +585,39 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                     _fixture_value(fixtures, alias, "bytes32_hex", f"{sw}/complete_da_ids/{i}")
                     for i, alias in enumerate(da_ids)
                 ]
-                if raw_ids != sorted(raw_ids):
-                    raise RuntimeError(f"{sw}/complete_da_ids: not ascending raw bytes")
+                # Strictly ascending: an equal neighbour is a duplicated
+                # occurrence, which a complete per-block set may never carry.
+                if any(b <= a for a, b in zip(raw_ids, raw_ids[1:])):
+                    raise RuntimeError(f"{sw}/complete_da_ids: not strictly ascending raw bytes")
+                if want_da is not None:
+                    bound = want_da.get(summary_row.get("block_id"))
+                    if bound is not None and raw_ids != bound:
+                        raise RuntimeError(
+                            f"{sw}/complete_da_ids: {raw_ids!r} differ from the included-set "
+                            f"identities {bound!r} of this block"
+                        )
+
+            if last_block is not None and (
+                chain_hash != last_block.get("block_hash") or chain_height != last_block["height"]
+            ):
+                raise RuntimeError(
+                    f"{where}/CHAIN: tip must equal the last canonical-applied block"
+                )
+
+            # Secondary consistency only: the typed rows are the primary evidence.
+            effects = expected.get("effects")
+            effect = effects.get("summary_rows") if isinstance(effects, dict) else None
+            if isinstance(effect, dict) and effect.get("value") != len(summary):
+                raise RuntimeError(
+                    f"{where}/effects.summary_rows: {effect.get('value')!r} differs from the "
+                    f"{len(summary)} published rows"
+                )
+
+    orphans = sorted(set(resolved) - referenced)
+    if orphans:
+        raise RuntimeError(
+            f"canonical_pipeline_v2: resolved_values[{orphans[0]}] is referenced by no image projection"
+        )
 
     for cases in obligation_reverse.values():
         cases.sort()
@@ -332,12 +638,22 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
 
 
 def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
-    """Run RUB-1208 single-dimension hostile mutations from a valid artifact."""
+    """Run RUB-1208 single-dimension hostile mutations from a valid artifact.
+
+    Every control starts from the committed artifact (a KNOWN-VALID control),
+    changes exactly ONE dimension, and asserts the exact failure pointer, so a
+    control that passes for the wrong reason is itself an error.
+    """
     control = load_json_fail_closed(path)
 
     def case_of(data: dict, row_id: str, case_id: str) -> dict:
-        row = next(row for row in data["rows"] if row["row_id"] == row_id)
-        return next(case for case in row["cases"] if case["case_id"] == case_id)
+        row = next((row for row in data["rows"] if row["row_id"] == row_id), None)
+        if row is None:
+            raise RuntimeError(f"negative control target row {row_id} is gone")
+        case = next((c for c in row["cases"] if c["case_id"] == case_id), None)
+        if case is None:
+            raise RuntimeError(f"negative control target case {row_id}/{case_id} is gone")
+        return case
 
     def stale_owner_tip(data: dict) -> None:
         case = case_of(data, "C01-DIRECT-001", "MAIN")
@@ -360,18 +676,104 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         case = case_of(data, "C01-DIRECT-001", "MAIN")
         case["obligation_ids"].pop()
 
+    def rename_obligation(data: dict) -> None:
+        # Census-preserving: same unique count, same occurrence count. Only the
+        # forward receipt hash can reject it.
+        case = case_of(data, "C01-DIRECT-001", "MAIN")
+        case["obligation_ids"][0] = "OBL-NOT-A-CENSUS-ID-999"
+
+    def move_obligation(data: dict) -> None:
+        # Census-preserving in both counts: one id moves to a case that does not
+        # already carry it, so unique and occurrence counts are untouched and the
+        # forward receipt hash is the only thing left that can reject it.
+        source = case_of(data, "C01-DACLEAN-001", "CORRUPT_FIRST")
+        target = case_of(data, "C01-DIRECT-001", "MAIN")
+        movable = [o for o in source["obligation_ids"] if o not in target["obligation_ids"]]
+        if not movable:
+            raise RuntimeError(
+                "negative control 'moved obligation id' has no movable obligation left"
+            )
+        source["obligation_ids"].remove(movable[0])
+        target["obligation_ids"].append(movable[0])
+
+    def swap_block_hash(data: dict) -> None:
+        case = case_of(data, "C01-SUMMARY-001", "MULTI_BLOCK_ORDER")
+        rows = case["expected"]["canonical_applied_blocks"]
+        rows[0]["block_hash"], rows[1]["block_hash"] = rows[1]["block_hash"], rows[0]["block_hash"]
+
+    def duplicate_da_id(data: dict) -> None:
+        case = case_of(data, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
+        ids = case["expected"]["canonical_applied_blocks"][0]["complete_da_ids"]
+        ids[1] = ids[0]
+
+    def drop_da_id(data: dict) -> None:
+        case = case_of(data, "C01-DACLEAN-001", "MULTI_SET_SUCCESS")
+        case["expected"]["canonical_applied_blocks"][0]["complete_da_ids"].pop()
+
+    def empty_new_summary(data: dict) -> None:
+        case = case_of(data, "C01-DIRECT-001", "MAIN")
+        case["expected"]["canonical_applied_blocks"] = []
+
+    def disconnect_summary_null(data: dict) -> None:
+        case = case_of(data, "C01-DISCONNECT-001", "MAIN")
+        case["expected"]["canonical_applied_blocks"] = None
+
+    def relation_contradicts_truth(data: dict) -> None:
+        case = case_of(data, "C01-SIDE-001", "MAIN")
+        case["expected"]["state_image"]["CHAIN_IMAGE_V1"]["relation"] = "new"
+
+    def stale_chain_tip(data: dict) -> None:
+        # Dual violation: CHAIN tip AND the OWNER stable tip move together, so
+        # the OWNER<->CHAIN relation still holds and only the summary binding
+        # can reject it.
+        case = case_of(data, "C01-DIRECT-001", "MAIN")
+        fields = case["expected"]["state_image"]["CHAIN_IMAGE_V1"]["direct_fields"]
+        stable = case["expected"]["state_image"]["OWNER_IMAGE_V1"]["direct_fields"]["stable_tip"]
+        data["resolved_values"][fields["tip_hash"]]["value"] = "11" * 32
+        data["resolved_values"][stable]["value"]["hash"] = "11" * 32
+
+    def orphan_resolved_value(data: dict) -> None:
+        data["resolved_values"]["tip_hash@C01-DIRECT-001/ORPHAN:new"] = {
+            "type": "bytes32_hex",
+            "value": "22" * 32,
+        }
+
+    def substituted_digest_alias(data: dict) -> None:
+        # Resolves to a real bytes32_hex entry, just not this position's.
+        case = case_of(data, "C01-SUMMARY-001", "MULTI_BLOCK_ORDER")
+        other = case_of(data, "C01-DIRECT-001", "MAIN")
+        case["expected"]["state_image"]["CHAIN_IMAGE_V1"]["digest_alias"] = (
+            other["expected"]["state_image"]["CHAIN_IMAGE_V1"]["digest_alias"]
+        )
+
+    def summary_rows_effect_drift(data: dict) -> None:
+        case = case_of(data, "C01-REORG-001", "MAIN")
+        case["expected"]["effects"]["summary_rows"]["value"] = 99
+
     mutations = (
         ("stale OWNER stable_tip", stale_owner_tip, "OWNER/stable_tip"),
         ("reversed same-count summary", reverse_summary, "heights not strictly canonical"),
-        ("reversed DA ids", reverse_da_ids, "not ascending raw bytes"),
+        ("reversed DA ids", reverse_da_ids, "not strictly ascending raw bytes"),
         ("non-NEW summary", non_new_summary, "non-NEW must be null"),
         ("dropped obligation receipt", drop_obligation, "obligation occurrences"),
+        ("renamed obligation id", rename_obligation, "obligation forward receipt hash mismatch"),
+        ("moved obligation id", move_obligation, "obligation forward receipt hash mismatch"),
+        ("substituted same-count block_hash", swap_block_hash, "is not the hash of block_id"),
+        ("duplicated DA occurrence", duplicate_da_id, "not strictly ascending raw bytes"),
+        ("dropped DA occurrence", drop_da_id, "differ from the included-set identities"),
+        ("empty summary on a NEW connect", empty_new_summary, "/input/disconnect_command"),
+        ("disconnect summary null instead of []", disconnect_summary_null, "NEW must be an array"),
+        ("relation contradicts commit truth", relation_contradicts_truth, "invalid for NOT_APPLICABLE"),
+        ("stale CHAIN tip with a consistent owner", stale_chain_tip, "tip must equal the last canonical-applied block"),
+        ("orphan resolved value", orphan_resolved_value, "referenced by no image projection"),
+        ("substituted digest alias", substituted_digest_alias, "digest_alias="),
+        ("summary_rows effect drift", summary_rows_effect_drift, "effects.summary_rows"),
     )
     with tempfile.TemporaryDirectory(prefix="rubin-r1208-negative-") as td:
         for name, mutate, expected_reason in mutations:
             candidate = copy.deepcopy(control)
             mutate(candidate)
-            mutated_path = Path(td) / (name.replace(" ", "_") + ".json")
+            mutated_path = Path(td) / (name.replace(" ", "_").replace("/", "_") + ".json")
             mutated_path.write_text(
                 json.dumps(candidate, ensure_ascii=False, separators=(",", ":")) + "\n",
                 encoding="utf-8",
@@ -424,10 +826,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         assert_committed_untouched(repo_root, output_dir)
         run_generator(repo_root, output_dir)
         # Isolated unit tests for the generic drift machinery intentionally build
-        # a minimal fake repo without schemas and replace generated files with
-        # sentinel bytes. The real repository always has the v2 schema; only in
-        # that real context does the semantic relation gate apply.
-        if (repo_root / V2_SCHEMA_REL).is_file():
+        # a minimal fake repo and replace generated files with sentinel bytes.
+        # Gate on an explicit opt-out, never on an unrelated file's presence, so
+        # deleting or renaming a file can never silently switch the gate off.
+        if not args.skip_v2_semantics:
             validate_canonical_pipeline_v2_semantics(output_dir / V2_REL)
             validate_canonical_pipeline_v2_semantics(committed_root / V2_REL)
             assert_canonical_pipeline_v2_negative_controls(committed_root / V2_REL)
