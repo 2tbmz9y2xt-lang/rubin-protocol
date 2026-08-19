@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import copy
 import filecmp
+import hashlib
 import json
 import os
 import shutil
@@ -45,6 +46,13 @@ V2_RUB1208_CASE_COUNTS = {
     "C01-SIDE-001": 1,
     "C01-SUMMARY-001": 6,
 }
+# Canonical SHA-256 of the 24-case obligation receipts. Forward is
+# {row/case -> sorted obligation_ids}; reverse is {obligation_id -> sorted row/case}.
+# Both are independently derived from the corrected RUB-1206 v8 payload.
+V2_RUB1208_OBLIGATION_FORWARD_SHA256 = "f0be2577e0e5ed13ab2bcf50163d5289f7a04fd48352dea29fa7b216f310d45b"
+V2_RUB1208_OBLIGATION_REVERSE_SHA256 = "378f3789d24c2a43bc2c29e50e0efa96232b666ede32bc8e9b30dcdebf71c60b"
+V2_RUB1208_OBLIGATION_UNIQUE = 143
+V2_RUB1208_OBLIGATION_OCCURRENCES = 259
 
 # Hardcoded expected generator-owned fixture set per
 # rubin-protocol#1358 task body. Every entry MUST be emitted by the
@@ -150,6 +158,13 @@ def diff_set(
     return missing_committed, differing, matching, missing_candidate, extra_candidate
 
 
+def _canonical_sha256(value: object) -> str:
+    raw = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 def _typed_value(values: dict, alias: object, want: str, where: str):
     if not isinstance(alias, str):
         raise RuntimeError(f"{where}: alias is not a string")
@@ -177,7 +192,7 @@ def _fixture_value(fixtures: dict, alias: object, want: str, where: str):
 
 
 def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
-    """RUB-1208 relation gate independent of generator byte equality."""
+    """RUB-1208 relation/receipt gate independent of generator byte equality."""
     data = load_json_fail_closed(path)
     if not isinstance(data, dict):
         raise RuntimeError("canonical_pipeline_v2: top-level value is not an object")
@@ -206,11 +221,29 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             f"!= {V2_RUB1208_CASE_COUNTS!r}"
         )
 
+    obligation_forward = {}
+    obligation_reverse = {}
+    obligation_occurrences = 0
+
     for row in rows:
         row_id = row["row_id"]
         for case in row["cases"]:
             case_id = case.get("case_id")
             where = f"{row_id}/{case_id}"
+            obligations = case.get("obligation_ids")
+            if (
+                not isinstance(obligations, list)
+                or not obligations
+                or len(obligations) != len(set(obligations))
+                or not all(isinstance(value, str) for value in obligations)
+            ):
+                raise RuntimeError(f"{where}/obligation_ids: must be non-empty unique strings")
+            sorted_obligations = sorted(obligations)
+            obligation_forward[where] = sorted_obligations
+            obligation_occurrences += len(sorted_obligations)
+            for obligation in sorted_obligations:
+                obligation_reverse.setdefault(obligation, []).append(where)
+
             expected = case.get("expected")
             if not isinstance(expected, dict):
                 raise RuntimeError(f"{where}: expected is not an object")
@@ -280,6 +313,23 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                 if raw_ids != sorted(raw_ids):
                     raise RuntimeError(f"{sw}/complete_da_ids: not ascending raw bytes")
 
+    for cases in obligation_reverse.values():
+        cases.sort()
+    if obligation_occurrences != V2_RUB1208_OBLIGATION_OCCURRENCES:
+        raise RuntimeError(
+            f"canonical_pipeline_v2: obligation occurrences={obligation_occurrences} "
+            f"want {V2_RUB1208_OBLIGATION_OCCURRENCES}"
+        )
+    if len(obligation_reverse) != V2_RUB1208_OBLIGATION_UNIQUE:
+        raise RuntimeError(
+            f"canonical_pipeline_v2: unique obligations={len(obligation_reverse)} "
+            f"want {V2_RUB1208_OBLIGATION_UNIQUE}"
+        )
+    if _canonical_sha256(obligation_forward) != V2_RUB1208_OBLIGATION_FORWARD_SHA256:
+        raise RuntimeError("canonical_pipeline_v2: obligation forward receipt hash mismatch")
+    if _canonical_sha256(obligation_reverse) != V2_RUB1208_OBLIGATION_REVERSE_SHA256:
+        raise RuntimeError("canonical_pipeline_v2: obligation reverse receipt hash mismatch")
+
 
 def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
     """Run RUB-1208 single-dimension hostile mutations from a valid artifact."""
@@ -306,11 +356,16 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         case = case_of(data, "C01-SIDE-001", "MAIN")
         case["expected"]["canonical_applied_blocks"] = []
 
+    def drop_obligation(data: dict) -> None:
+        case = case_of(data, "C01-DIRECT-001", "MAIN")
+        case["obligation_ids"].pop()
+
     mutations = (
         ("stale OWNER stable_tip", stale_owner_tip, "OWNER/stable_tip"),
         ("reversed same-count summary", reverse_summary, "heights not strictly canonical"),
         ("reversed DA ids", reverse_da_ids, "not ascending raw bytes"),
         ("non-NEW summary", non_new_summary, "non-NEW must be null"),
+        ("dropped obligation receipt", drop_obligation, "obligation occurrences"),
     )
     with tempfile.TemporaryDirectory(prefix="rubin-r1208-negative-") as td:
         for name, mutate, expected_reason in mutations:
