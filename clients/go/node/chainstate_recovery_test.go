@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"os"
@@ -201,15 +202,58 @@ func TestReconcileChainStateWithBlockStore_InputValidationAndNoopPaths(t *testin
 	}
 }
 
-func TestTruncateIncompleteCanonicalSuffix_InputValidation(t *testing.T) {
-	if _, err := truncateIncompleteCanonicalSuffix(nil); err == nil {
+// TestChainStateRecoveryReplayHashMessagesArePinned: verifyReplayBlockHash now
+// composes its per-stage prefix from the shared identity helper. The two stages
+// reachable through it must still produce the exact baseline strings — the
+// third ("hash header") is defense-in-depth only, since ParseBlockBytes cannot
+// hand back a header of the wrong length.
+func TestChainStateRecoveryReplayHashMessagesArePinned(t *testing.T) {
+	parsed, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(genesis): %v", err)
+	}
+	genesisHash := mustHeaderHash(t, parsed.HeaderBytes)
+	var wrong [32]byte
+	wrong[0] = 0xfe
+	for _, tc := range []struct {
+		name  string
+		bytes []byte
+		hash  [32]byte
+		want  string
+	}{
+		{
+			name: "parse_failure", bytes: []byte("not a block"), hash: devnetGenesisBlockHash,
+			want: "parse block bytes during chainstate replay at height 3: ",
+		},
+		{
+			name: "identity_mismatch", bytes: devnetGenesisBlockBytes, hash: wrong,
+			want: "canonical artifact corruption during chainstate replay at height 3: expected " +
+				hex.EncodeToString(wrong[:]) + ", on-disk header hashes to " + hex.EncodeToString(genesisHash[:]),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyReplayBlockHash(tc.bytes, tc.hash, 3)
+			if err == nil || !strings.HasPrefix(err.Error(), tc.want) {
+				t.Fatalf("message = %v, want the prefix %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestChainStateRecoveryRequireCompleteCanonicalPrefixInputValidation(t *testing.T) {
+	if err := requireCompleteCanonicalPrefix(nil); err == nil {
 		t.Fatalf("expected nil blockstore error")
 	}
 
 	store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
 	store.index.Canonical = []string{"zz"}
-	if _, err := truncateIncompleteCanonicalSuffix(store); err == nil {
+	err := requireCompleteCanonicalPrefix(store)
+	if err == nil {
 		t.Fatalf("expected malformed canonical hash error")
+	}
+	// A structural error keeps its own identity; it is neither fail-closed class.
+	if errors.Is(err, errCanonicalIndexZeroCompletePrefix) || errors.Is(err, errCanonicalIndexIncompleteSuffix) {
+		t.Fatalf("structural error must keep precedence, got %v", err)
 	}
 }
 
@@ -298,64 +342,64 @@ func TestReconcileChainStateWithBlockStorePreservesWidePersistedSupply(t *testin
 	}
 }
 
-func TestReconcileChainStateWithBlockStore_TruncatesIncompleteCanonicalSuffix(t *testing.T) {
+// TestChainStateRecoveryIncompleteCanonicalSuffixIsFatal replaces the baseline
+// truncate-the-suffix behavior. A committed canonical row whose undo record is
+// gone is corruption of committed chain, not garbage to drop: recovery refuses,
+// writes NOTHING (the writeFileAtomicFn probe is never reached), leaves the RAM
+// index, the on-disk index bytes and the chainstate exactly as they were, and
+// never reaches any service start. It also carries the "no index write occurs"
+// row of the deleted TestTruncateIncompleteCanonicalSuffix_PropagatesIndexWriteFailure:
+// with no write there is no write failure to propagate.
+func TestChainStateRecoveryIncompleteCanonicalSuffixIsFatal(t *testing.T) {
 	dir := t.TempDir()
-	chainStatePath := ChainStatePath(dir)
-	store, err := CreateBlockStore(BlockStorePath(dir))
-	if err != nil {
-		t.Fatalf("CreateBlockStore: %v", err)
-	}
-
-	target := consensus.POW_LIMIT
-	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, chainStatePath)
-	liveState := NewChainState()
-	engine, err := NewSyncEngine(liveState, store, cfg)
-	if err != nil {
-		t.Fatalf("NewSyncEngine: %v", err)
-	}
-	if _, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil); err != nil {
-		t.Fatalf("ApplyBlock(genesis): %v", err)
-	}
-
-	genesisParsed, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
-	if err != nil {
-		t.Fatalf("ParseBlockBytes(genesis): %v", err)
-	}
-	block1Coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, 1)
-	block1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, genesisParsed.Header.Timestamp+1, block1Coinbase)
-	if _, err := engine.ApplyBlock(block1, nil); err != nil {
-		t.Fatalf("ApplyBlock(block1): %v", err)
-	}
-
-	block1Parsed, err := consensus.ParseBlockBytes(block1)
-	if err != nil {
-		t.Fatalf("ParseBlockBytes(block1): %v", err)
-	}
-	block1Hash, err := consensus.BlockHash(block1Parsed.HeaderBytes)
-	if err != nil {
-		t.Fatalf("BlockHash(block1): %v", err)
-	}
+	store, liveState, cfg := storeAtGenesis(t, dir)
+	block1Hash := appendCanonicalBlock(t, store, liveState, cfg)
 	if err := os.Remove(filepath.Join(store.undoDir, hex.EncodeToString(block1Hash[:])+".json")); err != nil {
 		t.Fatalf("Remove(block1 undo): %v", err)
 	}
 
-	state := cloneChainState(liveState)
-	changed, err := ReconcileChainStateWithBlockStore(state, store, cfg)
+	markerPath := filepath.Join(BlockStorePath(dir), "index.json")
+	indexBefore, err := os.ReadFile(markerPath) // #nosec G304 -- test-local path.
 	if err != nil {
-		t.Fatalf("ReconcileChainStateWithBlockStore: %v", err)
+		t.Fatalf("read marker: %v", err)
 	}
-	if !changed {
-		t.Fatalf("expected reconcile to truncate incomplete canonical suffix")
+	prevWrite := writeFileAtomicFn
+	t.Cleanup(func() { writeFileAtomicFn = prevWrite })
+	writes := 0
+	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
+		writes++
+		return prevWrite(path, data, mode)
+	}
+
+	state := cloneChainState(liveState)
+	before := state.view()
+	changed, err := ReconcileChainStateWithBlockStore(state, store, cfg)
+	if !errors.Is(err, errCanonicalIndexIncompleteSuffix) {
+		t.Fatalf("reconcile err = %v, want errCanonicalIndexIncompleteSuffix", err)
+	}
+	if changed {
+		t.Fatalf("a refused recovery must report no change")
+	}
+	if want := "index declares 2 entries but only 1 have a complete header/block/undo set"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("message = %q, want it to contain %q", err.Error(), want)
+	}
+	if writes != 0 {
+		t.Fatalf("fail-closed recovery performed %d atomic writes, want 0", writes)
+	}
+
+	indexAfter, err := os.ReadFile(markerPath) // #nosec G304 -- test-local path.
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if !bytes.Equal(indexAfter, indexBefore) {
+		t.Fatalf("canonical index bytes changed on the fail-closed path")
 	}
 	tipHeight, tipHash, ok, err := store.Tip()
-	if err != nil {
-		t.Fatalf("Tip: %v", err)
+	if err != nil || !ok || tipHeight != 1 || tipHash != block1Hash {
+		t.Fatalf("canonical tip moved: ok=%v height=%d hash=%x err=%v", ok, tipHeight, tipHash, err)
 	}
-	if !ok || tipHeight != 0 || tipHash != devnetGenesisBlockHash {
-		t.Fatalf("unexpected truncated tip: ok=%v height=%d hash=%x", ok, tipHeight, tipHash)
-	}
-	if !state.HasTip || state.Height != 0 || state.TipHash != devnetGenesisBlockHash {
-		t.Fatalf("unexpected reconciled state after truncation: has_tip=%v height=%d tip=%x", state.HasTip, state.Height, state.TipHash)
+	if after := state.view(); after != before {
+		t.Fatalf("chainstate mutated before the refusal: %+v -> %+v", before, after)
 	}
 }
 
@@ -411,49 +455,6 @@ func TestReconcileChainStateWithBlockStore_PropagatesCorruptCanonicalArtifact(t 
 	}
 	if !ok || tipHeight != 1 || tipHash != block1Hash {
 		t.Fatalf("canonical tip changed after corrupt artifact: ok=%v height=%d hash=%x", ok, tipHeight, tipHash)
-	}
-}
-
-func TestTruncateIncompleteCanonicalSuffix_PropagatesIndexWriteFailure(t *testing.T) {
-	dir := t.TempDir()
-	store := mustCreateBlockStore(t, BlockStorePath(dir))
-
-	target := consensus.POW_LIMIT
-	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(dir))
-	liveState := NewChainState()
-	engine, err := NewSyncEngine(liveState, store, cfg)
-	if err != nil {
-		t.Fatalf("NewSyncEngine: %v", err)
-	}
-	if _, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil); err != nil {
-		t.Fatalf("ApplyBlock(genesis): %v", err)
-	}
-
-	genesisParsed, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
-	if err != nil {
-		t.Fatalf("ParseBlockBytes(genesis): %v", err)
-	}
-	block1Coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, 1)
-	block1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, genesisParsed.Header.Timestamp+1, block1Coinbase)
-	block1Summary, err := engine.ApplyBlock(block1, nil)
-	if err != nil {
-		t.Fatalf("ApplyBlock(block1): %v", err)
-	}
-	if err := os.Remove(filepath.Join(store.undoDir, hex.EncodeToString(block1Summary.BlockHash[:])+".json")); err != nil {
-		t.Fatalf("Remove(block1 undo): %v", err)
-	}
-
-	prevWrite := writeFileAtomicFn
-	t.Cleanup(func() { writeFileAtomicFn = prevWrite })
-	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
-		if path == store.indexPath {
-			return os.ErrPermission
-		}
-		return prevWrite(path, data, mode)
-	}
-
-	if _, err := truncateIncompleteCanonicalSuffix(store); !errors.Is(err, os.ErrPermission) {
-		t.Fatalf("expected truncate write failure, got %v", err)
 	}
 }
 

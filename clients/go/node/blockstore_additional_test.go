@@ -30,7 +30,7 @@ func TestOpenBlockStore_ErrorsWhenRootIsFile(t *testing.T) {
 
 func TestLoadBlockStoreIndex_Errors(t *testing.T) {
 	t.Run("read_error_invalid_name", func(t *testing.T) {
-		if _, err := loadBlockStoreIndex(filepath.Join(t.TempDir(), ".")); err == nil {
+		if _, _, err := loadBlockStoreIndex(filepath.Join(t.TempDir(), ".")); err == nil {
 			t.Fatalf("expected error")
 		}
 	})
@@ -62,7 +62,7 @@ func TestLoadBlockStoreIndex_Errors(t *testing.T) {
 			if err := os.WriteFile(path, raw, 0o600); err != nil {
 				t.Fatalf("WriteFile: %v", err)
 			}
-			if _, err := loadBlockStoreIndex(path); err == nil {
+			if _, _, err := loadBlockStoreIndex(path); err == nil {
 				t.Fatalf("expected error")
 			} else if errors.Is(err, ErrStoreIntegrity) {
 				t.Fatalf("row must fail on the inner decode class, got %v", err)

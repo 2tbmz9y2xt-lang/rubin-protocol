@@ -35,6 +35,12 @@ type BlockStore struct {
 	headersDir string
 	undoDir    string
 	index      blockStoreIndexDisk
+	// indexRaw is the exact visible envelope bytes of indexPath as this store
+	// last read or wrote them, and is the identity a prepared commit compares
+	// against. It must be the bytes THEMSELVES, never a re-encoding: two inner
+	// spellings can decode to the same index, so a re-encoding would make a
+	// strict readback claim an identity the disk does not hold.
+	indexRaw []byte
 
 	canonicalHeightByHash map[[32]byte]uint64
 	chainWorkByHash       map[[32]byte]*big.Int
@@ -87,10 +93,11 @@ func CreateBlockStore(rootPath string) (*BlockStore, error) {
 		}
 	}
 	index := blockStoreIndexDisk{Version: blockStoreIndexVersion, Canonical: []string{}}
-	if err := saveBlockStoreIndex(paths.index, index); err != nil {
+	raw, err := writeCanonicalIndexFile(paths.index, index)
+	if err != nil {
 		return nil, fmt.Errorf("commit blockstore index: %w", err)
 	}
-	return newBlockStore(paths, index)
+	return newBlockStore(paths, index, raw)
 }
 
 // OpenBlockStore opens an already-initialized blockstore. Strict: no mkdir, no
@@ -102,11 +109,11 @@ func OpenBlockStore(rootPath string) (*BlockStore, error) {
 	if err := paths.requireInitialized(); err != nil {
 		return nil, err
 	}
-	index, err := loadBlockStoreIndex(paths.index)
+	index, raw, err := loadBlockStoreIndex(paths.index)
 	if err != nil {
 		return nil, err
 	}
-	return newBlockStore(paths, index)
+	return newBlockStore(paths, index, raw)
 }
 
 // reloadFromDisk read-only replaces this store's visible index/cache in place.
@@ -121,6 +128,7 @@ func (bs *BlockStore) reloadFromDisk() error {
 	bs.stateMu.Lock()
 	defer bs.stateMu.Unlock()
 	bs.index = refreshed.index
+	bs.indexRaw = refreshed.indexRaw
 	bs.canonicalHeightByHash = refreshed.canonicalHeightByHash
 	bs.chainWorkByHash = refreshed.chainWorkByHash
 	return nil
@@ -148,7 +156,7 @@ func (p blockStorePaths) requireInitialized() error {
 	return nil
 }
 
-func newBlockStore(paths blockStorePaths, index blockStoreIndexDisk) (*BlockStore, error) {
+func newBlockStore(paths blockStorePaths, index blockStoreIndexDisk, indexRaw []byte) (*BlockStore, error) {
 	canonicalHeightByHash, err := buildCanonicalHeightIndex(index.Canonical)
 	if err != nil {
 		return nil, err
@@ -160,6 +168,7 @@ func newBlockStore(paths blockStorePaths, index blockStoreIndexDisk) (*BlockStor
 		headersDir: paths.headers,
 		undoDir:    paths.undo,
 		index:      index,
+		indexRaw:   indexRaw,
 
 		canonicalHeightByHash: canonicalHeightByHash,
 		chainWorkByHash:       make(map[[32]byte]*big.Int),
@@ -225,7 +234,7 @@ func (bs *BlockStore) SetCanonicalTip(height uint64, blockHash [32]byte) error {
 		bs.index.Canonical = nextCanonical
 		bs.canonicalHeightByHash[blockHash] = height
 	}
-	return saveBlockStoreIndex(bs.indexPath, bs.index)
+	return bs.saveCanonicalIndexLocked()
 }
 
 func (bs *BlockStore) RewindToHeight(height uint64) error {
@@ -254,7 +263,7 @@ func (bs *BlockStore) TruncateCanonical(count uint64) error {
 		return err
 	}
 	bs.index.Canonical = append([]string(nil), bs.index.Canonical[:count]...)
-	return saveBlockStoreIndex(bs.indexPath, bs.index)
+	return bs.saveCanonicalIndexLocked()
 }
 
 func (bs *BlockStore) CanonicalHash(height uint64) ([32]byte, bool, error) {
@@ -319,7 +328,7 @@ func (bs *BlockStore) RestoreCanonicalIndex(canonical []string) error {
 	defer bs.stateMu.Unlock()
 	bs.index.Canonical = nextCanonical
 	bs.replaceCanonicalState(nextIndex)
-	return saveBlockStoreIndex(bs.indexPath, bs.index)
+	return bs.saveCanonicalIndexLocked()
 }
 
 func (bs *BlockStore) GetBlockByHash(blockHash [32]byte) ([]byte, error) {
@@ -595,21 +604,22 @@ func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
 // rejection, unchanged by the envelope). Every present marker must clear the
 // strict store_envelope_v1 BEFORE the inner index decode runs; envelope
 // failures carry the ErrStoreIntegrity identity unwrapped, so the pinned
-// messages reach callers.
-func loadBlockStoreIndex(path string) (blockStoreIndexDisk, error) {
+// messages reach callers. It returns the decoded index AND the exact visible
+// bytes it validated, which become the store's visible canonical identity.
+func loadBlockStoreIndex(path string) (blockStoreIndexDisk, []byte, error) {
 	raw, err := readFileByPath(path)
 	if err != nil {
-		return blockStoreIndexDisk{}, err
+		return blockStoreIndexDisk{}, nil, err
 	}
 	payload, err := openStoreEnvelope(storeEnvelopeBlockIndex, raw)
 	if err != nil {
-		return blockStoreIndexDisk{}, err
+		return blockStoreIndexDisk{}, nil, err
 	}
 	index, err := decodeBlockStoreIndex(payload)
 	if err != nil {
-		return blockStoreIndexDisk{}, fmt.Errorf("decode blockstore index: %w", err)
+		return blockStoreIndexDisk{}, nil, fmt.Errorf("decode blockstore index: %w", err)
 	}
-	return index, nil
+	return index, raw, nil
 }
 
 // decodeBlockStoreIndex accepts exactly one JSON object with exactly one
@@ -706,19 +716,52 @@ func validCanonicalHashHex(value string) bool {
 	return true
 }
 
-func saveBlockStoreIndex(path string, index blockStoreIndexDisk) error {
+// encodeBlockStoreIndex produces the exact visible bytes for index. It is the
+// ONE encoder behind the legacy save path and the prepared canonical commit, so
+// a prepared image and a saved one can never disagree byte for byte.
+func encodeBlockStoreIndex(index blockStoreIndexDisk) ([]byte, error) {
 	payload, err := json.MarshalIndent(index, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	payload = append(payload, '\n')
 	// The pre-envelope on-disk bytes become the exact envelope payload; the
 	// inner encoding and the atomic write path are unchanged.
-	raw, err := marshalStoreEnvelope(storeEnvelopeBlockIndex, payload)
+	return marshalStoreEnvelope(storeEnvelopeBlockIndex, payload)
+}
+
+// writeCanonicalIndexFile writes the visible index through the RUB-1084 atomic
+// lane and returns the exact bytes it wrote.
+func writeCanonicalIndexFile(path string, index blockStoreIndexDisk) ([]byte, error) {
+	raw, err := encodeBlockStoreIndex(index)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeFileAtomicFn(path, raw, 0o600); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// saveBlockStoreIndex is the write step for callers that track no visible
+// identity of their own.
+func saveBlockStoreIndex(path string, index blockStoreIndexDisk) error {
+	_, err := writeCanonicalIndexFile(path, index)
+	return err
+}
+
+// saveCanonicalIndexLocked is the write step of the legacy mutate-then-save
+// path: the caller already mutated bs.index under stateMu.Lock, so this records
+// the committed bytes as the new visible identity. A failed write leaves
+// indexRaw naming the bytes still on disk, which is what makes a prepared
+// commit refuse to build on RAM the disk never accepted.
+func (bs *BlockStore) saveCanonicalIndexLocked() error {
+	raw, err := writeCanonicalIndexFile(bs.indexPath, bs.index)
 	if err != nil {
 		return err
 	}
-	return writeFileAtomicFn(path, raw, 0o600)
+	bs.indexRaw = raw
+	return nil
 }
 
 // VerifyGenesisAnchor enforces the RUB-1134 genesis anchor: a non-empty
@@ -789,4 +832,321 @@ func canonicalTipHeight(canonical []string) (uint64, bool) {
 		return 0, false
 	}
 	return uint64(len(canonical) - 1), true // #nosec G115 -- len(canonical) > 0 is checked above.
+}
+
+// canonicalCommitClass is the outcome class of one prepared canonical-index
+// commit. Every value except canonicalCommitted is a frozen RUB-922 C01
+// identity string, so the identity has exactly one source and cannot drift from
+// a mapping table.
+type canonicalCommitClass string
+
+const (
+	// canonicalCommitted is a successful durable commit. It is a LOCAL name,
+	// not a frozen C01 identity: the owning canonical transition is what maps
+	// a committed index to ACCEPTED / commit truth NEW.
+	canonicalCommitted canonicalCommitClass = "COMMITTED"
+
+	canonicalCommitPrecommit       canonicalCommitClass = "LOCAL_PERSISTENCE_ERROR(precommit)"
+	canonicalCommitTerminalOld     canonicalCommitClass = "TERMINAL_PERSISTENCE(old)"
+	canonicalCommitTerminalNew     canonicalCommitClass = "TERMINAL_PERSISTENCE(new)"
+	canonicalCommitTerminalUnknown canonicalCommitClass = "TERMINAL_PERSISTENCE(neither_or_unreadable)"
+)
+
+// canonicalCommitResult is one prepared-commit outcome: the class and the
+// underlying cause for the two failure families. It carries nothing else — no
+// latch, counter, lease or retry budget lives at this layer.
+type canonicalCommitResult struct {
+	class canonicalCommitClass
+	err   error
+}
+
+func (r canonicalCommitResult) String() string { return string(r.class) }
+
+// errCanonicalIndexMoved: the store's visible canonical identity changed
+// between prepare and commit, so the prepared image is stale and nothing is
+// written. The owning canonical transition holds the writer fence; this is the
+// last check under it, never a substitute for it.
+var errCanonicalIndexMoved = errors.New("prepared canonical index is stale: visible index bytes changed")
+
+// preparedCanonicalIndex is one complete next canonical-index image: the exact
+// bytes to commit plus every RAM object publication installs, all built BEFORE
+// any write touches the filesystem.
+//
+// Single use. After a successful publication the store's visible identity is
+// newRaw, so a second commit fails its freshness precondition unless the
+// replacement was a byte-identical no-op, in which case republishing the same
+// image is inert.
+type preparedCanonicalIndex struct {
+	oldRaw       []byte
+	newRaw       []byte
+	index        blockStoreIndexDisk
+	heightByHash map[[32]byte]uint64
+	chainWork    map[[32]byte]*big.Int
+}
+
+// prepareCanonicalIndex validates the complete planned canonical list and
+// builds the whole next image without touching the store or the filesystem.
+// Validation is the same pair the strict on-disk read uses:
+// validateBlockStoreIndex pins version and the 64-lowercase-hex row spelling
+// (parseHex alone would accept uppercase and surrounding space), and
+// buildCanonicalHeightIndex proves every row decodes to a hash.
+//
+// oldRaw is the exact visible index bytes the caller observed; commit refuses
+// if the store's visible identity has moved since. A nil next list is refused
+// exactly as a JSON null canonical is on disk; an empty non-nil list is the
+// legitimate empty-store identity.
+func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalIndex, error) {
+	// Copy so a later caller mutation cannot reach the prepared image, and keep
+	// nil-ness exact: `append([]string(nil), next...)` would fold an EMPTY list
+	// into nil and reject the legitimate empty-store identity.
+	canonical := next
+	if next != nil {
+		canonical = append(make([]string, 0, len(next)), next...)
+	}
+	index := blockStoreIndexDisk{Version: blockStoreIndexVersion, Canonical: canonical}
+	if err := validateBlockStoreIndex(index); err != nil {
+		return nil, err
+	}
+	heightByHash, err := buildCanonicalHeightIndex(index.Canonical)
+	if err != nil {
+		return nil, err
+	}
+	newRaw, err := encodeBlockStoreIndex(index)
+	if err != nil {
+		return nil, err
+	}
+	return &preparedCanonicalIndex{
+		oldRaw:       append([]byte(nil), oldRaw...),
+		newRaw:       newRaw,
+		index:        index,
+		heightByHash: heightByHash,
+		chainWork:    make(map[[32]byte]*big.Int),
+	}, nil
+}
+
+// commit performs the one durable canonical-index transition: freshness check,
+// the existing RUB-1084 atomic write with NO store lock held, exactly one
+// strict visible readback when the write may have crossed the namespace commit,
+// then a non-fallible publication of the prebuilt image.
+//
+// It never rolls back, retries, rewrites or repairs, and it latches nothing:
+// the owning canonical transition consumes the returned evidence.
+func (p *preparedCanonicalIndex) commit(bs *BlockStore) canonicalCommitResult {
+	bs.stateMu.RLock()
+	fresh := bytes.Equal(bs.indexRaw, p.oldRaw)
+	bs.stateMu.RUnlock()
+	if !fresh {
+		return canonicalCommitResult{class: canonicalCommitPrecommit, err: errCanonicalIndexMoved}
+	}
+
+	// No publication lock is held while waiting for or executing this write.
+	err := writeFileAtomicFn(bs.indexPath, p.newRaw, 0o600)
+	switch {
+	case err == nil:
+		p.publish(bs)
+		return canonicalCommitResult{class: canonicalCommitted}
+	case isAtomicWritePostCommit(err):
+		return p.classifyVisibleIndex(bs, err)
+	default:
+		// before_namespace_commit, and every error the atomic lane did not
+		// classify at all: the rename never happened, so old disk and old RAM
+		// are exactly as they were.
+		return canonicalCommitResult{class: canonicalCommitPrecommit, err: err}
+	}
+}
+
+// classifyVisibleIndex is the one strict readback. It classifies by the VISIBLE
+// BYTES, never by the error text, and compares the complete identity: a shared
+// tip or a matching hash is not an identity, so anything that is not exactly
+// the old or exactly the new image is neither. A read failure is neither too —
+// nothing is guessed, retried or rewritten.
+func (p *preparedCanonicalIndex) classifyVisibleIndex(bs *BlockStore, cause error) canonicalCommitResult {
+	raw, err := readFileByPath(bs.indexPath)
+	switch {
+	case err != nil:
+		return canonicalCommitResult{class: canonicalCommitTerminalUnknown, err: cause}
+	case bytes.Equal(raw, p.oldRaw):
+		return canonicalCommitResult{class: canonicalCommitTerminalOld, err: cause}
+	case bytes.Equal(raw, p.newRaw):
+		p.publish(bs)
+		return canonicalCommitResult{class: canonicalCommitTerminalNew, err: cause}
+	default:
+		return canonicalCommitResult{class: canonicalCommitTerminalUnknown, err: cause}
+	}
+}
+
+// publish installs the prebuilt image. Everything assigned here was built
+// before the write, so between the durable commit and this assignment there is
+// no allocation, parse, callback, clone or ordinary error return — only this
+// lock and four plain assignments, which every reader under stateMu.RLock()
+// therefore observes wholly as the old image or wholly as the new one.
+// TestPreparedCanonicalIndexPublishAllocatesNothing measures the zero.
+func (p *preparedCanonicalIndex) publish(bs *BlockStore) {
+	bs.stateMu.Lock()
+	bs.index = p.index
+	bs.indexRaw = p.newRaw
+	bs.canonicalHeightByHash = p.heightByHash
+	bs.chainWorkByHash = p.chainWork
+	bs.stateMu.Unlock()
+}
+
+// BlockPresenceClass is the closed set of presence classifications for a block
+// hash in this store. The strings are the frozen RUB-922 C01 identities.
+type BlockPresenceClass string
+
+const (
+	BlockPresenceAbsent             BlockPresenceClass = "ABSENT"
+	BlockPresenceStoredNoncanonical BlockPresenceClass = "STORED_NONCANONICAL"
+	BlockPresenceCanonical          BlockPresenceClass = "CANONICAL"
+	BlockPresenceLocalStoreError    BlockPresenceClass = "LOCAL_STORE_ERROR"
+)
+
+// BlockPresenceScope qualifies LOCAL_STORE_ERROR and is empty for every other
+// class. Canonical scope is the store-integrity evidence the owning canonical
+// transition latches as TERMINAL_STORE_INTEGRITY(canonical); noncanonical scope
+// leaves every canonical image untouched.
+type BlockPresenceScope string
+
+const (
+	BlockPresenceScopeCanonical    BlockPresenceScope = "canonical"
+	BlockPresenceScopeNoncanonical BlockPresenceScope = "noncanonical"
+)
+
+// BlockArtifactState is one stored artifact's state. Valid means the artifact
+// was read AND is bound to the requested hash: the block's own header re-hashes
+// to it, the header hashes to it, the undo envelope carries it. Everything that
+// is neither absent nor bound — corrupt, mismatched, over-bound, unreadable —
+// is invalid, and none of it is ever repaired, truncated or rewritten here.
+type BlockArtifactState string
+
+const (
+	BlockArtifactAbsent  BlockArtifactState = "absent"
+	BlockArtifactValid   BlockArtifactState = "valid"
+	BlockArtifactInvalid BlockArtifactState = "invalid"
+)
+
+// BlockArtifactLeaves is the per-artifact evidence behind one BlockPresence.
+type BlockArtifactLeaves struct {
+	Block  BlockArtifactState
+	Header BlockArtifactState
+	Undo   BlockArtifactState
+}
+
+// BlockPresence is one snapshot classification of a block hash: the class, the
+// scope that qualifies a store error, and the leaf evidence behind both.
+type BlockPresence struct {
+	Class  BlockPresenceClass
+	Scope  BlockPresenceScope
+	Leaves BlockArtifactLeaves
+}
+
+// String renders the frozen identity; LOCAL_STORE_ERROR carries its scope.
+func (p BlockPresence) String() string {
+	if p.Class == BlockPresenceLocalStoreError {
+		return fmt.Sprintf("%s(%s)", p.Class, p.Scope)
+	}
+	return string(p.Class)
+}
+
+// InspectBlockPresence classifies blockHash against this store's canonical
+// membership and its three stored artifacts. The receiver must be non-nil: no
+// caller reaches it without a constructed store, and inventing a class for a
+// nil store would add a row this closed set does not have.
+//
+// The whole classification runs under ONE stateMu.RLock, which by contract
+// spans the artifact reads as well, so canonical membership and artifact state
+// are one snapshot instead of two observations a concurrent replacement could
+// interleave. It takes no second lock (the artifact readers are lock-free),
+// repairs nothing, and never treats a present header as presence on its own.
+func (bs *BlockStore) InspectBlockPresence(blockHash [32]byte) BlockPresence {
+	bs.stateMu.RLock()
+	defer bs.stateMu.RUnlock()
+
+	_, member := bs.canonicalHeightByHash[blockHash]
+	leaves := BlockArtifactLeaves{
+		Block:  bs.inspectBlockLeaf(blockHash),
+		Header: bs.inspectHeaderLeaf(blockHash),
+		Undo:   bs.inspectUndoLeaf(blockHash),
+	}
+	if member {
+		return canonicalPresence(leaves)
+	}
+	return noncanonicalPresence(leaves)
+}
+
+// canonicalPresence: a canonical member is CANONICAL only with a valid block, a
+// matching header and a valid hash-bound undo. EVERY other combination is
+// canonical-scoped store-integrity evidence.
+func canonicalPresence(leaves BlockArtifactLeaves) BlockPresence {
+	complete := BlockArtifactLeaves{Block: BlockArtifactValid, Header: BlockArtifactValid, Undo: BlockArtifactValid}
+	if leaves == complete {
+		return BlockPresence{Class: BlockPresenceCanonical, Leaves: leaves}
+	}
+	return BlockPresence{Class: BlockPresenceLocalStoreError, Scope: BlockPresenceScopeCanonical, Leaves: leaves}
+}
+
+// noncanonicalPresence: nothing stored is ABSENT, the three recognized stored
+// shapes are STORED_NONCANONICAL, and every other combination is a
+// noncanonical-scoped store error.
+func noncanonicalPresence(leaves BlockArtifactLeaves) BlockPresence {
+	const (
+		absent = BlockArtifactAbsent
+		valid  = BlockArtifactValid
+	)
+	switch leaves {
+	case BlockArtifactLeaves{Block: absent, Header: absent, Undo: absent}:
+		return BlockPresence{Class: BlockPresenceAbsent, Leaves: leaves}
+	case BlockArtifactLeaves{Block: valid, Header: absent, Undo: absent},
+		BlockArtifactLeaves{Block: valid, Header: valid, Undo: absent},
+		BlockArtifactLeaves{Block: valid, Header: valid, Undo: valid}:
+		return BlockPresence{Class: BlockPresenceStoredNoncanonical, Leaves: leaves}
+	default:
+		return BlockPresence{Class: BlockPresenceLocalStoreError, Scope: BlockPresenceScopeNoncanonical, Leaves: leaves}
+	}
+}
+
+// inspectBlockLeaf: stored block bytes are valid only when they parse and their
+// own header re-hashes to the requested hash — the same content-addressed
+// identity replay's re-hash defense enforces.
+func (bs *BlockStore) inspectBlockLeaf(blockHash [32]byte) BlockArtifactState {
+	blockBytes, err := bs.GetBlockByHash(blockHash)
+	if err != nil {
+		return artifactStateFromErr(err)
+	}
+	observed, _, err := storedBlockHeaderHash(blockBytes)
+	if err != nil || observed != blockHash {
+		return BlockArtifactInvalid
+	}
+	return BlockArtifactValid
+}
+
+// inspectHeaderLeaf: a stored header is valid only when it hashes to the
+// requested hash. Existence alone is never presence.
+func (bs *BlockStore) inspectHeaderLeaf(blockHash [32]byte) BlockArtifactState {
+	headerBytes, err := bs.GetHeaderByHash(blockHash)
+	if err != nil {
+		return artifactStateFromErr(err)
+	}
+	return artifactStateFromErr(validateBlockHeaderHash(headerBytes, blockHash))
+}
+
+// inspectUndoLeaf: GetUndo binds the record to the hash the CALLER asked for
+// (RUB-1132), so a record moved between two undo files reads as invalid.
+func (bs *BlockStore) inspectUndoLeaf(blockHash [32]byte) BlockArtifactState {
+	_, err := bs.GetUndo(blockHash)
+	return artifactStateFromErr(err)
+}
+
+// artifactStateFromErr maps one strict artifact read to its leaf state. Only an
+// absent file is absent, so a corrupt, mismatched, over-bound or unreadable
+// artifact can never pass as "not there".
+func artifactStateFromErr(err error) BlockArtifactState {
+	switch {
+	case err == nil:
+		return BlockArtifactValid
+	case errors.Is(err, os.ErrNotExist):
+		return BlockArtifactAbsent
+	default:
+		return BlockArtifactInvalid
+	}
 }

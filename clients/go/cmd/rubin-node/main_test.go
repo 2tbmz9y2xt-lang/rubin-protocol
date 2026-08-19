@@ -3587,12 +3587,13 @@ func TestRunDryRunReportsStaleChainStateWithoutRepairing(t *testing.T) {
 	}
 }
 
-// TestRunDryRunDoesNotTruncateCanonicalIndex covers the reconcile's other
-// durable write, and the destructive one: an incomplete canonical suffix
-// (here a tip whose undo record is gone) makes it drop the tip from the
-// index. --dry-run must surface that datadir intact, tip included, so the
-// operator decides whether to lose the block.
-func TestRunDryRunDoesNotTruncateCanonicalIndex(t *testing.T) {
+// TestRunDryRunReportsIncompleteCanonicalSuffixIntact covers the datadir the
+// mutating startup path refuses: an incomplete canonical suffix (here a tip
+// whose undo record is gone) now fails the reconcile closed instead of dropping
+// the tip from the index (RUB-890). --dry-run runs no reconcile at all, so it
+// must surface that datadir intact, tip included and byte-for-byte unwritten,
+// and leave the decision to the operator.
+func TestRunDryRunReportsIncompleteCanonicalSuffixIntact(t *testing.T) {
 	dir := preparedDatadir(t)
 	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
 	if err != nil {

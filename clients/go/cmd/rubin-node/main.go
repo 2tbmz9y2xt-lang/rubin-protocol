@@ -552,26 +552,30 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// in clients/rust/crates/rubin-node/src/main.rs: the contract is
 	// that chainstate is persisted to disk BEFORE any sync / P2P / RPC /
 	// miner thread can observe it, so a post-reconcile crash cannot
-	// expose a chainstate whose claimed tip exceeds the truncated
-	// canonical index. If chainState.Save fails after a successful
-	// reconcile, the canonical index on disk is already truncated
-	// (atomic via write_file_atomic) but the chainstate snapshot may be
-	// stale; the next startup will detect this via height/tip mismatch
-	// and reset+replay from height 0 — correct, just wasteful on large
-	// chains. If the sync engine constructor itself fails later, the
-	// already-repaired chainstate is durable on disk.
+	// expose a chainstate whose claimed tip disagrees with the canonical
+	// index. The reconcile itself writes NOTHING (RUB-890): a canonical
+	// index declaring committed entries whose header/block/undo set is
+	// incomplete is refused rather than truncated or repaired, so that
+	// datadir exits 2 here and reaches no service start. If chainState.Save
+	// fails after a successful reconcile, the canonical index on disk is
+	// untouched but the chainstate snapshot may be stale; the next startup
+	// detects this via height/tip mismatch and resets+replays from height 0
+	// — correct, just wasteful on large chains. If the sync engine
+	// constructor itself fails later, the already-repaired chainstate is
+	// durable on disk.
 	//
 	// Both steps are skipped under --dry-run, which reports the datadir and
-	// must not repair it: the reconcile can truncate the canonical index,
-	// and Save rewrites the snapshot (temp file + rename, so a fresh inode)
-	// on every single invocation. The banners below therefore describe the
-	// chainstate as loaded from disk — a snapshot that disagrees with the
-	// blockstore is reported, not fixed. Ordinary startup is unaffected:
-	// same two calls, same order, same errors, same exit codes.
+	// must not write to it: Save rewrites the snapshot (temp file + rename,
+	// so a fresh inode) on every single invocation. The banners below
+	// therefore describe the chainstate as loaded from disk — a snapshot
+	// that disagrees with the blockstore is reported, not fixed, and a
+	// datadir the mutating path would refuse is shown intact. Ordinary
+	// startup is unaffected: same two calls, same order, same errors, same
+	// exit codes.
 	if !*dryRun {
 		// RUB-1134 genesis anchor: a non-empty canonical index whose row 0 is
 		// not the configured genesis hash is a foreign datadir. Checked BEFORE
-		// the reconcile so no replay, truncate or adoption consumes a foreign
+		// the reconcile so no replay or adoption consumes a foreign
 		// index; an empty index skips it. --dry-run adopts nothing, so the
 		// anchor is enforced only on this mutating path, as in the Rust mirror.
 		if err := blockStore.VerifyGenesisAnchor(genesisHashFromGenesis); err != nil {

@@ -44,40 +44,44 @@ func cloneChainState(src *ChainState) *ChainState {
 	}
 }
 
-func truncateIncompleteCanonicalSuffix(store *BlockStore) (bool, error) {
-	if store == nil {
-		return false, errors.New("nil blockstore")
-	}
-	return scanAndTruncateCanonicalSuffix(store)
-}
-
 // errCanonicalIndexZeroCompletePrefix: the canonical index claims blocks but not
-// even height 0 has a complete header/block/undo set. Truncating to zero would
-// silently discard the operator's whole chain, so this is fatal. Raised AFTER the
+// even height 0 has a complete header/block/undo set. Discarding the rows would
+// silently destroy the operator's whole chain, so this is fatal. Raised AFTER the
 // scan's structural/IO/corruption errors (they keep precedence) and BEFORE
-// TruncateCanonical, any chainstate reset/replay/save, and any service start.
+// any chainstate reset/replay/save and any service start.
 // Cross-client literal — Rust mirror CANONICAL_INDEX_ZERO_COMPLETE_PREFIX_ERR.
 var errCanonicalIndexZeroCompletePrefix = errors.New("persisted canonical index has zero complete prefix")
 
-func scanAndTruncateCanonicalSuffix(store *BlockStore) (bool, error) {
+// errCanonicalIndexIncompleteSuffix: the canonical index declares committed
+// entries whose header/block/undo set is incomplete. Committed canonical rows
+// are never truncated or repaired to hide that, so startup fails closed and the
+// operator decides. Go-primary; the Rust mirror is RUB-897.
+var errCanonicalIndexIncompleteSuffix = errors.New("persisted canonical index has an incomplete committed suffix")
+
+// requireCompleteCanonicalPrefix proves every entry the canonical index already
+// declares committed has a complete header/block/undo set. It WRITES NOTHING:
+// its domain is store.CanonicalIndexSnapshot(), so every state it can reach is
+// index-declared-committed and dropping the suffix would discard committed
+// chain to hide corruption. Precedence is unchanged from the scan it replaces:
+// structural/IO/corruption errors first, then the zero-complete-prefix literal,
+// then the incomplete-suffix refusal.
+func requireCompleteCanonicalPrefix(store *BlockStore) error {
 	canonical, err := store.CanonicalIndexSnapshot()
 	if err != nil {
-		return false, err
+		return err
 	}
 	validCount, err := countCompleteCanonicalPrefix(store, canonical)
 	if err != nil {
-		return false, err
-	}
-	if len(canonical) > 0 && validCount == 0 {
-		return false, errCanonicalIndexZeroCompletePrefix
+		return err
 	}
 	if validCount == uint64(len(canonical)) {
-		return false, nil
+		return nil
 	}
-	if err := store.TruncateCanonical(validCount); err != nil {
-		return false, err
+	if validCount == 0 {
+		return errCanonicalIndexZeroCompletePrefix
 	}
-	return true, nil
+	return fmt.Errorf("%w: index declares %d entries but only %d have a complete header/block/undo set",
+		errCanonicalIndexIncompleteSuffix, len(canonical), validCount)
 }
 
 func countCompleteCanonicalPrefix(store *BlockStore, canonical []string) (uint64, error) {
@@ -141,6 +145,10 @@ func (bs *BlockStore) undoExists(blockHash [32]byte) error {
 // in the blockstore but missing from the persisted chainstate snapshot. When the
 // loaded snapshot disagrees with the canonical chain at its claimed height, the
 // canonical blockstore view wins and replay restarts from an empty state.
+//
+// It fails closed on canonical corruption before anything else: an incomplete
+// committed canonical prefix returns an error rather than being truncated or
+// repaired, so this function performs no durable write of its own on any path.
 func ReconcileChainStateWithBlockStore(state *ChainState, store *BlockStore, cfg SyncConfig) (bool, error) {
 	if state == nil {
 		return false, errors.New("nil chainstate")
@@ -148,8 +156,7 @@ func ReconcileChainStateWithBlockStore(state *ChainState, store *BlockStore, cfg
 	if store == nil {
 		return false, errors.New("nil blockstore")
 	}
-	truncated, err := truncateIncompleteCanonicalSuffix(store)
-	if err != nil {
+	if err := requireCompleteCanonicalPrefix(store); err != nil {
 		return false, err
 	}
 	tipHeight, _, ok, err := store.Tip()
@@ -157,27 +164,27 @@ func ReconcileChainStateWithBlockStore(state *ChainState, store *BlockStore, cfg
 		return false, err
 	}
 	if !ok {
-		return reconcileEmptyBlockStore(state, truncated), nil
+		return reconcileEmptyBlockStore(state), nil
 	}
 
-	replayFrom, changed, replayNeeded, err := reconcileReplayStart(state, store, tipHeight, truncated)
+	replayFrom, changed, replayNeeded, err := reconcileReplayStart(state, store, tipHeight)
 	if err != nil || !replayNeeded {
 		return changed, err
 	}
 	return replayCanonicalBlocks(state, store, cfg, replayFrom, tipHeight, changed)
 }
 
-func reconcileEmptyBlockStore(state *ChainState, truncated bool) bool {
+func reconcileEmptyBlockStore(state *ChainState) bool {
 	view := state.view()
 	dirty := view.hasTip || view.utxoCount != 0 || !view.alreadyGenerated.IsZero() || view.height != 0 || view.tipHash != ([32]byte{})
-	if truncated || dirty {
+	if dirty {
 		state.replaceFrom(NewChainState())
 		return true
 	}
 	return false
 }
 
-func reconcileReplayStart(state *ChainState, store *BlockStore, tipHeight uint64, changed bool) (uint64, bool, bool, error) {
+func reconcileReplayStart(state *ChainState, store *BlockStore, tipHeight uint64) (uint64, bool, bool, error) {
 	view := state.view()
 	if !view.hasTip || view.height > tipHeight {
 		state.replaceFrom(NewChainState())
@@ -185,16 +192,16 @@ func reconcileReplayStart(state *ChainState, store *BlockStore, tipHeight uint64
 	}
 	canonicalHash, hasHeight, err := store.CanonicalHash(view.height)
 	if err != nil {
-		return 0, changed, false, err
+		return 0, false, false, err
 	}
 	if !hasHeight || canonicalHash != view.tipHash {
 		state.replaceFrom(NewChainState())
 		return 0, true, true, nil
 	}
 	if view.height == tipHeight {
-		return 0, changed, false, nil
+		return 0, false, false, nil
 	}
-	return view.height + 1, changed, true, nil
+	return view.height + 1, false, true, nil
 }
 
 func replayCanonicalBlocks(state *ChainState, store *BlockStore, cfg SyncConfig, replayFrom uint64, tipHeight uint64, changed bool) (bool, error) {
@@ -244,11 +251,11 @@ func replayCanonicalBlocks(state *ChainState, store *BlockStore, cfg SyncConfig,
 // replayCanonicalBlocks and ReconcileChainStateWithBlockStore to
 // cmd/rubin-node/main.go, which exits 2 BEFORE chainState.Save, before
 // newSyncEngineFn, and before the mempool, peer manager and every service
-// start. This helper writes nothing, so the only durable write already made is
-// the pre-existing incomplete-suffix truncation from
-// truncateIncompleteCanonicalSuffix; it stays intact and nothing is added to
-// it. The in-memory reset reconcileReplayStart may have done is not durable —
-// chainState.Save is never reached.
+// start. This helper writes nothing, and neither does any other step of the
+// reconcile: the incomplete-suffix truncation that used to run first is gone,
+// so a failed recovery leaves the datadir byte-identical. The in-memory reset
+// reconcileReplayStart may have done is not durable — chainState.Save is never
+// reached.
 func replayExpectedTarget(store *BlockStore, cfg SyncConfig, height uint64, tipHeight uint64) (*[32]byte, error) {
 	if height == 0 {
 		return cfg.ExpectedTarget, nil
@@ -285,15 +292,25 @@ func replayBlockInputs(store *BlockStore, blockHash [32]byte, height uint64) ([]
 	return blockBytes, prevTimestamps, nil
 }
 
-func verifyReplayBlockHash(blockBytes []byte, blockHash [32]byte, height uint64) error {
-	// Defense-in-depth: re-hash the loaded block's header before ConnectBlock.
+// storedBlockHeaderHash re-derives the content-addressed identity of stored
+// block bytes: parse, then hash the contained header. step names the stage that
+// failed so each caller keeps its own message. It is shared by replay's re-hash
+// defense and InspectBlockPresence's block leaf, so the two can never disagree
+// on what makes stored block bytes valid.
+func storedBlockHeaderHash(blockBytes []byte) (blockHash [32]byte, step string, err error) {
 	parsed, err := consensus.ParseBlockBytes(blockBytes)
 	if err != nil {
-		return fmt.Errorf("parse block bytes during chainstate replay at height %d: %w", height, err)
+		return blockHash, "parse block bytes", err
 	}
-	observedHash, err := consensus.BlockHash(parsed.HeaderBytes)
+	blockHash, err = consensus.BlockHash(parsed.HeaderBytes)
+	return blockHash, "hash header", err
+}
+
+func verifyReplayBlockHash(blockBytes []byte, blockHash [32]byte, height uint64) error {
+	// Defense-in-depth: re-hash the loaded block's header before ConnectBlock.
+	observedHash, step, err := storedBlockHeaderHash(blockBytes)
 	if err != nil {
-		return fmt.Errorf("hash header during chainstate replay at height %d: %w", height, err)
+		return fmt.Errorf("%s during chainstate replay at height %d: %w", step, height, err)
 	}
 	if observedHash != blockHash {
 		return fmt.Errorf(
