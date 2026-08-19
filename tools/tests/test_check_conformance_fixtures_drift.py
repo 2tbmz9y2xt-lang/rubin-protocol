@@ -314,7 +314,7 @@ class CanonicalPipelineSchemaTests(unittest.TestCase):
         self.assertFalse(any(validator.is_valid({**data, "result_taxonomy": t}) for t in (["BOGUS"] + data["result_taxonomy"][1:], data["result_taxonomy"] + ["EXTRA"])))
 
 class CanonicalPipelineV2SchemaTests(unittest.TestCase):
-    """RUB-1207 / C01-R2: the dormant pair strict-loads, validates, and fails closed."""
+    """RUB-1208 / C01-R2: the migrated BUILDING pair strict-loads, validates, and fails closed."""
 
     REPO_ROOT = TOOLS_DIR.parent
     ARTIFACT = REPO_ROOT / "conformance/fixtures/protocol/canonical_pipeline_v2.json"
@@ -337,7 +337,9 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
             for e in sorted(validator.iter_errors(data), key=lambda e: list(e.path))
         ]
         self.assertEqual(errors, [])
-        self.assertEqual(data["rows"], [])
+        self.assertEqual(len(data["rows"]), 8)
+        self.assertEqual(sum(len(row["cases"]) for row in data["rows"]), 24)
+        self.assertEqual(data["_meta"]["closure_epoch"]["closure_manifest_version"], "rubin-c01-design-closure-v8")
         self.assertEqual(data["_meta"]["closure_epoch"]["status"], "building")
         self.assertNotIn("pending_owner", self.ARTIFACT.read_text(encoding="utf-8", errors="strict"))
 
@@ -576,9 +578,9 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
         raw = self.SCHEMA.read_text(encoding="utf-8", errors="strict")
         artifact_raw = self.ARTIFACT.read_text(encoding="utf-8", errors="strict")
         cases = {
-            "schema duplicate key": (raw.replace('"type": "object",', '"type": "object", "type": "object",', 1).encode(), 'duplicate JSON key "type"'),
+            "schema duplicate key": (raw.replace('"type":"object"', '"type":"object","type":"object"', 1).encode(), 'duplicate JSON key "type"'),
             "artifact duplicate key": (artifact_raw.replace('"artifact":', '"artifact": "x", "artifact":', 1).encode(), 'duplicate JSON key "artifact"'),
-            "artifact NaN constant": (artifact_raw.replace('"schema_version": 2', '"schema_version": NaN', 1).encode(), "invalid JSON constant 'NaN'"),
+            "artifact NaN constant": (artifact_raw.replace('"schema_version":2', '"schema_version":NaN', 1).encode(), "invalid JSON constant 'NaN'"),
             "artifact trailing document": ((artifact_raw + "{}").encode(), "invalid JSON artifact"),
             "artifact non-utf8": (artifact_raw.encode() + b"\xff", "invalid JSON artifact"),
         }
