@@ -21,6 +21,15 @@ from gen_conformance_matrix import load_json_fail_closed, reject_duplicate_json_
 # typed input, typed expected output, per-image projection and summary rows --
 # so a negative that passes proves the closure, not a missing constraint.
 _IMAGES = ("CHAIN_IMAGE_V1", "STANDARD_MEMPOOL_IMAGE_V1", "RETAINED_DA_IMAGE_V1", "OWNER_IMAGE_V1")
+# Per-image direct-field key sets, exactly as image_manifest.images.<IMAGE>.direct_fields
+# pins them; the schema arms require this key set and nothing else.
+_IMAGE_DIRECT_FIELDS = {
+    "CHAIN_IMAGE_V1": ["tip_hash", "height", "utxo_count"],
+    "STANDARD_MEMPOOL_IMAGE_V1": ["current_mempool_min_fee_rate", "last_admission_seq", "used_bytes", "tx_count", "record_count"],
+    "RETAINED_DA_IMAGE_V1": ["set_count", "orphan_bytes", "pinned_payload_bytes"],
+    "OWNER_IMAGE_V1": ["claim_count", "stable_tip"],
+}
+
 V2_CONTROL_ROW = {
     "row_id": "C01-DIRECT-001", "kind": "observation", "notes": ["control row for the RUB-1207 schema negatives"],
     "release_requirements": {
@@ -39,7 +48,8 @@ V2_CONTROL_ROW = {
             "canonical_counters": {"accepted_delta": "+1", "rejected_delta": "0"},
             "effects": {"publication_events": {"value": 1, "type": "u64", "required": True, "observer": "publication counter"}},
             "state_image": {image: {"relation": "new", "digest_alias": f"{image}@C01-DIRECT-001/MAIN:new",
-                                    "direct_fields": {"tip_hash": "tip_hash@C01-DIRECT-001/MAIN:new"}} for image in _IMAGES},
+                                    "direct_fields": {f: f"{f}@C01-DIRECT-001/MAIN:new" for f in fields}}
+                            for image, fields in _IMAGE_DIRECT_FIELDS.items()},
             "canonical_applied_blocks": [{"block_id": "B1", "block_hash": "B1_HASH", "complete_da_ids": ["DA_ID_1"]}],
         },
         "obligation_ids": ["OBL-OWN-PUBCHAIN-018"], "sources": ["canonical_pipeline_v1.json row C01-DIRECT-001"],
@@ -161,7 +171,7 @@ class MainExitCodeTests(unittest.TestCase):
             captured = io.StringIO()
             with mock.patch.object(m, "run_generator", side_effect=fake_run):
                 with mock.patch("sys.stdout", captured):
-                    rc = m.main(["--repo-root", str(repo_root)])
+                    rc = m.main(["--repo-root", str(repo_root), "--skip-v2-semantics"])
         self.assertEqual(rc, 0)
         self.assertIn(
             f"OK: conformance fixture drift check passed ({len(m.EXPECTED_FIXTURES)} generator-owned files match committed)",
@@ -173,7 +183,7 @@ class MainExitCodeTests(unittest.TestCase):
             repo_root = Path(td)
             captured = io.StringIO()
             with mock.patch("sys.stderr", captured):
-                rc = m.main(["--repo-root", str(repo_root)])
+                rc = m.main(["--repo-root", str(repo_root), "--skip-v2-semantics"])
         self.assertEqual(rc, 2)
         self.assertIn("ERROR: committed fixtures dir not found", captured.getvalue())
 
@@ -191,7 +201,7 @@ class MainExitCodeTests(unittest.TestCase):
             captured = io.StringIO()
             with mock.patch("subprocess.run", side_effect=raise_fnf):
                 with mock.patch("sys.stderr", captured):
-                    rc = m.main(["--repo-root", str(repo_root)])
+                    rc = m.main(["--repo-root", str(repo_root), "--skip-v2-semantics"])
         self.assertEqual(rc, 2)
         self.assertIn("ERROR:", captured.getvalue())
         self.assertNotIn("Traceback", captured.getvalue())
@@ -214,7 +224,7 @@ class MainExitCodeTests(unittest.TestCase):
             captured = io.StringIO()
             with mock.patch("tempfile.mkdtemp", side_effect=fake_mkdtemp):
                 with mock.patch("sys.stderr", captured):
-                    rc = m.main(["--repo-root", str(repo_root)])
+                    rc = m.main(["--repo-root", str(repo_root), "--skip-v2-semantics"])
         self.assertEqual(rc, 2)
         self.assertIn(
             "candidate output", captured.getvalue()
@@ -235,7 +245,7 @@ class MainExitCodeTests(unittest.TestCase):
             captured = io.StringIO()
             with mock.patch.object(m, "run_generator", side_effect=fake_run):
                 with mock.patch("sys.stderr", captured):
-                    rc = m.main(["--repo-root", str(repo_root)])
+                    rc = m.main(["--repo-root", str(repo_root), "--skip-v2-semantics"])
         self.assertEqual(rc, 1)
         self.assertIn(f"~ {target}", captured.getvalue())
 
@@ -254,7 +264,7 @@ class MainExitCodeTests(unittest.TestCase):
             captured = io.StringIO()
             with mock.patch.object(m, "run_generator", side_effect=fake_run):
                 with mock.patch("sys.stderr", captured):
-                    rc = m.main(["--repo-root", str(repo_root)])
+                    rc = m.main(["--repo-root", str(repo_root), "--skip-v2-semantics"])
         self.assertEqual(rc, 1)
         self.assertIn(f"- {target}", captured.getvalue())
 
@@ -548,9 +558,13 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
     def test_result_truth_arms_partition_the_taxonomy(self):
         # Every taxonomy member, expanded to its argument forms, matches exactly one arm.
         _, data = self._load()
+        # Select the result -> commit_truth arms by what they CONCLUDE. RUB-1208
+        # added truth -> image-relation arms that also guard on a string result,
+        # and those are a different relation, not a fifth taxonomy arm.
         arms = [(a["if"]["properties"]["result"], a["then"]["properties"]["commit_truth"]["const"])
                 for a in load_json_fail_closed(self.SCHEMA)["$defs"]["expected"]["allOf"]
-                if a["if"]["properties"].get("result", {}).get("type") == "string"]
+                if a["if"]["properties"].get("result", {}).get("type") == "string"
+                and "commit_truth" in a["then"]["properties"]]
         self.assertEqual(len(arms), 4)
         for entry in data["result_taxonomy"]:
             head, _, args = entry.partition("(")
@@ -578,9 +592,9 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
         raw = self.SCHEMA.read_text(encoding="utf-8", errors="strict")
         artifact_raw = self.ARTIFACT.read_text(encoding="utf-8", errors="strict")
         cases = {
-            "schema duplicate key": (raw.replace('"type":"object"', '"type":"object","type":"object"', 1).encode(), 'duplicate JSON key "type"'),
+            "schema duplicate key": (raw.replace('"type": "object",', '"type": "object", "type": "object",', 1).encode(), 'duplicate JSON key "type"'),
             "artifact duplicate key": (artifact_raw.replace('"artifact":', '"artifact": "x", "artifact":', 1).encode(), 'duplicate JSON key "artifact"'),
-            "artifact NaN constant": (artifact_raw.replace('"schema_version":2', '"schema_version":NaN', 1).encode(), "invalid JSON constant 'NaN'"),
+            "artifact NaN constant": (artifact_raw.replace('"schema_version": 2', '"schema_version": NaN', 1).encode(), "invalid JSON constant 'NaN'"),
             "artifact trailing document": ((artifact_raw + "{}").encode(), "invalid JSON artifact"),
             "artifact non-utf8": (artifact_raw.encode() + b"\xff", "invalid JSON artifact"),
         }
@@ -595,3 +609,172 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CanonicalPipelineV2RUB1208Tests(unittest.TestCase):
+    """RUB-1208: the schema and the drift checker reject each assigned mutation."""
+
+    REPO_ROOT = TOOLS_DIR.parent
+    ARTIFACT = REPO_ROOT / "conformance/fixtures/protocol/canonical_pipeline_v2.json"
+    SCHEMA = REPO_ROOT / "conformance/schemas/cv-canonical-pipeline-v2.json"
+
+    def setUp(self):
+        import jsonschema
+
+        self.data = load_json_fail_closed(self.ARTIFACT)
+        schema = load_json_fail_closed(self.SCHEMA)
+        jsonschema.Draft202012Validator.check_schema(schema)
+        self.validator = jsonschema.Draft202012Validator(schema)
+        self.assertTrue(self.validator.is_valid(self.data), "control artifact must validate")
+
+    def _case(self, data, row_id, case_id):
+        row = next(r for r in data["rows"] if r["row_id"] == row_id)
+        return next(c for c in row["cases"] if c["case_id"] == case_id)
+
+    def _first_resolved(self, data, tag):
+        return next(k for k, v in data["resolved_values"].items() if v["type"] == tag)
+
+    def _reject(self, mutate):
+        """Mutate a deep copy of the KNOWN-VALID control in one dimension."""
+        data = json.loads(json.dumps(self.data))
+        mutate(data)
+        return self.validator.is_valid(data)
+
+    def test_schema_rejects_every_assigned_single_dimension_mutation(self):
+        def swap_manifest_member(d):
+            # Same cardinality, one authorized member replaced by an unauthorized
+            # one of identical shape (mechanic 2, identity not count).
+            d["image_manifest"]["images"]["CHAIN_IMAGE_V1"]["direct_fields"] = [
+                "tip_hash", "height", "already_generated"
+            ]
+
+        def swap_summary_manifest_member(d):
+            d["summary_manifest"]["assigned_mutations"][0]["id"] = "M99"
+
+        mutations = {
+            "image_manifest same-cardinality substitution": swap_manifest_member,
+            "summary_manifest same-cardinality substitution": swap_summary_manifest_member,
+            "closure input_schema_design_hash": lambda d: d["_meta"]["closure_epoch"].__setitem__("input_schema_design_hash", "00" * 32),
+            "closure expected_projection_design_hash": lambda d: d["_meta"]["closure_epoch"].__setitem__("expected_projection_design_hash", "00" * 32),
+            "closure image_manifest_hash": lambda d: d["_meta"]["closure_epoch"].__setitem__("image_manifest_hash", "00" * 32),
+            "closure summary_manifest_hash": lambda d: d["_meta"]["closure_epoch"].__setitem__("summary_manifest_hash", "00" * 32),
+            "authority_source_sha256": lambda d: d["_meta"].__setitem__("authority_source_sha256", "00" * 32),
+            "generated warning reworded": lambda d: d["_meta"].__setitem__("warning", "machine-generated file"),
+            "generated warning trailing newline": lambda d: d["_meta"].__setitem__("warning", d["_meta"]["warning"] + "\n"),
+            "resolvedEntry unknown tag": lambda d: d["resolved_values"][self._first_resolved(d, "u64")].__setitem__("type", "bytes"),
+            "resolvedEntry extra property": lambda d: d["resolved_values"][self._first_resolved(d, "u64")].__setitem__("note", "x"),
+            "resolvedEntry bytes32 short": lambda d: d["resolved_values"][self._first_resolved(d, "bytes32_hex")].__setitem__("value", "ab"),
+            "resolvedEntry bytes32 uppercase": lambda d: d["resolved_values"][self._first_resolved(d, "bytes32_hex")].__setitem__("value", "AB" * 32),
+            "resolvedEntry u64 as string": lambda d: d["resolved_values"][self._first_resolved(d, "u64")].__setitem__("value", "12"),
+            "resolvedEntry u64 negative": lambda d: d["resolved_values"][self._first_resolved(d, "u64")].__setitem__("value", -1),
+            "resolvedEntry u64 two to the 64": lambda d: d["resolved_values"][self._first_resolved(d, "u64")].__setitem__("value", 2 ** 64),
+            "resolved key whitespace only": lambda d: d["resolved_values"].__setitem__(" ", {"type": "u64", "value": 1}),
+            "resolved key trailing newline": lambda d: d["resolved_values"].__setitem__(self._first_resolved(d, "u64") + "\n", {"type": "u64", "value": 1}),
+            "resolved key missing argument": lambda d: d["resolved_values"].__setitem__("tip_hash", {"type": "u64", "value": 1}),
+            "resolved key invalid relation suffix": lambda d: d["resolved_values"].__setitem__("tip_hash@C01-DIRECT-001/MAIN:bogus", {"type": "u64", "value": 1}),
+            "direct_fields dropped key": lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["expected"]["state_image"]["STANDARD_MEMPOOL_IMAGE_V1"]["direct_fields"].pop("used_bytes"),
+            "direct_fields extra key": lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["expected"]["state_image"]["CHAIN_IMAGE_V1"]["direct_fields"].__setitem__("bogus", "tip_hash@C01-DIRECT-001/MAIN:new"),
+            "relation contradicts NEW": lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["expected"]["state_image"]["CHAIN_IMAGE_V1"].__setitem__("relation", "old"),
+            "relation contradicts OLD": lambda d: self._case(d, "C01-DACLEAN-001", "CORRUPT_FIRST")["expected"]["state_image"]["CHAIN_IMAGE_V1"].__setitem__("relation", "new"),
+            "relation contradicts NOT_APPLICABLE": lambda d: self._case(d, "C01-SIDE-001", "MAIN")["expected"]["state_image"]["CHAIN_IMAGE_V1"].__setitem__("relation", "new"),
+            "summary block_hash inline literal": lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["expected"]["canonical_applied_blocks"][0].__setitem__("block_hash", "ab" * 32),
+            "obligation id trailing dash": lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["obligation_ids"].__setitem__(0, "OBL-X-"),
+            "obligation id empty segment": lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["obligation_ids"].__setitem__(0, "OBL--X"),
+            "disconnect summary null instead of []": lambda d: self._case(d, "C01-DISCONNECT-001", "MAIN")["expected"].__setitem__("canonical_applied_blocks", None),
+            "non-NEW summary is an array": lambda d: self._case(d, "C01-SIDE-001", "MAIN")["expected"].__setitem__("canonical_applied_blocks", []),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name):
+                self.assertFalse(self._reject(mutate), f"schema accepted {name}")
+
+    def test_relation_arms_keep_wire_and_recovery_rows_expressible(self):
+        # The truth -> relation arms are guarded on a CLASSIFIED result. Without
+        # that guard a DD-001 wire-disposed OLD row (every image `unchanged`) and
+        # a DD-002 recovery NOT_APPLICABLE row (`new`) become unsatisfiable, so
+        # both positive controls belong next to the negatives.
+        base = {
+            "result": None, "pipeline_reached": False, "canonical_applied_blocks": None,
+            "canonical_counters": {"accepted_delta": "0", "rejected_delta": "0"},
+            "rpc_projection": {"class": "NOT_REACHED", "http": None, "commit_state": None,
+                               "mined": "not_applicable", "success_identity": "not_applicable",
+                               "error_class": None, "phase": "not_reached"},
+        }
+        for label, extra, truth, relation in (
+            ("wire disposed", {"wire_disposition": "CHECKSUM_REJECT"}, "OLD", "unchanged"),
+            ("recovery", {"recovery_outcome": "identity_proven_route1"}, "NOT_APPLICABLE", "new"),
+        ):
+            with self.subTest(label):
+                data = json.loads(json.dumps(self.data))
+                case = self._case(data, "C01-DIRECT-001", "MAIN")
+                case["expected"].update(base)
+                case["expected"].update(extra)
+                case["expected"]["commit_truth"] = truth
+                for image in case["expected"]["state_image"].values():
+                    image["relation"] = relation
+                self.assertTrue(self.validator.is_valid(data), f"{label} row must stay expressible")
+
+    def test_shipped_semantic_negative_controls_all_redden(self):
+        # The five-plus controls live in the production checker so the drift gate
+        # runs them; run them here too so the cheap unittest gate covers them.
+        m.assert_canonical_pipeline_v2_negative_controls(self.ARTIFACT)
+
+    def test_semantic_gate_accepts_the_committed_artifact(self):
+        m.validate_canonical_pipeline_v2_semantics(self.ARTIFACT)
+
+    def test_obligation_receipts_reject_a_census_preserving_edit(self):
+        # Killer for the forward receipt hash: both edits keep the unique (143)
+        # and occurrence (259) counts exactly, so the hash is the only check left.
+        for label, mutate in (
+            ("renamed id", lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["obligation_ids"].__setitem__(0, "OBL-NOT-A-CENSUS-ID-999")),
+            ("moved id", self._move_one_obligation),
+        ):
+            with self.subTest(label):
+                data = json.loads(json.dumps(self.data))
+                mutate(data)
+                unique = {o for r in data["rows"] for c in r["cases"] for o in c["obligation_ids"]}
+                occurrences = sum(len(c["obligation_ids"]) for r in data["rows"] for c in r["cases"])
+                self.assertEqual(occurrences, m.V2_RUB1208_OBLIGATION_OCCURRENCES)
+                self.assertEqual(len(unique), m.V2_RUB1208_OBLIGATION_UNIQUE)
+                with tempfile.TemporaryDirectory() as td:
+                    path = Path(td) / "mutated.json"
+                    path.write_text(json.dumps(data), encoding="utf-8")
+                    with self.assertRaises(RuntimeError) as ctx:
+                        m.validate_canonical_pipeline_v2_semantics(path)
+                self.assertIn("obligation forward receipt hash mismatch", str(ctx.exception))
+
+    def _move_one_obligation(self, data):
+        source = self._case(data, "C01-DACLEAN-001", "CORRUPT_FIRST")
+        target = self._case(data, "C01-DIRECT-001", "MAIN")
+        movable = [o for o in source["obligation_ids"] if o not in target["obligation_ids"]]
+        source["obligation_ids"].remove(movable[0])
+        target["obligation_ids"].append(movable[0])
+
+    def test_semantic_gate_does_not_depend_on_the_schema_file(self):
+        # Regression: the gate used to run only `if V2_SCHEMA_REL.is_file()`, so
+        # deleting or renaming an unrelated file switched it off silently.
+        self.assertNotIn("V2_SCHEMA_REL", INSPECT_SOURCE)
+        self.assertIn("if not args.skip_v2_semantics:", INSPECT_SOURCE)
+
+    def test_meta_is_read_fail_closed(self):
+        for label, mutate in (
+            ("_meta is a string", lambda d: d.__setitem__("_meta", "x")),
+            ("closure_epoch is a list", lambda d: d["_meta"].__setitem__("closure_epoch", [])),
+        ):
+            with self.subTest(label):
+                data = json.loads(json.dumps(self.data))
+                mutate(data)
+                with tempfile.TemporaryDirectory() as td:
+                    path = Path(td) / "mutated.json"
+                    path.write_text(json.dumps(data), encoding="utf-8")
+                    with self.assertRaises(RuntimeError):
+                        m.validate_canonical_pipeline_v2_semantics(path)
+
+    def test_go_and_python_agree_on_the_row_case_census(self):
+        # The census is maintained on two sides; pin the copies equal.
+        go_source = (self.REPO_ROOT / "clients/go/cmd/gen-conformance-fixtures/runtime.go").read_text(encoding="utf-8")
+        block = go_source.split("var cp2R1208Rows = map[string]int{", 1)[1].split("}", 1)[0]
+        go_counts = {k: int(v) for k, v in re.findall(r'"([^"]+)":\s*(\d+)', block)}
+        self.assertEqual(go_counts, m.V2_RUB1208_CASE_COUNTS)
+
+
+INSPECT_SOURCE = (TOOLS_DIR / "check_conformance_fixtures_drift.py").read_text(encoding="utf-8")

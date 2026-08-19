@@ -11,6 +11,18 @@ Policy:
 
 ---
 
+## 2026-08-19 — C01-R2 semantic image, ordered summary and DA cleanup classifier (RUB-1208)
+
+`protocol/canonical_pipeline_v2.json` stays **BUILDING** and gains its first migrated content: 8 registered publication/image rows with 24 cases (the 12-case RUB-1180 DA cleanup classifier, 6 canonical-applied summary cases and the six single-case direct/genesis/side/reorg/disconnect/equal-work rows), a 227-entry typed `fixtures` catalog, a 408-entry `resolved_values` map of image digests and direct-field values, and the frozen `image_manifest` and `summary_manifest` as schema `const`s. `_meta.closure_epoch` is re-pinned from `rubin-c01-design-closure-v3` to the corrected `rubin-c01-design-closure-v8` and gains `input_schema_design_hash` and `expected_projection_design_hash`; `_meta.rub1208_payload_sha256` is replaced by `_meta.authority_source_sha256`.
+
+Authoring source: the new `clients/go/cmd/gen-conformance-fixtures/canonical_pipeline_v2_authority.json`, embedded by the generator via `go:embed` and pinned by SHA-256 on both sides. The artifact is emitted pretty-printed by the generator's indented writer, exactly like `protocol/canonical_pipeline_v1.json`; the schema is pretty-printed as before. Expected values are authored architecture authority carried over from the RUB-1206 v8 closure snapshot — no Go or Rust node production path is called to compute one.
+
+Newly enforced on BOTH the generator (`cp2ValidateR1208Payload`, `cp2ValidateR1208Expected`) and the drift checker (`validate_canonical_pipeline_v2_semantics`), each with an executed single-dimension negative: a summary row's `block_hash` must be the hash its `block_id` fixture declares; `complete_da_ids` is strictly ascending, unique per row, and derived from the case's `/input/block_included_set_identities` where it states one; the CHAIN tip equals the last canonical-applied block; the OWNER `stable_tip` equals the published CHAIN tip; the image `relation` is bound to `commit_truth`; a NEW case carries a non-empty summary unless it states a `/input/disconnect_command` stimulus; digest and direct-field aliases must equal the exact composed `NAME@ROW/CASE:relation` form; per-image `direct_fields` key sets are derived from the frozen `image_manifest`; `resolved_values` carries no orphan entry.
+
+Exact commands: `scripts/dev-env.sh -- bash -lc 'cd clients/go && go run ./cmd/gen-conformance-fixtures'` and `scripts/dev-env.sh -- python3 tools/gen_conformance_matrix.py`. Non-goals: no client implementation, adapter, acceptance runner, comparator, specification, formal or runner change; no `CV-*.json` vector is added or modified; the v1 pair is unchanged and byte-frozen; `closure_epoch.status` stays `building`, so no C02/C02A/C03/C04 consumer may bind this revision.
+
+---
+
 ## 2026-08-18 — Dormant C01-R2 successor pair (RUB-1207)
 
 New generator-owned artifact `protocol/canonical_pipeline_v2.json` with the versioned schema `conformance/schemas/cv-canonical-pipeline-v2.json` (schema version 2), registered as **BUILDING** — not an authority, bound by `_meta.closure_epoch` to the RUB-1206 design-closure manifest `rubin-c01-design-closure-v3`, carrying identity and shape only (frozen 79-entry row registry, empty `rows` and `fixtures`, no expected value). The v1 pair is unchanged and byte-frozen; `conformance/README.md` describes the shape. `+connect_count` stays a symbolic `canonical_counters.accepted_delta` token; only R1 EFFECT-level symbolic counts (for example `+included_matching_sets`) become `token`-typed effects in v2, where a `u64` effect is an integral JSON number in canonical form (the generator emits integers; `1.0` and `1e2` are never emitted).

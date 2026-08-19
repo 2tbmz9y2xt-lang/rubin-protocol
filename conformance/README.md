@@ -173,19 +173,39 @@ inventory and the orphan-pool result classification — duplicate / oversize / s
 Rust adapter and the RUB-901 comparator, none of which exists yet, so no canonical-publication slice
 may claim it as a passing gate.
 
-### The dormant C01-R2 successor pair (RUB-1207 / RUB-1208)
+### The BUILDING C01-R2 successor pair (RUB-1207 / RUB-1208)
 
 `conformance/fixtures/protocol/canonical_pipeline_v2.json` + `conformance/schemas/cv-canonical-pipeline-v2.json`
 (schema version 2). Status: **BUILDING** — not an authority, and no C02/C02A/C03/C04 consumer may bind it.
 The v1 pair above stays the inert authority and a byte-frozen read-only parent until RUB-1204 activates v2
 and deletes it in the same PR. `_meta.closure_epoch` pins the corrected RUB-1206 closure epoch v8 and
 `row_registry` freezes the 79 `row_id -> kind` identities. RUB-1208 migrates exactly 8 publication/image
-rows with 24 cases, including the 12-case DA cleanup classifier and exact ordered canonical-applied summaries;
-its fixture catalog and `resolved_values` carry the typed stimuli and image/direct-field resolver values. The
-remaining registered rows stay unmigrated for RUB-1209..RUB-1212, and RUB-1204 completes the revision.
-The migrated pair is schema-validated by `CanonicalPipelineV2SchemaTests` in
-`tools/tests/test_check_conformance_fixtures_drift.py`; generator byte identity remains enforced by the
-conformance fixture drift gate above.
+rows with 24 cases, including the 12-case DA cleanup classifier and the ordered canonical-applied summaries;
+the remaining registered rows stay unmigrated for RUB-1209..RUB-1212, and RUB-1204 completes the revision.
+
+The artifact is generated, never hand-edited. Its single authoring source is
+`clients/go/cmd/gen-conformance-fixtures/canonical_pipeline_v2_authority.json`, which the generator embeds
+and pins by SHA-256 on both sides (`cp2AuthoritySourceSHA256` and `_meta.authority_source_sha256`); the
+frozen `image_manifest` and `summary_manifest` are copied from it into the artifact and cross-pinned as
+schema `const`s, so the authority file is the one place either is edited. Regenerate with
+`cd clients/go && go run ./cmd/gen-conformance-fixtures --output-dir <abs>` and copy the result in.
+
+What actually executes, and where:
+
+| checked | validator | test |
+| --- | --- | --- |
+| schema validity, `row_registry` as an exact 79-entry map, closure-epoch and parent pins as `const`, and one single-dimension rejection per assigned mutation | `conformance/schemas/cv-canonical-pipeline-v2.json` | `CanonicalPipelineV2SchemaTests` and `CanonicalPipelineV2RUB1208Tests` in `tools/tests/test_check_conformance_fixtures_drift.py` |
+| row/case census (8 rows, 24 cases), obligation forward-and-reverse receipts, and the image/summary/DA relations | `validate_canonical_pipeline_v2_semantics` in `tools/check_conformance_fixtures_drift.py` | `test_semantic_gate_accepts_the_committed_artifact`, `test_obligation_receipts_reject_a_census_preserving_edit` |
+| the same relations on the generating side, plus the authority byte pin and the manifest hashes | `cp2ValidateR1208Payload` / `cp2ValidateR1208Expected` in `clients/go/cmd/gen-conformance-fixtures/runtime.go` | `TestCanonicalPipelineV2R1208ValidatorFailsClosed`, `TestCanonicalPipelineV2AuthorityPinIsExact`, `TestCanonicalPipelineV2DirectFieldsMatchTheManifest` |
+| the shipped single-dimension hostile controls (substituted `block_hash`, dropped/duplicated DA occurrence, stale CHAIN tip, stale OWNER `stable_tip`, renamed/moved obligation id, and the rest) | `assert_canonical_pipeline_v2_negative_controls` in `tools/check_conformance_fixtures_drift.py`, run by the drift gate | `test_shipped_semantic_negative_controls_all_redden` |
+| generator byte identity | the conformance fixture drift gate above | `TestCanonicalPipelineV2CorpusIsByteDeterministic` |
+
+Two conventions the shape does not state by itself. `release_requirements[go|rust]` is a set of
+(issue, surface) blocking obligations, not a set of issues: one issue legitimately appears more than once
+with different surfaces, and a per-case block appends its case-specific surfaces to the row's rather than
+replacing them. A `sources[]` entry resolves against `_meta.governing_spec_oid` for a spec citation, an
+in-repo path for a fixture citation, the bound closure snapshot `rubin-c01-design-closure-v8` for a design
+citation, and the obligation census for an `OBL-` id.
 
 ## Fuzz crash promotion (manual-only)
 
