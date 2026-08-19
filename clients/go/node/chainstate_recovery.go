@@ -85,11 +85,9 @@ var errCanonicalArtifactUnbound = errors.New("canonical artifact is not bound to
 // (linkage). Rust checks neither — its mirror still stops at the first
 // incomplete row and still truncates (Go-primary, sibling RUB-897).
 //
-// Cost, accepted for strictness: every boot now READS AND FULLY PARSES every
+// Cost, accepted for strictness: every boot READS AND FULLY PARSES every
 // canonical block (up to consensus.MAX_BLOCK_BYTES each) and SHA3s every
-// canonical header. On a replay boot each block is parsed twice — once here
-// and once in verifyReplayBlockHash. RUB-1202 sizes that cost when it cuts the
-// production callers over.
+// canonical header, twice per block on a replay boot.
 func requireCompleteCanonicalPrefix(store *BlockStore) error {
 	if store == nil {
 		return errors.New("nil blockstore")
@@ -134,8 +132,8 @@ func countCompleteCanonicalPrefix(store *BlockStore, canonical []string) (uint64
 			return 0, fmt.Errorf("canonical header artifact %x links to %x, expected %x: %w",
 				row.hash, row.prev, previous, errCanonicalArtifactUnbound)
 		}
-		if !row.complete && uint64(i) < validCount {
-			validCount = uint64(i)
+		if !row.complete {
+			validCount = min(validCount, uint64(i))
 		}
 		previous = row.hash
 	}
@@ -153,63 +151,59 @@ type canonicalRowArtifacts struct {
 }
 
 // canonicalArtifactsComplete checks header, then block, then undo — ALL three,
-// in that fixed order, because an absent artifact must not hide a corrupt one
-// behind it in the same row. It stamps every propagated structural error with
-// the artifact kind and the indexed hash: the operator reads this as
+// in that fixed statement order, because an absent artifact must not hide a
+// corrupt one behind it in the same row. It stamps every propagated structural
+// error with the artifact kind and the indexed hash: the operator reads this as
 // "chainstate reconcile failed: <err>", so a leaf reason like "header hash
 // mismatch" that names no artifact and no row is unactionable. Only
 // os.ErrNotExist is absence, and only absence feeds the complete-prefix count.
+//
+// All three leaves are STRICT: an artifact that is merely present is not a
+// complete canonical artifact. They apply the same identity rules as
+// InspectBlockPresence's leaves — validateBlockHeaderHash for the header,
+// storedBlockHeaderHash for the block, GetUndo's hash binding for the undo — so
+// startup and presence can never disagree on what "complete" means. A present
+// but unbound artifact propagates as a structural error with FIRST precedence,
+// exactly like the corrupt-undo path. The header and block leaves carry the
+// errCanonicalArtifactUnbound identity alongside their own detail, so a caller
+// can tell "present but not bound to this row" from a plain read failure
+// without matching on text; the sentinel marks IDENTITY failures only, and a
+// read-class refusal — absence, or the RUB-1057 size bound — propagates
+// unwrapped and carries neither.
 func (bs *BlockStore) canonicalArtifactsComplete(hashHex string) (canonicalRowArtifacts, error) {
 	blockHash, err := parseHex32("canonical hash", hashHex)
 	if err != nil {
 		return canonicalRowArtifacts{}, err
 	}
 	row := canonicalRowArtifacts{complete: true, hash: blockHash}
-	for _, artifact := range []struct {
-		kind  string
-		check func([32]byte) error
-	}{
-		{"header", func(hash [32]byte) error {
-			prev, err := bs.headerExists(hash)
-			if err != nil {
-				return err
-			}
-			row.hasHeader, row.prev = true, prev
-			return nil
-		}},
-		{"block", bs.blockExists},
-		{"undo", bs.undoExists},
-	} {
-		err := artifact.check(blockHash)
-		if errors.Is(err, os.ErrNotExist) {
-			row.complete = false
-			continue
-		}
-		if err != nil {
-			return canonicalRowArtifacts{}, fmt.Errorf("canonical %s artifact %x: %w", artifact.kind, blockHash, err)
-		}
+
+	prev, err := bs.canonicalHeaderPrev(blockHash)
+	if errors.Is(err, os.ErrNotExist) {
+		row.complete = false
+	} else if err != nil {
+		return canonicalRowArtifacts{}, fmt.Errorf("canonical header artifact %x: %w", blockHash, err)
+	} else {
+		row.hasHeader, row.prev = true, prev
+	}
+
+	if err := bs.verifyCanonicalBlock(blockHash); errors.Is(err, os.ErrNotExist) {
+		row.complete = false
+	} else if err != nil {
+		return canonicalRowArtifacts{}, fmt.Errorf("canonical block artifact %x: %w", blockHash, err)
+	}
+
+	if err := bs.verifyCanonicalUndo(blockHash); errors.Is(err, os.ErrNotExist) {
+		row.complete = false
+	} else if err != nil {
+		return canonicalRowArtifacts{}, fmt.Errorf("canonical undo artifact %x: %w", blockHash, err)
 	}
 	return row, nil
 }
 
-// headerExists and blockExists are STRICT: an artifact that is merely present
-// is not a complete canonical artifact. They apply the same identity rules as
-// InspectBlockPresence's leaves — validateBlockHeaderHash for the header,
-// storedBlockHeaderHash for the block, GetUndo's hash binding for the undo — so
-// startup and presence can never disagree on what "complete" means. A present
-// but unbound artifact returns a non-ErrNotExist error, which
-// canonicalArtifactsComplete stamps and propagates as a structural error with
-// FIRST precedence, exactly like the corrupt-undo path; only ErrNotExist feeds
-// the complete-prefix count. Both carry the errCanonicalArtifactUnbound
-// identity alongside their own detail, so a caller can tell "present but not
-// bound to this row" from a plain read failure without matching on text. The
-// sentinel marks IDENTITY failures only: a read-class refusal — absence, or the
-// RUB-1057 size bound — propagates unwrapped and carries neither.
-//
-// headerExists also returns the parent the validated header names, so the
-// linkage rule is proved from the bytes this read already holds instead of a
-// second read of the same file.
-func (bs *BlockStore) headerExists(blockHash [32]byte) ([32]byte, error) {
+// canonicalHeaderPrev validates the row's header and returns the parent it
+// names, so the linkage rule is proved from the bytes this read already holds
+// instead of a second read of the same file.
+func (bs *BlockStore) canonicalHeaderPrev(blockHash [32]byte) ([32]byte, error) {
 	var prev [32]byte
 	headerBytes, err := bs.GetHeaderByHash(blockHash)
 	if err != nil {
@@ -227,7 +221,9 @@ func (bs *BlockStore) headerExists(blockHash [32]byte) ([32]byte, error) {
 	return header.PrevBlockHash, nil
 }
 
-func (bs *BlockStore) blockExists(blockHash [32]byte) error {
+// verifyCanonicalBlock: the stored block bytes must parse and re-derive the
+// indexed hash.
+func (bs *BlockStore) verifyCanonicalBlock(blockHash [32]byte) error {
 	blockBytes, err := bs.GetBlockByHash(blockHash)
 	if err != nil {
 		return err
@@ -242,7 +238,9 @@ func (bs *BlockStore) blockExists(blockHash [32]byte) error {
 	return nil
 }
 
-func (bs *BlockStore) undoExists(blockHash [32]byte) error {
+// verifyCanonicalUndo: the stored undo record must decode and carry the indexed
+// hash (RUB-1132).
+func (bs *BlockStore) verifyCanonicalUndo(blockHash [32]byte) error {
 	_, err := bs.GetUndo(blockHash)
 	return err
 }
@@ -395,21 +393,6 @@ func replayBlockInputs(store *BlockStore, blockHash [32]byte, height uint64) ([]
 		return nil, nil, err
 	}
 	return blockBytes, prevTimestamps, nil
-}
-
-// storedBlockHeaderHash re-derives the content-addressed identity of stored
-// block bytes: parse, then hash the contained header. step names the stage that
-// failed so each caller keeps its own message, and is MEANINGFUL ONLY when err
-// is non-nil. It is shared by replay's re-hash defense, startup's strict
-// canonical-artifact check and InspectBlockPresence's block leaf, so none of
-// them can disagree on what makes stored block bytes valid.
-func storedBlockHeaderHash(blockBytes []byte) (blockHash [32]byte, step string, err error) {
-	parsed, err := consensus.ParseBlockBytes(blockBytes)
-	if err != nil {
-		return blockHash, "parse block bytes", err
-	}
-	blockHash, err = consensus.BlockHash(parsed.HeaderBytes)
-	return blockHash, "hash header", err
 }
 
 func verifyReplayBlockHash(blockBytes []byte, blockHash [32]byte, height uint64) error {

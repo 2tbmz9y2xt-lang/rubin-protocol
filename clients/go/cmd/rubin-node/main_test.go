@@ -3654,7 +3654,6 @@ func TestRunStartupRefusesIncompleteCanonicalSuffix(t *testing.T) {
 	before := datadirSnapshot(t, storeRoot)
 	markerBefore, chainStateBefore := read(marker), read(chainStatePath)
 
-	stopAfterChainStateSave(t)
 	var out, errOut bytes.Buffer
 	code := run([]string{"--datadir", dir}, &out, &errOut)
 	if code != 2 {
