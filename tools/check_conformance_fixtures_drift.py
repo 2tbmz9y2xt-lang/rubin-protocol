@@ -791,7 +791,8 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         expected["state_image"]["CHAIN_IMAGE_V1"]["relation"] = "old"
 
     def summary_rows_effect_is_a_bool(data: dict) -> None:
-        case_of(data, "C01-REORG-001", "MAIN")["expected"]["effects"]["summary_rows"]["value"] = True
+        # A 1-ROW case on purpose: True == 1, so the count arm cannot fire and only the type guard is left.
+        case_of(data, "C01-SUMMARY-001", "SINGLE_BLOCK_NO_DA")["expected"]["effects"]["summary_rows"]["value"] = True
 
     def stale_owner_tip(data: dict) -> None:
         case = case_of(data, "C01-DIRECT-001", "MAIN")
@@ -952,7 +953,7 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("occurrence added where the stated count is zero", add_occurrence_where_count_is_zero, "the case states 0"),
         ("summary borrows another case's da alias", borrow_another_cases_da_alias, "outside the case namespace"),
         ("wire disposed row with an old image", wire_disposed_row_with_an_old_image, "invalid for OLD"),
-        ("summary_rows effect is a bool", summary_rows_effect_is_a_bool, "differs from the 3 published rows"),
+        ("summary_rows effect is a bool", summary_rows_effect_is_a_bool, "True differs from the 1 published rows"),
         ("resolved key trailing newline", resolved_key_trailing_newline, "is not the composed full form"),
         ("resolved key leading space", resolved_key_leading_space, "is not the composed full form"),
         ("bytes32 value trailing newline", bytes32_trailing_newline, "is not a valid bytes32_hex literal"),
