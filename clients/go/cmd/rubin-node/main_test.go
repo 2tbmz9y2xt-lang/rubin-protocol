@@ -3587,12 +3587,13 @@ func TestRunDryRunReportsStaleChainStateWithoutRepairing(t *testing.T) {
 	}
 }
 
-// TestRunDryRunDoesNotTruncateCanonicalIndex covers the reconcile's other
-// durable write, and the destructive one: an incomplete canonical suffix
-// (here a tip whose undo record is gone) makes it drop the tip from the
-// index. --dry-run must surface that datadir intact, tip included, so the
-// operator decides whether to lose the block.
-func TestRunDryRunDoesNotTruncateCanonicalIndex(t *testing.T) {
+// TestRunDryRunReportsIncompleteCanonicalSuffixIntact covers the datadir the
+// mutating startup path refuses: an incomplete canonical suffix (here a tip
+// whose undo record is gone) now fails the reconcile closed instead of dropping
+// the tip from the index (RUB-890). --dry-run runs no reconcile at all, so it
+// must surface that datadir intact, tip included and byte-for-byte unwritten,
+// and leave the decision to the operator.
+func TestRunDryRunReportsIncompleteCanonicalSuffixIntact(t *testing.T) {
 	dir := preparedDatadir(t)
 	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
 	if err != nil {
@@ -3612,6 +3613,71 @@ func TestRunDryRunDoesNotTruncateCanonicalIndex(t *testing.T) {
 	assertNoFilesystemWrite(t, before, datadirSnapshot(t, dir))
 	if !strings.Contains(report, "blockstore: tip_height=1 ") {
 		t.Fatalf("report must still show the untruncated tip, stdout=%q", report)
+	}
+}
+
+// TestRunStartupRefusesIncompleteCanonicalSuffix is the mutating counterpart of
+// the dry-run row above, driven through run(): the node-package test calls the
+// reconcile directly, so deleting this call site would leave every other suite
+// green. A canonical tip whose undo record is gone is corruption of COMMITTED
+// chain, so startup exits 2 on the reconcile message and leaves the datadir
+// byte-identical — where the baseline silently truncated the tip out of the
+// index and served on (RUB-890).
+func TestRunStartupRefusesIncompleteCanonicalSuffix(t *testing.T) {
+	dir := preparedDatadir(t)
+	storeRoot := node.BlockStorePath(dir)
+	store, err := node.OpenBlockStore(storeRoot)
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	tipHeight, tipHash, ok, err := store.Tip()
+	if err != nil || !ok || tipHeight != 1 {
+		t.Fatalf("fixture tip: height=%d ok=%v err=%v", tipHeight, ok, err)
+	}
+	if err := os.Remove(filepath.Join(storeRoot, "undo", hex.EncodeToString(tipHash[:])+".json")); err != nil {
+		t.Fatalf("remove tip undo record: %v", err)
+	}
+
+	read := func(path string) []byte {
+		raw, err := os.ReadFile(path) // #nosec G304 -- test-local path.
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		return raw
+	}
+	// Scoped to the blockstore subtree, where all canonical state lives: a
+	// mutating startup legitimately creates its datadir-root lock files before
+	// the reconcile runs, and those are infrastructure, not state. The marker
+	// and chainstate bytes cover the CONTENT axis the snapshot does not.
+	marker := filepath.Join(storeRoot, "index.json")
+	chainStatePath := node.ChainStatePath(dir)
+	before := datadirSnapshot(t, storeRoot)
+	markerBefore, chainStateBefore := read(marker), read(chainStatePath)
+
+	var out, errOut bytes.Buffer
+	code := run([]string{"--datadir", dir}, &out, &errOut)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
+	}
+	// The specific fail-closed class, not just the generic wrapper: the wrapper
+	// is shared with every other reconcile failure, so it would stay green if
+	// the refusal degraded into a plain error.
+	for _, want := range []string{
+		"chainstate reconcile failed",
+		"persisted canonical index has an incomplete committed suffix",
+		"index declares 2 entries; the complete header/block/undo prefix ends after 1",
+	} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Fatalf("expected %q in stderr, got %q", want, errOut.String())
+		}
+	}
+
+	assertNoFilesystemWrite(t, before, datadirSnapshot(t, storeRoot))
+	if !bytes.Equal(read(marker), markerBefore) {
+		t.Fatalf("the refused startup rewrote the canonical index")
+	}
+	if !bytes.Equal(read(chainStatePath), chainStateBefore) {
+		t.Fatalf("the refused startup rewrote the chainstate snapshot")
 	}
 }
 

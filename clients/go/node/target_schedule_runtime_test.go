@@ -455,6 +455,17 @@ func TestTargetScheduleRuntimeReorgPreviewRejectsBeforeDisconnect(t *testing.T) 
 	}
 }
 
+// TestTargetScheduleRuntimeRecoveryDerivesPerBlock proves the expected target
+// is derived and BOUND per replayed block, using a corrupt height-1 canonical
+// header as its vehicle.
+//
+// Rewired for RUB-890: strict fail-closed startup now refuses that datadir at
+// the complete-prefix scan, ahead of replay, so the test asserts that refusal
+// explicitly and then drives the per-block evidence through
+// replayCanonicalBlocks — entered one step lower, but the same step
+// ReconcileChainStateWithBlockStore reaches once the scan passes. The
+// reconcile-level propagation is asserted by the structural-refusal row below;
+// the per-block rows no longer travel through the reconcile entry point.
 func TestTargetScheduleRuntimeRecoveryDerivesPerBlock(t *testing.T) {
 	engine, store, dir := newStockDevnetEngine(t, nil)
 	genesisSnapshot := cloneChainState(engine.chainState)
@@ -493,17 +504,43 @@ func TestTargetScheduleRuntimeRecoveryDerivesPerBlock(t *testing.T) {
 		t.Fatalf("clear chainstate snapshot: %v", err)
 	}
 
-	// No additional durable write after a target-context failure: the
-	// canonical index, the artifacts, and the absent chainstate snapshot must
-	// all be exactly as they were.
+	// Strict fail-closed startup (RUB-890) refuses this datadir at the
+	// complete-prefix scan, BEFORE any replay runs: a canonical header that no
+	// longer hashes to its indexed value is committed-canonical corruption, not
+	// something replay is allowed to discover. That refusal is asserted here in
+	// its own right — structural error, chainstate untouched, nothing written.
+	refused := NewChainState()
+	refusedBefore := refused.view()
+	if _, rerr := ReconcileChainStateWithBlockStore(refused, store, cfg); !errors.Is(rerr, errCanonicalArtifactUnbound) {
+		t.Fatalf("startup err=%v, want the unbound-artifact refusal before replay", rerr)
+	}
+	if after := refused.view(); after != refusedBefore {
+		t.Fatalf("chainstate mutated before the refusal: %+v -> %+v", refusedBefore, after)
+	}
+	if durableStoreFingerprint(t, store) != before {
+		t.Fatalf("durable store state changed on the refused startup")
+	}
+	if _, serr := os.Stat(chainStatePath); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("chainstate snapshot written on the refused startup: %v", serr)
+	}
+
+	// The per-block target evidence therefore drives replayCanonicalBlocks
+	// directly: the same step the reconcile reaches once the scan passes,
+	// entered with exactly the arguments a tipless snapshot produces (replay
+	// from height 0 through the canonical tip).
+	//
 	// The selected parent is the canonical index entry at height-1, never the
 	// replayed block's own hash. With ONLY the height-1 header corrupted, a
 	// self-parenting derivation would already fail at height 1; the canonical
 	// parent lets height 1 replay from the intact genesis header so that only
 	// height 2 fails. How far the replay got is the witness.
+	tipHeight, _, hasTip, err := store.Tip()
+	if err != nil || !hasTip {
+		t.Fatalf("Tip()=(%d,%v,%v)", tipHeight, hasTip, err)
+	}
 	partial := NewChainState()
-	if _, err := ReconcileChainStateWithBlockStore(partial, store, cfg); !errors.Is(err, errTargetHistoryCorrupt) {
-		t.Fatalf("reconcile err=%v, want errTargetHistoryCorrupt", err)
+	if _, err := replayCanonicalBlocks(partial, store, cfg, 0, tipHeight, true); !errors.Is(err, errTargetHistoryCorrupt) {
+		t.Fatalf("replay err=%v, want errTargetHistoryCorrupt", err)
 	}
 	if partial.Height != 1 {
 		t.Fatalf("replay reached height %d before failing, want 1", partial.Height)
@@ -513,9 +550,12 @@ func TestTargetScheduleRuntimeRecoveryDerivesPerBlock(t *testing.T) {
 	// corrupt header surfaces from the MTP window, never from the schedule.
 	nonStock := cfg
 	nonStock.Network = "regtest"
-	if _, err := ReconcileChainStateWithBlockStore(NewChainState(), store, nonStock); err == nil || errors.Is(err, errTargetHistoryCorrupt) {
+	if _, err := replayCanonicalBlocks(NewChainState(), store, nonStock, 0, tipHeight, true); err == nil || errors.Is(err, errTargetHistoryCorrupt) {
 		t.Fatalf("non-devnet replay err=%v, want a failure that is not the schedule class", err)
 	}
+	// No additional durable write after a target-context failure: the
+	// canonical index, the artifacts, and the absent chainstate snapshot must
+	// all be exactly as they were.
 	if durableStoreFingerprint(t, store) != before {
 		t.Fatalf("durable store state changed after a target-context failure")
 	}

@@ -712,7 +712,7 @@ func crashAtBoundary(t *testing.T, boundary, order string, store *BlockStore, li
 	})
 
 	writes := []func() error{
-		func() error { return saveBlockStoreIndex(store.indexPath, store.index) },
+		func() error { _, err := writeCanonicalIndexFile(store.indexPath, store.index); return err },
 		func() error { return live.Save(chainStatePath) },
 	}
 	if order == "chainstate_first" {
