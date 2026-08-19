@@ -187,8 +187,8 @@ The artifact is generated, never hand-edited. Its single authoring source is
 `clients/go/cmd/gen-conformance-fixtures/canonical_pipeline_v2_authority.json`, which the generator embeds
 and pins by SHA-256 on both sides (`cp2AuthoritySourceSHA256` and `_meta.authority_source_sha256`); the
 frozen `image_manifest` and `summary_manifest` are copied from it into the artifact and cross-pinned as
-schema `const`s, so the authority file is the one place either is edited. Regenerate with
-`cd clients/go && go run ./cmd/gen-conformance-fixtures --output-dir <abs>` and copy the result in.
+schema `const`s, so the authority file is the one place either is edited. Regenerate in place with
+`scripts/dev-env.sh -- bash -lc 'cd clients/go && go run ./cmd/gen-conformance-fixtures'`.
 
 What actually executes, and where:
 
@@ -202,8 +202,8 @@ What actually executes, and where:
 
 Two conventions the shape does not state by itself. `release_requirements[go|rust]` is a set of
 (issue, surface) blocking obligations, not a set of issues: one issue legitimately appears more than once
-with different surfaces, and a per-case block appends its case-specific surfaces to the row's rather than
-replacing them. A `sources[]` entry resolves against `_meta.governing_spec_oid` for a spec citation, an
+with different surfaces. Where a case carries its own block, that block is the case's complete blocking set
+and replaces the row-level default, exactly as `$defs/case.release_requirements` in the schema states. A `sources[]` entry resolves against `_meta.governing_spec_oid` for a spec citation, an
 in-repo path for a fixture citation, the bound closure snapshot `rubin-c01-design-closure-v8` for a design
 citation, and the obligation census for an `OBL-` id.
 

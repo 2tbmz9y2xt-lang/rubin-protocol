@@ -493,7 +493,7 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
             ),
             "hash effect value off grammar": (
                 lambda r: set_effect(r, "gc_victim_hash", "H FULL 1", "hash"),
-                (f"{expected}/effects/gc_victim_hash/value", "oneOf"),
+                (f"{expected}/effects/gc_victim_hash/value", "pattern"),
             ),
             "release requirement without receipt flag": (
                 lambda r: r["release_requirements"]["go"][0].pop("delivery_receipt_required"),
@@ -607,10 +607,6 @@ class CanonicalPipelineV2SchemaTests(unittest.TestCase):
                         load_json_fail_closed(path)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class CanonicalPipelineV2RUB1208Tests(unittest.TestCase):
     """RUB-1208: the schema and the drift checker reject each assigned mutation."""
 
@@ -682,16 +678,19 @@ class CanonicalPipelineV2RUB1208Tests(unittest.TestCase):
             "obligation id empty segment": lambda d: self._case(d, "C01-DIRECT-001", "MAIN")["obligation_ids"].__setitem__(0, "OBL--X"),
             "disconnect summary null instead of []": lambda d: self._case(d, "C01-DISCONNECT-001", "MAIN")["expected"].__setitem__("canonical_applied_blocks", None),
             "non-NEW summary is an array": lambda d: self._case(d, "C01-SIDE-001", "MAIN")["expected"].__setitem__("canonical_applied_blocks", []),
+            "hash effect value as an alias": lambda d: self._case(d, "C01-REORG-001", "MAIN")["expected"]["effects"].__setitem__("gc_victim_hash", {"value": "NO_SUCH_ALIAS_XYZ", "type": "hash", "required": True, "observer": "probe"}),
         }
         for name, mutate in mutations.items():
             with self.subTest(name):
                 self.assertFalse(self._reject(mutate), f"schema accepted {name}")
 
     def test_relation_arms_keep_wire_and_recovery_rows_expressible(self):
-        # The truth -> relation arms are guarded on a CLASSIFIED result. Without
-        # that guard a DD-001 wire-disposed OLD row (every image `unchanged`) and
-        # a DD-002 recovery NOT_APPLICABLE row (`new`) become unsatisfiable, so
-        # both positive controls belong next to the negatives.
+        # The truth -> relation arms are guarded on a CLASSIFIED result on all
+        # three sides. Without that guard a DD-001 wire-disposed OLD row (every
+        # image `unchanged`, C01-SIDE-001/MAIN) and a DD-002 recovery
+        # NOT_APPLICABLE row (`new`, C01-DIRECT-001/MAIN) become unsatisfiable,
+        # so the positive control asserts the semantic gate too, not only the
+        # schema: the generator and the drift gate must accept them as well.
         base = {
             "result": None, "pipeline_reached": False, "canonical_applied_blocks": None,
             "canonical_counters": {"accepted_delta": "0", "rejected_delta": "0"},
@@ -699,19 +698,21 @@ class CanonicalPipelineV2RUB1208Tests(unittest.TestCase):
                                "mined": "not_applicable", "success_identity": "not_applicable",
                                "error_class": None, "phase": "not_reached"},
         }
-        for label, extra, truth, relation in (
-            ("wire disposed", {"wire_disposition": "CHECKSUM_REJECT"}, "OLD", "unchanged"),
-            ("recovery", {"recovery_outcome": "identity_proven_route1"}, "NOT_APPLICABLE", "new"),
+        for label, row_id, extra, truth in (
+            ("wire disposed", "C01-SIDE-001", {"wire_disposition": "CHECKSUM_REJECT"}, "OLD"),
+            ("recovery", "C01-DIRECT-001", {"recovery_outcome": "identity_proven_route1"}, "NOT_APPLICABLE"),
         ):
             with self.subTest(label):
                 data = json.loads(json.dumps(self.data))
-                case = self._case(data, "C01-DIRECT-001", "MAIN")
+                case = self._case(data, row_id, "MAIN")
                 case["expected"].update(base)
                 case["expected"].update(extra)
                 case["expected"]["commit_truth"] = truth
-                for image in case["expected"]["state_image"].values():
-                    image["relation"] = relation
                 self.assertTrue(self.validator.is_valid(data), f"{label} row must stay expressible")
+                with tempfile.TemporaryDirectory() as td:
+                    path = Path(td) / "row.json"
+                    path.write_text(json.dumps(data), encoding="utf-8")
+                    m.validate_canonical_pipeline_v2_semantics(path)
 
     def test_shipped_semantic_negative_controls_all_redden(self):
         # The five-plus controls live in the production checker so the drift gate
@@ -770,11 +771,20 @@ class CanonicalPipelineV2RUB1208Tests(unittest.TestCase):
                         m.validate_canonical_pipeline_v2_semantics(path)
 
     def test_go_and_python_agree_on_the_row_case_census(self):
-        # The census is maintained on two sides; pin the copies equal.
+        # Every list this slice maintains on more than one side is pinned equal:
+        # the census, the composed-key grammar and the direct-field type map.
         go_source = (self.REPO_ROOT / "clients/go/cmd/gen-conformance-fixtures/runtime.go").read_text(encoding="utf-8")
         block = go_source.split("var cp2R1208Rows = map[string]int{", 1)[1].split("}", 1)[0]
         go_counts = {k: int(v) for k, v in re.findall(r'"([^"]+)":\s*(\d+)', block)}
         self.assertEqual(go_counts, m.V2_RUB1208_CASE_COUNTS)
+        schema = load_json_fail_closed(self.SCHEMA)
+        self.assertEqual(m.V2_RESOLVED_KEY_RE.pattern, schema["$defs"]["resolvedKey"]["pattern"])
+        types = go_source.split("var cp2DirectFieldTypes = map[string]string{", 1)[1].split("}", 1)[0]
+        self.assertEqual(dict(re.findall(r'"([a-z_]+)":\s*"([a-z0-9_]+)"', types)), m.V2_DIRECT_FIELD_TYPES)
 
 
 INSPECT_SOURCE = (TOOLS_DIR / "check_conformance_fixtures_drift.py").read_text(encoding="utf-8")
+
+
+if __name__ == "__main__":
+    unittest.main()

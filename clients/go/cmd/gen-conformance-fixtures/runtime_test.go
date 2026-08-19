@@ -1566,13 +1566,17 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		"surplus reached flag": "set only when result is null",
 	}
 	for name, apply := range mutate {
+		reason, named := want[name]
+		if !named {
+			t.Fatalf("mutation %q has no expected reason: a table entry without one asserts nothing", name)
+		}
 		row := cp2Row{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}
 		apply(&row)
 		err := cp2ValidateRows([]cp2Row{row}, registry)
 		if err == nil {
 			t.Errorf("%s: expected a fail-closed rejection", name)
-		} else if !strings.Contains(err.Error(), want[name]) {
-			t.Errorf("%s: error = %q, want it to name %q", name, err, want[name])
+		} else if !strings.Contains(err.Error(), reason) {
+			t.Errorf("%s: error = %q, want it to name %q", name, err, reason)
 		}
 	}
 }
@@ -1754,6 +1758,7 @@ func TestCanonicalPipelineV2GrammarParity(t *testing.T) {
 		"machineToken": {cp2TokenRE.String(), str(append(defs, "machineToken", "pattern")...)},
 		"snakeToken":   {cp2SnakeRE.String(), str(append(defs, "snakeToken", "pattern")...)},
 		"alias":        {cp2UpperTokenRE.String(), str(append(defs, "alias", "pattern")...)},
+		"resolvedKey":  {cp2ResolvedKeyRE.String(), str(append(defs, "resolvedKey", "pattern")...)},
 		"case_id":      {cp2UpperTokenRE.String(), str(append(defs, "case", "properties", "case_id", "pattern")...)},
 		"issueId":      {cp2IssueRE.String(), str(append(defs, "issueId", "pattern")...)},
 		"bytesLit":     {cp2BytesRE.String(), str(append(defs, "bytesLit", "pattern")...)},
@@ -1918,6 +1923,13 @@ func TestCanonicalPipelineV2ValidatorsNeverPanic(t *testing.T) {
 			_, _ = cp2ValidateInputs(pick(), []cp2Input{in}), cp2ValidateExpected(pick(), row.Cases[0].Expected)
 			_, _ = cp2ValidateRPC(pick(), row.Cases[0].Expected.RPC), cp2InputOK(in)
 			_, _ = cp2FixtureValueOK(cp2Fixture{Type: pick(), Value: value}), cp2ClosedValueOK(value)
+			_ = cp2ValidateR1208Expected(pick(), map[string]any{"expected": map[string]any{
+				"commit_truth": pick(), "state_image": value, "canonical_applied_blocks": value,
+			}, "input": []any{value, map[string]any{"pointer": pick(), "value_or_alias": value}}},
+				fixtures, map[string]cp2Fixture{pick(): {Type: pick(), Value: value}},
+				map[string][]string{"CHAIN_IMAGE_V1": {pick()}})
+			_ = cp2ValidateResolved(fixtures)
+			_, _ = cp2DirectFieldNames(cpMap{"images": value})
 		}()
 	}
 }
@@ -2311,6 +2323,44 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			effects := c["expected"].(map[string]any)["effects"].(map[string]any)
 			effects["summary_rows"].(map[string]any)["value"] = json.Number("99")
 		},
+		"resolved key trailing newline": func(t *testing.T, d map[string]any) {
+			values := d["resolved_values"].(map[string]any)
+			first := slices.Sorted(maps.Keys(values))[0]
+			values[first+"\n"] = values[first]
+			delete(values, first)
+		},
+		"stale standard used_bytes": func(t *testing.T, d map[string]any) {
+			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN"), "STANDARD_MEMPOOL_IMAGE_V1", "used_bytes")["value"] = json.Number("999999")
+		},
+		"stale retained set_count": func(t *testing.T, d map[string]any) {
+			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-DACLEAN-001", "ABSENT_RETAINED"), "RETAINED_DA_IMAGE_V1", "set_count")["value"] = json.Number("0")
+		},
+		"stale owner claim_count": func(t *testing.T, d map[string]any) {
+			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-DACLEAN-001", "CORRUPT_FIRST"), "OWNER_IMAGE_V1", "claim_count")["value"] = json.Number("99")
+		},
+		"da occurrence dropped from a block_includes case": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			cp2CaseSummary(t, c)[0].(map[string]any)["complete_da_ids"] = []any{}
+		},
+		"da occurrence added where the stated count is zero": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "SINGLE_BLOCK_NO_DA")
+			row := cp2CaseSummary(t, c)[0].(map[string]any)
+			row["complete_da_ids"] = []any{"R1208_SUMMARY_001_SINGLE_BLOCK_NO_DA_B1_HASH"}
+		},
+		"cross-block occurrence dropped from one row": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "CROSS_BLOCK_OCCURRENCE")
+			cp2CaseSummary(t, c)[1].(map[string]any)["complete_da_ids"] = []any{}
+		},
+		"summary borrows another case's da alias": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-REORG-001", "MAIN")
+			cp2CaseSummary(t, c)[0].(map[string]any)["complete_da_ids"].([]any)[0] = "R1208_DACLEAN_001_EXACT_MATCH_DA_ID_1"
+		},
+		"wire disposed row with an old image": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")
+			expected := c["expected"].(map[string]any)
+			expected["result"], expected["wire_disposition"], expected["commit_truth"] = nil, "CHECKSUM_REJECT", "OLD"
+			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["relation"] = "old"
+		},
 		"included-set identity substituted": func(t *testing.T, d map[string]any) {
 			fixtures := d["fixtures"].(map[string]any)
 			entry := fixtures["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
@@ -2319,48 +2369,101 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		},
 	}
 	want := map[string]string{
-		"closure binding substituted":               "closure bindings differ from frozen v8 pins",
-		"image manifest edited":                     "image manifest hash=",
-		"summary manifest edited":                   "summary manifest hash=",
-		"unauthorized row id":                       "unauthorized",
-		"case count off the census":                 "unauthorized",
-		"resolved value unknown tag":                "is not a valid bytes literal",
-		"resolved key not a token":                  "is not a machine token",
-		"orphan resolved value":                     "is referenced by no image projection",
-		"digest alias substituted":                  "digest_alias=",
-		"digest alias absent":                       "digest_alias missing",
-		"digest alias wrong type":                   "type=u64 want bytes32_hex",
-		"direct field dropped":                      "direct_fields shape",
-		"direct field alias substituted":            "alias=",
-		"one image omitted":                         "must carry exactly 4 images",
-		"relation and its aliases moved together":   "invalid for NOT_APPLICABLE",
-		"relation contradicts NEW truth":            "invalid for NEW",
-		"relation contradicts OLD truth":            "invalid for OLD",
-		"relation contradicts NOT_APPLICABLE truth": "invalid for NOT_APPLICABLE",
-		"stale owner stable tip":                    "OWNER/stable_tip must equal the published CHAIN tip",
-		"stale chain tip with a consistent owner":   "CHAIN tip must equal the last canonical-applied block",
-		"summary row substituted block_hash":        "is not the hash of block_id",
-		"summary rows reversed":                     "heights not strictly canonical",
-		"da occurrence duplicated":                  "not strictly raw-byte ascending",
-		"da occurrence dropped":                     "differ from the included-set identities",
-		"da occurrence reordered":                   "not strictly raw-byte ascending",
-		"da alias absent from the catalog":          "is absent",
-		"empty summary on a NEW connect":            "/input/disconnect_command",
-		"disconnect summary null instead of empty":  "summary must be array for NEW",
-		"non-NEW summary is not null":               "summary must be null for NOT_APPLICABLE",
-		"summary_rows effect drift":                 "effects.summary_rows",
-		"included-set identity substituted":         "differ from the included-set identities",
+		"closure binding substituted":                        "closure bindings differ from frozen v8 pins",
+		"image manifest edited":                              "image manifest hash=",
+		"summary manifest edited":                            "summary manifest hash=",
+		"unauthorized row id":                                "unauthorized",
+		"case count off the census":                          "unauthorized",
+		"resolved value unknown tag":                         "is not a valid bytes literal",
+		"resolved key not a token":                           "is not the composed full form",
+		"resolved key trailing newline":                      "is not the composed full form",
+		"stale standard used_bytes":                          "used_bytes=999999 differs from the 201",
+		"stale retained set_count":                           "set_count=0 differs from the 1",
+		"stale owner claim_count":                            "claim_count=99 differs from the 3",
+		"da occurrence dropped from a block_includes case":   "differ from the included-set identities",
+		"da occurrence added where the stated count is zero": "summary carries 1 complete DA-set occurrences, the case states 0",
+		"cross-block occurrence dropped from one row":        "differ from the included-set identities",
+		"summary borrows another case's da alias":            "is outside the case namespace",
+		"wire disposed row with an old image":                "invalid for OLD",
+		"orphan resolved value":                              "is referenced by no image projection",
+		"digest alias substituted":                           "digest_alias=",
+		"digest alias absent":                                "digest_alias missing",
+		"digest alias wrong type":                            "type=u64 want bytes32_hex",
+		"direct field dropped":                               "direct_fields shape",
+		"direct field alias substituted":                     "alias=",
+		"one image omitted":                                  "must carry exactly 4 images",
+		"relation and its aliases moved together":            "invalid for NOT_APPLICABLE",
+		"relation contradicts NEW truth":                     "invalid for NEW",
+		"relation contradicts OLD truth":                     "invalid for OLD",
+		"relation contradicts NOT_APPLICABLE truth":          "invalid for NOT_APPLICABLE",
+		"stale owner stable tip":                             "OWNER/stable_tip must equal the published CHAIN tip",
+		"stale chain tip with a consistent owner":            "CHAIN tip must equal the last canonical-applied block",
+		"summary row substituted block_hash":                 "is not the hash of block_id",
+		"summary rows reversed":                              "heights not strictly canonical",
+		"da occurrence duplicated":                           "not strictly raw-byte ascending",
+		"da occurrence dropped":                              "differ from the included-set identities",
+		"da occurrence reordered":                            "not strictly raw-byte ascending",
+		"da alias absent from the catalog":                   "is absent",
+		"empty summary on a NEW connect":                     "/input/disconnect_command",
+		"disconnect summary null instead of empty":           "summary must be array for NEW",
+		"non-NEW summary is not null":                        "summary must be null for NOT_APPLICABLE",
+		"summary_rows effect drift":                          "effects.summary_rows",
+		"included-set identity substituted":                  "differ from the included-set identities",
 	}
 	for _, name := range slices.Sorted(maps.Keys(mutate)) {
 		t.Run(name, func(t *testing.T) {
+			reason, named := want[name]
+			if !named {
+				t.Fatalf("mutation %q has no expected reason: a table entry without one asserts nothing", name)
+			}
 			doc := cp2AuthorityControl(t)
 			mutate[name](t, doc)
 			err := cp2ValidateAuthorityDoc(t, doc)
 			if err == nil {
 				t.Fatalf("mutation %q was accepted", name)
 			}
-			if !strings.Contains(err.Error(), want[name]) {
-				t.Errorf("mutation %q: error = %v, want it to contain %q", name, err, want[name])
+			if !strings.Contains(err.Error(), reason) {
+				t.Errorf("mutation %q: error = %v, want it to contain %q", name, err, reason)
+			}
+		})
+	}
+}
+
+// cp2ResolvedValueOf returns the resolved_values entry one image field names.
+func cp2ResolvedValueOf(t *testing.T, d, c map[string]any, image, field string) map[string]any {
+	t.Helper()
+	alias := cp2CaseImage(t, c, image)["direct_fields"].(map[string]any)[field].(string)
+	entry, ok := d["resolved_values"].(map[string]any)[alias].(map[string]any)
+	if !ok {
+		t.Fatalf("resolved alias %q is absent", alias)
+	}
+	return entry
+}
+
+// TestCanonicalPipelineV2NullResultRowsStayExpressible is the positive control
+// for the null-result relation arms: DD-001 (a wire-disposed frame touched no
+// image, so every image stays `unchanged` under commit truth OLD) and DD-002 (a
+// recovery either leaves every image or proves one new identity under
+// NOT_APPLICABLE). Both are rows RUB-1209..1212 must migrate, both are
+// schema-valid, and without the result-nullity guard the generator rejects them.
+func TestCanonicalPipelineV2NullResultRowsStayExpressible(t *testing.T) {
+	for _, tc := range []struct{ label, row, key, value, truth string }{
+		{"wire disposed", "C01-SIDE-001", "wire_disposition", "CHECKSUM_REJECT", "OLD"},
+		{"recovery", "C01-DIRECT-001", "recovery_outcome", "identity_proven_route1", "NOT_APPLICABLE"},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			doc := cp2AuthorityControl(t)
+			expected := cp2AuthorityCase(t, doc, tc.row, "MAIN")["expected"].(map[string]any)
+			expected["result"], expected["pipeline_reached"] = nil, false
+			expected[tc.key], expected["commit_truth"] = tc.value, tc.truth
+			expected["canonical_applied_blocks"] = nil
+			expected["canonical_counters"] = map[string]any{"accepted_delta": "0", "rejected_delta": "0"}
+			expected["rpc_projection"] = map[string]any{
+				"class": "NOT_REACHED", "http": nil, "commit_state": nil, "mined": "not_applicable",
+				"success_identity": "not_applicable", "error_class": nil, "phase": "not_reached",
+			}
+			if err := cp2ValidateAuthorityDoc(t, doc); err != nil {
+				t.Fatalf("%s row must stay expressible: %v", tc.label, err)
 			}
 		})
 	}
