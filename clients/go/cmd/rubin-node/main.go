@@ -564,15 +564,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// large chains. If the sync engine constructor itself fails later, the
 	// chainstate saved above is durable on disk.
 	//
-	// All three steps are skipped under --dry-run, which reports the datadir
-	// and must not change it: Save rewrites the snapshot (temp file + rename,
-	// so a fresh inode) on every single invocation, the reconcile can reset
-	// the in-memory chainstate the banners report, and VerifyGenesisAnchor is
-	// skipped for the reason in the inner comment below. The banners
-	// therefore describe the chainstate as loaded from disk — a snapshot that
-	// disagrees with the blockstore is reported, not fixed, and a datadir the
-	// mutating path would refuse is shown intact. Ordinary startup is
-	// unaffected: same three calls, same order, same errors, same exit codes.
+	// NONE of the three steps runs under --dry-run, which reports the datadir
+	// and must not change it: Save WOULD rewrite the snapshot (temp file +
+	// rename, so a fresh inode) on every single invocation, the reconcile
+	// WOULD reset the in-memory chainstate the banners report, and
+	// VerifyGenesisAnchor is skipped for the reason in the inner comment below.
+	// The banners therefore describe the RAW snapshot as loaded from disk — a
+	// snapshot that disagrees with the blockstore is reported, not fixed, and a
+	// datadir the mutating path would refuse is shown intact. Ordinary startup
+	// is unaffected: same three calls, same order, same errors, same exit codes.
 	if !*dryRun {
 		// RUB-1134 genesis anchor: a non-empty canonical index whose row 0 is
 		// not the configured genesis hash is a foreign datadir. Checked BEFORE

@@ -49,7 +49,8 @@ func cloneChainState(src *ChainState) *ChainState {
 // silently destroy the operator's whole chain, so this is fatal. Raised AFTER the
 // scan's structural/IO/corruption errors (they keep precedence) and BEFORE
 // any chainstate reset/replay/save and any service start.
-// Cross-client literal — Rust mirror CANONICAL_INDEX_ZERO_COMPLETE_PREFIX_ERR.
+// Cross-client literal — Rust mirror CANONICAL_INDEX_ZERO_COMPLETE_PREFIX_ERR;
+// the caller appends the operator remedy, so it stays the exact message PREFIX.
 var errCanonicalIndexZeroCompletePrefix = errors.New("persisted canonical index has zero complete prefix")
 
 // errCanonicalIndexIncompleteSuffix: the canonical index declares committed
@@ -86,8 +87,9 @@ var errCanonicalArtifactUnbound = errors.New("canonical artifact is not bound to
 // incomplete row and still truncates (Go-primary, sibling RUB-897).
 //
 // Cost, accepted for strictness: every boot READS AND FULLY PARSES every
-// canonical block (up to consensus.MAX_BLOCK_BYTES each) and SHA3s every
-// canonical header, twice per block on a replay boot.
+// canonical block (up to consensus.MAX_BLOCK_BYTES each), READS and JSON-decodes
+// every canonical undo record (up to undoFileMaxBytes = 2 GB each) and SHA3s
+// every canonical header, twice per block on a replay boot.
 func requireCompleteCanonicalPrefix(store *BlockStore) error {
 	if store == nil {
 		return errors.New("nil blockstore")
@@ -104,9 +106,9 @@ func requireCompleteCanonicalPrefix(store *BlockStore) error {
 		return nil
 	}
 	if validCount == 0 {
-		return errCanonicalIndexZeroCompletePrefix
+		return fmt.Errorf("%w: datadir reset and full resync required", errCanonicalIndexZeroCompletePrefix)
 	}
-	return fmt.Errorf("%w: index declares %d entries; the complete header/block/undo prefix ends after %d",
+	return fmt.Errorf("%w: index declares %d entries; the complete header/block/undo prefix ends after %d; datadir reset and full resync required",
 		errCanonicalIndexIncompleteSuffix, len(canonical), validCount)
 }
 

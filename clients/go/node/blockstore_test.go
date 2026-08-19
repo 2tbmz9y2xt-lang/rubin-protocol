@@ -2649,32 +2649,38 @@ func TestInspectBlockPresenceConcurrentWithPublication(t *testing.T) {
 
 // TestInspectBlockPresenceStraddledByStoreNeverShowsImpossibleState: artifact
 // writers hold no store lock, so the probe lands a real StoreBlock -> PutUndo
-// between the first and second leaf read instead of leaving that interleaving
-// to the scheduler. Reverse leaf order keeps the observed tuple prefix-closed;
-// forward order reports {Block:absent Header:valid Undo:valid} here, and the
-// same tuple in a genuinely concurrent -race run pinned to GOMAXPROCS=1.
+// between two leaf reads instead of leaving that interleaving to the scheduler.
+// BOTH interior boundaries are pinned, and only undo -> header -> block clears
+// both: undo -> block -> header survives the first and reports the impossible
+// {Block:absent Header:valid Undo:absent} at the second; forward order already
+// fails the first with {Block:absent Header:valid Undo:valid}, the same tuple a
+// genuinely concurrent -race run pinned at GOMAXPROCS=1.
 func TestInspectBlockPresenceStraddledByStoreNeverShowsImpossibleState(t *testing.T) {
-	store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
-	header := testHeaderBytes(0x89, 890)
-	hash := mustHeaderHash(t, header)
-	reads, previousProbe := 0, presenceLeafProbe
-	t.Cleanup(func() { presenceLeafProbe = previousProbe })
-	presenceLeafProbe = func() {
-		if reads++; reads != 2 {
-			return
-		}
-		if err := store.StoreBlock(hash, header, []byte("presence-order")); err != nil {
-			t.Fatalf("StoreBlock: %v", err)
-		}
-		if err := store.PutUndo(hash, undoTestUndo()); err != nil {
-			t.Fatalf("PutUndo: %v", err)
-		}
-	}
+	for _, at := range []int{2, 3} {
+		t.Run(fmt.Sprintf("before_leaf_%d", at), func(t *testing.T) {
+			store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
+			header := testHeaderBytes(0x89, 890)
+			hash := mustHeaderHash(t, header)
+			reads, previousProbe := 0, presenceLeafProbe
+			t.Cleanup(func() { presenceLeafProbe = previousProbe })
+			presenceLeafProbe = func() {
+				if reads++; reads != at {
+					return
+				}
+				if err := store.StoreBlock(hash, header, []byte("presence-order")); err != nil {
+					t.Fatalf("StoreBlock: %v", err)
+				}
+				if err := store.PutUndo(hash, undoTestUndo()); err != nil {
+					t.Fatalf("PutUndo: %v", err)
+				}
+			}
 
-	leaves := store.InspectBlockPresence(hash).Leaves
-	if (leaves.Header != BlockArtifactAbsent && leaves.Block == BlockArtifactAbsent) ||
-		(leaves.Undo != BlockArtifactAbsent && (leaves.Header == BlockArtifactAbsent || leaves.Block == BlockArtifactAbsent)) {
-		t.Fatalf("leaves %+v existed at no instant", leaves)
+			leaves := store.InspectBlockPresence(hash).Leaves
+			if (leaves.Header != BlockArtifactAbsent && leaves.Block == BlockArtifactAbsent) ||
+				(leaves.Undo != BlockArtifactAbsent && (leaves.Header == BlockArtifactAbsent || leaves.Block == BlockArtifactAbsent)) {
+				t.Fatalf("leaves %+v existed at no instant", leaves)
+			}
+		})
 	}
 }
 
@@ -2833,14 +2839,17 @@ func TestBlockStoreIndexRawTracksVisibleBytes(t *testing.T) {
 		return store
 	}
 	for _, step := range []struct {
-		name string
-		call func(*BlockStore) error
+		name    string
+		call    func(*BlockStore) error
+		wantTip bool
 	}{
-		{"set_canonical_tip", func(store *BlockStore) error { return store.SetCanonicalTip(0, hash) }},
+		{"set_canonical_tip", func(store *BlockStore) error { return store.SetCanonicalTip(0, hash) }, true},
 		{"restore_canonical_index", func(store *BlockStore) error {
 			return store.RestoreCanonicalIndex([]string{hex.EncodeToString(hash[:])})
-		}},
-		{"truncate_canonical", func(store *BlockStore) error { return store.TruncateCanonical(0) }},
+		}, true},
+		{"truncate_canonical", func(store *BlockStore) error { return store.TruncateCanonical(0) }, false},
+		{"restore_empty_index", func(store *BlockStore) error { return store.RestoreCanonicalIndex([]string{}) }, false},
+		{"restore_nil_index", func(store *BlockStore) error { return store.RestoreCanonicalIndex(nil) }, false},
 	} {
 		t.Run(step.name, func(t *testing.T) {
 			store := freshStore(t)
@@ -2849,6 +2858,15 @@ func TestBlockStoreIndexRawTracksVisibleBytes(t *testing.T) {
 			}
 			if !bytes.Equal(store.visibleIndexBytes(), mustReadIndexFile(t, store)) {
 				t.Fatalf("%s left the visible identity out of step with the disk", step.name)
+			}
+			// A persisted index must be a REOPENABLE index: both empty-list
+			// writers fold to nil, which marshals to the null the open refuses.
+			reopened, err := OpenBlockStore(store.rootPath)
+			if err != nil {
+				t.Fatalf("%s: reopen refused the index it just wrote: %v", step.name, err)
+			}
+			if _, _, ok, err := reopened.Tip(); err != nil || ok != step.wantTip {
+				t.Fatalf("%s: reopened tip ok=%v err=%v, want ok=%v", step.name, ok, err, step.wantTip)
 			}
 		})
 	}
@@ -3129,10 +3147,12 @@ func TestInspectBlockPresenceTruthTable(t *testing.T) {
 	// lock is unobtainable while the snapshot holds its RLock — so a read
 	// hoisted out of the snapshot takes it and fails here.
 	previousProbe := presenceLeafProbe
+	// An escape is reported against the ROW; the outer t would name the table.
+	rowT := t
 	presenceLeafProbe = func() {
 		if fixture.store.stateMu.TryLock() {
 			fixture.store.stateMu.Unlock()
-			t.Error("leaf read ran outside the presence snapshot")
+			rowT.Error("leaf read ran outside the presence snapshot")
 		}
 	}
 	t.Cleanup(func() { presenceLeafProbe = previousProbe })
@@ -3140,6 +3160,8 @@ func TestInspectBlockPresenceTruthTable(t *testing.T) {
 		name := fmt.Sprintf("member_%v/block_%s/header_%s/undo_%s", row.member, row.block, row.header, row.undo)
 		seen[name] = true
 		t.Run(name, func(t *testing.T) {
+			defer func(parent *testing.T) { rowT = parent }(rowT)
+			rowT = t
 			leaves := BlockArtifactLeaves{Block: row.block, Header: row.header, Undo: row.undo}
 			want := BlockPresence{Class: row.class, Scope: row.scope, Leaves: leaves}
 			fixture.setCanonicalMembership(row.member)

@@ -183,6 +183,9 @@ func newBlockStore(paths blockStorePaths, index blockStoreIndexDisk, indexRaw []
 	}, nil
 }
 
+// PutBlock appends a canonical tip while persisting NO undo record, so a store
+// written only through it is refused by the strict startup scan. Test/legacy
+// convenience, no production caller; CommitCanonicalBlock is the commit path.
 func (bs *BlockStore) PutBlock(height uint64, blockHash [32]byte, headerBytes []byte, blockBytes []byte) error {
 	if err := bs.StoreBlock(blockHash, headerBytes, blockBytes); err != nil {
 		return err
@@ -249,10 +252,15 @@ func (bs *BlockStore) RewindToHeight(height uint64) error {
 	if bs == nil {
 		return errors.New("nil blockstore")
 	}
-	if len(bs.index.Canonical) == 0 {
+	// Read under the lock like every reader; only a precheck — TruncateCanonical
+	// re-checks the range under the write lock it mutates in.
+	bs.stateMu.RLock()
+	length := uint64(len(bs.index.Canonical))
+	bs.stateMu.RUnlock()
+	if length == 0 {
 		return nil
 	}
-	if height >= uint64(len(bs.index.Canonical)) {
+	if height >= length {
 		return fmt.Errorf("rewind height out of range: %d", height)
 	}
 	return bs.TruncateCanonical(height + 1)
@@ -750,6 +758,13 @@ func validCanonicalHashHex(value string) bool {
 // ONE encoder behind the legacy save path and the prepared canonical commit, so
 // a prepared image and a saved one can never disagree byte for byte.
 func encodeBlockStoreIndex(index blockStoreIndexDisk) ([]byte, error) {
+	// The empty on-disk identity is [], never the JSON null a nil slice marshals
+	// to and the strict open refuses: the store must not persist an index it
+	// would refuse to reopen. prepareCanonicalIndex validates BEFORE this
+	// encode, so its nil-list refusal is unaffected.
+	if index.Canonical == nil {
+		index.Canonical = []string{}
+	}
 	payload, err := json.MarshalIndent(index, "", "  ")
 	if err != nil {
 		return nil, err
@@ -775,13 +790,19 @@ func writeCanonicalIndexFile(path string, index blockStoreIndexDisk) ([]byte, er
 
 // saveCanonicalIndexLocked is the write step of the legacy mutate-then-save
 // path: the caller already mutated bs.index under stateMu.Lock, so this records
-// the bytes the disk actually holds as the new visible identity.
+// the bytes the disk actually holds as the new visible identity. Its three
+// callers (SetCanonicalTip, TruncateCanonical, RestoreCanonicalIndex) hold
+// stateMu across their whole body while a prepared commit writes OUTSIDE it, so
+// the two paths interleave safely only under the canonical writer fence RUB-1202
+// installs; until then the prepared primitive is dormant.
 //
 // After a PRE-commit failure the old bytes are still visible and indexRaw keeps
 // naming them, while bs.index and the height map — already mutated by the
-// caller — LEAD the disk: the visible canonical identity is indexRaw, never
-// bs.index. A POST-commit failure did rename, so the visible identity IS the new
-// bytes even though the call returns an error, and indexRaw moves with it. An
+// caller — LEAD the disk: for a prepared commit the visible canonical identity
+// is indexRaw, never bs.index, while the public readers (Tip, CanonicalHash,
+// CanonicalIndexSnapshot) serve bs.index and so report state the disk refused.
+// A POST-commit failure did rename, so the visible identity IS the new bytes
+// even though the call returns an error, and indexRaw moves with it. An
 // UNTAGGED error keeps the OLD identity, asymmetric to commit's "untagged takes
 // the readback" and unreachable: this lane returns only stage-tagged errors.
 func (bs *BlockStore) saveCanonicalIndexLocked() error {
@@ -1232,11 +1253,12 @@ func (p BlockPresence) String() string {
 // really held. RUB-908's reclaim makes artifacts present->absent and must
 // re-derive that argument.
 //
-// The cost is real and accepted: the block leaf READS, fully PARSES and hashes
-// up to consensus.MAX_BLOCK_BYTES under the read lock, so a publication waits
-// behind an inspection and a pending writer blocks every arriving reader. It
-// takes no second lock, repairs nothing, and never treats a present header as
-// presence on its own.
+// The cost is real and accepted, and all of it runs under the read lock: the
+// block leaf READS, fully PARSES and hashes up to consensus.MAX_BLOCK_BYTES and
+// the undo leaf READS and JSON-decodes up to undoFileMaxBytes (2 GB), so a
+// publication waits behind an inspection and a pending writer blocks every
+// arriving reader. It takes no second lock, repairs nothing, and never treats a
+// present header as presence on its own.
 func (bs *BlockStore) InspectBlockPresence(blockHash [32]byte) BlockPresence {
 	if bs == nil {
 		return BlockPresence{

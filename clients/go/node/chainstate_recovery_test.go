@@ -394,7 +394,7 @@ func TestChainStateRecoveryIncompleteCanonicalSuffixIsFatal(t *testing.T) {
 	if !errors.Is(err, errCanonicalIndexIncompleteSuffix) {
 		t.Fatalf("reconcile err = %v, want errCanonicalIndexIncompleteSuffix", err)
 	}
-	if want := "index declares 2 entries; the complete header/block/undo prefix ends after 1"; !strings.Contains(err.Error(), want) {
+	if want := "index declares 2 entries; the complete header/block/undo prefix ends after 1; datadir reset and full resync required"; !strings.Contains(err.Error(), want) {
 		t.Fatalf("message = %q, want it to contain %q", err.Error(), want)
 	}
 	tipHeight, tipHash, ok, tipErr := store.Tip()
@@ -614,8 +614,8 @@ func storeAtGenesis(t *testing.T, dir string) (*BlockStore, *ChainState, SyncCon
 
 // B2 rules 5-6 + parity matrix row 12: a canonical index that claims blocks but
 // has NO complete artifact set at height 0 is fatal. The guard fires before any
-// index write and before any chainstate reset/save, with the exact cross-client
-// message. Rust mirror:
+// index write and before any chainstate reset/save, carrying the exact
+// cross-client literal as its message prefix. Rust mirror:
 // `zero_complete_canonical_prefix_is_fatal_before_any_mutation`.
 func TestReconcileZeroCompleteCanonicalPrefixIsFatal(t *testing.T) {
 	dir := t.TempDir()
@@ -628,7 +628,7 @@ func TestReconcileZeroCompleteCanonicalPrefixIsFatal(t *testing.T) {
 	if !errors.Is(err, errCanonicalIndexZeroCompletePrefix) {
 		t.Fatalf("reconcile err = %v, want errCanonicalIndexZeroCompletePrefix", err)
 	}
-	if got, want := err.Error(), "persisted canonical index has zero complete prefix"; got != want {
+	if got, want := err.Error(), "persisted canonical index has zero complete prefix: datadir reset and full resync required"; got != want {
 		t.Fatalf("message = %q, want %q", got, want)
 	}
 	if got, snapErr := store.CanonicalIndexSnapshot(); snapErr != nil || len(got) != 1 {
@@ -988,7 +988,7 @@ func TestChainStateRecoveryCompletePrefixEndsAtTheFirstIncompleteRow(t *testing.
 					t.Fatalf("Remove(row %d header): %v", row, err)
 				}
 			}
-			_, err := ReconcileChainStateWithBlockStore(cloneChainState(liveState), store, cfg)
+			err := assertReconcileFailsClosed(t, store, cloneChainState(liveState), cfg)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("reconcile err = %v, want %v", err, tc.wantErr)
 			}
