@@ -743,16 +743,6 @@ func writeCanonicalIndexFile(path string, index blockStoreIndexDisk) ([]byte, er
 	return raw, nil
 }
 
-// saveBlockStoreIndex is a TEST-ONLY shim, retained for the envelope
-// round-trip probe in store_envelope_test.go. It writes the index but updates
-// no store's visible identity, so no BlockStore method may call it: a store
-// whose indexRaw stopped naming the bytes on disk would make a strict readback
-// classify against an image the disk does not hold.
-func saveBlockStoreIndex(path string, index blockStoreIndexDisk) error {
-	_, err := writeCanonicalIndexFile(path, index)
-	return err
-}
-
 // saveCanonicalIndexLocked is the write step of the legacy mutate-then-save
 // path: the caller already mutated bs.index under stateMu.Lock, so this records
 // the bytes the disk actually holds as the new visible identity.
