@@ -11,38 +11,210 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Patch allowlisted RUB-1208 drift tests
+      - name: Patch allowlisted RUB-1208 generator tests and docs
         shell: bash
         run: |
           set -euo pipefail
+          TARGET=50498c844e6074427572fa75c797b07aa2723035
           git fetch origin rub-1208-c01-r2-semantic-image
-          test "$(git rev-parse origin/rub-1208-c01-r2-semantic-image)" = "c27a17e1638dcd0b78bca90b014faf74677bb427"
+          test "$(git rev-parse origin/rub-1208-c01-r2-semantic-image)" = "$TARGET"
           git switch -C rub-1208-c01-r2-semantic-image origin/rub-1208-c01-r2-semantic-image
           python3 - <<'PY'
           from pathlib import Path
-          p=Path('tools/tests/test_check_conformance_fixtures_drift.py')
-          s=p.read_text()
-          old='''        self.assertEqual(data["rows"], [])\n        self.assertEqual(data["_meta"]["closure_epoch"]["status"], "building")\n'''
-          new='''        self.assertEqual(len(data["rows"]), 8)\n        self.assertEqual(sum(len(row["cases"]) for row in data["rows"]), 24)\n        self.assertTrue(data["fixtures"])\n        self.assertTrue(data["resolved_values"])\n        self.assertEqual(data["_meta"]["closure_epoch"]["status"], "building")\n'''
-          if old not in s: raise SystemExit('missing dormant-row assertion')
-          s=s.replace(old,new,1)
-          old='''            "schema duplicate key": (raw.replace('"type": "object",', '"type": "object", "type": "object",', 1).encode(), 'duplicate JSON key "type"'),\n'''
-          new='''            "schema duplicate key": (re.sub(r'"type"\\s*:\\s*"object"\\s*,', '"type":"object","type":"object",', raw, count=1).encode(), 'duplicate JSON key "type"'),\n'''
-          if old not in s: raise SystemExit('missing schema duplicate mutator')
-          s=s.replace(old,new,1)
-          old='''            "artifact NaN constant": (artifact_raw.replace('"schema_version": 2', '"schema_version": NaN', 1).encode(), "invalid JSON constant 'NaN'"),\n'''
-          new='''            "artifact NaN constant": (re.sub(r'"schema_version"\\s*:\\s*2', '"schema_version":NaN', artifact_raw, count=1).encode(), "invalid JSON constant 'NaN'"),\n'''
-          if old not in s: raise SystemExit('missing NaN mutator')
-          s=s.replace(old,new,1)
-          s=s.replace('"""RUB-1207 / C01-R2: the dormant pair strict-loads, validates, and fails closed."""','"""RUB-1208 / C01-R2: the building migrated pair strict-loads, validates, and fails closed."""',1)
+
+          # Generator-side family relation: OWNER stable_tip is part of the
+          # compared publication image and must equal the CHAIN tip/height.
+          p = Path('clients/go/cmd/gen-conformance-fixtures/runtime.go')
+          s = p.read_text()
+          needle = '''\t}\n\tsummary := expected["canonical_applied_blocks"]\n'''
+          relation = '''\t}\n\tchainDirect := images["CHAIN_IMAGE_V1"].(map[string]any)["direct_fields"].(map[string]any)\n\townerDirect := images["OWNER_IMAGE_V1"].(map[string]any)["direct_fields"].(map[string]any)\n\tchainTipAlias, _ := chainDirect["tip_hash"].(string)\n\tchainHeightAlias, _ := chainDirect["height"].(string)\n\tstableTipAlias, _ := ownerDirect["stable_tip"].(string)\n\tchainTip := resolved[chainTipAlias].Value\n\tchainHeight, chainHeightOK := cp2UintOf(resolved[chainHeightAlias].Value)\n\tstableTip, stableTipOK := cp2JSONImage(resolved[stableTipAlias].Value).(map[string]any)\n\tstableHeight, stableHeightOK := cp2UintOf(stableTip["height"])\n\tstableHash, stableHashOK := stableTip["hash"].(string)\n\thasTip, hasTipOK := stableTip["has_tip"].(bool)\n\tchainHash, chainHashOK := chainTip.(string)\n\tif !stableTipOK || len(stableTip) != 3 || !hasTipOK || !hasTip || !chainHeightOK || !stableHeightOK || stableHeight != chainHeight || !stableHashOK || !chainHashOK || stableHash != chainHash {\n\t\treturn fmt.Errorf("%s/OWNER_IMAGE_V1/stable_tip must equal published CHAIN_IMAGE_V1 tip hash/height", where)\n\t}\n\tsummary := expected["canonical_applied_blocks"]\n'''
+          if 'stable_tip must equal published CHAIN_IMAGE_V1' not in s:
+              if needle not in s:
+                  raise SystemExit('runtime relation insertion point missing')
+              s = s.replace(needle, relation, 1)
+          p.write_text(s)
+
+          # Generator-side executed RUB-1208 negatives and literal pins.
+          p = Path('clients/go/cmd/gen-conformance-fixtures/runtime_test.go')
+          s = p.read_text()
+          marker = '// RUB-1208 semantic-image closure tests.'
+          if marker not in s:
+              s += r'''
+
+// RUB-1208 semantic-image closure tests. These literal expectations are
+// independent of cp2Meta/cp2Authority and deliberately fail on a one-sided pin
+// edit. The payload is authored architecture authority, never client output.
+func cp2R1208PayloadForTest(t *testing.T) cp2R1208Payload {
+	t.Helper()
+	payload, err := cp2DecodeR1208Payload(cp2R1208PayloadGzipBase64, cp2R1208PayloadSHA256)
+	if err != nil {
+		t.Fatalf("decode RUB-1208 payload: %v", err)
+	}
+	return payload
+}
+
+func TestCanonicalPipelineV2R1208LiteralPinsAndCensus(t *testing.T) {
+	want := map[string]string{
+		"closure_manifest_version": "rubin-c01-design-closure-v8",
+		"manifest_root_sha256": "e9b4bbfa09b4cf939973b229b59105f8996282b6fc2ffaa094362e76948bbc89",
+		"obligation_set_hash": "4af7520a185bfa732ece69f5a6c12f4d012917b9c6fd1d8f42b98195284f59b0",
+		"row_case_design_hash": "8b70ba6d504a7e7ed92bf7bd0b769cb9eeb48356bdf356247520916629cc1216",
+		"stage_owner_relation_hash": "4513e667a03dabca78e7369e989676ea5ab3d75d59a817493d84fe968b3a8518",
+		"mutation_assignment_hash": "94f846a9b454e019a2b1c7b833c75862151d1e66f91216e107b2478d0f0cb4a5",
+		"image_manifest_hash": "08fbabf558f3df10e89bd6160804db8efc814378140ae4514717952c7d913116",
+		"summary_manifest_hash": "39e39d94593d434e7051a3f77ca94d3dd31a5a8d65a3f12a764e29a5fde041dd",
+		"relation_snapshot_hash": "3e7db40fa6917b5a7d61ab113a74f7107f8f166080393e1c9789dbd927b24edb",
+		"input_schema_design_hash": "468b2b5401e12915b9bcdd76cb2714eda837fcd9401324ac7677770bb7069f57",
+		"expected_projection_design_hash": "b1e539c3cb7155c5821b5788c4de9aea40cf706fb9faf4c44af7e4ae21586d8c",
+	}
+	got := map[string]string{
+		"closure_manifest_version": cp2ClosureManifestVersion,
+		"manifest_root_sha256": cp2ManifestRootSHA256,
+		"obligation_set_hash": cp2ObligationSetHash,
+		"row_case_design_hash": cp2RowCaseDesignHash,
+		"stage_owner_relation_hash": cp2StageOwnerRelationHash,
+		"mutation_assignment_hash": cp2MutationAssignmentHash,
+		"image_manifest_hash": cp2ImageManifestHash,
+		"summary_manifest_hash": cp2SummaryManifestHash,
+		"relation_snapshot_hash": cp2RelationSnapshotHash,
+		"input_schema_design_hash": cp2InputSchemaDesignHash,
+		"expected_projection_design_hash": cp2ExpectedProjectionDesignHash,
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("RUB-1208 closure pins = %v, want literal v8 pins %v", got, want)
+	}
+	payload := cp2R1208PayloadForTest(t)
+	if err := cp2ValidateR1208Payload(payload); err != nil {
+		t.Fatalf("valid RUB-1208 payload rejected: %v", err)
+	}
+	if len(payload.Rows) != 8 || len(payload.Fixtures) != 227 || len(payload.ResolvedValues) != 408 {
+		t.Fatalf("RUB-1208 census rows/fixtures/resolved = %d/%d/%d, want 8/227/408", len(payload.Rows), len(payload.Fixtures), len(payload.ResolvedValues))
+	}
+	cases := 0
+	for _, raw := range payload.Rows {
+		var row cp2Row
+		if err := json.Unmarshal(raw, &row); err != nil {
+			t.Fatalf("decode row: %v", err)
+		}
+		cases += len(row.Cases)
+	}
+	if cases != 24 {
+		t.Fatalf("RUB-1208 cases=%d want 24", cases)
+	}
+}
+
+func TestCanonicalPipelineV2R1208ResolvedAliasesFailClosed(t *testing.T) {
+	const digestAlias = "CHAIN_IMAGE_V1@C01-DIRECT-001/MAIN:new"
+	for name, mutate := range map[string]func(*cp2R1208Payload){
+		"missing digest alias": func(p *cp2R1208Payload) { delete(p.ResolvedValues, digestAlias) },
+		"wrong digest type": func(p *cp2R1208Payload) {
+			p.ResolvedValues[digestAlias] = cp2Fixture{Type: "u64", Value: json.Number("1")}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload := cp2R1208PayloadForTest(t)
+			mutate(&payload)
+			if err := cp2ValidateR1208Payload(payload); err == nil {
+				t.Fatal("mutated resolved alias was accepted")
+			}
+		})
+	}
+}
+
+func cp2MutateR1208CaseForTest(t *testing.T, payload *cp2R1208Payload, rowID, caseID string, mutate func(map[string]any)) {
+	t.Helper()
+	for i, raw := range payload.Rows {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		var row map[string]any
+		if err := dec.Decode(&row); err != nil {
+			t.Fatalf("decode row: %v", err)
+		}
+		if row["row_id"] != rowID {
+			continue
+		}
+		for _, rawCase := range row["cases"].([]any) {
+			c := rawCase.(map[string]any)
+			if c["case_id"] == caseID {
+				mutate(c)
+				encoded, err := json.Marshal(row)
+				if err != nil {
+					t.Fatalf("encode mutated row: %v", err)
+				}
+				payload.Rows[i] = encoded
+				return
+			}
+		}
+	}
+	t.Fatalf("missing RUB-1208 case %s/%s", rowID, caseID)
+}
+
+func TestCanonicalPipelineV2R1208FamilyRelationsFailClosed(t *testing.T) {
+	t.Run("stale owner stable tip", func(t *testing.T) {
+		payload := cp2R1208PayloadForTest(t)
+		alias := "stable_tip@C01-DIRECT-001/MAIN:new"
+		value := payload.ResolvedValues[alias]
+		stable := cp2JSONImage(value.Value).(map[string]any)
+		stable["hash"] = strings.Repeat("00", 32)
+		value.Value = stable
+		payload.ResolvedValues[alias] = value
+		if err := cp2ValidateR1208Payload(payload); err == nil || !strings.Contains(err.Error(), "stable_tip must equal published CHAIN_IMAGE_V1") {
+			t.Fatalf("stale stable_tip error=%v, want exact family-relation rejection", err)
+		}
+	})
+	t.Run("reversed same-count summary", func(t *testing.T) {
+		payload := cp2R1208PayloadForTest(t)
+		cp2MutateR1208CaseForTest(t, &payload, "C01-SUMMARY-001", "MULTI_BLOCK_ORDER", func(c map[string]any) {
+			summary := c["expected"].(map[string]any)["canonical_applied_blocks"].([]any)
+			for i, j := 0, len(summary)-1; i < j; i, j = i+1, j-1 {
+				summary[i], summary[j] = summary[j], summary[i]
+			}
+		})
+		if err := cp2ValidateR1208Payload(payload); err == nil || !strings.Contains(err.Error(), "summary heights not strictly canonical") {
+			t.Fatalf("reversed summary error=%v, want canonical-order rejection", err)
+		}
+	})
+}
+'''
+          p.write_text(s)
+
+          # Changelog receipt is required whenever protocol/canonical_pipeline_v2.json changes.
+          p = Path('conformance/fixtures/CHANGELOG.md')
+          s = p.read_text()
+          title = '## 2026-08-19 — C01-R2 semantic image and exact summary authority (RUB-1208)'
+          if title not in s:
+              entry = '''## 2026-08-19 — C01-R2 semantic image and exact summary authority (RUB-1208)\n\n`protocol/canonical_pipeline_v2.json` remains **BUILDING** and is rebound to corrected RUB-1206 closure epoch `rubin-c01-design-closure-v8`. RUB-1208 migrates exactly 8 registered rows / 24 cases, including the 12-case DA-cleanup classifier, the four frozen semantic image manifests, typed `resolved_values`, and exact ordered `canonical_applied_blocks`; the v1 schema/artifact pair remains byte-frozen and no consumer is released. Generator-side checks are `cp2ValidateR1208Payload` / `cp2ValidateR1208Expected`; `TestCanonicalPipelineV2R1208LiteralPinsAndCensus`, `TestCanonicalPipelineV2R1208ResolvedAliasesFailClosed`, and `TestCanonicalPipelineV2R1208FamilyRelationsFailClosed` execute literal-pin, alias and family-relation negatives. `tools/check_conformance_fixtures_drift.py` independently validates the committed/generated 8/24 census, OWNER stable-tip relation, summary/DA ordering, obligation forward/reverse receipts and hostile mutations before byte comparison.\n\nRegeneration remains manual through `scripts/dev-env.sh -- bash -lc 'cd clients/go && go run ./cmd/gen-conformance-fixtures'`; drift verification is `scripts/dev-env.sh -- python3 tools/check_conformance_fixtures_drift.py`. Non-goals: no production client, adapter, comparator, specification, Lean, CI or v1 parent change; `closure_epoch.status` stays `building` and this PR is NEVER_MERGE.\n\n---\n\n'''
+              marker = '---\n\n'
+              if marker not in s:
+                  raise SystemExit('CHANGELOG insertion marker missing')
+              s = s.replace(marker, marker + entry, 1)
           p.write_text(s)
           PY
+
+          gofmt -w clients/go/cmd/gen-conformance-fixtures/runtime.go clients/go/cmd/gen-conformance-fixtures/runtime_test.go
           python3 -m unittest tools.tests.test_check_conformance_fixtures_drift
           git diff --check
-          git diff --name-only | grep -qx 'tools/tests/test_check_conformance_fixtures_drift.py'
+          python3 - <<'PY'
+          import subprocess
+          allowed = {
+              'clients/go/cmd/gen-conformance-fixtures/runtime.go',
+              'clients/go/cmd/gen-conformance-fixtures/runtime_test.go',
+              'conformance/schemas/cv-canonical-pipeline-v2.json',
+              'conformance/fixtures/protocol/canonical_pipeline_v2.json',
+              'conformance/fixtures/CHANGELOG.md',
+              'conformance/README.md',
+              'tools/check_conformance_fixtures_drift.py',
+              'tools/tests/test_check_conformance_fixtures_drift.py',
+          }
+          changed = set(subprocess.check_output(['git','diff','--name-only','f972c0262c9762ce92e4c51263cd35b43d47df34...HEAD']).decode().split())
+          changed |= set(subprocess.check_output(['git','diff','--name-only']).decode().split())
+          extra = changed - allowed
+          if extra:
+              raise SystemExit(f'outside RUB-1208 allowlist: {sorted(extra)}')
+          PY
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add tools/tests/test_check_conformance_fixtures_drift.py
-          git commit -m 'RUB-1208: align strict loader tests with migrated v2 corpus'
+          git add clients/go/cmd/gen-conformance-fixtures/runtime.go clients/go/cmd/gen-conformance-fixtures/runtime_test.go conformance/fixtures/CHANGELOG.md
+          test -n "$(git diff --cached --name-only)"
+          git commit -m 'RUB-1208: enforce image relations and record receipts'
           git push origin HEAD:rub-1208-c01-r2-semantic-image
-# transport trigger via contents API
