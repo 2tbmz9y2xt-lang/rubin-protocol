@@ -1977,7 +1977,7 @@ func TestCanonicalPipelineV2IntegerAndScheduleAliases(t *testing.T) {
 	}
 }
 
-// TestCanonicalPipelineV2CorpusIsByteDeterministic proves the dormant revision
+// TestCanonicalPipelineV2CorpusIsByteDeterministic proves the BUILDING revision
 // is reproducible and carries neither retired v1 field.
 func TestCanonicalPipelineV2CorpusIsByteDeterministic(t *testing.T) {
 	first := filepath.Join(t.TempDir(), "canonical_pipeline_v2.json")

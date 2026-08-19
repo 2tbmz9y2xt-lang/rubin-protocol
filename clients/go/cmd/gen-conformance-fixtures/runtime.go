@@ -344,8 +344,9 @@ func runGeneratorCLIWithArgs(args []string) {
 	// architecture authority, never measured from a node production path.
 	mustWriteCanonicalPipelineCorpus(remapWritePath(filepath.Join(repoRoot, "conformance", "fixtures", "protocol", "canonical_pipeline_v1.json")))
 
-	// RUB-1207 / C01-R2: the dormant BUILDING successor pair. Same provenance
-	// rule as v1; it carries identity and shape only, never a migrated row.
+	// RUB-1207 / RUB-1208 / C01-R2: the BUILDING successor pair. Same provenance
+	// rule as v1 — every expected value is authored authority, read from the
+	// embedded authority source, never measured from a node production path.
 	mustWriteCanonicalPipelineV2Corpus(remapWritePath(filepath.Join(repoRoot, "conformance", "fixtures", "protocol", "canonical_pipeline_v2.json")))
 
 	fmt.Println("ok: updated fixtures with real ML-DSA signatures")
