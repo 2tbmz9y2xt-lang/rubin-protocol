@@ -685,7 +685,9 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             # DA sets the block carries, so an added or dropped occurrence
             # reddens even where no identity is stated.
             stated_count = _input_value(inputs, "/input/block_complete_da_set_count")
-            if stated_count is not _ABSENT and stated_count != occurrences:
+            if stated_count is not _ABSENT and (
+                type(stated_count) is not int or stated_count != occurrences
+            ):
                 raise RuntimeError(
                     f"{where}/canonical_applied_blocks: {occurrences} complete DA-set "
                     f"occurrences, the case states {stated_count!r}"
