@@ -2164,13 +2164,13 @@ func TestPreparedCanonicalIndexRejectsInvalidNextList(t *testing.T) {
 	}
 }
 
-// TestPreparedCanonicalIndexPrecommitFailureKeepsExactOldState: only a failure
+// TestPreparedCanonicalIndexPrecommitAndStaleImageKeepExactOldState: only a failure
 // the write lane PROVED did not cross the namespace commit is the frozen
 // LOCAL_PERSISTENCE_ERROR(precommit) identity, and it leaves the exact old bytes
 // and maps with no latch, counter or retry. A stale prepared image is a
 // different, LOCAL class: nothing was even attempted, so it is not one of the
 // frozen precommit triggers.
-func TestPreparedCanonicalIndexPrecommitFailureKeepsExactOldState(t *testing.T) {
+func TestPreparedCanonicalIndexPrecommitAndStaleImageKeepExactOldState(t *testing.T) {
 	store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
 	row0, row1 := canonicalIndexRow(0x30), canonicalIndexRow(0x31)
 	mustCommitCanonicalIndex(t, store, []string{row0})
@@ -2222,6 +2222,12 @@ func TestPreparedCanonicalIndexRefusesSecondCommit(t *testing.T) {
 	writes := 0
 	withWriteFileAtomicFn(t, func(path string, _ []byte, _ os.FileMode) error {
 		writes++
+		// TryLock, never the RLock reader: a held lock must fail this row, not hang it.
+		if store.stateMu.TryLock() {
+			store.stateMu.Unlock()
+		} else {
+			t.Error("a publication lock was held while the commit write ran")
+		}
 		return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
 	})
 	if got := prepared.commit(store); got.class != canonicalCommitTerminalOld {
@@ -2263,6 +2269,12 @@ func TestPreparedCanonicalIndexPostCommitVisibleBytesClassify(t *testing.T) {
 			t.Fatalf("remove index: %v", err)
 		}
 	}
+	// The PLANNED NEW rows re-spelled: it decodes alike, so only bytes refuse it.
+	respelled, err := marshalStoreEnvelope(storeEnvelopeBlockIndex, []byte(`{"canonical":["`+row0+`","`+row1+`"],"version":1}`))
+	if err != nil {
+		t.Fatalf("marshalStoreEnvelope: %v", err)
+	}
+	plantRespelledNew := func(t *testing.T, store *BlockStore, _ *preparedCanonicalIndex) { mustPlantIndex(t, store, respelled) }
 
 	for _, tc := range []struct {
 		name string
@@ -2278,6 +2290,7 @@ func TestPreparedCanonicalIndexPostCommitVisibleBytesClassify(t *testing.T) {
 	}{
 		{name: "visible_old", wantClass: canonicalCommitTerminalOld},
 		{name: "visible_new", visible: plantNew, wantClass: canonicalCommitTerminalNew, published: true},
+		{name: "respelled_new_identity", visible: plantRespelledNew, wantClass: canonicalCommitTerminalUnknown},
 		{
 			name: "visible_third_identity",
 			visible: func(t *testing.T, store *BlockStore, _ *preparedCanonicalIndex) {
@@ -2445,19 +2458,23 @@ func TestPreparedCanonicalIndexTerminalUnknownLeavesIdentityStale(t *testing.T) 
 // heights into one height-by-hash entry, so the store would run with a map that
 // does not describe its own list. The cross-client decoder is untouched (Rust
 // still accepts it — startup divergence window, RUB-897); this is the Go-side
-// guard, covering Create/Open/reload alike and the one legacy writer that
-// builds its own map.
+// guard over Open (which reloadFromDisk routes through) and RestoreCanonicalIndex,
+// the one legacy writer that builds its own map. Create writes the empty list.
 func TestBlockStoreOpenRejectsDuplicateCanonicalRow(t *testing.T) {
 	root := BlockStorePath(t.TempDir())
 	store := mustCreateBlockStore(t, root)
 	row := canonicalIndexRow(0xf0)
+	// The shared decoder stays untightened (Rust mirror, RUB-897): it accepts what the store refuses.
+	if _, err := decodeBlockStoreIndex([]byte(`{"canonical":["` + row + `","` + row + `"],"version":1}`)); err != nil {
+		t.Fatalf("decodeBlockStoreIndex must keep accepting a duplicate row: %v", err)
+	}
 	mustPlantIndex(t, store, mustEncodeCanonicalIndex(t, []string{row, row}))
 	if _, err := OpenBlockStore(root); !errors.Is(err, errCanonicalIndexDuplicateRow) || !strings.Contains(err.Error(), store.indexPath) {
 		t.Fatalf("OpenBlockStore err = %v, want the duplicate-row refusal naming %s", err, store.indexPath)
 	}
 
-	// The write side refuses the same list before touching the file, so the node
-	// cannot persist an index it would refuse to reopen.
+	// A writer that builds its map from a caller-supplied list refuses the same list
+	// before touching the file: it cannot persist what it would refuse to reopen.
 	planted := mustReadIndexFile(t, store)
 	if err := store.RestoreCanonicalIndex([]string{row, row}); !errors.Is(err, errCanonicalIndexDuplicateRow) {
 		t.Fatalf("RestoreCanonicalIndex err = %v, want the duplicate-row refusal", err)

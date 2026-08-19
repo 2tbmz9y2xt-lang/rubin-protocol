@@ -453,8 +453,10 @@ func chainWorkHeaderCorruption(blockHash [32]byte, reason string, err error) err
 // canonical at a single height in any prev-linked chain, RestoreCanonicalIndex
 // replays a CanonicalIndexSnapshot of this same store, and SetCanonicalTip
 // appends the header its caller just connected. That is a caller invariant, not
-// a structural one, and the writer-side check is one length comparison — so the
-// node cannot persist an index it would refuse to reopen. The shared on-disk
+// a structural one, and the writer-side check is one length comparison — so no
+// writer that builds its map from a caller-supplied list can persist an index it
+// would refuse to reopen. SetCanonicalTip mutates the live map in place and
+// rests on the caller invariant alone. The shared on-disk
 // decoder is deliberately NOT tightened with it:
 // decodeBlockStoreIndex is cross-client mirrored (Rust load_blockstore_index)
 // and would need its sibling to move in step — Rust still accepts such an
@@ -780,7 +782,9 @@ func writeCanonicalIndexFile(path string, index blockStoreIndexDisk) ([]byte, er
 //
 // A POST-commit failure did rename, so the visible identity IS the new bytes
 // even though the call returns an error, and indexRaw has to move with it or a
-// later readback would compare against an image no longer on disk.
+// later readback would compare against an image no longer on disk. An UNTAGGED
+// error keeps the OLD identity — asymmetric to commit's "untagged takes the
+// readback", and unreachable: this lane returns only stage-tagged errors.
 func (bs *BlockStore) saveCanonicalIndexLocked() error {
 	raw, err := encodeBlockStoreIndex(bs.index)
 	if err != nil {
@@ -1118,7 +1122,9 @@ func (bs *BlockStore) visibleIndexBytes() []byte {
 }
 
 // BlockPresenceClass is the closed set of presence classifications for a block
-// hash in this store. All four CLASS strings are frozen RUB-922 C01 identities.
+// hash in this store. All four CLASS strings are the contract's closed return
+// set; ABSENT, STORED_NONCANONICAL, CANONICAL and LOCAL_STORE_ERROR(noncanonical)
+// are the frozen RUB-922 C01 identities.
 type BlockPresenceClass string
 
 const (
