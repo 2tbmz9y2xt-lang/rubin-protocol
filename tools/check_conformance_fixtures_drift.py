@@ -71,9 +71,6 @@ EXPECTED_FIXTURES: tuple[Path, ...] = (
     # RUB-922 / C01 canonical publication observables corpus. Generator-owned
     # and byte-frozen: only the C01 owner issue (RUB-922, then its R2 successor RUB-1204) may change its expected rows.
     Path("protocol/canonical_pipeline_v1.json"),
-    # checked by tools/tests/test_check_conformance_fixtures_drift.py and the
-    # semantic cross-image / summary relations are checked below for both the
-    # generated candidate and committed artifact before byte equality is accepted.
     V2_REL,
 )
 
@@ -164,17 +161,11 @@ def _canonical_sha256(value: object) -> str:
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
-
 def _case_alias_prefix(where: str) -> str:
-    """The catalog namespace of one case: every fixture a migrated case names is
-    keyed R1208_<ROW>_<CASE>_... . Mirrors Go cp2CaseFixture."""
     row_id, case_id = where.split("/")[:2]
     return "R1208_" + row_id.removeprefix("C01-").replace("-", "_") + "_" + case_id + "_"
 
-
 def _fixture_value(fixtures: dict, alias: object, want: Optional[str], where: str):
-    """Resolve one catalog alias: existence, declared tag (`want=None` accepts any
-    tag, mirroring Go's bare `alias` input tag) and the naming case's namespace."""
     if not isinstance(alias, str):
         raise RuntimeError(f"{where}: fixture alias is not a string")
     entry = fixtures.get(alias)
@@ -187,7 +178,6 @@ def _fixture_value(fixtures: dict, alias: object, want: Optional[str], where: st
     if not alias.startswith(_case_alias_prefix(where)):
         raise RuntimeError(f"{where}: fixture alias {alias!r} is outside the case namespace")
     return entry.get("value")
-
 
 # Type of every direct field. The frozen image manifest names the per-image
 # field LIST but not the tags, so the names come from the manifest at run time
@@ -223,7 +213,6 @@ V2_RESOLVED_KEY_RE = re.compile(
 )
 V2_BYTES32_RE = re.compile(r"^[0-9a-f]{64}$")
 
-
 def _relations_for_truth(expected: dict, truth: str, image: str) -> tuple:
     """Relations one image may carry under a commit truth. Mirrors Go
     cp2RelationForTruth and the $defs/expected arms, whose classified arms are
@@ -248,9 +237,7 @@ def _relations_for_truth(expected: dict, truth: str, image: str) -> tuple:
         return ("new", "unchanged")
     return ()
 
-
 def _direct_field_names(manifest: object) -> dict:
-    """Per-image direct-field list, read from the frozen image manifest."""
     if not isinstance(manifest, dict) or not isinstance(manifest.get("images"), dict):
         raise RuntimeError("canonical_pipeline_v2: image_manifest carries no images map")
     out = {}
@@ -268,10 +255,7 @@ def _direct_field_names(manifest: object) -> dict:
         out[image] = list(fields)
     return out
 
-
 def _resolved_entry(values: dict, alias: object, want: str, where: str):
-    """Resolve one composed alias in resolved_values, fail-closed on absence,
-    key grammar and tag. Mirrors Go cp2ResolvedType plus cp2ValidateResolved."""
     if not isinstance(alias, str):
         raise RuntimeError(f"{where}: alias is not a string")
     if not V2_RESOLVED_KEY_RE.fullmatch(alias):
@@ -285,10 +269,7 @@ def _resolved_entry(values: dict, alias: object, want: str, where: str):
         )
     return entry.get("value")
 
-
 def _validate_resolved_values(resolved: dict) -> None:
-    """Every entry is a typed literal of its declared tag, keyed by the composed
-    full form. Mirrors Go cp2ValidateResolved except the `object` arm, whose closed-object grammar Go and the schema own."""
     for name in sorted(resolved):
         if not V2_RESOLVED_KEY_RE.fullmatch(name):
             raise RuntimeError(f"resolved_values key {name!r} is not the composed full form")
@@ -307,7 +288,6 @@ def _validate_resolved_values(resolved: dict) -> None:
         if not ok:
             raise RuntimeError(f"resolved_values[{name}] is not a valid {tag} literal")
 
-
 _ABSENT = object()
 _PRESTATE_POINTER = {
     "STANDARD_MEMPOOL_IMAGE_V1": "/input/prestate_standard_records",
@@ -315,26 +295,14 @@ _PRESTATE_POINTER = {
     "OWNER_IMAGE_V1": "/input/prestate_owner_claims",
 }
 
-
 def _input_value(inputs: object, pointer: str):
-    """The value one stated stimulus carries, or _ABSENT when the case states no
-    such pointer and therefore constrains nothing. Mirrors Go cp2InputValue."""
     if isinstance(inputs, list):
         for entry in inputs:
             if isinstance(entry, dict) and entry.get("pointer") == pointer:
                 return entry.get("value_or_alias")
     return _ABSENT
 
-
 def _validate_input_aliases(where: str, case: dict, fixtures: dict, named: set) -> None:
-    """Every alias an input pointer or the schedule id names must exist, carry the
-    tag the pointer declares and live in this case's own namespace: existence and
-    tag alone would let one case drive its stimulus from another case's fixture.
-    Mirrors Go cp2ValidateAliases/cp2ResolveAliases -- a `token` tag carries a
-    machine token, never an alias, and a bare `alias` tag accepts any catalog tag --
-    plus the closed pointer vocabulary (Go cp2ValidateR1208Expected) and the
-    once-per-array alias rule (Go cp2InputOK). Every alias it resolves is recorded
-    in `named` for the catalog reverse-reachability gate."""
     stated = list(case.get("input") or [])
     for entry in stated:
         if entry.get("pointer") not in V2_STATED_POINTERS:
@@ -357,7 +325,6 @@ def _validate_input_aliases(where: str, case: dict, fixtures: dict, named: set) 
                 f"{where}{entry.get('pointer')}",
             )
             named.add(item)
-
 
 def _derived_counts(where: str, image: str, relation: str, inputs: object, fixtures: dict) -> tuple:
     """Counters an image that did not move republishes: an `unchanged` or `old`
@@ -405,12 +372,11 @@ def _derived_counts(where: str, image: str, relation: str, inputs: object, fixtu
     return ({"record_count": len(records), "tx_count": len(records), "used_bytes": used},
             {"last_admission_seq": last})
 
-
 def _set_identity_da_id(raw: object, where: str) -> str:
+    _cleanup_identity(raw, where)
     if not isinstance(raw, dict) or not isinstance(raw.get("da_id"), str):
         raise RuntimeError(f"{where}: included-set identity carries no da_id")
     return raw["da_id"]
-
 
 def _cleanup_identity(raw: object, where: str) -> str:
     valid = lambda value: isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
@@ -427,11 +393,9 @@ def _cleanup_identity(raw: object, where: str) -> str:
         chunks.append({"chunk_index": previous, "txid": chunk["txid"], "wtxid": chunk["wtxid"]})
     return json.dumps({"da_id": raw["da_id"], "commit": {"txid": commit["txid"], "wtxid": commit["wtxid"]}, "chunks": chunks}, sort_keys=True, separators=(",", ":"))
 
-
 def _input_aliases_at(inputs: object, pointer: str) -> list[str]:
     value = _input_value(inputs, pointer)
     return [item for item in value if isinstance(item, str)] if isinstance(value, list) else [value] if isinstance(value, str) else []
-
 
 def _validate_cleanup_classifier(where: str, inputs: object, expected: dict, fixtures: dict) -> None:
     if not where.startswith("C01-DACLEAN-001/"):
@@ -467,6 +431,13 @@ def _validate_cleanup_classifier(where: str, inputs: object, expected: dict, fix
         claim = f"R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_CLAIM_DA_SET_1"
         if fault.get("target") != "CLAIM_DA_SET_1" or claim not in _input_aliases_at(inputs, "/input/prestate_owner_claims"):
             raise RuntimeError(f"{where}/input/owner_token_fault/target: does not name the stated prestate owner claim")
+        claim_value = _fixture_value(fixtures, claim, "object", f"{where}/input/owner_token_fault/target")
+        retained = _fixture_value(fixtures, "R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_DA_SET_1", "object", f"{where}/input/prestate_retained_da_sets")
+        commit = retained.get("commit") if isinstance(retained, dict) else None
+        claim_tx = claim_value.get("txid") if isinstance(claim_value, dict) else None
+        commit_tx = commit.get("txid") if isinstance(commit, dict) else None
+        if not isinstance(claim_value, dict) or claim_value.get("kind") != "owner_claim" or claim_value.get("domain") != "da" or not isinstance(claim_tx, str) or not isinstance(commit_tx, str) or not V2_BYTES32_RE.fullmatch(claim_tx) or claim_tx != commit_tx:
+            raise RuntimeError(f"{where}/input/owner_token_fault/target: owner claim does not exactly bind retained DA_SET_1 commit txid")
     wants = {"da_record_removals": len(removed), "da_inclusion_noops": len(included) - len(matched)}
     effects = expected.get("effects", {})
     for key, want in wants.items():
@@ -474,7 +445,6 @@ def _validate_cleanup_classifier(where: str, inputs: object, expected: dict, fix
             raise RuntimeError(f"{where}/effects/da_record_removals: required")
         if key in effects and (not isinstance(effects[key], dict) or type(effects[key].get("value")) is not int or effects[key]["value"] != want):
             raise RuntimeError(f"{where}/effects/{key}={effects[key].get('value')!r} want {want}")
-
 
 def _validate_cleanup_fault(where: str, inputs: object, fixtures: dict) -> None:
     faults, plan = _input_aliases_at(inputs, "/input/retained_record_fault"), _input_aliases_at(inputs, "/input/selected_record_plan_order")
@@ -491,7 +461,6 @@ def _validate_cleanup_fault(where: str, inputs: object, fixtures: dict) -> None:
         raise RuntimeError(f"{where}/input/retained_record_fault/position_index: want {want}")
     if not isinstance(fault.get("target"), str) or plan[want] != f"R1208_DACLEAN_001_{case}_{fault['target']}":
         raise RuntimeError(f"{where}/input/retained_record_fault/target: does not name selected_record_plan_order[{want}]")
-
 
 def _flat_stated_da_ids(where: str, inputs: object, fixtures: dict) -> tuple:
     out, stated = [], False
@@ -513,10 +482,11 @@ def _flat_stated_da_ids(where: str, inputs: object, fixtures: dict) -> tuple:
     if not isinstance(ordered, list):
         raise RuntimeError(f"{where_in}: not an array")
     ids = [_fixture_value(fixtures, alias, "bytes32_hex", where_in) for alias in ordered]
+    if len(set(ids)) != len(ids):
+        raise RuntimeError(f"{where_in}: states an identity more than once")
     if stated and sorted(set(out)) != sorted(set(ids)):
         raise RuntimeError(f"{where}: stated occurrence spellings disagree on the complete DA-set identities")
     return out + ids, True
-
 
 def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: list):
     if not isinstance(inputs, list):
@@ -561,6 +531,8 @@ def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: li
                 f"{where}: included-set fixture {alias!r} is neither a flat identity "
                 f"nor a {{block_id, identities}} group"
             )
+    if len(set(flat)) != len(flat):
+        raise RuntimeError(f"{where}/input/block_included_set_identities states an identity more than once")
     if len(shapes) > 1:
         raise RuntimeError(f"{where}: mixes flat and grouped included-set identities")
     if stated and extra_stated and sorted(set(flat)) != sorted(set(extra)):
@@ -618,10 +590,7 @@ def _summary_rows_effect(where: str, expected: dict, rows: int) -> None:
             f"{rows} published rows"
         )
 
-
 def _prestate_chain_block(where: str, prestate: object, fixtures: dict, from_end: int) -> dict:
-    """The stated prestate chain entry `from_end` places from its end: 1 is the
-    stated prestate tip, 2 the entry below it. Mirrors Go cp2PrestateChainBlock."""
     chain = prestate if isinstance(prestate, list) else []
     if len(chain) < from_end:
         raise RuntimeError(f"{where}/CHAIN: states a {len(chain)}-block prestate chain, so entry -{from_end} is not stated")
@@ -632,11 +601,6 @@ def _prestate_chain_block(where: str, prestate: object, fixtures: dict, from_end
 
 
 def _stated_branch_blocks(where: str, inputs: object, fixtures: dict) -> list:
-    """The ordered blocks a case states will become newly canonical: the
-    pre-stored side branch in canonical order, the block a single-block stimulus
-    names (a genesis pack or a relayed stimulus block) and the candidate an
-    equal-work tie-break names. A case stating none of them constrains nothing.
-    Mirrors Go cp2StatedBranchBlocks."""
     branch = _input_value(inputs, "/input/prestored_side_branch")
     out = list(branch) if isinstance(branch, list) else []
     for pointer in ("/input/genesis_pack", "/input/stimulus_block"):
@@ -674,14 +638,6 @@ def _stated_branch_blocks(where: str, inputs: object, fixtures: dict) -> list:
 
 
 def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
-    """RUB-1208 relation/receipt gate independent of generator byte equality.
-
-    Most relations below are also enforced by the generator
-    (clients/go/cmd/gen-conformance-fixtures/runtime.go cp2ValidateR1208Payload
-    and cp2ValidateR1208Expected), but neither side is the other's superset: the
-    `fixtures` catalog literals are validated by Go (cp2ValidateFixtures) and the
-    schema, the obligation forward/reverse receipts only here.
-    """
     data = load_json_fail_closed(path)
     if not isinstance(data, dict):
         raise RuntimeError("canonical_pipeline_v2: top-level value is not an object")
@@ -889,8 +845,8 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                         f"block_id {summary_row.get('block_id')!r}"
                     )
                 height = block["height"]
-                if last_height is not None and height <= last_height:
-                    raise RuntimeError(f"{where}/canonical_applied_blocks: heights not strictly canonical")
+                if last_height is not None and height != last_height + 1:
+                    raise RuntimeError(f"{where}/canonical_applied_blocks: heights are not consecutive")
                 last_height, last_block = height, block
 
                 da_ids = summary_row.get("complete_da_ids")
@@ -1256,6 +1212,7 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
     fixture_value = lambda data, alias: data["fixtures"][alias]["value"]
     corrupt_first = lambda data, suffix: data["fixtures"][f"R1208_DACLEAN_001_CORRUPT_FIRST_{suffix}"]
     owner_fault = lambda data: fixture_value(data, "R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_INPUT_OWNER_TOKEN_FAULT")
+    owner_claim = lambda data: fixture_value(data, "R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_CLAIM_DA_SET_1")
     mutations = (
         ("orphan fixtures entry", lambda d: d["fixtures"].update({"R1208_DIRECT_001_MAIN_ORPHAN": {"type": "u64", "value": 1}}), "fixtures[R1208_DIRECT_001_MAIN_ORPHAN] is named by no case"),
         ("stated array repeats an alias", repeat_a_stated_alias, "names an alias more than once"),
@@ -1271,10 +1228,16 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("included chunks empty", lambda d: fixture_value(d, "R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0").update(chunks=[]), "invalid complete DA set identity"),
         ("included chunk index overflows u16", lambda d: fixture_value(d, "R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0")["chunks"][0].update(chunk_index=65536), "chunks/0: invalid or non-ascending identity"),
         ("included chunk indices nonascending", lambda d: fixture_value(d, "R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0")["chunks"][1].update(chunk_index=0), "chunks/1: invalid or non-ascending identity"),
+        ("included identity missing chunks", lambda d: fixture_value(d, "R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0").pop("chunks"), "invalid complete DA set identity"),
+        ("flat included identities duplicate", lambda d: fixture_value(d, "R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1").update(da_id=fixture_value(d, "R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0")["da_id"]), "block_included_set_identities states an identity more than once"),
+        ("ordered DA ids duplicate", lambda d: d["fixtures"]["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_DA_ID_LO"].update(value=d["fixtures"]["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_DA_ID_HI"]["value"]), "block_complete_da_ids_in_transaction_order: states an identity more than once"),
         ("retained aliases share one identity", lambda d: corrupt_first(d, "DA_SET_2").update(value=corrupt_first(d, "DA_SET_1")["value"]), "prestate_retained_da_sets: aliases 'R1208_DACLEAN_001_CORRUPT_FIRST_DA_SET_1' and 'R1208_DACLEAN_001_CORRUPT_FIRST_DA_SET_2' resolve to the same complete identity"),
         ("selected plan names a non-retained record", lambda d: input_of(d, "C01-DACLEAN-001", "CORRUPT_FIRST", "/input/selected_record_plan_order")["value_or_alias"].__setitem__(2, "R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_2"), "selected_record_plan_order: alias 'R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_2' does not name a retained prestate record"),
         ("owner token fault kind differs", lambda d: owner_fault(d).update(kind="other"), "owner_token_fault/kind: want exact_token_mismatch_against_selected_record"),
         ("owner token fault target differs", lambda d: owner_fault(d).update(target="CLAIM_DA_SET_2"), "owner_token_fault/target: does not name the stated prestate owner claim"),
+        ("owner token claim txid differs", lambda d: owner_claim(d).update(txid="1" * 64), "owner claim does not exactly bind retained DA_SET_1 commit txid"),
+        ("owner token claim kind differs", lambda d: owner_claim(d).update(kind="other"), "owner claim does not exactly bind retained DA_SET_1 commit txid"),
+        ("owner token claim domain differs", lambda d: owner_claim(d).update(domain="standard"), "owner claim does not exactly bind retained DA_SET_1 commit txid"),
         ("required removal effect absent", lambda d: case_of(d, "C01-DACLEAN-001", "EXACT_MATCH")["expected"]["effects"].pop("da_record_removals"), "effects/da_record_removals: required"),
         ("fault kind differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_RETAINED_RECORD_FAULT").update(kind="other"), "retained_record_fault/kind: want selected_record_corrupt"),
         ("fault position differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_RETAINED_RECORD_FAULT").update(position_index=1), "retained_record_fault/position_index: want 0"),
@@ -1294,7 +1257,7 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("two grouped keys bind one summary row", lambda d: d["fixtures"][group_1]["value"].update(block_id="SUCCESS_B1P"), "is bound by more than one included-set group"),
         ("grouped key matches no summary row", lambda d: d["fixtures"][group_1]["value"].update(block_id="NOPE"), "included-set block 'NOPE' matches 0 summary rows"),
         ("grouped key matches two summary rows", lambda d: case_of(d, "C01-DACLEAN-001", "MULTI_SET_SUCCESS")["expected"]["canonical_applied_blocks"][1].update(block_id="R1208_DACLEAN_001_MULTI_SET_SUCCESS_B1P"), "matches 2 summary rows"),
-        ("flat and grouped shapes mixed", lambda d: d["fixtures"][group_1].update(value={"da_id": "0" * 63 + "9"}), "mixes flat and grouped included-set identities"),
+        ("flat and grouped shapes mixed", lambda d: d["fixtures"][group_1].update(value=d["fixtures"][group_1]["value"]["identities"][0]), "mixes flat and grouped included-set identities"),
         ("flat identities on a multi-row summary", flat_identities_on_a_multi_row_summary, "flat included-set identities but 2 summary rows"),
         ("closure epoch moved off v8", lambda d: d["_meta"]["closure_epoch"].update(closure_manifest_version="rubin-c01-design-closure-v9"), "closure epoch is not frozen v8"),
         ("closure status moved off building", lambda d: d["_meta"]["closure_epoch"].update(status="frozen"), "closure status is not building"),
@@ -1306,7 +1269,9 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("stale CHAIN height with a consistent owner", stale_chain_height, "tip must equal the last canonical-applied block"),
         ("OWNER stable_tip height stated as a float", float_stable_tip_height, "must equal published CHAIN tip"),
         ("summary block height stated as a negative integer", negative_summary_block_height, "fixture has no u64 height"),
-        ("reversed same-count summary", reverse_summary, "heights not strictly canonical"),
+        ("reversed same-count summary", reverse_summary, "heights are not consecutive"),
+        ("summary height gap", lambda d: fixture_value(d, "R1208_SUMMARY_001_MULTI_BLOCK_ORDER_B1P").update(height=1), "heights are not consecutive"),
+        ("summary height wraps max to zero", lambda d: (fixture_value(d, "R1208_SUMMARY_001_MULTI_BLOCK_ORDER_B1P").update(height=2**64 - 1), fixture_value(d, "R1208_SUMMARY_001_MULTI_BLOCK_ORDER_B2P").update(height=0), fixture_value(d, "R1208_SUMMARY_001_MULTI_BLOCK_ORDER_B3P").update(height=1)), "heights are not consecutive"),
         ("reversed DA ids", reverse_da_ids, "not strictly ascending raw bytes"),
         ("non-NEW summary", non_new_summary, "non-NEW must be null"),
         ("dropped obligation receipt", drop_obligation, "obligation occurrences"),
@@ -1369,15 +1334,7 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
 
 
 def run_v2_gate(candidate: Path, committed: Path, authority: Path) -> None:
-    """RUB-1208 semantic/receipt gate over both sides of the v2 pair: a violation
-    is DRIFT (exit 1), not an environment failure, and a programming error raised
-    INSIDE the gate by a hostile artifact is re-raised labelled rather than
-    escaping as a traceback -- the same types raised elsewhere stay unhandled.
-
-    The hand-authored authority source the artifact is generated from is
-    strict-loaded FIRST: both json.loads and Go's encoding/json keep the last of
-    two duplicate keys, so without this load an edited authority could carry a
-    silently dropped expectation into every downstream check."""
+    """Strict-load authority first, then validate both artifacts and shipped controls."""
     for check, path in (
         (load_json_fail_closed, authority),
         (validate_canonical_pipeline_v2_semantics, candidate),

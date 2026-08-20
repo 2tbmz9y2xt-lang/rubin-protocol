@@ -199,9 +199,9 @@ What actually executes, and where:
 | the same image/summary/complete-DA-identity and selected-fault relations on the generating side (the obligation and sources receipts are checker-side by design), plus the authority byte pin and manifest hashes | `cp2ValidateR1208Payload` / `cp2ValidateR1208Expected` in `clients/go/cmd/gen-conformance-fixtures/runtime.go` | `TestCanonicalPipelineV2R1208ValidatorFailsClosed`, `TestCanonicalPipelineV2AuthorityPinIsExact`, `TestCanonicalPipelineV2DirectFieldsMatchTheManifest` |
 | the shipped single-dimension hostile controls (substituted `block_hash`, dropped/duplicated DA occurrence, stale CHAIN tip, stale OWNER `stable_tip`, renamed/moved obligation id, and the rest) | `assert_canonical_pipeline_v2_negative_controls` in `tools/check_conformance_fixtures_drift.py`, run by the drift gate | `test_shipped_semantic_negative_controls_all_redden` |
 | generator byte identity | the conformance fixture drift gate above | `TestCanonicalPipelineV2CorpusIsByteDeterministic` |
-| corpus closure: every `fixtures` entry is named by some case, every stated `/input/...` pointer is in the closed vocabulary, stated arrays do not repeat aliases, retained DA aliases have distinct complete identities, and selected-plan aliases name distinct retained records | `cp2ValidateR1208Payload` / `validate_canonical_pipeline_v2_semantics` | `orphan fixtures entry`, `input pointer typo`, `stated array repeats an alias`, `retained aliases share one identity`, `selected plan names a non-retained record` |
+| structural closure: complete included-set identities obey the full commit/chunk grammar; each flat occurrence spelling preserves multiplicity before set normalization; OWNER_TOKEN binds the exact claim txid to retained DA_SET_1; encoded summary heights are consecutive; Go closes row/case keys while admitting schema-legal row `notes`/`authority` | Go/Python v2 validators | mirrored one-dimension controls |
 
-Four identity bindings make a same-shape substitution red. The control names below are the drift-checker
+These structural controls do not activate named-case truth, effects, prestate semantics, consumer readiness, or Go/Rust runtime conformance; RUB-1204 owns those obligations. The control names below are the drift-checker
 labels in `assert_canonical_pipeline_v2_negative_controls` (`test_shipped_semantic_negative_controls_all_redden`);
 the generator runs its twin of each in `TestCanonicalPipelineV2R1208ValidatorFailsClosed`.
 
@@ -215,9 +215,8 @@ the generator runs its twin of each in `TestCanonicalPipelineV2R1208ValidatorFai
 Two conventions the shape does not state by itself. `release_requirements[go|rust]` is a set of
 (issue, surface) blocking obligations, not a set of issues: one issue legitimately appears more than once
 with different surfaces. Where a case carries its own block, that block is the case's complete blocking set
-and replaces the row-level default, exactly as `$defs/case.release_requirements` in the schema states. `sources[]` is pass-through authority, not dynamically resolved: the schema owns its shape and grammar, while the Python checker pins the exact root-verified current case-to-sorted-sources receipt. The schema also owns the other fields the
-generator's typed decode deliberately ignores — the `obligation_ids` grammar,
-`release_requirements` shape and unknown or retired keys — so none needs a generator-side mirror. Enforcement of the remaining `effects` relations
+and replaces the row-level default, exactly as `$defs/case.release_requirements` in the schema states. `sources[]` is pass-through authority, not dynamically resolved: the schema owns its shape and grammar, while the Python checker pins the exact root-verified current case-to-sorted-sources receipt.
+The schema owns pass-through metadata value grammar and required schema shape, including `obligation_ids`, `release_requirements`, `notes` and `authority`; Go mirrors only the allowed row/case key set and unknown/retired-key exclusions. Enforcement of the remaining `effects` relations
 (`connected_block_decay_events`, `relay_authority`, `intermediate_tip_rows`, `external_visibility`, and a
 closed effect-key vocabulary) is deferred to RUB-1204 with the rest of the deferred closure work.
 

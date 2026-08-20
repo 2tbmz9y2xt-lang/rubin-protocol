@@ -1615,7 +1615,7 @@ func TestCanonicalPipelineV2ValidatorAcceptsTheStatedShapes(t *testing.T) {
 	}
 }
 
-// TestCanonicalPipelineV2AliasesResolveInFixtures pins the one rule JSON Schema
+// TestCanonicalPipelineV2AliasesResolveInFixtures verifies that input aliases exist and resolve to their declared fixture type.
 func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	c := cp2ValidCase()
 	c.Input = []cp2Input{{
@@ -1994,8 +1994,6 @@ func TestCanonicalPipelineV2IntegerAndScheduleAliases(t *testing.T) {
 	}
 }
 
-// TestCanonicalPipelineV2CorpusIsByteDeterministic proves the BUILDING revision
-// is reproducible and carries neither retired v1 field.
 func TestCanonicalPipelineV2CorpusIsByteDeterministic(t *testing.T) {
 	first := filepath.Join(t.TempDir(), "canonical_pipeline_v2.json")
 	second := filepath.Join(t.TempDir(), "canonical_pipeline_v2.json")
@@ -2103,7 +2101,6 @@ func cp2CaseSummary(t *testing.T, c map[string]any) []any {
 	return rows
 }
 
-// TestCanonicalPipelineV2AuthorityPinIsExact proves the byte pin rejects an
 func TestCanonicalPipelineV2AuthorityPinIsExact(t *testing.T) {
 	if _, err := cp2DecodeAuthority(cp2AuthoritySource, cp2AuthoritySourceSHA256); err != nil {
 		t.Fatalf("control must decode under its pin: %v", err)
@@ -2135,7 +2132,6 @@ func TestCanonicalPipelineV2AuthorityPinIsExact(t *testing.T) {
 	}
 }
 
-// TestCanonicalPipelineV2DirectFieldsMatchTheManifest pins the two lists this
 func TestCanonicalPipelineV2DirectFieldsMatchTheManifest(t *testing.T) {
 	payload, err := cp2DecodeAuthority(cp2AuthoritySource, cp2AuthoritySourceSHA256)
 	if err != nil {
@@ -2169,7 +2165,6 @@ func TestCanonicalPipelineV2DirectFieldsMatchTheManifest(t *testing.T) {
 	}
 }
 
-// TestCanonicalPipelineV2R1208ValidatorFailsClosed drives one single-dimension
 func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 	if err := cp2ValidateAuthorityDoc(t, cp2AuthorityControl(t)); err != nil {
 		t.Fatalf("control authority must validate: %v", err)
@@ -2198,8 +2193,20 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			d["fixtures"].(map[string]any)["R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_INPUT_OWNER_TOKEN_FAULT"].(map[string]any)["value"].(map[string]any)[field] = value
 		}
 	}
+	ownerClaim := func(field string, value any) func(*testing.T, map[string]any) {
+		return func(_ *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_CLAIM_DA_SET_1"].(map[string]any)["value"].(map[string]any)[field] = value
+		}
+	}
 	corruptFirstFixture := func(d map[string]any, suffix string) map[string]any {
 		return d["fixtures"].(map[string]any)["R1208_DACLEAN_001_CORRUPT_FIRST_"+suffix].(map[string]any)
+	}
+	for field, value := range map[string]any{"notes": []any{"note"}, "authority": map[string]any{"bound": "fixed"}} {
+		doc := cp2AuthorityControl(t)
+		doc["rows"].([]any)[0].(map[string]any)[field] = value
+		if err := cp2ValidateAuthorityDoc(t, doc); err != nil {
+			t.Fatalf("schema-legal row %s must validate: %v", field, err)
+		}
 	}
 	mutate := map[string]func(*testing.T, map[string]any){
 		"closure binding substituted": func(t *testing.T, d map[string]any) {
@@ -2323,6 +2330,14 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			rows := cp2CaseSummary(t, c)
 			slices.Reverse(rows)
 		},
+		"summary height gap": func(_ *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_SUMMARY_001_MULTI_BLOCK_ORDER_B1P"].(map[string]any)["value"].(map[string]any)["height"] = json.Number("1")
+		},
+		"summary height wraps max to zero": func(_ *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_SUMMARY_001_MULTI_BLOCK_ORDER_B1P"].(map[string]any)["value"].(map[string]any)["height"] = json.Number("18446744073709551615")
+			d["fixtures"].(map[string]any)["R1208_SUMMARY_001_MULTI_BLOCK_ORDER_B2P"].(map[string]any)["value"].(map[string]any)["height"] = json.Number("0")
+			d["fixtures"].(map[string]any)["R1208_SUMMARY_001_MULTI_BLOCK_ORDER_B3P"].(map[string]any)["value"].(map[string]any)["height"] = json.Number("1")
+		},
 		"da occurrence duplicated": func(t *testing.T, d map[string]any) {
 			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
 			ids := cp2CaseSummary(t, c)[0].(map[string]any)["complete_da_ids"].([]any)
@@ -2433,6 +2448,10 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			f := d["fixtures"].(map[string]any)["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
 			f["value"].(map[string]any)["da_id"] = strings.Repeat("0", 63) + "9"
 		},
+		"included identity missing chunks": func(_ *testing.T, d map[string]any) {
+			v := d["fixtures"].(map[string]any)["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0"].(map[string]any)["value"].(map[string]any)
+			delete(v, "chunks")
+		},
 		"one occurrence spelling stated empty": func(t *testing.T, d map[string]any) {
 			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
 			for _, raw := range c["input"].([]any) {
@@ -2504,7 +2523,8 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			cp2CaseSummary(t, cp2AuthorityCase(t, d, "C01-DACLEAN-001", "MULTI_SET_SUCCESS"))[1].(map[string]any)["block_id"] = "R1208_DACLEAN_001_MULTI_SET_SUCCESS_B1P"
 		},
 		"flat and grouped shapes mixed": func(t *testing.T, d map[string]any) {
-			d["fixtures"].(map[string]any)["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)["value"] = map[string]any{"da_id": strings.Repeat("0", 63) + "9"}
+			entry := d["fixtures"].(map[string]any)["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
+			entry["value"] = entry["value"].(map[string]any)["identities"].([]any)[0]
 		},
 		"flat identities on a multi-row summary": func(t *testing.T, d map[string]any) {
 			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
@@ -2545,6 +2565,15 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"included chunks empty":               identity("", "chunks", []any{}),
 		"included chunk index overflows u16":  identity("chunk0", "chunk_index", json.Number("65536")),
 		"included chunk indices nonascending": identity("chunk1", "chunk_index", json.Number("0")),
+		"flat included identities duplicate": func(_ *testing.T, d map[string]any) {
+			fixtures := d["fixtures"].(map[string]any)
+			first := fixtures["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0"].(map[string]any)["value"].(map[string]any)
+			fixtures["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)["value"].(map[string]any)["da_id"] = first["da_id"]
+		},
+		"ordered DA ids duplicate": func(_ *testing.T, d map[string]any) {
+			fixtures := d["fixtures"].(map[string]any)
+			fixtures["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_DA_ID_LO"].(map[string]any)["value"] = fixtures["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_DA_ID_HI"].(map[string]any)["value"]
+		},
 		"retained aliases share one identity": func(_ *testing.T, d map[string]any) {
 			corruptFirstFixture(d, "DA_SET_2")["value"] = corruptFirstFixture(d, "DA_SET_1")["value"]
 		},
@@ -2554,6 +2583,9 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		},
 		"owner token fault kind differs":   ownerFault("kind", "other"),
 		"owner token fault target differs": ownerFault("target", "CLAIM_DA_SET_2"),
+		"owner token claim txid differs":   ownerClaim("txid", strings.Repeat("1", 64)),
+		"owner token claim kind differs":   ownerClaim("kind", "other"),
+		"owner token claim domain differs": ownerClaim("domain", "standard"),
 		"required removal effect absent": func(t *testing.T, d map[string]any) {
 			delete(cp2AuthorityCase(t, d, "C01-DACLEAN-001", "EXACT_MATCH")["expected"].(map[string]any)["effects"].(map[string]any), "da_record_removals")
 		},
@@ -2605,7 +2637,9 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"stale owner stable tip":                             "OWNER/stable_tip must equal the published CHAIN tip",
 		"stale chain tip with a consistent owner":            "CHAIN tip must equal the last canonical-applied block",
 		"summary row substituted block_hash":                 "is not the hash of block_id",
-		"summary rows reversed":                              "heights not strictly canonical",
+		"summary rows reversed":                              "summary heights are not consecutive",
+		"summary height gap":                                 "summary heights are not consecutive",
+		"summary height wraps max to zero":                   "summary heights are not consecutive",
 		"da occurrence duplicated":                           "not strictly raw-byte ascending",
 		"da occurrence dropped":                              "differ from the included-set identities",
 		"da occurrence reordered":                            "not strictly raw-byte ascending",
@@ -2620,6 +2654,7 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"summary block substituted for another stated block": "differ from the stated branch",
 		"input alias borrowed from another case":             "is outside the case namespace",
 		"one occurrence spelling disagrees":                  "stated occurrence spellings disagree",
+		"included identity missing chunks":                   "invalid complete DA set identity",
 		"one occurrence spelling stated empty":               "stated occurrence spellings disagree",
 		"standalone disconnect publishes a row":              "standalone disconnect and must carry an exact empty summary",
 		"connected block dropped from the summary":           "summary carries 2 rows, the case states connect_count 3",
@@ -2649,10 +2684,15 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"included chunks empty":                              "invalid complete DA set identity",
 		"included chunk index overflows u16":                 "chunks/0: invalid or non-ascending identity",
 		"included chunk indices nonascending":                "chunks/1: invalid or non-ascending identity",
+		"flat included identities duplicate":                 "block_included_set_identities states an identity more than once",
+		"ordered DA ids duplicate":                           "block_complete_da_ids_in_transaction_order states an identity more than once",
 		"retained aliases share one identity":                "prestate_retained_da_sets: aliases \"R1208_DACLEAN_001_CORRUPT_FIRST_DA_SET_1\" and \"R1208_DACLEAN_001_CORRUPT_FIRST_DA_SET_2\" resolve to the same complete identity",
 		"selected plan names a non-retained record":          "selected_record_plan_order: alias \"R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_2\" does not name a retained prestate record",
 		"owner token fault kind differs":                     "owner_token_fault/kind: want exact_token_mismatch_against_selected_record",
 		"owner token fault target differs":                   "owner_token_fault/target: does not name the stated prestate owner claim",
+		"owner token claim txid differs":                     "owner claim does not exactly bind retained DA_SET_1 commit txid",
+		"owner token claim kind differs":                     "owner claim does not exactly bind retained DA_SET_1 commit txid",
+		"owner token claim domain differs":                   "owner claim does not exactly bind retained DA_SET_1 commit txid",
 		"required removal effect absent":                     "effects/da_record_removals: required",
 		"fault kind differs":                                 "retained_record_fault/kind: want selected_record_corrupt",
 		"fault position differs":                             "retained_record_fault/position_index: want 0",
@@ -2692,7 +2732,6 @@ func cp2ResolvedValueOf(t *testing.T, d, c map[string]any, image, field string) 
 	return entry
 }
 
-// TestCanonicalPipelineV2NullResultRowsStayExpressible is the positive control
 func TestCanonicalPipelineV2NullResultRowsStayExpressible(t *testing.T) {
 	for _, tc := range []struct {
 		label, row, key, value, truth string
@@ -2722,7 +2761,6 @@ func TestCanonicalPipelineV2NullResultRowsStayExpressible(t *testing.T) {
 	}
 }
 
-// TestCanonicalPipelineV2ProbeFile validates an arbitrary v2 artifact through
 func TestCanonicalPipelineV2ProbeFile(t *testing.T) {
 	path := os.Getenv("RUBIN_CP2_PROBE_FILE")
 	if path == "" {
@@ -2786,7 +2824,6 @@ func remarshal(t *testing.T, from any, into any) {
 	}
 }
 
-// TestCanonicalPipelineV2AliasNamespacesCannotCollide pins the argument that
 func TestCanonicalPipelineV2AliasNamespacesCannotCollide(t *testing.T) {
 	composed := cp2ComposedAlias("tip_hash", "C01-DIRECT-001/MAIN", "new")
 	if !strings.Contains(composed, "@") {

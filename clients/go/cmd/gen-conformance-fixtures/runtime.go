@@ -2445,8 +2445,6 @@ const (
 	cp2GoverningSpecOID  = "c14b010024ce633e1027bf891af3c49741db544a"
 )
 
-// cp2AuthoritySource is the human-readable C01-R2 authority: the RUB-1206 v8
-//
 //go:embed canonical_pipeline_v2_authority.json
 var cp2AuthoritySource []byte
 
@@ -2497,7 +2495,6 @@ var (
 	cp2Provenances = []string{"normative_boundary", "witness_fixture", "deterministic_schedule_control", "configured_bound"}
 )
 
-// cp2StatedPointers is the closed input vocabulary of the migrated corpus (the
 var cp2StatedPointers = []string{
 	"/input/block_complete_da_ids_in_transaction_order", "/input/block_complete_da_set_count", "/input/block_included_set_identities", "/input/block_includes", "/input/candidate_a", "/input/candidate_b", "/input/candidate_hash_relation", "/input/candidate_work_relation",
 	"/input/chain_id", "/input/connect_count", "/input/cross_block_da_id", "/input/datadir_state", "/input/delivery_entrypoint", "/input/detached_branch_only_output_spender", "/input/disconnect_command", "/input/final_chain_invalid_members", "/input/genesis_pack",
@@ -2788,9 +2785,10 @@ type cp2StrictRow struct {
 	Kind                string          `json:"kind"`
 	Cases               []cp2StrictCase `json:"cases"`
 	ReleaseRequirements json.RawMessage `json:"release_requirements"`
+	Notes               json.RawMessage `json:"notes"`
+	Authority           json.RawMessage `json:"authority"`
 }
 
-// cp2Artifact is the emit shape of the v2 corpus. It is a struct, not a map, so
 type cp2Artifact struct {
 	Artifact              string                `json:"artifact"`
 	SchemaVersion         int                   `json:"schema_version"`
@@ -3028,10 +3026,7 @@ func cp2ValidateCases(rowID string, cases []cp2Case) error {
 	return nil
 }
 
-// cp2ValidateRows gates the fields the Go structs carry: registry identity, the
-// row-kind exclusions, row and case ids, the input vocabulary and pointers, the
-// schedule alias, and the result/truth/RPC relations; cp2ValidateAliases and
-// cp2ValidateFixtures cover the catalog. The schema-only fields
+// cp2ValidateRows owns typed row/case identity, inputs, schedules, and result relations; the schema owns pass-through metadata values.
 func cp2ValidateRows(rows []cp2Row, registry map[string]string) error {
 	if len(registry) != cp2RegistrySize {
 		return fmt.Errorf("row registry: %d identities, want the frozen %d", len(registry), cp2RegistrySize)
@@ -3150,7 +3145,7 @@ func cp2ValidateAliases(rows []cp2Row, fixtures map[string]cp2Fixture, named map
 	return nil
 }
 
-// cp2ResolveAliases requires every alias one pointer names to exist in the
+// cp2ResolveAliases requires every input or schedule alias to exist with its declared type and case namespace.
 func cp2ResolveAliases(where string, in cp2Input, fixtures map[string]cp2Fixture, named map[string]bool) error {
 	want := strings.TrimSuffix(strings.TrimPrefix(in.Type, "array<"), ">")
 	for _, alias := range cp2AliasesOf(in) {
@@ -3183,7 +3178,6 @@ var cp2R1208Rows = map[string]int{
 	"C01-GENESIS-001": 1, "C01-REORG-001": 1, "C01-SIDE-001": 1, "C01-SUMMARY-001": 6,
 }
 
-// cp2DecodeAuthority pins the authority source bytes BEFORE parsing them: a
 func cp2DecodeAuthority(raw []byte, wantSHA string) (cp2R1208Payload, error) {
 	var payload cp2R1208Payload
 	if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != wantSHA {
@@ -3236,7 +3230,6 @@ func cp2ResolvedType(values map[string]cp2Fixture, alias, want string) error {
 	return nil
 }
 
-// cp2DirectFieldTypes is the type of every direct field. The manifest names the
 var cp2DirectFieldTypes = map[string]string{
 	"claim_count": "u64", "current_mempool_min_fee_rate": "u64", "height": "u64",
 	"last_admission_seq": "u64", "orphan_bytes": "u64", "pinned_payload_bytes": "u64",
@@ -3244,7 +3237,6 @@ var cp2DirectFieldTypes = map[string]string{
 	"tx_count": "u64", "used_bytes": "u64", "utxo_count": "u64",
 }
 
-// cp2DirectFieldNames reads the per-image direct-field list out of the frozen
 func cp2DirectFieldNames(manifest cpMap) (map[string][]string, error) {
 	images, ok := cp2JSONImage(manifest["images"]).(map[string]any)
 	if !ok {
@@ -3276,7 +3268,6 @@ func cp2DirectFieldNames(manifest cpMap) (map[string][]string, error) {
 	return out, nil
 }
 
-// cp2RelationForTruth reports the relations one image may carry under a commit
 func cp2RelationForTruth(expected map[string]any, truth, image string) []string {
 	if _, classified := expected["result"].(string); !classified {
 		if _, wire := expected["wire_disposition"]; wire {
@@ -3303,12 +3294,10 @@ func cp2RelationForTruth(expected map[string]any, truth, image string) []string 
 	return nil
 }
 
-// cp2ComposedAlias is the exact resolved_values key for one position:
 func cp2ComposedAlias(name, where, relation string) string {
 	return name + "@" + where + ":" + relation
 }
 
-// cp2IncludedSetDAIDs derives the expected per-block da_id lists from the case's
 func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixture, summary []any) (map[string][]string, error) {
 	var aliases []string
 	stated := false
@@ -3384,6 +3373,9 @@ func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixt
 			return nil, fmt.Errorf("%s included-set fixture %q is neither a flat identity nor a {block_id, identities} group", where, alias)
 		}
 	}
+	if len(cp2SortedUnique(flat)) != len(flat) {
+		return nil, fmt.Errorf("%s/input/block_included_set_identities states an identity more than once", where)
+	}
 	if len(shapes) > 1 {
 		return nil, fmt.Errorf("%s mixes flat and grouped included-set identities", where)
 	}
@@ -3431,7 +3423,6 @@ func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixt
 	return out, nil
 }
 
-// cp2StatedBranchBlocks is the ordered block set a case states will become newly
 func cp2StatedBranchBlocks(where string, inputs []any, fixtures map[string]cp2Fixture) ([]string, error) {
 	var out []string
 	branch, _ := cp2InputValue(inputs, "/input/prestored_side_branch")
@@ -3476,7 +3467,6 @@ func cp2StatedBranchBlocks(where string, inputs []any, fixtures map[string]cp2Fi
 	return append(out, winner), nil
 }
 
-// cp2InputValue returns the value one stated stimulus pointer carries, and
 func cp2InputValue(inputs []any, pointer string) (any, bool) {
 	for _, raw := range inputs {
 		in, ok := raw.(map[string]any)
@@ -3490,7 +3480,6 @@ func cp2InputValue(inputs []any, pointer string) (any, bool) {
 	return nil, false
 }
 
-// cp2FlatStatedDAIDs reads the two other spellings of the same occurrence fact:
 func cp2FlatStatedDAIDs(where string, inputs []any, fixtures map[string]cp2Fixture) ([]string, bool, error) {
 	var out []string
 	stated := false
@@ -3535,6 +3524,10 @@ func cp2FlatStatedDAIDs(where string, inputs []any, fixtures map[string]cp2Fixtu
 		id, _ := f.Value.(string)
 		ordered = append(ordered, id)
 	}
+	aliases := cp2InputAliasesAt(inputs, "/input/block_complete_da_ids_in_transaction_order")
+	if len(cp2SortedUnique(aliases)) == len(aliases) && len(cp2SortedUnique(ordered)) != len(ordered) {
+		return nil, false, fmt.Errorf("%s/input/block_complete_da_ids_in_transaction_order states an identity more than once", where)
+	}
 	if stated && !slices.Equal(cp2SortedUnique(out), cp2SortedUnique(ordered)) {
 		return nil, false, fmt.Errorf("%s stated occurrence spellings disagree on the complete DA-set identities", where)
 	}
@@ -3542,6 +3535,9 @@ func cp2FlatStatedDAIDs(where string, inputs []any, fixtures map[string]cp2Fixtu
 }
 
 func cp2SetIdentityDAID(where, alias string, raw any) (string, error) {
+	if _, err := cp2CleanupIdentity(where+"/"+alias, raw); err != nil {
+		return "", err
+	}
 	identity, ok := cp2JSONImage(raw).(map[string]any)
 	if !ok {
 		return "", fmt.Errorf("%s included-set fixture %q carries a non-object identity", where, alias)
@@ -3688,6 +3684,22 @@ func cp2ValidateCleanupClassifier(where string, inputs []any, expected map[strin
 		if fault["target"] != "CLAIM_DA_SET_1" || !slices.Contains(cp2InputAliasesAt(inputs, "/input/prestate_owner_claims"), cp2CaseAliasPrefix(where)+"CLAIM_DA_SET_1") {
 			return fmt.Errorf("%s/input/owner_token_fault/target: does not name the stated prestate owner claim", where)
 		}
+		claimFixture, err := cp2CaseFixture(fixtures, where, cp2CaseAliasPrefix(where)+"CLAIM_DA_SET_1", "object")
+		if err != nil {
+			return err
+		}
+		setFixture, err := cp2CaseFixture(fixtures, where, cp2CaseAliasPrefix(where)+"DA_SET_1", "object")
+		if err != nil {
+			return err
+		}
+		claim, _ := cp2JSONImage(claimFixture.Value).(map[string]any)
+		set, _ := cp2JSONImage(setFixture.Value).(map[string]any)
+		commit, _ := cp2JSONImage(set["commit"]).(map[string]any)
+		claimTx, claimOK := claim["txid"].(string)
+		commitTx, commitOK := commit["txid"].(string)
+		if claim["kind"] != "owner_claim" || claim["domain"] != "da" || !claimOK || !commitOK || !cp2HexRE.MatchString(claimTx) || claimTx != commitTx {
+			return fmt.Errorf("%s/input/owner_token_fault/target: owner claim does not exactly bind retained DA_SET_1 commit txid", where)
+		}
 	}
 	effects, _ := expected["effects"].(map[string]any)
 	var removedCount, includedCount, matchedCount uint64
@@ -3772,7 +3784,6 @@ func cp2SummaryBlockAlias(where string, summary []any, index int) (string, error
 	return block, nil
 }
 
-// cp2SummaryBlockForSuffix binds a grouped included-set entry to exactly one
 func cp2SummaryBlockForSuffix(where string, summary []any, suffix string) (string, error) {
 	var found string
 	for i := range summary {
@@ -3793,7 +3804,6 @@ func cp2SummaryBlockForSuffix(where string, summary []any, suffix string) (strin
 	return found, nil
 }
 
-// cp2PrestateRecords resolves the object fixtures one stated prestate pointer
 func cp2PrestateRecords(where string, inputs []any, fixtures map[string]cp2Fixture, pointer string) ([]map[string]any, bool, error) {
 	raw, stated := cp2InputValue(inputs, pointer)
 	if !stated {
@@ -3819,7 +3829,6 @@ func cp2PrestateRecords(where string, inputs []any, fixtures map[string]cp2Fixtu
 	return out, true, nil
 }
 
-// cp2DerivedCounts is the counter set an image that did not move republishes: an
 func cp2DerivedCounts(where, image, relation string, inputs []any, fixtures map[string]cp2Fixture) (map[string]uint64, map[string]uint64, error) {
 	pointer := map[string]string{
 		"STANDARD_MEMPOOL_IMAGE_V1": "/input/prestate_standard_records",
@@ -3866,7 +3875,6 @@ func cp2DerivedCounts(where, image, relation string, inputs []any, fixtures map[
 		map[string]uint64{"last_admission_seq": last}, nil
 }
 
-// cp2ValidateR1208Expected validates one case's expected projection against the
 func cp2ValidateR1208Expected(where string, c map[string]any, fixtures map[string]cp2Fixture, resolved map[string]cp2Fixture, direct map[string][]string) error {
 	expected, ok := c["expected"].(map[string]any)
 	if !ok {
@@ -3947,7 +3955,6 @@ func cp2ValidateR1208Expected(where string, c map[string]any, fixtures map[strin
 	return cp2ValidateR1208Summary(where, inputs, expected, images, fixtures, resolved, truth)
 }
 
-// cp2ValidateOwnerStableTip mirrors the drift checker's OWNER/CHAIN relation:
 func cp2ValidateOwnerStableTip(where string, images map[string]any, resolved map[string]cp2Fixture) error {
 	chain, _ := images["CHAIN_IMAGE_V1"].(map[string]any)
 	owner, _ := images["OWNER_IMAGE_V1"].(map[string]any)
@@ -4061,8 +4068,8 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 		if !ok {
 			return fmt.Errorf("%s summary[%d] block height invalid", where, i)
 		}
-		if haveHeight && h <= lastHeight {
-			return fmt.Errorf("%s summary heights not strictly canonical", where)
+		if haveHeight && (lastHeight == math.MaxUint64 || h != lastHeight+1) {
+			return fmt.Errorf("%s summary heights are not consecutive", where)
 		}
 		lastHeight, haveHeight, lastBlock = h, true, obj
 
@@ -4145,7 +4152,6 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 	return cp2SummaryRowsEffect(where, expected, uint64(len(rows)))
 }
 
-// cp2PrestateChainBlock resolves the stated prestate chain entry `fromEnd`
 func cp2PrestateChainBlock(where string, prestate any, fixtures map[string]cp2Fixture, fromEnd int) (map[string]any, error) {
 	chain, _ := prestate.([]any)
 	if len(chain) < fromEnd {
@@ -4163,7 +4169,6 @@ func cp2PrestateChainBlock(where string, prestate any, fixtures map[string]cp2Fi
 	return block, nil
 }
 
-// cp2ValidateChainTip compares the published CHAIN tip identity against the
 func cp2ValidateChainTip(where string, images map[string]any, resolved map[string]cp2Fixture, tipBlock map[string]any, what string) error {
 	chain, _ := images["CHAIN_IMAGE_V1"].(map[string]any)
 	chainFields, _ := chain["direct_fields"].(map[string]any)
@@ -4187,7 +4192,7 @@ func cp2ValidateChainTip(where string, images map[string]any, resolved map[strin
 	return nil
 }
 
-// cp2SummaryRowsEffect checks the stated row-count effect against the rows the
+// Keep this secondary effect check last so typed summary errors retain precedence.
 func cp2SummaryRowsEffect(where string, expected map[string]any, rows uint64) error {
 	effects, _ := expected["effects"].(map[string]any)
 	effect, stated := effects["summary_rows"].(map[string]any)
@@ -4200,7 +4205,6 @@ func cp2SummaryRowsEffect(where string, expected map[string]any, rows uint64) er
 	return nil
 }
 
-// cp2CaseFixture resolves one catalog alias a case names. Beyond existence and
 func cp2CaseFixture(fixtures map[string]cp2Fixture, where, alias, want string) (cp2Fixture, error) {
 	f, ok := fixtures[alias]
 	if !ok {
@@ -4215,13 +4219,11 @@ func cp2CaseFixture(fixtures map[string]cp2Fixture, where, alias, want string) (
 	return f, nil
 }
 
-// cp2CaseAliasPrefix is the catalog namespace of one case: every fixture a
 func cp2CaseAliasPrefix(where string) string {
 	row, caseID, _ := strings.Cut(where, "/")
 	return "R1208_" + strings.ReplaceAll(strings.TrimPrefix(row, "C01-"), "-", "_") + "_" + caseID + "_"
 }
 
-// cp2ManifestHashOK re-derives a frozen manifest's canonical hash and compares
 func cp2ManifestHashOK(what string, manifest cpMap, want string) error {
 	got, err := cp2CanonicalSHA(manifest)
 	if err != nil {
