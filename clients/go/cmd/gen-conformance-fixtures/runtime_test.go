@@ -2332,6 +2332,17 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"stale standard used_bytes": func(t *testing.T, d map[string]any) {
 			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN"), "STANDARD_MEMPOOL_IMAGE_V1", "used_bytes")["value"] = json.Number("999999")
 		},
+		"prestate sizes overflow the used-bytes total": func(t *testing.T, d map[string]any) {
+			// 2^64-1 + 1 is the minimal sum past the u64 ceiling: without the overflow arm `used` wraps to 0 and the wrapped total becomes the derived counter.
+			f := d["fixtures"].(map[string]any)
+			f["R1208_SIDE_001_MAIN_TX_S1"].(map[string]any)["value"].(map[string]any)["size"] = json.Number("18446744073709551615")
+			f["R1208_SIDE_001_MAIN_TX_S2"] = map[string]any{"type": "object", "value": map[string]any{"kind": "standard_record", "size": json.Number("1")}}
+			for _, raw := range cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")["input"].([]any) {
+				if in := raw.(map[string]any); in["pointer"] == "/input/prestate_standard_records" {
+					in["value_or_alias"] = []any{"R1208_SIDE_001_MAIN_TX_S1", "R1208_SIDE_001_MAIN_TX_S2"}
+				}
+			}
+		},
 		"stale retained set_count": func(t *testing.T, d map[string]any) {
 			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-DACLEAN-001", "ABSENT_RETAINED"), "RETAINED_DA_IMAGE_V1", "set_count")["value"] = json.Number("0")
 		},
@@ -2388,6 +2399,13 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 				}
 			}
 		},
+		"grouped included-set entry stated empty": func(t *testing.T, d map[string]any) {
+			entry := d["fixtures"].(map[string]any)["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
+			entry["value"].(map[string]any)["identities"] = []any{}
+		},
+		"commit truth outside the closed set": func(t *testing.T, d map[string]any) {
+			cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")["expected"].(map[string]any)["commit_truth"] = "MAYBE"
+		},
 		"included-set identity substituted": func(t *testing.T, d map[string]any) {
 			fixtures := d["fixtures"].(map[string]any)
 			entry := fixtures["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
@@ -2405,6 +2423,9 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"resolved key not a token":                           "is not the composed full form",
 		"resolved key trailing newline":                      "is not the composed full form",
 		"stale standard used_bytes":                          "used_bytes=999999 differs from the 201",
+		"prestate sizes overflow the used-bytes total":       "overflows the used-bytes total",
+		"grouped included-set entry stated empty":            "differ from the included-set identities",
+		"commit truth outside the closed set":                "no allowed relation",
 		"stale retained set_count":                           "set_count=0 differs from the 1",
 		"stale owner claim_count":                            "claim_count=99 differs from the 3",
 		"da occurrence dropped from a block_includes case":   "differ from the included-set identities",

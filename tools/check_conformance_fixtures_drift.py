@@ -257,7 +257,9 @@ def _direct_field_names(manifest: object) -> dict:
         if not isinstance(fields, list) or not fields:
             raise RuntimeError(f"canonical_pipeline_v2: image manifest {image} names no direct_fields")
         for name in fields:
-            if not isinstance(name, str) or name not in V2_DIRECT_FIELD_TYPES:
+            if not isinstance(name, str):
+                raise RuntimeError(f"canonical_pipeline_v2: image manifest {image} direct_fields carries a non-string")
+            if name not in V2_DIRECT_FIELD_TYPES:
                 raise RuntimeError(
                     f"canonical_pipeline_v2: image manifest {image} direct field {name!r} has no declared type"
                 )
@@ -343,9 +345,10 @@ def _derived_counts(where: str, image: str, relation: str, inputs: object, fixtu
         return {"claim_count": len(records)}
     used = 0
     for record in records:
-        if not isinstance(record, dict) or type(record.get("size")) is not int or not 0 <= record["size"] < 2**64 or used > 2**64 - 1 - record["size"]:
+        size = record.get("size") if isinstance(record, dict) else None
+        if type(size) is not int or not 0 <= size < 2**64 or used > 2**64 - 1 - size:
             raise RuntimeError(f"{where}{pointer}: carries a record without a u64 size or overflows the used-bytes total")
-        used += record["size"]
+        used += size
     return {"record_count": len(records), "tx_count": len(records), "used_bytes": used}
 
 
@@ -504,7 +507,9 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
         if not isinstance(row, dict) or not isinstance(row.get("cases"), list):
             raise RuntimeError("canonical_pipeline_v2: migrated row shape")
         row_id = row.get("row_id")
-        if not isinstance(row_id, str) or row_id in got_counts:
+        if not isinstance(row_id, str):
+            raise RuntimeError(f"canonical_pipeline_v2: row_id {row_id!r} is not a string")
+        if row_id in got_counts:
             raise RuntimeError(f"canonical_pipeline_v2: duplicate migrated row {row_id!r}")
         got_counts[row_id] = len(row["cases"])
     if got_counts != V2_RUB1208_CASE_COUNTS:
@@ -964,6 +969,16 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         case = case_of(data, "C01-REORG-001", "MAIN")
         case["expected"]["canonical_applied_blocks"].pop(0)
 
+    def maybe_commit_truth(data: dict) -> None:
+        case_of(data, "C01-DIRECT-001", "MAIN")["expected"]["commit_truth"] = "MAYBE"
+
+    def overflow_prestate_sizes(data: dict) -> None:
+        # 2**64-1 + 1 is the minimal sum past the u64 ceiling: without the overflow arm `used` wraps to 0 and the wrapped total becomes the derived counter.
+        data["fixtures"]["R1208_SIDE_001_MAIN_TX_S1"]["value"]["size"] = 2**64 - 1
+        data["fixtures"]["R1208_SIDE_001_MAIN_TX_S2"] = {"type": "object", "value": {"kind": "standard_record", "size": 1}}
+        stated = next(i for i in case_of(data, "C01-SIDE-001", "MAIN")["input"] if i["pointer"] == "/input/prestate_standard_records")
+        stated["value_or_alias"] = ["R1208_SIDE_001_MAIN_TX_S1", "R1208_SIDE_001_MAIN_TX_S2"]
+
     def summary_rows_effect_drift(data: dict) -> None:
         case = case_of(data, "C01-REORG-001", "MAIN")
         case["expected"]["effects"]["summary_rows"]["value"] = 99
@@ -993,6 +1008,8 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("substituted digest alias", substituted_digest_alias, "digest_alias="),
         ("summary_rows effect drift", summary_rows_effect_drift, "effects.summary_rows"),
         ("stale standard used_bytes", stale_standard_used_bytes, "differs from the 201 the stated prestate derives"),
+        ("prestate sizes overflow the used-bytes total", overflow_prestate_sizes, "overflows the used-bytes total"),
+        ("commit truth outside the closed set", maybe_commit_truth, "no allowed relation"),
         ("stale retained set_count", stale_retained_set_count, "differs from the 1 the stated prestate derives"),
         ("stale owner claim_count", stale_owner_claim_count, "differs from the 3 the stated prestate derives"),
         ("dropped occurrence on a block_includes case", drop_block_includes_occurrence, "differ from the included-set"),

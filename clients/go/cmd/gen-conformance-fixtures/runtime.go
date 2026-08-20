@@ -3395,13 +3395,15 @@ func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixt
 		switch {
 		case hasBlock && hasIdentities:
 			shapes["grouped"] = true
+			ids := grouped[blockID]
 			for _, raw := range identities {
 				id, err := cp2SetIdentityDAID(where, alias, raw)
 				if err != nil {
 					return nil, err
 				}
-				grouped[blockID] = append(grouped[blockID], id)
+				ids = append(ids, id)
 			}
+			grouped[blockID] = ids // bound outside the loop: a stated `identities: []` claims the EMPTY set for this block's row
 		case !hasBlock && !hasIdentities:
 			shapes["flat"] = true
 			id, err := cp2SetIdentityDAID(where, alias, entry)
