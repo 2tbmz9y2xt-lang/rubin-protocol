@@ -257,7 +257,7 @@ def _direct_field_names(manifest: object) -> dict:
         if not isinstance(fields, list) or not fields:
             raise RuntimeError(f"canonical_pipeline_v2: image manifest {image} names no direct_fields")
         for name in fields:
-            if name not in V2_DIRECT_FIELD_TYPES:
+            if not isinstance(name, str) or name not in V2_DIRECT_FIELD_TYPES:
                 raise RuntimeError(
                     f"canonical_pipeline_v2: image manifest {image} direct field {name!r} has no declared type"
                 )
@@ -343,8 +343,8 @@ def _derived_counts(where: str, image: str, relation: str, inputs: object, fixtu
         return {"claim_count": len(records)}
     used = 0
     for record in records:
-        if not isinstance(record, dict) or type(record.get("size")) is not int or not 0 <= record["size"] < 2**64:
-            raise RuntimeError(f"{where}{pointer}: carries a record without a u64 size")
+        if not isinstance(record, dict) or type(record.get("size")) is not int or not 0 <= record["size"] < 2**64 or used > 2**64 - 1 - record["size"]:
+            raise RuntimeError(f"{where}{pointer}: carries a record without a u64 size or overflows the used-bytes total")
         used += record["size"]
     return {"record_count": len(records), "tx_count": len(records), "used_bytes": used}
 
@@ -504,7 +504,7 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
         if not isinstance(row, dict) or not isinstance(row.get("cases"), list):
             raise RuntimeError("canonical_pipeline_v2: migrated row shape")
         row_id = row.get("row_id")
-        if row_id in got_counts:
+        if not isinstance(row_id, str) or row_id in got_counts:
             raise RuntimeError(f"canonical_pipeline_v2: duplicate migrated row {row_id!r}")
         got_counts[row_id] = len(row["cases"])
     if got_counts != V2_RUB1208_CASE_COUNTS:
