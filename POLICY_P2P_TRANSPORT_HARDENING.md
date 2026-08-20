@@ -138,7 +138,15 @@ Treat these as malformed relay inputs:
 - impossible lengths;
 - duplicate prefilled indices;
 - invalid transaction index mappings;
-- unsupported compact relay wire version.
+
+For `sendcmpct`, require exactly nine payload bytes, then validate that `mode`
+is `0`, `1`, or `2` before classifying `version`. Any other mode remains
+malformed regardless of version. With a valid mode,
+`version != 1` is unsupported but not malformed and is consumed as a
+state-neutral ignore: it MUST NOT mutate compact state, affect score or ban
+state, disconnect the peer, return a public handler error, or prevent the same
+session from processing its next valid frame. Only `version == 1` with a valid
+mode may update compact state.
 
 Malformed relay inputs MAY affect peer score.
 
