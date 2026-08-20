@@ -2915,7 +2915,7 @@ pub fn decode_inventory_vectors(payload: &[u8]) -> io::Result<Vec<InventoryVecto
         ));
     }
     let mut out = Vec::with_capacity(count);
-    for chunk in payload.chunks_exact(INVENTORY_VECTOR_SIZE) {
+    for chunk in payload.as_chunks::<INVENTORY_VECTOR_SIZE>().0 {
         let kind = chunk[0];
         if kind != MSG_BLOCK && kind != MSG_TX {
             return Err(io::Error::new(
@@ -3345,7 +3345,10 @@ pub fn decode_cmpctblock_payload(payload: &[u8]) -> io::Result<CmpctBlockPayload
     let prefilled_count = read_compact_size_at(payload, &mut next_offset)?;
     let total_entries = validate_cmpctblock_entry_count(short_count, prefilled_count)?;
     let mut short_ids = Vec::new();
-    for chunk in payload[offset..short_id_end].chunks_exact(COMPACT_SHORT_ID_BYTES) {
+    for chunk in payload[offset..short_id_end]
+        .as_chunks::<COMPACT_SHORT_ID_BYTES>()
+        .0
+    {
         let mut short_id = [0u8; COMPACT_SHORT_ID_BYTES];
         short_id.copy_from_slice(chunk);
         short_ids.push(short_id);
