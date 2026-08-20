@@ -2370,7 +2370,8 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			// 2^64-1 + 1 is the minimal sum past the u64 ceiling: without the overflow arm `used` wraps to 0 and the wrapped total becomes the derived counter.
 			f := d["fixtures"].(map[string]any)
 			f["R1208_SIDE_001_MAIN_TX_S1"].(map[string]any)["value"].(map[string]any)["size"] = json.Number("18446744073709551615")
-			f["R1208_SIDE_001_MAIN_TX_S2"] = map[string]any{"type": "object", "value": map[string]any{"kind": "standard_record", "size": json.Number("1")}}
+			// admission_seq is stated so the u64-shape arm cannot preempt the overflow arm this row exists to prove.
+			f["R1208_SIDE_001_MAIN_TX_S2"] = map[string]any{"type": "object", "value": map[string]any{"kind": "standard_record", "size": json.Number("1"), "admission_seq": json.Number("2")}}
 			for _, raw := range cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")["input"].([]any) {
 				if in := raw.(map[string]any); in["pointer"] == "/input/prestate_standard_records" {
 					in["value_or_alias"] = []any{"R1208_SIDE_001_MAIN_TX_S1", "R1208_SIDE_001_MAIN_TX_S2"}
@@ -2379,6 +2380,16 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		},
 		"stale retained set_count": func(t *testing.T, d map[string]any) {
 			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-DACLEAN-001", "ABSENT_RETAINED"), "RETAINED_DA_IMAGE_V1", "set_count")["value"] = json.Number("0")
+		},
+		"stale retained pinned_payload_bytes": func(t *testing.T, d map[string]any) {
+			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-DISCONNECT-001", "MAIN"), "RETAINED_DA_IMAGE_V1", "pinned_payload_bytes")["value"] = json.Number("999999")
+		},
+		"rewound last_admission_seq": func(t *testing.T, d map[string]any) {
+			// A rewind BELOW a resident record is the M15 mutation; a watermark ABOVE it is legal (evicted seq), so only this direction reddens.
+			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN"), "STANDARD_MEMPOOL_IMAGE_V1", "last_admission_seq")["value"] = json.Number("0")
+		},
+		"chain utxo_count off the tip block": func(t *testing.T, d map[string]any) {
+			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN"), "CHAIN_IMAGE_V1", "utxo_count")["value"] = json.Number("777")
 		},
 		"stale owner claim_count": func(t *testing.T, d map[string]any) {
 			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-DACLEAN-001", "CORRUPT_FIRST"), "OWNER_IMAGE_V1", "claim_count")["value"] = json.Number("99")
@@ -2540,6 +2551,9 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"grouped included-set entry stated empty":            "differ from the included-set identities",
 		"commit truth outside the closed set":                "no allowed relation",
 		"stale retained set_count":                           "set_count=0 differs from the 1",
+		"stale retained pinned_payload_bytes":                "pinned_payload_bytes=999999 differs from the 308",
+		"rewound last_admission_seq":                         "last_admission_seq=0 is rewound below the 1",
+		"chain utxo_count off the tip block":                 "CHAIN tip must equal the stated prestate chain tip",
 		"stale owner claim_count":                            "claim_count=99 differs from the 3",
 		"da occurrence dropped from a block_includes case":   "differ from the included-set identities",
 		"da occurrence added where the stated count is zero": "summary carries 1 complete DA-set occurrences, the case states 0",

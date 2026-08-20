@@ -351,32 +351,52 @@ def _validate_input_aliases(where: str, case: dict, fixtures: dict) -> None:
                 )
 
 
-def _derived_counts(where: str, image: str, relation: str, inputs: object, fixtures: dict) -> dict:
+def _derived_counts(where: str, image: str, relation: str, inputs: object, fixtures: dict) -> tuple:
     """Counters an image that did not move republishes: an `unchanged` or `old`
     image is exactly the prestate the case states, so M15 (stale standard), M16
     (stale retained-DA) and M17 (stale owner claim) redden instead of being
     authored freely. Mirrors Go cp2DerivedCounts; the `new` transition rule is
-    deferred to RUB-1204 and derived nowhere here."""
+    deferred to RUB-1204 and derived nowhere here.
+
+    Returns (exact equalities, lower bounds). `last_admission_seq` is the
+    monotone high-water M1 preserves (manifest mutation M15 "rewound"), which
+    the reference only requires at or above the greatest resident
+    admission_seq, so an evicted higher seq legally leaves it ABOVE the stated
+    maximum. `orphan_bytes` (excluded wireBytes accounting) and
+    `current_mempool_min_fee_rate` are functions of no stated record."""
     pointer = _PRESTATE_POINTER.get(image)
     if pointer is None or relation not in ("unchanged", "old"):
-        return {}
+        return {}, {}
     value = _input_value(inputs, pointer)
     if value is _ABSENT:
-        return {}
+        return {}, {}
     if not isinstance(value, list):
         raise RuntimeError(f"{where}{pointer}: not an array")
     records = [_fixture_value(fixtures, alias, "object", f"{where}{pointer}") for alias in value]
     if image == "RETAINED_DA_IMAGE_V1":
-        return {"set_count": len(records)}
+        # RUBIN_COMPACT_BLOCKS 5.1 counts DA payload bytes only for a retained COMPLETE_SET; every other state contributes zero (da_relay_state.go pinnedPayloadAccountingBytes).
+        pinned = 0
+        for record in records:
+            if not isinstance(record, dict) or record.get("state") != "COMPLETE_SET":
+                continue
+            payload = record.get("payload_bytes")
+            if type(payload) is not int or not 0 <= payload < 2**64 or pinned > 2**64 - 1 - payload:
+                raise RuntimeError(f"{where}{pointer}: carries a COMPLETE_SET without a u64 payload_bytes or overflows the pinned-payload total")
+            pinned += payload
+        return {"set_count": len(records), "pinned_payload_bytes": pinned}, {}
     if image == "OWNER_IMAGE_V1":
-        return {"claim_count": len(records)}
-    used = 0
+        return {"claim_count": len(records)}, {}
+    used = last = 0
     for record in records:
         size = record.get("size") if isinstance(record, dict) else None
-        if type(size) is not int or not 0 <= size < 2**64 or used > 2**64 - 1 - size:
-            raise RuntimeError(f"{where}{pointer}: carries a record without a u64 size or overflows the used-bytes total")
+        seq = record.get("admission_seq") if isinstance(record, dict) else None
+        if type(size) is not int or not 0 <= size < 2**64 or used > 2**64 - 1 - size \
+                or type(seq) is not int or not 0 <= seq < 2**64:
+            raise RuntimeError(f"{where}{pointer}: carries a record without a u64 size or admission_seq or overflows the used-bytes total")
         used += size
-    return {"record_count": len(records), "tx_count": len(records), "used_bytes": used}
+        last = max(last, seq)
+    return ({"record_count": len(records), "tx_count": len(records), "used_bytes": used},
+            {"last_admission_seq": last})
 
 
 def _set_identity_da_id(raw: object, where: str) -> str:
@@ -680,7 +700,7 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                     )
                 _resolved_entry(resolved, digest, "bytes32_hex", f"{where}/{image}/digest_alias")
                 referenced.add(digest)
-                derived = _derived_counts(where, image, relation, inputs, fixtures)
+                derived, at_least = _derived_counts(where, image, relation, inputs, fixtures)
                 written = projection.get("direct_fields")
                 if not isinstance(written, dict) or set(written) != set(direct_fields[image]):
                     raise RuntimeError(
@@ -704,6 +724,11 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                             f"{where}/{image}/{field}: {value!r} differs from the "
                             f"{derived[field]} the stated prestate derives"
                         )
+                    if field in at_least and value < at_least[field]:
+                        raise RuntimeError(
+                            f"{where}/{image}/{field}: {value!r} is rewound below the "
+                            f"{at_least[field]} the stated prestate requires"
+                        )
 
             chain = images["CHAIN_IMAGE_V1"]["direct_fields"]
             owner = images["OWNER_IMAGE_V1"]["direct_fields"]
@@ -713,6 +738,8 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             chain_height = _resolved_entry(
                 resolved, chain.get("height"), "u64", f"{where}/CHAIN/height"
             )
+            # All three CHAIN direct fields are bound to the tip block, so a count belonging to another block is a substituted identity. Mirrors Go cp2ValidateChainTip.
+            chain_utxo = _resolved_entry(resolved, chain.get("utxo_count"), "u64", f"{where}/CHAIN/utxo_count")
             stable_tip = _resolved_entry(
                 resolved, owner.get("stable_tip"), "object", f"{where}/OWNER/stable_tip"
             )
@@ -735,7 +762,8 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                 prestate = _input_value(inputs, "/input/prestate_canonical_chain")
                 if prestate is not _ABSENT and images["CHAIN_IMAGE_V1"].get("relation") != "new":
                     tip_block = _prestate_chain_block(where, prestate, fixtures, 1)
-                    if chain_hash != tip_block.get("block_hash") or chain_height != tip_block.get("height"):
+                    if chain_hash != tip_block.get("block_hash") or chain_height != tip_block.get("height") \
+                            or chain_utxo != tip_block.get("utxo_count"):
                         raise RuntimeError(f"{where}/CHAIN: tip must equal the stated prestate chain tip")
                 # A non-NEW case publishes no summary at all, so its stated row
                 # count is exactly 0: reached here, the arm is unreachable behind
@@ -849,6 +877,7 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                 tip_what = "the block below the disconnected tip"
             if tip_block is not None and (
                 chain_hash != tip_block.get("block_hash") or chain_height != tip_block.get("height")
+                or chain_utxo != tip_block.get("utxo_count")
             ):
                 raise RuntimeError(f"{where}/CHAIN: tip must equal {tip_what}")
 
@@ -908,6 +937,16 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
 
     def stale_owner_claim_count(data: dict) -> None:
         resolved_of(data, "C01-DACLEAN-001", "CORRUPT_FIRST", "OWNER_IMAGE_V1", "claim_count")["value"] = 99
+
+    def stale_retained_pinned_payload_bytes(data: dict) -> None:
+        resolved_of(data, "C01-DISCONNECT-001", "MAIN", "RETAINED_DA_IMAGE_V1", "pinned_payload_bytes")["value"] = 999999
+
+    def rewound_last_admission_seq(data: dict) -> None:
+        # A rewind BELOW a resident record is M15; a watermark ABOVE it is legal (an evicted seq), so only this direction reddens.
+        resolved_of(data, "C01-SIDE-001", "MAIN", "STANDARD_MEMPOOL_IMAGE_V1", "last_admission_seq")["value"] = 0
+
+    def chain_utxo_count_off_the_tip_block(data: dict) -> None:
+        resolved_of(data, "C01-SIDE-001", "MAIN", "CHAIN_IMAGE_V1", "utxo_count")["value"] = 777
 
     def drop_block_includes_occurrence(data: dict) -> None:
         case_of(data, "C01-DIRECT-001", "MAIN")["expected"]["canonical_applied_blocks"][0]["complete_da_ids"] = []
@@ -1124,7 +1163,8 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
     def overflow_prestate_sizes(data: dict) -> None:
         # 2**64-1 + 1 is the minimal sum past the u64 ceiling; Python ints never wrap like Go uint64, so record_count would reject without this guard.
         data["fixtures"]["R1208_SIDE_001_MAIN_TX_S1"]["value"]["size"] = 2**64 - 1
-        data["fixtures"]["R1208_SIDE_001_MAIN_TX_S2"] = {"type": "object", "value": {"kind": "standard_record", "size": 1}}
+        # admission_seq is stated so the u64-shape arm cannot preempt the overflow arm this control exists to prove.
+        data["fixtures"]["R1208_SIDE_001_MAIN_TX_S2"] = {"type": "object", "value": {"kind": "standard_record", "size": 1, "admission_seq": 2}}
         stated = next(i for i in case_of(data, "C01-SIDE-001", "MAIN")["input"] if i["pointer"] == "/input/prestate_standard_records")
         stated["value_or_alias"] = ["R1208_SIDE_001_MAIN_TX_S1", "R1208_SIDE_001_MAIN_TX_S2"]
 
@@ -1209,6 +1249,9 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("commit truth outside the closed set", maybe_commit_truth, "no allowed relation"),
         ("stale retained set_count", stale_retained_set_count, "differs from the 1 the stated prestate derives"),
         ("stale owner claim_count", stale_owner_claim_count, "differs from the 3 the stated prestate derives"),
+        ("stale retained pinned_payload_bytes", stale_retained_pinned_payload_bytes, "differs from the 308 the stated prestate derives"),
+        ("rewound last_admission_seq", rewound_last_admission_seq, "is rewound below the 1 the stated prestate requires"),
+        ("chain utxo_count off the tip block", chain_utxo_count_off_the_tip_block, "tip must equal the stated prestate chain tip"),
         ("dropped occurrence on a block_includes case", drop_block_includes_occurrence, "differ from the included-set"),
         ("one occurrence spelling dropped", drop_one_occurrence_spelling, "stated occurrence spellings disagree"),
         ("one occurrence spelling stated empty", empty_one_occurrence_spelling, "stated occurrence spellings disagree"),

@@ -3681,7 +3681,14 @@ func cp2PrestateRecords(where string, inputs []any, fixtures map[string]cp2Fixtu
 // counters are derived rather than authored and M15 (stale standard), M16
 // (stale retained-DA) and M17 (stale owner claim) redden. A `new` image needs
 // the transition rule, which is deferred to RUB-1204 and derived nowhere here.
-func cp2DerivedCounts(where, image, relation string, inputs []any, fixtures map[string]cp2Fixture) (map[string]uint64, error) {
+// The second result is LOWER BOUNDS: `last_admission_seq` is the monotone
+// high-water M1 preserves (manifest mutation M15 "rewound"), which the reference
+// only requires at or above the greatest resident admission_seq
+// (node/sync_mempool.go rejects `snapshot.lastAdmissionSeq < maxAdmissionSeq`),
+// so an evicted higher seq legally leaves it ABOVE the stated maximum.
+// `orphan_bytes` (wireBytes accounting the manifest excludes by rule) and
+// `current_mempool_min_fee_rate` are functions of no stated record.
+func cp2DerivedCounts(where, image, relation string, inputs []any, fixtures map[string]cp2Fixture) (map[string]uint64, map[string]uint64, error) {
 	pointer := map[string]string{
 		"STANDARD_MEMPOOL_IMAGE_V1": "/input/prestate_standard_records",
 		"RETAINED_DA_IMAGE_V1":      "/input/prestate_retained_da_sets",
@@ -3689,28 +3696,43 @@ func cp2DerivedCounts(where, image, relation string, inputs []any, fixtures map[
 	}[image]
 	derived := map[string]uint64{}
 	if pointer == "" || (relation != "unchanged" && relation != "old") {
-		return derived, nil
+		return derived, nil, nil
 	}
 	records, stated, err := cp2PrestateRecords(where, inputs, fixtures, pointer)
 	if err != nil || !stated {
-		return derived, err
+		return derived, nil, err
 	}
 	n := uint64(len(records))
 	switch image {
 	case "RETAINED_DA_IMAGE_V1":
-		return map[string]uint64{"set_count": n}, nil
+		// RUBIN_COMPACT_BLOCKS §5.1 counts DA payload bytes only for a retained COMPLETE_SET; every other state contributes zero (da_relay_state.go pinnedPayloadAccountingBytes).
+		pinned := uint64(0)
+		for _, record := range records {
+			if record["state"] != "COMPLETE_SET" {
+				continue
+			}
+			payload, ok := cp2UintOf(record["payload_bytes"])
+			if !ok || pinned > math.MaxUint64-payload {
+				return nil, nil, fmt.Errorf("%s%s carries a COMPLETE_SET without a u64 payload_bytes or overflows the pinned-payload total", where, pointer)
+			}
+			pinned += payload
+		}
+		return map[string]uint64{"set_count": n, "pinned_payload_bytes": pinned}, nil, nil
 	case "OWNER_IMAGE_V1":
-		return map[string]uint64{"claim_count": n}, nil
+		return map[string]uint64{"claim_count": n}, nil, nil
 	}
-	used := uint64(0)
+	used, last := uint64(0), uint64(0)
 	for _, record := range records {
-		size, ok := cp2UintOf(record["size"])
-		if !ok || used > math.MaxUint64-size {
-			return nil, fmt.Errorf("%s%s carries a record without a u64 size or overflows the used-bytes total", where, pointer)
+		size, sizeOK := cp2UintOf(record["size"])
+		seq, seqOK := cp2UintOf(record["admission_seq"])
+		if !sizeOK || !seqOK || used > math.MaxUint64-size {
+			return nil, nil, fmt.Errorf("%s%s carries a record without a u64 size or admission_seq or overflows the used-bytes total", where, pointer)
 		}
 		used += size
+		last = max(last, seq)
 	}
-	return map[string]uint64{"record_count": n, "tx_count": n, "used_bytes": used}, nil
+	return map[string]uint64{"record_count": n, "tx_count": n, "used_bytes": used},
+		map[string]uint64{"last_admission_seq": last}, nil
 }
 
 // cp2ValidateR1208Expected validates one case's expected projection against the
@@ -3755,7 +3777,7 @@ func cp2ValidateR1208Expected(where string, c map[string]any, fixtures map[strin
 		if !ok || len(fields) != len(direct[image]) {
 			return fmt.Errorf("%s/%s direct_fields shape", where, image)
 		}
-		derived, err := cp2DerivedCounts(where, image, relation, inputs, fixtures)
+		derived, atLeast, err := cp2DerivedCounts(where, image, relation, inputs, fixtures)
 		if err != nil {
 			return err
 		}
@@ -3773,6 +3795,11 @@ func cp2ValidateR1208Expected(where string, c map[string]any, fixtures map[strin
 			if want, ok := derived[field]; ok {
 				if got, numeric := cp2UintOf(resolved[alias].Value); !numeric || got != want {
 					return fmt.Errorf("%s/%s/%s=%v differs from the %d the stated prestate derives", where, image, field, resolved[alias].Value, want)
+				}
+			}
+			if floor, ok := atLeast[field]; ok {
+				if got, numeric := cp2UintOf(resolved[alias].Value); !numeric || got < floor {
+					return fmt.Errorf("%s/%s/%s=%v is rewound below the %d the stated prestate requires", where, image, field, resolved[alias].Value, floor)
 				}
 			}
 		}
@@ -4012,20 +4039,28 @@ func cp2PrestateChainBlock(where string, prestate any, fixtures map[string]cp2Fi
 }
 
 // cp2ValidateChainTip compares the published CHAIN tip identity against the
-// block the case's own stated inputs make the tip.
+// block the case's own stated inputs make the tip. All three CHAIN direct fields
+// are bound here: the tip block fixture declares utxo_count exactly as it
+// declares block_hash and height, so a count belonging to another block is a
+// substituted identity, not a free counter.
 func cp2ValidateChainTip(where string, images map[string]any, resolved map[string]cp2Fixture, tipBlock map[string]any, what string) error {
 	chain, _ := images["CHAIN_IMAGE_V1"].(map[string]any)
 	chainFields, _ := chain["direct_fields"].(map[string]any)
 	tipAlias, _ := chainFields["tip_hash"].(string)
 	heightAlias, _ := chainFields["height"].(string)
+	utxoAlias, _ := chainFields["utxo_count"].(string)
 	tip, tipOK := resolved[tipAlias]
 	height, heightOK := resolved[heightAlias]
-	if !tipOK || !heightOK {
+	utxo, utxoOK := resolved[utxoAlias]
+	if !tipOK || !heightOK || !utxoOK {
 		return fmt.Errorf("%s CHAIN tip alias is unresolved", where)
 	}
 	gotHeight, numeric := cp2UintOf(height.Value)
 	wantHeight, wantNumeric := cp2UintOf(tipBlock["height"])
-	if tip.Value != tipBlock["block_hash"] || !numeric || !wantNumeric || gotHeight != wantHeight {
+	gotUTXO, utxoNumeric := cp2UintOf(utxo.Value)
+	wantUTXO, wantUTXONumeric := cp2UintOf(tipBlock["utxo_count"])
+	if tip.Value != tipBlock["block_hash"] || !numeric || !wantNumeric || gotHeight != wantHeight ||
+		!utxoNumeric || !wantUTXONumeric || gotUTXO != wantUTXO {
 		return fmt.Errorf("%s CHAIN tip must equal %s", where, what)
 	}
 	return nil
