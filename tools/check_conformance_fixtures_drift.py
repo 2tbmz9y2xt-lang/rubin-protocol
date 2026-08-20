@@ -509,14 +509,58 @@ def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: li
     return {block_alias(0): want}
 
 
-def _stated_branch_blocks(inputs: object) -> list:
+def _summary_rows_effect(where: str, expected: dict, rows: int) -> None:
+    """The stated row-count effect against the rows the case publishes. Secondary
+    consistency only: the typed rows are the primary evidence, so this runs LAST
+    on both paths and never preempts them. Mirrors Go cp2SummaryRowsEffect."""
+    effects = expected.get("effects")
+    effect = effects.get("summary_rows") if isinstance(effects, dict) else None
+    if isinstance(effect, dict) and (
+        type(effect.get("value")) is not int or effect["value"] != rows
+    ):
+        raise RuntimeError(
+            f"{where}/effects.summary_rows: {effect.get('value')!r} differs from the "
+            f"{rows} published rows"
+        )
+
+
+def _stated_branch_blocks(where: str, inputs: object, fixtures: dict) -> list:
     """The ordered blocks a case states will become newly canonical: the
-    pre-stored side branch in canonical order, then the stimulus block. A case
-    stating neither constrains nothing. Mirrors Go cp2StatedBranchBlocks."""
+    pre-stored side branch in canonical order, the block a single-block stimulus
+    names (a genesis pack or a relayed stimulus block) and the candidate an
+    equal-work tie-break names. A case stating none of them constrains nothing.
+    Mirrors Go cp2StatedBranchBlocks."""
     branch = _input_value(inputs, "/input/prestored_side_branch")
     out = list(branch) if isinstance(branch, list) else []
-    stimulus = _input_value(inputs, "/input/stimulus_block")
-    return out + [stimulus] if stimulus is not _ABSENT else out
+    for pointer in ("/input/genesis_pack", "/input/stimulus_block"):
+        value = _input_value(inputs, pointer)
+        if value is not _ABSENT:
+            out.append(value)
+    first = _input_value(inputs, "/input/candidate_a")
+    second = _input_value(inputs, "/input/candidate_b")
+    if first is _ABSENT and second is _ABSENT:
+        return out
+    # Equal-work tie-break: the candidate with the lower raw-byte block hash is
+    # the sole newly canonical block. The stated relation is enforced against the
+    # candidates' OWN declared hashes (both bytes32 lowercase hex, so string
+    # order is raw-byte order), so a stated-but-false relation is a rejection
+    # rather than a license for whichever winner the case then publishes. A
+    # half-stated pair resolves the absent alias and is rejected there.
+    hashes = []
+    for alias in (first, second):
+        block = _fixture_value(fixtures, alias, "object", f"{where}/equal-work candidate")
+        hashes.append(block.get("block_hash") if isinstance(block, dict) else None)
+    relation = _input_value(inputs, "/input/candidate_hash_relation")
+    if (
+        relation != "hash_ba_lt_hash_bb_raw_bytes"
+        or not all(isinstance(h, str) and V2_BYTES32_RE.match(h) for h in hashes)
+        or hashes[0] >= hashes[1]
+    ):
+        raise RuntimeError(
+            f"{where}: states candidate_hash_relation {relation!r}, which the candidates' "
+            f"own hashes {hashes[0]!r} / {hashes[1]!r} do not establish"
+        )
+    return out + [first]
 
 
 def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
@@ -672,6 +716,10 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             if truth != "NEW":
                 if summary is not None:
                     raise RuntimeError(f"{where}/canonical_applied_blocks: non-NEW must be null")
+                # A non-NEW case publishes no summary at all, so its stated row
+                # count is exactly 0: reached here, the arm is unreachable behind
+                # the NEW path. Mirrors Go cp2ValidateR1208Summary.
+                _summary_rows_effect(where, expected, 0)
                 continue
             if not isinstance(summary, list):
                 raise RuntimeError(f"{where}/canonical_applied_blocks: NEW must be an array")
@@ -749,7 +797,7 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             # The published blocks are the blocks the case states, in order: a
             # dropped, reordered or substituted one stops being the frame's own
             # ordered outcome even where every row is individually well-formed.
-            branch = _stated_branch_blocks(inputs)
+            branch = _stated_branch_blocks(where, inputs, fixtures)
             if branch and [r["block_id"] for r in summary] != branch:
                 raise RuntimeError(
                     f"{where}/canonical_applied_blocks: published blocks differ from "
@@ -770,23 +818,30 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                     f"occurrences, the case states {stated_count!r}"
                 )
 
-            if last_block is not None and (
-                chain_hash != last_block.get("block_hash") or chain_height != last_block["height"]
-            ):
-                raise RuntimeError(
-                    f"{where}/CHAIN: tip must equal the last canonical-applied block"
+            # The published chain tip is the last newly canonical block -- or, for
+            # a standalone disconnect, which publishes no row at all, the entry
+            # BELOW the disconnected tip in the stated prestate chain.
+            tip_block, tip_what = last_block, "the last canonical-applied block"
+            if disconnect:
+                prestate = _input_value(inputs, "/input/prestate_canonical_chain")
+                chain = prestate if isinstance(prestate, list) else []
+                if len(chain) < 2:
+                    raise RuntimeError(
+                        f"{where}/CHAIN: disconnects over a {len(chain)}-block prestate "
+                        f"chain, so no post-disconnect tip is stated"
+                    )
+                tip_block = _fixture_value(
+                    fixtures, chain[-2], "object", f"{where}/CHAIN/post-disconnect tip"
                 )
+                if not isinstance(tip_block, dict):
+                    raise RuntimeError(f"{where}/CHAIN: post-disconnect tip fixture is not an object")
+                tip_what = "the block below the disconnected tip"
+            if tip_block is not None and (
+                chain_hash != tip_block.get("block_hash") or chain_height != tip_block.get("height")
+            ):
+                raise RuntimeError(f"{where}/CHAIN: tip must equal {tip_what}")
 
-            # Secondary consistency only: the typed rows are the primary evidence.
-            effects = expected.get("effects")
-            effect = effects.get("summary_rows") if isinstance(effects, dict) else None
-            if isinstance(effect, dict) and (
-                type(effect.get("value")) is not int or effect["value"] != len(summary)
-            ):
-                raise RuntimeError(
-                    f"{where}/effects.summary_rows: {effect.get('value')!r} differs from the "
-                    f"{len(summary)} published rows"
-                )
+            _summary_rows_effect(where, expected, len(summary))
 
     orphans = sorted(set(resolved) - referenced)
     if orphans:
@@ -1066,7 +1121,43 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         case = case_of(data, "C01-REORG-001", "MAIN")
         case["expected"]["effects"]["summary_rows"]["value"] = 99
 
+    def substitute_the_genesis_summary_block(data: dict) -> None:
+        # The substitute carries the genesis block's own hash and height, so only
+        # the pack -> summary derivation can reject it.
+        data["fixtures"]["R1208_GENESIS_001_MAIN_G2"] = data["fixtures"]["R1208_GENESIS_001_MAIN_G"]
+        case_of(data, "C01-GENESIS-001", "MAIN")["expected"]["canonical_applied_blocks"][0]["block_id"] = "R1208_GENESIS_001_MAIN_G2"
+
+    def substitute_the_equal_work_winner(data: dict) -> None:
+        # Coherent: the row names the LOSER and the loser's own declared hash, so
+        # only the stated tie-break can reject the substitution.
+        loser = data["fixtures"]["R1208_EQUALWORK_001_MAIN_BB"]["value"]["block_hash"]
+        data["fixtures"]["R1208_EQUALWORK_001_MAIN_BB_HASH"] = {"type": "bytes32_hex", "value": loser}
+        row = case_of(data, "C01-EQUALWORK-001", "MAIN")["expected"]["canonical_applied_blocks"][0]
+        row["block_id"], row["block_hash"] = "R1208_EQUALWORK_001_MAIN_BB", "R1208_EQUALWORK_001_MAIN_BB_HASH"
+
+    def roll_the_post_disconnect_tip_to_genesis(data: dict) -> None:
+        input_of(data, "C01-DISCONNECT-001", "MAIN", "/input/prestate_canonical_chain")["value_or_alias"][1] = "R1208_DISCONNECT_001_MAIN_G"
+
+    def flat_identities_on_a_multi_row_summary(data: dict) -> None:
+        rows = case_of(data, "C01-DIRECT-001", "MAIN")["expected"]["canonical_applied_blocks"]
+        rows.append(rows[0])
+
+    group_1 = "R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"
     mutations = (
+        ("genesis summary block substituted", substitute_the_genesis_summary_block, "published blocks differ from the stated branch"),
+        ("equal-work winner substituted", substitute_the_equal_work_winner, "published blocks differ from the stated branch"),
+        ("equal-work hash relation contradicts the candidates", lambda d: input_of(d, "C01-EQUALWORK-001", "MAIN", "/input/candidate_hash_relation").update(value_or_alias="hash_bb_lt_hash_ba_raw_bytes"), "states candidate_hash_relation 'hash_bb_lt_hash_ba_raw_bytes'"),
+        ("post-disconnect tip rolled to genesis", roll_the_post_disconnect_tip_to_genesis, "tip must equal the block below the disconnected tip"),
+        ("non-NEW effect claims summary rows", lambda d: case_of(d, "C01-SUMMARY-001", "NON_NEW_NULL")["expected"]["effects"]["summary_rows"].update(value=7), "effects.summary_rows: 7 differs from the 0 published rows"),
+        ("two grouped keys bind one summary row", lambda d: d["fixtures"][group_1]["value"].update(block_id="SUCCESS_B1P"), "is bound by more than one included-set group"),
+        ("grouped key matches no summary row", lambda d: d["fixtures"][group_1]["value"].update(block_id="NOPE"), "included-set block 'NOPE' matches 0 summary rows"),
+        ("grouped key matches two summary rows", lambda d: case_of(d, "C01-DACLEAN-001", "MULTI_SET_SUCCESS")["expected"]["canonical_applied_blocks"][1].update(block_id="R1208_DACLEAN_001_MULTI_SET_SUCCESS_B1P"), "matches 2 summary rows"),
+        ("flat and grouped shapes mixed", lambda d: d["fixtures"][group_1].update(value={"da_id": "0" * 63 + "9"}), "mixes flat and grouped included-set identities"),
+        ("flat identities on a multi-row summary", flat_identities_on_a_multi_row_summary, "flat included-set identities but 2 summary rows"),
+        ("closure epoch moved off v8", lambda d: d["_meta"]["closure_epoch"].update(closure_manifest_version="rubin-c01-design-closure-v9"), "closure epoch is not frozen v8"),
+        ("closure status moved off building", lambda d: d["_meta"]["closure_epoch"].update(status="frozen"), "closure status is not building"),
+        ("migrated row duplicated", lambda d: d["rows"].append(d["rows"][0]), "duplicate migrated row"),
+        ("disconnect over a one-block prestate chain", lambda d: input_of(d, "C01-DISCONNECT-001", "MAIN", "/input/prestate_canonical_chain").update(value_or_alias=["R1208_DISCONNECT_001_MAIN_G"]), "disconnects over a 1-block prestate"),
         ("stale OWNER stable_tip", stale_owner_tip, "OWNER/stable_tip"),
         ("connect_count stated as a float", float_connect_count, "states connect_count 3.0"),
         ("block_complete_da_set_count stated as a float", float_da_set_count, "the case states 0.0"),

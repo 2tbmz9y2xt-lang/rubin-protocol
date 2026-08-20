@@ -2462,6 +2462,59 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			identities := entry["value"].(map[string]any)["identities"].([]any)
 			identities[0].(map[string]any)["da_id"] = strings.Repeat("0", 63) + "9"
 		},
+		"genesis summary block substituted": func(t *testing.T, d map[string]any) {
+			// The substitute carries the genesis block's own hash and height, so
+			// only the pack -> summary derivation can reject it.
+			f := d["fixtures"].(map[string]any)
+			f["R1208_GENESIS_001_MAIN_G2"] = f["R1208_GENESIS_001_MAIN_G"]
+			cp2CaseSummary(t, cp2AuthorityCase(t, d, "C01-GENESIS-001", "MAIN"))[0].(map[string]any)["block_id"] = "R1208_GENESIS_001_MAIN_G2"
+		},
+		"equal-work winner substituted": func(t *testing.T, d map[string]any) {
+			// Coherent: the row names the LOSER and the loser's own declared hash,
+			// so only the stated tie-break can reject the substitution.
+			f := d["fixtures"].(map[string]any)
+			loser := f["R1208_EQUALWORK_001_MAIN_BB"].(map[string]any)["value"].(map[string]any)["block_hash"]
+			f["R1208_EQUALWORK_001_MAIN_BB_HASH"] = map[string]any{"type": "bytes32_hex", "value": loser}
+			row := cp2CaseSummary(t, cp2AuthorityCase(t, d, "C01-EQUALWORK-001", "MAIN"))[0].(map[string]any)
+			row["block_id"], row["block_hash"] = "R1208_EQUALWORK_001_MAIN_BB", "R1208_EQUALWORK_001_MAIN_BB_HASH"
+		},
+		"equal-work relation contradicts the candidates": func(t *testing.T, d map[string]any) {
+			cp2CaseInput(t, d, "C01-EQUALWORK-001", "MAIN", "/input/candidate_hash_relation")["value_or_alias"] = "hash_bb_lt_hash_ba_raw_bytes"
+		},
+		"post-disconnect tip rolled to genesis": func(t *testing.T, d map[string]any) {
+			cp2CaseInput(t, d, "C01-DISCONNECT-001", "MAIN", "/input/prestate_canonical_chain")["value_or_alias"].([]any)[1] = "R1208_DISCONNECT_001_MAIN_G"
+		},
+		"non-NEW effect claims summary rows": func(t *testing.T, d map[string]any) {
+			cp2AuthorityCase(t, d, "C01-SUMMARY-001", "NON_NEW_NULL")["expected"].(map[string]any)["effects"].(map[string]any)["summary_rows"].(map[string]any)["value"] = json.Number("7")
+		},
+		"two grouped keys bind one summary row": func(t *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)["value"].(map[string]any)["block_id"] = "SUCCESS_B1P"
+		},
+		"grouped key matches no summary row": func(t *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)["value"].(map[string]any)["block_id"] = "NOPE"
+		},
+		"grouped key matches two summary rows": func(t *testing.T, d map[string]any) {
+			cp2CaseSummary(t, cp2AuthorityCase(t, d, "C01-DACLEAN-001", "MULTI_SET_SUCCESS"))[1].(map[string]any)["block_id"] = "R1208_DACLEAN_001_MULTI_SET_SUCCESS_B1P"
+		},
+		"flat and grouped shapes mixed": func(t *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)["value"] = map[string]any{"da_id": strings.Repeat("0", 63) + "9"}
+		},
+		"flat identities on a multi-row summary": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			c["expected"].(map[string]any)["canonical_applied_blocks"] = append(cp2CaseSummary(t, c), cp2CaseSummary(t, c)[0])
+		},
+		"authority row dropped": func(t *testing.T, d map[string]any) {
+			rows := d["rows"].([]any)
+			d["rows"] = rows[:len(rows)-1]
+		},
+		"migrated row duplicated": func(t *testing.T, d map[string]any) {
+			// Count-preserving: only the seen-set arm can reject the second copy.
+			rows := d["rows"].([]any)
+			rows[len(rows)-1] = rows[0]
+		},
+		"disconnect over a one-block prestate chain": func(t *testing.T, d map[string]any) {
+			cp2CaseInput(t, d, "C01-DISCONNECT-001", "MAIN", "/input/prestate_canonical_chain")["value_or_alias"] = []any{"R1208_DISCONNECT_001_MAIN_G"}
+		},
 	}
 	want := map[string]string{
 		"closure binding substituted":                        "closure bindings differ from frozen v8 pins",
@@ -2515,6 +2568,19 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"one occurrence spelling stated empty":               "stated occurrence spellings disagree",
 		"standalone disconnect publishes a row":              "standalone disconnect and must carry an exact empty summary",
 		"connected block dropped from the summary":           "summary carries 2 rows, the case states connect_count 3",
+		"genesis summary block substituted":                  "differ from the stated branch",
+		"equal-work winner substituted":                      "differ from the stated branch",
+		"equal-work relation contradicts the candidates":     "states candidate_hash_relation hash_bb_lt_hash_ba_raw_bytes, which the candidates' own hashes",
+		"post-disconnect tip rolled to genesis":              "CHAIN tip must equal the block below the disconnected tip",
+		"non-NEW effect claims summary rows":                 "effects.summary_rows=7 differs from the 0 published rows",
+		"two grouped keys bind one summary row":              "is bound by more than one included-set group",
+		"grouped key matches no summary row":                 "included-set block \"NOPE\" matches no summary row",
+		"grouped key matches two summary rows":               "matches more than one summary row",
+		"flat and grouped shapes mixed":                      "mixes flat and grouped included-set identities",
+		"flat identities on a multi-row summary":             "flat included-set identities but 2 summary rows",
+		"authority row dropped":                              "RUB-1208 rows=",
+		"migrated row duplicated":                            "RUB-1208 row C01-DIRECT-001 cases=1 unauthorized",
+		"disconnect over a one-block prestate chain":         "disconnects over a 1-block prestate chain",
 	}
 	for _, name := range slices.Sorted(maps.Keys(mutate)) {
 		t.Run(name, func(t *testing.T) {

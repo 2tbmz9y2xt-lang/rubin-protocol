@@ -3479,10 +3479,12 @@ func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixt
 }
 
 // cp2StatedBranchBlocks is the ordered block set a case states will become newly
-// canonical: the pre-stored side branch in canonical order, then the stimulus
-// block. A case stating neither constrains nothing. The tags of both pointers
-// are enforced by cp2InputOK, so a malformed value contributes no alias here.
-func cp2StatedBranchBlocks(inputs []any) []string {
+// canonical: the pre-stored side branch in canonical order, the block a
+// single-block stimulus names (a genesis pack or a relayed stimulus block), and
+// the candidate an equal-work tie-break names. A case stating none of them
+// constrains nothing. The tags of these pointers are enforced by cp2InputOK, so
+// a malformed value contributes no alias here.
+func cp2StatedBranchBlocks(where string, inputs []any, fixtures map[string]cp2Fixture) ([]string, error) {
 	var out []string
 	branch, _ := cp2InputValue(inputs, "/input/prestored_side_branch")
 	list, _ := branch.([]any)
@@ -3490,11 +3492,39 @@ func cp2StatedBranchBlocks(inputs []any) []string {
 		alias, _ := v.(string)
 		out = append(out, alias)
 	}
-	if value, stated := cp2InputValue(inputs, "/input/stimulus_block"); stated {
-		alias, _ := value.(string)
-		out = append(out, alias)
+	for _, pointer := range []string{"/input/genesis_pack", "/input/stimulus_block"} {
+		if value, stated := cp2InputValue(inputs, pointer); stated {
+			alias, _ := value.(string)
+			out = append(out, alias)
+		}
 	}
-	return out
+	// Equal-work tie-break: the candidate with the lower raw-byte block hash is
+	// the sole newly canonical block. The stated relation is enforced against the
+	// candidates' OWN declared hashes -- both bytes32 lowercase hex, so string
+	// order is raw-byte order -- so a stated-but-false relation is a rejection
+	// rather than a license for whichever winner the case then publishes.
+	first, statedA := cp2InputValue(inputs, "/input/candidate_a")
+	second, statedB := cp2InputValue(inputs, "/input/candidate_b")
+	if !statedA && !statedB {
+		return out, nil
+	}
+	// A half-stated pair resolves the absent alias "" and is rejected there.
+	var hash [2]string
+	for i, value := range [2]any{first, second} {
+		alias, _ := value.(string)
+		f, err := cp2CaseFixture(fixtures, where, alias, "object")
+		if err != nil {
+			return nil, fmt.Errorf("%s equal-work candidate: %w", where, err)
+		}
+		obj, _ := cp2JSONImage(f.Value).(map[string]any)
+		hash[i], _ = obj["block_hash"].(string)
+	}
+	relation, _ := cp2InputValue(inputs, "/input/candidate_hash_relation")
+	if relation != "hash_ba_lt_hash_bb_raw_bytes" || !cp2MatchOK(hash[0], cp2HexRE) || !cp2MatchOK(hash[1], cp2HexRE) || hash[0] >= hash[1] {
+		return nil, fmt.Errorf("%s states candidate_hash_relation %v, which the candidates' own hashes %q / %q do not establish", where, relation, hash[0], hash[1])
+	}
+	winner, _ := first.(string)
+	return append(out, winner), nil
 }
 
 // cp2InputValue returns the value one stated stimulus pointer carries, and
@@ -3795,7 +3825,9 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 		if summary != nil {
 			return fmt.Errorf("%s summary must be null for %s", where, truth)
 		}
-		return nil
+		// A non-NEW case publishes no summary at all, so its stated row count is
+		// exactly 0: reached here, the arm is unreachable behind the NEW path.
+		return cp2SummaryRowsEffect(where, expected, 0)
 	}
 	rows, ok := summary.([]any)
 	if !ok {
@@ -3904,7 +3936,11 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 	// The published blocks are the blocks the case states, in order: a dropped,
 	// reordered or substituted one stops being the frame's own ordered outcome
 	// even where every row is individually well-formed.
-	if branch := cp2StatedBranchBlocks(inputs); len(branch) > 0 && !slices.Equal(blocks, branch) {
+	branch, err := cp2StatedBranchBlocks(where, inputs, fixtures)
+	if err != nil {
+		return err
+	}
+	if len(branch) > 0 && !slices.Equal(blocks, branch) {
 		return fmt.Errorf("%s canonical-applied blocks %v differ from the stated branch %v", where, blocks, branch)
 	}
 
@@ -3921,8 +3957,27 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 			return fmt.Errorf("%s summary carries %d complete DA-set occurrences, the case states %v", where, occurrences, value)
 		}
 	}
-	// The published chain tip is the last newly canonical block.
-	if lastBlock != nil {
+	// The published chain tip is the last newly canonical block -- or, for a
+	// standalone disconnect, which publishes no row at all, the entry BELOW the
+	// disconnected tip in the stated prestate chain.
+	tipBlock, tipWhat := lastBlock, "the last canonical-applied block"
+	if disconnect {
+		prestate, _ := cp2InputValue(inputs, "/input/prestate_canonical_chain")
+		chain, _ := prestate.([]any)
+		if len(chain) < 2 {
+			return fmt.Errorf("%s disconnects over a %d-block prestate chain, so no post-disconnect tip is stated", where, len(chain))
+		}
+		alias, _ := chain[len(chain)-2].(string)
+		f, err := cp2CaseFixture(fixtures, where, alias, "object")
+		if err != nil {
+			return fmt.Errorf("%s post-disconnect tip: %w", where, err)
+		}
+		if tipBlock, _ = cp2JSONImage(f.Value).(map[string]any); tipBlock == nil {
+			return fmt.Errorf("%s post-disconnect tip fixture %q is not an object", where, alias)
+		}
+		tipWhat = "the block below the disconnected tip"
+	}
+	if tipBlock != nil {
 		chain, _ := images["CHAIN_IMAGE_V1"].(map[string]any)
 		chainFields, _ := chain["direct_fields"].(map[string]any)
 		tipAlias, _ := chainFields["tip_hash"].(string)
@@ -3933,19 +3988,26 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 			return fmt.Errorf("%s CHAIN tip alias is unresolved", where)
 		}
 		gotHeight, numeric := cp2UintOf(height.Value)
-		wantHeight, wantNumeric := cp2UintOf(lastBlock["height"])
-		if tip.Value != lastBlock["block_hash"] || !numeric || !wantNumeric || gotHeight != wantHeight {
-			return fmt.Errorf("%s CHAIN tip must equal the last canonical-applied block", where)
+		wantHeight, wantNumeric := cp2UintOf(tipBlock["height"])
+		if tip.Value != tipBlock["block_hash"] || !numeric || !wantNumeric || gotHeight != wantHeight {
+			return fmt.Errorf("%s CHAIN tip must equal %s", where, tipWhat)
 		}
 	}
 
-	// Secondary consistency only: the typed rows are the primary evidence.
+	return cp2SummaryRowsEffect(where, expected, uint64(len(rows)))
+}
+
+// cp2SummaryRowsEffect checks the stated row-count effect against the rows the
+// case publishes. Secondary consistency only: the typed rows are the primary
+// evidence, so this runs LAST on both paths and never preempts them.
+func cp2SummaryRowsEffect(where string, expected map[string]any, rows uint64) error {
 	effects, _ := expected["effects"].(map[string]any)
-	if effect, ok := effects["summary_rows"].(map[string]any); ok {
-		got, numeric := cp2UintOf(effect["value"])
-		if !numeric || got != uint64(len(rows)) {
-			return fmt.Errorf("%s effects.summary_rows=%v differs from the %d published rows", where, effect["value"], len(rows))
-		}
+	effect, stated := effects["summary_rows"].(map[string]any)
+	if !stated {
+		return nil
+	}
+	if got, numeric := cp2UintOf(effect["value"]); !numeric || got != rows {
+		return fmt.Errorf("%s effects.summary_rows=%v differs from the %d published rows", where, effect["value"], rows)
 	}
 	return nil
 }
