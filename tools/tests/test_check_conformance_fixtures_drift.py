@@ -797,12 +797,17 @@ class CanonicalPipelineV2RUB1208Tests(unittest.TestCase):
                                "mined": "not_applicable", "success_identity": "not_applicable",
                                "error_class": None, "phase": "not_reached"},
         }
-        for label, row_id, extra, truth in (
-            ("wire disposed", "C01-SIDE-001", {"wire_disposition": "CHECKSUM_REJECT"}, "OLD"),
-            ("recovery", "C01-DIRECT-001", {"recovery_outcome": "identity_proven_route1"}, "NOT_APPLICABLE"),
+        # Dropping the summary un-names the fixtures only its rows named, and the
+        # catalog gate is reverse reachability, not a whitelist, so they go too.
+        for label, row_id, extra, truth, unnamed in (
+            ("wire disposed", "C01-SIDE-001", {"wire_disposition": "CHECKSUM_REJECT"}, "OLD", ()),
+            ("recovery", "C01-DIRECT-001", {"recovery_outcome": "identity_proven_route1"}, "NOT_APPLICABLE",
+             ("R1208_DIRECT_001_MAIN_B1_HASH", "R1208_DIRECT_001_MAIN_DA_ID_1")),
         ):
             with self.subTest(label):
                 data = json.loads(json.dumps(self.data))
+                for alias in unnamed:
+                    del data["fixtures"][alias]
                 case = self._case(data, row_id, "MAIN")
                 case["expected"].update(base)
                 case["expected"].update(extra)

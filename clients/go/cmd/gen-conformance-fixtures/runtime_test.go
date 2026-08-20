@@ -1629,17 +1629,17 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	}}
 	rows := []cp2Row{{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{c}}}
 	block := map[string]cp2Fixture{cp2CaseAlias: {Type: "object", Value: cpMap{"height": 1}}}
-	err := cp2ValidateAliases(rows, map[string]cp2Fixture{})
+	err := cp2ValidateAliases(rows, map[string]cp2Fixture{}, map[string]bool{})
 	if err == nil || !strings.Contains(err.Error(), `alias "`+cp2CaseAlias+`"`) {
 		t.Fatalf("empty catalog: error = %v, want a rejection naming alias %s", err, cp2CaseAlias)
 	}
-	if err := cp2ValidateAliases(rows, block); err != nil {
+	if err := cp2ValidateAliases(rows, block, map[string]bool{}); err != nil {
 		t.Fatalf("catalog carrying %s must validate: %v", cp2CaseAlias, err)
 	}
 	// An alias array marshals to a schema-valid array in either Go shape.
 	for _, arr := range []any{[]any{cp2CaseAlias}, []string{cp2CaseAlias}} {
 		rows[0].Cases[0].Input[0] = cp2Input{Pointer: "/input/prestate", Type: "array<alias>", ValueOrAlias: arr}
-		if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}); err == nil || !strings.Contains(err.Error(), `alias "`+cp2CaseAlias+`"`) {
+		if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}, map[string]bool{}); err == nil || !strings.Contains(err.Error(), `alias "`+cp2CaseAlias+`"`) {
 			t.Fatalf("array alias %T: error = %v, want a rejection naming %s", arr, err, cp2CaseAlias)
 		}
 	}
@@ -1660,12 +1660,12 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	}
 	// A pointer tagged u64 may not resolve to an object fixture.
 	rows[0].Cases[0].Input[0].Type = "u64"
-	if err := cp2ValidateAliases(rows, block); err == nil || !strings.Contains(err.Error(), "is a object fixture, want u64") {
+	if err := cp2ValidateAliases(rows, block, map[string]bool{}); err == nil || !strings.Contains(err.Error(), "is a object fixture, want u64") {
 		t.Fatalf("type mismatch: error = %v, want the fixture type named", err)
 	}
 	// A token tag carries a machine token, never a catalog alias.
 	rows[0].Cases[0].Input[0].Type, rows[0].Cases[0].Input[0].ValueOrAlias = "token", "ABSENT"
-	if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}); err != nil {
+	if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}, map[string]bool{}); err != nil {
 		t.Fatalf("token input must not demand a fixture: %v", err)
 	}
 	for name, catalog := range map[string]map[string]cp2Fixture{
@@ -1924,7 +1924,7 @@ func TestCanonicalPipelineV2ValidatorsNeverPanic(t *testing.T) {
 			}()
 			rows := []cp2Row{row}
 			_, _ = cp2ValidateRows(rows, registry), cp2ValidateFixtures(fixtures)
-			_, _ = cp2ValidateAliases(rows, fixtures), cp2ValidateCases(pick(), row.Cases)
+			_, _ = cp2ValidateAliases(rows, fixtures, map[string]bool{}), cp2ValidateCases(pick(), row.Cases)
 			_, _ = cp2ValidateInputs(pick(), []cp2Input{in}), cp2ValidateExpected(pick(), row.Cases[0].Expected)
 			_, _ = cp2ValidateRPC(pick(), row.Cases[0].Expected.RPC), cp2InputOK(in)
 			_, _ = cp2FixtureValueOK(cp2Fixture{Type: pick(), Value: value}), cp2ClosedValueOK(value)
@@ -1988,14 +1988,14 @@ func TestCanonicalPipelineV2IntegerAndScheduleAliases(t *testing.T) {
 		"schedule absent":        {map[string]cp2Fixture{cp2CaseAlias: block1}, false},
 		"schedule not an object": {map[string]cp2Fixture{cp2CaseAlias: block1, cp2CaseSchedAlias: {Type: "u64", Value: 1}}, false},
 	} {
-		if err := cp2ValidateAliases([]cp2Row{sched}, tc.catalog); (err == nil) != tc.ok {
+		if err := cp2ValidateAliases([]cp2Row{sched}, tc.catalog, map[string]bool{}); (err == nil) != tc.ok {
 			t.Errorf("%s: err = %v, want ok = %v", name, err, tc.ok)
 		}
 	}
 	// A schedule id, like every input alias, lives in the naming case's namespace.
 	sched.Cases[0].ScheduleID = cp2Ptr("SCHED")
 	borrowed := map[string]cp2Fixture{cp2CaseAlias: block1, "SCHED": {Type: "object", Value: cpMap{"barrier": "A"}}}
-	if err := cp2ValidateAliases([]cp2Row{sched}, borrowed); err == nil || !strings.Contains(err.Error(), "outside the case namespace") {
+	if err := cp2ValidateAliases([]cp2Row{sched}, borrowed, map[string]bool{}); err == nil || !strings.Contains(err.Error(), "outside the case namespace") {
 		t.Errorf("borrowed schedule id: error = %v, want a namespace rejection", err)
 	}
 }
@@ -2493,7 +2493,10 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			cp2CaseInput(t, d, "C01-EQUALWORK-001", "MAIN", "/input/candidate_hash_relation")["value_or_alias"] = "hash_bb_lt_hash_ba_raw_bytes"
 		},
 		"post-disconnect tip rolled to genesis": func(t *testing.T, d map[string]any) {
-			cp2CaseInput(t, d, "C01-DISCONNECT-001", "MAIN", "/input/prestate_canonical_chain")["value_or_alias"].([]any)[1] = "R1208_DISCONNECT_001_MAIN_G"
+			// Swapped, never repeated: the entry BELOW the tip becomes genesis while
+			// the array still names each block once, so this stays a single dimension.
+			chain := cp2CaseInput(t, d, "C01-DISCONNECT-001", "MAIN", "/input/prestate_canonical_chain")["value_or_alias"].([]any)
+			chain[0], chain[1] = chain[1], chain[0]
 		},
 		"non-NEW chain tip rolled back one block": func(t *testing.T, d map[string]any) {
 			// Coherent: CHAIN and OWNER both name the block BELOW the stated
@@ -2535,6 +2538,25 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		},
 		"disconnect over a one-block prestate chain": func(t *testing.T, d map[string]any) {
 			cp2CaseInput(t, d, "C01-DISCONNECT-001", "MAIN", "/input/prestate_canonical_chain")["value_or_alias"] = []any{"R1208_DISCONNECT_001_MAIN_G"}
+		},
+		"orphan fixtures entry": func(t *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_DIRECT_001_MAIN_ORPHAN"] = map[string]any{"type": "u64", "value": json.Number("1")}
+		},
+		"stated array repeats an alias": func(t *testing.T, d map[string]any) {
+			in := cp2CaseInput(t, d, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA", "/input/block_complete_da_ids_in_transaction_order")
+			ids := in["value_or_alias"].([]any)
+			in["value_or_alias"] = append(ids, ids[0])
+		},
+		"input pointer typo": func(t *testing.T, d map[string]any) {
+			// Silently ABSENT without the closed vocabulary: the standard-mempool
+			// derivation would simply stop constraining this case.
+			cp2CaseInput(t, d, "C01-SIDE-001", "MAIN", "/input/prestate_standard_records")["pointer"] = "/input/prestate_standard_record"
+		},
+		"branch tip does not out-work the prestate tip": func(t *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_REORG_001_MAIN_B3P"].(map[string]any)["value"].(map[string]any)["cumulative_chainwork"] = json.Number("3")
+		},
+		"equal-work candidates carry unequal work": func(t *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_EQUALWORK_001_MAIN_BB"].(map[string]any)["value"].(map[string]any)["cumulative_chainwork"] = json.Number("4")
 		},
 	}
 	want := map[string]string{
@@ -2606,6 +2628,11 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"authority row dropped":                              "RUB-1208 rows=",
 		"migrated row duplicated":                            "RUB-1208 row C01-DIRECT-001 cases=1 unauthorized",
 		"disconnect over a one-block prestate chain":         "states a 1-block prestate chain, so entry -2 is not stated",
+		"orphan fixtures entry":                              "fixtures[R1208_DIRECT_001_MAIN_ORPHAN] is named by no case",
+		"stated array repeats an alias":                      "names an alias more than once",
+		"input pointer typo":                                 `input pointer "/input/prestate_standard_record" is outside the closed stated vocabulary`,
+		"branch tip does not out-work the prestate tip":      "branch tip cumulative_chainwork 3 does not win fork choice",
+		"equal-work candidates carry unequal work":           "candidate_work_relation exactly_equal_cumulative_chainwork, which the candidates' own cumulative_chainwork 3 / 4",
 	}
 	for _, name := range slices.Sorted(maps.Keys(mutate)) {
 		t.Run(name, func(t *testing.T) {
@@ -2644,12 +2671,20 @@ func cp2ResolvedValueOf(t *testing.T, d, c map[string]any, image, field string) 
 // NOT_APPLICABLE). Both are rows RUB-1209..1212 must migrate, both are
 // schema-valid, and without the result-nullity guard the generator rejects them.
 func TestCanonicalPipelineV2NullResultRowsStayExpressible(t *testing.T) {
-	for _, tc := range []struct{ label, row, key, value, truth string }{
-		{"wire disposed", "C01-SIDE-001", "wire_disposition", "CHECKSUM_REJECT", "OLD"},
-		{"recovery", "C01-DIRECT-001", "recovery_outcome", "identity_proven_route1", "NOT_APPLICABLE"},
+	for _, tc := range []struct {
+		label, row, key, value, truth string
+		unnamed                       []string
+	}{
+		{"wire disposed", "C01-SIDE-001", "wire_disposition", "CHECKSUM_REJECT", "OLD", nil},
+		// Dropping the summary un-names the two fixtures only its rows named, and
+		// the catalog gate is reverse reachability, not a whitelist.
+		{"recovery", "C01-DIRECT-001", "recovery_outcome", "identity_proven_route1", "NOT_APPLICABLE", []string{"R1208_DIRECT_001_MAIN_B1_HASH", "R1208_DIRECT_001_MAIN_DA_ID_1"}},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
 			doc := cp2AuthorityControl(t)
+			for _, alias := range tc.unnamed {
+				delete(doc["fixtures"].(map[string]any), alias)
+			}
 			expected := cp2AuthorityCase(t, doc, tc.row, "MAIN")["expected"].(map[string]any)
 			expected["result"], expected["pipeline_reached"] = nil, false
 			expected[tc.key], expected["commit_truth"] = tc.value, tc.truth

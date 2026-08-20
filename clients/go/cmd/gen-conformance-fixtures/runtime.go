@@ -2517,6 +2517,18 @@ var (
 	cp2Provenances = []string{"normative_boundary", "witness_fixture", "deterministic_schedule_control", "configured_bound"}
 )
 
+// cp2StatedPointers is the closed input vocabulary of the migrated corpus (the
+// pointers a derivation consumes plus the declarative ones). The schema pins a
+// pointer's GRAMMAR only, so without this list a typo is a well-formed pointer
+// that reads as a silently ABSENT stimulus and disables the derivation it feeds.
+// A row migrating a new stimulus adds it here and in the drift mirror.
+var cp2StatedPointers = []string{
+	"/input/block_complete_da_ids_in_transaction_order", "/input/block_complete_da_set_count", "/input/block_included_set_identities", "/input/block_includes", "/input/candidate_a", "/input/candidate_b", "/input/candidate_hash_relation", "/input/candidate_work_relation",
+	"/input/chain_id", "/input/connect_count", "/input/cross_block_da_id", "/input/datadir_state", "/input/delivery_entrypoint", "/input/detached_branch_only_output_spender", "/input/disconnect_command", "/input/final_chain_invalid_members", "/input/genesis_pack",
+	"/input/owner_token_fault", "/input/prestate_canonical_chain", "/input/prestate_owner_claims", "/input/prestate_retained_da_sets", "/input/prestate_standard_min_fee_rate_raised_above_default", "/input/prestate_standard_records", "/input/prestored_side_branch",
+	"/input/retained_record_fault", "/input/schedule_arms", "/input/selected_record_plan_order", "/input/stimulus_block", "/input/stimulus_block_parent_relation", "/input/stimulus_block_work_relation",
+}
+
 var (
 	cp2UpperTokenRE          = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`) // one grammar for a case id and a fixtures alias
 	cp2TokenRE               = regexp.MustCompile(`^[A-Za-z0-9_@/:()|+.-]+$`)
@@ -2670,6 +2682,12 @@ func cp2InputOK(in cp2Input) error {
 	}
 	if !cp2ValueOK(in.Type, cp2JSONImage(in.ValueOrAlias), true) {
 		return fmt.Errorf("input %s value is not a %s literal or alias", in.Pointer, in.Type)
+	}
+	// A stated array names each alias ONCE: it states occurrences, and every
+	// derivation over it set-normalizes, so a repeat would silently stand in for
+	// a dropped occurrence instead of being the second occurrence it spells.
+	if aliases := cp2AliasesOf(in); len(cp2SortedUnique(aliases)) != len(aliases) {
+		return fmt.Errorf("input %s names an alias more than once", in.Pointer)
 	}
 	return nil
 }
@@ -3137,17 +3155,18 @@ func cp2AppendAlias(out []string, v any) []string {
 // direct-field aliases in resolved_values — are resolved by the sibling walk
 // cp2ValidateR1208Expected, which runs over the same rows. No effect value is an
 // alias in this corpus, so no effect walk exists.
-func cp2ValidateAliases(rows []cp2Row, fixtures map[string]cp2Fixture) error {
+// It also records every catalog alias the input side names, in `named`.
+func cp2ValidateAliases(rows []cp2Row, fixtures map[string]cp2Fixture, named map[string]bool) error {
 	for _, row := range rows {
 		for _, c := range row.Cases {
 			for _, in := range c.Input {
-				if err := cp2ResolveAliases(row.RowID+"/"+c.CaseID, in, fixtures); err != nil {
+				if err := cp2ResolveAliases(row.RowID+"/"+c.CaseID, in, fixtures, named); err != nil {
 					return err
 				}
 			}
 			if c.ScheduleID != nil {
 				sched := cp2Input{Pointer: "/schedule_id", Type: "object", ValueOrAlias: *c.ScheduleID}
-				if err := cp2ResolveAliases(row.RowID+"/"+c.CaseID, sched, fixtures); err != nil {
+				if err := cp2ResolveAliases(row.RowID+"/"+c.CaseID, sched, fixtures, named); err != nil {
 					return err
 				}
 			}
@@ -3161,9 +3180,10 @@ func cp2ValidateAliases(rows []cp2Row, fixtures map[string]cp2Fixture) error {
 // accepts any catalog type, since the tag names no literal form itself) and to
 // live in the naming case's own namespace: existence and type alone would let
 // one case drive its stimulus from another case's fixture.
-func cp2ResolveAliases(where string, in cp2Input, fixtures map[string]cp2Fixture) error {
+func cp2ResolveAliases(where string, in cp2Input, fixtures map[string]cp2Fixture, named map[string]bool) error {
 	want := strings.TrimSuffix(strings.TrimPrefix(in.Type, "array<"), ">")
 	for _, alias := range cp2AliasesOf(in) {
+		named[alias] = true
 		fixture, ok := fixtures[alias]
 		if !ok {
 			return fmt.Errorf("case %s: input %s names alias %q, absent from the fixtures catalog", where, in.Pointer, alias)
@@ -3412,6 +3432,9 @@ func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixt
 				}
 				ids = append(ids, id)
 			}
+			if len(cp2SortedUnique(ids)) != len(ids) {
+				return nil, fmt.Errorf("%s included-set group %q states an identity more than once", where, blockID)
+			}
 			grouped[blockID] = ids // bound outside the loop: a stated `identities: []` claims the EMPTY set for this block's row
 		case !hasBlock && !hasIdentities:
 			shapes["flat"] = true
@@ -3427,6 +3450,11 @@ func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixt
 	if len(shapes) > 1 {
 		return nil, fmt.Errorf("%s mixes flat and grouped included-set identities", where)
 	}
+	// Set-normalized on purpose, unlike one spelling's own identity list above: two
+	// spellings state the SAME fact, and a flat entry is one identity, not one
+	// occurrence -- the DACLEAN CORRUPT_* prestates state one da_id under two
+	// distinct identities, so multiplicity ACROSS flat entries is not this corpus's
+	// occurrence unit. RUB-1204 owns that if it ever becomes one.
 	if stated && extraStated && !slices.Equal(cp2SortedUnique(flat), cp2SortedUnique(extra)) {
 		return nil, fmt.Errorf("%s stated occurrence spellings disagree on the complete DA-set identities", where)
 	}
@@ -3510,6 +3538,8 @@ func cp2StatedBranchBlocks(where string, inputs []any, fixtures map[string]cp2Fi
 	}
 	// A half-stated pair resolves the absent alias "" and is rejected there.
 	var hash [2]string
+	var work [2]uint64
+	var workOK [2]bool
 	for i, value := range [2]any{first, second} {
 		alias, _ := value.(string)
 		f, err := cp2CaseFixture(fixtures, where, alias, "object")
@@ -3518,10 +3548,18 @@ func cp2StatedBranchBlocks(where string, inputs []any, fixtures map[string]cp2Fi
 		}
 		obj, _ := cp2JSONImage(f.Value).(map[string]any)
 		hash[i], _ = obj["block_hash"].(string)
+		work[i], workOK[i] = cp2UintOf(obj["cumulative_chainwork"])
 	}
 	relation, _ := cp2InputValue(inputs, "/input/candidate_hash_relation")
 	if relation != "hash_ba_lt_hash_bb_raw_bytes" || !cp2MatchOK(hash[0], cp2HexRE) || !cp2MatchOK(hash[1], cp2HexRE) || hash[0] >= hash[1] {
 		return nil, fmt.Errorf("%s states candidate_hash_relation %v, which the candidates' own hashes %q / %q do not establish", where, relation, hash[0], hash[1])
+	}
+	// The tie-break is reached only on EQUAL work (node/sync_reorg.go:224
+	// shouldSwitchToBranch): unequal candidates are decided by work alone, so a
+	// lower hash would not make the stated winner canonical.
+	workRelation, _ := cp2InputValue(inputs, "/input/candidate_work_relation")
+	if workRelation != "exactly_equal_cumulative_chainwork" || !workOK[0] || !workOK[1] || work[0] != work[1] {
+		return nil, fmt.Errorf("%s states candidate_work_relation %v, which the candidates' own cumulative_chainwork %d / %d do not establish", where, workRelation, work[0], work[1])
 	}
 	winner, _ := first.(string)
 	return append(out, winner), nil
@@ -3570,6 +3608,9 @@ func cp2FlatStatedDAIDs(where string, inputs []any, fixtures map[string]cp2Fixtu
 				return nil, false, err
 			}
 			out = append(out, id)
+		}
+		if len(cp2SortedUnique(out)) != len(out) {
+			return nil, false, fmt.Errorf("%s/input/block_includes states an identity more than once", where)
 		}
 	}
 	value, ok := cp2InputValue(inputs, "/input/block_complete_da_ids_in_transaction_order")
@@ -3746,6 +3787,12 @@ func cp2ValidateR1208Expected(where string, c map[string]any, fixtures map[strin
 	}
 	truth, _ := expected["commit_truth"].(string)
 	inputs, _ := c["input"].([]any)
+	for _, raw := range inputs {
+		in, _ := raw.(map[string]any)
+		if p, _ := in["pointer"].(string); !slices.Contains(cp2StatedPointers, p) {
+			return fmt.Errorf("%s input pointer %q is outside the closed stated vocabulary", where, p)
+		}
+	}
 	images, ok := expected["state_image"].(map[string]any)
 	if !ok || len(images) != len(direct) {
 		return fmt.Errorf("%s/state_image must carry exactly %d images", where, len(direct))
@@ -3998,6 +4045,24 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 			return fmt.Errorf("%s summary carries %d complete DA-set occurrences, the case states %v", where, occurrences, value)
 		}
 	}
+	// Fork choice is what makes a stated branch canonical at all: greater
+	// cumulative chainwork than the current tip, or equal work with a
+	// lexicographically lower tip hash (node/sync_reorg.go:224 shouldSwitchToBranch,
+	// applied by applyPreferredBranch at :261). A branch the reference would never
+	// switch to cannot publish a canonical-applied summary, whatever its rows say.
+	if prestate, stated := cp2InputValue(inputs, "/input/prestate_canonical_chain"); stated && lastBlock != nil {
+		preTip, err := cp2PrestateChainBlock(where, prestate, fixtures, 1)
+		if err != nil {
+			return err
+		}
+		got, gotOK := cp2UintOf(lastBlock["cumulative_chainwork"])
+		want, wantOK := cp2UintOf(preTip["cumulative_chainwork"])
+		tipHash, _ := lastBlock["block_hash"].(string)
+		preHash, _ := preTip["block_hash"].(string)
+		if !gotOK || !wantOK || got < want || (got == want && tipHash >= preHash) {
+			return fmt.Errorf("%s branch tip cumulative_chainwork %v does not win fork choice against the stated prestate tip's %v", where, lastBlock["cumulative_chainwork"], preTip["cumulative_chainwork"])
+		}
+	}
 	// The published chain tip is the last newly canonical block -- or, for a
 	// standalone disconnect, which publishes no row at all, the entry BELOW the
 	// disconnected tip in the stated prestate chain.
@@ -4152,6 +4217,7 @@ func cp2ValidateR1208Payload(payload cp2R1208Payload) error {
 		return err
 	}
 	referenced := make(map[string]bool, len(payload.ResolvedValues))
+	named := make(map[string]bool, len(payload.Fixtures))
 	if len(payload.Rows) != len(cp2R1208Rows) {
 		return fmt.Errorf("RUB-1208 rows=%d want %d", len(payload.Rows), len(cp2R1208Rows))
 	}
@@ -4187,7 +4253,7 @@ func cp2ValidateR1208Payload(payload cp2R1208Payload) error {
 			if err := cp2ValidateR1208Expected(where, c, payload.Fixtures, payload.ResolvedValues, direct); err != nil {
 				return err
 			}
-			cp2CollectResolvedRefs(c, direct, referenced)
+			cp2CollectRefs(c, direct, referenced, named)
 		}
 	}
 	// Every resolved value is reachable from a projection: an orphan entry is a
@@ -4200,12 +4266,25 @@ func cp2ValidateR1208Payload(payload cp2R1208Payload) error {
 	if err := cp2ValidateRows(typed, cp2RowRegistry()); err != nil {
 		return err
 	}
-	return cp2ValidateAliases(typed, payload.Fixtures)
+	if err := cp2ValidateAliases(typed, payload.Fixtures, named); err != nil {
+		return err
+	}
+	// The same reverse reachability for the catalog: an entry no case names is a
+	// stimulus nothing states, which is where a stale or substituted-away fixture
+	// hides -- the three alias positions the schema admits are all recorded above.
+	for _, alias := range slices.Sorted(maps.Keys(payload.Fixtures)) {
+		if !named[alias] {
+			return fmt.Errorf("fixtures[%s] is named by no case", alias)
+		}
+	}
+	return nil
 }
 
-// cp2CollectResolvedRefs records every resolved alias one case names. It runs
-// after cp2ValidateR1208Expected has already proven the shape, so it only reads.
-func cp2CollectResolvedRefs(c map[string]any, direct map[string][]string, out map[string]bool) {
+// cp2CollectRefs records every alias one case names, per namespace: the resolved
+// image aliases in `out`, and in `named` the catalog aliases of the summary's own
+// three positions (cp2ResolveAliases records the input side). It runs after
+// cp2ValidateR1208Expected has already proven the shape, so it only reads.
+func cp2CollectRefs(c map[string]any, direct map[string][]string, out, named map[string]bool) {
 	expected, _ := c["expected"].(map[string]any)
 	images, _ := expected["state_image"].(map[string]any)
 	for image, fields := range direct {
@@ -4217,6 +4296,16 @@ func cp2CollectResolvedRefs(c map[string]any, direct map[string][]string, out ma
 		for _, field := range fields {
 			if alias, ok := written[field].(string); ok {
 				out[alias] = true
+			}
+		}
+	}
+	rows, _ := expected["canonical_applied_blocks"].([]any)
+	for _, raw := range rows {
+		row, _ := raw.(map[string]any)
+		ids, _ := row["complete_da_ids"].([]any)
+		for _, v := range append([]any{row["block_id"], row["block_hash"]}, ids...) {
+			if alias, ok := v.(string); ok {
+				named[alias] = true
 			}
 		}
 	}
