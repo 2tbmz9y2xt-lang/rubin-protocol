@@ -10,6 +10,15 @@ Lean replay/refinement слой покрывает non-`CV-PV-*` conformance fix
 представленные модулями, импортированными `RubinFormal.Conformance.Index`.
 Runtime/parallel-only `CV-PV-*` gates в этот Lean replay scope не входят.
 
+`SECTION_HASHES` manifest membership and formal `coverage[]` registry membership
+are independent sets, not a one-to-one mapping. The registry has exactly 32
+formal coverage entries. A `section_heading` is a registry row label: some
+values are exact specification headings; others identify residual, bridge,
+model, or other bounded formal scopes. Row status, evidence, and claims apply
+to that registered row, not automatically to a manifest member. An unregistered
+manifest H2 is not thereby formally proved, and a registered formal row need
+not remain an independent manifest member.
+
 Конечный CV replay — это compiled conformance evidence. Теорема
 `cv_*_vectors_pass` section-registered только там, где она является
 claim-bearing `machine_checked_contract` evidence; она не является
@@ -42,8 +51,8 @@ universal/model section proof evidence.
 - `proof_coverage.json` сейчас содержит 32 machine-checked registry entries.
 - Status counts: `24` `proved`, `5` `proved_with_axiom`, `3` `stated`, `0` `deferred`.
 - Не все 32 entries равны по силе claims: честная граница определяется `evidence_level` и `limitations`.
-- Extra formal-only theorems не считаются pinned-section coverage,
-  если они не внесены отдельной registry entry.
+- Extra formal-only theorems do not establish a registered formal coverage row
+  unless they are represented by a registry entry.
 
 ## Текущая раскладка evidence levels
 
