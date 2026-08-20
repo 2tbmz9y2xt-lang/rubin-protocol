@@ -804,7 +804,6 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         stated["value_or_alias"] = []
 
     def grouped_included_set_entry_stated_empty(data: dict) -> None:
-        # A grouped identities: [] binds that block to the EMPTY set too.
         data["fixtures"]["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"]["value"]["identities"] = []
 
     def borrow_another_cases_da_alias(data: dict) -> None:
@@ -977,8 +976,7 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         case_of(data, "C01-DIRECT-001", "MAIN")["expected"]["commit_truth"] = "MAYBE"
 
     def overflow_prestate_sizes(data: dict) -> None:
-        # 2**64-1 + 1 is the minimal sum past the u64 ceiling. Python ints
-        # never wrap like Go uint64; without it, record_count rejects instead.
+        # 2**64-1 + 1 is the minimal sum past the u64 ceiling; Python ints never wrap like Go uint64, so record_count would reject without this guard.
         data["fixtures"]["R1208_SIDE_001_MAIN_TX_S1"]["value"]["size"] = 2**64 - 1
         data["fixtures"]["R1208_SIDE_001_MAIN_TX_S2"] = {"type": "object", "value": {"kind": "standard_record", "size": 1}}
         stated = next(i for i in case_of(data, "C01-SIDE-001", "MAIN")["input"] if i["pointer"] == "/input/prestate_standard_records")
