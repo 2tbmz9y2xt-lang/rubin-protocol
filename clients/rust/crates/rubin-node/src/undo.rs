@@ -1250,7 +1250,7 @@ fn base64_decode_canonical(value: &[u8]) -> Result<Vec<u8>, String> {
     }
     let quads = value.len() / 4;
     let mut out = Vec::with_capacity(quads.saturating_mul(3));
-    for (index, quad) in value.chunks_exact(4).enumerate() {
+    for (index, quad) in value.as_chunks::<4>().0.iter().enumerate() {
         // Padding is legal only in the final quad; anywhere else `=` is not an
         // alphabet symbol and fails below.
         let pad = if index + 1 != quads {
