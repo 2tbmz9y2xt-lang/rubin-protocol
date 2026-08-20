@@ -3416,7 +3416,7 @@ func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixt
 	if len(shapes) > 1 {
 		return nil, fmt.Errorf("%s mixes flat and grouped included-set identities", where)
 	}
-	if len(flat) > 0 && len(extra) > 0 && !slices.Equal(cp2SortedUnique(flat), cp2SortedUnique(extra)) {
+	if stated && extraStated && !slices.Equal(cp2SortedUnique(flat), cp2SortedUnique(extra)) {
 		return nil, fmt.Errorf("%s stated occurrence spellings disagree on the complete DA-set identities", where)
 	}
 	flat = append(flat, extra...)
@@ -3519,7 +3519,7 @@ func cp2FlatStatedDAIDs(where string, inputs []any, fixtures map[string]cp2Fixtu
 		id, _ := f.Value.(string)
 		ordered = append(ordered, id)
 	}
-	if len(out) > 0 && len(ordered) > 0 && !slices.Equal(cp2SortedUnique(out), cp2SortedUnique(ordered)) {
+	if stated && !slices.Equal(cp2SortedUnique(out), cp2SortedUnique(ordered)) {
 		return nil, false, fmt.Errorf("%s stated occurrence spellings disagree on the complete DA-set identities", where)
 	}
 	return append(out, ordered...), true, nil
@@ -3635,7 +3635,7 @@ func cp2DerivedCounts(where, image, relation string, inputs []any, fixtures map[
 	for _, record := range records {
 		size, ok := cp2UintOf(record["size"])
 		if !ok || used > math.MaxUint64-size {
-			return nil, fmt.Errorf("%s%s carries a record without a u64 size", where, pointer)
+			return nil, fmt.Errorf("%s%s carries a record without a u64 size or overflows the used-bytes total", where, pointer)
 		}
 		used += size
 	}
@@ -3665,7 +3665,7 @@ func cp2ValidateR1208Expected(where string, c map[string]any, fixtures map[strin
 		relation, _ := p["relation"].(string)
 		allowed := cp2RelationForTruth(expected, truth, image)
 		if len(allowed) == 0 {
-			return fmt.Errorf("%s commit truth %q is unknown", where, truth)
+			return fmt.Errorf("%s no allowed relation: truth %q unknown or null result, no disposition", where, truth)
 		}
 		if !slices.Contains(allowed, relation) {
 			return fmt.Errorf("%s/%s relation=%s invalid for %s, want one of %v", where, image, relation, truth, allowed)

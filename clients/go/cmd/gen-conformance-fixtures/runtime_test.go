@@ -2379,6 +2379,15 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			f := d["fixtures"].(map[string]any)["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
 			f["value"].(map[string]any)["da_id"] = strings.Repeat("0", 63) + "9"
 		},
+		"one occurrence spelling stated empty": func(t *testing.T, d map[string]any) {
+			// A stated [] claims the EMPTY set, so it disagrees with the ids the other spelling names.
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
+			for _, raw := range c["input"].([]any) {
+				if in := raw.(map[string]any); in["pointer"] == "/input/block_included_set_identities" {
+					in["value_or_alias"] = []any{}
+				}
+			}
+		},
 		"included-set identity substituted": func(t *testing.T, d map[string]any) {
 			fixtures := d["fixtures"].(map[string]any)
 			entry := fixtures["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
@@ -2429,6 +2438,7 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"summary_rows effect is a bool on a zero-row case":   "effects.summary_rows=true differs from the 0 published rows",
 		"included-set identity substituted":                  "differ from the included-set identities",
 		"one occurrence spelling disagrees":                  "stated occurrence spellings disagree",
+		"one occurrence spelling stated empty":               "stated occurrence spellings disagree",
 		"standalone disconnect publishes a row":              "standalone disconnect and must carry an exact empty summary",
 		"connected block dropped from the summary":           "summary carries 2 rows, the case states connect_count 3",
 	}

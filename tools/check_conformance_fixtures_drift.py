@@ -284,7 +284,7 @@ def _resolved_entry(values: dict, alias: object, want: str, where: str):
 
 def _validate_resolved_values(resolved: dict) -> None:
     """Every entry is a typed literal of its declared tag, keyed by the composed
-    full form. Mirrors Go cp2ValidateResolved."""
+    full form. Mirrors Go cp2ValidateResolved except the `object` arm, whose closed-object grammar Go and the schema own."""
     for name in sorted(resolved):
         if not V2_RESOLVED_KEY_RE.fullmatch(name):
             raise RuntimeError(f"resolved_values key {name!r} is not the composed full form")
@@ -379,7 +379,7 @@ def _flat_stated_da_ids(where: str, inputs: object, fixtures: dict) -> tuple:
     if not isinstance(ordered, list):
         raise RuntimeError(f"{where_in}: not an array")
     ids = [_fixture_value(fixtures, alias, "bytes32_hex", where_in) for alias in ordered]
-    if out and ids and sorted(set(out)) != sorted(set(ids)):
+    if stated and sorted(set(out)) != sorted(set(ids)):
         raise RuntimeError(f"{where}: stated occurrence spellings disagree on the complete DA-set identities")
     return out + ids, True
 
@@ -433,7 +433,7 @@ def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: li
             )
     if len(shapes) > 1:
         raise RuntimeError(f"{where}: mixes flat and grouped included-set identities")
-    if flat and extra and sorted(set(flat)) != sorted(set(extra)):
+    if stated and extra_stated and sorted(set(flat)) != sorted(set(extra)):
         raise RuntimeError(f"{where}: stated occurrence spellings disagree on the complete DA-set identities")
     flat.extend(extra)
 
@@ -555,7 +555,7 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                 relation = projection.get("relation")
                 allowed = _relations_for_truth(expected, truth, image)
                 if not allowed:
-                    raise RuntimeError(f"{where}: commit truth {truth!r} is unknown")
+                    raise RuntimeError(f"{where}: no allowed relation: truth {truth!r} unknown or null result, no disposition")
                 if relation not in allowed:
                     raise RuntimeError(
                         f"{where}/{image}: relation={relation!r} invalid for {truth}, "
@@ -792,6 +792,12 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         stated = next(i for i in case["input"] if i["pointer"].endswith("da_ids_in_transaction_order"))
         stated["value_or_alias"] = stated["value_or_alias"][:1]
 
+    def empty_one_occurrence_spelling(data: dict) -> None:
+        # A stated [] claims the EMPTY set, so it disagrees with the 2 ids the other spelling names.
+        case = case_of(data, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
+        stated = next(i for i in case["input"] if i["pointer"].endswith("included_set_identities"))
+        stated["value_or_alias"] = []
+
     def borrow_another_cases_da_alias(data: dict) -> None:
         case = case_of(data, "C01-REORG-001", "MAIN")
         case["expected"]["canonical_applied_blocks"][0]["complete_da_ids"][0] = "R1208_DACLEAN_001_EXACT_MATCH_DA_ID_1"
@@ -991,6 +997,7 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("stale owner claim_count", stale_owner_claim_count, "differs from the 3 the stated prestate derives"),
         ("dropped occurrence on a block_includes case", drop_block_includes_occurrence, "differ from the included-set"),
         ("one occurrence spelling dropped", drop_one_occurrence_spelling, "stated occurrence spellings disagree"),
+        ("one occurrence spelling stated empty", empty_one_occurrence_spelling, "stated occurrence spellings disagree"),
         ("occurrence added where the stated count is zero", add_occurrence_where_count_is_zero, "the case states 0"),
         ("summary borrows another case's da alias", borrow_another_cases_da_alias, "outside the case namespace"),
         ("wire disposed row with an old image", wire_disposed_row_with_an_old_image, "invalid for OLD"),
