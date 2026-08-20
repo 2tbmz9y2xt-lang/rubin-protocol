@@ -200,6 +200,16 @@ What actually executes, and where:
 | the shipped single-dimension hostile controls (substituted `block_hash`, dropped/duplicated DA occurrence, stale CHAIN tip, stale OWNER `stable_tip`, renamed/moved obligation id, and the rest) | `assert_canonical_pipeline_v2_negative_controls` in `tools/check_conformance_fixtures_drift.py`, run by the drift gate | `test_shipped_semantic_negative_controls_all_redden` |
 | generator byte identity | the conformance fixture drift gate above | `TestCanonicalPipelineV2CorpusIsByteDeterministic` |
 
+Three identity bindings make a same-shape substitution red. The control names below are the drift-checker
+labels in `assert_canonical_pipeline_v2_negative_controls` (`test_shipped_semantic_negative_controls_all_redden`);
+the generator runs its twin of each in `TestCanonicalPipelineV2R1208ValidatorFailsClosed`.
+
+| binding | validator (generator / checker) | executed controls |
+| --- | --- | --- |
+| the published summary blocks are the blocks the case's own inputs state: the pre-stored side branch in canonical order, the block a genesis pack or stimulus names, or the equal-work candidate the stated `/input/candidate_hash_relation` selects — that relation itself re-derived from the two candidates' hash fixtures | `cp2StatedBranchBlocks` / `_stated_branch_blocks` | `summary block substituted for another stated block`, `genesis summary block substituted`, `equal-work winner substituted`, `equal-work hash relation contradicts the candidates` |
+| the published CHAIN tip is the last canonical-applied block; the entry below the disconnected tip on a standalone disconnect; the stated prestate chain tip wherever the published CHAIN image is not `new` | `cp2ValidateChainTip` with `cp2PrestateChainBlock` / the same relations with `_prestate_chain_block` | `stale CHAIN tip with a consistent owner`, `post-disconnect tip rolled to genesis`, `non-NEW chain tip rolled back one block` |
+| where a case states grouped `/input/block_included_set_identities`, each group binds exactly one summary row and every summary row is bound by exactly one group | `cp2IncludedSetDAIDs` / `_included_set_da_ids` | `one grouped included-set entry omitted`, `two grouped keys bind one summary row`, `grouped key matches no summary row`, `grouped key matches two summary rows` |
+
 Two conventions the shape does not state by itself. `release_requirements[go|rust]` is a set of
 (issue, surface) blocking obligations, not a set of issues: one issue legitimately appears more than once
 with different surfaces. Where a case carries its own block, that block is the case's complete blocking set

@@ -3441,7 +3441,7 @@ func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixt
 			}
 			// Two keys may suffix-match the SAME row (`..._B1P` ends in `_B1P` AND
 			// `_IDENTITY_B1P`): the last sorted key would silently overwrite the
-			// other group's constraint. Unreachable with the shipped ids: probed.
+			// other group's constraint. Unreachable with the shipped ids; the control `two grouped keys bind one summary row` reaches it.
 			if _, bound := out[block]; bound {
 				return nil, fmt.Errorf("%s summary row %q is bound by more than one included-set group", where, block)
 			}
@@ -3825,6 +3825,20 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 		if summary != nil {
 			return fmt.Errorf("%s summary must be null for %s", where, truth)
 		}
+		// A published CHAIN image that is not `new` never moved, so the tip is still
+		// the last entry of the stated prestate chain. The key is that relation, not
+		// the truth: DD-002 proves a new identity under NOT_APPLICABLE, and it moves.
+		chainImage, _ := images["CHAIN_IMAGE_V1"].(map[string]any)
+		relation, _ := chainImage["relation"].(string)
+		if prestate, stated := cp2InputValue(inputs, "/input/prestate_canonical_chain"); stated && relation != "new" {
+			tipBlock, err := cp2PrestateChainBlock(where, prestate, fixtures, 1)
+			if err != nil {
+				return err
+			}
+			if err := cp2ValidateChainTip(where, images, resolved, tipBlock, "the stated prestate chain tip"); err != nil {
+				return err
+			}
+		}
 		// A non-NEW case publishes no summary at all, so its stated row count is
 		// exactly 0: reached here, the arm is unreachable behind the NEW path.
 		return cp2SummaryRowsEffect(where, expected, 0)
@@ -3963,38 +3977,58 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 	tipBlock, tipWhat := lastBlock, "the last canonical-applied block"
 	if disconnect {
 		prestate, _ := cp2InputValue(inputs, "/input/prestate_canonical_chain")
-		chain, _ := prestate.([]any)
-		if len(chain) < 2 {
-			return fmt.Errorf("%s disconnects over a %d-block prestate chain, so no post-disconnect tip is stated", where, len(chain))
-		}
-		alias, _ := chain[len(chain)-2].(string)
-		f, err := cp2CaseFixture(fixtures, where, alias, "object")
+		below, err := cp2PrestateChainBlock(where, prestate, fixtures, 2)
 		if err != nil {
-			return fmt.Errorf("%s post-disconnect tip: %w", where, err)
+			return err
 		}
-		if tipBlock, _ = cp2JSONImage(f.Value).(map[string]any); tipBlock == nil {
-			return fmt.Errorf("%s post-disconnect tip fixture %q is not an object", where, alias)
-		}
-		tipWhat = "the block below the disconnected tip"
+		tipBlock, tipWhat = below, "the block below the disconnected tip"
 	}
 	if tipBlock != nil {
-		chain, _ := images["CHAIN_IMAGE_V1"].(map[string]any)
-		chainFields, _ := chain["direct_fields"].(map[string]any)
-		tipAlias, _ := chainFields["tip_hash"].(string)
-		heightAlias, _ := chainFields["height"].(string)
-		tip, tipOK := resolved[tipAlias]
-		height, heightOK := resolved[heightAlias]
-		if !tipOK || !heightOK {
-			return fmt.Errorf("%s CHAIN tip alias is unresolved", where)
-		}
-		gotHeight, numeric := cp2UintOf(height.Value)
-		wantHeight, wantNumeric := cp2UintOf(tipBlock["height"])
-		if tip.Value != tipBlock["block_hash"] || !numeric || !wantNumeric || gotHeight != wantHeight {
-			return fmt.Errorf("%s CHAIN tip must equal %s", where, tipWhat)
+		if err := cp2ValidateChainTip(where, images, resolved, tipBlock, tipWhat); err != nil {
+			return err
 		}
 	}
 
 	return cp2SummaryRowsEffect(where, expected, uint64(len(rows)))
+}
+
+// cp2PrestateChainBlock resolves the stated prestate chain entry `fromEnd`
+// places from its end: 1 is the stated prestate tip, 2 the entry below it.
+func cp2PrestateChainBlock(where string, prestate any, fixtures map[string]cp2Fixture, fromEnd int) (map[string]any, error) {
+	chain, _ := prestate.([]any)
+	if len(chain) < fromEnd {
+		return nil, fmt.Errorf("%s states a %d-block prestate chain, so entry -%d is not stated", where, len(chain), fromEnd)
+	}
+	alias, _ := chain[len(chain)-fromEnd].(string)
+	f, err := cp2CaseFixture(fixtures, where, alias, "object")
+	if err != nil {
+		return nil, fmt.Errorf("%s prestate chain: %w", where, err)
+	}
+	block, _ := cp2JSONImage(f.Value).(map[string]any)
+	if block == nil {
+		return nil, fmt.Errorf("%s prestate chain fixture %q is not an object", where, alias)
+	}
+	return block, nil
+}
+
+// cp2ValidateChainTip compares the published CHAIN tip identity against the
+// block the case's own stated inputs make the tip.
+func cp2ValidateChainTip(where string, images map[string]any, resolved map[string]cp2Fixture, tipBlock map[string]any, what string) error {
+	chain, _ := images["CHAIN_IMAGE_V1"].(map[string]any)
+	chainFields, _ := chain["direct_fields"].(map[string]any)
+	tipAlias, _ := chainFields["tip_hash"].(string)
+	heightAlias, _ := chainFields["height"].(string)
+	tip, tipOK := resolved[tipAlias]
+	height, heightOK := resolved[heightAlias]
+	if !tipOK || !heightOK {
+		return fmt.Errorf("%s CHAIN tip alias is unresolved", where)
+	}
+	gotHeight, numeric := cp2UintOf(height.Value)
+	wantHeight, wantNumeric := cp2UintOf(tipBlock["height"])
+	if tip.Value != tipBlock["block_hash"] || !numeric || !wantNumeric || gotHeight != wantHeight {
+		return fmt.Errorf("%s CHAIN tip must equal %s", where, what)
+	}
+	return nil
 }
 
 // cp2SummaryRowsEffect checks the stated row-count effect against the rows the

@@ -524,6 +524,18 @@ def _summary_rows_effect(where: str, expected: dict, rows: int) -> None:
         )
 
 
+def _prestate_chain_block(where: str, prestate: object, fixtures: dict, from_end: int) -> dict:
+    """The stated prestate chain entry `from_end` places from its end: 1 is the
+    stated prestate tip, 2 the entry below it. Mirrors Go cp2PrestateChainBlock."""
+    chain = prestate if isinstance(prestate, list) else []
+    if len(chain) < from_end:
+        raise RuntimeError(f"{where}/CHAIN: states a {len(chain)}-block prestate chain, so entry -{from_end} is not stated")
+    block = _fixture_value(fixtures, chain[-from_end], "object", f"{where}/CHAIN/prestate chain")
+    if not isinstance(block, dict):
+        raise RuntimeError(f"{where}/CHAIN: prestate chain fixture is not an object")
+    return block
+
+
 def _stated_branch_blocks(where: str, inputs: object, fixtures: dict) -> list:
     """The ordered blocks a case states will become newly canonical: the
     pre-stored side branch in canonical order, the block a single-block stimulus
@@ -716,6 +728,15 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             if truth != "NEW":
                 if summary is not None:
                     raise RuntimeError(f"{where}/canonical_applied_blocks: non-NEW must be null")
+                # A published CHAIN image that is not `new` never moved, so the tip
+                # is still the last entry of the stated prestate chain. The key is
+                # that relation, not the truth: DD-002 proves a new identity under
+                # NOT_APPLICABLE, and there the tip does move. Mirrors Go.
+                prestate = _input_value(inputs, "/input/prestate_canonical_chain")
+                if prestate is not _ABSENT and images["CHAIN_IMAGE_V1"].get("relation") != "new":
+                    tip_block = _prestate_chain_block(where, prestate, fixtures, 1)
+                    if chain_hash != tip_block.get("block_hash") or chain_height != tip_block.get("height"):
+                        raise RuntimeError(f"{where}/CHAIN: tip must equal the stated prestate chain tip")
                 # A non-NEW case publishes no summary at all, so its stated row
                 # count is exactly 0: reached here, the arm is unreachable behind
                 # the NEW path. Mirrors Go cp2ValidateR1208Summary.
@@ -824,17 +845,7 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             tip_block, tip_what = last_block, "the last canonical-applied block"
             if disconnect:
                 prestate = _input_value(inputs, "/input/prestate_canonical_chain")
-                chain = prestate if isinstance(prestate, list) else []
-                if len(chain) < 2:
-                    raise RuntimeError(
-                        f"{where}/CHAIN: disconnects over a {len(chain)}-block prestate "
-                        f"chain, so no post-disconnect tip is stated"
-                    )
-                tip_block = _fixture_value(
-                    fixtures, chain[-2], "object", f"{where}/CHAIN/post-disconnect tip"
-                )
-                if not isinstance(tip_block, dict):
-                    raise RuntimeError(f"{where}/CHAIN: post-disconnect tip fixture is not an object")
+                tip_block = _prestate_chain_block(where, prestate, fixtures, 2)
                 tip_what = "the block below the disconnected tip"
             if tip_block is not None and (
                 chain_hash != tip_block.get("block_hash") or chain_height != tip_block.get("height")
@@ -1135,6 +1146,17 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         row = case_of(data, "C01-EQUALWORK-001", "MAIN")["expected"]["canonical_applied_blocks"][0]
         row["block_id"], row["block_hash"] = "R1208_EQUALWORK_001_MAIN_BB", "R1208_EQUALWORK_001_MAIN_BB_HASH"
 
+    def roll_back_the_non_new_chain_tip(data: dict) -> None:
+        # Coherent: CHAIN and OWNER both name the block BELOW the stated prestate
+        # tip, so only the prestate binding can reject it.
+        case = case_of(data, "C01-SIDE-001", "MAIN")
+        below = data["fixtures"]["R1208_SIDE_001_MAIN_B0"]["value"]
+        fields = case["expected"]["state_image"]["CHAIN_IMAGE_V1"]["direct_fields"]
+        stable = data["resolved_values"][case["expected"]["state_image"]["OWNER_IMAGE_V1"]["direct_fields"]["stable_tip"]]["value"]
+        data["resolved_values"][fields["tip_hash"]]["value"] = below["block_hash"]
+        data["resolved_values"][fields["height"]]["value"] = below["height"]
+        stable["hash"], stable["height"] = below["block_hash"], below["height"]
+
     def roll_the_post_disconnect_tip_to_genesis(data: dict) -> None:
         input_of(data, "C01-DISCONNECT-001", "MAIN", "/input/prestate_canonical_chain")["value_or_alias"][1] = "R1208_DISCONNECT_001_MAIN_G"
 
@@ -1148,6 +1170,7 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("equal-work winner substituted", substitute_the_equal_work_winner, "published blocks differ from the stated branch"),
         ("equal-work hash relation contradicts the candidates", lambda d: input_of(d, "C01-EQUALWORK-001", "MAIN", "/input/candidate_hash_relation").update(value_or_alias="hash_bb_lt_hash_ba_raw_bytes"), "states candidate_hash_relation 'hash_bb_lt_hash_ba_raw_bytes'"),
         ("post-disconnect tip rolled to genesis", roll_the_post_disconnect_tip_to_genesis, "tip must equal the block below the disconnected tip"),
+        ("non-NEW chain tip rolled back one block", roll_back_the_non_new_chain_tip, "tip must equal the stated prestate chain tip"),
         ("non-NEW effect claims summary rows", lambda d: case_of(d, "C01-SUMMARY-001", "NON_NEW_NULL")["expected"]["effects"]["summary_rows"].update(value=7), "effects.summary_rows: 7 differs from the 0 published rows"),
         ("two grouped keys bind one summary row", lambda d: d["fixtures"][group_1]["value"].update(block_id="SUCCESS_B1P"), "is bound by more than one included-set group"),
         ("grouped key matches no summary row", lambda d: d["fixtures"][group_1]["value"].update(block_id="NOPE"), "included-set block 'NOPE' matches 0 summary rows"),
@@ -1157,7 +1180,7 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("closure epoch moved off v8", lambda d: d["_meta"]["closure_epoch"].update(closure_manifest_version="rubin-c01-design-closure-v9"), "closure epoch is not frozen v8"),
         ("closure status moved off building", lambda d: d["_meta"]["closure_epoch"].update(status="frozen"), "closure status is not building"),
         ("migrated row duplicated", lambda d: d["rows"].append(d["rows"][0]), "duplicate migrated row"),
-        ("disconnect over a one-block prestate chain", lambda d: input_of(d, "C01-DISCONNECT-001", "MAIN", "/input/prestate_canonical_chain").update(value_or_alias=["R1208_DISCONNECT_001_MAIN_G"]), "disconnects over a 1-block prestate"),
+        ("disconnect over a one-block prestate chain", lambda d: input_of(d, "C01-DISCONNECT-001", "MAIN", "/input/prestate_canonical_chain").update(value_or_alias=["R1208_DISCONNECT_001_MAIN_G"]), "states a 1-block prestate chain, so entry -2 is not stated"),
         ("stale OWNER stable_tip", stale_owner_tip, "OWNER/stable_tip"),
         ("connect_count stated as a float", float_connect_count, "states connect_count 3.0"),
         ("block_complete_da_set_count stated as a float", float_da_set_count, "the case states 0.0"),

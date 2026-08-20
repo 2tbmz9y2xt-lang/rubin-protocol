@@ -2484,6 +2484,16 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"post-disconnect tip rolled to genesis": func(t *testing.T, d map[string]any) {
 			cp2CaseInput(t, d, "C01-DISCONNECT-001", "MAIN", "/input/prestate_canonical_chain")["value_or_alias"].([]any)[1] = "R1208_DISCONNECT_001_MAIN_G"
 		},
+		"non-NEW chain tip rolled back one block": func(t *testing.T, d map[string]any) {
+			// Coherent: CHAIN and OWNER both name the block BELOW the stated
+			// prestate tip, so only the prestate binding can reject it.
+			c := cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")
+			below := d["fixtures"].(map[string]any)["R1208_SIDE_001_MAIN_B0"].(map[string]any)["value"].(map[string]any)
+			cp2ResolvedValueOf(t, d, c, "CHAIN_IMAGE_V1", "tip_hash")["value"] = below["block_hash"]
+			cp2ResolvedValueOf(t, d, c, "CHAIN_IMAGE_V1", "height")["value"] = below["height"]
+			stable := cp2ResolvedValueOf(t, d, c, "OWNER_IMAGE_V1", "stable_tip")["value"].(map[string]any)
+			stable["hash"], stable["height"] = below["block_hash"], below["height"]
+		},
 		"non-NEW effect claims summary rows": func(t *testing.T, d map[string]any) {
 			cp2AuthorityCase(t, d, "C01-SUMMARY-001", "NON_NEW_NULL")["expected"].(map[string]any)["effects"].(map[string]any)["summary_rows"].(map[string]any)["value"] = json.Number("7")
 		},
@@ -2572,6 +2582,7 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"equal-work winner substituted":                      "differ from the stated branch",
 		"equal-work relation contradicts the candidates":     "states candidate_hash_relation hash_bb_lt_hash_ba_raw_bytes, which the candidates' own hashes",
 		"post-disconnect tip rolled to genesis":              "CHAIN tip must equal the block below the disconnected tip",
+		"non-NEW chain tip rolled back one block":            "CHAIN tip must equal the stated prestate chain tip",
 		"non-NEW effect claims summary rows":                 "effects.summary_rows=7 differs from the 0 published rows",
 		"two grouped keys bind one summary row":              "is bound by more than one included-set group",
 		"grouped key matches no summary row":                 "included-set block \"NOPE\" matches no summary row",
@@ -2580,7 +2591,7 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"flat identities on a multi-row summary":             "flat included-set identities but 2 summary rows",
 		"authority row dropped":                              "RUB-1208 rows=",
 		"migrated row duplicated":                            "RUB-1208 row C01-DIRECT-001 cases=1 unauthorized",
-		"disconnect over a one-block prestate chain":         "disconnects over a 1-block prestate chain",
+		"disconnect over a one-block prestate chain":         "states a 1-block prestate chain, so entry -2 is not stated",
 	}
 	for _, name := range slices.Sorted(maps.Keys(mutate)) {
 		t.Run(name, func(t *testing.T) {
