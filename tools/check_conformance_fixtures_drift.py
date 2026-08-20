@@ -803,6 +803,16 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         stated = next(i for i in case["input"] if i["pointer"].endswith("included_set_identities"))
         stated["value_or_alias"] = []
 
+    def grouped_included_set_entry_stated_empty(data: dict) -> None:
+        # A grouped {block_id, identities} entry stating identities: [] still
+        # binds that block to the empty set, so it disagrees with the block's
+        # non-empty actual complete_da_ids -- same rule as the flat spelling
+        # above, but through the grouped branch's setdefault instead.
+        fixture = data["fixtures"][
+            "R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"
+        ]
+        fixture["value"]["identities"] = []
+
     def borrow_another_cases_da_alias(data: dict) -> None:
         case = case_of(data, "C01-REORG-001", "MAIN")
         case["expected"]["canonical_applied_blocks"][0]["complete_da_ids"][0] = "R1208_DACLEAN_001_EXACT_MATCH_DA_ID_1"
@@ -973,7 +983,10 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         case_of(data, "C01-DIRECT-001", "MAIN")["expected"]["commit_truth"] = "MAYBE"
 
     def overflow_prestate_sizes(data: dict) -> None:
-        # 2**64-1 + 1 is the minimal sum past the u64 ceiling: without the overflow arm `used` wraps to 0 and the wrapped total becomes the derived counter.
+        # 2**64-1 + 1 is the minimal sum past the u64 ceiling: this guard raises
+        # before the add runs. Python ints never wrap like Go uint64 -- without
+        # it, `used` just grows past 2**64 and the reject instead comes from the
+        # now-stale record_count field comparison, not this used-bytes message.
         data["fixtures"]["R1208_SIDE_001_MAIN_TX_S1"]["value"]["size"] = 2**64 - 1
         data["fixtures"]["R1208_SIDE_001_MAIN_TX_S2"] = {"type": "object", "value": {"kind": "standard_record", "size": 1}}
         stated = next(i for i in case_of(data, "C01-SIDE-001", "MAIN")["input"] if i["pointer"] == "/input/prestate_standard_records")
@@ -1015,6 +1028,7 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("dropped occurrence on a block_includes case", drop_block_includes_occurrence, "differ from the included-set"),
         ("one occurrence spelling dropped", drop_one_occurrence_spelling, "stated occurrence spellings disagree"),
         ("one occurrence spelling stated empty", empty_one_occurrence_spelling, "stated occurrence spellings disagree"),
+        ("grouped included-set entry stated empty", grouped_included_set_entry_stated_empty, "differ from the included-set"),
         ("occurrence added where the stated count is zero", add_occurrence_where_count_is_zero, "the case states 0"),
         ("summary borrows another case's da alias", borrow_another_cases_da_alias, "outside the case namespace"),
         ("wire disposed row with an old image", wire_disposed_row_with_an_old_image, "invalid for OLD"),
