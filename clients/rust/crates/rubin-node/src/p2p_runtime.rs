@@ -7208,7 +7208,7 @@ mod tests {
     fn decode_inventory_vectors_rejects_count_over_limit() {
         let count = MAX_INVENTORY_VECTORS + 1;
         let mut payload = vec![0u8; count * INVENTORY_VECTOR_SIZE];
-        for chunk in payload.chunks_exact_mut(INVENTORY_VECTOR_SIZE) {
+        for chunk in payload.as_chunks_mut::<INVENTORY_VECTOR_SIZE>().0 {
             chunk[0] = MSG_BLOCK;
         }
         let err = decode_inventory_vectors(&payload).unwrap_err();
