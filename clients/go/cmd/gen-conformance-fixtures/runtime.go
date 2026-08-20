@@ -4022,6 +4022,13 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 		return fmt.Errorf("%s is a standalone disconnect and must carry an exact empty summary", where)
 	}
 	if value, ok := cp2InputValue(inputs, "/input/connect_count"); ok {
+		if alias, ok := value.(string); ok {
+			f, err := cp2CaseFixture(fixtures, where, alias, "u64")
+			if err != nil {
+				return fmt.Errorf("%s/input/connect_count: %w", where, err)
+			}
+			value = f.Value
+		}
 		want, numeric := cp2UintOf(value)
 		if !numeric || want != uint64(len(rows)) {
 			return fmt.Errorf("%s summary carries %d rows, the case states connect_count %v", where, len(rows), value)
@@ -4113,6 +4120,13 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 	}
 
 	if value, ok := cp2InputValue(inputs, "/input/block_complete_da_set_count"); ok {
+		if alias, ok := value.(string); ok {
+			f, err := cp2CaseFixture(fixtures, where, alias, "u64")
+			if err != nil {
+				return fmt.Errorf("%s/input/block_complete_da_set_count: %w", where, err)
+			}
+			value = f.Value
+		}
 		want, numeric := cp2UintOf(value)
 		if !numeric || want != occurrences {
 			return fmt.Errorf("%s summary carries %d complete DA-set occurrences, the case states %v", where, occurrences, value)

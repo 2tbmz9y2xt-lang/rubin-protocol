@@ -2208,6 +2208,15 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			t.Fatalf("schema-legal row %s must validate: %v", field, err)
 		}
 	}
+	aliasDoc := cp2AuthorityControl(t)
+	aliasFixtures := aliasDoc["fixtures"].(map[string]any)
+	aliasFixtures["R1208_REORG_001_MAIN_CONNECT_COUNT"] = map[string]any{"type": "u64", "value": json.Number("3")}
+	aliasFixtures["R1208_SUMMARY_001_SINGLE_BLOCK_NO_DA_SET_COUNT"] = map[string]any{"type": "u64", "value": json.Number("0")}
+	cp2CaseInput(t, aliasDoc, "C01-REORG-001", "MAIN", "/input/connect_count")["value_or_alias"] = "R1208_REORG_001_MAIN_CONNECT_COUNT"
+	cp2CaseInput(t, aliasDoc, "C01-SUMMARY-001", "SINGLE_BLOCK_NO_DA", "/input/block_complete_da_set_count")["value_or_alias"] = "R1208_SUMMARY_001_SINGLE_BLOCK_NO_DA_SET_COUNT"
+	if err := cp2ValidateAuthorityDoc(t, aliasDoc); err != nil {
+		t.Fatalf("schema-legal u64 count aliases must validate: %v", err)
+	}
 	mutate := map[string]func(*testing.T, map[string]any){
 		"closure binding substituted": func(t *testing.T, d map[string]any) {
 			d["closure_bindings"].(map[string]any)["image_manifest_hash"] = strings.Repeat("00", 32)

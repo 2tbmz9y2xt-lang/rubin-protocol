@@ -815,6 +815,18 @@ class CanonicalPipelineV2RUB1208Tests(unittest.TestCase):
 
     def test_semantic_gate_accepts_the_committed_artifact(self):
         m.validate_canonical_pipeline_v2_semantics(self.ARTIFACT)
+        data = json.loads(json.dumps(self.data))
+        data["fixtures"]["R1208_REORG_001_MAIN_CONNECT_COUNT"] = {"type": "u64", "value": 3}
+        data["fixtures"]["R1208_SUMMARY_001_SINGLE_BLOCK_NO_DA_SET_COUNT"] = {"type": "u64", "value": 0}
+        for row, case, pointer, alias in (
+            ("C01-REORG-001", "MAIN", "/input/connect_count", "R1208_REORG_001_MAIN_CONNECT_COUNT"),
+            ("C01-SUMMARY-001", "SINGLE_BLOCK_NO_DA", "/input/block_complete_da_set_count", "R1208_SUMMARY_001_SINGLE_BLOCK_NO_DA_SET_COUNT"),
+        ):
+            next(i for i in self._case(data, row, case)["input"] if i["pointer"] == pointer)["value_or_alias"] = alias
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "count-aliases.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            m.validate_canonical_pipeline_v2_semantics(path)
 
     def test_obligation_receipts_reject_a_census_preserving_edit(self):
         # Killer for the forward receipt hash: both edits keep the unique (143)

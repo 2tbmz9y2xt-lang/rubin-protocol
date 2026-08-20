@@ -332,7 +332,6 @@ def _derived_counts(where: str, image: str, relation: str, inputs: object, fixtu
     (stale retained-DA) and M17 (stale owner claim) redden instead of being
     authored freely. Mirrors Go cp2DerivedCounts; the `new` transition rule is
     deferred to RUB-1204 and derived nowhere here.
-
     Returns (exact equalities, lower bounds). `last_admission_seq` is the
     monotone high-water M1 preserves (manifest mutation M15 "rewound"), which
     the reference only requires at or above the greatest resident
@@ -505,7 +504,6 @@ def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: li
     extra, extra_stated = _flat_stated_da_ids(where, inputs, fixtures)
     if not stated and not extra_stated:
         return None
-
     grouped, flat, shapes = {}, [], set()
     if extra_stated:
         shapes.add("flat")
@@ -538,13 +536,11 @@ def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: li
     if stated and extra_stated and sorted(set(flat)) != sorted(set(extra)):
         raise RuntimeError(f"{where}: stated occurrence spellings disagree on the complete DA-set identities")
     flat.extend(extra)
-
     def block_alias(index: int) -> str:
         row = summary[index]
         if not isinstance(row, dict) or not isinstance(row.get("block_id"), str):
             raise RuntimeError(f"{where}/canonical_applied_blocks/{index}: block_id is not an alias")
         return row["block_id"]
-
     out = {}
     if "grouped" in shapes:
         for suffix in sorted(grouped):
@@ -575,7 +571,6 @@ def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: li
         )
     return {block_alias(0): want}
 
-
 def _summary_rows_effect(where: str, expected: dict, rows: int) -> None:
     """The stated row-count effect against the rows the case publishes. Secondary
     consistency only: the typed rows are the primary evidence, so this runs LAST
@@ -598,7 +593,6 @@ def _prestate_chain_block(where: str, prestate: object, fixtures: dict, from_end
     if not isinstance(block, dict):
         raise RuntimeError(f"{where}/CHAIN: prestate chain fixture is not an object")
     return block
-
 
 def _stated_branch_blocks(where: str, inputs: object, fixtures: dict) -> list:
     branch = _input_value(inputs, "/input/prestored_side_branch")
@@ -636,7 +630,6 @@ def _stated_branch_blocks(where: str, inputs: object, fixtures: dict) -> list:
         )
     return out + [first]
 
-
 def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
     data = load_json_fail_closed(path)
     if not isinstance(data, dict):
@@ -649,7 +642,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
         raise RuntimeError("canonical_pipeline_v2: closure epoch is not frozen v8")
     if epoch.get("status") != "building":
         raise RuntimeError("canonical_pipeline_v2: closure status is not building")
-
     fixtures = data.get("fixtures")
     resolved = data.get("resolved_values")
     rows = data.get("rows")
@@ -657,7 +649,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
         raise RuntimeError("canonical_pipeline_v2: fixtures/resolved_values/rows shape")
     _validate_resolved_values(resolved)
     direct_fields = _direct_field_names(data.get("image_manifest"))
-
     got_counts = {}
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("cases"), list):
@@ -673,14 +664,12 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             f"canonical_pipeline_v2: RUB-1208 row/case census {got_counts!r} "
             f"!= {V2_RUB1208_CASE_COUNTS!r}"
         )
-
     obligation_forward = {}
     obligation_reverse = {}
     obligation_occurrences = 0
     source_forward = {}
     referenced = set()
     named = set()
-
     for row in rows:
         row_id = row["row_id"]
         for case in row["cases"]:
@@ -699,7 +688,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             obligation_occurrences += len(sorted_obligations)
             for obligation in sorted_obligations:
                 obligation_reverse.setdefault(obligation, []).append(where)
-
             _validate_input_aliases(where, case, fixtures, named)
             expected = case.get("expected")
             if not isinstance(expected, dict):
@@ -716,7 +704,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             if not isinstance(sources, list) or not all(isinstance(source, str) for source in sources):
                 raise RuntimeError(f"{where}/sources: must be strings")
             source_forward[where] = sorted(sources)
-
             for image in sorted(direct_fields):
                 projection = images[image]
                 if not isinstance(projection, dict):
@@ -767,7 +754,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                             f"{where}/{image}/{field}: {value!r} is rewound below the "
                             f"{at_least[field]} the stated prestate requires"
                         )
-
             chain = images["CHAIN_IMAGE_V1"]["direct_fields"]
             owner = images["OWNER_IMAGE_V1"]["direct_fields"]
             chain_hash = _resolved_entry(
@@ -785,7 +771,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                 raise RuntimeError(
                     f"{where}/OWNER/stable_tip: must equal published CHAIN tip hash/height"
                 )
-
             summary = expected.get("canonical_applied_blocks")
             if truth != "NEW":
                 if summary is not None:
@@ -801,7 +786,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                 continue
             if not isinstance(summary, list):
                 raise RuntimeError(f"{where}/canonical_applied_blocks: NEW must be an array")
-
             disconnect = isinstance(inputs, list) and any(
                 isinstance(x, dict) and x.get("pointer") == "/input/disconnect_command"
                 for x in inputs
@@ -817,6 +801,8 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                     f"an exact empty summary"
                 )
             stated_connects = _input_value(inputs, "/input/connect_count")
+            if isinstance(stated_connects, str):
+                stated_connects = _fixture_value(fixtures, stated_connects, "u64", f"{where}/input/connect_count")
             if stated_connects is not _ABSENT and (
                 type(stated_connects) is not int or stated_connects != len(summary)
             ):
@@ -825,7 +811,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                     f"states connect_count {stated_connects!r}"
                 )
             want_da = _included_set_da_ids(where, inputs, fixtures, summary)
-
             last_height, last_block, occurrences = None, None, 0
             for index, summary_row in enumerate(summary):
                 sw = f"{where}/canonical_applied_blocks/{index}"
@@ -848,7 +833,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                 if last_height is not None and height != last_height + 1:
                     raise RuntimeError(f"{where}/canonical_applied_blocks: heights are not consecutive")
                 last_height, last_block = height, block
-
                 da_ids = summary_row.get("complete_da_ids")
                 if not isinstance(da_ids, list):
                     raise RuntimeError(f"{sw}/complete_da_ids: not an array")
@@ -867,15 +851,15 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                             f"{sw}/complete_da_ids: {raw_ids!r} differ from the included-set "
                             f"identities {bound!r} of this block"
                         )
-
             branch = _stated_branch_blocks(where, inputs, fixtures)
             if branch and [r["block_id"] for r in summary] != branch:
                 raise RuntimeError(
                     f"{where}/canonical_applied_blocks: published blocks differ from "
                     f"the stated branch {branch!r}"
                 )
-
             stated_count = _input_value(inputs, "/input/block_complete_da_set_count")
+            if isinstance(stated_count, str):
+                stated_count = _fixture_value(fixtures, stated_count, "u64", f"{where}/input/block_complete_da_set_count")
             if stated_count is not _ABSENT and (
                 type(stated_count) is not int or stated_count != occurrences
             ):
@@ -883,7 +867,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                     f"{where}/canonical_applied_blocks: {occurrences} complete DA-set "
                     f"occurrences, the case states {stated_count!r}"
                 )
-
             prestate = _input_value(inputs, "/input/prestate_canonical_chain")
             if prestate is not _ABSENT and last_block is not None:
                 pre_tip = _prestate_chain_block(where, prestate, fixtures, 1)
@@ -905,10 +888,8 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                 or chain_utxo != tip_block.get("utxo_count")
             ):
                 raise RuntimeError(f"{where}/CHAIN: tip must equal {tip_what}")
-
             _validate_cleanup_classifier(where, inputs, expected, fixtures)
             _summary_rows_effect(where, expected, len(summary))
-
     orphans = sorted(set(resolved) - referenced)
     if orphans:
         raise RuntimeError(
@@ -917,7 +898,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
     unnamed = sorted(set(fixtures) - named)
     if unnamed:
         raise RuntimeError(f"canonical_pipeline_v2: fixtures[{unnamed[0]}] is named by no case")
-
     for cases in obligation_reverse.values():
         cases.sort()
     if obligation_occurrences != V2_RUB1208_OBLIGATION_OCCURRENCES:
@@ -937,10 +917,8 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
     if _canonical_sha256(source_forward) != V2_RUB1208_SOURCES_SHA256:
         raise RuntimeError("canonical_pipeline_v2: sources forward receipt hash mismatch")
 
-
 def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
     control = load_json_fail_closed(path)
-
     def case_of(data: dict, row_id: str, case_id: str) -> dict:
         row = next((row for row in data["rows"] if row["row_id"] == row_id), None)
         if row is None:
@@ -949,54 +927,40 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         if case is None:
             raise RuntimeError(f"negative control target case {row_id}/{case_id} is gone")
         return case
-
     def resolved_of(data: dict, row_id: str, case_id: str, image: str, field: str) -> dict:
         case = case_of(data, row_id, case_id)
         return data["resolved_values"][case["expected"]["state_image"][image]["direct_fields"][field]]
-
     def stale_standard_used_bytes(data: dict) -> None:
         resolved_of(data, "C01-SIDE-001", "MAIN", "STANDARD_MEMPOOL_IMAGE_V1", "used_bytes")["value"] = 999999
-
     def stale_retained_set_count(data: dict) -> None:
         resolved_of(data, "C01-DACLEAN-001", "ABSENT_RETAINED", "RETAINED_DA_IMAGE_V1", "set_count")["value"] = 0
-
     def stale_owner_claim_count(data: dict) -> None:
         resolved_of(data, "C01-DACLEAN-001", "CORRUPT_FIRST", "OWNER_IMAGE_V1", "claim_count")["value"] = 99
-
     def stale_retained_pinned_payload_bytes(data: dict) -> None:
         resolved_of(data, "C01-DISCONNECT-001", "MAIN", "RETAINED_DA_IMAGE_V1", "pinned_payload_bytes")["value"] = 999999
-
     def rewound_last_admission_seq(data: dict) -> None:
         resolved_of(data, "C01-SIDE-001", "MAIN", "STANDARD_MEMPOOL_IMAGE_V1", "last_admission_seq")["value"] = 0
-
     def chain_utxo_count_off_the_tip_block(data: dict) -> None:
         resolved_of(data, "C01-SIDE-001", "MAIN", "CHAIN_IMAGE_V1", "utxo_count")["value"] = 777
-
     def drop_block_includes_occurrence(data: dict) -> None:
         case_of(data, "C01-DIRECT-001", "MAIN")["expected"]["canonical_applied_blocks"][0]["complete_da_ids"] = []
-
     def add_occurrence_where_count_is_zero(data: dict) -> None:
         case = case_of(data, "C01-SUMMARY-001", "SINGLE_BLOCK_NO_DA")
         case["expected"]["canonical_applied_blocks"][0]["complete_da_ids"] = [
             "R1208_SUMMARY_001_SINGLE_BLOCK_NO_DA_B1_HASH"
         ]
-
     def drop_one_occurrence_spelling(data: dict) -> None:
         case = case_of(data, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
         stated = next(i for i in case["input"] if i["pointer"].endswith("da_ids_in_transaction_order"))
         stated["value_or_alias"] = stated["value_or_alias"][:1]
-
     def empty_one_occurrence_spelling(data: dict) -> None:
         case = case_of(data, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
         stated = next(i for i in case["input"] if i["pointer"].endswith("included_set_identities"))
         stated["value_or_alias"] = []
-
     def grouped_included_set_entry_stated_empty(data: dict) -> None:
         data["fixtures"]["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"]["value"]["identities"] = []
-
     def input_of(data: dict, row_id: str, case_id: str, pointer: str) -> dict:
         return next(i for i in case_of(data, row_id, case_id)["input"] if i["pointer"] == pointer)
-
     def omit_one_grouped_included_set_entry(data: dict) -> None:
         stated = input_of(data, "C01-DACLEAN-001", "MULTI_SET_SUCCESS", "/input/block_included_set_identities")
         stated["value_or_alias"] = stated["value_or_alias"][:1]
