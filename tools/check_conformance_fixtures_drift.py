@@ -804,14 +804,8 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         stated["value_or_alias"] = []
 
     def grouped_included_set_entry_stated_empty(data: dict) -> None:
-        # A grouped {block_id, identities} entry stating identities: [] still
-        # binds that block to the empty set, so it disagrees with the block's
-        # non-empty actual complete_da_ids -- same rule as the flat spelling
-        # above, but through the grouped branch's setdefault instead.
-        fixture = data["fixtures"][
-            "R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"
-        ]
-        fixture["value"]["identities"] = []
+        # A grouped identities: [] binds that block to the EMPTY set too.
+        data["fixtures"]["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"]["value"]["identities"] = []
 
     def borrow_another_cases_da_alias(data: dict) -> None:
         case = case_of(data, "C01-REORG-001", "MAIN")
@@ -983,10 +977,8 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         case_of(data, "C01-DIRECT-001", "MAIN")["expected"]["commit_truth"] = "MAYBE"
 
     def overflow_prestate_sizes(data: dict) -> None:
-        # 2**64-1 + 1 is the minimal sum past the u64 ceiling: this guard raises
-        # before the add runs. Python ints never wrap like Go uint64 -- without
-        # it, `used` just grows past 2**64 and the reject instead comes from the
-        # now-stale record_count field comparison, not this used-bytes message.
+        # 2**64-1 + 1 is the minimal sum past the u64 ceiling. Python ints
+        # never wrap like Go uint64; without it, record_count rejects instead.
         data["fixtures"]["R1208_SIDE_001_MAIN_TX_S1"]["value"]["size"] = 2**64 - 1
         data["fixtures"]["R1208_SIDE_001_MAIN_TX_S2"] = {"type": "object", "value": {"kind": "standard_record", "size": 1}}
         stated = next(i for i in case_of(data, "C01-SIDE-001", "MAIN")["input"] if i["pointer"] == "/input/prestate_standard_records")
