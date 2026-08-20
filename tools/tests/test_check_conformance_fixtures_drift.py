@@ -283,13 +283,17 @@ class V2SemanticGateExitCodeTests(unittest.TestCase):
 
     BROKEN_V2 = b'{"_meta": "not an object"}\n'
 
-    def _run(self, *, skip=(), v2_body=None):
+    def _run(self, *, skip=(), v2_body=None, authority=b"{}\n"):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             committed = repo_root / m.COMMITTED_FIXTURES_REL
             committed.mkdir(parents=True)
             _populate_committed(committed)
             (repo_root / m.GO_MODULE_REL).mkdir(parents=True, exist_ok=True)
+            authority_path = repo_root / m.V2_AUTHORITY_REL
+            authority_path.parent.mkdir(parents=True, exist_ok=True)
+            if authority is not None:
+                authority_path.write_bytes(authority)
             if v2_body is not None:
                 (committed / m.V2_REL).write_bytes(v2_body)
 
@@ -309,6 +313,20 @@ class V2SemanticGateExitCodeTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("ERROR: canonical_pipeline_v2: _meta.closure_epoch is not an object", err)
         self.assertNotIn("Traceback", err)
+
+    def test_duplicate_key_in_the_authority_source_is_drift(self):
+        # json.loads and Go's encoding/json both keep the LAST of two duplicate
+        # keys, so an edited authority could hide a dropped expectation from every
+        # downstream check; the gate strict-loads it before the artifact.
+        rc, err = self._run(v2_body=self.BROKEN_V2, authority=b'{"rows": [], "rows": []}\n')
+        self.assertEqual(rc, 1)
+        self.assertIn("duplicate", err)
+        self.assertIn(m.V2_AUTHORITY_REL.name, err)
+        self.assertNotIn("Traceback", err)
+        # And the missing file is drift too, never a silent skip.
+        rc, err = self._run(v2_body=self.BROKEN_V2, authority=None)
+        self.assertEqual((rc, "Traceback" in err), (1, False), err)
+        self.assertIn(m.V2_AUTHORITY_REL.name, err)
 
     def test_missing_generated_v2_reaches_the_regression_diagnostic(self):
         rc, err = self._run(skip=(m.V2_REL,))

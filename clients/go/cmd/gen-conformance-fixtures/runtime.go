@@ -3157,8 +3157,10 @@ func cp2ValidateAliases(rows []cp2Row, fixtures map[string]cp2Fixture) error {
 }
 
 // cp2ResolveAliases requires every alias one pointer names to exist in the
-// catalog AND to carry the fixture type the pointer tag declares; an `alias`
-// tag accepts any catalog type, since the tag names no literal form itself.
+// catalog, to carry the fixture type the pointer tag declares (an `alias` tag
+// accepts any catalog type, since the tag names no literal form itself) and to
+// live in the naming case's own namespace: existence and type alone would let
+// one case drive its stimulus from another case's fixture.
 func cp2ResolveAliases(where string, in cp2Input, fixtures map[string]cp2Fixture) error {
 	want := strings.TrimSuffix(strings.TrimPrefix(in.Type, "array<"), ">")
 	for _, alias := range cp2AliasesOf(in) {
@@ -3168,6 +3170,9 @@ func cp2ResolveAliases(where string, in cp2Input, fixtures map[string]cp2Fixture
 		}
 		if want != "alias" && fixture.Type != want {
 			return fmt.Errorf("case %s: input %s alias %q is a %s fixture, want %s", where, in.Pointer, alias, fixture.Type, want)
+		}
+		if prefix := cp2CaseAliasPrefix(where); !strings.HasPrefix(alias, prefix) {
+			return fmt.Errorf("case %s: input %s alias %q is outside the case namespace %q", where, in.Pointer, alias, prefix)
 		}
 	}
 	return nil
@@ -3432,6 +3437,11 @@ func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixt
 			}
 			out[block] = cp2SortedUnique(grouped[suffix])
 		}
+		// Every key is one distinct summary row, so equal sizes is exactly "every
+		// row bound": a row no group binds is a row whose list nothing checks.
+		if len(out) != len(summary) {
+			return nil, fmt.Errorf("%s binds %d of %d summary rows to a stated included-set group", where, len(out), len(summary))
+		}
 		return out, nil
 	}
 	want := cp2SortedUnique(flat)
@@ -3456,6 +3466,25 @@ func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixt
 	}
 	out[block] = want
 	return out, nil
+}
+
+// cp2StatedBranchBlocks is the ordered block set a case states will become newly
+// canonical: the pre-stored side branch in canonical order, then the stimulus
+// block. A case stating neither constrains nothing. The tags of both pointers
+// are enforced by cp2InputOK, so a malformed value contributes no alias here.
+func cp2StatedBranchBlocks(inputs []any) []string {
+	var out []string
+	branch, _ := cp2InputValue(inputs, "/input/prestored_side_branch")
+	list, _ := branch.([]any)
+	for _, v := range list {
+		alias, _ := v.(string)
+		out = append(out, alias)
+	}
+	if value, stated := cp2InputValue(inputs, "/input/stimulus_block"); stated {
+		alias, _ := value.(string)
+		out = append(out, alias)
+	}
+	return out
 }
 
 // cp2InputValue returns the value one stated stimulus pointer carries, and
@@ -3789,6 +3818,7 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 	lastHeight, occurrences := uint64(0), uint64(0)
 	haveHeight := false
 	var lastBlock map[string]any
+	var blocks []string
 	for i, raw := range rows {
 		row, ok := raw.(map[string]any)
 		if !ok {
@@ -3796,6 +3826,7 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 		}
 		blockID, _ := row["block_id"].(string)
 		blockHash, _ := row["block_hash"].(string)
+		blocks = append(blocks, blockID)
 		bf, err := cp2CaseFixture(fixtures, where, blockID, "object")
 		if err != nil {
 			return fmt.Errorf("%s summary[%d] block_id: %w", where, i, err)
@@ -3860,6 +3891,13 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 		}
 	}
 
+	// The published blocks are the blocks the case states, in order: a dropped,
+	// reordered or substituted one stops being the frame's own ordered outcome
+	// even where every row is individually well-formed.
+	if branch := cp2StatedBranchBlocks(inputs); len(branch) > 0 && !slices.Equal(blocks, branch) {
+		return fmt.Errorf("%s canonical-applied blocks %v differ from the stated branch %v", where, blocks, branch)
+	}
+
 	// One stimulus states the occurrence fact for the whole case rather than per
 	// identity: a complete-set count is the number of complete DA sets the block
 	// carries, so an added or dropped occurrence reddens even where no identity
@@ -3913,12 +3951,17 @@ func cp2CaseFixture(fixtures map[string]cp2Fixture, where, alias, want string) (
 	if f.Type != want {
 		return f, fmt.Errorf("fixture alias %q type=%s want %s", alias, f.Type, want)
 	}
-	row, caseID, _ := strings.Cut(where, "/")
-	prefix := "R1208_" + strings.ReplaceAll(strings.TrimPrefix(row, "C01-"), "-", "_") + "_" + caseID + "_"
-	if !strings.HasPrefix(alias, prefix) {
+	if prefix := cp2CaseAliasPrefix(where); !strings.HasPrefix(alias, prefix) {
 		return f, fmt.Errorf("fixture alias %q is outside the case namespace %q", alias, prefix)
 	}
 	return f, nil
+}
+
+// cp2CaseAliasPrefix is the catalog namespace of one case: every fixture a
+// migrated case names is keyed R1208_<ROW>_<CASE>_.
+func cp2CaseAliasPrefix(where string) string {
+	row, caseID, _ := strings.Cut(where, "/")
+	return "R1208_" + strings.ReplaceAll(strings.TrimPrefix(row, "C01-"), "-", "_") + "_" + caseID + "_"
 }
 
 // cp2ManifestHashOK re-derives a frozen manifest's canonical hash and compares

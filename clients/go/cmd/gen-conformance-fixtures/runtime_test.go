@@ -1446,10 +1446,15 @@ func cp2ValidInput(pointer, tag string, value any) cp2Input {
 	return cp2Input{Pointer: pointer, Type: tag, ValueOrAlias: value, Provenance: "witness_fixture", ProductionSetupSink: "sink", ConsumptionProofOwner: "RUB-923"}
 }
 
+// cp2CaseAlias and cp2CaseSchedAlias are catalog aliases inside the control
+// case's own namespace (C01-DIRECT-001/MAIN), which cp2ResolveAliases requires
+// of every input alias and schedule id.
+const cp2CaseAlias, cp2CaseSchedAlias = "R1208_DIRECT_001_MAIN_B1", "R1208_DIRECT_001_MAIN_SCHED"
+
 // cp2ValidCase is the known-valid control every RUB-1207 negative mutates in
 // exactly one dimension.
 func cp2ValidCase() cp2Case {
-	return cp2Case{CaseID: "MAIN", Input: []cp2Input{cp2ValidInput("/input/stimulus_block", "alias", "B1")}, Expected: cp2Expected{
+	return cp2Case{CaseID: "MAIN", Input: []cp2Input{cp2ValidInput("/input/stimulus_block", "alias", cp2CaseAlias)}, Expected: cp2Expected{
 		Result: cp2Ptr("ACCEPTED"), CommitTruth: "NEW",
 		RPC: cp2RPC{
 			Class: "MINED_200_COMMITTED", HTTP: cp2Ptr(200), CommitState: cp2Ptr("committed"),
@@ -1619,23 +1624,23 @@ func TestCanonicalPipelineV2ValidatorAcceptsTheStatedShapes(t *testing.T) {
 func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	c := cp2ValidCase()
 	c.Input = []cp2Input{{
-		Pointer: "/input/stimulus_block", Type: "alias", ValueOrAlias: "B1",
+		Pointer: "/input/stimulus_block", Type: "alias", ValueOrAlias: cp2CaseAlias,
 		Provenance: "normative_boundary", ProductionSetupSink: "node.Miner.MineOne", ConsumptionProofOwner: "RUB-923",
 	}}
 	rows := []cp2Row{{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{c}}}
-	block := map[string]cp2Fixture{"B1": {Type: "object", Value: cpMap{"height": 1}}}
+	block := map[string]cp2Fixture{cp2CaseAlias: {Type: "object", Value: cpMap{"height": 1}}}
 	err := cp2ValidateAliases(rows, map[string]cp2Fixture{})
-	if err == nil || !strings.Contains(err.Error(), `alias "B1"`) {
-		t.Fatalf("empty catalog: error = %v, want a rejection naming alias B1", err)
+	if err == nil || !strings.Contains(err.Error(), `alias "`+cp2CaseAlias+`"`) {
+		t.Fatalf("empty catalog: error = %v, want a rejection naming alias %s", err, cp2CaseAlias)
 	}
 	if err := cp2ValidateAliases(rows, block); err != nil {
-		t.Fatalf("catalog carrying B1 must validate: %v", err)
+		t.Fatalf("catalog carrying %s must validate: %v", cp2CaseAlias, err)
 	}
 	// An alias array marshals to a schema-valid array in either Go shape.
-	for _, arr := range []any{[]any{"B1"}, []string{"B1"}} {
+	for _, arr := range []any{[]any{cp2CaseAlias}, []string{cp2CaseAlias}} {
 		rows[0].Cases[0].Input[0] = cp2Input{Pointer: "/input/prestate", Type: "array<alias>", ValueOrAlias: arr}
-		if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}); err == nil || !strings.Contains(err.Error(), `alias "B1"`) {
-			t.Fatalf("array alias %T: error = %v, want a rejection naming B1", arr, err)
+		if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}); err == nil || !strings.Contains(err.Error(), `alias "`+cp2CaseAlias+`"`) {
+			t.Fatalf("array alias %T: error = %v, want a rejection naming %s", arr, err, cp2CaseAlias)
 		}
 	}
 	rows[0].Cases[0].Input[0] = c.Input[0]
@@ -1973,19 +1978,25 @@ func TestCanonicalPipelineV2IntegerAndScheduleAliases(t *testing.T) {
 		t.Error("the float64 arm must accept integral values inside the bound and reject one above it")
 	}
 	sched := cp2Row{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}
-	sched.Cases[0].ScheduleID = cp2Ptr("SCHED")
+	sched.Cases[0].ScheduleID = cp2Ptr(cp2CaseSchedAlias)
 	block1 := cp2Fixture{Type: "object", Value: cpMap{"h": 1}}
 	for name, tc := range map[string]struct {
 		catalog map[string]cp2Fixture
 		ok      bool
 	}{
-		"schedule present":       {map[string]cp2Fixture{"B1": block1, "SCHED": {Type: "object", Value: cpMap{"barrier": "A"}}}, true},
-		"schedule absent":        {map[string]cp2Fixture{"B1": block1}, false},
-		"schedule not an object": {map[string]cp2Fixture{"B1": block1, "SCHED": {Type: "u64", Value: 1}}, false},
+		"schedule present":       {map[string]cp2Fixture{cp2CaseAlias: block1, cp2CaseSchedAlias: {Type: "object", Value: cpMap{"barrier": "A"}}}, true},
+		"schedule absent":        {map[string]cp2Fixture{cp2CaseAlias: block1}, false},
+		"schedule not an object": {map[string]cp2Fixture{cp2CaseAlias: block1, cp2CaseSchedAlias: {Type: "u64", Value: 1}}, false},
 	} {
 		if err := cp2ValidateAliases([]cp2Row{sched}, tc.catalog); (err == nil) != tc.ok {
 			t.Errorf("%s: err = %v, want ok = %v", name, err, tc.ok)
 		}
+	}
+	// A schedule id, like every input alias, lives in the naming case's namespace.
+	sched.Cases[0].ScheduleID = cp2Ptr("SCHED")
+	borrowed := map[string]cp2Fixture{cp2CaseAlias: block1, "SCHED": {Type: "object", Value: cpMap{"barrier": "A"}}}
+	if err := cp2ValidateAliases([]cp2Row{sched}, borrowed); err == nil || !strings.Contains(err.Error(), "outside the case namespace") {
+		t.Errorf("borrowed schedule id: error = %v, want a namespace rejection", err)
 	}
 }
 
@@ -2070,6 +2081,18 @@ func cp2AuthorityCase(t *testing.T, doc map[string]any, rowID, caseID string) ma
 		}
 	}
 	t.Fatalf("negative control target %s/%s is gone", rowID, caseID)
+	return nil
+}
+
+// cp2CaseInput returns the stated input entry one case pointer names.
+func cp2CaseInput(t *testing.T, d map[string]any, rowID, caseID, pointer string) map[string]any {
+	t.Helper()
+	for _, raw := range cp2AuthorityCase(t, d, rowID, caseID)["input"].([]any) {
+		if in := raw.(map[string]any); in["pointer"] == pointer {
+			return in
+		}
+	}
+	t.Fatalf("case %s/%s states no %s", rowID, caseID, pointer)
 	return nil
 }
 
@@ -2406,6 +2429,22 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"commit truth outside the closed set": func(t *testing.T, d map[string]any) {
 			cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")["expected"].(map[string]any)["commit_truth"] = "MAYBE"
 		},
+		"one grouped included-set entry omitted": func(t *testing.T, d map[string]any) {
+			// The B2P group goes while its summary row keeps its occurrence: without
+			// the coverage arm that row is bound by nothing and passes.
+			in := cp2CaseInput(t, d, "C01-DACLEAN-001", "MULTI_SET_SUCCESS", "/input/block_included_set_identities")
+			in["value_or_alias"] = in["value_or_alias"].([]any)[:1]
+		},
+		"summary block substituted for another stated block": func(t *testing.T, d map[string]any) {
+			// The summary keeps its rows, heights and hashes, so only the
+			// branch-to-summary derivation can reject the substituted branch block.
+			cp2CaseInput(t, d, "C01-REORG-001", "MAIN", "/input/prestored_side_branch")["value_or_alias"].([]any)[0] = "R1208_REORG_001_MAIN_B3P"
+		},
+		"input alias borrowed from another case": func(t *testing.T, d map[string]any) {
+			// A non-NEW case on purpose: its summary is null, so the branch
+			// derivation cannot fire and the namespace is the only rule left.
+			cp2CaseInput(t, d, "C01-DACLEAN-001", "CORRUPT_FIRST", "/input/stimulus_block")["value_or_alias"] = "R1208_GENESIS_001_MAIN_G"
+		},
 		"included-set identity substituted": func(t *testing.T, d map[string]any) {
 			fixtures := d["fixtures"].(map[string]any)
 			entry := fixtures["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
@@ -2458,6 +2497,9 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"summary_rows effect drift":                          "effects.summary_rows",
 		"summary_rows effect is a bool on a zero-row case":   "effects.summary_rows=true differs from the 0 published rows",
 		"included-set identity substituted":                  "differ from the included-set identities",
+		"one grouped included-set entry omitted":             "binds 1 of 2 summary rows to a stated included-set group",
+		"summary block substituted for another stated block": "differ from the stated branch",
+		"input alias borrowed from another case":             "is outside the case namespace",
 		"one occurrence spelling disagrees":                  "stated occurrence spellings disagree",
 		"one occurrence spelling stated empty":               "stated occurrence spellings disagree",
 		"standalone disconnect publishes a row":              "standalone disconnect and must carry an exact empty summary",

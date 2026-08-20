@@ -40,6 +40,7 @@ FAKE_REPO_ENV = "_RUBIN_DRIFT_FAKE_REPO"
 GENERATOR_PACKAGE = "./cmd/gen-conformance-fixtures"
 GO_MODULE_REL = Path("clients/go")
 V2_REL = Path("protocol/canonical_pipeline_v2.json")
+V2_AUTHORITY_REL = Path("clients/go/cmd/gen-conformance-fixtures/canonical_pipeline_v2_authority.json")
 V2_RUB1208_CASE_COUNTS = {
     "C01-DACLEAN-001": 12,
     "C01-DIRECT-001": 1,
@@ -183,13 +184,15 @@ def _case_alias_prefix(where: str) -> str:
     return "R1208_" + row_id.removeprefix("C01-").replace("-", "_") + "_" + case_id + "_"
 
 
-def _fixture_value(fixtures: dict, alias: object, want: str, where: str):
+def _fixture_value(fixtures: dict, alias: object, want: Optional[str], where: str):
+    """Resolve one catalog alias: existence, declared tag (`want=None` accepts any
+    tag, mirroring Go's bare `alias` input tag) and the naming case's namespace."""
     if not isinstance(alias, str):
         raise RuntimeError(f"{where}: fixture alias is not a string")
     entry = fixtures.get(alias)
     if not isinstance(entry, dict):
         raise RuntimeError(f"{where}: fixture alias {alias!r} is absent")
-    if entry.get("type") != want:
+    if want is not None and entry.get("type") != want:
         raise RuntimeError(
             f"{where}: fixture alias {alias!r} type={entry.get('type')!r} want {want}"
         )
@@ -216,6 +219,7 @@ V2_DIRECT_FIELD_TYPES = {
     "used_bytes": "u64",
     "utxo_count": "u64",
 }
+V2_UPPER_TOKEN_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 V2_RESOLVED_KEY_RE = re.compile(
     r"^[A-Za-z][A-Za-z0-9_]*@C01(-[A-Z0-9]+)+-[0-9]{3}/[A-Z][A-Z0-9_]*:(new|old|unchanged|withheld)$"
 )
@@ -322,6 +326,29 @@ def _input_value(inputs: object, pointer: str):
             if isinstance(entry, dict) and entry.get("pointer") == pointer:
                 return entry.get("value_or_alias")
     return _ABSENT
+
+
+def _validate_input_aliases(where: str, case: dict, fixtures: dict) -> None:
+    """Every alias an input pointer or the schedule id names must exist, carry the
+    tag the pointer declares and live in this case's own namespace: existence and
+    tag alone would let one case drive its stimulus from another case's fixture.
+    Mirrors Go cp2ValidateAliases/cp2ResolveAliases -- a `token` tag carries a
+    machine token, never an alias, and a bare `alias` tag accepts any catalog tag."""
+    stated = list(case.get("input") or [])
+    if isinstance(case.get("schedule_id"), str):
+        stated.append({"pointer": "/schedule_id", "type": "object", "value_or_alias": case["schedule_id"]})
+    for entry in stated:
+        tag = entry.get("type")
+        if not isinstance(tag, str) or tag in ("token", "array<token>"):
+            continue
+        want = tag.removeprefix("array<").removesuffix(">")
+        value = entry.get("value_or_alias")
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, str) and V2_UPPER_TOKEN_RE.fullmatch(item):
+                _fixture_value(
+                    fixtures, item, None if want == "alias" else want,
+                    f"{where}{entry.get('pointer')}",
+                )
 
 
 def _derived_counts(where: str, image: str, relation: str, inputs: object, fixtures: dict) -> dict:
@@ -458,6 +485,13 @@ def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: li
                     f"{where}: included-set block {suffix!r} matches {len(matches)} summary rows"
                 )
             out[matches[0]] = sorted(set(grouped[suffix]))
+        # Every key is one distinct summary row, so equal sizes is exactly "every
+        # row bound": a row no group binds is a row whose list nothing checks.
+        if len(out) != len(summary):
+            raise RuntimeError(
+                f"{where}: binds {len(out)} of {len(summary)} summary rows to a "
+                f"stated included-set group"
+            )
         return out
     want = sorted(set(flat))
     if not want:
@@ -468,6 +502,16 @@ def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: li
             f"{len(summary)} summary rows, so no row binding is derivable"
         )
     return {block_alias(0): want}
+
+
+def _stated_branch_blocks(inputs: object) -> list:
+    """The ordered blocks a case states will become newly canonical: the
+    pre-stored side branch in canonical order, then the stimulus block. A case
+    stating neither constrains nothing. Mirrors Go cp2StatedBranchBlocks."""
+    branch = _input_value(inputs, "/input/prestored_side_branch")
+    out = list(branch) if isinstance(branch, list) else []
+    stimulus = _input_value(inputs, "/input/stimulus_block")
+    return out + [stimulus] if stimulus is not _ABSENT else out
 
 
 def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
@@ -542,6 +586,7 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             for obligation in sorted_obligations:
                 obligation_reverse.setdefault(obligation, []).append(where)
 
+            _validate_input_aliases(where, case, fixtures)
             expected = case.get("expected")
             if not isinstance(expected, dict):
                 raise RuntimeError(f"{where}: expected is not an object")
@@ -696,6 +741,16 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                             f"identities {bound!r} of this block"
                         )
 
+            # The published blocks are the blocks the case states, in order: a
+            # dropped, reordered or substituted one stops being the frame's own
+            # ordered outcome even where every row is individually well-formed.
+            branch = _stated_branch_blocks(inputs)
+            if branch and [r["block_id"] for r in summary] != branch:
+                raise RuntimeError(
+                    f"{where}/canonical_applied_blocks: published blocks differ from "
+                    f"the stated branch {branch!r}"
+                )
+
             # One stimulus states the occurrence fact for the whole case rather
             # than per identity: a complete-set count is the number of complete
             # DA sets the block carries, so an added or dropped occurrence
@@ -805,6 +860,25 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
 
     def grouped_included_set_entry_stated_empty(data: dict) -> None:
         data["fixtures"]["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"]["value"]["identities"] = []
+
+    def input_of(data: dict, row_id: str, case_id: str, pointer: str) -> dict:
+        return next(i for i in case_of(data, row_id, case_id)["input"] if i["pointer"] == pointer)
+
+    def omit_one_grouped_included_set_entry(data: dict) -> None:
+        # The B2P group goes while its summary row keeps its occurrence: without
+        # the coverage arm that row is bound by nothing and passes.
+        stated = input_of(data, "C01-DACLEAN-001", "MULTI_SET_SUCCESS", "/input/block_included_set_identities")
+        stated["value_or_alias"] = stated["value_or_alias"][:1]
+
+    def substitute_one_stated_branch_block(data: dict) -> None:
+        # The summary keeps its rows, heights and hashes, so only the branch-to-
+        # summary derivation can reject the substituted branch block.
+        input_of(data, "C01-REORG-001", "MAIN", "/input/prestored_side_branch")["value_or_alias"][0] = "R1208_REORG_001_MAIN_B3P"
+
+    def borrow_another_cases_input_alias(data: dict) -> None:
+        # A non-NEW case on purpose: its summary is null, so the branch derivation
+        # cannot fire and the namespace is the only rule left.
+        input_of(data, "C01-DACLEAN-001", "CORRUPT_FIRST", "/input/stimulus_block")["value_or_alias"] = "R1208_GENESIS_001_MAIN_G"
 
     def borrow_another_cases_da_alias(data: dict) -> None:
         case = case_of(data, "C01-REORG-001", "MAIN")
@@ -1021,6 +1095,9 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("grouped included-set entry stated empty", grouped_included_set_entry_stated_empty, "differ from the included-set"),
         ("occurrence added where the stated count is zero", add_occurrence_where_count_is_zero, "the case states 0"),
         ("summary borrows another case's da alias", borrow_another_cases_da_alias, "outside the case namespace"),
+        ("one grouped included-set entry omitted", omit_one_grouped_included_set_entry, "binds 1 of 2 summary rows"),
+        ("summary block substituted for another stated block", substitute_one_stated_branch_block, "published blocks differ from the stated branch"),
+        ("input alias borrowed from another case", borrow_another_cases_input_alias, "outside the case namespace"),
         ("wire disposed row with an old image", wire_disposed_row_with_an_old_image, "invalid for OLD"),
         ("summary_rows effect is a bool", summary_rows_effect_is_a_bool, "True differs from the 1 published rows"),
         ("resolved key trailing newline", resolved_key_trailing_newline, "is not the composed full form"),
@@ -1049,12 +1126,18 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
                 raise RuntimeError(f"RUB-1208 negative {name!r} was accepted")
 
 
-def run_v2_gate(candidate: Path, committed: Path) -> None:
+def run_v2_gate(candidate: Path, committed: Path, authority: Path) -> None:
     """RUB-1208 semantic/receipt gate over both sides of the v2 pair: a violation
     is DRIFT (exit 1), not an environment failure, and a programming error raised
     INSIDE the gate by a hostile artifact is re-raised labelled rather than
-    escaping as a traceback -- the same types raised elsewhere stay unhandled."""
+    escaping as a traceback -- the same types raised elsewhere stay unhandled.
+
+    The hand-authored authority source the artifact is generated from is
+    strict-loaded FIRST: both json.loads and Go's encoding/json keep the last of
+    two duplicate keys, so without this load an edited authority could carry a
+    silently dropped expectation into every downstream check."""
     for check, path in (
+        (load_json_fail_closed, authority),
         (validate_canonical_pipeline_v2_semantics, candidate),
         (validate_canonical_pipeline_v2_semantics, committed),
         (assert_canonical_pipeline_v2_negative_controls, committed),
@@ -1109,7 +1192,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         candidate_v2, committed_v2 = output_dir / V2_REL, committed_root / V2_REL
         if os.environ.get(FAKE_REPO_ENV) != "1" and candidate_v2.is_file() and committed_v2.is_file():
             try:
-                run_v2_gate(candidate_v2, committed_v2)
+                run_v2_gate(candidate_v2, committed_v2, repo_root / V2_AUTHORITY_REL)
             except RuntimeError as exc:
                 print(f"ERROR: {exc}", file=sys.stderr)
                 return 1
