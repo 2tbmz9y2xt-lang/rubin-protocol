@@ -1447,8 +1447,6 @@ func cp2ValidInput(pointer, tag string, value any) cp2Input {
 }
 
 // cp2CaseAlias and cp2CaseSchedAlias are catalog aliases inside the control
-// case's own namespace (C01-DIRECT-001/MAIN), which cp2ResolveAliases requires
-// of every input alias and schedule id.
 const cp2CaseAlias, cp2CaseSchedAlias = "R1208_DIRECT_001_MAIN_B1", "R1208_DIRECT_001_MAIN_SCHED"
 
 // cp2ValidCase is the known-valid control every RUB-1207 negative mutates in
@@ -1619,8 +1617,6 @@ func TestCanonicalPipelineV2ValidatorAcceptsTheStatedShapes(t *testing.T) {
 }
 
 // TestCanonicalPipelineV2AliasesResolveInFixtures pins the one rule JSON Schema
-// cannot express: an alias must exist in the catalog, so a row naming an alias
-// absent from `fixtures` is rejected — the intended fail-closed order.
 func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	c := cp2ValidCase()
 	c.Input = []cp2Input{{
@@ -1992,7 +1988,6 @@ func TestCanonicalPipelineV2IntegerAndScheduleAliases(t *testing.T) {
 			t.Errorf("%s: err = %v, want ok = %v", name, err, tc.ok)
 		}
 	}
-	// A schedule id, like every input alias, lives in the naming case's namespace.
 	sched.Cases[0].ScheduleID = cp2Ptr("SCHED")
 	borrowed := map[string]cp2Fixture{cp2CaseAlias: block1, "SCHED": {Type: "object", Value: cpMap{"barrier": "A"}}}
 	if err := cp2ValidateAliases([]cp2Row{sched}, borrowed, map[string]bool{}); err == nil || !strings.Contains(err.Error(), "outside the case namespace") {
@@ -2034,8 +2029,6 @@ func TestCanonicalPipelineV2CorpusIsByteDeterministic(t *testing.T) {
 }
 
 // cp2AuthorityControl decodes the embedded authority source into a generic
-// document. Every RUB-1208 negative below starts from this KNOWN-VALID control
-// and changes exactly one dimension.
 func cp2AuthorityControl(t *testing.T) map[string]any {
 	t.Helper()
 	var doc map[string]any
@@ -2048,9 +2041,6 @@ func cp2AuthorityControl(t *testing.T) map[string]any {
 }
 
 // cp2ValidateAuthorityDoc re-encodes a mutated control and drives the real
-// decode + validate path. The sha is recomputed on purpose: the pin is tested
-// separately, and re-pinning here is what lets a SEMANTIC negative reach the
-// validators instead of stopping at the byte pin.
 func cp2ValidateAuthorityDoc(t *testing.T, doc map[string]any) error {
 	t.Helper()
 	raw, err := json.Marshal(doc)
@@ -2118,8 +2108,6 @@ func cp2CaseSummary(t *testing.T, c map[string]any) []any {
 }
 
 // TestCanonicalPipelineV2AuthorityPinIsExact proves the byte pin rejects an
-// edited authority source before any semantic validator sees it, and that the
-// decoder accepts exactly one document.
 func TestCanonicalPipelineV2AuthorityPinIsExact(t *testing.T) {
 	if _, err := cp2DecodeAuthority(cp2AuthoritySource, cp2AuthoritySourceSHA256); err != nil {
 		t.Fatalf("control must decode under its pin: %v", err)
@@ -2137,8 +2125,6 @@ func TestCanonicalPipelineV2AuthorityPinIsExact(t *testing.T) {
 		!strings.Contains(err.Error(), "authority source json") {
 		t.Errorf("truncated document: error = %v, want a json rejection", err)
 	}
-	// An unknown key must FAIL generation, never be laundered out of the artifact
-	// past the schema: top-level authority object AND typed catalog entry.
 	for _, doc := range []string{
 		`{"rows":[],"unexpected_top_level":1}`,
 		`{"fixtures":{"A":{"type":"u64","value":1,"stray":2}}}`,
@@ -2148,15 +2134,12 @@ func TestCanonicalPipelineV2AuthorityPinIsExact(t *testing.T) {
 			t.Errorf("%s: error = %v, want an unknown-field rejection", doc, err)
 		}
 	}
-	// The pinned sha is the sha of the file the generator embeds.
 	if got := fmt.Sprintf("%x", sha256.Sum256(cp2AuthoritySource)); got != cp2AuthoritySourceSHA256 {
 		t.Errorf("embedded authority sha256 = %s, want the pinned %s", got, cp2AuthoritySourceSHA256)
 	}
 }
 
 // TestCanonicalPipelineV2DirectFieldsMatchTheManifest pins the two lists this
-// slice maintains on two sides: the per-image direct-field names come from the
-// frozen manifest, and every one of them has a declared type here.
 func TestCanonicalPipelineV2DirectFieldsMatchTheManifest(t *testing.T) {
 	payload, err := cp2DecodeAuthority(cp2AuthoritySource, cp2AuthoritySourceSHA256)
 	if err != nil {
@@ -2180,8 +2163,6 @@ func TestCanonicalPipelineV2DirectFieldsMatchTheManifest(t *testing.T) {
 	if len(named) != len(cp2DirectFieldTypes) {
 		t.Errorf("manifest names %d direct fields, cp2DirectFieldTypes declares %d", len(named), len(cp2DirectFieldTypes))
 	}
-	// A manifest whose direct_fields list changed must not leave the Go check
-	// enforcing the old set.
 	manifest := cp2JSONImage(payload.ImageManifest).(map[string]any)
 	images := manifest["images"].(map[string]any)
 	chain := images["CHAIN_IMAGE_V1"].(map[string]any)
@@ -2193,11 +2174,27 @@ func TestCanonicalPipelineV2DirectFieldsMatchTheManifest(t *testing.T) {
 }
 
 // TestCanonicalPipelineV2R1208ValidatorFailsClosed drives one single-dimension
-// mutation per rejection branch the RUB-1208 validators add, from a KNOWN-VALID
-// control, asserting the exact reason each time.
 func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 	if err := cp2ValidateAuthorityDoc(t, cp2AuthorityControl(t)); err != nil {
 		t.Fatalf("control authority must validate: %v", err)
+	}
+	identity := func(part, field string, value any) func(*testing.T, map[string]any) {
+		return func(_ *testing.T, d map[string]any) {
+			v := d["fixtures"].(map[string]any)["R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0"].(map[string]any)["value"].(map[string]any)
+			if part == "commit" {
+				v = v["commit"].(map[string]any)
+			} else if part == "chunk0" {
+				v = v["chunks"].([]any)[0].(map[string]any)
+			} else if part == "chunk1" {
+				v = v["chunks"].([]any)[1].(map[string]any)
+			}
+			v[field] = value
+		}
+	}
+	fault := func(caseID, field string, value any) func(*testing.T, map[string]any) {
+		return func(_ *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_DACLEAN_001_"+caseID+"_INPUT_RETAINED_RECORD_FAULT"].(map[string]any)["value"].(map[string]any)[field] = value
+		}
 	}
 	mutate := map[string]func(*testing.T, map[string]any){
 		"closure binding substituted": func(t *testing.T, d map[string]any) {
@@ -2241,8 +2238,6 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			delete(cp2CaseImage(t, c, "CHAIN_IMAGE_V1"), "digest_alias")
 		},
 		"digest alias wrong type": func(t *testing.T, d map[string]any) {
-			// Retag the entry AND give it a valid literal of the new tag, so the
-			// only thing left to reject is the alias/tag relation itself.
 			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
 			alias := cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["digest_alias"].(string)
 			entry := d["resolved_values"].(map[string]any)[alias].(map[string]any)
@@ -2264,9 +2259,6 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			delete(expected["state_image"].(map[string]any), "RETAINED_DA_IMAGE_V1")
 		},
 		"relation and its aliases moved together": func(t *testing.T, d map[string]any) {
-			// Dual violation: the relation moves AND every alias that encodes it
-			// moves with it, so the composed-alias check still passes and the
-			// truth -> relation arm is the only thing that can reject this.
 			c := cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")
 			values := d["resolved_values"].(map[string]any)
 			p := cp2CaseImage(t, c, "RETAINED_DA_IMAGE_V1")
@@ -2367,10 +2359,8 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN"), "STANDARD_MEMPOOL_IMAGE_V1", "used_bytes")["value"] = json.Number("999999")
 		},
 		"prestate sizes overflow the used-bytes total": func(t *testing.T, d map[string]any) {
-			// 2^64-1 + 1 is the minimal sum past the u64 ceiling: without the overflow arm `used` wraps to 0 and the wrapped total becomes the derived counter.
 			f := d["fixtures"].(map[string]any)
 			f["R1208_SIDE_001_MAIN_TX_S1"].(map[string]any)["value"].(map[string]any)["size"] = json.Number("18446744073709551615")
-			// admission_seq is stated so the u64-shape arm cannot preempt the overflow arm this row exists to prove.
 			f["R1208_SIDE_001_MAIN_TX_S2"] = map[string]any{"type": "object", "value": map[string]any{"kind": "standard_record", "size": json.Number("1"), "admission_seq": json.Number("2")}}
 			for _, raw := range cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")["input"].([]any) {
 				if in := raw.(map[string]any); in["pointer"] == "/input/prestate_standard_records" {
@@ -2385,7 +2375,6 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-DISCONNECT-001", "MAIN"), "RETAINED_DA_IMAGE_V1", "pinned_payload_bytes")["value"] = json.Number("999999")
 		},
 		"rewound last_admission_seq": func(t *testing.T, d map[string]any) {
-			// A rewind BELOW a resident record is the M15 mutation; a watermark ABOVE it is legal (evicted seq), so only this direction reddens.
 			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN"), "STANDARD_MEMPOOL_IMAGE_V1", "last_admission_seq")["value"] = json.Number("0")
 		},
 		"chain utxo_count off the tip block": func(t *testing.T, d map[string]any) {
@@ -2426,17 +2415,14 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			c["expected"].(map[string]any)["canonical_applied_blocks"] = cp2CaseSummary(t, c)[1:]
 		},
 		"summary_rows effect is a bool on a zero-row case": func(t *testing.T, d map[string]any) {
-			// 0 rows: cp2UintOf(true)=0 would equal len(rows), so only the type arm rejects it.
 			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "DISCONNECT_EMPTY")
 			c["expected"].(map[string]any)["effects"].(map[string]any)["summary_rows"].(map[string]any)["value"] = true
 		},
 		"one occurrence spelling disagrees": func(t *testing.T, d map[string]any) {
-			// Only the included-set spelling moves; the ordered spelling still names the old id.
 			f := d["fixtures"].(map[string]any)["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
 			f["value"].(map[string]any)["da_id"] = strings.Repeat("0", 63) + "9"
 		},
 		"one occurrence spelling stated empty": func(t *testing.T, d map[string]any) {
-			// A stated [] claims the EMPTY set, so it disagrees with the ids the other spelling names.
 			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
 			for _, raw := range c["input"].([]any) {
 				if in := raw.(map[string]any); in["pointer"] == "/input/block_included_set_identities" {
@@ -2452,19 +2438,13 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")["expected"].(map[string]any)["commit_truth"] = "MAYBE"
 		},
 		"one grouped included-set entry omitted": func(t *testing.T, d map[string]any) {
-			// The B2P group goes while its summary row keeps its occurrence: without
-			// the coverage arm that row is bound by nothing and passes.
 			in := cp2CaseInput(t, d, "C01-DACLEAN-001", "MULTI_SET_SUCCESS", "/input/block_included_set_identities")
 			in["value_or_alias"] = in["value_or_alias"].([]any)[:1]
 		},
 		"summary block substituted for another stated block": func(t *testing.T, d map[string]any) {
-			// The summary keeps its rows, heights and hashes, so only the
-			// branch-to-summary derivation can reject the substituted branch block.
 			cp2CaseInput(t, d, "C01-REORG-001", "MAIN", "/input/prestored_side_branch")["value_or_alias"].([]any)[0] = "R1208_REORG_001_MAIN_B3P"
 		},
 		"input alias borrowed from another case": func(t *testing.T, d map[string]any) {
-			// A non-NEW case on purpose: its summary is null, so the branch
-			// derivation cannot fire and the namespace is the only rule left.
 			cp2CaseInput(t, d, "C01-DACLEAN-001", "CORRUPT_FIRST", "/input/stimulus_block")["value_or_alias"] = "R1208_GENESIS_001_MAIN_G"
 		},
 		"included-set identity substituted": func(t *testing.T, d map[string]any) {
@@ -2474,15 +2454,11 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			identities[0].(map[string]any)["da_id"] = strings.Repeat("0", 63) + "9"
 		},
 		"genesis summary block substituted": func(t *testing.T, d map[string]any) {
-			// The substitute carries the genesis block's own hash and height, so
-			// only the pack -> summary derivation can reject it.
 			f := d["fixtures"].(map[string]any)
 			f["R1208_GENESIS_001_MAIN_G2"] = f["R1208_GENESIS_001_MAIN_G"]
 			cp2CaseSummary(t, cp2AuthorityCase(t, d, "C01-GENESIS-001", "MAIN"))[0].(map[string]any)["block_id"] = "R1208_GENESIS_001_MAIN_G2"
 		},
 		"equal-work winner substituted": func(t *testing.T, d map[string]any) {
-			// Coherent: the row names the LOSER and the loser's own declared hash,
-			// so only the stated tie-break can reject the substitution.
 			f := d["fixtures"].(map[string]any)
 			loser := f["R1208_EQUALWORK_001_MAIN_BB"].(map[string]any)["value"].(map[string]any)["block_hash"]
 			f["R1208_EQUALWORK_001_MAIN_BB_HASH"] = map[string]any{"type": "bytes32_hex", "value": loser}
@@ -2493,14 +2469,10 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			cp2CaseInput(t, d, "C01-EQUALWORK-001", "MAIN", "/input/candidate_hash_relation")["value_or_alias"] = "hash_bb_lt_hash_ba_raw_bytes"
 		},
 		"post-disconnect tip rolled to genesis": func(t *testing.T, d map[string]any) {
-			// Swapped, never repeated: the entry BELOW the tip becomes genesis while
-			// the array still names each block once, so this stays a single dimension.
 			chain := cp2CaseInput(t, d, "C01-DISCONNECT-001", "MAIN", "/input/prestate_canonical_chain")["value_or_alias"].([]any)
 			chain[0], chain[1] = chain[1], chain[0]
 		},
 		"non-NEW chain tip rolled back one block": func(t *testing.T, d map[string]any) {
-			// Coherent: CHAIN and OWNER both name the block BELOW the stated
-			// prestate tip, so only the prestate binding can reject it.
 			c := cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")
 			below := d["fixtures"].(map[string]any)["R1208_SIDE_001_MAIN_B0"].(map[string]any)["value"].(map[string]any)
 			cp2ResolvedValueOf(t, d, c, "CHAIN_IMAGE_V1", "tip_hash")["value"] = below["block_hash"]
@@ -2532,7 +2504,6 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			d["rows"] = rows[:len(rows)-1]
 		},
 		"migrated row duplicated": func(t *testing.T, d map[string]any) {
-			// Count-preserving: only the seen-set arm can reject the second copy.
 			rows := d["rows"].([]any)
 			rows[len(rows)-1] = rows[0]
 		},
@@ -2548,8 +2519,6 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			in["value_or_alias"] = append(ids, ids[0])
 		},
 		"input pointer typo": func(t *testing.T, d map[string]any) {
-			// Silently ABSENT without the closed vocabulary: the standard-mempool
-			// derivation would simply stop constraining this case.
 			cp2CaseInput(t, d, "C01-SIDE-001", "MAIN", "/input/prestate_standard_records")["pointer"] = "/input/prestate_standard_record"
 		},
 		"branch tip does not out-work the prestate tip": func(t *testing.T, d map[string]any) {
@@ -2558,6 +2527,21 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"equal-work candidates carry unequal work": func(t *testing.T, d map[string]any) {
 			d["fixtures"].(map[string]any)["R1208_EQUALWORK_001_MAIN_BB"].(map[string]any)["value"].(map[string]any)["cumulative_chainwork"] = json.Number("4")
 		},
+		"included commit wtxid differs":        identity("commit", "wtxid", strings.Repeat("1", 64)),
+		"included commit txid differs":         identity("commit", "txid", strings.Repeat("1", 64)),
+		"included chunk wtxid differs":         identity("chunk0", "wtxid", strings.Repeat("1", 64)),
+		"included chunk txid differs":          identity("chunk0", "txid", strings.Repeat("1", 64)),
+		"included chunks empty":                identity("", "chunks", []any{}),
+		"included chunk index overflows u16":   identity("chunk0", "chunk_index", json.Number("65536")),
+		"included chunk indices nonascending":  identity("chunk1", "chunk_index", json.Number("0")),
+		"fault kind differs":                   fault("CORRUPT_FIRST", "kind", "other"),
+		"fault position differs":               fault("CORRUPT_FIRST", "position_index", json.Number("1")),
+		"fault target differs":                 fault("CORRUPT_FIRST", "target", "DA_SET_2"),
+		"fault position is architecture-large": fault("CORRUPT_FIRST", "position_index", json.Number("4294967296")),
+		"middle fault position differs":        fault("CORRUPT_MIDDLE", "position_index", json.Number("0")),
+		"middle fault target differs":          fault("CORRUPT_MIDDLE", "target", "DA_SET_1"),
+		"last fault position differs":          fault("CORRUPT_LAST", "position_index", json.Number("0")),
+		"last fault target differs":            fault("CORRUPT_LAST", "target", "DA_SET_1"),
 	}
 	want := map[string]string{
 		"closure binding substituted":                        "closure bindings differ from frozen v8 pins",
@@ -2633,6 +2617,21 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"input pointer typo":                                 `input pointer "/input/prestate_standard_record" is outside the closed stated vocabulary`,
 		"branch tip does not out-work the prestate tip":      "branch tip cumulative_chainwork 3 does not win fork choice",
 		"equal-work candidates carry unequal work":           "candidate_work_relation exactly_equal_cumulative_chainwork, which the candidates' own cumulative_chainwork 3 / 4",
+		"included commit wtxid differs":                      "effects/da_record_removals=1 want 0",
+		"included commit txid differs":                       "effects/da_record_removals=1 want 0",
+		"included chunk wtxid differs":                       "effects/da_record_removals=1 want 0",
+		"included chunk txid differs":                        "effects/da_record_removals=1 want 0",
+		"included chunks empty":                              "invalid complete DA set identity",
+		"included chunk index overflows u16":                 "chunks/0: invalid or non-ascending identity",
+		"included chunk indices nonascending":                "chunks/1: invalid or non-ascending identity",
+		"fault kind differs":                                 "retained_record_fault/kind: want selected_record_corrupt",
+		"fault position differs":                             "retained_record_fault/position_index: want 0",
+		"fault target differs":                               "retained_record_fault/target: does not name selected_record_plan_order[0]",
+		"fault position is architecture-large":               "retained_record_fault/position_index: want 0",
+		"middle fault position differs":                      "retained_record_fault/position_index: want 1",
+		"middle fault target differs":                        "retained_record_fault/target: does not name selected_record_plan_order[1]",
+		"last fault position differs":                        "retained_record_fault/position_index: want 2",
+		"last fault target differs":                          "retained_record_fault/target: does not name selected_record_plan_order[2]",
 	}
 	for _, name := range slices.Sorted(maps.Keys(mutate)) {
 		t.Run(name, func(t *testing.T) {
@@ -2665,19 +2664,12 @@ func cp2ResolvedValueOf(t *testing.T, d, c map[string]any, image, field string) 
 }
 
 // TestCanonicalPipelineV2NullResultRowsStayExpressible is the positive control
-// for the null-result relation arms: DD-001 (a wire-disposed frame touched no
-// image, so every image stays `unchanged` under commit truth OLD) and DD-002 (a
-// recovery either leaves every image or proves one new identity under
-// NOT_APPLICABLE). Both are rows RUB-1209..1212 must migrate, both are
-// schema-valid, and without the result-nullity guard the generator rejects them.
 func TestCanonicalPipelineV2NullResultRowsStayExpressible(t *testing.T) {
 	for _, tc := range []struct {
 		label, row, key, value, truth string
 		unnamed                       []string
 	}{
 		{"wire disposed", "C01-SIDE-001", "wire_disposition", "CHECKSUM_REJECT", "OLD", nil},
-		// Dropping the summary un-names the two fixtures only its rows named, and
-		// the catalog gate is reverse reachability, not a whitelist.
 		{"recovery", "C01-DIRECT-001", "recovery_outcome", "identity_proven_route1", "NOT_APPLICABLE", []string{"R1208_DIRECT_001_MAIN_B1_HASH", "R1208_DIRECT_001_MAIN_DA_ID_1"}},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
@@ -2702,9 +2694,6 @@ func TestCanonicalPipelineV2NullResultRowsStayExpressible(t *testing.T) {
 }
 
 // TestCanonicalPipelineV2ProbeFile validates an arbitrary v2 artifact through
-// the real generator validators, so an external probe run can drive exactly the
-// checks the generator itself applies. It is skipped unless RUBIN_CP2_PROBE_FILE
-// names a file.
 func TestCanonicalPipelineV2ProbeFile(t *testing.T) {
 	path := os.Getenv("RUBIN_CP2_PROBE_FILE")
 	if path == "" {
@@ -2725,9 +2714,6 @@ func TestCanonicalPipelineV2ProbeFile(t *testing.T) {
 		ImageManifest:   cpMap{},
 		SummaryManifest: cpMap{},
 	}
-	// An emitted artifact carries the manifests and maps at top level and the
-	// closure bindings under _meta.closure_epoch; project it back onto the
-	// authority shape the validators consume.
 	if meta, ok := doc["_meta"].(map[string]any); ok {
 		if epoch, ok := meta["closure_epoch"].(map[string]any); ok {
 			for _, k := range []string{
@@ -2772,9 +2758,6 @@ func remarshal(t *testing.T, from any, into any) {
 }
 
 // TestCanonicalPipelineV2AliasNamespacesCannotCollide pins the argument that
-// replaces a runtime disjointness check between `fixtures` and `resolved_values`:
-// a catalog key may carry no `@`, and every composed resolved key carries one,
-// so no string can be a legal key in both maps.
 func TestCanonicalPipelineV2AliasNamespacesCannotCollide(t *testing.T) {
 	composed := cp2ComposedAlias("tip_hash", "C01-DIRECT-001/MAIN", "new")
 	if !strings.Contains(composed, "@") {

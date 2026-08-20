@@ -35,7 +35,6 @@ from gen_conformance_matrix import load_json_fail_closed
 
 
 COMMITTED_FIXTURES_REL = Path("conformance/fixtures")
-# Set only by the isolated fake-repo unit tests; see main().
 FAKE_REPO_ENV = "_RUBIN_DRIFT_FAKE_REPO"
 GENERATOR_PACKAGE = "./cmd/gen-conformance-fixtures"
 GO_MODULE_REL = Path("clients/go")
@@ -51,20 +50,11 @@ V2_RUB1208_CASE_COUNTS = {
     "C01-SIDE-001": 1,
     "C01-SUMMARY-001": 6,
 }
-# Canonical SHA-256 of the 24-case obligation receipts: forward is
-# {row/case -> sorted obligation_ids}, reverse is {obligation_id -> sorted row/case}.
-# Both literals were recomputed from the bound closure snapshot
-# rubin-c01-design-closure-v8 case_design.canonical.json (the 24 entries whose
-# sha256 is _meta.closure_epoch.row_case_design_hash), NOT from the artifact they
-# pin, so the pin is independent of its subject. The reverse receipt and the two
-# counts below are pure functions of the forward map: they carry the error string
-# a dropped id asserts, and the forward hash is the killer for all four
-# (test_obligation_receipts_reject_a_census_preserving_edit renames one id and
-# moves one between cases, leaving both counts untouched).
 V2_RUB1208_OBLIGATION_FORWARD_SHA256 = "f0be2577e0e5ed13ab2bcf50163d5289f7a04fd48352dea29fa7b216f310d45b"
 V2_RUB1208_OBLIGATION_REVERSE_SHA256 = "378f3789d24c2a43bc2c29e50e0efa96232b666ede32bc8e9b30dcdebf71c60b"
 V2_RUB1208_OBLIGATION_UNIQUE = 143
 V2_RUB1208_OBLIGATION_OCCURRENCES = 259
+V2_RUB1208_SOURCES_SHA256 = "6d3655613a4119d7e081ac520c6f16f9223d7fbb244fd4bdc6348e32e8e24324"
 
 # Hardcoded expected generator-owned fixture set per
 # rubin-protocol#1358 task body. Every entry MUST be emitted by the
@@ -82,7 +72,6 @@ EXPECTED_FIXTURES: tuple[Path, ...] = (
     # RUB-922 / C01 canonical publication observables corpus. Generator-owned
     # and byte-frozen: only the C01 owner issue (RUB-922, then its R2 successor RUB-1204) may change its expected rows.
     Path("protocol/canonical_pipeline_v1.json"),
-    # RUB-1208 / C01-R2 BUILDING successor. Generator-owned; schema shape is
     # checked by tools/tests/test_check_conformance_fixtures_drift.py and the
     # semantic cross-image / summary relations are checked below for both the
     # generated candidate and committed artifact before byte equality is accepted.
@@ -428,6 +417,68 @@ def _set_identity_da_id(raw: object, where: str) -> str:
     return raw["da_id"]
 
 
+def _cleanup_identity(raw: object, where: str) -> str:
+    valid = lambda value: isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+    if not isinstance(raw, dict) or not valid(raw.get("da_id")) or not isinstance(raw.get("commit"), dict) or not isinstance(raw.get("chunks"), list) or not raw["chunks"]:
+        raise RuntimeError(f"{where}: invalid complete DA set identity")
+    commit = raw["commit"]
+    if not valid(commit.get("txid")) or not valid(commit.get("wtxid")):
+        raise RuntimeError(f"{where}: invalid complete DA set identity")
+    chunks, previous = [], None
+    for index, chunk in enumerate(raw["chunks"]):
+        if not isinstance(chunk, dict) or type(chunk.get("chunk_index")) is not int or not 0 <= chunk["chunk_index"] <= 0xffff or not valid(chunk.get("txid")) or not valid(chunk.get("wtxid")) or previous is not None and chunk["chunk_index"] <= previous:
+            raise RuntimeError(f"{where}/chunks/{index}: invalid or non-ascending identity")
+        previous = chunk["chunk_index"]
+        chunks.append({"chunk_index": previous, "txid": chunk["txid"], "wtxid": chunk["wtxid"]})
+    return json.dumps({"da_id": raw["da_id"], "commit": {"txid": commit["txid"], "wtxid": commit["wtxid"]}, "chunks": chunks}, sort_keys=True, separators=(",", ":"))
+
+
+def _input_aliases_at(inputs: object, pointer: str) -> list[str]:
+    value = _input_value(inputs, pointer)
+    return [item for item in value if isinstance(item, str)] if isinstance(value, list) else [value] if isinstance(value, str) else []
+
+
+def _validate_cleanup_classifier(where: str, inputs: object, expected: dict, fixtures: dict) -> None:
+    if not where.startswith("C01-DACLEAN-001/"):
+        return
+    included = set()
+    for alias in _input_aliases_at(inputs, "/input/block_included_set_identities") + _input_aliases_at(inputs, "/input/block_includes"):
+        value = _fixture_value(fixtures, alias, "object", f"{where}/input/block_included_set_identities")
+        values = value.get("identities", value.get("complete_da_set_identities", [value])) if isinstance(value, dict) else [value]
+        included.update(_cleanup_identity(raw, f"{where}/input/block_included_set_identities") for raw in values)
+    invalid, removed, matched = set(_input_aliases_at(inputs, "/input/final_chain_invalid_members")), set(), set()
+    for alias in _input_aliases_at(inputs, "/input/prestate_retained_da_sets"):
+        key = _cleanup_identity(_fixture_value(fixtures, alias, "object", f"{where}/{alias}"), f"{where}/{alias}")
+        if alias in invalid or key in included:
+            removed.add(alias)
+        if key in included:
+            matched.add(key)
+    if _input_aliases_at(inputs, "/input/retained_record_fault") or _input_aliases_at(inputs, "/input/owner_token_fault"):
+        removed.clear()
+    wants = {"da_record_removals": len(removed), "da_inclusion_noops": len(included) - len(matched)}
+    effects = expected.get("effects", {})
+    for key, want in wants.items():
+        if key in effects and (not isinstance(effects[key], dict) or type(effects[key].get("value")) is not int or effects[key]["value"] != want):
+            raise RuntimeError(f"{where}/effects/{key}={effects[key].get('value')!r} want {want}")
+
+
+def _validate_cleanup_fault(where: str, inputs: object, fixtures: dict) -> None:
+    faults, plan = _input_aliases_at(inputs, "/input/retained_record_fault"), _input_aliases_at(inputs, "/input/selected_record_plan_order")
+    if not faults:
+        return
+    case = where.removeprefix("C01-DACLEAN-001/")
+    positions = {"CORRUPT_FIRST": 0, "CORRUPT_MIDDLE": len(plan) // 2, "CORRUPT_LAST": len(plan) - 1}
+    if case not in positions or not plan:
+        raise RuntimeError(f"{where}/input/retained_record_fault: selected plan absent")
+    want, fault = positions[case], _fixture_value(fixtures, faults[0], "object", f"{where}/input/retained_record_fault")
+    if fault.get("kind") != "selected_record_corrupt":
+        raise RuntimeError(f"{where}/input/retained_record_fault/kind: want selected_record_corrupt")
+    if type(fault.get("position_index")) is not int or fault["position_index"] != want:
+        raise RuntimeError(f"{where}/input/retained_record_fault/position_index: want {want}")
+    if not isinstance(fault.get("target"), str) or plan[want] != f"R1208_DACLEAN_001_{case}_{fault['target']}":
+        raise RuntimeError(f"{where}/input/retained_record_fault/target: does not name selected_record_plan_order[{want}]")
+
+
 def _flat_stated_da_ids(where: str, inputs: object, fixtures: dict) -> tuple:
     """The two other spellings of the same occurrence fact:
     /input/block_includes states one block's complete DA-set identities inline
@@ -690,6 +741,7 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
     obligation_forward = {}
     obligation_reverse = {}
     obligation_occurrences = 0
+    source_forward = {}
     referenced = set()
     named = set()
 
@@ -717,12 +769,17 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             if not isinstance(expected, dict):
                 raise RuntimeError(f"{where}: expected is not an object")
             inputs = case.get("input")
+            _validate_cleanup_fault(where, inputs, fixtures)
             truth = expected.get("commit_truth")
             images = expected.get("state_image")
             if not isinstance(images, dict) or set(images) != set(direct_fields):
                 raise RuntimeError(
                     f"{where}: state_image must carry exactly the {len(direct_fields)} manifest images"
                 )
+            sources = case.get("sources")
+            if not isinstance(sources, list) or not all(isinstance(source, str) for source in sources):
+                raise RuntimeError(f"{where}/sources: must be strings")
+            source_forward[where] = sorted(sources)
 
             for image in sorted(direct_fields):
                 projection = images[image]
@@ -813,6 +870,7 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                 # A non-NEW case publishes no summary at all, so its stated row
                 # count is exactly 0: reached here, the arm is unreachable behind
                 # the NEW path. Mirrors Go cp2ValidateR1208Summary.
+                _validate_cleanup_classifier(where, inputs, expected, fixtures)
                 _summary_rows_effect(where, expected, 0)
                 continue
             if not isinstance(summary, list):
@@ -942,6 +1000,7 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             ):
                 raise RuntimeError(f"{where}/CHAIN: tip must equal {tip_what}")
 
+            _validate_cleanup_classifier(where, inputs, expected, fixtures)
             _summary_rows_effect(where, expected, len(summary))
 
     orphans = sorted(set(resolved) - referenced)
@@ -972,6 +1031,8 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
         raise RuntimeError("canonical_pipeline_v2: obligation forward receipt hash mismatch")
     if _canonical_sha256(obligation_reverse) != V2_RUB1208_OBLIGATION_REVERSE_SHA256:
         raise RuntimeError("canonical_pipeline_v2: obligation reverse receipt hash mismatch")
+    if _canonical_sha256(source_forward) != V2_RUB1208_SOURCES_SHA256:
+        raise RuntimeError("canonical_pipeline_v2: sources forward receipt hash mismatch")
 
 
 def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
@@ -1279,6 +1340,7 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         stated["value_or_alias"] = stated["value_or_alias"] + stated["value_or_alias"][:1]
 
     group_1 = "R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"
+    fixture_value = lambda data, alias: data["fixtures"][alias]["value"]
     mutations = (
         ("orphan fixtures entry", lambda d: d["fixtures"].update({"R1208_DIRECT_001_MAIN_ORPHAN": {"type": "u64", "value": 1}}), "fixtures[R1208_DIRECT_001_MAIN_ORPHAN] is named by no case"),
         ("stated array repeats an alias", repeat_a_stated_alias, "names an alias more than once"),
@@ -1287,6 +1349,22 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("input pointer typo", lambda d: input_of(d, "C01-SIDE-001", "MAIN", "/input/prestate_standard_records").update(pointer="/input/prestate_standard_record"), "'/input/prestate_standard_record' is outside the closed stated vocabulary"),
         ("branch tip does not out-work the prestate tip", lambda d: d["fixtures"]["R1208_REORG_001_MAIN_B3P"]["value"].update(cumulative_chainwork=3), "cumulative_chainwork 3 does not win fork choice"),
         ("equal-work candidates carry unequal work", lambda d: d["fixtures"]["R1208_EQUALWORK_001_MAIN_BB"]["value"].update(cumulative_chainwork=4), "own cumulative_chainwork 3 / 4 do not establish"),
+        ("included commit wtxid differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0")["commit"].update(wtxid="1" * 64), "effects/da_record_removals=1 want 0"),
+        ("included commit txid differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0")["commit"].update(txid="1" * 64), "effects/da_record_removals=1 want 0"),
+        ("included chunk wtxid differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0")["chunks"][0].update(wtxid="1" * 64), "effects/da_record_removals=1 want 0"),
+        ("included chunk txid differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0")["chunks"][0].update(txid="1" * 64), "effects/da_record_removals=1 want 0"),
+        ("included chunks empty", lambda d: fixture_value(d, "R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0").update(chunks=[]), "invalid complete DA set identity"),
+        ("included chunk index overflows u16", lambda d: fixture_value(d, "R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0")["chunks"][0].update(chunk_index=65536), "chunks/0: invalid or non-ascending identity"),
+        ("included chunk indices nonascending", lambda d: fixture_value(d, "R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0")["chunks"][1].update(chunk_index=0), "chunks/1: invalid or non-ascending identity"),
+        ("fault kind differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_RETAINED_RECORD_FAULT").update(kind="other"), "retained_record_fault/kind: want selected_record_corrupt"),
+        ("fault position differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_RETAINED_RECORD_FAULT").update(position_index=1), "retained_record_fault/position_index: want 0"),
+        ("fault target differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_RETAINED_RECORD_FAULT").update(target="DA_SET_2"), "retained_record_fault/target: does not name selected_record_plan_order[0]"),
+        ("fault position is architecture-large", lambda d: fixture_value(d, "R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_RETAINED_RECORD_FAULT").update(position_index=4294967296), "retained_record_fault/position_index: want 0"),
+        ("middle fault position differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_CORRUPT_MIDDLE_INPUT_RETAINED_RECORD_FAULT").update(position_index=0), "retained_record_fault/position_index: want 1"),
+        ("middle fault target differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_CORRUPT_MIDDLE_INPUT_RETAINED_RECORD_FAULT").update(target="DA_SET_1"), "retained_record_fault/target: does not name selected_record_plan_order[1]"),
+        ("last fault position differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_CORRUPT_LAST_INPUT_RETAINED_RECORD_FAULT").update(position_index=0), "retained_record_fault/position_index: want 2"),
+        ("last fault target differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_CORRUPT_LAST_INPUT_RETAINED_RECORD_FAULT").update(target="DA_SET_1"), "retained_record_fault/target: does not name selected_record_plan_order[2]"),
+        ("source substituted", lambda d: case_of(d, "C01-DIRECT-001", "MAIN")["sources"].__setitem__(0, "substituted"), "sources forward receipt hash mismatch"),
         ("genesis summary block substituted", substitute_the_genesis_summary_block, "published blocks differ from the stated branch"),
         ("equal-work winner substituted", substitute_the_equal_work_winner, "published blocks differ from the stated branch"),
         ("equal-work hash relation contradicts the candidates", lambda d: input_of(d, "C01-EQUALWORK-001", "MAIN", "/input/candidate_hash_relation").update(value_or_alias="hash_bb_lt_hash_ba_raw_bytes"), "states candidate_hash_relation 'hash_bb_lt_hash_ba_raw_bytes'"),
