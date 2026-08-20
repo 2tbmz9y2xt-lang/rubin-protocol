@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import re
 import sys
 import tempfile
@@ -17,13 +16,7 @@ sys.path.insert(0, str(TOOLS_DIR))
 import check_conformance_fixtures_drift as m
 from gen_conformance_matrix import load_json_fail_closed, reject_duplicate_json_object_pairs
 
-# RUB-1207 / C01-R2: the known-valid observation row every schema negative below
-# mutates in exactly one dimension. It carries the complete required shape --
-# typed input, typed expected output, per-image projection and summary rows --
-# so a negative that passes proves the closure, not a missing constraint.
 _IMAGES = ("CHAIN_IMAGE_V1", "STANDARD_MEMPOOL_IMAGE_V1", "RETAINED_DA_IMAGE_V1", "OWNER_IMAGE_V1")
-# Per-image direct-field key sets, exactly as image_manifest.images.<IMAGE>.direct_fields
-# pins them; the schema arms require this key set and nothing else.
 _IMAGE_DIRECT_FIELDS = {
     "CHAIN_IMAGE_V1": ["tip_hash", "height", "utxo_count"],
     "STANDARD_MEMPOOL_IMAGE_V1": ["current_mempool_min_fee_rate", "last_admission_seq", "used_bytes", "tx_count", "record_count"],
@@ -159,10 +152,8 @@ class DiffSetTests(unittest.TestCase):
 
 class MainExitCodeTests(unittest.TestCase):
     def setUp(self):
-        # The fake repo's sentinel bytes are not the real v2 artifact, so these
-        # tests opt out through the environment sentinel; no CLI flag can.
-        patcher = mock.patch.dict(os.environ, {m.FAKE_REPO_ENV: "1"})
-        patcher.start()
+        patcher = mock.patch.object(m, "run_v2_gate")
+        self.run_v2_gate = patcher.start()
         self.addCleanup(patcher.stop)
 
     def test_main_clean_returns_zero(self):
@@ -185,8 +176,8 @@ class MainExitCodeTests(unittest.TestCase):
             f"OK: conformance fixture drift check passed ({len(m.EXPECTED_FIXTURES)} generator-owned files match committed)",
             captured.getvalue(),
         )
-        # Loud on stderr, and the rc above is unchanged: visibility, not a failure.
-        self.assertIn("NOTICE: canonical_pipeline_v2 semantic gate SKIPPED (fake-repo sentinel)", errors.getvalue())
+        self.assertEqual(errors.getvalue(), "")
+        self.run_v2_gate.assert_called_once()
 
     def test_main_missing_committed_dir_returns_two(self):
         with tempfile.TemporaryDirectory() as td:
@@ -348,10 +339,9 @@ class V2SemanticGateExitCodeTests(unittest.TestCase):
             self.assertEqual((rc, repr(exc) in err, "Traceback" in err), (1, True, False), err)
         # Outside the gate the same exception type stays unhandled: the tool must
         # not turn a bug in its own machinery into a fixture verdict.
-        with mock.patch.dict(os.environ, {m.FAKE_REPO_ENV: "1"}):
-            with mock.patch.object(m, "diff_set", side_effect=KeyError("outside")):
-                with self.assertRaises(KeyError):
-                    self._run()
+        with mock.patch.object(m, "run_v2_gate"), mock.patch.object(m, "diff_set", side_effect=KeyError("outside")):
+            with self.assertRaises(KeyError):
+                self._run()
 
 
 class CanonicalPipelineSchemaTests(unittest.TestCase):
@@ -858,10 +848,9 @@ class CanonicalPipelineV2RUB1208Tests(unittest.TestCase):
         # Regression: the gate used to run only `if V2_SCHEMA_REL.is_file()`, so
         # deleting or renaming an unrelated file switched it off silently.
         self.assertNotIn("V2_SCHEMA_REL", INSPECT_SOURCE)
-        # And it is not switchable from the command line at all: the only opt-out
-        # is the environment sentinel the fake-repo tests set.
         self.assertNotIn("skip-v2-semantics", INSPECT_SOURCE)
-        self.assertIn('os.environ.get(FAKE_REPO_ENV) == "1"', INSPECT_SOURCE)
+        self.assertNotIn("FAKE_REPO_ENV", INSPECT_SOURCE)
+        self.assertNotIn("RUBIN_DRIFT_FAKE_REPO", INSPECT_SOURCE)
 
     def test_meta_is_read_fail_closed(self):
         for label, mutate in (

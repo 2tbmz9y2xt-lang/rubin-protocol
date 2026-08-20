@@ -2193,6 +2193,14 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 			d["fixtures"].(map[string]any)["R1208_DACLEAN_001_"+caseID+"_INPUT_RETAINED_RECORD_FAULT"].(map[string]any)["value"].(map[string]any)[field] = value
 		}
 	}
+	ownerFault := func(field string, value any) func(*testing.T, map[string]any) {
+		return func(_ *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_INPUT_OWNER_TOKEN_FAULT"].(map[string]any)["value"].(map[string]any)[field] = value
+		}
+	}
+	corruptFirstFixture := func(d map[string]any, suffix string) map[string]any {
+		return d["fixtures"].(map[string]any)["R1208_DACLEAN_001_CORRUPT_FIRST_"+suffix].(map[string]any)
+	}
 	mutate := map[string]func(*testing.T, map[string]any){
 		"closure binding substituted": func(t *testing.T, d map[string]any) {
 			d["closure_bindings"].(map[string]any)["image_manifest_hash"] = strings.Repeat("00", 32)
@@ -2207,6 +2215,12 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		},
 		"unauthorized row id": func(t *testing.T, d map[string]any) {
 			d["rows"].([]any)[0].(map[string]any)["row_id"] = "C01-DIRECT-002"
+		},
+		"unknown row field": func(_ *testing.T, d map[string]any) {
+			d["rows"].([]any)[0].(map[string]any)["unknown"] = true
+		},
+		"unknown case field": func(_ *testing.T, d map[string]any) {
+			d["rows"].([]any)[0].(map[string]any)["cases"].([]any)[0].(map[string]any)["unknown"] = true
 		},
 		"case count off the census": func(t *testing.T, d map[string]any) {
 			row := d["rows"].([]any)[0].(map[string]any)
@@ -2524,13 +2538,25 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"equal-work candidates carry unequal work": func(t *testing.T, d map[string]any) {
 			d["fixtures"].(map[string]any)["R1208_EQUALWORK_001_MAIN_BB"].(map[string]any)["value"].(map[string]any)["cumulative_chainwork"] = json.Number("4")
 		},
-		"included commit wtxid differs":        identity("commit", "wtxid", strings.Repeat("1", 64)),
-		"included commit txid differs":         identity("commit", "txid", strings.Repeat("1", 64)),
-		"included chunk wtxid differs":         identity("chunk0", "wtxid", strings.Repeat("1", 64)),
-		"included chunk txid differs":          identity("chunk0", "txid", strings.Repeat("1", 64)),
-		"included chunks empty":                identity("", "chunks", []any{}),
-		"included chunk index overflows u16":   identity("chunk0", "chunk_index", json.Number("65536")),
-		"included chunk indices nonascending":  identity("chunk1", "chunk_index", json.Number("0")),
+		"included commit wtxid differs":       identity("commit", "wtxid", strings.Repeat("1", 64)),
+		"included commit txid differs":        identity("commit", "txid", strings.Repeat("1", 64)),
+		"included chunk wtxid differs":        identity("chunk0", "wtxid", strings.Repeat("1", 64)),
+		"included chunk txid differs":         identity("chunk0", "txid", strings.Repeat("1", 64)),
+		"included chunks empty":               identity("", "chunks", []any{}),
+		"included chunk index overflows u16":  identity("chunk0", "chunk_index", json.Number("65536")),
+		"included chunk indices nonascending": identity("chunk1", "chunk_index", json.Number("0")),
+		"retained aliases share one identity": func(_ *testing.T, d map[string]any) {
+			corruptFirstFixture(d, "DA_SET_2")["value"] = corruptFirstFixture(d, "DA_SET_1")["value"]
+		},
+		"selected plan names a non-retained record": func(t *testing.T, d map[string]any) {
+			in := cp2CaseInput(t, d, "C01-DACLEAN-001", "CORRUPT_FIRST", "/input/selected_record_plan_order")
+			in["value_or_alias"].([]any)[2] = "R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_2"
+		},
+		"owner token fault kind differs":   ownerFault("kind", "other"),
+		"owner token fault target differs": ownerFault("target", "CLAIM_DA_SET_2"),
+		"required removal effect absent": func(t *testing.T, d map[string]any) {
+			delete(cp2AuthorityCase(t, d, "C01-DACLEAN-001", "EXACT_MATCH")["expected"].(map[string]any)["effects"].(map[string]any), "da_record_removals")
+		},
 		"fault kind differs":                   fault("CORRUPT_FIRST", "kind", "other"),
 		"fault position differs":               fault("CORRUPT_FIRST", "position_index", json.Number("1")),
 		"fault target differs":                 fault("CORRUPT_FIRST", "target", "DA_SET_2"),
@@ -2545,6 +2571,8 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"image manifest edited":                              "image manifest hash=",
 		"summary manifest edited":                            "summary manifest hash=",
 		"unauthorized row id":                                "unauthorized",
+		"unknown row field":                                  `json: unknown field "unknown"`,
+		"unknown case field":                                 `json: unknown field "unknown"`,
 		"case count off the census":                          "unauthorized",
 		"resolved value unknown tag":                         "is not a valid bytes literal",
 		"resolved key not a token":                           "is not the composed full form",
@@ -2621,6 +2649,11 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 		"included chunks empty":                              "invalid complete DA set identity",
 		"included chunk index overflows u16":                 "chunks/0: invalid or non-ascending identity",
 		"included chunk indices nonascending":                "chunks/1: invalid or non-ascending identity",
+		"retained aliases share one identity":                "prestate_retained_da_sets: aliases \"R1208_DACLEAN_001_CORRUPT_FIRST_DA_SET_1\" and \"R1208_DACLEAN_001_CORRUPT_FIRST_DA_SET_2\" resolve to the same complete identity",
+		"selected plan names a non-retained record":          "selected_record_plan_order: alias \"R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_2\" does not name a retained prestate record",
+		"owner token fault kind differs":                     "owner_token_fault/kind: want exact_token_mismatch_against_selected_record",
+		"owner token fault target differs":                   "owner_token_fault/target: does not name the stated prestate owner claim",
+		"required removal effect absent":                     "effects/da_record_removals: required",
 		"fault kind differs":                                 "retained_record_fault/kind: want selected_record_corrupt",
 		"fault position differs":                             "retained_record_fault/position_index: want 0",
 		"fault target differs":                               "retained_record_fault/target: does not name selected_record_plan_order[0]",

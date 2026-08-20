@@ -35,7 +35,6 @@ from gen_conformance_matrix import load_json_fail_closed
 
 
 COMMITTED_FIXTURES_REL = Path("conformance/fixtures")
-FAKE_REPO_ENV = "_RUBIN_DRIFT_FAKE_REPO"
 GENERATOR_PACKAGE = "./cmd/gen-conformance-fixtures"
 GO_MODULE_REL = Path("clients/go")
 V2_REL = Path("protocol/canonical_pipeline_v2.json")
@@ -350,9 +349,6 @@ def _validate_input_aliases(where: str, case: dict, fixtures: dict, named: set) 
         value = entry.get("value_or_alias")
         aliases = [item for item in (value if isinstance(value, list) else [value])
                    if isinstance(item, str) and V2_UPPER_TOKEN_RE.fullmatch(item)]
-        # A stated array names each alias ONCE: it states occurrences, and every
-        # derivation over it set-normalizes, so a repeat would silently stand in
-        # for a dropped occurrence instead of being the second occurrence it spells.
         if len(set(aliases)) != len(aliases):
             raise RuntimeError(f"{where}: input {entry.get('pointer')} names an alias more than once")
         for item in aliases:
@@ -386,7 +382,6 @@ def _derived_counts(where: str, image: str, relation: str, inputs: object, fixtu
         raise RuntimeError(f"{where}{pointer}: not an array")
     records = [_fixture_value(fixtures, alias, "object", f"{where}{pointer}") for alias in value]
     if image == "RETAINED_DA_IMAGE_V1":
-        # RUBIN_COMPACT_BLOCKS 5.1 counts DA payload bytes only for a retained COMPLETE_SET; every other state contributes zero (da_relay_state.go pinnedPayloadAccountingBytes).
         pinned = 0
         for record in records:
             if not isinstance(record, dict) or record.get("state") != "COMPLETE_SET":
@@ -446,18 +441,37 @@ def _validate_cleanup_classifier(where: str, inputs: object, expected: dict, fix
         value = _fixture_value(fixtures, alias, "object", f"{where}/input/block_included_set_identities")
         values = value.get("identities", value.get("complete_da_set_identities", [value])) if isinstance(value, dict) else [value]
         included.update(_cleanup_identity(raw, f"{where}/input/block_included_set_identities") for raw in values)
-    invalid, removed, matched = set(_input_aliases_at(inputs, "/input/final_chain_invalid_members")), set(), set()
+    invalid, removed, matched, retained = set(_input_aliases_at(inputs, "/input/final_chain_invalid_members")), set(), set(), {}
     for alias in _input_aliases_at(inputs, "/input/prestate_retained_da_sets"):
         key = _cleanup_identity(_fixture_value(fixtures, alias, "object", f"{where}/{alias}"), f"{where}/{alias}")
+        if key in retained:
+            raise RuntimeError(f"{where}/input/prestate_retained_da_sets: aliases {retained[key]!r} and {alias!r} resolve to the same complete identity")
+        retained[key] = alias
         if alias in invalid or key in included:
             removed.add(alias)
         if key in included:
             matched.add(key)
+    for alias in _input_aliases_at(inputs, "/input/selected_record_plan_order"):
+        key = _cleanup_identity(_fixture_value(fixtures, alias, "object", f"{where}/{alias}"), f"{where}/{alias}")
+        if retained.get(key) != alias:
+            raise RuntimeError(f"{where}/input/selected_record_plan_order: alias {alias!r} does not name a retained prestate record")
     if _input_aliases_at(inputs, "/input/retained_record_fault") or _input_aliases_at(inputs, "/input/owner_token_fault"):
         removed.clear()
+    if where.endswith("/OWNER_TOKEN_MISMATCH"):
+        faults = _input_aliases_at(inputs, "/input/owner_token_fault")
+        if len(faults) != 1:
+            raise RuntimeError(f"{where}/input/owner_token_fault: want exactly one fault")
+        fault = _fixture_value(fixtures, faults[0], "object", f"{where}/input/owner_token_fault")
+        if fault.get("kind") != "exact_token_mismatch_against_selected_record":
+            raise RuntimeError(f"{where}/input/owner_token_fault/kind: want exact_token_mismatch_against_selected_record")
+        claim = f"R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_CLAIM_DA_SET_1"
+        if fault.get("target") != "CLAIM_DA_SET_1" or claim not in _input_aliases_at(inputs, "/input/prestate_owner_claims"):
+            raise RuntimeError(f"{where}/input/owner_token_fault/target: does not name the stated prestate owner claim")
     wants = {"da_record_removals": len(removed), "da_inclusion_noops": len(included) - len(matched)}
     effects = expected.get("effects", {})
     for key, want in wants.items():
+        if key == "da_record_removals" and key not in effects:
+            raise RuntimeError(f"{where}/effects/da_record_removals: required")
         if key in effects and (not isinstance(effects[key], dict) or type(effects[key].get("value")) is not int or effects[key]["value"] != want):
             raise RuntimeError(f"{where}/effects/{key}={effects[key].get('value')!r} want {want}")
 
@@ -480,12 +494,6 @@ def _validate_cleanup_fault(where: str, inputs: object, fixtures: dict) -> None:
 
 
 def _flat_stated_da_ids(where: str, inputs: object, fixtures: dict) -> tuple:
-    """The two other spellings of the same occurrence fact:
-    /input/block_includes states one block's complete DA-set identities inline
-    and /input/block_complete_da_ids_in_transaction_order states that block's
-    da_ids by catalog alias. Neither carries a block binding, exactly like a flat
-    included-set identity. Two stated spellings must name the SAME id set: a union
-    would let either drop one. Mirrors Go cp2FlatStatedDAIDs."""
     out, stated = [], False
     includes = _input_value(inputs, "/input/block_includes")
     if includes is not _ABSENT:
@@ -511,11 +519,6 @@ def _flat_stated_da_ids(where: str, inputs: object, fixtures: dict) -> tuple:
 
 
 def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: list):
-    """Expected per-block da_id lists derived from the case's own
-    /input/block_included_set_identities. Mirrors Go cp2IncludedSetDAIDs:
-    grouped {block_id, identities} entries bind by block-alias suffix, flat
-    entries carry no block binding and need a single-row summary, and the two
-    shapes are never mixed. Returns None when the case states no such stimulus."""
     if not isinstance(inputs, list):
         return None
     aliases, stated = [], False
@@ -560,10 +563,6 @@ def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: li
             )
     if len(shapes) > 1:
         raise RuntimeError(f"{where}: mixes flat and grouped included-set identities")
-    # Set-normalized on purpose, unlike one spelling's own identity list: two
-    # spellings state the SAME fact, and a flat entry is one identity, not one
-    # occurrence (the DACLEAN CORRUPT_* prestates state one da_id under two
-    # distinct identities). Mirrors Go cp2IncludedSetDAIDs.
     if stated and extra_stated and sorted(set(flat)) != sorted(set(extra)):
         raise RuntimeError(f"{where}: stated occurrence spellings disagree on the complete DA-set identities")
     flat.extend(extra)
@@ -585,14 +584,9 @@ def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: li
                 raise RuntimeError(
                     f"{where}: included-set block {suffix!r} matches {len(matches)} summary rows"
                 )
-            # Two keys may suffix-match the SAME row (`..._B1P` ends in `_B1P` AND
-            # `_IDENTITY_B1P`): the last sorted key would silently overwrite the
-            # other group's constraint. Mirrors Go cp2IncludedSetDAIDs.
             if matches[0] in out:
                 raise RuntimeError(f"{where}: summary row {matches[0]!r} is bound by more than one included-set group")
             out[matches[0]] = sorted(set(grouped[suffix]))
-        # Every key is one distinct summary row, so equal sizes is exactly "every
-        # row bound": a row no group binds is a row whose list nothing checks.
         if len(out) != len(summary):
             raise RuntimeError(
                 f"{where}: binds {len(out)} of {len(summary)} summary rows to a "
@@ -653,12 +647,6 @@ def _stated_branch_blocks(where: str, inputs: object, fixtures: dict) -> list:
     second = _input_value(inputs, "/input/candidate_b")
     if first is _ABSENT and second is _ABSENT:
         return out
-    # Equal-work tie-break: the candidate with the lower raw-byte block hash is
-    # the sole newly canonical block. The stated relation is enforced against the
-    # candidates' OWN declared hashes (both bytes32 lowercase hex, so string
-    # order is raw-byte order), so a stated-but-false relation is a rejection
-    # rather than a license for whichever winner the case then publishes. A
-    # half-stated pair resolves the absent alias and is rejected there.
     hashes, works = [], []
     for alias in (first, second):
         block = _fixture_value(fixtures, alias, "object", f"{where}/equal-work candidate")
@@ -674,11 +662,6 @@ def _stated_branch_blocks(where: str, inputs: object, fixtures: dict) -> list:
             f"{where}: states candidate_hash_relation {relation!r}, which the candidates' "
             f"own hashes {hashes[0]!r} / {hashes[1]!r} do not establish"
         )
-    # The tie-break is reached only on EQUAL work (node/sync_reorg.go:224
-    # shouldSwitchToBranch): unequal candidates are decided by work alone, so a
-    # lower hash would not make the stated winner canonical.
-    # Type AND range, like Go cp2UintOf: `True == 1` and a negative int would pass
-    # a bare equality that the generator rejects.
     work_relation = _input_value(inputs, "/input/candidate_work_relation")
     if (work_relation != "exactly_equal_cumulative_chainwork"
             or not all(type(w) is int and 0 <= w < 2**64 for w in works)
@@ -717,9 +700,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
     if not isinstance(fixtures, dict) or not isinstance(resolved, dict) or not isinstance(rows, list):
         raise RuntimeError("canonical_pipeline_v2: fixtures/resolved_values/rows shape")
     _validate_resolved_values(resolved)
-    # No fixtures/resolved_values disjointness check exists because a collision is
-    # unreachable: a catalog key matches ^[A-Z][A-Z0-9_]*$ (no `@`) while every
-    # resolved key is the composed NAME@ROW/CASE:relation form (always one `@`).
     direct_fields = _direct_field_names(data.get("image_manifest"))
 
     got_counts = {}
@@ -840,13 +820,10 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             chain_height = _resolved_entry(
                 resolved, chain.get("height"), "u64", f"{where}/CHAIN/height"
             )
-            # All three CHAIN direct fields are bound to the tip block, so a count belonging to another block is a substituted identity. Mirrors Go cp2ValidateChainTip.
             chain_utxo = _resolved_entry(resolved, chain.get("utxo_count"), "u64", f"{where}/CHAIN/utxo_count")
             stable_tip = _resolved_entry(
                 resolved, owner.get("stable_tip"), "object", f"{where}/OWNER/stable_tip"
             )
-            # Value AND type, like Go cp2ValidateOwnerStableTip: `1 == True` and
-            # `4 == 4.0` in Python, so a bare equality admits what cp2UintOf rejects.
             want_tip = {"has_tip": (True, bool), "height": (chain_height, int), "hash": (chain_hash, str)}
             if {k: (v, type(v)) for k, v in stable_tip.items()} != want_tip:
                 raise RuntimeError(
@@ -857,19 +834,12 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
             if truth != "NEW":
                 if summary is not None:
                     raise RuntimeError(f"{where}/canonical_applied_blocks: non-NEW must be null")
-                # A published CHAIN image that is not `new` never moved, so the tip
-                # is still the last entry of the stated prestate chain. The key is
-                # that relation, not the truth: DD-002 proves a new identity under
-                # NOT_APPLICABLE, and there the tip does move. Mirrors Go.
                 prestate = _input_value(inputs, "/input/prestate_canonical_chain")
                 if prestate is not _ABSENT and images["CHAIN_IMAGE_V1"].get("relation") != "new":
                     tip_block = _prestate_chain_block(where, prestate, fixtures, 1)
                     if chain_hash != tip_block.get("block_hash") or chain_height != tip_block.get("height") \
                             or chain_utxo != tip_block.get("utxo_count"):
                         raise RuntimeError(f"{where}/CHAIN: tip must equal the stated prestate chain tip")
-                # A non-NEW case publishes no summary at all, so its stated row
-                # count is exactly 0: reached here, the arm is unreachable behind
-                # the NEW path. Mirrors Go cp2ValidateR1208Summary.
                 _validate_cleanup_classifier(where, inputs, expected, fixtures)
                 _summary_rows_effect(where, expected, 0)
                 continue
@@ -890,8 +860,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                     f"{where}/canonical_applied_blocks: a standalone disconnect must carry "
                     f"an exact empty summary"
                 )
-            # A stated connect count is the number of blocks the frame connects,
-            # which is exactly the number of summary rows.
             stated_connects = _input_value(inputs, "/input/connect_count")
             if stated_connects is not _ABSENT and (
                 type(stated_connects) is not int or stated_connects != len(summary)
@@ -915,7 +883,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                 )
                 if not isinstance(block, dict) or type(block.get("height")) is not int or not 0 <= block["height"] < 2**64:
                     raise RuntimeError(f"{sw}/block_id: fixture has no u64 height")
-                # Exact block identity (summary_manifest M14/identity).
                 if block.get("block_hash") != block_hash:
                     raise RuntimeError(
                         f"{sw}/block_hash: {summary_row.get('block_hash')!r} is not the hash of "
@@ -933,8 +900,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                     _fixture_value(fixtures, alias, "bytes32_hex", f"{sw}/complete_da_ids/{i}")
                     for i, alias in enumerate(da_ids)
                 ]
-                # Strictly ascending: an equal neighbour is a duplicated
-                # occurrence, which a complete per-block set may never carry.
                 if any(b <= a for a, b in zip(raw_ids, raw_ids[1:])):
                     raise RuntimeError(f"{sw}/complete_da_ids: not strictly ascending raw bytes")
                 occurrences += len(raw_ids)
@@ -947,9 +912,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                             f"identities {bound!r} of this block"
                         )
 
-            # The published blocks are the blocks the case states, in order: a
-            # dropped, reordered or substituted one stops being the frame's own
-            # ordered outcome even where every row is individually well-formed.
             branch = _stated_branch_blocks(where, inputs, fixtures)
             if branch and [r["block_id"] for r in summary] != branch:
                 raise RuntimeError(
@@ -957,11 +919,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                     f"the stated branch {branch!r}"
                 )
 
-            # One stimulus states the occurrence fact for the whole case rather
-            # than per identity, so an added or dropped occurrence reddens even
-            # where no identity is stated. SEMANTICS, both sides: the stated count
-            # is the CASE TOTAL -- occurrences summed over EVERY summary row, never
-            # per block, so a multi-row case states the total.
             stated_count = _input_value(inputs, "/input/block_complete_da_set_count")
             if stated_count is not _ABSENT and (
                 type(stated_count) is not int or stated_count != occurrences
@@ -971,10 +928,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                     f"occurrences, the case states {stated_count!r}"
                 )
 
-            # Fork choice is what makes a stated branch canonical at all: greater
-            # cumulative chainwork than the current tip, or equal work with a
-            # lexicographically lower tip hash (node/sync_reorg.go:224
-            # shouldSwitchToBranch, applied by applyPreferredBranch at :261).
             prestate = _input_value(inputs, "/input/prestate_canonical_chain")
             if prestate is not _ABSENT and last_block is not None:
                 pre_tip = _prestate_chain_block(where, prestate, fixtures, 1)
@@ -986,9 +939,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                         f"{where}/canonical_applied_blocks: branch tip cumulative_chainwork {got!r} "
                         f"does not win fork choice against the stated prestate tip's {want!r}"
                     )
-            # The published chain tip is the last newly canonical block -- or, for
-            # a standalone disconnect, which publishes no row at all, the entry
-            # BELOW the disconnected tip in the stated prestate chain.
             tip_block, tip_what = last_block, "the last canonical-applied block"
             if disconnect:
                 prestate = _input_value(inputs, "/input/prestate_canonical_chain")
@@ -1008,9 +958,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
         raise RuntimeError(
             f"canonical_pipeline_v2: resolved_values[{orphans[0]}] is referenced by no image projection"
         )
-    # The same reverse reachability for the catalog: an entry no case names is a
-    # stimulus nothing states, which is where a stale or substituted-away fixture
-    # hides. The three alias positions the schema admits are all recorded above.
     unnamed = sorted(set(fixtures) - named)
     if unnamed:
         raise RuntimeError(f"canonical_pipeline_v2: fixtures[{unnamed[0]}] is named by no case")
@@ -1036,12 +983,6 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
 
 
 def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
-    """Run RUB-1208 single-dimension hostile mutations from a valid artifact.
-
-    Every control starts from the committed artifact (a KNOWN-VALID control),
-    changes exactly ONE dimension, and asserts the exact failure pointer, so a
-    control that passes for the wrong reason is itself an error.
-    """
     control = load_json_fail_closed(path)
 
     def case_of(data: dict, row_id: str, case_id: str) -> dict:
@@ -1070,7 +1011,6 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         resolved_of(data, "C01-DISCONNECT-001", "MAIN", "RETAINED_DA_IMAGE_V1", "pinned_payload_bytes")["value"] = 999999
 
     def rewound_last_admission_seq(data: dict) -> None:
-        # A rewind BELOW a resident record is M15; a watermark ABOVE it is legal (an evicted seq), so only this direction reddens.
         resolved_of(data, "C01-SIDE-001", "MAIN", "STANDARD_MEMPOOL_IMAGE_V1", "last_admission_seq")["value"] = 0
 
     def chain_utxo_count_off_the_tip_block(data: dict) -> None:
@@ -1086,13 +1026,11 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ]
 
     def drop_one_occurrence_spelling(data: dict) -> None:
-        # Both spellings state the same set, so a union let a drop from ONE through.
         case = case_of(data, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
         stated = next(i for i in case["input"] if i["pointer"].endswith("da_ids_in_transaction_order"))
         stated["value_or_alias"] = stated["value_or_alias"][:1]
 
     def empty_one_occurrence_spelling(data: dict) -> None:
-        # A stated [] claims the EMPTY set, so it disagrees with the 2 ids the other spelling names.
         case = case_of(data, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
         stated = next(i for i in case["input"] if i["pointer"].endswith("included_set_identities"))
         stated["value_or_alias"] = []
@@ -1104,19 +1042,13 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         return next(i for i in case_of(data, row_id, case_id)["input"] if i["pointer"] == pointer)
 
     def omit_one_grouped_included_set_entry(data: dict) -> None:
-        # The B2P group goes while its summary row keeps its occurrence: without
-        # the coverage arm that row is bound by nothing and passes.
         stated = input_of(data, "C01-DACLEAN-001", "MULTI_SET_SUCCESS", "/input/block_included_set_identities")
         stated["value_or_alias"] = stated["value_or_alias"][:1]
 
     def substitute_one_stated_branch_block(data: dict) -> None:
-        # The summary keeps its rows, heights and hashes, so only the branch-to-
-        # summary derivation can reject the substituted branch block.
         input_of(data, "C01-REORG-001", "MAIN", "/input/prestored_side_branch")["value_or_alias"][0] = "R1208_REORG_001_MAIN_B3P"
 
     def borrow_another_cases_input_alias(data: dict) -> None:
-        # A non-NEW case on purpose: its summary is null, so the branch derivation
-        # cannot fire and the namespace is the only rule left.
         input_of(data, "C01-DACLEAN-001", "CORRUPT_FIRST", "/input/stimulus_block")["value_or_alias"] = "R1208_GENESIS_001_MAIN_G"
 
     def borrow_another_cases_da_alias(data: dict) -> None:
@@ -1129,7 +1061,6 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         expected["state_image"]["CHAIN_IMAGE_V1"]["relation"] = "old"
 
     def summary_rows_effect_is_a_bool(data: dict) -> None:
-        # A 1-ROW case on purpose: True == 1, so the count arm cannot fire and only the type guard is left.
         case_of(data, "C01-SUMMARY-001", "SINGLE_BLOCK_NO_DA")["expected"]["effects"]["summary_rows"]["value"] = True
 
     def stale_owner_tip(data: dict) -> None:
@@ -1138,17 +1069,14 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         data["resolved_values"][alias]["value"]["hash"] = "00" * 32
 
     def float_stable_tip_height(data: dict) -> None:
-        # Type-exactness pair: 4.0 equals 4 and -1 is an int, so both pass every value arm.
         stable = resolved_of(data, "C01-DIRECT-001", "MAIN", "OWNER_IMAGE_V1", "stable_tip")["value"]
         stable["height"] = float(stable["height"])
 
     def negative_summary_block_height(data: dict) -> None:
-        # Row 0 of 3: ordering and the CHAIN-tip binding (last row) both still hold.
         row = case_of(data, "C01-REORG-001", "MAIN")["expected"]["canonical_applied_blocks"][0]
         data["fixtures"][row["block_id"]]["value"]["height"] = -1
 
     def float_connect_count(data: dict) -> None:
-        # 3.0 equals 3 in the count arm, so only the type arm can reject it.
         stated = case_of(data, "C01-REORG-001", "MAIN")["input"]
         next(i for i in stated if i["pointer"] == "/input/connect_count")["value_or_alias"] = 3.0
 
@@ -1157,7 +1085,6 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         next(i for i in stated if i["pointer"] == "/input/block_complete_da_set_count")["value_or_alias"] = 0.0
 
     def stale_chain_height(data: dict) -> None:
-        # Same block hash, one-off height: the hash arm and the OWNER tip both pass.
         row = case_of(data, "C01-DIRECT-001", "MAIN")["expected"]["canonical_applied_blocks"][0]
         data["fixtures"][row["block_id"]]["value"]["height"] += 1
 
@@ -1178,15 +1105,10 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         case["obligation_ids"].pop()
 
     def rename_obligation(data: dict) -> None:
-        # Census-preserving: same unique count, same occurrence count. Only the
-        # forward receipt hash can reject it.
         case = case_of(data, "C01-DIRECT-001", "MAIN")
         case["obligation_ids"][0] = "OBL-NOT-A-CENSUS-ID-999"
 
     def move_obligation(data: dict) -> None:
-        # Census-preserving in both counts: one id moves to a case that does not
-        # already carry it, so unique and occurrence counts are untouched and the
-        # forward receipt hash is the only thing left that can reject it.
         source = case_of(data, "C01-DACLEAN-001", "CORRUPT_FIRST")
         target = case_of(data, "C01-DIRECT-001", "MAIN")
         movable = [o for o in source["obligation_ids"] if o not in target["obligation_ids"]]
@@ -1224,9 +1146,6 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         case["expected"]["state_image"]["CHAIN_IMAGE_V1"]["relation"] = "new"
 
     def relation_and_aliases_moved_together(data: dict) -> None:
-        # Dual violation: the relation moves AND every alias encoding it moves
-        # with it, so the composed-alias check still passes and only the
-        # truth -> relation arm can reject this.
         case = case_of(data, "C01-SIDE-001", "MAIN")
         projection = case["expected"]["state_image"]["RETAINED_DA_IMAGE_V1"]
         values = data["resolved_values"]
@@ -1242,9 +1161,6 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
             projection["direct_fields"][field] = rename(projection["direct_fields"][field])
 
     def stale_chain_tip(data: dict) -> None:
-        # Dual violation: CHAIN tip AND the OWNER stable tip move together, so
-        # the OWNER<->CHAIN relation still holds and only the summary binding
-        # can reject it.
         case = case_of(data, "C01-DIRECT-001", "MAIN")
         fields = case["expected"]["state_image"]["CHAIN_IMAGE_V1"]["direct_fields"]
         stable = case["expected"]["state_image"]["OWNER_IMAGE_V1"]["direct_fields"]["stable_tip"]
@@ -1258,7 +1174,6 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         }
 
     def substituted_digest_alias(data: dict) -> None:
-        # Resolves to a real bytes32_hex entry, just not this position's.
         case = case_of(data, "C01-SUMMARY-001", "MULTI_BLOCK_ORDER")
         other = case_of(data, "C01-DIRECT-001", "MAIN")
         case["expected"]["state_image"]["CHAIN_IMAGE_V1"]["digest_alias"] = (
@@ -1301,8 +1216,6 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         case["expected"]["effects"]["summary_rows"]["value"] = 99
 
     def substitute_the_genesis_summary_block(data: dict) -> None:
-        # The substitute carries the genesis block's own hash and height, so only
-        # the pack -> summary derivation can reject it.
         data["fixtures"]["R1208_GENESIS_001_MAIN_G2"] = data["fixtures"]["R1208_GENESIS_001_MAIN_G"]
         case_of(data, "C01-GENESIS-001", "MAIN")["expected"]["canonical_applied_blocks"][0]["block_id"] = "R1208_GENESIS_001_MAIN_G2"
 
@@ -1341,6 +1254,8 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
 
     group_1 = "R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"
     fixture_value = lambda data, alias: data["fixtures"][alias]["value"]
+    corrupt_first = lambda data, suffix: data["fixtures"][f"R1208_DACLEAN_001_CORRUPT_FIRST_{suffix}"]
+    owner_fault = lambda data: fixture_value(data, "R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_INPUT_OWNER_TOKEN_FAULT")
     mutations = (
         ("orphan fixtures entry", lambda d: d["fixtures"].update({"R1208_DIRECT_001_MAIN_ORPHAN": {"type": "u64", "value": 1}}), "fixtures[R1208_DIRECT_001_MAIN_ORPHAN] is named by no case"),
         ("stated array repeats an alias", repeat_a_stated_alias, "names an alias more than once"),
@@ -1356,6 +1271,11 @@ def assert_canonical_pipeline_v2_negative_controls(path: Path) -> None:
         ("included chunks empty", lambda d: fixture_value(d, "R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0").update(chunks=[]), "invalid complete DA set identity"),
         ("included chunk index overflows u16", lambda d: fixture_value(d, "R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0")["chunks"][0].update(chunk_index=65536), "chunks/0: invalid or non-ascending identity"),
         ("included chunk indices nonascending", lambda d: fixture_value(d, "R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0")["chunks"][1].update(chunk_index=0), "chunks/1: invalid or non-ascending identity"),
+        ("retained aliases share one identity", lambda d: corrupt_first(d, "DA_SET_2").update(value=corrupt_first(d, "DA_SET_1")["value"]), "prestate_retained_da_sets: aliases 'R1208_DACLEAN_001_CORRUPT_FIRST_DA_SET_1' and 'R1208_DACLEAN_001_CORRUPT_FIRST_DA_SET_2' resolve to the same complete identity"),
+        ("selected plan names a non-retained record", lambda d: input_of(d, "C01-DACLEAN-001", "CORRUPT_FIRST", "/input/selected_record_plan_order")["value_or_alias"].__setitem__(2, "R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_2"), "selected_record_plan_order: alias 'R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_2' does not name a retained prestate record"),
+        ("owner token fault kind differs", lambda d: owner_fault(d).update(kind="other"), "owner_token_fault/kind: want exact_token_mismatch_against_selected_record"),
+        ("owner token fault target differs", lambda d: owner_fault(d).update(target="CLAIM_DA_SET_2"), "owner_token_fault/target: does not name the stated prestate owner claim"),
+        ("required removal effect absent", lambda d: case_of(d, "C01-DACLEAN-001", "EXACT_MATCH")["expected"]["effects"].pop("da_record_removals"), "effects/da_record_removals: required"),
         ("fault kind differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_RETAINED_RECORD_FAULT").update(kind="other"), "retained_record_fault/kind: want selected_record_corrupt"),
         ("fault position differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_RETAINED_RECORD_FAULT").update(position_index=1), "retained_record_fault/position_index: want 0"),
         ("fault target differs", lambda d: fixture_value(d, "R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_RETAINED_RECORD_FAULT").update(target="DA_SET_2"), "retained_record_fault/target: does not name selected_record_plan_order[0]"),
@@ -1506,17 +1426,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         assert_committed_untouched(repo_root, output_dir)
         run_generator(repo_root, output_dir)
-        # An absent v2 artifact on either side is drift with its own diagnostic
-        # below, so the gate runs only when both files exist. The isolated
-        # fake-repo tests, whose generated files are sentinel bytes, opt out
-        # through an environment sentinel -- never a public CLI flag, and never
-        # an unrelated file's presence.
         candidate_v2, committed_v2 = output_dir / V2_REL, committed_root / V2_REL
-        if os.environ.get(FAKE_REPO_ENV) == "1":
-            # Loud: an inherited sentinel would otherwise disable the semantic gate,
-            # the receipts and the negative controls with nothing on the terminal.
-            print("NOTICE: canonical_pipeline_v2 semantic gate SKIPPED (fake-repo sentinel)", file=sys.stderr)
-        elif candidate_v2.is_file() and committed_v2.is_file():
+        if candidate_v2.is_file() and committed_v2.is_file():
             try:
                 run_v2_gate(candidate_v2, committed_v2, repo_root / V2_AUTHORITY_REL)
             except RuntimeError as exc:

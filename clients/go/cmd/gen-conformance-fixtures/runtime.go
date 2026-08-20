@@ -2772,6 +2772,24 @@ type cp2Row struct {
 	Cases []cp2Case `json:"cases,omitempty"`
 }
 
+type cp2StrictCase struct {
+	CaseID              string          `json:"case_id"`
+	ScheduleID          *string         `json:"schedule_id"`
+	Input               json.RawMessage `json:"input"`
+	Expected            json.RawMessage `json:"expected"`
+	Notes               json.RawMessage `json:"notes"`
+	Obligations         json.RawMessage `json:"obligation_ids"`
+	ReleaseRequirements json.RawMessage `json:"release_requirements"`
+	Sources             json.RawMessage `json:"sources"`
+}
+
+type cp2StrictRow struct {
+	RowID               string          `json:"row_id"`
+	Kind                string          `json:"kind"`
+	Cases               []cp2StrictCase `json:"cases"`
+	ReleaseRequirements json.RawMessage `json:"release_requirements"`
+}
+
 // cp2Artifact is the emit shape of the v2 corpus. It is a struct, not a map, so
 type cp2Artifact struct {
 	Artifact              string                `json:"artifact"`
@@ -3617,7 +3635,7 @@ func cp2ValidateCleanupClassifier(where string, inputs []any, expected map[strin
 	for _, alias := range cp2InputAliasesAt(inputs, "/input/final_chain_invalid_members") {
 		invalid[alias] = true
 	}
-	removed, matched := map[string]bool{}, map[string]bool{}
+	removed, matched, retained := map[string]bool{}, map[string]bool{}, map[string]string{}
 	for _, alias := range cp2InputAliasesAt(inputs, "/input/prestate_retained_da_sets") {
 		f, err := cp2CaseFixture(fixtures, where, alias, "object")
 		if err != nil {
@@ -3627,6 +3645,10 @@ func cp2ValidateCleanupClassifier(where string, inputs []any, expected map[strin
 		if err != nil {
 			return err
 		}
+		if retained[key] != "" {
+			return fmt.Errorf("%s/input/prestate_retained_da_sets: aliases %q and %q resolve to the same complete identity", where, retained[key], alias)
+		}
+		retained[key] = alias
 		if invalid[alias] || included[key] {
 			removed[alias] = true
 		}
@@ -3634,8 +3656,38 @@ func cp2ValidateCleanupClassifier(where string, inputs []any, expected map[strin
 			matched[key] = true
 		}
 	}
+	for _, alias := range cp2InputAliasesAt(inputs, "/input/selected_record_plan_order") {
+		f, err := cp2CaseFixture(fixtures, where, alias, "object")
+		if err != nil {
+			return err
+		}
+		key, err := cp2CleanupIdentity(where+"/"+alias, f.Value)
+		if err != nil {
+			return err
+		}
+		if retained[key] != alias {
+			return fmt.Errorf("%s/input/selected_record_plan_order: alias %q does not name a retained prestate record", where, alias)
+		}
+	}
 	if len(cp2InputAliasesAt(inputs, "/input/retained_record_fault"))+len(cp2InputAliasesAt(inputs, "/input/owner_token_fault")) > 0 {
 		removed = map[string]bool{}
+	}
+	if strings.HasSuffix(where, "/OWNER_TOKEN_MISMATCH") {
+		faults := cp2InputAliasesAt(inputs, "/input/owner_token_fault")
+		if len(faults) != 1 {
+			return fmt.Errorf("%s/input/owner_token_fault: want exactly one fault", where)
+		}
+		f, err := cp2CaseFixture(fixtures, where, faults[0], "object")
+		if err != nil {
+			return err
+		}
+		fault, _ := cp2JSONImage(f.Value).(map[string]any)
+		if fault["kind"] != "exact_token_mismatch_against_selected_record" {
+			return fmt.Errorf("%s/input/owner_token_fault/kind: want exact_token_mismatch_against_selected_record", where)
+		}
+		if fault["target"] != "CLAIM_DA_SET_1" || !slices.Contains(cp2InputAliasesAt(inputs, "/input/prestate_owner_claims"), cp2CaseAliasPrefix(where)+"CLAIM_DA_SET_1") {
+			return fmt.Errorf("%s/input/owner_token_fault/target: does not name the stated prestate owner claim", where)
+		}
 	}
 	effects, _ := expected["effects"].(map[string]any)
 	var removedCount, includedCount, matchedCount uint64
@@ -3652,6 +3704,9 @@ func cp2ValidateCleanupClassifier(where string, inputs []any, expected map[strin
 	for _, key := range []string{"da_record_removals", "da_inclusion_noops"} {
 		want := wants[key]
 		effect, stated := effects[key].(map[string]any)
+		if key == "da_record_removals" && !stated {
+			return fmt.Errorf("%s/effects/da_record_removals: required", where)
+		}
 		if !stated {
 			continue
 		}
@@ -4213,6 +4268,12 @@ func cp2ValidateR1208Payload(payload cp2R1208Payload) error {
 	seen := map[string]bool{}
 	for _, raw := range payload.Rows {
 		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		var strict cp2StrictRow
+		if err := dec.Decode(&strict); err != nil {
+			return err
+		}
+		dec = json.NewDecoder(bytes.NewReader(raw))
 		dec.UseNumber()
 		var row cp2Row
 		if err := dec.Decode(&row); err != nil {
