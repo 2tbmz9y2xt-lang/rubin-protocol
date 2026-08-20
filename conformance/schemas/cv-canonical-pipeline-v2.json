@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Canonical publication observables corpus (C01-R2), schema version 2 — BUILDING",
-  "description": "Machine contract for conformance/fixtures/protocol/canonical_pipeline_v2.json, the DORMANT C01-R2 successor of cv-canonical-pipeline-v1.json. It is BUILDING, not an authority: while `_meta.closure_epoch.status` is `building` no C02/C02A/C03/C04 consumer may claim or bind it, and the byte-frozen v1 pair stays the inert authority until RUB-1204 activates v2 and deletes the parent in one PR. Machine stimulus lives ONLY in a case's `input`, runtime expectation ONLY in `expected`, static machine authority ONLY in a row's `authority`, and human explanation ONLY in `notes` (array of strings): there is no `detail`, no `scenario` and no `pending_owner` in this shape. Aliases (`B1`, `B1_HASH`, `DA_ID_1`) resolve in the top-level `fixtures` catalog from four positions: an input pointer's `value_or_alias`, a case's `schedule_id`, a summary row's `block_id`/`block_hash`/`complete_da_ids`, and a `hash`-typed effect value. `additionalProperties` is false on every object with a fixed property set, and the open maps (`fixtures`, `effects`, `authority`, `direct_fields`) close their keys and their value grammar instead; an omitted optional field states no expectation and is neither a zero nor a wildcard.",
+  "description": "Machine contract for conformance/fixtures/protocol/canonical_pipeline_v2.json, the BUILDING C01-R2 successor of cv-canonical-pipeline-v1.json. It is BUILDING, not an authority: while `_meta.closure_epoch.status` is `building` no C02/C02A/C03/C04 consumer may claim or bind it, and the byte-frozen v1 pair stays the inert authority until RUB-1204 activates v2 and deletes the parent in one PR. Machine stimulus lives ONLY in a case's `input`, runtime expectation ONLY in `expected`, static machine authority ONLY in a row's `authority`, and human explanation ONLY in `notes` (array of strings): there is no `detail`, no `scenario` and no `pending_owner` in this shape. Aliases (`B1`, `B1_HASH`, `DA_ID_1`) resolve in the top-level `fixtures` catalog from three positions: an input pointer's `value_or_alias`, a case's `schedule_id`, and a summary row's `block_id`/`block_hash`/`complete_da_ids`. Image digest and direct-field aliases are a separate namespace resolving in `resolved_values`. No effect value is an alias in this revision, and no validator resolves one. `additionalProperties` is false on every object with a fixed property set, and the open maps (`fixtures`, `effects`, `authority`, `direct_fields`) close their keys and their value grammar instead; an omitted optional field states no expectation and is neither a zero nor a wildcard.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["artifact", "schema_version", "schema", "_meta", "authority", "result_taxonomy", "commit_truth_values", "rpc_projection_classes", "wire_disposition_values", "recovery_outcome_values", "row_registry", "fixtures", "rows"],
+  "required": ["artifact", "schema_version", "schema", "_meta", "authority", "result_taxonomy", "commit_truth_values", "rpc_projection_classes", "wire_disposition_values", "recovery_outcome_values", "row_registry", "fixtures", "image_manifest", "resolved_values", "rows", "summary_manifest"],
   "properties": {
     "artifact": { "const": "canonical_pipeline_v2" },
     "schema_version": { "const": 2 },
@@ -13,19 +13,21 @@
       "description": "Revision identity: the generator, the byte-frozen R1 parent pins, the governing spec OID and the RUB-1206 closure epoch this revision is bound to. Every closure-epoch value is a `const` here and a constant in the generator, so drift on either side fails validation or generation instead of shipping a revision bound to a manifest nobody closed.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["generated_by", "warning", "schema_version", "corpus_revision", "parent_r1_source_oid", "parent_r1_merge_oid", "parent_artifact_sha256", "parent_schema_sha256", "governing_spec_oid", "closure_epoch"],
+      "required": ["generated_by", "warning", "schema_version", "corpus_revision", "parent_r1_source_oid", "parent_r1_merge_oid", "parent_artifact_sha256", "parent_schema_sha256", "governing_spec_oid", "authority_source_sha256", "closure_epoch"],
       "properties": {
-        "generated_by": { "const": "clients/go/cmd/gen-conformance-fixtures" }, "warning": { "$ref": "#/$defs/text" }, "schema_version": { "const": 2 },
+        "generated_by": { "const": "clients/go/cmd/gen-conformance-fixtures" }, "warning": { "const": "MACHINE-GENERATED FILE. Do not edit manually." }, "schema_version": { "const": 2 },
         "corpus_revision": { "const": "C01-R2" }, "parent_r1_source_oid": { "const": "1e24b0249dab04b21de492ad307b6a47c63f12b5" }, "parent_r1_merge_oid": { "const": "3b1e45590b18994b4ce5f6e3ec2d9dc6b416e880" },
         "parent_artifact_sha256": { "const": "68a1f551333ca17b93ebe3e6d737658cc661e40b40a3b41dbe27b37b74537246" }, "parent_schema_sha256": { "const": "c962f5434d373ac5268527cc82ef8eb68fd45ddac50c849da32b3f8ef87cdca7" }, "governing_spec_oid": { "const": "c14b010024ce633e1027bf891af3c49741db544a" },
+        "authority_source_sha256": { "description": "SHA-256 of clients/go/cmd/gen-conformance-fixtures/canonical_pipeline_v2_authority.json, the human-readable authority source the generator embeds. Pinned here and as cp2AuthoritySourceSHA256 in the generator, so an edit to that file without re-pinning both sides fails generation.", "const": "d9f3a4ba81a2e8c115ab559990da26e81cefdbe8ba4a92d81010e81dc94ec1e3" },
         "closure_epoch": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["closure_manifest_version", "manifest_root_sha256", "obligation_set_hash", "row_case_design_hash", "stage_owner_relation_hash", "mutation_assignment_hash", "image_manifest_hash", "summary_manifest_hash", "relation_snapshot_hash", "status"],
+          "required": ["closure_manifest_version", "manifest_root_sha256", "obligation_set_hash", "row_case_design_hash", "stage_owner_relation_hash", "mutation_assignment_hash", "image_manifest_hash", "summary_manifest_hash", "relation_snapshot_hash", "input_schema_design_hash", "expected_projection_design_hash", "status"],
           "properties": {
-            "closure_manifest_version": { "const": "rubin-c01-design-closure-v3" }, "manifest_root_sha256": { "const": "da48730ad29963d94499a6fce1b5c58fe39e9a3779e643cbfcd8148b9b2c98b7" }, "obligation_set_hash": { "const": "4af7520a185bfa732ece69f5a6c12f4d012917b9c6fd1d8f42b98195284f59b0" },
-            "row_case_design_hash": { "const": "8bcfd02557f63893a6dc43690e8091dea10c02bfd3af7c0a9639193ff9ef4221" }, "stage_owner_relation_hash": { "const": "4513e667a03dabca78e7369e989676ea5ab3d75d59a817493d84fe968b3a8518" }, "mutation_assignment_hash": { "const": "fcd8d3dab8ec9a5e6d233e8539f31751e6446118d519f1f14f581b77cf9f84fc" },
-            "image_manifest_hash": { "const": "e014000b71102e54be70af0dc756f8930c57573f7346db05935964053230f928" }, "summary_manifest_hash": { "const": "39e39d94593d434e7051a3f77ca94d3dd31a5a8d65a3f12a764e29a5fde041dd" }, "relation_snapshot_hash": { "const": "3e7db40fa6917b5a7d61ab113a74f7107f8f166080393e1c9789dbd927b24edb" },
+            "closure_manifest_version": { "const": "rubin-c01-design-closure-v8" }, "manifest_root_sha256": { "const": "e9b4bbfa09b4cf939973b229b59105f8996282b6fc2ffaa094362e76948bbc89" }, "obligation_set_hash": { "const": "4af7520a185bfa732ece69f5a6c12f4d012917b9c6fd1d8f42b98195284f59b0" },
+            "row_case_design_hash": { "const": "8b70ba6d504a7e7ed92bf7bd0b769cb9eeb48356bdf356247520916629cc1216" }, "stage_owner_relation_hash": { "const": "4513e667a03dabca78e7369e989676ea5ab3d75d59a817493d84fe968b3a8518" }, "mutation_assignment_hash": { "const": "94f846a9b454e019a2b1c7b833c75862151d1e66f91216e107b2478d0f0cb4a5" },
+            "image_manifest_hash": { "const": "08fbabf558f3df10e89bd6160804db8efc814378140ae4514717952c7d913116" }, "summary_manifest_hash": { "const": "39e39d94593d434e7051a3f77ca94d3dd31a5a8d65a3f12a764e29a5fde041dd" }, "relation_snapshot_hash": { "const": "3e7db40fa6917b5a7d61ab113a74f7107f8f166080393e1c9789dbd927b24edb" },
+            "input_schema_design_hash": { "const": "468b2b5401e12915b9bcdd76cb2714eda837fcd9401324ac7677770bb7069f57" }, "expected_projection_design_hash": { "const": "b1e539c3cb7155c5821b5788c4de9aea40cf706fb9faf4c44af7e4ae21586d8c" },
             "status": { "const": "building", "description": "This revision is BUILDING and is not a passing authority for any consumer; RUB-1204 changes this const to `complete` when it activates v2." }
           }
         }
@@ -94,14 +96,523 @@
       }
     },
     "fixtures": {
-      "description": "Deterministic alias catalog, keyed by alias. Four positions resolve here: an input pointer's `value_or_alias`, a case's `schedule_id`, a summary row's `block_id`/`block_hash`/`complete_da_ids`, and a `hash`-typed effect value. The generator resolves the first two today; RUB-1208 extends it to the expected-side positions as it lands them. `digest_alias` and `direct_fields` values are generator-named machine tokens, not catalog keys. Each entry is a typed literal whose value is validated against its tag, and the generator checks both that a named alias exists and that its fixture type matches the pointer tag; the catalog is empty while no row is migrated. A free-form object or a row-id-only hard-coded setup is not a substitute.",
+      "description": "Deterministic typed alias catalog, keyed by alias. Three positions resolve here fail-closed: an input pointer's `value_or_alias` and a case's `schedule_id` (the generator), and a summary row's `block_id`/`block_hash`/`complete_da_ids` (the generator, mirrored by the drift gate). Image digest and direct-field aliases are NOT catalog keys: they resolve in the separate top-level `resolved_values` map, and no string is a legal key in both: a catalog key admits no `@` and every composed resolved key carries exactly one (pinned by the generator's alias-namespace test, listed in conformance/README.md). Each entry is a typed literal whose value is validated against its tag; a structured input value lives here, never inline. A free-form object or a row-id-only hard-coded setup is not a substitute.",
       "type": "object",
       "propertyNames": { "$ref": "#/$defs/alias" },
       "additionalProperties": { "$ref": "#/$defs/fixtureEntry" }
     },
-    "rows": { "description": "Uniqueness of row_id is enforced by the generator; JSON Schema cannot express per-key uniqueness, so a schema-only consumer must not read schema-valid as corpus-valid.", "type": "array", "items": { "$ref": "#/$defs/row" } }
+    "image_manifest": {
+      "description": "The RUB-1206 v8 image component/encoding manifest, frozen whole. Its SHA-256 is `_meta.closure_epoch.image_manifest_hash` and the generator recomputes it from the authority source before emitting, so schema and generator fail on the same byte. `images.<IMAGE>.direct_fields` is the single source of the per-image direct-field key set: the generator derives its check from this list and the state_image arms below pin the same keys.",
+      "const": {
+          "closure_correction_note": "v8 preserves v6 input/type closure and v7 retained-DA tie-break; OWNER_IMAGE_V1 excludes generation high-water because governing spec 6.4.1 requires OLD to preserve the exact old publication image while explicitly forbidding generation-high-water rewind on precommit abort. Publication OWNER identity is claims + by_outpoint + stable_tip.",
+          "common_encoding": {
+            "absence_null_empty": "an absent optional component is encoded as u8 0x00; a present one as u8 0x01 followed by its encoding; an empty array is present with count 0; JSON projection distinguishes `null` (absent) from `[]` (empty)",
+            "arrays": "length prefix as u64 count, then elements in the normative order named per component; never client iteration order",
+            "byte_strings": "variable-length byte/string fields are encoded as u64 byte length followed by the raw bytes; sorting keys uses raw bytes before length-prefix encoding",
+            "bytes32": "raw 32 bytes; JSON projection lowercase hex",
+            "closed_enums": "PendingOutpointDomain u8 index order: standard=0, da=1; daRelaySetState u8 index order from RUBIN_COMPACT_BLOCKS §5 state order: ORPHAN_CHUNKS=0, STAGED_COMMIT=1, COMPLETE_SET=2",
+            "digest_projection_in_c01": "each image is compared as its digest (`state_image.<image>.digest`) PLUS the small direct fields listed as `direct_fields` (so a same-tip wrong image is localizable); the adapter emits both from production state via a test seam",
+            "domain_separator": "ASCII tag `RUBIN-C01-<IMAGE_NAME>-V1` followed by 0x00, prepended once before the concatenated canonical fields",
+            "excluded_by_rule": "Go/Rust pointers, mutexes, allocation layouts, token layouts (PendingOutpointToken seq/owner pointer), private serializer bytes, map iteration order, cache state, admission counters/metrics",
+            "hash": "SHA3-256 (the chain's only digest primitive; matches consensus.UtxoSetHash / Rust utxo_set_hash)",
+            "integers": "u8 = 1 byte unsigned; u16 = 2-byte big-endian; u32 = 4-byte big-endian; u64 = 8-byte big-endian; u128 = 16-byte big-endian; u256 = 32-byte big-endian (RUB-1153 exact u128; JSON u128 uses the canonical unsigned decimal string)",
+            "maps": "never hashed as maps: converted to arrays sorted by the named key",
+            "outpoints": "outpoint = txid raw 32 bytes followed by vout u32 big-endian"
+          },
+          "image_manifest_version": "rubin-c01-image-manifest-v1-draft",
+          "images": {
+            "CHAIN_IMAGE_V1": {
+              "components": [
+                {
+                  "go_source": "node.ChainState.TipHash (chainstate.go:59)",
+                  "measurement": "direct value",
+                  "name": "tip_hash",
+                  "rust_source": "rubin-node chainstate tip hash",
+                  "type": "bytes32"
+                },
+                {
+                  "go_source": "node.ChainState.Height (chainstate.go:57)",
+                  "measurement": "direct value",
+                  "name": "height",
+                  "type": "u64"
+                },
+                {
+                  "go_source": "node.BlockStore.ChainWork(tip) (blockstore.go:339)",
+                  "measurement": "direct value",
+                  "name": "cumulative_chainwork",
+                  "notes": "SPEC_GAP-IMG-001: no normative encoding for cumulative work; propose fixed 32-byte big-endian (fits PoW targets); needs controller/spec word or a documented conformance-local encoding",
+                  "type": "u256 big-endian 32 bytes (SPEC_GAP: width/encoding of chain work not fixed by spec text; Go BlockStore.ChainWork returns *big.Int, blockstore.go:339)"
+                },
+                {
+                  "go_source": "node.ChainState.AlreadyGenerated (chainstate.go:58); summary AlreadyGenerated/AlreadyGeneratedN1",
+                  "measurement": "direct value (canonical decimal string in JSON, RUB-1153)",
+                  "name": "already_generated",
+                  "type": "u128"
+                },
+                {
+                  "go_source": "consensus.UtxoSetHash(ChainState.Utxos) (consensus/state_digest.go:17; node.ChainState.StateDigest chainstate.go:432)",
+                  "measurement": "canonical digest (existing cross-client primitive; not re-specified here)",
+                  "name": "utxo_set_hash",
+                  "rust_source": "rubin-node chainstate.rs:686 utxo_set_hash / :690 state_digest (bit-identical by existing parity vectors)",
+                  "type": "bytes32"
+                },
+                {
+                  "go_source": "len(ChainState.Utxos); summary UtxoCount",
+                  "measurement": "direct value",
+                  "name": "utxo_count",
+                  "type": "u64"
+                }
+              ],
+              "digest_field_order": [
+                "tip_hash",
+                "height",
+                "cumulative_chainwork",
+                "already_generated",
+                "utxo_set_hash",
+                "utxo_count"
+              ],
+              "direct_fields": [
+                "tip_hash",
+                "height",
+                "utxo_count"
+              ],
+              "normative_source": [
+                "spec RUBIN_MEMPOOL_POLICY.md 6.4.1 `C1 = candidate chain with exact final tip, height, and confirmed UTXO view`",
+                "RUB-1180 one_invariant / commit_truth_projection",
+                "R1 C01-REORG-001 effects.final_state_fields = tip_hash, height, cumulative_chainwork, utxo_digest, supply_digest"
+              ],
+              "omission_mutations": [
+                "M34: drop cumulative_chainwork while Go/Rust agree → RED",
+                "M34: drop already_generated → RED",
+                "M26: right tip, wrong utxo_set_hash → RED"
+              ]
+            },
+            "OWNER_IMAGE_V1": {
+              "components": [
+                {
+                  "claim_fields_in_order": [
+                    {
+                      "go_source": "pendingOutpointClaim.domain (pending_outpoint_owner.go:107)",
+                      "name": "domain",
+                      "type": "u8 closed enum PendingOutpointDomain (standard=0 | da=1)"
+                    },
+                    {
+                      "go_source": "pendingOutpointClaim.txid",
+                      "name": "txid",
+                      "type": "bytes32"
+                    },
+                    {
+                      "go_source": "pendingOutpointClaim.inputs",
+                      "name": "inputs",
+                      "type": "array<outpoint(txid bytes32, vout u32 big-endian)> in claim order"
+                    },
+                    {
+                      "go_source": "pendingOutpointClaim.finalized",
+                      "name": "finalized",
+                      "type": "bool as u8"
+                    }
+                  ],
+                  "excluded": [
+                    "token (client-private: owner pointer + seq)",
+                    "claim.generation / owner generation high-water (admission fencing state; not canonical publication state)"
+                  ],
+                  "measurement": "canonical digest; JSON projection carries `claim_count`",
+                  "name": "claims",
+                  "type": "array<claim> sorted by (domain u8, txid bytes32)"
+                },
+                {
+                  "go_source": "PendingOutpointOwner.byOutpoint (pending_outpoint_owner.go:132; row = token, txid — token excluded)",
+                  "measurement": "canonical digest (relational: every by_outpoint row must be an input of exactly one claim)",
+                  "name": "by_outpoint",
+                  "type": "array<(outpoint, txid)> sorted by outpoint canonical key"
+                },
+                {
+                  "go_source": "PendingOutpointOwner.stableTip (:137)",
+                  "measurement": "direct value (must equal CHAIN_IMAGE tip after publication — relational check)",
+                  "name": "stable_tip",
+                  "type": "(has_tip u8, height u64, hash bytes32)"
+                }
+              ],
+              "digest_field_order": [
+                "claims",
+                "by_outpoint",
+                "stable_tip"
+              ],
+              "direct_fields": [
+                "claim_count",
+                "stable_tip"
+              ],
+              "excluded_by_rule": [
+                "tokenHighWater (SPEC_GAP-IMG-005: token high-water is an implementation counter — proposed EXCLUDED; the normative statement is 'no pre-crash token may reappear', which is a relational/negative check, not a digest component)",
+                "inTransition (transient)",
+                "generation high-water / claim.generation (spec 6.4.1: precommit abort MUST NOT rewind generation high-water while OLD MUST preserve the exact old publication image; therefore generation is an admission-fencing counter, not a publication-image component)"
+              ],
+              "normative_source": [
+                "spec 6.4.1 `O1 = S0.owner minus exact claims owned by records excluded from M1.records or D1`; token release rules; restart invalidates old owner instance and every old token; fresh-token union after recovery",
+                "RUB-1180 normative_decision 1/7",
+                "RUB-1123 (Rust mirror of atomic standard pending-outpoint owner)"
+              ],
+              "omission_mutations": [
+                "M17: stale/missing owner claim → RED",
+                "M26: right tip, stale_tip mismatch → RED",
+                "M34: drop stable_tip -> RED"
+              ]
+            },
+            "RETAINED_DA_IMAGE_V1": {
+              "components": [
+                {
+                  "excluded": [
+                    "receivedTime (client-local monotonic clock, SPEC_GAP-IMG-004: is received-time order a published semantic? proposed EXCLUDED from digest, kept as relational check only if spec §5 makes eviction order normative)",
+                    "wireBytes (transport accounting)",
+                    "replaceableChunks (relay bookkeeping)"
+                  ],
+                  "measurement": "canonical digest; JSON projection carries `set_count`, `sets_digest` and the sorted `da_id` list",
+                  "name": "sets",
+                  "ordering": "ascending da_id raw bytes; ties by canonical set_identity bytes (commit txid,wtxid then chunks in chunk_index order) lexicographically",
+                  "set_fields_in_order": [
+                    {
+                      "go_source": "daRelaySetRecord.daID (da_relay_state.go:102)",
+                      "name": "da_id",
+                      "type": "bytes32"
+                    },
+                    {
+                      "go_source": "daRelaySetRecord.state",
+                      "name": "state",
+                      "type": "u8 closed enum daRelaySetState (ORPHAN_CHUNKS=0, STAGED_COMMIT=1, COMPLETE_SET=2; order frozen from RUBIN_COMPACT_BLOCKS §5)"
+                    },
+                    {
+                      "go_source": "daRelaySetRecord.commit (daRelayCommit)",
+                      "name": "commit",
+                      "type": "(txid bytes32, wtxid bytes32) — the set identity commit part"
+                    },
+                    {
+                      "go_source": "daRelaySetRecord.chunks (map → sorted)",
+                      "name": "chunks",
+                      "type": "array<(chunk_index u16, txid bytes32, wtxid bytes32)> ascending chunk_index — the set identity chunk part"
+                    },
+                    {
+                      "go_source": "daRelaySetRecord.payloadBytes",
+                      "name": "payload_bytes",
+                      "type": "u64"
+                    },
+                    {
+                      "go_source": "daRelaySetRecord.ttlBlocksRemaining",
+                      "name": "ttl_blocks_remaining",
+                      "notes": "normative TTL semantics from RUBIN_COMPACT_BLOCKS §5/§10; RUB-910 da_ttl_fence — included so a TTL interleaving across prepare/publish (M18) is visible",
+                      "type": "u64"
+                    }
+                  ],
+                  "type": "array<set> sorted by da_id ascending raw bytes"
+                },
+                {
+                  "go_source": "daRelayState.orphanBytes",
+                  "measurement": "direct value",
+                  "name": "orphan_bytes",
+                  "type": "u64"
+                },
+                {
+                  "go_source": "daRelayState.orphanBytesByDAID",
+                  "measurement": "canonical digest",
+                  "name": "orphan_bytes_by_da_id",
+                  "type": "array<(da_id, bytes)> sorted by da_id"
+                },
+                {
+                  "go_source": "daRelayState.orphanBytesByPeerQuotaKey",
+                  "measurement": "canonical digest (source-key byte corpus RUB-1212 item 5)",
+                  "name": "orphan_bytes_by_peer_quota_key",
+                  "type": "array<(key string bytes, bytes)> sorted by key bytes"
+                },
+                {
+                  "go_source": "daRelayState.pinnedPayloadBytes",
+                  "measurement": "direct value",
+                  "name": "pinned_payload_bytes",
+                  "type": "u64"
+                }
+              ],
+              "digest_field_order": [
+                "sets",
+                "orphan_bytes",
+                "orphan_bytes_by_da_id",
+                "orphan_bytes_by_peer_quota_key",
+                "pinned_payload_bytes"
+              ],
+              "direct_fields": [
+                "set_count",
+                "orphan_bytes",
+                "pinned_payload_bytes"
+              ],
+              "excluded_by_rule": [
+                "caps (configured constants)",
+                "prefetch state (relay-local)",
+                "nextReceivedTime (SPEC_GAP-IMG-004)"
+              ],
+              "normative_source": [
+                "spec 6.4.1 `D1 = records in S0.DA whose every member R satisfies final_chain_valid(R, C1), minus records whose exact set identity occurs in I`",
+                "RUB-1180 normative_decision 1-2",
+                "RUB-1201 (atomic all-or-none retained-DA image), RUB-1200 (relocation to package node)"
+              ],
+              "omission_mutations": [
+                "M16: one stale retained-DA record (exact included identity not removed) → RED",
+                "M18: TTL advance interleaved between prepare and publish visible as ttl_blocks_remaining delta → RED",
+                "M34: drop orphan_bytes → RED"
+              ],
+              "set_identity_tie_break": "when two retained records share da_id, order by the canonical bytes of set_identity = commit(txid,wtxid) || chunks(count then chunk_index,txid,wtxid in ascending chunk_index); this tie-break is required by C01-DACLEAN-001/MULTI_SET_SUCCESS and corrupt first/middle/last witness states"
+            },
+            "STANDARD_MEMPOOL_IMAGE_V1": {
+              "components": [
+                {
+                  "excluded": [
+                    "mempoolEntry.raw (bytes are bound by wtxid)",
+                    "mempoolEntry.token (client-private token layout)",
+                    "mempoolEntry.source (SPEC_GAP-IMG-002: is `source` a published semantic component or admission bookkeeping? spec 6.4.1 says every other standard-state field is preserved; source is not a policy/state component visible to readers — proposed EXCLUDED, needs word)"
+                  ],
+                  "measurement": "canonical digest over the sorted record array; JSON projection carries `record_count` and `records_digest`",
+                  "name": "records",
+                  "record_fields_in_order": [
+                    {
+                      "go_source": "mempoolEntry.txid (mempool.go:40)",
+                      "name": "txid",
+                      "type": "bytes32"
+                    },
+                    {
+                      "go_source": "mempoolEntry.wtxid (mempool.go:41)",
+                      "name": "wtxid",
+                      "type": "bytes32"
+                    },
+                    {
+                      "go_source": "mempoolEntry.admissionSeq (mempool.go:53)",
+                      "name": "admission_seq",
+                      "type": "u64"
+                    },
+                    {
+                      "go_source": "mempoolEntry.fee (mempool.go:50)",
+                      "name": "fee",
+                      "type": "u128"
+                    },
+                    {
+                      "go_source": "mempoolEntry.weight",
+                      "name": "weight",
+                      "type": "u64"
+                    },
+                    {
+                      "go_source": "mempoolEntry.size (int → u64)",
+                      "name": "size",
+                      "type": "u64"
+                    },
+                    {
+                      "go_source": "mempoolEntry.inputs",
+                      "name": "inputs",
+                      "type": "array<outpoint(txid bytes32, vout u32 big-endian)> in tx input order"
+                    }
+                  ],
+                  "type": "array<record> sorted by txid ascending raw bytes"
+                },
+                {
+                  "go_source": "Mempool.currentMinFeeRate (mempool.go:68)",
+                  "measurement": "direct value",
+                  "name": "current_mempool_min_fee_rate",
+                  "normative": "spec 6.4.1 fee-floor decay once per A1 row using fixed final standard bytes; standalone disconnect = zero decay events",
+                  "type": "u64"
+                },
+                {
+                  "go_source": "Mempool.lastAdmissionSeq (mempool.go:67)",
+                  "measurement": "direct value",
+                  "name": "last_admission_seq",
+                  "normative": "monotonic high-water preserved by M1",
+                  "type": "u64"
+                },
+                {
+                  "go_source": "Mempool.usedBytes (mempool.go:66)",
+                  "measurement": "direct value (recomputed accounting = sum of record sizes; relational check against records)",
+                  "name": "used_bytes",
+                  "type": "u64"
+                },
+                {
+                  "go_source": "len(Mempool.txs)",
+                  "measurement": "direct value",
+                  "name": "tx_count",
+                  "type": "u64"
+                }
+              ],
+              "digest_field_order": [
+                "records",
+                "current_mempool_min_fee_rate",
+                "last_admission_seq",
+                "used_bytes",
+                "tx_count"
+              ],
+              "direct_fields": [
+                "current_mempool_min_fee_rate",
+                "last_admission_seq",
+                "used_bytes",
+                "tx_count",
+                "record_count"
+              ],
+              "excluded_by_rule": [
+                "policy MempoolConfig, maxTxs/maxBytes/lowWaterBytes (configured constants; static authority C01-GO-CONSTANTS-001)",
+                "sigCache",
+                "admit*/evicted* counters (metrics)"
+              ],
+              "normative_source": [
+                "spec 6.4.1 `M1 is the complete standard mempool image, not only its record set. It preserves every other standard-state field and monotonic high-water except that derived indexes and accounting are recomputed exactly.` + fee-floor decay clause (L359-L365; A1 clause L367-L372)",
+                "RUB-1180 normative_decision 1"
+              ],
+              "omission_mutations": [
+                "M15: one stale record present in image while tip/UTXO/supply correct → RED",
+                "M34: drop current_mempool_min_fee_rate → RED (fee-floor decay class)",
+                "M15: last_admission_seq rewound → RED"
+              ]
+            }
+          },
+          "spec_gaps": [
+            {
+              "blocking": "no — a conformance-local encoding is legal because the digest is a harness measurement, not a wire/consensus value; controller may accept without a spec issue",
+              "component": "CHAIN_IMAGE_V1.cumulative_chainwork",
+              "id": "SPEC_GAP-IMG-001",
+              "proposal": "32-byte big-endian; conformance-local encoding documented in the v2 schema",
+              "question": "normative encoding width for cumulative chain work in a cross-client digest (Go *big.Int)"
+            },
+            {
+              "blocking": "no",
+              "component": "STANDARD_MEMPOOL_IMAGE_V1.records.source",
+              "id": "SPEC_GAP-IMG-002",
+              "proposal": "EXCLUDED (bookkeeping)",
+              "question": "is per-record admission `source` a published semantic component of M1?"
+            },
+            {
+              "blocking": "no",
+              "component": "RETAINED_DA_IMAGE_V1.sets.state",
+              "id": "SPEC_GAP-IMG-003",
+              "proposal": "freeze the §5 state list in the v2 schema as string tokens; digest encodes the token index in that frozen list",
+              "question": "closed enum order for DA set states must come from RUBIN_COMPACT_BLOCKS §5, not Go iota"
+            },
+            {
+              "blocking": "no",
+              "component": "RETAINED_DA_IMAGE_V1 receivedTime / nextReceivedTime",
+              "id": "SPEC_GAP-IMG-004",
+              "proposal": "EXCLUDED from digest; eviction order compared only through the explicit orphan/eviction effect rows",
+              "question": "is received-time (eviction) order a published semantic component or client-local?"
+            },
+            {
+              "blocking": "no",
+              "component": "OWNER_IMAGE_V1.tokenHighWater",
+              "id": "SPEC_GAP-IMG-005",
+              "proposal": "EXCLUDED; the 'no pre-crash token reappears' obligation is a forbidden/relational check",
+              "question": "token high-water as digest component vs relational negative check"
+            }
+          ],
+          "status": "components grounded in Go code at 3b1e4559 and spec 6.4.1; encodings adopted as conformance-local (IMG-001..005 dispositioned individually in spec_gaps.jsonl); RUB-1208 freezes them in the v2 schema"
+        }
+    },
+    "resolved_values": {
+      "description": "Digest and direct-field values, keyed by the exact composed alias `NAME@ROW_ID/CASE_ID:relation` (mechanic 9 full form). NAME is the image name for a `digest_alias` and the field name for a `direct_fields` entry; the `:relation` suffix is the owning image's relation. The generator and the drift checker both recompose the expected key from its position and compare it, so a substituted, cross-case or wrong-relation alias is rejected rather than merely resolved. Referenced set and key set are checked equal (no orphan entry).",
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/resolvedKey" },
+      "additionalProperties": { "$ref": "#/$defs/resolvedEntry" }
+    },
+    "rows": { "description": "Uniqueness of row_id is enforced by the generator; JSON Schema cannot express per-key uniqueness, so a schema-only consumer must not read schema-valid as corpus-valid.", "type": "array", "items": { "$ref": "#/$defs/row" } },
+    "summary_manifest": {
+      "description": "The RUB-1206 v8 canonical-applied summary manifest, frozen whole. Its SHA-256 is `_meta.closure_epoch.summary_manifest_hash` and the generator recomputes it from the authority source before emitting. `truth_relation` is the normative source for the summary arms below; each `assigned_mutations[].expected_red` names the compared pointer a validator reddens.",
+      "const": {
+          "assigned_mutations": [
+            {
+              "expected_red": "expected.canonical_applied_blocks[i].block_hash mismatch at the first differing index",
+              "id": "M13",
+              "mutation": "same count, reversed row order",
+              "owner": "RUB-1208 (authority/generator), RUB-926 and RUB-901 (comparator on actual)"
+            },
+            {
+              "expected_red": "row i block_hash pointer",
+              "id": "M14",
+              "instance_key": "M14/identity",
+              "mutation": "substitute one block_hash, same count",
+              "owner": "RUB-1208 / RUB-926 / RUB-901"
+            },
+            {
+              "expected_red": "later row complete_da_ids missing element",
+              "id": "M11",
+              "mutation": "cross-block occurrence collapsed by cleanup dedup (occurrence removed from a later row)",
+              "owner": "RUB-1208 (authority) / RUB-923 (Go observation) / RUB-926"
+            },
+            {
+              "expected_red": "result→truth→summary relation validator (RUB-1207 item 6 / RUB-1210 item 5)",
+              "id": "M03",
+              "mutation": "non-null summary under OLD/UNKNOWN/NOT_APPLICABLE truth (illegal relay-authorizing summary; registry M03 at /expected/canonical_applied_blocks of every null-summary case)",
+              "owner": "RUB-1207 / RUB-1210 / RUB-926 / RUB-901"
+            },
+            {
+              "expected_red": "absence/null rule pointer",
+              "id": "M12",
+              "mutation": "standalone disconnect summary `null` instead of `[]` (or vice versa)",
+              "owner": "RUB-1208 / RUB-926"
+            },
+            {
+              "expected_red": "row i complete_da_ids pointer",
+              "id": "M14",
+              "instance_key": "M14/occurrence",
+              "mutation": "drop or duplicate one da_id occurrence in a row (folded former M14b)",
+              "owner": "RUB-1208 / RUB-926 / RUB-901",
+              "variant": "occurrence"
+            }
+          ],
+          "normative_source": [
+            "spec RUBIN_MEMPOOL_POLICY.md 6.4.1: `A1 = newly canonical (block_hash, complete_da_ids) rows in ascending height; each row's IDs are ascending bytes and cross-block duplicates remain` (L355); `A1 has exactly one row for every newly canonical block, including a row whose complete_da_ids is empty ... sorted by ascending raw bytes. Cross-block occurrences remain in their respective rows. Global first-occurrence deduplication applies only to cleanup validation and MUST NOT remove an occurrence from A1` (L367-L372); `A1 is observable only afterward` (L423); `Only NEW exposes the planned summary. Every other truth class exposes an empty summary and no relay authority` (L455-L456); standalone disconnect = NEW with empty summary (L431-L432)",
+            "spec RUBIN_COMPACT_BLOCKS.md §19: canonical_applied_blocks = ordered block_hash projection of already-published A1; only NEW + non-empty summary authorizes relay",
+            "spec RUBIN_L1_P2P_AUX.md §5.1: summary read-only; P2P observes only after proven NEW publication",
+            "Go production shape: node.CanonicalAppliedBlock{Hash [32]byte, CompleteDAIDs [][32]byte}; ChainStateConnectSummary.CanonicalAppliedBlocks populated ONLY by the SyncEngine canonical-apply path in canonical order (chainstate.go:72-91); RUB-1195 one_invariant consumes ChainStateConnectSummary.CanonicalAppliedBlocks"
+          ],
+          "projection": {
+            "count_only_secondary": "`summary_rows` (R1) may remain as `expected.summary_row_count` for a consistency check; it is never primary evidence (RUB-1206 §G, RUB-1208 item 3)",
+            "field": "expected.canonical_applied_blocks",
+            "occurrence_identity": "(row index, da_id). `set_identity` (commit txid/wtxid + chunks) is NOT a public summary component (spec 6.4.1 uses set identity for cleanup selection only; RUB-1180 clause 2 `represented by da_id`); it lives in the DA cleanup classifier cases (RUB-1208 item 4)",
+            "row_fields_in_order": [
+              {
+                "name": "block_id",
+                "type": "string alias into the case's typed input fixture catalog (e.g. `B1`) — human/dispatch identity, never compared by itself"
+              },
+              {
+                "name": "block_hash",
+                "type": "bytes32 (hex in JSON) — the exact block hash; compared"
+              },
+              {
+                "name": "complete_da_ids",
+                "type": "array<bytes32> ascending raw bytes; may be empty; compared element-wise in order"
+              }
+            ],
+            "type": "array<row> in canonical (ascending height) order; `null` when the truth class exposes no summary (every non-NEW truth); `[]` exactly for a proven-NEW standalone disconnect (no new row); otherwise one row per newly canonical block including rows whose complete_da_ids is empty (DD-007)"
+          },
+          "relay_authority_relation": {
+            "authorized": "NEW AND rows non-empty AND not IBD (RUBIN_COMPACT_BLOCKS §19 step 1)",
+            "no_authority": "non-NEW, empty summary, unresolved/duplicate/absent summary, stored side-branch processing, IBD sample true",
+            "owner_row_frames": "for each unique post-handshake send owner × eligible row: exactly one ordinary single-vector MSG_BLOCK inv (P2P_AUX §4.6) in canonical order; row-local source exclusion only for (captured source owner, exact supplied hash); write failure stops only that owner's suffix"
+          },
+          "spec_gaps": [],
+          "status": "DRAFT_ROOT_2026-08-18 — grounded in spec 6.4.1 A1 rules, RUBIN_COMPACT_BLOCKS §19, RUBIN_L1_P2P_AUX §5.1 and Go node.CanonicalAppliedBlock (chainstate.go:72-75)",
+          "summary_manifest_version": "rubin-c01-summary-manifest-v1-draft",
+          "truth_relation": {
+            "NEW": "rows = every newly canonical block in canonical order (direct: exactly one; reorg: every branch block; bootstrap/genesis: the genesis row); standalone disconnect: [] (present, empty)",
+            "NOT_APPLICABLE": "null (STORED_NONCANONICAL / KNOWN_BLOCK_NOOP / LOCAL_STORE_ERROR(noncanonical) — side branch reports none)",
+            "OLD": "null (no summary, no relay authority)",
+            "UNKNOWN": "null (withheld with the images)"
+          }
+        }
+    }
   },
   "$defs": {
+    "resolvedKey": { "description": "Composed alias `NAME@ROW_ID/CASE_ID:relation`: the full anchored form, not a prefix. NAME is an image name or a direct-field name; the suffix is the owning image's relation. Position-exactness (NAME and ROW/CASE match the site that uses the alias) is a generator/drift-checker relation, since JSON Schema cannot compare a key to its referencing site.", "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*@C01(-[A-Z0-9]+)+-[0-9]{3}/[A-Z][A-Z0-9_]*:(new|old|unchanged|withheld)$", "not": { "pattern": "\\s" } },
+    "resolvedEntry": {
+      "description": "One typed digest or direct-field value. `type` is the closed 3-way discriminator and each tag constrains `value` to that tag's exact JSON representation and full domain.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": { "type": { "enum": ["bytes32_hex", "object", "u64"] }, "value": true },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "bytes32_hex" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/bytes32Lit" } } } },
+        { "if": { "properties": { "type": { "const": "u64" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/u64Lit" } } } },
+        { "if": { "properties": { "type": { "const": "object" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/closedObject" } } } }
+      ]
+    },
     "rowId": { "type": "string", "pattern": "^C01(-[A-Z0-9]+)+-[0-9]{3}$", "not": { "pattern": "\\s" } },
     "rowKind": { "enum": ["observation", "authority", "forbidden"], "description": "Acceptance semantics inherited from v1: only kind=observation rows are adapter-emitted and compared (their cases carry the machine input and expected output); authority and forbidden rows are static authority read directly and are never emitted or compared as records. An observation row may also carry an `authority` block for the static bounds and closed sets its cases are read against — that block is still never emitted or compared." },
     "alias": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "not": { "pattern": "\\s" } },
@@ -190,7 +701,7 @@
         "input": { "description": "Uniqueness of pointer within the case is generator-enforced, as for rows.", "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/inputPointer" } },
         "schedule_id": { "description": "Alias of the catalog `object` fixture naming the barriers and events of an interleaved stimulus, or null when the stimulus needs no interleaving. Never a sleep.", "oneOf": [{ "$ref": "#/$defs/alias" }, { "type": "null" }] },
         "expected": { "$ref": "#/$defs/expected" },
-        "obligation_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^OBL-[A-Z0-9-]+$", "not": { "pattern": "\\s" } } },
+        "obligation_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^OBL-[A-Z0-9]+(-[A-Z0-9]+)*$", "not": { "pattern": "\\s" } } },
         "sources": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
         "notes": { "$ref": "#/$defs/notes" },
         "release_requirements": { "description": "Optional per-case override where one case of the row requires a different delivery set; the row-level map is the default.", "$ref": "#/$defs/releaseRequirements" }
@@ -253,13 +764,16 @@
         { "if": { "properties": { "result": { "type": "null" } }, "required": ["result"] },
           "then": { "required": ["pipeline_reached"], "properties": { "pipeline_reached": { "const": false }, "rpc_projection": { "properties": { "class": { "enum": ["NOT_REACHED", "STARTUP_UNAVAILABLE_503"] } } } },
             "oneOf": [{ "required": ["wire_disposition"] }, { "required": ["recovery_outcome"] }],
-            "allOf": [{ "if": { "required": ["wire_disposition"] }, "then": { "description": "A frame the wire layer disposed of touches no image; the generator carries no state_image, so this relation is schema-only.", "properties": { "commit_truth": { "const": "OLD" }, "state_image": { "additionalProperties": { "properties": { "relation": { "const": "unchanged" } } } } } } },
-              { "if": { "required": ["recovery_outcome"] }, "then": { "description": "Startup either leaves every image as it found it or proves one new identity; schema-only for the same reason.", "properties": { "commit_truth": { "const": "NOT_APPLICABLE" }, "state_image": { "additionalProperties": { "properties": { "relation": { "enum": ["unchanged", "new"] } } } } } } }] },
+            "allOf": [{ "if": { "required": ["wire_disposition"] }, "then": { "description": "A frame the wire layer disposed of touches no image, so every image stays `unchanged`. Mirrored by the generator and by the drift gate, which read the same result nullity.", "properties": { "commit_truth": { "const": "OLD" }, "state_image": { "additionalProperties": { "properties": { "relation": { "const": "unchanged" } } } } } } },
+              { "if": { "required": ["recovery_outcome"] }, "then": { "description": "Startup either leaves every image as it found it or proves one new identity. Mirrored by the generator and by the drift gate.", "properties": { "commit_truth": { "const": "NOT_APPLICABLE" }, "state_image": { "additionalProperties": { "properties": { "relation": { "enum": ["unchanged", "new"] } } } } } } }] },
           "else": { "not": { "anyOf": [{ "required": ["pipeline_reached"] }, { "required": ["wire_disposition"] }, { "required": ["recovery_outcome"] }] } } },
         { "if": { "properties": { "canonical_counters": { "properties": { "accepted_delta": { "not": { "const": "0" } } }, "required": ["accepted_delta"] } }, "required": ["canonical_counters"] }, "then": { "properties": { "commit_truth": { "const": "NEW" } } } },
         { "if": { "properties": { "canonical_counters": { "properties": { "rejected_delta": { "const": "+1" } }, "required": ["rejected_delta"] } }, "required": ["canonical_counters"] }, "then": { "properties": { "commit_truth": { "const": "OLD" } } } },
         { "if": { "properties": { "commit_truth": { "const": "NEW" } }, "required": ["commit_truth"] }, "then": { "properties": { "canonical_applied_blocks": { "type": "array" } } }, "else": { "properties": { "canonical_applied_blocks": { "type": "null" } } } },
-        { "if": { "properties": { "commit_truth": { "const": "UNKNOWN" } }, "required": ["commit_truth"] }, "then": { "properties": { "state_image": { "additionalProperties": { "properties": { "relation": { "const": "withheld" } } } } } }, "else": { "properties": { "state_image": { "additionalProperties": { "properties": { "relation": { "enum": ["new", "old", "unchanged"] } } } } } } }
+        { "if": { "properties": { "commit_truth": { "const": "UNKNOWN" } }, "required": ["commit_truth"] }, "then": { "properties": { "state_image": { "additionalProperties": { "properties": { "relation": { "const": "withheld" } } } } } }, "else": { "properties": { "state_image": { "additionalProperties": { "properties": { "relation": { "enum": ["new", "old", "unchanged"] } } } } } } },
+        { "if": { "properties": { "commit_truth": { "const": "OLD" }, "result": { "type": "string" } }, "required": ["commit_truth", "result"] }, "then": { "description": "spec 6.4.1 requires an OLD outcome to preserve the exact old publication image (image_manifest.closure_correction_note), so every image relation is `old`. Mirrored by the generator and by the drift gate, both guarded on the same string result.", "properties": { "state_image": { "additionalProperties": { "properties": { "relation": { "const": "old" } } } } } } },
+        { "if": { "properties": { "commit_truth": { "const": "NOT_APPLICABLE" }, "result": { "type": "string" } }, "required": ["commit_truth", "result"] }, "then": { "description": "A classified NOT_APPLICABLE outcome publishes nothing (summary_manifest.truth_relation: `side branch reports none`), so no image moves.", "properties": { "state_image": { "additionalProperties": { "properties": { "relation": { "const": "unchanged" } } } } } } },
+        { "if": { "properties": { "commit_truth": { "const": "NEW" } }, "required": ["commit_truth"] }, "then": { "description": "A NEW publication moves the chain identity, and OWNER carries stable_tip, which the generator requires to equal the published CHAIN tip; the mempool and retained-DA images may or may not move, but neither may be `old` or `withheld`.", "properties": { "state_image": { "properties": { "CHAIN_IMAGE_V1": { "properties": { "relation": { "const": "new" } } }, "OWNER_IMAGE_V1": { "properties": { "relation": { "const": "new" } } }, "STANDARD_MEMPOOL_IMAGE_V1": { "properties": { "relation": { "enum": ["new", "unchanged"] } } }, "RETAINED_DA_IMAGE_V1": { "properties": { "relation": { "enum": ["new", "unchanged"] } } } } } } } }
       ]
     },
     "rpcProjection": {
@@ -281,7 +795,7 @@
       ]
     },
     "effect": {
-      "description": "One compared effect: the expected value, its type tag, whether the comparison is required, and the production observation that yields it. A missing or unknown compared field is a mismatch, never a wildcard. A `hash` value is a bytes32 hex literal or an alias resolving in `fixtures` — the same rule as a summary row's block_hash, since a generator-computed digest is carried by alias. A `token` value may be the empty string: the empty normalized orphan source-quota key is a real machine value with no other encoding.",
+      "description": "One compared effect: the expected value, its type tag, whether the comparison is required, and the production observation that yields it. A missing or unknown compared field is a mismatch, never a wildcard. A `hash` value is a bytes32 hex literal: no effect value is an alias in this revision and no validator resolves one, so the alias form is not admitted here. A `token` value may be the empty string: the empty normalized orphan source-quota key is a real machine value with no other encoding.",
       "type": "object",
       "additionalProperties": false,
       "required": ["value", "type", "required", "observer"],
@@ -291,7 +805,7 @@
       },
       "allOf": [
         { "if": { "properties": { "type": { "const": "token" } }, "required": ["type"] }, "then": { "properties": { "value": { "oneOf": [{ "$ref": "#/$defs/machineToken" }, { "const": "" }] } } } },
-        { "if": { "properties": { "type": { "const": "hash" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/bytes32OrAlias" } } } },
+        { "if": { "properties": { "type": { "const": "hash" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/bytes32Lit" } } } },
         { "if": { "properties": { "type": { "const": "u64" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 } } } },
         { "if": { "properties": { "type": { "const": "array" } }, "required": ["type"] }, "then": { "properties": { "value": { "type": "array", "items": { "$ref": "#/$defs/closedValue" } } } } },
         { "if": { "properties": { "type": { "const": "object" } }, "required": ["type"] }, "then": { "properties": { "value": { "$ref": "#/$defs/closedObject" } } } },
@@ -304,8 +818,10 @@
       "additionalProperties": false,
       "required": ["CHAIN_IMAGE_V1", "STANDARD_MEMPOOL_IMAGE_V1", "RETAINED_DA_IMAGE_V1", "OWNER_IMAGE_V1"],
       "properties": {
-        "CHAIN_IMAGE_V1": { "$ref": "#/$defs/imageProjection" }, "STANDARD_MEMPOOL_IMAGE_V1": { "$ref": "#/$defs/imageProjection" }, "RETAINED_DA_IMAGE_V1": { "$ref": "#/$defs/imageProjection" },
-        "OWNER_IMAGE_V1": { "$ref": "#/$defs/imageProjection" }
+        "CHAIN_IMAGE_V1": { "allOf": [{ "$ref": "#/$defs/imageProjection" }, { "properties": { "direct_fields": { "required": ["tip_hash", "height", "utxo_count"], "propertyNames": { "enum": ["tip_hash", "height", "utxo_count"] } } } }] },
+        "STANDARD_MEMPOOL_IMAGE_V1": { "allOf": [{ "$ref": "#/$defs/imageProjection" }, { "properties": { "direct_fields": { "required": ["current_mempool_min_fee_rate", "last_admission_seq", "used_bytes", "tx_count", "record_count"], "propertyNames": { "enum": ["current_mempool_min_fee_rate", "last_admission_seq", "used_bytes", "tx_count", "record_count"] } } } }] },
+        "RETAINED_DA_IMAGE_V1": { "allOf": [{ "$ref": "#/$defs/imageProjection" }, { "properties": { "direct_fields": { "required": ["set_count", "orphan_bytes", "pinned_payload_bytes"], "propertyNames": { "enum": ["set_count", "orphan_bytes", "pinned_payload_bytes"] } } } }] },
+        "OWNER_IMAGE_V1": { "allOf": [{ "$ref": "#/$defs/imageProjection" }, { "properties": { "direct_fields": { "required": ["claim_count", "stable_tip"], "propertyNames": { "enum": ["claim_count", "stable_tip"] } } } }] }
       }
     },
     "imageProjection": {
@@ -313,7 +829,7 @@
       "additionalProperties": false,
       "required": ["relation", "digest_alias", "direct_fields"],
       "properties": {
-        "relation": { "enum": ["new", "old", "withheld", "unchanged"] }, "digest_alias": { "description": "Generator-named machine token, not a catalog key; RUB-1208 lands the resolver that checks uniqueness and resolution.", "$ref": "#/$defs/machineToken" }, "direct_fields": { "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/mapKey" }, "additionalProperties": { "$ref": "#/$defs/machineToken" } }
+        "relation": { "enum": ["new", "old", "withheld", "unchanged"] }, "digest_alias": { "description": "The composed alias of this image’s digest in top-level `resolved_values`. Existence and bytes32_hex type are enforced by the generator and mirrored by the drift gate; both also require the alias to equal the exact composed form for this position.", "$ref": "#/$defs/resolvedKey" }, "direct_fields": { "description": "Per-image direct fields. The key set is pinned per image by the state_image arms, taken from image_manifest.images.<IMAGE>.direct_fields; each value is a composed alias resolving in `resolved_values` with the field’s declared type.", "type": "object", "minProperties": 1, "propertyNames": { "$ref": "#/$defs/mapKey" }, "additionalProperties": { "$ref": "#/$defs/resolvedKey" } }
       }
     },
     "summaryRow": {
@@ -321,7 +837,7 @@
       "additionalProperties": false,
       "required": ["block_id", "block_hash", "complete_da_ids"],
       "properties": {
-        "block_id": { "$ref": "#/$defs/alias" }, "block_hash": { "$ref": "#/$defs/bytes32OrAlias" }, "complete_da_ids": { "description": "Ascending raw bytes; may be empty. Order and cross-block duplicates are comparator-enforced (RUB-926 / RUB-901), not by this schema.", "type": "array", "items": { "$ref": "#/$defs/bytes32OrAlias" } }
+        "block_id": { "$ref": "#/$defs/alias" }, "block_hash": { "description": "Catalog alias only, never an inline literal: the generator resolves it in `fixtures` and requires it to equal fixtures[block_id].value.block_hash, so a same-count substituted block_hash is rejected (summary_manifest M14/identity).", "$ref": "#/$defs/alias" }, "complete_da_ids": { "description": "Catalog aliases of every complete DA-set occurrence in this block, strictly ascending by raw da_id bytes and unique within the row. Where the case carries /input/block_included_set_identities the list is derived from it and compared element-wise, so a dropped or duplicated occurrence is rejected (summary_manifest M14/occurrence).", "type": "array", "items": { "$ref": "#/$defs/alias" } }
       }
     }
   }

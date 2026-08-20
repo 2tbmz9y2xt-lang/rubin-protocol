@@ -173,14 +173,52 @@ inventory and the orphan-pool result classification — duplicate / oversize / s
 Rust adapter and the RUB-901 comparator, none of which exists yet, so no canonical-publication slice
 may claim it as a passing gate.
 
-### The dormant C01-R2 successor pair (RUB-1207)
+### The BUILDING C01-R2 successor pair (RUB-1207 / RUB-1208)
 
 `conformance/fixtures/protocol/canonical_pipeline_v2.json` + `conformance/schemas/cv-canonical-pipeline-v2.json`
 (schema version 2). Status: **BUILDING** — not an authority, and no C02/C02A/C03/C04 consumer may bind it.
 The v1 pair above stays the inert authority and a byte-frozen read-only parent until RUB-1204 activates v2
-and deletes it in the same PR. `_meta.closure_epoch` pins the RUB-1206 design closure; `row_registry` freezes
-the 79 `row_id -> kind` identities and migration status is derived from `rows`, empty here with `fixtures`.
-The schema defines the row and case shape; RUB-1208..RUB-1212 migrate rows and RUB-1204 completes.
+and deletes it in the same PR. `_meta.closure_epoch` pins the corrected RUB-1206 closure epoch v8 and
+`row_registry` freezes the 79 `row_id -> kind` identities. RUB-1208 migrates exactly 8 publication/image
+rows with 24 cases, including the 12-case DA cleanup classifier and the ordered canonical-applied summaries;
+the remaining registered rows stay unmigrated for RUB-1209..RUB-1212, and RUB-1204 completes the revision.
+
+The artifact is generated, never hand-edited. Its single authoring source is
+`clients/go/cmd/gen-conformance-fixtures/canonical_pipeline_v2_authority.json`, which the generator embeds
+and pins by SHA-256 on both sides (`cp2AuthoritySourceSHA256` and `_meta.authority_source_sha256`); the
+frozen `image_manifest` and `summary_manifest` are copied from it into the artifact and cross-pinned as
+schema `const`s, so the authority file is the one place either is edited. Regenerate in place with
+`scripts/dev-env.sh -- bash -lc 'cd clients/go && go run ./cmd/gen-conformance-fixtures'`.
+
+What actually executes, and where:
+
+| checked | validator | test |
+| --- | --- | --- |
+| schema validity, `row_registry` as an exact 79-entry map, closure-epoch and parent pins as `const`, and one single-dimension rejection per assigned mutation | `conformance/schemas/cv-canonical-pipeline-v2.json` | `CanonicalPipelineV2SchemaTests` and `CanonicalPipelineV2RUB1208Tests` in `tools/tests/test_check_conformance_fixtures_drift.py` |
+| row/case census (8 rows, 24 cases), obligation and exact current case-to-sorted-sources receipts, and the image/summary/complete-DA-identity relations | `validate_canonical_pipeline_v2_semantics` in `tools/check_conformance_fixtures_drift.py` | `test_semantic_gate_accepts_the_committed_artifact`, `test_obligation_receipts_reject_a_census_preserving_edit` |
+| the same image/summary/complete-DA-identity and selected-fault relations on the generating side (the obligation and sources receipts are checker-side by design), plus the authority byte pin and manifest hashes | `cp2ValidateR1208Payload` / `cp2ValidateR1208Expected` in `clients/go/cmd/gen-conformance-fixtures/runtime.go` | `TestCanonicalPipelineV2R1208ValidatorFailsClosed`, `TestCanonicalPipelineV2AuthorityPinIsExact`, `TestCanonicalPipelineV2DirectFieldsMatchTheManifest` |
+| the shipped single-dimension hostile controls (substituted `block_hash`, dropped/duplicated DA occurrence, stale CHAIN tip, stale OWNER `stable_tip`, renamed/moved obligation id, and the rest) | `assert_canonical_pipeline_v2_negative_controls` in `tools/check_conformance_fixtures_drift.py`, run by the drift gate | `test_shipped_semantic_negative_controls_all_redden` |
+| generator byte identity | the conformance fixture drift gate above | `TestCanonicalPipelineV2CorpusIsByteDeterministic` |
+| structural closure: complete included-set identities obey the full commit/chunk grammar; each flat occurrence spelling preserves multiplicity before set normalization; OWNER_TOKEN binds the exact claim txid to retained DA_SET_1; encoded summary heights are consecutive; scalar u64 count pointers accept exact literals or case-local `u64` fixture aliases; Go closes row/case keys while admitting schema-legal row `notes`/`authority` | Go/Python v2 validators | mirrored controls |
+
+These structural controls do not activate named-case truth, effects, prestate semantics, consumer readiness, or Go/Rust runtime conformance; RUB-1204 owns those obligations. The control names below are the drift-checker
+labels in `assert_canonical_pipeline_v2_negative_controls` (`test_shipped_semantic_negative_controls_all_redden`);
+the generator runs its twin of each in `TestCanonicalPipelineV2R1208ValidatorFailsClosed`.
+
+| binding | validator (generator / checker) | executed controls |
+| --- | --- | --- |
+| the published summary blocks are the blocks the case's own inputs state: the pre-stored side branch in canonical order, the block a genesis pack or stimulus names, or the equal-work candidate the stated `/input/candidate_hash_relation` selects — that relation itself re-derived from the two candidates' hash fixtures, and the equal work the tie-break presupposes re-derived from their `cumulative_chainwork`. The published branch tip must in turn win fork choice against the stated prestate tip (greater chainwork, or equal chainwork with a lower tip hash — the `shouldSwitchToBranch` comparison block in `node/sync_reorg.go`) | `cp2StatedBranchBlocks` and `cp2ValidateR1208Summary` / `_stated_branch_blocks` and the summary walk | `summary block substituted for another stated block`, `genesis summary block substituted`, `equal-work winner substituted`, `equal-work hash relation contradicts the candidates`, `equal-work candidates carry unequal work`, `branch tip does not out-work the prestate tip` |
+| the published CHAIN tip is the last canonical-applied block; the entry below the disconnected tip on a standalone disconnect; the stated prestate chain tip wherever the published CHAIN image is not `new` — and all three CHAIN direct fields (`tip_hash`, `height`, `utxo_count`) are read from that one tip block fixture, so a UTXO count belonging to another block is a substituted identity | `cp2ValidateChainTip` with `cp2PrestateChainBlock` / the same relations with `_prestate_chain_block` | `stale CHAIN tip with a consistent owner`, `post-disconnect tip rolled to genesis`, `non-NEW chain tip rolled back one block`, `chain utxo_count off the tip block` |
+| an `unchanged` or `old` image republishes the stated prestate, so seven counters come from it rather than from the author: `record_count`, `tx_count`, `used_bytes`, `set_count`, `claim_count` and `pinned_payload_bytes` as exact equalities — the last one summed over stated `COMPLETE_SET` sets only, every other set state contributing zero per RUBIN_COMPACT_BLOCKS §5.1 — plus `last_admission_seq` as a LOWER BOUND, because the manifest makes it a monotonic high-water whose named mutation (M15) is a rewind: an evicted higher seq legally leaves the published watermark above the stated maximum. The two direct fields derived from no stated input are `orphan_bytes` (wireBytes accounting the manifest excludes from the image by rule) and `current_mempool_min_fee_rate` (independent standard state the snapshot carries beside its entries) | `cp2DerivedCounts` / `_derived_counts` | `stale standard used_bytes`, `stale retained set_count`, `stale owner claim_count`, `stale retained pinned_payload_bytes`, `rewound last_admission_seq`, `prestate sizes overflow the used-bytes total` |
+| where a case states grouped `/input/block_included_set_identities`, each group binds exactly one summary row and every summary row is bound by exactly one group | `cp2IncludedSetDAIDs` / `_included_set_da_ids` | `one grouped included-set entry omitted`, `two grouped keys bind one summary row`, `grouped key matches no summary row`, `grouped key matches two summary rows` |
+
+Two conventions the shape does not state by itself. `release_requirements[go|rust]` is a set of
+(issue, surface) blocking obligations, not a set of issues: one issue legitimately appears more than once
+with different surfaces. Where a case carries its own block, that block is the case's complete blocking set
+and replaces the row-level default, exactly as `$defs/case.release_requirements` in the schema states. `sources[]` is pass-through authority, not dynamically resolved: the schema owns its shape and grammar, while the Python checker pins the exact root-verified current case-to-sorted-sources receipt.
+The schema owns pass-through metadata value grammar and required schema shape, including `obligation_ids`, `release_requirements`, `notes` and `authority`; Go mirrors only the allowed row/case key set and unknown/retired-key exclusions. Enforcement of the remaining `effects` relations
+(`connected_block_decay_events`, `relay_authority`, `intermediate_tip_rows`, `external_visibility`, and a
+closed effect-key vocabulary) is deferred to RUB-1204 with the rest of the deferred closure work.
 
 ## Fuzz crash promotion (manual-only)
 

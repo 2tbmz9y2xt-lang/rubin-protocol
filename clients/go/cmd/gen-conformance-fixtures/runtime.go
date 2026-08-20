@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/sha3"
 	"embed"
 	"encoding/binary"
@@ -38,7 +39,6 @@ import (
 // (reached in this generator through the conformanceFixtureKeypair.SignDigest32
 // override), it makes generator output byte-reproducible from the same
 // origin/main input.
-//
 // These DER blobs are conformance-only test material. They are NOT
 // production keys, NOT used by the node, wallet, or any signing-rpc
 // path. The selection mapping (label -> committed DER) is the
@@ -343,8 +343,6 @@ func runGeneratorCLIWithArgs(args []string) {
 	// architecture authority, never measured from a node production path.
 	mustWriteCanonicalPipelineCorpus(remapWritePath(filepath.Join(repoRoot, "conformance", "fixtures", "protocol", "canonical_pipeline_v1.json")))
 
-	// RUB-1207 / C01-R2: the dormant BUILDING successor pair. Same provenance
-	// rule as v1; it carries identity and shape only, never a migrated row.
 	mustWriteCanonicalPipelineV2Corpus(remapWritePath(filepath.Join(repoRoot, "conformance", "fixtures", "protocol", "canonical_pipeline_v2.json")))
 
 	fmt.Println("ok: updated fixtures with real ML-DSA signatures")
@@ -2408,14 +2406,7 @@ func mustWriteCanonicalPipelineCorpus(path string) {
 }
 
 // ---------------------------------------------------------------------------
-// RUB-1207 / C01-R2 — dormant BUILDING successor of the v1 pair.
 //
-// This revision carries IDENTITY and SHAPE only: the closure epoch that binds
-// it, the frozen 79-entry row registry, the closed token domains, and the
-// validators RUB-1208..RUB-1212 land their migrated rows against. `rows` is
-// empty by contract; the byte-frozen v1 pair stays the inert authority until
-// RUB-1204 activates v2. No expected value is computed by calling a Go or Rust
-// node production path, and no row carries `pending_owner` or `detail`.
 // ---------------------------------------------------------------------------
 
 const (
@@ -2431,16 +2422,19 @@ const (
 	// at claim). Every value below is mirrored as a schema `const`, so a drift
 	// on either side fails generation or validation rather than shipping a
 	// revision bound to a manifest nobody closed.
-	cp2ClosureManifestVersion = "rubin-c01-design-closure-v3"
-	cp2ManifestRootSHA256     = "da48730ad29963d94499a6fce1b5c58fe39e9a3779e643cbfcd8148b9b2c98b7"
-	cp2ObligationSetHash      = "4af7520a185bfa732ece69f5a6c12f4d012917b9c6fd1d8f42b98195284f59b0"
-	cp2RowCaseDesignHash      = "8bcfd02557f63893a6dc43690e8091dea10c02bfd3af7c0a9639193ff9ef4221"
-	cp2StageOwnerRelationHash = "4513e667a03dabca78e7369e989676ea5ab3d75d59a817493d84fe968b3a8518"
-	cp2MutationAssignmentHash = "fcd8d3dab8ec9a5e6d233e8539f31751e6446118d519f1f14f581b77cf9f84fc"
-	cp2ImageManifestHash      = "e014000b71102e54be70af0dc756f8930c57573f7346db05935964053230f928"
-	cp2SummaryManifestHash    = "39e39d94593d434e7051a3f77ca94d3dd31a5a8d65a3f12a764e29a5fde041dd"
-	cp2RelationSnapshotHash   = "3e7db40fa6917b5a7d61ab113a74f7107f8f166080393e1c9789dbd927b24edb"
-	cp2ClosureStatus          = "building"
+	cp2ClosureManifestVersion       = "rubin-c01-design-closure-v8"
+	cp2ManifestRootSHA256           = "e9b4bbfa09b4cf939973b229b59105f8996282b6fc2ffaa094362e76948bbc89"
+	cp2ObligationSetHash            = "4af7520a185bfa732ece69f5a6c12f4d012917b9c6fd1d8f42b98195284f59b0"
+	cp2RowCaseDesignHash            = "8b70ba6d504a7e7ed92bf7bd0b769cb9eeb48356bdf356247520916629cc1216"
+	cp2StageOwnerRelationHash       = "4513e667a03dabca78e7369e989676ea5ab3d75d59a817493d84fe968b3a8518"
+	cp2MutationAssignmentHash       = "94f846a9b454e019a2b1c7b833c75862151d1e66f91216e107b2478d0f0cb4a5"
+	cp2ImageManifestHash            = "08fbabf558f3df10e89bd6160804db8efc814378140ae4514717952c7d913116"
+	cp2SummaryManifestHash          = "39e39d94593d434e7051a3f77ca94d3dd31a5a8d65a3f12a764e29a5fde041dd"
+	cp2RelationSnapshotHash         = "3e7db40fa6917b5a7d61ab113a74f7107f8f166080393e1c9789dbd927b24edb"
+	cp2InputSchemaDesignHash        = "468b2b5401e12915b9bcdd76cb2714eda837fcd9401324ac7677770bb7069f57"
+	cp2ExpectedProjectionDesignHash = "b1e539c3cb7155c5821b5788c4de9aea40cf706fb9faf4c44af7e4ae21586d8c"
+	cp2AuthoritySourceSHA256        = "d9f3a4ba81a2e8c115ab559990da26e81cefdbe8ba4a92d81010e81dc94ec1e3"
+	cp2ClosureStatus                = "building"
 
 	// Byte-frozen R1 parent identity. RUB-1204 activates v2 and deletes the
 	// parent in one PR; until then v1 is reachable by these pins only.
@@ -2450,6 +2444,9 @@ const (
 	cp2ParentSchemaSHA   = "c962f5434d373ac5268527cc82ef8eb68fd45ddac50c849da32b3f8ef87cdca7"
 	cp2GoverningSpecOID  = "c14b010024ce633e1027bf891af3c49741db544a"
 )
+
+//go:embed canonical_pipeline_v2_authority.json
+var cp2AuthoritySource []byte
 
 // cp2RPCClasses is the closed RPC projection class enum (RUB-1206 DD-009). The
 // class is authored, not computed: one (phase, http, commit_state, mined) tuple
@@ -2498,9 +2495,17 @@ var (
 	cp2Provenances = []string{"normative_boundary", "witness_fixture", "deterministic_schedule_control", "configured_bound"}
 )
 
+var cp2StatedPointers = []string{
+	"/input/block_complete_da_ids_in_transaction_order", "/input/block_complete_da_set_count", "/input/block_included_set_identities", "/input/block_includes", "/input/candidate_a", "/input/candidate_b", "/input/candidate_hash_relation", "/input/candidate_work_relation",
+	"/input/chain_id", "/input/connect_count", "/input/cross_block_da_id", "/input/datadir_state", "/input/delivery_entrypoint", "/input/detached_branch_only_output_spender", "/input/disconnect_command", "/input/final_chain_invalid_members", "/input/genesis_pack",
+	"/input/owner_token_fault", "/input/prestate_canonical_chain", "/input/prestate_owner_claims", "/input/prestate_retained_da_sets", "/input/prestate_standard_min_fee_rate_raised_above_default", "/input/prestate_standard_records", "/input/prestored_side_branch",
+	"/input/retained_record_fault", "/input/schedule_arms", "/input/selected_record_plan_order", "/input/stimulus_block", "/input/stimulus_block_parent_relation", "/input/stimulus_block_work_relation",
+}
+
 var (
 	cp2UpperTokenRE          = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`) // one grammar for a case id and a fixtures alias
 	cp2TokenRE               = regexp.MustCompile(`^[A-Za-z0-9_@/:()|+.-]+$`)
+	cp2ResolvedKeyRE         = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*@C01(-[A-Z0-9]+)+-[0-9]{3}/[A-Z][A-Z0-9_]*:(new|old|unchanged|withheld)$`)
 	cp2BytesRE, cp2HexRE     = regexp.MustCompile(`^([0-9a-f]{2})*$`), regexp.MustCompile(`^[0-9a-f]{64}$`)
 	cp2SnakeRE               = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 	cp2PointerRE, cp2IssueRE = regexp.MustCompile(`^/input/[a-z][a-z0-9_]*$`), regexp.MustCompile(`^RUB-[1-9][0-9]*$`)
@@ -2651,6 +2656,9 @@ func cp2InputOK(in cp2Input) error {
 	if !cp2ValueOK(in.Type, cp2JSONImage(in.ValueOrAlias), true) {
 		return fmt.Errorf("input %s value is not a %s literal or alias", in.Pointer, in.Type)
 	}
+	if aliases := cp2AliasesOf(in); len(cp2SortedUnique(aliases)) != len(aliases) {
+		return fmt.Errorf("input %s names an alias more than once", in.Pointer)
+	}
 	return nil
 }
 
@@ -2761,6 +2769,26 @@ type cp2Row struct {
 	Cases []cp2Case `json:"cases,omitempty"`
 }
 
+type cp2StrictCase struct {
+	CaseID              string          `json:"case_id"`
+	ScheduleID          *string         `json:"schedule_id"`
+	Input               json.RawMessage `json:"input"`
+	Expected            json.RawMessage `json:"expected"`
+	Notes               json.RawMessage `json:"notes"`
+	Obligations         json.RawMessage `json:"obligation_ids"`
+	ReleaseRequirements json.RawMessage `json:"release_requirements"`
+	Sources             json.RawMessage `json:"sources"`
+}
+
+type cp2StrictRow struct {
+	RowID               string          `json:"row_id"`
+	Kind                string          `json:"kind"`
+	Cases               []cp2StrictCase `json:"cases"`
+	ReleaseRequirements json.RawMessage `json:"release_requirements"`
+	Notes               json.RawMessage `json:"notes"`
+	Authority           json.RawMessage `json:"authority"`
+}
+
 type cp2Artifact struct {
 	Artifact              string                `json:"artifact"`
 	SchemaVersion         int                   `json:"schema_version"`
@@ -2774,7 +2802,10 @@ type cp2Artifact struct {
 	RecoveryOutcomeValues []string              `json:"recovery_outcome_values"`
 	RowRegistry           map[string]string     `json:"row_registry"`
 	Fixtures              map[string]cp2Fixture `json:"fixtures"`
-	Rows                  []cp2Row              `json:"rows"`
+	ImageManifest         cpMap                 `json:"image_manifest"`
+	ResolvedValues        map[string]cp2Fixture `json:"resolved_values"`
+	Rows                  []any                 `json:"rows"`
+	SummaryManifest       cpMap                 `json:"summary_manifest"`
 }
 
 // cp2RowRegistry is the frozen C01-R2 identity map (row_id -> kind): the 62
@@ -2995,13 +3026,7 @@ func cp2ValidateCases(rowID string, cases []cp2Case) error {
 	return nil
 }
 
-// cp2ValidateRows gates the fields the Go structs carry: registry identity, the
-// row-kind exclusions, row and case ids, the input vocabulary and pointers, the
-// schedule alias, and the result/truth/RPC relations; cp2ValidateAliases and
-// cp2ValidateFixtures cover the catalog. The schema-only fields
-// (release_requirements, obligation_ids, sources, counters, effects, images,
-// summary) are gated by validating the committed artifact against the committed
-// schema, which stays the complete gate until RUB-1208 lands their values.
+// cp2ValidateRows owns typed row/case identity, inputs, schedules, and result relations; the schema owns pass-through metadata values.
 func cp2ValidateRows(rows []cp2Row, registry map[string]string) error {
 	if len(registry) != cp2RegistrySize {
 		return fmt.Errorf("row registry: %d identities, want the frozen %d", len(registry), cp2RegistrySize)
@@ -3029,26 +3054,29 @@ func cp2ValidateRows(rows []cp2Row, registry map[string]string) error {
 // R1 parent pins, the governing spec OID and the bound closure epoch.
 func cp2Meta() cpMap {
 	return cpMap{
-		"generated_by":           "clients/go/cmd/gen-conformance-fixtures",
-		"warning":                "MACHINE-GENERATED FILE. Do not edit manually.",
-		"schema_version":         cp2SchemaVer,
-		"corpus_revision":        cp2CorpusRev,
-		"parent_r1_source_oid":   cp2ParentSourceOID,
-		"parent_r1_merge_oid":    cp2ParentMergeOID,
-		"parent_artifact_sha256": cp2ParentArtifactSHA,
-		"parent_schema_sha256":   cp2ParentSchemaSHA,
-		"governing_spec_oid":     cp2GoverningSpecOID,
+		"generated_by":            "clients/go/cmd/gen-conformance-fixtures",
+		"warning":                 "MACHINE-GENERATED FILE. Do not edit manually.",
+		"schema_version":          cp2SchemaVer,
+		"corpus_revision":         cp2CorpusRev,
+		"parent_r1_source_oid":    cp2ParentSourceOID,
+		"parent_r1_merge_oid":     cp2ParentMergeOID,
+		"parent_artifact_sha256":  cp2ParentArtifactSHA,
+		"parent_schema_sha256":    cp2ParentSchemaSHA,
+		"governing_spec_oid":      cp2GoverningSpecOID,
+		"authority_source_sha256": cp2AuthoritySourceSHA256,
 		"closure_epoch": cpMap{
-			"closure_manifest_version":  cp2ClosureManifestVersion,
-			"manifest_root_sha256":      cp2ManifestRootSHA256,
-			"obligation_set_hash":       cp2ObligationSetHash,
-			"row_case_design_hash":      cp2RowCaseDesignHash,
-			"stage_owner_relation_hash": cp2StageOwnerRelationHash,
-			"mutation_assignment_hash":  cp2MutationAssignmentHash,
-			"image_manifest_hash":       cp2ImageManifestHash,
-			"summary_manifest_hash":     cp2SummaryManifestHash,
-			"relation_snapshot_hash":    cp2RelationSnapshotHash,
-			"status":                    cp2ClosureStatus,
+			"closure_manifest_version":        cp2ClosureManifestVersion,
+			"manifest_root_sha256":            cp2ManifestRootSHA256,
+			"obligation_set_hash":             cp2ObligationSetHash,
+			"row_case_design_hash":            cp2RowCaseDesignHash,
+			"stage_owner_relation_hash":       cp2StageOwnerRelationHash,
+			"mutation_assignment_hash":        cp2MutationAssignmentHash,
+			"image_manifest_hash":             cp2ImageManifestHash,
+			"summary_manifest_hash":           cp2SummaryManifestHash,
+			"relation_snapshot_hash":          cp2RelationSnapshotHash,
+			"input_schema_design_hash":        cp2InputSchemaDesignHash,
+			"expected_projection_design_hash": cp2ExpectedProjectionDesignHash,
+			"status":                          cp2ClosureStatus,
 		},
 	}
 }
@@ -3057,13 +3085,13 @@ func cp2Meta() cpMap {
 // architecture authority, never measured from a node production path.
 func cp2Authority() cpMap {
 	return cpMap{
-		"issue":                "RUB-1207",
+		"issue":                "RUB-1208",
 		"architecture_parent":  "RUB-882 as superseded by RUB-1180; row and case design closed by RUB-1206",
 		"normative_spec_ref":   "2tbmz9y2xt-lang/rubin-spec@" + cp2GoverningSpecOID,
-		"baseline_ref":         "2tbmz9y2xt-lang/rubin-protocol@" + cp2ParentMergeOID,
+		"baseline_ref":         "2tbmz9y2xt-lang/rubin-protocol@f972c0262c9762ce92e4c51263cd35b43d47df34",
 		"expected_row_origin":  "authored architecture authority; no Go or Rust node production path is called to compute an expected value",
 		"executors":            "none while status is building: no C02/C02A/C03/C04 consumer may bind this revision",
-		"status":               "BUILDING C01-R2 authority — not active; conformance/fixtures/protocol/canonical_pipeline_v1.json remains the inert authority. rows is empty: RUB-1208..RUB-1212 migrate the registered rows and RUB-1204 completes the revision",
+		"status":               "BUILDING C01-R2 authority — RUB-1208 migrates 8 registered publication/summary/DA-cleanup rows and 24 cases; remaining rows land in RUB-1209..RUB-1212 and RUB-1204 completes the revision",
 		"consume_freeze_point": "POST-RUB-911 target: the frozen P2P effect order carries no canonical-DA consume step",
 	}
 }
@@ -3098,21 +3126,17 @@ func cp2AppendAlias(out []string, v any) []string {
 // cp2ValidateAliases resolves every alias a stimulus pointer names against the
 // top-level fixtures catalog. JSON Schema pins an alias's grammar but cannot
 // express its EXISTENCE, so this is the only gate that catches a dangling one.
-// The catalog is empty until RUB-1208 populates it, so an alias-carrying row is
-// rejected until then — the intended fail-closed order.
-// ponytail: input side only; the expected struct carries no effects or summary
-// yet, so RUB-1208 extends this walk when it lands those alias positions.
-func cp2ValidateAliases(rows []cp2Row, fixtures map[string]cp2Fixture) error {
+func cp2ValidateAliases(rows []cp2Row, fixtures map[string]cp2Fixture, named map[string]bool) error {
 	for _, row := range rows {
 		for _, c := range row.Cases {
 			for _, in := range c.Input {
-				if err := cp2ResolveAliases(row.RowID+"/"+c.CaseID, in, fixtures); err != nil {
+				if err := cp2ResolveAliases(row.RowID+"/"+c.CaseID, in, fixtures, named); err != nil {
 					return err
 				}
 			}
 			if c.ScheduleID != nil {
 				sched := cp2Input{Pointer: "/schedule_id", Type: "object", ValueOrAlias: *c.ScheduleID}
-				if err := cp2ResolveAliases(row.RowID+"/"+c.CaseID, sched, fixtures); err != nil {
+				if err := cp2ResolveAliases(row.RowID+"/"+c.CaseID, sched, fixtures, named); err != nil {
 					return err
 				}
 			}
@@ -3121,12 +3145,11 @@ func cp2ValidateAliases(rows []cp2Row, fixtures map[string]cp2Fixture) error {
 	return nil
 }
 
-// cp2ResolveAliases requires every alias one pointer names to exist in the
-// catalog AND to carry the fixture type the pointer tag declares; an `alias`
-// tag accepts any catalog type, since the tag names no literal form itself.
-func cp2ResolveAliases(where string, in cp2Input, fixtures map[string]cp2Fixture) error {
+// cp2ResolveAliases requires every input or schedule alias to exist with its declared type and case namespace.
+func cp2ResolveAliases(where string, in cp2Input, fixtures map[string]cp2Fixture, named map[string]bool) error {
 	want := strings.TrimSuffix(strings.TrimPrefix(in.Type, "array<"), ">")
 	for _, alias := range cp2AliasesOf(in) {
+		named[alias] = true
 		fixture, ok := fixtures[alias]
 		if !ok {
 			return fmt.Errorf("case %s: input %s names alias %q, absent from the fixtures catalog", where, in.Pointer, alias)
@@ -3134,37 +3157,1241 @@ func cp2ResolveAliases(where string, in cp2Input, fixtures map[string]cp2Fixture
 		if want != "alias" && fixture.Type != want {
 			return fmt.Errorf("case %s: input %s alias %q is a %s fixture, want %s", where, in.Pointer, alias, fixture.Type, want)
 		}
+		if prefix := cp2CaseAliasPrefix(where); !strings.HasPrefix(alias, prefix) {
+			return fmt.Errorf("case %s: input %s alias %q is outside the case namespace %q", where, in.Pointer, alias, prefix)
+		}
 	}
 	return nil
 }
 
+type cp2R1208Payload struct {
+	ClosureBindings map[string]string     `json:"closure_bindings"`
+	Fixtures        map[string]cp2Fixture `json:"fixtures"`
+	ImageManifest   cpMap                 `json:"image_manifest"`
+	ResolvedValues  map[string]cp2Fixture `json:"resolved_values"`
+	Rows            []json.RawMessage     `json:"rows"`
+	SummaryManifest cpMap                 `json:"summary_manifest"`
+}
+
+var cp2R1208Rows = map[string]int{
+	"C01-DACLEAN-001": 12, "C01-DIRECT-001": 1, "C01-DISCONNECT-001": 1, "C01-EQUALWORK-001": 1,
+	"C01-GENESIS-001": 1, "C01-REORG-001": 1, "C01-SIDE-001": 1, "C01-SUMMARY-001": 6,
+}
+
+func cp2DecodeAuthority(raw []byte, wantSHA string) (cp2R1208Payload, error) {
+	var payload cp2R1208Payload
+	if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != wantSHA {
+		return payload, fmt.Errorf("authority source sha256=%s want %s", got, wantSHA)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	dec.UseNumber()
+	if err := dec.Decode(&payload); err != nil {
+		return payload, fmt.Errorf("authority source json: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return payload, errors.New("authority source has trailing JSON")
+	}
+	return payload, nil
+}
+
+func cp2CanonicalSHA(v any) (string, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	raw := bytes.TrimSuffix(b.Bytes(), []byte{'\n'})
+	return fmt.Sprintf("%x", sha256.Sum256(raw)), nil
+}
+
+func cp2ValidateResolved(values map[string]cp2Fixture) error {
+	for _, name := range slices.Sorted(maps.Keys(values)) {
+		value := values[name]
+		if !cp2ResolvedKeyRE.MatchString(name) {
+			return fmt.Errorf("resolved_values key %q is not the composed full form", name)
+		}
+		if !slices.Contains([]string{"bytes32_hex", "object", "u64"}, value.Type) || !cp2FixtureValueOK(value) {
+			return fmt.Errorf("resolved_values[%s] is not a valid %s literal", name, value.Type)
+		}
+	}
+	return nil
+}
+
+func cp2ResolvedType(values map[string]cp2Fixture, alias, want string) error {
+	value, ok := values[alias]
+	if !ok {
+		return fmt.Errorf("resolved alias %q is absent", alias)
+	}
+	if value.Type != want {
+		return fmt.Errorf("resolved alias %q type=%s want %s", alias, value.Type, want)
+	}
+	return nil
+}
+
+var cp2DirectFieldTypes = map[string]string{
+	"claim_count": "u64", "current_mempool_min_fee_rate": "u64", "height": "u64",
+	"last_admission_seq": "u64", "orphan_bytes": "u64", "pinned_payload_bytes": "u64",
+	"record_count": "u64", "set_count": "u64", "stable_tip": "object", "tip_hash": "bytes32_hex",
+	"tx_count": "u64", "used_bytes": "u64", "utxo_count": "u64",
+}
+
+func cp2DirectFieldNames(manifest cpMap) (map[string][]string, error) {
+	images, ok := cp2JSONImage(manifest["images"]).(map[string]any)
+	if !ok {
+		return nil, errors.New("image manifest carries no images map")
+	}
+	out := make(map[string][]string, len(images))
+	for _, image := range slices.Sorted(maps.Keys(images)) {
+		entry, ok := images[image].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("image manifest %s is not an object", image)
+		}
+		raw, ok := entry["direct_fields"].([]any)
+		if !ok || len(raw) == 0 {
+			return nil, fmt.Errorf("image manifest %s names no direct_fields", image)
+		}
+		fields := make([]string, 0, len(raw))
+		for _, v := range raw {
+			name, ok := v.(string)
+			if !ok {
+				return nil, fmt.Errorf("image manifest %s direct_fields carries a non-string", image)
+			}
+			if _, known := cp2DirectFieldTypes[name]; !known {
+				return nil, fmt.Errorf("image manifest %s direct field %q has no declared type", image, name)
+			}
+			fields = append(fields, name)
+		}
+		out[image] = fields
+	}
+	return out, nil
+}
+
+func cp2RelationForTruth(expected map[string]any, truth, image string) []string {
+	if _, classified := expected["result"].(string); !classified {
+		if _, wire := expected["wire_disposition"]; wire {
+			return []string{"unchanged"}
+		}
+		if _, recovery := expected["recovery_outcome"]; recovery {
+			return []string{"unchanged", "new"}
+		}
+		return nil
+	}
+	switch truth {
+	case "UNKNOWN":
+		return []string{"withheld"}
+	case "OLD":
+		return []string{"old"}
+	case "NOT_APPLICABLE":
+		return []string{"unchanged"}
+	case "NEW":
+		if image == "CHAIN_IMAGE_V1" || image == "OWNER_IMAGE_V1" {
+			return []string{"new"}
+		}
+		return []string{"new", "unchanged"}
+	}
+	return nil
+}
+
+func cp2ComposedAlias(name, where, relation string) string {
+	return name + "@" + where + ":" + relation
+}
+
+func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixture, summary []any) (map[string][]string, error) {
+	var aliases []string
+	stated := false
+	for _, raw := range inputs {
+		in, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("%s input entry is not an object", where)
+		}
+		if p, _ := in["pointer"].(string); p != "/input/block_included_set_identities" {
+			continue
+		}
+		stated = true
+		values, ok := cp2JSONImage(in["value_or_alias"]).([]any)
+		if !ok {
+			return nil, fmt.Errorf("%s/input/block_included_set_identities is not an array", where)
+		}
+		for _, v := range values {
+			alias, ok := v.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s/input/block_included_set_identities carries a non-alias", where)
+			}
+			aliases = append(aliases, alias)
+		}
+	}
+	extra, extraStated, err := cp2FlatStatedDAIDs(where, inputs, fixtures)
+	if err != nil {
+		return nil, err
+	}
+	if !stated && !extraStated {
+		return map[string][]string{}, nil
+	}
+
+	grouped := map[string][]string{}
+	var flat []string
+	shapes := map[string]bool{}
+	if extraStated {
+		shapes["flat"] = true
+	}
+	for _, alias := range aliases {
+		f, err := cp2CaseFixture(fixtures, where, alias, "object")
+		if err != nil {
+			return nil, fmt.Errorf("%s/input/block_included_set_identities: %w", where, err)
+		}
+		entry, ok := cp2JSONImage(f.Value).(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("%s included-set fixture %q is not an object", where, alias)
+		}
+		blockID, hasBlock := entry["block_id"].(string)
+		identities, hasIdentities := entry["identities"].([]any)
+		switch {
+		case hasBlock && hasIdentities:
+			shapes["grouped"] = true
+			ids := grouped[blockID]
+			for _, raw := range identities {
+				id, err := cp2SetIdentityDAID(where, alias, raw)
+				if err != nil {
+					return nil, err
+				}
+				ids = append(ids, id)
+			}
+			if len(cp2SortedUnique(ids)) != len(ids) {
+				return nil, fmt.Errorf("%s included-set group %q states an identity more than once", where, blockID)
+			}
+			grouped[blockID] = ids // bound outside the loop: a stated `identities: []` claims the EMPTY set for this block's row
+		case !hasBlock && !hasIdentities:
+			shapes["flat"] = true
+			id, err := cp2SetIdentityDAID(where, alias, entry)
+			if err != nil {
+				return nil, err
+			}
+			flat = append(flat, id)
+		default:
+			return nil, fmt.Errorf("%s included-set fixture %q is neither a flat identity nor a {block_id, identities} group", where, alias)
+		}
+	}
+	if len(cp2SortedUnique(flat)) != len(flat) {
+		return nil, fmt.Errorf("%s/input/block_included_set_identities states an identity more than once", where)
+	}
+	if len(shapes) > 1 {
+		return nil, fmt.Errorf("%s mixes flat and grouped included-set identities", where)
+	}
+	if stated && extraStated && !slices.Equal(cp2SortedUnique(flat), cp2SortedUnique(extra)) {
+		return nil, fmt.Errorf("%s stated occurrence spellings disagree on the complete DA-set identities", where)
+	}
+	flat = append(flat, extra...)
+
+	out := map[string][]string{}
+	if shapes["grouped"] {
+		for _, suffix := range slices.Sorted(maps.Keys(grouped)) {
+			block, err := cp2SummaryBlockForSuffix(where, summary, suffix)
+			if err != nil {
+				return nil, err
+			}
+			if _, bound := out[block]; bound {
+				return nil, fmt.Errorf("%s summary row %q is bound by more than one included-set group", where, block)
+			}
+			out[block] = cp2SortedUnique(grouped[suffix])
+		}
+		if len(out) != len(summary) {
+			return nil, fmt.Errorf("%s binds %d of %d summary rows to a stated included-set group", where, len(out), len(summary))
+		}
+		return out, nil
+	}
+	want := cp2SortedUnique(flat)
+	if len(want) == 0 {
+		for i := range summary {
+			block, err := cp2SummaryBlockAlias(where, summary, i)
+			if err != nil {
+				return nil, err
+			}
+			out[block] = nil
+		}
+		return out, nil
+	}
+	if len(summary) != 1 {
+		return nil, fmt.Errorf("%s carries %d flat included-set identities but %d summary rows, so no row binding is derivable", where, len(want), len(summary))
+	}
+	block, err := cp2SummaryBlockAlias(where, summary, 0)
+	if err != nil {
+		return nil, err
+	}
+	out[block] = want
+	return out, nil
+}
+
+func cp2StatedBranchBlocks(where string, inputs []any, fixtures map[string]cp2Fixture) ([]string, error) {
+	var out []string
+	branch, _ := cp2InputValue(inputs, "/input/prestored_side_branch")
+	list, _ := branch.([]any)
+	for _, v := range list {
+		alias, _ := v.(string)
+		out = append(out, alias)
+	}
+	for _, pointer := range []string{"/input/genesis_pack", "/input/stimulus_block"} {
+		if value, stated := cp2InputValue(inputs, pointer); stated {
+			alias, _ := value.(string)
+			out = append(out, alias)
+		}
+	}
+	first, statedA := cp2InputValue(inputs, "/input/candidate_a")
+	second, statedB := cp2InputValue(inputs, "/input/candidate_b")
+	if !statedA && !statedB {
+		return out, nil
+	}
+	var hash [2]string
+	var work [2]uint64
+	var workOK [2]bool
+	for i, value := range [2]any{first, second} {
+		alias, _ := value.(string)
+		f, err := cp2CaseFixture(fixtures, where, alias, "object")
+		if err != nil {
+			return nil, fmt.Errorf("%s equal-work candidate: %w", where, err)
+		}
+		obj, _ := cp2JSONImage(f.Value).(map[string]any)
+		hash[i], _ = obj["block_hash"].(string)
+		work[i], workOK[i] = cp2UintOf(obj["cumulative_chainwork"])
+	}
+	relation, _ := cp2InputValue(inputs, "/input/candidate_hash_relation")
+	if relation != "hash_ba_lt_hash_bb_raw_bytes" || !cp2MatchOK(hash[0], cp2HexRE) || !cp2MatchOK(hash[1], cp2HexRE) || hash[0] >= hash[1] {
+		return nil, fmt.Errorf("%s states candidate_hash_relation %v, which the candidates' own hashes %q / %q do not establish", where, relation, hash[0], hash[1])
+	}
+	workRelation, _ := cp2InputValue(inputs, "/input/candidate_work_relation")
+	if workRelation != "exactly_equal_cumulative_chainwork" || !workOK[0] || !workOK[1] || work[0] != work[1] {
+		return nil, fmt.Errorf("%s states candidate_work_relation %v, which the candidates' own cumulative_chainwork %d / %d do not establish", where, workRelation, work[0], work[1])
+	}
+	winner, _ := first.(string)
+	return append(out, winner), nil
+}
+
+func cp2InputValue(inputs []any, pointer string) (any, bool) {
+	for _, raw := range inputs {
+		in, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if p, _ := in["pointer"].(string); p == pointer {
+			return cp2JSONImage(in["value_or_alias"]), true
+		}
+	}
+	return nil, false
+}
+
+func cp2FlatStatedDAIDs(where string, inputs []any, fixtures map[string]cp2Fixture) ([]string, bool, error) {
+	var out []string
+	stated := false
+	if value, ok := cp2InputValue(inputs, "/input/block_includes"); ok {
+		stated = true
+		alias, _ := value.(string)
+		f, err := cp2CaseFixture(fixtures, where, alias, "object")
+		if err != nil {
+			return nil, false, fmt.Errorf("%s/input/block_includes: %w", where, err)
+		}
+		entry, _ := cp2JSONImage(f.Value).(map[string]any)
+		identities, ok := entry["complete_da_set_identities"].([]any)
+		if !ok {
+			return nil, false, fmt.Errorf("%s/input/block_includes names no complete_da_set_identities", where)
+		}
+		for _, raw := range identities {
+			id, err := cp2SetIdentityDAID(where, alias, raw)
+			if err != nil {
+				return nil, false, err
+			}
+			out = append(out, id)
+		}
+		if len(cp2SortedUnique(out)) != len(out) {
+			return nil, false, fmt.Errorf("%s/input/block_includes states an identity more than once", where)
+		}
+	}
+	value, ok := cp2InputValue(inputs, "/input/block_complete_da_ids_in_transaction_order")
+	if !ok {
+		return out, stated, nil
+	}
+	ids, ok := value.([]any)
+	if !ok {
+		return nil, false, fmt.Errorf("%s/input/block_complete_da_ids_in_transaction_order is not an array", where)
+	}
+	var ordered []string
+	for _, v := range ids {
+		alias, _ := v.(string)
+		f, err := cp2CaseFixture(fixtures, where, alias, "bytes32_hex")
+		if err != nil {
+			return nil, false, fmt.Errorf("%s/input/block_complete_da_ids_in_transaction_order: %w", where, err)
+		}
+		id, _ := f.Value.(string)
+		ordered = append(ordered, id)
+	}
+	aliases := cp2InputAliasesAt(inputs, "/input/block_complete_da_ids_in_transaction_order")
+	if len(cp2SortedUnique(aliases)) == len(aliases) && len(cp2SortedUnique(ordered)) != len(ordered) {
+		return nil, false, fmt.Errorf("%s/input/block_complete_da_ids_in_transaction_order states an identity more than once", where)
+	}
+	if stated && !slices.Equal(cp2SortedUnique(out), cp2SortedUnique(ordered)) {
+		return nil, false, fmt.Errorf("%s stated occurrence spellings disagree on the complete DA-set identities", where)
+	}
+	return append(out, ordered...), true, nil
+}
+
+func cp2SetIdentityDAID(where, alias string, raw any) (string, error) {
+	if _, err := cp2CleanupIdentity(where+"/"+alias, raw); err != nil {
+		return "", err
+	}
+	identity, ok := cp2JSONImage(raw).(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("%s included-set fixture %q carries a non-object identity", where, alias)
+	}
+	id, ok := identity["da_id"].(string)
+	if !ok {
+		return "", fmt.Errorf("%s included-set fixture %q carries an identity without a da_id", where, alias)
+	}
+	return id, nil
+}
+
+func cp2CleanupIdentity(where string, raw any) (string, error) {
+	identity, ok := cp2JSONImage(raw).(map[string]any)
+	commit, commitOK := cp2JSONImage(identity["commit"]).(map[string]any)
+	chunks, chunksOK := cp2JSONImage(identity["chunks"]).([]any)
+	hex := func(v any) (string, bool) {
+		s, ok := v.(string)
+		return s, ok && len(s) == 64 && cp2HexRE.MatchString(s)
+	}
+	daID, daOK := hex(identity["da_id"])
+	txid, txOK := hex(commit["txid"])
+	wtxid, wtxOK := hex(commit["wtxid"])
+	if !ok || !commitOK || !chunksOK || len(chunks) == 0 || !daOK || !txOK || !wtxOK {
+		return "", fmt.Errorf("%s: invalid complete DA set identity", where)
+	}
+	canonicalChunks := make([]any, 0, len(chunks))
+	var previous uint64
+	for i, rawChunk := range chunks {
+		chunk, ok := cp2JSONImage(rawChunk).(map[string]any)
+		index, indexOK := cp2UintOf(chunk["chunk_index"])
+		chunkTx, txOK := hex(chunk["txid"])
+		chunkWTx, wtxOK := hex(chunk["wtxid"])
+		if !ok || !indexOK || index > math.MaxUint16 || !txOK || !wtxOK || (i > 0 && index <= previous) {
+			return "", fmt.Errorf("%s/chunks/%d: invalid or non-ascending identity", where, i)
+		}
+		previous = index
+		canonicalChunks = append(canonicalChunks, map[string]any{"chunk_index": index, "txid": chunkTx, "wtxid": chunkWTx})
+	}
+	canonical := map[string]any{"da_id": daID, "commit": map[string]any{"txid": txid, "wtxid": wtxid}, "chunks": canonicalChunks}
+	b, _ := json.Marshal(canonical)
+	return string(b), nil
+}
+
+func cp2InputAliasesAt(inputs []any, pointer string) []string {
+	v, ok := cp2InputValue(inputs, pointer)
+	if !ok {
+		return nil
+	}
+	if list, ok := v.([]any); ok {
+		out := make([]string, 0, len(list))
+		for _, raw := range list {
+			if s, ok := raw.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	if s, ok := v.(string); ok {
+		return []string{s}
+	}
+	return nil
+}
+
+func cp2ValidateCleanupClassifier(where string, inputs []any, expected map[string]any, fixtures map[string]cp2Fixture) error {
+	if !strings.HasPrefix(where, "C01-DACLEAN-001/") {
+		return nil
+	}
+	included := map[string]bool{}
+	for _, alias := range append(cp2InputAliasesAt(inputs, "/input/block_included_set_identities"), cp2InputAliasesAt(inputs, "/input/block_includes")...) {
+		f, err := cp2CaseFixture(fixtures, where, alias, "object")
+		if err != nil {
+			return err
+		}
+		value := cp2JSONImage(f.Value)
+		obj, _ := value.(map[string]any)
+		values := []any{value}
+		if grouped, ok := cp2JSONImage(obj["identities"]).([]any); ok {
+			values = grouped
+		} else if block, ok := cp2JSONImage(obj["complete_da_set_identities"]).([]any); ok {
+			values = block
+		}
+		for _, raw := range values {
+			key, err := cp2CleanupIdentity(where+"/input/block_included_set_identities", raw)
+			if err != nil {
+				return err
+			}
+			included[key] = true
+		}
+	}
+	invalid := map[string]bool{}
+	for _, alias := range cp2InputAliasesAt(inputs, "/input/final_chain_invalid_members") {
+		invalid[alias] = true
+	}
+	removed, matched, retained := map[string]bool{}, map[string]bool{}, map[string]string{}
+	for _, alias := range cp2InputAliasesAt(inputs, "/input/prestate_retained_da_sets") {
+		f, err := cp2CaseFixture(fixtures, where, alias, "object")
+		if err != nil {
+			return err
+		}
+		key, err := cp2CleanupIdentity(where+"/"+alias, f.Value)
+		if err != nil {
+			return err
+		}
+		if retained[key] != "" {
+			return fmt.Errorf("%s/input/prestate_retained_da_sets: aliases %q and %q resolve to the same complete identity", where, retained[key], alias)
+		}
+		retained[key] = alias
+		if invalid[alias] || included[key] {
+			removed[alias] = true
+		}
+		if included[key] {
+			matched[key] = true
+		}
+	}
+	for _, alias := range cp2InputAliasesAt(inputs, "/input/selected_record_plan_order") {
+		f, err := cp2CaseFixture(fixtures, where, alias, "object")
+		if err != nil {
+			return err
+		}
+		key, err := cp2CleanupIdentity(where+"/"+alias, f.Value)
+		if err != nil {
+			return err
+		}
+		if retained[key] != alias {
+			return fmt.Errorf("%s/input/selected_record_plan_order: alias %q does not name a retained prestate record", where, alias)
+		}
+	}
+	if len(cp2InputAliasesAt(inputs, "/input/retained_record_fault"))+len(cp2InputAliasesAt(inputs, "/input/owner_token_fault")) > 0 {
+		removed = map[string]bool{}
+	}
+	if strings.HasSuffix(where, "/OWNER_TOKEN_MISMATCH") {
+		faults := cp2InputAliasesAt(inputs, "/input/owner_token_fault")
+		if len(faults) != 1 {
+			return fmt.Errorf("%s/input/owner_token_fault: want exactly one fault", where)
+		}
+		f, err := cp2CaseFixture(fixtures, where, faults[0], "object")
+		if err != nil {
+			return err
+		}
+		fault, _ := cp2JSONImage(f.Value).(map[string]any)
+		if fault["kind"] != "exact_token_mismatch_against_selected_record" {
+			return fmt.Errorf("%s/input/owner_token_fault/kind: want exact_token_mismatch_against_selected_record", where)
+		}
+		if fault["target"] != "CLAIM_DA_SET_1" || !slices.Contains(cp2InputAliasesAt(inputs, "/input/prestate_owner_claims"), cp2CaseAliasPrefix(where)+"CLAIM_DA_SET_1") {
+			return fmt.Errorf("%s/input/owner_token_fault/target: does not name the stated prestate owner claim", where)
+		}
+		claimFixture, err := cp2CaseFixture(fixtures, where, cp2CaseAliasPrefix(where)+"CLAIM_DA_SET_1", "object")
+		if err != nil {
+			return err
+		}
+		setFixture, err := cp2CaseFixture(fixtures, where, cp2CaseAliasPrefix(where)+"DA_SET_1", "object")
+		if err != nil {
+			return err
+		}
+		claim, _ := cp2JSONImage(claimFixture.Value).(map[string]any)
+		set, _ := cp2JSONImage(setFixture.Value).(map[string]any)
+		commit, _ := cp2JSONImage(set["commit"]).(map[string]any)
+		claimTx, claimOK := claim["txid"].(string)
+		commitTx, commitOK := commit["txid"].(string)
+		if claim["kind"] != "owner_claim" || claim["domain"] != "da" || !claimOK || !commitOK || !cp2HexRE.MatchString(claimTx) || claimTx != commitTx {
+			return fmt.Errorf("%s/input/owner_token_fault/target: owner claim does not exactly bind retained DA_SET_1 commit txid", where)
+		}
+	}
+	effects, _ := expected["effects"].(map[string]any)
+	var removedCount, includedCount, matchedCount uint64
+	for range removed {
+		removedCount++
+	}
+	for range included {
+		includedCount++
+	}
+	for range matched {
+		matchedCount++
+	}
+	wants := map[string]uint64{"da_record_removals": removedCount, "da_inclusion_noops": includedCount - matchedCount}
+	for _, key := range []string{"da_record_removals", "da_inclusion_noops"} {
+		want := wants[key]
+		effect, stated := effects[key].(map[string]any)
+		if key == "da_record_removals" && !stated {
+			return fmt.Errorf("%s/effects/da_record_removals: required", where)
+		}
+		if !stated {
+			continue
+		}
+		got, ok := cp2UintOf(effect["value"])
+		if !ok || got != want {
+			return fmt.Errorf("%s/effects/%s=%v want %d", where, key, effect["value"], want)
+		}
+	}
+	return nil
+}
+
+func cp2ValidateCleanupFault(where string, inputs []any, fixtures map[string]cp2Fixture) error {
+	faults, plan := cp2InputAliasesAt(inputs, "/input/retained_record_fault"), cp2InputAliasesAt(inputs, "/input/selected_record_plan_order")
+	if len(faults) == 0 {
+		return nil
+	}
+	if len(plan) == 0 {
+		return fmt.Errorf("%s/input/retained_record_fault: selected plan absent", where)
+	}
+	var planLen uint64
+	for range plan {
+		planLen++
+	}
+	caseID := strings.TrimPrefix(where, "C01-DACLEAN-001/")
+	want, ok := map[string]uint64{"CORRUPT_FIRST": 0, "CORRUPT_MIDDLE": planLen / 2, "CORRUPT_LAST": planLen - 1}[caseID]
+	if !ok {
+		return fmt.Errorf("%s/input/retained_record_fault: selected plan absent", where)
+	}
+	f, err := cp2CaseFixture(fixtures, where, faults[0], "object")
+	if err != nil {
+		return err
+	}
+	fault, _ := cp2JSONImage(f.Value).(map[string]any)
+	position, numeric := cp2UintOf(fault["position_index"])
+	target, targetOK := fault["target"].(string)
+	if fault["kind"] != "selected_record_corrupt" {
+		return fmt.Errorf("%s/input/retained_record_fault/kind: want selected_record_corrupt", where)
+	}
+	if !numeric || position != want {
+		return fmt.Errorf("%s/input/retained_record_fault/position_index: want %d", where, want)
+	}
+	if !targetOK || plan[want] != cp2CaseAliasPrefix(where)+target {
+		return fmt.Errorf("%s/input/retained_record_fault/target: does not name selected_record_plan_order[%d]", where, want)
+	}
+	return nil
+}
+
+func cp2SortedUnique(values []string) []string {
+	out := slices.Clone(values)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+func cp2SummaryBlockAlias(where string, summary []any, index int) (string, error) {
+	row, ok := summary[index].(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("%s summary[%d] is not object", where, index)
+	}
+	block, ok := row["block_id"].(string)
+	if !ok {
+		return "", fmt.Errorf("%s summary[%d] block_id is not an alias", where, index)
+	}
+	return block, nil
+}
+
+func cp2SummaryBlockForSuffix(where string, summary []any, suffix string) (string, error) {
+	var found string
+	for i := range summary {
+		block, err := cp2SummaryBlockAlias(where, summary, i)
+		if err != nil {
+			return "", err
+		}
+		if strings.HasSuffix(block, "_"+suffix) {
+			if found != "" {
+				return "", fmt.Errorf("%s included-set block %q matches more than one summary row", where, suffix)
+			}
+			found = block
+		}
+	}
+	if found == "" {
+		return "", fmt.Errorf("%s included-set block %q matches no summary row", where, suffix)
+	}
+	return found, nil
+}
+
+func cp2PrestateRecords(where string, inputs []any, fixtures map[string]cp2Fixture, pointer string) ([]map[string]any, bool, error) {
+	raw, stated := cp2InputValue(inputs, pointer)
+	if !stated {
+		return nil, false, nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, false, fmt.Errorf("%s%s is not an array", where, pointer)
+	}
+	out := make([]map[string]any, 0, len(list))
+	for _, v := range list {
+		alias, _ := v.(string)
+		f, err := cp2CaseFixture(fixtures, where, alias, "object")
+		if err != nil {
+			return nil, false, fmt.Errorf("%s%s: %w", where, pointer, err)
+		}
+		obj, ok := cp2JSONImage(f.Value).(map[string]any)
+		if !ok {
+			return nil, false, fmt.Errorf("%s%s fixture %q is not an object", where, pointer, alias)
+		}
+		out = append(out, obj)
+	}
+	return out, true, nil
+}
+
+func cp2DerivedCounts(where, image, relation string, inputs []any, fixtures map[string]cp2Fixture) (map[string]uint64, map[string]uint64, error) {
+	pointer := map[string]string{
+		"STANDARD_MEMPOOL_IMAGE_V1": "/input/prestate_standard_records",
+		"RETAINED_DA_IMAGE_V1":      "/input/prestate_retained_da_sets",
+		"OWNER_IMAGE_V1":            "/input/prestate_owner_claims",
+	}[image]
+	derived := map[string]uint64{}
+	if pointer == "" || (relation != "unchanged" && relation != "old") {
+		return derived, nil, nil
+	}
+	records, stated, err := cp2PrestateRecords(where, inputs, fixtures, pointer)
+	if err != nil || !stated {
+		return derived, nil, err
+	}
+	n := uint64(len(records))
+	switch image {
+	case "RETAINED_DA_IMAGE_V1":
+		pinned := uint64(0)
+		for _, record := range records {
+			if record["state"] != "COMPLETE_SET" {
+				continue
+			}
+			payload, ok := cp2UintOf(record["payload_bytes"])
+			if !ok || pinned > math.MaxUint64-payload {
+				return nil, nil, fmt.Errorf("%s%s carries a COMPLETE_SET without a u64 payload_bytes or overflows the pinned-payload total", where, pointer)
+			}
+			pinned += payload
+		}
+		return map[string]uint64{"set_count": n, "pinned_payload_bytes": pinned}, nil, nil
+	case "OWNER_IMAGE_V1":
+		return map[string]uint64{"claim_count": n}, nil, nil
+	}
+	used, last := uint64(0), uint64(0)
+	for _, record := range records {
+		size, sizeOK := cp2UintOf(record["size"])
+		seq, seqOK := cp2UintOf(record["admission_seq"])
+		if !sizeOK || !seqOK || used > math.MaxUint64-size {
+			return nil, nil, fmt.Errorf("%s%s carries a record without a u64 size or admission_seq or overflows the used-bytes total", where, pointer)
+		}
+		used += size
+		last = max(last, seq)
+	}
+	return map[string]uint64{"record_count": n, "tx_count": n, "used_bytes": used},
+		map[string]uint64{"last_admission_seq": last}, nil
+}
+
+func cp2ValidateR1208Expected(where string, c map[string]any, fixtures map[string]cp2Fixture, resolved map[string]cp2Fixture, direct map[string][]string) error {
+	expected, ok := c["expected"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("%s expected is not an object", where)
+	}
+	truth, _ := expected["commit_truth"].(string)
+	inputs, _ := c["input"].([]any)
+	if err := cp2ValidateCleanupFault(where, inputs, fixtures); err != nil {
+		return err
+	}
+	for _, raw := range inputs {
+		in, _ := raw.(map[string]any)
+		if p, _ := in["pointer"].(string); !slices.Contains(cp2StatedPointers, p) {
+			return fmt.Errorf("%s input pointer %q is outside the closed stated vocabulary", where, p)
+		}
+	}
+	images, ok := expected["state_image"].(map[string]any)
+	if !ok || len(images) != len(direct) {
+		return fmt.Errorf("%s/state_image must carry exactly %d images", where, len(direct))
+	}
+	for _, image := range slices.Sorted(maps.Keys(direct)) {
+		p, ok := images[image].(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s/state_image/%s missing", where, image)
+		}
+		relation, _ := p["relation"].(string)
+		allowed := cp2RelationForTruth(expected, truth, image)
+		if len(allowed) == 0 {
+			return fmt.Errorf("%s no allowed relation: truth %q unknown or null result, no disposition", where, truth)
+		}
+		if !slices.Contains(allowed, relation) {
+			return fmt.Errorf("%s/%s relation=%s invalid for %s, want one of %v", where, image, relation, truth, allowed)
+		}
+		digest, ok := p["digest_alias"].(string)
+		if !ok {
+			return fmt.Errorf("%s/%s digest_alias missing", where, image)
+		}
+		if want := cp2ComposedAlias(image, where, relation); digest != want {
+			return fmt.Errorf("%s/%s digest_alias=%q want %q", where, image, digest, want)
+		}
+		if err := cp2ResolvedType(resolved, digest, "bytes32_hex"); err != nil {
+			return fmt.Errorf("%s/%s: %w", where, image, err)
+		}
+		fields, ok := p["direct_fields"].(map[string]any)
+		if !ok || len(fields) != len(direct[image]) {
+			return fmt.Errorf("%s/%s direct_fields shape", where, image)
+		}
+		derived, atLeast, err := cp2DerivedCounts(where, image, relation, inputs, fixtures)
+		if err != nil {
+			return err
+		}
+		for _, field := range direct[image] {
+			alias, ok := fields[field].(string)
+			if !ok {
+				return fmt.Errorf("%s/%s/%s alias missing", where, image, field)
+			}
+			if want := cp2ComposedAlias(field, where, relation); alias != want {
+				return fmt.Errorf("%s/%s/%s alias=%q want %q", where, image, field, alias, want)
+			}
+			if err := cp2ResolvedType(resolved, alias, cp2DirectFieldTypes[field]); err != nil {
+				return fmt.Errorf("%s/%s/%s: %w", where, image, field, err)
+			}
+			if want, ok := derived[field]; ok {
+				if got, numeric := cp2UintOf(resolved[alias].Value); !numeric || got != want {
+					return fmt.Errorf("%s/%s/%s=%v differs from the %d the stated prestate derives", where, image, field, resolved[alias].Value, want)
+				}
+			}
+			if floor, ok := atLeast[field]; ok {
+				if got, numeric := cp2UintOf(resolved[alias].Value); !numeric || got < floor {
+					return fmt.Errorf("%s/%s/%s=%v is rewound below the %d the stated prestate requires", where, image, field, resolved[alias].Value, floor)
+				}
+			}
+		}
+	}
+	if err := cp2ValidateOwnerStableTip(where, images, resolved); err != nil {
+		return err
+	}
+	return cp2ValidateR1208Summary(where, inputs, expected, images, fixtures, resolved, truth)
+}
+
+func cp2ValidateOwnerStableTip(where string, images map[string]any, resolved map[string]cp2Fixture) error {
+	chain, _ := images["CHAIN_IMAGE_V1"].(map[string]any)
+	owner, _ := images["OWNER_IMAGE_V1"].(map[string]any)
+	chainFields, _ := chain["direct_fields"].(map[string]any)
+	ownerFields, _ := owner["direct_fields"].(map[string]any)
+	tipAlias, _ := chainFields["tip_hash"].(string)
+	heightAlias, _ := chainFields["height"].(string)
+	tipEntry, tipOK := resolved[tipAlias]
+	heightEntry, heightOK := resolved[heightAlias]
+	stableAlias, _ := ownerFields["stable_tip"].(string)
+	stableEntry, stableOK := resolved[stableAlias]
+	if !tipOK || !heightOK || !stableOK {
+		return fmt.Errorf("%s OWNER/stable_tip: chain tip or stable tip alias is unresolved", where)
+	}
+	tip, ok := tipEntry.Value.(string)
+	if !ok {
+		return fmt.Errorf("%s OWNER/stable_tip: chain tip_hash is not a string", where)
+	}
+	height, ok := cp2UintOf(heightEntry.Value)
+	if !ok {
+		return fmt.Errorf("%s OWNER/stable_tip: chain height is not a u64", where)
+	}
+	stable, ok := cp2JSONImage(stableEntry.Value).(map[string]any)
+	if !ok {
+		return fmt.Errorf("%s OWNER/stable_tip: value is not an object", where)
+	}
+	gotHeight, heightNumeric := cp2UintOf(stable["height"])
+	if len(stable) != 3 || stable["has_tip"] != true || stable["hash"] != tip || !heightNumeric || gotHeight != height {
+		return fmt.Errorf("%s OWNER/stable_tip must equal the published CHAIN tip hash/height", where)
+	}
+	return nil
+}
+
+func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any, images map[string]any, fixtures map[string]cp2Fixture, resolved map[string]cp2Fixture, truth string) error {
+	summary := expected["canonical_applied_blocks"]
+	if truth != "NEW" {
+		if summary != nil {
+			return fmt.Errorf("%s summary must be null for %s", where, truth)
+		}
+		chainImage, _ := images["CHAIN_IMAGE_V1"].(map[string]any)
+		relation, _ := chainImage["relation"].(string)
+		if prestate, stated := cp2InputValue(inputs, "/input/prestate_canonical_chain"); stated && relation != "new" {
+			tipBlock, err := cp2PrestateChainBlock(where, prestate, fixtures, 1)
+			if err != nil {
+				return err
+			}
+			if err := cp2ValidateChainTip(where, images, resolved, tipBlock, "the stated prestate chain tip"); err != nil {
+				return err
+			}
+		}
+		if err := cp2ValidateCleanupClassifier(where, inputs, expected, fixtures); err != nil {
+			return err
+		}
+		return cp2SummaryRowsEffect(where, expected, 0)
+	}
+	rows, ok := summary.([]any)
+	if !ok {
+		return fmt.Errorf("%s summary must be array for NEW", where)
+	}
+	_, disconnect := cp2InputValue(inputs, "/input/disconnect_command")
+	if len(rows) == 0 && !disconnect {
+		return fmt.Errorf("%s summary is empty but the case carries no /input/disconnect_command stimulus", where)
+	}
+	if len(rows) != 0 && disconnect {
+		return fmt.Errorf("%s is a standalone disconnect and must carry an exact empty summary", where)
+	}
+	if value, ok := cp2InputValue(inputs, "/input/connect_count"); ok {
+		if alias, ok := value.(string); ok {
+			f, err := cp2CaseFixture(fixtures, where, alias, "u64")
+			if err != nil {
+				return fmt.Errorf("%s/input/connect_count: %w", where, err)
+			}
+			value = f.Value
+		}
+		want, numeric := cp2UintOf(value)
+		if !numeric || want != uint64(len(rows)) {
+			return fmt.Errorf("%s summary carries %d rows, the case states connect_count %v", where, len(rows), value)
+		}
+	}
+
+	wantDA, err := cp2IncludedSetDAIDs(where, inputs, fixtures, rows)
+	if err != nil {
+		return err
+	}
+
+	lastHeight, occurrences := uint64(0), uint64(0)
+	haveHeight := false
+	var lastBlock map[string]any
+	var blocks []string
+	for i, raw := range rows {
+		row, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s summary[%d] is not object", where, i)
+		}
+		blockID, _ := row["block_id"].(string)
+		blockHash, _ := row["block_hash"].(string)
+		blocks = append(blocks, blockID)
+		bf, err := cp2CaseFixture(fixtures, where, blockID, "object")
+		if err != nil {
+			return fmt.Errorf("%s summary[%d] block_id: %w", where, i, err)
+		}
+		hf, err := cp2CaseFixture(fixtures, where, blockHash, "bytes32_hex")
+		if err != nil {
+			return fmt.Errorf("%s summary[%d]: %w", where, i, err)
+		}
+		obj, ok := cp2JSONImage(bf.Value).(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s summary[%d] block fixture is not an object", where, i)
+		}
+		hashValue, ok := hf.Value.(string)
+		if !ok {
+			return fmt.Errorf("%s summary[%d] block_hash fixture is not a string", where, i)
+		}
+		if declared, _ := obj["block_hash"].(string); declared != hashValue {
+			return fmt.Errorf("%s summary[%d] block_hash %q is not the hash of block_id %q", where, i, blockHash, blockID)
+		}
+		h, ok := cp2UintOf(obj["height"])
+		if !ok {
+			return fmt.Errorf("%s summary[%d] block height invalid", where, i)
+		}
+		if haveHeight && (lastHeight == math.MaxUint64 || h != lastHeight+1) {
+			return fmt.Errorf("%s summary heights are not consecutive", where)
+		}
+		lastHeight, haveHeight, lastBlock = h, true, obj
+
+		ids, ok := row["complete_da_ids"].([]any)
+		if !ok {
+			return fmt.Errorf("%s summary[%d] complete_da_ids invalid", where, i)
+		}
+		values := make([]string, 0, len(ids))
+		prev := ""
+		for j, rawID := range ids {
+			a, ok := rawID.(string)
+			if !ok {
+				return fmt.Errorf("%s summary[%d] da id invalid", where, i)
+			}
+			af, err := cp2CaseFixture(fixtures, where, a, "bytes32_hex")
+			if err != nil {
+				return fmt.Errorf("%s summary[%d]: %w", where, i, err)
+			}
+			v, ok := af.Value.(string)
+			if !ok {
+				return fmt.Errorf("%s summary[%d] da id fixture is not a string", where, i)
+			}
+			if j > 0 && v <= prev {
+				return fmt.Errorf("%s summary[%d] da ids not strictly raw-byte ascending", where, i)
+			}
+			prev = v
+			values = append(values, v)
+			occurrences++
+		}
+		if want, bound := wantDA[blockID]; bound && !slices.Equal(values, want) {
+			return fmt.Errorf("%s summary[%d] complete_da_ids %v differ from the included-set identities %v of block %q", where, i, values, want, blockID)
+		}
+	}
+
+	branch, err := cp2StatedBranchBlocks(where, inputs, fixtures)
+	if err != nil {
+		return err
+	}
+	if len(branch) > 0 && !slices.Equal(blocks, branch) {
+		return fmt.Errorf("%s canonical-applied blocks %v differ from the stated branch %v", where, blocks, branch)
+	}
+
+	if value, ok := cp2InputValue(inputs, "/input/block_complete_da_set_count"); ok {
+		if alias, ok := value.(string); ok {
+			f, err := cp2CaseFixture(fixtures, where, alias, "u64")
+			if err != nil {
+				return fmt.Errorf("%s/input/block_complete_da_set_count: %w", where, err)
+			}
+			value = f.Value
+		}
+		want, numeric := cp2UintOf(value)
+		if !numeric || want != occurrences {
+			return fmt.Errorf("%s summary carries %d complete DA-set occurrences, the case states %v", where, occurrences, value)
+		}
+	}
+	if prestate, stated := cp2InputValue(inputs, "/input/prestate_canonical_chain"); stated && lastBlock != nil {
+		preTip, err := cp2PrestateChainBlock(where, prestate, fixtures, 1)
+		if err != nil {
+			return err
+		}
+		got, gotOK := cp2UintOf(lastBlock["cumulative_chainwork"])
+		want, wantOK := cp2UintOf(preTip["cumulative_chainwork"])
+		tipHash, _ := lastBlock["block_hash"].(string)
+		preHash, _ := preTip["block_hash"].(string)
+		if !gotOK || !wantOK || got < want || (got == want && tipHash >= preHash) {
+			return fmt.Errorf("%s branch tip cumulative_chainwork %v does not win fork choice against the stated prestate tip's %v", where, lastBlock["cumulative_chainwork"], preTip["cumulative_chainwork"])
+		}
+	}
+	tipBlock, tipWhat := lastBlock, "the last canonical-applied block"
+	if disconnect {
+		prestate, _ := cp2InputValue(inputs, "/input/prestate_canonical_chain")
+		below, err := cp2PrestateChainBlock(where, prestate, fixtures, 2)
+		if err != nil {
+			return err
+		}
+		tipBlock, tipWhat = below, "the block below the disconnected tip"
+	}
+	if tipBlock != nil {
+		if err := cp2ValidateChainTip(where, images, resolved, tipBlock, tipWhat); err != nil {
+			return err
+		}
+	}
+
+	if err := cp2ValidateCleanupClassifier(where, inputs, expected, fixtures); err != nil {
+		return err
+	}
+	return cp2SummaryRowsEffect(where, expected, uint64(len(rows)))
+}
+
+func cp2PrestateChainBlock(where string, prestate any, fixtures map[string]cp2Fixture, fromEnd int) (map[string]any, error) {
+	chain, _ := prestate.([]any)
+	if len(chain) < fromEnd {
+		return nil, fmt.Errorf("%s states a %d-block prestate chain, so entry -%d is not stated", where, len(chain), fromEnd)
+	}
+	alias, _ := chain[len(chain)-fromEnd].(string)
+	f, err := cp2CaseFixture(fixtures, where, alias, "object")
+	if err != nil {
+		return nil, fmt.Errorf("%s prestate chain: %w", where, err)
+	}
+	block, _ := cp2JSONImage(f.Value).(map[string]any)
+	if block == nil {
+		return nil, fmt.Errorf("%s prestate chain fixture %q is not an object", where, alias)
+	}
+	return block, nil
+}
+
+func cp2ValidateChainTip(where string, images map[string]any, resolved map[string]cp2Fixture, tipBlock map[string]any, what string) error {
+	chain, _ := images["CHAIN_IMAGE_V1"].(map[string]any)
+	chainFields, _ := chain["direct_fields"].(map[string]any)
+	tipAlias, _ := chainFields["tip_hash"].(string)
+	heightAlias, _ := chainFields["height"].(string)
+	utxoAlias, _ := chainFields["utxo_count"].(string)
+	tip, tipOK := resolved[tipAlias]
+	height, heightOK := resolved[heightAlias]
+	utxo, utxoOK := resolved[utxoAlias]
+	if !tipOK || !heightOK || !utxoOK {
+		return fmt.Errorf("%s CHAIN tip alias is unresolved", where)
+	}
+	gotHeight, numeric := cp2UintOf(height.Value)
+	wantHeight, wantNumeric := cp2UintOf(tipBlock["height"])
+	gotUTXO, utxoNumeric := cp2UintOf(utxo.Value)
+	wantUTXO, wantUTXONumeric := cp2UintOf(tipBlock["utxo_count"])
+	if tip.Value != tipBlock["block_hash"] || !numeric || !wantNumeric || gotHeight != wantHeight ||
+		!utxoNumeric || !wantUTXONumeric || gotUTXO != wantUTXO {
+		return fmt.Errorf("%s CHAIN tip must equal %s", where, what)
+	}
+	return nil
+}
+
+// Keep this secondary effect check last so typed summary errors retain precedence.
+func cp2SummaryRowsEffect(where string, expected map[string]any, rows uint64) error {
+	effects, _ := expected["effects"].(map[string]any)
+	effect, stated := effects["summary_rows"].(map[string]any)
+	if !stated {
+		return nil
+	}
+	if got, numeric := cp2UintOf(effect["value"]); !numeric || got != rows {
+		return fmt.Errorf("%s effects.summary_rows=%v differs from the %d published rows", where, effect["value"], rows)
+	}
+	return nil
+}
+
+func cp2CaseFixture(fixtures map[string]cp2Fixture, where, alias, want string) (cp2Fixture, error) {
+	f, ok := fixtures[alias]
+	if !ok {
+		return f, fmt.Errorf("fixture alias %q is absent", alias)
+	}
+	if f.Type != want {
+		return f, fmt.Errorf("fixture alias %q type=%s want %s", alias, f.Type, want)
+	}
+	if prefix := cp2CaseAliasPrefix(where); !strings.HasPrefix(alias, prefix) {
+		return f, fmt.Errorf("fixture alias %q is outside the case namespace %q", alias, prefix)
+	}
+	return f, nil
+}
+
+func cp2CaseAliasPrefix(where string) string {
+	row, caseID, _ := strings.Cut(where, "/")
+	return "R1208_" + strings.ReplaceAll(strings.TrimPrefix(row, "C01-"), "-", "_") + "_" + caseID + "_"
+}
+
+func cp2ManifestHashOK(what string, manifest cpMap, want string) error {
+	got, err := cp2CanonicalSHA(manifest)
+	if err != nil {
+		return fmt.Errorf("%s hash: %w", what, err)
+	}
+	if got != want {
+		return fmt.Errorf("%s hash=%s want %s", what, got, want)
+	}
+	return nil
+}
+
+func cp2ValidateR1208Payload(payload cp2R1208Payload) error {
+	wantBindings := map[string]string{
+		"closure_manifest_version": cp2ClosureManifestVersion, "manifest_root_sha256": cp2ManifestRootSHA256,
+		"row_case_design_hash": cp2RowCaseDesignHash, "input_schema_design_hash": cp2InputSchemaDesignHash,
+		"expected_projection_design_hash": cp2ExpectedProjectionDesignHash, "image_manifest_hash": cp2ImageManifestHash,
+		"summary_manifest_hash": cp2SummaryManifestHash, "mutation_assignment_hash": cp2MutationAssignmentHash,
+	}
+	if !maps.Equal(payload.ClosureBindings, wantBindings) {
+		return errors.New("RUB-1208 closure bindings differ from frozen v8 pins")
+	}
+	if err := cp2ManifestHashOK("image manifest", payload.ImageManifest, cp2ImageManifestHash); err != nil {
+		return err
+	}
+	if err := cp2ManifestHashOK("summary manifest", payload.SummaryManifest, cp2SummaryManifestHash); err != nil {
+		return err
+	}
+	if err := cp2ValidateFixtures(payload.Fixtures); err != nil {
+		return err
+	}
+	if err := cp2ValidateResolved(payload.ResolvedValues); err != nil {
+		return err
+	}
+	direct, err := cp2DirectFieldNames(payload.ImageManifest)
+	if err != nil {
+		return err
+	}
+	referenced := make(map[string]bool, len(payload.ResolvedValues))
+	named := make(map[string]bool, len(payload.Fixtures))
+	if len(payload.Rows) != len(cp2R1208Rows) {
+		return fmt.Errorf("RUB-1208 rows=%d want %d", len(payload.Rows), len(cp2R1208Rows))
+	}
+	typed := make([]cp2Row, 0, len(payload.Rows))
+	seen := map[string]bool{}
+	for _, raw := range payload.Rows {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		var strict cp2StrictRow
+		if err := dec.Decode(&strict); err != nil {
+			return err
+		}
+		dec = json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		var row cp2Row
+		if err := dec.Decode(&row); err != nil {
+			return err
+		}
+		wantCases, ok := cp2R1208Rows[row.RowID]
+		if !ok || seen[row.RowID] || len(row.Cases) != wantCases {
+			return fmt.Errorf("RUB-1208 row %s cases=%d unauthorized", row.RowID, len(row.Cases))
+		}
+		seen[row.RowID] = true
+		typed = append(typed, row)
+		var generic map[string]any
+		dec = json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		if err := dec.Decode(&generic); err != nil {
+			return err
+		}
+		cases, _ := generic["cases"].([]any)
+		for _, cr := range cases {
+			c, ok := cr.(map[string]any)
+			if !ok {
+				return fmt.Errorf("RUB-1208 row %s carries a non-object case", row.RowID)
+			}
+			id, _ := c["case_id"].(string)
+			where := row.RowID + "/" + id
+			if err := cp2ValidateR1208Expected(where, c, payload.Fixtures, payload.ResolvedValues, direct); err != nil {
+				return err
+			}
+			cp2CollectRefs(c, direct, referenced, named)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(payload.ResolvedValues)) {
+		if !referenced[name] {
+			return fmt.Errorf("resolved_values[%s] is referenced by no image projection", name)
+		}
+	}
+	if err := cp2ValidateRows(typed, cp2RowRegistry()); err != nil {
+		return err
+	}
+	if err := cp2ValidateAliases(typed, payload.Fixtures, named); err != nil {
+		return err
+	}
+	for _, alias := range slices.Sorted(maps.Keys(payload.Fixtures)) {
+		if !named[alias] {
+			return fmt.Errorf("fixtures[%s] is named by no case", alias)
+		}
+	}
+	return nil
+}
+
+func cp2CollectRefs(c map[string]any, direct map[string][]string, out, named map[string]bool) {
+	expected, _ := c["expected"].(map[string]any)
+	images, _ := expected["state_image"].(map[string]any)
+	for image, fields := range direct {
+		p, _ := images[image].(map[string]any)
+		if alias, ok := p["digest_alias"].(string); ok {
+			out[alias] = true
+		}
+		written, _ := p["direct_fields"].(map[string]any)
+		for _, field := range fields {
+			if alias, ok := written[field].(string); ok {
+				out[alias] = true
+			}
+		}
+	}
+	rows, _ := expected["canonical_applied_blocks"].([]any)
+	for _, raw := range rows {
+		row, _ := raw.(map[string]any)
+		ids, _ := row["complete_da_ids"].([]any)
+		for _, v := range append([]any{row["block_id"], row["block_hash"]}, ids...) {
+			if alias, ok := v.(string); ok {
+				named[alias] = true
+			}
+		}
+	}
+}
+
 func mustWriteCanonicalPipelineV2Corpus(path string) {
-	registry := cp2RowRegistry()
-	rows := []cp2Row{} // BUILDING: RUB-1208..RUB-1212 migrate rows, RUB-1204 completes.
-	fixtures := map[string]cp2Fixture{}
-	if err := cp2ValidateRows(rows, registry); err != nil {
+	payload, err := cp2DecodeAuthority(cp2AuthoritySource, cp2AuthoritySourceSHA256)
+	if err != nil {
 		fatalf("canonical pipeline v2: %v", err)
 	}
-	if err := cp2ValidateFixtures(fixtures); err != nil {
+	if err := cp2ValidateR1208Payload(payload); err != nil {
 		fatalf("canonical pipeline v2: %v", err)
 	}
-	if err := cp2ValidateAliases(rows, fixtures); err != nil {
-		fatalf("canonical pipeline v2: %v", err)
+	rows := make([]any, 0, len(payload.Rows))
+	for _, raw := range payload.Rows {
+		var row any
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		if err := dec.Decode(&row); err != nil {
+			fatalf("canonical pipeline v2 row: %v", err)
+		}
+		rows = append(rows, row)
 	}
-	artifact := cp2Artifact{
-		Artifact:              cp2ArtifactName,
-		SchemaVersion:         cp2SchemaVer,
-		Schema:                cp2SchemaRel,
-		Meta:                  cp2Meta(),
-		Authority:             cp2Authority(),
-		ResultTaxonomy:        canonicalPipelineTaxonomy,
-		CommitTruthValues:     canonicalPipelineCommitTruth,
-		RPCProjectionClasses:  cp2RPCClasses,
-		WireDispositionValues: cp2WireDispositionValues,
-		RecoveryOutcomeValues: cp2RecoveryOutcomeValues,
-		RowRegistry:           registry,
-		Fixtures:              fixtures,
-		Rows:                  rows,
-	}
-	mustWriteJSON(path, &artifact)
+	mustWriteJSON(path, cp2Artifact{
+		Artifact: cp2ArtifactName, SchemaVersion: cp2SchemaVer, Schema: cp2SchemaRel,
+		Meta: cp2Meta(), Authority: cp2Authority(),
+		ResultTaxonomy: canonicalPipelineTaxonomy, CommitTruthValues: canonicalPipelineCommitTruth,
+		RPCProjectionClasses: cp2RPCClasses, WireDispositionValues: cp2WireDispositionValues,
+		RecoveryOutcomeValues: cp2RecoveryOutcomeValues, RowRegistry: cp2RowRegistry(),
+		Fixtures: payload.Fixtures, ImageManifest: payload.ImageManifest,
+		ResolvedValues: payload.ResolvedValues, Rows: rows, SummaryManifest: payload.SummaryManifest,
+	})
 }

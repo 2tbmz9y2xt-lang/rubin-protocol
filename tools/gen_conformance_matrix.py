@@ -112,7 +112,7 @@ PROTOCOL_ARTIFACT_META: dict[str, tuple[str, str]] = {
     ),
     "canonical_pipeline_v2.json": (
         "BUILDING C01-R2 authority — not active; v1 remains the inert authority",
-        "closure-epoch-bound C01-R2 identity and shape foundation (RUB-1207): frozen 79-entry row registry, no migrated row; no consumer may bind it (see conformance/README.md)",
+        "closure-epoch-bound C01-R2 identity and shape foundation (RUB-1207): frozen 79-entry row registry, 8 migrated rows / 24 cases (RUB-1208); no consumer may bind it (see conformance/README.md)",
     ),
     "legacy_exposure_hook_vectors.json": (
         "Operational protocol artifact",

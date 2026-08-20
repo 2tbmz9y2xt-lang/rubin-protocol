@@ -1446,10 +1446,12 @@ func cp2ValidInput(pointer, tag string, value any) cp2Input {
 	return cp2Input{Pointer: pointer, Type: tag, ValueOrAlias: value, Provenance: "witness_fixture", ProductionSetupSink: "sink", ConsumptionProofOwner: "RUB-923"}
 }
 
+const cp2CaseAlias, cp2CaseSchedAlias = "R1208_DIRECT_001_MAIN_B1", "R1208_DIRECT_001_MAIN_SCHED"
+
 // cp2ValidCase is the known-valid control every RUB-1207 negative mutates in
 // exactly one dimension.
 func cp2ValidCase() cp2Case {
-	return cp2Case{CaseID: "MAIN", Input: []cp2Input{cp2ValidInput("/input/stimulus_block", "alias", "B1")}, Expected: cp2Expected{
+	return cp2Case{CaseID: "MAIN", Input: []cp2Input{cp2ValidInput("/input/stimulus_block", "alias", cp2CaseAlias)}, Expected: cp2Expected{
 		Result: cp2Ptr("ACCEPTED"), CommitTruth: "NEW",
 		RPC: cp2RPC{
 			Class: "MINED_200_COMMITTED", HTTP: cp2Ptr(200), CommitState: cp2Ptr("committed"),
@@ -1566,13 +1568,17 @@ func TestCanonicalPipelineV2ValidatorFailsClosed(t *testing.T) {
 		"surplus reached flag": "set only when result is null",
 	}
 	for name, apply := range mutate {
+		reason, named := want[name]
+		if !named {
+			t.Fatalf("mutation %q has no expected reason: a table entry without one asserts nothing", name)
+		}
 		row := cp2Row{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}
 		apply(&row)
 		err := cp2ValidateRows([]cp2Row{row}, registry)
 		if err == nil {
 			t.Errorf("%s: expected a fail-closed rejection", name)
-		} else if !strings.Contains(err.Error(), want[name]) {
-			t.Errorf("%s: error = %q, want it to name %q", name, err, want[name])
+		} else if !strings.Contains(err.Error(), reason) {
+			t.Errorf("%s: error = %q, want it to name %q", name, err, reason)
 		}
 	}
 }
@@ -1609,29 +1615,27 @@ func TestCanonicalPipelineV2ValidatorAcceptsTheStatedShapes(t *testing.T) {
 	}
 }
 
-// TestCanonicalPipelineV2AliasesResolveInFixtures pins the one rule JSON Schema
-// cannot express: an alias must exist in the catalog. Until RUB-1208 populates
-// `fixtures`, an alias-carrying row is rejected — the intended fail-closed order.
+// TestCanonicalPipelineV2AliasesResolveInFixtures verifies that input aliases exist and resolve to their declared fixture type.
 func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	c := cp2ValidCase()
 	c.Input = []cp2Input{{
-		Pointer: "/input/stimulus_block", Type: "alias", ValueOrAlias: "B1",
+		Pointer: "/input/stimulus_block", Type: "alias", ValueOrAlias: cp2CaseAlias,
 		Provenance: "normative_boundary", ProductionSetupSink: "node.Miner.MineOne", ConsumptionProofOwner: "RUB-923",
 	}}
 	rows := []cp2Row{{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{c}}}
-	block := map[string]cp2Fixture{"B1": {Type: "object", Value: cpMap{"height": 1}}}
-	err := cp2ValidateAliases(rows, map[string]cp2Fixture{})
-	if err == nil || !strings.Contains(err.Error(), `alias "B1"`) {
-		t.Fatalf("empty catalog: error = %v, want a rejection naming alias B1", err)
+	block := map[string]cp2Fixture{cp2CaseAlias: {Type: "object", Value: cpMap{"height": 1}}}
+	err := cp2ValidateAliases(rows, map[string]cp2Fixture{}, map[string]bool{})
+	if err == nil || !strings.Contains(err.Error(), `alias "`+cp2CaseAlias+`"`) {
+		t.Fatalf("empty catalog: error = %v, want a rejection naming alias %s", err, cp2CaseAlias)
 	}
-	if err := cp2ValidateAliases(rows, block); err != nil {
-		t.Fatalf("catalog carrying B1 must validate: %v", err)
+	if err := cp2ValidateAliases(rows, block, map[string]bool{}); err != nil {
+		t.Fatalf("catalog carrying %s must validate: %v", cp2CaseAlias, err)
 	}
 	// An alias array marshals to a schema-valid array in either Go shape.
-	for _, arr := range []any{[]any{"B1"}, []string{"B1"}} {
+	for _, arr := range []any{[]any{cp2CaseAlias}, []string{cp2CaseAlias}} {
 		rows[0].Cases[0].Input[0] = cp2Input{Pointer: "/input/prestate", Type: "array<alias>", ValueOrAlias: arr}
-		if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}); err == nil || !strings.Contains(err.Error(), `alias "B1"`) {
-			t.Fatalf("array alias %T: error = %v, want a rejection naming B1", arr, err)
+		if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}, map[string]bool{}); err == nil || !strings.Contains(err.Error(), `alias "`+cp2CaseAlias+`"`) {
+			t.Fatalf("array alias %T: error = %v, want a rejection naming %s", arr, err, cp2CaseAlias)
 		}
 	}
 	rows[0].Cases[0].Input[0] = c.Input[0]
@@ -1651,12 +1655,12 @@ func TestCanonicalPipelineV2AliasesResolveInFixtures(t *testing.T) {
 	}
 	// A pointer tagged u64 may not resolve to an object fixture.
 	rows[0].Cases[0].Input[0].Type = "u64"
-	if err := cp2ValidateAliases(rows, block); err == nil || !strings.Contains(err.Error(), "is a object fixture, want u64") {
+	if err := cp2ValidateAliases(rows, block, map[string]bool{}); err == nil || !strings.Contains(err.Error(), "is a object fixture, want u64") {
 		t.Fatalf("type mismatch: error = %v, want the fixture type named", err)
 	}
 	// A token tag carries a machine token, never a catalog alias.
 	rows[0].Cases[0].Input[0].Type, rows[0].Cases[0].Input[0].ValueOrAlias = "token", "ABSENT"
-	if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}); err != nil {
+	if err := cp2ValidateAliases(rows, map[string]cp2Fixture{}, map[string]bool{}); err != nil {
 		t.Fatalf("token input must not demand a fixture: %v", err)
 	}
 	for name, catalog := range map[string]map[string]cp2Fixture{
@@ -1754,6 +1758,7 @@ func TestCanonicalPipelineV2GrammarParity(t *testing.T) {
 		"machineToken": {cp2TokenRE.String(), str(append(defs, "machineToken", "pattern")...)},
 		"snakeToken":   {cp2SnakeRE.String(), str(append(defs, "snakeToken", "pattern")...)},
 		"alias":        {cp2UpperTokenRE.String(), str(append(defs, "alias", "pattern")...)},
+		"resolvedKey":  {cp2ResolvedKeyRE.String(), str(append(defs, "resolvedKey", "pattern")...)},
 		"case_id":      {cp2UpperTokenRE.String(), str(append(defs, "case", "properties", "case_id", "pattern")...)},
 		"issueId":      {cp2IssueRE.String(), str(append(defs, "issueId", "pattern")...)},
 		"bytesLit":     {cp2BytesRE.String(), str(append(defs, "bytesLit", "pattern")...)},
@@ -1914,10 +1919,17 @@ func TestCanonicalPipelineV2ValidatorsNeverPanic(t *testing.T) {
 			}()
 			rows := []cp2Row{row}
 			_, _ = cp2ValidateRows(rows, registry), cp2ValidateFixtures(fixtures)
-			_, _ = cp2ValidateAliases(rows, fixtures), cp2ValidateCases(pick(), row.Cases)
+			_, _ = cp2ValidateAliases(rows, fixtures, map[string]bool{}), cp2ValidateCases(pick(), row.Cases)
 			_, _ = cp2ValidateInputs(pick(), []cp2Input{in}), cp2ValidateExpected(pick(), row.Cases[0].Expected)
 			_, _ = cp2ValidateRPC(pick(), row.Cases[0].Expected.RPC), cp2InputOK(in)
 			_, _ = cp2FixtureValueOK(cp2Fixture{Type: pick(), Value: value}), cp2ClosedValueOK(value)
+			_ = cp2ValidateR1208Expected(pick(), map[string]any{"expected": map[string]any{
+				"commit_truth": pick(), "state_image": value, "canonical_applied_blocks": value,
+			}, "input": []any{value, map[string]any{"pointer": pick(), "value_or_alias": value}}},
+				fixtures, map[string]cp2Fixture{pick(): {Type: pick(), Value: value}},
+				map[string][]string{"CHAIN_IMAGE_V1": {pick()}})
+			_ = cp2ValidateResolved(fixtures)
+			_, _ = cp2DirectFieldNames(cpMap{"images": value})
 		}()
 	}
 }
@@ -1961,24 +1973,27 @@ func TestCanonicalPipelineV2IntegerAndScheduleAliases(t *testing.T) {
 		t.Error("the float64 arm must accept integral values inside the bound and reject one above it")
 	}
 	sched := cp2Row{RowID: "C01-DIRECT-001", Kind: "observation", Cases: []cp2Case{cp2ValidCase()}}
-	sched.Cases[0].ScheduleID = cp2Ptr("SCHED")
+	sched.Cases[0].ScheduleID = cp2Ptr(cp2CaseSchedAlias)
 	block1 := cp2Fixture{Type: "object", Value: cpMap{"h": 1}}
 	for name, tc := range map[string]struct {
 		catalog map[string]cp2Fixture
 		ok      bool
 	}{
-		"schedule present":       {map[string]cp2Fixture{"B1": block1, "SCHED": {Type: "object", Value: cpMap{"barrier": "A"}}}, true},
-		"schedule absent":        {map[string]cp2Fixture{"B1": block1}, false},
-		"schedule not an object": {map[string]cp2Fixture{"B1": block1, "SCHED": {Type: "u64", Value: 1}}, false},
+		"schedule present":       {map[string]cp2Fixture{cp2CaseAlias: block1, cp2CaseSchedAlias: {Type: "object", Value: cpMap{"barrier": "A"}}}, true},
+		"schedule absent":        {map[string]cp2Fixture{cp2CaseAlias: block1}, false},
+		"schedule not an object": {map[string]cp2Fixture{cp2CaseAlias: block1, cp2CaseSchedAlias: {Type: "u64", Value: 1}}, false},
 	} {
-		if err := cp2ValidateAliases([]cp2Row{sched}, tc.catalog); (err == nil) != tc.ok {
+		if err := cp2ValidateAliases([]cp2Row{sched}, tc.catalog, map[string]bool{}); (err == nil) != tc.ok {
 			t.Errorf("%s: err = %v, want ok = %v", name, err, tc.ok)
 		}
 	}
+	sched.Cases[0].ScheduleID = cp2Ptr("SCHED")
+	borrowed := map[string]cp2Fixture{cp2CaseAlias: block1, "SCHED": {Type: "object", Value: cpMap{"barrier": "A"}}}
+	if err := cp2ValidateAliases([]cp2Row{sched}, borrowed, map[string]bool{}); err == nil || !strings.Contains(err.Error(), "outside the case namespace") {
+		t.Errorf("borrowed schedule id: error = %v, want a namespace rejection", err)
+	}
 }
 
-// TestCanonicalPipelineV2CorpusIsByteDeterministic proves the dormant revision
-// is reproducible and carries neither retired v1 field.
 func TestCanonicalPipelineV2CorpusIsByteDeterministic(t *testing.T) {
 	first := filepath.Join(t.TempDir(), "canonical_pipeline_v2.json")
 	second := filepath.Join(t.TempDir(), "canonical_pipeline_v2.json")
@@ -2007,5 +2022,837 @@ func TestCanonicalPipelineV2CorpusIsByteDeterministic(t *testing.T) {
 	epoch, _ := artifact["_meta"].(map[string]any)["closure_epoch"].(map[string]any)
 	if epoch["manifest_root_sha256"] != cp2ManifestRootSHA256 || epoch["status"] != cp2ClosureStatus {
 		t.Fatalf("closure epoch = %v, want the bound RUB-1206 manifest identity in status %q", epoch, cp2ClosureStatus)
+	}
+}
+
+func cp2AuthorityControl(t *testing.T) map[string]any {
+	t.Helper()
+	var doc map[string]any
+	dec := json.NewDecoder(bytes.NewReader(cp2AuthoritySource))
+	dec.UseNumber()
+	if err := dec.Decode(&doc); err != nil {
+		t.Fatalf("decode authority control: %v", err)
+	}
+	return doc
+}
+
+func cp2ValidateAuthorityDoc(t *testing.T, doc map[string]any) error {
+	t.Helper()
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("re-encode mutated authority: %v", err)
+	}
+	payload, err := cp2DecodeAuthority(raw, fmt.Sprintf("%x", sha256.Sum256(raw)))
+	if err != nil {
+		return err
+	}
+	return cp2ValidateR1208Payload(payload)
+}
+
+func cp2AuthorityCase(t *testing.T, doc map[string]any, rowID, caseID string) map[string]any {
+	t.Helper()
+	rows, _ := doc["rows"].([]any)
+	for _, raw := range rows {
+		row, _ := raw.(map[string]any)
+		if id, _ := row["row_id"].(string); id != rowID {
+			continue
+		}
+		cases, _ := row["cases"].([]any)
+		for _, rawCase := range cases {
+			c, _ := rawCase.(map[string]any)
+			if id, _ := c["case_id"].(string); id == caseID {
+				return c
+			}
+		}
+	}
+	t.Fatalf("negative control target %s/%s is gone", rowID, caseID)
+	return nil
+}
+
+func cp2CaseInput(t *testing.T, d map[string]any, rowID, caseID, pointer string) map[string]any {
+	t.Helper()
+	for _, raw := range cp2AuthorityCase(t, d, rowID, caseID)["input"].([]any) {
+		if in := raw.(map[string]any); in["pointer"] == pointer {
+			return in
+		}
+	}
+	t.Fatalf("case %s/%s states no %s", rowID, caseID, pointer)
+	return nil
+}
+
+func cp2CaseImage(t *testing.T, c map[string]any, image string) map[string]any {
+	t.Helper()
+	expected, _ := c["expected"].(map[string]any)
+	images, _ := expected["state_image"].(map[string]any)
+	p, ok := images[image].(map[string]any)
+	if !ok {
+		t.Fatalf("case carries no %s projection", image)
+	}
+	return p
+}
+
+func cp2CaseSummary(t *testing.T, c map[string]any) []any {
+	t.Helper()
+	expected, _ := c["expected"].(map[string]any)
+	rows, ok := expected["canonical_applied_blocks"].([]any)
+	if !ok {
+		t.Fatalf("case carries no summary array")
+	}
+	return rows
+}
+
+func TestCanonicalPipelineV2AuthorityPinIsExact(t *testing.T) {
+	if _, err := cp2DecodeAuthority(cp2AuthoritySource, cp2AuthoritySourceSHA256); err != nil {
+		t.Fatalf("control must decode under its pin: %v", err)
+	}
+	mutated := append(slices.Clone(cp2AuthoritySource), ' ')
+	if _, err := cp2DecodeAuthority(mutated, cp2AuthoritySourceSHA256); err == nil ||
+		!strings.Contains(err.Error(), "authority source sha256=") {
+		t.Errorf("one appended byte: error = %v, want a sha256 pin rejection", err)
+	}
+	if _, err := cp2DecodeAuthority([]byte("{}{}"), fmt.Sprintf("%x", sha256.Sum256([]byte("{}{}")))); err == nil ||
+		!strings.Contains(err.Error(), "trailing JSON") {
+		t.Errorf("two documents: error = %v, want a trailing JSON rejection", err)
+	}
+	if _, err := cp2DecodeAuthority([]byte("{"), fmt.Sprintf("%x", sha256.Sum256([]byte("{")))); err == nil ||
+		!strings.Contains(err.Error(), "authority source json") {
+		t.Errorf("truncated document: error = %v, want a json rejection", err)
+	}
+	for _, doc := range []string{
+		`{"rows":[],"unexpected_top_level":1}`,
+		`{"fixtures":{"A":{"type":"u64","value":1,"stray":2}}}`,
+	} {
+		if _, err := cp2DecodeAuthority([]byte(doc), fmt.Sprintf("%x", sha256.Sum256([]byte(doc)))); err == nil ||
+			!strings.Contains(err.Error(), "unknown field") {
+			t.Errorf("%s: error = %v, want an unknown-field rejection", doc, err)
+		}
+	}
+	if got := fmt.Sprintf("%x", sha256.Sum256(cp2AuthoritySource)); got != cp2AuthoritySourceSHA256 {
+		t.Errorf("embedded authority sha256 = %s, want the pinned %s", got, cp2AuthoritySourceSHA256)
+	}
+}
+
+func TestCanonicalPipelineV2DirectFieldsMatchTheManifest(t *testing.T) {
+	payload, err := cp2DecodeAuthority(cp2AuthoritySource, cp2AuthoritySourceSHA256)
+	if err != nil {
+		t.Fatalf("decode authority: %v", err)
+	}
+	direct, err := cp2DirectFieldNames(payload.ImageManifest)
+	if err != nil {
+		t.Fatalf("derive direct fields: %v", err)
+	}
+	named := map[string]bool{}
+	for _, fields := range direct {
+		for _, f := range fields {
+			named[f] = true
+		}
+	}
+	for field := range cp2DirectFieldTypes {
+		if !named[field] {
+			t.Errorf("cp2DirectFieldTypes declares %q, which no manifest image names", field)
+		}
+	}
+	if len(named) != len(cp2DirectFieldTypes) {
+		t.Errorf("manifest names %d direct fields, cp2DirectFieldTypes declares %d", len(named), len(cp2DirectFieldTypes))
+	}
+	manifest := cp2JSONImage(payload.ImageManifest).(map[string]any)
+	images := manifest["images"].(map[string]any)
+	chain := images["CHAIN_IMAGE_V1"].(map[string]any)
+	chain["direct_fields"] = []any{"tip_hash", "height", "already_generated"}
+	if _, err := cp2DirectFieldNames(manifest); err == nil ||
+		!strings.Contains(err.Error(), "has no declared type") {
+		t.Errorf("substituted manifest direct field: error = %v, want an undeclared-type rejection", err)
+	}
+}
+
+func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
+	if err := cp2ValidateAuthorityDoc(t, cp2AuthorityControl(t)); err != nil {
+		t.Fatalf("control authority must validate: %v", err)
+	}
+	identity := func(part, field string, value any) func(*testing.T, map[string]any) {
+		return func(_ *testing.T, d map[string]any) {
+			v := d["fixtures"].(map[string]any)["R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0"].(map[string]any)["value"].(map[string]any)
+			switch part {
+			case "commit":
+				v = v["commit"].(map[string]any)
+			case "chunk0":
+				v = v["chunks"].([]any)[0].(map[string]any)
+			case "chunk1":
+				v = v["chunks"].([]any)[1].(map[string]any)
+			}
+			v[field] = value
+		}
+	}
+	fault := func(caseID, field string, value any) func(*testing.T, map[string]any) {
+		return func(_ *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_DACLEAN_001_"+caseID+"_INPUT_RETAINED_RECORD_FAULT"].(map[string]any)["value"].(map[string]any)[field] = value
+		}
+	}
+	ownerFault := func(field string, value any) func(*testing.T, map[string]any) {
+		return func(_ *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_INPUT_OWNER_TOKEN_FAULT"].(map[string]any)["value"].(map[string]any)[field] = value
+		}
+	}
+	ownerClaim := func(field string, value any) func(*testing.T, map[string]any) {
+		return func(_ *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_CLAIM_DA_SET_1"].(map[string]any)["value"].(map[string]any)[field] = value
+		}
+	}
+	corruptFirstFixture := func(d map[string]any, suffix string) map[string]any {
+		return d["fixtures"].(map[string]any)["R1208_DACLEAN_001_CORRUPT_FIRST_"+suffix].(map[string]any)
+	}
+	for field, value := range map[string]any{"notes": []any{"note"}, "authority": map[string]any{"bound": "fixed"}} {
+		doc := cp2AuthorityControl(t)
+		doc["rows"].([]any)[0].(map[string]any)[field] = value
+		if err := cp2ValidateAuthorityDoc(t, doc); err != nil {
+			t.Fatalf("schema-legal row %s must validate: %v", field, err)
+		}
+	}
+	aliasDoc := cp2AuthorityControl(t)
+	aliasFixtures := aliasDoc["fixtures"].(map[string]any)
+	aliasFixtures["R1208_REORG_001_MAIN_CONNECT_COUNT"] = map[string]any{"type": "u64", "value": json.Number("3")}
+	aliasFixtures["R1208_SUMMARY_001_SINGLE_BLOCK_NO_DA_SET_COUNT"] = map[string]any{"type": "u64", "value": json.Number("0")}
+	cp2CaseInput(t, aliasDoc, "C01-REORG-001", "MAIN", "/input/connect_count")["value_or_alias"] = "R1208_REORG_001_MAIN_CONNECT_COUNT"
+	cp2CaseInput(t, aliasDoc, "C01-SUMMARY-001", "SINGLE_BLOCK_NO_DA", "/input/block_complete_da_set_count")["value_or_alias"] = "R1208_SUMMARY_001_SINGLE_BLOCK_NO_DA_SET_COUNT"
+	if err := cp2ValidateAuthorityDoc(t, aliasDoc); err != nil {
+		t.Fatalf("schema-legal u64 count aliases must validate: %v", err)
+	}
+	mutate := map[string]func(*testing.T, map[string]any){
+		"closure binding substituted": func(t *testing.T, d map[string]any) {
+			d["closure_bindings"].(map[string]any)["image_manifest_hash"] = strings.Repeat("00", 32)
+		},
+		"image manifest edited": func(t *testing.T, d map[string]any) {
+			m := d["image_manifest"].(map[string]any)
+			m["image_manifest_version"] = "rubin-c01-image-manifest-v2-draft"
+		},
+		"summary manifest edited": func(t *testing.T, d map[string]any) {
+			m := d["summary_manifest"].(map[string]any)
+			m["summary_manifest_version"] = "tampered"
+		},
+		"unauthorized row id": func(t *testing.T, d map[string]any) {
+			d["rows"].([]any)[0].(map[string]any)["row_id"] = "C01-DIRECT-002"
+		},
+		"unknown row field": func(_ *testing.T, d map[string]any) {
+			d["rows"].([]any)[0].(map[string]any)["unknown"] = true
+		},
+		"unknown case field": func(_ *testing.T, d map[string]any) {
+			d["rows"].([]any)[0].(map[string]any)["cases"].([]any)[0].(map[string]any)["unknown"] = true
+		},
+		"case count off the census": func(t *testing.T, d map[string]any) {
+			row := d["rows"].([]any)[0].(map[string]any)
+			cases := row["cases"].([]any)
+			row["cases"] = append(cases, cases[0])
+		},
+		"resolved value unknown tag": func(t *testing.T, d map[string]any) {
+			values := d["resolved_values"].(map[string]any)
+			values[slices.Sorted(maps.Keys(values))[0]].(map[string]any)["type"] = "bytes"
+		},
+		"resolved key not a token": func(t *testing.T, d map[string]any) {
+			values := d["resolved_values"].(map[string]any)
+			first := slices.Sorted(maps.Keys(values))[0]
+			values["bad key"] = values[first]
+		},
+		"orphan resolved value": func(t *testing.T, d map[string]any) {
+			d["resolved_values"].(map[string]any)["tip_hash@C01-DIRECT-001/ORPHAN:new"] = map[string]any{"type": "bytes32_hex", "value": strings.Repeat("22", 32)}
+		},
+		"digest alias substituted": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "MULTI_BLOCK_ORDER")
+			other := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["digest_alias"] = cp2CaseImage(t, other, "CHAIN_IMAGE_V1")["digest_alias"]
+		},
+		"digest alias absent": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			delete(cp2CaseImage(t, c, "CHAIN_IMAGE_V1"), "digest_alias")
+		},
+		"digest alias wrong type": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			alias := cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["digest_alias"].(string)
+			entry := d["resolved_values"].(map[string]any)[alias].(map[string]any)
+			entry["type"], entry["value"] = "u64", json.Number("7")
+		},
+		"direct field dropped": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			fields := cp2CaseImage(t, c, "STANDARD_MEMPOOL_IMAGE_V1")["direct_fields"].(map[string]any)
+			delete(fields, "used_bytes")
+		},
+		"direct field alias substituted": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			other := cp2AuthorityCase(t, d, "C01-GENESIS-001", "MAIN")
+			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["direct_fields"].(map[string]any)["height"] = cp2CaseImage(t, other, "CHAIN_IMAGE_V1")["direct_fields"].(map[string]any)["height"]
+		},
+		"one image omitted": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			expected := c["expected"].(map[string]any)
+			delete(expected["state_image"].(map[string]any), "RETAINED_DA_IMAGE_V1")
+		},
+		"relation and its aliases moved together": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")
+			values := d["resolved_values"].(map[string]any)
+			p := cp2CaseImage(t, c, "RETAINED_DA_IMAGE_V1")
+			rename := func(old string) string {
+				renamed := strings.Replace(old, ":unchanged", ":new", 1)
+				values[renamed] = values[old]
+				delete(values, old)
+				return renamed
+			}
+			p["relation"] = "new"
+			p["digest_alias"] = rename(p["digest_alias"].(string))
+			fields := p["direct_fields"].(map[string]any)
+			for _, f := range slices.Sorted(maps.Keys(fields)) {
+				fields[f] = rename(fields[f].(string))
+			}
+		},
+		"relation contradicts NEW truth": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["relation"] = "old"
+		},
+		"relation contradicts OLD truth": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DACLEAN-001", "CORRUPT_FIRST")
+			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["relation"] = "new"
+		},
+		"relation contradicts NOT_APPLICABLE truth": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")
+			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["relation"] = "new"
+		},
+		"stale owner stable tip": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			alias := cp2CaseImage(t, c, "OWNER_IMAGE_V1")["direct_fields"].(map[string]any)["stable_tip"].(string)
+			entry := d["resolved_values"].(map[string]any)[alias].(map[string]any)
+			entry["value"].(map[string]any)["hash"] = strings.Repeat("00", 32)
+		},
+		"stale chain tip with a consistent owner": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			tip := cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["direct_fields"].(map[string]any)["tip_hash"].(string)
+			stable := cp2CaseImage(t, c, "OWNER_IMAGE_V1")["direct_fields"].(map[string]any)["stable_tip"].(string)
+			values := d["resolved_values"].(map[string]any)
+			values[tip].(map[string]any)["value"] = strings.Repeat("11", 32)
+			values[stable].(map[string]any)["value"].(map[string]any)["hash"] = strings.Repeat("11", 32)
+		},
+		"summary row substituted block_hash": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "MULTI_BLOCK_ORDER")
+			rows := cp2CaseSummary(t, c)
+			a, b := rows[0].(map[string]any), rows[1].(map[string]any)
+			a["block_hash"], b["block_hash"] = b["block_hash"], a["block_hash"]
+		},
+		"summary rows reversed": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "MULTI_BLOCK_ORDER")
+			rows := cp2CaseSummary(t, c)
+			slices.Reverse(rows)
+		},
+		"summary height gap": func(_ *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_SUMMARY_001_MULTI_BLOCK_ORDER_B1P"].(map[string]any)["value"].(map[string]any)["height"] = json.Number("1")
+		},
+		"summary height wraps max to zero": func(_ *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_SUMMARY_001_MULTI_BLOCK_ORDER_B1P"].(map[string]any)["value"].(map[string]any)["height"] = json.Number("18446744073709551615")
+			d["fixtures"].(map[string]any)["R1208_SUMMARY_001_MULTI_BLOCK_ORDER_B2P"].(map[string]any)["value"].(map[string]any)["height"] = json.Number("0")
+			d["fixtures"].(map[string]any)["R1208_SUMMARY_001_MULTI_BLOCK_ORDER_B3P"].(map[string]any)["value"].(map[string]any)["height"] = json.Number("1")
+		},
+		"da occurrence duplicated": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
+			ids := cp2CaseSummary(t, c)[0].(map[string]any)["complete_da_ids"].([]any)
+			ids[1] = ids[0]
+		},
+		"da occurrence dropped": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DACLEAN-001", "MULTI_SET_SUCCESS")
+			row := cp2CaseSummary(t, c)[0].(map[string]any)
+			ids := row["complete_da_ids"].([]any)
+			row["complete_da_ids"] = ids[:len(ids)-1]
+		},
+		"da occurrence reordered": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
+			ids := cp2CaseSummary(t, c)[0].(map[string]any)["complete_da_ids"].([]any)
+			slices.Reverse(ids)
+		},
+		"da alias absent from the catalog": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
+			cp2CaseSummary(t, c)[0].(map[string]any)["complete_da_ids"].([]any)[0] = "R1208_ABSENT_DA_ID"
+		},
+		"empty summary on a NEW connect": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			c["expected"].(map[string]any)["canonical_applied_blocks"] = []any{}
+		},
+		"disconnect summary null instead of empty": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DISCONNECT-001", "MAIN")
+			c["expected"].(map[string]any)["canonical_applied_blocks"] = nil
+		},
+		"non-NEW summary is not null": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")
+			c["expected"].(map[string]any)["canonical_applied_blocks"] = []any{}
+		},
+		"summary_rows effect drift": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-REORG-001", "MAIN")
+			effects := c["expected"].(map[string]any)["effects"].(map[string]any)
+			effects["summary_rows"].(map[string]any)["value"] = json.Number("99")
+		},
+		"resolved key trailing newline": func(t *testing.T, d map[string]any) {
+			values := d["resolved_values"].(map[string]any)
+			first := slices.Sorted(maps.Keys(values))[0]
+			values[first+"\n"] = values[first]
+			delete(values, first)
+		},
+		"stale standard used_bytes": func(t *testing.T, d map[string]any) {
+			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN"), "STANDARD_MEMPOOL_IMAGE_V1", "used_bytes")["value"] = json.Number("999999")
+		},
+		"prestate sizes overflow the used-bytes total": func(t *testing.T, d map[string]any) {
+			f := d["fixtures"].(map[string]any)
+			f["R1208_SIDE_001_MAIN_TX_S1"].(map[string]any)["value"].(map[string]any)["size"] = json.Number("18446744073709551615")
+			f["R1208_SIDE_001_MAIN_TX_S2"] = map[string]any{"type": "object", "value": map[string]any{"kind": "standard_record", "size": json.Number("1"), "admission_seq": json.Number("2")}}
+			for _, raw := range cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")["input"].([]any) {
+				if in := raw.(map[string]any); in["pointer"] == "/input/prestate_standard_records" {
+					in["value_or_alias"] = []any{"R1208_SIDE_001_MAIN_TX_S1", "R1208_SIDE_001_MAIN_TX_S2"}
+				}
+			}
+		},
+		"stale retained set_count": func(t *testing.T, d map[string]any) {
+			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-DACLEAN-001", "ABSENT_RETAINED"), "RETAINED_DA_IMAGE_V1", "set_count")["value"] = json.Number("0")
+		},
+		"stale retained pinned_payload_bytes": func(t *testing.T, d map[string]any) {
+			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-DISCONNECT-001", "MAIN"), "RETAINED_DA_IMAGE_V1", "pinned_payload_bytes")["value"] = json.Number("999999")
+		},
+		"rewound last_admission_seq": func(t *testing.T, d map[string]any) {
+			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN"), "STANDARD_MEMPOOL_IMAGE_V1", "last_admission_seq")["value"] = json.Number("0")
+		},
+		"chain utxo_count off the tip block": func(t *testing.T, d map[string]any) {
+			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN"), "CHAIN_IMAGE_V1", "utxo_count")["value"] = json.Number("777")
+		},
+		"stale owner claim_count": func(t *testing.T, d map[string]any) {
+			cp2ResolvedValueOf(t, d, cp2AuthorityCase(t, d, "C01-DACLEAN-001", "CORRUPT_FIRST"), "OWNER_IMAGE_V1", "claim_count")["value"] = json.Number("99")
+		},
+		"da occurrence dropped from a block_includes case": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			cp2CaseSummary(t, c)[0].(map[string]any)["complete_da_ids"] = []any{}
+		},
+		"da occurrence added where the stated count is zero": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "SINGLE_BLOCK_NO_DA")
+			row := cp2CaseSummary(t, c)[0].(map[string]any)
+			row["complete_da_ids"] = []any{"R1208_SUMMARY_001_SINGLE_BLOCK_NO_DA_B1_HASH"}
+		},
+		"cross-block occurrence dropped from one row": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "CROSS_BLOCK_OCCURRENCE")
+			cp2CaseSummary(t, c)[1].(map[string]any)["complete_da_ids"] = []any{}
+		},
+		"summary borrows another case's da alias": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-REORG-001", "MAIN")
+			cp2CaseSummary(t, c)[0].(map[string]any)["complete_da_ids"].([]any)[0] = "R1208_DACLEAN_001_EXACT_MATCH_DA_ID_1"
+		},
+		"wire disposed row with an old image": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")
+			expected := c["expected"].(map[string]any)
+			expected["result"], expected["wire_disposition"], expected["commit_truth"] = nil, "CHECKSUM_REJECT", "OLD"
+			cp2CaseImage(t, c, "CHAIN_IMAGE_V1")["relation"] = "old"
+		},
+		"standalone disconnect publishes a row": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DISCONNECT-001", "MAIN")
+			c["expected"].(map[string]any)["canonical_applied_blocks"] = []any{map[string]any{}}
+		},
+		"connected block dropped from the summary": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-REORG-001", "MAIN")
+			c["expected"].(map[string]any)["canonical_applied_blocks"] = cp2CaseSummary(t, c)[1:]
+		},
+		"summary_rows effect is a bool on a zero-row case": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "DISCONNECT_EMPTY")
+			c["expected"].(map[string]any)["effects"].(map[string]any)["summary_rows"].(map[string]any)["value"] = true
+		},
+		"one occurrence spelling disagrees": func(t *testing.T, d map[string]any) {
+			f := d["fixtures"].(map[string]any)["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
+			f["value"].(map[string]any)["da_id"] = strings.Repeat("0", 63) + "9"
+		},
+		"included identity missing chunks": func(_ *testing.T, d map[string]any) {
+			v := d["fixtures"].(map[string]any)["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0"].(map[string]any)["value"].(map[string]any)
+			delete(v, "chunks")
+		},
+		"one occurrence spelling stated empty": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA")
+			for _, raw := range c["input"].([]any) {
+				if in := raw.(map[string]any); in["pointer"] == "/input/block_included_set_identities" {
+					in["value_or_alias"] = []any{}
+				}
+			}
+		},
+		"grouped included-set entry stated empty": func(t *testing.T, d map[string]any) {
+			entry := d["fixtures"].(map[string]any)["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
+			entry["value"].(map[string]any)["identities"] = []any{}
+		},
+		"commit truth outside the closed set": func(t *testing.T, d map[string]any) {
+			cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")["expected"].(map[string]any)["commit_truth"] = "MAYBE"
+		},
+		"one grouped included-set entry omitted": func(t *testing.T, d map[string]any) {
+			in := cp2CaseInput(t, d, "C01-DACLEAN-001", "MULTI_SET_SUCCESS", "/input/block_included_set_identities")
+			in["value_or_alias"] = in["value_or_alias"].([]any)[:1]
+		},
+		"summary block substituted for another stated block": func(t *testing.T, d map[string]any) {
+			cp2CaseInput(t, d, "C01-REORG-001", "MAIN", "/input/prestored_side_branch")["value_or_alias"].([]any)[0] = "R1208_REORG_001_MAIN_B3P"
+		},
+		"input alias borrowed from another case": func(t *testing.T, d map[string]any) {
+			cp2CaseInput(t, d, "C01-DACLEAN-001", "CORRUPT_FIRST", "/input/stimulus_block")["value_or_alias"] = "R1208_GENESIS_001_MAIN_G"
+		},
+		"included-set identity substituted": func(t *testing.T, d map[string]any) {
+			fixtures := d["fixtures"].(map[string]any)
+			entry := fixtures["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
+			identities := entry["value"].(map[string]any)["identities"].([]any)
+			identities[0].(map[string]any)["da_id"] = strings.Repeat("0", 63) + "9"
+		},
+		"genesis summary block substituted": func(t *testing.T, d map[string]any) {
+			f := d["fixtures"].(map[string]any)
+			f["R1208_GENESIS_001_MAIN_G2"] = f["R1208_GENESIS_001_MAIN_G"]
+			cp2CaseSummary(t, cp2AuthorityCase(t, d, "C01-GENESIS-001", "MAIN"))[0].(map[string]any)["block_id"] = "R1208_GENESIS_001_MAIN_G2"
+		},
+		"equal-work winner substituted": func(t *testing.T, d map[string]any) {
+			f := d["fixtures"].(map[string]any)
+			loser := f["R1208_EQUALWORK_001_MAIN_BB"].(map[string]any)["value"].(map[string]any)["block_hash"]
+			f["R1208_EQUALWORK_001_MAIN_BB_HASH"] = map[string]any{"type": "bytes32_hex", "value": loser}
+			row := cp2CaseSummary(t, cp2AuthorityCase(t, d, "C01-EQUALWORK-001", "MAIN"))[0].(map[string]any)
+			row["block_id"], row["block_hash"] = "R1208_EQUALWORK_001_MAIN_BB", "R1208_EQUALWORK_001_MAIN_BB_HASH"
+		},
+		"equal-work relation contradicts the candidates": func(t *testing.T, d map[string]any) {
+			cp2CaseInput(t, d, "C01-EQUALWORK-001", "MAIN", "/input/candidate_hash_relation")["value_or_alias"] = "hash_bb_lt_hash_ba_raw_bytes"
+		},
+		"post-disconnect tip rolled to genesis": func(t *testing.T, d map[string]any) {
+			chain := cp2CaseInput(t, d, "C01-DISCONNECT-001", "MAIN", "/input/prestate_canonical_chain")["value_or_alias"].([]any)
+			chain[0], chain[1] = chain[1], chain[0]
+		},
+		"non-NEW chain tip rolled back one block": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-SIDE-001", "MAIN")
+			below := d["fixtures"].(map[string]any)["R1208_SIDE_001_MAIN_B0"].(map[string]any)["value"].(map[string]any)
+			cp2ResolvedValueOf(t, d, c, "CHAIN_IMAGE_V1", "tip_hash")["value"] = below["block_hash"]
+			cp2ResolvedValueOf(t, d, c, "CHAIN_IMAGE_V1", "height")["value"] = below["height"]
+			stable := cp2ResolvedValueOf(t, d, c, "OWNER_IMAGE_V1", "stable_tip")["value"].(map[string]any)
+			stable["hash"], stable["height"] = below["block_hash"], below["height"]
+		},
+		"non-NEW effect claims summary rows": func(t *testing.T, d map[string]any) {
+			cp2AuthorityCase(t, d, "C01-SUMMARY-001", "NON_NEW_NULL")["expected"].(map[string]any)["effects"].(map[string]any)["summary_rows"].(map[string]any)["value"] = json.Number("7")
+		},
+		"two grouped keys bind one summary row": func(t *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)["value"].(map[string]any)["block_id"] = "SUCCESS_B1P"
+		},
+		"grouped key matches no summary row": func(t *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)["value"].(map[string]any)["block_id"] = "NOPE"
+		},
+		"grouped key matches two summary rows": func(t *testing.T, d map[string]any) {
+			cp2CaseSummary(t, cp2AuthorityCase(t, d, "C01-DACLEAN-001", "MULTI_SET_SUCCESS"))[1].(map[string]any)["block_id"] = "R1208_DACLEAN_001_MULTI_SET_SUCCESS_B1P"
+		},
+		"flat and grouped shapes mixed": func(t *testing.T, d map[string]any) {
+			entry := d["fixtures"].(map[string]any)["R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)
+			entry["value"] = entry["value"].(map[string]any)["identities"].([]any)[0]
+		},
+		"flat identities on a multi-row summary": func(t *testing.T, d map[string]any) {
+			c := cp2AuthorityCase(t, d, "C01-DIRECT-001", "MAIN")
+			c["expected"].(map[string]any)["canonical_applied_blocks"] = append(cp2CaseSummary(t, c), cp2CaseSummary(t, c)[0])
+		},
+		"authority row dropped": func(t *testing.T, d map[string]any) {
+			rows := d["rows"].([]any)
+			d["rows"] = rows[:len(rows)-1]
+		},
+		"migrated row duplicated": func(t *testing.T, d map[string]any) {
+			rows := d["rows"].([]any)
+			rows[len(rows)-1] = rows[0]
+		},
+		"disconnect over a one-block prestate chain": func(t *testing.T, d map[string]any) {
+			cp2CaseInput(t, d, "C01-DISCONNECT-001", "MAIN", "/input/prestate_canonical_chain")["value_or_alias"] = []any{"R1208_DISCONNECT_001_MAIN_G"}
+		},
+		"orphan fixtures entry": func(t *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_DIRECT_001_MAIN_ORPHAN"] = map[string]any{"type": "u64", "value": json.Number("1")}
+		},
+		"stated array repeats an alias": func(t *testing.T, d map[string]any) {
+			in := cp2CaseInput(t, d, "C01-SUMMARY-001", "SINGLE_BLOCK_WITH_DA", "/input/block_complete_da_ids_in_transaction_order")
+			ids := in["value_or_alias"].([]any)
+			in["value_or_alias"] = append(ids, ids[0])
+		},
+		"input pointer typo": func(t *testing.T, d map[string]any) {
+			cp2CaseInput(t, d, "C01-SIDE-001", "MAIN", "/input/prestate_standard_records")["pointer"] = "/input/prestate_standard_record"
+		},
+		"branch tip does not out-work the prestate tip": func(t *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_REORG_001_MAIN_B3P"].(map[string]any)["value"].(map[string]any)["cumulative_chainwork"] = json.Number("3")
+		},
+		"equal-work candidates carry unequal work": func(t *testing.T, d map[string]any) {
+			d["fixtures"].(map[string]any)["R1208_EQUALWORK_001_MAIN_BB"].(map[string]any)["value"].(map[string]any)["cumulative_chainwork"] = json.Number("4")
+		},
+		"included commit wtxid differs":       identity("commit", "wtxid", strings.Repeat("1", 64)),
+		"included commit txid differs":        identity("commit", "txid", strings.Repeat("1", 64)),
+		"included chunk wtxid differs":        identity("chunk0", "wtxid", strings.Repeat("1", 64)),
+		"included chunk txid differs":         identity("chunk0", "txid", strings.Repeat("1", 64)),
+		"included chunks empty":               identity("", "chunks", []any{}),
+		"included chunk index overflows u16":  identity("chunk0", "chunk_index", json.Number("65536")),
+		"included chunk indices nonascending": identity("chunk1", "chunk_index", json.Number("0")),
+		"flat included identities duplicate": func(_ *testing.T, d map[string]any) {
+			fixtures := d["fixtures"].(map[string]any)
+			first := fixtures["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0"].(map[string]any)["value"].(map[string]any)
+			fixtures["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"].(map[string]any)["value"].(map[string]any)["da_id"] = first["da_id"]
+		},
+		"ordered DA ids duplicate": func(_ *testing.T, d map[string]any) {
+			fixtures := d["fixtures"].(map[string]any)
+			fixtures["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_DA_ID_LO"].(map[string]any)["value"] = fixtures["R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_DA_ID_HI"].(map[string]any)["value"]
+		},
+		"retained aliases share one identity": func(_ *testing.T, d map[string]any) {
+			corruptFirstFixture(d, "DA_SET_2")["value"] = corruptFirstFixture(d, "DA_SET_1")["value"]
+		},
+		"selected plan names a non-retained record": func(t *testing.T, d map[string]any) {
+			in := cp2CaseInput(t, d, "C01-DACLEAN-001", "CORRUPT_FIRST", "/input/selected_record_plan_order")
+			in["value_or_alias"].([]any)[2] = "R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_2"
+		},
+		"owner token fault kind differs":   ownerFault("kind", "other"),
+		"owner token fault target differs": ownerFault("target", "CLAIM_DA_SET_2"),
+		"owner token claim txid differs":   ownerClaim("txid", strings.Repeat("1", 64)),
+		"owner token claim kind differs":   ownerClaim("kind", "other"),
+		"owner token claim domain differs": ownerClaim("domain", "standard"),
+		"required removal effect absent": func(t *testing.T, d map[string]any) {
+			delete(cp2AuthorityCase(t, d, "C01-DACLEAN-001", "EXACT_MATCH")["expected"].(map[string]any)["effects"].(map[string]any), "da_record_removals")
+		},
+		"fault kind differs":                   fault("CORRUPT_FIRST", "kind", "other"),
+		"fault position differs":               fault("CORRUPT_FIRST", "position_index", json.Number("1")),
+		"fault target differs":                 fault("CORRUPT_FIRST", "target", "DA_SET_2"),
+		"fault position is architecture-large": fault("CORRUPT_FIRST", "position_index", json.Number("4294967296")),
+		"middle fault position differs":        fault("CORRUPT_MIDDLE", "position_index", json.Number("0")),
+		"middle fault target differs":          fault("CORRUPT_MIDDLE", "target", "DA_SET_1"),
+		"last fault position differs":          fault("CORRUPT_LAST", "position_index", json.Number("0")),
+		"last fault target differs":            fault("CORRUPT_LAST", "target", "DA_SET_1"),
+	}
+	want := map[string]string{
+		"closure binding substituted":                        "closure bindings differ from frozen v8 pins",
+		"image manifest edited":                              "image manifest hash=",
+		"summary manifest edited":                            "summary manifest hash=",
+		"unauthorized row id":                                "unauthorized",
+		"unknown row field":                                  `json: unknown field "unknown"`,
+		"unknown case field":                                 `json: unknown field "unknown"`,
+		"case count off the census":                          "unauthorized",
+		"resolved value unknown tag":                         "is not a valid bytes literal",
+		"resolved key not a token":                           "is not the composed full form",
+		"resolved key trailing newline":                      "is not the composed full form",
+		"stale standard used_bytes":                          "used_bytes=999999 differs from the 201",
+		"prestate sizes overflow the used-bytes total":       "overflows the used-bytes total",
+		"grouped included-set entry stated empty":            "differ from the included-set identities",
+		"commit truth outside the closed set":                "no allowed relation",
+		"stale retained set_count":                           "set_count=0 differs from the 1",
+		"stale retained pinned_payload_bytes":                "pinned_payload_bytes=999999 differs from the 308",
+		"rewound last_admission_seq":                         "last_admission_seq=0 is rewound below the 1",
+		"chain utxo_count off the tip block":                 "CHAIN tip must equal the stated prestate chain tip",
+		"stale owner claim_count":                            "claim_count=99 differs from the 3",
+		"da occurrence dropped from a block_includes case":   "differ from the included-set identities",
+		"da occurrence added where the stated count is zero": "summary carries 1 complete DA-set occurrences, the case states 0",
+		"cross-block occurrence dropped from one row":        "differ from the included-set identities",
+		"summary borrows another case's da alias":            "is outside the case namespace",
+		"wire disposed row with an old image":                "invalid for OLD",
+		"orphan resolved value":                              "is referenced by no image projection",
+		"digest alias substituted":                           "digest_alias=",
+		"digest alias absent":                                "digest_alias missing",
+		"digest alias wrong type":                            "type=u64 want bytes32_hex",
+		"direct field dropped":                               "direct_fields shape",
+		"direct field alias substituted":                     "alias=",
+		"one image omitted":                                  "must carry exactly 4 images",
+		"relation and its aliases moved together":            "invalid for NOT_APPLICABLE",
+		"relation contradicts NEW truth":                     "invalid for NEW",
+		"relation contradicts OLD truth":                     "invalid for OLD",
+		"relation contradicts NOT_APPLICABLE truth":          "invalid for NOT_APPLICABLE",
+		"stale owner stable tip":                             "OWNER/stable_tip must equal the published CHAIN tip",
+		"stale chain tip with a consistent owner":            "CHAIN tip must equal the last canonical-applied block",
+		"summary row substituted block_hash":                 "is not the hash of block_id",
+		"summary rows reversed":                              "summary heights are not consecutive",
+		"summary height gap":                                 "summary heights are not consecutive",
+		"summary height wraps max to zero":                   "summary heights are not consecutive",
+		"da occurrence duplicated":                           "not strictly raw-byte ascending",
+		"da occurrence dropped":                              "differ from the included-set identities",
+		"da occurrence reordered":                            "not strictly raw-byte ascending",
+		"da alias absent from the catalog":                   "is absent",
+		"empty summary on a NEW connect":                     "/input/disconnect_command",
+		"disconnect summary null instead of empty":           "summary must be array for NEW",
+		"non-NEW summary is not null":                        "summary must be null for NOT_APPLICABLE",
+		"summary_rows effect drift":                          "effects.summary_rows",
+		"summary_rows effect is a bool on a zero-row case":   "effects.summary_rows=true differs from the 0 published rows",
+		"included-set identity substituted":                  "differ from the included-set identities",
+		"one grouped included-set entry omitted":             "binds 1 of 2 summary rows to a stated included-set group",
+		"summary block substituted for another stated block": "differ from the stated branch",
+		"input alias borrowed from another case":             "is outside the case namespace",
+		"one occurrence spelling disagrees":                  "stated occurrence spellings disagree",
+		"included identity missing chunks":                   "invalid complete DA set identity",
+		"one occurrence spelling stated empty":               "stated occurrence spellings disagree",
+		"standalone disconnect publishes a row":              "standalone disconnect and must carry an exact empty summary",
+		"connected block dropped from the summary":           "summary carries 2 rows, the case states connect_count 3",
+		"genesis summary block substituted":                  "differ from the stated branch",
+		"equal-work winner substituted":                      "differ from the stated branch",
+		"equal-work relation contradicts the candidates":     "states candidate_hash_relation hash_bb_lt_hash_ba_raw_bytes, which the candidates' own hashes",
+		"post-disconnect tip rolled to genesis":              "CHAIN tip must equal the block below the disconnected tip",
+		"non-NEW chain tip rolled back one block":            "CHAIN tip must equal the stated prestate chain tip",
+		"non-NEW effect claims summary rows":                 "effects.summary_rows=7 differs from the 0 published rows",
+		"two grouped keys bind one summary row":              "is bound by more than one included-set group",
+		"grouped key matches no summary row":                 "included-set block \"NOPE\" matches no summary row",
+		"grouped key matches two summary rows":               "matches more than one summary row",
+		"flat and grouped shapes mixed":                      "mixes flat and grouped included-set identities",
+		"flat identities on a multi-row summary":             "flat included-set identities but 2 summary rows",
+		"authority row dropped":                              "RUB-1208 rows=",
+		"migrated row duplicated":                            "RUB-1208 row C01-DIRECT-001 cases=1 unauthorized",
+		"disconnect over a one-block prestate chain":         "states a 1-block prestate chain, so entry -2 is not stated",
+		"orphan fixtures entry":                              "fixtures[R1208_DIRECT_001_MAIN_ORPHAN] is named by no case",
+		"stated array repeats an alias":                      "names an alias more than once",
+		"input pointer typo":                                 `input pointer "/input/prestate_standard_record" is outside the closed stated vocabulary`,
+		"branch tip does not out-work the prestate tip":      "branch tip cumulative_chainwork 3 does not win fork choice",
+		"equal-work candidates carry unequal work":           "candidate_work_relation exactly_equal_cumulative_chainwork, which the candidates' own cumulative_chainwork 3 / 4",
+		"included commit wtxid differs":                      "effects/da_record_removals=1 want 0",
+		"included commit txid differs":                       "effects/da_record_removals=1 want 0",
+		"included chunk wtxid differs":                       "effects/da_record_removals=1 want 0",
+		"included chunk txid differs":                        "effects/da_record_removals=1 want 0",
+		"included chunks empty":                              "invalid complete DA set identity",
+		"included chunk index overflows u16":                 "chunks/0: invalid or non-ascending identity",
+		"included chunk indices nonascending":                "chunks/1: invalid or non-ascending identity",
+		"flat included identities duplicate":                 "block_included_set_identities states an identity more than once",
+		"ordered DA ids duplicate":                           "block_complete_da_ids_in_transaction_order states an identity more than once",
+		"retained aliases share one identity":                "prestate_retained_da_sets: aliases \"R1208_DACLEAN_001_CORRUPT_FIRST_DA_SET_1\" and \"R1208_DACLEAN_001_CORRUPT_FIRST_DA_SET_2\" resolve to the same complete identity",
+		"selected plan names a non-retained record":          "selected_record_plan_order: alias \"R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_2\" does not name a retained prestate record",
+		"owner token fault kind differs":                     "owner_token_fault/kind: want exact_token_mismatch_against_selected_record",
+		"owner token fault target differs":                   "owner_token_fault/target: does not name the stated prestate owner claim",
+		"owner token claim txid differs":                     "owner claim does not exactly bind retained DA_SET_1 commit txid",
+		"owner token claim kind differs":                     "owner claim does not exactly bind retained DA_SET_1 commit txid",
+		"owner token claim domain differs":                   "owner claim does not exactly bind retained DA_SET_1 commit txid",
+		"required removal effect absent":                     "effects/da_record_removals: required",
+		"fault kind differs":                                 "retained_record_fault/kind: want selected_record_corrupt",
+		"fault position differs":                             "retained_record_fault/position_index: want 0",
+		"fault target differs":                               "retained_record_fault/target: does not name selected_record_plan_order[0]",
+		"fault position is architecture-large":               "retained_record_fault/position_index: want 0",
+		"middle fault position differs":                      "retained_record_fault/position_index: want 1",
+		"middle fault target differs":                        "retained_record_fault/target: does not name selected_record_plan_order[1]",
+		"last fault position differs":                        "retained_record_fault/position_index: want 2",
+		"last fault target differs":                          "retained_record_fault/target: does not name selected_record_plan_order[2]",
+	}
+	for _, name := range slices.Sorted(maps.Keys(mutate)) {
+		t.Run(name, func(t *testing.T) {
+			reason, named := want[name]
+			if !named {
+				t.Fatalf("mutation %q has no expected reason: a table entry without one asserts nothing", name)
+			}
+			doc := cp2AuthorityControl(t)
+			mutate[name](t, doc)
+			err := cp2ValidateAuthorityDoc(t, doc)
+			if err == nil {
+				t.Fatalf("mutation %q was accepted", name)
+			}
+			if !strings.Contains(err.Error(), reason) {
+				t.Errorf("mutation %q: error = %v, want it to contain %q", name, err, reason)
+			}
+		})
+	}
+}
+
+func cp2ResolvedValueOf(t *testing.T, d, c map[string]any, image, field string) map[string]any {
+	t.Helper()
+	alias := cp2CaseImage(t, c, image)["direct_fields"].(map[string]any)[field].(string)
+	entry, ok := d["resolved_values"].(map[string]any)[alias].(map[string]any)
+	if !ok {
+		t.Fatalf("resolved alias %q is absent", alias)
+	}
+	return entry
+}
+
+func TestCanonicalPipelineV2NullResultRowsStayExpressible(t *testing.T) {
+	for _, tc := range []struct {
+		label, row, key, value, truth string
+		unnamed                       []string
+	}{
+		{"wire disposed", "C01-SIDE-001", "wire_disposition", "CHECKSUM_REJECT", "OLD", nil},
+		{"recovery", "C01-DIRECT-001", "recovery_outcome", "identity_proven_route1", "NOT_APPLICABLE", []string{"R1208_DIRECT_001_MAIN_B1_HASH", "R1208_DIRECT_001_MAIN_DA_ID_1"}},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			doc := cp2AuthorityControl(t)
+			for _, alias := range tc.unnamed {
+				delete(doc["fixtures"].(map[string]any), alias)
+			}
+			expected := cp2AuthorityCase(t, doc, tc.row, "MAIN")["expected"].(map[string]any)
+			expected["result"], expected["pipeline_reached"] = nil, false
+			expected[tc.key], expected["commit_truth"] = tc.value, tc.truth
+			expected["canonical_applied_blocks"] = nil
+			expected["canonical_counters"] = map[string]any{"accepted_delta": "0", "rejected_delta": "0"}
+			expected["rpc_projection"] = map[string]any{
+				"class": "NOT_REACHED", "http": nil, "commit_state": nil, "mined": "not_applicable",
+				"success_identity": "not_applicable", "error_class": nil, "phase": "not_reached",
+			}
+			if err := cp2ValidateAuthorityDoc(t, doc); err != nil {
+				t.Fatalf("%s row must stay expressible: %v", tc.label, err)
+			}
+		})
+	}
+}
+
+func TestCanonicalPipelineV2ProbeFile(t *testing.T) {
+	path := os.Getenv("RUBIN_CP2_PROBE_FILE")
+	if path == "" {
+		t.Skip("RUBIN_CP2_PROBE_FILE is unset")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read probe file: %v", err)
+	}
+	var doc map[string]any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&doc); err != nil {
+		t.Fatalf("probe file is not one JSON document: %v", err)
+	}
+	payload := cp2R1208Payload{
+		ClosureBindings: map[string]string{},
+		ImageManifest:   cpMap{},
+		SummaryManifest: cpMap{},
+	}
+	if meta, ok := doc["_meta"].(map[string]any); ok {
+		if epoch, ok := meta["closure_epoch"].(map[string]any); ok {
+			for _, k := range []string{
+				"closure_manifest_version", "manifest_root_sha256", "row_case_design_hash",
+				"input_schema_design_hash", "expected_projection_design_hash",
+				"image_manifest_hash", "summary_manifest_hash", "mutation_assignment_hash",
+			} {
+				if v, ok := epoch[k].(string); ok {
+					payload.ClosureBindings[k] = v
+				}
+			}
+		}
+	}
+	remarshal(t, doc["image_manifest"], &payload.ImageManifest)
+	remarshal(t, doc["summary_manifest"], &payload.SummaryManifest)
+	remarshal(t, doc["fixtures"], &payload.Fixtures)
+	remarshal(t, doc["resolved_values"], &payload.ResolvedValues)
+	rows, _ := doc["rows"].([]any)
+	for _, row := range rows {
+		encoded, err := json.Marshal(row)
+		if err != nil {
+			t.Fatalf("re-encode probe row: %v", err)
+		}
+		payload.Rows = append(payload.Rows, encoded)
+	}
+	if err := cp2ValidateR1208Payload(payload); err != nil {
+		t.Fatalf("probe file rejected: %v", err)
+	}
+}
+
+func remarshal(t *testing.T, from any, into any) {
+	t.Helper()
+	raw, err := json.Marshal(from)
+	if err != nil {
+		t.Fatalf("re-encode probe section: %v", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(into); err != nil {
+		t.Fatalf("decode probe section: %v", err)
+	}
+}
+
+func TestCanonicalPipelineV2AliasNamespacesCannotCollide(t *testing.T) {
+	composed := cp2ComposedAlias("tip_hash", "C01-DIRECT-001/MAIN", "new")
+	if !strings.Contains(composed, "@") {
+		t.Fatalf("composed alias %q carries no @, the argument does not hold", composed)
+	}
+	if cp2UpperTokenRE.MatchString(composed) {
+		t.Errorf("catalog alias grammar accepts the composed key %q", composed)
+	}
+	for _, s := range []string{"A@B", "A:B", "A/B"} {
+		if cp2UpperTokenRE.MatchString(s) {
+			t.Errorf("catalog alias grammar accepts %q, which a composed key may contain", s)
+		}
+	}
+	payload, err := cp2DecodeAuthority(cp2AuthoritySource, cp2AuthoritySourceSHA256)
+	if err != nil {
+		t.Fatalf("decode authority: %v", err)
+	}
+	for name := range payload.ResolvedValues {
+		if _, clash := payload.Fixtures[name]; clash {
+			t.Fatalf("alias %q is in both namespaces", name)
+		}
 	}
 }

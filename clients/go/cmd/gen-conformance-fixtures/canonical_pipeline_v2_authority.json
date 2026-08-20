@@ -1,171 +1,13 @@
 {
-  "artifact": "canonical_pipeline_v2",
-  "schema_version": 2,
-  "schema": "conformance/schemas/cv-canonical-pipeline-v2.json",
-  "_meta": {
-    "authority_source_sha256": "d9f3a4ba81a2e8c115ab559990da26e81cefdbe8ba4a92d81010e81dc94ec1e3",
-    "closure_epoch": {
-      "closure_manifest_version": "rubin-c01-design-closure-v8",
-      "expected_projection_design_hash": "b1e539c3cb7155c5821b5788c4de9aea40cf706fb9faf4c44af7e4ae21586d8c",
-      "image_manifest_hash": "08fbabf558f3df10e89bd6160804db8efc814378140ae4514717952c7d913116",
-      "input_schema_design_hash": "468b2b5401e12915b9bcdd76cb2714eda837fcd9401324ac7677770bb7069f57",
-      "manifest_root_sha256": "e9b4bbfa09b4cf939973b229b59105f8996282b6fc2ffaa094362e76948bbc89",
-      "mutation_assignment_hash": "94f846a9b454e019a2b1c7b833c75862151d1e66f91216e107b2478d0f0cb4a5",
-      "obligation_set_hash": "4af7520a185bfa732ece69f5a6c12f4d012917b9c6fd1d8f42b98195284f59b0",
-      "relation_snapshot_hash": "3e7db40fa6917b5a7d61ab113a74f7107f8f166080393e1c9789dbd927b24edb",
-      "row_case_design_hash": "8b70ba6d504a7e7ed92bf7bd0b769cb9eeb48356bdf356247520916629cc1216",
-      "stage_owner_relation_hash": "4513e667a03dabca78e7369e989676ea5ab3d75d59a817493d84fe968b3a8518",
-      "status": "building",
-      "summary_manifest_hash": "39e39d94593d434e7051a3f77ca94d3dd31a5a8d65a3f12a764e29a5fde041dd"
-    },
-    "corpus_revision": "C01-R2",
-    "generated_by": "clients/go/cmd/gen-conformance-fixtures",
-    "governing_spec_oid": "c14b010024ce633e1027bf891af3c49741db544a",
-    "parent_artifact_sha256": "68a1f551333ca17b93ebe3e6d737658cc661e40b40a3b41dbe27b37b74537246",
-    "parent_r1_merge_oid": "3b1e45590b18994b4ce5f6e3ec2d9dc6b416e880",
-    "parent_r1_source_oid": "1e24b0249dab04b21de492ad307b6a47c63f12b5",
-    "parent_schema_sha256": "c962f5434d373ac5268527cc82ef8eb68fd45ddac50c849da32b3f8ef87cdca7",
-    "schema_version": 2,
-    "warning": "MACHINE-GENERATED FILE. Do not edit manually."
-  },
-  "authority": {
-    "architecture_parent": "RUB-882 as superseded by RUB-1180; row and case design closed by RUB-1206",
-    "baseline_ref": "2tbmz9y2xt-lang/rubin-protocol@f972c0262c9762ce92e4c51263cd35b43d47df34",
-    "consume_freeze_point": "POST-RUB-911 target: the frozen P2P effect order carries no canonical-DA consume step",
-    "executors": "none while status is building: no C02/C02A/C03/C04 consumer may bind this revision",
-    "expected_row_origin": "authored architecture authority; no Go or Rust node production path is called to compute an expected value",
-    "issue": "RUB-1208",
-    "normative_spec_ref": "2tbmz9y2xt-lang/rubin-spec@c14b010024ce633e1027bf891af3c49741db544a",
-    "status": "BUILDING C01-R2 authority — RUB-1208 migrates 8 registered publication/summary/DA-cleanup rows and 24 cases; remaining rows land in RUB-1209..RUB-1212 and RUB-1204 completes the revision"
-  },
-  "result_taxonomy": [
-    "ACCEPTED",
-    "STORED_NONCANONICAL",
-    "KNOWN_BLOCK_NOOP(CANONICAL|STORED_NONCANONICAL)",
-    "MISSING_PARENT",
-    "ORPHAN_RETAINED",
-    "ORPHAN_ALREADY_RETAINED",
-    "CONSENSUS_INVALID(exact_error)",
-    "LOCAL_BUSY",
-    "LOCAL_RESOURCE_UNAVAILABLE(resource)",
-    "STALE_LOCAL_PLAN",
-    "LOCAL_CANCELLED",
-    "LOCAL_STORE_ERROR(noncanonical)",
-    "LOCAL_PERSISTENCE_ERROR(precommit)",
-    "TERMINAL_STORE_INTEGRITY(canonical)",
-    "TERMINAL_LOCAL_INVARIANT(evidence)",
-    "TERMINAL_PERSISTENCE(old|new|neither_or_unreadable)"
-  ],
-  "commit_truth_values": [
-    "OLD",
-    "NEW",
-    "UNKNOWN",
-    "NOT_APPLICABLE"
-  ],
-  "rpc_projection_classes": [
-    "NOT_REACHED",
-    "STARTUP_UNAVAILABLE_503",
-    "BOOTSTRAP_CONTINUATION_ONLY",
-    "BOOTSTRAP_TERMINAL_INVARIANT_503",
-    "BOOTSTRAP_TERMINAL_NEW_503_COMMITTED",
-    "MINED_200_COMMITTED",
-    "MINED_422_NOT_COMMITTED",
-    "MINED_503_NOT_COMMITTED",
-    "MINED_503_COMMITTED_TERMINAL_NEW",
-    "MINED_503_UNKNOWN"
-  ],
-  "wire_disposition_values": [
-    "CHECKSUM_REJECT",
-    "CMPCT_DECODE_REJECT",
-    "EXACT_HASH_MISMATCH",
-    "FRAME_LENGTH_REJECT",
-    "FRAME_READ_ERROR"
-  ],
-  "recovery_outcome_values": [
-    "bootstrap_only_pregenesis",
-    "fail_closed_no_exposure",
-    "identity_proven_route1"
-  ],
-  "row_registry": {
-    "C01-APPLYMETA-CAP-001": "observation",
-    "C01-APPLYMETA-OVER-001": "observation",
-    "C01-BUDGET-RACE-001": "observation",
-    "C01-BUSY-001": "observation",
-    "C01-CANCEL-001": "observation",
-    "C01-CKPT-001": "authority",
-    "C01-CKPT-CASES-001": "observation",
-    "C01-DACLEAN-001": "observation",
-    "C01-DIRECT-001": "observation",
-    "C01-DISCONNECT-001": "observation",
-    "C01-EFFECT-ACCEPTED-001": "observation",
-    "C01-EFFECT-STORED-001": "observation",
-    "C01-EQUALWORK-001": "observation",
-    "C01-FAULT-ACCEPTED-001": "observation",
-    "C01-FAULT-STORED-001": "observation",
-    "C01-FIRSTERR-INDEX-001": "observation",
-    "C01-FIRSTERR-LATE-001": "observation",
-    "C01-FORBID-BUSY-001": "forbidden",
-    "C01-FORBID-INTERMEDIATE-001": "forbidden",
-    "C01-FORBID-PERSIST-001": "forbidden",
-    "C01-FORBID-PRESENCE-001": "forbidden",
-    "C01-FORBID-RETRY-001": "forbidden",
-    "C01-FORBID-SURFACE-001": "forbidden",
-    "C01-GC-CRASH-001": "authority",
-    "C01-GC-CRASH-CASES-001": "observation",
-    "C01-GC-HEALTHY-001": "observation",
-    "C01-GC-ORDER-001": "observation",
-    "C01-GENESIS-001": "observation",
-    "C01-GO-CONSTANTS-001": "authority",
-    "C01-INVENTORY-001": "authority",
-    "C01-INVENTORY-CASES-001": "observation",
-    "C01-INVENTORY-RECLAIMED-001": "authority",
-    "C01-NEUTRAL-001": "authority",
-    "C01-NOOP-CMPCT-001": "observation",
-    "C01-NOOP-FULL-001": "observation",
-    "C01-ORPH-DUP-001": "observation",
-    "C01-ORPH-EVICT-001": "observation",
-    "C01-ORPH-INFLIGHT-001": "observation",
-    "C01-ORPH-MISSING-PARENT-001": "observation",
-    "C01-ORPH-OVERSIZE-001": "observation",
-    "C01-ORPH-RETAIN-001": "observation",
-    "C01-ORPH-SOURCE51-001": "observation",
-    "C01-PATH-COMPACT-001": "observation",
-    "C01-PATH-FALLBACK-001": "observation",
-    "C01-PATH-FULL-001": "observation",
-    "C01-PATHS-001": "authority",
-    "C01-POSTCOMMIT-001": "authority",
-    "C01-PRENS-001": "observation",
-    "C01-PRESENCE-001": "authority",
-    "C01-PRESENCE-STORED-001": "observation",
-    "C01-PRESENCE-STOREERR-001": "observation",
-    "C01-PRESENCE-TERMINAL-001": "observation",
-    "C01-PROVIDER-001": "authority",
-    "C01-PROVIDER-CASES-001": "observation",
-    "C01-RECLAIMED-RECEIVE-001": "observation",
-    "C01-RECOVERY-001": "observation",
-    "C01-RELAY-ACCEPTED-001": "authority",
-    "C01-RELAY-OBS-001": "observation",
-    "C01-RELAY-STORED-001": "authority",
-    "C01-REORG-001": "observation",
-    "C01-REORGMETA-001": "authority",
-    "C01-REORGMETA-CASES-001": "observation",
-    "C01-RES-IDENTITIES-001": "authority",
-    "C01-RES-IDENTITIES-PENDING-001": "authority",
-    "C01-RES-RECOVERY-001": "observation",
-    "C01-RESOLVER-001": "observation",
-    "C01-RPC-PHASE-001": "observation",
-    "C01-SIDE-001": "observation",
-    "C01-SRCKEY-001": "authority",
-    "C01-SRCKEY-CASES-001": "observation",
-    "C01-STALE-001": "observation",
-    "C01-SUMMARY-001": "observation",
-    "C01-TERMINV-001": "observation",
-    "C01-TERMINV-BOOT-001": "observation",
-    "C01-TP-NEW-001": "observation",
-    "C01-TP-OLD-001": "observation",
-    "C01-TP-UNKNOWN-001": "observation",
-    "C01-TTLFENCE-001": "observation",
-    "C01-WIRE-OVERFLOW-001": "observation"
+  "closure_bindings": {
+    "closure_manifest_version": "rubin-c01-design-closure-v8",
+    "expected_projection_design_hash": "b1e539c3cb7155c5821b5788c4de9aea40cf706fb9faf4c44af7e4ae21586d8c",
+    "image_manifest_hash": "08fbabf558f3df10e89bd6160804db8efc814378140ae4514717952c7d913116",
+    "input_schema_design_hash": "468b2b5401e12915b9bcdd76cb2714eda837fcd9401324ac7677770bb7069f57",
+    "manifest_root_sha256": "e9b4bbfa09b4cf939973b229b59105f8996282b6fc2ffaa094362e76948bbc89",
+    "mutation_assignment_hash": "94f846a9b454e019a2b1c7b833c75862151d1e66f91216e107b2478d0f0cb4a5",
+    "row_case_design_hash": "8b70ba6d504a7e7ed92bf7bd0b769cb9eeb48356bdf356247520916629cc1216",
+    "summary_manifest_hash": "39e39d94593d434e7051a3f77ca94d3dd31a5a8d65a3f12a764e29a5fde041dd"
   },
   "fixtures": {
     "R1208_DACLEAN_001_ABSENT_RETAINED_B0": {
@@ -3335,8 +3177,8 @@
       "byte_strings": "variable-length byte/string fields are encoded as u64 byte length followed by the raw bytes; sorting keys uses raw bytes before length-prefix encoding",
       "bytes32": "raw 32 bytes; JSON projection lowercase hex",
       "closed_enums": "PendingOutpointDomain u8 index order: standard=0, da=1; daRelaySetState u8 index order from RUBIN_COMPACT_BLOCKS §5 state order: ORPHAN_CHUNKS=0, STAGED_COMMIT=1, COMPLETE_SET=2",
-      "digest_projection_in_c01": "each image is compared as its digest (`state_image.\u003cimage\u003e.digest`) PLUS the small direct fields listed as `direct_fields` (so a same-tip wrong image is localizable); the adapter emits both from production state via a test seam",
-      "domain_separator": "ASCII tag `RUBIN-C01-\u003cIMAGE_NAME\u003e-V1` followed by 0x00, prepended once before the concatenated canonical fields",
+      "digest_projection_in_c01": "each image is compared as its digest (`state_image.<image>.digest`) PLUS the small direct fields listed as `direct_fields` (so a same-tip wrong image is localizable); the adapter emits both from production state via a test seam",
+      "domain_separator": "ASCII tag `RUBIN-C01-<IMAGE_NAME>-V1` followed by 0x00, prepended once before the concatenated canonical fields",
       "excluded_by_rule": "Go/Rust pointers, mutexes, allocation layouts, token layouts (PendingOutpointToken seq/owner pointer), private serializer bytes, map iteration order, cache state, admission counters/metrics",
       "hash": "SHA3-256 (the chain's only digest primitive; matches consensus.UtxoSetHash / Rust utxo_set_hash)",
       "integers": "u8 = 1 byte unsigned; u16 = 2-byte big-endian; u32 = 4-byte big-endian; u64 = 8-byte big-endian; u128 = 16-byte big-endian; u256 = 32-byte big-endian (RUB-1153 exact u128; JSON u128 uses the canonical unsigned decimal string)",
@@ -3428,7 +3270,7 @@
               {
                 "go_source": "pendingOutpointClaim.inputs",
                 "name": "inputs",
-                "type": "array\u003coutpoint(txid bytes32, vout u32 big-endian)\u003e in claim order"
+                "type": "array<outpoint(txid bytes32, vout u32 big-endian)> in claim order"
               },
               {
                 "go_source": "pendingOutpointClaim.finalized",
@@ -3442,13 +3284,13 @@
             ],
             "measurement": "canonical digest; JSON projection carries `claim_count`",
             "name": "claims",
-            "type": "array\u003cclaim\u003e sorted by (domain u8, txid bytes32)"
+            "type": "array<claim> sorted by (domain u8, txid bytes32)"
           },
           {
             "go_source": "PendingOutpointOwner.byOutpoint (pending_outpoint_owner.go:132; row = token, txid — token excluded)",
             "measurement": "canonical digest (relational: every by_outpoint row must be an input of exactly one claim)",
             "name": "by_outpoint",
-            "type": "array\u003c(outpoint, txid)\u003e sorted by outpoint canonical key"
+            "type": "array<(outpoint, txid)> sorted by outpoint canonical key"
           },
           {
             "go_source": "PendingOutpointOwner.stableTip (:137)",
@@ -3479,7 +3321,7 @@
         "omission_mutations": [
           "M17: stale/missing owner claim → RED",
           "M26: right tip, stale_tip mismatch → RED",
-          "M34: drop stable_tip -\u003e RED"
+          "M34: drop stable_tip -> RED"
         ]
       },
       "RETAINED_DA_IMAGE_V1": {
@@ -3512,7 +3354,7 @@
               {
                 "go_source": "daRelaySetRecord.chunks (map → sorted)",
                 "name": "chunks",
-                "type": "array\u003c(chunk_index u16, txid bytes32, wtxid bytes32)\u003e ascending chunk_index — the set identity chunk part"
+                "type": "array<(chunk_index u16, txid bytes32, wtxid bytes32)> ascending chunk_index — the set identity chunk part"
               },
               {
                 "go_source": "daRelaySetRecord.payloadBytes",
@@ -3526,7 +3368,7 @@
                 "type": "u64"
               }
             ],
-            "type": "array\u003cset\u003e sorted by da_id ascending raw bytes"
+            "type": "array<set> sorted by da_id ascending raw bytes"
           },
           {
             "go_source": "daRelayState.orphanBytes",
@@ -3538,13 +3380,13 @@
             "go_source": "daRelayState.orphanBytesByDAID",
             "measurement": "canonical digest",
             "name": "orphan_bytes_by_da_id",
-            "type": "array\u003c(da_id, bytes)\u003e sorted by da_id"
+            "type": "array<(da_id, bytes)> sorted by da_id"
           },
           {
             "go_source": "daRelayState.orphanBytesByPeerQuotaKey",
             "measurement": "canonical digest (source-key byte corpus RUB-1212 item 5)",
             "name": "orphan_bytes_by_peer_quota_key",
-            "type": "array\u003c(key string bytes, bytes)\u003e sorted by key bytes"
+            "type": "array<(key string bytes, bytes)> sorted by key bytes"
           },
           {
             "go_source": "daRelayState.pinnedPayloadBytes",
@@ -3626,10 +3468,10 @@
               {
                 "go_source": "mempoolEntry.inputs",
                 "name": "inputs",
-                "type": "array\u003coutpoint(txid bytes32, vout u32 big-endian)\u003e in tx input order"
+                "type": "array<outpoint(txid bytes32, vout u32 big-endian)> in tx input order"
               }
             ],
-            "type": "array\u003crecord\u003e sorted by txid ascending raw bytes"
+            "type": "array<record> sorted by txid ascending raw bytes"
           },
           {
             "go_source": "Mempool.currentMinFeeRate (mempool.go:68)",
@@ -5577,7 +5419,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DIRECT_001_MAIN_G",
                 "R1208_DIRECT_001_MAIN_B0"
@@ -5604,7 +5446,7 @@
               "pointer": "/input/prestate_standard_records",
               "production_setup_sink": "node.Mempool.AddTx (clients/go/node/mempool.go:282)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DIRECT_001_MAIN_TX_S1"
               ]
@@ -5612,9 +5454,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DIRECT_001_MAIN_DA_SET_1"
               ]
@@ -5622,9 +5464,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DIRECT_001_MAIN_CLAIM_TX_S1",
                 "R1208_DIRECT_001_MAIN_CLAIM_DA_SET_1"
@@ -5918,23 +5760,23 @@
               "pointer": "/input/prestate_standard_records",
               "production_setup_sink": "node.Mempool.AddTx (clients/go/node/mempool.go:282)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": []
             },
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": []
             },
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": []
             }
           ],
@@ -6158,7 +6000,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SIDE_001_MAIN_G",
                 "R1208_SIDE_001_MAIN_B0",
@@ -6168,7 +6010,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/stimulus_block",
-              "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg -\u003e storeSideBlockAndSummary (clients/go/node/sync_reorg.go:28,88)",
+              "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg -> storeSideBlockAndSummary (clients/go/node/sync_reorg.go:28,88)",
               "provenance": "normative_boundary",
               "type": "alias",
               "value_or_alias": "R1208_SIDE_001_MAIN_B1P"
@@ -6176,7 +6018,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/stimulus_block_work_relation",
-              "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg -\u003e storeSideBlockAndSummary (clients/go/node/sync_reorg.go:28,88)",
+              "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg -> storeSideBlockAndSummary (clients/go/node/sync_reorg.go:28,88)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "strictly_less_cumulative_work_than_tip"
@@ -6184,7 +6026,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/delivery_entrypoint",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "p2p_block_frame"
@@ -6194,7 +6036,7 @@
               "pointer": "/input/prestate_standard_records",
               "production_setup_sink": "node.Mempool.AddTx (clients/go/node/mempool.go:282)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SIDE_001_MAIN_TX_S1"
               ]
@@ -6202,9 +6044,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SIDE_001_MAIN_DA_SET_1"
               ]
@@ -6212,9 +6054,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SIDE_001_MAIN_CLAIM_TX_S1",
                 "R1208_SIDE_001_MAIN_CLAIM_DA_SET_1"
@@ -6477,7 +6319,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_REORG_001_MAIN_G",
                 "R1208_REORG_001_MAIN_B0",
@@ -6488,9 +6330,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestored_side_branch",
-              "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg -\u003e storeSideBlockAndSummary (clients/go/node/sync_reorg.go:28,88)",
+              "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg -> storeSideBlockAndSummary (clients/go/node/sync_reorg.go:28,88)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_REORG_001_MAIN_B1P",
                 "R1208_REORG_001_MAIN_B2P"
@@ -6507,7 +6349,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/delivery_entrypoint",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "p2p_block_frame"
@@ -6525,7 +6367,7 @@
               "pointer": "/input/prestate_standard_records",
               "production_setup_sink": "node.Mempool.AddTx (clients/go/node/mempool.go:282)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_REORG_001_MAIN_TX_S1",
                 "R1208_REORG_001_MAIN_TX_S2"
@@ -6534,9 +6376,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_REORG_001_MAIN_DA_SET_1",
                 "R1208_REORG_001_MAIN_DA_SET_2"
@@ -6545,9 +6387,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_REORG_001_MAIN_CLAIM_TX_S1",
                 "R1208_REORG_001_MAIN_CLAIM_TX_S2",
@@ -6832,7 +6674,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DISCONNECT_001_MAIN_G",
                 "R1208_DISCONNECT_001_MAIN_B0",
@@ -6842,7 +6684,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_standard_min_fee_rate_raised_above_default",
-              "production_setup_sink": "node.Mempool.AddTx past the low-water threshold -\u003e raiseMinFeeRateAfterEvictionLocked (clients/go/node/mempool_fee_floor.go:127) — production route only; Mempool.SetCurrentMinFeeRateForTest (mempool_fee_floor.go:97) is a test seam and MUST NOT be the adapter route",
+              "production_setup_sink": "node.Mempool.AddTx past the low-water threshold -> raiseMinFeeRateAfterEvictionLocked (clients/go/node/mempool_fee_floor.go:127) — production route only; Mempool.SetCurrentMinFeeRateForTest (mempool_fee_floor.go:97) is a test seam and MUST NOT be the adapter route",
               "provenance": "normative_boundary",
               "type": "bool",
               "value_or_alias": true
@@ -6860,7 +6702,7 @@
               "pointer": "/input/prestate_standard_records",
               "production_setup_sink": "node.Mempool.AddTx (clients/go/node/mempool.go:282)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DISCONNECT_001_MAIN_TX_S1"
               ]
@@ -6868,9 +6710,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DISCONNECT_001_MAIN_DA_SET_1"
               ]
@@ -6878,9 +6720,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DISCONNECT_001_MAIN_CLAIM_TX_S1",
                 "R1208_DISCONNECT_001_MAIN_CLAIM_DA_SET_1"
@@ -7105,7 +6947,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_EQUALWORK_001_MAIN_G",
                 "R1208_EQUALWORK_001_MAIN_B0"
@@ -7146,9 +6988,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/schedule_arms",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55) — ARM_AB delivers and validation-completes BA then BB; ARM_BA reverses both orders",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55) — ARM_AB delivers and validation-completes BA then BB; ARM_BA reverses both orders",
               "provenance": "deterministic_schedule_control",
-              "type": "array\u003ctoken\u003e",
+              "type": "array<token>",
               "value_or_alias": [
                 "ARM_AB",
                 "ARM_BA"
@@ -7157,7 +6999,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/delivery_entrypoint",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "p2p_block_frame"
@@ -7388,7 +7230,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_EXACT_MATCH_G",
                 "R1208_DACLEAN_001_EXACT_MATCH_B0"
@@ -7405,7 +7247,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/delivery_entrypoint",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "p2p_block_frame"
@@ -7413,9 +7255,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_EXACT_MATCH_DA_SET_1"
               ]
@@ -7423,9 +7265,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_EXACT_MATCH_CLAIM_DA_SET_1"
               ]
@@ -7435,7 +7277,7 @@
               "pointer": "/input/block_included_set_identities",
               "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28); the block's DA commit+chunk transactions determine the included identities",
               "provenance": "normative_boundary",
-              "type": "array\u003cobject\u003e",
+              "type": "array<object>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0"
               ]
@@ -7578,7 +7420,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_REPEATED_IDENTITY_G",
                 "R1208_DACLEAN_001_REPEATED_IDENTITY_B0",
@@ -7589,9 +7431,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestored_side_branch",
-              "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg -\u003e storeSideBlockAndSummary (clients/go/node/sync_reorg.go:28,88)",
+              "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg -> storeSideBlockAndSummary (clients/go/node/sync_reorg.go:28,88)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_REPEATED_IDENTITY_B1P"
               ]
@@ -7607,7 +7449,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/delivery_entrypoint",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "p2p_block_frame"
@@ -7623,9 +7465,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_REPEATED_IDENTITY_DA_SET_1"
               ]
@@ -7633,9 +7475,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_REPEATED_IDENTITY_CLAIM_DA_SET_1"
               ]
@@ -7645,7 +7487,7 @@
               "pointer": "/input/block_included_set_identities",
               "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28); the SAME exact identity ID1 occurs in both newly canonical blocks",
               "provenance": "normative_boundary",
-              "type": "array\u003cobject\u003e",
+              "type": "array<object>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_REPEATED_IDENTITY_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0",
                 "R1208_DACLEAN_001_REPEATED_IDENTITY_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"
@@ -7779,7 +7621,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_SAME_DAID_DIFF_IDENTITY_G",
                 "R1208_DACLEAN_001_SAME_DAID_DIFF_IDENTITY_B0"
@@ -7796,7 +7638,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/delivery_entrypoint",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "p2p_block_frame"
@@ -7804,9 +7646,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_SAME_DAID_DIFF_IDENTITY_DA_SET_1"
               ]
@@ -7814,9 +7656,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_SAME_DAID_DIFF_IDENTITY_CLAIM_DA_SET_1"
               ]
@@ -7826,14 +7668,14 @@
               "pointer": "/input/block_included_set_identities",
               "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28); the block's DA commit+chunk transactions determine the included identities",
               "provenance": "normative_boundary",
-              "type": "array\u003cobject\u003e",
+              "type": "array<object>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_SAME_DAID_DIFF_IDENTITY_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0"
               ]
             }
           ],
           "notes": [
-            "Killer for a da_id-keyed comparator: the merged Go path consumes by da_id alone (p2p.Service.consumeCompleteDASetIDs -\u003e daRelayState.consumeCompleteSet, clients/go/node/p2p/da_relay_consume.go:75, da_relay_state.go:285), so this case fails at 3b1e4559 by construction and is discharged by the RUB-1200/1201/1202 exact-identity cleanup owners."
+            "Killer for a da_id-keyed comparator: the merged Go path consumes by da_id alone (p2p.Service.consumeCompleteDASetIDs -> daRelayState.consumeCompleteSet, clients/go/node/p2p/da_relay_consume.go:75, da_relay_state.go:285), so this case fails at 3b1e4559 by construction and is discharged by the RUB-1200/1201/1202 exact-identity cleanup owners."
           ],
           "obligation_ids": [
             "OBL-SPEC-MP641-034",
@@ -7957,7 +7799,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_ABSENT_RETAINED_G",
                 "R1208_DACLEAN_001_ABSENT_RETAINED_B0"
@@ -7974,7 +7816,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/delivery_entrypoint",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "p2p_block_frame"
@@ -7982,9 +7824,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_ABSENT_RETAINED_DA_SET_1"
               ]
@@ -7992,9 +7834,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_ABSENT_RETAINED_CLAIM_DA_SET_1"
               ]
@@ -8004,7 +7846,7 @@
               "pointer": "/input/block_included_set_identities",
               "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28); the block's DA commit+chunk transactions determine the included identities",
               "provenance": "normative_boundary",
-              "type": "array\u003cobject\u003e",
+              "type": "array<object>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_ABSENT_RETAINED_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0"
               ]
@@ -8125,7 +7967,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_SAME_TXID_DIFF_WTXID_G",
                 "R1208_DACLEAN_001_SAME_TXID_DIFF_WTXID_B0"
@@ -8142,7 +7984,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/delivery_entrypoint",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "p2p_block_frame"
@@ -8150,9 +7992,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_SAME_TXID_DIFF_WTXID_DA_SET_1"
               ]
@@ -8160,9 +8002,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_SAME_TXID_DIFF_WTXID_CLAIM_DA_SET_1"
               ]
@@ -8172,7 +8014,7 @@
               "pointer": "/input/block_included_set_identities",
               "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28); the block's DA commit+chunk transactions determine the included identities",
               "provenance": "normative_boundary",
-              "type": "array\u003cobject\u003e",
+              "type": "array<object>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_SAME_TXID_DIFF_WTXID_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0"
               ]
@@ -8308,7 +8150,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_CORRUPT_FIRST_G",
                 "R1208_DACLEAN_001_CORRUPT_FIRST_B0"
@@ -8333,9 +8175,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_CORRUPT_FIRST_DA_SET_1",
                 "R1208_DACLEAN_001_CORRUPT_FIRST_DA_SET_2",
@@ -8345,9 +8187,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_CORRUPT_FIRST_CLAIM_DA_SET_1",
                 "R1208_DACLEAN_001_CORRUPT_FIRST_CLAIM_DA_SET_2",
@@ -8359,7 +8201,7 @@
               "pointer": "/input/block_included_set_identities",
               "production_setup_sink": "node.Miner.MineOne (clients/go/node/miner.go:197) driven by the /mine_next RPC handler; the mined candidate is applied through node.SyncEngine.ApplyBlockWithReorg; the candidate includes all three retained identities so the plan selects three records",
               "provenance": "normative_boundary",
-              "type": "array\u003cobject\u003e",
+              "type": "array<object>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0",
                 "R1208_DACLEAN_001_CORRUPT_FIRST_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1",
@@ -8371,7 +8213,7 @@
               "pointer": "/input/selected_record_plan_order",
               "production_setup_sink": "node.Miner.MineOne (clients/go/node/miner.go:197) driven by the /mine_next RPC handler; the mined candidate is applied through node.SyncEngine.ApplyBlockWithReorg; the order is fixed by `I = canonical set identities in newly canonical block/transaction order` (spec 6.4.1 L351), pinned by the candidate's transaction order",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_CORRUPT_FIRST_DA_SET_1",
                 "R1208_DACLEAN_001_CORRUPT_FIRST_DA_SET_2",
@@ -8602,7 +8444,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_CORRUPT_MIDDLE_G",
                 "R1208_DACLEAN_001_CORRUPT_MIDDLE_B0"
@@ -8627,9 +8469,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_CORRUPT_MIDDLE_DA_SET_1",
                 "R1208_DACLEAN_001_CORRUPT_MIDDLE_DA_SET_2",
@@ -8639,9 +8481,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_CORRUPT_MIDDLE_CLAIM_DA_SET_1",
                 "R1208_DACLEAN_001_CORRUPT_MIDDLE_CLAIM_DA_SET_2",
@@ -8653,7 +8495,7 @@
               "pointer": "/input/block_included_set_identities",
               "production_setup_sink": "node.Miner.MineOne (clients/go/node/miner.go:197) driven by the /mine_next RPC handler; the mined candidate is applied through node.SyncEngine.ApplyBlockWithReorg; the candidate includes all three retained identities so the plan selects three records",
               "provenance": "normative_boundary",
-              "type": "array\u003cobject\u003e",
+              "type": "array<object>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_CORRUPT_MIDDLE_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0",
                 "R1208_DACLEAN_001_CORRUPT_MIDDLE_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1",
@@ -8665,7 +8507,7 @@
               "pointer": "/input/selected_record_plan_order",
               "production_setup_sink": "node.Miner.MineOne (clients/go/node/miner.go:197) driven by the /mine_next RPC handler; the mined candidate is applied through node.SyncEngine.ApplyBlockWithReorg; the order is fixed by `I = canonical set identities in newly canonical block/transaction order` (spec 6.4.1 L351), pinned by the candidate's transaction order",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_CORRUPT_MIDDLE_DA_SET_1",
                 "R1208_DACLEAN_001_CORRUPT_MIDDLE_DA_SET_2",
@@ -8896,7 +8738,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_CORRUPT_LAST_G",
                 "R1208_DACLEAN_001_CORRUPT_LAST_B0"
@@ -8921,9 +8763,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_CORRUPT_LAST_DA_SET_1",
                 "R1208_DACLEAN_001_CORRUPT_LAST_DA_SET_2",
@@ -8933,9 +8775,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_CORRUPT_LAST_CLAIM_DA_SET_1",
                 "R1208_DACLEAN_001_CORRUPT_LAST_CLAIM_DA_SET_2",
@@ -8947,7 +8789,7 @@
               "pointer": "/input/block_included_set_identities",
               "production_setup_sink": "node.Miner.MineOne (clients/go/node/miner.go:197) driven by the /mine_next RPC handler; the mined candidate is applied through node.SyncEngine.ApplyBlockWithReorg; the candidate includes all three retained identities so the plan selects three records",
               "provenance": "normative_boundary",
-              "type": "array\u003cobject\u003e",
+              "type": "array<object>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_CORRUPT_LAST_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0",
                 "R1208_DACLEAN_001_CORRUPT_LAST_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1",
@@ -8959,7 +8801,7 @@
               "pointer": "/input/selected_record_plan_order",
               "production_setup_sink": "node.Miner.MineOne (clients/go/node/miner.go:197) driven by the /mine_next RPC handler; the mined candidate is applied through node.SyncEngine.ApplyBlockWithReorg; the order is fixed by `I = canonical set identities in newly canonical block/transaction order` (spec 6.4.1 L351), pinned by the candidate's transaction order",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_CORRUPT_LAST_DA_SET_1",
                 "R1208_DACLEAN_001_CORRUPT_LAST_DA_SET_2",
@@ -9184,7 +9026,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_G",
                 "R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_B0"
@@ -9209,9 +9051,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_DA_SET_1"
               ]
@@ -9219,9 +9061,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_CLAIM_DA_SET_1"
               ]
@@ -9231,7 +9073,7 @@
               "pointer": "/input/block_included_set_identities",
               "production_setup_sink": "node.Miner.MineOne (clients/go/node/miner.go:197) driven by the /mine_next RPC handler; the mined candidate is applied through node.SyncEngine.ApplyBlockWithReorg",
               "provenance": "normative_boundary",
-              "type": "array\u003cobject\u003e",
+              "type": "array<object>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_OWNER_TOKEN_MISMATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0"
               ]
@@ -9468,7 +9310,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_MULTI_SET_SUCCESS_G",
                 "R1208_DACLEAN_001_MULTI_SET_SUCCESS_B0",
@@ -9479,9 +9321,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestored_side_branch",
-              "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg -\u003e storeSideBlockAndSummary (clients/go/node/sync_reorg.go:28,88)",
+              "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg -> storeSideBlockAndSummary (clients/go/node/sync_reorg.go:28,88)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_MULTI_SET_SUCCESS_B1P"
               ]
@@ -9497,7 +9339,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/delivery_entrypoint",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "p2p_block_frame"
@@ -9513,9 +9355,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_MULTI_SET_SUCCESS_DA_SET_1",
                 "R1208_DACLEAN_001_MULTI_SET_SUCCESS_DA_SET_2",
@@ -9525,9 +9367,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_MULTI_SET_SUCCESS_CLAIM_DA_SET_1",
                 "R1208_DACLEAN_001_MULTI_SET_SUCCESS_CLAIM_DA_SET_2",
@@ -9539,7 +9381,7 @@
               "pointer": "/input/block_included_set_identities",
               "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28)",
               "provenance": "normative_boundary",
-              "type": "array\u003cobject\u003e",
+              "type": "array<object>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0",
                 "R1208_DACLEAN_001_MULTI_SET_SUCCESS_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"
@@ -9679,7 +9521,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_OVERLAP_INVALID_REMOVAL_G",
                 "R1208_DACLEAN_001_OVERLAP_INVALID_REMOVAL_B0"
@@ -9696,7 +9538,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/delivery_entrypoint",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "p2p_block_frame"
@@ -9704,9 +9546,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_OVERLAP_INVALID_REMOVAL_DA_SET_1"
               ]
@@ -9714,9 +9556,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_OVERLAP_INVALID_REMOVAL_CLAIM_DA_SET_1"
               ]
@@ -9726,7 +9568,7 @@
               "pointer": "/input/block_included_set_identities",
               "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28)",
               "provenance": "normative_boundary",
-              "type": "array\u003cobject\u003e",
+              "type": "array<object>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_OVERLAP_INVALID_REMOVAL_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0"
               ]
@@ -9736,7 +9578,7 @@
               "pointer": "/input/final_chain_invalid_members",
               "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28); B1 also spends the confirmed outpoint that a DA_SET_1 member spends, so DA_SET_1 is independently final-chain-invalid against C1's confirmed UTXO view",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_OVERLAP_INVALID_REMOVAL_DA_SET_1"
               ]
@@ -9880,7 +9722,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_G",
                 "R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_B0"
@@ -9897,7 +9739,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/delivery_entrypoint",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "p2p_block_frame"
@@ -9907,7 +9749,7 @@
               "pointer": "/input/prestate_standard_records",
               "production_setup_sink": "node.Mempool.AddTx (clients/go/node/mempool.go:282)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_TX_S1",
                 "R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_TX_S2"
@@ -9916,9 +9758,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_DA_SET_1",
                 "R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_DA_SET_2"
@@ -9927,9 +9769,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_CLAIM_TX_S1",
                 "R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_CLAIM_TX_S2",
@@ -9942,7 +9784,7 @@
               "pointer": "/input/block_included_set_identities",
               "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28); B1 includes NO complete DA set — the removals here come only from final-chain invalidity",
               "provenance": "normative_boundary",
-              "type": "array\u003cobject\u003e",
+              "type": "array<object>",
               "value_or_alias": []
             },
             {
@@ -9950,7 +9792,7 @@
               "pointer": "/input/final_chain_invalid_members",
               "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28); B1 spends the confirmed outpoints that TX_S1 and a DA_SET_1 member spend",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_TX_S1",
                 "R1208_DACLEAN_001_FINAL_CHAIN_INVALID_STD_AND_DA_DA_SET_1"
@@ -10179,7 +10021,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SUMMARY_001_SINGLE_BLOCK_NO_DA_G",
                 "R1208_SUMMARY_001_SINGLE_BLOCK_NO_DA_B0"
@@ -10196,7 +10038,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/delivery_entrypoint",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "p2p_block_frame"
@@ -10336,7 +10178,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_G",
                 "R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_B0"
@@ -10353,7 +10195,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/delivery_entrypoint",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "p2p_block_frame"
@@ -10363,7 +10205,7 @@
               "pointer": "/input/block_complete_da_ids_in_transaction_order",
               "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28); the two complete sets appear in B1 in DESCENDING raw-byte order of their da_id, so transaction order and required output order differ",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_DA_ID_HI",
                 "R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_DA_ID_LO"
@@ -10372,9 +10214,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_DA_SET_LO",
                 "R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_DA_SET_HI"
@@ -10383,9 +10225,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_CLAIM_DA_SET_LO",
                 "R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_CLAIM_DA_SET_HI"
@@ -10396,7 +10238,7 @@
               "pointer": "/input/block_included_set_identities",
               "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28); the block's DA commit+chunk transactions determine the included identities",
               "provenance": "normative_boundary",
-              "type": "array\u003cobject\u003e",
+              "type": "array<object>",
               "value_or_alias": [
                 "R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0",
                 "R1208_SUMMARY_001_SINGLE_BLOCK_WITH_DA_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"
@@ -10540,7 +10382,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SUMMARY_001_MULTI_BLOCK_ORDER_G",
                 "R1208_SUMMARY_001_MULTI_BLOCK_ORDER_B0",
@@ -10551,9 +10393,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestored_side_branch",
-              "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg -\u003e storeSideBlockAndSummary (clients/go/node/sync_reorg.go:28,88)",
+              "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg -> storeSideBlockAndSummary (clients/go/node/sync_reorg.go:28,88)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SUMMARY_001_MULTI_BLOCK_ORDER_B1P",
                 "R1208_SUMMARY_001_MULTI_BLOCK_ORDER_B2P"
@@ -10570,7 +10412,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/delivery_entrypoint",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "p2p_block_frame"
@@ -10720,7 +10562,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SUMMARY_001_CROSS_BLOCK_OCCURRENCE_G",
                 "R1208_SUMMARY_001_CROSS_BLOCK_OCCURRENCE_B0",
@@ -10730,9 +10572,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestored_side_branch",
-              "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg -\u003e storeSideBlockAndSummary (clients/go/node/sync_reorg.go:28,88)",
+              "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg -> storeSideBlockAndSummary (clients/go/node/sync_reorg.go:28,88)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SUMMARY_001_CROSS_BLOCK_OCCURRENCE_B1P"
               ]
@@ -10748,7 +10590,7 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/delivery_entrypoint",
-              "production_setup_sink": "p2p.peer.handleBlock -\u003e processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
+              "production_setup_sink": "p2p.peer.handleBlock -> processRelayedBlock (clients/go/node/p2p/handlers_block.go:44,55)",
               "provenance": "normative_boundary",
               "type": "token",
               "value_or_alias": "p2p_block_frame"
@@ -10772,9 +10614,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_retained_da_sets",
-              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -\u003e daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
+              "production_setup_sink": "p2p.Service.stageRelayDACommitTx / stageRelayDAChunkTx (clients/go/node/p2p/da_relay_ingest.go:26,44) -> daRelayState.addDACommit/addDAChunk (clients/go/node/p2p/da_relay_state.go:373,459)",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SUMMARY_001_CROSS_BLOCK_OCCURRENCE_DA_SET_1"
               ]
@@ -10782,9 +10624,9 @@
             {
               "consumption_proof_owner": "RUB-923",
               "pointer": "/input/prestate_owner_claims",
-              "production_setup_sink": "node.Mempool.BeginDAAdmission -\u003e DAAdmission.BeginCommit -\u003e DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -\u003e PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
+              "production_setup_sink": "node.Mempool.BeginDAAdmission -> DAAdmission.BeginCommit -> DACommit.Commit (clients/go/node/da_admission.go:68,179,337) for DA claims; node.Mempool.AddTx -> PendingOutpointOwner.Reserve (clients/go/node/pending_outpoint_owner.go:321) for standard claims",
               "provenance": "witness_fixture",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SUMMARY_001_CROSS_BLOCK_OCCURRENCE_CLAIM_DA_SET_1"
               ]
@@ -10794,7 +10636,7 @@
               "pointer": "/input/block_included_set_identities",
               "production_setup_sink": "node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28); the block's DA commit+chunk transactions determine the included identities",
               "provenance": "normative_boundary",
-              "type": "array\u003cobject\u003e",
+              "type": "array<object>",
               "value_or_alias": [
                 "R1208_SUMMARY_001_CROSS_BLOCK_OCCURRENCE_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0",
                 "R1208_SUMMARY_001_CROSS_BLOCK_OCCURRENCE_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_1"
@@ -10917,7 +10759,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SUMMARY_001_DISCONNECT_EMPTY_G",
                 "R1208_SUMMARY_001_DISCONNECT_EMPTY_B0",
@@ -11047,7 +10889,7 @@
               "pointer": "/input/prestate_canonical_chain",
               "production_setup_sink": "node.SyncEngine.BootstrapCanonicalGenesisIfEmpty (clients/go/node/sync.go:322) for the genesis row, then node.SyncEngine.ApplyBlockWithReorg (clients/go/node/sync_reorg.go:28) for each prefix block in ascending height",
               "provenance": "normative_boundary",
-              "type": "array\u003calias\u003e",
+              "type": "array<alias>",
               "value_or_alias": [
                 "R1208_SUMMARY_001_NON_NEW_NULL_G",
                 "R1208_SUMMARY_001_NON_NEW_NULL_B0"
@@ -11181,7 +11023,7 @@
             "this artifact's frozen summary_manifest const: projection / truth_relation / relay_authority_relation",
             "2tbmz9y2xt-lang/rubin-spec@c14b010024ce633e1027bf891af3c49741db544a RUBIN_MEMPOOL_POLICY.md#6.4.1 L438 (MISSING_PARENT | OLD | preserve the exact old image)",
             "conformance/fixtures/protocol/canonical_pipeline_v1.json row C01-ORPH-MISSING-PARENT-001 (`an apply entered without orphan retention whose parent is neither canonical nor stored returns MISSING_PARENT and preserves the exact old image`; counters {0,0})",
-            "this artifact's frozen summary_manifest const: truth_relation OLD -\u003e null and assigned_mutations M03/M06"
+            "this artifact's frozen summary_manifest const: truth_relation OLD -> null and assigned_mutations M03/M06"
           ]
         }
       ],
@@ -11338,10 +11180,10 @@
         },
         {
           "name": "complete_da_ids",
-          "type": "array\u003cbytes32\u003e ascending raw bytes; may be empty; compared element-wise in order"
+          "type": "array<bytes32> ascending raw bytes; may be empty; compared element-wise in order"
         }
       ],
-      "type": "array\u003crow\u003e in canonical (ascending height) order; `null` when the truth class exposes no summary (every non-NEW truth); `[]` exactly for a proven-NEW standalone disconnect (no new row); otherwise one row per newly canonical block including rows whose complete_da_ids is empty (DD-007)"
+      "type": "array<row> in canonical (ascending height) order; `null` when the truth class exposes no summary (every non-NEW truth); `[]` exactly for a proven-NEW standalone disconnect (no new row); otherwise one row per newly canonical block including rows whose complete_da_ids is empty (DD-007)"
     },
     "relay_authority_relation": {
       "authorized": "NEW AND rows non-empty AND not IBD (RUBIN_COMPACT_BLOCKS §19 step 1)",
