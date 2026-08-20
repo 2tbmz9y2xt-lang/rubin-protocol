@@ -1446,7 +1446,6 @@ func cp2ValidInput(pointer, tag string, value any) cp2Input {
 	return cp2Input{Pointer: pointer, Type: tag, ValueOrAlias: value, Provenance: "witness_fixture", ProductionSetupSink: "sink", ConsumptionProofOwner: "RUB-923"}
 }
 
-// cp2CaseAlias and cp2CaseSchedAlias are catalog aliases inside the control
 const cp2CaseAlias, cp2CaseSchedAlias = "R1208_DIRECT_001_MAIN_B1", "R1208_DIRECT_001_MAIN_SCHED"
 
 // cp2ValidCase is the known-valid control every RUB-1207 negative mutates in
@@ -2028,7 +2027,6 @@ func TestCanonicalPipelineV2CorpusIsByteDeterministic(t *testing.T) {
 	}
 }
 
-// cp2AuthorityControl decodes the embedded authority source into a generic
 func cp2AuthorityControl(t *testing.T) map[string]any {
 	t.Helper()
 	var doc map[string]any
@@ -2040,7 +2038,6 @@ func cp2AuthorityControl(t *testing.T) map[string]any {
 	return doc
 }
 
-// cp2ValidateAuthorityDoc re-encodes a mutated control and drives the real
 func cp2ValidateAuthorityDoc(t *testing.T, doc map[string]any) error {
 	t.Helper()
 	raw, err := json.Marshal(doc)
@@ -2074,7 +2071,6 @@ func cp2AuthorityCase(t *testing.T, doc map[string]any, rowID, caseID string) ma
 	return nil
 }
 
-// cp2CaseInput returns the stated input entry one case pointer names.
 func cp2CaseInput(t *testing.T, d map[string]any, rowID, caseID, pointer string) map[string]any {
 	t.Helper()
 	for _, raw := range cp2AuthorityCase(t, d, rowID, caseID)["input"].([]any) {
@@ -2181,11 +2177,12 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 	identity := func(part, field string, value any) func(*testing.T, map[string]any) {
 		return func(_ *testing.T, d map[string]any) {
 			v := d["fixtures"].(map[string]any)["R1208_DACLEAN_001_EXACT_MATCH_INPUT_BLOCK_INCLUDED_SET_IDENTITIES_0"].(map[string]any)["value"].(map[string]any)
-			if part == "commit" {
+			switch part {
+			case "commit":
 				v = v["commit"].(map[string]any)
-			} else if part == "chunk0" {
+			case "chunk0":
 				v = v["chunks"].([]any)[0].(map[string]any)
-			} else if part == "chunk1" {
+			case "chunk1":
 				v = v["chunks"].([]any)[1].(map[string]any)
 			}
 			v[field] = value
@@ -2652,7 +2649,6 @@ func TestCanonicalPipelineV2R1208ValidatorFailsClosed(t *testing.T) {
 	}
 }
 
-// cp2ResolvedValueOf returns the resolved_values entry one image field names.
 func cp2ResolvedValueOf(t *testing.T, d, c map[string]any, image, field string) map[string]any {
 	t.Helper()
 	alias := cp2CaseImage(t, c, image)["direct_fields"].(map[string]any)[field].(string)

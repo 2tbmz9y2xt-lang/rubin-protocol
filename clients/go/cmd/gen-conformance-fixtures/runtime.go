@@ -39,7 +39,6 @@ import (
 // (reached in this generator through the conformanceFixtureKeypair.SignDigest32
 // override), it makes generator output byte-reproducible from the same
 // origin/main input.
-//
 // These DER blobs are conformance-only test material. They are NOT
 // production keys, NOT used by the node, wallet, or any signing-rpc
 // path. The selection mapping (label -> committed DER) is the
@@ -3114,8 +3113,6 @@ func cp2AppendAlias(out []string, v any) []string {
 // cp2ValidateAliases resolves every alias a stimulus pointer names against the
 // top-level fixtures catalog. JSON Schema pins an alias's grammar but cannot
 // express its EXISTENCE, so this is the only gate that catches a dangling one.
-//
-// cp2ValidateR1208Expected, which runs over the same rows. No effect value is an
 func cp2ValidateAliases(rows []cp2Row, fixtures map[string]cp2Fixture, named map[string]bool) error {
 	for _, row := range rows {
 		for _, c := range row.Cases {
@@ -3552,7 +3549,7 @@ func cp2CleanupIdentity(where string, raw any) (string, error) {
 	if !ok || !commitOK || !chunksOK || len(chunks) == 0 || !daOK || !txOK || !wtxOK {
 		return "", fmt.Errorf("%s: invalid complete DA set identity", where)
 	}
-	canonical := map[string]any{"da_id": daID, "commit": map[string]any{"txid": txid, "wtxid": wtxid}, "chunks": []any{}}
+	canonicalChunks := make([]any, 0, len(chunks))
 	var previous uint64
 	for i, rawChunk := range chunks {
 		chunk, ok := cp2JSONImage(rawChunk).(map[string]any)
@@ -3563,8 +3560,9 @@ func cp2CleanupIdentity(where string, raw any) (string, error) {
 			return "", fmt.Errorf("%s/chunks/%d: invalid or non-ascending identity", where, i)
 		}
 		previous = index
-		canonical["chunks"] = append(canonical["chunks"].([]any), map[string]any{"chunk_index": index, "txid": chunkTx, "wtxid": chunkWTx})
+		canonicalChunks = append(canonicalChunks, map[string]any{"chunk_index": index, "txid": chunkTx, "wtxid": chunkWTx})
 	}
+	canonical := map[string]any{"da_id": daID, "commit": map[string]any{"txid": txid, "wtxid": wtxid}, "chunks": canonicalChunks}
 	b, _ := json.Marshal(canonical)
 	return string(b), nil
 }
@@ -3640,7 +3638,17 @@ func cp2ValidateCleanupClassifier(where string, inputs []any, expected map[strin
 		removed = map[string]bool{}
 	}
 	effects, _ := expected["effects"].(map[string]any)
-	wants := map[string]uint64{"da_record_removals": uint64(len(removed)), "da_inclusion_noops": uint64(len(included) - len(matched))}
+	var removedCount, includedCount, matchedCount uint64
+	for range removed {
+		removedCount++
+	}
+	for range included {
+		includedCount++
+	}
+	for range matched {
+		matchedCount++
+	}
+	wants := map[string]uint64{"da_record_removals": removedCount, "da_inclusion_noops": includedCount - matchedCount}
 	for _, key := range []string{"da_record_removals", "da_inclusion_noops"} {
 		want := wants[key]
 		effect, stated := effects[key].(map[string]any)
@@ -3660,9 +3668,16 @@ func cp2ValidateCleanupFault(where string, inputs []any, fixtures map[string]cp2
 	if len(faults) == 0 {
 		return nil
 	}
+	if len(plan) == 0 {
+		return fmt.Errorf("%s/input/retained_record_fault: selected plan absent", where)
+	}
+	var planLen uint64
+	for range plan {
+		planLen++
+	}
 	caseID := strings.TrimPrefix(where, "C01-DACLEAN-001/")
-	want, ok := map[string]int{"CORRUPT_FIRST": 0, "CORRUPT_MIDDLE": len(plan) / 2, "CORRUPT_LAST": len(plan) - 1}[caseID]
-	if !ok || len(plan) == 0 {
+	want, ok := map[string]uint64{"CORRUPT_FIRST": 0, "CORRUPT_MIDDLE": planLen / 2, "CORRUPT_LAST": planLen - 1}[caseID]
+	if !ok {
 		return fmt.Errorf("%s/input/retained_record_fault: selected plan absent", where)
 	}
 	f, err := cp2CaseFixture(fixtures, where, faults[0], "object")
@@ -3675,7 +3690,7 @@ func cp2ValidateCleanupFault(where string, inputs []any, fixtures map[string]cp2
 	if fault["kind"] != "selected_record_corrupt" {
 		return fmt.Errorf("%s/input/retained_record_fault/kind: want selected_record_corrupt", where)
 	}
-	if !numeric || position != uint64(want) {
+	if !numeric || position != want {
 		return fmt.Errorf("%s/input/retained_record_fault/position_index: want %d", where, want)
 	}
 	if !targetOK || plan[want] != cp2CaseAliasPrefix(where)+target {
@@ -4185,7 +4200,6 @@ func cp2ValidateR1208Payload(payload cp2R1208Payload) error {
 	if err := cp2ValidateResolved(payload.ResolvedValues); err != nil {
 		return err
 	}
-	// TestCanonicalPipelineV2AliasNamespacesCannotCollide pins that argument.
 	direct, err := cp2DirectFieldNames(payload.ImageManifest)
 	if err != nil {
 		return err
@@ -4249,8 +4263,6 @@ func cp2ValidateR1208Payload(payload cp2R1208Payload) error {
 	return nil
 }
 
-// cp2CollectRefs records every alias one case names, per namespace: the resolved
-// cp2ValidateR1208Expected has already proven the shape, so it only reads.
 func cp2CollectRefs(c map[string]any, direct map[string][]string, out, named map[string]bool) {
 	expected, _ := c["expected"].(map[string]any)
 	images, _ := expected["state_image"].(map[string]any)
