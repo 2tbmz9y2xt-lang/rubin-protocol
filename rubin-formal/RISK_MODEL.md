@@ -9,15 +9,17 @@
 
 - `rubin-formal/proof_coverage.json`
   - `proof_level`; `package_maturity`: уровни строгости и текущего доверенного состояния пакета
-  - `coverage[]`: pinned‑секции из `spec/SECTION_HASHES.json` и их статусы
+  - `coverage[]`: exactly 32 registered formal coverage rows and their statuses; this registry is independent of `spec/SECTION_HASHES.json` membership
   - `claims.allowed` / `claims.forbidden`: рамка допустимых публичных формулировок (обязательно)
 
 ## Source rebind: 116 original → 102 active (4 `DROP_RETIRED_GENERATED_SOURCE` + 3 `DROP_RETIRED_SOURCE` + 7 `DROP_STALE_SOURCE`; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
 
 ## Термины
 
-- **Pinned section**: секция из `spec/SECTION_HASHES.json`, которая hash‑pin’ится и должна быть синхронна со спекой.
-- `status=proved`: утверждения для pinned‑секции доказаны в рамках текущего `proof_level`.
+- **Pinned section**: a member of `spec/SECTION_HASHES.json`, hash-pinned to the specification. Manifest membership and formal `coverage[]` registry membership are independent sets, not a one-to-one mapping.
+- **Registered formal coverage row**: one of exactly 32 entries in `coverage[]`. Its `section_heading` is a registry row label: some labels are exact specification headings; others identify residual, bridge, model, or other bounded formal scopes. Row status, evidence, and claims apply to that registered row, not automatically to a manifest member.
+- An unregistered manifest H2 is not thereby formally proved, and a registered formal row need not remain an independent manifest member.
+- `status=proved`: assertions for the registered row are proved within the current `proof_level`.
 - `status=proved_with_axiom`: утверждения доказаны, но proof опирается на один или более явно названных допущений. Для hash/commitment-секций это обычно означает reduction к collision resistance, а не аксиомо-свободную невозможность коллизии.
 - `status=stated`: row сохраняет полезное machine-checked model/contract evidence, но не заявляет более широкий proof closure. В текущем registry таких строк `3`.
 - `status=deferred`: резервный статус для сознательно не покрытой секции. В текущем registry таких строк нет.
@@ -45,7 +47,7 @@
 
 Для Phase‑0/devnet достаточно:
 - baseline существует и консистентен;
-- **нет** pinned‑секций со `status=deferred`;
+- there are no registered formal coverage rows with `status=deferred`;
 - `claims.allowed/forbidden` присутствуют (anti‑overclaim).
 
 `proof_level=toy-model` разрешён (как baseline).

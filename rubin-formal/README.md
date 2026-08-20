@@ -5,7 +5,7 @@ Machine-checked formal proof surface for the RUBIN L1 blockchain protocol.
 ## Contents
 
 - Lean 4 package `RubinFormal`
-- `proof_coverage.json` — machine-readable coverage registry with 32 section entries
+- `proof_coverage.json` — machine-readable registry with exactly 32 formal coverage entries
 - Each registry entry carries explicit `evidence_level`, `proof_trust`, `notes`, and `limitations` so that public claims never outrun the actual proof boundary
 
 ## Source rebind: 116 original → 102 active (4 `DROP_RETIRED_GENERATED_SOURCE` + 3 `DROP_RETIRED_SOURCE` + 7 `DROP_STALE_SOURCE`; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
@@ -29,7 +29,15 @@ Permitted claim formulations (OK):
 - "Lean executable semantics replay the non-`CV-PV-*` conformance fixtures
   represented by modules imported by `RubinFormal.Conformance.Index`"
 - "Bridge evidence is op-scoped Lean evidence; Go/Rust correspondence remains human-reviewed"
-- "Pinned-section coverage is machine-readable with explicit evidence levels: universal, behavioral, assumption-backed, contract-level, and model-level"
+- "Formal coverage is machine-readable with explicit evidence levels: universal, behavioral, assumption-backed, contract-level, and model-level"
+
+`spec/SECTION_HASHES.json` manifest membership and formal `coverage[]` registry
+membership are independent sets, not a one-to-one mapping. A `section_heading`
+is a registry row label: some labels are exact specification headings; others
+identify residual, bridge, model, or other bounded formal scopes. Row status,
+evidence, and claims apply to that registered row, not automatically to a
+manifest member. An unregistered manifest H2 is not thereby formally proved,
+and a registered formal row need not remain an independent manifest member.
 
 Prohibited claim formulations (NOT OK):
 
@@ -55,11 +63,11 @@ Wire model notes:
 
 - This is **not** a freeze-ready package at the level of "universal byte-accurate wire + state transition model for all sections"
 - Consensus rules are not changed by this formal package
-- The formal coverage registry currently contains 32 machine-checked section entries
+- The formal coverage registry currently contains exactly 32 machine-checked entries
 - Registry status counts: 24 `proved`, 5 `proved_with_axiom`, 3 `stated`, 0 `deferred`
 - Claim strength breakdown: 23 universal, 5 assumption-backed, 3 model-level, 1 contract-level
 - Machine-checked status does not imply uniform claim strength — the honest boundary is set by `status`, `evidence_level`, and `limitations`
-- Extra formal-only theorems are not counted as pinned-section claims unless registered in the machine-readable registry
+- Extra formal-only theorems do not establish a registered formal coverage row unless registered in the machine-readable registry
 
 ## Local build
 
@@ -78,5 +86,5 @@ cd .. && scripts/dev-env.sh -- bash -lc 'cd rubin-formal && lake build'
 ## Roadmap
 
 1. Keep `proof_coverage.json`, public narrative, and closeout evidence in sync
-2. Do not elevate formal-only extra theorems to public pinned-section claims without an explicit registry update
+2. Do not elevate formal-only extra theorems to public formal-coverage claims without an explicit registry update
 3. Theorem-level traceability (`theorem_refs`) is tracked as a separate hygiene/improvement effort, not mixed with truth-correction
