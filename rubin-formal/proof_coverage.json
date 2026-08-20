@@ -1777,7 +1777,8 @@
       "formal verification of full RUBIN consensus / CANONICAL semantics",
       "cryptographic security proofs of ML-DSA / non-native candidate suites / SHA3-256",
       "bit-exact wire/serialization proof beyond what is exercised by conformance fixtures",
-      "treating SECTION_HASHES membership and formal coverage registry membership as one-to-one, or treating formal-only extra theorems as claim-bearing formal coverage without a registered coverage[] row",
+      "treating formal-only extra theorems as additional pinned-section coverage when they are not in the registry",
+      "treating SECTION_HASHES membership and formal coverage registry membership as one-to-one sets",
       "universal mechanized refinement between spec text and Go/Rust implementations",
       "claiming machine-checked Lean-to-Go/Rust equivalence for bridge theorems — Lean cannot import Go/Rust; parity is human-verified by code review"
     ]
