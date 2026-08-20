@@ -2137,6 +2137,17 @@ func TestCanonicalPipelineV2AuthorityPinIsExact(t *testing.T) {
 		!strings.Contains(err.Error(), "authority source json") {
 		t.Errorf("truncated document: error = %v, want a json rejection", err)
 	}
+	// An unknown key must FAIL generation, never be laundered out of the artifact
+	// past the schema: top-level authority object AND typed catalog entry.
+	for _, doc := range []string{
+		`{"rows":[],"unexpected_top_level":1}`,
+		`{"fixtures":{"A":{"type":"u64","value":1,"stray":2}}}`,
+	} {
+		if _, err := cp2DecodeAuthority([]byte(doc), fmt.Sprintf("%x", sha256.Sum256([]byte(doc)))); err == nil ||
+			!strings.Contains(err.Error(), "unknown field") {
+			t.Errorf("%s: error = %v, want an unknown-field rejection", doc, err)
+		}
+	}
 	// The pinned sha is the sha of the file the generator embeds.
 	if got := fmt.Sprintf("%x", sha256.Sum256(cp2AuthoritySource)); got != cp2AuthoritySourceSHA256 {
 		t.Errorf("embedded authority sha256 = %s, want the pinned %s", got, cp2AuthoritySourceSHA256)

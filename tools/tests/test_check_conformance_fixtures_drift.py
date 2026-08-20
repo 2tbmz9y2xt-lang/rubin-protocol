@@ -176,15 +176,17 @@ class MainExitCodeTests(unittest.TestCase):
             def fake_run(_repo_root, out_dir):
                 _populate_candidate(out_dir)
 
-            captured = io.StringIO()
+            captured, errors = io.StringIO(), io.StringIO()
             with mock.patch.object(m, "run_generator", side_effect=fake_run):
-                with mock.patch("sys.stdout", captured):
+                with mock.patch("sys.stdout", captured), mock.patch("sys.stderr", errors):
                     rc = m.main(["--repo-root", str(repo_root)])
         self.assertEqual(rc, 0)
         self.assertIn(
             f"OK: conformance fixture drift check passed ({len(m.EXPECTED_FIXTURES)} generator-owned files match committed)",
             captured.getvalue(),
         )
+        # Loud on stderr, and the rc above is unchanged: visibility, not a failure.
+        self.assertIn("NOTICE: canonical_pipeline_v2 semantic gate SKIPPED (fake-repo sentinel)", errors.getvalue())
 
     def test_main_missing_committed_dir_returns_two(self):
         with tempfile.TemporaryDirectory() as td:
@@ -854,7 +856,7 @@ class CanonicalPipelineV2RUB1208Tests(unittest.TestCase):
         # And it is not switchable from the command line at all: the only opt-out
         # is the environment sentinel the fake-repo tests set.
         self.assertNotIn("skip-v2-semantics", INSPECT_SOURCE)
-        self.assertIn('os.environ.get(FAKE_REPO_ENV) != "1"', INSPECT_SOURCE)
+        self.assertIn('os.environ.get(FAKE_REPO_ENV) == "1"', INSPECT_SOURCE)
 
     def test_meta_is_read_fail_closed(self):
         for label, mutate in (

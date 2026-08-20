@@ -3195,13 +3195,17 @@ var cp2R1208Rows = map[string]int{
 // cp2DecodeAuthority pins the authority source bytes BEFORE parsing them: a
 // byte that changed without a re-pin is rejected here, so no downstream
 // validator ever sees an unbound corpus. Exactly one JSON document is accepted;
-// trailing content is a rejection, not ignored input.
+// trailing content is a rejection, not ignored input. Unknown fields are too:
+// the typed decode would otherwise LAUNDER an unknown top-level key or a stray
+// fixtures/resolved_values field out of the artifact, past the schema's
+// additionalProperties. Rows stay json.RawMessage, so case fields are unaffected.
 func cp2DecodeAuthority(raw []byte, wantSHA string) (cp2R1208Payload, error) {
 	var payload cp2R1208Payload
 	if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != wantSHA {
 		return payload, fmt.Errorf("authority source sha256=%s want %s", got, wantSHA)
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
 	dec.UseNumber()
 	if err := dec.Decode(&payload); err != nil {
 		return payload, fmt.Errorf("authority source json: %w", err)
@@ -3434,6 +3438,12 @@ func cp2IncludedSetDAIDs(where string, inputs []any, fixtures map[string]cp2Fixt
 			block, err := cp2SummaryBlockForSuffix(where, summary, suffix)
 			if err != nil {
 				return nil, err
+			}
+			// Two keys may suffix-match the SAME row (`..._B1P` ends in `_B1P` AND
+			// `_IDENTITY_B1P`): the last sorted key would silently overwrite the
+			// other group's constraint. Unreachable with the shipped ids: probed.
+			if _, bound := out[block]; bound {
+				return nil, fmt.Errorf("%s summary row %q is bound by more than one included-set group", where, block)
 			}
 			out[block] = cp2SortedUnique(grouped[suffix])
 		}
@@ -3899,11 +3909,12 @@ func cp2ValidateR1208Summary(where string, inputs []any, expected map[string]any
 	}
 
 	// One stimulus states the occurrence fact for the whole case rather than per
-	// identity: a complete-set count is the number of complete DA sets the block
-	// carries, so an added or dropped occurrence reddens even where no identity
-	// is stated. (/input/cross_block_da_id needs no arm of its own: the only case
-	// stating one also states the per-block identities, and dropping either public
-	// occurrence already reddens on that binding.)
+	// identity, so an added or dropped occurrence reddens even where no identity
+	// is stated. SEMANTICS, both sides: the stated count is the CASE TOTAL —
+	// occurrences summed over EVERY summary row, never per block, so a multi-row
+	// case states the total. (/input/cross_block_da_id needs no arm of its own:
+	// the only case stating one also states the per-block identities, and dropping
+	// either public occurrence already reddens on that binding.)
 	if value, ok := cp2InputValue(inputs, "/input/block_complete_da_set_count"); ok {
 		want, numeric := cp2UintOf(value)
 		if !numeric || want != occurrences {

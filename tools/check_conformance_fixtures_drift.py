@@ -484,6 +484,11 @@ def _included_set_da_ids(where: str, inputs: object, fixtures: dict, summary: li
                 raise RuntimeError(
                     f"{where}: included-set block {suffix!r} matches {len(matches)} summary rows"
                 )
+            # Two keys may suffix-match the SAME row (`..._B1P` ends in `_B1P` AND
+            # `_IDENTITY_B1P`): the last sorted key would silently overwrite the
+            # other group's constraint. Mirrors Go cp2IncludedSetDAIDs.
+            if matches[0] in out:
+                raise RuntimeError(f"{where}: summary row {matches[0]!r} is bound by more than one included-set group")
             out[matches[0]] = sorted(set(grouped[suffix]))
         # Every key is one distinct summary row, so equal sizes is exactly "every
         # row bound": a row no group binds is a row whose list nothing checks.
@@ -752,9 +757,10 @@ def validate_canonical_pipeline_v2_semantics(path: Path) -> None:
                 )
 
             # One stimulus states the occurrence fact for the whole case rather
-            # than per identity: a complete-set count is the number of complete
-            # DA sets the block carries, so an added or dropped occurrence
-            # reddens even where no identity is stated.
+            # than per identity, so an added or dropped occurrence reddens even
+            # where no identity is stated. SEMANTICS, both sides: the stated count
+            # is the CASE TOTAL -- occurrences summed over EVERY summary row, never
+            # per block, so a multi-row case states the total.
             stated_count = _input_value(inputs, "/input/block_complete_da_set_count")
             if stated_count is not _ABSENT and (
                 type(stated_count) is not int or stated_count != occurrences
@@ -1190,7 +1196,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # through an environment sentinel -- never a public CLI flag, and never
         # an unrelated file's presence.
         candidate_v2, committed_v2 = output_dir / V2_REL, committed_root / V2_REL
-        if os.environ.get(FAKE_REPO_ENV) != "1" and candidate_v2.is_file() and committed_v2.is_file():
+        if os.environ.get(FAKE_REPO_ENV) == "1":
+            # Loud: an inherited sentinel would otherwise disable the semantic gate,
+            # the receipts and the negative controls with nothing on the terminal.
+            print("NOTICE: canonical_pipeline_v2 semantic gate SKIPPED (fake-repo sentinel)", file=sys.stderr)
+        elif candidate_v2.is_file() and committed_v2.is_file():
             try:
                 run_v2_gate(candidate_v2, committed_v2, repo_root / V2_AUTHORITY_REL)
             except RuntimeError as exc:
