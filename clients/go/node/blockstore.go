@@ -51,9 +51,9 @@ type BlockStore struct {
 	noncanonical        atomic.Pointer[noncanonicalAccounting]
 	noncanonicalPending map[[32]byte]chan struct{}
 
-	// leafProbe runs via probeLeaf at the top of EACH of the three presence artifact
-	// reads, so hoisting a leaf out of the read lock is observable for a store a test
-	// instruments. nil in production; per store, so no two tests can share one.
+	// leafProbe runs via probeLeaf during presence reads and reconstruction probes,
+	// making leaf movement observable to an instrumented test. nil in production;
+	// per store, so no two tests can share one.
 	leafProbe func()
 }
 

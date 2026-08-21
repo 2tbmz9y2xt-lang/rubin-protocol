@@ -1,3 +1,5 @@
+//go:build darwin || linux
+
 package node
 
 import (
@@ -308,6 +310,8 @@ func TestNoncanonicalStrictRebuildRejectsLeavesAndDrift(t *testing.T) {
 			mustNoncanonical(t, os.Chtimes(store.blocksDir, time.Unix(1_000_000_001, 0), time.Unix(1_000_000_001, 0)))
 		}}, {"enumerated inode", "", 2, replaceLeaf}, {"opened inode", "noncanonical artifact is not the opened regular leaf", 3, replaceLeaf}, {"pre-open fifo", "", 3, func(_ *BlockStore, path string, _ []byte) {
 			mustNoncanonical(t, os.Remove(path), syscall.Mkfifo(path, 0o600))
+		}}, {"pre-open symlink ELOOP", "ELOOP", 3, func(_ *BlockStore, path string, _ []byte) {
+			mustNoncanonical(t, os.Remove(path), os.Symlink(path+".target", path))
 		}}, {"same inode rewrite", "", 4, func(_ *BlockStore, path string, header []byte) {
 			before, err := os.Lstat(path)
 			mustNoncanonical(t, err)
@@ -360,12 +364,12 @@ func rejectNoncanonicalRebuildDrift(t *testing.T, phase int, mutate func(*BlockS
 		}
 	}
 	var closeCalls *int
-	if want != "" {
+	if want != "" && want != "ELOOP" {
 		closeCalls = countNoncanonicalClose(t, path, nil)
 	}
 	done := make(chan error, 1)
 	go func() { _, err := store.rebuildNoncanonicalAccounting(noncanonicalDefaultByteLimit); done <- err }()
-	if err := receiveNoncanonical(t, done, "rebuild drift did not return"); err == nil || want != "" && !strings.Contains(err.Error(), want) || closeCalls != nil && *closeCalls != 1 {
+	if err := receiveNoncanonical(t, done, "rebuild drift did not return"); err == nil || want == "ELOOP" && !errors.Is(err, syscall.ELOOP) || want != "" && want != "ELOOP" && !strings.Contains(err.Error(), want) || closeCalls != nil && *closeCalls != 1 {
 		t.Fatalf("rebuild err=%v want=%q", err, want)
 	}
 }

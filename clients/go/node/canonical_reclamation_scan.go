@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -15,6 +14,9 @@ import (
 func (bs *BlockStore) rebuildNoncanonicalAccounting(limit uint64) (*noncanonicalAccounting, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
+	}
+	if err := requireNoncanonicalReconstructionHost(); err != nil {
+		return nil, err
 	}
 	if err := requireCompleteCanonicalPrefix(bs); err != nil {
 		return nil, err
@@ -218,30 +220,6 @@ func (bs *BlockStore) openNoncanonicalArtifact(dir, name string, limit int64, di
 		resultErr = errors.New("noncanonical artifact is not the opened regular leaf")
 	}
 	return
-}
-
-func openNoncanonicalFile(path string, flags int) (*os.File, error) {
-	for {
-		fd, err := syscall.Open(path, flags, 0)
-		if errors.Is(err, syscall.EINTR) {
-			continue
-		}
-		if err != nil {
-			return nil, &os.PathError{Op: "open", Path: path, Err: err}
-		}
-		if fd < 0 {
-			return nil, &os.PathError{Op: "open", Path: path, Err: syscall.EINVAL}
-		}
-		return os.NewFile(uintptr(fd), path), nil
-	}
-}
-
-func openNoncanonicalArtifactFile(path string) (*os.File, error) {
-	return openNoncanonicalFile(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK)
-}
-
-func openNoncanonicalDirectory(path string) (*os.File, error) {
-	return openNoncanonicalFile(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NONBLOCK|syscall.O_DIRECTORY)
 }
 
 func validNoncanonicalArtifactSize(size, limit int64) bool { return size >= 0 && size <= limit }
