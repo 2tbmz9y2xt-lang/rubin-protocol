@@ -395,20 +395,17 @@ func (bs *BlockStore) strictNoncanonicalArtifact(kind noncanonicalArtifactKind, 
 		state, prev := noncanonicalStoredBlockState(raw, hash)
 		return state, prev, noncanonicalUnknownHeight, size, nil
 	case noncanonicalHeaderArtifact:
-		if err := validateBlockHeaderHash(raw, hash); err != nil {
-			return BlockArtifactInvalid, zero, noncanonicalUnknownHeight, size, nil
+		if validateBlockHeaderHash(raw, hash) == nil {
+			if header, err := consensus.ParseBlockHeaderBytes(raw); err == nil {
+				return BlockArtifactValid, header.PrevBlockHash, noncanonicalUnknownHeight, size, nil
+			}
 		}
-		header, err := consensus.ParseBlockHeaderBytes(raw)
-		if err != nil {
-			return BlockArtifactInvalid, zero, noncanonicalUnknownHeight, size, nil
-		}
-		return BlockArtifactValid, header.PrevBlockHash, noncanonicalUnknownHeight, size, nil
+		return BlockArtifactInvalid, zero, noncanonicalUnknownHeight, size, nil
 	default:
-		undo, err := unmarshalUndoEnvelope(hash, raw)
-		if err != nil {
-			return BlockArtifactInvalid, zero, noncanonicalUnknownHeight, size, nil
+		if undo, err := unmarshalUndoEnvelope(hash, raw); err == nil {
+			return BlockArtifactValid, zero, undo.BlockHeight, size, nil
 		}
-		return BlockArtifactValid, zero, undo.BlockHeight, size, nil
+		return BlockArtifactInvalid, zero, noncanonicalUnknownHeight, size, nil
 	}
 }
 
