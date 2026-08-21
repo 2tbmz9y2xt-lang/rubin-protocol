@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"sort"
+	"sync"
 )
 
 func (s *Service) broadcastInventory(skip *peer, items []InventoryVector) error {
@@ -57,12 +58,18 @@ func (s *Service) broadcastInventoryToPeers(peers []*peer, items []InventoryVect
 	if err != nil {
 		return err
 	}
+	var wg sync.WaitGroup
 	for _, current := range peers {
-		if err := current.send(messageInv, payload); err != nil {
-			current.setLastError(err.Error())
-			_ = current.conn.Close()
-		}
+		wg.Add(1)
+		go func(current *peer) {
+			defer wg.Done()
+			if err := current.send(messageInv, payload); err != nil {
+				current.setLastError(err.Error())
+				_ = current.conn.Close()
+			}
+		}(current)
 	}
+	wg.Wait()
 	return nil
 }
 
