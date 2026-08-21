@@ -21,18 +21,21 @@ func noncanonicalTestFile(store *BlockStore, kind noncanonicalArtifactKind, hash
 	dir, suffix, _ := store.noncanonicalArtifactPath(kind)
 	return filepath.Join(dir, hex.EncodeToString(hash[:])+suffix)
 }
+
 func mustNoncanonical(t *testing.T, errs ...error) {
 	t.Helper()
 	if err := errors.Join(errs...); err != nil {
 		t.Fatal(err)
 	}
 }
+
 func mustNoncanonicalAtomic(t *testing.T, err error, path string) {
 	var got *atomicWriteError
 	if err == nil || errors.Is(err, errNoncanonicalCount) || errors.Is(err, errNoncanonicalBytes) || !errors.As(err, &got) || got.destination != path || got.stage != atomicWriteBeforeNamespaceCommit || got.operation != atomicWriteCreateIfAbsent || got.primary == nil || got.primary.Error() != errExistingContentDiffers(path).Error() || len(got.secondary) != 0 {
 		t.Fatalf("atomic error=%#v", got)
 	}
 }
+
 func countNoncanonicalClose(t *testing.T, target string, fault error) *int {
 	t.Helper()
 	closeFile, calls := closeNoncanonicalFile, 0
@@ -48,6 +51,7 @@ func countNoncanonicalClose(t *testing.T, target string, fault error) *int {
 	t.Cleanup(func() { closeNoncanonicalFile = closeFile })
 	return &calls
 }
+
 func receiveNoncanonical[T any](t *testing.T, c <-chan T, message string) (value T) {
 	t.Helper()
 	select {
@@ -57,6 +61,7 @@ func receiveNoncanonical[T any](t *testing.T, c <-chan T, message string) (value
 	}
 	return
 }
+
 func installNoncanonicalAccounting(t *testing.T, store *BlockStore, limit uint64) *noncanonicalAccounting {
 	t.Helper()
 	accounting, err := store.rebuildNoncanonicalAccounting(limit)
@@ -67,6 +72,7 @@ func installNoncanonicalAccounting(t *testing.T, store *BlockStore, limit uint64
 	store.stateMu.Unlock()
 	return accounting
 }
+
 func mustNoncanonicalRestartDigest(t *testing.T, store *BlockStore, want [32]byte) {
 	t.Helper()
 	reopened := mustOpenBlockStore(t, store.rootPath)
@@ -99,6 +105,7 @@ func noncanonicalTestDigest(snapshot noncanonicalAccountingSnapshot) [32]byte {
 	copy(got[:], h.Sum(nil))
 	return got
 }
+
 func TestNoncanonicalLimitsAndProductionDormancy(t *testing.T) {
 	for _, limit := range []uint64{0, uint64(8) << 30, (uint64(8) << 30) + 1, uint64(32) << 30, (uint64(8) << 30) - 1, (uint64(32) << 30) + 1} {
 		_, err := normalizeNoncanonicalLimit(limit)
@@ -108,6 +115,12 @@ func TestNoncanonicalLimitsAndProductionDormancy(t *testing.T) {
 	}
 	if noncanonicalDefaultByteLimit != uint64(8)<<30 || noncanonicalMaximumByteLimit != uint64(32)<<30 || noncanonicalHashCap != 524288 || unsafe.Sizeof(noncanonicalRow{}) > 128 || noncanonicalBackingBytes > 64<<20 {
 		t.Fatal("fixed accounting bounds drifted")
+	}
+	accounting, err := newNoncanonicalAccounting(noncanonicalDefaultByteLimit)
+	mustNoncanonical(t, err)
+	actualBytes := cap(accounting.rows) * int(unsafe.Sizeof(noncanonicalRow{}))
+	if len(accounting.rows) != noncanonicalHashCap || cap(accounting.rows) != noncanonicalHashCap || actualBytes > 64<<20 {
+		t.Fatalf("fixed allocation rows=%d cap=%d bytes=%d", len(accounting.rows), cap(accounting.rows), actualBytes)
 	}
 	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
 	if store.noncanonical.Load() != nil {
@@ -130,6 +143,7 @@ func TestNoncanonicalLimitsAndProductionDormancy(t *testing.T) {
 		t.Fatal("reload activated accounting")
 	}
 }
+
 func TestNoncanonicalRebuildMergesArtifactPasses(t *testing.T) {
 	genesis, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
 	mustNoncanonical(t, err)
@@ -152,7 +166,7 @@ func TestNoncanonicalRebuildMergesArtifactPasses(t *testing.T) {
 	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
 	mustNoncanonical(t, store.CommitCanonicalBlock(0, devnetGenesisBlockHash, genesis.HeaderBytes, devnetGenesisBlockBytes, &BlockUndo{}))
 	header, headerOnly := testHeaderBytes(9, 91), testHeaderBytes(10, 92)
-	hash, headerOnlyHash, undoOnlyHash, badHeaderHash, badUndoHash := mustHeaderHash(t, header), mustHeaderHash(t, headerOnly), [32]byte{11}, [32]byte{12}, [32]byte{13}
+	hash, headerOnlyHash, undoOnlyHash, badHeaderHash, badUndoHash, emptyHeaderHash := mustHeaderHash(t, header), mustHeaderHash(t, headerOnly), [32]byte{11}, [32]byte{12}, [32]byte{13}, [32]byte{14}
 	undo, err := marshalUndoEnvelope(hash, &BlockUndo{BlockHeight: 7})
 	mustNoncanonical(t, err)
 	undoOnly, err := marshalUndoEnvelope(undoOnlyHash, &BlockUndo{BlockHeight: 8})
@@ -162,7 +176,7 @@ func TestNoncanonicalRebuildMergesArtifactPasses(t *testing.T) {
 		hash [32]byte
 		data []byte
 	}{
-		{noncanonicalBlockArtifact, hash, devnetGenesisBlockBytes}, {noncanonicalHeaderArtifact, hash, header}, {noncanonicalUndoArtifact, hash, undo}, {noncanonicalHeaderArtifact, headerOnlyHash, headerOnly}, {noncanonicalUndoArtifact, undoOnlyHash, undoOnly}, {noncanonicalHeaderArtifact, badHeaderHash, header}, {noncanonicalUndoArtifact, badUndoHash, []byte("corrupt undo")},
+		{noncanonicalBlockArtifact, hash, devnetGenesisBlockBytes}, {noncanonicalHeaderArtifact, hash, header}, {noncanonicalUndoArtifact, hash, undo}, {noncanonicalHeaderArtifact, headerOnlyHash, headerOnly}, {noncanonicalUndoArtifact, undoOnlyHash, undoOnly}, {noncanonicalHeaderArtifact, badHeaderHash, header}, {noncanonicalUndoArtifact, badUndoHash, []byte("corrupt undo")}, {noncanonicalHeaderArtifact, emptyHeaderHash, nil},
 	} {
 		mustNoncanonical(t, os.WriteFile(noncanonicalTestFile(store, leaf.kind, leaf.hash), leaf.data, 0o600))
 	}
@@ -177,15 +191,17 @@ func TestNoncanonicalRebuildMergesArtifactPasses(t *testing.T) {
 		{hash: undoOnlyHash, undoBytes: uint64(len(undoOnly)), height: 8, flags: 1 << 4},
 		{hash: badHeaderHash, headerBytes: uint64(len(header)), height: noncanonicalUnknownHeight, flags: 2 << 2},
 		{hash: badUndoHash, undoBytes: uint64(len("corrupt undo")), height: noncanonicalUnknownHeight, flags: 2 << 4},
+		{hash: emptyHeaderHash, height: noncanonicalUnknownHeight, flags: 2 << 2},
 	}
 	sort.Slice(wantRows, func(i, j int) bool { return string(wantRows[i].hash[:]) < string(wantRows[j].hash[:]) })
-	want := noncanonicalAccountingSnapshot{usedBytes: uint64(len(devnetGenesisBlockBytes) + len(header)*2 + len(undo) + len(headerOnly) + len(undoOnly) + len("corrupt undo")), uniqueCount: 5, rows: wantRows}
+	want := noncanonicalAccountingSnapshot{usedBytes: uint64(len(devnetGenesisBlockBytes) + len(header)*2 + len(undo) + len(headerOnly) + len(undoOnly) + len("corrupt undo")), uniqueCount: 6, rows: wantRows}
 	installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
 	if got := store.noncanonicalAccountingDigest(); got != noncanonicalTestDigest(want) {
 		t.Fatalf("digest=%x want=%x", got, noncanonicalTestDigest(want))
 	}
 	mustNoncanonicalRestartDigest(t, store, store.noncanonicalAccountingDigest())
 }
+
 func TestNoncanonicalStrictRebuildRejectsLeavesAndDrift(t *testing.T) {
 	for _, kind := range []string{"malformed", "suffix", "uppercase", "directory", "fifo", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
@@ -258,6 +274,7 @@ func TestNoncanonicalStrictRebuildRejectsLeavesAndDrift(t *testing.T) {
 		t.Fatalf("canonical-first err=%v", err)
 	}
 }
+
 func rejectNoncanonicalRebuildDrift(t *testing.T, phase int, mutate func(*BlockStore, string, []byte), want string) {
 	t.Helper()
 	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "drift"))
@@ -282,6 +299,7 @@ func rejectNoncanonicalRebuildDrift(t *testing.T, phase int, mutate func(*BlockS
 		t.Fatalf("rebuild err=%v want=%q", err, want)
 	}
 }
+
 func TestNoncanonicalCloseErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -305,6 +323,7 @@ func TestNoncanonicalCloseErrors(t *testing.T) {
 		})
 	}
 }
+
 func TestNoncanonicalOpenErrorCloses(t *testing.T) {
 	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "oversize"))
 	path := noncanonicalTestFile(store, noncanonicalHeaderArtifact, [32]byte{1})
@@ -317,6 +336,7 @@ func TestNoncanonicalOpenErrorCloses(t *testing.T) {
 		t.Fatalf("image=%t err=%v calls=%d probes=%d", image != nil, err, *calls, probes)
 	}
 }
+
 func withNoncanonicalFault(t *testing.T, dir string, post bool, fault error) {
 	t.Helper()
 	withAtomicWriteOps(t, func(ops *atomicWriteOps) {
@@ -339,6 +359,7 @@ func withNoncanonicalFault(t *testing.T, dir string, post bool, fault error) {
 		}
 	})
 }
+
 func TestNoncanonicalPartialCreateRestartsAccounting(t *testing.T) {
 	fault := errors.New("injected create fault")
 	for _, tc := range []struct {
@@ -397,6 +418,7 @@ func TestNoncanonicalPartialCreateRestartsAccounting(t *testing.T) {
 		})
 	}
 }
+
 func TestNoncanonicalQuotaAndErrorOrder(t *testing.T) {
 	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
 	accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
@@ -483,6 +505,7 @@ func TestNoncanonicalQuotaAndErrorOrder(t *testing.T) {
 		t.Fatal("checked add overflow accepted")
 	}
 }
+
 func TestNoncanonicalReservationsCoordinateHashes(t *testing.T) {
 	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
 	installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)

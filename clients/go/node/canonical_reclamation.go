@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"sort"
 	"syscall"
-	"unsafe"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -49,10 +48,10 @@ type noncanonicalRow struct {
 	flags                              uint16
 }
 
-const noncanonicalRowBytes = uint64(unsafe.Sizeof(noncanonicalRow{}))
-const noncanonicalBackingBytes = uint64(noncanonicalHashCap) * noncanonicalRowBytes
-
-var _ [128 - int(unsafe.Sizeof(noncanonicalRow{}))]byte
+const (
+	noncanonicalRowBytes     = uint64(128)
+	noncanonicalBackingBytes = uint64(noncanonicalHashCap) * noncanonicalRowBytes
+)
 
 type noncanonicalAccounting struct {
 	rows                     []noncanonicalRow
@@ -75,6 +74,7 @@ func normalizeNoncanonicalLimit(limit uint64) (uint64, error) {
 	}
 	return limit, nil
 }
+
 func newNoncanonicalAccounting(limit uint64) (*noncanonicalAccounting, error) {
 	limit, err := normalizeNoncanonicalLimit(limit)
 	if err != nil {
@@ -82,6 +82,7 @@ func newNoncanonicalAccounting(limit uint64) (*noncanonicalAccounting, error) {
 	}
 	return &noncanonicalAccounting{rows: make([]noncanonicalRow, noncanonicalHashCap), limit: limit}, nil
 }
+
 func (bs *BlockStore) noncanonicalAccountingSnapshot() noncanonicalAccountingSnapshot {
 	if bs == nil {
 		return noncanonicalAccountingSnapshot{}
@@ -97,6 +98,7 @@ func (bs *BlockStore) noncanonicalAccountingSnapshot() noncanonicalAccountingSna
 		rows: append([]noncanonicalRow(nil), a.rows[:a.count]...),
 	}
 }
+
 func (bs *BlockStore) noncanonicalAccountingDigest() [32]byte {
 	snapshot := bs.noncanonicalAccountingSnapshot()
 	h := sha256.New()
@@ -120,12 +122,15 @@ func (bs *BlockStore) noncanonicalAccountingDigest() [32]byte {
 	copy(digest[:], h.Sum(nil))
 	return digest
 }
+
 func (a *noncanonicalAccounting) find(hash [32]byte) (int, bool) { return a.findPrefix(hash, a.count) }
+
 func (a *noncanonicalAccounting) findPrefix(hash [32]byte, count uint32) (int, bool) {
 	n := int(count)
 	at := sort.Search(n, func(i int) bool { return bytes.Compare(a.rows[i].hash[:], hash[:]) >= 0 })
 	return at, at < n && a.rows[at].hash == hash
 }
+
 func (a *noncanonicalAccounting) appendRow(hash [32]byte) (*noncanonicalRow, error) {
 	if a.count >= noncanonicalHashCap {
 		return nil, errNoncanonicalCount
@@ -135,6 +140,7 @@ func (a *noncanonicalAccounting) appendRow(hash [32]byte) (*noncanonicalRow, err
 	a.rows[at] = noncanonicalRow{hash: hash, height: noncanonicalUnknownHeight}
 	return &a.rows[at], nil
 }
+
 func (a *noncanonicalAccounting) insertRow(hash [32]byte, at int) (*noncanonicalRow, error) {
 	if a.count >= noncanonicalHashCap {
 		return nil, errNoncanonicalCount
@@ -146,22 +152,26 @@ func (a *noncanonicalAccounting) insertRow(hash [32]byte, at int) (*noncanonical
 	a.rows[at] = noncanonicalRow{hash: hash, height: noncanonicalUnknownHeight}
 	return &a.rows[at], nil
 }
+
 func (a *noncanonicalAccounting) rowForScan(hash [32]byte) (*noncanonicalRow, error) {
 	if at, found := a.findPrefix(hash, a.sortedCount); found {
 		return &a.rows[at], nil
 	}
 	return a.appendRow(hash)
 }
+
 func (a *noncanonicalAccounting) sortRows() {
 	sort.Slice(a.rows[:a.count], func(i, j int) bool { return bytes.Compare(a.rows[i].hash[:], a.rows[j].hash[:]) < 0 })
 	a.sortedCount = a.count
 }
+
 func checkedNoncanonicalAdd(left, right uint64) (uint64, bool) {
 	if ^uint64(0)-left < right {
 		return 0, false
 	}
 	return left + right, true
 }
+
 func (a *noncanonicalAccounting) canReserve(bytesToReserve uint64, addCount bool) error {
 	if addCount && a.count >= noncanonicalHashCap {
 		return errNoncanonicalCount
@@ -180,6 +190,7 @@ func artifactShift(kind noncanonicalArtifactKind) uint16 { return uint16(kind) *
 func artifactReservedBit(kind noncanonicalArtifactKind) uint16 {
 	return noncanonicalReservedBase << kind
 }
+
 func artifactStateBits(state BlockArtifactState) uint16 {
 	switch state {
 	case BlockArtifactValid:
@@ -190,6 +201,7 @@ func artifactStateBits(state BlockArtifactState) uint16 {
 		return 0
 	}
 }
+
 func (r *noncanonicalRow) state(kind noncanonicalArtifactKind) BlockArtifactState {
 	switch (r.flags >> artifactShift(kind)) & noncanonicalStateMask {
 	case 1:
@@ -200,11 +212,13 @@ func (r *noncanonicalRow) state(kind noncanonicalArtifactKind) BlockArtifactStat
 		return BlockArtifactAbsent
 	}
 }
+
 func (r *noncanonicalRow) setState(kind noncanonicalArtifactKind, state BlockArtifactState) {
 	shift := artifactShift(kind)
 	r.flags &^= noncanonicalStateMask << shift
 	r.flags |= artifactStateBits(state) << shift
 }
+
 func (r *noncanonicalRow) setValidMetadata(kind noncanonicalArtifactKind, state BlockArtifactState, prev [32]byte, height uint64) {
 	if state != BlockArtifactValid {
 		return
@@ -216,6 +230,7 @@ func (r *noncanonicalRow) setValidMetadata(kind noncanonicalArtifactKind, state 
 		r.height = height
 	}
 }
+
 func (r *noncanonicalRow) bytes(kind noncanonicalArtifactKind) *uint64 {
 	switch kind {
 	case noncanonicalHeaderArtifact:
@@ -226,22 +241,27 @@ func (r *noncanonicalRow) bytes(kind noncanonicalArtifactKind) *uint64 {
 		return &r.blockBytes
 	}
 }
+
 func (r *noncanonicalRow) hasReservation(kind noncanonicalArtifactKind) bool {
 	return r.flags&artifactReservedBit(kind) != 0
 }
+
 func (r *noncanonicalRow) setReservation(kind noncanonicalArtifactKind, value uint64) {
 	*r.bytes(kind) = value
 	r.flags |= artifactReservedBit(kind)
 }
+
 func (r *noncanonicalRow) clearReservation(kind noncanonicalArtifactKind) uint64 {
 	value := *r.bytes(kind)
 	*r.bytes(kind) = 0
 	r.flags &^= artifactReservedBit(kind)
 	return value
 }
+
 func (r *noncanonicalRow) empty() bool {
 	return r.flags&(noncanonicalStateMask<<artifactShift(noncanonicalBlockArtifact)|noncanonicalStateMask<<artifactShift(noncanonicalHeaderArtifact)|noncanonicalStateMask<<artifactShift(noncanonicalUndoArtifact)|artifactReservedBit(noncanonicalBlockArtifact)|artifactReservedBit(noncanonicalHeaderArtifact)|artifactReservedBit(noncanonicalUndoArtifact)) == 0
 }
+
 func (a *noncanonicalAccounting) remove(at int) {
 	n := int(a.count)
 	copy(a.rows[at:n-1], a.rows[at+1:n])
@@ -249,6 +269,7 @@ func (a *noncanonicalAccounting) remove(at int) {
 	a.sortedCount = a.count
 	a.rows[a.count] = noncanonicalRow{}
 }
+
 func (a *noncanonicalAccounting) addScanned(hash [32]byte, kind noncanonicalArtifactKind, size uint64, state BlockArtifactState, prev [32]byte, height uint64) error {
 	_, found := a.findPrefix(hash, a.sortedCount)
 	if err := a.canReserve(size, !found); err != nil {
@@ -285,6 +306,7 @@ func (bs *BlockStore) rebuildNoncanonicalAccounting(limit uint64) (*noncanonical
 	}
 	return accounting, nil
 }
+
 func (bs *BlockStore) scanNoncanonicalDirectory(accounting *noncanonicalAccounting, kind noncanonicalArtifactKind) (resultErr error) {
 	dir, suffix, limit := bs.noncanonicalArtifactPath(kind)
 	d, err := os.Open(dir)
@@ -316,6 +338,7 @@ func (bs *BlockStore) scanNoncanonicalDirectory(accounting *noncanonicalAccounti
 		}
 	}
 }
+
 func (bs *BlockStore) noncanonicalArtifactPath(kind noncanonicalArtifactKind) (string, string, int64) {
 	switch kind {
 	case noncanonicalHeaderArtifact:
@@ -326,6 +349,7 @@ func (bs *BlockStore) noncanonicalArtifactPath(kind noncanonicalArtifactKind) (s
 		return bs.blocksDir, ".bin", blockFileMaxBytes
 	}
 }
+
 func (bs *BlockStore) scanNoncanonicalEntry(accounting *noncanonicalAccounting, kind noncanonicalArtifactKind, dir, suffix string, limit int64, directory os.FileInfo, entry os.DirEntry) error {
 	name := entry.Name()
 	if name == atomicWriteLockLeaf || name == atomicWriteScratchLeaf {
@@ -352,12 +376,14 @@ func (bs *BlockStore) scanNoncanonicalEntry(accounting *noncanonicalAccounting, 
 	}
 	return accounting.addScanned(hash, kind, size, state, prev, height)
 }
+
 func noncanonicalArtifactHash(name, suffix string) ([32]byte, error) {
 	if len(name) != 64+len(suffix) || name[64:] != suffix || !validCanonicalHashHex(name[:64]) {
 		return [32]byte{}, fmt.Errorf("unexpected noncanonical artifact name: %q", name)
 	}
 	return parseHex32("noncanonical artifact hash", name[:64])
 }
+
 func (bs *BlockStore) strictNoncanonicalArtifact(kind noncanonicalArtifactKind, dir, name string, limit int64, directory, entryInfo os.FileInfo, hash [32]byte) (BlockArtifactState, [32]byte, uint64, uint64, error) {
 	var zero [32]byte
 	raw, size, err := bs.readNoncanonicalArtifact(dir, name, limit, directory, entryInfo)
@@ -367,32 +393,37 @@ func (bs *BlockStore) strictNoncanonicalArtifact(kind noncanonicalArtifactKind, 
 	switch kind {
 	case noncanonicalBlockArtifact:
 		state, prev := noncanonicalStoredBlockState(raw, hash)
-		return state, prev, noncanonicalUnknownHeight, uint64(size), nil
+		return state, prev, noncanonicalUnknownHeight, size, nil
 	case noncanonicalHeaderArtifact:
 		if err := validateBlockHeaderHash(raw, hash); err != nil {
-			return BlockArtifactInvalid, zero, noncanonicalUnknownHeight, uint64(size), nil
+			return BlockArtifactInvalid, zero, noncanonicalUnknownHeight, size, nil
 		}
 		header, err := consensus.ParseBlockHeaderBytes(raw)
 		if err != nil {
-			return BlockArtifactInvalid, zero, noncanonicalUnknownHeight, uint64(size), nil
+			return BlockArtifactInvalid, zero, noncanonicalUnknownHeight, size, nil
 		}
-		return BlockArtifactValid, header.PrevBlockHash, noncanonicalUnknownHeight, uint64(size), nil
+		return BlockArtifactValid, header.PrevBlockHash, noncanonicalUnknownHeight, size, nil
 	default:
 		undo, err := unmarshalUndoEnvelope(hash, raw)
 		if err != nil {
-			return BlockArtifactInvalid, zero, noncanonicalUnknownHeight, uint64(size), nil
+			return BlockArtifactInvalid, zero, noncanonicalUnknownHeight, size, nil
 		}
-		return BlockArtifactValid, zero, undo.BlockHeight, uint64(size), nil
+		return BlockArtifactValid, zero, undo.BlockHeight, size, nil
 	}
 }
-func (bs *BlockStore) readNoncanonicalArtifact(dir, name string, limit int64, directory, entryInfo os.FileInfo) ([]byte, int64, error) {
+
+func (bs *BlockStore) readNoncanonicalArtifact(dir, name string, limit int64, directory, entryInfo os.FileInfo) ([]byte, uint64, error) {
 	file, before, size, err := bs.openNoncanonicalArtifact(dir, name, limit, directory, entryInfo)
 	if err != nil {
 		return nil, 0, err
 	}
 	raw, err := bs.readOpenedNoncanonicalArtifact(file, filepath.Join(dir, name), name, limit, dir, directory, before, size)
-	return raw, size, err
+	if err != nil {
+		return nil, 0, err
+	}
+	return raw, uint64(len(raw)), nil
 }
+
 func (bs *BlockStore) openNoncanonicalArtifact(dir, name string, limit int64, directory, entryInfo os.FileInfo) (file *os.File, before os.FileInfo, size int64, resultErr error) {
 	if resultErr = stableNoncanonicalDirectory(dir, directory); resultErr != nil {
 		return
@@ -430,16 +461,9 @@ func (bs *BlockStore) openNoncanonicalArtifact(dir, name string, limit int64, di
 	}
 	return
 }
+
 func openNoncanonicalArtifactFile(path string) (*os.File, error) {
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, err
-	}
-	if file := os.NewFile(uintptr(fd), path); file != nil {
-		return file, nil
-	}
-	_ = syscall.Close(fd)
-	return nil, errors.New("open noncanonical artifact")
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 }
 func validNoncanonicalArtifactSize(size, limit int64) bool { return size >= 0 && size <= limit }
 func (bs *BlockStore) readOpenedNoncanonicalArtifact(file *os.File, path, name string, limit int64, dir string, directory, before os.FileInfo, size int64) (raw []byte, resultErr error) {
@@ -459,6 +483,7 @@ func (bs *BlockStore) readOpenedNoncanonicalArtifact(file *os.File, path, name s
 	closed = true
 	return
 }
+
 func (bs *BlockStore) readAndVerifyNoncanonicalArtifact(file *os.File, path, name string, limit int64, before os.FileInfo, size int64) ([]byte, error) {
 	bs.probeLeaf()
 	raw, err := readCapped(file, name, capHint(size, limit), limit)
@@ -481,6 +506,7 @@ func (bs *BlockStore) readAndVerifyNoncanonicalArtifact(file *os.File, path, nam
 	}
 	return raw, nil
 }
+
 func (bs *BlockStore) closeAndCheckNoncanonicalArtifact(file *os.File, path, dir string, directory, before os.FileInfo, size int64) error {
 	if err := closeNoncanonicalFile(file); err != nil {
 		return err
@@ -495,6 +521,7 @@ func (bs *BlockStore) closeAndCheckNoncanonicalArtifact(file *os.File, path, dir
 	}
 	return stableNoncanonicalDirectory(dir, directory)
 }
+
 func stableNoncanonicalDirectory(dir string, opened os.FileInfo) error {
 	current, err := os.Lstat(dir)
 	if err == nil && (!opened.IsDir() || !current.IsDir() || opened.Size() != current.Size() || !opened.ModTime().Equal(current.ModTime()) || !os.SameFile(opened, current)) {
@@ -502,9 +529,11 @@ func stableNoncanonicalDirectory(dir string, opened os.FileInfo) error {
 	}
 	return err
 }
+
 func sameNoncanonicalArtifactSnapshot(before, after os.FileInfo, size int64) bool {
 	return before.Mode().IsRegular() && after.Mode().IsRegular() && before.Size() == size && after.Size() == size && before.ModTime().Equal(after.ModTime()) && os.SameFile(before, after)
 }
+
 func noncanonicalStoredBlockState(raw []byte, hash [32]byte) (BlockArtifactState, [32]byte) {
 	if parsed, err := consensus.ParseBlockBytes(raw); err == nil {
 		if observed, err := consensus.BlockHash(parsed.HeaderBytes); err == nil && observed == hash {
@@ -513,6 +542,7 @@ func noncanonicalStoredBlockState(raw []byte, hash [32]byte) (BlockArtifactState
 	}
 	return BlockArtifactInvalid, [32]byte{}
 }
+
 func preflightNoncanonicalFile(path string, content []byte) (bool, error) {
 	if err := validateAtomicWriteDestination(path, atomicWriteCreateIfAbsent); err != nil {
 		return false, err
@@ -567,6 +597,7 @@ func (bs *BlockStore) reserveNoncanonicalArtifactWrite(hash [32]byte, leaves []n
 	reservation.releaseUncreated()
 	return err
 }
+
 func (bs *BlockStore) beginNoncanonicalReservation(hash [32]byte, leaves []noncanonicalReservationLeaf) (*noncanonicalReservation, error) {
 	for {
 		bs.stateMu.Lock()
@@ -578,6 +609,7 @@ func (bs *BlockStore) beginNoncanonicalReservation(hash [32]byte, leaves []nonca
 		<-wait
 	}
 }
+
 func (bs *BlockStore) lockedNoncanonicalReservation(hash [32]byte, leaves []noncanonicalReservationLeaf) (*noncanonicalReservation, chan struct{}, error) {
 	accounting := bs.noncanonical.Load()
 	if accounting == nil {
@@ -592,6 +624,7 @@ func (bs *BlockStore) lockedNoncanonicalReservation(hash [32]byte, leaves []nonc
 	reservation, err := bs.reserveLockedNoncanonicalLeaves(accounting, hash, leaves)
 	return reservation, nil, err
 }
+
 func (bs *BlockStore) reserveLockedNoncanonicalLeaves(accounting *noncanonicalAccounting, hash [32]byte, leaves []noncanonicalReservationLeaf) (*noncanonicalReservation, error) {
 	at, row, adding, err := accounting.reservationRow(hash, len(leaves) != 0)
 	if err != nil {
@@ -609,6 +642,7 @@ func (bs *BlockStore) reserveLockedNoncanonicalLeaves(accounting *noncanonicalAc
 	}
 	return bs.commitLockedNoncanonicalReservation(accounting, hash, leaves, at, row, adding, bytesToReserve)
 }
+
 func (a *noncanonicalAccounting) reservationRow(hash [32]byte, needsRow bool) (int, *noncanonicalRow, bool, error) {
 	at, found := a.find(hash)
 	if found {
@@ -619,6 +653,7 @@ func (a *noncanonicalAccounting) reservationRow(hash [32]byte, needsRow bool) (i
 	}
 	return at, nil, true, nil
 }
+
 func noncanonicalReservationBytes(row *noncanonicalRow, leaves []noncanonicalReservationLeaf) (uint64, bool, error) {
 	var bytesToReserve uint64
 	missing := false
@@ -634,6 +669,7 @@ func noncanonicalReservationBytes(row *noncanonicalRow, leaves []noncanonicalRes
 	}
 	return bytesToReserve, missing, nil
 }
+
 func (bs *BlockStore) commitLockedNoncanonicalReservation(accounting *noncanonicalAccounting, hash [32]byte, leaves []noncanonicalReservationLeaf, at int, row *noncanonicalRow, adding bool, bytesToReserve uint64) (*noncanonicalReservation, error) {
 	if adding {
 		var err error
@@ -655,6 +691,7 @@ func (bs *BlockStore) commitLockedNoncanonicalReservation(accounting *noncanonic
 	bs.noncanonicalPending[hash] = done
 	return &noncanonicalReservation{store: bs, hash: hash, done: done, tracked: true}, nil
 }
+
 func (r *noncanonicalReservation) created(leaf noncanonicalReservationLeaf) {
 	if r == nil || !r.tracked {
 		return
@@ -663,6 +700,7 @@ func (r *noncanonicalReservation) created(leaf noncanonicalReservationLeaf) {
 	defer r.store.stateMu.Unlock()
 	r.createdLocked(leaf)
 }
+
 func (r *noncanonicalReservation) createdLocked(leaf noncanonicalReservationLeaf) {
 	accounting := r.store.noncanonical.Load()
 	if accounting == nil {
@@ -678,6 +716,7 @@ func (r *noncanonicalReservation) createdLocked(leaf noncanonicalReservationLeaf
 	}
 	r.commitCreated(accounting, row, leaf)
 }
+
 func (r *noncanonicalReservation) commitCreated(accounting *noncanonicalAccounting, row *noncanonicalRow, leaf noncanonicalReservationLeaf) {
 	reserved := row.clearReservation(leaf.kind)
 	accounting.reservedBytes -= reserved
@@ -686,6 +725,7 @@ func (r *noncanonicalReservation) commitCreated(accounting *noncanonicalAccounti
 	row.setState(leaf.kind, leaf.state)
 	row.setValidMetadata(leaf.kind, leaf.state, leaf.prev, leaf.height)
 }
+
 func (r *noncanonicalReservation) releaseUncreated() {
 	if r == nil || !r.tracked {
 		return
@@ -710,6 +750,7 @@ func (r *noncanonicalReservation) releaseUncreated() {
 		accounting.remove(at)
 	}
 }
+
 func (r *noncanonicalReservation) finish() {
 	if r == nil || !r.tracked {
 		return

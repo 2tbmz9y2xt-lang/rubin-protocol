@@ -908,6 +908,7 @@ func (bs *BlockStore) persistBlockBytes(blockHash [32]byte, headerBytes []byte, 
 	}
 	return bs.persistTrackedBlockBytes(blockHash, blockPath, headerPath, blockBytes, headerBytes)
 }
+
 func (bs *BlockStore) persistUntrackedBlockBytes(hash [32]byte, blockPath, headerPath string, blockBytes, headerBytes []byte) error {
 	return bs.reserveNoncanonicalArtifactWrite(hash, nil, func(*noncanonicalReservation) error {
 		if err := writeFileIfAbsent(blockPath, blockBytes); err != nil {
@@ -916,6 +917,7 @@ func (bs *BlockStore) persistUntrackedBlockBytes(hash [32]byte, blockPath, heade
 		return writeFileIfAbsent(headerPath, headerBytes)
 	})
 }
+
 func (bs *BlockStore) persistTrackedBlockBytes(hash [32]byte, blockPath, headerPath string, blockBytes, headerBytes []byte) error {
 	blockExists, err := preflightNoncanonicalFile(blockPath, blockBytes)
 	if err != nil {
@@ -956,6 +958,7 @@ func (bs *BlockStore) persistTrackedBlockBytes(hash [32]byte, blockPath, headerP
 		return writeMissingNoncanonicalBlockFiles(r, blockPath, headerPath, blockBytes, headerBytes, block, headerLeaf, blockExists, headerExists)
 	})
 }
+
 func writeMissingNoncanonicalBlockFiles(r *noncanonicalReservation, blockPath, headerPath string, blockBytes, headerBytes []byte, block, header noncanonicalReservationLeaf, blockExists, headerExists bool) error {
 	if !blockExists {
 		if err := writeNoncanonicalBlockArtifact(r, blockPath, blockBytes, block); err != nil {
@@ -967,6 +970,7 @@ func writeMissingNoncanonicalBlockFiles(r *noncanonicalReservation, blockPath, h
 	}
 	return nil
 }
+
 func writeNoncanonicalBlockArtifact(r *noncanonicalReservation, path string, raw []byte, leaf noncanonicalReservationLeaf) error {
 	err := writeFileIfAbsent(path, raw)
 	if err == nil || isAtomicWritePostCommit(err) {
