@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unsafe"
 
@@ -127,7 +128,7 @@ func TestNoncanonicalLimitsAndProductionDormancy(t *testing.T) {
 		t.Fatal("CreateBlockStore activated accounting")
 	}
 	calls, wantErr := 0, errors.New("nil reservation")
-	if err := store.reserveNoncanonicalArtifactWrite([32]byte{}, nil, func(*noncanonicalReservation) error { calls++; return wantErr }); !errors.Is(err, wantErr) || calls != 1 {
+	if err := store.reserveNoncanonicalArtifactWrite([32]byte{}, nil, nil, func(*noncanonicalReservation) error { calls++; return wantErr }); !errors.Is(err, wantErr) || calls != 1 {
 		t.Fatalf("nil reservation err=%v calls=%d", err, calls)
 	}
 	header, block := testHeaderBytes(1, 2), []byte("production write")
@@ -202,6 +203,71 @@ func TestNoncanonicalRebuildMergesArtifactPasses(t *testing.T) {
 	mustNoncanonicalRestartDigest(t, store, store.noncanonicalAccountingDigest())
 }
 
+func TestNoncanonicalRebuildSkipsHashCanonicalizedAfterRead(t *testing.T) {
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+	header := testHeaderBytes(10, 100)
+	hash := mustHeaderHash(t, header)
+	mustNoncanonical(t, os.WriteFile(noncanonicalTestFile(store, noncanonicalHeaderArtifact, hash), header, 0o600))
+	probes := 0
+	store.leafProbe = func() {
+		probes++
+		if probes == 5 {
+			store.leafProbe = nil
+			store.stateMu.Lock()
+			store.canonicalHeightByHash[hash] = 0
+			store.stateMu.Unlock()
+		}
+	}
+	image, err := store.rebuildNoncanonicalAccounting(noncanonicalDefaultByteLimit)
+	if err != nil || probes != 5 || image == nil {
+		t.Fatalf("image=%t probes=%d err=%v", image != nil, probes, err)
+	}
+	if image.usedBytes != 0 || image.count != 0 {
+		t.Fatalf("used=%d count=%d", image.usedBytes, image.count)
+	}
+}
+
+func TestNoncanonicalRebuildsSymlinkDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		retarget, fifo bool
+	}{{"stable", false, false}, {"retarget directory", true, false}, {"retarget fifo", true, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+			target, replacement := store.headersDir+".target", store.headersDir+".replacement"
+			mustNoncanonical(t, os.Rename(store.headersDir, target))
+			if tc.fifo {
+				mustNoncanonical(t, syscall.Mkfifo(replacement, 0o600))
+			} else if tc.retarget {
+				mustNoncanonical(t, os.Mkdir(replacement, 0o700))
+			}
+			mustNoncanonical(t, os.Symlink(target, store.headersDir))
+			header := testHeaderBytes(11, 110)
+			hash := mustHeaderHash(t, header)
+			mustNoncanonical(t, os.WriteFile(noncanonicalTestFile(store, noncanonicalHeaderArtifact, hash), header, 0o600))
+			if !tc.retarget {
+				reopened := mustOpenBlockStore(t, store.rootPath)
+				installNoncanonicalAccounting(t, reopened, noncanonicalDefaultByteLimit)
+				snapshot := reopened.noncanonicalAccountingSnapshot()
+				if len(snapshot.rows) != 1 || snapshot.rows[0].hash != hash || snapshot.rows[0].state(noncanonicalHeaderArtifact) != BlockArtifactValid {
+					t.Fatalf("symlink directory snapshot=%+v", snapshot)
+				}
+				mustNoncanonicalRestartDigest(t, reopened, reopened.noncanonicalAccountingDigest())
+				return
+			}
+			store.leafProbe = func() {
+				store.leafProbe = nil
+				mustNoncanonical(t, os.Remove(store.headersDir), os.Symlink(replacement, store.headersDir))
+			}
+			done := make(chan error, 1)
+			go func() { _, err := store.rebuildNoncanonicalAccounting(noncanonicalDefaultByteLimit); done <- err }()
+			if err := receiveNoncanonical(t, done, "retargeted directory rebuild did not return"); err == nil || tc.fifo && !errors.Is(err, syscall.ENOTDIR) {
+				t.Fatalf("retargeted directory err=%v", err)
+			}
+		})
+	}
+}
+
 func TestNoncanonicalStrictRebuildRejectsLeavesAndDrift(t *testing.T) {
 	for _, kind := range []string{"malformed", "suffix", "uppercase", "directory", "fifo", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
@@ -240,7 +306,9 @@ func TestNoncanonicalStrictRebuildRejectsLeavesAndDrift(t *testing.T) {
 		{"empty EOF", "", 1, func(store *BlockStore, _ string, _ []byte) {
 			mustNoncanonical(t, os.WriteFile(noncanonicalTestFile(store, noncanonicalBlockArtifact, [32]byte{1}), []byte("x"), 0o600))
 			mustNoncanonical(t, os.Chtimes(store.blocksDir, time.Unix(1_000_000_001, 0), time.Unix(1_000_000_001, 0)))
-		}}, {"enumerated inode", "", 2, replaceLeaf}, {"opened inode", "noncanonical artifact is not the opened regular leaf", 3, replaceLeaf}, {"same inode rewrite", "", 4, func(_ *BlockStore, path string, header []byte) {
+		}}, {"enumerated inode", "", 2, replaceLeaf}, {"opened inode", "noncanonical artifact is not the opened regular leaf", 3, replaceLeaf}, {"pre-open fifo", "", 3, func(_ *BlockStore, path string, _ []byte) {
+			mustNoncanonical(t, os.Remove(path), syscall.Mkfifo(path, 0o600))
+		}}, {"same inode rewrite", "", 4, func(_ *BlockStore, path string, header []byte) {
 			before, err := os.Lstat(path)
 			mustNoncanonical(t, err)
 			header = append([]byte(nil), header...)
@@ -295,7 +363,9 @@ func rejectNoncanonicalRebuildDrift(t *testing.T, phase int, mutate func(*BlockS
 	if want != "" {
 		closeCalls = countNoncanonicalClose(t, path, nil)
 	}
-	if _, err := store.rebuildNoncanonicalAccounting(noncanonicalDefaultByteLimit); err == nil || want != "" && !strings.Contains(err.Error(), want) || closeCalls != nil && *closeCalls != 1 {
+	done := make(chan error, 1)
+	go func() { _, err := store.rebuildNoncanonicalAccounting(noncanonicalDefaultByteLimit); done <- err }()
+	if err := receiveNoncanonical(t, done, "rebuild drift did not return"); err == nil || want != "" && !strings.Contains(err.Error(), want) || closeCalls != nil && *closeCalls != 1 {
 		t.Fatalf("rebuild err=%v want=%q", err, want)
 	}
 }
@@ -480,7 +550,7 @@ func TestNoncanonicalQuotaAndErrorOrder(t *testing.T) {
 		}
 	}
 	called := false
-	if err := store.reserveNoncanonicalArtifactWrite([32]byte{3}, []noncanonicalReservationLeaf{{kind: noncanonicalBlockArtifact, bytes: ^uint64(0)}, {kind: noncanonicalHeaderArtifact, bytes: 1}}, func(*noncanonicalReservation) error { called = true; return nil }); !errors.Is(err, errNoncanonicalCount) || called {
+	if err := store.reserveNoncanonicalArtifactWrite([32]byte{3}, []noncanonicalReservationLeaf{{kind: noncanonicalBlockArtifact, bytes: ^uint64(0)}, {kind: noncanonicalHeaderArtifact, bytes: 1}}, nil, func(*noncanonicalReservation) error { called = true; return nil }); !errors.Is(err, errNoncanonicalCount) || called {
 		t.Fatalf("reserve count precedence err=%v called=%t", err, called)
 	}
 	if err := full.addScanned([32]byte{3}, noncanonicalBlockArtifact, ^uint64(0), BlockArtifactInvalid, [32]byte{}, 0); !errors.Is(err, errNoncanonicalCount) || full.usedBytes != 0 {
@@ -489,7 +559,7 @@ func TestNoncanonicalQuotaAndErrorOrder(t *testing.T) {
 	full.count, full.sortedCount, full.usedBytes, full.reservedBytes, full.limit = 0, 0, 0, 0, noncanonicalDefaultByteLimit
 	row := full.rows[0]
 	called = false
-	if err := store.reserveNoncanonicalArtifactWrite([32]byte{4}, []noncanonicalReservationLeaf{{kind: noncanonicalBlockArtifact, bytes: ^uint64(0)}, {kind: noncanonicalHeaderArtifact, bytes: 1}}, func(*noncanonicalReservation) error { called = true; return nil }); !errors.Is(err, errNoncanonicalBytes) || errors.Is(err, errNoncanonicalCount) || called || full.count != 0 || full.sortedCount != 0 || full.usedBytes != 0 || full.reservedBytes != 0 || full.limit != noncanonicalDefaultByteLimit || full.rows[0] != row {
+	if err := store.reserveNoncanonicalArtifactWrite([32]byte{4}, []noncanonicalReservationLeaf{{kind: noncanonicalBlockArtifact, bytes: ^uint64(0)}, {kind: noncanonicalHeaderArtifact, bytes: 1}}, nil, func(*noncanonicalReservation) error { called = true; return nil }); !errors.Is(err, errNoncanonicalBytes) || errors.Is(err, errNoncanonicalCount) || called || full.count != 0 || full.sortedCount != 0 || full.usedBytes != 0 || full.reservedBytes != 0 || full.limit != noncanonicalDefaultByteLimit || full.rows[0] != row {
 		t.Fatalf("reserve bytes err=%v used=%d reserved=%d count=%d row=%+v", err, full.usedBytes, full.reservedBytes, full.count, full.rows[0])
 	}
 	full.limit = 1
@@ -506,48 +576,148 @@ func TestNoncanonicalQuotaAndErrorOrder(t *testing.T) {
 	}
 }
 
+func TestNoncanonicalStoreBlockConflictPrecedesConcurrentQuota(t *testing.T) {
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+	accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+	header, first := testHeaderBytes(23, 204), []byte("first partial")
+	hash := mustHeaderHash(t, header)
+	blockPath := noncanonicalTestFile(store, noncanonicalBlockArtifact, hash)
+	mustNoncanonical(t, os.WriteFile(blockPath, first, 0o600))
+	mustNoncanonical(t, accounting.addScanned(hash, noncanonicalBlockArtifact, uint64(len(first)), BlockArtifactInvalid, [32]byte{}, noncanonicalUnknownHeight))
+	accounting.limit = accounting.usedBytes
+	previousRead := readFileByPathFn
+	t.Cleanup(func() { readFileByPathFn = previousRead })
+	sawPending := false
+	readFileByPathFn = func(path string, maxBytes int64) ([]byte, error) {
+		if path != blockPath {
+			return previousRead(path, maxBytes)
+		}
+		store.stateMu.Lock()
+		sawPending = store.noncanonicalPending[hash] != nil
+		store.stateMu.Unlock()
+		if !sawPending {
+			return nil, errors.New("preflight preceded reservation")
+		}
+		return previousRead(path, maxBytes)
+	}
+	err := store.StoreBlock(hash, header, []byte("conflicting"))
+	if !sawPending {
+		t.Fatal("preflight preceded reservation")
+	}
+	mustNoncanonicalAtomic(t, err, blockPath)
+}
+
 func TestNoncanonicalReservationsCoordinateHashes(t *testing.T) {
 	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
 	installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
 	leaf := noncanonicalReservationLeaf{kind: noncanonicalBlockArtifact, bytes: 1, state: BlockArtifactValid}
 	sameLeaf := noncanonicalReservationLeaf{kind: noncanonicalHeaderArtifact, bytes: 1, state: BlockArtifactValid}
-	started, release, firstDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
-	released := false
-	t.Cleanup(func() {
-		if !released {
-			close(release)
+	synctest.Test(t, func(t *testing.T) {
+		started, release, firstDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+		defer func() {
+			select {
+			case <-release:
+			default:
+				close(release)
+			}
+		}()
+		go func() {
+			firstDone <- store.reserveNoncanonicalArtifactWrite([32]byte{1}, []noncanonicalReservationLeaf{leaf}, nil, func(r *noncanonicalReservation) error { close(started); <-release; r.created(leaf); return nil })
+		}()
+		synctest.Wait()
+		<-started
+		snapshot := store.noncanonicalAccountingSnapshot()
+		if len(snapshot.rows) != 1 || snapshot.usedBytes != 0 || snapshot.reservedBytes != 1 || snapshot.uniqueCount != 1 || snapshot.rows[0].blockBytes != 1 || snapshot.rows[0].height != noncanonicalUnknownHeight || snapshot.rows[0].flags&(1<<6) == 0 {
+			t.Fatalf("pending used=%d reserved=%d count=%d rows=%d", snapshot.usedBytes, snapshot.reservedBytes, snapshot.uniqueCount, len(snapshot.rows))
+		}
+		if got, want := store.noncanonicalAccountingDigest(), noncanonicalTestDigest(snapshot); got != want {
+			t.Fatalf("pending digest=%x want=%x", got, want)
+		}
+		prepared, sameDone, otherDone := make(chan struct{}), make(chan error, 1), make(chan error, 1)
+		go func() {
+			sameDone <- store.reserveNoncanonicalArtifactWrite([32]byte{1}, nil, func() ([]noncanonicalReservationLeaf, error) {
+				close(prepared)
+				return []noncanonicalReservationLeaf{sameLeaf}, nil
+			}, func(r *noncanonicalReservation) error { r.created(sameLeaf); return nil })
+		}()
+		go func() {
+			otherDone <- store.reserveNoncanonicalArtifactWrite([32]byte{}, []noncanonicalReservationLeaf{leaf}, nil, func(r *noncanonicalReservation) error { r.created(leaf); return nil })
+		}()
+		synctest.Wait()
+		mustNoncanonical(t, <-otherDone)
+		select {
+		case <-prepared:
+			t.Fatal("same hash preflight bypassed reservation")
+		case err := <-sameDone:
+			t.Fatalf("same hash bypassed reservation: %v", err)
+		default:
+		}
+		close(release)
+		synctest.Wait()
+		mustNoncanonical(t, <-firstDone)
+		mustNoncanonical(t, <-sameDone)
+		snapshot = store.noncanonicalAccountingSnapshot()
+		if len(snapshot.rows) != 2 || snapshot.usedBytes != 3 || snapshot.reservedBytes != 0 || snapshot.rows[0].hash != ([32]byte{}) || snapshot.rows[0].state(noncanonicalBlockArtifact) != BlockArtifactValid || snapshot.rows[1].hash != ([32]byte{1}) || snapshot.rows[1].state(noncanonicalBlockArtifact) != BlockArtifactValid || snapshot.rows[1].state(noncanonicalHeaderArtifact) != BlockArtifactValid {
+			t.Fatalf("reservation convergence=%+v", snapshot)
+		}
+		before, beforeDigest, cutover := snapshot, store.noncanonicalAccountingDigest(), [32]byte{2}
+		called := false
+		mustNoncanonical(t, store.reserveNoncanonicalArtifactWrite(cutover, nil, func() ([]noncanonicalReservationLeaf, error) {
+			store.stateMu.Lock()
+			store.canonicalHeightByHash[cutover] = 0
+			store.stateMu.Unlock()
+			return []noncanonicalReservationLeaf{leaf}, nil
+		}, func(r *noncanonicalReservation) error { called = true; r.created(leaf); return nil }))
+		if got := store.noncanonicalAccountingSnapshot(); !called || len(got.rows) != len(before.rows) || got.usedBytes != before.usedBytes || got.reservedBytes != before.reservedBytes || got.uniqueCount != before.uniqueCount || store.noncanonicalAccountingDigest() != beforeDigest {
+			t.Fatalf("canonical cutover charged=%+v", got)
 		}
 	})
-	go func() {
-		firstDone <- store.reserveNoncanonicalArtifactWrite([32]byte{1}, []noncanonicalReservationLeaf{leaf}, func(r *noncanonicalReservation) error { close(started); <-release; r.created(leaf); return nil })
-	}()
-	_ = receiveNoncanonical(t, started, "first reservation did not start")
-	snapshot := store.noncanonicalAccountingSnapshot()
-	if len(snapshot.rows) != 1 || snapshot.usedBytes != 0 || snapshot.reservedBytes != 1 || snapshot.uniqueCount != 1 || snapshot.rows[0].blockBytes != 1 || snapshot.rows[0].height != noncanonicalUnknownHeight || snapshot.rows[0].flags&(1<<6) == 0 {
-		t.Fatalf("pending used=%d reserved=%d count=%d rows=%d", snapshot.usedBytes, snapshot.reservedBytes, snapshot.uniqueCount, len(snapshot.rows))
+}
+
+func TestNoncanonicalReservationEarlyExitsFinishPending(t *testing.T) {
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+	accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+	fault := errors.New("prepare")
+	leaf := noncanonicalReservationLeaf{kind: noncanonicalBlockArtifact, bytes: 1, state: BlockArtifactValid}
+	check := func(name string, hash [32]byte, exit func() ([]noncanonicalReservationLeaf, error), want error, wantCall bool) {
+		t.Helper()
+		before, digest, called := store.noncanonicalAccountingSnapshot(), store.noncanonicalAccountingDigest(), false
+		var captured chan struct{}
+		err := store.reserveNoncanonicalArtifactWrite(hash, nil, func() ([]noncanonicalReservationLeaf, error) {
+			store.stateMu.Lock()
+			captured = store.noncanonicalPending[hash]
+			store.stateMu.Unlock()
+			if captured == nil {
+				t.Fatalf("%s prepare did not own pending", name)
+			}
+			return exit()
+		}, func(*noncanonicalReservation) error { called = true; return nil })
+		if want == nil && err != nil || want != nil && !errors.Is(err, want) {
+			t.Fatalf("%s err=%v want=%v", name, err, want)
+		}
+		store.stateMu.Lock()
+		pending := store.noncanonicalPending[hash]
+		store.stateMu.Unlock()
+		select {
+		case <-captured:
+		default:
+			t.Fatalf("%s pending channel remained open", name)
+		}
+		after := store.noncanonicalAccountingSnapshot()
+		if pending != nil || called != wantCall || len(after.rows) != len(before.rows) || after.usedBytes != before.usedBytes || after.reservedBytes != before.reservedBytes || after.uniqueCount != before.uniqueCount || store.noncanonicalAccountingDigest() != digest {
+			t.Fatalf("%s pending=%t called=%t snapshot=%+v", name, pending != nil, called, after)
+		}
 	}
-	if got, want := store.noncanonicalAccountingDigest(), noncanonicalTestDigest(snapshot); got != want {
-		t.Fatalf("pending digest=%x want=%x", got, want)
-	}
-	sameDone, otherDone := make(chan error, 1), make(chan error, 1)
-	go func() {
-		sameDone <- store.reserveNoncanonicalArtifactWrite([32]byte{1}, []noncanonicalReservationLeaf{sameLeaf}, func(r *noncanonicalReservation) error { r.created(sameLeaf); return nil })
-	}()
-	go func() {
-		otherDone <- store.reserveNoncanonicalArtifactWrite([32]byte{}, []noncanonicalReservationLeaf{leaf}, func(r *noncanonicalReservation) error { r.created(leaf); return nil })
-	}()
-	mustNoncanonical(t, receiveNoncanonical(t, otherDone, "different hash serialized across I/O"))
-	select {
-	case err := <-sameDone:
-		t.Fatalf("same hash bypassed reservation: %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-	close(release)
-	released = true
-	mustNoncanonical(t, receiveNoncanonical(t, firstDone, "first reservation did not finish"))
-	mustNoncanonical(t, receiveNoncanonical(t, sameDone, "same hash did not resume"))
-	snapshot = store.noncanonicalAccountingSnapshot()
-	if len(snapshot.rows) != 2 || snapshot.usedBytes != 3 || snapshot.reservedBytes != 0 || snapshot.rows[0].hash != ([32]byte{}) || snapshot.rows[0].state(noncanonicalBlockArtifact) != BlockArtifactValid || snapshot.rows[1].hash != ([32]byte{1}) || snapshot.rows[1].state(noncanonicalBlockArtifact) != BlockArtifactValid || snapshot.rows[1].state(noncanonicalHeaderArtifact) != BlockArtifactValid {
-		t.Fatalf("reservation convergence=%+v", snapshot)
-	}
+	check("prepare error", [32]byte{1}, func() ([]noncanonicalReservationLeaf, error) { return nil, fault }, fault, false)
+	check("zero leaves", [32]byte{2}, func() ([]noncanonicalReservationLeaf, error) { return nil, nil }, nil, false)
+	accounting.limit = 0
+	check("quota", [32]byte{3}, func() ([]noncanonicalReservationLeaf, error) { return []noncanonicalReservationLeaf{leaf}, nil }, errNoncanonicalBytes, false)
+	accounting.limit = noncanonicalDefaultByteLimit
+	canonical := [32]byte{4}
+	check("canonical", canonical, func() ([]noncanonicalReservationLeaf, error) {
+		store.stateMu.Lock()
+		store.canonicalHeightByHash[canonical] = 0
+		store.stateMu.Unlock()
+		return []noncanonicalReservationLeaf{leaf}, nil
+	}, nil, true)
 }

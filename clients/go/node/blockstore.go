@@ -610,13 +610,6 @@ func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {
 	// equality preserves its exact bytes and version; corruption or a different
 	// undo is never healed in place.
 	resolveExisting := func() error { return bs.checkExistingUndo(path, blockHash, undo) }
-	existingErr := resolveExisting()
-	if existingErr == nil {
-		return syncMatchingExistingFile(path)
-	}
-	if !errors.Is(existingErr, os.ErrNotExist) {
-		return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteCreateIfAbsent, existingErr)
-	}
 	leaf := noncanonicalReservationLeaf{
 		kind:   noncanonicalUndoArtifact,
 		bytes:  uint64(len(raw)),
@@ -630,7 +623,16 @@ func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {
 		}
 		return err
 	}
-	return bs.reserveNoncanonicalArtifactWrite(blockHash, []noncanonicalReservationLeaf{leaf}, write)
+	return bs.reserveNoncanonicalArtifactWrite(blockHash, nil, func() ([]noncanonicalReservationLeaf, error) {
+		existingErr := resolveExisting()
+		if existingErr == nil {
+			return nil, syncMatchingExistingFile(path)
+		}
+		if !errors.Is(existingErr, os.ErrNotExist) {
+			return nil, newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteCreateIfAbsent, existingErr)
+		}
+		return []noncanonicalReservationLeaf{leaf}, nil
+	}, write)
 }
 
 func (bs *BlockStore) checkExistingUndo(path string, blockHash [32]byte, undo *BlockUndo) error {
@@ -910,7 +912,7 @@ func (bs *BlockStore) persistBlockBytes(blockHash [32]byte, headerBytes []byte, 
 }
 
 func (bs *BlockStore) persistUntrackedBlockBytes(hash [32]byte, blockPath, headerPath string, blockBytes, headerBytes []byte) error {
-	return bs.reserveNoncanonicalArtifactWrite(hash, nil, func(*noncanonicalReservation) error {
+	return bs.reserveNoncanonicalArtifactWrite(hash, nil, nil, func(*noncanonicalReservation) error {
 		if err := writeFileIfAbsent(blockPath, blockBytes); err != nil {
 			return err
 		}
@@ -919,54 +921,47 @@ func (bs *BlockStore) persistUntrackedBlockBytes(hash [32]byte, blockPath, heade
 }
 
 func (bs *BlockStore) persistTrackedBlockBytes(hash [32]byte, blockPath, headerPath string, blockBytes, headerBytes []byte) error {
-	blockExists, err := preflightNoncanonicalFile(blockPath, blockBytes)
-	if err != nil {
-		return err
-	}
-	headerExists, err := preflightNoncanonicalFile(headerPath, headerBytes)
-	if err != nil {
-		return err
-	}
-	if blockExists && headerExists {
-		return nil
-	}
-	header, err := consensus.ParseBlockHeaderBytes(headerBytes)
-	if err != nil {
-		return err
-	}
-	blockState, blockPrev := noncanonicalStoredBlockState(blockBytes, hash)
-	block := noncanonicalReservationLeaf{
-		kind:  noncanonicalBlockArtifact,
-		bytes: uint64(len(blockBytes)),
-		state: blockState,
-		prev:  blockPrev,
-	}
-	headerLeaf := noncanonicalReservationLeaf{
-		kind:  noncanonicalHeaderArtifact,
-		bytes: uint64(len(headerBytes)),
-		state: BlockArtifactValid,
-		prev:  header.PrevBlockHash,
-	}
-	leaves := make([]noncanonicalReservationLeaf, 0, 2)
-	if !blockExists {
-		leaves = append(leaves, block)
-	}
-	if !headerExists {
-		leaves = append(leaves, headerLeaf)
-	}
-	return bs.reserveNoncanonicalArtifactWrite(hash, leaves, func(r *noncanonicalReservation) error {
-		return writeMissingNoncanonicalBlockFiles(r, blockPath, headerPath, blockBytes, headerBytes, block, headerLeaf, blockExists, headerExists)
+	var leaves []noncanonicalReservationLeaf
+	return bs.reserveNoncanonicalArtifactWrite(hash, nil, func() ([]noncanonicalReservationLeaf, error) {
+		blockExists, err := preflightNoncanonicalFile(blockPath, blockBytes)
+		if err != nil {
+			return nil, err
+		}
+		headerExists, err := preflightNoncanonicalFile(headerPath, headerBytes)
+		if err != nil {
+			return nil, err
+		}
+		if blockExists && headerExists {
+			return nil, nil
+		}
+		header, err := consensus.ParseBlockHeaderBytes(headerBytes)
+		if err != nil {
+			return nil, err
+		}
+		blockState, blockPrev := noncanonicalStoredBlockState(blockBytes, hash)
+		block := noncanonicalReservationLeaf{kind: noncanonicalBlockArtifact, bytes: uint64(len(blockBytes)), state: blockState, prev: blockPrev}
+		headerLeaf := noncanonicalReservationLeaf{kind: noncanonicalHeaderArtifact, bytes: uint64(len(headerBytes)), state: BlockArtifactValid, prev: header.PrevBlockHash}
+		if !blockExists {
+			leaves = append(leaves, block)
+		}
+		if !headerExists {
+			leaves = append(leaves, headerLeaf)
+		}
+		return leaves, nil
+	}, func(r *noncanonicalReservation) error {
+		return writeMissingNoncanonicalBlockFiles(r, leaves, blockPath, blockBytes, headerPath, headerBytes)
 	})
 }
 
-func writeMissingNoncanonicalBlockFiles(r *noncanonicalReservation, blockPath, headerPath string, blockBytes, headerBytes []byte, block, header noncanonicalReservationLeaf, blockExists, headerExists bool) error {
-	if !blockExists {
-		if err := writeNoncanonicalBlockArtifact(r, blockPath, blockBytes, block); err != nil {
+func writeMissingNoncanonicalBlockFiles(r *noncanonicalReservation, leaves []noncanonicalReservationLeaf, blockPath string, blockBytes []byte, headerPath string, headerBytes []byte) error {
+	for _, leaf := range leaves {
+		path, raw := blockPath, blockBytes
+		if leaf.kind == noncanonicalHeaderArtifact {
+			path, raw = headerPath, headerBytes
+		}
+		if err := writeNoncanonicalBlockArtifact(r, path, raw, leaf); err != nil {
 			return err
 		}
-	}
-	if !headerExists {
-		return writeNoncanonicalBlockArtifact(r, headerPath, headerBytes, header)
 	}
 	return nil
 }
