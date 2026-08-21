@@ -63,6 +63,64 @@ func TestCoverageResidual_ServiceSyncBroadcastBranches(t *testing.T) {
 	}
 }
 
+func TestBroadcastInventoryToPeersJoinsHeldPeer(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	heldLocal, heldRemote := net.Pipe()
+	defer heldLocal.Close()
+	defer heldRemote.Close()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	held := &peer{conn: &lifecycleGateConn{Conn: heldLocal, entered: entered, release: release}, service: h.service, state: nodePeerState("held-peer")}
+	heldFrame := lifecycleReadFrame(held, heldRemote)
+
+	independentLocal, independentRemote := net.Pipe()
+	defer independentLocal.Close()
+	defer independentRemote.Close()
+	independent := &peer{conn: independentLocal, service: h.service, state: nodePeerState("independent-peer")}
+	independentRead := make(chan error, 1)
+	go func() {
+		_, err := readFrame(independentRemote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		independentRead <- err
+	}()
+	broadcastDone := make(chan error, 1)
+	want := InventoryVector{Type: MSG_BLOCK, Hash: [32]byte{0x01}}
+	go func() {
+		broadcastDone <- h.service.broadcastInventoryToPeers(
+			[]*peer{held, independent},
+			[]InventoryVector{want},
+		)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(lifecycleWatchdog):
+		t.Fatal("held peer send did not start")
+	}
+	select {
+	case err := <-independentRead:
+		if err != nil {
+			t.Fatalf("independent peer receipt failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for independent peer receipt")
+	}
+	requireStillBlocked(t, broadcastDone, "broadcastInventoryToPeers")
+	close(release)
+	released = true
+	requireReturned(t, broadcastDone, "broadcastInventoryToPeers")
+	frame := <-heldFrame
+	items, err := decodeInventoryVectors(frame.Payload)
+	if frame.Command != messageInv || err != nil || len(items) != 1 || items[0] != want {
+		t.Fatalf("held frame=%+v items=%+v err=%v, want one %v", frame, items, err, want)
+	}
+}
+
 func TestSelectTxRelayPeersDeterministic(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	peers := []*peer{
