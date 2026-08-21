@@ -5,7 +5,7 @@
   "package_maturity": "experimental_pending_reverification",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
-  "spec_section_hashes_sha3_256": "d4d21a6fcdfd90fe1dc723a180ce4cffea61d9e6f62579ce29c29d64dd15fba3",
+  "spec_section_hashes_sha3_256": "28168cae5835af5da61d014442836611a6c50f4a946e7472b64ce8900fba4197",
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "source_rebind": {
@@ -784,7 +784,9 @@
         "RubinFormal.ptpi_locktime_fail": "rubin-formal/RubinFormal/ErrorPriority.lean"
       },
       "notes": "Universal theorem lane: block-level 6-stage live error propagation on `validateBlockBasic`, direct live tx-parse and tx-semantic stage bridges, and the retained semantic ordering/injectivity contract. The experimental `tx_parse_pipeline_deterministic` model omits DA-core and payload-read failures and is intentionally unregistered as complete live parse evidence. TARGET ambiguity is formally resolved via `target_error_disambiguated`, and `dispatchCovenantValidation` is claimed on the direct live per-input path rather than through a parallel-model helper caveat. Separate fixture lane: CV-VALIDATION-ORDER replay on pinned ordering vectors. That executable lane is complementary regression evidence only and does not replace the live stage-order theorem surface.",
-      "limitations": [],
+      "limitations": [
+        "RUB-1217's P0-S6 SpendTx total order, mixed-invalid precedence across stages, families, and input indices, and transaction-index arbitration are normative requirements not proved by the currently registered theorems or pinned fixtures."
+      ],
       "evidence_level": "machine_checked_universal"
     },
     {
@@ -975,7 +977,8 @@
       "notes": "Section 16 claim is carried by concrete regression theorems plus the retained registry-aware rejection and threshold/vault theorems on `validateWitnessItemLengthsRegistry`, `validateThresholdSigSpendRegistry`, and `validateVaultSpendRegistry` specialized to `PRE_ROTATION_REGISTRY`. The deleted aggregate binding and ML-DSA acceptance wrappers are not claimed. This row closes the named retained spend-side helper/live cases only; parser-stage witness canonicalization and activation-stage suite gating remain outside this surface.",
       "limitations": [
         "Registry-aware coverage is specialized to PRE_ROTATION_REGISTRY; post-rotation registries with additional suites remain future scope.",
-        "The parse-time structural validity / registry validity / activation validity split introduced for the witness parser model is not itself counted in this Section 16 row."
+        "The parse-time structural validity / registry validity / activation validity split introduced for the witness parser model is not itself counted in this Section 16 row.",
+        "The current Section 16 evidence does not prove RUB-1217's six global S1A family-before-index scans or their mixed-invalid precedence; it must not be read as proving the new complete family order."
       ],
       "evidence_level": "machine_checked_universal"
     },
@@ -1126,7 +1129,8 @@
       "notes": "Block connection pipeline with coinbase, value conservation, and per-tx state machine. Current CORE_VAULT spend proofs remain registered; the retained experimental VaultStateMachine lifecycle corpus is not current-protocol evidence. TxContext parameters are caller-provided. Coinbase UTXO marking is covered by the current list-to-RBMap bridge and query-level semantics. Vault-policy replay is limited to the safe subset/default-order path.",
       "limitations": [
         "RBMap-level operational equivalence is not fully proved end-to-end; the current closure relies on the explicit list-to-RBMap bridge and query-level semantics now available in CoinbaseBehavioral.",
-        "vault_policy_default_order_safe_proved covers the spend-side safe subset / default-order path only and is not a full L1↔L2 equivalence theorem for every vault-policy branch."
+        "vault_policy_default_order_safe_proved covers the spend-side safe subset / default-order path only and is not a full L1↔L2 equivalence theorem for every vault-policy branch.",
+        "The current UTXO evidence does not prove RUB-1217's P0-S6 atomic publication boundary, accepted-nonce publication, transaction-index arbitration, or rejection-time absence of partial UTXO, replay, queue, or candidate-state publication."
       ],
       "evidence_level": "machine_checked_universal"
     },
