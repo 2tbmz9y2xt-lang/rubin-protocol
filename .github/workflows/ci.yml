@@ -296,7 +296,7 @@ jobs:
         run: |
           key="$(mktemp)"; trap 'rm -f "$key"' EXIT
           printf '%s\n' "$RUBIN_FORMAL_DEPLOY_KEY" > "$key"
-          test "$(ssh-keygen -y -f "$key")" = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHKJBNrYj8kKt8ydHGYFG543eLWgyhQ5Es89lVygE9I6'
+          test "$(ssh-keygen -y -f "$key" | awk '{print $1, $2}')" = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHKJBNrYj8kKt8ydHGYFG543eLWgyhQ5Es89lVygE9I6'
 
       - if: steps.test_gate.outputs.run_test == 'true' && github.repository == '2tbmz9y2xt-lang/rubin-protocol' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == '2tbmz9y2xt-lang' && github.actor == '2tbmz9y2xt-lang'))
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
