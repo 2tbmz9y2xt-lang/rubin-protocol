@@ -422,6 +422,7 @@ jobs:
         if: steps.test_gate.outputs.run_test == 'true'
         run: |
           cd clients/go
+          set -o pipefail
           go test -json ./node/p2p -run '^TestCanonicalBlockRelayFixtureRows$' -count=1 | awk -v require_pass="${RUBIN_SPEC_ROOT:+1}" '{print} /"Action":"pass"/ && /"Test":"TestCanonicalBlockRelayFixtureRows"/ {passed=1} /"Action":"skip"/ && /"Test":"TestCanonicalBlockRelayFixtureRows"/ {skipped=1} END {exit require_pass ? !passed : !skipped}'
           go test ./...
 
