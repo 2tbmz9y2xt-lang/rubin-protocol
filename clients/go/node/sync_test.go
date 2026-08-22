@@ -414,7 +414,7 @@ func TestSyncEngineIBDLogic(t *testing.T) {
 }
 
 func TestCanonicalBlockRelayTerminalNew(t *testing.T) {
-	injectStateSync := func(t *testing.T, engine *SyncEngine, failAt int) *bool {
+	injectStateSync := func(t *testing.T, engine *SyncEngine, failAt int, unreadable bool) *bool {
 		t.Helper()
 		failed := new(bool)
 		calls := 0
@@ -426,6 +426,10 @@ func TestCanonicalBlockRelayTerminalNew(t *testing.T) {
 				}
 				if !*failed && calls == failAt {
 					*failed = true
+					if unreadable {
+						mustAtomic(t, os.Remove(engine.cfg.ChainStatePath))
+						mustAtomic(t, os.Mkdir(engine.cfg.ChainStatePath, 0o700))
+					}
 					return os.ErrPermission
 				}
 				return syncParent(parent)
@@ -434,59 +438,77 @@ func TestCanonicalBlockRelayTerminalNew(t *testing.T) {
 		return failed
 	}
 
-	t.Run("direct complete visible NEW", func(t *testing.T) {
-		engine, store, _ := newPersistenceFaultEngine(t)
-		pb, err := consensus.ParseBlockBytes(DevnetGenesisBlockBytes())
-		if err != nil {
-			t.Fatalf("parse genesis: %v", err)
-		}
-		failed := injectStateSync(t, engine, 1)
-		summary, err := engine.ApplyBlockWithReorg(DevnetGenesisBlockBytes(), nil)
-		if !*failed || summary == nil || !errors.Is(err, os.ErrPermission) || summary.BlockHash != devnetGenesisBlockHash || len(summary.CanonicalAppliedBlocks) != 1 {
-			t.Fatalf("failed=%v summary=%+v err=%v", *failed, summary, err)
-		}
-		view := engine.chainState.view()
-		index, indexErr := store.CanonicalIndexSnapshot()
-		wantIndex := []string{hex.EncodeToString(summary.BlockHash[:])}
-		if !view.hasTip || view.height != summary.BlockHeight || view.tipHash != summary.BlockHash || engine.chainState.StateDigest() != summary.PostStateDigest || indexErr != nil || !reflect.DeepEqual(index, wantIndex) {
-			t.Fatalf("live=%+v digest=%x index=%v indexErr=%v, want summary=%+v index=%v", view, engine.chainState.StateDigest(), index, indexErr, summary, wantIndex)
-		}
-		if engine.tipTimestamp != pb.Header.Timestamp || engine.IsInIBD(pb.Header.Timestamp) {
-			t.Fatalf("tipTimestamp=%d IBD=%v, want published timestamp %d and post-transition non-IBD", engine.tipTimestamp, engine.IsInIBD(pb.Header.Timestamp), pb.Header.Timestamp)
-		}
-	})
+	for _, unreadable := range []bool{false, true} {
+		t.Run(map[bool]string{false: "direct complete visible NEW", true: "direct unreadable NEW"}[unreadable], func(t *testing.T) {
+			engine, store, _ := newPersistenceFaultEngine(t)
+			pb, err := consensus.ParseBlockBytes(DevnetGenesisBlockBytes())
+			if err != nil {
+				t.Fatalf("parse genesis: %v", err)
+			}
+			failed := injectStateSync(t, engine, 1, unreadable)
+			summary, err := engine.ApplyBlockWithReorg(DevnetGenesisBlockBytes(), nil)
+			var fault *storagePersistenceFault
+			if unreadable {
+				if !*failed || summary != nil || !errors.Is(err, os.ErrPermission) || !errors.As(err, &fault) || fault.reloadErr == nil {
+					t.Fatalf("failed=%v summary=%+v fault=%+v err=%v", *failed, summary, fault, err)
+				}
+				return
+			}
+			if !*failed || summary == nil || !errors.Is(err, os.ErrPermission) || summary.BlockHash != devnetGenesisBlockHash || len(summary.CanonicalAppliedBlocks) != 1 {
+				t.Fatalf("failed=%v summary=%+v err=%v", *failed, summary, err)
+			}
+			view := engine.chainState.view()
+			index, indexErr := store.CanonicalIndexSnapshot()
+			wantIndex := []string{hex.EncodeToString(summary.BlockHash[:])}
+			if !view.hasTip || view.height != summary.BlockHeight || view.tipHash != summary.BlockHash || engine.chainState.StateDigest() != summary.PostStateDigest || indexErr != nil || !reflect.DeepEqual(index, wantIndex) {
+				t.Fatalf("live=%+v digest=%x index=%v indexErr=%v, want summary=%+v index=%v", view, engine.chainState.StateDigest(), index, indexErr, summary, wantIndex)
+			}
+			if engine.tipTimestamp != pb.Header.Timestamp || engine.IsInIBD(pb.Header.Timestamp) {
+				t.Fatalf("tipTimestamp=%d IBD=%v, want published timestamp %d and post-transition non-IBD", engine.tipTimestamp, engine.IsInIBD(pb.Header.Timestamp), pb.Header.Timestamp)
+			}
+		})
+	}
 
-	t.Run("preferred complete visible NEW", func(t *testing.T) {
-		engine, _, target := newReorgTestEngine(t)
-		subsidy1 := consensus.BlockSubsidy(1, 0)
-		coinbase1 := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1)
-		blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbase1)
-		if _, err := engine.ApplyBlockWithReorg(blockA1, nil); err != nil {
-			t.Fatalf("apply A1: %v", err)
-		}
-		sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(2), coinbase1)
-		_, sideB1Hash := mustParseReorgBlockForTest(t, sideB1)
-		if _, err := engine.ApplyBlockWithReorg(sideB1, nil); err != nil {
-			t.Fatalf("store B1: %v", err)
-		}
-		subsidy2 := consensus.BlockSubsidy(2, subsidy1)
-		sideB2 := buildSingleTxBlock(t, sideB1Hash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
-		parsedB2, sideB2Hash := mustParseReorgBlockForTest(t, sideB2)
-		failed := injectStateSync(t, engine, 3)
-		summary, err := engine.ApplyBlockWithReorg(sideB2, nil)
-		if !*failed || summary == nil || !errors.Is(err, os.ErrPermission) || summary.BlockHash != sideB2Hash || len(summary.CanonicalAppliedBlocks) != 2 {
-			t.Fatalf("failed=%v summary=%+v err=%v", *failed, summary, err)
-		}
-		view := engine.chainState.view()
-		index, indexErr := engine.blockStore.CanonicalIndexSnapshot()
-		wantIndex := []string{hex.EncodeToString(devnetGenesisBlockHash[:]), hex.EncodeToString(sideB1Hash[:]), hex.EncodeToString(sideB2Hash[:])}
-		if !view.hasTip || view.height != summary.BlockHeight || view.tipHash != summary.BlockHash || engine.chainState.StateDigest() != summary.PostStateDigest || indexErr != nil || !reflect.DeepEqual(index, wantIndex) {
-			t.Fatalf("live=%+v digest=%x index=%v indexErr=%v, want summary=%+v index=%v", view, engine.chainState.StateDigest(), index, indexErr, summary, wantIndex)
-		}
-		if engine.tipTimestamp != parsedB2.Header.Timestamp || engine.IsInIBD(parsedB2.Header.Timestamp) {
-			t.Fatalf("tipTimestamp=%d IBD=%v, want published timestamp %d and post-transition non-IBD", engine.tipTimestamp, engine.IsInIBD(parsedB2.Header.Timestamp), parsedB2.Header.Timestamp)
-		}
-	})
+	for _, unreadable := range []bool{false, true} {
+		t.Run(map[bool]string{false: "preferred complete visible NEW", true: "preferred unreadable NEW"}[unreadable], func(t *testing.T) {
+			engine, _, target := newReorgTestEngine(t)
+			subsidy1 := consensus.BlockSubsidy(1, 0)
+			coinbase1 := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1)
+			blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbase1)
+			if _, err := engine.ApplyBlockWithReorg(blockA1, nil); err != nil {
+				t.Fatalf("apply A1: %v", err)
+			}
+			sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(2), coinbase1)
+			_, sideB1Hash := mustParseReorgBlockForTest(t, sideB1)
+			if _, err := engine.ApplyBlockWithReorg(sideB1, nil); err != nil {
+				t.Fatalf("store B1: %v", err)
+			}
+			subsidy2 := consensus.BlockSubsidy(2, subsidy1)
+			sideB2 := buildSingleTxBlock(t, sideB1Hash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+			parsedB2, sideB2Hash := mustParseReorgBlockForTest(t, sideB2)
+			failed := injectStateSync(t, engine, 3, unreadable)
+			summary, err := engine.ApplyBlockWithReorg(sideB2, nil)
+			var fault *storagePersistenceFault
+			if unreadable {
+				if !*failed || summary != nil || !errors.Is(err, os.ErrPermission) || !errors.As(err, &fault) || fault.reloadErr == nil {
+					t.Fatalf("failed=%v summary=%+v fault=%+v err=%v", *failed, summary, fault, err)
+				}
+				return
+			}
+			if !*failed || summary == nil || !errors.Is(err, os.ErrPermission) || summary.BlockHash != sideB2Hash || len(summary.CanonicalAppliedBlocks) != 2 {
+				t.Fatalf("failed=%v summary=%+v err=%v", *failed, summary, err)
+			}
+			view := engine.chainState.view()
+			index, indexErr := engine.blockStore.CanonicalIndexSnapshot()
+			wantIndex := []string{hex.EncodeToString(devnetGenesisBlockHash[:]), hex.EncodeToString(sideB1Hash[:]), hex.EncodeToString(sideB2Hash[:])}
+			if !view.hasTip || view.height != summary.BlockHeight || view.tipHash != summary.BlockHash || engine.chainState.StateDigest() != summary.PostStateDigest || indexErr != nil || !reflect.DeepEqual(index, wantIndex) {
+				t.Fatalf("live=%+v digest=%x index=%v indexErr=%v, want summary=%+v index=%v", view, engine.chainState.StateDigest(), index, indexErr, summary, wantIndex)
+			}
+			if engine.tipTimestamp != parsedB2.Header.Timestamp || engine.IsInIBD(parsedB2.Header.Timestamp) {
+				t.Fatalf("tipTimestamp=%d IBD=%v, want published timestamp %d and post-transition non-IBD", engine.tipTimestamp, engine.IsInIBD(parsedB2.Header.Timestamp), parsedB2.Header.Timestamp)
+			}
+		})
+	}
 
 	t.Run("precommit remains nil", func(t *testing.T) {
 		engine, _, _ := newPersistenceFaultEngine(t)

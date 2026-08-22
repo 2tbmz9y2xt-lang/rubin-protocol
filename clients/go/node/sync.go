@@ -1229,7 +1229,10 @@ func (s *SyncEngine) isCompleteVisibleCanonicalSummary(summary *ChainStateConnec
 	if !summaryHasCanonicalRows(summary) {
 		return false
 	}
-	if !s.persistenceFaulted() {
+	s.mu.RLock()
+	fault := s.persistenceFault
+	s.mu.RUnlock()
+	if fault == nil || fault.reloadErr != nil {
 		return false
 	}
 	live := s.chainState.view()
