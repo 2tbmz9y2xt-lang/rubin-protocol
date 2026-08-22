@@ -376,8 +376,14 @@ func TestSyncEngine_IsInIBDEdgeCases(t *testing.T) {
 	st.HasTip = true
 	engine.tipTimestamp = 100
 	engine.cfg.IBDLagSeconds = 10
-	if !engine.IsInIBD(99) {
-		t.Fatalf("expected IBD when now < tip timestamp")
+	if engine.IsInIBD(99) {
+		t.Fatalf("did not expect IBD when tip timestamp is in future")
+	}
+	if engine.IsInIBD(100) {
+		t.Fatalf("did not expect IBD when now equals tip timestamp")
+	}
+	if engine.IsInIBD(110) {
+		t.Fatalf("did not expect IBD when lag equals threshold")
 	}
 }
 
@@ -396,12 +402,101 @@ func TestSyncEngineIBDLogic(t *testing.T) {
 	st.Height = 10
 	engine.tipTimestamp = 1_000
 	engine.cfg.IBDLagSeconds = 100
+	if engine.IsInIBD(900) {
+		t.Fatalf("did not expect IBD when tip is in future")
+	}
 	if !engine.IsInIBD(1_200) {
 		t.Fatalf("expected IBD when lag exceeds threshold")
 	}
 	if engine.IsInIBD(1_050) {
 		t.Fatalf("did not expect IBD when lag below threshold")
 	}
+}
+
+func TestCanonicalBlockRelayTerminalNew(t *testing.T) {
+	injectStateSync := func(t *testing.T, engine *SyncEngine, failAt int) *bool {
+		t.Helper()
+		failed := new(bool)
+		calls := 0
+		withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+			syncParent := ops.syncParent
+			ops.syncParent = func(parent string) error {
+				if parent == filepath.Dir(engine.cfg.ChainStatePath) {
+					calls++
+				}
+				if !*failed && calls == failAt {
+					*failed = true
+					return os.ErrPermission
+				}
+				return syncParent(parent)
+			}
+		})
+		return failed
+	}
+
+	t.Run("direct complete visible NEW", func(t *testing.T) {
+		engine, store, _ := newPersistenceFaultEngine(t)
+		pb, err := consensus.ParseBlockBytes(DevnetGenesisBlockBytes())
+		if err != nil {
+			t.Fatalf("parse genesis: %v", err)
+		}
+		failed := injectStateSync(t, engine, 1)
+		summary, err := engine.ApplyBlockWithReorg(DevnetGenesisBlockBytes(), nil)
+		if !*failed || summary == nil || !errors.Is(err, os.ErrPermission) || summary.BlockHash != devnetGenesisBlockHash || len(summary.CanonicalAppliedBlocks) != 1 {
+			t.Fatalf("failed=%v summary=%+v err=%v", *failed, summary, err)
+		}
+		view := engine.chainState.view()
+		index, indexErr := store.CanonicalIndexSnapshot()
+		wantIndex := []string{hex.EncodeToString(summary.BlockHash[:])}
+		if !view.hasTip || view.height != summary.BlockHeight || view.tipHash != summary.BlockHash || engine.chainState.StateDigest() != summary.PostStateDigest || indexErr != nil || !reflect.DeepEqual(index, wantIndex) {
+			t.Fatalf("live=%+v digest=%x index=%v indexErr=%v, want summary=%+v index=%v", view, engine.chainState.StateDigest(), index, indexErr, summary, wantIndex)
+		}
+		if engine.tipTimestamp != pb.Header.Timestamp || engine.IsInIBD(pb.Header.Timestamp) {
+			t.Fatalf("tipTimestamp=%d IBD=%v, want published timestamp %d and post-transition non-IBD", engine.tipTimestamp, engine.IsInIBD(pb.Header.Timestamp), pb.Header.Timestamp)
+		}
+	})
+
+	t.Run("preferred complete visible NEW", func(t *testing.T) {
+		engine, _, target := newReorgTestEngine(t)
+		subsidy1 := consensus.BlockSubsidy(1, 0)
+		coinbase1 := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1)
+		blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbase1)
+		if _, err := engine.ApplyBlockWithReorg(blockA1, nil); err != nil {
+			t.Fatalf("apply A1: %v", err)
+		}
+		sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(2), coinbase1)
+		_, sideB1Hash := mustParseReorgBlockForTest(t, sideB1)
+		if _, err := engine.ApplyBlockWithReorg(sideB1, nil); err != nil {
+			t.Fatalf("store B1: %v", err)
+		}
+		subsidy2 := consensus.BlockSubsidy(2, subsidy1)
+		sideB2 := buildSingleTxBlock(t, sideB1Hash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+		parsedB2, sideB2Hash := mustParseReorgBlockForTest(t, sideB2)
+		failed := injectStateSync(t, engine, 3)
+		summary, err := engine.ApplyBlockWithReorg(sideB2, nil)
+		if !*failed || summary == nil || !errors.Is(err, os.ErrPermission) || summary.BlockHash != sideB2Hash || len(summary.CanonicalAppliedBlocks) != 2 {
+			t.Fatalf("failed=%v summary=%+v err=%v", *failed, summary, err)
+		}
+		view := engine.chainState.view()
+		index, indexErr := engine.blockStore.CanonicalIndexSnapshot()
+		wantIndex := []string{hex.EncodeToString(devnetGenesisBlockHash[:]), hex.EncodeToString(sideB1Hash[:]), hex.EncodeToString(sideB2Hash[:])}
+		if !view.hasTip || view.height != summary.BlockHeight || view.tipHash != summary.BlockHash || engine.chainState.StateDigest() != summary.PostStateDigest || indexErr != nil || !reflect.DeepEqual(index, wantIndex) {
+			t.Fatalf("live=%+v digest=%x index=%v indexErr=%v, want summary=%+v index=%v", view, engine.chainState.StateDigest(), index, indexErr, summary, wantIndex)
+		}
+		if engine.tipTimestamp != parsedB2.Header.Timestamp || engine.IsInIBD(parsedB2.Header.Timestamp) {
+			t.Fatalf("tipTimestamp=%d IBD=%v, want published timestamp %d and post-transition non-IBD", engine.tipTimestamp, engine.IsInIBD(parsedB2.Header.Timestamp), parsedB2.Header.Timestamp)
+		}
+	})
+
+	t.Run("precommit remains nil", func(t *testing.T) {
+		engine, _, _ := newPersistenceFaultEngine(t)
+		withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+			ops.openScratch = func(string, int, os.FileMode) (atomicWriteScratchFile, error) { return nil, os.ErrPermission }
+		})
+		if summary, err := engine.ApplyBlockWithReorg(DevnetGenesisBlockBytes(), nil); summary != nil || err == nil {
+			t.Fatalf("summary=%+v err=%v, want nil precommit summary and error", summary, err)
+		}
+	})
 }
 
 func TestSyncEngineApplyBlockPersistsChainstateAndStore(t *testing.T) {
@@ -931,7 +1026,7 @@ func TestSyncEngine_isInIBDUnchecked(t *testing.T) {
 		}
 		engine.tipTimestamp = 0
 		if !engine.isInIBDUnchecked() {
-			t.Fatal("expected IBD when tipTimestamp == 0")
+			t.Fatal("expected IBD when the zero timestamp is older than the lag threshold")
 		}
 	})
 
@@ -942,11 +1037,11 @@ func TestSyncEngine_isInIBDUnchecked(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSyncEngine: %v", err)
 		}
-		// Set tip timestamp far in the future.
+		// A future tip is outside IBD by the merged Section 9 rule.
 		engine.tipTimestamp = ^uint64(0)
 		engine.cfg.IBDLagSeconds = 100
-		if !engine.isInIBDUnchecked() {
-			t.Fatal("expected IBD when tip timestamp is in future")
+		if engine.isInIBDUnchecked() {
+			t.Fatal("did not expect IBD when tip timestamp is in future")
 		}
 	})
 

@@ -5,6 +5,8 @@ import (
 	"crypto/sha3"
 	"sort"
 	"sync"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 func (s *Service) broadcastInventory(skip *peer, items []InventoryVector) error {
@@ -23,6 +25,56 @@ func (s *Service) broadcastInventory(skip *peer, items []InventoryVector) error 
 	}
 	txPeers := selectTxRelayPeers(inventoryRelayKey(txItems), s.txRelaySalt(skip), peers, s.cfg.TxRelayFanout)
 	return s.broadcastInventoryToPeers(txPeers, txItems)
+}
+
+func (s *Service) relayCanonicalAppliedBlocks(source *peer, suppliedHash [32]byte, summary *node.ChainStateConnectSummary) {
+	if !s.canonicalRelayReady(summary) {
+		return
+	}
+	nowUnixSigned := s.cfg.Now().Unix()
+	if nowUnixSigned < 0 || s.cfg.SyncEngine.IsInIBD(uint64(nowUnixSigned)) {
+		return
+	}
+
+	s.peersMu.RLock()
+	captured := make(map[*peer]struct{}, len(s.peers))
+	for _, current := range s.peers {
+		if current != nil && current.snapshotState().HandshakeComplete {
+			captured[current] = struct{}{}
+		}
+	}
+	s.peersMu.RUnlock()
+
+	var wg sync.WaitGroup
+	for current := range captured {
+		wg.Add(1)
+		go func(current *peer) {
+			defer wg.Done()
+			relayCanonicalRows(current, source, suppliedHash, summary.CanonicalAppliedBlocks)
+		}(current)
+	}
+	wg.Wait()
+}
+
+func (s *Service) canonicalRelayReady(summary *node.ChainStateConnectSummary) bool {
+	return summary != nil && len(summary.CanonicalAppliedBlocks) != 0 && s.cfg.Now != nil && s.cfg.SyncEngine != nil
+}
+
+func relayCanonicalRows(current, source *peer, suppliedHash [32]byte, rows []node.CanonicalAppliedBlock) {
+	for _, row := range rows {
+		if current == source && row.Hash == suppliedHash {
+			continue
+		}
+		payload, err := encodeInventoryVectors([]InventoryVector{{Type: MSG_BLOCK, Hash: row.Hash}})
+		if err == nil {
+			err = current.send(messageInv, payload)
+		}
+		if err != nil {
+			current.setLastError(err.Error())
+			_ = current.conn.Close()
+			return
+		}
+	}
 }
 
 func (s *Service) inventoryPeers(skip *peer) []*peer {

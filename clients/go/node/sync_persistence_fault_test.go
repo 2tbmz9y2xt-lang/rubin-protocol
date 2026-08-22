@@ -4,6 +4,7 @@ package node
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -124,7 +125,11 @@ func TestSyncEnginePostCommitFailuresReloadVisibleStateWithoutCompensation(t *te
 						}
 					})
 					summary, err := entry(engine, DevnetGenesisBlockBytes(), nil)
-					requireAtomicTest(t, summary == nil && failed, "summary=%+v injected=%v", summary, failed)
+					wantSummary := entryIndex == 1 && targetIndex >= 3
+					requireAtomicTest(t, (summary != nil) == wantSummary && failed, "summary=%+v wantSummary=%v injected=%v", summary, wantSummary, failed)
+					if wantSummary {
+						requireAtomicTest(t, engine.isCompleteVisibleCanonicalSummary(summary, []string{hex.EncodeToString(summary.BlockHash[:])}), "summary=%+v, want complete visible NEW", summary)
+					}
 					fault := requirePersistenceFault(t, err, []atomicWriteOperation{atomicWriteCreateIfAbsent, atomicWriteCreateIfAbsent, atomicWriteCreateIfAbsent, atomicWriteOverwrite, atomicWriteOverwrite}[targetIndex])
 					requireAtomicTest(t, fault == engine.persistenceFault && errors.Is(fault.cause, os.ErrPermission) && commits == targetIndex+1, "fault=%+v commits=%d", fault, commits)
 					disk, err := OpenBlockStore(BlockStorePath(dir))

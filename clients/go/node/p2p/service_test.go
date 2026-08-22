@@ -746,6 +746,7 @@ func TestProcessRelayedBlockRejectsInvalidOrphanPoWBeforeRetention(t *testing.T)
 func TestAcceptedRelayedBlockBroadcastsResolvedOrphans(t *testing.T) {
 	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	sink.service.cfg.Now = func() time.Time { return time.Unix(0, 0) }
 
 	height1Hash, block1Bytes := testHarnessBlockAtHeight(t, source, 1)
 	height2Hash, block2Bytes := testHarnessBlockAtHeight(t, source, 2)
@@ -756,8 +757,21 @@ func TestAcceptedRelayedBlockBroadcastsResolvedOrphans(t *testing.T) {
 	sink.service.blockSeen.Add(height2Hash)
 
 	readFrames := registerRelayFrameSink(t, sink.service, "relay-peer", 2)
+	sink.service.peersMu.RLock()
+	relayPeer := sink.service.peers["relay-peer"]
+	sink.service.peersMu.RUnlock()
+	relayPeer.stateMu.Lock()
+	relayPeer.state.HandshakeComplete = true
+	relayPeer.stateMu.Unlock()
 
 	originPeer := testPeerForService(sink.service, "origin", 2)
+	originConn := &scriptedConn{}
+	originPeer.conn = originConn
+	originPeer.state.Addr = "origin"
+	originPeer.state.HandshakeComplete = true
+	sink.service.peersMu.Lock()
+	sink.service.peers[originPeer.addr()] = originPeer
+	sink.service.peersMu.Unlock()
 
 	summary, err := originPeer.processRelayedBlock(block1Bytes)
 	if err != nil {
@@ -771,6 +785,13 @@ func TestAcceptedRelayedBlockBroadcastsResolvedOrphans(t *testing.T) {
 		{Type: MSG_BLOCK, Hash: height1Hash},
 		{Type: MSG_BLOCK, Hash: height2Hash},
 	})
+	if originConn.Len() != 57 {
+		t.Fatalf("source relay bytes=%d, want one child frame", originConn.Len())
+	}
+	items, err := decodeInventoryVectors(originConn.Bytes()[wireHeaderSize:])
+	if err != nil || len(items) != 1 || items[0] != (InventoryVector{Type: MSG_BLOCK, Hash: height2Hash}) {
+		t.Fatalf("source inventory=%+v err=%v, want child only", items, err)
+	}
 }
 
 func TestProcessRelayedBlockRejectsSideBranchTimestampBeforeAcceptedInventory(t *testing.T) {
