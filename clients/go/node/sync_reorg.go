@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -278,12 +279,27 @@ func (s *SyncEngine) applyPreferredBranch(
 	if err != nil {
 		return nil, err
 	}
+	finalSummary := rows[len(rows)-1].summary
+	canonicalBlocks := make([]CanonicalAppliedBlock, 0, len(rows))
+	plannedIndex := append([]string(nil), canonicalIndex[:commonAncestorHeight+1]...)
+	for i := range rows {
+		canonicalBlocks = append(canonicalBlocks, rows[i].summary.CanonicalAppliedBlocks...)
+		plannedIndex = append(plannedIndex, hex.EncodeToString(rows[i].item.hash[:]))
+	}
 	tr, err := s.beginCanonicalTransition(canonicalIndex, diag)
 	if err != nil {
 		return nil, err
 	}
-	summary, canonicalBlocks, err := s.applyPreferredBranchUnderGuard(tr, rows, commonAncestorHeight, preparedDisconnectedBlocks)
+	summary, _, err := s.applyPreferredBranchUnderGuard(tr, rows, commonAncestorHeight, preparedDisconnectedBlocks)
 	if endErr := tr.end(err); endErr != nil {
+		finalSummary.CanonicalAppliedBlocks = canonicalBlocks
+		if s.isCompleteVisibleCanonicalSummary(finalSummary, plannedIndex) {
+			finalRow := rows[len(rows)-1]
+			s.recordAppliedBlock(finalSummary.BlockHeight, finalRow.item.header.Timestamp)
+			s.noteBlockApplyAcceptedN(uint64(len(rows)))
+			s.noteReorg(reorgDepth)
+			return finalSummary, endErr
+		}
 		return nil, endErr
 	}
 	// Runs after the transition released the admission guard but still under the

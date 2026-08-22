@@ -74,12 +74,21 @@ func (p *peer) processRelayedBlock(blockBytes []byte) (*node.ChainStateConnectSu
 	p.service.chainMu.Lock()
 	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
 	p.service.chainMu.Unlock()
+	if summary != nil {
+		return p.acceptRelayedBlockResult(blockHash, summary, err)
+	}
 	if err != nil {
 		return p.handleRelayedBlockApplyError(pb, blockHash, blockBytes, err)
 	}
 	p.clearCompactOutstandingRequestForBlock(blockHash)
 	p.acceptedRelayedBlock(blockHash, summary)
 	return summary, nil
+}
+
+func (p *peer) acceptRelayedBlockResult(blockHash [32]byte, summary *node.ChainStateConnectSummary, err error) (*node.ChainStateConnectSummary, error) {
+	p.clearCompactOutstandingRequestForBlock(blockHash)
+	p.acceptedRelayedBlock(blockHash, summary)
+	return summary, err
 }
 
 func (p *peer) handleRelayedBlockApplyError(
@@ -138,13 +147,13 @@ func parseRelayedBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, err
 }
 
 func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainStateConnectSummary) {
-	if err := p.service.noteAcceptedBlock(p, blockHash, summary); err != nil {
+	if err := p.service.noteAcceptedBlock(p, blockHash, blockHash, summary); err != nil {
 		p.setLastError(err.Error())
 	}
-	p.service.resolveOrphans(p, blockHash)
+	p.service.resolveOrphansFromSupplied(p, blockHash, blockHash)
 }
 
-func (s *Service) noteAcceptedBlock(skip *peer, blockHash [32]byte, summary *node.ChainStateConnectSummary) error {
+func (s *Service) noteAcceptedBlock(source *peer, suppliedHash, blockHash [32]byte, summary *node.ChainStateConnectSummary) error {
 	var consumeErr error
 	if summary != nil {
 		s.cfg.SyncEngine.RecordBestKnownHeight(summary.BlockHeight)
@@ -154,7 +163,7 @@ func (s *Service) noteAcceptedBlock(skip *peer, blockHash [32]byte, summary *nod
 		consumeErr = s.consumeCanonicalAppliedDASets(summary.CanonicalAppliedBlocks)
 	}
 	s.blockSeen.Add(blockHash)
-	_ = s.broadcastAcceptedBlock(skip, blockHash)
+	s.relayCanonicalAppliedBlocks(source, suppliedHash, summary)
 	return errors.Join(consumeErr, s.advanceDAOrphanTTL())
 }
 
@@ -175,7 +184,11 @@ func (s *Service) retainOrResolveOrphan(skip *peer, blockHash, parentHash [32]by
 	if skip != nil {
 		peerAddr = skip.addr()
 	}
-	s.retainOrResolveOrphanFrom(peerAddr, blockHash, parentHash, blockBytes)
+	s.retainOrResolveRelayedOrphan(skip, blockHash, peerAddr, parentHash, blockBytes)
+}
+
+func (s *Service) resolveOrphansFromSupplied(source *peer, suppliedHash, blockHash [32]byte) {
+	s.resolveRelayedOrphans(source, suppliedHash, blockHash)
 }
 
 // retainOrResolveOrphanFrom is like retainOrResolveOrphan but takes an explicit
@@ -183,7 +196,11 @@ func (s *Service) retainOrResolveOrphan(skip *peer, blockHash, parentHash [32]by
 // identity so that per-peer quota accounting remains accurate across requeue
 // cycles.
 func (s *Service) retainOrResolveOrphanFrom(fromPeer string, blockHash, parentHash [32]byte, blockBytes []byte) {
-	added, evicted := s.orphans.Add(blockHash, parentHash, blockBytes, fromPeer)
+	s.retainOrResolveRelayedOrphan(nil, blockHash, fromPeer, parentHash, blockBytes)
+}
+
+func (s *Service) retainOrResolveRelayedOrphan(source *peer, suppliedHash [32]byte, fromPeer string, parentHash [32]byte, blockBytes []byte) {
+	added, evicted := s.orphans.Add(suppliedHash, parentHash, blockBytes, fromPeer)
 	if !added {
 		// Rejected orphans (quota/limit) are NOT added to blockSeen.
 		// blockSeen is consulted by needsInventory(): poisoning it
@@ -192,7 +209,7 @@ func (s *Service) retainOrResolveOrphanFrom(fromPeer string, blockHash, parentHa
 		// per-peer ban scoring and the orphan pool's own dedup.
 		return
 	}
-	s.blockSeen.Add(blockHash)
+	s.blockSeen.Add(suppliedHash)
 	for _, dropped := range evicted {
 		s.blockSeen.Remove(dropped)
 	}
@@ -200,10 +217,14 @@ func (s *Service) retainOrResolveOrphanFrom(fromPeer string, blockHash, parentHa
 	if err != nil || !parentPresent {
 		return
 	}
-	s.resolveOrphans(nil, parentHash)
+	s.resolveRelayedOrphans(source, suppliedHash, parentHash)
 }
 
 func (s *Service) resolveOrphans(skip *peer, blockHash [32]byte) {
+	s.resolveRelayedOrphans(skip, [32]byte{}, blockHash)
+}
+
+func (s *Service) resolveRelayedOrphans(source *peer, suppliedHash, blockHash [32]byte) {
 	// Iterative queue-based approach to avoid stack overflow on deep
 	// orphan chains (mirrors Bitcoin Core's ProcessOrphanTx pattern).
 	queue := [][32]byte{blockHash}
@@ -219,6 +240,9 @@ func (s *Service) resolveOrphans(skip *peer, blockHash [32]byte) {
 			s.chainMu.Lock()
 			summary, applyErr := s.cfg.SyncEngine.ApplyBlockWithReorg(child.blockBytes, nil)
 			s.chainMu.Unlock()
+			if s.acceptResolvedOrphanResult(source, suppliedHash, childHash, summary, applyErr) {
+				return
+			}
 			if applyErr != nil {
 				if errors.Is(applyErr, node.ErrParentNotFound) {
 					// Clear blockSeen before requeue so
@@ -232,12 +256,27 @@ func (s *Service) resolveOrphans(skip *peer, blockHash [32]byte) {
 				// re-advertisement of known-invalid blocks.
 				continue
 			}
-			if err := s.noteAcceptedBlock(skip, childHash, summary); err != nil {
-				if skip != nil {
-					skip.setLastError(err.Error())
-				}
-			}
 			queue = append(queue, childHash)
 		}
 	}
+}
+
+func (s *Service) acceptResolvedOrphanResult(source *peer, suppliedHash, childHash [32]byte, summary *node.ChainStateConnectSummary, applyErr error) bool {
+	if summary == nil {
+		return false
+	}
+	rowSource, rowSuppliedHash := source, suppliedHash
+	if childHash != suppliedHash {
+		rowSource, rowSuppliedHash = nil, [32]byte{}
+	}
+	if err := s.noteAcceptedBlock(rowSource, rowSuppliedHash, childHash, summary); err != nil && source != nil {
+		source.setLastError(err.Error())
+	}
+	if applyErr == nil {
+		return false
+	}
+	if source != nil {
+		source.setLastError(applyErr.Error())
+	}
+	return true
 }

@@ -1,9 +1,11 @@
 package node
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -366,7 +368,11 @@ func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*Ch
 	defer s.flushDiagnostics(diag)
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
-	return s.applyBlock(blockBytes, prevTimestamps, diag)
+	summary, err := s.applyBlock(blockBytes, prevTimestamps, diag)
+	if err != nil {
+		return nil, err
+	}
+	return summary, nil
 }
 
 func (s *SyncEngine) applyBlock(blockBytes []byte, prevTimestamps []uint64, diag *diagnosticBatch) (*ChainStateConnectSummary, error) {
@@ -708,18 +714,12 @@ func (s *SyncEngine) isInIBDUnchecked() bool {
 	tipTimestamp := s.tipTimestamp
 	ibdLag := s.cfg.IBDLagSeconds
 	s.mu.RUnlock()
-	if tipTimestamp == 0 {
-		return true
-	}
 	nowUnixSigned := time.Now().Unix()
 	if nowUnixSigned < 0 {
 		return true
 	}
 	nowUnix := uint64(nowUnixSigned) // #nosec G115 -- guarded against negative Unix timestamps above.
-	if nowUnix < tipTimestamp {
-		return true
-	}
-	return nowUnix-tipTimestamp > ibdLag
+	return nowUnix >= tipTimestamp && nowUnix-tipTimestamp > ibdLag
 }
 
 func (s *SyncEngine) IsInIBD(nowUnix uint64) bool {
@@ -733,10 +733,7 @@ func (s *SyncEngine) IsInIBD(nowUnix uint64) bool {
 	tipTimestamp := s.tipTimestamp
 	ibdLag := s.cfg.IBDLagSeconds
 	s.mu.RUnlock()
-	if nowUnix < tipTimestamp {
-		return true
-	}
-	return nowUnix-tipTimestamp > ibdLag
+	return nowUnix >= tipTimestamp && nowUnix-tipTimestamp > ibdLag
 }
 
 type syncRollbackState struct {
@@ -1218,9 +1215,50 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	}
 	summary.CanonicalAppliedBlocks = []CanonicalAppliedBlock{{Hash: ctx.blockHash, CompleteDAIDs: daIDs}}
 	if err := s.commitPreparedBlock(prepared, summary, ctx, pb, blockBytes); err != nil {
+		planned := append(append([]string(nil), ctx.canonicalIndex...), hex.EncodeToString(ctx.blockHash[:]))
+		if s.isCompleteVisibleCanonicalSummary(summary, planned) {
+			s.recordAppliedBlock(summary.BlockHeight, pb.Header.Timestamp)
+			return summary, blockApplyMetricAccepted, err
+		}
 		return nil, blockApplyMetricNone, err
 	}
 	return summary, blockApplyMetricAccepted, nil
+}
+
+func (s *SyncEngine) isCompleteVisibleCanonicalSummary(summary *ChainStateConnectSummary, plannedIndex []string) bool {
+	if !summaryHasCanonicalRows(summary) {
+		return false
+	}
+	if !s.terminalPersistenceReadbackComplete() {
+		return false
+	}
+	live := s.chainState.view()
+	liveTip := canonicalTipScalars{hasTip: live.hasTip, height: live.height, tipHash: live.tipHash, alreadyGenerated: live.alreadyGenerated}
+	wantTip := canonicalTipScalars{hasTip: true, height: summary.BlockHeight, tipHash: summary.BlockHash, alreadyGenerated: summary.AlreadyGeneratedN1}
+	if liveTip != wantTip {
+		return false
+	}
+	if uint64(live.utxoCount) != summary.UtxoCount { // #nosec G115 -- utxoCount is sourced from len and cannot be negative.
+		return false
+	}
+	if s.chainState.StateDigest() != summary.PostStateDigest {
+		return false
+	}
+	if s.blockStore == nil {
+		return true
+	}
+	visibleIndex, err := s.blockStore.CanonicalIndexSnapshot()
+	return err == nil && slices.Equal(visibleIndex, plannedIndex)
+}
+
+func (s *SyncEngine) terminalPersistenceReadbackComplete() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.persistenceFault != nil && s.persistenceFault.reloadErr == nil
+}
+
+func summaryHasCanonicalRows(summary *ChainStateConnectSummary) bool {
+	return summary != nil && len(summary.CanonicalAppliedBlocks) != 0
 }
 
 // commitPreparedBlock opens the transition for a direct connect and runs the

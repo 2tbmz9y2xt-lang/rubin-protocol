@@ -540,24 +540,31 @@ func (p *peer) processCompactRelayedBlockWithFallback(expectedHash [32]byte, blo
 		p.clearCompactOutstandingRequestForBlock(blockHash)
 		return false, false, nil
 	}
+	return p.applyCompactRelayedBlock(pb, blockHash, blockBytes, fallbackOnApply)
+}
+
+func (p *peer) applyCompactRelayedBlock(pb *consensus.ParsedBlock, blockHash [32]byte, blockBytes []byte, fallbackOnApply bool) (bool, bool, error) {
 	p.service.chainMu.Lock()
 	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
 	p.service.chainMu.Unlock()
+	if summary != nil && err != nil {
+		_, resultErr := p.acceptRelayedBlockResult(blockHash, summary, err)
+		return false, true, resultErr
+	}
 	if err != nil {
 		return p.compactApplyErrorFallback(pb, blockHash, blockBytes, err, fallbackOnApply)
 	}
 	if summary == nil {
 		return false, false, errors.New("compact block apply returned nil summary")
 	}
-	have, err = p.service.hasBlock(blockHash)
+	have, err := p.service.hasBlock(blockHash)
 	if err != nil {
 		return false, false, err
 	}
 	if !have {
 		return false, false, errors.New("compact block apply succeeded without accepting block")
 	}
-	p.clearCompactOutstandingRequestForBlock(blockHash)
-	p.acceptedRelayedBlock(blockHash, summary)
+	_, _ = p.acceptRelayedBlockResult(blockHash, summary, nil)
 	return false, true, nil
 }
 
