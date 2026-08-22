@@ -147,14 +147,13 @@ func parseRelayedBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, err
 }
 
 func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainStateConnectSummary) {
-	if err := p.service.noteAcceptedBlock(p, blockHash, summary); err != nil {
+	if err := p.service.noteAcceptedBlock(p, blockHash, blockHash, summary); err != nil {
 		p.setLastError(err.Error())
 	}
-	p.service.relayCanonicalAppliedBlocks(p, blockHash, summary)
 	p.service.resolveOrphansFromSupplied(p, blockHash, blockHash)
 }
 
-func (s *Service) noteAcceptedBlock(skip *peer, blockHash [32]byte, summary *node.ChainStateConnectSummary) error {
+func (s *Service) noteAcceptedBlock(source *peer, suppliedHash, blockHash [32]byte, summary *node.ChainStateConnectSummary) error {
 	var consumeErr error
 	if summary != nil {
 		s.cfg.SyncEngine.RecordBestKnownHeight(summary.BlockHeight)
@@ -164,6 +163,7 @@ func (s *Service) noteAcceptedBlock(skip *peer, blockHash [32]byte, summary *nod
 		consumeErr = s.consumeCanonicalAppliedDASets(summary.CanonicalAppliedBlocks)
 	}
 	s.blockSeen.Add(blockHash)
+	s.relayCanonicalAppliedBlocks(source, suppliedHash, summary)
 	return errors.Join(consumeErr, s.advanceDAOrphanTTL())
 }
 
@@ -269,10 +269,9 @@ func (s *Service) acceptResolvedOrphanResult(source *peer, suppliedHash, childHa
 	if childHash != suppliedHash {
 		rowSource, rowSuppliedHash = nil, [32]byte{}
 	}
-	if err := s.noteAcceptedBlock(source, childHash, summary); err != nil && source != nil {
+	if err := s.noteAcceptedBlock(rowSource, rowSuppliedHash, childHash, summary); err != nil && source != nil {
 		source.setLastError(err.Error())
 	}
-	s.relayCanonicalAppliedBlocks(rowSource, rowSuppliedHash, summary)
 	if applyErr == nil {
 		return false
 	}

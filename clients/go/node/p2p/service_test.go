@@ -317,6 +317,7 @@ func TestAcceptedBlockKeepsResolvingOrphansWhenDATTLExpiryFails(t *testing.T) {
 
 func TestProcessRelayedBlockAdvancesDARelayTTL(t *testing.T) {
 	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	sink.service.cfg.Now = func() time.Time { return time.Unix(0, 0) }
 	caps := defaultDARelayCaps()
 	caps.orphanTTLBlocks = 1
 	sink.service.daRelay = newDARelayStateForTest(t, caps)
@@ -326,6 +327,13 @@ func TestProcessRelayedBlockAdvancesDARelayTTL(t *testing.T) {
 	if got := sink.service.daRelay.orphanBytes; got == 0 {
 		t.Fatalf("orphanBytes=%d, want staged orphan bytes before block accept", got)
 	}
+	relayObservedOrphan := false
+	destination := testPeerForService(sink.service, "ttl-order-destination", 0)
+	destination.conn = &scriptedConn{writeHook: func(int) {
+		_, relayObservedOrphan = daRelayRecordSnapshot(t, sink.service.daRelay, daID)
+	}}
+	destination.state.HandshakeComplete = true
+	sink.service.peers["ttl-order-destination"] = destination
 
 	peer := testPeerForService(sink.service, "remote", 1)
 	summary, err := peer.processRelayedBlock(node.DevnetGenesisBlockBytes())
@@ -334,6 +342,9 @@ func TestProcessRelayedBlockAdvancesDARelayTTL(t *testing.T) {
 	}
 	if summary == nil || summary.BlockHeight != 0 {
 		t.Fatalf("summary=%v, want height 0", summary)
+	}
+	if !relayObservedOrphan {
+		t.Fatal("block relay did not observe the DA orphan before TTL expiry")
 	}
 	if _, ok := sink.service.daRelay.sets[daID]; ok {
 		t.Fatalf("DA set %x still present after accepted block TTL expiry", daID)
