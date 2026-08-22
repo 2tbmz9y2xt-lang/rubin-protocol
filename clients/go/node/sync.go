@@ -1229,10 +1229,7 @@ func (s *SyncEngine) isCompleteVisibleCanonicalSummary(summary *ChainStateConnec
 	if !summaryHasCanonicalRows(summary) {
 		return false
 	}
-	s.mu.RLock()
-	fault := s.persistenceFault
-	s.mu.RUnlock()
-	if fault == nil || fault.reloadErr != nil {
+	if !s.terminalPersistenceReadbackComplete() {
 		return false
 	}
 	live := s.chainState.view()
@@ -1252,6 +1249,12 @@ func (s *SyncEngine) isCompleteVisibleCanonicalSummary(summary *ChainStateConnec
 	}
 	visibleIndex, err := s.blockStore.CanonicalIndexSnapshot()
 	return err == nil && slices.Equal(visibleIndex, plannedIndex)
+}
+
+func (s *SyncEngine) terminalPersistenceReadbackComplete() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.persistenceFault != nil && s.persistenceFault.reloadErr == nil
 }
 
 func summaryHasCanonicalRows(summary *ChainStateConnectSummary) bool {
