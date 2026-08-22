@@ -291,6 +291,22 @@ jobs:
           print(f"ok: {len(paths)} files")
           PY
 
+      - if: steps.test_gate.outputs.run_test == 'true' && github.repository == '2tbmz9y2xt-lang/rubin-protocol' && github.actor == '2tbmz9y2xt-lang' && github.triggering_actor == '2tbmz9y2xt-lang' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == '2tbmz9y2xt-lang'))
+        env: {RUBIN_FORMAL_DEPLOY_KEY: "${{ secrets.RUBIN_FORMAL_DEPLOY_KEY }}"}
+        run: |
+          key="$(mktemp)"; trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$RUBIN_FORMAL_DEPLOY_KEY" > "$key"
+          test "$(ssh-keygen -y -f "$key" | awk '{print $1, $2}')" = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINvdTwflUW8AaJ7VkIOwURD5MQcmn5JCZtD3geiYFSqZ'
+
+      - if: steps.test_gate.outputs.run_test == 'true' && github.repository == '2tbmz9y2xt-lang/rubin-protocol' && github.actor == '2tbmz9y2xt-lang' && github.triggering_actor == '2tbmz9y2xt-lang' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == '2tbmz9y2xt-lang'))
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {repository: 2tbmz9y2xt-lang/rubin-spec, ref: 991df8ea2f44b79446506bbd51ad6c8c97467a4d, path: .ci/rubin-spec, sparse-checkout: conformance/CV-P2P-CANONICAL-BLOCK-RELAY.json, sparse-checkout-cone-mode: false, ssh-key: "${{ secrets.RUBIN_FORMAL_DEPLOY_KEY }}", persist-credentials: false}
+
+      - if: steps.test_gate.outputs.run_test == 'true' && github.repository == '2tbmz9y2xt-lang/rubin-protocol' && github.actor == '2tbmz9y2xt-lang' && github.triggering_actor == '2tbmz9y2xt-lang' && (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == '2tbmz9y2xt-lang'))
+        run: |
+          echo '1655fb765d696df6fd81a606bf8be86d09143aa7ed5379434a16d9c0c5e60576  .ci/rubin-spec/conformance/CV-P2P-CANONICAL-BLOCK-RELAY.json' | sha256sum -c -
+          echo "RUBIN_SPEC_ROOT=${GITHUB_WORKSPACE}/.ci/rubin-spec" >> "$GITHUB_ENV"
+
       - name: Prepare OpenSSL bundle
         if: steps.test_gate.outputs.run_test == 'true'
         uses: ./.github/actions/openssl-bundle
@@ -406,6 +422,8 @@ jobs:
         if: steps.test_gate.outputs.run_test == 'true'
         run: |
           cd clients/go
+          set -o pipefail
+          go test -json ./node/p2p -run '^TestCanonicalBlockRelayFixtureRows$' -count=1 | awk -v require_pass="${RUBIN_SPEC_ROOT:+1}" '{print} /"Action":"pass"/ && /"Test":"TestCanonicalBlockRelayFixtureRows"/ {passed=1} /"Action":"skip"/ && /"Test":"TestCanonicalBlockRelayFixtureRows"/ {skipped=1} END {exit require_pass ? !passed : !skipped}'
           go test ./...
 
       - name: Conformance Go tests
