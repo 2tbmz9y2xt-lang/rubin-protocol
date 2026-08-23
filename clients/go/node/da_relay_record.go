@@ -95,6 +95,7 @@ func (s *DARelayState) assignFirstSeenReceivedTimeLocked(record *daRelaySetRecor
 	record.receivedTime = receivedTime
 	return nil
 }
+
 func (r daRelaySetRecord) missingChunkIndexes() []uint16 {
 	if r.commit.chunkCount == 0 || r.state == daRelayStateCompleteSet {
 		return nil
