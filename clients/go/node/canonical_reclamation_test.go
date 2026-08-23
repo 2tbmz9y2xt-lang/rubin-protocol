@@ -323,8 +323,12 @@ func TestNoncanonicalRebuildsSymlinkDirectory(t *testing.T) {
 
 func TestNoncanonicalStrictRebuildRejectsLeavesAndDrift(t *testing.T) {
 	for _, tc := range []struct{ name, want string }{
-		{"malformed", "unexpected noncanonical artifact name"}, {"suffix", "unexpected noncanonical artifact name"}, {"uppercase", "unexpected noncanonical artifact name"},
-		{"directory", "noncanonical artifact enumeration drift"}, {"fifo", "noncanonical artifact enumeration drift"}, {"symlink", "read noncanonical artifact"},
+		{"malformed", "unexpected noncanonical artifact name"},
+		{"suffix", "unexpected noncanonical artifact name"},
+		{"uppercase", "unexpected noncanonical artifact name"},
+		{"directory", "noncanonical artifact enumeration drift"},
+		{"fifo", "noncanonical artifact enumeration drift"},
+		{"symlink", "read noncanonical artifact"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
@@ -420,8 +424,11 @@ func TestNoncanonicalDisconnectRejectsStrictLeaves(t *testing.T) {
 		name, want string
 		wantIs     error
 	}{
-		{"directory", "noncanonical artifact enumeration drift", nil}, {"fifo", "noncanonical artifact enumeration drift", nil}, {"symlink", "read noncanonical artifact", nil},
-		{"oversize", "store file exceeds size bound", errStoreFileTooLarge}, {"identity_drift", "store file exceeds size bound", errStoreFileTooLarge},
+		{"directory", "noncanonical artifact enumeration drift", nil},
+		{"fifo", "noncanonical artifact enumeration drift", nil},
+		{"symlink", "read noncanonical artifact", nil},
+		{"oversize", "store file exceeds size bound", errStoreFileTooLarge},
+		{"identity_drift", "store file exceeds size bound", errStoreFileTooLarge},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "disconnect"))
@@ -457,6 +464,7 @@ func TestNoncanonicalDisconnectRejectsStrictLeaves(t *testing.T) {
 		})
 	}
 }
+
 func rejectNoncanonicalTransition(t *testing.T, want string, amend func(*noncanonicalAccounting, [32]byte)) {
 	t.Helper()
 	s := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "invalid-accounting"))
@@ -513,6 +521,7 @@ func TestNoncanonicalTransitionValidatesAccounting(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) { rejectNoncanonicalTransition(t, tc.want, tc.amend) })
 	}
 }
+
 func TestNoncanonicalTransitionNormalizesOverlapAndOrder(t *testing.T) {
 	overlap := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "overlap"))
 	header := testHeaderBytes(0x2b, 43)
