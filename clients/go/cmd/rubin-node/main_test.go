@@ -1998,7 +1998,7 @@ func TestMainRejectsMissingDARelayStateBeforeRuntime(t *testing.T) {
 	}
 	newP2PServiceFn = func(p2p.ServiceConfig) (*p2p.Service, error) {
 		t.Fatal("p2p must not be constructed")
-		return nil, nil
+		return nil, errors.New("p2p construction reached after fatal")
 	}
 	dir := t.TempDir()
 	seedBlockStore(t, dir)
