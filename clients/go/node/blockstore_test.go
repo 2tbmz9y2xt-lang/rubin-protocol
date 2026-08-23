@@ -20,6 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -2284,6 +2285,81 @@ func TestPreparedCanonicalIndexRefusesSecondCommit(t *testing.T) {
 	assertCanonicalRAMUnchanged(t, store, before, "second commit")
 }
 
+func TestPreparedCanonicalIndexCrossStoreCommitIsSingleUse(t *testing.T) {
+	stores := []*BlockStore{mustCreateBlockStore(t, BlockStorePath(t.TempDir())), mustCreateBlockStore(t, BlockStorePath(t.TempDir()))}
+	for _, store := range stores {
+		if err := store.CommitCanonicalBlock(0, devnetGenesisBlockHash, devnetGenesisHeaderBytes, devnetGenesisBlockBytes, &BlockUndo{BlockHeight: 0}); err != nil {
+			t.Fatalf("commit canonical block: %v", err)
+		}
+	}
+	if !bytes.Equal(stores[0].visibleIndexBytes(), stores[1].visibleIndexBytes()) {
+		t.Fatal("sibling stores do not share the prepared old image")
+	}
+	var writes atomic.Int32
+	fault := errors.New("precommit")
+	withWriteFileAtomicFn(t, func(path string, _ []byte, _ os.FileMode) error {
+		writes.Add(1)
+		return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteOverwrite, fault)
+	})
+	for range 4 {
+		prepared := mustPrepareCanonicalIndex(t, stores[0], []string{})
+		entered, release, start := make(chan struct{}, 2), make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		releaseProbes := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseProbes()
+		for _, store := range stores {
+			probe := new(sync.Once)
+			store.leafProbe = func() { probe.Do(func() { entered <- struct{}{}; <-release }) }
+		}
+		writes.Store(0)
+		results := make(chan canonicalCommitResult, len(stores))
+		receive := func(message string) canonicalCommitResult {
+			select {
+			case result := <-results:
+				return result
+			case <-time.After(time.Second):
+				t.Fatal(message)
+			}
+			return canonicalCommitResult{}
+		}
+		for _, store := range stores {
+			go func(store *BlockStore) { <-start; results <- prepared.commit(store) }(store)
+		}
+		close(start)
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			releaseProbes()
+			receive("first prepared commit did not finish")
+			receive("second prepared commit did not finish")
+			t.Fatal("no prepared reclassification reached its leaf probe")
+		}
+		select {
+		case <-entered:
+			releaseProbes()
+			receive("first planner did not finish")
+			receive("second planner did not finish")
+			t.Fatal("one prepared image reached two reclassification planners")
+		case loser := <-results:
+			if loser.class != canonicalCommitStale || !errors.Is(loser.err, errPreparedIndexSpent) {
+				releaseProbes()
+				receive("claimed prepared commit did not finish")
+				t.Fatalf("loser=%s err=%v", loser.class, loser.err)
+			}
+		case <-time.After(time.Second):
+			releaseProbes()
+			receive("first prepared commit did not finish")
+			receive("second prepared commit did not finish")
+			t.Fatal("second store did not refuse the spent image")
+		}
+		releaseProbes()
+		winner := receive("claimed prepared commit did not finish")
+		if winner.class != canonicalCommitPrecommit || !errors.Is(winner.err, fault) || writes.Load() != 1 {
+			t.Fatalf("winner=%s err=%v writes=%d", winner.class, winner.err, writes.Load())
+		}
+	}
+}
+
 // sameLengthDifferentBytes returns bytes of the SAME length as raw but a
 // different content, so a readback that compares lengths instead of contents
 // would misclassify them as an identity match.
@@ -2525,11 +2601,11 @@ func TestPreparedCanonicalIndexPublishLockedAllocatesNothing(t *testing.T) {
 	accounting := store.noncanonical.Load()
 	disconnected := noncanonicalRow{hash: [32]byte{1}, blockBytes: 1, height: noncanonicalUnknownHeight}
 	disconnected.setState(noncanonicalBlockArtifact, BlockArtifactValid)
-	prepared.noncanonicalDelta = &noncanonicalTransitionDelta{disconnected: []noncanonicalRow{disconnected}, usedBytes: 1, uniqueCount: 1}
+	delta := &noncanonicalTransitionDelta{disconnected: []noncanonicalRow{disconnected}, usedBytes: 1, uniqueCount: 1}
 	store.stateMu.Lock()
 	allocs := testing.AllocsPerRun(100, func() {
 		accounting.count, accounting.sortedCount, accounting.usedBytes = 0, 0, 0
-		prepared.publishLocked(store)
+		prepared.publishLocked(store, delta)
 	})
 	store.stateMu.Unlock()
 	if allocs != 0 {

@@ -1166,13 +1166,12 @@ var (
 // that left the visible identity OLD and would still pass the freshness check —
 // can be followed by a second write from the same image.
 type preparedCanonicalIndex struct {
-	oldRaw            []byte
-	newRaw            []byte
-	index             blockStoreIndexDisk
-	noncanonicalDelta *noncanonicalTransitionDelta
-	heightByHash      map[[32]byte]uint64
-	chainWork         map[[32]byte]*big.Int
-	spent             bool
+	oldRaw       []byte
+	newRaw       []byte
+	index        blockStoreIndexDisk
+	heightByHash map[[32]byte]uint64
+	chainWork    map[[32]byte]*big.Int
+	spent        atomic.Bool
 }
 
 // prepareCanonicalIndex validates the complete planned canonical list and builds the
@@ -1236,7 +1235,7 @@ func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalInde
 func (p *preparedCanonicalIndex) commit(bs *BlockStore) canonicalCommitResult {
 	bs.stateMu.Lock()
 	bs.beginNoncanonicalTransitionLocked()
-	if p.spent {
+	if p.spent.Load() {
 		bs.endNoncanonicalTransitionLocked()
 		bs.stateMu.Unlock()
 		return canonicalCommitResult{class: canonicalCommitStale, err: errPreparedIndexSpent}
@@ -1247,20 +1246,23 @@ func (p *preparedCanonicalIndex) commit(bs *BlockStore) canonicalCommitResult {
 		bs.stateMu.Unlock()
 		return canonicalCommitResult{class: canonicalCommitStale, err: errCanonicalIndexMoved}
 	}
+	if !p.spent.CompareAndSwap(false, true) {
+		bs.endNoncanonicalTransitionLocked()
+		bs.stateMu.Unlock()
+		return canonicalCommitResult{class: canonicalCommitStale, err: errPreparedIndexSpent}
+	}
 	delta, err := bs.prepareNoncanonicalReclassification(p, nil)
 	if err != nil {
 		bs.endNoncanonicalTransitionLocked()
 		bs.stateMu.Unlock()
 		return canonicalCommitResult{err: err}
 	}
-	p.noncanonicalDelta = delta
-	p.spent = true
 	bs.stateMu.Unlock()
 
 	// No publication lock is held while waiting for or executing this write.
 	err = writeFileAtomicFn(bs.indexPath, p.newRaw, 0o600)
 	if err == nil {
-		p.finishTransition(bs, true)
+		p.finishTransition(bs, delta, true)
 		return canonicalCommitResult{class: canonicalCommitted}
 	}
 	// The frozen precommit identity means "no commit attempt may have crossed",
@@ -1269,20 +1271,19 @@ func (p *preparedCanonicalIndex) commit(bs *BlockStore) canonicalCommitResult {
 	// one strict readback before every result persistence may have crossed —
 	// so after_namespace_commit and every untagged error take the readback.
 	if stage, tagged := atomicWriteStageOf(err); tagged && stage == atomicWriteBeforeNamespaceCommit {
-		p.finishTransition(bs, false)
+		p.finishTransition(bs, delta, false)
 		return canonicalCommitResult{class: canonicalCommitPrecommit, err: err}
 	}
 	result := p.classifyVisibleIndex(bs, err)
-	p.finishTransition(bs, result.class == canonicalCommitTerminalNew)
+	p.finishTransition(bs, delta, result.class == canonicalCommitTerminalNew)
 	return result
 }
 
-func (p *preparedCanonicalIndex) finishTransition(bs *BlockStore, publish bool) {
+func (p *preparedCanonicalIndex) finishTransition(bs *BlockStore, delta *noncanonicalTransitionDelta, publish bool) {
 	bs.stateMu.Lock()
 	if publish {
-		p.publishLocked(bs)
+		p.publishLocked(bs, delta)
 	}
-	p.noncanonicalDelta = nil
 	bs.endNoncanonicalTransitionLocked()
 	bs.stateMu.Unlock()
 }
@@ -1348,8 +1349,8 @@ func (p *preparedCanonicalIndex) classifyVisibleIndex(bs *BlockStore, cause erro
 // derived under the old index would survive a reorg as an answer for a hash this
 // image no longer contains. The legacy pure-append mutator keeps its cache (only
 // its reorg branch resets) — a deliberate divergence from the append path.
-func (p *preparedCanonicalIndex) publishLocked(bs *BlockStore) {
-	publishNoncanonicalReclassificationLocked(bs, p, p.noncanonicalDelta, true)
+func (p *preparedCanonicalIndex) publishLocked(bs *BlockStore, delta *noncanonicalTransitionDelta) {
+	publishNoncanonicalReclassificationLocked(bs, p, delta, true)
 }
 
 // visibleIndexBytes returns a copy of the store's visible canonical identity under
