@@ -1068,6 +1068,7 @@ func TestDARelayCompleteSetCandidatesExposeOnlyCompleteImmutableOrdered(t *testi
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 	orphanID, stagedID := daRelayTestID(31), daRelayTestID(32)
 	lateID, earlyID := daRelayTestID(33), daRelayTestID(30)
+	missingCommitID, missingChunkID := daRelayTestID(34), daRelayTestID(35)
 	earlyPayload0, earlyPayload1 := []byte("early-0"), []byte("early-1")
 	latePayload := []byte("late")
 
@@ -1081,6 +1082,13 @@ func TestDARelayCompleteSetCandidatesExposeOnlyCompleteImmutableOrdered(t *testi
 		daRelayTestChunkWithTxBytes(earlyID, 0, uint64(len(earlyPayload0)), []byte("chunk-early-0"), earlyPayload0),
 	} {
 		mustAddDAChunk(t, state, "peer-e", chunk)
+	}
+	mustAddDACommit(t, state, "peer-mc", daRelayTestCommitForPayloads(missingCommitID, 1, latePayload))
+	mustAddDAChunk(t, state, "peer-mc", daRelayTestChunkWithTxBytes(missingCommitID, 0, uint64(len(latePayload)), []byte("chunk-only"), latePayload))
+	mustAddDACommit(t, state, "peer-mk", daRelayTestCommitWithTxBytes(missingChunkID, 1, []byte("commit-only"), latePayload))
+	mustAddDAChunk(t, state, "peer-mk", daRelayTestChunkPayload(missingChunkID, 0, uint64(len(latePayload)), latePayload))
+	if state.sets[missingCommitID].state != daRelayStateCompleteSet || state.sets[missingChunkID].state != daRelayStateCompleteSet {
+		t.Fatal("invalid candidate fixtures are not complete")
 	}
 
 	candidates := state.CompleteSetCandidates(^uint64(0))
@@ -1118,6 +1126,20 @@ func TestDARelayCompleteSetCandidatesExposeOnlyCompleteImmutableOrdered(t *testi
 func TestDARelayCompleteSetCandidatesNilSafe(t *testing.T) {
 	if got := (*DARelayState)(nil).CompleteSetCandidates(1); got != nil {
 		t.Fatalf("nil state candidates=%v, want nil", got)
+	}
+}
+
+func TestDARelayPublicBoundaryNoopRows(t *testing.T) {
+	if (*SyncEngine)(nil).DARelayState() != nil {
+		t.Fatal("nil engine returned DA relay state")
+	}
+	if err := (*DARelayState)(nil).ReleasePeerQuotaKey("peer"); err != nil {
+		t.Fatalf("nil state release: %v", err)
+	}
+	requireDAErr(t, ValidateDARelayChunk(DARelayChunk{}), errDARelayChunkPayloadSizeInvalid)
+	payload := []byte("valid")
+	if err := ValidateDARelayChunk(DARelayChunk{ChunkHash: sha3.Sum256(payload), Payload: payload, WireBytes: uint64(len(payload))}); err != nil {
+		t.Fatalf("valid public chunk: %v", err)
 	}
 }
 
