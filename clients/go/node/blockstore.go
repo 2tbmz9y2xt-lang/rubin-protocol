@@ -46,10 +46,10 @@ type BlockStore struct {
 	canonicalHeightByHash map[[32]byte]uint64
 	chainWorkByHash       map[[32]byte]*big.Int
 
-	// noncanonical is atomically published only by same-package tests; stateMu
-	// protects its contents and the short-lived reservation waiters.
-	noncanonical        atomic.Pointer[noncanonicalAccounting]
-	noncanonicalPending map[[32]byte]chan struct{}
+	// Create/Open install the sole backing; stateMu protects in-place reload/reclassification.
+	noncanonical               atomic.Pointer[noncanonicalAccounting]
+	noncanonicalPending        map[[32]byte]chan struct{}
+	noncanonicalTransitionDone chan struct{}
 
 	// leafProbe runs via probeLeaf during presence reads and reconstruction probes,
 	// making leaf movement observable to an instrumented test. nil in production;
@@ -88,12 +88,17 @@ func newBlockStorePaths(rootPath string) blockStorePaths {
 	}
 }
 
-// CreateBlockStore initializes a fresh blockstore at rootPath: the only
-// constructor that writes. The root is created exclusively (an existing root of
-// any kind fails; two racing creates cannot both win) and index.json is written
-// LAST as the creation commit marker, so a crash before it leaves a partial root
-// both constructors reject. Owns only rootPath, never chainstate.
+// CreateBlockStore initializes a fresh blockstore with the default 8 GiB limit.
 func CreateBlockStore(rootPath string) (*BlockStore, error) {
+	return CreateBlockStoreWithNoncanonicalLimit(rootPath, 0)
+}
+
+// CreateBlockStoreWithNoncanonicalLimit validates the limit before creating the root.
+func CreateBlockStoreWithNoncanonicalLimit(rootPath string, limit uint64) (*BlockStore, error) {
+	limit, err := normalizeNoncanonicalLimit(limit)
+	if err != nil {
+		return nil, fmt.Errorf("create blockstore: %w", err)
+	}
 	paths := newBlockStorePaths(rootPath)
 	if err := os.Mkdir(paths.root, 0o700); err != nil {
 		return nil, fmt.Errorf("create blockstore root: %w", err)
@@ -108,14 +113,29 @@ func CreateBlockStore(rootPath string) (*BlockStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("commit blockstore index: %w", err)
 	}
-	return newBlockStore(paths, index, raw)
+	store, err := newBlockStore(paths, index, raw)
+	if err != nil {
+		return nil, err
+	}
+	accounting, err := newNoncanonicalAccounting(limit)
+	if err != nil {
+		return nil, err
+	}
+	store.noncanonical.Store(accounting)
+	return store, nil
 }
 
-// OpenBlockStore opens an already-initialized blockstore. Strict: no mkdir, no
-// marker synthesis, no fallback. A missing root/subdirectory/marker, a malformed
-// marker, or a resolved path of the wrong kind is an error, never a fresh empty
-// store. Symlinks resolve normally; no runtime path-identity claim is made.
+// OpenBlockStore opens an initialized blockstore with the default 8 GiB limit.
 func OpenBlockStore(rootPath string) (*BlockStore, error) {
+	return OpenBlockStoreWithNoncanonicalLimit(rootPath, 0)
+}
+
+// OpenBlockStoreWithNoncanonicalLimit strictly reconstructs bounded accounting and publishes no store on error.
+func OpenBlockStoreWithNoncanonicalLimit(rootPath string, limit uint64) (*BlockStore, error) {
+	limit, err := normalizeNoncanonicalLimit(limit)
+	if err != nil {
+		return nil, fmt.Errorf("open blockstore: %w", err)
+	}
 	paths := newBlockStorePaths(rootPath)
 	if err := paths.requireInitialized(); err != nil {
 		return nil, err
@@ -124,25 +144,80 @@ func OpenBlockStore(rootPath string) (*BlockStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newBlockStore(paths, index, raw)
+	store, err := newBlockStore(paths, index, raw)
+	if err != nil {
+		return nil, err
+	}
+	accounting, err := store.reconstructNoncanonicalAccounting(limit)
+	if err != nil {
+		return nil, err
+	}
+	store.noncanonical.Store(accounting)
+	return store, nil
 }
 
-// reloadFromDisk read-only replaces this store's visible index/cache in place.
+// reloadFromDisk validates and reconstructs before joint in-place publication.
 func (bs *BlockStore) reloadFromDisk() error {
 	if bs == nil {
 		return errors.New("nil blockstore")
 	}
-	refreshed, err := OpenBlockStore(bs.rootPath)
+	bs.stateMu.Lock()
+	defer bs.stateMu.Unlock()
+	bs.beginNoncanonicalTransitionLocked()
+	defer bs.endNoncanonicalTransitionLocked()
+	paths := newBlockStorePaths(bs.rootPath)
+	if err := paths.requireInitialized(); err != nil {
+		return err
+	}
+	index, raw, err := loadBlockStoreIndex(paths.index)
 	if err != nil {
 		return err
 	}
-	bs.stateMu.Lock()
-	defer bs.stateMu.Unlock()
-	bs.index = refreshed.index
-	bs.indexRaw = refreshed.indexRaw
-	bs.canonicalHeightByHash = refreshed.canonicalHeightByHash
-	bs.chainWorkByHash = refreshed.chainWorkByHash
+	refreshed, err := newBlockStore(paths, index, raw)
+	if err != nil {
+		return err
+	}
+	prepared := &preparedCanonicalIndex{newRaw: raw, index: index, heightByHash: refreshed.canonicalHeightByHash, chainWork: refreshed.chainWorkByHash}
+	delta, err := bs.prepareNoncanonicalReclassification(prepared, refreshed)
+	if err != nil {
+		return err
+	}
+	if err := requireCompleteCanonicalPrefix(refreshed); err != nil {
+		return err
+	}
+	publishNoncanonicalReclassificationLocked(bs, prepared, delta, true)
 	return nil
+}
+
+// beginNoncanonicalTransitionLocked fences/drains under caller-held stateMu without a goroutine.
+func (bs *BlockStore) beginNoncanonicalTransitionLocked() {
+	bs.waitNoncanonicalTransitionLocked()
+	bs.noncanonicalTransitionDone = make(chan struct{})
+	for len(bs.noncanonicalPending) > 0 {
+		waiters := make([]chan struct{}, 0, len(bs.noncanonicalPending))
+		for _, done := range bs.noncanonicalPending {
+			waiters = append(waiters, done)
+		}
+		bs.stateMu.Unlock()
+		for _, done := range waiters {
+			<-done
+		}
+		bs.stateMu.Lock()
+	}
+}
+
+func (bs *BlockStore) waitNoncanonicalTransitionLocked() {
+	for bs.noncanonicalTransitionDone != nil {
+		done := bs.noncanonicalTransitionDone
+		bs.stateMu.Unlock()
+		<-done
+		bs.stateMu.Lock()
+	}
+}
+
+func (bs *BlockStore) endNoncanonicalTransitionLocked() {
+	close(bs.noncanonicalTransitionDone)
+	bs.noncanonicalTransitionDone = nil
 }
 
 // requireInitialized checks the resolved filesystem kind of every path the store
@@ -231,26 +306,37 @@ func (bs *BlockStore) SetCanonicalTip(height uint64, blockHash [32]byte) error {
 	}
 	bs.stateMu.Lock()
 	defer bs.stateMu.Unlock()
+	bs.waitNoncanonicalTransitionLocked()
 
 	hashHex := hex.EncodeToString(blockHash[:])
 	currentLen := uint64(len(bs.index.Canonical))
-	switch {
-	case height > currentLen:
+	if height > currentLen {
 		return fmt.Errorf("height gap: got %d, expected <= %d", height, currentLen)
-	case height == currentLen:
-		bs.index.Canonical = append(bs.index.Canonical, hashHex)
-		bs.canonicalHeightByHash[blockHash] = height
-	case bs.index.Canonical[height] == hashHex:
-		// No-op.
-	default:
-		if err := bs.dropCanonicalStateFromLocked(height); err != nil {
-			return err
-		}
-		nextCanonical := append([]string(nil), bs.index.Canonical[:height]...)
-		nextCanonical = append(nextCanonical, hashHex)
-		bs.index.Canonical = nextCanonical
-		bs.canonicalHeightByHash[blockHash] = height
 	}
+	if canonicalHashAt(bs.index.Canonical, height, hashHex) {
+		return bs.saveCanonicalIndexLocked()
+	}
+
+	nextCanonical := append([]string{}, bs.index.Canonical[:height]...)
+	nextCanonical = append(nextCanonical, hashHex)
+	currentRaw, err := encodeBlockStoreIndex(bs.index)
+	if err != nil {
+		return err
+	}
+	prepared, err := prepareCanonicalIndex(currentRaw, nextCanonical)
+	if err != nil {
+		return err
+	}
+	if height == currentLen {
+		prepared.chainWork = bs.chainWorkByHash
+	}
+	bs.beginNoncanonicalTransitionLocked()
+	defer bs.endNoncanonicalTransitionLocked()
+	delta, err := bs.prepareNoncanonicalReclassification(prepared, nil)
+	if err != nil {
+		return err
+	}
+	publishNoncanonicalReclassificationLocked(bs, prepared, delta, false)
 	return bs.saveCanonicalIndexLocked()
 }
 
@@ -258,11 +344,11 @@ func (bs *BlockStore) RewindToHeight(height uint64) error {
 	if bs == nil {
 		return errors.New("nil blockstore")
 	}
-	// Read under the lock like every reader; only a precheck — TruncateCanonical
-	// re-checks the range under the write lock it mutates in.
-	bs.stateMu.RLock()
+	// Precheck waits for publication; TruncateCanonical re-checks under its lock.
+	bs.stateMu.Lock()
+	bs.waitNoncanonicalTransitionLocked()
 	length := uint64(len(bs.index.Canonical))
-	bs.stateMu.RUnlock()
+	bs.stateMu.Unlock()
 	if length == 0 {
 		return nil
 	}
@@ -278,13 +364,29 @@ func (bs *BlockStore) TruncateCanonical(count uint64) error {
 	}
 	bs.stateMu.Lock()
 	defer bs.stateMu.Unlock()
+	bs.waitNoncanonicalTransitionLocked()
 	if count > uint64(len(bs.index.Canonical)) {
 		return fmt.Errorf("truncate count out of range: %d", count)
 	}
-	if err := bs.dropCanonicalStateFromLocked(count); err != nil {
+	if count == uint64(len(bs.index.Canonical)) {
+		return bs.saveCanonicalIndexLocked()
+	}
+	nextCanonical := append([]string{}, bs.index.Canonical[:count]...)
+	currentRaw, err := encodeBlockStoreIndex(bs.index)
+	if err != nil {
 		return err
 	}
-	bs.index.Canonical = append([]string(nil), bs.index.Canonical[:count]...)
+	prepared, err := prepareCanonicalIndex(currentRaw, nextCanonical)
+	if err != nil {
+		return err
+	}
+	bs.beginNoncanonicalTransitionLocked()
+	defer bs.endNoncanonicalTransitionLocked()
+	delta, err := bs.prepareNoncanonicalReclassification(prepared, nil)
+	if err != nil {
+		return err
+	}
+	publishNoncanonicalReclassificationLocked(bs, prepared, delta, false)
 	return bs.saveCanonicalIndexLocked()
 }
 
@@ -347,20 +449,24 @@ func (bs *BlockStore) RestoreCanonicalIndex(canonical []string) error {
 	// nil folds to that empty identity, unlike prepare — the rollback caller
 	// (SyncEngine.restoreRollbackPersistentState) passes the nil CanonicalIndexSnapshot returns for an empty index.
 	nextCanonical := append(make([]string, 0, len(canonical)), canonical...)
-	if err := validateBlockStoreIndex(blockStoreIndexDisk{Version: blockStoreIndexVersion, Canonical: nextCanonical}); err != nil {
-		return err
+	// Restore passes no comparison bytes because even an identical image must save.
+	prepared, err := prepareCanonicalIndex(nil, nextCanonical)
+	if errors.Is(err, errCanonicalIndexDuplicateRow) {
+		return duplicateCanonicalRowErr(bs.indexPath)
 	}
-	nextIndex, err := buildCanonicalHeightIndex(nextCanonical)
 	if err != nil {
 		return err
 	}
-	if len(nextIndex) != len(nextCanonical) {
-		return duplicateCanonicalRowErr(bs.indexPath)
-	}
 	bs.stateMu.Lock()
 	defer bs.stateMu.Unlock()
-	bs.index.Canonical = nextCanonical
-	bs.replaceCanonicalState(nextIndex)
+	bs.waitNoncanonicalTransitionLocked()
+	bs.beginNoncanonicalTransitionLocked()
+	defer bs.endNoncanonicalTransitionLocked()
+	delta, err := bs.prepareNoncanonicalReclassification(prepared, nil)
+	if err != nil {
+		return err
+	}
+	publishNoncanonicalReclassificationLocked(bs, prepared, delta, false)
 	return bs.saveCanonicalIndexLocked()
 }
 
@@ -476,15 +582,12 @@ func chainWorkHeaderCorruption(blockHash [32]byte, reason string, err error) err
 // height-by-hash entry, so the store would run with a map that does not describe
 // its own list, and would persist an index it refuses to reopen. Refused by every
 // writer that builds the map from a caller-supplied list — every constructor,
-// prepare and RestoreCanonicalIndex. SetCanonicalTip mutates the live map in place
-// and rests on the caller invariant alone (one canonical height per hash in any
-// prev-linked chain), whose breach persists that same unreopenable index. The
+// prepare, RestoreCanonicalIndex, SetCanonicalTip, and TruncateCanonical. The
 // shared on-disk decoder stays deliberately untightened: decodeBlockStoreIndex is
 // cross-client mirrored (Rust load_blockstore_index) and still accepts it (RUB-897).
 var errCanonicalIndexDuplicateRow = errors.New("canonical index repeats a block hash")
 
-// duplicateCanonicalRowErr is the one message shape for that refusal, so the
-// store entry points cannot drift apart on how they name the offending file.
+// duplicateCanonicalRowErr adds the path for constructors/Open/reload and Restore; other mutators may return the bare sentinel.
 func duplicateCanonicalRowErr(indexPath string) error {
 	return fmt.Errorf("canonical index %s: %w", indexPath, errCanonicalIndexDuplicateRow)
 }
@@ -821,9 +924,10 @@ func writeCanonicalIndexFile(path string, index blockStoreIndexDisk) ([]byte, er
 // saveCanonicalIndexLocked is the write step of the legacy mutate-then-save path: the
 // caller already mutated bs.index under stateMu.Lock, so this records the bytes the
 // disk holds as the new visible identity. Every caller holds stateMu across the
-// mutation AND this save (RestoreCanonicalIndex proves its list before the lock), while
-// a prepared commit writes OUTSIDE it, so the two paths interleave safely only under
-// RUB-1202's canonical writer fence; until then the PREPARED primitive is dormant.
+// mutation AND this save (RestoreCanonicalIndex proves its list before the lock).
+// A prepared commit drops stateMu for durable I/O, but the shared transition fence
+// blocks legacy mutation until publication. RUB-1202 owns the wider SyncEngine,
+// ChainState, and admission cutover; until then this primitive has no production caller.
 //
 // After a PRE-commit failure the old bytes are still visible and indexRaw keeps
 // naming them, while bs.index and the height map — already mutated by the caller —
@@ -998,6 +1102,10 @@ func canonicalTipHeight(canonical []string) (uint64, bool) {
 	return uint64(len(canonical) - 1), true // #nosec G115 -- len(canonical) > 0 is checked above.
 }
 
+func canonicalHashAt(canonical []string, height uint64, hashHex string) bool {
+	return height < uint64(len(canonical)) && canonical[height] == hashHex
+}
+
 // canonicalCommitClass is the outcome class of one prepared canonical-index commit.
 // Exactly four values are frozen RUB-922 C01 identity strings —
 // canonicalCommitPrecommit and the three canonicalCommitTerminal* — so those
@@ -1026,9 +1134,8 @@ const (
 	canonicalCommitTerminalUnknown canonicalCommitClass = "TERMINAL_PERSISTENCE(neither_or_unreadable)"
 )
 
-// canonicalCommitResult is one prepared-commit outcome: the class and the
-// underlying cause for the two failure families. It carries nothing else — no
-// latch, counter, lease or retry budget lives at this layer.
+// canonicalCommitResult carries one outcome and cause; an empty class is a pre-write accounting refusal.
+// No latch, counter, lease, or retry state lives here.
 type canonicalCommitResult struct {
 	class canonicalCommitClass
 	err   error
@@ -1059,12 +1166,13 @@ var (
 // that left the visible identity OLD and would still pass the freshness check —
 // can be followed by a second write from the same image.
 type preparedCanonicalIndex struct {
-	oldRaw       []byte
-	newRaw       []byte
-	index        blockStoreIndexDisk
-	heightByHash map[[32]byte]uint64
-	chainWork    map[[32]byte]*big.Int
-	spent        bool
+	oldRaw            []byte
+	newRaw            []byte
+	index             blockStoreIndexDisk
+	noncanonicalDelta *noncanonicalTransitionDelta
+	heightByHash      map[[32]byte]uint64
+	chainWork         map[[32]byte]*big.Int
+	spent             bool
 }
 
 // prepareCanonicalIndex validates the complete planned canonical list and builds the
@@ -1072,10 +1180,10 @@ type preparedCanonicalIndex struct {
 // same pair the strict on-disk read uses: validateBlockStoreIndex pins version and
 // the 64-lowercase-hex row spelling (parseHex alone would accept uppercase and
 // surrounding space), and buildCanonicalHeightIndex proves every row decodes to a
-// hash. oldRaw is the exact visible index bytes the caller observed; commit refuses
-// if the store's visible identity has moved since. A nil next list is refused exactly
-// as a JSON null canonical is on disk; an empty non-nil list is the legitimate
-// empty-store identity.
+// hash. oldRaw is optional comparison identity: commits pass exact visible bytes,
+// Set/Truncate pass encoded live RAM, and Restore passes nil because even a no-op
+// must save. Commit still refuses if visible identity moved. A nil next list is
+// rejected like JSON null; empty non-nil is the valid empty identity.
 func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalIndex, error) {
 	// Copy so a later caller mutation cannot reach the prepared image, and keep
 	// nil-ness exact: `append([]string(nil), next...)` would fold an EMPTY list
@@ -1120,29 +1228,39 @@ func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalInde
 // exactly one strict visible readback whenever the write may have crossed the
 // namespace commit, then a non-fallible publication of the prebuilt image. It
 // never rolls back, retries, rewrites or repairs and latches nothing: the owning
-// canonical transition consumes the returned evidence. REQUIRES the caller to hold
-// the canonical writer fence (SyncEngine.mutationMu plus ChainState.admissionMu.W,
-// RUB-1202): the freshness comparison is a staleness ASSERT, not mutual exclusion
-// — it reads and releases the store's read lock before the write — so only that
-// fence closes the check-then-act window, and under it p.spent needs no
-// synchronization of its own. A nil bs is a programming error; the fence holder
-// owns the receiver.
+// canonical transition consumes the returned evidence. BlockStore's internal
+// transition fence closes reservations, reload, same-store commits, and the
+// durable-write window; the owning SyncEngine transition still supplies its
+// wider ChainState/admission fence when RUB-1202 cuts over callers. A nil bs is
+// a programming error.
 func (p *preparedCanonicalIndex) commit(bs *BlockStore) canonicalCommitResult {
+	bs.stateMu.Lock()
+	bs.beginNoncanonicalTransitionLocked()
 	if p.spent {
+		bs.endNoncanonicalTransitionLocked()
+		bs.stateMu.Unlock()
 		return canonicalCommitResult{class: canonicalCommitStale, err: errPreparedIndexSpent}
 	}
-	bs.stateMu.RLock()
 	fresh := bytes.Equal(bs.indexRaw, p.oldRaw)
-	bs.stateMu.RUnlock()
 	if !fresh {
+		bs.endNoncanonicalTransitionLocked()
+		bs.stateMu.Unlock()
 		return canonicalCommitResult{class: canonicalCommitStale, err: errCanonicalIndexMoved}
 	}
+	delta, err := bs.prepareNoncanonicalReclassification(p, nil)
+	if err != nil {
+		bs.endNoncanonicalTransitionLocked()
+		bs.stateMu.Unlock()
+		return canonicalCommitResult{err: err}
+	}
+	p.noncanonicalDelta = delta
 	p.spent = true
+	bs.stateMu.Unlock()
 
 	// No publication lock is held while waiting for or executing this write.
-	err := writeFileAtomicFn(bs.indexPath, p.newRaw, 0o600)
+	err = writeFileAtomicFn(bs.indexPath, p.newRaw, 0o600)
 	if err == nil {
-		p.publish(bs)
+		p.finishTransition(bs, true)
 		return canonicalCommitResult{class: canonicalCommitted}
 	}
 	// The frozen precommit identity means "no commit attempt may have crossed",
@@ -1151,9 +1269,22 @@ func (p *preparedCanonicalIndex) commit(bs *BlockStore) canonicalCommitResult {
 	// one strict readback before every result persistence may have crossed —
 	// so after_namespace_commit and every untagged error take the readback.
 	if stage, tagged := atomicWriteStageOf(err); tagged && stage == atomicWriteBeforeNamespaceCommit {
+		p.finishTransition(bs, false)
 		return canonicalCommitResult{class: canonicalCommitPrecommit, err: err}
 	}
-	return p.classifyVisibleIndex(bs, err)
+	result := p.classifyVisibleIndex(bs, err)
+	p.finishTransition(bs, result.class == canonicalCommitTerminalNew)
+	return result
+}
+
+func (p *preparedCanonicalIndex) finishTransition(bs *BlockStore, publish bool) {
+	bs.stateMu.Lock()
+	if publish {
+		p.publishLocked(bs)
+	}
+	p.noncanonicalDelta = nil
+	bs.endNoncanonicalTransitionLocked()
+	bs.stateMu.Unlock()
 }
 
 // classifyVisibleIndex is the one strict readback. It classifies by the VISIBLE
@@ -1188,34 +1319,29 @@ func (p *preparedCanonicalIndex) classifyVisibleIndex(bs *BlockStore, cause erro
 	case bytes.Equal(raw, p.oldRaw):
 		return canonicalCommitResult{class: canonicalCommitTerminalOld, err: cause}
 	case bytes.Equal(raw, p.newRaw):
-		p.publish(bs)
 		return canonicalCommitResult{class: canonicalCommitTerminalNew, err: cause}
 	default:
 		return canonicalCommitResult{class: canonicalCommitTerminalUnknown, err: cause}
 	}
 }
 
-// publish takes the store's write lock for the one publication of this image.
-func (p *preparedCanonicalIndex) publish(bs *BlockStore) {
-	bs.stateMu.Lock()
-	p.publishLocked(bs)
-	bs.stateMu.Unlock()
-}
-
 // publishLocked installs the prebuilt image. PRECONDITION: the caller holds
-// bs.stateMu.Lock(). It is split out because RUB-1202 composes this transition with
-// RUB-908's prebuilt accounting-image assignment inside the SAME critical section
-// (contract clause), so both become ONE complete published image and a reader under
-// RLock() never observes a partial replacement.
+// bs.stateMu.Lock(). RUB-908 publishes the prepared accounting and canonical
+// halves inside this SAME critical section, so a reader under RLock never sees
+// a partial replacement.
 //
-// Everything assigned here was built before the write, so on the SUCCESS path there
-// is no allocation, parse, callback, clone or ordinary error return between the
-// durable commit and these four plain assignments — measured, not asserted. The
-// post-commit-ambiguity path interposes exactly ONE strict readback first: the
-// lane's durable boundary is rename plus parent fsync, but that readback decides
-// the PUBLISHED image, so a parent-fsync failure over a visible new image publishes
-// here as TERMINAL_PERSISTENCE(new) and the owning transition latches admission on
-// the class.
+// The noncanonical half publishes under the same hold by contract: a prepared
+// delta planned against this transition compacts and merges the accounting
+// image BEFORE the canonical assignments, so committed and TERMINAL(new)
+// outcomes publish BOTH images together while precommit and TERMINAL(old)
+// never reach this method. Everything assigned here was built before the write,
+// so on the SUCCESS path there is no allocation, parse, callback, clone or
+// ordinary error return between the durable commit and these assignments —
+// measured, not asserted. The post-commit-ambiguity path interposes exactly ONE
+// strict readback first: the lane's durable boundary is rename plus parent fsync,
+// but that readback decides the PUBLISHED image, so a parent-fsync failure over a
+// visible new image publishes here as TERMINAL_PERSISTENCE(new) and the owning
+// transition latches admission on the class.
 //
 // chainWorkByHash is REPLACED with the prepared empty map rather than carried:
 // cachedChainWork serves entries without re-checking canonical membership, so work
@@ -1223,10 +1349,7 @@ func (p *preparedCanonicalIndex) publish(bs *BlockStore) {
 // image no longer contains. The legacy pure-append mutator keeps its cache (only
 // its reorg branch resets) — a deliberate divergence from the append path.
 func (p *preparedCanonicalIndex) publishLocked(bs *BlockStore) {
-	bs.index = p.index
-	bs.indexRaw = p.newRaw
-	bs.canonicalHeightByHash = p.heightByHash
-	bs.chainWorkByHash = p.chainWork
+	publishNoncanonicalReclassificationLocked(bs, p, p.noncanonicalDelta, true)
 }
 
 // visibleIndexBytes returns a copy of the store's visible canonical identity under
@@ -1246,7 +1369,7 @@ func (bs *BlockStore) visibleIndexBytes() []byte {
 // are the frozen RUB-922 C01 identities. The set is closed only for the current
 // retain-everything profile: a retention profile that permits pruned suffix data
 // adds LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact) (C01-RES-RECOVERY-001),
-// which arrives with RUB-908's reclaim.
+// which arrives with RUB-1222's reclaim.
 type BlockPresenceClass string
 
 const (
@@ -1326,7 +1449,7 @@ func (p BlockPresence) String() string {
 // instead of two observations a concurrent replacement could interleave. The RLock
 // protects the MEMBERSHIP map; the artifact FILES have lock-free, monotone
 // absent->present writers, so the leaves are read in REVERSE persistence order and
-// every observed tuple is a state the store really held. RUB-908's reclaim makes
+// every observed tuple is a state the store really held. RUB-1222's reclaim makes
 // artifacts present->absent and must re-derive that argument.
 //
 // The cost is real and accepted, and all of it runs under the read lock: the block
