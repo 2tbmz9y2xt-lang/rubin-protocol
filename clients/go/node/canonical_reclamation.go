@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -80,6 +82,342 @@ func newNoncanonicalAccounting(limit uint64) (*noncanonicalAccounting, error) {
 	return &noncanonicalAccounting{rows: make([]noncanonicalRow, noncanonicalHashCap), limit: limit}, nil
 }
 
+// noncanonicalTransitionDelta is the compact remove/add plan, never a second full backing.
+type noncanonicalTransitionDelta struct {
+	removeIndices []uint32
+	disconnected  []noncanonicalRow
+	usedBytes     uint64
+	uniqueCount   uint32
+	replaceAll    bool
+}
+
+func (bs *BlockStore) prepareNoncanonicalReclassification(prepared *preparedCanonicalIndex, reloadSource *BlockStore) (*noncanonicalTransitionDelta, error) {
+	accounting := bs.noncanonical.Load()
+	if accounting == nil {
+		return &noncanonicalTransitionDelta{}, nil
+	}
+	if prepared == nil || len(prepared.heightByHash) != len(prepared.index.Canonical) {
+		return nil, errCanonicalIndexDuplicateRow
+	}
+	if reloadSource != nil {
+		return reloadSource.reconstructNoncanonicalReloadDelta(accounting.limit)
+	}
+	disconnected, overflow, err := bs.reconstructDisconnectedRows(prepared.heightByHash)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateNoncanonicalAccounting(accounting, bs.canonicalHeightByHash); err != nil {
+		return nil, err
+	}
+	delta := &noncanonicalTransitionDelta{
+		removeIndices: noncanonicalRemovalIndices(accounting, prepared.heightByHash, disconnected),
+		disconnected:  disconnected,
+	}
+	finalCount := int(accounting.count) - len(delta.removeIndices) + len(disconnected) + overflow
+	if finalCount > noncanonicalHashCap {
+		return nil, errNoncanonicalCount
+	}
+	delta.uniqueCount = uint32(finalCount) // #nosec G115 -- finalCount is checked against noncanonicalHashCap above.
+	return noncanonicalTransitionBytes(accounting, delta)
+}
+
+func (bs *BlockStore) reconstructNoncanonicalReloadDelta(limit uint64) (*noncanonicalTransitionDelta, error) {
+	limit, err := normalizeNoncanonicalLimit(limit)
+	if err != nil {
+		return nil, err
+	}
+	replacement := &noncanonicalAccounting{rows: make([]noncanonicalRow, 0, noncanonicalHashCap), limit: limit}
+	if err := bs.reconstructNoncanonicalAccountingInto(replacement); err != nil {
+		return nil, err
+	}
+	return &noncanonicalTransitionDelta{disconnected: replacement.rows, usedBytes: replacement.usedBytes, uniqueCount: replacement.count, replaceAll: true}, nil
+}
+
+func (bs *BlockStore) reconstructDisconnectedRows(next map[[32]byte]uint64) ([]noncanonicalRow, int, error) {
+	hash, at, ok := bs.nextDisconnectedHash(next, 0)
+	if !ok {
+		return nil, 0, nil
+	}
+	directories, err := bs.snapshotNoncanonicalDirectories()
+	if err != nil {
+		return nil, 0, err
+	}
+	disconnected, overflow := make([]noncanonicalRow, 0, min(len(bs.index.Canonical), noncanonicalHashCap)), 0
+	for ok {
+		row, err := bs.reconstructDisconnectedRow(hash, directories)
+		if err != nil {
+			return nil, 0, err
+		}
+		if !row.empty() {
+			if len(disconnected) == noncanonicalHashCap {
+				overflow = 1
+			} else {
+				disconnected = append(disconnected, *row)
+			}
+		}
+		hash, at, ok = bs.nextDisconnectedHash(next, at)
+	}
+	sort.Slice(disconnected, func(i, j int) bool {
+		return bytes.Compare(disconnected[i].hash[:], disconnected[j].hash[:]) < 0
+	})
+	return disconnected, overflow, nil
+}
+
+func (bs *BlockStore) nextDisconnectedHash(next map[[32]byte]uint64, at int) ([32]byte, int, bool) {
+	for at < len(bs.index.Canonical) {
+		hash, err := parseHex32("canonical hash", bs.index.Canonical[at])
+		at++
+		if err != nil {
+			// Preserve the legacy mutate-before-save error surface for removed rows.
+			continue
+		}
+		if _, stillCanonical := next[hash]; stillCanonical {
+			continue
+		}
+		return hash, at, true
+	}
+	return [32]byte{}, at, false
+}
+
+func noncanonicalRemovalIndices(accounting *noncanonicalAccounting, next map[[32]byte]uint64, disconnected []noncanonicalRow) []uint32 {
+	remove := make([]uint32, 0, min(int(accounting.count), len(next)+len(disconnected)))
+	for at := int(accounting.count) - 1; at >= 0; at-- {
+		hash := accounting.rows[at].hash
+		_, becomesCanonical := next[hash]
+		replaced := sort.Search(len(disconnected), func(i int) bool {
+			return bytes.Compare(disconnected[i].hash[:], hash[:]) >= 0
+		})
+		if becomesCanonical || replaced < len(disconnected) && disconnected[replaced].hash == hash {
+			remove = append(remove, uint32(at)) // #nosec G115 -- at is below validated accounting.count <= noncanonicalHashCap.
+		}
+	}
+	return remove
+}
+
+func noncanonicalTransitionBytes(accounting *noncanonicalAccounting, delta *noncanonicalTransitionDelta) (*noncanonicalTransitionDelta, error) {
+	usedBytes, removeCursor := uint64(0), len(delta.removeIndices)-1
+	for i := range accounting.rows[:accounting.count] {
+		if removeCursor >= 0 && delta.removeIndices[removeCursor] == uint32(i) {
+			removeCursor--
+			continue
+		}
+		var err error
+		usedBytes, err = addNoncanonicalLogicalBytes(usedBytes, accounting.rows[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, row := range delta.disconnected {
+		var err error
+		usedBytes, err = addNoncanonicalLogicalBytes(usedBytes, row)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if usedBytes > accounting.limit {
+		return nil, errNoncanonicalBytes
+	}
+	delta.usedBytes = usedBytes
+	return delta, nil
+}
+
+func validateNoncanonicalAccounting(accounting *noncanonicalAccounting, canonical map[[32]byte]uint64) error {
+	if !validNoncanonicalImageShape(accounting) {
+		return errors.New("noncanonical accounting image is inconsistent")
+	}
+	limit, err := normalizeNoncanonicalLimit(accounting.limit)
+	if err != nil || limit != accounting.limit {
+		return errors.New("noncanonical accounting limit is inconsistent")
+	}
+	usedBytes, err := sumNoncanonicalRows(accounting.rows[:accounting.count], canonical)
+	if err != nil {
+		return err
+	}
+	if usedBytes != accounting.usedBytes {
+		return errors.New("noncanonical accounting total is inconsistent")
+	}
+	if usedBytes > accounting.limit {
+		return errors.New("noncanonical accounting exceeds its limit")
+	}
+	return nil
+}
+
+func validNoncanonicalImageShape(accounting *noncanonicalAccounting) bool {
+	return len(accounting.rows) == noncanonicalHashCap && accounting.count <= noncanonicalHashCap && accounting.sortedCount == accounting.count && accounting.reservedBytes == 0
+}
+
+func sumNoncanonicalRows(rows []noncanonicalRow, canonical map[[32]byte]uint64) (uint64, error) {
+	usedBytes := uint64(0)
+	for i, row := range rows {
+		var previous *noncanonicalRow
+		if i > 0 {
+			previous = &rows[i-1]
+		}
+		if err := validateNoncanonicalRow(row, previous, canonical); err != nil {
+			return 0, err
+		}
+		next, err := addNoncanonicalLogicalBytes(usedBytes, row)
+		if err != nil {
+			return 0, errors.New("noncanonical accounting total overflow")
+		}
+		usedBytes = next
+	}
+	return usedBytes, nil
+}
+
+func validateNoncanonicalRow(row noncanonicalRow, previous *noncanonicalRow, canonical map[[32]byte]uint64) error {
+	if row.empty() {
+		return errors.New("noncanonical accounting row is empty")
+	}
+	if previous != nil && bytes.Compare(previous.hash[:], row.hash[:]) >= 0 {
+		return errors.New("noncanonical accounting rows are not strictly sorted")
+	}
+	if _, exists := canonical[row.hash]; exists {
+		return errors.New("canonical hash remained in noncanonical accounting")
+	}
+	for _, kind := range []noncanonicalArtifactKind{noncanonicalBlockArtifact, noncanonicalHeaderArtifact, noncanonicalUndoArtifact} {
+		if row.hasReservation(kind) {
+			return errors.New("noncanonical accounting reservation remained after drain")
+		}
+	}
+	return nil
+}
+
+func noncanonicalLogicalBytes(row noncanonicalRow) (uint64, bool) {
+	total, ok := checkedNoncanonicalAdd(row.blockBytes, row.headerBytes)
+	if !ok {
+		return 0, false
+	}
+	return checkedNoncanonicalAdd(total, row.undoBytes)
+}
+
+func addNoncanonicalLogicalBytes(total uint64, row noncanonicalRow) (uint64, error) {
+	rowBytes, ok := noncanonicalLogicalBytes(row)
+	if !ok {
+		return 0, errNoncanonicalBytes
+	}
+	next, ok := checkedNoncanonicalAdd(total, rowBytes)
+	if !ok {
+		return 0, errNoncanonicalBytes
+	}
+	return next, nil
+}
+
+// reconstructDisconnectedRow uses strict bounded reads; errors precede publication and durable writes.
+func (bs *BlockStore) reconstructDisconnectedRow(hash [32]byte, directories [3]os.FileInfo) (*noncanonicalRow, error) {
+	row := &noncanonicalRow{hash: hash, height: noncanonicalUnknownHeight}
+	for _, kind := range []noncanonicalArtifactKind{noncanonicalBlockArtifact, noncanonicalHeaderArtifact, noncanonicalUndoArtifact} {
+		dir, suffix, limit := bs.noncanonicalArtifactPath(kind)
+		name := hex.EncodeToString(hash[:]) + suffix
+		path := filepath.Join(dir, name)
+		entryInfo, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := stableNoncanonicalDirectory(dir, directories[kind]); err != nil {
+				return nil, fmt.Errorf("reconstruct disconnected %d %x: %w", kind, hash, err)
+			}
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reconstruct disconnected %d %x: %w", kind, hash, err)
+		}
+		state, prev, height, size, err := bs.strictNoncanonicalArtifact(kind, dir, name, limit, directories[kind], entryInfo, hash)
+		if err != nil {
+			return nil, fmt.Errorf("reconstruct disconnected %d %x: %w", kind, hash, err)
+		}
+		*row.bytes(kind) = size
+		row.setState(kind, state)
+		row.setValidMetadata(kind, state, prev, height)
+	}
+	return row, nil
+}
+
+// publishNoncanonicalReclassificationLocked is the non-fallible, allocation-free stateMu publisher for both images.
+func publishNoncanonicalReclassificationLocked(bs *BlockStore, prepared *preparedCanonicalIndex, delta *noncanonicalTransitionDelta, durable bool) {
+	if accounting := bs.noncanonical.Load(); accounting != nil && delta != nil {
+		oldCount := int(accounting.count)
+		kept := 0
+		if !delta.replaceAll {
+			kept = compactNoncanonicalRows(accounting, delta.removeIndices)
+		}
+		mergeDisconnectedRows(accounting.rows, kept, delta.disconnected)
+		clearNoncanonicalTail(accounting.rows, int(delta.uniqueCount), oldCount)
+		accounting.count = delta.uniqueCount
+		accounting.sortedCount = delta.uniqueCount
+		accounting.usedBytes = delta.usedBytes
+		accounting.reservedBytes = 0
+	}
+	bs.index = prepared.index
+	if durable {
+		bs.indexRaw = prepared.newRaw
+	}
+	bs.canonicalHeightByHash = prepared.heightByHash
+	bs.chainWorkByHash = prepared.chainWork
+}
+
+func compactNoncanonicalRows(accounting *noncanonicalAccounting, remove []uint32) int {
+	removeCursor, write := len(remove)-1, 0
+	for read := range accounting.rows[:accounting.count] {
+		if removeCursor >= 0 && remove[removeCursor] == uint32(read) {
+			removeCursor--
+			continue
+		}
+		accounting.rows[write] = accounting.rows[read]
+		write++
+	}
+	return write
+}
+
+func mergeDisconnectedRows(rows []noncanonicalRow, kept int, disconnected []noncanonicalRow) {
+	i, j, at := kept-1, len(disconnected)-1, kept+len(disconnected)-1
+	for i >= 0 && j >= 0 {
+		if bytes.Compare(rows[i].hash[:], disconnected[j].hash[:]) > 0 {
+			rows[at] = rows[i]
+			i--
+		} else {
+			rows[at] = disconnected[j]
+			j--
+		}
+		at--
+	}
+	for j >= 0 {
+		rows[at] = disconnected[j]
+		j--
+		at--
+	}
+}
+
+func clearNoncanonicalTail(rows []noncanonicalRow, finalCount, oldCount int) {
+	for at := finalCount; at < oldCount; at++ {
+		rows[at] = noncanonicalRow{}
+	}
+}
+
+// reconstructNoncanonicalAccounting runs A's strict opened-handle scan, excluding canonical membership.
+func (bs *BlockStore) reconstructNoncanonicalAccounting(limit uint64) (*noncanonicalAccounting, error) {
+	accounting, err := newNoncanonicalAccounting(limit)
+	if err != nil {
+		return nil, err
+	}
+	if err := bs.reconstructNoncanonicalAccountingInto(accounting); err != nil {
+		return nil, err
+	}
+	return accounting, nil
+}
+
+func (bs *BlockStore) reconstructNoncanonicalAccountingInto(accounting *noncanonicalAccounting) error {
+	directories, err := bs.snapshotNoncanonicalDirectories()
+	if err != nil {
+		return err
+	}
+	for _, kind := range []noncanonicalArtifactKind{noncanonicalBlockArtifact, noncanonicalHeaderArtifact, noncanonicalUndoArtifact} {
+		if err := bs.scanNoncanonicalDirectory(accounting, kind, directories[kind]); err != nil {
+			return err
+		}
+		accounting.sortRows()
+	}
+	return nil
+}
+
 func (bs *BlockStore) noncanonicalAccountingSnapshot() noncanonicalAccountingSnapshot {
 	if bs == nil {
 		return noncanonicalAccountingSnapshot{}
@@ -134,6 +472,9 @@ func (a *noncanonicalAccounting) appendRow(hash [32]byte) (*noncanonicalRow, err
 	}
 	at := int(a.count)
 	a.count++
+	if at == len(a.rows) {
+		a.rows = append(a.rows, noncanonicalRow{})
+	}
 	a.rows[at] = noncanonicalRow{hash: hash, height: noncanonicalUnknownHeight}
 	return &a.rows[at], nil
 }
@@ -376,11 +717,12 @@ func (bs *BlockStore) reserveInactiveNoncanonicalArtifactWrite(prepare func() ([
 func (bs *BlockStore) beginNoncanonicalReservation(hash [32]byte) *noncanonicalReservation {
 	for {
 		bs.stateMu.Lock()
-		if bs.noncanonical.Load() == nil {
+		if wait := bs.noncanonicalTransitionDone; wait != nil {
 			bs.stateMu.Unlock()
-			return &noncanonicalReservation{store: bs}
+			<-wait
+			continue
 		}
-		if _, canonical := bs.canonicalHeightByHash[hash]; canonical {
+		if bs.noncanonical.Load() == nil {
 			bs.stateMu.Unlock()
 			return &noncanonicalReservation{store: bs}
 		}

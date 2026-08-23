@@ -20,6 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -2284,6 +2285,81 @@ func TestPreparedCanonicalIndexRefusesSecondCommit(t *testing.T) {
 	assertCanonicalRAMUnchanged(t, store, before, "second commit")
 }
 
+func TestPreparedCanonicalIndexCrossStoreCommitIsSingleUse(t *testing.T) {
+	stores := []*BlockStore{mustCreateBlockStore(t, BlockStorePath(t.TempDir())), mustCreateBlockStore(t, BlockStorePath(t.TempDir()))}
+	for _, store := range stores {
+		if err := store.CommitCanonicalBlock(0, devnetGenesisBlockHash, devnetGenesisHeaderBytes, devnetGenesisBlockBytes, &BlockUndo{BlockHeight: 0}); err != nil {
+			t.Fatalf("commit canonical block: %v", err)
+		}
+	}
+	if !bytes.Equal(stores[0].visibleIndexBytes(), stores[1].visibleIndexBytes()) {
+		t.Fatal("sibling stores do not share the prepared old image")
+	}
+	var writes atomic.Int32
+	fault := errors.New("precommit")
+	withWriteFileAtomicFn(t, func(path string, _ []byte, _ os.FileMode) error {
+		writes.Add(1)
+		return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteOverwrite, fault)
+	})
+	for range 4 {
+		prepared := mustPrepareCanonicalIndex(t, stores[0], []string{})
+		entered, release, start := make(chan struct{}, 2), make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		releaseProbes := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseProbes()
+		for _, store := range stores {
+			probe := new(sync.Once)
+			store.leafProbe = func() { probe.Do(func() { entered <- struct{}{}; <-release }) }
+		}
+		writes.Store(0)
+		results := make(chan canonicalCommitResult, len(stores))
+		receive := func(message string) canonicalCommitResult {
+			select {
+			case result := <-results:
+				return result
+			case <-time.After(time.Second):
+				t.Fatal(message)
+			}
+			return canonicalCommitResult{}
+		}
+		for _, store := range stores {
+			go func(store *BlockStore) { <-start; results <- prepared.commit(store) }(store)
+		}
+		close(start)
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			releaseProbes()
+			receive("first prepared commit did not finish")
+			receive("second prepared commit did not finish")
+			t.Fatal("no prepared reclassification reached its leaf probe")
+		}
+		select {
+		case <-entered:
+			releaseProbes()
+			receive("first planner did not finish")
+			receive("second planner did not finish")
+			t.Fatal("one prepared image reached two reclassification planners")
+		case loser := <-results:
+			if loser.class != canonicalCommitStale || !errors.Is(loser.err, errPreparedIndexSpent) {
+				releaseProbes()
+				receive("claimed prepared commit did not finish")
+				t.Fatalf("loser=%s err=%v", loser.class, loser.err)
+			}
+		case <-time.After(time.Second):
+			releaseProbes()
+			receive("first prepared commit did not finish")
+			receive("second prepared commit did not finish")
+			t.Fatal("second store did not refuse the spent image")
+		}
+		releaseProbes()
+		winner := receive("claimed prepared commit did not finish")
+		if winner.class != canonicalCommitPrecommit || !errors.Is(winner.err, fault) || writes.Load() != 1 {
+			t.Fatalf("winner=%s err=%v writes=%d", winner.class, winner.err, writes.Load())
+		}
+	}
+}
+
 // sameLengthDifferentBytes returns bytes of the SAME length as raw but a
 // different content, so a readback that compares lengths instead of contents
 // would misclassify them as an identity match.
@@ -2491,8 +2567,7 @@ func TestPreparedCanonicalIndexTerminalUnknownLeavesIdentityStale(t *testing.T) 
 // heights into one height-by-hash entry, so the store would run with a map that
 // does not describe its own list. The cross-client decoder is untouched (Rust
 // still accepts it — startup divergence window, RUB-897); this is the Go-side
-// guard over Open (which reloadFromDisk routes through) and RestoreCanonicalIndex,
-// the one legacy writer that builds its own map. Create writes the empty list.
+// guard: Open/reload reject through newBlockStore; Restore validates separately.
 func TestBlockStoreOpenRejectsDuplicateCanonicalRow(t *testing.T) {
 	root := BlockStorePath(t.TempDir())
 	store := mustCreateBlockStore(t, root)
@@ -2519,12 +2594,19 @@ func TestBlockStoreOpenRejectsDuplicateCanonicalRow(t *testing.T) {
 
 // TestPreparedCanonicalIndexPublishLockedAllocatesNothing measures the
 // commit-to-RAM step itself, held under the same lock the commit path holds: it
-// is plain field and pointer assignment, nothing else.
+// is prevalidated in-place compaction plus field assignment, with no allocation.
 func TestPreparedCanonicalIndexPublishLockedAllocatesNothing(t *testing.T) {
 	store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
 	prepared := mustPrepareCanonicalIndex(t, store, []string{canonicalIndexRow(0x60), canonicalIndexRow(0x61)})
+	accounting := store.noncanonical.Load()
+	disconnected := noncanonicalRow{hash: [32]byte{1}, blockBytes: 1, height: noncanonicalUnknownHeight}
+	disconnected.setState(noncanonicalBlockArtifact, BlockArtifactValid)
+	delta := &noncanonicalTransitionDelta{disconnected: []noncanonicalRow{disconnected}, usedBytes: 1, uniqueCount: 1}
 	store.stateMu.Lock()
-	allocs := testing.AllocsPerRun(100, func() { prepared.publishLocked(store) })
+	allocs := testing.AllocsPerRun(100, func() {
+		accounting.count, accounting.sortedCount, accounting.usedBytes = 0, 0, 0
+		prepared.publishLocked(store, delta)
+	})
 	store.stateMu.Unlock()
 	if allocs != 0 {
 		t.Fatalf("publish allocated %v objects per run, want 0", allocs)
@@ -2567,30 +2649,38 @@ func TestPreparedCanonicalIndexOldSnapshotsSurviveReplacement(t *testing.T) {
 // height map and visible identity always agreeing. Run under -race.
 func TestPreparedCanonicalIndexConcurrentReadersPinOldImage(t *testing.T) {
 	store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
-	row0, oldOnly, newOnly := canonicalIndexRow(0x80), canonicalIndexRow(0x81), canonicalIndexRow(0x82)
-	old := []string{row0, oldOnly}
-	next := []string{row0, newOnly}
+	oldHeader, newHeader := testHeaderBytes(0x80, 80), testHeaderBytes(0x81, 81)
+	oldOnlyHash, newOnlyHash := mustHeaderHash(t, oldHeader), mustHeaderHash(t, newHeader)
+	if err := store.StoreBlock(oldOnlyHash, oldHeader, []byte("old")); err != nil {
+		t.Fatalf("store old artifact: %v", err)
+	}
+	if err := store.StoreBlock(newOnlyHash, newHeader, []byte("new")); err != nil {
+		t.Fatalf("store new artifact: %v", err)
+	}
+	old, next := []string{hex.EncodeToString(oldOnlyHash[:])}, []string{hex.EncodeToString(newOnlyHash[:])}
 	oldPrepared := mustCommitCanonicalIndex(t, store, old)
 	prepared := mustPrepareCanonicalIndex(t, store, next)
-	oldOnlyHash, newOnlyHash := canonicalIndexRowHash(t, oldOnly), canonicalIndexRowHash(t, newOnly)
 
 	spawnReaders(t, 8, func() bool {
 		store.stateMu.RLock()
 		canonical := append([]string(nil), store.index.Canonical...)
 		_, hasOld := store.canonicalHeightByHash[oldOnlyHash]
 		_, hasNew := store.canonicalHeightByHash[newOnlyHash]
+		accounting := store.noncanonical.Load()
+		_, oldNoncanonical := accounting.find(oldOnlyHash)
+		_, newNoncanonical := accounting.find(newOnlyHash)
 		raw := store.indexRaw
 		store.stateMu.RUnlock()
 
 		switch {
 		case slices.Equal(canonical, old):
-			if !hasOld || hasNew || !bytes.Equal(raw, oldPrepared.newRaw) {
-				t.Errorf("torn old image: old=%v new=%v identity_matches=%v", hasOld, hasNew, bytes.Equal(raw, oldPrepared.newRaw))
+			if !hasOld || hasNew || oldNoncanonical || !newNoncanonical || !bytes.Equal(raw, oldPrepared.newRaw) {
+				t.Errorf("torn old pair: canonical=(%v,%v) accounting=(%v,%v)", hasOld, hasNew, oldNoncanonical, newNoncanonical)
 				return false
 			}
 		case slices.Equal(canonical, next):
-			if hasOld || !hasNew || !bytes.Equal(raw, prepared.newRaw) {
-				t.Errorf("torn new image: old=%v new=%v identity_matches=%v", hasOld, hasNew, bytes.Equal(raw, prepared.newRaw))
+			if hasOld || !hasNew || !oldNoncanonical || newNoncanonical || !bytes.Equal(raw, prepared.newRaw) {
+				t.Errorf("torn new pair: canonical=(%v,%v) accounting=(%v,%v)", hasOld, hasNew, oldNoncanonical, newNoncanonical)
 				return false
 			}
 		default:
@@ -2656,6 +2746,8 @@ func TestInspectBlockPresenceStraddledByStoreNeverShowsImpossibleState(t *testin
 	for _, at := range []int{2, 3} {
 		t.Run(fmt.Sprintf("before_leaf_%d", at), func(t *testing.T) {
 			store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
+			// Disable accounting: this test isolates the pre-accounting monotone leaf-order invariant.
+			store.noncanonical.Store(nil)
 			header := testHeaderBytes(0x89, 890)
 			hash := mustHeaderHash(t, header)
 			reads := 0
