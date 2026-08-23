@@ -59,21 +59,21 @@ func (s *DARelayState) sortedIncompleteDAIDsLocked() [][32]byte {
 	return daIDs
 }
 
-func (s *DARelayState) addDACommit(peerQuotaKey string, commit daRelayCommit) (daRelaySetRecord, error) {
+func (s *DARelayState) addDACommit(peerQuotaKey string, commit daRelayCommit) error {
 	if err := validateDACommit(commit); err != nil {
-		return daRelaySetRecord{}, err
+		return err
 	}
 
 	txBytesOwned := false
 	for {
-		record, retry, err := s.addDACommitAttempt(peerQuotaKey, &commit, &txBytesOwned)
+		_, retry, err := s.addDACommitAttempt(peerQuotaKey, &commit, &txBytesOwned)
 		if err != nil {
-			return daRelaySetRecord{}, err
+			return err
 		}
 		if retry {
 			continue
 		}
-		return record.clone(), nil
+		return nil
 	}
 }
 
@@ -175,22 +175,22 @@ func (s *DARelayState) completeDACommitSnapshot(peerQuotaKey string, commit *daR
 	return record, false, nil
 }
 
-func (s *DARelayState) addDAChunk(peerQuotaKey string, chunk daRelayChunk) (daRelaySetRecord, error) {
+func (s *DARelayState) addDAChunk(peerQuotaKey string, chunk daRelayChunk) error {
 	payload, err := s.prepareDAChunk(chunk)
 	if err != nil {
-		return daRelaySetRecord{}, err
+		return err
 	}
 
 	txBytesOwned := false
 	for {
-		record, retry, err := s.addDAChunkAttempt(peerQuotaKey, &chunk, payload, &txBytesOwned)
+		_, retry, err := s.addDAChunkAttempt(peerQuotaKey, &chunk, payload, &txBytesOwned)
 		if err != nil {
-			return daRelaySetRecord{}, err
+			return err
 		}
 		if retry {
 			continue
 		}
-		return record.clone(), nil
+		return nil
 	}
 }
 

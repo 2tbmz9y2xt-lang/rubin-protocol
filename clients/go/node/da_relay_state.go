@@ -254,19 +254,18 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 
 // StageCommit retains one commit whose peer quota key was normalized by P2P.
 func (s *DARelayState) StageCommit(peerQuotaKey string, commit DARelayCommit) error {
-	_, err := s.addDACommit(peerQuotaKey, daRelayCommit{
+	return s.addDACommit(peerQuotaKey, daRelayCommit{
 		daID:              commit.DAID,
 		payloadCommitment: commit.PayloadCommitment,
 		chunkCount:        commit.ChunkCount,
 		wireBytes:         commit.WireBytes,
 		txBytes:           commit.TxBytes,
 	})
-	return err
 }
 
 // StageChunk retains one chunk whose peer quota key was normalized by P2P.
 func (s *DARelayState) StageChunk(peerQuotaKey string, chunk DARelayChunk) error {
-	_, err := s.addDAChunk(peerQuotaKey, daRelayChunk{
+	return s.addDAChunk(peerQuotaKey, daRelayChunk{
 		daID:        chunk.DAID,
 		chunkHash:   chunk.ChunkHash,
 		chunkIndex:  chunk.ChunkIndex,
@@ -275,7 +274,6 @@ func (s *DARelayState) StageChunk(peerQuotaKey string, chunk DARelayChunk) error
 		txBytes:     chunk.TxBytes,
 		hashChecked: chunk.HashChecked,
 	})
-	return err
 }
 
 // ValidateDARelayChunk validates one unretained chunk before relay admission.

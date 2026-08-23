@@ -142,7 +142,7 @@ func TestDARelayPeerQuotaKeyPreventsPortHopping(t *testing.T) {
 		secondID := daRelayTestID(42)
 
 		record := mustAddDAChunk(t, state, "127.0.0.1", daRelayTestChunk(firstID, 0, 6))
-		_, err := state.addDAChunk("127.0.0.1", daRelayTestChunk(secondID, 0, 5))
+		err := state.addDAChunk("127.0.0.1", daRelayTestChunk(secondID, 0, 5))
 		requireDAErr(t, err, errDARelayOrphanPeerCapExceeded)
 
 		requirePortHopRejectedWithoutMutation(t, state, secondID, record.wireBytes)
@@ -156,7 +156,7 @@ func TestDARelayPeerQuotaKeyPreventsPortHopping(t *testing.T) {
 		secondID := daRelayTestID(44)
 
 		record := mustAddDACommit(t, state, "127.0.0.1", daRelayTestCommit(firstID, 2, 6))
-		_, err := state.addDACommit("127.0.0.1", daRelayTestCommit(secondID, 2, 5))
+		err := state.addDACommit("127.0.0.1", daRelayTestCommit(secondID, 2, 5))
 		requireDAErr(t, err, errDARelayOrphanPeerCapExceeded)
 
 		requirePortHopRejectedWithoutMutation(t, state, secondID, record.wireBytes)
@@ -186,7 +186,7 @@ func TestDARelayEmptyPeerQuotaKeyIsCapped(t *testing.T) {
 		secondID := daRelayTestID(46)
 
 		record := mustAddDAChunk(t, state, "", daRelayTestChunk(firstID, 0, 6))
-		_, err := state.addDAChunk("", daRelayTestChunk(secondID, 0, 5))
+		err := state.addDAChunk("", daRelayTestChunk(secondID, 0, 5))
 		requireDAErr(t, err, errDARelayOrphanPeerCapExceeded)
 
 		if got := state.orphanBytesForPeerQuotaKey(""); got != record.wireBytes {
@@ -205,7 +205,7 @@ func TestDARelayEmptyPeerQuotaKeyIsCapped(t *testing.T) {
 		secondID := daRelayTestID(48)
 
 		record := mustAddDACommit(t, state, "", daRelayTestCommit(firstID, 2, 6))
-		_, err := state.addDACommit("", daRelayTestCommit(secondID, 2, 5))
+		err := state.addDACommit("", daRelayTestCommit(secondID, 2, 5))
 		requireDAErr(t, err, errDARelayOrphanPeerCapExceeded)
 
 		if got := state.orphanBytesForPeerQuotaKey(""); got != record.wireBytes {
@@ -398,7 +398,7 @@ func TestDARelayRejectsStagedIndexAndCapFailuresBeforeMutation(t *testing.T) {
 		caps := defaultDARelayCaps()
 		tt.patch(&caps)
 		state := newDARelayStateForTest(t, caps)
-		_, err := state.addDAChunk("peer-a", daRelayTestChunk(daID, 0, 5))
+		err := state.addDAChunk("peer-a", daRelayTestChunk(daID, 0, 5))
 		requireDAErr(t, err, tt.want)
 		if len(state.sets) != 0 || state.orphanBytes != 0 {
 			t.Fatalf("rejection mutated state: sets=%d orphan=%d", len(state.sets), state.orphanBytes)
@@ -407,13 +407,13 @@ func TestDARelayRejectsStagedIndexAndCapFailuresBeforeMutation(t *testing.T) {
 
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 	mustAddDACommit(t, state, "peer-a", daRelayTestCommit(daID, 1, 1))
-	_, err := state.addDAChunk("peer-a", daRelayTestChunk(daID, 1, 1))
+	err := state.addDAChunk("peer-a", daRelayTestChunk(daID, 1, 1))
 	requireDAErr(t, err, errDARelayChunkIndexOutsideCommit)
-	_, err = state.addDACommit("peer-a", daRelayTestCommit(daID, 0, 1))
+	err = state.addDACommit("peer-a", daRelayTestCommit(daID, 0, 1))
 	requireDAErr(t, err, errDARelayChunkCountInvalid)
-	_, err = state.addDACommit("peer-a", daRelayTestCommit(daID, uint16(consensus.MAX_DA_CHUNK_COUNT+1), 1))
+	err = state.addDACommit("peer-a", daRelayTestCommit(daID, uint16(consensus.MAX_DA_CHUNK_COUNT+1), 1))
 	requireDAErr(t, err, errDARelayChunkCountInvalid)
-	_, err = state.addDAChunk("peer-a", daRelayTestChunk(daID, uint16(consensus.MAX_DA_CHUNK_COUNT), 1))
+	err = state.addDAChunk("peer-a", daRelayTestChunk(daID, uint16(consensus.MAX_DA_CHUNK_COUNT), 1))
 	requireDAErr(t, err, errDARelayChunkIndexOutOfRange)
 
 	caps := defaultDARelayCaps()
@@ -421,12 +421,12 @@ func TestDARelayRejectsStagedIndexAndCapFailuresBeforeMutation(t *testing.T) {
 	caps.orphanPoolPerDAIDBytes = ^uint64(0)
 	overflowState := newDARelayStateForTest(t, caps)
 	mustAddDAChunk(t, overflowState, "peer-a", daRelayTestChunk(daID, 0, ^uint64(0)))
-	_, err = overflowState.addDACommit("peer-a", daRelayTestCommit(daID, 2, 1))
+	err = overflowState.addDACommit("peer-a", daRelayTestCommit(daID, 2, 1))
 	requireDAErr(t, err, errDARelayArithmeticOverflow)
 
 	chunkOnlyOverflowState := newDARelayStateForTest(t, caps)
 	mustAddDAChunk(t, chunkOnlyOverflowState, "peer-a", daRelayTestChunk(daID, 0, ^uint64(0)))
-	_, err = chunkOnlyOverflowState.addDAChunk("peer-a", daRelayTestChunk(daID, 1, 1))
+	err = chunkOnlyOverflowState.addDAChunk("peer-a", daRelayTestChunk(daID, 1, 1))
 	requireDAErr(t, err, errDARelayArithmeticOverflow)
 	if len(chunkOnlyOverflowState.sets[daID].chunks) != 1 {
 		t.Fatalf("chunk overflow mutated chunk set: got %d chunks", len(chunkOnlyOverflowState.sets[daID].chunks))
@@ -552,7 +552,7 @@ func TestDARelayCompletionIgnoresTransientOrphanCapsForRetainedTxBytes(t *testin
 		commitTx := []byte("retained-commit-tx")
 		mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 0, 2, payload))
 
-		_, err := state.addDACommit("peer-b", daRelayTestCommitWithTxBytes(daID, 1, commitTx, payload))
+		err := state.addDACommit("peer-b", daRelayTestCommitWithTxBytes(daID, 1, commitTx, payload))
 		requireDAErr(t, err, errDARelayPinnedPayloadCapExceeded)
 		commitTx[0] = 'X'
 		stored := state.sets[daID]
@@ -570,7 +570,7 @@ func TestDARelayCompletionIgnoresTransientOrphanCapsForRetainedTxBytes(t *testin
 		chunkTx := []byte("retained-chunk-tx")
 		mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, 1, payload))
 
-		_, err := state.addDAChunk("peer-b", daRelayTestChunkWithTxBytes(daID, 0, 2, chunkTx, payload))
+		err := state.addDAChunk("peer-b", daRelayTestChunkWithTxBytes(daID, 0, 2, chunkTx, payload))
 		requireDAErr(t, err, errDARelayPinnedPayloadCapExceeded)
 		chunkTx[0] = 'X'
 		stored := state.sets[daID]
@@ -584,9 +584,9 @@ func TestDARelayRejectsZeroWireBytesBeforeMutation(t *testing.T) {
 	daID := daRelayTestID(3)
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 
-	_, err := state.addDACommit("peer-a", daRelayTestCommit(daID, 1, 0))
+	err := state.addDACommit("peer-a", daRelayTestCommit(daID, 1, 0))
 	requireDAErr(t, err, errDARelayWireBytesInvalid)
-	_, err = state.addDAChunk("peer-a", daRelayTestChunk(daID, 0, 0))
+	err = state.addDAChunk("peer-a", daRelayTestChunk(daID, 0, 0))
 	requireDAErr(t, err, errDARelayWireBytesInvalid)
 
 	if len(state.sets) != 0 || state.orphanBytes != 0 || state.orphanCommitOverheadBytes != 0 {
@@ -598,7 +598,7 @@ func TestDARelayRejectsReceivedTimeOverflowBeforeMutation(t *testing.T) {
 	chunkState := newDARelayStateForTest(t, defaultDARelayCaps())
 	chunkState.nextReceivedTime = ^uint64(0)
 	chunkID := daRelayTestID(49)
-	_, err := chunkState.addDAChunk("peer-a", daRelayTestChunk(chunkID, 0, 1))
+	err := chunkState.addDAChunk("peer-a", daRelayTestChunk(chunkID, 0, 1))
 	requireDAErr(t, err, errDARelayArithmeticOverflow)
 	if len(chunkState.sets) != 0 || chunkState.nextReceivedTime != ^uint64(0) {
 		t.Fatalf("chunk time overflow mutated state: sets=%d time=%d", len(chunkState.sets), chunkState.nextReceivedTime)
@@ -607,7 +607,7 @@ func TestDARelayRejectsReceivedTimeOverflowBeforeMutation(t *testing.T) {
 	commitState := newDARelayStateForTest(t, defaultDARelayCaps())
 	commitState.nextReceivedTime = ^uint64(0)
 	commitID := daRelayTestID(50)
-	_, err = commitState.addDACommit("peer-a", daRelayTestCommit(commitID, 2, 1))
+	err = commitState.addDACommit("peer-a", daRelayTestCommit(commitID, 2, 1))
 	requireDAErr(t, err, errDARelayArithmeticOverflow)
 	if len(commitState.sets) != 0 || commitState.nextReceivedTime != ^uint64(0) {
 		t.Fatalf("commit time overflow mutated state: sets=%d time=%d", len(commitState.sets), commitState.nextReceivedTime)
@@ -619,7 +619,7 @@ func TestDARelayRejectsDuplicatesBeforeMutation(t *testing.T) {
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 
 	record := mustAddDACommit(t, state, "peer-a", daRelayTestCommit(daID, 2, 3))
-	_, err := state.addDACommit("peer-b", daRelayTestCommit(daID, 2, 5))
+	err := state.addDACommit("peer-b", daRelayTestCommit(daID, 2, 5))
 	requireDAErr(t, err, errDARelayDuplicateCommit)
 	if state.sets[daID].commit.wireBytes != record.commit.wireBytes || state.orphanBytes != record.wireBytes {
 		t.Fatalf("duplicate commit mutated state: commit=%d orphan=%d want commit=%d orphan=%d", state.sets[daID].commit.wireBytes, state.orphanBytes, record.commit.wireBytes, record.wireBytes)
@@ -638,7 +638,7 @@ func TestDARelayRejectsDuplicatesBeforeMutation(t *testing.T) {
 	record = mustAddDAChunk(t, state, "peer-c", chunk)
 	duplicateChunk := daRelayTestChunkWithTxBytes(daID, 0, 11, []byte{'d', 1, 'e'}, []byte{1})
 	duplicateChunk.chunkHash[0] ^= 0xff
-	_, err = state.addDAChunk("peer-d", duplicateChunk)
+	err = state.addDAChunk("peer-d", duplicateChunk)
 	requireDAErr(t, err, errDARelayDuplicateChunk)
 	duplicateChunk.txBytes[0] = 'X'
 	wantOrphanBytes := record.wireBytes + uint64(len(chunk.payload))
@@ -660,7 +660,7 @@ func TestDARelayDuplicateCommitAfterOrphanChunksKeepsFirstSeenState(t *testing.T
 	record := mustAddDACommit(t, state, "peer-b", daRelayTestCommitWithTxBytes(daID, 3, []byte("first-commit"), payload0, payload1))
 
 	duplicate := daRelayTestCommitWithTxBytes(daID, 11, []byte("duplicate-commit"), payload0, payload1)
-	_, err := state.addDACommit("peer-c", duplicate)
+	err := state.addDACommit("peer-c", duplicate)
 	requireDAErr(t, err, errDARelayDuplicateCommit)
 	duplicate.txBytes[0] = 'X'
 	stored := state.sets[daID]
@@ -983,7 +983,7 @@ func TestDARelayRejectedCandidatesDoNotMutateStoredChunks(t *testing.T) {
 	mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daID, 0, 1))
 	mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daID, 2, 1))
 	state.caps.orphanCommitOverheadBytes = 1
-	_, err := state.addDACommit("peer-b", daRelayTestCommit(daID, 2, 2))
+	err := state.addDACommit("peer-b", daRelayTestCommit(daID, 2, 2))
 	requireDAErr(t, err, errDARelayOrphanCommitCapExceeded)
 	if _, ok := state.sets[daID].chunks[2]; !ok {
 		t.Fatalf("failed commit pruned stored orphan chunk")
@@ -996,14 +996,14 @@ func TestDARelayRejectedCandidatesDoNotMutateStoredChunks(t *testing.T) {
 	mustAddDACommit(t, state, "peer-a", daRelayTestCommit(daID, 2, 1))
 	state.caps.orphanPoolPerDAIDBytes = state.orphanBytes
 	chunk := daRelayTestChunk(daID, 1, 1)
-	_, err = state.addDAChunk("peer-b", chunk)
+	err = state.addDAChunk("peer-b", chunk)
 	requireDAErr(t, err, errDARelayOrphanDAIDCapExceeded)
 	if _, ok := state.sets[daID].chunks[1]; ok {
 		t.Fatalf("failed chunk insert mutated stored staged record")
 	}
 	chunk.chunkIndex = 2
 	chunk.chunkHash[0] ^= 0xff
-	_, err = state.addDAChunk("peer-b", chunk)
+	err = state.addDAChunk("peer-b", chunk)
 	requireDAErr(t, err, errDARelayChunkIndexOutsideCommit)
 }
 
@@ -1057,7 +1057,7 @@ func TestDARelayCommitCompletesOrphanChunks(t *testing.T) {
 	caps.pinnedPayloadBytes = 1
 	cappedState := newDARelayStateForTest(t, caps)
 	mustAddDAChunk(t, cappedState, "peer-a", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
-	_, err := cappedState.addDACommit("peer-c", daRelayTestCommitForPayloads(daID, 1, payload0))
+	err := cappedState.addDACommit("peer-c", daRelayTestCommitForPayloads(daID, 1, payload0))
 	requireDAErr(t, err, errDARelayPinnedPayloadCapExceeded)
 	if cappedState.sets[daID].commit.chunkCount != 0 || cappedState.pinnedPayloadBytes != 0 {
 		t.Fatalf("pinned cap rejection mutated commit=%d pinned=%d", cappedState.sets[daID].commit.chunkCount, cappedState.pinnedPayloadBytes)
@@ -1217,18 +1217,18 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	requireDAErr(t, ValidateDARelayChunk(DARelayChunk{
 		DAID: daID, ChunkHash: badChunk.chunkHash, Payload: badChunk.payload, WireBytes: badChunk.wireBytes,
 	}), ErrDARelayChunkHashMismatch)
-	_, err := state.addDAChunk("peer-a", badChunk)
+	err := state.addDAChunk("peer-a", badChunk)
 	requireDAErr(t, err, errDARelayChunkHashMismatch)
 	if len(state.sets) != 0 {
 		t.Fatalf("hash mismatch mutated state")
 	}
-	_, err = state.addDAChunk("peer-a", daRelayTestChunkPayload(daID, 0, 1, nil))
+	err = state.addDAChunk("peer-a", daRelayTestChunkPayload(daID, 0, 1, nil))
 	requireDAErr(t, err, errDARelayChunkPayloadSizeInvalid)
-	_, err = state.addDAChunk("peer-a", daRelayTestChunkPayload(daID, 0, 1, make([]byte, consensus.CHUNK_BYTES+1)))
+	err = state.addDAChunk("peer-a", daRelayTestChunkPayload(daID, 0, 1, make([]byte, consensus.CHUNK_BYTES+1)))
 	requireDAErr(t, err, errDARelayChunkPayloadSizeInvalid)
-	_, err = state.addDAChunk("peer-a", daRelayTestChunkPayload(daID, 0, 1, []byte("underreported")))
+	err = state.addDAChunk("peer-a", daRelayTestChunkPayload(daID, 0, 1, []byte("underreported")))
 	requireDAErr(t, err, errDARelayWireBytesInvalid)
-	_, err = state.addDACommit("peer-a", daRelayTestCommit(daID, 1, 0))
+	err = state.addDACommit("peer-a", daRelayTestCommit(daID, 1, 0))
 	requireDAErr(t, err, errDARelayWireBytesInvalid)
 	if len(state.sets) != 0 {
 		t.Fatalf("shape rejection mutated state")
@@ -1238,13 +1238,13 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	payload1 := []byte("payload-b")
 	mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
 	mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1))
-	_, err = state.addDACommit("peer-b", daRelayTestCommitForPayloads(daID, 1, payload1, payload0))
+	err = state.addDACommit("peer-b", daRelayTestCommitForPayloads(daID, 1, payload1, payload0))
 	requireDAErr(t, err, errDARelayPayloadCommitmentMismatch)
 	record := state.sets[daID]
 	if record.state != daRelayStateStagedCommit || record.commit.chunkCount != 2 || len(record.chunks) != 0 || state.orphanBytes != record.wireBytes || state.pinnedPayloadBytes != 0 {
 		t.Fatalf("commitment mismatch failed to preserve first commit cleanly: state=%v commit=%d chunks=%d orphan=%d record=%d pinned=%d", record.state, record.commit.chunkCount, len(record.chunks), state.orphanBytes, record.wireBytes, state.pinnedPayloadBytes)
 	}
-	_, err = state.addDACommit("peer-d", daRelayTestCommitForPayloads(daID, 1, payload0, payload1))
+	err = state.addDACommit("peer-d", daRelayTestCommitForPayloads(daID, 1, payload0, payload1))
 	requireDAErr(t, err, errDARelayDuplicateCommit)
 	record = mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 0, uint64(len(payload1)), payload1))
 	record = mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 1, uint64(len(payload0)), payload0))
@@ -1259,7 +1259,7 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), []byte("payload-x")))
 	mustAddDACommit(t, state, "peer-b", daRelayTestCommitForPayloads(daID, 1, payload0, payload1))
 	beforeMismatchTime := state.nextReceivedTime
-	_, err = state.addDAChunk("peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1))
+	err = state.addDAChunk("peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1))
 	requireDAErr(t, err, errDARelayPayloadCommitmentMismatch)
 	record = state.sets[daID]
 	if _, ok := record.replaceableChunks[0]; ok || len(record.chunks) != 1 || state.pinnedPayloadBytes != 0 {
@@ -1268,13 +1268,13 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	if state.nextReceivedTime != beforeMismatchTime || record.receivedTime != beforeMismatchTime {
 		t.Fatalf("partial chunk mismatch time record=%d state=%d want first-seen %d", record.receivedTime, state.nextReceivedTime, beforeMismatchTime)
 	}
-	_, err = state.addDAChunk("peer-d", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
+	err = state.addDAChunk("peer-d", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
 	requireDAErr(t, err, errDARelayDuplicateChunk)
 
 	state = newDARelayStateForTest(t, defaultDARelayCaps())
 	mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, 1, payload0, payload1))
 	mustAddDAChunk(t, state, "peer-b", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
-	_, err = state.addDAChunk("peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), []byte("payload-x")))
+	err = state.addDAChunk("peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), []byte("payload-x")))
 	requireDAErr(t, err, errDARelayPayloadCommitmentMismatch)
 	if state.sets[daID].state != daRelayStateStagedCommit || len(state.sets[daID].chunks) != 1 || state.pinnedPayloadBytes != 0 {
 		t.Fatalf("chunk mismatch mutated staged chunks: state=%v chunks=%d pinned=%d", state.sets[daID].state, len(state.sets[daID].chunks), state.pinnedPayloadBytes)
@@ -1291,7 +1291,7 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	caps.pinnedPayloadBytes = 1
 	state = newDARelayStateForTest(t, caps)
 	mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, 1, payload0))
-	_, err = state.addDAChunk("peer-b", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
+	err = state.addDAChunk("peer-b", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
 	requireDAErr(t, err, errDARelayPinnedPayloadCapExceeded)
 	if state.sets[daID].state != daRelayStateStagedCommit || len(state.sets[daID].chunks) != 0 || state.pinnedPayloadBytes != 0 {
 		t.Fatalf("pinned cap rejection mutated state: state=%v chunks=%d pinned=%d", state.sets[daID].state, len(state.sets[daID].chunks), state.pinnedPayloadBytes)
@@ -1356,7 +1356,7 @@ func TestDARelayRejectsCompletionOverflowBeforeMutation(t *testing.T) {
 		payload := []byte{1}
 		mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 0, ^uint64(0), payload))
 
-		_, err := state.addDACommit("peer-b", daRelayTestCommitForPayloads(daID, 1, payload))
+		err := state.addDACommit("peer-b", daRelayTestCommitForPayloads(daID, 1, payload))
 		requireDAErr(t, err, errDARelayArithmeticOverflow)
 
 		record := state.sets[daID]
@@ -1371,7 +1371,7 @@ func TestDARelayRejectsCompletionOverflowBeforeMutation(t *testing.T) {
 		payload := []byte{1}
 		mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, ^uint64(0), payload))
 
-		_, err := state.addDAChunk("peer-b", daRelayTestChunkPayload(daID, 0, 1, payload))
+		err := state.addDAChunk("peer-b", daRelayTestChunkPayload(daID, 0, 1, payload))
 		requireDAErr(t, err, errDARelayArithmeticOverflow)
 
 		record := state.sets[daID]
@@ -1391,7 +1391,7 @@ func TestDARelayRejectsMismatchApplyFailureBeforeMutation(t *testing.T) {
 		mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1))
 		state.orphanBytesByPeerQuotaKey["peer-a"] = 0
 
-		_, err := state.addDACommit("peer-b", daRelayTestCommitForPayloads(daID, 1, payload1, payload0))
+		err := state.addDACommit("peer-b", daRelayTestCommitForPayloads(daID, 1, payload1, payload0))
 		requireDAErr(t, err, errDARelayArithmeticOverflow)
 
 		record := state.sets[daID]
@@ -1409,7 +1409,7 @@ func TestDARelayRejectsMismatchApplyFailureBeforeMutation(t *testing.T) {
 		mustAddDAChunk(t, state, "peer-b", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
 		state.orphanBytesByPeerQuotaKey["peer-b"] = 0
 
-		_, err := state.addDAChunk("peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), []byte("wrong")))
+		err := state.addDAChunk("peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), []byte("wrong")))
 		requireDAErr(t, err, errDARelayPayloadCommitmentMismatch)
 
 		record := state.sets[daID]
@@ -1682,7 +1682,7 @@ func TestDARelayPinnedPayloadAccountingUsesPayloadBytesOnly(t *testing.T) {
 		// One byte past the cap is rejected before any record or counter moves.
 		mustAddDACommit(t, state, "peer-c", daRelayTestCommitForPayloads(rejectID, 1, []byte{7}))
 		before := daRelayStateSnapshot(state)
-		_, err := state.addDAChunk("peer-d", daRelayTestChunkPayload(rejectID, 0, 1, []byte{7}))
+		err := state.addDAChunk("peer-d", daRelayTestChunkPayload(rejectID, 0, 1, []byte{7}))
 		requireDAErr(t, err, errDARelayPinnedPayloadCapExceeded)
 		if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, before) {
 			t.Fatalf("rejected admission mutated state: got=%+v want=%+v", got, before)
@@ -1694,7 +1694,7 @@ func TestDARelayPinnedPayloadAccountingUsesPayloadBytesOnly(t *testing.T) {
 		daID := daRelayTestID(120)
 		mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, 2, head, tail))
 		mustAddDAChunk(t, state, "peer-b", daRelayTestChunkPayload(daID, 0, uint64(len(head)), head))
-		_, err := state.addDAChunk("peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(tail)), []byte("ABCDEF")))
+		err := state.addDAChunk("peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(tail)), []byte("ABCDEF")))
 		requireDAErr(t, err, errDARelayPayloadCommitmentMismatch)
 		if state.sets[daID].state != daRelayStateStagedCommit || state.pinnedPayloadBytes != 0 {
 			t.Fatalf("mismatch state=%v pinned=%d, want staged 0", state.sets[daID].state, state.pinnedPayloadBytes)
@@ -1940,7 +1940,7 @@ func requireAddDAChunkErrWithin(t *testing.T, state *DARelayState, peer string, 
 	t.Helper()
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := state.addDAChunk(peer, chunk)
+		err := state.addDAChunk(peer, chunk)
 		errCh <- err
 	}()
 	select {
