@@ -1489,6 +1489,61 @@ func TestDARelayCompletionSnapshotRejectsMismatches(t *testing.T) {
 	}
 }
 
+func TestDARelayCompletionTransitionsRejectStaleSnapshots(t *testing.T) {
+	t.Run("commit last", func(t *testing.T) {
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		daID := daRelayTestID(123)
+		first, second := []byte("first"), []byte("second")
+		mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 0, uint64(len(first)), first))
+		mustAddDAChunk(t, state, "peer-b", daRelayTestChunkPayload(daID, 1, uint64(len(second)), second))
+		commit, txBytesOwned := daRelayTestCommitForPayloads(daID, 1, first, second), false
+
+		_, snapshot, complete, err := state.stageDACommitForCompletion("peer-c", &commit, &txBytesOwned)
+		if err != nil || !complete {
+			t.Fatalf("capture commit-last snapshot complete=%v err=%v", complete, err)
+		}
+		if err := state.ReleasePeerQuotaKey("peer-a"); err != nil {
+			t.Fatalf("release snapshotted chunk: %v", err)
+		}
+		payloadBytes, _ := snapshot.payloadCommitment()
+		_, retry, err := state.completeDACommitSnapshot("peer-c", &commit, &txBytesOwned, snapshot, payloadBytes)
+		if err != nil || !retry {
+			t.Fatalf("stale commit completion retry=%v err=%v, want true nil", retry, err)
+		}
+		record := state.sets[daID]
+		if record.state == daRelayStateCompleteSet || record.commit.chunkCount != 0 || len(record.chunks) != 1 {
+			t.Fatalf("stale commit published record=%+v", record)
+		}
+	})
+
+	t.Run("chunk last", func(t *testing.T) {
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		daID := daRelayTestID(124)
+		first, second := []byte("first"), []byte("second")
+		mustAddDACommit(t, state, "peer-c", daRelayTestCommitForPayloads(daID, 1, first, second))
+		mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 0, uint64(len(first)), first))
+		chunk, txBytesOwned := daRelayTestChunkPayload(daID, 1, uint64(len(second)), second), false
+		payload := cloneBytes(chunk.payload)
+
+		_, snapshot, complete, err := state.stageDAChunkForCompletion("peer-b", &chunk, payload, &txBytesOwned)
+		if err != nil || !complete {
+			t.Fatalf("capture chunk-last snapshot complete=%v err=%v", complete, err)
+		}
+		if err := state.ReleasePeerQuotaKey("peer-a"); err != nil {
+			t.Fatalf("release snapshotted chunk: %v", err)
+		}
+		payloadBytes, _ := snapshot.payloadCommitment()
+		_, retry, err := state.completeDAChunkSnapshot("peer-b", &chunk, payload, &txBytesOwned, snapshot, payloadBytes)
+		if err != nil || !retry {
+			t.Fatalf("stale chunk completion retry=%v err=%v, want true nil", retry, err)
+		}
+		record := state.sets[daID]
+		if record.state != daRelayStateStagedCommit || record.commit.chunkCount != 2 || len(record.chunks) != 0 {
+			t.Fatalf("stale chunk published record=%+v", record)
+		}
+	})
+}
+
 func TestDARelayMarkMatchingChunksRejectsNoopSnapshots(t *testing.T) {
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 	daID := daRelayTestID(62)
