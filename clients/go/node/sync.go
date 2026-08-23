@@ -109,6 +109,8 @@ type SyncEngine struct {
 	chainState         *ChainState
 	blockStore         *BlockStore
 	mempool            *Mempool
+	daRelay            *DARelayState
+	daRelayClaimed     bool
 	cfg                SyncConfig
 	stderr             io.Writer
 	mu                 sync.RWMutex
@@ -518,6 +520,34 @@ func (s *SyncEngine) SetMempool(mempool *Mempool) {
 	}
 }
 
+// DARelayState returns the read-only relay-state pointer bound with the
+// engine's initial mempool. It never consumes the lifetime Service claim.
+func (s *SyncEngine) DARelayState() *DARelayState {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.daRelay
+}
+
+// ClaimDARelayState atomically returns the sole lifetime Service claim.
+func (s *SyncEngine) ClaimDARelayState() (*DARelayState, error) {
+	if s == nil {
+		return nil, errors.New("sync engine DA relay state is not initialized")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.daRelay == nil {
+		return nil, errors.New("sync engine DA relay state is not initialized")
+	}
+	if s.daRelayClaimed {
+		return nil, errors.New("sync engine DA relay state is already claimed")
+	}
+	s.daRelayClaimed = true
+	return s.daRelay, nil
+}
+
 // bindMempoolUnderMutation performs the initialization-only binding under the
 // caller's mutationMu, holding the live admission guard EXCLUSIVELY and
 // CONTINUOUSLY from the live tip read through the install. Lock order is
@@ -592,6 +622,25 @@ func (s *SyncEngine) installInitialMempool(mempool *Mempool, admission PendingOu
 	owner := mempool.pendingOutpointOwnerLocked()
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
+	if err := checkInitialMempoolOwnerLocked(owner, admission); err != nil {
+		return err
+	}
+	daRelay, err := newDARelayState(mempool, defaultDARelayCaps())
+	if err != nil {
+		return err
+	}
+	if mempool.policy.RotationProvider == nil {
+		mempool.policy.RotationProvider = s.cfg.RotationProvider
+	}
+	if mempool.policy.SuiteRegistry == nil {
+		mempool.policy.SuiteRegistry = s.cfg.SuiteRegistry
+	}
+	s.mempool = mempool
+	s.daRelay = daRelay
+	return nil
+}
+
+func checkInitialMempoolOwnerLocked(owner *PendingOutpointOwner, admission PendingOutpointAdmissionContext) error {
 	if err := owner.checkNoClaimsLocked(); err != nil {
 		return err
 	}
@@ -601,13 +650,6 @@ func (s *SyncEngine) installInitialMempool(mempool *Mempool, admission PendingOu
 	if current, ok := owner.admissionContextLocked(); !ok || current != admission {
 		return errors.New("mempool candidate admission context moved during binding")
 	}
-	if mempool.policy.RotationProvider == nil {
-		mempool.policy.RotationProvider = s.cfg.RotationProvider
-	}
-	if mempool.policy.SuiteRegistry == nil {
-		mempool.policy.SuiteRegistry = s.cfg.SuiteRegistry
-	}
-	s.mempool = mempool
 	return nil
 }
 

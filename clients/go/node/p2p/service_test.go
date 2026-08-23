@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"context"
+	"crypto/sha3"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -24,8 +25,56 @@ type testHarness struct {
 	blockStore  *node.BlockStore
 	syncCfg     node.SyncConfig
 	syncEngine  *node.SyncEngine
+	mempool     *node.Mempool
 	service     *Service
 	timestamp   uint64
+}
+
+func unclaimedServiceConfig(t *testing.T) ServiceConfig {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	engine, err := node.NewSyncEngine(h.chainState, h.blockStore, h.syncCfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	mempool, err := node.NewMempool(h.chainState, h.blockStore, node.DevnetGenesisChainID())
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	engine.SetMempool(mempool)
+	cfg := h.service.cfg
+	cfg.SyncEngine = engine
+	return cfg
+}
+
+func TestNewServiceCloseDoesNotReleaseEngineClaim(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	want := h.syncEngine.DARelayState()
+	if want == nil || h.service.daRelay != want {
+		t.Fatalf("first service relay=%p engine relay=%p", h.service.daRelay, want)
+	}
+	if err := h.service.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := NewService(h.service.cfg); err == nil || err.Error() != "sync engine DA relay state is already claimed" {
+		t.Fatalf("NewService after Close: %v", err)
+	}
+}
+
+func TestNewServiceRejectsUninitializedEngineAfterConfigValidation(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	uninitialized, err := node.NewSyncEngine(h.chainState, h.blockStore, h.syncCfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	cfg := h.service.cfg
+	cfg.SyncEngine = uninitialized
+	if _, err := NewService(cfg); err == nil || err.Error() != "sync engine DA relay state is not initialized" {
+		t.Fatalf("uninitialized engine error=%v", err)
+	}
+	cfg.TxMetadataFunc = nil
+	if _, err := NewService(cfg); err == nil || !strings.Contains(err.Error(), "tx metadata") {
+		t.Fatalf("pre-existing config error lost priority: %v", err)
+	}
 }
 
 func TestHandshakeValid(t *testing.T) {
@@ -284,219 +333,108 @@ func TestOrphanResolution(t *testing.T) {
 	assertHarnessTip(t, sink, 2, height2Hash)
 }
 
-func TestAcceptedBlockKeepsResolvingOrphansWhenDATTLExpiryFails(t *testing.T) {
+func TestProcessRelayedBlockAdvancesDARelayTTL(t *testing.T) {
 	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
-	sink.service.daRelay = newDARelayStateForTest(t, defaultDARelayCaps())
-	overflowID := daRelayTestID(102)
-	overflowRecord := daRelayOverflowOrphanAccountingRecord(overflowID)
-	overflowRecord.ttlBlocksRemaining = 2
-	sink.service.daRelay.sets[overflowID] = overflowRecord
-	sink.service.daRelay.orphanBytesByDAID[overflowID] = overflowRecord.wireBytes
-
-	genesisBytes := node.DevnetGenesisBlockBytes()
-	_, block1Bytes := testHarnessBlockAtHeight(t, source, 1)
-	height2Hash, block2Bytes := testHarnessBlockAtHeight(t, source, 2)
-	peer := testPeerForService(sink.service, "remote", 2)
-
-	assertRelayedBlockIsOrphan(t, peer, block2Bytes, "block2")
-	assertRelayedBlockIsOrphan(t, peer, block1Bytes, "block1")
-	summary, err := peer.processRelayedBlock(genesisBytes)
-	if err != nil {
-		t.Fatalf("processRelayedBlock(genesis): %v", err)
-	}
-	if summary == nil || summary.BlockHeight != 0 {
-		t.Fatalf("genesis summary=%v, want height 0", summary)
-	}
-	if peer.snapshotState().LastError == "" {
-		t.Fatalf("expected DA TTL cleanup error to be recorded")
-	}
-	assertOrphanPoolLen(t, sink.service, 0)
-	assertHarnessTip(t, sink, 2, height2Hash)
-}
-
-func TestProcessRelayedBlockAdvancesDARelayTTL(t *testing.T) {
-	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	sink.service.cfg.EnableCompactReceive = true
 	sink.service.cfg.Now = func() time.Time { return time.Unix(0, 0) }
-	caps := defaultDARelayCaps()
-	caps.orphanTTLBlocks = 1
-	sink.service.daRelay = newDARelayStateForTest(t, caps)
-
-	daID := daRelayTestID(100)
-	mustAddDAChunk(t, sink.service.daRelay, "peer-a", daRelayTestChunk(daID, 0, 7))
-	if got := sink.service.daRelay.orphanBytes; got == 0 {
-		t.Fatalf("orphanBytes=%d, want staged orphan bytes before block accept", got)
-	}
-	relayObservedOrphan := false
-	destination := testPeerForService(sink.service, "ttl-order-destination", 0)
+	chunk := stageOrphanQuotaBoundary(t, sink.service, 100)
+	observed := false
+	destination := testPeerForService(sink.service, "ttl-destination", 0)
 	destination.conn = &scriptedConn{writeHook: func(int) {
-		_, relayObservedOrphan = daRelayRecordSnapshot(t, sink.service.daRelay, daID)
+		observed = sink.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk) != nil
 	}}
 	destination.state.HandshakeComplete = true
-	sink.service.peers["ttl-order-destination"] = destination
-
-	peer := testPeerForService(sink.service, "remote", 1)
-	summary, err := peer.processRelayedBlock(node.DevnetGenesisBlockBytes())
-	if err != nil {
-		t.Fatalf("processRelayedBlock(genesis): %v", err)
+	destination.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	sink.service.peers[destination.addr()] = destination
+	peer := testPeerForService(sink.service, "remote", 2)
+	for _, block := range [][]byte{node.DevnetGenesisBlockBytes(), blockAtHeight(t, source, 1), blockAtHeight(t, source, 2)} {
+		if _, err := peer.processRelayedBlock(block); err != nil {
+			t.Fatalf("process relayed block: %v", err)
+		}
 	}
-	if summary == nil || summary.BlockHeight != 0 {
-		t.Fatalf("summary=%v, want height 0", summary)
+	if !observed {
+		t.Fatal("relay did not observe the orphan before TTL expiry")
 	}
-	if !relayObservedOrphan {
-		t.Fatal("block relay did not observe the DA orphan before TTL expiry")
-	}
-	if _, ok := sink.service.daRelay.sets[daID]; ok {
-		t.Fatalf("DA set %x still present after accepted block TTL expiry", daID)
-	}
-	if got := sink.service.daRelay.orphanBytes; got != 0 {
-		t.Fatalf("orphanBytes=%d, want 0 after accepted block TTL expiry", got)
-	}
-	if got := sink.service.daRelay.orphanBytesForPeer("peer-a"); got != 0 {
-		t.Fatalf("orphanBytesForPeer(peer-a)=%d, want 0", got)
-	}
-	if got := sink.service.daRelay.orphanBytesForDAID(daID); got != 0 {
-		t.Fatalf("orphanBytesForDAID=%d, want 0", got)
+	if err := sink.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk); err != nil {
+		t.Fatalf("expired orphan was retained: %v", err)
 	}
 }
 
 func TestAnnounceBlockAdvancesDARelayTTL(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	caps := defaultDARelayCaps()
-	caps.orphanTTLBlocks = 1
-	h.service.daRelay = newDARelayStateForTest(t, caps)
-
-	daID := daRelayTestID(101)
-	mustAddDAChunk(t, h.service.daRelay, "peer-a", daRelayTestChunk(daID, 0, 7))
-	blockBytes := h.mineNextBlockBytes(t)
-	if err := h.service.AnnounceBlock(blockBytes); err != nil {
-		t.Fatalf("AnnounceBlock: %v", err)
+	chunk := stageOrphanQuotaBoundary(t, h.service, 101)
+	for range 3 {
+		if err := h.service.AnnounceBlock(h.mineNextBlockBytes(t)); err != nil {
+			t.Fatalf("AnnounceBlock: %v", err)
+		}
 	}
-	if _, ok := h.service.daRelay.sets[daID]; ok {
-		t.Fatalf("DA set %x still present after local block announce TTL expiry", daID)
-	}
-	if got := h.service.daRelay.orphanBytes; got != 0 {
-		t.Fatalf("orphanBytes=%d, want 0 after local block announce TTL expiry", got)
-	}
-	if got := h.service.daRelay.orphanBytesForPeer("peer-a"); got != 0 {
-		t.Fatalf("orphanBytesForPeer(peer-a)=%d, want 0", got)
-	}
-	if got := h.service.daRelay.orphanBytesForDAID(daID); got != 0 {
-		t.Fatalf("orphanBytesForDAID=%d, want 0", got)
+	if err := h.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk); err != nil {
+		t.Fatalf("expired local orphan was retained: %v", err)
 	}
 }
 
 func TestUnregisterPeerReleasesDAChunkPeerAccountingAndDropsOwnedChunk(t *testing.T) {
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
-	caps := defaultDARelayCaps()
-	caps.orphanPoolPerPeerBytes = 10
-	h.service.daRelay = newDARelayStateForTest(t, caps)
-	daID := daRelayTestID(106)
-	completeID := daRelayTestID(111)
-	payload := []byte("complete-payload")
-	mustAddDAChunk(t, h.service.daRelay, "127.0.0.1:19111", daRelayTestChunk(daID, 0, 7))
-	mustAddDACommit(t, h.service.daRelay, "127.0.0.1:19111", daRelayTestCommitForPayloads(completeID, 3, payload))
-	complete := mustAddDAChunk(t, h.service.daRelay, "127.0.0.1:19111", daRelayTestChunkPayload(completeID, 0, uint64(len(payload)), payload))
-	if complete.state != daRelayStateCompleteSet || h.service.daRelay.pinnedPayloadBytes == 0 {
-		t.Fatalf("setup complete state=%v pinned=%d", complete.state, h.service.daRelay.pinnedPayloadBytes)
-	}
-	wantPinned := h.service.daRelay.pinnedPayloadBytes
-	peer := &peer{service: h.service, state: node.PeerState{Addr: "127.0.0.1:19111"}}
+	owner := "127.0.0.1:19111"
+	completeID := daRelayTestID(128)
+	stageCompleteDASetForService(t, h.service, completeID, []byte("complete"))
+	chunk := stageOrphanQuotaBoundary(t, h.service, 106)
+	peer := &peer{service: h.service, state: node.PeerState{Addr: owner}}
 	if err := h.service.registerPeer(peer); err != nil {
 		t.Fatalf("register peer: %v", err)
 	}
-
 	h.service.unregisterPeer(peer)
-	if got := h.service.daRelay.orphanBytesForPeer("127.0.0.1:19111"); got != 0 {
-		t.Fatalf("peer orphan bytes after unregister = %d, want 0", got)
+	if err := h.service.daRelay.StageChunk(peerQuotaKey(owner), chunk); err != nil {
+		t.Fatalf("owned orphan was retained: %v", err)
 	}
-	if got := h.service.daRelay.orphanBytes; got != 0 {
-		t.Fatalf("global orphan bytes after unregister = %d, want 0", got)
-	}
-	if got := h.service.daRelay.orphanBytesForDAID(daID); got != 0 {
-		t.Fatalf("da_id orphan bytes after unregister = %d, want 0", got)
-	}
-	if _, ok := h.service.daRelay.sets[daID]; ok {
-		t.Fatalf("DA record %x retained after owner disconnect", daID)
-	}
-	if got := h.service.daRelay.sets[completeID]; got.state != daRelayStateCompleteSet || h.service.daRelay.pinnedPayloadBytes != wantPinned {
-		t.Fatalf("complete set after unregister state=%v pinned=%d want %d", got.state, h.service.daRelay.pinnedPayloadBytes, wantPinned)
+	if candidates := h.service.CompleteDASetCandidates(^uint64(0)); len(candidates) != 1 || candidates[0].DAID != completeID {
+		t.Fatalf("complete candidates=%+v", candidates)
 	}
 }
 
 func TestUnregisterPeerReleasesDACommitPeerAccountingAndPreservesOtherChunks(t *testing.T) {
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
-	caps := defaultDARelayCaps()
-	caps.orphanPoolPerPeerBytes = 10
-	h.service.daRelay = newDARelayStateForTest(t, caps)
+	owner, other := "127.0.0.1:19111", "127.0.0.2:19112"
 	daID := daRelayTestID(109)
-	otherChunk := mustAddDAChunk(t, h.service.daRelay, "127.0.0.2:19112", daRelayTestChunk(daID, 0, 3))
-	mustAddDACommit(t, h.service.daRelay, "127.0.0.1:19111", daRelayTestCommit(daID, 2, 7))
-	peer := &peer{service: h.service, state: node.PeerState{Addr: "127.0.0.1:19111"}}
+	const quotaUnit = uint64(4 << 20)
+	for i := byte(0); i < 13; i++ {
+		stageOrphanDAChunk(t, h.service, daRelayTestID(120+i), fmt.Sprintf("127.0.2.%d:19111", i+1), quotaUnit)
+	}
+	chunk := stageOrphanDAChunk(t, h.service, daID, other, quotaUnit)
+	if err := h.service.daRelay.StageCommit(peerQuotaKey(owner), node.DARelayCommit{DAID: daID, ChunkCount: 2, WireBytes: quotaUnit}); err != nil {
+		t.Fatalf("StageCommit: %v", err)
+	}
+	peer := &peer{service: h.service, state: node.PeerState{Addr: owner}}
 	if err := h.service.registerPeer(peer); err != nil {
 		t.Fatalf("register peer: %v", err)
 	}
-
 	h.service.unregisterPeer(peer)
-	if got := h.service.daRelay.orphanBytesForPeer("127.0.0.1:19111"); got != 0 {
-		t.Fatalf("peer orphan bytes after unregister = %d, want 0", got)
+	if err := h.service.daRelay.StageChunk(peerQuotaKey(other), chunk); err == nil {
+		t.Fatal("other peer chunk was released")
 	}
-	if got := h.service.daRelay.orphanBytesForPeer("127.0.0.2:19112"); got != otherChunk.wireBytes {
-		t.Fatalf("other peer orphan bytes after unregister = %d, want %d", got, otherChunk.wireBytes)
+	if err := h.service.daRelay.StageCommit(peerQuotaKey(owner), node.DARelayCommit{DAID: daID, ChunkCount: 2, WireBytes: quotaUnit}); err != nil {
+		t.Fatalf("owned commit was retained: %v", err)
 	}
-	if got := h.service.daRelay.orphanBytes; got != otherChunk.wireBytes {
-		t.Fatalf("global orphan bytes after unregister = %d, want %d", got, otherChunk.wireBytes)
-	}
-	if got := h.service.daRelay.orphanBytesForDAID(daID); got != otherChunk.wireBytes {
-		t.Fatalf("da_id orphan bytes after unregister = %d, want %d", got, otherChunk.wireBytes)
-	}
-	if got := h.service.daRelay.orphanCommitOverheadBytes; got != 0 {
-		t.Fatalf("commit overhead after unregister = %d, want 0", got)
-	}
-	gotRecord := h.service.daRelay.sets[daID]
-	if gotRecord.state != daRelayStateOrphanChunks || gotRecord.commit.chunkCount != 0 || len(gotRecord.chunks) != 1 {
-		t.Fatalf("record after unregister state=%v commit_count=%d chunks=%d", gotRecord.state, gotRecord.commit.chunkCount, len(gotRecord.chunks))
-	}
-	if _, ok := gotRecord.chunks[0]; !ok {
-		t.Fatalf("other peer chunk missing after unregister")
+	if err := h.service.daRelay.StageCommit(peerQuotaKey("127.0.0.3:19113"), node.DARelayCommit{DAID: daRelayTestID(110), ChunkCount: 2, WireBytes: quotaUnit}); err != nil {
+		t.Fatalf("commit quota was not reused: %v", err)
 	}
 }
 
 func TestUnregisterPeerKeepsDAAccountingForActiveQuotaKey(t *testing.T) {
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
-	h.service.daRelay = newDARelayStateForTest(t, defaultDARelayCaps())
-	daID := daRelayTestID(107)
-	record := mustAddDAChunk(t, h.service.daRelay, "127.0.0.1:19112", daRelayTestChunk(daID, 0, 9))
-	oldPeer := &peer{service: h.service, state: node.PeerState{Addr: "127.0.0.1:19111"}}
-	newPeer := &peer{service: h.service, state: node.PeerState{Addr: "127.0.0.1:19112"}}
-	if err := h.service.registerPeer(oldPeer); err != nil {
-		t.Fatalf("register old peer: %v", err)
+	oldAddr, activeAddr := "127.0.0.1:19111", "127.0.0.1:19112"
+	chunk := stageOrphanDAChunk(t, h.service, daRelayTestID(107), activeAddr)
+	oldPeer := &peer{service: h.service, state: node.PeerState{Addr: oldAddr}}
+	activePeer := &peer{service: h.service, state: node.PeerState{Addr: activeAddr}}
+	for _, peer := range []*peer{oldPeer, activePeer} {
+		if err := h.service.registerPeer(peer); err != nil {
+			t.Fatalf("register peer: %v", err)
+		}
 	}
-	unlockQuota := h.service.lockPeerQuotaKey(peerQuotaKey(newPeer.addr()))
-	registered := make(chan error, 1)
-	go func() { registered <- h.service.registerPeer(newPeer) }()
-	waitForPeerQuotaLockRefs(t, h.service, peerQuotaKey(newPeer.addr()), 2)
-	select {
-	case err := <-registered:
-		unlockQuota()
-		t.Fatalf("register new peer completed while quota locked: %v", err)
-	default:
-	}
-	if got := h.service.cfg.PeerManager.Count(); got != 1 {
-		unlockQuota()
-		t.Fatalf("peer manager count while quota locked = %d, want 1", got)
-	}
-	unlockQuota()
-	if err := <-registered; err != nil {
-		t.Fatalf("register new peer: %v", err)
-	}
-
 	h.service.unregisterPeer(oldPeer)
-	if got := h.service.daRelay.orphanBytesForPeer("127.0.0.1:19112"); got != record.wireBytes {
-		t.Fatalf("active quota key orphan bytes = %d, want %d", got, record.wireBytes)
-	}
-	if got := h.service.peers["127.0.0.1:19112"]; got != newPeer {
-		t.Fatalf("active peer was not retained")
+	if err := h.service.daRelay.StageChunk(peerQuotaKey(activeAddr), chunk); err == nil {
+		t.Fatal("active quota key released retained chunk")
 	}
 }
 
@@ -504,44 +442,78 @@ func TestUnregisterPeerHoldsQuotaLockThroughPeerManagerRemoval(t *testing.T) {
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	runtimeCfg := node.DefaultPeerRuntimeConfig("devnet", 1)
 	h.peerManager = node.NewPeerManager(runtimeCfg)
-	h.service.cfg.PeerManager = h.peerManager
-	h.service.cfg.PeerRuntimeConfig = runtimeCfg
-	h.service.daRelay = newDARelayStateForTest(t, defaultDARelayCaps())
-	daID := daRelayTestID(112)
+	h.service.cfg.PeerManager, h.service.cfg.PeerRuntimeConfig = h.peerManager, runtimeCfg
 	oldPeer := &peer{service: h.service, state: node.PeerState{Addr: "127.0.0.1:19111"}}
 	newPeer := &peer{service: h.service, state: node.PeerState{Addr: "127.0.0.1:19112"}}
 	if err := h.service.registerPeer(oldPeer); err != nil {
 		t.Fatalf("register old peer: %v", err)
 	}
-	mustAddDAChunk(t, h.service.daRelay, oldPeer.addr(), daRelayTestChunk(daID, 0, 9))
-
-	h.service.daRelay.mu.Lock()
+	chunk := stageOrphanDAChunk(t, h.service, daRelayTestID(112), oldPeer.addr(), 4<<20)
+	key := peerQuotaKey(oldPeer.addr())
+	unlock := h.service.lockPeerQuotaKey(key)
 	unregistered := make(chan struct{})
-	go func() {
-		h.service.unregisterPeer(oldPeer)
-		close(unregistered)
-	}()
-	waitFor(t, time.Second, func() bool {
-		return h.service.cfg.PeerManager.Count() == 0
-	})
-
+	go func() { h.service.unregisterPeer(oldPeer); close(unregistered) }()
+	waitForPeerQuotaLockRefs(t, h.service, key, 2)
 	registered := make(chan error, 1)
 	go func() { registered <- h.service.registerPeer(newPeer) }()
-	waitForPeerQuotaLockRefs(t, h.service, peerQuotaKey(newPeer.addr()), 2)
+	waitForPeerQuotaLockRefs(t, h.service, key, 3)
 	select {
+	case err := <-unregistered:
+		unlock()
+		t.Fatalf("unregister completed while peers barrier held: %v", err)
 	case err := <-registered:
-		h.service.daRelay.mu.Unlock()
-		t.Fatalf("register new peer completed while unregister held DA relay lock: %v", err)
+		unlock()
+		t.Fatalf("replacement completed while quota locked: %v", err)
 	default:
 	}
-	h.service.daRelay.mu.Unlock()
+	if got := h.service.cfg.PeerManager.Count(); got != 1 {
+		unlock()
+		t.Fatalf("peer manager count while quota locked = %d, want 1", got)
+	}
+	unlock()
 	<-unregistered
 	if err := <-registered; err != nil {
-		t.Fatalf("register new peer: %v", err)
+		if err.Error() != "max peers reached" || h.service.registerPeer(newPeer) != nil {
+			t.Fatalf("replacement register: %v", err)
+		}
 	}
-	if got := h.service.cfg.PeerManager.Count(); got != 1 {
-		t.Fatalf("peer manager count after replacement register = %d, want 1", got)
+	if err := h.service.daRelay.StageChunk(key, chunk); err != nil {
+		t.Fatalf("cleanup raced replacement: %v", err)
 	}
+}
+
+func blockAtHeight(t *testing.T, h *testHarness, height uint64) []byte {
+	_, block := testHarnessBlockAtHeight(t, h, height)
+	return block
+}
+
+func stageOrphanDAChunk(t *testing.T, svc *Service, daID [32]byte, peerAddr string, wireBytes ...uint64) node.DARelayChunk {
+	payload := []byte{daID[0]}
+	wireBytesValue := uint64(len(payload))
+	if len(wireBytes) != 0 {
+		wireBytesValue = wireBytes[0]
+	}
+	chunk := node.DARelayChunk{DAID: daID, ChunkHash: sha3.Sum256(payload), Payload: payload, WireBytes: wireBytesValue}
+	if err := svc.daRelay.StageChunk(peerQuotaKey(peerAddr), chunk); err != nil {
+		t.Fatalf("StageChunk: %v", err)
+	}
+	return chunk
+}
+
+func stageOrphanQuotaBoundary(t *testing.T, svc *Service, seed byte) (first node.DARelayChunk) {
+	for i := byte(0); i < 8; i++ {
+		id := daRelayTestID(seed + i)
+		chunk := stageOrphanDAChunk(t, svc, id, fmt.Sprintf("127.0.0.%d:19111", i+1), 4<<20)
+		if i == 0 {
+			first = chunk
+		}
+		payload := []byte{seed + i, 1}
+		next := node.DARelayChunk{DAID: id, ChunkHash: sha3.Sum256(payload), ChunkIndex: 1, Payload: payload, WireBytes: 4 << 20}
+		if err := svc.daRelay.StageChunk(peerQuotaKey(fmt.Sprintf("127.0.1.%d:19111", i+1)), next); err != nil {
+			t.Fatalf("StageChunk: %v", err)
+		}
+	}
+	return first
 }
 
 func TestLockPeerQuotaKeyInitializesNilMap(t *testing.T) {
@@ -950,6 +922,15 @@ func newTestHarness(t *testing.T, blockCount int, bindAddr string, bootstrapPeer
 	for i := 1; i < blockCount; i++ {
 		_ = h.mineNextBlockBytes(t)
 	}
+	mempool, err := node.NewMempool(chainState, blockStore, node.DevnetGenesisChainID())
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	syncEngine.SetMempool(mempool)
+	if syncEngine.DARelayState() == nil {
+		t.Fatal("SetMempool did not initialize DA relay state")
+	}
+	h.mempool = mempool
 
 	runtimeCfg := node.DefaultPeerRuntimeConfig("devnet", 8)
 	runtimeCfg.ReadDeadline = time.Second

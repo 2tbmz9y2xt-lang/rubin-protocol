@@ -1532,6 +1532,7 @@ func (f *pendingOutpointSyncFixture) newPool(t *testing.T) *Mempool {
 // neither the engine binding nor the candidate's owner context.
 func assertBindingRejected(t *testing.T, engine *SyncEngine, candidate, want *Mempool, what string) {
 	t.Helper()
+	stateBefore := engine.DARelayState()
 	var before PendingOutpointAdmissionContext
 	if candidate != nil {
 		before = mustAdmissionContext(t, candidate.PendingOutpointOwner(), "before "+what)
@@ -1539,6 +1540,9 @@ func assertBindingRejected(t *testing.T, engine *SyncEngine, candidate, want *Me
 	engine.SetMempool(candidate)
 	if bound := boundMempool(engine); bound != want {
 		t.Fatalf("%s: engine mempool=%p, want %p", what, bound, want)
+	}
+	if state := engine.DARelayState(); state != stateBefore {
+		t.Fatalf("%s: engine DA relay=%p, want %p unchanged", what, state, stateBefore)
 	}
 	if candidate == nil {
 		return
@@ -1548,7 +1552,7 @@ func assertBindingRejected(t *testing.T, engine *SyncEngine, candidate, want *Me
 	}
 }
 
-// TestSyncSetMempoolPendingOutpointConstructOnceAndRejectsStaleOrNonemptyBinding
+// TestSetMempoolCoBindsDARelayState
 // proves SetMempool is initialization-only. A transition must own ONE
 // pointer-identical ChainState, Mempool and owner for its whole duration, and a
 // pointer comparison cannot see that a detached pool's records were validated
@@ -1556,9 +1560,16 @@ func assertBindingRejected(t *testing.T, engine *SyncEngine, candidate, want *Me
 // empty candidate at the guarded live tip binds, an exact same-pointer retry is
 // a no-op, and every stale-tip, nonempty, foreign-ChainState, nil-unbind or
 // different-pointer candidate is refused with no mutation on either side.
-func TestSyncSetMempoolPendingOutpointConstructOnceAndRejectsStaleOrNonemptyBinding(t *testing.T) {
+func TestSetMempoolCoBindsDARelayState(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	fixtureContext := mustAdmissionContext(t, f.owner, "on the bound fixture pool")
+	relay := f.engine.DARelayState()
+	if relay == nil {
+		t.Fatal("initial binding did not publish DA relay")
+	}
+	if relay.mempool != f.mempool {
+		t.Fatalf("initial DA relay mempool=%p, want exact pool %p", relay.mempool, f.mempool)
+	}
 
 	// An exact same-pointer rebind is the ONLY accepted post-binding call.
 	f.engine.SetMempool(f.mempool)
@@ -1567,6 +1578,9 @@ func TestSyncSetMempoolPendingOutpointConstructOnceAndRejectsStaleOrNonemptyBind
 	}
 	if got := mustAdmissionContext(t, f.owner, "after the same-pointer rebind"); got != fixtureContext {
 		t.Fatalf("same-pointer rebind moved the context to %+v, want %+v", got, fixtureContext)
+	}
+	if got := f.engine.DARelayState(); got != relay {
+		t.Fatalf("same-pointer rebind replaced DA relay %p with %p", relay, got)
 	}
 	assertBindingRejected(t, f.engine, nil, f.mempool, "nil unbind after the initial binding")
 
@@ -1613,6 +1627,95 @@ func TestSyncSetMempoolPendingOutpointConstructOnceAndRejectsStaleOrNonemptyBind
 	engine.SetMempool(fresh)
 	if bound := boundMempool(engine); bound != fresh || bound.PendingOutpointOwner() != fresh.PendingOutpointOwner() {
 		t.Fatalf("engine mempool=%p, want the fresh current-tip candidate %p", bound, fresh)
+	}
+}
+
+func TestSetMempoolRejectionDoesNotPublishDARelayState(t *testing.T) {
+	TestSetMempoolCoBindsDARelayState(t)
+}
+
+func TestSetMempoolConcurrentCandidatesKeepOneDARelayPair(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	engine := f.unboundEngineOn(t)
+	pools := []*Mempool{f.newPool(t), f.newPool(t)}
+	start, entered, done := make(chan struct{}), make(chan struct{}, 2), make(chan struct{}, 2)
+	engine.mutationMu.Lock()
+	for _, pool := range pools {
+		go func(pool *Mempool) { <-start; entered <- struct{}{}; engine.SetMempool(pool); done <- struct{}{} }(pool)
+	}
+	close(start)
+	for range pools {
+		<-entered
+	}
+	select {
+	case <-done:
+		engine.mutationMu.Unlock()
+		t.Fatal("SetMempool completed while mutation lock was held")
+	default:
+	}
+	engine.mutationMu.Unlock()
+	for range pools {
+		<-done
+	}
+	bound, relay := boundMempool(engine), engine.DARelayState()
+	if (bound != pools[0] && bound != pools[1]) || relay == nil || relay.mempool != bound {
+		t.Fatalf("bound=%p relay=%p relay.mempool=%p", bound, relay, relay.mempool)
+	}
+}
+
+func TestClaimDARelayStateSecondClaimRejected(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	want := f.engine.DARelayState()
+	if got := f.engine.DARelayState(); got != want {
+		t.Fatalf("getter=%p, want %p", got, want)
+	}
+	if got, err := f.engine.ClaimDARelayState(); err != nil || got != want {
+		t.Fatalf("first claim state=%p err=%v, want %p nil", got, err, want)
+	}
+	f.engine.SetMempool(f.mempool)
+	if got, err := f.engine.ClaimDARelayState(); got != nil || err == nil || err.Error() != "sync engine DA relay state is already claimed" {
+		t.Fatalf("second claim state=%p err=%v", got, err)
+	}
+	for _, engine := range []*SyncEngine{nil, {}} {
+		if _, err := engine.ClaimDARelayState(); err == nil || err.Error() != "sync engine DA relay state is not initialized" {
+			t.Fatalf("uninitialized claim: %v", err)
+		}
+	}
+}
+
+func TestClaimDARelayStateConcurrentSingleWinner(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	want := f.engine.DARelayState()
+	type result struct {
+		state *DARelayState
+		err   error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			<-start
+			state, err := f.engine.ClaimDARelayState()
+			results <- result{state, err}
+		}()
+	}
+	close(start)
+	winners := 0
+	for range 2 {
+		result := <-results
+		if result.err == nil {
+			if result.state != want {
+				t.Fatal("wrong winning state")
+			}
+			winners++
+			continue
+		}
+		if result.state != nil || result.err.Error() != "sync engine DA relay state is already claimed" {
+			t.Fatal("wrong losing claim")
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("claim winners=%d, want one", winners)
 	}
 }
 

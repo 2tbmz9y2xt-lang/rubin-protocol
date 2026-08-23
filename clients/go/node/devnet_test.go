@@ -374,8 +374,13 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 		}
 
 		if cNodeDown && wantHeight == restartAt {
-			if err := nodeC.restartWithPeers(ctx, []string{nodeA.service.Addr()}); err != nil {
+			oldEngine, oldMempool, oldPeerManager := nodeC.syncEngine, nodeC.mempool, nodeC.peerManager
+			restartPeers := []string{nodeB.service.Addr(), nodeA.service.Addr()}
+			if err := nodeC.restartWithPeers(ctx, restartPeers); err != nil {
 				t.Fatalf("restart node C at height %d: %v", wantHeight, err)
+			}
+			if nodeC.syncEngine == oldEngine || nodeC.mempool == oldMempool || nodeC.peerManager == oldPeerManager || nodeC.service == nil || strings.Join(nodeC.bootstrapPeers, ",") != strings.Join(restartPeers, ",") {
+				t.Fatal("restart did not replace local state or preserve explicit peers")
 			}
 			// Order: peer link first, then header/block sync. A node
 			// with zero peers cannot make sync progress, so checking
@@ -386,7 +391,7 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 			// instrumentation, which adds ~2-3x overhead on the
 			// 200-block (killAt..restartAt) post-restart sync window.
 			peerConnectStart := time.Now()
-			waitForPeerCountWithTimeout(t, nodeC, 1, 30*time.Second)
+			waitForPeerCountWithTimeout(t, nodeC, len(restartPeers), 30*time.Second)
 			peerConnectElapsed := time.Since(peerConnectStart)
 			// Peer-elapsed is logged BEFORE the sync wait so the
 			// operator sees this number even if the sync wait fatals
@@ -610,17 +615,27 @@ func (n *devnetNode) restartWithPeers(ctx context.Context, peers []string) error
 		restartPeers = append([]string(nil), n.bootstrapPeers...)
 	}
 	n.stop()
-	n.peerManager = node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
-	service, err := newDevnetService(n, n.bindAddr, restartPeers)
+	engine, err := node.NewSyncEngine(n.chainState, n.blockStore, n.syncCfg)
 	if err != nil {
 		return err
 	}
-	n.service = service
-	n.bootstrapPeers = append([]string(nil), restartPeers...)
-	if err := n.service.Start(ctx); err != nil {
-		n.service = nil
+	mempool, err := node.NewMempool(n.chainState, n.blockStore, node.DevnetGenesisChainID())
+	if err != nil {
 		return err
 	}
+	engine.SetMempool(mempool)
+	replacement := *n
+	replacement.syncEngine, replacement.mempool, replacement.peerManager = engine, mempool, node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
+	service, err := newDevnetService(&replacement, n.bindAddr, restartPeers)
+	if err != nil {
+		return err
+	}
+	if err = service.Start(ctx); err != nil {
+		_ = service.Close()
+		return err
+	}
+	n.syncEngine, n.mempool, n.peerManager, n.service = engine, mempool, replacement.peerManager, service
+	n.bootstrapPeers = append([]string(nil), restartPeers...)
 	return nil
 }
 

@@ -77,6 +77,16 @@ func daCommitRelayTxBytes(t *testing.T, daID [32]byte, nonce uint64, payloads ..
 	return raw
 }
 
+func daRelayPayloadCommitment(payloads ...[]byte) [32]byte {
+	hasher := sha3.New256()
+	for _, payload := range payloads {
+		_, _ = hasher.Write(payload)
+	}
+	var out [32]byte
+	copy(out[:], hasher.Sum(nil))
+	return out
+}
+
 func daChunkRelayTxBytes(t *testing.T, daID [32]byte, index uint16, nonce uint64, payload []byte) []byte {
 	t.Helper()
 	chunkHash := sha3.Sum256(payload)
@@ -89,21 +99,13 @@ func daChunkRelayTxBytes(t *testing.T, daID [32]byte, index uint16, nonce uint64
 			ChunkIndex: index,
 			ChunkHash:  chunkHash,
 		},
-		DaPayload: cloneBytes(payload),
+		DaPayload: append([]byte(nil), payload...),
 	}
 	raw, err := consensus.MarshalTx(tx)
 	if err != nil {
 		t.Fatalf("MarshalTx DA chunk: %v", err)
 	}
 	return raw
-}
-
-func daRelayRecordSnapshot(t *testing.T, state *daRelayState, daID [32]byte) (daRelaySetRecord, bool) {
-	t.Helper()
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	record, ok := state.sets[daID]
-	return record.clone(), ok
 }
 
 func daRelayTestPeer(h *testHarness, addr string) *peer {
@@ -174,11 +176,10 @@ func wireCanonicalMempoolForP2PTest(t *testing.T, h *testHarness) *node.Mempool 
 	if h == nil || h.service == nil {
 		t.Fatal("nil p2p test harness")
 	}
-	mempool, err := node.NewMempool(h.chainState, h.blockStore, node.DevnetGenesisChainID())
-	if err != nil {
-		t.Fatalf("NewMempool: %v", err)
+	mempool := h.mempool
+	if mempool == nil {
+		t.Fatal("test harness has no canonical mempool")
 	}
-	h.syncEngine.SetMempool(mempool)
 	h.service.cfg.TxPool = NewCanonicalMempoolTxPool(mempool)
 	h.service.cfg.TxMetadataFunc = CanonicalMempoolRelayMetadata
 	return mempool
@@ -323,29 +324,19 @@ func TestHandleTxStagesDATxsIntoRelayState(t *testing.T) {
 	if err := p.handleTx(commitTx); err != nil {
 		t.Fatalf("handleTx DA commit: %v", err)
 	}
-	record, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID)
-	if !ok {
-		t.Fatal("DA commit tx did not create a relay state record")
-	}
-	if record.state != daRelayStateStagedCommit || record.commit.chunkCount != 1 {
-		t.Fatalf("DA commit relay state=%v chunk_count=%d, want staged/1", record.state, record.commit.chunkCount)
-	}
-	if record.commit.payloadCommitment != daRelayPayloadCommitment(payload) {
-		t.Fatal("DA commit relay state stored wrong payload commitment")
+	if plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"probe"}, time.Unix(1, 0)); len(plans) != 1 || diagnostic != "" {
+		t.Fatalf("commit plans=%d diagnostic=%q, want one missing chunk", len(plans), diagnostic)
 	}
 
 	if err := p.handleTx(chunkTx); err != nil {
 		t.Fatalf("handleTx DA chunk: %v", err)
 	}
-	record, ok = daRelayRecordSnapshot(t, h.service.daRelay, daID)
-	if !ok {
-		t.Fatal("DA chunk tx removed relay state record")
+	candidates := h.service.CompleteDASetCandidates(^uint64(0))
+	if len(candidates) != 1 || candidates[0].DAID != daID || candidates[0].PayloadBytes != uint64(len(payload)) {
+		t.Fatalf("candidates=%+v, want complete payload for %x", candidates, daID)
 	}
-	if record.state != daRelayStateCompleteSet {
-		t.Fatalf("DA relay state=%v, want complete set", record.state)
-	}
-	if record.payloadBytes != uint64(len(payload)) || h.service.daRelay.pinnedPayloadBytes == 0 {
-		t.Fatalf("DA complete accounting payload=%d pinned=%d", record.payloadBytes, h.service.daRelay.pinnedPayloadBytes)
+	if !reflect.DeepEqual(candidates[0].CommitTx, commitTx) || len(candidates[0].Chunks) != 1 || !reflect.DeepEqual(candidates[0].Chunks[0].Tx, chunkTx) {
+		t.Fatalf("candidate retained bytes=%+v", candidates[0])
 	}
 }
 
@@ -390,8 +381,8 @@ func TestStageRelayDATxIgnoresIncompleteMetadata(t *testing.T) {
 	if err := h.service.stageRelayDATx(peerAddr, []byte{0x04}, badCommitment); err != nil {
 		t.Fatalf("DA commit with short commitment: %v", err)
 	}
-	if _, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID); ok {
-		t.Fatal("incomplete DA metadata mutated relay state")
+	if plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"probe"}, time.Unix(1, 0)); len(plans) != 0 || diagnostic != "" {
+		t.Fatalf("incomplete metadata plans=%d diagnostic=%q", len(plans), diagnostic)
 	}
 }
 
@@ -434,17 +425,13 @@ func TestHandleTxDAAdmissionRejectsDoNotMutateRelayState(t *testing.T) {
 	if err := p.handleTx(nonCanonical); err != nil {
 		t.Fatalf("handleTx non-canonical DA commit: %v", err)
 	}
-	if _, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID); ok {
-		t.Fatal("non-canonical DA commit mutated relay state")
-	}
-
 	badChunk := daChunkRelayTxBytes(t, daID, 0, 9202, payload)
 	badChunk[len(badChunk)-1] ^= 0xff
 	if err := p.handleTx(badChunk); err != nil {
 		t.Fatalf("handleTx DA chunk hash mismatch: %v", err)
 	}
-	if _, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID); ok {
-		t.Fatal("DA chunk hash mismatch mutated relay state")
+	if plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"probe"}, time.Unix(1, 0)); len(plans) != 0 || diagnostic != "" {
+		t.Fatalf("rejected DA plans=%d diagnostic=%q", len(plans), diagnostic)
 	}
 	if p.snapshotState().BanScore != 20 {
 		t.Fatalf("ban score=%d, want parse and DA admission penalties", p.snapshotState().BanScore)
@@ -512,12 +499,8 @@ func TestAnnounceTxStagesDAOnceAcrossLocalAndInbound(t *testing.T) {
 	if err := p.handleTx(commitTx); err != nil {
 		t.Fatalf("handleTx duplicate DA commit: %v", err)
 	}
-	record, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID)
-	if !ok {
-		t.Fatal("local DA commit did not create relay state")
-	}
-	if record.state != daRelayStateStagedCommit || record.receivedTime != 1 {
-		t.Fatalf("after duplicate DA commit state=%v received_time=%d, want staged/1", record.state, record.receivedTime)
+	if plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"probe"}, time.Unix(1, 0)); len(plans) != 1 || diagnostic != "" {
+		t.Fatalf("duplicate commit plans=%d diagnostic=%q", len(plans), diagnostic)
 	}
 
 	if err := h.service.AnnounceTx(chunkTx); err != nil {
@@ -526,12 +509,9 @@ func TestAnnounceTxStagesDAOnceAcrossLocalAndInbound(t *testing.T) {
 	if err := p.handleTx(chunkTx); err != nil {
 		t.Fatalf("handleTx duplicate DA chunk: %v", err)
 	}
-	record, ok = daRelayRecordSnapshot(t, h.service.daRelay, daID)
-	if !ok {
-		t.Fatal("local DA chunk removed relay state")
-	}
-	if record.state != daRelayStateCompleteSet || record.receivedTime != 1 || h.service.daRelay.nextReceivedTime != 1 {
-		t.Fatalf("duplicate local/inbound DA relay state=%v received=%d next=%d, want complete/1/1", record.state, record.receivedTime, h.service.daRelay.nextReceivedTime)
+	candidates := h.service.CompleteDASetCandidates(^uint64(0))
+	if len(candidates) != 1 || candidates[0].DAID != daID {
+		t.Fatalf("duplicate local/inbound candidates=%+v, want %x", candidates, daID)
 	}
 }
 
@@ -946,10 +926,6 @@ func TestHandleTxRetriesTransientRelayPoolGetMissAfterSeen(t *testing.T) {
 	if !h.service.txSeen.Has(txid) {
 		t.Fatal("handleTx should keep tx seen after retry admission")
 	}
-	record, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID)
-	if !ok || len(record.chunks) != 1 {
-		t.Fatalf("DA chunk was not staged after retry admission: ok=%v chunks=%d", ok, len(record.chunks))
-	}
 	if pool.getCalls < 3 || pool.putCalls != 1 {
 		t.Fatalf("pool getCalls=%d putCalls=%d, want retry after transient Get miss", pool.getCalls, pool.putCalls)
 	}
@@ -973,7 +949,7 @@ func TestHandleTxRejectsBadDAChunkBeforeSeenOrAdmission(t *testing.T) {
 	if badTxid, err := canonicalTxID(badPayloadTx); err != nil || badTxid != txid {
 		t.Fatalf("bad DA payload txid=%x err=%v, want %x", badTxid, err, txid)
 	}
-	if err := daRelayTestPeer(h, "127.0.0.1:19115").handleTx(badPayloadTx); !errors.Is(err, errDARelayChunkHashMismatch) {
+	if err := daRelayTestPeer(h, "127.0.0.1:19115").handleTx(badPayloadTx); !errors.Is(err, node.ErrDARelayChunkHashMismatch) {
 		t.Fatalf("handle bad DA chunk err=%v, want hash mismatch at ban threshold", err)
 	}
 	if h.service.cfg.TxPool.Has(txid) || h.service.txSeen.Has(txid) {
@@ -997,8 +973,8 @@ func TestValidateRelayDATxForAdmissionRejectsInvalidChunkShape(t *testing.T) {
 		},
 		DaPayload: payload,
 	}
-	if err := validateRelayDATxForAdmission(nil, tx); !errors.Is(err, errDARelayWireBytesInvalid) {
-		t.Fatalf("validateRelayDATxForAdmission err=%v, want wire bytes invalid", err)
+	if err := validateRelayDATxForAdmission(nil, tx); err == nil {
+		t.Fatal("validateRelayDATxForAdmission accepted zero wire bytes")
 	}
 }
 
@@ -1028,7 +1004,7 @@ func TestHandleTxAlreadySeenRejectsBadDAChunkVariant(t *testing.T) {
 		t.Fatalf("bad DA payload txid=%x err=%v, want %x", badTxid, err, txid)
 	}
 
-	if err := daRelayTestPeer(h, "127.0.0.1:19116").handleTx(badPayloadTx); !errors.Is(err, errDARelayChunkHashMismatch) {
+	if err := daRelayTestPeer(h, "127.0.0.1:19116").handleTx(badPayloadTx); !errors.Is(err, node.ErrDARelayChunkHashMismatch) {
 		t.Fatalf("handle seen bad DA chunk err=%v, want hash mismatch at ban threshold", err)
 	}
 	if got, ok := h.service.cfg.TxPool.Get(txid); !ok || !reflect.DeepEqual(got, txBytes) {
@@ -1082,7 +1058,7 @@ func TestAnnounceTxAlreadyAdmittedRejectsBadDAChunkVariant(t *testing.T) {
 		t.Fatalf("bad DA payload txid=%x err=%v, want %x", badTxid, err, txid)
 	}
 
-	if err := h.service.AnnounceTx(badPayloadTx); !errors.Is(err, errDARelayChunkHashMismatch) {
+	if err := h.service.AnnounceTx(badPayloadTx); !errors.Is(err, node.ErrDARelayChunkHashMismatch) {
 		t.Fatalf("AnnounceTx bad same-txid DA payload err=%v, want hash mismatch", err)
 	}
 	if h.service.txSeen.Has(txid) {

@@ -610,6 +610,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	syncEngine.SetMempool(mempool)
+	if syncEngine.DARelayState() == nil {
+		_, _ = fmt.Fprintln(stderr, "DA relay state init failed")
+		return 2
+	}
 	syncEngine.SetStderr(stderr)
 	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig(cfg.Network, cfg.MaxPeers))
 

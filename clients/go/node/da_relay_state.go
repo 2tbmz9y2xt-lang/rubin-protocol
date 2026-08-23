@@ -1,10 +1,9 @@
-package p2p
+package node
 
 import (
 	"bytes"
 	"crypto/sha3"
 	"errors"
-	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -135,6 +134,35 @@ type daRelayPrefetchPlan struct {
 	indexes []uint16
 }
 
+// DARelayPrefetchPlan is one caller-owned request reservation.
+type DARelayPrefetchPlan struct {
+	DAID    [32]byte
+	PeerKey string
+	Indexes []uint16
+}
+
+// DARelayCommit is the retained commit metadata supplied by P2P after peer
+// quota normalization.
+type DARelayCommit struct {
+	DAID              [32]byte
+	PayloadCommitment [32]byte
+	ChunkCount        uint16
+	WireBytes         uint64
+	TxBytes           []byte
+}
+
+// DARelayChunk is one retained chunk supplied by P2P after peer quota
+// normalization.
+type DARelayChunk struct {
+	DAID        [32]byte
+	ChunkHash   [32]byte
+	ChunkIndex  uint16
+	Payload     []byte
+	WireBytes   uint64
+	TxBytes     []byte
+	HashChecked bool
+}
+
 type daRelayCommit struct {
 	daID              [32]byte
 	payloadCommitment [32]byte
@@ -178,12 +206,17 @@ var (
 	errDARelayOrphanPeerCapExceeded     = errors.New("da orphan pool per-peer cap exceeded")
 	errDARelayOrphanDAIDCapExceeded     = errors.New("da orphan pool per-da_id cap exceeded")
 	errDARelayOrphanCommitCapExceeded   = errors.New("da orphan commit overhead cap exceeded")
-	errDARelayChunkHashMismatch         = errors.New("da chunk hash mismatch")
+	ErrDARelayChunkHashMismatch         = errors.New("da chunk hash mismatch")
 	errDARelayChunkPayloadSizeInvalid   = errors.New("da chunk payload size invalid")
-	errDARelayPayloadCommitmentMismatch = errors.New("da payload commitment mismatch")
+	ErrDARelayPayloadCommitmentMismatch = errors.New("da payload commitment mismatch")
 	errDARelayWireBytesInvalid          = errors.New("da relay wire bytes invalid")
 	errDARelayPinnedPayloadCapExceeded  = errors.New("da pinned payload cap exceeded")
 	errDARelayArithmeticOverflow        = errors.New("da relay arithmetic overflow")
+)
+
+var (
+	errDARelayChunkHashMismatch         = ErrDARelayChunkHashMismatch
+	errDARelayPayloadCommitmentMismatch = ErrDARelayPayloadCommitmentMismatch
 )
 
 type daRelayRecordAccounting struct {
@@ -192,8 +225,9 @@ type daRelayRecordAccounting struct {
 	peerBytes   map[string]uint64
 }
 
-type daRelayState struct {
+type DARelayState struct {
 	mu                        sync.Mutex
+	mempool                   *Mempool
 	caps                      daRelayCaps
 	prefetch                  daRelayPrefetchState
 	nextReceivedTime          uint64
@@ -205,11 +239,12 @@ type daRelayState struct {
 	sets                      map[[32]byte]daRelaySetRecord
 }
 
-func newDARelayState(caps daRelayCaps) (*daRelayState, error) {
+func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) {
 	if err := caps.validate(); err != nil {
 		return nil, err
 	}
-	return &daRelayState{
+	return &DARelayState{
+		mempool:                   mempool,
 		caps:                      caps,
 		orphanBytesByPeerQuotaKey: map[string]uint64{},
 		orphanBytesByDAID:         map[[32]byte]uint64{},
@@ -217,7 +252,145 @@ func newDARelayState(caps daRelayCaps) (*daRelayState, error) {
 	}, nil
 }
 
-func (s *daRelayState) nextMonotonicReceivedTime() (uint64, error) {
+// StageCommit retains one commit whose peer quota key was normalized by P2P.
+func (s *DARelayState) StageCommit(peerQuotaKey string, commit DARelayCommit) error {
+	_, err := s.addDACommit(peerQuotaKey, daRelayCommit{
+		daID:              commit.DAID,
+		payloadCommitment: commit.PayloadCommitment,
+		chunkCount:        commit.ChunkCount,
+		wireBytes:         commit.WireBytes,
+		txBytes:           commit.TxBytes,
+	})
+	return err
+}
+
+// StageChunk retains one chunk whose peer quota key was normalized by P2P.
+func (s *DARelayState) StageChunk(peerQuotaKey string, chunk DARelayChunk) error {
+	_, err := s.addDAChunk(peerQuotaKey, daRelayChunk{
+		daID:        chunk.DAID,
+		chunkHash:   chunk.ChunkHash,
+		chunkIndex:  chunk.ChunkIndex,
+		payload:     chunk.Payload,
+		wireBytes:   chunk.WireBytes,
+		txBytes:     chunk.TxBytes,
+		hashChecked: chunk.HashChecked,
+	})
+	return err
+}
+
+// ValidateDARelayChunk validates one unretained chunk before relay admission.
+func ValidateDARelayChunk(chunk DARelayChunk) error {
+	internal := daRelayChunk{
+		daID:        chunk.DAID,
+		chunkHash:   chunk.ChunkHash,
+		chunkIndex:  chunk.ChunkIndex,
+		payload:     chunk.Payload,
+		wireBytes:   chunk.WireBytes,
+		hashChecked: chunk.HashChecked,
+	}
+	if err := validateDAChunk(internal); err != nil {
+		return err
+	}
+	if !internal.hashChecked && sha3.Sum256(internal.payload) != internal.chunkHash {
+		return ErrDARelayChunkHashMismatch
+	}
+	return nil
+}
+
+// AdvanceOrphanTTL advances the retained incomplete-set TTL once.
+func (s *DARelayState) AdvanceOrphanTTL() error {
+	_, err := s.advanceOrphanTTL()
+	return err
+}
+
+// ReleasePeerQuotaKey releases incomplete retained data owned by key.
+func (s *DARelayState) ReleasePeerQuotaKey(key string) error {
+	return s.releasePeerQuotaKey(key)
+}
+
+// ConsumeCompleteSet releases one retained complete set.
+func (s *DARelayState) ConsumeCompleteSet(daID [32]byte) (bool, error) {
+	return s.consumeCompleteSet(daID)
+}
+
+// PlanPrefetch reserves missing chunks for the supplied normalized peer keys.
+func (s *DARelayState) PlanPrefetch(daID [32]byte, peerKeys []string, now time.Time) ([]DARelayPrefetchPlan, string) {
+	plans, diagnostic := s.planDAPrefetch(daRelaySetRecord{daID: daID}, peerKeys, now)
+	out := make([]DARelayPrefetchPlan, len(plans))
+	for i, plan := range plans {
+		out[i] = DARelayPrefetchPlan{DAID: plan.daID, PeerKey: plan.peerKey, Indexes: plan.indexes}
+	}
+	return out, diagnostic
+}
+
+// ReleasePrefetchPlan releases one previously reserved prefetch plan.
+func (s *DARelayState) ReleasePrefetchPlan(plan DARelayPrefetchPlan) {
+	s.releaseDAPrefetchPlan(daRelayPrefetchPlan{daID: plan.DAID, peerKey: plan.PeerKey, indexes: plan.Indexes})
+}
+
+// CompleteSetCandidates returns caller-owned COMPLETE_SET snapshots up to maxPayloadBytes.
+func (s *DARelayState) CompleteSetCandidates(maxPayloadBytes uint64) []CompleteDASetCandidate {
+	if s == nil || maxPayloadBytes == 0 {
+		return nil
+	}
+	var candidates []CompleteDASetCandidate
+	var payloadBytes uint64
+	for _, record := range s.completeSetCandidateRecordsSnapshot() {
+		if record.payloadBytes > maxPayloadBytes-payloadBytes {
+			continue
+		}
+		candidate, ok := record.completeSetCandidate()
+		if !ok {
+			continue
+		}
+		candidates = append(candidates, candidate)
+		payloadBytes += record.payloadBytes
+	}
+	return candidates
+}
+
+func (s *DARelayState) completeSetCandidateRecordsSnapshot() []daRelaySetRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	daIDs := make([][32]byte, 0, len(s.sets))
+	for daID, record := range s.sets {
+		if record.state == daRelayStateCompleteSet {
+			daIDs = append(daIDs, daID)
+		}
+	}
+	sort.Slice(daIDs, func(i, j int) bool {
+		return bytes.Compare(daIDs[i][:], daIDs[j][:]) < 0
+	})
+
+	records := make([]daRelaySetRecord, 0, len(daIDs))
+	for _, daID := range daIDs {
+		records = append(records, s.sets[daID].cloneForStateMutation())
+	}
+	return records
+}
+
+func (r daRelaySetRecord) completeSetCandidate() (CompleteDASetCandidate, bool) {
+	if r.commit.chunkCount == 0 || len(r.commit.txBytes) == 0 {
+		return CompleteDASetCandidate{}, false
+	}
+	chunks := make([]CompleteDASetChunkCandidate, 0, r.commit.chunkCount)
+	for i := uint16(0); i < r.commit.chunkCount; i++ {
+		chunk, ok := r.chunks[i]
+		if !ok || len(chunk.txBytes) == 0 {
+			return CompleteDASetCandidate{}, false
+		}
+		chunks = append(chunks, CompleteDASetChunkCandidate{Index: i, Tx: cloneBytes(chunk.txBytes)})
+	}
+	return CompleteDASetCandidate{
+		DAID:         r.daID,
+		PayloadBytes: r.payloadBytes,
+		CommitTx:     cloneBytes(r.commit.txBytes),
+		Chunks:       chunks,
+	}, true
+}
+
+func (s *DARelayState) nextMonotonicReceivedTime() (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -229,11 +402,11 @@ func (s *daRelayState) nextMonotonicReceivedTime() (uint64, error) {
 	return receivedTime, nil
 }
 
-func (s *daRelayState) nextReceivedTimeLocked() (uint64, error) {
+func (s *DARelayState) nextReceivedTimeLocked() (uint64, error) {
 	return checkedAddUint64(s.nextReceivedTime, 1)
 }
 
-func (s *daRelayState) assignFirstSeenReceivedTimeLocked(record *daRelaySetRecord) error {
+func (s *DARelayState) assignFirstSeenReceivedTimeLocked(record *daRelaySetRecord) error {
 	if record.receivedTime != 0 {
 		return nil
 	}
@@ -245,11 +418,10 @@ func (s *daRelayState) assignFirstSeenReceivedTimeLocked(record *daRelaySetRecor
 	return nil
 }
 
-func (s *daRelayState) setOrphanBytesForPeer(peerAddr string, bytes uint64) {
+func (s *DARelayState) setOrphanBytesForPeerQuotaKey(key string, bytes uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	key := peerQuotaKey(peerAddr)
 	if bytes == 0 {
 		delete(s.orphanBytesByPeerQuotaKey, key)
 		return
@@ -257,14 +429,14 @@ func (s *daRelayState) setOrphanBytesForPeer(peerAddr string, bytes uint64) {
 	s.orphanBytesByPeerQuotaKey[key] = bytes
 }
 
-func (s *daRelayState) orphanBytesForPeer(peerAddr string) uint64 {
+func (s *DARelayState) orphanBytesForPeerQuotaKey(key string) uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.orphanBytesByPeerQuotaKey[peerQuotaKey(peerAddr)]
+	return s.orphanBytesByPeerQuotaKey[key]
 }
 
-func (s *daRelayState) setOrphanBytesForDAID(daID [32]byte, bytes uint64) {
+func (s *DARelayState) setOrphanBytesForDAID(daID [32]byte, bytes uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -275,14 +447,14 @@ func (s *daRelayState) setOrphanBytesForDAID(daID [32]byte, bytes uint64) {
 	s.orphanBytesByDAID[daID] = bytes
 }
 
-func (s *daRelayState) orphanBytesForDAID(daID [32]byte) uint64 {
+func (s *DARelayState) orphanBytesForDAID(daID [32]byte) uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	return s.orphanBytesByDAID[daID]
 }
 
-func (s *daRelayState) consumeCompleteSet(daID [32]byte) (bool, error) {
+func (s *DARelayState) consumeCompleteSet(daID [32]byte) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -296,7 +468,7 @@ func (s *daRelayState) consumeCompleteSet(daID [32]byte) (bool, error) {
 	return true, nil
 }
 
-func (s *daRelayState) advanceOrphanTTL() ([]daRelayExpiredSet, error) {
+func (s *DARelayState) advanceOrphanTTL() ([]daRelayExpiredSet, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -321,7 +493,7 @@ func (s *daRelayState) advanceOrphanTTL() ([]daRelayExpiredSet, error) {
 	return expired, nil
 }
 
-func (s *daRelayState) releasePeerQuotaKey(key string) error {
+func (s *DARelayState) releasePeerQuotaKey(key string) error {
 	if s == nil {
 		return nil
 	}
@@ -355,7 +527,7 @@ func (s *daRelayState) releasePeerQuotaKey(key string) error {
 	return nil
 }
 
-func (s *daRelayState) sortedIncompleteDAIDsLocked() [][32]byte {
+func (s *DARelayState) sortedIncompleteDAIDsLocked() [][32]byte {
 	var daIDs [][32]byte
 	for daID := range s.orphanBytesByDAID {
 		record, ok := s.sets[daID]
@@ -370,7 +542,7 @@ func (s *daRelayState) sortedIncompleteDAIDsLocked() [][32]byte {
 	return daIDs
 }
 
-func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRelaySetRecord, error) {
+func (s *DARelayState) addDACommit(peerQuotaKey string, commit daRelayCommit) (daRelaySetRecord, error) {
 	if commit.chunkCount == 0 || uint64(commit.chunkCount) > consensus.MAX_DA_CHUNK_COUNT {
 		return daRelaySetRecord{}, errDARelayChunkCountInvalid
 	}
@@ -381,7 +553,7 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 	commitTxBytesOwned := false
 	for {
 		s.mu.Lock()
-		record, commitTxBytesOwnedNow, err := s.stageDACommitRecordLocked(peerAddr, commit, commitTxBytesOwned)
+		record, commitTxBytesOwnedNow, err := s.stageDACommitRecordLocked(peerQuotaKey, commit, commitTxBytesOwned)
 		if err != nil {
 			s.mu.Unlock()
 			return daRelaySetRecord{}, err
@@ -409,7 +581,7 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 		if payloadCommitment != snapshot.payloadCommitmentExpected {
 			// Commit metadata is the first-seen authority for duplicate handling;
 			// orphan chunks are provisional until they match that commit.
-			applied, err := s.stageCommitDroppingMatchingCompletionChunks(peerAddr, commit, commitTxBytesOwned, snapshot)
+			applied, err := s.stageCommitDroppingMatchingCompletionChunks(peerQuotaKey, commit, commitTxBytesOwned, snapshot)
 			if err != nil {
 				return daRelaySetRecord{}, err
 			}
@@ -420,7 +592,7 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 		}
 
 		s.mu.Lock()
-		record, commitTxBytesOwnedNow, err = s.stageDACommitRecordLocked(peerAddr, commit, commitTxBytesOwned)
+		record, commitTxBytesOwnedNow, err = s.stageDACommitRecordLocked(peerQuotaKey, commit, commitTxBytesOwned)
 		if err != nil {
 			s.mu.Unlock()
 			return daRelaySetRecord{}, err
@@ -456,7 +628,7 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 	}
 }
 
-func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelaySetRecord, error) {
+func (s *DARelayState) addDAChunk(peerQuotaKey string, chunk daRelayChunk) (daRelaySetRecord, error) {
 	if err := validateDAChunk(chunk); err != nil {
 		return daRelaySetRecord{}, err
 	}
@@ -477,7 +649,7 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 	chunkTxBytesOwned := false
 	for {
 		s.mu.Lock()
-		record, chunkTxBytesOwnedNow, err := s.stageDAChunkRecordLocked(peerAddr, chunk, payload, chunkTxBytesOwned)
+		record, chunkTxBytesOwnedNow, err := s.stageDAChunkRecordLocked(peerQuotaKey, chunk, payload, chunkTxBytesOwned)
 		if err != nil {
 			s.mu.Unlock()
 			return daRelaySetRecord{}, err
@@ -515,7 +687,7 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 		}
 
 		s.mu.Lock()
-		record, chunkTxBytesOwnedNow, err = s.stageDAChunkRecordLocked(peerAddr, chunk, payload, chunkTxBytesOwned)
+		record, chunkTxBytesOwnedNow, err = s.stageDAChunkRecordLocked(peerQuotaKey, chunk, payload, chunkTxBytesOwned)
 		if err != nil {
 			s.mu.Unlock()
 			return daRelaySetRecord{}, err
@@ -555,14 +727,14 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 
 // txBytesOwned is only true for retrying a txBytes slice cloned by an earlier
 // successful staging call; first admission still clones after duplicate checks.
-func (s *daRelayState) stageDACommitRecordLocked(peerAddr string, commit daRelayCommit, txBytesOwned bool) (daRelaySetRecord, bool, error) {
+func (s *DARelayState) stageDACommitRecordLocked(peerQuotaKey string, commit daRelayCommit, txBytesOwned bool) (daRelaySetRecord, bool, error) {
 	record := s.sets[commit.daID].cloneForStateMutation()
 	record.ensureMaps()
 	if record.commit.chunkCount != 0 {
 		return daRelaySetRecord{}, false, errDARelayDuplicateCommit
 	}
 	c := commit
-	c.peerQuotaKey = peerQuotaKey(peerAddr)
+	c.peerQuotaKey = peerQuotaKey
 	cloneTxBytes := !txBytesOwned && len(c.txBytes) != 0
 	txBytesOwnedNow := txBytesOwned || len(c.txBytes) == 0
 	txBytes := c.txBytes
@@ -592,13 +764,13 @@ func (s *daRelayState) stageDACommitRecordLocked(peerAddr string, commit daRelay
 }
 
 // txBytesOwned follows the same ownership contract as stageDACommitRecordLocked.
-func (s *daRelayState) stageDAChunkRecordLocked(peerAddr string, chunk daRelayChunk, payload []byte, txBytesOwned bool) (daRelaySetRecord, bool, error) {
+func (s *DARelayState) stageDAChunkRecordLocked(peerQuotaKey string, chunk daRelayChunk, payload []byte, txBytesOwned bool) (daRelaySetRecord, bool, error) {
 	record := s.sets[chunk.daID].cloneForStateMutation()
 	record.ensureMaps()
 	if err := record.validateChunkInsert(chunk.chunkIndex); err != nil {
 		return daRelaySetRecord{}, false, err
 	}
-	chunk.peerQuotaKey = peerQuotaKey(peerAddr)
+	chunk.peerQuotaKey = peerQuotaKey
 	cloneTxBytes := !txBytesOwned && len(chunk.txBytes) != 0
 	txBytesOwnedNow := txBytesOwned || len(chunk.txBytes) == 0
 	txBytes := chunk.txBytes
@@ -644,7 +816,7 @@ func validateDAChunk(chunk daRelayChunk) error {
 	return nil
 }
 
-func (s *daRelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
+func (s *DARelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 	oldRecord := s.sets[record.daID]
 	orphanBytes, peerBytes, daBytes, commitBytes, err := s.projectOrphanAccountingDeltaLocked(oldRecord, record)
 	if err != nil {
@@ -666,7 +838,7 @@ func (s *daRelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 	return nil
 }
 
-func (s *daRelayState) checkDASetRecordCapsLocked(record daRelaySetRecord) error {
+func (s *DARelayState) checkDASetRecordCapsLocked(record daRelaySetRecord) error {
 	oldRecord := s.sets[record.daID]
 	if _, _, _, _, err := s.projectOrphanAccountingDeltaLocked(oldRecord, record); err != nil {
 		return err
@@ -675,7 +847,7 @@ func (s *daRelayState) checkDASetRecordCapsLocked(record daRelaySetRecord) error
 	return err
 }
 
-func (s *daRelayState) removeDASetRecordLocked(record daRelaySetRecord) error {
+func (s *DARelayState) removeDASetRecordLocked(record daRelaySetRecord) error {
 	emptyRecord := daRelaySetRecord{daID: record.daID}
 	orphanBytes, peerBytes, daBytes, commitBytes, err := s.projectOrphanAccountingDeltaLocked(record, emptyRecord)
 	if err != nil {
@@ -695,7 +867,7 @@ func (s *daRelayState) removeDASetRecordLocked(record daRelaySetRecord) error {
 	return nil
 }
 
-func (s *daRelayState) projectOrphanAccountingDeltaLocked(oldRecord, newRecord daRelaySetRecord) (uint64, map[string]uint64, uint64, uint64, error) {
+func (s *DARelayState) projectOrphanAccountingDeltaLocked(oldRecord, newRecord daRelaySetRecord) (uint64, map[string]uint64, uint64, uint64, error) {
 	oldAccounting, err := oldRecord.orphanAccounting()
 	if err != nil {
 		return 0, nil, 0, 0, err
@@ -723,7 +895,7 @@ func (s *daRelayState) projectOrphanAccountingDeltaLocked(oldRecord, newRecord d
 	return orphanBytes, peerBytes, daBytes, commitBytes, nil
 }
 
-func (s *daRelayState) projectPinnedPayloadDeltaLocked(oldRecord, newRecord daRelaySetRecord) (uint64, error) {
+func (s *DARelayState) projectPinnedPayloadDeltaLocked(oldRecord, newRecord daRelaySetRecord) (uint64, error) {
 	pinnedBytes, err := checkedApplyUint64Delta(s.pinnedPayloadBytes, oldRecord.pinnedPayloadAccountingBytes(), newRecord.pinnedPayloadAccountingBytes())
 	if err != nil {
 		return 0, err
@@ -734,7 +906,7 @@ func (s *daRelayState) projectPinnedPayloadDeltaLocked(oldRecord, newRecord daRe
 	return pinnedBytes, nil
 }
 
-func (s *daRelayState) projectPeerAccountingDeltaLocked(oldPeerBytes, newPeerBytes map[string]uint64) (map[string]uint64, error) {
+func (s *DARelayState) projectPeerAccountingDeltaLocked(oldPeerBytes, newPeerBytes map[string]uint64) (map[string]uint64, error) {
 	projected := map[string]uint64{}
 	for key, oldBytes := range oldPeerBytes {
 		value, err := checkedApplyUint64Delta(s.orphanBytesByPeerQuotaKey[key], oldBytes, newPeerBytes[key])
@@ -762,7 +934,7 @@ func (s *daRelayState) projectPeerAccountingDeltaLocked(oldPeerBytes, newPeerByt
 	return projected, nil
 }
 
-func (s *daRelayState) applyProjectedPeerBytes(projected map[string]uint64) {
+func (s *DARelayState) applyProjectedPeerBytes(projected map[string]uint64) {
 	for key, bytes := range projected {
 		if bytes == 0 {
 			delete(s.orphanBytesByPeerQuotaKey, key)
@@ -772,7 +944,7 @@ func (s *daRelayState) applyProjectedPeerBytes(projected map[string]uint64) {
 	}
 }
 
-func (s *daRelayState) applyProjectedDAIDBytes(daID [32]byte, bytes uint64) {
+func (s *DARelayState) applyProjectedDAIDBytes(daID [32]byte, bytes uint64) {
 	if bytes == 0 {
 		delete(s.orphanBytesByDAID, daID)
 		return
@@ -961,11 +1133,11 @@ func (s daRelayCompletionSnapshot) payloadCommitment() (uint64, [32]byte) {
 	return payloadBytes, payloadCommitment
 }
 
-func (s *daRelayState) stageCommitDroppingMatchingCompletionChunks(peerAddr string, commit daRelayCommit, txBytesOwned bool, snapshot daRelayCompletionSnapshot) (bool, error) {
+func (s *DARelayState) stageCommitDroppingMatchingCompletionChunks(peerQuotaKey string, commit daRelayCommit, txBytesOwned bool, snapshot daRelayCompletionSnapshot) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	record, commitTxBytesOwned, err := s.stageDACommitRecordLocked(peerAddr, commit, txBytesOwned)
+	record, commitTxBytesOwned, err := s.stageDACommitRecordLocked(peerQuotaKey, commit, txBytesOwned)
 	if err != nil {
 		return false, err
 	}
@@ -994,7 +1166,7 @@ func (s *daRelayState) stageCommitDroppingMatchingCompletionChunks(peerAddr stri
 	return true, nil
 }
 
-func (s *daRelayState) markMatchingCompletionChunksReplaceable(snapshot daRelayCompletionSnapshot) (retry bool, err error) {
+func (s *DARelayState) markMatchingCompletionChunksReplaceable(snapshot daRelayCompletionSnapshot) (retry bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1209,122 +1381,7 @@ func cloneBytes(in []byte) []byte {
 	return append([]byte(nil), in...)
 }
 
-func (s *Service) scheduleDAPrefetch(peerAddr string, record daRelaySetRecord) {
-	if !s.canScheduleDAPrefetch() {
-		return
-	}
-	peersByKey, keys := s.daPrefetchPeers(peerAddr)
-	plans, diagnostic := s.daRelay.planDAPrefetch(record, keys, s.cfg.Now())
-	reportDAPrefetchDiagnostic(peersByKey, keys, diagnostic)
-	for _, plan := range plans {
-		s.sendDAPrefetchPlan(peersByKey, plan)
-	}
-}
-
-func (s *Service) canScheduleDAPrefetch() bool {
-	if s == nil {
-		return false
-	}
-	return s.daRelay != nil
-}
-
-func (s *Service) daPrefetchPeers(peerAddr string) (map[string]*peer, []string) {
-	s.peersMu.RLock()
-	defer s.peersMu.RUnlock()
-	peers, keys := s.allDAPrefetchPeersLocked()
-	if peerAddr == "" {
-		return peers, keys
-	}
-	return peers, preferDAPrefetchPeer(keys, s.preferredDAPrefetchPeerKeyLocked(peerAddr))
-}
-
-func (s *Service) preferredDAPrefetchPeerKeyLocked(peerAddr string) string {
-	current := s.peers[peerAddr]
-	if !acceptsDAPrefetch(current) {
-		return ""
-	}
-	key := peerQuotaKey(current.addr())
-	if key == "" {
-		return ""
-	}
-	return key
-}
-
-func (s *Service) allDAPrefetchPeersLocked() (map[string]*peer, []string) {
-	peers := map[string]*peer{}
-	for _, current := range s.peers {
-		if !acceptsDAPrefetch(current) {
-			continue
-		}
-		if key := peerQuotaKey(current.addr()); key != "" {
-			peers[key] = current
-		}
-	}
-	keys := make([]string, 0, len(peers))
-	for key := range peers {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return peers, keys
-}
-
-func preferDAPrefetchPeer(keys []string, preferred string) []string {
-	if preferred == "" || len(keys) < 2 {
-		return keys
-	}
-	ordered := make([]string, 0, len(keys))
-	for _, key := range keys {
-		if key == preferred {
-			ordered = append(ordered, key)
-			break
-		}
-	}
-	if len(ordered) == 0 {
-		return keys
-	}
-	for _, key := range keys {
-		if key != preferred {
-			ordered = append(ordered, key)
-		}
-	}
-	return ordered
-}
-
-func acceptsDAPrefetch(current *peer) bool {
-	if current == nil {
-		return false
-	}
-	return current.acceptsCompactBlocks()
-}
-
-func reportDAPrefetchDiagnostic(peersByKey map[string]*peer, keys []string, diagnostic string) {
-	if diagnostic == "" || len(keys) == 0 {
-		return
-	}
-	peersByKey[keys[0]].setLastError(diagnostic)
-}
-
-func (s *Service) sendDAPrefetchPlan(peersByKey map[string]*peer, plan daRelayPrefetchPlan) {
-	current := peersByKey[plan.peerKey]
-	if current == nil {
-		s.daRelay.releaseDAPrefetchPlan(plan)
-		return
-	}
-	payload, err := encodeDAPrefetchPlanPayload(plan)
-	if err == nil {
-		err = current.send(messageGetDAChunk, payload)
-	}
-	if err != nil {
-		current.setLastError(fmt.Sprintf("da prefetch send failed: %v", err))
-		s.daRelay.releaseDAPrefetchPlan(plan)
-	}
-}
-
-func encodeDAPrefetchPlanPayload(plan daRelayPrefetchPlan) ([]byte, error) {
-	return encodeGetDAChunkPayload(getDAChunkPayload{Version: daChunkRequestVersion, DAID: plan.daID, Indexes: plan.indexes})
-}
-
-func (s *daRelayState) planDAPrefetch(record daRelaySetRecord, peerKeys []string, now time.Time) ([]daRelayPrefetchPlan, string) {
+func (s *DARelayState) planDAPrefetch(record daRelaySetRecord, peerKeys []string, now time.Time) ([]daRelayPrefetchPlan, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.prefetch.ensureMaps()
@@ -1454,7 +1511,7 @@ func buildDAPrefetchPlans(daID [32]byte, peerKeys []string, plansByPeer map[stri
 	return plans
 }
 
-func (s *daRelayState) releaseDAPrefetchPlan(plan daRelayPrefetchPlan) {
+func (s *DARelayState) releaseDAPrefetchPlan(plan daRelayPrefetchPlan) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	set := s.prefetch.indexes[plan.daID]
