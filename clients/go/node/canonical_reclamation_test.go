@@ -373,14 +373,14 @@ func TestNoncanonicalStrictRebuildRejectsLeavesAndDrift(t *testing.T) {
 		phase      int
 		mutate     func(*BlockStore, string, []byte)
 	}{
-		{"empty EOF", "", 1, func(store *BlockStore, _ string, _ []byte) {
+		{"empty EOF", "noncanonical artifact directory identity drift", 1, func(store *BlockStore, _ string, _ []byte) {
 			mustNoncanonical(t, os.WriteFile(noncanonicalTestFile(store, noncanonicalBlockArtifact, [32]byte{1}), []byte("x"), 0o600))
 			mustNoncanonical(t, os.Chtimes(store.blocksDir, time.Unix(1_000_000_001, 0), time.Unix(1_000_000_001, 0)))
-		}}, {"enumerated inode", "", 2, replaceLeaf}, {"opened inode", "noncanonical artifact is not the opened regular leaf", 3, replaceLeaf}, {"pre-open fifo", "", 3, func(_ *BlockStore, path string, _ []byte) {
+		}}, {"enumerated inode", "noncanonical artifact enumeration drift", 2, replaceLeaf}, {"opened inode", "noncanonical artifact is not the opened regular leaf", 3, replaceLeaf}, {"pre-open fifo", "noncanonical artifact is not the opened regular leaf", 3, func(_ *BlockStore, path string, _ []byte) {
 			mustNoncanonical(t, os.Remove(path), syscall.Mkfifo(path, 0o600))
 		}}, {"pre-open symlink ELOOP", "ELOOP", 3, func(_ *BlockStore, path string, _ []byte) {
 			mustNoncanonical(t, os.Remove(path), os.Symlink(path+".target", path))
-		}}, {"same inode rewrite", "", 4, func(_ *BlockStore, path string, header []byte) {
+		}}, {"same inode rewrite", "noncanonical artifact identity drift", 4, func(_ *BlockStore, path string, header []byte) {
 			before, err := os.Lstat(path)
 			mustNoncanonical(t, err)
 			header = append([]byte(nil), header...)
@@ -392,7 +392,7 @@ func TestNoncanonicalStrictRebuildRejectsLeavesAndDrift(t *testing.T) {
 			if !os.SameFile(before, after) || before.Size() != after.Size() {
 				t.Fatal("rewrite changed leaf identity or size")
 			}
-		}}, {"post-close leaf", "", 5, replaceLeaf}, {"post-close directory", "", 5, func(store *BlockStore, path string, _ []byte) {
+		}}, {"post-close leaf", "noncanonical artifact close drift", 5, replaceLeaf}, {"post-close directory", "noncanonical artifact directory identity drift", 5, func(store *BlockStore, path string, _ []byte) {
 			old := store.headersDir + ".old"
 			mustNoncanonical(t, os.Rename(store.headersDir, old), os.Mkdir(store.headersDir, 0o700), os.Link(filepath.Join(old, filepath.Base(path)), path))
 			store.leafProbe = func() {
@@ -560,12 +560,12 @@ func rejectNoncanonicalRebuildDrift(t *testing.T, phase int, mutate func(*BlockS
 		}
 	}
 	var closeCalls *int
-	if want != "" && want != "ELOOP" {
+	if phase >= 3 && want != "ELOOP" {
 		closeCalls = countNoncanonicalClose(t, path, nil)
 	}
 	done := make(chan error, 1)
 	go func() { _, err := store.rebuildNoncanonicalAccounting(noncanonicalDefaultByteLimit); done <- err }()
-	if err := receiveNoncanonical(t, done, "rebuild drift did not return"); err == nil || want == "ELOOP" && !errors.Is(err, syscall.ELOOP) || want != "" && want != "ELOOP" && !strings.Contains(err.Error(), want) || closeCalls != nil && *closeCalls != 1 {
+	if err := receiveNoncanonical(t, done, "rebuild drift did not return"); err == nil || errors.Is(err, errNoncanonicalCount) || errors.Is(err, errNoncanonicalBytes) || want == "ELOOP" && !errors.Is(err, syscall.ELOOP) || want != "ELOOP" && !strings.Contains(err.Error(), want) || closeCalls != nil && *closeCalls != 1 {
 		t.Fatalf("rebuild err=%v want=%q", err, want)
 	}
 }

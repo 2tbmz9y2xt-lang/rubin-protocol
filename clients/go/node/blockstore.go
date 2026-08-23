@@ -1124,8 +1124,7 @@ const (
 	// errCanonicalIndexMoved attempted nothing, so the owning canonical transition maps
 	// it to STALE_LOCAL_PLAN, never to the frozen precommit identity (whose
 	// C01-PRENS-001 triggers are the atomic write and the precommit checkpoint writes).
-	// errPreparedIndexSpent is instead a caller fence/latch violation whose commit truth
-	// is whatever the FIRST attempt returned — it can follow TERMINAL_PERSISTENCE(new).
+	// errPreparedIndexSpent says a prior invocation atomically claimed/spent the image, including planner/resource refusal.
 	canonicalCommitStale canonicalCommitClass = "STALE_PREPARED_IMAGE"
 
 	canonicalCommitPrecommit       canonicalCommitClass = "LOCAL_PERSISTENCE_ERROR(precommit)"
@@ -1149,10 +1148,8 @@ var (
 	// writer fence; this is the last check under it, never a substitute for it.
 	errCanonicalIndexMoved = errors.New("prepared canonical index is stale: visible index bytes changed")
 
-	// This prepared image already made its one write attempt. Spec §6.4.1 forbids any
-	// rollback, retry, rewrite or heuristic classification after a terminal persistence
-	// result, so a second commit is refused.
-	errPreparedIndexSpent = errors.New("prepared canonical index was already committed")
+	// A prior invocation atomically claimed/spent this image, including planner/resource refusal; later invocation is refused.
+	errPreparedIndexSpent = errors.New("prepared canonical index was already spent")
 
 	// The planned image equals the visible index bytes, so there is no
 	// transition to commit — a benign no-op, not an invalid plan.
@@ -1229,9 +1226,7 @@ func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalInde
 // never rolls back, retries, rewrites or repairs and latches nothing: the owning
 // canonical transition consumes the returned evidence. BlockStore's internal
 // transition fence closes reservations, reload, same-store commits, and the
-// durable-write window; the owning SyncEngine transition still supplies its
-// wider ChainState/admission fence when RUB-1202 cuts over callers. A nil bs is
-// a programming error.
+// durable-write window; the owning SyncEngine transition still supplies its wider ChainState/admission fence when RUB-1202 cuts over callers; a nil bs is a programming error.
 func (p *preparedCanonicalIndex) commit(bs *BlockStore) canonicalCommitResult {
 	bs.stateMu.Lock()
 	bs.beginNoncanonicalTransitionLocked()
