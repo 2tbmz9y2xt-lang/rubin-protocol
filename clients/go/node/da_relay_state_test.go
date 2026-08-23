@@ -169,7 +169,7 @@ func TestDARelayPeerQuotaKeyPreventsPortHopping(t *testing.T) {
 func TestDARelayReleasePeerQuotaKeySkipsUnchargedPeer(t *testing.T) {
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 	record := mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daRelayTestID(112), 0, 7))
-	if err := state.releasePeerQuotaKey("peer-b"); err != nil {
+	if err := state.ReleasePeerQuotaKey("peer-b"); err != nil {
 		t.Fatalf("release uncharged peer: %v", err)
 	}
 	if got := state.orphanBytesForPeerQuotaKey("peer-a"); got != record.wireBytes {
@@ -713,6 +713,9 @@ func TestDARelayAdvanceOrphanTTLExpiresOrphanChunksAtomically(t *testing.T) {
 	if got := state.orphanBytesForPeerQuotaKey("peer-b"); got != 0 {
 		t.Fatalf("expiry left peer-b bytes=%d", got)
 	}
+	if err := state.AdvanceOrphanTTL(); err != nil {
+		t.Fatalf("public ttl advance: %v", err)
+	}
 	if expired, err = state.advanceOrphanTTL(); err != nil || len(expired) != 0 {
 		t.Fatalf("second ttl advance expired=%+v err=%v, want no-op", expired, err)
 	}
@@ -843,12 +846,20 @@ func TestDARelayConsumeCompleteSetRemovesRecordAndPinnedAccounting(t *testing.T)
 	keepPayload := []byte("keep-payload")
 
 	mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(consumeID, 2, consumePayload, missingPayload))
-	plans, diagnostic := state.planDAPrefetch(state.sets[consumeID], []string{"peer-prefetch"}, time.Unix(1, 0))
+	plans, diagnostic := state.PlanPrefetch(consumeID, []string{"peer-prefetch"}, time.Unix(1, 0))
 	if diagnostic != "" || len(plans) != 1 {
 		t.Fatalf("prefetch setup plans=%+v diagnostic=%q, want one plan", plans, diagnostic)
 	}
 	if got, _ := state.prefetch.bytesInFlight(); got == 0 {
 		t.Fatal("prefetch setup did not reserve bytes")
+	}
+	state.ReleasePrefetchPlan(plans[0])
+	if got, _ := state.prefetch.bytesInFlight(); got != 0 {
+		t.Fatalf("released prefetch bytes=%d, want 0", got)
+	}
+	plans, diagnostic = state.PlanPrefetch(consumeID, []string{"peer-prefetch"}, time.Unix(1, 0))
+	if diagnostic != "" || len(plans) != 1 {
+		t.Fatalf("prefetch replan plans=%+v diagnostic=%q, want one plan", plans, diagnostic)
 	}
 	mustAddDAChunk(t, state, "peer-b", daRelayTestChunkPayload(consumeID, 0, uint64(len(consumePayload)), consumePayload))
 	consumeRecord := mustAddDAChunk(t, state, "peer-b", daRelayTestChunkPayload(consumeID, 1, uint64(len(missingPayload)), missingPayload))
@@ -860,7 +871,7 @@ func TestDARelayConsumeCompleteSetRemovesRecordAndPinnedAccounting(t *testing.T)
 		t.Fatalf("setup pinned=%d, want %d", state.pinnedPayloadBytes, consumePinned+keepPinned)
 	}
 
-	consumed, err := state.consumeCompleteSet(consumeID)
+	consumed, err := state.ConsumeCompleteSet(consumeID)
 	if err != nil || !consumed {
 		t.Fatalf("consume complete set consumed=%v err=%v, want true nil", consumed, err)
 	}
@@ -883,7 +894,7 @@ func TestDARelayConsumeCompleteSetRemovesRecordAndPinnedAccounting(t *testing.T)
 		t.Fatalf("prefetch bytes in flight after consume=%d, want 0", got)
 	}
 
-	consumed, err = state.consumeCompleteSet(consumeID)
+	consumed, err = state.ConsumeCompleteSet(consumeID)
 	if err != nil || consumed {
 		t.Fatalf("second consume consumed=%v err=%v, want false nil", consumed, err)
 	}
@@ -1203,6 +1214,9 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 	badChunk := daRelayTestChunkPayload(daID, 0, 3, []byte("bad"))
 	badChunk.chunkHash[0] ^= 0xff
+	requireDAErr(t, ValidateDARelayChunk(DARelayChunk{
+		DAID: daID, ChunkHash: badChunk.chunkHash, Payload: badChunk.payload, WireBytes: badChunk.wireBytes,
+	}), ErrDARelayChunkHashMismatch)
 	_, err := state.addDAChunk("peer-a", badChunk)
 	requireDAErr(t, err, errDARelayChunkHashMismatch)
 	if len(state.sets) != 0 {
@@ -1895,20 +1909,24 @@ func newDARelayStateForTest(t *testing.T, caps daRelayCaps) *DARelayState {
 
 func mustAddDAChunk(t *testing.T, state *DARelayState, peer string, chunk daRelayChunk) daRelaySetRecord {
 	t.Helper()
-	record, err := state.addDAChunk(peer, chunk)
-	if err != nil {
+	if err := state.StageChunk(peer, DARelayChunk{
+		DAID: chunk.daID, ChunkHash: chunk.chunkHash, ChunkIndex: chunk.chunkIndex, Payload: chunk.payload,
+		WireBytes: chunk.wireBytes, TxBytes: chunk.txBytes, HashChecked: chunk.hashChecked,
+	}); err != nil {
 		t.Fatalf("add DA chunk: %v", err)
 	}
-	return record
+	return state.sets[chunk.daID].clone()
 }
 
 func mustAddDACommit(t *testing.T, state *DARelayState, peer string, commit daRelayCommit) daRelaySetRecord {
 	t.Helper()
-	record, err := state.addDACommit(peer, commit)
-	if err != nil {
+	if err := state.StageCommit(peer, DARelayCommit{
+		DAID: commit.daID, PayloadCommitment: commit.payloadCommitment, ChunkCount: commit.chunkCount,
+		WireBytes: commit.wireBytes, TxBytes: commit.txBytes,
+	}); err != nil {
 		t.Fatalf("add DA commit: %v", err)
 	}
-	return record
+	return state.sets[commit.daID].clone()
 }
 
 func requireDAErr(t *testing.T, got error, want error) {
