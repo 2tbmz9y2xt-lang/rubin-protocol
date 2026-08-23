@@ -274,33 +274,15 @@ func TestServiceWorkLifecycleCloseWaitsForPublicCallbacks(t *testing.T) {
 			t.Fatalf("socket owner received %d more bytes after Close returned", n)
 		}
 	})
-	t.Run("DA owner lock barrier in ConsumeAcceptedBlockDASets", func(t *testing.T) {
-		s := lifecycleService(t)
-		daID := daRelayTestID(0x7d)
-		blockBytes := stageCompleteDASet(t, s.daRelay, daID, "lifecycle", []byte("lifecycle-payload"))
-		s.daRelay.mu.Lock()
-		consume := make(chan error, 1)
-		go func() { consume <- s.ConsumeAcceptedBlockDASets(blockBytes) }()
-		select { // The Service is still OPEN, so the call cannot have been rejected: not returning here means it holds its lease and is parked on the DA owner lock.
-		case err := <-consume:
-			t.Fatalf("ConsumeAcceptedBlockDASets returned early: %v", err)
-		case <-time.After(lifecycleSettle):
-		}
-		closeDone := lifecycleClose(s)
-		waitDraining(t, s)
-		requireStillBlocked(t, closeDone, "Close")
-		s.daRelay.mu.Unlock()
-		requireReturned(t, closeDone, "Close")
-		must(t, <-consume, "pre-authorized ConsumeAcceptedBlockDASets")
-		requireEqual(t, lifecycleDASetPresent(s, daID), false, "the DA set the pre-authorized consume must have taken from the real state owner")
-	})
 }
 
 func lifecycleDASetPresent(s *Service, daID [32]byte) bool {
-	s.daRelay.mu.Lock()
-	defer s.daRelay.mu.Unlock()
-	_, ok := s.daRelay.sets[daID]
-	return ok
+	for _, candidate := range s.CompleteDASetCandidates(^uint64(0)) {
+		if candidate.DAID == daID {
+			return true
+		}
+	}
+	return false
 }
 
 // TestServiceWorkLifecyclePeerWorkerInheritance runs a real peer loop and handler stack: one authorized message finishes its publication and its owed compact fallback while Close waits, and after the drain the worker arms no read deadline and starts no further read.
@@ -578,10 +560,14 @@ func TestServiceWorkLifecycleConcurrentClose(t *testing.T) {
 func TestServiceWorkLifecycleReadOnlyAfterClose(t *testing.T) {
 	s := lifecycleService(t)
 	daID, snapshotID := daRelayTestID(0x7e), daRelayTestID(0x7f)
-	blockBytes := stageCompleteDASet(t, s.daRelay, daID, "lifecycle-readonly", []byte("readonly-payload"))
-	payload := []byte("snapshot-payload")
-	mustAddDACommit(t, s.daRelay, "lifecycle-snapshot", daRelayTestCommitWithTxBytes(snapshotID, 1, []byte("commit-tx"), payload))
-	mustAddDAChunk(t, s.daRelay, "lifecycle-snapshot", daRelayTestChunkWithTxBytes(snapshotID, 0, uint64(len(payload)), []byte("chunk-tx"), payload))
+	payload := []byte("readonly-payload")
+	stageCompleteDASetForService(t, s, daID, payload)
+	blockBytes := compactTestBlockBytesWithTxs(t, [][]byte{
+		minimalValidTxBytes(t),
+		daCommitRelayTxBytes(t, daID, 1, payload),
+		daChunkRelayTxBytes(t, daID, 0, 2, payload),
+	})
+	stageCompleteDASetForService(t, s, snapshotID, []byte("snapshot-payload"))
 	txBytes := minimalValidTxBytes(t)
 	_, txid, err := parseCanonicalTx(txBytes)
 	must(t, err, "parseCanonicalTx")
@@ -596,7 +582,7 @@ func TestServiceWorkLifecycleReadOnlyAfterClose(t *testing.T) {
 	requireReturned(t, lifecycleClose(s), "Close")
 	requireEqual(t, s.Addr() != "", true, "a non-empty Addr() after Close")
 	requireEqual(t, s.PeerLifecycleExits(), exitsBefore, "PeerLifecycleExits after Close")
-	requireEqual(t, len(s.CompleteDASetCandidates(1<<20)), 1, "defensive DA snapshot candidates after Close")
+	requireEqual(t, len(s.CompleteDASetCandidates(1<<20)), 2, "defensive DA snapshot candidates after Close")
 	requireClosedRejection(t, s.AnnounceTx(txBytes), "retained AnnounceTx callback")
 	requireClosedRejection(t, s.AnnounceBlock(blockBytes), "retained AnnounceBlock callback")
 	requireClosedRejection(t, s.ConsumeAcceptedBlockDASets(blockBytes), "retained DA consume callback")

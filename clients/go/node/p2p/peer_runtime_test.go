@@ -1722,6 +1722,14 @@ func newPeerRuntimeTestPeer(t *testing.T) *peer {
 	if err != nil {
 		t.Fatalf("NewSyncEngine: %v", err)
 	}
+	mempool, err := node.NewMempool(chainState, blockStore, node.DevnetGenesisChainID())
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	syncEngine.SetMempool(mempool)
+	if syncEngine.DARelayState() == nil {
+		t.Fatal("SetMempool did not initialize DA relay state")
+	}
 	cfg := ServiceConfig{
 		BindAddr:          "127.0.0.1:0",
 		GenesisHash:       node.DevnetGenesisBlockHash(),

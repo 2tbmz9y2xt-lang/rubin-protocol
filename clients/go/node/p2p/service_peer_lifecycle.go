@@ -153,7 +153,7 @@ func (s *Service) releaseDAQuotaIfInactiveLocked(quotaKey string) error {
 	if active {
 		return nil
 	}
-	return s.daRelay.releasePeerQuotaKey(quotaKey)
+	return s.daRelay.ReleasePeerQuotaKey(quotaKey)
 }
 
 func (s *Service) lockPeerQuotaKey(quotaKey string) func() {

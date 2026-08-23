@@ -175,8 +175,7 @@ func (s *Service) advanceDAOrphanTTL() error {
 	if s == nil || s.daRelay == nil {
 		return nil
 	}
-	_, err := s.daRelay.advanceOrphanTTL()
-	return err
+	return s.daRelay.AdvanceOrphanTTL()
 }
 
 func (s *Service) retainOrResolveOrphan(skip *peer, blockHash, parentHash [32]byte, blockBytes []byte) {

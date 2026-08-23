@@ -47,19 +47,32 @@ func TestCoverage_NewServiceAndListenerGuards(t *testing.T) {
 	}
 }
 
+func TestNewServiceInvalidConfigDoesNotConsumeDARelayClaim(t *testing.T) {
+	for _, test := range []struct {
+		want string
+		bad  func(*ServiceConfig)
+	}{
+		{"bind address is required", func(c *ServiceConfig) { c.BindAddr = ""; c.PeerManager = nil }},
+		{"nil peer manager", func(c *ServiceConfig) { c.PeerManager = nil; c.SyncEngine = nil }},
+		{"nil sync engine", func(c *ServiceConfig) { c.SyncEngine = nil; c.BlockStore = nil }},
+		{"nil blockstore", func(c *ServiceConfig) { c.BlockStore = nil; c.TxMetadataFunc = nil }},
+		{"nil tx metadata func", func(c *ServiceConfig) { c.TxMetadataFunc = nil }},
+	} {
+		valid := unclaimedServiceConfig(t)
+		invalid := valid
+		test.bad(&invalid)
+		if _, err := NewService(invalid); err == nil || err.Error() != test.want {
+			t.Fatalf("invalid config error=%v, want %q", err, test.want)
+		}
+		if _, err := NewService(valid); err != nil {
+			t.Fatalf("valid config after %q: %v", test.want, err)
+		}
+	}
+}
+
 func TestCoverage_NewServiceDefaultsAndAnnounceBlock(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	svc, err := NewService(ServiceConfig{
-		BindAddr:       "127.0.0.1:0",
-		PeerManager:    h.peerManager,
-		SyncConfig:     h.syncCfg,
-		SyncEngine:     h.syncEngine,
-		BlockStore:     h.blockStore,
-		TxMetadataFunc: testHarnessDefaultTxMetadata,
-	})
-	if err != nil {
-		t.Fatalf("NewService: %v", err)
-	}
+	svc := h.service
 	if svc.cfg.TxPool == nil || svc.cfg.UserAgent == "" || svc.cfg.GenesisHash == ([32]byte{}) || svc.cfg.LocatorLimit == 0 || svc.cfg.GetBlocksBatchSize == 0 {
 		t.Fatalf("expected defaults to be populated: %#v", svc.cfg)
 	}

@@ -75,7 +75,7 @@ func (s *Service) ConsumeAcceptedBlockDASets(blockBytes []byte) error {
 func (s *Service) consumeCompleteDASetIDs(daIDs [][32]byte) error {
 	var firstErr error
 	for _, daID := range daIDs {
-		if _, err := s.daRelay.consumeCompleteSet(daID); err != nil && firstErr == nil {
+		if _, err := s.daRelay.ConsumeCompleteSet(daID); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("consume DA set %x: %w", daID, err)
 		}
 	}

@@ -92,7 +92,7 @@ type Service struct {
 	blockSeen *boundedHashSet
 	txSeen    *boundedHashSet
 	orphans   *orphanPool
-	daRelay   *daRelayState
+	daRelay   *node.DARelayState
 
 	// peerLifecycleExits counts peer lifecycle exits at the single
 	// canonical removal boundary inside unregisterPeer. The counter is
@@ -127,18 +127,20 @@ type peer struct {
 	compact   peerCompactRelayState
 }
 
+// NewService validates and normalizes cfg before atomically claiming the
+// SyncEngine's sole lifetime DA relay state; Close never releases that claim.
 func NewService(cfg ServiceConfig) (*Service, error) {
 	if err := validateServiceConfig(cfg); err != nil {
 		return nil, err
 	}
 	cfg = normalizeServiceConfig(cfg)
-	outboundAddrs := normalizeDialTargets(cfg.BootstrapPeers)
-	addrMgr := newAddrManager(cfg.Now)
-	seedAddrManagerFromBootstrap(addrMgr, outboundAddrs)
-	daRelay, err := newDARelayState(defaultDARelayCaps())
+	daRelay, err := cfg.SyncEngine.ClaimDARelayState()
 	if err != nil {
 		return nil, err
 	}
+	outboundAddrs := normalizeDialTargets(cfg.BootstrapPeers)
+	addrMgr := newAddrManager(cfg.Now)
+	seedAddrManagerFromBootstrap(addrMgr, outboundAddrs)
 	return &Service{
 		cfg:            cfg,
 		peers:          make(map[string]*peer),

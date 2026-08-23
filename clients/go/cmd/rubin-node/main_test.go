@@ -1990,6 +1990,23 @@ func TestRunWiresP2PToCanonicalMempool(t *testing.T) {
 	}
 }
 
+func TestMainRejectsMissingDARelayStateBeforeRuntime(t *testing.T) {
+	prevMempool, prevP2P := newMempoolFn, newP2PServiceFn
+	t.Cleanup(func() { newMempoolFn, newP2PServiceFn = prevMempool, prevP2P })
+	newMempoolFn = func(_ *node.ChainState, store *node.BlockStore, chainID [32]byte, cfg node.MempoolConfig) (*node.Mempool, error) {
+		return node.NewMempoolWithConfig(node.NewChainState(), store, chainID, cfg)
+	}
+	newP2PServiceFn = func(p2p.ServiceConfig) (*p2p.Service, error) {
+		t.Fatal("p2p must not be constructed")
+		return nil, errors.New("p2p construction reached after fatal")
+	}
+	dir := t.TempDir()
+	seedBlockStore(t, dir)
+	if code := run([]string{"--datadir", dir, "--bind", "127.0.0.1:0", "--rpc-bind", ""}, io.Discard, io.Discard); code != 2 {
+		t.Fatalf("exit code=%d, want 2", code)
+	}
+}
+
 func TestApplySuiteContextToSyncConfig(t *testing.T) {
 	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), "")
 	registry := consensus.DefaultSuiteRegistry()
@@ -2290,7 +2307,9 @@ func TestRunMineBlocksPassesMineAddressToMiner(t *testing.T) {
 	prevMiner := newMinerFn
 	prevMempool := newMempoolFn
 	var captured node.MinerConfig
+	var capturedMempool *node.Mempool
 	newMinerFn = func(_ *node.ChainState, _ *node.BlockStore, _ *node.SyncEngine, cfg node.MinerConfig) (*node.Miner, error) {
+		capturedMempool.SetCurrentMinFeeRateForTest(offlineMinerSentinelFloor)
 		captured = cfg
 		return nil, errors.New("boom")
 	}
@@ -2299,7 +2318,7 @@ func TestRunMineBlocksPassesMineAddressToMiner(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		mp.SetCurrentMinFeeRateForTest(offlineMinerSentinelFloor)
+		capturedMempool = mp
 		return mp, nil
 	}
 	t.Cleanup(func() {
@@ -2963,15 +2982,17 @@ func TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn(t *testing.T
 		const liveMinerSentinelFloor uint64 = 0xDEADBEEFCAFE
 		prevMiner := newMinerFn
 		prevMempool := newMempoolFn
+		var capturedMempool *node.Mempool
 		newMempoolFn = func(st *node.ChainState, store *node.BlockStore, chainID [32]byte, cfg node.MempoolConfig) (*node.Mempool, error) {
 			mp, err := node.NewMempoolWithConfig(st, store, chainID, cfg)
 			if err != nil {
 				return nil, err
 			}
-			mp.SetCurrentMinFeeRateForTest(liveMinerSentinelFloor)
+			capturedMempool = mp
 			return mp, nil
 		}
 		newMinerFn = func(_ *node.ChainState, _ *node.BlockStore, _ *node.SyncEngine, cfg node.MinerConfig) (*node.Miner, error) {
+			capturedMempool.SetCurrentMinFeeRateForTest(liveMinerSentinelFloor)
 			if cfg.CurrentMempoolMinFeeRateFn == nil {
 				_, _ = fmt.Fprintln(os.Stderr, "T-D regression: live miner cfg.CurrentMempoolMinFeeRateFn=nil")
 				os.Exit(33)
