@@ -902,7 +902,7 @@ func TestDARelayAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T
 			state.orphanBytesByDAID[ids[tt.index]] = 0
 			before := daRelayStateSnapshot(state)
 			expired, err := state.advanceOrphanTTL()
-			if err != errDARelayArithmeticOverflow || expired != nil {
+			if err != errDARelayArithmeticOverflow || expired != nil { //nolint:errorlint // Exact identity is part of the contract.
 				t.Fatalf("underflow expired=%+v err=%v, want nil and %v", expired, err, errDARelayArithmeticOverflow)
 			}
 			requireDARelayStateUnchanged(t, state, before)
@@ -912,11 +912,11 @@ func TestDARelayAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T
 		state, _ := newDARelayFirstErrorState(t)
 		before := daRelayStateSnapshot(state)
 		expired, err := state.advanceOrphanTTL()
-		if err != errDARelayOrphanPeerCapExceeded || expired != nil {
+		if err != errDARelayOrphanPeerCapExceeded || expired != nil { //nolint:errorlint // Exact identity is part of the contract.
 			t.Fatalf("first ttl err=%v expired=%+v, want %v and nil", err, expired, errDARelayOrphanPeerCapExceeded)
 		}
 		requireDARelayStateUnchanged(t, state, before)
-		if err := state.AdvanceOrphanTTL(); err != errDARelayOrphanPeerCapExceeded {
+		if err := state.AdvanceOrphanTTL(); err != errDARelayOrphanPeerCapExceeded { //nolint:errorlint // Exact identity is part of the contract.
 			t.Fatalf("public ttl err=%v, want %v", err, errDARelayOrphanPeerCapExceeded)
 		}
 		requireDARelayStateUnchanged(t, state, before)
@@ -958,13 +958,13 @@ func TestDARelayAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T
 		}
 	})
 	t.Run("locked test snapshots preserve complete images", func(t *testing.T) {
-		state := newDARelayLockedSnapshotState(t, "peer-ttl")
-		expected := newDARelayLockedSnapshotState(t, "peer-ttl")
+		state, expected := newDARelayLockedSnapshotState(t, "peer-ttl"), newDARelayLockedSnapshotState(t, "peer-ttl")
 		requireDARelayLockedSnapshotImages(t, state, expected, func(state *DARelayState) error {
 			return state.AdvanceOrphanTTL()
 		})
 	})
 }
+
 func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testing.T) {
 	t.Run("nil and uncharged no-op", func(t *testing.T) {
 		if err := (*DARelayState)(nil).ReleasePeerQuotaKey("peer-drop"); err != nil {
@@ -1010,7 +1010,7 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 			state.orphanBytesByDAID[ids[tt.index]] = 0
 			before := daRelayStateSnapshot(state)
 			err := state.ReleasePeerQuotaKey("peer-drop")
-			if err != errDARelayArithmeticOverflow {
+			if err != errDARelayArithmeticOverflow { //nolint:errorlint // Exact identity is part of the contract.
 				t.Fatalf("underflow err=%v, want %v", err, errDARelayArithmeticOverflow)
 			}
 			requireDARelayStateUnchanged(t, state, before)
@@ -1032,7 +1032,7 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 		state.orphanBytesByDAID[ids[2]] = corrupt.wireBytes
 		before := daRelayStateSnapshot(state)
 		err := state.ReleasePeerQuotaKey("peer-drop")
-		if err != errDARelayArithmeticOverflow {
+		if err != errDARelayArithmeticOverflow { //nolint:errorlint // Exact identity is part of the contract.
 			t.Fatalf("overflow err=%v, want %v", err, errDARelayArithmeticOverflow)
 		}
 		requireDARelayStateUnchanged(t, state, before)
@@ -1040,19 +1040,19 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 	t.Run("first error wins", func(t *testing.T) {
 		state, _ := newDARelayFirstErrorState(t)
 		before := daRelayStateSnapshot(state)
-		if err := state.ReleasePeerQuotaKey("peer-drop"); err != errDARelayOrphanPeerCapExceeded {
+		if err := state.ReleasePeerQuotaKey("peer-drop"); err != errDARelayOrphanPeerCapExceeded { //nolint:errorlint // Exact identity is part of the contract.
 			t.Fatalf("first peer err=%v, want %v", err, errDARelayOrphanPeerCapExceeded)
 		}
 		requireDARelayStateUnchanged(t, state, before)
 	})
 	t.Run("locked test snapshots preserve complete images", func(t *testing.T) {
-		state := newDARelayLockedSnapshotState(t, "peer-drop")
-		expected := newDARelayLockedSnapshotState(t, "peer-drop")
+		state, expected := newDARelayLockedSnapshotState(t, "peer-drop"), newDARelayLockedSnapshotState(t, "peer-drop")
 		requireDARelayLockedSnapshotImages(t, state, expected, func(state *DARelayState) error {
 			return state.ReleasePeerQuotaKey("peer-drop")
 		})
 	})
 }
+
 func TestDARelayConsumeCompleteSetRemovesRecordAndPinnedAccounting(t *testing.T) {
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 	consumeID := daRelayTestID(99)
@@ -2298,12 +2298,14 @@ func cloneDARelayPrefetchIndexes(indexes map[[32]byte]map[uint16]string) map[[32
 	}
 	return clone
 }
+
 func requireDARelayStateUnchanged(t *testing.T, state *DARelayState, before daRelayStateView) {
 	t.Helper()
 	if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, before) {
 		t.Fatalf("state mutated: got=%+v want=%+v", got, before)
 	}
 }
+
 func newDARelayAtomicBatchState(t *testing.T, peer string) (*DARelayState, [3][32]byte) {
 	t.Helper()
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
@@ -2329,6 +2331,7 @@ func newDARelayAtomicBatchState(t *testing.T, peer string) (*DARelayState, [3][3
 	}
 	return state, ids
 }
+
 func newDARelayPeerReleaseSuccessState(t *testing.T) *DARelayState {
 	t.Helper()
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
@@ -2347,6 +2350,7 @@ func newDARelayPeerReleaseSuccessState(t *testing.T) *DARelayState {
 	state.prefetch.expires = map[[32]byte]time.Time{wholeID: time.Unix(2, 0), partialID: time.Unix(3, 0)}
 	return state
 }
+
 func newDARelayFirstErrorState(t *testing.T) (*DARelayState, [2][32]byte) {
 	t.Helper()
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
@@ -2359,6 +2363,7 @@ func newDARelayFirstErrorState(t *testing.T) (*DARelayState, [2][32]byte) {
 	state.orphanBytesByDAID[ids[1]] = 0
 	return state, ids
 }
+
 func newDARelayLockedSnapshotState(t *testing.T, peer string) *DARelayState {
 	t.Helper()
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
@@ -2373,10 +2378,10 @@ func newDARelayLockedSnapshotState(t *testing.T, peer string) *DARelayState {
 	mustAddDAChunk(t, state, "peer-complete", daRelayTestChunkWithTxBytes(completeID, 0, 1, []byte{2}, payload))
 	return state
 }
+
 func requireDARelayLockedSnapshotImages(t *testing.T, state, expected *DARelayState, write func(*DARelayState) error) {
 	t.Helper()
-	before := daRelayStateSnapshot(state)
-	candidates := state.CompleteSetCandidates(^uint64(0))
+	before, candidates := daRelayStateSnapshot(state), state.CompleteSetCandidates(^uint64(0))
 	if len(candidates) != 1 {
 		t.Fatalf("public reader candidates=%d, want 1", len(candidates))
 	}
@@ -2385,14 +2390,10 @@ func requireDARelayLockedSnapshotImages(t *testing.T, state, expected *DARelaySt
 	}
 	after := daRelayStateSnapshot(expected)
 	const readers, snapshotsPerReader = 4, 16
-	start := make(chan struct{})
-	cancel := make(chan struct{})
-	warmed := make(chan struct{}, readers)
-	snapshots := make(chan daRelayStateView, readers*(snapshotsPerReader+2))
-	writerResult := make(chan error, 1)
-	writeDone := make(chan struct{})
-	readerErr := make(chan error, readers)
-	deadline := time.NewTimer(2 * time.Second)
+	start, cancel := make(chan struct{}), make(chan struct{})
+	warmed, snapshots := make(chan struct{}, readers), make(chan daRelayStateView, readers*(snapshotsPerReader+2))
+	writerResult, writeDone := make(chan error, 1), make(chan struct{})
+	readerErr, deadline := make(chan error, readers), time.NewTimer(2*time.Second)
 	defer deadline.Stop()
 	var readersDone sync.WaitGroup
 	defer func() { close(cancel); readersDone.Wait() }()
@@ -2492,6 +2493,7 @@ func requireDARelayLockedSnapshotImages(t *testing.T, state, expected *DARelaySt
 		t.Fatal("final locked snapshot differs from expected post-image")
 	}
 }
+
 func mustPinnedPayloadAccounting(t *testing.T, record daRelaySetRecord) uint64 {
 	t.Helper()
 	return record.pinnedPayloadAccountingBytes()
