@@ -885,7 +885,7 @@ func TestDARelayAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T
 		if len(expired) != 2 || expired[0].daID != ids[0] || expired[0].receivedTime != 1 || expired[1].daID != ids[2] || expired[1].receivedTime != 3 {
 			t.Fatalf("mixed expired=%+v, want sorted first and final", expired)
 		}
-		if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, want) || got.nextReceivedTime != 5 {
+		if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, want) || got.nextReceivedTime != 5 { //nolint:govet // Complete private state-image equality requires structural comparison.
 			t.Fatalf("ttl success image=%+v, want %+v", got, want)
 		}
 	})
@@ -993,7 +993,7 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 			t.Fatalf("release peer: %v", err)
 		}
 		_, retained := state.sets[daRelayTestID(250)]
-		if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, want) || got.nextReceivedTime != 5 || retained || got.sets[daRelayTestID(213)].state != daRelayStateOrphanChunks || got.sets[daRelayTestID(213)].wireBytes != 11 || got.sets[daRelayTestID(213)].commit.wireBytes != 0 || len(got.sets[daRelayTestID(213)].chunks) != 1 || got.sets[daRelayTestID(213)].chunks[1].peerQuotaKey != "peer-keep" || !reflect.DeepEqual(got.sets[daRelayTestID(215)], completeWant) {
+		if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, want) || got.nextReceivedTime != 5 || retained || got.sets[daRelayTestID(213)].state != daRelayStateOrphanChunks || got.sets[daRelayTestID(213)].wireBytes != 11 || got.sets[daRelayTestID(213)].commit.wireBytes != 0 || len(got.sets[daRelayTestID(213)].chunks) != 1 || got.sets[daRelayTestID(213)].chunks[1].peerQuotaKey != "peer-keep" || !reflect.DeepEqual(got.sets[daRelayTestID(215)], completeWant) { //nolint:govet // Complete private state-image equality requires structural comparison.
 			t.Fatalf("peer success image=%+v, want %+v", got, want)
 		}
 	})
@@ -2301,7 +2301,7 @@ func cloneDARelayPrefetchIndexes(indexes map[[32]byte]map[uint16]string) map[[32
 
 func requireDARelayStateUnchanged(t *testing.T, state *DARelayState, before daRelayStateView) {
 	t.Helper()
-	if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, before) {
+	if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, before) { //nolint:govet // Complete private state-image equality requires structural comparison.
 		t.Fatalf("state mutated: got=%+v want=%+v", got, before)
 	}
 }
@@ -2467,9 +2467,9 @@ func requireDARelayLockedSnapshotImages(t *testing.T, state, expected *DARelaySt
 	close(snapshots)
 	sawBefore, sawAfter, partialImage := false, false, false
 	for got := range snapshots {
-		if reflect.DeepEqual(got, before) {
+		if reflect.DeepEqual(got, before) { //nolint:govet // Complete private state-image equality requires structural comparison.
 			sawBefore = true
-		} else if reflect.DeepEqual(got, after) {
+		} else if reflect.DeepEqual(got, after) { //nolint:govet // Complete private state-image equality requires structural comparison.
 			sawAfter = true
 		} else {
 			partialImage = true
@@ -2489,7 +2489,7 @@ func requireDARelayLockedSnapshotImages(t *testing.T, state, expected *DARelaySt
 	if partialImage {
 		t.Fatal("locked snapshot observed a partial image")
 	}
-	if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, after) {
+	if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, after) { //nolint:govet // Complete private state-image equality requires structural comparison.
 		t.Fatal("final locked snapshot differs from expected post-image")
 	}
 }
