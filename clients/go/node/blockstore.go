@@ -1398,9 +1398,9 @@ type preparedCanonicalIndex struct {
 // decodeCanonicalIndexSequence strict-decodes visible index bytes into the
 // canonical-index identity, composing the SAME envelope and inner decoders the
 // on-disk read uses — including loadBlockStoreIndex's exact error wrapping, so one corrupt
-// image has ONE error identity whether it is decoded here or reopened from disk: no second
-// parser accepts a spelling the store would refuse to reopen, and every caller treats a
-// decode failure as no identity, never an empty one.
+// image has ONE error identity whether it is decoded here or read from disk: no second
+// parser accepts a spelling the store's own read (loadBlockStoreIndex) would refuse, and
+// every caller treats a decode failure as no identity, never an empty one.
 func decodeCanonicalIndexSequence(raw []byte) ([]string, error) {
 	payload, err := openStoreEnvelope(storeEnvelopeBlockIndex, raw)
 	if err != nil {
@@ -1421,8 +1421,8 @@ func decodeCanonicalIndexSequence(raw []byte) ([]string, error) {
 // hash. oldRaw is optional comparison identity: commits pass exact visible bytes,
 // Set/Truncate pass encoded live RAM, and Restore passes nil because even a no-op
 // must save. When present it is DECODED to its ordered sequence, so the comparison
-// identity is the sequence and not the spelling, and bytes this store would refuse
-// to reopen are refused here rather than kept as an identity nothing can match.
+// identity is the sequence and not the spelling, and bytes the store's own read
+// would refuse are refused here rather than kept as an identity nothing can match.
 // Commit still refuses if the visible identity moved. A nil next list is rejected
 // like JSON null; empty non-nil is the valid empty identity.
 func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalIndex, error) {
@@ -1560,12 +1560,12 @@ func (p *preparedCanonicalIndex) finishTransition(bs *BlockStore, delta *noncano
 // IDENTITY of §6.4.1 — the complete ordered row sequence, position = height, length and
 // every row — never by the error text: a shared tip, a reordering, a duplicate, a prefix,
 // an extra row and a matching length are each NOT one, so anything that is not exactly the
-// old or exactly the planned-new sequence is neither. A read failure, and bytes the store
-// would refuse to reopen, are neither too — nothing is guessed, retried or rewritten. It
-// reads through the loadBlockStoreIndexFn seam (loadBlockStoreIndex in production, so no
-// second parser can accept an image the store could not reopen; tests replace it to COUNT
-// the one read), and that read is unbounded like every other read of this file: a decoded
-// sequence no longer lets the two planned images bound it (RUB-1057).
+// old or exactly the planned-new sequence is neither. A read failure, and bytes the strict
+// read (loadBlockStoreIndex) refuses, are neither too — nothing is guessed, retried or
+// rewritten. It reads through the loadBlockStoreIndexFn seam (loadBlockStoreIndex in
+// production, so no second parser can accept an image that read would refuse; tests replace
+// it to COUNT the one read), and that read is unbounded like every other read of this file:
+// a decoded sequence no longer lets the two planned images bound it (RUB-1057).
 //
 // Two spellings of one sequence are ONE identity, so terminal NEW caches the EXACT bytes
 // it read while publishing the prevalidated PLANNED decoded image; a nil old identity

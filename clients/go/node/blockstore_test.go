@@ -2058,13 +2058,12 @@ func mustPrepareCanonicalIndex(t *testing.T, store *BlockStore, next []string) *
 	return prepared
 }
 
-func mustCommitCanonicalIndex(t *testing.T, store *BlockStore, next []string) *preparedCanonicalIndex {
+func mustCommitCanonicalIndex(t *testing.T, store *BlockStore, next []string) {
 	t.Helper()
 	prepared := mustPrepareCanonicalIndex(t, store, next)
 	if got := prepared.commit(store); got.class != canonicalCommitted {
 		t.Fatalf("commit(%v) = %s (%v), want COMMITTED", next, got.class, got.err)
 	}
-	return prepared
 }
 
 // assertPublishedCanonicalImage proves the prepared image is the live one in
@@ -2371,8 +2370,8 @@ func TestPreparedCanonicalIndexCrossStoreCommitIsSingleUse(t *testing.T) {
 // the strict decoder accepts and encodeBlockStoreIndex never emits. It is the
 // test's own oracle for "same sequence, different bytes", never produced by the code
 // under test, and every user proves it differs from the canonical encoding so no row can
-// pass because the two spellings collapsed. Callers pass >= 1 row: the empty sequence has
-// exactly one spelling, so there is nothing to re-spell.
+// pass because the two spellings collapsed. Callers pass >= 1 row: zero rows would render
+// `"canonical":[""]`, an invalid single empty row, not the empty sequence.
 func respellCanonicalIndex(t *testing.T, rows ...string) []byte {
 	t.Helper()
 	return mustMarshalStoreEnvelope(t, `{"version":1,"canonical":["`+strings.Join(rows, `","`)+`"]}`)
@@ -3073,7 +3072,7 @@ func failUnlinkAroundRename(afterRename bool, fault error) func(*testing.T, *Blo
 
 // TestBlockStoreCanonicalIndexCommitFaultMatrix walks the real RUB-1084 write
 // lane with one injected fault per stage. Pre-commit stages leave the exact old
-// bytes and RAM; post-commit stages classify on the visible bytes alone.
+// bytes and RAM; post-commit stages classify on the visible identity alone.
 func TestBlockStoreCanonicalIndexCommitFaultMatrix(t *testing.T) {
 	row0, row1 := canonicalIndexRow(0x90), canonicalIndexRow(0x91)
 	fault := errors.New("injected stage fault")
@@ -3320,8 +3319,7 @@ func TestBlockStoreIndexRawTracksVisibleBytes(t *testing.T) {
 
 // TestBlockStoreOpenKeepsExactDiskIndexBytes: the visible identity is the bytes
 // THEMSELVES, never a re-encoding. Two inner spellings decode to the same index,
-// so an identity derived by re-encoding would claim bytes the disk does not
-// hold — and a strict readback would then classify on a fiction.
+// so an identity derived by re-encoding would claim bytes the disk does not hold.
 func TestBlockStoreOpenKeepsExactDiskIndexBytes(t *testing.T) {
 	root := BlockStorePath(t.TempDir())
 	store := mustCreateBlockStore(t, root)
