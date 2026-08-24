@@ -663,41 +663,92 @@ type noncanonicalReservationLeaf struct {
 	prev   [32]byte
 	height uint64
 }
+
+const (
+	noncanonicalD0InvalidBlock uint8 = iota
+	noncanonicalD1HeaderWithoutBlock
+	noncanonicalD2UndoWithoutBlockOrHeader
+	noncanonicalD3InvalidHeader
+	noncanonicalD4UndoWithoutHeader
+	noncanonicalD5InvalidUndo
+	noncanonicalProtected, noncanonicalWalkSeen = 1 << 6, 1 << 7
+)
+
+type noncanonicalReclaim struct {
+	owner, hash                    [32]byte
+	before                         noncanonicalRow
+	leaf                           noncanonicalArtifactKind
+	class                          uint8
+	parent                         string
+	cause                          error
+	protected                      map[[32]byte]uint8
+	marked, fsyncPending, unlinked bool
+}
 type noncanonicalReservation struct {
 	store   *BlockStore
 	hash    [32]byte
 	done    chan struct{}
 	tracked bool
+	owner   bool
 }
 
 // reserveNoncanonicalArtifactWrite is the sole create-path reservation entry.
 func (bs *BlockStore) reserveNoncanonicalArtifactWrite(hash [32]byte, leaves []noncanonicalReservationLeaf, prepare func() ([]noncanonicalReservationLeaf, error), create func(*noncanonicalReservation) error) error {
+	budget := noncanonicalRecoveryBudget{}
+	return bs.reserveNoncanonicalArtifactWriteWithBudget(hash, leaves, prepare, create, &budget)
+}
+
+func (bs *BlockStore) reserveNoncanonicalArtifactWriteWithBudget(hash [32]byte, leaves []noncanonicalReservationLeaf, prepare func() ([]noncanonicalReservationLeaf, error), create func(*noncanonicalReservation) error, budget *noncanonicalRecoveryBudget) error {
 	if handled, err := bs.reserveInactiveNoncanonicalArtifactWrite(prepare, create); handled {
 		return err
 	}
-	reservation := bs.beginNoncanonicalReservation(hash)
-	if reservation.tracked {
-		defer reservation.finish()
-	}
-	if prepare != nil {
-		var err error
-		leaves, err = prepare()
+	for {
+		reservation, err := bs.beginNoncanonicalReservation(hash, budget)
 		if err != nil {
 			return err
 		}
-		if len(leaves) == 0 {
-			return nil
+		leaves, done, err := reservation.prepareWrite(leaves, prepare)
+		if done {
+			return err
 		}
-	}
-	if !reservation.tracked {
-		return create(reservation)
-	}
-	if err := reservation.reserve(leaves); err != nil {
+		restart, err := reservation.completeWrite(leaves, create)
+		if restart {
+			continue
+		}
 		return err
 	}
-	err := create(reservation)
-	reservation.releaseUncreated()
-	return err
+}
+
+func (r *noncanonicalReservation) prepareWrite(leaves []noncanonicalReservationLeaf, prepare func() ([]noncanonicalReservationLeaf, error)) ([]noncanonicalReservationLeaf, bool, error) {
+	if prepare == nil {
+		return leaves, false, nil
+	}
+	leaves, err := prepare()
+	if err != nil || len(leaves) == 0 {
+		r.finish()
+		return leaves, true, err
+	}
+	return leaves, false, nil
+}
+
+func (r *noncanonicalReservation) completeWrite(leaves []noncanonicalReservationLeaf, create func(*noncanonicalReservation) error) (bool, error) {
+	if !r.tracked {
+		return false, create(r)
+	}
+	restart, err := r.reserve(leaves)
+	if restart {
+		r.finish()
+		return true, nil
+	}
+	if err != nil && r.owner {
+		err = r.reclaim(leaves)
+	}
+	if err == nil {
+		err = create(r)
+		r.releaseUncreated()
+	}
+	r.finish()
+	return false, err
 }
 
 func (bs *BlockStore) reserveInactiveNoncanonicalArtifactWrite(prepare func() ([]noncanonicalReservationLeaf, error), create func(*noncanonicalReservation) error) (bool, error) {
@@ -714,17 +765,16 @@ func (bs *BlockStore) reserveInactiveNoncanonicalArtifactWrite(prepare func() ([
 	return true, create(&noncanonicalReservation{store: bs})
 }
 
-func (bs *BlockStore) beginNoncanonicalReservation(hash [32]byte) *noncanonicalReservation {
+func (bs *BlockStore) beginNoncanonicalReservation(hash [32]byte, budget *noncanonicalRecoveryBudget) (*noncanonicalReservation, error) {
 	for {
 		bs.stateMu.Lock()
-		if wait := bs.noncanonicalTransitionDone; wait != nil {
+		if err := bs.waitNoncanonicalTransitionLocked(budget); err != nil {
 			bs.stateMu.Unlock()
-			<-wait
-			continue
+			return nil, err
 		}
 		if bs.noncanonical.Load() == nil {
 			bs.stateMu.Unlock()
-			return &noncanonicalReservation{store: bs}
+			return &noncanonicalReservation{store: bs}, nil
 		}
 		if wait := bs.noncanonicalPending[hash]; wait != nil {
 			bs.stateMu.Unlock()
@@ -737,21 +787,31 @@ func (bs *BlockStore) beginNoncanonicalReservation(hash [32]byte) *noncanonicalR
 		done := make(chan struct{})
 		bs.noncanonicalPending[hash] = done
 		bs.stateMu.Unlock()
-		return &noncanonicalReservation{store: bs, hash: hash, done: done, tracked: true}
+		return &noncanonicalReservation{store: bs, hash: hash, done: done, tracked: true}, nil
 	}
 }
 
-func (r *noncanonicalReservation) reserve(leaves []noncanonicalReservationLeaf) error {
+func (r *noncanonicalReservation) reserve(leaves []noncanonicalReservationLeaf) (bool, error) {
 	r.store.stateMu.Lock()
 	defer r.store.stateMu.Unlock()
 	accounting := r.store.noncanonical.Load()
 	if accounting == nil {
-		return nil
+		return false, nil
 	}
 	if _, canonical := r.store.canonicalHeightByHash[r.hash]; canonical {
-		return nil
+		return false, nil
 	}
-	return r.store.reserveLockedNoncanonicalLeaves(accounting, r.hash, leaves)
+	err := r.store.reserveLockedNoncanonicalLeaves(accounting, r.hash, leaves)
+	if !errors.Is(err, errNoncanonicalCount) && !errors.Is(err, errNoncanonicalBytes) {
+		return false, err
+	}
+	if r.store.noncanonicalTransitionDone != nil {
+		return true, err
+	}
+	r.store.noncanonicalTransitionDone = make(chan struct{})
+	r.store.noncanonicalReclaim = &noncanonicalReclaim{owner: r.hash}
+	r.owner = true
+	return false, err
 }
 
 func (bs *BlockStore) reserveLockedNoncanonicalLeaves(accounting *noncanonicalAccounting, hash [32]byte, leaves []noncanonicalReservationLeaf) error {
@@ -882,4 +942,348 @@ func (r *noncanonicalReservation) finish() {
 	defer r.store.stateMu.Unlock()
 	delete(r.store.noncanonicalPending, r.hash)
 	close(r.done)
+}
+
+func noncanonicalDamage(row noncanonicalRow) (uint8, bool) {
+	block, header, undo := row.state(noncanonicalBlockArtifact), row.state(noncanonicalHeaderArtifact), row.state(noncanonicalUndoArtifact)
+	if block == BlockArtifactInvalid {
+		return noncanonicalD0InvalidBlock, true
+	}
+	if block != BlockArtifactValid {
+		return noncanonicalMissingBlockDamage(header, undo)
+	}
+	return noncanonicalValidBlockDamage(header, undo)
+}
+
+func noncanonicalMissingBlockDamage(header, undo BlockArtifactState) (uint8, bool) {
+	if header != BlockArtifactAbsent {
+		return noncanonicalD1HeaderWithoutBlock, true
+	}
+	if undo != BlockArtifactAbsent {
+		return noncanonicalD2UndoWithoutBlockOrHeader, true
+	}
+	return 0, false
+}
+
+func noncanonicalValidBlockDamage(header, undo BlockArtifactState) (uint8, bool) {
+	if header == BlockArtifactInvalid {
+		return noncanonicalD3InvalidHeader, true
+	}
+	if header == BlockArtifactAbsent && undo != BlockArtifactAbsent {
+		return noncanonicalD4UndoWithoutHeader, true
+	}
+	if undo == BlockArtifactInvalid {
+		return noncanonicalD5InvalidUndo, true
+	}
+	return 0, false
+}
+
+func (bs *BlockStore) noncanonicalProtectionLocked(accounting *noncanonicalAccounting, owner [32]byte, leaves []noncanonicalReservationLeaf) map[[32]byte]uint8 {
+	protected := bs.seedNoncanonicalProtectionLocked(accounting, owner)
+	parent, proposed := proposedNoncanonicalParent(leaves)
+	if !proposed {
+		if at, found := accounting.find(owner); found {
+			row := accounting.rows[at]
+			if row.state(noncanonicalBlockArtifact) == BlockArtifactValid || row.state(noncanonicalHeaderArtifact) == BlockArtifactValid {
+				parent = row.prev
+			}
+		}
+	}
+	walkNoncanonicalProtection(accounting, protected, parent)
+	return protected
+}
+
+func (bs *BlockStore) seedNoncanonicalProtectionLocked(accounting *noncanonicalAccounting, owner [32]byte) map[[32]byte]uint8 {
+	protected := make(map[[32]byte]uint8, int(accounting.count)+2)
+	protected[owner] = noncanonicalProtected
+	for _, row := range accounting.rows[:accounting.count] {
+		if bs.noncanonicalReaders[row.hash] != 0 {
+			protected[row.hash] |= noncanonicalProtected
+		}
+		if row.prev == ([32]byte{}) || row.state(noncanonicalBlockArtifact) != BlockArtifactValid && row.state(noncanonicalHeaderArtifact) != BlockArtifactValid {
+			continue
+		}
+		if _, found := accounting.find(row.prev); found {
+			protected[row.prev] |= noncanonicalProtected
+		}
+	}
+	return protected
+}
+
+func proposedNoncanonicalParent(leaves []noncanonicalReservationLeaf) ([32]byte, bool) {
+	for _, leaf := range leaves {
+		if leaf.state != BlockArtifactValid {
+			continue
+		}
+		if leaf.kind == noncanonicalBlockArtifact || leaf.kind == noncanonicalHeaderArtifact {
+			return leaf.prev, true
+		}
+	}
+	return [32]byte{}, false
+}
+
+func walkNoncanonicalProtection(accounting *noncanonicalAccounting, protected map[[32]byte]uint8, parent [32]byte) {
+	for parent != ([32]byte{}) {
+		at, found := accounting.find(parent)
+		if !found {
+			return
+		}
+		if protected[parent]&noncanonicalWalkSeen != 0 {
+			return
+		}
+		protected[parent] |= noncanonicalProtected | noncanonicalWalkSeen
+		row := accounting.rows[at]
+		if row.state(noncanonicalBlockArtifact) != BlockArtifactValid && row.state(noncanonicalHeaderArtifact) != BlockArtifactValid {
+			return
+		}
+		parent = row.prev
+	}
+}
+
+func (bs *BlockStore) nextNoncanonicalCandidateLocked(accounting *noncanonicalAccounting, class uint8, after [32]byte, started bool, protected map[[32]byte]uint8) (noncanonicalRow, bool) {
+	at := 0
+	if started {
+		at = sort.Search(int(accounting.count), func(i int) bool {
+			return bytes.Compare(accounting.rows[i].hash[:], after[:]) > 0
+		})
+	}
+	for ; at < int(accounting.count); at++ {
+		row := accounting.rows[at]
+		got, damaged := noncanonicalDamage(row)
+		_, canonical := bs.canonicalHeightByHash[row.hash]
+		if damaged && got == class && protected[row.hash]&noncanonicalProtected == 0 && !canonical && bs.noncanonicalReaders[row.hash] == 0 {
+			reclaim := bs.noncanonicalReclaim
+			reclaim.hash, reclaim.class, reclaim.marked, reclaim.protected = row.hash, class, true, protected
+			return row, true
+		}
+	}
+	return noncanonicalRow{}, false
+}
+
+func (r *noncanonicalReservation) reclaim(leaves []noncanonicalReservationLeaf) error {
+	protected, err := r.prepareReclaim(leaves)
+	if err != nil {
+		return err
+	}
+	r.store.probeLeaf()
+	for class := noncanonicalD0InvalidBlock; class <= noncanonicalD5InvalidUndo; class++ {
+		done, err := r.reclaimClass(class, protected, leaves)
+		if done {
+			return err
+		}
+	}
+	r.store.stateMu.Lock()
+	err = r.store.reserveLockedNoncanonicalLeaves(r.store.noncanonical.Load(), r.hash, leaves)
+	r.store.endNoncanonicalTransitionLocked()
+	r.store.stateMu.Unlock()
+	return err
+}
+
+func (r *noncanonicalReservation) waitForOtherReservations() {
+	r.store.stateMu.Lock()
+	waiters := make([]chan struct{}, 0, len(r.store.noncanonicalPending))
+	for hash, done := range r.store.noncanonicalPending {
+		if hash != r.hash {
+			waiters = append(waiters, done)
+		}
+	}
+	r.store.stateMu.Unlock()
+	for _, done := range waiters {
+		<-done
+	}
+}
+
+func (r *noncanonicalReservation) prepareReclaim(leaves []noncanonicalReservationLeaf) (map[[32]byte]uint8, error) {
+	r.waitForOtherReservations()
+	r.store.stateMu.Lock()
+	accounting, reclaim := r.store.noncanonical.Load(), r.store.noncanonicalReclaim
+	if accounting == nil || reclaim == nil || reclaim.owner != r.hash {
+		r.store.endNoncanonicalTransitionLocked()
+		r.store.stateMu.Unlock()
+		return nil, errors.New("noncanonical reclaim accounting is inconsistent")
+	}
+	if imageErr := noncanonicalReclaimImageError(accounting, r.store.canonicalHeightByHash); imageErr != nil {
+		r.store.endNoncanonicalTransitionLocked()
+		r.store.stateMu.Unlock()
+		return nil, fmt.Errorf("noncanonical reclaim accounting: %w", imageErr)
+	}
+	protected := r.store.noncanonicalProtectionLocked(accounting, r.hash, leaves)
+	r.store.stateMu.Unlock()
+	return protected, nil
+}
+
+func noncanonicalReclaimImageError(accounting *noncanonicalAccounting, canonical map[[32]byte]uint64) error {
+	if !validNoncanonicalImageShape(accounting) {
+		return errors.New("image shape is inconsistent")
+	}
+	used, imageErr := sumNoncanonicalRows(accounting.rows[:accounting.count], canonical)
+	switch {
+	case imageErr != nil:
+	case used != accounting.usedBytes:
+		imageErr = errors.New("total is inconsistent")
+	case used > accounting.limit:
+		imageErr = errors.New("used bytes exceed limit")
+	}
+	return imageErr
+}
+
+func (r *noncanonicalReservation) reclaimClass(class uint8, protected map[[32]byte]uint8, leaves []noncanonicalReservationLeaf) (bool, error) {
+	var after [32]byte
+	for started := false; ; started = true {
+		r.store.stateMu.Lock()
+		candidate, found := r.store.nextNoncanonicalCandidateLocked(r.store.noncanonical.Load(), class, after, started, protected)
+		r.store.stateMu.Unlock()
+		if !found {
+			return false, nil
+		}
+		after = candidate.hash
+		if _, err := r.store.reclaimNoncanonicalCandidate(candidate, false); err != nil {
+			return true, err
+		}
+		r.store.stateMu.Lock()
+		err := r.store.reserveLockedNoncanonicalLeaves(r.store.noncanonical.Load(), r.hash, leaves)
+		done := err == nil || !errors.Is(err, errNoncanonicalCount) && !errors.Is(err, errNoncanonicalBytes)
+		if done {
+			r.store.endNoncanonicalTransitionLocked()
+		}
+		r.store.stateMu.Unlock()
+		if done {
+			return true, err
+		}
+	}
+}
+
+func (bs *BlockStore) reclaimNoncanonicalCandidate(row noncanonicalRow, recovering bool) (noncanonicalRow, error) {
+	strict := !recovering
+	for _, kind := range []noncanonicalArtifactKind{noncanonicalBlockArtifact, noncanonicalHeaderArtifact, noncanonicalUndoArtifact} {
+		if row.state(kind) == BlockArtifactAbsent {
+			continue
+		}
+		next, err := bs.reclaimNoncanonicalLeaf(row, kind, recovering, strict)
+		if err != nil {
+			return noncanonicalRow{}, err
+		}
+		row, strict = next, false
+	}
+	return row, nil
+}
+
+type noncanonicalLeafReclaimPlan struct {
+	reclaim       *noncanonicalReclaim
+	before, after noncanonicalRow
+	path          string
+	recovering    bool
+	unlinked      bool
+}
+
+func (bs *BlockStore) reclaimNoncanonicalLeaf(before noncanonicalRow, kind noncanonicalArtifactKind, recovering, strict bool) (noncanonicalRow, error) {
+	plan, err := bs.prepareNoncanonicalLeafReclaim(before, kind, recovering)
+	if err != nil {
+		return noncanonicalRow{}, err
+	}
+	if err := bs.persistNoncanonicalLeafReclaim(plan, strict); err != nil {
+		return noncanonicalRow{}, err
+	}
+	if err := bs.publishNoncanonicalLeafReclaim(plan); err != nil {
+		return noncanonicalRow{}, err
+	}
+	return plan.after, nil
+}
+
+func (bs *BlockStore) prepareNoncanonicalLeafReclaim(before noncanonicalRow, kind noncanonicalArtifactKind, recovering bool) (*noncanonicalLeafReclaimPlan, error) {
+	bs.stateMu.Lock()
+	accounting, reclaim := bs.noncanonical.Load(), bs.noncanonicalReclaim
+	if accounting == nil || reclaim == nil {
+		bs.stateMu.Unlock()
+		return nil, bs.failNoncanonicalReclaim(reclaim, recovering, false, errors.New("noncanonical reclaim state changed"))
+	}
+	dir, suffix, _ := bs.noncanonicalArtifactPath(kind)
+	unlinked := recovering && reclaim.before == before && reclaim.leaf == kind && reclaim.unlinked
+	reclaim.before, reclaim.leaf, reclaim.parent, reclaim.unlinked = before, kind, dir, unlinked
+	at, found := accounting.find(before.hash)
+	_, canonical := bs.canonicalHeightByHash[before.hash]
+	_, damaged := noncanonicalDamage(before)
+	owned := noncanonicalLeafReclaimOwned(accounting, reclaim, before, at, found)
+	eligible := bs.noncanonicalLeafReclaimEligible(reclaim, before.hash, canonical, damaged)
+	if !owned || !eligible {
+		bs.stateMu.Unlock()
+		err := noncanonicalReclaimError(reclaim, "recheck", errors.New("candidate changed"))
+		return nil, bs.failNoncanonicalReclaim(reclaim, recovering, reclaim.unlinked, err)
+	}
+	path := filepath.Join(dir, hex.EncodeToString(before.hash[:])+suffix)
+	bs.stateMu.Unlock()
+	plan := &noncanonicalLeafReclaimPlan{reclaim: reclaim, before: before, after: noncanonicalReclaimedRow(before, kind), path: path, recovering: recovering, unlinked: unlinked}
+	return plan, nil
+}
+
+func noncanonicalLeafReclaimOwned(accounting *noncanonicalAccounting, reclaim *noncanonicalReclaim, before noncanonicalRow, at int, found bool) bool {
+	return reclaim.marked && reclaim.hash == before.hash && found && accounting.rows[at] == before
+}
+
+func (bs *BlockStore) noncanonicalLeafReclaimEligible(reclaim *noncanonicalReclaim, hash [32]byte, canonical, damaged bool) bool {
+	return reclaim.protected[hash]&noncanonicalProtected == 0 && !canonical && damaged && bs.noncanonicalReaders[hash] == 0
+}
+
+func (bs *BlockStore) persistNoncanonicalLeafReclaim(plan *noncanonicalLeafReclaimPlan, strict bool) error {
+	if strict {
+		exact := plan.before
+		if plan.unlinked {
+			exact = plan.after
+		}
+		if err := bs.requireExactNoncanonicalRow(exact); err != nil {
+			err = noncanonicalReclaimError(plan.reclaim, "strict", err)
+			return bs.failNoncanonicalReclaim(plan.reclaim, plan.recovering, plan.unlinked, err)
+		}
+	}
+	if err := atomicWriteIO.unlink(plan.path); err != nil {
+		err = noncanonicalReclaimError(plan.reclaim, "unlink", err)
+		return bs.failNoncanonicalReclaim(plan.reclaim, plan.recovering, plan.unlinked, err)
+	}
+	if err := atomicWriteIO.syncParent(plan.reclaim.parent); err != nil {
+		err = noncanonicalReclaimError(plan.reclaim, "fsync", err)
+		return bs.failNoncanonicalReclaim(plan.reclaim, true, true, err)
+	}
+	return nil
+}
+
+func (bs *BlockStore) publishNoncanonicalLeafReclaim(plan *noncanonicalLeafReclaimPlan) error {
+	bs.stateMu.Lock()
+	if !bs.publishNoncanonicalReclaimLocked(plan.reclaim, plan.after) {
+		bs.stateMu.Unlock()
+		err := noncanonicalReclaimError(plan.reclaim, "publish", errors.New("accounting drift"))
+		return bs.failNoncanonicalReclaim(plan.reclaim, true, true, err)
+	}
+	bs.stateMu.Unlock()
+	return nil
+}
+
+func noncanonicalReclaimError(reclaim *noncanonicalReclaim, action string, err error) error {
+	return fmt.Errorf("reclaim %x class %d leaf %d %s: %w", reclaim.hash, reclaim.class, reclaim.leaf, action, err)
+}
+
+func (bs *BlockStore) requireExactNoncanonicalRow(want noncanonicalRow) error {
+	directories, err := bs.snapshotNoncanonicalDirectories()
+	if err != nil {
+		return err
+	}
+	got, err := bs.reconstructDisconnectedRow(want.hash, directories)
+	if err != nil {
+		return err
+	}
+	if *got != want {
+		return errors.New("noncanonical artifact row identity drift")
+	}
+	return nil
+}
+
+func noncanonicalReclaimedRow(row noncanonicalRow, kind noncanonicalArtifactKind) noncanonicalRow {
+	row.setState(kind, BlockArtifactAbsent)
+	*row.bytes(kind) = 0
+	if kind == noncanonicalUndoArtifact {
+		row.height = noncanonicalUnknownHeight
+	}
+	if row.state(noncanonicalBlockArtifact) != BlockArtifactValid && row.state(noncanonicalHeaderArtifact) != BlockArtifactValid {
+		row.prev = [32]byte{}
+	}
+	return row
 }
