@@ -18,7 +18,12 @@ func (s *DARelayState) releasePeerQuotaKey(key string) error {
 	if s.orphanBytesByPeerQuotaKey[key] == 0 {
 		return nil
 	}
-	return s.releasePeerQuotaKeyLocked(key)
+	projected := s.cloneForAtomicBatchLocked()
+	if err := projected.releasePeerQuotaKeyLocked(key); err != nil {
+		return err
+	}
+	s.publishAtomicBatchLocked(projected)
+	return nil
 }
 
 func (s *DARelayState) releasePeerQuotaKeyLocked(key string) error {
