@@ -50,21 +50,22 @@ type BlockStore struct {
 	noncanonical               atomic.Pointer[noncanonicalAccounting]
 	noncanonicalPending        map[[32]byte]chan struct{}
 	noncanonicalTransitionDone chan struct{}
+	noncanonicalReclaim        *noncanonicalReclaim
+	noncanonicalReaders        map[[32]byte]uint32
 
-	// leafProbe runs via probeLeaf during presence reads and reconstruction probes,
-	// making leaf movement observable to an instrumented test. nil in production;
-	// per store, so no two tests can share one.
+	// leafProbe runs after GetUndo release, before presence/reconstruction probes, after
+	// protection freeze, and post-recovery before handoff. nil in production and per-store.
 	leafProbe func()
 }
 
-// Block/header/undo blobs are append-only. The canonical chain view is the index file,
-// updated via atomic rename. Rollback paths rely on restoring that canonical index; stale
-// blob files are tolerated as unreachable garbage, not live chain state.
+// Blobs are create-if-absent; BlockStore retains canonical/healthy rows and reclaims only damaged side rows.
 
 type blockStoreIndexDisk struct {
 	Canonical []string `json:"canonical"`
 	Version   uint32   `json:"version"`
 }
+
+type noncanonicalRecoveryBudget struct{ claimed bool }
 
 func BlockStorePath(dataDir string) string {
 	return filepath.Join(dataDir, blockStoreDirName)
@@ -163,7 +164,10 @@ func (bs *BlockStore) reloadFromDisk() error {
 	}
 	bs.stateMu.Lock()
 	defer bs.stateMu.Unlock()
-	bs.beginNoncanonicalTransitionLocked()
+	budget := noncanonicalRecoveryBudget{}
+	if err := bs.beginNoncanonicalTransitionLocked(&budget); err != nil {
+		return err
+	}
 	defer bs.endNoncanonicalTransitionLocked()
 	paths := newBlockStorePaths(bs.rootPath)
 	if err := paths.requireInitialized(); err != nil {
@@ -190,8 +194,10 @@ func (bs *BlockStore) reloadFromDisk() error {
 }
 
 // beginNoncanonicalTransitionLocked fences/drains under caller-held stateMu without a goroutine.
-func (bs *BlockStore) beginNoncanonicalTransitionLocked() {
-	bs.waitNoncanonicalTransitionLocked()
+func (bs *BlockStore) beginNoncanonicalTransitionLocked(budget *noncanonicalRecoveryBudget) error {
+	if err := bs.waitNoncanonicalTransitionLocked(budget); err != nil {
+		return err
+	}
 	bs.noncanonicalTransitionDone = make(chan struct{})
 	for len(bs.noncanonicalPending) > 0 {
 		waiters := make([]chan struct{}, 0, len(bs.noncanonicalPending))
@@ -204,20 +210,118 @@ func (bs *BlockStore) beginNoncanonicalTransitionLocked() {
 		}
 		bs.stateMu.Lock()
 	}
+	return nil
 }
 
-func (bs *BlockStore) waitNoncanonicalTransitionLocked() {
+func (bs *BlockStore) claimNoncanonicalRecoveryLocked(budget *noncanonicalRecoveryBudget) *noncanonicalReclaim {
+	reclaim := bs.noncanonicalReclaim
+	if reclaim == nil || !reclaim.fsyncPending || budget.claimed {
+		return nil
+	}
+	budget.claimed, reclaim.fsyncPending = true, false
+	return reclaim
+}
+
+func (bs *BlockStore) waitNoncanonicalTransitionLocked(budget *noncanonicalRecoveryBudget) error {
 	for bs.noncanonicalTransitionDone != nil {
+		if reclaim := bs.noncanonicalReclaim; reclaim != nil && reclaim.cause != nil && budget.claimed {
+			return reclaim.cause
+		}
+		if reclaim := bs.claimNoncanonicalRecoveryLocked(budget); reclaim != nil {
+			bs.stateMu.Unlock()
+			err := bs.recoverNoncanonicalReclaim(reclaim)
+			bs.stateMu.Lock()
+			if err != nil {
+				return err
+			}
+			bs.stateMu.Unlock()
+			bs.probeLeaf()
+			bs.stateMu.Lock()
+			bs.endNoncanonicalTransitionLocked()
+			continue
+		}
 		done := bs.noncanonicalTransitionDone
 		bs.stateMu.Unlock()
 		<-done
 		bs.stateMu.Lock()
 	}
+	return nil
 }
 
 func (bs *BlockStore) endNoncanonicalTransitionLocked() {
 	close(bs.noncanonicalTransitionDone)
-	bs.noncanonicalTransitionDone = nil
+	bs.noncanonicalTransitionDone, bs.noncanonicalReclaim = nil, nil
+}
+
+func (bs *BlockStore) keepNoncanonicalReclaimPendingLocked(reclaim *noncanonicalReclaim) {
+	if bs.noncanonicalReclaim != reclaim {
+		return
+	}
+	reclaim.fsyncPending = true
+	close(bs.noncanonicalTransitionDone)
+	bs.noncanonicalTransitionDone = make(chan struct{})
+}
+
+func (bs *BlockStore) publishNoncanonicalReclaimLocked(reclaim *noncanonicalReclaim, after noncanonicalRow) bool {
+	accounting, at, reclaimed, ok := bs.reclaimPublicationRowLocked(reclaim)
+	if !ok {
+		return false
+	}
+	if accounting.usedBytes < reclaimed {
+		return false
+	}
+	accounting.usedBytes -= reclaimed
+	if after.empty() {
+		accounting.remove(at)
+	} else {
+		accounting.rows[at] = after
+	}
+	reclaim.unlinked = false
+	return true
+}
+
+func (bs *BlockStore) reclaimPublicationRowLocked(reclaim *noncanonicalReclaim) (*noncanonicalAccounting, int, uint64, bool) {
+	accounting := bs.noncanonical.Load()
+	if accounting == nil || bs.noncanonicalReclaim != reclaim || !reclaim.marked {
+		return nil, 0, 0, false
+	}
+	_, canonical := bs.canonicalHeightByHash[reclaim.hash]
+	if canonical || bs.noncanonicalReaders[reclaim.hash] != 0 {
+		return nil, 0, 0, false
+	}
+	at, found := accounting.find(reclaim.hash)
+	if !found || accounting.rows[at] != reclaim.before {
+		return nil, 0, 0, false
+	}
+	return accounting, at, *reclaim.before.bytes(reclaim.leaf), true
+}
+
+func (bs *BlockStore) recoverNoncanonicalReclaim(reclaim *noncanonicalReclaim) error {
+	after, err := bs.reclaimNoncanonicalLeaf(reclaim.before, reclaim.leaf, true, true)
+	if err != nil {
+		return err
+	}
+	final, err := bs.reclaimNoncanonicalCandidate(after, true)
+	if err != nil {
+		return err
+	}
+	if !final.empty() {
+		err = noncanonicalReclaimError(reclaim, "finish", errors.New("row remained present"))
+		return bs.failNoncanonicalReclaim(reclaim, true, false, err)
+	}
+	return nil
+}
+
+func (bs *BlockStore) failNoncanonicalReclaim(reclaim *noncanonicalReclaim, pending, unlinked bool, err error) error {
+	bs.stateMu.Lock()
+	if pending && reclaim != nil && bs.noncanonicalReclaim == reclaim {
+		reclaim.unlinked, reclaim.cause = unlinked, err
+		bs.keepNoncanonicalReclaimPendingLocked(reclaim)
+	} else {
+		bs.endNoncanonicalTransitionLocked()
+	}
+	bs.stateMu.Unlock()
+	return err
 }
 
 // requireInitialized checks the resolved filesystem kind of every path the store
@@ -268,10 +372,11 @@ func newBlockStore(paths blockStorePaths, index blockStoreIndexDisk, indexRaw []
 // written only through it is refused by the strict startup scan. Test/legacy
 // convenience, no production caller; CommitCanonicalBlock is the commit path.
 func (bs *BlockStore) PutBlock(height uint64, blockHash [32]byte, headerBytes []byte, blockBytes []byte) error {
-	if err := bs.StoreBlock(blockHash, headerBytes, blockBytes); err != nil {
+	budget := noncanonicalRecoveryBudget{}
+	if err := bs.storeBlock(blockHash, headerBytes, blockBytes, &budget); err != nil {
 		return err
 	}
-	return bs.SetCanonicalTip(height, blockHash)
+	return bs.setCanonicalTip(height, blockHash, &budget)
 }
 
 func (bs *BlockStore) CommitCanonicalBlock(height uint64, blockHash [32]byte, headerBytes []byte, blockBytes []byte, undo *BlockUndo) error {
@@ -281,56 +386,84 @@ func (bs *BlockStore) CommitCanonicalBlock(height uint64, blockHash [32]byte, he
 	if undo == nil {
 		return errors.New("nil block undo")
 	}
-	if err := bs.StoreBlock(blockHash, headerBytes, blockBytes); err != nil {
+	budget := noncanonicalRecoveryBudget{}
+	if err := bs.storeBlock(blockHash, headerBytes, blockBytes, &budget); err != nil {
 		return err
 	}
-	if err := bs.PutUndo(blockHash, undo); err != nil {
+	if err := bs.putUndo(blockHash, undo, &budget); err != nil {
 		return err
 	}
-	return bs.SetCanonicalTip(height, blockHash)
+	return bs.setCanonicalTip(height, blockHash, &budget)
 }
 
 func (bs *BlockStore) StoreBlock(blockHash [32]byte, headerBytes []byte, blockBytes []byte) error {
+	budget := noncanonicalRecoveryBudget{}
+	return bs.storeBlock(blockHash, headerBytes, blockBytes, &budget)
+}
+
+func (bs *BlockStore) storeBlock(blockHash [32]byte, headerBytes []byte, blockBytes []byte, budget *noncanonicalRecoveryBudget) error {
 	if bs == nil {
 		return errors.New("nil blockstore")
 	}
 	if err := validateBlockHeaderHash(headerBytes, blockHash); err != nil {
 		return err
 	}
-	return bs.persistBlockBytes(blockHash, headerBytes, blockBytes)
+	return bs.persistBlockBytes(blockHash, headerBytes, blockBytes, budget)
 }
 
 func (bs *BlockStore) SetCanonicalTip(height uint64, blockHash [32]byte) error {
+	budget := noncanonicalRecoveryBudget{}
+	return bs.setCanonicalTip(height, blockHash, &budget)
+}
+
+func (bs *BlockStore) setCanonicalTip(height uint64, blockHash [32]byte, budget *noncanonicalRecoveryBudget) error {
 	if bs == nil {
 		return errors.New("nil blockstore")
 	}
 	bs.stateMu.Lock()
 	defer bs.stateMu.Unlock()
-	bs.waitNoncanonicalTransitionLocked()
+	if err := bs.waitNoncanonicalTransitionLocked(budget); err != nil {
+		return err
+	}
+	prepared, noOp, err := bs.prepareCanonicalTipLocked(height, blockHash)
+	if err != nil {
+		return err
+	}
+	if noOp {
+		return bs.saveCanonicalIndexLocked()
+	}
+	return bs.applyPreparedCanonicalLocked(prepared, budget)
+}
 
+func (bs *BlockStore) prepareCanonicalTipLocked(height uint64, blockHash [32]byte) (*preparedCanonicalIndex, bool, error) {
 	hashHex := hex.EncodeToString(blockHash[:])
 	currentLen := uint64(len(bs.index.Canonical))
 	if height > currentLen {
-		return fmt.Errorf("height gap: got %d, expected <= %d", height, currentLen)
+		return nil, false, fmt.Errorf("height gap: got %d, expected <= %d", height, currentLen)
 	}
 	if canonicalHashAt(bs.index.Canonical, height, hashHex) {
-		return bs.saveCanonicalIndexLocked()
+		return nil, true, nil
 	}
-
 	nextCanonical := append([]string{}, bs.index.Canonical[:height]...)
 	nextCanonical = append(nextCanonical, hashHex)
 	currentRaw, err := encodeBlockStoreIndex(bs.index)
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 	prepared, err := prepareCanonicalIndex(currentRaw, nextCanonical)
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 	if height == currentLen {
 		prepared.chainWork = bs.chainWorkByHash
 	}
-	bs.beginNoncanonicalTransitionLocked()
+	return prepared, false, nil
+}
+
+func (bs *BlockStore) applyPreparedCanonicalLocked(prepared *preparedCanonicalIndex, budget *noncanonicalRecoveryBudget) error {
+	if err := bs.beginNoncanonicalTransitionLocked(budget); err != nil {
+		return err
+	}
 	defer bs.endNoncanonicalTransitionLocked()
 	delta, err := bs.prepareNoncanonicalReclassification(prepared, nil)
 	if err != nil {
@@ -345,8 +478,12 @@ func (bs *BlockStore) RewindToHeight(height uint64) error {
 		return errors.New("nil blockstore")
 	}
 	// Precheck waits for publication; TruncateCanonical re-checks under its lock.
+	budget := noncanonicalRecoveryBudget{}
 	bs.stateMu.Lock()
-	bs.waitNoncanonicalTransitionLocked()
+	if err := bs.waitNoncanonicalTransitionLocked(&budget); err != nil {
+		bs.stateMu.Unlock()
+		return err
+	}
 	length := uint64(len(bs.index.Canonical))
 	bs.stateMu.Unlock()
 	if length == 0 {
@@ -355,39 +492,47 @@ func (bs *BlockStore) RewindToHeight(height uint64) error {
 	if height >= length {
 		return fmt.Errorf("rewind height out of range: %d", height)
 	}
-	return bs.TruncateCanonical(height + 1)
+	return bs.truncateCanonical(height+1, &budget)
 }
 
 func (bs *BlockStore) TruncateCanonical(count uint64) error {
 	if bs == nil {
 		return errors.New("nil blockstore")
 	}
+	budget := noncanonicalRecoveryBudget{}
+	return bs.truncateCanonical(count, &budget)
+}
+
+func (bs *BlockStore) truncateCanonical(count uint64, budget *noncanonicalRecoveryBudget) error {
 	bs.stateMu.Lock()
 	defer bs.stateMu.Unlock()
-	bs.waitNoncanonicalTransitionLocked()
+	if err := bs.waitNoncanonicalTransitionLocked(budget); err != nil {
+		return err
+	}
 	if count > uint64(len(bs.index.Canonical)) {
 		return fmt.Errorf("truncate count out of range: %d", count)
 	}
 	if count == uint64(len(bs.index.Canonical)) {
 		return bs.saveCanonicalIndexLocked()
 	}
+	prepared, err := bs.prepareCanonicalPrefixLocked(count)
+	if err != nil {
+		return err
+	}
+	return bs.applyPreparedCanonicalLocked(prepared, budget)
+}
+
+func (bs *BlockStore) prepareCanonicalPrefixLocked(count uint64) (*preparedCanonicalIndex, error) {
 	nextCanonical := append([]string{}, bs.index.Canonical[:count]...)
 	currentRaw, err := encodeBlockStoreIndex(bs.index)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	prepared, err := prepareCanonicalIndex(currentRaw, nextCanonical)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	bs.beginNoncanonicalTransitionLocked()
-	defer bs.endNoncanonicalTransitionLocked()
-	delta, err := bs.prepareNoncanonicalReclassification(prepared, nil)
-	if err != nil {
-		return err
-	}
-	publishNoncanonicalReclassificationLocked(bs, prepared, delta, false)
-	return bs.saveCanonicalIndexLocked()
+	return prepared, nil
 }
 
 func (bs *BlockStore) CanonicalHash(height uint64) ([32]byte, bool, error) {
@@ -459,29 +604,64 @@ func (bs *BlockStore) RestoreCanonicalIndex(canonical []string) error {
 	}
 	bs.stateMu.Lock()
 	defer bs.stateMu.Unlock()
-	bs.waitNoncanonicalTransitionLocked()
-	bs.beginNoncanonicalTransitionLocked()
-	defer bs.endNoncanonicalTransitionLocked()
-	delta, err := bs.prepareNoncanonicalReclassification(prepared, nil)
-	if err != nil {
+	budget := noncanonicalRecoveryBudget{}
+	if err := bs.waitNoncanonicalTransitionLocked(&budget); err != nil {
 		return err
 	}
-	publishNoncanonicalReclassificationLocked(bs, prepared, delta, false)
-	return bs.saveCanonicalIndexLocked()
+	return bs.applyPreparedCanonicalLocked(prepared, &budget)
 }
 
 func (bs *BlockStore) GetBlockByHash(blockHash [32]byte) ([]byte, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
 	}
-	return readFileFromDir(bs.blocksDir, hex.EncodeToString(blockHash[:])+".bin", blockFileMaxBytes)
+	if !bs.pinNoncanonicalReader(blockHash) {
+		return nil, os.ErrNotExist
+	}
+	defer bs.unpinNoncanonicalReader(blockHash)
+	return bs.getBlockByHashRaw(blockHash)
 }
 
 func (bs *BlockStore) GetHeaderByHash(blockHash [32]byte) ([]byte, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
 	}
-	return readFileFromDir(bs.headersDir, hex.EncodeToString(blockHash[:])+".bin", headerFileMaxBytes)
+	if !bs.pinNoncanonicalReader(blockHash) {
+		return nil, os.ErrNotExist
+	}
+	defer bs.unpinNoncanonicalReader(blockHash)
+	return bs.getHeaderByHashRaw(blockHash)
+}
+
+func (bs *BlockStore) getBlockByHashRaw(blockHash [32]byte) ([]byte, error) {
+	return readFileByPathFn(filepath.Join(bs.blocksDir, hex.EncodeToString(blockHash[:])+".bin"), blockFileMaxBytes)
+}
+
+func (bs *BlockStore) getHeaderByHashRaw(blockHash [32]byte) ([]byte, error) {
+	return readFileByPathFn(filepath.Join(bs.headersDir, hex.EncodeToString(blockHash[:])+".bin"), headerFileMaxBytes)
+}
+
+func (bs *BlockStore) pinNoncanonicalReader(hash [32]byte) bool {
+	bs.stateMu.Lock()
+	defer bs.stateMu.Unlock()
+	if reclaim := bs.noncanonicalReclaim; reclaim != nil && reclaim.marked && reclaim.hash == hash {
+		return false
+	}
+	if bs.noncanonicalReaders == nil {
+		bs.noncanonicalReaders = make(map[[32]byte]uint32)
+	}
+	bs.noncanonicalReaders[hash]++
+	return true
+}
+
+func (bs *BlockStore) unpinNoncanonicalReader(hash [32]byte) {
+	bs.stateMu.Lock()
+	defer bs.stateMu.Unlock()
+	if count := bs.noncanonicalReaders[hash]; count > 1 {
+		bs.noncanonicalReaders[hash] = count - 1
+	} else {
+		delete(bs.noncanonicalReaders, hash)
+	}
 }
 
 func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
@@ -688,8 +868,21 @@ func cloneBigInt(x *big.Int) *big.Int {
 }
 
 func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {
+	budget := noncanonicalRecoveryBudget{}
+	return bs.putUndo(blockHash, undo, &budget)
+}
+
+func (bs *BlockStore) putUndo(blockHash [32]byte, undo *BlockUndo, budget *noncanonicalRecoveryBudget) error {
 	if bs == nil {
 		return errors.New("nil blockstore")
+	}
+	if budget.claimed {
+		bs.stateMu.Lock()
+		err := bs.waitNoncanonicalTransitionLocked(budget)
+		bs.stateMu.Unlock()
+		if err != nil {
+			return err
+		}
 	}
 	raw, err := marshalUndoEnvelope(blockHash, undo)
 	if err != nil {
@@ -726,7 +919,7 @@ func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {
 		}
 		return err
 	}
-	return bs.reserveNoncanonicalArtifactWrite(blockHash, nil, func() ([]noncanonicalReservationLeaf, error) {
+	return bs.reserveNoncanonicalArtifactWriteWithBudget(blockHash, nil, func() ([]noncanonicalReservationLeaf, error) {
 		existingErr := resolveExisting()
 		if existingErr == nil {
 			return nil, syncMatchingExistingFile(path)
@@ -735,7 +928,7 @@ func (bs *BlockStore) PutUndo(blockHash [32]byte, undo *BlockUndo) error {
 			return nil, newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteCreateIfAbsent, existingErr)
 		}
 		return []noncanonicalReservationLeaf{leaf}, nil
-	}, write)
+	}, write, budget)
 }
 
 func (bs *BlockStore) checkExistingUndo(path string, blockHash [32]byte, undo *BlockUndo) error {
@@ -757,7 +950,12 @@ func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
 	if bs == nil {
 		return nil, errors.New("nil blockstore")
 	}
-	raw, err := readFileFromDir(bs.undoDir, hex.EncodeToString(blockHash[:])+".json", undoFileMaxBytes)
+	if !bs.pinNoncanonicalReader(blockHash) {
+		return nil, os.ErrNotExist
+	}
+	raw, err := bs.getUndoRaw(blockHash)
+	bs.unpinNoncanonicalReader(blockHash)
+	bs.probeLeaf()
 	if err != nil {
 		return nil, err
 	}
@@ -765,6 +963,10 @@ func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
 	// that is what makes a record moved or renamed between two undo files fail
 	// instead of restoring the wrong block's UTXOs.
 	return unmarshalUndoEnvelope(blockHash, raw)
+}
+
+func (bs *BlockStore) getUndoRaw(blockHash [32]byte) ([]byte, error) {
+	return readFileByPathFn(filepath.Join(bs.undoDir, hex.EncodeToString(blockHash[:])+".json"), undoFileMaxBytes)
 }
 
 // loadBlockStoreIndex reads the sole initialization marker. A missing marker is
@@ -1005,28 +1207,29 @@ func storedBlockHeaderHash(blockBytes []byte) (blockHash [32]byte, step string, 
 	return blockHash, "", nil
 }
 
-func (bs *BlockStore) persistBlockBytes(blockHash [32]byte, headerBytes []byte, blockBytes []byte) error {
+func (bs *BlockStore) persistBlockBytes(blockHash [32]byte, headerBytes []byte, blockBytes []byte, budget *noncanonicalRecoveryBudget) error {
 	hashHex := hex.EncodeToString(blockHash[:])
 	blockPath := filepath.Join(bs.blocksDir, hashHex+".bin")
 	headerPath := filepath.Join(bs.headersDir, hashHex+".bin")
 	if bs.noncanonical.Load() == nil {
-		return bs.persistUntrackedBlockBytes(blockHash, blockPath, headerPath, blockBytes, headerBytes)
+		return bs.persistUntrackedBlockBytes(blockHash, blockPath, headerPath, blockBytes, headerBytes, budget)
 	}
-	return bs.persistTrackedBlockBytes(blockHash, blockPath, headerPath, blockBytes, headerBytes)
+	return bs.persistTrackedBlockBytes(blockHash, blockPath, headerPath, blockBytes, headerBytes, budget)
 }
 
-func (bs *BlockStore) persistUntrackedBlockBytes(hash [32]byte, blockPath, headerPath string, blockBytes, headerBytes []byte) error {
-	return bs.reserveNoncanonicalArtifactWrite(hash, nil, nil, func(*noncanonicalReservation) error {
+func (bs *BlockStore) persistUntrackedBlockBytes(hash [32]byte, blockPath, headerPath string, blockBytes, headerBytes []byte, budget *noncanonicalRecoveryBudget) error {
+	return bs.reserveNoncanonicalArtifactWriteWithBudget(hash, nil, nil, func(*noncanonicalReservation) error {
 		if err := writeFileIfAbsent(blockPath, blockBytes); err != nil {
 			return err
 		}
 		return writeFileIfAbsent(headerPath, headerBytes)
-	})
+	}, budget)
 }
 
-func (bs *BlockStore) persistTrackedBlockBytes(hash [32]byte, blockPath, headerPath string, blockBytes, headerBytes []byte) error {
+func (bs *BlockStore) persistTrackedBlockBytes(hash [32]byte, blockPath, headerPath string, blockBytes, headerBytes []byte, budget *noncanonicalRecoveryBudget) error {
 	var leaves []noncanonicalReservationLeaf
-	return bs.reserveNoncanonicalArtifactWrite(hash, nil, func() ([]noncanonicalReservationLeaf, error) {
+	return bs.reserveNoncanonicalArtifactWriteWithBudget(hash, nil, func() ([]noncanonicalReservationLeaf, error) {
+		leaves = leaves[:0]
 		blockExists, err := preflightNoncanonicalFile(blockPath, blockBytes)
 		if err != nil {
 			return nil, err
@@ -1054,7 +1257,7 @@ func (bs *BlockStore) persistTrackedBlockBytes(hash [32]byte, blockPath, headerP
 		return leaves, nil
 	}, func(r *noncanonicalReservation) error {
 		return writeMissingNoncanonicalBlockFiles(r, leaves, blockPath, blockBytes, headerPath, headerBytes)
-	})
+	}, budget)
 }
 
 func writeMissingNoncanonicalBlockFiles(r *noncanonicalReservation, leaves []noncanonicalReservationLeaf, blockPath string, blockBytes []byte, headerPath string, headerBytes []byte) error {
@@ -1133,7 +1336,7 @@ const (
 	canonicalCommitTerminalUnknown canonicalCommitClass = "TERMINAL_PERSISTENCE(neither_or_unreadable)"
 )
 
-// canonicalCommitResult carries one outcome and cause; an empty class is a pre-write accounting refusal.
+// canonicalCommitResult carries one outcome and cause; empty class means pre-write local refusal, including accounting or reclaim recovery.
 // No latch, counter, lease, or retry state lives here.
 type canonicalCommitResult struct {
 	class canonicalCommitClass
@@ -1228,34 +1431,42 @@ func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalInde
 // transition fence closes reservations, reload, same-store commits, and the
 // durable-write window; the owning SyncEngine transition still supplies its wider ChainState/admission fence when RUB-1202 cuts over callers; a nil bs is a programming error.
 func (p *preparedCanonicalIndex) commit(bs *BlockStore) canonicalCommitResult {
+	budget := noncanonicalRecoveryBudget{}
 	bs.stateMu.Lock()
-	bs.beginNoncanonicalTransitionLocked()
-	if p.spent.Load() {
-		bs.endNoncanonicalTransitionLocked()
-		bs.stateMu.Unlock()
-		return canonicalCommitResult{class: canonicalCommitStale, err: errPreparedIndexSpent}
-	}
-	fresh := bytes.Equal(bs.indexRaw, p.oldRaw)
-	if !fresh {
-		bs.endNoncanonicalTransitionLocked()
-		bs.stateMu.Unlock()
-		return canonicalCommitResult{class: canonicalCommitStale, err: errCanonicalIndexMoved}
-	}
-	if !p.spent.CompareAndSwap(false, true) {
-		bs.endNoncanonicalTransitionLocked()
-		bs.stateMu.Unlock()
-		return canonicalCommitResult{class: canonicalCommitStale, err: errPreparedIndexSpent}
-	}
-	delta, err := bs.prepareNoncanonicalReclassification(p, nil)
-	if err != nil {
-		bs.endNoncanonicalTransitionLocked()
+	if err := bs.beginNoncanonicalTransitionLocked(&budget); err != nil {
 		bs.stateMu.Unlock()
 		return canonicalCommitResult{err: err}
 	}
+	delta, result, ok := p.prepareCommitLocked(bs)
+	if !ok {
+		bs.endNoncanonicalTransitionLocked()
+		bs.stateMu.Unlock()
+		return result
+	}
 	bs.stateMu.Unlock()
+	return p.persistCommit(bs, delta)
+}
 
+func (p *preparedCanonicalIndex) prepareCommitLocked(bs *BlockStore) (*noncanonicalTransitionDelta, canonicalCommitResult, bool) {
+	if p.spent.Load() {
+		return nil, canonicalCommitResult{class: canonicalCommitStale, err: errPreparedIndexSpent}, false
+	}
+	if !bytes.Equal(bs.indexRaw, p.oldRaw) {
+		return nil, canonicalCommitResult{class: canonicalCommitStale, err: errCanonicalIndexMoved}, false
+	}
+	if !p.spent.CompareAndSwap(false, true) {
+		return nil, canonicalCommitResult{class: canonicalCommitStale, err: errPreparedIndexSpent}, false
+	}
+	delta, err := bs.prepareNoncanonicalReclassification(p, nil)
+	if err != nil {
+		return nil, canonicalCommitResult{err: err}, false
+	}
+	return delta, canonicalCommitResult{}, true
+}
+
+func (p *preparedCanonicalIndex) persistCommit(bs *BlockStore, delta *noncanonicalTransitionDelta) canonicalCommitResult {
 	// No publication lock is held while waiting for or executing this write.
-	err = writeFileAtomicFn(bs.indexPath, p.newRaw, 0o600)
+	err := writeFileAtomicFn(bs.indexPath, p.newRaw, 0o600)
 	if err == nil {
 		p.finishTransition(bs, delta, true)
 		return canonicalCommitResult{class: canonicalCommitted}
@@ -1362,10 +1573,7 @@ func (bs *BlockStore) visibleIndexBytes() []byte {
 // BlockPresenceClass is the closed set of presence classifications for a block
 // hash in this store. All four CLASS strings are the contract's closed return
 // set; ABSENT, STORED_NONCANONICAL, CANONICAL and LOCAL_STORE_ERROR(noncanonical)
-// are the frozen RUB-922 C01 identities. The set is closed only for the current
-// retain-everything profile: a retention profile that permits pruned suffix data
-// adds LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact) (C01-RES-RECOVERY-001),
-// which arrives with RUB-1222's reclaim.
+// are frozen RUB-922 identities; fully reclaimed damaged side rows are ABSENT.
 type BlockPresenceClass string
 
 const (
@@ -1440,13 +1648,10 @@ func (p BlockPresence) String() string {
 // that value coincides with the all-invalid canonical observation by design, and the
 // class set stays closed.
 //
-// The whole classification runs under ONE stateMu.RLock, which by contract spans the
-// artifact reads as well, so canonical membership and artifact state are one snapshot
-// instead of two observations a concurrent replacement could interleave. The RLock
-// protects the MEMBERSHIP map; the artifact FILES have lock-free, monotone
-// absent->present writers, so the leaves are read in REVERSE persistence order and
-// every observed tuple is a state the store really held. RUB-1222's reclaim makes
-// artifacts present->absent and must re-derive that argument.
+// A reader pin precedes the ONE stateMu.RLock spanning membership and artifact reads.
+// Reclaim selects only an unpinned hash and rejects later pins once marked; reverse
+// persistence-order reads therefore still observe one real tuple while damaged rows
+// may move present->absent.
 //
 // The cost is real and accepted, and all of it runs under the read lock: the block
 // leaf READS, fully PARSES and hashes up to consensus.MAX_BLOCK_BYTES and the undo
@@ -1461,6 +1666,10 @@ func (bs *BlockStore) InspectBlockPresence(blockHash [32]byte) BlockPresence {
 			Leaves: BlockArtifactLeaves{Block: BlockArtifactInvalid, Header: BlockArtifactInvalid, Undo: BlockArtifactInvalid},
 		}
 	}
+	if !bs.pinNoncanonicalReader(blockHash) {
+		return BlockPresence{Class: BlockPresenceAbsent, Leaves: BlockArtifactLeaves{Block: BlockArtifactAbsent, Header: BlockArtifactAbsent, Undo: BlockArtifactAbsent}}
+	}
+	defer bs.unpinNoncanonicalReader(blockHash)
 	bs.stateMu.RLock()
 	defer bs.stateMu.RUnlock()
 
@@ -1519,7 +1728,7 @@ func (bs *BlockStore) probeLeaf() {
 // identity replay's re-hash defense enforces.
 func (bs *BlockStore) inspectBlockLeaf(blockHash [32]byte) BlockArtifactState {
 	bs.probeLeaf()
-	blockBytes, err := bs.GetBlockByHash(blockHash)
+	blockBytes, err := bs.getBlockByHashRaw(blockHash)
 	if err != nil {
 		return artifactStateFromErr(err)
 	}
@@ -1536,7 +1745,7 @@ func (bs *BlockStore) inspectBlockLeaf(blockHash [32]byte) BlockArtifactState {
 // requested hash. Existence alone is never presence.
 func (bs *BlockStore) inspectHeaderLeaf(blockHash [32]byte) BlockArtifactState {
 	bs.probeLeaf()
-	headerBytes, err := bs.GetHeaderByHash(blockHash)
+	headerBytes, err := bs.getHeaderByHashRaw(blockHash)
 	if err != nil {
 		return artifactStateFromErr(err)
 	}
@@ -1547,11 +1756,14 @@ func (bs *BlockStore) inspectHeaderLeaf(blockHash [32]byte) BlockArtifactState {
 	return BlockArtifactValid
 }
 
-// inspectUndoLeaf: GetUndo binds the record to the hash the CALLER asked for
-// (RUB-1132), so a record moved between two undo files reads as invalid.
+// inspectUndoLeaf decodes the raw record against the requested hash, so a
+// record moved between two undo files reads as invalid.
 func (bs *BlockStore) inspectUndoLeaf(blockHash [32]byte) BlockArtifactState {
 	bs.probeLeaf()
-	_, err := bs.GetUndo(blockHash)
+	raw, err := bs.getUndoRaw(blockHash)
+	if err == nil {
+		_, err = unmarshalUndoEnvelope(blockHash, raw)
+	}
 	return artifactStateFromErr(err)
 }
 
