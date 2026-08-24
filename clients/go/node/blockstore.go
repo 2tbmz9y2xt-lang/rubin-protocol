@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -18,8 +19,9 @@ import (
 )
 
 var (
-	readFileByPathFn  = readFileByPathCapped
-	writeFileAtomicFn = writeFileAtomic
+	readFileByPathFn      = readFileByPathCapped
+	writeFileAtomicFn     = writeFileAtomic
+	loadBlockStoreIndexFn = loadBlockStoreIndex
 )
 
 const (
@@ -37,10 +39,10 @@ type BlockStore struct {
 	undoDir    string
 	index      blockStoreIndexDisk
 	// indexRaw is the exact visible envelope bytes of indexPath as this store
-	// last read or wrote them, and is the identity a prepared commit compares
-	// against. It must be the bytes THEMSELVES, never a re-encoding: two inner
-	// spellings can decode to the same index, so a re-encoding would make a
-	// strict readback claim an identity the disk does not hold.
+	// last read or wrote them, and is what a prepared commit DECODES its freshness
+	// comparison from. It must be the bytes THEMSELVES, never a re-encoding: two
+	// inner spellings can decode to the same index, so a re-encoding would leave
+	// the store naming bytes the disk does not hold.
 	indexRaw []byte
 
 	canonicalHeightByHash map[[32]byte]uint64
@@ -594,7 +596,7 @@ func (bs *BlockStore) RestoreCanonicalIndex(canonical []string) error {
 	// nil folds to that empty identity, unlike prepare — the rollback caller
 	// (SyncEngine.restoreRollbackPersistentState) passes the nil CanonicalIndexSnapshot returns for an empty index.
 	nextCanonical := append(make([]string, 0, len(canonical)), canonical...)
-	// Restore passes no comparison bytes because even an identical image must save.
+	// Restore passes no comparison identity because even an identical list must save.
 	prepared, err := prepareCanonicalIndex(nil, nextCanonical)
 	if errors.Is(err, errCanonicalIndexDuplicateRow) {
 		return duplicateCanonicalRowErr(bs.indexPath)
@@ -1346,16 +1348,21 @@ type canonicalCommitResult struct {
 // The prepared-commit refusals. Each is a typed sentinel so a consumer can tell
 // a benign refusal from an invalid plan without matching on message text.
 var (
-	// The visible canonical identity moved between prepare and commit, so the prepared
-	// image is stale and nothing is written. The owning canonical transition holds the
-	// writer fence; this is the last check under it, never a substitute for it.
+	// The visible canonical identity is not the ordered row sequence the image was
+	// planned against — it moved, it cannot be decoded, or the image never had a
+	// comparison identity — so the image is stale and nothing is written; a pure
+	// re-spelling is NOT movement, and the message's "bytes" is legacy wording
+	// (the sentinel is compared by identity). The owning canonical transition
+	// holds the writer fence; this is the last check under it, never a substitute.
 	errCanonicalIndexMoved = errors.New("prepared canonical index is stale: visible index bytes changed")
 
 	// A prior invocation atomically claimed/spent this image, including planner/resource refusal; later invocation is refused.
 	errPreparedIndexSpent = errors.New("prepared canonical index was already spent")
 
-	// The planned image equals the visible index bytes, so there is no
-	// transition to commit — a benign no-op, not an invalid plan.
+	// The planned sequence equals the comparison identity's sequence, so there is
+	// no transition to commit — a benign no-op, not an invalid plan. It fires on
+	// the decoded rows, so any valid spelling of that sequence is the same no-op;
+	// the message's "bytes" is legacy wording (compared by identity).
 	errCanonicalIndexNoOp = errors.New("prepared canonical index is a no-op: the planned image equals the visible index bytes")
 )
 
@@ -1366,12 +1373,36 @@ var (
 // that left the visible identity OLD and would still pass the freshness check —
 // can be followed by a second write from the same image.
 type preparedCanonicalIndex struct {
-	oldRaw       []byte
+	oldRaw []byte
+	// oldCanonical is the decoded comparison IDENTITY: §6.4.1's complete ordered
+	// row sequence, position = height. nil means NO comparison identity
+	// (Restore/reload), which never commits. The planned-new identity is
+	// index.Canonical and stays PLANNED even when a readback replaces newRaw.
+	oldCanonical []string
+	// newRaw is the exact bytes to commit and then the exact bytes publication
+	// caches as the visible identity: a terminal-NEW readback REPLACES it with the
+	// bytes the disk holds. Only the claiming goroutine touches it, before publication.
 	newRaw       []byte
 	index        blockStoreIndexDisk
 	heightByHash map[[32]byte]uint64
 	chainWork    map[[32]byte]*big.Int
 	spent        atomic.Bool
+}
+
+// decodeCanonicalIndexSequence strict-decodes visible index bytes into the
+// canonical-index identity, composing the SAME envelope and inner decoders the
+// on-disk read uses: no second parser accepts a spelling the store would refuse to
+// reopen, and every caller treats a decode failure as no identity, never an empty one.
+func decodeCanonicalIndexSequence(raw []byte) ([]string, error) {
+	payload, err := openStoreEnvelope(storeEnvelopeBlockIndex, raw)
+	if err != nil {
+		return nil, err
+	}
+	index, err := decodeBlockStoreIndex(payload)
+	if err != nil {
+		return nil, err
+	}
+	return index.Canonical, nil
 }
 
 // prepareCanonicalIndex validates the complete planned canonical list and builds the
@@ -1381,8 +1412,11 @@ type preparedCanonicalIndex struct {
 // surrounding space), and buildCanonicalHeightIndex proves every row decodes to a
 // hash. oldRaw is optional comparison identity: commits pass exact visible bytes,
 // Set/Truncate pass encoded live RAM, and Restore passes nil because even a no-op
-// must save. Commit still refuses if visible identity moved. A nil next list is
-// rejected like JSON null; empty non-nil is the valid empty identity.
+// must save. When present it is DECODED to its ordered sequence, so the comparison
+// identity is the sequence and not the spelling, and bytes this store would refuse
+// to reopen are refused here rather than kept as an identity nothing can match.
+// Commit still refuses if the visible identity moved. A nil next list is rejected
+// like JSON null; empty non-nil is the valid empty identity.
 func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalIndex, error) {
 	// Copy so a later caller mutation cannot reach the prepared image, and keep
 	// nil-ness exact: `append([]string(nil), next...)` would fold an EMPTY list
@@ -1406,15 +1440,26 @@ func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalInde
 	if err != nil {
 		return nil, err
 	}
-	// The identical image is refused rather than staged: a post-commit
+	var oldCanonical []string
+	if oldRaw != nil {
+		if oldCanonical, err = decodeCanonicalIndexSequence(oldRaw); err != nil {
+			return nil, err
+		}
+	}
+	// The identical SEQUENCE is refused rather than staged: a post-commit
 	// ambiguity would read it back as the OLD identity and publish nothing,
 	// while the success path publishes — one transition with two different RAM
-	// outcomes (the publication also resets the derived chain-work cache).
-	if bytes.Equal(oldRaw, newRaw) {
+	// outcomes (the publication also resets the derived chain-work cache). Two
+	// spellings of one sequence are one identity, so re-spelling is the same
+	// no-op. An image with NO comparison identity is never a no-op: Restore saves
+	// even an identical list, so the nil test comes first (slices.Equal would take
+	// nil for the empty sequence).
+	if oldCanonical != nil && slices.Equal(oldCanonical, index.Canonical) {
 		return nil, errCanonicalIndexNoOp
 	}
 	return &preparedCanonicalIndex{
 		oldRaw:       append([]byte(nil), oldRaw...),
+		oldCanonical: oldCanonical,
 		newRaw:       newRaw,
 		index:        index,
 		heightByHash: heightByHash,
@@ -1447,11 +1492,18 @@ func (p *preparedCanonicalIndex) commit(bs *BlockStore) canonicalCommitResult {
 	return p.persistCommit(bs, delta)
 }
 
+// prepareCommitLocked checks spent first, then the comparison identity — no
+// identity, an undecodable one, or a moved SEQUENCE all refuse BEFORE the
+// single-use claim, so a refusal leaves the image reusable and writes nothing —
+// and only then claims. Re-spelling the same rows is not movement. It decodes
+// bs.indexRaw, never bs.index, which saveCanonicalIndexLocked explains can LEAD
+// the disk after a legacy pre-commit failure.
 func (p *preparedCanonicalIndex) prepareCommitLocked(bs *BlockStore) (*noncanonicalTransitionDelta, canonicalCommitResult, bool) {
 	if p.spent.Load() {
 		return nil, canonicalCommitResult{class: canonicalCommitStale, err: errPreparedIndexSpent}, false
 	}
-	if !bytes.Equal(bs.indexRaw, p.oldRaw) {
+	visible, err := decodeCanonicalIndexSequence(bs.indexRaw)
+	if p.oldCanonical == nil || err != nil || !slices.Equal(visible, p.oldCanonical) {
 		return nil, canonicalCommitResult{class: canonicalCommitStale, err: errCanonicalIndexMoved}, false
 	}
 	if !p.spent.CompareAndSwap(false, true) {
@@ -1494,38 +1546,36 @@ func (p *preparedCanonicalIndex) finishTransition(bs *BlockStore, delta *noncano
 	bs.stateMu.Unlock()
 }
 
-// classifyVisibleIndex is the one strict readback. It classifies by the VISIBLE
-// BYTES, never by the error text, and compares the complete identity: a shared tip
-// or a matching hash is not one, so anything that is not exactly the old or exactly
-// the new image is neither. A read failure is neither too — nothing is guessed,
-// retried or rewritten. The read is BOUNDED at the longer of the two images: only those
-// two byte strings can match, so anything longer is provably neither identity and is
-// refused (errStoreFileTooLarge) before it is allocated on this untrusted on-disk path,
-// where the planned images fix the bound. That is why it does not inherit
-// loadBlockStoreIndex's deliberately unbounded read, which has no such ceiling to
-// derive (RUB-1057).
+// classifyVisibleIndex is the one strict readback. It classifies by the visible
+// canonical IDENTITY of §6.4.1 — the complete ordered row sequence, position =
+// height, length and every row — never by the error text: a shared tip, a
+// reordering, a duplicate, a prefix, an extra row and a matching length are each
+// NOT one, so anything that is not exactly the old or exactly the planned-new
+// sequence is neither. A read failure, and bytes the store would refuse to reopen,
+// are neither too — nothing is guessed, retried or rewritten. It reuses the strict
+// loadBlockStoreIndex, so no second parser can accept an image the store could not
+// reopen, and that read is unbounded like every other read of this file: a decoded
+// sequence no longer lets the two planned images bound it (RUB-1057).
 //
-// Byte equality is deliberately STRONGER than comparing decoded lists — two
-// spellings decode alike but only one is the identity the commit planned — so do
-// not "simplify" it to a decode. It also diverges deliberately from §6.4.1, which
-// words the identity as the (height, block_hash) SEQUENCE: bytes can only refuse an
-// image the sequence rule would accept, so the divergence runs fail-closed, and it
-// is unreachable in practice because both writers encode through
-// encodeBlockStoreIndex. After a terminal result the store's cached identity may no
-// longer describe the disk (a third identity, or an unreadable file), and nothing
-// here repairs that: commit's freshness check is a staleness ASSERT, not a guard
-// against a post-terminal rewrite — the owning transition's latch is what stops the
-// next write.
+// Two spellings of one sequence are ONE identity, so terminal NEW caches the EXACT
+// bytes it read while publishing the prevalidated PLANNED decoded image; a nil old
+// identity cannot reach here (prepareCommitLocked refuses it), so the old arm
+// cannot match an empty sequence by accident. After a terminal result the store's
+// cached identity may no longer describe the disk (a third identity, or an
+// unreadable file), and nothing here repairs that: commit's freshness check is a
+// staleness ASSERT, not a guard against a post-terminal rewrite — the owning
+// transition's latch is what stops the next write.
 func (p *preparedCanonicalIndex) classifyVisibleIndex(bs *BlockStore, cause error) canonicalCommitResult {
-	raw, err := readFileByPathCapped(bs.indexPath, int64(max(len(p.oldRaw), len(p.newRaw))))
+	visible, raw, err := loadBlockStoreIndexFn(bs.indexPath)
 	switch {
 	case err != nil:
 		// Both causes survive errors.Is: the write failure that sent us here
 		// and the readback failure that left the identity unprovable.
 		return canonicalCommitResult{class: canonicalCommitTerminalUnknown, err: errors.Join(cause, err)}
-	case bytes.Equal(raw, p.oldRaw):
+	case slices.Equal(visible.Canonical, p.oldCanonical):
 		return canonicalCommitResult{class: canonicalCommitTerminalOld, err: cause}
-	case bytes.Equal(raw, p.newRaw):
+	case slices.Equal(visible.Canonical, p.index.Canonical):
+		p.newRaw = raw
 		return canonicalCommitResult{class: canonicalCommitTerminalNew, err: cause}
 	default:
 		return canonicalCommitResult{class: canonicalCommitTerminalUnknown, err: cause}
