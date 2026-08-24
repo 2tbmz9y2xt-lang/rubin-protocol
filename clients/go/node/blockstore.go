@@ -1328,8 +1328,6 @@ const (
 
 	// canonicalCommitStale is the prepared image refusing to build on a visible
 	// identity it never observed, or refusing a second use; err splits those.
-	// errCanonicalIndexMoved covers exactly three pre-write refusals: the visible sequence
-	// MOVED, the image carries NO comparison identity, or the cached identity will not decode.
 	// errCanonicalIndexMoved attempted nothing, so the owning canonical transition maps
 	// it to STALE_LOCAL_PLAN, never to the frozen precommit identity (whose
 	// C01-PRENS-001 triggers are the atomic write and the precommit checkpoint writes).
