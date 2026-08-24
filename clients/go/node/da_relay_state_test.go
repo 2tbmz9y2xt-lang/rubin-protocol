@@ -6,6 +6,7 @@ import (
 	"maps"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -837,6 +838,221 @@ func TestDARelayAdvanceOrphanTTLReturnsProjectionErrorsWithoutMutation(t *testin
 	}
 }
 
+func TestDARelayAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T) {
+	t.Run("empty no-op", func(t *testing.T) {
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		before := daRelayStateSnapshot(state)
+		expired, err := state.advanceOrphanTTL()
+		if err != nil || len(expired) != 0 {
+			t.Fatalf("empty advance expired=%+v err=%v", expired, err)
+		}
+		requireDARelayStateUnchanged(t, state, before)
+	})
+	t.Run("decrement only", func(t *testing.T) {
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		daID := daRelayTestID(201)
+		record := mustAddDAChunk(t, state, "peer-ttl", daRelayTestChunk(daID, 0, 7))
+		record.ttlBlocksRemaining = 3
+		state.sets[daID] = record
+		expired, err := state.advanceOrphanTTL()
+		if err != nil || len(expired) != 0 {
+			t.Fatalf("decrement advance expired=%+v err=%v", expired, err)
+		}
+		if got := state.sets[daID]; got.ttlBlocksRemaining != 2 || got.receivedTime != record.receivedTime {
+			t.Fatalf("record after decrement=%+v, want ttl 2 and receivedTime %d", got, record.receivedTime)
+		}
+	})
+	t.Run("mixed sorted success", func(t *testing.T) {
+		state, ids := newDARelayAtomicBatchState(t, "peer-ttl")
+		twin, _ := newDARelayAtomicBatchState(t, "peer-ttl")
+		twin.mempool = state.mempool
+		for _, s := range []*DARelayState{state, twin} {
+			record := s.sets[ids[1]]
+			record.ttlBlocksRemaining = 2
+			s.sets[ids[1]] = record
+		}
+		twin.mu.Lock()
+		_, wantErr := twin.advanceOrphanTTLLocked()
+		twin.mu.Unlock()
+		if wantErr != nil {
+			t.Fatalf("build ttl expected image: %v", wantErr)
+		}
+		want := daRelayStateSnapshot(twin)
+		expired, err := state.advanceOrphanTTL()
+		if err != nil {
+			t.Fatalf("mixed advance: %v", err)
+		}
+		if len(expired) != 2 || expired[0].daID != ids[0] || expired[0].receivedTime != 1 || expired[1].daID != ids[2] || expired[1].receivedTime != 3 {
+			t.Fatalf("mixed expired=%+v, want sorted first and final", expired)
+		}
+		if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, want) || got.nextReceivedTime != 5 {
+			t.Fatalf("ttl success image=%+v, want %+v", got, want)
+		}
+	})
+	for _, tt := range []struct {
+		name  string
+		index int
+	}{
+		{name: "underflow first", index: 0},
+		{name: "underflow middle", index: 1},
+		{name: "underflow final", index: 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state, ids := newDARelayAtomicBatchState(t, "peer-ttl")
+			state.orphanBytesByDAID[ids[tt.index]] = 0
+			before := daRelayStateSnapshot(state)
+			expired, err := state.advanceOrphanTTL()
+			if err != errDARelayArithmeticOverflow || expired != nil {
+				t.Fatalf("underflow expired=%+v err=%v, want nil and %v", expired, err, errDARelayArithmeticOverflow)
+			}
+			requireDARelayStateUnchanged(t, state, before)
+		})
+	}
+	t.Run("first error and public propagation", func(t *testing.T) {
+		state, _ := newDARelayFirstErrorState(t)
+		before := daRelayStateSnapshot(state)
+		expired, err := state.advanceOrphanTTL()
+		if err != errDARelayOrphanPeerCapExceeded || expired != nil {
+			t.Fatalf("first ttl err=%v expired=%+v, want %v and nil", err, expired, errDARelayOrphanPeerCapExceeded)
+		}
+		requireDARelayStateUnchanged(t, state, before)
+		if err := state.AdvanceOrphanTTL(); err != errDARelayOrphanPeerCapExceeded {
+			t.Fatalf("public ttl err=%v, want %v", err, errDARelayOrphanPeerCapExceeded)
+		}
+		requireDARelayStateUnchanged(t, state, before)
+	})
+	t.Run("snapshot owns complete mutable image", func(t *testing.T) {
+		state, ids := newDARelayAtomicBatchState(t, "peer-ttl")
+		record := state.sets[ids[0]]
+		chunk := record.chunks[0]
+		record.commit.txBytes, chunk.txBytes = []byte{1}, []byte{2}
+		record.chunks[0] = chunk
+		state.sets[ids[0]] = record
+		state.orphanCommitOverheadBytes, state.pinnedPayloadBytes = 17, 19
+		wantPeer, wantDAID, before := state.orphanBytesByPeerQuotaKey["peer-ttl"], state.orphanBytesByDAID[ids[0]], daRelayStateSnapshot(state)
+		state.orphanBytesByPeerQuotaKey["alias"], state.orphanBytesByDAID[daRelayTestID(250)] = 1, 1
+		state.prefetch.indexes[ids[0]][0] = "changed"
+		state.prefetch.expires[ids[0]] = time.Time{}
+		record = state.sets[ids[0]]
+		record.commit.txBytes[0] = 3
+		chunk = record.chunks[0]
+		chunk.payload[0], chunk.txBytes[0] = 4, 5
+		record.chunks[0] = chunk
+		state.sets[ids[0]] = record
+		if got := before.prefetchIndexes[ids[0]][0]; got != "peer-prefetch-a" {
+			t.Fatalf("snapshot nested prefetch key=%q, want peer-prefetch-a", got)
+		}
+		if got := before.prefetchExpires[ids[0]]; !got.Equal(time.Unix(1, 0)) {
+			t.Fatalf("snapshot prefetch expiry=%v, want %v", got, time.Unix(1, 0))
+		}
+		captured := before.sets[ids[0]]
+		if !reflect.DeepEqual(captured.commit.txBytes, []byte{1}) || captured.chunks[0].payload[0] != 1 || !reflect.DeepEqual(captured.chunks[0].txBytes, []byte{2}) || before.peerBytes["peer-ttl"] != wantPeer || before.daIDBytes[ids[0]] != wantDAID || before.peerBytes["alias"] != 0 || before.daIDBytes[daRelayTestID(250)] != 0 || before.mempool != state.mempool || before.caps != state.caps || before.nextReceivedTime != state.nextReceivedTime || before.orphanBytes != state.orphanBytes || before.commitBytes != state.orphanCommitOverheadBytes || before.pinnedPayloadBytes != state.pinnedPayloadBytes {
+			t.Fatal("snapshot omitted or aliased mutable state")
+		}
+		state.mu.Lock()
+		projected := state.cloneForAtomicBatchLocked()
+		state.mu.Unlock()
+		projected.prefetch.indexes[ids[0]][0] = "projected"
+		if got := state.prefetch.indexes[ids[0]][0]; got != "changed" || projected.mempool != state.mempool {
+			t.Fatalf("projection nested prefetch mutated live value=%q", got)
+		}
+	})
+	t.Run("locked test snapshots preserve complete images", func(t *testing.T) {
+		state := newDARelayLockedSnapshotState(t, "peer-ttl")
+		expected := newDARelayLockedSnapshotState(t, "peer-ttl")
+		requireDARelayLockedSnapshotImages(t, state, expected, func(state *DARelayState) error {
+			return state.AdvanceOrphanTTL()
+		})
+	})
+}
+func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testing.T) {
+	t.Run("nil and uncharged no-op", func(t *testing.T) {
+		if err := (*DARelayState)(nil).ReleasePeerQuotaKey("peer-drop"); err != nil {
+			t.Fatalf("nil release: %v", err)
+		}
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		mustAddDAChunk(t, state, "peer-keep", daRelayTestChunk(daRelayTestID(211), 0, 7))
+		before := daRelayStateSnapshot(state)
+		if err := state.ReleasePeerQuotaKey("peer-drop"); err != nil {
+			t.Fatalf("uncharged release: %v", err)
+		}
+		requireDARelayStateUnchanged(t, state, before)
+	})
+	t.Run("partial and whole cleanup", func(t *testing.T) {
+		state := newDARelayPeerReleaseSuccessState(t)
+		twin := newDARelayPeerReleaseSuccessState(t)
+		twin.mempool = state.mempool
+		twin.mu.Lock()
+		wantErr := twin.releasePeerQuotaKeyLocked("peer-drop")
+		twin.mu.Unlock()
+		if wantErr != nil {
+			t.Fatalf("build peer expected image: %v", wantErr)
+		}
+		completeWant, want := daRelayStateSnapshot(state).sets[daRelayTestID(215)], daRelayStateSnapshot(twin)
+		if err := state.ReleasePeerQuotaKey("peer-drop"); err != nil {
+			t.Fatalf("release peer: %v", err)
+		}
+		_, retained := state.sets[daRelayTestID(250)]
+		if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, want) || got.nextReceivedTime != 5 || retained || got.sets[daRelayTestID(213)].state != daRelayStateOrphanChunks || got.sets[daRelayTestID(213)].wireBytes != 11 || got.sets[daRelayTestID(213)].commit.wireBytes != 0 || len(got.sets[daRelayTestID(213)].chunks) != 1 || got.sets[daRelayTestID(213)].chunks[1].peerQuotaKey != "peer-keep" || !reflect.DeepEqual(got.sets[daRelayTestID(215)], completeWant) {
+			t.Fatalf("peer success image=%+v, want %+v", got, want)
+		}
+	})
+	for _, tt := range []struct {
+		name  string
+		index int
+	}{
+		{name: "underflow first", index: 0},
+		{name: "underflow middle", index: 1},
+		{name: "underflow final", index: 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state, ids := newDARelayAtomicBatchState(t, "peer-drop")
+			state.orphanBytesByDAID[ids[tt.index]] = 0
+			before := daRelayStateSnapshot(state)
+			err := state.ReleasePeerQuotaKey("peer-drop")
+			if err != errDARelayArithmeticOverflow {
+				t.Fatalf("underflow err=%v, want %v", err, errDARelayArithmeticOverflow)
+			}
+			requireDARelayStateUnchanged(t, state, before)
+		})
+	}
+	t.Run("overflow after valid prefix", func(t *testing.T) {
+		state, ids := newDARelayAtomicBatchState(t, "peer-drop")
+		mustAddDAChunk(t, state, "peer-keep", daRelayTestChunk(ids[0], 1, 11))
+		record := state.sets[ids[0]]
+		record.replaceableChunks = map[uint16]bool{0: true}
+		state.sets[ids[0]] = record
+		corrupt := daRelayOverflowOrphanAccountingRecord(ids[2])
+		corrupt.commit.peerQuotaKey = "peer-keep"
+		sibling := corrupt.chunks[0]
+		sibling.peerQuotaKey = "peer-keep"
+		corrupt.chunks[0] = sibling
+		corrupt.chunks[1] = daRelayChunk{daID: ids[2], peerQuotaKey: "peer-drop", chunkIndex: 1, payload: []byte{1}, wireBytes: 1}
+		state.sets[ids[2]] = corrupt
+		state.orphanBytesByDAID[ids[2]] = corrupt.wireBytes
+		before := daRelayStateSnapshot(state)
+		err := state.ReleasePeerQuotaKey("peer-drop")
+		if err != errDARelayArithmeticOverflow {
+			t.Fatalf("overflow err=%v, want %v", err, errDARelayArithmeticOverflow)
+		}
+		requireDARelayStateUnchanged(t, state, before)
+	})
+	t.Run("first error wins", func(t *testing.T) {
+		state, _ := newDARelayFirstErrorState(t)
+		before := daRelayStateSnapshot(state)
+		if err := state.ReleasePeerQuotaKey("peer-drop"); err != errDARelayOrphanPeerCapExceeded {
+			t.Fatalf("first peer err=%v, want %v", err, errDARelayOrphanPeerCapExceeded)
+		}
+		requireDARelayStateUnchanged(t, state, before)
+	})
+	t.Run("locked test snapshots preserve complete images", func(t *testing.T) {
+		state := newDARelayLockedSnapshotState(t, "peer-drop")
+		expected := newDARelayLockedSnapshotState(t, "peer-drop")
+		requireDARelayLockedSnapshotImages(t, state, expected, func(state *DARelayState) error {
+			return state.ReleasePeerQuotaKey("peer-drop")
+		})
+	})
+}
 func TestDARelayConsumeCompleteSetRemovesRecordAndPinnedAccounting(t *testing.T) {
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 	consumeID := daRelayTestID(99)
@@ -2032,7 +2248,10 @@ func requireAddDAChunkErrWithin(t *testing.T, state *DARelayState, peer string, 
 // rejected operation can be compared against the whole prior state, matching
 // the Rust mirror's `assert_eq!(state, before)`.
 type daRelayStateView struct {
+	mempool            *Mempool
 	caps               daRelayCaps
+	prefetchIndexes    map[[32]byte]map[uint16]string
+	prefetchExpires    map[[32]byte]time.Time
 	nextReceivedTime   uint64
 	orphanBytes        uint64
 	commitBytes        uint64
@@ -2047,7 +2266,10 @@ func daRelayStateSnapshot(state *DARelayState) daRelayStateView {
 	defer state.mu.Unlock()
 
 	view := daRelayStateView{
+		mempool:            state.mempool,
 		caps:               state.caps,
+		prefetchIndexes:    cloneDARelayPrefetchIndexes(state.prefetch.indexes),
+		prefetchExpires:    maps.Clone(state.prefetch.expires),
 		nextReceivedTime:   state.nextReceivedTime,
 		orphanBytes:        state.orphanBytes,
 		commitBytes:        state.orphanCommitOverheadBytes,
@@ -2057,11 +2279,219 @@ func daRelayStateSnapshot(state *DARelayState) daRelayStateView {
 		sets:               make(map[[32]byte]daRelaySetRecord, len(state.sets)),
 	}
 	for daID, record := range state.sets {
-		view.sets[daID] = record.cloneForStateMutation()
+		record = record.cloneForStateMutation()
+		record.commit.txBytes = cloneBytes(record.commit.txBytes)
+		for index, chunk := range record.chunks {
+			chunk.payload = cloneBytes(chunk.payload)
+			chunk.txBytes = cloneBytes(chunk.txBytes)
+			record.chunks[index] = chunk
+		}
+		view.sets[daID] = record
 	}
 	return view
 }
 
+func cloneDARelayPrefetchIndexes(indexes map[[32]byte]map[uint16]string) map[[32]byte]map[uint16]string {
+	clone := maps.Clone(indexes)
+	for daID, reservations := range clone {
+		clone[daID] = maps.Clone(reservations)
+	}
+	return clone
+}
+func requireDARelayStateUnchanged(t *testing.T, state *DARelayState, before daRelayStateView) {
+	t.Helper()
+	if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, before) {
+		t.Fatalf("state mutated: got=%+v want=%+v", got, before)
+	}
+}
+func newDARelayAtomicBatchState(t *testing.T, peer string) (*DARelayState, [3][32]byte) {
+	t.Helper()
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	state.mempool = &Mempool{}
+	state.caps.orphanTTLBlocks = 1
+	ids := [3][32]byte{daRelayTestID(221), daRelayTestID(222), daRelayTestID(223)}
+	for _, daID := range ids {
+		mustAddDAChunk(t, state, peer, daRelayTestChunk(daID, 0, 7))
+	}
+	record := mustAddDACommit(t, state, peer, daRelayTestCommit([32]byte{222, 1}, 1, 5))
+	record.ttlBlocksRemaining = 2
+	state.sets[record.daID] = record
+	completeID, payload := daRelayTestID(225), []byte{1}
+	mustAddDACommit(t, state, peer, daRelayTestCommitForPayloads(completeID, 1, payload))
+	mustAddDAChunk(t, state, peer, daRelayTestChunkPayload(completeID, 0, 1, payload))
+	state.prefetch.indexes = map[[32]byte]map[uint16]string{
+		ids[0]: {0: "peer-prefetch-a", 1: "peer-prefetch-b"},
+		ids[1]: {2: "peer-prefetch-c"},
+	}
+	state.prefetch.expires = map[[32]byte]time.Time{
+		ids[0]: time.Unix(1, 0),
+		ids[1]: time.Unix(2, 0),
+	}
+	return state, ids
+}
+func newDARelayPeerReleaseSuccessState(t *testing.T) *DARelayState {
+	t.Helper()
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	state.mempool = &Mempool{}
+	wholeID, partialID, keepID, completeID := daRelayTestID(212), daRelayTestID(213), daRelayTestID(214), daRelayTestID(215)
+	mustAddDAChunk(t, state, "peer-drop", daRelayTestChunk(wholeID, 0, 7))
+	mustAddDACommit(t, state, "peer-drop", daRelayTestCommit(partialID, 3, 5))
+	mustAddDAChunk(t, state, "peer-drop", daRelayTestChunk(partialID, 0, 7))
+	mustAddDAChunk(t, state, "peer-keep", daRelayTestChunk(partialID, 1, 11))
+	mustAddDAChunk(t, state, "peer-keep", daRelayTestChunk(keepID, 0, 13))
+	mustAddDAChunk(t, state, "peer-drop", daRelayTestChunk(daRelayTestID(250), 0, 7))
+	payload := []byte("complete")
+	mustAddDACommit(t, state, "peer-keep", daRelayTestCommitForPayloads(completeID, 5, payload))
+	mustAddDAChunk(t, state, "peer-drop", daRelayTestChunkPayload(completeID, 0, uint64(len(payload)), payload))
+	state.prefetch.indexes = map[[32]byte]map[uint16]string{wholeID: {0: "peer-prefetch"}, partialID: {2: "peer-prefetch"}}
+	state.prefetch.expires = map[[32]byte]time.Time{wholeID: time.Unix(2, 0), partialID: time.Unix(3, 0)}
+	return state
+}
+func newDARelayFirstErrorState(t *testing.T) (*DARelayState, [2][32]byte) {
+	t.Helper()
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	state.caps.orphanTTLBlocks = 1
+	ids := [2][32]byte{daRelayTestID(230), daRelayTestID(231)}
+	mustAddDAChunk(t, state, "peer-drop", daRelayTestChunk(ids[0], 0, 7))
+	mustAddDAChunk(t, state, "peer-early", daRelayTestChunk(ids[0], 1, 7))
+	mustAddDAChunk(t, state, "peer-drop", daRelayTestChunk(ids[1], 0, 7))
+	state.orphanBytesByPeerQuotaKey["peer-early"] = state.caps.orphanPoolPerPeerBytes + state.orphanBytesByPeerQuotaKey["peer-early"] + 1
+	state.orphanBytesByDAID[ids[1]] = 0
+	return state, ids
+}
+func newDARelayLockedSnapshotState(t *testing.T, peer string) *DARelayState {
+	t.Helper()
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	state.caps.orphanTTLBlocks = 1
+	for i := 0; i < 256; i++ {
+		daID := daRelayTestID(byte(i))
+		mustAddDAChunk(t, state, peer, daRelayTestChunk(daID, 0, 7))
+	}
+	payload := []byte{1}
+	completeID := [32]byte{0, 1}
+	mustAddDACommit(t, state, "peer-complete", daRelayTestCommitWithTxBytes(completeID, 1, []byte{1}, payload))
+	mustAddDAChunk(t, state, "peer-complete", daRelayTestChunkWithTxBytes(completeID, 0, 1, []byte{2}, payload))
+	return state
+}
+func requireDARelayLockedSnapshotImages(t *testing.T, state, expected *DARelayState, write func(*DARelayState) error) {
+	t.Helper()
+	before := daRelayStateSnapshot(state)
+	candidates := state.CompleteSetCandidates(^uint64(0))
+	if len(candidates) != 1 {
+		t.Fatalf("public reader candidates=%d, want 1", len(candidates))
+	}
+	if err := write(expected); err != nil {
+		t.Fatalf("build expected image: %v", err)
+	}
+	after := daRelayStateSnapshot(expected)
+	const readers, snapshotsPerReader = 4, 16
+	start := make(chan struct{})
+	cancel := make(chan struct{})
+	warmed := make(chan struct{}, readers)
+	snapshots := make(chan daRelayStateView, readers*(snapshotsPerReader+2))
+	writerResult := make(chan error, 1)
+	writeDone := make(chan struct{})
+	readerErr := make(chan error, readers)
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	var readersDone sync.WaitGroup
+	defer func() { close(cancel); readersDone.Wait() }()
+	for i := 0; i < readers; i++ {
+		readersDone.Add(1)
+		go func() {
+			defer readersDone.Done()
+			for i := 0; i <= snapshotsPerReader; i++ {
+				if !reflect.DeepEqual(state.CompleteSetCandidates(^uint64(0)), candidates) {
+					readerErr <- errors.New("public reader result changed")
+					return
+				}
+				snapshots <- daRelayStateSnapshot(state)
+				if i == 0 {
+					warmed <- struct{}{}
+					select {
+					case <-start:
+					case <-cancel:
+						return
+					}
+				}
+			}
+			select {
+			case <-writeDone:
+			case <-cancel:
+				return
+			}
+			if !reflect.DeepEqual(state.CompleteSetCandidates(^uint64(0)), candidates) {
+				readerErr <- errors.New("public reader result changed")
+				return
+			}
+			snapshots <- daRelayStateSnapshot(state)
+		}()
+	}
+	go func() {
+		defer close(writeDone)
+		select {
+		case <-start:
+		case <-cancel:
+			return
+		}
+		writerErr := write(state)
+		select {
+		case writerResult <- writerErr:
+		case <-cancel:
+		}
+	}()
+	for i := 0; i < readers; i++ {
+		select {
+		case <-warmed:
+		case err := <-readerErr:
+			t.Fatal(err)
+		case <-deadline.C:
+			t.Fatal("reader warmup did not complete")
+		}
+	}
+	close(start)
+	var writerErr error
+	select {
+	case writerErr = <-writerResult:
+	case <-deadline.C:
+		t.Fatal("writer did not complete")
+	}
+	done := make(chan struct{})
+	go func() { readersDone.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-deadline.C:
+		t.Fatal("readers did not complete")
+	}
+	close(snapshots)
+	sawBefore, sawAfter, partialImage := false, false, false
+	for got := range snapshots {
+		if reflect.DeepEqual(got, before) {
+			sawBefore = true
+		} else if reflect.DeepEqual(got, after) {
+			sawAfter = true
+		} else {
+			partialImage = true
+		}
+	}
+	select {
+	case err := <-readerErr:
+		t.Fatal(err)
+	default:
+	}
+	if writerErr != nil {
+		t.Fatalf("image write: %v", writerErr)
+	}
+	if !sawBefore || !sawAfter {
+		t.Fatal("locked snapshots did not observe both images")
+	}
+	if partialImage {
+		t.Fatal("locked snapshot observed a partial image")
+	}
+	if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, after) {
+		t.Fatal("final locked snapshot differs from expected post-image")
+	}
+}
 func mustPinnedPayloadAccounting(t *testing.T, record daRelaySetRecord) uint64 {
 	t.Helper()
 	return record.pinnedPayloadAccountingBytes()

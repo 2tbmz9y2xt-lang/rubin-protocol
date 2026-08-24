@@ -3,6 +3,7 @@ package node
 import (
 	"crypto/sha3"
 	"errors"
+	"maps"
 	"sync"
 	"time"
 
@@ -378,6 +379,16 @@ func (s *DARelayState) advanceOrphanTTL() ([]daRelayExpiredSet, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	projected := s.cloneForAtomicBatchLocked()
+	expired, err := projected.advanceOrphanTTLLocked()
+	if err != nil {
+		return nil, err
+	}
+	s.publishAtomicBatchLocked(projected)
+	return expired, nil
+}
+
+func (s *DARelayState) advanceOrphanTTLLocked() ([]daRelayExpiredSet, error) {
 	var expired []daRelayExpiredSet
 	for _, daID := range s.sortedIncompleteDAIDsLocked() {
 		record := s.sets[daID]
@@ -397,6 +408,36 @@ func (s *DARelayState) advanceOrphanTTL() ([]daRelayExpiredSet, error) {
 		})
 	}
 	return expired, nil
+}
+
+func (s *DARelayState) cloneForAtomicBatchLocked() *DARelayState {
+	prefetchIndexes := maps.Clone(s.prefetch.indexes)
+	for daID, indexes := range prefetchIndexes {
+		prefetchIndexes[daID] = maps.Clone(indexes)
+	}
+	return &DARelayState{
+		mempool:                   s.mempool,
+		caps:                      s.caps,
+		prefetch:                  daRelayPrefetchState{indexes: prefetchIndexes, expires: maps.Clone(s.prefetch.expires)},
+		nextReceivedTime:          s.nextReceivedTime,
+		orphanBytes:               s.orphanBytes,
+		orphanBytesByPeerQuotaKey: maps.Clone(s.orphanBytesByPeerQuotaKey),
+		orphanBytesByDAID:         maps.Clone(s.orphanBytesByDAID),
+		orphanCommitOverheadBytes: s.orphanCommitOverheadBytes,
+		pinnedPayloadBytes:        s.pinnedPayloadBytes,
+		sets:                      maps.Clone(s.sets),
+	}
+}
+
+func (s *DARelayState) publishAtomicBatchLocked(projected *DARelayState) {
+	s.prefetch = projected.prefetch
+	s.nextReceivedTime = projected.nextReceivedTime
+	s.orphanBytes = projected.orphanBytes
+	s.orphanBytesByPeerQuotaKey = projected.orphanBytesByPeerQuotaKey
+	s.orphanBytesByDAID = projected.orphanBytesByDAID
+	s.orphanCommitOverheadBytes = projected.orphanCommitOverheadBytes
+	s.pinnedPayloadBytes = projected.pinnedPayloadBytes
+	s.sets = projected.sets
 }
 
 func (s *DARelayState) planDAPrefetch(record daRelaySetRecord, peerKeys []string, now time.Time) ([]daRelayPrefetchPlan, string) {
