@@ -53,6 +53,14 @@ func undoPayloadAllocationDelta(t *testing.T, warm, run func() error) uint64 {
 }
 
 func TestUndoPayloadAllocationPublicPaths(t *testing.T) {
+	// Under -race sync.Pool.Put randomly drops values and encoding/json pools its encode/scan state, so per-call TotalAlloc is nondeterministic.
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "-race" && setting.Value == "true" {
+				t.Skip("allocation accounting is nondeterministic in race builds because sync.Pool randomly drops values")
+			}
+		}
+	}
 	type sample struct {
 		undo         *BlockUndo
 		payload, raw []byte

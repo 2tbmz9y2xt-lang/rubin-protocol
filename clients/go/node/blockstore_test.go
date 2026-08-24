@@ -1964,7 +1964,7 @@ func restoreStoredUndo(t *testing.T, store *BlockStore, blockHash [32]byte, orig
 // RUB-890: prepared canonical-index commit and strict block presence.
 // The primitive is package-private and has NO production caller in this slice;
 // these tests are its only drivers. Several replace package-level seams
-// (writeFileAtomicFn, atomicWriteIO): none may call t.Parallel.
+// (writeFileAtomicFn, loadBlockStoreIndexFn, atomicWriteIO): none may call t.Parallel.
 // ---------------------------------------------------------------------------
 
 // canonicalIndexRow returns a deterministic, canonically-spelled index row.
@@ -2058,13 +2058,12 @@ func mustPrepareCanonicalIndex(t *testing.T, store *BlockStore, next []string) *
 	return prepared
 }
 
-func mustCommitCanonicalIndex(t *testing.T, store *BlockStore, next []string) *preparedCanonicalIndex {
+func mustCommitCanonicalIndex(t *testing.T, store *BlockStore, next []string) {
 	t.Helper()
 	prepared := mustPrepareCanonicalIndex(t, store, next)
 	if got := prepared.commit(store); got.class != canonicalCommitted {
 		t.Fatalf("commit(%v) = %s (%v), want COMMITTED", next, got.class, got.err)
 	}
-	return prepared
 }
 
 // assertPublishedCanonicalImage proves the prepared image is the live one in
@@ -2137,12 +2136,14 @@ func TestPreparedCanonicalIndexAcceptedTransitions(t *testing.T) {
 			store.chainWorkByHash[canonicalIndexRowHash(t, row0)] = big.NewInt(7)
 			store.stateMu.Unlock()
 
-			prepared := mustCommitCanonicalIndex(t, store, tc.next)
-			assertPublishedCanonicalImage(t, store, tc.next, prepared.newRaw)
+			mustCommitCanonicalIndex(t, store, tc.next)
+			// A LITERAL fixture from the row list, never the image's own field (x == x).
+			wantRaw := mustEncodeCanonicalIndex(t, tc.next)
+			assertPublishedCanonicalImage(t, store, tc.next, wantRaw)
 
 			// Restart from the committed canonical index.
 			reopened := mustOpenBlockStore(t, root)
-			assertPublishedCanonicalImage(t, reopened, tc.next, prepared.newRaw)
+			assertPublishedCanonicalImage(t, reopened, tc.next, wantRaw)
 			_, _, ok, err := reopened.Tip()
 			if err != nil || ok != (len(tc.next) > 0) {
 				t.Fatalf("restart tip: ok=%v err=%v", ok, err)
@@ -2217,7 +2218,11 @@ func TestPreparedCanonicalIndexPrecommitAndStaleImageKeepExactOldState(t *testin
 	before, diskBefore := captureCanonicalRAMImage(store), mustReadIndexFile(t, store)
 
 	t.Run("stale_visible_identity", func(t *testing.T) {
-		prepared, err := prepareCanonicalIndex([]byte("bytes this store never had"), []string{row0, row1})
+		// A well-formed identity this store never held: a comparison identity has
+		// to DECODE (prepare refuses malformed bytes outright), so the staleness
+		// under test is a different sequence, not an unreadable spelling.
+		neverVisible := mustEncodeCanonicalIndex(t, []string{canonicalIndexRow(0x3f)})
+		prepared, err := prepareCanonicalIndex(neverVisible, []string{row0, row1})
 		if err != nil {
 			t.Fatalf("prepareCanonicalIndex: %v", err)
 		}
@@ -2360,166 +2365,439 @@ func TestPreparedCanonicalIndexCrossStoreCommitIsSingleUse(t *testing.T) {
 	}
 }
 
-// sameLengthDifferentBytes returns bytes of the SAME length as raw but a
-// different content, so a readback that compares lengths instead of contents
-// would misclassify them as an identity match.
-func sameLengthDifferentBytes(raw []byte) []byte {
-	out := append([]byte(nil), raw...)
-	out[len(out)/2] ^= 0x01
-	return out
+// respellCanonicalIndex wraps a HAND-WRITTEN compact spelling of one canonical
+// sequence in the store envelope: field order reversed and no indentation, which
+// the strict decoder accepts and encodeBlockStoreIndex never emits. It is the
+// test's own oracle for "same sequence, different bytes", never produced by the code
+// under test, and every user proves it differs from the canonical encoding so no row can
+// pass because the two spellings collapsed. Callers pass >= 1 row: zero rows would render
+// `"canonical":[""]`, an invalid single empty row, not the empty sequence.
+func respellCanonicalIndex(t *testing.T, rows ...string) []byte {
+	t.Helper()
+	return mustMarshalStoreEnvelope(t, `{"version":1,"canonical":["`+strings.Join(rows, `","`)+`"]}`)
 }
 
-// TestPreparedCanonicalIndexPostCommitVisibleBytesClassify: whenever the write may
-// have crossed the namespace commit — the lane said so, or it returned an error it
-// never classified at all — exactly ONE strict readback classifies by the VISIBLE
-// BYTES. The error text never classifies, a stale RAM identity never classifies, a
-// matching LENGTH is not an identity, and only the exact new image publishes. Every
-// row also pins single use: one write, a spent second commit, one image.
-func TestPreparedCanonicalIndexPostCommitVisibleBytesClassify(t *testing.T) {
-	row0, row1, row2 := canonicalIndexRow(0x40), canonicalIndexRow(0x41), canonicalIndexRow(0x42)
-	postCommitCause := errors.New("post-commit fault")
-	plantNew := func(t *testing.T, store *BlockStore, p *preparedCanonicalIndex) { mustPlantIndex(t, store, p.newRaw) }
-	removeIndex := func(t *testing.T, store *BlockStore, _ *preparedCanonicalIndex) {
-		if err := os.Remove(store.indexPath); err != nil {
-			t.Fatalf("remove index: %v", err)
-		}
-	}
-	// The PLANNED NEW rows re-spelled: it decodes alike, so only bytes refuse it.
-	respelled, err := marshalStoreEnvelope(storeEnvelopeBlockIndex, []byte(`{"canonical":["`+row0+`","`+row1+`"],"version":1}`))
+func mustMarshalStoreEnvelope(t *testing.T, payload string) []byte {
+	t.Helper()
+	raw, err := marshalStoreEnvelope(storeEnvelopeBlockIndex, []byte(payload))
 	if err != nil {
 		t.Fatalf("marshalStoreEnvelope: %v", err)
 	}
-	plantRespelledNew := func(t *testing.T, store *BlockStore, _ *preparedCanonicalIndex) { mustPlantIndex(t, store, respelled) }
+	return raw
+}
+
+// withLoadBlockStoreIndexFn replaces the strict readback seam so a test can COUNT the
+// reads one commit performs; it mirrors withWriteFileAtomicFn.
+func withLoadBlockStoreIndexFn(t *testing.T, fn func(string) (blockStoreIndexDisk, []byte, error)) {
+	t.Helper()
+	previous := loadBlockStoreIndexFn
+	loadBlockStoreIndexFn = fn
+	t.Cleanup(func() { loadBlockStoreIndexFn = previous })
+}
+
+// countCanonicalWrites counts write attempts and reports success without touching the
+// disk, for lanes that only care how many times the write lane ran.
+func countCanonicalWrites(t *testing.T) *int {
+	t.Helper()
+	writes := 0
+	withWriteFileAtomicFn(t, func(string, []byte, os.FileMode) error { writes++; return nil })
+	return &writes
+}
+
+// TestPreparedCanonicalIndexSequenceIdentityPreparationAndFreshness: preparation and
+// commit freshness compare the complete ordered ROW SEQUENCE of spec §6.4.1 — length and
+// every row, position = height — never the bytes that spell it. So a re-spelled visible
+// identity is the SAME identity, a truly moved or undecodable one is refused before the
+// single-use claim and before any write, and an image with NO comparison identity still
+// saves through Restore yet may never commit.
+func TestPreparedCanonicalIndexSequenceIdentityPreparationAndFreshness(t *testing.T) {
+	row0, row1, row2 := canonicalIndexRow(0x50), canonicalIndexRow(0x51), canonicalIndexRow(0x52)
+	seedRows, nextRows := []string{row0}, []string{row0, row1}
+	seed := func(t *testing.T) *BlockStore {
+		t.Helper()
+		store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
+		mustCommitCanonicalIndex(t, store, seedRows)
+		return store
+	}
+	respelledSeed := respellCanonicalIndex(t, seedRows...)
+	if bytes.Equal(respelledSeed, mustEncodeCanonicalIndex(t, seedRows)) {
+		t.Fatal("the re-spelled fixture must differ byte for byte from the canonical encoding")
+	}
+
+	// Preparation: oldRaw state x planned next, all before any image exists.
+	for _, tc := range []struct {
+		name    string
+		oldRaw  []byte // nil: the store's own canonical visible identity
+		next    []string
+		wantIs  error
+		wantErr string // exact refusal text, for refusals that carry no sentinel
+		wantOk  bool
+	}{
+		{name: "canonical_old_same_sequence_is_no_op", next: seedRows, wantIs: errCanonicalIndexNoOp},
+		// Byte identity would stage this as a real transition and write.
+		{name: "respelled_old_same_sequence_is_no_op", oldRaw: respelledSeed, next: seedRows, wantIs: errCanonicalIndexNoOp},
+		{name: "canonical_old_different_next_builds_image", next: nextRows, wantOk: true},
+		// Fail closed: an undecodable identity must not degrade into "no identity",
+		// which would silently skip the no-op refusal.
+		{name: "malformed_envelope_old_raw", oldRaw: []byte("bytes this store never had"), next: nextRows, wantIs: ErrStoreIntegrity},
+		{name: "malformed_inner_json_old_raw", oldRaw: mustMarshalStoreEnvelope(t, `{"canonical":[`), next: nextRows},
+		// STRICTNESS, not well-formedness: valid JSON in a valid envelope that a lax
+		// json.Unmarshal into blockStoreIndexDisk accepts silently. The pinned text proves
+		// the store's own exact-field rule refused it, wrapped as loadBlockStoreIndex wraps
+		// it — one corrupt image, one error identity through prepare and reopen.
+		{
+			name: "extra_top_level_field_old_raw", oldRaw: mustMarshalStoreEnvelope(t, `{"version":1,"canonical":[],"extra":0}`), next: nextRows,
+			wantErr: `decode blockstore index: blockstore index fields must be exactly canonical and version, got ["canonical" "extra" "version"]`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, writes := seed(t), countCanonicalWrites(t)
+			oldRaw := tc.oldRaw
+			if oldRaw == nil {
+				oldRaw = store.visibleIndexBytes()
+			}
+			prepared, err := prepareCanonicalIndex(oldRaw, tc.next)
+			switch {
+			case tc.wantOk:
+				if err != nil {
+					t.Fatalf("prepare: %v", err)
+				}
+				// Both retained identities are compared to LITERAL sequences.
+				if !slices.Equal(prepared.oldCanonical, seedRows) || !slices.Equal(prepared.index.Canonical, nextRows) {
+					t.Fatalf("retained old=%v planned=%v", prepared.oldCanonical, prepared.index.Canonical)
+				}
+			case err == nil || prepared != nil:
+				t.Fatalf("prepare accepted the refused input: %v", err)
+			case tc.wantIs != nil && !errors.Is(err, tc.wantIs):
+				t.Fatalf("prepare err = %v, want %v", err, tc.wantIs)
+			case tc.wantErr != "" && err.Error() != tc.wantErr:
+				t.Fatalf("prepare err = %q, want %q", err, tc.wantErr)
+			}
+			if *writes != 0 {
+				t.Fatalf("preparation reached the write lane %d times", *writes)
+			}
+		})
+	}
+
+	setCache := func(raw []byte) func(*testing.T, *BlockStore) {
+		return func(_ *testing.T, store *BlockStore) {
+			store.stateMu.Lock()
+			store.indexRaw = raw
+			store.stateMu.Unlock()
+		}
+	}
+	// Commit freshness: the visible identity as it stands between prepare and commit.
+	for _, tc := range []struct {
+		name       string
+		nilOld     bool
+		emptyStore bool
+		cache      func(*testing.T, *BlockStore)
+		wantClass  canonicalCommitClass
+		wantIs     error
+		wantWrites int
+	}{
+		// A writer that emitted a different valid spelling of the same rows leaves exactly
+		// this cache; the in-tree encoder emits one spelling, so the fixture is hand-written.
+		{name: "respelled_cached_identity_is_fresh", cache: setCache(respelledSeed), wantClass: canonicalCommitted, wantWrites: 1},
+		// The EMPTY visible sequence is what needs the explicit no-identity guard: a nil
+		// identity compares equal to an empty one, so a freshness check that only compared
+		// sequences would let a Restore-shaped image commit against a fresh store.
+		{name: "nil_old_identity_commit_is_refused", nilOld: true, emptyStore: true, wantClass: canonicalCommitStale, wantIs: errCanonicalIndexMoved},
+		{name: "true_sequence_drift_refuses_commit", cache: func(t *testing.T, store *BlockStore) {
+			// The lost-update schedule: a legacy mutator advances the visible
+			// identity between prepare and commit, through its own save path.
+			if err := store.SetCanonicalTip(0, canonicalIndexRowHash(t, row2)); err != nil {
+				t.Fatalf("SetCanonicalTip: %v", err)
+			}
+		}, wantClass: canonicalCommitStale, wantIs: errCanonicalIndexMoved},
+		// Empty again for the fail-closed arm: an undecodable cache decodes to NO sequence,
+		// equal to the empty one, so only the explicit decode-failure refusal keeps it stale.
+		{name: "undecodable_cached_identity_refuses_commit", emptyStore: true, cache: setCache([]byte("not an envelope")), wantClass: canonicalCommitStale, wantIs: errCanonicalIndexMoved},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := seed(t)
+			if tc.emptyStore {
+				store = mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
+			}
+			oldRaw := store.visibleIndexBytes()
+			if tc.nilOld {
+				oldRaw = nil
+			}
+			prepared, err := prepareCanonicalIndex(oldRaw, nextRows)
+			if err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			if tc.cache != nil {
+				tc.cache(t, store)
+			}
+			writes := countCanonicalWrites(t)
+			got := prepared.commit(store)
+			if got.class != tc.wantClass || (tc.wantIs != nil && !errors.Is(got.err, tc.wantIs)) {
+				t.Fatalf("commit = %s (%v), want %s (%v)", got.class, got.err, tc.wantClass, tc.wantIs)
+			}
+			if *writes != tc.wantWrites {
+				t.Fatalf("the write lane ran %d times, want %d", *writes, tc.wantWrites)
+			}
+			if tc.wantClass != canonicalCommitStale {
+				return
+			}
+			// Refused BEFORE the single-use claim, so the image stays reusable and
+			// the SAME refusal comes back — never errPreparedIndexSpent.
+			if prepared.spent.Load() {
+				t.Fatal("a pre-claim refusal spent the image")
+			}
+			if again := prepared.commit(store); again.class != tc.wantClass || !errors.Is(again.err, tc.wantIs) {
+				t.Fatalf("second commit = %s (%v), want the same refusal", again.class, again.err)
+			}
+		})
+	}
+
+	// Restore has NO comparison identity, so an identical list is not a no-op and must still
+	// reach the save. The EMPTY row matters: a nil identity would compare equal to empty.
+	t.Run("nil_old_identity_restore_saves_identical_sequence", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			store func(t *testing.T) *BlockStore
+			rows  []string
+		}{
+			{name: "identical_nonempty", store: seed, rows: seedRows},
+			{name: "identical_empty", store: func(t *testing.T) *BlockStore {
+				return mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
+			}, rows: []string{}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				store, writes := tc.store(t), countCanonicalWrites(t)
+				if err := store.RestoreCanonicalIndex(tc.rows); err != nil {
+					t.Fatalf("RestoreCanonicalIndex(%v): %v", tc.rows, err)
+				}
+				if *writes != 1 {
+					t.Fatalf("the write lane ran %d times, want exactly one save", *writes)
+				}
+			})
+		}
+	})
+
+	t.Run("spent_image_refuses_second_commit", func(t *testing.T) {
+		store := seed(t)
+		prepared := mustPrepareCanonicalIndex(t, store, nextRows)
+		writes := countCanonicalWrites(t)
+		if got := prepared.commit(store); got.class != canonicalCommitted {
+			t.Fatalf("first commit = %s (%v), want COMMITTED", got.class, got.err)
+		}
+		if got := prepared.commit(store); got.class != canonicalCommitStale || !errors.Is(got.err, errPreparedIndexSpent) {
+			t.Fatalf("second commit = %s (%v), want the spent refusal", got.class, got.err)
+		}
+		if *writes != 1 {
+			t.Fatalf("the write lane ran %d times, want exactly one attempt", *writes)
+		}
+	})
+
+	t.Run("concurrent_double_commit_claims_once", func(t *testing.T) {
+		store := seed(t)
+		prepared := mustPrepareCanonicalIndex(t, store, nextRows)
+		var writes atomic.Int32
+		withWriteFileAtomicFn(t, func(string, []byte, os.FileMode) error { writes.Add(1); return nil })
+		// Both goroutines park on the barrier before either may claim. Same-store commits
+		// then serialize on the transition fence, so this row pins that the SECOND arrival is
+		// refused as spent and only one write happens; CAS contention is the cross-store test.
+		var ready sync.WaitGroup
+		ready.Add(2)
+		start, results := make(chan struct{}), make(chan canonicalCommitResult, 2)
+		for range 2 {
+			go func() { ready.Done(); <-start; results <- prepared.commit(store) }()
+		}
+		ready.Wait()
+		close(start)
+		committed, refused := 0, 0
+		for range 2 {
+			switch got := <-results; {
+			case got.class == canonicalCommitted:
+				committed++
+			case got.class == canonicalCommitStale && errors.Is(got.err, errPreparedIndexSpent):
+				refused++
+			default:
+				t.Fatalf("concurrent commit = %s (%v)", got.class, got.err)
+			}
+		}
+		if committed != 1 || refused != 1 || writes.Load() != 1 {
+			t.Fatalf("committed=%d refused=%d writes=%d, want 1/1/1", committed, refused, writes.Load())
+		}
+	})
+}
+
+// TestPreparedCanonicalIndexPostCommitVisibleSequenceClassify: whenever the write may
+// have crossed the namespace commit — the lane said so, or it returned an error it never
+// classified at all — exactly ONE strict readback classifies by the complete ordered ROW
+// SEQUENCE. Two spellings of one sequence are ONE identity, so a re-spelled old or new
+// image is that identity and terminal NEW caches the EXACT bytes the disk holds; a shared
+// tip, a reordering, a duplicate, a prefix, an extra row, a matching length, a missing
+// file and an unreadable one are each NEITHER. Neither the error text nor a stale RAM
+// identity classifies, a proven pre-commit failure never reads, and every row pins single
+// use: one write, one image, a spent second commit.
+func TestPreparedCanonicalIndexPostCommitVisibleSequenceClassify(t *testing.T) {
+	const (
+		afterCommit  = ""       // the lane tagged the failure AFTER the namespace commit
+		untagged     = "untag"  // an error the atomic lane never classified at all
+		beforeCommit = "before" // the lane PROVED nothing crossed
+		cleanWrite   = "clean"  // the write succeeded
+	)
+	row0, row1, row2 := canonicalIndexRow(0x40), canonicalIndexRow(0x41), canonicalIndexRow(0x42)
+	row3, row4 := canonicalIndexRow(0x43), canonicalIndexRow(0x44)
+	oldRows, newRows := []string{row0}, []string{row0, row1, row2}
+	cause := errors.New("write-lane fault")
+
+	canonicalNew := mustEncodeCanonicalIndex(t, newRows)
+	respelledOld, respelledNew := respellCanonicalIndex(t, oldRows...), respellCanonicalIndex(t, newRows...)
+	if bytes.Equal(respelledOld, mustEncodeCanonicalIndex(t, oldRows)) || bytes.Equal(respelledNew, canonicalNew) {
+		t.Fatal("the re-spelled fixtures must differ byte for byte from the canonical encoding")
+	}
+	plant := func(raw []byte) func(*testing.T, *BlockStore) {
+		return func(t *testing.T, store *BlockStore) { mustPlantIndex(t, store, raw) }
+	}
+	plantRows := func(rows ...string) func(*testing.T, *BlockStore) {
+		return func(t *testing.T, store *BlockStore) { mustPlantIndex(t, store, mustEncodeCanonicalIndex(t, rows)) }
+	}
 
 	for _, tc := range []struct {
 		name string
-		// untagged drives the write seam to return an error the atomic lane
-		// never classified: an unclassified error is NOT proof of a pre-commit
-		// failure, so it must reach the same strict readback.
-		untagged  bool
-		staleRAM  bool
-		visible   func(t *testing.T, store *BlockStore, prepared *preparedCanonicalIndex)
-		wantClass canonicalCommitClass
-		published bool
-		alsoIs    error
+		// visible makes the named disk state visible from inside the write lane,
+		// exactly as a crossed write would leave it. nil keeps the committed old.
+		visible     func(*testing.T, *BlockStore)
+		outcome     string
+		wantClass   canonicalCommitClass
+		wantReads   int
+		wantReadErr bool
+		// wantRaw non-nil means publication is expected, and it is the EXACT visible
+		// identity the store must cache — a literal fixture, never the image under test.
+		wantRaw []byte
+		alsoIs  error
 	}{
-		{name: "visible_old", wantClass: canonicalCommitTerminalOld},
-		{name: "visible_new", visible: plantNew, wantClass: canonicalCommitTerminalNew, published: true},
-		{name: "respelled_new_identity", visible: plantRespelledNew, wantClass: canonicalCommitTerminalUnknown},
+		{name: "canonical_old", outcome: afterCommit, wantClass: canonicalCommitTerminalOld, wantReads: 1},
+		{name: "respelled_old", visible: plant(respelledOld), outcome: untagged, wantClass: canonicalCommitTerminalOld, wantReads: 1},
+		{name: "canonical_new", visible: plant(canonicalNew), wantClass: canonicalCommitTerminalNew, wantReads: 1, wantRaw: canonicalNew},
+		// Byte identity would call this NEITHER, and publishing the planned
+		// encoding would leave the store naming bytes the disk does not hold.
+		{name: "respelled_new", visible: plant(respelledNew), outcome: untagged, wantClass: canonicalCommitTerminalNew, wantReads: 1, wantRaw: respelledNew},
+		{name: "third_sequence", visible: plantRows(row3, row4), wantClass: canonicalCommitTerminalUnknown, wantReads: 1},
+		// The planned TIP with a different prefix kills tip-only identity.
+		{name: "same_tip_different_prefix", visible: plantRows(row3, row1, row2), wantClass: canonicalCommitTerminalUnknown, wantReads: 1},
+		// The planned rows as a SET, in another order.
+		{name: "reordered_new_rows", visible: plantRows(row0, row2, row1), wantClass: canonicalCommitTerminalUnknown, wantReads: 1},
+		// Decodes fine — validateBlockStoreIndex has no duplicate-row check — so only
+		// sequence inequality refuses it. LONGER than the planned image on purpose: at the
+		// planned length it repeats same_length_one_row_differs and a de-dup identity lives.
+		{name: "duplicated_new_row", visible: plantRows(row0, row1, row1, row2), wantClass: canonicalCommitTerminalUnknown, wantReads: 1},
+		{name: "strict_prefix_of_new", visible: plantRows(row0, row1), wantClass: canonicalCommitTerminalUnknown, wantReads: 1},
+		{name: "new_plus_extra_row", visible: plantRows(row0, row1, row2, row3), wantClass: canonicalCommitTerminalUnknown, wantReads: 1},
+		{name: "same_length_one_row_differs", visible: plantRows(row0, row1, row3), wantClass: canonicalCommitTerminalUnknown, wantReads: 1},
+		{name: "empty_sequence", visible: plantRows(), wantClass: canonicalCommitTerminalUnknown, wantReads: 1},
+		// A missing file is a read FAILURE, never an implicit empty identity.
+		{name: "missing_file", visible: func(t *testing.T, store *BlockStore) {
+			if err := os.Remove(store.indexPath); err != nil {
+				t.Fatalf("remove index: %v", err)
+			}
+		}, outcome: untagged, wantClass: canonicalCommitTerminalUnknown, wantReads: 1, wantReadErr: true, alsoIs: os.ErrNotExist},
+		// Trailing padding shifts the derived envelope layout: bytes the store
+		// would refuse to reopen are no identity, however long they are.
 		{
-			name: "visible_third_identity",
-			visible: func(t *testing.T, store *BlockStore, _ *preparedCanonicalIndex) {
-				mustPlantIndex(t, store, mustEncodeCanonicalIndex(t, []string{row0, row2}))
-			},
-			wantClass: canonicalCommitTerminalUnknown,
+			name: "malformed_envelope", visible: plant(append(append([]byte(nil), canonicalNew...), bytes.Repeat([]byte{' '}, 4096)...)),
+			wantClass: canonicalCommitTerminalUnknown, wantReads: 1, wantReadErr: true,
 		},
-		{
-			// The PLANNED rows, two of them swapped: §6.4.1 lists "reordered"
-			// among the neither triggers, and a readback that compared the
-			// decoded rows AS A SET would take it for the new identity.
-			name: "reordered_planned_rows",
-			visible: func(t *testing.T, store *BlockStore, _ *preparedCanonicalIndex) {
-				mustPlantIndex(t, store, mustEncodeCanonicalIndex(t, []string{row1, row0}))
-			},
-			wantClass: canonicalCommitTerminalUnknown,
-		},
-		{
-			// A visible image sharing the planned TIP but differing earlier is
-			// NEITHER identity: tip-only or hash-only comparison is exactly the
-			// shortcut that would call it new.
-			name: "shared_tip_different_prefix",
-			visible: func(t *testing.T, store *BlockStore, _ *preparedCanonicalIndex) {
-				mustPlantIndex(t, store, mustEncodeCanonicalIndex(t, []string{row2, row1}))
-			},
-			wantClass: canonicalCommitTerminalUnknown,
-		},
-		{
-			// The one strict readback is BOUNDED: only two byte strings can
-			// match, so an image longer than both is provably neither identity
-			// and is refused before it is allocated — the bound refusal travels
-			// back as part of the evidence.
-			name: "oversized_visible_image",
-			visible: func(t *testing.T, store *BlockStore, p *preparedCanonicalIndex) {
-				mustPlantIndex(t, store, append(append([]byte(nil), p.newRaw...), bytes.Repeat([]byte{' '}, 4096)...))
-			},
-			wantClass: canonicalCommitTerminalUnknown, alsoIs: errStoreFileTooLarge,
-		},
-		{
-			name: "old_length_different_content",
-			visible: func(t *testing.T, store *BlockStore, p *preparedCanonicalIndex) {
-				mustPlantIndex(t, store, sameLengthDifferentBytes(p.oldRaw))
-			},
-			wantClass: canonicalCommitTerminalUnknown,
-		},
-		{
-			name: "new_length_different_content",
-			visible: func(t *testing.T, store *BlockStore, p *preparedCanonicalIndex) {
-				mustPlantIndex(t, store, sameLengthDifferentBytes(p.newRaw))
-			},
-			wantClass: canonicalCommitTerminalUnknown,
-		},
-		{
-			// Both causes survive: the write failure AND the readback failure.
-			name: "unreadable", visible: removeIndex,
-			wantClass: canonicalCommitTerminalUnknown, alsoIs: os.ErrNotExist,
-		},
-		{
-			// A malformed RAM identity against a valid disk image: the readback
-			// compares DISK bytes, so it cannot report "old" on RAM's word.
-			name:      "stale_ram_identity_against_valid_disk",
-			staleRAM:  true,
-			wantClass: canonicalCommitTerminalUnknown,
-		},
-		{name: "untagged_visible_old", untagged: true, wantClass: canonicalCommitTerminalOld},
-		{name: "untagged_visible_new", untagged: true, visible: plantNew, wantClass: canonicalCommitTerminalNew, published: true},
-		{name: "untagged_unreadable", untagged: true, visible: removeIndex, wantClass: canonicalCommitTerminalUnknown},
+		{name: "malformed_inner_json", visible: func(t *testing.T, store *BlockStore) {
+			mustPlantIndex(t, store, mustMarshalStoreEnvelope(t, `{"canonical":[`))
+		}, wantClass: canonicalCommitTerminalUnknown, wantReads: 1, wantReadErr: true},
+		// A visibly NEW image behind a PROVEN pre-commit failure: nothing crossed,
+		// so nothing is read or published even though a readback would say NEW.
+		{name: "before_namespace_commit", visible: plant(respelledNew), outcome: beforeCommit, wantClass: canonicalCommitPrecommit},
+		{name: "clean_write", outcome: cleanWrite, wantClass: canonicalCommitted, wantRaw: canonicalNew},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
-			mustCommitCanonicalIndex(t, store, []string{row0})
-			if tc.staleRAM {
-				store.stateMu.Lock()
-				store.indexRaw = []byte("malformed cached identity")
-				store.stateMu.Unlock()
-			}
-			prepared := mustPrepareCanonicalIndex(t, store, []string{row0, row1})
+			mustCommitCanonicalIndex(t, store, oldRows)
+			prepared := mustPrepareCanonicalIndex(t, store, newRows)
 			before := captureCanonicalRAMImage(store)
 
-			writes := 0
-			withWriteFileAtomicFn(t, func(path string, _ []byte, _ os.FileMode) error {
+			writes, reads, readErr := 0, 0, error(nil)
+			withLoadBlockStoreIndexFn(t, func(path string) (blockStoreIndexDisk, []byte, error) {
+				reads++
+				index, raw, err := loadBlockStoreIndex(path)
+				readErr = err
+				return index, raw, err
+			})
+			withWriteFileAtomicFn(t, func(path string, data []byte, perm os.FileMode) error {
 				writes++
 				if tc.visible != nil {
-					tc.visible(t, store, prepared)
+					tc.visible(t, store)
 				}
-				if tc.untagged {
-					return postCommitCause
+				switch tc.outcome {
+				case cleanWrite:
+					return writeFileAtomic(path, data, perm)
+				case beforeCommit:
+					return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteOverwrite, cause)
+				case untagged:
+					return cause
+				default:
+					return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, atomicWriteOverwrite, cause)
 				}
-				return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, atomicWriteOverwrite, postCommitCause)
 			})
 
 			got := prepared.commit(store)
 			if got.class != tc.wantClass {
-				t.Fatalf("commit = %s, want %s", got.class, tc.wantClass)
+				t.Fatalf("commit = %s (%v), want %s", got.class, got.err, tc.wantClass)
 			}
-			if !errors.Is(got.err, postCommitCause) {
-				t.Fatalf("terminal result dropped its cause: %v", got.err)
+			if tc.outcome == cleanWrite {
+				if got.err != nil {
+					t.Fatalf("a committed result carries %v", got.err)
+				}
+			} else if !errors.Is(got.err, cause) {
+				t.Fatalf("result dropped the write-lane cause: %v", got.err)
 			}
 			if tc.alsoIs != nil && !errors.Is(got.err, tc.alsoIs) {
-				t.Fatalf("terminal result dropped the readback failure: %v", got.err)
+				t.Fatalf("result dropped the readback failure: %v", got.err)
+			}
+			if (readErr != nil) != tc.wantReadErr {
+				t.Fatalf("readback err = %v, want failure=%v", readErr, tc.wantReadErr)
+			}
+			// Both causes survive an unprovable identity: the write failure AND
+			// the exact readback failure, joined.
+			if readErr != nil && !errors.Is(got.err, readErr) {
+				t.Fatalf("result dropped the exact readback cause %v: %v", readErr, got.err)
+			}
+			if writes != 1 || reads != tc.wantReads {
+				t.Fatalf("writes=%d reads=%d, want 1/%d", writes, reads, tc.wantReads)
 			}
 			if second := prepared.commit(store); second.class != canonicalCommitStale || !errors.Is(second.err, errPreparedIndexSpent) {
 				t.Fatalf("second commit = %s (%v), want the spent refusal", second.class, second.err)
 			}
-			if writes != 1 {
-				t.Fatalf("the write lane ran %d times, want exactly one attempt", writes)
+			if writes != 1 || reads != tc.wantReads {
+				t.Fatalf("the spent second commit reached the lanes: writes=%d reads=%d", writes, reads)
 			}
-			if tc.published {
-				assertPublishedCanonicalImage(t, store, []string{row0, row1}, prepared.newRaw)
+			if tc.wantRaw != nil {
+				assertPublishedCanonicalImage(t, store, newRows, tc.wantRaw)
 				return
 			}
 			assertCanonicalRAMUnchanged(t, store, before, tc.name)
 		})
 	}
+
+	// The OLD arm needs a MULTI-ROW old identity of its own: every row above has a
+	// single-row old, where "length and tip" and "the whole sequence" agree, so an old arm
+	// weakened to length-plus-tip would survive the entire table. Old {row0,row1}, planned
+	// {row0,row1,row2}, visible {row3,row1}: old length, old tip, different prefix.
+	t.Run("old_length_and_tip_with_different_prefix", func(t *testing.T) {
+		store := mustCreateBlockStore(t, BlockStorePath(t.TempDir()))
+		mustCommitCanonicalIndex(t, store, []string{row0, row1})
+		prepared := mustPrepareCanonicalIndex(t, store, []string{row0, row1, row2})
+		before := captureCanonicalRAMImage(store)
+		withWriteFileAtomicFn(t, func(path string, _ []byte, _ os.FileMode) error {
+			mustPlantIndex(t, store, mustEncodeCanonicalIndex(t, []string{row3, row1}))
+			return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, atomicWriteOverwrite, cause)
+		})
+		if got := prepared.commit(store); got.class != canonicalCommitTerminalUnknown || !errors.Is(got.err, cause) {
+			t.Fatalf("commit = %s (%v), want %s carrying the write-lane cause", got.class, got.err, canonicalCommitTerminalUnknown)
+		}
+		assertCanonicalRAMUnchanged(t, store, before, "old length and tip with a different prefix")
+	})
 }
 
 func mustEncodeCanonicalIndex(t *testing.T, canonical []string) []byte {
@@ -2658,8 +2936,12 @@ func TestPreparedCanonicalIndexConcurrentReadersPinOldImage(t *testing.T) {
 		t.Fatalf("store new artifact: %v", err)
 	}
 	old, next := []string{hex.EncodeToString(oldOnlyHash[:])}, []string{hex.EncodeToString(newOnlyHash[:])}
-	oldPrepared := mustCommitCanonicalIndex(t, store, old)
+	mustCommitCanonicalIndex(t, store, old)
 	prepared := mustPrepareCanonicalIndex(t, store, next)
+	// LITERAL fixtures, built before the readers start. A reader must never touch the
+	// prepared image: commit may REPLACE newRaw with the bytes a terminal readback found, so
+	// a goroutine reading it would race the commit — and assert x == x on the published bytes.
+	oldRaw, nextRaw := mustEncodeCanonicalIndex(t, old), mustEncodeCanonicalIndex(t, next)
 
 	spawnReaders(t, 8, func() bool {
 		store.stateMu.RLock()
@@ -2674,12 +2956,12 @@ func TestPreparedCanonicalIndexConcurrentReadersPinOldImage(t *testing.T) {
 
 		switch {
 		case slices.Equal(canonical, old):
-			if !hasOld || hasNew || oldNoncanonical || !newNoncanonical || !bytes.Equal(raw, oldPrepared.newRaw) {
+			if !hasOld || hasNew || oldNoncanonical || !newNoncanonical || !bytes.Equal(raw, oldRaw) {
 				t.Errorf("torn old pair: canonical=(%v,%v) accounting=(%v,%v)", hasOld, hasNew, oldNoncanonical, newNoncanonical)
 				return false
 			}
 		case slices.Equal(canonical, next):
-			if hasOld || !hasNew || !oldNoncanonical || newNoncanonical || !bytes.Equal(raw, prepared.newRaw) {
+			if hasOld || !hasNew || !oldNoncanonical || newNoncanonical || !bytes.Equal(raw, nextRaw) {
 				t.Errorf("torn new pair: canonical=(%v,%v) accounting=(%v,%v)", hasOld, hasNew, oldNoncanonical, newNoncanonical)
 				return false
 			}
@@ -2694,7 +2976,7 @@ func TestPreparedCanonicalIndexConcurrentReadersPinOldImage(t *testing.T) {
 		t.Errorf("commit = %s (%v)", got.class, got.err)
 		return
 	}
-	assertPublishedCanonicalImage(t, store, next, prepared.newRaw)
+	assertPublishedCanonicalImage(t, store, next, nextRaw)
 }
 
 // TestInspectBlockPresenceConcurrentWithPublication: presence classification
@@ -2794,7 +3076,7 @@ func failUnlinkAroundRename(afterRename bool, fault error) func(*testing.T, *Blo
 
 // TestBlockStoreCanonicalIndexCommitFaultMatrix walks the real RUB-1084 write
 // lane with one injected fault per stage. Pre-commit stages leave the exact old
-// bytes and RAM; post-commit stages classify on the visible bytes alone.
+// bytes and RAM; post-commit stages classify on the visible identity alone.
 func TestBlockStoreCanonicalIndexCommitFaultMatrix(t *testing.T) {
 	row0, row1 := canonicalIndexRow(0x90), canonicalIndexRow(0x91)
 	fault := errors.New("injected stage fault")
@@ -2898,7 +3180,9 @@ func TestBlockStoreCanonicalIndexCommitFaultMatrix(t *testing.T) {
 				t.Fatalf("commit = %s (%v), want %s", got.class, got.err, tc.wantClass)
 			}
 			if tc.published {
-				assertPublishedCanonicalImage(t, store, []string{row0, row1}, prepared.newRaw)
+				// A LITERAL fixture: on the terminal-NEW rows the readback has already
+				// replaced prepared.newRaw, so comparing against it would assert x == x.
+				assertPublishedCanonicalImage(t, store, []string{row0, row1}, mustEncodeCanonicalIndex(t, []string{row0, row1}))
 				return
 			}
 			assertCanonicalRAMUnchanged(t, store, before, tc.name)
@@ -3039,8 +3323,7 @@ func TestBlockStoreIndexRawTracksVisibleBytes(t *testing.T) {
 
 // TestBlockStoreOpenKeepsExactDiskIndexBytes: the visible identity is the bytes
 // THEMSELVES, never a re-encoding. Two inner spellings decode to the same index,
-// so an identity derived by re-encoding would claim bytes the disk does not
-// hold — and a strict readback would then classify on a fiction.
+// so an identity derived by re-encoding would claim bytes the disk does not hold.
 func TestBlockStoreOpenKeepsExactDiskIndexBytes(t *testing.T) {
 	root := BlockStorePath(t.TempDir())
 	store := mustCreateBlockStore(t, root)

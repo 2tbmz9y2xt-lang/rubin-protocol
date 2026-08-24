@@ -651,7 +651,10 @@ func TestNoncanonicalTransitionNormalizesOverlapAndOrder(t *testing.T) {
 	hash := mustHeaderHash(t, header)
 	mustNoncanonical(t, overlap.StoreBlock(hash, header, []byte("overlap")))
 	overlap.index.Canonical = []string{hex.EncodeToString(hash[:])}
-	overlap.indexRaw = []byte("overlap")
+	// The visible identity must NAME the RAM list it stands for: prepare
+	// strict-decodes it as the comparison identity and refuses bytes this store
+	// would not reopen.
+	overlap.indexRaw = mustEncodeCanonicalIndex(t, overlap.index.Canonical)
 	prepared := mustPrepareCanonicalIndex(t, overlap, []string{})
 	delta, err := overlap.prepareNoncanonicalReclassification(prepared, nil)
 	if err != nil || delta.uniqueCount != 1 || len(delta.removeIndices) != 1 || len(delta.disconnected) != 1 {
@@ -1199,8 +1202,11 @@ func TestNoncanonicalPreparedOutcomesPublishBothOrNeither(t *testing.T) {
 			mustNoncanonical(t, os.WriteFile(path, data, mode))
 			return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, atomicWriteOverwrite, fault)
 		}},
+		// A strictly DECODABLE third sequence: undecodable bytes would classify as
+		// unknown through the read failure and never exercise "a valid sequence that
+		// is neither identity publishes neither half".
 		{name: "terminal_unknown", wantClass: canonicalCommitTerminalUnknown, write: func(t *testing.T, path string, _ []byte, mode os.FileMode) error {
-			mustNoncanonical(t, os.WriteFile(path, []byte("third identity"), mode))
+			mustNoncanonical(t, os.WriteFile(path, mustEncodeCanonicalIndex(t, []string{canonicalIndexRow(0x77)}), mode))
 			return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, atomicWriteOverwrite, fault)
 		}},
 	} {
