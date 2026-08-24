@@ -651,7 +651,10 @@ func TestNoncanonicalTransitionNormalizesOverlapAndOrder(t *testing.T) {
 	hash := mustHeaderHash(t, header)
 	mustNoncanonical(t, overlap.StoreBlock(hash, header, []byte("overlap")))
 	overlap.index.Canonical = []string{hex.EncodeToString(hash[:])}
-	overlap.indexRaw = []byte("overlap")
+	// The visible identity must NAME the RAM list it stands for: prepare
+	// strict-decodes it as the comparison identity and refuses bytes this store
+	// would not reopen.
+	overlap.indexRaw = mustEncodeCanonicalIndex(t, overlap.index.Canonical)
 	prepared := mustPrepareCanonicalIndex(t, overlap, []string{})
 	delta, err := overlap.prepareNoncanonicalReclassification(prepared, nil)
 	if err != nil || delta.uniqueCount != 1 || len(delta.removeIndices) != 1 || len(delta.disconnected) != 1 {

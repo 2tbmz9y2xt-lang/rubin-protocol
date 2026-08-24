@@ -630,16 +630,22 @@ func TestBlockStoreCanonicalAndTruncateErrorBranches(t *testing.T) {
 		t.Fatalf("expected truncate out-of-range error")
 	}
 
+	// A truncate whose CURRENT in-RAM index carries a row the strict decoder
+	// refuses is refused whole, not silently truncated into shape: the live index
+	// is encoded as the comparison identity, so the malformed row fails
+	// preparation before any mutation, write, or publication.
 	hash := [32]byte{0x21}
 	store.index.Canonical = []string{hex.EncodeToString(hash[:]), "zz"}
 	store.canonicalHeightByHash = map[[32]byte]uint64{hash: 0}
-	if err := store.TruncateCanonical(1); err != nil {
-		t.Fatalf("TruncateCanonical malformed suffix: %v", err)
+	before, disk := captureCanonicalRAMImage(store), mustReadIndexFile(t, store)
+	writes := 0
+	withWriteFileAtomicFn(t, func(string, []byte, os.FileMode) error { writes++; return nil })
+	const want = `canonical[1]: not 64 lowercase hex characters: "zz"`
+	if err := store.TruncateCanonical(1); err == nil || err.Error() != want || writes != 0 {
+		t.Fatalf("TruncateCanonical over a malformed row: err=%v writes=%d, want %q and no write attempt", err, writes, want)
 	}
-	if len(store.index.Canonical) != 1 {
-		t.Fatalf("canonical len=%d, want 1", len(store.index.Canonical))
-	}
-	if _, ok := store.canonicalHeightByHash[hash]; !ok {
-		t.Fatalf("expected retained prefix to stay indexed")
+	assertCanonicalRAMUnchanged(t, store, before, "refused truncate")
+	if !bytes.Equal(mustReadIndexFile(t, store), disk) {
+		t.Fatal("refused truncate rewrote the on-disk index")
 	}
 }
