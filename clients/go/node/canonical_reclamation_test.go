@@ -27,6 +27,38 @@ func noncanonicalTestFile(store *BlockStore, kind noncanonicalArtifactKind, hash
 	return filepath.Join(dir, hex.EncodeToString(hash[:])+suffix)
 }
 
+func noncanonicalValidArtifacts(t *testing.T, seed byte, prev [32]byte) ([32]byte, []byte, []byte) {
+	header := testHeaderBytes(seed, uint64(seed)+1000)
+	copy(header[4:36], prev[:])
+	block := append([]byte(nil), devnetGenesisBlockBytes...)
+	copy(block[:consensus.BLOCK_HEADER_BYTES], header)
+	return mustHeaderHash(t, header), header, block
+}
+
+func writeNoncanonicalArtifacts(t *testing.T, store *BlockStore, hash [32]byte, block, header, undo []byte) {
+	for _, artifact := range []struct {
+		kind noncanonicalArtifactKind
+		raw  []byte
+	}{{noncanonicalBlockArtifact, block}, {noncanonicalHeaderArtifact, header}, {noncanonicalUndoArtifact, undo}} {
+		if artifact.raw != nil {
+			mustNoncanonical(t, os.WriteFile(noncanonicalTestFile(store, artifact.kind, hash), artifact.raw, 0o600))
+		}
+	}
+}
+
+func fullHealthyNoncanonicalAccounting(t *testing.T) *noncanonicalAccounting {
+	accounting, err := newNoncanonicalAccounting(noncanonicalDefaultByteLimit)
+	mustNoncanonical(t, err)
+	for i := range noncanonicalHashCap {
+		row := &accounting.rows[i]
+		binary.BigEndian.PutUint64(row.hash[24:], uint64(i+1))
+		row.blockBytes, row.height = 1, noncanonicalUnknownHeight
+		row.setState(noncanonicalBlockArtifact, BlockArtifactValid)
+	}
+	accounting.count, accounting.sortedCount, accounting.usedBytes = noncanonicalHashCap, noncanonicalHashCap, noncanonicalHashCap
+	return accounting
+}
+
 func mustNoncanonical(t *testing.T, errs ...error) {
 	t.Helper()
 	if err := errors.Join(errs...); err != nil {
@@ -38,6 +70,15 @@ func mustNoncanonicalAtomic(t *testing.T, err error, path string) {
 	var got *atomicWriteError
 	if err == nil || errors.Is(err, errNoncanonicalCount) || errors.Is(err, errNoncanonicalBytes) || !errors.As(err, &got) || got.destination != path || got.stage != atomicWriteBeforeNamespaceCommit || got.operation != atomicWriteCreateIfAbsent || got.primary == nil || got.primary.Error() != errExistingContentDiffers(path).Error() || len(got.secondary) != 0 {
 		t.Fatalf("atomic error=%#v", got)
+	}
+}
+
+func requireNoncanonicalReclaimFault(t *testing.T, err, cause error, hash [32]byte, class uint8, kind noncanonicalArtifactKind, action string) {
+	t.Helper()
+	var atomicErr *atomicWriteError
+	want := "reclaim " + hex.EncodeToString(hash[:]) + " class " + string(rune('0'+class)) + " leaf " + string(rune('0'+kind)) + " " + action
+	if err == nil || !errors.Is(err, cause) || errors.Is(err, errNoncanonicalCount) || errors.Is(err, errNoncanonicalBytes) || errors.As(err, &atomicErr) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("reclaim error=%v want cause=%v context=%q", err, cause, want)
 	}
 }
 
@@ -108,6 +149,84 @@ func noncanonicalTestDigest(snapshot noncanonicalAccountingSnapshot) [32]byte {
 	var got [32]byte
 	copy(got[:], h.Sum(nil))
 	return got
+}
+
+func independentNoncanonicalDiskSnapshot(t *testing.T, store *BlockStore, canonical ...[32]byte) noncanonicalAccountingSnapshot {
+	t.Helper()
+	excluded, indexed := map[[32]byte]bool{}, map[[32]byte]noncanonicalRow{}
+	for _, hash := range canonical {
+		excluded[hash] = true
+	}
+	dirs := [...]struct {
+		path, suffix string
+		kind         noncanonicalArtifactKind
+	}{{store.blocksDir, ".bin", noncanonicalBlockArtifact}, {store.headersDir, ".bin", noncanonicalHeaderArtifact}, {store.undoDir, ".json", noncanonicalUndoArtifact}}
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir.path)
+		mustNoncanonical(t, err)
+		for _, entry := range entries {
+			name := entry.Name()
+			if name == atomicWriteLockLeaf || name == atomicWriteScratchLeaf {
+				continue
+			}
+			if len(name) != 64+len(dir.suffix) || name[64:] != dir.suffix || name[:64] != strings.ToLower(name[:64]) {
+				t.Fatalf("independent artifact name=%q", name)
+			}
+			hashRaw, err := hex.DecodeString(name[:64])
+			mustNoncanonical(t, err)
+			var hash [32]byte
+			copy(hash[:], hashRaw)
+			if excluded[hash] {
+				continue
+			}
+			raw, err := os.ReadFile(filepath.Join(dir.path, name))
+			mustNoncanonical(t, err)
+			row, found := indexed[hash]
+			if !found {
+				row = noncanonicalRow{hash: hash, height: noncanonicalUnknownHeight}
+			}
+			state, prev, height := BlockArtifactInvalid, [32]byte{}, noncanonicalUnknownHeight
+			switch dir.kind {
+			case noncanonicalBlockArtifact:
+				if parsed, parseErr := consensus.ParseBlockBytes(raw); parseErr == nil {
+					if observed, hashErr := consensus.BlockHash(parsed.HeaderBytes); hashErr == nil && observed == hash {
+						state, prev = BlockArtifactValid, parsed.Header.PrevBlockHash
+					}
+				}
+			case noncanonicalHeaderArtifact:
+				if parsed, parseErr := consensus.ParseBlockHeaderBytes(raw); parseErr == nil {
+					if observed, hashErr := consensus.BlockHash(raw); hashErr == nil && observed == hash {
+						state, prev = BlockArtifactValid, parsed.PrevBlockHash
+					}
+				}
+			case noncanonicalUndoArtifact:
+				if undo, undoErr := unmarshalUndoEnvelope(hash, raw); undoErr == nil {
+					state, height = BlockArtifactValid, undo.BlockHeight
+				}
+			}
+			*row.bytes(dir.kind) = uint64(len(raw))
+			row.setState(dir.kind, state)
+			row.setValidMetadata(dir.kind, state, prev, height)
+			indexed[hash] = row
+		}
+	}
+	rows := make([]noncanonicalRow, 0, len(indexed))
+	var used uint64
+	for _, row := range indexed {
+		rows, used = append(rows, row), used+row.blockBytes+row.headerBytes+row.undoBytes
+	}
+	sort.Slice(rows, func(i, j int) bool { return bytes.Compare(rows[i].hash[:], rows[j].hash[:]) < 0 })
+	return noncanonicalAccountingSnapshot{usedBytes: used, uniqueCount: uint32(len(rows)), rows: rows}
+}
+
+func requireReopenMatchesIndependentDisk(t *testing.T, store *BlockStore, canonical ...[32]byte) noncanonicalAccountingSnapshot {
+	t.Helper()
+	want := independentNoncanonicalDiskSnapshot(t, store, canonical...)
+	got := mustOpenBlockStore(t, store.rootPath).noncanonicalAccountingSnapshot()
+	if got.usedBytes != want.usedBytes || got.reservedBytes != 0 || got.uniqueCount != want.uniqueCount || !slices.Equal(got.rows, want.rows) {
+		t.Fatalf("reopen=%+v independent=%+v", got, want)
+	}
+	return want
 }
 
 func TestNoncanonicalLimitsAndProductionActivation(t *testing.T) {
@@ -704,7 +823,9 @@ func TestNoncanonicalQuotaAndErrorOrder(t *testing.T) {
 	}
 	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
 	accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
-	header, block, undo := testHeaderBytes(20, 201), []byte("quota block"), &BlockUndo{BlockHeight: 10}
+	header, undo := testHeaderBytes(20, 201), &BlockUndo{BlockHeight: 10}
+	block := append([]byte(nil), devnetGenesisBlockBytes...)
+	copy(block[:consensus.BLOCK_HEADER_BYTES], header)
 	hash := mustHeaderHash(t, header)
 	rawUndo, err := marshalUndoEnvelope(hash, undo)
 	mustNoncanonical(t, err)
@@ -735,12 +856,7 @@ func TestNoncanonicalQuotaAndErrorOrder(t *testing.T) {
 	mustNoncanonical(t, os.WriteFile(undoPath, existingUndo, 0o600))
 	err = store.PutUndo(nextHash, &BlockUndo{BlockHeight: 12})
 	mustNoncanonicalAtomic(t, err, undoPath)
-	full, err := newNoncanonicalAccounting(noncanonicalDefaultByteLimit)
-	mustNoncanonical(t, err)
-	full.count = 524287
-	if _, err := full.appendRow([32]byte{1}); err != nil || full.count != 524288 {
-		t.Fatalf("524288th row err=%v count=%d", err, full.count)
-	}
+	full := fullHealthyNoncanonicalAccounting(t)
 	if _, err := full.appendRow([32]byte{2}); !errors.Is(err, errNoncanonicalCount) {
 		t.Fatalf("524289th row err=%v", err)
 	}
@@ -748,12 +864,12 @@ func TestNoncanonicalQuotaAndErrorOrder(t *testing.T) {
 		t.Fatalf("count did not precede bytes: %v", err)
 	}
 	store.noncanonical.Store(full)
-	fullRow, wrongHashErr := full.rows[noncanonicalHashCap-1], store.StoreBlock([32]byte{}, header, block)
+	fullRow, fullUsed, wrongHashErr := full.rows[noncanonicalHashCap-1], full.usedBytes, store.StoreBlock([32]byte{}, header, block)
 	nilUndoErr := store.PutUndo([32]byte{}, nil)
 	if wrongHashErr == nil || wrongHashErr.Error() != "header hash mismatch" || nilUndoErr == nil || nilUndoErr.Error() != "nil block undo" || errors.Is(wrongHashErr, errNoncanonicalCount) || errors.Is(wrongHashErr, errNoncanonicalBytes) || errors.Is(nilUndoErr, errNoncanonicalCount) || errors.Is(nilUndoErr, errNoncanonicalBytes) {
 		t.Fatalf("input errs=%v,%v", wrongHashErr, nilUndoErr)
 	}
-	if full.count != noncanonicalHashCap || full.usedBytes != 0 || full.reservedBytes != 0 || full.rows[noncanonicalHashCap-1] != fullRow {
+	if full.count != noncanonicalHashCap || full.usedBytes != fullUsed || full.reservedBytes != 0 || full.rows[noncanonicalHashCap-1] != fullRow {
 		t.Fatalf("input validation mutated full accounting")
 	}
 	for _, kind := range []noncanonicalArtifactKind{noncanonicalBlockArtifact, noncanonicalHeaderArtifact, noncanonicalUndoArtifact} {
@@ -765,7 +881,7 @@ func TestNoncanonicalQuotaAndErrorOrder(t *testing.T) {
 	if err := store.reserveNoncanonicalArtifactWrite([32]byte{3}, []noncanonicalReservationLeaf{{kind: noncanonicalBlockArtifact, bytes: ^uint64(0)}, {kind: noncanonicalHeaderArtifact, bytes: 1}}, nil, func(*noncanonicalReservation) error { called = true; return nil }); !errors.Is(err, errNoncanonicalCount) || called {
 		t.Fatalf("reserve count precedence err=%v called=%t", err, called)
 	}
-	if err := full.addScanned([32]byte{3}, noncanonicalBlockArtifact, ^uint64(0), BlockArtifactInvalid, [32]byte{}, 0); !errors.Is(err, errNoncanonicalCount) || full.usedBytes != 0 {
+	if err := full.addScanned([32]byte{3}, noncanonicalBlockArtifact, ^uint64(0), BlockArtifactInvalid, [32]byte{}, 0); !errors.Is(err, errNoncanonicalCount) || full.usedBytes != fullUsed {
 		t.Fatalf("scan count precedence err=%v used=%d", err, full.usedBytes)
 	}
 	full.count, full.sortedCount, full.usedBytes, full.reservedBytes, full.limit = 0, 0, 0, 0, noncanonicalDefaultByteLimit
@@ -1494,4 +1610,1419 @@ func TestNoncanonicalReloadFailurePreservesPendingReservation(t *testing.T) {
 			t.Fatalf("failed reload state=%+v canonical=%v", got, canonicalAfter)
 		}
 	})
+}
+
+func TestNoncanonicalReclaim(t *testing.T) {
+	t.Run("class_then_hash_order", func(t *testing.T) {
+		store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+		d0Low, d0High, d1, d2 := [32]byte{1}, [32]byte{}, [32]byte{2}, [32]byte{3}
+		for i := range d0High {
+			d0High[i] = 0xff
+		}
+		d3, _, d3Block := noncanonicalValidArtifacts(t, 0x71, [32]byte{})
+		d4, _, d4Block := noncanonicalValidArtifacts(t, 0x72, [32]byte{})
+		d5, d5Header, d5Block := noncanonicalValidArtifacts(t, 0x73, [32]byte{})
+		requireAtomicTest(t, bytes.Compare(d0Low[:], d0High[:]) < 0 && bytes.Compare(d0High[:], d1[:]) > 0 && bytes.Compare(d0High[:], d5[:]) > 0, "ordering premise d0Low=%x d0Mixed=%x d1=%x d5=%x", d0Low, d0High, d1, d5)
+		for _, row := range []struct {
+			hash                [32]byte
+			block, header, undo []byte
+		}{
+			{d5, d5Block, d5Header, []byte("invalid undo")},
+			{d4, d4Block, nil, []byte("invalid undo")},
+			{d3, d3Block, []byte("invalid header"), nil},
+			{d2, nil, nil, []byte("invalid undo")},
+			{d1, nil, []byte("invalid header"), nil},
+			{d0High, []byte("invalid block"), []byte("invalid header"), nil},
+			{d0Low, []byte("invalid block"), nil, nil},
+		} {
+			writeNoncanonicalArtifacts(t, store, row.hash, row.block, row.header, row.undo)
+		}
+		accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+		accounting.limit = accounting.usedBytes
+		requested := accounting.usedBytes - uint64(len(d5Header)+len("invalid undo"))
+		want := []string{
+			noncanonicalTestFile(store, noncanonicalBlockArtifact, d0Low),
+			noncanonicalTestFile(store, noncanonicalBlockArtifact, d0High),
+			noncanonicalTestFile(store, noncanonicalHeaderArtifact, d0High),
+			noncanonicalTestFile(store, noncanonicalHeaderArtifact, d1),
+			noncanonicalTestFile(store, noncanonicalUndoArtifact, d2),
+			noncanonicalTestFile(store, noncanonicalBlockArtifact, d3),
+			noncanonicalTestFile(store, noncanonicalHeaderArtifact, d3),
+			noncanonicalTestFile(store, noncanonicalBlockArtifact, d4),
+			noncanonicalTestFile(store, noncanonicalUndoArtifact, d4),
+			noncanonicalTestFile(store, noncanonicalBlockArtifact, d5),
+			noncanonicalTestFile(store, noncanonicalHeaderArtifact, d5),
+			noncanonicalTestFile(store, noncanonicalUndoArtifact, d5),
+		}
+		var unlinked, synced []string
+		withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+			unlink, syncParent := ops.unlink, ops.syncParent
+			ops.unlink = func(path string) error {
+				unlinked = append(unlinked, path)
+				return unlink(path)
+			}
+			ops.syncParent = func(parent string) error {
+				synced = append(synced, parent)
+				return syncParent(parent)
+			}
+		})
+		called := false
+		leaf := noncanonicalReservationLeaf{kind: noncanonicalBlockArtifact, bytes: requested, state: BlockArtifactInvalid}
+		mustNoncanonical(t, store.reserveNoncanonicalArtifactWrite([32]byte{0xff}, []noncanonicalReservationLeaf{leaf}, nil, func(*noncanonicalReservation) error {
+			called = true
+			return nil
+		}))
+		requireAtomicTest(t, called && slices.Equal(unlinked, want) && len(synced) == len(want), "called=%t unlinked=%v synced=%v want=%v", called, unlinked, synced, want)
+		for i := range want {
+			requireAtomicTest(t, synced[i] == filepath.Dir(want[i]), "unlink/fsync[%d]=%q/%q", i, want[i], synced[i])
+		}
+		if got := store.noncanonicalAccountingSnapshot(); got.usedBytes != 0 || got.reservedBytes != 0 || got.uniqueCount != 0 {
+			t.Fatalf("final accounting=%+v", got)
+		}
+		mustNoncanonicalRestartDigest(t, store, store.noncanonicalAccountingDigest())
+	})
+
+	t.Run("damage_singleton_public_matrix", func(t *testing.T) {
+		victim, header, block := noncanonicalValidArtifacts(t, 0x74, [32]byte{})
+		undo, err := marshalUndoEnvelope(victim, &BlockUndo{BlockHeight: 7})
+		mustNoncanonical(t, err)
+		owner, ownerHeader, ownerBlock := noncanonicalValidArtifacts(t, 0x75, [32]byte{})
+		foreignUndo := []byte(mustMarshalUndoEnvelope(t, owner, &BlockUndo{BlockHeight: 7}))
+		checksumUndo := append([]byte(nil), undo...)
+		checksumUndo[len(checksumUndo)-4] = "10"[checksumUndo[len(checksumUndo)-4]&1]
+		noncanonicalUndo := marshalUndoEnvelopePayload(t, undoEnvelopeVersion, victim, []byte(`{"txs":[],"previous_already_generated":"0","block_height":7}`))
+		invalidBlock := make([]byte, len(ownerHeader)+len(ownerBlock))
+		cases := []struct {
+			name                string
+			class               uint8
+			block, header, undo []byte
+		}{
+			{"D0_valid_companion", noncanonicalD0InvalidBlock, invalidBlock, header, nil},
+			{"D0_first_match", noncanonicalD0InvalidBlock, invalidBlock, []byte("invalid header"), []byte("invalid undo")},
+			{"D1_valid", noncanonicalD1HeaderWithoutBlock, nil, header, nil},
+			{"D1_invalid", noncanonicalD1HeaderWithoutBlock, nil, []byte("invalid header"), nil},
+			{"D2_valid", noncanonicalD2UndoWithoutBlockOrHeader, nil, nil, undo},
+			{"D2_invalid", noncanonicalD2UndoWithoutBlockOrHeader, nil, nil, []byte("invalid undo")},
+			{"D3", noncanonicalD3InvalidHeader, block, []byte("invalid header"), nil},
+			{"D4_valid", noncanonicalD4UndoWithoutHeader, block, nil, undo},
+			{"D4_invalid", noncanonicalD4UndoWithoutHeader, block, nil, []byte("invalid undo")},
+			{"D5_malformed", noncanonicalD5InvalidUndo, block, header, []byte("invalid undo")},
+			{"D5_wrong_binding", noncanonicalD5InvalidUndo, block, header, foreignUndo},
+			{"D5_checksum", noncanonicalD5InvalidUndo, block, header, checksumUndo},
+			{"D5_noncanonical", noncanonicalD5InvalidUndo, block, header, noncanonicalUndo},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+				writeNoncanonicalArtifacts(t, store, victim, tc.block, tc.header, tc.undo)
+				accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+				victimBytes := accounting.usedBytes
+				accounting.limit = victimBytes
+				gotClass, damaged := noncanonicalDamage(accounting.rows[0])
+				err := store.StoreBlock(owner, ownerHeader, ownerBlock)
+				wantSuccess := victimBytes >= uint64(len(ownerHeader)+len(ownerBlock))
+				requireAtomicTest(t, damaged && gotClass == tc.class && (wantSuccess && err == nil || !wantSuccess && errors.Is(err, errNoncanonicalBytes)), "class=%d/%t err=%v", gotClass, damaged, err)
+				live, disk := store.noncanonicalAccountingSnapshot(), requireReopenMatchesIndependentDisk(t, store)
+				wantCount, wantUsed := uint32(0), uint64(0)
+				if wantSuccess {
+					wantCount, wantUsed = 1, uint64(len(ownerHeader)+len(ownerBlock))
+				}
+				requireAtomicTest(t, slices.Equal(live.rows, disk.rows) && live.uniqueCount == wantCount && disk.uniqueCount == wantCount && len(disk.rows) == int(wantCount) && live.usedBytes == wantUsed && disk.usedBytes == wantUsed && (wantCount == 0 || disk.rows[0].hash == owner) && live.reservedBytes == 0 && store.noncanonicalTransitionDone == nil && store.noncanonicalReclaim == nil && len(store.noncanonicalPending) == 0 && len(store.noncanonicalReaders) == 0, "singleton live=%+v disk=%+v", live, disk)
+			})
+		}
+	})
+
+	t.Run("single_strict_reconstruction", func(t *testing.T) {
+		store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+		victim, header, block := noncanonicalValidArtifacts(t, 0x79, [32]byte{})
+		writeNoncanonicalArtifacts(t, store, victim, block, header, []byte("invalid undo"))
+		accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+		accounting.limit = accounting.usedBytes
+		paths := []string{
+			noncanonicalTestFile(store, noncanonicalBlockArtifact, victim),
+			noncanonicalTestFile(store, noncanonicalHeaderArtifact, victim),
+			noncanonicalTestFile(store, noncanonicalUndoArtifact, victim),
+		}
+		closes, fault, closeFile := map[string]int{paths[0]: 0, paths[1]: 0, paths[2]: 0}, errors.New("second strict close"), closeNoncanonicalFile
+		closeNoncanonicalFile = func(file *os.File) error {
+			path := file.Name()
+			if err := closeFile(file); err != nil {
+				return err
+			}
+			if _, found := closes[path]; found {
+				closes[path]++
+				if closes[path] > 1 {
+					return fault
+				}
+			}
+			return nil
+		}
+		t.Cleanup(func() { closeNoncanonicalFile = closeFile })
+		owner, ownerHeader, ownerBlock := noncanonicalValidArtifacts(t, 0x7a, [32]byte{})
+		err := store.StoreBlock(owner, ownerHeader, ownerBlock)
+		requireAtomicTest(t, err == nil && closes[paths[0]] == 1 && closes[paths[1]] == 1 && closes[paths[2]] == 1, "single strict err=%v closes=%v", err, closes)
+		absent := true
+		for _, path := range paths {
+			_, statErr := os.Stat(path)
+			absent = absent && errors.Is(statErr, os.ErrNotExist)
+		}
+		live, disk := store.noncanonicalAccountingSnapshot(), requireReopenMatchesIndependentDisk(t, store)
+		wantUsed := uint64(len(ownerHeader) + len(ownerBlock))
+		requireAtomicTest(t, absent && slices.Equal(live.rows, disk.rows) && live.uniqueCount == 1 && len(live.rows) == 1 && live.rows[0].hash == owner && live.usedBytes == wantUsed && live.reservedBytes == 0 && store.noncanonicalTransitionDone == nil && store.noncanonicalReclaim == nil && len(store.noncanonicalPending) == 0 && len(store.noncanonicalReaders) == 0, "single strict live=%+v disk=%+v absent=%t", live, disk, absent)
+	})
+
+	t.Run("healthy_full_count_precedes_bytes", func(t *testing.T) {
+		store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+		store.noncanonical.Store(fullHealthyNoncanonicalAccounting(t))
+		called := false
+		leaf := noncanonicalReservationLeaf{kind: noncanonicalBlockArtifact, bytes: ^uint64(0), state: BlockArtifactValid}
+		err := store.reserveNoncanonicalArtifactWrite([32]byte{0xff}, []noncanonicalReservationLeaf{leaf, {kind: noncanonicalHeaderArtifact, bytes: 1}}, nil, func(*noncanonicalReservation) error {
+			called = true
+			return nil
+		})
+		requireAtomicTest(t, errors.Is(err, errNoncanonicalCount) && !errors.Is(err, errNoncanonicalBytes) && !called, "healthy full err=%v called=%t", err, called)
+		full := store.noncanonical.Load()
+		beforeUsed, beforeCount := full.usedBytes, full.count
+		err = full.addScanned([32]byte{0xfe}, noncanonicalBlockArtifact, ^uint64(0), BlockArtifactInvalid, [32]byte{}, noncanonicalUnknownHeight)
+		requireAtomicTest(t, errors.Is(err, errNoncanonicalCount) && !errors.Is(err, errNoncanonicalBytes) && full.usedBytes == beforeUsed && full.count == beforeCount, "scan count order err=%v used=%d count=%d", err, full.usedBytes, full.count)
+		full.sortedCount--
+		if err := store.reserveNoncanonicalArtifactWrite([32]byte{0xfe}, []noncanonicalReservationLeaf{leaf}, nil, func(*noncanonicalReservation) error { return nil }); err == nil || errors.Is(err, errNoncanonicalCount) || errors.Is(err, errNoncanonicalBytes) || !strings.Contains(err.Error(), "accounting") {
+			t.Fatalf("corrupt accounting err=%v", err)
+		}
+	})
+
+	t.Run("prepared_freshness_and_spent_precedence", func(t *testing.T) {
+		store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+		a, b, c := [32]byte{0x76}, [32]byte{0x77}, [32]byte{0x78}
+		stale := mustPrepareCanonicalIndex(t, store, []string{hex.EncodeToString(a[:])})
+		mustNoncanonical(t, store.SetCanonicalTip(0, c))
+		result := stale.commit(store)
+		requireAtomicTest(t, result.class == canonicalCommitStale && errors.Is(result.err, errCanonicalIndexMoved) && !errors.Is(result.err, errPreparedIndexSpent) && !stale.spent.Load(), "freshness=%+v", result)
+		spent := mustPrepareCanonicalIndex(t, store, []string{hex.EncodeToString(a[:])})
+		requireAtomicTest(t, spent.commit(store).class == canonicalCommitted, "initial commit failed")
+		mustNoncanonical(t, store.SetCanonicalTip(0, b))
+		result = spent.commit(store)
+		requireAtomicTest(t, result.class == canonicalCommitStale && errors.Is(result.err, errPreparedIndexSpent) && !errors.Is(result.err, errCanonicalIndexMoved), "spent precedence=%+v", result)
+	})
+
+	t.Run("storeblock_restart_reprepares", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+			victim := [32]byte{0x81}
+			writeNoncanonicalArtifacts(t, store, victim, []byte{0}, nil, nil)
+			accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+			hash, header, block := noncanonicalValidArtifacts(t, 0x75, [32]byte{})
+			accounting.limit = accounting.usedBytes + uint64(len(block)+len(header)) - 1
+			previousRead, started, release := readFileByPathFn, make(chan struct{}), make(chan struct{})
+			blockPath, reads := noncanonicalTestFile(store, noncanonicalBlockArtifact, hash), 0
+			readFileByPathFn = func(path string, limit int64) ([]byte, error) {
+				if path == blockPath {
+					reads++
+					if reads == 1 {
+						close(started)
+						<-release
+					}
+				}
+				return previousRead(path, limit)
+			}
+			t.Cleanup(func() { readFileByPathFn = previousRead })
+			done := make(chan error, 1)
+			go func() { done <- store.StoreBlock(hash, header, block) }()
+			receiveNoncanonical(t, started, "StoreBlock did not enter preflight")
+			store.stateMu.Lock()
+			store.noncanonicalTransitionDone = make(chan struct{})
+			store.stateMu.Unlock()
+			close(release)
+			synctest.Wait()
+			store.stateMu.Lock()
+			pending := store.noncanonicalPending[hash]
+			store.endNoncanonicalTransitionLocked()
+			store.stateMu.Unlock()
+			mustNoncanonical(t, receiveNoncanonical(t, done, "StoreBlock did not restart"))
+			requireAtomicTest(t, pending == nil && reads >= 2, "pending=%t preflight reads=%d", pending != nil, reads)
+		})
+	})
+
+	t.Run("bounded_protection_graph", func(t *testing.T) {
+		store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+		accounting, err := newNoncanonicalAccounting(noncanonicalDefaultByteLimit)
+		mustNoncanonical(t, err)
+		owner, first, ancestor, fallback, shared := [32]byte{1}, [32]byte{2}, [32]byte{3}, [32]byte{4}, [32]byte{5}
+		reader, victim := [32]byte{8}, [32]byte{}
+		add := func(hash, prev [32]byte, state BlockArtifactState) {
+			row, addErr := accounting.appendRow(hash)
+			mustNoncanonical(t, addErr)
+			row.prev, row.blockBytes = prev, 1
+			row.setState(noncanonicalBlockArtifact, state)
+			accounting.usedBytes++
+		}
+		add(owner, fallback, BlockArtifactValid)
+		add(first, ancestor, BlockArtifactValid)
+		add(ancestor, first, BlockArtifactValid)
+		add(fallback, [32]byte{}, BlockArtifactValid)
+		add(shared, [32]byte{10}, BlockArtifactValid)
+		add([32]byte{6}, shared, BlockArtifactValid)
+		add([32]byte{7}, shared, BlockArtifactValid)
+		add(reader, [32]byte{}, BlockArtifactValid)
+		add(victim, [32]byte{}, BlockArtifactInvalid)
+		accounting.sortRows()
+		store.noncanonical.Store(accounting)
+		store.noncanonicalReaders = map[[32]byte]uint32{reader: 1, {0xfe}: 1}
+		store.noncanonicalReclaim = &noncanonicalReclaim{owner: owner}
+		leaf := noncanonicalReservationLeaf{kind: noncanonicalHeaderArtifact, state: BlockArtifactValid, prev: first}
+		protected := store.noncanonicalProtectionLocked(accounting, owner, []noncanonicalReservationLeaf{leaf})
+		requireAtomicTest(t, protected[owner]&noncanonicalProtected != 0 && protected[first]&noncanonicalWalkSeen != 0 && protected[ancestor]&noncanonicalWalkSeen != 0 && protected[shared]&noncanonicalProtected != 0 && protected[reader]&noncanonicalProtected != 0 && protected[victim] == 0 && protected[[32]byte{10}] == 0 && protected[[32]byte{0xfe}] == 0 && len(protected) <= int(accounting.count)+2, "protection=%v rows=%d", protected, accounting.count)
+		fallbackWalk := store.noncanonicalProtectionLocked(accounting, owner, []noncanonicalReservationLeaf{{kind: noncanonicalUndoArtifact, state: BlockArtifactValid}})
+		zeroWalk := store.noncanonicalProtectionLocked(accounting, owner, []noncanonicalReservationLeaf{{kind: noncanonicalHeaderArtifact, state: BlockArtifactValid}})
+		missing := [32]byte{9}
+		missingWalk := store.noncanonicalProtectionLocked(accounting, owner, []noncanonicalReservationLeaf{{kind: noncanonicalHeaderArtifact, state: BlockArtifactValid, prev: missing}})
+		requireAtomicTest(t, fallbackWalk[fallback]&noncanonicalWalkSeen != 0 && zeroWalk[fallback]&noncanonicalWalkSeen == 0 && zeroWalk[[32]byte{}] == 0 && missingWalk[missing] == 0, "fallback=%x zero=%x missing=%x", fallbackWalk[fallback], zeroWalk[fallback], missingWalk[missing])
+		store.canonicalHeightByHash[victim] = 0
+		if _, found := store.nextNoncanonicalCandidateLocked(accounting, noncanonicalD0InvalidBlock, [32]byte{}, false, map[[32]byte]uint8{}); found {
+			t.Fatal("canonical victim selected")
+		}
+		delete(store.canonicalHeightByHash, victim)
+		store.noncanonicalReaders[victim] = 1
+		if _, found := store.nextNoncanonicalCandidateLocked(accounting, noncanonicalD0InvalidBlock, [32]byte{}, false, map[[32]byte]uint8{}); found {
+			t.Fatal("reader victim selected")
+		}
+		delete(store.noncanonicalReaders, victim)
+		if _, found := store.nextNoncanonicalCandidateLocked(accounting, noncanonicalD0InvalidBlock, [32]byte{}, false, map[[32]byte]uint8{victim: noncanonicalProtected}); found {
+			t.Fatal("protected victim selected")
+		}
+		if _, found := store.nextNoncanonicalCandidateLocked(accounting, noncanonicalD0InvalidBlock, [32]byte{}, false, map[[32]byte]uint8{}); !found || !store.noncanonicalReclaim.marked || store.pinNoncanonicalReader(victim) {
+			t.Fatal("victim was not exclusively marked")
+		}
+		at, _ := accounting.find(victim)
+		reclaim := store.noncanonicalReclaim
+		reclaim.before, reclaim.leaf = accounting.rows[at], noncanonicalBlockArtifact
+		accounting.usedBytes = 0
+		if store.publishNoncanonicalReclaimLocked(reclaim, noncanonicalReclaimedRow(reclaim.before, reclaim.leaf)) {
+			t.Fatal("underflowing publication accepted")
+		}
+	})
+
+	t.Run("pre_unlink_rechecks", func(t *testing.T) {
+		for _, mutation := range []string{"accounting_row", "canonical_membership", "marked_ownership", "victim_hash_ownership"} {
+			t.Run(mutation, func(t *testing.T) {
+				store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+				victim := [32]byte{0xe1}
+				writeNoncanonicalArtifacts(t, store, victim, []byte("damaged"), nil, nil)
+				accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+				at, _ := accounting.find(victim)
+				before := accounting.rows[at]
+				store.noncanonicalTransitionDone = make(chan struct{})
+				store.noncanonicalReclaim = &noncanonicalReclaim{hash: victim, protected: map[[32]byte]uint8{}, marked: true}
+				switch mutation {
+				case "accounting_row":
+					accounting.rows[at].blockBytes++
+				case "canonical_membership":
+					store.canonicalHeightByHash[victim] = 0
+				case "marked_ownership":
+					store.noncanonicalReclaim.marked = false
+				case "victim_hash_ownership":
+					store.noncanonicalReclaim.hash = [32]byte{0xe3}
+				}
+				unlinks := 0
+				withAtomicWriteOps(t, func(ops *atomicWriteOps) { ops.unlink = func(string) error { unlinks++; return nil } })
+				_, err := store.reclaimNoncanonicalLeaf(before, noncanonicalBlockArtifact, false, true)
+				_, statErr := os.Stat(noncanonicalTestFile(store, noncanonicalBlockArtifact, victim))
+				requireAtomicTest(t, err != nil && strings.Contains(err.Error(), "leaf 0 recheck") && statErr == nil && unlinks == 0 && store.noncanonicalTransitionDone == nil && store.noncanonicalReclaim == nil && len(store.noncanonicalPending) == 0 && len(store.noncanonicalReaders) == 0, "recheck=%v stat=%v unlinks=%d", err, statErr, unlinks)
+			})
+		}
+	})
+
+	t.Run("freeze_then_public_reader_skips", func(t *testing.T) {
+		store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+		owner, ownerHeader, ownerBlock := noncanonicalValidArtifacts(t, 0xe4, [32]byte{})
+		victim, sibling := [32]byte{0xe5}, [32]byte{0xe6}
+		damaged := make([]byte, len(ownerHeader)+len(ownerBlock))
+		writeNoncanonicalArtifacts(t, store, victim, damaged, nil, nil)
+		writeNoncanonicalArtifacts(t, store, sibling, damaged, nil, nil)
+		accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+		accounting.limit = accounting.usedBytes
+		previousRead, started, release := readFileByPathFn, make(chan struct{}), make(chan struct{})
+		target := noncanonicalTestFile(store, noncanonicalBlockArtifact, victim)
+		readFileByPathFn = func(path string, limit int64) ([]byte, error) {
+			if path == target {
+				close(started)
+				<-release
+			}
+			return previousRead(path, limit)
+		}
+		t.Cleanup(func() { readFileByPathFn = previousRead })
+		readDone := make(chan error, 1)
+		store.leafProbe = func() {
+			store.leafProbe = nil
+			go func() { _, err := store.GetBlockByHash(victim); readDone <- err }()
+			<-started
+		}
+		mustNoncanonical(t, store.StoreBlock(owner, ownerHeader, ownerBlock))
+		_, victimErr := os.Stat(target)
+		_, siblingErr := os.Stat(noncanonicalTestFile(store, noncanonicalBlockArtifact, sibling))
+		requireAtomicTest(t, victimErr == nil && errors.Is(siblingErr, os.ErrNotExist) && store.noncanonicalReaders[victim] == 1, "victim=%v sibling=%v readers=%d", victimErr, siblingErr, store.noncanonicalReaders[victim])
+		close(release)
+		mustNoncanonical(t, <-readDone)
+		live, disk := store.noncanonicalAccountingSnapshot(), requireReopenMatchesIndependentDisk(t, store)
+		requireAtomicTest(t, len(store.noncanonicalReaders) == 0 && slices.Equal(live.rows, disk.rows), "freeze live=%+v", live)
+	})
+
+	t.Run("strict_drift_precedes_unlink", func(t *testing.T) {
+		store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+		victim, header, block := noncanonicalValidArtifacts(t, 0xe7, [32]byte{})
+		writeNoncanonicalArtifacts(t, store, victim, block, header, []byte("invalid undo"))
+		accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+		accounting.limit = accounting.usedBytes
+		owner, ownerHeader, ownerBlock := noncanonicalValidArtifacts(t, 0xe8, [32]byte{})
+		before, probes, unlinks := store.noncanonicalAccountingSnapshot(), 0, 0
+		target := noncanonicalTestFile(store, noncanonicalBlockArtifact, victim)
+		store.leafProbe = func() {
+			probes++
+			if probes == 2 {
+				store.leafProbe = nil
+				if !store.stateMu.TryLock() {
+					t.Fatal("strict probe held stateMu")
+				}
+				store.stateMu.Unlock()
+				mustNoncanonical(t, os.WriteFile(target, append(block, 0), 0o600))
+			}
+		}
+		withAtomicWriteOps(t, func(ops *atomicWriteOps) { ops.unlink = func(string) error { unlinks++; return nil } })
+		err := store.StoreBlock(owner, ownerHeader, ownerBlock)
+		var atomicErr *atomicWriteError
+		after, disk := store.noncanonicalAccountingSnapshot(), requireReopenMatchesIndependentDisk(t, store)
+		context := "reclaim " + hex.EncodeToString(victim[:]) + " class 5 leaf 0 strict"
+		requireAtomicTest(t, err != nil && strings.Contains(err.Error(), context) && !errors.Is(err, errNoncanonicalCount) && !errors.Is(err, errNoncanonicalBytes) && !errors.As(err, &atomicErr) && unlinks == 0 && slices.Equal(after.rows, before.rows) && after.usedBytes == before.usedBytes && !slices.Equal(disk.rows, after.rows) && store.noncanonicalTransitionDone == nil && store.noncanonicalReclaim == nil, "strict err=%v unlinks=%d", err, unlinks)
+	})
+
+	t.Run("public_protection_matrix", func(t *testing.T) {
+		for i, name := range []string{"current_reservation", "proposed_ancestry_cycle", "retained_shared_parent", "canonical", "reader_held", "healthy"} {
+			t.Run(name, func(t *testing.T) {
+				store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+				protected, sibling := [32]byte{byte(0x30 + i)}, [32]byte{byte(0x60 + i)}
+				owner, ownerHeader, ownerBlock := noncanonicalValidArtifacts(t, byte(0xd0+i), [32]byte{})
+				request := len(ownerHeader) + len(ownerBlock)
+				writeNoncanonicalArtifacts(t, store, sibling, make([]byte, request), nil, nil)
+				write := func() error { return store.StoreBlock(owner, ownerHeader, ownerBlock) }
+				protectedPaths := []string{noncanonicalTestFile(store, noncanonicalBlockArtifact, protected)}
+				var canonical [][32]byte
+				switch name {
+				case "current_reservation", "reader_held":
+					writeNoncanonicalArtifacts(t, store, protected, make([]byte, request), nil, nil)
+					if name == "current_reservation" {
+						write = func() error { return store.PutUndo(protected, &BlockUndo{BlockHeight: 9}) }
+					}
+				case "proposed_ancestry_cycle":
+					protected, protectedHeader, protectedBlock := noncanonicalValidArtifacts(t, 0xda, [32]byte{})
+					writeNoncanonicalArtifacts(t, store, protected, protectedBlock, protectedHeader, []byte("invalid undo"))
+					owner, ownerHeader, ownerBlock = noncanonicalValidArtifacts(t, 0xdb, protected)
+					protectedPaths = []string{noncanonicalTestFile(store, noncanonicalBlockArtifact, protected), noncanonicalTestFile(store, noncanonicalHeaderArtifact, protected), noncanonicalTestFile(store, noncanonicalUndoArtifact, protected)}
+				case "retained_shared_parent":
+					writeNoncanonicalArtifacts(t, store, protected, make([]byte, request), nil, nil)
+					for seed := byte(0xdc); seed <= 0xdd; seed++ {
+						child, _, childBlock := noncanonicalValidArtifacts(t, seed, protected)
+						writeNoncanonicalArtifacts(t, store, child, childBlock, nil, nil)
+						protectedPaths = append(protectedPaths, noncanonicalTestFile(store, noncanonicalBlockArtifact, child))
+					}
+				case "canonical":
+					protected, protectedHeader, protectedBlock := noncanonicalValidArtifacts(t, 0xdf, [32]byte{})
+					mustNoncanonical(t, store.StoreBlock(protected, protectedHeader, protectedBlock), store.PutUndo(protected, &BlockUndo{BlockHeight: 0}))
+					mustNoncanonical(t, store.SetCanonicalTip(0, protected))
+					protectedPaths = []string{noncanonicalTestFile(store, noncanonicalBlockArtifact, protected), noncanonicalTestFile(store, noncanonicalHeaderArtifact, protected), noncanonicalTestFile(store, noncanonicalUndoArtifact, protected)}
+					canonical = [][32]byte{protected}
+				case "healthy":
+					protected, _, protectedBlock := noncanonicalValidArtifacts(t, 0xde, [32]byte{})
+					writeNoncanonicalArtifacts(t, store, protected, protectedBlock, nil, nil)
+					protectedPaths = []string{noncanonicalTestFile(store, noncanonicalBlockArtifact, protected)}
+				}
+				accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+				accounting.limit = accounting.usedBytes
+				cycleAt := -1
+				var cyclePrev [32]byte
+				if name == "proposed_ancestry_cycle" {
+					cycleAt, _ = accounting.find(protected)
+					cyclePrev, accounting.rows[cycleAt].prev = accounting.rows[cycleAt].prev, protected
+				}
+				var readerDone chan error
+				var release chan struct{}
+				if name == "reader_held" {
+					previousRead, started := readFileByPathFn, make(chan struct{})
+					release, readerDone = make(chan struct{}), make(chan error, 1)
+					readFileByPathFn = func(path string, limit int64) ([]byte, error) {
+						if path == protectedPaths[0] {
+							close(started)
+							<-release
+						}
+						return previousRead(path, limit)
+					}
+					t.Cleanup(func() { readFileByPathFn = previousRead })
+					go func() { _, err := store.GetBlockByHash(protected); readerDone <- err }()
+					<-started
+				}
+				mustNoncanonical(t, write())
+				if release != nil {
+					close(release)
+					mustNoncanonical(t, <-readerDone)
+				}
+				if cycleAt >= 0 {
+					accounting.rows[cycleAt].prev = cyclePrev
+				}
+				_, siblingErr := os.Stat(noncanonicalTestFile(store, noncanonicalBlockArtifact, sibling))
+				for _, path := range protectedPaths {
+					_, err := os.Stat(path)
+					mustNoncanonical(t, err)
+				}
+				live, disk := store.noncanonicalAccountingSnapshot(), requireReopenMatchesIndependentDisk(t, store, canonical...)
+				requireAtomicTest(t, errors.Is(siblingErr, os.ErrNotExist) && slices.Equal(live.rows, disk.rows) && live.reservedBytes == 0 && len(store.noncanonicalPending) == 0 && len(store.noncanonicalReaders) == 0 && store.noncanonicalTransitionDone == nil && store.noncanonicalReclaim == nil, "protection live=%+v disk=%+v", live, disk)
+			})
+		}
+	})
+
+	t.Run("public_quota_owner_restart_and_handoff", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+			owner, ownerHeader, ownerBlock := noncanonicalValidArtifacts(t, 0xf1, [32]byte{})
+			loser, loserHeader, loserBlock := noncanonicalValidArtifacts(t, 0xf2, [32]byte{})
+			victim := [32]byte{0xf0}
+			writeNoncanonicalArtifacts(t, store, victim, make([]byte, len(ownerHeader)+len(ownerBlock)), nil, nil)
+			accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+			accounting.limit = accounting.usedBytes
+			ownerReady, loserReady, releaseOwner, releaseLoser := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+			loserRestart, releaseRestart, ownerCreate, releaseCreate := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+			previousRead, calls := readFileByPathFn, map[string]int{}
+			ownerPath, loserPath := noncanonicalTestFile(store, noncanonicalBlockArtifact, owner), noncanonicalTestFile(store, noncanonicalBlockArtifact, loser)
+			readFileByPathFn = func(path string, limit int64) ([]byte, error) {
+				store.stateMu.Lock()
+				calls[path]++
+				call := calls[path]
+				store.stateMu.Unlock()
+				switch {
+				case path == ownerPath && call == 1:
+					close(ownerReady)
+					<-releaseOwner
+				case path == loserPath && call == 1:
+					close(loserReady)
+					<-releaseLoser
+				case path == loserPath && call == 2:
+					close(loserRestart)
+					<-releaseRestart
+				}
+				return previousRead(path, limit)
+			}
+			t.Cleanup(func() { readFileByPathFn = previousRead })
+			withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+				open, blocked := ops.openScratch, false
+				ops.openScratch = func(path string, flags int, mode os.FileMode) (atomicWriteScratchFile, error) {
+					if !blocked {
+						blocked = true
+						close(ownerCreate)
+						<-releaseCreate
+					}
+					return open(path, flags, mode)
+				}
+			})
+			ownerDone, loserDone, canonicalDone := make(chan error, 1), make(chan error, 1), make(chan error, 1)
+			go func() { ownerDone <- store.StoreBlock(owner, ownerHeader, ownerBlock) }()
+			go func() { loserDone <- store.StoreBlock(loser, loserHeader, loserBlock) }()
+			synctest.Wait()
+			receiveNoncanonical(t, ownerReady, "owner preflight missing")
+			receiveNoncanonical(t, loserReady, "loser preflight missing")
+			close(releaseOwner)
+			synctest.Wait()
+			store.stateMu.Lock()
+			oneOwner := store.noncanonicalReclaim != nil && store.noncanonicalReclaim.owner == owner && store.noncanonicalPending[loser] != nil
+			store.stateMu.Unlock()
+			requireAtomicTest(t, oneOwner, "public writers did not elect one owner")
+			close(releaseLoser)
+			synctest.Wait()
+			receiveNoncanonical(t, ownerCreate, "owner did not receive capacity")
+			receiveNoncanonical(t, loserRestart, "loser did not restart")
+			handoff := store.noncanonicalAccountingSnapshot()
+			requireAtomicTest(t, handoff.usedBytes == 0 && handoff.reservedBytes == uint64(len(ownerHeader)+len(ownerBlock)), "capacity handoff=%+v", handoff)
+			accounting.limit = noncanonicalDefaultByteLimit
+			go func() { canonicalDone <- store.SetCanonicalTip(0, [32]byte{0xf3}) }()
+			synctest.Wait()
+			select {
+			case err := <-canonicalDone:
+				t.Fatalf("canonical transition bypassed writers: %v", err)
+			default:
+			}
+			close(releaseRestart)
+			close(releaseCreate)
+			synctest.Wait()
+			mustNoncanonical(t, receiveNoncanonical(t, ownerDone, "owner did not finish"), receiveNoncanonical(t, canonicalDone, "canonical transition did not finish"), receiveNoncanonical(t, loserDone, "loser did not finish"))
+			final := store.noncanonicalAccountingSnapshot()
+			canonical, ok := store.canonicalHeightByHash[[32]byte{0xf3}]
+			requireAtomicTest(t, ok && canonical == 0 && calls[loserPath] >= 2 && final.reservedBytes == 0 && store.noncanonicalTransitionDone == nil && store.noncanonicalReclaim == nil && len(store.noncanonicalPending) == 0 && len(store.noncanonicalReaders) == 0, "canonical=%d/%t calls=%d final=%+v", canonical, ok, calls[loserPath], final)
+		})
+	})
+}
+
+func TestNoncanonicalReaderFence(t *testing.T) {
+	wantInspect := BlockPresence{Class: BlockPresenceLocalStoreError, Scope: BlockPresenceScopeNoncanonical, Leaves: BlockArtifactLeaves{Block: BlockArtifactValid, Header: BlockArtifactValid, Undo: BlockArtifactInvalid}}
+	readers := []struct {
+		name    string
+		inspect bool
+		read    func(*BlockStore, [32]byte) ([]byte, error)
+	}{
+		{"block", false, (*BlockStore).GetBlockByHash},
+		{"header", false, (*BlockStore).GetHeaderByHash},
+		{"undo", false, func(s *BlockStore, h [32]byte) ([]byte, error) { _, err := s.GetUndo(h); return nil, err }},
+		{"inspect", true, func(s *BlockStore, h [32]byte) ([]byte, error) {
+			if got := s.InspectBlockPresence(h); got != wantInspect {
+				return nil, errors.New("unexpected D5 presence")
+			}
+			return nil, nil
+		}},
+	}
+	for _, tc := range readers {
+		t.Run("pre_mark_"+tc.name, func(t *testing.T) {
+			store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+			hash, header, block := noncanonicalValidArtifacts(t, 0x91, [32]byte{})
+			writeNoncanonicalArtifacts(t, store, hash, block, header, []byte("invalid undo"))
+			accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+			accounting.limit = accounting.usedBytes
+			leaf := noncanonicalReservationLeaf{kind: noncanonicalBlockArtifact, bytes: accounting.usedBytes, state: BlockArtifactInvalid}
+			previousRead, started, release := readFileByPathFn, make(chan struct{}), make(chan struct{})
+			blocked := false
+			readFileByPathFn = func(path string, limit int64) ([]byte, error) {
+				pinned := store.noncanonicalReaders[hash]
+				if !tc.inspect {
+					store.stateMu.Lock()
+					pinned = store.noncanonicalReaders[hash]
+					store.stateMu.Unlock()
+				}
+				requireAtomicTest(t, pinned != 0, "raw read preceded pin")
+				if !blocked {
+					blocked = true
+					close(started)
+					<-release
+				}
+				return previousRead(path, limit)
+			}
+			t.Cleanup(func() { readFileByPathFn = previousRead })
+			type readResult struct {
+				raw []byte
+				err error
+			}
+			readDone, gcDone := make(chan readResult, 1), make(chan error, 1)
+			go func() { raw, err := tc.read(store, hash); readDone <- readResult{raw, err} }()
+			receiveNoncanonical(t, started, "public read did not reach raw seam")
+			go func() {
+				gcDone <- store.reserveNoncanonicalArtifactWrite([32]byte{0x92}, []noncanonicalReservationLeaf{leaf}, nil, func(*noncanonicalReservation) error { return nil })
+			}()
+			if tc.inspect {
+				close(release)
+			} else if err := receiveNoncanonical(t, gcDone, "GC waited for getter"); !errors.Is(err, errNoncanonicalBytes) {
+				t.Fatalf("GC error=%v", err)
+			} else {
+				close(release)
+			}
+			result := receiveNoncanonical(t, readDone, "public read did not finish")
+			wantRaw := map[string][]byte{"block": block, "header": header}[tc.name]
+			if tc.name == "undo" {
+				requireAtomicTest(t, errors.Is(result.err, ErrUndoIntegrity) && !errors.Is(result.err, os.ErrNotExist), "undo result=%v", result.err)
+			} else {
+				requireAtomicTest(t, result.err == nil && bytes.Equal(result.raw, wantRaw), "%s raw=%x err=%v", tc.name, result.raw, result.err)
+			}
+			if tc.inspect {
+				if err := receiveNoncanonical(t, gcDone, "GC did not finish after inspect"); err != nil && !errors.Is(err, errNoncanonicalBytes) {
+					t.Fatalf("GC error=%v", err)
+				}
+			}
+			store.stateMu.Lock()
+			count := store.noncanonicalReaders[hash]
+			store.stateMu.Unlock()
+			requireAtomicTest(t, count == 0, "reader leak=%d", count)
+		})
+	}
+
+	t.Run("overlapping_readers_refcount", func(t *testing.T) {
+		store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+		victim, header, block := noncanonicalValidArtifacts(t, 0x98, [32]byte{})
+		writeNoncanonicalArtifacts(t, store, victim, block, header, []byte("invalid undo"))
+		accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+		accounting.limit = accounting.usedBytes
+		owner, ownerHeader, ownerBlock := noncanonicalValidArtifacts(t, 0x99, [32]byte{})
+		previousRead, started, release := readFileByPathFn, make(chan struct{}, 2), make(chan struct{})
+		target, calls := noncanonicalTestFile(store, noncanonicalBlockArtifact, victim), 0
+		readFileByPathFn = func(path string, limit int64) ([]byte, error) {
+			store.stateMu.Lock()
+			if path == target {
+				calls++
+			}
+			call := calls
+			store.stateMu.Unlock()
+			if path == target && call <= 2 {
+				started <- struct{}{}
+				<-release
+			}
+			return previousRead(path, limit)
+		}
+		t.Cleanup(func() { readFileByPathFn = previousRead })
+		type result struct {
+			raw []byte
+			err error
+		}
+		done := make(chan result, 2)
+		for range 2 {
+			go func() { raw, err := store.GetBlockByHash(victim); done <- result{raw, err} }()
+		}
+		<-started
+		<-started
+		store.stateMu.Lock()
+		readers := store.noncanonicalReaders[victim]
+		store.stateMu.Unlock()
+		requireAtomicTest(t, readers == 2 && errors.Is(store.StoreBlock(owner, ownerHeader, ownerBlock), errNoncanonicalBytes), "readers=%d", readers)
+		release <- struct{}{}
+		first := <-done
+		store.stateMu.Lock()
+		readers = store.noncanonicalReaders[victim]
+		store.stateMu.Unlock()
+		requireAtomicTest(t, first.err == nil && bytes.Equal(first.raw, block) && readers == 1 && errors.Is(store.StoreBlock(owner, ownerHeader, ownerBlock), errNoncanonicalBytes), "first=%v readers=%d", first.err, readers)
+		release <- struct{}{}
+		second := <-done
+		mustNoncanonical(t, second.err, store.StoreBlock(owner, ownerHeader, ownerBlock))
+		live, disk := store.noncanonicalAccountingSnapshot(), requireReopenMatchesIndependentDisk(t, store)
+		requireAtomicTest(t, bytes.Equal(second.raw, block) && len(store.noncanonicalReaders) == 0 && live.reservedBytes == 0 && slices.Equal(live.rows, disk.rows), "second=%v live=%+v", second.err, live)
+	})
+
+	t.Run("undo_release_and_inspect_order", func(t *testing.T) {
+		store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+		hash, header, block := noncanonicalValidArtifacts(t, 0x96, [32]byte{})
+		writeNoncanonicalArtifacts(t, store, hash, block, header, []byte("invalid undo"))
+		previousRead, undoPath := readFileByPathFn, noncanonicalTestFile(store, noncanonicalUndoArtifact, hash)
+		t.Cleanup(func() { readFileByPathFn = previousRead })
+		checkRelease := func(raw []byte, want error) {
+			readFileByPathFn = func(path string, limit int64) ([]byte, error) {
+				if path == undoPath {
+					return raw, want
+				}
+				return previousRead(path, limit)
+			}
+			probes := 0
+			store.leafProbe = func() {
+				store.stateMu.Lock()
+				readers := store.noncanonicalReaders[hash]
+				store.stateMu.Unlock()
+				probes++
+				requireAtomicTest(t, readers == 0, "undo decode retained reader")
+			}
+			_, err := store.GetUndo(hash)
+			requireAtomicTest(t, errors.Is(err, want) && probes == 1, "GetUndo err=%v probes=%d", err, probes)
+		}
+		checkRelease(nil, os.ErrPermission)
+		checkRelease([]byte("{"), ErrUndoIntegrity)
+		store.leafProbe = nil
+		var order []string
+		readFileByPathFn = func(path string, limit int64) ([]byte, error) {
+			order = append(order, path)
+			return previousRead(path, limit)
+		}
+		got := store.InspectBlockPresence(hash)
+		wantOrder := []string{undoPath, noncanonicalTestFile(store, noncanonicalHeaderArtifact, hash), noncanonicalTestFile(store, noncanonicalBlockArtifact, hash)}
+		requireAtomicTest(t, got == wantInspect && slices.Equal(order, wantOrder), "presence=%+v order=%v", got, order)
+	})
+
+	t.Run("same_hash_public_writers_serialize_preflight", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+			hash, header, block := noncanonicalValidArtifacts(t, 0x97, [32]byte{})
+			installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+			started, release, reached := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+				open := ops.openScratch
+				ops.openScratch = func(path string, flags int, mode os.FileMode) (atomicWriteScratchFile, error) {
+					if filepath.Dir(path) == store.undoDir {
+						close(started)
+						<-release
+					}
+					return open(path, flags, mode)
+				}
+			})
+			previousRead, blockPath, signaled := readFileByPathFn, noncanonicalTestFile(store, noncanonicalBlockArtifact, hash), false
+			readFileByPathFn = func(path string, limit int64) ([]byte, error) {
+				if path == blockPath && !signaled {
+					signaled = true
+					close(reached)
+				}
+				return previousRead(path, limit)
+			}
+			t.Cleanup(func() { readFileByPathFn = previousRead })
+			undoDone, blockDone := make(chan error, 1), make(chan error, 1)
+			go func() { undoDone <- store.PutUndo(hash, &BlockUndo{BlockHeight: 7}) }()
+			synctest.Wait()
+			receiveNoncanonical(t, started, "PutUndo did not reach write")
+			go func() { blockDone <- store.StoreBlock(hash, header, block) }()
+			synctest.Wait()
+			select {
+			case <-reached:
+				t.Fatal("same-hash StoreBlock reached preflight")
+			case err := <-blockDone:
+				t.Fatalf("same-hash StoreBlock bypassed pending writer: %v", err)
+			default:
+			}
+			close(release)
+			synctest.Wait()
+			mustNoncanonical(t, receiveNoncanonical(t, undoDone, "PutUndo did not finish"), receiveNoncanonical(t, blockDone, "StoreBlock did not finish"))
+			final := store.noncanonicalAccountingSnapshot()
+			requireAtomicTest(t, len(final.rows) == 1 && final.rows[0].hash == hash && final.reservedBytes == 0 && len(store.noncanonicalPending) == 0 && len(store.noncanonicalReaders) == 0 && store.noncanonicalTransitionDone == nil && store.noncanonicalReclaim == nil, "same-hash final=%+v", final)
+			mustNoncanonicalRestartDigest(t, store, store.noncanonicalAccountingDigest())
+		})
+	})
+
+	t.Run("late_family_and_failures", func(t *testing.T) {
+		store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+		hash, header, block := noncanonicalValidArtifacts(t, 0x93, [32]byte{})
+		other, _, otherBlock := noncanonicalValidArtifacts(t, 0x94, [32]byte{})
+		writeNoncanonicalArtifacts(t, store, hash, block, header, []byte("invalid undo"))
+		writeNoncanonicalArtifacts(t, store, other, otherBlock, nil, nil)
+		accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+		accounting.limit = accounting.usedBytes
+		at, _ := accounting.find(hash)
+		victimBytes, _ := noncanonicalLogicalBytes(accounting.rows[at])
+		leaf := noncanonicalReservationLeaf{kind: noncanonicalBlockArtifact, bytes: victimBytes, state: BlockArtifactInvalid}
+		marked, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+		probes := 0
+		store.leafProbe = func() {
+			probes++
+			if probes == 1 {
+				return
+			}
+			store.leafProbe = nil
+			close(marked)
+			<-release
+		}
+		go func() {
+			done <- store.reserveNoncanonicalArtifactWrite([32]byte{0x95}, []noncanonicalReservationLeaf{leaf}, nil, func(*noncanonicalReservation) error { return nil })
+		}()
+		receiveNoncanonical(t, marked, "candidate was not marked")
+		previousRead, rawCalls := readFileByPathFn, 0
+		readFileByPathFn = func(path string, limit int64) ([]byte, error) { rawCalls++; return previousRead(path, limit) }
+		t.Cleanup(func() { readFileByPathFn = previousRead })
+		if _, err := store.GetBlockByHash(hash); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("late block=%v", err)
+		}
+		if _, err := store.GetHeaderByHash(hash); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("late header=%v", err)
+		}
+		if _, err := store.GetUndo(hash); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("late undo=%v", err)
+		}
+		wantAbsent := BlockPresence{Class: BlockPresenceAbsent, Leaves: BlockArtifactLeaves{Block: BlockArtifactAbsent, Header: BlockArtifactAbsent, Undo: BlockArtifactAbsent}}
+		if got := store.InspectBlockPresence(hash); got != wantAbsent || rawCalls != 0 || probes != 2 {
+			t.Fatalf("late presence=%+v raw=%d probes=%d", got, rawCalls, probes)
+		}
+		if got, err := store.GetBlockByHash(other); err != nil || !bytes.Equal(got, otherBlock) || rawCalls != 1 {
+			t.Fatalf("unrelated read=%d err=%v", rawCalls, err)
+		}
+		close(release)
+		mustNoncanonical(t, receiveNoncanonical(t, done, "marked reclaim did not finish"))
+		readFileByPathFn = func(string, int64) ([]byte, error) { return nil, errors.New("read fault") }
+		_, _ = store.GetBlockByHash(other)
+		_, _ = store.GetHeaderByHash(other)
+		_, _ = store.GetUndo(other)
+		_ = store.InspectBlockPresence(other)
+		requireAtomicTest(t, len(store.noncanonicalReaders) == 0, "failure reader leaks=%v", store.noncanonicalReaders)
+	})
+}
+
+func TestNoncanonicalReclaimFsyncPending(t *testing.T) {
+	for _, kind := range []noncanonicalArtifactKind{noncanonicalBlockArtifact, noncanonicalHeaderArtifact, noncanonicalUndoArtifact} {
+		for _, phase := range []string{"unlink", "fsync"} {
+			t.Run(phase+"_leaf_"+string(rune('0'+kind)), func(t *testing.T) {
+				store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+				hash, header, block := noncanonicalValidArtifacts(t, byte(0xb0+kind), [32]byte{})
+				writeNoncanonicalArtifacts(t, store, hash, block, header, []byte("invalid undo"))
+				accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+				accounting.limit = accounting.usedBytes
+				fault, target := errors.New(phase+" fault"), noncanonicalTestFile(store, kind, hash)
+				withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+					unlink, syncParent := ops.unlink, ops.syncParent
+					ops.unlink = func(path string) error {
+						if phase == "unlink" && path == target {
+							return fault
+						}
+						return unlink(path)
+					}
+					ops.syncParent = func(parent string) error {
+						if phase == "fsync" && parent == filepath.Dir(target) {
+							return fault
+						}
+						return syncParent(parent)
+					}
+				})
+				leaf := noncanonicalReservationLeaf{kind: noncanonicalBlockArtifact, bytes: accounting.usedBytes, state: BlockArtifactInvalid}
+				err := store.reserveNoncanonicalArtifactWrite([32]byte{0xbf}, []noncanonicalReservationLeaf{leaf}, nil, func(*noncanonicalReservation) error { return nil })
+				requireNoncanonicalReclaimFault(t, err, fault, hash, noncanonicalD5InvalidUndo, kind, phase)
+				snapshot := store.noncanonicalAccountingSnapshot()
+				requireAtomicTest(t, len(snapshot.rows) == 1 && snapshot.rows[0].state(kind) != BlockArtifactAbsent, "failed leaf credited=%+v", snapshot)
+				disk, wantDiskUsed := requireReopenMatchesIndependentDisk(t, store), snapshot.usedBytes
+				if phase == "fsync" {
+					wantDiskUsed -= *snapshot.rows[0].bytes(kind)
+				}
+				requireAtomicTest(t, disk.usedBytes == wantDiskUsed, "fault disk=%+v live=%+v", disk, snapshot)
+				for prior := noncanonicalBlockArtifact; prior < kind; prior++ {
+					requireAtomicTest(t, snapshot.rows[0].state(prior) == BlockArtifactAbsent, "prior leaf %d not retained", prior)
+				}
+				store.stateMu.Lock()
+				pending := store.noncanonicalTransitionDone != nil && store.noncanonicalReclaim != nil && store.noncanonicalReclaim.fsyncPending && store.noncanonicalReclaim.leaf == kind && store.noncanonicalReclaim.unlinked
+				store.stateMu.Unlock()
+				_, statErr := os.Stat(target)
+				if phase == "fsync" {
+					if !pending || !errors.Is(statErr, os.ErrNotExist) {
+						t.Fatalf("pending=%t stat=%v", pending, statErr)
+					}
+					if _, err := store.GetBlockByHash(hash); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("pending reader=%v", err)
+					}
+				} else if pending || store.noncanonicalTransitionDone != nil || store.noncanonicalReclaim != nil || statErr != nil {
+					t.Fatalf("unlink gate=%t stat=%v", pending, statErr)
+				}
+				requireAtomicTest(t, snapshot.reservedBytes == 0 && len(store.noncanonicalPending) == 0 && len(store.noncanonicalReaders) == 0, "fault cleanup=%+v pending=%d readers=%d", snapshot, len(store.noncanonicalPending), len(store.noncanonicalReaders))
+			})
+		}
+	}
+
+	t.Run("crash_reopen_boundaries", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+			victim, header, block := noncanonicalValidArtifacts(t, 0xba, [32]byte{})
+			undo := []byte("invalid undo")
+			writeNoncanonicalArtifacts(t, store, victim, block, header, undo)
+			accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+			at, _ := accounting.find(victim)
+			original := accounting.rows[at]
+			accounting.limit = accounting.usedBytes
+			owner, ownerHeader, ownerBlock := noncanonicalValidArtifacts(t, 0xbb, [32]byte{})
+			targets := [...]string{
+				noncanonicalTestFile(store, noncanonicalBlockArtifact, victim),
+				noncanonicalTestFile(store, noncanonicalHeaderArtifact, victim),
+				noncanonicalTestFile(store, noncanonicalUndoArtifact, victim),
+			}
+			type boundary struct {
+				phase string
+				kind  noncanonicalArtifactKind
+			}
+			events, release := make(chan boundary), make(chan struct{})
+			pause := func(phase string, kind noncanonicalArtifactKind) { events <- boundary{phase, kind}; <-release }
+			withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+				open, unlink, syncParent := ops.openScratch, ops.unlink, ops.syncParent
+				synced, afterUndo := [3]bool{}, false
+				ops.unlink = func(path string) error {
+					for kind, target := range targets {
+						if path == target {
+							if kind > 0 {
+								pause("after_accounted", noncanonicalArtifactKind(kind-1))
+							}
+							pause("before_unlink", noncanonicalArtifactKind(kind))
+						}
+					}
+					return unlink(path)
+				}
+				ops.syncParent = func(parent string) error {
+					for kind, target := range targets {
+						if !synced[kind] && parent == filepath.Dir(target) {
+							pause("after_unlink_before_fsync", noncanonicalArtifactKind(kind))
+							if err := syncParent(parent); err != nil {
+								return err
+							}
+							synced[kind] = true
+							pause("after_fsync_before_publish", noncanonicalArtifactKind(kind))
+							return nil
+						}
+					}
+					return syncParent(parent)
+				}
+				ops.openScratch = func(path string, flags int, mode os.FileMode) (atomicWriteScratchFile, error) {
+					if !afterUndo && filepath.Dir(path) == store.blocksDir {
+						afterUndo = true
+						pause("after_accounted", noncanonicalUndoArtifact)
+					}
+					return open(path, flags, mode)
+				}
+			})
+			assertImage := func(label string, snapshot noncanonicalAccountingSnapshot, through int) {
+				want := original
+				for kind := 0; kind <= through; kind++ {
+					want.setState(noncanonicalArtifactKind(kind), BlockArtifactAbsent)
+					*want.bytes(noncanonicalArtifactKind(kind)) = 0
+				}
+				if through >= int(noncanonicalHeaderArtifact) {
+					want.prev = [32]byte{}
+				}
+				if through >= int(noncanonicalUndoArtifact) {
+					want.height = noncanonicalUnknownHeight
+				}
+				var got noncanonicalRow
+				found := false
+				for _, row := range snapshot.rows {
+					if row.hash == victim {
+						got, found = row, true
+					}
+				}
+				wantUsed := want.blockBytes + want.headerBytes + want.undoBytes
+				ok := found == !want.empty() && (!found || got == want) && snapshot.usedBytes == wantUsed
+				if !ok {
+					t.Errorf("%s through=%d image=%+v", label, through, snapshot)
+				}
+			}
+			done := make(chan error, 1)
+			go func() { done <- store.StoreBlock(owner, ownerHeader, ownerBlock) }()
+			for range 12 {
+				event := receiveNoncanonical(t, events, "missing reclaim boundary")
+				diskThrough, liveThrough := int(event.kind)-1, int(event.kind)-1
+				if event.phase != "before_unlink" {
+					diskThrough = int(event.kind)
+				}
+				if event.phase == "after_accounted" {
+					liveThrough = int(event.kind)
+				}
+				for kind, target := range targets {
+					_, err := os.Stat(target)
+					requireAtomicTest(t, errors.Is(err, os.ErrNotExist) == (kind <= diskThrough), "%s leaf=%d stat=%v", event.phase, kind, err)
+				}
+				assertImage("live/"+event.phase, store.noncanonicalAccountingSnapshot(), liveThrough)
+				assertImage("independent/"+event.phase, requireReopenMatchesIndependentDisk(t, store), diskThrough)
+				release <- struct{}{}
+			}
+			mustNoncanonical(t, receiveNoncanonical(t, done, "reclaim boundary writer did not finish"))
+			final := store.noncanonicalAccountingSnapshot()
+			requireAtomicTest(t, final.reservedBytes == 0 && store.noncanonicalTransitionDone == nil && store.noncanonicalReclaim == nil && len(store.noncanonicalPending) == 0 && len(store.noncanonicalReaders) == 0, "boundary cleanup=%+v", final)
+			requireAtomicTest(t, slices.Equal(final.rows, requireReopenMatchesIndependentDisk(t, store).rows), "boundary final disk=%+v", final)
+			mustNoncanonicalRestartDigest(t, store, store.noncanonicalAccountingDigest())
+		})
+	})
+
+	t.Run("one_recovery_claim_across_restart", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+			indexBefore := store.visibleIndexBytes()
+			original, originalHeader, originalBlock := noncanonicalValidArtifacts(t, 0xbc, [32]byte{})
+			request := len(originalHeader) + len(originalBlock)
+			victim1, victim2 := [32]byte{1}, [32]byte{2}
+			writeNoncanonicalArtifacts(t, store, victim1, make([]byte, request/2), nil, nil)
+			writeNoncanonicalArtifacts(t, store, victim2, make([]byte, request-request/2), nil, nil)
+			accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+			accounting.limit = accounting.usedBytes
+			fault, faultNext := errors.New("successive fsync"), true
+			withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+				syncParent := ops.syncParent
+				ops.syncParent = func(parent string) error {
+					if faultNext {
+						faultNext = false
+						return fault
+					}
+					return syncParent(parent)
+				}
+			})
+			seed, seedHeader, seedBlock := noncanonicalValidArtifacts(t, 0xbd, [32]byte{})
+			seedErr := store.StoreBlock(seed, seedHeader, seedBlock)
+			requireNoncanonicalReclaimFault(t, seedErr, fault, victim1, noncanonicalD0InvalidBlock, noncanonicalBlockArtifact, "fsync")
+			handoff := false
+			store.leafProbe = func() {
+				if handoff {
+					return
+				}
+				if !store.stateMu.TryLock() {
+					t.Error("post-recovery probe retained stateMu")
+					return
+				}
+				defer store.stateMu.Unlock()
+				_, found := accounting.find(victim1)
+				if !found {
+					handoff = true
+					requireAtomicTest(t, store.noncanonicalTransitionDone != nil && store.noncanonicalReclaim != nil && store.noncanonicalReclaim.cause == seedErr, "recovery gate/cause changed before handoff")
+				}
+			}
+			previousRead, ready, release, blocked := readFileByPathFn, make(chan struct{}), make(chan struct{}), false
+			originalPath := noncanonicalTestFile(store, noncanonicalBlockArtifact, original)
+			readFileByPathFn = func(path string, limit int64) ([]byte, error) {
+				if path == originalPath && !blocked {
+					blocked = true
+					close(ready)
+					<-release
+				}
+				return previousRead(path, limit)
+			}
+			t.Cleanup(func() { readFileByPathFn = previousRead })
+			originalDone := make(chan error, 1)
+			go func() { originalDone <- store.StoreBlock(original, originalHeader, originalBlock) }()
+			<-ready
+			faultNext = true
+			second, secondHeader, secondBlock := noncanonicalValidArtifacts(t, 0xbe, [32]byte{})
+			secondDone := make(chan error, 1)
+			go func() { secondDone <- store.StoreBlock(second, secondHeader, secondBlock) }()
+			synctest.Wait()
+			store.stateMu.Lock()
+			owner := store.noncanonicalReclaim != nil && store.noncanonicalReclaim.owner == second
+			store.stateMu.Unlock()
+			requireAtomicTest(t, owner, "second writer did not own reclaim")
+			close(release)
+			synctest.Wait()
+			secondErr := receiveNoncanonical(t, secondDone, "second writer did not retain fsync failure")
+			requireNoncanonicalReclaimFault(t, secondErr, fault, victim2, noncanonicalD0InvalidBlock, noncanonicalBlockArtifact, "fsync")
+			store.stateMu.Lock()
+			pending, pendingDone := store.noncanonicalReclaim, store.noncanonicalTransitionDone
+			store.stateMu.Unlock()
+			originalErr := receiveNoncanonical(t, originalDone, "consumed recovery budget waited on second pending record")
+			store.stateMu.Lock()
+			unchanged := pending != nil && store.noncanonicalReclaim == pending && store.noncanonicalTransitionDone == pendingDone && pending.fsyncPending && pending.cause == secondErr && len(store.index.Canonical) == 0 && len(store.canonicalHeightByHash) == 0
+			store.stateMu.Unlock()
+			requireAtomicTest(t, originalErr == secondErr && unchanged && bytes.Equal(indexBefore, store.visibleIndexBytes()), "original=%v second=%v unchanged=%t", originalErr, secondErr, unchanged)
+			accounting.limit = noncanonicalDefaultByteLimit
+			tip := [32]byte{0xbf}
+			mustNoncanonical(t, store.SetCanonicalTip(0, tip))
+			canonical, ok, canonicalErr := store.CanonicalHash(0)
+			live, disk := store.noncanonicalAccountingSnapshot(), requireReopenMatchesIndependentDisk(t, store, tip)
+			requireAtomicTest(t, handoff && canonicalErr == nil && ok && canonical == tip && slices.Equal(live.rows, disk.rows) && live.uniqueCount == 0 && live.usedBytes == 0 && live.reservedBytes == 0 && store.noncanonicalTransitionDone == nil && store.noncanonicalReclaim == nil && len(store.noncanonicalPending) == 0 && len(store.noncanonicalReaders) == 0, "recovery cleanup=%+v", live)
+		})
+	})
+
+	t.Run("consumed_recovering_returns_retained_cause", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+			victim := [32]byte{1}
+			writeNoncanonicalArtifacts(t, store, victim, []byte{0}, nil, nil)
+			accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+			accounting.limit = accounting.usedBytes
+			fault, faultNext := errors.New("recovering fsync"), true
+			target, unlinks, syncs := noncanonicalTestFile(store, noncanonicalBlockArtifact, victim), 0, 0
+			withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+				unlink, syncParent := ops.unlink, ops.syncParent
+				ops.unlink = func(path string) error {
+					if path == target {
+						unlinks++
+					}
+					return unlink(path)
+				}
+				ops.syncParent = func(parent string) error {
+					if parent == store.blocksDir {
+						syncs++
+						if faultNext {
+							faultNext = false
+							return fault
+						}
+					}
+					return syncParent(parent)
+				}
+			})
+			leaf := noncanonicalReservationLeaf{kind: noncanonicalBlockArtifact, bytes: 1, state: BlockArtifactInvalid}
+			pendingErr := store.reserveNoncanonicalArtifactWrite([32]byte{2}, []noncanonicalReservationLeaf{leaf}, nil, func(*noncanonicalReservation) error { return nil })
+			requireNoncanonicalReclaimFault(t, pendingErr, fault, victim, noncanonicalD0InvalidBlock, noncanonicalBlockArtifact, "fsync")
+			accounting.limit = noncanonicalDefaultByteLimit
+			indexBefore := store.visibleIndexBytes()
+			reached, release, held := make(chan struct{}), make(chan struct{}), false
+			store.leafProbe = func() {
+				store.stateMu.Lock()
+				reclaim := store.noncanonicalReclaim
+				_, found := accounting.find(victim)
+				ready := !held && reclaim != nil && !reclaim.fsyncPending && reclaim.cause == pendingErr && !found
+				if ready {
+					held = true
+				}
+				store.stateMu.Unlock()
+				if ready {
+					close(reached)
+					<-release
+				}
+			}
+			tip, freshDone := [32]byte{3}, make(chan error, 1)
+			go func() { freshDone <- store.SetCanonicalTip(0, tip) }()
+			receiveNoncanonical(t, reached, "fresh claimant did not reach recovering probe")
+			store.stateMu.Lock()
+			pending, pendingDone := store.noncanonicalReclaim, store.noncanonicalTransitionDone
+			beforeUnlinks, beforeSyncs := unlinks, syncs
+			store.stateMu.Unlock()
+			budget, consumedDone := noncanonicalRecoveryBudget{claimed: true}, make(chan error, 1)
+			go func() { consumedDone <- store.setCanonicalTip(0, [32]byte{4}, &budget) }()
+			synctest.Wait()
+			var consumedErr error
+			select {
+			case consumedErr = <-consumedDone:
+			default:
+				close(release)
+				t.Fatal("consumed caller waited for recovering claimant")
+			}
+			store.stateMu.Lock()
+			unchanged := pending != nil && store.noncanonicalReclaim == pending && store.noncanonicalTransitionDone == pendingDone && pending.cause == pendingErr && !pending.fsyncPending && len(store.noncanonicalPending) == 0
+			store.stateMu.Unlock()
+			requireAtomicTest(t, consumedErr == pendingErr && unchanged && unlinks == beforeUnlinks && syncs == beforeSyncs && bytes.Equal(store.visibleIndexBytes(), indexBefore), "consumed=%v pending=%t unlink=%d/%d fsync=%d/%d", consumedErr, unchanged, unlinks, beforeUnlinks, syncs, beforeSyncs)
+			close(release)
+			mustNoncanonical(t, receiveNoncanonical(t, freshDone, "fresh claimant did not finish"))
+			canonical, ok, err := store.CanonicalHash(0)
+			live, disk := store.noncanonicalAccountingSnapshot(), requireReopenMatchesIndependentDisk(t, store, tip)
+			requireAtomicTest(t, err == nil && ok && canonical == tip && slices.Equal(live.rows, disk.rows) && live.uniqueCount == 0 && store.noncanonicalTransitionDone == nil && store.noncanonicalReclaim == nil, "fresh canonical=%x/%t err=%v live=%+v", canonical, ok, err, live)
+		})
+	})
+
+	t.Run("composite_recovery_budget", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, hold string
+			commit     bool
+			wantUndo   bool
+		}{{"CommitBeforeUndo", "header", true, false}, {"CommitBeforeTip", "undo", true, true}, {"PutBlockBeforeTip", "header", false, false}} {
+			t.Run(tc.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+					hash, header, block := noncanonicalValidArtifacts(t, 0xc4, [32]byte{})
+					undo := &BlockUndo{BlockHeight: 7}
+					undoRaw, err := marshalUndoEnvelope(hash, undo)
+					mustNoncanonical(t, err)
+					request := len(header) + len(block)
+					requireAtomicTest(t, request > len(undoRaw), "composite fixture request=%d undo=%d", request, len(undoRaw))
+					victim1, victim2 := [32]byte{1}, [32]byte{2}
+					writeNoncanonicalArtifacts(t, store, victim1, make([]byte, request+len(undoRaw)), nil, nil)
+					writeNoncanonicalArtifacts(t, store, victim2, []byte{0}, nil, nil)
+					accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+					accounting.limit = accounting.usedBytes
+					fault, faultNext := errors.New("composite fsync"), true
+					victim1Path := noncanonicalTestFile(store, noncanonicalBlockArtifact, victim1)
+					victim2Path := noncanonicalTestFile(store, noncanonicalBlockArtifact, victim2)
+					holdPath := noncanonicalTestFile(store, noncanonicalHeaderArtifact, hash)
+					if tc.hold == "undo" {
+						holdPath = noncanonicalTestFile(store, noncanonicalUndoArtifact, hash)
+					}
+					phaseReached, releasePhase, phaseHeld := make(chan struct{}), make(chan struct{}), false
+					unlinks, syncs, reclaimSync := 0, 0, false
+					withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+						link, unlink, syncParent := ops.link, ops.unlink, ops.syncParent
+						ops.link = func(source, target string) error {
+							if target == holdPath && !phaseHeld {
+								phaseHeld = true
+								close(phaseReached)
+								<-releasePhase
+							}
+							return link(source, target)
+						}
+						ops.unlink = func(path string) error {
+							if path == victim1Path || path == victim2Path {
+								unlinks++
+								reclaimSync = true
+							}
+							return unlink(path)
+						}
+						ops.syncParent = func(parent string) error {
+							if reclaimSync && parent == store.blocksDir {
+								reclaimSync = false
+								syncs++
+								if faultNext {
+									faultNext = false
+									return fault
+								}
+							}
+							return syncParent(parent)
+						}
+					})
+					seed, seedHeader, seedBlock := noncanonicalValidArtifacts(t, 0xc5, [32]byte{})
+					firstErr := store.StoreBlock(seed, seedHeader, seedBlock)
+					requireNoncanonicalReclaimFault(t, firstErr, fault, victim1, noncanonicalD0InvalidBlock, noncanonicalBlockArtifact, "fsync")
+					indexBefore := store.visibleIndexBytes()
+					compositeDone := make(chan error, 1)
+					go func() {
+						if tc.commit {
+							compositeDone <- store.CommitCanonicalBlock(0, hash, header, block, undo)
+							return
+						}
+						compositeDone <- store.PutBlock(0, hash, header, block)
+					}()
+					receiveNoncanonical(t, phaseReached, "composite did not reach post-recovery "+tc.hold+" write")
+					requireAtomicTest(t, unlinks == 2 && syncs == 2, "first recovery unlink/fsync=%d/%d", unlinks, syncs)
+					faultNext = true
+					second, secondHeader, secondBlock := noncanonicalValidArtifacts(t, 0xc6, [32]byte{})
+					secondDone := make(chan error, 1)
+					go func() { secondDone <- store.StoreBlock(second, secondHeader, secondBlock) }()
+					synctest.Wait()
+					store.stateMu.Lock()
+					owner := store.noncanonicalReclaim != nil && store.noncanonicalReclaim.owner == second
+					store.stateMu.Unlock()
+					requireAtomicTest(t, owner, "second writer did not own composite handoff")
+					close(releasePhase)
+					synctest.Wait()
+					secondErr := receiveNoncanonical(t, secondDone, "second writer did not retain fsync failure")
+					requireNoncanonicalReclaimFault(t, secondErr, fault, victim2, noncanonicalD0InvalidBlock, noncanonicalBlockArtifact, "fsync")
+					compositeErr := receiveNoncanonical(t, compositeDone, "composite waited for a second recovery")
+					store.stateMu.Lock()
+					pending := store.noncanonicalReclaim != nil && store.noncanonicalReclaim.fsyncPending && store.noncanonicalReclaim.cause == secondErr
+					store.stateMu.Unlock()
+					_, undoErr := os.Stat(noncanonicalTestFile(store, noncanonicalUndoArtifact, hash))
+					_, secondBlockErr := os.Stat(noncanonicalTestFile(store, noncanonicalBlockArtifact, second))
+					undoPublished := undoErr == nil
+					requireAtomicTest(t, compositeErr == secondErr && pending && unlinks == 3 && syncs == 3 && undoPublished == tc.wantUndo && errors.Is(secondBlockErr, os.ErrNotExist) && bytes.Equal(store.visibleIndexBytes(), indexBefore), "composite=%v pending=%t unlink/fsync=%d/%d undo=%v/%t second=%v", compositeErr, pending, unlinks, syncs, undoErr, tc.wantUndo, secondBlockErr)
+					store.stateMu.Lock()
+					pendingRecord, pendingDone := store.noncanonicalReclaim, store.noncanonicalTransitionDone
+					store.stateMu.Unlock()
+					beforeAccounting := store.noncanonicalAccountingSnapshot()
+					claimed := noncanonicalRecoveryBudget{claimed: true}
+					precedenceErr := store.putUndo(hash, nil, &claimed)
+					afterAccounting := store.noncanonicalAccountingSnapshot()
+					_, precedenceUndoErr := os.Stat(noncanonicalTestFile(store, noncanonicalUndoArtifact, hash))
+					store.stateMu.Lock()
+					pendingUnchanged := pendingRecord != nil && store.noncanonicalReclaim == pendingRecord && store.noncanonicalTransitionDone == pendingDone && pendingRecord.fsyncPending && pendingRecord.cause == secondErr
+					store.stateMu.Unlock()
+					requireAtomicTest(t, precedenceErr == secondErr && pendingUnchanged && unlinks == 3 && syncs == 3 && beforeAccounting.usedBytes == afterAccounting.usedBytes && beforeAccounting.reservedBytes == afterAccounting.reservedBytes && beforeAccounting.uniqueCount == afterAccounting.uniqueCount && slices.Equal(beforeAccounting.rows, afterAccounting.rows) && (undoErr == nil) == (precedenceUndoErr == nil) && errors.Is(undoErr, os.ErrNotExist) == errors.Is(precedenceUndoErr, os.ErrNotExist) && bytes.Equal(store.visibleIndexBytes(), indexBefore), "claimed putUndo precedence err=%v pending=%t unlink/fsync=%d/%d undo=%v/%v", precedenceErr, pendingUnchanged, unlinks, syncs, undoErr, precedenceUndoErr)
+					accounting.limit = noncanonicalDefaultByteLimit
+					mustNoncanonical(t, store.PutUndo(hash, undo))
+					gotUndo, getErr := store.GetUndo(hash)
+					live, disk := store.noncanonicalAccountingSnapshot(), requireReopenMatchesIndependentDisk(t, store)
+					requireAtomicTest(t, getErr == nil && gotUndo != nil && gotUndo.BlockHeight == undo.BlockHeight && unlinks == 4 && syncs == 4 && slices.Equal(live.rows, disk.rows) && live.reservedBytes == 0 && store.noncanonicalTransitionDone == nil && store.noncanonicalReclaim == nil && len(store.noncanonicalPending) == 0 && bytes.Equal(store.visibleIndexBytes(), indexBefore), "fresh recovery undo=%+v err=%v unlink/fsync=%d/%d live=%+v", gotUndo, getErr, unlinks, syncs, live)
+				})
+			})
+		}
+	})
+
+	t.Run("hostile_recovery_blocks_gates", func(t *testing.T) {
+		store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+		hash, header, block := noncanonicalValidArtifacts(t, 0xc1, [32]byte{})
+		writeNoncanonicalArtifacts(t, store, hash, block, header, []byte("invalid undo"))
+		accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+		accounting.limit = accounting.usedBytes
+		prepared := mustPrepareCanonicalIndex(t, store, []string{hex.EncodeToString(hash[:])})
+		indexBefore, faulting := store.visibleIndexBytes(), true
+		fault := errors.New("pending fsync")
+		withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+			syncParent := ops.syncParent
+			ops.syncParent = func(parent string) error {
+				if faulting && parent == store.blocksDir {
+					return fault
+				}
+				return syncParent(parent)
+			}
+		})
+		leaf := noncanonicalReservationLeaf{kind: noncanonicalBlockArtifact, bytes: accounting.usedBytes, state: BlockArtifactInvalid}
+		requireNoncanonicalReclaimFault(t, store.reserveNoncanonicalArtifactWrite([32]byte{0xc2}, []noncanonicalReservationLeaf{leaf}, nil, func(*noncanonicalReservation) error { return nil }), fault, hash, noncanonicalD5InvalidUndo, noncanonicalBlockArtifact, "fsync")
+		faulting = false
+		assertPending := func(err error, action, cause string) {
+			var atomicErr *atomicWriteError
+			store.stateMu.Lock()
+			pending := store.noncanonicalTransitionDone != nil && store.noncanonicalReclaim != nil && store.noncanonicalReclaim.fsyncPending
+			store.stateMu.Unlock()
+			context := "reclaim " + hex.EncodeToString(hash[:]) + " class 5 leaf 0 " + action + ": " + cause
+			if err == nil || !strings.Contains(err.Error(), context) || errors.Is(err, errNoncanonicalCount) || errors.Is(err, errNoncanonicalBytes) || errors.Is(err, errPreparedIndexSpent) || errors.Is(err, errCanonicalIndexMoved) || errors.As(err, &atomicErr) || !pending {
+				t.Fatalf("recovery err=%v pending=%t", err, pending)
+			}
+		}
+		mustNoncanonical(t, os.WriteFile(noncanonicalTestFile(store, noncanonicalBlockArtifact, hash), block, 0o600))
+		writes := 0
+		withWriteFileAtomicFn(t, func(string, []byte, os.FileMode) error { writes++; return nil })
+		result := prepared.commit(store)
+		assertPending(result.err, "strict", "noncanonical artifact row identity drift")
+		if result.class != "" || prepared.spent.Load() || writes != 0 || !bytes.Equal(store.visibleIndexBytes(), indexBefore) {
+			t.Fatalf("prepared class=%q spent=%t writes=%d", result.class, prepared.spent.Load(), writes)
+		}
+		mustNoncanonical(t, os.Remove(noncanonicalTestFile(store, noncanonicalBlockArtifact, hash)), os.Remove(noncanonicalTestFile(store, noncanonicalHeaderArtifact, hash)))
+		assertPending(store.reloadFromDisk(), "strict", "noncanonical artifact row identity drift")
+		mustNoncanonical(t, os.WriteFile(noncanonicalTestFile(store, noncanonicalHeaderArtifact, hash), header, 0o600))
+		at, _ := accounting.find(hash)
+		accounting.rows[at].headerBytes++
+		assertPending(store.SetCanonicalTip(0, [32]byte{0xc3}), "recheck", "candidate changed")
+		for _, gate := range []struct {
+			name string
+			call func() error
+		}{{"restore", func() error { return store.RestoreCanonicalIndex([]string{strings.Repeat("c", 64)}) }}, {"truncate", func() error { return store.TruncateCanonical(0) }}, {"rewind", func() error { return store.RewindToHeight(0) }}} {
+			beforeIndex, beforeDigest, beforeWrites := append([]string(nil), store.index.Canonical...), store.noncanonicalAccountingDigest(), writes
+			assertPending(gate.call(), "recheck", "candidate changed")
+			if !slices.Equal(store.index.Canonical, beforeIndex) || store.noncanonicalAccountingDigest() != beforeDigest || writes != beforeWrites {
+				t.Fatalf("%s mutated before recovery: index=%v writes=%d", gate.name, store.index.Canonical, writes)
+			}
+		}
+		if accounting.usedBytes == 0 || accounting.reservedBytes != 0 || len(store.noncanonicalPending) != 0 || len(store.noncanonicalReaders) != 0 {
+			t.Fatal("hostile recovery credited capacity")
+		}
+	})
+
+	t.Run("strict_open_read_close_directory_matrix", TestNoncanonicalStrictRebuildRejectsLeavesAndDrift)
+	t.Run("partial_create_restart_oracle", TestNoncanonicalPartialCreateRestartsAccounting)
+
+	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+	hash, header, block := noncanonicalValidArtifacts(t, 0xa1, [32]byte{})
+	writeNoncanonicalArtifacts(t, store, hash, block, header, []byte("invalid undo"))
+	accounting := installNoncanonicalAccounting(t, store, noncanonicalDefaultByteLimit)
+	accounting.limit = accounting.usedBytes
+	requested, before := accounting.usedBytes, store.noncanonicalAccountingDigest()
+	fault := errors.New("reclaim fsync")
+	var events []string
+	syncCalls := 0
+	withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+		unlink, syncParent := ops.unlink, ops.syncParent
+		ops.unlink = func(path string) error {
+			events = append(events, "u:"+path)
+			return unlink(path)
+		}
+		ops.syncParent = func(parent string) error {
+			events = append(events, "s:"+parent)
+			requireAtomicTest(t, parent == store.blocksDir || store.noncanonicalReclaim.class == noncanonicalD5InvalidUndo, "recovery released row ownership")
+			syncCalls++
+			if syncCalls <= 2 {
+				return fault
+			}
+			return syncParent(parent)
+		}
+	})
+	owner := [32]byte{0xa2}
+	leaf := noncanonicalReservationLeaf{kind: noncanonicalBlockArtifact, bytes: requested, state: BlockArtifactInvalid}
+	create := func(*noncanonicalReservation) error { return nil }
+	requireNoncanonicalReclaimFault(t, store.reserveNoncanonicalArtifactWrite(owner, []noncanonicalReservationLeaf{leaf}, nil, create), fault, hash, noncanonicalD5InvalidUndo, noncanonicalBlockArtifact, "fsync")
+	store.stateMu.Lock()
+	pending := store.noncanonicalTransitionDone != nil && store.noncanonicalReclaim != nil && store.noncanonicalReclaim.fsyncPending
+	store.stateMu.Unlock()
+	if !pending || store.noncanonicalAccountingDigest() != before {
+		t.Fatalf("fsync pending=%t accounting changed", pending)
+	}
+	if _, err := os.Stat(noncanonicalTestFile(store, noncanonicalBlockArtifact, hash)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("block unlink prefix=%v", err)
+	}
+	restarted := mustOpenBlockStore(t, store.rootPath)
+	restart := restarted.noncanonicalAccountingSnapshot()
+	if len(restart.rows) != 1 || restart.rows[0].state(noncanonicalBlockArtifact) != BlockArtifactAbsent || restart.rows[0].state(noncanonicalHeaderArtifact) != BlockArtifactValid || restart.rows[0].state(noncanonicalUndoArtifact) != BlockArtifactInvalid || restart.usedBytes != uint64(len(header)+len("invalid undo")) {
+		t.Fatalf("restart prefix=%+v", restart)
+	}
+	requireNoncanonicalReclaimFault(t, store.reserveNoncanonicalArtifactWrite(owner, []noncanonicalReservationLeaf{leaf}, nil, create), fault, hash, noncanonicalD5InvalidUndo, noncanonicalBlockArtifact, "fsync")
+	store.stateMu.Lock()
+	stillPending := store.noncanonicalTransitionDone != nil && store.noncanonicalReclaim != nil && store.noncanonicalReclaim.fsyncPending
+	store.stateMu.Unlock()
+	if !stillPending || store.noncanonicalAccountingDigest() != before {
+		t.Fatal("failed recovery published healthy capacity")
+	}
+	store.stateMu.Lock()
+	reclaim := store.noncanonicalReclaim
+	reclaim.fsyncPending = false
+	store.stateMu.Unlock()
+	after, err := store.reclaimNoncanonicalLeaf(reclaim.before, reclaim.leaf, true, true)
+	mustNoncanonical(t, err)
+	store.stateMu.Lock()
+	store.noncanonicalReaders = map[[32]byte]uint32{hash: 1}
+	store.stateMu.Unlock()
+	_, err = store.reclaimNoncanonicalLeaf(after, noncanonicalHeaderArtifact, true, false)
+	store.stateMu.Lock()
+	advanced := store.noncanonicalReclaim == reclaim && reclaim.before == after && reclaim.leaf == noncanonicalHeaderArtifact && !reclaim.unlinked && reclaim.fsyncPending
+	delete(store.noncanonicalReaders, hash)
+	store.stateMu.Unlock()
+	snapshot := store.noncanonicalAccountingSnapshot()
+	_, headerErr := os.Stat(noncanonicalTestFile(store, noncanonicalHeaderArtifact, hash))
+	if err == nil || !strings.Contains(err.Error(), "class 5 leaf 1 recheck") || !advanced || len(events) != 6 || len(snapshot.rows) != 1 || snapshot.rows[0] != after || headerErr != nil {
+		t.Fatalf("continued recovery err=%v advanced=%t events=%v snapshot=%+v header=%v", err, advanced, events, snapshot, headerErr)
+	}
+	mustNoncanonicalRestartDigest(t, store, store.noncanonicalAccountingDigest())
+	mustNoncanonical(t, store.reserveNoncanonicalArtifactWrite(owner, []noncanonicalReservationLeaf{leaf}, nil, create))
+	wantEvents := []string{
+		"u:" + noncanonicalTestFile(store, noncanonicalBlockArtifact, hash),
+		"s:" + store.blocksDir,
+		"u:" + noncanonicalTestFile(store, noncanonicalBlockArtifact, hash),
+		"s:" + store.blocksDir,
+		"u:" + noncanonicalTestFile(store, noncanonicalBlockArtifact, hash),
+		"s:" + store.blocksDir,
+		"u:" + noncanonicalTestFile(store, noncanonicalHeaderArtifact, hash),
+		"s:" + store.headersDir,
+		"u:" + noncanonicalTestFile(store, noncanonicalUndoArtifact, hash),
+		"s:" + store.undoDir,
+	}
+	if !slices.Equal(events, wantEvents) {
+		t.Fatalf("durable order=%v want=%v", events, wantEvents)
+	}
+	final := store.noncanonicalAccountingSnapshot()
+	if final.usedBytes != 0 || final.reservedBytes != 0 || final.uniqueCount != 0 || store.noncanonicalTransitionDone != nil || store.noncanonicalReclaim != nil || len(store.noncanonicalPending) != 0 || len(store.noncanonicalReaders) != 0 {
+		t.Fatalf("final accounting=%+v", final)
+	}
+	mustNoncanonicalRestartDigest(t, store, store.noncanonicalAccountingDigest())
 }
