@@ -1202,8 +1202,11 @@ func TestNoncanonicalPreparedOutcomesPublishBothOrNeither(t *testing.T) {
 			mustNoncanonical(t, os.WriteFile(path, data, mode))
 			return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, atomicWriteOverwrite, fault)
 		}},
+		// A strictly DECODABLE third sequence: undecodable bytes would classify as
+		// unknown through the read failure and never exercise "a valid sequence that
+		// is neither identity publishes neither half".
 		{name: "terminal_unknown", wantClass: canonicalCommitTerminalUnknown, write: func(t *testing.T, path string, _ []byte, mode os.FileMode) error {
-			mustNoncanonical(t, os.WriteFile(path, []byte("third identity"), mode))
+			mustNoncanonical(t, os.WriteFile(path, mustEncodeCanonicalIndex(t, []string{canonicalIndexRow(0x77)}), mode))
 			return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, atomicWriteOverwrite, fault)
 		}},
 	} {

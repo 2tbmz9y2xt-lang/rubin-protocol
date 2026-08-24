@@ -638,11 +638,10 @@ func TestBlockStoreCanonicalAndTruncateErrorBranches(t *testing.T) {
 	store.index.Canonical = []string{hex.EncodeToString(hash[:]), "zz"}
 	store.canonicalHeightByHash = map[[32]byte]uint64{hash: 0}
 	before, disk := captureCanonicalRAMImage(store), mustReadIndexFile(t, store)
-	writes := 0
-	withWriteFileAtomicFn(t, func(string, []byte, os.FileMode) error { writes++; return nil })
-	const want = `canonical[1]: not 64 lowercase hex characters: "zz"`
-	if err := store.TruncateCanonical(1); err == nil || err.Error() != want || writes != 0 {
-		t.Fatalf("TruncateCanonical over a malformed row: err=%v writes=%d, want %q and no write attempt", err, writes, want)
+	writes := countCanonicalWrites(t)
+	const want = `decode blockstore index: canonical[1]: not 64 lowercase hex characters: "zz"`
+	if err := store.TruncateCanonical(1); err == nil || err.Error() != want || *writes != 0 {
+		t.Fatalf("TruncateCanonical over a malformed row: err=%v writes=%d, want %q and no write attempt", err, *writes, want)
 	}
 	assertCanonicalRAMUnchanged(t, store, before, "refused truncate")
 	if !bytes.Equal(mustReadIndexFile(t, store), disk) {

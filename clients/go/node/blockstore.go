@@ -42,7 +42,9 @@ type BlockStore struct {
 	// last read or wrote them, and is what a prepared commit DECODES its freshness
 	// comparison from. It must be the bytes THEMSELVES, never a re-encoding: two
 	// inner spellings can decode to the same index, so a re-encoding would leave
-	// the store naming bytes the disk does not hold.
+	// the store naming bytes the disk does not hold. After a TERMINAL(old) over a re-spelled
+	// image these bytes may spell the visible sequence differently than the disk does;
+	// freshness compares sequences, so that is not staleness.
 	indexRaw []byte
 
 	canonicalHeightByHash map[[32]byte]uint64
@@ -1326,6 +1328,8 @@ const (
 
 	// canonicalCommitStale is the prepared image refusing to build on a visible
 	// identity it never observed, or refusing a second use; err splits those.
+	// errCanonicalIndexMoved covers exactly three pre-write refusals: the visible sequence
+	// MOVED, the image carries NO comparison identity, or the cached identity will not decode.
 	// errCanonicalIndexMoved attempted nothing, so the owning canonical transition maps
 	// it to STALE_LOCAL_PLAN, never to the frozen precommit identity (whose
 	// C01-PRENS-001 triggers are the atomic write and the precommit checkpoint writes).
@@ -1373,15 +1377,17 @@ var (
 // that left the visible identity OLD and would still pass the freshness check —
 // can be followed by a second write from the same image.
 type preparedCanonicalIndex struct {
+	// oldRaw is the comparison identity AS SPELLED by the caller, retained only for the
+	// fixtures that replay those exact bytes; nothing compares against it — oldCanonical does.
 	oldRaw []byte
 	// oldCanonical is the decoded comparison IDENTITY: §6.4.1's complete ordered
 	// row sequence, position = height. nil means NO comparison identity
 	// (Restore/reload), which never commits. The planned-new identity is
 	// index.Canonical and stays PLANNED even when a readback replaces newRaw.
 	oldCanonical []string
-	// newRaw is the exact bytes to commit and then the exact bytes publication
-	// caches as the visible identity: a terminal-NEW readback REPLACES it with the
-	// bytes the disk holds. Only the claiming goroutine touches it, before publication.
+	// newRaw is the exact bytes to commit and then what publication caches as the visible
+	// identity: a terminal-NEW readback REPLACES it with the bytes the disk holds. Only the
+	// claiming goroutine touches it, before publication.
 	newRaw       []byte
 	index        blockStoreIndexDisk
 	heightByHash map[[32]byte]uint64
@@ -1391,8 +1397,10 @@ type preparedCanonicalIndex struct {
 
 // decodeCanonicalIndexSequence strict-decodes visible index bytes into the
 // canonical-index identity, composing the SAME envelope and inner decoders the
-// on-disk read uses: no second parser accepts a spelling the store would refuse to
-// reopen, and every caller treats a decode failure as no identity, never an empty one.
+// on-disk read uses — including loadBlockStoreIndex's exact error wrapping, so one corrupt
+// image has ONE error identity whether it is decoded here or reopened from disk: no second
+// parser accepts a spelling the store would refuse to reopen, and every caller treats a
+// decode failure as no identity, never an empty one.
 func decodeCanonicalIndexSequence(raw []byte) ([]string, error) {
 	payload, err := openStoreEnvelope(storeEnvelopeBlockIndex, raw)
 	if err != nil {
@@ -1400,7 +1408,7 @@ func decodeCanonicalIndexSequence(raw []byte) ([]string, error) {
 	}
 	index, err := decodeBlockStoreIndex(payload)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode blockstore index: %w", err)
 	}
 	return index.Canonical, nil
 }
@@ -1449,11 +1457,10 @@ func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalInde
 	// The identical SEQUENCE is refused rather than staged: a post-commit
 	// ambiguity would read it back as the OLD identity and publish nothing,
 	// while the success path publishes — one transition with two different RAM
-	// outcomes (the publication also resets the derived chain-work cache). Two
-	// spellings of one sequence are one identity, so re-spelling is the same
-	// no-op. An image with NO comparison identity is never a no-op: Restore saves
-	// even an identical list, so the nil test comes first (slices.Equal would take
-	// nil for the empty sequence).
+	// outcomes (the publication also resets the derived chain-work cache). Two spellings of
+	// one sequence are one identity, so re-spelling is the same no-op. An image with NO
+	// comparison identity is never a no-op: Restore saves even an identical list, so the nil
+	// test comes first (slices.Equal would take nil for the empty sequence).
 	if oldCanonical != nil && slices.Equal(oldCanonical, index.Canonical) {
 		return nil, errCanonicalIndexNoOp
 	}
@@ -1492,18 +1499,21 @@ func (p *preparedCanonicalIndex) commit(bs *BlockStore) canonicalCommitResult {
 	return p.persistCommit(bs, delta)
 }
 
-// prepareCommitLocked checks spent first, then the comparison identity — no
-// identity, an undecodable one, or a moved SEQUENCE all refuse BEFORE the
-// single-use claim, so a refusal leaves the image reusable and writes nothing —
-// and only then claims. Re-spelling the same rows is not movement. It decodes
-// bs.indexRaw, never bs.index, which saveCanonicalIndexLocked explains can LEAD
-// the disk after a legacy pre-commit failure.
+// prepareCommitLocked checks spent first, then the comparison identity — no identity, an
+// undecodable one, or a moved SEQUENCE all refuse BEFORE the single-use claim, so a refusal
+// leaves the image reusable and writes nothing — and only then claims. Re-spelling the same
+// rows is not movement. It decodes bs.indexRaw, never bs.index, which saveCanonicalIndexLocked
+// explains can LEAD the disk after a legacy pre-commit failure.
 func (p *preparedCanonicalIndex) prepareCommitLocked(bs *BlockStore) (*noncanonicalTransitionDelta, canonicalCommitResult, bool) {
 	if p.spent.Load() {
 		return nil, canonicalCommitResult{class: canonicalCommitStale, err: errPreparedIndexSpent}, false
 	}
+	// No comparison identity: nothing to be fresh against, so the decode is not attempted.
+	if p.oldCanonical == nil {
+		return nil, canonicalCommitResult{class: canonicalCommitStale, err: errCanonicalIndexMoved}, false
+	}
 	visible, err := decodeCanonicalIndexSequence(bs.indexRaw)
-	if p.oldCanonical == nil || err != nil || !slices.Equal(visible, p.oldCanonical) {
+	if err != nil || !slices.Equal(visible, p.oldCanonical) {
 		return nil, canonicalCommitResult{class: canonicalCommitStale, err: errCanonicalIndexMoved}, false
 	}
 	if !p.spent.CompareAndSwap(false, true) {
@@ -1546,25 +1556,24 @@ func (p *preparedCanonicalIndex) finishTransition(bs *BlockStore, delta *noncano
 	bs.stateMu.Unlock()
 }
 
-// classifyVisibleIndex is the one strict readback. It classifies by the visible
-// canonical IDENTITY of §6.4.1 — the complete ordered row sequence, position =
-// height, length and every row — never by the error text: a shared tip, a
-// reordering, a duplicate, a prefix, an extra row and a matching length are each
-// NOT one, so anything that is not exactly the old or exactly the planned-new
-// sequence is neither. A read failure, and bytes the store would refuse to reopen,
-// are neither too — nothing is guessed, retried or rewritten. It reuses the strict
-// loadBlockStoreIndex, so no second parser can accept an image the store could not
-// reopen, and that read is unbounded like every other read of this file: a decoded
+// classifyVisibleIndex is the one strict readback. It classifies by the visible canonical
+// IDENTITY of §6.4.1 — the complete ordered row sequence, position = height, length and
+// every row — never by the error text: a shared tip, a reordering, a duplicate, a prefix,
+// an extra row and a matching length are each NOT one, so anything that is not exactly the
+// old or exactly the planned-new sequence is neither. A read failure, and bytes the store
+// would refuse to reopen, are neither too — nothing is guessed, retried or rewritten. It
+// reads through the loadBlockStoreIndexFn seam (loadBlockStoreIndex in production, so no
+// second parser can accept an image the store could not reopen; tests replace it to COUNT
+// the one read), and that read is unbounded like every other read of this file: a decoded
 // sequence no longer lets the two planned images bound it (RUB-1057).
 //
-// Two spellings of one sequence are ONE identity, so terminal NEW caches the EXACT
-// bytes it read while publishing the prevalidated PLANNED decoded image; a nil old
-// identity cannot reach here (prepareCommitLocked refuses it), so the old arm
-// cannot match an empty sequence by accident. After a terminal result the store's
-// cached identity may no longer describe the disk (a third identity, or an
-// unreadable file), and nothing here repairs that: commit's freshness check is a
-// staleness ASSERT, not a guard against a post-terminal rewrite — the owning
-// transition's latch is what stops the next write.
+// Two spellings of one sequence are ONE identity, so terminal NEW caches the EXACT bytes
+// it read while publishing the prevalidated PLANNED decoded image; a nil old identity
+// cannot reach here (prepareCommitLocked refuses it), so the old arm cannot match an empty
+// sequence by accident. After a terminal result the store's cached identity may no longer
+// describe the disk (a third identity, or an unreadable file), and nothing here repairs
+// that: commit's freshness check is a staleness ASSERT, not a guard against a post-terminal
+// rewrite — the owning transition's latch is what stops the next write.
 func (p *preparedCanonicalIndex) classifyVisibleIndex(bs *BlockStore, cause error) canonicalCommitResult {
 	visible, raw, err := loadBlockStoreIndexFn(bs.indexPath)
 	switch {
