@@ -2445,8 +2445,10 @@ func TestPreparedCanonicalIndexSequenceIdentityPreparationAndFreshness(t *testin
 		// json.Unmarshal into blockStoreIndexDisk accepts silently. The pinned text proves
 		// the store's own exact-field rule refused it, wrapped as loadBlockStoreIndex wraps
 		// it — one corrupt image, one error identity through prepare and reopen.
-		{name: "extra_top_level_field_old_raw", oldRaw: mustMarshalStoreEnvelope(t, `{"version":1,"canonical":[],"extra":0}`), next: nextRows,
-			wantErr: `decode blockstore index: blockstore index fields must be exactly canonical and version, got ["canonical" "extra" "version"]`},
+		{
+			name: "extra_top_level_field_old_raw", oldRaw: mustMarshalStoreEnvelope(t, `{"version":1,"canonical":[],"extra":0}`), next: nextRows,
+			wantErr: `decode blockstore index: blockstore index fields must be exactly canonical and version, got ["canonical" "extra" "version"]`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, writes := seed(t), countCanonicalWrites(t)
@@ -2697,8 +2699,10 @@ func TestPreparedCanonicalIndexPostCommitVisibleSequenceClassify(t *testing.T) {
 		}, outcome: untagged, wantClass: canonicalCommitTerminalUnknown, wantReads: 1, wantReadErr: true, alsoIs: os.ErrNotExist},
 		// Trailing padding shifts the derived envelope layout: bytes the store
 		// would refuse to reopen are no identity, however long they are.
-		{name: "malformed_envelope", visible: plant(append(append([]byte(nil), canonicalNew...), bytes.Repeat([]byte{' '}, 4096)...)),
-			wantClass: canonicalCommitTerminalUnknown, wantReads: 1, wantReadErr: true},
+		{
+			name: "malformed_envelope", visible: plant(append(append([]byte(nil), canonicalNew...), bytes.Repeat([]byte{' '}, 4096)...)),
+			wantClass: canonicalCommitTerminalUnknown, wantReads: 1, wantReadErr: true,
+		},
 		{name: "malformed_inner_json", visible: func(t *testing.T, store *BlockStore) {
 			mustPlantIndex(t, store, mustMarshalStoreEnvelope(t, `{"canonical":[`))
 		}, wantClass: canonicalCommitTerminalUnknown, wantReads: 1, wantReadErr: true},

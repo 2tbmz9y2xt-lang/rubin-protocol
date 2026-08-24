@@ -1424,13 +1424,7 @@ func decodeCanonicalIndexSequence(raw []byte) ([]string, error) {
 // Commit still refuses if the visible identity moved. A nil next list is rejected
 // like JSON null; empty non-nil is the valid empty identity.
 func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalIndex, error) {
-	// Copy so a later caller mutation cannot reach the prepared image, and keep
-	// nil-ness exact: `append([]string(nil), next...)` would fold an EMPTY list
-	// into nil and reject the legitimate empty-store identity.
-	canonical := next
-	if next != nil {
-		canonical = append(make([]string, 0, len(next)), next...)
-	}
+	canonical := slices.Clone(next) // Copy: caller mutation cannot reach the image, and Clone preserves nil-ness exactly.
 	index := blockStoreIndexDisk{Version: blockStoreIndexVersion, Canonical: canonical}
 	if err := validateBlockStoreIndex(index); err != nil {
 		return nil, err
@@ -1451,16 +1445,16 @@ func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalInde
 		if oldCanonical, err = decodeCanonicalIndexSequence(oldRaw); err != nil {
 			return nil, err
 		}
-	}
-	// The identical SEQUENCE is refused rather than staged: a post-commit
-	// ambiguity would read it back as the OLD identity and publish nothing,
-	// while the success path publishes — one transition with two different RAM
-	// outcomes (the publication also resets the derived chain-work cache). Two spellings of
-	// one sequence are one identity, so re-spelling is the same no-op. An image with NO
-	// comparison identity is never a no-op: Restore saves even an identical list, so the nil
-	// test comes first (slices.Equal would take nil for the empty sequence).
-	if oldCanonical != nil && slices.Equal(oldCanonical, index.Canonical) {
-		return nil, errCanonicalIndexNoOp
+		// The identical SEQUENCE is refused rather than staged: a post-commit
+		// ambiguity would read it back as the OLD identity and publish nothing,
+		// while the success path publishes — one transition with two different RAM
+		// outcomes (the publication also resets the derived chain-work cache). Two spellings of
+		// one sequence are one identity, so re-spelling is the same no-op. An image with NO
+		// comparison identity is never a no-op: Restore saves even an identical list, and this
+		// branch IS that nil test (slices.Equal would take nil for the empty sequence).
+		if slices.Equal(oldCanonical, index.Canonical) {
+			return nil, errCanonicalIndexNoOp
+		}
 	}
 	return &preparedCanonicalIndex{
 		oldRaw:       append([]byte(nil), oldRaw...),
