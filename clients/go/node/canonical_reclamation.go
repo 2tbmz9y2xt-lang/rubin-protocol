@@ -943,6 +943,7 @@ func (r *noncanonicalReservation) finish() {
 	delete(r.store.noncanonicalPending, r.hash)
 	close(r.done)
 }
+
 func noncanonicalDamage(row noncanonicalRow) (uint8, bool) {
 	block, header, undo := row.state(noncanonicalBlockArtifact), row.state(noncanonicalHeaderArtifact), row.state(noncanonicalUndoArtifact)
 	if block == BlockArtifactInvalid {
@@ -976,6 +977,7 @@ func noncanonicalValidBlockDamage(header, undo BlockArtifactState) (uint8, bool)
 	}
 	return 0, false
 }
+
 func (bs *BlockStore) noncanonicalProtectionLocked(accounting *noncanonicalAccounting, owner [32]byte, leaves []noncanonicalReservationLeaf) map[[32]byte]uint8 {
 	protected := bs.seedNoncanonicalProtectionLocked(accounting, owner)
 	parent, proposed := proposedNoncanonicalParent(leaves)
@@ -1037,6 +1039,7 @@ func walkNoncanonicalProtection(accounting *noncanonicalAccounting, protected ma
 		parent = row.prev
 	}
 }
+
 func (bs *BlockStore) nextNoncanonicalCandidateLocked(accounting *noncanonicalAccounting, class uint8, after [32]byte, started bool, protected map[[32]byte]uint8) (noncanonicalRow, bool) {
 	at := 0
 	if started {
@@ -1056,6 +1059,7 @@ func (bs *BlockStore) nextNoncanonicalCandidateLocked(accounting *noncanonicalAc
 	}
 	return noncanonicalRow{}, false
 }
+
 func (r *noncanonicalReservation) reclaim(leaves []noncanonicalReservationLeaf) error {
 	protected, err := r.prepareReclaim(leaves)
 	if err != nil {
@@ -1109,10 +1113,11 @@ func (r *noncanonicalReservation) prepareReclaim(leaves []noncanonicalReservatio
 }
 
 func noncanonicalReclaimImageError(accounting *noncanonicalAccounting, canonical map[[32]byte]uint64) error {
-	used, imageErr := sumNoncanonicalRows(accounting.rows[:min(accounting.count, uint32(len(accounting.rows)))], canonical)
+	if !validNoncanonicalImageShape(accounting) {
+		return errors.New("image shape is inconsistent")
+	}
+	used, imageErr := sumNoncanonicalRows(accounting.rows[:accounting.count], canonical)
 	switch {
-	case !validNoncanonicalImageShape(accounting):
-		imageErr = errors.New("image shape is inconsistent")
 	case imageErr != nil:
 	case used != accounting.usedBytes:
 		imageErr = errors.New("total is inconsistent")
@@ -1147,6 +1152,7 @@ func (r *noncanonicalReservation) reclaimClass(class uint8, protected map[[32]by
 		}
 	}
 }
+
 func (bs *BlockStore) reclaimNoncanonicalCandidate(row noncanonicalRow, recovering bool) (noncanonicalRow, error) {
 	strict := !recovering
 	for _, kind := range []noncanonicalArtifactKind{noncanonicalBlockArtifact, noncanonicalHeaderArtifact, noncanonicalUndoArtifact} {
@@ -1250,9 +1256,11 @@ func (bs *BlockStore) publishNoncanonicalLeafReclaim(plan *noncanonicalLeafRecla
 	bs.stateMu.Unlock()
 	return nil
 }
+
 func noncanonicalReclaimError(reclaim *noncanonicalReclaim, action string, err error) error {
 	return fmt.Errorf("reclaim %x class %d leaf %d %s: %w", reclaim.hash, reclaim.class, reclaim.leaf, action, err)
 }
+
 func (bs *BlockStore) requireExactNoncanonicalRow(want noncanonicalRow) error {
 	directories, err := bs.snapshotNoncanonicalDirectories()
 	if err != nil {
@@ -1267,6 +1275,7 @@ func (bs *BlockStore) requireExactNoncanonicalRow(want noncanonicalRow) error {
 	}
 	return nil
 }
+
 func noncanonicalReclaimedRow(row noncanonicalRow, kind noncanonicalArtifactKind) noncanonicalRow {
 	row.setState(kind, BlockArtifactAbsent)
 	*row.bytes(kind) = 0

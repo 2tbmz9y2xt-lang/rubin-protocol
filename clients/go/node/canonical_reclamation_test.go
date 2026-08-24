@@ -82,6 +82,10 @@ func requireNoncanonicalReclaimFault(t *testing.T, err, cause error, hash [32]by
 	}
 }
 
+func sameNoncanonicalRetainedError(got, want error) bool {
+	return got != nil && want != nil && errors.Is(got, want) && errors.Is(want, got)
+}
+
 func countNoncanonicalClose(t *testing.T, target string, fault error) *int {
 	t.Helper()
 	closeFile, calls := closeNoncanonicalFile, 0
@@ -1785,6 +1789,11 @@ func TestNoncanonicalReclaim(t *testing.T) {
 		beforeUsed, beforeCount := full.usedBytes, full.count
 		err = full.addScanned([32]byte{0xfe}, noncanonicalBlockArtifact, ^uint64(0), BlockArtifactInvalid, [32]byte{}, noncanonicalUnknownHeight)
 		requireAtomicTest(t, errors.Is(err, errNoncanonicalCount) && !errors.Is(err, errNoncanonicalBytes) && full.usedBytes == beforeUsed && full.count == beforeCount, "scan count order err=%v used=%d count=%d", err, full.usedBytes, full.count)
+		invalidShape := *full
+		invalidShape.count = noncanonicalHashCap + 1
+		if err := noncanonicalReclaimImageError(&invalidShape, nil); err == nil || err.Error() != "image shape is inconsistent" {
+			t.Fatalf("image shape boundary err=%v", err)
+		}
 		full.sortedCount--
 		if err := store.reserveNoncanonicalArtifactWrite([32]byte{0xfe}, []noncanonicalReservationLeaf{leaf}, nil, func(*noncanonicalReservation) error { return nil }); err == nil || errors.Is(err, errNoncanonicalCount) || errors.Is(err, errNoncanonicalBytes) || !strings.Contains(err.Error(), "accounting") {
 			t.Fatalf("corrupt accounting err=%v", err)
@@ -2632,7 +2641,7 @@ func TestNoncanonicalReclaimFsyncPending(t *testing.T) {
 				_, found := accounting.find(victim1)
 				if !found {
 					handoff = true
-					requireAtomicTest(t, store.noncanonicalTransitionDone != nil && store.noncanonicalReclaim != nil && store.noncanonicalReclaim.cause == seedErr, "recovery gate/cause changed before handoff")
+					requireAtomicTest(t, store.noncanonicalTransitionDone != nil && store.noncanonicalReclaim != nil && sameNoncanonicalRetainedError(store.noncanonicalReclaim.cause, seedErr), "recovery gate/cause changed before handoff")
 				}
 			}
 			previousRead, ready, release, blocked := readFileByPathFn, make(chan struct{}), make(chan struct{}), false
@@ -2667,9 +2676,9 @@ func TestNoncanonicalReclaimFsyncPending(t *testing.T) {
 			store.stateMu.Unlock()
 			originalErr := receiveNoncanonical(t, originalDone, "consumed recovery budget waited on second pending record")
 			store.stateMu.Lock()
-			unchanged := pending != nil && store.noncanonicalReclaim == pending && store.noncanonicalTransitionDone == pendingDone && pending.fsyncPending && pending.cause == secondErr && len(store.index.Canonical) == 0 && len(store.canonicalHeightByHash) == 0
+			unchanged := pending != nil && store.noncanonicalReclaim == pending && store.noncanonicalTransitionDone == pendingDone && pending.fsyncPending && sameNoncanonicalRetainedError(pending.cause, secondErr) && len(store.index.Canonical) == 0 && len(store.canonicalHeightByHash) == 0
 			store.stateMu.Unlock()
-			requireAtomicTest(t, originalErr == secondErr && unchanged && bytes.Equal(indexBefore, store.visibleIndexBytes()), "original=%v second=%v unchanged=%t", originalErr, secondErr, unchanged)
+			requireAtomicTest(t, sameNoncanonicalRetainedError(originalErr, secondErr) && unchanged && bytes.Equal(indexBefore, store.visibleIndexBytes()), "original=%v second=%v unchanged=%t", originalErr, secondErr, unchanged)
 			accounting.limit = noncanonicalDefaultByteLimit
 			tip := [32]byte{0xbf}
 			mustNoncanonical(t, store.SetCanonicalTip(0, tip))
@@ -2717,7 +2726,7 @@ func TestNoncanonicalReclaimFsyncPending(t *testing.T) {
 				store.stateMu.Lock()
 				reclaim := store.noncanonicalReclaim
 				_, found := accounting.find(victim)
-				ready := !held && reclaim != nil && !reclaim.fsyncPending && reclaim.cause == pendingErr && !found
+				ready := !held && reclaim != nil && !reclaim.fsyncPending && sameNoncanonicalRetainedError(reclaim.cause, pendingErr) && !found
 				if ready {
 					held = true
 				}
@@ -2745,9 +2754,9 @@ func TestNoncanonicalReclaimFsyncPending(t *testing.T) {
 				t.Fatal("consumed caller waited for recovering claimant")
 			}
 			store.stateMu.Lock()
-			unchanged := pending != nil && store.noncanonicalReclaim == pending && store.noncanonicalTransitionDone == pendingDone && pending.cause == pendingErr && !pending.fsyncPending && len(store.noncanonicalPending) == 0
+			unchanged := pending != nil && store.noncanonicalReclaim == pending && store.noncanonicalTransitionDone == pendingDone && sameNoncanonicalRetainedError(pending.cause, pendingErr) && !pending.fsyncPending && len(store.noncanonicalPending) == 0
 			store.stateMu.Unlock()
-			requireAtomicTest(t, consumedErr == pendingErr && unchanged && unlinks == beforeUnlinks && syncs == beforeSyncs && bytes.Equal(store.visibleIndexBytes(), indexBefore), "consumed=%v pending=%t unlink=%d/%d fsync=%d/%d", consumedErr, unchanged, unlinks, beforeUnlinks, syncs, beforeSyncs)
+			requireAtomicTest(t, sameNoncanonicalRetainedError(consumedErr, pendingErr) && unchanged && unlinks == beforeUnlinks && syncs == beforeSyncs && bytes.Equal(store.visibleIndexBytes(), indexBefore), "consumed=%v pending=%t unlink=%d/%d fsync=%d/%d", consumedErr, unchanged, unlinks, beforeUnlinks, syncs, beforeSyncs)
 			close(release)
 			mustNoncanonical(t, receiveNoncanonical(t, freshDone, "fresh claimant did not finish"))
 			canonical, ok, err := store.CanonicalHash(0)
@@ -2843,12 +2852,12 @@ func TestNoncanonicalReclaimFsyncPending(t *testing.T) {
 					requireNoncanonicalReclaimFault(t, secondErr, fault, victim2, noncanonicalD0InvalidBlock, noncanonicalBlockArtifact, "fsync")
 					compositeErr := receiveNoncanonical(t, compositeDone, "composite waited for a second recovery")
 					store.stateMu.Lock()
-					pending := store.noncanonicalReclaim != nil && store.noncanonicalReclaim.fsyncPending && store.noncanonicalReclaim.cause == secondErr
+					pending := store.noncanonicalReclaim != nil && store.noncanonicalReclaim.fsyncPending && sameNoncanonicalRetainedError(store.noncanonicalReclaim.cause, secondErr)
 					store.stateMu.Unlock()
 					_, undoErr := os.Stat(noncanonicalTestFile(store, noncanonicalUndoArtifact, hash))
 					_, secondBlockErr := os.Stat(noncanonicalTestFile(store, noncanonicalBlockArtifact, second))
 					undoPublished := undoErr == nil
-					requireAtomicTest(t, compositeErr == secondErr && pending && unlinks == 3 && syncs == 3 && undoPublished == tc.wantUndo && errors.Is(secondBlockErr, os.ErrNotExist) && bytes.Equal(store.visibleIndexBytes(), indexBefore), "composite=%v pending=%t unlink/fsync=%d/%d undo=%v/%t second=%v", compositeErr, pending, unlinks, syncs, undoErr, tc.wantUndo, secondBlockErr)
+					requireAtomicTest(t, sameNoncanonicalRetainedError(compositeErr, secondErr) && pending && unlinks == 3 && syncs == 3 && undoPublished == tc.wantUndo && errors.Is(secondBlockErr, os.ErrNotExist) && bytes.Equal(store.visibleIndexBytes(), indexBefore), "composite=%v pending=%t unlink/fsync=%d/%d undo=%v/%t second=%v", compositeErr, pending, unlinks, syncs, undoErr, tc.wantUndo, secondBlockErr)
 					store.stateMu.Lock()
 					pendingRecord, pendingDone := store.noncanonicalReclaim, store.noncanonicalTransitionDone
 					store.stateMu.Unlock()
@@ -2858,9 +2867,9 @@ func TestNoncanonicalReclaimFsyncPending(t *testing.T) {
 					afterAccounting := store.noncanonicalAccountingSnapshot()
 					_, precedenceUndoErr := os.Stat(noncanonicalTestFile(store, noncanonicalUndoArtifact, hash))
 					store.stateMu.Lock()
-					pendingUnchanged := pendingRecord != nil && store.noncanonicalReclaim == pendingRecord && store.noncanonicalTransitionDone == pendingDone && pendingRecord.fsyncPending && pendingRecord.cause == secondErr
+					pendingUnchanged := pendingRecord != nil && store.noncanonicalReclaim == pendingRecord && store.noncanonicalTransitionDone == pendingDone && pendingRecord.fsyncPending && sameNoncanonicalRetainedError(pendingRecord.cause, secondErr)
 					store.stateMu.Unlock()
-					requireAtomicTest(t, precedenceErr == secondErr && pendingUnchanged && unlinks == 3 && syncs == 3 && beforeAccounting.usedBytes == afterAccounting.usedBytes && beforeAccounting.reservedBytes == afterAccounting.reservedBytes && beforeAccounting.uniqueCount == afterAccounting.uniqueCount && slices.Equal(beforeAccounting.rows, afterAccounting.rows) && (undoErr == nil) == (precedenceUndoErr == nil) && errors.Is(undoErr, os.ErrNotExist) == errors.Is(precedenceUndoErr, os.ErrNotExist) && bytes.Equal(store.visibleIndexBytes(), indexBefore), "claimed putUndo precedence err=%v pending=%t unlink/fsync=%d/%d undo=%v/%v", precedenceErr, pendingUnchanged, unlinks, syncs, undoErr, precedenceUndoErr)
+					requireAtomicTest(t, sameNoncanonicalRetainedError(precedenceErr, secondErr) && pendingUnchanged && unlinks == 3 && syncs == 3 && beforeAccounting.usedBytes == afterAccounting.usedBytes && beforeAccounting.reservedBytes == afterAccounting.reservedBytes && beforeAccounting.uniqueCount == afterAccounting.uniqueCount && slices.Equal(beforeAccounting.rows, afterAccounting.rows) && (undoErr == nil) == (precedenceUndoErr == nil) && errors.Is(undoErr, os.ErrNotExist) == errors.Is(precedenceUndoErr, os.ErrNotExist) && bytes.Equal(store.visibleIndexBytes(), indexBefore), "claimed putUndo precedence err=%v pending=%t unlink/fsync=%d/%d undo=%v/%v", precedenceErr, pendingUnchanged, unlinks, syncs, undoErr, precedenceUndoErr)
 					accounting.limit = noncanonicalDefaultByteLimit
 					mustNoncanonical(t, store.PutUndo(hash, undo))
 					gotUndo, getErr := store.GetUndo(hash)
