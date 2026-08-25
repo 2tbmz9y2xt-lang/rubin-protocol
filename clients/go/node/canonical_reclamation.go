@@ -88,19 +88,15 @@ type noncanonicalTransitionDelta struct {
 	disconnected  []noncanonicalRow
 	usedBytes     uint64
 	uniqueCount   uint32
-	replaceAll    bool
 }
 
-func (bs *BlockStore) prepareNoncanonicalReclassification(prepared *preparedCanonicalIndex, reloadSource *BlockStore) (*noncanonicalTransitionDelta, error) {
+func (bs *BlockStore) prepareNoncanonicalReclassification(prepared *preparedCanonicalIndex) (*noncanonicalTransitionDelta, error) {
 	accounting := bs.noncanonical.Load()
 	if accounting == nil {
 		return &noncanonicalTransitionDelta{}, nil
 	}
 	if prepared == nil || len(prepared.heightByHash) != len(prepared.index.Canonical) {
 		return nil, errCanonicalIndexDuplicateRow
-	}
-	if reloadSource != nil {
-		return reloadSource.reconstructNoncanonicalReloadDelta(accounting.limit)
 	}
 	disconnected, overflow, err := bs.reconstructDisconnectedRows(prepared.heightByHash)
 	if err != nil {
@@ -119,18 +115,6 @@ func (bs *BlockStore) prepareNoncanonicalReclassification(prepared *preparedCano
 	}
 	delta.uniqueCount = uint32(finalCount) // #nosec G115 -- finalCount is checked against noncanonicalHashCap above.
 	return noncanonicalTransitionBytes(accounting, delta)
-}
-
-func (bs *BlockStore) reconstructNoncanonicalReloadDelta(limit uint64) (*noncanonicalTransitionDelta, error) {
-	limit, err := normalizeNoncanonicalLimit(limit)
-	if err != nil {
-		return nil, err
-	}
-	replacement := &noncanonicalAccounting{rows: make([]noncanonicalRow, 0, noncanonicalHashCap), limit: limit}
-	if err := bs.reconstructNoncanonicalAccountingInto(replacement); err != nil {
-		return nil, err
-	}
-	return &noncanonicalTransitionDelta{disconnected: replacement.rows, usedBytes: replacement.usedBytes, uniqueCount: replacement.count, replaceAll: true}, nil
 }
 
 func (bs *BlockStore) reconstructDisconnectedRows(next map[[32]byte]uint64) ([]noncanonicalRow, int, error) {
@@ -335,10 +319,7 @@ func (bs *BlockStore) reconstructDisconnectedRow(hash [32]byte, directories [3]o
 func publishNoncanonicalReclassificationLocked(bs *BlockStore, prepared *preparedCanonicalIndex, delta *noncanonicalTransitionDelta, durable bool) {
 	if accounting := bs.noncanonical.Load(); accounting != nil && delta != nil {
 		oldCount := int(accounting.count)
-		kept := 0
-		if !delta.replaceAll {
-			kept = compactNoncanonicalRows(accounting, delta.removeIndices)
-		}
+		kept := compactNoncanonicalRows(accounting, delta.removeIndices)
 		mergeDisconnectedRows(accounting.rows, kept, delta.disconnected)
 		clearNoncanonicalTail(accounting.rows, int(delta.uniqueCount), oldCount)
 		accounting.count = delta.uniqueCount

@@ -141,31 +141,34 @@ func TestDisconnectPreparedTipUsesRetainedVerifiedBlock(t *testing.T) {
 	if ctx.storedBlock.lookupHash != summary.BlockHash || !reflect.DeepEqual(ctx.storedBlock.blockBytes, block) {
 		t.Fatal("prepared disconnect did not retain the verified canonical block")
 	}
+	// The private final image is built from the RETAINED block, but the old
+	// suffix is still strict-read before the checkpoint is replaced, so bytes
+	// corrupted after preparation refuse the transition with OLD preserved.
+	if ctx.finalState == nil || ctx.summary == nil || ctx.summary.BlockHash != summary.BlockHash {
+		t.Fatalf("prepared disconnect summary=%+v final=%v", ctx.summary, ctx.finalState != nil)
+	}
 	writeRawStoreBlockFile(t, store, summary.BlockHash, []byte("not a block"))
-
-	tr := mustBeginCanonicalTransition(t, engine)
-	disconnected, err := engine.disconnectPreparedTip(ctx, tr.rollback)
-	if err != nil {
-		tr.abort()
-		t.Fatalf("disconnectPreparedTip reread or reparsed the block: %v", err)
+	if _, err := engine.DisconnectTip(); err == nil {
+		t.Fatal("disconnect crossed the commit with an unprovable old suffix")
 	}
-	if err := tr.finish(); err != nil {
-		t.Fatalf("canonical transition finish: %v", err)
+	// The existing pre-transition read owns this corner: the disconnect path
+	// loads and verifies the tip block BEFORE any plan exists, so the refusal
+	// keeps its existing local-corruption identity and never opens a transition
+	// or latches the engine.
+	if engine.persistenceFaulted() {
+		t.Fatal("a pre-transition local-corruption refusal latched the engine")
 	}
-	if disconnected.BlockHash != summary.BlockHash || engine.chainState.Height != 0 || engine.chainState.TipHash != devnetGenesisBlockHash {
-		t.Fatalf("disconnect summary=%+v state=(%d,%x)", disconnected, engine.chainState.Height, engine.chainState.TipHash)
+	if engine.chainState.Height != 1 || engine.chainState.TipHash != summary.BlockHash {
+		t.Fatalf("refused disconnect moved the live tip to (%d,%x)", engine.chainState.Height, engine.chainState.TipHash)
 	}
-	if _, ok, err := store.CanonicalHash(1); err != nil || ok {
-		t.Fatalf("canonical height 1 after disconnect: ok=%v err=%v", ok, err)
+	if hash, ok, err := store.CanonicalHash(1); err != nil || !ok || hash != summary.BlockHash {
+		t.Fatalf("refused disconnect changed canonical height 1: ok=%v err=%v", ok, err)
 	}
 }
 
-func TestPreparedCanonicalDisconnectRetainsPreviewedBlocks(t *testing.T) {
-	engine, store, target := newReorgTestEngine(t)
-	var hashes [][32]byte
-	blocks := make([][]byte, 0, 2)
-	prevHash := devnetGenesisBlockHash
-	alreadyGenerated := uint64(0)
+func TestPreparedCanonicalDisconnectRefusesNoncanonicalWalk(t *testing.T) {
+	engine, _, target := newReorgTestEngine(t)
+	prevHash, alreadyGenerated := devnetGenesisBlockHash, uint64(0)
 	for height := uint64(1); height <= 2; height++ {
 		subsidy := consensus.BlockSubsidy(height, alreadyGenerated)
 		block := buildSingleTxBlock(t, prevHash, target, reorgTestTimestamp(height), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, subsidy))
@@ -173,65 +176,41 @@ func TestPreparedCanonicalDisconnectRetainsPreviewedBlocks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ApplyBlock(A%d): %v", height, err)
 		}
-		hashes = append(hashes, summary.BlockHash)
-		blocks = append(blocks, block)
 		prevHash = summary.BlockHash
 		alreadyGenerated += subsidy
 	}
-
-	undoDir := store.undoDir
-	store.undoDir = t.TempDir()
-	writeRawStoreBlockFile(t, store, hashes[0], corruptStoredMerkleBody(t, blocks[0]))
-	_, _, err := engine.previewDisconnectCanonicalToAncestor(cloneChainState(engine.chainState), 0)
-	assertBranchStoreCorruption(t, err)
-	store.undoDir = undoDir
-	writeRawStoreBlockFile(t, store, hashes[0], blocks[0])
-
-	prepared, depth, err := engine.previewDisconnectCanonicalToAncestor(cloneChainState(engine.chainState), 0)
-	if err != nil || depth != 2 || len(prepared) != 2 {
-		t.Fatalf("previewDisconnectCanonicalToAncestor=(%d blocks,%d,%v), want two blocks", len(prepared), depth, err)
+	canonicalIndex, err := engine.canonicalIndexPreflight()
+	if err != nil {
+		t.Fatalf("canonicalIndexPreflight: %v", err)
 	}
-	for index, storedBlock := range prepared {
-		wantHash := hashes[len(hashes)-1-index]
-		if storedBlock.lookupHash != wantHash || storedBlock.parsed == nil {
-			t.Fatalf("prepared[%d]=(%x,%v), want retained %x", index, storedBlock.lookupHash, storedBlock.parsed, wantHash)
-		}
-		writeRawStoreBlockFile(t, store, storedBlock.lookupHash, []byte("replaced after preview"))
+	depth, err := engine.previewDisconnectCanonicalToAncestor(cloneChainState(engine.chainState), canonicalIndex, 0)
+	if err != nil || depth != 2 {
+		t.Fatalf("previewDisconnectCanonicalToAncestor=(%d,%v), want depth 2", depth, err)
 	}
-
-	tr := mustBeginCanonicalTransition(t, engine)
-	if err := engine.disconnectCanonicalToAncestor(0, prepared, tr.rollback); err != nil {
-		tr.abort()
-		t.Fatalf("disconnectCanonicalToAncestor reread a prepared block: %v", err)
+	foreign := append([]string(nil), canonicalIndex...)
+	foreign[2] = strings.Repeat("a", 64)
+	if _, err := engine.previewDisconnectCanonicalToAncestor(cloneChainState(engine.chainState), foreign, 0); err == nil || !strings.Contains(err.Error(), "is not canonical at height 2") {
+		t.Fatalf("noncanonical walk err=%v", err)
 	}
-	if err := tr.finish(); err != nil {
-		t.Fatalf("canonical transition finish: %v", err)
-	}
-	if engine.chainState.Height != 0 || engine.chainState.TipHash != devnetGenesisBlockHash {
-		t.Fatalf("chainstate after retained disconnect=(%d,%x), want genesis", engine.chainState.Height, engine.chainState.TipHash)
-	}
-	if _, ok, err := store.CanonicalHash(1); err != nil || ok {
-		t.Fatalf("canonical height 1 after retained disconnect: ok=%v err=%v", ok, err)
+	if _, err := engine.previewDisconnectCanonicalToAncestor(cloneChainState(engine.chainState), canonicalIndex[:1], 0); err == nil || !strings.Contains(err.Error(), "preview tip is not inside the canonical identity") {
+		t.Fatalf("short identity err=%v", err)
 	}
 }
 
 func TestPreparedDisconnectValidationErrors(t *testing.T) {
 	engine, _, target := newReorgTestEngine(t)
 	block := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidy(1, 0)))
-	if _, err := engine.ApplyBlock(block, nil); err != nil {
-		t.Fatal(err)
-	}
-	prepared, _, err := engine.previewDisconnectCanonicalToAncestor(cloneChainState(engine.chainState), 0)
+	summary, err := engine.ApplyBlock(block, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored := prepared[0]
-	badTxids, parsed := stored, *stored.parsed
-	parsed.Txids, badTxids.parsed = nil, &parsed
+	stored, _, err := engine.fetchDisconnectBlockAndUndo(summary.BlockHash)
+	if err != nil {
+		t.Fatal(err)
+	}
 	wrongHash := stored
 	wrongHash.lookupHash[0] ^= 1
-	empty, uninitialized := &SyncEngine{chainState: NewChainState(), blockStore: &BlockStore{}}, &SyncEngine{}
-	nilPacket := []verifiedStoredBlock{{lookupHash: stored.lookupHash}}
+	uninitialized := &SyncEngine{}
 	context := func(block verifiedStoredBlock) error {
 		_, err := engine.prepareDisconnectTipContext(1, stored.lookupHash, block, nil)
 		return err
@@ -240,18 +219,9 @@ func TestPreparedDisconnectValidationErrors(t *testing.T) {
 		name, want string
 		run        func() error
 	}{
-		{"prepare uninitialized", "sync engine is not initialized", func() error { _, err := uninitialized.prepareDisconnectTipFromVerified(stored); return err }},
-		{"prepare empty store", "blockstore has no canonical tip", func() error { _, err := empty.prepareDisconnectTipFromVerified(stored); return err }},
-		{"ancestor above tip", "common ancestor is above canonical tip", func() error { return engine.disconnectCanonicalToAncestor(2, prepared, syncRollbackState{}) }},
-		{"validate uninitialized", "sync engine is not initialized", func() error { return uninitialized.validatePreparedDisconnectBlocks(0, nil) }},
-		{"validate empty store", "blockstore has no canonical tip", func() error { return empty.validatePreparedDisconnectBlocks(0, nil) }},
-		{"wrong count", "prepared disconnect block count mismatch", func() error { return engine.validatePreparedDisconnectBlocks(0, nil) }},
-		{"nil parsed", "invalid prepared disconnect block", func() error { return engine.validatePreparedDisconnectBlocks(0, nilPacket) }},
-		{"txid length", "invalid prepared disconnect block", func() error { return engine.validatePreparedDisconnectBlocks(0, []verifiedStoredBlock{badTxids}) }},
-		{"missing canonical", "prepared disconnect block is not canonical", func() error { return engine.validatePreparedDisconnectBlock(stored, 2) }},
-		{"lookup mismatch", "prepared disconnect block is not canonical", func() error { return engine.validatePreparedDisconnectBlock(wrongHash, 1) }},
+		{"prepare uninitialized", "sync engine is not initialized", func() error { _, err := uninitialized.prepareDisconnectTip(); return err }},
 		{"context lookup mismatch", "disconnect block is not current canonical tip", func() error { return context(wrongHash) }},
-		{"context nil parsed", "nil verified stored block", func() error { return context(nilPacket[0]) }},
+		{"context nil parsed", "nil verified stored block", func() error { return context(verifiedStoredBlock{lookupHash: stored.lookupHash}) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -341,16 +311,11 @@ func TestDisconnectTipPendingOutpointAdvancesOneGenerationWithoutRequeue(t *test
 	}
 }
 
-// mustBeginCanonicalTransition runs the canonical-index preflight and opens a
-// transition in the same order production does, so a test never opens one with
-// an unread rollback index.
+// mustBeginCanonicalTransition opens one canonical transition the way production
+// does, for a test that needs the admission fence held.
 func mustBeginCanonicalTransition(t *testing.T, engine *SyncEngine) *canonicalTransition {
 	t.Helper()
-	canonicalIndex, err := engine.canonicalIndexPreflight()
-	if err != nil {
-		t.Fatalf("canonicalIndexPreflight: %v", err)
-	}
-	tr, err := engine.beginCanonicalTransition(canonicalIndex, nil)
+	tr, err := engine.beginCanonicalTransition(nil)
 	if err != nil {
 		t.Fatalf("beginCanonicalTransition: %v", err)
 	}

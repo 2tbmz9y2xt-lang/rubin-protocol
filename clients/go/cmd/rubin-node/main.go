@@ -214,6 +214,31 @@ func printLegacyExposureReport(w io.Writer, report legacyExposureReport) error {
 	return enc.Encode(report)
 }
 
+// requireCheckpointAtCanonicalTip proves the loaded checkpoint is exactly the
+// canonical index tip — has-tip, height and tip hash — using the same strict
+// read-only open the dry-run path uses, so it takes no datadir lock and creates
+// nothing. A stale or divergent snapshot exits 2 and emits no report.
+func requireCheckpointAtCanonicalTip(dataDir, chainStatePath string, chainState *node.ChainState, stderr io.Writer) int {
+	blockStore, _, exit := createOrOpenBlockStore(dataDir, chainStatePath, false, true, stderr)
+	if exit != 0 {
+		return exit
+	}
+	height, hash, hasTip, err := blockStore.Tip()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "legacy exposure scan canonical tip read failed: %v\n", err)
+		return 2
+	}
+	if !hasTip || !chainState.HasTip || chainState.Height != height || chainState.TipHash != hash {
+		_, _ = fmt.Fprintf(
+			stderr,
+			"legacy exposure scan requires a chainstate snapshot at the canonical tip: snapshot=(has_tip=%v,height=%d,tip=%x) canonical=(has_tip=%v,height=%d,tip=%x)\n",
+			chainState.HasTip, chainState.Height, chainState.TipHash, hasTip, height, hash,
+		)
+		return 2
+	}
+	return 0
+}
+
 func loadLegacyExposureScanChainState(path string) (*node.ChainState, error) {
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
@@ -461,6 +486,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "%v\n", err)
 			return 2
+		}
+		// The snapshot is the node's precommit CHECKPOINT and may lag the
+		// canonical index by a transition. The scanner does not replay: replay
+		// needs the network identity this mode deliberately does not require a
+		// genesis file for, and measuring exposure against a guessed identity is
+		// worse than not measuring it. So the report is emitted ONLY when the
+		// snapshot IS the canonical tip; otherwise this exits 2 with no JSON and
+		// the operator re-runs after the node has checkpointed at the tip.
+		if exit := requireCheckpointAtCanonicalTip(cfg.DataDir, chainStatePath, chainState, stderr); exit != 0 {
+			return exit
 		}
 		report := buildLegacyExposureReport(cfg.Network, cfg.DataDir, chainState, watchedSuiteIDs, *legacyExposureIncludeOutpoints)
 		if err := printLegacyExposureReport(stdout, report); err != nil {

@@ -344,6 +344,14 @@ stop_live() {
 initialize_store() {
   start_live "$1" "$2" "$3" create
   stop_live "$3"
+  # The mined store's durable snapshot is the precommit CHECKPOINT, one
+  # transition behind the canonical index tip. Startup recovery — anchor,
+  # reconcile, save — is what advances it, and readers that require
+  # checkpoint == tip (--legacy-exposure-scan) consume these fixtures with no
+  # live node of their own, so every prepared store gets one recovery cycle
+  # here: inside init, before any case removes the lock or seeds residues.
+  start_live "$1" "$2" "$3.recover"
+  stop_live "$3.recover"
   [[ -f "$2/.rubin.lock" && ! -s "$2/.rubin.lock" ]] || fail "$3: initialized store has no valid persistent lock"
 }
 assert_fresh_create_reclaims_datadir_scratch() {

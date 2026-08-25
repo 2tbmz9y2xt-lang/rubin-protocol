@@ -2343,12 +2343,22 @@ func TestDevnetRPCMineNextPreservesWideSupply(t *testing.T) {
 	if chainState.AlreadyGenerated != want {
 		t.Fatalf("live supply=%s, want %s", chainState.AlreadyGenerated.String(), want.String())
 	}
-	restarted, err := node.LoadChainState(chainStatePath)
+	// The durable snapshot is the precommit CHECKPOINT at the highest row both
+	// identities share, so this reads it through the same startup composition
+	// main.go uses — anchor, then reconcile — which replays the canonical suffix
+	// back to the mined tip before anything asserts on the supply. IN MEMORY
+	// ONLY: an assertion about a datadir must not rewrite that datadir, and the
+	// byte comparison below is what holds this caller to it.
+	before, err := os.ReadFile(chainStatePath)
 	if err != nil {
-		t.Fatalf("LoadChainState: %v", err)
+		t.Fatalf("read checkpoint: %v", err)
 	}
+	restarted := recoveredChainState(t, chainStatePath, blockStore, syncCfg)
 	if restarted.AlreadyGenerated != want {
-		t.Fatalf("persisted supply=%s, want %s", restarted.AlreadyGenerated.String(), want.String())
+		t.Fatalf("recovered supply=%s, want %s", restarted.AlreadyGenerated.String(), want.String())
+	}
+	if after, err := os.ReadFile(chainStatePath); err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("the supply assertion rewrote the checkpoint (%d bytes -> %d bytes, err=%v)", len(before), len(after), err)
 	}
 }
 

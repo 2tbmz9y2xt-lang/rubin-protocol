@@ -29,7 +29,12 @@ func (o *PendingOutpointOwner) beginTransition() (uint64, error) {
 }
 
 // commitStableTip publishes the transition's stable tip and reopens admission.
-// It is the last step of a successful transition.
+//
+// It has NO production caller: a canonical transition publishes its owner image
+// — stable tip included — by assignment inside publishCanonicalMempoolPlan,
+// under the same owner hold as M1/O1, because nothing after the canonical-index
+// commit may return an error. It survives as the direct owner-level primitive
+// the owner's own tests drive.
 func (o *PendingOutpointOwner) commitStableTip(tip PendingOutpointTip) error {
 	if o == nil {
 		return nil
@@ -44,9 +49,12 @@ func (o *PendingOutpointOwner) commitStableTip(tip PendingOutpointTip) error {
 	return nil
 }
 
-// endTransitionAborted reopens admission after an exact restore. The stable tip
-// keeps its pre-transition value; token and generation high-waters stay
-// advanced so no sequence is ever reused.
+// endTransitionAborted clears the transition flag and reopens admission. There
+// is no owner image to restore on either path that reaches it: an OLD or UNKNOWN
+// transition published nothing at all, and the one path that arrives AFTER
+// publication — truth NEW on an engine with no mempool — has no owner, so the
+// call is the nil no-op below. The stable tip keeps its pre-transition value;
+// token and generation high-waters stay advanced so no sequence is ever reused.
 func (o *PendingOutpointOwner) endTransitionAborted() {
 	if o == nil {
 		return
@@ -56,7 +64,8 @@ func (o *PendingOutpointOwner) endTransitionAborted() {
 	o.inTransition = false
 }
 
-// pendingOutpointSnapshot is the exact same-owner rollback image.
+// pendingOutpointSnapshot is the exact same-owner image a canonical transition
+// snapshots under the admission fence and rebuilds its published O1 from.
 type pendingOutpointSnapshot struct {
 	claims              []pendingOutpointClaim
 	stableTip           PendingOutpointTip
@@ -105,6 +114,11 @@ func (o *PendingOutpointOwner) checkSnapshotClaim(claim pendingOutpointClaim, to
 // NEITHER. The caller cross-checks them against the records it is about to
 // install and only then calls publishRestoreLocked, so owner image and records
 // become visible together or not at all. The caller holds o.mu.
+//
+// It has NO production caller: the canonical plan builder constructs its owner
+// candidate with buildCanonicalOwnerIndex instead, which builds the same two
+// indexes off-lock while the plan is still refusable. This survives as the
+// owner-level primitive its own tests drive.
 func (o *PendingOutpointOwner) buildRestoreLocked(snap pendingOutpointSnapshot) (pendingOutpointIndex, error) {
 	byOutpoint := make(map[consensus.Outpoint]pendingOutpointRow, len(snap.claims))
 	byToken := make(map[PendingOutpointToken]*pendingOutpointClaim, len(snap.claims))
@@ -138,6 +152,11 @@ func (o *PendingOutpointOwner) buildRestoreLocked(snap pendingOutpointSnapshot) 
 // index. It cannot fail, so no error-capable step remains once the owner image is
 // visible. High-waters never regress — the larger of current and snapshot wins —
 // so an aborted transition cannot hand out a sequence twice. Caller holds o.mu.
+//
+// It does NOT close the transition: inTransition is cleared by the caller inside
+// the same o.mu hold, and only for an ordinary COMMITTED outcome —
+// TERMINAL_PERSISTENCE(new) publishes this identical image and deliberately
+// keeps the transition and admission latched.
 func (o *PendingOutpointOwner) publishRestoreLocked(snap pendingOutpointSnapshot, candidate pendingOutpointIndex) {
 	o.byOutpoint = candidate.byOutpoint
 	o.byToken = candidate.byToken

@@ -22,7 +22,9 @@ type PVTelemetry struct {
 
 	// Block-level counters.
 	blocksValidated atomic.Uint64 // total blocks processed through PV path
-	blocksSkipped   atomic.Uint64 // blocks skipped (mode=off or not IBD)
+	// not validated: mode=off, not IBD, or a winning-reorg branch row (exempt in
+	// every mode: a shadow pre-state would break the two-image bound).
+	blocksSkipped atomic.Uint64
 
 	// Shadow mismatch counters (bounded cardinality by type).
 	mismatchVerdict atomic.Uint64 // seq accept vs par reject or vice versa

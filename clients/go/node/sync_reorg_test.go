@@ -12,6 +12,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+	"unsafe"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -84,16 +86,9 @@ func TestReorgTwoMiners(t *testing.T) {
 		t.Fatalf("BlockHash(B1): %v", err)
 	}
 	blockB2 := buildSingleTxBlock(t, blockB1Hash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
-	rotation := &corruptCanonicalOnCreateRotation{overwrite: func() {
-		writeRawStoreBlockFile(t, store, summaryA1.BlockHash, []byte("corrupt after preview"))
-	}}
-	engine.cfg.RotationProvider = rotation
 	summaryB2, err := engine.ApplyBlockWithReorg(blockB2, nil)
 	if err != nil {
 		t.Fatalf("ApplyBlockWithReorg(B2): %v", err)
-	}
-	if rotation.fires != 1 {
-		t.Fatalf("post-preview overwrite fired %d times, want 1", rotation.fires)
 	}
 	if summaryB2.BlockHeight != 2 {
 		t.Fatalf("B2 height=%d, want 2", summaryB2.BlockHeight)
@@ -608,8 +603,9 @@ func TestApplyBlockWithReorgRollbackRestoresCanonicalIndexAndChainstateFile(t *t
 	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
 		if path == store.indexPath {
 			indexWriteCount++
-			if indexWriteCount == 2 {
-				return os.ErrPermission
+			// One prepared commit per transition: this IS the reorg's write.
+			if indexWriteCount == 1 {
+				return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
 			}
 		}
 		return prevWrite(path, data, mode)
@@ -623,12 +619,18 @@ func TestApplyBlockWithReorgRollbackRestoresCanonicalIndexAndChainstateFile(t *t
 	if err != nil {
 		t.Fatalf("LoadChainState(after): %v", err)
 	}
-	wantState, err := chainStateFromDisk(beforeState)
-	if err != nil {
+	if _, err := chainStateFromDisk(beforeState); err != nil {
 		t.Fatalf("chainStateFromDisk(before): %v", err)
 	}
-	if !reflect.DeepEqual(afterState, wantState) {
-		t.Fatalf("persisted chainstate not restored after rollback")
+	// The durable snapshot is the common-ancestor CHECKPOINT the precommit
+	// recovery set replaced it with. That row belongs to BOTH identities, so the
+	// refused reorg did not destroy the last usable old snapshot: replaying the
+	// retained old suffix from it reproduces the exact preserved OLD image.
+	if !afterState.HasTip || afterState.Height != 0 || afterState.TipHash != devnetGenesisBlockHash {
+		t.Fatalf("persisted checkpoint=(%v,%d,%x), want the common ancestor", afterState.HasTip, afterState.Height, afterState.TipHash)
+	}
+	if changed, err := ReconcileChainStateWithBlockStore(afterState, store, engine.cfg); err != nil || !changed || afterState.Height != 1 || afterState.TipHash != summaryA1.BlockHash {
+		t.Fatalf("checkpoint replay=(%d,%x) changed=%v err=%v, want the preserved OLD identity", afterState.Height, afterState.TipHash, changed, err)
 	}
 	if engine.chainState.Height != 1 || engine.chainState.TipHash != summaryA1.BlockHash {
 		t.Fatalf("in-memory chainstate not restored after rollback")
@@ -1000,11 +1002,7 @@ func TestRequeueDisconnectedTransactionsUsesTipDownOrderAndContinuesAfterReject(
 	if err != nil {
 		t.Fatalf("ParseBlockBytes(low): %v", err)
 	}
-	// Bad byte fields prove production requeue uses the retained parses.
-	engine.requeueVerifiedDisconnectedTransactions([]verifiedStoredBlock{
-		{blockBytes: []byte("not parsed again"), parsed: highParsed},
-		{blockBytes: []byte("not parsed again"), parsed: lowParsed},
-	}, nil)
+	engine.requeueParsedDisconnectedTransactions([]*consensus.ParsedBlock{highParsed, lowParsed}, nil)
 
 	if !strings.Contains(stderr.String(), "mempool: requeue-tx:") {
 		t.Fatalf("expected duplicate requeue rejection to be logged, got %q", stderr.String())
@@ -1436,10 +1434,10 @@ func TestApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure(t *testin
 	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
 		if path == store.indexPath {
 			indexWrites++
-			if indexWrites == 3 {
+			if indexWrites == 1 {
 				observedFailedCommit = true
 				duringFailedCommitCounts = engine.BlockApplyCounts()
-				return os.ErrPermission
+				return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
 			}
 		}
 		return prevWrite(path, data, mode)
@@ -1762,20 +1760,11 @@ func TestSyncApplyHelperAdditionalBranches(t *testing.T) {
 
 	engine, _, _ := newReorgTestEngine(t)
 	engine.blockStore.index.Canonical = []string{"zz"}
-	if _, err := engine.captureRollbackState(); err == nil {
-		t.Fatalf("expected captureRollbackState canonical snapshot error")
+	if _, err := engine.canonicalIndexPreflight(); err == nil {
+		t.Fatalf("expected canonicalIndexPreflight snapshot error")
 	}
 
 	engine, _, _ = newReorgTestEngine(t)
-	cause := errors.New("boom")
-	state, err := engine.captureRollbackState()
-	if err != nil {
-		t.Fatalf("captureRollbackState: %v", err)
-	}
-	if err := engine.rollbackApplyBlock(cause, state); !errors.Is(err, cause) {
-		t.Fatalf("rollbackApplyBlock err=%v, want %v", err, cause)
-	}
-
 	engine.cfg.ChainID = [32]byte{}
 	if err := testValidateIncomingChainID(0, devnetGenesisChainID); err != nil {
 		t.Fatalf("testValidateIncomingChainID(devnet genesis): %v", err)
@@ -1853,6 +1842,63 @@ func reorgTestCoinbaseForWtxids(t *testing.T, height uint64, value uint64, addre
 		{value: value, covenantType: consensus.COV_TYPE_P2PK, covenantData: append([]byte(nil), address...)},
 		{value: 0, covenantType: consensus.COV_TYPE_ANCHOR, covenantData: commitment[:]},
 	})
+}
+
+// TestSideBlockStoreFailureNeverLatches pins the LOCAL_STORE_ERROR(noncanonical)
+// disposition: a side branch that loses fork choice touches no canonical state,
+// so even an AMBIGUOUS post-namespace-commit write failure while storing it is
+// NOT_APPLICABLE to canonical truth. It is returned, it latches nothing, and the
+// engine keeps applying canonical blocks afterwards.
+func TestSideBlockStoreFailureNeverLatches(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+	subsidy1 := consensus.BlockSubsidy(1, 0)
+	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	a1, err := engine.ApplyBlock(blockA1, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(A1): %v", err)
+	}
+	subsidy2 := consensus.BlockSubsidy(2, subsidy1)
+	blockA2 := buildSingleTxBlock(t, a1.BlockHash, target, reorgTestTimestamp(2), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+	a2, err := engine.ApplyBlock(blockA2, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(A2): %v", err)
+	}
+
+	// One block against a two-block canonical chain of identical targets: strictly
+	// less work, so fork choice takes the store-side-block path deterministically
+	// rather than through a tip-hash tiebreak.
+	sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	// The AMBIGUOUS class: the parent sync fails after the leaf may already be
+	// durable, which is the failure a canonical commit would have to latch on.
+	// One-shot, so the canonical apply at the end runs against a healthy store.
+	failed := false
+	withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+		syncParent := ops.syncParent
+		ops.syncParent = func(parent string) error {
+			if !failed && parent == store.blocksDir {
+				failed = true
+				return os.ErrPermission
+			}
+			return syncParent(parent)
+		}
+	})
+	summary, err := engine.ApplyBlockWithReorg(sideB1, nil)
+	if summary != nil || !failed || !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("summary=%+v failed=%v err=%v, want the side-block store failure", summary, failed, err)
+	}
+	if engine.persistenceFaulted() {
+		t.Fatal("a noncanonical side-block store failure latched the engine")
+	}
+	if view := engine.chainState.view(); view.tipHash != a2.BlockHash {
+		t.Fatalf("canonical tip=%x, want the untouched %x", view.tipHash, a2.BlockHash)
+	}
+
+	// The engine is still open for canonical business, which is what
+	// NOT_APPLICABLE has to mean in practice.
+	blockA3 := buildSingleTxBlock(t, a2.BlockHash, target, reorgTestTimestamp(4), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 3, consensus.BlockSubsidy(3, subsidy1+subsidy2)))
+	if _, err := engine.ApplyBlock(blockA3, nil); err != nil {
+		t.Fatalf("ApplyBlock(A3) after a side-block store failure: %v", err)
+	}
 }
 
 func newReorgTestEngine(t *testing.T) (*SyncEngine, *BlockStore, [32]byte) {
@@ -3440,9 +3486,9 @@ func TestApplyBlockWithReorgPendingOutpointRestoresExactTokensOnFailure(t *testi
 	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
 		if path == f.store.indexPath {
 			indexWrites++
-			if indexWrites == 3 {
+			if indexWrites == 1 {
 				injected = true
-				return os.ErrPermission
+				return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
 			}
 		}
 		return prevWrite(path, data, mode)
@@ -3605,22 +3651,30 @@ func TestPreferredBranchConsensusRejectionCountsExactlyOnce(t *testing.T) {
 	})
 }
 
-// TestPreparePreferredBranchRetainsCompactRowsWithoutUtxoSnapshots pins the
-// preparation memory shape: a prepared row carries no ChainState, no UTXO map
-// and nothing else that scales with the UTXO set — only the block data the path
-// already carried, the summary, the prior-tip scalars, the precomputed undo and
-// a delta bounded by the block's own inputs and outputs. Retained full-state
-// memory is O(1) in branch depth, which is what lets an arbitrarily deep valid
-// branch prepare without a depth cap.
-func TestPreparePreferredBranchRetainsCompactRowsWithoutUtxoSnapshots(t *testing.T) {
+// TestCanonicalCutoverRetainsOnlyChargedRowMetadata pins the plan's retention
+// shape: after staging and validation the transition keeps ONLY charged
+// (height, hash) descriptors and A1 IDs. No block or header bytes, no
+// ParsedBlock, no BlockUndo, no UTXO delta and no transaction payload survive,
+// and a reorg holds exactly two O(UTXO) ChainState images — the immutable common
+// checkpoint and the rolling image that becomes final C1 — never a third.
+func TestCanonicalCutoverRetainsOnlyChargedRowMetadata(t *testing.T) {
+	descriptor := reflect.TypeOf(canonicalRowDescriptor{})
+	for i := 0; i < descriptor.NumField(); i++ {
+		switch descriptor.Field(i).Type.Kind() {
+		case reflect.Uint64, reflect.Array:
+		default:
+			t.Fatalf("canonicalRowDescriptor.%s is %v: a charged row is (height, hash) only", descriptor.Field(i).Name, descriptor.Field(i).Type)
+		}
+	}
+	if got := unsafe.Sizeof(canonicalRowDescriptor{}); got != canonicalPlanMetadataRowBytes {
+		t.Fatalf("canonicalRowDescriptor size=%d, want the charged %d bytes", got, canonicalPlanMetadataRowBytes)
+	}
 	chainStatePtr := reflect.TypeOf((*ChainState)(nil))
-	for _, structType := range []reflect.Type{reflect.TypeOf(preparedBranchBlock{}), reflect.TypeOf(chainStateDelta{})} {
-		for i := 0; i < structType.NumField(); i++ {
-			field := structType.Field(i)
-			if field.Type == chainStatePtr || field.Type.Kind() == reflect.Map {
-				t.Fatalf("%s.%s is %v: a prepared row must retain no chainstate and no map",
-					structType.Name(), field.Name, field.Type)
-			}
+	prepared := reflect.TypeOf(preparedBranchBlock{})
+	for i := 0; i < prepared.NumField(); i++ {
+		field := prepared.Field(i)
+		if field.Type == chainStatePtr || field.Type.Kind() == reflect.Map {
+			t.Fatalf("preparedBranchBlock.%s is %v: a prepared row must retain no chainstate and no map", field.Name, field.Type)
 		}
 	}
 
@@ -3630,52 +3684,70 @@ func TestPreparePreferredBranchRetainsCompactRowsWithoutUtxoSnapshots(t *testing
 	liveUtxos, liveUtxoHash := len(f.engine.chainState.Utxos), f.engine.chainState.UtxoSetHash()
 
 	branch := f.storedSideBranch(t, forkHash, forkHeight+1, forkGenerated, 2)
-	rows, disconnected, reorgDepth, _, _, err := f.engine.preparePreferredBranch(branch, forkHeight, nil)
+	canonicalIndex, err := f.engine.canonicalIndexPreflight()
 	if err != nil {
-		t.Fatalf("preparePreferredBranch: %v", err)
+		t.Fatalf("canonicalIndexPreflight: %v", err)
 	}
-	if len(rows) != 2 || len(disconnected) != 1 || reorgDepth != 1 {
-		t.Fatalf("rows=%d disconnected=%d depth=%d, want 2/1/1", len(rows), len(disconnected), reorgDepth)
+	plan, summary, reorgDepth, _, err := f.engine.planPreferredBranch(canonicalIndex, branch, forkHeight)
+	if err != nil {
+		t.Fatalf("planPreferredBranch: %v", err)
+	}
+	if len(plan.connect) != 2 || len(plan.disconnect) != 1 || reorgDepth != 1 || summary == nil {
+		t.Fatalf("connect=%d disconnect=%d depth=%d, want 2/1/1", len(plan.connect), len(plan.disconnect), reorgDepth)
+	}
+	if plan.checkpoint == plan.final || plan.checkpoint.Height != forkHeight || plan.checkpoint.TipHash != forkHash {
+		t.Fatalf("checkpoint=(%d,%x) shared_with_final=%v, want the immutable common ancestor", plan.checkpoint.Height, plan.checkpoint.TipHash, plan.checkpoint == plan.final)
+	}
+	if plan.final.Height != forkHeight+2 || plan.final.TipHash != branch[1].hash {
+		t.Fatalf("final C1=(%d,%x), want the branch tip", plan.final.Height, plan.final.TipHash)
+	}
+	if plan.disconnect[0] != (canonicalRowDescriptor{height: forkHeight + 1, hash: summaryA.BlockHash}) {
+		t.Fatalf("disconnect row=%+v, want the old tip", plan.disconnect[0])
+	}
+	for i, row := range plan.connect {
+		if row != (canonicalRowDescriptor{height: forkHeight + 1 + uint64(i), hash: branch[i].hash}) {
+			t.Fatalf("connect row %d=%+v, want ascending branch rows", i, row)
+		}
+	}
+	if len(plan.applied) != len(plan.connect) {
+		t.Fatalf("A1 rows=%d, want one per newly canonical block", len(plan.applied))
+	}
+	if len(plan.staged) != 2 {
+		t.Fatalf("staged rows=%d before staging, want the new suffix", len(plan.staged))
 	}
 
-	prior := canonicalTipScalars{hasTip: true, height: forkHeight, tipHash: forkHash, alreadyGenerated: consensus.Uint128FromU64(forkGenerated)}
-	for i := range rows {
-		row := &rows[i]
-		if row.priorTip != prior {
-			t.Fatalf("row %d prior tip=%+v, want %+v", i, row.priorTip, prior)
-		}
-		if row.delta.post.height != forkHeight+1+uint64(i) || row.delta.post.tipHash != branch[i].hash || !row.delta.post.hasTip {
-			t.Fatalf("row %d delta post=%+v, want its own block at height %d", i, row.delta.post, forkHeight+1+uint64(i))
-		}
-		if row.undo == nil || row.undo.BlockHeight != row.delta.post.height || row.undo.PreviousAlreadyGenerated != prior.alreadyGenerated {
-			t.Fatalf("row %d undo=%+v, want the precomputed undo for that row", i, row.undo)
-		}
-		// A coinbase-only branch block spends nothing and creates one indexed
-		// output: the retained delta tracks the block, not the UTXO set.
-		if len(row.delta.spent) != 0 || len(row.delta.created) != 1 || len(row.delta.created) >= liveUtxos {
-			t.Fatalf("row %d delta spent=%d created=%d against a %d-entry live set, want 0/1 and compact",
-				i, len(row.delta.spent), len(row.delta.created), liveUtxos)
-		}
-		prior = row.delta.post
+	// Staging consumes and releases the payload; nothing depth-proportional
+	// survives into the transition.
+	if err := f.engine.proveCanonicalRecoverySet(plan); err != nil {
+		t.Fatalf("proveCanonicalRecoverySet: %v", err)
+	}
+	if plan.staged != nil {
+		t.Fatalf("staged payload survived staging: %d rows", len(plan.staged))
+	}
+	charge, err := canonicalPlanMetadataCharge(plan.disconnect, plan.connect, plan.applied)
+	if err != nil || charge != canonicalPlanMetadataBaseBytes+3*canonicalPlanMetadataRowBytes {
+		t.Fatalf("charge=%d err=%v, want the exact base plus three rows", charge, err)
+	}
+	if len(plan.connect) >= liveUtxos {
+		t.Fatalf("retained rows=%d against a %d-entry live set, want compact metadata", len(plan.connect), liveUtxos)
 	}
 
-	// Preparation touches no live state.
+	// Planning and staging touch no live canonical state.
 	if f.engine.chainState.TipHash != summaryA.BlockHash || f.engine.chainState.UtxoSetHash() != liveUtxoHash {
-		t.Fatalf("preparation mutated the live chainstate: tip=%x", f.engine.chainState.TipHash)
+		t.Fatalf("planning mutated the live chainstate: tip=%x", f.engine.chainState.TipHash)
 	}
 	if storeHeight, storeHash, ok, err := f.store.Tip(); err != nil || !ok || storeHash != summaryA.BlockHash || storeHeight != summaryA.BlockHeight {
-		t.Fatalf("preparation moved the blockstore tip to (%d,%x,ok=%v,err=%v)", storeHeight, storeHash, ok, err)
+		t.Fatalf("planning moved the blockstore tip to (%d,%x,ok=%v,err=%v)", storeHeight, storeHash, ok, err)
 	}
 }
 
-// TestApplyBlockWithReorgPendingOutpointCompactRowsPersistAndUndo pins the
-// commit half of the compact-row reorg: each already-validated row is applied to
-// the ONE live ChainState and persisted with its own precomputed undo before the
-// next row starts, so chainstate and blockstore correspond at every persisted
-// row; a failure on the second row restores the live UTXO SET exactly, not just
-// the tip; and the per-row undo is real — disconnecting the branch afterwards
-// returns the chainstate to the fork point byte for byte.
-func TestApplyBlockWithReorgPendingOutpointCompactRowsPersistAndUndo(t *testing.T) {
+// TestCanonicalCutoverWinningReorgOneCommit pins the winning-reorg row: one
+// final private C1, EXACTLY ONE canonical-index write however many rows the
+// branch has, no intermediate public tip at that write, and a deterministic
+// requeue that runs only after the transition reopened admission. The refused
+// first attempt proves an OLD/open commit leaves the exact old image, and the
+// disconnects afterwards prove the staged per-row undo is real.
+func TestCanonicalCutoverWinningReorgOneCommit(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	forkHash, forkHeight, forkGenerated := f.tipHash, f.tipHeight, f.alreadyGenerated
 	forkUtxoHash := f.engine.chainState.UtxoSetHash()
@@ -3684,59 +3756,64 @@ func TestApplyBlockWithReorgPendingOutpointCompactRowsPersistAndUndo(t *testing.
 	branch := f.storedSideBranch(t, forkHash, forkHeight+1, forkGenerated, 2)
 	candidate := branch[len(branch)-1]
 
-	// Observe the live chainstate at every canonical-index write and fail the
-	// third — the second row's commit, after the first row was applied and
-	// persisted. Writes 1..3 are the disconnect truncation and the two rows.
 	type indexObservation struct {
 		height uint64
 		hash   [32]byte
 	}
 	prevWrite := writeFileAtomicFn
 	t.Cleanup(func() { writeFileAtomicFn = prevWrite })
-	observed, failThirdWrite, injected := []indexObservation{}, true, false
+	observed, failWrite, injected := []indexObservation{}, true, false
 	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
 		if path == f.store.indexPath {
 			view := f.engine.chainState.view()
 			observed = append(observed, indexObservation{height: view.height, hash: view.tipHash})
-			if failThirdWrite && len(observed) == 3 {
+			if failWrite {
 				injected = true
-				return os.ErrPermission
+				// A PROVEN pre-namespace refusal: nothing crossed the commit
+				// point, so the class is precommit and the truth is OLD/open.
+				return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
 			}
 		}
 		return prevWrite(path, data, mode)
 	}
 
 	if _, err := f.engine.ApplyBlockWithReorg(candidate.blockBytes, nil); err == nil || !injected {
-		t.Fatalf("expected the injected second-row persistence failure (err=%v injected=%v)", err, injected)
+		t.Fatalf("expected the injected commit failure (err=%v injected=%v)", err, injected)
+	}
+	if len(observed) != 1 {
+		t.Fatalf("canonical index writes=%d on a refused two-row reorg, want exactly 1", len(observed))
+	}
+	if f.engine.persistenceFaulted() {
+		t.Fatal("a proven pre-namespace commit refusal latched the engine")
 	}
 	if f.engine.chainState.TipHash != summaryA.BlockHash || f.engine.chainState.Height != summaryA.BlockHeight {
-		t.Fatalf("chainstate tip=(%d,%x) after the failed reorg, want A (%d,%x)",
+		t.Fatalf("chainstate tip=(%d,%x) after the refused reorg, want A (%d,%x)",
 			f.engine.chainState.Height, f.engine.chainState.TipHash, summaryA.BlockHeight, summaryA.BlockHash)
 	}
 	if got := f.engine.chainState.UtxoSetHash(); got != beforeReorgUtxoHash {
-		t.Fatalf("utxo set hash=%x after the failed reorg, want the exact pre-reorg set %x", got, beforeReorgUtxoHash)
+		t.Fatalf("utxo set hash=%x after the refused reorg, want the exact pre-reorg set %x", got, beforeReorgUtxoHash)
 	}
 
-	// The same branch, with persistence healthy, must now commit.
-	failThirdWrite, observed = false, nil
+	failWrite, observed = false, nil
 	summaryB, err := f.engine.ApplyBlockWithReorg(candidate.blockBytes, nil)
 	if err != nil {
 		t.Fatalf("ApplyBlockWithReorg(retry): %v", err)
 	}
-	if summaryB.BlockHash != candidate.hash || summaryB.BlockHeight != forkHeight+2 || len(observed) < 2 {
-		t.Fatalf("reorg summary=(%d,%x) index_writes=%d, want the branch tip (%d,%x) with one write per row",
-			summaryB.BlockHeight, summaryB.BlockHash, len(observed), forkHeight+2, candidate.hash)
+	if summaryB.BlockHash != candidate.hash || summaryB.BlockHeight != forkHeight+2 {
+		t.Fatalf("reorg summary=(%d,%x), want the branch tip (%d,%x)", summaryB.BlockHeight, summaryB.BlockHash, forkHeight+2, candidate.hash)
 	}
-	// At each row's index write the live chainstate is ALREADY that row's block,
-	// never one behind: the store cannot run ahead of the state.
-	for i, row := range observed[len(observed)-2:] {
-		want := indexObservation{height: forkHeight + 1 + uint64(i), hash: branch[i].hash}
-		if row != want {
-			t.Fatalf("chainstate at row %d's index write=(%d,%x), want (%d,%x)", i, row.height, row.hash, want.height, want.hash)
-		}
+	if len(observed) != 1 {
+		t.Fatalf("canonical index writes=%d for a two-row reorg, want exactly 1", len(observed))
+	}
+	// The single commit happens with the OLD image still public: no reader can
+	// observe an intermediate tip, because publication follows classification.
+	if observed[0] != (indexObservation{height: summaryA.BlockHeight, hash: summaryA.BlockHash}) {
+		t.Fatalf("live chainstate at the commit=(%d,%x), want the old tip (%d,%x)", observed[0].height, observed[0].hash, summaryA.BlockHeight, summaryA.BlockHash)
+	}
+	if len(summaryB.CanonicalAppliedBlocks) != 2 {
+		t.Fatalf("A1 rows=%d, want one per newly canonical block", len(summaryB.CanonicalAppliedBlocks))
 	}
 
-	// The per-row undo persisted above is the real one.
 	for i := range branch {
 		if _, err := f.engine.DisconnectTip(); err != nil {
 			t.Fatalf("DisconnectTip(%d): %v", i, err)
@@ -3749,6 +3826,72 @@ func TestApplyBlockWithReorgPendingOutpointCompactRowsPersistAndUndo(t *testing.
 	}
 	if got := f.engine.chainState.UtxoSetHash(); got != forkUtxoHash {
 		t.Fatalf("utxo set hash after disconnecting the branch=%x, want the fork-point set %x", got, forkUtxoHash)
+	}
+}
+
+// TestCanonicalCutoverWinningReorgTerminalNewRequeuesNothing pins the
+// TERMINAL_PERSISTENCE(new) row of Section 11.1: the transition publishes its
+// complete NEW image and summary and returns the terminal error, but invokes
+// ZERO requeue owners — the disconnected transaction does not reappear. The
+// guard is also a liveness requirement: admission stays latched, so a requeue
+// attempt would block on the retained guard instead of returning.
+func TestCanonicalCutoverWinningReorgTerminalNewRequeuesNothing(t *testing.T) {
+	f := newPendingOutpointSyncFixture(t)
+	forkHash, forkHeight, forkGenerated := f.tipHash, f.tipHeight, f.alreadyGenerated
+	spend := f.spend(t, 700, 3)
+	spendID := txID(t, spend)
+	blockA := f.blockIncluding(t, forkHash, forkHeight+1, forkGenerated, 205, spend)
+	if _, err := f.engine.ApplyBlock(blockA, nil); err != nil {
+		t.Fatalf("ApplyBlock(A with the spend): %v", err)
+	}
+	if f.mempool.Contains(spendID) {
+		t.Fatal("the spend must be canonical, not resident, before the reorg")
+	}
+	branch := f.storedSideBranch(t, forkHash, forkHeight+1, forkGenerated, 2)
+	candidate := branch[len(branch)-1]
+
+	prevWrite := writeFileAtomicFn
+	t.Cleanup(func() { writeFileAtomicFn = prevWrite })
+	injected := false
+	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
+		if path == f.store.indexPath && !injected {
+			injected = true
+			// The write really lands, then the lane reports an AMBIGUOUS
+			// failure: the strict readback proves the planned-new identity.
+			if err := prevWrite(path, data, mode); err != nil {
+				return err
+			}
+			return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
+		}
+		return prevWrite(path, data, mode)
+	}
+
+	type result struct {
+		summary *ChainStateConnectSummary
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		summary, err := f.engine.ApplyBlockWithReorg(candidate.blockBytes, nil)
+		done <- result{summary, err}
+	}()
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("terminal NEW invoked a requeue owner and blocked on the retained admission guard")
+	}
+	if !injected || got.err == nil || got.summary == nil || len(got.summary.CanonicalAppliedBlocks) != 2 {
+		t.Fatalf("injected=%v summary=%+v err=%v, want the published NEW image with a terminal error", injected, got.summary, got.err)
+	}
+	if !f.engine.persistenceFaulted() {
+		t.Fatal("terminal NEW did not latch the engine")
+	}
+	if f.mempool.Contains(spendID) {
+		t.Fatal("terminal NEW invoked a standard requeue owner")
+	}
+	if f.engine.chainState.view().tipHash != candidate.hash {
+		t.Fatalf("terminal NEW published tip=%x, want the branch tip %x", f.engine.chainState.view().tipHash, candidate.hash)
 	}
 }
 
@@ -3952,5 +4095,52 @@ func TestPreferredReorgPreservesWideSupplyAndFailsAtomicallyOnCorruptUndo(t *tes
 	}
 	if secondDisconnect.AlreadyGenerated != wide || engine.chainState.AlreadyGenerated != wide {
 		t.Fatalf("second disconnect supply summary=%s state=%s, want %s", secondDisconnect.AlreadyGenerated.String(), engine.chainState.AlreadyGenerated.String(), wide.String())
+	}
+}
+
+// TestWinningReorgHoldsTwoImagesUnderPVShadow pins resource_bounds on the path
+// PV could break it: with the shadow active the winning-reorg preparation still
+// retains only the common checkpoint and the rolling image that becomes C1. The
+// shadow pre-state was the one third-image producer here (its run cloned a
+// fourth), so "no branch row validated" is exactly "no third image".
+func TestWinningReorgHoldsTwoImagesUnderPVShadow(t *testing.T) {
+	engine, _, target := newReorgTestEngine(t)
+	engine.pvMode = pvModeShadow
+	subsidy1 := consensus.BlockSubsidy(1, 0)
+	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	if _, err := engine.ApplyBlockWithReorg(blockA1, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(A1): %v", err)
+	}
+	if !engine.pvShadowActive() {
+		t.Fatal("fixture is not shadow-active: the row would prove nothing")
+	}
+	sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(2), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	sideB1Hash, err := consensus.BlockHash(blockHeaderBytes(t, sideB1))
+	if err != nil {
+		t.Fatalf("BlockHash(B1): %v", err)
+	}
+	a1Hash := engine.chainState.view().tipHash
+	if _, err := engine.ApplyBlockWithReorg(sideB1, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B1): %v", err)
+	}
+	// B1 must be STORED, not connected: if a tie-break made it the tip, B2 would
+	// take the DIRECT path and the row below would prove nothing.
+	if tip := engine.chainState.view().tipHash; tip != a1Hash {
+		t.Fatalf("side B1 became the tip (%x): this fixture no longer exercises a reorg", tip)
+	}
+	before := engine.pvTelemetry.Snapshot()
+	sideB2 := buildSingleTxBlock(t, sideB1Hash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidy(2, subsidy1)))
+	if _, err := engine.ApplyBlockWithReorg(sideB2, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B2, winning): %v", err)
+	}
+	after := engine.pvTelemetry.Snapshot()
+	if depth := engine.LastReorgDepth(); depth != 1 {
+		t.Fatalf("LastReorgDepth()=%d, want the depth-1 reorg this row measures", depth)
+	}
+	if after.BlocksValidated != before.BlocksValidated {
+		t.Fatalf("winning reorg ran %d PV shadow validations: each one clones a third full image", after.BlocksValidated-before.BlocksValidated)
+	}
+	if after.BlocksSkipped == before.BlocksSkipped {
+		t.Fatal("winning reorg recorded no PV-skipped row: the accounting no longer covers the branch")
 	}
 }

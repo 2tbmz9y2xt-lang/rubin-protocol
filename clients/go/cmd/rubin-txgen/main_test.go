@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha3"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -11,7 +13,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -19,39 +24,19 @@ import (
 )
 
 func TestTxGenCreateValidTx(t *testing.T) {
-	fromKey := mustTxGenKeypair(t)
 	toKey := mustTxGenKeypair(t)
-	fromDER, err := fromKey.PrivateKeyDER()
-	if err != nil {
-		t.Fatalf("PrivateKeyDER: %v", err)
-	}
-
-	dir := t.TempDir()
-	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	// The shared mined datadir: complete canonical artifacts and a checkpoint
+	// one transition behind the tip. rubin-txgen reconciles before selecting,
+	// so a chainstate-only datadir no longer runs.
+	dir, minedDER := mustMinedDatadir(t)
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-
-	st := node.NewChainState()
-	st.HasTip = true
-	st.Height = 100
-	st.TipHash[0] = 0x44
-	var prevTxid [32]byte
-	prevTxid[0] = 0x99
-	st.Utxos[consensus.Outpoint{Txid: prevTxid, Vout: 0}] = consensus.UtxoEntry{
-		Value:             100,
-		CovenantType:      consensus.COV_TYPE_P2PK,
-		CovenantData:      fromAddress,
-		CreationHeight:    1,
-		CreatedByCoinbase: true,
-	}
-	if err := st.Save(node.ChainStatePath(dir)); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
+	st := mustReconciledChainState(t, dir)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := run([]string{
 		"--datadir", dir,
-		"--from-key", hex.EncodeToString(fromDER),
+		"--from-key", minedDER,
 		"--to-key", hex.EncodeToString(toAddress),
 		"--amount", "90",
 		"--fee", "1",
@@ -64,7 +49,7 @@ func TestTxGenCreateValidTx(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeString: %v", err)
 	}
-	checked, err := consensus.CheckTransaction(txBytes, st.Utxos, 101, 0, node.DevnetGenesisChainID())
+	checked, err := consensus.CheckTransaction(txBytes, st.Utxos, st.Height+1, 0, node.DevnetGenesisChainID())
 	if err != nil {
 		t.Fatalf("CheckTransaction: %v", err)
 	}
@@ -80,8 +65,8 @@ func TestTxGenCreateValidTx(t *testing.T) {
 	if checked.Tx.Outputs[0].Value != 90 {
 		t.Fatalf("output[0]=%d, want 90", checked.Tx.Outputs[0].Value)
 	}
-	if checked.Tx.Outputs[1].Value != 9 {
-		t.Fatalf("change=%d, want 9", checked.Tx.Outputs[1].Value)
+	if checked.Tx.Outputs[1].Value == 0 {
+		t.Fatalf("change=%d, want the coinbase remainder", checked.Tx.Outputs[1].Value)
 	}
 }
 
@@ -107,38 +92,20 @@ func symlinkTraversalDataDir(t *testing.T) (raw string, cleaned string, escaped 
 }
 
 func TestRunNormalizesDataDirBeforeChainStateLoad(t *testing.T) {
-	fromKey := mustTxGenKeypair(t)
 	toKey := mustTxGenKeypair(t)
-	fromDER, err := fromKey.PrivateKeyDER()
-	if err != nil {
-		t.Fatalf("PrivateKeyDER: %v", err)
-	}
+	// The shared mined datadir: complete canonical artifacts and a checkpoint
+	// one transition behind the tip. rubin-txgen reconciles before selecting,
+	// so a chainstate-only datadir no longer runs.
 	rawDataDir, normalizedDataDir, escapedDataDir := symlinkTraversalDataDir(t)
-	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	mined, minedDER := mustMinedDatadir(t)
+	mustCopyTree(t, mined, normalizedDataDir)
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-
-	st := node.NewChainState()
-	st.HasTip = true
-	st.Height = 100
-	st.TipHash[0] = 0x44
-	var prevTxid [32]byte
-	prevTxid[0] = 0x99
-	st.Utxos[consensus.Outpoint{Txid: prevTxid, Vout: 0}] = consensus.UtxoEntry{
-		Value:             100,
-		CovenantType:      consensus.COV_TYPE_P2PK,
-		CovenantData:      fromAddress,
-		CreationHeight:    1,
-		CreatedByCoinbase: true,
-	}
-	if err := st.Save(node.ChainStatePath(normalizedDataDir)); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := run([]string{
 		"--datadir", rawDataDir,
-		"--from-key", hex.EncodeToString(fromDER),
+		"--from-key", minedDER,
 		"--to-key", hex.EncodeToString(toAddress),
 		"--amount", "90",
 		"--fee", "1",
@@ -527,32 +494,12 @@ func TestSubmitTxReturnsTransportError(t *testing.T) {
 }
 
 func TestRunSubmitToReturnsErrorOnReject(t *testing.T) {
-	fromKey := mustTxGenKeypair(t)
 	toKey := mustTxGenKeypair(t)
-	fromDER, err := fromKey.PrivateKeyDER()
-	if err != nil {
-		t.Fatalf("PrivateKeyDER: %v", err)
-	}
-
-	dir := t.TempDir()
-	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	// The shared mined datadir: complete canonical artifacts and a checkpoint
+	// one transition behind the tip. rubin-txgen reconciles before selecting,
+	// so a chainstate-only datadir no longer runs.
+	dir, minedDER := mustMinedDatadir(t)
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-
-	st := node.NewChainState()
-	st.HasTip = true
-	st.Height = 100
-	var prevTxid [32]byte
-	prevTxid[0] = 0x24
-	st.Utxos[consensus.Outpoint{Txid: prevTxid, Vout: 0}] = consensus.UtxoEntry{
-		Value:             100,
-		CovenantType:      consensus.COV_TYPE_P2PK,
-		CovenantData:      fromAddress,
-		CreationHeight:    0,
-		CreatedByCoinbase: true,
-	}
-	if err := st.Save(node.ChainStatePath(dir)); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rejected", http.StatusUnprocessableEntity)
@@ -563,7 +510,7 @@ func TestRunSubmitToReturnsErrorOnReject(t *testing.T) {
 	var stderr bytes.Buffer
 	code := run([]string{
 		"--datadir", dir,
-		"--from-key", hex.EncodeToString(fromDER),
+		"--from-key", minedDER,
 		"--to-key", hex.EncodeToString(toAddress),
 		"--amount", "90",
 		"--fee", "1",
@@ -578,38 +525,18 @@ func TestRunSubmitToReturnsErrorOnReject(t *testing.T) {
 }
 
 func TestRunSubmitToReturnsErrorOnInvalidTarget(t *testing.T) {
-	fromKey := mustTxGenKeypair(t)
 	toKey := mustTxGenKeypair(t)
-	fromDER, err := fromKey.PrivateKeyDER()
-	if err != nil {
-		t.Fatalf("PrivateKeyDER: %v", err)
-	}
-
-	dir := t.TempDir()
-	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	// The shared mined datadir: complete canonical artifacts and a checkpoint
+	// one transition behind the tip. rubin-txgen reconciles before selecting,
+	// so a chainstate-only datadir no longer runs.
+	dir, minedDER := mustMinedDatadir(t)
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-
-	st := node.NewChainState()
-	st.HasTip = true
-	st.Height = 100
-	var prevTxid [32]byte
-	prevTxid[0] = 0x25
-	st.Utxos[consensus.Outpoint{Txid: prevTxid, Vout: 0}] = consensus.UtxoEntry{
-		Value:             100,
-		CovenantType:      consensus.COV_TYPE_P2PK,
-		CovenantData:      fromAddress,
-		CreationHeight:    0,
-		CreatedByCoinbase: true,
-	}
-	if err := st.Save(node.ChainStatePath(dir)); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := run([]string{
 		"--datadir", dir,
-		"--from-key", hex.EncodeToString(fromDER),
+		"--from-key", minedDER,
 		"--to-key", hex.EncodeToString(toAddress),
 		"--amount", "90",
 		"--fee", "1",
@@ -627,33 +554,12 @@ func TestRunSubmitToReturnsErrorOnInvalidTarget(t *testing.T) {
 }
 
 func TestRunSubmitToPostsGeneratedTxAndPreservesStdout(t *testing.T) {
-	fromKey := mustTxGenKeypair(t)
 	toKey := mustTxGenKeypair(t)
-	fromDER, err := fromKey.PrivateKeyDER()
-	if err != nil {
-		t.Fatalf("PrivateKeyDER: %v", err)
-	}
-
-	dir := t.TempDir()
-	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	// The shared mined datadir: complete canonical artifacts and a checkpoint
+	// one transition behind the tip. rubin-txgen reconciles before selecting,
+	// so a chainstate-only datadir no longer runs.
+	dir, minedDER := mustMinedDatadir(t)
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-
-	st := node.NewChainState()
-	st.HasTip = true
-	st.Height = 100
-	st.TipHash[0] = 0x55
-	var prevTxid [32]byte
-	prevTxid[0] = 0x42
-	st.Utxos[consensus.Outpoint{Txid: prevTxid, Vout: 0}] = consensus.UtxoEntry{
-		Value:             100,
-		CovenantType:      consensus.COV_TYPE_P2PK,
-		CovenantData:      fromAddress,
-		CreationHeight:    0,
-		CreatedByCoinbase: true,
-	}
-	if err := st.Save(node.ChainStatePath(dir)); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
 
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -670,7 +576,7 @@ func TestRunSubmitToPostsGeneratedTxAndPreservesStdout(t *testing.T) {
 	var stderr bytes.Buffer
 	code := run([]string{
 		"--datadir", dir,
-		"--from-key", hex.EncodeToString(fromDER),
+		"--from-key", minedDER,
 		"--to-key", hex.EncodeToString(toAddress),
 		"--amount", "90",
 		"--fee", "1",
@@ -685,5 +591,307 @@ func TestRunSubmitToPostsGeneratedTxAndPreservesStdout(t *testing.T) {
 	}
 	if !strings.Contains(gotBody, generatedHex) {
 		t.Fatalf("submit body missing generated tx hex")
+	}
+}
+
+// datadirDigest fingerprints every file under root, so "this tool wrote nothing"
+// is checked against the bytes rather than asserted.
+func datadirDigest(t *testing.T, root string) string {
+	t.Helper()
+	var rows []string
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		rows = append(rows, fmt.Sprintf("%s=%x", rel, sha3.Sum256(raw)))
+		return nil
+	}); err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	sort.Strings(rows)
+	return strings.Join(rows, "\n")
+}
+
+func mustCopyTree(t *testing.T, from, to string) {
+	t.Helper()
+	if err := filepath.WalkDir(from, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, relErr := filepath.Rel(from, path)
+		if relErr != nil {
+			return relErr
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(filepath.Join(to, rel), 0o700)
+		}
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		return os.WriteFile(filepath.Join(to, rel), raw, 0o600)
+	}); err != nil {
+		t.Fatalf("copy %s -> %s: %v", from, to, err)
+	}
+}
+
+// minedDatadirOnce mines ONE real devnet datadir for the whole package: complete
+// canonical artifacts for every row, coinbases paying the fixture key, and a
+// durable snapshot that is the node's precommit checkpoint — one transition
+// behind the tip, exactly as production leaves it. rubin-txgen reconciles before
+// it selects, so this is the only datadir shape it accepts; mining it once and
+// copying the bytes keeps the cost off every test.
+var minedDatadirOnce = sync.OnceValues(buildMinedDatadir)
+
+func buildMinedDatadir() (string, error) {
+	key, err := consensus.NewMLDSA87Keypair()
+	if err != nil {
+		return "", err
+	}
+	defer key.Close()
+	der, err := key.PrivateKeyDER()
+	if err != nil {
+		return "", err
+	}
+	dir, err := os.MkdirTemp("", "txgen-mined")
+	if err != nil {
+		return "", err
+	}
+	store, err := node.CreateBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		return "", err
+	}
+	target := consensus.POW_LIMIT
+	chainState := node.NewChainState()
+	engine, err := node.NewSyncEngine(chainState, store, node.DefaultSyncConfig(&target, node.DevnetGenesisChainID(), node.ChainStatePath(dir)))
+	if err != nil {
+		return "", err
+	}
+	if _, err := engine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		return "", err
+	}
+	mempool, err := node.NewMempool(chainState, store, node.DevnetGenesisChainID())
+	if err != nil {
+		return "", err
+	}
+	engine.SetMempool(mempool)
+	cfg := node.DefaultMinerConfig()
+	cfg.Target, cfg.MineAddress = target, consensus.P2PKCovenantDataForPubkey(key.PubkeyBytes())
+	timestamp := uint64(1_777_000_000)
+	cfg.TimestampSource = func() uint64 { timestamp++; return timestamp }
+	miner, err := node.NewMiner(chainState, store, engine, cfg)
+	if err != nil {
+		return "", err
+	}
+	// One block past maturity, so the height-1 coinbase is spendable.
+	for height := uint64(1); height <= consensus.COINBASE_MATURITY+1; height++ {
+		if _, err := miner.MineOne(context.Background(), nil); err != nil {
+			return "", fmt.Errorf("mine height %d: %w", height, err)
+		}
+	}
+	return dir + "\x00" + hex.EncodeToString(der), nil
+}
+
+func mustMinedDatadir(t *testing.T) (string, string) {
+	t.Helper()
+	joined, err := minedDatadirOnce()
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unsupported") {
+			t.Skipf("ML-DSA backend unavailable: %v", err)
+		}
+		t.Fatalf("build mined datadir: %v", err)
+	}
+	parts := strings.SplitN(joined, "\x00", 2)
+	dir := t.TempDir()
+	mustCopyTree(t, parts[0], dir)
+	return dir, parts[1]
+}
+
+// mustReconciledChainState replays the datadir the way rubin-txgen does — read
+// only — so a test can assert against the same image the tool selected from.
+func mustReconciledChainState(t *testing.T, dir string) *node.ChainState {
+	t.Helper()
+	st, err := node.LoadChainState(node.ChainStatePath(dir))
+	if err != nil {
+		t.Fatalf("LoadChainState: %v", err)
+	}
+	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	if _, err := node.ReconcileChainStateWithBlockStore(st, store, node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), "")); err != nil {
+		t.Fatalf("ReconcileChainStateWithBlockStore: %v", err)
+	}
+	return st
+}
+
+// TestRunReconcilesCheckpointAgainstCanonicalIndexReadOnly pins the direct-consumer
+// rule: rubin-txgen reconciles the checkpoint against the canonical index IN
+// MEMORY before it selects anything, writes nothing to somebody else's datadir on
+// any path, and emits no transaction when any step of that fails.
+func TestRunReconcilesCheckpointAgainstCanonicalIndexReadOnly(t *testing.T) {
+	toKey := mustTxGenKeypair(t)
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	args := func(dir, der string) []string {
+		return []string{"--datadir", dir, "--from-key", der, "--to-key", hex.EncodeToString(toAddress), "--amount", "90", "--fee", "1"}
+	}
+
+	t.Run("selection runs against the reconciled image, not the raw checkpoint", func(t *testing.T) {
+		// A real datadir whose checkpoint is REPLACED by one claiming a height
+		// the canonical index does not have, funding a coinbase mature only at
+		// that claimed height.
+		dir, der := mustMinedDatadir(t)
+		key, err := hex.DecodeString(der)
+		if err != nil {
+			t.Fatalf("DecodeString: %v", err)
+		}
+		fromKey, err := consensus.NewMLDSA87KeypairFromDER(key)
+		if err != nil {
+			t.Fatalf("NewMLDSA87KeypairFromDER: %v", err)
+		}
+		defer fromKey.Close()
+		fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+		stale := node.NewChainState()
+		stale.HasTip, stale.Height = true, 1_000_000
+		stale.TipHash[0] = 0x44
+		var prevTxid [32]byte
+		prevTxid[0] = 0x99
+		stale.Utxos[consensus.Outpoint{Txid: prevTxid, Vout: 0}] = consensus.UtxoEntry{
+			Value: 100, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: fromAddress,
+			CreationHeight: 1, CreatedByCoinbase: true,
+		}
+		if err := stale.Save(node.ChainStatePath(dir)); err != nil {
+			t.Fatalf("Save(stale checkpoint): %v", err)
+		}
+		// Read RAW the tool would select happily; that is the behavior the
+		// reconcile replaces, proven here rather than asserted.
+		raw, err := node.LoadChainState(node.ChainStatePath(dir))
+		if err != nil {
+			t.Fatalf("LoadChainState: %v", err)
+		}
+		rawHeight, err := nextSpendHeight(raw)
+		if err != nil {
+			t.Fatalf("nextSpendHeight: %v", err)
+		}
+		if _, _, err := selectSpendableCoinbases(raw, fromAddress, rawHeight, 91); err != nil {
+			t.Fatalf("the raw checkpoint must be spendable for this row to discriminate: %v", err)
+		}
+		before := datadirDigest(t, dir)
+		var stdout, stderr bytes.Buffer
+		if code := run(args(dir, der), &stdout, &stderr); code != 0 {
+			t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+		}
+		txBytes, err := hex.DecodeString(strings.TrimSpace(stdout.String()))
+		if err != nil {
+			t.Fatalf("DecodeString: %v", err)
+		}
+		tx, _, _, _, err := consensus.ParseTx(txBytes)
+		if err != nil {
+			t.Fatalf("ParseTx: %v", err)
+		}
+		// The emitted transaction spends a coinbase of the RECONCILED chain, not
+		// the outpoint the raw checkpoint offered.
+		for _, in := range tx.Inputs {
+			if in.PrevTxid == prevTxid {
+				t.Fatal("selection spent the raw checkpoint's outpoint")
+			}
+		}
+		if got := datadirDigest(t, dir); got != before {
+			t.Fatal("the tool wrote to the datadir")
+		}
+	})
+
+	t.Run("a successful run writes nothing", func(t *testing.T) {
+		dir, der := mustMinedDatadir(t)
+		before := datadirDigest(t, dir)
+		var stdout, stderr bytes.Buffer
+		if code := run(args(dir, der), &stdout, &stderr); code != 0 {
+			t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+		}
+		if strings.TrimSpace(stdout.String()) == "" {
+			t.Fatal("a successful run emitted no transaction")
+		}
+		if got := datadirDigest(t, dir); got != before {
+			t.Fatal("a successful run wrote to the datadir")
+		}
+	})
+
+	t.Run("an unopenable blockstore exits 2 with no transaction", func(t *testing.T) {
+		dir := t.TempDir()
+		st := node.NewChainState()
+		st.HasTip, st.Height = true, 100
+		if err := st.Save(node.ChainStatePath(dir)); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		before := datadirDigest(t, dir)
+		var stdout, stderr bytes.Buffer
+		if code := run(args(dir, "00"), &stdout, &stderr); code != 2 {
+			t.Fatalf("exit=%d, want 2 with no blockstore", code)
+		}
+		if strings.TrimSpace(stdout.String()) != "" || datadirDigest(t, dir) != before {
+			t.Fatal("a refused run emitted a transaction or wrote to the datadir")
+		}
+	})
+}
+
+// TestReplaySyncConfigUsesTheNodeSuiteContextBuilder pins the coupling behind
+// the canonical-suffix replay: the rotation provider and suite registry must
+// come from Config.BuildRotationProvider — the one builder rubin-node startup
+// uses (cmd/rubin-node/main.go wires its result into the same SyncConfig
+// fields) — never from a nil pair this tool decided on its own. A datadir whose
+// node runs a context the replay does not have can reject a suffix block the
+// node accepted.
+//
+// This pins the PLUMBING, not a custom-rotation fixture: no CLI path populates
+// Config.RotationDescriptor / Config.SuiteRegistry today (rubin-node has no
+// config-file flag), so no shipped binary can produce a devnet datadir whose
+// context is non-nil, and building one would mean inventing the very parallel
+// config surface this fix avoids. The production-network row below proves the
+// builder is a real source rather than a synonym for nil.
+func TestReplaySyncConfigUsesTheNodeSuiteContextBuilder(t *testing.T) {
+	devnet := node.DefaultConfig()
+	devnet.Network = "devnet"
+	wantRotation, wantRegistry, err := devnet.BuildRotationProvider()
+	if err != nil {
+		t.Fatalf("BuildRotationProvider(devnet): %v", err)
+	}
+	got, err := replaySyncConfig("devnet")
+	if err != nil {
+		t.Fatalf("replaySyncConfig(devnet): %v", err)
+	}
+	// DeepEqual, not pointer identity: every builder call mints a fresh registry.
+	if !reflect.DeepEqual(got.RotationProvider, wantRotation) || !reflect.DeepEqual(got.SuiteRegistry, wantRegistry) {
+		t.Fatalf("replay context=(%v,%v), want the node builder's (%v,%v)", got.RotationProvider, got.SuiteRegistry, wantRotation, wantRegistry)
+	}
+	if got.ChainID != node.DevnetGenesisChainID() {
+		t.Fatalf("replay chain id=%x, want the devnet identity the genesis anchor pins", got.ChainID)
+	}
+
+	production := node.DefaultConfig()
+	production.Network = "mainnet"
+	productionRotation, productionRegistry, err := production.BuildRotationProvider()
+	if err != nil {
+		t.Fatalf("BuildRotationProvider(mainnet): %v", err)
+	}
+	if productionRotation == nil || productionRegistry == nil {
+		t.Fatalf("the node suite-context builder returned (%v,%v) for a production network: a hardcoded nil pair would silently drop a real context", productionRotation, productionRegistry)
+	}
+	// The killer for a re-hardcoded nil pair: devnet's context is nil today, so
+	// only a network whose context is NOT nil can tell the builder apart from a
+	// literal.
+	productionCfg, err := replaySyncConfig("mainnet")
+	if err != nil {
+		t.Fatalf("replaySyncConfig(mainnet): %v", err)
+	}
+	if !reflect.DeepEqual(productionCfg.RotationProvider, productionRotation) || !reflect.DeepEqual(productionCfg.SuiteRegistry, productionRegistry) {
+		t.Fatalf("replay context=(%v,%v) does not carry the builder's production context (%v,%v)", productionCfg.RotationProvider, productionCfg.SuiteRegistry, productionRotation, productionRegistry)
 	}
 }

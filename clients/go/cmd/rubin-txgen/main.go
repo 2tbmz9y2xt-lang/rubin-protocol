@@ -32,6 +32,32 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+// replaySyncConfig builds the suite context the canonical suffix is replayed
+// under, through the SAME builder rubin-node uses at startup
+// (Config.BuildRotationProvider), so a block the node accepted cannot be
+// rejected here by a rotation provider or suite registry this tool invented.
+//
+// The only caller passes devnet and there is no network flag: the caller
+// already refuses any datadir whose canonical row 0 is not the devnet genesis,
+// so no other network's suffix ever reaches this replay. Today devnet's builder
+// returns (nil, nil) — the value the replay used before this existed — but that
+// is the BUILDER's answer now, not a hardcoded one, so a devnet context added
+// later moves both binaries together. The parameter exists so that claim is
+// testable on a network whose context is non-nil. A builder error fails closed
+// rather than replaying context-free.
+func replaySyncConfig(network string) (node.SyncConfig, error) {
+	cfg := node.DefaultConfig()
+	cfg.Network = network
+	rotation, registry, err := cfg.BuildRotationProvider()
+	if err != nil {
+		return node.SyncConfig{}, err
+	}
+	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), "")
+	syncCfg.RotationProvider = rotation
+	syncCfg.SuiteRegistry = registry
+	return syncCfg, nil
+}
+
 func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("rubin-txgen", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -95,6 +121,34 @@ func run(args []string, stdout, stderr io.Writer) int {
 	st, err := node.LoadChainState(node.ChainStatePath(dataDir))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "chainstate load failed: %v\n", err)
+		return 2
+	}
+	// The persisted snapshot is the node's precommit CHECKPOINT: it is the
+	// highest row common to the old and planned-new canonical identities, so it
+	// can lag the canonical tip by a transition. Spending from it would select
+	// against a stale UTXO view, so the canonical suffix is replayed here first.
+	//
+	// IN MEMORY ONLY. This tool is a client of somebody else's datadir — it does
+	// not hold the datadir lock and the node may be running — so it opens the
+	// store read-only, verifies the fixed devnet genesis anchor before adopting
+	// anything from that index, reconciles into its own image and writes NOTHING
+	// back. Any failure exits 2 and emits no transaction.
+	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dataDir))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "blockstore open failed: %v\n", err)
+		return 2
+	}
+	if err := blockStore.VerifyGenesisAnchor(node.DevnetGenesisBlockHash()); err != nil {
+		_, _ = fmt.Fprintf(stderr, "canonical index genesis anchor failed: %v\n", err)
+		return 2
+	}
+	syncCfg, err := replaySyncConfig("devnet")
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "replay suite context failed: %v\n", err)
+		return 2
+	}
+	if _, err := node.ReconcileChainStateWithBlockStore(st, blockStore, syncCfg); err != nil {
+		_, _ = fmt.Fprintf(stderr, "chainstate reconcile failed: %v\n", err)
 		return 2
 	}
 	nextHeight, err := nextSpendHeight(st)

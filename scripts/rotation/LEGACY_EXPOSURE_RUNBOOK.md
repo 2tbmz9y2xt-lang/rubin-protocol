@@ -69,11 +69,31 @@ The scanner emits deterministic JSON with:
 Today this measurement surface covers UTXOs whose covenant data explicitly
 stores a `suite_id` byte. In current node code that means the explicit suite-id
 index surface, not every possible migration-related interpretation layer.
-The scanner is chainstate-only: it reads the local datadir and exits without
-starting runtime services, so this measurement mode does not require a genesis
-file just to inspect an already indexed chainstate snapshot. Scans against a
-missing chainstate file or a snapshot without a tip are invalid and must be
-treated as hard errors, not as zero-exposure readiness.
+The scanner reads the local datadir and exits without starting runtime
+services, so this measurement mode does not require a genesis file just to
+inspect an already indexed chainstate snapshot. It does not replay: replay would
+need the network identity this mode deliberately does not ask for, and exposure
+measured against a guessed identity is worse than no measurement.
+
+Because the persisted snapshot is the node's precommit checkpoint, it can lag
+the canonical index by one transition. The scanner therefore emits JSON only
+when the snapshot is EXACTLY the canonical index tip — same has-tip, height and
+tip hash. Scans against a missing chainstate file, a snapshot without a tip, or
+a snapshot that is not the canonical tip exit 2 with no report, and must be
+treated as hard errors, not as zero-exposure readiness. A report is never
+emitted from a lagging snapshot.
+
+The snapshot equals the canonical tip only right after the node's own startup
+recovery has run — startup verifies the genesis anchor, reconciles the snapshot
+against the canonical index and saves it — and until the node commits its next
+transition, after which the durable snapshot is again the checkpoint one
+transition behind. The operational recipe is therefore: start the node, let
+startup recovery finish, stop the node, then run the scan against the stopped
+datadir. Scanning a datadir that a node is actively writing is not supported:
+the scan takes no datadir lock, so it neither blocks nor is blocked by that
+node, but it reconstructs bounded non-canonical accounting from a directory the
+node is mutating, and it is measuring a snapshot the node moves out from under
+it — either can exit 2 with no report.
 
 ## 4) Explicit Trigger Criteria
 

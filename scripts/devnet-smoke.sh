@@ -85,40 +85,22 @@ extract_rpc_addr() {
   printf '%s\n' "${addr}"
 }
 
-wait_for_height() {
-  local datadir="$1"
-  local want_height="$2"
-  local timeout="$3"
-  local deadline=$((SECONDS + timeout))
-  while (( SECONDS < deadline )); do
-    if python3 - "${datadir}" "${want_height}" <<'PY'
-import base64
+read_rpc_height() {
+  local rpc_addr="$1"
+  python3 - "${rpc_addr}" <<'PY'
 import json
-import pathlib
 import sys
+import urllib.request
 
-datadir = pathlib.Path(sys.argv[1])
-want_height = int(sys.argv[2])
-path = datadir / "chainstate.json"
-if not path.exists():
-    raise SystemExit(1)
-# RUB-1134: unwrap the store_envelope_v1 frame (the node verifies the
-# domain-tagged checksum on load); the inner payload encoding is unchanged.
-envelope = json.loads(path.read_text())
-if envelope.get("version") != 1:
-    raise SystemExit(1)
-data = json.loads(base64.b64decode(envelope["payload_b64"], validate=True))
-if data.get("has_tip") and data.get("height") == want_height:
-    raise SystemExit(0)
-raise SystemExit(1)
+rpc_addr = sys.argv[1]
+with urllib.request.urlopen(f"http://{rpc_addr}/get_tip", timeout=2) as resp:
+    if resp.status != 200:
+        raise SystemExit(f"get_tip status {resp.status}")
+    data = json.loads(resp.read().decode("utf-8"))
+if not data.get("has_tip"):
+    raise SystemExit("node reports no tip")
+print(data["height"])
 PY
-    then
-      return 0
-    fi
-    sleep 1
-  done
-  echo "timeout waiting for height=${want_height} in ${datadir}" >&2
-  return 1
 }
 
 wait_for_rpc_ready() {
@@ -249,11 +231,11 @@ if [[ "${MINED_LINES}" != "10" ]]; then
   exit 1
 fi
 
-IFS=$'\t' read -r NODE_A_HEIGHT _ _ _ NODE_A_HAS_TIP < <(read_state_tsv "${NODE_A_DIR}")
-if [[ "${NODE_A_HAS_TIP}" != "true" ]]; then
-  echo "node A has no tip after mining" >&2
-  exit 1
-fi
+# The reference height is the LIVE tip, never chainstate.json: the durable
+# snapshot is the precommit checkpoint and lags the canonical tip by one
+# transition, so a wait built from it would target N-1 while every node reports
+# N. read_rpc_height also fails closed when node A reports no tip.
+NODE_A_HEIGHT="$(read_rpc_height "${NODE_A_RPC_ADDR}")"
 
 echo "Starting node B"
 start_node "${NODE_B_LOG}" --create-store --datadir "${NODE_B_DIR}" --bind "127.0.0.1:0" --rpc-bind "${NODE_B_RPC_ADDR}" --peers "${NODE_A_ADDR}"
@@ -270,8 +252,6 @@ wait_for_log "${NODE_B_LOG}" "rubin-node skeleton running" 30 "${NODE_B_PID}"
 wait_for_log "${NODE_C_LOG}" "rubin-node skeleton running" 30 "${NODE_C_PID}"
 wait_for_rpc_ready "${NODE_B_RPC_ADDR}" 30
 wait_for_rpc_ready "${NODE_C_RPC_ADDR}" 30
-wait_for_height "${NODE_B_DIR}" "${NODE_A_HEIGHT}" 30
-wait_for_height "${NODE_C_DIR}" "${NODE_A_HEIGHT}" 30
 wait_for_rpc_height "${NODE_A_RPC_ADDR}" "${NODE_A_HEIGHT}" 30
 wait_for_rpc_height "${NODE_B_RPC_ADDR}" "${NODE_A_HEIGHT}" 30
 wait_for_rpc_height "${NODE_C_RPC_ADDR}" "${NODE_A_HEIGHT}" 30

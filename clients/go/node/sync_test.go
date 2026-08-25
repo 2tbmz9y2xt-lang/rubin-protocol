@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -284,7 +288,7 @@ func TestRecheckLiveTipIdentityRejectsSupplyOnlyMove(t *testing.T) {
 	state := NewChainState()
 	prior := chainTipScalarsOf(state)
 	state.AlreadyGenerated = consensus.Uint128FromU64(1)
-	err := (&SyncEngine{}).recheckLiveTipIdentity(&canonicalTransition{chainState: state}, prior)
+	err := (&SyncEngine{}).recheckCanonicalTransitionFreshness(&canonicalTransition{chainState: state}, &canonicalTransitionPlan{priorTip: prior})
 	if err == nil || err.Error() != "live chainstate tip moved during canonical apply" {
 		t.Fatalf("err=%v, want exact supply-only tip-move error", err)
 	}
@@ -413,23 +417,21 @@ func TestSyncEngineIBDLogic(t *testing.T) {
 	}
 }
 
+// TestCanonicalBlockRelayTerminalNew pins TERMINAL_PERSISTENCE(new) end to end:
+// an AMBIGUOUS canonical-index write whose strict readback finds the exact
+// planned-new identity publishes the complete C/M/O/A1 image and its NEW summary,
+// returns the terminal error and latches admission. A readback that proves
+// neither identity is UNKNOWN and publishes nothing, and a proven pre-namespace
+// refusal preserves OLD with no summary at all.
 func TestCanonicalBlockRelayTerminalNew(t *testing.T) {
-	injectStateSync := func(t *testing.T, engine *SyncEngine, failAt int, unreadable bool) *bool {
+	injectIndexSync := func(t *testing.T, store *BlockStore) *bool {
 		t.Helper()
 		failed := new(bool)
-		calls := 0
 		withAtomicWriteOps(t, func(ops *atomicWriteOps) {
 			syncParent := ops.syncParent
 			ops.syncParent = func(parent string) error {
-				if parent == filepath.Dir(engine.cfg.ChainStatePath) {
-					calls++
-				}
-				if !*failed && calls == failAt {
+				if !*failed && parent == store.rootPath {
 					*failed = true
-					if unreadable {
-						mustAtomic(t, os.Remove(engine.cfg.ChainStatePath))
-						mustAtomic(t, os.Mkdir(engine.cfg.ChainStatePath, 0o700))
-					}
 					return os.ErrPermission
 				}
 				return syncParent(parent)
@@ -438,77 +440,86 @@ func TestCanonicalBlockRelayTerminalNew(t *testing.T) {
 		return failed
 	}
 
-	for _, unreadable := range []bool{false, true} {
-		t.Run(map[bool]string{false: "direct complete visible NEW", true: "direct unreadable NEW"}[unreadable], func(t *testing.T) {
-			engine, store, _ := newPersistenceFaultEngine(t)
-			pb, err := consensus.ParseBlockBytes(DevnetGenesisBlockBytes())
-			if err != nil {
-				t.Fatalf("parse genesis: %v", err)
-			}
-			failed := injectStateSync(t, engine, 1, unreadable)
-			summary, err := engine.ApplyBlockWithReorg(DevnetGenesisBlockBytes(), nil)
-			var fault *storagePersistenceFault
-			if unreadable {
-				if !*failed || summary != nil || !errors.Is(err, os.ErrPermission) || !errors.As(err, &fault) || fault.reloadErr == nil {
-					t.Fatalf("failed=%v summary=%+v fault=%+v err=%v", *failed, summary, fault, err)
-				}
-				return
-			}
-			if !*failed || summary == nil || !errors.Is(err, os.ErrPermission) || summary.BlockHash != devnetGenesisBlockHash || len(summary.CanonicalAppliedBlocks) != 1 {
-				t.Fatalf("failed=%v summary=%+v err=%v", *failed, summary, err)
-			}
-			view := engine.chainState.view()
-			index, indexErr := store.CanonicalIndexSnapshot()
-			wantIndex := []string{hex.EncodeToString(summary.BlockHash[:])}
-			if !view.hasTip || view.height != summary.BlockHeight || view.tipHash != summary.BlockHash || engine.chainState.StateDigest() != summary.PostStateDigest || indexErr != nil || !reflect.DeepEqual(index, wantIndex) {
-				t.Fatalf("live=%+v digest=%x index=%v indexErr=%v, want summary=%+v index=%v", view, engine.chainState.StateDigest(), index, indexErr, summary, wantIndex)
-			}
-			if engine.tipTimestamp != pb.Header.Timestamp || engine.IsInIBD(pb.Header.Timestamp) {
-				t.Fatalf("tipTimestamp=%d IBD=%v, want published timestamp %d and post-transition non-IBD", engine.tipTimestamp, engine.IsInIBD(pb.Header.Timestamp), pb.Header.Timestamp)
-			}
-		})
-	}
+	t.Run("direct complete visible NEW", func(t *testing.T) {
+		engine, store, _ := newPersistenceFaultEngine(t)
+		// The corridor stores the record into the entry point's batch and cannot
+		// format a fallback, so this proves the batch really arrived non-nil.
+		var stderr bytes.Buffer
+		engine.SetStderr(&stderr)
+		pb, err := consensus.ParseBlockBytes(DevnetGenesisBlockBytes())
+		if err != nil {
+			t.Fatalf("parse genesis: %v", err)
+		}
+		failed := injectIndexSync(t, store)
+		summary, err := engine.ApplyBlockWithReorg(DevnetGenesisBlockBytes(), nil)
+		if !*failed || summary == nil || !errors.Is(err, os.ErrPermission) || summary.BlockHash != devnetGenesisBlockHash || len(summary.CanonicalAppliedBlocks) != 1 {
+			t.Fatalf("failed=%v summary=%+v err=%v", *failed, summary, err)
+		}
+		if !engine.persistenceFaulted() {
+			t.Fatal("terminal NEW did not latch the engine")
+		}
+		view := engine.chainState.view()
+		index, indexErr := store.CanonicalIndexSnapshot()
+		wantIndex := []string{hex.EncodeToString(summary.BlockHash[:])}
+		if !view.hasTip || view.height != summary.BlockHeight || view.tipHash != summary.BlockHash || engine.chainState.StateDigest() != summary.PostStateDigest || indexErr != nil || !reflect.DeepEqual(index, wantIndex) {
+			t.Fatalf("live=%+v digest=%x index=%v indexErr=%v, want summary=%+v index=%v", view, engine.chainState.StateDigest(), index, indexErr, summary, wantIndex)
+		}
+		if engine.tipTimestamp != pb.Header.Timestamp || engine.IsInIBD(pb.Header.Timestamp) {
+			t.Fatalf("tipTimestamp=%d IBD=%v, want published timestamp %d and post-transition non-IBD", engine.tipTimestamp, engine.IsInIBD(pb.Header.Timestamp), pb.Header.Timestamp)
+		}
+		if !strings.Contains(stderr.String(), "canonical transition terminal (terminal canonical persistence (new))") {
+			t.Fatalf("terminal-NEW stderr=%q, want the latch record", stderr.String())
+		}
+	})
 
-	for _, unreadable := range []bool{false, true} {
-		t.Run(map[bool]string{false: "preferred complete visible NEW", true: "preferred unreadable NEW"}[unreadable], func(t *testing.T) {
-			engine, _, target := newReorgTestEngine(t)
-			subsidy1 := consensus.BlockSubsidy(1, 0)
-			coinbase1 := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1)
-			blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbase1)
-			if _, err := engine.ApplyBlockWithReorg(blockA1, nil); err != nil {
-				t.Fatalf("apply A1: %v", err)
-			}
-			sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(2), coinbase1)
-			_, sideB1Hash := mustParseReorgBlockForTest(t, sideB1)
-			if _, err := engine.ApplyBlockWithReorg(sideB1, nil); err != nil {
-				t.Fatalf("store B1: %v", err)
-			}
-			subsidy2 := consensus.BlockSubsidy(2, subsidy1)
-			sideB2 := buildSingleTxBlock(t, sideB1Hash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
-			parsedB2, sideB2Hash := mustParseReorgBlockForTest(t, sideB2)
-			failed := injectStateSync(t, engine, 3, unreadable)
-			summary, err := engine.ApplyBlockWithReorg(sideB2, nil)
-			var fault *storagePersistenceFault
-			if unreadable {
-				if !*failed || summary != nil || !errors.Is(err, os.ErrPermission) || !errors.As(err, &fault) || fault.reloadErr == nil {
-					t.Fatalf("failed=%v summary=%+v fault=%+v err=%v", *failed, summary, fault, err)
-				}
-				return
-			}
-			if !*failed || summary == nil || !errors.Is(err, os.ErrPermission) || summary.BlockHash != sideB2Hash || len(summary.CanonicalAppliedBlocks) != 2 {
-				t.Fatalf("failed=%v summary=%+v err=%v", *failed, summary, err)
-			}
-			view := engine.chainState.view()
-			index, indexErr := engine.blockStore.CanonicalIndexSnapshot()
-			wantIndex := []string{hex.EncodeToString(devnetGenesisBlockHash[:]), hex.EncodeToString(sideB1Hash[:]), hex.EncodeToString(sideB2Hash[:])}
-			if !view.hasTip || view.height != summary.BlockHeight || view.tipHash != summary.BlockHash || engine.chainState.StateDigest() != summary.PostStateDigest || indexErr != nil || !reflect.DeepEqual(index, wantIndex) {
-				t.Fatalf("live=%+v digest=%x index=%v indexErr=%v, want summary=%+v index=%v", view, engine.chainState.StateDigest(), index, indexErr, summary, wantIndex)
-			}
-			if engine.tipTimestamp != parsedB2.Header.Timestamp || engine.IsInIBD(parsedB2.Header.Timestamp) {
-				t.Fatalf("tipTimestamp=%d IBD=%v, want published timestamp %d and post-transition non-IBD", engine.tipTimestamp, engine.IsInIBD(parsedB2.Header.Timestamp), parsedB2.Header.Timestamp)
-			}
+	t.Run("preferred complete visible NEW", func(t *testing.T) {
+		engine, _, target := newReorgTestEngine(t)
+		subsidy1 := consensus.BlockSubsidy(1, 0)
+		coinbase1 := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1)
+		blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbase1)
+		if _, err := engine.ApplyBlockWithReorg(blockA1, nil); err != nil {
+			t.Fatalf("apply A1: %v", err)
+		}
+		sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(2), coinbase1)
+		_, sideB1Hash := mustParseReorgBlockForTest(t, sideB1)
+		if _, err := engine.ApplyBlockWithReorg(sideB1, nil); err != nil {
+			t.Fatalf("store B1: %v", err)
+		}
+		subsidy2 := consensus.BlockSubsidy(2, subsidy1)
+		sideB2 := buildSingleTxBlock(t, sideB1Hash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+		parsedB2, sideB2Hash := mustParseReorgBlockForTest(t, sideB2)
+		failed := injectIndexSync(t, engine.blockStore)
+		summary, err := engine.ApplyBlockWithReorg(sideB2, nil)
+		if !*failed || summary == nil || !errors.Is(err, os.ErrPermission) || summary.BlockHash != sideB2Hash || len(summary.CanonicalAppliedBlocks) != 2 {
+			t.Fatalf("failed=%v summary=%+v err=%v", *failed, summary, err)
+		}
+		view := engine.chainState.view()
+		index, indexErr := engine.blockStore.CanonicalIndexSnapshot()
+		wantIndex := []string{hex.EncodeToString(devnetGenesisBlockHash[:]), hex.EncodeToString(sideB1Hash[:]), hex.EncodeToString(sideB2Hash[:])}
+		if !view.hasTip || view.height != summary.BlockHeight || view.tipHash != summary.BlockHash || engine.chainState.StateDigest() != summary.PostStateDigest || indexErr != nil || !reflect.DeepEqual(index, wantIndex) {
+			t.Fatalf("live=%+v digest=%x index=%v indexErr=%v, want summary=%+v index=%v", view, engine.chainState.StateDigest(), index, indexErr, summary, wantIndex)
+		}
+		if engine.tipTimestamp != parsedB2.Header.Timestamp || engine.IsInIBD(parsedB2.Header.Timestamp) {
+			t.Fatalf("tipTimestamp=%d IBD=%v, want published timestamp %d and post-transition non-IBD", engine.tipTimestamp, engine.IsInIBD(parsedB2.Header.Timestamp), parsedB2.Header.Timestamp)
+		}
+	})
+
+	t.Run("unreadable readback is UNKNOWN", func(t *testing.T) {
+		engine, store, _ := newPersistenceFaultEngine(t)
+		failed := injectIndexSync(t, store)
+		reads := 0
+		withLoadBlockStoreIndexFn(t, func(string) (blockStoreIndexDisk, []byte, error) {
+			reads++
+			return blockStoreIndexDisk{}, nil, os.ErrInvalid
 		})
-	}
+		summary, err := engine.ApplyBlockWithReorg(DevnetGenesisBlockBytes(), nil)
+		if !*failed || summary != nil || !errors.Is(err, os.ErrPermission) || !errors.Is(err, os.ErrInvalid) || reads != 1 {
+			t.Fatalf("failed=%v summary=%+v err=%v reads=%d", *failed, summary, err, reads)
+		}
+		if !engine.persistenceFaulted() || engine.chainState.view().hasTip {
+			t.Fatalf("UNKNOWN latch=%v tip=%v, want a latched engine that published nothing", engine.persistenceFaulted(), engine.chainState.view().hasTip)
+		}
+	})
 
 	t.Run("precommit remains nil", func(t *testing.T) {
 		engine, _, _ := newPersistenceFaultEngine(t)
@@ -557,8 +568,12 @@ func TestSyncEngineApplyBlockPersistsChainstateAndStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload chainstate: %v", err)
 	}
-	if !loaded.HasTip || loaded.Height != 1 {
-		t.Fatalf("unexpected persisted chainstate: has_tip=%v height=%d", loaded.HasTip, loaded.Height)
+	// The durable snapshot is the precommit CHECKPOINT at the highest row both
+	// identities share — here the pre-apply genesis tip — not the new tip: no
+	// fallible postcommit tip save exists. Startup reconcile replays the suffix
+	// from it, which is what makes either identity recoverable.
+	if !loaded.HasTip || loaded.Height != 0 || loaded.TipHash != devnetGenesisBlockHash {
+		t.Fatalf("unexpected persisted checkpoint: has_tip=%v height=%d tip=%x", loaded.HasTip, loaded.Height, loaded.TipHash)
 	}
 
 	height, _, ok, err := store.Tip()
@@ -2084,4 +2099,1348 @@ func TestSyncPendingOutpointCorruptCanonicalIndexOutranksConsensusRejection(t *t
 		_, err = f.engine.ApplyBlockWithReorg(side2, nil)
 		assertIndexError(t, err)
 	})
+}
+
+// countCanonicalIndexWrites installs the canonical-index write seam and returns
+// the running count of writes aimed at that store's index, so a test can pin
+// "exactly one prepared commit per transition" from the write itself.
+func countCanonicalIndexWrites(t *testing.T, store *BlockStore) *int {
+	t.Helper()
+	writes, write := new(int), writeFileAtomicFn
+	withWriteFileAtomicFn(t, func(path string, data []byte, mode os.FileMode) error {
+		if path == store.indexPath {
+			*writes++
+		}
+		return write(path, data, mode)
+	})
+	return writes
+}
+
+// newCutoverEngine builds a persistent engine on an EMPTY store, so a test can
+// drive the bootstrap transition itself.
+func newCutoverEngine(t *testing.T) (*SyncEngine, *BlockStore, string) {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := CreateBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("CreateBlockStore: %v", err)
+	}
+	target := consensus.POW_LIMIT
+	engine, err := NewSyncEngine(NewChainState(), store, DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(dir)))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	return engine, store, dir
+}
+
+// TestCanonicalCutoverDirectAndBootstrapCommitTruth pins the direct and
+// bootstrap rows: each transition derives one plan, writes the canonical index
+// EXACTLY once, and exposes C/M/O, A1 and the summary only after that commit
+// selected NEW. The durable checkpoint left behind is the highest row common to
+// both identities — the pre-apply image — which is what lets restart replay
+// either suffix.
+func TestCanonicalCutoverDirectAndBootstrapCommitTruth(t *testing.T) {
+	engine, store, dir := newCutoverEngine(t)
+	mp, err := NewMempool(engine.chainState, store, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	engine.SetMempool(mp)
+	owner := mp.PendingOutpointOwner()
+	before, ok := owner.AdmissionContext()
+	if !ok {
+		t.Fatal("owner unavailable before bootstrap")
+	}
+
+	writes := countCanonicalIndexWrites(t, store)
+	if err := engine.BootstrapCanonicalGenesisIfEmpty(); err != nil {
+		t.Fatalf("BootstrapCanonicalGenesisIfEmpty: %v", err)
+	}
+	if *writes != 1 {
+		t.Fatalf("bootstrap canonical index writes=%d, want exactly 1", *writes)
+	}
+	// The bootstrap checkpoint is the exact empty pre-genesis state.
+	checkpoint, err := LoadChainState(ChainStatePath(dir))
+	if err != nil {
+		t.Fatalf("LoadChainState(bootstrap checkpoint): %v", err)
+	}
+	if checkpoint.HasTip || len(checkpoint.Utxos) != 0 {
+		t.Fatalf("bootstrap checkpoint=(hasTip=%v,utxos=%d), want the empty pre-genesis image", checkpoint.HasTip, len(checkpoint.Utxos))
+	}
+	after, ok := owner.AdmissionContext()
+	if !ok || after.Generation != before.Generation+1 || after.StableTip.Hash != devnetGenesisBlockHash || !after.StableTip.HasTip {
+		t.Fatalf("bootstrap owner=%+v ok=%v, want one generation advance bound to C1", after, ok)
+	}
+	index, err := store.CanonicalIndexSnapshot()
+	if err != nil || len(index) != 1 || index[0] != hex.EncodeToString(devnetGenesisBlockHash[:]) {
+		t.Fatalf("bootstrap index=%v err=%v", index, err)
+	}
+
+	// Bootstrap never reports success on a LATCHED engine. An UNTAGGED commit
+	// failure over a write that really landed classifies as
+	// TERMINAL_PERSISTENCE(new): C1 publishes, so a tip appears, and the race
+	// tolerance would otherwise read that tip as "someone else bootstrapped".
+	t.Run("bootstrap never reports success on a latched engine", func(t *testing.T) {
+		latched, latchedStore, _ := newCutoverEngine(t)
+		write, injected := writeFileAtomicFn, false
+		withWriteFileAtomicFn(t, func(path string, data []byte, mode os.FileMode) error {
+			if path == latchedStore.indexPath && !injected {
+				injected = true
+				if err := write(path, data, mode); err != nil {
+					return err
+				}
+				return errors.New("untagged canonical index commit failure")
+			}
+			return write(path, data, mode)
+		})
+		err := latched.BootstrapCanonicalGenesisIfEmpty()
+		if !injected || err == nil {
+			t.Fatalf("injected=%v err=%v, want the terminal cause surfaced", injected, err)
+		}
+		if !latched.persistenceFaulted() || !latched.chainState.view().hasTip {
+			t.Fatalf("latch=%v tip=%v, want a latched engine that published C1", latched.persistenceFaulted(), latched.chainState.view().hasTip)
+		}
+	})
+
+	genesisView := engine.chainState.view()
+	target := consensus.POW_LIMIT
+	block := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidy(1, 0)))
+	*writes = 0
+	summary, err := engine.ApplyBlock(block, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(1): %v", err)
+	}
+	if *writes != 1 {
+		t.Fatalf("direct canonical index writes=%d, want exactly 1", *writes)
+	}
+	if len(summary.CanonicalAppliedBlocks) != 1 || summary.CanonicalAppliedBlocks[0].Hash != summary.BlockHash {
+		t.Fatalf("A1=%+v, want exactly one row for the newly canonical block", summary.CanonicalAppliedBlocks)
+	}
+	// The direct checkpoint is the OLD tip: the highest row both identities share.
+	checkpoint, err = LoadChainState(ChainStatePath(dir))
+	if err != nil {
+		t.Fatalf("LoadChainState(direct checkpoint): %v", err)
+	}
+	if !checkpoint.HasTip || checkpoint.Height != genesisView.height || checkpoint.TipHash != genesisView.tipHash {
+		t.Fatalf("direct checkpoint=(%d,%x), want the pre-apply tip (%d,%x)", checkpoint.Height, checkpoint.TipHash, genesisView.height, genesisView.tipHash)
+	}
+	if live := engine.chainState.view(); live.height != summary.BlockHeight || live.tipHash != summary.BlockHash {
+		t.Fatalf("live tip=(%d,%x), want the published C1", live.height, live.tipHash)
+	}
+	if tip, ok := owner.AdmissionContext(); !ok || tip.StableTip.Hash != summary.BlockHash {
+		t.Fatalf("owner stable tip=%+v ok=%v, want C1", tip, ok)
+	}
+
+	// Both arms of the direct identity refusal, each with its own row: the store
+	// and the chainstate must agree on the parent HASH, and the index row COUNT
+	// must be the candidate's height. Either mismatch is refused before staging,
+	// with nothing written, no latch, and a plain local error — never a
+	// consensus.TxError, which through the unchanged P2P callers would add ban
+	// score for a fault that is entirely local.
+	canonical := []string{hex.EncodeToString(devnetGenesisBlockHash[:]), hex.EncodeToString(summary.BlockHash[:])}
+	for _, tc := range []struct {
+		name  string
+		index []string
+		want  string
+	}{
+		{
+			// Same length, same members, wrong position: every row still resolves
+			// to a stored block, so nothing upstream of the plan can catch this.
+			name:  "parent hash disagreement refuses before staging",
+			index: []string{canonical[1], canonical[0]},
+			want:  "is not the canonical row at height 1",
+		},
+		{
+			// The chainstate tip is still height 1, so the candidate is height 2
+			// while the visible identity already carries three rows. The extra row
+			// is deliberately past the timestamp-context window, so this reaches
+			// the row-count arm instead of an upstream missing-row read.
+			name:  "row count disagreement refuses before staging",
+			index: append(append([]string(nil), canonical...), strings.Repeat("ab", 32)),
+			want:  "does not extend a 3-row canonical identity",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := store.RestoreCanonicalIndex(tc.index); err != nil {
+				t.Fatalf("RestoreCanonicalIndex: %v", err)
+			}
+			beforeArtifacts := durableStoreFingerprint(t, store)
+			mismatchWrites := countCanonicalIndexWrites(t, store)
+			next := buildSingleTxBlock(t, summary.BlockHash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidy(2, consensus.BlockSubsidy(1, 0))))
+			refused, err := engine.ApplyBlock(next, nil)
+			if refused != nil || err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("summary=%+v err=%v, want the %q refusal", refused, err, tc.want)
+			}
+			var txErr *consensus.TxError
+			if errors.As(err, &txErr) {
+				t.Fatalf("the local refusal is a consensus.TxError (%+v): P2P would score a ban for a local index mismatch", txErr)
+			}
+			if *mismatchWrites != 0 || engine.persistenceFaulted() {
+				t.Fatalf("index writes=%d latch=%v, want an OLD/open refusal", *mismatchWrites, engine.persistenceFaulted())
+			}
+			if got := durableStoreFingerprint(t, store); got != beforeArtifacts {
+				t.Fatalf("the refusal staged artifacts:\n got=%s\nwant=%s", got, beforeArtifacts)
+			}
+			if err := store.RestoreCanonicalIndex(canonical); err != nil {
+				t.Fatalf("RestoreCanonicalIndex(repair): %v", err)
+			}
+		})
+	}
+
+	// A refused commit is OLD/open: no publication, no counter, no latch.
+	beforeCounts, beforeView := engine.BlockApplyCounts(), engine.chainState.view()
+	next := buildSingleTxBlock(t, summary.BlockHash, target, reorgTestTimestamp(2), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidy(2, consensus.BlockSubsidy(1, 0))))
+	write := writeFileAtomicFn
+	withWriteFileAtomicFn(t, func(path string, data []byte, mode os.FileMode) error {
+		if path == store.indexPath {
+			return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
+		}
+		return write(path, data, mode)
+	})
+	refused, err := engine.ApplyBlock(next, nil)
+	if refused != nil || err == nil || engine.persistenceFaulted() {
+		t.Fatalf("refused commit summary=%+v err=%v latch=%v", refused, err, engine.persistenceFaulted())
+	}
+	if engine.chainState.view() != beforeView || engine.BlockApplyCounts() != beforeCounts {
+		t.Fatalf("refused commit published state=%+v counts=%+v", engine.chainState.view(), engine.BlockApplyCounts())
+	}
+	if _, ok := owner.AdmissionContext(); !ok {
+		t.Fatal("refused commit left admission closed")
+	}
+}
+
+// TestCanonicalCutoverStandaloneDisconnectOneCommit pins the standalone
+// disconnect row: one commit, an EMPTY A1, and therefore zero connected-block
+// fee decay.
+func TestCanonicalCutoverStandaloneDisconnectOneCommit(t *testing.T) {
+	f := newCanonicalMOFixture(t, 1, MempoolConfig{})
+	if err := f.applyCoinbase(t); err != nil {
+		t.Fatalf("ApplyBlock: %v", err)
+	}
+	f.mp.SetCurrentMinFeeRateForTest(64)
+	beforeFloor := f.mp.CurrentMinFeeRateSnapshot()
+	beforeIndex, err := f.store.CanonicalIndexSnapshot()
+	if err != nil {
+		t.Fatalf("CanonicalIndexSnapshot: %v", err)
+	}
+
+	writes := countCanonicalIndexWrites(t, f.store)
+	summary, err := f.engine.DisconnectTip()
+	if err != nil {
+		t.Fatalf("DisconnectTip: %v", err)
+	}
+	if *writes != 1 {
+		t.Fatalf("disconnect canonical index writes=%d, want exactly 1", *writes)
+	}
+	if got := f.mp.CurrentMinFeeRateSnapshot(); got != beforeFloor {
+		t.Fatalf("fee floor=%d after a standalone disconnect, want the unchanged %d (no A1 row, no decay event)", got, beforeFloor)
+	}
+	afterIndex, err := f.store.CanonicalIndexSnapshot()
+	if err != nil || len(afterIndex) != len(beforeIndex)-1 {
+		t.Fatalf("index after disconnect=%v err=%v, want one row shorter", afterIndex, err)
+	}
+	if summary.NewHeight != uint64(len(afterIndex))-1 {
+		t.Fatalf("disconnect summary=%+v, want the parent height", summary)
+	}
+	if tip, ok := f.mp.PendingOutpointOwner().AdmissionContext(); !ok || tip.StableTip.Height != summary.NewHeight {
+		t.Fatalf("owner stable tip=%+v ok=%v, want the disconnected parent", tip, ok)
+	}
+}
+
+// TestCanonicalCutoverApplyPlanMetadataBounds pins the exact charge formula
+// 48 + 40*(disconnect_rows+connect_rows) + 32*sum(len(A1[row].CompleteDAIDs)),
+// the inclusive production cap, and the refusal ORDER: an over-cap plan is
+// refused before any artifact, checkpoint, generation or live mutation.
+//
+// The exact-cap and cap+8 rows run against the package-private cap override on
+// the SAME production comparison; the production cap constant and its cap+8
+// neighbour are pinned as literals and fed to that comparison directly.
+func TestCanonicalCutoverApplyPlanMetadataBounds(t *testing.T) {
+	rows := func(n int) []canonicalRowDescriptor { return make([]canonicalRowDescriptor, n) }
+	applied := func(counts ...int) []CanonicalAppliedBlock {
+		out := make([]CanonicalAppliedBlock, 0, len(counts))
+		for _, n := range counts {
+			out = append(out, CanonicalAppliedBlock{CompleteDAIDs: make([][32]byte, n)})
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name             string
+		disconnect, conn int
+		ids              []int
+		want             uint64
+	}{
+		{"empty", 0, 0, nil, 48},
+		{"one connect row", 0, 1, []int{0}, 88},
+		{"disconnect and connect", 2, 3, []int{0, 0, 0}, 248},
+		{"ids charged per id", 0, 1, []int{3}, 184},
+		{"cross block ids retained", 0, 2, []int{1, 1}, 192},
+	} {
+		got, err := canonicalPlanMetadataCharge(rows(tc.disconnect), rows(tc.conn), applied(tc.ids...))
+		if err != nil || got != tc.want {
+			t.Fatalf("%s charge=%d err=%v, want %d", tc.name, got, err, tc.want)
+		}
+	}
+
+	if canonicalPlanMetadataCapBytes != 67108864 {
+		t.Fatalf("production cap=%d, want the pinned 64 MiB literal 67108864", canonicalPlanMetadataCapBytes)
+	}
+	for _, term := range []uint64{canonicalPlanMetadataBaseBytes, canonicalPlanMetadataRowBytes, canonicalPlanMetadataIDBytes, canonicalPlanMetadataCapBytes} {
+		if term%8 != 0 {
+			t.Fatalf("charge term %d is not a multiple of 8: cap+8 would not be the smallest realizable overflow", term)
+		}
+	}
+	if err := canonicalPlanMetadataBoundError(canonicalPlanMetadataCapBytes); err != nil {
+		t.Fatalf("the exact cap must be accepted: %v", err)
+	}
+	if err := canonicalPlanMetadataBoundError(canonicalPlanMetadataCapBytes + 8); !errors.Is(err, errCanonicalPlanMetadataCap) {
+		t.Fatalf("cap+8=%d err=%v, want the resource refusal", canonicalPlanMetadataCapBytes+8, err)
+	}
+
+	// Exact cap accepted / cap+8 refused on the real charge path.
+	previousCap := canonicalPlanMetadataCap
+	t.Cleanup(func() { canonicalPlanMetadataCap = previousCap })
+	canonicalPlanMetadataCap = 168
+	exact := &canonicalTransitionPlan{connect: rows(3)}
+	if err := exact.checkCanonicalPlanMetadataBound(); err != nil {
+		t.Fatalf("exact cap plan refused: %v", err)
+	}
+	over := &canonicalTransitionPlan{applied: applied(4)}
+	if err := over.checkCanonicalPlanMetadataBound(); !errors.Is(err, errCanonicalPlanMetadataCap) {
+		t.Fatalf("cap+8 plan err=%v, want the resource refusal", err)
+	}
+
+	// End to end: the refusal precedes every side effect.
+	f := newCanonicalMOFixture(t, 1, MempoolConfig{})
+	beforeIndex, err := f.store.CanonicalIndexSnapshot()
+	if err != nil {
+		t.Fatalf("CanonicalIndexSnapshot: %v", err)
+	}
+	beforeView, beforeOwner := f.engine.chainState.view(), mustCutoverAdmission(t, f.mp)
+	// The bound fires before ARTIFACT, checkpoint, generation and live work, so
+	// the durable store fingerprint — canonical index plus every block, header
+	// and undo file — must be identical afterwards.
+	beforeArtifacts := durableStoreFingerprint(t, f.store)
+	beforeSnapshot, err := os.ReadFile(f.engine.cfg.ChainStatePath)
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	writes := countCanonicalIndexWrites(t, f.store)
+	canonicalPlanMetadataCap = 8
+	if err := f.applyCoinbase(t); !errors.Is(err, errCanonicalPlanMetadataCap) {
+		t.Fatalf("over-cap apply err=%v, want the resource refusal", err)
+	}
+	afterSnapshot, err := os.ReadFile(f.engine.cfg.ChainStatePath)
+	if err != nil {
+		t.Fatalf("read checkpoint after refusal: %v", err)
+	}
+	afterIndex, err := f.store.CanonicalIndexSnapshot()
+	if err != nil {
+		t.Fatalf("CanonicalIndexSnapshot after refusal: %v", err)
+	}
+	if *writes != 0 || !reflect.DeepEqual(afterIndex, beforeIndex) || !reflect.DeepEqual(afterSnapshot, beforeSnapshot) {
+		t.Fatalf("over-cap refusal mutated index writes=%d index=%v checkpoint_changed=%v", *writes, afterIndex, !reflect.DeepEqual(afterSnapshot, beforeSnapshot))
+	}
+	if got := durableStoreFingerprint(t, f.store); got != beforeArtifacts {
+		t.Fatalf("over-cap refusal staged artifacts:\n got=%s\nwant=%s", got, beforeArtifacts)
+	}
+	after := mustCutoverAdmission(t, f.mp)
+	if f.engine.chainState.view() != beforeView || after.Generation != beforeOwner.Generation {
+		t.Fatalf("over-cap refusal advanced the generation or the live image: view=%+v owner=%+v", f.engine.chainState.view(), after)
+	}
+}
+
+func mustCutoverAdmission(t *testing.T, mp *Mempool) PendingOutpointAdmissionContext {
+	t.Helper()
+	ctx, ok := mp.PendingOutpointOwner().AdmissionContext()
+	if !ok {
+		t.Fatal("owner admission context unavailable")
+	}
+	return ctx
+}
+
+// TestCanonicalCutoverPrecommitRecoverySet pins RECOVERY_PROOF: the new suffix
+// is staged through the existing artifact writers, both suffix proof sets are
+// strict-read through the same reader startup uses, and only then is the durable
+// checkpoint replaced and read back. The write ORDER is observed from the
+// filesystem, not asserted from the code.
+func TestCanonicalCutoverPrecommitRecoverySet(t *testing.T) {
+	engine, store, dir := newCutoverEngine(t)
+	if err := engine.BootstrapCanonicalGenesisIfEmpty(); err != nil {
+		t.Fatalf("BootstrapCanonicalGenesisIfEmpty: %v", err)
+	}
+	target := consensus.POW_LIMIT
+	block := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidy(1, 0)))
+
+	var order []string
+	withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+		sync := ops.syncParent
+		ops.syncParent = func(parent string) error {
+			switch parent {
+			case store.blocksDir, store.headersDir, store.undoDir:
+				order = append(order, "artifact")
+			case dir:
+				order = append(order, "checkpoint")
+			case store.rootPath:
+				order = append(order, "index")
+			}
+			return sync(parent)
+		}
+	})
+	summary, err := engine.ApplyBlock(block, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock: %v", err)
+	}
+	if len(order) < 3 || order[len(order)-1] != "index" || order[len(order)-2] != "checkpoint" {
+		t.Fatalf("durable write order=%v, want every artifact, then the checkpoint, then the index", order)
+	}
+	for _, stage := range order[:len(order)-2] {
+		if stage != "artifact" {
+			t.Fatalf("durable write order=%v, want artifacts before the checkpoint", order)
+		}
+	}
+
+	// Both suffix rows read as valid.
+	for _, hash := range [][32]byte{devnetGenesisBlockHash, summary.BlockHash} {
+		if class, err := store.proveCanonicalArtifacts(hash); class != canonicalArtifactValid || err != nil {
+			t.Fatalf("proveCanonicalArtifacts(%x)=(%v,%v), want valid", hash, class, err)
+		}
+	}
+	// Definitive absence is POSITIVE evidence, so it is the invalid class, not
+	// unavailability.
+	var absent [32]byte
+	if class, _ := store.proveCanonicalArtifacts(absent); class != canonicalArtifactInvalid {
+		t.Fatalf("proveCanonicalArtifacts(absent) class=%v, want invalid", class)
+	}
+	if err := os.Remove(filepath.Join(store.undoDir, hex.EncodeToString(summary.BlockHash[:])+".json")); err != nil {
+		t.Fatalf("Remove(undo): %v", err)
+	}
+	if class, _ := store.proveCanonicalArtifacts(summary.BlockHash); class != canonicalArtifactInvalid {
+		t.Fatalf("proveCanonicalArtifacts(missing undo) class=%v, want invalid", class)
+	}
+
+	// A canonical artifact the retention profile requires, corrupted between the
+	// reorg preview and the proof, is TERMINAL_STORE_INTEGRITY(canonical): the
+	// pre-fence path takes the admission guard, installs the EXISTING latch and
+	// retains it, publishing nothing.
+	t.Run("pre-fence canonical corruption latches", func(t *testing.T) {
+		reorgEngine, reorgStore, reorgTarget := newReorgTestEngine(t)
+		subsidy1 := consensus.BlockSubsidy(1, 0)
+		a1 := buildSingleTxBlock(t, devnetGenesisBlockHash, reorgTarget, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+		a1Summary, err := reorgEngine.ApplyBlock(a1, nil)
+		if err != nil {
+			t.Fatalf("ApplyBlock(A1): %v", err)
+		}
+		b1 := buildSingleTxBlock(t, devnetGenesisBlockHash, reorgTarget, reorgTestTimestamp(2), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+		if _, err := reorgEngine.ApplyBlockWithReorg(b1, nil); err != nil {
+			t.Fatalf("store B1: %v", err)
+		}
+		_, b1Hash := mustParseReorgBlockForTest(t, b1)
+		b2 := buildSingleTxBlock(t, b1Hash, reorgTarget, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidy(2, subsidy1)))
+		rotation := &corruptCanonicalOnCreateRotation{overwrite: func() {
+			writeRawStoreBlockFile(t, reorgStore, a1Summary.BlockHash, []byte("corrupt after preview"))
+		}}
+		reorgEngine.cfg.RotationProvider = rotation
+		reorgWrites := countCanonicalIndexWrites(t, reorgStore)
+		var integrity *canonicalStoreIntegrityError
+		if _, err := reorgEngine.ApplyBlockWithReorg(b2, nil); !errors.As(err, &integrity) {
+			t.Fatalf("reorg over a corrupt required artifact=%v, want the canonical store-integrity refusal", err)
+		}
+		if rotation.fires != 1 || *reorgWrites != 0 || !reorgEngine.persistenceFaulted() {
+			t.Fatalf("fires=%d index writes=%d latch=%v", rotation.fires, *reorgWrites, reorgEngine.persistenceFaulted())
+		}
+		if reorgEngine.chainState.TipHash != a1Summary.BlockHash {
+			t.Fatalf("terminal OLD moved the live tip to %x", reorgEngine.chainState.TipHash)
+		}
+		if _, err := reorgEngine.ApplyBlock(a1, nil); !errors.Is(err, errStoragePersistenceFault) {
+			t.Fatalf("post-latch mutation=%v, want the retained fail-closed latch", err)
+		}
+	})
+
+	// A staged NEW-suffix row that will not strict-read is a member of this
+	// precommit recovery set, so it is TERMINAL_STORE_INTEGRITY(canonical): the
+	// engine latches, publishes nothing and never reaches the checkpoint or the
+	// index write.
+	t.Run("staged connect row failing its proof latches", func(t *testing.T) {
+		proofEngine, proofStore, proofDir := newCutoverEngine(t)
+		if err := proofEngine.BootstrapCanonicalGenesisIfEmpty(); err != nil {
+			t.Fatalf("BootstrapCanonicalGenesisIfEmpty: %v", err)
+		}
+		checkpointBefore, err := os.ReadFile(ChainStatePath(proofDir))
+		if err != nil {
+			t.Fatalf("read checkpoint: %v", err)
+		}
+		next := buildSingleTxBlock(t, devnetGenesisBlockHash, consensus.POW_LIMIT, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidy(1, 0)))
+		parsed, err := consensus.ParseBlockBytes(next)
+		if err != nil {
+			t.Fatalf("ParseBlockBytes: %v", err)
+		}
+		nextHash, err := consensus.BlockHash(parsed.HeaderBytes)
+		if err != nil {
+			t.Fatalf("BlockHash: %v", err)
+		}
+		// The undo file is read through this seam ONLY by the strict proof:
+		// staging writes it without reading it back through readFileByPathFn.
+		undoPath := filepath.Join(proofStore.undoDir, hex.EncodeToString(nextHash[:])+".json")
+		// POSITIVE evidence: the read COMPLETES and the value is a malformed
+		// state-reversal artifact. An acquisition failure here would be
+		// unavailability instead — that row lives in
+		// TestCanonicalCutoverStrictReadErrorClassification.
+		previousRead, proofReads := readFileByPathFn, 0
+		t.Cleanup(func() { readFileByPathFn = previousRead })
+		readFileByPathFn = func(path string, limit int64) ([]byte, error) {
+			if path == undoPath {
+				proofReads++
+				return []byte("{}"), nil
+			}
+			return previousRead(path, limit)
+		}
+		writes := countCanonicalIndexWrites(t, proofStore)
+		summary, err := proofEngine.ApplyBlock(next, nil)
+		var integrity *canonicalStoreIntegrityError
+		if summary != nil || !errors.As(err, &integrity) {
+			t.Fatalf("summary=%+v err=%v, want the canonical store-integrity refusal", summary, err)
+		}
+		if proofReads == 0 || *writes != 0 || !proofEngine.persistenceFaulted() {
+			t.Fatalf("proof reads=%d index writes=%d latch=%v", proofReads, *writes, proofEngine.persistenceFaulted())
+		}
+		if live := proofEngine.chainState.view(); live.height != 0 || live.tipHash != devnetGenesisBlockHash {
+			t.Fatalf("terminal OLD moved the live tip to (%d,%x)", live.height, live.tipHash)
+		}
+		checkpointAfter, err := os.ReadFile(ChainStatePath(proofDir))
+		if err != nil || !reflect.DeepEqual(checkpointAfter, checkpointBefore) {
+			t.Fatalf("the proof failure replaced the checkpoint: err=%v", err)
+		}
+		// The artifacts were staged first; only their proof failed.
+		if _, err := proofStore.GetBlockByHash(nextHash); err != nil {
+			t.Fatalf("staged block artifact missing: %v", err)
+		}
+	})
+
+	// A checkpoint that cannot be written refuses BEFORE the index write, and
+	// the staged artifacts are already durable.
+	engine2, store2, dir2 := newCutoverEngine(t)
+	engine2.cfg.ChainStatePath = filepath.Join(dir2, "checkpoint-dir")
+	if err := os.Mkdir(engine2.cfg.ChainStatePath, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	writes := countCanonicalIndexWrites(t, store2)
+	if err := engine2.BootstrapCanonicalGenesisIfEmpty(); err == nil {
+		t.Fatal("bootstrap crossed the commit with an unwritable checkpoint")
+	}
+	if *writes != 0 || engine2.persistenceFaulted() {
+		t.Fatalf("checkpoint refusal writes=%d latch=%v, want a precommit refusal", *writes, engine2.persistenceFaulted())
+	}
+	if _, err := store2.GetBlockByHash(devnetGenesisBlockHash); err != nil {
+		t.Fatalf("staged block artifact missing after the checkpoint refusal: %v", err)
+	}
+	if index, err := store2.CanonicalIndexSnapshot(); err != nil || len(index) != 0 {
+		t.Fatalf("canonical index=%v err=%v after the checkpoint refusal, want the empty old identity", index, err)
+	}
+}
+
+// TestCanonicalCutoverLatchedBootstrapReturnIsTotal pins the contract's "MUST be
+// nonnil": whatever the apply reported, a LATCHED engine never returns nil from
+// bootstrap. The nil-applyErr row is not reachable through today's classifier —
+// every latching class carries a cause — which is exactly why it is pinned here
+// instead of being left to a caller's assumption.
+func TestCanonicalCutoverLatchedBootstrapReturnIsTotal(t *testing.T) {
+	apply := errors.New("apply failed")
+	for _, tc := range []struct {
+		name     string
+		applyErr error
+		hasTip   bool
+		latched  bool
+		want     error
+	}{
+		{"latched with a cause", apply, true, true, apply},
+		{"latched with no cause", nil, true, true, errStoragePersistenceFault},
+		{"latched with no cause and no tip", nil, false, true, errStoragePersistenceFault},
+		{"unlatched race recovery still returns nil", apply, true, false, nil},
+		{"unlatched success still returns nil", nil, false, false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := latchAwareBootstrapResult(tc.applyErr, tc.hasTip, tc.latched)
+			if tc.want == nil && got != nil || tc.want != nil && !errors.Is(got, tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCanonicalCutoverPersistenceTruthTable is the closed classifier: every
+// commit class maps to exactly one (truth, latch) pair, and the hostile readback
+// identity set maps to exactly the OLD / NEW / UNKNOWN rows. The unit rows and
+// the end-to-end rows must agree on the same input.
+func TestCanonicalCutoverPersistenceTruthTable(t *testing.T) {
+	cause := errors.New("commit cause")
+	for _, tc := range []struct {
+		name    string
+		result  canonicalCommitResult
+		truth   canonicalCommitTruth
+		latched bool
+	}{
+		{"committed", canonicalCommitResult{class: canonicalCommitted}, canonicalTruthNew, false},
+		{"precommit", canonicalCommitResult{class: canonicalCommitPrecommit, err: cause}, canonicalTruthOld, false},
+		{"stale moved", canonicalCommitResult{class: canonicalCommitStale, err: errCanonicalIndexMoved}, canonicalTruthOld, false},
+		{"stale spent", canonicalCommitResult{class: canonicalCommitStale, err: errPreparedIndexSpent}, canonicalTruthOld, true},
+		{"empty class bytes", canonicalCommitResult{err: errNoncanonicalBytes}, canonicalTruthOld, false},
+		{"empty class count", canonicalCommitResult{err: errNoncanonicalCount}, canonicalTruthOld, false},
+		{"empty class integrity", canonicalCommitResult{err: cause}, canonicalTruthOld, true},
+		{"terminal old", canonicalCommitResult{class: canonicalCommitTerminalOld, err: cause}, canonicalTruthOld, true},
+		{"terminal new", canonicalCommitResult{class: canonicalCommitTerminalNew, err: cause}, canonicalTruthNew, true},
+		{"terminal unknown", canonicalCommitResult{class: canonicalCommitTerminalUnknown, err: cause}, canonicalTruthUnknown, true},
+		{"unknown class", canonicalCommitResult{class: canonicalCommitClass("NOT_A_CLASS"), err: cause}, canonicalTruthUnknown, true},
+		{"zero value with no cause", canonicalCommitResult{}, canonicalTruthOld, true},
+	} {
+		truth, latched, got := classifyCanonicalCommit(tc.result)
+		if truth != tc.truth || latched != tc.latched {
+			t.Fatalf("%s -> truth=%v latched=%v, want %v/%v", tc.name, truth, latched, tc.truth, tc.latched)
+		}
+		if latched && got == nil {
+			t.Fatalf("%s latched without a cause", tc.name)
+		}
+		if truth == canonicalTruthNew && !latched && got != nil {
+			t.Fatalf("%s ordinary NEW carried an error: %v", tc.name, got)
+		}
+	}
+	// A wrapped sentinel is still distinguished by identity, never by text.
+	wrapped := canonicalCommitResult{class: canonicalCommitStale, err: fmt.Errorf("prepared canonical index is stale: %w", errPreparedIndexSpent)}
+	if truth, latched, _ := classifyCanonicalCommit(wrapped); truth != canonicalTruthOld || !latched {
+		t.Fatalf("re-spelled spent sentinel -> truth=%v latched=%v, want OLD/latched", truth, latched)
+	}
+
+	// The operator-facing label is derived from the same (truth, cause) pair, so
+	// a spent prepared index is not reported as a persistence failure.
+	for _, tc := range []struct {
+		truth canonicalCommitTruth
+		cause error
+		want  string
+	}{
+		{canonicalTruthNew, cause, "terminal canonical persistence (new)"},
+		{canonicalTruthUnknown, cause, "terminal canonical persistence (neither_or_unreadable)"},
+		{canonicalTruthOld, wrapped.err, "terminal local invariant (old)"},
+		{canonicalTruthOld, cause, "terminal canonical transition (old)"},
+	} {
+		if got := canonicalLatchReason(tc.truth, tc.cause); got != tc.want {
+			t.Fatalf("canonicalLatchReason(%v, %v)=%q, want %q", tc.truth, tc.cause, got, tc.want)
+		}
+	}
+
+	genesisHex := hex.EncodeToString(devnetGenesisBlockHash[:])
+	third := strings.Repeat("ab", 32)
+	for _, tc := range []struct {
+		name      string
+		readback  []string
+		fail      bool
+		truth     canonicalCommitTruth
+		publishes bool
+	}{
+		{name: "exact old", readback: []string{}, truth: canonicalTruthOld},
+		{name: "exact new", readback: []string{genesisHex}, truth: canonicalTruthNew, publishes: true},
+		{name: "third identity", readback: []string{third}, truth: canonicalTruthUnknown},
+		{name: "extra row", readback: []string{genesisHex, third}, truth: canonicalTruthUnknown},
+		{name: "reordered", readback: []string{third, genesisHex}, truth: canonicalTruthUnknown},
+		{name: "unreadable", fail: true, truth: canonicalTruthUnknown},
+	} {
+		t.Run("readback/"+tc.name, func(t *testing.T) {
+			engine, store, _ := newCutoverEngine(t)
+			write := writeFileAtomicFn
+			withWriteFileAtomicFn(t, func(path string, data []byte, mode os.FileMode) error {
+				if path == store.indexPath {
+					// AMBIGUOUS: the lane cannot prove the namespace commit did
+					// not cross, so the classifier must take one strict readback.
+					return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
+				}
+				return write(path, data, mode)
+			})
+			reads := 0
+			withLoadBlockStoreIndexFn(t, func(string) (blockStoreIndexDisk, []byte, error) {
+				reads++
+				if tc.fail {
+					return blockStoreIndexDisk{}, nil, os.ErrInvalid
+				}
+				index := blockStoreIndexDisk{Version: blockStoreIndexVersion, Canonical: tc.readback}
+				raw, err := encodeBlockStoreIndex(index)
+				if err != nil {
+					t.Fatalf("encodeBlockStoreIndex: %v", err)
+				}
+				return index, raw, nil
+			})
+			summary, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil)
+			if err == nil || reads != 1 {
+				t.Fatalf("err=%v strict readbacks=%d, want exactly one", err, reads)
+			}
+			if !engine.persistenceFaulted() {
+				t.Fatalf("%s did not latch a terminal outcome", tc.name)
+			}
+			if (summary != nil) != tc.publishes || engine.chainState.view().hasTip != tc.publishes {
+				t.Fatalf("%s summary=%v live_tip=%v, want published=%v", tc.name, summary != nil, engine.chainState.view().hasTip, tc.publishes)
+			}
+		})
+	}
+}
+
+// TestCanonicalCutoverNoFalliblePostNewPublication proves the publication step
+// cannot fail: none of its three functions can return an error at all, and once
+// the canonical index write returns, no further durable write and no provider
+// callback runs before the transition returns.
+func TestCanonicalCutoverNoFalliblePostNewPublication(t *testing.T) {
+	for _, fn := range []any{
+		(*canonicalTransition).publishCanonicalTransition,
+		assignCanonicalChainState,
+		(*Mempool).publishCanonicalMempoolPlan,
+		(*Mempool).publishCanonicalMempoolPlanLocked,
+		(*PendingOutpointOwner).publishRestoreLocked,
+		(*SyncEngine).storeTerminalFault,
+	} {
+		if out := reflect.TypeOf(fn).NumOut(); out != 0 {
+			t.Fatalf("%v returns %d values: postcommit publication must not be able to fail", reflect.TypeOf(fn), out)
+		}
+	}
+	// The terminal-NEW arm runs INSIDE the corridor, so its payload must arrive
+	// pre-built: a *storagePersistenceFault and a formatted string, never the
+	// (bool, error) pair the corridor would have to build from.
+	publish := reflect.TypeOf((*canonicalTransition).publishCanonicalTransition)
+	if got, want := publish.In(publish.NumIn()-2), reflect.TypeOf((*storagePersistenceFault)(nil)); got != want {
+		t.Fatalf("publishCanonicalTransition takes %v, want the pre-built %v", got, want)
+	}
+	if got := publish.In(publish.NumIn() - 1); got.Kind() != reflect.String {
+		t.Fatalf("publishCanonicalTransition takes %v, want the pre-built report string", got)
+	}
+
+	provider := newCanonicalMOProvider(t, devnetGenesisChainID)
+	f := newCanonicalMOFixture(t, 1, MempoolConfig{RotationProvider: provider})
+	f.add(t, f.ops[0], 1)
+	providerCalls := func() int {
+		provider.mu.Lock()
+		defer provider.mu.Unlock()
+		return provider.create + provider.spend
+	}
+	// Counted at the ATOMIC-WRITE lane, not at one seam: every durable write the
+	// process performs after the commit — including a chainstate save, which does
+	// not go through the index seam — has to show up here.
+	writesAfterCommit, providerAtCommit, committed := 0, 0, false
+	withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+		link, rename := ops.link, ops.rename
+		note := func() {
+			if committed {
+				writesAfterCommit++
+			}
+		}
+		ops.link = func(a, b string) error { note(); return link(a, b) }
+		ops.rename = func(a, b string) error {
+			note()
+			err := rename(a, b)
+			if err == nil && b == f.store.indexPath {
+				committed, providerAtCommit = true, providerCalls()
+			}
+			return err
+		}
+	})
+	if err := f.applyCoinbase(t); err != nil {
+		t.Fatalf("applyCoinbase: %v", err)
+	}
+	if !committed {
+		t.Fatal("the canonical index was never committed")
+	}
+	if writesAfterCommit != 0 {
+		t.Fatalf("durable writes after the commit=%d, want 0", writesAfterCommit)
+	}
+	if got := providerCalls(); got != providerAtCommit {
+		t.Fatalf("provider callbacks after the commit=%d, want none (was %d)", got-providerAtCommit, providerAtCommit)
+	}
+	owner := f.mp.PendingOutpointOwner()
+	ctx, ok := owner.AdmissionContext()
+	if !ok || ctx.StableTip.Hash != f.engine.chainState.view().tipHash {
+		t.Fatalf("owner=%+v ok=%v, want the transition closed with stable tip C1", ctx, ok)
+	}
+}
+
+// TestCanonicalCutoverConcurrentAdmissionAndBlockStore forces the schedules the
+// fence must survive: admission attempted while the transition is parked inside
+// the BlockStore commit, a concurrent BlockStore reader during that same window,
+// a repeated attempt after a terminal latch, and no second commit anywhere.
+func TestCanonicalCutoverConcurrentAdmissionAndBlockStore(t *testing.T) {
+	f := newCanonicalMOFixture(t, 1, MempoolConfig{})
+	// Built BEFORE the commit window: the fixture helper reads live chainstate
+	// fields without the lock, which is a test-side race, not a production one.
+	admissionTx := f.raw(t, f.ops[0], 9, false)
+	entered, release := make(chan struct{}), make(chan struct{})
+	write, writes := writeFileAtomicFn, 0
+	withWriteFileAtomicFn(t, func(path string, data []byte, mode os.FileMode) error {
+		if path == f.store.indexPath {
+			writes++
+			close(entered)
+			<-release
+		}
+		return write(path, data, mode)
+	})
+	applied := make(chan error, 1)
+	go func() { applied <- f.applyCoinbase(t) }()
+	select {
+	case <-entered:
+	case err := <-applied:
+		close(release)
+		t.Fatalf("apply returned before the commit window: %v", err)
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("timed out waiting for the commit window")
+	}
+
+	// admissionMu is held across the commit, so admission blocks.
+	admitted := make(chan error, 1)
+	go func() { admitted <- f.mp.AddTx(admissionTx) }()
+	select {
+	case err := <-admitted:
+		close(release)
+		t.Fatalf("admission passed the fence during the commit: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	// BlockStore.commit owns stateMu internally and holds NO component lock
+	// across its durable write, so a reader still completes.
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := f.store.GetBlockByHash(devnetGenesisBlockHash)
+		readDone <- err
+	}()
+	select {
+	case err := <-readDone:
+		if err != nil {
+			close(release)
+			t.Fatalf("concurrent blockstore read during the commit: %v", err)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("concurrent blockstore read deadlocked against the commit")
+	}
+
+	close(release)
+	if err := <-applied; err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	select {
+	case err := <-admitted:
+		if err != nil {
+			t.Fatalf("admission after the fence reopened: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("admission never completed after the fence reopened")
+	}
+	if writes != 1 {
+		t.Fatalf("canonical index writes=%d, want exactly one commit", writes)
+	}
+
+	// Terminal repeat: the EXISTING latch refuses every later transition, and no
+	// second commit is attempted.
+	f.engine.latchTerminalFault(errors.New("terminal for the repeat row"))
+	before := writes
+	if err := f.applyCoinbase(t); !errors.Is(err, errStoragePersistenceFault) {
+		t.Fatalf("repeat after latch=%v, want the existing fail-closed latch", err)
+	}
+	if _, err := f.engine.DisconnectTip(); !errors.Is(err, errStoragePersistenceFault) {
+		t.Fatalf("disconnect after latch=%v, want the existing fail-closed latch", err)
+	}
+	if writes != before {
+		t.Fatalf("canonical index writes after the latch=%d, want no second commit", writes-before)
+	}
+}
+
+// TestCanonicalCutoverNonpersistentCompatibility walks the compatibility rows an
+// engine with no BlockStore takes. Without a canonical index the chainstate save
+// is the durable identity, so it selects truth exactly as the prepared commit
+// does; with no chainstate path there is no persistence truth at all. Winning
+// reorg and standalone disconnect keep requiring a store.
+func TestCanonicalCutoverNonpersistentCompatibility(t *testing.T) {
+	newEngine := func(t *testing.T, path string) (*SyncEngine, *Mempool) {
+		t.Helper()
+		target := consensus.POW_LIMIT
+		engine, err := NewSyncEngine(NewChainState(), nil, DefaultSyncConfig(&target, devnetGenesisChainID, path))
+		if err != nil {
+			t.Fatalf("NewSyncEngine: %v", err)
+		}
+		store, err := CreateBlockStore(BlockStorePath(t.TempDir()))
+		if err != nil {
+			t.Fatalf("CreateBlockStore: %v", err)
+		}
+		mp, err := NewMempool(engine.chainState, store, devnetGenesisChainID)
+		if err != nil {
+			t.Fatalf("NewMempool: %v", err)
+		}
+		engine.SetMempool(mp)
+		return engine, mp
+	}
+
+	t.Run("nil store empty path publishes and stays open", func(t *testing.T) {
+		engine, mp := newEngine(t, "")
+		summary, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil)
+		if err != nil || summary == nil || !engine.chainState.view().hasTip {
+			t.Fatalf("summary=%+v err=%v tip=%v", summary, err, engine.chainState.view().hasTip)
+		}
+		if ctx, ok := mp.PendingOutpointOwner().AdmissionContext(); !ok || ctx.StableTip.Hash != summary.BlockHash {
+			t.Fatalf("owner=%+v ok=%v, want C1 with admission reopened", ctx, ok)
+		}
+	})
+
+	t.Run("nil store nonempty path saves C1", func(t *testing.T) {
+		dir := t.TempDir()
+		engine, _ := newEngine(t, ChainStatePath(dir))
+		summary, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil)
+		if err != nil || summary == nil {
+			t.Fatalf("summary=%+v err=%v", summary, err)
+		}
+		loaded, err := LoadChainState(ChainStatePath(dir))
+		if err != nil || !loaded.HasTip || loaded.TipHash != summary.BlockHash {
+			t.Fatalf("durable image=(%v,%x) err=%v, want C1", loaded.HasTip, loaded.TipHash, err)
+		}
+	})
+
+	t.Run("proven pre-namespace save failure is OLD open", func(t *testing.T) {
+		dir := t.TempDir()
+		engine, mp := newEngine(t, filepath.Join(dir, "state-dir"))
+		if err := os.Mkdir(engine.cfg.ChainStatePath, 0o700); err != nil {
+			t.Fatalf("Mkdir: %v", err)
+		}
+		summary, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil)
+		if summary != nil || err == nil || engine.persistenceFaulted() || engine.chainState.view().hasTip {
+			t.Fatalf("summary=%+v err=%v latch=%v tip=%v", summary, err, engine.persistenceFaulted(), engine.chainState.view().hasTip)
+		}
+		if _, ok := mp.PendingOutpointOwner().AdmissionContext(); !ok {
+			t.Fatal("an OLD/open refusal left admission closed")
+		}
+	})
+
+	t.Run("ambiguous save with exact C1 is terminal NEW", func(t *testing.T) {
+		dir := t.TempDir()
+		engine, _ := newEngine(t, ChainStatePath(dir))
+		failed := false
+		withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+			sync := ops.syncParent
+			ops.syncParent = func(parent string) error {
+				if !failed && parent == dir {
+					failed = true
+					return os.ErrPermission
+				}
+				return sync(parent)
+			}
+		})
+		summary, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil)
+		if !failed || summary == nil || err == nil || !engine.persistenceFaulted() {
+			t.Fatalf("injected=%v summary=%+v err=%v latch=%v", failed, summary, err, engine.persistenceFaulted())
+		}
+		if !engine.chainState.view().hasTip {
+			t.Fatal("terminal NEW did not publish C1")
+		}
+	})
+
+	t.Run("ambiguous save with another image is UNKNOWN", func(t *testing.T) {
+		dir := t.TempDir()
+		engine, _ := newEngine(t, ChainStatePath(dir))
+		failed := false
+		withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+			sync := ops.syncParent
+			ops.syncParent = func(parent string) error {
+				if !failed && parent == dir {
+					failed = true
+					if err := os.Remove(ChainStatePath(dir)); err != nil {
+						t.Fatalf("Remove(chainstate): %v", err)
+					}
+					return os.ErrPermission
+				}
+				return sync(parent)
+			}
+		})
+		summary, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil)
+		if !failed || summary != nil || err == nil || !engine.persistenceFaulted() {
+			t.Fatalf("injected=%v summary=%+v err=%v latch=%v", failed, summary, err, engine.persistenceFaulted())
+		}
+		if engine.chainState.view().hasTip {
+			t.Fatal("UNKNOWN published a guessed image")
+		}
+	})
+
+	t.Run("nil store terminal M/O latches and saves nothing", func(t *testing.T) {
+		dir := t.TempDir()
+		engine, mp := newEngine(t, ChainStatePath(dir))
+		owner := mp.PendingOutpointOwner()
+		owner.mu.Lock()
+		owner.byToken[PendingOutpointToken{owner: owner, seq: 1}] = nil
+		owner.mu.Unlock()
+		summary, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil)
+		if summary != nil || !isCanonicalMOTerminalError(err) || !engine.persistenceFaulted() {
+			t.Fatalf("summary=%+v err=%v latch=%v, want terminal OLD/latched", summary, err, engine.persistenceFaulted())
+		}
+		if engine.chainState.view().hasTip {
+			t.Fatal("a terminal M/O invariant published C1")
+		}
+		if _, statErr := os.Stat(ChainStatePath(dir)); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("terminal M/O reached Save(C1): stat=%v", statErr)
+		}
+		if _, ok := owner.AdmissionContext(); ok {
+			t.Fatal("a terminal M/O invariant reopened admission")
+		}
+	})
+
+	// Compatibility row 2 — nonnil BlockStore, EMPTY chainstate path: the same
+	// one-commit classifier and fixed publication, with only the durable
+	// checkpoint and its readiness proof omitted.
+	t.Run("compat row 2: nonnil store with an empty chainstate path", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := CreateBlockStore(BlockStorePath(dir))
+		if err != nil {
+			t.Fatalf("CreateBlockStore: %v", err)
+		}
+		target := consensus.POW_LIMIT
+		engine, err := NewSyncEngine(NewChainState(), store, DefaultSyncConfig(&target, devnetGenesisChainID, ""))
+		if err != nil {
+			t.Fatalf("NewSyncEngine: %v", err)
+		}
+		mp, err := NewMempool(engine.chainState, store, devnetGenesisChainID)
+		if err != nil {
+			t.Fatalf("NewMempool: %v", err)
+		}
+		engine.SetMempool(mp)
+		writes := countCanonicalIndexWrites(t, store)
+		summary, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil)
+		if err != nil || summary == nil || *writes != 1 {
+			t.Fatalf("summary=%+v err=%v index writes=%d, want one commit", summary, err, *writes)
+		}
+		index, err := store.CanonicalIndexSnapshot()
+		if err != nil || len(index) != 1 || index[0] != hex.EncodeToString(devnetGenesisBlockHash[:]) {
+			t.Fatalf("index=%v err=%v", index, err)
+		}
+		if ctx, ok := mp.PendingOutpointOwner().AdmissionContext(); !ok || ctx.StableTip.Hash != summary.BlockHash {
+			t.Fatalf("owner=%+v ok=%v, want C1 with admission reopened", ctx, ok)
+		}
+		if _, statErr := os.Stat(ChainStatePath(dir)); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("an empty chainstate path still wrote a checkpoint: stat=%v", statErr)
+		}
+	})
+
+	t.Run("reorg and disconnect require a store", func(t *testing.T) {
+		engine, _ := newEngine(t, "")
+		if _, err := engine.DisconnectTip(); err == nil || err.Error() != "sync engine has no blockstore" {
+			t.Fatalf("DisconnectTip=%v, want exactly the missing-store refusal", err)
+		}
+		if _, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil); err != nil {
+			t.Fatalf("bootstrap: %v", err)
+		}
+		target := consensus.POW_LIMIT
+		side := buildSingleTxBlock(t, [32]byte{0xAA}, target, reorgTestTimestamp(9), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidy(1, 0)))
+		if _, err := engine.ApplyBlockWithReorg(side, nil); err == nil {
+			t.Fatal("a non-genesis reorg candidate was accepted without a blockstore")
+		}
+	})
+}
+
+// canonicalArtifactSeam replaces the bounded artifact reader for exactly one
+// path and counts how many times the recovery proof reads it. Removing the seam
+// removes the injection, so every row below fails rather than passing vacuously.
+func canonicalArtifactSeam(t *testing.T, path string, outcome func() ([]byte, error)) *int {
+	t.Helper()
+	reads, previous := new(int), readFileByPathFn
+	t.Cleanup(func() { readFileByPathFn = previous })
+	readFileByPathFn = func(p string, limit int64) ([]byte, error) {
+		if p == path {
+			*reads++
+			return outcome()
+		}
+		return previous(p, limit)
+	}
+	return reads
+}
+
+// TestCanonicalCutoverStrictReadErrorClassification pins MP641's recovery-proof
+// read rules: the read ORDER, the stop-at-the-first-non-valid-observation rule,
+// and the split between an artifact that could not be ACQUIRED — OLD, admission
+// open, no latch, no retry — and positive evidence about the artifact itself —
+// OLD, latched. Classification is on the observation, never on a platform error
+// name: os.ErrPermission and syscall.EIO and a partial-plus-non-EOF read all land
+// in the same class, while os.ErrNotExist and a proven over-bound land in the
+// other.
+func TestCanonicalCutoverStrictReadErrorClassification(t *testing.T) {
+	// A standalone disconnect at height 1. Its OLD/disconnect suffix is that one
+	// row and its new suffix is empty, so nothing stages the row's artifacts and
+	// the seamed header read below can only be the recovery proof's own.
+	stage := func(t *testing.T) (*SyncEngine, *BlockStore, [32]byte) {
+		t.Helper()
+		engine, store, _ := newCutoverEngine(t)
+		if err := engine.BootstrapCanonicalGenesisIfEmpty(); err != nil {
+			t.Fatalf("BootstrapCanonicalGenesisIfEmpty: %v", err)
+		}
+		block := buildSingleTxBlock(t, devnetGenesisBlockHash, consensus.POW_LIMIT, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidy(1, 0)))
+		summary, err := engine.ApplyBlock(block, nil)
+		if err != nil {
+			t.Fatalf("ApplyBlock: %v", err)
+		}
+		return engine, store, summary.BlockHash
+	}
+	headerOf := func(store *BlockStore, hash [32]byte) string {
+		return filepath.Join(store.headersDir, hex.EncodeToString(hash[:])+".bin")
+	}
+
+	for _, tc := range []struct {
+		name      string
+		outcome   func() ([]byte, error)
+		unavail   bool
+		wantLatch bool
+	}{
+		{"open failure", func() ([]byte, error) { return nil, os.ErrPermission }, true, false},
+		{"metadata stat failure", func() ([]byte, error) { return nil, syscall.EIO }, true, false},
+		{"partial bytes then non-EOF", func() ([]byte, error) { return nil, io.ErrUnexpectedEOF }, true, false},
+		{"definitive absence", func() ([]byte, error) { return nil, os.ErrNotExist }, false, true},
+		{"proven over-bound", func() ([]byte, error) { return nil, errStoreFileTooLarge }, false, true},
+		{"clean short EOF is an invalid representation", func() ([]byte, error) { return []byte("short"), nil }, false, true},
+		{"complete value with a hash mismatch", func() ([]byte, error) { return make([]byte, consensus.BLOCK_HEADER_BYTES), nil }, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			engine, store, hash := stage(t)
+			writes := countCanonicalIndexWrites(t, store)
+			reads := canonicalArtifactSeam(t, headerOf(store, hash), tc.outcome)
+			summary, err := engine.DisconnectTip()
+			var unavailable *canonicalArtifactUnavailableError
+			var integrity *canonicalStoreIntegrityError
+			if summary != nil || err == nil || errors.As(err, &unavailable) != tc.unavail || errors.As(err, &integrity) == tc.unavail {
+				t.Fatalf("summary=%+v err=%v, want a refusal with unavailable=%v", summary, err, tc.unavail)
+			}
+			if engine.persistenceFaulted() != tc.wantLatch || *writes != 0 || engine.chainState.view().height != 1 {
+				t.Fatalf("latch=%v writes=%d height=%d, want latch=%v, zero commits and the preserved OLD tip", engine.persistenceFaulted(), *writes, engine.chainState.view().height, tc.wantLatch)
+			}
+			// No same-attempt retry: the failing artifact is read exactly once.
+			if *reads != 1 {
+				t.Fatalf("reads of the failing artifact=%d, want exactly 1", *reads)
+			}
+			// Admission itself, not a proxy: a latched outcome RETAINS the write
+			// guard until restart, an open one released it.
+			if free := engine.chainState.admissionMu.TryLock(); free != !tc.wantLatch {
+				t.Fatalf("admission free=%v, want %v", free, !tc.wantLatch)
+			} else if free {
+				engine.chainState.admissionMu.Unlock()
+			}
+		})
+	}
+
+	// A reader that refuses because reclaim already MARKED the hash observed
+	// nothing about the artifact: it never opened it. That is a local condition of
+	// this store, so it must classify as unavailability — OLD, admission open —
+	// even though the refusal is spelled with an os.ErrNotExist-compatible error
+	// so the store's pre-existing consumers keep their absence behavior.
+	t.Run("a reclaim-refused reader is unavailability, not definitive absence", func(t *testing.T) {
+		engine, store, hash := stage(t)
+		writes := countCanonicalIndexWrites(t, store)
+		headerPath := headerOf(store, hash)
+		previous := readFileByPathFn
+		t.Cleanup(func() { readFileByPathFn = previous })
+		readFileByPathFn = func(p string, limit int64) ([]byte, error) {
+			if p == headerPath {
+				// Marked between the proof's header read and its block read, so
+				// the refusal lands INSIDE the recovery proof rather than on the
+				// disconnect's own upstream block/undo reads.
+				store.stateMu.Lock()
+				store.noncanonicalReclaim = &noncanonicalReclaim{hash: hash, marked: true}
+				store.stateMu.Unlock()
+			}
+			return previous(p, limit)
+		}
+		summary, err := engine.DisconnectTip()
+		var unavailable *canonicalArtifactUnavailableError
+		var integrity *canonicalStoreIntegrityError
+		if summary != nil || !errors.As(err, &unavailable) || errors.As(err, &integrity) {
+			t.Fatalf("summary=%+v err=%v, want LOCAL_RESOURCE_UNAVAILABLE for a reclaim-refused read", summary, err)
+		}
+		if engine.persistenceFaulted() || *writes != 0 || engine.chainState.view().height != 1 {
+			t.Fatalf("latch=%v writes=%d height=%d, want an OLD/open refusal", engine.persistenceFaulted(), *writes, engine.chainState.view().height)
+		}
+		if free := engine.chainState.admissionMu.TryLock(); !free {
+			t.Fatal("a reclaim-refused read retained admission")
+		} else {
+			engine.chainState.admissionMu.Unlock()
+		}
+		// The same refusal still reads as absence for every consumer written
+		// against the older reader contract.
+		if _, err := store.GetBlockByHash(hash); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("GetBlockByHash err=%v, want an os.ErrNotExist-compatible refusal", err)
+		}
+	})
+
+	t.Run("reads header then block then the state-reversal artifact", func(t *testing.T) {
+		_, store, hash := stage(t)
+		headerPath := filepath.Join(store.headersDir, hex.EncodeToString(hash[:])+".bin")
+		blockPath := filepath.Join(store.blocksDir, hex.EncodeToString(hash[:])+".bin")
+		undoPath := filepath.Join(store.undoDir, hex.EncodeToString(hash[:])+".json")
+		previous, order := readFileByPathFn, []string(nil)
+		t.Cleanup(func() { readFileByPathFn = previous })
+		readFileByPathFn = func(p string, limit int64) ([]byte, error) {
+			switch p {
+			case headerPath:
+				order = append(order, "header")
+			case blockPath:
+				order = append(order, "block")
+			case undoPath:
+				order = append(order, "undo")
+			}
+			return previous(p, limit)
+		}
+		// Driven at the unit that OWNS the per-row order, so the recorded reads
+		// are the proof's and only the proof's: a whole transition also reads
+		// these same files for other reasons, and a tail slice of that sequence
+		// cannot tell a reordered read from an inserted one.
+		if class, err := store.proveCanonicalArtifacts(hash); class != canonicalArtifactValid || err != nil {
+			t.Fatalf("proveCanonicalArtifacts=(%v,%v), want valid", class, err)
+		}
+		// EXACT equality, not a suffix: any extra, missing, repeated or moved
+		// read fails, which is what makes both a reorder and an insertion red.
+		if !slices.Equal(order, []string{"header", "block", "undo"}) {
+			t.Fatalf("proof read order=%v, want exactly [header block undo]", order)
+		}
+	})
+
+	t.Run("stops at the first non-valid observation", func(t *testing.T) {
+		engine, store, hash := stage(t)
+		// The header fails; the block and the state-reversal artifact of the SAME
+		// row must not be inspected AFTERWARDS. Reads before the proof (the
+		// disconnect's own prepared block/undo) are not the proof's and are not
+		// counted, which is what the header-failure flag separates.
+		headerPath := headerOf(store, hash)
+		blockPath := filepath.Join(store.blocksDir, hex.EncodeToString(hash[:])+".bin")
+		undoPath := filepath.Join(store.undoDir, hex.EncodeToString(hash[:])+".json")
+		previous, headerFailed, blockReads, undoReads := readFileByPathFn, false, 0, 0
+		t.Cleanup(func() { readFileByPathFn = previous })
+		readFileByPathFn = func(p string, limit int64) ([]byte, error) {
+			switch {
+			case p == headerPath:
+				headerFailed = true
+				return nil, os.ErrPermission
+			case headerFailed && p == blockPath:
+				blockReads++
+			case headerFailed && p == undoPath:
+				undoReads++
+			}
+			return previous(p, limit)
+		}
+		if _, err := engine.DisconnectTip(); err == nil {
+			t.Fatal("expected the header refusal")
+		}
+		if !headerFailed || blockReads != 0 || undoReads != 0 {
+			t.Fatalf("after the header failed the proof read block=%d undo=%d later artifacts, want 0/0", blockReads, undoReads)
+		}
+	})
+
+	t.Run("a later independent apply succeeds after the condition clears", func(t *testing.T) {
+		engine, store, hash := stage(t)
+		canonicalArtifactSeam(t, headerOf(store, hash), func() ([]byte, error) { return nil, os.ErrPermission })
+		if _, err := engine.DisconnectTip(); err == nil || engine.persistenceFaulted() {
+			t.Fatalf("first attempt err=%v latch=%v, want OLD/open", err, engine.persistenceFaulted())
+		}
+		readFileByPathFn = readFileByPathCapped
+		summary, err := engine.DisconnectTip()
+		if err != nil || summary == nil || summary.NewHeight != 0 {
+			t.Fatalf("retry summary=%+v err=%v, want the ordinary path to succeed", summary, err)
+		}
+	})
+}
+
+// TestCanonicalCutoverCheckpointExactEnvelopeReadback pins the persistent
+// checkpoint proof: the exact bytes handed to the atomic writer are re-read once
+// and compared BYTE FOR BYTE. The discriminating row is a durable image that is
+// semantically identical but byte-different — a decode-and-compare proof accepts
+// it, byte equality does not.
+func TestCanonicalCutoverCheckpointExactEnvelopeReadback(t *testing.T) {
+	// reencodeCheckpoint rewrites the durable checkpoint the instant it lands,
+	// through the SAME envelope encoder, from a compact rather than an indented
+	// payload: same decoded image, different bytes, valid checksum.
+	reencode := func(t *testing.T, path string) {
+		t.Helper()
+		loaded, err := LoadChainState(path)
+		if err != nil {
+			t.Fatalf("LoadChainState: %v", err)
+		}
+		disk, err := stateToDisk(loaded)
+		if err != nil {
+			t.Fatalf("stateToDisk: %v", err)
+		}
+		payload, err := json.Marshal(disk)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		raw, err := marshalStoreEnvelope(storeEnvelopeChainState, append(payload, '\n'))
+		if err != nil {
+			t.Fatalf("marshalStoreEnvelope: %v", err)
+		}
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name      string
+		corrupt   func(t *testing.T, path string)
+		wantLatch bool
+	}{
+		{
+			name: "semantically identical but byte different",
+			corrupt: func(t *testing.T, path string) {
+				reencode(t, path)
+				// A decode-and-compare proof would accept this image: it still
+				// decodes, to the very same chainstate.
+				if _, err := LoadChainState(path); err != nil {
+					t.Fatalf("the re-encoded checkpoint must still decode: %v", err)
+				}
+			},
+			wantLatch: true,
+		},
+		{
+			name: "raw readback cannot acquire the bytes",
+			corrupt: func(t *testing.T, path string) {
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("Remove: %v", err)
+				}
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatalf("Mkdir: %v", err)
+				}
+			},
+			wantLatch: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			engine, store, dir := newCutoverEngine(t)
+			path := ChainStatePath(dir)
+			corrupted := false
+			withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+				rename := ops.rename
+				ops.rename = func(a, b string) error {
+					err := rename(a, b)
+					if err == nil && b == path && !corrupted {
+						corrupted = true
+						tc.corrupt(t, path)
+					}
+					return err
+				}
+			})
+			writes := countCanonicalIndexWrites(t, store)
+			err := engine.BootstrapCanonicalGenesisIfEmpty()
+			var unavailable *canonicalArtifactUnavailableError
+			var integrity *canonicalStoreIntegrityError
+			if !corrupted || err == nil {
+				t.Fatalf("corrupted=%v err=%v, want the checkpoint proof to refuse", corrupted, err)
+			}
+			if errors.As(err, &integrity) != tc.wantLatch || errors.As(err, &unavailable) == tc.wantLatch {
+				t.Fatalf("err=%v, want integrity=%v", err, tc.wantLatch)
+			}
+			if engine.persistenceFaulted() != tc.wantLatch || *writes != 0 || engine.chainState.view().hasTip {
+				t.Fatalf("latch=%v writes=%d tip=%v", engine.persistenceFaulted(), *writes, engine.chainState.view().hasTip)
+			}
+			if tc.wantLatch && !strings.Contains(err.Error(), "first differs at offset") {
+				// Equal-length-different-bytes is the discriminating case, and a
+				// pair of lengths cannot name it: the message must localize it.
+				t.Fatalf("mismatch err=%v, want the first-difference offset", err)
+			}
+		})
+	}
+
+	// The two terminal formatters run on a path that is already failing closed;
+	// a zero value must render, not panic.
+	if (&canonicalStoreIntegrityError{}).Error() == "" || (&canonicalArtifactUnavailableError{}).Error() == "" {
+		t.Fatal("a zero-value canonical failure rendered as the empty string")
+	}
 }

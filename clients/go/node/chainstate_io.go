@@ -472,31 +472,41 @@ func parseChainStateV2Supply(token json.RawMessage) (consensus.Uint128, error) {
 }
 
 func (s *ChainState) Save(path string) error {
+	_, err := s.saveReturningEnvelope(path)
+	return err
+}
+
+// saveReturningEnvelope is the ONE encode-and-atomically-write path. It returns
+// the exact envelope bytes it handed the atomic writer, so a caller proving a
+// durable checkpoint can compare those bytes against one raw read instead of
+// decoding a third image and re-deriving a digest from it. Save is the
+// value-discarding wrapper, so the two can never encode differently.
+func (s *ChainState) saveReturningEnvelope(path string) ([]byte, error) {
 	if s == nil {
-		return errors.New("nil chainstate")
+		return nil, errors.New("nil chainstate")
 	}
 	disk, err := stateToDisk(s)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	payload, err := json.MarshalIndent(disk, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode chainstate: %w", err)
+		return nil, fmt.Errorf("encode chainstate: %w", err)
 	}
 	payload = append(payload, '\n')
 	// The pre-envelope on-disk bytes become the exact envelope payload.
 	raw, err := marshalStoreEnvelope(storeEnvelopeChainState, payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := validateAtomicWriteDestination(path, atomicWriteOverwrite); err != nil {
-		return err
+		return nil, err
 	}
 	// nosemgrep: Semgrep_go.lang.correctness.permissions.file_permission.incorrect-default-permission
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil { // nosemgrep
-		return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteOverwrite, err)
+		return nil, newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteOverwrite, err)
 	}
-	return writeFileAtomic(path, raw, 0o600)
+	return raw, writeFileAtomic(path, raw, 0o600)
 }
 
 func DevnetGenesisChainID() [32]byte {

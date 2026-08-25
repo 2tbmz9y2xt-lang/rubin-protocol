@@ -3710,8 +3710,8 @@ func TestRestoreMempoolSnapshotRecomputesByteAccounting(t *testing.T) {
 	if err := mp.AddTx(tx2); err != nil {
 		t.Fatalf("AddTx(tx2): %v", err)
 	}
-	if err := restoreMempoolSnapshot(mp, snapshot); err != nil {
-		t.Fatalf("restoreMempoolSnapshot: %v", err)
+	if err := installMempoolImageForTest(mp, snapshot); err != nil {
+		t.Fatalf("installMempoolImageForTest: %v", err)
 	}
 	if got := mp.Len(); got != 1 {
 		t.Fatalf("mempool len=%d, want 1", got)
@@ -3793,8 +3793,8 @@ func TestRestoreMempoolSnapshotPreservesAdmissionSeqHighWatermark(t *testing.T) 
 		t.Fatalf("snapshot currentMinFeeRate=%d, want 7", snapshot.currentMinFeeRate)
 	}
 	mp.currentMinFeeRate = 3
-	if err := restoreMempoolSnapshot(mp, snapshot); err != nil {
-		t.Fatalf("restoreMempoolSnapshot: %v", err)
+	if err := installMempoolImageForTest(mp, snapshot); err != nil {
+		t.Fatalf("installMempoolImageForTest: %v", err)
 	}
 	if mp.lastAdmissionSeq != 2 {
 		t.Fatalf("lastAdmissionSeq after restore=%d, want 2", mp.lastAdmissionSeq)
@@ -4049,7 +4049,7 @@ func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T
 				tc.configure(mp)
 			}
 			bad := tc.mutate(snapshot)
-			if err := restoreMempoolSnapshot(mp, bad); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if err := installMempoolImageForTest(mp, bad); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("expected %q rejection, got %v", tc.want, err)
 			}
 			if got := mp.Len(); got != 1 {
@@ -4108,8 +4108,8 @@ func TestRestoreMempoolSnapshotAllowsExactCapacityBoundary(t *testing.T) {
 		t.Fatalf("mempool len=%d after clearing, want 0", got)
 	}
 
-	if err := restoreMempoolSnapshot(source, snapshot); err != nil {
-		t.Fatalf("restoreMempoolSnapshot exact boundary: %v", err)
+	if err := installMempoolImageForTest(source, snapshot); err != nil {
+		t.Fatalf("installMempoolImageForTest exact boundary: %v", err)
 	}
 	if got := source.Len(); got != 2 {
 		t.Fatalf("mempool len=%d, want 2", got)
@@ -4433,8 +4433,8 @@ func TestMempoolSnapshotPendingOutpointRoundTripRestoresExactTokens(t *testing.T
 	if err := mp.AddTx(discarded); err != nil {
 		t.Fatalf("AddTx(discarded): %v", err)
 	}
-	if err := restoreMempoolSnapshot(mp, snapshot); err != nil {
-		t.Fatalf("restoreMempoolSnapshot: %v", err)
+	if err := installMempoolImageForTest(mp, snapshot); err != nil {
+		t.Fatalf("installMempoolImageForTest: %v", err)
 	}
 
 	if mp.Contains(txID(t, discarded)) {
@@ -4511,7 +4511,7 @@ func TestMempoolSnapshotPendingOutpointRejectsBrokenClaimBinding(t *testing.T) {
 			mp.mu.RUnlock()
 			beforeOutpoints, beforeClaims, beforeHighWater := ownerCounts(mp)
 			corrupt(&snapshot)
-			if err := restoreMempoolSnapshot(mp, snapshot); err == nil {
+			if err := installMempoolImageForTest(mp, snapshot); err == nil {
 				t.Fatalf("restore accepted a %s snapshot", name)
 			}
 			if mp.Len() != beforeLen || !mp.Contains(txid) {
@@ -5280,7 +5280,7 @@ func TestMempoolRetainedTxByID(t *testing.T) {
 			mustOK(t, "AddTx(better fee)", mp.AddTx(buildTx(t, st, ops[1], 400_000, 2)))
 		})
 		removalCase(t, "empty restore", defaultCfg, func(t *testing.T, mp *Mempool, _ *ChainState, _ []consensus.Outpoint, _ []byte, empty mempoolSnapshot) {
-			mustOK(t, "restoreMempoolSnapshot", restoreMempoolSnapshot(mp, empty))
+			mustOK(t, "installMempoolImageForTest", installMempoolImageForTest(mp, empty))
 		})
 	})
 
@@ -5292,13 +5292,13 @@ func TestMempoolRetainedTxByID(t *testing.T) {
 		mustOK(t, "snapshotMempool", err)
 		tx2 := buildTx(t, st, outpoints[1], 200_000, 2)
 		mustOK(t, "AddTx(tx2)", mp.AddTx(tx2))
-		mustOK(t, "restoreMempoolSnapshot", restoreMempoolSnapshot(mp, withTx1))
+		mustOK(t, "installMempoolImageForTest", installMempoolImageForTest(mp, withTx1))
 		wantHit(t, mp, tx1)
 		wantMiss(t, "row dropped by the restore", mp, txID(t, tx2))
 		// A rejected restore publishes nothing, so the pre-restore tuple stands.
 		broken := withTx1
 		broken.lastAdmissionSeq = 0
-		if err := restoreMempoolSnapshot(mp, broken); err == nil {
+		if err := installMempoolImageForTest(mp, broken); err == nil {
 			t.Fatal("restore accepted an admission high-water below the restored max")
 		}
 		wantHit(t, mp, tx1)
@@ -5340,7 +5340,7 @@ func TestMempoolRetainedTxByID(t *testing.T) {
 		// Public-path cycles kill stale/fabricated hits and prove race-cleanliness.
 		for i := 0; i < 200; i++ {
 			mustOK(t, "EvictConfirmed", mp.EvictConfirmed(block))
-			mustOK(t, "restoreMempoolSnapshot", restoreMempoolSnapshot(mp, withRow))
+			mustOK(t, "installMempoolImageForTest", installMempoolImageForTest(mp, withRow))
 		}
 		// Divergent-incarnation swap kills fields assembled across two incarnations.
 		incarnations := [2]*mempoolEntry{entryA, entryB}
