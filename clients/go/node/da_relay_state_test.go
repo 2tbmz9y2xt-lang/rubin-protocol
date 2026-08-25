@@ -1053,7 +1053,32 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 	})
 }
 
-func TestDARelayConsumeCompleteSetRemovesRecordAndPinnedAccounting(t *testing.T) {
+// removeCompleteDASetForTest removes one retained COMPLETE_SET through
+// removeDASetRecordLocked — the SAME locked removal primitive the canonical D
+// image applies to its clone — and reports whether a complete record was there
+// to remove.
+//
+// It exists because the exported ConsumeCompleteSet wrapper was deleted with its
+// post-return caller: retained-DA removal is now selected inside the canonical
+// transition, and this file's remaining rows are unit coverage of the removal
+// primitive's accounting, not of a public writer. It is test scaffolding and
+// confers no production authority; which records a canonical transition actually
+// selects is pinned in sync_da_relay_test.go.
+func removeCompleteDASetForTest(t *testing.T, state *DARelayState, daID [32]byte) bool {
+	t.Helper()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	record, ok := state.sets[daID]
+	if !ok || record.state != daRelayStateCompleteSet {
+		return false
+	}
+	if err := state.removeDASetRecordLocked(record); err != nil {
+		t.Fatalf("removeDASetRecordLocked(%x): %v", daID, err)
+	}
+	return true
+}
+
+func TestDARelayRemoveCompleteSetRemovesRecordAndPinnedAccounting(t *testing.T) {
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 	consumeID := daRelayTestID(99)
 	keepID := daRelayTestID(100)
@@ -1087,90 +1112,33 @@ func TestDARelayConsumeCompleteSetRemovesRecordAndPinnedAccounting(t *testing.T)
 		t.Fatalf("setup pinned=%d, want %d", state.pinnedPayloadBytes, consumePinned+keepPinned)
 	}
 
-	consumed, err := state.ConsumeCompleteSet(consumeID)
-	if err != nil || !consumed {
-		t.Fatalf("consume complete set consumed=%v err=%v, want true nil", consumed, err)
+	if !removeCompleteDASetForTest(t, state, consumeID) {
+		t.Fatal("complete set was not present to remove")
 	}
 	if _, ok := state.sets[consumeID]; ok {
-		t.Fatalf("consumed complete set retained da_id")
+		t.Fatalf("removed complete set retained da_id")
 	}
 	if got := state.sets[keepID]; got.state != daRelayStateCompleteSet {
 		t.Fatalf("unrelated complete set state=%v, want complete", got.state)
 	}
 	if state.pinnedPayloadBytes != keepPinned {
-		t.Fatalf("pinned after consume=%d, want %d", state.pinnedPayloadBytes, keepPinned)
+		t.Fatalf("pinned after removal=%d, want %d", state.pinnedPayloadBytes, keepPinned)
 	}
 	if _, ok := state.prefetch.indexes[consumeID]; ok {
-		t.Fatal("consume retained da_id prefetch indexes")
+		t.Fatal("removal retained da_id prefetch indexes")
 	}
 	if _, ok := state.prefetch.expires[consumeID]; ok {
-		t.Fatal("consume retained da_id prefetch expiry")
+		t.Fatal("removal retained da_id prefetch expiry")
 	}
 	if got, _ := state.prefetch.bytesInFlight(); got != 0 {
-		t.Fatalf("prefetch bytes in flight after consume=%d, want 0", got)
+		t.Fatalf("prefetch bytes in flight after removal=%d, want 0", got)
 	}
 
-	consumed, err = state.ConsumeCompleteSet(consumeID)
-	if err != nil || consumed {
-		t.Fatalf("second consume consumed=%v err=%v, want false nil", consumed, err)
+	if removeCompleteDASetForTest(t, state, consumeID) {
+		t.Fatal("second removal reported an already-removed da_id as present")
 	}
 	if state.pinnedPayloadBytes != keepPinned {
-		t.Fatalf("pinned after second consume=%d, want %d", state.pinnedPayloadBytes, keepPinned)
-	}
-}
-
-func TestDARelayConsumeCompleteSetLeavesIncompleteRecords(t *testing.T) {
-	state := newDARelayStateForTest(t, defaultDARelayCaps())
-	orphanID := daRelayTestID(101)
-	stagedID := daRelayTestID(102)
-
-	mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(orphanID, 0, 1))
-	mustAddDACommit(t, state, "peer-b", daRelayTestCommit(stagedID, 1, 1))
-	wantOrphanBytes := state.orphanBytes
-	wantCommitBytes := state.orphanCommitOverheadBytes
-
-	for _, daID := range [][32]byte{orphanID, stagedID} {
-		consumed, err := state.consumeCompleteSet(daID)
-		if err != nil || consumed {
-			t.Fatalf("consume incomplete %x consumed=%v err=%v, want false nil", daID, consumed, err)
-		}
-	}
-	if got := state.sets[orphanID]; got.state != daRelayStateOrphanChunks {
-		t.Fatalf("orphan state=%v, want orphan chunks", got.state)
-	}
-	if got := state.sets[stagedID]; got.state != daRelayStateStagedCommit {
-		t.Fatalf("staged state=%v, want staged commit", got.state)
-	}
-	if state.orphanBytes != wantOrphanBytes || state.orphanCommitOverheadBytes != wantCommitBytes || state.pinnedPayloadBytes != 0 {
-		t.Fatalf("incomplete consume mutated accounting orphan=%d/%d commit=%d/%d pinned=%d", state.orphanBytes, wantOrphanBytes, state.orphanCommitOverheadBytes, wantCommitBytes, state.pinnedPayloadBytes)
-	}
-}
-
-func TestDARelayConsumeCompleteSetReturnsProjectionErrorWithoutMutation(t *testing.T) {
-	state := newDARelayStateForTest(t, defaultDARelayCaps())
-	daID := daRelayTestID(103)
-	record := daRelaySetRecord{
-		daID:         daID,
-		state:        daRelayStateCompleteSet,
-		payloadBytes: 1,
-	}
-	state.sets[daID] = record
-	state.prefetch.indexes = map[[32]byte]map[uint16]string{daID: {0: "peer-prefetch"}}
-	state.prefetch.expires = map[[32]byte]time.Time{daID: time.Unix(1, 0)}
-
-	consumed, err := state.consumeCompleteSet(daID)
-	if consumed {
-		t.Fatal("corrupt complete set reported consumed")
-	}
-	requireDAErr(t, err, errDARelayArithmeticOverflow)
-	if _, ok := state.sets[daID]; !ok {
-		t.Fatal("failed consume deleted corrupt complete record")
-	}
-	if _, ok := state.prefetch.indexes[daID]; !ok {
-		t.Fatal("failed consume released prefetch indexes")
-	}
-	if _, ok := state.prefetch.expires[daID]; !ok {
-		t.Fatal("failed consume released prefetch expiry")
+		t.Fatalf("pinned after second removal=%d, want %d", state.pinnedPayloadBytes, keepPinned)
 	}
 }
 
@@ -1183,6 +1151,8 @@ func TestDARelayRemoveSetRecordReturnsPinnedProjectionErrorWithoutMutation(t *te
 		payloadBytes: 1,
 	}
 	state.sets[daID] = record
+	state.prefetch.indexes = map[[32]byte]map[uint16]string{daID: {0: "peer-prefetch"}}
+	state.prefetch.expires = map[[32]byte]time.Time{daID: time.Unix(1, 0)}
 
 	state.mu.Lock()
 	err := state.removeDASetRecordLocked(record)
@@ -1190,6 +1160,14 @@ func TestDARelayRemoveSetRecordReturnsPinnedProjectionErrorWithoutMutation(t *te
 	requireDAErr(t, err, errDARelayArithmeticOverflow)
 	if _, ok := state.sets[daID]; !ok {
 		t.Fatal("failed remove deleted corrupt complete record")
+	}
+	// The prefetch release is the LAST step of removeDASetRecordLocked, after
+	// every checked projection, so a refused removal must not have reached it.
+	if _, ok := state.prefetch.indexes[daID]; !ok {
+		t.Fatal("failed remove released prefetch indexes")
+	}
+	if _, ok := state.prefetch.expires[daID]; !ok {
+		t.Fatal("failed remove released prefetch expiry")
 	}
 }
 
@@ -1962,8 +1940,8 @@ func TestDARelayPinnedPayloadAccountingUsesPayloadBytesOnly(t *testing.T) {
 		}
 
 		// The same exact-cap landing reached commit-last, after releasing the chunk-last one.
-		if consumed, err := state.consumeCompleteSet(exactID); err != nil || !consumed {
-			t.Fatalf("release before commit-last exact cap consumed=%v err=%v, want true nil", consumed, err)
+		if !removeCompleteDASetForTest(t, state, exactID) {
+			t.Fatal("release before commit-last exact cap found no complete set")
 		}
 		commitLastID := daRelayTestID(121)
 		mustAddDAChunk(t, state, "peer-c", daRelayTestChunkPayload(commitLastID, 0, uint64(len(head)), head))
@@ -2011,14 +1989,14 @@ func TestDARelayPinnedPayloadAccountingUsesPayloadBytesOnly(t *testing.T) {
 			t.Fatalf("staged pinned=%d, want %d", state.pinnedPayloadBytes, wantPayload+wantKeep)
 		}
 
-		consumed, err := state.consumeCompleteSet(consumeID)
-		if err != nil || !consumed || state.pinnedPayloadBytes != wantKeep {
-			t.Fatalf("first release consumed=%v err=%v pinned=%d, want true nil %d", consumed, err, state.pinnedPayloadBytes, wantKeep)
+		if !removeCompleteDASetForTest(t, state, consumeID) || state.pinnedPayloadBytes != wantKeep {
+			t.Fatalf("first release pinned=%d, want %d", state.pinnedPayloadBytes, wantKeep)
 		}
+		// Already removed, never present, and present-but-incomplete: none of the
+		// three is a complete record, and none moves the pinned counter.
 		for _, daID := range [][32]byte{consumeID, daRelayTestID(119), stagedID} {
-			consumed, err := state.consumeCompleteSet(daID)
-			if err != nil || consumed || state.pinnedPayloadBytes != wantKeep {
-				t.Fatalf("no-op release %x consumed=%v err=%v pinned=%d, want false nil %d", daID, consumed, err, state.pinnedPayloadBytes, wantKeep)
+			if removeCompleteDASetForTest(t, state, daID) || state.pinnedPayloadBytes != wantKeep {
+				t.Fatalf("no-op release %x pinned=%d, want %d", daID, state.pinnedPayloadBytes, wantKeep)
 			}
 		}
 	})

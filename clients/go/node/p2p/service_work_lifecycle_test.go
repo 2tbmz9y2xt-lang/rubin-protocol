@@ -168,8 +168,6 @@ func TestServiceWorkLifecycleEntryMatrix(t *testing.T) {
 	blockBytes := node.DevnetGenesisBlockBytes()
 	must(t, s.AnnounceTx(minimalValidTxBytes(t)), "OPEN AnnounceTx")
 	must(t, s.AnnounceBlock(blockBytes), "OPEN AnnounceBlock")
-	must(t, s.ConsumeAcceptedBlockDASets(blockBytes), "OPEN ConsumeAcceptedBlockDASets")
-	must(t, s.consumeCompleteDASetIDs(nil), "OPEN synchronous internal callee")
 	requireEqual(t, s.trackDialPeer("127.0.0.21:0") && s.trackDialPeer("127.0.0.22:1"), true, "the pre-inserted dial reservations") // Registered-then-rejected register paths release the lease and add no reservation; a leaked lease would strand the final Close past its watchdog.
 	requireEqual(t, s.startDialPeer("127.0.0.21:0"), false, "the duplicate outbound dial registration")
 	s.connectDiscoveredAddrs([]string{"127.0.0.22:1"})
@@ -210,12 +208,10 @@ func TestServiceWorkLifecycleEntryMatrix(t *testing.T) {
 	requireEqual(t, s.inFlightDialCount(), 0, "in-flight dial reservations after Close")
 	requireClosedRejection(t, s.AnnounceTx([]byte{0x00}), "CLOSED malformed AnnounceTx") // Malformed bytes after Close pin the priority row: the registration gate precedes parsing, so the rejection is the exact closed error, never a parse error.
 	requireClosedRejection(t, s.AnnounceBlock([]byte{0x00}), "CLOSED malformed AnnounceBlock")
-	requireClosedRejection(t, s.ConsumeAcceptedBlockDASets([]byte{0x00}), "CLOSED malformed ConsumeAcceptedBlockDASets")
 	requireClosedRejection(t, s.Start(context.Background()), "CLOSED Start")
 	requireEqual(t, s.startDialPeer("127.0.0.30:0"), false, "the CLOSED outbound dial registration")
 	s.connectDiscoveredAddrs([]string{"127.0.0.31:1"})
 	requireEqual(t, s.inFlightDialCount(), 0, "CLOSED discovered dial reservations")
-	must(t, s.consumeCompleteDASetIDs(nil), "CLOSED synchronous internal callee") // Synchronous internal callees inherit and never register a nested lease, so they behave identically after the drain.
 }
 
 // TestServiceWorkLifecycleCloseWaitsForPublicCallbacks parks each real public entry on a producer, socket-write or DA-owner-lock barrier while Close runs, then observes the owners.
@@ -585,12 +581,14 @@ func TestServiceWorkLifecycleReadOnlyAfterClose(t *testing.T) {
 	requireEqual(t, len(s.CompleteDASetCandidates(1<<20)), 2, "defensive DA snapshot candidates after Close")
 	requireClosedRejection(t, s.AnnounceTx(txBytes), "retained AnnounceTx callback")
 	requireClosedRejection(t, s.AnnounceBlock(blockBytes), "retained AnnounceBlock callback")
-	requireClosedRejection(t, s.ConsumeAcceptedBlockDASets(blockBytes), "retained DA consume callback")
 	requireEqual(t, metaCalls.Load(), int64(0), "TxMetadataFunc calls after Close") // Every observable owner a won call would have moved: the metadata producer was never invoked, the retained peer's socket saw no frame, and the state owners below are unchanged.
 	requireEqual(t, writes.Load(), int64(0), "frame writes on the retained peer socket after Close")
 	_, pooled := s.cfg.TxPool.Get(txid)
 	requireEqual(t, pooled, false, "the relay-pool entry a rejected AnnounceTx would have added")
-	requireEqual(t, lifecycleDASetPresent(s, daID), true, "the DA set a rejected consume would have taken from the state owner")
+	// blockBytes carries this exact da_id's complete commit+chunk pair, so a
+	// Service that still owned any post-return retained-DA cleanup would have
+	// taken the set here. There is no such authority left: the set survives.
+	requireEqual(t, lifecycleDASetPresent(s, daID), true, "the retained DA set after Close and both rejected callbacks")
 	requireEqual(t, s.blockSeen.Has(node.DevnetGenesisBlockHash()), false, "the block seen-set entry a rejected AnnounceBlock would have added")
 }
 

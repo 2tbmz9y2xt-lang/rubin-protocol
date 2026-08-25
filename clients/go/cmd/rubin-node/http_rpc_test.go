@@ -2115,11 +2115,6 @@ func TestDevnetRPCMineNextMineOneError(t *testing.T) {
 	}
 	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, nil, io.Discard, miner)
 	state.nowUnix = func() uint64 { return 0 }
-	var consumeCalls int
-	state.SetAcceptedBlockDASetConsumer(func([]byte) error {
-		consumeCalls++
-		return nil
-	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -2138,9 +2133,6 @@ func TestDevnetRPCMineNextMineOneError(t *testing.T) {
 	}
 	if !strings.Contains(got.Error, context.Canceled.Error()) {
 		t.Fatalf("error=%q want context canceled", got.Error)
-	}
-	if consumeCalls != 0 {
-		t.Fatalf("consume calls after MineOne error=%d, want 0", consumeCalls)
 	}
 }
 
@@ -2207,13 +2199,6 @@ func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 		return nil
 	}, io.Discard, miner)
 	state.nowUnix = func() uint64 { return 0 }
-	state.SetAcceptedBlockDASetConsumer(func(block []byte) error {
-		if _, err := consensus.ParseBlockBytes(block); err != nil {
-			t.Fatalf("ParseBlockBytes(consumer): %v", err)
-		}
-		events = append(events, "consume")
-		return nil
-	})
 	server := httptest.NewServer(newDevnetRPCHandler(state))
 	t.Cleanup(server.Close)
 	resp, err := http.Post(server.URL+"/mine_next", "application/json", bytes.NewReader([]byte("{}")))
@@ -2237,8 +2222,11 @@ func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 	if len(announcedBlock) == 0 {
 		t.Fatal("expected /mine_next to announce the mined full block")
 	}
-	if got := strings.Join(events, ","); got != "consume,announce" {
-		t.Fatalf("events=%s, want consume before announce", got)
+	// Announce is the ONLY post-return effect /mine_next still drives: retained-DA
+	// cleanup was published inside the canonical transition, so no consume step
+	// precedes or follows it.
+	if got := strings.Join(events, ","); got != "announce" {
+		t.Fatalf("events=%s, want announce alone", got)
 	}
 	parsedBlock, err := consensus.ParseBlockBytes(announcedBlock)
 	if err != nil {
@@ -2401,35 +2389,6 @@ func mustRPCMineNextState(t *testing.T, minerCfgTweaks ...func(*node.MinerConfig
 	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, nil, io.Discard, miner)
 	state.nowUnix = func() uint64 { return 0 }
 	return state
-}
-
-func TestDevnetRPCMineNextFailsClosedOnDAConsumeError(t *testing.T) {
-	state := mustRPCMineNextState(t)
-	var announced bool
-	state.announceBlock = func([]byte) error {
-		announced = true
-		return nil
-	}
-	state.SetAcceptedBlockDASetConsumer(func([]byte) error {
-		return errors.New("consume failed")
-	})
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/mine_next", nil)
-	handleMineNext(state, rec, req)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status=%d want 500 body=%s", rec.Code, rec.Body.String())
-	}
-	var got mineNextResponse
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-		t.Fatalf("Decode: %v", err)
-	}
-	if got.Mined || !strings.Contains(got.Error, "consume accepted DA sets: consume failed") {
-		t.Fatalf("unexpected response: %+v", got)
-	}
-	if announced {
-		t.Fatal("announceBlock called after consume failure")
-	}
 }
 
 func TestDevnetRPCMineNextLogsAnnounceBlockError(t *testing.T) {
@@ -3756,18 +3715,6 @@ func TestDevnetRPCPeersExposesAllBoundedFields(t *testing.T) {
 	}
 }
 
-func TestSetAcceptedBlockDASetConsumerNilReceiver(t *testing.T) {
-	var state *devnetRPCState
-	called := false
-	state.SetAcceptedBlockDASetConsumer(func([]byte) error {
-		called = true
-		return nil
-	})
-	if called {
-		t.Fatal("nil receiver invoked consumer")
-	}
-}
-
 func TestMinedBlockBytesNilState(t *testing.T) {
 	var hash [32]byte
 	_, err := minedBlockBytes(nil, hash)
@@ -4321,7 +4268,8 @@ func postWhileLocked(t *testing.T, srv *runningDevnetRPCServer, path, handler, b
 
 // TestMineNextPostApplyWinnerSurvivesLifecycleCancellation executes the cell on
 // the far side of the mutation boundary: the rendezvous is the post-apply
-// acceptedBlockDASetConsumer callback, so ApplyBlock has already committed the
+// announceBlock callback — the route's ONE remaining post-return effect now that
+// the DA-consume callback is gone — so ApplyBlock has already committed the
 // canonical block when the lifecycle cancellation is published. /mine_next has
 // no checkpoint left after MineOne returned, so the successful result stays
 // authoritative — any post-boundary recheck that remaps it to 503 fails here.
@@ -4332,13 +4280,13 @@ func TestMineNextPostApplyWinnerSurvivesLifecycleCancellation(t *testing.T) {
 	var enterOnce sync.Once
 	// Wired before the server starts serving, so the handler goroutine reads it
 	// through the server's own start ordering rather than racing this write.
-	state.SetAcceptedBlockDASetConsumer(func([]byte) error {
+	state.announceBlock = func([]byte) error {
 		enterOnce.Do(func() {
 			close(entered)
 			<-release
 		})
 		return nil
-	})
+	}
 	releaseOnce := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(releaseOnce)
 	srv := mustLifecycleServer(t, state)
@@ -4380,9 +4328,9 @@ func TestMineNextPostApplyWinnerSurvivesLifecycleCancellation(t *testing.T) {
 	select {
 	case <-entered:
 	case err := <-mineDone:
-		t.Fatalf("/mine_next finished without reaching the post-apply callback: %v", err)
+		t.Fatalf("/mine_next finished without reaching the post-apply announce callback: %v", err)
 	case <-time.After(testJoinWatchdog):
-		t.Fatal("/mine_next never reached the post-apply callback")
+		t.Fatal("/mine_next never reached the post-apply announce callback")
 	}
 
 	afterHeight, _, afterOK, err := state.blockStore.Tip()
@@ -4390,7 +4338,7 @@ func TestMineNextPostApplyWinnerSurvivesLifecycleCancellation(t *testing.T) {
 		t.Fatalf("Tip: %v", err)
 	}
 	if !afterOK || afterHeight != beforeHeight+1 {
-		t.Fatalf("tip height=%d ok=%v at the post-apply callback, want %d: the rendezvous is not past canonical apply", afterHeight, afterOK, beforeHeight+1)
+		t.Fatalf("tip height=%d ok=%v at the post-apply announce callback, want %d: the rendezvous is not past canonical apply", afterHeight, afterOK, beforeHeight+1)
 	}
 	// Publication lands strictly after the mutation boundary this route already
 	// crossed, and strictly before the route selects its response.

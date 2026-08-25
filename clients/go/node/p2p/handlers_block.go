@@ -153,18 +153,25 @@ func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainState
 	p.service.resolveOrphansFromSupplied(p, blockHash, blockHash)
 }
 
+// noteAcceptedBlock runs the post-return effects of one accepted block, in
+// order: best-known height, seen-set, inventory relay, then the fenced retained-DA
+// TTL advance.
+//
+// It performs NO retained-DA cleanup for the block's complete DA sets. That
+// cleanup is not a post-return effect at all: the canonical transition selects
+// and publishes the complete new retained-DA image inside its own admission
+// fence, before this function's caller could observe the summary
+// (RUBIN_MEMPOOL_POLICY.md Section 6.4.1 — "No other section, callback,
+// notification, or post-return loop may complete or redefine this transition").
+// A1's da_id rows stay in the summary as the block's public DA-set identity; no
+// caller may treat them as work still to do.
 func (s *Service) noteAcceptedBlock(source *peer, suppliedHash, blockHash [32]byte, summary *node.ChainStateConnectSummary) error {
-	var consumeErr error
 	if summary != nil {
 		s.cfg.SyncEngine.RecordBestKnownHeight(summary.BlockHeight)
-		// Consume complete DA sets only for blocks the SyncEngine reported as
-		// canonical-applied. Side branches report none, so storing a side block
-		// never consumes; reorgs report every newly-canonical block.
-		consumeErr = s.consumeCanonicalAppliedDASets(summary.CanonicalAppliedBlocks)
 	}
 	s.blockSeen.Add(blockHash)
 	s.relayCanonicalAppliedBlocks(source, suppliedHash, summary)
-	return errors.Join(consumeErr, s.advanceDAOrphanTTL())
+	return s.advanceDAOrphanTTL()
 }
 
 func (s *Service) broadcastAcceptedBlock(skip *peer, blockHash [32]byte) error {

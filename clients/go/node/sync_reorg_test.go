@@ -3105,8 +3105,8 @@ func daExtractionTestID(seed byte) (out [32]byte) {
 }
 
 // daExtractionBlockBytes encodes a real block carrying txs, so a row exercises
-// the same parse-then-extract path ConsumeAcceptedBlockDASets takes rather than
-// only the in-memory core.
+// the same parse-then-extract path CompleteDASetIDsFromParsedBlock is driven
+// through by the apply path rather than only the in-memory core.
 func daExtractionBlockBytes(t *testing.T, daTxs ...[]byte) []byte {
 	t.Helper()
 	txs := make([][]byte, 0, len(daTxs)+1)
@@ -3149,8 +3149,8 @@ func daExtractionChunkTxBytes(t *testing.T, daID [32]byte, index uint16, nonce u
 }
 
 // mustParseCompleteDASetIDs runs the extraction core over real block bytes:
-// parse first, exactly as ConsumeAcceptedBlockDASets does, so these rows pin the
-// behavior of the encoded-block entry and not only of the core.
+// parse first, exactly as applyCanonicalParsedBlockTracked does, so these rows
+// pin the behavior of the encoded-block entry and not only of the core.
 func mustParseCompleteDASetIDs(t *testing.T, blockBytes []byte) [][32]byte {
 	t.Helper()
 	parsed, err := consensus.ParseBlockBytes(blockBytes)
