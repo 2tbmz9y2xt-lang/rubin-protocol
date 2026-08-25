@@ -369,8 +369,8 @@ func TestCanonicalMOPlanWinningReorg(t *testing.T) {
 		if endErr := tr.end(err); endErr != err { //nolint:errorlint // Exact passthrough identity is the behavior under test.
 			t.Fatalf("transition end=%v cause=%v", endErr, err)
 		}
-		var early *disconnectPreFinalizeError
-		if err == nil || errors.As(err, &early) {
+		early := &disconnectPreFinalizeError{cause: err}
+		if err == nil || early.Error() != err.Error() || early.Unwrap() != err || unwrapDisconnectPreFinalizeError(err) != err || errors.As(err, &early) { //nolint:errorlint // Exact helper passthrough is under test.
 			t.Fatalf("reorg error=%v leaked pre-finalize wrapper", err)
 		}
 	})

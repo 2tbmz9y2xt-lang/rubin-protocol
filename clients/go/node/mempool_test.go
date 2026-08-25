@@ -3423,10 +3423,10 @@ func TestMempoolRollingMinFeeDecaysOnlyOnConnectedBlockLowWater(t *testing.T) {
 	if got := canonicalMempoolFeeFloor(mp.currentMinFeeRate, mp.usedBytes, mp.effectiveLowWaterBytesLocked(), 1); got != 8 {
 		t.Fatalf("boundary usedBytes floor=%d, want 8", got)
 	}
-	mp.currentMinFeeRate = DefaultMempoolMinFeeRate
+	mp.currentMinFeeRate = 0
 	mp.usedBytes = 0
-	if got := canonicalMempoolFeeFloor(mp.currentMinFeeRate, mp.usedBytes, mp.effectiveLowWaterBytesLocked(), 1); got != DefaultMempoolMinFeeRate {
-		t.Fatalf("base floor=%d, want %d", got, DefaultMempoolMinFeeRate)
+	if preClamp, postDecay := canonicalMempoolFeeFloor(mp.currentMinFeeRate, mp.usedBytes, mp.effectiveLowWaterBytesLocked(), 0), canonicalMempoolFeeFloor(DefaultMempoolMinFeeRate, mp.usedBytes, mp.effectiveLowWaterBytesLocked(), 1); preClamp != DefaultMempoolMinFeeRate || postDecay != DefaultMempoolMinFeeRate {
+		t.Fatalf("minimum floors pre=%d post=%d, want %d", preClamp, postDecay, DefaultMempoolMinFeeRate)
 	}
 }
 
