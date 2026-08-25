@@ -87,6 +87,99 @@ type MinedBlock struct {
 	TxCount   int
 }
 
+// CanonicalCommitState is the RUBIN_MEMPOOL_POLICY.md Section 6.4.1 commit truth
+// of the canonical apply that selects one mining result, in the exact wire form
+// RUBIN_NODE_RPC_DEVNET.md Section 3.4 requires of its mandatory commit_state
+// field. The three constants below are the CLOSED set; no other value is ever
+// produced, and "unknown" MUST NOT be flattened onto "not_committed".
+type CanonicalCommitState string
+
+const (
+	// CanonicalCommitStateNotCommitted is truth OLD, NOT_APPLICABLE, or any
+	// outcome reached before a commit could cross: the exact old image stands.
+	CanonicalCommitStateNotCommitted CanonicalCommitState = "not_committed"
+	// CanonicalCommitStateCommitted is truth NEW: the complete planned new
+	// image was published, whether or not the transition then latched.
+	CanonicalCommitStateCommitted CanonicalCommitState = "committed"
+	// CanonicalCommitStateUnknown is TERMINAL_PERSISTENCE(neither_or_unreadable):
+	// neither image may be guessed and no identity may be exposed.
+	CanonicalCommitStateUnknown CanonicalCommitState = "unknown"
+)
+
+// MineOneDisposition is the closed public-result class of one mining attempt.
+// It is what a transport maps to its own status vocabulary — Section 3.4 maps
+// these three to 200, 422 and 503 — so no transport has to classify an error
+// string, a latch, a tip or a storage reread to answer.
+type MineOneDisposition uint8
+
+const (
+	// MineOneDispositionSuccess is a mined candidate that committed.
+	MineOneDispositionSuccess MineOneDisposition = iota
+	// MineOneDispositionUnprocessable is the candidate's OWN failure: a
+	// consensus or policy rejection, a nonce or build failure, a request
+	// cancellation, or any other ordinary candidate outcome.
+	MineOneDispositionUnprocessable
+	// MineOneDispositionServiceUnavailable is a LOCAL condition rather than a
+	// verdict on the candidate: an unavailable runtime, a latched engine, and
+	// every failure at or after the durable commit stage — bounded resource,
+	// stale plan, noncanonical store, precommit persistence, and every terminal
+	// class including a terminal NEW that did publish.
+	MineOneDispositionServiceUnavailable
+)
+
+// MineOneOutcome is the complete typed result of ONE MineOneWithOutcome
+// invocation, and the only thing a caller needs to render Section 3.4's
+// projection.
+//
+// Block is nonnil exactly when the attempt published a candidate — including a
+// terminal candidate NEW, which returns both the block identity and the terminal
+// error. CommitState and Disposition are independent: a committed attempt can be
+// unavailable (terminal NEW), and a not_committed one can be unprocessable
+// (ordinary rejection) or unavailable (local failure).
+type MineOneOutcome struct {
+	Block       *MinedBlock
+	CommitState CanonicalCommitState
+	Disposition MineOneDisposition
+}
+
+// canonicalMineOneOutcome projects ONE canonical apply's per-invocation typed
+// projection onto the closed (commit state, disposition) pair.
+//
+// It reads the projection and the storage-persistence-fault sentinel and NOTHING
+// else: no error text, no latch inspection, no current tip, no published summary,
+// no storage reread. err is the error the apply returned, used only for its
+// presence and for that one sentinel identity.
+func canonicalMineOneOutcome(projection canonicalApplyProjection, err error) (CanonicalCommitState, MineOneDisposition) {
+	switch projection.truth {
+	case canonicalTruthNew:
+		if err != nil {
+			return CanonicalCommitStateCommitted, MineOneDispositionServiceUnavailable
+		}
+		return CanonicalCommitStateCommitted, MineOneDispositionSuccess
+	case canonicalTruthUnknown:
+		return CanonicalCommitStateUnknown, MineOneDispositionServiceUnavailable
+	default:
+		if err == nil {
+			return CanonicalCommitStateNotCommitted, MineOneDispositionSuccess
+		}
+		if projection.commitStageEntered || errors.Is(err, errStoragePersistenceFault) {
+			return CanonicalCommitStateNotCommitted, MineOneDispositionServiceUnavailable
+		}
+		return CanonicalCommitStateNotCommitted, MineOneDispositionUnprocessable
+	}
+}
+
+// unavailableMineOneOutcome is the outcome of a failure that never reached a
+// canonical apply at all, so no truth was classified and the old image stands.
+func unavailableMineOneOutcome() MineOneOutcome {
+	return MineOneOutcome{CommitState: CanonicalCommitStateNotCommitted, Disposition: MineOneDispositionServiceUnavailable}
+}
+
+// unprocessableMineOneOutcome is the candidate's own pre-apply failure.
+func unprocessableMineOneOutcome() MineOneOutcome {
+	return MineOneOutcome{CommitState: CanonicalCommitStateNotCommitted, Disposition: MineOneDispositionUnprocessable}
+}
+
 type Miner struct {
 	chainState *ChainState
 	blockStore *BlockStore
@@ -195,27 +288,63 @@ func (m *Miner) MineN(ctx context.Context, blocks int, txs [][]byte) ([]MinedBlo
 // goroutine — so a caller may pass a single-goroutine context implementation
 // whose Done/Err are only valid on the calling goroutine.
 func (m *Miner) MineOne(ctx context.Context, txs [][]byte) (*MinedBlock, error) {
-	// Validate miner state
+	outcome, err := m.MineOneWithOutcome(ctx, txs)
+	if err != nil {
+		// Unchanged contract: ANY error returns a nil block, including the
+		// terminal candidate NEW whose block the typed outcome does carry.
+		return nil, err
+	}
+	return outcome.Block, nil
+}
+
+// MineOneWithOutcome is MineOne plus the typed per-invocation commit state and
+// public-result class of the attempt. It observes ctx at exactly the same
+// checkpoints, returns exactly the same errors, and mutates exactly as much.
+//
+// A caller that only needs the block should keep using MineOne; a caller that
+// must PROJECT the attempt — Section 3.4's /mine_next is the one in tree — needs
+// the outcome, because the block alone cannot distinguish a terminal candidate
+// NEW (published, unavailable) from an ordinary success, nor an UNKNOWN truth
+// from an ordinary refusal.
+func (m *Miner) MineOneWithOutcome(ctx context.Context, txs [][]byte) (MineOneOutcome, error) {
+	// An uninitialized miner is an unavailable runtime, not a verdict on the
+	// candidate. /mine_next cannot reach it — it answers 503 on a nil miner and
+	// NewMiner rejects a partially built one — so this classification is
+	// defensive.
 	if err := m.validateMineOneInput(); err != nil {
-		return nil, err
+		return unavailableMineOneOutcome(), err
 	}
 
-	// Check context cancellation
-	if ctx != nil {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
+	// Entry cancellation. A request-local cancellation alone keeps the ordinary
+	// candidate class; a caller that ALSO observed its lifecycle source canceled
+	// at this checkpoint overrides that classification itself, which is where
+	// that authority already lived.
+	if err := mineOneContextErr(ctx); err != nil {
+		return unprocessableMineOneOutcome(), err
 	}
 
-	// Bootstrap genesis if needed
-	if err := m.bootstrapGenesisIfNeeded(); err != nil {
-		return nil, err
+	projection, err := m.sync.bootstrapCanonicalGenesisIfEmpty()
+	if err != nil {
+		state, disposition := canonicalMineOneOutcome(projection, err)
+		return MineOneOutcome{CommitState: state, Disposition: disposition}, err
 	}
 
-	// Execute mining
 	return m.executeMineOne(ctx, txs)
+}
+
+// mineOneContextErr is the ONE non-blocking cancellation poll shape every
+// checkpoint uses: a select with a default, never a blocking receive, and never
+// a retained Done channel. A nil ctx disables observation.
+func mineOneContextErr(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
 }
 
 func (m *Miner) buildBlock(ctx context.Context, txs [][]byte) ([]byte, []uint64, uint64, uint64, int, error) {

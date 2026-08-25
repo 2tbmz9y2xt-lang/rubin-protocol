@@ -757,8 +757,10 @@ if not isinstance(data, dict) or set(data) != {"captured_at_unix_ns", "implement
 if data.get("method") != "POST" or data.get("request_path") != "/mine_next":
     sys.exit("mine sidecar route mismatch")
 resp = data.get("response")
-if not isinstance(resp, dict) or set(resp) != {"block_hash", "height", "mined", "nonce", "timestamp", "tx_count"}:
+if not isinstance(resp, dict) or set(resp) != {"block_hash", "commit_state", "height", "mined", "nonce", "timestamp", "tx_count"}:
     sys.exit("mine response shape mismatch")
+if resp.get("commit_state") != "committed":
+    sys.exit("mine response commit_state mismatch")
 height, block_hash, tx_count = resp.get("height"), resp.get("block_hash"), resp.get("tx_count")
 if resp.get("mined") is not True:
     sys.exit("mine response did not mine")

@@ -636,7 +636,8 @@ if mode == "tip":
     require(isinstance(tip_hash, str) and len(tip_hash) == 64 and all(ch in "0123456789abcdef" for ch in tip_hash), "tip has invalid tip_hash")
     print(json.dumps({key: body[key] for key in ("has_tip", "height", "tip_hash")}, sort_keys=True))
 elif mode == "refusal":
-    require(record["status"] == 422 and isinstance(body, dict) and set(body) == {"mined", "error"} and body["mined"] is False, "refusal HTTP disposition/root/keys changed")
+    require(record["status"] == 422 and isinstance(body, dict) and set(body) == {"mined", "commit_state", "error"} and body["mined"] is False, "refusal HTTP disposition/root/keys changed")
+    require(body["commit_state"] == "not_committed", "refusal commit_state changed")
     error = body["error"]
     markers = ("atomic write lock failed", sys.argv[3], "before_namespace_commit", "create_if_absent")
     require(isinstance(error, str) and all(marker in error for marker in markers), "atomic refusal is missing stable markers")
@@ -645,9 +646,9 @@ elif mode == "refusal":
     require("datadir is already in use" not in error and "persistence fault" not in error, "atomic writer took the wrong refusal path")
 elif mode == "success":
     before, after = load(sys.argv[3], "pre-refusal tip"), load(sys.argv[4], "post-retry tip")
-    keys = {"mined", "height", "block_hash", "timestamp", "nonce", "tx_count"}
+    keys = {"mined", "commit_state", "height", "block_hash", "timestamp", "nonce", "tx_count"}
     require(record["status"] == 200 and isinstance(body, dict) and set(body) == keys, "retry success HTTP disposition/root/keys changed")
-    require(body["mined"] is True and all(type(body[key]) is int for key in ("height", "timestamp", "nonce", "tx_count")), "retry success types changed")
+    require(body["mined"] is True and body["commit_state"] == "committed" and all(type(body[key]) is int for key in ("height", "timestamp", "nonce", "tx_count")), "retry success types changed")
     require(isinstance(body["block_hash"], str) and len(body["block_hash"]) == 64 and all(ch in "0123456789abcdef" for ch in body["block_hash"]), "retry block_hash type changed")
     require(set(before) == {"has_tip", "height", "tip_hash"} and set(after) == set(before), "tip projection keys changed")
     require(before["has_tip"] is True and after["has_tip"] is True, "tip projection has no tip")

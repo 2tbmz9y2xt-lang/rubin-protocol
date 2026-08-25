@@ -495,14 +495,85 @@ type submitTxResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
+// mineNextResponse is RUBIN_NODE_RPC_DEVNET.md Section 3.4's response body.
+//
+// CommitState is MANDATORY on every response and is never empty. Mined is a
+// POINTER because the section distinguishes three states of the field, not two:
+// present-true, present-false, and ABSENT for commit_state "unknown", where no
+// legacy mined value may be exposed. A plain bool cannot express the third.
+//
+// Success identity is all of height, block_hash, timestamp, nonce and tx_count:
+// when it is absent none of them may appear, which is what the omitempty
+// pointers enforce.
 type mineNextResponse struct {
-	Mined     bool    `json:"mined"`
-	Height    *uint64 `json:"height,omitempty"`
-	BlockHash *string `json:"block_hash,omitempty"`
-	Timestamp *uint64 `json:"timestamp,omitempty"`
-	Nonce     *uint64 `json:"nonce,omitempty"`
-	TxCount   *int    `json:"tx_count,omitempty"`
-	Error     string  `json:"error,omitempty"`
+	Mined       *bool                     `json:"mined,omitempty"`
+	CommitState node.CanonicalCommitState `json:"commit_state"`
+	Height      *uint64                   `json:"height,omitempty"`
+	BlockHash   *string                   `json:"block_hash,omitempty"`
+	Timestamp   *uint64                   `json:"timestamp,omitempty"`
+	Nonce       *uint64                   `json:"nonce,omitempty"`
+	TxCount     *int                      `json:"tx_count,omitempty"`
+	Error       string                    `json:"error,omitempty"`
+}
+
+// minedFlag renders the mandatory present-true / present-false mined field. The
+// absent case does not go through here: it is the nil pointer.
+func minedFlag(mined bool) *bool { return &mined }
+
+// mineNextRejection is the reject-or-unavailable shape: mined present and false,
+// the mandatory commit_state, no success identity.
+func mineNextRejection(state node.CanonicalCommitState, errText string) mineNextResponse {
+	return mineNextResponse{Mined: minedFlag(false), CommitState: state, Error: errText}
+}
+
+// mineNextIdentity is the success shape. errText is empty for an ordinary
+// success and carries the terminal error for a terminal candidate NEW, which
+// Section 3.4 answers with the success shape PLUS a mandatory error field.
+func mineNextIdentity(mb *node.MinedBlock, state node.CanonicalCommitState, errText string) mineNextResponse {
+	height, ts, nonce, txCount := mb.Height, mb.Timestamp, mb.Nonce, mb.TxCount
+	hash := hex.EncodeToString(mb.Hash[:])
+	return mineNextResponse{
+		Mined:       minedFlag(true),
+		CommitState: state,
+		Height:      &height,
+		BlockHash:   &hash,
+		Timestamp:   &ts,
+		Nonce:       &nonce,
+		TxCount:     &txCount,
+		Error:       errText,
+	}
+}
+
+// mineNextFailure selects the exact body Section 3.4 assigns to one failed
+// attempt, from the TYPED outcome alone:
+//
+//	unknown truth        -> the unknown shape, mined ABSENT, no identity
+//	published candidate  -> the success shape plus the mandatory error
+//	everything else      -> the reject shape with its own commit_state, which is
+//	                        "committed" for a terminal bootstrap NEW
+func mineNextFailure(outcome node.MineOneOutcome, err error) mineNextResponse {
+	if outcome.CommitState == node.CanonicalCommitStateUnknown {
+		return mineNextResponse{CommitState: outcome.CommitState, Error: err.Error()}
+	}
+	if outcome.Block != nil {
+		return mineNextIdentity(outcome.Block, outcome.CommitState, err.Error())
+	}
+	return mineNextRejection(outcome.CommitState, err.Error())
+}
+
+// mineNextStatus maps the CLOSED typed disposition to its Section 3.4 status.
+// It is the ONLY place this route selects a status from a mining result and it
+// reads no error string; the default is the unavailable class, so a disposition
+// this file does not recognize fails closed instead of answering 200.
+func mineNextStatus(disposition node.MineOneDisposition) int {
+	switch disposition {
+	case node.MineOneDispositionSuccess:
+		return http.StatusOK
+	case node.MineOneDispositionUnprocessable:
+		return http.StatusUnprocessableEntity
+	default:
+		return http.StatusServiceUnavailable
+	}
 }
 
 type getMempoolResponse struct {
@@ -1216,25 +1287,18 @@ func handleSubmitTx(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 
 func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Request) {
 	const route = "/mine_next"
+	// Every guard below refuses before any canonical apply is reached, so the
+	// old image stands and commit_state is not_committed by construction.
 	if r.Method != http.MethodPost {
-		writeJSONResponse(state, route, w, http.StatusBadRequest, mineNextResponse{
-			Mined: false,
-			Error: "POST required",
-		})
+		writeJSONResponse(state, route, w, http.StatusBadRequest, mineNextRejection(node.CanonicalCommitStateNotCommitted, "POST required"))
 		return
 	}
 	if state == nil {
-		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextResponse{
-			Mined: false,
-			Error: "rpc unavailable",
-		})
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextRejection(node.CanonicalCommitStateNotCommitted, "rpc unavailable"))
 		return
 	}
 	if state.miner == nil {
-		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextResponse{
-			Mined: false,
-			Error: "live mining unavailable",
-		})
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextRejection(node.CanonicalCommitStateNotCommitted, "live mining unavailable"))
 		return
 	}
 	state.rpcMut.Lock()
@@ -1245,7 +1309,7 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 	// The nolint below is a linter blind spot, not a suppressed finding: mineCtx
 	// IS derived from r.Context() — it embeds it and falls through to it — but
 	// contextcheck only recognizes derivation through context.WithXXX.
-	mb, err := state.miner.MineOne(mineCtx, nil) //nolint:contextcheck
+	outcome, err := state.miner.MineOneWithOutcome(mineCtx, nil) //nolint:contextcheck
 	if err != nil {
 		state.rpcMut.Unlock()
 		// RUBIN_NODE_RPC_DEVNET.md section 2 + 3.4. The rule in full: a defined
@@ -1269,18 +1333,25 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		// true latch already implies err is context.Canceled, so the term is
 		// structurally redundant today but contract-prescribed.
 		if errors.Is(err, context.Canceled) && mineCtx.observedLifecycle {
-			writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextResponse{
-				Mined: false,
-				Error: "rpc unavailable",
-			})
+			writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextRejection(outcome.CommitState, "rpc unavailable"))
 			return
 		}
-		writeJSONResponse(state, route, w, http.StatusUnprocessableEntity, mineNextResponse{
-			Mined: false,
-			Error: err.Error(),
-		})
+		// Everything else is the attempt's OWN typed class: the status comes
+		// from the closed disposition and the body from the typed outcome, so
+		// this route never classifies an error string, a latch, the current tip
+		// or a storage reread.
+		writeJSONResponse(state, route, w, mineNextStatus(outcome.Disposition), mineNextFailure(outcome, err))
 		return
 	}
+	if outcome.Block == nil {
+		// Unreachable: a nil error means commit truth NEW, which always carries
+		// the published identity. Fail closed rather than answer 200 with a
+		// success shape that has no identity in it.
+		state.rpcMut.Unlock()
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextRejection(outcome.CommitState, "mined block identity unavailable"))
+		return
+	}
+	mb := outcome.Block
 	state.rpcMut.Unlock()
 	// The mined block's bytes are loaded ONLY for the announce branch, which is
 	// the sole surviving post-return effect: the canonical transition already
@@ -1296,19 +1367,7 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 			_, _ = fmt.Fprintf(state.stderr, "rpc: announce-block: %v\n", err)
 		}
 	}
-	height := mb.Height
-	ts := mb.Timestamp
-	nonce := mb.Nonce
-	txCount := mb.TxCount
-	hash := hex.EncodeToString(mb.Hash[:])
-	writeJSONResponse(state, route, w, http.StatusOK, mineNextResponse{
-		Mined:     true,
-		Height:    &height,
-		BlockHash: &hash,
-		Timestamp: &ts,
-		Nonce:     &nonce,
-		TxCount:   &txCount,
-	})
+	writeJSONResponse(state, route, w, mineNextStatus(outcome.Disposition), mineNextIdentity(mb, outcome.CommitState, ""))
 }
 
 func minedBlockBytes(state *devnetRPCState, hash [32]byte) ([]byte, error) {

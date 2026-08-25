@@ -269,6 +269,11 @@ type canonicalMempoolPlan struct {
 	currentMinFeeRate uint64
 	pending           pendingOutpointSnapshot
 	ownerIndex        pendingOutpointIndex
+	// chain is the captured C1 execution context this plan was validated
+	// against. It is prepared state, not published state: the D1 preparation
+	// reads it so both images are judged against one view, and
+	// publishCanonicalMempoolPlanLocked never touches it.
+	chain canonicalFinalChainContext
 }
 
 type canonicalMempoolPlanContext struct {
@@ -310,9 +315,29 @@ func localCanonicalMempoolPlanError(err error) error {
 	return &canonicalMOPlanError{detail: err.Error()}
 }
 
-func isCanonicalMOTerminalError(err error) bool {
-	var terminal *canonicalMOTerminalError
-	return errors.As(err, &terminal)
+// isCanonicalTransitionTerminalError reports whether a precommit failure is a
+// TERMINAL_LOCAL_INVARIANT of the transition's own retained state — the standard
+// mempool / owner class, or the retained-DA class. Both preserve OLD, publish
+// nothing and keep mutation admission latched, so both take the same closeout;
+// only the operator record distinguishes them.
+func isCanonicalTransitionTerminalError(err error) bool {
+	var mo *canonicalMOTerminalError
+	if errors.As(err, &mo) {
+		return true
+	}
+	var da *canonicalDATerminalError
+	return errors.As(err, &da)
+}
+
+// canonicalTerminalReason names the retained-state class that latched, from the
+// error's TYPE and never from its text, so one stderr line tells an operator
+// which subsystem to investigate.
+func canonicalTerminalReason(cause error) string {
+	var da *canonicalDATerminalError
+	if errors.As(cause, &da) {
+		return "canonical retained-DA invariant"
+	}
+	return "canonical mempool invariant"
 }
 
 func canonicalMempoolPlanContextOf(m *Mempool) (canonicalMempoolPlanContext, error) {
@@ -356,6 +381,27 @@ func canonicalMempoolFinalStateOf(final *ChainState, mtp uint64, inputs []consen
 	return canonicalMempoolFinalState{utxos: snapshot.utxos, nextHeight: nextHeight, mtp: mtp}, nil
 }
 
+// canonicalFinalChainContext is the ONE captured execution context every
+// chain-dependent validity decision of a transition runs against: C1 itself, its
+// next height and MTP, the chain id, the policy with its rotation-cache view
+// installed, and the signature cache.
+//
+// It is built once, by the M1 preparation, and handed unchanged to the D1
+// preparation, so a standard record and a retained DA member cannot be judged
+// against different views of the same planned chain. The rotation cache is
+// shared for the same reason it exists for M1 — one provider observation per
+// height for the whole transition — and the signature cache carries the work
+// already done for M1 into D1.
+type canonicalFinalChainContext struct {
+	final      *ChainState
+	rotation   consensus.RotationProvider
+	sigCache   *consensus.SigCache
+	policy     MempoolConfig
+	chainID    [32]byte
+	nextHeight uint64
+	mtp        uint64
+}
+
 func prepareCanonicalMempoolPlan(
 	m *Mempool,
 	snapshot mempoolSnapshot,
@@ -379,11 +425,34 @@ func prepareCanonicalMempoolPlan(
 	if err != nil {
 		return canonicalMempoolPlan{}, terminalCanonicalMempoolError(err)
 	}
-	retained, err := selectCanonicalMempoolEntries(snapshot.entries, finalState, ctx)
+	chain := canonicalFinalChainContextOf(final, finalState, ctx)
+	retained, err := selectCanonicalMempoolEntries(snapshot.entries, finalState, chain)
 	if err != nil {
 		return canonicalMempoolPlan{}, err
 	}
-	return buildCanonicalMempoolPlan(retained, snapshot, ctx, decayRows, usedBytes)
+	plan, err := buildCanonicalMempoolPlan(retained, snapshot, ctx, decayRows, usedBytes)
+	if err != nil {
+		return canonicalMempoolPlan{}, err
+	}
+	plan.chain = chain
+	return plan, nil
+}
+
+// canonicalFinalChainContextOf installs the transition's one rotation cache on a
+// copy of the live policy. The caller's MempoolConfig is not modified.
+func canonicalFinalChainContextOf(final *ChainState, finalState canonicalMempoolFinalState, ctx canonicalMempoolPlanContext) canonicalFinalChainContext {
+	rotation := newCanonicalMempoolRotationCache(ctx.policy.RotationProvider)
+	policy := ctx.policy
+	policy.RotationProvider = rotation
+	return canonicalFinalChainContext{
+		final:      final,
+		rotation:   rotation,
+		sigCache:   ctx.sigCache,
+		policy:     policy,
+		chainID:    ctx.chainID,
+		nextHeight: finalState.nextHeight,
+		mtp:        finalState.mtp,
+	}
 }
 
 func canonicalMempoolPlanContextForChain(m *Mempool, chainID [32]byte) (canonicalMempoolPlanContext, error) {
@@ -842,14 +911,11 @@ func buildCanonicalOwnerIndex(owner *PendingOutpointOwner, snapshot pendingOutpo
 func selectCanonicalMempoolEntries(
 	entries []mempoolEntry,
 	final canonicalMempoolFinalState,
-	ctx canonicalMempoolPlanContext,
+	chain canonicalFinalChainContext,
 ) ([]mempoolEntry, error) {
-	rotation := newCanonicalMempoolRotationCache(ctx.policy.RotationProvider)
-	policy := ctx.policy
-	policy.RotationProvider = rotation
 	retained := make([]mempoolEntry, 0, len(entries))
 	for i := range entries {
-		keep, err := canonicalMempoolEntryFinalValid(entries[i], final, ctx.chainID, policy, rotation, ctx.sigCache)
+		keep, err := canonicalMempoolEntryFinalValid(entries[i], final, chain)
 		if err != nil {
 			return nil, err
 		}
@@ -863,35 +929,67 @@ func selectCanonicalMempoolEntries(
 func canonicalMempoolEntryFinalValid(
 	entry mempoolEntry,
 	final canonicalMempoolFinalState,
-	chainID [32]byte,
-	policy MempoolConfig,
-	rotation consensus.RotationProvider,
-	sigCache *consensus.SigCache,
+	chain canonicalFinalChainContext,
 ) (bool, error) {
 	tx, err := parseMempoolEntryRaw(entry)
 	if err != nil {
 		return false, terminalCanonicalMempoolError(err)
 	}
-	checked, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext(
+	checked, keep, err := canonicalCheckedAgainstFinalChain(
 		entry.raw,
 		tx,
 		consensus.ParsedTxIDs{TxID: entry.txid, WTxID: entry.wtxid},
 		copySelectedUtxoSet(final.utxos, entry.inputs),
-		final.nextHeight,
-		final.mtp,
-		chainID,
-		consensus.SuiteValidationContext{Rotation: rotation, Registry: policy.SuiteRegistry, SigCache: sigCache},
+		chain,
 	)
-	if err != nil {
-		if canonicalMempoolValidationAbortsPlan(err) {
-			return false, localCanonicalMempoolPlanError(err)
-		}
-		return false, nil
+	if err != nil || !keep {
+		return false, err
 	}
 	if err := validateCanonicalCheckedEntry(entry, checked); err != nil {
 		return false, terminalCanonicalMempoolError(err)
 	}
-	return canonicalMempoolChainPolicyValid(tx, final.utxos, final.nextHeight, chainID, policy, rotation)
+	return canonicalMempoolChainPolicyValid(tx, final.utxos, chain)
+}
+
+// canonicalCheckedAgainstFinalChain is the chain-dependent consensus half of
+// Section 6.4.1's final_chain_valid, shared by the standard-record and retained
+// DA-member preparations so both judge a transaction against the identical
+// captured C1 context and the identical exclusion-versus-abort classification.
+//
+// utxos MUST already be the OWNED confirmed view for this transaction's inputs;
+// the two callers select it differently (M1 from the union it snapshotted for
+// the whole pool, D1 per member from C1 itself) and the classification below must
+// not depend on which.
+//
+// keep=false with a nil error is an EXCLUSION: this transaction is not valid
+// against C1 and its record leaves the new image. A non-nil error is the plan
+// abort — a direct TxError whose cause the existing classifiers call
+// plan-aborting, or any wrapped/non-TxError failure — and no D-specific or
+// M-specific reclassification is layered on top of it.
+func canonicalCheckedAgainstFinalChain(
+	raw []byte,
+	tx *consensus.Tx,
+	ids consensus.ParsedTxIDs,
+	utxos map[consensus.Outpoint]consensus.UtxoEntry,
+	chain canonicalFinalChainContext,
+) (*consensus.CheckedTransaction, bool, error) {
+	checked, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndSuiteContext(
+		raw,
+		tx,
+		ids,
+		utxos,
+		chain.nextHeight,
+		chain.mtp,
+		chain.chainID,
+		consensus.SuiteValidationContext{Rotation: chain.rotation, Registry: chain.policy.SuiteRegistry, SigCache: chain.sigCache},
+	)
+	if err != nil {
+		if canonicalMempoolValidationAbortsPlan(err) {
+			return nil, false, localCanonicalMempoolPlanError(err)
+		}
+		return nil, false, nil
+	}
+	return checked, true, nil
 }
 
 func canonicalMempoolValidationAbortsPlan(err error) bool {
@@ -925,28 +1023,31 @@ func canonicalCheckedMempoolEntryMatches(entry mempoolEntry, checked *consensus.
 	return checked.TxID == entry.txid && checked.WTxID == entry.wtxid && checked.Fee == entry.fee && checked.Weight == entry.weight && checked.SerializedSize == entry.size && bytes.Equal(checked.Bytes, entry.raw)
 }
 
+// canonicalMempoolChainPolicyValid is the chain-CONTEXT half of final_chain_valid
+// that Section 6.4.1 keeps alongside the consensus check: the locktime decision
+// against C1's next height, and the CORE_SIMPLICITY activation decision against
+// C1's rotation view. Both the standard-record and retained DA-member
+// preparations run it; neither reruns a pool-local duplicate, fee-floor,
+// capacity, admission-sequence or owner-conflict check.
 func canonicalMempoolChainPolicyValid(
 	tx *consensus.Tx,
 	utxos map[consensus.Outpoint]consensus.UtxoEntry,
-	nextHeight uint64,
-	chainID [32]byte,
-	policy MempoolConfig,
-	rotation consensus.RotationProvider,
+	chain canonicalFinalChainContext,
 ) (bool, error) {
 	if tx == nil {
 		return false, terminalCanonicalMempoolError(errors.New("nil canonical mempool transaction"))
 	}
-	if uint64(tx.Locktime) > nextHeight {
+	if uint64(tx.Locktime) > chain.nextHeight {
 		return false, nil
 	}
-	if !policy.PolicyRejectSimplicityPreActivation {
+	if !chain.policy.PolicyRejectSimplicityPreActivation {
 		return true, nil
 	}
 	policyUtxos, err := policyInputSnapshot(tx, utxos)
 	if err != nil {
 		return false, terminalCanonicalMempoolError(err)
 	}
-	reject, _, err := rejectCoreSimplicityPreActivation(tx, policyUtxos, chainID, nextHeight, rotation)
+	reject, _, err := rejectCoreSimplicityPreActivation(tx, policyUtxos, chain.chainID, chain.nextHeight, chain.rotation)
 	if err != nil {
 		if reject {
 			return false, localCanonicalMempoolPlanError(err)

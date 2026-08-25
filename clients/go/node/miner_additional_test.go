@@ -3,6 +3,8 @@ package node
 import (
 	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"math"
 	"testing"
 
@@ -723,5 +725,73 @@ func TestParseCanonicalTx(t *testing.T) {
 	raw = append(raw, 0x00)
 	if _, _, _, err := parseCanonicalTx(raw, "bad"); err == nil || err.Error() != "bad" {
 		t.Fatalf("expected non-canonical parse error, got %v", err)
+	}
+}
+
+// TestCanonicalMineOneOutcomeProjection pins the ONE mapping from a canonical
+// apply's per-invocation projection to the closed typed pair /mine_next renders.
+// Every row is decided by the projection and the storage-persistence-fault
+// sentinel alone: no error text, no latch read, no tip, no storage reread.
+func TestCanonicalMineOneOutcomeProjection(t *testing.T) {
+	ordinary := errors.New("ordinary candidate failure")
+	for _, tc := range []struct {
+		name        string
+		projection  canonicalApplyProjection
+		err         error
+		state       CanonicalCommitState
+		disposition MineOneDisposition
+	}{
+		{
+			name:       "ordinary NEW is a committed success",
+			projection: canonicalApplyProjection{truth: canonicalTruthNew, commitStageEntered: true},
+			state:      CanonicalCommitStateCommitted, disposition: MineOneDispositionSuccess,
+		},
+		{
+			name:       "terminal NEW is committed and unavailable",
+			projection: canonicalApplyProjection{truth: canonicalTruthNew, commitStageEntered: true},
+			err:        ordinary,
+			state:      CanonicalCommitStateCommitted, disposition: MineOneDispositionServiceUnavailable,
+		},
+		{
+			name:       "UNKNOWN is never flattened onto not_committed",
+			projection: canonicalApplyProjection{truth: canonicalTruthUnknown, commitStageEntered: true},
+			err:        ordinary,
+			state:      CanonicalCommitStateUnknown, disposition: MineOneDispositionServiceUnavailable,
+		},
+		{
+			name:       "a commit-stage refusal is unavailable, not unprocessable",
+			projection: canonicalApplyProjection{truth: canonicalTruthOld, commitStageEntered: true},
+			err:        ordinary,
+			state:      CanonicalCommitStateNotCommitted, disposition: MineOneDispositionServiceUnavailable,
+		},
+		{
+			name:       "an ordinary pre-commit failure stays unprocessable",
+			projection: canonicalApplyProjection{truth: canonicalTruthOld},
+			err:        ordinary,
+			state:      CanonicalCommitStateNotCommitted, disposition: MineOneDispositionUnprocessable,
+		},
+		{
+			name:       "an already latched engine is unavailable before any commit stage",
+			projection: canonicalApplyProjection{truth: canonicalTruthOld},
+			err:        fmt.Errorf("wrapped: %w", errStoragePersistenceFault),
+			state:      CanonicalCommitStateNotCommitted, disposition: MineOneDispositionServiceUnavailable,
+		},
+		{
+			name:       "an ordinary or no-op bootstrap continues",
+			projection: canonicalApplyProjection{truth: canonicalTruthOld},
+			state:      CanonicalCommitStateNotCommitted, disposition: MineOneDispositionSuccess,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, disposition := canonicalMineOneOutcome(tc.projection, tc.err)
+			if state != tc.state || disposition != tc.disposition {
+				t.Fatalf("state=%q disposition=%v, want %q %v", state, disposition, tc.state, tc.disposition)
+			}
+		})
+	}
+	// The three wire strings are exact and lowercase; a fourth is not
+	// representable through this mapping.
+	if CanonicalCommitStateNotCommitted != "not_committed" || CanonicalCommitStateCommitted != "committed" || CanonicalCommitStateUnknown != "unknown" {
+		t.Fatal("the commit_state wire vocabulary changed")
 	}
 }

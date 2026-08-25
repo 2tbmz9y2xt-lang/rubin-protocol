@@ -68,6 +68,14 @@ type canonicalTransitionPlan struct {
 	// list is empty, IDs ascending by raw bytes, cross-block occurrences kept.
 	applied []CanonicalAppliedBlock
 
+	// includedDA is I: the EXACT set identities the newly canonical blocks
+	// carry, in block/transaction order, derived from each already validated
+	// ParsedBlock and its aligned txid/wtxid arrays. It is the inclusion half of
+	// the D1 selection and is charged as bounded fixed-width metadata; no block
+	// or transaction bytes are retained for it. A standalone disconnect makes
+	// none, which is the empty list, not a skipped step.
+	includedDA []canonicalDASetIdentity
+
 	// checkpoint is the image at the highest (height, block_hash) row common to
 	// both identities; final is C1. A standalone disconnect shares one image for
 	// both, and a reorg holds exactly these two O(UTXO) images and never a third.
@@ -92,6 +100,15 @@ const (
 	canonicalPlanMetadataRowBytes  = 40
 	canonicalPlanMetadataIDBytes   = 32
 
+	// canonicalPlanDAIdentityBytes is one privately retained included identity's
+	// fixed cost: da_id, the commit's txid and wtxid, and its aligned
+	// chunk-count metadata. canonicalPlanDAChunkIdentityBytes is one chunk
+	// identity: the u16 index plus txid and wtxid, rounded to the charge's
+	// 8-byte unit. Both are multiples of 8, so they preserve the property the
+	// cap comparison below relies on.
+	canonicalPlanDAIdentityBytes      = 104
+	canonicalPlanDAChunkIdentityBytes = 72
+
 	// canonicalPlanMetadataCapBytes is the 64 MiB production cap on the charge
 	// below. The exact cap is accepted; every term is a multiple of 8, so the
 	// smallest realizable overflow is cap+8.
@@ -110,14 +127,17 @@ var canonicalPlanMetadataCap = canonicalPlanMetadataCapBytes
 var errCanonicalPlanMetadataCap = errors.New("LOCAL_RESOURCE_UNAVAILABLE(canonical_plan_metadata)")
 
 // canonicalPlanMetadataCharge bills the plan's row metadata:
-// 48 + 40*(disconnect_rows+connect_rows) + 32*sum(len(A1[row].CompleteDAIDs)).
+// 48 + 40*(disconnect_rows+connect_rows) + 32*sum(len(A1[row].CompleteDAIDs))
+// + 104*len(I) + 72*sum(len(I[i].chunks)).
 // Every term is checked, so no count can wrap the total back under the cap.
 //
 // It bills THAT and nothing else. The two private O(UTXO) ChainState images and
 // the O(height) old/new canonical sequences the plan also holds are normed
 // separately by the contract's resource_bounds, so this cap is not a bound on
-// the plan's total memory.
-func canonicalPlanMetadataCharge(disconnect, connect []canonicalRowDescriptor, applied []CanonicalAppliedBlock) (uint64, error) {
+// the plan's total memory. The prepared retained-DA image is likewise outside it:
+// it clones maps and shares retained payload, and the DA byte and count caps
+// already bound what it can point at.
+func canonicalPlanMetadataCharge(disconnect, connect []canonicalRowDescriptor, applied []CanonicalAppliedBlock, includedDA []canonicalDASetIdentity) (uint64, error) {
 	rows := uint64(len(disconnect)) + uint64(len(connect))
 	total, err := addCanonicalPlanBytes(canonicalPlanMetadataBaseBytes, canonicalPlanMetadataRowBytes, rows)
 	if err != nil {
@@ -129,7 +149,19 @@ func canonicalPlanMetadataCharge(disconnect, connect []canonicalRowDescriptor, a
 			return 0, err
 		}
 	}
-	return addCanonicalPlanBytes(total, canonicalPlanMetadataIDBytes, ids)
+	if total, err = addCanonicalPlanBytes(total, canonicalPlanMetadataIDBytes, ids); err != nil {
+		return 0, err
+	}
+	chunks := uint64(0)
+	for i := range includedDA {
+		if chunks, err = addCanonicalPlanBytes(chunks, 1, uint64(len(includedDA[i].chunks))); err != nil {
+			return 0, err
+		}
+	}
+	if total, err = addCanonicalPlanBytes(total, canonicalPlanDAIdentityBytes, uint64(len(includedDA))); err != nil {
+		return 0, err
+	}
+	return addCanonicalPlanBytes(total, canonicalPlanDAChunkIdentityBytes, chunks)
 }
 
 // addCanonicalPlanBytes returns total+unit*count, refusing any overflow.
@@ -144,7 +176,7 @@ func addCanonicalPlanBytes(total, unit, count uint64) (uint64, error) {
 // and C1/A1 planning and BEFORE any artifact, checkpoint, generation or live
 // work, so an over-cap plan is refused with nothing mutated.
 func (p *canonicalTransitionPlan) checkCanonicalPlanMetadataBound() error {
-	charge, err := canonicalPlanMetadataCharge(p.disconnect, p.connect, p.applied)
+	charge, err := canonicalPlanMetadataCharge(p.disconnect, p.connect, p.applied, p.includedDA)
 	if err != nil {
 		return err
 	}
@@ -469,7 +501,7 @@ func (s *SyncEngine) fenceAndCommitCanonicalTransition(plan *canonicalTransition
 	if err != nil {
 		return canonicalTruthOld, err
 	}
-	mo, err := s.prepareCanonicalFenceImage(tr, plan)
+	image, err := s.prepareCanonicalFenceImage(tr, plan)
 	if err != nil {
 		return canonicalTruthOld, tr.end(err)
 	}
@@ -483,17 +515,33 @@ func (s *SyncEngine) fenceAndCommitCanonicalTransition(plan *canonicalTransition
 		fault = &storagePersistenceFault{cause: cause}
 		report = terminalTransitionRecord(canonicalLatchReason(truth, cause), cause)
 	}
-	tr.publishCanonicalTransition(plan, mo, truth, fault, report)
+	tr.publishCanonicalTransition(plan, image, truth, fault, report)
 	return truth, cause
+}
+
+// canonicalFenceImage is the complete new image one transition prepared under the
+// admission fence and publishes by assignment if — and only if — the commit
+// selects NEW. Both halves are optional in exactly one case each: an engine with
+// no mempool bound has neither, which is not an error.
+type canonicalFenceImage struct {
+	mo *canonicalMempoolPlan
+	da *preparedCanonicalDAImage
 }
 
 // prepareCanonicalFenceImage rechecks freshness under the fence and then builds
 // the complete standard/owner image against final C1, binds the prepared owner
 // image's stable tip to C1, and runs the full live preflight under Mempool.mu
-// then PendingOutpointOwner.mu. It publishes nothing: publication is a separate
-// assignment that runs only after the commit selects NEW.
+// then PendingOutpointOwner.mu. Only then does it prepare the retained-DA image
+// against the SAME captured C1 context. It publishes nothing: publication is a
+// separate assignment that runs only after the commit selects NEW.
 //
-// A nil result means no mempool is bound to this engine, which is not an error.
+// The M/O half is deliberately FIRST and complete before the D half starts, so a
+// transition violating both invariants at once reports the standard/owner error:
+// the contract's error order is preparation order, and D preparation is not
+// reached at all once M/O has failed.
+//
+// An empty image means no mempool is bound to this engine, which is not an
+// error; a bound mempool always carries the retained-DA state installed with it.
 //
 // The closing validateCanonicalMempoolLiveImage REPEATS the identical call the
 // plan builder already makes inside canonicalMempoolPlanSnapshot, on the same
@@ -504,26 +552,30 @@ func (s *SyncEngine) fenceAndCommitCanonicalTransition(plan *canonicalTransition
 // PendingOutpointOwner.mu. A future reader must not "deduplicate" it: dropping
 // the second call would leave the ordered proof unproven and only the earlier,
 // pre-bind one standing.
-func (s *SyncEngine) prepareCanonicalFenceImage(tr *canonicalTransition, plan *canonicalTransitionPlan) (*canonicalMempoolPlan, error) {
+func (s *SyncEngine) prepareCanonicalFenceImage(tr *canonicalTransition, plan *canonicalTransitionPlan) (canonicalFenceImage, error) {
 	if err := s.recheckCanonicalTransitionFreshness(tr, plan); err != nil {
-		return nil, err
+		return canonicalFenceImage{}, err
 	}
 	if tr.mempool == nil {
-		return nil, nil
+		return canonicalFenceImage{}, nil
 	}
 	snapshot, err := snapshotMempool(tr.mempool)
 	if err != nil {
-		return nil, err
+		return canonicalFenceImage{}, err
 	}
 	mo, err := prepareCanonicalMempoolPlan(tr.mempool, snapshot, plan.final, plan.finalMTP, len(plan.connect), s.cfg.ChainID)
 	if err != nil {
-		return nil, err
+		return canonicalFenceImage{}, err
 	}
 	mo.pending.stableTip = pendingOutpointTipOf(plan.final)
 	if err := validateCanonicalMempoolLiveImage(tr.mempool, mo.snapshot, mo.snapshotUsedBytes, mo.owner); err != nil {
-		return nil, terminalCanonicalMempoolError(err)
+		return canonicalFenceImage{}, terminalCanonicalMempoolError(err)
 	}
-	return &mo, nil
+	da, err := prepareCanonicalDAImage(tr.daRelay, plan.includedDA, mo.chain)
+	if err != nil {
+		return canonicalFenceImage{}, err
+	}
+	return canonicalFenceImage{mo: &mo, da: da}, nil
 }
 
 // recheckCanonicalTransitionFreshness proves, under the admission fence, that the
@@ -594,9 +646,16 @@ func (s *SyncEngine) saveNonpersistentFinalState(plan *canonicalTransitionPlan) 
 // publishCanonicalTransition is FIXED_PUBLICATION. NEW first assignment-publishes
 // the prebuilt C1 under ChainState.mu and releases it, then takes Mempool.mu ->
 // PendingOutpointOwner.mu and assignment-publishes M1/O1 with stable tip C1 and
-// the owner transition state, then releases both. No component locks overlap,
-// and the PUBLICATION ASSIGNMENTS themselves allocate nothing, clone nothing, do
-// no I/O, validate nothing, invoke no callback and cannot fail.
+// the owner transition state, then releases both, then takes DARelayState.mu and
+// assignment-publishes the prepared D1. That is the contract's exact order —
+// C1, M1/O1, D1 — and no component locks overlap. The PUBLICATION ASSIGNMENTS
+// themselves allocate nothing, clone nothing, do no I/O, validate nothing,
+// invoke no callback and cannot fail.
+//
+// D1 is published for EVERY truth NEW, latched or not: TERMINAL_PERSISTENCE(new)
+// publishes the identical complete image and then latches. Truth OLD and truth
+// UNKNOWN publish no D image at all, so the live retained-DA state stays exactly
+// the one the transition read.
 //
 // The latched arm runs AFTER every assignment and is stores only: the fault and
 // the operator record were BUILT BY THE CALLER before the corridor opened, so it
@@ -614,15 +673,16 @@ func (s *SyncEngine) saveNonpersistentFinalState(plan *canonicalTransitionPlan) 
 // A latched outcome keeps admission closed until restart: terminal NEW publishes
 // the full image and still latches, terminal OLD and UNKNOWN publish nothing.
 // Every open outcome clears the owner transition and reopens admission.
-func (t *canonicalTransition) publishCanonicalTransition(plan *canonicalTransitionPlan, mo *canonicalMempoolPlan, truth canonicalCommitTruth, fault *storagePersistenceFault, report string) {
+func (t *canonicalTransition) publishCanonicalTransition(plan *canonicalTransitionPlan, image canonicalFenceImage, truth canonicalCommitTruth, fault *storagePersistenceFault, report string) {
 	latched := fault != nil
 	ownerClosed := false
 	if truth == canonicalTruthNew {
 		assignCanonicalChainState(t.chainState, plan.final)
-		if mo != nil {
-			t.mempool.publishCanonicalMempoolPlan(*mo, !latched)
+		if image.mo != nil {
+			t.mempool.publishCanonicalMempoolPlan(*image.mo, !latched)
 			ownerClosed = !latched
 		}
+		image.da.publish()
 	}
 	if latched {
 		t.engine.storeTerminalFault(fault)

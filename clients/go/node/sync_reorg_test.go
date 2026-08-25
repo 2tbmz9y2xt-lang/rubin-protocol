@@ -764,7 +764,7 @@ func TestCollectBranchToCanonicalPropagatesNonNotExistErrors(t *testing.T) {
 
 func TestApplyCanonicalParsedBlockHelperErrors(t *testing.T) {
 	var nilEngine *SyncEngine
-	if _, err := nilEngine.applyCanonicalParsedBlock(nil, nil, nil, nil, nil); err == nil {
+	if _, _, err := nilEngine.applyCanonicalParsedBlock(nil, nil, nil, nil, nil); err == nil {
 		t.Fatalf("expected nil sync engine error")
 	}
 
@@ -784,7 +784,7 @@ func TestApplyCanonicalParsedBlockHelperErrors(t *testing.T) {
 	}
 
 	engine := newEmptyEngine(t, devnetGenesisChainID)
-	if _, err := engine.applyCanonicalParsedBlock(nil, nil, nil, nil, nil); err == nil {
+	if _, _, err := engine.applyCanonicalParsedBlock(nil, nil, nil, nil, nil); err == nil {
 		t.Fatalf("expected nil parsed block error")
 	}
 
@@ -1517,15 +1517,19 @@ func TestNonCoinbaseBlockTransactionsExtractsCanonicalTransactions(t *testing.T)
 		spendTx,
 	)
 
-	txs, err := nonCoinbaseBlockTransactions(block)
+	rows, err := nonCoinbaseBlockTransactions(block)
 	if err != nil {
 		t.Fatalf("nonCoinbaseBlockTransactions: %v", err)
 	}
-	if len(txs) != 1 {
-		t.Fatalf("len(non-coinbase txs)=%d, want 1", len(txs))
+	if len(rows) != 1 {
+		t.Fatalf("len(non-coinbase rows)=%d, want 1", len(rows))
 	}
-	if !reflect.DeepEqual(txs[0], spendTx) {
+	if !reflect.DeepEqual(rows[0].txBytes, spendTx) {
 		t.Fatalf("extracted tx bytes differ from original spend tx")
+	}
+	// The kind travels with the bytes, taken from the block's own parse.
+	if rows[0].kind != 0x00 {
+		t.Fatalf("row tx_kind=%#02x, want the standard kind", rows[0].kind)
 	}
 }
 
@@ -3055,7 +3059,7 @@ func TestApplyCanonicalParsedBlockRollsBackWhenCanonicalReportFails(t *testing.T
 		Txs:         completeDASetTxsForCount(consensus.MAX_DA_BATCHES_PER_BLOCK + 1),
 	}
 
-	summary, outcome, err := engine.applyCanonicalParsedBlockTracked(overloaded, blockBytes, nil, nil, nil)
+	summary, outcome, _, err := engine.applyCanonicalParsedBlockTracked(overloaded, blockBytes, nil, nil, nil)
 	if err == nil {
 		t.Fatal("over-cap canonical-applied report was accepted")
 	}
@@ -3724,7 +3728,7 @@ func TestCanonicalCutoverRetainsOnlyChargedRowMetadata(t *testing.T) {
 	if plan.staged != nil {
 		t.Fatalf("staged payload survived staging: %d rows", len(plan.staged))
 	}
-	charge, err := canonicalPlanMetadataCharge(plan.disconnect, plan.connect, plan.applied)
+	charge, err := canonicalPlanMetadataCharge(plan.disconnect, plan.connect, plan.applied, plan.includedDA)
 	if err != nil || charge != canonicalPlanMetadataBaseBytes+3*canonicalPlanMetadataRowBytes {
 		t.Fatalf("charge=%d err=%v, want the exact base plus three rows", charge, err)
 	}
@@ -4143,4 +4147,66 @@ func TestWinningReorgHoldsTwoImagesUnderPVShadow(t *testing.T) {
 	if after.BlocksSkipped == before.BlocksSkipped {
 		t.Fatal("winning reorg recorded no PV-skipped row: the accounting no longer covers the branch")
 	}
+}
+
+// TestRequeueSelectsOneOwnerFromTheRowsOwnTxKind pins the Section 11.1 owner
+// selection for the current line, from the row's ALREADY PARSED tx_kind and with
+// no second classifier: the standard row is admitted exactly once and the two DA
+// kinds invoke zero owners. The coinbase row at index 0 is skipped before any of
+// them.
+//
+// The DA rows are a bounded intermediate guard, NOT Section 11.1's DA
+// re-admission: routing them into the standard owner would admit them under the
+// wrong domain's rules, and their real owner arrives with RUB-680.
+//
+// {0x00, 0x01, 0x02} is the COMPLETE reachable domain here: a disconnected row
+// always comes from a canonical parse, and the canonical codec refuses any other
+// tx_kind outright — asserted below, so the selection's remaining arm is
+// defensive rather than untested territory.
+func TestRequeueSelectsOneOwnerFromTheRowsOwnTxKind(t *testing.T) {
+	if _, err := consensus.MarshalTx(&consensus.Tx{Version: 1, TxKind: 0x7f, TxNonce: 44}); err == nil {
+		t.Fatal("the canonical codec accepted an unsupported tx_kind, so the requeue domain is wider than these rows")
+	}
+	f := newCanonicalMOFixture(t, 4, MempoolConfig{})
+	standard := f.raw(t, f.ops[0], 41, false)
+	commit := f.daCommitTx(t, f.ops[1], daRelayTestID(0xb1), 1, 42)
+	chunk := f.daChunkTx(t, f.ops[2], daRelayTestID(0xb1), 0, 43, []byte("payload"))
+
+	parsed, err := consensus.ParseBlockBytes(daExtractionBlockBytes(t, standard, commit, chunk))
+	if err != nil {
+		t.Fatalf("ParseBlockBytes: %v", err)
+	}
+	rows, err := nonCoinbaseParsedBlockTransactions(parsed)
+	if err != nil {
+		t.Fatalf("nonCoinbaseParsedBlockTransactions: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("non-coinbase rows=%d, want 3 (the coinbase row is skipped)", len(rows))
+	}
+	for i, want := range []uint8{0x00, 0x01, 0x02} {
+		if rows[i].kind != want {
+			t.Fatalf("row %d kind=%#02x, want %#02x", i, rows[i].kind, want)
+		}
+	}
+
+	f.engine.requeueParsedDisconnectedTransactions([]*consensus.ParsedBlock{parsed}, nil)
+
+	standardTxid, _, err := canonicalTxIDsForNodeTest(standard)
+	if err != nil {
+		t.Fatalf("parse standard row: %v", err)
+	}
+	f.mp.mu.RLock()
+	admitted := make([][32]byte, 0, len(f.mp.txs))
+	for txid := range f.mp.txs {
+		admitted = append(admitted, txid)
+	}
+	f.mp.mu.RUnlock()
+	if len(admitted) != 1 || admitted[0] != standardTxid {
+		t.Fatalf("admitted=%x, want exactly the standard row %x", admitted, standardTxid)
+	}
+}
+
+func canonicalTxIDsForNodeTest(raw []byte) ([32]byte, [32]byte, error) {
+	_, txid, wtxid, _, err := consensus.ParseTx(raw)
+	return txid, wtxid, err
 }

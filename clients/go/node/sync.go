@@ -327,8 +327,38 @@ func ValidateDevnetGenesisIdentity(chainID, genesisHash [32]byte) error {
 // exported methods are nil-safe and there are existing tests that exercise
 // the nil-receiver path; this method joins that contract for consistency.
 func (s *SyncEngine) BootstrapCanonicalGenesisIfEmpty() error {
+	_, err := s.bootstrapCanonicalGenesisIfEmpty()
+	return err
+}
+
+// canonicalApplyProjection is ONE canonical apply's per-invocation typed result:
+// the commit truth its classifier selected, and whether the attempt reached the
+// durable commit stage at all.
+//
+// It is a RETURN VALUE threaded to the caller that has to project it into a
+// public result. The engine keeps no last-result field, so two concurrent
+// callers cannot read each other's outcome and a projection can never outlive
+// the attempt that produced it.
+//
+// commitStageEntered is the boundary between the two public failure classes.
+// Everything commitCanonicalTransition can refuse — the plan metadata bound, the
+// recovery proof's resource and integrity classes, the fence's freshness
+// recheck, the terminal standard/owner and retained-DA invariants, and every
+// commit classification — is a local unavailability, never a verdict on the
+// candidate. Everything BEFORE it — parse, consensus validation, DA-set
+// extraction, MTP, plan derivation — is the candidate's own outcome.
+type canonicalApplyProjection struct {
+	truth              canonicalCommitTruth
+	commitStageEntered bool
+}
+
+// bootstrapCanonicalGenesisIfEmpty is BootstrapCanonicalGenesisIfEmpty plus the
+// attempt's typed projection, which the miner needs to tell an ordinary
+// bootstrap (continue to the candidate) from a terminal one (answer now). Its
+// error result is EXACTLY the exported method's, on every input.
+func (s *SyncEngine) bootstrapCanonicalGenesisIfEmpty() (canonicalApplyProjection, error) {
 	if s == nil {
-		return errors.New("sync engine is not initialized")
+		return canonicalApplyProjection{}, errors.New("sync engine is not initialized")
 	}
 	// Deferred BEFORE the mutationMu unlock so it runs AFTER it: the writer is
 	// invoked with no engine lock held. Every entry point repeats this order.
@@ -337,16 +367,16 @@ func (s *SyncEngine) BootstrapCanonicalGenesisIfEmpty() error {
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
 	if err := s.mutationAllowed(); err != nil {
-		return err
+		return canonicalApplyProjection{}, err
 	}
 	if s.chainState.view().hasTip || s.cfg.ChainID != devnetGenesisChainID {
-		return nil
+		return canonicalApplyProjection{}, nil
 	}
-	_, applyErr := s.applyBlock(devnetGenesisBlockBytes, nil, diag)
+	_, projection, applyErr := s.applyBlock(devnetGenesisBlockBytes, nil, diag)
 	if errors.Is(applyErr, errStoragePersistenceFault) || isAtomicWritePostCommit(applyErr) {
-		return applyErr
+		return projection, applyErr
 	}
-	return raceTolerantBootstrapResult(applyErr, s.chainState.view().hasTip, s.persistenceFaulted())
+	return projection, raceTolerantBootstrapResult(applyErr, s.chainState.view().hasTip, s.persistenceFaulted())
 }
 
 // raceTolerantBootstrapResult is the TOTAL bootstrap return rule. It tolerates a
@@ -376,7 +406,7 @@ func (s *SyncEngine) BootstrapCanonicalGenesisIfEmpty() error {
 //     the contract's "MUST be nonnil" as code instead of as an assumption about
 //     a caller one refactor away.
 func raceTolerantBootstrapResult(applyErr error, hasTip, latched bool) error {
-	if isCanonicalMOTerminalError(applyErr) || errors.Is(applyErr, errStoragePersistenceFault) {
+	if isCanonicalTransitionTerminalError(applyErr) || errors.Is(applyErr, errStoragePersistenceFault) {
 		return applyErr
 	}
 	if applyErr == nil {
@@ -415,8 +445,15 @@ func raceTolerantBootstrapResult(applyErr error, hasTip, latched bool) error {
 //
 // Nil-safe on the receiver, like the other exported SyncEngine methods.
 func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
+	summary, _, err := s.applyBlockWithProjection(blockBytes, prevTimestamps)
+	return summary, err
+}
+
+// applyBlockWithProjection is ApplyBlock plus the attempt's typed projection. Its
+// summary and error results are EXACTLY ApplyBlock's, on every input.
+func (s *SyncEngine) applyBlockWithProjection(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, canonicalApplyProjection, error) {
 	if s == nil {
-		return nil, errors.New("sync engine is not initialized")
+		return nil, canonicalApplyProjection{}, errors.New("sync engine is not initialized")
 	}
 	diag := &diagnosticBatch{}
 	defer s.flushDiagnostics(diag)
@@ -425,13 +462,13 @@ func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*Ch
 	return s.applyBlock(blockBytes, prevTimestamps, diag)
 }
 
-func (s *SyncEngine) applyBlock(blockBytes []byte, prevTimestamps []uint64, diag *diagnosticBatch) (*ChainStateConnectSummary, error) {
+func (s *SyncEngine) applyBlock(blockBytes []byte, prevTimestamps []uint64, diag *diagnosticBatch) (*ChainStateConnectSummary, canonicalApplyProjection, error) {
 	if err := s.mutationAllowed(); err != nil {
-		return nil, err
+		return nil, canonicalApplyProjection{}, err
 	}
 	pb, err := consensus.ParseBlockBytes(blockBytes)
 	if err != nil {
-		return nil, err
+		return nil, canonicalApplyProjection{}, err
 	}
 	return s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps, nil, diag)
 }
@@ -853,6 +890,11 @@ type canonicalTransition struct {
 	chainState *ChainState
 	mempool    *Mempool
 	owner      *PendingOutpointOwner
+	// daRelay is the retained-DA state bound to this engine, captured with the
+	// mempool pointer under the same read. ClaimDARelayState hands the same
+	// pointer to Service and never transfers or clears the engine's own, so the
+	// transition and the P2P writers always drive one object.
+	daRelay *DARelayState
 	// diag is the entry point's bounded diagnostic batch. Producers under the
 	// guard append to it; nothing under the guard invokes the writer.
 	diag       *diagnosticBatch
@@ -869,6 +911,7 @@ func (s *SyncEngine) beginCanonicalTransition(diag *diagnosticBatch) (*canonical
 	}
 	s.mu.RLock()
 	mempool := s.mempool
+	daRelay := s.daRelay
 	s.mu.RUnlock()
 	chainState := s.chainState
 	if mempool != nil && mempool.chainState != chainState {
@@ -886,6 +929,7 @@ func (s *SyncEngine) beginCanonicalTransition(diag *diagnosticBatch) (*canonical
 		chainState: chainState,
 		mempool:    mempool,
 		owner:      owner,
+		daRelay:    daRelay,
 		diag:       diag,
 		generation: generation,
 	}, nil
@@ -903,9 +947,9 @@ func (t *canonicalTransition) abort() {
 // the owner transition and reopens admission. A post-commit outcome never comes
 // here — publishCanonicalTransition owns that closeout.
 func (t *canonicalTransition) end(cause error) error {
-	if isCanonicalMOTerminalError(cause) {
+	if isCanonicalTransitionTerminalError(cause) {
 		t.engine.latchTerminalFault(cause)
-		t.engine.reportTerminalTransition(t.diag, "canonical mempool invariant", cause)
+		t.engine.reportTerminalTransition(t.diag, canonicalTerminalReason(cause), cause)
 		return cause
 	}
 	t.abort()
@@ -977,13 +1021,13 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	prevTimestamps []uint64,
 	target *canonicalApplyTarget,
 	diag *diagnosticBatch,
-) (*ChainStateConnectSummary, error) {
+) (*ChainStateConnectSummary, canonicalApplyProjection, error) {
 	if err := s.mutationAllowed(); err != nil {
-		return nil, err
+		return nil, canonicalApplyProjection{}, err
 	}
-	summary, outcome, err := s.applyCanonicalParsedBlockTracked(pb, blockBytes, prevTimestamps, target, diag)
+	summary, outcome, projection, err := s.applyCanonicalParsedBlockTracked(pb, blockBytes, prevTimestamps, target, diag)
 	s.noteBlockApplyOutcome(outcome)
-	return summary, err
+	return summary, projection, err
 }
 
 type canonicalBlockApplyContext struct {
@@ -1016,14 +1060,14 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	prevTimestamps []uint64,
 	target *canonicalApplyTarget,
 	diag *diagnosticBatch,
-) (*ChainStateConnectSummary, blockApplyMetricOutcome, error) {
+) (*ChainStateConnectSummary, blockApplyMetricOutcome, canonicalApplyProjection, error) {
 	ctx, outcome, err := s.prepareCanonicalBlockApply(pb, target, diag)
 	if err != nil {
-		return nil, outcome, err
+		return nil, outcome, canonicalApplyProjection{}, err
 	}
 	prepared := cloneChainState(ctx.prevState)
 	if prepared == nil {
-		return nil, blockApplyMetricNone, errors.New("nil prepared chainstate")
+		return nil, blockApplyMetricNone, canonicalApplyProjection{}, errors.New("nil prepared chainstate")
 	}
 	summary, err := prepared.ConnectBlockWithSuiteContext(
 		blockBytes,
@@ -1035,7 +1079,7 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	)
 	s.runPVShadowIfActive(blockBytes, prevTimestamps, ctx, err, summary)
 	if err != nil {
-		return nil, blockApplyMetricRejected, err
+		return nil, blockApplyMetricRejected, canonicalApplyProjection{}, err
 	}
 	// This is the ONLY site that reports a block as canonical-applied, so the
 	// distinction between "connected to some chain state" and "made canonical"
@@ -1047,23 +1091,30 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	// has been mutated.
 	daIDs, err := CompleteDASetIDsFromParsedBlock(pb)
 	if err != nil {
-		return nil, blockApplyMetricNone, err
+		return nil, blockApplyMetricNone, canonicalApplyProjection{}, err
+	}
+	// I, derived from the SAME already validated parse A1 came from and bounded
+	// by the cardinality check A1 just made. It never reads the da_id rows above.
+	includedDA, err := canonicalDASetIdentitiesFromParsedBlock(pb)
+	if err != nil {
+		return nil, blockApplyMetricNone, canonicalApplyProjection{}, err
 	}
 	finalMTP, err := s.finalMempoolMTP(ctx.blockHeight, pb.Header.Timestamp, prevTimestamps)
 	if err != nil {
-		return nil, blockApplyMetricNone, err
+		return nil, blockApplyMetricNone, canonicalApplyProjection{}, err
 	}
-	plan, err := s.planDirectCanonicalConnect(ctx, prepared, pb, blockBytes, daIDs, finalMTP)
+	plan, err := s.planDirectCanonicalConnect(ctx, prepared, pb, blockBytes, daIDs, includedDA, finalMTP)
 	if err != nil {
-		return nil, blockApplyMetricNone, err
+		return nil, blockApplyMetricNone, canonicalApplyProjection{}, err
 	}
 	truth, err := s.commitCanonicalTransition(plan, diag)
+	projection := canonicalApplyProjection{truth: truth, commitStageEntered: true}
 	if truth != canonicalTruthNew {
-		return nil, blockApplyMetricNone, err
+		return nil, blockApplyMetricNone, projection, err
 	}
 	summary.CanonicalAppliedBlocks = plan.applied
 	s.recordAppliedBlock(summary.BlockHeight, pb.Header.Timestamp)
-	return summary, blockApplyMetricAccepted, err
+	return summary, blockApplyMetricAccepted, projection, err
 }
 
 // planDirectCanonicalConnect derives the complete C1/A1 plan for a direct connect
@@ -1080,6 +1131,7 @@ func (s *SyncEngine) planDirectCanonicalConnect(
 	pb *consensus.ParsedBlock,
 	blockBytes []byte,
 	daIDs [][32]byte,
+	includedDA []canonicalDASetIdentity,
 	finalMTP uint64,
 ) (*canonicalTransitionPlan, error) {
 	row := canonicalRowDescriptor{height: ctx.blockHeight, hash: ctx.blockHash}
@@ -1087,6 +1139,7 @@ func (s *SyncEngine) planDirectCanonicalConnect(
 		oldSequence: ctx.canonicalIndex,
 		connect:     []canonicalRowDescriptor{row},
 		applied:     []CanonicalAppliedBlock{{Hash: ctx.blockHash, CompleteDAIDs: daIDs}},
+		includedDA:  includedDA,
 		checkpoint:  ctx.prevState,
 		final:       final,
 		priorTip:    chainTipScalarsOf(ctx.prevState),
