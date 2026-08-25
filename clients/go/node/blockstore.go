@@ -586,7 +586,7 @@ func (bs *BlockStore) GetBlockByHash(blockHash [32]byte) ([]byte, error) {
 		return nil, errors.New("nil blockstore")
 	}
 	if !bs.pinNoncanonicalReader(blockHash) {
-		return nil, os.ErrNotExist
+		return nil, errNoncanonicalReclaimPinned
 	}
 	defer bs.unpinNoncanonicalReader(blockHash)
 	return bs.getBlockByHashRaw(blockHash)
@@ -597,7 +597,7 @@ func (bs *BlockStore) GetHeaderByHash(blockHash [32]byte) ([]byte, error) {
 		return nil, errors.New("nil blockstore")
 	}
 	if !bs.pinNoncanonicalReader(blockHash) {
-		return nil, os.ErrNotExist
+		return nil, errNoncanonicalReclaimPinned
 	}
 	defer bs.unpinNoncanonicalReader(blockHash)
 	return bs.getHeaderByHashRaw(blockHash)
@@ -610,6 +610,14 @@ func (bs *BlockStore) getBlockByHashRaw(blockHash [32]byte) ([]byte, error) {
 func (bs *BlockStore) getHeaderByHashRaw(blockHash [32]byte) ([]byte, error) {
 	return readFileByPathFn(filepath.Join(bs.headersDir, hex.EncodeToString(blockHash[:])+".bin"), headerFileMaxBytes)
 }
+
+// errNoncanonicalReclaimPinned is what a reader returns when reclaim has already
+// MARKED that hash: the artifact was not looked for at all, so the refusal is an
+// operational condition of this store, never evidence about the artifact. It
+// wraps os.ErrNotExist so every pre-existing consumer keeps the absence behavior
+// it was written against, while a caller that must classify the observation —
+// classifyCanonicalArtifactAcquisition — can tell the two apart by identity.
+var errNoncanonicalReclaimPinned = fmt.Errorf("noncanonical reclaim already marked this hash: %w", os.ErrNotExist)
 
 func (bs *BlockStore) pinNoncanonicalReader(hash [32]byte) bool {
 	bs.stateMu.Lock()
@@ -937,7 +945,7 @@ func (bs *BlockStore) checkExistingUndo(path string, blockHash [32]byte, undo *B
 // how the bytes are obtained.
 func (bs *BlockStore) getUndoRawPinned(blockHash [32]byte) ([]byte, error) {
 	if !bs.pinNoncanonicalReader(blockHash) {
-		return nil, os.ErrNotExist
+		return nil, errNoncanonicalReclaimPinned
 	}
 	raw, err := bs.getUndoRaw(blockHash)
 	bs.unpinNoncanonicalReader(blockHash)

@@ -24,6 +24,22 @@ type verifiedStoredBlock struct {
 	parsed     *consensus.ParsedBlock
 }
 
+// ApplyBlockWithReorg is the relay entry point: it connects a tip extension, or
+// stores a losing side-branch block, or switches to a winning branch — whichever
+// fork choice selects — and any canonical switch runs inside exactly one
+// canonical transition.
+//
+// It has the same return contract as ApplyBlock:
+//   - (summary, nil) — ordinary ACCEPTED/NEW, or the synthetic summary for a
+//     stored side-branch block that did not win fork choice.
+//   - (summary, err) — EXACTLY and ONLY TERMINAL_PERSISTENCE(new): C1/M1/O1 and
+//     the accepted delta are published for the whole branch, the engine latches,
+//     admission stays closed until restart, and zero requeue owners run.
+//   - (nil, err) — every other outcome, including a consensus rejection, a
+//     side-block LOCAL_STORE_ERROR(noncanonical) that never latches, and every
+//     OLD/open canonical refusal, which mutates nothing.
+//
+// Nil-safe on the receiver, like the other exported SyncEngine methods.
 func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
 	if s == nil {
 		return nil, errors.New("sync engine is not initialized")
@@ -228,8 +244,10 @@ func (s *SyncEngine) shouldSwitchToBranch(
 // existing path already carried, that connect's summary, and the precomputed
 // BlockUndo staging writes. The whole branch is validated against ONE rolling
 // private clone, the mechanism Bitcoin Core's DisconnectTip/ConnectTip and btcd's
-// reorganizeChain use for one coins view with per-block undo. Every row dies with
-// planPreferredBranch: the transition itself keeps only charged descriptors.
+// reorganizeChain use for one coins view with per-block undo. The slice of these
+// records dies with planPreferredBranch, but the payloads move into plan.staged
+// and outlive it until the recovery proof writes and releases them; only charged
+// descriptors survive past that point.
 type preparedBranchBlock struct {
 	item    reorgBranchBlock
 	summary *ChainStateConnectSummary
@@ -276,7 +294,14 @@ func (s *SyncEngine) applyPreferredBranch(
 // common-checkpoint image, ONE rolling image that becomes final C1, the ordered
 // disconnect and connect descriptors, A1, and the new-suffix artifacts staging
 // will consume. It returns the final row's summary, the reorg depth and the new
-// tip timestamp; every per-row payload dies with this call.
+// tip timestamp.
+//
+// Per-row payloads do NOT die with this call: each row's header bytes, block
+// bytes and precomputed undo move into plan.staged and stay reachable until
+// proveCanonicalRecoverySet writes them and releases the slice, at the very
+// start of the transition. The caller's own branch slice keeps the same bytes
+// reachable for the whole transition independently of the plan. What the
+// transition carries PAST staging is only the charged descriptors.
 func (s *SyncEngine) planPreferredBranch(
 	canonicalIndex []string,
 	branch []reorgBranchBlock,
@@ -329,8 +354,9 @@ func (s *SyncEngine) planPreferredBranch(
 // common-checkpoint clone taken once the preview has disconnected back to the
 // common ancestor, and the rolling clone that goes on to become final C1. The
 // per-row records still grow linearly in branch depth — block bytes, parse and
-// precomputed undo — but they are consumed by staging and released there, so
-// nothing depth-proportional survives into the transition itself.
+// precomputed undo — and they enter the transition inside plan.staged; staging
+// consumes and releases them in the recovery-proof step, so nothing
+// depth-proportional survives PAST it.
 //
 // It touches no live state and nothing it does repeats once the fence is held. A
 // failed row aborts the whole preparation and discards both clones with it,

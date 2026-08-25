@@ -1844,6 +1844,63 @@ func reorgTestCoinbaseForWtxids(t *testing.T, height uint64, value uint64, addre
 	})
 }
 
+// TestSideBlockStoreFailureNeverLatches pins the LOCAL_STORE_ERROR(noncanonical)
+// disposition: a side branch that loses fork choice touches no canonical state,
+// so even an AMBIGUOUS post-namespace-commit write failure while storing it is
+// NOT_APPLICABLE to canonical truth. It is returned, it latches nothing, and the
+// engine keeps applying canonical blocks afterwards.
+func TestSideBlockStoreFailureNeverLatches(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+	subsidy1 := consensus.BlockSubsidy(1, 0)
+	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	a1, err := engine.ApplyBlock(blockA1, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(A1): %v", err)
+	}
+	subsidy2 := consensus.BlockSubsidy(2, subsidy1)
+	blockA2 := buildSingleTxBlock(t, a1.BlockHash, target, reorgTestTimestamp(2), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+	a2, err := engine.ApplyBlock(blockA2, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(A2): %v", err)
+	}
+
+	// One block against a two-block canonical chain of identical targets: strictly
+	// less work, so fork choice takes the store-side-block path deterministically
+	// rather than through a tip-hash tiebreak.
+	sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	// The AMBIGUOUS class: the parent sync fails after the leaf may already be
+	// durable, which is the failure a canonical commit would have to latch on.
+	// One-shot, so the canonical apply at the end runs against a healthy store.
+	failed := false
+	withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+		syncParent := ops.syncParent
+		ops.syncParent = func(parent string) error {
+			if !failed && parent == store.blocksDir {
+				failed = true
+				return os.ErrPermission
+			}
+			return syncParent(parent)
+		}
+	})
+	summary, err := engine.ApplyBlockWithReorg(sideB1, nil)
+	if summary != nil || !failed || !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("summary=%+v failed=%v err=%v, want the side-block store failure", summary, failed, err)
+	}
+	if engine.persistenceFaulted() {
+		t.Fatal("a noncanonical side-block store failure latched the engine")
+	}
+	if view := engine.chainState.view(); view.tipHash != a2.BlockHash {
+		t.Fatalf("canonical tip=%x, want the untouched %x", view.tipHash, a2.BlockHash)
+	}
+
+	// The engine is still open for canonical business, which is what
+	// NOT_APPLICABLE has to mean in practice.
+	blockA3 := buildSingleTxBlock(t, a2.BlockHash, target, reorgTestTimestamp(4), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 3, consensus.BlockSubsidy(3, subsidy1+subsidy2)))
+	if _, err := engine.ApplyBlock(blockA3, nil); err != nil {
+		t.Fatalf("ApplyBlock(A3) after a side-block store failure: %v", err)
+	}
+}
+
 func newReorgTestEngine(t *testing.T) (*SyncEngine, *BlockStore, [32]byte) {
 	t.Helper()
 	dir := t.TempDir()

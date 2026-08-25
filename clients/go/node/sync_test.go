@@ -2224,34 +2224,61 @@ func TestCanonicalCutoverDirectAndBootstrapCommitTruth(t *testing.T) {
 		t.Fatalf("owner stable tip=%+v ok=%v, want C1", tip, ok)
 	}
 
-	// The store and the chainstate must agree on the parent HASH, not only on
-	// the height: an index whose last row names a different block is refused
-	// before staging, with nothing written and no latch.
-	t.Run("parent hash disagreement refuses before staging", func(t *testing.T) {
-		// Same length, same members, wrong position: every row still resolves to a
-		// stored block, so nothing upstream of the plan can catch this.
-		canonical := []string{hex.EncodeToString(devnetGenesisBlockHash[:]), hex.EncodeToString(summary.BlockHash[:])}
-		foreign := []string{canonical[1], canonical[0]}
-		if err := store.RestoreCanonicalIndex(foreign); err != nil {
-			t.Fatalf("RestoreCanonicalIndex: %v", err)
-		}
-		beforeArtifacts := durableStoreFingerprint(t, store)
-		mismatchWrites := countCanonicalIndexWrites(t, store)
-		next := buildSingleTxBlock(t, summary.BlockHash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidy(2, consensus.BlockSubsidy(1, 0))))
-		refused, err := engine.ApplyBlock(next, nil)
-		if refused != nil || err == nil || !strings.Contains(err.Error(), "is not the canonical row at height 1") {
-			t.Fatalf("summary=%+v err=%v, want the parent-row refusal", refused, err)
-		}
-		if *mismatchWrites != 0 || engine.persistenceFaulted() {
-			t.Fatalf("index writes=%d latch=%v, want an OLD/open refusal", *mismatchWrites, engine.persistenceFaulted())
-		}
-		if got := durableStoreFingerprint(t, store); got != beforeArtifacts {
-			t.Fatalf("the refusal staged artifacts:\n got=%s\nwant=%s", got, beforeArtifacts)
-		}
-		if err := store.RestoreCanonicalIndex(canonical); err != nil {
-			t.Fatalf("RestoreCanonicalIndex(repair): %v", err)
-		}
-	})
+	// Both arms of the direct identity refusal, each with its own row: the store
+	// and the chainstate must agree on the parent HASH, and the index row COUNT
+	// must be the candidate's height. Either mismatch is refused before staging,
+	// with nothing written, no latch, and a plain local error — never a
+	// consensus.TxError, which through the unchanged P2P callers would add ban
+	// score for a fault that is entirely local.
+	canonical := []string{hex.EncodeToString(devnetGenesisBlockHash[:]), hex.EncodeToString(summary.BlockHash[:])}
+	for _, tc := range []struct {
+		name  string
+		index []string
+		want  string
+	}{
+		{
+			// Same length, same members, wrong position: every row still resolves
+			// to a stored block, so nothing upstream of the plan can catch this.
+			name:  "parent hash disagreement refuses before staging",
+			index: []string{canonical[1], canonical[0]},
+			want:  "is not the canonical row at height 1",
+		},
+		{
+			// The chainstate tip is still height 1, so the candidate is height 2
+			// while the visible identity already carries three rows. The extra row
+			// is deliberately past the timestamp-context window, so this reaches
+			// the row-count arm instead of an upstream missing-row read.
+			name:  "row count disagreement refuses before staging",
+			index: append(append([]string(nil), canonical...), strings.Repeat("ab", 32)),
+			want:  "does not extend a 3-row canonical identity",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := store.RestoreCanonicalIndex(tc.index); err != nil {
+				t.Fatalf("RestoreCanonicalIndex: %v", err)
+			}
+			beforeArtifacts := durableStoreFingerprint(t, store)
+			mismatchWrites := countCanonicalIndexWrites(t, store)
+			next := buildSingleTxBlock(t, summary.BlockHash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidy(2, consensus.BlockSubsidy(1, 0))))
+			refused, err := engine.ApplyBlock(next, nil)
+			if refused != nil || err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("summary=%+v err=%v, want the %q refusal", refused, err, tc.want)
+			}
+			var txErr *consensus.TxError
+			if errors.As(err, &txErr) {
+				t.Fatalf("the local refusal is a consensus.TxError (%+v): P2P would score a ban for a local index mismatch", txErr)
+			}
+			if *mismatchWrites != 0 || engine.persistenceFaulted() {
+				t.Fatalf("index writes=%d latch=%v, want an OLD/open refusal", *mismatchWrites, engine.persistenceFaulted())
+			}
+			if got := durableStoreFingerprint(t, store); got != beforeArtifacts {
+				t.Fatalf("the refusal staged artifacts:\n got=%s\nwant=%s", got, beforeArtifacts)
+			}
+			if err := store.RestoreCanonicalIndex(canonical); err != nil {
+				t.Fatalf("RestoreCanonicalIndex(repair): %v", err)
+			}
+		})
+	}
 
 	// A refused commit is OLD/open: no publication, no counter, no latch.
 	beforeCounts, beforeView := engine.BlockApplyCounts(), engine.chainState.view()
@@ -2337,10 +2364,10 @@ func TestCanonicalCutoverApplyPlanMetadataBounds(t *testing.T) {
 		want             uint64
 	}{
 		{"empty", 0, 0, nil, 48},
-		{"one connect row", 0, 1, applyIDCounts(0), 88},
-		{"disconnect and connect", 2, 3, applyIDCounts(0, 0, 0), 248},
-		{"ids charged per id", 0, 1, applyIDCounts(3), 184},
-		{"cross block ids retained", 0, 2, applyIDCounts(1, 1), 192},
+		{"one connect row", 0, 1, []int{0}, 88},
+		{"disconnect and connect", 2, 3, []int{0, 0, 0}, 248},
+		{"ids charged per id", 0, 1, []int{3}, 184},
+		{"cross block ids retained", 0, 2, []int{1, 1}, 192},
 	} {
 		got, err := canonicalPlanMetadataCharge(rows(tc.disconnect), rows(tc.conn), applied(tc.ids...))
 		if err != nil || got != tc.want {
@@ -2415,8 +2442,6 @@ func TestCanonicalCutoverApplyPlanMetadataBounds(t *testing.T) {
 		t.Fatalf("over-cap refusal advanced the generation or the live image: view=%+v owner=%+v", f.engine.chainState.view(), after)
 	}
 }
-
-func applyIDCounts(counts ...int) []int { return counts }
 
 func mustCutoverAdmission(t *testing.T, mp *Mempool) PendingOutpointAdmissionContext {
 	t.Helper()
@@ -2607,6 +2632,35 @@ func TestCanonicalCutoverPrecommitRecoverySet(t *testing.T) {
 	}
 }
 
+// TestCanonicalCutoverLatchedBootstrapReturnIsTotal pins the contract's "MUST be
+// nonnil": whatever the apply reported, a LATCHED engine never returns nil from
+// bootstrap. The nil-applyErr row is not reachable through today's classifier —
+// every latching class carries a cause — which is exactly why it is pinned here
+// instead of being left to a caller's assumption.
+func TestCanonicalCutoverLatchedBootstrapReturnIsTotal(t *testing.T) {
+	apply := errors.New("apply failed")
+	for _, tc := range []struct {
+		name     string
+		applyErr error
+		hasTip   bool
+		latched  bool
+		want     error
+	}{
+		{"latched with a cause", apply, true, true, apply},
+		{"latched with no cause", nil, true, true, errStoragePersistenceFault},
+		{"latched with no cause and no tip", nil, false, true, errStoragePersistenceFault},
+		{"unlatched race recovery still returns nil", apply, true, false, nil},
+		{"unlatched success still returns nil", nil, false, false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := latchAwareBootstrapResult(tc.applyErr, tc.hasTip, tc.latched)
+			if tc.want == nil && got != nil || tc.want != nil && !errors.Is(got, tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCanonicalCutoverPersistenceTruthTable is the closed classifier: every
 // commit class maps to exactly one (truth, latch) pair, and the hostile readback
 // identity set maps to exactly the OLD / NEW / UNKNOWN rows. The unit rows and
@@ -2647,6 +2701,23 @@ func TestCanonicalCutoverPersistenceTruthTable(t *testing.T) {
 	wrapped := canonicalCommitResult{class: canonicalCommitStale, err: fmt.Errorf("prepared canonical index is stale: %w", errPreparedIndexSpent)}
 	if truth, latched, _ := classifyCanonicalCommit(wrapped); truth != canonicalTruthOld || !latched {
 		t.Fatalf("re-spelled spent sentinel -> truth=%v latched=%v, want OLD/latched", truth, latched)
+	}
+
+	// The operator-facing label is derived from the same (truth, cause) pair, so
+	// a spent prepared index is not reported as a persistence failure.
+	for _, tc := range []struct {
+		truth canonicalCommitTruth
+		cause error
+		want  string
+	}{
+		{canonicalTruthNew, cause, "terminal canonical persistence (new)"},
+		{canonicalTruthUnknown, cause, "terminal canonical persistence (neither_or_unreadable)"},
+		{canonicalTruthOld, wrapped.err, "terminal local invariant (old)"},
+		{canonicalTruthOld, cause, "terminal canonical transition (old)"},
+	} {
+		if got := canonicalLatchReason(tc.truth, tc.cause); got != tc.want {
+			t.Fatalf("canonicalLatchReason(%v, %v)=%q, want %q", tc.truth, tc.cause, got, tc.want)
+		}
 	}
 
 	genesisHex := hex.EncodeToString(devnetGenesisBlockHash[:])
@@ -3131,6 +3202,49 @@ func TestCanonicalCutoverStrictReadErrorClassification(t *testing.T) {
 		})
 	}
 
+	// A reader that refuses because reclaim already MARKED the hash observed
+	// nothing about the artifact: it never opened it. That is a local condition of
+	// this store, so it must classify as unavailability — OLD, admission open —
+	// even though the refusal is spelled with an os.ErrNotExist-compatible error
+	// so the store's pre-existing consumers keep their absence behavior.
+	t.Run("a reclaim-refused reader is unavailability, not definitive absence", func(t *testing.T) {
+		engine, store, hash := stage(t)
+		writes := countCanonicalIndexWrites(t, store)
+		headerPath := headerOf(store, hash)
+		previous := readFileByPathFn
+		t.Cleanup(func() { readFileByPathFn = previous })
+		readFileByPathFn = func(p string, limit int64) ([]byte, error) {
+			if p == headerPath {
+				// Marked between the proof's header read and its block read, so
+				// the refusal lands INSIDE the recovery proof rather than on the
+				// disconnect's own upstream block/undo reads.
+				store.stateMu.Lock()
+				store.noncanonicalReclaim = &noncanonicalReclaim{hash: hash, marked: true}
+				store.stateMu.Unlock()
+			}
+			return previous(p, limit)
+		}
+		summary, err := engine.DisconnectTip()
+		var unavailable *canonicalArtifactUnavailableError
+		var integrity *canonicalStoreIntegrityError
+		if summary != nil || !errors.As(err, &unavailable) || errors.As(err, &integrity) {
+			t.Fatalf("summary=%+v err=%v, want LOCAL_RESOURCE_UNAVAILABLE for a reclaim-refused read", summary, err)
+		}
+		if engine.persistenceFaulted() || *writes != 0 || engine.chainState.view().height != 1 {
+			t.Fatalf("latch=%v writes=%d height=%d, want an OLD/open refusal", engine.persistenceFaulted(), *writes, engine.chainState.view().height)
+		}
+		if free := engine.chainState.admissionMu.TryLock(); !free {
+			t.Fatal("a reclaim-refused read retained admission")
+		} else {
+			engine.chainState.admissionMu.Unlock()
+		}
+		// The same refusal still reads as absence for every consumer written
+		// against the older reader contract.
+		if _, err := store.GetBlockByHash(hash); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("GetBlockByHash err=%v, want an os.ErrNotExist-compatible refusal", err)
+		}
+	})
+
 	t.Run("reads header then block then the state-reversal artifact", func(t *testing.T) {
 		_, store, hash := stage(t)
 		headerPath := filepath.Join(store.headersDir, hex.EncodeToString(hash[:])+".bin")
@@ -3298,7 +3412,17 @@ func TestCanonicalCutoverCheckpointExactEnvelopeReadback(t *testing.T) {
 			if engine.persistenceFaulted() != tc.wantLatch || *writes != 0 || engine.chainState.view().hasTip {
 				t.Fatalf("latch=%v writes=%d tip=%v", engine.persistenceFaulted(), *writes, engine.chainState.view().hasTip)
 			}
+			if tc.wantLatch && !strings.Contains(err.Error(), "first differs at offset") {
+				// Equal-length-different-bytes is the discriminating case, and a
+				// pair of lengths cannot name it: the message must localize it.
+				t.Fatalf("mismatch err=%v, want the first-difference offset", err)
+			}
 		})
 	}
 
+	// The two terminal formatters run on a path that is already failing closed;
+	// a zero value must render, not panic.
+	if (&canonicalStoreIntegrityError{}).Error() == "" || (&canonicalArtifactUnavailableError{}).Error() == "" {
+		t.Fatal("a zero-value canonical failure rendered as the empty string")
+	}
 }

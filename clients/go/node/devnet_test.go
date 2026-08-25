@@ -366,6 +366,8 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 	submittedTxs := make([][32]byte, 0, targetHeight/txInterval)
 
 	cNodeDown := false
+	var preStopHeight uint64
+	var preStopTip, preStopDigest [32]byte
 	for wantHeight := uint64(1); wantHeight <= targetHeight; wantHeight++ {
 		mined := nodeA.mineOne(t, true)
 		if mined.Height != wantHeight {
@@ -392,8 +394,25 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 		}
 
 		if wantHeight == killAt {
+			// The exact live tip the stopped process held. Recovery has to
+			// reproduce THIS, from the durable checkpoint plus the retained
+			// canonical suffix, before any peer can hand it a block.
+			preStopHeight, preStopTip, _ = tip(t, nodeC)
+			preStopDigest = nodeC.chainState.StateDigest()
 			nodeC.stop()
 			cNodeDown = true
+			// The read-only recovery every assertion uses must leave the
+			// datadir byte-identical. Checked on the STOPPED node, so the
+			// comparison has no concurrent writer and the result is
+			// deterministic rather than a race with the node's own commits.
+			before, err := os.ReadFile(nodeC.chainStatePath)
+			if err != nil {
+				t.Fatalf("read node-c checkpoint: %v", err)
+			}
+			loadChainState(t, nodeC)
+			if after, err := os.ReadFile(nodeC.chainStatePath); err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("node-c: a read-only assertion rewrote the checkpoint (%d bytes -> %d bytes, err=%v)", len(before), len(after), err)
+			}
 		}
 
 		if cNodeDown && wantHeight == restartAt {
@@ -404,6 +423,19 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 			}
 			if nodeC.syncEngine == oldEngine || nodeC.mempool == oldMempool || nodeC.peerManager == oldPeerManager || nodeC.service == nil || strings.Join(nodeC.bootstrapPeers, ",") != strings.Join(restartPeers, ",") {
 				t.Fatal("restart did not replace local state or preserve explicit peers")
+			}
+			// BEFORE any peer wait: recovery alone must reproduce the pre-stop
+			// tip. Asserted after the sync legs below, a peer handing node C the
+			// same blocks again would mask a checkpoint that never replayed.
+			if height, hash, ok := tip(t, nodeC); !ok || height != preStopHeight || hash != preStopTip {
+				t.Fatalf("recovered canonical tip=(%d,%x,ok=%v), want the exact pre-stop tip (%d,%x)", height, hash, ok, preStopHeight, preStopTip)
+			}
+			// The LIVE image the restart installed, not a fresh read-only
+			// recovery: the checkpoint alone lags the canonical tip, so an image
+			// equal to the pre-stop one is proof the retained suffix replayed
+			// onto it during startup rather than arriving later from a peer.
+			if got := nodeC.chainState.StateDigest(); got != preStopDigest {
+				t.Fatalf("recovered live image=%x, want the pre-stop image %x", got, preStopDigest)
 			}
 			// Order: peer link first, then header/block sync. A node
 			// with zero peers cannot make sync progress, so checking
@@ -778,7 +810,10 @@ func assertSubmittedTxsConfirmed(t *testing.T, txids [][32]byte, nodes ...*devne
 		t.Fatalf("expected submitted txs during soak test")
 	}
 	for _, current := range nodes {
-		// Use disk-loaded chainstate to avoid TOCTOU race with live state.
+		// The RECOVERED image, not the live one: this asserts the confirmed
+		// outputs survive in the DURABLE datadir — precommit checkpoint plus the
+		// retained canonical suffix replayed back — which reading the live
+		// in-memory state would not prove. It writes nothing back.
 		state := loadChainState(t, current)
 		for _, txid := range txids {
 			if !chainStateHasTxOutputs(state, txid) {

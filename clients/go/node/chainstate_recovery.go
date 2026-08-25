@@ -36,10 +36,18 @@ const (
 // definitively is not there, or its size is proven to exceed the applicable
 // bound. Every post-acquisition failure is the caller's to classify, because by
 // then a complete value was in hand and any failure is integrity evidence.
+//
+// A reader that refused because reclaim already marked the hash never looked at
+// the artifact, so it is unavailability and MUST be tested before the absence
+// arm: the refusal deliberately wraps os.ErrNotExist for the store's older
+// consumers, and reading it as definitive absence would latch a node shut over a
+// transient local condition.
 func classifyCanonicalArtifactAcquisition(err error) canonicalArtifactRead {
 	switch {
 	case err == nil:
 		return canonicalArtifactValid
+	case errors.Is(err, errNoncanonicalReclaimPinned):
+		return canonicalArtifactUnavailable
 	case errors.Is(err, os.ErrNotExist), errors.Is(err, errStoreFileTooLarge):
 		return canonicalArtifactInvalid
 	default:

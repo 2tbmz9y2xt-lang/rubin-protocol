@@ -314,6 +314,14 @@ func ValidateDevnetGenesisIdentity(chainID, genesisHash [32]byte) error {
 // store via the normal ApplyBlock path. Returns the ApplyBlock error
 // directly on failure; callers wrap if they want a function-prefix.
 //
+// A LATCHED apply is never reported as success. If the apply leaves the
+// engine persistence-faulted or admission latched — including
+// TERMINAL_PERSISTENCE(new), where genesis C1 WAS published — this returns
+// that exact terminal error and never reinterprets the published tip as
+// concurrent success. nil is returned for exactly one failure shape: a
+// nonterminal apply error on an unlatched engine whose recheck finds a tip
+// another writer installed on the shared ChainState.
+//
 // Defensive nil-receiver guard mirrors the pattern used by other exported
 // SyncEngine methods (HeaderSyncRequest, RecordBestKnownHeight, ...). Other
 // exported methods are nil-safe and there are existing tests that exercise
@@ -338,14 +346,28 @@ func (s *SyncEngine) BootstrapCanonicalGenesisIfEmpty() error {
 	if errors.Is(applyErr, errStoragePersistenceFault) || isAtomicWritePostCommit(applyErr) {
 		return applyErr
 	}
-	result := raceTolerantBootstrapResult(applyErr, s.chainState.view().hasTip)
-	// A LATCHED engine never reports bootstrap success. The race tolerance above
-	// covers exactly one thing — a tip installed concurrently on the shared
-	// ChainState — and a terminal outcome is not that: an untagged ambiguous
-	// index write, a canonical store-integrity refusal and an empty-class latch
-	// all leave the engine closed until restart, and a caller told "nil" would
-	// go on to mine or serve on a node that can no longer mutate anything.
-	if result == nil && s.persistenceFaulted() {
+	return latchAwareBootstrapResult(applyErr, s.chainState.view().hasTip, s.persistenceFaulted())
+}
+
+// latchAwareBootstrapResult is the TOTAL bootstrap return rule: a LATCHED engine
+// never reports bootstrap success, on any input. The race tolerance below covers
+// exactly one thing — a tip installed concurrently on the shared ChainState —
+// and a terminal outcome is not that: an untagged ambiguous index write, a
+// canonical store-integrity refusal and an empty-class latch all leave the engine
+// closed until restart, and a caller told "nil" would go on to mine or serve on a
+// node that can no longer mutate anything.
+//
+// A latch reported alongside no apply error is not reachable through today's
+// commit classifier — every latching class carries its cause — so this returns
+// the latch identity rather than the nil a plain passthrough would produce. That
+// is the contract's "MUST be nonnil", stated as code instead of as an assumption
+// about a caller one refactor away.
+func latchAwareBootstrapResult(applyErr error, hasTip, latched bool) error {
+	result := raceTolerantBootstrapResult(applyErr, hasTip)
+	if result == nil && latched {
+		if applyErr == nil {
+			return errStoragePersistenceFault
+		}
 		return applyErr
 	}
 	return result
@@ -371,6 +393,24 @@ func raceTolerantBootstrapResult(applyErr error, hasTip bool) error {
 	return applyErr
 }
 
+// ApplyBlock connects one block that must extend the current canonical tip,
+// inside exactly one canonical transition.
+//
+// Return contract, which every caller may rely on:
+//   - (summary, nil) — ordinary ACCEPTED/NEW. C1/M1/O1 are published, the
+//     accepted counter is advanced and admission is open again.
+//   - (summary, err) — EXACTLY and ONLY TERMINAL_PERSISTENCE(new): the truth is
+//     NEW, so the complete image, the summary and the accepted delta are
+//     published, the engine latches and admission stays closed until restart,
+//     and zero requeue owners are invoked. A caller that treats a non-nil error
+//     as "nothing happened" is wrong for this one case.
+//   - (nil, err) — every other outcome. An OLD/open refusal (local parent-row
+//     mismatch, plan bound, precommit persistence error, resource
+//     unavailability, stale plan) mutates nothing: no artifact, checkpoint,
+//     index, publication or counter, and no latch. A latched OLD/UNKNOWN
+//     outcome likewise publishes nothing and keeps admission closed.
+//
+// Nil-safe on the receiver, like the other exported SyncEngine methods.
 func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
 	if s == nil {
 		return nil, errors.New("sync engine is not initialized")
@@ -379,10 +419,6 @@ func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*Ch
 	defer s.flushDiagnostics(diag)
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
-	// A summary is returned WITH an error only for TERMINAL_PERSISTENCE(new):
-	// that truth is NEW, so its complete image, summary and accepted delta are
-	// published even though the engine latches. Every other failure returns no
-	// summary.
 	return s.applyBlock(blockBytes, prevTimestamps, diag)
 }
 
@@ -1018,8 +1054,10 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 // or bootstrap. The candidate extends the canonical tip, so the old identity's
 // last row IS the highest common row and the old suffix is empty; the new suffix
 // is this one block. The checkpoint is the pre-apply image the candidate was
-// validated against and C1 is the connected clone, so the path holds exactly the
-// two private images it already had.
+// validated against and C1 is the connected clone, so the path RETAINS exactly
+// the two private images it already had. That is a retention bound, not a peak
+// bound: buildBlockUndo already took, and released, one more full copyUtxoSet
+// while precomputing this row's undo, exactly as it did before the cutover.
 func (s *SyncEngine) planDirectCanonicalConnect(
 	ctx canonicalBlockApplyContext,
 	final *ChainState,

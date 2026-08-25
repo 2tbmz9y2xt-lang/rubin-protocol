@@ -261,7 +261,7 @@ func (s *SyncEngine) commitCanonicalTransition(plan *canonicalTransitionPlan, di
 type canonicalStoreIntegrityError struct{ cause error }
 
 func (e *canonicalStoreIntegrityError) Error() string {
-	return "TERMINAL_STORE_INTEGRITY(canonical): " + e.cause.Error()
+	return "TERMINAL_STORE_INTEGRITY(canonical): " + canonicalCauseText(e.cause)
 }
 
 func (e *canonicalStoreIntegrityError) Unwrap() error { return e.cause }
@@ -275,10 +275,21 @@ func (e *canonicalStoreIntegrityError) Unwrap() error { return e.cause }
 type canonicalArtifactUnavailableError struct{ cause error }
 
 func (e *canonicalArtifactUnavailableError) Error() string {
-	return "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read): " + e.cause.Error()
+	return "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read): " + canonicalCauseText(e.cause)
 }
 
 func (e *canonicalArtifactUnavailableError) Unwrap() error { return e.cause }
+
+// canonicalCauseText renders a canonical failure cause without assuming it is
+// non-nil. Both constructors are fed a non-nil cause today, but these Error
+// methods run on a path that is already failing closed, and a formatter that
+// panics there would replace a latch an operator can act on with a crash.
+func canonicalCauseText(cause error) string {
+	if cause == nil {
+		return "unclassified cause"
+	}
+	return cause.Error()
+}
 
 // canonicalArtifactReadError turns one observation class into the error the
 // recovery proof returns, so the class — never an error string — decides which
@@ -383,6 +394,15 @@ func (s *SyncEngine) proveCanonicalRecoverySet(plan *canonicalTransitionPlan) er
 // so it is integrity evidence (OLD, latched). A write failure keeps its existing
 // LOCAL_PERSISTENCE_ERROR(precommit) identity and preserves OLD with admission
 // open.
+//
+// Cost, accepted for strictness: every canonical transition encodes and writes
+// the FULL chainstate image and then raw-reads all of it back, so the durable
+// work is O(UTXO) per transition rather than O(rows touched), and the readback
+// transiently materializes a second copy of the envelope. That is the same
+// accepted-cost trade requireCompleteCanonicalPrefix makes at startup, and it is
+// load-bearing here: without the readback the transition would commit on the
+// word of a write call, and a checkpoint that is not exactly the common image is
+// what turns a later restart into a chain that cannot replay either suffix.
 func (s *SyncEngine) replaceCanonicalCheckpoint(plan *canonicalTransitionPlan) error {
 	if s.cfg.ChainStatePath == "" {
 		return nil
@@ -396,15 +416,39 @@ func (s *SyncEngine) replaceCanonicalCheckpoint(plan *canonicalTransitionPlan) e
 		return canonicalArtifactReadError(classifyCanonicalArtifactAcquisition(err), fmt.Errorf("canonical checkpoint readback: %w", err))
 	}
 	if !bytes.Equal(got, want) {
-		return &canonicalStoreIntegrityError{cause: fmt.Errorf("canonical checkpoint readback is %d bytes, want the %d bytes just written", len(got), len(want))}
+		return &canonicalStoreIntegrityError{cause: fmt.Errorf(
+			"canonical checkpoint readback is %d bytes and first differs at offset %d, want the %d bytes just written",
+			len(got), firstByteDifference(got, want), len(want),
+		)}
 	}
 	return nil
 }
 
+// firstByteDifference reports the offset of the first differing byte, or the
+// shorter length when one image is a prefix of the other. Equal length with
+// different bytes is exactly the case a length comparison cannot name, and the
+// offset localizes it without hashing or decoding either image.
+func firstByteDifference(got, want []byte) int {
+	for i := 0; i < len(got) && i < len(want); i++ {
+		if got[i] != want[i] {
+			return i
+		}
+	}
+	return min(len(got), len(want))
+}
+
 // sameCanonicalStateImage compares two chainstate images by the six values that
 // identify a canonical snapshot: has-tip, height, tip hash, already-generated,
-// UTXO count and state digest. It is shared by the checkpoint readback and by
-// the no-BlockStore ambiguous-save readback, so both prove the same equality.
+// UTXO count and state digest.
+//
+// Its ONE caller is the no-BlockStore ambiguous-save readback. The checkpoint
+// readback deliberately does NOT share it: the two readbacks prove different
+// predicates. The checkpoint proves that the exact bytes handed to the encoder
+// reached the file (bytes.Equal, no decode), which is the stronger and cheaper
+// statement available when the wanted image is still in hand as bytes. This one
+// proves that an image loaded back off disk after an AMBIGUOUS write IS the
+// planned image; only a decoded comparison can answer that, because the bytes
+// that landed were written by a call whose outcome is unknown.
 func sameCanonicalStateImage(got *ChainState, want *ChainState) bool {
 	if got == nil || want == nil {
 		return false
@@ -441,6 +485,16 @@ func (s *SyncEngine) fenceAndCommitCanonicalTransition(plan *canonicalTransition
 // assignment that runs only after the commit selects NEW.
 //
 // A nil result means no mempool is bound to this engine, which is not an error.
+//
+// The closing validateCanonicalMempoolLiveImage REPEATS the identical call the
+// plan builder already makes inside canonicalMempoolPlanSnapshot, on the same
+// snapshot, byte count and owner. The repeat is DELIBERATE and contract-ordered
+// (FENCE_AND_MO): the first proof runs before the plan and the stable-tip
+// binding exist, and the contract requires the full live preflight to be the
+// LAST step, after stableTip is bound to C1, under Mempool.mu then
+// PendingOutpointOwner.mu. A future reader must not "deduplicate" it: dropping
+// the second call would leave the ordered proof unproven and only the earlier,
+// pre-bind one standing.
 func (s *SyncEngine) prepareCanonicalFenceImage(tr *canonicalTransition, plan *canonicalTransitionPlan) (*canonicalMempoolPlan, error) {
 	if err := s.recheckCanonicalTransitionFreshness(tr, plan); err != nil {
 		return nil, err
@@ -552,21 +606,36 @@ func (t *canonicalTransition) publishCanonicalTransition(plan *canonicalTransiti
 		}
 	}
 	if latched {
-		reason := "terminal canonical persistence (old)"
-		switch truth {
-		case canonicalTruthNew:
-			reason = "terminal canonical persistence (new)"
-		case canonicalTruthUnknown:
-			reason = "terminal canonical persistence (neither_or_unreadable)"
-		}
 		t.engine.latchTerminalFault(cause)
-		t.engine.reportTerminalTransition(t.diag, reason, cause)
+		t.engine.reportTerminalTransition(t.diag, canonicalLatchReason(truth, cause), cause)
 		return
 	}
 	if !ownerClosed {
 		t.owner.endTransitionAborted()
 	}
 	t.chainState.admissionMu.Unlock()
+}
+
+// canonicalLatchReason names the CLASS that latched, from the classifier's own
+// (truth, cause) pair and never from error text. An operator reading one stderr
+// line must be able to tell a spent prepared index — a local invariant violation
+// that says the process reused a prepared commit — from a durable persistence
+// failure, because the two point at different things to investigate. The OLD
+// default stays deliberately unspecific: the remaining latched-OLD classes are
+// terminal-old persistence and an empty-class accounting failure, which carry no
+// sentinel to separate them, and naming one of the two would be a guess. The
+// verbatim cause follows in the same record either way.
+func canonicalLatchReason(truth canonicalCommitTruth, cause error) string {
+	switch {
+	case truth == canonicalTruthNew:
+		return "terminal canonical persistence (new)"
+	case truth == canonicalTruthUnknown:
+		return "terminal canonical persistence (neither_or_unreadable)"
+	case errors.Is(cause, errPreparedIndexSpent):
+		return "terminal local invariant (old)"
+	default:
+		return "terminal canonical transition (old)"
+	}
 }
 
 // assignCanonicalChainState publishes the prebuilt final image by ASSIGNMENT

@@ -3397,26 +3397,37 @@ func preparedDatadir(t *testing.T) string {
 	return dir
 }
 
-// mustCheckpointAtCanonicalTip runs the node's own startup recovery composition
-// over the datadir — anchor, reconcile, save — so the durable snapshot is the
-// canonical tip, exactly as a real startup would leave it.
-func mustCheckpointAtCanonicalTip(t *testing.T, dir string) {
+// recoveredChainState runs the node's own startup recovery composition — load,
+// genesis anchor, reconcile — over an already-open store and RETURNS the
+// recovered image. It writes nothing: an assertion that reads a datadir must not
+// also rewrite it, so only a caller preparing a datadir for a later process
+// Saves what this returns.
+func recoveredChainState(t *testing.T, path string, store *node.BlockStore, cfg node.SyncConfig) *node.ChainState {
 	t.Helper()
-	path := node.ChainStatePath(dir)
 	state, err := node.LoadChainState(path)
 	if err != nil {
 		t.Fatalf("LoadChainState: %v", err)
 	}
+	if err := store.VerifyGenesisAnchor(node.DevnetGenesisBlockHash()); err != nil {
+		t.Fatalf("VerifyGenesisAnchor: %v", err)
+	}
+	if _, err := node.ReconcileChainStateWithBlockStore(state, store, cfg); err != nil {
+		t.Fatalf("ReconcileChainStateWithBlockStore: %v", err)
+	}
+	return state
+}
+
+// mustCheckpointAtCanonicalTip runs that same composition and then SAVES, so the
+// durable snapshot is the canonical tip exactly as a real startup would leave
+// it. Only fixtures preparing a datadir for a later CLI run may use it.
+func mustCheckpointAtCanonicalTip(t *testing.T, dir string) {
+	t.Helper()
+	path := node.ChainStatePath(dir)
 	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
 	if err != nil {
 		t.Fatalf("OpenBlockStore: %v", err)
 	}
-	if err := store.VerifyGenesisAnchor(node.DevnetGenesisBlockHash()); err != nil {
-		t.Fatalf("VerifyGenesisAnchor: %v", err)
-	}
-	if _, err := node.ReconcileChainStateWithBlockStore(state, store, node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), path)); err != nil {
-		t.Fatalf("ReconcileChainStateWithBlockStore: %v", err)
-	}
+	state := recoveredChainState(t, path, store, node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), path))
 	if err := state.Save(path); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -3961,9 +3972,16 @@ func TestRunLegacyExposureScanRejectsStaleCheckpoint(t *testing.T) {
 		}
 	})
 
+	// One row per disjunct of the equality gate, so no single dropped comparison
+	// leaves the gate still passing every row. The fourth disjunct — a chainstate
+	// without a tip — is unreachable here by construction:
+	// loadLegacyExposureScanChainState already refuses a tipless snapshot before
+	// this gate runs, and TestRunLegacyExposureScanRequiresChainstateTip pins that
+	// earlier refusal.
 	for _, tc := range []struct {
-		name  string
-		stale func(t *testing.T, dir string, state *node.ChainState)
+		name     string
+		snapshot func() *node.ChainState
+		stale    func(t *testing.T, dir string, state *node.ChainState)
 	}{
 		{
 			name: "canonical index one row ahead",
@@ -3973,10 +3991,39 @@ func TestRunLegacyExposureScanRejectsStaleCheckpoint(t *testing.T) {
 				mustCanonicalIndexAtTip(t, dir, state.Height+1, ahead)
 			},
 		},
+		{
+			// Same height, different block: only a tip-HASH comparison sees it.
+			name: "canonical row at the snapshot height names another block",
+			stale: func(t *testing.T, dir string, state *node.ChainState) {
+				var other [32]byte
+				other[0] = 0x44
+				mustCanonicalIndexAtTip(t, dir, state.Height, other)
+			},
+		},
+		{
+			// A store with no canonical row at all, against a snapshot whose own
+			// height and tip hash are the zero values the empty store reports:
+			// EVERY other disjunct compares equal, so only the canonical has-tip
+			// check can refuse this row.
+			name: "canonical index has no tip",
+			snapshot: func() *node.ChainState {
+				state := node.NewChainState()
+				state.HasTip = true
+				return state
+			},
+			stale: func(t *testing.T, dir string, _ *node.ChainState) {
+				if _, err := node.CreateBlockStore(node.BlockStorePath(dir)); err != nil {
+					t.Fatalf("CreateBlockStore: %v", err)
+				}
+			},
+		},
 	} {
 		t.Run(tc.name+" exits 2 with no report", func(t *testing.T) {
 			dir := t.TempDir()
 			state := newState()
+			if tc.snapshot != nil {
+				state = tc.snapshot()
+			}
 			if err := state.Save(node.ChainStatePath(dir)); err != nil {
 				t.Fatalf("Save(chainstate): %v", err)
 			}

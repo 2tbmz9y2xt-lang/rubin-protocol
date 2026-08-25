@@ -80,8 +80,20 @@ the canonical index by one transition. The scanner therefore emits JSON only
 when the snapshot is EXACTLY the canonical index tip — same has-tip, height and
 tip hash. Scans against a missing chainstate file, a snapshot without a tip, or
 a snapshot that is not the canonical tip exit 2 with no report, and must be
-treated as hard errors, not as zero-exposure readiness. Re-run once the node has
-checkpointed at the tip; a report is never emitted from a lagging snapshot.
+treated as hard errors, not as zero-exposure readiness. A report is never
+emitted from a lagging snapshot.
+
+The snapshot equals the canonical tip only right after the node's own startup
+recovery has run — startup verifies the genesis anchor, reconciles the snapshot
+against the canonical index and saves it — and until the node commits its next
+transition, after which the durable snapshot is again the checkpoint one
+transition behind. The operational recipe is therefore: start the node, let
+startup recovery finish, stop the node, then run the scan against the stopped
+datadir. Scanning a datadir that a node is actively writing is not supported:
+the scan takes no datadir lock, so it neither blocks nor is blocked by that
+node, but it reconstructs bounded non-canonical accounting from a directory the
+node is mutating, and it is measuring a snapshot the node moves out from under
+it — either can exit 2 with no report.
 
 ## 4) Explicit Trigger Criteria
 

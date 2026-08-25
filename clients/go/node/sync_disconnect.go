@@ -17,6 +17,20 @@ type disconnectTipContext struct {
 	newTipTimestamp uint64
 }
 
+// DisconnectTip removes the current canonical tip inside exactly one canonical
+// transition. A1 is EMPTY — no block becomes canonical — so there is no accepted
+// delta and no connected-block fee decay event.
+//
+// Return contract:
+//   - (summary, nil) — ordinary NEW: the shortened C1 and the matching M1/O1 are
+//     published and admission is open again.
+//   - (summary, err) — EXACTLY and ONLY TERMINAL_PERSISTENCE(new): the shortened
+//     image is published because the truth is NEW, and the engine still latches
+//     with admission closed until restart.
+//   - (nil, err) — every other outcome. An OLD/open refusal mutates nothing: no
+//     artifact, checkpoint, index, publication or counter, and no latch.
+//
+// Nil-safe on the receiver, like the other exported SyncEngine methods.
 func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {
 	if s == nil {
 		return nil, errors.New("sync engine is not initialized")
@@ -32,9 +46,8 @@ func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {
 // plan has an EMPTY A1 — no block becomes canonical, so there is no
 // connected-block fee decay event — an empty new suffix, and one disconnect
 // descriptor. The post-disconnect image is both final C1 and the common
-// checkpoint, so the path holds exactly one private image.
-//
-// A summary is returned WITH an error only for TERMINAL_PERSISTENCE(new).
+// checkpoint, so the path holds exactly one private image. DisconnectTip's doc
+// carries the return contract this shares with it.
 func (s *SyncEngine) disconnectTip(diag *diagnosticBatch) (*ChainStateDisconnectSummary, error) {
 	canonicalIndex, err := s.canonicalIndexPreflight()
 	if err != nil {

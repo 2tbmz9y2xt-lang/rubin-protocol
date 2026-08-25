@@ -3805,10 +3805,17 @@ func TestPreparedCanonicalIndexCarriesOnlyPlannedCanonicalChainWork(t *testing.T
 
 	t.Run("append keeps the surviving prefix", func(t *testing.T) {
 		store, genesis, rowOne, appended, sideOnly := newStore(t)
+		store.stateMu.RLock()
+		oldEntry := store.chainWorkByHash[genesis]
+		store.stateMu.RUnlock()
 		prepared := mustPrepareCanonicalIndex(t, store, []string{hashHex(genesis), hashHex(rowOne), hashHex(appended)})
 		if got := prepared.commit(store); got.class != canonicalCommitted {
 			t.Fatalf("commit class=%q err=%v", got.class, got.err)
 		}
+		// Carried by VALUE, not by pointer: mutating the entry the old cache
+		// still references must not move the published one. Equal strings cannot
+		// tell a clone from an alias, so the aliasing is what is asserted.
+		oldEntry.SetInt64(1 << 40)
 		got := carried(t, store)
 		if len(got) != 2 || got[genesis] != "7" || got[rowOne] != "9" {
 			t.Fatalf("carried=%v, want exactly the two canonical prefix entries", got)
