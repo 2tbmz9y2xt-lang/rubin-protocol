@@ -11,6 +11,12 @@ Policy:
 
 ---
 
+## 2026-08-25 — DA expected routing authority (RUB-1241)
+
+Manual `protocol/da_admission_expected_v1.json` registers 24 inert `BUILDING_EXPECTED` remote, local, cross-source, and detached-reorg cases, including a canonical detached branch with transition-wide DA-unavailable / standard-available owner lifecycle and structured entrypoint/reservation projections.
+Registered through `tools/gen_conformance_matrix.py`; regenerated `conformance/MATRIX.md`. Non-goals: no client, runner, schema, codec, production behavior, capacity case, parity, or gate claim.
+Changed files: `protocol/da_admission_expected_v1.json`, `tools/gen_conformance_matrix.py`, `conformance/MATRIX.md`, and this changelog.
+
 ## 2026-08-19 — C01-R2 semantic image, ordered summary and DA cleanup classifier (RUB-1208)
 
 `protocol/canonical_pipeline_v2.json` stays **BUILDING** and gains its first migrated content: 8 registered publication/image rows with 24 cases (the 12-case RUB-1180 DA cleanup classifier, 6 canonical-applied summary cases and the six single-case direct/genesis/side/reorg/disconnect/equal-work rows), a 227-entry typed `fixtures` catalog, a 408-entry `resolved_values` map of image digests and direct-field values, and the frozen `image_manifest` and `summary_manifest` as schema `const`s. `_meta.closure_epoch` is re-pinned from `rubin-c01-design-closure-v3` to the corrected `rubin-c01-design-closure-v8` and gains `input_schema_design_hash` and `expected_projection_design_hash`; `_meta` gains `authority_source_sha256`.
