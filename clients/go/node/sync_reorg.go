@@ -274,7 +274,7 @@ func (s *SyncEngine) applyPreferredBranch(
 	if err != nil {
 		return nil, err
 	}
-	plan, summary, reorgDepth, finalTimestamp, err := s.planPreferredBranch(canonicalIndex, branch, commonAncestorHeight, diag)
+	plan, summary, reorgDepth, finalTimestamp, err := s.planPreferredBranch(canonicalIndex, branch, commonAncestorHeight)
 	if err != nil {
 		return nil, err
 	}
@@ -305,18 +305,16 @@ func (s *SyncEngine) applyPreferredBranch(
 // Per-row payloads do NOT die with this call: each row's header bytes, block
 // bytes and precomputed undo move into plan.staged and stay reachable until
 // proveCanonicalRecoverySet writes them and releases the slice, at the very
-// start of the transition. plan.staged is the ONLY guaranteed reachability: the
-// caller's branch slice may be collected once it is last used, so nothing may
-// rely on it. What the transition carries PAST staging is only the charged
-// descriptors.
+// start of the transition. plan.staged is the ONLY guaranteed reachability —
+// the caller's branch slice may be collected after its last use — and past
+// staging the transition carries only the charged descriptors.
 func (s *SyncEngine) planPreferredBranch(
 	canonicalIndex []string,
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
-	diag *diagnosticBatch,
 ) (*canonicalTransitionPlan, *ChainStateConnectSummary, uint64, uint64, error) {
 	priorTip := chainTipScalarsOf(s.chainState)
-	checkpoint, rolling, rows, reorgDepth, finalMTP, err := s.preparePreferredBranch(canonicalIndex, branch, commonAncestorHeight, diag)
+	checkpoint, rolling, rows, reorgDepth, finalMTP, err := s.preparePreferredBranch(canonicalIndex, branch, commonAncestorHeight)
 	if err != nil {
 		return nil, nil, 0, 0, err
 	}
@@ -373,7 +371,6 @@ func (s *SyncEngine) preparePreferredBranch(
 	canonicalIndex []string,
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
-	diag *diagnosticBatch,
 ) (*ChainState, *ChainState, []preparedBranchBlock, uint64, uint64, error) {
 	rolling := cloneChainState(s.chainState)
 	if rolling == nil {
@@ -452,10 +449,10 @@ func (s *SyncEngine) prepareBranchRow(
 		s.cfg.RotationProvider,
 		s.cfg.SuiteRegistry,
 	)
-	// PV shadow is DIRECT-CONNECT ONLY, in every pv mode. resource_bounds gives
-	// this path exactly two O(UTXO) images — the immutable common checkpoint and
-	// the rolling image that becomes C1 — and a per-row shadow pre-state would be
-	// a third, with the shadow's own clone a fourth. Reorg rows are PV-skipped.
+	// PV shadow is DIRECT-CONNECT ONLY, in every pv mode: resource_bounds gives
+	// this path exactly two O(UTXO) images (common checkpoint + the rolling image
+	// that becomes C1), and a per-row shadow pre-state would be a third, the
+	// shadow's own clone a fourth. Reorg rows are PV-skipped.
 	s.pvTelemetry.RecordBlockSkipped()
 	if err != nil {
 		// The ONE canonical block-apply rejection for this whole branch; see the

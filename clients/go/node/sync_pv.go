@@ -85,18 +85,10 @@ func (s *SyncEngine) runPVShadowOnSuccess(blockBytes []byte, prevTimestamps []ui
 	}
 }
 
-// pvShadowActive reports whether a shadow run would happen right now.
+// pvShadowActive reports whether MODE and IBD allow a shadow now, not whether a
+// path runs one: winning-reorg rows are exempt in every mode (two-image bound).
 func (s *SyncEngine) pvShadowActive() bool {
 	return (s.pvMode == pvModeShadow || s.pvMode == pvModeOn) && s.isInIBDUnchecked()
-}
-
-// runPVShadow runs the shadow for a caller that already decided it is active.
-func (s *SyncEngine) runPVShadow(blockBytes []byte, prevTimestamps []uint64, ctx canonicalBlockApplyContext, seqErr error, seqSummary *ChainStateConnectSummary) {
-	if seqErr != nil {
-		s.runPVShadowOnError(blockBytes, prevTimestamps, ctx, seqErr)
-		return
-	}
-	s.runPVShadowOnSuccess(blockBytes, prevTimestamps, ctx, seqSummary)
 }
 
 // runPVShadowIfActive runs the appropriate PV shadow validation.
@@ -105,5 +97,9 @@ func (s *SyncEngine) runPVShadowIfActive(blockBytes []byte, prevTimestamps []uin
 		s.pvTelemetry.RecordBlockSkipped()
 		return
 	}
-	s.runPVShadow(blockBytes, prevTimestamps, ctx, seqErr, seqSummary)
+	if seqErr != nil {
+		s.runPVShadowOnError(blockBytes, prevTimestamps, ctx, seqErr)
+		return
+	}
+	s.runPVShadowOnSuccess(blockBytes, prevTimestamps, ctx, seqSummary)
 }

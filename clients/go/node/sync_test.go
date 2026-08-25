@@ -442,6 +442,10 @@ func TestCanonicalBlockRelayTerminalNew(t *testing.T) {
 
 	t.Run("direct complete visible NEW", func(t *testing.T) {
 		engine, store, _ := newPersistenceFaultEngine(t)
+		// The corridor stores the record into the entry point's batch and cannot
+		// format a fallback, so this proves the batch really arrived non-nil.
+		var stderr bytes.Buffer
+		engine.SetStderr(&stderr)
 		pb, err := consensus.ParseBlockBytes(DevnetGenesisBlockBytes())
 		if err != nil {
 			t.Fatalf("parse genesis: %v", err)
@@ -462,6 +466,9 @@ func TestCanonicalBlockRelayTerminalNew(t *testing.T) {
 		}
 		if engine.tipTimestamp != pb.Header.Timestamp || engine.IsInIBD(pb.Header.Timestamp) {
 			t.Fatalf("tipTimestamp=%d IBD=%v, want published timestamp %d and post-transition non-IBD", engine.tipTimestamp, engine.IsInIBD(pb.Header.Timestamp), pb.Header.Timestamp)
+		}
+		if !strings.Contains(stderr.String(), "canonical transition terminal (terminal canonical persistence (new))") {
+			t.Fatalf("terminal-NEW stderr=%q, want the latch record", stderr.String())
 		}
 	})
 
@@ -2793,7 +2800,7 @@ func TestCanonicalCutoverNoFalliblePostNewPublication(t *testing.T) {
 	}
 	// The terminal-NEW arm runs INSIDE the corridor, so its payload must arrive
 	// pre-built: a *storagePersistenceFault and a formatted string, never the
-	// (bool, error) pair that forced the corridor to build them itself.
+	// (bool, error) pair the corridor would have to build from.
 	publish := reflect.TypeOf((*canonicalTransition).publishCanonicalTransition)
 	if got, want := publish.In(publish.NumIn()-2), reflect.TypeOf((*storagePersistenceFault)(nil)); got != want {
 		t.Fatalf("publishCanonicalTransition takes %v, want the pre-built %v", got, want)

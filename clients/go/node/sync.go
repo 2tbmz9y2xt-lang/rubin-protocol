@@ -919,9 +919,8 @@ func (s *SyncEngine) latchTerminalFault(cause error) {
 	s.storeTerminalFault(&storagePersistenceFault{cause: cause})
 }
 
-// storeTerminalFault installs an ALREADY BUILT fault: it takes locks and stores,
-// and allocates nothing. The publication corridor calls this one, with a fault
-// constructed before the corridor opened.
+// storeTerminalFault installs an ALREADY BUILT fault: locks and stores, no
+// allocation. The publication corridor calls this one.
 func (s *SyncEngine) storeTerminalFault(fault *storagePersistenceFault) {
 	s.persistenceFaultMu.Lock()
 	defer s.persistenceFaultMu.Unlock()
@@ -949,9 +948,8 @@ func (s *SyncEngine) reportTerminalTransition(diag *diagnosticBatch, reason stri
 }
 
 // terminalTransitionRecord is the record's ONE definition and its only
-// allocating step. The publication corridor cannot call reportTerminalTransition
-// — formatting inside the corridor is what FIXED_PUBLICATION forbids — so it
-// builds the string through this before the corridor opens and then only stores.
+// allocating step. FIXED_PUBLICATION forbids formatting inside the corridor, so
+// the corridor's caller builds the string through this first, then only stores.
 func terminalTransitionRecord(reason string, cause error) string {
 	return fmt.Sprintf("sync: canonical transition terminal (%s), admission stays closed until restart: %v\n", reason, cause)
 }

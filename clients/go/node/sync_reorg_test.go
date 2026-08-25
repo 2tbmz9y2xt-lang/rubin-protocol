@@ -3688,7 +3688,7 @@ func TestCanonicalCutoverRetainsOnlyChargedRowMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonicalIndexPreflight: %v", err)
 	}
-	plan, summary, reorgDepth, _, err := f.engine.planPreferredBranch(canonicalIndex, branch, forkHeight, nil)
+	plan, summary, reorgDepth, _, err := f.engine.planPreferredBranch(canonicalIndex, branch, forkHeight)
 	if err != nil {
 		t.Fatalf("planPreferredBranch: %v", err)
 	}
@@ -4099,11 +4099,10 @@ func TestPreferredReorgPreservesWideSupplyAndFailsAtomicallyOnCorruptUndo(t *tes
 }
 
 // TestWinningReorgHoldsTwoImagesUnderPVShadow pins resource_bounds on the path
-// PV could break it: with the shadow active the winning-reorg preparation must
-// still retain only the immutable common checkpoint and the rolling image that
-// becomes C1. The shadow pre-state was the one third-image producer here (and
-// the shadow run itself cloned a fourth), so "every branch row PV-skipped, none
-// validated" is exactly "no third image was materialized".
+// PV could break it: with the shadow active the winning-reorg preparation still
+// retains only the common checkpoint and the rolling image that becomes C1. The
+// shadow pre-state was the one third-image producer here (its run cloned a
+// fourth), so "no branch row validated" is exactly "no third image".
 func TestWinningReorgHoldsTwoImagesUnderPVShadow(t *testing.T) {
 	engine, _, target := newReorgTestEngine(t)
 	engine.pvMode = pvModeShadow
@@ -4113,15 +4112,21 @@ func TestWinningReorgHoldsTwoImagesUnderPVShadow(t *testing.T) {
 		t.Fatalf("ApplyBlockWithReorg(A1): %v", err)
 	}
 	if !engine.pvShadowActive() {
-		t.Fatal("fixture is not in the shadow-active window: the row would prove nothing")
+		t.Fatal("fixture is not shadow-active: the row would prove nothing")
 	}
 	sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(2), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
 	sideB1Hash, err := consensus.BlockHash(blockHeaderBytes(t, sideB1))
 	if err != nil {
 		t.Fatalf("BlockHash(B1): %v", err)
 	}
+	a1Hash := engine.chainState.view().tipHash
 	if _, err := engine.ApplyBlockWithReorg(sideB1, nil); err != nil {
 		t.Fatalf("ApplyBlockWithReorg(B1): %v", err)
+	}
+	// B1 must be STORED, not connected: if a tie-break made it the tip, B2 would
+	// take the DIRECT path and the row below would prove nothing.
+	if tip := engine.chainState.view().tipHash; tip != a1Hash {
+		t.Fatalf("side B1 became the tip (%x): this fixture no longer exercises a reorg", tip)
 	}
 	before := engine.pvTelemetry.Snapshot()
 	sideB2 := buildSingleTxBlock(t, sideB1Hash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidy(2, subsidy1)))
@@ -4129,6 +4134,9 @@ func TestWinningReorgHoldsTwoImagesUnderPVShadow(t *testing.T) {
 		t.Fatalf("ApplyBlockWithReorg(B2, winning): %v", err)
 	}
 	after := engine.pvTelemetry.Snapshot()
+	if depth := engine.LastReorgDepth(); depth != 1 {
+		t.Fatalf("LastReorgDepth()=%d, want the depth-1 reorg this row measures", depth)
+	}
 	if after.BlocksValidated != before.BlocksValidated {
 		t.Fatalf("winning reorg ran %d PV shadow validations: each one clones a third full image", after.BlocksValidated-before.BlocksValidated)
 	}

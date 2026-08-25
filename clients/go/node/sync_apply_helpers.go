@@ -598,10 +598,18 @@ func (s *SyncEngine) saveNonpersistentFinalState(plan *canonicalTransitionPlan) 
 // and the PUBLICATION ASSIGNMENTS themselves allocate nothing, clone nothing, do
 // no I/O, validate nothing, invoke no callback and cannot fail.
 //
-// The latched arm runs AFTER every assignment and is stores only: the fault
-// value and the operator record were BUILT BY THE CALLER before the corridor
-// opened, so this arm allocates, formats and validates nothing either. Nothing
-// it does can un-publish what was already assigned.
+// The latched arm runs AFTER every assignment and is stores only: the fault and
+// the operator record were BUILT BY THE CALLER before the corridor opened, so it
+// allocates, formats and validates nothing. It does BLOCK — storeTerminalFault
+// takes persistenceFaultMu then s.mu under this transition's admissionMu, which
+// the clause allows and the outermost-admission lock order covers. It can
+// un-publish nothing.
+//
+// t.diag is non-nil on every production path: the five batch-creating entries
+// (BootstrapCanonicalGenesisIfEmpty, ApplyBlock, SetMempool, DisconnectTip,
+// ApplyBlockWithReorg) allocate it before taking mutationMu. The nil check is a
+// no-panic guard, not a live case — a nil batch would DROP the record, the
+// corridor having no fallback — so TestCanonicalBlockRelayTerminalNew pins it.
 //
 // A latched outcome keeps admission closed until restart: terminal NEW publishes
 // the full image and still latches, terminal OLD and UNKNOWN publish nothing.
@@ -618,8 +626,7 @@ func (t *canonicalTransition) publishCanonicalTransition(plan *canonicalTransiti
 	}
 	if latched {
 		t.engine.storeTerminalFault(fault)
-		// The batch slot directly, not diagnoseTerminal: that accessor formats,
-		// and this record was formatted before the corridor opened.
+		// The batch slot directly: diagnoseTerminal formats, and this record was.
 		if t.diag != nil {
 			t.diag.terminal = report
 		}
