@@ -360,7 +360,8 @@ func raceTolerantBootstrapResult(applyErr error, hasTip bool) error {
 	if isCanonicalMOTerminalError(applyErr) || errors.Is(applyErr, errStoragePersistenceFault) {
 		return applyErr
 	}
-	if _, ok := applyErr.(*rollbackRestoreFault); ok {
+	var restoreFault *rollbackRestoreFault
+	if errors.As(applyErr, &restoreFault) {
 		return applyErr
 	}
 	if applyErr != nil && hasTip {
@@ -934,9 +935,8 @@ func (t *canonicalTransition) abort() {
 	t.chainState.admissionMu.Unlock()
 }
 
-// end is the sole admission closeout. Nil commits; ordinary errors abort.
-// THREE terminal fail-closed causes retain admissionMu: canonical M/O invariant,
-// existing post-commit persistence latch, and failed exact rollback restore.
+// end is the sole admission closeout: nil commits; ordinary errors abort. Three
+// terminal causes retain admissionMu: M/O invariant, persistence latch, or failed exact restore.
 func (t *canonicalTransition) end(cause error) error {
 	if cause == nil {
 		return t.finish()
@@ -1338,9 +1338,8 @@ func (s *SyncEngine) commitPreparedBlock(
 }
 
 // commitPreparedBlockUnderGuard commits one already-validated block under an
-// open transition. Prepublication errors return directly; later C errors roll
-// back. Block rows are not revalidated; retained mempool rows are parsed and
-// lower-seam validated against final C1 before fixed publication.
+// open transition. Prepublication errors return directly; later C errors roll back.
+// Block rows are not revalidated; retained rows use the lower seam against final C1 before publication.
 func (s *SyncEngine) commitPreparedBlockUnderGuard(
 	tr *canonicalTransition,
 	prepared *ChainState,

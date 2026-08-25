@@ -33,6 +33,7 @@ func mustCanonicalMO(t *testing.T, label string, err error) {
 		t.Fatalf("%s: %v", label, err)
 	}
 }
+
 func awaitCanonicalMOError(t *testing.T, ch <-chan error, label string) error {
 	t.Helper()
 	select {
@@ -43,6 +44,7 @@ func awaitCanonicalMOError(t *testing.T, ch <-chan error, label string) error {
 		return nil
 	}
 }
+
 func awaitCanonicalMOAdmissionRLock(t *testing.T, caller string) {
 	t.Helper()
 	deadline, stack := time.Now().Add(time.Second), make([]byte, 1<<20)
@@ -57,6 +59,7 @@ func awaitCanonicalMOAdmissionRLock(t *testing.T, caller string) {
 	}
 	t.Fatalf("%s did not block at admissionMu.RLock", caller)
 }
+
 func newCanonicalMOFixture(t *testing.T, inputs int, cfg MempoolConfig) *canonicalMOFixture {
 	engine, store, target := newReorgTestEngine(t)
 	signer, err := consensus.NewMLDSA87Keypair()
@@ -81,9 +84,11 @@ func newCanonicalMOFixture(t *testing.T, inputs int, cfg MempoolConfig) *canonic
 	f.mp = mp
 	return f
 }
+
 func (f *canonicalMOFixture) raw(t *testing.T, op consensus.Outpoint, nonce uint64, core bool) []byte {
 	return f.rawWithLocktime(t, op, nonce, core, 0)
 }
+
 func (f *canonicalMOFixture) rawWithLocktime(t *testing.T, op consensus.Outpoint, nonce uint64, core bool, locktime uint32) []byte {
 	outputs := []consensus.TxOutput{{Value: 900_000, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), f.address...)}}
 	if core {
@@ -99,14 +104,17 @@ func (f *canonicalMOFixture) rawWithLocktime(t *testing.T, op consensus.Outpoint
 	mustCanonicalMO(t, "MarshalTx", err)
 	return raw
 }
+
 func (f *canonicalMOFixture) add(t *testing.T, op consensus.Outpoint, nonce uint64) [32]byte {
 	raw := f.raw(t, op, nonce, false)
 	mustCanonicalMO(t, "AddTx", f.mp.AddTx(raw))
 	return txID(t, raw)
 }
+
 func (f *canonicalMOFixture) install(t *testing.T, op consensus.Outpoint, nonce uint64, core bool) [32]byte {
 	return f.installRaw(t, f.raw(t, op, nonce, core))
 }
+
 func (f *canonicalMOFixture) installRaw(t *testing.T, raw []byte) [32]byte {
 	tx, txid, wtxid, consumed, err := consensus.ParseTx(raw)
 	if err != nil || consumed != len(raw) {
@@ -130,6 +138,7 @@ func (f *canonicalMOFixture) installRaw(t *testing.T, raw []byte) [32]byte {
 	f.mp.mu.Unlock()
 	return txid
 }
+
 func (f *canonicalMOFixture) applyCoinbase(t *testing.T) error {
 	height := f.engine.chainState.Height + 1
 	subsidy := consensus.BlockSubsidyBig(height, f.engine.chainState.AlreadyGenerated.Big())
@@ -138,6 +147,7 @@ func (f *canonicalMOFixture) applyCoinbase(t *testing.T) error {
 	_, err := f.engine.ApplyBlock(block, nil)
 	return err
 }
+
 func (f *canonicalMOFixture) applySpend(t *testing.T, op consensus.Outpoint, nonce uint64) error {
 	raw := f.raw(t, op, nonce, false)
 	_, _, wtxid, _, err := consensus.ParseTx(raw)
@@ -169,6 +179,7 @@ func newCanonicalMOProvider(t *testing.T, chainID [32]byte) *canonicalMOProvider
 	mustCanonicalMO(t, "SimplicityDeploymentSetAnchor", err)
 	return &canonicalMOProvider{descriptors: descriptors, anchor: anchor, ok: true}
 }
+
 func (p *canonicalMOProvider) NativeCreateSuites(height uint64) *consensus.NativeSuiteSet {
 	p.mu.Lock()
 	p.create, p.createHeights = p.create+1, append(p.createHeights, height)
@@ -182,6 +193,7 @@ func (p *canonicalMOProvider) NativeCreateSuites(height uint64) *consensus.Nativ
 	}
 	return consensus.DefaultRotationProvider{}.NativeCreateSuites(height)
 }
+
 func (p *canonicalMOProvider) NativeSpendSuites(height uint64) *consensus.NativeSuiteSet {
 	p.mu.Lock()
 	p.spend, p.spendHeights = p.spend+1, append(p.spendHeights, height)
@@ -195,6 +207,7 @@ func (p *canonicalMOProvider) NativeSpendSuites(height uint64) *consensus.Native
 	}
 	return consensus.DefaultRotationProvider{}.NativeSpendSuites(height)
 }
+
 func (p *canonicalMOProvider) PublishedSimplicityDeployments() ([]consensus.SimplicityDeploymentDescriptor, [32]byte, bool, error) {
 	p.mu.Lock()
 	p.deployments++
@@ -214,14 +227,15 @@ func (p *canonicalMOProvider) PublishedSimplicityDeployments() ([]consensus.Simp
 	}
 	return descriptors, anchor, ok, err
 }
+
 func (p *canonicalMOProvider) counts() (int, int, int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.create, p.spend, p.deployments
 }
+
 func assertCanonicalMOPlanAbort(t *testing.T, f *canonicalMOFixture) error {
-	before := canonicalMOImageFingerprint(t, f.mp, 0)
-	beforeView := f.engine.chainState.view()
+	before, beforeView := canonicalMOImageFingerprint(t, f.mp, 0), f.engine.chainState.view()
 	beforeIndex, err := f.store.CanonicalIndexSnapshot()
 	mustCanonicalMO(t, "CanonicalIndexSnapshot(before)", err)
 	writes := 0
@@ -241,6 +255,7 @@ func assertCanonicalMOPlanAbort(t *testing.T, f *canonicalMOFixture) error {
 	}
 	return err
 }
+
 func TestCanonicalMOPlanDirectAndBootstrap(t *testing.T) {
 	f := newCanonicalMOFixture(t, 1, MempoolConfig{})
 	txid := f.add(t, f.ops[0], 1)
@@ -248,7 +263,6 @@ func TestCanonicalMOPlanDirectAndBootstrap(t *testing.T) {
 	if f.mp.Contains(txid) {
 		t.Fatal("direct final-C1-invalid record survived")
 	}
-
 	dir := t.TempDir()
 	store, err := CreateBlockStore(BlockStorePath(dir))
 	mustCanonicalMO(t, "CreateBlockStore", err)
@@ -270,9 +284,8 @@ func TestCanonicalMOPlanDirectAndBootstrap(t *testing.T) {
 		t.Fatalf("bootstrap M/O plan floor=%d before=%+v after=%+v", mp.CurrentMinFeeRateSnapshot(), before, after)
 	}
 	t.Run("terminal_snapshot_is_not_race_tolerant", func(t *testing.T) {
-		terminal := terminalCanonicalMempoolError(errors.New("test terminal"))
-		restore := &rollbackRestoreFault{cause: errors.New("apply"), restoreErr: errors.New("restore")}
-		if raceTolerantBootstrapResult(terminal, true) != terminal || raceTolerantBootstrapResult(errStoragePersistenceFault, true) != errStoragePersistenceFault || raceTolerantBootstrapResult(restore, true) != restore {
+		terminal, restore := fmt.Errorf("wrapped: %w", terminalCanonicalMempoolError(errors.New("test terminal"))), fmt.Errorf("wrapped: %w", &rollbackRestoreFault{cause: errors.New("apply"), restoreErr: errors.New("restore")})
+		if !errors.Is(raceTolerantBootstrapResult(terminal, true), terminal) || !errors.Is(raceTolerantBootstrapResult(errStoragePersistenceFault, true), errStoragePersistenceFault) || !errors.Is(raceTolerantBootstrapResult(restore, true), restore) {
 			t.Fatal("bootstrap race helper hid a terminal result behind a tip")
 		}
 		dir := t.TempDir()
@@ -299,6 +312,7 @@ func TestCanonicalMOPlanDirectAndBootstrap(t *testing.T) {
 		}
 	})
 }
+
 func TestCanonicalMOPlanWinningReorg(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	forkHash, forkHeight, forkGenerated := f.tipHash, f.tipHeight, f.alreadyGenerated
@@ -352,7 +366,7 @@ func TestCanonicalMOPlanWinningReorg(t *testing.T) {
 		g.engine.chainState.Utxos[collision] = consensus.UtxoEntry{Value: 1}
 		g.engine.chainState.mu.Unlock()
 		_, _, err = g.engine.applyPreferredBranchUnderGuard(tr, nil, g.engine.chainState.Height-1, []verifiedStoredBlock{stored}, cloneChainState(g.engine.chainState), 0)
-		if endErr := tr.end(err); endErr != err {
+		if endErr := tr.end(err); endErr != err { //nolint:errorlint // Exact passthrough identity is the behavior under test.
 			t.Fatalf("transition end=%v cause=%v", endErr, err)
 		}
 		var early *disconnectPreFinalizeError
@@ -361,6 +375,7 @@ func TestCanonicalMOPlanWinningReorg(t *testing.T) {
 		}
 	})
 }
+
 func TestCanonicalMOPlanStandaloneDisconnect(t *testing.T) {
 	f := newCanonicalMOFixture(t, 2, MempoolConfig{})
 	retained := f.add(t, f.ops[0], 1)
@@ -383,10 +398,10 @@ func TestCanonicalMOPlanStandaloneDisconnect(t *testing.T) {
 		t.Fatalf("standalone final-C1 selection removed=%v retained=%v floor=%d", f.mp.Contains(removed), f.mp.Contains(retained), f.mp.CurrentMinFeeRateSnapshot())
 	}
 }
+
 func TestCanonicalMOPlanFinalChainValidity(t *testing.T) {
 	lock := newCanonicalMOFixture(t, 2, MempoolConfig{})
-	boundaryRaw := lock.rawWithLocktime(t, lock.ops[0], 1, false, uint32(lock.engine.chainState.Height+2))
-	lockedRaw := lock.rawWithLocktime(t, lock.ops[1], 2, false, uint32(lock.engine.chainState.Height+3))
+	boundaryRaw, lockedRaw := lock.rawWithLocktime(t, lock.ops[0], 1, false, uint32(lock.engine.chainState.Height+2)), lock.rawWithLocktime(t, lock.ops[1], 2, false, uint32(lock.engine.chainState.Height+3))
 	boundary, locked := txID(t, boundaryRaw), txID(t, lockedRaw)
 	_, _, boundaryWTxID, _, err := consensus.ParseTx(boundaryRaw)
 	mustCanonicalMO(t, "ParseTx(locktime boundary)", err)
@@ -413,7 +428,6 @@ func TestCanonicalMOPlanFinalChainValidity(t *testing.T) {
 	if len(emptyFinal.utxos) != 0 || len(selectedFinal.utxos) != 1 {
 		t.Fatalf("bounded final UTXOs empty=%d selected=%d", len(emptyFinal.utxos), len(selectedFinal.utxos))
 	}
-
 	mtp := newCanonicalMOFixture(t, 0, MempoolConfig{})
 	mustCanonicalMO(t, "ApplyBlock(MTP predecessor)", mtp.applyCoinbase(t))
 	oldMTP, err := mtp.mp.nextBlockMTP(mtp.engine.chainState.Height + 1)
@@ -445,7 +459,6 @@ func TestCanonicalMOPlanFinalChainValidity(t *testing.T) {
 	if err := mtp.applyCoinbase(t); err != nil || !mtp.mp.Contains(htlc) {
 		t.Fatalf("final-MTP refund err=%v retained=%v", err, mtp.mp.Contains(htlc))
 	}
-
 	one := newCanonicalMOFixture(t, 1, MempoolConfig{})
 	one.add(t, one.ops[0], 1)
 	one.mp.sigCache.Reset()
@@ -454,6 +467,7 @@ func TestCanonicalMOPlanFinalChainValidity(t *testing.T) {
 		t.Fatalf("lower seam cache hits=%d misses=%d, want 0/1", hits, misses)
 	}
 }
+
 func TestCanonicalMOPlanPreservesPoolLocalPolicyAndHighWater(t *testing.T) {
 	f := newCanonicalMOFixture(t, 1, MempoolConfig{MaxTransactions: 1})
 	txid := f.add(t, f.ops[0], 1)
@@ -472,6 +486,7 @@ func TestCanonicalMOPlanPreservesPoolLocalPolicyAndHighWater(t *testing.T) {
 		t.Fatalf("pool-local state changed: retained=%v seq=%d/%d floor=%d entry=%+v claim=%+v", f.mp.Contains(txid), seq, beforeSeq, floor, afterEntry, afterClaim)
 	}
 }
+
 func TestCanonicalMOPlanOwnerClaimsAndDIndependence(t *testing.T) {
 	f := newCanonicalMOFixture(t, 3, MempoolConfig{})
 	standard := f.add(t, f.ops[0], 1)
@@ -511,6 +526,7 @@ func TestCanonicalMOPlanOwnerClaimsAndDIndependence(t *testing.T) {
 		t.Fatalf("retained standard index=%x/%v want %x", got, ok, retained)
 	}
 }
+
 func TestCanonicalMOPlanProviderSnapshotAndFirstErrorOrder(t *testing.T) {
 	if canonicalMempoolValidationAbortsPlan(&consensus.TxError{Code: consensus.TX_ERR_SIMPLICITY_REJECTED}) {
 		t.Fatal("unspecified_simplicity_disposition_family_excludes")
@@ -616,7 +632,6 @@ func TestCanonicalMOPlanProviderSnapshotAndFirstErrorOrder(t *testing.T) {
 			t.Fatalf("all exclusions kept owner rows=%d/%d", outpoints, claims)
 		}
 	})
-
 	inactive := newCanonicalMOProvider(t, devnetGenesisChainID)
 	inactive.descriptors = nil
 	inactive.anchor, _ = consensus.SimplicityDeploymentSetAnchor(devnetGenesisChainID, nil)
@@ -639,7 +654,6 @@ func TestCanonicalMOPlanProviderSnapshotAndFirstErrorOrder(t *testing.T) {
 	if err := witness.applyCoinbase(t); err != nil || witness.mp.Contains(witnessID) {
 		t.Fatalf("invalid simplicity witness err=%v retained=%v", err, witness.mp.Contains(witnessID))
 	}
-
 	for _, row := range []struct {
 		name   string
 		mutate func(*canonicalMOProvider)
@@ -686,7 +700,6 @@ func TestCanonicalMOPlanProviderSnapshotAndFirstErrorOrder(t *testing.T) {
 			t.Fatalf("observations create=%d deployments=%d", create, deploy)
 		}
 	})
-
 	local := newCanonicalMOFixture(t, 1, MempoolConfig{SuiteRegistry: unboundAlgSuiteRegistry()})
 	local.install(t, local.ops[0], 1, false)
 	var localTxErr *consensus.TxError
@@ -695,7 +708,6 @@ func TestCanonicalMOPlanProviderSnapshotAndFirstErrorOrder(t *testing.T) {
 	} else if errors.As(err, &localTxErr) {
 		t.Fatalf("local backend error leaked consensus tx error: %v", err)
 	}
-
 	early := newCanonicalMOProvider(t, devnetGenesisChainID)
 	i := newCanonicalMOFixture(t, 1, MempoolConfig{RotationProvider: early})
 	i.install(t, i.ops[0], 1, true)
@@ -715,6 +727,7 @@ func TestCanonicalMOPlanProviderSnapshotAndFirstErrorOrder(t *testing.T) {
 		t.Fatalf("early invariant read provider create=%d spend=%d deployments=%d", create, spend, deployments)
 	}
 }
+
 func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 	feeProvider := newCanonicalMOProvider(t, devnetGenesisChainID)
 	feeFixture := newCanonicalMOFixture(t, 1, MempoolConfig{RotationProvider: feeProvider})
@@ -895,8 +908,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 			withOwner(m, func(o *PendingOutpointOwner) { o.byToken[e.token].txid = [32]byte{} })
 		}},
 	}
-	// These values can be self-consistent when captured, so only a post-capture
-	// change is an intrinsic stale-image failure.
+	// These values can be self-consistent when captured, so only a post-capture change is an intrinsic stale-image failure.
 	freshnessOnly := map[string]bool{"current_min_fee_rate": true, "owner_stable_tip": true, "owner_generation_high_water": true, "claim_generation": true}
 	for _, row := range rows {
 		indexes := []int{1}
@@ -1207,7 +1219,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 		t.Cleanup(func() { writeFileAtomicFn = write })
 		writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error { writes++; return write(path, data, mode) }
 		err = f.engine.commitPreparedBlockUnderGuard(tr, f.engine.chainState, nil, canonicalBlockApplyContext{prevState: badPrior}, nil, nil, 0)
-		if endErr := tr.end(err); endErr != err || err == nil || writes != 0 || f.engine.persistenceFaulted() {
+		if endErr := tr.end(err); endErr != err || err == nil || writes != 0 || f.engine.persistenceFaulted() { //nolint:errorlint // Exact passthrough identity is the behavior under test.
 			t.Fatalf("prepublication recheck err=%v end=%v writes=%d latch=%v", err, endErr, writes, f.engine.persistenceFaulted())
 		}
 		if before != canonicalMOImageFingerprint(t, f.mp, 1) {
@@ -1218,6 +1230,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 		}
 	})
 }
+
 func TestCanonicalMOPlanLegacyRollbackRestoresExactOldImage(t *testing.T) {
 	f := newCanonicalMOFixture(t, 1, MempoolConfig{})
 	f.add(t, f.ops[0], 1)
@@ -1244,7 +1257,6 @@ func TestCanonicalMOPlanLegacyRollbackRestoresExactOldImage(t *testing.T) {
 	if indexWrites != 2 {
 		t.Fatalf("canonical index writes=%d, want 2", indexWrites)
 	}
-
 	g := newCanonicalMOFixture(t, 1, MempoolConfig{})
 	g.add(t, g.ops[0], 1)
 	g.mp.SetCurrentMinFeeRateForTest(8)
@@ -1272,7 +1284,6 @@ func TestCanonicalMOPlanLegacyRollbackRestoresExactOldImage(t *testing.T) {
 	if _, ok := g.mp.PendingOutpointOwner().AdmissionContext(); ok {
 		t.Fatal("rollback failure reopened admission")
 	}
-
 	p := newCanonicalMOProvider(t, devnetGenesisChainID)
 	h := newCanonicalMOFixture(t, 1, MempoolConfig{RotationProvider: p})
 	mustCanonicalMO(t, "ApplyBlock(disconnect predecessor)", h.applyCoinbase(t))
@@ -1302,6 +1313,7 @@ func TestCanonicalMOPlanLegacyRollbackRestoresExactOldImage(t *testing.T) {
 		t.Fatal("postpublication disconnect rollback left admission closed")
 	}
 }
+
 func TestCanonicalMOPlanConcurrentAdmission(t *testing.T) {
 	for _, remove := range []bool{false, true} {
 		name := "add"
@@ -1466,6 +1478,7 @@ func TestCanonicalMOPlanConcurrentAdmission(t *testing.T) {
 		})
 	}
 }
+
 func mustCanonicalMOSnapshot(t *testing.T, mp *Mempool) mempoolSnapshot {
 	snapshot, err := snapshotMempool(mp)
 	if err != nil {

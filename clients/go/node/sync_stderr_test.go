@@ -82,11 +82,8 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 // exactly the position these calls are in. TestSyncEngineDiagnosticWriter*
 // pin the batched isolation properties the direct form cannot show.
 //
-// One diagnostic site is deliberately absent: the canonical M/O planning
-// invariant report, which only fires inside an open transition and would need
-// that whole fixture here. It is exercised by
-// TestSyncEngineTransitionDiagnosticsFlushAfterUnlock — the repository
-// call-site audit, not this list, is what proves no SyncEngine site reads
+// Canonical M/O planning needs an open-transition fixture; TestSyncEngineTransitionDiagnosticsFlushAfterUnlock exercises it.
+// The repository call-site audit, not this list, proves no SyncEngine site reads
 // s.stderr raw. Adding a transition-free diagnostic site without adding it here
 // leaves it unproven.
 func stderrProducers(t *testing.T, f *pendingOutpointSyncFixture, spentBlock []byte, pvBlock []byte, pvCtx canonicalBlockApplyContext) map[string]func() {

@@ -72,19 +72,7 @@ type Mempool struct {
 	// the former spenders index: outpoint ownership now lives with the claim
 	// and its token, so no second spender map can drift from the records.
 	pendingOutpoints *PendingOutpointOwner
-	// sigCache is the one positive-only signature cache this Mempool owns. It
-	// is constructed empty, lives in process memory only, and is never
-	// persisted. It reaches consensus through exactly two ratified call sites,
-	// both landing in the suite-aware validation seam every sequential native
-	// signature path (P2PK, multisig, Vault threshold, HTLC, CORE_STEALTH)
-	// shares: validateTransactionWithConsensus (mempolicy_helpers.go), the
-	// parsed-transaction seam used for relay metadata, and
-	// checkTransactionWithSnapshot (mempool_precheck.go), the live AddTx path,
-	// which enters through the raw-bytes helper. A hit lets consensus
-	// skip ONLY a previously successful backend verification call for the
-	// exact same tuple under the same resolved verifier binding — never an
-	// admission, duplicate, conflict, floor, or capacity decision. Block
-	// validation, the miner, and the deferred SigCheckQueue never see it.
+	// sigCache is the one positive-only signature cache this Mempool owns.
 	sigCache *consensus.SigCache
 	// Admission counters are bumped exactly once for each AddTx call on a
 	// non-nil Mempool that reaches the final outcome accounting path.
@@ -353,8 +341,7 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource, probe 
 	policy := m.policySnapshot()
 	// Wave-6/8 (PR #1422): snap currentMinFeeRate ONCE so the cheap
 	// precheck has a stable floor input for its accept/reject decision.
-	// admissionMu excludes canonical publication. The locked path enforces
-	// max(snappedFloor, live currentMinFeeRate) so admission cannot miss a concurrent raise:
+	// admissionMu excludes canonical publication. The locked path enforces max(snappedFloor, live currentMinFeeRate) so admission cannot miss a concurrent raise:
 	//   - raise race: if raiseMinFeeRateAfterEvictionLocked fires
 	//     between snap and lock, live currentMinFeeRate (higher) wins →
 	//     tx correctly rejected against the current rolling floor;

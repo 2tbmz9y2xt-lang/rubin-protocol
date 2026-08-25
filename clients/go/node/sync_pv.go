@@ -123,12 +123,10 @@ func (s *SyncEngine) runPVShadowIfActive(blockBytes []byte, prevTimestamps []uin
 
 // finalizeAppliedBlock persists the already-published canonical block.
 //
-// The prepared standard Mempool/owner image and live canonical tip have ALREADY
-// been published. Planning errors return before either publication and never
-// reach persistence; later failures follow the existing rollback/persistence
-// classifier. Runtime accepted-tip recording is likewise NOT done here: it
-// happens only after this persistence AND the owner stable-tip commit succeed,
-// in canonicalTransition.finish.
+// The prepared Mempool/owner image and live canonical tip are already published.
+// Planning errors return before either publication and never reach persistence;
+// later failures use existing rollback classification. Runtime tip recording occurs
+// only after persistence and the owner stable-tip commit, in canonicalTransition.finish.
 func (s *SyncEngine) finalizeAppliedBlock(summary *ChainStateConnectSummary, blockHash [32]byte, pb *consensus.ParsedBlock, blockBytes []byte, prevState *ChainState, rollbackState syncRollbackState) error {
 	commitStart := time.Now()
 	if err := s.persistAppliedBlock(summary, blockHash, pb, blockBytes, prevState); err != nil {

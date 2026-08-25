@@ -40,8 +40,6 @@ func (m *Mempool) validateTransactionWithConsensus(
 		nextHeight,
 		blockMTP,
 		m.chainID,
-		// The mempool-owned positive signature cache enters consensus only
-		// here, through the existing suite-aware parsed-transaction seam.
 		consensus.SuiteValidationContext{
 			Rotation: policy.RotationProvider,
 			Registry: policy.SuiteRegistry,

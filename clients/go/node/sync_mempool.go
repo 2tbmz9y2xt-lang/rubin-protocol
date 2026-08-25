@@ -300,8 +300,7 @@ func validateMempoolEntryParsedTx(entry mempoolEntry, tx *consensus.Tx) error {
 	return nil
 }
 
-// canonicalMempoolPlan is the fully built standard-record and owner-claim
-// image a canonical transition installs before its existing C mutation.
+// canonicalMempoolPlan is the complete standard-record/owner-claim image installed before C mutation.
 type canonicalMempoolPlan struct {
 	owner             *PendingOutpointOwner
 	snapshot          mempoolSnapshot
@@ -355,8 +354,8 @@ func localCanonicalMempoolPlanError(err error) error {
 }
 
 func isCanonicalMOTerminalError(err error) bool {
-	_, ok := err.(*canonicalMOTerminalError)
-	return ok
+	var terminal *canonicalMOTerminalError
+	return errors.As(err, &terminal)
 }
 
 func canonicalMempoolPlanContextOf(m *Mempool) (canonicalMempoolPlanContext, error) {
@@ -492,9 +491,8 @@ func canonicalMempoolInputUnion(entries []mempoolEntry) []consensus.Outpoint {
 	return inputs
 }
 
-// canonicalMempoolSnapshotInRawOrder gives structural validation one stable
-// order: standard record claims by raw txid, then every other claim by raw
-// txid and token sequence. The rollback snapshot itself remains untouched.
+// canonicalMempoolSnapshotInRawOrder orders standard records/claims by raw txid,
+// then other claims by raw txid and token; the rollback snapshot stays untouched.
 func canonicalMempoolSnapshotInRawOrder(snapshot mempoolSnapshot) mempoolSnapshot {
 	snapshot.entries = append([]mempoolEntry(nil), snapshot.entries...)
 	sort.Slice(snapshot.entries, func(i, j int) bool {
@@ -940,7 +938,7 @@ func canonicalMempoolEntryFinalValid(
 }
 
 func canonicalMempoolValidationAbortsPlan(err error) bool {
-	txErr, ok := err.(*consensus.TxError)
+	txErr, ok := err.(*consensus.TxError) //nolint:errorlint // Only a direct, nonnil TxError may exclude; wrapped errors abort the plan.
 	return !ok || txErr == nil || canonicalMempoolCauseAbortsPlan(txErr.Cause())
 }
 

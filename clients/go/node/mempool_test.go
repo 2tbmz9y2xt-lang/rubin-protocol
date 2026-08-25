@@ -2500,21 +2500,6 @@ func TestMempoolCheapPrecheckCachedDefaultNativeSetsContainCanonicalSuite(t *tes
 	}
 }
 
-// TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive
-// pins the wave-8 race-fix: validateFeeFloorLockedWithFloor uses
-// MAX(snappedFloor, m.currentMinFeeRateLocked()) so newer higher
-// floors always win.
-//
-// Bidirectional race protection:
-//   - decay race: snap-high & live-low → max=snap-high → reject
-//     (acceptable spurious reject; caller retries against new snap).
-//   - raise race: snap-low & live-high → max=live-high → reject
-//     (correctly enforces current floor; never admits below it).
-//
-// Wave-6 used pure snap (closed decay race, opened raise race).
-// Wave-8 takes the max so both Copilot wave-5 (decay) AND Codex/
-// Copilot wave-7 (raise) findings are addressed simultaneously per
-// Copilot's wave-7 fix recommendation.
 func TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
@@ -2532,9 +2517,6 @@ func TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive(t *testing.T
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
 
-	// Case 1 — decay race direction (snap-HIGH, live-LOW):
-	// max(snap=10, live=1) = 10 → reject. Spurious reject acceptable;
-	// caller retries against new lower snap.
 	mp.currentMinFeeRate = 1
 	if err := mp.validateFeeFloorLockedWithFloor(entry /* snappedFloor */, 10); err == nil ||
 		!strings.Contains(err.Error(), "mempool fee below rolling minimum") {

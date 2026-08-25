@@ -231,10 +231,8 @@ func (s *SyncEngine) shouldSwitchToBranch(
 // precomputed BlockUndo, and the compact block-local UTXO delta — bounded by the
 // branch's own inputs and outputs, never by branch depth times the UTXO set. The
 // whole branch is validated against ONE rolling private clone, the mechanism
-// Bitcoin Core's DisconnectTip/ConnectTip and btcd's reorganizeChain use when
-// they roll a single coins view with per-block undo. In-guard commit does not
-// revalidate block rows; it separately parses and lower-seam validates retained
-// mempool rows against final C1 before the fixed publisher.
+// Bitcoin Core's DisconnectTip/ConnectTip and btcd's reorganizeChain use for one
+// coins view with per-block undo. Commit reparses retained rows for the final-C1 lower seam, not block rows.
 type preparedBranchBlock struct {
 	item     reorgBranchBlock
 	summary  *ChainStateConnectSummary
@@ -261,10 +259,8 @@ type createdUtxo struct {
 // applyPreferredBranch applies the candidate branch selected by fork choice —
 // greater ChainWork, or equal ChainWork with a lexicographically lower tip hash
 // — inside EXACTLY ONE canonical transition: one generation for the whole
-// winning branch, one final standard M/O publication, and the existing
-// deterministic requeue after the final stable owner tip is committed. Block
-// rows are fully validated before the transition; retained mempool rows are
-// parsed and lower-seam validated against final C1 before publication.
+// winning branch and one final M/O publication, then deterministic requeue after
+// stable-tip commit. Block rows are prevalidated; retained rows use the final-C1 lower seam.
 func (s *SyncEngine) applyPreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
@@ -312,9 +308,8 @@ func (s *SyncEngine) applyPreferredBranch(
 	return summary, nil
 }
 
-// applyPreferredBranchUnderGuard parses and lower-seam validates retained
-// mempool rows against final C1, then fixed-publishes their M/O image before
-// the existing disconnect and per-row canonical path.
+// applyPreferredBranchUnderGuard validates retained rows against final C1, publishes
+// their fixed M/O image, then runs the existing disconnect/per-row canonical path.
 func (s *SyncEngine) applyPreferredBranchUnderGuard(
 	tr *canonicalTransition,
 	rows []preparedBranchBlock,
@@ -401,9 +396,8 @@ func (s *SyncEngine) preparePreferredBranch(
 // the canonical index, and every ancestor it needs is already stored. Target
 // context resolves first, so its failure short-circuits before the connect.
 //
-// The connect below is the branch path's only block-row consensus verdict — the
-// commit half does not revalidate block rows — so its failure records the
-// canonical block-apply rejection. A failed row aborts the entire preparation, so a branch
+// The connect below is the only block-row verdict; commit does not revalidate rows.
+// Its failure records canonical rejection and aborts the entire preparation, so a branch
 // contributes at most ONE rejected outcome however many rows it has, and the
 // rows that already prepared contribute nothing: the branch never opened a
 // transition, so it never published and they are neither accepted nor rejected.

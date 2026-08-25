@@ -3346,9 +3346,8 @@ func TestLoadVerifiedStoredBlockReadFailuresAreLocalCorruption(t *testing.T) {
 // TestApplyBlockWithReorgPendingOutpointUsesOneGenerationForTheWholeBranch
 // proves the preferred-branch row: the whole winning branch runs inside EXACTLY
 // one canonical transition, so exactly one generation is consumed no matter how
-// many blocks are disconnected and connected; one final-C1 M/O plan removes the
-// record and exact claim when the final branch includes it; and the owner's
-// stable tip is the branch tip.
+// many rows move; one final-C1 M/O plan removes the included record and claim,
+// and the owner's stable tip becomes the branch tip.
 func TestApplyBlockWithReorgPendingOutpointUsesOneGenerationForTheWholeBranch(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	forkHash, forkHeight, forkGenerated := f.tipHash, f.tipHeight, f.alreadyGenerated
@@ -3427,8 +3426,7 @@ func TestApplyBlockWithReorgPendingOutpointRestoresExactTokensOnFailure(t *testi
 	}
 	beforeReorg := mustAdmissionContext(t, f.owner, "before the failed reorg")
 
-	// A branch that does NOT include the spend, so final-C1 planning retains the
-	// record if the reorg commits — and rollback must restore it if not.
+	// This branch omits the spend: final-C1 retains the record, and failure restores it.
 	blockB101 := buildSingleTxBlock(t, forkHash, f.target, 203, reorgTestCoinbaseForAddress(t, forkHeight+1, subsidyA101, f.destAddress))
 	b101Parsed, b101Hash := mustParseReorgBlockForTest(t, blockB101)
 	if err := f.store.StoreBlock(b101Hash, b101Parsed.HeaderBytes, blockB101); err != nil {
