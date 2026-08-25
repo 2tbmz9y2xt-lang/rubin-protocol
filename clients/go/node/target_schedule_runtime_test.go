@@ -163,8 +163,12 @@ func newTargetScheduleBoundaryChain(t *testing.T) (*SyncEngine, *BlockStore, []u
 		canonical = append(canonical, hex.EncodeToString(hash[:]))
 		prev = hash
 	}
-	store.index.Canonical = canonical
-	store.rebuildCanonicalHeightIndex()
+	// RestoreCanonicalIndex, never a direct store.index write: the prepared
+	// canonical commit compares the VISIBLE on-disk identity, so a fixture that
+	// leaves RAM ahead of disk can never commit.
+	if err := store.RestoreCanonicalIndex(canonical); err != nil {
+		t.Fatalf("RestoreCanonicalIndex: %v", err)
+	}
 	engine.chainState.mu.Lock()
 	engine.chainState.Height = uint64(consensus.WINDOW_SIZE - 2)
 	engine.chainState.TipHash = prev

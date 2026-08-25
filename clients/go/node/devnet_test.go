@@ -439,8 +439,8 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 			syncStart := time.Now()
 			syncDeadline := syncStart.Add(syncBudget)
 			for {
-				state, stateErr := node.LoadChainState(nodeC.chainStatePath)
-				if stateErr == nil && state.HasTip && state.Height == wantHeight {
+				syncedHeight, _, syncedOK := tip(t, nodeC)
+				if syncedOK && syncedHeight == wantHeight {
 					t.Logf(
 						"[restart-sync] node-c synced %d blocks (h=%d -> h=%d) in %s",
 						wantHeight-killAt,
@@ -452,8 +452,8 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 				}
 				if time.Now().After(syncDeadline) {
 					var lastHeight uint64
-					if stateErr == nil && state.HasTip {
-						lastHeight = state.Height
+					if syncedOK {
+						lastHeight = syncedHeight
 					}
 					t.Fatalf(
 						"[restart-sync] node-c sync %d->%d FAILED after %s: last_height=%d/%d (peer reconnected in %s, sync budget %s)",
@@ -638,16 +638,25 @@ func (n *devnetNode) restartWithPeers(ctx context.Context, peers []string) error
 		restartPeers = append([]string(nil), n.bootstrapPeers...)
 	}
 	n.stop()
-	engine, err := node.NewSyncEngine(n.chainState, n.blockStore, n.syncCfg)
+	// A real restart recovers its chainstate from the DURABLE datadir through
+	// the startup path, never from the in-memory image the stopped process
+	// held: that is what proves the precommit checkpoint plus the retained
+	// canonical suffix replay back to the exact pre-restart tip.
+	chainState, err := reconcileDatadir(n.chainStatePath, n.blockStore, n.syncCfg)
 	if err != nil {
 		return err
 	}
-	mempool, err := node.NewMempool(n.chainState, n.blockStore, node.DevnetGenesisChainID())
+	engine, err := node.NewSyncEngine(chainState, n.blockStore, n.syncCfg)
+	if err != nil {
+		return err
+	}
+	mempool, err := node.NewMempool(chainState, n.blockStore, node.DevnetGenesisChainID())
 	if err != nil {
 		return err
 	}
 	engine.SetMempool(mempool)
 	replacement := *n
+	replacement.chainState = chainState
 	replacement.syncEngine, replacement.mempool, replacement.peerManager = engine, mempool, node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
 	service, err := newDevnetService(&replacement, n.bindAddr, restartPeers)
 	if err != nil {
@@ -657,6 +666,7 @@ func (n *devnetNode) restartWithPeers(ctx context.Context, peers []string) error
 		_ = service.Close()
 		return err
 	}
+	n.chainState = chainState
 	n.syncEngine, n.mempool, n.peerManager, n.service = engine, mempool, replacement.peerManager, service
 	n.bootstrapPeers = append([]string(nil), restartPeers...)
 	return nil
@@ -864,6 +874,10 @@ func addAmountAndFee(amount uint64, fee uint64) (uint64, error) {
 func logMonitoringCheckpoint(t *testing.T, atHeight uint64, nodes ...*devnetNode) {
 	t.Helper()
 	for _, current := range nodes {
+		// Diagnostics only, so it reads the durable snapshot RAW and labels it as
+		// the checkpoint it is. Reconciling here would write the recovered tip
+		// back to a live node's datadir, which is a mutation a log must not make
+		// — and it would hide from the restart leg whether recovery really works.
 		state, err := node.LoadChainState(current.chainStatePath)
 		if err != nil {
 			t.Fatalf("load chainstate %s: %v", current.name, err)
@@ -877,7 +891,7 @@ func logMonitoringCheckpoint(t *testing.T, atHeight uint64, nodes ...*devnetNode
 			stateHeight = state.Height
 		}
 		t.Logf(
-			"[checkpoint h=%d] node=%s height=%d tip=%x already_generated=%s utxo_count=%d peers=%d",
+			"[checkpoint h=%d] node=%s checkpoint_height=%d checkpoint_tip=%x already_generated=%s utxo_count=%d peers=%d",
 			atHeight,
 			current.name,
 			stateHeight,
@@ -988,19 +1002,22 @@ func (n *devnetNode) disconnectToHeight(t *testing.T, targetHeight uint64, hasTa
 	}
 }
 
+// waitForHeight polls the LIVE canonical tip. The durable snapshot lags it by
+// one transition by design, and reconciling on every 25 ms poll would rewrite
+// the datadir underneath a running node.
 func waitForHeight(t *testing.T, current *devnetNode, want uint64) {
 	t.Helper()
 	waitFor(t, 5*time.Second, fmt.Sprintf("%s height=%d", current.name, want), func() bool {
-		state, err := node.LoadChainState(current.chainStatePath)
-		return err == nil && state.HasTip && state.Height == want
+		height, _, ok := tip(t, current)
+		return ok && height == want
 	})
 }
 
 func waitForHeightWithTimeout(t *testing.T, current *devnetNode, want uint64, timeout time.Duration) {
 	t.Helper()
 	waitFor(t, timeout, fmt.Sprintf("%s height=%d", current.name, want), func() bool {
-		state, err := node.LoadChainState(current.chainStatePath)
-		return err == nil && state.HasTip && state.Height == want
+		height, _, ok := tip(t, current)
+		return ok && height == want
 	})
 }
 
@@ -1224,11 +1241,7 @@ func assertSoakConsensusMetrics(t *testing.T, nodes ...*devnetNode) {
 
 func loadChainStateMust(t *testing.T, current *devnetNode) *node.ChainState {
 	t.Helper()
-	state, err := node.LoadChainState(current.chainStatePath)
-	if err != nil {
-		t.Fatalf("load chainstate %s: %v", current.name, err)
-	}
-	return state
+	return recoverChainState(t, current)
 }
 
 func mustTxGenKeypair(t *testing.T) *consensus.MLDSA87Keypair {
@@ -1366,17 +1379,53 @@ func tip(t *testing.T, current *devnetNode) (uint64, [32]byte, bool) {
 	return height, hash, ok
 }
 
-func loadChainState(t *testing.T, current *devnetNode) *node.ChainState {
-	t.Helper()
-	state, err := node.LoadChainState(current.chainStatePath)
+// reconcileDatadir runs the node's OWN startup recovery composition over a
+// persisted datadir — VerifyGenesisAnchor, then ReconcileChainStateWithBlockStore,
+// then Save — in the exact order cmd/rubin-node/main.go runs it before it builds
+// a sync engine.
+//
+// Since the canonical publication cutover the persisted snapshot is the
+// precommit CHECKPOINT at the highest row common to the old and planned-new
+// identities, so replaying the canonical suffix from it is what turns a durable
+// datadir back into the live tip. Every assertion that reads that snapshot goes
+// through here, and so does a restart: reading the raw file and calling it the
+// tip would assert one transition behind.
+func reconcileDatadir(chainStatePath string, blockStore *node.BlockStore, syncCfg node.SyncConfig) (*node.ChainState, error) {
+	state, err := node.LoadChainState(chainStatePath)
 	if err != nil {
-		t.Fatalf("%s load chainstate: %v", current.name, err)
+		return nil, fmt.Errorf("load chainstate: %w", err)
+	}
+	if err := blockStore.VerifyGenesisAnchor(node.DevnetGenesisBlockHash()); err != nil {
+		return nil, fmt.Errorf("canonical index genesis anchor failed: %w", err)
+	}
+	if _, err := node.ReconcileChainStateWithBlockStore(state, blockStore, syncCfg); err != nil {
+		return nil, fmt.Errorf("chainstate reconcile failed: %w", err)
+	}
+	if err := state.Save(chainStatePath); err != nil {
+		return nil, fmt.Errorf("chainstate save failed: %w", err)
+	}
+	return state, nil
+}
+
+func recoverChainState(t *testing.T, current *devnetNode) *node.ChainState {
+	t.Helper()
+	state, err := reconcileDatadir(current.chainStatePath, current.blockStore, current.syncCfg)
+	if err != nil {
+		t.Fatalf("%s %v", current.name, err)
 	}
 	return state
 }
 
+func loadChainState(t *testing.T, current *devnetNode) *node.ChainState {
+	t.Helper()
+	return recoverChainState(t, current)
+}
+
 func readChainStateFile(t *testing.T, current *devnetNode) []byte {
 	t.Helper()
+	// Reconcile first, so the bytes compared across nodes are the recovered
+	// tip image rather than whichever checkpoint each node happens to hold.
+	recoverChainState(t, current)
 	raw, err := os.ReadFile(current.chainStatePath)
 	if err != nil {
 		t.Fatalf("%s read chainstate file: %v", current.name, err)

@@ -2343,9 +2343,22 @@ func TestDevnetRPCMineNextPreservesWideSupply(t *testing.T) {
 	if chainState.AlreadyGenerated != want {
 		t.Fatalf("live supply=%s, want %s", chainState.AlreadyGenerated.String(), want.String())
 	}
+	// The durable snapshot is the precommit CHECKPOINT at the highest row both
+	// identities share, so a restart reads it through the same startup path
+	// main.go uses — anchor, reconcile, save — and replays the canonical suffix
+	// back to the mined tip before anything asserts on the supply.
 	restarted, err := node.LoadChainState(chainStatePath)
 	if err != nil {
 		t.Fatalf("LoadChainState: %v", err)
+	}
+	if err := blockStore.VerifyGenesisAnchor(node.DevnetGenesisBlockHash()); err != nil {
+		t.Fatalf("VerifyGenesisAnchor: %v", err)
+	}
+	if _, err := node.ReconcileChainStateWithBlockStore(restarted, blockStore, syncCfg); err != nil {
+		t.Fatalf("ReconcileChainStateWithBlockStore: %v", err)
+	}
+	if err := restarted.Save(chainStatePath); err != nil {
+		t.Fatalf("Save(restarted): %v", err)
 	}
 	if restarted.AlreadyGenerated != want {
 		t.Fatalf("persisted supply=%s, want %s", restarted.AlreadyGenerated.String(), want.String())
