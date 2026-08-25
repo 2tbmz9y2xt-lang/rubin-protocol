@@ -22,21 +22,12 @@ func (m *Mempool) validateFeeFloorLocked(entry *mempoolEntry) error {
 // MAXIMUM of (snappedFloor, live currentMinFeeRate) so newer higher
 // floors always win.
 //
-// Bidirectional race protection:
-//   - decay race (Copilot wave-5): if `decayMinFeeRateAfterConnectedBlockLocked`
-//     fires between snap and lock, snappedFloor (higher) wins → tx
-//     rejected here too. Caller may retry against the new lower
-//     snapshot and admit — spurious reject is the lesser evil
-//     (acceptable per Copilot's wave-7 recommendation).
+// Concurrent admission race protection:
 //   - raise race (Codex + Copilot wave-7): if
 //     `raiseMinFeeRateAfterEvictionLocked` fires between snap and
 //     lock, live `currentMinFeeRate` (higher) wins → tx correctly
 //     rejected against the current congestion-control policy. NEVER
 //     admits a transaction below the current rolling floor.
-//
-// A prior snap-once pass-through closed the decay race in one direction but
-// introduced the raise race in the opposite direction. The locked re-read with
-// max-of-(snap, live) closes both sides.
 func (m *Mempool) validateFeeFloorLockedWithFloor(entry *mempoolEntry, snappedFloor uint64) error {
 	if entry == nil {
 		return selectRelayDisposition(txAdmitRejected("nil mempool entry"), RelayAdmissionInternal)
@@ -142,16 +133,20 @@ func (m *Mempool) raiseMinFeeRateAfterEvictionLocked(evictedEntries []*mempoolEn
 	}
 }
 
-func (m *Mempool) decayMinFeeRateAfterConnectedBlockLocked() {
-	m.ensureMinFeeRateLocked()
-	if m.usedBytes >= m.effectiveLowWaterBytesLocked() {
-		return
+func canonicalMempoolFeeFloor(oldFloor uint64, finalUsedBytes, lowWaterBytes, rows int) uint64 {
+	if oldFloor < DefaultMempoolMinFeeRate {
+		oldFloor = DefaultMempoolMinFeeRate
 	}
-	decayed := m.currentMinFeeRate / 2
-	if decayed < DefaultMempoolMinFeeRate {
-		decayed = DefaultMempoolMinFeeRate
+	if rows <= 0 || finalUsedBytes >= lowWaterBytes {
+		return oldFloor
 	}
-	m.currentMinFeeRate = decayed
+	for range rows {
+		oldFloor /= 2
+		if oldFloor < DefaultMempoolMinFeeRate {
+			return DefaultMempoolMinFeeRate
+		}
+	}
+	return oldFloor
 }
 
 // entryFloorRate derives the u64 rolling-floor RATE implied by an evicted

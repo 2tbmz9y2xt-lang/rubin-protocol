@@ -212,8 +212,8 @@ func (m *Mempool) AdmissionCounts() MempoolAdmissionCounts {
 // fields under the read lock — values are NOT cached duplicates of
 // MempoolConfig defaults — so max_bytes, low_water_bytes, and
 // min_fee_rate reflect the rolling state including the post-eviction
-// adjustments performed by raiseMinFeeRateAfterEvictionLocked and
-// decayMinFeeRateAfterConnectedBlockLocked. EvictedResidentTotal is
+// adjustments performed by eviction and canonical-transition publication.
+// EvictedResidentTotal is
 // loaded INSIDE the read-lock window. Writers bump that counter
 // under m.mu.Lock in the per-victim counter loop of
 // addEntryLockedProbed — the one implementation of the locked

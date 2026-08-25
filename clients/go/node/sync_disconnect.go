@@ -7,6 +7,8 @@ import (
 type disconnectTipContext struct {
 	storedBlock verifiedStoredBlock
 	undo        *BlockUndo
+	finalState  *ChainState
+	mempoolMTP  uint64
 	// tipHeight is the canonical height of the block being disconnected, read
 	// fresh per block. The canonical index must be truncated relative to the
 	// CURRENT tip: a preferred-branch reorg disconnects several blocks inside
@@ -14,6 +16,20 @@ type disconnectTipContext struct {
 	// truncate every iteration back to the same original height.
 	tipHeight       uint64
 	newTipTimestamp uint64
+}
+
+type disconnectPreFinalizeError struct{ cause error }
+
+func (e *disconnectPreFinalizeError) Error() string { return e.cause.Error() }
+
+func (e *disconnectPreFinalizeError) Unwrap() error { return e.cause }
+
+func unwrapDisconnectPreFinalizeError(err error) error {
+	var early *disconnectPreFinalizeError
+	if errors.As(err, &early) {
+		return early.cause
+	}
+	return err
 }
 
 func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {
@@ -27,9 +43,7 @@ func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {
 	return s.disconnectTip(diag)
 }
 
-// disconnectTip runs a standalone disconnect as ONE canonical transition: it
-// advances a single generation, commits the prepared stable tip under the same
-// guard, and adds no requeue and no full-Mempool revalidation policy.
+// disconnectTip runs one guarded final-C1 M/O plan with no requeue.
 func (s *SyncEngine) disconnectTip(diag *diagnosticBatch) (*ChainStateDisconnectSummary, error) {
 	canonicalIndex, err := s.canonicalIndexPreflight()
 	if err != nil {
@@ -43,7 +57,17 @@ func (s *SyncEngine) disconnectTip(diag *diagnosticBatch) (*ChainStateDisconnect
 	if err != nil {
 		return nil, err
 	}
+	if err := s.prepareAndPublishCanonicalMempoolPlan(tr, ctx.finalState, ctx.mempoolMTP, 0); err != nil {
+		if endErr := tr.end(err); endErr != nil {
+			return nil, endErr
+		}
+		return nil, err
+	}
 	summary, err := s.disconnectPreparedTip(ctx, tr.rollback)
+	var early *disconnectPreFinalizeError
+	if errors.As(err, &early) {
+		err = s.rollbackApplyBlock(early.cause, tr.rollback)
+	}
 	if endErr := tr.end(err); endErr != nil {
 		return nil, endErr
 	}
@@ -57,7 +81,7 @@ func (s *SyncEngine) disconnectTip(diag *diagnosticBatch) (*ChainStateDisconnect
 func (s *SyncEngine) disconnectPreparedTip(ctx disconnectTipContext, rollback syncRollbackState) (*ChainStateDisconnectSummary, error) {
 	summary, err := s.disconnectVerifiedUnderTransition(ctx.storedBlock, ctx.undo)
 	if err != nil {
-		return nil, err
+		return nil, &disconnectPreFinalizeError{cause: err}
 	}
 	if err := s.finalizeDisconnectState(rollback, ctx.tipHeight, ctx.newTipTimestamp); err != nil {
 		return nil, err
@@ -102,7 +126,11 @@ func (s *SyncEngine) prepareDisconnectTip() (disconnectTipContext, error) {
 	if err != nil {
 		return disconnectTipContext{}, err
 	}
-	return s.prepareDisconnectTipContext(tipHeight, tipHash, storedBlock, undo)
+	ctx, err := s.prepareDisconnectTipContext(tipHeight, tipHash, storedBlock, undo)
+	if err != nil {
+		return disconnectTipContext{}, err
+	}
+	return s.prepareMempoolDisconnectContext(ctx)
 }
 
 func (s *SyncEngine) prepareDisconnectTipFromVerified(storedBlock verifiedStoredBlock) (disconnectTipContext, error) {
@@ -159,6 +187,29 @@ func (s *SyncEngine) prepareDisconnectTipContext(tipHeight uint64, tipHash [32]b
 		tipHeight:       tipHeight,
 		newTipTimestamp: newTipTimestamp,
 	}, nil
+}
+
+func (s *SyncEngine) prepareMempoolDisconnectContext(ctx disconnectTipContext) (disconnectTipContext, error) {
+	finalState := cloneChainState(s.chainState)
+	if finalState == nil {
+		return disconnectTipContext{}, errors.New("nil final disconnect chainstate")
+	}
+	if _, err := finalState.disconnectVerifiedStoredBlock(ctx.storedBlock, ctx.undo); err != nil {
+		return disconnectTipContext{}, err
+	}
+	nextHeight, _, err := nextBlockContext(finalState)
+	if err != nil {
+		return disconnectTipContext{}, err
+	}
+	prevTimestamps, err := prevTimestampsFromStore(s.blockStore, nextHeight)
+	if err != nil {
+		return disconnectTipContext{}, err
+	}
+	ctx.finalState = finalState
+	if nextHeight != 0 {
+		ctx.mempoolMTP = mtpMedian(nextHeight, prevTimestamps)
+	}
+	return ctx, nil
 }
 
 func (s *SyncEngine) validateDisconnectTipReady() error {

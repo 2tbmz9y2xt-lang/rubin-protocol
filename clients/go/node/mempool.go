@@ -116,9 +116,9 @@ type Mempool struct {
 	// returns txAdmitUnavailable with an empty victim list. Fee-floor
 	// rejection of an incoming transaction never reaches this counter
 	// either, because the fee-floor check happens before
-	// validateCapacityAdmissionLocked. Confirmed-block removals via
-	// EvictConfirmed/applyConnectedBlock are conflict resolution, not
-	// policy capacity eviction, and also do not increment this counter.
+	// validateCapacityAdmissionLocked. Public terminal removals and canonical
+	// M/O plan publication are not policy capacity eviction, and also do not
+	// increment this counter.
 	evictedResidentTotal atomic.Uint64
 }
 
@@ -353,19 +353,12 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource, probe 
 	policy := m.policySnapshot()
 	// Wave-6/8 (PR #1422): snap currentMinFeeRate ONCE so the cheap
 	// precheck has a stable floor input for its accept/reject decision.
-	// The locked path (validateFeeFloorLockedWithFloor below) then
-	// enforces max(snappedFloor, live currentMinFeeRate) so the
-	// admission decision is bidirectionally race-safe:
-	//   - decay race: if decayMinFeeRateAfterConnectedBlockLocked fires
-	//     between snap and lock, snappedFloor (higher) wins → spurious
-	//     reject is the lesser evil, caller may retry (acceptable per
-	//     Copilot wave-7 recommendation).
+	// admissionMu excludes canonical publication. The locked path enforces
+	// max(snappedFloor, live currentMinFeeRate) so admission cannot miss a concurrent raise:
 	//   - raise race: if raiseMinFeeRateAfterEvictionLocked fires
 	//     between snap and lock, live currentMinFeeRate (higher) wins →
 	//     tx correctly rejected against the current rolling floor;
 	//     never admits below the live congestion-control level.
-	// Wave-7's snap-once-pass-through fixed only the decay direction
-	// and reopened the opposite race; wave-8 closes both.
 	snappedFloor := m.CurrentMinFeeRateSnapshot()
 	checked, inputs, err := m.checkTransactionWithSnapshot(txBytes, snapshot, policy, snappedFloor, probe)
 	if err != nil {

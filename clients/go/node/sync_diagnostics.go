@@ -140,10 +140,9 @@ func (s *SyncEngine) flushDiagnostics(batch *diagnosticBatch) {
 // anything the caps dropped, then the terminal-latch record.
 //
 // The terminal record goes last, which IS its producer order: it is emitted by
-// canonicalTransition.end, after every other producer of that mutation (PV
-// shadow runs before the transition opens, the cleanup report inside it), and
-// the only producer that could follow it — the reorg requeue — is skipped
-// entirely when end returns a terminal cause.
+// canonicalTransition.end after every other producer of that mutation. The only
+// producer that could follow it — the reorg requeue — is skipped entirely when
+// end returns a terminal cause.
 func (b *diagnosticBatch) flushTail(writer io.Writer) {
 	if b.truncated {
 		_, _ = fmt.Fprint(writer, diagnosticBatchTruncatedRecord)
