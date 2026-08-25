@@ -366,8 +366,7 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 	submittedTxs := make([][32]byte, 0, targetHeight/txInterval)
 
 	cNodeDown := false
-	var preStopHeight uint64
-	var preStopTip, preStopDigest [32]byte
+	var preStop nodeImage
 	for wantHeight := uint64(1); wantHeight <= targetHeight; wantHeight++ {
 		mined := nodeA.mineOne(t, true)
 		if mined.Height != wantHeight {
@@ -394,13 +393,12 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 		}
 
 		if wantHeight == killAt {
-			// The exact live tip the stopped process held. Recovery has to
-			// reproduce THIS, from the durable checkpoint plus the retained
-			// canonical suffix, before any peer can hand it a block.
-			preStopHeight, preStopTip, _ = tip(t, nodeC)
-			preStopDigest = nodeC.chainState.StateDigest()
 			nodeC.stop()
 			cNodeDown = true
+			// Captured AFTER the service is closed: nothing can advance node C
+			// any more, so this IS its final image and recovery has to reproduce
+			// exactly it. Captured before the stop it would race a peer delivery.
+			preStop = snapshotNodeImage(t, nodeC)
 			// The read-only recovery every assertion uses must leave the
 			// datadir byte-identical. Checked on the STOPPED node, so the
 			// comparison has no concurrent writer and the result is
@@ -418,24 +416,21 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 		if cNodeDown && wantHeight == restartAt {
 			oldEngine, oldMempool, oldPeerManager := nodeC.syncEngine, nodeC.mempool, nodeC.peerManager
 			restartPeers := []string{nodeB.service.Addr(), nodeA.service.Addr()}
-			if err := nodeC.restartWithPeers(ctx, restartPeers); err != nil {
+			recovered, err := nodeC.restartWithPeers(t, ctx, restartPeers)
+			if err != nil {
 				t.Fatalf("restart node C at height %d: %v", wantHeight, err)
 			}
 			if nodeC.syncEngine == oldEngine || nodeC.mempool == oldMempool || nodeC.peerManager == oldPeerManager || nodeC.service == nil || strings.Join(nodeC.bootstrapPeers, ",") != strings.Join(restartPeers, ",") {
 				t.Fatal("restart did not replace local state or preserve explicit peers")
 			}
-			// BEFORE any peer wait: recovery alone must reproduce the pre-stop
-			// tip. Asserted after the sync legs below, a peer handing node C the
-			// same blocks again would mask a checkpoint that never replayed.
-			if height, hash, ok := tip(t, nodeC); !ok || height != preStopHeight || hash != preStopTip {
-				t.Fatalf("recovered canonical tip=(%d,%x,ok=%v), want the exact pre-stop tip (%d,%x)", height, hash, ok, preStopHeight, preStopTip)
-			}
-			// The LIVE image the restart installed, not a fresh read-only
-			// recovery: the checkpoint alone lags the canonical tip, so an image
-			// equal to the pre-stop one is proof the retained suffix replayed
-			// onto it during startup rather than arriving later from a peer.
-			if got := nodeC.chainState.StateDigest(); got != preStopDigest {
-				t.Fatalf("recovered live image=%x, want the pre-stop image %x", got, preStopDigest)
+			// Captured inside restartWithPeers before service.Start, so no peer
+			// delivery can precede it. The DIGEST is the load-bearing half: the
+			// checkpoint alone lags the canonical tip, so a live image equal to
+			// the pre-stop one proves the retained suffix replayed at startup.
+			// The height/tip half only sanity-checks the BlockStore identity the
+			// restart shares with the stopped process.
+			if recovered != preStop {
+				t.Fatalf("recovered image=%+v, want the pre-stop image %+v", recovered, preStop)
 			}
 			// Order: peer link first, then header/block sync. A node
 			// with zero peers cannot make sync progress, so checking
@@ -658,50 +653,66 @@ func (n *devnetNode) stop() {
 	n.service = nil
 }
 
-func (n *devnetNode) restartWithPeers(ctx context.Context, peers []string) error {
+// nodeImage is what a restart has to reproduce: canonical tip identity plus the
+// live UTXO image at it. Comparable, so one == is the whole assertion.
+type nodeImage struct {
+	height      uint64
+	tip, digest [32]byte
+}
+
+// snapshotNodeImage reads a node nothing is advancing (stopped, or not started).
+func snapshotNodeImage(t *testing.T, n *devnetNode) nodeImage {
+	t.Helper()
+	height, hash, _ := tip(t, n)
+	return nodeImage{height: height, tip: hash, digest: n.chainState.StateDigest()}
+}
+
+func (n *devnetNode) restartWithPeers(t *testing.T, ctx context.Context, peers []string) (nodeImage, error) {
+	t.Helper()
 	if n == nil {
-		return fmt.Errorf("nil node")
+		return nodeImage{}, fmt.Errorf("nil node")
 	}
 	if n.bindAddr == "" {
-		return fmt.Errorf("node has no bind address")
+		return nodeImage{}, fmt.Errorf("node has no bind address")
 	}
 	restartPeers := append([]string(nil), peers...)
 	if len(restartPeers) == 0 {
 		restartPeers = append([]string(nil), n.bootstrapPeers...)
 	}
 	n.stop()
-	// A real restart recovers its chainstate from the DURABLE datadir through
-	// the startup path, never from the in-memory image the stopped process
-	// held: that is what proves the precommit checkpoint plus the retained
-	// canonical suffix replay back to the exact pre-restart tip.
+	// A real restart recovers through the startup path from the DURABLE datadir,
+	// never from the in-memory image the stopped process held.
 	chainState, err := reconcileDatadir(n.chainStatePath, n.blockStore, n.syncCfg, true)
 	if err != nil {
-		return err
+		return nodeImage{}, err
 	}
 	engine, err := node.NewSyncEngine(chainState, n.blockStore, n.syncCfg)
 	if err != nil {
-		return err
+		return nodeImage{}, err
 	}
 	mempool, err := node.NewMempool(chainState, n.blockStore, node.DevnetGenesisChainID())
 	if err != nil {
-		return err
+		return nodeImage{}, err
 	}
 	engine.SetMempool(mempool)
 	replacement := *n
 	replacement.chainState = chainState
 	replacement.syncEngine, replacement.mempool, replacement.peerManager = engine, mempool, node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
+	// Recovery is complete and nothing is serving yet, so this is what the
+	// durable datadir ALONE produced; read after Start, a peer could beat it.
+	recovered := snapshotNodeImage(t, &replacement)
 	service, err := newDevnetService(&replacement, n.bindAddr, restartPeers)
 	if err != nil {
-		return err
+		return nodeImage{}, err
 	}
 	if err = service.Start(ctx); err != nil {
 		_ = service.Close()
-		return err
+		return nodeImage{}, err
 	}
 	n.chainState = chainState
 	n.syncEngine, n.mempool, n.peerManager, n.service = engine, mempool, replacement.peerManager, service
 	n.bootstrapPeers = append([]string(nil), restartPeers...)
-	return nil
+	return recovered, nil
 }
 
 func (n *devnetNode) submitTx(raw []byte) error {

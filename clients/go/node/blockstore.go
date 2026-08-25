@@ -614,9 +614,12 @@ func (bs *BlockStore) getHeaderByHashRaw(blockHash [32]byte) ([]byte, error) {
 // errNoncanonicalReclaimPinned is what a reader returns when reclaim has already
 // MARKED that hash: the artifact was not looked for at all, so the refusal is an
 // operational condition of this store, never evidence about the artifact. It
-// wraps os.ErrNotExist so every pre-existing consumer keeps the absence behavior
-// it was written against, while a caller that must classify the observation —
-// classifyCanonicalArtifactAcquisition — can tell the two apart by identity.
+// wraps os.ErrNotExist so a consumer testing errors.Is(err, os.ErrNotExist) —
+// which is every current one — keeps the absence behavior it was written
+// against, while a caller that must classify the observation —
+// classifyCanonicalArtifactAcquisition — tells the two apart by identity.
+// os.IsNotExist does NOT unwrap %w and would read the sentinel as an ordinary
+// error; no caller uses it on these three readers.
 var errNoncanonicalReclaimPinned = fmt.Errorf("noncanonical reclaim already marked this hash: %w", os.ErrNotExist)
 
 func (bs *BlockStore) pinNoncanonicalReader(hash [32]byte) bool {

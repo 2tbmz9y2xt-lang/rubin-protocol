@@ -27,8 +27,12 @@ type disconnectTipContext struct {
 //   - (summary, err) — EXACTLY and ONLY TERMINAL_PERSISTENCE(new): the shortened
 //     image is published because the truth is NEW, and the engine still latches
 //     with admission closed until restart.
-//   - (nil, err) — every other outcome. An OLD/open refusal mutates nothing: no
-//     artifact, checkpoint, index, publication or counter, and no latch.
+//   - (nil, err) — every other outcome. An OLD/open refusal PUBLISHES nothing:
+//     no index write, no C1/M1/O1, no counter, no latch, live tip preserved.
+//     Its new suffix is empty, so it stages no artifacts; one reached after the
+//     checkpoint step does leave that file rewritten to the POST-disconnect
+//     image — the row both identities share, from which startup replays the
+//     still-listed tip row back.
 //
 // Nil-safe on the receiver, like the other exported SyncEngine methods.
 func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {

@@ -406,9 +406,14 @@ func raceTolerantBootstrapResult(applyErr error, hasTip bool) error {
 //     as "nothing happened" is wrong for this one case.
 //   - (nil, err) — every other outcome. An OLD/open refusal (local parent-row
 //     mismatch, plan bound, precommit persistence error, resource
-//     unavailability, stale plan) mutates nothing: no artifact, checkpoint,
-//     index, publication or counter, and no latch. A latched OLD/UNKNOWN
-//     outcome likewise publishes nothing and keeps admission closed.
+//     unavailability, stale plan) PUBLISHES nothing: no canonical index write,
+//     no C1/M1/O1, no counter, no latch, live image untouched. A refusal
+//     reached after the precommit steps does leave durable residue — this
+//     block's staged header/block/undo, and the rewritten checkpoint, here the
+//     pre-apply image the refusal preserved anyway — harmless by construction:
+//     staged rows stay noncanonical until an index commit names them, and the
+//     checkpoint row belongs to old and planned-new alike. A latched outcome
+//     likewise publishes nothing and keeps admission closed.
 //
 // Nil-safe on the receiver, like the other exported SyncEngine methods.
 func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {

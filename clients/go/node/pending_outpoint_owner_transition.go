@@ -49,11 +49,12 @@ func (o *PendingOutpointOwner) commitStableTip(tip PendingOutpointTip) error {
 	return nil
 }
 
-// endTransitionAborted reopens admission for a transition that published
-// NOTHING, which is the only shape an abort takes now: the live image was never
-// replaced, so there is nothing to restore and this only clears the transition
-// flag. The stable tip keeps its pre-transition value; token and generation
-// high-waters stay advanced so no sequence is ever reused.
+// endTransitionAborted clears the transition flag and reopens admission. There
+// is no owner image to restore on either path that reaches it: an OLD or UNKNOWN
+// transition published nothing at all, and the one path that arrives AFTER
+// publication — truth NEW on an engine with no mempool — has no owner, so the
+// call is the nil no-op below. The stable tip keeps its pre-transition value;
+// token and generation high-waters stay advanced so no sequence is ever reused.
 func (o *PendingOutpointOwner) endTransitionAborted() {
 	if o == nil {
 		return

@@ -37,7 +37,13 @@ type verifiedStoredBlock struct {
 //     admission stays closed until restart, and zero requeue owners run.
 //   - (nil, err) — every other outcome, including a consensus rejection, a
 //     side-block LOCAL_STORE_ERROR(noncanonical) that never latches, and every
-//     OLD/open canonical refusal, which mutates nothing.
+//     OLD/open canonical refusal. A canonical refusal PUBLISHES nothing — no
+//     index write, no C/M/O, no counter, no latch, live image untouched — but
+//     one reached after the precommit steps leaves the whole branch's staged
+//     artifacts behind and the checkpoint rewritten to the COMMON ANCESTOR
+//     image, which lags the preserved live tip. Both harmless: staged rows stay
+//     noncanonical, and startup replays the unchanged canonical index forward
+//     from that common row.
 //
 // Nil-safe on the receiver, like the other exported SyncEngine methods.
 func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {

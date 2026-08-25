@@ -38,10 +38,13 @@ const (
 // then a complete value was in hand and any failure is integrity evidence.
 //
 // A reader that refused because reclaim already marked the hash never looked at
-// the artifact, so it is unavailability and MUST be tested before the absence
+// the artifact, so HERE it is unavailability and is tested before the absence
 // arm: the refusal deliberately wraps os.ErrNotExist for the store's older
-// consumers, and reading it as definitive absence would latch a node shut over a
-// transient local condition.
+// consumers, and this lane reading it as definitive absence would latch a node
+// shut over a transient local condition. The ordering rule is THIS classifier's,
+// not the package's — the startup completeness scan still folds the sentinel
+// into absence, and may: both its production callers reconcile once before their
+// process owns a store writer that could mark a reclaim.
 func classifyCanonicalArtifactAcquisition(err error) canonicalArtifactRead {
 	switch {
 	case err == nil:
