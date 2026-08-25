@@ -677,19 +677,18 @@ func TestCanonicalMOPlanProviderSnapshotAndFirstErrorOrder(t *testing.T) {
 		p := newCanonicalMOProvider(t, devnetGenesisChainID)
 		p.createSet, p.err = consensus.NewNativeSuiteSet(), errors.New("deployment read")
 		g := newCanonicalMOFixture(t, 2, MempoolConfig{RotationProvider: p})
-		core := g.raw(t, g.ops[1], 1, true)
-		coreID := txID(t, core)
-		var first []byte
-		for nonce := uint64(1); nonce < 33; nonce++ {
-			raw := g.raw(t, g.ops[0], nonce, false)
-			id := txID(t, raw)
-			if string(id[:]) < string(coreID[:]) {
-				first = raw
-				break
+		find := func(input int, isCore, high bool) []byte {
+			for nonce := uint64(1); nonce < 257; nonce++ {
+				raw := g.raw(t, g.ops[input], nonce, isCore)
+				if (txID(t, raw)[0] >= 0x80) == high {
+					return raw
+				}
 			}
+			return nil
 		}
-		if first == nil {
-			t.Fatal("could not construct first provisional exclusion")
+		first, core := find(0, false, false), find(1, true, true)
+		if first == nil || core == nil || txID(t, first)[0] >= txID(t, core)[0] {
+			t.Fatal("could not construct ordered raw-txid prefixes")
 		}
 		g.installRaw(t, first)
 		g.installRaw(t, core)
