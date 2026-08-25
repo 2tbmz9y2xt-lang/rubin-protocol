@@ -11,6 +11,10 @@ Policy:
 
 ---
 
+## 2026-08-25 — DA expected capacity authority (RUB-1242)
+
+Manual authoring (no generator) appended 16 inert completion, count/retained-byte boundary, exact-comparator, and atomic-eviction expected cases to `protocol/da_admission_expected_v1.json`, bringing the `BUILDING_EXPECTED` corpus to 40 cases. Validation commands: `python3 tools/check_conformance_fixtures_policy.py`, `python3 tools/gen_conformance_matrix.py --check`, and `git diff --check`. Changed files: `protocol/da_admission_expected_v1.json` and `CHANGELOG.md`.
+
 ## 2026-08-25 — DA expected routing authority (RUB-1241)
 
 Manual `protocol/da_admission_expected_v1.json` registers 24 inert `BUILDING_EXPECTED` remote, local, cross-source, and detached-reorg cases, including a canonical detached branch with transition-wide DA-unavailable / standard-available owner lifecycle and structured entrypoint/reservation projections.
