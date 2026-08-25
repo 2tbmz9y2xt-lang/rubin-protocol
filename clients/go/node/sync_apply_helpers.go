@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -31,8 +32,7 @@ func txErrCode(err error) string {
 // keeps once staging and proof are done: the charged (height, hash) pair — 40
 // bytes, exactly what canonicalPlanMetadataCharge bills for one row. No block or
 // header bytes, no ParsedBlock, no BlockUndo, no UTXO delta and no transaction
-// payload survive into it, so retained plan memory is bounded by the metadata
-// charge instead of by transition depth.
+// payload survive into it, so the per-row retention is metadata, not payload.
 type canonicalRowDescriptor struct {
 	height uint64
 	hash   [32]byte
@@ -109,9 +109,14 @@ var canonicalPlanMetadataCap = canonicalPlanMetadataCapBytes
 // generation advance or live mutation, so a refused plan changes nothing.
 var errCanonicalPlanMetadataCap = errors.New("LOCAL_RESOURCE_UNAVAILABLE(canonical_plan_metadata)")
 
-// canonicalPlanMetadataCharge bills exactly what the plan retains:
+// canonicalPlanMetadataCharge bills the plan's row metadata:
 // 48 + 40*(disconnect_rows+connect_rows) + 32*sum(len(A1[row].CompleteDAIDs)).
 // Every term is checked, so no count can wrap the total back under the cap.
+//
+// It bills THAT and nothing else. The two private O(UTXO) ChainState images and
+// the O(height) old/new canonical sequences the plan also holds are normed
+// separately by the contract's resource_bounds, so this cap is not a bound on
+// the plan's total memory.
 func canonicalPlanMetadataCharge(disconnect, connect []canonicalRowDescriptor, applied []CanonicalAppliedBlock) (uint64, error) {
 	rows := uint64(len(disconnect)) + uint64(len(connect))
 	total, err := addCanonicalPlanBytes(canonicalPlanMetadataBaseBytes, canonicalPlanMetadataRowBytes, rows)
@@ -261,6 +266,34 @@ func (e *canonicalStoreIntegrityError) Error() string {
 
 func (e *canonicalStoreIntegrityError) Unwrap() error { return e.cause }
 
+// canonicalArtifactUnavailableError is MP641's
+// LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read): the local condition
+// prevented obtaining a complete bound-satisfying value, and nothing was
+// observed about the artifact itself. It preserves OLD with admission OPEN, so
+// it deliberately does NOT satisfy errors.As for the integrity type — that is
+// what keeps it out of the latch lane.
+type canonicalArtifactUnavailableError struct{ cause error }
+
+func (e *canonicalArtifactUnavailableError) Error() string {
+	return "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read): " + e.cause.Error()
+}
+
+func (e *canonicalArtifactUnavailableError) Unwrap() error { return e.cause }
+
+// canonicalArtifactReadError turns one observation class into the error the
+// recovery proof returns, so the class — never an error string — decides which
+// lane the transition takes.
+func canonicalArtifactReadError(class canonicalArtifactRead, err error) error {
+	switch class {
+	case canonicalArtifactValid:
+		return nil
+	case canonicalArtifactUnavailable:
+		return &canonicalArtifactUnavailableError{cause: err}
+	default:
+		return &canonicalStoreIntegrityError{cause: err}
+	}
+}
+
 // latchPreFenceCanonicalCorruption installs the EXISTING terminal fail-closed
 // latch for a canonical corruption found before the fence opened. It acquires
 // the live admission guard BEFORE installing the fault and RETAINS it until
@@ -291,12 +324,24 @@ func (s *SyncEngine) prepareCanonicalTransitionIndex(plan *canonicalTransitionPl
 
 // proveCanonicalRecoverySet completes precommit recovery: it stages every
 // required new-suffix artifact through the existing reservation path, strict-reads
-// BOTH suffix proof sets through the same reader startup uses, and only then
-// replaces the durable checkpoint and reads it back.
+// BOTH suffix proof sets, and only then replaces the durable checkpoint and reads
+// it back.
 //
-// Order is load-bearing. No failure here can destroy the last usable old
-// snapshot: the checkpoint row is common to the old and planned-new identities,
-// so a checkpoint that did land still replays either suffix.
+// The MP641 read order is load-bearing and is the order below: the old/disconnect
+// suffix TIP-DOWN first, then the planned-new/connect suffix ASCENDING, each row
+// header then block then state-reversal artifact, stopping at the first non-valid
+// observation. No failure here can destroy the last usable old snapshot: the
+// checkpoint row is common to the old and planned-new identities, so a checkpoint
+// that did land still replays either suffix.
+//
+// The two failure classes are NOT interchangeable. An artifact that could not be
+// ACQUIRED — open, metadata or byte read failing before a complete bound-satisfying
+// value or a definitive absence — is LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read):
+// OLD, admission open, nothing committed or published, and NO retry inside this
+// attempt; a later independent apply may take the ordinary path once the local
+// condition changes. Positive evidence — definitive absence, a proven over-bound
+// representation, a clean EOF establishing an invalid one, or complete integrity
+// evidence — is TERMINAL_STORE_INTEGRITY(canonical): OLD, latched.
 func (s *SyncEngine) proveCanonicalRecoverySet(plan *canonicalTransitionPlan) error {
 	if s.blockStore == nil {
 		plan.staged = nil
@@ -316,31 +361,42 @@ func (s *SyncEngine) proveCanonicalRecoverySet(plan *canonicalTransitionPlan) er
 	}
 	for _, rows := range [][]canonicalRowDescriptor{plan.disconnect, plan.connect} {
 		for _, row := range rows {
-			if err := s.blockStore.proveCanonicalArtifacts(row.hash); err != nil {
-				return &canonicalStoreIntegrityError{cause: err}
+			if err := canonicalArtifactReadError(s.blockStore.proveCanonicalArtifacts(row.hash)); err != nil {
+				return err
 			}
 		}
 	}
 	return s.replaceCanonicalCheckpoint(plan)
 }
 
-// replaceCanonicalCheckpoint atomically saves the common-ancestor image and
-// integrity-reads it back, comparing has-tip, height, tip hash, already-generated,
-// UTXO count and state digest. A configured-out chainstate path omits only this
-// durable readiness proof; every other step of the state machine is unchanged.
+// replaceCanonicalCheckpoint atomically writes the common-ancestor image through
+// the one encode-and-write path and proves the durable bytes are EXACTLY the
+// bytes it handed that path: one raw read with the same bound LoadChainState
+// uses, then byte equality. It does not decode a third image and does not
+// compute a state digest — the encoder is deterministic, so equal bytes is the
+// stronger statement and the cheaper one. A configured-out chainstate path omits
+// only this durable readiness proof; every other step is unchanged.
+//
+// The readback failure classes are MP641's, same as the suffix rows: a read that
+// could not obtain the bytes is unavailability (OLD, open); a byte difference is
+// complete evidence that the durable representation is not the one just written,
+// so it is integrity evidence (OLD, latched). A write failure keeps its existing
+// LOCAL_PERSISTENCE_ERROR(precommit) identity and preserves OLD with admission
+// open.
 func (s *SyncEngine) replaceCanonicalCheckpoint(plan *canonicalTransitionPlan) error {
 	if s.cfg.ChainStatePath == "" {
 		return nil
 	}
-	if err := plan.checkpoint.Save(s.cfg.ChainStatePath); err != nil {
-		return err
-	}
-	loaded, err := LoadChainState(s.cfg.ChainStatePath)
+	want, err := plan.checkpoint.saveReturningEnvelope(s.cfg.ChainStatePath)
 	if err != nil {
 		return err
 	}
-	if !sameCanonicalStateImage(loaded, plan.checkpoint) {
-		return errors.New("canonical checkpoint readback does not match the common-ancestor image")
+	got, err := readFileByPath(s.cfg.ChainStatePath)
+	if err != nil {
+		return canonicalArtifactReadError(classifyCanonicalArtifactAcquisition(err), fmt.Errorf("canonical checkpoint readback: %w", err))
+	}
+	if !bytes.Equal(got, want) {
+		return &canonicalStoreIntegrityError{cause: fmt.Errorf("canonical checkpoint readback is %d bytes, want the %d bytes just written", len(got), len(want))}
 	}
 	return nil
 }
@@ -433,6 +489,10 @@ func (s *SyncEngine) recheckCanonicalTransitionFreshness(tr *canonicalTransition
 // takes the chainstate-save lane instead, which returns the same closed result
 // classes so one classifier serves both.
 func (s *SyncEngine) commitCanonicalIndexOnce(plan *canonicalTransitionPlan, prepared *preparedCanonicalIndex) canonicalCommitResult {
+	// Commit latency now measures the ONE durable index commit (or the
+	// no-BlockStore chainstate save) and is recorded on EVERY attempt, refusals
+	// included. It no longer covers per-row artifact writes: staging happens
+	// earlier, in the recovery-proof step.
 	commitStart := time.Now()
 	defer func() { s.pvTelemetry.RecordCommitLatency(time.Since(commitStart)) }()
 	if prepared != nil {
@@ -471,9 +531,13 @@ func (s *SyncEngine) saveNonpersistentFinalState(plan *canonicalTransitionPlan) 
 // publishCanonicalTransition is FIXED_PUBLICATION. NEW first assignment-publishes
 // the prebuilt C1 under ChainState.mu and releases it, then takes Mempool.mu ->
 // PendingOutpointOwner.mu and assignment-publishes M1/O1 with stable tip C1 and
-// the owner transition state, then releases both. No component locks overlap and
-// nothing here allocates, clones, does I/O, validates, invokes a callback or
-// returns an error.
+// the owner transition state, then releases both. No component locks overlap,
+// and the PUBLICATION ASSIGNMENTS themselves allocate nothing, clone nothing, do
+// no I/O, validate nothing, invoke no callback and cannot fail.
+//
+// The latched arm is the one exception and runs AFTER every assignment: it
+// installs the existing terminal fault and formats one bounded diagnostic, so it
+// allocates. Nothing it does can un-publish what was already assigned.
 //
 // A latched outcome keeps admission closed until restart: terminal NEW publishes
 // the full image and still latches, terminal OLD and UNKNOWN publish nothing.
@@ -488,25 +552,21 @@ func (t *canonicalTransition) publishCanonicalTransition(plan *canonicalTransiti
 		}
 	}
 	if latched {
+		reason := "terminal canonical persistence (old)"
+		switch truth {
+		case canonicalTruthNew:
+			reason = "terminal canonical persistence (new)"
+		case canonicalTruthUnknown:
+			reason = "terminal canonical persistence (neither_or_unreadable)"
+		}
 		t.engine.latchTerminalFault(cause)
-		t.engine.reportTerminalTransition(t.diag, canonicalTerminalReason(truth), cause)
+		t.engine.reportTerminalTransition(t.diag, reason, cause)
 		return
 	}
 	if !ownerClosed {
 		t.owner.endTransitionAborted()
 	}
 	t.chainState.admissionMu.Unlock()
-}
-
-func canonicalTerminalReason(truth canonicalCommitTruth) string {
-	switch truth {
-	case canonicalTruthNew:
-		return "terminal canonical persistence (new)"
-	case canonicalTruthUnknown:
-		return "terminal canonical persistence (neither_or_unreadable)"
-	default:
-		return "terminal canonical persistence (old)"
-	}
 }
 
 // assignCanonicalChainState publishes the prebuilt final image by ASSIGNMENT
@@ -530,10 +590,13 @@ func assignCanonicalChainState(dst *ChainState, src *ChainState) {
 // requeueCanonicalDisconnectedRows runs the existing best-effort standard requeue
 // over the rows this transition disconnected, tip-down, which is the Section 11.1
 // h_max..h_min order. It RE-READS each row from the store rather than retaining
-// its bytes: the rows are retained healthy noncanonical artifacts, and holding
-// depth-proportional payload is exactly what the plan's resource bound forbids. A
-// row that can no longer be read is skipped with a diagnostic — requeue is a
-// downstream best-effort effect and cannot change commit truth.
+// its bytes: the rows are retained healthy noncanonical artifacts, so the
+// transition itself never has to carry depth-proportional payload ACROSS the
+// commit. Requeue is not free — it materializes each disconnected parse here,
+// transiently, one row at a time — but that lives entirely after the transition
+// released admission. A row that can no longer be read is skipped with a
+// diagnostic: requeue is a downstream best-effort effect and cannot change
+// commit truth.
 func (s *SyncEngine) requeueCanonicalDisconnectedRows(rows []canonicalRowDescriptor, diag *diagnosticBatch) {
 	if s.mempool == nil || s.blockStore == nil || len(rows) == 0 {
 		return
@@ -556,9 +619,11 @@ func (s *SyncEngine) requeueCanonicalDisconnectedRows(rows []canonicalRowDescrip
 }
 
 // canonicalSequenceDescriptors turns a contiguous canonical-index range into
-// charged descriptors. Rows are read from the identity itself, so a descriptor
-// can never name a height the sequence does not hold.
-func canonicalSequenceDescriptors(sequence []string, from, to uint64, tipDown bool) ([]canonicalRowDescriptor, error) {
+// charged descriptors, tip-down — h_max..h_min, which is the Section 11.1
+// requeue order and the order a disconnect suffix is walked in. Rows are read
+// from the identity itself, so a descriptor can never name a height the sequence
+// does not hold.
+func canonicalSequenceDescriptors(sequence []string, from, to uint64) ([]canonicalRowDescriptor, error) {
 	if to > uint64(len(sequence)) || from > to {
 		return nil, fmt.Errorf("canonical descriptor range [%d,%d) is not inside a %d-row identity", from, to, len(sequence))
 	}
@@ -570,9 +635,7 @@ func canonicalSequenceDescriptors(sequence []string, from, to uint64, tipDown bo
 		}
 		rows = append(rows, canonicalRowDescriptor{height: height, hash: hash})
 	}
-	if tipDown {
-		slices.Reverse(rows)
-	}
+	slices.Reverse(rows)
 	return rows, nil
 }
 

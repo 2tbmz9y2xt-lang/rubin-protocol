@@ -19,9 +19,10 @@ type mempoolSnapshot struct {
 	currentMinFeeRate uint64
 }
 
-// snapshotMempool captures the exact rollback image: cloned entries with their
-// exact tokens plus the owner's claims, stable tip and high-waters. Lock order
-// is Mempool.mu then owner.mu.
+// snapshotMempool captures the exact live standard/owner image the canonical M/O
+// plan is built from and preflighted against: cloned entries with their exact
+// tokens plus the owner's claims, stable tip and high-waters. Lock order is
+// Mempool.mu then owner.mu.
 func snapshotMempool(m *Mempool) (mempoolSnapshot, error) {
 	if m == nil {
 		return mempoolSnapshot{}, nil
@@ -448,7 +449,7 @@ func canonicalMempoolInputUnion(entries []mempoolEntry) []consensus.Outpoint {
 }
 
 // canonicalMempoolSnapshotInRawOrder orders standard records/claims by raw txid,
-// then other claims by raw txid and token; the rollback snapshot stays untouched.
+// then other claims by raw txid and token; the caller's snapshot stays untouched.
 func canonicalMempoolSnapshotInRawOrder(snapshot mempoolSnapshot) mempoolSnapshot {
 	snapshot.entries = append([]mempoolEntry(nil), snapshot.entries...)
 	sort.Slice(snapshot.entries, func(i, j int) bool {

@@ -288,7 +288,7 @@ func (s *SyncEngine) planPreferredBranch(
 	if err != nil {
 		return nil, nil, 0, 0, err
 	}
-	disconnect, err := canonicalSequenceDescriptors(canonicalIndex, commonAncestorHeight+1, uint64(len(canonicalIndex)), true)
+	disconnect, err := canonicalSequenceDescriptors(canonicalIndex, commonAncestorHeight+1, uint64(len(canonicalIndex)))
 	if err != nil {
 		return nil, nil, 0, 0, err
 	}
@@ -394,7 +394,8 @@ func (s *SyncEngine) preparePreferredBranch(
 // resolution before it and the undo/delta/DA-set derivation after it are local
 // failures, not consensus verdicts on the candidate, and neither may add an
 // outcome — the same rule that keeps side-chain storage, orphan / missing
-// parent, local I/O, persistence, rollback and retained-state planning failures at zero.
+// parent, local I/O, recovery-proof, commit-refusal and retained-state planning
+// failures at zero.
 func (s *SyncEngine) prepareBranchRow(
 	rolling *ChainState,
 	item reorgBranchBlock,

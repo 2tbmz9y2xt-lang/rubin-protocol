@@ -16,15 +16,20 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-// installMempoolImageForTest installs snapshot into m through the SAME
-// primitives the canonical plan builder and publisher use in production —
-// buildMempoolRestoreMaps, PendingOutpointOwner.buildRestoreLocked,
-// validateRestoredClaimBinding and PendingOutpointOwner.publishRestoreLocked —
-// so the rules these tests assert are production rules.
+// installMempoolImageForTest installs snapshot into m through the restore
+// primitives buildMempoolRestoreMaps, PendingOutpointOwner.buildRestoreLocked,
+// validateRestoredClaimBinding and PendingOutpointOwner.publishRestoreLocked, so
+// the entry, accounting, high-water and claim-binding rules these tests assert
+// are production rules.
 //
-// Only the COMPOSITION is test-local: production reaches those primitives from
+// Two things are NOT production, and the tests below must not be read as proving
+// them. The composition is test-local: production reaches these rules from
 // prepareCanonicalMempoolPlan, which additionally requires the live image to
-// equal the snapshot, and these tests deliberately install a foreign image.
+// equal the snapshot, while these tests deliberately install a foreign image.
+// And buildRestoreLocked itself has no production caller — the canonical plan
+// builder constructs its owner candidate with buildCanonicalOwnerIndex, which
+// applies the same claim rules off-lock; only publishRestoreLocked and
+// validateRestoredClaimBinding are on the production path.
 func installMempoolImageForTest(m *Mempool, snapshot mempoolSnapshot) error {
 	if m == nil {
 		return nil

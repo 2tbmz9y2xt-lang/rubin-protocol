@@ -45,7 +45,7 @@ func (s *SyncEngine) disconnectTip(diag *diagnosticBatch) (*ChainStateDisconnect
 	if err != nil {
 		return nil, err
 	}
-	disconnect, err := canonicalSequenceDescriptors(canonicalIndex, ctx.tipHeight, ctx.tipHeight+1, true)
+	disconnect, err := canonicalSequenceDescriptors(canonicalIndex, ctx.tipHeight, ctx.tipHeight+1)
 	if err != nil {
 		return nil, err
 	}

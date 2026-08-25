@@ -104,7 +104,7 @@ func TestDevnetThreeNodeSyncAndDeterminism(t *testing.T) {
 
 	assertSameTip(t, nodeA, nodeB, nodeC)
 	assertSameUTXOSet(t, nodeA, nodeB, nodeC)
-	assertSameChainStateFile(t, nodeA, nodeB, nodeC)
+	assertSameRecoveredChainState(t, nodeA, nodeB, nodeC)
 
 	wantSubsidy := cumulativeSubsidy(10)
 	for _, current := range []*devnetNode{nodeA, nodeB, nodeC} {
@@ -209,7 +209,7 @@ func TestDevnetTwoNodeFullBlockP2PBaseline(t *testing.T) {
 	waitForHeight(t, nodeA, wantHeight)
 	assertSameTip(t, nodeA, nodeB)
 	assertSameUTXOSet(t, nodeA, nodeB)
-	assertSameChainStateFile(t, nodeA, nodeB)
+	assertSameRecoveredChainState(t, nodeA, nodeB)
 	assertBlockContainsTxID(t, nodeA, mined.Hash, txid)
 }
 
@@ -276,7 +276,7 @@ func TestDevnetLongestChainWinsReplayGate(t *testing.T) {
 
 	assertSameTip(t, shortFork, longFork, observer)
 	assertSameUTXOSet(t, shortFork, longFork, observer)
-	assertSameChainStateFile(t, shortFork, longFork, observer)
+	assertSameRecoveredChainState(t, shortFork, longFork, observer)
 
 	wantSubsidy := cumulativeSubsidy(6)
 	for _, current := range []*devnetNode{shortFork, longFork, observer} {
@@ -486,7 +486,7 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 	}
 
 	assertSameTip(t, nodeA, nodeB, nodeC)
-	assertSameChainStateFile(t, nodeA, nodeB, nodeC)
+	assertSameRecoveredChainState(t, nodeA, nodeB, nodeC)
 	assertSoakConsensusMetrics(t, nodeA, nodeB, nodeC)
 
 	memAfter := readMemStats()
@@ -642,7 +642,7 @@ func (n *devnetNode) restartWithPeers(ctx context.Context, peers []string) error
 	// the startup path, never from the in-memory image the stopped process
 	// held: that is what proves the precommit checkpoint plus the retained
 	// canonical suffix replay back to the exact pre-restart tip.
-	chainState, err := reconcileDatadir(n.chainStatePath, n.blockStore, n.syncCfg)
+	chainState, err := reconcileDatadir(n.chainStatePath, n.blockStore, n.syncCfg, true)
 	if err != nil {
 		return err
 	}
@@ -779,7 +779,7 @@ func assertSubmittedTxsConfirmed(t *testing.T, txids [][32]byte, nodes ...*devne
 	}
 	for _, current := range nodes {
 		// Use disk-loaded chainstate to avoid TOCTOU race with live state.
-		state := loadChainStateMust(t, current)
+		state := loadChainState(t, current)
 		for _, txid := range txids {
 			if !chainStateHasTxOutputs(state, txid) {
 				t.Fatalf("%s missing confirmed tx %x", current.name, txid)
@@ -1211,7 +1211,7 @@ func assertSoakConsensusMetrics(t *testing.T, nodes ...*devnetNode) {
 		return
 	}
 	want := nodes[0]
-	wantState := loadChainStateMust(t, want)
+	wantState := loadChainState(t, want)
 
 	// Verify AlreadyGenerated matches cumulative subsidy formula (not just cross-node match)
 	wantSubsidy := cumulativeSubsidy(wantState.Height)
@@ -1223,7 +1223,7 @@ func assertSoakConsensusMetrics(t *testing.T, nodes ...*devnetNode) {
 	}
 
 	for _, current := range nodes[1:] {
-		got := loadChainStateMust(t, current)
+		got := loadChainState(t, current)
 		if got.Height != wantState.Height {
 			t.Fatalf("height mismatch %s=%d %s=%d", current.name, got.Height, want.name, wantState.Height)
 		}
@@ -1237,11 +1237,6 @@ func assertSoakConsensusMetrics(t *testing.T, nodes ...*devnetNode) {
 			t.Fatalf("utxo count mismatch %s=%d want=%d", current.name, len(got.Utxos), len(wantState.Utxos))
 		}
 	}
-}
-
-func loadChainStateMust(t *testing.T, current *devnetNode) *node.ChainState {
-	t.Helper()
-	return recoverChainState(t, current)
 }
 
 func mustTxGenKeypair(t *testing.T) *consensus.MLDSA87Keypair {
@@ -1313,21 +1308,19 @@ func assertSameUTXOSet(t *testing.T, nodes ...*devnetNode) {
 	}
 }
 
-func assertSameChainStateFile(t *testing.T, nodes ...*devnetNode) {
+func assertSameRecoveredChainState(t *testing.T, nodes ...*devnetNode) {
 	t.Helper()
 	if len(nodes) < 2 {
 		return
 	}
-	wantBytes := readChainStateFile(t, nodes[0])
 	wantDigest := chainStateDigest(t, nodes[0])
 	for _, current := range nodes[1:] {
-		gotBytes := readChainStateFile(t, current)
-		if !bytes.Equal(gotBytes, wantBytes) {
+		if got := chainStateDigest(t, current); got != wantDigest {
 			t.Fatalf(
-				"chainstate bytes mismatch %s vs %s: got=%s want=%s",
+				"recovered chainstate mismatch %s vs %s: got=%s want=%s",
 				current.name,
 				nodes[0].name,
-				chainStateDigest(t, current),
+				got,
 				wantDigest,
 			)
 		}
@@ -1390,7 +1383,13 @@ func tip(t *testing.T, current *devnetNode) (uint64, [32]byte, bool) {
 // datadir back into the live tip. Every assertion that reads that snapshot goes
 // through here, and so does a restart: reading the raw file and calling it the
 // tip would assert one transition behind.
-func reconcileDatadir(chainStatePath string, blockStore *node.BlockStore, syncCfg node.SyncConfig) (*node.ChainState, error) {
+//
+// persist splits the two uses. A RESTART persists, exactly like main.go, because
+// the node is stopped and the datadir is its own. An ASSERTION does NOT: writing
+// a running node's datadir from a test helper is a mutation an observer must not
+// make, and it would also repair the very state a later restart is supposed to
+// prove it can recover on its own.
+func reconcileDatadir(chainStatePath string, blockStore *node.BlockStore, syncCfg node.SyncConfig, persist bool) (*node.ChainState, error) {
 	state, err := node.LoadChainState(chainStatePath)
 	if err != nil {
 		return nil, fmt.Errorf("load chainstate: %w", err)
@@ -1401,42 +1400,36 @@ func reconcileDatadir(chainStatePath string, blockStore *node.BlockStore, syncCf
 	if _, err := node.ReconcileChainStateWithBlockStore(state, blockStore, syncCfg); err != nil {
 		return nil, fmt.Errorf("chainstate reconcile failed: %w", err)
 	}
+	if !persist {
+		return state, nil
+	}
 	if err := state.Save(chainStatePath); err != nil {
 		return nil, fmt.Errorf("chainstate save failed: %w", err)
 	}
 	return state, nil
 }
 
-func recoverChainState(t *testing.T, current *devnetNode) *node.ChainState {
+// loadChainState is the READ-ONLY recovery every assertion uses: it replays the
+// durable datadir into an in-memory image and writes nothing back.
+func loadChainState(t *testing.T, current *devnetNode) *node.ChainState {
 	t.Helper()
-	state, err := reconcileDatadir(current.chainStatePath, current.blockStore, current.syncCfg)
+	state, err := reconcileDatadir(current.chainStatePath, current.blockStore, current.syncCfg, false)
 	if err != nil {
 		t.Fatalf("%s %v", current.name, err)
 	}
 	return state
 }
 
-func loadChainState(t *testing.T, current *devnetNode) *node.ChainState {
-	t.Helper()
-	return recoverChainState(t, current)
-}
-
-func readChainStateFile(t *testing.T, current *devnetNode) []byte {
-	t.Helper()
-	// Reconcile first, so the bytes compared across nodes are the recovered
-	// tip image rather than whichever checkpoint each node happens to hold.
-	recoverChainState(t, current)
-	raw, err := os.ReadFile(current.chainStatePath)
-	if err != nil {
-		t.Fatalf("%s read chainstate file: %v", current.name, err)
-	}
-	return raw
-}
-
+// chainStateDigest fingerprints the RECOVERED image — the scalars plus the UTXO
+// set hash — not the snapshot file's bytes. Two nodes at the same tip can hold
+// checkpoints from different transitions, so equal recovered images, not equal
+// files, is what "same chainstate" means after the cutover.
 func chainStateDigest(t *testing.T, current *devnetNode) string {
 	t.Helper()
-	sum := sha256.Sum256(readChainStateFile(t, current))
-	return hex.EncodeToString(sum[:])
+	state := loadChainState(t, current)
+	digest := state.StateDigest()
+	return fmt.Sprintf("has_tip=%v height=%d tip=%x already_generated=%s utxo_set=%x",
+		state.HasTip, state.Height, state.TipHash, state.AlreadyGenerated.String(), digest)
 }
 
 func utxoDigest(t *testing.T, current *devnetNode) string {

@@ -359,9 +359,7 @@ func runNormalizesDataDirBeforeChainStateAndBlockStorePathDerivation(t *testing.
 	// Height 7 is the chainstate-path probe: --dry-run no longer writes a
 	// snapshot (RUB-1071), so the derivation is proved by reading this one
 	// back out of the report instead of by stat-ing a file the run created.
-	if err := testLegacyExposureTippedChainState().Save(node.ChainStatePath(cleaned)); err != nil {
-		t.Fatalf("seed chainstate: %v", err)
-	}
+	mustLegacyExposureDatadir(t, cleaned, testLegacyExposureTippedChainState())
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
@@ -848,9 +846,7 @@ func TestRunLegacyExposureScanEmitsDeterministicJSON(t *testing.T) {
 		CreationHeight:    4,
 		CreatedByCoinbase: false,
 	}
-	if err := state.Save(node.ChainStatePath(dir)); err != nil {
-		t.Fatalf("Save(chainstate): %v", err)
-	}
+	mustLegacyExposureDatadir(t, dir, state)
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
@@ -948,9 +944,7 @@ func TestRunLegacyExposureScanIncludesOutpoints(t *testing.T) {
 		CreationHeight:    4,
 		CreatedByCoinbase: false,
 	}
-	if err := state.Save(node.ChainStatePath(dir)); err != nil {
-		t.Fatalf("Save(chainstate): %v", err)
-	}
+	mustLegacyExposureDatadir(t, dir, state)
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
@@ -998,9 +992,7 @@ func TestRunLegacyExposureScanIncludesOutpoints(t *testing.T) {
 
 func TestRunLegacyExposureScanEmitsEmptyOutpointsWhenDetailModeHasNoMatches(t *testing.T) {
 	dir := t.TempDir()
-	if err := testLegacyExposureTippedChainState().Save(node.ChainStatePath(dir)); err != nil {
-		t.Fatalf("Save(chainstate): %v", err)
-	}
+	mustLegacyExposureDatadir(t, dir, testLegacyExposureTippedChainState())
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
@@ -1185,9 +1177,7 @@ func TestRunLegacyExposureScanValidatesSuiteIDsBeforeDataDirCreate(t *testing.T)
 func TestRunLegacyExposureScanDoesNotRequireGenesisFileForNamedNetwork(t *testing.T) {
 	dir := t.TempDir()
 	state := testLegacyExposureTippedChainState()
-	if err := state.Save(node.ChainStatePath(dir)); err != nil {
-		t.Fatalf("Save(chainstate): %v", err)
-	}
+	mustLegacyExposureDatadir(t, dir, state)
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
@@ -1578,9 +1568,7 @@ func TestRunRejectsInvalidPVModeBeforeStorage(t *testing.T) {
 
 	t.Run("legacy_exposure_scan_tipped_chainstate", func(t *testing.T) {
 		datadir := t.TempDir()
-		if err := testLegacyExposureTippedChainState().Save(node.ChainStatePath(datadir)); err != nil {
-			t.Fatalf("Save(chainstate): %v", err)
-		}
+		mustLegacyExposureDatadir(t, datadir, testLegacyExposureTippedChainState())
 		before := snapshotDir(t, datadir)
 		stdout, stderr := runInvalid(t, []string{
 			"--datadir", datadir,
@@ -1659,9 +1647,7 @@ func TestRunRejectsInvalidPVModeBeforeStorage(t *testing.T) {
 
 func TestRunLegacyExposureScanPropagatesEncodeFailure(t *testing.T) {
 	dir := t.TempDir()
-	if err := testLegacyExposureTippedChainState().Save(node.ChainStatePath(dir)); err != nil {
-		t.Fatalf("Save(chainstate): %v", err)
-	}
+	mustLegacyExposureDatadir(t, dir, testLegacyExposureTippedChainState())
 
 	var errOut bytes.Buffer
 	code := run(
@@ -3403,7 +3389,37 @@ func preparedDatadir(t *testing.T) string {
 	if code, stderr := runCLI("--datadir", dir, "--create-store", "--mine-blocks", "1", "--mine-exit"); code != 0 {
 		t.Fatalf("prepare datadir: exit %d (stderr=%q)", code, stderr)
 	}
+	// The mine-and-exit run leaves the durable snapshot at its precommit
+	// checkpoint, one transition behind the canonical tip. Startup is what
+	// advances it, so the fixture performs that same recovery once — otherwise
+	// every read-only consumer sees a datadir no operator would scan.
+	mustCheckpointAtCanonicalTip(t, dir)
 	return dir
+}
+
+// mustCheckpointAtCanonicalTip runs the node's own startup recovery composition
+// over the datadir — anchor, reconcile, save — so the durable snapshot is the
+// canonical tip, exactly as a real startup would leave it.
+func mustCheckpointAtCanonicalTip(t *testing.T, dir string) {
+	t.Helper()
+	path := node.ChainStatePath(dir)
+	state, err := node.LoadChainState(path)
+	if err != nil {
+		t.Fatalf("LoadChainState: %v", err)
+	}
+	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	if err := store.VerifyGenesisAnchor(node.DevnetGenesisBlockHash()); err != nil {
+		t.Fatalf("VerifyGenesisAnchor: %v", err)
+	}
+	if _, err := node.ReconcileChainStateWithBlockStore(state, store, node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), path)); err != nil {
+		t.Fatalf("ReconcileChainStateWithBlockStore: %v", err)
+	}
+	if err := state.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
 }
 
 // dryRunReport runs --dry-run against dir and returns the report. A
@@ -3878,5 +3894,100 @@ func TestReadFileConfigBoundGenesisSite(t *testing.T) {
 	over := configBoundTestFile(t, dir, "over.json", pack, 1<<24+1)
 	if _, err := parseGenesisConfigFull(over); err == nil || !strings.Contains(err.Error(), "exceeds size bound") {
 		t.Fatalf("over-bound genesis pack must be refused with the typed size error, got %v", err)
+	}
+}
+
+// mustCanonicalIndexAtTip gives a datadir a canonical index whose tip is exactly
+// (height, tip). The scanner compares the checkpoint against that tip and does
+// not replay, so the rows below the tip only have to exist.
+func mustCanonicalIndexAtTip(t *testing.T, dir string, height uint64, tip [32]byte) {
+	t.Helper()
+	store, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		if store, err = node.CreateBlockStore(node.BlockStorePath(dir)); err != nil {
+			t.Fatalf("CreateBlockStore: %v", err)
+		}
+	}
+	rows := make([]string, 0, height+1)
+	for row := uint64(0); row < height; row++ {
+		rows = append(rows, fmt.Sprintf("%064x", row+1))
+	}
+	rows = append(rows, hex.EncodeToString(tip[:]))
+	if err := store.RestoreCanonicalIndex(rows); err != nil {
+		t.Fatalf("RestoreCanonicalIndex: %v", err)
+	}
+}
+
+// mustLegacyExposureDatadir saves the checkpoint and the matching canonical
+// index, which is the only datadir shape the scanner will report on.
+func mustLegacyExposureDatadir(t *testing.T, dir string, state *node.ChainState) {
+	t.Helper()
+	if err := state.Save(node.ChainStatePath(dir)); err != nil {
+		t.Fatalf("Save(chainstate): %v", err)
+	}
+	mustCanonicalIndexAtTip(t, dir, state.Height, state.TipHash)
+}
+
+// TestRunLegacyExposureScanRejectsStaleCheckpoint pins the direct-consumer rule
+// for --legacy-exposure-scan: the persisted snapshot is the node's precommit
+// checkpoint and may lag the canonical index, and the scanner does not replay
+// under a guessed network identity. It therefore emits JSON only when the
+// snapshot IS the canonical tip, and exits 2 with NO report otherwise.
+func TestRunLegacyExposureScanRejectsStaleCheckpoint(t *testing.T) {
+	newState := func() *node.ChainState {
+		state := node.NewChainState()
+		state.HasTip = true
+		state.Height = 4
+		state.TipHash[0] = 0x42
+		return state
+	}
+	scan := func(t *testing.T, dir string) (int, string, string) {
+		t.Helper()
+		var out, errOut bytes.Buffer
+		code := run([]string{"--datadir", dir, "--legacy-exposure-scan", "--legacy-suite-id", "1"}, &out, &errOut)
+		return code, out.String(), errOut.String()
+	}
+
+	t.Run("checkpoint at the canonical tip emits the report", func(t *testing.T) {
+		dir := t.TempDir()
+		mustLegacyExposureDatadir(t, dir, newState())
+		code, stdout, stderr := scan(t, dir)
+		if code != 0 {
+			t.Fatalf("exit=%d stderr=%q", code, stderr)
+		}
+		var report map[string]any
+		if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+			t.Fatalf("json.Unmarshal(%q): %v", stdout, err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name  string
+		stale func(t *testing.T, dir string, state *node.ChainState)
+	}{
+		{
+			name: "canonical index one row ahead",
+			stale: func(t *testing.T, dir string, state *node.ChainState) {
+				var ahead [32]byte
+				ahead[0] = 0x43
+				mustCanonicalIndexAtTip(t, dir, state.Height+1, ahead)
+			},
+		},
+	} {
+		t.Run(tc.name+" exits 2 with no report", func(t *testing.T) {
+			dir := t.TempDir()
+			state := newState()
+			if err := state.Save(node.ChainStatePath(dir)); err != nil {
+				t.Fatalf("Save(chainstate): %v", err)
+			}
+			tc.stale(t, dir, state)
+			code, stdout, stderr := scan(t, dir)
+			if code != 2 {
+				t.Fatalf("exit=%d stdout=%q stderr=%q, want 2", code, stdout, stderr)
+			}
+			if strings.TrimSpace(stdout) != "" {
+				t.Fatalf("a refused scan emitted a report: %q", stdout)
+			}
+		})
 	}
 }

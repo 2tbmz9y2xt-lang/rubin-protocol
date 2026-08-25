@@ -1,7 +1,6 @@
 package node
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -9,22 +8,84 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-// proveCanonicalArtifacts strict-reads one suffix row's BlockHeaderBytes,
-// BlockBytes and undo through the SAME reader the startup scan uses, so
-// precommit recovery and startup recovery can never disagree about what a
-// retained canonical artifact set is. It writes nothing and repairs nothing.
-func (bs *BlockStore) proveCanonicalArtifacts(blockHash [32]byte) error {
+// canonicalArtifactRead is the OBSERVATION class MP641 classifies a precommit
+// recovery-proof read on. It is derived from what the reader observed, never
+// from a platform error name or a wrapper this package happens to use.
+type canonicalArtifactRead uint8
+
+const (
+	// canonicalArtifactValid: a complete value satisfying every applicable bound
+	// was read and passed its identity/binding check.
+	canonicalArtifactValid canonicalArtifactRead = iota
+	// canonicalArtifactUnavailable: an open, metadata read, or byte read failed
+	// BEFORE a complete bound-satisfying value or a definitive absence was
+	// observed — including partial bytes followed by a non-EOF error, which are
+	// discarded. LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read): OLD, open.
+	canonicalArtifactUnavailable
+	// canonicalArtifactInvalid: definitive required absence, a stat- or
+	// read-PROVEN over-bound representation, a clean (possibly short) EOF that
+	// establishes an invalid representation, or complete malformed / checksum /
+	// hash / binding / state-reversal integrity evidence.
+	// TERMINAL_STORE_INTEGRITY(canonical): OLD, latched.
+	canonicalArtifactInvalid
+)
+
+// classifyCanonicalArtifactAcquisition maps ONE byte-acquisition outcome to its
+// observation class. Acquisition means open, stat and read: an error here is
+// unavailability unless the observation is itself positive evidence — the file
+// definitively is not there, or its size is proven to exceed the applicable
+// bound. Every post-acquisition failure is the caller's to classify, because by
+// then a complete value was in hand and any failure is integrity evidence.
+func classifyCanonicalArtifactAcquisition(err error) canonicalArtifactRead {
+	switch {
+	case err == nil:
+		return canonicalArtifactValid
+	case errors.Is(err, os.ErrNotExist), errors.Is(err, errStoreFileTooLarge):
+		return canonicalArtifactInvalid
+	default:
+		return canonicalArtifactUnavailable
+	}
+}
+
+// proveCanonicalArtifacts strict-reads ONE precommit suffix row in the MP641
+// order — header, block, then the state-reversal artifact — and STOPS at the
+// first non-valid observation without inspecting a later artifact to look for
+// terminal evidence. It writes nothing and repairs nothing.
+//
+// Each rule it applies lives in exactly one place and is shared with the startup
+// scan: validateBlockHeaderHash, storedBlockHeaderHash and unmarshalUndoEnvelope.
+// Only the SEQUENCING differs, and it must: the startup scan visits every row's
+// every artifact so a structural error behind a gap is not masked, while this
+// one is required to stop at the first non-valid observation.
+func (bs *BlockStore) proveCanonicalArtifacts(blockHash [32]byte) (canonicalArtifactRead, error) {
 	if bs == nil {
-		return errors.New("nil blockstore")
+		return canonicalArtifactInvalid, errors.New("nil blockstore")
 	}
-	row, err := bs.canonicalArtifactsComplete(hex.EncodeToString(blockHash[:]))
-	if err != nil {
-		return err
+	headerBytes, err := bs.GetHeaderByHash(blockHash)
+	if class := classifyCanonicalArtifactAcquisition(err); class != canonicalArtifactValid {
+		return class, fmt.Errorf("canonical header artifact %x: %w", blockHash, err)
 	}
-	if !row.complete {
-		return fmt.Errorf("%w: canonical suffix artifact set for %x is incomplete", errCanonicalIndexIncompleteSuffix, blockHash)
+	if err := validateBlockHeaderHash(headerBytes, blockHash); err != nil {
+		return canonicalArtifactInvalid, fmt.Errorf("canonical header artifact %x: %w: %w", blockHash, errCanonicalArtifactUnbound, err)
 	}
-	return nil
+
+	blockBytes, err := bs.GetBlockByHash(blockHash)
+	if class := classifyCanonicalArtifactAcquisition(err); class != canonicalArtifactValid {
+		return class, fmt.Errorf("canonical block artifact %x: %w", blockHash, err)
+	}
+	observed, step, err := storedBlockHeaderHash(blockBytes)
+	if err != nil || observed != blockHash {
+		return canonicalArtifactInvalid, fmt.Errorf("canonical block artifact %x: %w: %s observed=%x: %v", blockHash, errCanonicalArtifactUnbound, step, observed, err) //nolint:errorlint // %v keeps local corruption out of p2p's consensus-error chain.
+	}
+
+	undoRaw, err := bs.getUndoRawPinned(blockHash)
+	if class := classifyCanonicalArtifactAcquisition(err); class != canonicalArtifactValid {
+		return class, fmt.Errorf("canonical undo artifact %x: %w", blockHash, err)
+	}
+	if _, err := unmarshalUndoEnvelope(blockHash, undoRaw); err != nil {
+		return canonicalArtifactInvalid, fmt.Errorf("canonical undo artifact %x: %w", blockHash, err)
+	}
+	return canonicalArtifactValid, nil
 }
 
 func cloneChainState(src *ChainState) *ChainState {

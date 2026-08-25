@@ -73,7 +73,7 @@ Canonical outputs are frozen in `conformance/fixtures/protocol/legacy_exposure_h
 
 ### Emitted JSON vs invalid scans
 
-Successful CLI runs that print JSON use a chainstate snapshot **with a tip**; scans without a tip or without chainstate exit with an error and do not emit this report. The `invalid_no_chainstate_tip` hook row exists only for parity with the shared hook helper and for conformance/tests; it is not an emitted scanner report state. Operators should therefore treat **successful** JSON as having `chainstate_has_tip == true` when following the runbook.
+Successful CLI runs that print JSON use a chainstate snapshot **with a tip** that is **exactly the canonical index tip** (same has-tip, height and tip hash); the persisted snapshot is the node's precommit checkpoint and may lag the canonical index by one transition, and the scanner does not replay. Scans without a tip, without chainstate, or against a snapshot that is not the canonical tip exit with an error and do not emit this report. The `invalid_no_chainstate_tip` hook row exists only for parity with the shared hook helper and for conformance/tests; it is not an emitted scanner report state. Operators should therefore treat **successful** JSON as having `chainstate_has_tip == true` when following the runbook.
 
 ## Advisory disclaimer
 

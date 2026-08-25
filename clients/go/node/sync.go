@@ -1,6 +1,7 @@
 package node
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -337,7 +338,17 @@ func (s *SyncEngine) BootstrapCanonicalGenesisIfEmpty() error {
 	if errors.Is(applyErr, errStoragePersistenceFault) || isAtomicWritePostCommit(applyErr) {
 		return applyErr
 	}
-	return raceTolerantBootstrapResult(applyErr, s.chainState.view().hasTip)
+	result := raceTolerantBootstrapResult(applyErr, s.chainState.view().hasTip)
+	// A LATCHED engine never reports bootstrap success. The race tolerance above
+	// covers exactly one thing — a tip installed concurrently on the shared
+	// ChainState — and a terminal outcome is not that: an untagged ambiguous
+	// index write, a canonical store-integrity refusal and an empty-class latch
+	// all leave the engine closed until restart, and a caller told "nil" would
+	// go on to mine or serve on a node that can no longer mutate anything.
+	if result == nil && s.persistenceFaulted() {
+		return applyErr
+	}
+	return result
 }
 
 // raceTolerantBootstrapResult tolerates a directly changed shared ChainState:
@@ -692,7 +703,7 @@ func (s *SyncEngine) reportMempoolBindingRejected(diag *diagnosticBatch, err err
 // while mutationMu, s.mu, or any ChainState / Mempool / PendingOutpointOwner
 // lock is held, so it may block or re-enter a non-diagnostic SyncEngine mutation
 // without stalling or deadlocking a mutator. Write errors are ignored: a
-// diagnostic never changes a consensus, persistence, rollback or mempool result.
+// diagnostic never changes a consensus, persistence, publication or mempool result.
 //
 // ONE carve-out: the terminal fail-closed latch (canonicalTransition.end)
 // retains the ChainState admission guard until restart, so that single flush
@@ -1030,10 +1041,18 @@ func (s *SyncEngine) planDirectCanonicalConnect(
 	if s.blockStore == nil {
 		return plan, nil
 	}
-	// The store and the chainstate must already agree on the tip, or the
-	// candidate does not extend the identity it was planned against.
+	// The store and the chainstate must already agree on the tip in BOTH halves:
+	// the identity must be exactly one row short of the candidate's height, and
+	// above genesis its last row must be the very hash the candidate was
+	// validated against. Height agreement alone would let a chainstate describing
+	// a different chain of the same length stage artifacts and replace the
+	// checkpoint for an identity the disk does not hold. The reorg path proves
+	// the same thing row by row in previewDisconnectCanonicalToAncestor.
 	if ctx.blockHeight != uint64(len(ctx.canonicalIndex)) {
 		return nil, fmt.Errorf("direct canonical connect at height %d does not extend a %d-row canonical identity", ctx.blockHeight, len(ctx.canonicalIndex))
+	}
+	if ctx.blockHeight > 0 && ctx.canonicalIndex[ctx.blockHeight-1] != hex.EncodeToString(plan.priorTip.tipHash[:]) {
+		return nil, fmt.Errorf("direct canonical connect parent %x is not the canonical row at height %d", plan.priorTip.tipHash, ctx.blockHeight-1)
 	}
 	plan.newSequence = canonicalSequenceWithSuffix(ctx.canonicalIndex, ctx.blockHeight, [][32]byte{ctx.blockHash})
 	undo, err := buildBlockUndo(ctx.prevState, pb, ctx.blockHeight)
@@ -1090,10 +1109,17 @@ func (s *SyncEngine) prepareCanonicalBlockApply(pb *consensus.ParsedBlock, targe
 	if outcome, err := s.validateGenesisIdentity(blockHeight, blockHash); err != nil {
 		return canonicalBlockApplyContext{}, outcome, err
 	}
-	// The fallible canonical-index rollback preflight sits exactly where it sat
-	// before the transition existed: after the genesis-identity guard and BEFORE
-	// the clone below is connected, so a corrupt local index is reported ahead of
-	// the candidate's consensus error rather than behind it.
+	// The fallible canonical-index read sits exactly where it sat before the
+	// transition existed: after the genesis-identity guard and BEFORE the clone
+	// below is connected, so a corrupt local index is reported ahead of the
+	// candidate's consensus error rather than behind it.
+	//
+	// It reads bs.index, while the fence rechecks the VISIBLE identity decoded
+	// from bs.indexRaw and the commit compares that same visible identity. The
+	// two can only differ after a legacy mutate-then-save pre-commit failure,
+	// and no legacy writer has a production caller any more; if they ever did
+	// differ the transition refuses at the fence, so the divergence is
+	// fail-closed — a spurious refusal, never a wrong accept.
 	canonicalIndex, err := s.canonicalIndexPreflight()
 	if err != nil {
 		return canonicalBlockApplyContext{}, blockApplyMetricNone, err

@@ -50,7 +50,7 @@ type BlockStore struct {
 	canonicalHeightByHash map[[32]byte]uint64
 	chainWorkByHash       map[[32]byte]*big.Int
 
-	// Create/Open install the sole backing; stateMu protects in-place reload/reclassification.
+	// Create/Open install the sole backing; stateMu protects in-place reclassification.
 	noncanonical               atomic.Pointer[noncanonicalAccounting]
 	noncanonicalPending        map[[32]byte]chan struct{}
 	noncanonicalTransitionDone chan struct{}
@@ -338,7 +338,9 @@ func newBlockStore(paths blockStorePaths, index blockStoreIndexDisk, indexRaw []
 
 // PutBlock appends a canonical tip while persisting NO undo record, so a store
 // written only through it is refused by the strict startup scan. Test/legacy
-// convenience, no production caller; CommitCanonicalBlock is the commit path.
+// convenience with no production caller — the production commit path is
+// preparedCanonicalIndex.commit, which the owning SyncEngine transition invokes
+// exactly once after staging every artifact through StoreBlock and PutUndo.
 func (bs *BlockStore) PutBlock(height uint64, blockHash [32]byte, headerBytes []byte, blockBytes []byte) error {
 	budget := noncanonicalRecoveryBudget{}
 	if err := bs.storeBlock(blockHash, headerBytes, blockBytes, &budget); err != nil {
@@ -735,7 +737,7 @@ func chainWorkHeaderCorruption(blockHash [32]byte, reason string, err error) err
 // cross-client mirrored (Rust load_blockstore_index) and still accepts it (RUB-897).
 var errCanonicalIndexDuplicateRow = errors.New("canonical index repeats a block hash")
 
-// duplicateCanonicalRowErr adds the path for constructors/Open/reload and Restore; other mutators may return the bare sentinel.
+// duplicateCanonicalRowErr adds the path for constructors/Open and Restore; other mutators may return the bare sentinel.
 func duplicateCanonicalRowErr(indexPath string) error {
 	return fmt.Errorf("canonical index %s: %w", indexPath, errCanonicalIndexDuplicateRow)
 }
@@ -828,6 +830,20 @@ func (bs *BlockStore) accumulateChainWorkFromTargets(base *big.Int, hashes [][32
 	return cloneBigInt(running), nil
 }
 
+// carryPlannedChainWorkLocked copies exactly the cached chain-work entries whose
+// hashes occur in the planned canonical identity. An append keeps the whole
+// common prefix; a reorg drops every disconnected row; a hash that was only ever
+// on a side branch is never carried. Caller holds bs.stateMu.
+func (bs *BlockStore) carryPlannedChainWorkLocked(planned map[[32]byte]uint64) map[[32]byte]*big.Int {
+	carried := make(map[[32]byte]*big.Int, len(bs.chainWorkByHash))
+	for hash, work := range bs.chainWorkByHash {
+		if _, stillCanonical := planned[hash]; stillCanonical {
+			carried[hash] = cloneBigInt(work)
+		}
+	}
+	return carried
+}
+
 func cloneBigInt(x *big.Int) *big.Int {
 	if x == nil {
 		return nil
@@ -914,16 +930,26 @@ func (bs *BlockStore) checkExistingUndo(path string, blockHash [32]byte, undo *B
 	return nil
 }
 
-func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
-	if bs == nil {
-		return nil, errors.New("nil blockstore")
-	}
+// getUndoRawPinned ACQUIRES the raw undo bytes under the existing short reader
+// pin and does nothing else: no decode, no binding check. It exists so a caller
+// that must classify an acquisition failure separately from an integrity failure
+// can see the two stages apart, and so GetUndo and that caller cannot drift on
+// how the bytes are obtained.
+func (bs *BlockStore) getUndoRawPinned(blockHash [32]byte) ([]byte, error) {
 	if !bs.pinNoncanonicalReader(blockHash) {
 		return nil, os.ErrNotExist
 	}
 	raw, err := bs.getUndoRaw(blockHash)
 	bs.unpinNoncanonicalReader(blockHash)
 	bs.probeLeaf()
+	return raw, err
+}
+
+func (bs *BlockStore) GetUndo(blockHash [32]byte) (*BlockUndo, error) {
+	if bs == nil {
+		return nil, errors.New("nil blockstore")
+	}
+	raw, err := bs.getUndoRawPinned(blockHash)
 	if err != nil {
 		return nil, err
 	}
@@ -1096,8 +1122,9 @@ func writeCanonicalIndexFile(path string, index blockStoreIndexDisk) ([]byte, er
 // disk holds as the new visible identity. Every caller holds stateMu across the
 // mutation AND this save (RestoreCanonicalIndex proves its list before the lock).
 // A prepared commit drops stateMu for durable I/O, but the shared transition fence
-// blocks legacy mutation until publication. RUB-1202 owns the wider SyncEngine,
-// ChainState, and admission cutover; until then this primitive has no production caller.
+// blocks legacy mutation until publication. This primitive has NO production
+// caller: the SyncEngine canonical paths commit through preparedCanonicalIndex,
+// and the legacy mutators that still reach here are test/compatibility surface.
 //
 // After a PRE-commit failure the old bytes are still visible and indexRaw keeps
 // naming them, while bs.index and the height map — already mutated by the caller —
@@ -1344,7 +1371,7 @@ type preparedCanonicalIndex struct {
 	oldRaw []byte
 	// oldCanonical is the decoded comparison IDENTITY: §6.4.1's complete ordered
 	// row sequence, position = height. nil means NO comparison identity
-	// (Restore/reload), which never commits. The planned-new identity is
+	// (Restore), which never commits. The planned-new identity is
 	// index.Canonical and stays PLANNED even when a readback replaces newRaw.
 	oldCanonical []string
 	// newRaw is the exact bytes to commit and then what publication caches as the visible
@@ -1436,8 +1463,9 @@ func prepareCanonicalIndex(oldRaw []byte, next []string) (*preparedCanonicalInde
 // namespace commit, then a non-fallible publication of the prebuilt image. It
 // never rolls back, retries, rewrites or repairs and latches nothing: the owning
 // canonical transition consumes the returned evidence. BlockStore's internal
-// transition fence closes reservations, reload, same-store commits, and the
-// durable-write window; the owning SyncEngine transition still supplies its wider ChainState/admission fence when RUB-1202 cuts over callers; a nil bs is a programming error.
+// transition fence closes reservations, same-store commits, and the durable-write
+// window; the owning SyncEngine transition supplies the wider ChainState/admission
+// fence and holds it across this call; a nil bs is a programming error.
 func (p *preparedCanonicalIndex) commit(bs *BlockStore) canonicalCommitResult {
 	budget := noncanonicalRecoveryBudget{}
 	bs.stateMu.Lock()
@@ -1479,6 +1507,9 @@ func (p *preparedCanonicalIndex) prepareCommitLocked(bs *BlockStore) (*noncanoni
 	if err != nil {
 		return nil, canonicalCommitResult{err: err}, false
 	}
+	// Built here — under stateMu, before the write, on the claimed image — so the
+	// cache published for NEW is exactly the planned identity's own work.
+	p.chainWork = bs.carryPlannedChainWorkLocked(p.heightByHash)
 	return delta, canonicalCommitResult{}, true
 }
 
@@ -1565,11 +1596,14 @@ func (p *preparedCanonicalIndex) classifyVisibleIndex(bs *BlockStore, cause erro
 // visible new image publishes here as TERMINAL_PERSISTENCE(new) and the owning
 // transition latches admission on the class.
 //
-// chainWorkByHash is REPLACED with the prepared empty map rather than carried:
-// cachedChainWork serves entries without re-checking canonical membership, so work
-// derived under the old index would survive a reorg as an answer for a hash this
-// image no longer contains. The legacy pure-append mutator keeps its cache (only
-// its reorg branch resets) — a deliberate divergence from the append path.
+// chainWorkByHash is REPLACED with the image carryPlannedChainWorkLocked built
+// under this same lock before the write: the cached entries whose hashes the
+// PLANNED identity still contains, and nothing else. cachedChainWork serves
+// entries without re-checking canonical membership, so carrying an entry for a
+// hash this image no longer contains would answer for a row that is no longer
+// canonical; recomputing the surviving common prefix instead would walk it again
+// on every reorg. The legacy pure-append mutator keeps its whole cache (only its
+// reorg branch resets) — a deliberate divergence from the append path.
 func (p *preparedCanonicalIndex) publishLocked(bs *BlockStore, delta *noncanonicalTransitionDelta) {
 	publishNoncanonicalReclassificationLocked(bs, p, delta, true)
 }

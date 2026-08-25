@@ -69,11 +69,19 @@ The scanner emits deterministic JSON with:
 Today this measurement surface covers UTXOs whose covenant data explicitly
 stores a `suite_id` byte. In current node code that means the explicit suite-id
 index surface, not every possible migration-related interpretation layer.
-The scanner is chainstate-only: it reads the local datadir and exits without
-starting runtime services, so this measurement mode does not require a genesis
-file just to inspect an already indexed chainstate snapshot. Scans against a
-missing chainstate file or a snapshot without a tip are invalid and must be
-treated as hard errors, not as zero-exposure readiness.
+The scanner reads the local datadir and exits without starting runtime
+services, so this measurement mode does not require a genesis file just to
+inspect an already indexed chainstate snapshot. It does not replay: replay would
+need the network identity this mode deliberately does not ask for, and exposure
+measured against a guessed identity is worse than no measurement.
+
+Because the persisted snapshot is the node's precommit checkpoint, it can lag
+the canonical index by one transition. The scanner therefore emits JSON only
+when the snapshot is EXACTLY the canonical index tip — same has-tip, height and
+tip hash. Scans against a missing chainstate file, a snapshot without a tip, or
+a snapshot that is not the canonical tip exit 2 with no report, and must be
+treated as hard errors, not as zero-exposure readiness. Re-run once the node has
+checkpointed at the tip; a report is never emitted from a lagging snapshot.
 
 ## 4) Explicit Trigger Criteria
 

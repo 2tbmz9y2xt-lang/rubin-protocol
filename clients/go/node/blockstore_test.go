@@ -2087,8 +2087,12 @@ func assertPublishedCanonicalImage(t *testing.T, store *BlockStore, want []strin
 	if !bytes.Equal(got.indexRaw, wantRaw) {
 		t.Fatalf("published visible identity is not the committed bytes")
 	}
-	if len(got.chainWork) != 0 {
-		t.Fatalf("published image kept %d chain-work entries, want a fresh empty cache", len(got.chainWork))
+	// Every carried entry must name a row of THIS identity; whether a given row
+	// was cached at all is the caller's row to assert.
+	for hash := range got.chainWork {
+		if _, planned := got.heights[hash]; !planned {
+			t.Fatalf("published image carried chain work for %x, which this identity does not contain", hash)
+		}
 	}
 	if disk := mustReadIndexFile(t, store); !bytes.Equal(disk, wantRaw) {
 		t.Fatalf("on-disk index is not the committed bytes")
@@ -2130,13 +2134,29 @@ func TestPreparedCanonicalIndexAcceptedTransitions(t *testing.T) {
 			if tc.seed != nil {
 				mustCommitCanonicalIndex(t, store, tc.seed)
 			}
-			// Seed the derived chain-work cache: publication must install the
-			// prepared EMPTY one, never carry work derived under the old index.
+			// Seed the derived chain-work cache. Publication installs the image
+			// built under the store lock before the write: the cached entries
+			// whose hashes the PLANNED identity still contains, and nothing else.
+			// Work derived under the old index for a row this identity drops must
+			// not survive, because cachedChainWork answers without re-checking
+			// canonical membership.
+			seeded := canonicalIndexRowHash(t, row0)
 			store.stateMu.Lock()
-			store.chainWorkByHash[canonicalIndexRowHash(t, row0)] = big.NewInt(7)
+			store.chainWorkByHash[seeded] = big.NewInt(7)
 			store.stateMu.Unlock()
 
 			mustCommitCanonicalIndex(t, store, tc.next)
+			store.stateMu.RLock()
+			carried, present := store.chainWorkByHash[seeded]
+			carriedCount := len(store.chainWorkByHash)
+			store.stateMu.RUnlock()
+			stillCanonical := slices.Contains(tc.next, row0)
+			if present != stillCanonical || (present && carried.String() != "7") {
+				t.Fatalf("seeded row carried=%v(%v) still_canonical=%v", present, carried, stillCanonical)
+			}
+			if carriedCount > len(tc.next) {
+				t.Fatalf("carried %d entries for a %d-row identity", carriedCount, len(tc.next))
+			}
 			// A LITERAL fixture from the row list, never the image's own field (x == x).
 			wantRaw := mustEncodeCanonicalIndex(t, tc.next)
 			assertPublishedCanonicalImage(t, store, tc.next, wantRaw)
@@ -3742,4 +3762,78 @@ func TestInspectBlockPresenceNilStoreIsStoreError(t *testing.T) {
 	if got := store.InspectBlockPresence([32]byte{}); got != want || got.String() != "LOCAL_STORE_ERROR" {
 		t.Fatalf("nil-store presence = %s leaves=%+v, want %s leaves=%+v", got, got.Leaves, want, want.Leaves)
 	}
+}
+
+// TestPreparedCanonicalIndexCarriesOnlyPlannedCanonicalChainWork pins the sole
+// authorized extension of the prepared-commit primitive: the chain-work cache
+// published with a committed image is the OLD cache intersected with the PLANNED
+// canonical identity. An append keeps the whole surviving common prefix, a reorg
+// drops every disconnected row, and a hash that was only ever on a side branch is
+// never carried — cachedChainWork answers without re-checking membership, so an
+// entry for a row this identity no longer holds would be a wrong answer.
+func TestPreparedCanonicalIndexCarriesOnlyPlannedCanonicalChainWork(t *testing.T) {
+	hashHex := func(h [32]byte) string { return hex.EncodeToString(h[:]) }
+	newStore := func(t *testing.T) (*BlockStore, [32]byte, [32]byte, [32]byte, [32]byte) {
+		t.Helper()
+		store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
+		genesis := mustHeaderHash(t, testHeaderBytes(0x10, 1))
+		rowOne := mustHeaderHash(t, testHeaderBytes(0x11, 2))
+		replacement := mustHeaderHash(t, testHeaderBytes(0x12, 3))
+		sideOnly := mustHeaderHash(t, testHeaderBytes(0x13, 4))
+		if err := store.RestoreCanonicalIndex([]string{hashHex(genesis), hashHex(rowOne)}); err != nil {
+			t.Fatalf("RestoreCanonicalIndex: %v", err)
+		}
+		// Seed the cache the way a chain-work walk would: canonical rows plus one
+		// entry for a hash that is only ever on a side branch.
+		store.stateMu.Lock()
+		store.chainWorkByHash[genesis] = big.NewInt(7)
+		store.chainWorkByHash[rowOne] = big.NewInt(9)
+		store.chainWorkByHash[sideOnly] = big.NewInt(11)
+		store.stateMu.Unlock()
+		return store, genesis, rowOne, replacement, sideOnly
+	}
+	carried := func(t *testing.T, store *BlockStore) map[[32]byte]string {
+		t.Helper()
+		store.stateMu.RLock()
+		defer store.stateMu.RUnlock()
+		out := make(map[[32]byte]string, len(store.chainWorkByHash))
+		for hash, work := range store.chainWorkByHash {
+			out[hash] = work.String()
+		}
+		return out
+	}
+
+	t.Run("append keeps the surviving prefix", func(t *testing.T) {
+		store, genesis, rowOne, appended, sideOnly := newStore(t)
+		prepared := mustPrepareCanonicalIndex(t, store, []string{hashHex(genesis), hashHex(rowOne), hashHex(appended)})
+		if got := prepared.commit(store); got.class != canonicalCommitted {
+			t.Fatalf("commit class=%q err=%v", got.class, got.err)
+		}
+		got := carried(t, store)
+		if len(got) != 2 || got[genesis] != "7" || got[rowOne] != "9" {
+			t.Fatalf("carried=%v, want exactly the two canonical prefix entries", got)
+		}
+		if _, present := got[sideOnly]; present {
+			t.Fatal("a side-only hash was carried into the planned identity")
+		}
+		if _, present := got[appended]; present {
+			t.Fatal("an entry appeared for a row whose work was never computed")
+		}
+	})
+
+	t.Run("reorg drops the disconnected row", func(t *testing.T) {
+		store, genesis, rowOne, replacement, _ := newStore(t)
+		prepared := mustPrepareCanonicalIndex(t, store, []string{hashHex(genesis), hashHex(replacement)})
+		if got := prepared.commit(store); got.class != canonicalCommitted {
+			t.Fatalf("commit class=%q err=%v", got.class, got.err)
+		}
+		got := carried(t, store)
+		if len(got) != 1 || got[genesis] != "7" {
+			t.Fatalf("carried=%v, want only the common-prefix entry", got)
+		}
+		if _, present := got[rowOne]; present {
+			t.Fatal("work for the disconnected row survived the reorg")
+		}
+	})
+
 }

@@ -97,6 +97,29 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "chainstate load failed: %v\n", err)
 		return 2
 	}
+	// The persisted snapshot is the node's precommit CHECKPOINT: it is the
+	// highest row common to the old and planned-new canonical identities, so it
+	// can lag the canonical tip by a transition. Spending from it would select
+	// against a stale UTXO view, so the canonical suffix is replayed here first.
+	//
+	// IN MEMORY ONLY. This tool is a client of somebody else's datadir — it does
+	// not hold the datadir lock and the node may be running — so it opens the
+	// store read-only, verifies the fixed devnet genesis anchor before adopting
+	// anything from that index, reconciles into its own image and writes NOTHING
+	// back. Any failure exits 2 and emits no transaction.
+	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dataDir))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "blockstore open failed: %v\n", err)
+		return 2
+	}
+	if err := blockStore.VerifyGenesisAnchor(node.DevnetGenesisBlockHash()); err != nil {
+		_, _ = fmt.Fprintf(stderr, "canonical index genesis anchor failed: %v\n", err)
+		return 2
+	}
+	if _, err := node.ReconcileChainStateWithBlockStore(st, blockStore, node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), "")); err != nil {
+		_, _ = fmt.Fprintf(stderr, "chainstate reconcile failed: %v\n", err)
+		return 2
+	}
 	nextHeight, err := nextSpendHeight(st)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "chainstate invalid: %v\n", err)
