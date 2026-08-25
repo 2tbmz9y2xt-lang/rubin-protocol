@@ -75,50 +75,6 @@ func snapshotCanonicalMempoolOwner(owner *PendingOutpointOwner) (pendingOutpoint
 	}, nil
 }
 
-// restoreMempoolSnapshot rebuilds the records and the owner claims of the SAME
-// owner from snapshot. It builds every temporary map first, cross-checks each
-// record against its exact finalized standard claim in both directions, and
-// only then publishes all maps or none. Token and generation high-waters are
-// retained at their advanced values, so an aborted transition can never hand
-// out a sequence twice.
-func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
-	if m == nil {
-		return nil
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.maxTxs <= 0 || m.maxBytes <= 0 {
-		return fmt.Errorf("invalid mempool snapshot restore limits: max_txs=%d max_bytes=%d", m.maxTxs, m.maxBytes)
-	}
-	txs, wtxids, maxAdmissionSeq, usedBytes, err := buildMempoolRestoreMaps(snapshot.entries, m.maxTxs, m.maxBytes)
-	if err != nil {
-		return err
-	}
-	if snapshot.lastAdmissionSeq < maxAdmissionSeq {
-		return fmt.Errorf("mempool snapshot admission high-watermark below restored max: last=%d max=%d", snapshot.lastAdmissionSeq, maxAdmissionSeq)
-	}
-	owner := m.pendingOutpointOwnerLocked()
-	owner.mu.Lock()
-	defer owner.mu.Unlock()
-	candidate, err := owner.buildRestoreLocked(snapshot.pending)
-	if err != nil {
-		return err
-	}
-	if err := validateRestoredClaimBinding(txs, candidate); err != nil {
-		return err
-	}
-	// Everything fallible is done. Both locks remain held while the owner image
-	// and record maps below are replaced.
-	owner.publishRestoreLocked(snapshot.pending, candidate)
-	m.txs = txs
-	m.wtxids = wtxids
-	m.usedBytes = usedBytes
-	m.lastAdmissionSeq = snapshot.lastAdmissionSeq
-	m.currentMinFeeRate = snapshot.currentMinFeeRate
-	m.ensureMinFeeRateLocked()
-	return nil
-}
-
 // validateRestoredClaimBinding proves the bijection between the records about to
 // be installed and the CANDIDATE finalized standard claims that would be
 // published alongside them: every record with inputs holds exactly one finalized
@@ -1052,19 +1008,27 @@ func canonicalMempoolPendingSnapshot(old pendingOutpointSnapshot, entries []memp
 	return pending
 }
 
-func (m *Mempool) preflightAndPublishCanonicalMempoolPlan(plan canonicalMempoolPlan) error {
+// publishCanonicalMempoolPlan is the postcommit M1/O1 assignment. It runs ONLY
+// after the canonical-index commit selected NEW and performs no allocation,
+// clone, I/O, validation, callback or fallible step: every one of those already
+// ran under the admission fence, which is still held, so the live image cannot
+// have moved since the preflight proved it.
+//
+// Lock order is Mempool.mu then PendingOutpointOwner.mu, and both are released
+// together. clearTransition is true for an ordinary COMMITTED outcome, which
+// clears owner.inTransition in the SAME owner hold as the image; it is false for
+// TERMINAL_PERSISTENCE(new), which publishes the identical image but keeps the
+// owner transition latched with admission.
+func (m *Mempool) publishCanonicalMempoolPlan(plan canonicalMempoolPlan, clearTransition bool) {
 	m.mu.Lock()
 	owner := plan.owner
 	owner.mu.Lock()
-	if err := validateCanonicalMempoolLiveImageLocked(m, plan.snapshot, plan.snapshotUsedBytes, owner); err != nil {
-		owner.mu.Unlock()
-		m.mu.Unlock()
-		return err
-	}
 	m.publishCanonicalMempoolPlanLocked(plan, owner)
+	if clearTransition {
+		owner.inTransition = false
+	}
 	owner.mu.Unlock()
 	m.mu.Unlock()
-	return nil
 }
 
 func (m *Mempool) publishCanonicalMempoolPlanLocked(plan canonicalMempoolPlan, owner *PendingOutpointOwner) {
@@ -1139,18 +1103,4 @@ func (c *canonicalMempoolDeploymentCache) PublishedSimplicityDeployments() ([]co
 		c.observed = true
 	}
 	return append([]consensus.SimplicityDeploymentDescriptor(nil), c.descriptors...), c.anchor, c.ok, c.err
-}
-
-func (s *SyncEngine) prepareAndPublishCanonicalMempoolPlan(tr *canonicalTransition, final *ChainState, mtp uint64, decayRows int) error {
-	if tr == nil || tr.mempool == nil {
-		return nil
-	}
-	plan, err := prepareCanonicalMempoolPlan(tr.mempool, tr.rollback.mempool, final, mtp, decayRows, s.cfg.ChainID)
-	if err != nil {
-		return err
-	}
-	if err := tr.mempool.preflightAndPublishCanonicalMempoolPlan(plan); err != nil {
-		return terminalCanonicalMempoolError(err)
-	}
-	return nil
 }

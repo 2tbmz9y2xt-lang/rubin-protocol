@@ -278,10 +278,6 @@ func TestNoncanonicalLimitsAndProductionActivation(t *testing.T) {
 	if got := reopened.noncanonicalAccountingDigest(); got != wantDigest {
 		t.Fatalf("reconstructed open digest=%x want=%x", got, wantDigest)
 	}
-	mustNoncanonical(t, reopened.reloadFromDisk())
-	if reloaded := reopened.noncanonicalAccountingDigest(); reloaded != wantDigest {
-		t.Fatalf("reload digest=%x want=%x", reloaded, wantDigest)
-	}
 	for _, limit := range []uint64{0, uint64(8) << 30, uint64(32) << 30} {
 		explicit, err := OpenBlockStoreWithNoncanonicalLimit(store.rootPath, limit)
 		if err != nil {
@@ -299,26 +295,9 @@ func TestNoncanonicalLimitsAndProductionActivation(t *testing.T) {
 		t.Fatalf("invalid open changed filesystem: %v", err)
 	}
 	explicit32, err := OpenBlockStoreWithNoncanonicalLimit(store.rootPath, uint64(32)<<30)
-	mustNoncanonical(t, err, explicit32.reloadFromDisk())
-	if got := explicit32.noncanonical.Load().limit; got != uint64(32)<<30 {
-		t.Fatalf("reload limit=%d want=%d", got, uint64(32)<<30)
-	}
-	invalidImage, invalidDigest, invalidRaw := explicit32.noncanonical.Load(), explicit32.noncanonicalAccountingDigest(), explicit32.visibleIndexBytes()
-	invalidImage.limit = 1
-	if err := explicit32.reloadFromDisk(); err == nil || !strings.Contains(err.Error(), "invalid noncanonical byte limit") || explicit32.noncanonical.Load() != invalidImage || explicit32.noncanonicalAccountingDigest() != invalidDigest || !bytes.Equal(explicit32.visibleIndexBytes(), invalidRaw) {
-		t.Fatalf("invalid live limit reload=%v", err)
-	}
-	mustNoncanonical(t, store.SetCanonicalTip(0, hash), os.Remove(noncanonicalTestFile(store, noncanonicalBlockArtifact, hash)), os.Remove(noncanonicalTestFile(store, noncanonicalUndoArtifact, hash)))
-	beforeImage, beforeDigest, beforeRaw := store.noncanonical.Load(), store.noncanonicalAccountingDigest(), store.visibleIndexBytes()
-	beforeHeight, beforeMember := store.canonicalHeightByHash[hash]
-	if err := store.reloadFromDisk(); !errors.Is(err, errCanonicalIndexZeroCompletePrefix) {
-		t.Fatalf("incomplete canonical reload error=%v", err)
-	}
-	canonical, err := store.CanonicalIndexSnapshot()
 	mustNoncanonical(t, err)
-	afterHeight, afterMember := store.canonicalHeightByHash[hash]
-	if len(canonical) != 1 || canonical[0] != hex.EncodeToString(hash[:]) || beforeMember != afterMember || beforeHeight != afterHeight || store.noncanonical.Load() != beforeImage || store.noncanonicalAccountingDigest() != beforeDigest || !bytes.Equal(store.visibleIndexBytes(), beforeRaw) {
-		t.Fatal("failed reload changed canonical or accounting state")
+	if got := explicit32.noncanonical.Load().limit; got != uint64(32)<<30 {
+		t.Fatalf("explicit open limit=%d want=%d", got, uint64(32)<<30)
 	}
 }
 
@@ -656,7 +635,7 @@ func TestNoncanonicalTransitionNormalizesOverlapAndOrder(t *testing.T) {
 	// would not reopen.
 	overlap.indexRaw = mustEncodeCanonicalIndex(t, overlap.index.Canonical)
 	prepared := mustPrepareCanonicalIndex(t, overlap, []string{})
-	delta, err := overlap.prepareNoncanonicalReclassification(prepared, nil)
+	delta, err := overlap.prepareNoncanonicalReclassification(prepared)
 	if err != nil || delta.uniqueCount != 1 || len(delta.removeIndices) != 1 || len(delta.disconnected) != 1 {
 		t.Fatalf("overlap delta=%+v err=%v", delta, err)
 	}
@@ -1391,7 +1370,6 @@ func TestNoncanonicalLegacyFailureAndTransitionErrorOrder(t *testing.T) {
 		{"restore", func(store *BlockStore) error {
 			return store.RestoreCanonicalIndex([]string{hex.EncodeToString(devnetGenesisBlockHash[:])})
 		}},
-		{"reloadFromDisk", func(store *BlockStore) error { return store.reloadFromDisk() }},
 	} {
 		t.Run("legacy_precommit_ram_ahead_restart_disk_truth/"+tc.name, func(t *testing.T) {
 			store := newCanonicalStore(t)
@@ -1489,7 +1467,6 @@ func TestNoncanonicalLegacyFailureAndTransitionErrorOrder(t *testing.T) {
 		if !slices.Equal(afterPrepared, beforeCanonical) || store.noncanonicalAccountingDigest() != beforeDigest || !bytes.Equal(mustReadIndexFile(t, store), beforeDisk) {
 			t.Fatal("prepared byte refusal changed RAM or disk")
 		}
-		mustNoncanonical(t, store.reloadFromDisk())
 		if got := prepared.commit(store); got.class != canonicalCommitStale || !errors.Is(got.err, errPreparedIndexSpent) || writes != 0 {
 			t.Fatalf("reused refused image=%s err=%v writes=%d", got.class, got.err, writes)
 		}
@@ -1515,109 +1492,6 @@ func TestNoncanonicalLegacyFailureAndTransitionErrorOrder(t *testing.T) {
 		mustNoncanonical(t, freed.SetCanonicalTip(0, accounting.rows[0].hash))
 		if got := freed.noncanonical.Load(); got.count != noncanonicalHashCap-1 || got.usedBytes != 0 {
 			t.Fatalf("canonical removal did not free the full image: count=%d bytes=%d", got.count, got.usedBytes)
-		}
-	})
-}
-
-func TestNoncanonicalReloadReplacesDivergentImage(t *testing.T) {
-	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "reload-replace"))
-	aHeader, cHeader := testHeaderBytes(0x64, 100), testHeaderBytes(0x65, 101)
-	a, c := mustHeaderHash(t, aHeader), mustHeaderHash(t, cHeader)
-	mustNoncanonical(t, store.StoreBlock(a, aHeader, []byte("A")), store.StoreBlock(c, cHeader, []byte("C")))
-	bHeader := testHeaderBytes(0x66, 102)
-	b := mustHeaderHash(t, bHeader)
-	mustNoncanonical(t, os.Remove(noncanonicalTestFile(store, noncanonicalBlockArtifact, a)), os.Remove(noncanonicalTestFile(store, noncanonicalHeaderArtifact, a)), os.WriteFile(noncanonicalTestFile(store, noncanonicalBlockArtifact, b), []byte("B"), 0o600), os.WriteFile(noncanonicalTestFile(store, noncanonicalHeaderArtifact, b), bHeader, 0o600))
-	want, err := store.reconstructNoncanonicalAccounting(noncanonicalDefaultByteLimit)
-	mustNoncanonical(t, err)
-	wantSnapshot := noncanonicalAccountingSnapshot{usedBytes: want.usedBytes, uniqueCount: want.count, rows: append([]noncanonicalRow(nil), want.rows[:want.count]...)}
-	image := store.noncanonical.Load()
-	mustNoncanonical(t, store.reloadFromDisk())
-	got := store.noncanonicalAccountingSnapshot()
-	if store.noncanonical.Load() != image || got.usedBytes != wantSnapshot.usedBytes || got.uniqueCount != wantSnapshot.uniqueCount || !slices.Equal(got.rows, wantSnapshot.rows) || store.noncanonicalAccountingDigest() != noncanonicalTestDigest(wantSnapshot) {
-		t.Fatalf("reload image=%+v want=%+v", got, wantSnapshot)
-	}
-	canonical, err := store.CanonicalIndexSnapshot()
-	mustNoncanonical(t, err)
-	if len(canonical) != 0 || !bytes.Equal(store.visibleIndexBytes(), mustReadIndexFile(t, store)) {
-		t.Fatalf("reload canonical=%v", canonical)
-	}
-	mustNoncanonicalRestartDigest(t, store, store.noncanonicalAccountingDigest())
-}
-
-func TestNoncanonicalReloadFailurePreservesPendingReservation(t *testing.T) {
-	store := mustCreateBlockStore(t, filepath.Join(t.TempDir(), "store"))
-	reopened := mustOpenBlockStore(t, store.rootPath)
-	image := reopened.noncanonical.Load()
-	mustNoncanonical(t, os.WriteFile(filepath.Join(reopened.blocksDir, "unexpected"), []byte("fault"), 0o600))
-	canonicalBefore, err := reopened.CanonicalIndexSnapshot()
-	mustNoncanonical(t, err)
-	visibleBefore := reopened.visibleIndexBytes()
-	row8, row9 := noncanonicalRow{hash: [32]byte{8}, blockBytes: 4, height: noncanonicalUnknownHeight}, noncanonicalRow{hash: [32]byte{9}, blockBytes: 4, height: noncanonicalUnknownHeight}
-	row8.setState(noncanonicalBlockArtifact, BlockArtifactValid)
-	row9.setState(noncanonicalBlockArtifact, BlockArtifactValid)
-	want := noncanonicalAccountingSnapshot{usedBytes: 8, uniqueCount: 2, rows: []noncanonicalRow{row8, row9}}
-	wantDigest := noncanonicalTestDigest(want)
-
-	synctest.Test(t, func(t *testing.T) {
-		leaf := noncanonicalReservationLeaf{kind: noncanonicalBlockArtifact, bytes: 4, state: BlockArtifactValid}
-		firstStarted, releaseFirst := make(chan struct{}), make(chan struct{})
-		firstDone := make(chan error, 1)
-		go func() {
-			firstDone <- reopened.reserveNoncanonicalArtifactWrite([32]byte{8}, []noncanonicalReservationLeaf{leaf}, nil, func(r *noncanonicalReservation) error {
-				close(firstStarted)
-				<-releaseFirst
-				r.created(leaf)
-				return nil
-			})
-		}()
-		synctest.Wait()
-		<-firstStarted
-		if pending := reopened.noncanonicalAccountingSnapshot(); pending.reservedBytes != leaf.bytes {
-			t.Fatalf("pending reserved=%d want=%d", pending.reservedBytes, leaf.bytes)
-		}
-
-		reloadDone := make(chan error, 1)
-		go func() { reloadDone <- reopened.reloadFromDisk() }()
-		synctest.Wait()
-		reopened.stateMu.Lock()
-		transitionActive := reopened.noncanonicalTransitionDone != nil
-		pendingActive := reopened.noncanonicalPending[[32]byte{8}] != nil
-		reopened.stateMu.Unlock()
-		if !transitionActive || !pendingActive {
-			t.Fatalf("reload fence=%v pending=%v", transitionActive, pendingActive)
-		}
-
-		secondPrepared := make(chan struct{})
-		secondDone := make(chan error, 1)
-		go func() {
-			secondDone <- reopened.reserveNoncanonicalArtifactWrite([32]byte{9}, nil, func() ([]noncanonicalReservationLeaf, error) {
-				close(secondPrepared)
-				return []noncanonicalReservationLeaf{leaf}, nil
-			}, func(r *noncanonicalReservation) error { r.created(leaf); return nil })
-		}()
-		synctest.Wait()
-		select {
-		case <-secondPrepared:
-			t.Fatal("new reservation bypassed reload transition")
-		default:
-		}
-		select {
-		case err := <-reloadDone:
-			t.Fatalf("reload bypassed pending reservation: %v", err)
-		default:
-		}
-
-		close(releaseFirst)
-		synctest.Wait()
-		mustNoncanonical(t, <-firstDone, <-secondDone)
-		if err := <-reloadDone; err == nil || !strings.Contains(err.Error(), "unexpected noncanonical artifact name") {
-			t.Fatalf("reload error=%v", err)
-		}
-		got := reopened.noncanonicalAccountingSnapshot()
-		canonicalAfter, err := reopened.CanonicalIndexSnapshot()
-		mustNoncanonical(t, err)
-		if reopened.noncanonical.Load() != image || got.usedBytes != want.usedBytes || got.reservedBytes != 0 || got.uniqueCount != want.uniqueCount || !slices.Equal(got.rows, want.rows) || reopened.noncanonicalAccountingDigest() != wantDigest || !slices.Equal(canonicalAfter, canonicalBefore) || !bytes.Equal(reopened.visibleIndexBytes(), visibleBefore) {
-			t.Fatalf("failed reload state=%+v canonical=%v", got, canonicalAfter)
 		}
 	})
 }
@@ -2926,7 +2800,7 @@ func TestNoncanonicalReclaimFsyncPending(t *testing.T) {
 			t.Fatalf("prepared class=%q spent=%t writes=%d", result.class, prepared.spent.Load(), writes)
 		}
 		mustNoncanonical(t, os.Remove(noncanonicalTestFile(store, noncanonicalBlockArtifact, hash)), os.Remove(noncanonicalTestFile(store, noncanonicalHeaderArtifact, hash)))
-		assertPending(store.reloadFromDisk(), "strict", "noncanonical artifact row identity drift")
+		assertPending(store.TruncateCanonical(0), "strict", "noncanonical artifact row identity drift")
 		mustNoncanonical(t, os.WriteFile(noncanonicalTestFile(store, noncanonicalHeaderArtifact, hash), header, 0o600))
 		at, _ := accounting.find(hash)
 		accounting.rows[at].headerBytes++

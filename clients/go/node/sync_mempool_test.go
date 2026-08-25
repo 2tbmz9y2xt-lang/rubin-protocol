@@ -16,6 +16,51 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
+// installMempoolImageForTest installs snapshot into m through the SAME
+// primitives the canonical plan builder and publisher use in production —
+// buildMempoolRestoreMaps, PendingOutpointOwner.buildRestoreLocked,
+// validateRestoredClaimBinding and PendingOutpointOwner.publishRestoreLocked —
+// so the rules these tests assert are production rules.
+//
+// Only the COMPOSITION is test-local: production reaches those primitives from
+// prepareCanonicalMempoolPlan, which additionally requires the live image to
+// equal the snapshot, and these tests deliberately install a foreign image.
+func installMempoolImageForTest(m *Mempool, snapshot mempoolSnapshot) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.maxTxs <= 0 || m.maxBytes <= 0 {
+		return fmt.Errorf("invalid mempool snapshot restore limits: max_txs=%d max_bytes=%d", m.maxTxs, m.maxBytes)
+	}
+	txs, wtxids, maxAdmissionSeq, usedBytes, err := buildMempoolRestoreMaps(snapshot.entries, m.maxTxs, m.maxBytes)
+	if err != nil {
+		return err
+	}
+	if snapshot.lastAdmissionSeq < maxAdmissionSeq {
+		return fmt.Errorf("mempool snapshot admission high-watermark below restored max: last=%d max=%d", snapshot.lastAdmissionSeq, maxAdmissionSeq)
+	}
+	owner := m.pendingOutpointOwnerLocked()
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	candidate, err := owner.buildRestoreLocked(snapshot.pending)
+	if err != nil {
+		return err
+	}
+	if err := validateRestoredClaimBinding(txs, candidate); err != nil {
+		return err
+	}
+	owner.publishRestoreLocked(snapshot.pending, candidate)
+	m.txs = txs
+	m.wtxids = wtxids
+	m.usedBytes = usedBytes
+	m.lastAdmissionSeq = snapshot.lastAdmissionSeq
+	m.currentMinFeeRate = snapshot.currentMinFeeRate
+	m.ensureMinFeeRateLocked()
+	return nil
+}
+
 type canonicalMOFixture struct {
 	engine  *SyncEngine
 	store   *BlockStore
@@ -284,8 +329,8 @@ func TestCanonicalMOPlanDirectAndBootstrap(t *testing.T) {
 		t.Fatalf("bootstrap M/O plan floor=%d before=%+v after=%+v", mp.CurrentMinFeeRateSnapshot(), before, after)
 	}
 	t.Run("terminal_snapshot_is_not_race_tolerant", func(t *testing.T) {
-		terminal, restore := fmt.Errorf("wrapped: %w", terminalCanonicalMempoolError(errors.New("test terminal"))), fmt.Errorf("wrapped: %w", &rollbackRestoreFault{cause: errors.New("apply"), restoreErr: errors.New("restore")})
-		if !errors.Is(raceTolerantBootstrapResult(terminal, true), terminal) || !errors.Is(raceTolerantBootstrapResult(errStoragePersistenceFault, true), errStoragePersistenceFault) || !errors.Is(raceTolerantBootstrapResult(restore, true), restore) {
+		terminal := fmt.Errorf("wrapped: %w", terminalCanonicalMempoolError(errors.New("test terminal")))
+		if !errors.Is(raceTolerantBootstrapResult(terminal, true), terminal) || !errors.Is(raceTolerantBootstrapResult(errStoragePersistenceFault, true), errStoragePersistenceFault) {
 			t.Fatal("bootstrap race helper hid a terminal result behind a tip")
 		}
 		dir := t.TempDir()
@@ -341,39 +386,6 @@ func TestCanonicalMOPlanWinningReorg(t *testing.T) {
 	if f.engine.chainState.TipHash == canonical.BlockHash || f.mempool.Contains(txID(t, spend)) || f.mempool.CurrentMinFeeRateSnapshot() != 2 || !ok || after.Generation != before.Generation+1 {
 		t.Fatal("winning reorg retained the old-chain standard record")
 	}
-	t.Run("unwraps_pre_finalize_error_after_rollback", func(t *testing.T) {
-		g := newCanonicalMOFixture(t, 1, MempoolConfig{})
-		mustCanonicalMO(t, "ApplyBlock", g.applySpend(t, g.ops[0], 1))
-		stored, err := g.engine.loadVerifiedStoredBlock(g.engine.chainState.TipHash)
-		mustCanonicalMO(t, "loadVerifiedStoredBlock", err)
-		undo, err := g.store.GetUndo(g.engine.chainState.TipHash)
-		mustCanonicalMO(t, "GetUndo", err)
-		var collision consensus.Outpoint
-		for _, txUndo := range undo.Txs {
-			if len(txUndo.Spent) != 0 {
-				collision = txUndo.Spent[0].Outpoint
-				break
-			}
-		}
-		if collision == (consensus.Outpoint{}) {
-			t.Fatal("missing spent undo row")
-		}
-		index, err := g.store.CanonicalIndexSnapshot()
-		mustCanonicalMO(t, "CanonicalIndexSnapshot", err)
-		tr, err := g.engine.beginCanonicalTransition(index, nil)
-		mustCanonicalMO(t, "beginCanonicalTransition", err)
-		g.engine.chainState.mu.Lock()
-		g.engine.chainState.Utxos[collision] = consensus.UtxoEntry{Value: 1}
-		g.engine.chainState.mu.Unlock()
-		_, _, err = g.engine.applyPreferredBranchUnderGuard(tr, nil, g.engine.chainState.Height-1, []verifiedStoredBlock{stored}, cloneChainState(g.engine.chainState), 0)
-		if endErr := tr.end(err); endErr != err { //nolint:errorlint // Exact passthrough identity is the behavior under test.
-			t.Fatalf("transition end=%v cause=%v", endErr, err)
-		}
-		early := &disconnectPreFinalizeError{cause: err}
-		if err == nil || early.Error() != err.Error() || early.Unwrap() != err || unwrapDisconnectPreFinalizeError(err) != err || errors.As(err, &early) { //nolint:errorlint // Exact helper passthrough is under test.
-			t.Fatalf("reorg error=%v leaked pre-finalize wrapper", err)
-		}
-	})
 }
 
 func TestCanonicalMOPlanStandaloneDisconnect(t *testing.T) {
@@ -1210,14 +1222,14 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 		before := canonicalMOImageFingerprint(t, f.mp, 0)
 		index, err := f.store.CanonicalIndexSnapshot()
 		mustCanonicalMO(t, "CanonicalIndexSnapshot", err)
-		tr, err := f.engine.beginCanonicalTransition(index, nil)
+		tr, err := f.engine.beginCanonicalTransition(nil)
 		mustCanonicalMO(t, "beginCanonicalTransition", err)
-		badPrior := cloneChainState(f.engine.chainState)
-		badPrior.Height++
+		stale := chainTipScalarsOf(f.engine.chainState)
+		stale.height++
 		write, writes := writeFileAtomicFn, 0
 		t.Cleanup(func() { writeFileAtomicFn = write })
 		writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error { writes++; return write(path, data, mode) }
-		err = f.engine.commitPreparedBlockUnderGuard(tr, f.engine.chainState, nil, canonicalBlockApplyContext{prevState: badPrior}, nil, nil, 0)
+		_, err = f.engine.prepareCanonicalFenceImage(tr, &canonicalTransitionPlan{oldSequence: index, priorTip: stale, final: f.engine.chainState})
 		if endErr := tr.end(err); endErr != err || err == nil || writes != 0 || f.engine.persistenceFaulted() { //nolint:errorlint // Exact passthrough identity is the behavior under test.
 			t.Fatalf("prepublication recheck err=%v end=%v writes=%d latch=%v", err, endErr, writes, f.engine.persistenceFaulted())
 		}
@@ -1230,7 +1242,13 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 	})
 }
 
-func TestCanonicalMOPlanLegacyRollbackRestoresExactOldImage(t *testing.T) {
+// TestCanonicalMOPlanRefusedCommitPublishesNothing replaces the legacy rollback
+// row: with publication moved AFTER the one index commit there is nothing to
+// restore, so a refused commit must leave the M/O image untouched, write the
+// index exactly once, reopen admission and never latch. The third case proves
+// the same for a tip that moves before the fence recheck, where no index write
+// happens at all.
+func TestCanonicalMOPlanRefusedCommitPublishesNothing(t *testing.T) {
 	f := newCanonicalMOFixture(t, 1, MempoolConfig{})
 	f.add(t, f.ops[0], 1)
 	f.mp.SetCurrentMinFeeRateForTest(8)
@@ -1241,75 +1259,47 @@ func TestCanonicalMOPlanLegacyRollbackRestoresExactOldImage(t *testing.T) {
 	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
 		if path == f.store.indexPath {
 			indexWrites++
-			if indexWrites == 1 {
-				return os.ErrPermission
-			}
+			return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
 		}
 		return write(path, data, mode)
 	}
-	if err := f.applyCoinbase(t); err == nil {
-		t.Fatal("expected post-publication canonical failure")
+	if err := f.applyCoinbase(t); err == nil || f.engine.persistenceFaulted() {
+		t.Fatalf("refused commit err=%v latch=%v", err, f.engine.persistenceFaulted())
 	}
 	if before != canonicalMOImageFingerprint(t, f.mp, 1) {
-		t.Fatalf("rollback M/O=%s", canonicalMOImageFingerprint(t, f.mp, 1))
+		t.Fatalf("refused commit M/O=%s", canonicalMOImageFingerprint(t, f.mp, 1))
 	}
-	if indexWrites != 2 {
-		t.Fatalf("canonical index writes=%d, want 2", indexWrites)
+	if indexWrites != 1 {
+		t.Fatalf("canonical index writes=%d, want exactly 1", indexWrites)
 	}
-	g := newCanonicalMOFixture(t, 1, MempoolConfig{})
-	g.add(t, g.ops[0], 1)
-	g.mp.SetCurrentMinFeeRateForTest(8)
-	beforeFailure := canonicalMOImageFingerprint(t, g.mp, 0)
-	writeFailure := writeFileAtomicFn
-	defer func() { writeFileAtomicFn = writeFailure }()
-	failureIndexWrites := 0
-	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
-		if path == g.store.indexPath {
-			failureIndexWrites++
-			return os.ErrPermission
-		}
-		return writeFailure(path, data, mode)
+	if _, ok := f.mp.PendingOutpointOwner().AdmissionContext(); !ok {
+		t.Fatal("refused commit left admission closed")
 	}
-	if err := g.applyCoinbase(t); err == nil || !g.engine.persistenceFaulted() {
-		t.Fatalf("rollback failure err=%v latch=%v", err, g.engine.persistenceFaulted())
-	}
-	wantFailure := strings.Replace(beforeFailure, "transition=false", "transition=true", 1)
-	if wantFailure != canonicalMOImageFingerprint(t, g.mp, 1) || g.mp.Len() != 1 {
-		t.Fatalf("rollback failure M/O=%s", canonicalMOImageFingerprint(t, g.mp, 1))
-	}
-	if failureIndexWrites != 2 {
-		t.Fatalf("failed rollback index writes=%d, want 2", failureIndexWrites)
-	}
-	if _, ok := g.mp.PendingOutpointOwner().AdmissionContext(); ok {
-		t.Fatal("rollback failure reopened admission")
-	}
-	p := newCanonicalMOProvider(t, devnetGenesisChainID)
-	h := newCanonicalMOFixture(t, 1, MempoolConfig{RotationProvider: p})
+	writeFileAtomicFn = write
+
+	h := newCanonicalMOFixture(t, 1, MempoolConfig{})
 	mustCanonicalMO(t, "ApplyBlock(disconnect predecessor)", h.applyCoinbase(t))
 	retained := h.install(t, h.ops[0], 1, true)
 	beforeDisconnect, beforeView := canonicalMOImageFingerprint(t, h.mp, 0), h.engine.chainState.view()
-	p.entered, p.release = make(chan struct{}, 1), make(chan struct{})
-	disconnect := make(chan error, 1)
-	go func() { _, err := h.engine.DisconnectTip(); disconnect <- err }()
-	select {
-	case <-p.entered:
-	case <-time.After(time.Second):
-		close(p.release)
-		_ = awaitCanonicalMOError(t, disconnect, "disconnect")
-		t.Fatal("disconnect plan did not reach provider barrier")
+	disconnectWrites := 0
+	withWriteFileAtomicFn(t, func(path string, data []byte, mode os.FileMode) error {
+		if path == h.store.indexPath {
+			disconnectWrites++
+			return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
+		}
+		return write(path, data, mode)
+	})
+	if _, err := h.engine.DisconnectTip(); err == nil || h.engine.persistenceFaulted() {
+		t.Fatalf("refused disconnect err=%v latch=%v", err, h.engine.persistenceFaulted())
 	}
-	h.engine.chainState.mu.Lock()
-	h.engine.chainState.TipHash[0] ^= 1
-	h.engine.chainState.mu.Unlock()
-	close(p.release)
-	if err := awaitCanonicalMOError(t, disconnect, "disconnect"); err == nil || h.engine.persistenceFaulted() {
-		t.Fatalf("postpublication disconnect err=%v latch=%v", err, h.engine.persistenceFaulted())
+	if disconnectWrites != 1 {
+		t.Fatalf("disconnect canonical index writes=%d, want exactly 1", disconnectWrites)
 	}
 	if beforeDisconnect != canonicalMOImageFingerprint(t, h.mp, 1) || h.engine.chainState.view() != beforeView || !h.mp.Contains(retained) {
-		t.Fatalf("postpublication disconnect rollback M/O=%s", canonicalMOImageFingerprint(t, h.mp, 1))
+		t.Fatalf("refused disconnect M/O=%s", canonicalMOImageFingerprint(t, h.mp, 1))
 	}
 	if _, ok := h.mp.PendingOutpointOwner().AdmissionContext(); !ok {
-		t.Fatal("postpublication disconnect rollback left admission closed")
+		t.Fatal("refused disconnect left admission closed")
 	}
 }
 

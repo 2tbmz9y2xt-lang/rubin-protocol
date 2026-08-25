@@ -1,7 +1,6 @@
 package node
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
@@ -119,48 +118,4 @@ func (s *SyncEngine) runPVShadowIfActive(blockBytes []byte, prevTimestamps []uin
 		return
 	}
 	s.runPVShadow(blockBytes, prevTimestamps, ctx, seqErr, seqSummary)
-}
-
-// finalizeAppliedBlock persists the already-published canonical block.
-//
-// The prepared Mempool/owner image and live canonical tip are already published.
-// Planning errors return before either publication and never reach persistence;
-// later failures use existing rollback classification. Runtime tip recording occurs
-// only after persistence and the owner stable-tip commit, in canonicalTransition.finish.
-func (s *SyncEngine) finalizeAppliedBlock(summary *ChainStateConnectSummary, blockHash [32]byte, pb *consensus.ParsedBlock, blockBytes []byte, prevState *ChainState, rollbackState syncRollbackState) error {
-	commitStart := time.Now()
-	if err := s.persistAppliedBlock(summary, blockHash, pb, blockBytes, prevState); err != nil {
-		return s.classifyPersistenceFailure(err, rollbackState)
-	}
-	s.pvTelemetry.RecordCommitLatency(time.Since(commitStart))
-	return nil
-}
-
-// classifyPersistenceFailure is the SINGLE classifier for a persistence failure
-// on an already-published canonical block, shared by the direct-connect path and
-// by each preferred-branch row so neither can drift into a different error class
-// or a different rollback rule.
-func (s *SyncEngine) classifyPersistenceFailure(err error, rollbackState syncRollbackState) error {
-	if !isAtomicWritePostCommit(err) {
-		return s.rollbackApplyBlock(err, rollbackState)
-	}
-	var atomicErr *atomicWriteError
-	errors.As(err, &atomicErr)
-	if s.blockStore != nil && atomicErr.destination == s.blockStore.indexPath {
-		return s.handlePersistenceError(err, true, false)
-	}
-	if atomicErr.destination == s.cfg.ChainStatePath {
-		return s.handlePersistenceError(err, false, true)
-	}
-	fault := s.handlePersistenceError(err, false, false)
-	// The prepared M/O image has already been published, so reverting only the tip
-	// would freeze a final-chain Mempool against a pre-apply canonical tip.
-	// Admission remains closed while both in-memory halves are restored for restart reconciliation.
-	if restoreErr := errors.Join(
-		publishPreparedChainState(s.chainState, rollbackState.chainState),
-		restoreMempoolSnapshot(s.mempool, rollbackState.mempool),
-	); restoreErr != nil {
-		return errors.Join(fault, restoreErr)
-	}
-	return fault
 }

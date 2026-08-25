@@ -2,7 +2,6 @@ package node
 
 import (
 	"encoding/hex"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,17 +31,9 @@ func TestCoverageResidual4_SyncHelperBranches(t *testing.T) {
 }
 
 func TestCoverageResidual4_SyncRollbackAndPersistHelpers(t *testing.T) {
-	engineWithNilState := &SyncEngine{}
-	if err := engineWithNilState.rollbackApplyBlock(errors.New("boom"), syncRollbackState{}); err == nil {
-		t.Fatalf("expected nil rollback failure")
-	}
-
 	engine := &SyncEngine{
 		chainState: NewChainState(),
 		cfg:        DefaultSyncConfig(nil, devnetGenesisChainID, ""),
-	}
-	if err := engine.persistAppliedBlock(&ChainStateConnectSummary{}, [32]byte{}, nil, nil, nil); err != nil {
-		t.Fatalf("persistAppliedBlock without store/path: %v", err)
 	}
 	engine.recordAppliedBlock(3, 11)
 	engine.recordAppliedBlock(2, 9)
@@ -102,7 +93,7 @@ func TestCoverageResidual4_SyncAdditionalErrorBranches(t *testing.T) {
 	}
 
 	store.index.Canonical = []string{"not-hex"}
-	if _, err := engine.captureRollbackState(); err == nil {
+	if _, err := engine.canonicalIndexPreflight(); err == nil {
 		t.Fatalf("expected malformed canonical index rejection")
 	}
 
@@ -134,8 +125,8 @@ func TestCoverageResidual4_ReorgAndBlockstoreHelpers(t *testing.T) {
 	}
 
 	engine, store, target := newReorgTestEngine(t)
-	if blocks, depth, err := engine.previewDisconnectCanonicalToAncestor(nil, 0); err != nil || blocks != nil || depth != 0 {
-		t.Fatalf("previewDisconnectCanonicalToAncestor(nil)=(%v,%d,%v), want (nil,0,nil)", blocks, depth, err)
+	if depth, err := engine.previewDisconnectCanonicalToAncestor(nil, nil, 0); err != nil || depth != 0 {
+		t.Fatalf("previewDisconnectCanonicalToAncestor(nil)=(%d,%v), want (0,nil)", depth, err)
 	}
 
 	var nilStore *BlockStore

@@ -135,10 +135,10 @@ func TestValidateGenesisIdentityPassesAtNonZeroHeight(t *testing.T) {
 	}
 }
 
-func TestRestoreRollbackChainStateRejectsNil(t *testing.T) {
-	s := &SyncEngine{}
-	err := s.restoreRollbackChainState(syncRollbackState{})
-	if err == nil || !strings.Contains(err.Error(), "nil chainstate destination") {
-		t.Fatalf("expected nil chainstate error, got %v", err)
+func TestCommitCanonicalTransitionRejectsNilPlanImage(t *testing.T) {
+	s := &SyncEngine{chainState: NewChainState()}
+	truth, err := s.commitCanonicalTransition(&canonicalTransitionPlan{}, nil)
+	if truth != canonicalTruthOld || err == nil || !strings.Contains(err.Error(), "nil canonical transition plan image") {
+		t.Fatalf("expected nil plan image refusal, got truth=%v err=%v", truth, err)
 	}
 }

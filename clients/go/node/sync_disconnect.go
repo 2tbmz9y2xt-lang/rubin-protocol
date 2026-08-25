@@ -1,35 +1,20 @@
 package node
 
 import (
+	"encoding/hex"
 	"errors"
+	"fmt"
 )
 
 type disconnectTipContext struct {
 	storedBlock verifiedStoredBlock
 	undo        *BlockUndo
 	finalState  *ChainState
+	summary     *ChainStateDisconnectSummary
 	mempoolMTP  uint64
-	// tipHeight is the canonical height of the block being disconnected, read
-	// fresh per block. The canonical index must be truncated relative to the
-	// CURRENT tip: a preferred-branch reorg disconnects several blocks inside
-	// ONE transition, so a length taken from the shared rollback snapshot would
-	// truncate every iteration back to the same original height.
+	// tipHeight is the canonical height of the block being disconnected.
 	tipHeight       uint64
 	newTipTimestamp uint64
-}
-
-type disconnectPreFinalizeError struct{ cause error }
-
-func (e *disconnectPreFinalizeError) Error() string { return e.cause.Error() }
-
-func (e *disconnectPreFinalizeError) Unwrap() error { return e.cause }
-
-func unwrapDisconnectPreFinalizeError(err error) error {
-	var early *disconnectPreFinalizeError
-	if errors.As(err, &early) {
-		return early.cause
-	}
-	return err
 }
 
 func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {
@@ -43,75 +28,44 @@ func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {
 	return s.disconnectTip(diag)
 }
 
-// disconnectTip runs one guarded final-C1 M/O plan with no requeue.
+// disconnectTip runs one standalone disconnect through the shared driver. Its
+// plan has an EMPTY A1 — no block becomes canonical, so there is no
+// connected-block fee decay event — an empty new suffix, and one disconnect
+// descriptor. The post-disconnect image is both final C1 and the common
+// checkpoint, so the path holds exactly one private image.
+//
+// A summary is returned WITH an error only for TERMINAL_PERSISTENCE(new).
 func (s *SyncEngine) disconnectTip(diag *diagnosticBatch) (*ChainStateDisconnectSummary, error) {
 	canonicalIndex, err := s.canonicalIndexPreflight()
 	if err != nil {
 		return nil, err
 	}
+	priorTip := chainTipScalarsOf(s.chainState)
 	ctx, err := s.prepareDisconnectTip()
 	if err != nil {
 		return nil, err
 	}
-	tr, err := s.beginCanonicalTransition(canonicalIndex, diag)
+	disconnect, err := canonicalSequenceDescriptors(canonicalIndex, ctx.tipHeight, ctx.tipHeight+1, true)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.prepareAndPublishCanonicalMempoolPlan(tr, ctx.finalState, ctx.mempoolMTP, 0); err != nil {
-		if endErr := tr.end(err); endErr != nil {
-			return nil, endErr
-		}
+	plan := &canonicalTransitionPlan{
+		oldSequence: canonicalIndex,
+		newSequence: canonicalSequenceWithSuffix(canonicalIndex, ctx.tipHeight, nil),
+		disconnect:  disconnect,
+		checkpoint:  ctx.finalState,
+		final:       ctx.finalState,
+		priorTip:    priorTip,
+		finalMTP:    ctx.mempoolMTP,
+	}
+	truth, err := s.commitCanonicalTransition(plan, diag)
+	if truth != canonicalTruthNew {
 		return nil, err
 	}
-	summary, err := s.disconnectPreparedTip(ctx, tr.rollback)
-	var early *disconnectPreFinalizeError
-	if errors.As(err, &early) {
-		err = s.rollbackApplyBlock(early.cause, tr.rollback)
-	}
-	if endErr := tr.end(err); endErr != nil {
-		return nil, endErr
-	}
-	return summary, nil
-}
-
-// disconnectPreparedTip disconnects one prepared tip under the caller's already
-// open canonical transition. It takes that transition's rollback state by value
-// rather than the transition itself: nothing else here is transition-scoped, and
-// a value cannot be nil-dereferenced on the validity path.
-func (s *SyncEngine) disconnectPreparedTip(ctx disconnectTipContext, rollback syncRollbackState) (*ChainStateDisconnectSummary, error) {
-	summary, err := s.disconnectVerifiedUnderTransition(ctx.storedBlock, ctx.undo)
-	if err != nil {
-		return nil, &disconnectPreFinalizeError{cause: err}
-	}
-	if err := s.finalizeDisconnectState(rollback, ctx.tipHeight, ctx.newTipTimestamp); err != nil {
-		return nil, err
-	}
-	return summary, nil
-}
-
-// disconnectVerifiedUnderTransition mirrors ChainState.disconnectVerifiedStoredBlock
-// without its admissionMu acquisition. The canonical transition already owns
-// that lock and sync.RWMutex is not reentrant, so calling the public wrapper
-// from under the guard would self-deadlock. Validation order and the shared
-// already-validated locked mutation primitive are unchanged.
-func (s *SyncEngine) disconnectVerifiedUnderTransition(storedBlock verifiedStoredBlock, undo *BlockUndo) (*ChainStateDisconnectSummary, error) {
-	state := s.chainState
-	if state == nil {
-		return nil, errors.New("nil chainstate")
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if !state.HasTip {
-		return nil, errors.New("chainstate has no tip")
-	}
-	if undo == nil {
-		return nil, errors.New("nil block undo")
-	}
-	pb, err := validateVerifiedDisconnectStoredBlock(storedBlock, undo, state.TipHash, state.Height)
-	if err != nil {
-		return nil, err
-	}
-	return state.disconnectParsedBlockLocked(pb, storedBlock.lookupHash, undo)
+	s.mu.Lock()
+	s.tipTimestamp = ctx.newTipTimestamp
+	s.mu.Unlock()
+	return ctx.summary, err
 }
 
 func (s *SyncEngine) prepareDisconnectTip() (disconnectTipContext, error) {
@@ -131,21 +85,6 @@ func (s *SyncEngine) prepareDisconnectTip() (disconnectTipContext, error) {
 		return disconnectTipContext{}, err
 	}
 	return s.prepareMempoolDisconnectContext(ctx)
-}
-
-func (s *SyncEngine) prepareDisconnectTipFromVerified(storedBlock verifiedStoredBlock) (disconnectTipContext, error) {
-	if err := s.validateDisconnectTipReady(); err != nil {
-		return disconnectTipContext{}, err
-	}
-	tipHeight, tipHash, err := s.currentDisconnectTip()
-	if err != nil {
-		return disconnectTipContext{}, err
-	}
-	undo, err := s.blockStore.GetUndo(tipHash)
-	if err != nil {
-		return disconnectTipContext{}, err
-	}
-	return s.prepareDisconnectTipContext(tipHeight, tipHash, storedBlock, undo)
 }
 
 func (s *SyncEngine) currentDisconnectTip() (uint64, [32]byte, error) {
@@ -189,14 +128,20 @@ func (s *SyncEngine) prepareDisconnectTipContext(tipHeight uint64, tipHash [32]b
 	}, nil
 }
 
+// prepareMempoolDisconnectContext builds the post-disconnect image on a PRIVATE
+// clone and keeps that image's own summary: the live chainstate is never
+// disconnected in place, it receives the finished image by assignment after the
+// index commit selects NEW.
 func (s *SyncEngine) prepareMempoolDisconnectContext(ctx disconnectTipContext) (disconnectTipContext, error) {
 	finalState := cloneChainState(s.chainState)
 	if finalState == nil {
 		return disconnectTipContext{}, errors.New("nil final disconnect chainstate")
 	}
-	if _, err := finalState.disconnectVerifiedStoredBlock(ctx.storedBlock, ctx.undo); err != nil {
+	summary, err := finalState.disconnectVerifiedStoredBlock(ctx.storedBlock, ctx.undo)
+	if err != nil {
 		return disconnectTipContext{}, err
 	}
+	ctx.summary = summary
 	nextHeight, _, err := nextBlockContext(finalState)
 	if err != nil {
 		return disconnectTipContext{}, err
@@ -222,76 +167,29 @@ func (s *SyncEngine) validateDisconnectTipReady() error {
 	return nil
 }
 
-func (s *SyncEngine) disconnectCanonicalToAncestor(commonAncestorHeight uint64, preparedBlocks []verifiedStoredBlock, rollback syncRollbackState) error {
-	if err := s.validatePreparedDisconnectBlocks(commonAncestorHeight, preparedBlocks); err != nil {
-		return err
-	}
-	for _, storedBlock := range preparedBlocks {
-		ctx, err := s.prepareDisconnectTipFromVerified(storedBlock)
-		if err != nil {
-			return err
-		}
-		if _, err := s.disconnectPreparedTip(ctx, rollback); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *SyncEngine) validatePreparedDisconnectBlocks(commonAncestorHeight uint64, preparedBlocks []verifiedStoredBlock) error {
-	if err := s.validateDisconnectTipReady(); err != nil {
-		return err
-	}
-	currentTipHeight, _, err := s.currentCanonicalTip()
-	if err != nil {
-		return err
-	}
-	if commonAncestorHeight > currentTipHeight {
-		return errors.New("common ancestor is above canonical tip")
-	}
-	if uint64(len(preparedBlocks)) != currentTipHeight-commonAncestorHeight {
-		return errors.New("prepared disconnect block count mismatch")
-	}
-	for index, storedBlock := range preparedBlocks {
-		if err := s.validatePreparedDisconnectBlock(storedBlock, currentTipHeight-uint64(index)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *SyncEngine) validatePreparedDisconnectBlock(storedBlock verifiedStoredBlock, canonicalHeight uint64) error {
-	if storedBlock.parsed == nil {
-		return errors.New("invalid prepared disconnect block")
-	}
-	if len(storedBlock.parsed.Txs) != len(storedBlock.parsed.Txids) {
-		return errors.New("invalid prepared disconnect block")
-	}
-	expectedHash, ok, err := s.blockStore.CanonicalHash(canonicalHeight)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return errors.New("prepared disconnect block is not canonical")
-	}
-	if storedBlock.lookupHash != expectedHash {
-		return errors.New("prepared disconnect block is not canonical")
-	}
-	return nil
-}
-
-func (s *SyncEngine) previewDisconnectCanonicalToAncestor(previewState *ChainState, commonAncestorHeight uint64) ([]verifiedStoredBlock, uint64, error) {
+// previewDisconnectCanonicalToAncestor rolls previewState back to the common
+// ancestor, leaving it holding the immutable common-checkpoint image. It walks
+// the ancestry from the preview tip and CROSS-CHECKS every walked block against
+// the canonical identity's row at that height, so a walked hash the identity
+// does not name at that exact height is refused before any artifact is staged.
+func (s *SyncEngine) previewDisconnectCanonicalToAncestor(previewState *ChainState, canonicalIndex []string, commonAncestorHeight uint64) (uint64, error) {
 	if previewState == nil {
-		return nil, 0, nil
+		return 0, nil
 	}
 	currentTipHeight := previewState.Height
+	if currentTipHeight >= uint64(len(canonicalIndex)) || commonAncestorHeight > currentTipHeight {
+		return 0, errors.New("preview tip is not inside the canonical identity")
+	}
 	reorgDepth := currentTipHeight - commonAncestorHeight
 	disconnectedBlocks := make([]verifiedStoredBlock, 0, reorgDepth)
 	tipHash := previewState.TipHash
 	for height := currentTipHeight; height > commonAncestorHeight; height-- {
+		if canonicalIndex[height] != hex.EncodeToString(tipHash[:]) {
+			return 0, fmt.Errorf("disconnect row %x is not canonical at height %d", tipHash, height)
+		}
 		storedBlock, err := s.loadVerifiedStoredBlock(tipHash)
 		if err != nil {
-			return nil, 0, err
+			return 0, err
 		}
 		disconnectedBlocks = append(disconnectedBlocks, storedBlock)
 		tipHash = storedBlock.parsed.Header.PrevBlockHash
@@ -299,13 +197,13 @@ func (s *SyncEngine) previewDisconnectCanonicalToAncestor(previewState *ChainSta
 	for _, storedBlock := range disconnectedBlocks {
 		undo, err := s.blockStore.GetUndo(storedBlock.lookupHash)
 		if err != nil {
-			return nil, 0, err
+			return 0, err
 		}
 		if _, err := previewState.disconnectVerifiedStoredBlock(storedBlock, undo); err != nil {
-			return nil, 0, err
+			return 0, err
 		}
 	}
-	return disconnectedBlocks, reorgDepth, nil
+	return reorgDepth, nil
 }
 
 func (s *SyncEngine) fetchDisconnectBlockAndUndo(tipHash [32]byte) (verifiedStoredBlock, *BlockUndo, error) {
@@ -324,27 +222,4 @@ func (s *SyncEngine) getParentTimestamp(tipHeight uint64, prevBlockHash [32]byte
 	}
 	parentHeader, err := s.blockStore.chainWorkHeader(prevBlockHash)
 	return parentHeader.Timestamp, err
-}
-
-// finalizeDisconnectState updates chain state after disconnect.
-func (s *SyncEngine) finalizeDisconnectState(rollbackState syncRollbackState, disconnectedHeight uint64, newTipTimestamp uint64) error {
-	if err := s.blockStore.TruncateCanonical(disconnectedHeight); err != nil {
-		if isAtomicWritePostCommit(err) {
-			return s.handlePersistenceError(err, true, false)
-		}
-		return s.rollbackApplyBlock(err, rollbackState)
-	}
-	if s.cfg.ChainStatePath != "" {
-		if err := s.chainState.Save(s.cfg.ChainStatePath); err != nil {
-			if isAtomicWritePostCommit(err) {
-				return s.handlePersistenceError(err, false, true)
-			}
-			return s.rollbackApplyBlock(err, rollbackState)
-		}
-	}
-	s.mu.Lock()
-	s.tipTimestamp = newTipTimestamp
-	s.bestKnownHeight = rollbackState.bestKnownHeight
-	s.mu.Unlock()
-	return nil
 }

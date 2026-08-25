@@ -13,46 +13,6 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-func TestShouldPersistChainStateSnapshotCadence(t *testing.T) {
-	if !shouldPersistChainStateSnapshot(nil, nil) {
-		t.Fatalf("nil state+summary must persist to stay fail-closed")
-	}
-	if !shouldPersistChainStateSnapshot(NewChainState(), &ChainStateConnectSummary{BlockHeight: 1}) {
-		t.Fatalf("tipless state must persist to seed first snapshot")
-	}
-
-	smallState := NewChainState()
-	smallState.HasTip = true
-	smallState.Utxos = make(map[consensus.Outpoint]consensus.UtxoEntry, chainStateSnapshotSmallUtxoCutoff)
-	for i := uint64(0); i < chainStateSnapshotSmallUtxoCutoff; i++ {
-		var txid [32]byte
-		txid[0] = byte(i)
-		smallState.Utxos[consensus.Outpoint{Txid: txid, Vout: uint32(i)}] = consensus.UtxoEntry{Value: i + 1}
-	}
-	if !shouldPersistChainStateSnapshot(smallState, &ChainStateConnectSummary{BlockHeight: 17}) {
-		t.Fatalf("small utxo set must persist every block")
-	}
-
-	largeState := NewChainState()
-	largeState.HasTip = true
-	largeState.Utxos = make(map[consensus.Outpoint]consensus.UtxoEntry, chainStateSnapshotSmallUtxoCutoff+1)
-	for i := uint64(0); i <= chainStateSnapshotSmallUtxoCutoff; i++ {
-		var txid [32]byte
-		txid[0] = byte(i)
-		txid[1] = byte(i >> 8)
-		largeState.Utxos[consensus.Outpoint{Txid: txid, Vout: uint32(i)}] = consensus.UtxoEntry{Value: i + 1}
-	}
-	if shouldPersistChainStateSnapshot(largeState, &ChainStateConnectSummary{BlockHeight: chainStateSnapshotIntervalBlocks - 1}) {
-		t.Fatalf("large utxo set must skip non-interval snapshots")
-	}
-	if !shouldPersistChainStateSnapshot(largeState, &ChainStateConnectSummary{BlockHeight: chainStateSnapshotIntervalBlocks}) {
-		t.Fatalf("large utxo set must persist on interval boundary")
-	}
-	if !shouldPersistChainStateSnapshot(largeState, &ChainStateConnectSummary{BlockHeight: 0}) {
-		t.Fatalf("height zero summary must persist")
-	}
-}
-
 func TestCloneChainState_NilAndDeepCopy(t *testing.T) {
 	if cloneChainState(nil) != nil {
 		t.Fatalf("cloneChainState(nil) must be nil")

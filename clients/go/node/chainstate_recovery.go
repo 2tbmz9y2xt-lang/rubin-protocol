@@ -1,6 +1,7 @@
 package node
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -8,23 +9,22 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-const (
-	chainStateSnapshotIntervalBlocks  = uint64(32)
-	chainStateSnapshotSmallUtxoCutoff = 4096
-)
-
-func shouldPersistChainStateSnapshot(state *ChainState, summary *ChainStateConnectSummary) bool {
-	if state == nil || summary == nil {
-		return true
+// proveCanonicalArtifacts strict-reads one suffix row's BlockHeaderBytes,
+// BlockBytes and undo through the SAME reader the startup scan uses, so
+// precommit recovery and startup recovery can never disagree about what a
+// retained canonical artifact set is. It writes nothing and repairs nothing.
+func (bs *BlockStore) proveCanonicalArtifacts(blockHash [32]byte) error {
+	if bs == nil {
+		return errors.New("nil blockstore")
 	}
-	view := state.view()
-	if !view.hasTip || summary.BlockHeight == 0 {
-		return true
+	row, err := bs.canonicalArtifactsComplete(hex.EncodeToString(blockHash[:]))
+	if err != nil {
+		return err
 	}
-	if view.utxoCount <= chainStateSnapshotSmallUtxoCutoff {
-		return true
+	if !row.complete {
+		return fmt.Errorf("%w: canonical suffix artifact set for %x is incomplete", errCanonicalIndexIncompleteSuffix, blockHash)
 	}
-	return summary.BlockHeight%chainStateSnapshotIntervalBlocks == 0
+	return nil
 }
 
 func cloneChainState(src *ChainState) *ChainState {

@@ -4,7 +4,6 @@ package node
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -25,11 +24,17 @@ func newPersistenceFaultEngine(t *testing.T) (*SyncEngine, *BlockStore, string) 
 	return engine, store, dir
 }
 
-func requirePersistenceFault(t *testing.T, err error, operation atomicWriteOperation) *storagePersistenceFault {
+// requirePersistenceFault proves one AMBIGUOUS canonical-index write: the
+// transition returns the atomic-write cause itself, and the engine carries the
+// terminal latch installed from that cause. The returned error is no longer the
+// latch wrapper — publication classifies, latches and returns the commit cause.
+func requirePersistenceFault(t *testing.T, engine *SyncEngine, err error, operation atomicWriteOperation) *storagePersistenceFault {
 	t.Helper()
 	atomic := requireAtomicWriteError(t, err, atomicWriteAfterNamespaceCommit, operation)
-	var fault *storagePersistenceFault
-	requireAtomicTest(t, errors.Is(atomic.primary, os.ErrPermission) && errors.As(err, &fault) && fault != nil, "primary=%v error type=%T, want permission *storagePersistenceFault", atomic.primary, err)
+	engine.mu.RLock()
+	fault := engine.persistenceFault
+	engine.mu.RUnlock()
+	requireAtomicTest(t, errors.Is(atomic.primary, os.ErrPermission) && fault != nil, "primary=%v latch=%v", atomic.primary, fault)
 	return fault
 }
 
@@ -48,10 +53,12 @@ func startBlockedApply(t *testing.T, engine *SyncEngine, store *BlockStore, seco
 	t.Helper()
 	entered, release, result := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 	withAtomicWriteOps(t, func(ops *atomicWriteOps) {
-		open, link, unlink, links, opens, injected := ops.openScratch, ops.link, ops.unlink, 0, 0, false
+		open, opens, injected := ops.openScratch, 0, false
 		ops.openScratch = func(path string, flag int, mode os.FileMode) (atomicWriteScratchFile, error) {
 			opens++
-			if opens > 1 && secondScratch != nil {
+			// Only a scratch opened AFTER the injection can belong to a queued
+			// mutator: the blocked apply opens several of its own first.
+			if injected && secondScratch != nil {
 				select {
 				case secondScratch <- struct{}{}:
 				default:
@@ -59,15 +66,15 @@ func startBlockedApply(t *testing.T, engine *SyncEngine, store *BlockStore, seco
 			}
 			return open(path, flag, mode)
 		}
-		ops.link = func(a, b string) error { links++; return link(a, b) }
-		ops.unlink = func(path string) error {
-			if !injected && links == 1 && filepath.Dir(path) == store.blocksDir {
+		sync := ops.syncParent
+		ops.syncParent = func(parent string) error {
+			if !injected && parent == store.rootPath {
 				injected = true
 				close(entered)
 				<-release
 				return os.ErrPermission
 			}
-			return unlink(path)
+			return sync(parent)
 		}
 	})
 	go func() { _, err := engine.ApplyBlock(DevnetGenesisBlockBytes(), nil); result <- err }()
@@ -83,7 +90,19 @@ func startBlockedApply(t *testing.T, engine *SyncEngine, store *BlockStore, seco
 	return release, result
 }
 
-func TestSyncEnginePostCommitFailuresReloadVisibleStateWithoutCompensation(t *testing.T) {
+// TestSyncEnginePostCommitFailuresDoNotCompensate walks every durable write a
+// direct connect performs, in the order the state machine performs them —
+// block, header, undo, common checkpoint, canonical index — and fails each one
+// AFTER its namespace commit.
+//
+// Only the index write can cross the commit point. The four writes before it are
+// precommit: they preserve OLD, publish nothing, latch nothing, and leave the
+// last usable snapshot intact because the checkpoint they replace is a row
+// common to both identities. The index write is ambiguous, so its one strict
+// readback finds the planned-new identity and yields TERMINAL_PERSISTENCE(new):
+// the full image and summary publish and the engine latches. Nothing anywhere
+// compensates, reloads or rewrites.
+func TestSyncEnginePostCommitFailuresDoNotCompensate(t *testing.T) {
 	targets := []struct {
 		name   string
 		parent func(*BlockStore, string) string
@@ -91,8 +110,8 @@ func TestSyncEnginePostCommitFailuresReloadVisibleStateWithoutCompensation(t *te
 		{"block", func(s *BlockStore, _ string) string { return s.blocksDir }},
 		{"header", func(s *BlockStore, _ string) string { return s.headersDir }},
 		{"undo", func(s *BlockStore, _ string) string { return s.undoDir }},
+		{"checkpoint", func(_ *BlockStore, d string) string { return d }},
 		{"index", func(s *BlockStore, _ string) string { return s.rootPath }},
-		{"chainstate", func(_ *BlockStore, d string) string { return d }},
 	}
 	entries := []func(*SyncEngine, []byte, []uint64) (*ChainStateConnectSummary, error){
 		(*SyncEngine).ApplyBlock,
@@ -103,7 +122,6 @@ func TestSyncEnginePostCommitFailuresReloadVisibleStateWithoutCompensation(t *te
 			for entryIndex, entry := range entries {
 				t.Run(tc.name+"/"+failure+"/"+[]string{"apply", "reorg"}[entryIndex], func(t *testing.T) {
 					engine, store, dir := newPersistenceFaultEngine(t)
-					engine.cfg.ChainStatePath = []string{"", engine.cfg.ChainStatePath, engine.cfg.ChainStatePath, engine.cfg.ChainStatePath, engine.cfg.ChainStatePath}[targetIndex]
 					parent, failed, commits := tc.parent(store, dir), false, 0
 					withAtomicWriteOps(t, func(ops *atomicWriteOps) {
 						link, rename, unlink, sync := ops.link, ops.rename, ops.unlink, ops.syncParent
@@ -125,33 +143,30 @@ func TestSyncEnginePostCommitFailuresReloadVisibleStateWithoutCompensation(t *te
 						}
 					})
 					summary, err := entry(engine, DevnetGenesisBlockBytes(), nil)
-					wantSummary := entryIndex == 1 && targetIndex >= 3
-					requireAtomicTest(t, (summary != nil) == wantSummary && failed, "summary=%+v wantSummary=%v injected=%v", summary, wantSummary, failed)
-					if wantSummary {
-						requireAtomicTest(t, engine.isCompleteVisibleCanonicalSummary(summary, []string{hex.EncodeToString(summary.BlockHash[:])}), "summary=%+v, want complete visible NEW", summary)
+					terminalNew := targetIndex == 4
+					requireAtomicTest(t, (summary != nil) == terminalNew && failed && err != nil, "summary=%+v terminalNew=%v injected=%v err=%v", summary, terminalNew, failed, err)
+					requireAtomicTest(t, engine.persistenceFaulted() == terminalNew && commits == targetIndex+1, "latch=%v commits=%d", engine.persistenceFaulted(), commits)
+					if terminalNew {
+						requirePersistenceFault(t, engine, err, atomicWriteOverwrite)
 					}
-					fault := requirePersistenceFault(t, err, []atomicWriteOperation{atomicWriteCreateIfAbsent, atomicWriteCreateIfAbsent, atomicWriteCreateIfAbsent, atomicWriteOverwrite, atomicWriteOverwrite}[targetIndex])
-					requireAtomicTest(t, fault == engine.persistenceFault && errors.Is(fault.cause, os.ErrPermission) && commits == targetIndex+1, "fault=%+v commits=%d", fault, commits)
 					disk, err := OpenBlockStore(BlockStorePath(dir))
 					mustAtomic(t, err)
 					_, _, diskStore, err := disk.Tip()
 					mustAtomic(t, err)
 					_, _, cachedStore, err := store.Tip()
-					requireAtomicTest(t, err == nil && diskStore == cachedStore && diskStore == (targetIndex >= 3), "store disk=%v cache=%v err=%v", diskStore, cachedStore, err)
+					requireAtomicTest(t, err == nil && diskStore == cachedStore && diskStore == terminalNew, "store disk=%v cache=%v err=%v", diskStore, cachedStore, err)
 					diskState, err := LoadChainState(ChainStatePath(dir))
 					mustAtomic(t, err)
-					requireAtomicTest(t, diskState.HasTip == (targetIndex == 4) && engine.chainState.view().hasTip == (targetIndex >= 3), "state disk=%v cache=%v", diskState.HasTip, engine.chainState.view().hasTip)
+					// The bootstrap checkpoint IS the exact empty pre-genesis
+					// state, so the durable snapshot never has a tip here.
+					requireAtomicTest(t, !diskState.HasTip && engine.chainState.view().hasTip == terminalNew, "state disk=%v cache=%v", diskState.HasTip, engine.chainState.view().hasTip)
 				})
 			}
 		}
 	}
-	var nilStore *BlockStore
-	requireAtomicTest(t, nilStore.reloadFromDisk() != nil, "nil blockstore reload")
-	cause, reload := errors.New("cause"), errors.New("reload")
+	cause := errors.New("cause")
 	fault := &storagePersistenceFault{cause: cause}
 	requireAtomicTest(t, fault.Error() == "storage persistence fault: cause" && errors.Is(fault, cause), "fault=%v", fault)
-	fault.reloadErr = reload
-	requireAtomicTest(t, fault.Error() == "storage persistence fault: cause (reload failed: reload)" && errors.Is(fault, cause), "fault=%v", fault)
 	var nilFault *storagePersistenceFault
 	requireAtomicTest(t, nilFault.Unwrap() == nil, "nil fault unwrap")
 }
@@ -185,7 +200,7 @@ func TestSyncEnginePostCommitFaultKeepsAdmissionClosedAfterLatch(t *testing.T) {
 		t.Error("AdmissionContext was available during an active transition")
 	}
 	close(release)
-	requirePersistenceFault(t, awaitPersistenceResult(t, result, "failed apply"), atomicWriteCreateIfAbsent)
+	requirePersistenceFault(t, engine, awaitPersistenceResult(t, result, "failed apply"), atomicWriteOverwrite)
 
 	if !engine.persistenceFaulted() {
 		t.Fatal("persistence fault was not latched")
@@ -231,34 +246,28 @@ func TestSyncEngineQueuesMutatorsUntilPostCommitFaultIsPublished(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 	engine.persistenceFaultMu.Unlock()
-	requirePersistenceFault(t, awaitPersistenceResult(t, firstResult, "first apply"), atomicWriteCreateIfAbsent)
+	requirePersistenceFault(t, engine, awaitPersistenceResult(t, firstResult, "first apply"), atomicWriteOverwrite)
 	results := [2]error{awaitPersistenceResult(t, secondResult, "second apply"), awaitPersistenceResult(t, bootstrapResult, "bootstrap")}
 	requireAtomicTest(t, errors.Is(results[0], errStoragePersistenceFault) && errors.Is(results[1], errStoragePersistenceFault), "second apply=%v bootstrap=%v", results[0], results[1])
 }
 
 func TestBootstrapPostCommitFaultIsNeverRaceRecovered(t *testing.T) {
-	for _, reloadFails := range []bool{false, true} {
-		t.Run(map[bool]string{false: "reloads", true: "reload_fails"}[reloadFails], func(t *testing.T) {
-			engine, _, dir := newPersistenceFaultEngine(t)
-			failed := false
-			withAtomicWriteOps(t, func(ops *atomicWriteOps) {
-				sync := ops.syncParent
-				ops.syncParent = func(parent string) error {
-					if !failed && parent == dir {
-						failed = true
-						if reloadFails {
-							mustAtomic(t, os.Remove(ChainStatePath(dir)))
-							mustAtomic(t, os.Mkdir(ChainStatePath(dir), 0o700))
-						}
-						return os.ErrPermission
-					}
-					return sync(parent)
-				}
-			})
-			fault, later := requirePersistenceFault(t, engine.BootstrapCanonicalGenesisIfEmpty(), atomicWriteOverwrite), engine.BootstrapCanonicalGenesisIfEmpty()
-			requireAtomicTest(t, failed && fault == engine.persistenceFault && errors.Is(fault.cause, os.ErrPermission) && (fault.reloadErr != nil) == reloadFails && errors.Is(later, errStoragePersistenceFault), "fault=%+v injected=%v later=%v", fault, failed, later)
-		})
-	}
+	engine, store, _ := newPersistenceFaultEngine(t)
+	failed := false
+	withAtomicWriteOps(t, func(ops *atomicWriteOps) {
+		sync := ops.syncParent
+		ops.syncParent = func(parent string) error {
+			if !failed && parent == store.rootPath {
+				failed = true
+				return os.ErrPermission
+			}
+			return sync(parent)
+		}
+	})
+	err := engine.BootstrapCanonicalGenesisIfEmpty()
+	fault := requirePersistenceFault(t, engine, err, atomicWriteOverwrite)
+	later := engine.BootstrapCanonicalGenesisIfEmpty()
+	requireAtomicTest(t, failed && errors.Is(fault.cause, os.ErrPermission) && errors.Is(later, errStoragePersistenceFault), "fault=%+v injected=%v later=%v", fault, failed, later)
 }
 
 func TestSyncEnginePersistenceFaultBlocksEveryMutationEntrypoint(t *testing.T) {
@@ -289,30 +298,25 @@ func TestSyncEnginePersistenceFaultBlocksEveryMutationEntrypoint(t *testing.T) {
 	}
 }
 
-func TestSyncEngineRollbackAndDisconnectPostCommitFaultsDoNotCompensate(t *testing.T) {
-	t.Run("rollback", func(t *testing.T) {
+func TestSyncEngineStagingAndDisconnectPostCommitFaultsDoNotCompensate(t *testing.T) {
+	t.Run("staging_refusal_never_reaches_the_index", func(t *testing.T) {
 		engine, store, _ := newPersistenceFaultEngine(t)
-		openFailed, syncFailed, commits := false, false, 0
+		openFailed, indexWrites := false, 0
 		withAtomicWriteOps(t, func(ops *atomicWriteOps) {
-			open, rename, sync := ops.openScratch, ops.rename, ops.syncParent
+			open := ops.openScratch
 			ops.openScratch = func(path string, f int, m os.FileMode) (atomicWriteScratchFile, error) {
+				if filepath.Dir(path) == store.rootPath {
+					indexWrites++
+				}
 				if !openFailed && filepath.Dir(path) == store.blocksDir {
 					openFailed = true
 					return nil, syscall.ENOSPC
 				}
 				return open(path, f, m)
 			}
-			ops.rename = func(a, b string) error { commits++; return rename(a, b) }
-			ops.syncParent = func(parent string) error {
-				if !syncFailed && parent == store.rootPath {
-					syncFailed = true
-					return os.ErrPermission
-				}
-				return sync(parent)
-			}
 		})
-		requirePersistenceFault(t, func() error { _, err := engine.ApplyBlock(DevnetGenesisBlockBytes(), nil); return err }(), atomicWriteOverwrite)
-		requireAtomicTest(t, openFailed && syncFailed && commits == 1 && engine.persistenceFault != nil, "open=%v sync=%v commits=%d fault=%+v", openFailed, syncFailed, commits, engine.persistenceFault)
+		_, err := engine.ApplyBlock(DevnetGenesisBlockBytes(), nil)
+		requireAtomicTest(t, openFailed && err != nil && indexWrites == 0 && !engine.persistenceFaulted(), "err=%v index writes=%d latch=%v", err, indexWrites, engine.persistenceFaulted())
 	})
 	t.Run("disconnect", func(t *testing.T) {
 		engine, store, _ := newPersistenceFaultEngine(t)
@@ -329,10 +333,12 @@ func TestSyncEngineRollbackAndDisconnectPostCommitFaultsDoNotCompensate(t *testi
 				return sync(parent)
 			}
 		})
-		requirePersistenceFault(t, func() error { _, err := engine.DisconnectTip(); return err }(), atomicWriteOverwrite)
-		requireAtomicTest(t, failed && commits == 1 && engine.persistenceFault != nil, "failed=%v commits=%d fault=%+v", failed, commits, engine.persistenceFault)
-		_, _, ok, err := store.Tip()
-		requireAtomicTest(t, err == nil && !ok, "cache tip=%v err=%v", ok, err)
+		_, err := engine.DisconnectTip()
+		// Checkpoint save, then the one index write: two durable commits.
+		requirePersistenceFault(t, engine, err, atomicWriteOverwrite)
+		requireAtomicTest(t, failed && commits == 2, "failed=%v commits=%d", failed, commits)
+		_, _, ok, tipErr := store.Tip()
+		requireAtomicTest(t, tipErr == nil && !ok, "cache tip=%v err=%v", ok, tipErr)
 	})
 }
 
@@ -349,7 +355,7 @@ func TestSyncEngineTerminalFaultedSnapshot(t *testing.T) {
 	var nilEngine *SyncEngine
 	requireAtomicTest(t, !nilEngine.TerminalFaulted(), "nil engine reported a terminal fault")
 
-	t.Run("post_commit_persistence_fault", func(t *testing.T) {
+	t.Run("terminal_canonical_index_fault", func(t *testing.T) {
 		engine, store, _ := newPersistenceFaultEngine(t)
 		requireAtomicTest(t, !engine.TerminalFaulted(), "fresh engine reported a terminal fault")
 		failed := false
@@ -364,7 +370,7 @@ func TestSyncEngineTerminalFaultedSnapshot(t *testing.T) {
 			}
 		})
 		_, applyErr := engine.ApplyBlock(DevnetGenesisBlockBytes(), nil)
-		fault := requirePersistenceFault(t, applyErr, atomicWriteOverwrite)
+		fault := requirePersistenceFault(t, engine, applyErr, atomicWriteOverwrite)
 		requireAtomicTest(t, failed && engine.TerminalFaulted(), "injected=%v terminal=%v", failed, engine.TerminalFaulted())
 		// Reading the status is not a state transition: the latched fault
 		// pointer and its cause survive repeated reads unchanged.
@@ -374,28 +380,4 @@ func TestSyncEngineTerminalFaultedSnapshot(t *testing.T) {
 		requireAtomicTest(t, engine.persistenceFault == fault && errors.Is(fault.cause, os.ErrPermission), "fault=%+v", engine.persistenceFault)
 	})
 
-	t.Run("rollback_restore_fault", func(t *testing.T) {
-		engine, store, _ := newPersistenceFaultEngine(t)
-		requireAtomicTest(t, !engine.TerminalFaulted(), "fresh engine reported a terminal fault")
-		blocked := 0
-		withAtomicWriteOps(t, func(ops *atomicWriteOps) {
-			open := ops.openScratch
-			ops.openScratch = func(path string, flag int, mode os.FileMode) (atomicWriteScratchFile, error) {
-				// Both writes fail BEFORE their namespace commit, so neither is
-				// an ambiguous post-commit fault: the block write fails the
-				// apply, and the canonical-index write fails its rollback
-				// restore. That pair is the rollbackRestoreFault latch.
-				if dir := filepath.Dir(path); dir == store.blocksDir || dir == store.rootPath {
-					blocked++
-					return nil, syscall.ENOSPC
-				}
-				return open(path, flag, mode)
-			}
-		})
-		_, applyErr := engine.ApplyBlock(DevnetGenesisBlockBytes(), nil)
-		var restoreFault *rollbackRestoreFault
-		requireAtomicTest(t, blocked >= 2 && errors.As(applyErr, &restoreFault), "blocked=%d apply=%v", blocked, applyErr)
-		requireAtomicTest(t, engine.TerminalFaulted() && engine.persistenceFault != nil, "terminal=%v fault=%+v", engine.TerminalFaulted(), engine.persistenceFault)
-		requireAtomicTest(t, errors.Is(engine.persistenceFault.cause, applyErr), "latched cause=%v, want the rollback restore fault %v", engine.persistenceFault.cause, applyErr)
-	})
 }

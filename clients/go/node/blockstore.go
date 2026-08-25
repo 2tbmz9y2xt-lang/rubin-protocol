@@ -161,42 +161,6 @@ func OpenBlockStoreWithNoncanonicalLimit(rootPath string, limit uint64) (*BlockS
 	return store, nil
 }
 
-// reloadFromDisk validates and reconstructs before joint in-place publication.
-func (bs *BlockStore) reloadFromDisk() error {
-	if bs == nil {
-		return errors.New("nil blockstore")
-	}
-	bs.stateMu.Lock()
-	defer bs.stateMu.Unlock()
-	budget := noncanonicalRecoveryBudget{}
-	if err := bs.beginNoncanonicalTransitionLocked(&budget); err != nil {
-		return err
-	}
-	defer bs.endNoncanonicalTransitionLocked()
-	paths := newBlockStorePaths(bs.rootPath)
-	if err := paths.requireInitialized(); err != nil {
-		return err
-	}
-	index, raw, err := loadBlockStoreIndex(paths.index)
-	if err != nil {
-		return err
-	}
-	refreshed, err := newBlockStore(paths, index, raw)
-	if err != nil {
-		return err
-	}
-	prepared := &preparedCanonicalIndex{newRaw: raw, index: index, heightByHash: refreshed.canonicalHeightByHash, chainWork: refreshed.chainWorkByHash}
-	delta, err := bs.prepareNoncanonicalReclassification(prepared, refreshed)
-	if err != nil {
-		return err
-	}
-	if err := requireCompleteCanonicalPrefix(refreshed); err != nil {
-		return err
-	}
-	publishNoncanonicalReclassificationLocked(bs, prepared, delta, true)
-	return nil
-}
-
 // beginNoncanonicalTransitionLocked fences/drains under caller-held stateMu without a goroutine.
 func (bs *BlockStore) beginNoncanonicalTransitionLocked(budget *noncanonicalRecoveryBudget) error {
 	if err := bs.waitNoncanonicalTransitionLocked(budget); err != nil {
@@ -469,7 +433,7 @@ func (bs *BlockStore) applyPreparedCanonicalLocked(prepared *preparedCanonicalIn
 		return err
 	}
 	defer bs.endNoncanonicalTransitionLocked()
-	delta, err := bs.prepareNoncanonicalReclassification(prepared, nil)
+	delta, err := bs.prepareNoncanonicalReclassification(prepared)
 	if err != nil {
 		return err
 	}
@@ -595,8 +559,8 @@ func (bs *BlockStore) RestoreCanonicalIndex(canonical []string) error {
 	// A persisted index must be REOPENABLE: parseHex accepts uppercase and padded rows
 	// the strict on-disk decoder refuses, so the spelling is proven before the lock, as
 	// prepareCanonicalIndex proves it; the copy keeps an empty list non-nil for it, and
-	// nil folds to that empty identity, unlike prepare — the rollback caller
-	// (SyncEngine.restoreRollbackPersistentState) passes the nil CanonicalIndexSnapshot returns for an empty index.
+	// nil folds to that empty identity, unlike prepare, so a caller may pass the nil
+	// CanonicalIndexSnapshot returns for an empty index.
 	nextCanonical := append(make([]string, 0, len(canonical)), canonical...)
 	// Restore passes no comparison identity because even an identical list must save.
 	prepared, err := prepareCanonicalIndex(nil, nextCanonical)
@@ -1511,7 +1475,7 @@ func (p *preparedCanonicalIndex) prepareCommitLocked(bs *BlockStore) (*noncanoni
 	if !p.spent.CompareAndSwap(false, true) {
 		return nil, canonicalCommitResult{class: canonicalCommitStale, err: errPreparedIndexSpent}, false
 	}
-	delta, err := bs.prepareNoncanonicalReclassification(p, nil)
+	delta, err := bs.prepareNoncanonicalReclassification(p)
 	if err != nil {
 		return nil, canonicalCommitResult{err: err}, false
 	}

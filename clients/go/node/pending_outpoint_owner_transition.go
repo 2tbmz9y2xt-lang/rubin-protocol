@@ -29,7 +29,12 @@ func (o *PendingOutpointOwner) beginTransition() (uint64, error) {
 }
 
 // commitStableTip publishes the transition's stable tip and reopens admission.
-// It is the last step of a successful transition.
+//
+// It has NO production caller: a canonical transition publishes its owner image
+// — stable tip included — by assignment inside publishCanonicalMempoolPlan,
+// under the same owner hold as M1/O1, because nothing after the canonical-index
+// commit may return an error. It survives as the direct owner-level primitive
+// the owner's own tests drive.
 func (o *PendingOutpointOwner) commitStableTip(tip PendingOutpointTip) error {
 	if o == nil {
 		return nil
@@ -138,6 +143,11 @@ func (o *PendingOutpointOwner) buildRestoreLocked(snap pendingOutpointSnapshot) 
 // index. It cannot fail, so no error-capable step remains once the owner image is
 // visible. High-waters never regress — the larger of current and snapshot wins —
 // so an aborted transition cannot hand out a sequence twice. Caller holds o.mu.
+//
+// It does NOT close the transition: inTransition is cleared by the caller inside
+// the same o.mu hold, and only for an ordinary COMMITTED outcome —
+// TERMINAL_PERSISTENCE(new) publishes this identical image and deliberately
+// keeps the transition and admission latched.
 func (o *PendingOutpointOwner) publishRestoreLocked(snap pendingOutpointSnapshot, candidate pendingOutpointIndex) {
 	o.byOutpoint = candidate.byOutpoint
 	o.byToken = candidate.byToken
