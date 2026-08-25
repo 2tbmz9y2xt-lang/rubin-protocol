@@ -3830,7 +3830,7 @@ func TestRestoreMempoolSnapshotPreservesAdmissionSeqHighWatermark(t *testing.T) 
 }
 
 func TestSnapshotMempoolNormalizesRollingFloor(t *testing.T) {
-	mp := &Mempool{}
+	mp := &Mempool{pendingOutpoints: newPendingOutpointOwner(PendingOutpointTip{})}
 	snapshot, err := snapshotMempool(mp)
 	if err != nil {
 		t.Fatalf("snapshotMempool: %v", err)

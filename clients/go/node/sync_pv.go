@@ -157,8 +157,7 @@ func (s *SyncEngine) classifyPersistenceFailure(err error, rollbackState syncRol
 	fault := s.handlePersistenceError(err, false, false)
 	// The prepared M/O image has already been published, so reverting only the tip
 	// would freeze a final-chain Mempool against a pre-apply canonical tip.
-	// The frozen state is unobservable behind the retained guard, but it is
-	// the state a restart reconciles against, so restore both halves.
+	// Admission remains closed while both in-memory halves are restored for restart reconciliation.
 	if restoreErr := errors.Join(
 		publishPreparedChainState(s.chainState, rollbackState.chainState),
 		restoreMempoolSnapshot(s.mempool, rollbackState.mempool),

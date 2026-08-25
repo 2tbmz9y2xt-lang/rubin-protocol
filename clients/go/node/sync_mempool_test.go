@@ -33,7 +33,6 @@ func mustCanonicalMO(t *testing.T, label string, err error) {
 		t.Fatalf("%s: %v", label, err)
 	}
 }
-
 func awaitCanonicalMOError(t *testing.T, ch <-chan error, label string) error {
 	t.Helper()
 	select {
@@ -44,7 +43,6 @@ func awaitCanonicalMOError(t *testing.T, ch <-chan error, label string) error {
 		return nil
 	}
 }
-
 func awaitCanonicalMOAdmissionRLock(t *testing.T, caller string) {
 	t.Helper()
 	deadline, stack := time.Now().Add(time.Second), make([]byte, 1<<20)
@@ -59,7 +57,6 @@ func awaitCanonicalMOAdmissionRLock(t *testing.T, caller string) {
 	}
 	t.Fatalf("%s did not block at admissionMu.RLock", caller)
 }
-
 func newCanonicalMOFixture(t *testing.T, inputs int, cfg MempoolConfig) *canonicalMOFixture {
 	engine, store, target := newReorgTestEngine(t)
 	signer, err := consensus.NewMLDSA87Keypair()

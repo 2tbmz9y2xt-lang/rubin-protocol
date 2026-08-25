@@ -107,8 +107,8 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 	if err := validateRestoredClaimBinding(txs, candidate); err != nil {
 		return err
 	}
-	// Everything fallible is done. Both locks are held, so the owner image and
-	// the records below become visible to any reader as one step.
+	// Everything fallible is done. Both locks remain held while the owner image
+	// and record maps below are replaced.
 	owner.publishRestoreLocked(snapshot.pending, candidate)
 	m.txs = txs
 	m.wtxids = wtxids
