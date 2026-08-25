@@ -446,6 +446,22 @@ echo "Preparing the healthy initialized store"
 "${GO_BIN}" --create-store --datadir "${BASE_DIR}" --mine-address "${MINE_ADDRESS}" \
   --mine-blocks 1 --mine-exit >"${ART}/base.mine.log" 2>&1
 
+# A bare --mine-exit leaves the durable snapshot at the precommit CHECKPOINT,
+# one transition behind the canonical index tip. Startup recovery — anchor,
+# reconcile, save — is what advances it, so each prepared datadir gets exactly
+# one lifecycle cycle here, before any shape or pin is derived from it. Same
+# start/wait/stop pattern as the empty capture below.
+recover_to_canonical_tip() {
+  local log="$1" dir="$2" pid
+  rubin_process_start "${log}" "${GO_BIN}" --datadir "${dir}" --bind 127.0.0.1:0
+  pid="${RUBIN_PROCESS_LAST_PID}"
+  rubin_process_wait_for_log "${log}" "rubin-node skeleton running" 60 "${pid}"
+  rubin_process_stop_pid "${pid}"
+}
+echo "Checkpointing the prepared stores at their canonical tips"
+recover_to_canonical_tip "healthy-recover.log" "${HEALTHY_DIR}"
+recover_to_canonical_tip "base-recover.log" "${BASE_DIR}"
+
 # The encoded empty/no-tip chainstate has to come from the client's own encoder,
 # not from a hand-written fixture: start a real node on a freshly created empty
 # store through the process lifecycle helpers, wait for its readiness evidence,

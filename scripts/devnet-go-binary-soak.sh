@@ -61,7 +61,6 @@ PARTITION_REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-partition-hea
 PARTITION_REORG_REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-partition-heal-reorg-report.json"
 PARTITION_REORG_BLOCK_CHECK_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-reorg-block-check.go"
 BASE_HEIGHT=$((TARGET_HEIGHT - 1))
-BASE_MINE_BLOCKS=$((BASE_HEIGHT + 1))
 A_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-a"
 B_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-b"
 C_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-c"
@@ -1254,7 +1253,9 @@ MINE_ADDRESS_HEX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1
 TO_ADDRESS_HEX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["to_address_hex"])' "${KEYGEN_JSON}")"
 mkdir -p "${A_DIR}" "${B_DIR}" "${C_DIR}"
 echo "Mining mature Go chain to height ${BASE_HEIGHT}"
-"${NODE_BIN}" --create-store --datadir "${A_DIR}" --mine-address "${MINE_ADDRESS_HEX}" --mine-blocks "${BASE_MINE_BLOCKS}" --mine-exit >"${MINE_LOG}" 2>&1
+# --mine-blocks N on a fresh store bootstraps genesis (height 0) and mines N on
+# top of it, so the block count IS the resulting height: ask for BASE_HEIGHT.
+"${NODE_BIN}" --create-store --datadir "${A_DIR}" --mine-address "${MINE_ADDRESS_HEX}" --mine-blocks "${BASE_HEIGHT}" --mine-exit >"${MINE_LOG}" 2>&1
 cp -R "${A_DIR}/." "${B_DIR}/"
 cp -R "${A_DIR}/." "${C_DIR}/"
 echo "Starting three Go rubin-node processes"
@@ -1268,7 +1269,10 @@ if (( WITH_RESTART == 1 )); then
   stop_registered_pid "${B_PID}"
 fi
 echo "Submitting tx through Go RPC and mining it through /mine_next"
-TX_HEX="$("${TXGEN_BIN}" --datadir "${A_DIR}" --from-key "${FROM_DER_HEX}" --to-key "${TO_ADDRESS_HEX}" --amount 1 --fee 1 --submit-to "${A_RPC_ADDR}")"
+# --fee is an ABSOLUTE amount while the mempool floor is a RATE (default 1 per
+# weight unit), so the fee must cover the whole tx weight: an ML-DSA-87 transfer
+# weighs ~7.8k, and 20000 clears that with >2x margin without pinning the weight.
+TX_HEX="$("${TXGEN_BIN}" --datadir "${A_DIR}" --from-key "${FROM_DER_HEX}" --to-key "${TO_ADDRESS_HEX}" --amount 1 --fee 20000 --submit-to "${A_RPC_ADDR}")"
 if ! MEMPOOL_JSON="$(rpc_json GET "${A_RPC_ADDR}" /get_mempool)"; then echo "get_mempool request failed: ${MEMPOOL_JSON}" >&2; exit 1; fi
 TX_ID="$(printf '%s' "${MEMPOOL_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); (d.get("count") == 1 and d.get("txids")) or sys.exit("expected mempool count=1; mempool_json="+json.dumps(d, sort_keys=True)); print(d["txids"][0])')"
 if ! MINE_JSON="$(rpc_json POST "${A_RPC_ADDR}" /mine_next '{}')"; then echo "mine_next request failed: ${MINE_JSON}" >&2; exit 1; fi
