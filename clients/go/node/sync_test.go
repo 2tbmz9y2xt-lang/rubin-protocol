@@ -2660,7 +2660,7 @@ func TestCanonicalCutoverLatchedBootstrapReturnIsTotal(t *testing.T) {
 		{"unlatched success still returns nil", nil, false, false, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := latchAwareBootstrapResult(tc.applyErr, tc.hasTip, tc.latched)
+			got := raceTolerantBootstrapResult(tc.applyErr, tc.hasTip, tc.latched)
 			if tc.want == nil && got != nil || tc.want != nil && !errors.Is(got, tc.want) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}

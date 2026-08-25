@@ -346,48 +346,46 @@ func (s *SyncEngine) BootstrapCanonicalGenesisIfEmpty() error {
 	if errors.Is(applyErr, errStoragePersistenceFault) || isAtomicWritePostCommit(applyErr) {
 		return applyErr
 	}
-	return latchAwareBootstrapResult(applyErr, s.chainState.view().hasTip, s.persistenceFaulted())
+	return raceTolerantBootstrapResult(applyErr, s.chainState.view().hasTip, s.persistenceFaulted())
 }
 
-// latchAwareBootstrapResult is the TOTAL bootstrap return rule: a LATCHED engine
-// never reports bootstrap success, on any input. The race tolerance below covers
-// exactly one thing — a tip installed concurrently on the shared ChainState —
-// and a terminal outcome is not that: an untagged ambiguous index write, a
-// canonical store-integrity refusal and an empty-class latch all leave the engine
-// closed until restart, and a caller told "nil" would go on to mine or serve on a
-// node that can no longer mutate anything.
+// raceTolerantBootstrapResult is the TOTAL bootstrap return rule. It tolerates a
+// directly changed shared ChainState — if apply fails after an external tip
+// appears, bootstrap is already satisfied — while a LATCHED engine never reports
+// bootstrap success, on any input.
 //
-// A latch reported alongside no apply error is not reachable through today's
-// commit classifier — every latching class carries its cause — so this returns
-// the latch identity rather than the nil a plain passthrough would produce. That
-// is the contract's "MUST be nonnil", stated as code instead of as an assumption
-// about a caller one refactor away.
-func latchAwareBootstrapResult(applyErr error, hasTip, latched bool) error {
-	result := raceTolerantBootstrapResult(applyErr, hasTip)
-	if result == nil && latched {
-		if applyErr == nil {
-			return errStoragePersistenceFault
-		}
-		return applyErr
-	}
-	return result
-}
-
-// raceTolerantBootstrapResult tolerates a directly changed shared ChainState:
-// if apply fails after an external tip appears, bootstrap is already satisfied.
+// The race tolerance covers exactly one thing: a tip installed concurrently on
+// the shared ChainState. A terminal outcome is not that. An untagged ambiguous
+// index write, a canonical store-integrity refusal and an empty-class latch all
+// leave the engine closed until restart, and a caller told "nil" would go on to
+// mine or serve on a node that can no longer mutate anything.
 //
 // Returns:
-//   - nil when ApplyBlock succeeded (applyErr == nil), regardless of hasTip.
+//   - nil when ApplyBlock succeeded (applyErr == nil) on an unlatched engine,
+//     regardless of hasTip.
 //   - nil when a nonterminal ApplyBlock failure finds a tip at recheck
-//     (race-recovery).
+//     (race-recovery) on an unlatched engine.
 //   - applyErr for a terminal canonical M/O or already-latched engine fault.
 //   - applyErr when ApplyBlock failed AND hasTip is still false (real failure
 //     unrelated to concurrent tip installation, e.g. blockstore I/O error).
-func raceTolerantBootstrapResult(applyErr error, hasTip bool) error {
+//   - applyErr, not nil, whenever the engine latched — including the
+//     race-recovery shape, which would otherwise report success.
+//   - errStoragePersistenceFault when the engine latched with no apply error.
+//     That pair is not reachable through today's commit classifier — every
+//     latching class carries its cause — so returning the latch identity states
+//     the contract's "MUST be nonnil" as code instead of as an assumption about
+//     a caller one refactor away.
+func raceTolerantBootstrapResult(applyErr error, hasTip, latched bool) error {
 	if isCanonicalMOTerminalError(applyErr) || errors.Is(applyErr, errStoragePersistenceFault) {
 		return applyErr
 	}
-	if applyErr != nil && hasTip {
+	if applyErr == nil {
+		if latched {
+			return errStoragePersistenceFault
+		}
+		return nil
+	}
+	if hasTip && !latched {
 		return nil
 	}
 	return applyErr

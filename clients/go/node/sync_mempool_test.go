@@ -335,7 +335,7 @@ func TestCanonicalMOPlanDirectAndBootstrap(t *testing.T) {
 	}
 	t.Run("terminal_snapshot_is_not_race_tolerant", func(t *testing.T) {
 		terminal := fmt.Errorf("wrapped: %w", terminalCanonicalMempoolError(errors.New("test terminal")))
-		if !errors.Is(raceTolerantBootstrapResult(terminal, true), terminal) || !errors.Is(raceTolerantBootstrapResult(errStoragePersistenceFault, true), errStoragePersistenceFault) {
+		if !errors.Is(raceTolerantBootstrapResult(terminal, true, false), terminal) || !errors.Is(raceTolerantBootstrapResult(errStoragePersistenceFault, true, false), errStoragePersistenceFault) {
 			t.Fatal("bootstrap race helper hid a terminal result behind a tip")
 		}
 		dir := t.TempDir()
