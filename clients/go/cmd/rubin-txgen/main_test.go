@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -839,4 +840,58 @@ func TestRunReconcilesCheckpointAgainstCanonicalIndexReadOnly(t *testing.T) {
 			t.Fatal("a refused run emitted a transaction or wrote to the datadir")
 		}
 	})
+}
+
+// TestReplaySyncConfigUsesTheNodeSuiteContextBuilder pins the coupling behind
+// the canonical-suffix replay: the rotation provider and suite registry must
+// come from Config.BuildRotationProvider — the one builder rubin-node startup
+// uses (cmd/rubin-node/main.go wires its result into the same SyncConfig
+// fields) — never from a nil pair this tool decided on its own. A datadir whose
+// node runs a context the replay does not have can reject a suffix block the
+// node accepted.
+//
+// This pins the PLUMBING, not a custom-rotation fixture: no CLI path populates
+// Config.RotationDescriptor / Config.SuiteRegistry today (rubin-node has no
+// config-file flag), so no shipped binary can produce a devnet datadir whose
+// context is non-nil, and building one would mean inventing the very parallel
+// config surface this fix avoids. The production-network row below proves the
+// builder is a real source rather than a synonym for nil.
+func TestReplaySyncConfigUsesTheNodeSuiteContextBuilder(t *testing.T) {
+	devnet := node.DefaultConfig()
+	devnet.Network = "devnet"
+	wantRotation, wantRegistry, err := devnet.BuildRotationProvider()
+	if err != nil {
+		t.Fatalf("BuildRotationProvider(devnet): %v", err)
+	}
+	got, err := replaySyncConfig("devnet")
+	if err != nil {
+		t.Fatalf("replaySyncConfig(devnet): %v", err)
+	}
+	// DeepEqual, not pointer identity: every builder call mints a fresh registry.
+	if !reflect.DeepEqual(got.RotationProvider, wantRotation) || !reflect.DeepEqual(got.SuiteRegistry, wantRegistry) {
+		t.Fatalf("replay context=(%v,%v), want the node builder's (%v,%v)", got.RotationProvider, got.SuiteRegistry, wantRotation, wantRegistry)
+	}
+	if got.ChainID != node.DevnetGenesisChainID() {
+		t.Fatalf("replay chain id=%x, want the devnet identity the genesis anchor pins", got.ChainID)
+	}
+
+	production := node.DefaultConfig()
+	production.Network = "mainnet"
+	productionRotation, productionRegistry, err := production.BuildRotationProvider()
+	if err != nil {
+		t.Fatalf("BuildRotationProvider(mainnet): %v", err)
+	}
+	if productionRotation == nil || productionRegistry == nil {
+		t.Fatalf("the node suite-context builder returned (%v,%v) for a production network: a hardcoded nil pair would silently drop a real context", productionRotation, productionRegistry)
+	}
+	// The killer for a re-hardcoded nil pair: devnet's context is nil today, so
+	// only a network whose context is NOT nil can tell the builder apart from a
+	// literal.
+	productionCfg, err := replaySyncConfig("mainnet")
+	if err != nil {
+		t.Fatalf("replaySyncConfig(mainnet): %v", err)
+	}
+	if !reflect.DeepEqual(productionCfg.RotationProvider, productionRotation) || !reflect.DeepEqual(productionCfg.SuiteRegistry, productionRegistry) {
+		t.Fatalf("replay context=(%v,%v) does not carry the builder's production context (%v,%v)", productionCfg.RotationProvider, productionCfg.SuiteRegistry, productionRotation, productionRegistry)
+	}
 }
