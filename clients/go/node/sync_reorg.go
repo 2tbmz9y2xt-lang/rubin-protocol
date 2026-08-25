@@ -305,9 +305,10 @@ func (s *SyncEngine) applyPreferredBranch(
 // Per-row payloads do NOT die with this call: each row's header bytes, block
 // bytes and precomputed undo move into plan.staged and stay reachable until
 // proveCanonicalRecoverySet writes them and releases the slice, at the very
-// start of the transition. The caller's own branch slice keeps the same bytes
-// reachable for the whole transition independently of the plan. What the
-// transition carries PAST staging is only the charged descriptors.
+// start of the transition. plan.staged is the ONLY guaranteed reachability: the
+// caller's branch slice may be collected once it is last used, so nothing may
+// rely on it. What the transition carries PAST staging is only the charged
+// descriptors.
 func (s *SyncEngine) planPreferredBranch(
 	canonicalIndex []string,
 	branch []reorgBranchBlock,
@@ -398,7 +399,7 @@ func (s *SyncEngine) preparePreferredBranch(
 	for i, item := range branch {
 		// The rolling state carries row i-1's post-state into row i, so the last
 		// row leaves it holding exactly the image the transition publishes.
-		row, rowErr := s.prepareBranchRow(rolling, item, commonAncestorHeight+1+uint64(i), slidingTs, diag)
+		row, rowErr := s.prepareBranchRow(rolling, item, commonAncestorHeight+1+uint64(i), slidingTs)
 		if rowErr != nil {
 			return nil, nil, nil, 0, 0, rowErr
 		}
@@ -433,7 +434,6 @@ func (s *SyncEngine) prepareBranchRow(
 	item reorgBranchBlock,
 	height uint64,
 	prevTimestamps []uint64,
-	diag *diagnosticBatch,
 ) (preparedBranchBlock, error) {
 	targetCtx, err := s.targetContextForCandidate(item.header.PrevBlockHash, height)
 	if err != nil {
@@ -444,26 +444,19 @@ func (s *SyncEngine) prepareBranchRow(
 	// sequential connect below overwrites the rolling map in place, so the
 	// touched entries — and ONLY those — are read out first.
 	preImages := capturePreImages(rolling, item.parsed)
-	ctx := canonicalBlockApplyContext{
-		blockHeight:    height,
-		blockHash:      item.hash,
-		expectedTarget: targetCtx.expected,
-		prevState:      s.pvShadowPreState(rolling),
-		diag:           diag,
-	}
 	summary, err := rolling.ConnectBlockWithSuiteContext(
 		item.blockBytes,
-		ctx.expectedTarget,
+		targetCtx.expected,
 		prevTimestamps,
 		s.cfg.ChainID,
 		s.cfg.RotationProvider,
 		s.cfg.SuiteRegistry,
 	)
-	if ctx.prevState != nil {
-		s.runPVShadow(item.blockBytes, prevTimestamps, ctx, err, summary)
-	} else {
-		s.pvTelemetry.RecordBlockSkipped()
-	}
+	// PV shadow is DIRECT-CONNECT ONLY, in every pv mode. resource_bounds gives
+	// this path exactly two O(UTXO) images — the immutable common checkpoint and
+	// the rolling image that becomes C1 — and a per-row shadow pre-state would be
+	// a third, with the shadow's own clone a fourth. Reorg rows are PV-skipped.
+	s.pvTelemetry.RecordBlockSkipped()
 	if err != nil {
 		// The ONE canonical block-apply rejection for this whole branch; see the
 		// accounting rule on this function.

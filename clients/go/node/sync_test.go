@@ -2785,10 +2785,21 @@ func TestCanonicalCutoverNoFalliblePostNewPublication(t *testing.T) {
 		(*Mempool).publishCanonicalMempoolPlan,
 		(*Mempool).publishCanonicalMempoolPlanLocked,
 		(*PendingOutpointOwner).publishRestoreLocked,
+		(*SyncEngine).storeTerminalFault,
 	} {
 		if out := reflect.TypeOf(fn).NumOut(); out != 0 {
 			t.Fatalf("%v returns %d values: postcommit publication must not be able to fail", reflect.TypeOf(fn), out)
 		}
+	}
+	// The terminal-NEW arm runs INSIDE the corridor, so its payload must arrive
+	// pre-built: a *storagePersistenceFault and a formatted string, never the
+	// (bool, error) pair that forced the corridor to build them itself.
+	publish := reflect.TypeOf((*canonicalTransition).publishCanonicalTransition)
+	if got, want := publish.In(publish.NumIn()-2), reflect.TypeOf((*storagePersistenceFault)(nil)); got != want {
+		t.Fatalf("publishCanonicalTransition takes %v, want the pre-built %v", got, want)
+	}
+	if got := publish.In(publish.NumIn() - 1); got.Kind() != reflect.String {
+		t.Fatalf("publishCanonicalTransition takes %v, want the pre-built report string", got)
 	}
 
 	provider := newCanonicalMOProvider(t, devnetGenesisChainID)

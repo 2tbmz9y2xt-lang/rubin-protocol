@@ -90,18 +90,6 @@ func (s *SyncEngine) pvShadowActive() bool {
 	return (s.pvMode == pvModeShadow || s.pvMode == pvModeOn) && s.isInIBDUnchecked()
 }
 
-// pvShadowPreState clones state ONLY when a shadow run will actually consume it.
-// The preferred-branch preparation rolls one private state forward in place, so
-// it has no per-row pre-image to hand the shadow unless one is taken here. A nil
-// result keeps that clone off the default path and lets the caller decide once
-// rather than re-evaluate a time-dependent predicate after the connect.
-func (s *SyncEngine) pvShadowPreState(state *ChainState) *ChainState {
-	if !s.pvShadowActive() {
-		return nil
-	}
-	return cloneChainState(state)
-}
-
 // runPVShadow runs the shadow for a caller that already decided it is active.
 func (s *SyncEngine) runPVShadow(blockBytes []byte, prevTimestamps []uint64, ctx canonicalBlockApplyContext, seqErr error, seqSummary *ChainStateConnectSummary) {
 	if seqErr != nil {

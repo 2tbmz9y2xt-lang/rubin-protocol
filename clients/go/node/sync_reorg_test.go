@@ -4097,3 +4097,42 @@ func TestPreferredReorgPreservesWideSupplyAndFailsAtomicallyOnCorruptUndo(t *tes
 		t.Fatalf("second disconnect supply summary=%s state=%s, want %s", secondDisconnect.AlreadyGenerated.String(), engine.chainState.AlreadyGenerated.String(), wide.String())
 	}
 }
+
+// TestWinningReorgHoldsTwoImagesUnderPVShadow pins resource_bounds on the path
+// PV could break it: with the shadow active the winning-reorg preparation must
+// still retain only the immutable common checkpoint and the rolling image that
+// becomes C1. The shadow pre-state was the one third-image producer here (and
+// the shadow run itself cloned a fourth), so "every branch row PV-skipped, none
+// validated" is exactly "no third image was materialized".
+func TestWinningReorgHoldsTwoImagesUnderPVShadow(t *testing.T) {
+	engine, _, target := newReorgTestEngine(t)
+	engine.pvMode = pvModeShadow
+	subsidy1 := consensus.BlockSubsidy(1, 0)
+	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	if _, err := engine.ApplyBlockWithReorg(blockA1, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(A1): %v", err)
+	}
+	if !engine.pvShadowActive() {
+		t.Fatal("fixture is not in the shadow-active window: the row would prove nothing")
+	}
+	sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(2), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	sideB1Hash, err := consensus.BlockHash(blockHeaderBytes(t, sideB1))
+	if err != nil {
+		t.Fatalf("BlockHash(B1): %v", err)
+	}
+	if _, err := engine.ApplyBlockWithReorg(sideB1, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B1): %v", err)
+	}
+	before := engine.pvTelemetry.Snapshot()
+	sideB2 := buildSingleTxBlock(t, sideB1Hash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidy(2, subsidy1)))
+	if _, err := engine.ApplyBlockWithReorg(sideB2, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B2, winning): %v", err)
+	}
+	after := engine.pvTelemetry.Snapshot()
+	if after.BlocksValidated != before.BlocksValidated {
+		t.Fatalf("winning reorg ran %d PV shadow validations: each one clones a third full image", after.BlocksValidated-before.BlocksValidated)
+	}
+	if after.BlocksSkipped == before.BlocksSkipped {
+		t.Fatal("winning reorg recorded no PV-skipped row: the accounting no longer covers the branch")
+	}
+}

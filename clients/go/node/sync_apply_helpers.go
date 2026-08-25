@@ -474,7 +474,16 @@ func (s *SyncEngine) fenceAndCommitCanonicalTransition(plan *canonicalTransition
 		return canonicalTruthOld, tr.end(err)
 	}
 	truth, latched, cause := classifyCanonicalCommit(s.commitCanonicalIndexOnce(plan, prepared))
-	tr.publishCanonicalTransition(plan, mo, truth, latched, cause)
+	// Built HERE, outside the publication corridor: the fault value and the
+	// operator record are the corridor's only allocating work, and clause 8
+	// allows it none. Non-nil means "latched" for the corridor.
+	var fault *storagePersistenceFault
+	var report string
+	if latched {
+		fault = &storagePersistenceFault{cause: cause}
+		report = terminalTransitionRecord(canonicalLatchReason(truth, cause), cause)
+	}
+	tr.publishCanonicalTransition(plan, mo, truth, fault, report)
 	return truth, cause
 }
 
@@ -589,14 +598,16 @@ func (s *SyncEngine) saveNonpersistentFinalState(plan *canonicalTransitionPlan) 
 // and the PUBLICATION ASSIGNMENTS themselves allocate nothing, clone nothing, do
 // no I/O, validate nothing, invoke no callback and cannot fail.
 //
-// The latched arm is the one exception and runs AFTER every assignment: it
-// installs the existing terminal fault and formats one bounded diagnostic, so it
-// allocates. Nothing it does can un-publish what was already assigned.
+// The latched arm runs AFTER every assignment and is stores only: the fault
+// value and the operator record were BUILT BY THE CALLER before the corridor
+// opened, so this arm allocates, formats and validates nothing either. Nothing
+// it does can un-publish what was already assigned.
 //
 // A latched outcome keeps admission closed until restart: terminal NEW publishes
 // the full image and still latches, terminal OLD and UNKNOWN publish nothing.
 // Every open outcome clears the owner transition and reopens admission.
-func (t *canonicalTransition) publishCanonicalTransition(plan *canonicalTransitionPlan, mo *canonicalMempoolPlan, truth canonicalCommitTruth, latched bool, cause error) {
+func (t *canonicalTransition) publishCanonicalTransition(plan *canonicalTransitionPlan, mo *canonicalMempoolPlan, truth canonicalCommitTruth, fault *storagePersistenceFault, report string) {
+	latched := fault != nil
 	ownerClosed := false
 	if truth == canonicalTruthNew {
 		assignCanonicalChainState(t.chainState, plan.final)
@@ -606,8 +617,12 @@ func (t *canonicalTransition) publishCanonicalTransition(plan *canonicalTransiti
 		}
 	}
 	if latched {
-		t.engine.latchTerminalFault(cause)
-		t.engine.reportTerminalTransition(t.diag, canonicalLatchReason(truth, cause), cause)
+		t.engine.storeTerminalFault(fault)
+		// The batch slot directly, not diagnoseTerminal: that accessor formats,
+		// and this record was formatted before the corridor opened.
+		if t.diag != nil {
+			t.diag.terminal = report
+		}
 		return
 	}
 	if !ownerClosed {

@@ -916,12 +916,19 @@ func (t *canonicalTransition) end(cause error) error {
 
 // latchTerminalFault installs the existing terminal fail-closed mutation latch.
 func (s *SyncEngine) latchTerminalFault(cause error) {
+	s.storeTerminalFault(&storagePersistenceFault{cause: cause})
+}
+
+// storeTerminalFault installs an ALREADY BUILT fault: it takes locks and stores,
+// and allocates nothing. The publication corridor calls this one, with a fault
+// constructed before the corridor opened.
+func (s *SyncEngine) storeTerminalFault(fault *storagePersistenceFault) {
 	s.persistenceFaultMu.Lock()
 	defer s.persistenceFaultMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.persistenceFault == nil {
-		s.persistenceFault = &storagePersistenceFault{cause: cause}
+		s.persistenceFault = fault
 	}
 }
 
@@ -938,7 +945,15 @@ func (s *SyncEngine) latchTerminalFault(cause error) {
 // losing it would leave an operator with shadow noise and a content-free
 // truncation marker as the only stderr trace of a node that latched shut.
 func (s *SyncEngine) reportTerminalTransition(diag *diagnosticBatch, reason string, cause error) {
-	s.diagnoseTerminal(diag, "sync: canonical transition terminal (%s), admission stays closed until restart: %v\n", reason, cause)
+	s.diagnoseTerminal(diag, "%s", terminalTransitionRecord(reason, cause))
+}
+
+// terminalTransitionRecord is the record's ONE definition and its only
+// allocating step. The publication corridor cannot call reportTerminalTransition
+// — formatting inside the corridor is what FIXED_PUBLICATION forbids — so it
+// builds the string through this before the corridor opens and then only stores.
+func terminalTransitionRecord(reason string, cause error) string {
+	return fmt.Sprintf("sync: canonical transition terminal (%s), admission stays closed until restart: %v\n", reason, cause)
 }
 
 func (s *SyncEngine) mutationAllowed() error {
