@@ -94,10 +94,8 @@ func (m *Mempool) checkTxParseAndContext(txBytes []byte, snapshot *chainStateAdm
 // admission path runs. The precheck uses this snapped value directly
 // (wave-6); the locked admission path enforces
 // `max(snappedFloor, m.currentMinFeeRateLocked())` (wave-8) so newer
-// HIGHER floors raised by `raiseMinFeeRateAfterEvictionLocked` win,
-// while spurious-reject under `decayMinFeeRateAfterConnectedBlockLocked`
-// remains the lesser evil (caller can retry against the fresher
-// snapshot). Bidirectional race protection biased toward strict.
+// HIGHER floors raised by `raiseMinFeeRateAfterEvictionLocked` win. The admission
+// guard excludes canonical-transition publication until this call returns.
 func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig, snappedFloor uint64, probe *relayAdmissionProbe) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
 	parsedTx, nextHeight, blockMTP, err := m.checkTxParseAndContext(txBytes, snapshot, probe)
 	if err != nil {

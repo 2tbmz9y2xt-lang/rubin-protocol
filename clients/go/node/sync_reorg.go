@@ -231,10 +231,8 @@ func (s *SyncEngine) shouldSwitchToBranch(
 // precomputed BlockUndo, and the compact block-local UTXO delta — bounded by the
 // branch's own inputs and outputs, never by branch depth times the UTXO set. The
 // whole branch is validated against ONE rolling private clone, the mechanism
-// Bitcoin Core's DisconnectTip/ConnectTip and btcd's reorganizeChain use when
-// they roll a single coins view with per-block undo. Everything the in-guard
-// commit needs is here, so it repeats no parse, no ConnectBlock, no signature
-// verification and no fallible preparation.
+// Bitcoin Core's DisconnectTip/ConnectTip and btcd's reorganizeChain use for one
+// coins view with per-block undo. Commit reparses retained rows for the final-C1 lower seam, not block rows.
 type preparedBranchBlock struct {
 	item     reorgBranchBlock
 	summary  *ChainStateConnectSummary
@@ -261,11 +259,8 @@ type createdUtxo struct {
 // applyPreferredBranch applies the candidate branch selected by fork choice —
 // greater ChainWork, or equal ChainWork with a lexicographically lower tip hash
 // — inside EXACTLY ONE canonical transition: one generation for the whole
-// winning branch, one standard pre-clean for the final prepared branch, every
-// per-block inner cleanup suppressed, and the existing deterministic requeue
-// running only after the final stable owner tip is committed. Every row is fully
-// validated BEFORE the transition opens, so nothing under the guard re-runs
-// consensus or re-verifies a signature.
+// winning branch and one final M/O publication, then deterministic requeue after
+// stable-tip commit. Block rows are prevalidated; retained rows use the final-C1 lower seam.
 func (s *SyncEngine) applyPreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
@@ -275,7 +270,7 @@ func (s *SyncEngine) applyPreferredBranch(
 	if err != nil {
 		return nil, err
 	}
-	rows, preparedDisconnectedBlocks, reorgDepth, err := s.preparePreferredBranch(branch, commonAncestorHeight, diag)
+	rows, preparedDisconnectedBlocks, reorgDepth, finalState, finalMTP, err := s.preparePreferredBranch(branch, commonAncestorHeight, diag)
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +285,7 @@ func (s *SyncEngine) applyPreferredBranch(
 	if err != nil {
 		return nil, err
 	}
-	summary, _, err := s.applyPreferredBranchUnderGuard(tr, rows, commonAncestorHeight, preparedDisconnectedBlocks)
+	summary, _, err := s.applyPreferredBranchUnderGuard(tr, rows, commonAncestorHeight, preparedDisconnectedBlocks, finalState, finalMTP)
 	if endErr := tr.end(err); endErr != nil {
 		finalSummary.CanonicalAppliedBlocks = canonicalBlocks
 		if s.isCompleteVisibleCanonicalSummary(finalSummary, plannedIndex) {
@@ -313,20 +308,21 @@ func (s *SyncEngine) applyPreferredBranch(
 	return summary, nil
 }
 
-// applyPreferredBranchUnderGuard is commit-only: pre-clean, disconnect to the
-// common ancestor, then publish and persist each already-prepared row. Nothing
-// suppresses the per-block inner cleanup — this path never calls it.
+// applyPreferredBranchUnderGuard validates retained rows against final C1, publishes
+// their fixed M/O image, then runs the existing disconnect/per-row canonical path.
 func (s *SyncEngine) applyPreferredBranchUnderGuard(
 	tr *canonicalTransition,
 	rows []preparedBranchBlock,
 	commonAncestorHeight uint64,
 	preparedDisconnectedBlocks []verifiedStoredBlock,
+	finalState *ChainState,
+	finalMTP uint64,
 ) (*ChainStateConnectSummary, []CanonicalAppliedBlock, error) {
-	if err := s.precleanPreferredBranch(tr, rows); err != nil {
-		return nil, nil, s.rollbackApplyBlock(err, tr.rollback)
+	if err := s.prepareAndPublishCanonicalMempoolPlan(tr, finalState, finalMTP, len(rows)); err != nil {
+		return nil, nil, err
 	}
 	if err := s.disconnectCanonicalToAncestor(commonAncestorHeight, preparedDisconnectedBlocks, tr.rollback); err != nil {
-		return nil, nil, s.rollbackApplyBlock(err, tr.rollback)
+		return nil, nil, s.rollbackApplyBlock(unwrapDisconnectPreFinalizeError(err), tr.rollback)
 	}
 	var summary *ChainStateConnectSummary
 	canonicalBlocks := make([]CanonicalAppliedBlock, 0, len(rows))
@@ -340,20 +336,6 @@ func (s *SyncEngine) applyPreferredBranchUnderGuard(
 		canonicalBlocks = append(canonicalBlocks, row.summary.CanonicalAppliedBlocks...)
 	}
 	return summary, canonicalBlocks, nil
-}
-
-// precleanPreferredBranch removes, in one standard-domain commit, every entry
-// the final prepared branch includes or conflicts with, before any live
-// ChainState or BlockStore canonical tip change.
-func (s *SyncEngine) precleanPreferredBranch(tr *canonicalTransition, rows []preparedBranchBlock) error {
-	if tr.mempool == nil {
-		return nil
-	}
-	blocks := make([]*consensus.ParsedBlock, 0, len(rows))
-	for i := range rows {
-		blocks = append(blocks, rows[i].item.parsed)
-	}
-	return tr.mempool.applyConnectedBlocksParsed(blocks)
 }
 
 // preparePreferredBranch validates the whole winning branch against ONE rolling
@@ -375,14 +357,14 @@ func (s *SyncEngine) preparePreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
 	diag *diagnosticBatch,
-) ([]preparedBranchBlock, []verifiedStoredBlock, uint64, error) {
+) ([]preparedBranchBlock, []verifiedStoredBlock, uint64, *ChainState, uint64, error) {
 	rolling := cloneChainState(s.chainState)
 	if rolling == nil {
-		return nil, nil, 0, errors.New("nil preview chainstate")
+		return nil, nil, 0, nil, 0, errors.New("nil preview chainstate")
 	}
 	preparedDisconnectedBlocks, reorgDepth, err := s.previewDisconnectCanonicalToAncestor(rolling, commonAncestorHeight)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, nil, 0, err
 	}
 	// Build a sliding MTP window: start from pre-fork timestamps, advance
 	// after each block.  The blockstore index is NOT updated during preview,
@@ -390,7 +372,7 @@ func (s *SyncEngine) preparePreferredBranch(
 	// re-deriving from the store each iteration (B.9 fix).
 	slidingTs, err := prevTimestampsFromStore(s.blockStore, commonAncestorHeight+1)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, nil, 0, err
 	}
 	rows := make([]preparedBranchBlock, 0, len(branch))
 	for i, item := range branch {
@@ -398,12 +380,12 @@ func (s *SyncEngine) preparePreferredBranch(
 		// exactly what the guard publishes one row at a time.
 		row, rowErr := s.prepareBranchRow(rolling, item, commonAncestorHeight+1+uint64(i), slidingTs, diag)
 		if rowErr != nil {
-			return nil, nil, 0, rowErr
+			return nil, nil, 0, nil, 0, rowErr
 		}
 		rows = append(rows, row)
 		slidingTs = advancePrevTimestamps(slidingTs, item.header.Timestamp)
 	}
-	return rows, preparedDisconnectedBlocks, reorgDepth, nil
+	return rows, preparedDisconnectedBlocks, reorgDepth, rolling, mtpMedian(commonAncestorHeight+uint64(len(rows))+1, slidingTs), nil
 }
 
 // prepareBranchRow fully validates one branch row by connecting it into the
@@ -414,9 +396,8 @@ func (s *SyncEngine) preparePreferredBranch(
 // the canonical index, and every ancestor it needs is already stored. Target
 // context resolves first, so its failure short-circuits before the connect.
 //
-// The connect below is the branch path's ONLY consensus verdict — the commit
-// half revalidates nothing — so its failure is where the canonical block-apply
-// rejection is recorded. A failed row aborts the entire preparation, so a branch
+// The connect below is the only block-row verdict; commit does not revalidate rows.
+// Its failure records canonical rejection and aborts the entire preparation, so a branch
 // contributes at most ONE rejected outcome however many rows it has, and the
 // rows that already prepared contribute nothing: the branch never opened a
 // transition, so it never published and they are neither accepted nor rejected.
@@ -425,7 +406,7 @@ func (s *SyncEngine) preparePreferredBranch(
 // resolution before it and the undo/delta/DA-set derivation after it are local
 // failures, not consensus verdicts on the candidate, and neither may add an
 // outcome — the same rule that keeps side-chain storage, orphan / missing
-// parent, local I/O, persistence, rollback and cleanup failures at zero.
+// parent, local I/O, persistence, rollback and retained-state planning failures at zero.
 func (s *SyncEngine) prepareBranchRow(
 	rolling *ChainState,
 	item reorgBranchBlock,

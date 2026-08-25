@@ -1345,9 +1345,8 @@ func mustAdmissionContext(t *testing.T, owner *PendingOutpointOwner, what string
 	return ctx
 }
 
-// breakResidentClaim rebinds a resident record to a FOREIGN owner's token —
-// precisely the record/claim inconsistency the typed standard delta refuses to
-// mutate through — so the next canonical cleanup of that record fails.
+// breakResidentClaim rebinds a resident record to a foreign owner's token so
+// complete canonical M/O planning rejects the malformed record/claim image.
 func (f *pendingOutpointSyncFixture) breakResidentClaim(t *testing.T, txid [32]byte) {
 	t.Helper()
 	foreign := newPendingOutpointOwner(PendingOutpointTip{})
@@ -1409,24 +1408,22 @@ func TestSyncPendingOutpointDirectConnectReleasesTokensAndCommitsStableTip(t *te
 	}
 }
 
-// TestSyncPendingOutpointCleanupFailureLatchesTerminalFault pins the row this
+// TestSyncPendingOutpointPlanningInvariantLatchesTerminalFault pins the row this
 // fixture actually reaches, which is NOT an ordinary abort. Breaking a resident
-// record's claim fails the standard cleanup, and then fails the ROLLBACK's
-// restore too, because restoreMempoolSnapshot rebuilds that same broken record
-// through validateRestoredClaimBinding and refuses it. An unprovable restore is
-// terminal by contract (canonicalTransition.end), so the engine latches the
-// storage-persistence fault and leaves admission closed.
+// record's claim fails complete canonical M/O planning before C publication.
+// That local invariant is terminal by contract (canonicalTransition.end), so
+// the engine latches the storage-persistence fault and leaves admission closed.
 //
 // The name and the assertions therefore state the latch, not a recovery: the
 // canonical tip is unmoved on BOTH ChainState and BlockStore, the owner never
 // reopens, AdmissionContext stays unavailable, a later mutator gets the latched
-// fault, and no block-apply outcome is recorded — a cleanup/rollback failure is
+// fault, and no block-apply outcome is recorded — a planning-invariant failure is
 // an operational fault, never a consensus verdict on the block.
 //
 // There is deliberately no ordinary-abort variant of this row: production has no
-// nonterminal cleanup-abort path here, and inventing one would need a test-only
+// nonterminal planning-abort path here, and inventing one would need a test-only
 // failure seam the contract forbids.
-func TestSyncPendingOutpointCleanupFailureLatchesTerminalFault(t *testing.T) {
+func TestSyncPendingOutpointPlanningInvariantLatchesTerminalFault(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	spend := f.spend(t, 700, 1)
 	if err := f.mempool.AddTx(spend); err != nil {
@@ -1437,10 +1434,10 @@ func TestSyncPendingOutpointCleanupFailureLatchesTerminalFault(t *testing.T) {
 	beforeHash, beforeHeight := f.engine.chainState.TipHash, f.engine.chainState.Height
 	beforeCounts := f.engine.BlockApplyCounts()
 	if _, err := f.engine.ApplyBlock(f.blockIncluding(t, f.tipHash, f.tipHeight+1, f.alreadyGenerated, 202, spend), nil); err == nil {
-		t.Fatal("apply committed a block whose standard cleanup failed")
+		t.Fatal("apply committed a block whose canonical M/O plan was invalid")
 	}
 	if f.engine.chainState.TipHash != beforeHash || f.engine.chainState.Height != beforeHeight {
-		t.Fatalf("canonical tip moved to (%d,%x) despite the cleanup failure, want (%d,%x)",
+		t.Fatalf("canonical tip moved to (%d,%x) despite the planning failure, want (%d,%x)",
 			f.engine.chainState.Height, f.engine.chainState.TipHash, beforeHeight, beforeHash)
 	}
 	storeHeight, storeHash, ok, err := f.store.Tip()
@@ -1451,13 +1448,13 @@ func TestSyncPendingOutpointCleanupFailureLatchesTerminalFault(t *testing.T) {
 	// The exact latch state: owner closed, admission unavailable, and the
 	// storage-persistence fault returned to every later SyncEngine mutator.
 	if ctx, reopened := f.owner.AdmissionContext(); reopened {
-		t.Fatalf("owner reopened at %+v after a cleanup failure whose restore could not be proven", ctx)
+		t.Fatalf("owner reopened at %+v after a terminal planning invariant", ctx)
 	}
 	if _, err := f.engine.DisconnectTip(); !errors.Is(err, errStoragePersistenceFault) {
 		t.Fatalf("later SyncEngine mutator err=%v, want the latched storage persistence fault", err)
 	}
 	if got := f.engine.BlockApplyCounts(); got != beforeCounts {
-		t.Fatalf("block-apply counts=%+v after a cleanup/rollback fault, want %+v unchanged", got, beforeCounts)
+		t.Fatalf("block-apply counts=%+v after a terminal planning fault, want %+v unchanged", got, beforeCounts)
 	}
 }
 
@@ -1839,7 +1836,7 @@ func TestSyncSetMempoolRejectsUsedEmptyHistory(t *testing.T) {
 			pool.mu.Lock()
 			defer pool.mu.Unlock()
 			pool.currentMinFeeRate = 8
-			pool.decayMinFeeRateAfterConnectedBlockLocked() // 8 -> 4, still above the default
+			pool.currentMinFeeRate = canonicalMempoolFeeFloor(pool.currentMinFeeRate, pool.usedBytes, pool.effectiveLowWaterBytesLocked(), 1)
 		}},
 		// The row the RAW read exists for: the accessor reports a below-default
 		// floor AS the default, so a regression to it would accept this pool.
@@ -1992,28 +1989,22 @@ func TestSyncSetMempoolBindingIsAtomicAgainstConcurrentAdmission(t *testing.T) {
 	}
 }
 
-// TestSyncPendingOutpointUnprovenRestoreLatchesAdmissionClosed pins the
-// fail-closed rule for a rollback whose EXACT restore failed: admission must not
-// reopen over a state nobody can prove. The transition is made to fail at the
-// standard cleanup and its restore is made to fail as well (an invalid mempool
-// capacity limit), so the engine takes the terminal latch, not an ordinary abort.
-func TestSyncPendingOutpointUnprovenRestoreLatchesAdmissionClosed(t *testing.T) {
+// TestSyncPendingOutpointMalformedPlanLatchesAdmissionClosed keeps the
+// fail-closed admission assertion for a malformed mempool limit: complete M/O
+// planning rejects it before C publication and terminally retains the guard.
+func TestSyncPendingOutpointMalformedPlanLatchesAdmissionClosed(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	spend := f.spend(t, 700, 1)
-	if err := f.mempool.AddTx(spend); err != nil {
-		t.Fatalf("AddTx(spend): %v", err)
-	}
-	f.breakResidentClaim(t, txID(t, spend))
 	f.mempool.mu.Lock()
-	f.mempool.maxTxs = 0 // the rollback's mempool restore now fails too
+	f.mempool.maxTxs = 0
 	f.mempool.mu.Unlock()
 
 	block := f.blockIncluding(t, f.tipHash, f.tipHeight+1, f.alreadyGenerated, 202, spend)
 	if _, err := f.engine.ApplyBlock(block, nil); err == nil {
-		t.Fatal("apply reported success although its restore could not be proven")
+		t.Fatal("apply reported success with a malformed canonical M/O plan")
 	}
 	if ctx, ok := f.owner.AdmissionContext(); ok {
-		t.Fatalf("owner reopened at %+v after an unproven restore", ctx)
+		t.Fatalf("owner reopened at %+v after a terminal malformed plan", ctx)
 	}
 	if _, err := f.engine.DisconnectTip(); !errors.Is(err, errStoragePersistenceFault) {
 		t.Fatalf("later SyncEngine mutator err=%v, want the latched storage persistence fault", err)

@@ -82,12 +82,8 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 // exactly the position these calls are in. TestSyncEngineDiagnosticWriter*
 // pin the batched isolation properties the direct form cannot show.
 //
-// One diagnostic site is deliberately absent: the standard-cleanup failure
-// report in commitPreparedBlockUnderGuard, which only fires inside an open
-// transition and would need that whole fixture here. It is exercised, together
-// with the in-transition terminal report, by
-// TestSyncEngineTransitionDiagnosticsFlushAfterUnlock — the repository
-// call-site audit, not this list, is what proves no SyncEngine site reads
+// Canonical M/O planning needs an open-transition fixture; TestSyncEngineTransitionDiagnosticsFlushAfterUnlock exercises it.
+// The repository call-site audit, not this list, proves no SyncEngine site reads
 // s.stderr raw. Adding a transition-free diagnostic site without adding it here
 // leaves it unproven.
 func stderrProducers(t *testing.T, f *pendingOutpointSyncFixture, spentBlock []byte, pvBlock []byte, pvCtx canonicalBlockApplyContext) map[string]func() {
@@ -891,11 +887,10 @@ func TestSyncEngineDiagnosticFlushesMayOverlapSafely(t *testing.T) {
 	engine.SetStderr(io.Discard)
 }
 
-// TestSyncEngineTransitionDiagnosticsFlushAfterUnlock covers the two producers
-// that fire ONLY under an open canonical transition — the standard-cleanup
-// failure and the terminal-latch report — driven through the public ApplyBlock
-// entry point. Both records reach the writer unchanged and in producer order,
-// with mutationMu and s.mu free.
+// TestSyncEngineTransitionDiagnosticsFlushAfterUnlock covers the terminal
+// planning-invariant report under an open canonical transition, driven through
+// the public ApplyBlock entry point. The record reaches the writer with
+// mutationMu and s.mu free.
 //
 // admissionMu is deliberately asserted as STILL HELD: this scenario ends in the
 // terminal fail-closed latch, which retains the admission guard until the node
@@ -915,7 +910,7 @@ func TestSyncEngineTransitionDiagnosticsFlushAfterUnlock(t *testing.T) {
 	probe := &diagnosticLockProbe{engine: f.engine, mempool: f.mempool, owner: f.owner}
 	f.engine.SetStderr(probe)
 	if _, err := f.engine.ApplyBlock(f.blockIncluding(t, f.tipHash, f.tipHeight+1, f.alreadyGenerated, 202, spend), nil); err == nil {
-		t.Fatal("apply committed a block whose standard cleanup failed")
+		t.Fatal("apply committed a block whose canonical M/O plan was invalid")
 	}
 	writes, engineLockHeld, admissionHeld := probe.held()
 	if engineLockHeld {
@@ -924,14 +919,12 @@ func TestSyncEngineTransitionDiagnosticsFlushAfterUnlock(t *testing.T) {
 	if !admissionHeld {
 		t.Fatal("the terminal latch released the admission guard; the fail-closed contract changed")
 	}
-	if writes != 2 {
-		t.Fatalf("writes=%d, want the cleanup record and the terminal record", writes)
+	if writes != 1 {
+		t.Fatalf("writes=%d, want the terminal planning record", writes)
 	}
 	out := probe.output()
-	cleanup := strings.Index(out, "sync: standard mempool cleanup failed at height ")
-	terminal := strings.Index(out, "sync: canonical transition terminal (rollback restore failed), admission stays closed until restart: ")
-	if cleanup < 0 || terminal < 0 || cleanup > terminal {
-		t.Fatalf("emitted %q, want the unchanged cleanup record before the unchanged terminal record", out)
+	if !strings.Contains(out, "sync: canonical transition terminal (canonical mempool invariant), admission stays closed until restart: ") || strings.Contains(out, "standard mempool cleanup") {
+		t.Fatalf("emitted %q, want only the terminal planning record", out)
 	}
 	f.engine.SetStderr(io.Discard)
 }

@@ -1610,10 +1610,10 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		// max_bytes and low_water_bytes are read live from the mempool
 		// (NOT from MempoolConfig defaults) so they reflect any
 		// per-instance override; min_fee_rate reflects the rolling
-		// post-eviction floor maintained by raiseMinFeeRateAfterEvictionLocked
-		// and decayMinFeeRateAfterConnectedBlockLocked. The eviction
-		// counter increments exactly once per resident-entry capacity
-		// eviction, in the per-victim loop of addEntryLockedWithFloor
+		// post-eviction floor maintained by capacity-eviction raises and
+		// canonical-transition publication. The eviction counter increments
+		// exactly once per resident-entry capacity eviction, in the per-victim
+		// loop of addEntryLockedWithFloor
 		// after commitStandardDeltaLocked removed the victims; candidate-
 		// worst rejection at capacity and fee-floor rejection do not.
 		"# HELP rubin_node_mempool_max_bytes Configured byte cap for the standard mempool.",

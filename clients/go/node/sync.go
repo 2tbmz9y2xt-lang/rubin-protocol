@@ -351,11 +351,19 @@ func (s *SyncEngine) BootstrapCanonicalGenesisIfEmpty() error {
 //
 // Returns:
 //   - nil when ApplyBlock succeeded (applyErr == nil), regardless of hasTip.
-//   - nil when a non-persistence ApplyBlock failure finds a tip at recheck
+//   - nil when a nonterminal ApplyBlock failure finds a tip at recheck
 //     (race-recovery).
+//   - applyErr for a terminal canonical M/O or already-latched engine fault.
 //   - applyErr when ApplyBlock failed AND hasTip is still false (real failure
 //     unrelated to concurrent tip installation, e.g. blockstore I/O error).
 func raceTolerantBootstrapResult(applyErr error, hasTip bool) error {
+	if isCanonicalMOTerminalError(applyErr) || errors.Is(applyErr, errStoragePersistenceFault) {
+		return applyErr
+	}
+	var restoreFault *rollbackRestoreFault
+	if errors.As(applyErr, &restoreFault) {
+		return applyErr
+	}
 	if applyErr != nil && hasTip {
 		return nil
 	}
@@ -885,6 +893,11 @@ func (s *SyncEngine) beginCanonicalTransition(canonicalIndex []string, diag *dia
 	}
 	rollback, err := s.captureRollbackStateWithIndex(canonicalIndex)
 	if err != nil {
+		if isCanonicalMOTerminalError(err) {
+			s.latchTerminalFault(err)
+			s.reportTerminalTransition(diag, "canonical mempool invariant", err)
+			return nil, err
+		}
 		owner.endTransitionAborted()
 		chainState.admissionMu.Unlock()
 		return nil, err
@@ -922,29 +935,16 @@ func (t *canonicalTransition) abort() {
 	t.chainState.admissionMu.Unlock()
 }
 
-// end closes the transition for cause, and is the ONLY place that decides
-// between reopening admission and latching it shut.
-//
-// cause == nil commits the stable tip and reopens admission.
-//
-// TWO causes are terminal and fail-closed, because neither leaves the live and
-// persistent states both provable: an already-latched ambiguous atomic
-// POST-COMMIT persistence fault, and a rollback whose exact restore FAILED
-// (*rollbackRestoreFault). Either leaves the owner transition-active,
-// AdmissionContext unavailable and admissionMu deliberately NOT released, and
-// latches the engine fault so later mutators fail closed too. Waiters block
-// until the required restart, which beats reopening over an unproven state.
-//
-// admissionMu is the ONLY lock retained across that terminal state. mutationMu
-// is released by the calling entry point's own deferred unlock as this returns,
-// so a later SyncEngine mutator acquires it and gets the latched fault from
-// mutationAllowed instead of waiting forever.
-//
-// Any other cause is an ordinary abort: the caller has already proven the exact
-// restore, so admission reopens with high-waters left advanced.
+// end is the sole admission closeout: nil commits; ordinary errors abort. Three
+// terminal causes retain admissionMu: M/O invariant, persistence latch, or failed exact restore.
 func (t *canonicalTransition) end(cause error) error {
 	if cause == nil {
 		return t.finish()
+	}
+	if isCanonicalMOTerminalError(cause) {
+		t.engine.latchTerminalFault(cause)
+		t.engine.reportTerminalTransition(t.diag, "canonical mempool invariant", cause)
+		return cause
 	}
 	if t.engine.persistenceFaulted() {
 		t.engine.reportTerminalTransition(t.diag, "post-commit persistence fault", cause)
@@ -960,10 +960,7 @@ func (t *canonicalTransition) end(cause error) error {
 	return cause
 }
 
-// latchTerminalFault installs cause as the engine's terminal storage-persistence
-// fault when none is latched yet. It is the SAME latch handlePersistenceError
-// installs — no new recovery mechanism, no new state machine — so mutationAllowed
-// returns it to every later mutator exactly as after an ambiguous write.
+// latchTerminalFault installs the existing terminal fail-closed mutation latch.
 func (s *SyncEngine) latchTerminalFault(cause error) {
 	s.persistenceFaultMu.Lock()
 	defer s.persistenceFaultMu.Unlock()
@@ -1256,7 +1253,11 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 		return nil, blockApplyMetricNone, err
 	}
 	summary.CanonicalAppliedBlocks = []CanonicalAppliedBlock{{Hash: ctx.blockHash, CompleteDAIDs: daIDs}}
-	if err := s.commitPreparedBlock(prepared, summary, ctx, pb, blockBytes); err != nil {
+	finalMTP, err := s.finalMempoolMTP(ctx.blockHeight, pb.Header.Timestamp, prevTimestamps)
+	if err != nil {
+		return nil, blockApplyMetricNone, err
+	}
+	if err := s.commitPreparedBlock(prepared, summary, ctx, pb, blockBytes, finalMTP); err != nil {
 		planned := append(append([]string(nil), ctx.canonicalIndex...), hex.EncodeToString(ctx.blockHash[:]))
 		if s.isCompleteVisibleCanonicalSummary(summary, planned) {
 			s.recordAppliedBlock(summary.BlockHeight, pb.Header.Timestamp)
@@ -1265,6 +1266,18 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 		return nil, blockApplyMetricNone, err
 	}
 	return summary, blockApplyMetricAccepted, nil
+}
+
+func (s *SyncEngine) finalMempoolMTP(height, timestamp uint64, fallback []uint64) (uint64, error) {
+	prev := fallback
+	if s.blockStore != nil {
+		var err error
+		prev, err = prevTimestampsFromStore(s.blockStore, height)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return mtpMedian(height+1, advancePrevTimestamps(prev, timestamp)), nil
 }
 
 func (s *SyncEngine) isCompleteVisibleCanonicalSummary(summary *ChainStateConnectSummary, plannedIndex []string) bool {
@@ -1311,12 +1324,13 @@ func (s *SyncEngine) commitPreparedBlock(
 	ctx canonicalBlockApplyContext,
 	pb *consensus.ParsedBlock,
 	blockBytes []byte,
+	finalMTP uint64,
 ) error {
 	tr, err := s.beginCanonicalTransition(ctx.canonicalIndex, ctx.diag)
 	if err != nil {
 		return err
 	}
-	err = s.commitPreparedBlockUnderGuard(tr, prepared, summary, ctx, pb, blockBytes)
+	err = s.commitPreparedBlockUnderGuard(tr, prepared, summary, ctx, pb, blockBytes, finalMTP)
 	if err == nil {
 		tr.appliedHeight, tr.appliedTimestamp, tr.applied = summary.BlockHeight, pb.Header.Timestamp, true
 	}
@@ -1324,10 +1338,8 @@ func (s *SyncEngine) commitPreparedBlock(
 }
 
 // commitPreparedBlockUnderGuard commits one already-validated block under an
-// open transition: live tip recheck, standard cleanup BEFORE any observable
-// canonical tip change, prepared-state publication, then persistence. No parse,
-// ConnectBlock, signature verification or consensus validation runs here, and
-// every error it returns has already been through rollback.
+// open transition. Prepublication errors return directly; later C errors roll back.
+// Block rows are not revalidated; retained rows use the lower seam against final C1 before publication.
 func (s *SyncEngine) commitPreparedBlockUnderGuard(
 	tr *canonicalTransition,
 	prepared *ChainState,
@@ -1335,17 +1347,13 @@ func (s *SyncEngine) commitPreparedBlockUnderGuard(
 	ctx canonicalBlockApplyContext,
 	pb *consensus.ParsedBlock,
 	blockBytes []byte,
+	finalMTP uint64,
 ) error {
 	if err := s.recheckLiveTipIdentity(tr, chainTipScalarsOf(ctx.prevState)); err != nil {
-		return s.rollbackApplyBlock(err, tr.rollback)
+		return err
 	}
-	// Cleanup precedes publication: the standard records and their exact
-	// claims are gone before any observer can see the new canonical tip.
-	if tr.mempool != nil {
-		if err := tr.mempool.applyConnectedBlockParsed(pb); err != nil {
-			s.diagnose(tr.diag, "sync: standard mempool cleanup failed at height %d, rolling back: %v\n", ctx.blockHeight, err)
-			return s.rollbackApplyBlock(err, tr.rollback)
-		}
+	if err := s.prepareAndPublishCanonicalMempoolPlan(tr, prepared, finalMTP, 1); err != nil {
+		return err
 	}
 	if err := publishPreparedChainState(tr.chainState, prepared); err != nil {
 		return s.rollbackApplyBlock(err, tr.rollback)

@@ -123,12 +123,10 @@ func (s *SyncEngine) runPVShadowIfActive(blockBytes []byte, prevTimestamps []uin
 
 // finalizeAppliedBlock persists the already-published canonical block.
 //
-// The standard Mempool and owner cleanup has ALREADY run, before the live
-// canonical tip changed (commitPreparedBlockUnderGuard), and a cleanup failure
-// there propagates into exact rollback instead of being logged over a committed
-// tip. Runtime accepted-tip recording is likewise NOT done here: it happens
-// only after this persistence AND the owner stable-tip commit succeed, in
-// canonicalTransition.finish.
+// The prepared Mempool/owner image and live canonical tip are already published.
+// Planning errors return before either publication and never reach persistence;
+// later failures use existing rollback classification. Runtime tip recording occurs
+// only after persistence and the owner stable-tip commit, in canonicalTransition.finish.
 func (s *SyncEngine) finalizeAppliedBlock(summary *ChainStateConnectSummary, blockHash [32]byte, pb *consensus.ParsedBlock, blockBytes []byte, prevState *ChainState, rollbackState syncRollbackState) error {
 	commitStart := time.Now()
 	if err := s.persistAppliedBlock(summary, blockHash, pb, blockBytes, prevState); err != nil {
@@ -155,10 +153,9 @@ func (s *SyncEngine) classifyPersistenceFailure(err error, rollbackState syncRol
 		return s.handlePersistenceError(err, false, true)
 	}
 	fault := s.handlePersistenceError(err, false, false)
-	// The standard cleanup already ran, so reverting only the tip would
-	// freeze a cleaned Mempool against a pre-apply canonical tip. The
-	// frozen state is unobservable behind the retained guard, but it is
-	// the state a restart reconciles against, so restore both halves.
+	// The prepared M/O image has already been published, so reverting only the tip
+	// would freeze a final-chain Mempool against a pre-apply canonical tip.
+	// Admission remains closed while both in-memory halves are restored for restart reconciliation.
 	if restoreErr := errors.Join(
 		publishPreparedChainState(s.chainState, rollbackState.chainState),
 		restoreMempoolSnapshot(s.mempool, rollbackState.mempool),

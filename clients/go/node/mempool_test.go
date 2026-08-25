@@ -2500,21 +2500,6 @@ func TestMempoolCheapPrecheckCachedDefaultNativeSetsContainCanonicalSuite(t *tes
 	}
 }
 
-// TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive
-// pins the wave-8 race-fix: validateFeeFloorLockedWithFloor uses
-// MAX(snappedFloor, m.currentMinFeeRateLocked()) so newer higher
-// floors always win.
-//
-// Bidirectional race protection:
-//   - decay race: snap-high & live-low → max=snap-high → reject
-//     (acceptable spurious reject; caller retries against new snap).
-//   - raise race: snap-low & live-high → max=live-high → reject
-//     (correctly enforces current floor; never admits below it).
-//
-// Wave-6 used pure snap (closed decay race, opened raise race).
-// Wave-8 takes the max so both Copilot wave-5 (decay) AND Codex/
-// Copilot wave-7 (raise) findings are addressed simultaneously per
-// Copilot's wave-7 fix recommendation.
 func TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
@@ -2532,9 +2517,6 @@ func TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive(t *testing.T
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
 
-	// Case 1 — decay race direction (snap-HIGH, live-LOW):
-	// max(snap=10, live=1) = 10 → reject. Spurious reject acceptable;
-	// caller retries against new lower snap.
 	mp.currentMinFeeRate = 1
 	if err := mp.validateFeeFloorLockedWithFloor(entry /* snappedFloor */, 10); err == nil ||
 		!strings.Contains(err.Error(), "mempool fee below rolling minimum") {
@@ -3433,27 +3415,18 @@ func TestMempoolRollingMinFeeDecaysOnlyOnConnectedBlockLowWater(t *testing.T) {
 	if got := mp.currentMinFeeRate; got != 8 {
 		t.Fatalf("EvictConfirmedParsed decayed floor to %d, want 8", got)
 	}
-	if err := mp.applyConnectedBlockParsed(&consensus.ParsedBlock{}); err != nil {
-		t.Fatalf("applyConnectedBlockParsed: %v", err)
-	}
-	if got := mp.currentMinFeeRate; got != 4 {
-		t.Fatalf("connected block low-water decay=%d, want 4", got)
+	if got := canonicalMempoolFeeFloor(mp.currentMinFeeRate, mp.usedBytes, mp.effectiveLowWaterBytesLocked(), 1); got != 4 {
+		t.Fatalf("connected-block low-water floor=%d, want 4", got)
 	}
 	mp.currentMinFeeRate = 8
 	mp.usedBytes = mp.effectiveLowWaterBytesLocked()
-	if err := mp.applyConnectedBlockParsed(&consensus.ParsedBlock{}); err != nil {
-		t.Fatalf("applyConnectedBlockParsed at low-water boundary: %v", err)
+	if got := canonicalMempoolFeeFloor(mp.currentMinFeeRate, mp.usedBytes, mp.effectiveLowWaterBytesLocked(), 1); got != 8 {
+		t.Fatalf("boundary usedBytes floor=%d, want 8", got)
 	}
-	if got := mp.currentMinFeeRate; got != 8 {
-		t.Fatalf("boundary usedBytes decayed floor to %d, want 8", got)
-	}
-	mp.currentMinFeeRate = DefaultMempoolMinFeeRate
+	mp.currentMinFeeRate = 0
 	mp.usedBytes = 0
-	if err := mp.applyConnectedBlockParsed(&consensus.ParsedBlock{}); err != nil {
-		t.Fatalf("applyConnectedBlockParsed at base floor: %v", err)
-	}
-	if got := mp.currentMinFeeRate; got != DefaultMempoolMinFeeRate {
-		t.Fatalf("base floor decayed to %d, want %d", got, DefaultMempoolMinFeeRate)
+	if preClamp, postDecay := canonicalMempoolFeeFloor(mp.currentMinFeeRate, mp.usedBytes, mp.effectiveLowWaterBytesLocked(), 0), canonicalMempoolFeeFloor(DefaultMempoolMinFeeRate, mp.usedBytes, mp.effectiveLowWaterBytesLocked(), 1); preClamp != DefaultMempoolMinFeeRate || postDecay != DefaultMempoolMinFeeRate {
+		t.Fatalf("minimum floors pre=%d post=%d, want %d", preClamp, postDecay, DefaultMempoolMinFeeRate)
 	}
 }
 
@@ -3498,8 +3471,11 @@ func TestMempoolConnectedBlockDecaySeesConfirmedAndConflictingRemovals(t *testin
 			{Inputs: []consensus.TxInput{{PrevTxid: spentByBlock.Txid, PrevVout: spentByBlock.Vout}}},
 		},
 	}
-	if err := mp.applyConnectedBlockParsed(block); err != nil {
-		t.Fatalf("applyConnectedBlockParsed: %v", err)
+	if err := mp.EvictConfirmedParsed(block); err != nil {
+		t.Fatalf("EvictConfirmedParsed: %v", err)
+	}
+	if err := mp.RemoveConflictingParsed(block); err != nil {
+		t.Fatalf("RemoveConflictingParsed: %v", err)
 	}
 	if mp.Contains(confirmedID) {
 		t.Fatal("connected block left confirmed tx in mempool")
@@ -3510,7 +3486,7 @@ func TestMempoolConnectedBlockDecaySeesConfirmedAndConflictingRemovals(t *testin
 	if got := mp.usedBytes; got != 0 {
 		t.Fatalf("usedBytes after connected block=%d, want 0", got)
 	}
-	if got := mp.currentMinFeeRate; got != 4 {
+	if got := canonicalMempoolFeeFloor(mp.currentMinFeeRate, mp.usedBytes, mp.effectiveLowWaterBytesLocked(), 1); got != 4 {
 		t.Fatalf("currentMinFeeRate after confirmed+conflict removals=%d, want 4", got)
 	}
 }
@@ -3836,7 +3812,7 @@ func TestRestoreMempoolSnapshotPreservesAdmissionSeqHighWatermark(t *testing.T) 
 }
 
 func TestSnapshotMempoolNormalizesRollingFloor(t *testing.T) {
-	mp := &Mempool{}
+	mp := &Mempool{pendingOutpoints: newPendingOutpointOwner(PendingOutpointTip{})}
 	snapshot, err := snapshotMempool(mp)
 	if err != nil {
 		t.Fatalf("snapshotMempool: %v", err)
@@ -4390,8 +4366,11 @@ func TestMempoolPendingOutpointBlockCleanupReleasesExactTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseBlockBytes: %v", err)
 	}
-	if err := mp.applyConnectedBlockParsed(parsed); err != nil {
-		t.Fatalf("applyConnectedBlockParsed: %v", err)
+	if err := mp.EvictConfirmedParsed(parsed); err != nil {
+		t.Fatalf("EvictConfirmedParsed: %v", err)
+	}
+	if err := mp.RemoveConflictingParsed(parsed); err != nil {
+		t.Fatalf("RemoveConflictingParsed: %v", err)
 	}
 	if got := mp.Len(); got != 0 {
 		t.Fatalf("mempool len=%d, want 0 after inclusion plus conflict cleanup", got)

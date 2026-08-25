@@ -60,38 +60,6 @@ func (m *Mempool) EvictConfirmedParsed(block *consensus.ParsedBlock) error {
 	})
 }
 
-func (m *Mempool) applyConnectedBlockParsed(block *consensus.ParsedBlock) error {
-	return m.applyConnectedBlocksParsed([]*consensus.ParsedBlock{block})
-}
-
-// applyConnectedBlocksParsed removes every standard entry the given canonical
-// blocks include or conflict with, in ONE standard-domain commit, and releases
-// each removed entry's exact token with it. A preferred-branch reorg pre-cleans
-// the whole winning branch through this single call instead of running a
-// per-block cleanup inside the transition.
-func (m *Mempool) applyConnectedBlocksParsed(blocks []*consensus.ParsedBlock) error {
-	if m == nil {
-		return errors.New("nil mempool")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var removals []*mempoolEntry
-	seen := make(map[[32]byte]struct{})
-	for _, block := range blocks {
-		if block == nil {
-			return errors.New("nil parsed block")
-		}
-		removals = m.blockTerminalEntriesLocked(removals, seen, block, true)
-	}
-	if err := m.commitStandardDeltaLocked(standardMempoolDelta{removals: removals}); err != nil {
-		return err
-	}
-	for range blocks {
-		m.decayMinFeeRateAfterConnectedBlockLocked()
-	}
-	return nil
-}
-
 func (m *Mempool) RemoveConflicting(blockBytes []byte) error {
 	return m.withParsedBlock(blockBytes, m.RemoveConflictingParsed)
 }
@@ -127,10 +95,6 @@ func (m *Mempool) withLockedParsedBlock(block *consensus.ParsedBlock, fn func(*c
 	// terminal removal could delete a record and its claim inside a canonical
 	// transition's snapshot/restore window, and an abort would then resurrect
 	// an entry the caller was told had been removed.
-	//
-	// The unexported connected-block cleanup (applyConnectedBlocksParsed)
-	// deliberately does NOT route through here: it runs under the transition's
-	// own admissionMu.Lock, and sync.RWMutex is not reentrant.
 	//
 	// Like standard admission, that RLock BLOCKS INDEFINITELY by design in the
 	// fail-closed terminal state described on canonicalTransition.end.
