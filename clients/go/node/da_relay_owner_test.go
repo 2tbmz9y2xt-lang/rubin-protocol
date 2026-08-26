@@ -2,6 +2,9 @@ package node
 
 import (
 	"crypto/sha3"
+	"fmt"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -29,19 +32,23 @@ func (f *daOwnerFixture) image(t *testing.T) string {
 	relay.mu.Lock()
 	for _, daID := range relay.sortedRetainedDAIDsLocked() {
 		record := relay.sets[daID]
-		out += string(daID[:]) + string(rune(record.state)) + string(rune(record.receivedTime))
+		out += fmt.Sprintf("|record %x state=%d received=%d", daID, record.state, record.receivedTime)
 		for _, member := range record.members() {
-			out += string(member.txid[:]) + string(member.wtxid[:]) + string(rune(member.token.seq))
+			out += fmt.Sprintf("|member txid=%x wtxid=%x token=%d", member.txid, member.wtxid, member.token.seq)
 		}
 	}
+	// Sorted, so the rendering does not depend on map iteration order.
+	locators := make([]string, 0, len(relay.locators))
 	for txid, locator := range relay.locators {
-		out += string(txid[:]) + string(rune(locator.kind)) + string(rune(locator.chunkIndex))
+		locators = append(locators, fmt.Sprintf("|locator %x kind=%d index=%d", txid, locator.kind, locator.chunkIndex))
 	}
+	sort.Strings(locators)
+	out += strings.Join(locators, "")
 	sequence := relay.nextReceivedTime
 	relay.mu.Unlock()
 	owner := f.owner()
 	owner.mu.Lock()
-	out += string(rune(len(owner.byToken))) + string(rune(len(owner.byOutpoint))) + string(rune(sequence))
+	out += fmt.Sprintf("|claims=%d rows=%d sequence=%d", len(owner.byToken), len(owner.byOutpoint), sequence)
 	owner.mu.Unlock()
 	return out
 }

@@ -69,6 +69,7 @@ type canonicalDAClaimProjection struct {
 // verification and the per-height rotation observation; the canonical RE-PARSE
 // of every member's bytes and the rest of its consensus check are paid again on
 // every transition. A cap on retained members is RUB-1118's, not this slice's.
+//
 // The third phase is the CLAIM phase, and it runs against the SAME live image
 // and the SAME private O1 candidate the M/O half prepared: every live DA member
 // must correspond to exactly one finalized DA claim in that candidate, no DA
@@ -188,16 +189,27 @@ func checkCanonicalDAMemberClaim(daID [32]byte, member daRelayMemberIdentity, in
 // checkNoOrphanCanonicalDAClaims refuses a DA claim the retained image does not
 // account for. The standard domain is deliberately untouched: it is
 // validateRestoredClaimBinding's subject, not this phase's.
+//
+// The map is walked in full and the LOWEST token sequence is named, never the
+// first key the runtime happens to hand out, so the same corrupt image yields the
+// same evidence string on every run.
 func checkNoOrphanCanonicalDAClaims(index pendingOutpointIndex, bound map[PendingOutpointToken]struct{}) error {
+	var orphan *pendingOutpointClaim
 	for token, claim := range index.byToken {
 		if claim.domain != PendingOutpointDA {
 			continue
 		}
-		if _, ok := bound[token]; !ok {
-			return fmt.Errorf("owner holds DA claim for %x with no retained DA member", claim.txid)
+		if _, ok := bound[token]; ok {
+			continue
+		}
+		if orphan == nil || token.seq < orphan.token.seq {
+			orphan = claim
 		}
 	}
-	return nil
+	if orphan == nil {
+		return nil
+	}
+	return fmt.Errorf("owner holds DA claim for %x with no retained DA member", orphan.txid)
 }
 
 // dropCanonicalDAClaims retires the projected DA claims from the plan's PRIVATE
