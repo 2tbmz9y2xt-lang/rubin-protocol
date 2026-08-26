@@ -876,7 +876,7 @@ def partition_contradiction(data: dict[str, Any]) -> str | None:
     proof = data.get("proof")
     if not isinstance(proof, dict):
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields" if "proof" in data else bad
-    if any(k in proof and not isinstance(proof.get(k), bool) for k in ("partition_changed_peer_state", "fork_diverged", "heal_restored_peer_state", "reorg_converged", "process_identity_rechecked_after_heal")) or ("go_reorg_metrics" in proof and (not isinstance(proof.get("go_reorg_metrics"), dict) or any(not jint(proof["go_reorg_metrics"].get(m), 1) for m in METRICS))):
+    if any(k in proof and not isinstance(proof.get(k), bool) for k in ("partition_changed_peer_state", "fork_diverged", "heal_restored_peer_state", "reorg_converged", "process_identity_rechecked_after_heal")) or ("go_reorg_metrics" in proof and (not isinstance(proof.get("go_reorg_metrics"), dict) or not jint(proof["go_reorg_metrics"].get(METRICS[0]), 1) or not jint(proof["go_reorg_metrics"].get(METRICS[1]), 0))):
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
     if any(k in proof and not endpoint(proof.get(k)) for k in ("partition_proxy_endpoint", "pre_partition_go_peer_addr", "heal_go_peer_addr")):
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
@@ -1083,7 +1083,7 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
     if bad := partition_node_identity_error(by_impl, root, proof.get("partition_proxy_endpoint")):
         return bad
     proof_metrics = proof.get("go_reorg_metrics")
-    if not isinstance(proof_metrics, dict) or set(proof_metrics) != set(METRICS) or any(not jint(proof_metrics.get(metric), 1) for metric in METRICS):
+    if not isinstance(proof_metrics, dict) or set(proof_metrics) != set(METRICS) or not jint(proof_metrics.get(METRICS[0]), 1) or not jint(proof_metrics.get(METRICS[1]), 0):
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
     final = data.get("final_verification")
     if not isinstance(final, dict) or set(final) != RESTART_FINAL_KEYS or final.get("producer_side") is not True or final.get("process_identity_rechecked") is not True or final.get("peer_snapshots_rechecked") is not True or final.get("rust_outbound_link_rechecked") is not False or final.get("rust_outbound_local_addr") is not None or final.get("rust_outbound_remote_addr") is not None or final.get("rust_outbound_pid") is not None:
@@ -1245,7 +1245,7 @@ def parse_metrics(path: Path, strict_prometheus: bool = False) -> tuple[dict[str
                 return None, "metrics_malformed"
             for metric in METRICS:
                 if metric not in obj: return None, "metrics_missing_or_zero"  # noqa: E701
-                if isinstance((v := obj.get(metric)), bool) or not isinstance(v, Decimal) or not v.is_finite() or v <= 0 or v > Decimal(1_000_000_000) or v != v.to_integral_value():
+                if isinstance((v := obj.get(metric)), bool) or not isinstance(v, Decimal) or not v.is_finite() or v < (1 if metric == METRICS[0] else 0) or v > Decimal(1_000_000_000) or v != v.to_integral_value():
                     return None, "metric_value_invalid"
                 found[metric] = int(v)
         else:
@@ -1255,11 +1255,11 @@ def parse_metrics(path: Path, strict_prometheus: bool = False) -> tuple[dict[str
                 if metric in METRICS and not m: return None, "metrics_malformed"  # noqa: E701
                 if m:
                     value = float(m.group(2))
-                    if metric in found or not math.isfinite(value) or value <= 0 or value > 1_000_000_000 or int(value) != value: return None, "metrics_duplicate" if metric in found else "metric_value_invalid"  # noqa: E701
+                    if metric in found or not math.isfinite(value) or value < (1 if metric == METRICS[0] else 0) or value > 1_000_000_000 or int(value) != value: return None, "metrics_duplicate" if metric in found else "metric_value_invalid"  # noqa: E701
                     found[metric] = int(value)
     except (json.JSONDecodeError, TypeError, ValueError, RecursionError) as exc:
         return None, str(exc) if str(exc).startswith("duplicate_json_key") else "metrics_malformed"
-    return (found, None) if all(found.get(m, 0) > 0 for m in METRICS) else (None, "metrics_missing_or_zero")
+    return (found, None) if found.get(METRICS[0], 0) >= 1 and found.get(METRICS[1], -1) >= 0 else (None, "metrics_missing_or_zero")
 def no_data_source_reason_error(value: Any) -> str | None:
     if not isinstance(value, str) or not value:
         return "rust_reorg_metrics_no_data_reason_invalid"
