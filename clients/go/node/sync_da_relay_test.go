@@ -851,6 +851,38 @@ func TestCanonicalDAImagePlanAbortPrecedence(t *testing.T) {
 	}
 }
 
+// TestCanonicalDAImageCrossRecordPrecedenceIsRecordMajor pins the CROSS-record
+// half of the D scan order, which no same-record row can show: the FIRST record
+// in ascending raw da_id order wins even when a LATER record carries an
+// EARLIER-phase failure. The low record aborts the plan in phase 2 while the
+// high record holds an unparseable member phase 1 would have caught, so a scan
+// that ran phase 1 over every record before any phase 2 would report the high
+// record's terminal instead — a different public error, a different lane, and a
+// latch where the contract requires an open abort.
+func TestCanonicalDAImageCrossRecordPrecedenceIsRecordMajor(t *testing.T) {
+	f := newCanonicalMOFixture(t, 4, MempoolConfig{SuiteRegistry: unboundAlgSuiteRegistry()})
+	relay := f.engine.DARelayState()
+	low, high := daRelayTestID(0x01), daRelayTestID(0xfe)
+	f.daSet(t, relay, low, f.ops[:2], 900)
+	f.daSet(t, relay, high, f.ops[2:4], 910)
+	record, corrupt := relay.sets[high].cloneForStateMutation(), relay.sets[high].chunks[0]
+	corrupt.txBytes = []byte{0xff, 0xfe}
+	record.chunks[0] = corrupt
+	relay.sets[high] = record
+	chain := f.canonicalDATestChain(t)
+	chain.policy.SuiteRegistry = unboundAlgSuiteRegistry()
+
+	image, err := prepareCanonicalDAImage(relay, nil, chain)
+	var plan *canonicalMOPlanError
+	var terminal *canonicalDATerminalError
+	if !errors.As(err, &plan) || errors.As(err, &terminal) || image != nil {
+		t.Fatalf("err=%v image=%v, want the low-da_id record's plan abort", err, image)
+	}
+	if _, live := relay.sets[low]; !live {
+		t.Fatal("a plan abort removed the live record")
+	}
+}
+
 // TestCanonicalDAImageAccountingFailureIsTerminal pins the OTHER terminal cause:
 // a checked accounting failure while projecting the removal is the same class as
 // corrupt member bytes, and it too publishes nothing.

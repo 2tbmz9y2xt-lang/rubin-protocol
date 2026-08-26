@@ -67,8 +67,10 @@ type ChainState struct {
 // bytes: a reorg summary accumulates one record per newly-canonical block, and a
 // block is up to consensus.MAX_BLOCK_BYTES, so retaining bytes made summary size
 // grow with reorg depth times block size. CompleteDAIDs is bounded by
-// consensus.MAX_DA_BATCHES_PER_BLOCK fixed-width IDs, which is all any consumer
-// needed from the bytes.
+// consensus.MAX_DA_BATCHES_PER_BLOCK fixed-width IDs and is the block's public
+// DA-set IDENTITY, not consumer input: the retained-DA cleanup that once read it
+// after the apply returned is performed inside the canonical transition's own
+// admission fence, and no post-return consumer of these IDs survives.
 type CanonicalAppliedBlock struct {
 	Hash          [32]byte
 	CompleteDAIDs [][32]byte

@@ -143,6 +143,19 @@ func (s *Service) releaseDAQuotaIfInactive(quotaKey string) error {
 	return s.releaseDAQuotaIfInactiveLocked(quotaKey)
 }
 
+// releaseDAQuotaIfInactiveLocked releases the retained incomplete DA data owned
+// by quotaKey once no live peer still holds that key, under the caller's per-key
+// peer quota lock.
+//
+// The release is best-effort cleanup, so it is skipped on a latched engine: a
+// terminal canonical transition RETAINS ChainState.admissionMu exclusively until
+// restart and ReleasePeerQuotaKey takes that fence around its whole mutation, so
+// calling it would park peer teardown forever rather than let unregisterPeer
+// finish. The check is BEST EFFORT, not a lock order: a latch landing between it
+// and the RLock still parks the caller. It closes the schedule that matters — a
+// node already latched when the peer goes away — and claims nothing about a
+// transition still in flight. A nil engine reports no fault, so the unbound test
+// construction keeps its existing behavior.
 func (s *Service) releaseDAQuotaIfInactiveLocked(quotaKey string) error {
 	if s.daRelay == nil {
 		return nil
@@ -150,7 +163,7 @@ func (s *Service) releaseDAQuotaIfInactiveLocked(quotaKey string) error {
 	s.peersMu.RLock()
 	active := s.hasActivePeerQuotaKeyLocked(quotaKey)
 	s.peersMu.RUnlock()
-	if active {
+	if active || s.cfg.SyncEngine.TerminalFaulted() {
 		return nil
 	}
 	return s.daRelay.ReleasePeerQuotaKey(quotaKey)
