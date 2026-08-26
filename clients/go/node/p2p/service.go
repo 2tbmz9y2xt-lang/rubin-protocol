@@ -278,8 +278,9 @@ func (s *Service) workAuthorized() bool {
 // latch landing between it and the RLock still parks the caller. It closes the
 // schedule that matters — a node already latched when the announce arrives — and
 // claims nothing about a transition still in flight, which the fence itself
-// continues to serialize. A nil engine reports no fault, so an unbound test
-// construction keeps its existing behavior.
+// continues to serialize. TerminalFaulted() is nil-safe by its own
+// documented contract, and no constructed Service reaches this gate with a
+// nil engine: validateServiceConfig rejects a nil SyncEngine.
 func (s *Service) AnnounceBlock(blockBytes []byte) error {
 	if s == nil {
 		return errors.New("nil service")

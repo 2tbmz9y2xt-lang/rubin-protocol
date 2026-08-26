@@ -154,8 +154,9 @@ func (s *Service) releaseDAQuotaIfInactive(quotaKey string) error {
 // finish. The check is BEST EFFORT, not a lock order: a latch landing between it
 // and the RLock still parks the caller. It closes the schedule that matters — a
 // node already latched when the peer goes away — and claims nothing about a
-// transition still in flight. A nil engine reports no fault, so the unbound test
-// construction keeps its existing behavior.
+// transition still in flight. TerminalFaulted() is nil-safe by its own
+// documented contract, and no constructed Service reaches this gate with a
+// nil engine: validateServiceConfig rejects a nil SyncEngine.
 func (s *Service) releaseDAQuotaIfInactiveLocked(quotaKey string) error {
 	if s.daRelay == nil {
 		return nil

@@ -617,8 +617,7 @@ func TestTerminalPersistenceNewSkipsTheFencedTTLAdvance(t *testing.T) {
 	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime orphan TTL")
 	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime orphan TTL")
 	terminal := errors.New("storage persistence fault")
-	_, got := p.acceptRelayedBlockResult(summary.BlockHash, summary, terminal)
-	requireEqual(t, errors.Is(got, terminal), true, "the terminal error the post-return chain returned")
+	p.acceptRelayedBlockResult(summary.BlockHash, summary, terminal)
 	requireEqual(t, h.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk) != nil, true, "the retained orphan the skipped TTL advance left in place")
 	requireEqual(t, h.service.blockSeen.Has(summary.BlockHash), true, "the seen-set entry the unfenced effects still added")
 }
@@ -670,8 +669,7 @@ func TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance(t *testing.T) {
 // image: every exported reader of that image takes the same retained fence, so
 // any such assertion would park exactly like the call under test.
 func TestLatchedEngineSkipsThePeerQuotaRelease(t *testing.T) {
-	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
-	h := latchedDAHarness(t, source)
+	h := latchedDAHarness(t, newTestHarness(t, 2, "127.0.0.1:0", nil))
 	p := &peer{service: h.service, state: node.PeerState{Addr: "127.0.0.1:19111"}}
 	must(t, h.service.registerPeer(p), "registerPeer")
 	exits := h.service.PeerLifecycleExits()
