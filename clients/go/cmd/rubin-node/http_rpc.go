@@ -32,14 +32,9 @@ type devnetRPCState struct {
 	// devnet evidence must still prove peer adoption instead of treating
 	// /mine_next success as network success.
 	announceBlock func([]byte) error
-	// acceptedBlockDASetConsumer is the fail-closed DA relay cleanup hook
-	// for locally mined blocks. Unlike announceBlock, this is part of the
-	// local /mine_next state transition and must succeed before the RPC
-	// reports success.
-	acceptedBlockDASetConsumer func([]byte) error
-	stderr                     io.Writer
-	nowUnix                    func() uint64
-	metrics                    *rpcMetrics
+	stderr        io.Writer
+	nowUnix       func() uint64
+	metrics       *rpcMetrics
 	// rpcMut serializes mutating devnet RPC work (mempool admits + live mining)
 	// so concurrent HTTP handlers cannot interleave chain/mempool updates.
 	rpcMut sync.Mutex
@@ -500,14 +495,93 @@ type submitTxResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
+// mineNextResponse is RUBIN_NODE_RPC_DEVNET.md Section 3.4's response body.
+//
+// CommitState is MANDATORY on every response and is never empty. Mined is a
+// POINTER because the section distinguishes three states of the field, not two:
+// present-true, present-false, and ABSENT for commit_state "unknown", where no
+// legacy mined value may be exposed. A plain bool cannot express the third.
+//
+// Success identity is all of height, block_hash, timestamp, nonce and tx_count:
+// when it is absent none of them may appear, which is what the omitempty
+// pointers enforce.
 type mineNextResponse struct {
-	Mined     bool    `json:"mined"`
-	Height    *uint64 `json:"height,omitempty"`
-	BlockHash *string `json:"block_hash,omitempty"`
-	Timestamp *uint64 `json:"timestamp,omitempty"`
-	Nonce     *uint64 `json:"nonce,omitempty"`
-	TxCount   *int    `json:"tx_count,omitempty"`
-	Error     string  `json:"error,omitempty"`
+	Mined       *bool                     `json:"mined,omitempty"`
+	CommitState node.CanonicalCommitState `json:"commit_state"`
+	Height      *uint64                   `json:"height,omitempty"`
+	BlockHash   *string                   `json:"block_hash,omitempty"`
+	Timestamp   *uint64                   `json:"timestamp,omitempty"`
+	Nonce       *uint64                   `json:"nonce,omitempty"`
+	TxCount     *int                      `json:"tx_count,omitempty"`
+	Error       string                    `json:"error,omitempty"`
+}
+
+// minedFlag renders the mandatory present-true / present-false mined field. The
+// absent case does not go through here: it is the nil pointer.
+func minedFlag(mined bool) *bool { return &mined }
+
+// mineNextRejection is the reject-or-unavailable shape: mined present and false,
+// the mandatory commit_state, no success identity.
+//
+// It is the SINGLE exit for the REJECT shape, so neither guard that hands it a
+// raw outcome.CommitState — the lifecycle-cancellation exit and the
+// identity-unavailable exit in handleMineNext — can lose Section 3.4's "mined is
+// absent only for unknown". The identity shape never has to repeat the rule:
+// mineNextFailure routes an unknown truth here even when a Block is present, and
+// the success exit is reached only with a nil error and a nonnil Block, which is
+// truth NEW — canonicalMineOneOutcome's NEW arm answers "committed".
+func mineNextRejection(state node.CanonicalCommitState, errText string) mineNextResponse {
+	if state == node.CanonicalCommitStateUnknown {
+		return mineNextResponse{CommitState: state, Error: errText}
+	}
+	return mineNextResponse{Mined: minedFlag(false), CommitState: state, Error: errText}
+}
+
+// mineNextIdentity is the success shape. errText is empty for an ordinary
+// success and carries the terminal error for a terminal candidate NEW, which
+// Section 3.4 answers with the success shape PLUS a mandatory error field.
+func mineNextIdentity(mb *node.MinedBlock, state node.CanonicalCommitState, errText string) mineNextResponse {
+	height, ts, nonce, txCount := mb.Height, mb.Timestamp, mb.Nonce, mb.TxCount
+	hash := hex.EncodeToString(mb.Hash[:])
+	return mineNextResponse{
+		Mined:       minedFlag(true),
+		CommitState: state,
+		Height:      &height,
+		BlockHash:   &hash,
+		Timestamp:   &ts,
+		Nonce:       &nonce,
+		TxCount:     &txCount,
+		Error:       errText,
+	}
+}
+
+// mineNextFailure selects the exact body Section 3.4 assigns to one failed
+// attempt, from the TYPED outcome alone:
+//
+//	unknown truth        -> the unknown shape, mined ABSENT, no identity
+//	published candidate  -> the success shape plus the mandatory error
+//	everything else      -> the reject shape with its own commit_state, which is
+//	                        "committed" for a terminal bootstrap NEW
+func mineNextFailure(outcome node.MineOneOutcome, err error) mineNextResponse {
+	if outcome.Block != nil && outcome.CommitState != node.CanonicalCommitStateUnknown {
+		return mineNextIdentity(outcome.Block, outcome.CommitState, err.Error())
+	}
+	return mineNextRejection(outcome.CommitState, err.Error())
+}
+
+// mineNextStatus maps the CLOSED typed disposition to its Section 3.4 status.
+// It is the ONLY place this route selects a status from a mining result and it
+// reads no error string; the default is the unavailable class, so a disposition
+// this file does not recognize fails closed instead of answering 200.
+func mineNextStatus(disposition node.MineOneDisposition) int {
+	switch disposition {
+	case node.MineOneDispositionSuccess:
+		return http.StatusOK
+	case node.MineOneDispositionUnprocessable:
+		return http.StatusUnprocessableEntity
+	default:
+		return http.StatusServiceUnavailable
+	}
 }
 
 type getMempoolResponse struct {
@@ -665,13 +739,6 @@ func newDevnetRPCStateWithLifecycle(
 	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, announceTx, announceBlock, stderr, liveMiner)
 	state.SetShutdownCtx(shutdownCtx)
 	return state
-}
-
-func (s *devnetRPCState) SetAcceptedBlockDASetConsumer(fn func([]byte) error) {
-	if s == nil {
-		return
-	}
-	s.acceptedBlockDASetConsumer = fn
 }
 
 // rpcBindHostIsLoopback reports whether the host part of host:port is suitable
@@ -1228,25 +1295,18 @@ func handleSubmitTx(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 
 func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Request) {
 	const route = "/mine_next"
+	// Every guard below refuses before any canonical apply is reached, so the
+	// old image stands and commit_state is not_committed by construction.
 	if r.Method != http.MethodPost {
-		writeJSONResponse(state, route, w, http.StatusBadRequest, mineNextResponse{
-			Mined: false,
-			Error: "POST required",
-		})
+		writeJSONResponse(state, route, w, http.StatusBadRequest, mineNextRejection(node.CanonicalCommitStateNotCommitted, "POST required"))
 		return
 	}
 	if state == nil {
-		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextResponse{
-			Mined: false,
-			Error: "rpc unavailable",
-		})
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextRejection(node.CanonicalCommitStateNotCommitted, "rpc unavailable"))
 		return
 	}
 	if state.miner == nil {
-		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextResponse{
-			Mined: false,
-			Error: "live mining unavailable",
-		})
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextRejection(node.CanonicalCommitStateNotCommitted, "live mining unavailable"))
 		return
 	}
 	state.rpcMut.Lock()
@@ -1257,88 +1317,109 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 	// The nolint below is a linter blind spot, not a suppressed finding: mineCtx
 	// IS derived from r.Context() — it embeds it and falls through to it — but
 	// contextcheck only recognizes derivation through context.WithXXX.
-	mb, err := state.miner.MineOne(mineCtx, nil) //nolint:contextcheck
+	outcome, err := state.miner.MineOneWithOutcome(mineCtx, nil) //nolint:contextcheck
 	if err != nil {
 		state.rpcMut.Unlock()
-		// RUBIN_NODE_RPC_DEVNET.md section 2 + 3.4. The rule in full: a defined
-		// check that OBSERVES lifecycle cancellation answers 503 `rpc
-		// unavailable` even when a per-request cancellation has also fired; the
-		// 422-preserving carve-out is a per-request cancellation ALONE, with
-		// every check seeing a live lifecycle source; and a route exit that
-		// formed a failure result stands with no later reclassification.
-		// mineCtx.observedLifecycle IS that observation, captured at the check
-		// rather than reconstructed from provenance: it is set only by a poll
-		// that read the source canceled, so lifecycle-at-poll wins even over an
-		// already-pinned request-local first cause, and a run whose every poll
-		// saw a live source keeps the baseline 422 permanently — nothing polls
-		// mineCtx after MineOne returned, so the latch cannot move underneath
-		// this classification. The errors.Is(err, context.Canceled) conjunct
-		// transcribes the contract's classification formula (cancellation AND
-		// observation) and guards a future poll site that might wrap or replace
-		// the error after a latching poll; with the current poll sites — the
-		// latch is set only inside a Done()/Err() poll and every MineOne
-		// checkpoint returns the unwrapped ctx.Err() on the same statement — a
-		// true latch already implies err is context.Canceled, so the term is
-		// structurally redundant today but contract-prescribed.
-		if errors.Is(err, context.Canceled) && mineCtx.observedLifecycle {
-			writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextResponse{
-				Mined: false,
-				Error: "rpc unavailable",
-			})
-			return
-		}
-		writeJSONResponse(state, route, w, http.StatusUnprocessableEntity, mineNextResponse{
-			Mined: false,
-			Error: err.Error(),
-		})
+		writeMineNextFailure(state, route, w, outcome, err, mineCtx.observedLifecycle)
 		return
 	}
-	var blockBytes []byte
-	blockBytesLoaded := false
-	if state.acceptedBlockDASetConsumer != nil {
-		blockBytes, err = minedBlockBytes(state, mb.Hash)
-		if err != nil {
-			state.rpcMut.Unlock()
-			writeJSONResponse(state, route, w, http.StatusInternalServerError, mineNextResponse{
-				Mined: false,
-				Error: fmt.Sprintf("load mined block for DA consume: %v", err),
-			})
-			return
-		}
-		blockBytesLoaded = true
-		if err := state.acceptedBlockDASetConsumer(blockBytes); err != nil {
-			state.rpcMut.Unlock()
-			writeJSONResponse(state, route, w, http.StatusInternalServerError, mineNextResponse{
-				Mined: false,
-				Error: fmt.Sprintf("consume accepted DA sets: %v", err),
-			})
-			return
-		}
+	if outcome.Block == nil {
+		// Unreachable: a nil error means commit truth NEW, which always carries
+		// the published identity. Fail closed rather than answer 200 with a
+		// success shape that has no identity in it.
+		state.rpcMut.Unlock()
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextRejection(outcome.CommitState, "mined block identity unavailable"))
+		return
 	}
+	mb := outcome.Block
 	state.rpcMut.Unlock()
-	if state.announceBlock != nil {
-		if !blockBytesLoaded {
-			blockBytes, err = minedBlockBytes(state, mb.Hash)
-		}
-		if err != nil {
-			_, _ = fmt.Fprintf(state.stderr, "rpc: announce-block: get mined block %x: %v\n", mb.Hash, err)
-		} else if err := state.announceBlock(blockBytes); err != nil {
-			_, _ = fmt.Fprintf(state.stderr, "rpc: announce-block: %v\n", err)
-		}
+	// Selected BEFORE the announce tail, exactly as the failure exit does, so both
+	// callers of announceMinedBlock have already chosen their bytes when it runs.
+	// Both selectors are pure over their arguments, so hoisting them cannot change
+	// the response.
+	status, body := mineNextStatus(outcome.Disposition), mineNextIdentity(mb, outcome.CommitState, "")
+	announceMinedBlock(state, outcome)
+	writeJSONResponse(state, route, w, status, body)
+}
+
+// writeMineNextFailure is the exit for a MineOne that returned an error, and it
+// runs strictly after rpcMut is released. Every OTHER refusal this route can
+// answer with — the three entry guards and the unreachable nil-identity exit —
+// either runs before MineOne or holds no candidate, so none of them has anything
+// to announce.
+//
+// It SELECTS the response first and writes it last, so nothing the announce tail
+// in between does — a store read failure, an announce error, a slow network
+// callback — can change the status or the body this route already chose
+// (RUBIN_NODE_RPC_DEVNET.md A13).
+//
+// The announce tail runs here for the same reason it runs on the success path: a
+// terminal candidate NEW published a real canonical block AND returned the
+// terminal error, so outcome.Block is nonnil on this exit too and the block is
+// as canonical as an ordinary success's. Skipping the announcement for it would
+// leave a committed block unannounced purely because the attempt also latched.
+func writeMineNextFailure(state *devnetRPCState, route string, w http.ResponseWriter, outcome node.MineOneOutcome, err error, observedLifecycle bool) {
+	var status int
+	var body mineNextResponse
+	// RUBIN_NODE_RPC_DEVNET.md section 2 + 3.4. The rule in full: a defined
+	// check that OBSERVES lifecycle cancellation answers 503 `rpc unavailable`
+	// even when a per-request cancellation has also fired; the 422-preserving
+	// carve-out is a per-request cancellation ALONE, with every check seeing a
+	// live lifecycle source; and a route exit that formed a failure result
+	// stands with no later reclassification. observedLifecycle IS that
+	// observation, captured at the check rather than reconstructed from
+	// provenance: it is set only by a poll that read the source canceled, so
+	// lifecycle-at-poll wins even over an already-pinned request-local first
+	// cause, and a run whose every poll saw a live source keeps the baseline 422
+	// permanently — nothing polls mineCtx after MineOne returned, so the latch
+	// cannot move underneath this classification. The errors.Is(err,
+	// context.Canceled) conjunct transcribes the contract's classification
+	// formula (cancellation AND observation) and guards a future poll site that
+	// might wrap or replace the error after a latching poll; with the current
+	// poll sites — the latch is set only inside a Done()/Err() poll and every
+	// MineOne checkpoint returns the unwrapped ctx.Err() on the same statement —
+	// a true latch already implies err is context.Canceled, so the term is
+	// structurally redundant today but contract-prescribed.
+	if errors.Is(err, context.Canceled) && observedLifecycle {
+		status, body = http.StatusServiceUnavailable, mineNextRejection(outcome.CommitState, "rpc unavailable")
+	} else {
+		// Everything else is the attempt's OWN typed class: the status comes
+		// from the closed disposition and the body from the typed outcome, so
+		// this route never classifies an error string, a latch, the current tip
+		// or a storage reread.
+		status, body = mineNextStatus(outcome.Disposition), mineNextFailure(outcome, err)
 	}
-	height := mb.Height
-	ts := mb.Timestamp
-	nonce := mb.Nonce
-	txCount := mb.TxCount
-	hash := hex.EncodeToString(mb.Hash[:])
-	writeJSONResponse(state, route, w, http.StatusOK, mineNextResponse{
-		Mined:     true,
-		Height:    &height,
-		BlockHash: &hash,
-		Timestamp: &ts,
-		Nonce:     &nonce,
-		TxCount:   &txCount,
-	})
+	announceMinedBlock(state, outcome)
+	writeJSONResponse(state, route, w, status, body)
+}
+
+// announceMinedBlock is the route's ONE remaining post-return effect: the
+// canonical transition already published the complete retained-DA image inside
+// its own admission fence, so nothing here has DA cleanup left to do.
+//
+// It announces only what the TYPED outcome proves was published — a nonnil Block
+// AND commit truth committed — reading the carrier the miner returned rather than
+// inferring publication from a latch, an error string, the current tip or a
+// storage reread. executeMineOne sets Block only alongside a published summary,
+// so the commit-state conjunct excludes nothing today; it is what keeps this
+// effect correct if a future arm ever returns a candidate under a truth that
+// published neither image.
+//
+// The mined block's bytes are loaded ONLY for this branch. It is best-effort by
+// contract — both failure shapes report to stderr and NEITHER may change the
+// response the caller already selected, which is why every caller selects before
+// calling and writes after.
+func announceMinedBlock(state *devnetRPCState, outcome node.MineOneOutcome) {
+	mb := outcome.Block
+	if mb == nil || outcome.CommitState != node.CanonicalCommitStateCommitted || state.announceBlock == nil {
+		return
+	}
+	blockBytes, loadErr := minedBlockBytes(state, mb.Hash)
+	if loadErr != nil {
+		_, _ = fmt.Fprintf(state.stderr, "rpc: announce-block: get mined block %x: %v\n", mb.Hash, loadErr)
+	} else if err := state.announceBlock(blockBytes); err != nil {
+		_, _ = fmt.Fprintf(state.stderr, "rpc: announce-block: %v\n", err)
+	}
 }
 
 func minedBlockBytes(state *devnetRPCState, hash [32]byte) ([]byte, error) {

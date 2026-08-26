@@ -757,8 +757,21 @@ if not isinstance(data, dict) or set(data) != {"captured_at_unix_ns", "implement
 if data.get("method") != "POST" or data.get("request_path") != "/mine_next":
     sys.exit("mine sidecar route mismatch")
 resp = data.get("response")
-if not isinstance(resp, dict) or set(resp) != {"block_hash", "height", "mined", "nonce", "timestamp", "tx_count"}:
+# This validator is applied to BOTH partitions' /mine_next sidecars (the reorg
+# phase mines on the Go node and on the Rust node). RUB-911 landed the typed
+# commit_state projection in Go only — the Rust mirror is RUB-920 — so each
+# sidecar is asserted against the shape its OWN implementation ships, and an
+# unrecognized implementation fails closed.
+impl = data.get("implementation")
+if impl not in ("go", "rust"):
+    sys.exit("mine sidecar implementation mismatch")
+keys = {"block_hash", "height", "mined", "nonce", "timestamp", "tx_count"}
+if impl == "go":
+    keys = keys | {"commit_state"}
+if not isinstance(resp, dict) or set(resp) != keys:
     sys.exit("mine response shape mismatch")
+if impl == "go" and resp.get("commit_state") != "committed":
+    sys.exit("mine response commit_state mismatch")
 height, block_hash, tx_count = resp.get("height"), resp.get("block_hash"), resp.get("tx_count")
 if resp.get("mined") is not True:
     sys.exit("mine response did not mine")

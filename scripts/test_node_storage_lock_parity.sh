@@ -612,8 +612,11 @@ print(json.dumps({"body": body, "elapsed_ms": int((time.monotonic() - started) *
 PY
 }
 validate_atomic_rpc() {
-  local label="$1" mode="$2" result="$3" arg1="${4:-}" arg2="${5:-}" output="${6:-/dev/null}"
-  python3 - "${mode}" "${result}" "${arg1}" "${arg2}" >"${output}" <<'PY' || fail "${label}: ${mode} RPC contract"
+  # impl is the implementation SERVING the route, so a /mine_next row asserts the
+  # body that implementation actually ships. Go carries the typed commit-state
+  # projection; the Rust mirror is RUB-920 and still ships the pre-typed shape.
+  local label="$1" mode="$2" result="$3" arg1="${4:-}" arg2="${5:-}" output="${6:-/dev/null}" impl="${7:-}"
+  python3 - "${mode}" "${result}" "${arg1}" "${arg2}" "${impl}" >"${output}" <<'PY' || fail "${label}: ${mode} RPC contract"
 import json, pathlib, re, sys
 def require(condition, message):
     if not condition:
@@ -626,6 +629,13 @@ def load(path, label):
     require(isinstance(value, dict), f"{label} root is not an object")
     return value
 mode, record = sys.argv[1], load(sys.argv[2], f"{sys.argv[1]} response")
+impl = sys.argv[5] if len(sys.argv) > 5 else ""
+# RUB-911 landed the typed commit-state projection in Go only; the Rust mirror is
+# RUB-920. Each /mine_next row is therefore asserted against the shape its OWN
+# server ships, and an unnamed server fails closed rather than picking a default.
+def mine_next_impl():
+    require(impl in ("go", "rust"), f"{mode} row did not name the serving implementation")
+    return impl
 require(set(record) == {"body", "elapsed_ms", "status"}, f"{mode} transport keys changed")
 require(type(record["elapsed_ms"]) is int and 0 <= record["elapsed_ms"] <= 10000, f"{mode} response was not bounded")
 body = record["body"]
@@ -636,7 +646,14 @@ if mode == "tip":
     require(isinstance(tip_hash, str) and len(tip_hash) == 64 and all(ch in "0123456789abcdef" for ch in tip_hash), "tip has invalid tip_hash")
     print(json.dumps({key: body[key] for key in ("has_tip", "height", "tip_hash")}, sort_keys=True))
 elif mode == "refusal":
-    require(record["status"] == 422 and isinstance(body, dict) and set(body) == {"mined", "error"} and body["mined"] is False, "refusal HTTP disposition/root/keys changed")
+    # The atomic-write refusal is raised INSIDE commitCanonicalTransition (the
+    # recovery-proof block staging), so the Go projection classes it commit-stage:
+    # 503 / not_committed, never the candidate's own 422.
+    if mine_next_impl() == "go":
+        require(record["status"] == 503 and isinstance(body, dict) and set(body) == {"mined", "commit_state", "error"} and body["mined"] is False, "refusal HTTP disposition/root/keys changed")
+        require(body["commit_state"] == "not_committed", "refusal commit_state changed")
+    else:
+        require(record["status"] == 422 and isinstance(body, dict) and set(body) == {"mined", "error"} and body["mined"] is False, "refusal HTTP disposition/root/keys changed")
     error = body["error"]
     markers = ("atomic write lock failed", sys.argv[3], "before_namespace_commit", "create_if_absent")
     require(isinstance(error, str) and all(marker in error for marker in markers), "atomic refusal is missing stable markers")
@@ -646,8 +663,10 @@ elif mode == "refusal":
 elif mode == "success":
     before, after = load(sys.argv[3], "pre-refusal tip"), load(sys.argv[4], "post-retry tip")
     keys = {"mined", "height", "block_hash", "timestamp", "nonce", "tx_count"}
+    if mine_next_impl() == "go":
+        keys = keys | {"commit_state"}
     require(record["status"] == 200 and isinstance(body, dict) and set(body) == keys, "retry success HTTP disposition/root/keys changed")
-    require(body["mined"] is True and all(type(body[key]) is int for key in ("height", "timestamp", "nonce", "tx_count")), "retry success types changed")
+    require(body["mined"] is True and (impl != "go" or body["commit_state"] == "committed") and all(type(body[key]) is int for key in ("height", "timestamp", "nonce", "tx_count")), "retry success types changed")
     require(isinstance(body["block_hash"], str) and len(body["block_hash"]) == 64 and all(ch in "0123456789abcdef" for ch in body["block_hash"]), "retry block_hash type changed")
     require(set(before) == {"has_tip", "height", "tip_hash"} and set(after) == set(before), "tip projection keys changed")
     require(before["has_tip"] is True and after["has_tip"] is True, "tip projection has no tip")
@@ -682,7 +701,7 @@ assert_atomic_writer_contention() {
   tip_projection "${label}.pre-refusal" "${LIVE_RPC}" "${pre_tip}"
   take_snapshot "${label}.before" "${physical}" "${before}"
   rpc_result "${label}.refusal" "${LIVE_RPC}" POST /mine_next || fail "${label}: refused mine_next request"
-  validate_atomic_rpc "${label}" refusal "${RPC_RESULT}" "${writer_parent}"
+  validate_atomic_rpc "${label}" refusal "${RPC_RESULT}" "${writer_parent}" "" "" "${writer}"
   rubin_process_is_alive "${LIVE_PID}" || fail "${label}: ordinary writer did not survive pre-commit refusal"
   take_snapshot "${label}.after" "${physical}" "${after}"
   assert_same_atomic_semantic_snapshot "${label}: same-parent different-destination writer mutated state" "${before}" "${after}"
@@ -692,7 +711,7 @@ assert_atomic_writer_contention() {
   rpc_result "${label}.retry" "${LIVE_RPC}" POST /mine_next || fail "${label}: retry mine_next request"
   local retry_result="${RPC_RESULT}"
   tip_projection "${label}.post-retry" "${LIVE_RPC}" "${success_tip}"
-  validate_atomic_rpc "${label}" success "${retry_result}" "${pre_tip}" "${success_tip}"
+  validate_atomic_rpc "${label}" success "${retry_result}" "${pre_tip}" "${success_tip}" "" "${writer}"
   stop_live "${label}.writer"
 }
 assert_atomic_reclaim() {

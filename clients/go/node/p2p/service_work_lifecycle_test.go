@@ -168,8 +168,6 @@ func TestServiceWorkLifecycleEntryMatrix(t *testing.T) {
 	blockBytes := node.DevnetGenesisBlockBytes()
 	must(t, s.AnnounceTx(minimalValidTxBytes(t)), "OPEN AnnounceTx")
 	must(t, s.AnnounceBlock(blockBytes), "OPEN AnnounceBlock")
-	must(t, s.ConsumeAcceptedBlockDASets(blockBytes), "OPEN ConsumeAcceptedBlockDASets")
-	must(t, s.consumeCompleteDASetIDs(nil), "OPEN synchronous internal callee")
 	requireEqual(t, s.trackDialPeer("127.0.0.21:0") && s.trackDialPeer("127.0.0.22:1"), true, "the pre-inserted dial reservations") // Registered-then-rejected register paths release the lease and add no reservation; a leaked lease would strand the final Close past its watchdog.
 	requireEqual(t, s.startDialPeer("127.0.0.21:0"), false, "the duplicate outbound dial registration")
 	s.connectDiscoveredAddrs([]string{"127.0.0.22:1"})
@@ -210,12 +208,10 @@ func TestServiceWorkLifecycleEntryMatrix(t *testing.T) {
 	requireEqual(t, s.inFlightDialCount(), 0, "in-flight dial reservations after Close")
 	requireClosedRejection(t, s.AnnounceTx([]byte{0x00}), "CLOSED malformed AnnounceTx") // Malformed bytes after Close pin the priority row: the registration gate precedes parsing, so the rejection is the exact closed error, never a parse error.
 	requireClosedRejection(t, s.AnnounceBlock([]byte{0x00}), "CLOSED malformed AnnounceBlock")
-	requireClosedRejection(t, s.ConsumeAcceptedBlockDASets([]byte{0x00}), "CLOSED malformed ConsumeAcceptedBlockDASets")
 	requireClosedRejection(t, s.Start(context.Background()), "CLOSED Start")
 	requireEqual(t, s.startDialPeer("127.0.0.30:0"), false, "the CLOSED outbound dial registration")
 	s.connectDiscoveredAddrs([]string{"127.0.0.31:1"})
 	requireEqual(t, s.inFlightDialCount(), 0, "CLOSED discovered dial reservations")
-	must(t, s.consumeCompleteDASetIDs(nil), "CLOSED synchronous internal callee") // Synchronous internal callees inherit and never register a nested lease, so they behave identically after the drain.
 }
 
 // TestServiceWorkLifecycleCloseWaitsForPublicCallbacks parks each real public entry on a producer, socket-write or DA-owner-lock barrier while Close runs, then observes the owners.
@@ -585,12 +581,14 @@ func TestServiceWorkLifecycleReadOnlyAfterClose(t *testing.T) {
 	requireEqual(t, len(s.CompleteDASetCandidates(1<<20)), 2, "defensive DA snapshot candidates after Close")
 	requireClosedRejection(t, s.AnnounceTx(txBytes), "retained AnnounceTx callback")
 	requireClosedRejection(t, s.AnnounceBlock(blockBytes), "retained AnnounceBlock callback")
-	requireClosedRejection(t, s.ConsumeAcceptedBlockDASets(blockBytes), "retained DA consume callback")
 	requireEqual(t, metaCalls.Load(), int64(0), "TxMetadataFunc calls after Close") // Every observable owner a won call would have moved: the metadata producer was never invoked, the retained peer's socket saw no frame, and the state owners below are unchanged.
 	requireEqual(t, writes.Load(), int64(0), "frame writes on the retained peer socket after Close")
 	_, pooled := s.cfg.TxPool.Get(txid)
 	requireEqual(t, pooled, false, "the relay-pool entry a rejected AnnounceTx would have added")
-	requireEqual(t, lifecycleDASetPresent(s, daID), true, "the DA set a rejected consume would have taken from the state owner")
+	// blockBytes carries this exact da_id's complete commit+chunk pair, so a
+	// Service that still owned any post-return retained-DA cleanup would have
+	// taken the set here. There is no such authority left: the set survives.
+	requireEqual(t, lifecycleDASetPresent(s, daID), true, "the retained DA set after Close and both rejected callbacks")
 	requireEqual(t, s.blockSeen.Has(node.DevnetGenesisBlockHash()), false, "the block seen-set entry a rejected AnnounceBlock would have added")
 }
 
@@ -603,4 +601,105 @@ func TestServiceWorkLifecycleFreshServiceIndependent(t *testing.T) {
 	must(t, fresh.AnnounceTx(minimalValidTxBytes(t)), "fresh Service AnnounceTx")
 	requireClosedRejection(t, closedService.AnnounceBlock(node.DevnetGenesisBlockBytes()), "closed AnnounceBlock")
 	requireReturned(t, lifecycleClose(fresh), "fresh Close")
+}
+
+// TestTerminalPersistenceNewSkipsTheFencedTTLAdvance is the latched-engine schedule. On TERMINAL_PERSISTENCE(new) the transition publishes the summary, returns the terminal error and RETAINS ChainState.admissionMu exclusively (publishCanonicalTransition's latched arm returns before its Unlock), so the post-return TTL advance — the ONLY step of noteAcceptedBlock that takes that fence — must be skipped: invoked, AdvanceOrphanTTL would park this worker at admissionMu.RLock forever and the terminal error would never reach the caller. node's TestCanonicalDAWritersCannotInterleaveWithTheTransition pins that AdvanceOrphanTTL does block on a held write guard, and TestSyncEnginePostCommitFaultKeepsAdmissionClosedAfterLatch that the terminal latch never releases it; this row owns the remaining half — that the chain no longer invokes it. A published summary alongside a non-nil apply error is exactly that shape at both engine seams and the error identity is deliberately never read, so the sentinel stands in for the fault, whose injection seam (atomicWriteIO) is private to package node.
+func TestTerminalPersistenceNewSkipsTheFencedTTLAdvance(t *testing.T) {
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	p := testPeerForService(h.service, "remote", 2)
+	summary, err := p.processRelayedBlock(blockAtHeight(t, source, 1))
+	must(t, err, "processRelayedBlock")
+	chunk := stageOrphanQuotaBoundary(t, h.service, 109)
+	// Primed to ONE advance from expiry, so the advance this row skips is the one
+	// that decides: with the gate reverted the orphan is released and the restage
+	// below succeeds instead of refusing.
+	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime orphan TTL")
+	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime orphan TTL")
+	terminal := errors.New("storage persistence fault")
+	p.acceptRelayedBlockResult(summary.BlockHash, summary, terminal)
+	requireEqual(t, h.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk) != nil, true, "the retained orphan the skipped TTL advance left in place")
+	requireEqual(t, h.service.blockSeen.Has(summary.BlockHash), true, "the seen-set entry the unfenced effects still added")
+}
+
+// latchedDAHarness returns a harness whose engine has GENUINELY latched its
+// terminal fault and therefore RETAINS ChainState.admissionMu exclusively — the
+// exact production state the two observer gates below defend against. The latch
+// is the engine's own decision, not an injected seam: the retained DA record
+// staged here carries commit bytes that do not canonically parse, so the next
+// canonical transition's D preparation fails terminally before the durable
+// commit and canonicalTransition.end latches without unlocking. atomicWriteIO,
+// the post-commit persistence-fault seam, is private to package node and no
+// forged latch is available from here.
+func latchedDAHarness(t *testing.T, source *testHarness) *testHarness {
+	t.Helper()
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	stageCompleteDASetForService(t, h.service, daRelayTestID(0x6a), []byte("latch-payload"))
+	if _, err := h.syncEngine.ApplyBlock(blockAtHeight(t, source, 1), nil); err == nil {
+		t.Fatal("the corrupt retained DA record did not fail the canonical transition")
+	}
+	requireEqual(t, h.syncEngine.TerminalFaulted(), true, "the engine terminal latch")
+	return h
+}
+
+// TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance is the AnnounceBlock half of
+// the latched-park class. The post-return orphan-TTL advance is the only step of
+// AnnounceBlock that takes the admission read fence, and a latched transition
+// never releases the write guard, so an ungated advance parks this leased caller
+// forever. The row proves the call RETURNS while the engine is genuinely
+// latched, and that it got far enough to reach the gated line: the unfenced
+// seen-set effect ahead of it landed.
+func TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance(t *testing.T) {
+	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
+	h := latchedDAHarness(t, source)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 2)
+	done := make(chan error, 1)
+	go func() { done <- h.service.AnnounceBlock(blockBytes) }()
+	requireReturned(t, done, "AnnounceBlock on a latched engine")
+	requireEqual(t, h.service.blockSeen.Has(blockHash), true, "the seen-set entry the unfenced effects still added")
+}
+
+// TestLatchedEngineSkipsThePeerQuotaRelease is the peer-teardown half. The
+// best-effort quota release takes the same fence, so an ungated release parks
+// unregisterPeer against a latched engine and strands the peer worker. The
+// lifecycle-exit counter increments only AFTER the gated call, so it is the
+// observation that the teardown ran past it rather than merely started.
+//
+// The skipped release itself is deliberately not observed through the retained
+// image: every exported reader of that image takes the same retained fence, so
+// any such assertion would park exactly like the call under test.
+func TestLatchedEngineSkipsThePeerQuotaRelease(t *testing.T) {
+	h := latchedDAHarness(t, newTestHarness(t, 2, "127.0.0.1:0", nil))
+	p := &peer{service: h.service, state: node.PeerState{Addr: "127.0.0.1:19111"}}
+	must(t, h.service.registerPeer(p), "registerPeer")
+	exits := h.service.PeerLifecycleExits()
+	done := make(chan error, 1)
+	go func() { h.service.unregisterPeer(p); done <- nil }()
+	requireReturned(t, done, "unregisterPeer on a latched engine")
+	requireEqual(t, h.service.PeerLifecycleExits(), exits+1, "the lifecycle exit the completed teardown recorded")
+}
+
+// TestResolvedOrphanTerminalResultSkipsTheFencedTTLAdvance is the RESOLVED-ORPHAN
+// entry's own killer for the same skip. acceptResolvedOrphanResult forwards the
+// apply error into noteAcceptedBlock, so a resolved orphan whose apply returns
+// the terminal shape — a published summary alongside a non-nil error — skips the
+// fenced TTL advance exactly like the relayed-block entry does. Forwarding nil
+// instead would advance the TTL, and the orphan primed one advance from expiry
+// below is what makes that difference observable.
+//
+// This entry reaches noteAcceptedBlock through its OWN call site, which the
+// relayed-block row above never executes; neither row can stand in for the other.
+func TestResolvedOrphanTerminalResultSkipsTheFencedTTLAdvance(t *testing.T) {
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	p := testPeerForService(h.service, "remote", 2)
+	summary, err := p.processRelayedBlock(blockAtHeight(t, source, 1))
+	must(t, err, "processRelayedBlock")
+	chunk := stageOrphanQuotaBoundary(t, h.service, 111)
+	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime orphan TTL")
+	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime orphan TTL")
+	terminal := errors.New("storage persistence fault")
+	stop := h.service.acceptResolvedOrphanResult(p, summary.BlockHash, summary.BlockHash, summary, terminal)
+	requireEqual(t, stop, true, "the resolved-orphan walk stop a terminal result forces")
+	requireEqual(t, h.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk) != nil, true, "the retained orphan the skipped TTL advance left in place")
 }

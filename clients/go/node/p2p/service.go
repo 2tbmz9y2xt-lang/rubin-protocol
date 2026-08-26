@@ -269,6 +269,18 @@ func (s *Service) workAuthorized() bool {
 // mutation, broadcast or DA TTL work: once Close has published the non-OPEN
 // state it returns exactly "service already closed" with zero effects, and a
 // call that won the lease first finishes while Close waits for it.
+//
+// The retained-DA TTL advance is additionally gated on the engine's terminal
+// latch. A latched canonical transition RETAINS ChainState.admissionMu
+// exclusively until restart, and advanceDAOrphanTTL is the only step here that
+// takes that fence, so invoking it would park this leased worker forever instead
+// of announcing and returning. The check is BEST EFFORT, not a lock order: a
+// latch landing between it and the RLock still parks the caller. It closes the
+// schedule that matters — a node already latched when the announce arrives — and
+// claims nothing about a transition still in flight, which the fence itself
+// continues to serialize. TerminalFaulted() is nil-safe by its own
+// documented contract, and no constructed Service reaches this gate with a
+// nil engine: validateServiceConfig rejects a nil SyncEngine.
 func (s *Service) AnnounceBlock(blockBytes []byte) error {
 	if s == nil {
 		return errors.New("nil service")
@@ -289,7 +301,10 @@ func (s *Service) AnnounceBlock(blockBytes []byte) error {
 		return nil
 	}
 	broadcastErr := s.broadcastAcceptedBlock(nil, blockHash)
-	ttlErr := s.advanceDAOrphanTTL()
+	var ttlErr error
+	if !s.cfg.SyncEngine.TerminalFaulted() {
+		ttlErr = s.advanceDAOrphanTTL()
+	}
 	if broadcastErr != nil {
 		return broadcastErr
 	}

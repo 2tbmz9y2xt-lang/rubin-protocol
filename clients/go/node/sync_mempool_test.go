@@ -95,19 +95,35 @@ func awaitCanonicalMOError(t *testing.T, ch <-chan error, label string) error {
 	}
 }
 
-func awaitCanonicalMOAdmissionRLock(t *testing.T, caller string) {
+// awaitCanonicalMOAdmissionRLock blocks until at least want goroutines whose
+// stack names caller are PARKED at ChainState.admissionMu.RLock. It is the
+// forcing barrier that replaces "wait a while and hope": a goroutine that merely
+// had not started yet never satisfies it, so a row built on it cannot pass for a
+// scheduling reason.
+func awaitCanonicalMOAdmissionRLock(t *testing.T, caller string, want int) {
 	t.Helper()
 	deadline, stack := time.Now().Add(time.Second), make([]byte, 1<<20)
 	for time.Now().Before(deadline) {
-		for _, goroutine := range strings.Split(string(stack[:runtime.Stack(stack, true)]), "\n\n") {
+		n := runtime.Stack(stack, true)
+		// A filled buffer means runtime.Stack TRUNCATED: a parked goroutine may
+		// be in the part that was cut, so grow and retry instead of concluding.
+		if n == len(stack) {
+			stack = make([]byte, 2*len(stack))
+			continue
+		}
+		parked := 0
+		for _, goroutine := range strings.Split(string(stack[:n]), "\n\n") {
 			atRLock := strings.Contains(goroutine, "sync.(*RWMutex).RLock") || strings.Contains(goroutine, "sync.runtime_SemacquireRWMutexR")
 			if atRLock && strings.Contains(goroutine, caller) {
-				return
+				parked++
 			}
+		}
+		if parked >= want {
+			return
 		}
 		runtime.Gosched()
 	}
-	t.Fatalf("%s did not block at admissionMu.RLock", caller)
+	t.Fatalf("fewer than %d %s goroutines blocked at admissionMu.RLock", want, caller)
 }
 
 func newCanonicalMOFixture(t *testing.T, inputs int, cfg MempoolConfig) *canonicalMOFixture {
@@ -335,7 +351,7 @@ func TestCanonicalMOPlanDirectAndBootstrap(t *testing.T) {
 	}
 	t.Run("terminal_snapshot_is_not_race_tolerant", func(t *testing.T) {
 		terminal := fmt.Errorf("wrapped: %w", terminalCanonicalMempoolError(errors.New("test terminal")))
-		if !errors.Is(raceTolerantBootstrapResult(terminal, true), terminal) || !errors.Is(raceTolerantBootstrapResult(errStoragePersistenceFault, true), errStoragePersistenceFault) {
+		if !errors.Is(raceTolerantBootstrapResult(terminal, true, false), terminal) || !errors.Is(raceTolerantBootstrapResult(errStoragePersistenceFault, true, false), errStoragePersistenceFault) {
 			t.Fatal("bootstrap race helper hid a terminal result behind a tip")
 		}
 		dir := t.TempDir()
@@ -350,11 +366,11 @@ func TestCanonicalMOPlanDirectAndBootstrap(t *testing.T) {
 		owner.mu.Lock()
 		owner.byToken[PendingOutpointToken{owner: owner, seq: 1}] = nil
 		owner.mu.Unlock()
-		if _, snapshotErr := snapshotMempool(mp); !isCanonicalMOTerminalError(snapshotErr) {
+		if _, snapshotErr := snapshotMempool(mp); !isCanonicalTransitionTerminalError(snapshotErr) {
 			t.Fatalf("snapshotMempool(nil claim) err=%v", snapshotErr)
 		}
 		err = engine.BootstrapCanonicalGenesisIfEmpty()
-		if !isCanonicalMOTerminalError(err) || !engine.persistenceFaulted() || engine.chainState.HasTip {
+		if !isCanonicalTransitionTerminalError(err) || !engine.persistenceFaulted() || engine.chainState.HasTip {
 			t.Fatalf("BootstrapCanonicalGenesisIfEmpty err=%v latch=%v tip=%v", err, engine.persistenceFaulted(), engine.chainState.HasTip)
 		}
 		if _, ok := owner.AdmissionContext(); ok {
@@ -733,7 +749,7 @@ func TestCanonicalMOPlanProviderSnapshotAndFirstErrorOrder(t *testing.T) {
 	}
 	i.mp.mu.Unlock()
 	err := i.applyCoinbase(t)
-	if !isCanonicalMOTerminalError(err) || !i.engine.persistenceFaulted() {
+	if !isCanonicalTransitionTerminalError(err) || !i.engine.persistenceFaulted() {
 		t.Fatalf("early invariant err=%v", err)
 	}
 	if _, ok := i.mp.PendingOutpointOwner().AdmissionContext(); ok {
@@ -753,7 +769,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 	feeFixture.mp.mu.Unlock()
 	feeState := feeFixture.engine.chainState.view()
 	feeErr := feeFixture.applySpend(t, feeFixture.ops[0], 2)
-	if !isCanonicalMOTerminalError(feeErr) || !feeFixture.engine.persistenceFaulted() || feeFixture.engine.chainState.view() != feeState || !feeFixture.mp.Contains(feeTxID) {
+	if !isCanonicalTransitionTerminalError(feeErr) || !feeFixture.engine.persistenceFaulted() || feeFixture.engine.chainState.view() != feeState || !feeFixture.mp.Contains(feeTxID) {
 		t.Fatalf("stored fee err=%v latch=%v retained=%v", feeErr, feeFixture.engine.persistenceFaulted(), feeFixture.mp.Contains(feeTxID))
 	}
 	if create, spend, deployments := feeProvider.counts(); create != 0 || spend != 0 || deployments != 0 {
@@ -957,7 +973,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 					}
 					before := canonicalMOImageFingerprint(t, f.mp, 0)
 					_, err := prepareCanonicalMempoolPlan(f.mp, snapshot, f.engine.chainState, 0, 1, f.engine.cfg.ChainID)
-					if !isCanonicalMOTerminalError(err) || before != canonicalMOImageFingerprint(t, f.mp, 0) {
+					if !isCanonicalTransitionTerminalError(err) || before != canonicalMOImageFingerprint(t, f.mp, 0) {
 						t.Fatalf("planning err=%v mutated M/O", err)
 					}
 					if row.name == "raw" && !strings.Contains(err.Error(), fmt.Sprintf("%x", snapshot.entries[index].txid)) {
@@ -986,7 +1002,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 		f.mp.mu.Unlock()
 		before := canonicalMOImageFingerprint(t, f.mp, 0)
 		_, err := prepareCanonicalMempoolPlan(f.mp, snapshot, f.engine.chainState, 0, 1, f.engine.cfg.ChainID)
-		if !isCanonicalMOTerminalError(err) || before != canonicalMOImageFingerprint(t, f.mp, 0) || !strings.Contains(err.Error(), fmt.Sprintf("%x", low.txid)) {
+		if !isCanonicalTransitionTerminalError(err) || before != canonicalMOImageFingerprint(t, f.mp, 0) || !strings.Contains(err.Error(), fmt.Sprintf("%x", low.txid)) {
 			t.Fatalf("%s err=%v want lower raw txid=%x", name, err, low.txid)
 		}
 	}
@@ -1010,7 +1026,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 		snapshot := mustCanonicalMOSnapshot(t, f.mp)
 		before := canonicalMOImageFingerprint(t, f.mp, 0)
 		_, err := prepareCanonicalMempoolPlan(f.mp, snapshot, f.engine.chainState, 0, 1, f.engine.cfg.ChainID)
-		if !isCanonicalMOTerminalError(err) || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), fmt.Sprintf("%x", last.txid)) || (wantMiddle && !strings.Contains(err.Error(), fmt.Sprintf("%x", middle.txid))) || before != canonicalMOImageFingerprint(t, f.mp, 0) {
+		if !isCanonicalTransitionTerminalError(err) || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), fmt.Sprintf("%x", last.txid)) || (wantMiddle && !strings.Contains(err.Error(), fmt.Sprintf("%x", middle.txid))) || before != canonicalMOImageFingerprint(t, f.mp, 0) {
 			t.Fatalf("%s err=%v want=%q middle=%x later=%x", name, err, want, middle.txid, last.txid)
 		}
 	}
@@ -1068,7 +1084,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 		o.mu.Unlock()
 		f.mp.mu.Unlock()
 		_, err := prepareCanonicalMempoolPlan(f.mp, snapshot, f.engine.chainState, 0, 1, f.engine.cfg.ChainID)
-		if !isCanonicalMOTerminalError(err) || !strings.Contains(err.Error(), fmt.Sprintf("%x", low.txid)) {
+		if !isCanonicalTransitionTerminalError(err) || !strings.Contains(err.Error(), fmt.Sprintf("%x", low.txid)) {
 			t.Fatalf("claim precedence err=%v want lower raw txid=%x", err, low.txid)
 		}
 	})
@@ -1096,7 +1112,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 		f.mp.mu.Unlock()
 		snapshot := mustCanonicalMOSnapshot(t, f.mp)
 		_, err := prepareCanonicalMempoolPlan(f.mp, snapshot, f.engine.chainState, 0, 1, f.engine.cfg.ChainID)
-		if !isCanonicalMOTerminalError(err) || !strings.Contains(err.Error(), fmt.Sprintf("%x", orphanID)) {
+		if !isCanonicalTransitionTerminalError(err) || !strings.Contains(err.Error(), fmt.Sprintf("%x", orphanID)) {
 			t.Fatalf("orphan precedence err=%v want standard=%x", err, orphanID)
 		}
 	})
@@ -1143,7 +1159,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 				}
 				before := canonicalMOImageFingerprint(t, f.mp, 0)
 				_, err := prepareCanonicalMempoolPlan(f.mp, snapshot, f.engine.chainState, 0, 1, f.engine.cfg.ChainID)
-				if !isCanonicalMOTerminalError(err) || !strings.Contains(err.Error(), row.family) || !strings.Contains(err.Error(), fmt.Sprintf("%x", lowerID)) || strings.Contains(err.Error(), fmt.Sprintf("%x", laterID)) || before != canonicalMOImageFingerprint(t, f.mp, 0) {
+				if !isCanonicalTransitionTerminalError(err) || !strings.Contains(err.Error(), row.family) || !strings.Contains(err.Error(), fmt.Sprintf("%x", lowerID)) || strings.Contains(err.Error(), fmt.Sprintf("%x", laterID)) || before != canonicalMOImageFingerprint(t, f.mp, 0) {
 					t.Fatalf("%s err=%v lower=%x later=%x", row.name, err, lowerID, laterID)
 				}
 			})
@@ -1179,7 +1195,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 		snapshot := mustCanonicalMOSnapshot(t, f.mp)
 		before := canonicalMOImageFingerprint(t, f.mp, 0)
 		_, err = prepareCanonicalMempoolPlan(f.mp, snapshot, f.engine.chainState, 0, 1, f.engine.cfg.ChainID)
-		if !isCanonicalMOTerminalError(err) || !strings.Contains(err.Error(), "duplicate pending-outpoint input") || strings.Contains(err.Error(), fmt.Sprintf("%x", laterID)) || before != canonicalMOImageFingerprint(t, f.mp, 0) {
+		if !isCanonicalTransitionTerminalError(err) || !strings.Contains(err.Error(), "duplicate pending-outpoint input") || strings.Contains(err.Error(), fmt.Sprintf("%x", laterID)) || before != canonicalMOImageFingerprint(t, f.mp, 0) {
 			t.Fatalf("bound duplicate err=%v later=%x", err, laterID)
 		}
 	})
@@ -1213,7 +1229,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 						f.mp.mu.Unlock()
 						_, err := prepareCanonicalMempoolPlan(f.mp, snapshot, f.engine.chainState, 0, 1, f.engine.cfg.ChainID)
 						o.endTransitionAborted()
-						if !isCanonicalMOTerminalError(err) || !strings.Contains(err.Error(), fmt.Sprintf("%x", snapshot.entries[index].txid)) {
+						if !isCanonicalTransitionTerminalError(err) || !strings.Contains(err.Error(), fmt.Sprintf("%x", snapshot.entries[index].txid)) {
 							t.Fatalf("%s input order err=%v want txid=%x", row.name, err, snapshot.entries[index].txid)
 						}
 					})
@@ -1446,7 +1462,7 @@ func TestCanonicalMOPlanConcurrentAdmission(t *testing.T) {
 				_ = waitApply("apply")
 				t.Fatal("admission operation did not start behind the plan barrier")
 			}
-			awaitCanonicalMOAdmissionRLock(t, caller)
+			awaitCanonicalMOAdmissionRLock(t, caller, 1)
 			if barrier != canonicalMOImageFingerprint(t, f.mp, 0) {
 				t.Fatalf("operation mutated M/O before admission guard release image=%s", canonicalMOImageFingerprint(t, f.mp, 0))
 			}

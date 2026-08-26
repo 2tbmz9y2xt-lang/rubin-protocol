@@ -225,9 +225,11 @@ func TestSyncEngineBootstrapCanonicalGenesisIfEmpty_IdempotentAfterTip(t *testin
 }
 
 // TestRaceTolerantBootstrapResult_OutcomeMatrix pins the three outcomes
-// of the TOCTOU recovery helper. Helper input is the (applyErr, hasTip)
-// tuple captured by BootstrapCanonicalGenesisIfEmpty after its ApplyBlock
-// call returns:
+// of the TOCTOU recovery helper on an UNLATCHED engine (latched=false in
+// every row); the latched axis of the same helper is pinned separately by
+// TestCanonicalCutoverLatchedBootstrapReturnIsTotal. Helper input is the
+// (applyErr, hasTip, latched) tuple captured by
+// BootstrapCanonicalGenesisIfEmpty after its ApplyBlock call returns:
 //   - applyErr=nil + hasTip=any: ApplyBlock succeeded; caller treats as
 //     genesis-just-installed; helper returns nil.
 //   - applyErr!=nil + hasTip=false: real failure (chain still empty after
@@ -251,7 +253,7 @@ func TestRaceTolerantBootstrapResult_OutcomeMatrix(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := raceTolerantBootstrapResult(c.applyErr, c.hasTip)
+			got := raceTolerantBootstrapResult(c.applyErr, c.hasTip, false)
 			if !errors.Is(got, c.want) {
 				t.Fatalf("got %v, want %v", got, c.want)
 			}
@@ -293,11 +295,10 @@ func TestSyncEngineBootstrapCanonicalGenesisIfEmpty_NilChainState(t *testing.T) 
 	}
 }
 
-// newAliasingTestPair builds a SyncEngine plus a fresh ChainState that does
-// NOT alias the engine's internal chainState. Returned values are intended
-// for NewMiner mismatched-aliasing tests: the caller passes the standalone
-// ChainState as the miner's chainState argument while the SyncEngine still
-// holds its own different ChainState.
+// newAliasingTestPair builds a SyncEngine on a fresh store plus a standalone
+// ChainState that does NOT alias the engine's internal chainState. The aliasing
+// rows pass that second state as the miner's own chainState; the isolated-engine
+// rows keep only the engine, whose store and chainstate no other fixture shares.
 func newAliasingTestPair(t *testing.T, chainID [32]byte) (*SyncEngine, *ChainState, *BlockStore) {
 	t.Helper()
 	dir := t.TempDir()

@@ -2348,9 +2348,10 @@ func TestCanonicalCutoverStandaloneDisconnectOneCommit(t *testing.T) {
 }
 
 // TestCanonicalCutoverApplyPlanMetadataBounds pins the exact charge formula
-// 48 + 40*(disconnect_rows+connect_rows) + 32*sum(len(A1[row].CompleteDAIDs)),
-// the inclusive production cap, and the refusal ORDER: an over-cap plan is
-// refused before any artifact, checkpoint, generation or live mutation.
+// 48 + 40*(disconnect_rows+connect_rows) + 32*sum(len(A1[row].CompleteDAIDs))
+// + 104*len(I) + 72*sum(len(I[i].chunks)), the inclusive production cap, and the
+// refusal ORDER: an over-cap plan is refused before any artifact, checkpoint,
+// generation or live mutation.
 //
 // The exact-cap and cap+8 rows run against the package-private cap override on
 // the SAME production comparison; the production cap constant and its cap+8
@@ -2364,19 +2365,31 @@ func TestCanonicalCutoverApplyPlanMetadataBounds(t *testing.T) {
 		}
 		return out
 	}
+	identities := func(chunkCounts ...int) []canonicalDASetIdentity {
+		out := make([]canonicalDASetIdentity, 0, len(chunkCounts))
+		for _, n := range chunkCounts {
+			out = append(out, canonicalDASetIdentity{chunks: make([]canonicalDAChunkIdentity, n)})
+		}
+		return out
+	}
 	for _, tc := range []struct {
 		name             string
 		disconnect, conn int
 		ids              []int
+		daChunks         []int
 		want             uint64
 	}{
-		{"empty", 0, 0, nil, 48},
-		{"one connect row", 0, 1, []int{0}, 88},
-		{"disconnect and connect", 2, 3, []int{0, 0, 0}, 248},
-		{"ids charged per id", 0, 1, []int{3}, 184},
-		{"cross block ids retained", 0, 2, []int{1, 1}, 192},
+		{"empty", 0, 0, nil, nil, 48},
+		{"one connect row", 0, 1, []int{0}, nil, 88},
+		{"disconnect and connect", 2, 3, []int{0, 0, 0}, nil, 248},
+		{"ids charged per id", 0, 1, []int{3}, nil, 184},
+		{"cross block ids retained", 0, 2, []int{1, 1}, nil, 192},
+		{"one identity with no chunks", 0, 0, nil, []int{0}, 152},
+		{"identity chunks charged per chunk", 0, 0, nil, []int{2}, 296},
+		{"identities charged per identity", 0, 0, nil, []int{1, 1}, 400},
+		{"a1 ids and identities are charged independently", 0, 1, []int{1}, []int{1}, 296},
 	} {
-		got, err := canonicalPlanMetadataCharge(rows(tc.disconnect), rows(tc.conn), applied(tc.ids...))
+		got, err := canonicalPlanMetadataCharge(rows(tc.disconnect), rows(tc.conn), applied(tc.ids...), identities(tc.daChunks...))
 		if err != nil || got != tc.want {
 			t.Fatalf("%s charge=%d err=%v, want %d", tc.name, got, err, tc.want)
 		}
@@ -2385,7 +2398,7 @@ func TestCanonicalCutoverApplyPlanMetadataBounds(t *testing.T) {
 	if canonicalPlanMetadataCapBytes != 67108864 {
 		t.Fatalf("production cap=%d, want the pinned 64 MiB literal 67108864", canonicalPlanMetadataCapBytes)
 	}
-	for _, term := range []uint64{canonicalPlanMetadataBaseBytes, canonicalPlanMetadataRowBytes, canonicalPlanMetadataIDBytes, canonicalPlanMetadataCapBytes} {
+	for _, term := range []uint64{canonicalPlanMetadataBaseBytes, canonicalPlanMetadataRowBytes, canonicalPlanMetadataIDBytes, canonicalPlanDAIdentityBytes, canonicalPlanDAChunkIdentityBytes, canonicalPlanMetadataCapBytes} {
 		if term%8 != 0 {
 			t.Fatalf("charge term %d is not a multiple of 8: cap+8 would not be the smallest realizable overflow", term)
 		}
@@ -2408,6 +2421,19 @@ func TestCanonicalCutoverApplyPlanMetadataBounds(t *testing.T) {
 	over := &canonicalTransitionPlan{applied: applied(4)}
 	if err := over.checkCanonicalPlanMetadataBound(); !errors.Is(err, errCanonicalPlanMetadataCap) {
 		t.Fatalf("cap+8 plan err=%v, want the resource refusal", err)
+	}
+
+	// The same two rows driven by the exact-identity half of the charge: 48 +
+	// 104 + 72 lands ON the cap, and the smallest step this axis can take from
+	// there — one more chunk identity — is refused.
+	canonicalPlanMetadataCap = 224
+	exactDA := &canonicalTransitionPlan{includedDA: identities(1)}
+	if err := exactDA.checkCanonicalPlanMetadataBound(); err != nil {
+		t.Fatalf("exact-cap identity plan refused: %v", err)
+	}
+	overDA := &canonicalTransitionPlan{includedDA: identities(2)}
+	if err := overDA.checkCanonicalPlanMetadataBound(); !errors.Is(err, errCanonicalPlanMetadataCap) {
+		t.Fatalf("over-cap identity plan err=%v, want the resource refusal", err)
 	}
 
 	// End to end: the refusal precedes every side effect.
@@ -2660,7 +2686,7 @@ func TestCanonicalCutoverLatchedBootstrapReturnIsTotal(t *testing.T) {
 		{"unlatched success still returns nil", nil, false, false, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := latchAwareBootstrapResult(tc.applyErr, tc.hasTip, tc.latched)
+			got := raceTolerantBootstrapResult(tc.applyErr, tc.hasTip, tc.latched)
 			if tc.want == nil && got != nil || tc.want != nil && !errors.Is(got, tc.want) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
@@ -2788,6 +2814,8 @@ func TestCanonicalCutoverPersistenceTruthTable(t *testing.T) {
 func TestCanonicalCutoverNoFalliblePostNewPublication(t *testing.T) {
 	for _, fn := range []any{
 		(*canonicalTransition).publishCanonicalTransition,
+		(*preparedCanonicalDAImage).publish,
+		(*DARelayState).publishAtomicBatchLocked,
 		assignCanonicalChainState,
 		(*Mempool).publishCanonicalMempoolPlan,
 		(*Mempool).publishCanonicalMempoolPlanLocked,
@@ -3067,7 +3095,7 @@ func TestCanonicalCutoverNonpersistentCompatibility(t *testing.T) {
 		owner.byToken[PendingOutpointToken{owner: owner, seq: 1}] = nil
 		owner.mu.Unlock()
 		summary, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil)
-		if summary != nil || !isCanonicalMOTerminalError(err) || !engine.persistenceFaulted() {
+		if summary != nil || !isCanonicalTransitionTerminalError(err) || !engine.persistenceFaulted() {
 			t.Fatalf("summary=%+v err=%v latch=%v, want terminal OLD/latched", summary, err, engine.persistenceFaulted())
 		}
 		if engine.chainState.view().hasTip {

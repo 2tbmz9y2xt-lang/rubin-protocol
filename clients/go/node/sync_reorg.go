@@ -170,7 +170,7 @@ func (s *SyncEngine) applyDirectBlockIfPossible(
 		if pb.Header.PrevBlockHash != zero {
 			return nil, true, ErrParentNotFound
 		}
-		summary, err := s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps, nil, diag)
+		summary, _, err := s.applyCanonicalParsedBlock(pb, blockBytes, prevTimestamps, nil, diag)
 		return summary, true, err
 	case pb.Header.PrevBlockHash == view.tipHash:
 		summary, err := s.applyDirectTipBlock(pb, blockBytes, view, diag)
@@ -200,7 +200,8 @@ func (s *SyncEngine) applyDirectTipBlock(pb *consensus.ParsedBlock, blockBytes [
 	if err != nil {
 		return nil, err
 	}
-	return s.applyCanonicalParsedBlock(pb, blockBytes, canonicalPrevTimestamps, targetCtx, diag)
+	summary, _, err := s.applyCanonicalParsedBlock(pb, blockBytes, canonicalPrevTimestamps, targetCtx, diag)
+	return summary, err
 }
 
 func (s *SyncEngine) shouldSwitchToBranch(
@@ -258,6 +259,10 @@ type preparedBranchBlock struct {
 	item    reorgBranchBlock
 	summary *ChainStateConnectSummary
 	undo    *BlockUndo
+	// includedDA is this row's contribution to I, in its own block's
+	// transaction order. planPreferredBranch concatenates the rows in ascending
+	// canonical order, which is the combined ordered list the contract asks for.
+	includedDA []canonicalDASetIdentity
 }
 
 // applyPreferredBranch applies the candidate branch selected by fork choice —
@@ -339,6 +344,7 @@ func (s *SyncEngine) planPreferredBranch(
 		descriptor := canonicalRowDescriptor{height: row.summary.BlockHeight, hash: row.item.hash}
 		plan.connect = append(plan.connect, descriptor)
 		plan.applied = append(plan.applied, row.summary.CanonicalAppliedBlocks...)
+		plan.includedDA = append(plan.includedDA, row.includedDA...)
 		plan.staged = append(plan.staged, canonicalStagedRow{
 			descriptor:  descriptor,
 			headerBytes: row.item.parsed.HeaderBytes,
@@ -475,8 +481,12 @@ func prepareCommitRow(item reorgBranchBlock, summary *ChainStateConnectSummary, 
 	if err != nil {
 		return preparedBranchBlock{}, err
 	}
+	includedDA, err := canonicalDASetIdentitiesFromParsedBlock(item.parsed)
+	if err != nil {
+		return preparedBranchBlock{}, err
+	}
 	summary.CanonicalAppliedBlocks = []CanonicalAppliedBlock{{Hash: item.hash, CompleteDAIDs: daIDs}}
-	return preparedBranchBlock{item: item, summary: summary, undo: undo}, nil
+	return preparedBranchBlock{item: item, summary: summary, undo: undo, includedDA: includedDA}, nil
 }
 
 // capturePreImages reads the pre-block UTXO entry of every outpoint the block's
@@ -716,48 +726,109 @@ func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte
 // diag is the owning mutation's batch when a public entry point drives this
 // (the reorg path), or nil for a caller outside a mutation, which holds none of
 // the engine's locks and may therefore write directly.
+// Section 11.1 selects ONE owner per disconnected non-coinbase row from the
+// row's own tx_kind, and this is that selection for the current line:
+//
+//	tx_kind 0x00                 -> exactly one standard-owner attempt
+//	tx_kind 0x01/0x02 (DA)       -> zero owners, dropped
+//	every other/unsupported kind -> zero owners, dropped
+//
+// The DA row is a BOUNDED INTERMEDIATE SAFETY GUARD, not Section 11.1's DA
+// re-admission: routing a DA_COMMIT_TX or DA_CHUNK_TX into the standard owner
+// would admit it under the wrong domain's rules, so until RUB-680 owns the
+// detached DA owner the row invokes no owner at all. This is deliberately a
+// smaller behavior than the subsection describes, and it MUST NOT be read as
+// completing it.
+//
+// Dropped rows record ONE diagnostic PER BLOCK carrying their count and the
+// per-kind breakdown, not one per row: the retained batch is bounded, and a
+// DA-heavy block emitting per-row records would evict the standard rows' own
+// diagnostics behind the truncation marker. An owner's own admission FAILURE
+// stays per-row, since each carries a distinct error. The drop touches no DA
+// owner and no peer quota.
 func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []*consensus.ParsedBlock, diag *diagnosticBatch) {
 	if s == nil || s.mempool == nil || len(disconnectedBlocks) == 0 {
 		return
 	}
 	// Disconnect helpers append blocks tip-down, matching h_max -> h_min requeue order.
 	for _, parsed := range disconnectedBlocks {
-		txs, err := nonCoinbaseParsedBlockTransactions(parsed)
+		rows, err := nonCoinbaseParsedBlockTransactions(parsed)
 		if err != nil {
 			continue
 		}
-		for _, txBytes := range txs {
-			if err := s.mempool.AddReorgTx(txBytes); err != nil {
-				s.diagnose(diag, "mempool: requeue-tx: %v\n", err)
-			}
+		s.requeueParsedBlockRows(rows, diag)
+	}
+}
+
+// requeueParsedBlockRows applies the selection above to ONE disconnected block's rows and emits its single dropped-rows record.
+func (s *SyncEngine) requeueParsedBlockRows(rows []canonicalRequeueRow, diag *diagnosticBatch) {
+	// Indexed by tx_kind, so the breakdown below renders in ascending kind
+	// order without a map or a sort.
+	var dropped [256]int
+	total := 0
+	for _, row := range rows {
+		if row.kind != 0x00 {
+			dropped[row.kind]++
+			total++
+			continue
+		}
+		if err := s.mempool.AddReorgTx(row.txBytes); err != nil {
+			s.diagnose(diag, "mempool: requeue-tx: %v\n", err)
 		}
 	}
-}
-
-func nonCoinbaseBlockTransactions(blockBytes []byte) ([][]byte, error) {
-	pb, err := consensus.ParseBlockBytes(blockBytes)
-	if err != nil {
-		return nil, err
+	if total != 0 {
+		kinds := ""
+		for kind, count := range dropped {
+			if count != 0 {
+				kinds = fmt.Sprintf("%s 0x%02x x%d", kinds, kind, count)
+			}
+		}
+		s.diagnose(diag, "mempool: requeue-tx: %d row(s) of a non-standard tx_kind invoke no owner in this line:%s\n", total, kinds)
 	}
-	return nonCoinbaseParsedBlockTransactions(pb)
 }
 
-func nonCoinbaseParsedBlockTransactions(pb *consensus.ParsedBlock) ([][]byte, error) {
+// canonicalRequeueRow is one disconnected non-coinbase row: the tx_kind the
+// block's ALREADY VALIDATED parse reported, and that row's canonical bytes. The
+// kind travels with the bytes precisely so the requeue selection never re-parses
+// and never falls back to a second classifier.
+//
+// txBytes is populated ONLY for kind 0x00, the one kind that reaches an owner;
+// a dropped row carries its kind and nil bytes.
+type canonicalRequeueRow struct {
+	txBytes []byte
+	kind    uint8
+}
+
+// nonCoinbaseParsedBlockTransactions returns the block's rows from index 1 in
+// canonical body order — the coinbase row at index 0 is skipped and invokes zero
+// owners whatever it parsed as.
+//
+// The kind is tested BEFORE the serialization, so a row no owner will receive is
+// never marshaled.
+func nonCoinbaseParsedBlockTransactions(pb *consensus.ParsedBlock) ([]canonicalRequeueRow, error) {
 	if pb == nil {
 		return nil, errors.New("nil parsed block")
 	}
 	if len(pb.Txs) <= 1 {
 		return nil, nil
 	}
-	txs := make([][]byte, 0, len(pb.Txs)-1)
+	rows := make([]canonicalRequeueRow, 0, len(pb.Txs)-1)
 	for txIndex := 1; txIndex < len(pb.Txs); txIndex++ {
-		txBytes, err := consensus.MarshalTx(pb.Txs[txIndex])
-		if err != nil {
-			return nil, err
+		tx := pb.Txs[txIndex]
+		if tx == nil {
+			return nil, fmt.Errorf("parsed block row %d is nil", txIndex)
 		}
-		txs = append(txs, txBytes)
+		row := canonicalRequeueRow{kind: tx.TxKind}
+		if row.kind == 0x00 {
+			txBytes, err := consensus.MarshalTx(tx)
+			if err != nil {
+				return nil, err
+			}
+			row.txBytes = txBytes
+		}
+		rows = append(rows, row)
 	}
-	return txs, nil
+	return rows, nil
 }
 
 func reverseBranchBlocks(branch []reorgBranchBlock) {

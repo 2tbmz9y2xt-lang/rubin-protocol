@@ -333,44 +333,113 @@ func TestOrphanResolution(t *testing.T) {
 	assertHarnessTip(t, sink, 2, height2Hash)
 }
 
-func TestProcessRelayedBlockAdvancesDARelayTTL(t *testing.T) {
-	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+// TestProcessRelayedBlockDropsRetainedDAOrphanNotValidAgainstC1 pins where
+// retained-DA cleanup now happens for a relayed block: INSIDE the canonical
+// transition, not in a post-return loop.
+//
+// The staged orphan chunk carries its exact retained transaction bytes, exactly
+// as the ingest path would, so the transition can parse it — and that
+// transaction funds nothing, so it is not final_chain_valid against C1 and the
+// whole record leaves the published image. The proof is that the SAME chunk
+// stages again afterwards: while the record was retained, a restage is refused
+// as a duplicate.
+func TestProcessRelayedBlockDropsRetainedDAOrphanNotValidAgainstC1(t *testing.T) {
 	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
-	sink.service.cfg.EnableCompactReceive = true
 	sink.service.cfg.Now = func() time.Time { return time.Unix(0, 0) }
-	chunk := stageOrphanQuotaBoundary(t, sink.service, 100)
-	observed := false
-	destination := testPeerForService(sink.service, "ttl-destination", 0)
-	destination.conn = &scriptedConn{writeHook: func(int) {
-		observed = sink.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk) != nil
-	}}
-	destination.state.HandshakeComplete = true
-	destination.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
-	sink.service.peers[destination.addr()] = destination
-	peer := testPeerForService(sink.service, "remote", 2)
-	for _, block := range [][]byte{node.DevnetGenesisBlockBytes(), blockAtHeight(t, source, 1), blockAtHeight(t, source, 2)} {
-		if _, err := peer.processRelayedBlock(block); err != nil {
-			t.Fatalf("process relayed block: %v", err)
-		}
+	chunk := stageRetainedDAOrphanChunk(t, sink.service, daRelayTestID(100), "127.0.0.1:19111")
+	if err := sink.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk); err == nil {
+		t.Fatal("the retained orphan did not refuse its own restage before any block was applied")
 	}
-	if !observed {
-		t.Fatal("relay did not observe the orphan before TTL expiry")
+	peer := testPeerForService(sink.service, "remote", 2)
+	// Exactly ONE block, against an orphan TTL of 3: TTL expiry cannot be the
+	// reason the record left, so the restage below can only be explained by the
+	// canonical transition's own D validation.
+	if _, err := peer.processRelayedBlock(node.DevnetGenesisBlockBytes()); err != nil {
+		t.Fatalf("process relayed block: %v", err)
 	}
 	if err := sink.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk); err != nil {
-		t.Fatalf("expired orphan was retained: %v", err)
+		t.Fatalf("the canonical transition kept a retained orphan it could not validate against C1: %v", err)
 	}
 }
 
+// stageRetainedDAOrphanChunk retains one orphan chunk WITH the exact canonical
+// transaction bytes its Section 5.2 admission used, which is what production
+// ingest always supplies and what the canonical transition parses to derive the
+// record's exact identity.
+func stageRetainedDAOrphanChunk(t *testing.T, svc *Service, daID [32]byte, peerAddr string) node.DARelayChunk {
+	t.Helper()
+	payload := []byte{daID[0]}
+	txBytes := daChunkRelayTxBytes(t, daID, 0, uint64(daID[0]), payload)
+	chunk := node.DARelayChunk{
+		DAID:      daID,
+		ChunkHash: sha3.Sum256(payload),
+		Payload:   payload,
+		WireBytes: uint64(len(txBytes)),
+		TxBytes:   txBytes,
+	}
+	if err := svc.daRelay.StageChunk(peerQuotaKey(peerAddr), chunk); err != nil {
+		t.Fatalf("StageChunk: %v", err)
+	}
+	return chunk
+}
+
+// TestAnnounceBlockAdvancesDARelayTTL keeps the TTL mechanism observable on its
+// own: AnnounceBlock applies nothing, so no canonical transition runs on this
+// harness and the fenced TTL advance is the ONLY thing that can release the
+// retained orphan. The blocks come from a second harness for exactly that
+// reason — mining them here would run a transition and settle the question
+// another way.
 func TestAnnounceBlockAdvancesDARelayTTL(t *testing.T) {
+	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	chunk := stageOrphanQuotaBoundary(t, h.service, 101)
-	for range 3 {
-		if err := h.service.AnnounceBlock(h.mineNextBlockBytes(t)); err != nil {
-			t.Fatalf("AnnounceBlock: %v", err)
+	for height := uint64(1); height <= 2; height++ {
+		if err := h.service.AnnounceBlock(blockAtHeight(t, source, height)); err != nil {
+			t.Fatalf("AnnounceBlock(%d): %v", height, err)
 		}
+	}
+	if err := h.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk); err == nil {
+		t.Fatal("the orphan expired before its TTL ran out")
+	}
+	if err := h.service.AnnounceBlock(blockAtHeight(t, source, 3)); err != nil {
+		t.Fatalf("AnnounceBlock(3): %v", err)
 	}
 	if err := h.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk); err != nil {
 		t.Fatalf("expired local orphan was retained: %v", err)
+	}
+}
+
+// stageCompleteDASetForService retains one single-chunk COMPLETE_SET through the
+// exported writer wrappers, with MINIMAL metadata and DELIBERATELY non-canonical
+// member bytes: TxBytes is the literal "commit"/"chunk", not the canonical
+// serialization of any transaction. The record is therefore NOT what an ingest
+// path would have staged, and that is what makes it serve both of its callers —
+// the retention rows here and in service_work_lifecycle_test.go, which only need
+// a record to be present, and latchedDAHarness, whose engine latches GENUINELY
+// because the next canonical transition's D preparation cannot parse these bytes.
+//
+// Relocated here from the deleted da_relay_consume_test.go, unchanged.
+func stageCompleteDASetForService(t *testing.T, svc *Service, daID [32]byte, payload []byte) {
+	t.Helper()
+	commitment := sha3.Sum256(payload)
+	if err := svc.daRelay.StageCommit("peer-a", node.DARelayCommit{
+		DAID:              daID,
+		PayloadCommitment: commitment,
+		ChunkCount:        1,
+		WireBytes:         1,
+		TxBytes:           []byte("commit"),
+	}); err != nil {
+		t.Fatalf("StageCommit: %v", err)
+	}
+	if err := svc.daRelay.StageChunk("peer-b", node.DARelayChunk{
+		DAID:       daID,
+		ChunkHash:  sha3.Sum256(payload),
+		ChunkIndex: 0,
+		Payload:    payload,
+		WireBytes:  uint64(len(payload)),
+		TxBytes:    []byte("chunk"),
+	}); err != nil {
+		t.Fatalf("StageChunk: %v", err)
 	}
 }
 

@@ -2115,11 +2115,6 @@ func TestDevnetRPCMineNextMineOneError(t *testing.T) {
 	}
 	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, nil, io.Discard, miner)
 	state.nowUnix = func() uint64 { return 0 }
-	var consumeCalls int
-	state.SetAcceptedBlockDASetConsumer(func([]byte) error {
-		consumeCalls++
-		return nil
-	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -2133,41 +2128,23 @@ func TestDevnetRPCMineNextMineOneError(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if got.Mined || got.Error == "" {
+	if mineNextMined(t, got) || got.Error == "" {
 		t.Fatalf("unexpected response: %+v", got)
 	}
 	if !strings.Contains(got.Error, context.Canceled.Error()) {
 		t.Fatalf("error=%q want context canceled", got.Error)
 	}
-	if consumeCalls != 0 {
-		t.Fatalf("consume calls after MineOne error=%d, want 0", consumeCalls)
-	}
 }
 
-func TestDevnetRPCMineNextRejectsGet(t *testing.T) {
-	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
-	t.Cleanup(server.Close)
-	resp, err := http.Get(server.URL + "/mine_next")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
+// mineNextMined reads the response's mined field and fails when the MANDATORY
+// field is absent. Absence is legal for exactly one commit_state — "unknown" —
+// and those rows assert it on the marshaled bytes instead.
+func mineNextMined(t *testing.T, got mineNextResponse) bool {
+	t.Helper()
+	if got.Mined == nil {
+		t.Fatalf("mandatory mined field absent from %+v", got)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status=%d want 400", resp.StatusCode)
-	}
-}
-
-func TestDevnetRPCMineNextUnavailableWithoutMiner(t *testing.T) {
-	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
-	t.Cleanup(server.Close)
-	resp, err := http.Post(server.URL+"/mine_next", "application/json", bytes.NewReader([]byte("{}")))
-	if err != nil {
-		t.Fatalf("Post: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d want 503", resp.StatusCode)
-	}
+	return *got.Mined
 }
 
 func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
@@ -2207,13 +2184,6 @@ func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 		return nil
 	}, io.Discard, miner)
 	state.nowUnix = func() uint64 { return 0 }
-	state.SetAcceptedBlockDASetConsumer(func(block []byte) error {
-		if _, err := consensus.ParseBlockBytes(block); err != nil {
-			t.Fatalf("ParseBlockBytes(consumer): %v", err)
-		}
-		events = append(events, "consume")
-		return nil
-	})
 	server := httptest.NewServer(newDevnetRPCHandler(state))
 	t.Cleanup(server.Close)
 	resp, err := http.Post(server.URL+"/mine_next", "application/json", bytes.NewReader([]byte("{}")))
@@ -2228,7 +2198,7 @@ func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if !got.Mined || got.Height == nil || *got.Height != 1 || got.TxCount == nil || *got.TxCount != 1 {
+	if !mineNextMined(t, got) || got.CommitState != node.CanonicalCommitStateCommitted || got.Height == nil || *got.Height != 1 || got.TxCount == nil || *got.TxCount != 1 {
 		t.Fatalf("unexpected response: %+v", got)
 	}
 	if got.Nonce == nil {
@@ -2237,8 +2207,11 @@ func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 	if len(announcedBlock) == 0 {
 		t.Fatal("expected /mine_next to announce the mined full block")
 	}
-	if got := strings.Join(events, ","); got != "consume,announce" {
-		t.Fatalf("events=%s, want consume before announce", got)
+	// Announce is the ONLY post-return effect /mine_next still drives: retained-DA
+	// cleanup was published inside the canonical transition, so no consume step
+	// precedes or follows it.
+	if got := strings.Join(events, ","); got != "announce" {
+		t.Fatalf("events=%s, want announce alone", got)
 	}
 	parsedBlock, err := consensus.ParseBlockBytes(announcedBlock)
 	if err != nil {
@@ -2333,7 +2306,7 @@ func TestDevnetRPCMineNextPreservesWideSupply(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if !response.Mined || response.Height == nil || *response.Height != 1 {
+	if !mineNextMined(t, response) || response.CommitState != node.CanonicalCommitStateCommitted || response.Height == nil || *response.Height != 1 {
 		t.Fatalf("unexpected response: %+v", response)
 	}
 	want, ok := wide.CheckedAdd(consensus.Uint128FromU64(consensus.TAIL_EMISSION_PER_BLOCK))
@@ -2403,32 +2376,87 @@ func mustRPCMineNextState(t *testing.T, minerCfgTweaks ...func(*node.MinerConfig
 	return state
 }
 
-func TestDevnetRPCMineNextFailsClosedOnDAConsumeError(t *testing.T) {
-	state := mustRPCMineNextState(t)
-	var announced bool
-	state.announceBlock = func([]byte) error {
-		announced = true
-		return nil
-	}
-	state.SetAcceptedBlockDASetConsumer(func([]byte) error {
-		return errors.New("consume failed")
-	})
+// TestMineNextFailureExitAnnouncesAPublishedCandidate is the failure exit's
+// announce row. A terminal candidate NEW is the one failure that PUBLISHED a
+// canonical block: it returns both the block identity and the terminal error, so
+// the block is as canonical as an ordinary success's and must be announced. The
+// row also pins the other half of A13 — the announce cannot change the response
+// the route already selected — and the two failures that must announce NOTHING:
+// one with no candidate at all, and one carrying a candidate under a commit
+// truth that published neither image. The last row is the gate's own negative:
+// its response shape is identical to the announcing row's (503, the identity
+// body, the terminal error), so the ONLY thing separating the two is the typed
+// commit state announceMinedBlock reads.
+//
+// It calls the exit directly with a constructed node.MineOneOutcome because a
+// terminal candidate NEW cannot be produced from this package: it requires a
+// post-namespace-commit canonical-index fault, whose seams (atomicWriteIO,
+// writeFileAtomicFn, loadBlockStoreIndexFn) are private to package node, and
+// state.miner is a concrete *node.Miner with no injection point. The real
+// carrier for that outcome is TestMineOneWithOutcomeRealCarriers, in package
+// node.
+func TestMineNextFailureExitAnnouncesAPublishedCandidate(t *testing.T) {
+	terminal := errors.New("terminal canonical persistence (new)")
+	for _, tc := range []struct {
+		name         string
+		block        bool
+		commitState  node.CanonicalCommitState
+		wantAnnounce bool
+	}{
+		{name: "terminal candidate NEW announces the published block", block: true, commitState: node.CanonicalCommitStateCommitted, wantAnnounce: true},
+		{name: "a failure with no candidate announces nothing", commitState: node.CanonicalCommitStateCommitted},
+		{name: "a candidate whose truth published neither image announces nothing", block: true, commitState: node.CanonicalCommitStateNotCommitted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := mustRPCMineNextState(t)
+			height, hash, ok, err := state.blockStore.Tip()
+			if err != nil || !ok {
+				t.Fatalf("Tip: ok=%v err=%v", ok, err)
+			}
+			want, err := state.blockStore.GetBlockByHash(hash)
+			if err != nil {
+				t.Fatalf("GetBlockByHash: %v", err)
+			}
+			var announced [][]byte
+			state.announceBlock = func(blockBytes []byte) error {
+				announced = append(announced, blockBytes)
+				return nil
+			}
+			outcome := node.MineOneOutcome{
+				CommitState: tc.commitState,
+				Disposition: node.MineOneDispositionServiceUnavailable,
+			}
+			if tc.block {
+				outcome.Block = &node.MinedBlock{Height: height, Hash: hash, Timestamp: 11, Nonce: 13, TxCount: 1}
+			}
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/mine_next", nil)
-	handleMineNext(state, rec, req)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status=%d want 500 body=%s", rec.Code, rec.Body.String())
-	}
-	var got mineNextResponse
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-		t.Fatalf("Decode: %v", err)
-	}
-	if got.Mined || !strings.Contains(got.Error, "consume accepted DA sets: consume failed") {
-		t.Fatalf("unexpected response: %+v", got)
-	}
-	if announced {
-		t.Fatal("announceBlock called after consume failure")
+			rec := httptest.NewRecorder()
+			writeMineNextFailure(state, "/mine_next", rec, outcome, terminal, false)
+
+			// The response half is asserted FIRST and on its own, so removing the
+			// announce tail or the commit-state gate fails ONLY the announce
+			// assertions below: the two claims cannot mask each other.
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status=%d, want %d", rec.Code, http.StatusServiceUnavailable)
+			}
+			var got mineNextResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if got.CommitState != tc.commitState || got.Error != terminal.Error() {
+				t.Fatalf("body commit_state=%q error=%q, want %q and the terminal error", got.CommitState, got.Error, tc.commitState)
+			}
+			if tc.block != (got.BlockHash != nil && *got.BlockHash == hex.EncodeToString(hash[:])) {
+				t.Fatalf("body block_hash=%v, want the candidate identity present=%v", got.BlockHash, tc.block)
+			}
+
+			if tc.wantAnnounce != (len(announced) == 1) {
+				t.Fatalf("announce calls=%d, want announced=%v", len(announced), tc.wantAnnounce)
+			}
+			if tc.wantAnnounce && !bytes.Equal(announced[0], want) {
+				t.Fatalf("announced %d bytes, want the published block's exact %d", len(announced[0]), len(want))
+			}
+		})
 	}
 }
 
@@ -2480,7 +2508,7 @@ func TestDevnetRPCMineNextLogsAnnounceBlockError(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if !got.Mined {
+	if !mineNextMined(t, got) {
 		t.Fatalf("mined=false, want true: %+v", got)
 	}
 	stderrOutput := stderrBuf.String()
@@ -3756,18 +3784,6 @@ func TestDevnetRPCPeersExposesAllBoundedFields(t *testing.T) {
 	}
 }
 
-func TestSetAcceptedBlockDASetConsumerNilReceiver(t *testing.T) {
-	var state *devnetRPCState
-	called := false
-	state.SetAcceptedBlockDASetConsumer(func([]byte) error {
-		called = true
-		return nil
-	})
-	if called {
-		t.Fatal("nil receiver invoked consumer")
-	}
-}
-
 func TestMinedBlockBytesNilState(t *testing.T) {
 	var hash [32]byte
 	_, err := minedBlockBytes(nil, hash)
@@ -4321,7 +4337,8 @@ func postWhileLocked(t *testing.T, srv *runningDevnetRPCServer, path, handler, b
 
 // TestMineNextPostApplyWinnerSurvivesLifecycleCancellation executes the cell on
 // the far side of the mutation boundary: the rendezvous is the post-apply
-// acceptedBlockDASetConsumer callback, so ApplyBlock has already committed the
+// announceBlock callback — the route's ONE remaining post-return effect now that
+// the DA-consume callback is gone — so ApplyBlock has already committed the
 // canonical block when the lifecycle cancellation is published. /mine_next has
 // no checkpoint left after MineOne returned, so the successful result stays
 // authoritative — any post-boundary recheck that remaps it to 503 fails here.
@@ -4332,13 +4349,13 @@ func TestMineNextPostApplyWinnerSurvivesLifecycleCancellation(t *testing.T) {
 	var enterOnce sync.Once
 	// Wired before the server starts serving, so the handler goroutine reads it
 	// through the server's own start ordering rather than racing this write.
-	state.SetAcceptedBlockDASetConsumer(func([]byte) error {
+	state.announceBlock = func([]byte) error {
 		enterOnce.Do(func() {
 			close(entered)
 			<-release
 		})
 		return nil
-	})
+	}
 	releaseOnce := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(releaseOnce)
 	srv := mustLifecycleServer(t, state)
@@ -4380,9 +4397,9 @@ func TestMineNextPostApplyWinnerSurvivesLifecycleCancellation(t *testing.T) {
 	select {
 	case <-entered:
 	case err := <-mineDone:
-		t.Fatalf("/mine_next finished without reaching the post-apply callback: %v", err)
+		t.Fatalf("/mine_next finished without reaching the post-apply announce callback: %v", err)
 	case <-time.After(testJoinWatchdog):
-		t.Fatal("/mine_next never reached the post-apply callback")
+		t.Fatal("/mine_next never reached the post-apply announce callback")
 	}
 
 	afterHeight, _, afterOK, err := state.blockStore.Tip()
@@ -4390,7 +4407,7 @@ func TestMineNextPostApplyWinnerSurvivesLifecycleCancellation(t *testing.T) {
 		t.Fatalf("Tip: %v", err)
 	}
 	if !afterOK || afterHeight != beforeHeight+1 {
-		t.Fatalf("tip height=%d ok=%v at the post-apply callback, want %d: the rendezvous is not past canonical apply", afterHeight, afterOK, beforeHeight+1)
+		t.Fatalf("tip height=%d ok=%v at the post-apply announce callback, want %d: the rendezvous is not past canonical apply", afterHeight, afterOK, beforeHeight+1)
 	}
 	// Publication lands strictly after the mutation boundary this route already
 	// crossed, and strictly before the route selects its response.
@@ -4408,7 +4425,7 @@ func TestMineNextPostApplyWinnerSurvivesLifecycleCancellation(t *testing.T) {
 	if err := json.Unmarshal(got.raw, &body); err != nil {
 		t.Fatalf("Unmarshal %q: %v", got.raw, err)
 	}
-	if got.status != http.StatusOK || !body.Mined || body.Error != "" {
+	if got.status != http.StatusOK || !mineNextMined(t, body) || body.CommitState != node.CanonicalCommitStateCommitted || body.Error != "" {
 		t.Fatalf("post-boundary lifecycle cancellation remapped the mine winner: %d %s", got.status, got.raw)
 	}
 	if body.Height == nil || *body.Height != beforeHeight+1 {
@@ -4431,7 +4448,7 @@ func assertMineCanceledBeforeApply(t *testing.T, closer func(*runningDevnetRPCSe
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("Unmarshal %q: %v", raw, err)
 	}
-	if status != http.StatusServiceUnavailable || got.Mined || got.Error != "rpc unavailable" {
+	if status != http.StatusServiceUnavailable || mineNextMined(t, got) || got.CommitState != node.CanonicalCommitStateNotCommitted || got.Error != "rpc unavailable" {
 		t.Fatalf("canceled /mine_next = %d %s, want 503 mined=false error=\"rpc unavailable\"", status, raw)
 	}
 	if got.Height != nil || got.BlockHash != nil || got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
@@ -4662,7 +4679,7 @@ func TestMineNextRequestCancellationPreservesExistingError(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if got.Mined || got.Error != context.Canceled.Error() {
+	if mineNextMined(t, got) || got.CommitState != node.CanonicalCommitStateNotCommitted || got.Error != context.Canceled.Error() {
 		t.Fatalf("request-local cancellation reclassified as lifecycle unavailability: %+v", got)
 	}
 }
@@ -4688,8 +4705,8 @@ func TestMineNextDualCanceledSourcesSelectLifecycleUnavailability(t *testing.T) 
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if got.Mined || got.Error != "rpc unavailable" {
-		t.Fatalf("dual-canceled /mine_next = %+v, want mined=false error=\"rpc unavailable\"", got)
+	if mineNextMined(t, got) || got.CommitState != node.CanonicalCommitStateNotCommitted || got.Error != "rpc unavailable" {
+		t.Fatalf("dual-canceled /mine_next = %+v, want not_committed mined=false error=\"rpc unavailable\"", got)
 	}
 	if got.Height != nil || got.BlockHash != nil || got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
 		t.Fatalf("unavailable /mine_next carried success fields: %+v", got)
@@ -4742,9 +4759,9 @@ func TestMineNextMidMiningLifecycleCancelSelectsUnavailability(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if got.Mined || got.Error != "rpc unavailable" || got.Height != nil || got.BlockHash != nil ||
-		got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
-		t.Fatalf("mid-mining lifecycle cancellation = %+v, want mined=false error=\"rpc unavailable\" and no success fields", got)
+	if mineNextMined(t, got) || got.CommitState != node.CanonicalCommitStateNotCommitted || got.Error != "rpc unavailable" || got.Height != nil ||
+		got.BlockHash != nil || got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
+		t.Fatalf("mid-mining lifecycle cancellation = %+v, want not_committed mined=false error=\"rpc unavailable\" and no success fields", got)
 	}
 	afterHeight, _, afterOK, err := state.blockStore.Tip()
 	if err != nil {
@@ -4803,9 +4820,9 @@ func TestMineNextLifecycleCancelAfterRequestCancelSelectsUnavailability(t *testi
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if got.Mined || got.Error != "rpc unavailable" || got.Height != nil || got.BlockHash != nil ||
-		got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
-		t.Fatalf("request-then-lifecycle cancellation = %+v, want mined=false error=\"rpc unavailable\" and no success fields", got)
+	if mineNextMined(t, got) || got.CommitState != node.CanonicalCommitStateNotCommitted || got.Error != "rpc unavailable" || got.Height != nil ||
+		got.BlockHash != nil || got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
+		t.Fatalf("request-then-lifecycle cancellation = %+v, want not_committed mined=false error=\"rpc unavailable\" and no success fields", got)
 	}
 	afterHeight, _, afterOK, err := state.blockStore.Tip()
 	if err != nil {
@@ -4892,5 +4909,155 @@ func TestMineOneEntryCancellationPrecedesBootstrap(t *testing.T) {
 	}
 	if ok {
 		t.Fatalf("tip height=%d present after an entry cancellation, want an untouched empty store: the entry check ran after the genesis bootstrap mutation", height)
+	}
+}
+
+// TestMineNextProjectionTable is the closed RUBIN_NODE_RPC_DEVNET.md Section 3.4
+// projection, one executed row per table bullet, driven through the REAL
+// production selectors — mineNextStatus for the status and
+// mineNextFailure/mineNextIdentity for the body — and asserted on the marshaled
+// bytes rather than on struct fields, so field presence and absence are part of
+// the assertion.
+//
+// The two ends of the chain are pinned separately and meet here: the node
+// package's TestCanonicalMineOneOutcomeProjection pins which typed outcome each
+// commit truth produces, and these rows pin what each typed outcome renders as.
+func TestMineNextProjectionTable(t *testing.T) {
+	identity := &node.MinedBlock{Height: 7, Hash: [32]byte{0xab}, Timestamp: 1710000000, Nonce: 3, TxCount: 2}
+	hash := hex.EncodeToString(identity.Hash[:])
+	successBody := `{"mined":true,"commit_state":"committed","height":7,"block_hash":"` + hash + `","timestamp":1710000000,"nonce":3,"tx_count":2}`
+	terminal := errors.New("terminal canonical persistence")
+
+	for _, tc := range []struct {
+		name    string
+		outcome node.MineOneOutcome
+		err     error
+		status  int
+		body    string
+	}{
+		{
+			name:    "ordinary candidate NEW",
+			outcome: node.MineOneOutcome{Block: identity, CommitState: node.CanonicalCommitStateCommitted, Disposition: node.MineOneDispositionSuccess},
+			status:  http.StatusOK,
+			body:    successBody,
+		},
+		{
+			name:    "terminal candidate NEW keeps the success identity and adds the error",
+			outcome: node.MineOneOutcome{Block: identity, CommitState: node.CanonicalCommitStateCommitted, Disposition: node.MineOneDispositionServiceUnavailable},
+			err:     terminal,
+			status:  http.StatusServiceUnavailable,
+			body:    `{"mined":true,"commit_state":"committed","height":7,"block_hash":"` + hash + `","timestamp":1710000000,"nonce":3,"tx_count":2,"error":"terminal canonical persistence"}`,
+		},
+		{
+			name:    "terminal bootstrap NEW is the reject shape with commit_state committed",
+			outcome: node.MineOneOutcome{CommitState: node.CanonicalCommitStateCommitted, Disposition: node.MineOneDispositionServiceUnavailable},
+			err:     terminal,
+			status:  http.StatusServiceUnavailable,
+			body:    `{"mined":false,"commit_state":"committed","error":"terminal canonical persistence"}`,
+		},
+		{
+			name:    "UNKNOWN omits mined entirely and guesses no identity",
+			outcome: node.MineOneOutcome{CommitState: node.CanonicalCommitStateUnknown, Disposition: node.MineOneDispositionServiceUnavailable},
+			err:     terminal,
+			status:  http.StatusServiceUnavailable,
+			body:    `{"commit_state":"unknown","error":"terminal canonical persistence"}`,
+		},
+		{
+			name:    "terminal OLD or a proven-old terminal result",
+			outcome: node.MineOneOutcome{CommitState: node.CanonicalCommitStateNotCommitted, Disposition: node.MineOneDispositionServiceUnavailable},
+			err:     terminal,
+			status:  http.StatusServiceUnavailable,
+			body:    `{"mined":false,"commit_state":"not_committed","error":"terminal canonical persistence"}`,
+		},
+		{
+			name:    "a bounded-resource, stale-plan, noncanonical-store or precommit-persistence result",
+			outcome: node.MineOneOutcome{CommitState: node.CanonicalCommitStateNotCommitted, Disposition: node.MineOneDispositionServiceUnavailable},
+			err:     errors.New("LOCAL_RESOURCE_UNAVAILABLE(canonical_plan_metadata)"),
+			status:  http.StatusServiceUnavailable,
+			body:    `{"mined":false,"commit_state":"not_committed","error":"LOCAL_RESOURCE_UNAVAILABLE(canonical_plan_metadata)"}`,
+		},
+		{
+			name:    "an ordinary candidate failure keeps its 422 precedence",
+			outcome: node.MineOneOutcome{CommitState: node.CanonicalCommitStateNotCommitted, Disposition: node.MineOneDispositionUnprocessable},
+			err:     errors.New("nonce search exhausted"),
+			status:  http.StatusUnprocessableEntity,
+			body:    `{"mined":false,"commit_state":"not_committed","error":"nonce search exhausted"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var body mineNextResponse
+			if tc.err == nil {
+				body = mineNextIdentity(tc.outcome.Block, tc.outcome.CommitState, "")
+			} else {
+				body = mineNextFailure(tc.outcome, tc.err)
+			}
+			raw, err := json.Marshal(body)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if got := mineNextStatus(tc.outcome.Disposition); got != tc.status {
+				t.Fatalf("status=%d, want %d", got, tc.status)
+			}
+			if string(raw) != tc.body {
+				t.Fatalf("body=%s\nwant %s", raw, tc.body)
+			}
+			if !strings.Contains(string(raw), `"commit_state"`) {
+				t.Fatalf("commit_state is mandatory on every response: %s", raw)
+			}
+			if tc.outcome.CommitState == node.CanonicalCommitStateUnknown && strings.Contains(string(raw), `"mined"`) {
+				t.Fatalf("unknown exposed a legacy mined field: %s", raw)
+			}
+		})
+	}
+
+	// A disposition this file does not recognize fails CLOSED, and the ZERO value
+	// is one of them: an outcome a later path leaves unfilled answers 503, never
+	// the success arm.
+	for _, disposition := range []node.MineOneDisposition{node.MineOneDisposition(200), 0} {
+		if got := mineNextStatus(disposition); got != http.StatusServiceUnavailable {
+			t.Fatalf("disposition %v status=%d, want 503", disposition, got)
+		}
+	}
+	// mined-absent-for-unknown holds at the CONSTRUCTOR, not only on the paths
+	// above: handleMineNext's lifecycle-cancellation and identity-unavailable
+	// exits hand mineNextRejection a raw outcome.CommitState.
+	raw, err := json.Marshal(mineNextRejection(node.CanonicalCommitStateUnknown, "terminal"))
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(raw) != `{"commit_state":"unknown","error":"terminal"}` {
+		t.Fatalf("mineNextRejection(unknown)=%s, want no mined key at all", raw)
+	}
+}
+
+// TestMineNextGuardsCarryCommitState pins the three responses the route emits
+// before any canonical apply is reachable: each is not_committed with mined
+// present and false, and each keeps its exact existing status and error text.
+func TestMineNextGuardsCarryCommitState(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		state  *devnetRPCState
+		method string
+		status int
+		errMsg string
+	}{
+		{name: "wrong method", state: mustRPCState(t, true), method: http.MethodGet, status: http.StatusBadRequest, errMsg: "POST required"},
+		{name: "nil state", state: nil, method: http.MethodPost, status: http.StatusServiceUnavailable, errMsg: "rpc unavailable"},
+		{name: "unavailable miner", state: mustRPCState(t, true), method: http.MethodPost, status: http.StatusServiceUnavailable, errMsg: "live mining unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handleMineNext(tc.state, rec, httptest.NewRequest(tc.method, "/mine_next", nil)) //nolint:noctx // table-driven handler test; the request needs no cancellation context
+			if rec.Code != tc.status {
+				t.Fatalf("status=%d want %d body=%s", rec.Code, tc.status, rec.Body.String())
+			}
+			var got mineNextResponse
+			if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			if mineNextMined(t, got) || got.CommitState != node.CanonicalCommitStateNotCommitted || got.Error != tc.errMsg {
+				t.Fatalf("response=%+v, want not_committed mined=false error=%q", got, tc.errMsg)
+			}
+		})
 	}
 }
