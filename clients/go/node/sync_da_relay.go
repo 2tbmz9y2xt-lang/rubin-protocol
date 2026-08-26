@@ -233,7 +233,7 @@ type preparedCanonicalDAImage struct {
 // every transition. A cap on retained members is RUB-1118's, not this slice's.
 func prepareCanonicalDAImage(relay *DARelayState, included []canonicalDASetIdentity, chain canonicalFinalChainContext) (*preparedCanonicalDAImage, error) {
 	if relay == nil {
-		return nil, nil
+		return nil, nil //nolint:nilnil // nil image, nil error = engine with no retained-DA state bound; publish() documents the nil no-op
 	}
 	relay.mu.Lock()
 	defer relay.mu.Unlock()

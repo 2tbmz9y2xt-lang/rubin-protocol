@@ -443,7 +443,7 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 			}
 			// Nothing but the deliberate corruption moved.
 			relay.sets[daID] = before.sets[daID]
-			if got := daRelayStateSnapshot(relay); !reflect.DeepEqual(got, before) {
+			if got := daRelayStateSnapshot(relay); !reflect.DeepEqual(got, before) { //nolint:govet // deepequalerrors: the snapshot must match byte-for-byte, error values included — identity is the assertion
 				t.Fatal("a terminal preparation mutated the live retained-DA image")
 			}
 		})
@@ -465,7 +465,7 @@ func TestRetaggedCanonicalDATerminalRelabelsOnlyTheTerminal(t *testing.T) {
 		t.Fatalf("retag=%v, want the retained-DA class naming the member", got)
 	}
 	plan := localCanonicalMempoolPlanError(errors.New("provider"))
-	if retaggedCanonicalDATerminal(plan, "commit") != plan || retaggedCanonicalDATerminal(nil, "commit") != nil {
+	if retaggedCanonicalDATerminal(plan, "commit") != plan || retaggedCanonicalDATerminal(nil, "commit") != nil { //nolint:errorlint // pointer identity is the assertion: retag must return the SAME plan error, not a wrapper
 		t.Fatal("a plan abort or a nil result was reclassified")
 	}
 }
@@ -487,7 +487,7 @@ func TestCanonicalDAImageIsDeterministicAndSharesRetainedBytes(t *testing.T) {
 
 	first := mustPrepareCanonicalDAImage(t, relay, nil, chain)
 	second := mustPrepareCanonicalDAImage(t, relay, nil, chain)
-	if !reflect.DeepEqual(daRelayStateSnapshot(first.projected), daRelayStateSnapshot(second.projected)) {
+	if !reflect.DeepEqual(daRelayStateSnapshot(first.projected), daRelayStateSnapshot(second.projected)) { //nolint:govet // deepequalerrors: the snapshot must match byte-for-byte, error values included — identity is the assertion
 		t.Fatal("two preparations of the same state produced different images")
 	}
 	if _, present := first.projected.sets[dropped]; present {

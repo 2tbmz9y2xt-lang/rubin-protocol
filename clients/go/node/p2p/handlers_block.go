@@ -176,7 +176,7 @@ func (s *Service) noteAcceptedBlock(source *peer, suppliedHash, blockHash [32]by
 	s.blockSeen.Add(blockHash)
 	s.relayCanonicalAppliedBlocks(source, suppliedHash, summary)
 	if applyErr != nil {
-		return nil
+		return nil //nolint:nilerr // terminal apply: the error already travels with the summary through processRelayedBlock's own return; nil here only skips the fenced TTL advance
 	}
 	return s.advanceDAOrphanTTL()
 }

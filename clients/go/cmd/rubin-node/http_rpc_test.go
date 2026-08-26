@@ -4963,7 +4963,7 @@ func TestMineNextGuardsCarryCommitState(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			handleMineNext(tc.state, rec, httptest.NewRequest(tc.method, "/mine_next", nil))
+			handleMineNext(tc.state, rec, httptest.NewRequest(tc.method, "/mine_next", nil)) //nolint:noctx // table-driven handler test; the request needs no cancellation context
 			if rec.Code != tc.status {
 				t.Fatalf("status=%d want %d body=%s", rec.Code, tc.status, rec.Body.String())
 			}
