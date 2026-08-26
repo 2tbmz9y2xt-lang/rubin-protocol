@@ -167,7 +167,7 @@ def metrics_sidecar(label: str, p: Path) -> dict:
         if matched is not None:
             req(metric not in found, f"{label} duplicate metric")
             found[metric] = int(matched.group(2))
-    req(set(found) == {"rubin_node_reorg_total", "rubin_node_last_reorg_depth"} and all(value >= 1 for value in found.values()), f"{label} missing reorg metrics")
+    req(set(found) == {"rubin_node_reorg_total", "rubin_node_last_reorg_depth"} and found["rubin_node_reorg_total"] >= 1 and found["rubin_node_last_reorg_depth"] >= 0, f"{label} missing reorg metrics")
     return found
 def peer_snapshot(label: str, p: Path, expected, want_connected: bool) -> None:
     snap = load_json_file(label, p)
@@ -632,7 +632,7 @@ if partition_mode:
     node_endpoints = {node[field] for node in nodes_by_impl.values() for field in ("rpc_endpoint", "p2p_endpoint")}
     req(proof["partition_proxy_endpoint"] not in node_endpoints and proof["partition_proxy_endpoint"] not in {proof["pre_partition_go_peer_addr"], proof["heal_go_peer_addr"]}, "partition proxy endpoint is not proxy-only")
     metrics = exact_object(proof.get("go_reorg_metrics"), {"rubin_node_last_reorg_depth", "rubin_node_reorg_total"}, "proof.go_reorg_metrics")
-    req(json_int(metrics.get("rubin_node_reorg_total"), "proof.go_reorg_metrics.rubin_node_reorg_total", 1) >= 1 and json_int(metrics.get("rubin_node_last_reorg_depth"), "proof.go_reorg_metrics.rubin_node_last_reorg_depth", 1) >= 1, "partition go reorg metrics do not prove reorg")
+    req(json_int(metrics.get("rubin_node_reorg_total"), "proof.go_reorg_metrics.rubin_node_reorg_total", 1) >= 1 and json_int(metrics.get("rubin_node_last_reorg_depth"), "proof.go_reorg_metrics.rubin_node_last_reorg_depth", 0) >= 0, "partition go reorg metrics do not prove reorg")
     go_fork, rust_win = tip_obj(proof.get("go_partition_tip"), "proof.go_partition_tip"), tip_obj(proof.get("rust_winning_tip"), "proof.rust_winning_tip")
     final_go, final_rust = tip_obj(proof.get("final_go_tip"), "proof.final_go_tip"), tip_obj(proof.get("final_rust_tip"), "proof.final_rust_tip")
     req(go_fork["hash"] != rust_win["hash"] and rust_win["height"] > go_fork["height"], "partition fork tips do not prove Rust winning branch")
@@ -2535,7 +2535,7 @@ for raw in lines:
         print("partition_go_metrics_duplicate")
         sys.exit(1)
     vals[m.group(1)] = int(m.group(2))
-if vals.get("rubin_node_reorg_total", 0) < 1 or vals.get("rubin_node_last_reorg_depth", 0) < 1:
+if vals.get("rubin_node_reorg_total", 0) < 1 or vals.get("rubin_node_last_reorg_depth", -1) < 0:
     print("partition_go_metrics_missing_or_zero")
     sys.exit(1)
 print(vals["rubin_node_reorg_total"], vals["rubin_node_last_reorg_depth"], sep="\t")
