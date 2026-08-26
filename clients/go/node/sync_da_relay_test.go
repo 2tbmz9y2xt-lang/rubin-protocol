@@ -1013,7 +1013,10 @@ func TestCanonicalDAImageSweepsSurvivingRecordAccounting(t *testing.T) {
 func TestCanonicalDAImageSweepAcceptsAndPublishesAConsistentImage(t *testing.T) {
 	a := newDAAccountingFixture(t)
 	set := a.relay.sets[a.complete]
-	included := identitiesOf(t, append([][]byte{set.commit.txBytes}, retainedChunkBytesInIndexOrder(set)...)...)
+	if len(set.chunks) != 1 {
+		t.Fatalf("fixture complete set holds %d chunks, want the single-chunk shape this row builds", len(set.chunks))
+	}
+	included := identitiesOf(t, set.commit.txBytes, set.chunks[0].txBytes)
 	if len(included) != 1 {
 		t.Fatalf("block identities=%d, want the one complete staged set", len(included))
 	}
@@ -1033,14 +1036,6 @@ func TestCanonicalDAImageSweepAcceptsAndPublishesAConsistentImage(t *testing.T) 
 	if err := a.relay.checkRetainedDAAccountingLocked(); err != nil {
 		t.Fatalf("the PUBLISHED live image fails its own accounting invariant: %v", err)
 	}
-}
-
-func retainedChunkBytesInIndexOrder(record daRelaySetRecord) [][]byte {
-	out := make([][]byte, 0, len(record.chunks))
-	for _, index := range sortedRetainedDAChunkIndexes(record) {
-		out = append(out, record.chunks[index].txBytes)
-	}
-	return out
 }
 
 // TestCanonicalDAImageScansEveryMemberAfterAnOrdinaryInvalidOne is the

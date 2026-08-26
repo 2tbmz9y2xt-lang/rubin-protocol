@@ -259,14 +259,10 @@ func prepareCanonicalDAImage(relay *DARelayState, included []canonicalDASetIdent
 }
 
 // checkRetainedDAAccountingLocked is R3's accounting-invariant sweep over the
-// WHOLE projected image, not only over the records the projection removed.
-//
-// The removal path checks its own arithmetic, so a REMOVED record's bookkeeping
-// is already proven; a SURVIVING record's is not, because the clone copies every
-// stored counter verbatim. This recomputes each stored aggregate from the
-// surviving records alone and compares it to what the clone carries, so a
-// retained field that contradicts its own record is a typed
-// TERMINAL_LOCAL_INVARIANT here — before the image is returned and therefore
+// WHOLE projected image, not only over the records the projection removed: the
+// removal path checks its own arithmetic, but the clone copies every SURVIVING
+// record's stored counters verbatim, so only this can catch one that contradicts
+// the records it summarizes. It runs before the image is returned and therefore
 // before anything is published.
 //
 // It is the SECOND, independent computation of the same numbers the six
@@ -286,12 +282,9 @@ func (s *DARelayState) checkRetainedDAAccountingLocked() error {
 }
 
 // retainedDAAccountingTotals is what the surviving records THEMSELVES imply for
-// every stored aggregate DARelayState carries.
-//
-// daIDEntries counts the per-da_id entries the records imply rather than
-// rebuilding that map: the per-record value is compared inside the walk, where
-// the da_id is already in hand, so only the count of EXTRA stored entries is
-// left to check afterwards.
+// every stored aggregate DARelayState carries. daIDEntries is a COUNT, not a
+// rebuilt map: each per-da_id value is compared inside the walk where its da_id
+// is already in hand, leaving only EXTRA stored entries to catch afterwards.
 type retainedDAAccountingTotals struct {
 	orphanBytes uint64
 	commitBytes uint64
@@ -351,8 +344,6 @@ func (t *retainedDAAccountingTotals) add(accounting daRelayRecordAccounting, pin
 	return nil
 }
 
-// checkAgainstLocked compares the recomputed totals to the stored counters,
-// naming the disagreeing aggregate and both values.
 func (t retainedDAAccountingTotals) checkAgainstLocked(s *DARelayState) error {
 	switch {
 	case t.orphanBytes != s.orphanBytes:

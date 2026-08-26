@@ -1337,8 +1337,9 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 	writeJSONResponse(state, route, w, mineNextStatus(outcome.Disposition), mineNextIdentity(mb, outcome.CommitState, ""))
 }
 
-// writeMineNextFailure is the route's ONE failure exit, and it runs strictly
-// after rpcMut is released.
+// writeMineNextFailure is the only exit an attempt that REACHED MineOne can
+// leave by on failure, and it runs strictly after rpcMut is released; the guards
+// ahead of it answer before or without a candidate and have nothing to announce.
 //
 // It SELECTS the response first and writes it last, so nothing the announce tail
 // in between does — a store read failure, an announce error, a slow network
@@ -1350,7 +1351,6 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 // terminal error, so outcome.Block is nonnil on this exit too and the block is
 // as canonical as an ordinary success's. Skipping the announcement for it would
 // leave a committed block unannounced purely because the attempt also latched.
-// Every other failure carries a nil Block and announces nothing.
 func writeMineNextFailure(state *devnetRPCState, route string, w http.ResponseWriter, outcome node.MineOneOutcome, err error, observedLifecycle bool) {
 	var status int
 	var body mineNextResponse
@@ -1393,8 +1393,7 @@ func writeMineNextFailure(state *devnetRPCState, route string, w http.ResponseWr
 // The mined block's bytes are loaded ONLY for this branch. It is best-effort by
 // contract — both failure shapes report to stderr and NEITHER may change the
 // response the caller already selected, which is why every caller selects before
-// calling and writes after. A nil block is the no-candidate case and announces
-// nothing.
+// calling and writes after.
 func announceMinedBlock(state *devnetRPCState, mb *node.MinedBlock) {
 	if mb == nil || state.announceBlock == nil {
 		return
