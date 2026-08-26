@@ -523,8 +523,13 @@ func minedFlag(mined bool) *bool { return &mined }
 // mineNextRejection is the reject-or-unavailable shape: mined present and false,
 // the mandatory commit_state, no success identity.
 //
-// It is the SINGLE exit enforcing Section 3.4's "mined is absent only for
-// unknown", so no call site handed an unknown truth can lose the rule.
+// It is the SINGLE exit for the REJECT shape, so neither guard that hands it a
+// raw outcome.CommitState — the lifecycle-cancellation exit and the
+// identity-unavailable exit in handleMineNext — can lose Section 3.4's "mined is
+// absent only for unknown". The identity shape never has to repeat the rule:
+// mineNextFailure routes an unknown truth here even when a Block is present, and
+// the success exit is reached only with a nil error and a nonnil Block, which is
+// truth NEW — canonicalMineOneOutcome's NEW arm answers "committed".
 func mineNextRejection(state node.CanonicalCommitState, errText string) mineNextResponse {
 	if state == node.CanonicalCommitStateUnknown {
 		return mineNextResponse{CommitState: state, Error: errText}

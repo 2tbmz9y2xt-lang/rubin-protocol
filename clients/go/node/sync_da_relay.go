@@ -267,11 +267,12 @@ func (i *preparedCanonicalDAImage) publish() {
 // Each record is walked TWICE, in ordered phases, never interleaved: phase 1
 // (canonicalRetainedDASetIdentity) parses and role-checks EVERY member, phase 2
 // (canonicalRetainedDAMembersFinalChainValid) validates every member against C1.
-// So a LATER member's parse/role terminal outranks an EARLIER member's
+// Precedence follows the loop nesting: the FIRST record in ascending da_id order
+// that reports an error wins, and inside that one record phase 1 outranks phase
+// 2 — so a LATER member's parse/role terminal outranks an EARLIER member's
 // validation-phase failure of any kind, a canonical precommit plan abort
-// included. Precedence: first error of phase 1, then of phase 2, then first
-// record in da_id order. A member that merely fails chain validation is a
-// planned removal, not an error.
+// included, only within the SAME record. A member that merely fails chain
+// validation is a planned removal, not an error.
 func (s *DARelayState) canonicalDARemovalsLocked(included []canonicalDASetIdentity, chain canonicalFinalChainContext) ([]daRelaySetRecord, error) {
 	inclusion := make(map[[32]byte][]canonicalDASetIdentity, len(included))
 	for i := range included {
@@ -456,6 +457,13 @@ func canonicalRetainedDAMemberFinalChainValid(member canonicalRetainedDAMember, 
 //
 // A canonical precommit PLAN error is deliberately NOT retagged: EPD-6 requires D
 // to return the SAME plan error M does, and it is not a retained-state invariant.
+//
+// It has NO reachable producer today. On this path the shared validator's only
+// terminal sites are canonicalMempoolChainPolicyValid's nil-tx guard, which a
+// parsed member cannot trip, and its policyInputSnapshot refusal, which the
+// consensus check's own keep=false already precedes on the same input set. The
+// relabel is insurance for that SHARED helper as RUB-678 extends it, and its unit
+// row proves the mechanism, not a live path.
 func retaggedCanonicalDATerminal(err error, label string) error {
 	var mo *canonicalMOTerminalError
 	if !errors.As(err, &mo) {

@@ -1993,19 +1993,14 @@ func TestDARelayPinnedPayloadAccountingUsesPayloadBytesOnly(t *testing.T) {
 			t.Fatalf("first release pinned=%d, want %d", state.pinnedPayloadBytes, wantKeep)
 		}
 		// Already removed, never present, and present-but-incomplete: none of the
-		// three is a complete record, and none moves ANY counter — the orphan and
-		// commit-overhead totals the staged incomplete record still owns included.
-		wantOrphan, wantCommit := state.orphanBytes, state.orphanCommitOverheadBytes
+		// three is a complete record, so the release refuses. The REFUSAL is the
+		// whole observable here — the helper's own state guard returns before
+		// removeDASetRecordLocked, so a counter or record-state assertion on this
+		// path could not be made to fail.
 		for _, daID := range [][32]byte{consumeID, daRelayTestID(119), stagedID} {
-			if removeCompleteDASetForTest(t, state, daID) || state.pinnedPayloadBytes != wantKeep {
-				t.Fatalf("no-op release %x pinned=%d, want %d", daID, state.pinnedPayloadBytes, wantKeep)
+			if removeCompleteDASetForTest(t, state, daID) {
+				t.Fatalf("no-op release %x reported a complete record", daID)
 			}
-			if state.orphanBytes != wantOrphan || state.orphanCommitOverheadBytes != wantCommit {
-				t.Fatalf("no-op release %x moved orphan=%d/%d commit=%d/%d", daID, state.orphanBytes, wantOrphan, state.orphanCommitOverheadBytes, wantCommit)
-			}
-		}
-		if got := state.sets[stagedID]; got.state != daRelayStateStagedCommit {
-			t.Fatalf("staged record state=%v after the no-op releases, want staged commit", got.state)
 		}
 	})
 

@@ -347,7 +347,10 @@ func (s *SyncEngine) BootstrapCanonicalGenesisIfEmpty() error {
 // commit classification — is projected as a local unavailability, never as a
 // verdict on the candidate. Everything BEFORE it — parse, consensus validation,
 // DA-set extraction, MTP, plan derivation — is the candidate's own outcome and
-// keeps its existing public precedence (a pre-commit local failure still 422s).
+// keeps its existing public precedence (a pre-commit local failure still 422s),
+// with ONE carve-out: canonicalMineOneOutcome reads the errStoragePersistenceFault
+// sentinel alongside this flag, so a refusal by an already latched engine is 503
+// even though it never entered the commit stage.
 type canonicalApplyProjection struct {
 	truth              canonicalCommitTruth
 	commitStageEntered bool

@@ -740,10 +740,12 @@ func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte
 // smaller behavior than the subsection describes, and it MUST NOT be read as
 // completing it.
 //
-// Dropped rows record ONE diagnostic PER BLOCK carrying their count, not one per
-// row: the retained batch is bounded, and a DA-heavy block emitting per-row
-// records would evict the standard rows' own diagnostics behind the truncation
-// marker. The drop touches no DA owner and no peer quota.
+// Dropped rows record ONE diagnostic PER BLOCK carrying their count and the
+// per-kind breakdown, not one per row: the retained batch is bounded, and a
+// DA-heavy block emitting per-row records would evict the standard rows' own
+// diagnostics behind the truncation marker. An owner's own admission FAILURE
+// stays per-row, since each carries a distinct error. The drop touches no DA
+// owner and no peer quota.
 func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []*consensus.ParsedBlock, diag *diagnosticBatch) {
 	if s == nil || s.mempool == nil || len(disconnectedBlocks) == 0 {
 		return
@@ -754,18 +756,28 @@ func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []
 		if err != nil {
 			continue
 		}
-		dropped := 0
+		// Indexed by tx_kind, so the breakdown below renders in ascending kind
+		// order without a map or a sort.
+		var dropped [256]int
+		total := 0
 		for _, row := range rows {
 			if row.kind != 0x00 {
-				dropped++
+				dropped[row.kind]++
+				total++
 				continue
 			}
 			if err := s.mempool.AddReorgTx(row.txBytes); err != nil {
 				s.diagnose(diag, "mempool: requeue-tx: %v\n", err)
 			}
 		}
-		if dropped != 0 {
-			s.diagnose(diag, "mempool: requeue-tx: %d row(s) of a non-standard tx_kind invoke no owner in this line\n", dropped)
+		if total != 0 {
+			kinds := ""
+			for kind, count := range dropped {
+				if count != 0 {
+					kinds = fmt.Sprintf("%s %#02x x%d", kinds, kind, count)
+				}
+			}
+			s.diagnose(diag, "mempool: requeue-tx: %d row(s) of a non-standard tx_kind invoke no owner in this line:%s\n", total, kinds)
 		}
 	}
 }

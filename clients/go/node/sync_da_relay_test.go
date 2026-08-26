@@ -454,6 +454,10 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 // relabel: a terminal the SHARED M/O validator raises for a retained DA member
 // is reported as the retained-DA class naming that member, while the canonical
 // precommit PLAN error EPD-6 shares is passed through untouched.
+//
+// It calls the relabel DIRECTLY because no production input reaches it today
+// (see retaggedCanonicalDATerminal): this row pins the MECHANISM waiting for the
+// shared validator's future terminal, not a live path.
 func TestRetaggedCanonicalDATerminalRelabelsOnlyTheTerminal(t *testing.T) {
 	got := retaggedCanonicalDATerminal(terminalCanonicalMempoolError(errors.New("detail")), "chunk 1")
 	var da *canonicalDATerminalError
@@ -642,15 +646,11 @@ func TestCanonicalDAWritersObserveTheCompletePublishedImage(t *testing.T) {
 	prepared := daRelayStateSnapshot(image.projected)
 	plan := &canonicalTransitionPlan{final: cloneChainState(f.engine.chainState)}
 	tr.publishCanonicalTransition(plan, canonicalFenceImage{da: image}, canonicalTruthNew, nil, "")
-	// Drain BEFORE the published snapshot, so the comparison below is against the
-	// image every released writer has already finished writing into.
+	// Drain BEFORE reading the live image, so every assertion below sees the
+	// image each released writer has already finished writing into.
 	writers.Wait()
-	published := daRelayStateSnapshot(relay)
-	if _, ok := published.sets[daID]; ok {
+	if _, ok := daRelayStateSnapshot(relay).sets[daID]; ok {
 		t.Fatal("the published image kept the record the preparation removed")
-	}
-	if !reflect.DeepEqual(prepared.sets[daID], published.sets[daID]) {
-		t.Fatal("a writer landed between preparation and publication")
 	}
 	// Every fenced writer ran AFTER publication, so each of its records is in
 	// the live image and none of them was in the prepared one.
@@ -703,9 +703,12 @@ func TestCanonicalDAImageIsPreparedOnEveryTransitionPath(t *testing.T) {
 		mustCanonicalMO(t, "NewMempool", err)
 		f.engine.SetMempool(mp)
 		relay := f.engine.DARelayState()
+		// The fork is taken BEFORE A1, so B1 is A1's SIBLING and applying B2 has to
+		// disconnect A1 to connect [B1, B2] — a branch extension would reach the
+		// same seam with an empty disconnect suffix and prove nothing about reorgs.
+		fork := f.forkFrom(t)
 		_, err = f.engine.ApplyBlock(f.blockWithDASets(t, daSetSpec{daID: [32]byte{0xa1}, payloads: [][]byte{[]byte("a1")}}), nil)
 		mustCanonicalMO(t, "ApplyBlock(A1)", err)
-		fork := f.forkFrom(t)
 		blockB1 := fork.blockWithDASets(t, daSetSpec{daID: [32]byte{0xb1}, payloads: [][]byte{[]byte("b1")}})
 		parsedB1, hashB1 := mustParseReorgBlockForTest(t, blockB1)
 		mustCanonicalMO(t, "StoreBlock(B1)", f.store.StoreBlock(hashB1, parsedB1.HeaderBytes, blockB1))
@@ -715,6 +718,9 @@ func TestCanonicalDAImageIsPreparedOnEveryTransitionPath(t *testing.T) {
 		stageRetainedDAMembersOfBlock(t, relay, blockB1, blockB2, survivor)
 		_, err = f.engine.ApplyBlockWithReorg(blockB2, nil)
 		mustCanonicalMO(t, "ApplyBlockWithReorg(B2)", err)
+		if depth := f.engine.LastReorgDepth(); depth != 1 {
+			t.Fatalf("LastReorgDepth()=%d, want the one disconnected block A1", depth)
+		}
 		_, b1Held := relay.sets[[32]byte{0xb1}]
 		_, b2Held := relay.sets[[32]byte{0xb2}]
 		_, survivorHeld := relay.sets[[32]byte{0xb3}]

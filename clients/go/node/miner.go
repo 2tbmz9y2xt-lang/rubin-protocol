@@ -119,8 +119,12 @@ const (
 	// stale plan, noncanonical store, precommit persistence, and every terminal
 	// class including a terminal NEW that did publish.
 	//
-	// It is deliberately the ZERO value, so a MineOneOutcome that some later
-	// path leaves unset fails CLOSED on 503 instead of claiming a success.
+	// It is deliberately the ZERO value, so a MineOneOutcome whose Disposition
+	// some later path leaves unset fails CLOSED on 503 instead of claiming a
+	// success. That covers the STATUS only: CommitState has no safe zero — its
+	// own zero is the empty string, which is outside the closed set — so every
+	// MineOneOutcome built anywhere assigns it a constant or the state
+	// canonicalMineOneOutcome selected, never a default.
 	MineOneDispositionServiceUnavailable MineOneDisposition = iota
 	// MineOneDispositionUnprocessable is the candidate's OWN failure: a
 	// consensus or policy rejection, a nonce or build failure, a request

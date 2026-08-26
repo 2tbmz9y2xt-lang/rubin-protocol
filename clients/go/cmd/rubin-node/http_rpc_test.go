@@ -4935,7 +4935,8 @@ func TestMineNextProjectionTable(t *testing.T) {
 		}
 	}
 	// mined-absent-for-unknown holds at the CONSTRUCTOR, not only on the paths
-	// above: the guard exits at :1336/:1351 hand it a raw outcome.CommitState.
+	// above: handleMineNext's lifecycle-cancellation and identity-unavailable
+	// exits hand mineNextRejection a raw outcome.CommitState.
 	raw, err := json.Marshal(mineNextRejection(node.CanonicalCommitStateUnknown, "terminal"))
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
