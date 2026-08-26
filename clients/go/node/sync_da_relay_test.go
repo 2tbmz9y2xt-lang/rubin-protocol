@@ -4,6 +4,7 @@ import (
 	"crypto/sha3"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -320,6 +321,12 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 			r.chunks[1] = chunk
 		}},
 		{"the commit declares another chunk count", func(r *daRelaySetRecord) { r.commit.chunkCount = 7 }},
+		{"the commit slot holds a chunk transaction", func(r *daRelaySetRecord) { r.commit.txBytes = r.chunks[0].txBytes }},
+		{"a chunk slot holds the commit transaction", func(r *daRelaySetRecord) {
+			chunk := r.chunks[0]
+			chunk.txBytes = r.commit.txBytes
+			r.chunks[0] = chunk
+		}},
 	} {
 		t.Run("terminal: "+tc.name, func(t *testing.T) {
 			f := newCanonicalMOFixture(t, 3, MempoolConfig{})
@@ -346,6 +353,9 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 			}
 			if !isCanonicalTransitionTerminalError(err) {
 				t.Fatal("the retained-DA terminal class does not take the terminal closeout")
+			}
+			if !strings.HasPrefix(err.Error(), "canonical retained-DA invariant: ") {
+				t.Fatalf("terminal record=%q, want the retained-DA class named first", err.Error())
 			}
 			if errors.Is(err, errCanonicalPlanMetadataCap) || errors.Is(err, errCanonicalIndexMoved) {
 				t.Fatalf("terminal invariant was reported as a resource or stale-plan class: %v", err)
@@ -548,4 +558,32 @@ func TestCanonicalDAImageIsSkippedWithoutABoundRelay(t *testing.T) {
 		t.Fatalf("image=%v err=%v, want no image and no error", image, err)
 	}
 	image.publish()
+}
+
+// TestCanonicalDAImageAccountingFailureIsTerminal pins the OTHER terminal cause:
+// a checked accounting failure while projecting the removal is the same class as
+// corrupt member bytes, and it too publishes nothing.
+func TestCanonicalDAImageAccountingFailureIsTerminal(t *testing.T) {
+	f := newCanonicalMOFixture(t, 3, MempoolConfig{})
+	relay := f.engine.DARelayState()
+	daID := daRelayTestID(0x54)
+	f.daSet(t, relay, daID, f.ops[:3], 830)
+	chain := f.canonicalDATestChain(t)
+	chain.final.mu.Lock()
+	for _, op := range f.ops[:3] {
+		delete(chain.final.Utxos, op)
+	}
+	chain.final.mu.Unlock()
+	relay.mu.Lock()
+	relay.pinnedPayloadBytes = 0 // the record still declares pinned payload bytes
+	relay.mu.Unlock()
+
+	_, err := prepareCanonicalDAImage(relay, nil, chain)
+	var terminal *canonicalDATerminalError
+	if !errors.As(err, &terminal) {
+		t.Fatalf("err=%v, want the retained-DA terminal class", err)
+	}
+	if _, live := relay.sets[daID]; !live {
+		t.Fatal("a terminal accounting failure removed the live record")
+	}
 }
