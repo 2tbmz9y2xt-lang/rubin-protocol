@@ -313,9 +313,13 @@ func (s *Service) AnnounceBlock(blockBytes []byte) error {
 
 // AnnounceTx admits a locally submitted transaction to the relay pool and
 // announces it. It takes one Service call lease before parsing, admission,
-// DA staging, seen-set mutation or inventory send: once Close has published
-// the non-OPEN state it returns exactly "service already closed" with zero
-// effects, and a call that won the lease first finishes while Close waits.
+// seen-set mutation or inventory send: once Close has published the non-OPEN
+// state it returns exactly "service already closed" with zero effects, and a
+// call that won the lease first finishes while Close waits.
+//
+// It retains NO DA member. RUB-678 removed the staging call that used to run
+// here: a local DA submission now has no production route into the retained-DA
+// image at all, and RUB-679 owns adding one through LocalDAProvenance.
 func (s *Service) AnnounceTx(txBytes []byte) error {
 	if s == nil {
 		return errors.New("nil service")
@@ -328,11 +332,9 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 	if err != nil {
 		return err
 	}
-	admittedTxBytes, admittedTx, err := s.ensureRelayTxAdmitted(txid, txBytes, tx, false)
-	if err != nil {
+	if _, _, err := s.ensureRelayTxAdmitted(txid, txBytes, tx, false); err != nil {
 		return err
 	}
-	_ = s.stageRelayDATx("", admittedTxBytes, admittedTx, true)
 	if !s.txSeen.Add(txid) {
 		return nil
 	}

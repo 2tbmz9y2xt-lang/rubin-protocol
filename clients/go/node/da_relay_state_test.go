@@ -243,15 +243,15 @@ func TestDARelayReceivedTimeIsMonotonicLocalSequence(t *testing.T) {
 		t.Fatalf("new DA relay state: %v", err)
 	}
 
-	first, err := state.nextMonotonicReceivedTime()
+	first, err := nextMonotonicReceivedTimeForTest(state)
 	if err != nil {
 		t.Fatalf("next received time: %v", err)
 	}
-	second, err := state.nextMonotonicReceivedTime()
+	second, err := nextMonotonicReceivedTimeForTest(state)
 	if err != nil {
 		t.Fatalf("next received time: %v", err)
 	}
-	third, err := state.nextMonotonicReceivedTime()
+	third, err := nextMonotonicReceivedTimeForTest(state)
 	if err != nil {
 		t.Fatalf("next received time: %v", err)
 	}
@@ -264,12 +264,12 @@ func TestDARelayReceivedTimeIsMonotonicLocalSequence(t *testing.T) {
 func TestDARelayReceivedTimeMonotonicAcrossMutationPaths(t *testing.T) {
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 
-	first, err := state.nextMonotonicReceivedTime()
+	first, err := nextMonotonicReceivedTimeForTest(state)
 	if err != nil {
 		t.Fatalf("next received time: %v", err)
 	}
 	chunkRecord := mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daRelayTestID(51), 0, 1))
-	second, err := state.nextMonotonicReceivedTime()
+	second, err := nextMonotonicReceivedTimeForTest(state)
 	if err != nil {
 		t.Fatalf("next received time: %v", err)
 	}
@@ -872,7 +872,7 @@ func TestDARelayAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T
 			s.sets[ids[1]] = record
 		}
 		twin.mu.Lock()
-		_, wantErr := twin.advanceOrphanTTLLocked()
+		_, _, wantErr := twin.advanceOrphanTTLLocked()
 		twin.mu.Unlock()
 		if wantErr != nil {
 			t.Fatalf("build ttl expected image: %v", wantErr)
@@ -983,7 +983,7 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 		twin := newDARelayPeerReleaseSuccessState(t)
 		twin.mempool = state.mempool
 		twin.mu.Lock()
-		wantErr := twin.releasePeerQuotaKeyLocked("peer-drop")
+		_, wantErr := twin.releasePeerQuotaKeyLocked("peer-drop")
 		twin.mu.Unlock()
 		if wantErr != nil {
 			t.Fatalf("build peer expected image: %v", wantErr)
@@ -1019,9 +1019,6 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 	t.Run("overflow after valid prefix", func(t *testing.T) {
 		state, ids := newDARelayAtomicBatchState(t, "peer-drop")
 		mustAddDAChunk(t, state, "peer-keep", daRelayTestChunk(ids[0], 1, 11))
-		record := state.sets[ids[0]]
-		record.replaceableChunks = map[uint16]bool{0: true}
-		state.sets[ids[0]] = record
 		corrupt := daRelayOverflowOrphanAccountingRecord(ids[2])
 		corrupt.commit.peerQuotaKey = "peer-keep"
 		sibling := corrupt.chunks[0]
@@ -1345,7 +1342,6 @@ func TestDARelayCloneModesKeepStateCopiesShallowAndCallerCopiesDeep(t *testing.T
 		chunks: map[uint16]daRelayChunk{
 			0: daRelayTestChunkWithTxBytes(daID, 0, 17, []byte("chunk-tx"), []byte("immutable-payload")),
 		},
-		replaceableChunks: map[uint16]bool{0: true},
 	}
 
 	stateClone := record.cloneForStateMutation()
@@ -1361,11 +1357,6 @@ func TestDARelayCloneModesKeepStateCopiesShallowAndCallerCopiesDeep(t *testing.T
 	if _, ok := record.chunks[1]; ok {
 		t.Fatalf("state mutation clone aliases chunk map")
 	}
-	stateClone.replaceableChunks[1] = true
-	if record.replaceableChunks[1] {
-		t.Fatalf("state mutation clone aliases replaceable chunk map")
-	}
-
 	callerClone := record.clone()
 	callerChunk := callerClone.chunks[0]
 	if &callerChunk.payload[0] == &originalChunk.payload[0] {
@@ -1378,10 +1369,6 @@ func TestDARelayCloneModesKeepStateCopiesShallowAndCallerCopiesDeep(t *testing.T
 	callerClone.chunks[0] = callerChunk
 	if record.chunks[0].payload[0] == callerClone.chunks[0].payload[0] {
 		t.Fatalf("caller clone aliases stored payload")
-	}
-	callerClone.replaceableChunks[1] = true
-	if record.replaceableChunks[1] {
-		t.Fatalf("caller clone aliases replaceable chunk map")
 	}
 }
 
@@ -1454,9 +1441,10 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	payload1 := []byte("payload-b")
 	mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
 	mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1))
-	err = state.addDACommit("peer-b", daRelayTestCommitForPayloads(daID, 1, payload1, payload0))
-	requireDAErr(t, err, errDARelayPayloadCommitmentMismatch)
-	record := state.sets[daID]
+	// A6: the FIRST-SEEN commit is the record's authority. A commit that arrives
+	// last and disagrees with the retained chunks is RETAINED as State B and takes
+	// those chunks (and their claims) with it.
+	record := mustAddDACommit(t, state, "peer-b", daRelayTestCommitForPayloads(daID, 1, payload1, payload0))
 	if record.state != daRelayStateStagedCommit || record.commit.chunkCount != 2 || len(record.chunks) != 0 || state.orphanBytes != record.wireBytes || state.pinnedPayloadBytes != 0 {
 		t.Fatalf("commitment mismatch failed to preserve first commit cleanly: state=%v commit=%d chunks=%d orphan=%d record=%d pinned=%d", record.state, record.commit.chunkCount, len(record.chunks), state.orphanBytes, record.wireBytes, state.pinnedPayloadBytes)
 	}
@@ -1478,8 +1466,8 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	err = state.addDAChunk("peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1))
 	requireDAErr(t, err, errDARelayPayloadCommitmentMismatch)
 	record = state.sets[daID]
-	if _, ok := record.replaceableChunks[0]; ok || len(record.chunks) != 1 || state.pinnedPayloadBytes != 0 {
-		t.Fatalf("partial chunk mismatch tainted stale chunk replacement: replaceable=%v chunks=%d pinned=%d", record.replaceableChunks, len(record.chunks), state.pinnedPayloadBytes)
+	if len(record.chunks) != 1 || state.pinnedPayloadBytes != 0 {
+		t.Fatalf("chunk-last mismatch mutated the retained record: chunks=%d pinned=%d", len(record.chunks), state.pinnedPayloadBytes)
 	}
 	if state.nextReceivedTime != beforeMismatchTime || record.receivedTime != beforeMismatchTime {
 		t.Fatalf("partial chunk mismatch time record=%d state=%d want first-seen %d", record.receivedTime, state.nextReceivedTime, beforeMismatchTime)
@@ -1498,9 +1486,6 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	record = mustAddDAChunk(t, state, "peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1))
 	if record.state != daRelayStateCompleteSet {
 		t.Fatalf("state after partial mismatch recovery=%v, want COMPLETE_SET", record.state)
-	}
-	if _, ok := record.replaceableChunks[0]; ok {
-		t.Fatalf("partial mismatch marked valid chunk replaceable: replaceable=%v", record.replaceableChunks)
 	}
 
 	caps := defaultDARelayCaps()
@@ -1525,36 +1510,6 @@ func TestDARelayRejectsSingleCandidateMismatchWithoutRetry(t *testing.T) {
 	record := state.sets[daID]
 	if record.state != daRelayStateStagedCommit || len(record.chunks) != 0 || state.pinnedPayloadBytes != 0 {
 		t.Fatalf("single-candidate mismatch mutated state: state=%v chunks=%d pinned=%d", record.state, len(record.chunks), state.pinnedPayloadBytes)
-	}
-}
-
-func TestDARelayRejectsBadReplaceableReplacementWithoutRetry(t *testing.T) {
-	state := newDARelayStateForTest(t, defaultDARelayCaps())
-	daID := daRelayTestID(64)
-	payload0 := []byte("payload-a")
-	payload1 := []byte("payload-b")
-	mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, 1, payload0, payload1))
-
-	record := state.sets[daID]
-	record.chunks = map[uint16]daRelayChunk{
-		0: daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), []byte("stale")),
-		1: daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1),
-	}
-	record.replaceableChunks = map[uint16]bool{0: true}
-	if err := record.recomputeOrphanTotals(); err != nil {
-		t.Fatalf("recompute replaceable setup: %v", err)
-	}
-	state.sets[daID] = record
-
-	if record.state != daRelayStateStagedCommit || !record.replaceableChunks[0] || len(record.chunks) != 2 {
-		t.Fatalf("setup did not retain replaceable stale chunk with other chunk present: state=%v replaceable=%v chunks=%d", record.state, record.replaceableChunks, len(record.chunks))
-	}
-
-	requireAddDAChunkErrWithin(t, state, "peer-d", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), []byte("also-bad")), errDARelayPayloadCommitmentMismatch)
-
-	record = state.sets[daID]
-	if !record.replaceableChunks[0] || len(record.chunks) != 2 || state.pinnedPayloadBytes != 0 {
-		t.Fatalf("bad replacement mismatch mutated state: replaceable=%v chunks=%d pinned=%d", record.replaceableChunks, len(record.chunks), state.pinnedPayloadBytes)
 	}
 }
 
@@ -1616,7 +1571,7 @@ func TestDARelayRejectsMismatchApplyFailureBeforeMutation(t *testing.T) {
 		}
 	})
 
-	t.Run("chunk partial mismatch skips replaceable apply", func(t *testing.T) {
+	t.Run("chunk-last mismatch applies nothing", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		daID := daRelayTestID(58)
 		payload0 := []byte("payload-a")
@@ -1629,8 +1584,8 @@ func TestDARelayRejectsMismatchApplyFailureBeforeMutation(t *testing.T) {
 		requireDAErr(t, err, errDARelayPayloadCommitmentMismatch)
 
 		record := state.sets[daID]
-		if _, ok := record.replaceableChunks[0]; ok || len(record.chunks) != 1 || record.state != daRelayStateStagedCommit {
-			t.Fatalf("chunk mismatch apply failure mutated record: replaceable=%v chunks=%d state=%v", record.replaceableChunks, len(record.chunks), record.state)
+		if len(record.chunks) != 1 || record.state != daRelayStateStagedCommit {
+			t.Fatalf("chunk mismatch mutated record: chunks=%d state=%v", len(record.chunks), record.state)
 		}
 	})
 }
@@ -1641,163 +1596,10 @@ func TestDARelayStageChunkRejectsDuplicateWithoutMutation(t *testing.T) {
 	chunk := daRelayTestChunk(daID, 0, 1)
 	record := mustAddDAChunk(t, state, "peer-a", chunk)
 
-	state.mu.Lock()
-	staged, _, err := state.stageDAChunkRecordLocked("peer-b", chunk, chunk.payload, false)
-	state.mu.Unlock()
-	requireDAErr(t, err, errDARelayDuplicateChunk)
+	requireDAErr(t, state.addDAChunk("peer-b", chunk), errDARelayDuplicateChunk)
 
-	if len(staged.chunks) != 0 || len(state.sets[daID].chunks) != len(record.chunks) || state.orphanBytes != record.wireBytes {
-		t.Fatalf("duplicate stage mutated state: staged=%d stored=%d orphan=%d", len(staged.chunks), len(state.sets[daID].chunks), state.orphanBytes)
-	}
-}
-
-func TestDARelayCompletionSnapshotRejectsMismatches(t *testing.T) {
-	daID := daRelayTestID(60)
-	payload0 := []byte("payload-a")
-	payload1 := []byte("payload-b")
-	record := daRelaySetRecord{
-		daID:   daID,
-		state:  daRelayStateStagedCommit,
-		commit: daRelayTestCommitForPayloads(daID, 1, payload0, payload1),
-		chunks: map[uint16]daRelayChunk{
-			0: daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0),
-			1: daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1),
-		},
-	}
-	snapshot, complete := record.completionSnapshot()
-	if !complete {
-		t.Fatalf("snapshot setup did not complete")
-	}
-	if !snapshot.matchesRecord(record) {
-		t.Fatalf("snapshot should match original record")
-	}
-
-	if snapshot.matchesRecord(daRelaySetRecord{}) {
-		t.Fatalf("snapshot matched incomplete record")
-	}
-	mismatched := snapshot
-	mismatched.daID = daRelayTestID(61)
-	if mismatched.matchesRecord(record) {
-		t.Fatalf("snapshot matched wrong da_id")
-	}
-	mismatched = snapshot
-	mismatched.chunks = mismatched.chunks[:1]
-	if mismatched.matchesRecord(record) {
-		t.Fatalf("snapshot matched wrong chunk length")
-	}
-	mismatched = snapshot
-	mismatched.chunks = append([]daRelayCompletionChunkSnapshot(nil), snapshot.chunks...)
-	mismatched.chunks[0].chunkIndex = 1
-	if mismatched.matchesRecord(record) {
-		t.Fatalf("snapshot matched wrong chunk index")
-	}
-	mismatched = snapshot
-	mismatched.chunks = append([]daRelayCompletionChunkSnapshot(nil), snapshot.chunks...)
-	mismatched.chunks[0].chunkHash[0] ^= 0xff
-	if mismatched.matchesRecord(record) {
-		t.Fatalf("snapshot matched wrong chunk hash")
-	}
-	mismatched = snapshot
-	mismatched.chunks = append([]daRelayCompletionChunkSnapshot(nil), snapshot.chunks...)
-	mismatched.chunks[0].payload = append(cloneBytes(mismatched.chunks[0].payload), 0)
-	if mismatched.matchesRecord(record) {
-		t.Fatalf("snapshot matched wrong payload length")
-	}
-}
-
-func TestDARelayCompletionTransitionsRejectStaleSnapshots(t *testing.T) {
-	t.Run("commit last", func(t *testing.T) {
-		state := newDARelayStateForTest(t, defaultDARelayCaps())
-		daID := daRelayTestID(123)
-		first, second := []byte("first"), []byte("second")
-		mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 0, uint64(len(first)), first))
-		mustAddDAChunk(t, state, "peer-b", daRelayTestChunkPayload(daID, 1, uint64(len(second)), second))
-		commit, txBytesOwned := daRelayTestCommitForPayloads(daID, 1, first, second), false
-
-		_, snapshot, complete, err := state.stageDACommitForCompletion("peer-c", &commit, &txBytesOwned)
-		if err != nil || !complete {
-			t.Fatalf("capture commit-last snapshot complete=%v err=%v", complete, err)
-		}
-		if err := state.ReleasePeerQuotaKey("peer-a"); err != nil {
-			t.Fatalf("release snapshotted chunk: %v", err)
-		}
-		payloadBytes, _ := snapshot.payloadCommitment()
-		_, retry, err := state.completeDACommitSnapshot("peer-c", &commit, &txBytesOwned, snapshot, payloadBytes)
-		if err != nil || !retry {
-			t.Fatalf("stale commit completion retry=%v err=%v, want true nil", retry, err)
-		}
-		record := state.sets[daID]
-		if record.state == daRelayStateCompleteSet || record.commit.chunkCount != 0 || len(record.chunks) != 1 {
-			t.Fatalf("stale commit published record=%+v", record)
-		}
-	})
-
-	t.Run("chunk last", func(t *testing.T) {
-		state := newDARelayStateForTest(t, defaultDARelayCaps())
-		daID := daRelayTestID(124)
-		first, second := []byte("first"), []byte("second")
-		mustAddDACommit(t, state, "peer-c", daRelayTestCommitForPayloads(daID, 1, first, second))
-		mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 0, uint64(len(first)), first))
-		chunk, txBytesOwned := daRelayTestChunkPayload(daID, 1, uint64(len(second)), second), false
-		payload := cloneBytes(chunk.payload)
-
-		_, snapshot, complete, err := state.stageDAChunkForCompletion("peer-b", &chunk, payload, &txBytesOwned)
-		if err != nil || !complete {
-			t.Fatalf("capture chunk-last snapshot complete=%v err=%v", complete, err)
-		}
-		if err := state.ReleasePeerQuotaKey("peer-a"); err != nil {
-			t.Fatalf("release snapshotted chunk: %v", err)
-		}
-		payloadBytes, _ := snapshot.payloadCommitment()
-		_, retry, err := state.completeDAChunkSnapshot("peer-b", &chunk, payload, &txBytesOwned, snapshot, payloadBytes)
-		if err != nil || !retry {
-			t.Fatalf("stale chunk completion retry=%v err=%v, want true nil", retry, err)
-		}
-		record := state.sets[daID]
-		if record.state != daRelayStateStagedCommit || record.commit.chunkCount != 2 || len(record.chunks) != 0 {
-			t.Fatalf("stale chunk published record=%+v", record)
-		}
-	})
-}
-
-func TestDARelayMarkMatchingChunksRejectsNoopSnapshots(t *testing.T) {
-	state := newDARelayStateForTest(t, defaultDARelayCaps())
-	daID := daRelayTestID(62)
-	payload := []byte("payload")
-	sourceRecord := daRelaySetRecord{
-		daID:   daID,
-		state:  daRelayStateStagedCommit,
-		commit: daRelayTestCommitForPayloads(daID, 1, payload),
-		chunks: map[uint16]daRelayChunk{
-			0: daRelayTestChunkPayload(daID, 0, uint64(len(payload)), payload),
-		},
-	}
-	snapshot, complete := sourceRecord.completionSnapshot()
-	if !complete {
-		t.Fatalf("snapshot setup did not complete")
-	}
-	completeRecord := sourceRecord
-	completeRecord.state = daRelayStateCompleteSet
-	state.sets[daID] = completeRecord
-	retry, err := state.markMatchingCompletionChunksReplaceable(snapshot)
-	if err != nil || !retry {
-		t.Fatalf("complete record mark retry=%v err=%v, want true nil", retry, err)
-	}
-
-	stagedRecord := completeRecord
-	stagedRecord.state = daRelayStateStagedCommit
-	stagedRecord.chunks = map[uint16]daRelayChunk{}
-	state.sets[daID] = stagedRecord
-	retry, err = state.markMatchingCompletionChunksReplaceable(snapshot)
-	if err != nil || retry {
-		t.Fatalf("empty matching mark retry=%v err=%v, want false nil", retry, err)
-	}
-
-	stagedRecord.chunks[0] = daRelayTestChunkPayload(daID, 0, uint64(len(payload)), []byte("wrong"))
-	state.sets[daID] = stagedRecord
-	retry, err = state.markMatchingCompletionChunksReplaceable(snapshot)
-	if err != nil || retry {
-		t.Fatalf("mismatched matching mark retry=%v err=%v, want false nil", retry, err)
+	if len(state.sets[daID].chunks) != len(record.chunks) || state.orphanBytes != record.wireBytes {
+		t.Fatalf("duplicate stage mutated state: stored=%d orphan=%d", len(state.sets[daID].chunks), state.orphanBytes)
 	}
 }
 
@@ -2183,10 +1985,7 @@ func newDARelayStateForTest(t *testing.T, caps daRelayCaps) *DARelayState {
 
 func mustAddDAChunk(t *testing.T, state *DARelayState, peer string, chunk daRelayChunk) daRelaySetRecord {
 	t.Helper()
-	if err := state.StageChunk(peer, DARelayChunk{
-		DAID: chunk.daID, ChunkHash: chunk.chunkHash, ChunkIndex: chunk.chunkIndex, Payload: chunk.payload,
-		WireBytes: chunk.wireBytes, TxBytes: chunk.txBytes, HashChecked: chunk.hashChecked,
-	}); err != nil {
+	if err := state.addDAChunk(peer, chunk); err != nil {
 		t.Fatalf("add DA chunk: %v", err)
 	}
 	return state.sets[chunk.daID].clone()
@@ -2194,10 +1993,7 @@ func mustAddDAChunk(t *testing.T, state *DARelayState, peer string, chunk daRela
 
 func mustAddDACommit(t *testing.T, state *DARelayState, peer string, commit daRelayCommit) daRelaySetRecord {
 	t.Helper()
-	if err := state.StageCommit(peer, DARelayCommit{
-		DAID: commit.daID, PayloadCommitment: commit.payloadCommitment, ChunkCount: commit.chunkCount,
-		WireBytes: commit.wireBytes, TxBytes: commit.txBytes,
-	}); err != nil {
+	if err := state.addDACommit(peer, commit); err != nil {
 		t.Fatalf("add DA commit: %v", err)
 	}
 	return state.sets[commit.daID].clone()
@@ -2240,6 +2036,10 @@ type daRelayStateView struct {
 	peerBytes          map[string]uint64
 	daIDBytes          map[[32]byte]uint64
 	sets               map[[32]byte]daRelaySetRecord
+	// locators is part of the compared image: the txid index is half the
+	// record-locator-claim bijection, so a row that survives a removal or is
+	// duplicated by a restage has to fail an unchanged-image assertion.
+	locators map[[32]byte]daRelayLocator
 }
 
 func daRelayStateSnapshot(state *DARelayState) daRelayStateView {
@@ -2258,6 +2058,7 @@ func daRelayStateSnapshot(state *DARelayState) daRelayStateView {
 		peerBytes:          maps.Clone(state.orphanBytesByPeerQuotaKey),
 		daIDBytes:          maps.Clone(state.orphanBytesByDAID),
 		sets:               make(map[[32]byte]daRelaySetRecord, len(state.sets)),
+		locators:           maps.Clone(state.locators),
 	}
 	for daID, record := range state.sets {
 		record = record.cloneForStateMutation()
@@ -2494,4 +2295,46 @@ func requirePortHopRejectedWithoutMutation(t *testing.T, state *DARelayState, re
 	if got := state.orphanBytesForDAID(rejectedID); got != 0 {
 		t.Fatalf("rejected da_id accounting = %d, want 0", got)
 	}
+}
+
+// advanceOrphanTTL runs the production TTL projection over a private clone and
+// reports the sets it expired. The production entry AdvanceOrphanTTL runs the
+// SAME projection and couples it to the owner's victim claims, discarding the
+// report; these accounting rows need the report to name the exact records, and
+// an unbound relay has no owner half for them to differ over.
+func (s *DARelayState) advanceOrphanTTL() ([]daRelayExpiredSet, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	projected := s.cloneForAtomicBatchLocked()
+	expired, _, err := projected.advanceOrphanTTLLocked()
+	if err != nil {
+		return nil, err
+	}
+	s.publishAtomicBatchLocked(projected)
+	return expired, nil
+}
+
+// releasePeerQuotaKey is advanceOrphanTTL's peer-teardown twin, with the same
+// contract and the same reason.
+func (s *DARelayState) releasePeerQuotaKey(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	projected := s.cloneForAtomicBatchLocked()
+	if _, err := projected.releasePeerQuotaKeyLocked(key); err != nil {
+		return err
+	}
+	s.publishAtomicBatchLocked(projected)
+	return nil
+}
+
+// nextMonotonicReceivedTimeForTest consumes one accepted-sequence value without
+// a member, so a row can pin the sequence itself rather than a record's copy.
+func nextMonotonicReceivedTimeForTest(s *DARelayState) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var scratch daRelaySetRecord
+	if err := s.advanceAcceptedSequenceLocked(&scratch); err != nil {
+		return 0, err
+	}
+	return scratch.receivedTime, nil
 }

@@ -117,6 +117,11 @@ wait_peers_ready() {
   return 1
 }
 
+# wait_mempool_contains is a SUBMITTER-side barrier only. Since RUB-678 a remote
+# DA transaction never enters the receiver's standard mempool — it exits ingress
+# before txSeen, the relay pool and the producer — so the receiver is proven to
+# have RETAINED the set by the only thing that needs the retained image: node-a
+# mining the complete DA set below.
 wait_mempool_contains() {
   local label="$1" addr="$2" txid="$3" deadline=$((SECONDS + 30)) last="<none>"
   while (( SECONDS < deadline )); do
@@ -307,7 +312,7 @@ report = {
         {"name": "node-b", "implementation": "go", "pid": i("B_PID"), "binary": e["NODE_BIN"], "rpc": e["B_RPC_ADDR"], "p2p": e["B_P2P_ADDR"], "datadir": e["B_DIR"], "handshake_peers": i("B_PEERS")},
     ],
     "da_relay_evidence": {
-        "submitter_to_peer_relay": {"submitted_to": "node-b", "observed_in_mempool": "node-a"},
+        "submitter_to_peer_relay": {"submitted_to": "node-b", "receiver_retained_evidence": "node-a mined the complete DA set from its retained image"},
         "incomplete_set_not_mined": {"mined_by": "node-a", "height": i("INCOMPLETE_MINE_HEIGHT"), "block_hash": e["INCOMPLETE_MINE_HASH"], "tx_count": i("INCOMPLETE_TX_COUNT"), "omitted_chunk_txid": e["CHUNK0_TXID"]},
         "staged_commit_not_mined_until_complete": {"mined_by": "node-a", "height": i("STAGED_MINE_HEIGHT"), "block_hash": e["STAGED_MINE_HASH"], "tx_count": i("STAGED_TX_COUNT"), "omitted_commit_txid": e["COMMIT_TXID"]},
         "complete_set_mined": {"mined_by": "node-a", "height": i("COMPLETE_MINE_HEIGHT"), "block_hash": e["COMPLETE_MINE_HASH"], "tx_count": i("COMPLETE_TX_COUNT"), "included_commit_txid": e["COMMIT_TXID"], "included_chunk_txids": [e["CHUNK0_TXID"], e["CHUNK1_TXID"]]},
@@ -359,7 +364,7 @@ B_PEERS="$(wait_peers_ready node-b "${B_RPC_ADDR}")"
 IFS=$'\t' read -r _ BASE_HASH < <(tip_tsv "${A_RPC_ADDR}")
 wait_tip_exact node-b "${B_RPC_ADDR}" "${BASE_HEIGHT}" "${BASE_HASH}" 30
 submit_tx_hex "${B_RPC_ADDR}" "${CHUNK0_HEX}" >/dev/null
-wait_mempool_contains node-a "${A_RPC_ADDR}" "${CHUNK0_TXID}"
+wait_mempool_contains node-b "${B_RPC_ADDR}" "${CHUNK0_TXID}"
 IFS=$'\t' read -r INCOMPLETE_MINE_HEIGHT INCOMPLETE_MINE_HASH INCOMPLETE_TX_COUNT < <(mine_next_tsv "${A_RPC_ADDR}")
 [[ "${INCOMPLETE_MINE_HEIGHT}" == "${INCOMPLETE_HEIGHT}" && "${INCOMPLETE_TX_COUNT}" == "1" ]] || {
   echo "incomplete DA set mined unexpectedly height=${INCOMPLETE_MINE_HEIGHT} tx_count=${INCOMPLETE_TX_COUNT}" >&2
@@ -369,16 +374,16 @@ wait_tip_exact node-b "${B_RPC_ADDR}" "${INCOMPLETE_HEIGHT}" "${INCOMPLETE_MINE_
 INCOMPLETE_BLOCK_HEX="$(block_hex "${A_RPC_ADDR}" "${INCOMPLETE_HEIGHT}")"
 assert_block_txids "${INCOMPLETE_BLOCK_HEX}" "${INCOMPLETE_MINE_HASH}" "1" "-" "${CHUNK0_TXID}"
 submit_tx_hex "${B_RPC_ADDR}" "${COMMIT_HEX}" >/dev/null
-wait_mempool_contains node-a "${A_RPC_ADDR}" "${COMMIT_TXID}"
+wait_mempool_contains node-b "${B_RPC_ADDR}" "${COMMIT_TXID}"
 IFS=$'\t' read -r STAGED_MINE_HEIGHT STAGED_MINE_HASH STAGED_TX_COUNT < <(mine_next_tsv "${A_RPC_ADDR}")
 [[ "${STAGED_MINE_HEIGHT}" == "$((INCOMPLETE_HEIGHT + 1))" && "${STAGED_TX_COUNT}" == "1" ]] || { echo "staged DA set mined unexpectedly height=${STAGED_MINE_HEIGHT} tx_count=${STAGED_TX_COUNT}" >&2; exit 1; }
 wait_tip_exact node-b "${B_RPC_ADDR}" "${STAGED_MINE_HEIGHT}" "${STAGED_MINE_HASH}" 60
 STAGED_BLOCK_HEX="$(block_hex "${A_RPC_ADDR}" "${STAGED_MINE_HEIGHT}")"
 assert_block_txids "${STAGED_BLOCK_HEX}" "${STAGED_MINE_HASH}" "1" "-" "${CHUNK0_TXID},${COMMIT_TXID}"
 submit_tx_hex "${B_RPC_ADDR}" "${DUP_HEX}" >/dev/null
-wait_mempool_contains node-a "${A_RPC_ADDR}" "${DUP_TXID}"
+wait_mempool_contains node-b "${B_RPC_ADDR}" "${DUP_TXID}"
 submit_tx_hex "${B_RPC_ADDR}" "${CHUNK1_HEX}" >/dev/null
-wait_mempool_contains node-a "${A_RPC_ADDR}" "${CHUNK1_TXID}"
+wait_mempool_contains node-b "${B_RPC_ADDR}" "${CHUNK1_TXID}"
 COMPLETE_FOUND=0
 for _ in 1 2 3 4 5; do
   IFS=$'\t' read -r COMPLETE_MINE_HEIGHT COMPLETE_MINE_HASH COMPLETE_TX_COUNT < <(mine_next_tsv "${A_RPC_ADDR}")

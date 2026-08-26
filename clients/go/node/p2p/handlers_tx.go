@@ -1,13 +1,20 @@
 package p2p
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
+// handleTx is the remote TX entry. Its order is lifecycle and envelope bounds,
+// then the canonical full-consumption parse, then tx_kind dispatch.
+//
+// A DA transaction (tx_kind 0x01 or 0x02) EXITS at that dispatch, before the
+// seen-set, before relay-pool admission, before the metadata producer and before
+// any MSG_TX announcement: remote DA has no standard residency and creates no
+// standard state at all. The standard 0x00 path below is unchanged.
 func (p *peer) handleTx(txBytes []byte) error {
 	// Defense-in-depth oversize guard (parity with Rust
 	// `tx_relay::handle_received_tx` oversize guard, surfaced as
@@ -30,46 +37,57 @@ func (p *peer) handleTx(txBytes []byte) error {
 		}
 		return nil
 	}
+	if tx.TxKind == 0x01 || tx.TxKind == 0x02 {
+		return p.handleRelayDATx(txBytes, tx)
+	}
 	if p.service.txSeen.Has(txid) {
-		return p.handleSeenRelayTxVariant(txid, txBytes, tx)
+		return nil
 	}
 	// Mark as seen BEFORE pool admission so that pool-full rejections still
 	// suppress future getdata requests (prevents inv/getdata churn at capacity).
-	if stop, err := p.validateAndMarkRelayTxSeen(txid, txBytes, tx); stop {
-		return err
+	if !p.service.txSeen.Add(txid) {
+		return nil
 	}
-	admittedTxBytes, admittedTx, err := p.service.ensureRelayTxAdmitted(txid, txBytes, tx, true)
-	if err != nil {
+	if _, _, err := p.service.ensureRelayTxAdmitted(txid, txBytes, tx, true); err != nil {
 		// Keep admission and metadata rejections peer-neutral for Go/Rust relay
 		// parity: local policy/runtime state can reject a structurally valid tx,
 		// and Rust surfaces the same branch as non-banworthy MetadataRejected.
 		return nil //nolint:nilerr
 	}
-	_ = p.service.stageRelayDATx(p.addr(), admittedTxBytes, admittedTx, true)
 	_ = p.service.broadcastInventory(p, []InventoryVector{{Type: MSG_TX, Hash: txid}})
 	return nil
 }
 
-func (p *peer) validateAndMarkRelayTxSeen(txid [32]byte, txBytes []byte, tx *consensus.Tx) (bool, error) {
-	if err := validateRelayDATxForAdmission(txBytes, tx); err != nil {
-		if p.bumpBan(10, err.Error()) {
-			return true, err
-		}
-		return true, nil
-	}
-	return !p.service.txSeen.Add(txid), nil
-}
-
-func (p *peer) handleSeenRelayTxVariant(txid [32]byte, txBytes []byte, tx *consensus.Tx) error {
-	if tx == nil || tx.TxKind != 0x02 || tx.DaChunkCore == nil {
-		return nil
-	}
-	if admittedTxBytes, ok := p.service.cfg.TxPool.Get(txid); ok && bytes.Equal(admittedTxBytes, txBytes) {
-		return nil
-	}
+// handleRelayDATx is the remote DA arm. The context-free shape and payload-hash
+// check keeps its existing peer consequence, and PEER provenance is built from
+// this peer's own address and its normalized quota key, so scoring and quota
+// teardown name exactly one subject.
+//
+// A DUPLICATE COMMIT carries the existing negative peer effect
+// (RUBIN_COMPACT_BLOCKS.md Section 5.1): a peer re-announcing a commit the node
+// already retains is the case that adjustment exists for. A duplicate CHUNK is
+// peer-neutral — chunks legitimately race between peers. Every other admission
+// failure stays peer-neutral for the same Go/Rust relay-parity reason the
+// standard path gives.
+func (p *peer) handleRelayDATx(txBytes []byte, tx *consensus.Tx) error {
 	if err := validateRelayDATxForAdmission(txBytes, tx); err != nil {
 		if p.bumpBan(10, err.Error()) {
 			return err
+		}
+		return nil
+	}
+	provenance, err := node.NewPeerDAProvenance(p.addr(), peerQuotaKey(p.addr()))
+	if err != nil {
+		return err
+	}
+	result, err := p.service.admitRelayDATx(p.addr(), txBytes, tx, provenance)
+	if err != nil {
+		return nil //nolint:nilerr // admission rejections are peer-neutral, exactly as on the standard path
+	}
+	if result.Disposition == node.DAAdmissionDuplicate && tx.TxKind == 0x01 {
+		reason := fmt.Sprintf("duplicate da commit %x", result.DAID)
+		if p.bumpBan(10, reason) {
+			return errors.New(reason)
 		}
 	}
 	return nil

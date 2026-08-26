@@ -8,45 +8,35 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-func (s *DARelayState) releasePeerQuotaKey(key string) error {
-	if s == nil {
-		return nil
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.orphanBytesByPeerQuotaKey[key] == 0 {
-		return nil
-	}
-	projected := s.cloneForAtomicBatchLocked()
-	if err := projected.releasePeerQuotaKeyLocked(key); err != nil {
-		return err
-	}
-	s.publishAtomicBatchLocked(projected)
-	return nil
-}
-
-func (s *DARelayState) releasePeerQuotaKeyLocked(key string) error {
+// releasePeerQuotaKeyLocked runs Section 18.3 peer teardown for one peer quota
+// identity over the PROJECTED image and returns the exact member claims the
+// teardown removes. It publishes nothing: the caller couples this projection and
+// the victim batch inside one DACommit so record, locator and claim move
+// together or not at all.
+func (s *DARelayState) releasePeerQuotaKeyLocked(key string) ([]DAAdmissionVictim, error) {
+	var victims []DAAdmissionVictim
 	for _, daID := range s.sortedIncompleteDAIDsLocked() {
-		if err := s.releasePeerQuotaKeyRecordLocked(key, s.sets[daID]); err != nil {
-			return err
+		removed, err := s.releasePeerQuotaKeyRecordLocked(key, s.sets[daID])
+		if err != nil {
+			return nil, err
 		}
+		victims = appendDAMemberVictims(victims, removed)
 	}
-	return nil
+	return victims, nil
 }
 
-func (s *DARelayState) releasePeerQuotaKeyRecordLocked(key string, record daRelaySetRecord) error {
-	updated, changed, err := record.withoutPeerQuotaKey(key)
+func (s *DARelayState) releasePeerQuotaKeyRecordLocked(key string, record daRelaySetRecord) ([]daRelayMemberIdentity, error) {
+	updated, removed, err := record.peerCleanupPlan(key)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if !changed {
-		return nil
+	if len(removed) == 0 {
+		return nil, nil
 	}
 	if updated.emptyIncomplete() {
-		return s.removeDASetRecordLocked(record)
+		return removed, s.removeDASetRecordLocked(record)
 	}
-	return s.applyDASetRecordLocked(updated)
+	return removed, s.applyDASetRecordLocked(updated)
 }
 
 func (s *DARelayState) sortedIncompleteDAIDsLocked() [][32]byte {
@@ -64,22 +54,121 @@ func (s *DARelayState) sortedIncompleteDAIDsLocked() [][32]byte {
 	return daIDs
 }
 
+// addDACommit stages one commit into the live image under DARelayState.mu, with
+// no owner claim. It is the package-private accounting/cap entry the retained
+// schema's own tests drive; every PRODUCTION admission goes through AdmitDA,
+// which stages the same member through stageDACommitLocked with its exact
+// identity and token.
 func (s *DARelayState) addDACommit(peerQuotaKey string, commit daRelayCommit) error {
-	if err := validateDACommit(commit); err != nil {
+	commit.peerQuotaKey = peerQuotaKey
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	projected := s.cloneForAtomicBatchLocked()
+	if _, err := projected.stageDACommitLocked(commit); err != nil {
 		return err
 	}
+	s.publishAtomicBatchLocked(projected)
+	return nil
+}
 
-	txBytesOwned := false
-	for {
-		_, retry, err := s.addDACommitAttempt(peerQuotaKey, &commit, &txBytesOwned)
-		if err != nil {
-			return err
-		}
-		if retry {
-			continue
-		}
-		return nil
+// addDAChunk is addDACommit's chunk half and carries the same contract.
+func (s *DARelayState) addDAChunk(peerQuotaKey string, chunk daRelayChunk) error {
+	chunk.peerQuotaKey = peerQuotaKey
+	payload, err := prepareDAChunkPayload(chunk)
+	if err != nil {
+		return err
 	}
+	chunk.payload = payload
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	projected := s.cloneForAtomicBatchLocked()
+	if _, err := projected.stageDAChunkLocked(chunk); err != nil {
+		return err
+	}
+	s.publishAtomicBatchLocked(projected)
+	return nil
+}
+
+// stageDACommitLocked installs one commit into the PROJECTED image and reports
+// the members the staging dropped, so the caller can turn them into exact victim
+// claims. The receiver is the private projection, never live state.
+func (s *DARelayState) stageDACommitLocked(commit daRelayCommit) ([]daRelayMemberIdentity, error) {
+	if err := validateDACommit(commit); err != nil {
+		return nil, err
+	}
+	record := s.sets[commit.daID].cloneForStateMutation()
+	record.ensureMaps()
+	if record.commit.chunkCount != 0 {
+		return nil, errDARelayDuplicateCommit
+	}
+	commit.txBytes = cloneBytes(commit.txBytes)
+	record.daID = commit.daID
+	record.commit = commit
+	dropped := record.pruneChunksOutsideCommit()
+	record.state = daRelayStateStagedCommit
+	record.ttlBlocksRemaining = s.caps.orphanTTLBlocks
+	if err := s.advanceAcceptedSequenceLocked(&record); err != nil {
+		return nil, err
+	}
+	completion, err := s.finishStagedDARecordLocked(&record, true)
+	if err != nil {
+		return nil, err
+	}
+	return append(dropped, completion...), nil
+}
+
+// stageDAChunkLocked installs one chunk into the PROJECTED image. A chunk that
+// completes the set with a payload commitment its commit does not confirm is
+// REJECTED whole (Section 5.2 chunk-last mismatch): the projection is discarded
+// by the caller, so the existing State B record and every claim it owns survive
+// byte-identical.
+func (s *DARelayState) stageDAChunkLocked(chunk daRelayChunk) ([]daRelayMemberIdentity, error) {
+	if err := validateDAChunk(chunk); err != nil {
+		return nil, err
+	}
+	record := s.sets[chunk.daID].cloneForStateMutation()
+	record.ensureMaps()
+	if err := record.validateChunkInsert(chunk.chunkIndex); err != nil {
+		return nil, err
+	}
+	chunk.txBytes = cloneBytes(chunk.txBytes)
+	record.daID = chunk.daID
+	if record.commit.chunkCount == 0 {
+		record.state = daRelayStateOrphanChunks
+		record.ttlBlocksRemaining = s.caps.orphanTTLBlocks
+	}
+	record.chunks[chunk.chunkIndex] = chunk
+	if err := s.advanceAcceptedSequenceLocked(&record); err != nil {
+		return nil, err
+	}
+	return s.finishStagedDARecordLocked(&record, false)
+}
+
+// finishStagedDARecordLocked resolves completion for one staged record and
+// applies it to the projection.
+//
+// commitArrival selects Section 5.2's two DIFFERENT mismatch outcomes, and the
+// asymmetry is deliberate: the FIRST-SEEN COMMIT is the record's authority, so a
+// commit that arrives last and disagrees with the retained chunks keeps its own
+// State B record and removes those chunks with their exact claims, while a CHUNK
+// that arrives last and disagrees is simply not retained and changes nothing.
+func (s *DARelayState) finishStagedDARecordLocked(record *daRelaySetRecord, commitArrival bool) ([]daRelayMemberIdentity, error) {
+	var dropped []daRelayMemberIdentity
+	if snapshot, complete := record.completionSnapshot(); complete {
+		payloadBytes, commitment := snapshot.payloadCommitment()
+		switch {
+		case commitment == snapshot.payloadCommitmentExpected:
+			record.markComplete(payloadBytes)
+		case commitArrival:
+			dropped = record.dropAllChunks()
+		default:
+			return nil, errDARelayPayloadCommitmentMismatch
+		}
+	}
+	if err := record.recomputeOrphanTotals(); err != nil {
+		return nil, err
+	}
+	return dropped, s.applyDASetRecordLocked(*record)
 }
 
 func validateDACommit(commit daRelayCommit) error {
@@ -92,310 +181,16 @@ func validateDACommit(commit daRelayCommit) error {
 	return nil
 }
 
-func (s *DARelayState) addDACommitAttempt(peerQuotaKey string, commit *daRelayCommit, txBytesOwned *bool) (daRelaySetRecord, bool, error) {
-	record, snapshot, complete, err := s.stageDACommitForCompletion(peerQuotaKey, commit, txBytesOwned)
-	if err != nil || !complete {
-		return record, false, err
-	}
-	return s.resolveDACommitCompletion(peerQuotaKey, commit, txBytesOwned, snapshot)
-}
-
-func (s *DARelayState) stageDACommitForCompletion(peerQuotaKey string, commit *daRelayCommit, txBytesOwned *bool) (daRelaySetRecord, daRelayCompletionSnapshot, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	record, ownedNow, err := s.stageDACommitRecordLocked(peerQuotaKey, *commit, *txBytesOwned)
-	if err != nil {
-		return daRelaySetRecord{}, daRelayCompletionSnapshot{}, false, err
-	}
-	updateDACommitTxBytes(commit, txBytesOwned, record, ownedNow)
-	snapshot, complete := record.completionSnapshot()
-	if complete {
-		return record, snapshot, true, nil
-	}
-	if err := record.recomputeOrphanTotals(); err != nil {
-		return daRelaySetRecord{}, daRelayCompletionSnapshot{}, false, err
-	}
-	if err := s.applyDASetRecordLocked(record); err != nil {
-		return daRelaySetRecord{}, daRelayCompletionSnapshot{}, false, err
-	}
-	return record, snapshot, false, nil
-}
-
-func updateDACommitTxBytes(commit *daRelayCommit, txBytesOwned *bool, record daRelaySetRecord, ownedNow bool) {
-	if !*txBytesOwned && ownedNow {
-		commit.txBytes = record.commit.txBytes
-		*txBytesOwned = true
-	}
-}
-
-func (s *DARelayState) resolveDACommitCompletion(peerQuotaKey string, commit *daRelayCommit, txBytesOwned *bool, snapshot daRelayCompletionSnapshot) (daRelaySetRecord, bool, error) {
-	payloadBytes, payloadCommitment := snapshot.payloadCommitment()
-	if payloadCommitment == snapshot.payloadCommitmentExpected {
-		return s.completeDACommitSnapshot(peerQuotaKey, commit, txBytesOwned, snapshot, payloadBytes)
-	}
-	// Commit metadata is the first-seen authority for duplicate handling;
-	// orphan chunks are provisional until they match that commit.
-	return s.rejectDACommitPayloadMismatch(peerQuotaKey, *commit, *txBytesOwned, snapshot)
-}
-
-func (s *DARelayState) rejectDACommitPayloadMismatch(peerQuotaKey string, commit daRelayCommit, txBytesOwned bool, snapshot daRelayCompletionSnapshot) (daRelaySetRecord, bool, error) {
-	applied, err := s.stageCommitDroppingMatchingCompletionChunks(peerQuotaKey, commit, txBytesOwned, snapshot)
-	if err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	if !applied {
-		return daRelaySetRecord{}, true, nil
-	}
-	return daRelaySetRecord{}, false, errDARelayPayloadCommitmentMismatch
-}
-
-func (s *DARelayState) completeDACommitSnapshot(peerQuotaKey string, commit *daRelayCommit, txBytesOwned *bool, snapshot daRelayCompletionSnapshot, payloadBytes uint64) (daRelaySetRecord, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	record, ownedNow, err := s.stageDACommitRecordLocked(peerQuotaKey, *commit, *txBytesOwned)
-	if err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	updateDACommitTxBytes(commit, txBytesOwned, record, ownedNow)
-	if !snapshot.matchesRecord(record) {
-		return daRelaySetRecord{}, true, nil
-	}
-	record.markComplete(payloadBytes)
-	if err := record.recomputeOrphanTotals(); err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	if err := s.checkDASetRecordCapsLocked(record); err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	if !*txBytesOwned {
-		record.cloneRetainedTxBytes()
-		commit.txBytes = record.commit.txBytes
-		*txBytesOwned = true
-	}
-	if err := s.applyDASetRecordLocked(record); err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	return record, false, nil
-}
-
-func (s *DARelayState) addDAChunk(peerQuotaKey string, chunk daRelayChunk) error {
-	payload, err := s.prepareDAChunk(chunk)
-	if err != nil {
-		return err
-	}
-
-	txBytesOwned := false
-	for {
-		_, retry, err := s.addDAChunkAttempt(peerQuotaKey, &chunk, payload, &txBytesOwned)
-		if err != nil {
-			return err
-		}
-		if retry {
-			continue
-		}
-		return nil
-	}
-}
-
-func (s *DARelayState) prepareDAChunk(chunk daRelayChunk) ([]byte, error) {
+// prepareDAChunkPayload validates one chunk's context-free shape and returns the
+// owned payload copy staging retains.
+func prepareDAChunkPayload(chunk daRelayChunk) ([]byte, error) {
 	if err := validateDAChunk(chunk); err != nil {
-		return nil, err
-	}
-	if err := s.validateDAChunkInsert(chunk); err != nil {
 		return nil, err
 	}
 	if !chunk.hashChecked && sha3.Sum256(chunk.payload) != chunk.chunkHash {
 		return nil, errDARelayChunkHashMismatch
 	}
 	return cloneBytes(chunk.payload), nil
-}
-
-func (s *DARelayState) validateDAChunkInsert(chunk daRelayChunk) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sets[chunk.daID].validateChunkInsert(chunk.chunkIndex)
-}
-
-func (s *DARelayState) addDAChunkAttempt(peerQuotaKey string, chunk *daRelayChunk, payload []byte, txBytesOwned *bool) (daRelaySetRecord, bool, error) {
-	record, snapshot, complete, err := s.stageDAChunkForCompletion(peerQuotaKey, chunk, payload, txBytesOwned)
-	if err != nil || !complete {
-		return record, false, err
-	}
-	return s.resolveDAChunkCompletion(peerQuotaKey, chunk, payload, txBytesOwned, snapshot)
-}
-
-func (s *DARelayState) stageDAChunkForCompletion(peerQuotaKey string, chunk *daRelayChunk, payload []byte, txBytesOwned *bool) (daRelaySetRecord, daRelayCompletionSnapshot, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	record, ownedNow, err := s.stageDAChunkRecordLocked(peerQuotaKey, *chunk, payload, *txBytesOwned)
-	if err != nil {
-		return daRelaySetRecord{}, daRelayCompletionSnapshot{}, false, err
-	}
-	updateDAChunkTxBytes(chunk, txBytesOwned, record, ownedNow)
-	snapshot, complete := record.completionSnapshot()
-	if complete {
-		return record, snapshot, true, nil
-	}
-	if err := record.recomputeOrphanTotals(); err != nil {
-		return daRelaySetRecord{}, daRelayCompletionSnapshot{}, false, err
-	}
-	if err := s.applyDASetRecordLocked(record); err != nil {
-		return daRelaySetRecord{}, daRelayCompletionSnapshot{}, false, err
-	}
-	return record, snapshot, false, nil
-}
-
-func updateDAChunkTxBytes(chunk *daRelayChunk, txBytesOwned *bool, record daRelaySetRecord, ownedNow bool) {
-	if !*txBytesOwned && ownedNow {
-		chunk.txBytes = record.chunks[chunk.chunkIndex].txBytes
-		*txBytesOwned = true
-	}
-}
-
-func (s *DARelayState) resolveDAChunkCompletion(peerQuotaKey string, chunk *daRelayChunk, payload []byte, txBytesOwned *bool, snapshot daRelayCompletionSnapshot) (daRelaySetRecord, bool, error) {
-	payloadBytes, payloadCommitment := snapshot.payloadCommitment()
-	if payloadCommitment == snapshot.payloadCommitmentExpected {
-		return s.completeDAChunkSnapshot(peerQuotaKey, chunk, payload, txBytesOwned, snapshot, payloadBytes)
-	}
-	return s.rejectDAChunkPayloadMismatch(snapshot)
-}
-
-func (s *DARelayState) rejectDAChunkPayloadMismatch(snapshot daRelayCompletionSnapshot) (daRelaySetRecord, bool, error) {
-	retry, err := s.markMatchingCompletionChunksReplaceable(snapshot)
-	if err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	if retry {
-		return daRelaySetRecord{}, true, nil
-	}
-	return daRelaySetRecord{}, false, errDARelayPayloadCommitmentMismatch
-}
-
-func (s *DARelayState) completeDAChunkSnapshot(peerQuotaKey string, chunk *daRelayChunk, payload []byte, txBytesOwned *bool, snapshot daRelayCompletionSnapshot, payloadBytes uint64) (daRelaySetRecord, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	record, ownedNow, err := s.stageDAChunkRecordLocked(peerQuotaKey, *chunk, payload, *txBytesOwned)
-	if err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	updateDAChunkTxBytes(chunk, txBytesOwned, record, ownedNow)
-	if !snapshot.matchesRecord(record) {
-		return daRelaySetRecord{}, true, nil
-	}
-	record.markComplete(payloadBytes)
-	if err := record.recomputeOrphanTotals(); err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	if err := s.checkDASetRecordCapsLocked(record); err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	if !*txBytesOwned {
-		record.cloneRetainedTxBytes()
-		chunk.txBytes = record.chunks[chunk.chunkIndex].txBytes
-		*txBytesOwned = true
-	}
-	if err := s.applyDASetRecordLocked(record); err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	return record, false, nil
-}
-
-// txBytesOwned is only true for retrying a txBytes slice cloned by an earlier
-// successful staging call; first admission still clones after duplicate checks.
-func (s *DARelayState) stageDACommitRecordLocked(peerQuotaKey string, commit daRelayCommit, txBytesOwned bool) (daRelaySetRecord, bool, error) {
-	record, stagedCommit, err := s.stageDACommitMetadataLocked(peerQuotaKey, commit)
-	if err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	return s.cloneStagedDACommitTxBytesLocked(record, stagedCommit, txBytesOwned)
-}
-
-func (s *DARelayState) stageDACommitMetadataLocked(peerQuotaKey string, commit daRelayCommit) (daRelaySetRecord, daRelayCommit, error) {
-	record := s.sets[commit.daID].cloneForStateMutation()
-	record.ensureMaps()
-	if record.commit.chunkCount != 0 {
-		return daRelaySetRecord{}, daRelayCommit{}, errDARelayDuplicateCommit
-	}
-	commit.peerQuotaKey = peerQuotaKey
-	record.daID = commit.daID
-	record.commit = commit
-	record.pruneChunksOutsideCommit()
-	record.state = daRelayStateStagedCommit
-	record.ttlBlocksRemaining = s.caps.orphanTTLBlocks
-	if err := s.assignFirstSeenReceivedTimeLocked(&record); err != nil {
-		return daRelaySetRecord{}, daRelayCommit{}, err
-	}
-	return record, commit, nil
-}
-
-func (s *DARelayState) cloneStagedDACommitTxBytesLocked(record daRelaySetRecord, commit daRelayCommit, txBytesOwned bool) (daRelaySetRecord, bool, error) {
-	if txBytesOwned || len(commit.txBytes) == 0 {
-		return record, true, nil
-	}
-	if record.completeByShape() {
-		return record, false, nil
-	}
-	if err := record.recomputeOrphanTotals(); err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	if err := s.checkDASetRecordCapsLocked(record); err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	commit.txBytes = cloneBytes(commit.txBytes)
-	record.commit = commit
-	return record, true, nil
-}
-
-// txBytesOwned follows the same ownership contract as stageDACommitRecordLocked.
-func (s *DARelayState) stageDAChunkRecordLocked(peerQuotaKey string, chunk daRelayChunk, payload []byte, txBytesOwned bool) (daRelaySetRecord, bool, error) {
-	record, stagedChunk, err := s.stageDAChunkMetadataLocked(peerQuotaKey, chunk, payload)
-	if err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	return s.cloneStagedDAChunkTxBytesLocked(record, stagedChunk, txBytesOwned)
-}
-
-func (s *DARelayState) stageDAChunkMetadataLocked(peerQuotaKey string, chunk daRelayChunk, payload []byte) (daRelaySetRecord, daRelayChunk, error) {
-	record := s.sets[chunk.daID].cloneForStateMutation()
-	record.ensureMaps()
-	if err := record.validateChunkInsert(chunk.chunkIndex); err != nil {
-		return daRelaySetRecord{}, daRelayChunk{}, err
-	}
-	chunk.peerQuotaKey = peerQuotaKey
-	record.daID = chunk.daID
-	if record.commit.chunkCount == 0 {
-		record.state = daRelayStateOrphanChunks
-		record.ttlBlocksRemaining = s.caps.orphanTTLBlocks
-	}
-	chunk.payload = payload
-	record.chunks[chunk.chunkIndex] = chunk
-	delete(record.replaceableChunks, chunk.chunkIndex)
-	if err := s.assignFirstSeenReceivedTimeLocked(&record); err != nil {
-		return daRelaySetRecord{}, daRelayChunk{}, err
-	}
-	return record, chunk, nil
-}
-
-func (s *DARelayState) cloneStagedDAChunkTxBytesLocked(record daRelaySetRecord, chunk daRelayChunk, txBytesOwned bool) (daRelaySetRecord, bool, error) {
-	if txBytesOwned || len(chunk.txBytes) == 0 {
-		return record, true, nil
-	}
-	if record.completeByShape() {
-		return record, false, nil
-	}
-	if err := record.recomputeOrphanTotals(); err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	if err := s.checkDASetRecordCapsLocked(record); err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	chunk.txBytes = cloneBytes(chunk.txBytes)
-	record.chunks[chunk.chunkIndex] = chunk
-	return record, true, nil
 }
 
 func validateDAChunk(chunk daRelayChunk) error {
@@ -412,6 +207,9 @@ func validateDAChunk(chunk daRelayChunk) error {
 	return nil
 }
 
+// applyDASetRecordLocked installs one record and its locator rows together.
+// Every projected accounting value is computed and cap-checked BEFORE the first
+// write, so a refused record leaves the image byte-identical.
 func (s *DARelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 	oldRecord := s.sets[record.daID]
 	orphanBytes, peerBytes, daBytes, commitBytes, err := s.projectOrphanAccountingDeltaLocked(oldRecord, record)
@@ -423,6 +221,7 @@ func (s *DARelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 		return err
 	}
 	s.sets[record.daID] = record
+	s.replaceLocatorsLocked(oldRecord, record)
 	s.orphanBytes = orphanBytes
 	s.applyProjectedPeerBytes(peerBytes)
 	s.applyProjectedDAIDBytes(record.daID, daBytes)
@@ -432,15 +231,6 @@ func (s *DARelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 		s.nextReceivedTime = record.receivedTime
 	}
 	return nil
-}
-
-func (s *DARelayState) checkDASetRecordCapsLocked(record daRelaySetRecord) error {
-	oldRecord := s.sets[record.daID]
-	if _, _, _, _, err := s.projectOrphanAccountingDeltaLocked(oldRecord, record); err != nil {
-		return err
-	}
-	_, err := s.projectPinnedPayloadDeltaLocked(oldRecord, record)
-	return err
 }
 
 func (s *DARelayState) removeDASetRecordLocked(record daRelaySetRecord) error {
@@ -454,6 +244,7 @@ func (s *DARelayState) removeDASetRecordLocked(record daRelaySetRecord) error {
 		return err
 	}
 	delete(s.sets, record.daID)
+	s.replaceLocatorsLocked(record, emptyRecord)
 	s.orphanBytes = orphanBytes
 	s.applyProjectedPeerBytes(peerBytes)
 	s.applyProjectedDAIDBytes(record.daID, daBytes)
@@ -461,6 +252,24 @@ func (s *DARelayState) removeDASetRecordLocked(record daRelaySetRecord) error {
 	s.pinnedPayloadBytes = pinnedBytes
 	s.prefetch.releaseSet(record.daID)
 	return nil
+}
+
+// replaceLocatorsLocked retires the old record's txid rows and installs the new
+// one's. It is called by the ONLY two writers of s.sets, which is what keeps the
+// locator index and the record image one bijection: a row can be neither
+// orphaned by a removal nor duplicated by a restage.
+func (s *DARelayState) replaceLocatorsLocked(oldRecord, newRecord daRelaySetRecord) {
+	if s.locators == nil {
+		s.locators = map[[32]byte]daRelayLocator{}
+	}
+	for txid, locator := range oldRecord.locators() {
+		if s.locators[txid] == locator {
+			delete(s.locators, txid)
+		}
+	}
+	for txid, locator := range newRecord.locators() {
+		s.locators[txid] = locator
+	}
 }
 
 func (s *DARelayState) projectOrphanAccountingDeltaLocked(oldRecord, newRecord daRelaySetRecord) (uint64, map[string]uint64, uint64, uint64, error) {

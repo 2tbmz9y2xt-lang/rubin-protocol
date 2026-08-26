@@ -42,29 +42,6 @@ type devnetNode struct {
 	timestamp      uint64
 }
 
-func TestDARelayStageChunkOwnsCallerPayload(t *testing.T) {
-	current := newDevnetNode(t, "da-relay-payload-copy", "", nil, 0x77, false)
-	relay := current.syncEngine.DARelayState()
-	if relay == nil {
-		t.Fatal("DA relay state is nil after initial mempool bind")
-	}
-
-	daID := [32]byte{0x77}
-	payload := []byte("caller-owned-payload")
-	commitment := sha3.Sum256(payload)
-	if err := relay.StageChunk("peer-a", node.DARelayChunk{
-		DAID: daID, ChunkHash: commitment, Payload: payload, WireBytes: uint64(len(payload)),
-	}); err != nil {
-		t.Fatalf("StageChunk: %v", err)
-	}
-	payload[0] ^= 0xff
-	if err := relay.StageCommit("peer-a", node.DARelayCommit{
-		DAID: daID, PayloadCommitment: commitment, ChunkCount: 1, WireBytes: uint64(len(payload)),
-	}); err != nil {
-		t.Fatalf("StageCommit after caller payload mutation: %v", err)
-	}
-}
-
 func TestDevnetThreeNodeSyncAndDeterminism(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

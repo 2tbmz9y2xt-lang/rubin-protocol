@@ -344,43 +344,55 @@ func TestOrphanResolution(t *testing.T) {
 // stages again afterwards: while the record was retained, a restage is refused
 // as a duplicate.
 func TestProcessRelayedBlockDropsRetainedDAOrphanNotValidAgainstC1(t *testing.T) {
-	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	sink.service.cfg.Now = func() time.Time { return time.Unix(0, 0) }
-	chunk := stageRetainedDAOrphanChunk(t, sink.service, daRelayTestID(100), "127.0.0.1:19111")
-	if err := sink.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk); err == nil {
-		t.Fatal("the retained orphan did not refuse its own restage before any block was applied")
-	}
+	f := newDAIngressFixture(t, sink, 2)
+	// Retained while chain-valid, then made final-invalid by spending its input
+	// out from under it in the block the transition applies.
+	txid := retainOrphanDAChunk(t, f, daRelayTestID(100), "127.0.0.1:19111")
+	requireRetainedDA(t, sink, txid, true, "the orphan before any block was applied")
+	// The member is retained while chain-valid and then made final-INVALID: its
+	// only funding outpoint leaves the confirmed view, exactly as a block spending
+	// it would do. Direct mutation is safe here — no peer worker is running and
+	// the transition below has not started.
+	delete(sink.chainState.Utxos, f.lastOp)
 	peer := testPeerForService(sink.service, "remote", 2)
 	// Exactly ONE block, against an orphan TTL of 3: TTL expiry cannot be the
-	// reason the record left, so the restage below can only be explained by the
+	// reason the record left, so its removal can only be explained by the
 	// canonical transition's own D validation.
-	if _, err := peer.processRelayedBlock(node.DevnetGenesisBlockBytes()); err != nil {
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	if _, err := peer.processRelayedBlock(blockAtHeight(t, source, 1)); err != nil {
 		t.Fatalf("process relayed block: %v", err)
 	}
-	if err := sink.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk); err != nil {
-		t.Fatalf("the canonical transition kept a retained orphan it could not validate against C1: %v", err)
-	}
+	requireRetainedDA(t, sink, txid, false, "the orphan the transition could not validate against C1")
 }
 
-// stageRetainedDAOrphanChunk retains one orphan chunk WITH the exact canonical
-// transaction bytes its Section 5.2 admission used, which is what production
-// ingest always supplies and what the canonical transition parses to derive the
-// record's exact identity.
-func stageRetainedDAOrphanChunk(t *testing.T, svc *Service, daID [32]byte, peerAddr string) node.DARelayChunk {
+// retainOrphanDAChunk retains ONE orphan chunk through the production admission
+// entry and returns its txid, which is the identity every residency assertion
+// below reads back through LookupRetainedTx.
+func retainOrphanDAChunk(t *testing.T, f *daIngressFixture, daID [32]byte, peerAddr string) [32]byte {
 	t.Helper()
-	payload := []byte{daID[0]}
-	txBytes := daChunkRelayTxBytes(t, daID, 0, uint64(daID[0]), payload)
-	chunk := node.DARelayChunk{
-		DAID:      daID,
-		ChunkHash: sha3.Sum256(payload),
-		Payload:   payload,
-		WireBytes: uint64(len(txBytes)),
-		TxBytes:   txBytes,
+	raw := f.chunkTx(t, daID, 0, []byte{daID[0]})
+	f.admit(t, raw, peerAddr)
+	return mustCanonicalTxID(t, raw)
+}
+
+// requireRetainedDA asserts retained-DA residency by exact txid. It is the
+// DIRECT observation LookupRetainedTx exists for, and it replaces the older
+// proxy — restaging the same member and reading the duplicate refusal — which no
+// longer exists as a caller-reachable operation.
+func requireRetainedDA(t *testing.T, h *testHarness, txid [32]byte, want bool, what string) {
+	t.Helper()
+	snapshot, owned, err := h.service.daRelay.LookupRetainedTx(txid)
+	if err != nil {
+		t.Fatalf("LookupRetainedTx(%x): %v", txid, err)
 	}
-	if err := svc.daRelay.StageChunk(peerQuotaKey(peerAddr), chunk); err != nil {
-		t.Fatalf("StageChunk: %v", err)
+	if owned != want {
+		t.Fatalf("%s: retained=%v, want %v", what, owned, want)
 	}
-	return chunk
+	if owned && snapshot.TxID != txid {
+		t.Fatalf("%s: snapshot txid=%x, want %x", what, snapshot.TxID, txid)
+	}
 }
 
 // TestAnnounceBlockAdvancesDARelayTTL keeps the TTL mechanism observable on its
@@ -392,108 +404,87 @@ func stageRetainedDAOrphanChunk(t *testing.T, svc *Service, daID [32]byte, peerA
 func TestAnnounceBlockAdvancesDARelayTTL(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	chunk := stageOrphanQuotaBoundary(t, h.service, 101)
+	f := newDAIngressFixture(t, h, 2)
+	txid := retainOrphanDAChunk(t, f, daRelayTestID(101), "127.0.0.1:19111")
 	for height := uint64(1); height <= 2; height++ {
 		if err := h.service.AnnounceBlock(blockAtHeight(t, source, height)); err != nil {
 			t.Fatalf("AnnounceBlock(%d): %v", height, err)
 		}
 	}
-	if err := h.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk); err == nil {
-		t.Fatal("the orphan expired before its TTL ran out")
-	}
+	requireRetainedDA(t, h, txid, true, "the orphan before its TTL ran out")
 	if err := h.service.AnnounceBlock(blockAtHeight(t, source, 3)); err != nil {
 		t.Fatalf("AnnounceBlock(3): %v", err)
 	}
-	if err := h.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk); err != nil {
-		t.Fatalf("expired local orphan was retained: %v", err)
-	}
+	requireRetainedDA(t, h, txid, false, "the expired orphan")
 }
 
-// stageCompleteDASetForService retains one single-chunk COMPLETE_SET through the
-// exported writer wrappers, with MINIMAL metadata and DELIBERATELY non-canonical
-// member bytes: TxBytes is the literal "commit"/"chunk", not the canonical
-// serialization of any transaction. The record is therefore NOT what an ingest
-// path would have staged, and that is what makes it serve both of its callers —
-// the retention rows here and in service_work_lifecycle_test.go, which only need
-// a record to be present, and latchedDAHarness, whose engine latches GENUINELY
-// because the next canonical transition's D preparation cannot parse these bytes.
-//
-// Relocated here from the deleted da_relay_consume_test.go, unchanged.
-func stageCompleteDASetForService(t *testing.T, svc *Service, daID [32]byte, payload []byte) {
+// retainCompleteDASetForService retains one single-chunk COMPLETE_SET through
+// the production admission entry and returns the two member txids.
+func retainCompleteDASetForService(t *testing.T, f *daIngressFixture, daID [32]byte, payload []byte, peerAddr string) (commitTxID, chunkTxID [32]byte) {
 	t.Helper()
-	commitment := sha3.Sum256(payload)
-	if err := svc.daRelay.StageCommit("peer-a", node.DARelayCommit{
-		DAID:              daID,
-		PayloadCommitment: commitment,
-		ChunkCount:        1,
-		WireBytes:         1,
-		TxBytes:           []byte("commit"),
-	}); err != nil {
-		t.Fatalf("StageCommit: %v", err)
-	}
-	if err := svc.daRelay.StageChunk("peer-b", node.DARelayChunk{
-		DAID:       daID,
-		ChunkHash:  sha3.Sum256(payload),
-		ChunkIndex: 0,
-		Payload:    payload,
-		WireBytes:  uint64(len(payload)),
-		TxBytes:    []byte("chunk"),
-	}); err != nil {
-		t.Fatalf("StageChunk: %v", err)
-	}
+	commitTx := f.commitTx(t, daID, 1, sha3.Sum256(payload))
+	f.admit(t, commitTx, peerAddr)
+	chunkTx := f.chunkTx(t, daID, 0, payload)
+	f.admit(t, chunkTx, peerAddr)
+	return mustCanonicalTxID(t, commitTx), mustCanonicalTxID(t, chunkTx)
 }
 
+// TestUnregisterPeerReleasesDAChunkPeerAccountingAndDropsOwnedChunk is A8's
+// State A row: peer teardown removes the departing peer's own orphan member and
+// leaves a COMPLETE_SET — which is not peer-quota state — untouched.
 func TestUnregisterPeerReleasesDAChunkPeerAccountingAndDropsOwnedChunk(t *testing.T) {
-	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h, 6)
 	owner := "127.0.0.1:19111"
 	completeID := daRelayTestID(128)
-	stageCompleteDASetForService(t, h.service, completeID, []byte("complete"))
-	chunk := stageOrphanQuotaBoundary(t, h.service, 106)
+	completeCommit, completeChunk := retainCompleteDASetForService(t, f, completeID, []byte("complete"), owner)
+	orphan := retainOrphanDAChunk(t, f, daRelayTestID(106), owner)
 	peer := &peer{service: h.service, state: node.PeerState{Addr: owner}}
 	if err := h.service.registerPeer(peer); err != nil {
 		t.Fatalf("register peer: %v", err)
 	}
 	h.service.unregisterPeer(peer)
-	if err := h.service.daRelay.StageChunk(peerQuotaKey(owner), chunk); err != nil {
-		t.Fatalf("owned orphan was retained: %v", err)
-	}
+	requireRetainedDA(t, h, orphan, false, "the departing peer's orphan member")
+	requireRetainedDA(t, h, completeCommit, true, "the COMPLETE_SET commit")
+	requireRetainedDA(t, h, completeChunk, true, "the COMPLETE_SET chunk")
 	if candidates := h.service.CompleteDASetCandidates(^uint64(0)); len(candidates) != 1 || candidates[0].DAID != completeID {
 		t.Fatalf("complete candidates=%+v", candidates)
 	}
 }
 
+// TestUnregisterPeerReleasesDACommitPeerAccountingAndPreservesOtherChunks is
+// A7A: the departing peer owns the State B commit and every member of the record
+// is PEER-provenanced, so the WHOLE staged record goes — including the OTHER
+// peer's chunk — while an unrelated peer's record is untouched.
 func TestUnregisterPeerReleasesDACommitPeerAccountingAndPreservesOtherChunks(t *testing.T) {
-	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h, 8)
 	owner, other := "127.0.0.1:19111", "127.0.0.2:19112"
 	daID := daRelayTestID(109)
-	const quotaUnit = uint64(4 << 20)
-	for i := byte(0); i < 13; i++ {
-		stageOrphanDAChunk(t, h.service, daRelayTestID(120+i), fmt.Sprintf("127.0.2.%d:19111", i+1), quotaUnit)
-	}
-	chunk := stageOrphanDAChunk(t, h.service, daID, other, quotaUnit)
-	if err := h.service.daRelay.StageCommit(peerQuotaKey(owner), node.DARelayCommit{DAID: daID, ChunkCount: 2, WireBytes: quotaUnit}); err != nil {
-		t.Fatalf("StageCommit: %v", err)
-	}
+	payload := []byte{daID[0]}
+	otherChunk := f.chunkTx(t, daID, 0, payload)
+	f.admit(t, otherChunk, other)
+	ownerCommit := f.commitTx(t, daID, 2, sha3.Sum256(payload))
+	f.admit(t, ownerCommit, owner)
+	unrelated := retainOrphanDAChunk(t, f, daRelayTestID(110), "127.0.0.3:19113")
+
 	peer := &peer{service: h.service, state: node.PeerState{Addr: owner}}
 	if err := h.service.registerPeer(peer); err != nil {
 		t.Fatalf("register peer: %v", err)
 	}
 	h.service.unregisterPeer(peer)
-	if err := h.service.daRelay.StageChunk(peerQuotaKey(other), chunk); err == nil {
-		t.Fatal("other peer chunk was released")
-	}
-	if err := h.service.daRelay.StageCommit(peerQuotaKey(owner), node.DARelayCommit{DAID: daID, ChunkCount: 2, WireBytes: quotaUnit}); err != nil {
-		t.Fatalf("owned commit was retained: %v", err)
-	}
-	if err := h.service.daRelay.StageCommit(peerQuotaKey("127.0.0.3:19113"), node.DARelayCommit{DAID: daRelayTestID(110), ChunkCount: 2, WireBytes: quotaUnit}); err != nil {
-		t.Fatalf("commit quota was not reused: %v", err)
-	}
+	requireRetainedDA(t, h, mustCanonicalTxID(t, ownerCommit), false, "the departing peer's State B commit")
+	requireRetainedDA(t, h, mustCanonicalTxID(t, otherChunk), false, "the other PEER member of the deleted record")
+	requireRetainedDA(t, h, unrelated, true, "an unrelated peer's record")
 }
 
+// TestUnregisterPeerKeepsDAAccountingForActiveQuotaKey pins that teardown of one
+// peer never releases a member owned by a quota key another live peer still holds.
 func TestUnregisterPeerKeepsDAAccountingForActiveQuotaKey(t *testing.T) {
-	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h, 2)
 	oldAddr, activeAddr := "127.0.0.1:19111", "127.0.0.1:19112"
-	chunk := stageOrphanDAChunk(t, h.service, daRelayTestID(107), activeAddr)
+	txid := retainOrphanDAChunk(t, f, daRelayTestID(107), activeAddr)
 	oldPeer := &peer{service: h.service, state: node.PeerState{Addr: oldAddr}}
 	activePeer := &peer{service: h.service, state: node.PeerState{Addr: activeAddr}}
 	for _, peer := range []*peer{oldPeer, activePeer} {
@@ -502,13 +493,11 @@ func TestUnregisterPeerKeepsDAAccountingForActiveQuotaKey(t *testing.T) {
 		}
 	}
 	h.service.unregisterPeer(oldPeer)
-	if err := h.service.daRelay.StageChunk(peerQuotaKey(activeAddr), chunk); err == nil {
-		t.Fatal("active quota key released retained chunk")
-	}
+	requireRetainedDA(t, h, txid, true, "the member an active quota key still owns")
 }
 
 func TestUnregisterPeerHoldsQuotaLockThroughPeerManagerRemoval(t *testing.T) {
-	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	runtimeCfg := node.DefaultPeerRuntimeConfig("devnet", 1)
 	h.peerManager = node.NewPeerManager(runtimeCfg)
 	h.service.cfg.PeerManager, h.service.cfg.PeerRuntimeConfig = h.peerManager, runtimeCfg
@@ -517,7 +506,8 @@ func TestUnregisterPeerHoldsQuotaLockThroughPeerManagerRemoval(t *testing.T) {
 	if err := h.service.registerPeer(oldPeer); err != nil {
 		t.Fatalf("register old peer: %v", err)
 	}
-	chunk := stageOrphanDAChunk(t, h.service, daRelayTestID(112), oldPeer.addr(), 4<<20)
+	f := newDAIngressFixture(t, h, 2)
+	txid := retainOrphanDAChunk(t, f, daRelayTestID(112), oldPeer.addr())
 	key := peerQuotaKey(oldPeer.addr())
 	unlock := h.service.lockPeerQuotaKey(key)
 	unregistered := make(chan struct{})
@@ -546,43 +536,12 @@ func TestUnregisterPeerHoldsQuotaLockThroughPeerManagerRemoval(t *testing.T) {
 			t.Fatalf("replacement register: %v", err)
 		}
 	}
-	if err := h.service.daRelay.StageChunk(key, chunk); err != nil {
-		t.Fatalf("cleanup raced replacement: %v", err)
-	}
+	requireRetainedDA(t, h, txid, false, "the member the completed teardown released")
 }
 
 func blockAtHeight(t *testing.T, h *testHarness, height uint64) []byte {
 	_, block := testHarnessBlockAtHeight(t, h, height)
 	return block
-}
-
-func stageOrphanDAChunk(t *testing.T, svc *Service, daID [32]byte, peerAddr string, wireBytes ...uint64) node.DARelayChunk {
-	payload := []byte{daID[0]}
-	wireBytesValue := uint64(len(payload))
-	if len(wireBytes) != 0 {
-		wireBytesValue = wireBytes[0]
-	}
-	chunk := node.DARelayChunk{DAID: daID, ChunkHash: sha3.Sum256(payload), Payload: payload, WireBytes: wireBytesValue}
-	if err := svc.daRelay.StageChunk(peerQuotaKey(peerAddr), chunk); err != nil {
-		t.Fatalf("StageChunk: %v", err)
-	}
-	return chunk
-}
-
-func stageOrphanQuotaBoundary(t *testing.T, svc *Service, seed byte) (first node.DARelayChunk) {
-	for i := byte(0); i < 8; i++ {
-		id := daRelayTestID(seed + i)
-		chunk := stageOrphanDAChunk(t, svc, id, fmt.Sprintf("127.0.0.%d:19111", i+1), 4<<20)
-		if i == 0 {
-			first = chunk
-		}
-		payload := []byte{seed + i, 1}
-		next := node.DARelayChunk{DAID: id, ChunkHash: sha3.Sum256(payload), ChunkIndex: 1, Payload: payload, WireBytes: 4 << 20}
-		if err := svc.daRelay.StageChunk(peerQuotaKey(fmt.Sprintf("127.0.1.%d:19111", i+1)), next); err != nil {
-			t.Fatalf("StageChunk: %v", err)
-		}
-	}
-	return first
 }
 
 func TestLockPeerQuotaKeyInitializesNilMap(t *testing.T) {

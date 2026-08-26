@@ -444,15 +444,24 @@ type canonicalFenceImage struct {
 // An empty image means no mempool is bound to this engine, which is not an
 // error; a bound mempool always carries the retained-DA state installed with it.
 //
-// The closing validateCanonicalMempoolLiveImage REPEATS the identical call the
-// plan builder already makes inside canonicalMempoolPlanSnapshot, on the same
-// snapshot, byte count and owner. The repeat is DELIBERATE and contract-ordered
-// (FENCE_AND_MO): the first proof runs before the plan and the stable-tip
-// binding exist, and the contract requires the full live preflight to be the
-// LAST step, after stableTip is bound to C1, under Mempool.mu then
-// PendingOutpointOwner.mu. A future reader must not "deduplicate" it: dropping
-// the second call would leave the ordered proof unproven and only the earlier,
-// pre-bind one standing.
+// validateCanonicalMempoolLiveImage REPEATS the identical call the plan builder
+// already makes inside canonicalMempoolPlanSnapshot, on the same snapshot, byte
+// count and owner. The repeat is DELIBERATE and contract-ordered (FENCE_AND_MO):
+// the first proof runs before the plan and the stable-tip binding exist, and the
+// contract requires the full live preflight to run after stableTip is bound to
+// C1, under Mempool.mu then PendingOutpointOwner.mu. A future reader must not
+// "deduplicate" it: dropping the second call would leave the ordered proof
+// unproven and only the earlier, pre-bind one standing.
+//
+// It is no longer the LAST step. D preparation retires the DA claims of its own
+// removals from the SAME private O1 candidate, so the candidate the transition
+// will publish is not final until that edit has run; the FINAL owner-index
+// rebuild and the record/claim binding preflight therefore follow it, over the
+// edited candidate. That closing binding proof is the one that speaks about what
+// gets published. The live-image proof deliberately keeps its earlier position:
+// it is a statement about the LIVE owner, which the D edit cannot move, and its
+// position is what makes a transition violating both invariants at once report
+// the standard/owner error.
 func (s *SyncEngine) prepareCanonicalFenceImage(tr *canonicalTransition, plan *canonicalTransitionPlan) (canonicalFenceImage, error) {
 	if err := s.recheckCanonicalTransitionFreshness(tr, plan); err != nil {
 		return canonicalFenceImage{}, err
@@ -472,9 +481,12 @@ func (s *SyncEngine) prepareCanonicalFenceImage(tr *canonicalTransition, plan *c
 	if err := validateCanonicalMempoolLiveImage(tr.mempool, mo.snapshot, mo.snapshotUsedBytes, mo.owner); err != nil {
 		return canonicalFenceImage{}, terminalCanonicalMempoolError(err)
 	}
-	da, err := prepareCanonicalDAImage(tr.daRelay, plan.includedDA, mo.chain)
+	da, err := prepareCanonicalDAImage(tr.daRelay, plan.includedDA, mo.chain, &mo)
 	if err != nil {
 		return canonicalFenceImage{}, err
+	}
+	if err := validateRestoredClaimBinding(mo.txs, mo.ownerIndex); err != nil {
+		return canonicalFenceImage{}, terminalCanonicalMempoolError(err)
 	}
 	return canonicalFenceImage{mo: &mo, da: da}, nil
 }

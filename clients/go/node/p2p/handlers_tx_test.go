@@ -313,13 +313,18 @@ func TestHandleTxValid(t *testing.T) {
 	}
 }
 
+// TestHandleTxStagesDATxsIntoRelayState is the remote retention row: a peer's
+// commit and chunk are retained by AdmitDA, the still-missing chunk is
+// prefetchable after the commit, and the completed set exposes the EXACT bytes
+// the peer sent.
 func TestHandleTxStagesDATxsIntoRelayState(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h, 4)
 	p := daRelayTestPeer(h, "127.0.0.1:19111")
 	daID := daRelayTestID(120)
 	payload := []byte("relay-da-payload")
-	commitTx := daCommitRelayTxBytes(t, daID, 9101, payload)
-	chunkTx := daChunkRelayTxBytes(t, daID, 0, 9102, payload)
+	commitTx := f.commitTx(t, daID, 1, sha3.Sum256(payload))
+	chunkTx := f.chunkTx(t, daID, 0, payload)
 
 	if err := p.handleTx(commitTx); err != nil {
 		t.Fatalf("handleTx DA commit: %v", err)
@@ -337,52 +342,6 @@ func TestHandleTxStagesDATxsIntoRelayState(t *testing.T) {
 	}
 	if !reflect.DeepEqual(candidates[0].CommitTx, commitTx) || len(candidates[0].Chunks) != 1 || !reflect.DeepEqual(candidates[0].Chunks[0].Tx, chunkTx) {
 		t.Fatalf("candidate retained bytes=%+v", candidates[0])
-	}
-}
-
-func TestStageRelayDATxIgnoresIncompleteMetadata(t *testing.T) {
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	daID := daRelayTestID(123)
-	peerAddr := "127.0.0.1:19114"
-
-	var nilService *Service
-	if err := nilService.stageRelayDATx(peerAddr, nil, &consensus.Tx{}); err != nil {
-		t.Fatalf("nil service stageRelayDATx: %v", err)
-	}
-	if err := h.service.stageRelayDATx(peerAddr, nil, nil); err != nil {
-		t.Fatalf("nil tx stageRelayDATx: %v", err)
-	}
-	if err := h.service.stageRelayDATx(peerAddr, []byte{0x01}, &consensus.Tx{TxKind: 0x01}); err != nil {
-		t.Fatalf("DA commit without core: %v", err)
-	}
-	if err := h.service.stageRelayDATx(peerAddr, []byte{0x02}, &consensus.Tx{TxKind: 0x02}); err != nil {
-		t.Fatalf("DA chunk without core: %v", err)
-	}
-
-	wrongCovenant := &consensus.Tx{
-		TxKind: 0x01,
-		Outputs: []consensus.TxOutput{{
-			CovenantType: consensus.COV_TYPE_P2PK,
-		}},
-		DaCommitCore: &consensus.DaCommitCore{DaID: daID, ChunkCount: 1},
-	}
-	if err := h.service.stageRelayDATx(peerAddr, []byte{0x03}, wrongCovenant); err != nil {
-		t.Fatalf("DA commit without DA covenant output: %v", err)
-	}
-
-	badCommitment := &consensus.Tx{
-		TxKind: 0x01,
-		Outputs: []consensus.TxOutput{{
-			CovenantType: consensus.COV_TYPE_DA_COMMIT,
-			CovenantData: []byte{0x01},
-		}},
-		DaCommitCore: &consensus.DaCommitCore{DaID: daID, ChunkCount: 1},
-	}
-	if err := h.service.stageRelayDATx(peerAddr, []byte{0x04}, badCommitment); err != nil {
-		t.Fatalf("DA commit with short commitment: %v", err)
-	}
-	if plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"probe"}, time.Unix(1, 0)); len(plans) != 0 || diagnostic != "" {
-		t.Fatalf("incomplete metadata plans=%d diagnostic=%q", len(plans), diagnostic)
 	}
 }
 
@@ -485,33 +444,32 @@ func TestAnnounceTx(t *testing.T) {
 	})
 }
 
-func TestAnnounceTxStagesDAOnceAcrossLocalAndInbound(t *testing.T) {
+// TestAnnounceTxRetainsNoDAMember is A5's local half: AnnounceTx has no
+// retained-DA route at all since RUB-678, so a locally submitted DA commit
+// reaches the relay pool and the announcement and retains NOTHING. The inbound
+// peer copy of the same transaction is what retains it.
+func TestAnnounceTxRetainsNoDAMember(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h, 4)
 	p := daRelayTestPeer(h, "127.0.0.1:19113")
 	daID := daRelayTestID(122)
 	payload := []byte("relay-da-local-payload")
-	commitTx := daCommitRelayTxBytes(t, daID, 9301, payload)
-	chunkTx := daChunkRelayTxBytes(t, daID, 0, 9302, payload)
+	commitTx := f.commitTx(t, daID, 1, sha3.Sum256(payload))
 
 	if err := h.service.AnnounceTx(commitTx); err != nil {
 		t.Fatalf("AnnounceTx DA commit: %v", err)
 	}
+	if _, owned, err := h.service.daRelay.LookupRetainedTx(mustCanonicalTxID(t, commitTx)); owned || err != nil {
+		t.Fatalf("AnnounceTx retained a DA member: owned=%v err=%v", owned, err)
+	}
 	if err := p.handleTx(commitTx); err != nil {
-		t.Fatalf("handleTx duplicate DA commit: %v", err)
+		t.Fatalf("handleTx DA commit: %v", err)
+	}
+	if _, owned, err := h.service.daRelay.LookupRetainedTx(mustCanonicalTxID(t, commitTx)); !owned || err != nil {
+		t.Fatalf("the remote copy was not retained: owned=%v err=%v", owned, err)
 	}
 	if plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"probe"}, time.Unix(1, 0)); len(plans) != 1 || diagnostic != "" {
-		t.Fatalf("duplicate commit plans=%d diagnostic=%q", len(plans), diagnostic)
-	}
-
-	if err := h.service.AnnounceTx(chunkTx); err != nil {
-		t.Fatalf("AnnounceTx DA chunk: %v", err)
-	}
-	if err := p.handleTx(chunkTx); err != nil {
-		t.Fatalf("handleTx duplicate DA chunk: %v", err)
-	}
-	candidates := h.service.CompleteDASetCandidates(^uint64(0))
-	if len(candidates) != 1 || candidates[0].DAID != daID {
-		t.Fatalf("duplicate local/inbound candidates=%+v, want %x", candidates, daID)
+		t.Fatalf("retained commit plans=%d diagnostic=%q", len(plans), diagnostic)
 	}
 }
 
@@ -913,9 +871,9 @@ func TestHandleTxRetriesTransientRelayPoolGetMissAfterSeen(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	pool := &transientGetMissTxPool{getMisses: 2}
 	h.service.cfg.TxPool = pool
-	daID := daRelayTestID(124)
-	payload := []byte("admitted-da-payload")
-	txBytes := daChunkRelayTxBytes(t, daID, 0, 9155, payload)
+	// A STANDARD transaction: remote DA exits before the relay pool, so only a
+	// standard one can exercise the pool's transient-miss retry.
+	txBytes := distinctTxBytes(t, 9155)
 	txid, err := canonicalTxID(txBytes)
 	if err != nil {
 		t.Fatalf("canonicalTxID: %v", err)

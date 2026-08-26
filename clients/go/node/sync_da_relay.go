@@ -37,6 +37,14 @@ type preparedCanonicalDAImage struct {
 	projected *DARelayState
 }
 
+// canonicalDAClaimProjection is the O1 half of D preparation: the exact DA claim
+// tokens the selected removals retire. It names TOKENS, never outpoints, because
+// the token is the only identity that survives an ABA reuse of the same outpoint
+// by a later claim.
+type canonicalDAClaimProjection struct {
+	dropped map[PendingOutpointToken]struct{}
+}
+
 // prepareCanonicalDAImage derives D1: the retained DA image with every record
 // removed that either has a member which is not final_chain_valid against C1, or
 // whose exact set identity occurs in the newly canonical inclusion list. The two
@@ -61,13 +69,32 @@ type preparedCanonicalDAImage struct {
 // verification and the per-height rotation observation; the canonical RE-PARSE
 // of every member's bytes and the rest of its consensus check are paid again on
 // every transition. A cap on retained members is RUB-1118's, not this slice's.
-func prepareCanonicalDAImage(relay *DARelayState, included []canonicalDASetIdentity, chain canonicalFinalChainContext) (*preparedCanonicalDAImage, error) {
+// The third phase is the CLAIM phase, and it runs against the SAME live image
+// and the SAME private O1 candidate the M/O half prepared: every live DA member
+// must correspond to exactly one finalized DA claim in that candidate, no DA
+// claim may be left over, and the claims of the selected removals are then
+// retired from the candidate. Any extra, missing, duplicate, foreign,
+// unfinalized, wrong-domain, txid-, input-, token-, locator- or
+// record-mismatched claim is TERMINAL_LOCAL_INVARIANT here, BEFORE the durable
+// commit, so OLD and every live image stay exactly as they were and admission
+// stays latched.
+//
+// It NEVER calls BeginDARemoval: that guard takes admissionMu.R and the
+// transition already holds the same lock exclusively. It adds no callback and no
+// second owner publisher — publishCanonicalMempoolPlan remains the ONLY O1
+// publisher, and the claim retirement is an edit of the candidate it will
+// publish.
+func prepareCanonicalDAImage(relay *DARelayState, included []canonicalDASetIdentity, chain canonicalFinalChainContext, mo *canonicalMempoolPlan) (*preparedCanonicalDAImage, error) {
 	if relay == nil {
 		return nil, nil //nolint:nilnil // nil image, nil error = engine with no retained-DA state bound; publish() documents the nil no-op
 	}
 	relay.mu.Lock()
 	defer relay.mu.Unlock()
 	removals, err := relay.canonicalDARemovalsLocked(included, chain)
+	if err != nil {
+		return nil, err
+	}
+	projection, err := relay.canonicalDAClaimProjectionLocked(removals, mo)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +109,121 @@ func prepareCanonicalDAImage(relay *DARelayState, included []canonicalDASetIdent
 	if err := projected.checkRetainedDAAccountingLocked(); err != nil {
 		return nil, err
 	}
+	mo.dropCanonicalDAClaims(projection)
 	return &preparedCanonicalDAImage{relay: relay, projected: projected}, nil
+}
+
+// canonicalDAClaimProjectionLocked proves the retained-member/DA-claim bijection
+// over the WHOLE live image and returns the tokens the removals retire. It
+// mutates nothing: the caller applies the projection only after every removal
+// has been projected without error.
+//
+// The quantifier is over the members PRESENT in each record, never over a
+// record's DECLARED chunk range: an incomplete record legitimately holds a sparse
+// member set, and demanding a claim for a member that was never admitted would
+// latch a healthy node.
+//
+// A nil mo is an engine with no standard/owner image bound, which is the same
+// engine that has no owner at all; there is then no claim domain to bind to and
+// the phase is skipped rather than inventing one.
+func (s *DARelayState) canonicalDAClaimProjectionLocked(removals []daRelaySetRecord, mo *canonicalMempoolPlan) (canonicalDAClaimProjection, error) {
+	if mo == nil || mo.owner == nil {
+		return canonicalDAClaimProjection{}, nil
+	}
+	bound := make(map[PendingOutpointToken]struct{}, len(mo.ownerIndex.byToken))
+	for _, daID := range s.sortedRetainedDAIDsLocked() {
+		for _, member := range s.sets[daID].members() {
+			if err := checkCanonicalDAMemberClaim(daID, member, mo.ownerIndex, bound); err != nil {
+				return canonicalDAClaimProjection{}, terminalCanonicalDAError(err)
+			}
+			bound[member.token] = struct{}{}
+		}
+	}
+	if err := checkNoOrphanCanonicalDAClaims(mo.ownerIndex, bound); err != nil {
+		return canonicalDAClaimProjection{}, terminalCanonicalDAError(err)
+	}
+	projection := canonicalDAClaimProjection{dropped: make(map[PendingOutpointToken]struct{})}
+	for _, record := range removals {
+		for _, member := range record.members() {
+			projection.dropped[member.token] = struct{}{}
+		}
+	}
+	return projection, nil
+}
+
+// checkCanonicalDAMemberClaim binds ONE retained member to EXACTLY ONE finalized
+// DA claim of the candidate owner image: same token identity, DA domain,
+// finalized phase, exact txid, exact ordered inputs, and a by-outpoint row for
+// every one of those inputs naming the same token and txid. A token already
+// bound to an earlier member is a duplicate and fails here.
+func checkCanonicalDAMemberClaim(daID [32]byte, member daRelayMemberIdentity, index pendingOutpointIndex, bound map[PendingOutpointToken]struct{}) error {
+	if _, duplicate := bound[member.token]; duplicate {
+		return fmt.Errorf("retained DA member %x of set %x shares its owner claim with another member", member.txid, daID)
+	}
+	claim, err := index.claimForToken(member.token)
+	if err != nil {
+		return fmt.Errorf("retained DA member %x of set %x: %w", member.txid, daID, err)
+	}
+	if claim == nil {
+		return fmt.Errorf("retained DA member %x of set %x has no live owner claim", member.txid, daID)
+	}
+	if claim.domain != PendingOutpointDA || claim.txid != member.txid || !claim.finalized {
+		return fmt.Errorf("retained DA member %x of set %x holds a claim that is not its own finalized DA claim", member.txid, daID)
+	}
+	if err := index.checkClaimInputs(member.txid, member.inputs, claim, member.token); err != nil {
+		return err
+	}
+	// checkClaimInputs binds each row by TOKEN, which is the standard domain's
+	// question. A retained DA member additionally owns the row's TXID: a row that
+	// carries this member's token under another transaction's identity is a
+	// record-mismatched claim, and nothing else on this path would refuse it.
+	for _, input := range member.inputs {
+		if row := index.byOutpoint[input]; row.txid != member.txid {
+			return fmt.Errorf("retained DA member %x of set %x holds an owner row naming %x", member.txid, daID, row.txid)
+		}
+	}
+	return nil
+}
+
+// checkNoOrphanCanonicalDAClaims refuses a DA claim the retained image does not
+// account for. The standard domain is deliberately untouched: it is
+// validateRestoredClaimBinding's subject, not this phase's.
+func checkNoOrphanCanonicalDAClaims(index pendingOutpointIndex, bound map[PendingOutpointToken]struct{}) error {
+	for token, claim := range index.byToken {
+		if claim.domain != PendingOutpointDA {
+			continue
+		}
+		if _, ok := bound[token]; !ok {
+			return fmt.Errorf("owner holds DA claim for %x with no retained DA member", claim.txid)
+		}
+	}
+	return nil
+}
+
+// dropCanonicalDAClaims retires the projected DA claims from the plan's PRIVATE
+// O1 candidate. It edits BOTH halves the candidate publishes — the ordered claim
+// list AND the rebuilt by-token/by-outpoint index pair — because
+// publishRestoreLocked installs the MAPS: editing the list alone would retire
+// nothing observable. The surviving claims are carried through UNCHANGED, same
+// token, same generation, same phase, and the list keeps its raw order, which the
+// live preflight consumes.
+//
+// It runs on the candidate only. The LIVE owner is not touched here and
+// dropClaimLocked — which mutates live maps — is deliberately never used on this
+// path.
+func (p *canonicalMempoolPlan) dropCanonicalDAClaims(projection canonicalDAClaimProjection) {
+	if p == nil || len(projection.dropped) == 0 {
+		return
+	}
+	claims := make([]pendingOutpointClaim, 0, len(p.pending.claims))
+	for _, claim := range p.pending.claims {
+		if _, drop := projection.dropped[claim.token]; drop {
+			continue
+		}
+		claims = append(claims, claim)
+	}
+	p.pending.claims = claims
+	p.ownerIndex = buildCanonicalOwnerIndex(p.owner, p.pending)
 }
 
 // checkRetainedDAAccountingLocked is R3's accounting-invariant sweep over the

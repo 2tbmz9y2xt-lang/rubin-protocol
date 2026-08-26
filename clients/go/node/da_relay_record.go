@@ -68,31 +68,25 @@ func (r daRelaySetRecord) completeSetCandidate() (CompleteDASetCandidate, bool) 
 	}, true
 }
 
-func (s *DARelayState) nextMonotonicReceivedTime() (uint64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	receivedTime, err := s.nextReceivedTimeLocked()
-	if err != nil {
-		return 0, err
-	}
-	s.nextReceivedTime = receivedTime
-	return receivedTime, nil
-}
-
-func (s *DARelayState) nextReceivedTimeLocked() (uint64, error) {
-	return checkedAddUint64(s.nextReceivedTime, 1)
-}
-
-func (s *DARelayState) assignFirstSeenReceivedTimeLocked(record *daRelaySetRecord) error {
-	if record.receivedTime != 0 {
-		return nil
-	}
-	receivedTime, err := s.nextReceivedTimeLocked()
+// advanceAcceptedSequenceLocked consumes exactly ONE value of the service-local
+// accepted-sequence high-water for one successful nonduplicate MEMBER, and gives
+// the record its FIRST member's value as receivedTime — a later member of the
+// same record advances the high-water but never refreshes the record
+// (RUBIN_COMPACT_BLOCKS.md Section 18.2).
+//
+// The add is checked BEFORE any field moves, so an exhausted space
+// (high-water == 2^64-1, which the previous acceptance was still allowed to
+// take) fails closed with the projected image untouched. A restarted service
+// begins at zero, so the first member of a fresh process is 1.
+func (s *DARelayState) advanceAcceptedSequenceLocked(record *daRelaySetRecord) error {
+	next, err := checkedAddUint64(s.nextReceivedTime, 1)
 	if err != nil {
 		return err
 	}
-	record.receivedTime = receivedTime
+	s.nextReceivedTime = next
+	if record.receivedTime == 0 {
+		record.receivedTime = next
+	}
 	return nil
 }
 
@@ -102,8 +96,7 @@ func (r daRelaySetRecord) missingChunkIndexes() []uint16 {
 	}
 	var missing []uint16
 	for i := uint16(0); i < r.commit.chunkCount; i++ {
-		_, ok := r.chunks[i]
-		if !ok || r.replaceableChunks[i] {
+		if _, ok := r.chunks[i]; !ok {
 			missing = append(missing, i)
 		}
 	}
@@ -145,12 +138,6 @@ func (r daRelaySetRecord) cloneWithPayloads(copyPayloads bool) daRelaySetRecord 
 			out.chunks[index] = chunk
 		}
 	}
-	if r.replaceableChunks != nil {
-		out.replaceableChunks = make(map[uint16]bool, len(r.replaceableChunks))
-		for index, replaceable := range r.replaceableChunks {
-			out.replaceableChunks[index] = replaceable
-		}
-	}
 	return out
 }
 
@@ -160,63 +147,120 @@ func (r *daRelaySetRecord) ensureMaps() {
 	}
 }
 
-func (r *daRelaySetRecord) pruneChunksOutsideCommit() {
-	for index := range r.chunks {
-		if index >= r.commit.chunkCount {
-			delete(r.chunks, index)
-			delete(r.replaceableChunks, index)
-		}
-	}
-}
-
-func (r daRelaySetRecord) withoutPeerQuotaKey(key string) (daRelaySetRecord, bool, error) {
-	if r.state == daRelayStateCompleteSet || r.wireBytes == 0 {
-		return r, false, nil
-	}
-
-	out := r.cloneForStateMutation()
-	changed := out.dropCommitForPeerQuotaKey(key)
-	if out.dropChunksForPeerQuotaKey(key) {
-		changed = true
-	}
-	if !changed {
-		return r, false, nil
-	}
-	out.payloadBytes = 0
-	if out.commit.chunkCount == 0 {
-		out.state = daRelayStateOrphanChunks
-		out.replaceableChunks = nil
-	}
-	if out.emptyIncomplete() {
-		out.wireBytes = 0
-		return out, true, nil
-	}
-	if err := out.recomputeOrphanTotals(); err != nil {
-		return daRelaySetRecord{}, false, err
-	}
-	return out, true, nil
-}
-
-func (r *daRelaySetRecord) dropCommitForPeerQuotaKey(key string) bool {
-	if r.commit.wireBytes == 0 || r.commit.peerQuotaKey != key {
-		return false
-	}
-	r.commit = daRelayCommit{}
-	r.replaceableChunks = nil
-	return true
-}
-
-func (r *daRelaySetRecord) dropChunksForPeerQuotaKey(key string) bool {
-	changed := false
-	for index, chunk := range r.chunks {
-		if chunk.wireBytes == 0 || chunk.peerQuotaKey != key {
+// pruneChunksOutsideCommit drops every retained chunk the arriving commit places
+// outside its declared range and reports them, so their exact claims are removed
+// in the same owner hold that publishes the commit.
+func (r *daRelaySetRecord) pruneChunksOutsideCommit() []daRelayMemberIdentity {
+	var dropped []daRelayMemberIdentity
+	for _, index := range sortedRetainedDAChunkIndexes(*r) {
+		if index < r.commit.chunkCount {
 			continue
 		}
+		dropped = append(dropped, r.chunks[index].daRelayMemberIdentity)
 		delete(r.chunks, index)
-		delete(r.replaceableChunks, index)
-		changed = true
 	}
-	return changed
+	return dropped
+}
+
+// dropAllChunks removes every retained chunk of a record and reports them in
+// exact identity order. It is Section 5.2's commit-last mismatch effect: the
+// first-seen commit stays, its chunks and their claims go.
+func (r *daRelaySetRecord) dropAllChunks() []daRelayMemberIdentity {
+	dropped := make([]daRelayMemberIdentity, 0, len(r.chunks))
+	for _, index := range sortedRetainedDAChunkIndexes(*r) {
+		dropped = append(dropped, r.chunks[index].daRelayMemberIdentity)
+		delete(r.chunks, index)
+	}
+	r.payloadBytes = 0
+	return dropped
+}
+
+// members lists one record's retained members in exact identity order: the
+// commit first when the record holds one, then the chunks in strictly ascending
+// index. Every removal, victim batch and claim-coverage walk uses this order, so
+// none of them depends on map iteration order.
+func (r daRelaySetRecord) members() []daRelayMemberIdentity {
+	members := make([]daRelayMemberIdentity, 0, 1+len(r.chunks))
+	if r.commit.chunkCount != 0 {
+		members = append(members, r.commit.daRelayMemberIdentity)
+	}
+	for _, index := range sortedRetainedDAChunkIndexes(r) {
+		members = append(members, r.chunks[index].daRelayMemberIdentity)
+	}
+	return members
+}
+
+// locators lists one record's txid -> member locator rows, in the same exact
+// identity order as members.
+func (r daRelaySetRecord) locators() map[[32]byte]daRelayLocator {
+	rows := make(map[[32]byte]daRelayLocator, 1+len(r.chunks))
+	if r.commit.chunkCount != 0 {
+		rows[r.commit.txid] = daRelayLocator{daID: r.daID, kind: daRelayLocatorCommit}
+	}
+	for index, chunk := range r.chunks {
+		rows[chunk.txid] = daRelayLocator{daID: r.daID, kind: daRelayLocatorChunk, chunkIndex: index}
+	}
+	return rows
+}
+
+// ownedByPeerQuota reports whether this member was admitted by a PEER whose
+// quota identity is exactly key. It is deliberately NOT a raw peerQuotaKey
+// comparison: a LOCAL or DETACHED_REORG member is peerless and carries the EMPTY
+// quota key, so a string compare would make peer cleanup for "" select exactly
+// the members RUBIN_COMPACT_BLOCKS.md Section 18.3 forbids it to touch.
+func (m daRelayMemberIdentity) ownedByPeerQuota(key string) bool {
+	return m.provenance.kind == daProvenancePeer && m.provenance.quotaIdentity == key
+}
+
+// peerCleanupPlan is Section 18.3's per-record peer-teardown selection for the
+// peer quota identity key, over a record that is NOT a COMPLETE_SET (State C is
+// not peer-quota state and this method is never reached for one).
+//
+// A commit is selected ONLY when it is itself PEER(key) AND every retained
+// member of the record has PEER provenance — then the WHOLE staged record goes,
+// PEER(other) members included, with every locator, charge and claim. If any
+// LOCAL or DETACHED_REORG member exists the commit is INELIGIBLE and only the
+// matching PEER(key) CHUNKS are removed, so an observable State B never
+// downgrades to State A.
+func (r daRelaySetRecord) peerCleanupPlan(key string) (daRelaySetRecord, []daRelayMemberIdentity, error) {
+	if r.state == daRelayStateCompleteSet || r.wireBytes == 0 {
+		return r, nil, nil
+	}
+	if r.commitEligibleForPeerCleanup(key) {
+		return daRelaySetRecord{daID: r.daID}, r.members(), nil
+	}
+	out := r.cloneForStateMutation()
+	var removed []daRelayMemberIdentity
+	for _, index := range sortedRetainedDAChunkIndexes(r) {
+		chunk := r.chunks[index]
+		if !chunk.ownedByPeerQuota(key) {
+			continue
+		}
+		removed = append(removed, chunk.daRelayMemberIdentity)
+		delete(out.chunks, index)
+	}
+	if len(removed) == 0 {
+		return r, nil, nil
+	}
+	if out.emptyIncomplete() {
+		return daRelaySetRecord{daID: r.daID}, removed, nil
+	}
+	if err := out.recomputeOrphanTotals(); err != nil {
+		return daRelaySetRecord{}, nil, err
+	}
+	return out, removed, nil
+}
+
+func (r daRelaySetRecord) commitEligibleForPeerCleanup(key string) bool {
+	if r.commit.chunkCount == 0 || !r.commit.ownedByPeerQuota(key) {
+		return false
+	}
+	for _, member := range r.members() {
+		if member.provenance.kind != daProvenancePeer {
+			return false
+		}
+	}
+	return true
 }
 
 func (r daRelaySetRecord) emptyIncomplete() bool {
@@ -225,9 +269,6 @@ func (r daRelaySetRecord) emptyIncomplete() bool {
 
 func (r daRelaySetRecord) validateChunkInsert(chunkIndex uint16) error {
 	if _, exists := r.chunks[chunkIndex]; exists {
-		if r.replaceableChunks[chunkIndex] {
-			return nil
-		}
 		return errDARelayDuplicateChunk
 	}
 	if r.commit.chunkCount != 0 && chunkIndex >= r.commit.chunkCount {
@@ -260,11 +301,6 @@ func (r daRelaySetRecord) completionSnapshot() (daRelayCompletionSnapshot, bool)
 	return snapshot, true
 }
 
-func (r daRelaySetRecord) completeByShape() bool {
-	_, complete := r.completionSnapshot()
-	return complete
-}
-
 func (s daRelayCompletionSnapshot) payloadCommitment() (uint64, [32]byte) {
 	hasher := sha3.New256()
 	var payloadBytes uint64
@@ -277,144 +313,12 @@ func (s daRelayCompletionSnapshot) payloadCommitment() (uint64, [32]byte) {
 	return payloadBytes, payloadCommitment
 }
 
-func (s *DARelayState) stageCommitDroppingMatchingCompletionChunks(peerQuotaKey string, commit daRelayCommit, txBytesOwned bool, snapshot daRelayCompletionSnapshot) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	record, commitTxBytesOwned, err := s.stageDACommitRecordLocked(peerQuotaKey, commit, txBytesOwned)
-	if err != nil {
-		return false, err
-	}
-	if !snapshot.matchesRecord(record) {
-		return false, nil
-	}
-	indexesToDrop, ok := record.matchingCompletionChunkIndexes(snapshot)
-	if !ok {
-		return false, nil
-	}
-	record.dropChunks(indexesToDrop)
-	record.payloadBytes = 0
-	record.state = daRelayStateStagedCommit
-	if err := record.recomputeOrphanTotals(); err != nil {
-		return false, err
-	}
-	if !commitTxBytesOwned {
-		if err := s.checkDASetRecordCapsLocked(record); err != nil {
-			return false, err
-		}
-		record.cloneRetainedTxBytes()
-	}
-	if err := s.applyDASetRecordLocked(record); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func (s *DARelayState) markMatchingCompletionChunksReplaceable(snapshot daRelayCompletionSnapshot) (retry bool, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	record := s.sets[snapshot.daID].cloneForStateMutation()
-	if record.state == daRelayStateCompleteSet || record.commit.chunkCount != snapshot.chunkCount || record.commit.payloadCommitment != snapshot.payloadCommitmentExpected {
-		return true, nil
-	}
-	indexes, ok := record.matchingCompletionChunkIndexes(snapshot)
-	if !ok {
-		return false, nil
-	}
-	if len(indexes) != len(snapshot.chunks) {
-		return false, nil
-	}
-	record.markChunksReplaceable(indexes)
-	if err := s.applyDASetRecordLocked(record); err != nil {
-		return false, err
-	}
-	return false, nil
-}
-
-func (r daRelaySetRecord) matchingCompletionChunkIndexes(snapshot daRelayCompletionSnapshot) ([]uint16, bool) {
-	indexes := make([]uint16, 0, len(snapshot.chunks))
-	for _, snapshotChunk := range snapshot.chunks {
-		chunk, ok := r.chunks[snapshotChunk.chunkIndex]
-		if !ok {
-			continue
-		}
-		if chunk.chunkHash != snapshotChunk.chunkHash || len(chunk.payload) != len(snapshotChunk.payload) {
-			return nil, false
-		}
-		indexes = append(indexes, snapshotChunk.chunkIndex)
-	}
-	return indexes, true
-}
-
-func (r *daRelaySetRecord) dropChunks(indexes []uint16) {
-	for _, index := range indexes {
-		delete(r.chunks, index)
-		delete(r.replaceableChunks, index)
-	}
-}
-
-func (r *daRelaySetRecord) markChunksReplaceable(indexes []uint16) {
-	if r.replaceableChunks == nil {
-		r.replaceableChunks = map[uint16]bool{}
-	}
-	for _, index := range indexes {
-		r.replaceableChunks[index] = true
-	}
-}
-
-func (s daRelayCompletionSnapshot) matchesRecord(r daRelaySetRecord) bool {
-	current, ok := r.completionSnapshot()
-	if !ok {
-		return false
-	}
-	return s.matchesHeader(current) && completionChunksMatch(s.chunks, current.chunks)
-}
-
-func (s daRelayCompletionSnapshot) matchesHeader(current daRelayCompletionSnapshot) bool {
-	return current.daID == s.daID &&
-		current.payloadCommitmentExpected == s.payloadCommitmentExpected &&
-		current.chunkCount == s.chunkCount
-}
-
-func completionChunksMatch(expected, current []daRelayCompletionChunkSnapshot) bool {
-	if len(current) != len(expected) {
-		return false
-	}
-	for i := range expected {
-		if !completionChunkMatches(expected[i], current[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func completionChunkMatches(expected, current daRelayCompletionChunkSnapshot) bool {
-	return current.chunkIndex == expected.chunkIndex &&
-		current.chunkHash == expected.chunkHash &&
-		len(current.payload) == len(expected.payload)
-}
-
 func (r *daRelaySetRecord) markComplete(payloadBytes uint64) {
 	r.payloadBytes = payloadBytes
 	r.state = daRelayStateCompleteSet
 	r.ttlBlocksRemaining = 0
-	r.replaceableChunks = nil
 	for index, chunk := range r.chunks {
 		chunk.payload = nil
-		r.chunks[index] = chunk
-	}
-}
-
-func (r *daRelaySetRecord) cloneRetainedTxBytes() {
-	if len(r.commit.txBytes) != 0 {
-		r.commit.txBytes = cloneBytes(r.commit.txBytes)
-	}
-	for index, chunk := range r.chunks {
-		if len(chunk.txBytes) == 0 {
-			continue
-		}
-		chunk.txBytes = cloneBytes(chunk.txBytes)
 		r.chunks[index] = chunk
 	}
 }
@@ -507,8 +411,12 @@ func retainedTxAccountingBytes(wireBytes uint64, txBytes []byte) uint64 {
 	return wireBytes
 }
 
+// addPeerAccounting bills one member's bytes to its peer quota key. An EMPTY key
+// is a PEERLESS member — LOCAL or DETACHED_REORG — and RUBIN_COMPACT_BLOCKS.md
+// Section 5 gives those only the global and per-da_id caps, never a per-peer one,
+// so it contributes to neither the map nor the per-peer cap.
 func addPeerAccounting(peerBytes map[string]uint64, key string, bytes uint64) error {
-	if bytes == 0 {
+	if bytes == 0 || key == "" {
 		return nil
 	}
 	var err error

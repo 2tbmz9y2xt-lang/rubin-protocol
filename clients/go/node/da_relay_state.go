@@ -105,7 +105,6 @@ type daRelaySetRecord struct {
 	ttlBlocksRemaining uint64
 	commit             daRelayCommit
 	chunks             map[uint16]daRelayChunk
-	replaceableChunks  map[uint16]bool
 }
 
 type daRelayEvictionAccounting struct {
@@ -140,43 +139,44 @@ type DARelayPrefetchPlan struct {
 	Indexes []uint16
 }
 
-// DARelayCommit is the retained commit metadata supplied by P2P after peer
-// quota normalization.
-//
-// TxBytes MUST be the EXACT canonical serialization of the tx_kind 0x01
-// transaction this record is the commit of — the bytes Section 5.2 admission
-// validated, fully consuming, with DaCommitCore.DaID == DAID and
-// DaCommitCore.ChunkCount == ChunkCount. Staging does NOT check it, and the
-// transition's re-parse detects only STRUCTURAL violations: bytes that do not
-// parse, trailing bytes, or a kind/da_id/chunk_count contradiction are
-// TERMINAL_LOCAL_INVARIANT(evidence) there — the node latches and publishes
-// nothing. A WELL-FORMED substitute transaction carrying matching metadata is
-// silently adopted as this record's exact identity instead: nothing binds these
-// bytes to the payload commitment or to the transaction admission actually saw.
-type DARelayCommit struct {
-	DAID              [32]byte
-	PayloadCommitment [32]byte
-	ChunkCount        uint16
-	WireBytes         uint64
-	TxBytes           []byte
-}
-
-// DARelayChunk is one retained chunk supplied by P2P after peer quota
-// normalization.
-//
-// TxBytes carries the same MUST as DARelayCommit.TxBytes, for the tx_kind 0x02
-// transaction at this exact ChunkIndex.
+// DARelayChunk is one UNRETAINED chunk's context-free shape, the sole input of
+// ValidateDARelayChunk. It carries no retained transaction bytes and no owner
+// identity: since RUB-678 the only way to retain a DA member is AdmitDA, which
+// derives every retained field from the DAAdmissionSnapshot of a fully validated
+// transaction rather than from a caller-supplied struct.
 type DARelayChunk struct {
 	DAID        [32]byte
 	ChunkHash   [32]byte
 	ChunkIndex  uint16
 	Payload     []byte
 	WireBytes   uint64
-	TxBytes     []byte
 	HashChecked bool
 }
 
+// daRelayMemberIdentity is the owner-coupled half of ONE retained DA member: the
+// exact admission identity DAAdmissionSnapshot carried, the provenance that
+// admitted it, and the exact finalized PendingOutpointToken its DA claim was
+// issued under. token is the JOIN KEY to PendingOutpointOwner — the owner has no
+// txid index — so every removal path names a claim through this field and never
+// by outpoint.
+//
+// A ZERO token means the member carries no owner claim. That is reachable only
+// for a relay with no bound owner (the unbound test construction) and for the
+// package-private staging helpers the accounting tests drive; a member of a BOUND
+// relay that reaches canonical planning with a zero token is a missing claim and
+// takes the terminal lane there.
+type daRelayMemberIdentity struct {
+	txid          [32]byte
+	wtxid         [32]byte
+	fee           consensus.Uint128
+	retainedBytes uint64
+	inputs        []consensus.Outpoint
+	token         PendingOutpointToken
+	provenance    DAProvenance
+}
+
 type daRelayCommit struct {
+	daRelayMemberIdentity
 	daID              [32]byte
 	payloadCommitment [32]byte
 	peerQuotaKey      string
@@ -186,6 +186,7 @@ type daRelayCommit struct {
 }
 
 type daRelayChunk struct {
+	daRelayMemberIdentity
 	daID         [32]byte
 	chunkHash    [32]byte
 	peerQuotaKey string
@@ -250,6 +251,28 @@ type DARelayState struct {
 	orphanCommitOverheadBytes uint64
 	pinnedPayloadBytes        uint64
 	sets                      map[[32]byte]daRelaySetRecord
+	// locators is the txid -> exact member locator index. It is maintained by
+	// applyDASetRecordLocked and removeDASetRecordLocked ONLY, so it cannot drift
+	// from s.sets without one of those two writers, and it is the sole txid
+	// authority: no second raw-byte or record store exists.
+	locators map[[32]byte]daRelayLocator
+}
+
+// daRelayLocatorKind names which member slot of a record a locator addresses.
+// The zero value is not a kind, so a zero locator can never resolve.
+type daRelayLocatorKind uint8
+
+const (
+	daRelayLocatorCommit daRelayLocatorKind = iota + 1
+	daRelayLocatorChunk
+)
+
+// daRelayLocator is one retained member's exact address inside the retained
+// image: its record, its role, and — for a chunk — its exact index.
+type daRelayLocator struct {
+	daID       [32]byte
+	kind       daRelayLocatorKind
+	chunkIndex uint16
 }
 
 func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) {
@@ -262,6 +285,7 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 		orphanBytesByPeerQuotaKey: map[string]uint64{},
 		orphanBytesByDAID:         map[[32]byte]uint64{},
 		sets:                      make(map[[32]byte]daRelaySetRecord),
+		locators:                  make(map[[32]byte]daRelayLocator),
 	}, nil
 }
 
@@ -294,9 +318,12 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 // INDEFINITELY, by design"). Returning instead would mutate retained state the
 // transition proved it cannot reason about.
 //
-// Forward note: RUB-678/RUB-680's owner-guarded paths REPLACE this fence for the
-// writers they take over and must never nest inside it — BeginDAAdmission holds
-// admissionMu.R for its guard's whole life and sync.RWMutex is not reentrant.
+// Its ONLY remaining writers are PlanPrefetch and ReleasePrefetchPlan, which
+// mutate request RESERVATIONS and never a retained record or an owner claim.
+// RUB-678 moved every retained-DA writer — AdmitDA, ReleasePeerQuotaKey and
+// AdvanceOrphanTTL — onto the owner-guarded BeginDAAdmission/BeginDARemoval
+// guards, which take admissionMu.R themselves for the guard's whole life. Those
+// paths must never nest inside this fence: sync.RWMutex is not reentrant.
 func (s *DARelayState) lockAdmissionFence() func() {
 	if s == nil || s.mempool == nil || s.mempool.chainState == nil {
 		return unfencedDARelayMutation
@@ -309,36 +336,6 @@ func (s *DARelayState) lockAdmissionFence() func() {
 // unfencedDARelayMutation is the release for an unbound relay: it exists as a
 // package-level func so the unbound path allocates no closure per mutation.
 func unfencedDARelayMutation() {}
-
-// StageCommit retains one commit whose peer quota key was normalized by P2P.
-// The complete mutation runs under the admission read fence. commit.TxBytes is
-// the caller's obligation, stated on DARelayCommit and unchecked here.
-func (s *DARelayState) StageCommit(peerQuotaKey string, commit DARelayCommit) error {
-	defer s.lockAdmissionFence()()
-	return s.addDACommit(peerQuotaKey, daRelayCommit{
-		daID:              commit.DAID,
-		payloadCommitment: commit.PayloadCommitment,
-		chunkCount:        commit.ChunkCount,
-		wireBytes:         commit.WireBytes,
-		txBytes:           commit.TxBytes,
-	})
-}
-
-// StageChunk retains one chunk whose peer quota key was normalized by P2P.
-// The complete mutation runs under the admission read fence. chunk.TxBytes is
-// the caller's obligation, stated on DARelayChunk and unchecked here.
-func (s *DARelayState) StageChunk(peerQuotaKey string, chunk DARelayChunk) error {
-	defer s.lockAdmissionFence()()
-	return s.addDAChunk(peerQuotaKey, daRelayChunk{
-		daID:        chunk.DAID,
-		chunkHash:   chunk.ChunkHash,
-		chunkIndex:  chunk.ChunkIndex,
-		payload:     chunk.Payload,
-		wireBytes:   chunk.WireBytes,
-		txBytes:     chunk.TxBytes,
-		hashChecked: chunk.HashChecked,
-	})
-}
 
 // ValidateDARelayChunk validates one unretained chunk before relay admission.
 func ValidateDARelayChunk(chunk DARelayChunk) error {
@@ -357,22 +354,6 @@ func ValidateDARelayChunk(chunk DARelayChunk) error {
 		return ErrDARelayChunkHashMismatch
 	}
 	return nil
-}
-
-// AdvanceOrphanTTL advances the retained incomplete-set TTL once.
-// The complete mutation runs under the admission read fence.
-func (s *DARelayState) AdvanceOrphanTTL() error {
-	defer s.lockAdmissionFence()()
-	_, err := s.advanceOrphanTTL()
-	return err
-}
-
-// ReleasePeerQuotaKey releases incomplete retained data owned by key.
-// The complete mutation runs under the admission read fence, taken INSIDE the
-// caller's per-key peer quota lock.
-func (s *DARelayState) ReleasePeerQuotaKey(key string) error {
-	defer s.lockAdmissionFence()()
-	return s.releasePeerQuotaKey(key)
 }
 
 // PlanPrefetch reserves missing chunks for the supplied normalized peer keys.
@@ -430,21 +411,14 @@ func (s *DARelayState) orphanBytesForDAID(daID [32]byte) uint64 {
 	return s.orphanBytesByDAID[daID]
 }
 
-func (s *DARelayState) advanceOrphanTTL() ([]daRelayExpiredSet, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	projected := s.cloneForAtomicBatchLocked()
-	expired, err := projected.advanceOrphanTTLLocked()
-	if err != nil {
-		return nil, err
-	}
-	s.publishAtomicBatchLocked(projected)
-	return expired, nil
-}
-
-func (s *DARelayState) advanceOrphanTTLLocked() ([]daRelayExpiredSet, error) {
+// advanceOrphanTTLLocked runs the TTL walk over the PROJECTED image: every
+// incomplete record either loses one TTL block or is removed WHOLE together with
+// every member claim it owns. It runs on a private clone, so it publishes
+// nothing; the caller collects the victim claims and publishes both halves under
+// one owner hold.
+func (s *DARelayState) advanceOrphanTTLLocked() ([]daRelayExpiredSet, []DAAdmissionVictim, error) {
 	var expired []daRelayExpiredSet
+	var victims []DAAdmissionVictim
 	for _, daID := range s.sortedIncompleteDAIDsLocked() {
 		record := s.sets[daID]
 		if record.ttlBlocksRemaining > 1 {
@@ -452,8 +426,9 @@ func (s *DARelayState) advanceOrphanTTLLocked() ([]daRelayExpiredSet, error) {
 			s.sets[daID] = record
 			continue
 		}
+		victims = appendDAMemberVictims(victims, record.members())
 		if err := s.removeDASetRecordLocked(record); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		expired = append(expired, daRelayExpiredSet{
 			daID:               record.daID,
@@ -462,7 +437,7 @@ func (s *DARelayState) advanceOrphanTTLLocked() ([]daRelayExpiredSet, error) {
 			receivedTime:       record.receivedTime,
 		})
 	}
-	return expired, nil
+	return expired, victims, nil
 }
 
 func (s *DARelayState) cloneForAtomicBatchLocked() *DARelayState {
@@ -481,6 +456,7 @@ func (s *DARelayState) cloneForAtomicBatchLocked() *DARelayState {
 		orphanCommitOverheadBytes: s.orphanCommitOverheadBytes,
 		pinnedPayloadBytes:        s.pinnedPayloadBytes,
 		sets:                      maps.Clone(s.sets),
+		locators:                  maps.Clone(s.locators),
 	}
 }
 
@@ -493,6 +469,7 @@ func (s *DARelayState) publishAtomicBatchLocked(projected *DARelayState) {
 	s.orphanCommitOverheadBytes = projected.orphanCommitOverheadBytes
 	s.pinnedPayloadBytes = projected.pinnedPayloadBytes
 	s.sets = projected.sets
+	s.locators = projected.locators
 }
 
 func (s *DARelayState) planDAPrefetch(record daRelaySetRecord, peerKeys []string, now time.Time) ([]daRelayPrefetchPlan, string) {
