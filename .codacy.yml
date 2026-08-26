@@ -118,6 +118,9 @@ engines:
       # Canonical-corridor helper closure (RUB-911): the D1 / typed-outcome work
       # pushed this file 479 -> 503 NLOC; same accepted-risk rationale as above.
       - "clients/go/node/sync_apply_helpers.go"
+      # Retained-DA canonical validation (RUB-911), new on this branch at sum
+      # CCN 87: deterministic member scan + final-chain branch closure.
+      - "clients/go/node/sync_da_relay.go"
       - "clients/go/node/sync_mempool.go"
       - "clients/go/node/sync_reorg.go"
       - "clients/go/node/undo.go"
