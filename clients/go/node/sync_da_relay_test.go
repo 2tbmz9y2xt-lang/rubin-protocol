@@ -120,6 +120,14 @@ type canonicalDATestSet struct {
 // and ops[i+1] for chunk i.
 func (f *canonicalMOFixture) daSet(t *testing.T, relay *DARelayState, daID [32]byte, ops []consensus.Outpoint, nonce uint64) canonicalDATestSet {
 	t.Helper()
+	return f.daSetForOwner(t, relay, f.mp.PendingOutpointOwner(), daID, ops, nonce)
+}
+
+// daSetForOwner is daSet for a relay bound to a DIFFERENT engine than the one
+// whose UTXOs signed these transactions: the claims are issued by the relay's
+// OWN owner, which is the only owner its canonical transition will read.
+func (f *canonicalMOFixture) daSetForOwner(t *testing.T, relay *DARelayState, owner *PendingOutpointOwner, daID [32]byte, ops []consensus.Outpoint, nonce uint64) canonicalDATestSet {
+	t.Helper()
 	set := canonicalDATestSet{daID: daID}
 	hasher := sha3.New256()
 	for i := 1; i < len(ops); i++ {
@@ -131,9 +139,9 @@ func (f *canonicalMOFixture) daSet(t *testing.T, relay *DARelayState, daID [32]b
 	var commitment [32]byte
 	copy(commitment[:], hasher.Sum(nil))
 	set.commit = f.daCommitTxCommitting(t, ops[0], daID, uint16(len(set.chunks)), nonce, commitment)
-	retainDAMemberForTest(t, relay, f.mp.PendingOutpointOwner(), set.commit, "peer-commit")
+	retainDAMemberForTest(t, relay, owner, set.commit, "peer-commit")
 	for _, chunkTx := range set.chunks {
-		retainDAMemberForTest(t, relay, f.mp.PendingOutpointOwner(), chunkTx, "peer-chunk")
+		retainDAMemberForTest(t, relay, owner, chunkTx, "peer-chunk")
 	}
 	return set
 }
@@ -410,7 +418,7 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 	// The first terminal record in ASCENDING RAW da_id order wins, whatever the
 	// map's iteration order happens to be on this run.
 	t.Run("the lowest raw da_id terminal record wins", func(t *testing.T) {
-		f := newCanonicalMOFixture(t, 3, MempoolConfig{})
+		f := newCanonicalMOFixture(t, 4, MempoolConfig{})
 		relay := f.engine.DARelayState()
 		low, high := daRelayTestID(0x01), daRelayTestID(0xfe)
 		f.daSet(t, relay, low, f.ops[:2], 880)
@@ -539,7 +547,7 @@ func TestRetaggedCanonicalDATerminalRelabelsOnlyTheTerminal(t *testing.T) {
 // clones maps while SHARING the immutable retained transaction bytes rather than
 // duplicating retained payload.
 func TestCanonicalDAImageIsDeterministicAndSharesRetainedBytes(t *testing.T) {
-	f := newCanonicalMOFixture(t, 3, MempoolConfig{})
+	f := newCanonicalMOFixture(t, 4, MempoolConfig{})
 	relay := f.engine.DARelayState()
 	kept, dropped := daRelayTestID(0x61), daRelayTestID(0x62)
 	f.daSet(t, relay, kept, f.ops[:2], 900)
@@ -816,8 +824,10 @@ func TestCanonicalDAImageIsPreparedOnEveryTransitionPath(t *testing.T) {
 		mustCanonicalMO(t, "NewMempoolWithConfig", err)
 		engine.SetMempool(mp)
 		relay, daID := engine.DARelayState(), daRelayTestID(0xd3)
-		// Signed against the other fixture's UTXOs: never valid against genesis C1.
-		f.daSet(t, relay, daID, f.ops[:2], 1220)
+		// Signed against the OTHER fixture's UTXOs, so the members are never valid
+		// against genesis C1 — but claimed on THIS engine's owner, so the record and
+		// its claims are the one bijection the transition's claim phase requires.
+		f.daSetForOwner(t, relay, mp.PendingOutpointOwner(), daID, f.ops[:2], 1220)
 		mustCanonicalMO(t, "BootstrapCanonicalGenesisIfEmpty", engine.BootstrapCanonicalGenesisIfEmpty())
 		if _, present := relay.sets[daID]; present {
 			t.Fatal("the bootstrap transition retained a record it never validated against C1")

@@ -131,6 +131,12 @@ func (s *DARelayState) stageDAChunkLocked(chunk daRelayChunk) ([]daRelayMemberId
 	if err := record.validateChunkInsert(chunk.chunkIndex); err != nil {
 		return nil, err
 	}
+	// The payload-hash check runs AFTER the shape and duplicate/index checks, the
+	// order the retained schema has always refused in: a duplicate index is a
+	// property of the record, a bad hash a property of the candidate.
+	if !chunk.hashChecked && sha3.Sum256(chunk.payload) != chunk.chunkHash {
+		return nil, errDARelayChunkHashMismatch
+	}
 	chunk.txBytes = cloneBytes(chunk.txBytes)
 	record.daID = chunk.daID
 	if record.commit.chunkCount == 0 {
@@ -181,14 +187,12 @@ func validateDACommit(commit daRelayCommit) error {
 	return nil
 }
 
-// prepareDAChunkPayload validates one chunk's context-free shape and returns the
-// owned payload copy staging retains.
+// prepareDAChunkPayload validates one chunk's context-free SHAPE and returns the
+// owned payload copy staging retains. The payload-hash check belongs to staging,
+// which runs it after the record's own duplicate/index refusals.
 func prepareDAChunkPayload(chunk daRelayChunk) ([]byte, error) {
 	if err := validateDAChunk(chunk); err != nil {
 		return nil, err
-	}
-	if !chunk.hashChecked && sha3.Sum256(chunk.payload) != chunk.chunkHash {
-		return nil, errDARelayChunkHashMismatch
 	}
 	return cloneBytes(chunk.payload), nil
 }
@@ -270,6 +274,11 @@ func (s *DARelayState) replaceLocatorsLocked(oldRecord, newRecord daRelaySetReco
 	for txid, locator := range newRecord.locators() {
 		s.locators[txid] = locator
 	}
+	// A ZERO txid is not an identity and must never be locatable: it is the shape
+	// the package-private staging entry produces for a member with no admission
+	// snapshot, and indexing it would make LookupRetainedTx resolve the zero txid
+	// to whichever record wrote last.
+	delete(s.locators, [32]byte{})
 }
 
 func (s *DARelayState) projectOrphanAccountingDeltaLocked(oldRecord, newRecord daRelaySetRecord) (uint64, map[string]uint64, uint64, uint64, error) {

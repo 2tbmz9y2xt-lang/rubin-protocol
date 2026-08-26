@@ -411,3 +411,89 @@ func requireRetained(t *testing.T, f *daOwnerFixture, txid [32]byte, want bool, 
 		t.Fatalf("%s: retained=%v, want %v", what, owned, want)
 	}
 }
+
+// TestAdmitDASameTxidDifferentWtxidIsNotClassifiedAsADuplicate is A3's
+// malleation row: the duplicate test is EXACT txid AND the retained bytes, so a
+// variant carrying the same txid under different witness bytes cannot short-cut
+// to DUPLICATE and cannot replace what is retained — it goes through full
+// validation and is refused there.
+func TestAdmitDASameTxidDifferentWtxidIsNotClassifiedAsADuplicate(t *testing.T) {
+	f := newDAOwnerFixture(t, 2)
+	daID, payload := daRelayTestID(0x38), []byte("wtxid-variant")
+	commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2110, sha3.Sum256(payload))
+	mustAdmit(t, f, commitTx, mustPeerProvenance(t, "peer-a"))
+	before := f.image(t)
+
+	tx, txid, wtxid, consumed, err := consensus.ParseTx(commitTx)
+	if err != nil || consumed != len(commitTx) {
+		t.Fatalf("ParseTx: consumed=%d err=%v", consumed, err)
+	}
+	if len(tx.Witness) == 0 || len(tx.Witness[0].Signature) == 0 {
+		t.Fatal("the fixture commit carries no witness signature to vary")
+	}
+	tx.Witness[0].Signature[0] ^= 0xff
+	variant, err := consensus.MarshalTx(tx)
+	mustCanonicalMO(t, "MarshalTx(wtxid variant)", err)
+	_, variantTxID, variantWTxID, _, err := consensus.ParseTx(variant)
+	mustCanonicalMO(t, "ParseTx(wtxid variant)", err)
+	if variantTxID != txid || variantWTxID == wtxid {
+		t.Fatalf("variant txid=%x wtxid==original=%v, want the same txid under a different wtxid", variantTxID, variantWTxID == wtxid)
+	}
+
+	result, err := f.relay().AdmitDA(variant, mustPeerProvenance(t, "peer-b"))
+	if err == nil {
+		t.Fatalf("the wtxid variant was accepted as %v", result.Disposition)
+	}
+	if result.Disposition == DAAdmissionDuplicate {
+		t.Fatal("the wtxid variant was classified as a duplicate")
+	}
+	if after := f.image(t); after != before {
+		t.Fatal("the wtxid variant mutated the retained image")
+	}
+}
+
+// TestAcceptedSequenceExhaustionFailsClosedBeforeAnyMutation is A10's boundary:
+// the last usable high-water value is taken once, and the next acceptance is
+// refused BEFORE any record, locator or claim moves.
+func TestAcceptedSequenceExhaustionFailsClosedBeforeAnyMutation(t *testing.T) {
+	f := newDAOwnerFixture(t, 3)
+	relay := f.relay()
+	relay.mu.Lock()
+	relay.nextReceivedTime = ^uint64(0) - 1
+	relay.mu.Unlock()
+
+	first := f.daChunkTx(t, f.ops[0], daRelayTestID(0x39), 0, 2120, []byte("last-usable"))
+	mustAdmit(t, f, first, mustPeerProvenance(t, "peer-a"))
+	relay.mu.Lock()
+	sequence := relay.nextReceivedTime
+	relay.mu.Unlock()
+	if sequence != ^uint64(0) {
+		t.Fatalf("high-water=%d, want the last usable value", sequence)
+	}
+	before := f.image(t)
+	second := f.daChunkTx(t, f.ops[1], daRelayTestID(0x3a), 0, 2121, []byte("exhausted"))
+	if _, err := relay.AdmitDA(second, mustPeerProvenance(t, "peer-a")); err == nil {
+		t.Fatal("an acceptance past the accepted-sequence space was retained")
+	}
+	if after := f.image(t); after != before {
+		t.Fatal("the exhausted-sequence refusal mutated the retained image")
+	}
+}
+
+// TestAdmitDARejectsAChunkOutsideItsCommitRange is the chunk-index bound reached
+// through the production entry: the record's own declared range refuses it and
+// nothing moves.
+func TestAdmitDARejectsAChunkOutsideItsCommitRange(t *testing.T) {
+	f := newDAOwnerFixture(t, 3)
+	daID := daRelayTestID(0x3b)
+	commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2130, sha3.Sum256([]byte("one")))
+	mustAdmit(t, f, commitTx, mustPeerProvenance(t, "peer-a"))
+	before := f.image(t)
+	outside := f.daChunkTx(t, f.ops[1], daID, 1, 2131, []byte("outside"))
+	if _, err := f.relay().AdmitDA(outside, mustPeerProvenance(t, "peer-a")); err == nil {
+		t.Fatal("a chunk outside the declared commit range was retained")
+	}
+	if after := f.image(t); after != before {
+		t.Fatal("an out-of-range chunk mutated the retained image")
+	}
+}

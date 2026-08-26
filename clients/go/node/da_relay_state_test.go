@@ -178,23 +178,26 @@ func TestDARelayReleasePeerQuotaKeySkipsUnchargedPeer(t *testing.T) {
 	}
 }
 
-func TestDARelayEmptyPeerQuotaKeyIsCapped(t *testing.T) {
+// TestDARelayPeerlessMembersAreAbsentFromPeerQuotaAccounting is A5/M2's
+// accounting half. An EMPTY quota key means a PEERLESS member — LOCAL or
+// DETACHED_REORG — and RUBIN_COMPACT_BLOCKS.md Section 5 gives those the global
+// and per-da_id caps only: they never appear in the per-peer map and the
+// per-peer cap can never refuse one.
+func TestDARelayPeerlessMembersAreAbsentFromPeerQuotaAccounting(t *testing.T) {
 	t.Run("chunk only", func(t *testing.T) {
 		caps := defaultDARelayCaps()
 		caps.orphanPoolPerPeerBytes = 10
 		state := newDARelayStateForTest(t, caps)
-		firstID := daRelayTestID(45)
-		secondID := daRelayTestID(46)
+		firstID, secondID := daRelayTestID(45), daRelayTestID(46)
 
-		record := mustAddDAChunk(t, state, "", daRelayTestChunk(firstID, 0, 6))
-		err := state.addDAChunk("", daRelayTestChunk(secondID, 0, 5))
-		requireDAErr(t, err, errDARelayOrphanPeerCapExceeded)
+		mustAddDAChunk(t, state, "", daRelayTestChunk(firstID, 0, 6))
+		mustAddDAChunk(t, state, "", daRelayTestChunk(secondID, 0, 5))
 
-		if got := state.orphanBytesForPeerQuotaKey(""); got != record.wireBytes {
-			t.Fatalf("empty peer quota bytes = %d, want %d", got, record.wireBytes)
+		if got := state.orphanBytesForPeerQuotaKey(""); got != 0 {
+			t.Fatalf("peerless bytes charged to the empty quota key = %d, want 0", got)
 		}
-		if _, ok := state.sets[secondID]; ok {
-			t.Fatalf("empty-peer cap rejection mutated state")
+		if _, ok := state.sets[secondID]; !ok {
+			t.Fatal("the per-peer cap refused a peerless member")
 		}
 	})
 
@@ -202,22 +205,30 @@ func TestDARelayEmptyPeerQuotaKeyIsCapped(t *testing.T) {
 		caps := defaultDARelayCaps()
 		caps.orphanPoolPerPeerBytes = 10
 		state := newDARelayStateForTest(t, caps)
-		firstID := daRelayTestID(47)
-		secondID := daRelayTestID(48)
+		firstID, secondID := daRelayTestID(47), daRelayTestID(48)
 
-		record := mustAddDACommit(t, state, "", daRelayTestCommit(firstID, 2, 6))
-		err := state.addDACommit("", daRelayTestCommit(secondID, 2, 5))
-		requireDAErr(t, err, errDARelayOrphanPeerCapExceeded)
+		mustAddDACommit(t, state, "", daRelayTestCommit(firstID, 2, 6))
+		mustAddDACommit(t, state, "", daRelayTestCommit(secondID, 2, 5))
 
-		if got := state.orphanBytesForPeerQuotaKey(""); got != record.wireBytes {
-			t.Fatalf("empty peer quota bytes = %d, want %d", got, record.wireBytes)
+		if got := state.orphanBytesForPeerQuotaKey(""); got != 0 {
+			t.Fatalf("peerless bytes charged to the empty quota key = %d, want 0", got)
 		}
-		if _, ok := state.sets[secondID]; ok {
-			t.Fatalf("empty-peer commit cap rejection mutated state")
+		if _, ok := state.sets[secondID]; !ok {
+			t.Fatal("the per-peer cap refused a peerless member")
 		}
 	})
-}
 
+	t.Run("peer teardown never selects one", func(t *testing.T) {
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		daID := daRelayTestID(49)
+		mustAddDAChunk(t, state, "", daRelayTestChunk(daID, 0, 6))
+		before := daRelayStateSnapshot(state)
+		if err := state.ReleasePeerQuotaKey(""); err != nil {
+			t.Fatalf("ReleasePeerQuotaKey(empty): %v", err)
+		}
+		requireDARelayStateUnchanged(t, state, before)
+	})
+}
 func TestDARelayDAIDAccountingDeletesZeroBytes(t *testing.T) {
 	state, err := newDARelayState(nil, defaultDARelayCaps())
 	if err != nil {
@@ -289,18 +300,20 @@ func TestDARelayReceivedTimeStaysFirstSeenForExistingRecord(t *testing.T) {
 		daID := daRelayTestID(84)
 
 		firstRecord := mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daID, 0, 1))
-		otherRecord := mustAddDAChunk(t, state, "peer-b", daRelayTestChunk(daRelayTestID(85), 0, 1))
+		mustAddDAChunk(t, state, "peer-b", daRelayTestChunk(daRelayTestID(85), 0, 1))
 		updatedRecord := mustAddDACommit(t, state, "peer-c", daRelayTestCommit(daID, 2, 1))
 
 		if updatedRecord.receivedTime != firstRecord.receivedTime {
 			t.Fatalf("updated received_time=%d, want first-seen %d", updatedRecord.receivedTime, firstRecord.receivedTime)
 		}
-		if state.nextReceivedTime != otherRecord.receivedTime {
-			t.Fatalf("state received_time=%d, want latest new-record time %d", state.nextReceivedTime, otherRecord.receivedTime)
+		// A10: the high-water advances once per accepted MEMBER, so the third
+		// member has taken it to 3 even though it refreshed no record.
+		if state.nextReceivedTime != 3 {
+			t.Fatalf("accepted-sequence high-water=%d, want one value per accepted member", state.nextReceivedTime)
 		}
 		nextRecord := mustAddDAChunk(t, state, "peer-d", daRelayTestChunk(daRelayTestID(86), 0, 1))
-		if nextRecord.receivedTime != otherRecord.receivedTime+1 {
-			t.Fatalf("next received_time=%d, want %d", nextRecord.receivedTime, otherRecord.receivedTime+1)
+		if nextRecord.receivedTime != 4 {
+			t.Fatalf("next received_time=%d, want 4", nextRecord.receivedTime)
 		}
 	})
 
@@ -309,18 +322,18 @@ func TestDARelayReceivedTimeStaysFirstSeenForExistingRecord(t *testing.T) {
 		daID := daRelayTestID(87)
 
 		firstRecord := mustAddDACommit(t, state, "peer-a", daRelayTestCommit(daID, 2, 1))
-		otherRecord := mustAddDAChunk(t, state, "peer-b", daRelayTestChunk(daRelayTestID(88), 0, 1))
+		mustAddDAChunk(t, state, "peer-b", daRelayTestChunk(daRelayTestID(88), 0, 1))
 		updatedRecord := mustAddDAChunk(t, state, "peer-c", daRelayTestChunk(daID, 0, 1))
 
 		if updatedRecord.receivedTime != firstRecord.receivedTime {
 			t.Fatalf("updated received_time=%d, want first-seen %d", updatedRecord.receivedTime, firstRecord.receivedTime)
 		}
-		if state.nextReceivedTime != otherRecord.receivedTime {
-			t.Fatalf("state received_time=%d, want latest new-record time %d", state.nextReceivedTime, otherRecord.receivedTime)
+		if state.nextReceivedTime != 3 {
+			t.Fatalf("accepted-sequence high-water=%d, want one value per accepted member", state.nextReceivedTime)
 		}
 		nextRecord := mustAddDACommit(t, state, "peer-d", daRelayTestCommit(daRelayTestID(89), 2, 1))
-		if nextRecord.receivedTime != otherRecord.receivedTime+1 {
-			t.Fatalf("next received_time=%d, want %d", nextRecord.receivedTime, otherRecord.receivedTime+1)
+		if nextRecord.receivedTime != 4 {
+			t.Fatalf("next received_time=%d, want 4", nextRecord.receivedTime)
 		}
 	})
 }
@@ -671,8 +684,11 @@ func TestDARelayDuplicateCommitAfterOrphanChunksKeepsFirstSeenState(t *testing.T
 	if !reflect.DeepEqual(stored.commit.txBytes, []byte("first-commit")) {
 		t.Fatalf("duplicate commit mutated stored tx bytes: %q", stored.commit.txBytes)
 	}
-	if stored.receivedTime != record.receivedTime || state.nextReceivedTime != record.receivedTime {
-		t.Fatalf("duplicate commit time record=%d state=%d want %d", stored.receivedTime, state.nextReceivedTime, record.receivedTime)
+	// The record keeps its FIRST member's value and the REJECTED duplicate
+	// consumed no accepted-sequence value, so the high-water is still the one the
+	// second accepted member took.
+	if stored.receivedTime != record.receivedTime || state.nextReceivedTime != 2 {
+		t.Fatalf("duplicate commit time record=%d state=%d want %d and high-water 2", stored.receivedTime, state.nextReceivedTime, record.receivedTime)
 	}
 	if _, ok := stored.chunks[0]; !ok {
 		t.Fatal("duplicate commit dropped first-seen orphan chunk")
@@ -885,7 +901,8 @@ func TestDARelayAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T
 		if len(expired) != 2 || expired[0].daID != ids[0] || expired[0].receivedTime != 1 || expired[1].daID != ids[2] || expired[1].receivedTime != 3 {
 			t.Fatalf("mixed expired=%+v, want sorted first and final", expired)
 		}
-		if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, want) || got.nextReceivedTime != 5 { //nolint:govet // Complete private state-image equality requires structural comparison.
+		// The accepted-sequence high-water counts MEMBERS, and this fixture has six.
+		if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, want) || got.nextReceivedTime != 6 { //nolint:govet // Complete private state-image equality requires structural comparison.
 			t.Fatalf("ttl success image=%+v, want %+v", got, want)
 		}
 	})
@@ -993,7 +1010,13 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 			t.Fatalf("release peer: %v", err)
 		}
 		_, retained := state.sets[daRelayTestID(250)]
-		if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, want) || got.nextReceivedTime != 5 || retained || got.sets[daRelayTestID(213)].state != daRelayStateOrphanChunks || got.sets[daRelayTestID(213)].wireBytes != 11 || got.sets[daRelayTestID(213)].commit.wireBytes != 0 || len(got.sets[daRelayTestID(213)].chunks) != 1 || got.sets[daRelayTestID(213)].chunks[1].peerQuotaKey != "peer-keep" || !reflect.DeepEqual(got.sets[daRelayTestID(215)], completeWant) { //nolint:govet // Complete private state-image equality requires structural comparison.
+		// A7A: 213's commit is PEER(peer-drop) and EVERY member of that record is
+		// PEER-provenanced, so the WHOLE staged record goes — the PEER(peer-keep)
+		// chunk with it — and no State B record is downgraded to State A. 214 is
+		// untouched and the COMPLETE_SET 215 is not peer-quota state at all.
+		_, stagedRetained := state.sets[daRelayTestID(213)]
+		_, keepRetained := state.sets[daRelayTestID(214)]
+		if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, want) || got.nextReceivedTime != 8 || retained || stagedRetained || !keepRetained || !reflect.DeepEqual(got.sets[daRelayTestID(215)], completeWant) { //nolint:govet // Complete private state-image equality requires structural comparison.
 			t.Fatalf("peer success image=%+v, want %+v", got, want)
 		}
 	})
@@ -1021,10 +1044,15 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 		mustAddDAChunk(t, state, "peer-keep", daRelayTestChunk(ids[0], 1, 11))
 		corrupt := daRelayOverflowOrphanAccountingRecord(ids[2])
 		corrupt.commit.peerQuotaKey = "peer-keep"
+		corrupt.commit.provenance = daRelayTestProvenance(t, "peer-keep")
 		sibling := corrupt.chunks[0]
 		sibling.peerQuotaKey = "peer-keep"
+		sibling.provenance = daRelayTestProvenance(t, "peer-keep")
 		corrupt.chunks[0] = sibling
-		corrupt.chunks[1] = daRelayChunk{daID: ids[2], peerQuotaKey: "peer-drop", chunkIndex: 1, payload: []byte{1}, wireBytes: 1}
+		corrupt.chunks[1] = daRelayChunk{
+			daRelayMemberIdentity: daRelayMemberIdentity{provenance: daRelayTestProvenance(t, "peer-drop")},
+			daID:                  ids[2], peerQuotaKey: "peer-drop", chunkIndex: 1, payload: []byte{1}, wireBytes: 1,
+		}
 		state.sets[ids[2]] = corrupt
 		state.orphanBytesByDAID[ids[2]] = corrupt.wireBytes
 		before := daRelayStateSnapshot(state)
@@ -1469,8 +1497,10 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	if len(record.chunks) != 1 || state.pinnedPayloadBytes != 0 {
 		t.Fatalf("chunk-last mismatch mutated the retained record: chunks=%d pinned=%d", len(record.chunks), state.pinnedPayloadBytes)
 	}
-	if state.nextReceivedTime != beforeMismatchTime || record.receivedTime != beforeMismatchTime {
-		t.Fatalf("partial chunk mismatch time record=%d state=%d want first-seen %d", record.receivedTime, state.nextReceivedTime, beforeMismatchTime)
+	// The record keeps its FIRST member's value and the rejected chunk consumed no
+	// accepted-sequence value, so the high-water is exactly where it was.
+	if state.nextReceivedTime != beforeMismatchTime || record.receivedTime != 1 {
+		t.Fatalf("chunk-last mismatch time record=%d state=%d want record 1 and high-water %d", record.receivedTime, state.nextReceivedTime, beforeMismatchTime)
 	}
 	err = state.addDAChunk("peer-d", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
 	requireDAErr(t, err, errDARelayDuplicateChunk)
@@ -1940,25 +1970,31 @@ func daRelayTestChunkWithTxBytes(daID [32]byte, index uint16, wireBytes uint64, 
 	return chunk
 }
 
+// daRelayOverflowOrphanAccountingRecord is one record whose STORED accounting
+// contradicts its members, with PEER provenance on every member so peer teardown
+// actually selects it.
 func daRelayOverflowOrphanAccountingRecord(daID [32]byte) daRelaySetRecord {
+	overflowPeer := DAProvenance{kind: daProvenancePeer, peerIdentity: "peer-overflow", quotaIdentity: "peer-overflow"}
 	return daRelaySetRecord{
 		daID:               daID,
 		state:              daRelayStateStagedCommit,
 		wireBytes:          ^uint64(0),
 		ttlBlocksRemaining: 1,
 		commit: daRelayCommit{
-			daID:         daID,
-			peerQuotaKey: "peer-overflow",
-			chunkCount:   2,
-			wireBytes:    ^uint64(0),
+			daRelayMemberIdentity: daRelayMemberIdentity{provenance: overflowPeer},
+			daID:                  daID,
+			peerQuotaKey:          "peer-overflow",
+			chunkCount:            2,
+			wireBytes:             ^uint64(0),
 		},
 		chunks: map[uint16]daRelayChunk{
 			0: {
-				daID:         daID,
-				peerQuotaKey: "peer-overflow",
-				chunkIndex:   0,
-				payload:      []byte{1},
-				wireBytes:    1,
+				daRelayMemberIdentity: daRelayMemberIdentity{provenance: overflowPeer},
+				daID:                  daID,
+				peerQuotaKey:          "peer-overflow",
+				chunkIndex:            0,
+				payload:               []byte{1},
+				wireBytes:             1,
 			},
 		},
 	}
@@ -1985,6 +2021,7 @@ func newDARelayStateForTest(t *testing.T, caps daRelayCaps) *DARelayState {
 
 func mustAddDAChunk(t *testing.T, state *DARelayState, peer string, chunk daRelayChunk) daRelaySetRecord {
 	t.Helper()
+	chunk.provenance = daRelayTestProvenance(t, peer)
 	if err := state.addDAChunk(peer, chunk); err != nil {
 		t.Fatalf("add DA chunk: %v", err)
 	}
@@ -1993,6 +2030,7 @@ func mustAddDAChunk(t *testing.T, state *DARelayState, peer string, chunk daRela
 
 func mustAddDACommit(t *testing.T, state *DARelayState, peer string, commit daRelayCommit) daRelaySetRecord {
 	t.Helper()
+	commit.provenance = daRelayTestProvenance(t, peer)
 	if err := state.addDACommit(peer, commit); err != nil {
 		t.Fatalf("add DA commit: %v", err)
 	}
@@ -2337,4 +2375,19 @@ func nextMonotonicReceivedTimeForTest(s *DARelayState) (uint64, error) {
 		return 0, err
 	}
 	return scratch.receivedTime, nil
+}
+
+// daRelayTestProvenance renders one test peer-quota key as the provenance a live
+// admission would have carried: PEER for a named key, and the PEERLESS LOCAL
+// source for the empty key, which is what an empty quota key now means.
+func daRelayTestProvenance(t *testing.T, peer string) DAProvenance {
+	t.Helper()
+	if peer == "" {
+		return LocalDAProvenance()
+	}
+	provenance, err := NewPeerDAProvenance(peer, peer)
+	if err != nil {
+		t.Fatalf("NewPeerDAProvenance(%q): %v", peer, err)
+	}
+	return provenance
 }
