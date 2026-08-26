@@ -113,18 +113,21 @@ const (
 type MineOneDisposition uint8
 
 const (
-	// MineOneDispositionSuccess is a mined candidate that committed.
-	MineOneDispositionSuccess MineOneDisposition = iota
-	// MineOneDispositionUnprocessable is the candidate's OWN failure: a
-	// consensus or policy rejection, a nonce or build failure, a request
-	// cancellation, or any other ordinary candidate outcome.
-	MineOneDispositionUnprocessable
 	// MineOneDispositionServiceUnavailable is a LOCAL condition rather than a
 	// verdict on the candidate: an unavailable runtime, a latched engine, and
 	// every failure at or after the durable commit stage — bounded resource,
 	// stale plan, noncanonical store, precommit persistence, and every terminal
 	// class including a terminal NEW that did publish.
-	MineOneDispositionServiceUnavailable
+	//
+	// It is deliberately the ZERO value, so a MineOneOutcome that some later
+	// path leaves unset fails CLOSED on 503 instead of claiming a success.
+	MineOneDispositionServiceUnavailable MineOneDisposition = iota
+	// MineOneDispositionUnprocessable is the candidate's OWN failure: a
+	// consensus or policy rejection, a nonce or build failure, a request
+	// cancellation, or any other ordinary candidate outcome.
+	MineOneDispositionUnprocessable
+	// MineOneDispositionSuccess is a mined candidate that committed.
+	MineOneDispositionSuccess
 )
 
 // MineOneOutcome is the complete typed result of ONE MineOneWithOutcome

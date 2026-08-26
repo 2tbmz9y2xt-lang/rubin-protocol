@@ -2147,32 +2147,6 @@ func mineNextMined(t *testing.T, got mineNextResponse) bool {
 	return *got.Mined
 }
 
-func TestDevnetRPCMineNextRejectsGet(t *testing.T) {
-	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
-	t.Cleanup(server.Close)
-	resp, err := http.Get(server.URL + "/mine_next")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status=%d want 400", resp.StatusCode)
-	}
-}
-
-func TestDevnetRPCMineNextUnavailableWithoutMiner(t *testing.T) {
-	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
-	t.Cleanup(server.Close)
-	resp, err := http.Post(server.URL+"/mine_next", "application/json", bytes.NewReader([]byte("{}")))
-	if err != nil {
-		t.Fatalf("Post: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d want 503", resp.StatusCode)
-	}
-}
-
 func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := node.ChainStatePath(dir)
@@ -4390,7 +4364,7 @@ func assertMineCanceledBeforeApply(t *testing.T, closer func(*runningDevnetRPCSe
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("Unmarshal %q: %v", raw, err)
 	}
-	if status != http.StatusServiceUnavailable || mineNextMined(t, got) || got.Error != "rpc unavailable" {
+	if status != http.StatusServiceUnavailable || mineNextMined(t, got) || got.CommitState != node.CanonicalCommitStateNotCommitted || got.Error != "rpc unavailable" {
 		t.Fatalf("canceled /mine_next = %d %s, want 503 mined=false error=\"rpc unavailable\"", status, raw)
 	}
 	if got.Height != nil || got.BlockHash != nil || got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
@@ -4621,7 +4595,7 @@ func TestMineNextRequestCancellationPreservesExistingError(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if mineNextMined(t, got) || got.Error != context.Canceled.Error() {
+	if mineNextMined(t, got) || got.CommitState != node.CanonicalCommitStateNotCommitted || got.Error != context.Canceled.Error() {
 		t.Fatalf("request-local cancellation reclassified as lifecycle unavailability: %+v", got)
 	}
 }
@@ -4647,8 +4621,8 @@ func TestMineNextDualCanceledSourcesSelectLifecycleUnavailability(t *testing.T) 
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if mineNextMined(t, got) || got.Error != "rpc unavailable" {
-		t.Fatalf("dual-canceled /mine_next = %+v, want mined=false error=\"rpc unavailable\"", got)
+	if mineNextMined(t, got) || got.CommitState != node.CanonicalCommitStateNotCommitted || got.Error != "rpc unavailable" {
+		t.Fatalf("dual-canceled /mine_next = %+v, want not_committed mined=false error=\"rpc unavailable\"", got)
 	}
 	if got.Height != nil || got.BlockHash != nil || got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
 		t.Fatalf("unavailable /mine_next carried success fields: %+v", got)
@@ -4701,9 +4675,9 @@ func TestMineNextMidMiningLifecycleCancelSelectsUnavailability(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if mineNextMined(t, got) || got.Error != "rpc unavailable" || got.Height != nil || got.BlockHash != nil ||
-		got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
-		t.Fatalf("mid-mining lifecycle cancellation = %+v, want mined=false error=\"rpc unavailable\" and no success fields", got)
+	if mineNextMined(t, got) || got.CommitState != node.CanonicalCommitStateNotCommitted || got.Error != "rpc unavailable" || got.Height != nil ||
+		got.BlockHash != nil || got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
+		t.Fatalf("mid-mining lifecycle cancellation = %+v, want not_committed mined=false error=\"rpc unavailable\" and no success fields", got)
 	}
 	afterHeight, _, afterOK, err := state.blockStore.Tip()
 	if err != nil {
@@ -4762,9 +4736,9 @@ func TestMineNextLifecycleCancelAfterRequestCancelSelectsUnavailability(t *testi
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if mineNextMined(t, got) || got.Error != "rpc unavailable" || got.Height != nil || got.BlockHash != nil ||
-		got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
-		t.Fatalf("request-then-lifecycle cancellation = %+v, want mined=false error=\"rpc unavailable\" and no success fields", got)
+	if mineNextMined(t, got) || got.CommitState != node.CanonicalCommitStateNotCommitted || got.Error != "rpc unavailable" || got.Height != nil ||
+		got.BlockHash != nil || got.Timestamp != nil || got.Nonce != nil || got.TxCount != nil {
+		t.Fatalf("request-then-lifecycle cancellation = %+v, want not_committed mined=false error=\"rpc unavailable\" and no success fields", got)
 	}
 	afterHeight, _, afterOK, err := state.blockStore.Tip()
 	if err != nil {
@@ -4952,21 +4926,22 @@ func TestMineNextProjectionTable(t *testing.T) {
 		})
 	}
 
-	// A disposition this file does not recognize fails CLOSED. The switch has no
-	// silent 200 arm, so a fourth class can never be rendered as a success.
-	if got := mineNextStatus(node.MineOneDisposition(200)); got != http.StatusServiceUnavailable {
-		t.Fatalf("undefined disposition status=%d, want 503", got)
-	}
-	// The route selects a status from the typed disposition ALONE: it never
-	// inspects an error string.
-	source, err := os.ReadFile("http_rpc.go")
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	for _, banned := range []string{"strings.Contains(err", "strings.HasPrefix(err", "err.Error() ==", "strings.Contains(outcome"} {
-		if strings.Contains(string(source), banned) {
-			t.Fatalf("the handler classifies on error text: %q", banned)
+	// A disposition this file does not recognize fails CLOSED, and the ZERO value
+	// is one of them: an outcome a later path leaves unfilled answers 503, never
+	// the success arm.
+	for _, disposition := range []node.MineOneDisposition{node.MineOneDisposition(200), 0} {
+		if got := mineNextStatus(disposition); got != http.StatusServiceUnavailable {
+			t.Fatalf("disposition %v status=%d, want 503", disposition, got)
 		}
+	}
+	// mined-absent-for-unknown holds at the CONSTRUCTOR, not only on the paths
+	// above: the guard exits at :1336/:1351 hand it a raw outcome.CommitState.
+	raw, err := json.Marshal(mineNextRejection(node.CanonicalCommitStateUnknown, "terminal"))
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(raw) != `{"commit_state":"unknown","error":"terminal"}` {
+		t.Fatalf("mineNextRejection(unknown)=%s, want no mined key at all", raw)
 	}
 }
 

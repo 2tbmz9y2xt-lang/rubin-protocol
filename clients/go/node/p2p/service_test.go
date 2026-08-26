@@ -344,7 +344,6 @@ func TestOrphanResolution(t *testing.T) {
 // stages again afterwards: while the record was retained, a restage is refused
 // as a duplicate.
 func TestProcessRelayedBlockDropsRetainedDAOrphanNotValidAgainstC1(t *testing.T) {
-	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	sink.service.cfg.Now = func() time.Time { return time.Unix(0, 0) }
 	chunk := stageRetainedDAOrphanChunk(t, sink.service, daRelayTestID(100), "127.0.0.1:19111")
@@ -352,10 +351,11 @@ func TestProcessRelayedBlockDropsRetainedDAOrphanNotValidAgainstC1(t *testing.T)
 		t.Fatal("the retained orphan did not refuse its own restage before any block was applied")
 	}
 	peer := testPeerForService(sink.service, "remote", 2)
-	for _, block := range [][]byte{node.DevnetGenesisBlockBytes(), blockAtHeight(t, source, 1), blockAtHeight(t, source, 2)} {
-		if _, err := peer.processRelayedBlock(block); err != nil {
-			t.Fatalf("process relayed block: %v", err)
-		}
+	// Exactly ONE block, against an orphan TTL of 3: TTL expiry cannot be the
+	// reason the record left, so the restage below can only be explained by the
+	// canonical transition's own D validation.
+	if _, err := peer.processRelayedBlock(node.DevnetGenesisBlockBytes()); err != nil {
+		t.Fatalf("process relayed block: %v", err)
 	}
 	if err := sink.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk); err != nil {
 		t.Fatalf("the canonical transition kept a retained orphan it could not validate against C1: %v", err)

@@ -344,9 +344,10 @@ func (s *SyncEngine) BootstrapCanonicalGenesisIfEmpty() error {
 // Everything commitCanonicalTransition can refuse — the plan metadata bound, the
 // recovery proof's resource and integrity classes, the fence's freshness
 // recheck, the terminal standard/owner and retained-DA invariants, and every
-// commit classification — is a local unavailability, never a verdict on the
-// candidate. Everything BEFORE it — parse, consensus validation, DA-set
-// extraction, MTP, plan derivation — is the candidate's own outcome.
+// commit classification — is projected as a local unavailability, never as a
+// verdict on the candidate. Everything BEFORE it — parse, consensus validation,
+// DA-set extraction, MTP, plan derivation — is the candidate's own outcome and
+// keeps its existing public precedence (a pre-commit local failure still 422s).
 type canonicalApplyProjection struct {
 	truth              canonicalCommitTruth
 	commitStageEntered bool

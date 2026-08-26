@@ -2435,7 +2435,6 @@ func TestCanonicalCutoverApplyPlanMetadataBounds(t *testing.T) {
 	if err := overDA.checkCanonicalPlanMetadataBound(); !errors.Is(err, errCanonicalPlanMetadataCap) {
 		t.Fatalf("over-cap identity plan err=%v, want the resource refusal", err)
 	}
-	canonicalPlanMetadataCap = 168
 
 	// End to end: the refusal precedes every side effect.
 	f := newCanonicalMOFixture(t, 1, MempoolConfig{})
@@ -2815,6 +2814,8 @@ func TestCanonicalCutoverPersistenceTruthTable(t *testing.T) {
 func TestCanonicalCutoverNoFalliblePostNewPublication(t *testing.T) {
 	for _, fn := range []any{
 		(*canonicalTransition).publishCanonicalTransition,
+		(*preparedCanonicalDAImage).publish,
+		(*DARelayState).publishAtomicBatchLocked,
 		assignCanonicalChainState,
 		(*Mempool).publishCanonicalMempoolPlan,
 		(*Mempool).publishCanonicalMempoolPlanLocked,

@@ -142,6 +142,14 @@ type DARelayPrefetchPlan struct {
 
 // DARelayCommit is the retained commit metadata supplied by P2P after peer
 // quota normalization.
+//
+// TxBytes MUST be the EXACT canonical serialization of the tx_kind 0x01
+// transaction this record is the commit of — the bytes Section 5.2 admission
+// validated, fully consuming, with DaCommitCore.DaID == DAID and
+// DaCommitCore.ChunkCount == ChunkCount. Staging does NOT check it: the transition re-parses
+// these bytes for the record's exact identity, so a violation is
+// TERMINAL_LOCAL_INVARIANT(evidence) there — the node latches and publishes
+// nothing.
 type DARelayCommit struct {
 	DAID              [32]byte
 	PayloadCommitment [32]byte
@@ -152,6 +160,9 @@ type DARelayCommit struct {
 
 // DARelayChunk is one retained chunk supplied by P2P after peer quota
 // normalization.
+//
+// TxBytes carries the same MUST as DARelayCommit.TxBytes, for the tx_kind 0x02
+// transaction at this exact ChunkIndex.
 type DARelayChunk struct {
 	DAID        [32]byte
 	ChunkHash   [32]byte
@@ -270,7 +281,19 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 //
 // An UNBOUND relay — no mempool, or a mempool with no chainstate, which is the
 // test-only construction — has no admission guard to take and keeps its existing
-// unfenced behavior rather than inventing one.
+// unfenced behavior rather than inventing one. The nil RECEIVER arm is load
+// bearing too: ReleasePeerQuotaKey is a pinned nil-safe surface, so the fence
+// must reach that body instead of dereferencing on the way in.
+//
+// A LATCHED engine parks a writer here until restart, by design: the terminal
+// fail-closed latch retains admissionMu exclusively, and standard admission
+// already parks its leased P2P workers the same way (mempool.go, "BLOCKS
+// INDEFINITELY, by design"). Returning instead would mutate retained state the
+// transition proved it cannot reason about.
+//
+// Forward note: RUB-678/RUB-680's owner-guarded paths REPLACE this fence for the
+// writers they take over and must never nest inside it — BeginDAAdmission holds
+// admissionMu.R for its guard's whole life and sync.RWMutex is not reentrant.
 func (s *DARelayState) lockAdmissionFence() func() {
 	if s == nil || s.mempool == nil || s.mempool.chainState == nil {
 		return unfencedDARelayMutation
@@ -285,7 +308,8 @@ func (s *DARelayState) lockAdmissionFence() func() {
 func unfencedDARelayMutation() {}
 
 // StageCommit retains one commit whose peer quota key was normalized by P2P.
-// The complete mutation runs under the admission read fence.
+// The complete mutation runs under the admission read fence. commit.TxBytes is
+// the caller's obligation, stated on DARelayCommit and unchecked here.
 func (s *DARelayState) StageCommit(peerQuotaKey string, commit DARelayCommit) error {
 	defer s.lockAdmissionFence()()
 	return s.addDACommit(peerQuotaKey, daRelayCommit{
@@ -298,7 +322,8 @@ func (s *DARelayState) StageCommit(peerQuotaKey string, commit DARelayCommit) er
 }
 
 // StageChunk retains one chunk whose peer quota key was normalized by P2P.
-// The complete mutation runs under the admission read fence.
+// The complete mutation runs under the admission read fence. chunk.TxBytes is
+// the caller's obligation, stated on DARelayChunk and unchecked here.
 func (s *DARelayState) StageChunk(peerQuotaKey string, chunk DARelayChunk) error {
 	defer s.lockAdmissionFence()()
 	return s.addDAChunk(peerQuotaKey, daRelayChunk{

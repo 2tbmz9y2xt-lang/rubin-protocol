@@ -740,8 +740,10 @@ func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte
 // smaller behavior than the subsection describes, and it MUST NOT be read as
 // completing it.
 //
-// Each dropped row records at most one local diagnostic, which is all the
-// subsection permits, and the drop touches no DA owner and no peer quota.
+// Dropped rows record ONE diagnostic PER BLOCK carrying their count, not one per
+// row: the retained batch is bounded, and a DA-heavy block emitting per-row
+// records would evict the standard rows' own diagnostics behind the truncation
+// marker. The drop touches no DA owner and no peer quota.
 func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []*consensus.ParsedBlock, diag *diagnosticBatch) {
 	if s == nil || s.mempool == nil || len(disconnectedBlocks) == 0 {
 		return
@@ -752,14 +754,18 @@ func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []
 		if err != nil {
 			continue
 		}
+		dropped := 0
 		for _, row := range rows {
 			if row.kind != 0x00 {
-				s.diagnose(diag, "mempool: requeue-tx: tx_kind %#02x invokes no owner in this line\n", row.kind)
+				dropped++
 				continue
 			}
 			if err := s.mempool.AddReorgTx(row.txBytes); err != nil {
 				s.diagnose(diag, "mempool: requeue-tx: %v\n", err)
 			}
+		}
+		if dropped != 0 {
+			s.diagnose(diag, "mempool: requeue-tx: %d row(s) of a non-standard tx_kind invoke no owner in this line\n", dropped)
 		}
 	}
 }
@@ -768,22 +774,20 @@ func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []
 // block's ALREADY VALIDATED parse reported, and that row's canonical bytes. The
 // kind travels with the bytes precisely so the requeue selection never re-parses
 // and never falls back to a second classifier.
+//
+// txBytes is populated ONLY for kind 0x00, the one kind that reaches an owner;
+// a dropped row carries its kind and nil bytes.
 type canonicalRequeueRow struct {
 	txBytes []byte
 	kind    uint8
 }
 
-func nonCoinbaseBlockTransactions(blockBytes []byte) ([]canonicalRequeueRow, error) {
-	pb, err := consensus.ParseBlockBytes(blockBytes)
-	if err != nil {
-		return nil, err
-	}
-	return nonCoinbaseParsedBlockTransactions(pb)
-}
-
 // nonCoinbaseParsedBlockTransactions returns the block's rows from index 1 in
 // canonical body order — the coinbase row at index 0 is skipped and invokes zero
 // owners whatever it parsed as.
+//
+// The kind is tested BEFORE the serialization, so a row no owner will receive is
+// never marshaled.
 func nonCoinbaseParsedBlockTransactions(pb *consensus.ParsedBlock) ([]canonicalRequeueRow, error) {
 	if pb == nil {
 		return nil, errors.New("nil parsed block")
@@ -797,11 +801,15 @@ func nonCoinbaseParsedBlockTransactions(pb *consensus.ParsedBlock) ([]canonicalR
 		if tx == nil {
 			return nil, fmt.Errorf("parsed block row %d is nil", txIndex)
 		}
-		txBytes, err := consensus.MarshalTx(tx)
-		if err != nil {
-			return nil, err
+		row := canonicalRequeueRow{kind: tx.TxKind}
+		if row.kind == 0x00 {
+			txBytes, err := consensus.MarshalTx(tx)
+			if err != nil {
+				return nil, err
+			}
+			row.txBytes = txBytes
 		}
-		rows = append(rows, canonicalRequeueRow{txBytes: txBytes, kind: tx.TxKind})
+		rows = append(rows, row)
 	}
 	return rows, nil
 }

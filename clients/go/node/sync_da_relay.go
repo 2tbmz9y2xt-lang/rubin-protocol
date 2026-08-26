@@ -126,9 +126,12 @@ func canonicalDASetIdentitiesFromParsedBlock(pb *consensus.ParsedBlock) ([]canon
 	return identities, nil
 }
 
-// canonicalDASetMembers accumulates one block's members for one da_id. It keeps
-// the FIRST occurrence of each role/index; a second commit or a duplicate chunk
-// index makes the tally incomplete, so such a set contributes no identity at all.
+// canonicalDASetMembers accumulates one block's members for one da_id, keeping
+// the FIRST occurrence of each role/index exactly as the shared tally does: a
+// second COMMIT makes the tally incomplete so the set contributes no identity,
+// while a duplicate chunk INDEX would be deduplicated by both (each is keyed by
+// index) rather than making it incomplete — and cannot occur anyway: consensus
+// rejects such a block upstream (BLOCK_ERR_DA_INCOMPLETE).
 type canonicalDASetMembers struct {
 	commit    canonicalDATxIdentity
 	hasCommit bool
@@ -216,8 +219,10 @@ type preparedCanonicalDAImage struct {
 // every canonical transition, including the later members of a record already
 // destined for removal. That is what makes "D1 is independently derived from
 // full validation of every retained member" a statement about the code rather
-// than about the common case; the shared rotation cache and signature cache from
-// the M1 preparation absorb the repeated work.
+// than about the common case. The shared caches absorb exactly the SIGNATURE
+// verification and the per-height rotation observation; the canonical RE-PARSE
+// of every member's bytes and the rest of its consensus check are paid again on
+// every transition. A cap on retained members is RUB-1118's, not this slice's.
 func prepareCanonicalDAImage(relay *DARelayState, included []canonicalDASetIdentity, chain canonicalFinalChainContext) (*preparedCanonicalDAImage, error) {
 	if relay == nil {
 		return nil, nil
@@ -230,6 +235,8 @@ func prepareCanonicalDAImage(relay *DARelayState, included []canonicalDASetIdent
 	}
 	projected := relay.cloneForAtomicBatchLocked()
 	for _, record := range removals {
+		// ...Locked names the clone's own invariant, not a second lock: projected
+		// is single-owner private state until publish.
 		if err := projected.removeDASetRecordLocked(record); err != nil {
 			return nil, terminalCanonicalDAError(err)
 		}
@@ -253,12 +260,18 @@ func (i *preparedCanonicalDAImage) publish() {
 	i.relay.mu.Unlock()
 }
 
-// canonicalDARemovalsLocked selects the records D1 removes, scanning in the
-// contract's deterministic order: records by ascending raw da_id, and within a
-// record its members in exact-identity order — commit first, then chunks in
-// ascending index. The FIRST terminal member error in that order wins; a member
-// that merely fails chain validation is a planned removal, not an error, and
-// never suppresses a later member's terminal evidence.
+// canonicalDARemovalsLocked selects the records D1 removes, scanning records by
+// ascending raw da_id and, within a record, its members in exact-identity order
+// — commit first, then chunks in ascending index.
+//
+// Each record is walked TWICE, in ordered phases, never interleaved: phase 1
+// (canonicalRetainedDASetIdentity) parses and role-checks EVERY member, phase 2
+// (canonicalRetainedDAMembersFinalChainValid) validates every member against C1.
+// So a LATER member's parse/role terminal outranks an EARLIER member's
+// validation-phase failure of any kind, a canonical precommit plan abort
+// included. Precedence: first error of phase 1, then of phase 2, then first
+// record in da_id order. A member that merely fails chain validation is a
+// planned removal, not an error.
 func (s *DARelayState) canonicalDARemovalsLocked(included []canonicalDASetIdentity, chain canonicalFinalChainContext) ([]daRelaySetRecord, error) {
 	inclusion := make(map[[32]byte][]canonicalDASetIdentity, len(included))
 	for i := range included {
@@ -405,10 +418,11 @@ func checkRetainedDAChunkRole(tx *consensus.Tx, daID [32]byte, index uint16) err
 
 // canonicalRetainedDAMembersFinalChainValid reports whether EVERY member of one
 // record is final_chain_valid against C1. It does not stop at the first invalid
-// member: a later member's terminal evidence — corrupt bytes, an unusable
-// chainstate view — must not be hidden by an earlier member's ordinary
-// invalidity, and only a complete pass proves the "every member" quantifier the
-// removal rule is written in.
+// member: a later member's error evidence — an unusable chainstate view, a
+// canonical precommit plan abort — must not be hidden by an earlier member's
+// ordinary invalidity, and only a complete pass proves the "every member"
+// quantifier the removal rule is written in. Corrupt bytes cannot appear here:
+// the parse phase already returned for the whole record.
 func canonicalRetainedDAMembersFinalChainValid(members []canonicalRetainedDAMember, chain canonicalFinalChainContext) (bool, error) {
 	valid := true
 	for i := range members {
@@ -431,6 +445,26 @@ func canonicalRetainedDAMembersFinalChainValid(members []canonicalRetainedDAMemb
 // membership: a retained member evicted from the standard mempool for a local
 // capacity reason is still chain-valid and its record stays.
 func canonicalRetainedDAMemberFinalChainValid(member canonicalRetainedDAMember, chain canonicalFinalChainContext) (bool, error) {
+	keep, err := canonicalRetainedDAMemberChainValid(member, chain)
+	return keep, retaggedCanonicalDATerminal(err, member.label)
+}
+
+// retaggedCanonicalDATerminal relabels a TERMINAL_LOCAL_INVARIANT the SHARED M/O
+// validator raised while judging a RETAINED DA member, so the operator record
+// names the subsystem that actually latched. Only the label moves; the class
+// stays terminal (isCanonicalTransitionTerminalError accepts both).
+//
+// A canonical precommit PLAN error is deliberately NOT retagged: EPD-6 requires D
+// to return the SAME plan error M does, and it is not a retained-state invariant.
+func retaggedCanonicalDATerminal(err error, label string) error {
+	var mo *canonicalMOTerminalError
+	if !errors.As(err, &mo) {
+		return err
+	}
+	return terminalCanonicalDAError(fmt.Errorf("retained DA %s: %s", label, mo.detail))
+}
+
+func canonicalRetainedDAMemberChainValid(member canonicalRetainedDAMember, chain canonicalFinalChainContext) (bool, error) {
 	snapshot := chain.final.admissionSnapshotForInputs(relayMetadataInputs(member.tx))
 	if snapshot == nil {
 		return false, terminalCanonicalDAError(fmt.Errorf("no final chainstate view for retained DA %s", member.label))

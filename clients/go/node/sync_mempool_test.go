@@ -95,19 +95,35 @@ func awaitCanonicalMOError(t *testing.T, ch <-chan error, label string) error {
 	}
 }
 
-func awaitCanonicalMOAdmissionRLock(t *testing.T, caller string) {
+// awaitCanonicalMOAdmissionRLock blocks until at least want goroutines whose
+// stack names caller are PARKED at ChainState.admissionMu.RLock. It is the
+// forcing barrier that replaces "wait a while and hope": a goroutine that merely
+// had not started yet never satisfies it, so a row built on it cannot pass for a
+// scheduling reason.
+func awaitCanonicalMOAdmissionRLock(t *testing.T, caller string, want int) {
 	t.Helper()
 	deadline, stack := time.Now().Add(time.Second), make([]byte, 1<<20)
 	for time.Now().Before(deadline) {
-		for _, goroutine := range strings.Split(string(stack[:runtime.Stack(stack, true)]), "\n\n") {
+		n := runtime.Stack(stack, true)
+		// A filled buffer means runtime.Stack TRUNCATED: a parked goroutine may
+		// be in the part that was cut, so grow and retry instead of concluding.
+		if n == len(stack) {
+			stack = make([]byte, 2*len(stack))
+			continue
+		}
+		parked := 0
+		for _, goroutine := range strings.Split(string(stack[:n]), "\n\n") {
 			atRLock := strings.Contains(goroutine, "sync.(*RWMutex).RLock") || strings.Contains(goroutine, "sync.runtime_SemacquireRWMutexR")
 			if atRLock && strings.Contains(goroutine, caller) {
-				return
+				parked++
 			}
+		}
+		if parked >= want {
+			return
 		}
 		runtime.Gosched()
 	}
-	t.Fatalf("%s did not block at admissionMu.RLock", caller)
+	t.Fatalf("fewer than %d %s goroutines blocked at admissionMu.RLock", want, caller)
 }
 
 func newCanonicalMOFixture(t *testing.T, inputs int, cfg MempoolConfig) *canonicalMOFixture {
@@ -1446,7 +1462,7 @@ func TestCanonicalMOPlanConcurrentAdmission(t *testing.T) {
 				_ = waitApply("apply")
 				t.Fatal("admission operation did not start behind the plan barrier")
 			}
-			awaitCanonicalMOAdmissionRLock(t, caller)
+			awaitCanonicalMOAdmissionRLock(t, caller, 1)
 			if barrier != canonicalMOImageFingerprint(t, f.mp, 0) {
 				t.Fatalf("operation mutated M/O before admission guard release image=%s", canonicalMOImageFingerprint(t, f.mp, 0))
 			}

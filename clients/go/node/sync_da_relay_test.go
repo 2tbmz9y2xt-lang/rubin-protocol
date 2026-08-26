@@ -3,6 +3,7 @@ package node
 import (
 	"crypto/sha3"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -291,6 +292,54 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 		}
 	})
 
+	// D1 scans ALL of S0.DA, not just its complete sets. Survival alone would NOT
+	// prove that — a scan that skipped incomplete records keeps them too — so the
+	// row also drives the same record to final-invalid and requires its removal.
+	t.Run("an incomplete record is scanned like any other", func(t *testing.T) {
+		f := newCanonicalMOFixture(t, 2, MempoolConfig{})
+		relay, daID, payload := f.engine.DARelayState(), daRelayTestID(0x55), []byte{0x55}
+		chunkTx := f.daChunkTx(t, f.ops[1], daID, 0, 870, payload)
+		mustCanonicalMO(t, "StageChunk", relay.StageChunk("peer-orphan", DARelayChunk{
+			DAID: daID, ChunkHash: sha3.Sum256(payload), Payload: payload,
+			WireBytes: uint64(len(chunkTx)), TxBytes: chunkTx,
+		}))
+		if got := relay.sets[daID].state; got != daRelayStateOrphanChunks {
+			t.Fatalf("fixture record state=%v, want an INCOMPLETE record", got)
+		}
+		chain := f.canonicalDATestChain(t)
+		if _, present := mustPrepareCanonicalDAImage(t, relay, nil, chain).projected.sets[daID]; !present {
+			t.Fatal("an incomplete chain-valid record was dropped")
+		}
+		chain.final.mu.Lock()
+		delete(chain.final.Utxos, f.ops[1])
+		chain.final.mu.Unlock()
+		if _, present := mustPrepareCanonicalDAImage(t, relay, nil, chain).projected.sets[daID]; present {
+			t.Fatal("an incomplete final-invalid record survived: the scan skips incomplete records")
+		}
+	})
+
+	// The first terminal record in ASCENDING RAW da_id order wins, whatever the
+	// map's iteration order happens to be on this run.
+	t.Run("the lowest raw da_id terminal record wins", func(t *testing.T) {
+		f := newCanonicalMOFixture(t, 3, MempoolConfig{})
+		relay := f.engine.DARelayState()
+		low, high := daRelayTestID(0x01), daRelayTestID(0xfe)
+		f.daSet(t, relay, low, f.ops[:2], 880)
+		f.daSet(t, relay, high, f.ops[1:3], 890)
+		for _, daID := range [][32]byte{low, high} {
+			record := relay.sets[daID].cloneForStateMutation()
+			record.commit.chunkCount = 9 // contradicts the retained commit tx
+			relay.sets[daID] = record
+		}
+		_, err := prepareCanonicalDAImage(relay, nil, f.canonicalDATestChain(t))
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%x", low)) {
+			t.Fatalf("err=%v, want the lowest raw da_id record's terminal evidence", err)
+		}
+		if strings.Contains(err.Error(), fmt.Sprintf("%x", high)) {
+			t.Fatalf("err=%v names the later record", err)
+		}
+	})
+
 	t.Run("one final-invalid member removes the whole record", func(t *testing.T) {
 		f := newCanonicalMOFixture(t, 3, MempoolConfig{})
 		relay := f.engine.DARelayState()
@@ -326,6 +375,13 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 			chunk := r.chunks[0]
 			chunk.txBytes = r.commit.txBytes
 			r.chunks[0] = chunk
+		}},
+		// H2: the LAST member of the three, reached only by a walk that does not
+		// stop at the first valid one.
+		{"the last member's bytes do not parse", func(r *daRelaySetRecord) {
+			chunk := r.chunks[1]
+			chunk.txBytes = []byte{0xff, 0xfe}
+			r.chunks[1] = chunk
 		}},
 	} {
 		t.Run("terminal: "+tc.name, func(t *testing.T) {
@@ -369,6 +425,22 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 	}
 }
 
+// TestRetaggedCanonicalDATerminalRelabelsOnlyTheTerminal pins the D-side
+// relabel: a terminal the SHARED M/O validator raises for a retained DA member
+// is reported as the retained-DA class naming that member, while the canonical
+// precommit PLAN error EPD-6 shares is passed through untouched.
+func TestRetaggedCanonicalDATerminalRelabelsOnlyTheTerminal(t *testing.T) {
+	got := retaggedCanonicalDATerminal(terminalCanonicalMempoolError(errors.New("detail")), "chunk 1")
+	var da *canonicalDATerminalError
+	if !errors.As(got, &da) || got.Error() != "canonical retained-DA invariant: retained DA chunk 1: detail" {
+		t.Fatalf("retag=%v, want the retained-DA class naming the member", got)
+	}
+	plan := localCanonicalMempoolPlanError(errors.New("provider"))
+	if retaggedCanonicalDATerminal(plan, "commit") != plan || retaggedCanonicalDATerminal(nil, "commit") != nil {
+		t.Fatal("a plan abort or a nil result was reclassified")
+	}
+}
+
 // TestCanonicalDAImageIsDeterministicAndSharesRetainedBytes pins that two
 // preparations of the same state agree exactly, and that the prepared image
 // clones maps while SHARING the immutable retained transaction bytes rather than
@@ -393,6 +465,9 @@ func TestCanonicalDAImageIsDeterministicAndSharesRetainedBytes(t *testing.T) {
 		t.Fatal("the invalid record survived preparation")
 	}
 	live, projected := relay.sets[kept], first.projected.sets[kept]
+	if len(live.commit.txBytes) == 0 || len(projected.commit.txBytes) == 0 {
+		t.Fatal("the surviving record lost its retained commit bytes: sharing cannot be observed")
+	}
 	if &live.commit.txBytes[0] != &projected.commit.txBytes[0] {
 		t.Fatal("the prepared image copied retained commit bytes instead of sharing them")
 	}
@@ -465,28 +540,38 @@ func TestCanonicalDAWritersCannotInterleaveWithTheTransition(t *testing.T) {
 	relay := f.engine.DARelayState()
 	daID := daRelayTestID(0x81)
 	payload := []byte("fenced")
-	writers := map[string]func(){
-		"StageCommit": func() {
+	// An ordered slice, not a map: subtest order is part of what a rerun has to
+	// reproduce.
+	writers := []struct {
+		name string
+		run  func()
+	}{
+		{"StageCommit", func() {
 			_ = relay.StageCommit("fence-peer", DARelayCommit{DAID: daID, PayloadCommitment: sha3.Sum256(payload), ChunkCount: 1, WireBytes: 8})
-		},
-		"StageChunk": func() {
+		}},
+		{"StageChunk", func() {
 			_ = relay.StageChunk("fence-peer", DARelayChunk{DAID: daRelayTestID(0x82), ChunkHash: sha3.Sum256(payload), Payload: payload, WireBytes: 8})
-		},
-		"AdvanceOrphanTTL":    func() { _ = relay.AdvanceOrphanTTL() },
-		"ReleasePeerQuotaKey": func() { _ = relay.ReleasePeerQuotaKey("fence-peer") },
-		"PlanPrefetch":        func() { relay.PlanPrefetch(daID, []string{"fence-peer"}, time.Unix(1, 0)) },
-		"ReleasePrefetchPlan": func() { relay.ReleasePrefetchPlan(DARelayPrefetchPlan{DAID: daID, PeerKey: "fence-peer"}) },
+		}},
+		{"AdvanceOrphanTTL", func() { _ = relay.AdvanceOrphanTTL() }},
+		{"ReleasePeerQuotaKey", func() { _ = relay.ReleasePeerQuotaKey("fence-peer") }},
+		{"PlanPrefetch", func() { relay.PlanPrefetch(daID, []string{"fence-peer"}, time.Unix(1, 0)) }},
+		{"ReleasePrefetchPlan", func() { relay.ReleasePrefetchPlan(DARelayPrefetchPlan{DAID: daID, PeerKey: "fence-peer"}) }},
 	}
-	for name, writer := range writers {
-		t.Run(name, func(t *testing.T) {
+	for _, writer := range writers {
+		t.Run(writer.name, func(t *testing.T) {
 			done := make(chan struct{})
 			f.engine.chainState.admissionMu.Lock()
-			go func() { defer close(done); writer() }()
+			go func() { defer close(done); writer.run() }()
+			// The BLOCK is proven from the writer's own parked stack, not inferred
+			// from elapsed time: a writer that had merely not been scheduled yet
+			// would never satisfy this barrier, and a writer that took no fence at
+			// all would reach done instead.
+			awaitCanonicalMOAdmissionRLock(t, writer.name, 1)
 			select {
 			case <-done:
 				f.engine.chainState.admissionMu.Unlock()
 				t.Fatal("the writer ran while the admission write guard was held")
-			case <-time.After(50 * time.Millisecond):
+			default:
 			}
 			f.engine.chainState.admissionMu.Unlock()
 			select {
@@ -524,15 +609,21 @@ func TestCanonicalDAWritersObserveTheCompletePublishedImage(t *testing.T) {
 			_ = relay.StageChunk("racing-peer", DARelayChunk{DAID: daRelayTestID(0xa0 + seed), ChunkHash: sha3.Sum256(payload), Payload: payload, WireBytes: 8})
 		}(byte(i))
 	}
+	// Every writer is PROVEN parked at admissionMu.RLock before the preparation
+	// runs. Without this the six goroutines might not have reached the fence at
+	// all, and "no writer landed inside the prepared image" would hold vacuously.
+	awaitCanonicalMOAdmissionRLock(t, "StageChunk", 6)
 	image := mustPrepareCanonicalDAImage(t, tr.daRelay, nil, chain)
 	prepared := daRelayStateSnapshot(image.projected)
 	plan := &canonicalTransitionPlan{final: cloneChainState(f.engine.chainState)}
 	tr.publishCanonicalTransition(plan, canonicalFenceImage{da: image}, canonicalTruthNew, nil, "")
+	// Drain BEFORE the published snapshot, so the comparison below is against the
+	// image every released writer has already finished writing into.
+	writers.Wait()
 	published := daRelayStateSnapshot(relay)
 	if _, ok := published.sets[daID]; ok {
 		t.Fatal("the published image kept the record the preparation removed")
 	}
-	writers.Wait()
 	if !reflect.DeepEqual(prepared.sets[daID], published.sets[daID]) {
 		t.Fatal("a writer landed between preparation and publication")
 	}

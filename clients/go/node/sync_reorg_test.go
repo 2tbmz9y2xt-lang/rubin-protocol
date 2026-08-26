@@ -1517,9 +1517,13 @@ func TestNonCoinbaseBlockTransactionsExtractsCanonicalTransactions(t *testing.T)
 		spendTx,
 	)
 
-	rows, err := nonCoinbaseBlockTransactions(block)
+	parsedBlock, err := consensus.ParseBlockBytes(block)
 	if err != nil {
-		t.Fatalf("nonCoinbaseBlockTransactions: %v", err)
+		t.Fatalf("ParseBlockBytes: %v", err)
+	}
+	rows, err := nonCoinbaseParsedBlockTransactions(parsedBlock)
+	if err != nil {
+		t.Fatalf("nonCoinbaseParsedBlockTransactions: %v", err)
 	}
 	if len(rows) != 1 {
 		t.Fatalf("len(non-coinbase rows)=%d, want 1", len(rows))
@@ -4187,9 +4191,21 @@ func TestRequeueSelectsOneOwnerFromTheRowsOwnTxKind(t *testing.T) {
 		if rows[i].kind != want {
 			t.Fatalf("row %d kind=%#02x, want %#02x", i, rows[i].kind, want)
 		}
+		// A row no owner will receive is never serialized: only the standard
+		// row carries bytes.
+		if hasBytes := rows[i].txBytes != nil; hasBytes != (want == 0x00) {
+			t.Fatalf("row %d kind=%#02x carries bytes=%v", i, want, hasBytes)
+		}
 	}
 
-	f.engine.requeueParsedDisconnectedTransactions([]*consensus.ParsedBlock{parsed}, nil)
+	// The two dropped rows of THIS block produce exactly ONE retained record
+	// carrying their count, so a DA-heavy block cannot evict the standard rows'
+	// own diagnostics behind the bounded batch's truncation marker.
+	batch := &diagnosticBatch{}
+	f.engine.requeueParsedDisconnectedTransactions([]*consensus.ParsedBlock{parsed}, batch)
+	if len(batch.records) != 1 || !strings.Contains(batch.records[0], "2 row(s)") {
+		t.Fatalf("requeue diagnostics=%q, want one per-block record naming 2 dropped rows", batch.records)
+	}
 
 	standardTxid, _, err := canonicalTxIDsForNodeTest(standard)
 	if err != nil {

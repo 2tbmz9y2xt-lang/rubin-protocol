@@ -1844,7 +1844,7 @@ func TestDARelayPinnedPayloadDeltaKeepsOverflowAndCapErrorsDistinct(t *testing.T
 // retained tx bytes, wire envelope overhead and chunk count never consume the
 // cap, and admission projection, the committed counter and release all use
 // that one value. Release underflow is pinned by
-// TestDARelayConsumeCompleteSetReturnsProjectionErrorWithoutMutation.
+// TestDARelayRemoveSetRecordReturnsPinnedProjectionErrorWithoutMutation.
 func TestDARelayPinnedPayloadAccountingUsesPayloadBytesOnly(t *testing.T) {
 	whole := []byte("0123456789abcdef")
 	head, tail := []byte("0123456789"), []byte("abcdef")
@@ -1993,11 +1993,19 @@ func TestDARelayPinnedPayloadAccountingUsesPayloadBytesOnly(t *testing.T) {
 			t.Fatalf("first release pinned=%d, want %d", state.pinnedPayloadBytes, wantKeep)
 		}
 		// Already removed, never present, and present-but-incomplete: none of the
-		// three is a complete record, and none moves the pinned counter.
+		// three is a complete record, and none moves ANY counter — the orphan and
+		// commit-overhead totals the staged incomplete record still owns included.
+		wantOrphan, wantCommit := state.orphanBytes, state.orphanCommitOverheadBytes
 		for _, daID := range [][32]byte{consumeID, daRelayTestID(119), stagedID} {
 			if removeCompleteDASetForTest(t, state, daID) || state.pinnedPayloadBytes != wantKeep {
 				t.Fatalf("no-op release %x pinned=%d, want %d", daID, state.pinnedPayloadBytes, wantKeep)
 			}
+			if state.orphanBytes != wantOrphan || state.orphanCommitOverheadBytes != wantCommit {
+				t.Fatalf("no-op release %x moved orphan=%d/%d commit=%d/%d", daID, state.orphanBytes, wantOrphan, state.orphanCommitOverheadBytes, wantCommit)
+			}
+		}
+		if got := state.sets[stagedID]; got.state != daRelayStateStagedCommit {
+			t.Fatalf("staged record state=%v after the no-op releases, want staged commit", got.state)
 		}
 	})
 

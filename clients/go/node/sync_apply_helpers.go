@@ -686,7 +686,8 @@ func (t *canonicalTransition) publishCanonicalTransition(plan *canonicalTransiti
 	}
 	if latched {
 		t.engine.storeTerminalFault(fault)
-		// The batch slot directly: diagnoseTerminal formats, and this record was.
+		// Into the batch's terminal slot directly: diagnoseTerminal would FORMAT
+		// here, and the caller already formatted this record before the corridor.
 		if t.diag != nil {
 			t.diag.terminal = report
 		}
