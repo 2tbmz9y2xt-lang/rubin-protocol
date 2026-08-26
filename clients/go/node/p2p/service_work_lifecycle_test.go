@@ -602,3 +602,23 @@ func TestServiceWorkLifecycleFreshServiceIndependent(t *testing.T) {
 	requireClosedRejection(t, closedService.AnnounceBlock(node.DevnetGenesisBlockBytes()), "closed AnnounceBlock")
 	requireReturned(t, lifecycleClose(fresh), "fresh Close")
 }
+
+// TestTerminalPersistenceNewSkipsTheFencedTTLAdvance is the latched-engine schedule. On TERMINAL_PERSISTENCE(new) the transition publishes the summary, returns the terminal error and RETAINS ChainState.admissionMu exclusively (publishCanonicalTransition's latched arm returns before its Unlock), so the post-return TTL advance — the ONLY step of noteAcceptedBlock that takes that fence — must be skipped: invoked, AdvanceOrphanTTL would park this worker at admissionMu.RLock forever and the terminal error would never reach the caller. node's TestCanonicalDAWritersCannotInterleaveWithTheTransition pins that AdvanceOrphanTTL does block on a held write guard, and TestSyncEnginePostCommitFaultKeepsAdmissionClosedAfterLatch that the terminal latch never releases it; this row owns the remaining half — that the chain no longer invokes it. A published summary alongside a non-nil apply error is exactly that shape at both engine seams and the error identity is deliberately never read, so the sentinel stands in for the fault, whose injection seam (atomicWriteIO) is private to package node.
+func TestTerminalPersistenceNewSkipsTheFencedTTLAdvance(t *testing.T) {
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	p := testPeerForService(h.service, "remote", 2)
+	summary, err := p.processRelayedBlock(blockAtHeight(t, source, 1))
+	must(t, err, "processRelayedBlock")
+	chunk := stageOrphanQuotaBoundary(t, h.service, 109)
+	// Primed to ONE advance from expiry, so the advance this row skips is the one
+	// that decides: with the gate reverted the orphan is released and the restage
+	// below succeeds instead of refusing.
+	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime orphan TTL")
+	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime orphan TTL")
+	terminal := errors.New("storage persistence fault")
+	_, got := p.acceptRelayedBlockResult(summary.BlockHash, summary, terminal)
+	requireEqual(t, errors.Is(got, terminal), true, "the terminal error the post-return chain returned")
+	requireEqual(t, h.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk) != nil, true, "the retained orphan the skipped TTL advance left in place")
+	requireEqual(t, h.service.blockSeen.Has(summary.BlockHash), true, "the seen-set entry the unfenced effects still added")
+}

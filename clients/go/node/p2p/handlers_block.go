@@ -81,13 +81,13 @@ func (p *peer) processRelayedBlock(blockBytes []byte) (*node.ChainStateConnectSu
 		return p.handleRelayedBlockApplyError(pb, blockHash, blockBytes, err)
 	}
 	p.clearCompactOutstandingRequestForBlock(blockHash)
-	p.acceptedRelayedBlock(blockHash, summary)
+	p.acceptedRelayedBlock(blockHash, summary, nil)
 	return summary, nil
 }
 
 func (p *peer) acceptRelayedBlockResult(blockHash [32]byte, summary *node.ChainStateConnectSummary, err error) (*node.ChainStateConnectSummary, error) {
 	p.clearCompactOutstandingRequestForBlock(blockHash)
-	p.acceptedRelayedBlock(blockHash, summary)
+	p.acceptedRelayedBlock(blockHash, summary, err)
 	return summary, err
 }
 
@@ -146,8 +146,8 @@ func parseRelayedBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, err
 	return pb, blockHash, nil
 }
 
-func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainStateConnectSummary) {
-	if err := p.service.noteAcceptedBlock(p, blockHash, blockHash, summary); err != nil {
+func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainStateConnectSummary, applyErr error) {
+	if err := p.service.noteAcceptedBlock(p, blockHash, blockHash, summary, applyErr); err != nil {
 		p.setLastError(err.Error())
 	}
 	p.service.resolveOrphansFromSupplied(p, blockHash, blockHash)
@@ -155,7 +155,11 @@ func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainState
 
 // noteAcceptedBlock runs the post-return effects of one accepted block, in
 // order: best-known height, seen-set, inventory relay, then the fenced retained-DA
-// TTL advance.
+// TTL advance. A non-nil applyErr alongside a published summary is exactly
+// TERMINAL_PERSISTENCE(new), whose transition RETAINS the admission write guard:
+// the first three effects still run — the block IS canonical — but the fenced TTL
+// advance is skipped, because taking its read fence against a guard that is never
+// released would park this worker forever instead of returning the terminal error.
 //
 // It performs NO retained-DA cleanup for the block's complete DA sets. That
 // cleanup is not a post-return effect at all: the canonical transition selects
@@ -165,12 +169,15 @@ func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainState
 // notification, or post-return loop may complete or redefine this transition").
 // A1's da_id rows stay in the summary as the block's public DA-set identity; no
 // caller may treat them as work still to do.
-func (s *Service) noteAcceptedBlock(source *peer, suppliedHash, blockHash [32]byte, summary *node.ChainStateConnectSummary) error {
+func (s *Service) noteAcceptedBlock(source *peer, suppliedHash, blockHash [32]byte, summary *node.ChainStateConnectSummary, applyErr error) error {
 	if summary != nil {
 		s.cfg.SyncEngine.RecordBestKnownHeight(summary.BlockHeight)
 	}
 	s.blockSeen.Add(blockHash)
 	s.relayCanonicalAppliedBlocks(source, suppliedHash, summary)
+	if applyErr != nil {
+		return nil
+	}
 	return s.advanceDAOrphanTTL()
 }
 
@@ -275,7 +282,7 @@ func (s *Service) acceptResolvedOrphanResult(source *peer, suppliedHash, childHa
 	if childHash != suppliedHash {
 		rowSource, rowSuppliedHash = nil, [32]byte{}
 	}
-	if err := s.noteAcceptedBlock(rowSource, rowSuppliedHash, childHash, summary); err != nil && source != nil {
+	if err := s.noteAcceptedBlock(rowSource, rowSuppliedHash, childHash, summary, applyErr); err != nil && source != nil {
 		source.setLastError(err.Error())
 	}
 	if applyErr == nil {
