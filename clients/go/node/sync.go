@@ -1106,9 +1106,10 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 // deriveCanonicalPlanInputs derives A1's da_id rows, the exact included
 // identities I, and the final mempool MTP for one connected candidate.
 func (s *SyncEngine) deriveCanonicalPlanInputs(pb *consensus.ParsedBlock, height uint64, prevTimestamps []uint64) ([][32]byte, []canonicalDASetIdentity, uint64, error) {
-	// This is the ONLY site that reports a block as canonical-applied, so the
-	// distinction between "connected to some chain state" and "made canonical"
-	// lives in exactly one place. Extraction runs on the already-parsed block —
+	// This is the direct/bootstrap lane's single site for reporting a block as
+	// canonical-applied; the preferred-reorg lane derives the same rows through
+	// prepareCommitRow. Both feed the one central D prepare/publish seam.
+	// Extraction runs on the already-parsed block —
 	// no re-parse, no retained bytes — and only AFTER the connect succeeded, so
 	// an over-cap or malformed DA layout is rejected by consensus with its own
 	// public error code before this ever runs. Any error here is therefore a

@@ -115,6 +115,9 @@ engines:
       - "clients/go/node/policy_da_anchor.go"
       - "clients/go/node/production_rotation_schedule.go"
       - "clients/go/node/sync.go"
+      # Canonical-corridor helper closure (RUB-911): the D1 / typed-outcome work
+      # pushed this file 479 -> 503 NLOC; same accepted-risk rationale as above.
+      - "clients/go/node/sync_apply_helpers.go"
       - "clients/go/node/sync_mempool.go"
       - "clients/go/node/sync_reorg.go"
       - "clients/go/node/undo.go"
