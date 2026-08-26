@@ -116,8 +116,8 @@ PROTOCOL_ARTIFACT_META: dict[str, tuple[str, str]] = {
         "closure-epoch-bound C01-R2 identity and shape foundation (RUB-1207): frozen 79-entry row registry, 8 migrated rows / 24 cases (RUB-1208); no consumer may bind it (see conformance/README.md)",
     ),
     "da_admission_expected_v1.json": (
-        "Manual BUILDING_EXPECTED DA routing and detached-reorg authority (RUB-1241 / D01A)",
-        "24 expected-only remote, local, cross-source, and detached-reorg cases; inert with capacity, configuration, and advertisement obligations outstanding",
+        "Manual FROZEN_EXPECTED DA authority (RUB-1243 / D01C)",
+        "66 expected-only routing, recovery, capacity, sequence, configuration, advertisement, and mixed-provenance cleanup cases; inert authority with all 19 obligations closed",
     ),
     "legacy_exposure_hook_vectors.json": (
         "Operational protocol artifact",

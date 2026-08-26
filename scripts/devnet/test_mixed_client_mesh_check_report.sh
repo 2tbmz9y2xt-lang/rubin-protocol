@@ -277,7 +277,7 @@ expect_metrics_pass() {
   PARTITION_REASON=""
   PARTITION_GO_METRICS_PARSED=""
   capture_go_reorg_metrics || { echo "FAIL: metrics parser rejected valid input: ${PARTITION_REASON}" >&2; exit 1; }
-  [[ "${PARTITION_GO_METRICS_PARSED}" == $'2\t3' ]] || { echo "FAIL: metrics parser returned ${PARTITION_GO_METRICS_PARSED}" >&2; exit 1; }
+  [[ "${PARTITION_GO_METRICS_PARSED}" == "$2" ]] || { echo "FAIL: metrics parser returned ${PARTITION_GO_METRICS_PARSED}" >&2; exit 1; }
 }
 expect_metrics_reason() {
   local expected="$2"
@@ -290,16 +290,19 @@ expect_metrics_reason() {
   fi
   [[ "${PARTITION_REASON}" == "${expected}" ]] || { echo "FAIL: metrics parser reason ${PARTITION_REASON}, want ${expected}" >&2; exit 1; }
 }
-valid="${probe_root}/valid.prom"; timestamp="${probe_root}/timestamp.prom"; json="${probe_root}/metrics.json"; zero="${probe_root}/zero.prom"; duplicate="${probe_root}/duplicate.prom"
+valid="${probe_root}/valid.prom"; depth_zero="${probe_root}/depth-zero.prom"; timestamp="${probe_root}/timestamp.prom"; json="${probe_root}/metrics.json"; zero="${probe_root}/zero.prom"; zero_depth_zero="${probe_root}/zero-depth-zero.prom"; zero_depth_one="${probe_root}/zero-depth-one.prom"; duplicate="${probe_root}/duplicate.prom"
 write_case "${valid}" "rubin_node_reorg_total 2" "rubin_node_last_reorg_depth 3"
+write_case "${depth_zero}" "rubin_node_reorg_total 1" "rubin_node_last_reorg_depth 0"
 write_case "${timestamp}" "rubin_node_reorg_total 2 123" "rubin_node_last_reorg_depth 3"
 write_case "${json}" '{"rubin_node_reorg_total": 2, "rubin_node_last_reorg_depth": 3}'
 write_case "${zero}" "rubin_node_reorg_total 0" "rubin_node_last_reorg_depth 3"
+write_case "${zero_depth_zero}" "rubin_node_reorg_total 0" "rubin_node_last_reorg_depth 0"; write_case "${zero_depth_one}" "rubin_node_reorg_total 0" "rubin_node_last_reorg_depth 1"
 write_case "${duplicate}" "rubin_node_reorg_total 2" "rubin_node_reorg_total 3" "rubin_node_last_reorg_depth 3"
-expect_metrics_pass "${valid}"
+expect_metrics_pass "${valid}" $'2\t3'; expect_metrics_pass "${depth_zero}" $'1\t0'
 expect_metrics_reason "${timestamp}" partition_go_metrics_malformed
 expect_metrics_reason "${json}" partition_go_metrics_malformed
 expect_metrics_reason "${zero}" partition_go_metrics_missing_or_zero
+expect_metrics_reason "${zero_depth_zero}" partition_go_metrics_missing_or_zero; expect_metrics_reason "${zero_depth_one}" partition_go_metrics_missing_or_zero
 expect_metrics_reason "${duplicate}" partition_go_metrics_duplicate
 SH
   bash "${probe}" "${CAPTURE_GO_REORG_METRICS_LIB}" "${TMP_ROOT}"
@@ -494,7 +497,7 @@ rust_started = "2026-05-12T10:00:01Z"
 def dump(path: Path, data: object) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-def node(impl: str) -> dict:
+def node(impl: str, create_store: bool = False) -> dict:
     is_go = impl == "go"
     name = "node-go" if is_go else "node-rust"
     binary = go_bin if is_go else rust_bin
@@ -511,6 +514,8 @@ def node(impl: str) -> dict:
     ]
     if not is_go:
         argv.extend(["--peer", go_p2p])
+    if create_store:
+        argv.append("--create-store")
     return {
         "binary": str(binary),
         "command": " ".join(argv),
@@ -527,7 +532,7 @@ def node(impl: str) -> dict:
         "started_at": go_started if is_go else rust_started,
     }
 
-nodes = [node("go"), node("rust")]
+nodes = [node("go", True), node("rust", True)]
 connectivity = {
     "bidirectional_observed": True,
     "counterpart_links": {
@@ -637,12 +642,12 @@ restart_info = {
     "go_target_tip": "bb" * 32,
     "go_target_tip_path": str(artifact_root / "go-restart-target-tip.json"),
     "go_target_tx_count": 1,
-    "new_command_argv": node("rust")["command_argv"],
+    "new_command_argv": node("rust", False)["command_argv"],
     "new_p2p_endpoint": rust_p2p,
     "new_pid": 41002,
     "new_rpc_endpoint": rust_rpc,
     "new_started_at": rust_started,
-    "old_command_argv": node("rust")["command_argv"],
+    "old_command_argv": node("rust", False)["command_argv"],
     "old_p2p_endpoint": "127.0.0.1:51031",
     "old_pid": 41020,
     "old_pid_stopped": True,
@@ -680,6 +685,7 @@ restart_report = {
         "purpose": "schema-valid legacy artifact only; not the Rust restart report verdict",
         "reason": "existing mixed_client_evidence_v1 PASS requires tx_path; Rust restart PASS lives in this report",
     },
+    "nodes": [node("go", False), node("rust", False)],
     "restart": restart,
     "run_id": artifact_root.name,
     "rust_restart": restart_info,
@@ -850,7 +856,7 @@ dump(artifact_root / "rust-converge-tip.json", {"best_known_height": height, "ha
 dump(artifact_root / "rust-missing-tx-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": missing_tx_hash})
 partition_proxy = "127.0.0.1:53010"
 partition_go_peer = "127.0.0.1:53011"
-partition_nodes = json.loads(json.dumps(nodes))
+partition_nodes = [node("go", False), node("rust", False)]
 partition_nodes[1]["command_argv"][-1] = partition_proxy
 partition_nodes[1]["command"] = " ".join(partition_nodes[1]["command_argv"])
 partition_peer_connectivity = {"bidirectional_observed": False, "counterpart_links": {"go_peer_snapshot_expected_addr": None, "rust_outbound_local_addr": None, "rust_outbound_pid": None, "rust_outbound_remote_addr": None, "rust_peer_snapshot_expected_addr": None}, "go_peer_snapshot": {"count": 0, "peers": []}, "go_to_rust": False, "rust_peer_snapshot": {"count": 0, "peers": []}, "rust_to_go": False}
@@ -886,7 +892,8 @@ dump(artifact_root / "partition-go-disconnected-tip.json", tip_sidecar("go", go_
 dump(artifact_root / "partition-go-disconnected-block.json", block_sidecar("go", go_rpc, disconnected_go_block_hex, disconnected_go_hash))
 dump(artifact_root / "partition-final-go-block.json", block_sidecar("go", go_rpc, rust_win_block_hex, rust_win_hash, rust_win_height))
 dump(artifact_root / "partition-final-rust-block.json", block_sidecar("rust", rust_rpc, rust_win_block_hex, rust_win_hash, rust_win_height))
-(artifact_root / "partition-go-metrics.prom").write_text("rubin_node_reorg_total 1\nrubin_node_last_reorg_depth 1\n", encoding="utf-8")
+(artifact_root / "partition-go-metrics.prom").write_text("rubin_node_reorg_total 1\nrubin_node_last_reorg_depth 0\n", encoding="utf-8")
+(artifact_root / "partition-go-metrics-depth-1.prom").write_text("rubin_node_reorg_total 1\nrubin_node_last_reorg_depth 1\n", encoding="utf-8")
 (artifact_root / "partition-go-metrics-timestamp.prom").write_text("rubin_node_reorg_total 1 123\nrubin_node_last_reorg_depth 1 123\n", encoding="utf-8")
 (artifact_root / "partition-go-metrics.json").write_text(json.dumps({"rubin_node_reorg_total": 1, "rubin_node_last_reorg_depth": 1}) + "\n", encoding="utf-8")
 for name, addr in (("partition-pre-rust-peers.json", partition_proxy), ("partition-pre-go-peers.json", partition_go_peer), ("partition-drop-rust-peers.json", None), ("partition-drop-go-peers.json", None), ("partition-fork-rust-peers.json", None), ("partition-fork-go-peers.json", None), ("partition-heal-rust-peers.json", partition_proxy), ("partition-heal-go-peers.json", partition_go_peer)):
@@ -901,8 +908,12 @@ bad_mine = mine_sidecar("rust", rust_rpc, rust_win_hash, rust_win_height); bad_m
 bad_mine = mine_sidecar("rust", rust_rpc, rust_win_hash, rust_win_height); bad_mine["timestamp"] = "1"; dump(artifact_root / "partition-rust-mine-string-timestamp.json", bad_mine)
 partition_observations = {"pre_partition": {"common_go_block": str(artifact_root / "partition-common-go-block.json"), "common_go_mine": str(artifact_root / "partition-common-go-mine.json"), "common_rust_block": str(artifact_root / "partition-common-rust-block.json"), "common_rust_tip": str(artifact_root / "partition-common-rust-tip.json"), "go_peer_snapshot": str(artifact_root / "partition-pre-go-peers.json"), "rust_peer_snapshot": str(artifact_root / "partition-pre-rust-peers.json")}, "partition": {"go_peer_snapshot": str(artifact_root / "partition-drop-go-peers.json"), "rust_peer_snapshot": str(artifact_root / "partition-drop-rust-peers.json")}, "fork": {"go_block": str(artifact_root / "partition-go-block.json"), "go_mine": str(artifact_root / "partition-go-mine.json"), "go_peer_snapshot": str(artifact_root / "partition-fork-go-peers.json"), "go_tip": str(artifact_root / "partition-go-tip.json"), "rust_block_1": str(artifact_root / "partition-rust-block-1.json"), "rust_block_2": str(artifact_root / "partition-rust-block-2.json"), "rust_mine_1": str(artifact_root / "partition-rust-mine-1.json"), "rust_mine_2": str(artifact_root / "partition-rust-mine-2.json"), "rust_peer_snapshot": str(artifact_root / "partition-fork-rust-peers.json"), "rust_tip": str(artifact_root / "partition-rust-tip.json")}, "heal": {"go_peer_snapshot": str(artifact_root / "partition-heal-go-peers.json"), "rust_peer_snapshot": str(artifact_root / "partition-heal-rust-peers.json")}, "reorg": {"go_metrics": str(artifact_root / "partition-go-metrics.prom"), "go_reorg_parent_block": str(artifact_root / "partition-go-reorg-parent-block.json"), "go_tip": str(artifact_root / "partition-final-go-tip.json"), "go_tip_block": str(artifact_root / "partition-final-go-block.json"), "rust_tip": str(artifact_root / "partition-final-rust-tip.json"), "rust_tip_block": str(artifact_root / "partition-final-rust-block.json")}}
 partition_legacy = {"authoritative": False, "marker_path": str(mesh_marker), "purpose": "schema-valid legacy artifact only; not the partition/heal/reorg report verdict", "reason": "existing mixed_client_evidence_v1 PASS requires tx_path; partition/heal/reorg PASS lives in this report"}
-partition_report = {**mesh_report, "artifact_created_at_utc": "2026-05-12T10:00:02Z", "final_verification": partition_final, "legacy_schema_compatibility": partition_legacy, "nodes": partition_nodes, "observations": partition_observations, "peer_connectivity": partition_peer_connectivity, "proof": {"final_go_tip": {"height": rust_win_height, "hash": rust_win_hash}, "final_rust_tip": {"height": rust_win_height, "hash": rust_win_hash}, "fork_diverged": True, "go_partition_tip": {"height": height, "hash": block_hash}, "go_reorg_metrics": {"rubin_node_last_reorg_depth": 1, "rubin_node_reorg_total": 1}, "heal_go_peer_addr": partition_go_peer, "heal_restored_peer_state": True, "partition_changed_peer_state": True, "partition_proxy_endpoint": partition_proxy, "pre_partition_go_peer_addr": partition_go_peer, "process_identity_rechecked_after_heal": True, "reorg_converged": True, "rust_winning_tip": {"height": rust_win_height, "hash": rust_win_hash}}, "run_id": artifact_root.name, "scenario": "mixed_client_partition_heal_reorg"}
+partition_report = {**mesh_report, "artifact_created_at_utc": "2026-05-12T10:00:02Z", "final_verification": partition_final, "legacy_schema_compatibility": partition_legacy, "nodes": partition_nodes, "observations": partition_observations, "peer_connectivity": partition_peer_connectivity, "proof": {"final_go_tip": {"height": rust_win_height, "hash": rust_win_hash}, "final_rust_tip": {"height": rust_win_height, "hash": rust_win_hash}, "fork_diverged": True, "go_partition_tip": {"height": height, "hash": block_hash}, "go_reorg_metrics": {"rubin_node_last_reorg_depth": 0, "rubin_node_reorg_total": 1}, "heal_go_peer_addr": partition_go_peer, "heal_restored_peer_state": True, "partition_changed_peer_state": True, "partition_proxy_endpoint": partition_proxy, "pre_partition_go_peer_addr": partition_go_peer, "process_identity_rechecked_after_heal": True, "reorg_converged": True, "rust_winning_tip": {"height": rust_win_height, "hash": rust_win_hash}}, "run_id": artifact_root.name, "scenario": "mixed_client_partition_heal_reorg"}
 dump(root / "partition-report.json", partition_report)
+positive_partition = json.loads(json.dumps(partition_report)); positive_partition["proof"]["go_reorg_metrics"]["rubin_node_last_reorg_depth"] = 1; positive_partition["observations"]["reorg"]["go_metrics"] = str(artifact_root / "partition-go-metrics-depth-1.prom"); dump(artifact_root / "partition-positive-depth-report.json", positive_partition)
+for depth in (0, 1):
+    metrics_path = artifact_root / f"partition-zero-total-depth-{depth}.prom"; metrics_path.write_text(f"rubin_node_reorg_total 0\nrubin_node_last_reorg_depth {depth}\n", encoding="utf-8")
+    bad_partition = json.loads(json.dumps(positive_partition if depth else partition_report)); bad_partition["proof"]["go_reorg_metrics"]["rubin_node_reorg_total"] = 0; bad_partition["observations"]["reorg"]["go_metrics"] = str(metrics_path); dump(artifact_root / f"partition-zero-total-depth-{depth}-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); del bad_partition["raw_samples"]; dump(artifact_root / "partition-missing-raw-samples-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); del bad_partition["nodes"][0]["process_alive"]; dump(artifact_root / "partition-missing-process-alive-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["unexpected_pass_evidence"] = True; dump(artifact_root / "partition-extra-top-level-report.json", bad_partition)
@@ -931,6 +942,7 @@ bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observa
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["reorg"]["go_metrics"] = str(artifact_root / "partition-go-metrics.json"); dump(artifact_root / "partition-metrics-json-report.json", bad_partition)
 tx_report = {
     **mesh_report,
+    "nodes": [node("go"), node("rust")],
     "go_submit": {
         "get_tx_path": str(artifact_root / "go-get-tx.json"),
         "rpc_endpoint": go_rpc,
@@ -995,6 +1007,7 @@ dump(rust_tx_marker, {
 })
 rust_converge_report = {
     **mesh_report,
+    "nodes": [node("go"), node("rust")],
     "go_accept": {
         "get_tx_path": str(artifact_root / "go-accept-get-tx.json"),
         "raw_hex": tx_hex,
@@ -1375,7 +1388,9 @@ print(artifact_root / "partition-go-tip-string-ibd-report.json")
 print(artifact_root / "partition-rust-mine-string-nonce-report.json")
 print(artifact_root / "partition-rust-mine-string-timestamp-report.json")
 print(artifact_root / "partition-metrics-timestamp-report.json")
-print(artifact_root / "partition-metrics-json-report.json")
+print(artifact_root / "partition-metrics-json-report.json"); print(artifact_root / "partition-positive-depth-report.json")
+print(artifact_root / "partition-zero-total-depth-0-report.json")
+print(artifact_root / "partition-zero-total-depth-1-report.json")
 PY
 }
 
@@ -1495,6 +1510,9 @@ PARTITION_RUST_MINE_STRING_NONCE_REPORT="$(sed -n '83p' "${REPORT_LIST}")"
 PARTITION_RUST_MINE_STRING_TIMESTAMP_REPORT="$(sed -n '84p' "${REPORT_LIST}")"
 PARTITION_METRICS_TIMESTAMP_REPORT="$(sed -n '85p' "${REPORT_LIST}")"
 PARTITION_METRICS_JSON_REPORT="$(sed -n '86p' "${REPORT_LIST}")"
+PARTITION_POSITIVE_DEPTH_REPORT="$(sed -n '87p' "${REPORT_LIST}")"
+PARTITION_ZERO_TOTAL_DEPTH_0_REPORT="$(sed -n '88p' "${REPORT_LIST}")"
+PARTITION_ZERO_TOTAL_DEPTH_1_REPORT="$(sed -n '89p' "${REPORT_LIST}")"
 TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT="${TMP_ROOT}/tx-huge-int-propagation-sample.json"
 CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-bool-height-sample.json"
 CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-float-height-sample.json"
@@ -1515,6 +1533,8 @@ done
 expect_pass_contains "public mesh check-report" "PASS: mixed_client_mesh report structurally accepted" "${HARNESS}" --check-report "${MESH_REPORT}"
 expect_pass_contains "rust restart check-report" "PASS: mixed_client_rust_restart report structurally accepted" "${HARNESS}" --rust-restart --check-report "${RESTART_REPORT}"
 expect_pass_contains "partition check-report" "PASS: mixed_client_partition_heal_reorg report structurally accepted" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_REPORT}"
+expect_pass_contains "partition positive-depth check-report" "PASS: mixed_client_partition_heal_reorg report structurally accepted" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_POSITIVE_DEPTH_REPORT}"
+expect_fail_contains "partition rejects zero total at depth zero" "proof.go_reorg_metrics.rubin_node_reorg_total is below 1" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_ZERO_TOTAL_DEPTH_0_REPORT}"; expect_fail_contains "partition rejects zero total at depth one" "proof.go_reorg_metrics.rubin_node_reorg_total is below 1" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_ZERO_TOTAL_DEPTH_1_REPORT}"
 expect_fail_contains "partition rejects missing raw samples" "report top-level keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_MISSING_RAW_SAMPLES_REPORT}"
 expect_generator_fail_contains "partition generator rejects missing raw samples" "top_level_fields_invalid" --partition-heal-reorg-report "${PARTITION_MISSING_RAW_SAMPLES_REPORT}"
 expect_fail_contains "partition rejects missing process_alive" "go node keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_MISSING_PROCESS_ALIVE_REPORT}"

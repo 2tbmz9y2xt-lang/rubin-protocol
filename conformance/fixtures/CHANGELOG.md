@@ -11,6 +11,14 @@ Policy:
 
 ---
 
+## 2026-08-26 — Frozen DA expected authority (RUB-1243 / D01C)
+
+Manual authoring (no JSON generator) appended 26 inert capacity-plan, resident-integrity, accepted-sequence, payload, configuration, advertisement, and mixed-provenance State B cleanup expected cases to `protocol/da_admission_expected_v1.json`, bringing the corpus from 40 to 66 cases, closing all 19 obligations, and moving it atomically to `FROZEN_EXPECTED`. The existing native Matrix generator owns only the artifact inventory row. Exact validation commands: `python3 tools/check_conformance_fixtures_policy.py`, `python3 tools/gen_conformance_matrix.py`, `python3 tools/gen_conformance_matrix.py --check`, `python3 -m unittest tools.tests.test_gen_conformance_matrix`, and `git diff --check`. Changed files: `conformance/fixtures/protocol/da_admission_expected_v1.json`, `tools/gen_conformance_matrix.py`, `conformance/MATRIX.md`, and `conformance/fixtures/CHANGELOG.md`.
+
+## 2026-08-25 — DA expected capacity authority (RUB-1242)
+
+Manual authoring (no generator) appended 16 inert completion, count/retained-byte boundary, exact-comparator, and atomic-eviction expected cases to `protocol/da_admission_expected_v1.json`, bringing the `BUILDING_EXPECTED` corpus to 40 cases. Validation commands: `python3 tools/check_conformance_fixtures_policy.py`, `python3 tools/gen_conformance_matrix.py --check`, and `git diff --check`. Changed files: `protocol/da_admission_expected_v1.json` and `CHANGELOG.md`.
+
 ## 2026-08-25 — DA expected routing authority (RUB-1241)
 
 Manual `protocol/da_admission_expected_v1.json` registers 24 inert `BUILDING_EXPECTED` remote, local, cross-source, and detached-reorg cases, including a canonical detached branch with transition-wide DA-unavailable / standard-available owner lifecycle and structured entrypoint/reservation projections.
