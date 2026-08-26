@@ -1333,8 +1333,13 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 	}
 	mb := outcome.Block
 	state.rpcMut.Unlock()
-	announceMinedBlock(state, mb)
-	writeJSONResponse(state, route, w, mineNextStatus(outcome.Disposition), mineNextIdentity(mb, outcome.CommitState, ""))
+	// Selected BEFORE the announce tail, exactly as the failure exit does, so both
+	// callers of announceMinedBlock have already chosen their bytes when it runs.
+	// Both selectors are pure over their arguments, so hoisting them cannot change
+	// the response.
+	status, body := mineNextStatus(outcome.Disposition), mineNextIdentity(mb, outcome.CommitState, "")
+	announceMinedBlock(state, outcome)
+	writeJSONResponse(state, route, w, status, body)
 }
 
 // writeMineNextFailure is the only exit an attempt that REACHED MineOne can
@@ -1382,7 +1387,7 @@ func writeMineNextFailure(state *devnetRPCState, route string, w http.ResponseWr
 		// or a storage reread.
 		status, body = mineNextStatus(outcome.Disposition), mineNextFailure(outcome, err)
 	}
-	announceMinedBlock(state, outcome.Block)
+	announceMinedBlock(state, outcome)
 	writeJSONResponse(state, route, w, status, body)
 }
 
@@ -1390,12 +1395,21 @@ func writeMineNextFailure(state *devnetRPCState, route string, w http.ResponseWr
 // canonical transition already published the complete retained-DA image inside
 // its own admission fence, so nothing here has DA cleanup left to do.
 //
+// It announces only what the TYPED outcome proves was published — a nonnil Block
+// AND commit truth committed — reading the carrier the miner returned rather than
+// inferring publication from a latch, an error string, the current tip or a
+// storage reread. executeMineOne sets Block only alongside a published summary,
+// so the commit-state conjunct excludes nothing today; it is what keeps this
+// effect correct if a future arm ever returns a candidate under a truth that
+// published neither image.
+//
 // The mined block's bytes are loaded ONLY for this branch. It is best-effort by
 // contract — both failure shapes report to stderr and NEITHER may change the
 // response the caller already selected, which is why every caller selects before
 // calling and writes after.
-func announceMinedBlock(state *devnetRPCState, mb *node.MinedBlock) {
-	if mb == nil || state.announceBlock == nil {
+func announceMinedBlock(state *devnetRPCState, outcome node.MineOneOutcome) {
+	mb := outcome.Block
+	if mb == nil || outcome.CommitState != node.CanonicalCommitStateCommitted || state.announceBlock == nil {
 		return
 	}
 	blockBytes, loadErr := minedBlockBytes(state, mb.Hash)

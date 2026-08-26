@@ -2381,8 +2381,12 @@ func mustRPCMineNextState(t *testing.T, minerCfgTweaks ...func(*node.MinerConfig
 // canonical block: it returns both the block identity and the terminal error, so
 // the block is as canonical as an ordinary success's and must be announced. The
 // row also pins the other half of A13 — the announce cannot change the response
-// the route already selected — and the nil-Block failure that must announce
-// nothing.
+// the route already selected — and the two failures that must announce NOTHING:
+// one with no candidate at all, and one carrying a candidate under a commit
+// truth that published neither image. The last row is the gate's own negative:
+// its response shape is identical to the announcing row's (503, the identity
+// body, the terminal error), so the ONLY thing separating the two is the typed
+// commit state announceMinedBlock reads.
 //
 // It calls the exit directly with a constructed node.MineOneOutcome because a
 // terminal candidate NEW cannot be produced from this package: it requires a
@@ -2394,12 +2398,14 @@ func mustRPCMineNextState(t *testing.T, minerCfgTweaks ...func(*node.MinerConfig
 func TestMineNextFailureExitAnnouncesAPublishedCandidate(t *testing.T) {
 	terminal := errors.New("terminal canonical persistence (new)")
 	for _, tc := range []struct {
-		name       string
-		published  bool
-		wantStatus int
+		name         string
+		block        bool
+		commitState  node.CanonicalCommitState
+		wantAnnounce bool
 	}{
-		{name: "terminal candidate NEW announces the published block", published: true, wantStatus: http.StatusServiceUnavailable},
-		{name: "a failure with no candidate announces nothing", wantStatus: http.StatusServiceUnavailable},
+		{name: "terminal candidate NEW announces the published block", block: true, commitState: node.CanonicalCommitStateCommitted, wantAnnounce: true},
+		{name: "a failure with no candidate announces nothing", commitState: node.CanonicalCommitStateCommitted},
+		{name: "a candidate whose truth published neither image announces nothing", block: true, commitState: node.CanonicalCommitStateNotCommitted},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state := mustRPCMineNextState(t)
@@ -2417,10 +2423,10 @@ func TestMineNextFailureExitAnnouncesAPublishedCandidate(t *testing.T) {
 				return nil
 			}
 			outcome := node.MineOneOutcome{
-				CommitState: node.CanonicalCommitStateCommitted,
+				CommitState: tc.commitState,
 				Disposition: node.MineOneDispositionServiceUnavailable,
 			}
-			if tc.published {
+			if tc.block {
 				outcome.Block = &node.MinedBlock{Height: height, Hash: hash, Timestamp: 11, Nonce: 13, TxCount: 1}
 			}
 
@@ -2428,26 +2434,26 @@ func TestMineNextFailureExitAnnouncesAPublishedCandidate(t *testing.T) {
 			writeMineNextFailure(state, "/mine_next", rec, outcome, terminal, false)
 
 			// The response half is asserted FIRST and on its own, so removing the
-			// announce tail fails ONLY the announce assertions below: the two
-			// claims cannot mask each other.
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("status=%d, want %d", rec.Code, tc.wantStatus)
+			// announce tail or the commit-state gate fails ONLY the announce
+			// assertions below: the two claims cannot mask each other.
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status=%d, want %d", rec.Code, http.StatusServiceUnavailable)
 			}
 			var got mineNextResponse
 			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 				t.Fatalf("decode body: %v", err)
 			}
-			if got.CommitState != node.CanonicalCommitStateCommitted || got.Error != terminal.Error() {
-				t.Fatalf("body commit_state=%q error=%q, want committed and the terminal error", got.CommitState, got.Error)
+			if got.CommitState != tc.commitState || got.Error != terminal.Error() {
+				t.Fatalf("body commit_state=%q error=%q, want %q and the terminal error", got.CommitState, got.Error, tc.commitState)
 			}
-			if tc.published != (got.BlockHash != nil && *got.BlockHash == hex.EncodeToString(hash[:])) {
-				t.Fatalf("body block_hash=%v, want the published identity present=%v", got.BlockHash, tc.published)
+			if tc.block != (got.BlockHash != nil && *got.BlockHash == hex.EncodeToString(hash[:])) {
+				t.Fatalf("body block_hash=%v, want the candidate identity present=%v", got.BlockHash, tc.block)
 			}
 
-			if tc.published != (len(announced) == 1) {
-				t.Fatalf("announce calls=%d, want published=%v", len(announced), tc.published)
+			if tc.wantAnnounce != (len(announced) == 1) {
+				t.Fatalf("announce calls=%d, want announced=%v", len(announced), tc.wantAnnounce)
 			}
-			if tc.published && !bytes.Equal(announced[0], want) {
+			if tc.wantAnnounce && !bytes.Equal(announced[0], want) {
 				t.Fatalf("announced %d bytes, want the published block's exact %d", len(announced[0]), len(want))
 			}
 		})
