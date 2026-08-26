@@ -756,29 +756,34 @@ func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []
 		if err != nil {
 			continue
 		}
-		// Indexed by tx_kind, so the breakdown below renders in ascending kind
-		// order without a map or a sort.
-		var dropped [256]int
-		total := 0
-		for _, row := range rows {
-			if row.kind != 0x00 {
-				dropped[row.kind]++
-				total++
-				continue
-			}
-			if err := s.mempool.AddReorgTx(row.txBytes); err != nil {
-				s.diagnose(diag, "mempool: requeue-tx: %v\n", err)
+		s.requeueParsedBlockRows(rows, diag)
+	}
+}
+
+// requeueParsedBlockRows applies the selection above to ONE disconnected block's rows and emits its single dropped-rows record.
+func (s *SyncEngine) requeueParsedBlockRows(rows []canonicalRequeueRow, diag *diagnosticBatch) {
+	// Indexed by tx_kind, so the breakdown below renders in ascending kind
+	// order without a map or a sort.
+	var dropped [256]int
+	total := 0
+	for _, row := range rows {
+		if row.kind != 0x00 {
+			dropped[row.kind]++
+			total++
+			continue
+		}
+		if err := s.mempool.AddReorgTx(row.txBytes); err != nil {
+			s.diagnose(diag, "mempool: requeue-tx: %v\n", err)
+		}
+	}
+	if total != 0 {
+		kinds := ""
+		for kind, count := range dropped {
+			if count != 0 {
+				kinds = fmt.Sprintf("%s 0x%02x x%d", kinds, kind, count)
 			}
 		}
-		if total != 0 {
-			kinds := ""
-			for kind, count := range dropped {
-				if count != 0 {
-					kinds = fmt.Sprintf("%s 0x%02x x%d", kinds, kind, count)
-				}
-			}
-			s.diagnose(diag, "mempool: requeue-tx: %d row(s) of a non-standard tx_kind invoke no owner in this line:%s\n", total, kinds)
-		}
+		s.diagnose(diag, "mempool: requeue-tx: %d row(s) of a non-standard tx_kind invoke no owner in this line:%s\n", total, kinds)
 	}
 }
 

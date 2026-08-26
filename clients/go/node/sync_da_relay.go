@@ -111,6 +111,12 @@ func canonicalDASetIdentitiesFromParsedBlock(pb *consensus.ParsedBlock) ([]canon
 		}
 		member.record(tx, canonicalDATxIdentity{txid: pb.Txids[i], wtxid: pb.Wtxids[i]})
 	}
+	return canonicalCompleteDASetIdentities(order, tallies, members)
+}
+
+// canonicalCompleteDASetIdentities renders every COMPLETE set's identity in the
+// accumulator's recorded order, never in either map's iteration order.
+func canonicalCompleteDASetIdentities(order [][32]byte, tallies map[[32]byte]blockDASetTally, members map[[32]byte]*canonicalDASetMembers) ([]canonicalDASetIdentity, error) {
 	identities := make([]canonicalDASetIdentity, 0, len(order))
 	for _, daID := range order {
 		tally := tallies[daID]
