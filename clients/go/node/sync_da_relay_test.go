@@ -696,8 +696,11 @@ func stageRetainedDAMembersOfBlock(t *testing.T, relay *DARelayState, blocks ...
 func TestCanonicalDAImageIsPreparedOnEveryTransitionPath(t *testing.T) {
 	t.Run("preferred reorg", func(t *testing.T) {
 		f := newCanonicalDATestFixture(t)
-		mp, err := NewMempoolWithConfig(f.engine.chainState, f.store, devnetGenesisChainID, MempoolConfig{})
-		mustCanonicalMO(t, "NewMempoolWithConfig", err)
+		// The PRODUCTION configuration (cmd/rubin-node/main.go builds
+		// DefaultMempoolConfig), so PolicyRejectSimplicityPreActivation is on and a
+		// chain-VALID survivor actually executes the D policy half.
+		mp, err := NewMempool(f.engine.chainState, f.store, devnetGenesisChainID)
+		mustCanonicalMO(t, "NewMempool", err)
 		f.engine.SetMempool(mp)
 		relay := f.engine.DARelayState()
 		_, err = f.engine.ApplyBlock(f.blockWithDASets(t, daSetSpec{daID: [32]byte{0xa1}, payloads: [][]byte{[]byte("a1")}}), nil)

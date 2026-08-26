@@ -469,7 +469,11 @@ func canonicalRetainedDAMemberChainValid(member canonicalRetainedDAMember, chain
 	if snapshot == nil {
 		return false, terminalCanonicalDAError(fmt.Errorf("no final chainstate view for retained DA %s", member.label))
 	}
-	if _, keep, err := canonicalCheckedAgainstFinalChain(member.raw, member.tx, member.ids, snapshot.utxos, chain); err != nil || !keep {
+	// The checker CONSUMES the owned map it is handed (one delete per spent
+	// input), so it gets a throwaway copy of the already-narrowed snapshot and the
+	// policy half below reads the pristine one — the same split the M side makes in
+	// canonicalMempoolEntryFinalValid.
+	if _, keep, err := canonicalCheckedAgainstFinalChain(member.raw, member.tx, member.ids, copyUtxoSet(snapshot.utxos), chain); err != nil || !keep {
 		return false, err
 	}
 	return canonicalMempoolChainPolicyValid(member.tx, snapshot.utxos, chain)
