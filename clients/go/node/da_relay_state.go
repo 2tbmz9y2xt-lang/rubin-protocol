@@ -146,10 +146,13 @@ type DARelayPrefetchPlan struct {
 // TxBytes MUST be the EXACT canonical serialization of the tx_kind 0x01
 // transaction this record is the commit of — the bytes Section 5.2 admission
 // validated, fully consuming, with DaCommitCore.DaID == DAID and
-// DaCommitCore.ChunkCount == ChunkCount. Staging does NOT check it: the transition re-parses
-// these bytes for the record's exact identity, so a violation is
+// DaCommitCore.ChunkCount == ChunkCount. Staging does NOT check it, and the
+// transition's re-parse detects only STRUCTURAL violations: bytes that do not
+// parse, trailing bytes, or a kind/da_id/chunk_count contradiction are
 // TERMINAL_LOCAL_INVARIANT(evidence) there — the node latches and publishes
-// nothing.
+// nothing. A WELL-FORMED substitute transaction carrying matching metadata is
+// silently adopted as this record's exact identity instead: nothing binds these
+// bytes to the payload commitment or to the transaction admission actually saw.
 type DARelayCommit struct {
 	DAID              [32]byte
 	PayloadCommitment [32]byte

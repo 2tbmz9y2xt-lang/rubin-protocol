@@ -774,7 +774,7 @@ func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []
 			kinds := ""
 			for kind, count := range dropped {
 				if count != 0 {
-					kinds = fmt.Sprintf("%s %#02x x%d", kinds, kind, count)
+					kinds = fmt.Sprintf("%s 0x%02x x%d", kinds, kind, count)
 				}
 			}
 			s.diagnose(diag, "mempool: requeue-tx: %d row(s) of a non-standard tx_kind invoke no owner in this line:%s\n", total, kinds)

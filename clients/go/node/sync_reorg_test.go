@@ -1533,7 +1533,7 @@ func TestNonCoinbaseBlockTransactionsExtractsCanonicalTransactions(t *testing.T)
 	}
 	// The kind travels with the bytes, taken from the block's own parse.
 	if rows[0].kind != 0x00 {
-		t.Fatalf("row tx_kind=%#02x, want the standard kind", rows[0].kind)
+		t.Fatalf("row tx_kind=0x%02x, want the standard kind", rows[0].kind)
 	}
 }
 
@@ -4189,12 +4189,12 @@ func TestRequeueSelectsOneOwnerFromTheRowsOwnTxKind(t *testing.T) {
 	}
 	for i, want := range []uint8{0x00, 0x01, 0x02} {
 		if rows[i].kind != want {
-			t.Fatalf("row %d kind=%#02x, want %#02x", i, rows[i].kind, want)
+			t.Fatalf("row %d kind=0x%02x, want 0x%02x", i, rows[i].kind, want)
 		}
 		// A row no owner will receive is never serialized: only the standard
 		// row carries bytes.
 		if hasBytes := rows[i].txBytes != nil; hasBytes != (want == 0x00) {
-			t.Fatalf("row %d kind=%#02x carries bytes=%v", i, want, hasBytes)
+			t.Fatalf("row %d kind=0x%02x carries bytes=%v", i, want, hasBytes)
 		}
 	}
 

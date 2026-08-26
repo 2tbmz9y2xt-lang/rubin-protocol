@@ -208,9 +208,11 @@ type preparedCanonicalDAImage struct {
 // causes form ONE record union, so a record matched by both is removed once.
 //
 // It runs under the transition's ChainState admission WRITE fence, so the live
-// image it reads cannot move before publication; it takes only DARelayState.mu
-// and never the admission guard itself, which is neither reentrant nor available
-// to it.
+// image it reads cannot move before publication; of the LIVE state it takes only
+// DARelayState.mu and never the admission guard itself, which is neither
+// reentrant nor available to it. Member validation additionally RLocks the
+// PRIVATE final image's ChainState.mu through admissionSnapshotForInputs — that
+// clone is transition-owned and its mutex never becomes the live one.
 //
 // Everything fallible happens HERE: parsing, validation and every checked
 // accounting projection. Publication is assignment only.
@@ -393,7 +395,7 @@ func parseRetainedDAMember(txBytes []byte, label string) (canonicalRetainedDAMem
 
 func checkRetainedDACommitRole(tx *consensus.Tx, record daRelaySetRecord) error {
 	if tx.TxKind != 0x01 || tx.DaCommitCore == nil {
-		return terminalCanonicalDAError(fmt.Errorf("retained DA commit for %x is tx_kind %#02x", record.daID, tx.TxKind))
+		return terminalCanonicalDAError(fmt.Errorf("retained DA commit for %x is tx_kind 0x%02x", record.daID, tx.TxKind))
 	}
 	if tx.DaCommitCore.DaID != record.daID {
 		return terminalCanonicalDAError(fmt.Errorf("retained DA commit for %x carries da_id %x", record.daID, tx.DaCommitCore.DaID))
@@ -406,7 +408,7 @@ func checkRetainedDACommitRole(tx *consensus.Tx, record daRelaySetRecord) error 
 
 func checkRetainedDAChunkRole(tx *consensus.Tx, daID [32]byte, index uint16) error {
 	if tx.TxKind != 0x02 || tx.DaChunkCore == nil {
-		return terminalCanonicalDAError(fmt.Errorf("retained DA chunk %d for %x is tx_kind %#02x", index, daID, tx.TxKind))
+		return terminalCanonicalDAError(fmt.Errorf("retained DA chunk %d for %x is tx_kind 0x%02x", index, daID, tx.TxKind))
 	}
 	if tx.DaChunkCore.DaID != daID {
 		return terminalCanonicalDAError(fmt.Errorf("retained DA chunk %d for %x carries da_id %x", index, daID, tx.DaChunkCore.DaID))
