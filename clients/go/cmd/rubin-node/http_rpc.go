@@ -1342,9 +1342,11 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 	writeJSONResponse(state, route, w, status, body)
 }
 
-// writeMineNextFailure is the only exit an attempt that REACHED MineOne can
-// leave by on failure, and it runs strictly after rpcMut is released; the guards
-// ahead of it answer before or without a candidate and have nothing to announce.
+// writeMineNextFailure is the exit for a MineOne that returned an error, and it
+// runs strictly after rpcMut is released. Every OTHER refusal this route can
+// answer with — the three entry guards and the unreachable nil-identity exit —
+// either runs before MineOne or holds no candidate, so none of them has anything
+// to announce.
 //
 // It SELECTS the response first and writes it last, so nothing the announce tail
 // in between does — a store read failure, an announce error, a slow network
