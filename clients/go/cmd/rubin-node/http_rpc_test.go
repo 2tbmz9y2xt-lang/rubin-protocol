@@ -2376,6 +2376,84 @@ func mustRPCMineNextState(t *testing.T, minerCfgTweaks ...func(*node.MinerConfig
 	return state
 }
 
+// TestMineNextFailureExitAnnouncesAPublishedCandidate is the failure exit's
+// announce row. A terminal candidate NEW is the one failure that PUBLISHED a
+// canonical block: it returns both the block identity and the terminal error, so
+// the block is as canonical as an ordinary success's and must be announced. The
+// row also pins the other half of A13 — the announce cannot change the response
+// the route already selected — and the nil-Block failure that must announce
+// nothing.
+//
+// It calls the exit directly with a constructed node.MineOneOutcome because a
+// terminal candidate NEW cannot be produced from this package: it requires a
+// post-namespace-commit canonical-index fault, whose seams (atomicWriteIO,
+// writeFileAtomicFn, loadBlockStoreIndexFn) are private to package node, and
+// state.miner is a concrete *node.Miner with no injection point. The real
+// carrier for that outcome is TestMineOneWithOutcomeRealCarriers, in package
+// node.
+func TestMineNextFailureExitAnnouncesAPublishedCandidate(t *testing.T) {
+	terminal := errors.New("terminal canonical persistence (new)")
+	for _, tc := range []struct {
+		name       string
+		published  bool
+		wantStatus int
+	}{
+		{name: "terminal candidate NEW announces the published block", published: true, wantStatus: http.StatusServiceUnavailable},
+		{name: "a failure with no candidate announces nothing", wantStatus: http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := mustRPCMineNextState(t)
+			height, hash, ok, err := state.blockStore.Tip()
+			if err != nil || !ok {
+				t.Fatalf("Tip: ok=%v err=%v", ok, err)
+			}
+			want, err := state.blockStore.GetBlockByHash(hash)
+			if err != nil {
+				t.Fatalf("GetBlockByHash: %v", err)
+			}
+			var announced [][]byte
+			state.announceBlock = func(blockBytes []byte) error {
+				announced = append(announced, blockBytes)
+				return nil
+			}
+			outcome := node.MineOneOutcome{
+				CommitState: node.CanonicalCommitStateCommitted,
+				Disposition: node.MineOneDispositionServiceUnavailable,
+			}
+			if tc.published {
+				outcome.Block = &node.MinedBlock{Height: height, Hash: hash, Timestamp: 11, Nonce: 13, TxCount: 1}
+			}
+
+			rec := httptest.NewRecorder()
+			writeMineNextFailure(state, "/mine_next", rec, outcome, terminal, false)
+
+			// The response half is asserted FIRST and on its own, so removing the
+			// announce tail fails ONLY the announce assertions below: the two
+			// claims cannot mask each other.
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status=%d, want %d", rec.Code, tc.wantStatus)
+			}
+			var got mineNextResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if got.CommitState != node.CanonicalCommitStateCommitted || got.Error != terminal.Error() {
+				t.Fatalf("body commit_state=%q error=%q, want committed and the terminal error", got.CommitState, got.Error)
+			}
+			if tc.published != (got.BlockHash != nil && *got.BlockHash == hex.EncodeToString(hash[:])) {
+				t.Fatalf("body block_hash=%v, want the published identity present=%v", got.BlockHash, tc.published)
+			}
+
+			if tc.published != (len(announced) == 1) {
+				t.Fatalf("announce calls=%d, want published=%v", len(announced), tc.published)
+			}
+			if tc.published && !bytes.Equal(announced[0], want) {
+				t.Fatalf("announced %d bytes, want the published block's exact %d", len(announced[0]), len(want))
+			}
+		})
+	}
+}
+
 func TestDevnetRPCMineNextLogsAnnounceBlockError(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := node.ChainStatePath(dir)

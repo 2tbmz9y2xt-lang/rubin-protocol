@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -220,8 +222,9 @@ type preparedCanonicalDAImage struct {
 // PRIVATE final image's ChainState.mu through admissionSnapshotForInputs — that
 // clone is transition-owned and its mutex never becomes the live one.
 //
-// Everything fallible happens HERE: parsing, validation and every checked
-// accounting projection. Publication is assignment only.
+// Everything fallible happens HERE: parsing, validation, every checked
+// accounting projection, and the whole-image accounting sweep that follows the
+// removals (checkRetainedDAAccountingLocked). Publication is assignment only.
 //
 // Cost, accepted deliberately: every retained member is validated against C1 on
 // every canonical transition, including the later members of a record already
@@ -249,7 +252,136 @@ func prepareCanonicalDAImage(relay *DARelayState, included []canonicalDASetIdent
 			return nil, terminalCanonicalDAError(err)
 		}
 	}
+	if err := projected.checkRetainedDAAccountingLocked(); err != nil {
+		return nil, err
+	}
 	return &preparedCanonicalDAImage{relay: relay, projected: projected}, nil
+}
+
+// checkRetainedDAAccountingLocked is R3's accounting-invariant sweep over the
+// WHOLE projected image, not only over the records the projection removed.
+//
+// The removal path checks its own arithmetic, so a REMOVED record's bookkeeping
+// is already proven; a SURVIVING record's is not, because the clone copies every
+// stored counter verbatim. This recomputes each stored aggregate from the
+// surviving records alone and compares it to what the clone carries, so a
+// retained field that contradicts its own record is a typed
+// TERMINAL_LOCAL_INVARIANT here — before the image is returned and therefore
+// before anything is published.
+//
+// It is the SECOND, independent computation of the same numbers the six
+// retained-DA writers maintain incrementally: any disagreement is the finding,
+// and the sweep never repairs, only refuses. The walk is by ascending raw da_id
+// and every accumulation is checked, so the same corrupt image yields the same
+// evidence string on every run and on every pointer width.
+func (s *DARelayState) checkRetainedDAAccountingLocked() error {
+	totals, err := s.recomputeRetainedDAAccountingLocked()
+	if err != nil {
+		return terminalCanonicalDAError(err)
+	}
+	if err := totals.checkAgainstLocked(s); err != nil {
+		return terminalCanonicalDAError(err)
+	}
+	return nil
+}
+
+// retainedDAAccountingTotals is what the surviving records THEMSELVES imply for
+// every stored aggregate DARelayState carries.
+//
+// daIDEntries counts the per-da_id entries the records imply rather than
+// rebuilding that map: the per-record value is compared inside the walk, where
+// the da_id is already in hand, so only the count of EXTRA stored entries is
+// left to check afterwards.
+type retainedDAAccountingTotals struct {
+	orphanBytes uint64
+	commitBytes uint64
+	pinnedBytes uint64
+	peerBytes   map[string]uint64
+	daIDEntries int
+}
+
+// recomputeRetainedDAAccountingLocked derives the totals from retained_tx(R) via
+// the SAME per-record accounting the mutation path bills with, so the sweep and
+// the writers cannot disagree about what a record contributes — only about what
+// the counters say it contributed.
+func (s *DARelayState) recomputeRetainedDAAccountingLocked() (retainedDAAccountingTotals, error) {
+	totals := retainedDAAccountingTotals{peerBytes: map[string]uint64{}}
+	for _, daID := range s.sortedRetainedDAIDsLocked() {
+		record := s.sets[daID]
+		if record.daID != daID {
+			return totals, fmt.Errorf("retained DA record stored under da_id %x carries da_id %x", daID, record.daID)
+		}
+		accounting, err := record.orphanAccounting()
+		if err != nil {
+			return totals, err
+		}
+		if stored := s.orphanBytesByDAID[daID]; stored != accounting.orphanBytes {
+			return totals, fmt.Errorf("per-da_id orphan bytes for %x: record implies %d, state holds %d", daID, accounting.orphanBytes, stored)
+		}
+		if accounting.orphanBytes != 0 {
+			totals.daIDEntries++
+		}
+		if err := totals.add(accounting, record.pinnedPayloadAccountingBytes()); err != nil {
+			return totals, err
+		}
+	}
+	return totals, nil
+}
+
+// add accumulates one record with checked arithmetic. The per-peer map is walked
+// in map order deliberately: every failure it can raise is the SHARED
+// errDARelayArithmeticOverflow sentinel, which carries no key, so no evidence
+// string depends on iteration order.
+func (t *retainedDAAccountingTotals) add(accounting daRelayRecordAccounting, pinned uint64) error {
+	var err error
+	if t.orphanBytes, err = checkedAddUint64(t.orphanBytes, accounting.orphanBytes); err != nil {
+		return err
+	}
+	if t.commitBytes, err = checkedAddUint64(t.commitBytes, accounting.commitBytes); err != nil {
+		return err
+	}
+	if t.pinnedBytes, err = checkedAddUint64(t.pinnedBytes, pinned); err != nil {
+		return err
+	}
+	for key, bytes := range accounting.peerBytes {
+		if err := addPeerAccounting(t.peerBytes, key, bytes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkAgainstLocked compares the recomputed totals to the stored counters,
+// naming the disagreeing aggregate and both values.
+func (t retainedDAAccountingTotals) checkAgainstLocked(s *DARelayState) error {
+	switch {
+	case t.orphanBytes != s.orphanBytes:
+		return fmt.Errorf("orphan pool bytes: records imply %d, state holds %d", t.orphanBytes, s.orphanBytes)
+	case t.commitBytes != s.orphanCommitOverheadBytes:
+		return fmt.Errorf("orphan commit overhead bytes: records imply %d, state holds %d", t.commitBytes, s.orphanCommitOverheadBytes)
+	case t.pinnedBytes != s.pinnedPayloadBytes:
+		return fmt.Errorf("pinned payload bytes: records imply %d, state holds %d", t.pinnedBytes, s.pinnedPayloadBytes)
+	case t.daIDEntries != len(s.orphanBytesByDAID):
+		return fmt.Errorf("per-da_id orphan bytes: records imply %d entries, state holds %d", t.daIDEntries, len(s.orphanBytesByDAID))
+	}
+	return t.checkPeerBytesLocked(s)
+}
+
+// checkPeerBytesLocked compares the per-peer counters key by key in ascending
+// key order, so the named key is the same on every run. A key the records do not
+// imply at all is caught by the entry count: neither map may hold a zero value —
+// every writer deletes an emptied key — so equal counts plus equal values on
+// every implied key is total equality.
+func (t retainedDAAccountingTotals) checkPeerBytesLocked(s *DARelayState) error {
+	for _, key := range slices.Sorted(maps.Keys(t.peerBytes)) {
+		if stored := s.orphanBytesByPeerQuotaKey[key]; stored != t.peerBytes[key] {
+			return fmt.Errorf("per-peer orphan bytes for %q: records imply %d, state holds %d", key, t.peerBytes[key], stored)
+		}
+	}
+	if len(t.peerBytes) != len(s.orphanBytesByPeerQuotaKey) {
+		return fmt.Errorf("per-peer orphan bytes: records imply %d entries, state holds %d", len(t.peerBytes), len(s.orphanBytesByPeerQuotaKey))
+	}
+	return nil
 }
 
 // publish is the D1 half of FIXED_PUBLICATION: it takes DARelayState.mu and

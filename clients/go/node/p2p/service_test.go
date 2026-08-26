@@ -410,10 +410,15 @@ func TestAnnounceBlockAdvancesDARelayTTL(t *testing.T) {
 }
 
 // stageCompleteDASetForService retains one single-chunk COMPLETE_SET through the
-// exported writer wrappers, so the record it leaves behind is byte-identical to
-// one an ingest path would have staged. Relocated here from the deleted
-// da_relay_consume_test.go, unchanged, because the surviving Service tests in
-// this file and in service_work_lifecycle_test.go are its remaining callers.
+// exported writer wrappers, with MINIMAL metadata and DELIBERATELY non-canonical
+// member bytes: TxBytes is the literal "commit"/"chunk", not the canonical
+// serialization of any transaction. The record is therefore NOT what an ingest
+// path would have staged, and that is what makes it serve both of its callers —
+// the retention rows here and in service_work_lifecycle_test.go, which only need
+// a record to be present, and latchedDAHarness, whose engine latches GENUINELY
+// because the next canonical transition's D preparation cannot parse these bytes.
+//
+// Relocated here from the deleted da_relay_consume_test.go, unchanged.
 func stageCompleteDASetForService(t *testing.T, svc *Service, daID [32]byte, payload []byte) {
 	t.Helper()
 	commitment := sha3.Sum256(payload)

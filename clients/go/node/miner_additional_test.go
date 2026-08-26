@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -726,6 +727,116 @@ func TestParseCanonicalTx(t *testing.T) {
 	if _, _, _, err := parseCanonicalTx(raw, "bad"); err == nil || err.Error() != "bad" {
 		t.Fatalf("expected non-canonical parse error, got %v", err)
 	}
+}
+
+// ambiguousCanonicalIndexWrite reproduces the production post-commit ambiguity
+// on the ONE canonical-index write: the file is written for real — the rename
+// CROSSED — and the lane then reports an after_namespace_commit failure, which
+// is the parent-fsync shape the classifier's single strict readback exists to
+// resolve.
+//
+// With readbackFails false that readback is the REAL loader over the real file,
+// so it finds the planned-new identity and the classifier selects
+// TERMINAL_PERSISTENCE(new). With it true the readback is unreadable, which is
+// TERMINAL_PERSISTENCE(neither_or_unreadable). These two seams are the only
+// injection in the rows below: the miner, the engine, the store, the candidate
+// and the classifier are all real.
+func ambiguousCanonicalIndexWrite(t *testing.T, store *BlockStore, readbackFails bool) {
+	t.Helper()
+	write, load := writeFileAtomicFn, loadBlockStoreIndexFn
+	withWriteFileAtomicFn(t, func(path string, data []byte, mode os.FileMode) error {
+		err := write(path, data, mode)
+		if path != store.indexPath || err != nil {
+			return err
+		}
+		return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
+	})
+	withLoadBlockStoreIndexFn(t, func(path string) (blockStoreIndexDisk, []byte, error) {
+		if readbackFails {
+			return blockStoreIndexDisk{}, nil, os.ErrInvalid
+		}
+		return load(path)
+	})
+}
+
+func requireMineOneOutcome(t *testing.T, outcome MineOneOutcome, err error, state CanonicalCommitState, disposition MineOneDisposition, hasBlock bool) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("outcome=%+v, want the attempt's own error", outcome)
+	}
+	if outcome.CommitState != state || outcome.Disposition != disposition || (outcome.Block != nil) != hasBlock {
+		t.Fatalf("commit_state=%q disposition=%v block=%v err=%v, want %q %v block=%v",
+			outcome.CommitState, outcome.Disposition, outcome.Block != nil, err, state, disposition, hasBlock)
+	}
+}
+
+func newMineOutcomeCarrier(t *testing.T) (*Miner, *SyncEngine, *BlockStore) {
+	t.Helper()
+	engine, store, _ := newCutoverEngine(t)
+	miner, err := NewMiner(engine.chainState, store, engine, DefaultMinerConfig())
+	if err != nil {
+		t.Fatalf("NewMiner: %v", err)
+	}
+	return miner, engine, store
+}
+
+// TestMineOneWithOutcomeRealCarriers drives the ACTUAL
+// (*Miner).MineOneWithOutcome — not the projection function it calls — through
+// every commit truth a canonical apply can select, and pins the exact
+// (CommitState, Disposition, Block-nil-ness, error identity) tuple each one
+// produces.
+//
+// The bootstrap row is the one the pure projection test cannot reach: it is the
+// only path whose outcome is built OUTSIDE executeMineOne, so flattening that
+// arm to unavailableMineOneOutcome() would silently report a published genesis
+// as not_committed and leave every projection row green.
+func TestMineOneWithOutcomeRealCarriers(t *testing.T) {
+	t.Run("bootstrap terminal NEW is committed and unavailable with no identity", func(t *testing.T) {
+		miner, engine, store := newMineOutcomeCarrier(t)
+		ambiguousCanonicalIndexWrite(t, store, false)
+		outcome, err := miner.MineOneWithOutcome(context.Background(), nil)
+		requireMineOneOutcome(t, outcome, err, CanonicalCommitStateCommitted, MineOneDispositionServiceUnavailable, false)
+		if !engine.persistenceFaulted() {
+			t.Fatal("the bootstrap terminal did not latch: the carrier is not the real commit path")
+		}
+	})
+
+	t.Run("candidate terminal NEW carries the published identity, and the latched retry is not_committed", func(t *testing.T) {
+		miner, engine, store := newMineOutcomeCarrier(t)
+		// A clean attempt first: it bootstraps genesis AND mines height 1, so the
+		// faulted attempt below is a real CANDIDATE apply, not the bootstrap.
+		if _, err := miner.MineOneWithOutcome(context.Background(), nil); err != nil {
+			t.Fatalf("clean MineOneWithOutcome: %v", err)
+		}
+		ambiguousCanonicalIndexWrite(t, store, false)
+		outcome, err := miner.MineOneWithOutcome(context.Background(), nil)
+		requireMineOneOutcome(t, outcome, err, CanonicalCommitStateCommitted, MineOneDispositionServiceUnavailable, true)
+		if outcome.Block.Height != 2 {
+			t.Fatalf("terminal NEW identity height=%d, want the published candidate at 2", outcome.Block.Height)
+		}
+		if !engine.persistenceFaulted() {
+			t.Fatal("the candidate terminal did not latch")
+		}
+
+		// Truth OLD through the sentinel arm: the latched engine refuses before any
+		// commit stage, which is a LOCAL unavailability and never a 422 verdict on
+		// the candidate.
+		retry, retryErr := miner.MineOneWithOutcome(context.Background(), nil)
+		requireMineOneOutcome(t, retry, retryErr, CanonicalCommitStateNotCommitted, MineOneDispositionServiceUnavailable, false)
+		if !errors.Is(retryErr, errStoragePersistenceFault) {
+			t.Fatalf("latched retry err=%v, want the persistence-fault sentinel", retryErr)
+		}
+	})
+
+	t.Run("UNKNOWN is never flattened onto not_committed", func(t *testing.T) {
+		miner, engine, store := newMineOutcomeCarrier(t)
+		ambiguousCanonicalIndexWrite(t, store, true)
+		outcome, err := miner.MineOneWithOutcome(context.Background(), nil)
+		requireMineOneOutcome(t, outcome, err, CanonicalCommitStateUnknown, MineOneDispositionServiceUnavailable, false)
+		if !engine.persistenceFaulted() {
+			t.Fatal("the unknown terminal did not latch")
+		}
+	})
 }
 
 // TestCanonicalMineOneOutcomeProjection pins the ONE mapping from a canonical

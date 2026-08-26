@@ -883,6 +883,206 @@ func TestCanonicalDAImageCrossRecordPrecedenceIsRecordMajor(t *testing.T) {
 	}
 }
 
+// daAccountingFixture stages the two record STATES whose stored aggregates are
+// disjoint, so every counter DARelayState carries is nonzero at once and each
+// one can be corrupted on its own: a COMPLETE_SET is the only state that
+// contributes pinned payload bytes and contributes no orphan accounting at all,
+// while an INCOMPLETE staged-commit record is the only state that contributes
+// global, per-peer, per-da_id and commit-overhead orphan bytes.
+//
+// Both records are chain-valid and neither is included, so BOTH SURVIVE the
+// projection: the sweep they exercise is the whole-image one, not the removal
+// path's own arithmetic.
+type daAccountingFixture struct {
+	f          *canonicalMOFixture
+	relay      *DARelayState
+	chain      canonicalFinalChainContext
+	complete   [32]byte
+	incomplete [32]byte
+}
+
+func newDAAccountingFixture(t *testing.T) *daAccountingFixture {
+	t.Helper()
+	f := newCanonicalMOFixture(t, 4, MempoolConfig{})
+	a := &daAccountingFixture{
+		f: f, relay: f.engine.DARelayState(),
+		complete: daRelayTestID(0x62), incomplete: daRelayTestID(0x63),
+	}
+	a.f.daSet(t, a.relay, a.complete, f.ops[:2], 1300)
+	// chunk_count 2 with only chunk 0 retained: the record stays incomplete, so
+	// its members keep their orphan accounting instead of becoming pinned payload.
+	commitTx := f.daCommitTx(t, f.ops[2], a.incomplete, 2, 1310)
+	mustCanonicalMO(t, "StageCommit", a.relay.StageCommit("peer-partial-commit", DARelayCommit{
+		DAID: a.incomplete, PayloadCommitment: sha3.Sum256([]byte("partial")), ChunkCount: 2,
+		WireBytes: uint64(len(commitTx)), TxBytes: commitTx,
+	}))
+	payload := []byte{0x63, 0x00}
+	chunkTx := f.daChunkTx(t, f.ops[3], a.incomplete, 0, 1311, payload)
+	mustCanonicalMO(t, "StageChunk", a.relay.StageChunk("peer-partial-chunk", DARelayChunk{
+		DAID: a.incomplete, ChunkHash: sha3.Sum256(payload), ChunkIndex: 0, Payload: payload,
+		WireBytes: uint64(len(chunkTx)), TxBytes: chunkTx,
+	}))
+	a.chain = f.canonicalDATestChain(t)
+	a.requireEveryAggregateIsExercised(t)
+	return a
+}
+
+// requireEveryAggregateIsExercised fails the fixture rather than the rows if any
+// stored aggregate is zero: a zero counter would let its corruption row pass on a
+// sweep that never looks at that field.
+func (a *daAccountingFixture) requireEveryAggregateIsExercised(t *testing.T) {
+	t.Helper()
+	a.relay.mu.Lock()
+	defer a.relay.mu.Unlock()
+	if a.relay.orphanBytes == 0 || a.relay.orphanCommitOverheadBytes == 0 || a.relay.pinnedPayloadBytes == 0 {
+		t.Fatalf("fixture aggregates orphan=%d commit=%d pinned=%d, want every one nonzero", a.relay.orphanBytes, a.relay.orphanCommitOverheadBytes, a.relay.pinnedPayloadBytes)
+	}
+	if len(a.relay.orphanBytesByPeerQuotaKey) != 2 || len(a.relay.orphanBytesByDAID) != 1 {
+		t.Fatalf("fixture peer entries=%d da_id entries=%d, want 2 and 1", len(a.relay.orphanBytesByPeerQuotaKey), len(a.relay.orphanBytesByDAID))
+	}
+	if a.relay.sets[a.complete].state != daRelayStateCompleteSet || a.relay.sets[a.incomplete].state == daRelayStateCompleteSet {
+		t.Fatalf("fixture states complete=%v incomplete=%v", a.relay.sets[a.complete].state, a.relay.sets[a.incomplete].state)
+	}
+}
+
+// TestCanonicalDAImageSweepsSurvivingRecordAccounting is R3 over the WHOLE
+// projected image. The removal path already checks the arithmetic of the records
+// it removes; the clone copies every SURVIVING record's stored counters verbatim,
+// so only this sweep can catch one that contradicts the records it is supposed to
+// summarize. One row per stored aggregate, plus the map key vs record da_id
+// agreement, each with the other aggregates left consistent — a sweep narrowed to
+// any single counter fails the other rows.
+func TestCanonicalDAImageSweepsSurvivingRecordAccounting(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		aggregate string
+		corrupt   func(*daAccountingFixture)
+	}{
+		{"pinned payload bytes", "pinned payload bytes", func(a *daAccountingFixture) { a.relay.pinnedPayloadBytes = 0 }},
+		{"global orphan bytes", "orphan pool bytes", func(a *daAccountingFixture) { a.relay.orphanBytes++ }},
+		{"commit overhead bytes", "orphan commit overhead bytes", func(a *daAccountingFixture) { a.relay.orphanCommitOverheadBytes++ }},
+		{"per-peer orphan bytes", `per-peer orphan bytes for "peer-partial-chunk"`, func(a *daAccountingFixture) {
+			a.relay.orphanBytesByPeerQuotaKey["peer-partial-chunk"]++
+		}},
+		{"per-peer entry that no record implies", "per-peer orphan bytes: records imply 2 entries, state holds 3", func(a *daAccountingFixture) {
+			a.relay.orphanBytesByPeerQuotaKey["peer-that-owns-nothing"] = 1
+		}},
+		{"per-da_id orphan bytes", "per-da_id orphan bytes for", func(a *daAccountingFixture) {
+			a.relay.orphanBytesByDAID[a.incomplete]++
+		}},
+		{"per-da_id entry that no record implies", "per-da_id orphan bytes: records imply 1 entries, state holds 2", func(a *daAccountingFixture) {
+			a.relay.orphanBytesByDAID[daRelayTestID(0xfe)] = 1
+		}},
+		// The record is stored under a key that is not its own da_id. Its members
+		// still agree with the record's OWN da_id, so phases 1 and 2 pass it and
+		// only the sweep's key check can report it; the copy sorts first, so the
+		// key check is the deterministic winner.
+		{"map key disagrees with the record da_id", "stored under da_id 0100000000", func(a *daAccountingFixture) {
+			a.relay.sets[daRelayTestID(0x01)] = a.relay.sets[a.complete]
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newDAAccountingFixture(t)
+			a.relay.mu.Lock()
+			tc.corrupt(a)
+			a.relay.mu.Unlock()
+			before := daRelayStateSnapshot(a.relay)
+
+			image, err := prepareCanonicalDAImage(a.relay, nil, a.chain)
+			var terminal *canonicalDATerminalError
+			if !errors.As(err, &terminal) || image != nil {
+				t.Fatalf("err=%v image=%v, want the retained-DA terminal class and no image", err, image)
+			}
+			if !isCanonicalTransitionTerminalError(err) {
+				t.Fatal("the sweep's terminal class does not take the terminal closeout")
+			}
+			if !strings.Contains(err.Error(), tc.aggregate) {
+				t.Fatalf("terminal record=%q, want it to name %q", err.Error(), tc.aggregate)
+			}
+			if got := daRelayStateSnapshot(a.relay); !reflect.DeepEqual(got, before) { //nolint:govet // deepequalerrors: the snapshot must match byte-for-byte, error values included — identity is the assertion
+				t.Fatal("a refused preparation mutated the live retained-DA image")
+			}
+		})
+	}
+}
+
+// TestCanonicalDAImageSweepAcceptsAndPublishesAConsistentImage is the sweep's
+// no-false-positive control: a consistent image still prepares, still publishes,
+// and the PUBLISHED live state satisfies the same invariant — so the sweep also
+// holds across a real removal, not only over an untouched image.
+func TestCanonicalDAImageSweepAcceptsAndPublishesAConsistentImage(t *testing.T) {
+	a := newDAAccountingFixture(t)
+	set := a.relay.sets[a.complete]
+	included := identitiesOf(t, append([][]byte{set.commit.txBytes}, retainedChunkBytesInIndexOrder(set)...)...)
+	if len(included) != 1 {
+		t.Fatalf("block identities=%d, want the one complete staged set", len(included))
+	}
+	image := mustPrepareCanonicalDAImage(t, a.relay, included, a.chain)
+	if _, present := image.projected.sets[a.complete]; present {
+		t.Fatal("the included complete set survived the projection")
+	}
+	if _, present := image.projected.sets[a.incomplete]; !present {
+		t.Fatal("the sweep removed the uninvolved incomplete record")
+	}
+	image.publish()
+	a.relay.mu.Lock()
+	defer a.relay.mu.Unlock()
+	if _, present := a.relay.sets[a.complete]; present {
+		t.Fatal("publication did not remove the included complete set")
+	}
+	if err := a.relay.checkRetainedDAAccountingLocked(); err != nil {
+		t.Fatalf("the PUBLISHED live image fails its own accounting invariant: %v", err)
+	}
+}
+
+func retainedChunkBytesInIndexOrder(record daRelaySetRecord) [][]byte {
+	out := make([][]byte, 0, len(record.chunks))
+	for _, index := range sortedRetainedDAChunkIndexes(record) {
+		out = append(out, record.chunks[index].txBytes)
+	}
+	return out
+}
+
+// TestCanonicalDAImageScansEveryMemberAfterAnOrdinaryInvalidOne is the
+// MIXED-PHASE row inside ONE record: its first member is ordinary-invalid — a
+// planned removal that carries no error — and a LATER member raises a canonical
+// precommit plan abort. Phase 2 must visit every member, so the plan abort is
+// what the preparation returns; a scan that stopped at the first invalid member
+// would silently downgrade this record to a removal and answer nil.
+func TestCanonicalDAImageScansEveryMemberAfterAnOrdinaryInvalidOne(t *testing.T) {
+	f := newCanonicalMOFixture(t, 3, MempoolConfig{SuiteRegistry: unboundAlgSuiteRegistry()})
+	relay, daID := f.engine.DARelayState(), daRelayTestID(0x59)
+	f.daSet(t, relay, daID, f.ops[:3], 860)
+	// The COMMIT is the first member walked, and its input leaves C1: an ordinary
+	// invalidity, not a terminal and not an abort.
+	invalidateCommitInput := func(chain canonicalFinalChainContext) {
+		chain.final.mu.Lock()
+		delete(chain.final.Utxos, f.ops[0])
+		chain.final.mu.Unlock()
+	}
+
+	// Control: with no abort source, the SAME fixture is an ordinary removal, so
+	// the row below cannot pass on a commit that was itself aborting.
+	control := f.canonicalDATestChain(t)
+	invalidateCommitInput(control)
+	if _, present := mustPrepareCanonicalDAImage(t, relay, nil, control).projected.sets[daID]; present {
+		t.Fatal("control: the first member is not ordinary-invalid — the record survived")
+	}
+
+	chain := f.canonicalDATestChain(t)
+	chain.policy.SuiteRegistry = unboundAlgSuiteRegistry()
+	invalidateCommitInput(chain)
+	before := daRelayStateSnapshot(relay)
+	image, err := prepareCanonicalDAImage(relay, nil, chain)
+	var plan *canonicalMOPlanError
+	if !errors.As(err, &plan) || image != nil || isCanonicalTransitionTerminalError(err) {
+		t.Fatalf("err=%v image=%v, want the LATER member's plan abort", err, image)
+	}
+	if got := daRelayStateSnapshot(relay); !reflect.DeepEqual(got, before) { //nolint:govet // deepequalerrors: the snapshot must match byte-for-byte, error values included — identity is the assertion
+		t.Fatal("a plan abort mutated the live retained-DA image")
+	}
+}
+
 // TestCanonicalDAImageAccountingFailureIsTerminal pins the OTHER terminal cause:
 // a checked accounting failure while projecting the removal is the same class as
 // corrupt member bytes, and it too publishes nothing.

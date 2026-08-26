@@ -1320,35 +1320,7 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 	outcome, err := state.miner.MineOneWithOutcome(mineCtx, nil) //nolint:contextcheck
 	if err != nil {
 		state.rpcMut.Unlock()
-		// RUBIN_NODE_RPC_DEVNET.md section 2 + 3.4. The rule in full: a defined
-		// check that OBSERVES lifecycle cancellation answers 503 `rpc
-		// unavailable` even when a per-request cancellation has also fired; the
-		// 422-preserving carve-out is a per-request cancellation ALONE, with
-		// every check seeing a live lifecycle source; and a route exit that
-		// formed a failure result stands with no later reclassification.
-		// mineCtx.observedLifecycle IS that observation, captured at the check
-		// rather than reconstructed from provenance: it is set only by a poll
-		// that read the source canceled, so lifecycle-at-poll wins even over an
-		// already-pinned request-local first cause, and a run whose every poll
-		// saw a live source keeps the baseline 422 permanently — nothing polls
-		// mineCtx after MineOne returned, so the latch cannot move underneath
-		// this classification. The errors.Is(err, context.Canceled) conjunct
-		// transcribes the contract's classification formula (cancellation AND
-		// observation) and guards a future poll site that might wrap or replace
-		// the error after a latching poll; with the current poll sites — the
-		// latch is set only inside a Done()/Err() poll and every MineOne
-		// checkpoint returns the unwrapped ctx.Err() on the same statement — a
-		// true latch already implies err is context.Canceled, so the term is
-		// structurally redundant today but contract-prescribed.
-		if errors.Is(err, context.Canceled) && mineCtx.observedLifecycle {
-			writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextRejection(outcome.CommitState, "rpc unavailable"))
-			return
-		}
-		// Everything else is the attempt's OWN typed class: the status comes
-		// from the closed disposition and the body from the typed outcome, so
-		// this route never classifies an error string, a latch, the current tip
-		// or a storage reread.
-		writeJSONResponse(state, route, w, mineNextStatus(outcome.Disposition), mineNextFailure(outcome, err))
+		writeMineNextFailure(state, route, w, outcome, err, mineCtx.observedLifecycle)
 		return
 	}
 	if outcome.Block == nil {
@@ -1361,21 +1333,78 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 	}
 	mb := outcome.Block
 	state.rpcMut.Unlock()
-	// The mined block's bytes are loaded ONLY for the announce branch, which is
-	// the sole surviving post-return effect: the canonical transition already
-	// published the complete retained-DA image inside its own admission fence,
-	// so nothing here has DA cleanup left to do. Announce stays best-effort —
-	// both failure shapes report to stderr and neither may change the response
-	// this route already selected.
-	if state.announceBlock != nil {
-		blockBytes, loadErr := minedBlockBytes(state, mb.Hash)
-		if loadErr != nil {
-			_, _ = fmt.Fprintf(state.stderr, "rpc: announce-block: get mined block %x: %v\n", mb.Hash, loadErr)
-		} else if err := state.announceBlock(blockBytes); err != nil {
-			_, _ = fmt.Fprintf(state.stderr, "rpc: announce-block: %v\n", err)
-		}
-	}
+	announceMinedBlock(state, mb)
 	writeJSONResponse(state, route, w, mineNextStatus(outcome.Disposition), mineNextIdentity(mb, outcome.CommitState, ""))
+}
+
+// writeMineNextFailure is the route's ONE failure exit, and it runs strictly
+// after rpcMut is released.
+//
+// It SELECTS the response first and writes it last, so nothing the announce tail
+// in between does — a store read failure, an announce error, a slow network
+// callback — can change the status or the body this route already chose
+// (RUBIN_NODE_RPC_DEVNET.md A13).
+//
+// The announce tail runs here for the same reason it runs on the success path: a
+// terminal candidate NEW published a real canonical block AND returned the
+// terminal error, so outcome.Block is nonnil on this exit too and the block is
+// as canonical as an ordinary success's. Skipping the announcement for it would
+// leave a committed block unannounced purely because the attempt also latched.
+// Every other failure carries a nil Block and announces nothing.
+func writeMineNextFailure(state *devnetRPCState, route string, w http.ResponseWriter, outcome node.MineOneOutcome, err error, observedLifecycle bool) {
+	var status int
+	var body mineNextResponse
+	// RUBIN_NODE_RPC_DEVNET.md section 2 + 3.4. The rule in full: a defined
+	// check that OBSERVES lifecycle cancellation answers 503 `rpc unavailable`
+	// even when a per-request cancellation has also fired; the 422-preserving
+	// carve-out is a per-request cancellation ALONE, with every check seeing a
+	// live lifecycle source; and a route exit that formed a failure result
+	// stands with no later reclassification. observedLifecycle IS that
+	// observation, captured at the check rather than reconstructed from
+	// provenance: it is set only by a poll that read the source canceled, so
+	// lifecycle-at-poll wins even over an already-pinned request-local first
+	// cause, and a run whose every poll saw a live source keeps the baseline 422
+	// permanently — nothing polls mineCtx after MineOne returned, so the latch
+	// cannot move underneath this classification. The errors.Is(err,
+	// context.Canceled) conjunct transcribes the contract's classification
+	// formula (cancellation AND observation) and guards a future poll site that
+	// might wrap or replace the error after a latching poll; with the current
+	// poll sites — the latch is set only inside a Done()/Err() poll and every
+	// MineOne checkpoint returns the unwrapped ctx.Err() on the same statement —
+	// a true latch already implies err is context.Canceled, so the term is
+	// structurally redundant today but contract-prescribed.
+	if errors.Is(err, context.Canceled) && observedLifecycle {
+		status, body = http.StatusServiceUnavailable, mineNextRejection(outcome.CommitState, "rpc unavailable")
+	} else {
+		// Everything else is the attempt's OWN typed class: the status comes
+		// from the closed disposition and the body from the typed outcome, so
+		// this route never classifies an error string, a latch, the current tip
+		// or a storage reread.
+		status, body = mineNextStatus(outcome.Disposition), mineNextFailure(outcome, err)
+	}
+	announceMinedBlock(state, outcome.Block)
+	writeJSONResponse(state, route, w, status, body)
+}
+
+// announceMinedBlock is the route's ONE remaining post-return effect: the
+// canonical transition already published the complete retained-DA image inside
+// its own admission fence, so nothing here has DA cleanup left to do.
+//
+// The mined block's bytes are loaded ONLY for this branch. It is best-effort by
+// contract — both failure shapes report to stderr and NEITHER may change the
+// response the caller already selected, which is why every caller selects before
+// calling and writes after. A nil block is the no-candidate case and announces
+// nothing.
+func announceMinedBlock(state *devnetRPCState, mb *node.MinedBlock) {
+	if mb == nil || state.announceBlock == nil {
+		return
+	}
+	blockBytes, loadErr := minedBlockBytes(state, mb.Hash)
+	if loadErr != nil {
+		_, _ = fmt.Fprintf(state.stderr, "rpc: announce-block: get mined block %x: %v\n", mb.Hash, loadErr)
+	} else if err := state.announceBlock(blockBytes); err != nil {
+		_, _ = fmt.Fprintf(state.stderr, "rpc: announce-block: %v\n", err)
+	}
 }
 
 func minedBlockBytes(state *devnetRPCState, hash [32]byte) ([]byte, error) {
