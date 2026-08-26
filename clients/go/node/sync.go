@@ -1085,25 +1085,7 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	if err != nil {
 		return nil, blockApplyMetricRejected, canonicalApplyProjection{}, err
 	}
-	// This is the ONLY site that reports a block as canonical-applied, so the
-	// distinction between "connected to some chain state" and "made canonical"
-	// lives in exactly one place. Extraction runs on the already-parsed block —
-	// no re-parse, no retained bytes — and only AFTER the connect succeeded, so
-	// an over-cap or malformed DA layout is rejected by consensus with its own
-	// public error code before this ever runs. Any error here is therefore a
-	// defensive assertion; it happens before the transition begins, so nothing
-	// has been mutated.
-	daIDs, err := CompleteDASetIDsFromParsedBlock(pb)
-	if err != nil {
-		return nil, blockApplyMetricNone, canonicalApplyProjection{}, err
-	}
-	// I, derived from the SAME already validated parse A1 came from and bounded
-	// by the cardinality check A1 just made. It never reads the da_id rows above.
-	includedDA, err := canonicalDASetIdentitiesFromParsedBlock(pb)
-	if err != nil {
-		return nil, blockApplyMetricNone, canonicalApplyProjection{}, err
-	}
-	finalMTP, err := s.finalMempoolMTP(ctx.blockHeight, pb.Header.Timestamp, prevTimestamps)
+	daIDs, includedDA, finalMTP, err := s.deriveCanonicalPlanInputs(pb, ctx.blockHeight, prevTimestamps)
 	if err != nil {
 		return nil, blockApplyMetricNone, canonicalApplyProjection{}, err
 	}
@@ -1119,6 +1101,34 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	summary.CanonicalAppliedBlocks = plan.applied
 	s.recordAppliedBlock(summary.BlockHeight, pb.Header.Timestamp)
 	return summary, blockApplyMetricAccepted, projection, err
+}
+
+// deriveCanonicalPlanInputs derives A1's da_id rows, the exact included
+// identities I, and the final mempool MTP for one connected candidate.
+func (s *SyncEngine) deriveCanonicalPlanInputs(pb *consensus.ParsedBlock, height uint64, prevTimestamps []uint64) ([][32]byte, []canonicalDASetIdentity, uint64, error) {
+	// This is the ONLY site that reports a block as canonical-applied, so the
+	// distinction between "connected to some chain state" and "made canonical"
+	// lives in exactly one place. Extraction runs on the already-parsed block —
+	// no re-parse, no retained bytes — and only AFTER the connect succeeded, so
+	// an over-cap or malformed DA layout is rejected by consensus with its own
+	// public error code before this ever runs. Any error here is therefore a
+	// defensive assertion; it happens before the transition begins, so nothing
+	// has been mutated.
+	daIDs, err := CompleteDASetIDsFromParsedBlock(pb)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	// I, derived from the SAME already validated parse A1 came from and bounded
+	// by the cardinality check A1 just made. It never reads the da_id rows above.
+	includedDA, err := canonicalDASetIdentitiesFromParsedBlock(pb)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	finalMTP, err := s.finalMempoolMTP(height, pb.Header.Timestamp, prevTimestamps)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	return daIDs, includedDA, finalMTP, nil
 }
 
 // planDirectCanonicalConnect derives the complete C1/A1 plan for a direct connect
