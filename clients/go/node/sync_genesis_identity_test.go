@@ -295,11 +295,9 @@ func TestSyncEngineBootstrapCanonicalGenesisIfEmpty_NilChainState(t *testing.T) 
 	}
 }
 
-// newAliasingTestPair builds a SyncEngine plus a fresh ChainState that does
-// NOT alias the engine's internal chainState. Returned values are intended
-// for NewMiner mismatched-aliasing tests: the caller passes the standalone
-// ChainState as the miner's chainState argument while the SyncEngine still
-// holds its own different ChainState.
+// newAliasingTestPair builds a SyncEngine on a fresh store plus a standalone
+// ChainState that does NOT alias the engine's internal chainState — the shape
+// the NewMiner mismatched-aliasing rows pass as the miner's own chainState.
 func newAliasingTestPair(t *testing.T, chainID [32]byte) (*SyncEngine, *ChainState, *BlockStore) {
 	t.Helper()
 	dir := t.TempDir()

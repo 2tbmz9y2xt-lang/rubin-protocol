@@ -262,6 +262,31 @@ func TestCanonicalDAImageExactInclusionSelection(t *testing.T) {
 	}
 }
 
+// TestCanonicalDAImageRemovesEveryIncludedIdentity is A6's "many": ONE plan
+// carrying three DISTINCT exact identities removes all three residents and only
+// those. Every record here is chain-valid, so no validity arm can supply a
+// removal, and the fourth resident excludes "the plan is non-empty, drop all".
+func TestCanonicalDAImageRemovesEveryIncludedIdentity(t *testing.T) {
+	f := newCanonicalMOFixture(t, 8, MempoolConfig{})
+	relay := f.engine.DARelayState()
+	ids := [][32]byte{daRelayTestID(0x44), daRelayTestID(0x45), daRelayTestID(0x46), daRelayTestID(0x47)}
+	var carried [][]byte
+	for i, daID := range ids {
+		set := f.daSet(t, relay, daID, f.ops[2*i:2*i+2], 720+uint64(i)*10)
+		if i < 3 {
+			carried = append(carried, set.commit, set.chunks[0])
+		}
+	}
+	included := identitiesOf(t, carried...)
+	if len(included) != 3 {
+		t.Fatalf("block identities=%d, want the three distinct included sets", len(included))
+	}
+	image := mustPrepareCanonicalDAImage(t, relay, included, f.canonicalDATestChain(t))
+	if _, kept := image.projected.sets[ids[3]]; !kept || len(image.projected.sets) != 1 {
+		t.Fatalf("projected residents=%d uncarried set kept=%v, want the three included ones gone and only it left", len(image.projected.sets), kept)
+	}
+}
+
 func mutatedIdentities(identities []canonicalDASetIdentity, mutate func(*canonicalDASetIdentity)) []canonicalDASetIdentity {
 	out := make([]canonicalDASetIdentity, len(identities))
 	for i := range identities {
@@ -640,6 +665,92 @@ func TestCanonicalDAWritersObserveTheCompletePublishedImage(t *testing.T) {
 	}
 }
 
+// stageRetainedDAMembersOfBlock retains every DA member of these blocks with the
+// exact canonical bytes ingest supplies, so the resident carries the identity
+// that block contributes to I.
+func stageRetainedDAMembersOfBlock(t *testing.T, relay *DARelayState, blocks ...[]byte) {
+	t.Helper()
+	for _, blockBytes := range blocks {
+		parsed, err := consensus.ParseBlockBytes(blockBytes)
+		mustCanonicalMO(t, "ParseBlockBytes", err)
+		for _, tx := range parsed.Txs {
+			raw := mustMarshalTxForNodeTest(t, tx)
+			switch tx.TxKind {
+			case 0x01:
+				var commitment [32]byte
+				copy(commitment[:], tx.Outputs[0].CovenantData)
+				mustCanonicalMO(t, "StageCommit", relay.StageCommit("da-peer", DARelayCommit{DAID: tx.DaCommitCore.DaID, PayloadCommitment: commitment, ChunkCount: tx.DaCommitCore.ChunkCount, WireBytes: uint64(len(raw)), TxBytes: raw}))
+			case 0x02:
+				mustCanonicalMO(t, "StageChunk", relay.StageChunk("da-peer", DARelayChunk{DAID: tx.DaChunkCore.DaID, ChunkHash: tx.DaChunkCore.ChunkHash, ChunkIndex: tx.DaChunkCore.ChunkIndex, Payload: tx.DaPayload, WireBytes: uint64(len(raw)), TxBytes: raw}))
+			}
+		}
+	}
+}
+
+// TestCanonicalDAImageIsPreparedOnEveryTransitionPath executes A7: the
+// preferred-reorg, standalone-disconnect and genesis-bootstrap entries all reach
+// the ONE central D prepare/publish seam. Every record is a COMPLETE set, which
+// the orphan TTL never walks, and no capacity eviction runs, so only the D
+// projection can remove one; the last two rows also carry an EMPTY inclusion
+// list, leaving final chain validity as their only cause.
+func TestCanonicalDAImageIsPreparedOnEveryTransitionPath(t *testing.T) {
+	t.Run("preferred reorg", func(t *testing.T) {
+		f := newCanonicalDATestFixture(t)
+		mp, err := NewMempoolWithConfig(f.engine.chainState, f.store, devnetGenesisChainID, MempoolConfig{})
+		mustCanonicalMO(t, "NewMempoolWithConfig", err)
+		f.engine.SetMempool(mp)
+		relay := f.engine.DARelayState()
+		_, err = f.engine.ApplyBlock(f.blockWithDASets(t, daSetSpec{daID: [32]byte{0xa1}, payloads: [][]byte{[]byte("a1")}}), nil)
+		mustCanonicalMO(t, "ApplyBlock(A1)", err)
+		fork := f.forkFrom(t)
+		blockB1 := fork.blockWithDASets(t, daSetSpec{daID: [32]byte{0xb1}, payloads: [][]byte{[]byte("b1")}})
+		parsedB1, hashB1 := mustParseReorgBlockForTest(t, blockB1)
+		mustCanonicalMO(t, "StoreBlock(B1)", f.store.StoreBlock(hashB1, parsedB1.HeaderBytes, blockB1))
+		blockB2 := fork.blockWithDASets(t, daSetSpec{daID: [32]byte{0xb2}, payloads: [][]byte{[]byte("b2")}})
+		// Built and never applied: its set is the survivor the branch leaves alone.
+		survivor := fork.blockWithDASets(t, daSetSpec{daID: [32]byte{0xb3}, payloads: [][]byte{[]byte("b3")}})
+		stageRetainedDAMembersOfBlock(t, relay, blockB1, blockB2, survivor)
+		_, err = f.engine.ApplyBlockWithReorg(blockB2, nil)
+		mustCanonicalMO(t, "ApplyBlockWithReorg(B2)", err)
+		_, b1Held := relay.sets[[32]byte{0xb1}]
+		_, b2Held := relay.sets[[32]byte{0xb2}]
+		_, survivorHeld := relay.sets[[32]byte{0xb3}]
+		if b1Held || b2Held || !survivorHeld {
+			t.Fatalf("reorg D disposition: B1 retained=%v B2 retained=%v survivor removed=%v", b1Held, b2Held, !survivorHeld)
+		}
+	})
+	t.Run("standalone disconnect", func(t *testing.T) {
+		f := newCanonicalMOFixture(t, 4, MempoolConfig{})
+		// The commit spends an output the DISCONNECTED block creates: valid now, final-invalid once it leaves.
+		created := consensus.Outpoint{Txid: txID(t, f.raw(t, f.ops[0], 2, false))}
+		mustCanonicalMO(t, "ApplyBlock(spend)", f.applySpend(t, f.ops[0], 2))
+		relay, dropped, kept := f.engine.DARelayState(), daRelayTestID(0xd1), daRelayTestID(0xd2)
+		f.daSet(t, relay, dropped, []consensus.Outpoint{created, f.ops[1]}, 1200)
+		f.daSet(t, relay, kept, f.ops[2:4], 1210)
+		_, err := f.engine.DisconnectTip()
+		mustCanonicalMO(t, "DisconnectTip", err)
+		_, invalidHeld := relay.sets[dropped]
+		_, validHeld := relay.sets[kept]
+		if invalidHeld || !validHeld {
+			t.Fatalf("disconnect D disposition: final-invalid retained=%v final-valid removed=%v", invalidHeld, !validHeld)
+		}
+	})
+	t.Run("genesis bootstrap", func(t *testing.T) {
+		f := newCanonicalMOFixture(t, 2, MempoolConfig{})
+		engine, _, store := newAliasingTestPair(t, devnetGenesisChainID)
+		mp, err := NewMempoolWithConfig(engine.chainState, store, devnetGenesisChainID, MempoolConfig{})
+		mustCanonicalMO(t, "NewMempoolWithConfig", err)
+		engine.SetMempool(mp)
+		relay, daID := engine.DARelayState(), daRelayTestID(0xd3)
+		// Signed against the other fixture's UTXOs: never valid against genesis C1.
+		f.daSet(t, relay, daID, f.ops[:2], 1220)
+		mustCanonicalMO(t, "BootstrapCanonicalGenesisIfEmpty", engine.BootstrapCanonicalGenesisIfEmpty())
+		if _, present := relay.sets[daID]; present {
+			t.Fatal("the bootstrap transition retained a record it never validated against C1")
+		}
+	})
+}
+
 // TestCanonicalDAImageIsSkippedWithoutABoundRelay pins the unbound engine: a
 // transition with no retained-DA state prepares and publishes none, and neither
 // step panics.
@@ -649,6 +760,86 @@ func TestCanonicalDAImageIsSkippedWithoutABoundRelay(t *testing.T) {
 		t.Fatalf("image=%v err=%v, want no image and no error", image, err)
 	}
 	image.publish()
+}
+
+// TestCanonicalFenceImageReportsTheMOTerminalOverTheDTerminal is the
+// dual-violation row: one transition whose standard image AND retained-DA image
+// are both invariant-violating reports the STANDARD terminal, M/O preparation
+// completing first. The control proves the D defect is terminal on its own, so
+// the row cannot pass on a harmless D half.
+func TestCanonicalFenceImageReportsTheMOTerminalOverTheDTerminal(t *testing.T) {
+	f := newCanonicalMOFixture(t, 3, MempoolConfig{})
+	relay, daID := f.engine.DARelayState(), daRelayTestID(0x57)
+	f.daSet(t, relay, daID, f.ops[1:3], 840)
+	record := relay.sets[daID].cloneForStateMutation()
+	record.commit.chunkCount = 7 // contradicts the retained commit transaction
+	relay.sets[daID] = record
+	var da *canonicalDATerminalError
+	if _, err := prepareCanonicalDAImage(relay, nil, f.canonicalDATestChain(t)); !errors.As(err, &da) {
+		t.Fatalf("control: the D defect is not terminal on its own: %v", err)
+	}
+
+	txid := f.add(t, f.ops[0], 1)
+	f.mp.mu.Lock()
+	f.mp.txs[txid].raw[0] ^= 1 // the entry no longer matches its own identity
+	f.mp.mu.Unlock()
+	index, err := f.store.CanonicalIndexSnapshot()
+	mustCanonicalMO(t, "CanonicalIndexSnapshot", err)
+	tr, err := f.engine.beginCanonicalTransition(nil)
+	mustCanonicalMO(t, "beginCanonicalTransition", err)
+	defer tr.abort()
+	_, err = f.engine.prepareCanonicalFenceImage(tr, &canonicalTransitionPlan{oldSequence: index, priorTip: chainTipScalarsOf(f.engine.chainState), final: f.engine.chainState})
+	_, live := relay.sets[daID]
+	if !isCanonicalTransitionTerminalError(err) || canonicalTerminalReason(err) != "canonical mempool invariant" || errors.As(err, &da) || !live {
+		t.Fatalf("dual violation err=%v live record retained=%v, want the standard/owner terminal", err, live)
+	}
+}
+
+// TestCanonicalDAImagePlanAbortPrecedence pins EPD-6 on the D side. A retained
+// member whose failure the SHARED classifiers call plan-aborting returns the
+// SAME canonical precommit plan error M returns: nothing removed, nothing
+// latched, admission reopened. A corrupt member of that record still outranks
+// it, because phase 1 parses every member before phase 2 validates any. The
+// abort source is an unbound suite registry, whose backend failure read as an
+// exclusion instead would have REMOVED the record.
+func TestCanonicalDAImagePlanAbortPrecedence(t *testing.T) {
+	f := newCanonicalMOFixture(t, 3, MempoolConfig{SuiteRegistry: unboundAlgSuiteRegistry()})
+	relay, daID := f.engine.DARelayState(), daRelayTestID(0x58)
+	f.daSet(t, relay, daID, f.ops[:3], 850)
+	chain := f.canonicalDATestChain(t)
+	chain.policy.SuiteRegistry = unboundAlgSuiteRegistry()
+
+	var plan *canonicalMOPlanError
+	image, err := prepareCanonicalDAImage(relay, nil, chain)
+	if !errors.As(err, &plan) || image != nil || isCanonicalTransitionTerminalError(err) {
+		t.Fatalf("plan-aborting member err=%v image=%v, want the shared plan error", err, image)
+	}
+	if _, live := relay.sets[daID]; !live {
+		t.Fatal("a plan abort removed the live record")
+	}
+
+	// The same abort through the real fence aborts OPEN, not latched.
+	index, indexErr := f.store.CanonicalIndexSnapshot()
+	mustCanonicalMO(t, "CanonicalIndexSnapshot", indexErr)
+	tr, beginErr := f.engine.beginCanonicalTransition(nil)
+	mustCanonicalMO(t, "beginCanonicalTransition", beginErr)
+	_, fenceErr := f.engine.prepareCanonicalFenceImage(tr, &canonicalTransitionPlan{oldSequence: index, priorTip: chainTipScalarsOf(f.engine.chainState), final: f.engine.chainState})
+	if endErr := tr.end(fenceErr); !errors.As(endErr, &plan) || f.engine.persistenceFaulted() {
+		t.Fatalf("fenced plan abort err=%v latch=%v", endErr, f.engine.persistenceFaulted())
+	}
+	if _, ok := f.mp.PendingOutpointOwner().AdmissionContext(); !ok {
+		t.Fatal("a D plan abort left admission closed")
+	}
+
+	// One unparseable LAST member: phase 1 returns for the whole record first.
+	record, corrupt := relay.sets[daID].cloneForStateMutation(), relay.sets[daID].chunks[1]
+	corrupt.txBytes = []byte{0xff, 0xfe}
+	record.chunks[1] = corrupt
+	relay.sets[daID] = record
+	var terminal *canonicalDATerminalError
+	if _, err := prepareCanonicalDAImage(relay, nil, chain); !errors.As(err, &terminal) {
+		t.Fatalf("err=%v, want the parse-phase terminal to outrank the plan abort", err)
+	}
 }
 
 // TestCanonicalDAImageAccountingFailureIsTerminal pins the OTHER terminal cause:

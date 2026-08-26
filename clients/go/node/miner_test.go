@@ -35,6 +35,13 @@ func TestMinerMineOneFromEmptyState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new miner: %v", err)
 	}
+	// The production wiring passes chainState and syncEngine as separate
+	// arguments, so an accepted construction must still END UP holding the
+	// engine's own pointers: /mine_next projects the truth of the transition
+	// that ran on THIS chainstate, and a split pair would report another's.
+	if miner.chainState != syncEngine.chainState || miner.blockStore != syncEngine.blockStore {
+		t.Fatal("NewMiner kept pointers that do not alias the sync engine's")
+	}
 
 	mb, err := miner.MineOne(context.Background(), nil)
 	if err != nil {
