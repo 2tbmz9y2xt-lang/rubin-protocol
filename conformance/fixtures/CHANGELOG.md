@@ -11,6 +11,10 @@ Policy:
 
 ---
 
+## 2026-08-27 — D00-R3 provisional DA expected authority (RUB-1267)
+
+Manual authoring re-pins the inert `FROZEN_EXPECTED` artifact to the reviewed provisional/noncanonical `rubin-spec@79c49092f35b7396669b991ec1fd534e41d9b1a7`: 79 expected-only cases, 19 closed obligations, and zero outstanding. An exact human spec merge-OID rebind remains required before final authority. Changed files: `POLICY_DA_ANCHOR_ANTI_ABUSE.md`, `protocol/da_admission_expected_v1.json`, `tools/gen_conformance_matrix.py`, `conformance/MATRIX.md`, and this changelog.
+
 ## 2026-08-26 — Frozen DA expected authority (RUB-1243 / D01C)
 
 Manual authoring (no JSON generator) appended 26 inert capacity-plan, resident-integrity, accepted-sequence, payload, configuration, advertisement, and mixed-provenance State B cleanup expected cases to `protocol/da_admission_expected_v1.json`, bringing the corpus from 40 to 66 cases, closing all 19 obligations, and moving it atomically to `FROZEN_EXPECTED`. The existing native Matrix generator owns only the artifact inventory row. Exact validation commands: `python3 tools/check_conformance_fixtures_policy.py`, `python3 tools/gen_conformance_matrix.py`, `python3 tools/gen_conformance_matrix.py --check`, `python3 -m unittest tools.tests.test_gen_conformance_matrix`, and `git diff --check`. Changed files: `conformance/fixtures/protocol/da_admission_expected_v1.json`, `tools/gen_conformance_matrix.py`, `conformance/MATRIX.md`, and `conformance/fixtures/CHANGELOG.md`.
