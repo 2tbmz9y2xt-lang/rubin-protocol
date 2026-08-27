@@ -197,11 +197,8 @@ type daRelayAdmissionMember struct {
 // AdmitDA is SYNCHRONOUS by contract: it performs no network action and never
 // waits, because it holds the admission read guard for its whole duration.
 func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmissionResult, error) {
-	if s == nil {
-		return DAAdmissionResult{}, selectRelayDisposition(txAdmitUnavailable("no DA relay state bound"), RelayAdmissionUnavailable)
-	}
-	if s.mempool == nil {
-		return DAAdmissionResult{}, selectRelayDisposition(txAdmitUnavailable("no mempool bound to the DA relay state"), RelayAdmissionUnavailable)
+	if err := s.checkAdmitDABound(); err != nil {
+		return DAAdmissionResult{}, err
 	}
 	if err := provenance.validate(); err != nil {
 		return DAAdmissionResult{}, err
@@ -228,6 +225,19 @@ func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmis
 		return DAAdmissionResult{}, err
 	}
 	return s.commitDAAdmission(admission, member)
+}
+
+// checkAdmitDABound is AdmitDA's call-shape refusal ahead of step 1: an unbound
+// relay state or one without a mempool selects the existing UNAVAILABLE before
+// provenance, parse, guard or any state work.
+func (s *DARelayState) checkAdmitDABound() error {
+	if s == nil {
+		return selectRelayDisposition(txAdmitUnavailable("no DA relay state bound"), RelayAdmissionUnavailable)
+	}
+	if s.mempool == nil {
+		return selectRelayDisposition(txAdmitUnavailable("no mempool bound to the DA relay state"), RelayAdmissionUnavailable)
+	}
+	return nil
 }
 
 // classifyRetainedReplay is steps 4-5 of AdmitDA: one guarded raw observation,
@@ -569,14 +579,8 @@ func (s *DARelayState) observeRetainedTxLocked(txid [32]byte) daRetainedObservat
 // their failures are re-rendered as plain text here). It reruns NO consensus,
 // fee, capacity or policy check and repairs nothing.
 func (o daRetainedObservation) validate(txid [32]byte) (DARetainedTxSnapshot, error) {
-	if !o.recordPresent || o.recordDAID != o.locator.daID {
-		return DARetainedTxSnapshot{}, fmt.Errorf("retained DA locator for %x names absent record %x", txid, o.locator.daID)
-	}
-	if !o.memberPresent || o.member.txid != txid {
-		return DARetainedTxSnapshot{}, fmt.Errorf("retained DA locator for %x does not resolve to its own member", txid)
-	}
-	if len(o.raw) == 0 {
-		return DARetainedTxSnapshot{}, fmt.Errorf("retained DA member %x has no retained transaction bytes", o.member.txid)
+	if err := o.checkLocatedCoherence(txid); err != nil {
+		return DARetainedTxSnapshot{}, err
 	}
 	tx, parsedTxID, parsedWTxID, consumed, err := consensus.ParseTx(o.raw)
 	if err != nil {
@@ -589,6 +593,22 @@ func (o daRetainedObservation) validate(txid [32]byte) (DARetainedTxSnapshot, er
 		return DARetainedTxSnapshot{}, err
 	}
 	return DARetainedTxSnapshot{TxID: o.member.txid, WTxID: o.member.wtxid, TxBytes: o.raw}, nil
+}
+
+// checkLocatedCoherence is validate's coherence phase over the located copy: the
+// locator must resolve inside the copy to its own record and member, and the
+// member must carry retained bytes.
+func (o daRetainedObservation) checkLocatedCoherence(txid [32]byte) error {
+	if !o.recordPresent || o.recordDAID != o.locator.daID {
+		return fmt.Errorf("retained DA locator for %x names absent record %x", txid, o.locator.daID)
+	}
+	if !o.memberPresent || o.member.txid != txid {
+		return fmt.Errorf("retained DA locator for %x does not resolve to its own member", txid)
+	}
+	if len(o.raw) == 0 {
+		return fmt.Errorf("retained DA member %x has no retained transaction bytes", o.member.txid)
+	}
+	return nil
 }
 
 // checkRole applies the locator's role/identity claims to the parsed copy. It

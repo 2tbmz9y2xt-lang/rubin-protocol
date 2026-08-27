@@ -229,16 +229,7 @@ func (r daRelaySetRecord) peerCleanupPlan(key string) (daRelaySetRecord, []daRel
 	if r.commitEligibleForPeerCleanup(key) {
 		return daRelaySetRecord{daID: r.daID}, r.members(), nil
 	}
-	out := r.cloneForStateMutation()
-	var removed []daRelayMemberIdentity
-	for _, index := range sortedRetainedDAChunkIndexes(r) {
-		chunk := r.chunks[index]
-		if !chunk.ownedByPeerQuota(key) {
-			continue
-		}
-		removed = append(removed, chunk.daRelayMemberIdentity)
-		delete(out.chunks, index)
-	}
+	out, removed := r.removePeerChunks(key)
 	if len(removed) == 0 {
 		return r, nil, nil
 	}
@@ -249,6 +240,23 @@ func (r daRelaySetRecord) peerCleanupPlan(key string) (daRelaySetRecord, []daRel
 		return daRelaySetRecord{}, nil, err
 	}
 	return out, removed, nil
+}
+
+// removePeerChunks is peerCleanupPlan's chunk-selection scan: one state-mutation
+// clone, from which every PEER(key) chunk is removed, reported in exact identity
+// order.
+func (r daRelaySetRecord) removePeerChunks(key string) (daRelaySetRecord, []daRelayMemberIdentity) {
+	out := r.cloneForStateMutation()
+	var removed []daRelayMemberIdentity
+	for _, index := range sortedRetainedDAChunkIndexes(r) {
+		chunk := r.chunks[index]
+		if !chunk.ownedByPeerQuota(key) {
+			continue
+		}
+		removed = append(removed, chunk.daRelayMemberIdentity)
+		delete(out.chunks, index)
+	}
+	return out, removed
 }
 
 func (r daRelaySetRecord) commitEligibleForPeerCleanup(key string) bool {

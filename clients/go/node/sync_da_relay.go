@@ -117,34 +117,16 @@ func prepareCanonicalDAImage(relay *DARelayState, included []canonicalDASetIdent
 // mutates nothing: the caller applies the projection only after every removal
 // has been projected without error.
 //
-// The quantifier is over the members PRESENT in each record, never over a
-// record's DECLARED chunk range: an incomplete record legitimately holds a sparse
-// member set, and demanding a claim for a member that was never admitted would
-// latch a healthy node.
-//
 // The skip arm covers BOTH ownerless shapes — a nil mo (no standard/owner image
 // was prepared at all) and a mo whose owner is nil (an engine that never bound a
 // pending-outpoint owner): either way there is no claim domain to bind to and
 // the phase is skipped rather than inventing one.
-//
-// bound is deliberately unhinted: it holds only the retained-DA members'
-// tokens while ownerIndex counts every domain's claims, so its population is
-// not derivable from any map length in hand.
 func (s *DARelayState) canonicalDAClaimProjectionLocked(removals []daRelaySetRecord, mo *canonicalMempoolPlan) (canonicalDAClaimProjection, error) {
 	if mo == nil || mo.owner == nil {
 		return nil, nil
 	}
-	bound := make(map[PendingOutpointToken]struct{})
-	for _, daID := range s.sortedRetainedDAIDsLocked() {
-		for _, member := range s.sets[daID].members() {
-			if err := checkCanonicalDAMemberClaim(daID, member, mo.ownerIndex, bound); err != nil {
-				return nil, terminalCanonicalDAError(err)
-			}
-			bound[member.token] = struct{}{}
-		}
-	}
-	if err := checkNoOrphanCanonicalDAClaims(mo.ownerIndex, bound); err != nil {
-		return nil, terminalCanonicalDAError(err)
+	if err := s.checkCanonicalDAClaimBijectionLocked(mo.ownerIndex); err != nil {
+		return nil, err
 	}
 	projection := make(canonicalDAClaimProjection)
 	for _, record := range removals {
@@ -153,6 +135,34 @@ func (s *DARelayState) canonicalDAClaimProjectionLocked(removals []daRelaySetRec
 		}
 	}
 	return projection, nil
+}
+
+// checkCanonicalDAClaimBijectionLocked is the proof half of
+// canonicalDAClaimProjectionLocked: every live retained member binds to exactly
+// one finalized DA claim of index, and no DA claim of index is left unbound.
+//
+// The quantifier is over the members PRESENT in each record, never over a
+// record's DECLARED chunk range: an incomplete record legitimately holds a sparse
+// member set, and demanding a claim for a member that was never admitted would
+// latch a healthy node.
+//
+// bound is deliberately unhinted: it holds only the retained-DA members'
+// tokens while ownerIndex counts every domain's claims, so its population is
+// not derivable from any map length in hand.
+func (s *DARelayState) checkCanonicalDAClaimBijectionLocked(index pendingOutpointIndex) error {
+	bound := make(map[PendingOutpointToken]struct{})
+	for _, daID := range s.sortedRetainedDAIDsLocked() {
+		for _, member := range s.sets[daID].members() {
+			if err := checkCanonicalDAMemberClaim(daID, member, index, bound); err != nil {
+				return terminalCanonicalDAError(err)
+			}
+			bound[member.token] = struct{}{}
+		}
+	}
+	if err := checkNoOrphanCanonicalDAClaims(index, bound); err != nil {
+		return terminalCanonicalDAError(err)
+	}
+	return nil
 }
 
 // checkCanonicalDAMemberClaim binds ONE retained member to EXACTLY ONE finalized
@@ -164,15 +174,9 @@ func checkCanonicalDAMemberClaim(daID [32]byte, member daRelayMemberIdentity, in
 	if _, duplicate := bound[member.token]; duplicate {
 		return fmt.Errorf("retained DA member %x of set %x shares its owner claim with another member", member.txid, daID)
 	}
-	claim, err := index.claimForToken(member.token)
+	claim, err := claimForCanonicalDAMember(daID, member, index)
 	if err != nil {
-		return fmt.Errorf("retained DA member %x of set %x: %w", member.txid, daID, err)
-	}
-	if claim == nil {
-		return fmt.Errorf("retained DA member %x of set %x has no live owner claim", member.txid, daID)
-	}
-	if claim.domain != PendingOutpointDA || claim.txid != member.txid || !claim.finalized {
-		return fmt.Errorf("retained DA member %x of set %x holds a claim that is not its own finalized DA claim", member.txid, daID)
+		return err
 	}
 	if err := index.checkClaimInputs(member.txid, member.inputs, claim, member.token); err != nil {
 		return err
@@ -187,6 +191,23 @@ func checkCanonicalDAMemberClaim(daID [32]byte, member daRelayMemberIdentity, in
 		}
 	}
 	return nil
+}
+
+// claimForCanonicalDAMember resolves the member's token to its live claim and
+// checks the claim's OWN identity — present, DA domain, finalized phase, exact
+// txid — leaving the per-input row checks to the caller.
+func claimForCanonicalDAMember(daID [32]byte, member daRelayMemberIdentity, index pendingOutpointIndex) (*pendingOutpointClaim, error) {
+	claim, err := index.claimForToken(member.token)
+	if err != nil {
+		return nil, fmt.Errorf("retained DA member %x of set %x: %w", member.txid, daID, err)
+	}
+	if claim == nil {
+		return nil, fmt.Errorf("retained DA member %x of set %x has no live owner claim", member.txid, daID)
+	}
+	if claim.domain != PendingOutpointDA || claim.txid != member.txid || !claim.finalized {
+		return nil, fmt.Errorf("retained DA member %x of set %x holds a claim that is not its own finalized DA claim", member.txid, daID)
+	}
+	return claim, nil
 }
 
 // checkNoOrphanCanonicalDAClaims refuses a DA claim the retained image does not
