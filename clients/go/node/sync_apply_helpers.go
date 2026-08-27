@@ -454,17 +454,12 @@ type canonicalFenceImage struct {
 // unproven and only the earlier, pre-bind one standing.
 //
 // It is no longer the LAST step. D preparation retires the DA claims of its own
-// removals from the SAME private O1 candidate, so the candidate the transition
-// will publish is not final until that edit has run. The owner-index rebuild
-// happens INSIDE that edit (dropCanonicalDAClaims rebuilds both index halves,
-// and only when a claim was actually retired — a transition that removes
-// nothing leaves the prepared index standing), and the closing record/claim
-// binding preflight below runs unconditionally AFTER the D phase, over whatever
-// candidate will be published. That closing binding proof is the one that
-// speaks about what gets published. The live-image proof deliberately keeps its
-// earlier position: it is a statement about the LIVE owner, which the D edit
-// cannot move, and its position is what makes a transition violating both
-// invariants at once report the standard/owner error.
+// removals from the SAME private O1 candidate, rebuilding the owner index
+// INSIDE that edit (dropCanonicalDAClaims, and only when a claim was actually
+// retired), and the closing record/claim binding preflight below runs
+// unconditionally AFTER the D phase, over whatever candidate will be published.
+// The live-image proof deliberately keeps its earlier, pre-D position: it is a
+// statement about the LIVE owner, which the D edit cannot move.
 func (s *SyncEngine) prepareCanonicalFenceImage(tr *canonicalTransition, plan *canonicalTransitionPlan) (canonicalFenceImage, error) {
 	if err := s.recheckCanonicalTransitionFreshness(tr, plan); err != nil {
 		return canonicalFenceImage{}, err

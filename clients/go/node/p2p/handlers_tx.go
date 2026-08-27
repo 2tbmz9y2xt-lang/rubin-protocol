@@ -57,31 +57,22 @@ func (p *peer) handleTx(txBytes []byte) error {
 	return nil
 }
 
-// handleRelayDATx is the remote DA arm. The context-free shape and payload-hash
+// handleRelayDATx is the remote DA arm: the context-free shape and payload-hash
 // check keeps its existing peer consequence, and PEER provenance is built from
-// this peer's own address and its normalized quota key, so scoring and quota
-// teardown name exactly one subject.
+// this peer's own address and its normalized quota key.
 //
-// The ONLY negative peer effect on this arm is the existing +10 for
-// SameDAIDCommitConflict — a FULLY VALIDATED different-txid DA_COMMIT_TX
-// competing with the retained same-da_id first-seen commit, reported by the
-// admission's own bool AND applied here only because this arm's provenance is
-// PEER. The effect is never derived from tx kind, from error text or from
-// DUPLICATE alone (RUBIN_COMPACT_BLOCKS.md Section 5.1): an exact retained
-// commit or chunk replay — requested or unsolicited — and a valid same-txid
-// nonexact candidate are peer-neutral DUPLICATE, and every admission failure
-// stays peer-neutral for the same Go/Rust relay-parity reason the standard
-// path gives.
+// The ONLY negative peer effect on this arm is the existing +10, applied from
+// the admission's SameDAIDCommitConflict bool AND this arm's PEER provenance —
+// never from tx kind, error text or DUPLICATE alone (RUBIN_COMPACT_BLOCKS.md
+// Section 5.1); every other admission outcome is peer-neutral, exactly as on
+// the standard path.
 //
-// The address is read ONCE and both identities are derived from that one value,
-// so scoring and quota accounting can never name two different subjects. A
-// REGISTERED peer cannot carry an empty address — the handshake binds it from
-// the connection (handshake.go:46) and registerPeer already keyed this peer's
-// quota lock by it (service_peer_lifecycle.go:79) — but the arm is TOTAL
-// regardless: an addressless peer can be neither scored nor quota-charged, so
-// retaining for it would break the per-peer accounting invariant. It is refused
-// and the read loop drops the connection (peer_runtime.go:249) instead, with
-// nothing retained and no score moved.
+// The address is read ONCE and both identities derive from that one value, so
+// scoring and quota accounting name one subject. A REGISTERED peer cannot carry
+// an empty address — the handshake binds it (handshake.go:46) and registerPeer
+// keys the quota lock by it (service_peer_lifecycle.go:79) — but the arm is
+// TOTAL regardless: an addressless peer is refused and the read loop drops the
+// connection (peer_runtime.go:249), with nothing retained and no score moved.
 func (p *peer) handleRelayDATx(txBytes []byte, tx *consensus.Tx) error {
 	if err := validateRelayDATxForAdmission(txBytes, tx); err != nil {
 		if p.bumpBan(10, err.Error()) {

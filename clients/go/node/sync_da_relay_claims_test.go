@@ -66,6 +66,20 @@ func daClaimTokens(plan canonicalMempoolPlan) map[PendingOutpointToken][32]byte 
 	return tokens
 }
 
+// firstDAClaim returns one DA-domain claim of the prepared candidate; every
+// defect row below corrupts whichever member it happens to name, since each is
+// an equally valid subject.
+func firstDAClaim(t *testing.T, mo *canonicalMempoolPlan) (PendingOutpointToken, *pendingOutpointClaim) {
+	t.Helper()
+	for token, claim := range mo.ownerIndex.byToken {
+		if claim.domain == PendingOutpointDA {
+			return token, claim
+		}
+	}
+	t.Fatal("no DA claim in the candidate")
+	return PendingOutpointToken{}, nil
+}
+
 // TestCanonicalDAClaimPhaseDropsExactlyTheRemovedMembersClaims is A9: the claims
 // of the removed record leave the candidate — from BOTH index halves and from the
 // ordered claim list — and every surviving claim keeps its exact token identity.
@@ -139,13 +153,8 @@ func TestCanonicalDAClaimPhaseDropsExactlyTheRemovedMembersClaims(t *testing.T) 
 func TestCanonicalDAClaimPhaseIsTerminalForEveryClaimDefect(t *testing.T) {
 	for name, corrupt := range map[string]func(t *testing.T, c *canonicalClaimFixture, mo *canonicalMempoolPlan, daID [32]byte){
 		"missing claim": func(t *testing.T, c *canonicalClaimFixture, mo *canonicalMempoolPlan, daID [32]byte) {
-			for token, claim := range mo.ownerIndex.byToken {
-				if claim.domain == PendingOutpointDA {
-					delete(mo.ownerIndex.byToken, token)
-					return
-				}
-			}
-			t.Fatal("no DA claim to remove")
+			token, _ := firstDAClaim(t, mo)
+			delete(mo.ownerIndex.byToken, token)
 		},
 		"orphan claim": func(t *testing.T, c *canonicalClaimFixture, mo *canonicalMempoolPlan, daID [32]byte) {
 			var txid [32]byte
@@ -160,40 +169,22 @@ func TestCanonicalDAClaimPhaseIsTerminalForEveryClaimDefect(t *testing.T) {
 			}
 		},
 		"unfinalized claim": func(t *testing.T, c *canonicalClaimFixture, mo *canonicalMempoolPlan, daID [32]byte) {
-			for _, claim := range mo.ownerIndex.byToken {
-				if claim.domain == PendingOutpointDA {
-					claim.finalized = false
-					return
-				}
-			}
-			t.Fatal("no DA claim to unfinalize")
+			_, claim := firstDAClaim(t, mo)
+			claim.finalized = false
 		},
 		"wrong domain": func(t *testing.T, c *canonicalClaimFixture, mo *canonicalMempoolPlan, daID [32]byte) {
-			for _, claim := range mo.ownerIndex.byToken {
-				if claim.domain == PendingOutpointDA {
-					claim.domain = PendingOutpointStandardMempool
-					return
-				}
-			}
-			t.Fatal("no DA claim to redomain")
+			_, claim := firstDAClaim(t, mo)
+			claim.domain = PendingOutpointStandardMempool
 		},
 		"txid mismatch": func(t *testing.T, c *canonicalClaimFixture, mo *canonicalMempoolPlan, daID [32]byte) {
-			for _, claim := range mo.ownerIndex.byToken {
-				if claim.domain == PendingOutpointDA {
-					claim.txid[0] ^= 0xff
-					return
-				}
-			}
-			t.Fatal("no DA claim to retxid")
+			_, claim := firstDAClaim(t, mo)
+			claim.txid[0] ^= 0xff
 		},
 		"input mismatch": func(t *testing.T, c *canonicalClaimFixture, mo *canonicalMempoolPlan, daID [32]byte) {
-			for _, claim := range mo.ownerIndex.byToken {
-				if claim.domain == PendingOutpointDA && len(claim.inputs) != 0 {
-					claim.inputs[0].Vout ^= 0xff
-					return
-				}
-			}
-			t.Fatal("no DA claim to reinput")
+			// Every finalized DA claim carries 1..MAX_TX_INPUTS inputs
+			// (validatePendingOutpointRequest), so inputs[0] always exists.
+			_, claim := firstDAClaim(t, mo)
+			claim.inputs[0].Vout ^= 0xff
 		},
 		"two members sharing one claim": func(t *testing.T, c *canonicalClaimFixture, mo *canonicalMempoolPlan, daID [32]byte) {
 			// The record's commit and its first chunk both name the commit's
@@ -215,13 +206,8 @@ func TestCanonicalDAClaimPhaseIsTerminalForEveryClaimDefect(t *testing.T) {
 			record.chunks[0] = chunk
 		},
 		"locator row mismatch": func(t *testing.T, c *canonicalClaimFixture, mo *canonicalMempoolPlan, daID [32]byte) {
-			for token, claim := range mo.ownerIndex.byToken {
-				if claim.domain == PendingOutpointDA && len(claim.inputs) != 0 {
-					mo.ownerIndex.byOutpoint[claim.inputs[0]] = pendingOutpointRow{token: token, txid: [32]byte{0xbb}}
-					return
-				}
-			}
-			t.Fatal("no DA claim to unbind")
+			token, claim := firstDAClaim(t, mo)
+			mo.ownerIndex.byOutpoint[claim.inputs[0]] = pendingOutpointRow{token: token, txid: [32]byte{0xbb}}
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -326,9 +312,7 @@ func TestClosingClaimBindingProofRunsOverTheEditedCandidate(t *testing.T) {
 	if !ok {
 		t.Fatalf("the standard entry %x is not in the candidate", standard)
 	}
-	mo.dropCanonicalDAClaims(canonicalDAClaimProjection{
-		dropped: map[PendingOutpointToken]struct{}{entry.token: {}},
-	})
+	mo.dropCanonicalDAClaims(canonicalDAClaimProjection{entry.token: {}})
 	if err := validateRestoredClaimBinding(mo.txs, mo.ownerIndex); err == nil {
 		t.Fatal("the closing binding proof accepted a candidate whose D edit orphaned a retained entry")
 	}

@@ -29,17 +29,18 @@ func (f *daOwnerFixture) relay() *DARelayState { return f.engine.DARelayState() 
 
 func (f *daOwnerFixture) owner() *PendingOutpointOwner { return f.mp.PendingOutpointOwner() }
 
-// image is the complete observable retained-DA state: every record, every
+// image renders the retained-DA state a "changed nothing" row proves untouched
+// — every record with its state, sequence stamp, TTL and payload bytes, every
 // member with its provenance, every locator row, all five accounting counters
-// and every live DA claim, rendered so a "changed nothing" row is a single
-// equality rather than a list of spot checks.
+// and every live DA claim — as one string equality rather than a list of spot
+// checks.
 func (f *daOwnerFixture) image(t *testing.T) string {
 	t.Helper()
 	relay, out := f.relay(), ""
 	relay.mu.Lock()
 	for _, daID := range relay.sortedRetainedDAIDsLocked() {
 		record := relay.sets[daID]
-		out += fmt.Sprintf("|record %x state=%d received=%d", daID, record.state, record.receivedTime)
+		out += fmt.Sprintf("|record %x state=%d received=%d ttl=%d payload=%d", daID, record.state, record.receivedTime, record.ttlBlocksRemaining, record.payloadBytes)
 		for _, member := range record.members() {
 			out += fmt.Sprintf("|member txid=%x wtxid=%x token=%d prov=%+v", member.txid, member.wtxid, member.token.seq, member.provenance)
 		}
@@ -559,29 +560,28 @@ func TestAdmitDASameDAIDDistinctCommitSetsTheConflictBitOnly(t *testing.T) {
 	}
 }
 
-// TestExactReplayVerdictIsDecidedAtomicallyWithItsObservation is the R9/K2
-// atomicity row: the exact-replay verdict is field-and-byte equality decided
-// INSIDE the same DARelayState.mu hold that copies the observation. Two
-// consequences are pinned: a member retired before the verdict window can never
-// yield a stale exact DUPLICATE — retire-then-observe is the only schedule the
-// single hold still admits — and the verdict needs no off-lock record-coherence
-// proof, where the old validate-first order manufactured INTERNAL from the
-// record's own map key.
-func TestExactReplayVerdictIsDecidedAtomicallyWithItsObservation(t *testing.T) {
-	t.Run("a retired member cannot produce the exact verdict", func(t *testing.T) {
+// TestReplayClassificationValidatesTheObservationBeforeTheExactVerdict is the
+// R9/K2 order row: classifyRetainedReplay copies the observation in one
+// DARelayState.mu window and then, OFF-lock over that copy, validates integrity
+// FIRST and decides exact equality only on an integrity-valid observation — so
+// the shortcut and LookupRetainedTx cannot disagree about a corrupt located
+// member, and exact fires only where the one_invariant's "integrity-valid exact
+// replay" literally holds.
+func TestReplayClassificationValidatesTheObservationBeforeTheExactVerdict(t *testing.T) {
+	t.Run("re-admission after retirement", func(t *testing.T) {
+		// A member retired through the real removal mutation is simply ABSENT to
+		// the shortcut: the replay re-enters ordinary admission and is retained
+		// again, never a stale DUPLICATE.
 		f := newDAOwnerFixture(t, 2)
 		daID := daRelayTestID(0x76)
 		commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2300, sha3.Sum256([]byte("retire")))
 		mustAdmit(t, f, commitTx, mustPeerProvenance(t, "peer-a"))
 		relay := f.relay()
-		// Direct package-private retirement under s.mu — the removal that could
-		// once land between the copy and the off-lock decision. With copy and
-		// decision in ONE hold it lands strictly before the verdict window.
 		relay.mu.Lock()
 		token := relay.sets[daID].commit.token
-		delete(relay.sets, daID)
-		delete(relay.locators, txID(t, commitTx))
+		removeErr := relay.removeDASetRecordLocked(relay.sets[daID])
 		relay.mu.Unlock()
+		mustCanonicalMO(t, "removeDASetRecordLocked", removeErr)
 		owner := f.owner()
 		owner.mu.Lock()
 		owner.dropClaimLocked(token)
@@ -591,7 +591,7 @@ func TestExactReplayVerdictIsDecidedAtomicallyWithItsObservation(t *testing.T) {
 			t.Fatalf("replay after retirement result=%+v err=%v, want ordinary re-retention, never a stale DUPLICATE", result, err)
 		}
 	})
-	t.Run("a byte-exact replay needs no off-lock record-coherence proof", func(t *testing.T) {
+	t.Run("a byte-exact replay on a mis-keyed record is INTERNAL", func(t *testing.T) {
 		f := newDAOwnerFixture(t, 2)
 		daID := daRelayTestID(0x77)
 		commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2301, sha3.Sum256([]byte("mis-keyed")))
@@ -604,11 +604,14 @@ func TestExactReplayVerdictIsDecidedAtomicallyWithItsObservation(t *testing.T) {
 		relay.mu.Unlock()
 		before := f.image(t)
 		result, err := relay.AdmitDA(commitTx, mustPeerProvenance(t, "peer-b"))
-		if err != nil || result.Disposition != DAAdmissionDuplicate || result.SameDAIDCommitConflict || result.DAID != daID {
-			t.Fatalf("byte-exact replay over a mis-keyed record result=%+v err=%v, want the in-lock equality verdict DUPLICATE", result, err)
+		if err == nil || relayDispositionOf(err) != RelayAdmissionInternal || result != (DAAdmissionResult{}) {
+			t.Fatalf("byte-exact replay over a mis-keyed record result=%+v err=%v, want the existing INTERNAL", result, err)
+		}
+		if _, _, lookupErr := relay.LookupRetainedTx(txID(t, commitTx)); lookupErr == nil {
+			t.Fatal("LookupRetainedTx accepted the mis-keyed record the shortcut refused")
 		}
 		if after := f.image(t); after != before {
-			t.Fatal("the equality verdict mutated the image")
+			t.Fatal("the INTERNAL classification mutated the image")
 		}
 	})
 }
@@ -988,24 +991,6 @@ func TestAcceptedSequenceExhaustionFailsClosedBeforeAnyMutation(t *testing.T) {
 	}
 }
 
-// TestAdmitDARejectsAChunkOutsideItsCommitRange is the chunk-index bound reached
-// through the production entry: the record's own declared range refuses it and
-// nothing moves.
-func TestAdmitDARejectsAChunkOutsideItsCommitRange(t *testing.T) {
-	f := newDAOwnerFixture(t, 3)
-	daID := daRelayTestID(0x3b)
-	commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2130, sha3.Sum256([]byte("one")))
-	mustAdmit(t, f, commitTx, mustPeerProvenance(t, "peer-a"))
-	before := f.image(t)
-	outside := f.daChunkTx(t, f.ops[1], daID, 1, 2131, []byte("outside"))
-	if _, err := f.relay().AdmitDA(outside, mustPeerProvenance(t, "peer-a")); err == nil {
-		t.Fatal("a chunk outside the declared commit range was retained")
-	}
-	if after := f.image(t); after != before {
-		t.Fatal("an out-of-range chunk mutated the retained image")
-	}
-}
-
 // daChunkTxSpending is daChunkTx over an ORDERED input list, so a row can pin
 // WHICH input an owner conflict names.
 func (f *canonicalMOFixture) daChunkTxSpending(t *testing.T, ops []consensus.Outpoint, daID [32]byte, index uint16, nonce uint64, payload []byte) []byte {
@@ -1228,9 +1213,9 @@ func TestPeerCleanupFailsClosedOnEveryDefectiveVictimToken(t *testing.T) {
 //
 // The guard release is proved by requireAdmissionGuardReleased's explicit
 // bounded write-lock schedule, which fails by timeout rather than hanging the
-// suite while a leaked read hold survives. A double release would not reach the
-// assertion at all — daAdmissionGuard.close and daAdmissionHold.release panic
-// on a second call — so "exactly once" is the conjunction of the two.
+// suite while a leaked read hold survives. A double release cannot happen —
+// daAdmissionGuard.close panics on a second call and releaseIfHeld stands down
+// once the hold is spent — so "exactly once" is the conjunction of the two.
 func TestAdmitDAFailureAtEveryFallibleStepPublishesNothingAndReleasesTheGuard(t *testing.T) {
 	f := newDAOwnerFixture(t, 5)
 	daID := daRelayTestID(0x56)

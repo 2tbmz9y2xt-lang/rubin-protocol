@@ -41,9 +41,7 @@ type preparedCanonicalDAImage struct {
 // tokens the selected removals retire. It names TOKENS, never outpoints, because
 // the token is the only identity that survives an ABA reuse of the same outpoint
 // by a later claim.
-type canonicalDAClaimProjection struct {
-	dropped map[PendingOutpointToken]struct{}
-}
+type canonicalDAClaimProjection map[PendingOutpointToken]struct{}
 
 // prepareCanonicalDAImage derives D1: the retained DA image with every record
 // removed that either has a member which is not final_chain_valid against C1, or
@@ -129,27 +127,29 @@ func prepareCanonicalDAImage(relay *DARelayState, included []canonicalDASetIdent
 // pending-outpoint owner): either way there is no claim domain to bind to and
 // the phase is skipped rather than inventing one.
 //
-// bound is deliberately unhinted: its population is not derivable from any map length in hand.
+// bound is deliberately unhinted: it holds only the retained-DA members'
+// tokens while ownerIndex counts every domain's claims, so its population is
+// not derivable from any map length in hand.
 func (s *DARelayState) canonicalDAClaimProjectionLocked(removals []daRelaySetRecord, mo *canonicalMempoolPlan) (canonicalDAClaimProjection, error) {
 	if mo == nil || mo.owner == nil {
-		return canonicalDAClaimProjection{}, nil
+		return nil, nil
 	}
 	bound := make(map[PendingOutpointToken]struct{})
 	for _, daID := range s.sortedRetainedDAIDsLocked() {
 		for _, member := range s.sets[daID].members() {
 			if err := checkCanonicalDAMemberClaim(daID, member, mo.ownerIndex, bound); err != nil {
-				return canonicalDAClaimProjection{}, terminalCanonicalDAError(err)
+				return nil, terminalCanonicalDAError(err)
 			}
 			bound[member.token] = struct{}{}
 		}
 	}
 	if err := checkNoOrphanCanonicalDAClaims(mo.ownerIndex, bound); err != nil {
-		return canonicalDAClaimProjection{}, terminalCanonicalDAError(err)
+		return nil, terminalCanonicalDAError(err)
 	}
-	projection := canonicalDAClaimProjection{dropped: make(map[PendingOutpointToken]struct{})}
+	projection := make(canonicalDAClaimProjection)
 	for _, record := range removals {
 		for _, member := range record.members() {
-			projection.dropped[member.token] = struct{}{}
+			projection[member.token] = struct{}{}
 		}
 	}
 	return projection, nil
@@ -227,12 +227,12 @@ func checkNoOrphanCanonicalDAClaims(index pendingOutpointIndex, bound map[Pendin
 // dropClaimLocked — which mutates live maps — is deliberately never used on this
 // path.
 func (p *canonicalMempoolPlan) dropCanonicalDAClaims(projection canonicalDAClaimProjection) {
-	if p == nil || len(projection.dropped) == 0 {
+	if p == nil || len(projection) == 0 {
 		return
 	}
 	claims := make([]pendingOutpointClaim, 0, len(p.pending.claims))
 	for _, claim := range p.pending.claims {
-		if _, drop := projection.dropped[claim.token]; drop {
+		if _, drop := projection[claim.token]; drop {
 			continue
 		}
 		claims = append(claims, claim)

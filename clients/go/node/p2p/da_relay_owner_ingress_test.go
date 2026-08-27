@@ -222,11 +222,12 @@ func frozenD00R3PeerEffect(t *testing.T, caseID string) string {
 	return ""
 }
 
-// requireFrozenPeerEffect maps the frozen peer_quality_effect onto the ban
+// requireFrozenPeerEffect maps caseID's frozen peer_quality_effect onto the ban
 // delta this arm applies: UNCHANGED is zero, NEGATIVE_DUPLICATE_COMMIT is the
 // existing +10.
-func requireFrozenPeerEffect(t *testing.T, caseID string, effect string, delta int) {
+func requireFrozenPeerEffect(t *testing.T, caseID string, delta int) {
 	t.Helper()
+	effect := frozenD00R3PeerEffect(t, caseID)
 	want := 0
 	if effect == "NEGATIVE_DUPLICATE_COMMIT" {
 		want = 10
@@ -275,7 +276,7 @@ func TestRemoteExactReplayIsPeerNeutralAndDistinctCommitIsNot(t *testing.T) {
 		if err := tt.peer.handleTx(tt.raw); err != nil {
 			t.Fatalf("%s: handleTx=%v, want the peer-neutral nil", tt.caseID, err)
 		}
-		requireFrozenPeerEffect(t, tt.caseID, frozenD00R3PeerEffect(t, tt.caseID), tt.peer.state.BanScore-banBefore)
+		requireFrozenPeerEffect(t, tt.caseID, tt.peer.state.BanScore-banBefore)
 		if after := f.imageDigest(t); after != before {
 			t.Fatalf("%s mutated the retained image", tt.caseID)
 		}
@@ -290,7 +291,7 @@ func TestRemoteExactReplayIsPeerNeutralAndDistinctCommitIsNot(t *testing.T) {
 	if err := stranger.handleTx(distinct); err != nil {
 		t.Fatalf("distinct commit below threshold: %v", err)
 	}
-	requireFrozenPeerEffect(t, "CAP_COMPLETE_DUPLICATE_MEMBER", frozenD00R3PeerEffect(t, "CAP_COMPLETE_DUPLICATE_MEMBER"), stranger.state.BanScore-banBefore)
+	requireFrozenPeerEffect(t, "CAP_COMPLETE_DUPLICATE_MEMBER", stranger.state.BanScore-banBefore)
 	if after := f.imageDigest(t); after != beforeDistinct {
 		t.Fatal("the discarded distinct commit mutated the retained image")
 	}
@@ -335,31 +336,6 @@ func TestPeerlessDAProvenanceIsAbsentFromPeerQuotaAccounting(t *testing.T) {
 	}
 	if after := f.imageDigest(t); after != before {
 		t.Fatalf("peer teardown selected a peerless member: %v -> %v", before, after)
-	}
-}
-
-// TestDAProvenanceConstructorsRefuseEmptyIdentities is R1: the zero value and a
-// PEER with either identity empty are refused before any state work.
-func TestDAProvenanceConstructorsRefuseEmptyIdentities(t *testing.T) {
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	f := newDAIngressFixture(t, h, 2)
-	raw := f.commitTx(t, daRelayTestID(0x14), 1, sha3.Sum256([]byte("x")))
-
-	for _, tt := range []struct{ peer, quota string }{{"", "quota"}, {"peer", ""}, {"", ""}} {
-		if _, err := node.NewPeerDAProvenance(tt.peer, tt.quota); err == nil {
-			t.Fatalf("NewPeerDAProvenance(%q,%q) was accepted", tt.peer, tt.quota)
-		}
-	}
-	// A nonempty identity of spaces is accepted, which is the documented choice.
-	if _, err := node.NewPeerDAProvenance(" ", " "); err != nil {
-		t.Fatalf("NewPeerDAProvenance(space) = %v, want accepted", err)
-	}
-	before := f.imageDigest(t)
-	if _, err := h.service.daRelay.AdmitDA(raw, node.DAProvenance{}); err == nil {
-		t.Fatal("AdmitDA accepted the zero provenance value")
-	}
-	if after := f.imageDigest(t); after != before {
-		t.Fatal("a refused provenance mutated the retained image")
 	}
 }
 

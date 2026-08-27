@@ -149,10 +149,11 @@ func matchingDAChunkPayloadHash(tx *consensus.Tx) bool {
 // has not committed) selects the existing UNAVAILABLE disposition before any DA
 // observation or candidate validation.
 //
-// The hold is single-goroutine and linear: it ends in exactly one of release()
-// (the guard is unlocked here) or validateDACandidate success (the guard
-// transfers into the returned DAAdmission, whose Close unlocks it). sync.RWMutex
-// is not reentrant, so nothing running under a hold may acquire the guard again.
+// The hold is single-goroutine and linear: it ends in exactly one of the
+// deferred releaseIfHeld (the guard is unlocked here) or validateDACandidate
+// success (the guard transfers into the returned DAAdmission, whose Close
+// unlocks it). sync.RWMutex is not reentrant, so nothing running under a hold
+// may acquire the guard again.
 type daAdmissionHold struct {
 	mempool *Mempool
 	owner   *PendingOutpointOwner
@@ -177,24 +178,16 @@ func (m *Mempool) acquireDAAdmissionHold() (*daAdmissionHold, error) {
 	return &daAdmissionHold{mempool: m, owner: m.pendingOutpoints, context: admission, held: true}, nil
 }
 
-// release unlocks a hold that was not converted into a DAAdmission. Exactly one
-// of release and a successful validateDACandidate may run, once.
-func (h *daAdmissionHold) release() {
-	if h == nil || !h.held {
-		panic("DA admission hold is not held")
-	}
-	h.held = false
-	h.mempool.chainState.admissionMu.RUnlock()
-}
-
 // releaseIfHeld releases the hold unless the guard already transferred into a
 // DAAdmission. Deferred right after acquisition, it makes the guard's release
 // exactly-once on EVERY unwind — error and panic alike — without ever
 // double-releasing after a successful transfer.
 func (h *daAdmissionHold) releaseIfHeld() {
-	if h.held {
-		h.release()
+	if h == nil || !h.held {
+		return
 	}
+	h.held = false
+	h.mempool.chainState.admissionMu.RUnlock()
 }
 
 // validateDACandidate runs the existing full candidate validation under the

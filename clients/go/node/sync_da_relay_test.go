@@ -642,33 +642,37 @@ func TestCanonicalDAWritersCannotInterleaveWithTheTransition(t *testing.T) {
 	// alone reproduces exactly what the full run exercises. prepare runs in the
 	// subtest body — signed-transaction construction, provenance and any t.Fatal
 	// live there — and returns the raced closure, which uses no *testing.T.
+	// frame is the function name the parked goroutine actually carries: an
+	// AdmitDA writer parks inside the mempool's admission guard, one frame below
+	// its own entry.
 	writers := []struct {
 		name    string
+		frame   string
 		prepare func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func()
 	}{
-		{"AdmitDA commit", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
+		{"AdmitDA commit", "AdmitDA", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
 			commitTx := f.daCommitTxCommitting(t, f.ops[0], daRelayTestID(0x81), 1, 1400, sha3.Sum256([]byte("fenced")))
 			provenance := daRelayTestProvenance(t, "fence-peer")
 			return func() { _, _ = relay.AdmitDA(commitTx, provenance) }
 		}},
-		{"AdmitDA chunk", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
+		{"AdmitDA chunk", "AdmitDA", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
 			chunkTx := f.daChunkTx(t, f.ops[1], daRelayTestID(0x82), 0, 1401, []byte("fenced"))
 			provenance := daRelayTestProvenance(t, "fence-peer")
 			return func() { _, _ = relay.AdmitDA(chunkTx, provenance) }
 		}},
-		{"AdvanceOrphanTTL", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
+		{"AdvanceOrphanTTL", "AdvanceOrphanTTL", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
 			return func() { _ = relay.AdvanceOrphanTTL() }
 		}},
-		{"ReleasePeerQuotaKey", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
+		{"ReleasePeerQuotaKey", "ReleasePeerQuotaKey", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
 			// The advisory zero-victim scan returns before any guard, so this
 			// fence row needs a charged key to walk past it.
 			mustCanonicalMO(t, "seed fenced peer bytes", relay.addDAChunk("fence-peer", daRelayTestChunk(daRelayTestID(0x83), 0, 7)))
 			return func() { _ = relay.ReleasePeerQuotaKey("fence-peer") }
 		}},
-		{"PlanPrefetch", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
+		{"PlanPrefetch", "PlanPrefetch", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
 			return func() { relay.PlanPrefetch(daRelayTestID(0x81), []string{"fence-peer"}, time.Unix(1, 0)) }
 		}},
-		{"ReleasePrefetchPlan", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
+		{"ReleasePrefetchPlan", "ReleasePrefetchPlan", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
 			return func() {
 				relay.ReleasePrefetchPlan(DARelayPrefetchPlan{DAID: daRelayTestID(0x81), PeerKey: "fence-peer"})
 			}
@@ -686,7 +690,7 @@ func TestCanonicalDAWritersCannotInterleaveWithTheTransition(t *testing.T) {
 			// from elapsed time: a writer that had merely not been scheduled yet
 			// would never satisfy this barrier, and a writer that took no fence at
 			// all would reach done instead.
-			awaitCanonicalMOAdmissionRLock(t, awaitedFenceCaller(writer.name), 1)
+			awaitCanonicalMOAdmissionRLock(t, writer.frame, 1)
 			select {
 			case <-done:
 				f.engine.chainState.admissionMu.Unlock()
@@ -1192,14 +1196,4 @@ func TestCanonicalDAImageAccountingFailureIsTerminal(t *testing.T) {
 	if _, live := relay.sets[daID]; !live {
 		t.Fatal("a terminal accounting failure removed the live record")
 	}
-}
-
-// awaitedFenceCaller maps a fence-writer row name onto the frame the parked
-// goroutine actually carries: an AdmitDA writer parks inside the mempool's
-// admission guard, one frame below its own entry.
-func awaitedFenceCaller(name string) string {
-	if strings.HasPrefix(name, "AdmitDA") {
-		return "AdmitDA"
-	}
-	return name
 }
