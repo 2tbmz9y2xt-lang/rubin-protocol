@@ -5,7 +5,7 @@
   "package_maturity": "experimental_pending_reverification",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
-  "spec_section_hashes_sha3_256": "be9feb5c878c72ae7582d2c1818abe7e78dfca6353916b8c7af7a0721a65dd66",
+  "spec_section_hashes_sha3_256": "cf6d65e9f0211e7537e5900f20cecae7aaeaf1e5917bc0e6805d3c1d89646414",
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "source_rebind": {
@@ -1131,7 +1131,7 @@
       },
       "notes": "Block connection pipeline with coinbase, value conservation, and per-tx state machine. Current CORE_VAULT spend proofs remain registered; the retained experimental VaultStateMachine lifecycle corpus is not current-protocol evidence. TxContext parameters are caller-provided. Coinbase UTXO marking is covered by the current list-to-RBMap bridge and query-level semantics. Vault-policy replay is limited to the safe subset/default-order path.",
       "limitations": [
-        "RUB-1252's StateEntryBytes and LogicalStateBytes definitions, final-image accounting, bound below 2^59 with checked-u64 sufficiency, and STORE_INTEGRITY/LOCAL_INVARIANT/NO_VALIDITY_RESULT StateView required-read handoff are not proved by the registered UTXO theorems.",
+        "RUB-1252's U_pre_genesis/U_parent selection, genesis S0 = 0, complete final-genesis S1, StateEntryBytes and LogicalStateBytes definitions, final-image accounting, bound below 2^59 with checked-u64 sufficiency, and STORE_INTEGRITY/LOCAL_INVARIANT/NO_VALIDITY_RESULT StateView required-read handoff are not proved by the registered UTXO theorems.",
         "RBMap-level operational equivalence is not fully proved end-to-end; the current closure relies on the explicit list-to-RBMap bridge and query-level semantics now available in CoinbaseBehavioral.",
         "vault_policy_default_order_safe_proved covers the spend-side safe subset / default-order path only and is not a full L1↔L2 equivalence theorem for every vault-policy branch.",
         "The current UTXO evidence does not prove RUB-1217's P0-S6 atomic publication boundary, accepted-nonce publication, transaction-index arbitration, or rejection-time absence of partial UTXO, replay, queue, or candidate-state publication."
@@ -1442,7 +1442,7 @@
       },
       "notes": "The retained theorem establishes totality for the BlockValidationOrder model: every input produces the model acceptance witness or an error returned by `validateBlockBasic`.",
       "limitations": [
-        "RUB-1252's activation-first step 13 ordering, inactive-path skip, active S0/S1 derivation and cap check, NO_VALIDITY_RESULT and existing-error priority, and zero-effect rejection are not proved by section25_validation_total_proved.",
+        "RUB-1252's activation-first step 13 ordering, inactive-path skip, height-zero U_parent selection and genesis S0 = 0, Section 19.2 genesis exception, active S0/S1 derivation and cap check, two-condition publication gate, NO_VALIDITY_RESULT and existing-error priority, and zero-effect rejection are not proved by section25_validation_total_proved.",
         "This model totality theorem does not prove the normative gate order or error-precedence requirements.",
         "A full order/error-precedence re-proof is deferred under RUB-1033."
       ],
