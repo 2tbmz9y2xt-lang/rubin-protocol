@@ -101,9 +101,10 @@ type DAAdmissionDisposition uint8
 const (
 	// DAAdmissionRetained means the EXACT member is resident after the call.
 	DAAdmissionRetained DAAdmissionDisposition = 1
-	// DAAdmissionDuplicate is a REJECTED no-mutation result: the member was
-	// already retained, so nothing reserved, nothing was removed, and no
-	// accepted-sequence value was consumed.
+	// DAAdmissionDuplicate is a REJECTED no-mutation result: the member, or
+	// the commit slot its record targets, is already occupied, so nothing was
+	// reserved, nothing was removed, and no accepted-sequence value was
+	// consumed.
 	DAAdmissionDuplicate DAAdmissionDisposition = 2
 )
 
@@ -158,15 +159,16 @@ type daRelayAdmissionMember struct {
 //     UNAVAILABLE before any DA lock. The guard stays held for the whole call —
 //     sync.RWMutex is not reentrant and nothing below may take it again;
 //  4. under that held guard, exactly ONE DARelayState.mu window copies exactly
-//     ONE raw retained observation for the candidate txid, and the DA lock is
-//     released BEFORE any retained parsing or validation. The copy is the
-//     shortcut's only retained byte store; there is no second lookup, retry,
-//     repair or fallback;
-//  5. the copied evidence is validated OFF-lock, still under the guard:
-//     invalid copied evidence selects the existing INTERNAL at this originating
-//     site; an integrity-valid exact (txid, wtxid, raw) replay returns
-//     peer-neutral DUPLICATE with zero ordinary validation, owner work,
-//     mutation, sequence or publication — requested and unsolicited alike;
+//     ONE raw retained observation for the candidate txid AND decides exact
+//     (txid, wtxid, raw) equality atomically with that copy, so the verdict
+//     cannot outlive its member; the DA lock is released BEFORE any retained
+//     parsing or validation. The copy is the shortcut's only retained byte
+//     store; there is no second lookup, retry, repair or fallback;
+//  5. an exact replay returns peer-neutral DUPLICATE with zero ordinary
+//     validation, owner work, mutation, sequence or publication — requested
+//     and unsolicited alike. Only a located NON-exact observation is validated
+//     OFF-lock, still under the guard: invalid copied evidence selects the
+//     existing INTERNAL at this originating site;
 //  6. only ABSENT and retained-nonexact evidence continue, under the SAME
 //     guard, through the existing signature, consensus, current-chain, fee and
 //     candidate-integrity order (validateDACandidate) — a same-txid INVALID
@@ -185,8 +187,8 @@ type daRelayAdmissionMember struct {
 // A failure before step 8 leaves D, the locator index and the owner
 // byte-identical, and every exit — error, panic unwind of a fallible step, or
 // duplicate — releases the admission guard exactly once (the deferred Close, or
-// the explicit hold.release on the pre-validation exits). There is deliberately
-// NO Abort call: after BeginCommit succeeds the remaining work is a token
+// the deferred hold release that stands down after the transfer). There is
+// deliberately NO Abort call: after BeginCommit succeeds the remaining work is a token
 // assignment into an already-present map slot and two pointer publications;
 // none of those can fail or panic, so no schedule exists that acquires a
 // candidate token and then declines to finalize it.
@@ -211,13 +213,12 @@ func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmis
 	if err != nil {
 		return DAAdmissionResult{}, err
 	}
+	defer hold.releaseIfHeld()
 	if result, done, err := s.classifyRetainedReplay(owned, txid, wtxid); done {
-		hold.release()
 		return result, err
 	}
 	admission, err := hold.validateDACandidate(owned, tx, txid, wtxid, inputs)
 	if err != nil {
-		hold.release()
 		return DAAdmissionResult{}, err
 	}
 	defer admission.Close()
@@ -229,24 +230,30 @@ func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmis
 }
 
 // classifyRetainedReplay is steps 4-5 of AdmitDA: the one guarded raw
-// observation and its off-lock classification. done reports that the
-// observation OWNS the result — an integrity-valid exact replay (peer-neutral
-// DUPLICATE, zero effect) or invalid copied evidence (existing INTERNAL).
-// ABSENT and retained-nonexact evidence return done=false: the shortcut
-// observation is discarded and the ordinary order resumes.
+// observation, the exact (txid, wtxid, raw) equality decided ATOMICALLY with
+// the copy inside the same DARelayState.mu hold — field and byte comparison
+// only, so no retained parsing or validation runs under the DA lock, and a
+// concurrent retire cannot separate the verdict from its member — and the
+// off-lock integrity validation of a located NON-exact observation. done
+// reports that the observation OWNS the result — an exact replay (peer-neutral
+// DUPLICATE, zero effect) or invalid non-exact copied evidence (existing
+// INTERNAL). ABSENT and integrity-valid nonexact evidence return done=false:
+// the shortcut observation is discarded and the ordinary order resumes.
 func (s *DARelayState) classifyRetainedReplay(owned []byte, txid, wtxid [32]byte) (DAAdmissionResult, bool, error) {
-	s.mu.Lock()
-	observation := s.observeRetainedTxLocked(txid)
-	s.mu.Unlock()
+	observation, exact := func() (daRetainedObservation, bool) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		o := s.observeRetainedTxLocked(txid)
+		return o, o.memberPresent && o.member.txid == txid && o.member.wtxid == wtxid && bytes.Equal(o.raw, owned)
+	}()
+	if exact {
+		return DAAdmissionResult{DAID: observation.locator.daID, Disposition: DAAdmissionDuplicate}, true, nil
+	}
 	if !observation.located {
 		return DAAdmissionResult{}, false, nil
 	}
-	snapshot, err := observation.validate(txid)
-	if err != nil {
+	if _, err := observation.validate(txid); err != nil {
 		return DAAdmissionResult{}, true, selectRelayDisposition(txAdmitUnavailable("invalid copied retained DA evidence: "+err.Error()), RelayAdmissionInternal)
-	}
-	if snapshot.WTxID == wtxid && bytes.Equal(observation.raw, owned) {
-		return DAAdmissionResult{DAID: observation.locator.daID, Disposition: DAAdmissionDuplicate}, true, nil
 	}
 	return DAAdmissionResult{}, false, nil
 }
@@ -259,9 +266,10 @@ func (s *DARelayState) classifyRetainedReplay(owned []byte, txid, wtxid [32]byte
 // below are Section 5.1's post-validation classes: a live locator row for the
 // candidate txid is the valid same-txid duplicate (exact replays that raced a
 // concurrent admission land here too) and returns peer-neutral DUPLICATE; a
-// commit staging refusal for a record that already holds a DIFFERENT txid's
-// commit is the same-da_id commit conflict and returns DUPLICATE with
-// SameDAIDCommitConflict. Both are decided before any owner reserve and both
+// commit staging refusal for a record whose staged commit txid is PROVEN under
+// this lock to differ from the candidate's is the same-da_id commit conflict
+// and returns DUPLICATE with SameDAIDCommitConflict. Both are decided before
+// any owner reserve and both
 // discard the private projection, so nothing mutates and no sequence is
 // consumed.
 func (s *DARelayState) commitDAAdmission(admission *DAAdmission, member daRelayAdmissionMember) (DAAdmissionResult, error) {
@@ -277,7 +285,11 @@ func (s *DARelayState) commitDAAdmission(admission *DAAdmission, member daRelayA
 	if err != nil {
 		if errors.Is(err, errDARelayDuplicateCommit) && member.locator.kind == daRelayLocatorCommit {
 			result.Disposition = DAAdmissionDuplicate
-			result.SameDAIDCommitConflict = true
+			// The arm's "different txid" claim is proven under this same lock,
+			// never inherited from the recheck above: a corrupt state that lost
+			// the locator row while the SAME commit stays staged is a plain
+			// peer-neutral duplicate, not the conflict effect.
+			result.SameDAIDCommitConflict = s.sets[member.locator.daID].commit.txid != member.identity().txid
 			return result, nil
 		}
 		return DAAdmissionResult{}, err
@@ -515,11 +527,13 @@ func (s *DARelayState) beginRetainedDARemoval() (*DARemoval, error) {
 }
 
 // daRetainedObservation is ONE atomic raw acquisition for one candidate txid,
-// copied in a single DARelayState.mu window and validated OFF-lock. It is the
-// shared raw-observation shape of BOTH read-only retained observers — the
-// LookupRetainedTx router branch and AdmitDA's duplicate-classification
-// shortcut — so the two cannot disagree about what "integrity-valid retained
-// member" means, and neither holds the DA lock across parsing or validation
+// copied in a single DARelayState.mu window. It is the shared raw-observation
+// shape of the two retained-evidence consumers — read-only LookupRetainedTx,
+// which validates it off-lock, and AdmitDA's duplicate-classification
+// shortcut, which decides an admission VERDICT: exact equality inside the
+// copying window, off-lock validation only for a non-exact observation — so
+// the two cannot disagree about what "integrity-valid retained member" means,
+// and neither holds the DA lock across parsing or validation
 // (RUBIN_COMPACT_BLOCKS.md Sections 5.1 and 17.5).
 //
 // raw is a defensive copy taken under the lock: it is the observation's only

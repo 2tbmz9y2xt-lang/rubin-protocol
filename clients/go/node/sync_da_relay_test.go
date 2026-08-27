@@ -639,44 +639,49 @@ func TestCanonicalDAImagePublishesOnlyForNew(t *testing.T) {
 func TestCanonicalDAWritersCannotInterleaveWithTheTransition(t *testing.T) {
 	// Every subtest is SELF-CONTAINED: it builds its own fixture, funds its own
 	// transactions and shares no state with any sibling, so running one subtest
-	// alone reproduces exactly what the full run exercises.
+	// alone reproduces exactly what the full run exercises. prepare runs in the
+	// subtest body — signed-transaction construction, provenance and any t.Fatal
+	// live there — and returns the raced closure, which uses no *testing.T.
 	writers := []struct {
-		name string
-		run  func(t *testing.T, f *canonicalMOFixture, relay *DARelayState)
+		name    string
+		prepare func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func()
 	}{
-		{"AdmitDA commit", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) {
+		{"AdmitDA commit", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
 			commitTx := f.daCommitTxCommitting(t, f.ops[0], daRelayTestID(0x81), 1, 1400, sha3.Sum256([]byte("fenced")))
-			_, _ = relay.AdmitDA(commitTx, daRelayTestProvenance(t, "fence-peer"))
+			provenance := daRelayTestProvenance(t, "fence-peer")
+			return func() { _, _ = relay.AdmitDA(commitTx, provenance) }
 		}},
-		{"AdmitDA chunk", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) {
+		{"AdmitDA chunk", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
 			chunkTx := f.daChunkTx(t, f.ops[1], daRelayTestID(0x82), 0, 1401, []byte("fenced"))
-			_, _ = relay.AdmitDA(chunkTx, daRelayTestProvenance(t, "fence-peer"))
+			provenance := daRelayTestProvenance(t, "fence-peer")
+			return func() { _, _ = relay.AdmitDA(chunkTx, provenance) }
 		}},
-		{"AdvanceOrphanTTL", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) {
-			_ = relay.AdvanceOrphanTTL()
+		{"AdvanceOrphanTTL", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
+			return func() { _ = relay.AdvanceOrphanTTL() }
 		}},
-		{"ReleasePeerQuotaKey", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) {
-			_ = relay.ReleasePeerQuotaKey("fence-peer")
+		{"ReleasePeerQuotaKey", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
+			// The advisory zero-victim scan returns before any guard, so this
+			// fence row needs a charged key to walk past it.
+			mustCanonicalMO(t, "seed fenced peer bytes", relay.addDAChunk("fence-peer", daRelayTestChunk(daRelayTestID(0x83), 0, 7)))
+			return func() { _ = relay.ReleasePeerQuotaKey("fence-peer") }
 		}},
-		{"PlanPrefetch", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) {
-			relay.PlanPrefetch(daRelayTestID(0x81), []string{"fence-peer"}, time.Unix(1, 0))
+		{"PlanPrefetch", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
+			return func() { relay.PlanPrefetch(daRelayTestID(0x81), []string{"fence-peer"}, time.Unix(1, 0)) }
 		}},
-		{"ReleasePrefetchPlan", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) {
-			relay.ReleasePrefetchPlan(DARelayPrefetchPlan{DAID: daRelayTestID(0x81), PeerKey: "fence-peer"})
+		{"ReleasePrefetchPlan", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) func() {
+			return func() {
+				relay.ReleasePrefetchPlan(DARelayPrefetchPlan{DAID: daRelayTestID(0x81), PeerKey: "fence-peer"})
+			}
 		}},
 	}
 	for _, writer := range writers {
 		t.Run(writer.name, func(t *testing.T) {
 			f := newCanonicalMOFixture(t, 2, MempoolConfig{})
 			relay := f.engine.DARelayState()
-			// ReleasePeerQuotaKey's advisory zero-victim scan returns before any
-			// guard, so its fence row needs a charged key to walk past it.
-			if writer.name == "ReleasePeerQuotaKey" {
-				mustCanonicalMO(t, "seed fenced peer bytes", relay.addDAChunk("fence-peer", daRelayTestChunk(daRelayTestID(0x83), 0, 7)))
-			}
+			run := writer.prepare(t, f, relay)
 			done := make(chan struct{})
 			f.engine.chainState.admissionMu.Lock()
-			go func() { defer close(done); writer.run(t, f, relay) }()
+			go func() { defer close(done); run() }()
 			// The BLOCK is proven from the writer's own parked stack, not inferred
 			// from elapsed time: a writer that had merely not been scheduled yet
 			// would never satisfy this barrier, and a writer that took no fence at

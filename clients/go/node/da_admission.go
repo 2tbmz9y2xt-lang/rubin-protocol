@@ -82,12 +82,8 @@ func (m *Mempool) BeginDAAdmission(raw []byte) (*DAAdmission, error) {
 	if err != nil {
 		return nil, err
 	}
-	admission, err := hold.validateDACandidate(owned, tx, txid, wtxid, inputs)
-	if err != nil {
-		hold.release()
-		return nil, err
-	}
-	return admission, nil
+	defer hold.releaseIfHeld()
+	return hold.validateDACandidate(owned, tx, txid, wtxid, inputs)
 }
 
 // parseDAAdmissionCandidate is the guardless pre-stage shared by
@@ -164,6 +160,9 @@ type daAdmissionHold struct {
 	held    bool
 }
 
+// acquireDAAdmissionHold requires a parseDAAdmissionCandidate-first caller:
+// that pre-stage proved the receiver, chainstate and owner non-nil, and
+// nothing else may reach this dereference of them.
 func (m *Mempool) acquireDAAdmissionHold() (*daAdmissionHold, error) {
 	m.chainState.admissionMu.RLock()
 	admission, ok := m.pendingOutpoints.AdmissionContext()
@@ -186,6 +185,16 @@ func (h *daAdmissionHold) release() {
 	}
 	h.held = false
 	h.mempool.chainState.admissionMu.RUnlock()
+}
+
+// releaseIfHeld releases the hold unless the guard already transferred into a
+// DAAdmission. Deferred right after acquisition, it makes the guard's release
+// exactly-once on EVERY unwind — error and panic alike — without ever
+// double-releasing after a successful transfer.
+func (h *daAdmissionHold) releaseIfHeld() {
+	if h.held {
+		h.release()
+	}
 }
 
 // validateDACandidate runs the existing full candidate validation under the

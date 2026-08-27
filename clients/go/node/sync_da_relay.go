@@ -129,9 +129,7 @@ func prepareCanonicalDAImage(relay *DARelayState, included []canonicalDASetIdent
 // pending-outpoint owner): either way there is no claim domain to bind to and
 // the phase is skipped rather than inventing one.
 //
-// bound is deliberately unhinted: it holds only the retained DA members' tokens,
-// and the owner index it is checked against counts every domain's claims, so its
-// population is not derivable from any map length in hand.
+// bound is deliberately unhinted: its population is not derivable from any map length in hand.
 func (s *DARelayState) canonicalDAClaimProjectionLocked(removals []daRelaySetRecord, mo *canonicalMempoolPlan) (canonicalDAClaimProjection, error) {
 	if mo == nil || mo.owner == nil {
 		return canonicalDAClaimProjection{}, nil

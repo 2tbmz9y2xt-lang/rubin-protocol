@@ -259,9 +259,11 @@ func (s *DARelayState) removeDASetRecordLocked(record daRelaySetRecord) error {
 }
 
 // replaceLocatorsLocked retires the old record's txid rows and installs the new
-// one's. It is called by the ONLY two writers of s.sets, which is what keeps the
-// locator index and the record image one bijection: a row can be neither
-// orphaned by a removal nor duplicated by a restage.
+// one's. It is called by the only two writers that change record MEMBERSHIP
+// (installMemberTokenLocked and the TTL decrement also assign s.sets, but never
+// add or remove a member), which is what keeps the locator index and the record
+// image one bijection: a row can be neither orphaned by a removal nor
+// duplicated by a restage.
 func (s *DARelayState) replaceLocatorsLocked(oldRecord, newRecord daRelaySetRecord) {
 	if s.locators == nil {
 		s.locators = map[[32]byte]daRelayLocator{}

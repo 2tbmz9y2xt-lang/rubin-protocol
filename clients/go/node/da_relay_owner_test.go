@@ -30,8 +30,9 @@ func (f *daOwnerFixture) relay() *DARelayState { return f.engine.DARelayState() 
 func (f *daOwnerFixture) owner() *PendingOutpointOwner { return f.mp.PendingOutpointOwner() }
 
 // image is the complete observable retained-DA state: every record, every
-// locator row and every live DA claim, rendered so a "changed nothing" row is a
-// single equality rather than a list of spot checks.
+// member with its provenance, every locator row, all five accounting counters
+// and every live DA claim, rendered so a "changed nothing" row is a single
+// equality rather than a list of spot checks.
 func (f *daOwnerFixture) image(t *testing.T) string {
 	t.Helper()
 	relay, out := f.relay(), ""
@@ -40,7 +41,7 @@ func (f *daOwnerFixture) image(t *testing.T) string {
 		record := relay.sets[daID]
 		out += fmt.Sprintf("|record %x state=%d received=%d", daID, record.state, record.receivedTime)
 		for _, member := range record.members() {
-			out += fmt.Sprintf("|member txid=%x wtxid=%x token=%d", member.txid, member.wtxid, member.token.seq)
+			out += fmt.Sprintf("|member txid=%x wtxid=%x token=%d prov=%+v", member.txid, member.wtxid, member.token.seq, member.provenance)
 		}
 	}
 	// Sorted, so the rendering does not depend on map iteration order.
@@ -50,6 +51,16 @@ func (f *daOwnerFixture) image(t *testing.T) string {
 	}
 	sort.Strings(locators)
 	out += strings.Join(locators, "")
+	perKey := make([]string, 0, len(relay.orphanBytesByPeerQuotaKey)+len(relay.orphanBytesByDAID))
+	for key, charged := range relay.orphanBytesByPeerQuotaKey {
+		perKey = append(perKey, fmt.Sprintf("|peer-bytes %q=%d", key, charged))
+	}
+	for daID, charged := range relay.orphanBytesByDAID {
+		perKey = append(perKey, fmt.Sprintf("|da-bytes %x=%d", daID, charged))
+	}
+	sort.Strings(perKey)
+	out += strings.Join(perKey, "")
+	out += fmt.Sprintf("|orphan=%d overhead=%d pinned=%d", relay.orphanBytes, relay.orphanCommitOverheadBytes, relay.pinnedPayloadBytes)
 	sequence := relay.nextReceivedTime
 	relay.mu.Unlock()
 	owner := f.owner()
@@ -311,7 +322,7 @@ func TestAdmitDAD00R3ReplayMatrix(t *testing.T) {
 		result, err := f.relay().AdmitDA(raw, provenance(t))
 		requireFrozenD00R3Outcome(t, rows[rowID], result, err)
 		if after := f.image(t); after != before {
-			t.Fatalf("%s mutated the record, locator, claim or accepted-sequence image", rowID)
+			t.Fatalf("%s mutated the record, locator, claim, accounting or accepted-sequence image", rowID)
 		}
 		requireAdmissionGuardReleased(t, f.engine.chainState, rowID)
 	}
@@ -546,6 +557,122 @@ func TestAdmitDASameDAIDDistinctCommitSetsTheConflictBitOnly(t *testing.T) {
 	if err != nil || replay.Disposition != DAAdmissionDuplicate || replay.SameDAIDCommitConflict {
 		t.Fatalf("exact replay result=%+v err=%v, want peer-neutral DUPLICATE without the conflict bit", replay, err)
 	}
+}
+
+// TestExactReplayVerdictIsDecidedAtomicallyWithItsObservation is the R9/K2
+// atomicity row: the exact-replay verdict is field-and-byte equality decided
+// INSIDE the same DARelayState.mu hold that copies the observation. Two
+// consequences are pinned: a member retired before the verdict window can never
+// yield a stale exact DUPLICATE — retire-then-observe is the only schedule the
+// single hold still admits — and the verdict needs no off-lock record-coherence
+// proof, where the old validate-first order manufactured INTERNAL from the
+// record's own map key.
+func TestExactReplayVerdictIsDecidedAtomicallyWithItsObservation(t *testing.T) {
+	t.Run("a retired member cannot produce the exact verdict", func(t *testing.T) {
+		f := newDAOwnerFixture(t, 2)
+		daID := daRelayTestID(0x76)
+		commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2300, sha3.Sum256([]byte("retire")))
+		mustAdmit(t, f, commitTx, mustPeerProvenance(t, "peer-a"))
+		relay := f.relay()
+		// Direct package-private retirement under s.mu — the removal that could
+		// once land between the copy and the off-lock decision. With copy and
+		// decision in ONE hold it lands strictly before the verdict window.
+		relay.mu.Lock()
+		token := relay.sets[daID].commit.token
+		delete(relay.sets, daID)
+		delete(relay.locators, txID(t, commitTx))
+		relay.mu.Unlock()
+		owner := f.owner()
+		owner.mu.Lock()
+		owner.dropClaimLocked(token)
+		owner.mu.Unlock()
+		result, err := relay.AdmitDA(commitTx, mustPeerProvenance(t, "peer-b"))
+		if err != nil || result.Disposition != DAAdmissionRetained {
+			t.Fatalf("replay after retirement result=%+v err=%v, want ordinary re-retention, never a stale DUPLICATE", result, err)
+		}
+	})
+	t.Run("a byte-exact replay needs no off-lock record-coherence proof", func(t *testing.T) {
+		f := newDAOwnerFixture(t, 2)
+		daID := daRelayTestID(0x77)
+		commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2301, sha3.Sum256([]byte("mis-keyed")))
+		mustAdmit(t, f, commitTx, mustPeerProvenance(t, "peer-a"))
+		relay := f.relay()
+		relay.mu.Lock()
+		record := relay.sets[daID]
+		record.daID[0] ^= 0xff // the record no longer agrees with its own map key
+		relay.sets[daID] = record
+		relay.mu.Unlock()
+		before := f.image(t)
+		result, err := relay.AdmitDA(commitTx, mustPeerProvenance(t, "peer-b"))
+		if err != nil || result.Disposition != DAAdmissionDuplicate || result.SameDAIDCommitConflict || result.DAID != daID {
+			t.Fatalf("byte-exact replay over a mis-keyed record result=%+v err=%v, want the in-lock equality verdict DUPLICATE", result, err)
+		}
+		if after := f.image(t); after != before {
+			t.Fatal("the equality verdict mutated the image")
+		}
+	})
+}
+
+// TestConflictBitRequiresAProvenDifferentTxid is the K3 corrupt-state row: the
+// SameDAIDCommitConflict arm re-proves under the final lock that the staged
+// commit's txid actually differs from the candidate's. A corrupt index that
+// lost the locator row while the SAME commit stays staged is a plain
+// peer-neutral duplicate and must not earn the existing negative peer effect.
+func TestConflictBitRequiresAProvenDifferentTxid(t *testing.T) {
+	f := newDAOwnerFixture(t, 2)
+	daID := daRelayTestID(0x78)
+	commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2310, sha3.Sum256([]byte("same-txid")))
+	mustAdmit(t, f, commitTx, mustPeerProvenance(t, "peer-a"))
+	relay := f.relay()
+	relay.mu.Lock()
+	delete(relay.locators, txID(t, commitTx))
+	relay.mu.Unlock()
+	before := f.image(t)
+	result, err := relay.AdmitDA(commitTx, mustPeerProvenance(t, "peer-b"))
+	if err != nil || result.Disposition != DAAdmissionDuplicate || result.SameDAIDCommitConflict {
+		t.Fatalf("same-txid restage over a lost locator row result=%+v err=%v, want DUPLICATE without the conflict bit", result, err)
+	}
+	if after := f.image(t); after != before {
+		t.Fatal("the corrupt-state duplicate mutated the image")
+	}
+}
+
+// TestCommitDAAdmissionLiveLocatorRecheckFiresDeterministically drives the
+// final-lock live-locator DUPLICATE arm WITHOUT a schedule and with no
+// production seam: the member is retained first, a second admission for the
+// SAME bytes is built through the shared Mempool.BeginDAAdmission lifecycle,
+// and commitDAAdmission is called directly, so the recheck fires by
+// construction rather than by winning a race.
+func TestCommitDAAdmissionLiveLocatorRecheckFiresDeterministically(t *testing.T) {
+	f := newDAOwnerFixture(t, 2)
+	daID := daRelayTestID(0x79)
+	chunkTx := f.daChunkTx(t, f.ops[0], daID, 0, 2320, []byte("live-locator"))
+	mustAdmit(t, f, chunkTx, mustPeerProvenance(t, "peer-a"))
+	before := f.image(t)
+	admission, err := f.mp.BeginDAAdmission(chunkTx)
+	if err != nil {
+		t.Fatalf("BeginDAAdmission: %v", err)
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			admission.Close()
+		}
+	}()
+	member, err := daRelayAdmissionMemberOf(admission.Snapshot(), mustPeerProvenance(t, "peer-b"))
+	if err != nil {
+		t.Fatalf("daRelayAdmissionMemberOf: %v", err)
+	}
+	result, err := f.relay().commitDAAdmission(admission, member)
+	if err != nil || result.Disposition != DAAdmissionDuplicate || result.SameDAIDCommitConflict || result.DAID != daID {
+		t.Fatalf("live-locator recheck result=%+v err=%v, want peer-neutral DUPLICATE", result, err)
+	}
+	closed = true
+	admission.Close()
+	if after := f.image(t); after != before {
+		t.Fatal("the live-locator duplicate mutated the image")
+	}
+	requireAdmissionGuardReleased(t, f.engine.chainState, "the direct commitDAAdmission duplicate")
 }
 
 // TestAdmitDARefusesEveryPreOwnerCondition is R1/R2/R4: an invalid provenance, a
