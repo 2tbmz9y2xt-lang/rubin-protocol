@@ -5,7 +5,7 @@
   "package_maturity": "experimental_pending_reverification",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
-  "spec_section_hashes_sha3_256": "c2e05b7f20da21e735de5a71d0364ee0da3a913115a9e085952c37d3f93c565e",
+  "spec_section_hashes_sha3_256": "be9feb5c878c72ae7582d2c1818abe7e78dfca6353916b8c7af7a0721a65dd66",
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "source_rebind": {
@@ -978,6 +978,7 @@
       },
       "notes": "Section 16 claim is carried by concrete regression theorems plus the retained registry-aware rejection and threshold/vault theorems on `validateWitnessItemLengthsRegistry`, `validateThresholdSigSpendRegistry`, and `validateVaultSpendRegistry` specialized to `PRE_ROTATION_REGISTRY`. The deleted aggregate binding and ML-DSA acceptance wrappers are not claimed. This row closes the named retained spend-side helper/live cases only; parser-stage witness canonicalization and activation-stage suite gating remain outside this surface.",
       "limitations": [
+        "RUB-1252's use of the Section 16 coinbase height ceiling to bound accepted heights by 2^32 and LogicalStateBytes below 2^59 is not proved by the registered transaction-structural theorems.",
         "Registry-aware coverage is specialized to PRE_ROTATION_REGISTRY; post-rotation registries with additional suites remain future scope.",
         "The parse-time structural validity / registry validity / activation validity split introduced for the witness parser model is not itself counted in this Section 16 row.",
         "The current Section 16 evidence does not prove RUB-1217's six global S1A family-before-index scans or their mixed-invalid precedence; it must not be read as proving the new complete family order."
@@ -1130,7 +1131,7 @@
       },
       "notes": "Block connection pipeline with coinbase, value conservation, and per-tx state machine. Current CORE_VAULT spend proofs remain registered; the retained experimental VaultStateMachine lifecycle corpus is not current-protocol evidence. TxContext parameters are caller-provided. Coinbase UTXO marking is covered by the current list-to-RBMap bridge and query-level semantics. Vault-policy replay is limited to the safe subset/default-order path.",
       "limitations": [
-        "RUB-1252's StateEntryBytes and LogicalStateBytes definitions, final-image accounting, bound below 2^91, and STORE_INTEGRITY/LOCAL_INVARIANT/NO_VALIDITY_RESULT required-read handoff are not proved by the registered UTXO theorems.",
+        "RUB-1252's StateEntryBytes and LogicalStateBytes definitions, final-image accounting, bound below 2^59 with checked-u64 sufficiency, and STORE_INTEGRITY/LOCAL_INVARIANT/NO_VALIDITY_RESULT StateView required-read handoff are not proved by the registered UTXO theorems.",
         "RBMap-level operational equivalence is not fully proved end-to-end; the current closure relies on the explicit list-to-RBMap bridge and query-level semantics now available in CoinbaseBehavioral.",
         "vault_policy_default_order_safe_proved covers the spend-side safe subset / default-order path only and is not a full L1↔L2 equivalence theorem for every vault-policy branch.",
         "The current UTXO evidence does not prove RUB-1217's P0-S6 atomic publication boundary, accepted-nonce publication, transaction-index arbitration, or rejection-time absence of partial UTXO, replay, queue, or candidate-state publication."
@@ -1419,7 +1420,7 @@
       },
       "notes": "Current Lean model evidence establishes deterministic selection for represented chainwork/hash values: `forkSelect_exhaustive` covers the model cases, `forkSelect_equal_chains` covers equal represented values, `forkSelect_total_det` covers model-distinguishable pairs, and `bytesLT_antisym` plus `bytesLT_total_of_ne` provide the tie-break properties. Separate generated fixture evidence: `fork_choice_select_cv_contract_proved` machine-checks exactly the six current positive protocol-generated CV-FORK-CHOICE fork_choice_select vectors in their pinned order. Distinct candidates with equal work and equal 32-byte hash are not distinguished by this model; candidate identity/hash-collision exclusion is an unproved premise tracked by RUB-1033. `compiler_trusted` records a `Lean.ofReduceBool` compiler/evaluator dependency in the registered fixture contract; it does not assert absence of ordinary Lean foundations.",
       "limitations": [
-        "RUB-1252's STAGED_NONCANONICAL status, prospective-only ranking, exact-parent suffix validation, retry behavior, and zero-publication rules are not proved by the registered fork-choice model.",
+        "RUB-1252's internal STAGED_NONCANONICAL state, existing STORED_NONCANONICAL and KNOWN_BLOCK_NOOP(STORED_NONCANONICAL) public projections, prospective-validation scheduling, exact-parent suffix validation, retry behavior, and zero-effect rules are not proved by the registered fork-choice model.",
         "forkSelect models the runtime fork_choice_select. Go/Rust code follows identical if/else chain. Structural equivalence evident from inspection but not proved via rfl (Go/Rust not importable to Lean).",
         "The 32-byte hash length premise (hL/hR) is a protocol type invariant (SHA3-256 output), not a semantic precondition. Runtime block hashes are always 32 bytes by construction.",
         "Distinct candidates with equal work and equal 32-byte hash are not distinguished; candidate identity and hash-collision exclusion are unproved premises deferred under RUB-1033.",
@@ -1441,7 +1442,7 @@
       },
       "notes": "The retained theorem establishes totality for the BlockValidationOrder model: every input produces the model acceptance witness or an error returned by `validateBlockBasic`.",
       "limitations": [
-        "RUB-1252's post-Section-19.2 S0/S1 derivation, active cap/drain check, no-result priority, and zero-effect rejection are not proved by section25_validation_total_proved.",
+        "RUB-1252's activation-first step 13 ordering, inactive-path skip, active S0/S1 derivation and cap check, NO_VALIDITY_RESULT and existing-error priority, and zero-effect rejection are not proved by section25_validation_total_proved.",
         "This model totality theorem does not prove the normative gate order or error-precedence requirements.",
         "A full order/error-precedence re-proof is deferred under RUB-1033."
       ],
