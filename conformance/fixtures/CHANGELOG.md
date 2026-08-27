@@ -11,9 +11,9 @@ Policy:
 
 ---
 
-## 2026-08-27 — D00-R3 provisional DA expected authority (RUB-1267)
+## 2026-08-27 — D00-R3 DA expected authority merge-OID rebind (RUB-1267)
 
-Manual authoring re-pins the inert `FROZEN_EXPECTED` artifact to the reviewed provisional/noncanonical `rubin-spec@79c49092f35b7396669b991ec1fd534e41d9b1a7`: 79 expected-only cases, 19 closed obligations, and zero outstanding. An exact human spec merge-OID rebind remains required before final authority. Changed files: `POLICY_DA_ANCHOR_ANTI_ABUSE.md`, `protocol/da_admission_expected_v1.json`, `tools/gen_conformance_matrix.py`, `conformance/MATRIX.md`, and this changelog.
+Authority-only rebind pins the inert `FROZEN_EXPECTED` artifact to merged `rubin-spec@0e5bcecade9eecfd807718ab3edf50bc19e9f31c`: 79 expected-only cases, 19 closed obligations, and zero outstanding. Reviewed head `79c49092f35b7396669b991ec1fd534e41d9b1a7` is provenance only and is byte-identical across all five changed spec files. Changed files: `POLICY_DA_ANCHOR_ANTI_ABUSE.md`, `protocol/da_admission_expected_v1.json`, `tools/gen_conformance_matrix.py`, `conformance/MATRIX.md`, and this changelog.
 
 ## 2026-08-26 — Frozen DA expected authority (RUB-1243 / D01C)
 
