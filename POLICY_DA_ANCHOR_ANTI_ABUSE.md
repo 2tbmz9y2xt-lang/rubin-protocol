@@ -179,14 +179,22 @@ This is intentionally below the consensus cap to reduce early-network abuse.
 
 Fee replacement of duplicate DA commits is forbidden.
 
-For a given `da_id`:
+For a given `da_id`, first-seen retention and fee non-replacement remain in force.
 
-1. First-seen commit is retained.
-2. Later duplicate commits are discarded.
-3. Higher fee does not replace the first commit.
-4. Duplicate sender receives a peer-score penalty (the magnitude of
-   the penalty is governed by the relay-policy peer-score system; this
-   overlay does not redefine it).
+1. An exact retained commit or chunk replay is discarded peer-neutrally; it
+   does not replace retained bytes or change retained state, owner, or sequence.
+2. A same-txid nonexact input has candidate witness/raw identity different from
+   the retained member. It receives no exact-replay shortcut and follows its
+   first owning validation. It cannot replace retained bytes; an otherwise-valid
+   duplicate result is peer-neutral.
+3. Only a fully validated different-txid commit for the same `da_id` keeps the
+   existing negative PEER effect. Higher fee does not replace the first commit.
+4. An available owner with no locator resumes ordinary admission. Unavailable
+   or unstable guard/context, or DA-owner unavailability, selects existing
+   `UNAVAILABLE`;
+   dangling, corrupt, or retained-identity-mismatched evidence selects existing
+   `INTERNAL`. Both outcomes are peer-neutral and create no owner, retained
+   state, sequence, replay-publication, or disconnect effect.
 
 ## 7. DA Set Eviction
 
