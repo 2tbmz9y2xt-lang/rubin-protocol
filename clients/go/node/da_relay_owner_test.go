@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -240,17 +241,28 @@ func requireFrozenD00R3Outcome(t *testing.T, row frozenD00R3Row, result DAAdmiss
 			t.Fatalf("%s: err=%v disposition=%v, frozen row wants producer %s", row.ID, err, relayDispositionOf(err), want.Producer)
 		}
 	case want.SemanticReason == "PARSE_OR_POLICY_REJECT":
-		// The existing public admission error flattens the consensus error to
-		// its exact "CODE: detail" text (validateTransactionWithConsensus), so
-		// the owning code is asserted from that unchanged public surface.
-		if err == nil || !strings.Contains(err.Error(), want.ErrorCode) {
-			t.Fatalf("%s: err=%v, frozen row wants owning %s", row.ID, err, want.ErrorCode)
-		}
+		requireOwningErrorCode(t, row.ID, err, want.ErrorCode)
 	default:
 		t.Fatalf("%s: unmapped frozen outcome %+v", row.ID, want)
 	}
 	if wantConflict := row.Expect.P2P.PeerQualityEffect == "NEGATIVE_DUPLICATE_COMMIT"; result.SameDAIDCommitConflict != wantConflict {
 		t.Fatalf("%s: SameDAIDCommitConflict=%v, frozen peer effect is %q", row.ID, result.SameDAIDCommitConflict, row.Expect.P2P.PeerQualityEffect)
+	}
+}
+
+// requireOwningErrorCode asserts the PINNED public admission surface, which is
+// exactly "CODE: detail" (consensus.TxError.Error, carried verbatim by
+// validateTransactionWithConsensus): the OWNING code is the first token, so a
+// competing code appearing anywhere in the detail — which a substring match
+// would happily accept — fails here instead.
+func requireOwningErrorCode(t *testing.T, rowID string, err error, want string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s: no error, frozen row wants owning %s", rowID, want)
+	}
+	got, detail, _ := strings.Cut(err.Error(), ": ")
+	if got != want {
+		t.Fatalf("%s: owning error code=%q (detail %q), frozen row wants %q", rowID, got, detail, want)
 	}
 }
 
@@ -487,6 +499,12 @@ func TestAdmitDAD00R3ReplayMatrix(t *testing.T) {
 // and owner, and exactly one retains while the other observes the peer-neutral
 // duplicate — in either schedule — leaving one member, one locator and one
 // finalized claim.
+//
+// The overlap is REAL, not hoped for: both goroutines report ready and then wait
+// on one released barrier, so the row cannot pass by running them one after the
+// other. Both receives are BOUNDED, so a schedule that deadlocks fails this row
+// by timeout instead of hanging the suite (the same discipline
+// requireAdmissionGuardReleased uses).
 func TestAdmitDAConcurrentSameBytesRetainExactlyOnce(t *testing.T) {
 	f := newDAOwnerFixture(t, 2)
 	commitTx := f.daCommitTxCommitting(t, f.ops[0], daRelayTestID(0x6e), 1, 2290, sha3.Sum256([]byte("race")))
@@ -496,15 +514,27 @@ func TestAdmitDAConcurrentSameBytesRetainExactlyOnce(t *testing.T) {
 		err    error
 	}
 	outcomes := make(chan outcome, 2)
+	start := make(chan struct{})
+	var ready sync.WaitGroup
+	ready.Add(2)
 	for i := 0; i < 2; i++ {
 		go func() {
+			ready.Done()
+			<-start
 			result, err := f.relay().AdmitDA(commitTx, provenance)
 			outcomes <- outcome{result: result, err: err}
 		}()
 	}
+	ready.Wait()
+	close(start)
 	retained, duplicate := 0, 0
 	for i := 0; i < 2; i++ {
-		got := <-outcomes
+		var got outcome
+		select {
+		case got = <-outcomes:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("concurrent AdmitDA %d of 2 never returned", i+1)
+		}
 		if got.err != nil {
 			t.Fatalf("concurrent AdmitDA: %v", got.err)
 		}
@@ -591,6 +621,33 @@ func TestReplayClassificationValidatesTheObservationBeforeTheExactVerdict(t *tes
 			t.Fatalf("replay after retirement result=%+v err=%v, want ordinary re-retention, never a stale DUPLICATE", result, err)
 		}
 	})
+	t.Run("a byte-exact replay on a state-contradicting record is INTERNAL", func(t *testing.T) {
+		// The guarded observation copies the record's STATE, so the off-lock
+		// validator can see that a State A (ORPHAN_CHUNKS) record carrying a
+		// commit contradicts itself. Without that field the shortcut would call
+		// this an integrity-valid exact replay and answer DUPLICATE.
+		f := newDAOwnerFixture(t, 2)
+		daID := daRelayTestID(0x7d)
+		commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2350, sha3.Sum256([]byte("state-a")))
+		mustAdmit(t, f, commitTx, mustPeerProvenance(t, "peer-a"))
+		relay := f.relay()
+		relay.mu.Lock()
+		record := relay.sets[daID]
+		record.state = daRelayStateOrphanChunks
+		relay.sets[daID] = record
+		relay.mu.Unlock()
+		before := f.image(t)
+		result, err := relay.AdmitDA(commitTx, mustPeerProvenance(t, "peer-b"))
+		if err == nil || relayDispositionOf(err) != RelayAdmissionInternal || result != (DAAdmissionResult{}) {
+			t.Fatalf("replay over a State A record holding a commit result=%+v err=%v, want the existing INTERNAL", result, err)
+		}
+		if _, _, lookupErr := relay.LookupRetainedTx(txID(t, commitTx)); lookupErr == nil {
+			t.Fatal("LookupRetainedTx accepted the record the shortcut refused")
+		}
+		if after := f.image(t); after != before {
+			t.Fatal("the INTERNAL classification mutated the image")
+		}
+	})
 	t.Run("a byte-exact replay on a mis-keyed record is INTERNAL", func(t *testing.T) {
 		f := newDAOwnerFixture(t, 2)
 		daID := daRelayTestID(0x77)
@@ -662,7 +719,7 @@ func TestCommitDAAdmissionLiveLocatorRecheckFiresDeterministically(t *testing.T)
 			admission.Close()
 		}
 	}()
-	member, err := daRelayAdmissionMemberOf(admission.Snapshot(), mustPeerProvenance(t, "peer-b"))
+	member, err := daRelayAdmissionMemberOf(admission, mustPeerProvenance(t, "peer-b"))
 	if err != nil {
 		t.Fatalf("daRelayAdmissionMemberOf: %v", err)
 	}
@@ -771,7 +828,7 @@ func TestAdmitDAChunkLastMismatchChangesNothing(t *testing.T) {
 // an absent txid is ABSENT_DA, and a locator that cannot produce its own member
 // is INTERNAL rather than absence.
 func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testing.T) {
-	f := newDAOwnerFixture(t, 2)
+	f := newDAOwnerFixture(t, 5)
 	daID, payload := daRelayTestID(0x37), []byte("lookup-payload")
 	commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2050, sha3.Sum256(payload))
 	if _, err := f.relay().AdmitDA(commitTx, mustPeerProvenance(t, "peer-a")); err != nil {
@@ -786,6 +843,22 @@ func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testin
 	if _, err := f.relay().AdmitDA(roleCommitTx, mustPeerProvenance(t, "peer-a")); err != nil {
 		t.Fatalf("AdmitDA(role fixture): %v", err)
 	}
+	// The kind and index rows below rewrite the row of a member that IS resolvable
+	// at the slot the corrupt row names, which is the only shape that can tell the
+	// closed-set rule from the txid check: with an if/else over the kind, each of
+	// them resolves happily and the lookup answers owned=true.
+	kindDAID := daRelayTestID(0x3d)
+	kindChunks := [][]byte{
+		f.daChunkTx(t, f.ops[2], kindDAID, 0, 2052, []byte("kind-zero")),
+		f.daChunkTx(t, f.ops[3], kindDAID, 1, 2053, []byte("kind-past")),
+	}
+	for _, raw := range kindChunks {
+		mustAdmit(t, f, raw, mustPeerProvenance(t, "peer-a"))
+	}
+	indexDAID := daRelayTestID(0x3e)
+	indexCommitTx := f.daCommitTxCommitting(t, f.ops[4], indexDAID, 1, 2054, sha3.Sum256([]byte("index")))
+	mustAdmit(t, f, indexCommitTx, mustPeerProvenance(t, "peer-a"))
+
 	relay.mu.Lock()
 	// Three corruption classes the index itself can hold: a row naming an absent
 	// record, a row naming a member whose retained txid is a different one, and a
@@ -793,6 +866,14 @@ func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testin
 	relay.locators[[32]byte{0xcd}] = daRelayLocator{daID: daRelayTestID(0xee), kind: daRelayLocatorCommit}
 	relay.locators[[32]byte{0xce}] = daRelayLocator{daID: daID, kind: daRelayLocatorCommit}
 	relay.locators[[32]byte{0xcf}] = daRelayLocator{daID: daID, kind: daRelayLocatorChunk, chunkIndex: 7}
+	// The locator KIND is a closed set of exactly {commit, chunk}: the zero value
+	// and anything past the last kind must take the same located-inconsistency
+	// lane, never resolve as "some chunk". A commit locator carrying a chunk index
+	// is the same class of contradiction — a record holds one commit slot and it
+	// has no index.
+	relay.locators[txID(t, kindChunks[0])] = daRelayLocator{daID: kindDAID, chunkIndex: 0}
+	relay.locators[txID(t, kindChunks[1])] = daRelayLocator{daID: kindDAID, kind: daRelayLocatorChunk + 1, chunkIndex: 1}
+	relay.locators[txID(t, indexCommitTx)] = daRelayLocator{daID: indexDAID, kind: daRelayLocatorCommit, chunkIndex: 3}
 	// A fourth class the index cannot show: the locator and the member agree,
 	// and the RETAINED BYTES no longer are that member.
 	record := relay.sets[daID]
@@ -807,11 +888,14 @@ func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testin
 	relay.sets[roleDAID] = roleRecord
 	relay.mu.Unlock()
 	for name, txid := range map[string][32]byte{
-		"dangling locator":  {0xcd},
-		"wrong record":      {0xce},
-		"wrong member kind": {0xcf},
-		"corrupted bytes":   txID(t, commitTx),
-		"role mismatch":     txID(t, roleCommitTx),
+		"dangling locator":             {0xcd},
+		"wrong record":                 {0xce},
+		"wrong member kind":            {0xcf},
+		"zero locator kind":            txID(t, kindChunks[0]),
+		"locator kind past the set":    txID(t, kindChunks[1]),
+		"commit locator with an index": txID(t, indexCommitTx),
+		"corrupted bytes":              txID(t, commitTx),
+		"role mismatch":                txID(t, roleCommitTx),
 	} {
 		snapshot, owned, err := relay.LookupRetainedTx(txid)
 		if owned || err == nil || snapshot.TxID != ([32]byte{}) {
@@ -1279,13 +1363,18 @@ func TestAdmitDARejectsAChunkAtTheDeclaredIndexCeiling(t *testing.T) {
 	mustAdmit(t, f, last, mustPeerProvenance(t, "peer-a"))
 }
 
-// TestTokenlessRetainedMemberContributesNoVictim pins appendDAMemberVictims'
-// zero-token arm: a member staged through the package-private accounting entry
-// owns NO claim, so a removal that selects it must publish its projection with
-// an EMPTY victim batch rather than name a zero token the owner would refuse.
-// The production admission path never produces such a member — this is the
-// test-only staging construction the retained-schema rows drive.
-func TestTokenlessRetainedMemberContributesNoVictim(t *testing.T) {
+// TestTokenlessRetainedMemberFailsClosedOnlyWhereAClaimCanExist is H2/M3/A8's
+// zero-token arm. Whether a zero token is legitimate is a property of the RELAY,
+// not of the member:
+//
+//   - BOUND relay: every member it retained owes exactly one finalized claim, so
+//     a zero token is MISSING token evidence for a claim that exists. Removing
+//     the record around it would publish a record-free, locator-free orphan
+//     claim, so the removal fails closed before any publication and the image is
+//     left byte-identical.
+//   - UNBOUND relay: beginRetainedDARemoval returns no guard at all and no claim
+//     can exist, so the member is simply removed with an empty victim batch.
+func TestTokenlessRetainedMemberFailsClosedOnlyWhereAClaimCanExist(t *testing.T) {
 	f := newDAOwnerFixture(t, 2)
 	daID := daRelayTestID(0x5c)
 	raw := f.daChunkTx(t, f.ops[0], daID, 0, 2180, []byte("tokenless"))
@@ -1302,10 +1391,126 @@ func TestTokenlessRetainedMemberContributesNoVictim(t *testing.T) {
 		daID: daID, chunkHash: tx.DaChunkCore.ChunkHash, chunkIndex: 0,
 		payload: tx.DaPayload, wireBytes: uint64(len(raw)), txBytes: raw, hashChecked: true,
 	}))
-	if err := f.relay().ReleasePeerQuotaKey("peer-a"); err != nil {
-		t.Fatalf("ReleasePeerQuotaKey over a tokenless member: %v", err)
+	before := f.image(t)
+	err = f.relay().ReleasePeerQuotaKey("peer-a")
+	if err == nil || !strings.Contains(err.Error(), "carries no owner token") {
+		t.Fatalf("bound-relay removal over a tokenless member: err=%v, want the fail-closed refusal", err)
 	}
-	requireRetained(t, f, txid, false, "the tokenless member")
+	if after := f.image(t); after != before {
+		t.Fatal("the refused removal mutated the retained image")
+	}
+	requireRetained(t, f, txid, true, "the tokenless member of a BOUND relay")
+
+	t.Run("an unbound relay owns no claim and removes it", func(t *testing.T) {
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		chunk := daRelayTestChunk(daRelayTestID(0x5d), 0, 11)
+		mustAddDAChunk(t, state, "peer-a", chunk)
+		if err := state.ReleasePeerQuotaKey("peer-a"); err != nil {
+			t.Fatalf("unbound removal over a tokenless member: %v", err)
+		}
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		if len(state.sets) != 0 || len(state.locators) != 0 {
+			t.Fatalf("unbound removal left sets=%d locators=%d", len(state.sets), len(state.locators))
+		}
+	})
+}
+
+// TestAdmitDAPlansOutsideTheFinalLockAndRefusesARacedPlan is the lock_and_effect
+// ordering row: every allocation, locator, record and victim decision is
+// COMPLETE before the final DA lock, and the final lock's currency recheck is
+// what makes those off-lock decisions authoritative.
+//
+// Both halves run through the production functions in the production order, made
+// deterministic by construction rather than by winning a race: the plan is
+// built, a second member of the SAME record is then admitted, and the plan is
+// applied. Applying it would install a record that never saw that member, so it
+// is refused with the transient UNAVAILABLE and the whole image byte-identical.
+//
+// The unrelated-record half is the other side of the same property and is
+// covered by the fence suite's six concurrent distinct-record writers: those
+// plans are NOT invalidated by one another.
+func TestAdmitDAPlansOutsideTheFinalLockAndRefusesARacedPlan(t *testing.T) {
+	f := newDAOwnerFixture(t, 3)
+	relay := f.relay()
+	daID := daRelayTestID(0x7a)
+	commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 3, 2330, sha3.Sum256([]byte("planned")))
+	mustAdmit(t, f, commitTx, mustPeerProvenance(t, "peer-a"))
+	chunkTx := f.daChunkTx(t, f.ops[1], daID, 0, 2331, []byte("planned-chunk"))
+	admission, err := f.mp.BeginDAAdmission(chunkTx)
+	if err != nil {
+		t.Fatalf("BeginDAAdmission: %v", err)
+	}
+	defer admission.Close()
+	member, err := daRelayAdmissionMemberOf(admission, mustPeerProvenance(t, "peer-b"))
+	if err != nil {
+		t.Fatalf("daRelayAdmissionMemberOf: %v", err)
+	}
+	beforePlan := f.image(t)
+	plan, err := relay.planDAAdmission(member)
+	if err != nil || plan.stageErr != nil {
+		t.Fatalf("planDAAdmission: err=%v stageErr=%v", err, plan.stageErr)
+	}
+	// The plan is COMPLETE and the live image is UNTOUCHED: the staged record
+	// already holds this member while the live record does not, and relay.mu is
+	// free — the Lock below returns — so none of it was decided under the final
+	// lock.
+	txid := txID(t, chunkTx)
+	relay.mu.Lock()
+	liveChunks := len(relay.sets[daID].chunks)
+	relay.mu.Unlock()
+	if staged, ok := plan.staged.record.chunks[0]; !ok || staged.txid != txid || liveChunks != 0 {
+		t.Fatalf("staged chunk present=%v live chunks=%d, want the complete plan off-lock and no live effect", ok, liveChunks)
+	}
+	if after := f.image(t); after != beforePlan {
+		t.Fatal("planning published state")
+	}
+
+	// A raced admission into the SAME record: applying the stale plan would
+	// install a record value that never saw it.
+	raced := f.daChunkTx(t, f.ops[2], daID, 1, 2332, []byte("raced-chunk"))
+	mustAdmit(t, f, raced, mustPeerProvenance(t, "peer-c"))
+	beforeApply := f.image(t)
+	result, err := relay.applyDAAdmissionPlan(admission, member, plan)
+	if err == nil || relayDispositionOf(err) != RelayAdmissionUnavailable || result != (DAAdmissionResult{}) {
+		t.Fatalf("raced plan result=%+v err=%v, want the transient UNAVAILABLE refusal", result, err)
+	}
+	if after := f.image(t); after != beforeApply {
+		t.Fatalf("the refused stale plan mutated the image:\n before=%s\n after =%s", beforeApply, after)
+	}
+	requireRetained(t, f, txID(t, raced), true, "the raced member the stale plan would have retired")
+	requireRetained(t, f, txid, false, "the refused candidate")
+}
+
+// TestAdmissionMemberRenderingConsumesTheAdmissionsOwnParse is R9's one-parse
+// row: the retained member is rendered from the transaction the admission ITSELF
+// parsed, never from a second parse of the snapshot bytes. The proof is direct —
+// the snapshot's bytes are replaced with bytes that cannot be parsed at all, and
+// the rendering still yields this candidate's own locator.
+func TestAdmissionMemberRenderingConsumesTheAdmissionsOwnParse(t *testing.T) {
+	f := newDAOwnerFixture(t, 2)
+	daID := daRelayTestID(0x7c)
+	chunkTx := f.daChunkTx(t, f.ops[0], daID, 0, 2340, []byte("one-parse"))
+	admission, err := f.mp.BeginDAAdmission(chunkTx)
+	if err != nil {
+		t.Fatalf("BeginDAAdmission: %v", err)
+	}
+	defer admission.Close()
+	unparseable := []byte{0x00}
+	if _, _, _, _, err := consensus.ParseTx(unparseable); err == nil {
+		t.Fatal("the substituted bytes parse, so this row would not detect a re-parse")
+	}
+	// Only the BYTES are substituted: every other snapshot field keeps the value
+	// the admission derived, so the rendering fails here only if it parses them.
+	admission.snapshot.TxBytes = unparseable
+	member, err := daRelayAdmissionMemberOf(admission, mustPeerProvenance(t, "peer-a"))
+	if err != nil {
+		t.Fatalf("daRelayAdmissionMemberOf over unparseable snapshot bytes: %v", err)
+	}
+	want := daRelayLocator{daID: daID, kind: daRelayLocatorChunk, chunkIndex: 0}
+	if member.locator != want {
+		t.Fatalf("rendered locator=%+v, want the carried parse's %+v", member.locator, want)
+	}
 }
 
 // TestPeerlessAdmissionChargesNoPeerQuotaKey is the A5/M2 ENFORCEMENT row on the

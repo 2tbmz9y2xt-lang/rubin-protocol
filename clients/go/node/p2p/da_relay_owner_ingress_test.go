@@ -147,11 +147,30 @@ func mustPeerDAProvenance(t *testing.T, peer string) node.DAProvenance {
 // TestRemoteDAExitsBeforeEveryStandardAuthority is A1/A2/M1: a remote DA commit
 // and a remote DA chunk are retained WITHOUT reaching the seen-set, the relay
 // pool, the metadata producer or an MSG_TX announcement, while a remote standard
-// transaction still reaches all of them exactly once.
+// transaction still reaches all four exactly once.
+//
+// All four authorities are ASSERTED, none is prose. The producer is the service's
+// own TxMetadataFunc, counted through a spy that wraps the harness default; the
+// MSG_TX announcement is counted as wire frames written to the ONLY peer
+// registered with the service, which is therefore broadcastInventory's whole
+// selection set. The standard half is what makes both counters non-vacuous: they must
+// MOVE for a standard transaction on the very same peer and service.
 func TestRemoteDAExitsBeforeEveryStandardAuthority(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h, 4)
 	p := daRelayTestPeer(h, "127.0.0.1:19111")
+	producerCalls := 0
+	inner := h.service.cfg.TxMetadataFunc
+	h.service.cfg.TxMetadataFunc = func(b []byte) (node.RelayTxMetadata, error) {
+		producerCalls++
+		return inner(b)
+	}
+	listener := &recordingConn{}
+	announced := &peer{conn: listener, service: h.service, state: nodePeerState("127.0.0.1:19119")}
+	h.service.peersMu.Lock()
+	h.service.peers[announced.addr()] = announced
+	h.service.peersMu.Unlock()
+
 	daID := daRelayTestID(0x10)
 	payload := []byte("da-exit")
 	commitTx := f.commitTx(t, daID, 1, sha3.Sum256(payload))
@@ -171,6 +190,12 @@ func TestRemoteDAExitsBeforeEveryStandardAuthority(t *testing.T) {
 		if _, pooled := h.service.cfg.TxPool.Get(txid); pooled {
 			t.Fatalf("remote DA %x entered the relay pool", txid)
 		}
+		if producerCalls != 0 {
+			t.Fatalf("remote DA %x reached the metadata producer %d times", txid, producerCalls)
+		}
+		if frames := listener.framesWritten(); frames != 0 {
+			t.Fatalf("remote DA %x announced %d frames to another peer", txid, frames)
+		}
 		if _, _, err := h.service.daRelay.LookupRetainedTx(txid); err != nil {
 			t.Fatalf("LookupRetainedTx(%x): %v", txid, err)
 		}
@@ -185,6 +210,9 @@ func TestRemoteDAExitsBeforeEveryStandardAuthority(t *testing.T) {
 	}
 	if !h.service.txSeen.Has(mustCanonicalTxID(t, standard)) {
 		t.Fatal("the standard path no longer marks a remote transaction seen")
+	}
+	if producerCalls != 1 || listener.framesWritten() != 1 {
+		t.Fatalf("standard path producer calls=%d announced frames=%d, want 1 and 1 — the DA assertions above are vacuous otherwise", producerCalls, listener.framesWritten())
 	}
 }
 

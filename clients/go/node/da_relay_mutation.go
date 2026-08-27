@@ -20,7 +20,9 @@ func (s *DARelayState) releasePeerQuotaKeyLocked(key string) ([]DAAdmissionVicti
 		if err != nil {
 			return nil, err
 		}
-		victims = appendDAMemberVictims(victims, removed)
+		if victims, err = s.appendDAMemberVictims(victims, removed); err != nil {
+			return nil, err
+		}
 	}
 	return victims, nil
 }
@@ -89,76 +91,118 @@ func (s *DARelayState) addDAChunk(peerQuotaKey string, chunk daRelayChunk) error
 	return nil
 }
 
-// stageDACommitLocked installs one commit into the PROJECTED image and reports
-// the members the staging dropped, so the caller can turn them into exact victim
-// claims. The receiver is the private projection, never live state.
-func (s *DARelayState) stageDACommitLocked(commit daRelayCommit) ([]daRelayMemberIdentity, error) {
-	if err := validateDACommit(commit); err != nil {
-		return nil, err
+// daRelayStagedMember is ONE member's staging result: the complete new record
+// value and the members the staging dropped, so a caller can turn those into
+// exact victim claims. It is produced by a PURE function of the current record,
+// the caps and the member — no sequence value, no state-level accounting, no
+// image — which is what lets an admission plan the whole record outside the
+// final DA lock and install it there in one assignment.
+type daRelayStagedMember struct {
+	record  daRelaySetRecord
+	dropped []daRelayMemberIdentity
+}
+
+func (c daRelayCaps) stageDAMember(current daRelaySetRecord, member daRelayAdmissionMember) (daRelayStagedMember, error) {
+	if member.locator.kind == daRelayLocatorCommit {
+		return c.stageDACommit(current, member.commit)
 	}
-	record := s.sets[commit.daID].cloneForStateMutation()
+	return c.stageDAChunk(current, member.chunk)
+}
+
+// stageDACommit builds the record one commit produces from current.
+func (c daRelayCaps) stageDACommit(current daRelaySetRecord, commit daRelayCommit) (daRelayStagedMember, error) {
+	if err := validateDACommit(commit); err != nil {
+		return daRelayStagedMember{}, err
+	}
+	record := current.cloneForStateMutation()
 	record.ensureMaps()
 	if record.commit.chunkCount != 0 {
-		return nil, errDARelayDuplicateCommit
+		return daRelayStagedMember{}, errDARelayDuplicateCommit
 	}
 	commit.txBytes = cloneBytes(commit.txBytes)
 	record.daID = commit.daID
 	record.commit = commit
 	dropped := record.pruneChunksOutsideCommit()
 	record.state = daRelayStateStagedCommit
-	record.ttlBlocksRemaining = s.caps.orphanTTLBlocks
-	if err := s.advanceAcceptedSequenceLocked(&record); err != nil {
-		return nil, err
-	}
-	completion, err := s.finishStagedDARecordLocked(&record, true)
+	record.ttlBlocksRemaining = c.orphanTTLBlocks
+	completion, err := finishStagedDARecord(&record, true)
 	if err != nil {
-		return nil, err
+		return daRelayStagedMember{}, err
 	}
-	return append(dropped, completion...), nil
+	return daRelayStagedMember{record: record, dropped: append(dropped, completion...)}, nil
 }
 
-// stageDAChunkLocked installs one chunk into the PROJECTED image. A chunk that
-// completes the set with a payload commitment its commit does not confirm is
-// REJECTED whole (Section 5.2 chunk-last mismatch): the projection is discarded
-// by the caller, so the existing State B record and every claim it owns survive
+// stageDAChunk is stageDACommit's chunk half. A chunk that completes the set
+// with a payload commitment its commit does not confirm is REJECTED whole
+// (Section 5.2 chunk-last mismatch): the staged record is discarded by the
+// caller, so the existing State B record and every claim it owns survive
 // byte-identical.
-func (s *DARelayState) stageDAChunkLocked(chunk daRelayChunk) ([]daRelayMemberIdentity, error) {
+func (c daRelayCaps) stageDAChunk(current daRelaySetRecord, chunk daRelayChunk) (daRelayStagedMember, error) {
 	if err := validateDAChunk(chunk); err != nil {
-		return nil, err
+		return daRelayStagedMember{}, err
 	}
-	record := s.sets[chunk.daID].cloneForStateMutation()
+	record := current.cloneForStateMutation()
 	record.ensureMaps()
 	if err := record.validateChunkInsert(chunk.chunkIndex); err != nil {
-		return nil, err
+		return daRelayStagedMember{}, err
 	}
 	// The payload-hash check runs AFTER the shape and duplicate/index checks, the
 	// order the retained schema has always refused in: a duplicate index is a
 	// property of the record, a bad hash a property of the candidate.
 	if !chunk.hashChecked && sha3.Sum256(chunk.payload) != chunk.chunkHash {
-		return nil, errDARelayChunkHashMismatch
+		return daRelayStagedMember{}, errDARelayChunkHashMismatch
 	}
 	chunk.txBytes = cloneBytes(chunk.txBytes)
 	record.daID = chunk.daID
 	if record.commit.chunkCount == 0 {
 		record.state = daRelayStateOrphanChunks
-		record.ttlBlocksRemaining = s.caps.orphanTTLBlocks
+		record.ttlBlocksRemaining = c.orphanTTLBlocks
 	}
 	record.chunks[chunk.chunkIndex] = chunk
-	if err := s.advanceAcceptedSequenceLocked(&record); err != nil {
-		return nil, err
+	dropped, err := finishStagedDARecord(&record, false)
+	if err != nil {
+		return daRelayStagedMember{}, err
 	}
-	return s.finishStagedDARecordLocked(&record, false)
+	return daRelayStagedMember{record: record, dropped: dropped}, nil
 }
 
-// finishStagedDARecordLocked resolves completion for one staged record and
-// applies it to the projection.
+// stageDACommitLocked and stageDAChunkLocked are the IMAGE-level staging entries
+// the package-private accounting helpers drive: the pure staging above, then the
+// accepted-sequence value, then installation into the image the receiver holds.
+// AdmitDA deliberately does NOT use them — it plans the pure half outside the
+// final DA lock and installs under it.
+func (s *DARelayState) stageDACommitLocked(commit daRelayCommit) ([]daRelayMemberIdentity, error) {
+	staged, err := s.caps.stageDACommit(s.sets[commit.daID], commit)
+	if err != nil {
+		return nil, err
+	}
+	return staged.dropped, s.applyStagedDAMemberLocked(staged.record)
+}
+
+func (s *DARelayState) stageDAChunkLocked(chunk daRelayChunk) ([]daRelayMemberIdentity, error) {
+	staged, err := s.caps.stageDAChunk(s.sets[chunk.daID], chunk)
+	if err != nil {
+		return nil, err
+	}
+	return staged.dropped, s.applyStagedDAMemberLocked(staged.record)
+}
+
+func (s *DARelayState) applyStagedDAMemberLocked(record daRelaySetRecord) error {
+	if err := s.advanceAcceptedSequenceLocked(&record); err != nil {
+		return err
+	}
+	return s.applyDASetRecordLocked(record)
+}
+
+// finishStagedDARecord resolves completion for one staged record. It is pure:
+// it installs nothing and reads no image.
 //
 // commitArrival selects Section 5.2's two DIFFERENT mismatch outcomes, and the
 // asymmetry is deliberate: the FIRST-SEEN COMMIT is the record's authority, so a
 // commit that arrives last and disagrees with the retained chunks keeps its own
 // State B record and removes those chunks with their exact claims, while a CHUNK
 // that arrives last and disagrees is simply not retained and changes nothing.
-func (s *DARelayState) finishStagedDARecordLocked(record *daRelaySetRecord, commitArrival bool) ([]daRelayMemberIdentity, error) {
+func finishStagedDARecord(record *daRelaySetRecord, commitArrival bool) ([]daRelayMemberIdentity, error) {
 	var dropped []daRelayMemberIdentity
 	if snapshot, complete := record.completionSnapshot(); complete {
 		payloadBytes, commitment := snapshot.payloadCommitment()
@@ -171,10 +215,7 @@ func (s *DARelayState) finishStagedDARecordLocked(record *daRelaySetRecord, comm
 			return nil, errDARelayPayloadCommitmentMismatch
 		}
 	}
-	if err := record.recomputeOrphanTotals(); err != nil {
-		return nil, err
-	}
-	return dropped, s.applyDASetRecordLocked(*record)
+	return dropped, record.recomputeOrphanTotals()
 }
 
 func validateDACommit(commit daRelayCommit) error {
@@ -211,30 +252,69 @@ func validateDAChunk(chunk daRelayChunk) error {
 	return nil
 }
 
+// daRelayRecordPlacement is one record's fully computed, cap-checked placement:
+// the record it replaces plus the new ABSOLUTE value of every counter it
+// touches. Producing it is the whole fallible half; applying it cannot fail.
+type daRelayRecordPlacement struct {
+	oldRecord   daRelaySetRecord
+	orphanBytes uint64
+	peerBytes   map[string]uint64
+	daBytes     uint64
+	commitBytes uint64
+	pinnedBytes uint64
+}
+
 // applyDASetRecordLocked installs one record and its locator rows together.
 // Every projected accounting value is computed and cap-checked BEFORE the first
 // write, so a refused record leaves the image byte-identical.
 func (s *DARelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
+	placement, err := s.projectDASetRecordLocked(record)
+	if err != nil {
+		return err
+	}
+	s.installDASetRecordLocked(record, placement)
+	return nil
+}
+
+// projectDASetRecordLocked is the FALLIBLE half: it derives every counter the
+// record would leave behind and cap-checks each, mutating nothing. The admission
+// path, which must reach the owner LAST, uses it and installs afterwards.
+func (s *DARelayState) projectDASetRecordLocked(record daRelaySetRecord) (daRelayRecordPlacement, error) {
 	oldRecord := s.sets[record.daID]
 	orphanBytes, peerBytes, daBytes, commitBytes, err := s.projectOrphanAccountingDeltaLocked(oldRecord, record)
 	if err != nil {
-		return err
+		return daRelayRecordPlacement{}, err
 	}
 	pinnedBytes, err := s.projectPinnedPayloadDeltaLocked(oldRecord, record)
 	if err != nil {
-		return err
+		return daRelayRecordPlacement{}, err
 	}
+	return daRelayRecordPlacement{
+		oldRecord:   oldRecord,
+		orphanBytes: orphanBytes,
+		peerBytes:   peerBytes,
+		daBytes:     daBytes,
+		commitBytes: commitBytes,
+		pinnedBytes: pinnedBytes,
+	}, nil
+}
+
+// installDASetRecordLocked is the NON-FALLIBLE half: assignment only. It stamps
+// the record's revision, which is what a later plan-currency recheck reads, and
+// must be called with the placement projectDASetRecordLocked returned for THIS
+// record, under the same lock hold.
+func (s *DARelayState) installDASetRecordLocked(record daRelaySetRecord, placement daRelayRecordPlacement) {
+	s.stampRecordLocked(&record)
 	s.sets[record.daID] = record
-	s.replaceLocatorsLocked(oldRecord, record)
-	s.orphanBytes = orphanBytes
-	s.applyProjectedPeerBytes(peerBytes)
-	s.applyProjectedDAIDBytes(record.daID, daBytes)
-	s.orphanCommitOverheadBytes = commitBytes
-	s.pinnedPayloadBytes = pinnedBytes
+	s.replaceLocatorsLocked(placement.oldRecord, record)
+	s.orphanBytes = placement.orphanBytes
+	s.applyProjectedPeerBytes(placement.peerBytes)
+	s.applyProjectedDAIDBytes(record.daID, placement.daBytes)
+	s.orphanCommitOverheadBytes = placement.commitBytes
+	s.pinnedPayloadBytes = placement.pinnedBytes
 	if record.receivedTime > s.nextReceivedTime {
 		s.nextReceivedTime = record.receivedTime
 	}
-	return nil
 }
 
 func (s *DARelayState) removeDASetRecordLocked(record daRelaySetRecord) error {

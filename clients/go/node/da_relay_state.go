@@ -97,8 +97,16 @@ func (c daRelayCaps) validateRelativeCaps() error {
 }
 
 type daRelaySetRecord struct {
-	daID               [32]byte
-	state              daRelaySetState
+	daID  [32]byte
+	state daRelaySetState
+	// revision is this record's IDENTITY, not a statistic: every writer that
+	// installs a record value stamps it from the state's monotone counter, so two
+	// record values are the same record state exactly when their revisions agree.
+	// It is what lets an admission plan built OUTSIDE the final DA lock prove,
+	// under that lock, that the record it planned against has not moved. An ABSENT
+	// record reads as the zero value, and no record a writer installs carries
+	// revision 0, so present and absent are never confused.
+	revision           uint64
 	receivedTime       uint64
 	payloadBytes       uint64
 	wireBytes          uint64
@@ -255,6 +263,11 @@ type DARelayState struct {
 	// from s.sets without one of those two writers, and it is the sole txid
 	// authority: no second raw-byte or record store exists.
 	locators map[[32]byte]daRelayLocator
+	// records is the monotone source of daRelaySetRecord.revision. It is carried
+	// through cloneForAtomicBatchLocked and publishAtomicBatchLocked so a stamp
+	// minted on a projection stays unique once that projection is published, and
+	// it is deliberately not part of the observable image.
+	records uint64
 }
 
 // daRelayLocatorKind names which member slot of a record a locator addresses.
@@ -423,10 +436,15 @@ func (s *DARelayState) advanceOrphanTTLLocked() ([]DAAdmissionVictim, error) {
 		record := s.sets[daID]
 		if record.ttlBlocksRemaining > 1 {
 			record.ttlBlocksRemaining--
+			s.stampRecordLocked(&record)
 			s.sets[daID] = record
 			continue
 		}
-		victims = appendDAMemberVictims(victims, record.members())
+		selected, err := s.appendDAMemberVictims(victims, record.members())
+		if err != nil {
+			return nil, err
+		}
+		victims = selected
 		if err := s.removeDASetRecordLocked(record); err != nil {
 			return nil, err
 		}
@@ -451,6 +469,7 @@ func (s *DARelayState) cloneForAtomicBatchLocked() *DARelayState {
 		pinnedPayloadBytes:        s.pinnedPayloadBytes,
 		sets:                      maps.Clone(s.sets),
 		locators:                  maps.Clone(s.locators),
+		records:                   s.records,
 	}
 }
 
@@ -464,6 +483,20 @@ func (s *DARelayState) publishAtomicBatchLocked(projected *DARelayState) {
 	s.pinnedPayloadBytes = projected.pinnedPayloadBytes
 	s.sets = projected.sets
 	s.locators = projected.locators
+	// The stamp source only ever ADVANCES. Every publisher currently holds this
+	// mutex from its clone through this call, so the projection's value cannot be
+	// behind — taking the maximum makes revision uniqueness independent of that
+	// argument rather than conditional on it.
+	s.records = max(s.records, projected.records)
+}
+
+// stampRecordLocked gives one record value a fresh identity. Every writer that
+// installs a record — installDASetRecordLocked and the TTL decrement — calls it,
+// so no two record states of one da_id ever share a revision and a removed
+// da_id's next record never reuses its predecessor's.
+func (s *DARelayState) stampRecordLocked(record *daRelaySetRecord) {
+	s.records++
+	record.revision = s.records
 }
 
 func (s *DARelayState) planDAPrefetch(record daRelaySetRecord, peerKeys []string, now time.Time) ([]daRelayPrefetchPlan, string) {

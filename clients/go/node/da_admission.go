@@ -43,9 +43,15 @@ type daAdmissionGuard struct {
 }
 
 // DAAdmission is a one-shot, chainstate-guarded DA candidate admission.
+//
+// tx is the admission's OWN canonical consumption of snapshot.TxBytes — the
+// exact *consensus.Tx the single ParseTx of this candidate produced, carried
+// here so no later stage re-parses the same bytes (RUB-678 R9: one raw
+// acquisition, one full canonical consumption per admission).
 type DAAdmission struct {
 	self     *DAAdmission
 	guard    *daAdmissionGuard
+	tx       *consensus.Tx
 	snapshot DAAdmissionSnapshot
 	context  PendingOutpointAdmissionContext
 }
@@ -205,8 +211,13 @@ func (h *daAdmissionHold) validateDACandidate(owned []byte, tx *consensus.Tx, tx
 	if err != nil {
 		return nil, err
 	}
+	// checked.Tx IS the tx argument and checked.Bytes IS a copy of owned, so the
+	// carried transaction, the retained bytes and the identity below are all the
+	// product of ONE consensus.ParseTx(owned) and cannot contradict each other:
+	// that is what replaces the renderer's former re-parse of the snapshot.
 	a := &DAAdmission{
 		guard: &daAdmissionGuard{chainState: m.chainState, owner: h.owner},
+		tx:    checked.Tx,
 		snapshot: DAAdmissionSnapshot{
 			TxID:          checked.TxID,
 			WTxID:         checked.WTxID,
@@ -241,6 +252,19 @@ func (a *DAAdmission) Snapshot() DAAdmissionSnapshot {
 		RetainedBytes: a.snapshot.RetainedBytes,
 		Inputs:        append([]consensus.Outpoint(nil), a.snapshot.Inputs...),
 	}
+}
+
+// parsedTx returns the admission's OWN canonical consumption of the candidate,
+// under exactly the Snapshot lifecycle guard: it is the transaction ParseTx
+// produced from the very bytes Snapshot returns, so a consumer reading the two
+// together never parses this candidate a second time. The parse AUTHORITY stays
+// inside the owner: no caller may supply one.
+func (a *DAAdmission) parsedTx() *consensus.Tx {
+	a.mustLiveValue()
+	if a.guard.state.Load() != daAdmissionOpen {
+		panic("DA admission snapshot is not available")
+	}
+	return a.tx
 }
 
 // BeginCommit is one-shot; its successful input-bearing candidate has a nonzero token.

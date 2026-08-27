@@ -231,6 +231,78 @@ func TestCanonicalDAClaimPhaseIsTerminalForEveryClaimDefect(t *testing.T) {
 	}
 }
 
+// TestCanonicalDAPreparationIsTerminalForEveryLocatorAndIdentityDefect is the
+// LOCATOR half of the one bijection D preparation proves, plus the stored member
+// identity the role checks alone cannot bind.
+//
+// The claim phase walks members and asks the owner about each; none of these
+// defects is visible to it — a member the index forgot, a row pointing at no
+// live member, and a member whose stored identity is not the identity its own
+// retained bytes produce all leave every member-to-claim binding intact. Each is
+// TERMINAL during planning, before the durable commit, with the live image and
+// the prepared candidate untouched.
+//
+// The nil-plan arm is deliberately included: the locator index exists whether or
+// not an owner is bound, so the phase must not be skippable with the claim one.
+func TestCanonicalDAPreparationIsTerminalForEveryLocatorAndIdentityDefect(t *testing.T) {
+	for name, tt := range map[string]struct {
+		owned   bool
+		corrupt func(t *testing.T, c *canonicalClaimFixture, daID [32]byte)
+	}{
+		"member with no locator row": {true, func(t *testing.T, c *canonicalClaimFixture, daID [32]byte) {
+			c.relay.mu.Lock()
+			defer c.relay.mu.Unlock()
+			delete(c.relay.locators, c.relay.sets[daID].chunks[0].txid)
+		}},
+		"member whose locator row names another slot": {true, func(t *testing.T, c *canonicalClaimFixture, daID [32]byte) {
+			c.relay.mu.Lock()
+			defer c.relay.mu.Unlock()
+			c.relay.locators[c.relay.sets[daID].chunks[0].txid] = daRelayLocator{daID: daID, kind: daRelayLocatorCommit}
+		}},
+		"locator row resolving to no live member": {true, func(t *testing.T, c *canonicalClaimFixture, daID [32]byte) {
+			c.relay.mu.Lock()
+			defer c.relay.mu.Unlock()
+			c.relay.locators[[32]byte{0xdd}] = daRelayLocator{daID: daID, kind: daRelayLocatorChunk, chunkIndex: 9}
+		}},
+		"stored member identity contradicting its own retained bytes": {true, func(t *testing.T, c *canonicalClaimFixture, daID [32]byte) {
+			c.relay.mu.Lock()
+			defer c.relay.mu.Unlock()
+			record := c.relay.sets[daID]
+			chunk := record.chunks[0]
+			chunk.wtxid[0] ^= 0xff
+			record.chunks[0] = chunk
+		}},
+		"member with no locator row and no owner image": {false, func(t *testing.T, c *canonicalClaimFixture, daID [32]byte) {
+			c.relay.mu.Lock()
+			defer c.relay.mu.Unlock()
+			delete(c.relay.locators, c.relay.sets[daID].chunks[0].txid)
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newCanonicalClaimFixture(t, 3)
+			daID := daRelayTestID(0x78)
+			c.f.daSet(t, c.relay, daID, c.f.ops[:3], 1670)
+			var mo *canonicalMempoolPlan
+			if tt.owned {
+				prepared := c.plan(t)
+				mo = &prepared
+			}
+			tt.corrupt(t, c, daID)
+			liveBefore := daRelayStateSnapshot(c.relay)
+
+			image, err := prepareCanonicalDAImage(c.relay, nil, c.chain, mo)
+			var terminal *canonicalDATerminalError
+			if !errors.As(err, &terminal) {
+				t.Fatalf("err=%v, want a retained-DA terminal invariant", err)
+			}
+			if image != nil {
+				t.Fatal("a terminal locator defect still produced a publishable image")
+			}
+			requireDARelayStateUnchanged(t, c.relay, liveBefore)
+		})
+	}
+}
+
 // TestCanonicalDAClaimPhaseIsSkippedWithoutAnOwnerImage pins the nil-plan arm: an
 // engine with no standard/owner image bound has no claim domain to bind to, so
 // the phase is skipped rather than inventing one.

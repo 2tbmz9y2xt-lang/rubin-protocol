@@ -117,11 +117,17 @@ wait_peers_ready() {
   return 1
 }
 
-# wait_mempool_contains is a SUBMITTER-side barrier only. Since RUB-678 a remote
-# DA transaction never enters the receiver's standard mempool — it exits ingress
-# before txSeen, the relay pool and the producer — so the receiver is proven to
-# have RETAINED the set by the only thing that needs the retained image: node-a
-# mining the complete DA set below.
+# wait_mempool_contains observes the SUBMITTER's own standard mempool and nothing
+# else: it proves node-b accepted the transaction locally and can now relay it.
+# This script has NO receiver-side retained-DA observable — that surface is
+# RUB-1169's, and checking node-a's standard mempool would assert the opposite of
+# what RUB-678 defines. So each pre-completion step claims exactly two things:
+# the submitter holds the transaction, and node-a's block does not contain it. A
+# coinbase-only block is produced identically whether node-a retained the member
+# outside the standard mempool or never received it, so neither claims receipt.
+# Receiver retained admission is claimed at ONE place — the complete-set step,
+# where node-a mines the commit and both chunks, which only a node holding the
+# whole retained set can build.
 wait_mempool_contains() {
   local label="$1" addr="$2" txid="$3" deadline=$((SECONDS + 30)) last="<none>"
   while (( SECONDS < deadline )); do
@@ -312,10 +318,10 @@ report = {
         {"name": "node-b", "implementation": "go", "pid": i("B_PID"), "binary": e["NODE_BIN"], "rpc": e["B_RPC_ADDR"], "p2p": e["B_P2P_ADDR"], "datadir": e["B_DIR"], "handshake_peers": i("B_PEERS")},
     ],
     "da_relay_evidence": {
-        "submitter_to_peer_relay": {"submitted_to": "node-b", "receiver_retained_evidence": "node-a mined the complete DA set from its retained image"},
-        "incomplete_set_not_mined": {"mined_by": "node-a", "height": i("INCOMPLETE_MINE_HEIGHT"), "block_hash": e["INCOMPLETE_MINE_HASH"], "tx_count": i("INCOMPLETE_TX_COUNT"), "omitted_chunk_txid": e["CHUNK0_TXID"]},
-        "staged_commit_not_mined_until_complete": {"mined_by": "node-a", "height": i("STAGED_MINE_HEIGHT"), "block_hash": e["STAGED_MINE_HASH"], "tx_count": i("STAGED_TX_COUNT"), "omitted_commit_txid": e["COMMIT_TXID"]},
-        "complete_set_mined": {"mined_by": "node-a", "height": i("COMPLETE_MINE_HEIGHT"), "block_hash": e["COMPLETE_MINE_HASH"], "tx_count": i("COMPLETE_TX_COUNT"), "included_commit_txid": e["COMMIT_TXID"], "included_chunk_txids": [e["CHUNK0_TXID"], e["CHUNK1_TXID"]]},
+        "submitter_to_peer_relay": {"submitted_to": "node-b", "receiver_retained_evidence": "node-a mined the complete DA set from its retained image", "claimed_at": "complete_set_mined"},
+        "incomplete_set_not_mined": {"mined_by": "node-a", "height": i("INCOMPLETE_MINE_HEIGHT"), "block_hash": e["INCOMPLETE_MINE_HASH"], "tx_count": i("INCOMPLETE_TX_COUNT"), "omitted_chunk_txid": e["CHUNK0_TXID"], "evidence": "block non-inclusion only; this step does not distinguish receiver retention from non-delivery"},
+        "staged_commit_not_mined_until_complete": {"mined_by": "node-a", "height": i("STAGED_MINE_HEIGHT"), "block_hash": e["STAGED_MINE_HASH"], "tx_count": i("STAGED_TX_COUNT"), "omitted_commit_txid": e["COMMIT_TXID"], "evidence": "block non-inclusion only; this step does not distinguish receiver retention from non-delivery"},
+        "complete_set_mined": {"mined_by": "node-a", "height": i("COMPLETE_MINE_HEIGHT"), "block_hash": e["COMPLETE_MINE_HASH"], "tx_count": i("COMPLETE_TX_COUNT"), "included_commit_txid": e["COMMIT_TXID"], "included_chunk_txids": [e["CHUNK0_TXID"], e["CHUNK1_TXID"]], "evidence": "node-a mined the commit and both chunks, which were generated and submitted at node-b and reached node-a only over P2P; retained admission is the only in-scope path by which a received DA transaction can reach node-a block"},
         "duplicate_commit_first_seen_no_replacement": {"duplicate_txid": e["DUP_TXID"], "evidence": "duplicate txid omitted from parsed complete block"},
     },
     "tx_generator": {"kind": "temporary_go_helper", "evidence_scope": "signed_tx_generation_only_not_runtime_proof"},
@@ -367,7 +373,7 @@ submit_tx_hex "${B_RPC_ADDR}" "${CHUNK0_HEX}" >/dev/null
 wait_mempool_contains node-b "${B_RPC_ADDR}" "${CHUNK0_TXID}"
 IFS=$'\t' read -r INCOMPLETE_MINE_HEIGHT INCOMPLETE_MINE_HASH INCOMPLETE_TX_COUNT < <(mine_next_tsv "${A_RPC_ADDR}")
 [[ "${INCOMPLETE_MINE_HEIGHT}" == "${INCOMPLETE_HEIGHT}" && "${INCOMPLETE_TX_COUNT}" == "1" ]] || {
-  echo "incomplete DA set mined unexpectedly height=${INCOMPLETE_MINE_HEIGHT} tx_count=${INCOMPLETE_TX_COUNT}" >&2
+  echo "node-a included a transaction before the DA set completed height=${INCOMPLETE_MINE_HEIGHT} tx_count=${INCOMPLETE_TX_COUNT}" >&2
   exit 1
 }
 wait_tip_exact node-b "${B_RPC_ADDR}" "${INCOMPLETE_HEIGHT}" "${INCOMPLETE_MINE_HASH}" 60
@@ -376,7 +382,7 @@ assert_block_txids "${INCOMPLETE_BLOCK_HEX}" "${INCOMPLETE_MINE_HASH}" "1" "-" "
 submit_tx_hex "${B_RPC_ADDR}" "${COMMIT_HEX}" >/dev/null
 wait_mempool_contains node-b "${B_RPC_ADDR}" "${COMMIT_TXID}"
 IFS=$'\t' read -r STAGED_MINE_HEIGHT STAGED_MINE_HASH STAGED_TX_COUNT < <(mine_next_tsv "${A_RPC_ADDR}")
-[[ "${STAGED_MINE_HEIGHT}" == "$((INCOMPLETE_HEIGHT + 1))" && "${STAGED_TX_COUNT}" == "1" ]] || { echo "staged DA set mined unexpectedly height=${STAGED_MINE_HEIGHT} tx_count=${STAGED_TX_COUNT}" >&2; exit 1; }
+[[ "${STAGED_MINE_HEIGHT}" == "$((INCOMPLETE_HEIGHT + 1))" && "${STAGED_TX_COUNT}" == "1" ]] || { echo "node-a included a transaction while the DA set was still incomplete height=${STAGED_MINE_HEIGHT} tx_count=${STAGED_TX_COUNT}" >&2; exit 1; }
 wait_tip_exact node-b "${B_RPC_ADDR}" "${STAGED_MINE_HEIGHT}" "${STAGED_MINE_HASH}" 60
 STAGED_BLOCK_HEX="$(block_hex "${A_RPC_ADDR}" "${STAGED_MINE_HEIGHT}")"
 assert_block_txids "${STAGED_BLOCK_HEX}" "${STAGED_MINE_HASH}" "1" "-" "${CHUNK0_TXID},${COMMIT_TXID}"
@@ -391,7 +397,7 @@ for _ in 1 2 3 4 5; do
   COMPLETE_BLOCK_HEX="$(block_hex "${A_RPC_ADDR}" "${COMPLETE_MINE_HEIGHT}")"
   assert_block_txids "${COMPLETE_BLOCK_HEX}" "${COMPLETE_MINE_HASH}" "4" "${COMMIT_TXID},${CHUNK0_TXID},${CHUNK1_TXID}" "${DUP_TXID}" 2>/dev/null && { COMPLETE_FOUND=1; break; }
 done
-[[ "${COMPLETE_FOUND}" == "1" ]] || { echo "complete DA set not mined by receiver node-a" >&2; exit 1; }
+[[ "${COMPLETE_FOUND}" == "1" ]] || { echo "receiver node-a never mined the complete DA set, so remote retained admission is unproven" >&2; exit 1; }
 IFS=$'\t' read -r A_FINAL_HEIGHT A_FINAL_HASH < <(tip_tsv "${A_RPC_ADDR}")
 IFS=$'\t' read -r B_FINAL_HEIGHT B_FINAL_HASH < <(tip_tsv "${B_RPC_ADDR}")
 [[ "${A_FINAL_HEIGHT}" == "${B_FINAL_HEIGHT}" && "${A_FINAL_HASH}" == "${B_FINAL_HASH}" && "${A_FINAL_HASH}" == "${COMPLETE_MINE_HASH}" ]] || {

@@ -174,28 +174,35 @@ type daRelayAdmissionMember struct {
 //     guard, through the existing signature, consensus, current-chain, fee and
 //     candidate-integrity order (validateDACandidate) — a same-txid INVALID
 //     candidate keeps its owning validation error and is never a duplicate;
-//  7. every allocation, parse, provenance, locator, record, accounting and
-//     sequence decision happens BEFORE the owner is touched, on a PRIVATE clone
-//     of the retained image; the final DA lock rechecks duplicate/first-seen —
-//     a VALID same-txid nonexact candidate returns peer-neutral DUPLICATE
-//     there, and a fully validated different-txid same-da_id commit returns
-//     DUPLICATE with SameDAIDCommitConflict, both before any owner reserve;
-//  8. DAAdmission.BeginCommit acquires PendingOutpointOwner.mu LAST and holds
-//     it into the returned DACommit, so the token write, the complete D
-//     publication and Commit all run inside one owner hold with no fallible
-//     step between them.
+//  7. every allocation, provenance, locator, record and victim decision is
+//     PLANNED BEFORE the final DA lock, on a PRIVATE copy of the one record
+//     this member joins, taken in its own DARelayState.mu window; nothing that
+//     decides the new record is left to run inside the final lock;
+//  8. the FINAL DA lock performs only the recheck — duplicate/first-seen, then
+//     the plan's currency, which is what makes every off-lock decision above
+//     authoritative — and then DAAdmission.BeginCommit with the exact victim
+//     descriptors, acquiring PendingOutpointOwner.mu LAST and holding it into
+//     the returned DACommit, so the token write, the complete D publication by
+//     assignment and Commit all run inside one owner hold with no fallible step
+//     between them. A VALID same-txid nonexact candidate returns peer-neutral
+//     DUPLICATE here, and a fully validated different-txid same-da_id commit
+//     returns DUPLICATE with SameDAIDCommitConflict, both before any reserve.
 //
-// A failure before step 8 leaves D, the locator index and the owner
-// byte-identical, and every exit — error, panic unwind of a fallible step, or
-// duplicate — releases the admission guard exactly once (the deferred Close, or
-// the deferred hold release that stands down after the transfer). There is
-// deliberately NO Abort call: after BeginCommit succeeds the remaining work is
-// a token assignment into an already-present map slot and two pointer
-// publications; none of those can fail or panic, so no schedule exists that
-// acquires a candidate token and then declines to finalize it.
+// A failure before the publication in step 8 leaves D, the locator index and
+// the owner byte-identical, and every exit — error, panic unwind of a fallible
+// step, or duplicate — releases the admission guard exactly once (the deferred
+// Close, or the deferred hold release that stands down after the transfer).
+// There is deliberately NO Abort call: after BeginCommit succeeds the remaining
+// work is a token assignment into an already-present map slot and the record,
+// locator and counter assignments of installDASetRecordLocked; none of those can
+// fail or panic, so no schedule exists that acquires a candidate token and then
+// declines to finalize it.
 //
-// AdmitDA is SYNCHRONOUS by contract: it performs no network action and never
-// waits, because it holds the admission read guard for its whole duration.
+// AdmitDA is SYNCHRONOUS by contract: it performs no network action, waits on
+// no external event and returns only when the admission has been decided. It
+// does BLOCK on locks — the admission read guard it holds for its whole
+// duration (indefinitely against a latched engine, the documented A12
+// residual), the DA lock and, inside BeginCommit, the owner lock.
 func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmissionResult, error) {
 	if err := s.checkAdmitDABound(); err != nil {
 		return DAAdmissionResult{}, err
@@ -220,7 +227,7 @@ func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmis
 		return DAAdmissionResult{}, err
 	}
 	defer admission.Close()
-	member, err := daRelayAdmissionMemberOf(admission.Snapshot(), provenance)
+	member, err := daRelayAdmissionMemberOf(admission, provenance)
 	if err != nil {
 		return DAAdmissionResult{}, err
 	}
@@ -264,71 +271,163 @@ func (s *DARelayState) classifyRetainedReplay(owned []byte, txid, wtxid [32]byte
 	return DAAdmissionResult{}, false, nil
 }
 
-// commitDAAdmission is AdmitDA's final DA lock: it rechecks the duplicate
-// against the LIVE locator index, projects the complete new image, and only
-// then reaches the owner. The candidate arriving here is FULLY VALIDATED, so
-// the two duplicate arms below are Section 5.1's post-validation classes, both
-// decided before any owner reserve, both discarding the private projection: a
-// live locator row for the candidate txid (an exact replay that raced a
-// concurrent admission lands here too) is peer-neutral DUPLICATE; a commit
-// staging refusal whose staged commit txid is PROVEN under this lock to differ
-// from the candidate's is DUPLICATE with SameDAIDCommitConflict.
+// daRelayAdmissionPlan is ONE complete admission decision, made outside the
+// final DA lock: the whole new record value, the exact victim descriptors the
+// staging drop implies, and the staging refusal if there was one.
+//
+// baseline is the REVISION of the record the plan was built against — the only
+// live input the plan freezes, since bounds and the accepted sequence are
+// rechecked against live values under the final lock. That lock proves the
+// baseline still current before anything is applied, so a decision reached
+// off-lock is never applied to a record it did not observe, and two admissions
+// of DIFFERENT records never invalidate one another.
+type daRelayAdmissionPlan struct {
+	baseline uint64
+	staged   daRelayStagedMember
+	victims  []DAAdmissionVictim
+	stageErr error
+}
+
+// commitDAAdmission is AdmitDA's steps 7-8. PLANNING (step 7) runs OUTSIDE the
+// final DA lock and APPLICATION (step 8) inside it.
 func (s *DARelayState) commitDAAdmission(admission *DAAdmission, member daRelayAdmissionMember) (DAAdmissionResult, error) {
-	result := DAAdmissionResult{DAID: member.locator.daID}
+	plan, err := s.planDAAdmission(member)
+	if err != nil {
+		return DAAdmissionResult{}, err
+	}
+	return s.applyDAAdmissionPlan(admission, member, plan)
+}
+
+// planDAAdmission is step 7: one DARelayState.mu window copies the record this
+// member belongs to, and every allocation, locator, record and victim decision
+// is then made OFF-lock on that private copy. It publishes nothing, touches no
+// live field and reaches no owner.
+//
+// Its own error return is reserved for a defect of the RETAINED record the plan
+// walked — a member that owes a claim and carries no token — which is fail-closed
+// and not a property of the candidate. A refusal of the CANDIDATE is carried in
+// stageErr and classified under the final lock, where the plan is known current.
+func (s *DARelayState) planDAAdmission(member daRelayAdmissionMember) (daRelayAdmissionPlan, error) {
+	current := func() daRelaySetRecord {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.sets[member.locator.daID]
+	}()
+	plan := daRelayAdmissionPlan{baseline: current.revision}
+	staged, err := s.caps.stageDAMember(current, member)
+	if err != nil {
+		plan.stageErr = err
+		return plan, nil
+	}
+	plan.staged = staged
+	plan.victims, err = s.appendDAMemberVictims(nil, staged.dropped)
+	return plan, err
+}
+
+// applyDAAdmissionPlan is step 8, and the whole final DA lock. It rechecks, in
+// the contract's own order, duplicate/first-seen against the LIVE locator index,
+// the LIVE record the plan was built against, the accepted SEQUENCE and the
+// accounting BOUNDS, and only then reaches the owner. Nothing here parses, walks
+// the retained set or decides what the new record is: that is the plan.
+//
+// The recheck is total over what the plan actually froze. The staged record is a
+// pure function of ONE live input — the record itself — so its revision IS the
+// plan/live agreement; the two values the plan did NOT freeze, the accounting
+// counters and the sequence high-water, are re-derived here, which is why a
+// concurrent admission of a DIFFERENT record neither invalidates this plan nor
+// is lost to it. A raced change to THIS record is REFUSED with the existing
+// transient UNAVAILABLE and every image byte-identical.
+//
+// Order is the safety argument: everything fallible — the rechecks, the bound
+// projection and the owner reserve — runs before the FIRST live write, and what
+// follows is assignment into present keys.
+//
+// The candidate arriving here is FULLY VALIDATED, so the two duplicate arms are
+// Section 5.1's post-validation classes, both decided before any owner reserve
+// and both discarding the plan: a live locator row for the candidate txid (an
+// exact replay that raced a concurrent admission lands here) is peer-neutral
+// DUPLICATE, and a commit staging refusal whose staged commit txid is PROVEN
+// here to differ from the candidate's is DUPLICATE with SameDAIDCommitConflict.
+func (s *DARelayState) applyDAAdmissionPlan(admission *DAAdmission, member daRelayAdmissionMember, plan daRelayAdmissionPlan) (DAAdmissionResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if result, done, err := s.recheckDAAdmissionPlanLocked(member, plan); done {
+		return result, err
+	}
+	return s.installDAAdmissionPlanLocked(admission, member, plan)
+}
+
+// recheckDAAdmissionPlanLocked is the duplicate/first-seen and plan-currency
+// half. done=true means the admission is decided here: a peer-neutral DUPLICATE,
+// the conflict-bearing DUPLICATE, the transient stale-plan refusal, or the
+// candidate refusal the plan carried.
+func (s *DARelayState) recheckDAAdmissionPlanLocked(member daRelayAdmissionMember, plan daRelayAdmissionPlan) (DAAdmissionResult, bool, error) {
+	result := DAAdmissionResult{DAID: member.locator.daID}
 	if _, duplicate := s.locators[member.identity().txid]; duplicate {
 		result.Disposition = DAAdmissionDuplicate
-		return result, nil
+		return result, true, nil
 	}
-	projected := s.cloneForAtomicBatchLocked()
-	dropped, err := projected.stageDAMemberLocked(member)
+	if s.sets[member.locator.daID].revision != plan.baseline {
+		return DAAdmissionResult{}, true, selectRelayDisposition(txAdmitUnavailable("retained DA record moved while this admission was planned"), RelayAdmissionUnavailable)
+	}
+	if plan.stageErr == nil {
+		return DAAdmissionResult{}, false, nil
+	}
+	if errors.Is(plan.stageErr, errDARelayDuplicateCommit) && member.locator.kind == daRelayLocatorCommit {
+		result.Disposition = DAAdmissionDuplicate
+		// The arm's "different txid" claim is proven against the LIVE record under
+		// this lock: a corrupt state that lost the locator row while the SAME
+		// commit stays staged is a plain peer-neutral duplicate, not the conflict.
+		result.SameDAIDCommitConflict = s.sets[member.locator.daID].commit.txid != member.identity().txid
+		return result, true, nil
+	}
+	return DAAdmissionResult{}, true, plan.stageErr
+}
+
+// installDAAdmissionPlanLocked is the sequence and bounds recheck, the owner
+// reserve, and then the writes. Everything fallible precedes the FIRST of them.
+func (s *DARelayState) installDAAdmissionPlanLocked(admission *DAAdmission, member daRelayAdmissionMember, plan daRelayAdmissionPlan) (DAAdmissionResult, error) {
+	record := plan.staged.record
+	// The accepted-sequence RECHECK, in advanceAcceptedSequenceLocked's own
+	// semantics but without its write: one value per accepted member, the record
+	// keeps its FIRST member's stamp, and an exhausted space fails closed here
+	// with the high-water untouched.
+	sequence, err := checkedAddUint64(s.nextReceivedTime, 1)
 	if err != nil {
-		if errors.Is(err, errDARelayDuplicateCommit) && member.locator.kind == daRelayLocatorCommit {
-			result.Disposition = DAAdmissionDuplicate
-			// The arm's "different txid" claim is proven under this same lock,
-			// never inherited from the recheck above: a corrupt state that lost
-			// the locator row while the SAME commit stays staged is a plain
-			// peer-neutral duplicate, not the conflict effect.
-			result.SameDAIDCommitConflict = s.sets[member.locator.daID].commit.txid != member.identity().txid
-			return result, nil
-		}
 		return DAAdmissionResult{}, err
 	}
-	commit, err := admission.BeginCommit(appendDAMemberVictims(nil, dropped))
+	if record.receivedTime == 0 {
+		record.receivedTime = sequence
+	}
+	placement, err := s.projectDASetRecordLocked(record)
 	if err != nil {
 		return DAAdmissionResult{}, err
 	}
-	projected.installMemberTokenLocked(member.locator, commit.CandidateToken())
-	s.publishAtomicBatchLocked(projected)
+	commit, err := admission.BeginCommit(plan.victims)
+	if err != nil {
+		return DAAdmissionResult{}, err
+	}
+	record.installMemberToken(member.locator, commit.CandidateToken())
+	s.nextReceivedTime = sequence
+	s.installDASetRecordLocked(record, placement)
 	commit.Commit()
-	result.Disposition = DAAdmissionRetained
-	return result, nil
+	return DAAdmissionResult{DAID: member.locator.daID, Disposition: DAAdmissionRetained}, nil
 }
 
-func (s *DARelayState) stageDAMemberLocked(member daRelayAdmissionMember) ([]daRelayMemberIdentity, error) {
-	if member.locator.kind == daRelayLocatorCommit {
-		return s.stageDACommitLocked(member.commit)
-	}
-	return s.stageDAChunkLocked(member.chunk)
-}
-
-// installMemberTokenLocked writes the finalized candidate token into the member
-// slot staging already created: assignment into present keys, no allocation, no
-// failure. Aliasing invariant: the receiver is the PRIVATE projection and the
-// record and chunks map written here are the fresh copies stageDAMemberLocked's
-// cloneForStateMutation created inside it — never the live image's maps — so
-// the write cannot reach live state before publishAtomicBatchLocked.
-func (s *DARelayState) installMemberTokenLocked(locator daRelayLocator, token PendingOutpointToken) {
-	record := s.sets[locator.daID]
+// installMemberToken writes the finalized candidate token into the member slot
+// staging already created: assignment into present keys, no allocation, no
+// failure. Aliasing invariant: the receiver is the PLAN's own record and its
+// chunks map is the fresh copy the pure staging's cloneForStateMutation made —
+// never the live image's — so the write cannot reach live state before
+// installDASetRecordLocked.
+func (r *daRelaySetRecord) installMemberToken(locator daRelayLocator, token PendingOutpointToken) {
 	if locator.kind == daRelayLocatorCommit {
-		record.commit.token = token
-	} else {
-		chunk := record.chunks[locator.chunkIndex]
-		chunk.token = token
-		record.chunks[locator.chunkIndex] = chunk
+		r.commit.token = token
+		return
 	}
-	s.sets[locator.daID] = record
+	chunk := r.chunks[locator.chunkIndex]
+	chunk.token = token
+	r.chunks[locator.chunkIndex] = chunk
 }
 
 func (m daRelayAdmissionMember) identity() daRelayMemberIdentity {
@@ -338,19 +437,20 @@ func (m daRelayAdmissionMember) identity() daRelayMemberIdentity {
 	return m.chunk.daRelayMemberIdentity
 }
 
-// daRelayAdmissionMemberOf renders one DAAdmissionSnapshot as the retained
+// daRelayAdmissionMemberOf renders one OWNER-ISSUED admission as the retained
 // member it becomes. Every retained field except the token and the locator comes
-// from the snapshot of the transaction admission actually validated — the bytes,
-// txid, wtxid, fee, retained size and ordered inputs — so nothing a caller
-// supplied can become part of a retained member.
-func daRelayAdmissionMemberOf(snapshot DAAdmissionSnapshot, provenance DAProvenance) (daRelayAdmissionMember, error) {
-	tx, txid, wtxid, err := parseRelayMetadataTx(snapshot.TxBytes)
-	if err != nil {
-		return daRelayAdmissionMember{}, err
-	}
-	if txid != snapshot.TxID || wtxid != snapshot.WTxID || snapshot.RetainedBytes != uint64(len(snapshot.TxBytes)) {
-		return daRelayAdmissionMember{}, txAdmitUnavailable("DA admission snapshot contradicts its own retained bytes")
-	}
+// from the admission of the transaction actually validated — its bytes, txid,
+// wtxid, fee, retained size and ordered inputs — so nothing a caller supplied
+// can become part of a retained member.
+//
+// It CONSUMES the admission's own canonical parse and never re-parses the
+// bytes: this candidate is parsed exactly once per admission (R9). The
+// self-consistency the former re-parse asserted is structural instead — the
+// admission builds tx, TxBytes, TxID, WTxID and RetainedBytes from ONE
+// consensus.ParseTx of one byte string (validateDACandidate) — and a caller may
+// not supply a transaction, because the parse authority stays inside the owner.
+func daRelayAdmissionMemberOf(admission *DAAdmission, provenance DAProvenance) (daRelayAdmissionMember, error) {
+	snapshot, tx := admission.Snapshot(), admission.parsedTx()
 	identity := daRelayMemberIdentity{
 		txid:          snapshot.TxID,
 		wtxid:         snapshot.WTxID,
@@ -430,17 +530,25 @@ func daCommitPayloadCommitment(tx *consensus.Tx) ([32]byte, bool) {
 }
 
 // appendDAMemberVictims turns removed members into exact owner victim
-// descriptors. A member with a ZERO token owns no claim — the unbound-relay and
-// package-private staging construction — and contributes no victim; nothing here
-// ever names a claim by outpoint.
-func appendDAMemberVictims(victims []DAAdmissionVictim, members []daRelayMemberIdentity) []DAAdmissionVictim {
+// descriptors, naming every claim by its exact token and never by outpoint.
+//
+// A ZERO token means the member owns NO claim, and whether that is possible is a
+// property of the RELAY: an UNBOUND relay has no owner, beginRetainedDARemoval
+// returns no guard and no claim can exist, so the member is legitimately skipped.
+// On a BOUND relay every retained member holds its finalized claim, so a zero
+// token is missing token evidence for a claim that DOES exist and removing the
+// record around it would orphan that claim. It fails closed, before publication.
+func (s *DARelayState) appendDAMemberVictims(victims []DAAdmissionVictim, members []daRelayMemberIdentity) ([]DAAdmissionVictim, error) {
 	for _, member := range members {
 		if member.token == (PendingOutpointToken{}) {
+			if s.ownerBound() {
+				return nil, fmt.Errorf("retained DA member %x of a bound relay carries no owner token", member.txid)
+			}
 			continue
 		}
 		victims = append(victims, DAAdmissionVictim{TxID: member.txid, Inputs: member.inputs, Token: member.token})
 	}
-	return victims
+	return victims, nil
 }
 
 // AdvanceOrphanTTL advances the retained incomplete-set TTL once, removing every
@@ -509,12 +617,20 @@ func (s *DARelayState) commitRetainedDARemoval(plan func(*DARelayState) ([]DAAdm
 	return nil
 }
 
+// ownerBound reports whether this relay is coupled to a pending-outpoint owner.
+// It is the ONE boundness predicate: the removal guard and the victim assembly
+// must agree about whether a claim can exist at all, and a projection carries
+// the same mempool pointer as the image it was cloned from.
+func (s *DARelayState) ownerBound() bool {
+	return s.mempool != nil && s.mempool.chainState != nil && s.mempool.pendingOutpoints != nil
+}
+
 // beginRetainedDARemoval returns the removal guard, or (nil, nil) for an UNBOUND
 // relay — no mempool, no chainstate, or no owner, which is the test-only
 // construction lockAdmissionFence documents. An unbound relay has no owner to
 // couple to and therefore no claim to remove.
 func (s *DARelayState) beginRetainedDARemoval() (*DARemoval, error) {
-	if s.mempool == nil || s.mempool.chainState == nil || s.mempool.pendingOutpoints == nil {
+	if !s.ownerBound() {
 		return nil, nil
 	}
 	return s.mempool.BeginDARemoval()
@@ -537,6 +653,7 @@ type daRetainedObservation struct {
 	locator          daRelayLocator
 	recordPresent    bool
 	recordDAID       [32]byte
+	recordState      daRelaySetState
 	commitChunkCount uint16
 	memberPresent    bool
 	member           daRelayMemberIdentity
@@ -544,8 +661,8 @@ type daRetainedObservation struct {
 }
 
 // observeRetainedTxLocked copies the complete evidence for txid: locator
-// presence, record presence and identity, the located member's identity, and
-// the exact retained raw bytes. It validates nothing — validation is the
+// presence, record presence, identity and STATE, the located member's identity,
+// and the exact retained raw bytes. It validates nothing — validation is the
 // off-lock half — and copies nothing twice.
 func (s *DARelayState) observeRetainedTxLocked(txid [32]byte) daRetainedObservation {
 	locator, located := s.locators[txid]
@@ -559,6 +676,7 @@ func (s *DARelayState) observeRetainedTxLocked(txid [32]byte) daRetainedObservat
 	}
 	observation.recordPresent = true
 	observation.recordDAID = record.daID
+	observation.recordState = record.state
 	observation.commitChunkCount = record.commit.chunkCount
 	member, raw, ok := retainedDAMemberAt(record, locator)
 	if !ok {
@@ -596,9 +714,12 @@ func (o daRetainedObservation) validate(txid [32]byte) (DARetainedTxSnapshot, er
 }
 
 // checkLocatedCoherence is validate's coherence phase over the located copy: the
-// locator must resolve inside the copy to its own record and member, and the
-// member must carry retained bytes.
+// locator's own shape, then its resolution inside the copy to its own record and
+// member, then the member's retained bytes, then the record's shape.
 func (o daRetainedObservation) checkLocatedCoherence(txid [32]byte) error {
+	if err := o.checkLocatorShape(txid); err != nil {
+		return err
+	}
 	if !o.recordPresent || o.recordDAID != o.locator.daID {
 		return fmt.Errorf("retained DA locator for %x names absent record %x", txid, o.locator.daID)
 	}
@@ -607,6 +728,34 @@ func (o daRetainedObservation) checkLocatedCoherence(txid [32]byte) error {
 	}
 	if len(o.raw) == 0 {
 		return fmt.Errorf("retained DA member %x has no retained transaction bytes", o.member.txid)
+	}
+	return o.checkRecordShape(txid)
+}
+
+// checkLocatorShape refuses a locator that is not a member of the CLOSED kind
+// set, and a commit locator carrying a chunk index — a contradiction, since a
+// record holds exactly one commit slot and it has no index. Both take the
+// located-inconsistency lane; neither may ever be read as "some chunk".
+func (o daRetainedObservation) checkLocatorShape(txid [32]byte) error {
+	switch o.locator.kind {
+	case daRelayLocatorCommit:
+		if o.locator.chunkIndex != 0 {
+			return fmt.Errorf("retained DA commit locator for %x carries chunk index %d", txid, o.locator.chunkIndex)
+		}
+	case daRelayLocatorChunk:
+	default:
+		return fmt.Errorf("retained DA locator for %x names member kind %d", txid, o.locator.kind)
+	}
+	return nil
+}
+
+// checkRecordShape refuses a record whose STATE contradicts its own membership:
+// ORPHAN_CHUNKS is exactly the state that holds no commit, so a State A record
+// carrying one — or a staged/complete record carrying none — is corrupt, and a
+// replay against it is not an "integrity-valid exact retained replay".
+func (o daRetainedObservation) checkRecordShape(txid [32]byte) error {
+	if (o.recordState == daRelayStateOrphanChunks) != (o.commitChunkCount == 0) {
+		return fmt.Errorf("retained DA record for %x is state %d with chunk_count %d", txid, o.recordState, o.commitChunkCount)
 	}
 	return nil
 }
@@ -617,10 +766,15 @@ func (o daRetainedObservation) checkLocatedCoherence(txid [32]byte) error {
 // CHECK is one shared authority, the ERROR CLASS is the caller's.
 func (o daRetainedObservation) checkRole(tx *consensus.Tx) error {
 	var err error
-	if o.locator.kind == daRelayLocatorCommit {
+	switch o.locator.kind {
+	case daRelayLocatorCommit:
 		err = checkRetainedDACommitRole(tx, daRelaySetRecord{daID: o.recordDAID, commit: daRelayCommit{chunkCount: o.commitChunkCount}})
-	} else {
+	case daRelayLocatorChunk:
 		err = checkRetainedDAChunkRole(tx, o.recordDAID, o.locator.chunkIndex)
+	default:
+		// checkLocatorShape already refused this kind; the arm exists so the
+		// closed set has no silent fallthrough if the two ever drift.
+		return fmt.Errorf("retained DA member %x names member kind %d", o.member.txid, o.locator.kind)
 	}
 	var terminal *canonicalDATerminalError
 	if errors.As(err, &terminal) {
@@ -666,17 +820,23 @@ func (s *DARelayState) LookupRetainedTx(txid [32]byte) (DARetainedTxSnapshot, bo
 }
 
 // retainedDAMemberAt resolves one locator to its member identity and exact
-// retained bytes inside record.
+// retained bytes inside record. The kind switch is EXACT over the closed set: a
+// locator outside it resolves to nothing rather than defaulting to a chunk slot,
+// so a corrupt index can never make LookupRetainedTx answer owned=true.
 func retainedDAMemberAt(record daRelaySetRecord, locator daRelayLocator) (daRelayMemberIdentity, []byte, bool) {
-	if locator.kind == daRelayLocatorCommit {
-		if record.commit.chunkCount == 0 {
+	switch locator.kind {
+	case daRelayLocatorCommit:
+		if record.commit.chunkCount == 0 || locator.chunkIndex != 0 {
 			return daRelayMemberIdentity{}, nil, false
 		}
 		return record.commit.daRelayMemberIdentity, record.commit.txBytes, true
-	}
-	chunk, ok := record.chunks[locator.chunkIndex]
-	if !ok {
+	case daRelayLocatorChunk:
+		chunk, ok := record.chunks[locator.chunkIndex]
+		if !ok {
+			return daRelayMemberIdentity{}, nil, false
+		}
+		return chunk.daRelayMemberIdentity, chunk.txBytes, true
+	default:
 		return daRelayMemberIdentity{}, nil, false
 	}
-	return chunk.daRelayMemberIdentity, chunk.txBytes, true
 }

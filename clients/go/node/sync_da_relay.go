@@ -68,6 +68,13 @@ type canonicalDAClaimProjection map[PendingOutpointToken]struct{}
 // of every member's bytes and the rest of its consensus check are paid again on
 // every transition. A cap on retained members is RUB-1118's, not this slice's.
 //
+// The LAST phase is the LOCATOR phase: every live member must hold exactly one
+// locator row naming its own record, role and index, and no row may survive
+// whose member the image cannot produce. It is deliberately last — the earlier
+// phases own the more specific evidence for an image that is wrong in several
+// ways at once — and it is deliberately UNCONDITIONAL, because the locator index
+// exists whether or not an owner is bound.
+//
 // The third phase is the CLAIM phase, and it runs against the SAME live image
 // and the SAME private O1 candidate the M/O half prepared: every live DA member
 // must correspond to exactly one finalized DA claim in that candidate, no DA
@@ -108,8 +115,64 @@ func prepareCanonicalDAImage(relay *DARelayState, included []canonicalDASetIdent
 	if err := projected.checkRetainedDAAccountingLocked(); err != nil {
 		return nil, err
 	}
+	if err := relay.checkCanonicalDALocatorBijectionLocked(); err != nil {
+		return nil, err
+	}
 	mo.dropCanonicalDAClaims(projection)
 	return &preparedCanonicalDAImage{relay: relay, projected: projected}, nil
+}
+
+// checkCanonicalDALocatorBijectionLocked proves the LOCATOR half of the one
+// bijection D preparation validates: every live member has exactly one locator
+// row naming its own record, role and index, and no locator row survives whose
+// member the image cannot produce. The claim phase binds members to CLAIMS and
+// is blind to both defects — a member the index forgot and a row pointing at
+// nothing are invisible to a member-driven walk.
+//
+// Both are TERMINAL_LOCAL_INVARIANT during canonical planning, never absence and
+// never a repair, exactly as they are in LookupRetainedTx. The walk is by
+// ascending raw da_id and, inside a record, commit first then chunks ascending,
+// so the same corrupt image names the same evidence on every run; every member's
+// row is compared in place, leaving only EXTRA rows to catch by population.
+func (s *DARelayState) checkCanonicalDALocatorBijectionLocked() error {
+	members := 0
+	for _, daID := range s.sortedRetainedDAIDsLocked() {
+		for _, row := range recordLocatorRowsInOrder(s.sets[daID]) {
+			got, ok := s.locators[row.txid]
+			if !ok || got != row.locator {
+				return terminalCanonicalDAError(fmt.Errorf("retained DA member %x of set %x holds locator row %+v (present=%v), want %+v", row.txid, daID, got, ok, row.locator))
+			}
+			members++
+		}
+	}
+	if members != len(s.locators) {
+		return terminalCanonicalDAError(fmt.Errorf("retained DA locator index holds %d rows for %d live members", len(s.locators), members))
+	}
+	return nil
+}
+
+type daRelayLocatorRow struct {
+	txid    [32]byte
+	locator daRelayLocator
+}
+
+// recordLocatorRowsInOrder lists one record's expected txid -> locator rows in
+// exact identity order, so the bijection walk never depends on map iteration
+// order. It deliberately does NOT reuse daRelaySetRecord.locators, which the
+// mutation path uses to INSTALL rows: a check driven by the installer's own
+// enumeration could not see a member that enumeration itself omits.
+func recordLocatorRowsInOrder(record daRelaySetRecord) []daRelayLocatorRow {
+	rows := make([]daRelayLocatorRow, 0, 1+len(record.chunks))
+	if record.commit.chunkCount != 0 {
+		rows = append(rows, daRelayLocatorRow{txid: record.commit.txid, locator: daRelayLocator{daID: record.daID, kind: daRelayLocatorCommit}})
+	}
+	for _, index := range sortedRetainedDAChunkIndexes(record) {
+		rows = append(rows, daRelayLocatorRow{
+			txid:    record.chunks[index].txid,
+			locator: daRelayLocator{daID: record.daID, kind: daRelayLocatorChunk, chunkIndex: index},
+		})
+	}
+	return rows
 }
 
 // canonicalDAClaimProjectionLocked proves the retained-member/DA-claim bijection
@@ -410,8 +473,10 @@ func (i *preparedCanonicalDAImage) publish() {
 // — commit first, then chunks in ascending index.
 //
 // Each record is walked TWICE, in ordered phases, never interleaved: phase 1
-// (canonicalRetainedDASetIdentity) parses and role-checks EVERY member, phase 2
-// (canonicalRetainedDAMembersFinalChainValid) validates every member against C1.
+// (canonicalRetainedDASetIdentity) parses and role-checks EVERY member and
+// checkRetainedDAStoredIdentity then binds each member's stored identity to that
+// same parse, phase 2 (canonicalRetainedDAMembersFinalChainValid) validates
+// every member against C1.
 // Precedence follows the loop nesting: the FIRST record in ascending da_id order
 // that reports an error wins, and inside that one record phase 1 outranks phase
 // 2 — so a LATER member's parse/role terminal outranks an EARLIER member's
@@ -430,6 +495,9 @@ func (s *DARelayState) canonicalDARemovalsLocked(included []canonicalDASetIdenti
 		if err != nil {
 			return nil, err
 		}
+		if err := checkRetainedDAStoredIdentity(record, identity); err != nil {
+			return nil, err
+		}
 		valid, err := canonicalRetainedDAMembersFinalChainValid(members, chain)
 		if err != nil {
 			return nil, err
@@ -440,6 +508,33 @@ func (s *DARelayState) canonicalDARemovalsLocked(included []canonicalDASetIdenti
 		removals = append(removals, record)
 	}
 	return removals, nil
+}
+
+// checkRetainedDAStoredIdentity binds each member's STORED admission identity to
+// the identity its own retained bytes canonically produce, consuming the parse
+// canonicalRetainedDASetIdentity already performed — no member is parsed twice —
+// in that walk's own order.
+//
+// The role phase proves the bytes are the right ROLE for their slot; nothing
+// else proves they are the right TRANSACTION. A member whose stored txid or
+// wtxid disagrees with its bytes is record-mismatched: the locator index, the DA
+// claim and every removal name it by the stored txid while a block would carry
+// the parsed one, so it is terminal before the durable commit.
+func checkRetainedDAStoredIdentity(record daRelaySetRecord, identity canonicalDASetIdentity) error {
+	if record.commit.chunkCount != 0 {
+		stored := canonicalDATxIdentity{txid: record.commit.txid, wtxid: record.commit.wtxid}
+		if stored != identity.commit {
+			return terminalCanonicalDAError(fmt.Errorf("retained DA commit for %x stores identity %x/%x and its retained bytes are %x/%x", record.daID, stored.txid, stored.wtxid, identity.commit.txid, identity.commit.wtxid))
+		}
+	}
+	for _, chunk := range identity.chunks {
+		member := record.chunks[chunk.index]
+		stored := canonicalDATxIdentity{txid: member.txid, wtxid: member.wtxid}
+		if stored != chunk.canonicalDATxIdentity {
+			return terminalCanonicalDAError(fmt.Errorf("retained DA chunk %d for %x stores identity %x/%x and its retained bytes are %x/%x", chunk.index, record.daID, stored.txid, stored.wtxid, chunk.txid, chunk.wtxid))
+		}
+	}
+	return nil
 }
 
 // sortedRetainedDAIDsLocked orders EVERY retained record by ascending raw da_id,
