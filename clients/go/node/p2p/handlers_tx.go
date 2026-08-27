@@ -69,6 +69,16 @@ func (p *peer) handleTx(txBytes []byte) error {
 // peer-neutral — chunks legitimately race between peers. Every other admission
 // failure stays peer-neutral for the same Go/Rust relay-parity reason the
 // standard path gives.
+//
+// The address is read ONCE and both identities are derived from that one value,
+// so scoring and quota accounting can never name two different subjects. A
+// REGISTERED peer cannot carry an empty address — the handshake binds it from
+// the connection (handshake.go:46) and registerPeer already keyed this peer's
+// quota lock by it (service_peer_lifecycle.go:79) — but the arm is TOTAL
+// regardless: an addressless peer can be neither scored nor quota-charged, so
+// retaining for it would break the per-peer accounting invariant. It is refused
+// and the read loop drops the connection (peer_runtime.go:249) instead, with
+// nothing retained and no score moved.
 func (p *peer) handleRelayDATx(txBytes []byte, tx *consensus.Tx) error {
 	if err := validateRelayDATxForAdmission(txBytes, tx); err != nil {
 		if p.bumpBan(10, err.Error()) {
@@ -76,11 +86,12 @@ func (p *peer) handleRelayDATx(txBytes []byte, tx *consensus.Tx) error {
 		}
 		return nil
 	}
-	provenance, err := node.NewPeerDAProvenance(p.addr(), peerQuotaKey(p.addr()))
+	addr := p.addr()
+	provenance, err := node.NewPeerDAProvenance(addr, peerQuotaKey(addr))
 	if err != nil {
 		return err
 	}
-	result, err := p.service.admitRelayDATx(p.addr(), txBytes, tx, provenance)
+	result, err := p.service.admitRelayDATx(addr, txBytes, tx, provenance)
 	if err != nil {
 		return nil //nolint:nilerr // admission rejections are peer-neutral, exactly as on the standard path
 	}

@@ -161,12 +161,14 @@ func canonicalRetainedDAMemberFinalChainValid(member canonicalRetainedDAMember, 
 // A canonical precommit PLAN error is deliberately NOT retagged: EPD-6 requires D
 // to return the SAME plan error M does, and it is not a retained-state invariant.
 //
-// It has NO reachable producer today. On this path the shared validator's only
-// terminal sites are canonicalMempoolChainPolicyValid's nil-tx guard, which a
-// parsed member cannot trip, and its policyInputSnapshot refusal, which the
-// consensus check's own keep=false already precedes on the same input set. The
-// relabel is insurance for that SHARED helper as RUB-678 extends it, and its unit
-// row proves the mechanism, not a live path.
+// It has NO reachable producer today, RUB-678 included. On this path the shared
+// validator's only terminal sites are canonicalMempoolChainPolicyValid's nil-tx
+// guard, which a parsed member cannot trip, and its policyInputSnapshot refusal,
+// which the consensus check's own keep=false already precedes on the same input
+// set. RUB-678's own claim phase raises canonicalDATerminalError directly and
+// never routes through the shared M/O validator, so it did not make this live
+// either. The relabel remains insurance for that SHARED helper, and its unit row
+// proves the mechanism, not a live path.
 func retaggedCanonicalDATerminal(err error, label string) error {
 	var mo *canonicalMOTerminalError
 	if !errors.As(err, &mo) {

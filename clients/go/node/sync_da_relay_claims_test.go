@@ -150,7 +150,10 @@ func TestCanonicalDAClaimPhaseIsTerminalForEveryClaimDefect(t *testing.T) {
 		"orphan claim": func(t *testing.T, c *canonicalClaimFixture, mo *canonicalMempoolPlan, daID [32]byte) {
 			var txid [32]byte
 			txid[0] = 0xaa
-			token := PendingOutpointToken{owner: mo.owner, seq: mo.ownerIndex.tokenHighWater}
+			// tokenHighWater+1: an EXTRA claim, never a collision with a live
+			// member's token, so this row reaches checkNoOrphanCanonicalDAClaims
+			// instead of corrupting an existing member's binding.
+			token := PendingOutpointToken{owner: mo.owner, seq: mo.ownerIndex.tokenHighWater + 1}
 			mo.ownerIndex.byToken[token] = &pendingOutpointClaim{
 				token: token, domain: PendingOutpointDA, txid: txid,
 				inputs: []consensus.Outpoint{{Txid: txid}}, finalized: true,
@@ -191,6 +194,25 @@ func TestCanonicalDAClaimPhaseIsTerminalForEveryClaimDefect(t *testing.T) {
 				}
 			}
 			t.Fatal("no DA claim to reinput")
+		},
+		"two members sharing one claim": func(t *testing.T, c *canonicalClaimFixture, mo *canonicalMempoolPlan, daID [32]byte) {
+			// The record's commit and its first chunk both name the commit's
+			// token: the duplicate is the retained image's defect, not the
+			// candidate's, and the phase must refuse it all the same.
+			c.relay.mu.Lock()
+			defer c.relay.mu.Unlock()
+			record := c.relay.sets[daID]
+			chunk := record.chunks[0]
+			chunk.token = record.commit.token
+			record.chunks[0] = chunk
+		},
+		"member naming a token this owner never issued": func(t *testing.T, c *canonicalClaimFixture, mo *canonicalMempoolPlan, daID [32]byte) {
+			c.relay.mu.Lock()
+			defer c.relay.mu.Unlock()
+			record := c.relay.sets[daID]
+			chunk := record.chunks[0]
+			chunk.token = PendingOutpointToken{owner: mo.owner, seq: mo.ownerIndex.tokenHighWater + 99}
+			record.chunks[0] = chunk
 		},
 		"locator row mismatch": func(t *testing.T, c *canonicalClaimFixture, mo *canonicalMempoolPlan, daID [32]byte) {
 			for token, claim := range mo.ownerIndex.byToken {
@@ -278,5 +300,36 @@ func TestCanonicalTransitionPublishesTheDropClaimImage(t *testing.T) {
 		if !found {
 			t.Fatalf("a surviving member lost its finalized DA claim: %x", txID(t, raw))
 		}
+	}
+}
+
+// TestClosingClaimBindingProofRunsOverTheEditedCandidate is the ORDERING row for
+// prepareCanonicalFenceImage's final rebuild-and-preflight step: the closing
+// validateRestoredClaimBinding speaks about the candidate AFTER the D phase
+// edited it, so a D-phase edit that retires a claim a surviving record still
+// needs is caught BEFORE publication.
+//
+// The edit is applied through the production helper the transition calls, and the
+// proof is the production check the transition then runs, composed in the same
+// order. On every REACHABLE input the D phase retires DA claims only, so this
+// guard cannot fire from the transition itself; a row that damaged the candidate
+// through the real call site would need a production seam the contract forbids.
+func TestClosingClaimBindingProofRunsOverTheEditedCandidate(t *testing.T) {
+	c := newCanonicalClaimFixture(t, 3)
+	c.f.daSet(t, c.relay, daRelayTestID(0x77), c.f.ops[1:3], 1660)
+	standard := c.f.add(t, c.f.ops[0], 7)
+	mo := c.plan(t)
+	if err := validateRestoredClaimBinding(mo.txs, mo.ownerIndex); err != nil {
+		t.Fatalf("the prepared candidate is already unbound: %v", err)
+	}
+	entry, ok := mo.txs[standard]
+	if !ok {
+		t.Fatalf("the standard entry %x is not in the candidate", standard)
+	}
+	mo.dropCanonicalDAClaims(canonicalDAClaimProjection{
+		dropped: map[PendingOutpointToken]struct{}{entry.token: {}},
+	})
+	if err := validateRestoredClaimBinding(mo.txs, mo.ownerIndex); err == nil {
+		t.Fatal("the closing binding proof accepted a candidate whose D edit orphaned a retained entry")
 	}
 }

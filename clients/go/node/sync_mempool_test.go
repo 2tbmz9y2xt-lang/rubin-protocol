@@ -520,40 +520,30 @@ func TestCanonicalMOPlanPreservesPoolLocalPolicyAndHighWater(t *testing.T) {
 	}
 }
 
-func TestCanonicalMOPlanOwnerClaimsAndDIndependence(t *testing.T) {
-	f := newCanonicalMOFixture(t, 3, MempoolConfig{})
+// TestCanonicalMOPlanOwnerClaimsExcludeOnlyTheSpentEntry pins the STANDARD half
+// of the owner image across a transition: the included entry's claim goes, the
+// survivor keeps its exact token, and the token high-water never rewinds.
+//
+// It deliberately holds NO DA claim. A DA-domain claim with no retained DA
+// member is an R6 TERMINAL_LOCAL_INVARIANT since RUB-678 — the transition's
+// claim phase refuses to publish an image whose owner holds a DA claim the
+// retained image cannot account for — so the DA-independence half this test used
+// to carry now lives where the retained members exist to back it:
+// TestCanonicalDAClaimPhaseDropsExactlyTheRemovedMembersClaims and
+// TestCanonicalTransitionPublishesTheDropClaimImage.
+func TestCanonicalMOPlanOwnerClaimsExcludeOnlyTheSpentEntry(t *testing.T) {
+	f := newCanonicalMOFixture(t, 2, MempoolConfig{})
 	standard := f.add(t, f.ops[0], 1)
 	retained := f.add(t, f.ops[1], 2)
 	retainedEntry, retainedClaim := residentClaim(t, f.mp, retained)
 	owner := f.mp.PendingOutpointOwner()
-	ctx, ok := owner.AdmissionContext()
-	if !ok {
-		t.Fatal("owner unavailable")
-	}
-	daToken, err := owner.Reserve(ctx, PendingOutpointDA, [32]byte{0xda}, []consensus.Outpoint{f.ops[2]})
-	if err != nil || owner.Finalize(daToken) != nil {
-		t.Fatalf("DA claim: token=%+v err=%v", daToken, err)
-	}
-	owner.mu.Lock()
-	daBefore, daRowBefore := *owner.byToken[daToken], owner.byOutpoint[f.ops[2]]
-	owner.mu.Unlock()
 	before := owner.snapshot()
 	beforeImage := canonicalMOImageFingerprint(t, f.mp, 0)
 	mustCanonicalMO(t, "ApplyBlock", f.applySpend(t, f.ops[0], 2))
 	after := owner.snapshot()
 	entry, claim := residentClaim(t, f.mp, retained)
-	if beforeImage == canonicalMOImageFingerprint(t, f.mp, 1) || f.mp.Contains(standard) || !f.mp.Contains(retained) || entry.token != retainedEntry.token || claim == nil || retainedClaim == nil || claim.token != retainedClaim.token || len(after.claims) != 2 || after.tokenHighWater != before.tokenHighWater || after.generationHighWater != before.generationHighWater+1 {
+	if beforeImage == canonicalMOImageFingerprint(t, f.mp, 1) || f.mp.Contains(standard) || !f.mp.Contains(retained) || entry.token != retainedEntry.token || claim == nil || retainedClaim == nil || claim.token != retainedClaim.token || len(after.claims) != 1 || after.tokenHighWater != before.tokenHighWater || after.generationHighWater != before.generationHighWater+1 {
 		t.Fatalf("owner image after standard exclusion=%+v image=%s", after, canonicalMOImageFingerprint(t, f.mp, 1))
-	}
-	var keptDA bool
-	for _, item := range after.claims {
-		keptDA = keptDA || item.token == daToken && item.domain == PendingOutpointDA
-	}
-	owner.mu.Lock()
-	daAfter, daRowAfter := owner.byToken[daToken], owner.byOutpoint[f.ops[2]]
-	owner.mu.Unlock()
-	if !keptDA || daAfter == nil || !reflect.DeepEqual(daBefore, *daAfter) || daRowBefore != daRowAfter {
-		t.Fatalf("DA claim/index changed before=%+v/%+v after=%+v/%+v", daBefore, daRowBefore, daAfter, daRowAfter)
 	}
 	if got, ok := owner.txidForOutpoint(f.ops[1]); !ok || got != retained {
 		t.Fatalf("retained standard index=%x/%v want %x", got, ok, retained)

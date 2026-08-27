@@ -214,6 +214,12 @@ func TestRemoteDuplicateDACommitScoresThePeerAndChunkDoesNot(t *testing.T) {
 	if after := daRelayImageDigest(t, h); after != before {
 		t.Fatalf("a duplicate mutated the retained image: %v -> %v", before, after)
 	}
+	// The EXISTING threshold handling, not a new one: once the accumulated score
+	// reaches the configured threshold the same +10 is reported as a hard error.
+	h.service.cfg.PeerRuntimeConfig.BanThreshold = p.state.BanScore + 10
+	if err := p.handleTx(commitTx); err == nil {
+		t.Fatal("a duplicate commit at the ban threshold was reported as peer-neutral")
+	}
 }
 
 // TestPeerlessDAProvenanceIsAbsentFromPeerQuotaAccounting is A5/M2: LOCAL and
@@ -332,4 +338,61 @@ func mustParseDATxForTest(t *testing.T, raw []byte) *consensus.Tx {
 		t.Fatalf("parseCanonicalTx: %v", err)
 	}
 	return tx
+}
+
+// TestRemoteDAFromAnAddresslessPeerIsRefusedAndRetainsNothing pins the TOTALITY
+// of the DA arm's provenance construction. A registered peer cannot reach this
+// state — the handshake binds the address and registerPeer already keyed the
+// quota lock by it — so this row constructs the peer directly and pins the
+// documented choice for the impossible case: a hard error that drops the
+// connection, with nothing retained and NO score moved (the shape check already
+// passed, so a ban here would punish a peer for the node's own bookkeeping).
+func TestRemoteDAFromAnAddresslessPeerIsRefusedAndRetainsNothing(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h, 2)
+	p := daRelayTestPeer(h, "")
+	chunkTx := f.chunkTx(t, daRelayTestID(0x18), 0, []byte("addressless"))
+	banBefore := p.state.BanScore
+
+	if err := p.handleTx(chunkTx); err == nil {
+		t.Fatal("a DA transaction from an addressless peer was accepted")
+	}
+	if p.state.BanScore != banBefore {
+		t.Fatalf("ban score moved to %d, want the peer-neutral %d", p.state.BanScore, banBefore)
+	}
+	txid := mustCanonicalTxID(t, chunkTx)
+	if _, owned, err := h.service.daRelay.LookupRetainedTx(txid); owned || err != nil {
+		t.Fatalf("addressless admission retained state: owned=%v err=%v", owned, err)
+	}
+	if h.service.txSeen.Has(txid) {
+		t.Fatal("the refused DA transaction entered the standard seen-set")
+	}
+}
+
+// TestRemoteDAAdmissionRejectionIsPeerNeutral is R2's peer-consequence half on
+// the arm the shape check cannot reach: a WELL-SHAPED DA transaction whose
+// admission fails inside BeginDAAdmission — here because the outpoint it spends
+// is no longer in the chainstate — is refused with NO score moved and no retained
+// state, exactly as the standard path treats its own admission rejections.
+func TestRemoteDAAdmissionRejectionIsPeerNeutral(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h, 2)
+	chunkTx := f.chunkTx(t, daRelayTestID(0x19), 0, []byte("unfunded"))
+	delete(h.chainState.Utxos, f.lastOp)
+	p := daRelayTestPeer(h, "127.0.0.1:19116")
+	banBefore := p.state.BanScore
+
+	if err := p.handleTx(chunkTx); err != nil {
+		t.Fatalf("handleTx(unfunded DA chunk) = %v, want the peer-neutral nil", err)
+	}
+	if p.state.BanScore != banBefore {
+		t.Fatalf("ban score moved to %d, want the peer-neutral %d", p.state.BanScore, banBefore)
+	}
+	txid := mustCanonicalTxID(t, chunkTx)
+	if _, owned, err := h.service.daRelay.LookupRetainedTx(txid); owned || err != nil {
+		t.Fatalf("a rejected admission retained state: owned=%v err=%v", owned, err)
+	}
+	if h.service.txSeen.Has(txid) {
+		t.Fatal("a rejected DA transaction entered the standard seen-set")
+	}
 }
